@@ -12,9 +12,9 @@ services:
     ports:
       - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-3300}:8080"
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     env_file:
-      - .env
+      - ../.env
     environment:
       AUTO_SETUP: "true"
       SERVER_HOST: "0.0.0.0"
@@ -54,7 +54,7 @@ services:
     container_name: sub2api-postgres
     restart: unless-stopped
     volumes:
-      - ./postgres_data:/var/lib/postgresql/data
+      - ../postgres_data:/var/lib/postgresql/data
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sub2api}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -76,7 +76,7 @@ services:
     restart: unless-stopped
     command: ["redis-server"]
     volumes:
-      - ./redis_data:/data
+      - ../redis_data:/data
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     networks:

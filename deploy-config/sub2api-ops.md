@@ -147,14 +147,14 @@ scp yiyutu-server:/tmp/backup.tar.gz ./
 
 ```bash
 # 查看服务状态
-cd /opt/sub2api && docker compose ps
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml ps
 
 # 重启
-cd /opt/sub2api && docker compose restart
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml restart
 
 # 日志（实时 / 最近 100 行）
-docker compose logs -f sub2api
-docker compose logs --tail=100 sub2api
+docker compose -f deploy-config/compose.yml logs -f sub2api
+docker compose -f deploy-config/compose.yml logs --tail=100 sub2api
 
 # 健康检查
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3300/health
@@ -178,13 +178,13 @@ docker exec sub2api-redis redis-cli ping   # 期望 PONG
 ```bash
 # 1. 备份当前数据（见第 6 节）
 # 2. 拉取最新镜像
-cd /opt/sub2api && docker compose pull sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml pull sub2api
 # 3. 记录当前镜像供回滚
 docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" weishaw/sub2api
 # 4. 重建容器
-docker compose up -d --remove-orphans sub2api
+docker compose -f deploy-config/compose.yml up -d --remove-orphans sub2api
 # 5. 验证
-sleep 15 && docker compose ps && curl -s http://127.0.0.1:3300/health
+sleep 15 && docker compose -f deploy-config/compose.yml ps && curl -s http://127.0.0.1:3300/health
 ```
 
 > 也可在管理后台左上角"检查更新"一键升级（支持回滚）。
@@ -212,7 +212,7 @@ docker exec sub2api-postgres pg_dump -U sub2api -d sub2api > /tmp/sub2api-db-$(d
 ```bash
 # 整体目录恢复到新服务器
 cd /opt && tar -xzf sub2api-backup-*.tar.gz
-cd sub2api && docker compose up -d
+cd sub2api && docker compose -f deploy-config/compose.yml up -d
 ```
 
 ### 6.4 既有历史备份（勿删除）
@@ -229,8 +229,8 @@ cd sub2api && docker compose up -d
 ### 7.1 容器无法启动
 
 ```bash
-docker compose logs --tail=200 sub2api
-docker compose ps
+docker compose -f deploy-config/compose.yml logs --tail=200 sub2api
+docker compose -f deploy-config/compose.yml ps
 ```
 
 - 若提示数据库连接失败：确认为 `postgres`、`redis` 先于 sub2api 就绪（compose 已声明 `depends_on` 健康条件）
@@ -239,15 +239,15 @@ docker compose ps
 ### 7.2 数据库问题
 
 ```bash
-docker compose ps postgres
+docker compose -f deploy-config/compose.yml ps postgres
 docker exec sub2api-postgres pg_isready -U sub2api -d sub2api
-docker compose logs --tail=100 postgres
+docker compose -f deploy-config/compose.yml logs --tail=100 postgres
 ```
 
 ### 7.3 Redis 问题
 
 ```bash
-docker compose ps redis
+docker compose -f deploy-config/compose.yml ps redis
 docker exec sub2api-redis redis-cli ping   # PONG
 ```
 
@@ -287,12 +287,12 @@ docker images weishaw/sub2api
 docker pull weishaw/sub2api:<old-version>
 docker tag weishaw/sub2api:<old-version> weishaw/sub2api:latest
 # 3. 重建
-cd /opt/sub2api && docker compose up -d --force-recreate sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml up -d --force-recreate sub2api
 # 4. 验证
-curl -s http://127.0.0.1:3300/health && docker compose ps
+curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml ps
 ```
 
-> 若紧急停服：`docker compose stop sub2api`，处理完毕后 `docker compose start sub2api`。
+> 若紧急停服：`docker compose -f deploy-config/compose.yml stop sub2api`，处理完毕后 `docker compose -f deploy-config/compose.yml start sub2api`。
 
 ---
 
