@@ -38,7 +38,7 @@ git add deploy-config && git commit -m "..." && git push origin main
 # 服务器
 ssh yiyutu-server
 cd /opt/sub2api && git pull
-docker compose -f deploy-config/compose.yml up -d --remove-orphans   # 应用配置
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --remove-orphans   # 应用配置
 nginx -t && systemctl reload nginx                                    # 若改 nginx
 ```
 
@@ -52,5 +52,5 @@ git sparse-checkout init --cone
 git sparse-checkout set deploy-config
 cp deploy-config/.env.example .env   # 填真实凭据
 mkdir -p data postgres_data redis_data
-docker compose -f deploy-config/compose.yml up -d
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 ```

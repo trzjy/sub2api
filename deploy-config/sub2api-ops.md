@@ -114,6 +114,8 @@ git push origin main
 
 > ⚠️ `JWT_SECRET`、`TOTP_ENCRYPTION_KEY` 必须保持固定。若清空，重启后所有用户被登出、已有 2FA 失效。
 
+> **重要**：compose 文件位于 `deploy-config/` 子目录，而真实凭据在根目录 `/opt/sub2api/.env`。因此所有 `docker compose` 命令必须显式加 `--env-file /opt/sub2api/.env`，否则 `${POSTGRES_PASSWORD}` 等插值会缺失，导致数据库/登录异常。示例见第 4 节。
+
 ### 3.2 Nginx 配置
 
 站点配置：`/etc/nginx/sites-available/duizhang`（symlink 到 sites-enabled）。
@@ -147,14 +149,14 @@ scp yiyutu-server:/tmp/backup.tar.gz ./
 
 ```bash
 # 查看服务状态
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml ps
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 
 # 重启
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml restart
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env restart
 
 # 日志（实时 / 最近 100 行）
-docker compose -f deploy-config/compose.yml logs -f sub2api
-docker compose -f deploy-config/compose.yml logs --tail=100 sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env logs -f sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env logs --tail=100 sub2api
 
 # 健康检查
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3300/health
@@ -178,13 +180,13 @@ docker exec sub2api-redis redis-cli ping   # 期望 PONG
 ```bash
 # 1. 备份当前数据（见第 6 节）
 # 2. 拉取最新镜像
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml pull sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env pull sub2api
 # 3. 记录当前镜像供回滚
 docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" weishaw/sub2api
 # 4. 重建容器
-docker compose -f deploy-config/compose.yml up -d --remove-orphans sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --remove-orphans sub2api
 # 5. 验证
-sleep 15 && docker compose -f deploy-config/compose.yml ps && curl -s http://127.0.0.1:3300/health
+sleep 15 && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps && curl -s http://127.0.0.1:3300/health
 ```
 
 > 也可在管理后台左上角"检查更新"一键升级（支持回滚）。
@@ -212,7 +214,7 @@ docker exec sub2api-postgres pg_dump -U sub2api -d sub2api > /tmp/sub2api-db-$(d
 ```bash
 # 整体目录恢复到新服务器
 cd /opt && tar -xzf sub2api-backup-*.tar.gz
-cd sub2api && docker compose -f deploy-config/compose.yml up -d
+cd sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 ```
 
 ### 6.4 既有历史备份（勿删除）
@@ -229,8 +231,8 @@ cd sub2api && docker compose -f deploy-config/compose.yml up -d
 ### 7.1 容器无法启动
 
 ```bash
-docker compose -f deploy-config/compose.yml logs --tail=200 sub2api
-docker compose -f deploy-config/compose.yml ps
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env logs --tail=200 sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 ```
 
 - 若提示数据库连接失败：确认为 `postgres`、`redis` 先于 sub2api 就绪（compose 已声明 `depends_on` 健康条件）
@@ -239,15 +241,15 @@ docker compose -f deploy-config/compose.yml ps
 ### 7.2 数据库问题
 
 ```bash
-docker compose -f deploy-config/compose.yml ps postgres
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps postgres
 docker exec sub2api-postgres pg_isready -U sub2api -d sub2api
-docker compose -f deploy-config/compose.yml logs --tail=100 postgres
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env logs --tail=100 postgres
 ```
 
 ### 7.3 Redis 问题
 
 ```bash
-docker compose -f deploy-config/compose.yml ps redis
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps redis
 docker exec sub2api-redis redis-cli ping   # PONG
 ```
 
@@ -287,12 +289,12 @@ docker images weishaw/sub2api
 docker pull weishaw/sub2api:<old-version>
 docker tag weishaw/sub2api:<old-version> weishaw/sub2api:latest
 # 3. 重建
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml up -d --force-recreate sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate sub2api
 # 4. 验证
-curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml ps
+curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 ```
 
-> 若紧急停服：`docker compose -f deploy-config/compose.yml stop sub2api`，处理完毕后 `docker compose -f deploy-config/compose.yml start sub2api`。
+> 若紧急停服：`docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env stop sub2api`，处理完毕后 `docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env start sub2api`。
 
 ---
 
