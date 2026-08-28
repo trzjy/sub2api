@@ -15,7 +15,6 @@ import (
 const (
 	BalanceProbeSnapshotExtraKey       = "balance_probe_snapshot"
 	balanceProbeDefaultIntervalMinutes = 10
-	balanceProbeCycleInterval          = time.Minute
 	balanceProbeMaxPerCycle            = 20
 	balanceProbeConcurrency            = 4
 	balanceProbeLeaderLockKey          = "account:balance:probe:leader"
@@ -148,6 +147,7 @@ func (s *AccountBalanceProbeCheckService) RunDue(ctx context.Context) error {
 		return err
 	}
 	var group errgroup.Group
+	group.SetLimit(balanceProbeConcurrency)
 	for i := range accounts {
 		accountID := accounts[i].ID
 		group.Go(func() error {

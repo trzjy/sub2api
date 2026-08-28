@@ -2631,7 +2631,8 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 
 // ListDueBalanceProbeAccounts returns enabled, active API-key accounts whose
 // persisted probe snapshot is stale or absent. SQL filtering avoids hydrating
-// the full account pool on every one-minute runner check.
+// the full account pool each runner tick; stale accounts progress in bounded
+// batches on every configured probe interval.
 func (r *accountRepository) ListDueBalanceProbeAccounts(ctx context.Context, now time.Time, limit int) ([]service.Account, error) {
 	if limit <= 0 {
 		return []service.Account{}, nil
