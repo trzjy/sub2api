@@ -2629,6 +2629,62 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	return nil
 }
 
+// ListDueBalanceProbeAccounts returns enabled, active API-key accounts whose
+// persisted probe snapshot is stale or absent. SQL filtering avoids hydrating
+// the full account pool on every one-minute runner check.
+func (r *accountRepository) ListDueBalanceProbeAccounts(ctx context.Context, now time.Time, limit int) ([]service.Account, error) {
+	if limit <= 0 {
+		return []service.Account{}, nil
+	}
+	if r.sql == nil {
+		return nil, errors.New("account repository SQL executor not configured")
+	}
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT id
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND status = 'active'
+			AND type = 'apikey'
+			AND credentials @> '{"balance_probe": {"enabled": true}}'::jsonb
+			AND (
+				extra #>> '{balance_probe_snapshot,fetched_at}' IS NULL
+				OR (extra #>> '{balance_probe_snapshot,fetched_at}')::timestamptz <= $1
+			)
+		ORDER BY extra #>> '{balance_probe_snapshot,fetched_at}' ASC NULLS FIRST, id ASC
+		LIMIT $2
+	`, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []service.Account{}, nil
+	}
+	accounts, err := r.GetByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]service.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if account != nil {
+			out = append(out, *account)
+		}
+	}
+	return out, nil
+}
+
 // UpdateUpstreamBillingProbeSnapshot stores a probe result only while the
 // network identity used by that probe is still current.
 func (r *accountRepository) UpdateUpstreamBillingProbeSnapshot(

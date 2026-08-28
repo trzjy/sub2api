@@ -1145,6 +1145,15 @@ export interface Account {
       last_result_at?: string
       error_code?: string
     }
+    balance_probe_snapshot?: {
+      success: boolean
+      remaining?: number | null
+      unit?: string
+      valid?: boolean
+      status_code?: number
+      fetched_at?: string
+      error?: string
+    }
   } & Record<string, unknown>)
   balance_probe?: {
     enabled: boolean

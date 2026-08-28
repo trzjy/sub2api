@@ -728,12 +728,18 @@ const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
 const balanceProbeLoading = ref(false)
 const balanceProbe = computed(() => usageInfo.value?.balance_probe)
+const persistedBalanceProbe = computed(() => {
+  const raw = props.account.extra?.balance_probe_snapshot
+  if (!raw || typeof raw !== 'object') return null
+  return raw as NonNullable<AccountUsageInfo['balance_probe']>
+})
+const effectiveBalanceProbe = computed(() => balanceProbe.value ?? persistedBalanceProbe.value)
 const balanceProbeLabel = computed(() => {
-  if (!balanceProbe.value?.success) {
-    return balanceProbe.value?.error || t('admin.accounts.balanceProbe.notQueried')
+  if (!effectiveBalanceProbe.value?.success) {
+    return effectiveBalanceProbe.value?.error || t('admin.accounts.balanceProbe.notQueried')
   }
-  const remaining = balanceProbe.value.remaining ?? 0
-  return `${remaining.toFixed(2)} ${balanceProbe.value.unit || 'USD'}`
+  const remaining = effectiveBalanceProbe.value.remaining ?? 0
+  return `${remaining.toFixed(2)} ${effectiveBalanceProbe.value.unit || 'USD'}`
 })
 watch(usageInfo, (usage) => {
   if (usage) emit('usage-loaded', usage)
@@ -1497,6 +1503,12 @@ const loadBalanceProbe = async () => {
   try {
     const result = await adminAPI.accounts.getUsage(props.account.id, 'balance-probe', true)
     usageInfo.value = result
+    if (result.balance_probe) {
+      emit('account-updated', {
+        ...props.account,
+        extra: { ...props.account.extra, balance_probe_snapshot: result.balance_probe }
+      })
+    }
     emit('usage-loaded', result)
   } catch (e: any) {
     console.error('Failed to load balance probe:', e)

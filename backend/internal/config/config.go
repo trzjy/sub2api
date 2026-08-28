@@ -1097,6 +1097,9 @@ type GatewayConfig struct {
 	// CNProviders: 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）的余额检测配置。
 	// 仅作用于 payg（按量付费）账号：周期探测余额，低于阈值则临时停调。
 	CNProviders GatewayCNProvidersConfig `mapstructure:"cn_providers"`
+
+	// APIKeyBalanceProbe: controlled API-key account balance snapshot cadence.
+	APIKeyBalanceProbe GatewayAPIKeyBalanceProbeConfig `mapstructure:"api_key_balance_probe"`
 }
 
 // GatewayGrokConfig holds Grok-specific gateway scheduling knobs.
@@ -1139,6 +1142,12 @@ type GatewayCNProvidersConfig struct {
 	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
 	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
 	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
+}
+
+// GatewayAPIKeyBalanceProbeConfig controls periodic snapshots for controlled
+// per-account API-key balance probes.
+type GatewayAPIKeyBalanceProbeConfig struct {
+	IntervalMinutes int `mapstructure:"interval_minutes"`
 }
 
 type GatewayLiveConfig struct {

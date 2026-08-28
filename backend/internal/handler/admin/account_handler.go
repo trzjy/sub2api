@@ -2329,6 +2329,28 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 
 	var usage *service.UsageInfo
 	if h.accountBalanceProbe != nil && source == "balance-probe" {
+		if !force {
+			account, accountErr := h.adminService.GetAccount(c.Request.Context(), accountID)
+			if accountErr != nil {
+				response.ErrorFrom(c, accountErr)
+				return
+			}
+			if snapshot, ok := account.Extra[service.BalanceProbeSnapshotExtraKey]; ok {
+				raw, marshalErr := json.Marshal(snapshot)
+				if marshalErr == nil {
+					var result service.BalanceProbeResult
+					if unmarshalErr := json.Unmarshal(raw, &result); unmarshalErr == nil {
+						usage = &service.UsageInfo{
+							Source:       "balance_probe",
+							UpdatedAt:    &result.FetchedAt,
+							BalanceProbe: &result,
+						}
+					}
+				}
+			}
+		}
+	}
+	if source == "balance-probe" && usage == nil && h.accountBalanceProbe != nil {
 		result, probeErr := h.accountBalanceProbe.Query(c.Request.Context(), accountID)
 		if probeErr != nil {
 			response.ErrorFrom(c, probeErr)
@@ -2343,10 +2365,17 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 				BalanceProbe: result,
 			}
 		}
-	} else if source == "passive" {
-		usage, err = h.accountUsageService.GetPassiveUsage(c.Request.Context(), accountID)
-	} else {
-		usage, err = h.accountUsageService.GetUsage(c.Request.Context(), accountID, force)
+	}
+	if usage == nil {
+		if source == "balance-probe" {
+			response.ErrorFrom(c, fmt.Errorf("balance probe snapshot unavailable"))
+			return
+		}
+		if source == "passive" {
+			usage, err = h.accountUsageService.GetPassiveUsage(c.Request.Context(), accountID)
+		} else {
+			usage, err = h.accountUsageService.GetUsage(c.Request.Context(), accountID, force)
+		}
 	}
 	if err != nil {
 		response.ErrorFrom(c, err)
