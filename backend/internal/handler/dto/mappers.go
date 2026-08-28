@@ -235,6 +235,11 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	if state := service.OllamaCloudUsageStateFromAccount(a); state.Eligible {
 		ollamaCloudUsage = state
 	}
+	balanceProbeConfig := a.BalanceProbeConfig()
+	var balanceProbe *service.BalanceProbeConfig
+	if balanceProbeConfig.Enabled {
+		balanceProbe = &balanceProbeConfig
+	}
 	out := &Account{
 		ID:                      a.ID,
 		Name:                    a.Name,
@@ -245,6 +250,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		CredentialsStatus:       credsStatus,
 		Extra:                   extra,
 		OllamaCloudUsage:        ollamaCloudUsage,
+		BalanceProbe:            balanceProbe,
 		ProxyID:                 a.ProxyID,
 		ProxyFallbackOriginID:   a.ProxyFallbackOriginID,
 		ProxyFallbackOriginName: a.ProxyFallbackOriginName,
