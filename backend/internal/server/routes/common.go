@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 
+	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,4 +30,13 @@ func RegisterCommonRoutes(r *gin.Engine) {
 			},
 		})
 	})
+}
+
+// RegisterInternalRoutes registers service-to-service endpoints. These routes
+// intentionally use their own token check and are not part of user/admin auth.
+func RegisterInternalRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.XianyuDelivery == nil {
+		return
+	}
+	v1.POST("/internal/xianyu/redeem-codes/claim", h.XianyuDelivery.Claim)
 }

@@ -357,6 +357,9 @@ func (s *adminServiceImpl) DeleteUser(ctx context.Context, id int64) error {
 	if user.Role == "admin" {
 		return errors.New("cannot delete admin user")
 	}
+	if s.cfg != nil && s.cfg.XianyuDelivery.Enabled && id == s.cfg.XianyuDelivery.SystemUserID {
+		return infraerrors.Conflict("XIANYU_SYSTEM_USER_PROTECTED", "cannot delete xianyu delivery system user")
+	}
 
 	apiKeys, err := s.listUserAPIKeysForDeletion(ctx, id)
 	if err != nil {
@@ -1263,6 +1266,15 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 			return nil, errors.New("group must be subscription type")
 		}
 	}
+	if input.Type == RedeemTypeXianyuDelivery && input.Value != 0 {
+		return nil, errors.New("value must be zero for xianyu_delivery codes")
+	}
+	if input.Type == RedeemTypeXianyuDelivery && strings.TrimSpace(input.Pool) == "" {
+		return nil, errors.New("pool is required for xianyu_delivery codes")
+	}
+	if input.Type == RedeemTypeXianyuDelivery && strings.ContainsAny(strings.TrimSpace(input.Pool), "\n\r") {
+		return nil, errors.New("pool must not contain line breaks")
+	}
 
 	codes := make([]RedeemCode, 0, input.Count)
 	for i := 0; i < input.Count; i++ {
@@ -1276,6 +1288,9 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 			Value:     input.Value,
 			Status:    StatusUnused,
 			ExpiresAt: input.ExpiresAt,
+		}
+		if input.Type == RedeemTypeXianyuDelivery {
+			code.Notes = XianyuPoolNote(strings.TrimSpace(input.Pool))
 		}
 		// 订阅类型专用字段
 		if input.Type == RedeemTypeSubscription {
@@ -1294,15 +1309,19 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 }
 
 func (s *adminServiceImpl) DeleteRedeemCode(ctx context.Context, id int64) error {
-	return s.redeemCodeRepo.Delete(ctx, id)
+	if err := s.redeemCodeRepo.Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete redeem code %d: %w", id, err)
+	}
+	return nil
 }
 
 func (s *adminServiceImpl) BatchDeleteRedeemCodes(ctx context.Context, ids []int64) (int64, error) {
 	var deleted int64
 	for _, id := range ids {
-		if err := s.redeemCodeRepo.Delete(ctx, id); err == nil {
-			deleted++
+		if err := s.redeemCodeRepo.Delete(ctx, id); err != nil {
+			return deleted, fmt.Errorf("delete redeem code %d: %w", id, err)
 		}
+		deleted++
 	}
 	return deleted, nil
 }

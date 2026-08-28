@@ -481,6 +481,64 @@ func (s *RedeemCodeRepoSuite) TestListByUser_DefaultLimit() {
 	s.Require().Len(codes, 1)
 }
 
+func (s *RedeemCodeRepoSuite) TestListWithFilters_ExcludesXianyuDeliveryByDefault() {
+	xianyuCode := &service.RedeemCode{
+		Code:   "XIANYU-LIST-HIDDEN",
+		Type:   service.RedeemTypeXianyuDelivery,
+		Status: service.StatusUsed,
+	}
+	balanceCode := &service.RedeemCode{
+		Code:   "BALANCE-LIST-SHOWN",
+		Type:   service.RedeemTypeBalance,
+		Value:  10,
+		Status: service.StatusUnused,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, xianyuCode))
+	s.Require().NoError(s.repo.Create(s.ctx, balanceCode))
+
+	codes, result, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{
+		Page:     1,
+		PageSize: 10,
+	}, "", "", "")
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), result.Total)
+	s.Require().Len(codes, 1)
+	s.Require().Equal(balanceCode.Code, codes[0].Code)
+
+	codes, result, err = s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{
+		Page:     1,
+		PageSize: 10,
+	}, service.RedeemTypeXianyuDelivery, "", "")
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), result.Total)
+	s.Require().Len(codes, 1)
+	s.Require().Equal(xianyuCode.Code, codes[0].Code)
+}
+
+func (s *RedeemCodeRepoSuite) TestListByUser_ExcludesXianyuDelivery() {
+	user := s.createUser(uniqueTestValue(s.T(), "xianyu-history") + "@example.com")
+	balanceCode := &service.RedeemCode{
+		Code:   "XIANYU-HISTORY-HIDDEN-BALANCE",
+		Type:   service.RedeemTypeBalance,
+		Value:  0,
+		Status: service.StatusUnused,
+	}
+	xianyuCode := &service.RedeemCode{
+		Code:   "XIANYU-HISTORY-HIDDEN",
+		Type:   service.RedeemTypeXianyuDelivery,
+		Status: service.StatusUnused,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, balanceCode))
+	s.Require().NoError(s.repo.Create(s.ctx, xianyuCode))
+	s.Require().NoError(s.repo.Use(s.ctx, balanceCode.ID, user.ID))
+	s.Require().NoError(s.repo.Use(s.ctx, xianyuCode.ID, user.ID))
+
+	codes, err := s.repo.ListByUser(s.ctx, user.ID, 10)
+	s.Require().NoError(err)
+	s.Require().Len(codes, 1)
+	s.Require().Equal(balanceCode.Code, codes[0].Code)
+}
+
 // --- Combined original test ---
 
 func (s *RedeemCodeRepoSuite) TestCreateBatch_Filters_Use_Idempotency_ListByUser() {

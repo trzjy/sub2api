@@ -141,6 +141,50 @@ func TestCreateAndRedeem_BalanceIgnoresSubscriptionFields(t *testing.T) {
 		"balance type should not require group_id or validity_days")
 }
 
+func TestGenerate_XianyuDeliveryRequiresZeroValue(t *testing.T) {
+	serviceStub := &stubAdminService{}
+	h := NewRedeemHandler(serviceStub, nil)
+	router := gin.New()
+	router.POST("/api/v1/admin/redeem-codes/generate", h.Generate)
+
+	body, err := json.Marshal(map[string]any{
+		"count": 1,
+		"type":  "xianyu_delivery",
+		"value": 10,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/redeem-codes/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
+func TestGenerate_XianyuDeliverySetsPoolNote(t *testing.T) {
+	serviceStub := &stubAdminService{}
+	serviceStub.redeems = []service.RedeemCode{{Code: "XY-001", Type: service.RedeemTypeXianyuDelivery}}
+	h := NewRedeemHandler(serviceStub, nil)
+	router := gin.New()
+	router.POST("/api/v1/admin/redeem-codes/generate", h.Generate)
+
+	body, err := json.Marshal(map[string]any{
+		"count": 1,
+		"type":  "xianyu_delivery",
+		"value": 0,
+		"pool":  "standard",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/redeem-codes/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NotNil(t, serviceStub.lastGenerateRedeemCodes)
+	require.Equal(t, "standard", serviceStub.lastGenerateRedeemCodes.Pool)
+}
+
 func TestResolveRedeemCodeExpiresAt_FromDays(t *testing.T) {
 	days := 3
 	expiresAt, err := resolveRedeemCodeExpiresAt(nil, &days)

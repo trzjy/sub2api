@@ -353,6 +353,26 @@ func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	}
 }
 
+func TestLoadXianyuDeliveryFromConfigFile(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`xianyu_delivery:
+  enabled: true
+  internal_token: secret
+  system_user_id: 123
+  item_pools:
+    "account:item": standard
+`), 0o600))
+	t.Setenv("CONFIG_FILE", configFile)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.XianyuDelivery.Enabled)
+	require.Equal(t, "secret", cfg.XianyuDelivery.InternalToken)
+	require.Equal(t, int64(123), cfg.XianyuDelivery.SystemUserID)
+	require.Equal(t, map[string]string{"account:item": "standard"}, cfg.XianyuDelivery.ItemPools)
+}
+
 func TestNormalizeRunMode(t *testing.T) {
 	tests := []struct {
 		input    string

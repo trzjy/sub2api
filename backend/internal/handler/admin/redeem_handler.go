@@ -35,8 +35,9 @@ func NewRedeemHandler(adminService service.AdminService, redeemService *service.
 // GenerateRedeemCodesRequest represents generate redeem codes request
 type GenerateRedeemCodesRequest struct {
 	Count         int        `json:"count" binding:"required,min=1,max=100"`
-	Type          string     `json:"type" binding:"required,oneof=balance concurrency subscription invitation"`
+	Type          string     `json:"type" binding:"required,oneof=balance concurrency subscription invitation xianyu_delivery"`
 	Value         float64    `json:"value"`
+	Pool          string     `json:"pool" binding:"omitempty,max=80"`
 	GroupID       *int64     `json:"group_id"`      // 订阅类型必填
 	ValidityDays  int        `json:"validity_days"` // 订阅类型使用，正数增加/负数退款扣减
 	ExpiresAt     *time.Time `json:"expires_at"`
@@ -141,12 +142,25 @@ func (h *RedeemHandler) Generate(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	if req.Type == service.RedeemTypeXianyuDelivery && req.Value != 0 {
+		response.BadRequest(c, "value must be zero for xianyu_delivery codes")
+		return
+	}
+	if req.Type == service.RedeemTypeXianyuDelivery && strings.TrimSpace(req.Pool) == "" {
+		response.BadRequest(c, "pool is required for xianyu_delivery codes")
+		return
+	}
+	if req.Type == service.RedeemTypeXianyuDelivery && strings.ContainsAny(strings.TrimSpace(req.Pool), "\n\r") {
+		response.BadRequest(c, "pool must not contain line breaks")
+		return
+	}
 
 	executeAdminIdempotentJSON(c, "admin.redeem_codes.generate", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
 		codes, execErr := h.adminService.GenerateRedeemCodes(ctx, &service.GenerateRedeemCodesInput{
 			Count:        req.Count,
 			Type:         req.Type,
 			Value:        req.Value,
+			Pool:         strings.TrimSpace(req.Pool),
 			GroupID:      req.GroupID,
 			ValidityDays: req.ValidityDays,
 			ExpiresAt:    expiresAt,

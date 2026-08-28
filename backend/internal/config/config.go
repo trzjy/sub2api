@@ -104,6 +104,7 @@ type Config struct {
 	BatchImage              BatchImageConfig              `mapstructure:"batch_image"`
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
+	XianyuDelivery          XianyuDeliveryConfig          `mapstructure:"xianyu_delivery"`
 }
 
 // PluginConfig 控制管理员手动上传的本地进程插件。
@@ -115,6 +116,13 @@ type PluginConfig struct {
 	MaxUploadBytes       int64             `mapstructure:"max_upload_bytes"`
 	MaxUncompressedBytes int64             `mapstructure:"max_uncompressed_bytes"`
 	StartTimeoutSeconds  int               `mapstructure:"start_timeout_seconds"`
+}
+
+type XianyuDeliveryConfig struct {
+	Enabled       bool              `mapstructure:"enabled"`
+	InternalToken string            `mapstructure:"internal_token"`
+	SystemUserID  int64             `mapstructure:"system_user_id"`
+	ItemPools     map[string]string `mapstructure:"item_pools"`
 }
 
 type LogConfig struct {
@@ -2172,6 +2180,9 @@ func setDefaults() {
 	viper.SetDefault("database.user_platform_quota_flusher_enabled", false)
 	viper.SetDefault("database.user_platform_quota_flush_interval_ms", 2000)
 	viper.SetDefault("database.user_platform_quota_flush_batch_size", 1000)
+	viper.SetDefault("xianyu_delivery.enabled", false)
+	viper.SetDefault("xianyu_delivery.internal_token", "")
+	viper.SetDefault("xianyu_delivery.system_user_id", 0)
 
 	// Redis
 	viper.SetDefault("redis.host", "localhost")

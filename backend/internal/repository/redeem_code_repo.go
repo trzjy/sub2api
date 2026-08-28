@@ -107,6 +107,8 @@ func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagin
 
 	if codeType != "" {
 		q = q.Where(redeemcode.TypeEQ(codeType))
+	} else {
+		q = q.Where(redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery))
 	}
 	if status != "" {
 		now := time.Now()
@@ -345,7 +347,10 @@ func (r *redeemCodeRepository) ListByUser(ctx context.Context, userID int64, lim
 	}
 
 	codes, err := r.client.RedeemCode.Query().
-		Where(redeemcode.UsedByEQ(userID)).
+		Where(
+			redeemcode.UsedByEQ(userID),
+			redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery),
+		).
 		WithGroup().
 		Order(dbent.Desc(redeemcode.FieldUsedAt)).
 		Limit(limit).
@@ -363,8 +368,10 @@ func (r *redeemCodeRepository) ListByUserPaginated(ctx context.Context, userID i
 	q := r.client.RedeemCode.Query().
 		Where(redeemcode.UsedByEQ(userID))
 
-	// Optional type filter
-	if codeType != "" {
+	// External delivery codes are not user balance history.
+	if codeType == "" {
+		q = q.Where(redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery))
+	} else {
 		q = q.Where(redeemcode.TypeEQ(codeType))
 	}
 

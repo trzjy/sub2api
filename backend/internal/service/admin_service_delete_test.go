@@ -786,7 +786,8 @@ func TestAdminService_BatchDeleteRedeemCodes_PartialFailures(t *testing.T) {
 	svc := &adminServiceImpl{redeemCodeRepo: repo}
 
 	deleted, err := svc.BatchDeleteRedeemCodes(context.Background(), []int64{1, 2, 3})
-	require.NoError(t, err)
-	require.Equal(t, int64(2), deleted)
-	require.Equal(t, []int64{1, 2, 3}, repo.deletedIDs)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errors.New("db error"))
+	require.Equal(t, int64(1), deleted)
+	require.Equal(t, []int64{1, 2}, repo.deletedIDs)
 }
