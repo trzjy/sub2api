@@ -1238,7 +1238,6 @@ image_storage:
 # 该接口只允许 xianyu-auto-reply 通过内网调用；公网反代必须拒绝
 # /api/v1/internal/ 前缀。
 xianyu_delivery:
-  enabled: false
   internal_token: ""
   system_user_id: 0
   item_pools: {}

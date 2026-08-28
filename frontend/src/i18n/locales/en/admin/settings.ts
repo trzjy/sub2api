@@ -42,6 +42,12 @@ export default {
           enabled: 'Enable Available Channels',
           enabledHint: 'When off, the sidebar entry is hidden and the endpoint returns an empty list.',
         },
+        xianyuDelivery: {
+          title: 'Xianyu Automatic Delivery',
+          description: 'When enabled, the internal claim endpoint lets xianyu-auto-reply allocate redeem codes by order. Internal tokens and item mappings remain deployment config.',
+          enabled: 'Enable Xianyu Automatic Delivery',
+          enabledHint: 'When off, the internal endpoint is unavailable. Existing orders remain visible in redeem code management.',
+        },
         modelPlaza: {
           title: 'Model Plaza',
           description: 'A public page showcasing available models and pricing by group. Disabled by default.',

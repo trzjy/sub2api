@@ -367,7 +367,6 @@ func TestLoadXianyuDeliveryFromConfigFile(t *testing.T) {
 
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.True(t, cfg.XianyuDelivery.Enabled)
 	require.Equal(t, "secret", cfg.XianyuDelivery.InternalToken)
 	require.Equal(t, int64(123), cfg.XianyuDelivery.SystemUserID)
 	require.Equal(t, map[string]string{"account:item": "standard"}, cfg.XianyuDelivery.ItemPools)

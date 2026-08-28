@@ -119,7 +119,6 @@ type PluginConfig struct {
 }
 
 type XianyuDeliveryConfig struct {
-	Enabled       bool              `mapstructure:"enabled"`
 	InternalToken string            `mapstructure:"internal_token"`
 	SystemUserID  int64             `mapstructure:"system_user_id"`
 	ItemPools     map[string]string `mapstructure:"item_pools"`

@@ -42,6 +42,12 @@ export default {
           enabled: '启用可用渠道',
           enabledHint: '关闭后用户端侧边栏入口隐藏，接口返回空数组。',
         },
+        xianyuDelivery: {
+          title: '闲鱼自动发货',
+          description: '开启后内部发货接口允许 xianyu-auto-reply 按订单领取兑换码。内部令牌与商品映射仍在部署配置中维护。',
+          enabled: '启用闲鱼自动发货',
+          enabledHint: '关闭后内部接口返回不可用；已有订单仍可在兑换码管理中查看。',
+        },
         modelPlaza: {
           title: '模型广场',
           description: '以分组为单位向访客展示可用模型与价格的公开页面。默认关闭。',

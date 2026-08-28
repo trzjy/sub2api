@@ -31,11 +31,22 @@ func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim
 
 func newXianyuDeliveryTestService(repo XianyuDeliveryRepository) *XianyuDeliveryService {
 	return NewXianyuDeliveryService(repo, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
-		Enabled:       true,
 		InternalToken: "secret",
 		SystemUserID:  123,
 		ItemPools:     map[string]string{"account:item": "standard"},
-	}})
+	}}, newXianyuSettingsStub(true))
+}
+
+type xianyuSettingsStub struct {
+	enabled bool
+}
+
+func newXianyuSettingsStub(enabled bool) *xianyuSettingsStub {
+	return &xianyuSettingsStub{enabled: enabled}
+}
+
+func (s *xianyuSettingsStub) GetXianyuDeliveryRuntime(context.Context) XianyuDeliveryRuntime {
+	return XianyuDeliveryRuntime{Enabled: s.enabled}
 }
 
 func validXianyuRequest() XianyuDeliveryClaimRequest {
@@ -84,7 +95,7 @@ func TestXianyuDeliveryRejectsInvalidAmountAndMissingConfiguration(t *testing.T)
 	_, err = svc.Claim(context.Background(), request)
 	require.ErrorIs(t, err, ErrXianyuInvalidAmount)
 
-	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &config.Config{})
+	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &config.Config{}, newXianyuSettingsStub(true))
 	_, err = missing.Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 
@@ -116,9 +127,9 @@ func TestXianyuDeliveryRejectsOverlongIdentifiers(t *testing.T) {
 
 func TestXianyuDeliveryValidateStartupRejectsUnavailableSystemUser(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
-		Enabled: true, InternalToken: "secret", SystemUserID: 123,
+		InternalToken: "secret", SystemUserID: 123,
 	}}
-	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, cfg)
+	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, cfg, newXianyuSettingsStub(true))
 	now := time.Now()
 	reader := &systemUserReaderStub{users: map[int64]*User{
 		123: {ID: 123, Status: StatusActive},
@@ -133,6 +144,26 @@ func TestXianyuDeliveryValidateStartupRejectsUnavailableSystemUser(t *testing.T)
 	require.Contains(t, err.Error(), "not found")
 
 	err = svc.ValidateStartup(context.Background(), &systemUserReaderStub{users: map[int64]*User{123: reader.users[456]}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unavailable")
+}
+
+func TestXianyuDeliveryUsesPanelToggleFailClosed(t *testing.T) {
+	repo := &xianyuClaimRepoStub{result: "code"}
+	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+		InternalToken: "secret", SystemUserID: 123, ItemPools: map[string]string{"account:item": "standard"},
+	}}
+	disabled := NewXianyuDeliveryService(repo, cfg, newXianyuSettingsStub(false))
+	_, err := disabled.Claim(context.Background(), validXianyuRequest())
+	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
+
+	now := time.Now()
+	reader := &systemUserReaderStub{users: map[int64]*User{123: {ID: 123, Status: StatusActive}}}
+	require.NoError(t, disabled.ValidateStartup(context.Background(), reader))
+
+	deletedUser := &systemUserReaderStub{users: map[int64]*User{123: {ID: 123, Status: StatusActive, DeletedAt: &now}}}
+	enabled := NewXianyuDeliveryService(repo, cfg, newXianyuSettingsStub(true))
+	err = enabled.ValidateStartup(context.Background(), deletedUser)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unavailable")
 }

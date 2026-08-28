@@ -319,7 +319,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	xianyuDeliveryRepository := repository.NewXianyuOrderClaimRepository(db)
-	xianyuDeliveryService := service.NewXianyuDeliveryService(xianyuDeliveryRepository, configConfig)
+	xianyuDeliveryService := service.NewXianyuDeliveryService(xianyuDeliveryRepository, configConfig, settingService)
 	if xianyuDeliveryService != nil {
 		if err := xianyuDeliveryService.ValidateStartup(context.Background(), userRepository); err != nil {
 			return nil, err

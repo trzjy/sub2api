@@ -25,7 +25,19 @@ func newXianyuHandlerForTest() *XianyuDeliveryHandler {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1, ItemPools: map[string]string{"account:item": "standard"},
 	}}
-	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, cfg), cfg)
+	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, cfg, newXianyuSettingsStub(true)), cfg)
+}
+
+type newXianyuSettingsStubType struct {
+	enabled bool
+}
+
+func newXianyuSettingsStub(enabled bool) *newXianyuSettingsStubType {
+	return &newXianyuSettingsStubType{enabled: enabled}
+}
+
+func (s *newXianyuSettingsStubType) GetXianyuDeliveryRuntime(context.Context) service.XianyuDeliveryRuntime {
+	return service.XianyuDeliveryRuntime{Enabled: s.enabled}
 }
 
 func TestXianyuDeliveryHandlerRejectsMissingOrWrongToken(t *testing.T) {

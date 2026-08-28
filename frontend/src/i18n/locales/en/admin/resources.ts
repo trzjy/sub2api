@@ -251,6 +251,10 @@ export default {
       subscription: 'Subscription',
       invitation: 'Invitation',
       invitationHint: 'Invitation codes are used to restrict user registration. They are automatically marked as used after use.',
+      xianyuDelivery: 'Xianyu Delivery Code',
+      xianyuPool: 'Inventory Pool',
+      xianyuPoolHint: 'Matches the item pool configured in deployment, for example standard.',
+      xianyuPoolRequired: 'Inventory pool is required',
       unused: 'Unused',
       used: 'Used',
       columns: {
@@ -316,6 +320,7 @@ export default {
         concurrency: 'Concurrency',
         subscription: 'Subscription',
         invitation: 'Invitation',
+        xianyu_delivery: 'Xianyu Delivery Code',
         // Admin adjustment types (created when admin modifies user balance/concurrency)
         admin_balance: 'Balance (Admin)',
         admin_concurrency: 'Concurrency (Admin)'

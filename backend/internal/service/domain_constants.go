@@ -504,6 +504,11 @@ const (
 	// sidebar entry is hidden. Defaults to false (opt-in feature).
 	SettingKeyAvailableChannelsEnabled = "available_channels_enabled"
 
+	// SettingKeyXianyuDeliveryEnabled is a DB-backed soft switch for the Xianyu
+	// automatic-delivery claim endpoint. Secrets and audit identity remain in
+	// deployment config.
+	SettingKeyXianyuDeliveryEnabled = "xianyu_delivery_enabled"
+
 	// SettingKeyModelPlazaEnabled is a DB-backed soft switch for the Model Plaza page
 	// (public group/model pricing showcase). When false: the plaza endpoint returns 404
 	// and the header entry is hidden. Defaults to false (opt-in feature).

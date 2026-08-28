@@ -185,6 +185,27 @@ func TestGenerate_XianyuDeliverySetsPoolNote(t *testing.T) {
 	require.Equal(t, "standard", serviceStub.lastGenerateRedeemCodes.Pool)
 }
 
+func TestGenerate_XianyuDeliveryRequiresPool(t *testing.T) {
+	serviceStub := &stubAdminService{}
+	h := NewRedeemHandler(serviceStub, nil)
+	router := gin.New()
+	router.POST("/api/v1/admin/redeem-codes/generate", h.Generate)
+
+	body, err := json.Marshal(map[string]any{
+		"count": 1,
+		"type":  "xianyu_delivery",
+		"value": 0,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/redeem-codes/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Nil(t, serviceStub.lastGenerateRedeemCodes)
+}
+
 func TestResolveRedeemCodeExpiresAt_FromDays(t *testing.T) {
 	days := 3
 	expiresAt, err := resolveRedeemCodeExpiresAt(nil, &days)

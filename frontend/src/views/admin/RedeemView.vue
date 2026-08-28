@@ -288,7 +288,13 @@
               <Select v-model="generateForm.type" :options="typeOptions" />
             </div>
             <!-- 余额/并发类型：显示数值输入 -->
-            <div v-if="generateForm.type !== 'subscription' && generateForm.type !== 'invitation'">
+            <div
+              v-if="
+                generateForm.type !== 'subscription' &&
+                generateForm.type !== 'invitation' &&
+                generateForm.type !== 'xianyu_delivery'
+              "
+            >
               <label class="input-label">
                 {{
                   generateForm.type === 'balance'
@@ -309,6 +315,13 @@
             <div v-if="generateForm.type === 'invitation'" class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
               <p class="text-sm text-blue-700 dark:text-blue-300">
                 {{ t('admin.redeem.invitationHint') }}
+              </p>
+            </div>
+            <div v-if="generateForm.type === 'xianyu_delivery'">
+              <label class="input-label">{{ t('admin.redeem.xianyuPool') }}</label>
+              <input v-model="xianyuPool" type="text" required class="input" />
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.redeem.xianyuPoolHint') }}
               </p>
             </div>
             <!-- 订阅类型：显示分组选择和有效天数 -->
@@ -735,7 +748,8 @@ const typeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
   { value: 'concurrency', label: t('admin.redeem.concurrency') },
   { value: 'subscription', label: t('admin.redeem.subscription') },
-  { value: 'invitation', label: t('admin.redeem.invitation') }
+  { value: 'invitation', label: t('admin.redeem.invitation') },
+  { value: 'xianyu_delivery', label: t('admin.redeem.xianyuDelivery') }
 ])
 
 const filterTypeOptions = computed(() => [
@@ -743,7 +757,8 @@ const filterTypeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
   { value: 'concurrency', label: t('admin.redeem.concurrency') },
   { value: 'subscription', label: t('admin.redeem.subscription') },
-  { value: 'invitation', label: t('admin.redeem.invitation') }
+  { value: 'invitation', label: t('admin.redeem.invitation') },
+  { value: 'xianyu_delivery', label: t('admin.redeem.xianyuDelivery') }
 ])
 
 const filterStatusOptions = computed(() => [
@@ -837,11 +852,15 @@ const generateForm = reactive({
   custom_expiry_days: 7
 })
 
-// 监听类型变化，邀请码类型时自动设置 value 为 0
+const xianyuPool = ref('')
+
+// 监听类型变化，邀请码与闲鱼发货凭证不需要数值
 watch(
   () => generateForm.type,
   (newType) => {
     if (newType === 'invitation') {
+      generateForm.value = 0
+    } else if (newType === 'xianyu_delivery') {
       generateForm.value = 0
     } else if (generateForm.value === 0) {
       generateForm.value = 10
@@ -1023,6 +1042,10 @@ const handleGenerateCodes = async () => {
     appStore.showError(t('admin.redeem.groupRequired'))
     return
   }
+  if (generateForm.type === 'xianyu_delivery' && !xianyuPool.value.trim()) {
+    appStore.showError(t('admin.redeem.xianyuPoolRequired'))
+    return
+  }
 
   const expiresInDays = getRedeemCodeExpiresInDays()
   if (expiresInDays === null) {
@@ -1038,7 +1061,8 @@ const handleGenerateCodes = async () => {
       generateForm.value,
       generateForm.type === 'subscription' ? generateForm.group_id : undefined,
       generateForm.type === 'subscription' ? generateForm.validity_days : undefined,
-      expiresInDays
+      expiresInDays,
+      generateForm.type === 'xianyu_delivery' ? xianyuPool.value : undefined
     )
     showGenerateDialog.value = false
     generatedCodes.value = result
@@ -1048,6 +1072,7 @@ const handleGenerateCodes = async () => {
     generateForm.validity_days = 30
     generateForm.expiry_option = 'never'
     generateForm.custom_expiry_days = 7
+    xianyuPool.value = ''
     loadCodes()
   } catch (error: any) {
     appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToGenerate'))

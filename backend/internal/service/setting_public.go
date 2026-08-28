@@ -496,6 +496,18 @@ func (s *SettingService) GetAvailableChannelsRuntime(ctx context.Context) Availa
 	}
 }
 
+type XianyuDeliveryRuntime struct {
+	Enabled bool
+}
+
+func (s *SettingService) GetXianyuDeliveryRuntime(ctx context.Context) XianyuDeliveryRuntime {
+	vals, err := s.settingRepo.GetMultiple(ctx, []string{SettingKeyXianyuDeliveryEnabled})
+	if err != nil {
+		return XianyuDeliveryRuntime{Enabled: false}
+	}
+	return XianyuDeliveryRuntime{Enabled: vals[SettingKeyXianyuDeliveryEnabled] == "true"}
+}
+
 // ModelPlazaRuntime is the lightweight view of the model-plaza feature consumed
 // by the public plaza handler.
 type ModelPlazaRuntime struct {

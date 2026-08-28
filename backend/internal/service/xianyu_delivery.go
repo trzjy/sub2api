@@ -58,16 +58,24 @@ type XianyuDeliveryRepository interface {
 }
 
 type XianyuDeliveryService struct {
-	repo XianyuDeliveryRepository
-	cfg  *config.Config
+	repo    XianyuDeliveryRepository
+	cfg     *config.Config
+	setting XianyuDeliverySettingReader
 }
 
-func NewXianyuDeliveryService(repo XianyuDeliveryRepository, cfg *config.Config) *XianyuDeliveryService {
-	return &XianyuDeliveryService{repo: repo, cfg: cfg}
+type XianyuDeliverySettingReader interface {
+	GetXianyuDeliveryRuntime(ctx context.Context) XianyuDeliveryRuntime
+}
+
+func NewXianyuDeliveryService(repo XianyuDeliveryRepository, cfg *config.Config, setting XianyuDeliverySettingReader) *XianyuDeliveryService {
+	return &XianyuDeliveryService{repo: repo, cfg: cfg, setting: setting}
 }
 
 func (s *XianyuDeliveryService) Claim(ctx context.Context, req XianyuDeliveryClaimRequest) (string, error) {
 	if s.cfg == nil || s.repo == nil || s.cfg.XianyuDelivery.SystemUserID <= 0 {
+		return "", ErrXianyuDeliveryNotConfigured
+	}
+	if s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return "", ErrXianyuDeliveryNotConfigured
 	}
 	claim, err := normalizeXianyuClaim(req, s.cfg.XianyuDelivery.ItemPools)
@@ -155,7 +163,7 @@ func (s *XianyuDeliveryService) ValidateConfiguration() error {
 
 // ValidateStartup enforces the protected audit user only when delivery is on.
 func (s *XianyuDeliveryService) ValidateStartup(ctx context.Context, users SystemUserReader) error {
-	if s == nil || s.cfg == nil || !s.cfg.XianyuDelivery.Enabled {
+	if s == nil || s.cfg == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return nil
 	}
 	if err := s.ValidateConfiguration(); err != nil {

@@ -357,7 +357,7 @@ func (s *adminServiceImpl) DeleteUser(ctx context.Context, id int64) error {
 	if user.Role == "admin" {
 		return errors.New("cannot delete admin user")
 	}
-	if s.cfg != nil && s.cfg.XianyuDelivery.Enabled && id == s.cfg.XianyuDelivery.SystemUserID {
+	if s.cfg != nil && id == s.cfg.XianyuDelivery.SystemUserID {
 		return infraerrors.Conflict("XIANYU_SYSTEM_USER_PROTECTED", "cannot delete xianyu delivery system user")
 	}
 

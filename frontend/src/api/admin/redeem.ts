@@ -70,7 +70,8 @@ export async function generate(
   value: number,
   groupId?: number | null,
   validityDays?: number,
-  expiresInDays?: number | null
+  expiresInDays?: number | null,
+  pool?: string
 ): Promise<RedeemCode[]> {
   const payload: GenerateRedeemCodesRequest = {
     count,
@@ -84,6 +85,9 @@ export async function generate(
     if (validityDays && validityDays > 0) {
       payload.validity_days = validityDays
     }
+  }
+  if (type === 'xianyu_delivery') {
+    payload.pool = (pool || '').trim()
   }
   if (expiresInDays && expiresInDays > 0) {
     payload.expires_in_days = expiresInDays
