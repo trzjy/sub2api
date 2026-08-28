@@ -1801,6 +1801,50 @@
         />
       </div>
 
+      <div
+        v-if="account?.type === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.balanceProbe.title') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.balanceProbe.description') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            class="relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2"
+            :class="balanceProbeEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'"
+            @click="balanceProbeEnabled = !balanceProbeEnabled"
+          >
+            <span
+              class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"
+              :class="balanceProbeEnabled ? 'translate-x-5' : 'translate-x-0'"
+            />
+          </button>
+        </div>
+        <div v-if="balanceProbeEnabled" class="mt-3 grid grid-cols-1 gap-3">
+          <div>
+            <label class="input-label mb-1">{{ t('admin.accounts.balanceProbe.url') }}</label>
+            <input
+              v-model="balanceProbeURL"
+              type="text"
+              class="input font-mono text-xs"
+              :placeholder="`${(editBaseUrl || '').replace(/\/$/, '')}/v1/usage`"
+            />
+          </div>
+          <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+            <input
+              v-model="balanceProbeBearerAuth"
+              type="checkbox"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-dark-500"
+            />
+            {{ t('admin.accounts.balanceProbe.bearerAuth') }}
+          </label>
+        </div>
+      </div>
+
       <OllamaCloudUsageSettings
         v-if="account?.ollama_cloud_usage?.eligible"
         :account="account"
@@ -3238,6 +3282,9 @@ const codexImageToolMode = ref<CodexImageToolMode>('inherit')
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
 const anthropicPassthroughEnabled = ref(false)
 const anthropicAPIKeyAuthScheme = ref<AnthropicAPIKeyAuthScheme>('x_api_key')
+const balanceProbeEnabled = ref(false)
+const balanceProbeURL = ref('')
+const balanceProbeBearerAuth = ref(true)
 const webSearchEmulationMode = ref('default')
 const webSearchGlobalEnabled = ref(false)
 const {
@@ -3955,6 +4002,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     editBaseUrl.value = isCNApiKeyAccount.value && editApiProtocol.value === 'adaptive'
       ? editAdaptiveBaseUrls.value.chat_completions
       : (credentials.base_url as string) || platformDefaultUrl
+    const storedBalanceProbe = credentials.balance_probe as { enabled?: boolean; url?: string; bearer_auth?: boolean } | undefined
+    balanceProbeEnabled.value = storedBalanceProbe?.enabled === true
+    balanceProbeURL.value = storedBalanceProbe?.url || ''
+    balanceProbeBearerAuth.value = storedBalanceProbe?.bearer_auth !== false
 
     // Load model mappings and detect mode
     loadModelRestrictionFromMapping(credentials.model_mapping as Record<string, unknown> | undefined)
@@ -4662,6 +4713,16 @@ const handleSubmit = async () => {
       } else if (!hasExistingApiKey) {
         appStore.showError(t('admin.accounts.apiKeyIsRequired'))
         return
+      }
+
+      if (balanceProbeEnabled.value) {
+        newCredentials.balance_probe = {
+          enabled: true,
+          url: balanceProbeURL.value.trim(),
+          bearer_auth: balanceProbeBearerAuth.value
+        }
+      } else {
+        delete newCredentials.balance_probe
       }
 
       // Add model mapping if configured（OpenAI 开启自动透传时保留现有映射，不再编辑）

@@ -55,6 +55,7 @@ type AccountHandler struct {
 	grokOAuthService        service.GrokOAuthTokenService
 	rateLimitService        *service.RateLimitService
 	accountUsageService     *service.AccountUsageService
+	accountBalanceProbe     *service.AccountBalanceProbeService
 	accountTestService      *service.AccountTestService
 	concurrencyService      *service.ConcurrencyService
 	crsSyncService          *service.CRSSyncService
@@ -73,6 +74,10 @@ func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamB
 
 func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUsageService) {
 	h.ollamaCloudUsage = usage
+}
+
+func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
+	h.accountBalanceProbe = probe
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -2323,7 +2328,22 @@ func (h *AccountHandler) GetUsage(c *gin.Context) {
 	force := c.Query("force") == "true"
 
 	var usage *service.UsageInfo
-	if source == "passive" {
+	if h.accountBalanceProbe != nil && source == "balance-probe" {
+		result, probeErr := h.accountBalanceProbe.Query(c.Request.Context(), accountID)
+		if probeErr != nil {
+			response.ErrorFrom(c, probeErr)
+			return
+		}
+		if !result.Success {
+			usage = &service.UsageInfo{ErrorCode: "balance_probe_failed", Error: result.Error}
+		} else {
+			usage = &service.UsageInfo{
+				Source:       "balance_probe",
+				UpdatedAt:    &result.FetchedAt,
+				BalanceProbe: result,
+			}
+		}
+	} else if source == "passive" {
 		usage, err = h.accountUsageService.GetPassiveUsage(c.Request.Context(), accountID)
 	} else {
 		usage, err = h.accountUsageService.GetUsage(c.Request.Context(), accountID, force)

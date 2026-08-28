@@ -560,10 +560,10 @@
     </template>
   </div>
 
-  <!-- Non-OAuth/Setup-Token accounts -->
-  <div ref="rootRef" v-else>
-    <!-- Gemini API Key accounts: show quota info -->
-    <AccountQuotaInfo v-if="account.platform === 'gemini'" :account="account" />
+    <!-- Non-OAuth/Setup-Token accounts -->
+    <div ref="rootRef" v-else>
+      <!-- Gemini API Key accounts: show quota info -->
+      <AccountQuotaInfo v-if="account.platform === 'gemini'" :account="account" />
     <!-- Key/Bedrock accounts: show today stats + optional quota bars -->
     <div v-else class="space-y-1">
       <OllamaCloudUsageCell
@@ -626,6 +626,36 @@
         :utilization="quotaTotalBar.utilization"
         color="purple"
       />
+
+      <!-- Optional controlled balance probe for custom API-key upstreams -->
+      <div
+        v-if="account.balance_probe?.enabled"
+        class="flex flex-wrap items-center gap-1.5"
+      >
+        <span
+          class="text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
+          :title="balanceProbe?.error || t('admin.accounts.balanceProbe.title')"
+        >
+          {{ balanceProbeLabel }}
+        </span>
+        <button
+          type="button"
+          class="inline-flex items-center gap-0.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium leading-4 text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+          :disabled="balanceProbeLoading"
+          @click="loadBalanceProbe"
+        >
+          <svg
+            class="h-2.5 w-2.5"
+            :class="{ 'animate-spin': balanceProbeLoading }"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {{ t('admin.accounts.cnProviders.probe') }}
+        </button>
+      </div>
 
       <!-- No data at all -->
       <div
@@ -696,6 +726,15 @@ const loading = ref(false)
 const activeQueryLoading = ref(false)
 const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
+const balanceProbeLoading = ref(false)
+const balanceProbe = computed(() => usageInfo.value?.balance_probe)
+const balanceProbeLabel = computed(() => {
+  if (!balanceProbe.value?.success) {
+    return balanceProbe.value?.error || t('admin.accounts.balanceProbe.notQueried')
+  }
+  const remaining = balanceProbe.value.remaining ?? 0
+  return `${remaining.toFixed(2)} ${balanceProbe.value.unit || 'USD'}`
+})
 watch(usageInfo, (usage) => {
   if (usage) emit('usage-loaded', usage)
 })
@@ -1450,6 +1489,19 @@ const loadActiveUsage = async () => {
     console.error('Failed to load active usage:', e)
   } finally {
     activeQueryLoading.value = false
+  }
+}
+
+const loadBalanceProbe = async () => {
+  balanceProbeLoading.value = true
+  try {
+    const result = await adminAPI.accounts.getUsage(props.account.id, 'balance-probe', true)
+    usageInfo.value = result
+    emit('usage-loaded', result)
+  } catch (e: any) {
+    console.error('Failed to load balance probe:', e)
+  } finally {
+    balanceProbeLoading.value = false
   }
 }
 

@@ -781,6 +781,13 @@ export default {
         fileReadFailed: '读取所选文件失败',
         noResponseBody: '服务器未返回响应体'
       },
+      balanceProbe: {
+        title: '自定义余额查询',
+        description: '为支持 JSON 用量接口的中转上游配置余额探测。仅读取上游返回值，不会修改本地扣费余额。',
+        url: '余额接口 URL',
+        bearerAuth: '使用 Bearer 认证',
+        notQueried: '余额未查询'
+      },
       anthropic: {
         apiKeyPassthrough: '自动透传（仅替换认证）',
         apiKeyPassthroughDesc:

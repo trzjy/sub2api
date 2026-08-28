@@ -1146,6 +1146,11 @@ export interface Account {
       error_code?: string
     }
   } & Record<string, unknown>)
+  balance_probe?: {
+    enabled: boolean
+    url?: string
+    bearer_auth?: boolean
+  }
   proxy_id: number | null
   proxy_fallback_origin_id?: number | null
   proxy_fallback_origin_name?: string | null
@@ -1377,6 +1382,15 @@ export interface AccountUsageInfo {
   error_code?: string
 
   error?: string            // usage 获取失败时的错误信息
+  balance_probe?: {
+    success: boolean
+    remaining?: number | null
+    unit?: string
+    valid?: boolean
+    status_code?: number
+    fetched_at?: string
+    error?: string
+  }
 }
 
 // OpenAI Codex usage snapshot (from response headers)

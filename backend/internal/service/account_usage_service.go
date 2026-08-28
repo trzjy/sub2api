@@ -244,6 +244,10 @@ type UsageInfo struct {
 
 	// 获取 usage 时的错误信息（降级返回，而非 500）
 	Error string `json:"error,omitempty"`
+
+	// 受控自定义余额探测结果。普通 API Key 账号可显式配置上游 JSON 余额端点，
+	// 该字段只承载探测返回值，不参与本地余额扣费。
+	BalanceProbe *BalanceProbeResult `json:"balance_probe,omitempty"`
 }
 
 // ClaudeUsageWindow Anthropic /api/oauth/usage 返回的单个用量窗口
