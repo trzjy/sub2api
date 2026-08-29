@@ -218,7 +218,7 @@ func (s *xianyuStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*
 	if s.claim == nil && s.resend != "" {
 		return &XianyuOrderClaim{
 			OrderNo: orderNo, Code: s.resend, AccountID: "account", ItemID: "item",
-			BuyerID: "buyer", DeliveryStatus: XianyuDeliveryStatusFailed,
+			BuyerID: "buyer", ChatID: "chat", DeliveryStatus: XianyuDeliveryStatusFailed,
 		}, nil
 	}
 	return s.claim, nil
@@ -255,7 +255,7 @@ func newXianyuDeliveryTestService(control XianyuControlRepository, repo XianyuDe
 func validXianyuRequest() XianyuDeliveryClaimRequest {
 	return XianyuDeliveryClaimRequest{
 		OrderID: "order-1", ItemID: "item", OrderAmount: "19.90", OrderQuantity: "1",
-		CookieID: "account", BuyerID: "buyer", SpecName: "spec", SpecValue: "value",
+		CookieID: "account", BuyerID: "buyer", ChatID: "chat", SpecName: "spec", SpecValue: "value",
 	}
 }
 
@@ -436,6 +436,7 @@ func TestXianyuDeliveryResendCallsWorkerBeforeMarkingPending(t *testing.T) {
 	require.Len(t, worker.claims, 1)
 	require.Equal(t, "ORIGINAL-CODE", worker.claims[0].Code)
 	require.Equal(t, "account", worker.claims[0].AccountID)
+	require.Equal(t, "chat", worker.claims[0].ChatID)
 
 	worker.err = errors.New("worker rejected resend")
 	_, err = svc.ResendOriginalCode(context.Background(), "order-1", 123)

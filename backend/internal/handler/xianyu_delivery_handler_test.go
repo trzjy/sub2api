@@ -137,7 +137,7 @@ func TestXianyuDeliveryHandlerReturnsStandardResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.POST("/claim", newXianyuHandlerForTest().Claim)
-	payload := service.XianyuDeliveryClaimRequest{OrderID: "order", ItemID: "item", OrderQuantity: "1", CookieID: "account", BuyerID: "buyer"}
+	payload := service.XianyuDeliveryClaimRequest{OrderID: "order", ItemID: "item", OrderQuantity: "1", CookieID: "account", BuyerID: "buyer", ChatID: "chat"}
 	body, err := json.Marshal(payload)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/claim", bytes.NewReader(body))
@@ -154,7 +154,7 @@ func TestXianyuDeliveryHandlerRejectsOversizedBody(t *testing.T) {
 	r := gin.New()
 	r.POST("/claim", newXianyuHandlerForTest().Claim)
 	payload := service.XianyuDeliveryClaimRequest{
-		OrderID: "order", ItemID: "item", OrderQuantity: "1", CookieID: "account", BuyerID: "buyer",
+		OrderID: "order", ItemID: "item", OrderQuantity: "1", CookieID: "account", BuyerID: "buyer", ChatID: "chat",
 		ItemDetail: strings.Repeat("x", 17*1024),
 	}
 	body, err := json.Marshal(payload)

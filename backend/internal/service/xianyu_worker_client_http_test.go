@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,6 +25,21 @@ func TestXianyuWorkerClientHealth(t *testing.T) {
 	require.True(t, health.Backend)
 	require.True(t, health.WebSocket)
 	require.True(t, health.Database)
+}
+
+func TestXianyuWorkerClientHealthAcceptsWorkerStringDatabase(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"status":"running","database":"connected"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	health, err := client.Health(context.Background())
+	require.NoError(t, err)
+	require.True(t, health.Backend)
+	require.True(t, health.Database)
+	require.False(t, health.WebSocket)
 }
 
 func TestXianyuWorkerClientHealthAcceptsBareResponse(t *testing.T) {
@@ -114,4 +130,22 @@ func TestXianyuWorkerClientResendDeliveryAcceptsWrappedSendStatus(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, result.Success)
 	require.Equal(t, "success", result.Data.SendStatus)
+}
+
+func TestXianyuWorkerClientResendDeliveryUsesWorkerContract(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/internal/accounts/a1/send-message", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"send_status":"success"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	_, err := client.ResendDelivery(context.Background(), "a1", "o1", "i1", "b1", "c1", "CODE")
+	require.NoError(t, err)
+	require.Equal(t, "CODE", body["message"])
+	require.Equal(t, "c1", body["chat_id"])
+	require.NotContains(t, body, "content")
 }

@@ -66,7 +66,7 @@ func (r *xianyuDeliveryListRepository) ListDeliveryClaims(ctx context.Context, f
 	}
 	args = append(args, limit, filter.Offset)
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT c.order_no, r.code, c.account_id, c.item_id, c.buyer_id, c.amount,
+		SELECT c.order_no, r.code, c.account_id, c.item_id, c.buyer_id, c.chat_id, c.amount,
 		       c.product_id, c.pool_id, c.binding_source, c.delivery_status, c.delivery_error,
 		       c.attempt_count, c.last_attempt_at, c.created_at
 		FROM xianyu_order_claims c
@@ -86,7 +86,7 @@ func (r *xianyuDeliveryListRepository) ListDeliveryClaims(ctx context.Context, f
 		var productID, poolID sql.NullInt64
 		var bindingSource sql.NullString
 		var lastAttemptAt sql.NullTime
-		if err := rows.Scan(&c.OrderNo, &c.Code, &c.AccountID, &c.ItemID, &c.BuyerID, &amount,
+		if err := rows.Scan(&c.OrderNo, &c.Code, &c.AccountID, &c.ItemID, &c.BuyerID, &c.ChatID, &amount,
 			&productID, &poolID, &bindingSource, &c.DeliveryStatus, &deliveryError,
 			&c.AttemptCount, &lastAttemptAt, &c.CreatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scan xianyu delivery claim: %w", err)
@@ -185,11 +185,11 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO xianyu_order_claims
-		(order_no, redeem_code_id, account_id, item_id, buyer_id, amount,
+		(order_no, redeem_code_id, account_id, item_id, buyer_id, chat_id, amount,
 		 product_id, pool_id, binding_source, delivery_status, attempt_count, last_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, NOW())`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, NOW())`,
 		claim.OrderID, codeID, claim.AccountID, claim.ItemID, claim.BuyerID, amount,
-		productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
+		claim.ChatID, productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
 		return "", fmt.Errorf("insert xianyu claim: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -284,13 +284,13 @@ func (r *xianyuOrderClaimStateRepository) GetDeliveryClaim(ctx context.Context, 
 	var bindingSource sql.NullString
 	var lastAttemptAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
-		SELECT c.order_no, r.code, c.account_id, c.item_id, c.buyer_id, c.amount,
+		SELECT c.order_no, r.code, c.account_id, c.item_id, c.buyer_id, c.chat_id, c.amount,
 		       c.product_id, c.pool_id, c.binding_source, c.delivery_status, c.delivery_error,
 		       c.attempt_count, c.last_attempt_at, c.created_at
 		FROM xianyu_order_claims c
 		JOIN redeem_codes r ON r.id = c.redeem_code_id
 		WHERE c.order_no = $1`, orderNo).
-		Scan(&c.OrderNo, &c.Code, &c.AccountID, &c.ItemID, &c.BuyerID, &amount,
+		Scan(&c.OrderNo, &c.Code, &c.AccountID, &c.ItemID, &c.BuyerID, &c.ChatID, &amount,
 			&productID, &poolID, &bindingSource, &c.DeliveryStatus, &deliveryError,
 			&c.AttemptCount, &lastAttemptAt, &c.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

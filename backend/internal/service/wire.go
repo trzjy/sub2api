@@ -896,7 +896,10 @@ func ProvideXianyuControlService(
 		// 迁移失败时启动失败关闭，不进入半迁移状态。
 		return nil, fmt.Errorf("xianyu legacy item_pools migration: %w", err)
 	}
-	return NewXianyuControlService(control, claimRepo, stateRepo, listRepo, encryptor, delivery, worker, setting, settingStore, xianyuSyncService), nil
+	controlService := NewXianyuControlService(control, claimRepo, stateRepo, listRepo, encryptor, delivery, worker, setting, settingStore, nil)
+	xianyuSyncService = NewXianyuSyncService(controlService, worker, nil, db, setting)
+	controlService.sync = xianyuSyncService
+	return controlService, nil
 }
 
 // ProviderSet is the Wire provider set for all services

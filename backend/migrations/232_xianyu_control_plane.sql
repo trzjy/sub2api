@@ -113,6 +113,7 @@ ALTER TABLE xianyu_order_claims
     ADD COLUMN IF NOT EXISTS product_id       BIGINT REFERENCES xianyu_products(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS pool_id          BIGINT REFERENCES xianyu_item_pools(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS binding_source   VARCHAR(24),
+    ADD COLUMN IF NOT EXISTS chat_id          VARCHAR(120) NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS delivery_status  VARCHAR(24) NOT NULL DEFAULT 'pending',
     ADD COLUMN IF NOT EXISTS delivery_error   TEXT,
     ADD COLUMN IF NOT EXISTS attempt_count    INT NOT NULL DEFAULT 0,

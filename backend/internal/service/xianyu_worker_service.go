@@ -179,7 +179,7 @@ func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuO
 		return ErrXianyuAccountDisabled
 	}
 	result, err := client.ResendDelivery(
-		ctx, account.AccountID, claim.OrderNo, claim.ItemID, claim.BuyerID, claim.BuyerID, claim.Code,
+		ctx, account.AccountID, claim.OrderNo, claim.ItemID, claim.BuyerID, claim.ChatID, claim.Code,
 	)
 	if err != nil {
 		return err

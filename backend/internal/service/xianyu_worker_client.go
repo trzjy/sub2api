@@ -57,11 +57,42 @@ func (e *XianyuWorkerError) Error() string {
 	return fmt.Sprintf("xianyu worker error %d %s", e.StatusCode, e.Reason)
 }
 
+// xianyuHealth accepts both boolean and Worker's string database status.
+type xianyuHealth bool
+
+func (v *xianyuHealth) UnmarshalJSON(data []byte) error {
+	text := strings.TrimSpace(string(data))
+	if text == "" || text == "null" {
+		*v = false
+		return nil
+	}
+	if text[0] == '"' {
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*v = xianyuHealth(strings.EqualFold(strings.TrimSpace(value), "connected"))
+		return nil
+	}
+	var value bool
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = xianyuHealth(value)
+	return nil
+}
+
+type xianyuWorkerHealthStatus struct {
+	Backend   bool         `json:"backend"`
+	WebSocket bool         `json:"websocket"`
+	Database  xianyuHealth `json:"database"`
+}
+
 // XianyuWorkerHealth 表示 Worker 健康检查结果。
 type XianyuWorkerHealth struct {
-	Backend   bool `json:"backend"`
-	WebSocket bool `json:"websocket"`
-	Database  bool `json:"database"`
+	Backend   bool
+	WebSocket bool
+	Database  bool
 }
 
 // XianyuWorkerAccountStatus 表示 Worker 侧账号状态。
@@ -100,23 +131,29 @@ type XianyuWorkerResult struct {
 // Health 检查后端、WebSocket 和数据库连通性。
 // Worker 健康端点同时兼容裸响应和标准包装响应。
 func (c *XianyuWorkerClient) Health(ctx context.Context) (*XianyuWorkerHealth, error) {
-	var out XianyuWorkerHealth
 	var wrapped struct {
-		Success bool                `json:"success"`
-		Data    *XianyuWorkerHealth `json:"data"`
+		Success bool                      `json:"success"`
+		Data    *xianyuWorkerHealthStatus `json:"data"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/health", nil, &wrapped, ""); err != nil {
 		return nil, err
 	}
 	if wrapped.Data != nil {
-		out = *wrapped.Data
-	} else {
-		if err := c.do(ctx, http.MethodGet, "/health", nil, &out, ""); err != nil {
-			return nil, err
-		}
+		return &XianyuWorkerHealth{
+			Backend:   wrapped.Data.Backend || wrapped.Success,
+			WebSocket: wrapped.Data.WebSocket,
+			Database:  bool(wrapped.Data.Database),
+		}, nil
 	}
-	out.Backend = out.Backend || wrapped.Success
-	return &out, nil
+	var out xianyuWorkerHealthStatus
+	if err := c.do(ctx, http.MethodGet, "/health", nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return &XianyuWorkerHealth{
+		Backend:   out.Backend,
+		WebSocket: out.WebSocket,
+		Database:  bool(out.Database),
+	}, nil
 }
 
 // ListAccounts 拉取账号 ID、昵称、Cookie 状态、任务状态。
@@ -181,12 +218,12 @@ func (c *XianyuWorkerClient) ListProducts(ctx context.Context, accountID string)
 func (c *XianyuWorkerClient) ResendDelivery(ctx context.Context, accountID, orderNo, itemID, buyerID, chatID, code string) (*XianyuWorkerResult, error) {
 	var out XianyuWorkerResult
 	body := map[string]any{
+		"message":      code,
 		"order_no":     orderNo,
 		"item_id":      itemID,
 		"buyer_id":     buyerID,
 		"chat_id":      chatID,
 		"card_id":      0,
-		"content":      code,
 		"wait_result":  true,
 		"wait_timeout": 10.0,
 	}

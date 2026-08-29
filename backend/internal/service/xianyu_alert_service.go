@@ -117,14 +117,16 @@ func workerHealthTransition(known, wasUnhealthy bool, healthStatus string, worke
 func (s *XianyuAlertService) evaluateWorker(ctx context.Context) {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
-		// 无 active Worker 配置：视为不可用并告警；无已知恢复态。
+		// 无 active Worker 配置：视为不可用并告警；同一状态去重。
+		if !s.workerKnown || !s.workerWasUnhealthy {
+			s.sendAlert(NotificationEmailEventXianyuWorkerUnhealthy, "worker", "unhealthy", map[string]string{
+				"worker_id":       "unknown",
+				"status":          "unhealthy",
+				"last_checked_at": time.Now().Format(time.RFC3339),
+			})
+		}
 		s.workerKnown = true
 		s.workerWasUnhealthy = true
-		s.sendAlert(NotificationEmailEventXianyuWorkerUnhealthy, "worker", "unhealthy", map[string]string{
-			"worker_id":       "unknown",
-			"status":          "unhealthy",
-			"last_checked_at": time.Now().Format(time.RFC3339),
-		})
 		return
 	}
 	// 健康检查结果由定时任务写入 xianyu_worker_configs.health_status；

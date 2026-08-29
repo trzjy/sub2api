@@ -190,6 +190,7 @@ type XianyuOrderClaim struct {
 	AccountID      string
 	ItemID         string
 	BuyerID        string
+	ChatID         string
 	Amount         *string
 	ProductID      *int64
 	PoolID         *int64

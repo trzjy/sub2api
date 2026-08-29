@@ -23,6 +23,7 @@ var (
 	ErrXianyuItemRequired          = infraerrors.BadRequest("XIANYU_ITEM_ID_REQUIRED", "item_id is required")
 	ErrXianyuAccountRequired       = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_REQUIRED", "cookie_id is required")
 	ErrXianyuBuyerRequired         = infraerrors.BadRequest("XIANYU_BUYER_ID_REQUIRED", "buyer_id is required")
+	ErrXianyuChatRequired          = infraerrors.BadRequest("XIANYU_CHAT_ID_REQUIRED", "chat_id is required")
 	ErrXianyuPoolNotMapped         = infraerrors.BadRequest("XIANYU_ITEM_POOL_NOT_MAPPED", "item is not mapped to a redeem-code pool")
 	ErrXianyuInventoryEmpty        = infraerrors.Conflict("XIANYU_INVENTORY_EMPTY", "no redeem code is available for this item")
 	ErrXianyuInvalidAmount         = infraerrors.BadRequest("XIANYU_AMOUNT_INVALID", "order_amount must be a valid decimal")
@@ -30,6 +31,7 @@ var (
 	ErrXianyuItemTooLong           = infraerrors.BadRequest("XIANYU_ITEM_ID_TOO_LONG", "item_id is too long")
 	ErrXianyuAccountTooLong        = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_TOO_LONG", "cookie_id is too long")
 	ErrXianyuBuyerTooLong          = infraerrors.BadRequest("XIANYU_BUYER_ID_TOO_LONG", "buyer_id is too long")
+	ErrXianyuChatTooLong           = infraerrors.BadRequest("XIANYU_CHAT_ID_TOO_LONG", "chat_id is too long")
 )
 
 type XianyuDeliveryClaimRequest struct {
@@ -42,6 +44,7 @@ type XianyuDeliveryClaimRequest struct {
 	SpecValue     string `json:"spec_value"`
 	CookieID      string `json:"cookie_id"`
 	BuyerID       string `json:"buyer_id"`
+	ChatID        string `json:"chat_id"`
 }
 
 type XianyuDeliveryClaim struct {
@@ -49,6 +52,7 @@ type XianyuDeliveryClaim struct {
 	ItemID    string
 	AccountID string
 	BuyerID   string
+	ChatID    string
 	Amount    *string
 	SpecName  string
 	SpecValue string
@@ -162,6 +166,7 @@ func normalizeXianyuClaim(req XianyuDeliveryClaimRequest) (XianyuDeliveryClaim, 
 		ItemID:    strings.TrimSpace(req.ItemID),
 		AccountID: strings.TrimSpace(req.CookieID),
 		BuyerID:   strings.TrimSpace(req.BuyerID),
+		ChatID:    strings.TrimSpace(req.ChatID),
 		SpecName:  strings.TrimSpace(req.SpecName),
 		SpecValue: strings.TrimSpace(req.SpecValue),
 	}
@@ -188,6 +193,12 @@ func normalizeXianyuClaim(req XianyuDeliveryClaimRequest) (XianyuDeliveryClaim, 
 	}
 	if utf8.RuneCountInString(claim.BuyerID) > 80 {
 		return XianyuDeliveryClaim{}, ErrXianyuBuyerTooLong
+	}
+	if claim.ChatID == "" {
+		return XianyuDeliveryClaim{}, ErrXianyuChatRequired
+	}
+	if utf8.RuneCountInString(claim.ChatID) > 120 {
+		return XianyuDeliveryClaim{}, ErrXianyuChatTooLong
 	}
 	if strings.TrimSpace(req.OrderQuantity) != "1" {
 		return XianyuDeliveryClaim{}, ErrXianyuQuantityUnsupported
