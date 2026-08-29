@@ -26,7 +26,6 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     xianyu: {
       getOverview: mocks.getOverview,
-      getAccess: vi.fn().mockResolvedValue({ can_manage: true }),
       listWorkerConfigs: mocks.getWorkerConfigs,
       saveWorkerConfig: mocks.saveWorkerConfig,
       checkHealth: mocks.checkHealth,

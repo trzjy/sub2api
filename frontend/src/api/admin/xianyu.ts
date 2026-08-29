@@ -23,15 +23,6 @@ export async function getOverview(options?: { signal?: AbortSignal }): Promise<X
   return data.data
 }
 
-export interface XianyuAccessResult {
-  can_manage: boolean
-}
-
-export async function getAccess(options?: { signal?: AbortSignal }): Promise<XianyuAccessResult> {
-  const { data } = await apiClient.get<{ data: XianyuAccessResult }>('/admin/xianyu/access', { signal: options?.signal })
-  return data.data
-}
-
 export async function listWorkerConfigs(options?: { signal?: AbortSignal }): Promise<XianyuWorkerConfig[]> {
   const { data } = await apiClient.get<{ data: XianyuWorkerConfig[] }>('/admin/xianyu/worker-configs', { signal: options?.signal })
   return data.data
@@ -147,7 +138,6 @@ export async function saveSettings(input: Partial<XianyuControlSettings>): Promi
 
 export const xianyuAPI = {
   getOverview,
-  getAccess,
   listWorkerConfigs,
   saveWorkerConfig,
   checkHealth,

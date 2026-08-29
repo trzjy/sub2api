@@ -143,31 +143,6 @@ func (s *XianyuControlService) SettingsEnabled(ctx context.Context) bool {
 	return s.Enabled(ctx)
 }
 
-// CanManage 判断管理员邮箱是否被显式授权管理闲鱼发货。
-// 空列表表示无人被授权；不自动赋予所有管理员。
-func (s *XianyuControlService) CanManage(ctx context.Context, adminEmail string) bool {
-	if strings.TrimSpace(adminEmail) == "" {
-		return false
-	}
-	if s.settingStore == nil {
-		return false
-	}
-	raw, err := s.settingStore.GetValue(ctx, SettingKeyXianyuDeliveryManageEmails)
-	if err != nil {
-		return false
-	}
-	entries := ParseNotifyEmails(raw)
-	for _, entry := range entries {
-		if entry.Disabled {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(entry.Email), strings.TrimSpace(adminEmail)) {
-			return true
-		}
-	}
-	return false
-}
-
 // ---------------------------------------------------------------------------
 // Worker 连接配置
 // ---------------------------------------------------------------------------

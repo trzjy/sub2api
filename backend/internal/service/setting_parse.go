@@ -200,8 +200,6 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		// Available channels feature (default disabled; opt-in)
 		SettingKeyAvailableChannelsEnabled: "false",
 		SettingKeyXianyuDeliveryEnabled:    "false",
-		// 显式授权列表默认为空：无管理员被授权管理闲鱼发货（默认拒绝）。
-		SettingKeyXianyuDeliveryManageEmails: "[]",
 
 		// Model plaza feature (default disabled; opt-in, public unless require_auth)
 		SettingKeyModelPlazaEnabled:       "false",

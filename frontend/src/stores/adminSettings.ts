@@ -50,7 +50,6 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
   const xianyuDeliveryEnabled = ref(readCachedBool('xianyu_delivery_enabled_cached', false))
-  const xianyuCanManage = ref(false)
   const customMenuItems = ref<CustomMenuItem[]>([])
 
   async function fetch(force = false): Promise<void> {
@@ -79,13 +78,6 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
 
       xianyuDeliveryEnabled.value = settings.xianyu_delivery_enabled ?? false
       writeCachedBool('xianyu_delivery_enabled_cached', xianyuDeliveryEnabled.value)
-
-      try {
-        const access = await adminAPI.xianyu.getAccess()
-        xianyuCanManage.value = access.can_manage
-      } catch {
-        xianyuCanManage.value = false
-      }
 
       loaded.value = true
     } catch (err) {
@@ -159,7 +151,6 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     opsQueryModeDefault,
     paymentEnabled,
     xianyuDeliveryEnabled,
-    xianyuCanManage,
     customMenuItems,
     fetch,
     setOpsMonitoringEnabledLocal,
