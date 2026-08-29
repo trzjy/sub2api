@@ -1,6 +1,6 @@
 services:
   sub2api:
-    image: sub2api:01e3451
+    image: sub2api:${SUB2API_IMAGE_TAG:-weishaw/sub2api:latest}
     container_name: sub2api
     restart: unless-stopped
     security_opt:
