@@ -2,7 +2,10 @@
 package routes
 
 import (
+	"strings"
+
 	"github.com/Wei-Shaw/sub2api/internal/handler"
+	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -130,6 +133,71 @@ func RegisterAdminRoutes(
 
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
+
+		// 闲鱼发货控制面
+		registerXianyuAdminRoutes(admin, h)
+	}
+}
+
+func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.Xianyu == nil {
+		return
+	}
+	// 仅显式授权（xianyu_delivery.manage）的管理员可见可操作。
+	xianyu := admin.Group("/xianyu")
+	xianyu.Use(xianyuManageGuard(h.Admin.Xianyu))
+	{
+		xianyu.GET("/access", h.Admin.Xianyu.Access)
+		xianyu.GET("/overview", h.Admin.Xianyu.Overview)
+		xianyu.GET("/worker-configs", h.Admin.Xianyu.WorkerConfigs)
+		xianyu.POST("/worker-configs", h.Admin.Xianyu.SaveWorkerConfig)
+		xianyu.PUT("/worker-configs/:id", h.Admin.Xianyu.SaveWorkerConfig)
+
+		xianyu.GET("/accounts", h.Admin.Xianyu.Accounts)
+		xianyu.POST("/accounts/sync", h.Admin.Xianyu.SyncAccounts)
+		xianyu.POST("/accounts/enable", h.Admin.Xianyu.EnableAccount)
+		xianyu.POST("/accounts/disable", h.Admin.Xianyu.DisableAccount)
+		xianyu.POST("/accounts/refresh-cookie", h.Admin.Xianyu.RefreshCookie)
+		xianyu.POST("/accounts/login-session", h.Admin.Xianyu.CreateLoginSession)
+		xianyu.GET("/accounts/:account_id/login-session", h.Admin.Xianyu.QueryLoginSession)
+
+		xianyu.GET("/products", h.Admin.Xianyu.Products)
+		xianyu.POST("/products/sync", h.Admin.Xianyu.SyncProducts)
+		xianyu.POST("/products/bind", h.Admin.Xianyu.BindProduct)
+
+		xianyu.GET("/binding-rules", h.Admin.Xianyu.BindingRules)
+		xianyu.POST("/binding-rules", h.Admin.Xianyu.SaveBindingRule)
+		xianyu.PUT("/binding-rules/:id", h.Admin.Xianyu.SaveBindingRule)
+
+		xianyu.GET("/item-pools", h.Admin.Xianyu.ItemPools)
+		xianyu.POST("/item-pools", h.Admin.Xianyu.SaveItemPool)
+		xianyu.PUT("/item-pools/:id", h.Admin.Xianyu.SaveItemPool)
+
+		xianyu.GET("/deliveries", h.Admin.Xianyu.Deliveries)
+		xianyu.POST("/deliveries/resend", h.Admin.Xianyu.ResendDelivery)
+
+		xianyu.GET("/settings", h.Admin.Xianyu.GetSettings)
+		xianyu.PUT("/settings", h.Admin.Xianyu.SaveSettings)
+
+		xianyu.POST("/health/check", h.Admin.Xianyu.CheckHealth)
+	}
+}
+
+// xianyuManageGuard 校验当前管理员被显式授权管理闲鱼发货。
+func xianyuManageGuard(h *admin.XianyuAdminHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h == nil {
+			response.ErrorFrom(c, service.ErrXianyuForbidden)
+			c.Abort()
+			return
+		}
+		email := strings.TrimSpace(c.GetString(middleware.ContextKeyAuthEmail))
+		if !h.CanManage(c.Request.Context(), email) {
+			response.ErrorFrom(c, service.ErrXianyuForbidden)
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
 

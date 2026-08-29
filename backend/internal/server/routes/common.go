@@ -39,4 +39,5 @@ func RegisterInternalRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
 		return
 	}
 	v1.POST("/internal/xianyu/redeem-codes/claim", h.XianyuDelivery.Claim)
+	v1.POST("/internal/xianyu/delivery-results", h.XianyuDelivery.DeliveryResult)
 }

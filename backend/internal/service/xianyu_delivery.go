@@ -50,47 +50,119 @@ type XianyuDeliveryClaim struct {
 	AccountID string
 	BuyerID   string
 	Amount    *string
-	Pool      string
+	SpecName  string
+	SpecValue string
+
+	AccountPK     int64
+	ProductID     int64
+	PoolID        int64
+	BindingSource string
 }
 
+// XianyuDeliveryRepository 负责幂等领取与发货状态持久化。
 type XianyuDeliveryRepository interface {
 	Claim(ctx context.Context, claim XianyuDeliveryClaim, systemUserID int64) (string, error)
 }
 
 type XianyuDeliveryService struct {
-	repo    XianyuDeliveryRepository
-	cfg     *config.Config
-	setting XianyuDeliverySettingReader
+	repo      XianyuDeliveryRepository
+	control   XianyuControlRepository
+	cfg       *config.Config
+	setting   XianyuDeliverySettingReader
+	delivery  XianyuDeliveryStateUpdater
+	workerSvc *XianyuWorkerService
 }
 
 type XianyuDeliverySettingReader interface {
 	GetXianyuDeliveryRuntime(ctx context.Context) XianyuDeliveryRuntime
 }
 
-func NewXianyuDeliveryService(repo XianyuDeliveryRepository, cfg *config.Config, setting XianyuDeliverySettingReader) *XianyuDeliveryService {
-	return &XianyuDeliveryService{repo: repo, cfg: cfg, setting: setting}
+// XianyuDeliveryStateUpdater 更新发货状态（适配端点回传 + 人工补发）。
+type XianyuDeliveryStateUpdater interface {
+	RecordDeliveryResult(ctx context.Context, result XianyuDeliveryStatusResult) error
+	GetDeliveryClaim(ctx context.Context, orderNo string) (*XianyuOrderClaim, error)
+	ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error)
 }
 
+func NewXianyuDeliveryService(
+	repo XianyuDeliveryRepository,
+	control XianyuControlRepository,
+	stateUpdater XianyuDeliveryStateUpdater,
+	cfg *config.Config,
+	setting XianyuDeliverySettingReader,
+	workerSvc *XianyuWorkerService,
+) *XianyuDeliveryService {
+	return &XianyuDeliveryService{repo: repo, control: control, delivery: stateUpdater, cfg: cfg, setting: setting, workerSvc: workerSvc}
+}
+
+// Claim 处理闲鱼订单领取请求。
+// 链路：校验账号 → 校验商品绑定 → 按订单加锁领取库存码。
 func (s *XianyuDeliveryService) Claim(ctx context.Context, req XianyuDeliveryClaimRequest) (string, error) {
-	if s.cfg == nil || s.repo == nil || s.cfg.XianyuDelivery.SystemUserID <= 0 {
+	if s.cfg == nil || s.repo == nil || s.control == nil || s.cfg.XianyuDelivery.SystemUserID <= 0 {
 		return "", ErrXianyuDeliveryNotConfigured
 	}
 	if s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return "", ErrXianyuDeliveryNotConfigured
 	}
-	claim, err := normalizeXianyuClaim(req, s.cfg.XianyuDelivery.ItemPools)
+	claim, err := s.normalizeAndResolveClaim(ctx, req)
 	if err != nil {
 		return "", err
 	}
 	return s.repo.Claim(ctx, claim, s.cfg.XianyuDelivery.SystemUserID)
 }
 
-func normalizeXianyuClaim(req XianyuDeliveryClaimRequest, pools map[string]string) (XianyuDeliveryClaim, error) {
+// normalizeAndResolveClaim 校验请求并把 cookie_id / item_id 解析为主程序内部身份与库存池。
+func (s *XianyuDeliveryService) normalizeAndResolveClaim(ctx context.Context, req XianyuDeliveryClaimRequest) (XianyuDeliveryClaim, error) {
+	claim, err := normalizeXianyuClaim(req)
+	if err != nil {
+		return XianyuDeliveryClaim{}, err
+	}
+
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		if err == ErrXianyuWorkerConfigNotFound {
+			return XianyuDeliveryClaim{}, ErrXianyuDeliveryNotConfigured
+		}
+		return XianyuDeliveryClaim{}, fmt.Errorf("load active xianyu worker: %w", err)
+	}
+
+	account, err := s.control.GetAccountByWorkerAndAccountID(ctx, workerCfg.ID, claim.AccountID)
+	if err != nil {
+		if err == ErrXianyuAccountNotFound {
+			return XianyuDeliveryClaim{}, ErrXianyuAccountRequired
+		}
+		return XianyuDeliveryClaim{}, fmt.Errorf("load xianyu account: %w", err)
+	}
+	if account.Status != XianyuAccountStatusEnabled {
+		return XianyuDeliveryClaim{}, ErrXianyuAccountDisabled
+	}
+
+	product, err := s.control.GetProductByIdentity(ctx, account.ID, claim.ItemID, claim.SpecName, claim.SpecValue)
+	if err != nil {
+		if err == ErrXianyuProductNotFound {
+			return XianyuDeliveryClaim{}, ErrXianyuPoolNotMapped
+		}
+		return XianyuDeliveryClaim{}, fmt.Errorf("load xianyu product: %w", err)
+	}
+	if product.Status != XianyuProductStatusActive || product.BindingStatus != XianyuBindingStatusMapped || product.PoolID == nil {
+		return XianyuDeliveryClaim{}, ErrXianyuProductUnmapped
+	}
+
+	claim.AccountPK = account.ID
+	claim.ProductID = product.ID
+	claim.PoolID = *product.PoolID
+	claim.BindingSource = product.BindingSource
+	return claim, nil
+}
+
+func normalizeXianyuClaim(req XianyuDeliveryClaimRequest) (XianyuDeliveryClaim, error) {
 	claim := XianyuDeliveryClaim{
 		OrderID:   strings.TrimSpace(req.OrderID),
 		ItemID:    strings.TrimSpace(req.ItemID),
 		AccountID: strings.TrimSpace(req.CookieID),
 		BuyerID:   strings.TrimSpace(req.BuyerID),
+		SpecName:  strings.TrimSpace(req.SpecName),
+		SpecValue: strings.TrimSpace(req.SpecValue),
 	}
 	if claim.OrderID == "" {
 		return XianyuDeliveryClaim{}, ErrXianyuOrderRequired
@@ -119,11 +191,6 @@ func normalizeXianyuClaim(req XianyuDeliveryClaimRequest, pools map[string]strin
 	if strings.TrimSpace(req.OrderQuantity) != "1" {
 		return XianyuDeliveryClaim{}, ErrXianyuQuantityUnsupported
 	}
-	pool := strings.TrimSpace(pools[claim.AccountID+":"+claim.ItemID])
-	if pool == "" {
-		return XianyuDeliveryClaim{}, ErrXianyuPoolNotMapped
-	}
-	claim.Pool = pool
 	if amount := strings.TrimSpace(req.OrderAmount); amount != "" {
 		if !xianyuAmountPattern.MatchString(amount) || integerDigits(amount) > 18 {
 			return XianyuDeliveryClaim{}, ErrXianyuInvalidAmount
@@ -180,6 +247,22 @@ func (s *XianyuDeliveryService) ValidateStartup(ctx context.Context, users Syste
 		return fmt.Errorf("xianyu delivery system user %d is unavailable", s.cfg.XianyuDelivery.SystemUserID)
 	}
 	return nil
+}
+
+// RecordDeliveryResult 转发给状态更新器（适配端点回传）。
+func (s *XianyuDeliveryService) RecordDeliveryResult(ctx context.Context, result XianyuDeliveryStatusResult) error {
+	if s.delivery == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	return s.delivery.RecordDeliveryResult(ctx, result)
+}
+
+// ResendOriginalCode 人工补发原码。
+func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error) {
+	if s.delivery == nil {
+		return "", ErrXianyuDeliveryNotConfigured
+	}
+	return s.delivery.ResendOriginalCode(ctx, orderNo, systemUserID)
 }
 
 type SystemUserReader interface {

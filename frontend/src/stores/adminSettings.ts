@@ -49,6 +49,8 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsRealtimeMonitoringEnabled = ref(readCachedBool('ops_realtime_monitoring_enabled_cached', true))
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
+  const xianyuDeliveryEnabled = ref(readCachedBool('xianyu_delivery_enabled_cached', false))
+  const xianyuCanManage = ref(false)
   const customMenuItems = ref<CustomMenuItem[]>([])
 
   async function fetch(force = false): Promise<void> {
@@ -75,6 +77,16 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
       paymentEnabled.value = paymentConfigResp.data?.enabled ?? false
       writeCachedBool('payment_enabled_cached', paymentEnabled.value)
 
+      xianyuDeliveryEnabled.value = settings.xianyu_delivery_enabled ?? false
+      writeCachedBool('xianyu_delivery_enabled_cached', xianyuDeliveryEnabled.value)
+
+      try {
+        const access = await adminAPI.xianyu.getAccess()
+        xianyuCanManage.value = access.can_manage
+      } catch {
+        xianyuCanManage.value = false
+      }
+
       loaded.value = true
     } catch (err) {
       // Keep cached/default value: do not "flip" the UI based on a transient fetch failure.
@@ -100,6 +112,12 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   function setPaymentEnabledLocal(value: boolean) {
     paymentEnabled.value = value
     writeCachedBool('payment_enabled_cached', value)
+    loaded.value = true
+  }
+
+  function setXianyuDeliveryEnabledLocal(value: boolean) {
+    xianyuDeliveryEnabled.value = value
+    writeCachedBool('xianyu_delivery_enabled_cached', value)
     loaded.value = true
   }
 
@@ -140,11 +158,14 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     opsRealtimeMonitoringEnabled,
     opsQueryModeDefault,
     paymentEnabled,
+    xianyuDeliveryEnabled,
+    xianyuCanManage,
     customMenuItems,
     fetch,
     setOpsMonitoringEnabledLocal,
     setOpsRealtimeMonitoringEnabledLocal,
     setPaymentEnabledLocal,
+    setXianyuDeliveryEnabledLocal,
     setOpsQueryModeDefaultLocal
   }
 })

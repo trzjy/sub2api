@@ -2408,3 +2408,113 @@ export type {
   PlatformQuotaWindow,
   PlatformQuotasResponse,
 } from '@/api/admin/users'
+
+// ============================================================================
+// Xianyu Delivery control plane types
+// ============================================================================
+
+export interface XianyuOverviewPool {
+  pool: XianyuItemPool
+  remaining: number
+  used: number
+  disabled: number
+  low_stock: boolean
+}
+
+export interface XianyuOverview {
+  worker_healthy: boolean
+  enabled_accounts: number
+  running_tasks: number
+  unmapped_products: number
+  pools: XianyuOverviewPool[]
+  today_delivered: number
+  today_failed: number
+  pending_deliveries: number
+}
+
+export interface XianyuWorkerConfig {
+  id: number
+  base_url: string
+  api_token_encrypted?: string
+  status: 'active' | 'disabled'
+  health_status: 'unknown' | 'healthy' | 'unhealthy'
+  last_checked_at?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface XianyuAccount {
+  id: number
+  worker_config_id: number
+  account_id: string
+  nickname: string
+  status: 'enabled' | 'disabled' | 'expired' | 'syncing'
+  cookie_status: 'valid' | 'invalid' | 'expiring' | 'unknown'
+  task_status: 'running' | 'stopped' | 'starting' | 'stopping' | 'unknown'
+  last_login_at?: string | null
+  last_seen_at?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface XianyuItemPool {
+  id: number
+  name: string
+  slug: string
+  description: string
+  low_stock_threshold: number
+  status: 'active' | 'disabled'
+  created_at?: string
+  updated_at?: string
+}
+
+export interface XianyuProduct {
+  id: number
+  account_pk: number
+  account_id: string
+  item_id: string
+  title: string
+  spec_name: string
+  spec_value: string
+  pool_id: number | null
+  binding_status: 'mapped' | 'unmapped'
+  binding_source: 'manual' | 'account_default' | 'keyword' | 'auto_new'
+  status: 'active' | 'disabled' | 'removed'
+  last_seen_at?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface XianyuBindingRule {
+  id: number
+  priority: number
+  account_pk: number
+  match_type: 'account_default' | 'keyword'
+  keyword: string
+  pool_id: number
+  status: 'active' | 'disabled'
+  created_at?: string
+  updated_at?: string
+}
+
+export interface XianyuOrderClaim {
+  order_no: string
+  code: string
+  account_id: string
+  item_id: string
+  buyer_id: string
+  amount?: string | null
+  product_id?: number | null
+  pool_id?: number | null
+  binding_source?: string | null
+  delivery_status: 'pending' | 'sent' | 'failed' | 'legacy_unverified'
+  delivery_error?: string | null
+  attempt_count: number
+  last_attempt_at?: string | null
+  created_at: string
+}
+
+export interface XianyuLoginSessionStatus {
+  status: 'waiting' | 'scanned' | 'success' | 'failed' | 'expired'
+  qr_code?: string
+}

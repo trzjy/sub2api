@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"time"
 
@@ -817,6 +818,79 @@ func ProvideAPIKeyService(
 	return svc
 }
 
+// ProvideXianyuWorkerService 创建闲鱼 Worker 控制面服务。
+func ProvideXianyuWorkerService(
+	control XianyuControlRepository,
+	encryptor SecretEncryptor,
+) *XianyuWorkerService {
+	return NewXianyuWorkerService(control, encryptor)
+}
+
+// ProvideXianyuAlertService 创建闲鱼告警服务。
+func ProvideXianyuAlertService(
+	control *XianyuControlService,
+	settingStore SettingRepository,
+	notify *NotificationEmailService,
+) *XianyuAlertService {
+	return NewXianyuAlertService(control, settingStore, notify)
+}
+
+// ProvideXianyuSyncService 创建闲鱼后台同步服务（健康检查 + 商品同步 + 自动绑定 + 告警巡检）。
+func ProvideXianyuSyncService(
+	control *XianyuControlService,
+	worker *XianyuWorkerService,
+	alert *XianyuAlertService,
+	db *sql.DB,
+	setting XianyuDeliverySettingReader,
+) *XianyuSyncService {
+	svc := NewXianyuSyncService(control, worker, alert, db, setting)
+	svc.Start()
+	return svc
+}
+
+// ProvideSystemUserReader 将 UserRepository 暴露为 SystemUserReader（启动校验用）。
+func ProvideSystemUserReader(repo UserRepository) SystemUserReader {
+	return repo
+}
+
+// ProvideXianyuDeliveryService 创建闲鱼发货服务，并执行启动校验。
+func ProvideXianyuDeliveryService(
+	repo XianyuDeliveryRepository,
+	control XianyuControlRepository,
+	stateUpdater XianyuDeliveryStateUpdater,
+	cfg *config.Config,
+	setting XianyuDeliverySettingReader,
+	workerSvc *XianyuWorkerService,
+	users SystemUserReader,
+) (*XianyuDeliveryService, error) {
+	svc := NewXianyuDeliveryService(repo, control, stateUpdater, cfg, setting, workerSvc)
+	if err := svc.ValidateStartup(context.Background(), users); err != nil {
+		return nil, err
+	}
+	return svc, nil
+}
+
+// ProvideXianyuControlService 创建闲鱼控制面服务，并执行旧 item_pools 一次性迁移。
+func ProvideXianyuControlService(
+	control XianyuControlRepository,
+	claimRepo XianyuDeliveryRepository,
+	stateRepo XianyuDeliveryStateUpdater,
+	listRepo XianyuDeliveryListRepository,
+	encryptor SecretEncryptor,
+	delivery *XianyuDeliveryService,
+	worker *XianyuWorkerService,
+	setting XianyuDeliverySettingReader,
+	settingStore SettingRepository,
+	db *sql.DB,
+) (*XianyuControlService, error) {
+	migration := NewXianyuLegacyMigration(db, control, encryptor)
+	if err := migration.Migrate(context.Background(), config.LoadXianyuLegacyItemPools()); err != nil {
+		// 迁移失败时启动失败关闭，不进入半迁移状态。
+		return nil, fmt.Errorf("xianyu legacy item_pools migration: %w", err)
+	}
+	return NewXianyuControlService(control, claimRepo, stateRepo, listRepo, encryptor, delivery, worker, setting, settingStore), nil
+}
+
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
@@ -831,7 +905,13 @@ var ProviderSet = wire.NewSet(
 	NewAccountService,
 	NewProxyService,
 	NewRedeemService,
-	NewXianyuDeliveryService,
+	ProvideXianyuWorkerService,
+	ProvideXianyuDeliveryService,
+	ProvideXianyuControlService,
+	ProvideXianyuAlertService,
+	ProvideXianyuSyncService,
+	ProvideSystemUserReader,
+	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),
 	NewPromoService,
 	NewUsageService,
 	NewDashboardService,
@@ -872,8 +952,7 @@ var ProviderSet = wire.NewSet(
 	ProvideCNProviderBalanceService,
 	ProvideCNProviderBalanceCheckService,
 	ProvideAccountBalanceProbeCheckService,
-	ProvideClaudeTokenProvider,
-	NewAntigravityGatewayService,
+	ProvideClaudeTokenProvider,	NewAntigravityGatewayService,
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
 	ProvideAccountTestService,

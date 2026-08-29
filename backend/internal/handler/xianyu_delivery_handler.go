@@ -48,6 +48,43 @@ func (h *XianyuDeliveryHandler) Claim(c *gin.Context) {
 	response.Success(c, gin.H{"content": content})
 }
 
+// DeliveryResult handles the worker → main delivery result callback.
+// POST /api/v1/internal/xianyu/delivery-results
+func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
+	if h == nil || h.service == nil || !constantTimeTokenMatch(c.GetHeader("X-Internal-Token"), h.token) {
+		response.Error(c, http.StatusUnauthorized, "invalid internal token")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, xianyuClaimMaxBodyBytes)
+	var req struct {
+		OrderNo   string  `json:"order_no"`
+		Success   bool    `json:"success"`
+		Confirmed *bool   `json:"confirmed"`
+		Error     *string `json:"error"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	req.OrderNo = strings.TrimSpace(req.OrderNo)
+	if req.OrderNo == "" {
+		response.BadRequest(c, "order_no is required")
+		return
+	}
+	confirmed := req.Confirmed != nil && *req.Confirmed
+	result := service.XianyuDeliveryStatusResult{
+		OrderNo:   req.OrderNo,
+		Success:   req.Success,
+		Confirmed: confirmed,
+		Error:     req.Error,
+	}
+	if err := h.service.RecordDeliveryResult(c.Request.Context(), result); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "delivery result recorded"})
+}
+
 func constantTimeTokenMatch(got, expected string) bool {
 	gotHash := sha256.Sum256([]byte(got))
 	expectedHash := sha256.Sum256([]byte(expected))

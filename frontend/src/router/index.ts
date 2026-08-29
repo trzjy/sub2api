@@ -573,6 +573,78 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/xianyu/overview',
+    name: 'AdminXianyuOverview',
+    component: () => import('@/views/admin/xianyu/XianyuOverviewView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Delivery Overview',
+      titleKey: 'admin.xianyu.overview.title',
+      descriptionKey: 'admin.xianyu.overview.description'
+    }
+  },
+  {
+    path: '/admin/xianyu/accounts',
+    name: 'AdminXianyuAccounts',
+    component: () => import('@/views/admin/xianyu/XianyuAccountsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Accounts',
+      titleKey: 'admin.xianyu.accounts.title',
+      descriptionKey: 'admin.xianyu.accounts.description'
+    }
+  },
+  {
+    path: '/admin/xianyu/products',
+    name: 'AdminXianyuProducts',
+    component: () => import('@/views/admin/xianyu/XianyuProductsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Products & Binding',
+      titleKey: 'admin.xianyu.products.title',
+      descriptionKey: 'admin.xianyu.products.description'
+    }
+  },
+  {
+    path: '/admin/xianyu/inventory',
+    name: 'AdminXianyuInventory',
+    component: () => import('@/views/admin/xianyu/XianyuInventoryView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Inventory Pools',
+      titleKey: 'admin.xianyu.inventory.title',
+      descriptionKey: 'admin.xianyu.inventory.description'
+    }
+  },
+  {
+    path: '/admin/xianyu/deliveries',
+    name: 'AdminXianyuDeliveries',
+    component: () => import('@/views/admin/xianyu/XianyuDeliveriesView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Deliveries',
+      titleKey: 'admin.xianyu.deliveries.title',
+      descriptionKey: 'admin.xianyu.deliveries.description'
+    }
+  },
+  {
+    path: '/admin/xianyu/settings',
+    name: 'AdminXianyuSettings',
+    component: () => import('@/views/admin/xianyu/XianyuSettingsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianyu Delivery Settings',
+      titleKey: 'admin.xianyu.settings.title',
+      descriptionKey: 'admin.xianyu.settings.description'
+    }
+  },
+  {
     path: '/admin/promo-codes',
     name: 'AdminPromoCodes',
     component: () => import('@/views/admin/PromoCodesView.vue'),

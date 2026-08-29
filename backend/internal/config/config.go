@@ -119,9 +119,11 @@ type PluginConfig struct {
 }
 
 type XianyuDeliveryConfig struct {
-	InternalToken string            `mapstructure:"internal_token"`
-	SystemUserID  int64             `mapstructure:"system_user_id"`
-	ItemPools     map[string]string `mapstructure:"item_pools"`
+	// InternalToken 主程序基础设施凭据：Worker 回传与主程序到 Worker 的双向认证基础。
+	// 与 Worker 侧 SUB2API_INTERNAL_TOKEN 环境变量同值（部署时固定注入）。
+	InternalToken string `mapstructure:"internal_token"`
+	// SystemUserID 系统审计用户 ID（兑换码领用 audit 归属）。
+	SystemUserID int64 `mapstructure:"system_user_id"`
 }
 
 type LogConfig struct {
@@ -1786,6 +1788,12 @@ func NormalizeRunMode(value string) string {
 // Load 读取并校验完整配置（要求 jwt.secret 已显式提供）。
 func Load() (*Config, error) {
 	return load(false)
+}
+
+// LoadXianyuLegacyItemPools 读取已废弃的 xianyu_delivery.item_pools 配置键。
+// 该键仅允许一次性迁移器读取（迁移后不再作为运行时配置来源）。
+func LoadXianyuLegacyItemPools() map[string]string {
+	return viper.GetStringMapString("xianyu_delivery.item_pools")
 }
 
 // LoadForBootstrap 读取启动阶段配置。

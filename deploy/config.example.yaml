@@ -1237,7 +1237,11 @@ image_storage:
 # =============================================================================
 # 该接口只允许 xianyu-auto-reply 通过内网调用；公网反代必须拒绝
 # /api/v1/internal/ 前缀。
+#
+# internal_token：主程序到 Worker 双向认证的基础凭据，与 Worker 侧
+# SUB2API_INTERNAL_TOKEN 环境变量同值（部署时固定注入）。
+# system_user_id：兑换码领用审计归属的系统用户 ID。
+# 旧配置键 xianyu_delivery.item_pools 已废弃，仅由一次性迁移器读取，迁移后不再作为运行时配置来源。
 xianyu_delivery:
   internal_token: ""
   system_user_id: 0
-  item_pools: {}

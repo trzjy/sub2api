@@ -693,6 +693,7 @@ const flagRiskControl = makeSidebarFlag(FeatureFlags.riskControl)
 const flagPluginManagement = makeSidebarFlag(FeatureFlags.pluginManagement)
 const flagOpsMonitoring = () => adminSettingsStore.opsMonitoringEnabled
 const flagAdminPayment = () => adminSettingsStore.paymentEnabled
+const flagXianyuDelivery = () => adminSettingsStore.xianyuDeliveryEnabled && adminSettingsStore.xianyuCanManage
 const flagBatchImageAccess = () => canUseBatchImage.value
 
 // buildSelfNavItems 构造用户自己的导航项（用户端主菜单和管理员的"我的账户"子菜单共享这组声明）。
@@ -790,6 +791,22 @@ const adminNavItems = computed((): NavItem[] => {
       ],
     },
     { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, hideInSimpleMode: true },
+    {
+      path: '/admin/xianyu',
+      label: t('nav.xianyuDelivery'),
+      icon: TicketIcon,
+      hideInSimpleMode: true,
+      featureFlag: flagXianyuDelivery,
+      expandOnly: true,
+      children: [
+        { path: '/admin/xianyu/overview', label: t('nav.xianyuOverview'), icon: DashboardIcon },
+        { path: '/admin/xianyu/accounts', label: t('nav.xianyuAccounts'), icon: UsersIcon },
+        { path: '/admin/xianyu/products', label: t('nav.xianyuProducts'), icon: TicketIcon },
+        { path: '/admin/xianyu/inventory', label: t('nav.xianyuInventory'), icon: FolderIcon },
+        { path: '/admin/xianyu/deliveries', label: t('nav.xianyuDeliveries'), icon: OrderIcon },
+        { path: '/admin/xianyu/settings', label: t('nav.xianyuSettings'), icon: CogIcon },
+      ],
+    },
     { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, hideInSimpleMode: true },
     {
       path: '/admin/affiliates',

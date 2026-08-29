@@ -360,8 +360,6 @@ func TestLoadXianyuDeliveryFromConfigFile(t *testing.T) {
   enabled: true
   internal_token: secret
   system_user_id: 123
-  item_pools:
-    "account:item": standard
 `), 0o600))
 	t.Setenv("CONFIG_FILE", configFile)
 
@@ -369,7 +367,24 @@ func TestLoadXianyuDeliveryFromConfigFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "secret", cfg.XianyuDelivery.InternalToken)
 	require.Equal(t, int64(123), cfg.XianyuDelivery.SystemUserID)
-	require.Equal(t, map[string]string{"account:item": "standard"}, cfg.XianyuDelivery.ItemPools)
+}
+
+func TestLoadXianyuLegacyItemPoolsMigratorOnly(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`xianyu_delivery:
+  enabled: true
+  internal_token: secret
+  system_user_id: 123
+  item_pools:
+    "account:item": standard
+`), 0o600))
+	t.Setenv("CONFIG_FILE", configFile)
+
+	_, err := Load()
+	require.NoError(t, err)
+	// 旧键只允许迁移器读取：通过独立入口访问，不进入 Config 结构体。
+	require.Equal(t, map[string]string{"account:item": "standard"}, LoadXianyuLegacyItemPools())
 }
 
 func TestNormalizeRunMode(t *testing.T) {

@@ -20,6 +20,22 @@ grep -qF '@internal_api path /api/v1/internal/*' deploy/Caddyfile
 grep -qF 'respond @internal_api 403' deploy/Caddyfile
 grep -qF 'deny all' deploy-config/nginx/corealgos.conf
 
+# xianyu-worker 及配套 MySQL/Redis 不得发布任何宿主机端口。
+if [[ -f deploy-config/compose.yml ]] && grep -qF 'xianyu-worker:' deploy-config/compose.yml; then
+  worker_ports=$(sed -n '/^  xianyu-worker:/,/^  [a-z]/p' deploy-config/compose.yml | grep -E '^[[:space:]]+- "[0-9]' || true)
+  mysql_ports=$(sed -n '/^  xianyu-worker-mysql:/,/^  [a-z]/p' deploy-config/compose.yml | grep -E '^[[:space:]]+- "[0-9]' || true)
+  redis_ports=$(sed -n '/^  xianyu-worker-redis:/,/^  [a-z]/p' deploy-config/compose.yml | grep -E '^[[:space:]]+- "[0-9]' || true)
+  if [[ -n "$worker_ports$mysql_ports$redis_ports" ]]; then
+    printf 'xianyu worker services must not publish host ports\n' >&2
+    exit 1
+  fi
+  # 主程序必须加入 xianyu-internal 网络以访问 Worker。
+  grep -qF 'xianyu-internal' deploy-config/compose.yml || {
+    printf 'compose must define the xianyu-internal network\n' >&2
+    exit 1
+  }
+fi
+
 if command -v docker >/dev/null 2>&1; then
   workdir=$(mktemp -d)
   cleanup() {

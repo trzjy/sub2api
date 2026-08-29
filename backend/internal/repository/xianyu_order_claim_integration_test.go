@@ -33,9 +33,15 @@ func TestXianyuOrderClaimRepositoryConcurrentFirstClaim(t *testing.T) {
 		service.RedeemTypeXianyuDelivery, service.XianyuPoolNote("standard"))
 	require.NoError(t, err)
 
+	// 创建池记录，供 claim 通过 PoolID 定位 slug。
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE slug = 'standard'`)
+	var poolID int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_item_pools (name, slug) VALUES ('standard', 'standard') RETURNING id`).Scan(&poolID))
+
 	repo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	claim := service.XianyuDeliveryClaim{
-		OrderID: "order-concurrent", ItemID: "item", AccountID: "account", BuyerID: "buyer", Pool: "standard",
+		OrderID: "order-concurrent", ItemID: "item", AccountID: "account", BuyerID: "buyer", PoolID: poolID,
 	}
 
 	const workers = 8
@@ -98,9 +104,14 @@ func TestXianyuOrderClaimRepositoryRejectsRedeemCodeDelete(t *testing.T) {
 		VALUES ('xianyu-delivery-protect@test.local', 'not-a-real-password')
 		RETURNING id`).Scan(&userID))
 
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE slug = 'standard'`)
+	var poolID int64
+	require.NoError(t, db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_item_pools (name, slug) VALUES ('standard', 'standard') RETURNING id`).Scan(&poolID))
+
 	repo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	code, err := repo.Claim(ctx, service.XianyuDeliveryClaim{
-		OrderID: "order-protect", ItemID: "item", AccountID: "account", BuyerID: "buyer", Pool: "standard",
+		OrderID: "order-protect", ItemID: "item", AccountID: "account", BuyerID: "buyer", PoolID: poolID,
 	}, userID)
 	require.NoError(t, err)
 

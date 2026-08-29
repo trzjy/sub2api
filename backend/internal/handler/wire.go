@@ -47,6 +47,7 @@ func ProvideAdminHandlers(
 	affiliateHandler *admin.AffiliateHandler,
 	complianceHandler *admin.ComplianceHandler,
 	auditLogHandler *admin.AuditLogHandler,
+	xianyuHandler *admin.XianyuAdminHandler,
 	upstreamBillingProbe *service.UpstreamBillingProbeService,
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	accountBalanceProbe *service.AccountBalanceProbeService,
@@ -91,6 +92,7 @@ func ProvideAdminHandlers(
 		Affiliate:              affiliateHandler,
 		Compliance:             complianceHandler,
 		AuditLog:               auditLogHandler,
+		Xianyu:                xianyuHandler,
 	}
 }
 
@@ -251,6 +253,7 @@ var ProviderSet = wire.NewSet(
 	NewAsyncImageHandler,
 	ProvideBatchImageHandler,
 	NewXianyuDeliveryHandler,
+	admin.NewXianyuAdminHandler,
 
 	// Admin handlers
 	admin.NewDashboardHandler,

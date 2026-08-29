@@ -298,4 +298,72 @@ curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.
 
 ---
 
-最后更新：2026-08-26
+## 10. SMTP 自动发信配置
+
+应用使用 Google Workspace 发送注册验证、密码重置等系统邮件。密码保存在本机 GNOME Keyring，不写入仓库或文档。
+
+### 10.1 SMTP 参数
+
+| 字段 | 值 |
+|------|------|
+| SMTP Host | `smtp.gmail.com` |
+| Port | `587` |
+| Encryption | `STARTTLS` |
+| Username | `trzjy2013@gmail.com` |
+| From Email | `trzjy2013@gmail.com` |
+| Sender Name | `Sub2API` |
+| Password | 存放于 GNOME Keyring，文档不记录 |
+
+### 10.2 应用专用密码元数据
+
+| 字段 | 值 |
+|------|------|
+| 应用名称 | `corealgos.com` |
+| 创建时间 | `07:03` |
+| 用途 | Sub2API 自动发信 |
+
+### 10.3 本机密钥环取回命令
+
+```bash
+python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
+```
+
+> 该命令输出即 SMTP Password。粘贴到 sub2api 管理后台时需确认已保存成功，随后关闭终端输出上下文。
+
+---
+
+## 11. 闲鱼自动发货控制面（Xianyu Worker + 主程序控制面板）
+
+### 11.1 部署说明
+
+- 生产 Compose（`deploy-config/compose.yml`）新增 `xianyu-worker`、`xianyu-worker-mysql`、`xianyu-worker-redis`。
+- Worker 相关服务只加入 `xianyu-internal` 网络，**不映射任何公网/宿主机端口**；主程序同时加入 `sub2api-network` 与 `xianyu-internal`。
+- 主程序通过 `http://xianyu-worker-backend:8089` 访问 Worker（Docker 服务别名）。面板设置中的 Worker 地址**不允许** `127.0.0.1`（容器内指向主程序自身），也不允许公网域名。
+- `SUB2API_INTERNAL_TOKEN`（Worker 回传主程序用）必须与主程序 `xianyu_delivery.internal_token` 同值。
+- Worker 回传端点固定为 `POST /api/v1/internal/xianyu/delivery-results`，仅 Worker 可通过 `X-Internal-Token` 调用；Nginx/Caddy 继续拒绝 `/api/v1/internal/` 前缀。
+- 旧配置键 `xianyu_delivery.item_pools` 已废弃：只由一次性迁移器读取一次（`xianyu_delivery.legacy_migrated` 标记完成后不再读取），运行时业务配置全部落库。
+
+### 11.2 `.env` 新增变量
+
+| 变量 | 说明 |
+|------|------|
+| `XIANYU_INTERNAL_TOKEN` | Worker→主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值 |
+| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定版本（不使用 latest） |
+| `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
+
+### 11.3 验证命令
+
+```bash
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
+# Worker 9000/8089/8090/MySQL(3306)/Redis(6379) 公网访问必须全部不可达
+bash deploy/tests/xianyu-deployment-boundary-test.sh
+```
+
+### 11.4 最小 Worker patch（cookie_id 透传）
+
+Worker 卡券（发货）调用主程序 Claim 时必须透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
+内部维护的 Worker 镜像固定到经审查的上游 commit，并叠加该最小 patch 与发货结果回传 patch（`POST /api/v1/internal/xianyu/delivery-results`）；Worker 端必须在获取到最终发送回执后再回传 `confirmed=true`，否则主程序保持 `pending` 并最终转人工。
+
+---
+
+最后更新：2026-08-29

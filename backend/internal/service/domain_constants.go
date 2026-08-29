@@ -509,6 +509,16 @@ const (
 	// deployment config.
 	SettingKeyXianyuDeliveryEnabled = "xianyu_delivery_enabled"
 
+	// SettingKeyXianyuAccountAutoRefresh 控制账号自动刷新定时任务。
+	SettingKeyXianyuAccountAutoRefresh = "xianyu_account_auto_refresh"
+	// SettingKeyXianyuProductAutoBind 控制商品自动绑定定时任务。
+	SettingKeyXianyuProductAutoBind = "xianyu_product_auto_bind"
+	// SettingKeyXianyuSyncIntervalMinutes 商品同步周期（分钟），默认 5。
+	SettingKeyXianyuSyncIntervalMinutes = "xianyu_sync_interval_minutes"
+	// SettingKeyXianyuDeliveryManageEmails 显式授权可管理闲鱼发货的管理员邮箱列表（JSON 数组）。
+	// 空列表表示没有任何管理员被授权；只有列表内的管理员可见可操作闲鱼控制面。
+	SettingKeyXianyuDeliveryManageEmails = "xianyu_delivery_manage_emails"
+
 	// SettingKeyModelPlazaEnabled is a DB-backed soft switch for the Model Plaza page
 	// (public group/model pricing showcase). When false: the plaza endpoint returns 404
 	// and the header entry is hidden. Defaults to false (opt-in feature).

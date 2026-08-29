@@ -29,12 +29,200 @@ func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim
 	return r.result, r.err
 }
 
-func newXianyuDeliveryTestService(repo XianyuDeliveryRepository) *XianyuDeliveryService {
-	return NewXianyuDeliveryService(repo, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
-		InternalToken: "secret",
-		SystemUserID:  123,
-		ItemPools:     map[string]string{"account:item": "standard"},
-	}}, newXianyuSettingsStub(true))
+// xianyuControlStub 是控制面仓库桩，用于断言 Claim 的账号/商品解析。
+type xianyuControlStub struct {
+	workerCfg     *XianyuWorkerConfig
+	account       *XianyuAccount
+	product       *XianyuProduct
+	accounts      []XianyuAccount
+	products      []XianyuProduct
+	pools         []XianyuItemPool
+	rules         []XianyuBindingRule
+	accountErr    error
+	productErr    error
+	createdCfg    *XianyuWorkerConfig
+	createdPool   *XianyuItemPool
+	createdAccount *XianyuAccount
+	createdProduct *XianyuProduct
+	bindCalls     int
+}
+
+func newXianyuControlStub() *xianyuControlStub {
+	poolID := int64(1)
+	return &xianyuControlStub{
+		workerCfg: &XianyuWorkerConfig{
+			ID: 1, BaseURL: "http://xianyu-worker-backend:8089", Status: XianyuWorkerStatusActive,
+			HealthStatus: XianyuWorkerHealthHealthy, APITokenEncrypted: "enc",
+		},
+		account: &XianyuAccount{
+			ID: 11, WorkerConfigID: 1, AccountID: "account", Status: XianyuAccountStatusEnabled,
+		},
+		product: &XianyuProduct{
+			ID: 21, AccountPK: 11, AccountID: "account", ItemID: "item",
+			BindingStatus: XianyuBindingStatusMapped, BindingSource: XianyuBindingSourceManual,
+			PoolID: &poolID, Status: XianyuProductStatusActive,
+		},
+	}
+}
+
+func (s *xianyuControlStub) ListWorkerConfigs(context.Context) ([]XianyuWorkerConfig, error) {
+	if s.workerCfg == nil {
+		return nil, nil
+	}
+	return []XianyuWorkerConfig{*s.workerCfg}, nil
+}
+func (s *xianyuControlStub) CreateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+	s.createdCfg = &cfg
+	return &cfg, nil
+}
+func (s *xianyuControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+	return &cfg, nil
+}
+func (s *xianyuControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
+	if s.workerCfg == nil {
+		return nil, ErrXianyuWorkerConfigNotFound
+	}
+	return s.workerCfg, nil
+}
+func (s *xianyuControlStub) ListAccounts(_ context.Context, workerConfigID int64) ([]XianyuAccount, error) {
+	if s.accounts != nil {
+		return s.accounts, nil
+	}
+	if s.account == nil {
+		return nil, nil
+	}
+	return []XianyuAccount{*s.account}, nil
+}
+func (s *xianyuControlStub) GetAccountByWorkerAndAccountID(_ context.Context, workerConfigID int64, accountID string) (*XianyuAccount, error) {
+	if s.accountErr != nil {
+		return nil, s.accountErr
+	}
+	if s.account == nil || s.account.AccountID != accountID {
+		return nil, ErrXianyuAccountNotFound
+	}
+	return s.account, nil
+}
+func (s *xianyuControlStub) UpsertAccount(_ context.Context, a XianyuAccount) (*XianyuAccount, error) {
+	s.createdAccount = &a
+	return &a, nil
+}
+func (s *xianyuControlStub) UpdateAccount(_ context.Context, a XianyuAccount) (*XianyuAccount, error) {
+	s.account = &a
+	return &a, nil
+}
+func (s *xianyuControlStub) ListItemPools(context.Context) ([]XianyuItemPool, error) {
+	return s.pools, nil
+}
+func (s *xianyuControlStub) GetItemPoolByID(_ context.Context, id int64) (*XianyuItemPool, error) {
+	for i := range s.pools {
+		if s.pools[i].ID == id {
+			return &s.pools[i], nil
+		}
+	}
+	return nil, ErrXianyuItemPoolNotFound
+}
+func (s *xianyuControlStub) GetItemPoolBySlug(_ context.Context, slug string) (*XianyuItemPool, error) {
+	for i := range s.pools {
+		if s.pools[i].Slug == slug {
+			return &s.pools[i], nil
+		}
+	}
+	return nil, ErrXianyuItemPoolNotFound
+}
+func (s *xianyuControlStub) CreateItemPool(_ context.Context, p XianyuItemPool) (*XianyuItemPool, error) {
+	s.createdPool = &p
+	return &p, nil
+}
+func (s *xianyuControlStub) UpdateItemPool(_ context.Context, p XianyuItemPool) (*XianyuItemPool, error) {
+	return &p, nil
+}
+func (s *xianyuControlStub) PoolStockCounts(context.Context, string) (int, int, int, error) {
+	return 5, 2, 1, nil
+}
+func (s *xianyuControlStub) DeliveryStats(context.Context, time.Time) (int, int, error) {
+	return 3, 1, nil
+}
+func (s *xianyuControlStub) PendingDeliveryCount(context.Context) (int, error) {
+	return 2, nil
+}
+func (s *xianyuControlStub) ListProducts(context.Context) ([]XianyuProduct, error) {
+	if s.products != nil {
+		return s.products, nil
+	}
+	if s.product == nil {
+		return nil, nil
+	}
+	return []XianyuProduct{*s.product}, nil
+}
+func (s *xianyuControlStub) ListProductsByAccount(_ context.Context, accountPK int64) ([]XianyuProduct, error) {
+	if s.products != nil {
+		return s.products, nil
+	}
+	if s.product == nil {
+		return nil, nil
+	}
+	return []XianyuProduct{*s.product}, nil
+}
+func (s *xianyuControlStub) GetProductByIdentity(_ context.Context, accountPK int64, itemID, specName, specValue string) (*XianyuProduct, error) {
+	if s.productErr != nil {
+		return nil, s.productErr
+	}
+	if s.product == nil || s.product.ItemID != itemID {
+		return nil, ErrXianyuProductNotFound
+	}
+	return s.product, nil
+}
+func (s *xianyuControlStub) UpsertProduct(_ context.Context, p XianyuProduct) (*XianyuProduct, error) {
+	s.createdProduct = &p
+	return &p, nil
+}
+func (s *xianyuControlStub) UpdateProduct(_ context.Context, p XianyuProduct) (*XianyuProduct, error) {
+	s.product = &p
+	return &p, nil
+}
+func (s *xianyuControlStub) UpdateProductBinding(_ context.Context, productID int64, bindingStatus, bindingSource string, poolID *int64) error {
+	s.bindCalls++
+	if s.product != nil {
+		s.product.BindingStatus = bindingStatus
+		s.product.BindingSource = bindingSource
+		s.product.PoolID = poolID
+	}
+	return nil
+}
+func (s *xianyuControlStub) ListBindingRules(context.Context) ([]XianyuBindingRule, error) {
+	return s.rules, nil
+}
+func (s *xianyuControlStub) CreateBindingRule(_ context.Context, r XianyuBindingRule) (*XianyuBindingRule, error) {
+	return &r, nil
+}
+func (s *xianyuControlStub) UpdateBindingRule(_ context.Context, r XianyuBindingRule) (*XianyuBindingRule, error) {
+	return &r, nil
+}
+
+type xianyuStateStub struct {
+	result    *XianyuDeliveryStatusResult
+	claim     *XianyuOrderClaim
+	resend    string
+	recordErr error
+	resendErr error
+}
+
+func (s *xianyuStateStub) RecordDeliveryResult(_ context.Context, r XianyuDeliveryStatusResult) error {
+	if s.recordErr != nil {
+		return s.recordErr
+	}
+	s.result = &r
+	return nil
+}
+func (s *xianyuStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*XianyuOrderClaim, error) {
+	return s.claim, nil
+}
+func (s *xianyuStateStub) ResendOriginalCode(_ context.Context, orderNo string, userID int64) (string, error) {
+	if s.resendErr != nil {
+		return "", s.resendErr
+	}
+	s.claim = &XianyuOrderClaim{OrderNo: orderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusPending}
+	return s.resend, nil
 }
 
 type xianyuSettingsStub struct {
@@ -49,6 +237,13 @@ func (s *xianyuSettingsStub) GetXianyuDeliveryRuntime(context.Context) XianyuDel
 	return XianyuDeliveryRuntime{Enabled: s.enabled}
 }
 
+func newXianyuDeliveryTestService(control XianyuControlRepository, repo XianyuDeliveryRepository, state XianyuDeliveryStateUpdater) *XianyuDeliveryService {
+	return NewXianyuDeliveryService(repo, control, state, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+		InternalToken: "secret",
+		SystemUserID:  123,
+	}}, newXianyuSettingsStub(true), nil)
+}
+
 func validXianyuRequest() XianyuDeliveryClaimRequest {
 	return XianyuDeliveryClaimRequest{
 		OrderID: "order-1", ItemID: "item", OrderAmount: "19.90", OrderQuantity: "1",
@@ -57,26 +252,33 @@ func validXianyuRequest() XianyuDeliveryClaimRequest {
 }
 
 func TestXianyuDeliveryClaimValidatesAndDelegates(t *testing.T) {
+	control := newXianyuControlStub()
 	repo := &xianyuClaimRepoStub{result: "ABCD-1234"}
-	svc := newXianyuDeliveryTestService(repo)
+	svc := newXianyuDeliveryTestService(control, repo, nil)
 
 	got, err := svc.Claim(context.Background(), validXianyuRequest())
 
 	require.NoError(t, err)
 	require.Equal(t, "ABCD-1234", got)
 	require.Equal(t, int64(123), repo.userID)
-	require.Equal(t, "standard", repo.claim.Pool)
+	require.Equal(t, int64(11), repo.claim.AccountPK)
+	require.Equal(t, int64(21), repo.claim.ProductID)
+	require.Equal(t, int64(1), repo.claim.PoolID)
+	require.Equal(t, XianyuBindingSourceManual, repo.claim.BindingSource)
 	require.Equal(t, "19.90", *repo.claim.Amount)
 }
 
 func TestXianyuDeliveryRejectsUnsupportedAndUnmappedRequests(t *testing.T) {
-	svc := newXianyuDeliveryTestService(&xianyuClaimRepoStub{result: "unused"})
+	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{result: "unused"}, nil)
 
 	request := validXianyuRequest()
 	request.OrderQuantity = "2"
 	_, err := svc.Claim(context.Background(), request)
 	require.ErrorIs(t, err, ErrXianyuQuantityUnsupported)
 
+	control := newXianyuControlStub()
+	control.product = nil
+	svc = newXianyuDeliveryTestService(control, &xianyuClaimRepoStub{result: "unused"}, nil)
 	request = validXianyuRequest()
 	request.ItemID = "other"
 	_, err = svc.Claim(context.Background(), request)
@@ -84,7 +286,7 @@ func TestXianyuDeliveryRejectsUnsupportedAndUnmappedRequests(t *testing.T) {
 }
 
 func TestXianyuDeliveryRejectsInvalidAmountAndMissingConfiguration(t *testing.T) {
-	svc := newXianyuDeliveryTestService(&xianyuClaimRepoStub{result: "unused"})
+	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{result: "unused"}, nil)
 	request := validXianyuRequest()
 	request.OrderAmount = "not-a-number"
 	_, err := svc.Claim(context.Background(), request)
@@ -95,18 +297,18 @@ func TestXianyuDeliveryRejectsInvalidAmountAndMissingConfiguration(t *testing.T)
 	_, err = svc.Claim(context.Background(), request)
 	require.ErrorIs(t, err, ErrXianyuInvalidAmount)
 
-	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &config.Config{}, newXianyuSettingsStub(true))
+	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, &config.Config{}, newXianyuSettingsStub(true), nil)
 	_, err = missing.Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 
 	repoErr := errors.New("db unavailable")
 	repo := &xianyuClaimRepoStub{err: repoErr}
-	_, err = newXianyuDeliveryTestService(repo).Claim(context.Background(), validXianyuRequest())
+	_, err = newXianyuDeliveryTestService(newXianyuControlStub(), repo, nil).Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, repoErr)
 }
 
 func TestXianyuDeliveryRejectsOverlongIdentifiers(t *testing.T) {
-	svc := newXianyuDeliveryTestService(&xianyuClaimRepoStub{result: "code"})
+	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{result: "code"}, nil)
 	request := validXianyuRequest()
 	request.OrderID = strings.Repeat("o", 65)
 	_, err := svc.Claim(context.Background(), request)
@@ -125,11 +327,29 @@ func TestXianyuDeliveryRejectsOverlongIdentifiers(t *testing.T) {
 	require.ErrorIs(t, err, ErrXianyuBuyerTooLong)
 }
 
+func TestXianyuDeliveryRejectsDisabledAccountAndUnmappedProduct(t *testing.T) {
+	control := newXianyuControlStub()
+	control.account.Status = XianyuAccountStatusDisabled
+	svc := newXianyuDeliveryTestService(control, &xianyuClaimRepoStub{result: "code"}, nil)
+	_, err := svc.Claim(context.Background(), validXianyuRequest())
+	require.ErrorIs(t, err, ErrXianyuAccountDisabled)
+
+	control = newXianyuControlStub()
+	poolID := int64(9)
+	control.product = &XianyuProduct{
+		ID: 21, AccountPK: 11, ItemID: "item", BindingStatus: XianyuBindingStatusUnmapped,
+		BindingSource: XianyuBindingSourceAutoNew, PoolID: &poolID, Status: XianyuProductStatusActive,
+	}
+	svc = newXianyuDeliveryTestService(control, &xianyuClaimRepoStub{result: "code"}, nil)
+	_, err = svc.Claim(context.Background(), validXianyuRequest())
+	require.ErrorIs(t, err, ErrXianyuProductUnmapped)
+}
+
 func TestXianyuDeliveryValidateStartupRejectsUnavailableSystemUser(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "secret", SystemUserID: 123,
 	}}
-	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, cfg, newXianyuSettingsStub(true))
+	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, cfg, newXianyuSettingsStub(true), nil)
 	now := time.Now()
 	reader := &systemUserReaderStub{users: map[int64]*User{
 		123: {ID: 123, Status: StatusActive},
@@ -151,9 +371,9 @@ func TestXianyuDeliveryValidateStartupRejectsUnavailableSystemUser(t *testing.T)
 func TestXianyuDeliveryUsesPanelToggleFailClosed(t *testing.T) {
 	repo := &xianyuClaimRepoStub{result: "code"}
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
-		InternalToken: "secret", SystemUserID: 123, ItemPools: map[string]string{"account:item": "standard"},
+		InternalToken: "secret", SystemUserID: 123,
 	}}
-	disabled := NewXianyuDeliveryService(repo, cfg, newXianyuSettingsStub(false))
+	disabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, cfg, newXianyuSettingsStub(false), nil)
 	_, err := disabled.Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 
@@ -162,10 +382,25 @@ func TestXianyuDeliveryUsesPanelToggleFailClosed(t *testing.T) {
 	require.NoError(t, disabled.ValidateStartup(context.Background(), reader))
 
 	deletedUser := &systemUserReaderStub{users: map[int64]*User{123: {ID: 123, Status: StatusActive, DeletedAt: &now}}}
-	enabled := NewXianyuDeliveryService(repo, cfg, newXianyuSettingsStub(true))
+	enabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, cfg, newXianyuSettingsStub(true), nil)
 	err = enabled.ValidateStartup(context.Background(), deletedUser)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unavailable")
+}
+
+func TestXianyuDeliveryRecordsResultAndResendsOriginalCode(t *testing.T) {
+	state := &xianyuStateStub{resend: "ORIGINAL-CODE"}
+	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{}, state)
+
+	err := svc.RecordDeliveryResult(context.Background(), XianyuDeliveryStatusResult{OrderNo: "o1", Success: true, Confirmed: true})
+	require.NoError(t, err)
+	require.NotNil(t, state.result)
+	require.True(t, state.result.Success)
+	require.True(t, state.result.Confirmed)
+
+	code, err := svc.ResendOriginalCode(context.Background(), "o1", 123)
+	require.NoError(t, err)
+	require.Equal(t, "ORIGINAL-CODE", code)
 }
 
 func TestRedeemRejectsXianyuDeliveryCode(t *testing.T) {

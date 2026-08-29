@@ -33,6 +33,11 @@ const (
 	NotificationEmailEventCyberPolicyNotice           = "content_moderation.cyber_policy_notice"
 	NotificationEmailEventOpsAlert                    = "ops.alert"
 	NotificationEmailEventOpsScheduledReport          = "ops.scheduled_report"
+	NotificationEmailEventXianyuWorkerUnhealthy       = "xianyu.worker_unhealthy"
+	NotificationEmailEventXianyuCookieInvalid         = "xianyu.cookie_invalid"
+	NotificationEmailEventXianyuTaskStopped           = "xianyu.task_stopped"
+	NotificationEmailEventXianyuPoolLowStock          = "xianyu.pool_low_stock"
+	NotificationEmailEventXianyuDeliveryPendingTimeout = "xianyu.delivery_pending_timeout"
 
 	notificationEmailTemplateKeyPrefix    = "notification_email_template:"
 	notificationEmailPreferenceKeyPrefix  = "notification_email_preference:"
@@ -1034,6 +1039,11 @@ var notificationEmailEventOrder = []string{
 	NotificationEmailEventCyberPolicyNotice,
 	NotificationEmailEventOpsAlert,
 	NotificationEmailEventOpsScheduledReport,
+	NotificationEmailEventXianyuWorkerUnhealthy,
+	NotificationEmailEventXianyuCookieInvalid,
+	NotificationEmailEventXianyuTaskStopped,
+	NotificationEmailEventXianyuPoolLowStock,
+	NotificationEmailEventXianyuDeliveryPendingTimeout,
 }
 
 var notificationEmailEventDefinitions = map[string]NotificationEmailEventInfo{
@@ -1151,6 +1161,51 @@ var notificationEmailEventDefinitions = map[string]NotificationEmailEventInfo{
 			),
 			append(append([]string{}, notificationEmailOpsSummaryPlaceholders...), "report_detail_display", "report_html")...,
 		),
+	},
+	NotificationEmailEventXianyuWorkerUnhealthy: {
+		Event:       NotificationEmailEventXianyuWorkerUnhealthy,
+		Label:       "Xianyu worker unhealthy",
+		Description: "Sent to configured admin notification emails when the Xianyu auto-reply worker becomes unhealthy.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"worker_id", "status", "last_checked_at"),
+	},
+	NotificationEmailEventXianyuCookieInvalid: {
+		Event:       NotificationEmailEventXianyuCookieInvalid,
+		Label:       "Xianyu account cookie invalid",
+		Description: "Sent to configured admin notification emails when a Xianyu account cookie becomes invalid or expiring.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"account_id", "nickname", "cookie_status"),
+	},
+	NotificationEmailEventXianyuTaskStopped: {
+		Event:       NotificationEmailEventXianyuTaskStopped,
+		Label:       "Xianyu account task stopped",
+		Description: "Sent to configured admin notification emails when a Xianyu account message task stops.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"account_id", "nickname", "task_status"),
+	},
+	NotificationEmailEventXianyuPoolLowStock: {
+		Event:       NotificationEmailEventXianyuPoolLowStock,
+		Label:       "Xianyu inventory pool low stock",
+		Description: "Sent to configured admin notification emails when a Xianyu inventory pool crosses the low-stock threshold.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"pool_id", "pool_name", "remaining", "threshold"),
+	},
+	NotificationEmailEventXianyuDeliveryPendingTimeout: {
+		Event:       NotificationEmailEventXianyuDeliveryPendingTimeout,
+		Label:       "Xianyu delivery pending timeout",
+		Description: "Sent to configured admin notification emails when a Xianyu delivery stays pending beyond the timeout.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"order_no", "created_at", "last_attempt_at"),
 	},
 }
 
@@ -1434,6 +1489,86 @@ var notificationEmailOfficialTemplates = map[string]map[string]notificationEmail
 		notificationEmailLocaleChinese: {
 			Subject: "[运维报表] {{report_name}}",
 			HTML:    notificationEmailOpsScheduledReportTemplate(notificationEmailLocaleChinese),
+		},
+	},
+	NotificationEmailEventXianyuWorkerUnhealthy: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Worker unhealthy",
+			HTML: notificationEmailCard("#dc2626", "Xianyu worker unhealthy", `
+<p><strong>Worker</strong>: {{worker_id}}</p>
+<p><strong>Status</strong>: {{status}}</p>
+<p><strong>Last checked</strong>: {{last_checked_at}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] Worker 异常",
+			HTML: notificationEmailCard("#dc2626", "闲鱼 Worker 异常", `
+<p><strong>Worker</strong>：{{worker_id}}</p>
+<p><strong>状态</strong>：{{status}}</p>
+<p><strong>最近检查</strong>：{{last_checked_at}}</p>`),
+		},
+	},
+	NotificationEmailEventXianyuCookieInvalid: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Account cookie {{cookie_status}}",
+			HTML: notificationEmailCard("#ea580c", "Xianyu account cookie", `
+<p><strong>Account</strong>: {{account_id}}</p>
+<p><strong>Nickname</strong>: {{nickname}}</p>
+<p><strong>Cookie status</strong>: {{cookie_status}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] 账号 Cookie {{cookie_status}}",
+			HTML: notificationEmailCard("#ea580c", "闲鱼账号 Cookie", `
+<p><strong>账号</strong>：{{account_id}}</p>
+<p><strong>昵称</strong>：{{nickname}}</p>
+<p><strong>Cookie 状态</strong>：{{cookie_status}}</p>`),
+		},
+	},
+	NotificationEmailEventXianyuTaskStopped: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Account task stopped",
+			HTML: notificationEmailCard("#dc2626", "Xianyu account task stopped", `
+<p><strong>Account</strong>: {{account_id}}</p>
+<p><strong>Nickname</strong>: {{nickname}}</p>
+<p><strong>Task status</strong>: {{task_status}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] 账号任务停止",
+			HTML: notificationEmailCard("#dc2626", "闲鱼账号任务停止", `
+<p><strong>账号</strong>：{{account_id}}</p>
+<p><strong>昵称</strong>：{{nickname}}</p>
+<p><strong>任务状态</strong>：{{task_status}}</p>`),
+		},
+	},
+	NotificationEmailEventXianyuPoolLowStock: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Inventory pool low stock",
+			HTML: notificationEmailCard("#ea580c", "Xianyu inventory pool low stock", `
+<p><strong>Pool</strong>: {{pool_name}} ({{pool_id}})</p>
+<p><strong>Remaining</strong>: {{remaining}}</p>
+<p><strong>Threshold</strong>: {{threshold}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] 库存池低库存",
+			HTML: notificationEmailCard("#ea580c", "闲鱼库存池低库存", `
+<p><strong>库存池</strong>：{{pool_name}}（{{pool_id}}）</p>
+<p><strong>剩余</strong>：{{remaining}}</p>
+<p><strong>阈值</strong>：{{threshold}}</p>`),
+		},
+	},
+	NotificationEmailEventXianyuDeliveryPendingTimeout: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Delivery pending timeout",
+			HTML: notificationEmailCard("#dc2626", "Xianyu delivery pending timeout", `
+<p><strong>Order</strong>: {{order_no}}</p>
+<p><strong>Created at</strong>: {{created_at}}</p>
+<p><strong>Last attempt</strong>: {{last_attempt_at}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] 发货待处理超时",
+			HTML: notificationEmailCard("#dc2626", "闲鱼发货待处理超时", `
+<p><strong>订单号</strong>：{{order_no}}</p>
+<p><strong>创建时间</strong>：{{created_at}}</p>
+<p><strong>最近尝试</strong>：{{last_attempt_at}}</p>`),
 		},
 	},
 }

@@ -1,6 +1,6 @@
 services:
   sub2api:
-    image: weishaw/sub2api:984a3d1
+    image: sub2api:01e3451
     container_name: sub2api
     restart: unless-stopped
     security_opt:
@@ -42,6 +42,7 @@ services:
         condition: service_healthy
     networks:
       - sub2api-network
+      - xianyu-internal
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s
@@ -88,6 +89,88 @@ services:
       retries: 5
       start_period: 5s
 
+  # xianyu-auto-reply Worker：内网专用，只加入 xianyu-internal 网络，不映射任何公网端口。
+  # 镜像为内部维护的固定版本（不使用 latest 漂浮标签），由运维在部署前 pin 到经审查的
+  # 上游 commit 构建产物。主程序通过 Docker 内部别名 xianyu-worker-backend 访问。
+  xianyu-worker:
+    image: xianyu-auto-reply:${XIANYU_WORKER_IMAGE_TAG:-reviewed}
+    container_name: xianyu-worker
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # 不映射任何宿主机端口：Worker 前端/后端/WebSocket 全部内网。
+    volumes:
+      - ../xianyu_worker_data:/app/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # Worker 回传主程序的内网地址与双向认证 token：部署时固定注入。
+      SUB2API_INTERNAL_BASE_URL: "http://sub2api:8080"
+      SUB2API_INTERNAL_TOKEN: ${XIANYU_INTERNAL_TOKEN}
+      MYSQL_HOST: xianyu-worker-mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${XIANYU_WORKER_MYSQL_USER:-xianyu}
+      MYSQL_PASSWORD: ${XIANYU_WORKER_MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${XIANYU_WORKER_MYSQL_DB:-xianyu}
+      REDIS_HOST: xianyu-worker-redis
+      REDIS_PORT: "6379"
+    depends_on:
+      xianyu-worker-mysql:
+        condition: service_healthy
+      xianyu-worker-redis:
+        condition: service_healthy
+    networks:
+      xianyu-internal:
+        aliases:
+          - xianyu-worker-backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  xianyu-worker-mysql:
+    image: mysql:8.0
+    container_name: xianyu-worker-mysql
+    restart: unless-stopped
+    # 宿主机端口绑定为空：仅内网。
+    volumes:
+      - ../xianyu_worker_mysql:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${XIANYU_WORKER_MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: ${XIANYU_WORKER_MYSQL_USER:-xianyu}
+      MYSQL_PASSWORD: ${XIANYU_WORKER_MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${XIANYU_WORKER_MYSQL_DB:-xianyu}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      xianyu-internal: null
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${XIANYU_WORKER_MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  xianyu-worker-redis:
+    image: redis:7-alpine
+    container_name: xianyu-worker-redis
+    restart: unless-stopped
+    command: ["redis-server"]
+    volumes:
+      - ../xianyu_worker_redis:/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      xianyu-internal: null
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
 networks:
   sub2api-network:
+    driver: bridge
+  xianyu-internal:
     driver: bridge
