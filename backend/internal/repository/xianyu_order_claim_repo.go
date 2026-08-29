@@ -188,8 +188,8 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 		(order_no, redeem_code_id, account_id, item_id, buyer_id, chat_id, amount,
 		 product_id, pool_id, binding_source, delivery_status, attempt_count, last_attempt_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, NOW())`,
-		claim.OrderID, codeID, claim.AccountID, claim.ItemID, claim.BuyerID, amount,
-		claim.ChatID, productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
+		claim.OrderID, codeID, claim.AccountID, claim.ItemID, claim.BuyerID,
+		claim.ChatID, amount, productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
 		return "", fmt.Errorf("insert xianyu claim: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `

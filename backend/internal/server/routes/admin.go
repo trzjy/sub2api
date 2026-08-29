@@ -2,8 +2,6 @@
 package routes
 
 import (
-	"strings"
-
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -183,7 +181,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 }
 
-// xianyuManageGuard 校验当前管理员被显式授权管理闲鱼发货。
+// xianyuManageGuard 校验当前管理员可管理闲鱼发货；管理员角色默认授权。
 func xianyuManageGuard(h *admin.XianyuAdminHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if h == nil {
@@ -191,8 +189,7 @@ func xianyuManageGuard(h *admin.XianyuAdminHandler) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		email := strings.TrimSpace(c.GetString(middleware.ContextKeyAuthEmail))
-		if !h.CanManage(c.Request.Context(), email) {
+		if !h.CanManage(c) {
 			response.ErrorFrom(c, service.ErrXianyuForbidden)
 			c.Abort()
 			return

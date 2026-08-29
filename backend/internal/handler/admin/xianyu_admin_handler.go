@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"context"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -12,12 +11,19 @@ import (
 
 // XianyuAdminHandler 处理闲鱼发货控制面管理请求。
 type XianyuAdminHandler struct {
-	control *service.XianyuControlService
+	control   *service.XianyuControlService
+	adminOnly func(c *gin.Context) bool
 }
 
 // NewXianyuAdminHandler 创建控制面管理 handler。
 func NewXianyuAdminHandler(control *service.XianyuControlService) *XianyuAdminHandler {
-	return &XianyuAdminHandler{control: control}
+	return &XianyuAdminHandler{
+		control: control,
+		adminOnly: func(c *gin.Context) bool {
+			role, _ := middleware.GetUserRoleFromContext(c)
+			return role == service.RoleAdmin
+		},
+	}
 }
 
 // Overview 概览页数据。
@@ -30,18 +36,20 @@ func (h *XianyuAdminHandler) Overview(c *gin.Context) {
 	response.Success(c, data)
 }
 
-// CanManage 判断当前管理员是否被授权管理闲鱼发货。
-func (h *XianyuAdminHandler) CanManage(ctx context.Context, adminEmail string) bool {
-	if h == nil || h.control == nil {
+// CanManage 判断当前管理员是否可管理闲鱼发货；管理员角色默认授权。
+func (h *XianyuAdminHandler) CanManage(c *gin.Context) bool {
+	if h == nil {
 		return false
 	}
-	return h.control.CanManage(ctx, adminEmail)
+	if h.adminOnly != nil && !h.adminOnly(c) {
+		return false
+	}
+	return true
 }
 
 // Access 返回当前管理员是否有闲鱼发货管理权限（前端导航门控用）。
 func (h *XianyuAdminHandler) Access(c *gin.Context) {
-	email := strings.TrimSpace(c.GetString(middleware.ContextKeyAuthEmail))
-	response.Success(c, gin.H{"can_manage": h.CanManage(c.Request.Context(), email)})
+	response.Success(c, gin.H{"can_manage": h.CanManage(c)})
 }
 
 // GetSettings 读取控制面设置。
@@ -79,10 +87,10 @@ func (h *XianyuAdminHandler) WorkerConfigs(c *gin.Context) {
 }
 
 type saveWorkerConfigRequest struct {
-	ID        int64  `json:"id"`
-	BaseURL   string `json:"base_url"`
-	APIToken  string `json:"api_token"`
-	Status    string `json:"status"`
+	ID       int64  `json:"id"`
+	BaseURL  string `json:"base_url"`
+	APIToken string `json:"api_token"`
+	Status   string `json:"status"`
 }
 
 func (h *XianyuAdminHandler) SaveWorkerConfig(c *gin.Context) {
@@ -92,10 +100,10 @@ func (h *XianyuAdminHandler) SaveWorkerConfig(c *gin.Context) {
 		return
 	}
 	cfg := service.XianyuWorkerConfig{
-		ID:              req.ID,
-		BaseURL:         req.BaseURL,
+		ID:                req.ID,
+		BaseURL:           req.BaseURL,
 		APITokenEncrypted: req.APIToken,
-		Status:          req.Status,
+		Status:            req.Status,
 	}
 	saved, err := h.control.SaveWorkerConfig(c.Request.Context(), cfg)
 	if err != nil {
