@@ -71,6 +71,7 @@ type XianyuDeliveryService struct {
 	setting   XianyuDeliverySettingReader
 	delivery  XianyuDeliveryStateUpdater
 	workerSvc *XianyuWorkerService
+	resender  func(ctx context.Context, claim *XianyuOrderClaim) error
 }
 
 type XianyuDeliverySettingReader interface {
@@ -259,8 +260,22 @@ func (s *XianyuDeliveryService) RecordDeliveryResult(ctx context.Context, result
 
 // ResendOriginalCode 人工补发原码。
 func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error) {
-	if s.delivery == nil {
+	if s == nil || s.delivery == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return "", ErrXianyuDeliveryNotConfigured
+	}
+	claim, err := s.delivery.GetDeliveryClaim(ctx, orderNo)
+	if err != nil {
+		return "", err
+	}
+	resender := s.resender
+	if resender == nil {
+		if s.workerSvc == nil {
+			return "", ErrXianyuDeliveryNotConfigured
+		}
+		resender = s.workerSvc.ResendDelivery
+	}
+	if err := resender(ctx, claim); err != nil {
+		return "", err
 	}
 	return s.delivery.ResendOriginalCode(ctx, orderNo, systemUserID)
 }

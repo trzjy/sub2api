@@ -31,20 +31,20 @@ func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim
 
 // xianyuControlStub 是控制面仓库桩，用于断言 Claim 的账号/商品解析。
 type xianyuControlStub struct {
-	workerCfg     *XianyuWorkerConfig
-	account       *XianyuAccount
-	product       *XianyuProduct
-	accounts      []XianyuAccount
-	products      []XianyuProduct
-	pools         []XianyuItemPool
-	rules         []XianyuBindingRule
-	accountErr    error
-	productErr    error
-	createdCfg    *XianyuWorkerConfig
-	createdPool   *XianyuItemPool
+	workerCfg      *XianyuWorkerConfig
+	account        *XianyuAccount
+	product        *XianyuProduct
+	accounts       []XianyuAccount
+	products       []XianyuProduct
+	pools          []XianyuItemPool
+	rules          []XianyuBindingRule
+	accountErr     error
+	productErr     error
+	createdCfg     *XianyuWorkerConfig
+	createdPool    *XianyuItemPool
 	createdAccount *XianyuAccount
 	createdProduct *XianyuProduct
-	bindCalls     int
+	bindCalls      int
 }
 
 func newXianyuControlStub() *xianyuControlStub {
@@ -215,6 +215,12 @@ func (s *xianyuStateStub) RecordDeliveryResult(_ context.Context, r XianyuDelive
 	return nil
 }
 func (s *xianyuStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*XianyuOrderClaim, error) {
+	if s.claim == nil && s.resend != "" {
+		return &XianyuOrderClaim{
+			OrderNo: orderNo, Code: s.resend, AccountID: "account", ItemID: "item",
+			BuyerID: "buyer", DeliveryStatus: XianyuDeliveryStatusFailed,
+		}, nil
+	}
 	return s.claim, nil
 }
 func (s *xianyuStateStub) ResendOriginalCode(_ context.Context, orderNo string, userID int64) (string, error) {
@@ -238,10 +244,12 @@ func (s *xianyuSettingsStub) GetXianyuDeliveryRuntime(context.Context) XianyuDel
 }
 
 func newXianyuDeliveryTestService(control XianyuControlRepository, repo XianyuDeliveryRepository, state XianyuDeliveryStateUpdater) *XianyuDeliveryService {
-	return NewXianyuDeliveryService(repo, control, state, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+	svc := NewXianyuDeliveryService(repo, control, state, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "secret",
 		SystemUserID:  123,
 	}}, newXianyuSettingsStub(true), nil)
+	svc.resender = func(context.Context, *XianyuOrderClaim) error { return nil }
+	return svc
 }
 
 func validXianyuRequest() XianyuDeliveryClaimRequest {
@@ -401,6 +409,37 @@ func TestXianyuDeliveryRecordsResultAndResendsOriginalCode(t *testing.T) {
 	code, err := svc.ResendOriginalCode(context.Background(), "o1", 123)
 	require.NoError(t, err)
 	require.Equal(t, "ORIGINAL-CODE", code)
+}
+
+type xianyuResendWorkerStub struct {
+	claims []*XianyuOrderClaim
+	err    error
+}
+
+func (s *xianyuResendWorkerStub) ResendDelivery(_ context.Context, claim *XianyuOrderClaim) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.claims = append(s.claims, claim)
+	return nil
+}
+
+func TestXianyuDeliveryResendCallsWorkerBeforeMarkingPending(t *testing.T) {
+	state := &xianyuStateStub{resend: "ORIGINAL-CODE"}
+	worker := &xianyuResendWorkerStub{}
+	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{}, state)
+	svc.resender = worker.ResendDelivery
+
+	code, err := svc.ResendOriginalCode(context.Background(), "order-1", 123)
+	require.NoError(t, err)
+	require.Equal(t, "ORIGINAL-CODE", code)
+	require.Len(t, worker.claims, 1)
+	require.Equal(t, "ORIGINAL-CODE", worker.claims[0].Code)
+	require.Equal(t, "account", worker.claims[0].AccountID)
+
+	worker.err = errors.New("worker rejected resend")
+	_, err = svc.ResendOriginalCode(context.Background(), "order-1", 123)
+	require.Error(t, err)
 }
 
 func TestRedeemRejectsXianyuDeliveryCode(t *testing.T) {

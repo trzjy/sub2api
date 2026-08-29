@@ -140,7 +140,7 @@ export default {
       legacyUnverified: 'Legacy Unverified',
       resend: 'Resend Original Code',
       confirmResend: 'Resend the original redeem code for this order?',
-      resendSuccess: 'Resend requested, waiting for Worker',
+      resendQueued: 'Resend requested, waiting for Worker',
       noDeliveries: 'No delivery records',
       searchPlaceholder: 'Search order no / account / code',
     },

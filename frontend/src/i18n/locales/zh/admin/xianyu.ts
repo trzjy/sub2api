@@ -140,7 +140,7 @@ export default {
       legacyUnverified: '历史未验证',
       resend: '补发原码',
       confirmResend: '确定为该订单补发原兑换码？',
-      resendSuccess: '补发成功，等待 Worker 重新发送',
+      resendQueued: '补发成功，等待 Worker 重新发送',
       noDeliveries: '暂无发货记录',
       searchPlaceholder: '搜索订单号 / 账号 / 兑换码',
     },

@@ -292,7 +292,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	xianyuControlService, err := service.ProvideXianyuControlService(xianyuControlRepository, xianyuDeliveryRepository, xianyuDeliveryStateUpdater, xianyuDeliveryListRepository, secretEncryptor, xianyuDeliveryService, xianyuWorkerService, settingService, settingRepository, db)
+	xianyuSettingStore := service.ProvideXianyuSettingStore(settingRepository)
+	xianyuControlService, err := service.ProvideXianyuControlService(xianyuControlRepository, xianyuDeliveryRepository, xianyuDeliveryStateUpdater, xianyuDeliveryListRepository, secretEncryptor, xianyuDeliveryService, xianyuWorkerService, settingService, xianyuSettingStore, db)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +366,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, settingRepository, notificationEmailService)
+	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, accountBalanceProbeCheckService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, promptService, pluginManager)
 	application := &Application{

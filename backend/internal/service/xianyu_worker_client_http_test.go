@@ -14,7 +14,7 @@ func TestXianyuWorkerClientHealth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/health", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"backend":true,"websocket":true,"database":true}`))
+		_, _ = w.Write([]byte(`{"success":true,"data":{"backend":true,"websocket":true,"database":true}}`))
 	}))
 	defer srv.Close()
 
@@ -22,6 +22,7 @@ func TestXianyuWorkerClientHealth(t *testing.T) {
 	health, err := client.Health(context.Background())
 	require.NoError(t, err)
 	require.True(t, health.Backend)
+	require.True(t, health.WebSocket)
 	require.True(t, health.Database)
 }
 

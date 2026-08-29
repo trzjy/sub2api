@@ -88,16 +88,28 @@ type XianyuWorkerProduct struct {
 
 // XianyuWorkerClaims 表示 Worker 侧操作结果。
 type XianyuWorkerResult struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
+	Success    bool   `json:"success"`
+	Message    string `json:"message,omitempty"`
+	SendStatus string `json:"send_status,omitempty"`
+	Data       *struct {
+		SendStatus string `json:"send_status,omitempty"`
+	} `json:"data,omitempty"`
 }
 
-// Health 检查后端、WebSocket 和数据库连通性。
+// Health 检查后端、WebSocket 和数据库连通性。Worker 可能返回标准包装响应。
 func (c *XianyuWorkerClient) Health(ctx context.Context) (*XianyuWorkerHealth, error) {
 	var out XianyuWorkerHealth
-	if err := c.do(ctx, http.MethodGet, "/health", nil, &out, ""); err != nil {
+	var wrapped struct {
+		Success bool                `json:"success"`
+		Data    *XianyuWorkerHealth `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/health", nil, &wrapped, ""); err != nil {
 		return nil, err
 	}
+	if wrapped.Data != nil {
+		out = *wrapped.Data
+	}
+	out.Backend = out.Backend || wrapped.Success
 	return &out, nil
 }
 
@@ -157,6 +169,27 @@ func (c *XianyuWorkerClient) ListProducts(ctx context.Context, accountID string)
 	return out, nil
 }
 
+// ResendDelivery asks the Worker to resend an original delivery code through the
+// buyer's existing chat. It waits for the platform-level send receipt so the
+// caller can distinguish a real send from an accepted HTTP request.
+func (c *XianyuWorkerClient) ResendDelivery(ctx context.Context, accountID, orderNo, itemID, buyerID, chatID, code string) (*XianyuWorkerResult, error) {
+	var out XianyuWorkerResult
+	body := map[string]any{
+		"order_no":     orderNo,
+		"item_id":      itemID,
+		"buyer_id":     buyerID,
+		"chat_id":      chatID,
+		"card_id":      0,
+		"content":      code,
+		"wait_result":  true,
+		"wait_timeout": 10.0,
+	}
+	if err := c.do(ctx, http.MethodPost, "/internal/accounts/"+accountID+"/send-message", body, &out, accountID); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // do 执行一次内网调用并统一错误映射。
 // expect accountID 用于需要在错误中附加账号上下文的操作。
 func (c *XianyuWorkerClient) do(ctx context.Context, method, path string, body any, out any, contextAccountID string) error {
@@ -197,8 +230,8 @@ func (c *XianyuWorkerClient) do(ctx context.Context, method, path string, body a
 	// Worker 可能返回标准包装 { code, message, data } 或裸对象。
 	if err := json.Unmarshal(payload, out); err != nil {
 		var wrapped struct {
-			Code int    `json:"code"`
-			Data any    `json:"data"`
+			Code int `json:"code"`
+			Data any `json:"data"`
 		}
 		if jsonErr := json.Unmarshal(payload, &wrapped); jsonErr == nil && wrapped.Data != nil {
 			raw, _ := json.Marshal(wrapped.Data)

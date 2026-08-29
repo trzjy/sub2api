@@ -165,7 +165,7 @@ async function doResend() {
   try {
     await adminAPI.xianyu.resendDelivery(resendTarget.value.order_no)
     await load()
-    appStore.showSuccess(t('admin.xianyu.deliveries.resendSuccess'))
+    appStore.showSuccess(t('admin.xianyu.deliveries.resendQueued'))
   } catch (err) {
     appStore.showError(String(err))
   }

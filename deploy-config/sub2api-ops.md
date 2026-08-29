@@ -348,7 +348,7 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 | 变量 | 说明 |
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker→主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值 |
-| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定版本（不使用 latest） |
+| `XIANYU_WORKER_IMAGE_DIGEST` | Worker 镜像固定 digest（不使用 latest/reviewed），当前审查版本为 `sha256:8343c385...46d5` |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
@@ -363,6 +363,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 
 Worker 卡券（发货）调用主程序 Claim 时必须透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
 内部维护的 Worker 镜像固定到经审查的上游 commit，并叠加该最小 patch 与发货结果回传 patch（`POST /api/v1/internal/xianyu/delivery-results`）；Worker 端必须在获取到最终发送回执后再回传 `confirmed=true`，否则主程序保持 `pending` 并最终转人工。
+已审查的镜像 digest 为 `sha256:8343c385b7e3161f131d3b076198ab38d6bc284b963c5ebfea542ef2c21f46d5`；当前 Worker 补丁源码保留在部署主机 `/opt/sub2api/xianyu-auto-reply-src/`，包含 `cookie_id` 透传、内部发送回执等待与回传集成，变更该镜像前必须重新审查并更新 digest。
 
 ---
 

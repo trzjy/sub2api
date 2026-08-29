@@ -25,7 +25,8 @@ var (
 	ErrXianyuBaseURLLoopbackInvalid = infraerrors.BadRequest("XIANYU_BASE_URL_LOOPBACK_INVALID", "xianyu worker base_url must not use 127.0.0.1 inside the container deployment")
 	ErrXianyuDeliveryUnavailable    = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_UNAVAILABLE", "xianyu delivery is unavailable")
 	ErrXianyuResendNotPending       = infraerrors.Conflict("XIANYU_RESEND_NOT_PENDING", "only failed deliveries can be resent")
-	ErrXianyuForbidden               = infraerrors.New(403, "XIANYU_MANAGE_FORBIDDEN", "you are not authorized to manage xianyu delivery")
+	ErrXianyuSyncBusy               = infraerrors.Conflict("XIANYU_SYNC_BUSY", "product sync is already running")
+	ErrXianyuForbidden              = infraerrors.New(403, "XIANYU_MANAGE_FORBIDDEN", "you are not authorized to manage xianyu delivery")
 )
 
 // Xianyu 控制面领域模型与仓库接口。
@@ -46,14 +47,14 @@ const (
 
 // XianyuWorkerConfig 是主程序对单条 Worker 内网连接配置的视图。
 type XianyuWorkerConfig struct {
-	ID               int64
-	BaseURL          string
+	ID                int64
+	BaseURL           string
 	APITokenEncrypted string
-	Status           string
-	HealthStatus     string
-	LastCheckedAt    *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	Status            string
+	HealthStatus      string
+	LastCheckedAt     *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // XianyuAccountStatus 表示闲鱼账号状态。
@@ -122,10 +123,10 @@ const (
 
 // XianyuBindingSource 表示商品绑定来源。
 const (
-	XianyuBindingSourceManual          = "manual"
-	XianyuBindingSourceAccountDefault  = "account_default"
-	XianyuBindingSourceKeyword         = "keyword"
-	XianyuBindingSourceAutoNew         = "auto_new"
+	XianyuBindingSourceManual           = "manual"
+	XianyuBindingSourceAccountDefault   = "account_default"
+	XianyuBindingSourceKeyword          = "keyword"
+	XianyuBindingSourceAutoNew          = "auto_new"
 	XianyuBindingSourceLegacyUnresolved = "legacy_unresolved"
 )
 
@@ -162,50 +163,50 @@ const (
 
 // XianyuBindingRule 是商品自动绑定规则。
 type XianyuBindingRule struct {
-	ID         int64
-	Priority   int
-	AccountPK  int64
-	MatchType  string
-	Keyword    string
-	PoolID     int64
-	Status     string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID        int64
+	Priority  int
+	AccountPK int64
+	MatchType string
+	Keyword   string
+	PoolID    int64
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // XianyuDeliveryStatus 表示发货状态。
 const (
-	XianyuDeliveryStatusPending         = "pending"
-	XianyuDeliveryStatusSent            = "sent"
-	XianyuDeliveryStatusFailed          = "failed"
+	XianyuDeliveryStatusPending          = "pending"
+	XianyuDeliveryStatusSent             = "sent"
+	XianyuDeliveryStatusFailed           = "failed"
 	XianyuDeliveryStatusLegacyUnverified = "legacy_unverified"
 )
 
 // XianyuOrderClaim 是发货记录（幂等事实表视图）。
 type XianyuOrderClaim struct {
-	OrderNo       string
-	RedeemCodeID  int64
-	Code          string
-	AccountID     string
-	ItemID        string
-	BuyerID       string
-	Amount        *string
-	ProductID     *int64
-	PoolID        *int64
-	BindingSource *string
+	OrderNo        string
+	RedeemCodeID   int64
+	Code           string
+	AccountID      string
+	ItemID         string
+	BuyerID        string
+	Amount         *string
+	ProductID      *int64
+	PoolID         *int64
+	BindingSource  *string
 	DeliveryStatus string
-	DeliveryError *string
-	AttemptCount  int
-	LastAttemptAt *time.Time
-	CreatedAt     time.Time
+	DeliveryError  *string
+	AttemptCount   int
+	LastAttemptAt  *time.Time
+	CreatedAt      time.Time
 }
 
 // XianyuDeliveryStatusResult 是 Worker 回传的发货结果。
 type XianyuDeliveryStatusResult struct {
-	OrderNo       string
-	Success       bool
-	Error         *string
-	Confirmed     bool // 是否有最终发送回执；true 时才可标记 sent
+	OrderNo   string
+	Success   bool
+	Error     *string
+	Confirmed bool // 是否有最终发送回执；true 时才可标记 sent
 }
 
 // XianyuDeliveryFilter 是发货记录列表筛选条件。

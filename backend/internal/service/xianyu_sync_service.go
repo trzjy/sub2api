@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -14,19 +15,19 @@ import (
 //   - 商品同步 + 自动绑定：默认 5 分钟，使用 PostgreSQL advisory lock 全局互斥
 //   - 告警巡检：复用管理员邮件通知机制
 type XianyuSyncService struct {
-	control  *XianyuControlService
-	worker   *XianyuWorkerService
-	alert    *XianyuAlertService
-	db       *sql.DB
-	setting  XianyuDeliverySettingReader
+	control *XianyuControlService
+	worker  *XianyuWorkerService
+	alert   *XianyuAlertService
+	db      *sql.DB
+	setting XianyuDeliverySettingReader
 
-	healthInterval      time.Duration
-	syncInterval        time.Duration
-	parentCtx           context.Context
-	parentCancel        context.CancelFunc
-	stopCh              chan struct{}
-	stopOnce            sync.Once
-	wg                  sync.WaitGroup
+	healthInterval time.Duration
+	syncInterval   time.Duration
+	parentCtx      context.Context
+	parentCancel   context.CancelFunc
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
 }
 
 // NewXianyuSyncService 创建同步任务服务。
@@ -85,7 +86,9 @@ func (s *XianyuSyncService) healthLoop() {
 				log.Printf("[XianyuSync] health check failed: %v", err)
 			}
 			// 健康时同步账号（保证状态新鲜）。
-			_ = s.worker.SyncAccounts(s.parentCtx)
+			if s.accountAutoRefreshEnabled(s.parentCtx) {
+				_ = s.worker.SyncAccounts(s.parentCtx)
+			}
 			// 每次巡检评估告警。
 			if s.alert != nil {
 				s.alert.Evaluate(s.parentCtx)
@@ -97,7 +100,7 @@ func (s *XianyuSyncService) healthLoop() {
 // syncLoop 每周期同步商品并自动绑定；advisory lock 阻止并发与立即刷新重复执行。
 func (s *XianyuSyncService) syncLoop() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.syncInterval)
+	ticker := time.NewTicker(s.currentSyncInterval(s.parentCtx))
 	defer ticker.Stop()
 	for {
 		select {
@@ -114,6 +117,32 @@ func (s *XianyuSyncService) syncLoop() {
 			}
 		}
 	}
+}
+
+func (s *XianyuSyncService) settings(ctx context.Context) XianyuSettings {
+	if s.control == nil {
+		return XianyuSettings{}
+	}
+	settings, err := s.control.GetSettings(ctx)
+	if err != nil {
+		return XianyuSettings{}
+	}
+	return settings
+}
+
+func (s *XianyuSyncService) currentSyncInterval(ctx context.Context) time.Duration {
+	minutes := s.settings(ctx).SyncIntervalMinutes
+	if minutes < 1 {
+		minutes = int(s.syncInterval / time.Minute)
+	}
+	if minutes < 1 {
+		minutes = 1
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (s *XianyuSyncService) accountAutoRefreshEnabled(ctx context.Context) bool {
+	return s.settings(ctx).AccountAutoRefresh
 }
 
 // advisoryLockKey 商品同步 advisory lock 键（与主程序内其他锁隔离）。
@@ -136,7 +165,7 @@ func (s *XianyuSyncService) RunProductSync(ctx context.Context) error {
 		return err
 	}
 	if !acquired {
-		return nil // 忙：跳过本轮
+		return ErrXianyuSyncBusy
 	}
 	defer func() {
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -144,8 +173,14 @@ func (s *XianyuSyncService) RunProductSync(ctx context.Context) error {
 		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, xianyuProductSyncLockKey)
 	}()
 
+	if !s.settings(ctx).ProductAutoBind {
+		return s.worker.SyncProducts(ctx)
+	}
 	if err := s.worker.SyncProducts(ctx); err != nil {
 		return err
 	}
-	return s.control.AutoBindProducts(ctx)
+	if err := s.control.AutoBindProducts(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }

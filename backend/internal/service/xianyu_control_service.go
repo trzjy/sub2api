@@ -20,14 +20,15 @@ type XianyuSettingStore interface {
 
 // XianyuControlService 提供控制面管理操作（admin 路由 + 自动绑定/同步任务）。
 type XianyuControlService struct {
-	control   XianyuControlRepository
-	claimRepo XianyuDeliveryRepository
-	stateRepo XianyuDeliveryStateUpdater
-	listRepo  XianyuDeliveryListRepository
-	encryptor SecretEncryptor
-	delivery  *XianyuDeliveryService
-	worker    *XianyuWorkerService
-	setting   XianyuDeliverySettingReader
+	control      XianyuControlRepository
+	claimRepo    XianyuDeliveryRepository
+	stateRepo    XianyuDeliveryStateUpdater
+	listRepo     XianyuDeliveryListRepository
+	encryptor    SecretEncryptor
+	delivery     *XianyuDeliveryService
+	worker       *XianyuWorkerService
+	sync         *XianyuSyncService
+	setting      XianyuDeliverySettingReader
 	settingStore XianyuSettingStore
 }
 
@@ -42,6 +43,7 @@ func NewXianyuControlService(
 	worker *XianyuWorkerService,
 	setting XianyuDeliverySettingReader,
 	settingStore XianyuSettingStore,
+	sync *XianyuSyncService,
 ) *XianyuControlService {
 	return &XianyuControlService{
 		control:      control,
@@ -51,6 +53,7 @@ func NewXianyuControlService(
 		encryptor:    encryptor,
 		delivery:     delivery,
 		worker:       worker,
+		sync:         sync,
 		setting:      setting,
 		settingStore: settingStore,
 	}
@@ -58,10 +61,10 @@ func NewXianyuControlService(
 
 // XianyuSettings 是控制面设置视图。
 type XianyuSettings struct {
-	DeliveryEnabled    bool `json:"delivery_enabled"`
-	AccountAutoRefresh bool `json:"account_auto_refresh"`
-	ProductAutoBind    bool `json:"product_auto_bind"`
-	SyncIntervalMinutes int `json:"sync_interval_minutes"`
+	DeliveryEnabled     bool `json:"delivery_enabled"`
+	AccountAutoRefresh  bool `json:"account_auto_refresh"`
+	ProductAutoBind     bool `json:"product_auto_bind"`
+	SyncIntervalMinutes int  `json:"sync_interval_minutes"`
 }
 
 // GetSettings 读取控制面设置。
@@ -79,9 +82,9 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 		return XianyuSettings{}, err
 	}
 	out := XianyuSettings{
-		DeliveryEnabled:    vals[SettingKeyXianyuDeliveryEnabled] == "true",
-		AccountAutoRefresh: isFalseSettingValue(vals[SettingKeyXianyuAccountAutoRefresh]) == false,
-		ProductAutoBind:    isFalseSettingValue(vals[SettingKeyXianyuProductAutoBind]) == false,
+		DeliveryEnabled:     vals[SettingKeyXianyuDeliveryEnabled] == "true",
+		AccountAutoRefresh:  isFalseSettingValue(vals[SettingKeyXianyuAccountAutoRefresh]) == false,
+		ProductAutoBind:     isFalseSettingValue(vals[SettingKeyXianyuProductAutoBind]) == false,
 		SyncIntervalMinutes: 5,
 	}
 	if v := vals[SettingKeyXianyuSyncIntervalMinutes]; v != "" {
@@ -100,6 +103,11 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 	if settings.SyncIntervalMinutes < 1 {
 		settings.SyncIntervalMinutes = 5
 	}
+	if settings.DeliveryEnabled && s.worker != nil {
+		if err := s.worker.CheckHealth(ctx); err != nil {
+			return err
+		}
+	}
 	values := map[string]string{
 		SettingKeyXianyuDeliveryEnabled:     strconv.FormatBool(settings.DeliveryEnabled),
 		SettingKeyXianyuAccountAutoRefresh:  strconv.FormatBool(settings.AccountAutoRefresh),
@@ -112,7 +120,7 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 // Enabled 返回闲鱼发货总开关。
 func (s *XianyuControlService) Enabled(ctx context.Context) bool {
 	return s.setting != nil && s.setting.GetXianyuDeliveryRuntime(ctx).Enabled
-}// GetActiveWorkerConfig 返回当前 active Worker 配置（告警巡检用）。
+} // GetActiveWorkerConfig 返回当前 active Worker 配置（告警巡检用）。
 func (s *XianyuControlService) GetActiveWorkerConfig(ctx context.Context) (*XianyuWorkerConfig, error) {
 	return s.control.GetActiveWorkerConfig(ctx)
 }
@@ -447,10 +455,10 @@ func (s *XianyuControlService) SyncAccounts(ctx context.Context) error {
 
 // SyncProducts 立即刷新商品。
 func (s *XianyuControlService) SyncProducts(ctx context.Context) error {
-	if s.worker == nil {
+	if s.worker == nil || s.sync == nil {
 		return ErrXianyuDeliveryNotConfigured
 	}
-	return s.worker.SyncProducts(ctx)
+	return s.sync.RunProductSync(ctx)
 }
 
 // CreateLoginSession 创建扫码会话。
@@ -501,23 +509,23 @@ func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo s
 // 概览
 // ---------------------------------------------------------------------------// XianyuOverview 是概览页数据。
 type XianyuOverview struct {
-	WorkerHealthy       bool  `json:"worker_healthy"`
-	EnabledAccounts     int   `json:"enabled_accounts"`
-	RunningTasks        int   `json:"running_tasks"`
-	UnmappedProducts    int   `json:"unmapped_products"`
-	Pools               []XianyuPoolOverview `json:"pools"`
-	TodayDelivered      int   `json:"today_delivered"`
-	TodayFailed         int   `json:"today_failed"`
-	PendingDeliveries   int   `json:"pending_deliveries"`
+	WorkerHealthy     bool                 `json:"worker_healthy"`
+	EnabledAccounts   int                  `json:"enabled_accounts"`
+	RunningTasks      int                  `json:"running_tasks"`
+	UnmappedProducts  int                  `json:"unmapped_products"`
+	Pools             []XianyuPoolOverview `json:"pools"`
+	TodayDelivered    int                  `json:"today_delivered"`
+	TodayFailed       int                  `json:"today_failed"`
+	PendingDeliveries int                  `json:"pending_deliveries"`
 }
 
 // XianyuPoolOverview 是池库存概览。
 type XianyuPoolOverview struct {
-	Pool           XianyuItemPool `json:"pool"`
-	Remaining      int            `json:"remaining"`
-	Used           int            `json:"used"`
-	Disabled       int            `json:"disabled"`
-	LowStock       bool           `json:"low_stock"`
+	Pool      XianyuItemPool `json:"pool"`
+	Remaining int            `json:"remaining"`
+	Used      int            `json:"used"`
+	Disabled  int            `json:"disabled"`
+	LowStock  bool           `json:"low_stock"`
 }
 
 func (s *XianyuControlService) GetOverview(ctx context.Context) (*XianyuOverview, error) {

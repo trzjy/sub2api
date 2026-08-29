@@ -10,10 +10,10 @@ import (
 // XianyuWorkerService 聚合 Worker 控制面操作：健康检查、账号同步、商品同步、
 // 扫码登录、账号启停、Cookie 刷新、绑定规则与池管理。
 type XianyuWorkerService struct {
-	control     XianyuControlRepository
-	encryptor   SecretEncryptor
-	forbidLoop  bool
-	clientFor   func(baseURL, token string) *XianyuWorkerClient
+	control    XianyuControlRepository
+	encryptor  SecretEncryptor
+	forbidLoop bool
+	clientFor  func(baseURL, token string) *XianyuWorkerClient
 }
 
 // NewXianyuWorkerService 创建 Worker 控制面服务。
@@ -48,13 +48,21 @@ func (s *XianyuWorkerService) CheckHealth(ctx context.Context) error {
 	now := time.Now()
 	health, err := client.Health(ctx)
 	newStatus := XianyuWorkerHealthUnhealthy
-	if err == nil && health != nil && health.Backend && health.Database {
+	if err == nil && health != nil && health.Backend && health.WebSocket && health.Database {
 		newStatus = XianyuWorkerHealthHealthy
 	}
 	cfg.HealthStatus = newStatus
 	cfg.LastCheckedAt = &now
-	_, err = s.control.UpdateWorkerConfig(ctx, *cfg)
-	return err
+	if _, updateErr := s.control.UpdateWorkerConfig(ctx, *cfg); updateErr != nil {
+		return updateErr
+	}
+	if err != nil {
+		return err
+	}
+	if newStatus != XianyuWorkerHealthHealthy {
+		return ErrXianyuWorkerUnhealthy
+	}
+	return nil
 }
 
 // SyncAccounts 拉取 Worker 账号列表并落库。
@@ -151,6 +159,39 @@ func (s *XianyuWorkerService) RefreshCookie(ctx context.Context, accountID strin
 		return nil, err
 	}
 	return saved, nil
+}
+
+// ResendDelivery resends an already-claimed code to the same buyer over the
+// Worker's internal channel. It does not allocate or consume new inventory.
+func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuOrderClaim) error {
+	if s == nil || claim == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	client, workerCfg, err := s.clientForActiveWorker(ctx)
+	if err != nil {
+		return err
+	}
+	account, err := s.control.GetAccountByWorkerAndAccountID(ctx, workerCfg.ID, claim.AccountID)
+	if err != nil {
+		return err
+	}
+	if account.Status != XianyuAccountStatusEnabled {
+		return ErrXianyuAccountDisabled
+	}
+	result, err := client.ResendDelivery(
+		ctx, account.AccountID, claim.OrderNo, claim.ItemID, claim.BuyerID, claim.BuyerID, claim.Code,
+	)
+	if err != nil {
+		return err
+	}
+	if result == nil || !result.Success || result.SendStatus != "success" {
+		message := "worker did not confirm delivery"
+		if result != nil && result.Message != "" {
+			message = result.Message
+		}
+		return &XianyuWorkerError{StatusCode: 500, Reason: "DELIVERY_NOT_CONFIRMED", Message: message}
+	}
+	return nil
 }
 
 // SyncProducts 拉取账号在售商品并落库；只在不覆盖手工绑定映射的前提下更新。

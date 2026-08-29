@@ -6,17 +6,27 @@ import (
 	"time"
 )
 
+// XianyuNotificationSender 是告警发送端口（由 NotificationEmailService 实现）。
+type XianyuNotificationSender interface {
+	Send(ctx context.Context, input NotificationEmailSendInput) error
+}
+
 // XianyuAlertService 负责闲鱼告警：复用现有管理员邮件通知机制。
 // 按「目标 ID + 事件」去重；恢复或事件状态变化时发送恢复通知。
 type XianyuAlertService struct {
 	control      *XianyuControlService
-	settingStore SettingRepository
-	notify       *NotificationEmailService
+	settingStore XianyuSettingStore
+	notify       XianyuNotificationSender
 	settingsOnly bool
+
+	// workerWasUnhealthy 记录上次巡检的 Worker 健康状态，用于只在
+	// unhealthy -> healthy 迁移时发送恢复通知（避免每次巡检重复发送）。
+	workerWasUnhealthy bool
+	workerKnown        bool
 }
 
 // NewXianyuAlertService 创建告警服务。
-func NewXianyuAlertService(control *XianyuControlService, settingStore SettingRepository, notify *NotificationEmailService) *XianyuAlertService {
+func NewXianyuAlertService(control *XianyuControlService, settingStore XianyuSettingStore, notify XianyuNotificationSender) *XianyuAlertService {
 	return &XianyuAlertService{control: control, settingStore: settingStore, notify: notify}
 }
 
@@ -64,16 +74,82 @@ func (s *XianyuAlertService) Evaluate(ctx context.Context) {
 	s.evaluatePendingTimeouts(ctx)
 }
 
+// xianyuWorkerAlertDecision 描述一次 worker 告警巡检的输出。
+type xianyuWorkerAlertDecision struct {
+	// Alerted 表示本次是否需要发送告警邮件。
+	Alerted bool
+	// Recovery 表示本次是否是恢复通知（unhealthy -> healthy）。
+	Recovery bool
+	// Reminder 是通知去重键（unhealthy / recovered / ""）。
+	Reminder string
+	// WorkerID 用于组装 source ID 与变量。
+	WorkerID string
+	// HealthStatus 透传给通知变量。
+	HealthStatus string
+	// LastCheckedAt 透传给通知变量。
+	LastCheckedAt time.Time
+}
+
+// workerHealthTransition 计算基于上次状态的告警决策（纯函数，便于单测）。
+func workerHealthTransition(known, wasUnhealthy bool, healthStatus string, workerID string, lastChecked time.Time) xianyuWorkerAlertDecision {
+	switch healthStatus {
+	case XianyuWorkerHealthUnknown, XianyuWorkerHealthUnhealthy:
+		if known && wasUnhealthy {
+			// 同事件未恢复不重复发送。
+			return xianyuWorkerAlertDecision{WorkerID: workerID, HealthStatus: healthStatus, LastCheckedAt: lastChecked}
+		}
+		return xianyuWorkerAlertDecision{
+			Alerted: true, Reminder: "unhealthy",
+			WorkerID: workerID, HealthStatus: healthStatus, LastCheckedAt: lastChecked,
+		}
+	default: // healthy / unknown
+		if known && wasUnhealthy {
+			// 恢复通知。
+			return xianyuWorkerAlertDecision{
+				Alerted: true, Recovery: true, Reminder: "recovered",
+				WorkerID: workerID, HealthStatus: healthStatus, LastCheckedAt: lastChecked,
+			}
+		}
+		return xianyuWorkerAlertDecision{WorkerID: workerID, HealthStatus: healthStatus, LastCheckedAt: lastChecked}
+	}
+}
+
 func (s *XianyuAlertService) evaluateWorker(ctx context.Context) {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
-		s.send(ctx, NotificationEmailEventXianyuWorkerUnhealthy, "worker", "unhealthy", map[string]string{
-			"worker_id": "unknown", "status": "unhealthy", "last_checked_at": time.Now().Format(time.RFC3339),
+		// 无 active Worker 配置：视为不可用并告警；无已知恢复态。
+		s.workerKnown = true
+		s.workerWasUnhealthy = true
+		s.sendAlert(NotificationEmailEventXianyuWorkerUnhealthy, "worker", "unhealthy", map[string]string{
+			"worker_id":       "unknown",
+			"status":          "unhealthy",
+			"last_checked_at": time.Now().Format(time.RFC3339),
 		})
 		return
 	}
-	_ = workerCfg
-	// 健康检查结果由定时任务更新，这里只在明确 unhealthy 时告警。
+	// 健康检查结果由定时任务写入 xianyu_worker_configs.health_status；
+	// unknown 是没有成功完成健康检查的事实状态，也必须告警。
+	lastChecked := time.Now()
+	if workerCfg.LastCheckedAt != nil {
+		lastChecked = *workerCfg.LastCheckedAt
+	}
+	decision := workerHealthTransition(s.workerKnown, s.workerWasUnhealthy, workerCfg.HealthStatus,
+		strconv.FormatInt(workerCfg.ID, 10), lastChecked)
+	if decision.Alerted {
+		s.sendAlert(NotificationEmailEventXianyuWorkerUnhealthy,
+			"worker:"+decision.WorkerID, decision.Reminder, map[string]string{
+				"worker_id":       decision.WorkerID,
+				"status":          decision.HealthStatus,
+				"last_checked_at": lastChecked.Format(time.RFC3339),
+			})
+	}
+	s.workerKnown = true
+	s.workerWasUnhealthy = workerCfg.HealthStatus != XianyuWorkerHealthHealthy
+}
+
+// sendAlert 发送一封告警邮件（失败不阻断巡检）。
+func (s *XianyuAlertService) sendAlert(event, sourceID, reminder string, variables map[string]string) {
+	s.send(context.Background(), event, sourceID, reminder, variables)
 }
 
 func (s *XianyuAlertService) evaluateAccounts(ctx context.Context) {

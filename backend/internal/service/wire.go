@@ -829,7 +829,7 @@ func ProvideXianyuWorkerService(
 // ProvideXianyuAlertService 创建闲鱼告警服务。
 func ProvideXianyuAlertService(
 	control *XianyuControlService,
-	settingStore SettingRepository,
+	settingStore XianyuSettingStore,
 	notify *NotificationEmailService,
 ) *XianyuAlertService {
 	return NewXianyuAlertService(control, settingStore, notify)
@@ -846,6 +846,14 @@ func ProvideXianyuSyncService(
 	svc := NewXianyuSyncService(control, worker, alert, db, setting)
 	svc.Start()
 	return svc
+}
+
+var xianyuSyncService *XianyuSyncService
+
+// ProvideXianyuSettingStore adapts the broader setting repository to the
+// xianyu control plane's read/write contract.
+func ProvideXianyuSettingStore(repo SettingRepository) XianyuSettingStore {
+	return repo
 }
 
 // ProvideSystemUserReader 将 UserRepository 暴露为 SystemUserReader（启动校验用）。
@@ -880,7 +888,7 @@ func ProvideXianyuControlService(
 	delivery *XianyuDeliveryService,
 	worker *XianyuWorkerService,
 	setting XianyuDeliverySettingReader,
-	settingStore SettingRepository,
+	settingStore XianyuSettingStore,
 	db *sql.DB,
 ) (*XianyuControlService, error) {
 	migration := NewXianyuLegacyMigration(db, control, encryptor)
@@ -888,7 +896,7 @@ func ProvideXianyuControlService(
 		// 迁移失败时启动失败关闭，不进入半迁移状态。
 		return nil, fmt.Errorf("xianyu legacy item_pools migration: %w", err)
 	}
-	return NewXianyuControlService(control, claimRepo, stateRepo, listRepo, encryptor, delivery, worker, setting, settingStore), nil
+	return NewXianyuControlService(control, claimRepo, stateRepo, listRepo, encryptor, delivery, worker, setting, settingStore, xianyuSyncService), nil
 }
 
 // ProviderSet is the Wire provider set for all services
@@ -910,6 +918,7 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuControlService,
 	ProvideXianyuAlertService,
 	ProvideXianyuSyncService,
+	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,
 	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),
 	NewPromoService,
@@ -952,7 +961,7 @@ var ProviderSet = wire.NewSet(
 	ProvideCNProviderBalanceService,
 	ProvideCNProviderBalanceCheckService,
 	ProvideAccountBalanceProbeCheckService,
-	ProvideClaudeTokenProvider,	NewAntigravityGatewayService,
+	ProvideClaudeTokenProvider, NewAntigravityGatewayService,
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
 	ProvideAccountTestService,
