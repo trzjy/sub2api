@@ -10,6 +10,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -127,6 +128,17 @@ type XianyuDeliveryConfig struct {
 	InternalToken string `mapstructure:"internal_token"`
 	// SystemUserID 系统审计用户 ID（兑换码领用 audit 归属）。
 	SystemUserID int64 `mapstructure:"system_user_id"`
+}
+
+func (c *XianyuDeliveryConfig) setDefaultsFromEnv() {
+	if value := strings.TrimSpace(os.Getenv("XIANYU_INTERNAL_TOKEN")); value != "" && strings.TrimSpace(c.InternalToken) == "" {
+		c.InternalToken = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XIANYU_SYSTEM_USER_ID")); value != "" && c.SystemUserID <= 0 {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
+			c.SystemUserID = parsed
+		}
+	}
 }
 
 type LogConfig struct {
@@ -1840,6 +1852,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config error: %w", err)
 	}
+	cfg.XianyuDelivery.setDefaultsFromEnv()
 	if trustedProxiesEnvConfigured {
 		cfg.Server.TrustedProxies = normalizeStringSlice(strings.Split(trustedProxiesEnv, ","))
 	}
