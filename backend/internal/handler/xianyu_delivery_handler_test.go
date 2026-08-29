@@ -166,3 +166,67 @@ func TestXianyuDeliveryHandlerRejectsOversizedBody(t *testing.T) {
 	r.ServeHTTP(resp, req)
 	require.Equal(t, http.StatusBadRequest, resp.Code)
 }
+
+// xianyuHandlerStateStub 实现 XianyuDeliveryStateUpdater，供 DeliveryResult 测试。
+type xianyuHandlerStateStub struct {
+	recorded *service.XianyuDeliveryStatusResult
+}
+
+func (s *xianyuHandlerStateStub) RecordDeliveryResult(_ context.Context, result service.XianyuDeliveryStatusResult) error {
+	s.recorded = &result
+	return nil
+}
+func (s *xianyuHandlerStateStub) GetDeliveryClaim(context.Context, string) (*service.XianyuOrderClaim, error) {
+	return nil, nil
+}
+func (s *xianyuHandlerStateStub) ResendOriginalCode(context.Context, string, int64) (string, error) {
+	return "", nil
+}
+
+func TestXianyuDeliveryHandlerRecordsResult(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	state := &xianyuHandlerStateStub{}
+	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+		InternalToken: "test-secret", SystemUserID: 1,
+	}}
+	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, cfg, newXianyuSettingsStub(true), nil)
+	h := NewXianyuDeliveryHandler(delivery, cfg)
+
+	r := gin.New()
+	r.POST("/delivery-results", h.DeliveryResult)
+
+	body := bytes.NewBufferString(`{"order_no":"order-1","success":true,"confirmed":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/delivery-results", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "test-secret")
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.NotNil(t, state.recorded)
+	require.Equal(t, "order-1", state.recorded.OrderNo)
+	require.True(t, state.recorded.Success)
+	require.True(t, state.recorded.Confirmed)
+}
+
+func TestXianyuDeliveryHandlerResultRequiresTokenAndOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newXianyuHandlerForTest()
+	r := gin.New()
+	r.POST("/delivery-results", h.DeliveryResult)
+
+	// 缺 token -> 401
+	body := bytes.NewBufferString(`{"order_no":"order-1","success":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/delivery-results", body)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusUnauthorized, resp.Code)
+
+	// 有 token 但缺 order_no -> 400
+	req = httptest.NewRequest(http.MethodPost, "/delivery-results", bytes.NewBufferString(`{"success":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "test-secret")
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+}

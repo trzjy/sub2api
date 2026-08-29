@@ -103,6 +103,7 @@ services:
       - ../xianyu_worker_data:/app/data
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      HOST: "0.0.0.0"
       # Worker 回传主程序的内网地址与双向认证 token：部署时固定注入。
       SUB2API_INTERNAL_BASE_URL: "http://sub2api:8080"
       SUB2API_INTERNAL_TOKEN: ${XIANYU_INTERNAL_TOKEN}
@@ -123,7 +124,7 @@ services:
         aliases:
           - xianyu-worker-backend
     healthcheck:
-      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8089/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
