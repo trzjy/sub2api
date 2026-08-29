@@ -92,11 +92,13 @@ type XianyuWorkerResult struct {
 	Message    string `json:"message,omitempty"`
 	SendStatus string `json:"send_status,omitempty"`
 	Data       *struct {
+		Success    bool   `json:"success,omitempty"`
 		SendStatus string `json:"send_status,omitempty"`
 	} `json:"data,omitempty"`
 }
 
-// Health 检查后端、WebSocket 和数据库连通性。Worker 可能返回标准包装响应。
+// Health 检查后端、WebSocket 和数据库连通性。
+// Worker 健康端点同时兼容裸响应和标准包装响应。
 func (c *XianyuWorkerClient) Health(ctx context.Context) (*XianyuWorkerHealth, error) {
 	var out XianyuWorkerHealth
 	var wrapped struct {
@@ -108,6 +110,10 @@ func (c *XianyuWorkerClient) Health(ctx context.Context) (*XianyuWorkerHealth, e
 	}
 	if wrapped.Data != nil {
 		out = *wrapped.Data
+	} else {
+		if err := c.do(ctx, http.MethodGet, "/health", nil, &out, ""); err != nil {
+			return nil, err
+		}
 	}
 	out.Backend = out.Backend || wrapped.Success
 	return &out, nil
@@ -227,7 +233,8 @@ func (c *XianyuWorkerClient) do(ctx context.Context, method, path string, body a
 	if out == nil || len(payload) == 0 {
 		return nil
 	}
-	// Worker 可能返回标准包装 { code, message, data } 或裸对象。
+	// Worker 可能返回裸对象、一层 { code, message, data } 包装，
+	// 或 backend API 包装后再包一层 data 的双层响应。
 	if err := json.Unmarshal(payload, out); err != nil {
 		var wrapped struct {
 			Code int `json:"code"`
@@ -238,6 +245,14 @@ func (c *XianyuWorkerClient) do(ctx context.Context, method, path string, body a
 			return json.Unmarshal(raw, out)
 		}
 		return fmt.Errorf("decode xianyu worker response: %w", err)
+	}
+	var extra struct {
+		Data *json.RawMessage `json:"data"`
+	}
+	if jsonErr := json.Unmarshal(payload, &extra); jsonErr == nil && extra.Data != nil {
+		if err := json.Unmarshal(*extra.Data, out); err == nil {
+			return nil
+		}
 	}
 	return nil
 }

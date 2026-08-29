@@ -100,7 +100,8 @@ func (s *XianyuSyncService) healthLoop() {
 // syncLoop 每周期同步商品并自动绑定；advisory lock 阻止并发与立即刷新重复执行。
 func (s *XianyuSyncService) syncLoop() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.currentSyncInterval(s.parentCtx))
+	currentInterval := s.currentSyncInterval(s.parentCtx)
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -115,6 +116,11 @@ func (s *XianyuSyncService) syncLoop() {
 			if err := s.RunProductSync(s.parentCtx); err != nil {
 				log.Printf("[XianyuSync] product sync failed: %v", err)
 			}
+		}
+		nextInterval := s.currentSyncInterval(s.parentCtx)
+		if nextInterval != currentInterval {
+			currentInterval = nextInterval
+			ticker.Reset(nextInterval)
 		}
 	}
 }

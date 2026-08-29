@@ -184,7 +184,14 @@ func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuO
 	if err != nil {
 		return err
 	}
-	if result == nil || !result.Success || result.SendStatus != "success" {
+	sendStatus := ""
+	if result != nil {
+		sendStatus = result.SendStatus
+		if sendStatus == "" && result.Data != nil {
+			sendStatus = result.Data.SendStatus
+		}
+	}
+	if result == nil || !result.Success || sendStatus != "success" {
 		message := "worker did not confirm delivery"
 		if result != nil && result.Message != "" {
 			message = result.Message

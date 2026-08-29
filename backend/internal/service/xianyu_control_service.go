@@ -103,7 +103,10 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 	if settings.SyncIntervalMinutes < 1 {
 		settings.SyncIntervalMinutes = 5
 	}
-	if settings.DeliveryEnabled && s.worker != nil {
+	if settings.DeliveryEnabled {
+		if s.worker == nil {
+			return ErrXianyuDeliveryNotConfigured
+		}
 		if err := s.worker.CheckHealth(ctx); err != nil {
 			return err
 		}

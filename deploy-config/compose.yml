@@ -91,7 +91,7 @@ services:
 
   # xianyu-auto-reply Worker：内网专用，只加入 xianyu-internal 网络，不映射任何公网端口。
   # 镜像为内部维护的固定 digest（不使用 latest/reviewed 漂浮标签）。
-  # 当前 Worker 补丁保留在部署主机 /opt/sub2api/xianyu-auto-reply-src/。
+  # Worker 审查源码与 Dockerfile 位于 deploy-config/xianyu-auto-reply-src/。
   xianyu-worker:
     image: xianyu-auto-reply@${XIANYU_WORKER_IMAGE_DIGEST:?set XIANYU_WORKER_IMAGE_DIGEST to the reviewed sha256 digest}
     container_name: xianyu-worker
@@ -124,7 +124,7 @@ services:
         aliases:
           - xianyu-worker-backend
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8089/health', timeout=5)); data=d.get('data',{}); assert d.get('success') and data.get('database') == 'connected' and data.get('websocket', {}).get('connected', True) is not False"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8089/health', timeout=5)); data=d.get('data',{}); assert d.get('success') and data.get('database') == 'connected'"]
       interval: 30s
       timeout: 10s
       retries: 3

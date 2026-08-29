@@ -26,6 +26,21 @@ func TestXianyuWorkerClientHealth(t *testing.T) {
 	require.True(t, health.Database)
 }
 
+func TestXianyuWorkerClientHealthAcceptsBareResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"backend":true,"websocket":true,"database":true}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	health, err := client.Health(context.Background())
+	require.NoError(t, err)
+	require.True(t, health.Backend)
+	require.True(t, health.WebSocket)
+	require.True(t, health.Database)
+}
+
 func TestXianyuWorkerClientListAccounts(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/accounts", r.URL.Path)
@@ -84,4 +99,19 @@ func TestXianyuWorkerClientListProducts(t *testing.T) {
 	require.Equal(t, "i1", products[0].ItemID)
 	require.Equal(t, "s", products[0].SpecName)
 	require.Equal(t, "v", products[0].SpecValue)
+}
+
+func TestXianyuWorkerClientResendDeliveryAcceptsWrappedSendStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/internal/accounts/a1/send-message", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"success":true,"data":{"send_status":"success"}}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	result, err := client.ResendDelivery(context.Background(), "a1", "o1", "i1", "b1", "c1", "CODE")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "success", result.Data.SendStatus)
 }

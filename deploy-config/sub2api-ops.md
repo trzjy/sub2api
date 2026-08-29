@@ -363,7 +363,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 
 Worker 卡券（发货）调用主程序 Claim 时必须透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
 内部维护的 Worker 镜像固定到经审查的上游 commit，并叠加该最小 patch 与发货结果回传 patch（`POST /api/v1/internal/xianyu/delivery-results`）；Worker 端必须在获取到最终发送回执后再回传 `confirmed=true`，否则主程序保持 `pending` 并最终转人工。
-已审查的镜像 digest 为 `sha256:8343c385b7e3161f131d3b076198ab38d6bc284b963c5ebfea542ef2c21f46d5`；当前 Worker 补丁源码保留在部署主机 `/opt/sub2api/xianyu-auto-reply-src/`，包含 `cookie_id` 透传、内部发送回执等待与回传集成，变更该镜像前必须重新审查并更新 digest。
+已审查的镜像 digest 为 `sha256:8343c385b7e3161f131d3b076198ab38d6bc284b963c5ebfea542ef2c21f46d5`；对应的 Worker 审查源码与 Dockerfile 已入库在 `deploy-config/xianyu-auto-reply-src/`，包含 `cookie_id` 透传、内部发送回执等待与回传集成。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本，变更镜像前必须从仓库构建、重新审查并更新 digest。
 
 ---
 
