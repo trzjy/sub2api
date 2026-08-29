@@ -1243,5 +1243,7 @@ image_storage:
 # system_user_id：兑换码领用审计归属的系统用户 ID。
 # 旧配置键 xianyu_delivery.item_pools 已废弃，仅由一次性迁移器读取，迁移后不再作为运行时配置来源。
 xianyu_delivery:
+  # 仅兼容旧启动配置；运行时开关由管理面板 xianyu_delivery_enabled 控制。
+  enabled: false
   internal_token: ""
   system_user_id: 0

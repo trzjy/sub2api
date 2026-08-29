@@ -119,6 +119,9 @@ type PluginConfig struct {
 }
 
 type XianyuDeliveryConfig struct {
+	// Enabled is retained only for backward-compatible bootstrap files; the
+	// panel-managed xianyu_delivery_enabled setting is the runtime source.
+	Enabled bool `mapstructure:"enabled"`
 	// InternalToken 主程序基础设施凭据：Worker 回传与主程序到 Worker 的双向认证基础。
 	// 与 Worker 侧 SUB2API_INTERNAL_TOKEN 环境变量同值（部署时固定注入）。
 	InternalToken string `mapstructure:"internal_token"`
