@@ -795,7 +795,6 @@ const adminNavItems = computed((): NavItem[] => {
       path: '/admin/xianyu',
       label: t('nav.xianyuDelivery'),
       icon: TicketIcon,
-      hideInSimpleMode: true,
       featureFlag: flagXianyuDelivery,
       expandOnly: true,
       children: [
