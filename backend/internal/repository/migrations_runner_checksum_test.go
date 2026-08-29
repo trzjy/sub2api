@@ -11,7 +11,7 @@ func TestIsMigrationChecksumCompatible(t *testing.T) {
 		ok := isMigrationChecksumCompatible(
 			"232_xianyu_control_plane.sql",
 			"05ad0119cd1a772f34d9bf8e587ef159034e9d5e0e5972ebb9fc8883359afc31",
-			"05ad0119cd1a772f34d9bf8e587ef159034e9d5e0e5972ebb9fc8883359afc31",
+			"d453996b0bc5cea6547df1bc08919af6ac7bcb04b67055fc38774728d895019f",
 		)
 		require.True(t, ok)
 	})
