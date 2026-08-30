@@ -506,7 +506,8 @@ class AutoDeliveryHandler:
                                     sender_user_name: str, msg_time: str, order_id: str,
                                     delivery_contents: list, send_results: list,
                                     any_send_failed: bool,
-                                    defer_send_status_writeback: bool = False) -> dict | None:
+                                    defer_send_status_writeback: bool = False,
+                                    quantity_sent: int | None = None) -> dict | None:
         """将自动发货的发送结果写入消息日志表
 
         Args:
@@ -612,13 +613,16 @@ class AutoDeliveryHandler:
                     }
                 # 默认：起后台任务异步等待发送结果并回写发送状态（不阻塞发货主流程）；
                 # log_id 为空时仅消费/清理 waiter 并回传，跳过日志状态回写。
-                self._spawn_delivery_send_status_writeback(log_service, log_id, pending_send_waiters, order_id)
+                self._spawn_delivery_send_status_writeback(
+                    log_service, log_id, pending_send_waiters, order_id, quantity_sent
+                )
         except Exception as e:
             logger.error(f"【{self.cookie_id}】写入自动发货消息日志失败: {self._safe_str(e)}")
         return None
 
     def _spawn_delivery_send_status_writeback(
-        self, log_service, log_id: int, waiters: list, order_no: str | None = None
+        self, log_service, log_id: int, waiters: list, order_no: str | None = None,
+        quantity_sent: int | None = None,
     ) -> None:
         """起后台任务：异步等待自动发货的发送结果并回写日志发送状态
 
@@ -629,11 +633,14 @@ class AutoDeliveryHandler:
             log_id: 日志主键ID
             waiters: 本次发出消息的 (send_future, mid) 列表
             order_no: 订单号（用于向主程序回传发货结果，可空）
+            quantity_sent: 实际成功发送的卡券份数（透传到主程序 quantity_sent 字段）
         """
         try:
             # handler 自身无任务追踪器，复用 parent（XianyuAsync）的追踪任务创建方法
             self.parent._create_tracked_task(
-                self._writeback_delivery_send_status(log_service, log_id, waiters, order_no)
+                self._writeback_delivery_send_status(
+                    log_service, log_id, waiters, order_no, quantity_sent=quantity_sent
+                )
             )
         except Exception as e:  # noqa: BLE001
             # 消费者确实无法启动：立即逐项 pop 并取消未完成 Future，避免 _receipts 泄漏。
@@ -693,13 +700,18 @@ class AutoDeliveryHandler:
         return reasons, confirmed, timed_out
 
     async def _report_delivery_receipt(
-        self, order_no: str, *, reasons: list, any_confirmed: bool, any_timeout: bool
+        self, order_no: str, *, reasons: list, any_confirmed: bool, any_timeout: bool,
+        quantity_sent: int | None = None,
     ) -> None:
         """按最终回执三态向主程序回传 delivery-results（收敛到共享实现）。
 
         只有明确成功回执才 confirmed=true（主程序标记 sent）；
         明确拒绝 → confirmed=false + error（主程序标 failed）；
         超时/异常（未拿到最终回执）→ confirmed=false（主程序保持 pending）。
+
+        Args:
+            quantity_sent: 实际成功获取/发送的卡券份数；只在 sent 路径透传到主程序。
+                主程序默认 quantity_sent=0；降级为 1 份时仍传 1（与订单原始 quantity 分离）。
         """
         if not order_no:
             return
@@ -707,11 +719,16 @@ class AutoDeliveryHandler:
             report_delivery_result_by_receipt,
         )
         await report_delivery_result_by_receipt(
-            order_no, reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout
+            order_no,
+            reasons=reasons,
+            any_confirmed=any_confirmed,
+            any_timeout=any_timeout,
+            quantity_sent=quantity_sent,
         )
 
     async def _writeback_delivery_send_status(
-        self, log_service, log_id: int, waiters: list, order_no: str | None = None
+        self, log_service, log_id: int, waiters: list, order_no: str | None = None,
+        quantity_sent: int | None = None,
     ) -> None:
         """等待各发送响应，按结果回写自动发货日志的发送状态，并回传 delivery-results。
 
@@ -720,6 +737,9 @@ class AutoDeliveryHandler:
 
         回传 confirmed 语义与日志口径分离：只有明确成功回执才 confirmed=true，
         超时/异常保持主程序 pending（不把超时伪装成最终发送成功）。
+
+        quantity_sent 由上游传入（_record_delivery_log 阶段已经按"实际成功发送"统计）；
+        仅在 sent 路径（明确成功回执）由 _report_delivery_receipt 透传给主程序。
         """
         try:
             reasons, any_confirmed, any_timeout = await self._resolve_send_receipts(
@@ -736,7 +756,11 @@ class AutoDeliveryHandler:
                 else:
                     await log_service.safe_update_send_status(log_id, "success", None)
             await self._report_delivery_receipt(
-                order_no or "", reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout
+                order_no or "",
+                reasons=reasons,
+                any_confirmed=any_confirmed,
+                any_timeout=any_timeout,
+                quantity_sent=quantity_sent,
             )
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】回写发货发送状态异常 log_id={log_id}: {self._safe_str(e)}")
@@ -1360,16 +1384,44 @@ class AutoDeliveryHandler:
                         )
                         quantity_to_send = 1
 
-                    # 注册订单级发货记录到主程序（幂等，失败不阻断发货）：
-                    # 主程序按 order_no 幂等创建 Worker 发货记录，只记订单级汇总（数量/状态/错误），
-                    # Worker 本地库存与逐份发货实现保持不变；delivery-results 回传由主程序更新同一条记录。
-                    try:
-                        from common.services.sub2api_delivery_result_client import ensure_delivery_record
-                        await ensure_delivery_record(order_id, quantity_to_send, "auto")
-                    except Exception as _record_e:
-                        logger.warning(
-                            f"【{self.cookie_id}】注册 Worker 发货记录异常（不阻断发货）order={order_id}: {self._safe_str(_record_e)}"
-                        )
+                    # 注册订单级发货记录到主程序：
+                    # - 已配置主程序回传地址（sub2api_internal_base_url/token）：ensure_delivery_record
+                    #   内部已做有限重试（最多 3 次），最终失败必须硬落地终止本次发货，
+                    #   避免 Worker 已发但主程序无记录造成孤儿订单。
+                    # - 未配置（standalone 模式）：ensure_delivery_record 直接返回 False，
+                    #   不阻断本地发货流程（保留既有边界）。
+                    from common.services.sub2api_delivery_result_client import (
+                        ensure_delivery_record,
+                        is_configured,
+                    )
+                    if is_configured():
+                        ensured = await ensure_delivery_record(order_id, quantity_to_send, "auto")
+                        if not ensured:
+                            fail_msg = (
+                                f"注册 Worker 发货记录到主程序失败（已重试耗尽）："
+                                f"order_id={order_id}, quantity={quantity_to_send}。"
+                                f"为避免孤儿订单，本次发货硬落地终止。"
+                            )
+                            logger.error(f"【{self.cookie_id}】{fail_msg}")
+                            if closed_order_card_only:
+                                # card_only 模式：保留 pre_check 写入的禁止发货原因 + 不重复通知买家。
+                                logger.info(
+                                    f'[{msg_time}] 【{self.cookie_id}】card_only 模式注册主程序记录失败，'
+                                    f'保留 pre_check 禁止发货原因 order_id={order_id}'
+                                )
+                            else:
+                                await self._update_delivery_fail_reason(order_id, fail_msg)
+                            # 提前结束本次发货：跳过后续卡券循环、消息发送、确认发货与回执回传。
+                            return
+                    else:
+                        # standalone 模式：保留旧"失败不阻断"行为；本地发货继续进行。
+                        try:
+                            await ensure_delivery_record(order_id, quantity_to_send, "auto")
+                        except Exception as _record_e:
+                            logger.warning(
+                                f"【{self.cookie_id}】standalone 注册 Worker 发货记录异常（不阻断发货）"
+                                f"order={order_id}: {self._safe_str(_record_e)}"
+                            )
 
                     # 多次调用自动发货方法，每次获取不同的内容
                     delivery_contents = []
@@ -1661,6 +1713,7 @@ class AutoDeliveryHandler:
                             send_results=send_results,
                             any_send_failed=any_send_failed,
                             defer_send_status_writeback=wait_card_receipt,
+                            quantity_sent=sum(1 for r in (send_results or []) if r.get("success")),
                         )
 
                         # "卡券发送成功再确认发货"模式：卡券已发送，现在执行确认发货
@@ -1915,6 +1968,15 @@ class AutoDeliveryHandler:
                             await self._update_delivery_fail_reason(order_id, fail_msg)
                             # 发送自动发货失败通知
                             await self.send_delivery_failure_notification(send_user_name, send_user_id, item_id, fail_msg, chat_id)
+                        # pre-send 阶段失败（未发生发送副作用）：回传主程序 success=false, confirmed=false，
+                        # 把订单级记录标 failed，避免"主程序 ensure 已建 pending 但永远不更新"的孤儿订单。
+                        # standalone 模式（未配置主程序回传）下 _report_delivery_receipt 直接跳过。
+                        await self._report_delivery_receipt(
+                            order_id or "",
+                            reasons=[fail_msg],
+                            any_confirmed=False,
+                            any_timeout=False,
+                        )
 
                 except Exception as e:
                     fail_msg = f"自动发货处理异常: {str(e)}"
@@ -1931,6 +1993,13 @@ class AutoDeliveryHandler:
                         await self._update_delivery_fail_reason(order_id, fail_msg)
                         # 发送自动发货异常通知
                         await self.send_delivery_failure_notification(send_user_name, send_user_id, item_id, fail_msg, chat_id)
+                    # pre-send 阶段处理异常（未发生发送副作用）：同上回传失败回执。
+                    await self._report_delivery_receipt(
+                        order_id or "",
+                        reasons=[fail_msg],
+                        any_confirmed=False,
+                        any_timeout=False,
+                    )
 
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】自动发货处理完成: {lock_key}')
 
