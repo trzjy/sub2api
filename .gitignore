@@ -162,3 +162,4 @@ output/
 /plugins/
 # 外审工具运行产物（本机，不入库）
 /.omx/
+.hypothesis/

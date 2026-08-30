@@ -43,10 +43,11 @@ python -m venv /tmp/worker-venv
 PYTHONPATH=backend-web:. /tmp/worker-venv/bin/python -m pytest backend-web/tests -p asyncio
 ```
 
-## Digest discipline
+## Tag discipline
 
-`XIANYU_WORKER_IMAGE_DIGEST` in `deploy-config/sub2api-ops.md` must stay
-synchronized with every rebuild: build from this directory, review the resulting
-image, then update the digest. The documented `sha256:8343c385...` value refers
-to an older reviewed image without the launcher / internal routes / receipt
-callback landed in this directory.
+`XIANYU_WORKER_IMAGE_TAG` in `deploy-config/sub2api-ops.md` §11.2 must stay
+synchronized with every rebuild: build from this directory, then update the
+tag value and the corresponding built image ID. The legacy
+`XIANYU_WORKER_IMAGE_DIGEST` field has been retired in favor of a pinned tag
+(local builds produce no registry RepoDigest, so a fixed tag is the reliable
+reference).
