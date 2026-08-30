@@ -2423,6 +2423,8 @@ export interface XianyuOverviewPool {
 
 export interface XianyuOverview {
   worker_healthy: boolean
+  worker_health_status?: 'unknown' | 'healthy' | 'unhealthy'
+  worker_last_checked_at?: string | null
   enabled_accounts: number
   running_tasks: number
   unmapped_products: number
@@ -2516,5 +2518,7 @@ export interface XianyuOrderClaim {
 
 export interface XianyuLoginSessionStatus {
   status: 'waiting' | 'scanned' | 'success' | 'failed' | 'expired'
+  session_id?: string
   qr_code?: string
+  message?: string
 }

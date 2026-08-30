@@ -21,13 +21,14 @@
             </div>
             <div>
               <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.baseUrl') }}</label>
-              <input v-model="form.base_url" class="input w-full" :placeholder="t('admin.xianyu.settings.baseUrlHint')" />
+              <input v-model="form.base_url" class="input w-full" autocomplete="off" autocapitalize="off" spellcheck="false" :placeholder="t('admin.xianyu.settings.baseUrlHint')" />
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.baseUrlHint') }}</p>
             </div>
             <div>
               <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.apiToken') }}</label>
-              <input v-model="form.api_token" type="password" class="input w-full" :placeholder="t('admin.xianyu.settings.apiTokenHint')" />
+              <input v-model="form.api_token" type="password" class="input w-full" autocomplete="new-password" :placeholder="t('admin.xianyu.settings.apiTokenHint')" />
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.apiTokenHint') }}</p>
+              <p v-if="workerConfig" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ t('admin.xianyu.settings.tokenLeaveBlank') }}</p>
             </div>
             <div class="flex items-center gap-2">
               <button class="btn btn-primary" @click="saveWorker">
@@ -48,12 +49,14 @@
             <div class="flex items-center justify-between">
               <div>
                 <label class="text-sm font-medium">{{ t('admin.xianyu.settings.deliveryEnabled') }}</label>
+                <p class="text-xs text-gray-400 dark:text-gray-500">{{ t('admin.xianyu.settings.deliveryEnabledHint') }}</p>
               </div>
               <Toggle v-model="settingsForm.delivery_enabled" />
             </div>
             <div class="flex items-center justify-between">
               <div>
                 <label class="text-sm font-medium">{{ t('admin.xianyu.settings.accountAutoRefresh') }}</label>
+                <p class="text-xs text-gray-400 dark:text-gray-500">{{ t('admin.xianyu.settings.accountAutoRefreshHint') }}</p>
               </div>
               <Toggle v-model="settingsForm.account_auto_refresh" />
             </div>
@@ -64,8 +67,9 @@
               <Toggle v-model="settingsForm.product_auto_bind" />
             </div>
             <div>
-              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.autoRefreshPeriod') }}</label>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.productSyncPeriod') }}</label>
               <input v-model.number="settingsForm.sync_interval_minutes" type="number" min="1" class="input w-full" />
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.productSyncPeriodHint') }}</p>
             </div>
             <div class="flex justify-end">
               <button class="btn btn-primary" @click="saveToggles">

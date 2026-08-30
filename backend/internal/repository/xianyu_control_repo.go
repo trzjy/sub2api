@@ -106,6 +106,21 @@ func (r *xianyuControlRepository) GetActiveWorkerConfig(ctx context.Context) (*s
 	return cfg, nil
 }
 
+func (r *xianyuControlRepository) GetWorkerConfigByID(ctx context.Context, id int64) (*service.XianyuWorkerConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT `+xianyuWorkerConfigColumns+`
+		FROM xianyu_worker_configs
+		WHERE id = $1`, id)
+	cfg, err := scanWorkerConfig(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuWorkerConfigNotFound
+		}
+		return nil, fmt.Errorf("get xianyu worker config by id: %w", err)
+	}
+	return cfg, nil
+}
+
 const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, status, cookie_status, task_status, last_login_at, last_seen_at, created_at, updated_at`
 
 func scanAccount(row interface{ Scan(...any) error }) (*service.XianyuAccount, error) {

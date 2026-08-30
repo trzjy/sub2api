@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -81,13 +83,28 @@ func (s *XianyuWorkerService) SyncAccounts(ctx context.Context) error {
 		if err == nil {
 			status = existing.Status
 		}
+		cookieStatus := XianyuCookieStatusUnknown
+		taskStatus := XianyuTaskStatusUnknown
+		if acc.Enabled {
+			if status == XianyuAccountStatusDisabled {
+				status = XianyuAccountStatusEnabled
+			}
+			taskStatus = XianyuTaskStatusRunning
+		}
+		var lastLoginAt *time.Time
+		if acc.LastLoginAt != "" {
+			if ts, err := time.Parse(time.RFC3339, acc.LastLoginAt); err == nil {
+				lastLoginAt = &ts
+			}
+		}
 		_, err = s.control.UpsertAccount(ctx, XianyuAccount{
 			WorkerConfigID: workerCfg.ID,
 			AccountID:      acc.AccountID,
 			Nickname:       acc.Nickname,
 			Status:         status,
-			CookieStatus:   acc.CookieStatus,
-			TaskStatus:     acc.TaskStatus,
+			CookieStatus:   cookieStatus,
+			TaskStatus:     taskStatus,
+			LastLoginAt:    lastLoginAt,
 			LastSeenAt:     timePtr(time.Now()),
 		})
 		if err != nil {
@@ -145,12 +162,14 @@ func (s *XianyuWorkerService) RefreshCookie(ctx context.Context, accountID strin
 	if err != nil {
 		return nil, err
 	}
-	status, err := client.RefreshCookie(ctx, accountID)
-	if err != nil {
+	if _, err := client.RefreshCookie(ctx, accountID); err != nil {
 		return nil, err
 	}
-	if status != nil && status.CookieStatus != "" {
-		account.CookieStatus = status.CookieStatus
+	// Worker 续期成功后自动启用账号；主程序账号状态仅按 Worker 启用结果更新为 enabled，
+	// 不把 Worker 的 cookie/续期细节直接写入主程序启停状态字段。
+	if account.Status != XianyuAccountStatusEnabled {
+		account.Status = XianyuAccountStatusEnabled
+		account.TaskStatus = XianyuTaskStatusRunning
 	}
 	now := time.Now()
 	account.LastSeenAt = &now
@@ -161,44 +180,79 @@ func (s *XianyuWorkerService) RefreshCookie(ctx context.Context, accountID strin
 	return saved, nil
 }
 
-// ResendDelivery resends an already-claimed code to the same buyer over the
-// Worker's internal channel. It does not allocate or consume new inventory.
-func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuOrderClaim) error {
-	if s == nil || claim == nil {
-		return ErrXianyuDeliveryNotConfigured
-	}
+// ClearCredentials 退出/清除凭证：停止 Worker 任务并删除 Worker 侧账号（含 Cookie），
+// 主程序投影保留并标记为 disabled。
+func (s *XianyuWorkerService) ClearCredentials(ctx context.Context, accountID string) error {
 	client, workerCfg, err := s.clientForActiveWorker(ctx)
 	if err != nil {
 		return err
 	}
+	account, err := s.control.GetAccountByWorkerAndAccountID(ctx, workerCfg.ID, accountID)
+	if err != nil {
+		return err
+	}
+	if err := client.ClearCredentials(ctx, accountID); err != nil {
+		return err
+	}
+	account.Status = XianyuAccountStatusDisabled
+	account.CookieStatus = XianyuCookieStatusUnknown
+	account.TaskStatus = XianyuTaskStatusStopped
+	_, err = s.control.UpdateAccount(ctx, *account)
+	return err
+}
+
+// ResendDelivery resends an already-claimed code to the same buyer over the
+// Worker's internal channel. It does not allocate or consume new inventory.
+func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuOrderClaim) error {
+	if s == nil || claim == nil {
+		return fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, ErrXianyuDeliveryNotConfigured)
+	}
+	client, workerCfg, err := s.clientForActiveWorker(ctx)
+	if err != nil {
+		// 无 active Worker：确定未向任何 Worker 发出发送请求。
+		return fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, err)
+	}
 	account, err := s.control.GetAccountByWorkerAndAccountID(ctx, workerCfg.ID, claim.AccountID)
 	if err != nil {
-		return err
+		// 账号在主程序侧不可解析：确定未 dispatch。
+		return fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, err)
 	}
 	if account.Status != XianyuAccountStatusEnabled {
-		return ErrXianyuAccountDisabled
+		// 账号已停用：确定未 dispatch。
+		return fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, ErrXianyuAccountDisabled)
 	}
 	result, err := client.ResendDelivery(
-		ctx, account.AccountID, claim.OrderNo, claim.ItemID, claim.BuyerID, claim.ChatID, claim.Code,
+		ctx, account.AccountID, claim.OrderNo, claim.ItemID, claim.BuyerID, claim.ChatID, claim.Code, claim.AttemptCount,
 	)
 	if err != nil {
+		// 请求前失败（配置缺失）或请求未到达 Worker（Unreachable）→ 确定未 dispatch，可回滚 failed；
+		// 超时（已发出）/ 解码失败 / 其他 → 结果不确定，保留 pending。
+		if errors.Is(err, ErrXianyuDeliveryNotConfigured) || errors.Is(err, ErrXianyuWorkerUnreachable) {
+			return fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, err)
+		}
 		return err
 	}
-	sendStatus := ""
-	if result != nil {
-		sendStatus = result.SendStatus
-		if sendStatus == "" && result.Data != nil {
-			sendStatus = result.Data.SendStatus
-		}
-	}
-	if result == nil || !result.Success || sendStatus != "success" {
+	receipt, reason := normalizeSendReceipt(result)
+	switch receipt {
+	case "sent_explicit_success":
+		return nil
+	case "dispatched_definite_failure":
+		// 机器可判定的"明确未 dispatch"（Worker 端账号不存在/无权）：
+		// 确定未发送，标记哨兵供主程序补发回滚 failed 后再次补发。
+		return fmt.Errorf("%w: worker did not dispatch (reason=%s)", ErrXianyuResendUndispatched, reason)
+	case "rejected":
+		// 平台明确拒绝（如 CSI_FORBID 拦截）：消息已 dispatch 但确定未送达。
+		// 与 dispatched_definite_failure 一样属于"确定失败"，标记哨兵供主程序
+		// 回滚 failed，与 Worker 侧异步兜底回传（REJECTED → success=false）收敛一致，
+		// 避免同步路径保留 pending、异步路径标 failed 的终态分歧。
+		return fmt.Errorf("%w: worker delivery rejected (reason=%s)", ErrXianyuResendRejected, reason)
+	default: // unknown_pending：已发出但未拿到最终回执，结果不确定，保留 pending（不重复发货）。
 		message := "worker did not confirm delivery"
-		if result != nil && result.Message != "" {
-			message = result.Message
+		if reason != "" {
+			message = reason
 		}
 		return &XianyuWorkerError{StatusCode: 500, Reason: "DELIVERY_NOT_CONFIRMED", Message: message}
 	}
-	return nil
 }
 
 // SyncProducts 拉取账号在售商品并落库；只在不覆盖手工绑定映射的前提下更新。

@@ -19,18 +19,18 @@ export interface XianyuDeliveryFilter {
 }
 
 export async function getOverview(options?: { signal?: AbortSignal }): Promise<XianyuOverview> {
-  const { data } = await apiClient.get<{ data: XianyuOverview }>('/admin/xianyu/overview', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuOverview>('/admin/xianyu/overview', { signal: options?.signal })
+  return data
 }
 
 export async function listWorkerConfigs(options?: { signal?: AbortSignal }): Promise<XianyuWorkerConfig[]> {
-  const { data } = await apiClient.get<{ data: XianyuWorkerConfig[] }>('/admin/xianyu/worker-configs', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuWorkerConfig[]>('/admin/xianyu/worker-configs', { signal: options?.signal })
+  return data
 }
 
 export async function saveWorkerConfig(input: Partial<XianyuWorkerConfig> & { api_token?: string }): Promise<XianyuWorkerConfig> {
-  const { data } = await apiClient.post<{ data: XianyuWorkerConfig }>('/admin/xianyu/worker-configs', input)
-  return data.data
+  const { data } = await apiClient.post<XianyuWorkerConfig>('/admin/xianyu/worker-configs', input)
+  return data
 }
 
 export async function checkHealth(): Promise<void> {
@@ -38,8 +38,8 @@ export async function checkHealth(): Promise<void> {
 }
 
 export async function listAccounts(options?: { signal?: AbortSignal }): Promise<XianyuAccount[]> {
-  const { data } = await apiClient.get<{ data: XianyuAccount[] }>('/admin/xianyu/accounts', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuAccount[]>('/admin/xianyu/accounts', { signal: options?.signal })
+  return data
 }
 
 export async function syncAccounts(): Promise<void> {
@@ -55,23 +55,27 @@ export async function disableAccount(accountId: string): Promise<void> {
 }
 
 export async function refreshCookie(accountId: string): Promise<XianyuAccount> {
-  const { data } = await apiClient.post<{ data: XianyuAccount }>('/admin/xianyu/accounts/refresh-cookie', { account_id: accountId })
-  return data.data
+  const { data } = await apiClient.post<XianyuAccount>('/admin/xianyu/accounts/refresh-cookie', { account_id: accountId })
+  return data
+}
+
+export async function clearCredentials(accountId: string): Promise<void> {
+  await apiClient.post('/admin/xianyu/accounts/clear-credentials', { account_id: accountId })
 }
 
 export async function createLoginSession(accountId: string): Promise<XianyuLoginSessionStatus> {
-  const { data } = await apiClient.post<{ data: XianyuLoginSessionStatus }>('/admin/xianyu/accounts/login-session', { account_id: accountId })
-  return data.data
+  const { data } = await apiClient.post<XianyuLoginSessionStatus>('/admin/xianyu/accounts/login-session', { account_id: accountId })
+  return data
 }
 
 export async function queryLoginSession(accountId: string, options?: { signal?: AbortSignal }): Promise<XianyuLoginSessionStatus> {
-  const { data } = await apiClient.get<{ data: XianyuLoginSessionStatus }>(`/admin/xianyu/accounts/${encodeURIComponent(accountId)}/login-session`, { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuLoginSessionStatus>(`/admin/xianyu/accounts/${encodeURIComponent(accountId)}/login-session`, { signal: options?.signal })
+  return data
 }
 
 export async function listProducts(options?: { signal?: AbortSignal }): Promise<XianyuProduct[]> {
-  const { data } = await apiClient.get<{ data: XianyuProduct[] }>('/admin/xianyu/products', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuProduct[]>('/admin/xianyu/products', { signal: options?.signal })
+  return data
 }
 
 export async function syncProducts(): Promise<void> {
@@ -83,23 +87,23 @@ export async function bindProduct(productId: number, poolId?: number | null): Pr
 }
 
 export async function listBindingRules(options?: { signal?: AbortSignal }): Promise<XianyuBindingRule[]> {
-  const { data } = await apiClient.get<{ data: XianyuBindingRule[] }>('/admin/xianyu/binding-rules', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuBindingRule[]>('/admin/xianyu/binding-rules', { signal: options?.signal })
+  return data
 }
 
 export async function saveBindingRule(input: Partial<XianyuBindingRule>): Promise<XianyuBindingRule> {
-  const { data } = await apiClient.post<{ data: XianyuBindingRule }>('/admin/xianyu/binding-rules', input)
-  return data.data
+  const { data } = await apiClient.post<XianyuBindingRule>('/admin/xianyu/binding-rules', input)
+  return data
 }
 
 export async function listItemPools(options?: { signal?: AbortSignal }): Promise<XianyuItemPool[]> {
-  const { data } = await apiClient.get<{ data: XianyuItemPool[] }>('/admin/xianyu/item-pools', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuItemPool[]>('/admin/xianyu/item-pools', { signal: options?.signal })
+  return data
 }
 
 export async function saveItemPool(input: Partial<XianyuItemPool>): Promise<XianyuItemPool> {
-  const { data } = await apiClient.post<{ data: XianyuItemPool }>('/admin/xianyu/item-pools', input)
-  return data.data
+  const { data } = await apiClient.post<XianyuItemPool>('/admin/xianyu/item-pools', input)
+  return data
 }
 
 export async function listDeliveries(filter: XianyuDeliveryFilter = {}, options?: { signal?: AbortSignal }): Promise<PaginatedResponse<XianyuOrderClaim>> {
@@ -116,8 +120,8 @@ export async function listDeliveries(filter: XianyuDeliveryFilter = {}, options?
 }
 
 export async function resendDelivery(orderNo: string): Promise<string> {
-  const { data } = await apiClient.post<{ data: { code: string } }>('/admin/xianyu/deliveries/resend', { order_no: orderNo })
-  return data.data.code
+  const { data } = await apiClient.post<{ code: string }>('/admin/xianyu/deliveries/resend', { order_no: orderNo })
+  return data.code
 }
 
 export interface XianyuControlSettings {
@@ -128,8 +132,8 @@ export interface XianyuControlSettings {
 }
 
 export async function getSettings(options?: { signal?: AbortSignal }): Promise<XianyuControlSettings> {
-  const { data } = await apiClient.get<{ data: XianyuControlSettings }>('/admin/xianyu/settings', { signal: options?.signal })
-  return data.data
+  const { data } = await apiClient.get<XianyuControlSettings>('/admin/xianyu/settings', { signal: options?.signal })
+  return data
 }
 
 export async function saveSettings(input: Partial<XianyuControlSettings>): Promise<void> {
@@ -146,6 +150,7 @@ export const xianyuAPI = {
   enableAccount,
   disableAccount,
   refreshCookie,
+  clearCredentials,
   createLoginSession,
   queryLoginSession,
   listProducts,

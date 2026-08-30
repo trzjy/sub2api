@@ -29,6 +29,7 @@
               <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.code') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.status') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.attempts') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.lastAttemptAt') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.error') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.createdAt') }}</th>
               <th class="px-4 py-2 text-right">{{ t('common.actions') }}</th>
@@ -39,11 +40,18 @@
               <td class="px-4 py-2 font-mono text-xs">{{ claim.order_no }}</td>
               <td class="px-4 py-2">{{ claim.account_id }}</td>
               <td class="px-4 py-2">{{ claim.item_id }}</td>
-              <td class="px-4 py-2 font-mono text-xs">{{ claim.code }}</td>
+              <td class="px-4 py-2 font-mono text-xs">
+                <span v-if="revealedCodes.has(claim.order_no)">{{ claim.code }}</span>
+                <span v-else>{{ maskCode(claim.code) }}</span>
+                <button class="ml-1 text-xs text-gray-400 hover:text-gray-600" @click="toggleReveal(claim.order_no)">
+                  {{ revealedCodes.has(claim.order_no) ? t('admin.xianyu.deliveries.hideCode') : t('admin.xianyu.deliveries.showCode') }}
+                </button>
+              </td>
               <td class="px-4 py-2">
                 <StatusBadge :status="claim.delivery_status" :label="deliveryStatusLabel(claim.delivery_status)" />
               </td>
               <td class="px-4 py-2">{{ claim.attempt_count }}</td>
+              <td class="px-4 py-2 text-gray-500">{{ claim.last_attempt_at ? formatDateTime(claim.last_attempt_at) : '-' }}</td>
               <td class="max-w-xs truncate px-4 py-2 text-gray-500" :title="claim.delivery_error || ''">
                 {{ claim.delivery_error || '-' }}
               </td>
@@ -151,6 +159,24 @@ function deliveryStatusLabel(status: string): string {
   }
 }
 
+const revealedCodes = ref<Set<string>>(new Set())
+
+function toggleReveal(orderNo: string) {
+  const next = new Set(revealedCodes.value)
+  if (next.has(orderNo)) {
+    next.delete(orderNo)
+  } else {
+    next.add(orderNo)
+  }
+  revealedCodes.value = next
+}
+
+function maskCode(code: string): string {
+  if (!code) return '-'
+  if (code.length <= 4) return '*'.repeat(code.length)
+  return `${code.slice(0, 2)}${'*'.repeat(Math.max(4, code.length - 4))}${code.slice(-2)}`
+}
+
 const confirmVisible = ref(false)
 const resendTarget = ref<XianyuOrderClaim | null>(null)
 
@@ -165,7 +191,7 @@ async function doResend() {
   try {
     await adminAPI.xianyu.resendDelivery(resendTarget.value.order_no)
     await load()
-    appStore.showSuccess(t('admin.xianyu.deliveries.resendQueued'))
+    appStore.showSuccess(t('admin.xianyu.deliveries.resendConfirmed'))
   } catch (err) {
     appStore.showError(String(err))
   }

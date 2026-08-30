@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 
 from common.services.account_cookie_service import merge_account_cookie_fields
@@ -34,9 +35,52 @@ from common.services.token_renewal_cache_service import (
     write_renewed_token_cache,
 )
 from common.services.token_api_mode import load_token_api_mode
+from common.services.receipt_outcome import ReceiptOutcome, send_status_from_receipt, delivery_result_payload_from_receipt
+from common.utils.internal_auth import require_internal_token
 from common.utils.xianyu_utils import trans_cookies
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+# 模块级强引用集合：持有补发回执等后台任务，避免事件循环弱引用导致任务在执行完成前被回收。
+# done 时通过回调从集合移除；异常由回调消费（避免 "Task exception was never retrieved"）。
+_background_tasks: set["asyncio.Task"] = set()
+
+
+def _spawn_background(coro) -> "asyncio.Task":
+    """创建并持有后台任务（强引用 + done 回调清理 + 异常消费）。"""
+    task = asyncio.create_task(coro)
+
+    def _on_done(t: "asyncio.Task") -> None:
+        _background_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc is not None:
+                logger.warning(f"后台任务异常: {type(exc).__name__}: {exc}")
+
+    _background_tasks.add(task)
+    task.add_done_callback(_on_done)
+    return task
+
+
+async def drain_background_tasks(timeout: float = 20.0) -> None:
+    """服务关闭时给后台回执任务一个 drain 窗口，超时后取消，避免静默丢失兜底回执。
+
+    默认 20s 覆盖回传重试预算（单次 5s + 最多 2 次重试 + 0.5/1s 退避 ≈ 16.5s），
+    避免关闭期间兜底回执在首次超时附近即被取消导致补发长期停在 pending。
+    """
+    if not _background_tasks:
+        return
+    tasks = list(_background_tasks)
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    for t in pending:
+        t.cancel()
+    if pending:
+        logger.warning(f"服务关闭时 {len(pending)} 个后台任务未在 {timeout}s 内完成，已取消")
+
+# internal 路由整体要求 X-Internal-Token 匹配 SUB2API_INTERNAL_TOKEN（配置为空时失败关闭）。
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(require_internal_token)],
+)
 
 
 class StartAccountRequest(BaseModel):
@@ -52,6 +96,9 @@ class SendMessageRequest(BaseModel):
     # 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）。默认 False 保持既有调用方零影响。
     wait_result: bool = False
     wait_timeout: float = 10.0
+    # 补发尝试代次（attempt_count）与订单号（order_no），用于发送回执关联与并发隔离；非补发调用可缺省。
+    attempt: int = 0
+    order_no: str = ""
 
 
 class DeliverOrderRequest(BaseModel):
@@ -958,59 +1005,99 @@ async def send_message(account_id: str, request: SendMessageRequest):
         # 获取账号实例
         instance = manager.instances.get(account_id)
         if not instance:
+            # 发送前失败：明确未 dispatch，供主程序补发回滚 failed。
             return {
                 "success": False,
                 "code": 404,
                 "message": f"账号 {account_id} 未运行或不存在",
-                "data": None,
+                "data": {
+                    "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                    "send_status": "failed",
+                    "dispatched": False,
+                },
             }
 
         # 检查是否有 WebSocket 连接
         if not hasattr(instance, 'ws') or not instance.ws:
+            # 发送前失败：明确未 dispatch，供主程序补发回滚 failed。
             return {
                 "success": False,
                 "code": 400,
                 "message": f"账号 {account_id} WebSocket 未连接",
-                "data": None,
+                "data": {
+                    "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                    "send_status": "failed",
+                    "dispatched": False,
+                },
             }
 
-        # 发送消息
+        # 发送消息：仅 wait_result=True 时注册回执 future 并等待，否则不注册避免 Future 泄漏。
         send_result = await instance.send_msg(
             websocket=instance.ws,
             chat_id=request.chat_id,
             send_user_id=None,  # 由实例内部获取
             content=request.message,
+            register_receipt=request.wait_result,
         )
 
-        # WebSocket 发送层失败：直接判失败
+        # WebSocket 发送层失败：判失败，统一输出回执枚举。
         if not isinstance(send_result, dict) or not send_result.get("success"):
             err = send_result.get("error_message") if isinstance(send_result, dict) else None
+            receipt = ReceiptOutcome.UNKNOWN_PENDING
+            if isinstance(send_result, dict):
+                if send_result.get("receipt") == ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE or send_result.get("dispatched") is False:
+                    receipt = ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE
+            data = {
+                "receipt": receipt,
+                "send_status": send_status_from_receipt(receipt),
+                "send_fail_reason": err,
+            }
+            if receipt == ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE:
+                data["dispatched"] = False
             return {
                 "success": False,
                 "code": 500,
                 "message": f"消息发送失败: {err or '未知错误'}",
-                "data": {"send_status": "failed", "send_fail_reason": err},
+                "data": data,
             }
 
-        # 可选：等待服务端响应，识别是否被安全拦截（CSI_FORBID 等）
-        send_status = "unknown"
+        # 可选：等待服务端响应，统一用 await_receipt 产出回执枚举（取代 send_status 三态手工映射）。
+        receipt = ReceiptOutcome.UNKNOWN_PENDING
         send_fail_reason = None
         if request.wait_result:
-            try:
-                reason = await instance.wait_send_reject_reason(
-                    send_result.get("send_future"),
-                    send_result.get("mid"),
-                    request.wait_timeout,
+            send_future = send_result.get("send_future")
+            mid = send_result.get("mid")
+            if send_future is not None and hasattr(instance, 'await_receipt'):
+                receipt, send_fail_reason = await instance.await_receipt(
+                    send_future, mid, timeout=request.wait_timeout
                 )
-                if reason:
-                    send_status = "failed"
-                    send_fail_reason = reason
-                else:
-                    send_status = "success"
-            except Exception as wait_e:  # noqa: BLE001
-                logger.warning(f"【{account_id}】等待发送结果异常: {wait_e}")
+            else:
+                send_fail_reason = "发送后未收到服务端回执（无回执 future）"
 
-        logger.info(f"【{account_id}】消息发送成功: chat_id={request.chat_id}, send_status={send_status}")
+        send_status = send_status_from_receipt(receipt)
+        logger.info(f"【{account_id}】消息发送成功: chat_id={request.chat_id}, receipt={receipt}")
+
+        # 补发场景（携带 order_no + attempt）：以独立后台任务回传 delivery-results，作为同步响应丢失时的兜底，
+        # 使主程序在响应超时/断连时仍能按 attempt 关联的最终回执关闭 pending。
+        # 兜底回执与同步响应由同一 receipt 派生，不再两套手工映射。
+        # 必须用 asyncio.create_task 真正后台化：fire_and_forget 内部含最多 3 次×5s 的回传重试，
+        # 若在此同步 await，会阻塞本同步响应超过主程序 15s 超时，导致同步与异步两条关闭路径同时失效。
+        if request.order_no and request.attempt:
+            try:
+                from common.services.sub2api_delivery_result_client import (
+                    report_delivery_result_fire_and_forget,
+                )
+
+                report_payload = delivery_result_payload_from_receipt(receipt, send_fail_reason)
+                _spawn_background(
+                    report_delivery_result_fire_and_forget(
+                        request.order_no,
+                        **report_payload,
+                        attempt=request.attempt,
+                    )
+                )
+            except Exception as rc_e:  # noqa: BLE001
+                logger.warning(f"【{account_id}】补发回执后台回传任务创建失败: {rc_e}")
 
         return {
             "success": True,
@@ -1020,6 +1107,7 @@ async def send_message(account_id: str, request: SendMessageRequest):
                 "account_id": account_id,
                 "chat_id": request.chat_id,
                 "message": request.message,
+                "receipt": receipt,
                 "send_status": send_status,
                 "send_fail_reason": send_fail_reason,
             },
@@ -1850,15 +1938,26 @@ async def _deliver_order_impl(request: DeliverOrderRequest):
                         f"【内部API】发送图片消息 第 {idx}/{quantity}: {content}"
                         if quantity > 1 else f"【内部API】发送图片消息: {content}"
                     )
-                    await xianyu_live.send_image_msg(
+                    img_result = await xianyu_live.send_image_msg(
                         ws,
                         request.chat_id,
                         request.buyer_id,
                         content,
-                        request.card_id
+                        request.card_id,
+                        register_receipt=True,
                     )
-                    final_contents.append(f"[图片]{content}")
-                    send_ok = True
+                    # 图片消息也显式注册发送回执并收集 send_results（与文本一致），
+                    # 参与下方"等待服务端回执识别拦截"，避免图片被平台拦截时误判为已送达。
+                    # 发送层失败已收敛为返回值（success=False）而非抛异常，按返回值判定：
+                    # 确定未发出时计入失败并保留原始内容供商家手动转发。
+                    if isinstance(img_result, dict):
+                        send_results.append(img_result)
+                    send_ok = bool(img_result and img_result.get("success"))
+                    if send_ok:
+                        final_contents.append(f"[图片]{content}")
+                    else:
+                        failed_indices.append(idx)
+                        final_contents.append(f"[图片-发送失败-请手动转发]{content}")
                 else:
                     rendered = process_delivery_content_with_description(
                         content,
@@ -1869,15 +1968,22 @@ async def _deliver_order_impl(request: DeliverOrderRequest):
                         f"【内部API】发送文本消息 第 {idx}/{quantity}: {rendered[:50]}..."
                         if quantity > 1 else f"【内部API】发送文本消息: {rendered[:50]}..."
                     )
-                    await xianyu_live.auto_delivery_handler._send_text_with_separator(
+                    text_ok = await xianyu_live.auto_delivery_handler._send_text_with_separator(
                         ws,
                         request.chat_id,
                         request.buyer_id,
                         rendered,
                         send_results=send_results
                     )
-                    final_contents.append(rendered)
-                    send_ok = True
+                    # 发送层失败已收敛为返回值（_send_text_with_separator 返回是否全部成功），
+                    # 不再抛异常：按返回值判定失败并记录失败标记，避免已扣库存/卡密但发送失败
+                    # 被误判为成功（send_before_confirm 模式下还可能错误确认平台发货，造成资损）。
+                    send_ok = bool(text_ok)
+                    if send_ok:
+                        final_contents.append(rendered)
+                    else:
+                        failed_indices.append(idx)
+                        final_contents.append(f"[发送失败-请手动转发] {content}")
             except Exception as send_err:
                 # 发送失败时仍把"原始内容"写入 final_contents 但带失败标记，保证库存被消费的卡密
                 # 都能在订单 delivery_content 中追溯，避免数据丢失。商家可从这里手动复制转发。

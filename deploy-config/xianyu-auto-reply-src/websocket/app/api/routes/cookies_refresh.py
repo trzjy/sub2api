@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -19,9 +19,15 @@ from common.db.session import async_session_maker
 from common.models.xy_account import XYAccount
 from common.services.captcha.concurrency import run_browser_task
 from common.services.cookie_renew_browser_service import cookie_renew_browser_service
+from common.utils.internal_auth import require_internal_token
 from app.services.xianyu.cookies_refresh_service import cookies_refresh_service
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+# 同 /internal 前缀路由必须与 internal.router 保持一致的服务间鉴权，避免无 token 可触达的旁路。
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(require_internal_token)],
+)
 
 
 class CookiesRefreshRequest(BaseModel):

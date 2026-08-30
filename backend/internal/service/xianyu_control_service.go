@@ -177,6 +177,28 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		return nil, err
 	}
 	token := strings.TrimSpace(input.APITokenEncrypted)
+
+	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token。
+	if input.ID != 0 && token == "" {
+		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
+		if err != nil {
+			return nil, err
+		}
+		input.APITokenEncrypted = existing.APITokenEncrypted
+		input.BaseURL = baseURL
+		if input.Status == "" {
+			input.Status = existing.Status
+		}
+		updated, err := s.control.UpdateWorkerConfig(ctx, input)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return nil, ErrXianyuActiveWorkerExists
+			}
+			return nil, err
+		}
+		return updated, nil
+	}
+
 	if token == "" {
 		return nil, infraerrors.BadRequest("XIANYU_WORKER_TOKEN_REQUIRED", "worker token is required")
 	}
@@ -310,8 +332,12 @@ func (s *XianyuControlService) ListProducts(ctx context.Context) ([]XianyuProduc
 // BindProduct 手工映射商品到池；解绑传 nil pool。
 func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64, poolID *int64, source string) error {
 	if poolID != nil {
-		if _, err := s.control.GetItemPoolByID(ctx, *poolID); err != nil {
+		pool, err := s.control.GetItemPoolByID(ctx, *poolID)
+		if err != nil {
 			return err
+		}
+		if pool.Status != XianyuItemPoolStatusActive {
+			return infraerrors.Conflict("XIANYU_ITEM_POOL_DISABLED", "cannot bind to a disabled item pool")
 		}
 		if err := s.control.UpdateProductBinding(ctx, productID, XianyuBindingStatusMapped, source, poolID); err != nil {
 			return err
@@ -415,6 +441,14 @@ func (s *XianyuControlService) RefreshCookie(ctx context.Context, accountID stri
 	return s.worker.RefreshCookie(ctx, accountID)
 }
 
+// ClearCredentials 退出/清除凭证：停止任务并删除 Worker 侧凭证，主程序投影标记 disabled。
+func (s *XianyuControlService) ClearCredentials(ctx context.Context, accountID string) error {
+	if s.worker == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	return s.worker.ClearCredentials(ctx, accountID)
+}
+
 // CheckHealth 立即执行健康检查。
 func (s *XianyuControlService) CheckHealth(ctx context.Context) error {
 	if s.worker == nil {
@@ -451,8 +485,8 @@ func (s *XianyuControlService) CreateLoginSession(ctx context.Context, accountID
 	return client.CreateLoginSession(ctx, accountID)
 }
 
-// QueryLoginSession 查询扫码会话状态。
-func (s *XianyuControlService) QueryLoginSession(ctx context.Context, accountID string) (*XianyuWorkerLoginSessionStatus, error) {
+// QueryLoginSession 按 Worker session_id 查询扫码会话状态。
+func (s *XianyuControlService) QueryLoginSession(ctx context.Context, sessionID string) (*XianyuWorkerLoginSessionStatus, error) {
 	if s.worker == nil {
 		return nil, ErrXianyuDeliveryNotConfigured
 	}
@@ -460,7 +494,7 @@ func (s *XianyuControlService) QueryLoginSession(ctx context.Context, accountID 
 	if err != nil {
 		return nil, err
 	}
-	return client.QueryLoginSession(ctx, accountID)
+	return client.QueryLoginSession(ctx, sessionID)
 }
 
 // ---------------------------------------------------------------------------
@@ -476,25 +510,27 @@ func (s *XianyuControlService) ListDeliveryClaims(ctx context.Context, filter Xi
 }
 
 // ResendOriginalCode 人工补发原码。
-func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error) {
+func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo string) (string, error) {
 	if s.delivery == nil {
 		return "", ErrXianyuDeliveryNotConfigured
 	}
-	return s.delivery.ResendOriginalCode(ctx, orderNo, systemUserID)
+	return s.delivery.ResendOriginalCode(ctx, orderNo)
 }
 
 // ---------------------------------------------------------------------------
 // 概览
 // ---------------------------------------------------------------------------// XianyuOverview 是概览页数据。
 type XianyuOverview struct {
-	WorkerHealthy     bool                 `json:"worker_healthy"`
-	EnabledAccounts   int                  `json:"enabled_accounts"`
-	RunningTasks      int                  `json:"running_tasks"`
-	UnmappedProducts  int                  `json:"unmapped_products"`
-	Pools             []XianyuPoolOverview `json:"pools"`
-	TodayDelivered    int                  `json:"today_delivered"`
-	TodayFailed       int                  `json:"today_failed"`
-	PendingDeliveries int                  `json:"pending_deliveries"`
+	WorkerHealthy       bool                 `json:"worker_healthy"`
+	WorkerHealthStatus  string               `json:"worker_health_status"`  // unknown / healthy / unhealthy
+	WorkerLastCheckedAt *time.Time           `json:"worker_last_checked_at,omitempty"`
+	EnabledAccounts     int                  `json:"enabled_accounts"`
+	RunningTasks        int                  `json:"running_tasks"`
+	UnmappedProducts    int                  `json:"unmapped_products"`
+	Pools               []XianyuPoolOverview `json:"pools"`
+	TodayDelivered      int                  `json:"today_delivered"`
+	TodayFailed         int                  `json:"today_failed"`
+	PendingDeliveries   int                  `json:"pending_deliveries"`
 }
 
 // XianyuPoolOverview 是池库存概览。
@@ -510,63 +546,78 @@ func (s *XianyuControlService) GetOverview(ctx context.Context) (*XianyuOverview
 	out := &XianyuOverview{}
 
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
-	if err == nil {
-		out.WorkerHealthy = workerCfg.HealthStatus == XianyuWorkerHealthHealthy
-		accounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
-		if err == nil {
-			for _, a := range accounts {
-				if a.Status == XianyuAccountStatusEnabled {
-					out.EnabledAccounts++
-				}
-				if a.TaskStatus == XianyuTaskStatusRunning {
-					out.RunningTasks++
-				}
-			}
+	if err != nil {
+		if err == ErrXianyuWorkerConfigNotFound {
+			// 未配置 Worker：返回空概览（前端据此展示未配置态）。
+			out.WorkerHealthy = false
+			return out, nil
+		}
+		return nil, err
+	}
+	out.WorkerHealthy = workerCfg.HealthStatus == XianyuWorkerHealthHealthy
+	out.WorkerHealthStatus = workerCfg.HealthStatus
+	out.WorkerLastCheckedAt = workerCfg.LastCheckedAt
+
+	accounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range accounts {
+		if a.Status == XianyuAccountStatusEnabled {
+			out.EnabledAccounts++
+		}
+		if a.TaskStatus == XianyuTaskStatusRunning {
+			out.RunningTasks++
 		}
 	}
 
 	products, err := s.control.ListProducts(ctx)
-	if err == nil {
-		for _, p := range products {
-			if p.Status == XianyuProductStatusActive && p.BindingStatus == XianyuBindingStatusUnmapped {
-				out.UnmappedProducts++
-			}
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range products {
+		if p.Status == XianyuProductStatusActive && p.BindingStatus == XianyuBindingStatusUnmapped {
+			out.UnmappedProducts++
 		}
 	}
 
 	pools, err := s.control.ListItemPools(ctx)
-	if err == nil {
-		for _, pool := range pools {
-			po := XianyuPoolOverview{Pool: pool}
-			po.Remaining, po.Used, po.Disabled = s.poolStockCounts(ctx, pool)
-			po.LowStock = pool.Status == XianyuItemPoolStatusActive && pool.LowStockThreshold > 0 && po.Remaining <= pool.LowStockThreshold
-			out.Pools = append(out.Pools, po)
+	if err != nil {
+		return nil, err
+	}
+	for _, pool := range pools {
+		po := XianyuPoolOverview{Pool: pool}
+		remaining, used, disabled, err := s.control.PoolStockCounts(ctx, pool.Slug)
+		if err != nil {
+			return nil, err
 		}
+		po.Remaining = remaining
+		po.Used = used
+		po.Disabled = disabled
+		po.LowStock = pool.Status == XianyuItemPoolStatusActive && pool.LowStockThreshold > 0 && po.Remaining <= pool.LowStockThreshold
+		out.Pools = append(out.Pools, po)
 	}
 
-	s.countTodayDeliveries(ctx, out)
+	if err := s.countTodayDeliveries(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-func (s *XianyuControlService) poolStockCounts(ctx context.Context, pool XianyuItemPool) (remaining, used, disabled int) {
-	remaining, used, disabled, err := s.control.PoolStockCounts(ctx, pool.Slug)
-	if err != nil {
-		return 0, 0, 0
-	}
-	return remaining, used, disabled
-}
-
-func (s *XianyuControlService) countTodayDeliveries(ctx context.Context, out *XianyuOverview) {
+func (s *XianyuControlService) countTodayDeliveries(ctx context.Context, out *XianyuOverview) error {
 	since := time.Now().UTC().Truncate(24 * time.Hour)
 	sent, failed, err := s.control.DeliveryStats(ctx, since)
-	if err == nil {
-		out.TodayDelivered = sent
-		out.TodayFailed = failed
+	if err != nil {
+		return err
 	}
+	out.TodayDelivered = sent
+	out.TodayFailed = failed
 	pending, err := s.control.PendingDeliveryCount(ctx)
-	if err == nil {
-		out.PendingDeliveries = pending
+	if err != nil {
+		return err
 	}
+	out.PendingDeliveries = pending
+	return nil
 }
 
 // ---------------------------------------------------------------------------

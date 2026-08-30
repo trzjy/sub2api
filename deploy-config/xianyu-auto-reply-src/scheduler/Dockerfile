@@ -42,5 +42,5 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV TZ=Asia/Shanghai
 
-# 启动服务
+# 启动服务（由 backend-web 镜像的 launcher 并行拉起，此处保持占位，直接执行 main 供单进程调试）
 CMD ["python", "scheduler/main.py"]

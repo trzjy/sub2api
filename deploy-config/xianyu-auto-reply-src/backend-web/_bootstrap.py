@@ -235,7 +235,7 @@ async def health_check():
     健康检查接口
 
     Returns:
-        服务健康状态
+        服务健康状态（含 websocket 进程在线探测，供主程序 CheckHealth 判定）
     """
     from common.db.session import async_engine
     from sqlalchemy import text
@@ -250,6 +250,18 @@ async def health_check():
         logger.error(f"数据库连接检查失败: {str(e)}")
         db_status = "disconnected"
 
+    # 探测 WebSocket 进程是否可响应（与 system_control 的 _probe_health 同语义）
+    websocket_online = False
+    try:
+        import aiohttp
+        ws_url = settings.websocket_service_url.rstrip("/") + "/health"
+        timeout = aiohttp.ClientTimeout(total=3)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(ws_url) as resp:
+                websocket_online = resp.status < 400
+    except Exception as e:
+        logger.warning(f"WebSocket 健康探测失败: {e}")
+
     return {
         "success": True,
         "code": 200,
@@ -259,6 +271,8 @@ async def health_check():
             "version": settings.version,
             "status": "running",
             "database": db_status,
+            "backend": True,
+            "websocket": websocket_online,
         },
     }
 

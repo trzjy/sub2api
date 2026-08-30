@@ -470,6 +470,7 @@ def _do_password_login_via_api(account_id: str) -> None:
             response = requests.post(
                 api_url,
                 json={"trigger_reason": "Session过期"},
+                headers={"X-Internal-Token": settings.sub2api_internal_token or ""},
                 timeout=10  # API立即返回，无需长时间等待
             )
 

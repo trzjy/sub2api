@@ -174,6 +174,12 @@ describe('Xianyu DeliveriesView', () => {
     const wrapper = mountWithStubs(XianyuDeliveriesView)
     await flushPromises()
     expect(wrapper.text()).toContain('o1')
+    // 兑换码默认脱敏（按需查看），不直接明文展示。
+    expect(wrapper.text()).not.toContain('CODE-1')
+    expect(wrapper.text()).toContain('CO****-1')
+    const revealBtn = wrapper.findAll('button').find((b) => b.text().includes('showCode'))
+    expect(revealBtn).toBeTruthy()
+    await revealBtn!.trigger('click')
     expect(wrapper.text()).toContain('CODE-1')
     const resendBtn = wrapper.findAll('button').find((b) => b.text().includes('resend'))
     expect(resendBtn).toBeTruthy()

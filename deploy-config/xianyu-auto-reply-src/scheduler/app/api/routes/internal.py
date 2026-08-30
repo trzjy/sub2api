@@ -9,16 +9,22 @@ Scheduler服务内部API路由
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from loguru import logger
 from pydantic import BaseModel
 
 from app.services.scheduler.listing_monitor_task import listing_monitor_task_service
 from app.services.scheduler_service import get_scheduler_service
 from common.services.account_cooldown import account_cooldown_manager
+from common.utils.internal_auth import require_internal_token
 from common.utils.time_utils import get_beijing_now_naive
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+# internal 路由整体要求 X-Internal-Token 匹配 SUB2API_INTERNAL_TOKEN（配置为空时失败关闭）。
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(require_internal_token)],
+)
 
 
 class LogRetentionRequest(BaseModel):

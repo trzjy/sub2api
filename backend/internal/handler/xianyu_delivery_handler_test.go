@@ -44,6 +44,9 @@ func (xianyuHandlerControlStub) UpdateWorkerConfig(context.Context, service.Xian
 func (xianyuHandlerControlStub) GetActiveWorkerConfig(context.Context) (*service.XianyuWorkerConfig, error) {
 	return &service.XianyuWorkerConfig{ID: 1, Status: service.XianyuWorkerStatusActive}, nil
 }
+func (xianyuHandlerControlStub) GetWorkerConfigByID(context.Context, int64) (*service.XianyuWorkerConfig, error) {
+	return &service.XianyuWorkerConfig{ID: 1, Status: service.XianyuWorkerStatusActive}, nil
+}
 func (xianyuHandlerControlStub) ListAccounts(context.Context, int64) ([]service.XianyuAccount, error) {
 	return nil, nil
 }
@@ -179,8 +182,8 @@ func (s *xianyuHandlerStateStub) RecordDeliveryResult(_ context.Context, result 
 func (s *xianyuHandlerStateStub) GetDeliveryClaim(context.Context, string) (*service.XianyuOrderClaim, error) {
 	return nil, nil
 }
-func (s *xianyuHandlerStateStub) ResendOriginalCode(context.Context, string, int64) (string, error) {
-	return "", nil
+func (s *xianyuHandlerStateStub) ResendOriginalCode(context.Context, string) (string, int, error) {
+	return "", 0, nil
 }
 
 func TestXianyuDeliveryHandlerRecordsResult(t *testing.T) {

@@ -45,6 +45,11 @@ class BackendWebConfig(BaseConfig):
     # CORS配置
     cors_origins_raw: str = Field(default="*", alias="CORS_ORIGINS")
 
+    # 主程序内网服务身份 token（双向认证）：与主程序 xianyu_delivery.internal_token 同值，
+    # 主程序以 X-Worker-Token 头携带，backend 据此解析为现有管理员用户（服务身份），
+    # 不新建平行账号/用户模型。
+    sub2api_internal_token: str = Field(default="", repr=False, alias="SUB2API_INTERNAL_TOKEN")
+
     # 服务间通信URL
     websocket_service_url: str = Field(
         default="http://localhost:8090",

@@ -250,7 +250,10 @@ async def trigger_manual_refresh(
             websocket_url = f"{settings.WEBSOCKET_SERVICE_URL}/internal/accounts/{account_id}/refresh-token"
 
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(websocket_url)
+                response = await client.post(
+                    websocket_url,
+                    headers={"X-Internal-Token": settings.sub2api_internal_token or ""},
+                )
 
                 if response.status_code == 200:
                     logger.info(f"【Cookie刷新】成功触发WebSocket服务刷新: account_id={account_id}")

@@ -137,6 +137,13 @@ func (s *xianyuWorkerControlStub) GetActiveWorkerConfig(context.Context) (*Xiany
 	return s.cfg, nil
 }
 
+func (s *xianyuWorkerControlStub) GetWorkerConfigByID(_ context.Context, id int64) (*XianyuWorkerConfig, error) {
+	if s.cfg == nil || s.cfg.ID != id {
+		return nil, ErrXianyuWorkerConfigNotFound
+	}
+	return s.cfg, nil
+}
+
 func TestXianyuCheckHealthRejectsMissingWebSocket(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"success":true,"data":{"backend":true,"websocket":false,"database":true}}`))

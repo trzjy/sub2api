@@ -78,6 +78,7 @@ from . import (
     user_settings,
     users,
     version,
+    internal_api,
 )
 
 # 创建API路由器
@@ -152,6 +153,9 @@ api_router.include_router(auto_reply_logs.router, tags=["消息日志"])
 api_router.include_router(account_login_logs.router, tags=["账号登录日志"])
 api_router.include_router(db_backup_logs.router, tags=["数据库备份日志"])
 api_router.include_router(risk_control_logs.router, tags=["风控日志"])
+
+# 主程序内网服务路由（internal_api.py 已定义 prefix="/internal"，挂载于 /api/v1 下）
+api_router.include_router(internal_api.router)
 
 # 管理员功能
 api_router.include_router(admin.router, prefix="/admin", tags=["管理员功能"])

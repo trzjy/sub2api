@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -187,7 +188,7 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 		INSERT INTO xianyu_order_claims
 		(order_no, redeem_code_id, account_id, item_id, buyer_id, chat_id, amount,
 		 product_id, pool_id, binding_source, delivery_status, attempt_count, last_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, NOW())`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, NOW())`,
 		claim.OrderID, codeID, claim.AccountID, claim.ItemID, claim.BuyerID,
 		claim.ChatID, amount, productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
 		return "", fmt.Errorf("insert xianyu claim: %w", err)
@@ -211,67 +212,54 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 	return code, nil
 }
 
+// RecordDeliveryResult 是唯一的回执状态入口（自动发货回执 / 补发成功与回滚都收敛于此）。
+// attempt 条件隔离：回执仅作用于 attempt_count 与自身一致的记录（attempt=0 匹配初始自动发货，
+// attempt=N 匹配第 N 次补发）；旧代次回执不改变新代次状态。对 sent/legacy 终态或 attempt 不匹配
+// 的迟到回执按幂等忽略（2xx ack），避免触发回传重试循环；冲突信息经结构化告警输出。
 func (r *xianyuOrderClaimStateRepository) RecordDeliveryResult(ctx context.Context, result service.XianyuDeliveryStatusResult) error {
-	if r == nil || r.db == nil {
-		return errors.New("xianyu claim database is unavailable")
-	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin xianyu delivery result transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, result.OrderNo); err != nil {
-		return fmt.Errorf("lock xianyu delivery order: %w", err)
-	}
-
-	var currentStatus string
-	err = tx.QueryRowContext(ctx, `SELECT delivery_status FROM xianyu_order_claims WHERE order_no = $1`, result.OrderNo).Scan(&currentStatus)
-	if errors.Is(err, sql.ErrNoRows) {
-		return service.ErrXianyuDeliveryClaimNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("lookup xianyu delivery claim: %w", err)
-	}
-
-	switch currentStatus {
-	case service.XianyuDeliveryStatusSent:
-		// sent 为终态；旧失败结果不能覆盖 sent。
-		return service.ErrXianyuDeliveryAlreadySent
-	case service.XianyuDeliveryStatusLegacyUnverified:
-		return service.ErrXianyuDeliveryAlreadySent
-	}
-
 	nextStatus := service.XianyuDeliveryStatusPending
-	if result.Success {
-		if result.Confirmed {
-			nextStatus = service.XianyuDeliveryStatusSent
-		} else {
-			// 返回成功但无法确认最终回执时保持 pending。
-			nextStatus = service.XianyuDeliveryStatusPending
-		}
-	} else {
+	if result.Success && result.Confirmed {
+		nextStatus = service.XianyuDeliveryStatusSent
+	} else if !result.Success {
 		nextStatus = service.XianyuDeliveryStatusFailed
 	}
-
-	var errMsg any
+	var errMsg *string
 	if result.Error != nil && strings.TrimSpace(*result.Error) != "" {
-		errMsg = strings.TrimSpace(*result.Error)
-	} else {
-		errMsg = nil
+		trimmed := strings.TrimSpace(*result.Error)
+		errMsg = &trimmed
 	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE xianyu_order_claims
-		SET delivery_status = $2, delivery_error = $3, last_attempt_at = NOW(), updated_at = NOW()
-		WHERE order_no = $1`, result.OrderNo, nextStatus, errMsg)
+	// 未知回执（Success=true, Confirmed=false → pending）只允许作用于 pending，
+	// 不得把明确 failed 复活为 pending（破坏明确失败状态单调性）。
+	fromStatuses := []string{service.XianyuDeliveryStatusPending, service.XianyuDeliveryStatusFailed}
+	if nextStatus == service.XianyuDeliveryStatusPending {
+		fromStatuses = []string{service.XianyuDeliveryStatusPending}
+	}
+	spec := claimTransitionSpec{
+		orderNo:            result.OrderNo,
+		toStatus:           nextStatus,
+		fromStatuses:       fromStatuses,
+		expectedAttempt:    result.Attempt,
+		requireAttempt:     true,
+		setError:           errMsg,
+		clearError:         errMsg == nil,
+		touchLastAttempt:   true,
+		idempotentStatuses: []string{nextStatus, service.XianyuDeliveryStatusSent, service.XianyuDeliveryStatusLegacyUnverified},
+	}
+	outcome, rb, err := r.applyClaimTransition(ctx, spec)
 	if err != nil {
-		return fmt.Errorf("update xianyu delivery result: %w", err)
+		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit xianyu delivery result: %w", err)
+	switch outcome {
+	case claimTransitionApplied, claimTransitionIdempotent:
+		return nil
+	case claimTransitionNotFound:
+		return service.ErrXianyuDeliveryClaimNotFound
+	default: // conflict：旧回执/状态终态不匹配，按隔离要求忽略，记录告警。
+		slog.Warn("xianyu delivery result ignored due to attempt/status mismatch",
+			"order_no", result.OrderNo, "request_attempt", result.Attempt,
+			"current_status", rb.status, "current_attempt", rb.attempt, "success", result.Success)
+		return nil
 	}
-	return nil
 }
 
 func (r *xianyuOrderClaimStateRepository) GetDeliveryClaim(ctx context.Context, orderNo string) (*service.XianyuOrderClaim, error) {
@@ -320,53 +308,74 @@ func (r *xianyuOrderClaimStateRepository) GetDeliveryClaim(ctx context.Context, 
 	return &c, nil
 }
 
-func (r *xianyuOrderClaimStateRepository) ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error) {
+// ResendOriginalCode 人工补发原码：failed → pending，attempt_count+1（返回递增后代次供回执关联）。
+// 同事务预读 + CAS（attempt 与 status 都作为条件），避免盲写任意状态。
+func (r *xianyuOrderClaimStateRepository) ResendOriginalCode(ctx context.Context, orderNo string) (string, int, error) {
 	if r == nil || r.db == nil {
-		return "", errors.New("xianyu claim database is unavailable")
+		return "", 0, errors.New("xianyu claim database is unavailable")
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin xianyu resend transaction: %w", err)
+		return "", 0, fmt.Errorf("begin xianyu resend transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, orderNo); err != nil {
-		return "", fmt.Errorf("lock xianyu resend order: %w", err)
+	if err := lockXianyuOrder(ctx, tx, orderNo); err != nil {
+		return "", 0, err
 	}
 
 	var currentStatus string
 	var code string
+	var curAttempt int
 	err = tx.QueryRowContext(ctx, `
-		SELECT c.delivery_status, r.code
+		SELECT c.delivery_status, r.code, c.attempt_count
 		FROM xianyu_order_claims c
 		JOIN redeem_codes r ON r.id = c.redeem_code_id
-		WHERE c.order_no = $1`, orderNo).Scan(&currentStatus, &code)
+		WHERE c.order_no = $1`, orderNo).Scan(&currentStatus, &code, &curAttempt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", service.ErrXianyuDeliveryClaimNotFound
+		return "", 0, service.ErrXianyuDeliveryClaimNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("lookup xianyu resend claim: %w", err)
+		return "", 0, fmt.Errorf("lookup xianyu resend claim: %w", err)
 	}
 
 	switch currentStatus {
 	case service.XianyuDeliveryStatusFailed:
 		// 允许人工补发原码：从 failed 回到 pending，等待 Worker 重发。
 	case service.XianyuDeliveryStatusPending:
-		return "", service.ErrXianyuResendNotPending
+		return "", 0, service.ErrXianyuResendNotPending
 	default:
-		return "", service.ErrXianyuDeliveryAlreadySent
+		return "", 0, service.ErrXianyuDeliveryAlreadySent
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE xianyu_order_claims
-		SET delivery_status = $2, delivery_error = NULL,
-		    attempt_count = attempt_count + 1, last_attempt_at = NOW(), updated_at = NOW()
-		WHERE order_no = $1`, orderNo, service.XianyuDeliveryStatusPending)
+	spec := claimTransitionSpec{
+		orderNo:          orderNo,
+		toStatus:         service.XianyuDeliveryStatusPending,
+		fromStatuses:     []string{service.XianyuDeliveryStatusFailed},
+		expectedAttempt:  curAttempt,
+		requireAttempt:   true,
+		bumpAttempt:      true,
+		clearError:       true,
+		touchLastAttempt: true,
+	}
+	outcome, rb, err := r.applyClaimTransitionTx(ctx, tx, spec)
 	if err != nil {
-		return "", fmt.Errorf("reset xianyu resend claim: %w", err)
+		return "", 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit xianyu resend: %w", err)
+	switch outcome {
+	case claimTransitionApplied:
+		// 返回递增后的 attempt 代次（旧 attempt 回执不得改变新状态）。
+		newAttempt := curAttempt + 1
+		if err := tx.Commit(); err != nil {
+			return "", 0, fmt.Errorf("commit xianyu resend: %w", err)
+		}
+		return code, newAttempt, nil
+	case claimTransitionNotFound:
+		return "", 0, service.ErrXianyuDeliveryClaimNotFound
+	default:
+		if rb != nil && rb.status == service.XianyuDeliveryStatusPending {
+			return "", 0, service.ErrXianyuResendNotPending
+		}
+		return "", 0, service.ErrXianyuDeliveryAlreadySent
 	}
-	return code, nil
 }

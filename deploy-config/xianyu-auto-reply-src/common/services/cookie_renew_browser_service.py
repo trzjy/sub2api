@@ -220,11 +220,19 @@ class CookieRenewBrowserService:
             settings = get_settings()
             base_url = getattr(settings, "websocket_service_url", "") or ""
             base_url = base_url.rstrip("/")
+            token = (getattr(settings, "sub2api_internal_token", "") or "").strip()
             if not base_url:
                 return CookieRenewBrowserResult(
                     success=False,
                     has_quick_enter=False,
                     message="未配置 websocket_service_url，无法委托浏览器续期",
+                )
+            if not token:
+                # internal 路由强制鉴权；token 未配置时失败关闭，不发出空 token 请求。
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=False,
+                    message="未配置 SUB2API_INTERNAL_TOKEN，无法委托浏览器续期",
                 )
 
             renew_url = f"{base_url}/internal/cookies/browser-renew"
@@ -235,6 +243,7 @@ class CookieRenewBrowserService:
                 async with session.post(
                     renew_url,
                     json={"account_id": account_id, "cookies_str": cookies_str},
+                    headers={"X-Internal-Token": token},
                 ) as response:
                     if response.status != 200:
                         text = await response.text()

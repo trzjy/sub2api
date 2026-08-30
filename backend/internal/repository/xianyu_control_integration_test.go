@@ -163,19 +163,26 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 
 	stateRepo := NewXianyuOrderClaimStateRepository(db)
 
-	// pending -> sent
-	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: true, Confirmed: true}))
+	// 新 claim 的 attempt_count 必须为 0（初始自动发货语义）。
 	claim, err := stateRepo.GetDeliveryClaim(ctx, "order-state")
 	require.NoError(t, err)
-	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
-	require.Equal(t, 1, claim.AttemptCount)
+	require.Equal(t, 0, claim.AttemptCount)
 
-	// sent 为终态：旧失败结果不能覆盖。
-	err = stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: false})
-	require.ErrorIs(t, err, service.ErrXianyuDeliveryAlreadySent)
+	// 自动发货回执 attempt=0 能关闭新 claim（bug A 修复：不再静默忽略回执）。
+	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: true, Confirmed: true}))
+	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
+	require.NoError(t, err)
+	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
+	require.Equal(t, 0, claim.AttemptCount)
+
+	// sent 为终态：旧失败回执按幂等忽略（2xx ack，不报错），状态不被覆盖。
+	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: false}))
+	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
+	require.NoError(t, err)
+	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
 
 	// 已 sent 不允许补发。
-	_, err = stateRepo.ResendOriginalCode(ctx, "order-state", userID)
+	_, _, err = stateRepo.ResendOriginalCode(ctx, "order-state")
 	require.ErrorIs(t, err, service.ErrXianyuDeliveryAlreadySent)
 
 	// pending 且未确认成功回执 -> 保持 pending。
@@ -188,7 +195,7 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 	require.Equal(t, service.XianyuDeliveryStatusPending, claim.DeliveryStatus)
 
 	// pending 不允许补发（无失败态）。
-	_, err = stateRepo.ResendOriginalCode(ctx, "order-state", userID)
+	_, _, err = stateRepo.ResendOriginalCode(ctx, "order-state")
 	require.ErrorIs(t, err, service.ErrXianyuResendNotPending)
 
 	// pending -> failed -> 人工补发原码（不分配新码）。
@@ -198,13 +205,36 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 	require.Equal(t, service.XianyuDeliveryStatusFailed, claim.DeliveryStatus)
 	originalCode := claim.Code
 
-	resent, err := stateRepo.ResendOriginalCode(ctx, "order-state", userID)
+	resent, attempt, err := stateRepo.ResendOriginalCode(ctx, "order-state")
 	require.NoError(t, err)
 	require.Equal(t, originalCode, resent)
 	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
 	require.NoError(t, err)
 	require.Equal(t, service.XianyuDeliveryStatusPending, claim.DeliveryStatus)
 	require.Equal(t, 1, claim.AttemptCount)
+	// 返回的 attempt 必须与持久化 attempt_count 一致（回执关联用）。
+	require.Equal(t, claim.AttemptCount, attempt)
+
+	// 补发回执 attempt=1 生效：pending -> sent。
+	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: true, Confirmed: true, Attempt: 1}))
+	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
+	require.NoError(t, err)
+	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
+	require.Equal(t, 1, claim.AttemptCount)
+
+	// 旧代次 attempt=0 的迟到回执不得改变新代次状态（隔离断言）。
+	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: false, Attempt: 0}))
+	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
+	require.NoError(t, err)
+	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
+	require.Equal(t, 1, claim.AttemptCount)
+
+	// 同 attempt 重复回执幂等 ack，不报错、不改变状态。
+	require.NoError(t, stateRepo.RecordDeliveryResult(ctx, service.XianyuDeliveryStatusResult{OrderNo: "order-state", Success: true, Confirmed: true, Attempt: 1}))
+	claim, err = stateRepo.GetDeliveryClaim(ctx, "order-state")
+	require.NoError(t, err)
+	require.Equal(t, service.XianyuDeliveryStatusSent, claim.DeliveryStatus)
+
 	// 库存只消耗一个码。
 	var usedCount int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE type=$1 AND status='used'`, service.RedeemTypeXianyuDelivery).Scan(&usedCount))

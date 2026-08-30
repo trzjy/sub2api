@@ -47,6 +47,15 @@ async def solve_captcha_via_websocket(
     """
     endpoint = f"{websocket_service_url.rstrip('/')}/internal/captcha/solve"
     timeout_seconds = get_remote_solve_timeout(browser_timeout)
+    # internal 路由要求 X-Internal-Token 匹配 SUB2API_INTERNAL_TOKEN。
+    headers: dict[str, str] = {}
+    try:
+        from common.core.config import get_settings
+        token = (getattr(get_settings(), "sub2api_internal_token", "") or "").strip()
+        if token:
+            headers["X-Internal-Token"] = token
+    except Exception:  # noqa: BLE001
+        pass
     payload = {
         "account_id": account_id,
         "url": url,
@@ -68,7 +77,7 @@ async def solve_captcha_via_websocket(
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(endpoint, json=payload) as response:
+            async with session.post(endpoint, json=payload, headers=headers) as response:
                 result = await response.json(content_type=None)
                 if isinstance(result, dict):
                     return result

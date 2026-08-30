@@ -30,13 +30,16 @@
               <td class="px-4 py-2 font-medium">{{ pool.name }}</td>
               <td class="px-4 py-2 text-gray-500">{{ pool.slug }}</td>
               <td class="px-4 py-2">
-                <span :class="isLowStock(pool) ? 'font-semibold text-red-600 dark:text-red-400' : ''">{{ remainingFor(pool) }}</span>
-                <span v-if="isLowStock(pool)" class="ml-1 rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-600 dark:bg-red-900 dark:text-red-300">
-                  {{ t('admin.xianyu.inventory.lowStock') }}
-                </span>
+                <span v-if="stockError" class="text-orange-500">{{ t('admin.xianyu.inventory.stockUnavailable') }}</span>
+                <template v-else>
+                  <span :class="isLowStock(pool) ? 'font-semibold text-red-600 dark:text-red-400' : ''">{{ remainingFor(pool) }}</span>
+                  <span v-if="isLowStock(pool)" class="ml-1 rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-600 dark:bg-red-900 dark:text-red-300">
+                    {{ t('admin.xianyu.inventory.lowStock') }}
+                  </span>
+                </template>
               </td>
-              <td class="px-4 py-2">{{ usedFor(pool) }}</td>
-              <td class="px-4 py-2">{{ disabledFor(pool) }}</td>
+              <td class="px-4 py-2">{{ stockError ? '-' : usedFor(pool) }}</td>
+              <td class="px-4 py-2">{{ stockError ? '-' : disabledFor(pool) }}</td>
               <td class="px-4 py-2">{{ pool.low_stock_threshold }}</td>
               <td class="px-4 py-2">
                 <StatusBadge
@@ -48,6 +51,9 @@
                 <div class="flex items-center justify-end gap-1.5">
                   <button class="btn btn-secondary btn-xs" @click="openEdit(pool)">
                     {{ t('common.edit') }}
+                  </button>
+                  <button class="btn btn-secondary btn-xs" @click="goManageCodes(pool)">
+                    {{ t('admin.xianyu.inventory.manageCodes') }}
                   </button>
                   <button class="btn btn-secondary btn-xs" @click="goGenerateCodes(pool)">
                     {{ t('admin.xianyu.inventory.generateCodes') }}
@@ -78,6 +84,10 @@
             <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.lowStockThreshold') }}</label>
             <input v-model.number="form.low_stock_threshold" type="number" min="0" class="input w-full" />
           </div>
+          <div class="flex items-center gap-2">
+            <span class="text-sm font-medium">{{ t('admin.xianyu.inventory.active') }}</span>
+            <Toggle v-model="formStatus" />
+          </div>
           <div class="flex justify-end gap-2">
             <button class="btn btn-secondary" @click="editVisible = false">{{ t('common.cancel') }}</button>
             <button class="btn btn-primary" @click="save">{{ t('admin.xianyu.inventory.savePool') }}</button>
@@ -89,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useRouter } from 'vue-router'
@@ -99,6 +109,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 
 const { t } = useI18n()
@@ -107,6 +118,7 @@ const router = useRouter()
 
 const pools = ref<XianyuItemPool[]>([])
 const overview = ref<XianyuOverview | null>(null)
+const stockError = ref(false)
 
 async function load() {
   try {
@@ -116,7 +128,9 @@ async function load() {
     ])
     pools.value = poolList
     overview.value = ov
+    stockError.value = false
   } catch (err) {
+    stockError.value = true
     appStore.showError(String(err))
   }
 }
@@ -139,7 +153,14 @@ function isLowStock(pool: XianyuItemPool): boolean {
 
 const editVisible = ref(false)
 const editingID = ref<number | null>(null)
-const form = reactive({ name: '', slug: '', description: '', low_stock_threshold: 0 })
+const form = reactive({ name: '', slug: '', description: '', low_stock_threshold: 0, status: 'active' })
+
+const formStatus = computed({
+  get: () => form.status === 'active',
+  set: (value: boolean) => {
+    form.status = value ? 'active' : 'disabled'
+  }
+})
 
 function openEdit(pool?: XianyuItemPool) {
   editingID.value = pool?.id ?? null
@@ -147,6 +168,7 @@ function openEdit(pool?: XianyuItemPool) {
   form.slug = pool?.slug ?? ''
   form.description = pool?.description ?? ''
   form.low_stock_threshold = pool?.low_stock_threshold ?? 0
+  form.status = pool?.status ?? 'active'
   editVisible.value = true
 }
 
@@ -165,7 +187,8 @@ async function save() {
       name: form.name.trim(),
       slug: form.slug.trim(),
       description: form.description.trim(),
-      low_stock_threshold: Math.max(0, form.low_stock_threshold || 0)
+      low_stock_threshold: Math.max(0, form.low_stock_threshold || 0),
+      status: form.status as 'active' | 'disabled'
     })
     editVisible.value = false
     await load()
@@ -173,6 +196,10 @@ async function save() {
   } catch (err) {
     appStore.showError(String(err))
   }
+}
+
+function goManageCodes(pool: XianyuItemPool) {
+  router.push({ path: '/admin/redeem', query: { type: 'xianyu_delivery', pool: pool.slug, view: 'list' } })
 }
 
 function goGenerateCodes(pool: XianyuItemPool) {

@@ -61,6 +61,7 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		Success   bool    `json:"success"`
 		Confirmed *bool   `json:"confirmed"`
 		Error     *string `json:"error"`
+		Attempt   int     `json:"attempt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request: "+err.Error())
@@ -77,6 +78,7 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		Success:   req.Success,
 		Confirmed: confirmed,
 		Error:     req.Error,
+		Attempt:   req.Attempt,
 	}
 	if err := h.service.RecordDeliveryResult(c.Request.Context(), result); err != nil {
 		response.ErrorFrom(c, err)

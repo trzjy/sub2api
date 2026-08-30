@@ -9,11 +9,13 @@ FastAPI依赖注入模块
 """
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncGenerator
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -33,11 +35,8 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_db_session),
-) -> User:
-    """获取当前用户"""
+async def _authenticate_jwt_token(token: str, session: AsyncSession) -> User:
+    """解析并校验 JWT Bearer token，返回对应活跃用户（与 get_current_user 同语义）。"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -51,13 +50,22 @@ async def get_current_user(
         raise credentials_exception
 
     # 查询用户
-    from sqlalchemy import select
     result = await session.execute(select(User).where(User.id == int(payload.sub)))
     user = result.scalar_one_or_none()
 
     if not user:
         raise credentials_exception
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
     return user
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    """获取当前用户（JWT Bearer 认证）"""
+    return await _authenticate_jwt_token(token, session)
 
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
@@ -72,6 +80,60 @@ async def get_current_admin_user(current_user: User = Depends(get_current_active
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
     return current_user
+
+
+async def get_service_or_user(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> User:
+    """主程序内网服务身份认证（复用现有用户/所有者语义）。
+
+    优先校验 X-Worker-Token 头是否匹配 SUB2API_INTERNAL_TOKEN：
+    - 匹配：解析为现有管理员用户（服务身份，owner 语义沿用该管理员）。
+    - 不匹配/缺失：回退到既有 JWT 用户认证，不影响前端登录。
+
+    不新建平行用户/账号模型；服务身份只在既有 User 表上解析。
+    """
+    internal_token = (settings.sub2api_internal_token or "").strip()
+    if not internal_token:
+        # 内网服务令牌未配置：internal 服务路由拒绝服务，绝不静默降级为普通 JWT 路由，
+        # 避免"任何 active admin JWT 都能调用 internal API"的攻击面扩大。
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="internal service token is not configured",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    worker_token = (request.headers.get("X-Worker-Token") or "").strip()
+    if worker_token:
+        if hmac.compare_digest(internal_token, worker_token):
+            result = await session.execute(
+                select(User)
+                .where(User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE)
+                .order_by(User.id)
+                .limit(1)
+            )
+            admin_user = result.scalar_one_or_none()
+            if admin_user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="no active admin user to bind internal service identity",
+                )
+            return admin_user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid internal service token",
+        )
+
+    # 未携带服务 token：回退 JWT Bearer 认证（复用同一解析逻辑，不影响前端登录）。
+    auth_header = request.headers.get("Authorization") or ""
+    if auth_header.startswith("Bearer "):
+        return await _authenticate_jwt_token(auth_header[len("Bearer "):].strip(), session)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 # ==================== Service 依赖注入 ====================

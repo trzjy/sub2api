@@ -96,6 +96,20 @@ class HTTPClient:
         session = await self._get_session()
         last_error = None
 
+        # 内部服务间调用：目标为 websocket / backend-web internal 路由时注入 X-Internal-Token，
+        # 匹配 SUB2API_INTERNAL_TOKEN（websocket/scheduler 的 internal router 强制校验）。
+        # 仅对内部服务 URL 注入，不影响对第三方请求。
+        headers = dict(headers) if headers else {}
+        try:
+            from app.core.config import get_settings as _get_settings
+            _s = _get_settings()
+            _ws = (_s.websocket_service_url or "").strip().rstrip("/")
+            _tok = (_s.sub2api_internal_token or "").strip()
+            if _tok and _ws and url.startswith(_ws):
+                headers.setdefault("X-Internal-Token", _tok)
+        except Exception:  # noqa: BLE001
+            pass
+
         for attempt in range(self.max_retries):
             try:
                 async with session.request(

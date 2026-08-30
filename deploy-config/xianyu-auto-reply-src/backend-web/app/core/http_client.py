@@ -77,6 +77,7 @@ class HTTPClient:
         json: Optional[Dict[str, Any]] = None,
         data: Optional[Any] = None,
         params: Optional[Dict[str, Any]] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         发送HTTP请求(带重试)
@@ -88,6 +89,8 @@ class HTTPClient:
             json: JSON数据
             data: 表单数据
             params: URL参数
+            max_retries: 本次请求重试次数（覆盖实例级默认值；None 用实例值）。
+                非幂等发送端点应传 1 以禁用传输层自动重试，避免重复发货。
 
         Returns:
             响应数据
@@ -98,7 +101,23 @@ class HTTPClient:
         session = await self._get_session()
         last_error = None
 
-        for attempt in range(self.max_retries):
+        # 内部服务间调用：目标为 websocket / scheduler internal 路由时注入 X-Internal-Token，
+        # 匹配 SUB2API_INTERNAL_TOKEN（websocket/scheduler 的 internal router 强制校验）。
+        # 仅对内部服务 URL 注入，不影响对闲鱼 CDN 等第三方请求。
+        headers = dict(headers) if headers else {}
+        try:
+            from app.core.config import get_settings as _get_settings
+            _s = _get_settings()
+            _ws = (_s.websocket_service_url or "").strip().rstrip("/")
+            _sch = (_s.scheduler_service_url or "").strip().rstrip("/")
+            _tok = (_s.sub2api_internal_token or "").strip()
+            if _tok and ((_ws and url.startswith(_ws)) or (_sch and url.startswith(_sch))):
+                headers.setdefault("X-Internal-Token", _tok)
+        except Exception:  # noqa: BLE001
+            pass
+
+        retries = self.max_retries if max_retries is None else max_retries
+        for attempt in range(retries):
             try:
                 async with session.request(
                     method=method,
@@ -139,14 +158,14 @@ class HTTPClient:
             ) as e:
                 last_error = e
 
-                # 判断是否应该重试
-                if attempt < self.max_retries - 1:
+                # 判断是否应该重试（使用本次请求的 retries 上限，避免 max_retries=1 时误报重试次数并额外休眠）
+                if attempt < retries - 1:
                     # 计算退避延迟(指数退避: 1s, 2s, 4s)
                     delay = self.retry_delay * (2 ** attempt)
 
                     logger.warning(
                         f"请求失败,{delay}秒后重试 "
-                        f"(第{attempt + 1}/{self.max_retries}次): "
+                        f"(第{attempt + 1}/{retries}次): "
                         f"{method} {url}, 错误: {str(e)}"
                     )
 
@@ -175,9 +194,10 @@ class HTTPClient:
         headers: Optional[Dict[str, str]] = None,
         json: Optional[Dict[str, Any]] = None,
         data: Optional[Any] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """POST请求"""
-        return await self.request("POST", url, headers=headers, json=json, data=data)
+        return await self.request("POST", url, headers=headers, json=json, data=data, max_retries=max_retries)
 
     async def put(
         self,

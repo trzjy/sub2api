@@ -66,6 +66,11 @@ class BaseConfig(BaseSettings):
     redis_password: str = Field(default="", repr=False)
     redis_db: int = Field(default=0)
 
+    # 主程序（Sub2API）内网回调配置：Worker 在获得最终发送回执后向主程序
+    # delivery-results 端点回传，主程序据此把发货记录标记为 sent（confirmed=true）。
+    sub2api_internal_base_url: str = Field(default="", alias="SUB2API_INTERNAL_BASE_URL")
+    sub2api_internal_token: str = Field(default="", repr=False, alias="SUB2API_INTERNAL_TOKEN")
+
     # JWT配置（用于安全模块）
     # 注意：jwt_secret_key 由数据库统一托管（backend-web 启动时自动生成并持久化），
     # 此处 default 仅作占位，运行期会被数据库中的值覆盖；请勿依赖环境变量配置该值。

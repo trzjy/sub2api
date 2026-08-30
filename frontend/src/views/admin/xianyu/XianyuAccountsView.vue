@@ -5,6 +5,7 @@
         <div>
           <h1 class="text-2xl font-bold">{{ t('admin.xianyu.accounts.title') }}</h1>
           <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.accounts.description') }}</p>
+          <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ t('admin.xianyu.accounts.syncHint') }}</p>
         </div>
         <div class="flex items-center gap-2">
           <button class="btn btn-secondary" :disabled="loading" @click="sync">
@@ -13,7 +14,14 @@
           <button class="btn btn-secondary" :disabled="loading" @click="load">
             <Icon name="refresh" size="sm" />
           </button>
+          <button class="btn btn-primary" :disabled="loading" @click="openScan(null)">
+            {{ t('admin.xianyu.accounts.scanLogin') }}
+          </button>
         </div>
+      </div>
+
+      <div v-if="syncError" class="mb-4 rounded border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-dark-700 dark:bg-red-900/20 dark:text-red-300">
+        {{ syncError }}
       </div>
 
       <div v-if="accounts.length" class="overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
@@ -25,6 +33,7 @@
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.status') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.cookieStatus') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.taskStatus') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.accounts.lastLoginAt') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.lastSeenAt') }}</th>
               <th class="px-4 py-2 text-right">{{ t('common.actions') }}</th>
             </tr>
@@ -55,6 +64,7 @@
                   :label="taskLabel(account.task_status)"
                 />
               </td>
+              <td class="px-4 py-2 text-gray-500">{{ account.last_login_at ? formatDateTime(account.last_login_at) : '-' }}</td>
               <td class="px-4 py-2 text-gray-500">{{ account.last_seen_at ? formatDateTime(account.last_seen_at) : '-' }}</td>
               <td class="px-4 py-2">
                 <div class="flex items-center justify-end gap-1.5">
@@ -70,13 +80,22 @@
                   <button class="btn btn-secondary btn-xs" @click="openScan(account)">
                     {{ t('admin.xianyu.accounts.scanLogin') }}
                   </button>
+                  <button class="btn btn-danger btn-xs" @click="doClearCredentials(account)">
+                    {{ t('admin.xianyu.accounts.clearCredentials') }}
+                  </button>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <EmptyState v-else :message="t('admin.xianyu.accounts.noAccounts')" />
+      <EmptyState v-else :message="t('admin.xianyu.accounts.noAccounts')">
+        <template #action>
+          <button class="btn btn-primary btn-sm" :disabled="loading" @click="openScan(null)">
+            {{ t('admin.xianyu.accounts.scanLogin') }}
+          </button>
+        </template>
+      </EmptyState>
 
       <BaseDialog :show="scanVisible" :title="t('admin.xianyu.accounts.scanTitle')" @close="stopPollingBehavior">
         <div class="flex flex-col items-center gap-3">
@@ -84,7 +103,7 @@
             {{ t('admin.xianyu.accounts.scanSuccess') }}
           </div>
           <div v-else-if="scanStatus === 'failed'" class="text-red-600">
-            {{ t('admin.xianyu.accounts.scanFailed') }}
+            {{ scanMessage || t('admin.xianyu.accounts.scanFailed') }}
           </div>
           <div v-else-if="scanStatus === 'expired'" class="text-red-600">
             {{ t('admin.xianyu.accounts.scanExpired') }}
@@ -129,11 +148,13 @@ const appStore = useAppStore()
 
 const accounts = ref<XianyuAccount[]>([])
 const loading = ref(false)
+const syncError = ref('')
 
 async function load() {
   loading.value = true
   try {
     accounts.value = await adminAPI.xianyu.listAccounts()
+    syncError.value = ''
   } catch (err) {
     appStore.showError(String(err))
   } finally {
@@ -142,11 +163,13 @@ async function load() {
 }
 
 async function sync() {
+  syncError.value = ''
   try {
     await adminAPI.xianyu.syncAccounts()
     await load()
     appStore.showSuccess(t('admin.xianyu.accounts.success'))
   } catch (err) {
+    syncError.value = String(err)
     appStore.showError(String(err))
   }
 }
@@ -220,46 +243,94 @@ function doRefreshCookie(account: XianyuAccount) {
   )
 }
 
+function doClearCredentials(account: XianyuAccount) {
+  ask(
+    t('admin.xianyu.accounts.clearCredentials'),
+    t('admin.xianyu.accounts.confirmClearCredentials', { nickname: account.nickname || account.account_id }),
+    async () => {
+      try {
+        await adminAPI.xianyu.clearCredentials(account.account_id)
+        await load()
+        appStore.showSuccess(t('admin.xianyu.accounts.success'))
+      } catch (err) {
+        appStore.showError(String(err))
+      }
+    }
+  )
+}
+
 const scanVisible = ref(false)
 const scanAccount = ref<XianyuAccount | null>(null)
+const scanSessionID = ref('')
 const scanStatus = ref('waiting')
+const scanMessage = ref('')
 const scanQRCode = ref('')
-let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollTimer: number | null = null
 
-async function openScan(account: XianyuAccount) {
+async function openScan(account: XianyuAccount | null) {
   scanAccount.value = account
   scanStatus.value = 'waiting'
+  scanMessage.value = ''
   scanQRCode.value = ''
+  scanSessionID.value = ''
   scanVisible.value = true
   try {
-    const session = await adminAPI.xianyu.createLoginSession(account.account_id)
+    const session = await adminAPI.xianyu.createLoginSession(account?.account_id || '')
     scanStatus.value = session.status
     scanQRCode.value = session.qr_code || ''
+    scanMessage.value = session.message || ''
+    scanSessionID.value = session.session_id || ''
+    if (!scanSessionID.value) {
+      appStore.showError(t('admin.xianyu.accounts.scanNoSession'))
+      scanVisible.value = false
+      return
+    }
   } catch (err) {
     appStore.showError(String(err))
     scanVisible.value = false
     return
   }
-  startPolling(account.account_id)
+  startPolling(scanSessionID.value)
 }
 
-function startPolling(accountId: string) {
+function startPolling(sessionID: string) {
   stopPolling()
-  pollTimer = setInterval(async () => {
-    try {
-      const session = await adminAPI.xianyu.queryLoginSession(accountId)
-      scanStatus.value = session.status
-      if (session.status === 'success' || session.status === 'failed' || session.status === 'expired') {
-        stopPolling()
-        if (session.status === 'success') {
-          await load()
-        }
-      }
-    } catch (err) {
+  pollCount = 0
+  pollTimer = window.setTimeout(() => pollOnce(sessionID), 2000)
+}
+
+const MAX_POLL_ATTEMPTS = 60 // 2s 间隔 × 60 ≈ 120s 上限，防止无限轮询
+
+let pollCount = 0
+
+async function pollOnce(sessionID: string) {
+  pollCount++
+  if (pollCount > MAX_POLL_ATTEMPTS) {
+    stopPolling()
+    scanStatus.value = 'failed'
+    scanMessage.value = t('admin.xianyu.accounts.scanTimeout')
+    return
+  }
+  try {
+    const session = await adminAPI.xianyu.queryLoginSession(sessionID)
+    scanStatus.value = session.status
+    scanMessage.value = session.message || ''
+    if (session.status === 'success' || session.status === 'failed' || session.status === 'expired') {
       stopPolling()
-      appStore.showError(String(err))
+      if (session.status === 'success') {
+        await load()
+      }
+      return
     }
-  }, 2000)
+  } catch (err) {
+    stopPolling()
+    appStore.showError(String(err))
+    return
+  }
+  // 上一轮完成后再调度下一轮，避免 setInterval 并发请求堆积
+  if (pollCount <= MAX_POLL_ATTEMPTS) {
+    pollTimer = window.setTimeout(() => pollOnce(sessionID), 2000)
+  }
 }
 
 function stopPolling() {

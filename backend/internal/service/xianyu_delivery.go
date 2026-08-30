@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -32,6 +33,14 @@ var (
 	ErrXianyuAccountTooLong        = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_TOO_LONG", "cookie_id is too long")
 	ErrXianyuBuyerTooLong          = infraerrors.BadRequest("XIANYU_BUYER_ID_TOO_LONG", "buyer_id is too long")
 	ErrXianyuChatTooLong           = infraerrors.BadRequest("XIANYU_CHAT_ID_TOO_LONG", "chat_id is too long")
+	// ErrXianyuResendUndispatched 标记人工补发"确定未向 Worker 发出发送请求"的错误
+	// （无 active Worker、账号不可用、请求构建前失败等）。这类错误必须回滚 pending→failed，
+	// 保持人工可重试；只有"可能已 dispatch / 发送结果不确定"时才保留 pending。
+	ErrXianyuResendUndispatched = errors.New("xianyu resend not dispatched")
+	// ErrXianyuResendRejected 标记补发"消息已 dispatch 但被平台明确拒绝"（如 CSI_FORBID 拦截）。
+	// 与 ErrXianyuResendUndispatched 一样属于"确定未送达"，必须回滚 pending→failed，
+	// 与 Worker 侧异步兜底回传（REJECTED → success=false）收敛一致，避免同步/异步终态分歧。
+	ErrXianyuResendRejected = errors.New("xianyu resend rejected")
 )
 
 type XianyuDeliveryClaimRequest struct {
@@ -83,10 +92,13 @@ type XianyuDeliverySettingReader interface {
 }
 
 // XianyuDeliveryStateUpdater 更新发货状态（适配端点回传 + 人工补发）。
+// 所有状态写（回执 / 补发成功 / 补发回滚）统一收敛到 RecordDeliveryResult，
+// 由它按 attempt 代次做 CAS 隔离；ResendOriginalCode 仅负责 failed→pending 发起补发。
 type XianyuDeliveryStateUpdater interface {
 	RecordDeliveryResult(ctx context.Context, result XianyuDeliveryStatusResult) error
 	GetDeliveryClaim(ctx context.Context, orderNo string) (*XianyuOrderClaim, error)
-	ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error)
+	// ResendOriginalCode 把 failed→pending（attempt_count+1），返回新 attempt 用于回执关联。
+	ResendOriginalCode(ctx context.Context, orderNo string) (string, int, error)
 }
 
 func NewXianyuDeliveryService(
@@ -270,7 +282,7 @@ func (s *XianyuDeliveryService) RecordDeliveryResult(ctx context.Context, result
 }
 
 // ResendOriginalCode 人工补发原码。
-func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string, systemUserID int64) (string, error) {
+func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string) (string, error) {
 	if s == nil || s.delivery == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return "", ErrXianyuDeliveryNotConfigured
 	}
@@ -285,10 +297,38 @@ func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo 
 		}
 		resender = s.workerSvc.ResendDelivery
 	}
-	if err := resender(ctx, claim); err != nil {
+	// 先把 failed → pending（事务内 advisory lock + 状态校验 + attempt CAS），
+	// 再触发 Worker 发送：即使发送成功但响应丢失/DB 提交失败，状态已不在 failed，
+	// 管理员重试不会触发双重发货。
+	code, attempt, err := s.delivery.ResendOriginalCode(ctx, orderNo)
+	if err != nil {
 		return "", err
 	}
-	return s.delivery.ResendOriginalCode(ctx, orderNo, systemUserID)
+	// 让补发发送链路携带本次 attempt 代次（用于回执关联，旧 attempt 回执不得改变新状态）。
+	claim.AttemptCount = attempt
+	if err := resender(ctx, claim); err != nil {
+		// 确定未送达（未 dispatch：无 active Worker / 账号不可用 / 请求构建前失败；
+		// 或已 dispatch 但被平台明确拒绝：rejected）→ 回滚 pending→failed
+		// （RecordDeliveryResult 失败回执），保持可人工重试；
+		// 可能已 dispatch / 结果不确定的错误保留 pending（等待回执或转人工）。
+		if errors.Is(err, ErrXianyuResendUndispatched) || errors.Is(err, ErrXianyuResendRejected) {
+			reason := err.Error()
+			if failErr := s.delivery.RecordDeliveryResult(ctx, XianyuDeliveryStatusResult{
+				OrderNo: orderNo, Success: false, Error: &reason, Attempt: attempt,
+			}); failErr != nil {
+				return "", fmt.Errorf("xianyu resend rollback failed: %w (send error: %v)", failErr, err)
+			}
+		}
+		return "", err
+	}
+	// 明确成功回执（resender 返回 nil = Worker 确认发送成功）：
+	// 按 attempt 条件原子 pending/failed → sent（RecordDeliveryResult 成功回执），避免订单永久滞留 pending。
+	if err := s.delivery.RecordDeliveryResult(ctx, XianyuDeliveryStatusResult{
+		OrderNo: orderNo, Success: true, Confirmed: true, Attempt: attempt,
+	}); err != nil {
+		return "", fmt.Errorf("mark xianyu resend sent: %w", err)
+	}
+	return code, nil
 }
 
 type SystemUserReader interface {

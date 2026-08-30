@@ -23,6 +23,8 @@ from common.utils.xianyu_utils import (
 )
 from common.utils.time_utils import get_beijing_now_naive
 from common.utils.text_utils import safe_str
+from common.services.receipt_outcome import ReceiptOutcome
+from common.services.receipt_registry import ReceiptRegistry
 from app.services.xianyu.connection_manager import ConnectionManager, ConnectionState
 from app.services.xianyu.token_manager import TokenManager
 
@@ -129,10 +131,8 @@ class XianyuAsync:
         self.message_semaphore = asyncio.Semaphore(100)
         self.active_message_tasks = 0
 
-        # LWP 请求-响应关联：按 mid 等待服务端响应
-        # key: mid（客户端发送时生成），value: asyncio.Future（消息循环收到响应时 set_result）
-        # 用于 /r/SingleChatConversation/create 等需要拿响应结果的请求
-        self._pending_mid_futures: Dict[str, asyncio.Future] = {}
+        # LWP 请求-响应关联：按 mid 等待服务端响应（回执 Future 的唯一属主 ReceiptRegistry）。
+        self._receipts = ReceiptRegistry()
 
         # Session
         self.session = None
@@ -1867,12 +1867,13 @@ class XianyuAsync:
             logger.error(f"[{msg_time}] 【{self.cookie_id}】处理确认收货图片失败: {e}")
             return None
 
-    async def send_msg(self, websocket, chat_id: str, send_user_id: str, content: str):
+    async def send_msg(self, websocket, chat_id: str, send_user_id: str, content: str, register_receipt: bool = False):
         """发送文本消息（参照旧框架实现）
 
         消息通过 WebSocket 发出后立即返回成功（不阻塞自动回复）。
-        同时注册 mid 等待队列，返回结果中携带 mid，供上层在写入日志后
-        异步等待服务端响应、回写发送状态（识别 CSI_FORBID 安全拦截等失败）。
+        仅 register_receipt=True 时注册 mid 等待队列（自动发货/等待回执的调用方），
+        返回结果携带 mid 供上层异步等待服务端响应、回写发送状态；
+        普通自动回复/确认收货等调用方默认不注册，避免无人消费的 Future 泄漏。
         """
         try:
             import base64
@@ -1921,30 +1922,73 @@ class XianyuAsync:
             msg_str = json.dumps(msg)
             logger.info(f"【{self.cookie_id}】WebSocket发送数据长度: {len(msg_str)} 字节")
 
-            # 注册 mid 等待队列（供上层写日志后异步检测发送结果），注册失败不影响发送
+            # 注册 mid 等待队列（供上层写日志后异步检测发送结果）。
+            # 仅 register_receipt=True 的调用方启用；注册失败意味着无法在发送后取得
+            # 明确成功回执：拒绝发送并标记确定未 dispatch。
             registered_mid = None
             send_future = None
-            try:
-                loop = asyncio.get_running_loop()
-                send_future = loop.create_future()
-                self._pending_mid_futures[mid] = send_future
-                registered_mid = mid
-            except Exception as reg_e:
-                logger.warning(f"【{self.cookie_id}】注册发送结果检测失败（不影响发送）: {self._safe_str(reg_e)}")
+            if register_receipt:
+                try:
+                    send_future = self._receipts.register(mid)
+                    registered_mid = mid
+                except Exception as reg_e:  # noqa: BLE001
+                    logger.error(f"【{self.cookie_id}】注册发送回执 future 失败，放弃发送: {self._safe_str(reg_e)}")
+                    return {
+                        "success": False,
+                        "mode": "text",
+                        "content": content,
+                        "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                        "dispatched": False,
+                        "error_message": f"注册发送回执 future 失败: {reg_e}",
+                    }
 
-            await websocket.send(msg_str)
+            # ---- 发送边界：进入 websocket.send 调用后的异常结果不确定，不标记 dispatched=false ----
+            try:
+                await websocket.send(msg_str)
+            except asyncio.CancelledError:
+                # 取消路径同样清理已注册的回执 future，再向上传播取消。
+                if registered_mid:
+                    fut = self._receipts.pop(registered_mid, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                raise
+            except Exception as send_e:  # noqa: BLE001
+                # 清理已注册的回执 future：发送异常后该 mid 不会再有响应分派，避免连接异常期
+                # 每次发货都遗留永不完成的 Future 导致 _receipts 无界增长。
+                if registered_mid:
+                    fut = self._receipts.pop(registered_mid, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                logger.error(f"【{self.cookie_id}】WebSocket 发送调用异常: {self._safe_str(send_e)}")
+                return {
+                    "success": False,
+                    "mode": "text",
+                    "content": content,
+                    "receipt": ReceiptOutcome.UNKNOWN_PENDING,
+                    "error_message": str(send_e),
+                }
             logger.info(f"【{self.cookie_id}】发送消息成功: {content[:50]}...")
             return {
                 "success": True,
                 "mode": "text",
                 "content": content,
                 "mid": registered_mid,
+                "receipt": ReceiptOutcome.UNKNOWN_PENDING,
                 # 直接携带 Future 引用：即使服务端响应在上层 await 之前到达
                 # （_dispatch_mid_response 已 set_result 并从字典移除），
                 # 持有引用仍能拿到结果，避免漏判拦截
                 "send_future": send_future,
             }
+        except asyncio.CancelledError:
+            # 任务取消（部署关闭/上游取消）可能发生在任意位置：清理已注册 future 后向上传播。
+            _rmid = locals().get("registered_mid")
+            if _rmid:
+                _fut = self._receipts.pop(_rmid, None)
+                if _fut is not None and not _fut.done():
+                    _fut.cancel()
+            raise
         except Exception as e:
+            # 发送前异常（构造消息/生成 mid/注册 future）：确定未向平台发出发送请求。
             logger.error(f"【{self.cookie_id}】发送消息失败: {e}")
             import traceback
             logger.error(f"【{self.cookie_id}】发送消息异常堆栈: {traceback.format_exc()}")
@@ -1952,6 +1996,8 @@ class XianyuAsync:
                 "success": False,
                 "mode": "text",
                 "content": content,
+                "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                "dispatched": False,
                 "error_message": str(e),
             }
 
@@ -1991,9 +2037,9 @@ class XianyuAsync:
             return None
         finally:
             # 已被 _dispatch_mid_response 分派的 mid 已从字典移除（pop 安全幂等）；
-            # 超时未响应的 mid 在此清理，防止 _pending_mid_futures 堆积
+            # 超时未响应的 mid 在此清理，防止 _receipts 堆积
             if mid:
-                self._pending_mid_futures.pop(mid, None)
+                self._receipts.pop(mid, None)
 
     @staticmethod
     def _extract_send_reject_reason(response: dict) -> Optional[str]:
@@ -2014,6 +2060,48 @@ class XianyuAsync:
             return f"{reason}（{more_info}）" if more_info else reason
         return None
 
+    async def await_receipt(
+        self, send_future, mid: Optional[str] = None, timeout: float = 10.0
+    ) -> tuple["ReceiptOutcome", Optional[str]]:
+        """共享的单条发送回执等待：返回 (ReceiptOutcome, reason)。
+
+        统一"发送后回执三态"为单一枚举：明确成功→SENT_EXPLICIT_SUCCESS；
+        明确拦截（body.reason）→REJECTED；超时/异常/无明确成功→UNKNOWN_PENDING。
+        超时/异常/取消路径都会清理注册的 mid（幂等）。
+        """
+        if send_future is None:
+            return ReceiptOutcome.UNKNOWN_PENDING, None
+        try:
+            try:
+                response = await asyncio.wait_for(send_future, timeout=timeout)
+            except asyncio.TimeoutError:
+                return ReceiptOutcome.UNKNOWN_PENDING, "发送后未收到服务端回执（超时）"
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                return ReceiptOutcome.UNKNOWN_PENDING, f"等待发送回执异常: {e}"
+            reason = self._extract_send_reject_reason(response)
+            if reason:
+                return ReceiptOutcome.REJECTED, reason
+            if self._is_explicit_send_success(response):
+                return ReceiptOutcome.SENT_EXPLICIT_SUCCESS, None
+            return ReceiptOutcome.UNKNOWN_PENDING, "发送后未收到明确成功回执"
+        finally:
+            if mid:
+                self._receipts.pop(mid, None)
+
+    @staticmethod
+    def _is_explicit_send_success(response: dict) -> bool:
+        """显式成功判定：仅 LWP 响应顶层 code == 200 才算明确成功。
+
+        仅凭"未检测到 body.reason"不能判定成功——平台可能以 headers.code / body.code /
+        body.msg / body.error 等结构返回风控或错误，这些都不应被提升为 confirmed success。
+        无明确成功回执一律视为未拿到最终回执（unknown/pending）。
+        """
+        if not isinstance(response, dict):
+            return False
+        return response.get("code") == 200
+
     # ==================== LWP 请求-响应关联 ====================
 
     def _dispatch_mid_response(self, message_data: dict) -> None:
@@ -2031,9 +2119,9 @@ class XianyuAsync:
                 return
             headers = message_data.get("headers") or {}
             mid = headers.get("mid") if isinstance(headers, dict) else None
-            if not mid or mid not in self._pending_mid_futures:
+            if not mid or not self._receipts.contains(mid):
                 return
-            future = self._pending_mid_futures.pop(mid, None)
+            future = self._receipts.pop(mid, None)
             if future is not None and not future.done():
                 future.set_result(message_data)
         except Exception as e:
@@ -2089,9 +2177,7 @@ class XianyuAsync:
         }
 
         # 注册等待 Future 并发送请求
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
-        self._pending_mid_futures[mid] = future
+        future = self._receipts.register(mid)
 
         try:
             # 打印完整请求体，便于与服务端响应对照排查
@@ -2131,7 +2217,7 @@ class XianyuAsync:
             return chat_id
         except asyncio.TimeoutError:
             # 超时清理 pending
-            self._pending_mid_futures.pop(mid, None)
+            self._receipts.pop(mid, None)
             logger.error(
                 f"【{self.cookie_id}】创建会话超时: to_user_id={to_user_id}, "
                 f"item_id={item_id}, timeout={timeout}s"
@@ -2139,7 +2225,7 @@ class XianyuAsync:
             raise TimeoutError(f"创建会话超时（{timeout}秒）")
         except Exception:
             # 其他异常也要清理
-            self._pending_mid_futures.pop(mid, None)
+            self._receipts.pop(mid, None)
             raise
 
     @staticmethod
@@ -2250,7 +2336,7 @@ class XianyuAsync:
 
         return (None, None)
 
-    async def send_image_msg(self, websocket, chat_id: str, send_user_id: str, image_url: str, card_id: int = None, keyword: str = None, default_reply_item_id = None, image_index: int = None):
+    async def send_image_msg(self, websocket, chat_id: str, send_user_id: str, image_url: str, card_id: int = None, keyword: str = None, default_reply_item_id = None, image_index: int = None, register_receipt: bool = False):
         """发送图片消息（参照旧框架实现）
 
         支持:
@@ -2276,6 +2362,7 @@ class XianyuAsync:
             from pathlib import Path
             from common.utils.xianyu_utils import generate_mid, generate_uuid
 
+            registered_mid = None  # 发送前注册的 mid，异常时用于清理 pending future
             cdn_url = image_url
             width, height = 800, 600  # 默认尺寸
             need_get_size_from_url = False  # 标记是否需要从URL获取尺寸
@@ -2330,6 +2417,7 @@ class XianyuAsync:
                             "success": False,
                             "mode": "image",
                             "image_url": image_url,
+                            "dispatched": False,
                             "error_message": "图片上传到CDN失败",
                         }
 
@@ -2379,6 +2467,7 @@ class XianyuAsync:
                         "success": False,
                         "mode": "image",
                         "image_url": image_url,
+                        "dispatched": False,
                         "error_message": "本地图片文件不存在",
                     }
             else:
@@ -2415,9 +2504,10 @@ class XianyuAsync:
 
             logger.info(f"【{self.cookie_id}】图片消息内容: {content_json}")
 
+            mid = generate_mid()
             msg = {
                 "lwp": "/r/MessageSend/sendByReceiverScope",
-                "headers": {"mid": generate_mid()},
+                "headers": {"mid": mid},
                 "body": [
                     {
                         "uuid": generate_uuid(),
@@ -2445,20 +2535,86 @@ class XianyuAsync:
             # 打印完整的发送消息用于调试
             logger.debug(f"【{self.cookie_id}】发送图片WebSocket消息: {json.dumps(msg, ensure_ascii=False)[:500]}...")
 
-            await websocket.send(json.dumps(msg))
+            # 注册 mid 等待队列（供上层异步检测发送结果），与文本 send_message 一致：
+            # 仅自动发货/内部等待回执的调用方（register_receipt=True）启用；
+            # 普通自动回复等调用方不注册，避免无人消费的 Future 泄漏。
+            # 注册失败无法在发送后确认回执：拒绝发送并标记确定未 dispatch。
+            registered_mid = None
+            send_future = None
+            if register_receipt:
+                try:
+                    send_future = self._receipts.register(mid)
+                    registered_mid = mid
+                except Exception as reg_e:  # noqa: BLE001
+                    logger.error(f"【{self.cookie_id}】注册图片发送回执 future 失败，放弃发送: {self._safe_str(reg_e)}")
+                    return {
+                        "success": False,
+                        "mode": "image",
+                        "image_url": image_url,
+                        "original_image_url": image_url,
+                        "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                        "dispatched": False,
+                        "error_message": f"注册图片发送回执 future 失败: {reg_e}",
+                    }
+
+            # ---- 发送边界：进入 websocket.send 调用后的异常结果不确定，不标记 dispatched=false ----
+            try:
+                await websocket.send(json.dumps(msg))
+            except asyncio.CancelledError:
+                # 取消路径同样清理已注册的回执 future，再向上传播取消。
+                if registered_mid:
+                    fut = self._receipts.pop(registered_mid, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                raise
+            except Exception as send_e:  # noqa: BLE001
+                # 清理已注册的回执 future：发送异常后该 mid 不会再有响应分派，避免 Future 无界增长。
+                if registered_mid:
+                    fut = self._receipts.pop(registered_mid, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                logger.error(f"【{self.cookie_id}】图片 WebSocket 发送调用异常: {self._safe_str(send_e)}")
+                return {
+                    "success": False,
+                    "mode": "image",
+                    "image_url": image_url,
+                    "original_image_url": image_url,
+                    "receipt": ReceiptOutcome.UNKNOWN_PENDING,
+                    "error_message": str(send_e),
+                }
             logger.info(f"【{self.cookie_id}】发送图片消息成功: {cdn_url}")
             return {
                 "success": True,
                 "mode": "image",
                 "image_url": cdn_url,
                 "original_image_url": image_url,
+                "mid": registered_mid,
+                "receipt": ReceiptOutcome.UNKNOWN_PENDING,
+                "send_future": send_future,
             }
+        except asyncio.CancelledError:
+            # 任务取消（部署关闭/上游取消）可能发生在任意位置：清理已注册 future 后向上传播。
+            if registered_mid:
+                fut = self._receipts.pop(registered_mid, None)
+                if fut is not None and not fut.done():
+                    fut.cancel()
+            raise
         except Exception as e:
+            # 发送前异常（构造/上传/尺寸获取等）：确定未 dispatch；同时清理已注册 mid/future。
+            try:
+                if registered_mid:
+                    fut = self._receipts.pop(registered_mid, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+            except Exception:  # noqa: BLE001
+                pass
             logger.error(f"【{self.cookie_id}】发送图片消息失败: {e}")
             return {
                 "success": False,
                 "mode": "image",
                 "image_url": image_url,
+                "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                "dispatched": False,
                 "error_message": str(e),
             }
 

@@ -21,6 +21,13 @@ var (
 	ErrXianyuDeliveryClaimNotFound  = infraerrors.NotFound("XIANYU_DELIVERY_CLAIM_NOT_FOUND", "xianyu delivery claim not found")
 	ErrXianyuDeliveryAlreadySent    = infraerrors.Conflict("XIANYU_DELIVERY_ALREADY_SENT", "xianyu delivery already sent")
 	ErrXianyuWorkerUnhealthy        = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNHEALTHY", "xianyu worker is unhealthy")
+	// 传输错误细分：Unreachable = 请求未到达 Worker（仅连接建立前的 dial 失败），可判定"确定未 dispatch"；
+	// Timeout = 请求已发出、结果不确定；Uncertain = 请求可能已写出、结果不确定（连接重置/TLS 等）；
+	// Malformed = 响应解码失败。
+	ErrXianyuWorkerUnreachable = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNREACHABLE", "xianyu worker is unreachable")
+	ErrXianyuWorkerTimeout     = infraerrors.ServiceUnavailable("XIANYU_WORKER_TIMEOUT", "xianyu worker request timed out")
+	ErrXianyuWorkerUncertain   = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNCERTAIN", "xianyu worker request outcome uncertain")
+	ErrXianyuWorkerMalformed   = infraerrors.BadRequest("XIANYU_WORKER_MALFORMED", "xianyu worker response malformed")
 	ErrXianyuBaseURLInvalid         = infraerrors.BadRequest("XIANYU_BASE_URL_INVALID", "xianyu worker base_url must be http://<docker-hostname>:<port> or http://<private-ip>:<port>")
 	ErrXianyuBaseURLLoopbackInvalid = infraerrors.BadRequest("XIANYU_BASE_URL_LOOPBACK_INVALID", "xianyu worker base_url must not use 127.0.0.1 inside the container deployment")
 	ErrXianyuDeliveryUnavailable    = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_UNAVAILABLE", "xianyu delivery is unavailable")
@@ -208,6 +215,9 @@ type XianyuDeliveryStatusResult struct {
 	Success   bool
 	Error     *string
 	Confirmed bool // 是否有最终发送回执；true 时才可标记 sent
+	// Attempt 回执所属发送尝试代次（补发递增后由调用方携带）；0 表示未关联（兼容旧回执）。
+	// 条件更新时仅当与记录当前 attempt_count 匹配才生效，防止旧 attempt 回执改变新状态。
+	Attempt int
 }
 
 // XianyuDeliveryFilter 是发货记录列表筛选条件。
@@ -225,6 +235,7 @@ type XianyuControlRepository interface {
 	CreateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
 	UpdateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
 	GetActiveWorkerConfig(ctx context.Context) (*XianyuWorkerConfig, error)
+	GetWorkerConfigByID(ctx context.Context, id int64) (*XianyuWorkerConfig, error)
 
 	// 闲鱼账号
 	ListAccounts(ctx context.Context, workerConfigID int64) ([]XianyuAccount, error)

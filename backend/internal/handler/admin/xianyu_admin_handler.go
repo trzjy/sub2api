@@ -168,6 +168,20 @@ func (h *XianyuAdminHandler) RefreshCookie(c *gin.Context) {
 	response.Success(c, saved)
 }
 
+// ClearCredentials 退出/清除凭证：停止任务并删除 Worker 侧凭证。
+func (h *XianyuAdminHandler) ClearCredentials(c *gin.Context) {
+	var req accountActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	if err := h.control.ClearCredentials(c.Request.Context(), req.AccountID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "account credentials cleared"})
+}
+
 // CreateLoginSession 创建扫码会话。
 func (h *XianyuAdminHandler) CreateLoginSession(c *gin.Context) {
 	var req accountActionRequest
@@ -377,22 +391,10 @@ func (h *XianyuAdminHandler) ResendDelivery(c *gin.Context) {
 		response.BadRequest(c, "order_no is required")
 		return
 	}
-	systemUserID := h.currentUserID(c)
-	code, err := h.control.ResendOriginalCode(c.Request.Context(), req.OrderNo, systemUserID)
+	code, err := h.control.ResendOriginalCode(c.Request.Context(), req.OrderNo)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, gin.H{"code": code})
-}
-
-func (h *XianyuAdminHandler) currentUserID(c *gin.Context) int64 {
-	if c == nil {
-		return 0
-	}
-	subject, ok := middleware.GetAuthSubjectFromContext(c)
-	if !ok {
-		return 0
-	}
-	return subject.UserID
 }

@@ -26,6 +26,7 @@ from app.services.xianyu.delivery_utils import (
 from app.services.xianyu.yifan_api_handler import YifanApiHandler
 from common.db.compat import db_manager
 from common.services.order_service import OrderDetailService
+from common.services.receipt_outcome import ReceiptOutcome, aggregate_receipts
 from common.utils.fish_nick_utils import get_buyer_fish_nick
 from common.utils.response_field import extract_card_api_response_content
 from common.utils.xianyu_utils import trans_cookies
@@ -195,10 +196,14 @@ class AutoDeliveryHandler:
         return await self.parent.create_session()
 
     async def send_msg(self, websocket, chat_id, send_user_id, content):
-        return await self.parent.send_msg(websocket, chat_id, send_user_id, content)
+        return await self.parent.send_msg(websocket, chat_id, send_user_id, content, register_receipt=True)
 
-    async def send_image_msg(self, websocket, chat_id, send_user_id, image_url, card_id=None, keyword=None, default_reply_item_id=None, image_index=None):
-        return await self.parent.send_image_msg(websocket, chat_id, send_user_id, image_url, card_id=card_id, keyword=keyword, default_reply_item_id=default_reply_item_id, image_index=image_index)
+    async def send_image_msg(self, websocket, chat_id, send_user_id, image_url, card_id=None, keyword=None, default_reply_item_id=None, image_index=None, register_receipt=False):
+        return await self.parent.send_image_msg(
+            websocket, chat_id, send_user_id, image_url,
+            card_id=card_id, keyword=keyword, default_reply_item_id=default_reply_item_id,
+            image_index=image_index, register_receipt=register_receipt,
+        )
 
     async def _send_msg_with_retry(self, websocket, chat_id: str, send_user_id: str,
                                     content: str, max_retries: int = 5, retry_delay: int = 2) -> dict:
@@ -224,6 +229,10 @@ class AutoDeliveryHandler:
             if isinstance(result, dict) and result.get("success"):
                 if attempt > 0:
                     logger.info(f"【{self.cookie_id}】消息重试第{attempt}次发送成功: {content[:30]}...")
+                return result
+            # 仅明确 DISPATCHED_DEFINITE_FAILURE（发送前失败、确定未发出）可安全重试；
+            # 已进入 websocket.send、结果不确定的失败不得重试，避免重复发货。
+            if not isinstance(result, dict) or result.get("receipt") != ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE:
                 return result
             # 最后一次不再重试
             if attempt >= max_retries:
@@ -261,10 +270,16 @@ class AutoDeliveryHandler:
         current_ws = websocket
         result = None
         for attempt in range(max_retries + 1):
-            result = await self.send_image_msg(current_ws, chat_id, send_user_id, image_url, **kwargs)
+            result = await self.send_image_msg(
+                current_ws, chat_id, send_user_id, image_url, register_receipt=True, **kwargs
+            )
             if isinstance(result, dict) and result.get("success"):
                 if attempt > 0:
                     logger.info(f"【{self.cookie_id}】图片重试第{attempt}次发送成功: {image_url[:50]}...")
+                return result
+            # 仅明确 DISPATCHED_DEFINITE_FAILURE（发送前失败、确定未发出）可安全重试；
+            # 已进入 websocket.send、结果不确定的失败不得重试，避免重复发货。
+            if not isinstance(result, dict) or result.get("receipt") != ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE:
                 return result
             if attempt >= max_retries:
                 break
@@ -575,12 +590,19 @@ class AutoDeliveryHandler:
             }
 
             log_service = AutoReplyLogService(self.cookie_id)
-            log_id = await log_service.record_message(log_payload)
-            logger.info(f"【{self.cookie_id}】自动发货消息日志已记录: 成功{success_count}/失败{fail_count}")
+            try:
+                log_id = await log_service.record_message(log_payload)
+                logger.info(f"【{self.cookie_id}】自动发货消息日志已记录: 成功{success_count}/失败{fail_count}")
+            except Exception as log_e:  # noqa: BLE001
+                # 日志写入失败：不阻断回执消费者启动，log_id 置空让消费者跳过日志状态回写。
+                logger.error(f"【{self.cookie_id}】自动发货消息日志写入失败: {self._safe_str(log_e)}")
+                log_id = None
 
-            # 发出成功且日志写入成功时，处理服务端响应并回写发送状态
-            if log_id and not any_send_failed and pending_send_waiters:
-                if defer_send_status_writeback:
+            # 只要存在待确认的发送回执 waiter 就启动消费者（解耦日志成功与部分失败）：
+            # 无论是否全部发送成功、日志是否写入成功，都必须让 waiter 进入有超时+finally 清理的消费者，
+            # 避免部分失败/日志异常时回执 Future 泄漏。
+            if pending_send_waiters:
+                if defer_send_status_writeback and log_id:
                     # 开关“卡券发送成功再确认发货”开启：改由确认发货前的同步等待统一判定并回写，
                     # 此处不再起后台回写任务，避免两处争用同一个 send_future
                     return {
@@ -588,14 +610,15 @@ class AutoDeliveryHandler:
                         "log_id": log_id,
                         "pending_send_waiters": pending_send_waiters,
                     }
-                # 默认：起后台任务异步等待发送结果并回写发送状态（不阻塞发货主流程）
-                self._spawn_delivery_send_status_writeback(log_service, log_id, pending_send_waiters)
+                # 默认：起后台任务异步等待发送结果并回写发送状态（不阻塞发货主流程）；
+                # log_id 为空时仅消费/清理 waiter 并回传，跳过日志状态回写。
+                self._spawn_delivery_send_status_writeback(log_service, log_id, pending_send_waiters, order_id)
         except Exception as e:
             logger.error(f"【{self.cookie_id}】写入自动发货消息日志失败: {self._safe_str(e)}")
         return None
 
     def _spawn_delivery_send_status_writeback(
-        self, log_service, log_id: int, waiters: list
+        self, log_service, log_id: int, waiters: list, order_no: str | None = None
     ) -> None:
         """起后台任务：异步等待自动发货的发送结果并回写日志发送状态
 
@@ -605,44 +628,116 @@ class AutoDeliveryHandler:
             log_service: 日志服务实例（复用同一个，避免重复构造）
             log_id: 日志主键ID
             waiters: 本次发出消息的 (send_future, mid) 列表
+            order_no: 订单号（用于向主程序回传发货结果，可空）
         """
         try:
             # handler 自身无任务追踪器，复用 parent（XianyuAsync）的追踪任务创建方法
             self.parent._create_tracked_task(
-                self._writeback_delivery_send_status(log_service, log_id, waiters)
+                self._writeback_delivery_send_status(log_service, log_id, waiters, order_no)
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # 消费者确实无法启动：立即逐项 pop 并取消未完成 Future，避免 _receipts 泄漏。
             logger.warning(f"【{self.cookie_id}】启动发货发送状态回写任务失败 log_id={log_id}: {self._safe_str(e)}")
+            pending_mid = getattr(self.parent, "_receipts", None)
+            if isinstance(pending_mid, dict):
+                for _send_future, _mid in waiters:
+                    if not _mid:
+                        continue
+                    _fut = pending_mid.pop(_mid, None)
+                    if _fut is not None and not _fut.done():
+                        _fut.cancel()
 
-    async def _writeback_delivery_send_status(
-        self, log_service, log_id: int, waiters: list
-    ) -> None:
-        """等待各发送响应，按结果回写自动发货日志的发送状态
+    async def _resolve_send_receipts(
+        self, waiters: list, timeout: float
+    ) -> tuple[list[str], bool, bool]:
+        """共享最终发送回执判定：区分 明确成功/明确拒绝/超时(无最终回执)。
 
-        - 任一消息被服务端拦截（返回 reason）→ send_status=failed，记录失败原因
-        - 全部无拦截响应（含正常发送、超时）→ send_status=success
+        并发等待全部 Future，使整批总等待时长收敛到约一个 timeout
+        （避免 N 条卡券顺序 await 造成 N × timeout 的时序回退）。
 
         Args:
-            log_service: 日志服务实例
-            log_id: 日志主键ID
             waiters: 本次发出消息的 (send_future, mid) 列表
+            timeout: 单条等待超时（秒）
+
+        Returns:
+            (reasons, any_confirmed, any_timeout)
+            - reasons: 明确被平台拦截的原因列表（明确拒绝）
+            - any_confirmed: 是否至少一条拿到明确成功回执
+            - any_timeout: 是否至少一条超时/异常（未拿到最终回执）
+        """
+        if not waiters:
+            return [], False, False
+
+        async def _wait_one(item) -> tuple[ReceiptOutcome, str | None]:
+            """单条等待：统一用 await_receipt 产出回执枚举（清理由 await_receipt finally 保证）。"""
+            send_future, mid = item
+            if not hasattr(self.parent, 'await_receipt') or send_future is None:
+                return ReceiptOutcome.UNKNOWN_PENDING, None
+            try:
+                return await self.parent.await_receipt(send_future, mid, timeout=timeout)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"【{self.cookie_id}】等待发送回执异常: {self._safe_str(e)}")
+                return ReceiptOutcome.UNKNOWN_PENDING, None
+
+        results = await asyncio.gather(*(_wait_one(item) for item in waiters), return_exceptions=True)
+        outcomes: list[tuple[ReceiptOutcome, str | None]] = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning(f"【{self.cookie_id}】并发等待发送回执异常: {self._safe_str(r)}")
+                outcomes.append((ReceiptOutcome.UNKNOWN_PENDING, None))
+            else:
+                outcomes.append(r)
+        reasons, confirmed, timed_out = aggregate_receipts(outcomes)
+        return reasons, confirmed, timed_out
+
+    async def _report_delivery_receipt(
+        self, order_no: str, *, reasons: list, any_confirmed: bool, any_timeout: bool
+    ) -> None:
+        """按最终回执三态向主程序回传 delivery-results（收敛到共享实现）。
+
+        只有明确成功回执才 confirmed=true（主程序标记 sent）；
+        明确拒绝 → confirmed=false + error（主程序标 failed）；
+        超时/异常（未拿到最终回执）→ confirmed=false（主程序保持 pending）。
+        """
+        if not order_no:
+            return
+        from common.services.sub2api_delivery_result_client import (
+            report_delivery_result_by_receipt,
+        )
+        await report_delivery_result_by_receipt(
+            order_no, reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout
+        )
+
+    async def _writeback_delivery_send_status(
+        self, log_service, log_id: int, waiters: list, order_no: str | None = None
+    ) -> None:
+        """等待各发送响应，按结果回写自动发货日志的发送状态，并回传 delivery-results。
+
+        - 任一消息被服务端拦截（返回 reason）→ send_status=failed，记录失败原因
+        - 全部无拦截响应（含正常发送、超时）→ send_status=success（日志口径保持既有语义）
+
+        回传 confirmed 语义与日志口径分离：只有明确成功回执才 confirmed=true，
+        超时/异常保持主程序 pending（不把超时伪装成最终发送成功）。
         """
         try:
-            wait_fn = getattr(self.parent, "wait_send_reject_reason", None)
-            if not callable(wait_fn):
-                return
-            reasons = []
-            for send_future, mid in waiters:
-                reason = await wait_fn(send_future, mid)
-                if reason:
-                    reasons.append(reason)
-            if reasons:
-                await log_service.safe_update_send_status(log_id, "failed", "；".join(reasons))
-                logger.warning(
-                    f"【{self.cookie_id}】自动发货发送被拦截 log_id={log_id}: {'；'.join(reasons)}"
-                )
-            else:
-                await log_service.safe_update_send_status(log_id, "success", None)
+            reasons, any_confirmed, any_timeout = await self._resolve_send_receipts(
+                waiters, timeout=10.0
+            )
+            # 日志写入成功（log_id 有效）时才回写日志发送状态；部分失败/日志异常时
+            # log_id 可能为 0/None，此时仍消费并清理 waiter（_resolve_send_receipts finally 已清理）。
+            if log_id:
+                if reasons:
+                    await log_service.safe_update_send_status(log_id, "failed", "；".join(reasons))
+                    logger.warning(
+                        f"【{self.cookie_id}】自动发货发送被拦截 log_id={log_id}: {'；'.join(reasons)}"
+                    )
+                else:
+                    await log_service.safe_update_send_status(log_id, "success", None)
+            await self._report_delivery_receipt(
+                order_no or "", reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout
+            )
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】回写发货发送状态异常 log_id={log_id}: {self._safe_str(e)}")
 
@@ -656,8 +751,8 @@ class AutoDeliveryHandler:
         - 任一被平台拦截（返回 reason，如 CSI_FORBID 安全拦截）→ 回写 failed，返回拦截原因
         - 全部未拦截（含正常发送、服务端未回执超时）→ 回写 success，返回 None
 
-        注意：仅文本消息会注册 send_future，图片消息无回执 future，不参与拦截判定
-        （与既有后台回写一致）。
+        注意：文本与自动发货图片路径均会注册 send_future 参与回执判定；
+        普通自动回复/确认收货图片不注册（register_receipt 决策见 send_image_msg）。
 
         Args:
             send_results: 本次每条消息的发送结果（含 send_future / mid）
@@ -678,27 +773,16 @@ class AutoDeliveryHandler:
         log_service = ctx.get("log_service")
         log_id = ctx.get("log_id")
 
-        wait_fn = getattr(self.parent, "wait_send_reject_reason", None)
-        if not callable(wait_fn) or not waiters:
+        if not waiters:
             return None
 
         logger.info(
             f'[{msg_time}] 【{self.cookie_id}】卡券发送成功再确认发货：确认发货前等待服务端回执，'
             f'order_id={order_id}，待确认 {len(waiters)} 条，最长等待 {SEND_BEFORE_CONFIRM_WAIT_TIMEOUT} 秒'
         )
-        # 并发等待各条消息的服务端回执，使总等待时长收敛到约一个超时（避免多数量订单逐条累加）
-        reasons = []
-        wait_results = await asyncio.gather(
-            *(wait_fn(send_future, mid, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT)
-              for send_future, mid in waiters),
-            return_exceptions=True,
+        reasons, any_confirmed, any_timeout = await self._resolve_send_receipts(
+            waiters, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT
         )
-        for r in wait_results:
-            if isinstance(r, Exception):
-                logger.warning(f"【{self.cookie_id}】等待卡券服务端回执异常: {self._safe_str(r)}")
-                continue
-            if r:
-                reasons.append(r)
 
         # 同步回写日志发送状态（替代被跳过的后台回写任务）
         try:
@@ -709,6 +793,12 @@ class AutoDeliveryHandler:
                     await log_service.safe_update_send_status(log_id, "success", None)
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】回写发货发送状态异常 log_id={log_id}: {self._safe_str(e)}")
+
+        # 与后台回写共享同一最终回执判定与回传：明确成功才 confirmed=true，
+        # 超时/异常保持主程序 pending。
+        await self._report_delivery_receipt(
+            order_id or "", reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout
+        )
 
         return "；".join(reasons) if reasons else None
 

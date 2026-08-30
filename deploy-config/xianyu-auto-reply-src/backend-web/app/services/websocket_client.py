@@ -46,7 +46,8 @@ class WebSocketServiceClient:
                 data["cookie_value"] = cookie_value
             if user_id:
                 data["user_id"] = user_id
-            response = await self.http_client.post(url, json=data if data else {})
+            # 非幂等任务状态变更：禁用传输层自动重试，避免响应丢失时重复启动。
+            response = await self.http_client.post(url, json=data if data else {}, max_retries=1)
             return response
         except Exception as e:
             logger.error(f"启动账号任务失败: {account_id}, 错误: {e}")
@@ -63,7 +64,8 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/stop"
         try:
-            response = await self.http_client.post(url)
+            # 非幂等任务状态变更：禁用传输层自动重试。
+            response = await self.http_client.post(url, max_retries=1)
             return response
         except Exception as e:
             logger.error(f"停止账号任务失败: {account_id}, 错误: {e}")
@@ -80,7 +82,8 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/restart"
         try:
-            response = await self.http_client.post(url, json={})
+            # 非幂等任务状态变更（清 Token 缓存 + 重启任务）：禁用传输层自动重试。
+            response = await self.http_client.post(url, json={}, max_retries=1)
             return response
         except Exception as e:
             logger.error(f"重启账号任务失败: {account_id}, 错误: {e}")
@@ -103,7 +106,17 @@ class WebSocketServiceClient:
             logger.error(f"查询账号任务状态失败: {account_id}, 错误: {e}")
             return {"success": False, "message": f"查询账号任务状态失败: {str(e)}"}
 
-    async def send_message(self, account_id: str, chat_id: str, content: str, message_type: str = "text") -> dict:
+    async def send_message(
+        self,
+        account_id: str,
+        chat_id: str,
+        content: str,
+        message_type: str = "text",
+        wait_result: bool = False,
+        wait_timeout: float = 10.0,
+        attempt: int = 0,
+        order_no: str = "",
+    ) -> dict:
         """发送消息
 
         Args:
@@ -111,17 +124,30 @@ class WebSocketServiceClient:
             chat_id: 聊天ID
             content: 消息内容
             message_type: 消息类型（text/image）
+            wait_result: 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）
+            wait_timeout: 等待发送结果超时（秒）
+            attempt: 补发尝试代次（attempt_count），用于发送回执关联与并发隔离
+            order_no: 订单号（补发场景透传，供回执关联）
 
         Returns:
             响应数据
         """
         url = f"{self.base_url}/internal/accounts/{account_id}/send-message"
         try:
-            response = await self.http_client.post(url, json={
+            # 非幂等发送端点：禁用传输层自动重试（max_retries=1），避免单次人工操作
+            # 在响应超时/断连时被透明重发导致重复发货。
+            payload = {
                 "chat_id": chat_id,
-                "content": content,
-                "message_type": message_type
-            })
+                "message": content,
+                "message_type": message_type,
+                "wait_result": wait_result,
+                "wait_timeout": wait_timeout,
+            }
+            if attempt:
+                payload["attempt"] = attempt
+            if order_no:
+                payload["order_no"] = order_no
+            response = await self.http_client.post(url, json=payload, max_retries=1)
             return response
         except Exception as e:
             logger.error(f"发送消息失败: {account_id}, 错误: {e}")
@@ -193,17 +219,22 @@ class WebSocketServiceClient:
         """
         url = f"{self.base_url}/internal/orders/deliver"
         try:
-            response = await self.http_client.post(url, json={
-                "account_id": account_id,
-                "order_no": order_no,
-                "item_id": item_id,
-                "buyer_id": buyer_id,
-                "chat_id": chat_id,
-                "card_id": card_id,
-                "is_bargain": is_bargain,
-                "delivery_method": delivery_method,
-                "quantity": int(quantity) if quantity and quantity > 0 else 1,
-            })
+            # 非幂等发货端点：禁用传输层自动重试，避免响应丢失时重复提取/发送卡券。
+            response = await self.http_client.post(
+                url,
+                json={
+                    "account_id": account_id,
+                    "order_no": order_no,
+                    "item_id": item_id,
+                    "buyer_id": buyer_id,
+                    "chat_id": chat_id,
+                    "card_id": card_id,
+                    "is_bargain": is_bargain,
+                    "delivery_method": delivery_method,
+                    "quantity": int(quantity) if quantity and quantity > 0 else 1,
+                },
+                max_retries=1,
+            )
             return response
         except Exception as e:
             logger.error(f"订单发货失败: {order_no}, 错误: {e}")
@@ -221,13 +252,18 @@ class WebSocketServiceClient:
         """无物流发货：在闲鱼确认发货但不发送卡券内容"""
         url = f"{self.base_url}/internal/orders/confirm-no-logistics"
         try:
-            return await self.http_client.post(url, json={
-                "account_id": account_id,
-                "order_no": order_no,
-                "item_id": item_id,
-                "buyer_id": buyer_id,
-                "is_bargain": is_bargain,
-            })
+            # 非幂等状态变更端点：禁用传输层自动重试。
+            return await self.http_client.post(
+                url,
+                json={
+                    "account_id": account_id,
+                    "order_no": order_no,
+                    "item_id": item_id,
+                    "buyer_id": buyer_id,
+                    "is_bargain": is_bargain,
+                },
+                max_retries=1,
+            )
         except Exception as e:
             logger.error(f"无物流发货失败: {order_no}, 错误: {e}")
             return {"success": False, "message": f"无物流发货失败: {str(e)}"}
@@ -235,9 +271,11 @@ class WebSocketServiceClient:
     async def cancel_order(self, account_id: str, order_no: str) -> dict:
         """卖家关闭（取消）一笔闲鱼订单"""
         try:
+            # 非幂等状态变更端点：禁用传输层自动重试。
             return await self.http_client.post(
                 f"{self.base_url}/internal/orders/cancel",
                 json={"account_id": account_id, "order_no": order_no},
+                max_retries=1,
             )
         except Exception as e:
             logger.error(f"取消订单失败: {order_no}, 错误: {e}")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,12 @@ func (s *xianyuControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWork
 }
 func (s *xianyuControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
 	if s.workerCfg == nil {
+		return nil, ErrXianyuWorkerConfigNotFound
+	}
+	return s.workerCfg, nil
+}
+func (s *xianyuControlStub) GetWorkerConfigByID(_ context.Context, id int64) (*XianyuWorkerConfig, error) {
+	if s.workerCfg == nil || s.workerCfg.ID != id {
 		return nil, ErrXianyuWorkerConfigNotFound
 	}
 	return s.workerCfg, nil
@@ -200,18 +207,29 @@ func (s *xianyuControlStub) UpdateBindingRule(_ context.Context, r XianyuBinding
 }
 
 type xianyuStateStub struct {
-	result    *XianyuDeliveryStatusResult
-	claim     *XianyuOrderClaim
-	resend    string
-	recordErr error
-	resendErr error
+	result           *XianyuDeliveryStatusResult
+	recordedResults  []XianyuDeliveryStatusResult
+	claim            *XianyuOrderClaim
+	resend           string
+	recordErr        error
+	resendErr        error
+	resendCalled     bool
 }
 
 func (s *xianyuStateStub) RecordDeliveryResult(_ context.Context, r XianyuDeliveryStatusResult) error {
 	if s.recordErr != nil {
 		return s.recordErr
 	}
+	s.recordedResults = append(s.recordedResults, r)
 	s.result = &r
+	// 按回执语义推进状态机（stub 侧模拟 repo 的 attempt CAS 结果）。
+	if r.Success && r.Confirmed {
+		s.claim = &XianyuOrderClaim{OrderNo: r.OrderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusSent, AttemptCount: r.Attempt}
+	} else if !r.Success {
+		s.claim = &XianyuOrderClaim{OrderNo: r.OrderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusFailed, AttemptCount: r.Attempt}
+	} else {
+		s.claim = &XianyuOrderClaim{OrderNo: r.OrderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusPending, AttemptCount: r.Attempt}
+	}
 	return nil
 }
 func (s *xianyuStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*XianyuOrderClaim, error) {
@@ -223,12 +241,13 @@ func (s *xianyuStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*
 	}
 	return s.claim, nil
 }
-func (s *xianyuStateStub) ResendOriginalCode(_ context.Context, orderNo string, userID int64) (string, error) {
+func (s *xianyuStateStub) ResendOriginalCode(_ context.Context, orderNo string) (string, int, error) {
 	if s.resendErr != nil {
-		return "", s.resendErr
+		return "", 0, s.resendErr
 	}
-	s.claim = &XianyuOrderClaim{OrderNo: orderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusPending}
-	return s.resend, nil
+	s.resendCalled = true
+	s.claim = &XianyuOrderClaim{OrderNo: orderNo, Code: s.resend, DeliveryStatus: XianyuDeliveryStatusPending, AttemptCount: 1}
+	return s.resend, 1, nil
 }
 
 type xianyuSettingsStub struct {
@@ -406,7 +425,7 @@ func TestXianyuDeliveryRecordsResultAndResendsOriginalCode(t *testing.T) {
 	require.True(t, state.result.Success)
 	require.True(t, state.result.Confirmed)
 
-	code, err := svc.ResendOriginalCode(context.Background(), "o1", 123)
+	code, err := svc.ResendOriginalCode(context.Background(), "o1")
 	require.NoError(t, err)
 	require.Equal(t, "ORIGINAL-CODE", code)
 }
@@ -424,23 +443,52 @@ func (s *xianyuResendWorkerStub) ResendDelivery(_ context.Context, claim *Xianyu
 	return nil
 }
 
-func TestXianyuDeliveryResendCallsWorkerBeforeMarkingPending(t *testing.T) {
+func TestXianyuDeliveryResendMarksPendingBeforeCallingWorker(t *testing.T) {
 	state := &xianyuStateStub{resend: "ORIGINAL-CODE"}
 	worker := &xianyuResendWorkerStub{}
 	svc := newXianyuDeliveryTestService(newXianyuControlStub(), &xianyuClaimRepoStub{}, state)
 	svc.resender = worker.ResendDelivery
 
-	code, err := svc.ResendOriginalCode(context.Background(), "order-1", 123)
+	code, err := svc.ResendOriginalCode(context.Background(), "order-1")
 	require.NoError(t, err)
 	require.Equal(t, "ORIGINAL-CODE", code)
+	// 必须先标记 pending（状态离开 failed）再触发 Worker 发送，防止发送后 DB 失败/响应丢失导致双重发货。
+	require.True(t, state.resendCalled, "claim must be reset to pending before worker resend")
 	require.Len(t, worker.claims, 1)
 	require.Equal(t, "ORIGINAL-CODE", worker.claims[0].Code)
 	require.Equal(t, "account", worker.claims[0].AccountID)
 	require.Equal(t, "chat", worker.claims[0].ChatID)
+	// 明确成功回执后必须通过 RecordDeliveryResult 标记 sent（attempt 关联），避免订单永久滞留 pending。
+	require.Len(t, state.recordedResults, 1, "happy path must record sent result")
+	last := state.recordedResults[len(state.recordedResults)-1]
+	require.True(t, last.Success)
+	require.True(t, last.Confirmed)
+	require.Equal(t, 1, last.Attempt)
 
-	worker.err = errors.New("worker rejected resend")
-	_, err = svc.ResendOriginalCode(context.Background(), "order-1", 123)
+	// 确定未 dispatch（如账号停用 / 无 active Worker）→ RecordDeliveryResult 失败回执回滚 failed，保持可人工重试。
+	worker.err = fmt.Errorf("%w: %v", ErrXianyuResendUndispatched, ErrXianyuAccountDisabled)
+	_, err = svc.ResendOriginalCode(context.Background(), "order-1")
 	require.Error(t, err)
+	require.Len(t, state.recordedResults, 2, "undispatched error must record rollback result")
+	rollback := state.recordedResults[len(state.recordedResults)-1]
+	require.False(t, rollback.Success)
+	require.Equal(t, 1, rollback.Attempt)
+
+	// 可能已 dispatch / 结果不确定（如 Worker 超时）→ 保留 pending，不写回执。
+	recordedBefore := len(state.recordedResults)
+	worker.err = errors.New("worker timeout, result unknown")
+	_, err = svc.ResendOriginalCode(context.Background(), "order-1")
+	require.Error(t, err)
+	require.Equal(t, recordedBefore, len(state.recordedResults), "uncertain send error must keep pending")
+
+	// 平台明确拒绝（如 CSI_FORBID 拦截，消息已 dispatch 但确定未送达）→ 与 undispatched 一样
+	// 回滚 failed，与 Worker 侧异步兜底回传（REJECTED → success=false）收敛一致，避免同步/异步终态分歧。
+	worker.err = fmt.Errorf("%w: worker delivery rejected (reason=CSI_FORBID)", ErrXianyuResendRejected)
+	_, err = svc.ResendOriginalCode(context.Background(), "order-1")
+	require.Error(t, err)
+	rollback = state.recordedResults[len(state.recordedResults)-1]
+	require.False(t, rollback.Success)
+	require.Equal(t, 1, rollback.Attempt)
 }
 
 func TestRedeemRejectsXianyuDeliveryCode(t *testing.T) {

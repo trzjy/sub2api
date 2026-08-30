@@ -125,6 +125,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # 关闭前给补发回执等后台任务 drain 窗口，避免兜底回执被静默丢弃
+    from app.api.routes.internal import drain_background_tasks
+    try:
+        await drain_background_tasks()
+    except Exception as e:
+        logger.warning(f"后台任务 drain 异常: {e}")
+
     # 关闭复用的 goofish API 连接池
     from common.services.order_service import close_goofish_connector
     await close_goofish_connector()

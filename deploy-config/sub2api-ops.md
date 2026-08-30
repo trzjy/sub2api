@@ -339,7 +339,9 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 - 生产 Compose（`deploy-config/compose.yml`）新增 `xianyu-worker`、`xianyu-worker-mysql`、`xianyu-worker-redis`。
 - Worker 相关服务只加入 `xianyu-internal` 网络，**不映射任何公网/宿主机端口**；主程序同时加入 `sub2api-network` 与 `xianyu-internal`。
 - 主程序通过 `http://xianyu-worker-backend:8089` 访问 Worker（Docker 服务别名）。面板设置中的 Worker 地址**不允许** `127.0.0.1`（容器内指向主程序自身），也不允许公网域名。
-- `SUB2API_INTERNAL_TOKEN`（Worker 回传主程序用）必须与主程序 `xianyu_delivery.internal_token` 同值。
+- 主程序→Worker 走 backend-web 的 `/api/v1/internal/*` 内网服务路由（`internal_api.py`：账号投影、启停、Cookie 续期、清除凭证、扫码登录、商品投影、消息发送回执转发），统一复用现有 `AccountService`/`ItemService`/`qr_login_manager`，不复制第二套账号/商品/登录存储。
+- 服务间双向认证使用同一 `SUB2API_INTERNAL_TOKEN`：主程序调 Worker 时以 `X-Worker-Token` 头发送，backend `deps.get_service_or_user` 校验并绑定到现有管理员用户（owner 语义沿用该用户，不新建平行用户）；Worker 回传主程序时以 `X-Internal-Token` 头发送。`XIANYU_INTERNAL_TOKEN` 与主程序 `xianyu_delivery.internal_token` 同值。
+- ⚠️ **服务令牌是「高权限全局系统令牌」**：绑定到现有管理员用户，owner 作用域沿袭管理员全局语义，唯一受信调用方是主程序；internal API 不提供多租户隔离。Worker 前端普通用户（JWT）访问各自 owner 隔离仍有效，但不得把 internal API 暴露给公网或非受信调用方。
 - Worker 回传端点固定为 `POST /api/v1/internal/xianyu/delivery-results`，仅 Worker 可通过 `X-Internal-Token` 调用；Nginx/Caddy 继续拒绝 `/api/v1/internal/` 前缀。
 - 旧配置键 `xianyu_delivery.item_pools` 已废弃：只由一次性迁移器读取一次（`xianyu_delivery.legacy_migrated` 标记完成后不再读取），运行时业务配置全部落库。
 
@@ -347,8 +349,9 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 
 | 变量 | 说明 |
 |------|------|
-| `XIANYU_INTERNAL_TOKEN` | Worker→主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值 |
-| `XIANYU_WORKER_IMAGE_DIGEST` | Worker 镜像固定 digest（不使用 latest/reviewed），当前审查版本为 `sha256:8343c385...46d5` |
+| `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
+| `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
+| `XIANYU_WORKER_IMAGE_DIGEST` | Worker 镜像固定 digest（不使用 latest/reviewed）。**必填**：旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。`.env.example` 已改为 `@sha256:<must-set>` 占位符，禁止留空或沿用旧 digest；部署前按 11.4 构建新镜像并填写其 sha256 digest |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
@@ -359,12 +362,22 @@ docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 bash deploy/tests/xianyu-deployment-boundary-test.sh
 ```
 
-### 11.4 最小 Worker patch（cookie_id 透传）
+### 11.4 Worker 镜像构建与回传补丁
 
-Worker 卡券（发货）调用主程序 Claim 时必须透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
-内部维护的 Worker 镜像固定到经审查的上游 commit，并叠加该最小 patch 与发货结果回传 patch（`POST /api/v1/internal/xianyu/delivery-results`）；Worker 端必须在获取到最终发送回执后再回传 `confirmed=true`，否则主程序保持 `pending` 并最终转人工。
-已审查的镜像 digest 为 `sha256:8343c385b7e3161f131d3b076198ab38d6bc284b963c5ebfea542ef2c21f46d5`；对应的 Worker 审查源码与 Dockerfile 已入库在 `deploy-config/xianyu-auto-reply-src/`，包含 `cookie_id` 透传、内部发送回执等待与回传集成。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本，变更镜像前必须从仓库构建、重新审查并更新 digest。
+- **镜像构建**：以 `deploy-config/xianyu-auto-reply-src/backend-web/Dockerfile` 构建（该 Dockerfile 已统一 `COPY common/backend-web/websocket/scheduler/launcher`，EXPOSE 8089/8090/8091，并安装三端依赖）；`launcher/entrypoint.py` 在单容器内并行启动 backend-web(8089)/websocket(8090)/scheduler(8091)。
+- **delivery-results 回传**：Worker 端 `common/services/sub2api_delivery_result_client.py` 在自动发货获得平台最终发送回执后回传 `POST {SUB2API_INTERNAL_BASE_URL}/api/v1/internal/xianyu/delivery-results`（`confirmed=true` 才标记 sent）；未配置 base_url/token 时静默跳过，不影响本地/单机模式。主程序保持 `pending` 直至收到 `confirmed=true`，否则最终转人工。
+- **cookie_id 透传**：Worker 卡券（发货）调用主程序 Claim 时透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
+- **digest 纪律**：`XIANYU_WORKER_IMAGE_DIGEST` 中 `sha256:8343c385...46d5` 是**旧**审查镜像。本轮已在 vendored 源码补齐 launcher、`/api/v1/internal/*` 路由、服务身份认证与 delivery-results 回传，并经独立高风险复审收敛了 8 项 must_fix（回传有限重试、图片发货回执、显式成功判定、补发先改状态、websocket/scheduler internal 鉴权、空 token 失败关闭、wait_timeout clamp、digest 必填）。随后对补发/发货链路做了**基座底层重构**（见下方 11.5），部署前必须：从当前仓库构建新镜像 → 用新 digest 替换 `XIANYU_WORKER_IMAGE_DIGEST`（`.env.example` 与生产 `.env`）。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本，变更镜像前必须从仓库构建、重新审查并更新 digest。
+- **internal 服务间鉴权**：backend-web→websocket/scheduler 的 `/internal/*` 路由要求 `X-Internal-Token` 匹配 `SUB2API_INTERNAL_TOKEN`（空配置失败关闭）；backend-web/scheduler 的 http_client 对 internal 服务 URL 自动注入该头。
+
+### 11.5 基座底层重构要点（补发/发货链路）
+
+- **attempt_count 语义统一**：`0`=初始自动发货（未补发），`N>=1`=第 N 次补发。`Claim` 写入 `0`；`ResendOriginalCode` 每次 `attempt_count+1`。存量数据经迁移 `backend/migrations/234_xianyu_attempt_count_normalize.sql` 归一化（`GREATEST(attempt_count-1,0)`）。此修复使自动发货回执（attempt=0）能正确关闭新 claim（旧实现 Claim 写 1 导致回执被静默丢弃、订单永久 pending）。
+- **中心化状态转换**：`xianyu_order_claim_state.go` 新增 `applyClaimTransition` 原语，统一承担 advisory lock + attempt CAS + 幂等/冲突分类。`RecordDeliveryResult`（唯一回执入口，含补发成功/回滚）与 `ResendOriginalCode` 全部收敛于此；原 `FailResendClaim`/`MarkResendSent` 已删除合并。对 sent/legacy 终态或 attempt 不匹配的迟到回执按幂等忽略（2xx ack），消除回传重试循环。
+- **统一回执枚举**（Python/跨层）：`common/services/receipt_outcome.py` 定义 `ReceiptOutcome`（`dispatched_definite_failure / sent_explicit_success / rejected / unknown_pending`），取代旧 `dispatched` 布尔 + `send_status` 三态 + `(success, confirmed)` 二元组三套编码。同步响应与异步兜底回传都由同一枚举派生。
+- **回执 Future 收口**：`common/services/receipt_registry.py`（`ReceiptRegistry`）成为 `_pending_mid_futures` 的唯一属主，`register/dispatch/discard/sweep` 统一注册、响应分派、清理与超时兜底，消除散落 6+ 处的清理逻辑。
+- **worker client 收敛**：`do()` 单一信封解码（优先 `data` 子对象，去掉顶层二次覆盖）；传输错误细分 `Unreachable/Timeout/Malformed`（Health 对外保持 `Unhealthy`）；发送回执统一 `normalizeSendReceipt` 归一化（优先 `receipt`，缺失回退旧字段，不可识别 fail-closed 为 `unknown_pending`）。
 
 ---
 
-最后更新：2026-08-29
+最后更新：2026-08-30
