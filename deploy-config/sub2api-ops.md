@@ -351,7 +351,7 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
-| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-08-30，含 P0-4 复审修复）：`prod-fix34-20260830-172747`（构建镜像 ID `sha256:d1fd4b24971340a2209a0d6aac7489969bc96c86ae2a4f38dc5ddfa6d73cb518`） |
+| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-08-30，含 EnsureDeliveryRecord 适配层）：`prod-fix34-ensure-20260830-203928`（构建镜像 ID `sha256:10e96f9f54638945e131b04e1b969d33865b3de0b8e1f72f1863f3941fa3d640`）。中间版 `prod-fix34-20260830-172747` / `sha256:d1fd4b249713...cb518` 已由本版本替代。 |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
