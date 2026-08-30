@@ -351,7 +351,7 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
-| `XIANYU_WORKER_IMAGE_DIGEST` | Worker 镜像固定 digest（不使用 latest/reviewed）。**必填**：旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。`.env.example` 已改为 `@sha256:<must-set>` 占位符，禁止留空或沿用旧 digest；部署前按 11.4 构建新镜像并填写其 sha256 digest |
+| `XIANYU_WORKER_IMAGE_DIGEST` | Worker 镜像固定 digest（不使用 latest/reviewed）。**必填**：旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。`.env.example` 已改为 `@sha256:<must-set>` 占位符，禁止留空或沿用旧 digest；部署前按 11.4 构建新镜像并填写其 sha256 digest。**当前生产值**（2026-08-30 部署，含 P0-4 复审修复）：`sha256:6d8772fea3c1763ba5fa9c27b33d5f3bbb2a268d07df50d0e4aaa477ef4899ad` |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
