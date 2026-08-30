@@ -26,7 +26,12 @@ from app.services.xianyu.delivery_utils import (
 from app.services.xianyu.yifan_api_handler import YifanApiHandler
 from common.db.compat import db_manager
 from common.services.order_service import OrderDetailService
-from common.services.receipt_outcome import ReceiptOutcome, aggregate_receipts
+from common.services.receipt_outcome import (
+    ReceiptOutcome,
+    aggregate_card_outcomes,
+    collapse_card_receipt,
+    receipt_of_send_result,
+)
 from common.utils.fish_nick_utils import get_buyer_fish_nick
 from common.utils.response_field import extract_card_api_response_content
 from common.utils.xianyu_utils import trans_cookies
@@ -42,49 +47,51 @@ SEND_BEFORE_CONFIRM_WAIT_TIMEOUT = float(os.getenv('SEND_BEFORE_CONFIRM_WAIT_TIM
 DELIVERY_AMOUNT_REFRESH_TIMEOUT = 15.0
 
 
-def count_cards_with_all_submessages_success(card_results: list[list[dict]]) -> int:
-    """按"卡券组"统计发送层全部子消息成功的卡券数（即实际成功送达的卡券份数）。
+def build_card_waiters(card_results: list[list[dict]]) -> list[list[tuple]]:
+    """把"按卡券分组的子消息发送结果"转成"按卡券分组的回执 waiter"。
 
-    一份"卡券" = 一次 _auto_delivery() 调用产出 = delivery_contents 中的一项，
-    一张卡券可由 N 个子消息组成（多图、图文、###### 分段文本），它们对应 card_results
-    的同一内层列表。
+    一份卡券 = delivery_contents 中的一项 = N 个子消息（多图、图文、###### 分段），
+    对应 card_results 的同一内层列表。分组必须一路保留到最终回执聚合：
+    扁平化会把"2 图 + 1 文"当成 3 份卡券，导致 quantity_sent 与失败判定全错。
 
-    旧实现按 send_results flatten 累加 success，等价于把"2 图 + 1 文"算成 3 份卡券；
-    本函数按卡券聚合：内层任一 success=False → 该张不计 1；全部 success → 计 1。
+    每个 waiter 项有两种形态：
+    - `(send_future, mid)`：需要 await 平台最终回执
+    - `(None, None, receipt, reason)`：已确定的回执，无需等待
 
-    Args:
-        card_results: 二维列表，外层索引 = 卡券索引，内层 = 该卡券的子消息 send_result 列表
+    没有 send_future 的子消息一律走 receipt_of_send_result 产出确定项，
+    **不再要求它带 mid**：register_receipt 失败、图片上传失败等分支既没有
+    send_future 也没有 mid，按 mid 过滤会让这些确定失败整体消失，
+    单份"图片失败 + 文本成功"就会被误判成整单送达。
 
-    Returns:
-        全部子消息成功的卡券数（即 quantity_sent 应传入主程序的值）。
-        注意：本函数仅按"发送层"判定，不涉及 receipt 状态（UNKNOWN_PENDING 等由
-        后续 _wait_card_delivery_confirmed 路径处理；如整单阻塞则 quantity_sent=0）。
+    空卡券组（格式错误、发送前异常）保留为空内层列表，由
+    collapse_card_receipt 判成 DISPATCHED_DEFINITE_FAILURE，绝不算成功一份。
     """
-    count = 0
-    for sub_results in card_results:
-        if not sub_results:
-            # 空卡券：视为一张完整成功的卡券（无子消息需要发）。
-            count += 1
-            continue
-        all_success = all(
-            isinstance(r, dict) and r.get("success", False) for r in sub_results
-        )
-        if all_success:
-            count += 1
-    return count
-
-
-def card_results_have_definite_failure(card_results: list[list[dict]]) -> bool:
-    """是否有任何子消息是明确失败（success=False）。
-
-    用于在"无 Future waiter + 全部子消息明确失败"场景下，主动回传 failed 而不是
-    永久 pending（修复项 D）。注意：这是发送层失败判定，不含 receipt 拦截。
-    """
-    for sub_results in card_results:
+    card_waiters: list[list[tuple]] = []
+    for sub_results in card_results or []:
+        group: list[tuple] = []
         for r in sub_results or []:
-            if isinstance(r, dict) and not r.get("success", False):
-                return True
-    return False
+            fut = r.get("send_future") if isinstance(r, dict) else None
+            if fut is not None:
+                group.append((fut, r.get("mid")))
+            else:
+                receipt, reason = receipt_of_send_result(r)
+                group.append((None, None, receipt, reason))
+        card_waiters.append(group)
+    return card_waiters
+
+
+def synthetic_send_result(receipt: ReceiptOutcome, reason: str) -> dict:
+    """构造一个"没有真实发送动作"的占位 send_result，用于补齐空卡券组。
+
+    只进入 card_results（回执判定），不进入 send_results（日志载荷契约不变）。
+    """
+    return {
+        "success": receipt == ReceiptOutcome.SENT_EXPLICIT_SUCCESS,
+        "mode": "synthetic",
+        "synthetic": True,
+        "receipt": receipt,
+        "error_message": reason,
+    }
 
 
 class AutoDeliveryHandler:
@@ -556,9 +563,9 @@ class AutoDeliveryHandler:
     async def _record_delivery_log(self, chat_id: str, item_id: str, sender_user_id: str,
                                     sender_user_name: str, msg_time: str, order_id: str,
                                     delivery_contents: list, send_results: list,
+                                    card_results: list,
                                     any_send_failed: bool,
-                                    defer_send_status_writeback: bool = False,
-                                    quantity_sent: int | None = None) -> dict | None:
+                                    defer_send_status_writeback: bool = False) -> dict | None:
         """将自动发货的发送结果写入消息日志表
 
         Args:
@@ -569,7 +576,9 @@ class AutoDeliveryHandler:
             msg_time: 消息时间
             order_id: 订单号
             delivery_contents: 发货内容列表
-            send_results: 每条消息的实际发送结果
+            send_results: 每条消息的实际发送结果（扁平，仅用于日志载荷）
+            card_results: 按卡券分组的子消息发送结果（外层=卡券），回执判定与
+                quantity_sent 的唯一依据；扁平 send_results 不参与回执判定
             any_send_failed: 是否有发送失败
             defer_send_status_writeback: 是否延后发送状态回写。
                 开启“卡券发送成功再确认发货”开关时置 True：不在此起后台回写任务，
@@ -577,8 +586,8 @@ class AutoDeliveryHandler:
                 同步等待统一判定并回写，避免后台任务与同步等待争用同一个 send_future。
 
         Returns:
-            defer_send_status_writeback=True 且存在待确认 future 时返回回写上下文 dict；
-            其余情况返回 None。
+            defer_send_status_writeback=True 时返回回写上下文 dict
+            （含 log_service / log_id / card_waiters）；其余情况返回 None。
         """
         try:
             from app.services.xianyu.auto_reply_log_service import AutoReplyLogService
@@ -609,22 +618,10 @@ class AutoDeliveryHandler:
             # 全部发出成功则先置 unknown，由后台任务等服务端响应后回写 success/failed
             send_status = "failed" if any_send_failed else "unknown"
             send_fail_reason = error_message if any_send_failed else None
-            # 收集本次发出文本消息的 (future, mid)，供异步检测是否被安全拦截。
-            # 修复项 C：除带 Future 的子消息外，也收集"无 Future 的明确失败"占位项
-            # (None, mid, fail_reason)，让 _resolve_send_receipts 把它当作
-            # ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE 计入 outcomes；
-            # 否则单份"图片失败 + 文本成功"会被误标 sent。
-            pending_send_waiters = []
-            for r in send_results:
-                if not isinstance(r, dict):
-                    continue
-                mid = r.get("mid")
-                fut = r.get("send_future")
-                if fut is not None:
-                    pending_send_waiters.append((fut, mid))
-                elif not r.get("success", False) and mid:
-                    # 无 Future 但明确失败：占位 (None, mid) 标记
-                    pending_send_waiters.append((None, mid, r.get("error_message") or "发送失败"))
+            # 按卡券分组构造回执 waiter：分组一路保留到最终聚合，
+            # 无 send_future 的子消息（含无 mid 的发送前失败）也进入 waiter，
+            # 由 build_card_waiters 统一产出确定回执项。
+            card_waiters = build_card_waiters(card_results)
 
             log_payload = {
                 "sender_user_id": sender_user_id,
@@ -660,49 +657,39 @@ class AutoDeliveryHandler:
                 logger.error(f"【{self.cookie_id}】自动发货消息日志写入失败: {self._safe_str(log_e)}")
                 log_id = None
 
-            # 修复项 D：waiters 为空时也要按 receipts 终态回传
-            # （如日志写入失败时 register_receipt 失败 → 无 Future + 全部子消息明确失败）。
-            # 修复项 F：defer_send_status_writeback 单独控制是否起后台消费者；
-            # 之前还依赖 log_id 写入成功，导致日志失败时后台 + 同步两路争用同一个 send_future。
-            if pending_send_waiters:
-                if defer_send_status_writeback:
-                    # 开关“卡券发送成功再确认发货”开启：改由确认发货前的同步等待统一判定并回写，
-                    # 此处不再起后台回写任务（无论 log_id 是否写入成功，都禁止后台消费者），
-                    # 避免与同步等待争用同一个 send_future。
-                    return {
-                        "log_service": log_service,
-                        "log_id": log_id,
-                        "pending_send_waiters": pending_send_waiters,
-                    }
-                # 默认：起后台任务异步等待发送结果并回写发送状态（不阻塞发货主流程）；
+            # 回执消费只有三条互斥出路，全部走同一个 _writeback_delivery_send_status，
+            # 不再为"没有 Future"单开分支（旧分支引用未定义的 card_results 必然抛
+            # NameError，被外层 except 吞掉后订单永久 pending）：
+            # 1. defer：交由确认发货前的同步等待统一判定并回写，避免与后台任务
+            #    争用同一个 send_future；
+            # 2. 存在真实 Future：起后台任务异步等待（不阻塞发货主流程）；
+            # 3. 全部是已确定的回执：直接内联 await 完成回传，既无需等待也不依赖
+            #    任务调度成功，确保"发送前全失败"能立刻落到 failed。
+            has_real_future = any(
+                len(item) == 2 and item[0] is not None
+                for group in card_waiters for item in group
+            )
+            if defer_send_status_writeback:
+                return {
+                    "log_service": log_service,
+                    "log_id": log_id,
+                    "card_waiters": card_waiters,
+                }
+            if has_real_future:
                 # log_id 为空时仅消费/清理 waiter 并回传，跳过日志状态回写。
                 self._spawn_delivery_send_status_writeback(
-                    log_service, log_id, pending_send_waiters, order_id, quantity_sent
+                    log_service, log_id, card_waiters, order_id
                 )
             else:
-                # 修复项 D：无可等待 waiter + 全部子消息明确失败（register_receipt 失败
-                # 等）→ 主动回传 failed，避免订单永久 pending。
-                # 否则保持 pending（quantity_sent=0，由超时兜底转人工）。
-                if card_results_have_definite_failure(card_results):
-                    try:
-                        await self._report_delivery_receipt(
-                            order_id or "",
-                            reasons=["发送前失败，确定未发出"],
-                            any_confirmed=False,
-                            any_timeout=False,
-                            quantity_sent=0,
-                        )
-                    except Exception as report_e:  # noqa: BLE001
-                        logger.warning(
-                            f"【{self.cookie_id}】无 waiter + 全部失败场景回传异常: {self._safe_str(report_e)}"
-                        )
+                await self._writeback_delivery_send_status(
+                    log_service, log_id, card_waiters, order_id
+                )
         except Exception as e:
             logger.error(f"【{self.cookie_id}】写入自动发货消息日志失败: {self._safe_str(e)}")
         return None
 
     def _spawn_delivery_send_status_writeback(
-        self, log_service, log_id: int, waiters: list, order_no: str | None = None,
-        quantity_sent: int | None = None,
+        self, log_service, log_id: int, card_waiters: list, order_no: str | None = None,
     ) -> None:
         """起后台任务：异步等待自动发货的发送结果并回写日志发送状态
 
@@ -711,58 +698,67 @@ class AutoDeliveryHandler:
         Args:
             log_service: 日志服务实例（复用同一个，避免重复构造）
             log_id: 日志主键ID
-            waiters: 本次发出消息的 (send_future, mid) 列表
+            card_waiters: 按卡券分组的回执 waiter（build_card_waiters 产出）
             order_no: 订单号（用于向主程序回传发货结果，可空）
-            quantity_sent: 实际成功发送的卡券份数（透传到主程序 quantity_sent 字段）
         """
         try:
             # handler 自身无任务追踪器，复用 parent（XianyuAsync）的追踪任务创建方法
             self.parent._create_tracked_task(
                 self._writeback_delivery_send_status(
-                    log_service, log_id, waiters, order_no, quantity_sent=quantity_sent
+                    log_service, log_id, card_waiters, order_no
                 )
             )
         except Exception as e:  # noqa: BLE001
-            # 消费者确实无法启动：立即逐项 pop 并取消未完成 Future，避免 _receipts 泄漏。
+            # 消费者确实无法启动：立即逐项 pop 并取消未完成 Future，避免回执表泄漏。
             logger.warning(f"【{self.cookie_id}】启动发货发送状态回写任务失败 log_id={log_id}: {self._safe_str(e)}")
-            pending_mid = getattr(self.parent, "_receipts", None)
-            if isinstance(pending_mid, dict):
-                for _send_future, _mid in waiters:
-                    if not _mid:
+            receipts = getattr(self.parent, "_receipts", None)
+            if receipts is None or not hasattr(receipts, "pop"):
+                return
+            for group in card_waiters or []:
+                for item in group or []:
+                    # 已确定的回执项 (None, None, receipt, reason) 没有注册过 Future。
+                    if len(item) != 2 or item[0] is None:
                         continue
-                    _fut = pending_mid.pop(_mid, None)
-                    if _fut is not None and not _fut.done():
+                    _mid = item[1]
+                    if _mid:
+                        receipts.pop(_mid, None)
+                    _fut = item[0]
+                    if not _fut.done():
                         _fut.cancel()
 
     async def _resolve_send_receipts(
-        self, waiters: list, timeout: float
-    ) -> tuple[list[str], bool, bool]:
-        """共享最终发送回执判定：区分 明确成功/明确拒绝/超时(无最终回执)。
+        self, card_waiters: list, timeout: float
+    ) -> tuple[list[str], bool, bool, int]:
+        """按卡券分组判定最终回执，聚合出订单级回传四元组。
 
         并发等待全部 Future，使整批总等待时长收敛到约一个 timeout
-        （避免 N 条卡券顺序 await 造成 N × timeout 的时序回退）。
+        （避免 N 份卡券顺序 await 造成 N × timeout 的时序回退），
+        但**只在提交给 asyncio.gather 时扁平化**，结果按原分组还原：
+        每份卡券先 collapse_card_receipt 折叠成一个回执，再聚合成订单级结论。
+        扁平聚合会把"2 图 + 1 文"当成 3 份，也会让"一份成功 + 一份被拒"
+        整单标 failed 并丢掉 quantity_sent=1。
 
         Args:
-            waiters: 本次发出消息的 (send_future, mid) 列表；
-                修复项 C：也接受 (None, mid, reason) 三元组（无 Future 但明确失败占位），
-                立即产出 ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE 计入 outcomes，
-                避免"图片失败 + 文本成功"被误判为整张 sent。
+            card_waiters: 按卡券分组的 waiter，外层=卡券，内层项为
+                `(send_future, mid)`（需等待）或
+                `(None, None, receipt, reason)`（已确定，无需等待）
             timeout: 单条等待超时（秒）
 
         Returns:
-            (reasons, any_confirmed, any_timeout)
-            - reasons: 明确被平台拦截的原因列表（明确拒绝）
-            - any_confirmed: 是否至少一条拿到明确成功回执
-            - any_timeout: 是否至少一条超时/异常（未拿到最终回执）
+            (reasons, any_confirmed, any_timeout, confirmed_cards)
+            - reasons: 确定失败（平台拒绝 / 发送前失败）的卡券原因列表
+            - any_confirmed: 是否至少一份卡券确定送达
+            - any_timeout: 是否至少一份卡券状态未知（订单须保持 pending）
+            - confirmed_cards: 确定送达的卡券份数（即 quantity_sent）
         """
-        if not waiters:
-            return [], False, False
+        if not card_waiters:
+            return [], False, False, 0
 
         async def _wait_one(item) -> tuple[ReceiptOutcome, str | None]:
-            """单条等待：统一用 await_receipt 产出回执枚举（清理由 await_receipt finally 保证）。"""
-            # 修复项 C：三元组 (None, mid, reason) → DISPATCHED_DEFINITE_FAILURE
-            if len(item) == 3 and item[0] is None:
-                return ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE, item[2]
+            """单条等待：统一产出回执枚举（清理由 await_receipt finally 保证）。"""
+            # 已确定的回执项：无 Future 可等，直接返回。
+            if len(item) == 4 and item[0] is None:
+                return item[2], item[3]
             send_future, mid = item[0], item[1]
             if not hasattr(self.parent, 'await_receipt') or send_future is None:
                 return ReceiptOutcome.UNKNOWN_PENDING, None
@@ -774,16 +770,26 @@ class AutoDeliveryHandler:
                 logger.warning(f"【{self.cookie_id}】等待发送回执异常: {self._safe_str(e)}")
                 return ReceiptOutcome.UNKNOWN_PENDING, None
 
-        results = await asyncio.gather(*(_wait_one(item) for item in waiters), return_exceptions=True)
-        outcomes: list[tuple[ReceiptOutcome, str | None]] = []
-        for r in results:
+        # 扁平提交并记录归属卡券索引，等待完成后还原分组。
+        flat: list[tuple[int, tuple]] = [
+            (card_idx, item)
+            for card_idx, group in enumerate(card_waiters)
+            for item in (group or [])
+        ]
+        results = await asyncio.gather(
+            *(_wait_one(item) for _card_idx, item in flat), return_exceptions=True
+        )
+
+        grouped: list[list[tuple[ReceiptOutcome, str | None]]] = [[] for _ in card_waiters]
+        for (card_idx, _item), r in zip(flat, results):
             if isinstance(r, Exception):
                 logger.warning(f"【{self.cookie_id}】并发等待发送回执异常: {self._safe_str(r)}")
-                outcomes.append((ReceiptOutcome.UNKNOWN_PENDING, None))
+                grouped[card_idx].append((ReceiptOutcome.UNKNOWN_PENDING, None))
             else:
-                outcomes.append(r)
-        reasons, confirmed, timed_out = aggregate_receipts(outcomes)
-        return reasons, confirmed, timed_out
+                grouped[card_idx].append(r)
+
+        card_outcomes = [collapse_card_receipt(sub) for sub in grouped]
+        return aggregate_card_outcomes(card_outcomes)
 
     async def _report_delivery_receipt(
         self, order_no: str, *, reasons: list, any_confirmed: bool, any_timeout: bool,
@@ -813,23 +819,22 @@ class AutoDeliveryHandler:
         )
 
     async def _writeback_delivery_send_status(
-        self, log_service, log_id: int, waiters: list, order_no: str | None = None,
-        quantity_sent: int | None = None,
+        self, log_service, log_id: int, card_waiters: list, order_no: str | None = None,
     ) -> None:
         """等待各发送响应，按结果回写自动发货日志的发送状态，并回传 delivery-results。
 
-        - 任一消息被服务端拦截（返回 reason）→ send_status=failed，记录失败原因
-        - 全部无拦截响应（含正常发送、超时）→ send_status=success（日志口径保持既有语义）
+        - 任一卡券被服务端拦截/确定失败（有 reason）→ send_status=failed，记录失败原因
+        - 其余（含正常发送、超时）→ send_status=success（日志口径保持既有语义）
 
         回传 confirmed 语义与日志口径分离：只有明确成功回执才 confirmed=true，
         超时/异常保持主程序 pending（不把超时伪装成最终发送成功）。
 
-        quantity_sent 由上游传入（_record_delivery_log 阶段已经按"实际成功发送"统计）；
-        仅在 sent 路径（明确成功回执）由 _report_delivery_receipt 透传给主程序。
+        quantity_sent 由回执层直接得出（确定送达的卡券份数），
+        不再依赖发送层的成功计数；仅在 sent 路径透传给主程序。
         """
         try:
-            reasons, any_confirmed, any_timeout = await self._resolve_send_receipts(
-                waiters, timeout=10.0
+            reasons, any_confirmed, any_timeout, quantity_sent = await self._resolve_send_receipts(
+                card_waiters, timeout=10.0
             )
             # 日志写入成功（log_id 有效）时才回写日志发送状态；部分失败/日志异常时
             # log_id 可能为 0/None，此时仍消费并清理 waiter（_resolve_send_receipts finally 已清理）。
@@ -851,57 +856,60 @@ class AutoDeliveryHandler:
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】回写发货发送状态异常 log_id={log_id}: {self._safe_str(e)}")
 
-    async def _wait_card_delivery_confirmed(self, send_results: list,
+    async def _wait_card_delivery_confirmed(self, card_results: list,
                                             delivery_log_ctx: dict | None,
-                                            msg_time: str, order_id: str,
-                                            quantity_sent: int | None = None) -> str | None:
-        """开关“卡券发送成功再确认发货”开启时，确认发货前同步等待服务端回执。
+                                            msg_time: str, order_id: str
+                                            ) -> tuple[str | None, bool]:
+        """开关"卡券发送成功再确认发货"开启时，确认发货前同步等待服务端回执。
 
         以本次发出消息的 send_future 为准等待服务端响应（不依赖日志是否写入成功），
-        并在有日志上下文时同步回写发送状态（替代被跳过的后台回写任务）：
-        - 任一被平台拦截（返回 reason，如 CSI_FORBID 安全拦截）→ 回写 failed，返回拦截原因
-        - 全部未拦截（含正常发送、服务端未回执超时）→ 回写 success，返回 None
+        并在有日志上下文时同步回写发送状态（替代被跳过的后台回写任务）。
+
+        返回 (拦截原因, 是否存在未知态) 二元组：
+        - 拦截原因：任一份卡券被平台拦截/确定失败时返回合并原因字符串，否则 None
+        - 是否存在未知态：任一份卡券状态未知（UNKNOWN_PENDING）时为 True，否则 False
+
+        调用方必须同时满足以下条件才允许确认平台发货 + 本地写 shipped：
+          card_intercept_reason is None  AND  not card_any_timeout
+
+        任意卡券未知（any_timeout=True）时不得确认发货也不得写 shipped，
+        复用 only_send_card_mode 路径：只记录卡券内容/失败原因，保持平台待发货。
 
         注意：文本与自动发货图片路径均会注册 send_future 参与回执判定；
         普通自动回复/确认收货图片不注册（register_receipt 决策见 send_image_msg）。
-        修复项 C：同时聚合"无 Future 的明确失败"占位项；修复项 B：透传 quantity_sent。
+        判定与回传按卡券分组进行，quantity_sent = 确定送达的卡券份数。
 
         Args:
-            send_results: 本次每条消息的发送结果（含 send_future / mid）
+            card_results: 按卡券分组的子消息发送结果（外层=卡券）
             delivery_log_ctx: _record_delivery_log 延后回写时返回的上下文
-                （含 log_service / log_id），日志写入失败时可能为 None
+                （含 log_service / log_id / card_waiters），日志写入失败时可能为 None
             msg_time: 消息时间（日志用）
             order_id: 订单号（日志用）
-            quantity_sent: 实际成功发送的卡券份数（按卡券组聚合），由调用方传入；
-                仅在 sent 路径透传到主程序。
 
         Returns:
-            拦截原因明文（被拦截时），未拦截 / 无可等待项返回 None
+            (拦截/确定失败原因明文或 None, 是否存在 UNKNOWN_PENDING 状态)
         """
-        # 修复项 C：waiters 同时收集 (send_future, mid) 与 (None, mid, reason) 占位
-        waiters = []
-        for r in (send_results or []):
-            if not isinstance(r, dict):
-                continue
-            mid = r.get("mid")
-            fut = r.get("send_future")
-            if fut is not None:
-                waiters.append((fut, mid))
-            elif not r.get("success", False) and mid:
-                waiters.append((None, mid, r.get("error_message") or "发送失败"))
         ctx = delivery_log_ctx or {}
         log_service = ctx.get("log_service")
         log_id = ctx.get("log_id")
+        # 复用 _record_delivery_log 已构造的分组 waiter（同一批 Future，避免重复构造）；
+        # 日志写入整体失败拿不到上下文时按 card_results 重建。
+        card_waiters = ctx.get("card_waiters") or build_card_waiters(card_results)
 
-        if not waiters:
-            return None
+        if not any(group for group in card_waiters):
+            # 空 waiter：无可判定项，视为未知态。
+            # 返回 (None, True) 而非单个 None——新契约要求二元组，调用方二元解包
+            # 必须不崩；any_timeout=True 让主程序保持 pending，不伪造 shipped。
+            return None, True
 
+        pending_count = sum(len(group) for group in card_waiters)
         logger.info(
             f'[{msg_time}] 【{self.cookie_id}】卡券发送成功再确认发货：确认发货前等待服务端回执，'
-            f'order_id={order_id}，待确认 {len(waiters)} 条，最长等待 {SEND_BEFORE_CONFIRM_WAIT_TIMEOUT} 秒'
+            f'order_id={order_id}，{len(card_waiters)} 份卡券共 {pending_count} 条待确认，'
+            f'最长等待 {SEND_BEFORE_CONFIRM_WAIT_TIMEOUT} 秒'
         )
-        reasons, any_confirmed, any_timeout = await self._resolve_send_receipts(
-            waiters, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT
+        reasons, any_confirmed, any_timeout, quantity_sent = await self._resolve_send_receipts(
+            card_waiters, timeout=SEND_BEFORE_CONFIRM_WAIT_TIMEOUT
         )
 
         # 同步回写日志发送状态（替代被跳过的后台回写任务）
@@ -914,14 +922,19 @@ class AutoDeliveryHandler:
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】回写发货发送状态异常 log_id={log_id}: {self._safe_str(e)}")
 
-        # 修复项 B：与后台回写共享同一最终回执判定与回传，透传 quantity_sent；
-        # 明确成功才 confirmed=true，超时/异常保持主程序 pending。
+        # 与后台回写共享同一最终回执判定与回传：明确成功才 confirmed=true，
+        # 任一份未知则保持主程序 pending，quantity_sent = 确定送达份数。
         await self._report_delivery_receipt(
             order_id or "", reasons=reasons, any_confirmed=any_confirmed, any_timeout=any_timeout,
             quantity_sent=quantity_sent,
         )
 
-        return "；".join(reasons) if reasons else None
+        # 返回 (拦截原因, 是否存在未知态) 二元组。
+        # 旧契约仅返 reason，UNKNOWN_PENDING 与"全部 SENT" 都返回 None，调用方误把
+        # UNKNOWN 当作"无拦截"继续 auto_confirm + 本地写 shipped，导致
+        # 主程序 pending、平台已确认发货、本地 shipped 三态不一致。新契约把
+        # any_timeout 显式抬出来，调用方据此拒绝确认发货与本地 shipped。
+        return ("；".join(reasons) if reasons else None), any_timeout
 
     def is_lock_held(self, lock_key: str) -> bool:
         return self.parent.is_lock_held(lock_key)
@@ -1675,9 +1688,12 @@ class AutoDeliveryHandler:
                         # 发送所有获取到的发货内容，跟踪发送结果
                         any_send_failed = False
                         send_results = []  # 收集所有发送结果用于写入消息日志
-                        card_results: list[list[dict]] = []  # 修复项 A：按卡券分组的子消息结果（外层=卡券）
+                        # 按卡券分组的子消息结果（外层=卡券）：回执判定与 quantity_sent 的唯一依据
+                        card_results: list[list[dict]] = []
                         for i, delivery_content in enumerate(delivery_contents):
-                            this_card_results: list[dict] = []  # 修复项 A：当前卡券的子消息结果
+                            this_card_results: list[dict] = []  # 当前卡券的子消息结果
+                            card_empty_reason: str | None = None  # 该份卡券"一条都没发出"的原因
+                            card_had_exception = False
                             try:
                                 # 检查是否是带图片的发货内容
                                 if delivery_content.startswith("__DELIVERY_WITH_IMAGES__"):
@@ -1722,6 +1738,7 @@ class AutoDeliveryHandler:
                                             if not text_ok:
                                                 any_send_failed = True
                                     else:
+                                        card_empty_reason = "图文发货内容格式错误，确定未发出"
                                         logger.error(f"发货内容格式错误: {delivery_content[:100]}")
 
                                 # 兼容旧的多图片发送标记
@@ -1753,6 +1770,7 @@ class AutoDeliveryHandler:
                                                     logger.error(f'[{msg_time}] 【自动发货多图片】第 {img_idx+1}/{len(image_urls)} 张发送失败(已重试5次): {img_err}')
                                                 # 图片之间无间隔，发送成功后直接发送下一张
                                     else:
+                                        card_empty_reason = "多图片发货标记格式错误，确定未发出"
                                         logger.error(f"多图片发送标记格式错误: {delivery_content}")
 
                                 # 兼容旧的单图片发送标记
@@ -1803,11 +1821,29 @@ class AutoDeliveryHandler:
 
                             except Exception as e:
                                 any_send_failed = True
+                                card_had_exception = True
                                 logger.error(f"发送第 {i+1} 条消息失败: {self._safe_str(e)}")
                             finally:
-                                # 修复项 A：每张卡券的子消息结果（无论正常/异常）必须入组。
-                                # 空列表也算一张卡券（"无子消息成功"语义），由后续 count_cards_*
-                                # 与 aggregate_receipts 判定。
+                                # 每份卡券必须入组，且绝不允许留下"空组"：
+                                # 空组在回执层无法与"成功一份"区分，会把格式错误、
+                                # 发送前异常算成已送达。这里统一补一条占位结果，
+                                # 让每份卡券都有明确回执：
+                                # - 已有子消息 + 中途异常 → UNKNOWN_PENDING
+                                #   （可能已半送达，订单保持 pending 转人工，不得重发）
+                                # - 一条都没发出 → DISPATCHED_DEFINITE_FAILURE
+                                #   （确定未发出，可安全补发）
+                                if not this_card_results:
+                                    any_send_failed = True
+                                    this_card_results.append(synthetic_send_result(
+                                        ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                                        card_empty_reason
+                                        or f"第 {i+1} 份卡券没有任何子消息发出，确定未发出",
+                                    ))
+                                elif card_had_exception:
+                                    this_card_results.append(synthetic_send_result(
+                                        ReceiptOutcome.UNKNOWN_PENDING,
+                                        f"第 {i+1} 份卡券发送过程异常，无法判定是否已送达",
+                                    ))
                                 card_results.append(this_card_results)
 
                         # 请求处理中若账号刚切换到只发卡券，后续也必须禁止确认发货，
@@ -1848,23 +1884,45 @@ class AutoDeliveryHandler:
                             order_id=order_id,
                             delivery_contents=delivery_contents,
                             send_results=send_results,
+                            card_results=card_results,
                             any_send_failed=any_send_failed,
                             defer_send_status_writeback=wait_card_receipt,
-                            quantity_sent=count_cards_with_all_submessages_success(card_results),
                         )
 
                         # "卡券发送成功再确认发货"模式：卡券已发送，现在执行确认发货
                         send_before_confirm_fail_msg = None  # 记录确认发货失败原因，延后到 update_order_delivery_info 之后写入
                         # 开关开启时：确认发货前等待服务端回执，确认卡券真实送达（未被平台拦截）再确认发货
                         # 以 send_results 中的 future 为准，不因日志写入失败而跳过等待
+                        # 等待结果包含"是否拦截"与"是否含未知态"两个 flag：
+                        # - 任一未知（any_timeout）→ 不得 auto_confirm、不得本地写 shipped，
+                        #   主程序保持 pending；本地走 only_send_card_mode 落库语义
+                        #   （已记卡券内容、平台订单保持待发货）
+                        # - 明确拦截/失败 → 同上，不确认发货，本地按 card_only 落库
+                        # - 全部 SENT_EXPLICIT_SUCCESS（两个 flag 都 False）→ 才允许走
+                        #   auto_confirm 与本地 status="shipped"
                         card_intercept_reason = None
+                        card_any_timeout = False
                         if wait_card_receipt:
-                            card_intercept_reason = await self._wait_card_delivery_confirmed(
-                                send_results, delivery_log_ctx, msg_time, order_id,
-                                quantity_sent=count_cards_with_all_submessages_success(card_results),
+                            card_intercept_reason, card_any_timeout = await self._wait_card_delivery_confirmed(
+                                card_results, delivery_log_ctx, msg_time, order_id,
                             )
 
-                        if send_before_confirm_active and not any_send_failed and not card_intercept_reason:
+                        # 任一回执未知/失败时：本开关禁止确认发货（与原"仅拦截"分支语义一致），
+                        # 但更重要的是还要把本地订单从"无条件 shipped"路径剥离——
+                        # 旧逻辑只在拦截/失败时短路 auto_confirm，后续仍会走 status="shipped"
+                        # 的本地落库；这会让"主程序 pending + 平台未确认 + 本地 shipped"
+                        # 同时出现。这里把 only_send_card_mode 抬起来，让本地落库走
+                        # record_card_only_delivery（保持平台待发货、防重复标记、记卡券内容）。
+                        if send_before_confirm_active and not any_send_failed and (card_intercept_reason or card_any_timeout):
+                            only_send_card_mode = True
+                            skip_shipping_confirm = True
+                            logger.info(
+                                f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} send_before_confirm 拒绝确认发货：'
+                                f'intercept_reason={card_intercept_reason!r}, any_timeout={card_any_timeout}；'
+                                f'本地按 only_send_card 落库，平台保持待发货，主程序按 receipt 回传'
+                            )
+
+                        if send_before_confirm_active and not any_send_failed and not card_intercept_reason and not card_any_timeout:
                             logger.info(f'[{msg_time}] 【{self.cookie_id}】卡券发送成功，开始执行确认发货: order_id={order_id}')
                             if self.is_auto_confirm_enabled():
                                 confirm_result = await self.auto_confirm(order_id, item_id)
@@ -1907,6 +1965,22 @@ class AutoDeliveryHandler:
                                 chat_id,
                             )
 
+                        # send_before_confirm 收口：本开关开启后，凡未真正在平台完成
+                        # confirm_shipping 的情况（任何_send_failed / UNKNOWN / auto_confirm 失败 /
+                        # 自动确认开关关闭等）一律走 only_send_card_mode 落库，绝不写本地 shipped。
+                        # auto_confirm() 真正成功时 platform_shipping_confirmed=True，自然不进此分支。
+                        # 旧实现只在"拦截/UNKNOWN"两条短路上抬 only_send_card_mode，
+                        # 其它失败分支仍落到 status="shipped"——主程序 failed + 平台未确认 +
+                        # 本地 shipped 三态同时出现，违反"已发货"单一事实源。
+                        if send_before_confirm_active and not platform_shipping_confirmed:
+                            only_send_card_mode = True
+                            skip_shipping_confirm = True
+                            logger.info(
+                                f'[{msg_time}] 【{self.cookie_id}】订单 {order_id} send_before_confirm 收口：'
+                                f'平台未确认发货（auto_confirm 失败/跳过/发送层失败），'
+                                f'本地按 only_send_card 落库，平台保持待发货'
+                            )
+
                         # 后置确认流程结束后再做一次终态复查，覆盖开关在最后几步才开启的窗口。
                         if (
                             not only_send_card_mode
@@ -1926,6 +2000,11 @@ class AutoDeliveryHandler:
                                 card_only_send_fail_msg = (
                                     f"卡券疑似被平台拦截未送达（{card_intercept_reason}），"
                                     "已记录卡券内容，请人工核实买家是否收到"
+                                )
+                            elif card_any_timeout:
+                                card_only_send_fail_msg = (
+                                    "卡券已发出但未收到平台最终回执（超时），"
+                                    "已记录卡券内容；订单保持待发货，请人工核实买家是否收到后手动确认发货"
                                 )
                             elif any_send_failed:
                                 card_only_send_fail_msg = (

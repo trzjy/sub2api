@@ -145,22 +145,28 @@ async def report_delivery_result_by_receipt(
     attempt: int = 0,
     quantity_sent: int | None = None,
 ) -> None:
-    """按最终发送回执三态向主程序回传 delivery-results。
+    """按最终发送回执三态向主程序回传 delivery-results（按卡券份聚合的结果）。
 
-    语义与主程序 `RecordDeliveryResult` 对齐：
-    - 明确拒绝（有拦截原因）→ success=false, confirmed=false + error（主程序标 failed）
-    - 明确成功回执（confirmed 且无超时）→ success=true, confirmed=true（主程序标 sent）
-    - 超时/异常（未拿到最终回执）→ confirmed=false（主程序保持 pending，最终转人工）
+    语义与主程序 `RecordDeliveryResult` 对齐，判定优先级按"证据强度 + 重发安全"排序：
+
+    1. any_timeout（任一份状态未知）→ success=true, confirmed=false（主程序保持
+       pending，超时兜底转人工）。未知态优先级最高：既不能标 sent（可能没送到），
+       也不能标 failed（可能已送到，标 failed 会触发重复发货）。
+    2. any_confirmed（无未知态且至少一份确定送达）→ success=true, confirmed=true
+       （主程序标 sent）并透传 quantity_sent=确定送达份数；若同时有确定失败的份，
+       其原因写入 error 落到 delivery_error，避免部分失败信息丢失。
+    3. reasons（全部确定失败）→ success=false, confirmed=false + error（主程序标 failed）。
+    4. 空批次 → 保持 pending。
 
     Args:
         order_no: 订单号
-        reasons: 平台拦截原因列表（明确拒绝）
-        any_confirmed: 是否至少一条拿到明确成功回执
-        any_timeout: 是否至少一条超时/异常（未拿到最终回执）
+        reasons: 确定失败（平台拒绝 / 发送前失败）的原因列表
+        any_confirmed: 是否至少一份卡券拿到明确成功回执
+        any_timeout: 是否至少一份卡券状态未知（未拿到最终回执）
         timeout: 回传请求超时（秒）
         attempt: 发送尝试代次（attempt_count）；补发由调用方携带
-        quantity_sent: 实际成功获取/发送的卡券份数。仅在 sent 路径（any_confirmed
-            且 any_timeout=False）时透传；其它状态不入库，由主程序保留默认 0。
+        quantity_sent: 确定送达的卡券份数。仅在 sent 路径（any_confirmed 且
+            any_timeout=False）时透传；其它状态不入库，由主程序保留默认 0。
     """
     if not order_no:
         return
@@ -168,17 +174,30 @@ async def report_delivery_result_by_receipt(
     # 但显式短路避免无意义的 task spawn。
     if not is_configured():
         return
-    if reasons:
+    if any_timeout:
+        # 任一份卡券状态未知：不确认也不判失败，保持主程序 pending 由超时兜底转人工。
+        # 未知态优先于 reasons：把"可能已送达"的订单标 failed 会触发重复发货。
+        error = "；".join(reasons + ["部分卡券未收到平台最终回执（超时）"]) if reasons \
+            else "发送后未收到平台最终回执（超时）"
+        await report_delivery_result_fire_and_forget(
+            order_no, success=True, confirmed=False, error=error, timeout=timeout, attempt=attempt
+        )
+    elif any_confirmed:
+        # 至少一份确定送达且无未知态 → sent，quantity_sent=确定送达份数。
+        # 同批存在确定失败的份时，把原因带上落到 delivery_error，不丢失部分失败信息。
+        await report_delivery_result_fire_and_forget(
+            order_no, success=True, confirmed=True,
+            error=("；".join(reasons) if reasons else None),
+            timeout=timeout, attempt=attempt,
+            quantity_sent=quantity_sent,
+        )
+    elif reasons:
+        # 全部确定失败（平台拒绝 / 发送前失败）→ 主程序标 failed，可安全补发。
         await report_delivery_result_fire_and_forget(
             order_no, success=False, confirmed=False, error="；".join(reasons), timeout=timeout, attempt=attempt
         )
-    elif any_confirmed and not any_timeout:
-        await report_delivery_result_fire_and_forget(
-            order_no, success=True, confirmed=True, timeout=timeout, attempt=attempt,
-            quantity_sent=quantity_sent,
-        )
     else:
-        # 全部超时/异常：未拿到最终回执，不确认，保持主程序 pending。
+        # 空批次（没有任何可判定的卡券）：保持主程序 pending。
         await report_delivery_result_fire_and_forget(
             order_no, success=True, confirmed=False, error="发送后未收到平台最终回执（超时）", timeout=timeout, attempt=attempt
         )

@@ -47,3 +47,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["app*"]
 exclude = ["logs*", "static*", "__pycache__*"]
+
+# Pyright LSP：父目录同时承载 `common.*` 与 `websocket.app.*` 两个顶层包，
+# 此处把父目录加入 extraPaths，使 LSP 能 resolve `from common...` 这类相对导入。
+# 仅影响 LSP 类型检查，不改变运行时/构建行为。
+[tool.pyright]
+extraPaths = [".."]

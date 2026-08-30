@@ -85,14 +85,18 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 	}
 	// quantity_sent 仅在 sent 状态写入，且按 Worker 回传的实发份数（非 quantity）覆盖；
 	// 这样支持多数量订单部分成功（quantity 保留原始购买数量，quantity_sent=实际成功份数）。
+	quantitySentParam := 0
 	if needQuantitySentCheck {
 		args = append(args, quantitySentArg)
-		query += fmt.Sprintf(", quantity_sent = $%d", len(args))
+		quantitySentParam = len(args)
+		query += fmt.Sprintf(", quantity_sent = $%d", quantitySentParam)
 	}
 	query += fmt.Sprintf(" WHERE order_no = $2 AND %s", statusFilter)
-	// 原子上限：quantity_sent 写入时必须 0 <= quantity_sent <= quantity；超限不命中任何行。
+	// 原子上限：必须校验"本次要写入的参数值"，不是 quantity_sent 列的旧值。
+	// 旧写法 `quantity_sent <= quantity` 在 UPDATE 的 WHERE 里读到的是更新前的列值
+	// （通常为 0），永远成立，等于没有上限；改为直接比较绑定参数 $N。
 	if needQuantitySentCheck {
-		query += " AND quantity_sent <= quantity AND quantity_sent >= 0"
+		query += fmt.Sprintf(" AND $%d BETWEEN 0 AND quantity", quantitySentParam)
 	}
 
 	res, err := r.db.ExecContext(ctx, query, args...)

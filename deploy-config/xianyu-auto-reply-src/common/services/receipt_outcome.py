@@ -55,26 +55,124 @@ def send_status_from_receipt(receipt: str) -> str:
     return "unknown"
 
 
-def aggregate_receipts(results: list[tuple[str, str | None]]) -> tuple[list[str], bool, bool]:
-    """从 (receipt, reason) 批次聚合出 (reasons, any_confirmed, any_timeout)。
+def coerce_receipt(value) -> ReceiptOutcome:
+    """把任意回执取值收敛为枚举；无法识别时失败关闭为 UNKNOWN_PENDING。
 
-    供自动发货批量回执判定与 delivery-results 三态回传共用：
-    - REJECTED → reasons 追加拦截原因
-    - SENT_EXPLICIT_SUCCESS → any_confirmed=True
-    - UNKNOWN_PENDING → any_timeout=True（未拿到最终回执，主程序保持 pending）
-    - DISPATCHED_DEFINITE_FAILURE → reasons 追加"发送前失败"
+    UNKNOWN_PENDING 是唯一安全的兜底：它既不谎称送达，也不谎称确定未发出，
+    主程序保持 pending 并由超时兜底转人工，不会触发重复发货。
+    """
+    if isinstance(value, ReceiptOutcome):
+        return value
+    try:
+        return ReceiptOutcome(value)
+    except (ValueError, TypeError):
+        return ReceiptOutcome.UNKNOWN_PENDING
+
+
+def receipt_of_send_result(result) -> tuple[ReceiptOutcome, str | None]:
+    """从单条 send_result 推导"无需等待 Future"时的回执枚举。
+
+    仅用于没有 send_future 可等待的子消息（发送前失败、返回值异常等）。
+    判定顺序按证据强度：
+
+    1. 非 dict（返回值异常）→ UNKNOWN_PENDING（无法证明未发出）
+    2. 显式 receipt 字段 → 直接采用（send_msg/send_image_msg 的单一事实源）
+    3. dispatched is False → DISPATCHED_DEFINITE_FAILURE
+       （发送前失败的历史信号，如"图片上传到CDN失败""本地图片文件不存在"，
+       这些分支确定未进入 websocket.send）
+    4. success is True 但无 receipt → UNKNOWN_PENDING（已发出、无最终回执）
+    5. 其余失败 → UNKNOWN_PENDING
+
+    第 5 条是刻意保守：没有明确证据时绝不凭空判定"确定未发出"，
+    否则会把"可能已送达"的订单错误标 failed 并触发重复发货。
+    """
+    if not isinstance(result, dict):
+        return ReceiptOutcome.UNKNOWN_PENDING, "发送返回值异常，无法判定是否已送达"
+    reason = result.get("error_message") or None
+    if result.get("receipt") is not None:
+        return coerce_receipt(result.get("receipt")), reason
+    if result.get("dispatched") is False:
+        return ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE, reason or "发送前失败，确定未发出"
+    if result.get("success") is True:
+        return ReceiptOutcome.UNKNOWN_PENDING, None
+    return ReceiptOutcome.UNKNOWN_PENDING, reason or "发送失败且无法判定是否已送达"
+
+
+def collapse_card_receipt(
+    sub_outcomes: list[tuple[ReceiptOutcome, str | None]]
+) -> tuple[ReceiptOutcome, str | None]:
+    """把"一份卡券"的全部子消息回执折叠为该份卡券的单一回执。
+
+    一份卡券 = delivery_contents 中的一项 = N 个子消息（多图、图文、###### 分段），
+    买家只有拿到全部子消息才算收到这份卡券，故折叠规则按"整份可用性"判定：
+
+    - 空组（没有任何子消息发出）→ DISPATCHED_DEFINITE_FAILURE。
+      格式错误、发送前异常都会留下空组，绝不能算成功一份。
+    - 全部 SENT_EXPLICIT_SUCCESS → SENT_EXPLICIT_SUCCESS（这份确定送达）
+    - 全部落在 {DDF, REJECTED} → 这份确定没送达：有 REJECTED 取 REJECTED，否则 DDF
+    - 其余（任一 UNKNOWN_PENDING，或"部分成功 + 部分确定失败"的半送达）
+      → UNKNOWN_PENDING：这份卡券状态不可判定，订单必须保持 pending 转人工，
+      既不能标 sent（买家没拿全），也不能标 failed（部分内容已发出，重发会重复发货）。
+    """
+    if not sub_outcomes:
+        return ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE, "该份卡券没有任何子消息发出"
+
+    outcomes = [coerce_receipt(o) for o, _ in sub_outcomes]
+    reasons = {}
+    for outcome, reason in sub_outcomes:
+        key = coerce_receipt(outcome)
+        if reason and key not in reasons:
+            reasons[key] = reason
+
+    if all(o == ReceiptOutcome.SENT_EXPLICIT_SUCCESS for o in outcomes):
+        return ReceiptOutcome.SENT_EXPLICIT_SUCCESS, None
+
+    definite_failures = {
+        ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+        ReceiptOutcome.REJECTED,
+    }
+    if all(o in definite_failures for o in outcomes):
+        if ReceiptOutcome.REJECTED in outcomes:
+            return ReceiptOutcome.REJECTED, reasons.get(ReceiptOutcome.REJECTED) or "平台明确拒绝"
+        return (
+            ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+            reasons.get(ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE) or "发送前失败，确定未发出",
+        )
+
+    # 混合态：任一未知，或"成功 + 确定失败"的半送达。
+    if ReceiptOutcome.UNKNOWN_PENDING in outcomes:
+        return ReceiptOutcome.UNKNOWN_PENDING, reasons.get(ReceiptOutcome.UNKNOWN_PENDING)
+    return ReceiptOutcome.UNKNOWN_PENDING, "该份卡券部分子消息已发出、部分确定失败，无法判定整份是否可用"
+
+
+def aggregate_card_outcomes(
+    card_outcomes: list[tuple[ReceiptOutcome, str | None]]
+) -> tuple[list[str], bool, bool, int]:
+    """把"每份卡券一个回执"聚合为订单级回传四元组。
+
+    Args:
+        card_outcomes: 每份卡券折叠后的 (receipt, reason)，顺序即卡券顺序。
+
+    Returns:
+        (reasons, any_confirmed, any_timeout, confirmed_cards)
+        - reasons: 确定失败（DDF/REJECTED）的原因列表；不含未知态
+        - any_confirmed: 是否至少一份确定送达
+        - any_timeout: 是否至少一份状态未知（订单必须保持 pending）
+        - confirmed_cards: 确定送达的卡券份数（即 quantity_sent）
     """
     reasons: list[str] = []
     any_confirmed = False
     any_timeout = False
-    for receipt_val, reason in results:
-        receipt = ReceiptOutcome(receipt_val) if isinstance(receipt_val, str) else receipt_val
+    confirmed_cards = 0
+    for outcome, reason in card_outcomes:
+        receipt = coerce_receipt(outcome)
         if receipt == ReceiptOutcome.SENT_EXPLICIT_SUCCESS:
             any_confirmed = True
+            confirmed_cards += 1
         elif receipt == ReceiptOutcome.REJECTED:
             reasons.append(reason or "平台明确拒绝")
         elif receipt == ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE:
             reasons.append(reason or "发送前失败，确定未发出")
         else:  # UNKNOWN_PENDING
             any_timeout = True
-    return reasons, any_confirmed, any_timeout
+    return reasons, any_confirmed, any_timeout, confirmed_cards
