@@ -380,4 +380,59 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 
 ---
 
+## 12. 定期清理机制（sub2api-cleanup）
+
+部署主机 `/opt/sub2api` 与 Docker 镜像列表会随每次升级/构建累积，无清理机制会持续增长。当前已部署与 yiyutu-release-cleanup 同款的清理机制。
+
+### 12.1 组件
+
+| 组件 | 路径 | 作用 |
+|---|---|---|
+| 清理脚本 | `/usr/local/sbin/sub2api-clean-releases` | 清理 sub2api / xianyu-auto-reply 旧镜像、命名空间内悬空镜像、本项目孤儿卷、过期 `.env.bak-*` |
+| systemd service | `/etc/systemd/system/sub2api-cleanup.service` | 一次性任务，调用脚本 |
+| systemd timer | `/etc/systemd/system/sub2api-cleanup.timer` | 每日 04:00 触发（与 yiyutu 00:00 错峰） |
+| 源文件（SSOT） | `deploy-config/scripts/sub2api-clean-releases` | 脚本源（部署时 `install -m 0755` 到 `/usr/local/sbin/`） |
+| 源文件（SSOT） | `deploy-config/systemd/sub2api-cleanup.{service,timer}` | systemd unit 源（部署时 `install -m 0644` 到 `/etc/systemd/system/`） |
+
+### 12.2 清理规则（KEEP_RELEASES=2）
+
+- **sub2api 镜像**：保留 `latest` + 当前运行容器加载的 tag + 1 个最近 tag；删除其余
+- **xianyu-auto-reply 镜像**：保留当前 `.env` 中 `XIANYU_WORKER_IMAGE_TAG` + 1 个最近 tag；删除其余
+- **悬空镜像（Repository=`<none>` 且 Tag=`<none>` 在 sub2api / xianyu-auto-reply 命名空间）**：删除；其他项目悬挂镜像严格跳过
+- **悬空卷（dangling=true 且名字以 `sub2api_` / `xianyu_` / `xianyu-worker_` 开头）**：删除；其他项目孤儿卷严格跳过
+- **`.env.bak-*` 文件**（`/opt/sub2api/`）：保留最近 3 个；删除其余
+
+### 12.3 手动执行
+
+```bash
+# dry-run（仅打印预期动作）
+/usr/local/sbin/sub2api-clean-releases --dry-run
+
+# 实跑
+/usr/local/sbin/sub2api-clean-releases
+
+# 查看下次执行时间
+systemctl list-timers sub2api-cleanup.timer
+
+# 查看最近执行日志
+journalctl -u sub2api-cleanup.service -n 50 --no-pager
+```
+
+### 12.4 部署
+
+升级时若脚本或 unit 有变更：
+
+```bash
+cd /opt/sub2api
+git pull origin main
+install -m 0755 deploy-config/scripts/sub2api-clean-releases /usr/local/sbin/sub2api-clean-releases
+install -m 0644 deploy-config/systemd/sub2api-cleanup.service /etc/systemd/system/sub2api-cleanup.service
+install -m 0644 deploy-config/systemd/sub2api-cleanup.timer /etc/systemd/system/sub2api-cleanup.timer
+systemctl daemon-reload
+```
+
+> ⚠️ 该脚本严格遵守命名空间白名单，不会误删同机其他项目（newapi / nginx 等）的镜像或卷。
+
+---
+
 最后更新：2026-08-30
