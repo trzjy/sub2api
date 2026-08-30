@@ -73,8 +73,11 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 	} else {
 		query += ", delivery_error = NULL"
 	}
-	if nextStatus == service.XianyuDeliveryStatusSent {
-		query += ", quantity_sent = quantity"
+	// quantity_sent 仅在 sent 状态写入，且按 Worker 回传的实发份数（非 quantity）覆盖；
+	// 这样支持多数量订单部分成功（quantity 保留原始购买数量，quantity_sent=实际成功份数）。
+	if nextStatus == service.XianyuDeliveryStatusSent && result.QuantitySent > 0 {
+		args = append(args, result.QuantitySent)
+		query += fmt.Sprintf(", quantity_sent = $%d", len(args))
 	}
 	query += fmt.Sprintf(" WHERE order_no = $2 AND %s", statusFilter)
 

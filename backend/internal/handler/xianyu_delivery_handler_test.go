@@ -233,3 +233,48 @@ func TestXianyuDeliveryHandlerResultRequiresTokenAndOrder(t *testing.T) {
 	r.ServeHTTP(resp, req)
 	require.Equal(t, http.StatusBadRequest, resp.Code)
 }
+
+func TestXianyuDeliveryHandlerForwardsQuantitySent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	state := &xianyuHandlerStateStub{}
+	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+		InternalToken: "test-secret", SystemUserID: 1,
+	}}
+	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, cfg, newXianyuSettingsStub(true), nil)
+	h := NewXianyuDeliveryHandler(delivery, cfg)
+
+	r := gin.New()
+	r.POST("/delivery-results", h.DeliveryResult)
+
+	// 多数量订单只成功 2 份：quantity_sent=2（不是 quantity=3）。
+	body := bytes.NewBufferString(`{"order_no":"order-1","success":true,"confirmed":true,"quantity_sent":2}`)
+	req := httptest.NewRequest(http.MethodPost, "/delivery-results", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "test-secret")
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.NotNil(t, state.recorded)
+	require.Equal(t, 2, state.recorded.QuantitySent)
+
+	// 缺 quantity_sent：按 0 处理，不报错（兼容旧 Worker）。
+	body = bytes.NewBufferString(`{"order_no":"order-2","success":true,"confirmed":true}`)
+	req = httptest.NewRequest(http.MethodPost, "/delivery-results", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "test-secret")
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.NotNil(t, state.recorded)
+	require.Equal(t, 0, state.recorded.QuantitySent)
+
+	// quantity_sent=0（显式 0）：按 0 处理。
+	body = bytes.NewBufferString(`{"order_no":"order-3","success":true,"confirmed":true,"quantity_sent":0}`)
+	req = httptest.NewRequest(http.MethodPost, "/delivery-results", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "test-secret")
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.Equal(t, 0, state.recorded.QuantitySent)
+}

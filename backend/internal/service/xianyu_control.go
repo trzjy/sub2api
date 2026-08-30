@@ -218,6 +218,10 @@ type XianyuDeliveryStatusResult struct {
 	// Attempt 回执所属发送尝试代次（补发递增后由调用方携带）；0 表示未关联（兼容旧回执）。
 	// 条件更新时仅当与记录当前 attempt_count 匹配才生效，防止旧 attempt 回执改变新状态。
 	Attempt int
+	// QuantitySent 实际成功获取/发送的卡券份数；仅在 sent（Success=true 且 Confirmed=true）
+	// 路径下写入主程序 quantity_sent 字段。其它状态（pending/failed）保留默认 0，
+	// 由调用方决定是否传值；值 < 0 视为未提供。
+	QuantitySent int
 }
 
 // XianyuDeliveryFilter 是发货记录列表筛选条件。

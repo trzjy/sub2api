@@ -58,11 +58,12 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, xianyuClaimMaxBodyBytes)
 	var req struct {
-		OrderNo   string  `json:"order_no"`
-		Success   bool    `json:"success"`
-		Confirmed *bool   `json:"confirmed"`
-		Error     *string `json:"error"`
-		Attempt   int     `json:"attempt"`
+		OrderNo      string  `json:"order_no"`
+		Success      bool    `json:"success"`
+		Confirmed    *bool   `json:"confirmed"`
+		Error        *string `json:"error"`
+		Attempt      int     `json:"attempt"`
+		QuantitySent *int    `json:"quantity_sent"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request: "+err.Error())
@@ -74,12 +75,19 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		return
 	}
 	confirmed := req.Confirmed != nil && *req.Confirmed
+	// quantity_sent 可选；未提供或 < 0 时按 0 处理（不写入 quantity_sent 字段，
+	// 保留主程序默认值 0，避免历史回执被新结构意外覆盖）。
+	quantitySent := 0
+	if req.QuantitySent != nil && *req.QuantitySent > 0 {
+		quantitySent = *req.QuantitySent
+	}
 	result := service.XianyuDeliveryStatusResult{
-		OrderNo:   req.OrderNo,
-		Success:   req.Success,
-		Confirmed: confirmed,
-		Error:     req.Error,
-		Attempt:   req.Attempt,
+		OrderNo:      req.OrderNo,
+		Success:      req.Success,
+		Confirmed:    confirmed,
+		Error:        req.Error,
+		Attempt:      req.Attempt,
+		QuantitySent: quantitySent,
 	}
 	// 优先按 order_no 路由到 Worker 发货记录（Worker 自动发货路径经 EnsureWorkerDeliveryRecord 创建）；
 	// 该订单无 Worker 记录时再更新主程序库存发货记录（xianyu_order_claims）。两者互斥，幂等关联同一 order_no。
