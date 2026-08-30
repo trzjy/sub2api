@@ -2516,6 +2516,18 @@ export interface XianyuOrderClaim {
   created_at: string
 }
 
+// Worker 自动发货订单级记录（不复制 Worker 卡券内容，只记订单级汇总）。
+export interface XianyuWorkerDelivery {
+  order_no: string
+  delivery_kind: string
+  quantity: number
+  quantity_sent: number
+  delivery_status: 'pending' | 'sent' | 'failed' | 'legacy_unverified'
+  delivery_error?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface XianyuLoginSessionStatus {
   status: 'waiting' | 'scanned' | 'success' | 'failed' | 'expired'
   session_id?: string

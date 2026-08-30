@@ -26,7 +26,7 @@ func newXianyuHandlerForTest() *XianyuDeliveryHandler {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,
 	}}
-	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, nil, cfg, newXianyuSettingsStub(true), nil), cfg)
+	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, nil, nil, cfg, newXianyuSettingsStub(true), nil), cfg)
 }
 
 // xianyuHandlerControlStub 提供 Claim 所需的最小控制面解析。
@@ -192,7 +192,7 @@ func TestXianyuDeliveryHandlerRecordsResult(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,
 	}}
-	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, cfg, newXianyuSettingsStub(true), nil)
+	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, cfg, newXianyuSettingsStub(true), nil)
 	h := NewXianyuDeliveryHandler(delivery, cfg)
 
 	r := gin.New()

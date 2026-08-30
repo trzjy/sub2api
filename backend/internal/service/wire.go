@@ -866,12 +866,13 @@ func ProvideXianyuDeliveryService(
 	repo XianyuDeliveryRepository,
 	control XianyuControlRepository,
 	stateUpdater XianyuDeliveryStateUpdater,
+	workerDelivery XianyuWorkerDeliveryRepository,
 	cfg *config.Config,
 	setting XianyuDeliverySettingReader,
 	workerSvc *XianyuWorkerService,
 	users SystemUserReader,
 ) (*XianyuDeliveryService, error) {
-	svc := NewXianyuDeliveryService(repo, control, stateUpdater, cfg, setting, workerSvc)
+	svc := NewXianyuDeliveryService(repo, control, stateUpdater, workerDelivery, cfg, setting, workerSvc)
 	if err := svc.ValidateStartup(context.Background(), users); err != nil {
 		return nil, err
 	}

@@ -1360,6 +1360,17 @@ class AutoDeliveryHandler:
                         )
                         quantity_to_send = 1
 
+                    # 注册订单级发货记录到主程序（幂等，失败不阻断发货）：
+                    # 主程序按 order_no 幂等创建 Worker 发货记录，只记订单级汇总（数量/状态/错误），
+                    # Worker 本地库存与逐份发货实现保持不变；delivery-results 回传由主程序更新同一条记录。
+                    try:
+                        from common.services.sub2api_delivery_result_client import ensure_delivery_record
+                        await ensure_delivery_record(order_id, quantity_to_send, "auto")
+                    except Exception as _record_e:
+                        logger.warning(
+                            f"【{self.cookie_id}】注册 Worker 发货记录异常（不阻断发货）order={order_id}: {self._safe_str(_record_e)}"
+                        )
+
                     # 多次调用自动发货方法，每次获取不同的内容
                     delivery_contents = []
                     success_count = 0

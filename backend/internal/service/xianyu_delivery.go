@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -78,13 +79,14 @@ type XianyuDeliveryRepository interface {
 }
 
 type XianyuDeliveryService struct {
-	repo      XianyuDeliveryRepository
-	control   XianyuControlRepository
-	cfg       *config.Config
-	setting   XianyuDeliverySettingReader
-	delivery  XianyuDeliveryStateUpdater
-	workerSvc *XianyuWorkerService
-	resender  func(ctx context.Context, claim *XianyuOrderClaim) error
+	repo           XianyuDeliveryRepository
+	control        XianyuControlRepository
+	cfg            *config.Config
+	setting        XianyuDeliverySettingReader
+	delivery       XianyuDeliveryStateUpdater
+	workerDelivery XianyuWorkerDeliveryRepository
+	workerSvc      *XianyuWorkerService
+	resender       func(ctx context.Context, claim *XianyuOrderClaim) error
 }
 
 type XianyuDeliverySettingReader interface {
@@ -105,11 +107,15 @@ func NewXianyuDeliveryService(
 	repo XianyuDeliveryRepository,
 	control XianyuControlRepository,
 	stateUpdater XianyuDeliveryStateUpdater,
+	workerDelivery XianyuWorkerDeliveryRepository,
 	cfg *config.Config,
 	setting XianyuDeliverySettingReader,
 	workerSvc *XianyuWorkerService,
 ) *XianyuDeliveryService {
-	return &XianyuDeliveryService{repo: repo, control: control, delivery: stateUpdater, cfg: cfg, setting: setting, workerSvc: workerSvc}
+	return &XianyuDeliveryService{
+		repo: repo, control: control, delivery: stateUpdater,
+		workerDelivery: workerDelivery, cfg: cfg, setting: setting, workerSvc: workerSvc,
+	}
 }
 
 // Claim 处理闲鱼订单领取请求。
@@ -281,6 +287,32 @@ func (s *XianyuDeliveryService) RecordDeliveryResult(ctx context.Context, result
 	return s.delivery.RecordDeliveryResult(ctx, result)
 }
 
+// EnsureWorkerDeliveryRecord 幂等创建 Worker 发货记录（订单级）。
+func (s *XianyuDeliveryService) EnsureWorkerDeliveryRecord(ctx context.Context, d XianyuWorkerDelivery) error {
+	if s == nil || s.workerDelivery == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	return s.workerDelivery.EnsureWorkerDeliveryRecord(ctx, d)
+}
+
+// RecordWorkerDeliveryResult 更新 Worker 发货记录；记录不存在返回 ErrXianyuDeliveryClaimNotFound，
+// 供 delivery-results 端点按 order_no 在 Worker 记录与主程序库存记录之间路由。
+// 未注入 Worker 记录仓库（未启用 Worker 发货记录适配）时同样返回 not found，交回主程序记录路径。
+func (s *XianyuDeliveryService) RecordWorkerDeliveryResult(ctx context.Context, result XianyuDeliveryStatusResult) error {
+	if s == nil || s.workerDelivery == nil {
+		return ErrXianyuDeliveryClaimNotFound
+	}
+	return s.workerDelivery.RecordWorkerDeliveryResult(ctx, result.OrderNo, result)
+}
+
+// ListWorkerDeliveries 分页列出 Worker 发货记录。
+func (s *XianyuDeliveryService) ListWorkerDeliveries(ctx context.Context, filter XianyuDeliveryFilter) ([]XianyuWorkerDelivery, int, error) {
+	if s == nil || s.workerDelivery == nil {
+		return nil, 0, ErrXianyuDeliveryNotConfigured
+	}
+	return s.workerDelivery.ListWorkerDeliveries(ctx, filter)
+}
+
 // ResendOriginalCode 人工补发原码。
 func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string) (string, error) {
 	if s == nil || s.delivery == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
@@ -333,4 +365,29 @@ func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo 
 
 type SystemUserReader interface {
 	GetByIDIncludeDeleted(ctx context.Context, id int64) (*User, error)
+}
+
+// XianyuWorkerDelivery 是 Worker 自动发货的订单级记录。
+// 只记录订单级汇总（数量/状态/错误），不复制 Worker 卡券内容或卡券模型；
+// Worker 保持本地库存与逐份发货实现，两边只通过 order_no、数量和结果回传做幂等关联。
+type XianyuWorkerDelivery struct {
+	OrderNo        string
+	DeliveryKind   string // auto / manual / redelivery
+	Quantity       int
+	QuantitySent   int
+	DeliveryStatus string
+	DeliveryError  *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// XianyuWorkerDeliveryRepository 维护 Worker 发货记录。
+type XianyuWorkerDeliveryRepository interface {
+	// EnsureWorkerDeliveryRecord 按 order_no 幂等创建/合并记录：不存在则插入（pending），
+	// 已存在不覆盖状态；仅当传入 quantity 更大时更新（请求重试不会重复重置状态）。
+	EnsureWorkerDeliveryRecord(ctx context.Context, d XianyuWorkerDelivery) error
+	// RecordWorkerDeliveryResult 按 order_no 更新 Worker 发货记录状态：
+	// success+confirmed→sent、!success→failed、其余（unknown）保持 pending；终态不降级。
+	RecordWorkerDeliveryResult(ctx context.Context, orderNo string, result XianyuDeliveryStatusResult) error
+	ListWorkerDeliveries(ctx context.Context, filter XianyuDeliveryFilter) ([]XianyuWorkerDelivery, int, error)
 }

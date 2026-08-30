@@ -141,6 +141,8 @@ export default {
     deliveries: {
       title: '发货记录',
       description: '订单发货状态与失败补发',
+      inventoryTab: '主程序库存',
+      workerTab: 'Worker 自动发货',
       orderNo: '订单号',
       accountId: '账号',
       itemId: '商品',
@@ -150,6 +152,9 @@ export default {
       attempts: '尝试次数',
       lastAttemptAt: '最近尝试',
       createdAt: '创建时间',
+      deliveryKind: '发货方式',
+      quantity: '数量',
+      quantitySent: '已发数量',
       pending: '待处理',
       sent: '已发送',
       failed: '失败',
@@ -161,6 +166,7 @@ export default {
       showCode: '查看',
       hideCode: '隐藏',
       noDeliveries: '暂无发货记录',
+      noWorkerDeliveries: '暂无 Worker 自动发货记录',
       searchPlaceholder: '搜索订单号 / 账号 / 兑换码',
     },
     settings: {

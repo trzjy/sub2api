@@ -283,6 +283,60 @@ async def test_delivery_result_client_unconfigured_skips(monkeypatch):
     assert await mod.report_delivery_result("O1", False, confirmed=False) is False
 
 
+@pytest.mark.asyncio
+async def test_ensure_delivery_record_contract(monkeypatch):
+    """Worker 自动发货注册订单级记录：URL/头/载荷与主程序 EnsureWorkerDeliveryRecord 契约一致。
+
+    只传 order_no/quantity/delivery_kind，不传卡券内容（Worker 本地库存不变）。
+    """
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        text = ""
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        mod,
+        "_load_config",
+        lambda: ("http://sub2api:8080", "secret-token"),
+    )
+
+    ok = await mod.ensure_delivery_record("WD-1", quantity=2, delivery_kind="auto")
+    assert ok is True
+    assert captured["url"] == "http://sub2api:8080/api/v1/internal/xianyu/worker-deliveries"
+    assert captured["headers"]["X-Internal-Token"] == "secret-token"
+    assert captured["json"] == {"order_no": "WD-1", "quantity": 2, "delivery_kind": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_delivery_record_unconfigured_skips(monkeypatch):
+    from common.services import sub2api_delivery_result_client as mod
+
+    monkeypatch.setattr(mod, "_load_config", lambda: ("", ""))
+    assert await mod.ensure_delivery_record("WD-1") is False
+
+
 # ---------------------------------------------------------------------------
 # delivery-results 三态回传判定（sub2api_delivery_result_client 共享实现）
 # ---------------------------------------------------------------------------

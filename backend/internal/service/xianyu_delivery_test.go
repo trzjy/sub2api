@@ -263,7 +263,7 @@ func (s *xianyuSettingsStub) GetXianyuDeliveryRuntime(context.Context) XianyuDel
 }
 
 func newXianyuDeliveryTestService(control XianyuControlRepository, repo XianyuDeliveryRepository, state XianyuDeliveryStateUpdater) *XianyuDeliveryService {
-	svc := NewXianyuDeliveryService(repo, control, state, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+	svc := NewXianyuDeliveryService(repo, control, state, nil, &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "secret",
 		SystemUserID:  123,
 	}}, newXianyuSettingsStub(true), nil)
@@ -324,7 +324,7 @@ func TestXianyuDeliveryRejectsInvalidAmountAndMissingConfiguration(t *testing.T)
 	_, err = svc.Claim(context.Background(), request)
 	require.ErrorIs(t, err, ErrXianyuInvalidAmount)
 
-	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, &config.Config{}, newXianyuSettingsStub(true), nil)
+	missing := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, nil, &config.Config{}, newXianyuSettingsStub(true), nil)
 	_, err = missing.Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 
@@ -376,7 +376,7 @@ func TestXianyuDeliveryValidateStartupRejectsUnavailableSystemUser(t *testing.T)
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "secret", SystemUserID: 123,
 	}}
-	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, cfg, newXianyuSettingsStub(true), nil)
+	svc := NewXianyuDeliveryService(&xianyuClaimRepoStub{}, &xianyuControlStub{}, nil, nil, cfg, newXianyuSettingsStub(true), nil)
 	now := time.Now()
 	reader := &systemUserReaderStub{users: map[int64]*User{
 		123: {ID: 123, Status: StatusActive},
@@ -400,7 +400,7 @@ func TestXianyuDeliveryUsesPanelToggleFailClosed(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "secret", SystemUserID: 123,
 	}}
-	disabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, cfg, newXianyuSettingsStub(false), nil)
+	disabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, nil, cfg, newXianyuSettingsStub(false), nil)
 	_, err := disabled.Claim(context.Background(), validXianyuRequest())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 
@@ -409,7 +409,7 @@ func TestXianyuDeliveryUsesPanelToggleFailClosed(t *testing.T) {
 	require.NoError(t, disabled.ValidateStartup(context.Background(), reader))
 
 	deletedUser := &systemUserReaderStub{users: map[int64]*User{123: {ID: 123, Status: StatusActive, DeletedAt: &now}}}
-	enabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, cfg, newXianyuSettingsStub(true), nil)
+	enabled := NewXianyuDeliveryService(repo, newXianyuControlStub(), nil, nil, cfg, newXianyuSettingsStub(true), nil)
 	err = enabled.ValidateStartup(context.Background(), deletedUser)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unavailable")

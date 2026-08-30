@@ -4,6 +4,20 @@
       <div class="mb-6">
         <h1 class="text-2xl font-bold">{{ t('admin.xianyu.deliveries.title') }}</h1>
         <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.deliveries.description') }}</p>
+        <div class="mt-3 flex gap-2">
+          <button
+            :class="activeTab === 'inventory' ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'"
+            @click="switchTab('inventory')"
+          >
+            {{ t('admin.xianyu.deliveries.inventoryTab') }}
+          </button>
+          <button
+            :class="activeTab === 'worker' ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'"
+            @click="switchTab('worker')"
+          >
+            {{ t('admin.xianyu.deliveries.workerTab') }}
+          </button>
+        </div>
       </div>
 
       <div class="mb-4 flex flex-wrap items-center gap-3">
@@ -19,7 +33,8 @@
         </button>
       </div>
 
-      <div v-if="claims.length" class="overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
+      <!-- 主程序库存发货记录 -->
+      <div v-if="activeTab === 'inventory' && claims.length" class="overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-gray-200 bg-gray-50 text-left dark:border-dark-700 dark:bg-dark-800">
@@ -76,7 +91,49 @@
           />
         </div>
       </div>
-      <EmptyState v-else :message="t('admin.xianyu.deliveries.noDeliveries')" />
+      <EmptyState v-else-if="activeTab === 'inventory'" :message="t('admin.xianyu.deliveries.noDeliveries')" />
+
+      <!-- Worker 自动发货记录（订单级汇总，不复制卡券内容） -->
+      <div v-if="activeTab === 'worker' && workerClaims.length" class="overflow-x-auto rounded-lg border border-gray-200 dark:border-dark-700">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-200 bg-gray-50 text-left dark:border-dark-700 dark:bg-dark-800">
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.orderNo') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.deliveryKind') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.quantity') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.quantitySent') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.status') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.error') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.deliveries.createdAt') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in workerClaims" :key="item.order_no" class="border-b border-gray-100 dark:border-dark-700">
+              <td class="px-4 py-2 font-mono text-xs">{{ item.order_no }}</td>
+              <td class="px-4 py-2">{{ item.delivery_kind }}</td>
+              <td class="px-4 py-2">{{ item.quantity }}</td>
+              <td class="px-4 py-2">{{ item.quantity_sent }}</td>
+              <td class="px-4 py-2">
+                <StatusBadge :status="item.delivery_status" :label="deliveryStatusLabel(item.delivery_status)" />
+              </td>
+              <td class="max-w-xs truncate px-4 py-2 text-gray-500" :title="item.delivery_error || ''">
+                {{ item.delivery_error || '-' }}
+              </td>
+              <td class="px-4 py-2 text-gray-500">{{ formatDateTime(item.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="flex items-center justify-end border-t border-gray-100 p-3 dark:border-dark-700">
+          <Pagination
+            :page="page"
+            :total="total"
+            :page-size="pageSize"
+            @update:page="onPage"
+            @update:pageSize="onPageSize"
+          />
+        </div>
+      </div>
+      <EmptyState v-else-if="activeTab === 'worker'" :message="t('admin.xianyu.deliveries.noWorkerDeliveries')" />
 
       <ConfirmDialog
         :show="confirmVisible"
@@ -95,7 +152,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
-import type { XianyuOrderClaim } from '@/types'
+import type { XianyuOrderClaim, XianyuWorkerDelivery } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -107,7 +164,9 @@ import Icon from '@/components/icons/Icon.vue'
 const { t } = useI18n()
 const appStore = useAppStore()
 
+const activeTab = ref<'inventory' | 'worker'>('inventory')
 const claims = ref<XianyuOrderClaim[]>([])
+const workerClaims = ref<XianyuWorkerDelivery[]>([])
 const search = ref('')
 const statusFilter = ref('')
 const page = ref(1)
@@ -125,19 +184,33 @@ const statusOptions = [
 async function load() {
   loading.value = true
   try {
-    const resp = await adminAPI.xianyu.listDeliveries({
+    const filter = {
       status: statusFilter.value || undefined,
       search: search.value || undefined,
       page: page.value,
       page_size: pageSize.value
-    })
-    claims.value = resp.items ?? []
-    total.value = resp.total ?? 0
+    }
+    if (activeTab.value === 'worker') {
+      const resp = await adminAPI.xianyu.listWorkerDeliveries(filter)
+      workerClaims.value = resp.items ?? []
+      total.value = resp.total ?? 0
+    } else {
+      const resp = await adminAPI.xianyu.listDeliveries(filter)
+      claims.value = resp.items ?? []
+      total.value = resp.total ?? 0
+    }
   } catch (err) {
     appStore.showError(String(err))
   } finally {
     loading.value = false
   }
+}
+
+function switchTab(tab: 'inventory' | 'worker') {
+  if (activeTab.value === tab) return
+  activeTab.value = tab
+  page.value = 1
+  load()
 }
 
 function onPage(value: number) {

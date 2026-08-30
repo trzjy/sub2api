@@ -167,9 +167,52 @@ async def report_delivery_result_by_receipt(
         )
 
 
+async def ensure_delivery_record(
+    order_no: str,
+    quantity: int = 1,
+    delivery_kind: str = "auto",
+    timeout: float = 5.0,
+) -> bool:
+    """Worker 自动发货前向主程序注册订单级发货记录（按 order_no 幂等）。
+
+    只注册订单级汇总（order_no/quantity/delivery_kind），不传卡券内容：
+    Worker 保持本地库存与逐份发货实现，主程序只做订单级记录与结果回传关联。
+    未配置 SUB2API_INTERNAL_BASE_URL/TOKEN 或调用失败时静默跳过（不阻断发货）。
+
+    Returns:
+        是否成功送达主程序（幂等创建/合并）。
+    """
+    base_url, token = _load_config()
+    if not base_url or not token:
+        return False
+    if not order_no:
+        return False
+    url = f"{base_url}/api/v1/internal/xianyu/worker-deliveries"
+    payload = {
+        "order_no": order_no,
+        "quantity": int(quantity or 1),
+        "delivery_kind": delivery_kind or "auto",
+    }
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers={"X-Internal-Token": token})
+        if 200 <= resp.status_code < 300:
+            return True
+        logger.warning(
+            f"注册 Worker 发货记录失败 order_no={order_no} status={resp.status_code}: {resp.text[:200]}"
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"注册 Worker 发货记录异常 order_no={order_no}: {type(e).__name__}: {e}")
+    return False
+
+
 __all__ = [
     "is_configured",
     "report_delivery_result",
     "report_delivery_result_fire_and_forget",
     "report_delivery_result_by_receipt",
+    "ensure_delivery_record",
 ]

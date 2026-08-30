@@ -141,6 +141,8 @@ export default {
     deliveries: {
       title: 'Deliveries',
       description: 'Order delivery status and failure resend',
+      inventoryTab: 'Main inventory',
+      workerTab: 'Worker auto-delivery',
       orderNo: 'Order No',
       accountId: 'Account',
       itemId: 'Item',
@@ -150,6 +152,9 @@ export default {
       attempts: 'Attempts',
       lastAttemptAt: 'Last Attempt',
       createdAt: 'Created At',
+      deliveryKind: 'Delivery Kind',
+      quantity: 'Quantity',
+      quantitySent: 'Sent',
       pending: 'Pending',
       sent: 'Sent',
       failed: 'Failed',
@@ -161,6 +166,7 @@ export default {
       showCode: 'View',
       hideCode: 'Hide',
       noDeliveries: 'No delivery records',
+      noWorkerDeliveries: 'No Worker auto-delivery records',
       searchPlaceholder: 'Search order no / account / code',
     },
     settings: {

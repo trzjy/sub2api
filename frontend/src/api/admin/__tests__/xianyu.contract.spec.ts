@@ -70,6 +70,13 @@ describe('xianyu admin api contract', () => {
     await expect(listDeliveries()).resolves.toEqual(page)
   })
 
+  it('listWorkerDeliveries returns paginated Worker delivery payload after interceptor unwrap', async () => {
+    const page = { items: [{ order_no: 'w1', delivery_kind: 'auto' }], total: 1, page: 1, page_size: 20, pages: 1 }
+    adapter.mockResolvedValue(success(page))
+    const { listWorkerDeliveries } = await import('@/api/admin/xianyu')
+    await expect(listWorkerDeliveries()).resolves.toEqual(page)
+  })
+
   it('resendDelivery returns the code string (not undefined) after send succeeds', async () => {
     adapter.mockResolvedValue(success({ code: 'CODE-123' }))
     const { resendDelivery } = await import('@/api/admin/xianyu')

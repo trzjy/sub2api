@@ -286,9 +286,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuDeliveryRepository := repository.NewXianyuOrderClaimRepository(db)
 	xianyuDeliveryStateUpdater := repository.NewXianyuOrderClaimStateRepository(db)
 	xianyuDeliveryListRepository := repository.NewXianyuDeliveryListRepository(db)
+	xianyuWorkerDeliveryRepository := repository.NewXianyuWorkerDeliveryRepository(db)
 	xianyuWorkerService := service.ProvideXianyuWorkerService(xianyuControlRepository, secretEncryptor)
 	systemUserReader := service.ProvideSystemUserReader(userRepository)
-	xianyuDeliveryService, err := service.ProvideXianyuDeliveryService(xianyuDeliveryRepository, xianyuControlRepository, xianyuDeliveryStateUpdater, configConfig, settingService, xianyuWorkerService, systemUserReader)
+	xianyuDeliveryService, err := service.ProvideXianyuDeliveryService(xianyuDeliveryRepository, xianyuControlRepository, xianyuDeliveryStateUpdater, xianyuWorkerDeliveryRepository, configConfig, settingService, xianyuWorkerService, systemUserReader)
 	if err != nil {
 		return nil, err
 	}

@@ -509,6 +509,14 @@ func (s *XianyuControlService) ListDeliveryClaims(ctx context.Context, filter Xi
 	return s.listRepo.ListDeliveryClaims(ctx, filter)
 }
 
+// ListWorkerDeliveries 列出 Worker 自动发货记录（订单级）。
+func (s *XianyuControlService) ListWorkerDeliveries(ctx context.Context, filter XianyuDeliveryFilter) ([]XianyuWorkerDelivery, int, error) {
+	if s.delivery == nil {
+		return nil, 0, ErrXianyuDeliveryNotConfigured
+	}
+	return s.delivery.ListWorkerDeliveries(ctx, filter)
+}
+
 // ResendOriginalCode 人工补发原码。
 func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo string) (string, error) {
 	if s.delivery == nil {

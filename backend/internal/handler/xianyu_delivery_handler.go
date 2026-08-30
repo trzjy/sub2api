@@ -3,6 +3,7 @@ package handler
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -80,11 +81,59 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		Error:     req.Error,
 		Attempt:   req.Attempt,
 	}
+	// 优先按 order_no 路由到 Worker 发货记录（Worker 自动发货路径经 EnsureWorkerDeliveryRecord 创建）；
+	// 该订单无 Worker 记录时再更新主程序库存发货记录（xianyu_order_claims）。两者互斥，幂等关联同一 order_no。
+	if err := h.service.RecordWorkerDeliveryResult(c.Request.Context(), result); err == nil {
+		response.Success(c, gin.H{"message": "delivery result recorded"})
+		return
+	} else if !errors.Is(err, service.ErrXianyuDeliveryClaimNotFound) {
+		response.ErrorFrom(c, err)
+		return
+	}
 	if err := h.service.RecordDeliveryResult(c.Request.Context(), result); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, gin.H{"message": "delivery result recorded"})
+}
+
+// EnsureWorkerDeliveryRecord 处理 Worker 自动发货的订单级记录注册（幂等）。
+// POST /api/v1/internal/xianyu/worker-deliveries
+func (h *XianyuDeliveryHandler) EnsureWorkerDeliveryRecord(c *gin.Context) {
+	if h == nil || h.service == nil || !constantTimeTokenMatch(c.GetHeader("X-Internal-Token"), h.token) {
+		response.Error(c, http.StatusUnauthorized, "invalid internal token")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, xianyuClaimMaxBodyBytes)
+	var req struct {
+		OrderNo      string `json:"order_no"`
+		DeliveryKind string `json:"delivery_kind"`
+		Quantity     int    `json:"quantity"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	d := service.XianyuWorkerDelivery{
+		OrderNo:      strings.TrimSpace(req.OrderNo),
+		DeliveryKind: strings.TrimSpace(req.DeliveryKind),
+		Quantity:     req.Quantity,
+	}
+	if d.OrderNo == "" {
+		response.BadRequest(c, "order_no is required")
+		return
+	}
+	if d.Quantity <= 0 {
+		d.Quantity = 1
+	}
+	if d.DeliveryKind == "" {
+		d.DeliveryKind = "auto"
+	}
+	if err := h.service.EnsureWorkerDeliveryRecord(c.Request.Context(), d); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "worker delivery record ensured"})
 }
 
 func constantTimeTokenMatch(got, expected string) bool {

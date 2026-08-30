@@ -7,6 +7,7 @@ import type {
   XianyuItemPool,
   XianyuBindingRule,
   XianyuOrderClaim,
+  XianyuWorkerDelivery,
   XianyuLoginSessionStatus,
   PaginatedResponse
 } from '@/types'
@@ -119,6 +120,19 @@ export async function listDeliveries(filter: XianyuDeliveryFilter = {}, options?
   return data
 }
 
+export async function listWorkerDeliveries(filter: XianyuDeliveryFilter = {}, options?: { signal?: AbortSignal }): Promise<PaginatedResponse<XianyuWorkerDelivery>> {
+  const { data } = await apiClient.get<PaginatedResponse<XianyuWorkerDelivery>>('/admin/xianyu/worker-deliveries', {
+    params: {
+      status: filter.status || undefined,
+      search: filter.search || undefined,
+      page: filter.page || 1,
+      page_size: filter.page_size || 20
+    },
+    signal: options?.signal
+  })
+  return data
+}
+
 export async function resendDelivery(orderNo: string): Promise<string> {
   const { data } = await apiClient.post<{ code: string }>('/admin/xianyu/deliveries/resend', { order_no: orderNo })
   return data.code
@@ -161,6 +175,7 @@ export const xianyuAPI = {
   listItemPools,
   saveItemPool,
   listDeliveries,
+  listWorkerDeliveries,
   resendDelivery,
   getSettings,
   saveSettings

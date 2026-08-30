@@ -375,6 +375,28 @@ func (h *XianyuAdminHandler) Deliveries(c *gin.Context) {
 	response.Paginated(c, claims, int64(total), page, pageSize)
 }
 
+// WorkerDeliveries Worker 自动发货记录列表（订单级汇总）。
+func (h *XianyuAdminHandler) WorkerDeliveries(c *gin.Context) {
+	page, pageSize := response.ParsePagination(c)
+	status := strings.TrimSpace(c.Query("status"))
+	search := strings.TrimSpace(c.Query("search"))
+	if len(search) > 100 {
+		search = search[:100]
+	}
+	filter := service.XianyuDeliveryFilter{
+		Status: status,
+		Search: search,
+		Offset: (page - 1) * pageSize,
+		Limit:  pageSize,
+	}
+	items, total, err := h.control.ListWorkerDeliveries(c.Request.Context(), filter)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Paginated(c, items, int64(total), page, pageSize)
+}
+
 type resendRequest struct {
 	OrderNo string `json:"order_no"`
 }
