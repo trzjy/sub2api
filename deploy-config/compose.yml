@@ -90,10 +90,12 @@ services:
       start_period: 5s
 
   # xianyu-auto-reply Worker：内网专用，只加入 xianyu-internal 网络，不映射任何公网端口。
-  # 镜像为内部维护的固定 digest（不使用 latest/reviewed 漂浮标签）。
+  # 镜像为内部维护的固定 tag（不使用 latest/reviewed 漂浮标签）。
+  # 镜像在部署主机直接构建（本机构建的镜像无 registry RepoDigest，@sha256 digest 引用无法解析），
+  # 部署后通过 docker inspect 校验运行容器镜像 ID 与构建产物一致（见 sub2api-ops.md）。
   # Worker 审查源码与 Dockerfile 位于 deploy-config/xianyu-auto-reply-src/。
   xianyu-worker:
-    image: xianyu-auto-reply@${XIANYU_WORKER_IMAGE_DIGEST:?set XIANYU_WORKER_IMAGE_DIGEST to the reviewed sha256 digest}
+    image: xianyu-auto-reply:${XIANYU_WORKER_IMAGE_TAG:?set XIANYU_WORKER_IMAGE_TAG to the reviewed worker image tag}
     container_name: xianyu-worker
     restart: unless-stopped
     security_opt:
