@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# sub2api-clean-releases: 清理 sub2api / xianyu-auto-reply 老旧 Docker 镜像与残留。
+#
+# 设计参照同机 /usr/local/sbin/yiyutu-clean-releases：
+#   - shell + set -euo pipefail
+#   - 保留计数由环境变量 KEEP_RELEASES 控制
+#   - 输出 kept/removed 汇总
+#
+# 与 yiyutu 的差异：
+#   - 清理对象是 Docker 镜像（不是文件目录）
+#   - 保留语义按"当前运行镜像 + 最新 N 个 tag"而非 mtime
+#   - 支持 dry-run：仅打印预期动作，不实际删除
+#
+# 调用：
+#   sub2api-clean-releases                # 实跑
+#   sub2api-clean-releases --dry-run      # dry-run，输出预期删除清单
+#
+# 配置（环境变量，可被 systemd unit 覆盖）：
+#   KEEP_RELEASES           每个项目保留 tag 数（含当前运行），默认 2
+#   DEPLOY_DIR              部署根目录，默认 /opt/sub2api
+#   ENV_FILE                sub2api .env 路径，默认 $DEPLOY_DIR/.env
+#   SUB2API_IMAGE           sub2api 镜像名，默认 sub2api
+#   WORKER_IMAGE            Worker 镜像名，默认 xianyu-auto-reply
+#   ENV_BAK_KEEP            .env.bak-* 保留数，默认 3
+
+set -euo pipefail
+
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+  echo "[dry-run] no destructive action will be performed"
+fi
+
+KEEP_RELEASES="${KEEP_RELEASES:-2}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/sub2api}"
+ENV_FILE="${ENV_FILE:-$DEPLOY_DIR/.env}"
+SUB2API_IMAGE="${SUB2API_IMAGE:-sub2api}"
+WORKER_IMAGE="${WORKER_IMAGE:-xianyu-auto-reply}"
+ENV_BAK_KEEP="${ENV_BAK_KEEP:-3}"
+
+if [ "$KEEP_RELEASES" -lt 2 ]; then
+  echo "KEEP_RELEASES must be at least 2 (current=$KEEP_RELEASES)" >&2
+  exit 1
+fi
+
+removed=0
+kept=0
+
+# ---- helper: 真实删除 vs dry-run 提示 --------------------------------------
+remove_image() {
+  local image_ref="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove image: $image_ref"
+    removed=$((removed + 1))
+    return
+  fi
+  if docker rmi "$image_ref" >/dev/null 2>&1; then
+    echo "removed image: $image_ref"
+    removed=$((removed + 1))
+  else
+    echo "skip (in use or missing): $image_ref" >&2
+  fi
+}
+
+remove_volume() {
+  local vol="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove volume: $vol"
+    removed=$((removed + 1))
+    return
+  fi
+  if docker volume rm "$vol" >/dev/null 2>&1; then
+    echo "removed volume: $vol"
+    removed=$((removed + 1))
+  else
+    echo "skip (in use or missing): $vol" >&2
+  fi
+}
+
+remove_file() {
+  local f="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove file: $f"
+    removed=$((removed + 1))
+    return
+  fi
+  if rm -f -- "$f"; then
+    echo "removed file: $f"
+    removed=$((removed + 1))
+  fi
+}
+
+# ---- 1. sub2api 镜像 ------------------------------------------------------
+# 保留集合：latest + 当前运行 sub2api 容器加载的 tag
+echo "=== sub2api images ==="
+
+running_sub2api_ref="$(docker inspect sub2api --format '{{.Config.Image}}' 2>/dev/null || true)"
+if [ -z "$running_sub2api_ref" ]; then
+  echo "warning: sub2api container not running, will keep only latest" >&2
+fi
+
+# 收集所有 sub2api:* tag，按 CreatedSince 倒序
+mapfile -t sub2api_tags < <(
+  docker images --format "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" "$SUB2API_IMAGE" |
+    grep -v "<none>" |
+    sort -k2,2 -r
+)
+
+sub2api_protect_set="$(mktemp)"
+trap 'rm -f "$sub2api_protect_set"' EXIT
+{
+  echo "sub2api:latest"
+  if [ -n "$running_sub2api_ref" ]; then echo "$running_sub2api_ref"; fi
+} | sort -u > "$sub2api_protect_set"
+
+seen=0
+while IFS=$'\t' read -r ref _created; do
+  if grep -qxF "$ref" "$sub2api_protect_set"; then
+    echo "keeping protected: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  if [ "$seen" -lt "$KEEP_RELEASES" ]; then
+    echo "keeping recent: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  remove_image "$ref"
+done < <(printf "%s\n" "${sub2api_tags[@]}")
+
+# ---- 2. xianyu-auto-reply 镜像 --------------------------------------------
+# 保留集合：当前 .env 中 XIANYU_WORKER_IMAGE_TAG + 它前 1 个最近 tag（KEEP_RELEASES-1）
+echo "=== xianyu-auto-reply images ==="
+
+worker_tag=""
+if [ -f "$ENV_FILE" ]; then
+  worker_tag="$(grep -E '^XIANYU_WORKER_IMAGE_TAG=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+fi
+if [ -z "$worker_tag" ]; then
+  echo "warning: XIANYU_WORKER_IMAGE_TAG not found in $ENV_FILE, will keep only currently running xianyu-worker image" >&2
+fi
+
+running_worker_ref="$(docker inspect xianyu-worker --format '{{.Config.Image}}' 2>/dev/null || true)"
+if [ -z "$running_worker_ref" ]; then
+  echo "warning: xianyu-worker container not running" >&2
+fi
+
+mapfile -t worker_tags < <(
+  docker images --format "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" "$WORKER_IMAGE" |
+    grep -v "<none>" |
+    sort -k2,2 -r
+)
+
+worker_protect_set="$(mktemp)"
+trap 'rm -f "$sub2api_protect_set" "$worker_protect_set"' EXIT
+{
+  if [ -n "$worker_tag" ]; then echo "$WORKER_IMAGE:$worker_tag"; fi
+  if [ -n "$running_worker_ref" ]; then echo "$running_worker_ref"; fi
+} | sort -u > "$worker_protect_set"
+
+# 期望保留总数 = KEEP_RELEASES
+seen=0
+while IFS=$'\t' read -r ref _created; do
+  if grep -qxF "$ref" "$worker_protect_set"; then
+    echo "keeping protected: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  if [ "$seen" -lt "$KEEP_RELEASES" ]; then
+    echo "keeping recent: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  remove_image "$ref"
+done < <(printf "%s\n" "${worker_tags[@]}")
+
+# ---- 3. 悬空镜像：仅清理 sub2api / xianyu-auto-reply 命名空间的 ----
+# 策略：枚举 Repository 为 sub2api 或 xianyu-auto-reply 且 Tag=<none> 的悬挂镜像。
+# 跳过任何其他 Repository 的镜像（包括完全 <none>:<none> 的孤儿层，那是 docker engine
+# 共享层，被多个项目复用，必须交给 docker image prune 或人工处理）。
+echo "=== dangling images (sub2api/xianyu-auto-reply namespace only) ==="
+mapfile -t dangling_images < <(docker images --format "{{.ID}}\t{{.Repository}}:{{.Tag}}" || true)
+whitelisted_imgs=()
+if [ "${#dangling_images[@]}" -gt 0 ] && [ -n "${dangling_images[0]:-}" ]; then
+  for line in "${dangling_images[@]}"; do
+    img_id="${line%%$'\t'*}"
+    img_ref="${line#*$'\t'}"
+    img_tag="${img_ref##*:}"
+    img_repo="${img_ref%:*}"
+    if [ "$img_tag" = "<none>" ] && { [ "$img_repo" = "$SUB2API_IMAGE" ] || [ "$img_repo" = "$WORKER_IMAGE" ]; }; then
+      whitelisted_imgs+=("$img_id")
+    fi
+  done
+fi
+if [ "${#whitelisted_imgs[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  for img_id in "${whitelisted_imgs[@]}"; do
+    remove_image "$img_id"
+  done
+fi
+
+# ---- 4. 悬空卷 ------------------------------------------------------------
+# 严格白名单：只清理属于本部署栈的孤儿卷（命名以 sub2api_ / xianyu_ / xianyu-worker_ 开头），
+# 严禁误删其他项目（newapi / nginx / tmp-* 等）的孤儿卷。
+echo "=== dangling volumes (whitelist: sub2api_/xianyu_*) ==="
+mapfile -t dangling_vols < <(docker volume ls -f "dangling=true" --format "{{.Name}}" || true)
+whitelisted_vols=()
+if [ "${#dangling_vols[@]}" -gt 0 ] && [ -n "${dangling_vols[0]:-}" ]; then
+  for vol in "${dangling_vols[@]}"; do
+    case "$vol" in
+      sub2api_*|xianyu_*|xianyu-worker_*)
+        whitelisted_vols+=("$vol")
+        ;;
+      *)
+        echo "skip non-owned volume: $vol"
+        ;;
+    esac
+  done
+fi
+if [ "${#whitelisted_vols[@]}" -eq 0 ]; then
+  echo "(none in whitelist)"
+else
+  for vol in "${whitelisted_vols[@]}"; do
+    remove_volume "$vol"
+  done
+fi
+
+# ---- 5. .env 备份文件 ------------------------------------------------------
+echo "=== .env backup files ==="
+if [ -d "$DEPLOY_DIR" ]; then
+  mapfile -t env_baks < <(
+    find "$DEPLOY_DIR" -maxdepth 1 -type f -name '.env.bak-*' -printf '%T@ %p\n' |
+      sort -rn |
+      cut -d' ' -f2-
+  )
+  if [ "${#env_baks[@]}" -eq 0 ]; then
+    echo "(none)"
+  else
+    b_seen=0
+    for f in "${env_baks[@]}"; do
+      if [ "$b_seen" -lt "$ENV_BAK_KEEP" ]; then
+        echo "keeping recent: $f"
+        kept=$((kept + 1))
+        b_seen=$((b_seen + 1))
+      else
+        remove_file "$f"
+      fi
+    done
+  fi
+else
+  echo "skip: $DEPLOY_DIR not found"
+fi
+
+# ---- 汇总 -----------------------------------------------------------------
+echo "cleanup complete: kept=$kept removed=$removed dry_run=$DRY_RUN deploy_dir=$DEPLOY_DIR"

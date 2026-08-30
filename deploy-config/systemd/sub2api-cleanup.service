@@ -1,0 +1,15 @@
+[Unit]
+Description=Clean old sub2api / xianyu-auto-reply Docker images and stale releases
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=KEEP_RELEASES=2
+Environment=DEPLOY_DIR=/opt/sub2api
+Environment=ENV_FILE=/opt/sub2api/.env
+Environment=SUB2API_IMAGE=sub2api
+Environment=WORKER_IMAGE=xianyu-auto-reply
+Environment=ENV_BAK_KEEP=3
+ExecStart=/usr/local/sbin/sub2api-clean-releases
+Nice=10
