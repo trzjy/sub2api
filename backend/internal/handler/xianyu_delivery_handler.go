@@ -75,10 +75,15 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		return
 	}
 	confirmed := req.Confirmed != nil && *req.Confirmed
-	// quantity_sent 可选；未提供或 < 0 时按 0 处理（不写入 quantity_sent 字段，
-	// 保留主程序默认值 0，避免历史回执被新结构意外覆盖）。
+	// quantity_sent 早期校验：负数直接 400（避免 Repository 内层被绕过写入脏值）。
+	// 上限校验（<= 该订单的 quantity）在 Repository 内 SQL 原子完成（需先查 quantity）。
+	// 缺省 / 0 / nil 都视为 0（保留主程序默认值，不写入 quantity_sent 字段）。
 	quantitySent := 0
-	if req.QuantitySent != nil && *req.QuantitySent > 0 {
+	if req.QuantitySent != nil {
+		if *req.QuantitySent < 0 {
+			response.BadRequest(c, "quantity_sent must be non-negative")
+			return
+		}
 		quantitySent = *req.QuantitySent
 	}
 	result := service.XianyuDeliveryStatusResult{

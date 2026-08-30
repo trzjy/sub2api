@@ -34,6 +34,7 @@ var (
 	ErrXianyuAccountTooLong        = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_TOO_LONG", "cookie_id is too long")
 	ErrXianyuBuyerTooLong          = infraerrors.BadRequest("XIANYU_BUYER_ID_TOO_LONG", "buyer_id is too long")
 	ErrXianyuChatTooLong           = infraerrors.BadRequest("XIANYU_CHAT_ID_TOO_LONG", "chat_id is too long")
+	ErrXianyuDeliveryQuantitySentOutOfRange = infraerrors.BadRequest("XIANYU_DELIVERY_QUANTITY_SENT_OUT_OF_RANGE", "quantity_sent must be between 0 and order quantity")
 	// ErrXianyuResendUndispatched 标记人工补发"确定未向 Worker 发出发送请求"的错误
 	// （无 active Worker、账号不可用、请求构建前失败等）。这类错误必须回滚 pending→failed，
 	// 保持人工可重试；只有"可能已 dispatch / 发送结果不确定"时才保留 pending。

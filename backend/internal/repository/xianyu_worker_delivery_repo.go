@@ -58,6 +58,16 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 		errMsg = &trimmed
 	}
 
+	// quantity_sent 原子校验：必须 0 <= quantity_sent <= quantity。
+	// SQL 表达式在 WHERE 子句做硬性约束，超限不命中任何行；然后由下方
+	// "无行命中" 分支区分"记录不存在 / 已是终态 / quantity_sent 越界"三类情况。
+	var quantitySentArg interface{}
+	needQuantitySentCheck := false
+	if nextStatus == service.XianyuDeliveryStatusSent && result.QuantitySent > 0 {
+		quantitySentArg = result.QuantitySent
+		needQuantitySentCheck = true
+	}
+
 	// 状态单调性：sent/failed 为终态；legacy_unverified 可被明确结果覆盖；
 	// unknown（Success=true, Confirmed=false → pending）仅作用于 pending，不得复活 failed。
 	statusFilter := "delivery_status IN ('pending', 'legacy_unverified')"
@@ -75,11 +85,15 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 	}
 	// quantity_sent 仅在 sent 状态写入，且按 Worker 回传的实发份数（非 quantity）覆盖；
 	// 这样支持多数量订单部分成功（quantity 保留原始购买数量，quantity_sent=实际成功份数）。
-	if nextStatus == service.XianyuDeliveryStatusSent && result.QuantitySent > 0 {
-		args = append(args, result.QuantitySent)
+	if needQuantitySentCheck {
+		args = append(args, quantitySentArg)
 		query += fmt.Sprintf(", quantity_sent = $%d", len(args))
 	}
 	query += fmt.Sprintf(" WHERE order_no = $2 AND %s", statusFilter)
+	// 原子上限：quantity_sent 写入时必须 0 <= quantity_sent <= quantity；超限不命中任何行。
+	if needQuantitySentCheck {
+		query += " AND quantity_sent <= quantity AND quantity_sent >= 0"
+	}
 
 	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -88,7 +102,7 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 	if affected, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("check xianyu worker delivery update: %w", err)
 	} else if affected == 0 {
-		// 无行命中：可能记录不存在或已是终态。终态幂等忽略；不存在则返回明确错误供路由判断。
+		// 无行命中：可能记录不存在 / 已是终态 / quantity_sent 越界。逐一区分。
 		var exists bool
 		if err := r.db.QueryRowContext(ctx,
 			`SELECT EXISTS(SELECT 1 FROM xianyu_worker_deliveries WHERE order_no = $1)`, orderNo).Scan(&exists); err != nil {
@@ -96,6 +110,18 @@ func (r *xianyuWorkerDeliveryRepository) RecordWorkerDeliveryResult(ctx context.
 		}
 		if !exists {
 			return service.ErrXianyuDeliveryClaimNotFound
+		}
+		// 记录存在但本次 UPDATE 未命中。区分终态（幂等忽略）与 quantity_sent 越界（明确错误）。
+		if needQuantitySentCheck {
+			var currentQty int
+			if err := r.db.QueryRowContext(ctx,
+				`SELECT quantity FROM xianyu_worker_deliveries WHERE order_no = $1`, orderNo).Scan(&currentQty); err != nil {
+				return fmt.Errorf("check xianyu worker delivery quantity: %w", err)
+			}
+			if result.QuantitySent < 0 || result.QuantitySent > currentQty {
+				return fmt.Errorf("%w: quantity_sent=%d exceeds order quantity=%d",
+					service.ErrXianyuDeliveryQuantitySentOutOfRange, result.QuantitySent, currentQty)
+			}
 		}
 		// 已存在但终态/状态不匹配：幂等忽略（2xx ack），不报错。
 	}
