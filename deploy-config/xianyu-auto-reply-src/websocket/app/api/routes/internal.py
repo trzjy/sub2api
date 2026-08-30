@@ -93,6 +93,8 @@ class SendMessageRequest(BaseModel):
     """发送消息请求"""
     chat_id: str
     message: str
+    # 收件人买家 ID（补发等调用方必须传入真实买家，否则收件人会被拼成 None@goofish）。
+    buyer_id: str = ""
     # 是否等待服务端发送结果（识别 CSI_FORBID 等安全拦截）。默认 False 保持既有调用方零影响。
     wait_result: bool = False
     wait_timeout: float = 10.0
@@ -1031,11 +1033,25 @@ async def send_message(account_id: str, request: SendMessageRequest):
                 },
             }
 
+        # 收件人校验：补发/内部发送必须携带真实买家 ID，缺失则明确失败关闭，
+        # 避免 actualReceivers 拼接成 "None@goofish" 把消息发给错误的收件人。
+        if not (request.buyer_id or "").strip():
+            return {
+                "success": False,
+                "code": 400,
+                "message": "buyer_id is required for internal message send",
+                "data": {
+                    "receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE,
+                    "send_status": "failed",
+                    "dispatched": False,
+                },
+            }
+
         # 发送消息：仅 wait_result=True 时注册回执 future 并等待，否则不注册避免 Future 泄漏。
         send_result = await instance.send_msg(
             websocket=instance.ws,
             chat_id=request.chat_id,
-            send_user_id=None,  # 由实例内部获取
+            send_user_id=request.buyer_id,
             content=request.message,
             register_receipt=request.wait_result,
         )

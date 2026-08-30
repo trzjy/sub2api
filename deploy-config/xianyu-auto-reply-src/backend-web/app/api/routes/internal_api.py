@@ -122,7 +122,14 @@ async def internal_clear_account_credentials(
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    await websocket_client.stop_account(account_id)
+    stop_result = await websocket_client.stop_account(account_id)
+    if not isinstance(stop_result, dict) or not stop_result.get("success"):
+        msg = (
+            stop_result.get("message", "停止账号任务失败")
+            if isinstance(stop_result, dict)
+            else "停止账号任务失败"
+        )
+        raise HTTPException(status_code=502, detail=f"停止账号任务失败，未清除凭证: {msg}")
     await account_service.delete_account(account)
     return ApiResponse(success=True, message="账号凭证已清除", data={"account_id": account_id})
 

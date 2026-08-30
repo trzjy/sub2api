@@ -125,10 +125,17 @@ async def get_service_or_user(
             detail="invalid internal service token",
         )
 
-    # 未携带服务 token：回退 JWT Bearer 认证（复用同一解析逻辑，不影响前端登录）。
+    # 未携带服务 token：回退 JWT Bearer 认证，但仅允许管理员（internal API 的 owner 语义绑定管理员）。
+    # 普通用户 JWT 不得调用内部控制接口，避免绕过服务间 token 扩大攻击面（缺失/非管理员一律失败关闭）。
     auth_header = request.headers.get("Authorization") or ""
     if auth_header.startswith("Bearer "):
-        return await _authenticate_jwt_token(auth_header[len("Bearer "):].strip(), session)
+        user = await _authenticate_jwt_token(auth_header[len("Bearer "):].strip(), session)
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges required for internal API",
+            )
+        return user
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",

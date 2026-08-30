@@ -343,6 +343,7 @@ func (c *XianyuWorkerClient) ResendDelivery(ctx context.Context, accountID, orde
 		"account_id":   accountID,
 		"message":      code,
 		"chat_id":      chatID,
+		"buyer_id":     buyerID,
 		"wait_result":  true,
 		"wait_timeout": 10.0,
 		"order_no":     orderNo,
