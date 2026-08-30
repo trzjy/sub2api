@@ -277,8 +277,14 @@ async def internal_send_message(
     account_id = str(payload.get("account_id") or "").strip()
     chat_id = str(payload.get("chat_id") or "").strip()
     message = str(payload.get("message") or "").strip()
-    if not account_id or not chat_id or not message:
-        return ApiResponse(success=False, message="account_id, chat_id, message 均不能为空")
+    # 收件人买家 ID：必须由调用方（主程序补发原码）传入真实 buyer_id，
+    # 否则下游 actualReceivers 会被拼成 "None@goofish" 致收件人错乱。
+    buyer_id = str(payload.get("buyer_id") or "").strip()
+    if not account_id or not chat_id or not message or not buyer_id:
+        return ApiResponse(
+            success=False,
+            message="account_id, chat_id, message, buyer_id 均不能为空",
+        )
 
     owner_id, _ = resolve_owner_scope(service_user)
     try:
@@ -323,6 +329,7 @@ async def internal_send_message(
         wait_timeout=wait_timeout,
         attempt=attempt,
         order_no=order_no,
+        buyer_id=buyer_id,
     )
     downstream = (result or {}).get("data") or {}
     # 统一按 receipt 归一化（缺失/未知回退 UNKNOWN_PENDING，绝不把无回执提升为成功）；

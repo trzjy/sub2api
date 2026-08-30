@@ -912,9 +912,21 @@ async def delete_account(
 ) -> ApiResponse:
     account = await _get_account_or_404(current_user, account_id, account_service)
 
-    # 先停止WebSocket任务（通过HTTP调用WebSocket服务）
+    # 先停止 WebSocket 任务：必须确认 Worker 停止成功后才删除账号。
+    # 失败时返回 502 保留账号记录，与已修复的清除凭证接口保持同一行为：
+    # 避免主程序侧账号删除后 Worker 仍在跑（孤儿进程/泄露 Cookie）。
     from app.services.websocket_client import websocket_client
-    await websocket_client.stop_account(account_id)
+    stop_result = await websocket_client.stop_account(account_id)
+    if not isinstance(stop_result, dict) or not stop_result.get("success"):
+        msg = (
+            stop_result.get("message", "停止账号任务失败")
+            if isinstance(stop_result, dict)
+            else "停止账号任务失败"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"停止账号任务失败，未删除账号: {msg}",
+        )
 
     await account_service.delete_account(account)
     return ApiResponse(success=True, message="账号已删除")

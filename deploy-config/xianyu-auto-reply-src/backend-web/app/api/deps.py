@@ -88,10 +88,12 @@ async def get_service_or_user(
 ) -> User:
     """主程序内网服务身份认证（复用现有用户/所有者语义）。
 
-    优先校验 X-Worker-Token 头是否匹配 SUB2API_INTERNAL_TOKEN：
+    严格仅接受 X-Worker-Token 头匹配 SUB2API_INTERNAL_TOKEN：
     - 匹配：解析为现有管理员用户（服务身份，owner 语义沿用该管理员）。
-    - 不匹配/缺失：回退到既有 JWT 用户认证，不影响前端登录。
+    - 不匹配/缺失：401 失败关闭。
 
+    普通前端 JWT Bearer 不得调用 internal API，避免任何 active admin JWT
+    越权调用服务间接口（与 admin 管理路由严格分离，普通用户走普通管理路由）。
     不新建平行用户/账号模型；服务身份只在既有 User 表上解析。
     """
     internal_token = (settings.sub2api_internal_token or "").strip()
@@ -105,42 +107,31 @@ async def get_service_or_user(
         )
 
     worker_token = (request.headers.get("X-Worker-Token") or "").strip()
-    if worker_token:
-        if hmac.compare_digest(internal_token, worker_token):
-            result = await session.execute(
-                select(User)
-                .where(User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE)
-                .order_by(User.id)
-                .limit(1)
-            )
-            admin_user = result.scalar_one_or_none()
-            if admin_user is None:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="no active admin user to bind internal service identity",
-                )
-            return admin_user
+    if not worker_token:
+        # 不再回退：缺失 X-Worker-Token 一律 401，包括普通 admin JWT。
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Worker-Token header is required for internal API",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not hmac.compare_digest(internal_token, worker_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid internal service token",
         )
-
-    # 未携带服务 token：回退 JWT Bearer 认证，但仅允许管理员（internal API 的 owner 语义绑定管理员）。
-    # 普通用户 JWT 不得调用内部控制接口，避免绕过服务间 token 扩大攻击面（缺失/非管理员一律失败关闭）。
-    auth_header = request.headers.get("Authorization") or ""
-    if auth_header.startswith("Bearer "):
-        user = await _authenticate_jwt_token(auth_header[len("Bearer "):].strip(), session)
-        if user.role != UserRole.ADMIN:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Admin privileges required for internal API",
-            )
-        return user
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+    result = await session.execute(
+        select(User)
+        .where(User.role == UserRole.ADMIN, User.status == UserStatus.ACTIVE)
+        .order_by(User.id)
+        .limit(1)
     )
+    admin_user = result.scalar_one_or_none()
+    if admin_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="no active admin user to bind internal service identity",
+        )
+    return admin_user
 
 
 # ==================== Service 依赖注入 ====================

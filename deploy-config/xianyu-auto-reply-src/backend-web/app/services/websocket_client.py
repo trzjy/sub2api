@@ -116,6 +116,7 @@ class WebSocketServiceClient:
         wait_timeout: float = 10.0,
         attempt: int = 0,
         order_no: str = "",
+        buyer_id: str = "",
     ) -> dict:
         """发送消息
 
@@ -128,10 +129,21 @@ class WebSocketServiceClient:
             wait_timeout: 等待发送结果超时（秒）
             attempt: 补发尝试代次（attempt_count），用于发送回执关联与并发隔离
             order_no: 订单号（补发场景透传，供回执关联）
+            buyer_id: 收件人买家 ID（不带 @goofish 后缀）。Worker 端缺失该字段
+                会失败关闭，避免 actualReceivers 拼接成 "None@goofish"。
+                调用方（补发 / 公开消息）必须传入真实买家，否则此函数返回失败。
 
         Returns:
             响应数据
         """
+        # 收件人校验：必须在透传给 Worker 前先卡住，避免下游拼接成 None@goofish。
+        # 公开消息 / 补发两条路径都已经在调用点校验过 to_user_id / payload.buyer_id，
+        # 这里只做最终防御，防止未来新增调用方绕过校验。
+        if not (buyer_id or "").strip():
+            return {
+                "success": False,
+                "message": "buyer_id is required for internal message send",
+            }
         url = f"{self.base_url}/internal/accounts/{account_id}/send-message"
         try:
             # 非幂等发送端点：禁用传输层自动重试（max_retries=1），避免单次人工操作
@@ -142,6 +154,7 @@ class WebSocketServiceClient:
                 "message_type": message_type,
                 "wait_result": wait_result,
                 "wait_timeout": wait_timeout,
+                "buyer_id": buyer_id,
             }
             if attempt:
                 payload["attempt"] = attempt

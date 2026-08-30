@@ -107,7 +107,8 @@ async def send_message(request: SendMessageRequest):
             account_id=cleaned_cookie_id,
             chat_id=cleaned_chat_id,
             content=cleaned_message,
-            message_type="text"
+            message_type="text",
+            buyer_id=cleaned_to_user_id,
         )
 
         if result.get('success'):

@@ -337,6 +337,121 @@ async def test_ensure_delivery_record_unconfigured_skips(monkeypatch):
     assert await mod.ensure_delivery_record("WD-1") is False
 
 
+@pytest.mark.asyncio
+async def test_ensure_delivery_record_retries_then_succeeds(monkeypatch):
+    """集成模式：注册失败时做有限重试，最终成功返回 True。"""
+    import asyncio
+
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    calls = []
+
+    class FakeResp:
+        status_code = 500
+        text = "boom"
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(1)
+            resp = FakeResp()
+            if len(calls) >= 3:
+                resp.status_code = 200
+            return resp
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+    async def _noop_sleep(s):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+
+    ok = await mod.ensure_delivery_record("WD-1", retries=2)
+    assert ok is True
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_ensure_delivery_record_returns_false_after_retry_exhausted(monkeypatch):
+    """集成模式：重试耗尽仍 5xx 时返回 False（上游必须硬落地终止发货）。"""
+    import asyncio
+
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    calls = []
+
+    class FakeResp:
+        status_code = 502
+        text = "bad gateway"
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append(1)
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+    async def _noop_sleep(s):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+
+    ok = await mod.ensure_delivery_record("WD-1", retries=2)
+    assert ok is False
+    assert len(calls) == 3  # 1 + 2 retries
+
+
+@pytest.mark.asyncio
+async def test_ensure_delivery_record_retries_on_exception(monkeypatch):
+    """集成模式：网络异常也应触发有限重试，最终失败返回 False。"""
+    import asyncio
+
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+    async def _noop_sleep(s):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+
+    ok = await mod.ensure_delivery_record("WD-1", retries=2)
+    assert ok is False
+
+
 # ---------------------------------------------------------------------------
 # delivery-results 三态回传判定（sub2api_delivery_result_client 共享实现）
 # ---------------------------------------------------------------------------
@@ -369,7 +484,7 @@ async def test_internal_send_message_missing_send_status_falls_back_unknown(monk
     monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
 
     resp = await routes.internal_send_message(
-        payload={"account_id": "a1", "chat_id": "c1", "message": "msg"},
+        payload={"account_id": "a1", "chat_id": "c1", "message": "msg", "buyer_id": "b1"},
         session=None,
         service_user=FakeUser(id=1),
     )
@@ -400,7 +515,7 @@ async def test_internal_send_message_rejects_unknown_send_status(monkeypatch):
     monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
 
     resp = await routes.internal_send_message(
-        payload={"account_id": "a1", "chat_id": "c1", "message": "msg"},
+        payload={"account_id": "a1", "chat_id": "c1", "message": "msg", "buyer_id": "b1"},
         session=None,
         service_user=FakeUser(id=1),
     )
@@ -412,14 +527,26 @@ async def test_delivery_receipt_confirmed_only_on_explicit_success(monkeypatch):
     from common.services import sub2api_delivery_result_client as mod
 
     calls = []
-    async def fake_report(order_no, success, confirmed=False, error=None, timeout=5.0, attempt=0):
-        calls.append({"order_no": order_no, "success": success, "confirmed": confirmed, "error": error, "attempt": attempt})
+    async def fake_report(order_no, success, confirmed=False, error=None, timeout=5.0, attempt=0, quantity_sent=None):
+        calls.append({
+            "order_no": order_no,
+            "success": success,
+            "confirmed": confirmed,
+            "error": error,
+            "attempt": attempt,
+            "quantity_sent": quantity_sent,
+        })
 
     monkeypatch.setattr(mod, "report_delivery_result_fire_and_forget", fake_report)
+    # 显式配置主程序回传地址，绕开 is_configured 短路
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
 
     # 明确成功回执 → confirmed=true（标记 sent）
     await mod.report_delivery_result_by_receipt("O1", reasons=[], any_confirmed=True, any_timeout=False)
-    assert calls[-1] == {"order_no": "O1", "success": True, "confirmed": True, "error": None, "attempt": 0}
+    assert calls[-1]["order_no"] == "O1"
+    assert calls[-1]["success"] is True
+    assert calls[-1]["confirmed"] is True
+    assert calls[-1]["error"] is None
 
     # 明确拒绝 → success=false, confirmed=false, error
     await mod.report_delivery_result_by_receipt("O1", reasons=["CSI_FORBID"], any_confirmed=False, any_timeout=False)
@@ -432,6 +559,193 @@ async def test_delivery_receipt_confirmed_only_on_explicit_success(monkeypatch):
     assert calls[-1]["success"] is True
     assert calls[-1]["confirmed"] is False
     assert calls[-1]["error"]  # 提示未收到最终回执
+
+
+# ---------------------------------------------------------------------------
+# must_fix 回归测试：quantity_sent 按实发回传（任务5）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_report_delivery_result_includes_quantity_sent_on_sent(monkeypatch):
+    """sent 路径必须把 quantity_sent 写入 payload。"""
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        text = ""
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+
+    ok = await mod.report_delivery_result(
+        "O1", True, confirmed=True, quantity_sent=2,
+    )
+    assert ok is True
+    assert captured["json"]["quantity_sent"] == 2
+
+
+@pytest.mark.asyncio
+async def test_report_delivery_result_omits_quantity_sent_on_non_sent(monkeypatch):
+    """pending/failed 路径不写入 quantity_sent（保留主程序默认 0）。"""
+    import httpx
+
+    from common.services import sub2api_delivery_result_client as mod
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        text = ""
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+
+    # 失败：传了 quantity_sent 但因 success=False 不写入
+    await mod.report_delivery_result(
+        "O1", False, confirmed=False, error="x", quantity_sent=2,
+    )
+    assert "quantity_sent" not in captured["json"]
+
+    # pending（超时）：传了 quantity_sent 但因 confirmed=False 不写入
+    await mod.report_delivery_result(
+        "O1", True, confirmed=False, error="timeout", quantity_sent=2,
+    )
+    assert "quantity_sent" not in captured["json"]
+
+
+@pytest.mark.asyncio
+async def test_report_delivery_result_by_receipt_passes_quantity_sent_on_sent(monkeypatch):
+    """by_receipt 的 sent 路径必须把 quantity_sent 透传到 fire_and_forget。"""
+    from common.services import sub2api_delivery_result_client as mod
+
+    calls = []
+
+    async def fake_report(order_no, success, confirmed=False, error=None, timeout=5.0, attempt=0, quantity_sent=None):
+        calls.append({"success": success, "confirmed": confirmed, "quantity_sent": quantity_sent})
+
+    monkeypatch.setattr(mod, "report_delivery_result_fire_and_forget", fake_report)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+
+    # sent 路径：quantity_sent 应透传
+    await mod.report_delivery_result_by_receipt(
+        "O1", reasons=[], any_confirmed=True, any_timeout=False, quantity_sent=2,
+    )
+    assert calls[-1] == {"success": True, "confirmed": True, "quantity_sent": 2}
+
+    # failed 路径：quantity_sent 不应透传（fire_and_forget 调用时不传）
+    await mod.report_delivery_result_by_receipt(
+        "O1", reasons=["CSI_FORBID"], any_confirmed=False, any_timeout=False, quantity_sent=99,
+    )
+    assert calls[-1]["quantity_sent"] is None
+
+    # pending 路径：quantity_sent 不应透传
+    await mod.report_delivery_result_by_receipt(
+        "O1", reasons=[], any_confirmed=False, any_timeout=True, quantity_sent=99,
+    )
+    assert calls[-1]["quantity_sent"] is None
+
+
+# ---------------------------------------------------------------------------
+# must_fix 回归测试：pre-send 失败回传 success=false confirmed=false（任务4）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_send_failures_route_to_failed_receipt(monkeypatch):
+    """pre-send 阶段 4 类失败（匹配失败/库存耗尽/API取码失败/发送前异常）必须
+    统一回传 success=false, confirmed=false + 失败原因（避免孤儿 pending 订单）。
+    """
+    from common.services import sub2api_delivery_result_client as mod
+
+    calls = []
+
+    async def fake_report(order_no, success, confirmed=False, error=None, timeout=5.0, attempt=0, quantity_sent=None):
+        calls.append({
+            "order_no": order_no,
+            "success": success,
+            "confirmed": confirmed,
+            "error": error,
+            "quantity_sent": quantity_sent,
+        })
+
+    monkeypatch.setattr(mod, "report_delivery_result_fire_and_forget", fake_report)
+    # 显式配置主程序回传地址，绕开 is_configured 短路
+    monkeypatch.setattr(mod, "_load_config", lambda: ("http://sub2api:8080", "secret-token"))
+
+    failure_scenarios = [
+        ("匹配失败", "未找到匹配的发货规则"),
+        ("库存耗尽", "卡券库存不足"),
+        ("API 取码失败", "外部卡券接口 502"),
+        ("发送前异常", "自动发货处理异常: KeyError"),
+    ]
+
+    for scenario_name, reason in failure_scenarios:
+        # 模拟 auto_delivery_handler 在未发生发送副作用时调用 _report_delivery_receipt。
+        await mod.report_delivery_result_by_receipt(
+            "O1",
+            reasons=[reason],
+            any_confirmed=False,
+            any_timeout=False,
+        )
+        assert calls[-1]["success"] is False, f"{scenario_name}: success 应为 False"
+        assert calls[-1]["confirmed"] is False, f"{scenario_name}: confirmed 应为 False"
+        assert reason in calls[-1]["error"], f"{scenario_name}: 失败原因应被记录"
+        assert calls[-1]["quantity_sent"] is None, f"{scenario_name}: failed 不写 quantity_sent"
+
+
+@pytest.mark.asyncio
+async def test_pre_send_failure_skipped_when_unconfigured(monkeypatch):
+    """standalone 模式（未配置主程序回传）：pre-send 失败不回传（避免无意义网络调用）。"""
+    from common.services import sub2api_delivery_result_client as mod
+
+    posted = []
+
+    async def fake_fire_and_forget(*args, **kwargs):
+        posted.append((args, kwargs))
+
+    monkeypatch.setattr(mod, "report_delivery_result_fire_and_forget", fake_fire_and_forget)
+    monkeypatch.setattr(mod, "_load_config", lambda: ("", ""))
+
+    await mod.report_delivery_result_by_receipt(
+        "O1",
+        reasons=["未找到匹配的发货规则"],
+        any_confirmed=False,
+        any_timeout=False,
+    )
+    assert not posted, "未配置主程序回传时不应调用 fire_and_forget"
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +765,77 @@ async def test_service_or_user_rejects_unconfigured_token(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await get_service_or_user(request=_make_request("anything"), session=session)
     assert exc.value.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# must_fix 回归测试：internal API 移除 JWT fallback（仅 X-Worker-Token 唯一入口）
+# ---------------------------------------------------------------------------
+
+
+def _make_request_with_jwt(jwt: str | None) -> Request:
+    """构造仅携带 JWT Bearer（无 X-Worker-Token）的请求：模拟普通 admin 前端登录态。"""
+    headers = []
+    if jwt:
+        headers.append((b"authorization", f"Bearer {jwt}".encode()))
+    return Request(
+        scope={
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/internal/cookies/details",
+            "headers": headers,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_internal_api_rejects_missing_worker_token(internal_token):
+    """缺失 X-Worker-Token 必须 401，即使客户端是合法 admin 用户也不得回退。"""
+    admin = FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    session = FakeSession(users=[admin])
+    with pytest.raises(HTTPException) as exc:
+        await get_service_or_user(request=_make_request_with_jwt(None), session=session)
+    assert exc.value.status_code == 401
+    assert "X-Worker-Token" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_internal_api_rejects_only_jwt(internal_token):
+    """仅携带 admin JWT（无 X-Worker-Token）必须 401，绝不回退到 JWT 认证。"""
+    admin = FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    session = FakeSession(users=[admin])
+    with pytest.raises(HTTPException) as exc:
+        await get_service_or_user(
+            request=_make_request_with_jwt("admin.jwt.token"), session=session
+        )
+    assert exc.value.status_code == 401
+    # 关键：失败原因是"缺少 X-Worker-Token"，而不是"JWT 校验失败"；
+    # 防止任何 active admin JWT 越权调用服务间接口。
+    assert "X-Worker-Token" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_internal_api_rejects_invalid_worker_token(internal_token):
+    """错误的 X-Worker-Token 必须 401（即使客户端也带了 admin JWT）。"""
+    admin = FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    session = FakeSession(users=[admin])
+    # 同时携带错误的 worker_token + admin JWT —— 都不应通过
+    request = _make_request("wrong-token")
+    request.scope["headers"].append((b"authorization", b"Bearer admin.jwt.token"))
+    with pytest.raises(HTTPException) as exc:
+        await get_service_or_user(request=request, session=session)
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_internal_api_accepts_valid_worker_token(internal_token):
+    """有效 X-Worker-Token 必须成功解析为现有管理员用户。"""
+    admin = FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    session = FakeSession(users=[admin])
+    # 即便同时携带 admin JWT，也必须由 X-Worker-Token 通道解析（不是 JWT 通道）。
+    request = _make_request("test-internal-token")
+    request.scope["headers"].append((b"authorization", b"Bearer admin.jwt.token"))
+    user = await get_service_or_user(request=request, session=session)
+    assert user is admin
 
 
 @pytest.mark.asyncio
@@ -642,7 +1027,7 @@ async def test_internal_send_message_preserves_dispatched_false(monkeypatch):
     monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
 
     resp = await routes.internal_send_message(
-        payload={"account_id": "a1", "chat_id": "c1", "message": "msg"},
+        payload={"account_id": "a1", "chat_id": "c1", "message": "msg", "buyer_id": "b1"},
         session=None,
         service_user=FakeUser(id=1),
     )
@@ -663,9 +1048,305 @@ async def test_internal_send_message_account_query_error_marks_undispatched(monk
     monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
 
     resp = await routes.internal_send_message(
-        payload={"account_id": "a1", "chat_id": "c1", "message": "msg"},
+        payload={"account_id": "a1", "chat_id": "c1", "message": "msg", "buyer_id": "b1"},
         session=None,
         service_user=FakeUser(id=1),
     )
     assert resp.success is False
     assert resp.data["dispatched"] is False
+
+
+# ---------------------------------------------------------------------------
+# must_fix 回归测试：buyer_id 全链路贯通（补发 + 公开消息 + websocket_client）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_internal_send_message_requires_buyer_id(monkeypatch):
+    """补发接口 payload 缺 buyer_id 必须失败关闭，避免下游拼成 None@goofish。"""
+    from app.api.routes import internal_api as routes
+    from app.services.account_service import AccountService
+
+    class FakeAccount:
+        account_id = "a1"
+
+    class FakeAccountService:
+        async def get_account_for_user(self, owner_id, account_id):
+            return FakeAccount()
+
+    monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
+
+    # monkeypatch websocket_client.send_message 防止真实网络调用
+    called = {"flag": False}
+
+    async def fake_send_message(**kwargs):
+        called["flag"] = True
+        return {"success": True, "data": {"receipt": "DISPATCHED_DEFINITE_FAILURE"}}
+
+    monkeypatch.setattr(
+        "app.services.websocket_client.websocket_client.send_message",
+        fake_send_message,
+    )
+
+    # 缺 buyer_id：必须失败，且 send_message 不得被调用（边界前拦截）
+    resp = await routes.internal_send_message(
+        payload={"account_id": "a1", "chat_id": "c1", "message": "msg"},
+        session=None,
+        service_user=FakeUser(id=1),
+    )
+    assert resp.success is False
+    assert "buyer_id" in resp.message
+    assert called["flag"] is False
+
+
+@pytest.mark.asyncio
+async def test_internal_send_message_passes_buyer_id_to_websocket(monkeypatch):
+    """补发接口必须把 payload["buyer_id"] 透传给 websocket_client.send_message。"""
+    from app.api.routes import internal_api as routes
+    from app.services.account_service import AccountService
+
+    class FakeAccount:
+        account_id = "a1"
+
+    class FakeAccountService:
+        async def get_account_for_user(self, owner_id, account_id):
+            return FakeAccount()
+
+    monkeypatch.setattr(AccountService, "get_account_for_user", FakeAccountService().get_account_for_user)
+
+    captured = {}
+
+    async def fake_send_message(**kwargs):
+        captured["buyer_id"] = kwargs.get("buyer_id")
+        return {"success": True, "data": {"receipt": "DISPATCHED_DEFINITE_FAILURE"}}
+
+    monkeypatch.setattr(
+        "app.services.websocket_client.websocket_client.send_message",
+        fake_send_message,
+    )
+
+    resp = await routes.internal_send_message(
+        payload={
+            "account_id": "a1",
+            "chat_id": "c1",
+            "message": "msg",
+            "buyer_id": "real-buyer-123",
+        },
+        session=None,
+        service_user=FakeUser(id=1),
+    )
+    assert resp.success is True
+    assert captured["buyer_id"] == "real-buyer-123"
+
+
+@pytest.mark.asyncio
+async def test_websocket_client_send_message_rejects_missing_buyer_id(monkeypatch):
+    """websocket_client.send_message 缺 buyer_id 必须立即失败关闭（不发出 None@goofish 请求）。"""
+    from app.services.websocket_client import WebSocketServiceClient
+
+    # base_url 来自 settings；monkeypatch settings 注入固定地址
+    from app.core.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "websocket_service_url", "http://ws:8090")
+
+    client = WebSocketServiceClient()
+    # 替 http_client，让缺 buyer_id 的快速失败路径不被实际网络调用触发
+    called = {"flag": False}
+
+    class FakeHttp:
+        async def post(self, *a, **k):
+            called["flag"] = True
+            return {}
+
+    monkeypatch.setattr(client, "http_client", FakeHttp())
+
+    result = await client.send_message(
+        account_id="a1",
+        chat_id="c1",
+        content="hello",
+    )
+    assert result["success"] is False
+    assert "buyer_id is required" in result["message"]
+    assert called["flag"] is False  # 边界前拦截，未发出请求
+
+
+@pytest.mark.asyncio
+async def test_websocket_client_send_message_includes_buyer_id_in_payload(monkeypatch):
+    """buyer_id 必须进入 payload 透传给 Worker 端。"""
+    from app.core.config import get_settings
+    from app.services.websocket_client import WebSocketServiceClient
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "websocket_service_url", "http://ws:8090")
+
+    captured = {}
+
+    class FakeHttp:
+        async def post(self, url, json=None, **k):
+            captured["url"] = url
+            captured["json"] = json
+            return {"success": True, "data": {}}
+
+    client = WebSocketServiceClient()
+    monkeypatch.setattr(client, "http_client", FakeHttp())
+
+    result = await client.send_message(
+        account_id="a1",
+        chat_id="c1",
+        content="hello",
+        buyer_id="real-buyer-123",
+    )
+    assert result["success"] is True
+    assert captured["json"]["buyer_id"] == "real-buyer-123"
+
+
+@pytest.mark.asyncio
+async def test_message_route_passes_to_user_id_as_buyer_id(monkeypatch):
+    """公开消息接口（message.py）必须把 to_user_id 作为 buyer_id 传给 websocket_client。"""
+    from app.api.routes import message as msg_route
+
+    captured = {}
+
+    async def fake_send_message(**kwargs):
+        captured["buyer_id"] = kwargs.get("buyer_id")
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "app.services.websocket_client.websocket_client.send_message",
+        fake_send_message,
+    )
+    # 旁路 API秘钥校验以聚焦 buyer_id 透传
+    monkeypatch.setattr(msg_route, "verify_api_key", lambda _k: True)
+
+    resp = await msg_route.send_message(
+        request=msg_route.SendMessageRequest(
+            api_key="k",
+            cookie_id="a1",
+            chat_id="c1",
+            to_user_id="real-buyer-456",
+            message="hello",
+        )
+    )
+    assert resp.success is True
+    assert captured["buyer_id"] == "real-buyer-456"
+
+
+@pytest.mark.asyncio
+async def test_message_route_rejects_missing_to_user_id(monkeypatch):
+    """公开消息接口缺 to_user_id 必须失败关闭（与补发一致，避免 None@goofish）。"""
+    from app.api.routes import message as msg_route
+
+    called = {"flag": False}
+
+    async def fake_send_message(**kwargs):
+        called["flag"] = True
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "app.services.websocket_client.websocket_client.send_message",
+        fake_send_message,
+    )
+    monkeypatch.setattr(msg_route, "verify_api_key", lambda _k: True)
+
+    resp = await msg_route.send_message(
+        request=msg_route.SendMessageRequest(
+            api_key="k",
+            cookie_id="a1",
+            chat_id="c1",
+            to_user_id="",  # 空字符串应被既有 required_params 校验拦截
+            message="hello",
+        )
+    )
+    assert resp.success is False
+    assert called["flag"] is False  # 边界前拦截，不会发出请求
+
+
+# ---------------------------------------------------------------------------
+# must_fix 回归测试：账号删除前校验 stop 结果（任务6）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_account_returns_502_when_stop_fails(monkeypatch):
+    """Worker 停止失败时必须返回 502 且不删除账号。"""
+    from fastapi import HTTPException
+
+    from app.api.routes import cookies as cookies_route
+    from app.services.websocket_client import websocket_client
+
+    class FakeAccount:
+        account_id = "a1"
+
+    class FakeAccountService:
+        deleted = {"flag": False}
+
+        async def get_account_for_user(self, owner_id, account_id):
+            return FakeAccount()
+
+        async def delete_account(self, account):
+            self.deleted["flag"] = True
+            return None
+
+    fake_service = FakeAccountService()
+
+    # 旁路 _get_account_or_404 返回假账号；用 get_account_for_user 替代
+    async def fake_get_or_404(*args, **kwargs):
+        return FakeAccount()
+
+    monkeypatch.setattr(cookies_route, "_get_account_or_404", fake_get_or_404)
+
+    # stop_account 返回失败
+    async def fake_stop(*a, **k):
+        return {"success": False, "message": "worker offline"}
+
+    monkeypatch.setattr(websocket_client, "stop_account", fake_stop)
+
+    try:
+        await cookies_route.delete_account(
+            account_id="a1",
+            current_user=FakeUser(id=1),
+            account_service=fake_service,
+        )
+        assert False, "expected 502"
+    except HTTPException as exc:
+        assert exc.status_code == 502
+        assert "停止账号任务失败" in exc.detail
+
+    assert fake_service.deleted["flag"] is False, "stop 失败时不得删除账号"
+
+
+@pytest.mark.asyncio
+async def test_delete_account_proceeds_when_stop_succeeds(monkeypatch):
+    """Worker 停止成功时正常删除账号。"""
+    from app.api.routes import cookies as cookies_route
+    from app.services.websocket_client import websocket_client
+
+    class FakeAccount:
+        account_id = "a1"
+
+    class FakeAccountService:
+        deleted = {"flag": False}
+
+        async def delete_account(self, account):
+            self.deleted["flag"] = True
+            return None
+
+    fake_service = FakeAccountService()
+
+    async def fake_get_or_404(*args, **kwargs):
+        return FakeAccount()
+
+    monkeypatch.setattr(cookies_route, "_get_account_or_404", fake_get_or_404)
+
+    async def fake_stop(*a, **k):
+        return {"success": True, "message": "stopped"}
+
+    monkeypatch.setattr(websocket_client, "stop_account", fake_stop)
+
+    resp = await cookies_route.delete_account(
+        account_id="a1",
+        current_user=FakeUser(id=1),
+        account_service=fake_service,
+    )
+    assert resp.success is True
+    assert fake_service.deleted["flag"] is True
