@@ -89,6 +89,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import type { XianyuWorkerConfig } from '@/types'
+import { extractApiErrorMessage } from '@/utils/apiError'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import Toggle from '@/components/common/Toggle.vue'
@@ -108,7 +109,7 @@ async function load() {
     form.api_token = ''
     form.status = active?.status ?? 'active'
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.loadWorkerFailed')))
   }
 }
 
@@ -132,7 +133,7 @@ async function saveWorker() {
     form.api_token = ''
     appStore.showSuccess(t('admin.xianyu.settings.workerConfigSaved'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.saveWorkerFailed')))
   }
 }
 
@@ -142,7 +143,7 @@ async function checkHealth() {
     await load()
     appStore.showSuccess(t('admin.xianyu.settings.healthCheck'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.healthCheckFailed')))
   }
 }
 
@@ -161,7 +162,7 @@ async function loadToggles() {
     settingsForm.product_auto_bind = s.product_auto_bind
     settingsForm.sync_interval_minutes = s.sync_interval_minutes
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.loadSettingsFailed')))
   }
 }
 
@@ -175,7 +176,7 @@ async function saveToggles() {
     })
     appStore.showSuccess(t('admin.xianyu.settings.success'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.saveSettingsFailed')))
   }
 }
 

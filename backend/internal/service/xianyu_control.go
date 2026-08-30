@@ -54,14 +54,14 @@ const (
 
 // XianyuWorkerConfig 是主程序对单条 Worker 内网连接配置的视图。
 type XianyuWorkerConfig struct {
-	ID                int64
-	BaseURL           string
-	APITokenEncrypted string
-	Status            string
-	HealthStatus      string
-	LastCheckedAt     *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64     `json:"id"`
+	BaseURL           string    `json:"base_url"`
+	APITokenEncrypted string    `json:"api_token_encrypted"`
+	Status            string    `json:"status"`
+	HealthStatus      string    `json:"health_status"`
+	LastCheckedAt     *time.Time `json:"last_checked_at,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // XianyuAccountStatus 表示闲鱼账号状态。
@@ -91,17 +91,17 @@ const (
 
 // XianyuAccount 是主程序保存的闲鱼账号状态视图。
 type XianyuAccount struct {
-	ID             int64
-	WorkerConfigID int64
-	AccountID      string
-	Nickname       string
-	Status         string
-	CookieStatus   string
-	TaskStatus     string
-	LastLoginAt    *time.Time
-	LastSeenAt     *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             int64      `json:"id"`
+	WorkerConfigID int64      `json:"worker_config_id"`
+	AccountID      string     `json:"account_id"`
+	Nickname       string     `json:"nickname"`
+	Status         string     `json:"status"`
+	CookieStatus   string     `json:"cookie_status"`
+	TaskStatus     string     `json:"task_status"`
+	LastLoginAt    *time.Time `json:"last_login_at,omitempty"`
+	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // XianyuItemPoolStatus 表示商品池状态。
@@ -112,14 +112,14 @@ const (
 
 // XianyuItemPool 是库存池配置。
 type XianyuItemPool struct {
-	ID                int64
-	Name              string
-	Slug              string
-	Description       string
-	LowStockThreshold int
-	Status            string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64     `json:"id"`
+	Name              string    `json:"name"`
+	Slug              string    `json:"slug"`
+	Description       string    `json:"description"`
+	LowStockThreshold int       `json:"low_stock_threshold"`
+	Status            string    `json:"status"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // XianyuBindingStatus 表示商品绑定状态。
@@ -146,20 +146,20 @@ const (
 
 // XianyuProduct 是商品映射。
 type XianyuProduct struct {
-	ID            int64
-	AccountPK     int64
-	AccountID     string
-	ItemID        string
-	Title         string
-	SpecName      string
-	SpecValue     string
-	PoolID        *int64
-	BindingStatus string
-	BindingSource string
-	Status        string
-	LastSeenAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID            int64      `json:"id"`
+	AccountPK     int64      `json:"account_pk"`
+	AccountID     string     `json:"account_id"`
+	ItemID        string     `json:"item_id"`
+	Title         string     `json:"title"`
+	SpecName      string     `json:"spec_name"`
+	SpecValue     string     `json:"spec_value"`
+	PoolID        *int64     `json:"pool_id"` // 未绑定为 null（前端类型必填 number|null）
+	BindingStatus string     `json:"binding_status"`
+	BindingSource string     `json:"binding_source"`
+	Status        string     `json:"status"`
+	LastSeenAt    *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // XianyuBindingRuleMatchType 表示绑定规则匹配类型。
@@ -170,15 +170,15 @@ const (
 
 // XianyuBindingRule 是商品自动绑定规则。
 type XianyuBindingRule struct {
-	ID        int64
-	Priority  int
-	AccountPK int64
-	MatchType string
-	Keyword   string
-	PoolID    int64
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        int64     `json:"id"`
+	Priority  int       `json:"priority"`
+	AccountPK int64     `json:"account_pk"`
+	MatchType string    `json:"match_type"`
+	Keyword   string    `json:"keyword"`
+	PoolID    int64     `json:"pool_id"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // XianyuDeliveryStatus 表示发货状态。
@@ -191,22 +191,22 @@ const (
 
 // XianyuOrderClaim 是发货记录（幂等事实表视图）。
 type XianyuOrderClaim struct {
-	OrderNo        string
-	RedeemCodeID   int64
-	Code           string
-	AccountID      string
-	ItemID         string
-	BuyerID        string
-	ChatID         string
-	Amount         *string
-	ProductID      *int64
-	PoolID         *int64
-	BindingSource  *string
-	DeliveryStatus string
-	DeliveryError  *string
-	AttemptCount   int
-	LastAttemptAt  *time.Time
-	CreatedAt      time.Time
+	OrderNo        string     `json:"order_no"`
+	RedeemCodeID   int64      `json:"redeem_code_id"`
+	Code           string     `json:"code"`
+	AccountID      string     `json:"account_id"`
+	ItemID         string     `json:"item_id"`
+	BuyerID        string     `json:"buyer_id"`
+	ChatID         string     `json:"chat_id"`
+	Amount         *string    `json:"amount,omitempty"`
+	ProductID      *int64     `json:"product_id,omitempty"`
+	PoolID         *int64     `json:"pool_id,omitempty"`
+	BindingSource  *string    `json:"binding_source,omitempty"`
+	DeliveryStatus string     `json:"delivery_status"`
+	DeliveryError  *string    `json:"delivery_error,omitempty"`
+	AttemptCount   int        `json:"attempt_count"`
+	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // XianyuDeliveryStatusResult 是 Worker 回传的发货结果。

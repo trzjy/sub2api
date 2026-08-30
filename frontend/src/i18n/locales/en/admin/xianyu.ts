@@ -200,6 +200,11 @@ export default {
       baseUrlInvalid: 'Invalid worker address',
       tokenRequired: 'Worker API Token is required',
       saveToggle: 'Save Toggles',
+      loadWorkerFailed: 'Failed to load worker config',
+      saveWorkerFailed: 'Failed to save worker config',
+      healthCheckFailed: 'Health check failed',
+      loadSettingsFailed: 'Failed to load settings',
+      saveSettingsFailed: 'Failed to save settings',
     },
   },
 }

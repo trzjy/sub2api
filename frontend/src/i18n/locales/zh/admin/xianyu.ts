@@ -200,6 +200,11 @@ export default {
       baseUrlInvalid: 'Worker 地址格式不合法',
       tokenRequired: '请输入 Worker API Token',
       saveToggle: '保存开关',
+      loadWorkerFailed: '加载 Worker 配置失败',
+      saveWorkerFailed: '保存 Worker 配置失败',
+      healthCheckFailed: '健康检查失败',
+      loadSettingsFailed: '加载设置失败',
+      saveSettingsFailed: '保存设置失败',
     },
   },
 }

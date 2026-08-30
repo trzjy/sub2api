@@ -178,7 +178,7 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 	}
 	token := strings.TrimSpace(input.APITokenEncrypted)
 
-	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token。
+	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token 与健康状态。
 	if input.ID != 0 && token == "" {
 		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
 		if err != nil {
@@ -189,6 +189,8 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		if input.Status == "" {
 			input.Status = existing.Status
 		}
+		input.HealthStatus = existing.HealthStatus
+		input.LastCheckedAt = existing.LastCheckedAt
 		updated, err := s.control.UpdateWorkerConfig(ctx, input)
 		if err != nil {
 			if isUniqueViolation(err) {
@@ -210,6 +212,16 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 	input.APITokenEncrypted = encrypted
 	if input.Status == "" {
 		input.Status = XianyuWorkerStatusDisabled
+	}
+	// 更新已有配置时需保留 health_status/last_checked_at，
+	// 否则全字段 UPDATE 会清空健康检查结果（schema health_status NOT NULL）。
+	if input.ID != 0 {
+		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
+		if err != nil {
+			return nil, err
+		}
+		input.HealthStatus = existing.HealthStatus
+		input.LastCheckedAt = existing.LastCheckedAt
 	}
 
 	// 创建时先以 disabled 落库，再在应用层校验唯一 active（DB 部分唯一索引兜底）。
