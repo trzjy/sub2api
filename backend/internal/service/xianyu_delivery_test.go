@@ -79,6 +79,9 @@ func (s *xianyuControlStub) CreateWorkerConfig(_ context.Context, cfg XianyuWork
 func (s *xianyuControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
 	return &cfg, nil
 }
+func (s *xianyuControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+	return &cfg, nil
+}
 func (s *xianyuControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
 	if s.workerCfg == nil {
 		return nil, ErrXianyuWorkerConfigNotFound

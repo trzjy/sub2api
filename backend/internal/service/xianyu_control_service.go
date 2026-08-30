@@ -178,7 +178,8 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 	}
 	token := strings.TrimSpace(input.APITokenEncrypted)
 
-	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token 与健康状态。
+	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token。
+	// health_status / last_checked_at 不在窄方法 SET 子句内，天然保留。
 	if input.ID != 0 && token == "" {
 		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
 		if err != nil {
@@ -189,9 +190,7 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		if input.Status == "" {
 			input.Status = existing.Status
 		}
-		input.HealthStatus = existing.HealthStatus
-		input.LastCheckedAt = existing.LastCheckedAt
-		updated, err := s.control.UpdateWorkerConfig(ctx, input)
+		updated, err := s.control.UpdateWorkerConfigUserFields(ctx, input)
 		if err != nil {
 			if isUniqueViolation(err) {
 				return nil, ErrXianyuActiveWorkerExists
@@ -210,18 +209,18 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 	}
 	input.BaseURL = baseURL
 	input.APITokenEncrypted = encrypted
-	if input.Status == "" {
-		input.Status = XianyuWorkerStatusDisabled
-	}
-	// 更新已有配置时需保留 health_status/last_checked_at，
-	// 否则全字段 UPDATE 会清空健康检查结果（schema health_status NOT NULL）。
+	// 更新已有配置时，状态留空表示保持原状（不再默认 disabled）；
+	// 只有创建时状态留空才默认 disabled。
 	if input.ID != 0 {
-		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
-		if err != nil {
-			return nil, err
+		if input.Status == "" {
+			existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
+			if err != nil {
+				return nil, err
+			}
+			input.Status = existing.Status
 		}
-		input.HealthStatus = existing.HealthStatus
-		input.LastCheckedAt = existing.LastCheckedAt
+	} else if input.Status == "" {
+		input.Status = XianyuWorkerStatusDisabled
 	}
 
 	// 创建时先以 disabled 落库，再在应用层校验唯一 active（DB 部分唯一索引兜底）。
@@ -235,7 +234,9 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		}
 		return created, nil
 	}
-	updated, err := s.control.UpdateWorkerConfig(ctx, input)
+	// admin 保存只写用户可编辑字段（base_url / api_token_encrypted / status），
+	// 健康字段由健康检查专管，不被并发覆盖。
+	updated, err := s.control.UpdateWorkerConfigUserFields(ctx, input)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrXianyuActiveWorkerExists
@@ -270,8 +271,8 @@ func (s *XianyuControlService) SetWorkerActive(ctx context.Context, id int64) (*
 		return target, nil
 	}
 	target.Status = XianyuWorkerStatusActive
-	// 保留加密 token。
-	return s.control.UpdateWorkerConfig(ctx, *target)
+	// 保留加密 token；健康字段不被窄方法触碰。
+	return s.control.UpdateWorkerConfigUserFields(ctx, *target)
 }
 
 // ---------------------------------------------------------------------------

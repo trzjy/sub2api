@@ -238,6 +238,9 @@ type XianyuControlRepository interface {
 	ListWorkerConfigs(ctx context.Context) ([]XianyuWorkerConfig, error)
 	CreateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
 	UpdateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
+	// UpdateWorkerConfigUserFields 仅更新用户可编辑字段（base_url/api_token_encrypted/status），
+	// 不触碰 health_status / last_checked_at；这两个字段由健康检查专管，避免 admin 保存并发覆盖。
+	UpdateWorkerConfigUserFields(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
 	GetActiveWorkerConfig(ctx context.Context) (*XianyuWorkerConfig, error)
 	GetWorkerConfigByID(ctx context.Context, id int64) (*XianyuWorkerConfig, error)
 

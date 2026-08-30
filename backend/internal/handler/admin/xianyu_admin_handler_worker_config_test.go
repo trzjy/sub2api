@@ -58,6 +58,10 @@ func (s *workerConfigControlStub) UpdateWorkerConfig(_ context.Context, cfg serv
 	return nil, service.ErrXianyuWorkerConfigNotFound
 }
 
+func (s *workerConfigControlStub) UpdateWorkerConfigUserFields(ctx context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+	return s.UpdateWorkerConfig(ctx, cfg)
+}
+
 func (s *workerConfigControlStub) GetActiveWorkerConfig(context.Context) (*service.XianyuWorkerConfig, error) {
 	if !s.activeFound {
 		return nil, service.ErrXianyuWorkerConfigNotFound

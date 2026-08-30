@@ -130,6 +130,10 @@ func (s *xianyuWorkerControlStub) UpdateWorkerConfig(_ context.Context, cfg Xian
 	return &cfg, nil
 }
 
+func (s *xianyuWorkerControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+	return s.UpdateWorkerConfig(context.Background(), cfg)
+}
+
 func (s *xianyuWorkerControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
 	if s.cfg == nil {
 		return nil, ErrXianyuWorkerConfigNotFound

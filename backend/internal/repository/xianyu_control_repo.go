@@ -90,6 +90,26 @@ func (r *xianyuControlRepository) UpdateWorkerConfig(ctx context.Context, cfg se
 	return updated, nil
 }
 
+// UpdateWorkerConfigUserFields 仅写入用户可编辑字段（base_url / api_token_encrypted / status）；
+// health_status 与 last_checked_at 不出现在 SET 子句中，由健康检查专管。
+// RETURNING 仍返回完整行（含健康字段），便于 service 直接透传给前端。
+func (r *xianyuControlRepository) UpdateWorkerConfigUserFields(ctx context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_worker_configs
+		SET base_url = $2, api_token_encrypted = $3, status = $4, updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuWorkerConfigColumns,
+		cfg.ID, cfg.BaseURL, cfg.APITokenEncrypted, cfg.Status)
+	updated, err := scanWorkerConfig(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuWorkerConfigNotFound
+		}
+		return nil, fmt.Errorf("update xianyu worker config user fields: %w", err)
+	}
+	return updated, nil
+}
+
 func (r *xianyuControlRepository) GetActiveWorkerConfig(ctx context.Context) (*service.XianyuWorkerConfig, error) {
 	row := r.db.QueryRowContext(ctx, `
 		SELECT `+xianyuWorkerConfigColumns+`

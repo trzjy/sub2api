@@ -41,6 +41,9 @@ func (xianyuHandlerControlStub) CreateWorkerConfig(context.Context, service.Xian
 func (xianyuHandlerControlStub) UpdateWorkerConfig(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
 	return nil, nil
 }
+func (xianyuHandlerControlStub) UpdateWorkerConfigUserFields(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+	return nil, nil
+}
 func (xianyuHandlerControlStub) GetActiveWorkerConfig(context.Context) (*service.XianyuWorkerConfig, error) {
 	return &service.XianyuWorkerConfig{ID: 1, Status: service.XianyuWorkerStatusActive}, nil
 }
