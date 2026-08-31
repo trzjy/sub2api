@@ -276,7 +276,14 @@ func (s *XianyuControlService) SetWorkerActive(ctx context.Context, id int64, ap
 // ---------------------------------------------------------------------------
 
 func (s *XianyuControlService) ListItemPools(ctx context.Context) ([]XianyuItemPool, error) {
-	return s.control.ListItemPools(ctx)
+	pools, err := s.control.ListItemPools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if pools == nil {
+		return []XianyuItemPool{}, nil
+	}
+	return pools, nil
 }
 
 func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error) {
@@ -335,7 +342,14 @@ func validPoolSlug(slug string) bool {
 // ---------------------------------------------------------------------------
 
 func (s *XianyuControlService) ListProducts(ctx context.Context) ([]XianyuProduct, error) {
-	return s.control.ListProducts(ctx)
+	products, err := s.control.ListProducts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if products == nil {
+		return []XianyuProduct{}, nil
+	}
+	return products, nil
 }
 
 // BindProduct 手工映射商品到池；解绑传 nil pool。
@@ -382,7 +396,14 @@ func (s *XianyuControlService) AutoBindProducts(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 func (s *XianyuControlService) ListBindingRules(ctx context.Context) ([]XianyuBindingRule, error) {
-	return s.control.ListBindingRules(ctx)
+	rules, err := s.control.ListBindingRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if rules == nil {
+		return []XianyuBindingRule{}, nil
+	}
+	return rules, nil
 }
 
 func (s *XianyuControlService) SaveBindingRule(ctx context.Context, rule XianyuBindingRule) (*XianyuBindingRule, error) {
@@ -419,11 +440,18 @@ func (s *XianyuControlService) ListAccounts(ctx context.Context) ([]XianyuAccoun
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
 		if err == ErrXianyuWorkerConfigNotFound {
-			return nil, nil
+			return []XianyuAccount{}, nil
 		}
 		return nil, err
 	}
-	return s.control.ListAccounts(ctx, workerCfg.ID)
+	accounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	if accounts == nil {
+		return []XianyuAccount{}, nil
+	}
+	return accounts, nil
 }
 
 // EnableAccount 启用账号。
@@ -539,7 +567,7 @@ func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo s
 // ---------------------------------------------------------------------------// XianyuOverview 是概览页数据。
 type XianyuOverview struct {
 	WorkerHealthy       bool                 `json:"worker_healthy"`
-	WorkerHealthStatus  string               `json:"worker_health_status"`  // unknown / healthy / unhealthy
+	WorkerHealthStatus  string               `json:"worker_health_status"` // unknown / healthy / unhealthy
 	WorkerLastCheckedAt *time.Time           `json:"worker_last_checked_at,omitempty"`
 	EnabledAccounts     int                  `json:"enabled_accounts"`
 	RunningTasks        int                  `json:"running_tasks"`
@@ -560,7 +588,7 @@ type XianyuPoolOverview struct {
 }
 
 func (s *XianyuControlService) GetOverview(ctx context.Context) (*XianyuOverview, error) {
-	out := &XianyuOverview{}
+	out := &XianyuOverview{Pools: make([]XianyuPoolOverview, 0)}
 
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {

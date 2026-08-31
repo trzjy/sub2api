@@ -44,7 +44,7 @@ func (s *saveWorkerConfigControlStub) CreateWorkerConfig(_ context.Context, cfg 
 }
 
 // UpdateWorkerConfigUserFields 模拟真实 SQL 行为：只写 base_url 与 api_token_encrypted
-//（token 留空时原地保留）；status / health_status / last_checked_at 保持 DB 原值。
+// （token 留空时原地保留）；status / health_status / last_checked_at 保持 DB 原值。
 func (s *saveWorkerConfigControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
 	for i := range s.configs {
 		if s.configs[i].ID == cfg.ID {
@@ -129,6 +129,39 @@ func sampleHealthyConfig() XianyuWorkerConfig {
 	}
 }
 
+func TestXianyuListMethodsNormalizeNilSlices(t *testing.T) {
+	stub := &saveWorkerConfigControlStub{configs: []XianyuWorkerConfig{sampleHealthyConfig()}}
+	svc := newSaveWorkerConfigTestService(stub)
+
+	accounts, err := svc.ListAccounts(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, accounts)
+	require.Empty(t, accounts)
+
+	products, err := svc.ListProducts(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, products)
+	require.Empty(t, products)
+
+	rules, err := svc.ListBindingRules(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, rules)
+	require.Empty(t, rules)
+
+	pools, err := svc.ListItemPools(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, pools)
+	require.Empty(t, pools)
+}
+
+func TestXianyuListAccountsWithoutWorkerReturnsEmptySlice(t *testing.T) {
+	svc := newSaveWorkerConfigTestService(&saveWorkerConfigControlStub{})
+	accounts, err := svc.ListAccounts(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, accounts)
+	require.Empty(t, accounts)
+}
+
 // Fix 1 + Fix 2：token 存在时更新，status 留空必须保留旧值；健康字段必须不被覆盖。
 func TestSaveWorkerConfigTokenUpdatePreservesHealth(t *testing.T) {
 	stub := &saveWorkerConfigControlStub{configs: []XianyuWorkerConfig{sampleHealthyConfig()}}
@@ -175,7 +208,7 @@ func TestSaveWorkerConfigEmptyTokenPreservesHealthAndStatus(t *testing.T) {
 }
 
 // 空库首次创建直接 active：并发重复创建由 uq_xianyu_worker_configs_active 部分唯一索引阻止
-//（第二个 INSERT 命中唯一冲突 → 服务层映射 409）。
+// （第二个 INSERT 命中唯一冲突 → 服务层映射 409）。
 func TestSaveWorkerConfigCreateDefaultsActive(t *testing.T) {
 	stub := &saveWorkerConfigControlStub{configs: nil}
 	svc := newSaveWorkerConfigTestService(stub)
@@ -242,35 +275,63 @@ func TestSaveWorkerConfigDoesNotChangeStatus(t *testing.T) {
 
 // ── 未触发的接口方法：返回零值即可 ──────────────────────────────
 
-func (s *saveWorkerConfigControlStub) ListAccounts(context.Context, int64) ([]XianyuAccount, error) { return nil, nil }
+func (s *saveWorkerConfigControlStub) ListAccounts(context.Context, int64) ([]XianyuAccount, error) {
+	return nil, nil
+}
 func (s *saveWorkerConfigControlStub) GetAccountByWorkerAndAccountID(context.Context, int64, string) (*XianyuAccount, error) {
 	return nil, ErrXianyuAccountNotFound
 }
-func (s *saveWorkerConfigControlStub) UpsertAccount(context.Context, XianyuAccount) (*XianyuAccount, error) { return nil, nil }
-func (s *saveWorkerConfigControlStub) UpdateAccount(context.Context, XianyuAccount) (*XianyuAccount, error) { return nil, nil }
-func (s *saveWorkerConfigControlStub) ListItemPools(context.Context) ([]XianyuItemPool, error)           { return nil, nil }
+func (s *saveWorkerConfigControlStub) UpsertAccount(context.Context, XianyuAccount) (*XianyuAccount, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) UpdateAccount(context.Context, XianyuAccount) (*XianyuAccount, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) ListItemPools(context.Context) ([]XianyuItemPool, error) {
+	return nil, nil
+}
 func (s *saveWorkerConfigControlStub) GetItemPoolByID(context.Context, int64) (*XianyuItemPool, error) {
 	return nil, ErrXianyuItemPoolNotFound
 }
 func (s *saveWorkerConfigControlStub) GetItemPoolBySlug(context.Context, string) (*XianyuItemPool, error) {
 	return nil, ErrXianyuItemPoolNotFound
 }
-func (s *saveWorkerConfigControlStub) CreateItemPool(context.Context, XianyuItemPool) (*XianyuItemPool, error) { return nil, nil }
-func (s *saveWorkerConfigControlStub) UpdateItemPool(context.Context, XianyuItemPool) (*XianyuItemPool, error) { return nil, nil }
-func (s *saveWorkerConfigControlStub) PoolStockCounts(context.Context, string) (int, int, int, error)         { return 0, 0, 0, nil }
-func (s *saveWorkerConfigControlStub) DeliveryStats(context.Context, time.Time) (int, int, error)             { return 0, 0, nil }
-func (s *saveWorkerConfigControlStub) PendingDeliveryCount(context.Context) (int, error)                      { return 0, nil }
-func (s *saveWorkerConfigControlStub) ListProducts(context.Context) ([]XianyuProduct, error)                 { return nil, nil }
-func (s *saveWorkerConfigControlStub) ListProductsByAccount(context.Context, int64) ([]XianyuProduct, error) { return nil, nil }
+func (s *saveWorkerConfigControlStub) CreateItemPool(context.Context, XianyuItemPool) (*XianyuItemPool, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) UpdateItemPool(context.Context, XianyuItemPool) (*XianyuItemPool, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) PoolStockCounts(context.Context, string) (int, int, int, error) {
+	return 0, 0, 0, nil
+}
+func (s *saveWorkerConfigControlStub) DeliveryStats(context.Context, time.Time) (int, int, error) {
+	return 0, 0, nil
+}
+func (s *saveWorkerConfigControlStub) PendingDeliveryCount(context.Context) (int, error) {
+	return 0, nil
+}
+func (s *saveWorkerConfigControlStub) ListProducts(context.Context) ([]XianyuProduct, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) ListProductsByAccount(context.Context, int64) ([]XianyuProduct, error) {
+	return nil, nil
+}
 func (s *saveWorkerConfigControlStub) GetProductByIdentity(context.Context, int64, string, string, string) (*XianyuProduct, error) {
 	return nil, ErrXianyuProductNotFound
 }
-func (s *saveWorkerConfigControlStub) UpsertProduct(context.Context, XianyuProduct) (*XianyuProduct, error) { return nil, nil }
-func (s *saveWorkerConfigControlStub) UpdateProduct(context.Context, XianyuProduct) (*XianyuProduct, error) { return nil, nil }
+func (s *saveWorkerConfigControlStub) UpsertProduct(context.Context, XianyuProduct) (*XianyuProduct, error) {
+	return nil, nil
+}
+func (s *saveWorkerConfigControlStub) UpdateProduct(context.Context, XianyuProduct) (*XianyuProduct, error) {
+	return nil, nil
+}
 func (s *saveWorkerConfigControlStub) UpdateProductBinding(context.Context, int64, string, string, *int64) error {
 	return nil
 }
-func (s *saveWorkerConfigControlStub) ListBindingRules(context.Context) ([]XianyuBindingRule, error) { return nil, nil }
+func (s *saveWorkerConfigControlStub) ListBindingRules(context.Context) ([]XianyuBindingRule, error) {
+	return nil, nil
+}
 func (s *saveWorkerConfigControlStub) CreateBindingRule(context.Context, XianyuBindingRule) (*XianyuBindingRule, error) {
 	return nil, nil
 }

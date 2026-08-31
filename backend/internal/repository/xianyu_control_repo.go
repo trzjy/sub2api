@@ -184,7 +184,7 @@ func (r *xianyuControlRepository) ListAccounts(ctx context.Context, workerConfig
 		return nil, fmt.Errorf("list xianyu accounts: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuAccount
+	out := make([]service.XianyuAccount, 0)
 	for rows.Next() {
 		a, err := scanAccount(rows)
 		if err != nil {
@@ -274,7 +274,7 @@ func (r *xianyuControlRepository) ListItemPools(ctx context.Context) ([]service.
 		return nil, fmt.Errorf("list xianyu item pools: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuItemPool
+	out := make([]service.XianyuItemPool, 0)
 	for rows.Next() {
 		p, err := scanItemPool(rows)
 		if err != nil {
@@ -366,7 +366,7 @@ func (r *xianyuControlRepository) ListProducts(ctx context.Context) ([]service.X
 		return nil, fmt.Errorf("list xianyu products: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuProduct
+	out := make([]service.XianyuProduct, 0)
 	for rows.Next() {
 		p, err := scanProduct(rows)
 		if err != nil {
@@ -383,7 +383,7 @@ func (r *xianyuControlRepository) ListProductsByAccount(ctx context.Context, acc
 		return nil, fmt.Errorf("list xianyu products by account: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuProduct
+	out := make([]service.XianyuProduct, 0)
 	for rows.Next() {
 		p, err := scanProduct(rows)
 		if err != nil {
@@ -485,7 +485,7 @@ func (r *xianyuControlRepository) ListBindingRules(ctx context.Context) ([]servi
 		return nil, fmt.Errorf("list xianyu binding rules: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuBindingRule
+	out := make([]service.XianyuBindingRule, 0)
 	for rows.Next() {
 		rl, err := scanBindingRule(rows)
 		if err != nil {
