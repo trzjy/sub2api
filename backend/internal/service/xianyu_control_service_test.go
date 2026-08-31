@@ -9,13 +9,12 @@ import (
 )
 
 // saveWorkerConfigControlStub 最小化实现 XianyuControlRepository，仅覆盖
-// SaveWorkerConfig / SetWorkerActive 触发到的 5 个方法，并暴露 full-update
-// 调用计数与 captured cfg，便于断言"健康字段不被覆盖"与"窄方法被使用"。
+// SaveWorkerConfig / SetWorkerActive 触发到的方法，并暴露 captured cfg，
+// 便于断言"健康字段不被覆盖"与"窄方法被使用"。
 type saveWorkerConfigControlStub struct {
-	configs          []XianyuWorkerConfig
-	nextID           int64
-	captured         *XianyuWorkerConfig
-	fullUpdateCalled bool
+	configs  []XianyuWorkerConfig
+	nextID   int64
+	captured *XianyuWorkerConfig
 }
 
 func (s *saveWorkerConfigControlStub) ListWorkerConfigs(context.Context) ([]XianyuWorkerConfig, error) {
@@ -44,13 +43,17 @@ func (s *saveWorkerConfigControlStub) CreateWorkerConfig(_ context.Context, cfg 
 	return &cp, nil
 }
 
-// UpdateWorkerConfig 全字段 UPDATE；窄方法不应走到此函数（admin save 走 UpdateWorkerConfigUserFields）。
-func (s *saveWorkerConfigControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
-	s.fullUpdateCalled = true
+// UpdateWorkerConfigUserFields 模拟真实 SQL 行为：只写 base_url 与 api_token_encrypted
+//（token 留空时原地保留）；status / health_status / last_checked_at 保持 DB 原值。
+func (s *saveWorkerConfigControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
 	for i := range s.configs {
 		if s.configs[i].ID == cfg.ID {
-			s.configs[i] = cfg
-			cp := cfg
+			s.configs[i].BaseURL = cfg.BaseURL
+			if cfg.APITokenEncrypted != "" {
+				s.configs[i].APITokenEncrypted = cfg.APITokenEncrypted
+			}
+			s.configs[i].UpdatedAt = time.Now()
+			cp := s.configs[i]
 			s.captured = &cp
 			return &cp, nil
 		}
@@ -58,14 +61,25 @@ func (s *saveWorkerConfigControlStub) UpdateWorkerConfig(_ context.Context, cfg 
 	return nil, ErrXianyuWorkerConfigNotFound
 }
 
-// UpdateWorkerConfigUserFields 模拟真实 SQL 行为：只写 base_url / api_token_encrypted / status；
-// health_status 与 last_checked_at 保留 DB 原值。
-func (s *saveWorkerConfigControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+// UpdateWorkerHealth 模拟真实 SQL 行为：只写健康字段，不触碰用户字段。
+func (s *saveWorkerConfigControlStub) UpdateWorkerHealth(_ context.Context, id int64, healthStatus string, lastCheckedAt time.Time) error {
 	for i := range s.configs {
-		if s.configs[i].ID == cfg.ID {
-			s.configs[i].BaseURL = cfg.BaseURL
-			s.configs[i].APITokenEncrypted = cfg.APITokenEncrypted
-			s.configs[i].Status = cfg.Status
+		if s.configs[i].ID == id {
+			s.configs[i].HealthStatus = healthStatus
+			s.configs[i].LastCheckedAt = &lastCheckedAt
+			s.configs[i].UpdatedAt = time.Now()
+			return nil
+		}
+	}
+	return ErrXianyuWorkerConfigNotFound
+}
+
+// ActivateWorkerConfig 模拟真实 SQL 行为：只写 status + 新 token，不写 base_url / 健康字段。
+func (s *saveWorkerConfigControlStub) ActivateWorkerConfig(_ context.Context, id int64, encryptedToken string) (*XianyuWorkerConfig, error) {
+	for i := range s.configs {
+		if s.configs[i].ID == id {
+			s.configs[i].Status = XianyuWorkerStatusActive
+			s.configs[i].APITokenEncrypted = encryptedToken
 			s.configs[i].UpdatedAt = time.Now()
 			cp := s.configs[i]
 			s.captured = &cp
@@ -129,8 +143,6 @@ func TestSaveWorkerConfigTokenUpdatePreservesHealth(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// admin save 绝不能走全字段 UPDATE。
-	require.False(t, stub.fullUpdateCalled, "SaveWorkerConfig 应走 UpdateWorkerConfigUserFields 窄方法")
 	// 窄方法返回的实体健康字段应保留 DB 原值。
 	require.Equal(t, XianyuWorkerHealthHealthy, updated.HealthStatus)
 	require.NotNil(t, updated.LastCheckedAt)
@@ -156,15 +168,15 @@ func TestSaveWorkerConfigEmptyTokenPreservesHealthAndStatus(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.False(t, stub.fullUpdateCalled, "留空 token 路径也应走窄方法")
 	require.Equal(t, XianyuWorkerStatusActive, updated.Status)
 	require.Equal(t, "ENC:old-token", updated.APITokenEncrypted, "原加密 token 应保留")
 	require.Equal(t, XianyuWorkerHealthHealthy, updated.HealthStatus)
 	require.NotNil(t, updated.LastCheckedAt)
 }
 
-// 回归保护：创建路径上 status 留空应默认 disabled（不是 active）。
-func TestSaveWorkerConfigCreateEmptyStatusDefaultsDisabled(t *testing.T) {
+// 空库首次创建直接 active：并发重复创建由 uq_xianyu_worker_configs_active 部分唯一索引阻止
+//（第二个 INSERT 命中唯一冲突 → 服务层映射 409）。
+func TestSaveWorkerConfigCreateDefaultsActive(t *testing.T) {
 	stub := &saveWorkerConfigControlStub{configs: nil}
 	svc := newSaveWorkerConfigTestService(stub)
 
@@ -174,23 +186,58 @@ func TestSaveWorkerConfigCreateEmptyStatusDefaultsDisabled(t *testing.T) {
 		// Status 留空
 	})
 	require.NoError(t, err)
-	require.Equal(t, XianyuWorkerStatusDisabled, created.Status)
-	require.False(t, stub.fullUpdateCalled, "创建路径走 CreateWorkerConfig，不应触发 UpdateWorkerConfig 全字段")
+	require.Equal(t, XianyuWorkerStatusActive, created.Status)
+	require.Equal(t, XianyuWorkerStatusActive, stub.configs[0].Status, "插入行应为 active，DB 部分唯一索引才能拦截并发重复")
+	require.Equal(t, "ENC:first-token", stub.configs[0].APITokenEncrypted, "真实 token 应加密入库")
 }
 
-// SetWorkerActive 改用窄方法，健康字段保留。
+// SetWorkerActive 提供真实 token 后激活：窄写只动 status + 新 token，
+// base_url 与健康字段保持 DB 原值（旧快照不得回滚并发 admin 保存）。
 func TestSetWorkerActiveUsesUserFieldsUpdate(t *testing.T) {
 	cfg := sampleHealthyConfig()
 	cfg.Status = XianyuWorkerStatusDisabled
 	stub := &saveWorkerConfigControlStub{configs: []XianyuWorkerConfig{cfg}}
 	svc := newSaveWorkerConfigTestService(stub)
 
-	updated, err := svc.SetWorkerActive(context.Background(), 1)
+	updated, err := svc.SetWorkerActive(context.Background(), 1, "real-token")
 	require.NoError(t, err)
-	require.False(t, stub.fullUpdateCalled, "SetWorkerActive 应走窄方法")
 	require.Equal(t, XianyuWorkerStatusActive, updated.Status)
-	require.Equal(t, XianyuWorkerHealthHealthy, stub.configs[0].HealthStatus)
+	require.Equal(t, "ENC:real-token", stub.configs[0].APITokenEncrypted, "新 token 应加密入库")
+	require.Equal(t, cfg.BaseURL, stub.configs[0].BaseURL, "激活窄写不得改动 base_url")
+	require.Equal(t, XianyuWorkerHealthHealthy, stub.configs[0].HealthStatus, "健康字段不被窄方法覆盖")
 	require.NotNil(t, stub.configs[0].LastCheckedAt)
+}
+
+// disabled→active 未提供 token → 拒绝且状态不变。
+func TestSetWorkerActiveDisabledRequiresToken(t *testing.T) {
+	cfg := sampleHealthyConfig()
+	cfg.Status = XianyuWorkerStatusDisabled
+	stub := &saveWorkerConfigControlStub{configs: []XianyuWorkerConfig{cfg}}
+	svc := newSaveWorkerConfigTestService(stub)
+
+	_, err := svc.SetWorkerActive(context.Background(), 1, "")
+	require.Error(t, err)
+	require.Equal(t, XianyuWorkerStatusDisabled, stub.configs[0].Status, "未授权激活，状态不得改动")
+}
+
+// 保存不得写 status：即便调用方提交 status='active'，disabled 配置仍保持 disabled（激活只走 /activate）。
+func TestSaveWorkerConfigDoesNotChangeStatus(t *testing.T) {
+	cfg := sampleHealthyConfig()
+	cfg.Status = XianyuWorkerStatusDisabled
+	stub := &saveWorkerConfigControlStub{configs: []XianyuWorkerConfig{cfg}}
+	svc := newSaveWorkerConfigTestService(stub)
+
+	updated, err := svc.SaveWorkerConfig(context.Background(), XianyuWorkerConfig{
+		ID:                1,
+		BaseURL:           "http://xianyu-worker-backend:9090",
+		APITokenEncrypted: "new-token",
+		Status:            XianyuWorkerStatusActive, // 客户端仍传 status 也必须被忽略
+	})
+	require.NoError(t, err)
+	require.Equal(t, XianyuWorkerStatusDisabled, stub.configs[0].Status, "保存不得写 status")
+	require.Equal(t, "http://xianyu-worker-backend:9090", stub.configs[0].BaseURL, "base_url 正常更新")
+	require.Equal(t, "ENC:new-token", stub.configs[0].APITokenEncrypted, "新 token 加密入库")
+	require.Equal(t, XianyuWorkerStatusDisabled, updated.Status, "返回实体 status 应为 DB 现值")
 }
 
 // ── 未触发的接口方法：返回零值即可 ──────────────────────────────

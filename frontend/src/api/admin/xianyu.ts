@@ -34,6 +34,11 @@ export async function saveWorkerConfig(input: Partial<XianyuWorkerConfig> & { ap
   return data
 }
 
+export async function activateWorkerConfig(id: number, apiToken: string): Promise<XianyuWorkerConfig> {
+  const { data } = await apiClient.post<XianyuWorkerConfig>(`/admin/xianyu/worker-configs/${id}/activate`, { api_token: apiToken })
+  return data
+}
+
 export async function checkHealth(): Promise<void> {
   await apiClient.post('/admin/xianyu/health/check')
 }
@@ -158,6 +163,7 @@ export const xianyuAPI = {
   getOverview,
   listWorkerConfigs,
   saveWorkerConfig,
+  activateWorkerConfig,
   checkHealth,
   listAccounts,
   syncAccounts,

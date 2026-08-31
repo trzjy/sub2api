@@ -76,11 +76,21 @@ func (s *xianyuControlStub) CreateWorkerConfig(_ context.Context, cfg XianyuWork
 	s.createdCfg = &cfg
 	return &cfg, nil
 }
-func (s *xianyuControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
-	return &cfg, nil
-}
 func (s *xianyuControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
 	return &cfg, nil
+}
+func (s *xianyuControlStub) UpdateWorkerHealth(context.Context, int64, string, time.Time) error {
+	return nil
+}
+
+func (s *xianyuControlStub) ActivateWorkerConfig(_ context.Context, id int64, encryptedToken string) (*XianyuWorkerConfig, error) {
+	if s.workerCfg == nil || s.workerCfg.ID != id {
+		return nil, ErrXianyuWorkerConfigNotFound
+	}
+	cp := *s.workerCfg
+	cp.Status = XianyuWorkerStatusActive
+	cp.APITokenEncrypted = encryptedToken
+	return &cp, nil
 }
 func (s *xianyuControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
 	if s.workerCfg == nil {

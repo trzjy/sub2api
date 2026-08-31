@@ -237,10 +237,15 @@ type XianyuControlRepository interface {
 	// Worker 连接配置
 	ListWorkerConfigs(ctx context.Context) ([]XianyuWorkerConfig, error)
 	CreateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
-	UpdateWorkerConfig(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
-	// UpdateWorkerConfigUserFields 仅更新用户可编辑字段（base_url/api_token_encrypted/status），
-	// 不触碰 health_status / last_checked_at；这两个字段由健康检查专管，避免 admin 保存并发覆盖。
+	// UpdateWorkerConfigUserFields 仅更新 base_url 与 api_token_encrypted（token 留空时原地保留），
+	// 不写 status / health_status / last_checked_at：status 由激活端点专管，健康字段由健康检查专管。
 	UpdateWorkerConfigUserFields(ctx context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error)
+	// UpdateWorkerHealth 仅写入健康检查结果字段（health_status / last_checked_at），
+	// 不触碰 base_url / api_token_encrypted / status（admin 保存并发时避免健康检查回滚）。
+	UpdateWorkerHealth(ctx context.Context, id int64, healthStatus string, lastCheckedAt time.Time) error
+	// ActivateWorkerConfig 仅置 active 并写入新 token（status / api_token_encrypted / updated_at），
+	// 不写 base_url 与健康字段：避免用激活读取的旧快照回滚并发 admin 保存的 base_url。
+	ActivateWorkerConfig(ctx context.Context, id int64, encryptedToken string) (*XianyuWorkerConfig, error)
 	GetActiveWorkerConfig(ctx context.Context) (*XianyuWorkerConfig, error)
 	GetWorkerConfigByID(ctx context.Context, id int64) (*XianyuWorkerConfig, error)
 

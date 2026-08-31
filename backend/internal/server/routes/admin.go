@@ -149,7 +149,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/overview", h.Admin.Xianyu.Overview)
 		xianyu.GET("/worker-configs", h.Admin.Xianyu.WorkerConfigs)
 		xianyu.POST("/worker-configs", h.Admin.Xianyu.SaveWorkerConfig)
-		xianyu.PUT("/worker-configs/:id", h.Admin.Xianyu.SaveWorkerConfig)
+		xianyu.POST("/worker-configs/:id/activate", h.Admin.Xianyu.ActivateWorkerConfig)
 
 		xianyu.GET("/accounts", h.Admin.Xianyu.Accounts)
 		xianyu.POST("/accounts/sync", h.Admin.Xianyu.SyncAccounts)

@@ -12,9 +12,9 @@ import (
 )
 
 type xianyuWorkerControlStub struct {
-	cfg       *XianyuWorkerConfig
-	updated   *XianyuWorkerConfig
-	updateErr error
+	cfg           *XianyuWorkerConfig
+	updatedHealth *string
+	updateErr     error
 }
 
 type testSecretEncryptor struct{}
@@ -122,16 +122,29 @@ func (s *xianyuWorkerControlStub) CreateWorkerConfig(_ context.Context, cfg Xian
 	return &cfg, nil
 }
 
-func (s *xianyuWorkerControlStub) UpdateWorkerConfig(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+func (s *xianyuWorkerControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
 	if s.updateErr != nil {
 		return nil, s.updateErr
 	}
-	s.updated = &cfg
 	return &cfg, nil
 }
 
-func (s *xianyuWorkerControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
-	return s.UpdateWorkerConfig(context.Background(), cfg)
+func (s *xianyuWorkerControlStub) UpdateWorkerHealth(_ context.Context, _ int64, healthStatus string, _ time.Time) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	s.updatedHealth = &healthStatus
+	return nil
+}
+
+func (s *xianyuWorkerControlStub) ActivateWorkerConfig(_ context.Context, id int64, encryptedToken string) (*XianyuWorkerConfig, error) {
+	if s.cfg == nil || s.cfg.ID != id {
+		return nil, ErrXianyuWorkerConfigNotFound
+	}
+	cp := *s.cfg
+	cp.Status = XianyuWorkerStatusActive
+	cp.APITokenEncrypted = encryptedToken
+	return &cp, nil
 }
 
 func (s *xianyuWorkerControlStub) GetActiveWorkerConfig(context.Context) (*XianyuWorkerConfig, error) {
@@ -167,7 +180,7 @@ func TestXianyuCheckHealthRejectsMissingWebSocket(t *testing.T) {
 
 	err := worker.CheckHealth(context.Background())
 	require.Error(t, err)
-	require.Equal(t, XianyuWorkerHealthUnhealthy, control.updated.HealthStatus)
+	require.Equal(t, XianyuWorkerHealthUnhealthy, *control.updatedHealth)
 }
 
 func TestXianyuCheckHealthUpdateErrorIsReturned(t *testing.T) {

@@ -47,19 +47,36 @@ func (s *workerConfigControlStub) CreateWorkerConfig(_ context.Context, cfg serv
 	return &cfg, nil
 }
 
-func (s *workerConfigControlStub) UpdateWorkerConfig(_ context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+func (s *workerConfigControlStub) UpdateWorkerConfigUserFields(_ context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
 	for i := range s.configs {
 		if s.configs[i].ID == cfg.ID {
-			s.configs[i] = cfg
-			s.updated = &cfg
-			return &cfg, nil
+			s.configs[i].BaseURL = cfg.BaseURL
+			if cfg.APITokenEncrypted != "" {
+				s.configs[i].APITokenEncrypted = cfg.APITokenEncrypted
+			}
+			cp := s.configs[i]
+			s.updated = &cp
+			return &cp, nil
 		}
 	}
 	return nil, service.ErrXianyuWorkerConfigNotFound
 }
 
-func (s *workerConfigControlStub) UpdateWorkerConfigUserFields(ctx context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
-	return s.UpdateWorkerConfig(ctx, cfg)
+// UpdateWorkerHealth 未被 worker-configs 三例触发，仅用于满足接口。
+func (s *workerConfigControlStub) UpdateWorkerHealth(context.Context, int64, string, time.Time) error {
+	return nil
+}
+
+func (s *workerConfigControlStub) ActivateWorkerConfig(_ context.Context, id int64, encryptedToken string) (*service.XianyuWorkerConfig, error) {
+	for i := range s.configs {
+		if s.configs[i].ID == id {
+			s.configs[i].Status = service.XianyuWorkerStatusActive
+			s.configs[i].APITokenEncrypted = encryptedToken
+			s.updated = &s.configs[i]
+			return &s.configs[i], nil
+		}
+	}
+	return nil, service.ErrXianyuWorkerConfigNotFound
 }
 
 func (s *workerConfigControlStub) GetActiveWorkerConfig(context.Context) (*service.XianyuWorkerConfig, error) {

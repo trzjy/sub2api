@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -86,11 +87,12 @@ func (h *XianyuAdminHandler) WorkerConfigs(c *gin.Context) {
 	response.Success(c, cfgs)
 }
 
+// saveWorkerConfigRequest 只承载 base_url / token；status 不在此契约内——
+// 保存路径不写 status，disabled→active 仅通过 /activate 端点完成。
 type saveWorkerConfigRequest struct {
 	ID       int64  `json:"id"`
 	BaseURL  string `json:"base_url"`
 	APIToken string `json:"api_token"`
-	Status   string `json:"status"`
 }
 
 func (h *XianyuAdminHandler) SaveWorkerConfig(c *gin.Context) {
@@ -103,9 +105,33 @@ func (h *XianyuAdminHandler) SaveWorkerConfig(c *gin.Context) {
 		ID:                req.ID,
 		BaseURL:           req.BaseURL,
 		APITokenEncrypted: req.APIToken,
-		Status:            req.Status,
 	}
 	saved, err := h.control.SaveWorkerConfig(c.Request.Context(), cfg)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	saved.APITokenEncrypted = ""
+	response.Success(c, saved)
+}
+
+type activateWorkerConfigRequest struct {
+	APIToken string `json:"api_token"`
+}
+
+// ActivateWorkerConfig 激活指定 Worker 配置；disabled→active 必须提供真实 token。
+func (h *XianyuAdminHandler) ActivateWorkerConfig(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "invalid worker config id")
+		return
+	}
+	var req activateWorkerConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	saved, err := h.control.SetWorkerActive(c.Request.Context(), id, req.APIToken)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

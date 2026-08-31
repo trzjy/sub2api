@@ -38,10 +38,13 @@ func (xianyuHandlerControlStub) ListWorkerConfigs(context.Context) ([]service.Xi
 func (xianyuHandlerControlStub) CreateWorkerConfig(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
 	return nil, nil
 }
-func (xianyuHandlerControlStub) UpdateWorkerConfig(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+func (xianyuHandlerControlStub) UpdateWorkerConfigUserFields(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
 	return nil, nil
 }
-func (xianyuHandlerControlStub) UpdateWorkerConfigUserFields(context.Context, service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+func (xianyuHandlerControlStub) UpdateWorkerHealth(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (xianyuHandlerControlStub) ActivateWorkerConfig(context.Context, int64, string) (*service.XianyuWorkerConfig, error) {
 	return nil, nil
 }
 func (xianyuHandlerControlStub) GetActiveWorkerConfig(context.Context) (*service.XianyuWorkerConfig, error) {

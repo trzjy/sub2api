@@ -30,14 +30,20 @@
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.apiTokenHint') }}</p>
               <p v-if="workerConfig" class="mt-1 text-xs text-gray-400 dark:text-gray-500">{{ t('admin.xianyu.settings.tokenLeaveBlank') }}</p>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
               <button class="btn btn-primary" @click="saveWorker">
                 {{ t('admin.xianyu.settings.saveWorker') }}
               </button>
               <button class="btn btn-secondary" @click="checkHealth">
                 {{ t('admin.xianyu.settings.healthCheck') }}
               </button>
+              <button v-if="workerConfig?.status === 'disabled'" class="btn btn-primary" @click="activateWorker">
+                {{ t('admin.xianyu.settings.activateWorker') }}
+              </button>
             </div>
+            <p v-if="workerConfig?.status === 'disabled'" class="text-xs text-gray-400 dark:text-gray-500">
+              {{ t('admin.xianyu.settings.tokenRequiredToActivateHint') }}
+            </p>
           </div>
         </div>
 
@@ -98,7 +104,8 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const workerConfig = ref<XianyuWorkerConfig | null>(null)
-const form = reactive<{ base_url: string; api_token: string; status?: 'active' | 'disabled' }>({ base_url: '', api_token: '', status: 'active' })
+// 保存路径不提交 status：disabled→active 仅通过「激活 Worker」按钮（/activate 端点）完成。
+const form = reactive<{ base_url: string; api_token: string }>({ base_url: '', api_token: '' })
 
 async function load() {
   try {
@@ -107,7 +114,6 @@ async function load() {
     workerConfig.value = active ?? null
     form.base_url = active?.base_url ?? ''
     form.api_token = ''
-    form.status = active?.status ?? 'active'
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.loadWorkerFailed')))
   }
@@ -126,8 +132,7 @@ async function saveWorker() {
     const saved = await adminAPI.xianyu.saveWorkerConfig({
       id: workerConfig.value?.id,
       base_url: form.base_url.trim(),
-      api_token: form.api_token || undefined,
-      status: form.status
+      api_token: form.api_token || undefined
     })
     workerConfig.value = saved
     form.api_token = ''
@@ -144,6 +149,22 @@ async function checkHealth() {
     appStore.showSuccess(t('admin.xianyu.settings.healthCheck'))
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.healthCheckFailed')))
+  }
+}
+
+async function activateWorker() {
+  if (!workerConfig.value) return
+  if (!form.api_token.trim()) {
+    appStore.showError(t('admin.xianyu.settings.tokenRequiredToActivate'))
+    return
+  }
+  try {
+    await adminAPI.xianyu.activateWorkerConfig(workerConfig.value.id, form.api_token.trim())
+    form.api_token = ''
+    await load()
+    appStore.showSuccess(t('admin.xianyu.settings.workerActivated'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.xianyu.settings.activateWorkerFailed')))
   }
 }
 

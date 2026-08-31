@@ -53,9 +53,9 @@ func (s *XianyuWorkerService) CheckHealth(ctx context.Context) error {
 	if err == nil && health != nil && health.Backend && health.WebSocket && health.Database {
 		newStatus = XianyuWorkerHealthHealthy
 	}
-	cfg.HealthStatus = newStatus
-	cfg.LastCheckedAt = &now
-	if _, updateErr := s.control.UpdateWorkerConfig(ctx, *cfg); updateErr != nil {
+	// 只写健康字段，绝不触碰 base_url / api_token / status：
+	// 避免健康检查晚于 admin 保存完成时回滚管理员刚保存的配置。
+	if updateErr := s.control.UpdateWorkerHealth(ctx, cfg.ID, newStatus, now); updateErr != nil {
 		return updateErr
 	}
 	if err != nil {

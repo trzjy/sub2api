@@ -161,9 +161,21 @@ func (s *XianyuControlService) ListWorkerConfigs(ctx context.Context) ([]XianyuW
 	return out, nil
 }
 
-// SaveWorkerConfig 创建或更新 Worker 配置。active 记录数 > 1 时失败。
+// SaveWorkerConfig 创建或更新 Worker 配置。
+// 保存路径只负责 base_url 与可选 token，绝不写 status：
+// disabled→active 仅能通过 SetWorkerActive（/activate 端点）完成，
+// 避免保存与激活并发时保存请求把激活结果打回 disabled。
 func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input XianyuWorkerConfig) (*XianyuWorkerConfig, error) {
+	baseURL := strings.TrimSpace(input.BaseURL)
+	if err := validateWorkerBaseURL(baseURL, s.worker != nil && s.worker.forbidLoop); err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(input.APITokenEncrypted)
+
 	if input.ID == 0 {
+		// 创建：仅允许一条配置。空库首次创建（提供真实 token）直接插入 active，
+		// 由 uq_xianyu_worker_configs_active 部分唯一索引阻止并发重复创建（第二个 INSERT 命中 → 409）。
+		// 迁移生成的占位配置保持 disabled，经 /activate 输入真实 token 启用。
 		existing, err := s.control.ListWorkerConfigs(ctx)
 		if err != nil {
 			return nil, err
@@ -171,61 +183,18 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		if len(existing) > 0 {
 			return nil, ErrXianyuWorkerConfigExists
 		}
-	}
-	baseURL := strings.TrimSpace(input.BaseURL)
-	if err := validateWorkerBaseURL(baseURL, s.worker != nil && s.worker.forbidLoop); err != nil {
-		return nil, err
-	}
-	token := strings.TrimSpace(input.APITokenEncrypted)
-
-	// 更新已有配置时允许留空 token（仅修改地址/状态），保留原加密 token。
-	// health_status / last_checked_at 不在窄方法 SET 子句内，天然保留。
-	if input.ID != 0 && token == "" {
-		existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
+		if token == "" {
+			return nil, infraerrors.BadRequest("XIANYU_WORKER_TOKEN_REQUIRED", "worker token is required")
+		}
+		encrypted, err := s.encryptor.Encrypt(token)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("encrypt xianyu worker token: %w", err)
 		}
-		input.APITokenEncrypted = existing.APITokenEncrypted
-		input.BaseURL = baseURL
-		if input.Status == "" {
-			input.Status = existing.Status
-		}
-		updated, err := s.control.UpdateWorkerConfigUserFields(ctx, input)
-		if err != nil {
-			if isUniqueViolation(err) {
-				return nil, ErrXianyuActiveWorkerExists
-			}
-			return nil, err
-		}
-		return updated, nil
-	}
-
-	if token == "" {
-		return nil, infraerrors.BadRequest("XIANYU_WORKER_TOKEN_REQUIRED", "worker token is required")
-	}
-	encrypted, err := s.encryptor.Encrypt(token)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt xianyu worker token: %w", err)
-	}
-	input.BaseURL = baseURL
-	input.APITokenEncrypted = encrypted
-	// 更新已有配置时，状态留空表示保持原状（不再默认 disabled）；
-	// 只有创建时状态留空才默认 disabled。
-	if input.ID != 0 {
-		if input.Status == "" {
-			existing, err := s.control.GetWorkerConfigByID(ctx, input.ID)
-			if err != nil {
-				return nil, err
-			}
-			input.Status = existing.Status
-		}
-	} else if input.Status == "" {
-		input.Status = XianyuWorkerStatusDisabled
-	}
-
-	// 创建时先以 disabled 落库，再在应用层校验唯一 active（DB 部分唯一索引兜底）。
-	if input.ID == 0 {
-		created, err := s.control.CreateWorkerConfig(ctx, input)
+		created, err := s.control.CreateWorkerConfig(ctx, XianyuWorkerConfig{
+			BaseURL:           baseURL,
+			APITokenEncrypted: encrypted,
+			Status:            XianyuWorkerStatusActive,
+		})
 		if err != nil {
 			if isUniqueViolation(err) {
 				return nil, ErrXianyuWorkerConfigExists
@@ -234,20 +203,31 @@ func (s *XianyuControlService) SaveWorkerConfig(ctx context.Context, input Xiany
 		}
 		return created, nil
 	}
-	// admin 保存只写用户可编辑字段（base_url / api_token_encrypted / status），
-	// 健康字段由健康检查专管，不被并发覆盖。
-	updated, err := s.control.UpdateWorkerConfigUserFields(ctx, input)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, ErrXianyuActiveWorkerExists
+
+	// 更新：只写 base_url + token；token 留空由 SQL 原地保留（CASE），status 一律不动。
+	encrypted := ""
+	if token != "" {
+		e, err := s.encryptor.Encrypt(token)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt xianyu worker token: %w", err)
 		}
+		encrypted = e
+	}
+	updated, err := s.control.UpdateWorkerConfigUserFields(ctx, XianyuWorkerConfig{
+		ID:                input.ID,
+		BaseURL:           baseURL,
+		APITokenEncrypted: encrypted,
+	})
+	if err != nil {
 		return nil, err
 	}
 	return updated, nil
 }
 
-// SetWorkerActive 仅允许将当前唯一配置置为 active；已存在其他 active 则失败。
-func (s *XianyuControlService) SetWorkerActive(ctx context.Context, id int64) (*XianyuWorkerConfig, error) {
+// SetWorkerActive 激活指定 Worker 配置（真实激活端点）。
+// 已 active 幂等返回；disabled→active 必须提供真实 token（迁移占位 token 无效），
+// 比 SaveWorkerConfig（留空 token 可沿用已存 token）刻意更严格。
+func (s *XianyuControlService) SetWorkerActive(ctx context.Context, id int64, apiToken string) (*XianyuWorkerConfig, error) {
 	all, err := s.control.ListWorkerConfigs(ctx)
 	if err != nil {
 		return nil, err
@@ -270,9 +250,25 @@ func (s *XianyuControlService) SetWorkerActive(ctx context.Context, id int64) (*
 	if target.Status == XianyuWorkerStatusActive {
 		return target, nil
 	}
-	target.Status = XianyuWorkerStatusActive
-	// 保留加密 token；健康字段不被窄方法触碰。
-	return s.control.UpdateWorkerConfigUserFields(ctx, *target)
+	if strings.TrimSpace(apiToken) == "" {
+		return nil, infraerrors.BadRequest("XIANYU_WORKER_TOKEN_REQUIRED_ACTIVATE",
+			"worker token is required to activate a disabled worker")
+	}
+	encrypted, err := s.encryptor.Encrypt(strings.TrimSpace(apiToken))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt xianyu worker token: %w", err)
+	}
+	// 窄方法只写 status + 新 token，绝不写 base_url / 健康字段：
+	// 避免用激活读取的旧快照回滚并发 admin 保存的 base_url。
+	// 唯一冲突（并发激活两条 disabled）映射为 409。
+	updated, err := s.control.ActivateWorkerConfig(ctx, id, encrypted)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrXianyuActiveWorkerExists
+		}
+		return nil, err
+	}
+	return updated, nil
 }
 
 // ---------------------------------------------------------------------------
