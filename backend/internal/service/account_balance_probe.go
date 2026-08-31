@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ const (
 	BalanceProbeConfigCredentialKey = "balance_probe"
 	balanceProbeTimeout             = 10 * time.Second
 	balanceProbeMaxBodyBytes        = 256 * 1024
+	oneAPIDefaultQuotaPerUSD        = 500000.0
 )
 
 type BalanceProbeConfig struct {
@@ -37,9 +39,19 @@ type BalanceProbeResult struct {
 
 func (a *Account) BalanceProbeConfig() BalanceProbeConfig {
 	config := BalanceProbeConfig{}
-	rawValue, ok := a.Credentials[BalanceProbeConfigCredentialKey]
+	if a == nil {
+		return config
+	}
+	rawValue, configured := a.Credentials[BalanceProbeConfigCredentialKey]
 	raw, ok := rawValue.(map[string]any)
 	if !ok {
+		// One-API/New-API compatible relays expose the same authenticated
+		// /api/user/self endpoint. Opt API-key accounts in automatically when
+		// no explicit balance_probe setting exists.
+		if !configured && a != nil && a.Type == AccountTypeAPIKey && strings.TrimSpace(a.GetCredential("base_url")) != "" {
+			config.Enabled = true
+			config.BearerAuth = true
+		}
 		return config
 	}
 	if enabled, ok := raw["enabled"].(bool); ok {
@@ -57,12 +69,56 @@ func (a *Account) BalanceProbeConfig() BalanceProbeConfig {
 func (config BalanceProbeConfig) normalizedURL(account *Account) (string, error) {
 	url := strings.TrimSpace(config.URL)
 	if url == "" {
-		url = strings.TrimRight(account.GetCredential("base_url"), "/") + "/v1/usage"
+		base := strings.TrimRight(account.GetCredential("base_url"), "/")
+		url = base + "/v1/usage"
+		if strings.HasSuffix(base, "/v1") {
+			url = base + "/usage"
+		}
 	}
 	if !strings.HasPrefix(url, "https://") {
 		return "", fmt.Errorf("balance probe URL must use https")
 	}
 	return url, nil
+}
+
+// probeURLs returns the standard relay endpoint first, followed by the
+// legacy OpenAI-compatible usage endpoint. Explicit URLs remain single-target.
+func (config BalanceProbeConfig) probeURLs(account *Account) ([]string, error) {
+	if strings.TrimSpace(config.URL) != "" {
+		probeURL, err := config.normalizedURL(account)
+		if err != nil {
+			return nil, err
+		}
+		return []string{probeURL}, nil
+	}
+	base := strings.TrimSpace(account.GetCredential("base_url"))
+	if base == "" {
+		return nil, fmt.Errorf("balance probe base URL is empty")
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return nil, fmt.Errorf("balance probe URL must use https")
+	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	path := basePath
+	if strings.HasSuffix(path, "/v1") {
+		path = strings.TrimSuffix(path, "/v1")
+	}
+	parsed.Path = strings.TrimRight(path, "/") + "/api/user/self"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	standard := parsed.String()
+	legacyPath := basePath
+	if !strings.HasSuffix(legacyPath, "/v1") {
+		legacyPath += "/v1"
+	}
+	legacyParsed := *parsed
+	legacyParsed.Path = legacyPath + "/usage"
+	legacy := legacyParsed.String()
+	if standard == legacy {
+		return []string{standard}, nil
+	}
+	return []string{standard, legacy}, nil
 }
 
 func (config BalanceProbeConfig) apiKey(account *Account) string {
@@ -103,74 +159,92 @@ func (s *AccountBalanceProbeService) Query(ctx context.Context, accountID int64)
 		return nil, fmt.Errorf("balance probe api key is empty")
 	}
 
-	probeURL, err := config.normalizedURL(account)
+	probeURLs, err := config.probeURLs(account)
 	if err != nil {
 		return nil, err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, balanceProbeTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(callCtx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build balance probe request: %w", err)
-	}
-	request.Header.Set("Accept", "application/json")
-	if config.BearerAuth {
-		request.Header.Set("Authorization", "Bearer "+apiKey)
-	} else {
-		request.Header.Set("Authorization", apiKey)
-	}
-	account.ApplyHeaderOverrides(request.Header)
-
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	response, err := s.httpUpstream.Do(request, proxyURL, account.ID, maxInt(account.Concurrency, 1))
-	if err != nil {
-		return nil, fmt.Errorf("balance probe request failed: %w", err)
+	var last *BalanceProbeResult
+	for i, probeURL := range probeURLs {
+		callCtx, cancel := context.WithTimeout(ctx, balanceProbeTimeout)
+		request, requestErr := http.NewRequestWithContext(callCtx, http.MethodGet, probeURL, nil)
+		if requestErr != nil {
+			cancel()
+			return nil, fmt.Errorf("build balance probe request: %w", requestErr)
+		}
+		request.Header.Set("Accept", "application/json")
+		if config.BearerAuth {
+			request.Header.Set("Authorization", "Bearer "+apiKey)
+		} else {
+			request.Header.Set("Authorization", apiKey)
+		}
+		account.ApplyHeaderOverrides(request.Header)
+		response, requestErr := s.httpUpstream.Do(request, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+		if requestErr != nil {
+			cancel()
+			if i+1 < len(probeURLs) {
+				continue
+			}
+			return nil, fmt.Errorf("balance probe request failed: %w", requestErr)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, balanceProbeMaxBodyBytes+1))
+		_ = response.Body.Close()
+		cancel()
+		if readErr != nil {
+			return nil, fmt.Errorf("read balance probe response: %w", readErr)
+		}
+		if len(body) > balanceProbeMaxBodyBytes {
+			return nil, fmt.Errorf("balance probe response too large")
+		}
+		result := parseBalanceProbeResponse(response.StatusCode, body)
+		if result.Success || i+1 == len(probeURLs) {
+			return result, nil
+		}
+		last = result
 	}
-	defer func() { _ = response.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(response.Body, balanceProbeMaxBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read balance probe response: %w", err)
-	}
-	if len(body) > balanceProbeMaxBodyBytes {
-		return nil, fmt.Errorf("balance probe response too large")
-	}
+	return last, nil
+}
 
-	result := &BalanceProbeResult{
-		StatusCode: response.StatusCode,
-		FetchedAt:  time.Now(),
-		Unit:       "USD",
-		Valid:      true,
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		result.Error = fmt.Sprintf("API error (HTTP %d)", response.StatusCode)
-		return result, nil
+func parseBalanceProbeResponse(statusCode int, body []byte) *BalanceProbeResult {
+	result := &BalanceProbeResult{StatusCode: statusCode, FetchedAt: time.Now(), Unit: "USD", Valid: true}
+	if statusCode < 200 || statusCode >= 300 {
+		result.Error = fmt.Sprintf("API error (HTTP %d)", statusCode)
+		return result
 	}
 	if !json.Valid(body) {
 		result.Error = "invalid balance probe response"
-		return result, nil
+		return result
 	}
-
-	remaining := firstJSONNumber(body, "remaining", "quota.remaining", "balance")
+	// Supports generic usage responses and One-API/New-API's data.quota.
+	remaining := firstJSONNumber(body,
+		"remaining", "quota.remaining", "balance", "data.remaining", "data.remaining_quota",
+		"data.quota", "data.remain_quota", "data.balance", "data.user.quota", "data.user.remain_quota")
 	if remaining == nil {
 		result.Error = "balance field not found"
-		return result, nil
+		return result
 	}
 	if value := gjson.GetBytes(body, "unit").String(); value != "" {
 		result.Unit = value
-	} else if value := gjson.GetBytes(body, "quota.unit").String(); value != "" {
+	} else if value := gjson.GetBytes(body, "data.unit").String(); value != "" {
 		result.Unit = value
+	} else if gjson.GetBytes(body, "data.quota").Exists() || gjson.GetBytes(body, "data.remain_quota").Exists() || gjson.GetBytes(body, "data.user.quota").Exists() || gjson.GetBytes(body, "data.user.remain_quota").Exists() {
+		// One-API/New-API stores wallet quota as integer units (500,000 = $1).
+		*remaining /= oneAPIDefaultQuotaPerUSD
+		result.Unit = "USD"
 	}
 	if value := gjson.GetBytes(body, "is_active"); value.Exists() {
 		result.Valid = value.Bool()
+	} else if value := gjson.GetBytes(body, "data.status"); value.Exists() {
+		result.Valid = value.String() == "active"
 	} else if value := gjson.GetBytes(body, "isValid"); value.Exists() {
 		result.Valid = value.Bool()
 	}
 	result.Success = true
 	result.Remaining = remaining
-	return result, nil
+	return result
 }
 
 func (s *AccountBalanceProbeService) account(ctx context.Context, accountID int64) (*Account, error) {

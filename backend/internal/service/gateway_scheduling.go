@@ -710,8 +710,12 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 		// 分层过滤选择：优先级 →（可选）最早重置 → 负载率 → LRU
 		for len(available) > 0 {
+			// Strictly prefer the official subscription pool while it has
+			// schedulable/load-available accounts. Relay accounts enter only after
+			// every subscription candidate has been exhausted.
+			selectionPool := subscriptionPriorityLoadPool(available)
 			// 1. 取优先级最小的集合
-			candidates := filterByMinPriority(available)
+			candidates := filterByMinPriority(selectionPool)
 			// 2. （可选）use-it-or-lose-it：优先选用会话窗口最早重置的账号
 			if cfg.PreferSoonestReset {
 				candidates = filterBySoonestReset(candidates)
@@ -750,7 +754,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	// ============ Layer 3: 兜底排队 ============
-	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
+	sortCandidatesBySubscriptionPriority(candidates, preferOAuth, cfg.FallbackSelectionMode)
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
@@ -768,7 +772,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
-	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
+	sortCandidatesBySubscriptionPriority(ordered, preferOAuth, "last_used")
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
@@ -1529,6 +1533,92 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 	return result
 }
 
+// isOfficialSubscriptionAccount uses the persisted account type/entitlement
+// fields as the sole source for subscription-vs-relay classification.
+func isOfficialSubscriptionAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if account.Platform == PlatformOpenAI {
+		return account.IsOpenAIChatGPTSubscription()
+	}
+	return account.IsOAuth()
+}
+
+// subscriptionPriorityLoadPool keeps relay accounts available for a later
+// pass, while ensuring every currently usable subscription account is tried
+// first in the load-aware selector.
+func subscriptionPriorityLoadPool(accounts []accountWithLoad) []accountWithLoad {
+	if len(accounts) == 0 {
+		return accounts
+	}
+	subscriptions := make([]accountWithLoad, 0, len(accounts))
+	for _, account := range accounts {
+		if isOfficialSubscriptionAccount(account.account) {
+			subscriptions = append(subscriptions, account)
+		}
+	}
+	if len(subscriptions) > 0 {
+		return subscriptions
+	}
+	return accounts
+}
+
+// gatewayAccountComesBefore preserves the existing priority/LRU ordering
+// inside each pool while making subscription-vs-relay a strict first key.
+func gatewayAccountComesBefore(a, b *Account, preferOAuth bool) bool {
+	aSubscription := isOfficialSubscriptionAccount(a)
+	bSubscription := isOfficialSubscriptionAccount(b)
+	if aSubscription != bSubscription {
+		return aSubscription
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	switch {
+	case a.LastUsedAt == nil && b.LastUsedAt != nil:
+		return true
+	case a.LastUsedAt != nil && b.LastUsedAt == nil:
+		return false
+	case a.LastUsedAt == nil && b.LastUsedAt == nil:
+		return preferOAuth && a.Type != b.Type && a.Type == AccountTypeOAuth
+	default:
+		return a.LastUsedAt.Before(*b.LastUsedAt)
+	}
+}
+
+func sortCandidatesBySubscriptionPriority(accounts []*Account, preferOAuth bool, mode string) {
+	if len(accounts) <= 1 {
+		return
+	}
+	subscriptions := make([]*Account, 0, len(accounts))
+	regular := make([]*Account, 0, len(accounts))
+	for _, account := range accounts {
+		if isOfficialSubscriptionAccount(account) {
+			subscriptions = append(subscriptions, account)
+		} else {
+			regular = append(regular, account)
+		}
+	}
+	if len(subscriptions) == 0 {
+		sortCandidatesForFallbackOrder(accounts, preferOAuth, mode)
+		return
+	}
+	sortCandidatesForFallbackOrder(subscriptions, preferOAuth, mode)
+	sortCandidatesForFallbackOrder(regular, preferOAuth, mode)
+	ordered := append(subscriptions, regular...)
+	copy(accounts, ordered)
+}
+
+func sortCandidatesForFallbackOrder(accounts []*Account, preferOAuth bool, mode string) {
+	if mode == "random" {
+		sortAccountsByPriorityOnly(accounts, preferOAuth)
+		shuffleWithinPriority(accounts)
+		return
+	}
+	sortAccountsByPriorityAndLastUsed(accounts, preferOAuth)
+}
+
 // filterByMinLoadRate 过滤出负载率最低的账号集合
 func filterByMinLoadRate(accounts []accountWithLoad) []accountWithLoad {
 	if len(accounts) == 0 {
@@ -1762,19 +1852,6 @@ func sameLastUsedAt(a, b *time.Time) bool {
 	}
 }
 
-// sortCandidatesForFallback 根据配置选择排序策略
-// mode: "last_used"(按最后使用时间) 或 "random"(随机)
-func (s *GatewayService) sortCandidatesForFallback(accounts []*Account, preferOAuth bool, mode string) {
-	if mode == "random" {
-		// 先按优先级排序，然后在同优先级内随机打乱
-		sortAccountsByPriorityOnly(accounts, preferOAuth)
-		shuffleWithinPriority(accounts)
-	} else {
-		// 默认按最后使用时间排序
-		sortAccountsByPriorityAndLastUsed(accounts, preferOAuth)
-	}
-}
-
 // sortAccountsByPriorityOnly 仅按优先级排序
 func sortAccountsByPriorityOnly(accounts []*Account, preferOAuth bool) {
 	sort.SliceStable(accounts, func(i, j int) bool {
@@ -1918,27 +1995,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
-			if selected == nil {
+			if selected == nil || gatewayAccountComesBefore(acc, selected, preferOAuth) {
 				selected = acc
-				continue
-			}
-			if acc.Priority < selected.Priority {
-				selected = acc
-			} else if acc.Priority == selected.Priority {
-				switch {
-				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-					selected = acc
-				case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-					// keep selected (never used is preferred)
-				case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
-					if preferOAuth && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
-						selected = acc
-					}
-				default:
-					if acc.LastUsedAt.Before(*selected.LastUsedAt) {
-						selected = acc
-					}
-				}
 			}
 		}
 
@@ -2035,27 +2093,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
-		if selected == nil {
+		if selected == nil || gatewayAccountComesBefore(acc, selected, preferOAuth) {
 			selected = acc
-			continue
-		}
-		if acc.Priority < selected.Priority {
-			selected = acc
-		} else if acc.Priority == selected.Priority {
-			switch {
-			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-				selected = acc
-			case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-				// keep selected (never used is preferred)
-			case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
-				if preferOAuth && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
-					selected = acc
-				}
-			default:
-				if acc.LastUsedAt.Before(*selected.LastUsedAt) {
-					selected = acc
-				}
-			}
 		}
 	}
 
@@ -2184,27 +2223,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
-			if selected == nil {
+			if selected == nil || gatewayAccountComesBefore(acc, selected, preferOAuth) {
 				selected = acc
-				continue
-			}
-			if acc.Priority < selected.Priority {
-				selected = acc
-			} else if acc.Priority == selected.Priority {
-				switch {
-				case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-					selected = acc
-				case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-					// keep selected (never used is preferred)
-				case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
-					if preferOAuth && acc.Platform == PlatformGemini && selected.Platform == PlatformGemini && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
-						selected = acc
-					}
-				default:
-					if acc.LastUsedAt.Before(*selected.LastUsedAt) {
-						selected = acc
-					}
-				}
 			}
 		}
 
@@ -2302,27 +2322,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
-		if selected == nil {
+		if selected == nil || gatewayAccountComesBefore(acc, selected, preferOAuth) {
 			selected = acc
-			continue
-		}
-		if acc.Priority < selected.Priority {
-			selected = acc
-		} else if acc.Priority == selected.Priority {
-			switch {
-			case acc.LastUsedAt == nil && selected.LastUsedAt != nil:
-				selected = acc
-			case acc.LastUsedAt != nil && selected.LastUsedAt == nil:
-				// keep selected (never used is preferred)
-			case acc.LastUsedAt == nil && selected.LastUsedAt == nil:
-				if preferOAuth && acc.Platform == PlatformGemini && selected.Platform == PlatformGemini && acc.Type != selected.Type && acc.Type == AccountTypeOAuth {
-					selected = acc
-				}
-			default:
-				if acc.LastUsedAt.Before(*selected.LastUsedAt) {
-					selected = acc
-				}
-			}
 		}
 	}
 

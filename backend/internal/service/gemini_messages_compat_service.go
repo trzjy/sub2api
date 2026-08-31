@@ -315,10 +315,10 @@ func (s *GeminiMessagesCompatService) passesRateLimitPreCheckWithCache(ctx conte
 	return ok
 }
 
-// selectBestGeminiAccount 从候选账号中选择最佳账号（优先级 + LRU + OAuth 优先）。
+// selectBestGeminiAccount 从候选账号中选择最佳账号（官网订阅优先 + 优先级 + LRU）。
 // 返回 nil 表示无可用账号。
 //
-// selectBestGeminiAccount selects best account from candidates (priority + LRU + OAuth preferred).
+// selectBestGeminiAccount selects best account from candidates (subscription first, then priority + LRU).
 // Returns nil if no available account.
 func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 	ctx context.Context,
@@ -376,34 +376,13 @@ func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Co
 }
 
 // isBetterGeminiAccount 判断 candidate 是否比 current 更优。
-// 规则：优先级更高（数值更小）优先；同优先级时，未使用过的优先（OAuth > 非 OAuth），其次是最久未使用的。
+// 先严格区分官网订阅与中转，再沿用优先级、未使用优先和 LRU 规则。
 //
 // isBetterGeminiAccount checks if candidate is better than current.
-// Rules: higher priority (lower value) wins; same priority: never used (OAuth > non-OAuth) > least recently used.
+// Subscription-vs-relay is the strict first key, followed by the existing
+// priority, never-used, and least-recently-used rules.
 func (s *GeminiMessagesCompatService) isBetterGeminiAccount(candidate, current *Account) bool {
-	// 优先级更高（数值更小）
-	if candidate.Priority < current.Priority {
-		return true
-	}
-	if candidate.Priority > current.Priority {
-		return false
-	}
-
-	// 同优先级，比较最后使用时间
-	switch {
-	case candidate.LastUsedAt == nil && current.LastUsedAt != nil:
-		// candidate 从未使用，优先
-		return true
-	case candidate.LastUsedAt != nil && current.LastUsedAt == nil:
-		// current 从未使用，保持
-		return false
-	case candidate.LastUsedAt == nil && current.LastUsedAt == nil:
-		// 都未使用，优先选择 OAuth 账号（更兼容 Code Assist 流程）
-		return candidate.Type == AccountTypeOAuth && current.Type != AccountTypeOAuth
-	default:
-		// 都使用过，选择最久未使用的
-		return candidate.LastUsedAt.Before(*current.LastUsedAt)
-	}
+	return gatewayAccountComesBefore(candidate, current, true)
 }
 
 // isModelSupportedByAccount 根据账户平台检查模型支持
