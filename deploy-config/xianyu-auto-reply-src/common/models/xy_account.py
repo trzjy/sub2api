@@ -45,6 +45,8 @@ class XYAccount(TimestampMixin, Base):
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, comment="元数据")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="最后登录时间")
     last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), comment="最后刷新时间")
+    # Cookie 状态：valid=有效 invalid=失效 expiring=即将过期（由扫码登录/续期成功后写入）
+    cookie_status: Mapped[str | None] = mapped_column(String(20), default=None, comment="Cookie状态（valid/invalid/expiring）")
 
     # 代理配置字段
     proxy_type: Mapped[str | None] = mapped_column(String(20), default="none", comment="代理类型")

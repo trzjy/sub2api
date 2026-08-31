@@ -1108,12 +1108,11 @@ async def renew_account_login(
                 # 调用共通服务执行接口续期
                 renew_result = await cookie_renew_api_service.renew(cookies_str, account_id)
 
-                # 不管续期是否成功，只要有Cookie字段更新就先写入数据库
-                if renew_result.updated_cookie_names and renew_result.new_cookies_str != cookies_str:
-                    account.cookie = renew_result.new_cookies_str
-                    await session.commit()
-
                 if not renew_result.success:
+                    # 续期彻底失败（接口+浏览器均无法续），标记 Cookie 为失效
+                    if renew_result.cookie_expired:
+                        account.cookie_status = "expired"
+                        await session.commit()
                     results.append({
                         "account_id": account_id,
                         "account_name": account.account_id,
@@ -1123,11 +1122,14 @@ async def renew_account_login(
                     failed_count += 1
                     continue
 
-                # 续期成功，自动启用账号
+                # 续期成功，写入新 Cookie 并标记为有效
+                account.cookie_status = "valid"
+                if renew_result.updated_cookie_names and renew_result.new_cookies_str != cookies_str:
+                    account.cookie = renew_result.new_cookies_str
                 if account.status != "active":
                     account.status = "active"
                     account.disable_reason = None
-                    await session.commit()
+                await session.commit()
 
                 # 通知 WebSocket 服务启动/重启账号任务
                 try:

@@ -266,8 +266,27 @@ const scanStatus = ref('waiting')
 const scanMessage = ref('')
 const scanQRCode = ref('')
 let pollTimer: number | null = null
+let closeTimer: number | null = null
+
+const AUTO_CLOSE_DELAY_MS = 1500 // 登录成功后停留片刻让用户看到提示，再自动关闭
+
+function clearAutoClose() {
+  if (closeTimer) {
+    clearTimeout(closeTimer)
+    closeTimer = null
+  }
+}
+
+function scheduleAutoClose() {
+  clearAutoClose()
+  closeTimer = window.setTimeout(() => {
+    closeTimer = null
+    scanVisible.value = false
+  }, AUTO_CLOSE_DELAY_MS)
+}
 
 async function openScan(account: XianyuAccount | null) {
+  clearAutoClose()
   scanAccount.value = account
   scanStatus.value = 'waiting'
   scanMessage.value = ''
@@ -319,6 +338,7 @@ async function pollOnce(sessionID: string) {
       stopPolling()
       if (session.status === 'success') {
         await load()
+        scheduleAutoClose()
       }
       return
     }
@@ -343,6 +363,7 @@ function stopPolling() {
 function stopPollingBehavior() {
   scanVisible.value = false
   stopPolling()
+  clearAutoClose()
 }
 
 function statusLabel(status: string): string {
@@ -375,5 +396,8 @@ function taskLabel(status: string): string {
 }
 
 onMounted(load)
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  clearAutoClose()
+})
 </script>

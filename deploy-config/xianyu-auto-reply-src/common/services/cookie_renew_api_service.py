@@ -61,6 +61,8 @@ class CookieRenewApiResult:
     renew_method: str = "none"  # api / browser / none
     need_password_login: bool = False
     step_details: str = ""
+    # Cookie 是否需要重新认证（token/session 过期，renew 后仍需要用户扫码或输密码）
+    cookie_expired: bool = False
 
 
 class CookieRenewApiService:
@@ -101,6 +103,7 @@ class CookieRenewApiService:
                 renew_method="none",
                 need_password_login=True,
                 step_details="Cookie为空，跳过所有续期",
+                cookie_expired=True,
             )
 
         # 定时任务触发：固定走 接口续期 → 浏览器续期 → 密码登录
@@ -197,6 +200,7 @@ class CookieRenewApiService:
             renew_method="none",
             need_password_login=True,
             step_details=" → ".join(step_details_parts),
+            cookie_expired=True,
         )
 
     async def _renew_api_first(
@@ -294,6 +298,7 @@ class CookieRenewApiService:
             renew_method="none",
             need_password_login=True,
             step_details=" → ".join(step_details_parts),
+            cookie_expired=True,
         )
 
     async def _do_api_renew_with_retry(self, cookies_str: str, log_prefix: str) -> dict:

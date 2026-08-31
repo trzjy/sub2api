@@ -84,6 +84,16 @@ func (s *XianyuWorkerService) SyncAccounts(ctx context.Context) error {
 			status = existing.Status
 		}
 		cookieStatus := XianyuCookieStatusUnknown
+		// Worker: "valid" / "expired" (CookieRenewApiResult.cookie_expired 时写 "expired")
+		// 主程序: "valid" / "expiring" / "invalid"
+		switch acc.CookieStatus {
+		case "valid":
+			cookieStatus = XianyuCookieStatusValid
+		case "expired":
+			cookieStatus = XianyuCookieStatusExpiring
+		case "invalid":
+			cookieStatus = XianyuCookieStatusInvalid
+		}
 		taskStatus := XianyuTaskStatusUnknown
 		if acc.Enabled {
 			if status == XianyuAccountStatusDisabled {

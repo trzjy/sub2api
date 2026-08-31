@@ -112,11 +112,12 @@ type XianyuWorkerRenewResult struct {
 
 // XianyuWorkerAccountStatus 表示 Worker 侧账号状态（internal_api /cookies/details 投影）。
 type XianyuWorkerAccountStatus struct {
-	AccountID    string `json:"account_id"`
-	Nickname     string `json:"nickname"`
-	Enabled      bool   `json:"enabled"`
-	Status       string `json:"status"`
-	LastLoginAt  string `json:"last_login_at,omitempty"`
+	AccountID     string `json:"account_id"`
+	Nickname      string `json:"nickname"`
+	Enabled       bool   `json:"enabled"`
+	Status        string `json:"status"`
+	CookieStatus  string `json:"cookie_status,omitempty"`
+	LastLoginAt   string `json:"last_login_at,omitempty"`
 	LastRefreshAt string `json:"last_refresh_at,omitempty"`
 }
 

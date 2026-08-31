@@ -46,6 +46,7 @@ async def internal_list_cookie_details(
                 "nickname": account.display_name or account.account_id,
                 "enabled": account.status not in {"inactive", "disabled", "suspended", "deleted"},
                 "status": account.status,
+                "cookie_status": account.cookie_status or "unknown",
                 "remark": account.remark or "",
                 "disable_reason": account.disable_reason or "",
                 "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,

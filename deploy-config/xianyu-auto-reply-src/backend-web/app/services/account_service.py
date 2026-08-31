@@ -485,6 +485,7 @@ class AccountService:
             account.login_method = login_method
             account.unb = unb
             account.last_login_at = datetime.now(tz=UTC)
+            account.cookie_status = "valid"
             if hasattr(account, "updated_at"):
                 account.updated_at = datetime.now(tz=UTC)
         else:
@@ -497,6 +498,7 @@ class AccountService:
                 cookie=cookies,
                 login_method=login_method,
                 status="active",
+                cookie_status="valid",
                 auto_confirm=False,
                 pause_duration=10,
                 show_browser=False,
@@ -559,6 +561,7 @@ class AccountService:
             existing.status = "active"
             existing.disable_reason = None
             existing.last_login_at = now
+            existing.cookie_status = "valid"
             if unb:
                 existing.unb = unb
             if hasattr(existing, "updated_at"):
@@ -575,6 +578,7 @@ class AccountService:
                 show_browser=show_browser,
                 login_method="password",
                 status="active",
+                cookie_status="valid",
                 auto_confirm=False,
                 pause_duration=10,
                 unb=unb,
