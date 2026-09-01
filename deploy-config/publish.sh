@@ -83,7 +83,7 @@ DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"tag":{"value":"%s"},"simple_relea
   "$BRANCH" "$TAG")
 
 DISPATCH_OUT=$(gh api repos/"$GH_REPO"/actions/workflows/"$WORKFLOW_ID_NUM"/dispatches \
-  -X POST -H "Content-Type: application/json" -d "$DISPATCH_JSON" 2>&1)
+  -X POST --input - <<< "$DISPATCH_JSON" 2>&1)
 
 DISPATCH_RC=$?
 if [ $DISPATCH_RC -ne 0 ]; then
