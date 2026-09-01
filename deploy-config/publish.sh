@@ -32,9 +32,12 @@ fi
 
 TAG="$1"
 
-# 1. 验证 GitHub token
+# 1. 验证 GitHub token（优先用 GITHUB_TOKEN 环境变量，否则从 gh CLI 读取）
 if [ -z "${GITHUB_TOKEN:-}" ]; then
-  echo "ERROR: GITHUB_TOKEN 环境变量未设置" >&2
+  GITHUB_TOKEN=$(gh auth token 2>/dev/null) || true
+fi
+if [ -z "$GITHUB_TOKEN" ]; then
+  echo "ERROR: GITHUB_TOKEN 环境变量未设置，且 gh auth 未登录" >&2
   echo "设置方法：export GITHUB_TOKEN=ghp_xxxx" >&2
   exit 1
 fi
