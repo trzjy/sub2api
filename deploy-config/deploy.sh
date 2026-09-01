@@ -40,12 +40,11 @@ fi
 TAG="$1"
 # 支持两种调用方式：
 # 1. 纯 tag（如 20260901-120000）→ 自动拼上 ghcr.io/{GHCR_IMAGE} 前缀
-# 2. 完整镜像路径（含 / 和 :）→ 直接使用
-if [[ "$TAG" == *"/"* || "$TAG" == *":"* ]]; then
+# 2. 完整镜像路径（含 /，如 ghcr.io/trzjy/sub2api:20260901-120000）→ 直接使用
+if [[ "$TAG" == *"/"* ]]; then
   REMOTE_IMAGE="$TAG"
 else
-  REMOTE_IMAGE="$GHCR_IMAGE:$TAG"
-fi
+  REMOTE_IMAGE="${GHCR_IMAGE:?}:${TAG}"
 
 echo "==> 部署目标: $REMOTE_IMAGE"
 echo "==> 部署目录: $DEPLOY_DIR"
