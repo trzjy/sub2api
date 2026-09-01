@@ -49,6 +49,7 @@ if [[ "$TAG" == *"/"* ]]; then
   REMOTE_IMAGE="$TAG"
 else
   REMOTE_IMAGE="${GHCR_IMAGE:?}:${TAG}"
+fi
 
 echo "==> 部署目标: $REMOTE_IMAGE"
 echo "==> 部署目录: $DEPLOY_DIR"
