@@ -1,6 +1,8 @@
 services:
   sub2api:
-    image: sub2api:${SUB2API_IMAGE_TAG:-weishaw/sub2api:latest}
+    # 完整镜像路径由 .env 中 SUB2API_IMAGE_TAG 决定（默认 ghcr.io/trzjy/sub2api:yyyymmdd-HHMMSS）
+    # 见 docs/DEPLOY.md 第 4 节
+    image: ${SUB2API_IMAGE_TAG:?SUB2API_IMAGE_TAG must be set (e.g. ghcr.io/trzjy/sub2api:20260901-120000)}
     container_name: sub2api
     restart: unless-stopped
     security_opt:

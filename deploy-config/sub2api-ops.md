@@ -351,7 +351,7 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
-| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-08-30，含 EnsureDeliveryRecord 适配层 + 鉴权收紧 / buyer_id 贯通 / pre-send 失败回传 / quantity_sent 实发 / stop 校验）：`prod-fix34-ensure-20260830-203928`（构建镜像 ID `sha256:b79ce29c47521348b5d76ace2dc5ec3c32eda9ba9506b273798b48cd455f0629`）。中间版 `prod-fix34-20260830-172747` / `sha256:d1fd4b249713...cb518` 已由本版本替代。 |
+| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前构建值**（2026-08-31，基于提交 `cb49c326d`）：`prod-cb49c32-20260831`（构建镜像 ID `sha256:a70cadf69abc24d0b475c3676e488bcddf61cc08d3f140573249a4826ba3f2f7`）。 |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
@@ -367,7 +367,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **镜像构建**：以 `deploy-config/xianyu-auto-reply-src/backend-web/Dockerfile` 构建（该 Dockerfile 已统一 `COPY common/backend-web/websocket/scheduler/launcher`，EXPOSE 8089/8090/8091，并安装三端依赖）；`launcher/entrypoint.py` 在单容器内并行启动 backend-web(8089)/websocket(8090)/scheduler(8091)。
 - **delivery-results 回传**：Worker 端 `common/services/sub2api_delivery_result_client.py` 在自动发货获得平台最终发送回执后回传 `POST {SUB2API_INTERNAL_BASE_URL}/api/v1/internal/xianyu/delivery-results`（`confirmed=true` 才标记 sent）；未配置 base_url/token 时静默跳过，不影响本地/单机模式。主程序保持 `pending` 直至收到 `confirmed=true`，否则最终转人工。
 - **cookie_id 透传**：Worker 卡券（发货）调用主程序 Claim 时透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
-- **digest 纪律**：旧字段 `XIANYU_WORKER_IMAGE_DIGEST` 已废弃，运行时统一使用 11.2 表格中的 `XIANYU_WORKER_IMAGE_TAG`（本机构建无 registry RepoDigest，固定 tag 引用更可靠）。当前已用 tag 模式替代：表格已记录 `prod-fix34-ensure-20260830-203928` 对应构建镜像 ID `sha256:10e96f9f54638945e131b04e1b969d33865b3de0b8e1f72f1863f3941fa3d640`，升级镜像时只改 tag 与同步该 tag 对应的镜像 ID。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本。
+- **digest 纪律**：旧字段 `XIANYU_WORKER_IMAGE_DIGEST` 已废弃，运行时统一使用 11.2 表格中的 `XIANYU_WORKER_IMAGE_TAG`（本机构建无 registry RepoDigest，固定 tag 引用更可靠）。当前构建值为 `prod-cb49c32-20260831`，对应构建镜像 ID `sha256:a70cadf69abc24d0b475c3676e488bcddf61cc08d3f140573249a4826ba3f2f7`；升级镜像时只改 tag 与同步该 tag 对应的镜像 ID。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本。
 - **internal 服务间鉴权**：backend-web→websocket/scheduler 的 `/internal/*` 路由要求 `X-Internal-Token` 匹配 `SUB2API_INTERNAL_TOKEN`（空配置失败关闭）；backend-web/scheduler 的 http_client 对 internal 服务 URL 自动注入该头。
 
 ### 11.5 基座底层重构要点（补发/发货链路）

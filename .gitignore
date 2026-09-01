@@ -2,6 +2,7 @@
 /docs-local/
 .codex
 .env
+.zcode/
 
 # ===================
 # Go 后端
