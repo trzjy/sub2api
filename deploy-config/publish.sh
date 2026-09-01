@@ -26,7 +26,8 @@ set -euo pipefail
 GH_REPO="${GH_REPO:-trzjy/sub2api}"
 WORKFLOW_ID="Release"
 # 发布用的 git tag（用于触发 release.yml）
-RELEASE_TAG="${RELEASE_TAG:-$(date -u +%Y%m%d-%H%M%S)}"
+# release.yml 监听 tags: ['v*']，必须以 v 开头
+RELEASE_TAG="${RELEASE_TAG:-v$(date -u +%Y%m%d-%H%M%S)}"
 
 # 1. 验证 GitHub token
 if [ -z "${GITHUB_TOKEN:-}" ]; then
