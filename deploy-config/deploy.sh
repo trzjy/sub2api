@@ -31,13 +31,17 @@ LOCAL_ALIAS="sub2api"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3300}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 {tag}" >&2
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 {tag|full-image-path} [--skip-pull]" >&2
   echo "  tag: GHCR 镜像 tag（如 20260901-120000、latest、v1.2.3）" >&2
+  echo "  --skip-pull: 跳过 docker pull（使用本地已有镜像，仅用于 dry-run / 测试）" >&2
   exit 2
 fi
 
+# 解析参数：第一个位置参数是 tag/路径，第二个可选 --skip-pull
 TAG="$1"
+SKIP_PULL=0
+[ "${2:-}" = "--skip-pull" ] && SKIP_PULL=1
 # 支持两种调用方式：
 # 1. 纯 tag（如 20260901-120000）→ 自动拼上 ghcr.io/{GHCR_IMAGE} 前缀
 # 2. 完整镜像路径（含 /，如 ghcr.io/trzjy/sub2api:20260901-120000）→ 直接使用
@@ -50,8 +54,15 @@ echo "==> 部署目标: $REMOTE_IMAGE"
 echo "==> 部署目录: $DEPLOY_DIR"
 
 # 1. 拉取镜像
-echo "==> [1/5] 拉取镜像 $REMOTE_IMAGE ..."
-docker pull "$REMOTE_IMAGE"
+if [ "$SKIP_PULL" -eq 1 ]; then
+  echo "==> [1/5] 跳过 docker pull（--skip-pull）"
+else
+  echo "==> [1/5] 拉取镜像 $REMOTE_IMAGE ..."
+  docker pull "$REMOTE_IMAGE" || {
+    echo "ERROR: docker pull 失败。如果本地已有镜像，可用 --skip-pull 重试。" >&2
+    exit 1
+  }
+fi
 
 # 2. 备份当前 .env
 if [ -f "$ENV_FILE" ]; then
