@@ -75,15 +75,20 @@ if [ -z "$WORKFLOW_ID_NUM" ]; then
 fi
 echo "    Workflow ID: $WORKFLOW_ID_NUM"
 
-# 6. 触发 workflow_dispatch
+# 6. 触发 workflow_dispatch（用 curl 替代 gh api，避免 JSON 类型处理问题）
 echo "==> [3/4] 触发 workflow_dispatch (tag=$TAG, simple_release=true) ..."
 
-# 构建 JSON body（用变量拼接避免引号嵌套地狱）
-DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"tag":{"value":"%s"},"simple_release":{"value":"true"}}}' \
+DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"tag":"%s","simple_release":true}}' \
   "$BRANCH" "$TAG")
 
-DISPATCH_OUT=$(gh api repos/"$GH_REPO"/actions/workflows/"$WORKFLOW_ID_NUM"/dispatches \
-  -X POST --input - <<< "$DISPATCH_JSON" 2>&1)
+GITHUB_TOKEN=$(gh auth token)
+
+DISPATCH_OUT=$(curl -sS -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  -d "$DISPATCH_JSON" \
+  "https://api.github.com/repos/$GH_REPO/actions/workflows/$WORKFLOW_ID_NUM/dispatches" 2>&1)
 
 DISPATCH_RC=$?
 if [ $DISPATCH_RC -ne 0 ]; then
@@ -91,7 +96,7 @@ if [ $DISPATCH_RC -ne 0 ]; then
   echo "响应: $DISPATCH_OUT" >&2
   echo "" >&2
   echo "提示：fork 的 workflow_dispatch 可能需要 GitHub 网页上手动触发" >&2
-  echo "  https://github.com/trzjy/sub2api/actions/workflows/release.yml" >&2
+  echo "  https://github.com/$GH_REPO/actions/workflows/release.yml" >&2
   exit 1
 fi
 echo "    触发成功: https://github.com/$GH_REPO/actions"
