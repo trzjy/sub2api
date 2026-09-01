@@ -59,8 +59,14 @@ echo "==> 已从 $TARGET_BAK 恢复 $ENV_FILE"
 TAG_VALUE=$(grep "^SUB2API_IMAGE_TAG=" "$ENV_FILE" | cut -d= -f2-)
 echo "==> 从备份提取 tag: $TAG_VALUE"
 
-# 提取纯 tag（去掉 ghcr.io/trzjy/sub2api: 前缀）
+# 提取纯 tag（去掉 ghcr.io/{owner}/sub2api: 前缀）
 PURE_TAG="${TAG_VALUE##*:}"
+# 如果不是纯 tag 格式（不含 /），再检查是否有 registry 前缀需要去除
+if [[ "$PURE_TAG" == *"/"* ]]; then
+  # 完整路径如 ghcr.io/trzjy/sub2api:20260901-120000
+  # 只取冒号后的部分
+  PURE_TAG="${PURE_TAG##*:}"
+fi
 
 echo "==> 拉取镜像 ..."
 docker pull "$TAG_VALUE" 2>/dev/null || {

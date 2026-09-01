@@ -2,13 +2,14 @@
 # sub2api-deploy: 拉取 GHCR 镜像并部署 sub2api 服务。
 #
 # 用法（在生产服务器 yiyutu-server 上）：
-#   deploy.sh {tag}
+#   deploy.sh {tag|full-image-path}
 # 示例：
-#   deploy.sh 20260901-120000    # 部署发布版
-#   deploy.sh latest             # 部署最新版
+#   deploy.sh 20260901-120000                        # 部署发布版（自动拼上 ghcr.io/trzjy/sub2api:）
+#   deploy.sh latest                                 # 部署最新版
+#   deploy.sh ghcr.io/trzjy/sub2api:20260901-120000  # 直接传完整路径（推荐，无歧义）
 #
 # 行为：
-#   1. docker pull ghcr.io/trzjy/sub2api:{tag}
+#   1. docker pull {image}
 #   2. 更新 .env 中 SUB2API_IMAGE_TAG
 #   3. 备份当前 .env 为 .env.bak-{时间戳}
 #   4. docker compose up -d --force-recreate sub2api
@@ -37,7 +38,14 @@ if [ $# -ne 1 ]; then
 fi
 
 TAG="$1"
-REMOTE_IMAGE="$GHCR_IMAGE:$TAG"
+# 支持两种调用方式：
+# 1. 纯 tag（如 20260901-120000）→ 自动拼上 ghcr.io/{GHCR_IMAGE} 前缀
+# 2. 完整镜像路径（含 / 和 :）→ 直接使用
+if [[ "$TAG" == *"/"* || "$TAG" == *":"* ]]; then
+  REMOTE_IMAGE="$TAG"
+else
+  REMOTE_IMAGE="$GHCR_IMAGE:$TAG"
+fi
 
 echo "==> 部署目标: $REMOTE_IMAGE"
 echo "==> 部署目录: $DEPLOY_DIR"
