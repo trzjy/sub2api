@@ -77,18 +77,24 @@ echo "    Workflow ID: $WORKFLOW_ID_NUM"
 
 # 6. 触发 workflow_dispatch
 echo "==> [3/4] 触发 workflow_dispatch (tag=$TAG, simple_release=true) ..."
-DISPATCH_RESP=$(gh api repos/"$GH_REPO"/actions/workflows/"$WORKFLOW_ID_NUM"/dispatches \
-  -F ref="$BRANCH" \
-  -F inputs="{\"tag\": {\"value\": \"$TAG\"}, \"simple_release\": {\"value\": \"true\"}}" \
-  --silent 2>&1)
+
+# 构建 JSON body（用变量拼接避免引号嵌套地狱）
+DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"tag":{"value":"%s"},"simple_release":{"value":"true"}}}' \
+  "$BRANCH" "$TAG")
+
+DISPATCH_OUT=$(gh api repos/"$GH_REPO"/actions/workflows/"$WORKFLOW_ID_NUM"/dispatches \
+  -X POST -H "Content-Type: application/json" -d "$DISPATCH_JSON" 2>&1)
 
 DISPATCH_RC=$?
 if [ $DISPATCH_RC -ne 0 ]; then
   echo "ERROR: workflow_dispatch 触发失败 (rc=$DISPATCH_RC)" >&2
-  echo "请检查 GITHUB_TOKEN 是否有 workflow 读写权限" >&2
-  echo "响应: $DISPATCH_RESP" >&2
+  echo "响应: $DISPATCH_OUT" >&2
+  echo "" >&2
+  echo "提示：fork 的 workflow_dispatch 可能需要 GitHub 网页上手动触发" >&2
+  echo "  https://github.com/trzjy/sub2api/actions/workflows/release.yml" >&2
   exit 1
 fi
+echo "    触发成功: https://github.com/$GH_REPO/actions"
 
 echo "    触发成功: https://github.com/$GH_REPO/actions"
 
