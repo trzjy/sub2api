@@ -2,19 +2,21 @@
 # sub2api-publish: 在本地触发 GitHub Actions workflow_dispatch 发布镜像。
 #
 # 用法（在本地开发机执行）：
-#   ./publish.sh {tag}
-# 示例：
-#   ./publish.sh 20260901-120000
+#   ./publish.sh
 #
 # 行为：
 #   1. 验证本地无未提交改动
 #   2. git push 当前分支到 origin
-#   3. 触发 GitHub API workflow_dispatch（trzjy/sub2api）
+#   3. 触发 GitHub API workflow_dispatch（trzjy/sub2api，simple_release=true）
 #   4. 轮询 Actions run 状态（最多 20 分钟）
-#   5. 完成后打印 pull 指令和下一步
+#   5. 完成后打印镜像 tag + pull 指令
+#
+# 注意：
+#   - 镜像 tag 由 GoReleaser 自动推断（基于 git ref / commit）
+#   - 不会传 tag input（release.yml 的 checkout 会用 tag 作为 git ref，传任意字符串会失败）
+#   - 轮询脚本无法预测最终镜像 tag，发布后请查看 GitHub Actions 输出版本号
 #
 # 依赖：
-#   - GITHUB_TOKEN 环境变量（GitHub PAT，有效期需 >30 天）
 #   - gh CLI 认证（gh auth status 需通过）
 #   - git remote origin 指向 trzjy/sub2api
 
@@ -23,14 +25,6 @@ set -euo pipefail
 GH_REPO="${GH_REPO:-trzjy/sub2api}"
 WORKFLOW_FILE="release.yml"
 WORKFLOW_ID="Release"
-
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 {tag}" >&2
-  echo "  tag: 发布版本号（不含 v 前缀，如 20260901-120000）" >&2
-  exit 2
-fi
-
-TAG="$1"
 
 # 1. 验证 GitHub token（优先用 GITHUB_TOKEN 环境变量，否则从 gh CLI 读取）
 if [ -z "${GITHUB_TOKEN:-}" ]; then
@@ -76,10 +70,14 @@ fi
 echo "    Workflow ID: $WORKFLOW_ID_NUM"
 
 # 6. 触发 workflow_dispatch（用 curl 替代 gh api，避免 JSON 类型处理问题）
-echo "==> [3/4] 触发 workflow_dispatch (tag=$TAG, simple_release=true) ..."
+echo "==> [3/4] 触发 workflow_dispatch (simple_release=true) ..."
 
-DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"tag":"%s","simple_release":true}}' \
-  "$BRANCH" "$TAG")
+# 注意：release.yml 的 checkout 步骤会读 tag input 作为 git ref。
+# 我们传任意时间戳作为版本号会导致 checkout 失败。
+# 正确用法：传 simple_release=true，由 GoReleaser 推断版本号（基于 git ref）。
+# 如果需要自定义版本号，先 git tag 然后 push 触发，不要用 workflow_dispatch 传 tag。
+DISPATCH_JSON=$(printf '{"ref":"%s","inputs":{"simple_release":true}}' \
+  "$BRANCH")
 
 GITHUB_TOKEN=$(gh auth token)
 
@@ -99,8 +97,6 @@ if [ $DISPATCH_RC -ne 0 ]; then
   echo "  https://github.com/$GH_REPO/actions/workflows/release.yml" >&2
   exit 1
 fi
-echo "    触发成功: https://github.com/$GH_REPO/actions"
-
 echo "    触发成功: https://github.com/$GH_REPO/actions"
 
 # 7. 轮询 Actions run
@@ -126,12 +122,18 @@ while [ "$elapsed" -lt "$MAX_WAIT" ]; do
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  GitHub Actions: $RUN_HTML"
-    echo "  镜像:   ghcr.io/$GH_REPO:$TAG"
     echo ""
-    echo "  下一步（服务器执行）："
-    echo "  ssh root@yiyutu-server"
-    echo "  cd /opt/sub2api"
-    echo "  ./deploy-config/deploy.sh $TAG"
+    echo "  镜像 tag 由 GoReleaser 自动推断，"
+    echo "  请在 Actions 输出的 'Run GoReleaser' 步骤中查看。"
+    echo ""
+    echo "  常见镜像名（已推 GHCR）："
+    echo "    ghcr.io/$GH_REPO:<version>     （如 v0.1.200）"
+    echo "    ghcr.io/$GH_REPO:latest"
+    echo ""
+    echo "  下一步（服务器执行，先在 Actions 页面查到的 tag）："
+    echo "    ssh root@yiyutu-server"
+    echo "    cd /opt/sub2api"
+    echo "    ./deploy-config/deploy.sh ghcr.io/$GH_REPO:<tag>"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 0
   elif [ "$RUN_CONCLUSION" = "failure" ] || [ "$RUN_CONCLUSION" = "cancelled" ]; then
