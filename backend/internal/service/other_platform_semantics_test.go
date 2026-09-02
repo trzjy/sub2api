@@ -45,3 +45,15 @@ func TestOtherPlatformAPIKeyProtocolAccess(t *testing.T) {
 	require.Equal(t, "sk-custom", acc.GetOpenAIProtocolAPIKey())
 	require.Equal(t, APIProtocolChatCompletions, acc.GetAPIProtocol())
 }
+
+// TestValidateOtherAccountCredential 锁定 other 建号不变量：仅 apikey、base_url 键存在且非空
+// （fmt.Sprint 会把缺失/nil 渲染成 "<nil>"，必须做存在性与 string 判定——落地外审-2）。
+func TestValidateOtherAccountCredential(t *testing.T) {
+	require.NoError(t, validateOtherAccountCredential(PlatformOpenAI, AccountTypeOAuth, nil))
+	require.Error(t, validateOtherAccountCredential(PlatformOther, AccountTypeUpstream, map[string]any{"base_url": "x"}))
+	require.Error(t, validateOtherAccountCredential(PlatformOther, AccountTypeAPIKey, map[string]any{}))
+	require.Error(t, validateOtherAccountCredential(PlatformOther, AccountTypeAPIKey, map[string]any{"base_url": nil}))
+	require.Error(t, validateOtherAccountCredential(PlatformOther, AccountTypeAPIKey, map[string]any{"base_url": ""}))
+	require.Error(t, validateOtherAccountCredential(PlatformOther, AccountTypeAPIKey, map[string]any{"base_url": "   "}))
+	require.NoError(t, validateOtherAccountCredential(PlatformOther, AccountTypeAPIKey, map[string]any{"base_url": "https://custom.example/v1"}))
+}

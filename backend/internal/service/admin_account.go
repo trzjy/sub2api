@@ -407,7 +407,12 @@ func validateOtherAccountCredential(platform, accountType string, credentials ma
 	if accountType != AccountTypeAPIKey {
 		return fmt.Errorf("platform %s only supports apikey accounts", platform)
 	}
-	if strings.TrimSpace(fmt.Sprint(credentials["base_url"])) == "" {
+	raw, ok := credentials["base_url"]
+	if !ok {
+		return fmt.Errorf("platform %s requires a custom base_url", platform)
+	}
+	baseURL, _ := raw.(string)
+	if strings.TrimSpace(baseURL) == "" {
 		return fmt.Errorf("platform %s requires a custom base_url", platform)
 	}
 	return nil
@@ -582,9 +587,17 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_TYPE_INVALID",
 				"platform other only supports apikey accounts")
 		}
-		if input.Credentials != nil && strings.TrimSpace(fmt.Sprint(input.Credentials["base_url"])) == "" {
-			return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
-				"platform other requires a custom base_url")
+		if input.Credentials != nil {
+			raw, ok := input.Credentials["base_url"]
+			if !ok {
+				return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
+					"platform other requires a custom base_url")
+			}
+			baseURL, _ := raw.(string)
+			if strings.TrimSpace(baseURL) == "" {
+				return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
+					"platform other requires a custom base_url")
+			}
 		}
 	}
 	var normalizedExtra map[string]any

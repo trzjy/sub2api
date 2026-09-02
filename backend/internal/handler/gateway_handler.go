@@ -1113,6 +1113,13 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
+	if platform == service.PlatformOther {
+		// other 无平台默认模型目录：空 mapping 时公开模型列表为空，不回落到
+		// Claude 默认模型（落地外审-1），与调度层空 mapping 拒绝保持同一契约。
+		writeModelsList(c, platform, nil)
+		return
+	}
+
 	// Fallback to default models
 	if platform == service.PlatformOpenAI {
 		c.JSON(http.StatusOK, gin.H{
