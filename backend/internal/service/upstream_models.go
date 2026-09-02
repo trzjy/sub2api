@@ -513,7 +513,7 @@ func upstreamModelRegistryBaseURL(account *Account) string {
 		return ""
 	}
 	switch {
-	case account.IsOpenAI() || account.IsCNProvider():
+	case account.UsesOpenAIProtocolSharedBaseURL():
 		return account.GetOpenAIFormatBaseURL()
 	case account.IsGrok():
 		return account.GetGrokBaseURL()
@@ -633,8 +633,8 @@ func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, acc
 		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
-	case account.IsOpenAI() || account.IsCNProvider():
-		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）复用 OpenAI /v1/models 探测。
+	case account.UsesOpenAIProtocolSharedBaseURL():
+		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与通用 other 复用 OpenAI /v1/models 探测。
 		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)
@@ -856,6 +856,10 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 	// 列表同步需使用 OpenAI 格式 base（供应商 × 模式默认）。
 	baseURL := account.GetOpenAIFormatBaseURL()
 	if strings.TrimSpace(baseURL) == "" {
+		if account.Platform == PlatformOther {
+			// other 无默认上游：模型同步空 base_url 失败关闭，禁止回落官方 OpenAI（外审-2）。
+			return nil, newUpstreamModelSyncConfigError("platform other requires a custom base_url", nil)
+		}
 		baseURL = "https://api.openai.com"
 	}
 	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)

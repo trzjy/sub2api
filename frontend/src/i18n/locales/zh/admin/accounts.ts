@@ -310,6 +310,7 @@ export default {
         kimi: 'Kimi',
         zhipu: 'Zhipu GLM',
         deepseek: 'DeepSeek',
+        other: 'Other',
       },
       cnProviders: {
         accountMode: {

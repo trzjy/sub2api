@@ -55,6 +55,10 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 	// embeddings 需使用 OpenAI 格式 base。
 	baseURL := account.GetOpenAIFormatBaseURL()
 	if baseURL == "" {
+		if account.Platform == PlatformOther {
+			// other 无默认上游：空 base_url 失败关闭，禁止回落官方 OpenAI（外审-2）。
+			return nil, fmt.Errorf("account %d (platform other) has no base_url", account.ID)
+		}
 		baseURL = "https://api.openai.com"
 	}
 	validatedURL, err := s.validateUpstreamBaseURL(baseURL)

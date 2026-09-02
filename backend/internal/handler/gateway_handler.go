@@ -1467,6 +1467,10 @@ func defaultModelIDsForPlatform(platform string) []string {
 			}
 		}
 		return ids
+	case service.PlatformOther:
+		// other 无平台内置模型目录：公开模型列表完全来自组内账号 model_mapping；
+		// 返回空列表，避免回落到 Claude 默认模型（外部审查外审-3）。
+		return nil
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

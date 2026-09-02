@@ -202,6 +202,18 @@
             <PlatformIcon platform="deepseek" size="sm" />
             DeepSeek
           </button>
+          <button
+            type="button"
+            @click="selectOtherPlatform"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'other'
+                ? 'bg-white text-slate-600 shadow-sm dark:bg-dark-600 dark:text-slate-300'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            Other
+          </button>
         </div>
       </div>
 
@@ -4046,6 +4058,15 @@ function selectCNPlatform(platform: 'kimi' | 'zhipu' | 'deepseek') {
   }
   apiKeyBaseUrl.value = defaultCNBaseUrl(platform, accountMode.value, apiProtocol.value)
   resetAdaptiveBaseUrls(platform, accountMode.value)
+}
+
+// 通用 other 平台：仅支持 OpenAI 兼容 API-Key 自定义上游；无内置默认端点，
+// base_url 必须由运营填写（后端同时有同名校验）。
+function selectOtherPlatform() {
+  form.platform = 'other'
+  form.type = 'apikey'
+  accountCategory.value = 'apikey'
+  apiKeyBaseUrl.value = ''
 }
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {

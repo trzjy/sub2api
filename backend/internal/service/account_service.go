@@ -222,6 +222,9 @@ func NewAccountService(accountRepo AccountRepository, groupRepo GroupRepository)
 
 // Create 创建账号
 func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (*Account, error) {
+	if err := validateOtherAccountCredential(req.Platform, req.Type, req.Credentials); err != nil {
+		return nil, err
+	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
 		if err := s.validateGroupIDsExist(ctx, req.GroupIDs); err != nil {
@@ -516,6 +519,9 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		return nil
 	case PlatformKimi, PlatformZhipu, PlatformDeepseek:
 		// 国产 OpenAI 兼容供应商：凭证为 API Key，实际可用性经余额/额度探测与转发路径验证。
+		return nil
+	case PlatformOther:
+		// 通用 OpenAI 兼容自定义上游：凭证为 API Key，可用性经 /v1/models 预览或转发路径验证。
 		return nil
 	default:
 		return fmt.Errorf("unsupported platform: %s", account.Platform)

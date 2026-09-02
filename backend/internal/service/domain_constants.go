@@ -47,6 +47,7 @@ const (
 	PlatformKimi      = domain.PlatformKimi
 	PlatformZhipu     = domain.PlatformZhipu
 	PlatformDeepseek  = domain.PlatformDeepseek
+	PlatformOther     = domain.PlatformOther
 	PlatformComposite = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
@@ -96,6 +97,14 @@ func IsCNProvider(platform string) bool {
 	}
 }
 
+// UsesOpenAIProtocolSharedBaseURL 报告 platform 是否属于「走共享 OpenAI 兼容
+// base_url / api_key」的平台族：含 openai（含 OAuth）、国产 CN 供应商（kimi/
+// zhipu/deepseek）与通用 other；不含 grok（走独立 GetGrokBaseURL）与 composite
+// （聚合层）。用于 base_url / api_key / 模型同步等公共能力点的平台判定。
+func UsesOpenAIProtocolSharedBaseURL(platform string) bool {
+	return platform == PlatformOpenAI || IsCNProvider(platform) || platform == PlatformOther
+}
+
 // AllowedQuotaPlatforms 是允许设置 user × platform quota 的平台列表（单一权威来源）。
 // ent/schema/user_platform_quota.go 的 Validate 函数独立维护（构建期约束），
 // 若新增平台需同步修改该 schema。
@@ -108,6 +117,7 @@ var AllowedQuotaPlatforms = []string{
 	PlatformKimi,
 	PlatformZhipu,
 	PlatformDeepseek,
+	PlatformOther,
 }
 
 // AllowedSchedulingThresholdPlatforms 是允许设置账号自动停调阈值的平台列表。

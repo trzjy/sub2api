@@ -1025,13 +1025,13 @@ func (h *AccountHandler) Update(c *gin.Context) {
 
 // scheduleOpenAIResponsesProbe 异步触发 OpenAI APIKey 账号的 Responses API 能力探测。
 //
-// 仅对 platform=openai && type=apikey 账号生效；其他账号无操作。
-// 探测本身在 goroutine 中执行（会发一次 HTTP 请求到上游），不会阻塞
-// 当前请求。探测错误仅记录日志，不向上下文传播：探测失败时标记保持缺失，
-// 网关会按"现状即证据"默认走 Responses。
+// 对 platform=openai/CN/other && type=apikey 账号生效；openai 走网络探测，
+// CN/other 在探测函数内直接落标（不发网络请求）。探测错误仅记录日志，
+// 不向上下文传播：探测失败时标记保持缺失，网关会按"现状即证据"默认走 Responses。
 func (h *AccountHandler) scheduleOpenAIResponsesProbe(account *service.Account) {
 	if account == nil || account.Type != service.AccountTypeAPIKey ||
-		(account.Platform != service.PlatformOpenAI && !service.IsCNProvider(account.Platform)) {
+		(account.Platform != service.PlatformOpenAI && !service.IsCNProvider(account.Platform) &&
+			account.Platform != service.PlatformOther) {
 		return
 	}
 	if h.accountTestService == nil {

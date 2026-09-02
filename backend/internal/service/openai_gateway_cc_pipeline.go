@@ -140,6 +140,11 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 func (s *OpenAIGatewayService) openAIChatCompletionsTargetURL(account *Account) (string, error) {
 	baseURL := account.GetOpenAIBaseURL()
 	if baseURL == "" {
+		if account.Platform == PlatformOther {
+			// other 无默认上游：空 base_url 必须失败关闭，绝不把第三方 key 打到官方
+			// OpenAI（外部审查外审-2；建号校验为主防线，此处兜底存量/直写数据）。
+			return "", fmt.Errorf("account %d (platform other) has no base_url", account.ID)
+		}
 		baseURL = "https://api.openai.com"
 	}
 	validatedURL, err := s.validateUpstreamBaseURL(baseURL)

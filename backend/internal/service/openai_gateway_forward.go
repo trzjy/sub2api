@@ -1240,6 +1240,11 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 	if account == nil || account.Type != AccountTypeAPIKey {
 		return false
 	}
+	if account.Platform == PlatformOther {
+		// other 是通用 ChatCompletions 自定义上游：一律按 CC 转发，避免账号 Extra
+		// 残留 probe 标记把入站消息/chat 推向上游不存在的 /v1/responses。
+		return true
+	}
 	if account.IsCNProvider() {
 		// CN 的显式协议配置优先于异步探针 Extra；adaptive 仅 DeepSeek 有原生
 		// Responses，Kimi/GLM 回退 Chat Completions。
@@ -1275,6 +1280,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			baseURL = account.GetCNProtocolBaseURL(APIProtocolResponses)
 		}
 		if baseURL == "" {
+			if account.Platform == PlatformOther {
+				// other 无默认上游：空 base_url 失败关闭，禁止回落官方 OpenAI（外审-2）。
+				return nil, fmt.Errorf("account %d (platform other) has no base_url", account.ID)
+			}
 			targetURL = openaiPlatformAPIURL
 		} else {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)

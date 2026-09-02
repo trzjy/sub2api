@@ -24,9 +24,12 @@ const (
 	PlatformAntigravity = "antigravity"
 	PlatformGrok        = "grok"
 	// 国产 OpenAI 兼容供应商（经 OpenAI 网关转发，按 Chat Completions 协议）。
-	PlatformKimi      = "kimi"     // Kimi (月之暗面 / Moonshot)
-	PlatformZhipu     = "zhipu"    // 智谱 GLM (bigmodel)
-	PlatformDeepseek  = "deepseek" // DeepSeek
+	PlatformKimi     = "kimi"     // Kimi (月之暗面 / Moonshot)
+	PlatformZhipu    = "zhipu"    // 智谱 GLM (bigmodel)
+	PlatformDeepseek = "deepseek" // DeepSeek
+	// PlatformOther 通用 OpenAI 兼容自定义上游：任意第三方 Chat Completions
+	// 兼容端点经 OpenAI 网关转发。无内置 base_url 预设，账号须自填 base_url。
+	PlatformOther     = "other"
 	PlatformComposite = "composite"
 )
 
