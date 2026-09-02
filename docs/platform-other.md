@@ -13,6 +13,8 @@ Sub2API 的平台标识是编译期硬编码，分散在十几处名单。现有
 2. minimax/qwen 等**不做任何官方预设**——需要时以 `other` 平台自填 base_url/api_key/model_mapping 添加；官方模型亦然；
 3. `other` 能力与具名 OpenAI 兼容平台看齐（见 §3）；支持**用户×平台 USD 配额**；**Anthropic 客户端（Claude Code `/v1/messages`）兼容范围见 §3.7 如实声明**。
 
+**阶段边界**：阶段一只提交方案文档与 `docs/.gitignore` 白名单（本分支即如此），不做任何代码/测试改动。§4.7 fixture、调度快照、URL 失败关闭、模型空 mapping、Anthropic 字段级验收等全部属**阶段二实现**，届时以 diff + 测试结果提供证据；不得把方案清单当作实现证据。
+
 ## 2. 语义与权威源
 
 `other` = **OpenAI 兼容 + API-Key + 自定义 base_url 的按量上游**。平台标识只新增一个，第三方厂商共用此桶；厂商间区分靠「账号 base_url + model_mapping + 群组命名」。
@@ -41,6 +43,8 @@ service 层 `UsesOpenAIProtocolSharedBaseURL(platform)` = `openai || IsCNProvide
 ### 3.3 base_url：无默认、失败关闭（外审 2）
 `other` 不内置任何上游默认值。**账号创建与更新的后端口径要求 `credentials.base_url` 必填**；并在此基础上做**纵深防御**：所有经 `GetOpenAIBaseURL()`/`GetOpenAIFormatBaseURL()` 的 URL 构建入口（CC 管道 `openai_gateway_cc_pipeline.go`、Responses、模型 `/v1/models`、count_tokens、embeddings 等）对 `other` 平台**空 base_url 一律返回明确配置错误**，禁止落入通用 `https://api.openai.com` fallback——防止存量账号/直写 DB/部分更新路径把第三方 key 打到 OpenAI 官方（凭证外发 + 不可预期费用）。`GetOpenAIBaseURL` 平台默认 switch 对 `other` 返回 ""（不进 default=api.openai.com 兜底分支）。
 
+**统一失败契约**：`other` + 空 base_url 一律返回明确配置错误（HTTP 400 + 稳定错误码），由**集中 helper** 判定，禁止各入口自行回退。**引用点清单是阶段二实现第 0 步的固定产物**：全仓扫描 `GetOpenAIBaseURL()`/`GetOpenAIFormatBaseURL()` 全部调用点，以及任何把空值显式替换为 `https://api.openai.com` 的 fallback 点，逐点加失败关闭——清单以扫描结果提交，不以「…等」省略，并做旧 fallback 残留扫描（见 §7/§8）。
+
 ### 3.4 协议：固定 chat_completions
 `GetAPIProtocol` 对非 CN 恒返 `chat_completions` → `other` 天然锁 CC。账号层不接受将其配成 anthropic/adaptive。
 
@@ -57,7 +61,7 @@ service 层 `UsesOpenAIProtocolSharedBaseURL(platform)` = `openai || IsCNProvide
 `/v1/messages` → OpenAI 网关 → `shouldForwardOpenAIResponsesViaRawChatCompletions`（非 CN API-Key 亦 true）→ 现成 Messages→ChatCompletions 转换器（`openai_gateway_messages_chat_fallback.go` → `pkg/apicompat`）。**兼容范围 = 转换器实际覆盖的 Anthropic 子集**：
 - **支持**：基础 messages 文本/多轮、基础 tool_use/tool_result 续接、流式。
 - **降级/丢弃（如实不承诺保真）**：上游无对应能力时 `thinking` 内容块、server-side 工具（如 web_search）会被转换器丢弃；请求可能返回 200 但语义缺失。不能以「返回 200」充当完整语义兼容。
-- 本任务**不重写转换器**；实现阶段为 thinking/tool/cache/count_tokens 建立端到端契约测试以**如实记录实测支持子集**，并在完成报告明示。需要完整保真的场景应接支持原生 anthropic 协议的上游或独立具名平台。
+- 本任务**不重写转换器**。实现阶段验收 = **字段级正/负例断言**（不是「记录观察」）：①支持子集正例：基础文本/多轮、`tool_use`/`tool_result` 续接、流式、`cache_control`、`count_tokens` 逐字段断言往返；②降级项负例断言预期行为：`thinking` 内容块被丢弃、server-side 工具被丢弃/明确拒绝——**断言明确行为，不允许「HTTP 200 + 静默丢语义」当通过**；③无能力项返回明确结果。上述断言列入 done_when。需要完整保真的场景应接支持原生 anthropic 协议的上游或独立具名平台。
 
 ### 3.8 调度快照生命周期（外审 1）
 `other` 须纳入调度快照全生命周期，与既有平台一致：
@@ -80,7 +84,7 @@ service 层 `UsesOpenAIProtocolSharedBaseURL(platform)` = `openai || IsCNProvide
 
 ### 4.3 base / key / URL（外审 2）
 - `account.go` `GetOpenAIBaseURL` 门换窄谓词；平台 switch 对 other 返回 ""（不落 api.openai.com）。
-- **所有 URL 构建入口对 other 空 base_url 失败关闭**：`openai_gateway_cc_pipeline.go`（CC target URL fallback）、Responses/chat buildUpstreamRequest、upstream_models `/v1/models`、count_tokens、embeddings 等（实施时以 `GetOpenAIBaseURL()`/`GetOpenAIFormatBaseURL()` 全引用点扫描）。
+- **所有 URL 构建入口对 other 空 base_url 失败关闭（阶段二第 0 步先产出全引用点清单）**：CC 管道 `openai_gateway_cc_pipeline.go`、Responses/chat `buildUpstreamRequest`、upstream_models `/v1/models`、count_tokens、embeddings 及扫描发现的一切入口；统一错误语义，禁止任何入口回落 `https://api.openai.com`。
 - `account.go` `GetOpenAIProtocolAPIKey`：放行 other apikey 读取。
 
 ### 4.4 公共能力 / 模型（外审 3）
@@ -105,9 +109,8 @@ service 层 `UsesOpenAIProtocolSharedBaseURL(platform)` = `openai || IsCNProvide
 - `ent/schema/user_platform_quota.go` `Validate` 追加 other。
 - 新迁移 `backend/migrations/236_user_platform_quotas_add_other.sql`（DROP+ADD CHECK 含 other）+ 同前缀迁移测试。
 
-### 4.7 测试与契约（外审完整性）
-- **`backend/internal/server/api_contract_test.go`：`default_platform_quotas` 两处 fixture 补 `"other"` 键（纳入本清单，不只提在 §2）。**
-- 其余见 §7。
+### 4.7 测试与契约（外审完整性，**阶段二实现必需项**）
+- **`backend/internal/server/api_contract_test.go`：`default_platform_quotas` 两处 fixture 补 `"other"` 键。**本方案阶段一仅提交 docs/.gitignore；该 fixture 连同全部代码改动属阶段二实现（§1 阶段边界）。
 
 ### 4.8 前端
 - `types/index.ts`：`AccountPlatform`/`GroupPlatform` 加 `'other'`。
@@ -138,7 +141,7 @@ service 层 `UsesOpenAIProtocolSharedBaseURL(platform)` = `openai || IsCNProvide
 ## 7. 验证矩阵
 - 后端：`go build ./...`、`go vet ./internal/...`、`go test ./... && golangci-lint run ./...`（backend/Makefile）。
 - 定向测试覆盖：窄谓词（grok/composite 不含）；调度快照桶对 other（外审 1 回归）；**空 base_url 在各 URL 构建入口失败关闭、不回落 api.openai.com**（外审 2 回归，覆盖 CC/模型/count_tokens/embeddings）；**other 空 mapping → 公开模型列表空 + 调度拒绝**（外审 3）；Normalize/dispatch/count_tokens/billing；迁移与契约 fixture（含 api_contract_test 补键）；配额 handler。
-- Anthropic 客户端：**端到端契约测试记录实测子集**（thinking/tool_use/tool_result/cache/count_tokens），完成报告如实明示支持与降级（外审 4）。
+- Anthropic 客户端：**字段级正/负例端到端契约测试**（§3.7）——基础文本/多轮、tool_use/tool_result 续接、流式、cache、count_tokens 逐字段断言；thinking / server-side tools 的丢弃与拒绝行为显式断言；不允许以 200 + 静默丢语义通过（外审 4）。
 - 前端：typecheck、lint:check、定向 vitest（platforms.spec.ts、SettingsView.spec.ts）。
 - 端到端（需真实第三方 OpenAI 兼容端点 Key；无 key 时单测+冒烟为主并标注待真实验收）。
 
