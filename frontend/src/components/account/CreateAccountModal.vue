@@ -5525,7 +5525,14 @@ const handleSubmit = async () => {
     return
   }
 
-  // Determine default base URL based on platform
+  if (form.platform === 'other' && !apiKeyBaseUrl.value.trim()) {
+    appStore.showError(t('admin.accounts.otherBaseUrlRequired'))
+    return
+  }
+
+  // Determine default base URL based on platform.
+  // other（通用 OpenAI 兼容自定义上游）没有默认端点：必须由用户填写，禁止回落
+  // 任何官方端点（落地外审-2）。下方在提交前做必填校验，后端亦有同名校验。
   const defaultBaseUrl =
     form.platform === 'openai'
       ? 'https://api.openai.com'
@@ -5533,7 +5540,9 @@ const handleSubmit = async () => {
         ? 'https://generativelanguage.googleapis.com'
         : form.platform === 'grok'
           ? 'https://api.x.ai/v1'
-          : 'https://api.anthropic.com'
+          : form.platform === 'other'
+            ? ''
+            : 'https://api.anthropic.com'
 
   // Build credentials with optional model mapping
   const credentials: Record<string, unknown> = {

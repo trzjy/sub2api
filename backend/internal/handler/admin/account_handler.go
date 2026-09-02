@@ -2771,6 +2771,16 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 
 	// For API Key accounts: return models based on model_mapping
 	mapping := account.GetModelMapping()
+	if account.Platform == service.PlatformOther {
+		// other 无平台默认模型目录：仅暴露 mapping 键；空映射返回空列表，避免宣称
+		// 支持 Claude 默认模型后被发往任意自定义上游（落地外审-2），与网关契约一致。
+		otherModels := make([]claude.Model, 0, len(mapping))
+		for requestedModel := range mapping {
+			otherModels = append(otherModels, claude.Model{ID: requestedModel, Type: "model", DisplayName: requestedModel})
+		}
+		response.Success(c, otherModels)
+		return
+	}
 	if len(mapping) == 0 {
 		// No mapping configured, return default models
 		response.Success(c, claude.DefaultModels)
