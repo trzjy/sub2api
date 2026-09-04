@@ -130,7 +130,9 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 	if account == nil || !account.IsCNProvider() || !account.IsCodingPlan() || len(account.Extra) == 0 {
 		return nil
 	}
-	provider := account.Platform
+	// 快照键以 coding 供应商为前缀（kimi_/zhipu_/volcano_），与
+	// cnQuotaExtraUpdates 的写入维度一致；不能用 platform（deepseek 火山号）取键。
+	provider := account.GetCodingPlanProvider()
 	var earliest *time.Time
 	for _, suffix := range []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset} {
 		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, suffix)])

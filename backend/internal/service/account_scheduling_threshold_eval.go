@@ -62,6 +62,10 @@ func EvaluateAccountSchedulingThreshold(account *Account, thresholds map[string]
 		winner = pickLatestResetSchedulingCandidate(cnProviderThresholdCandidates(account, PlatformKimi), threshold, now)
 	case PlatformZhipu:
 		winner = pickLatestResetSchedulingCandidate(cnProviderThresholdCandidates(account, PlatformZhipu), threshold, now)
+	case PlatformDeepseek:
+		// 火山方舟订阅号平台为 deepseek，快照前缀为 volcano_；非 coding 的 deepseek
+		// 账号对应 extra 为空 → 无候选 → 不变更决策，天然安全。
+		winner = pickLatestResetSchedulingCandidate(cnProviderThresholdCandidates(account, providerVolcano), threshold, now)
 	default:
 		return decision
 	}

@@ -44,7 +44,7 @@ func TestComputeDashboardHealthScore_DegradesOnBadSignals(t *testing.T) {
 		JobHeartbeats: []*OpsJobHeartbeat{
 			{
 				JobName:     "job-a",
-				LastErrorAt: timePtr(time.Now().UTC().Add(-1 * time.Minute)),
+				LastErrorAt: healthTimePtr(time.Now().UTC().Add(-1 * time.Minute)),
 				LastError:   stringPtr("boom"),
 			},
 		},
@@ -437,6 +437,6 @@ func TestComputeInfraHealth(t *testing.T) {
 	}
 }
 
-func timePtr(v time.Time) *time.Time { return &v }
+func healthTimePtr(v time.Time) *time.Time { return &v }
 
 func stringPtr(v string) *string { return &v }

@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -686,4 +688,120 @@ func TestGetAnthropicAPIKeyAuthScheme_CNProvider(t *testing.T) {
 
 	zhipu.Extra = map[string]any{"anthropic_apikey_auth_scheme": "authorization_bearer"}
 	require.Equal(t, AnthropicAPIKeyAuthSchemeAuthorizationBearer, zhipu.GetAnthropicAPIKeyAuthScheme())
+}
+
+// TestVolcanoUsageAction 路径决定管理 Action：/api/plan → GetAFPUsage，其余 → GetCodingPlanUsage。
+func TestVolcanoUsageAction(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "GetAFPUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/api/plan"))
+	require.Equal(t, "GetCodingPlanUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/api/coding"))
+	require.Equal(t, "GetCodingPlanUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/v1/chat/completions"))
+}
+
+// TestParseVolcanoAgentTiers 方舟 Agent Plan：AFPFiveHour/AFPWeekly 的
+// Used/Quota → 百分比，ResetTime(ms) → RFC3339。
+func TestParseVolcanoAgentTiers(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"Result":{
+		"AFPFiveHour":{"Quota":10000,"Used":2000,"ResetTime":1788484203000},
+		"AFPWeekly":{"Quota":35000,"Used":7000,"ResetTime":1788710400000}
+	}}`)
+	tiers := parseVolcanoAgentTiers(body)
+	require.Len(t, tiers, 2)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.InDelta(t, 20.0, tiers[0].UsedPercent, 1e-9)
+	require.Equal(t, "2026-09-04T01:10:03Z", tiers[0].ResetAt)
+	require.Equal(t, "weekly", tiers[1].Window)
+	require.InDelta(t, 20.0, tiers[1].UsedPercent, 1e-9)
+}
+
+// TestParseVolcanoCodingTiers Coding Plan：QuotaUsage[] 的 Percent 直接采用，
+// session=5h / weekly，ResetTimestamp(sec) → RFC3339，monthly 丢弃，-1 忽略。
+func TestParseVolcanoCodingTiers(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"Result":{"QuotaUsage":[
+		{"Level":"session","Percent":0,"ResetTimestamp":-1,"Cap":100},
+		{"Level":"weekly","Percent":55,"ResetTimestamp":1788710400,"Cap":100},
+		{"Level":"monthly","Percent":3,"ResetTimestamp":1791129599,"Cap":100}
+	]}}`)
+	tiers := parseVolcanoCodingTiers(body)
+	require.Len(t, tiers, 2)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.InDelta(t, 0.0, tiers[0].UsedPercent, 1e-9)
+	require.Equal(t, "", tiers[0].ResetAt) // -1 无重置
+	require.Equal(t, "weekly", tiers[1].Window)
+	require.InDelta(t, 55.0, tiers[1].UsedPercent, 1e-9)
+	require.Equal(t, "2026-09-06T16:00:00Z", tiers[1].ResetAt) // 1788710400s
+}
+
+// TestVolcanoExtraUpdatesAndSnapshotReset volcano 快照写 volcano_ 前缀，且
+// cnProviderQuotaSnapshotReset 按 GetCodingPlanProvider 取键（不能错读 deepseek_*）。
+func TestVolcanoExtraUpdatesAndSnapshotReset(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 30, ResetAt: "2026-09-04T11:00:00Z"},
+		{Window: "weekly", UsedPercent: 5, ResetAt: "2026-09-07T08:00:00Z"},
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	require.Equal(t, 30.0, updates[cnExtraKey(providerVolcano, cnExtraSuffix5hUsed)])
+	reset := cnProviderQuotaSnapshotReset(&Account{
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"account_mode": AccountModeCoding,
+			"base_url":     "https://ark.cn-beijing.volces.com/api/coding",
+		},
+		Extra: updates,
+	}, now)
+	require.NotNil(t, reset)
+	require.Equal(t, "2026-09-04T11:00:00Z", reset.UTC().Format(time.RFC3339))
+}
+
+// TestVolcEngineSignQuerySignature 固定输入下幂等且签名头齐全（Host/X-Date/
+// X-Content-Sha256/Authorization），SignedHeaders 为 host;x-content-sha256;x-date。
+func TestVolcEngineSignQuerySignature(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 4, 1, 30, 0, 0, time.UTC)
+	query := url.Values{}
+	query.Set("Action", "GetAFPUsage")
+	query.Set("Version", "2024-01-01")
+	canon, headers, err := volcEngineSignQuery("AK", "SK", "cn-beijing", "ark", "open.volcengineapi.com", query, now)
+	require.NoError(t, err)
+	require.Contains(t, canon, "Action=GetAFPUsage")
+	require.Contains(t, canon, "Version=2024-01-01")
+	require.Equal(t, "open.volcengineapi.com", headers.Get("Host"))
+	require.Equal(t, "20260904T013000Z", headers.Get("X-Date"))
+	auth := headers.Get("Authorization")
+	require.Contains(t, auth, "HMAC-SHA256 Credential=AK/20260904/cn-beijing/ark/request")
+	require.Contains(t, auth, "SignedHeaders=host;x-content-sha256;x-date")
+	require.Contains(t, auth, "Signature=")
+	// 幂等：同输入二次签名得同签名。
+	canon2, h2, _ := volcEngineSignQuery("AK", "SK", "cn-beijing", "ark", "open.volcengineapi.com", url.Values{"Action": {"GetAFPUsage"}, "Version": {"2024-01-01"}}, now)
+	require.Equal(t, canon, canon2)
+	require.Equal(t, headers.Get("Authorization"), h2.Get("Authorization"))
+	_ = http.Header{}
+}
+
+// TestVolcanoGetCodingPlanProvider coding 模式 + 火山 base_url 识别为 volcano 供应商。
+func TestVolcanoGetCodingPlanProvider(t *testing.T) {
+	t.Parallel()
+	for _, baseURL := range []string{
+		"https://ark.cn-beijing.volces.com/api/coding",
+		"https://ark.cn-beijing.volces.com/api/plan",
+	} {
+		a := &Account{
+			Platform:    PlatformDeepseek,
+			Type:        AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": baseURL, "account_mode": AccountModeCoding},
+		}
+		require.Equal(t, providerVolcano, a.GetCodingPlanProvider())
+	}
+	// 非 coding 模式不识别。
+	payg := &Account{
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/plan", "account_mode": AccountModePayG},
+	}
+	require.Equal(t, "", payg.GetCodingPlanProvider())
 }

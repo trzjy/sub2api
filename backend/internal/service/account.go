@@ -1569,6 +1569,10 @@ func (a *Account) GetCodingPlanProvider() string {
 		return PlatformKimi
 	case strings.Contains(baseURL, "bigmodel.cn"), strings.Contains(baseURL, "api.z.ai"):
 		return PlatformZhipu
+	case strings.Contains(baseURL, "ark.cn-beijing.volces.com"):
+		// 火山方舟订阅号：/api/plan（Agent Plan）与 /api/coding（Coding Plan）
+		// 同走 open.volcengineapi.com 管理接口，探测动作按路径区分。
+		return providerVolcano
 	default:
 		return ""
 	}
