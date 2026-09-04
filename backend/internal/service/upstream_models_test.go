@@ -322,6 +322,61 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
 }
 
+func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoSubscriptionToArk(t *testing.T) {
+	t.Parallel()
+
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	ctx := context.Background()
+
+	// 火山订阅号：platform=deepseek + base_url=ark 订阅端点 + api_protocol=anthropic。
+	// 修复前 GetOpenAIFormatBaseURL 会把 deepseek 回落 api.deepseek.com，导致火山密钥发到
+	// 错误主机（生产账号 29 的 sync-upstream 502）；修复后必须发往 ark 的 OpenAI 兼容端点。
+	account := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "ark-sub-key",
+			"base_url":     "https://ark.cn-beijing.volces.com/api/plan",
+			"api_protocol": "anthropic",
+			"account_mode": "coding",
+		},
+	}
+
+	req, err := svc.buildOpenAIUpstreamModelsRequest(ctx, account)
+	require.NoError(t, err)
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req.URL.String())
+	require.Equal(t, "Bearer ark-sub-key", req.Header.Get("Authorization"))
+	require.NotContains(t, req.URL.String(), "deepseek.com")
+
+	// /api/coding 同样派生到 /api/v3，密钥发往火山主机而非 deepseek.com。
+	coding := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "ark-coding-key",
+			"base_url":     "https://ark.cn-beijing.volces.com/api/coding",
+			"api_protocol": "anthropic",
+		},
+	}
+	req2, err := svc.buildOpenAIUpstreamModelsRequest(ctx, coding)
+	require.NoError(t, err)
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req2.URL.String())
+	require.Equal(t, "Bearer ark-coding-key", req2.Header.Get("Authorization"))
+
+	// 普通 deepseek（非火山，无自定义 base_url）不受影响：仍走 deepseek 默认端点。
+	plainDeepseek := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "plain-key",
+		},
+	}
+	req3, err := svc.buildOpenAIUpstreamModelsRequest(ctx, plainDeepseek)
+	require.NoError(t, err)
+	require.Equal(t, "https://api.deepseek.com/v1/models", req3.URL.String())
+	require.Equal(t, "Bearer plain-key", req3.Header.Get("Authorization"))
+}
+
 func TestBuildUpstreamModelsRequestSupportsGrokOAuth(t *testing.T) {
 	t.Parallel()
 
