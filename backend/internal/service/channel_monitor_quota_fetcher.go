@@ -199,7 +199,12 @@ func (f *ChannelMonitorQuotaFetcher) fetchUncached(ctx context.Context, accountI
 	// 下游服务不再各自 GetByID（每次含 proxies/groups 联查）。
 	switch account.Platform {
 	case domain.PlatformKimi, domain.PlatformZhipu, domain.PlatformDeepseek:
-		if account.IsCodingPlan() {
+		// 额度探测链路由「是否 coding plan 供应商」决定：kimi/zhipu coding 与
+		// 火山方舟订阅号（platform=deepseek，base_url 指向 volces）都走 quota 链路
+		// 刷新 <provider>_5h/weekly 快照；普通 deepseek payg 仍走 balance 链路。
+		// 用 resolveCNQuotaProvider（已兼容 payg 火山）而非 IsCodingPlan，
+		// 否则 payg 火山号不接周期刷新。
+		if resolveCNQuotaProvider(account) != "" {
 			return f.fetchCNQuota(ctx, account, now)
 		}
 		return f.fetchCNBalance(ctx, account, now)

@@ -79,8 +79,15 @@
   </div>
 </template>
 
+<script lang="ts">
+// 模块级共享状态（非 setup 块）：列表页每行一个组件实例，翻页/筛选/刷新会
+// 重复挂载各自副本；lastAutoProbeAt 放在模块作用域才能跨实例去重，避免对
+// 上游形成探测风暴。若放在 <script setup> 内则每实例独立，去抖失效。
+const lastAutoProbeAt = new Map<number, number>()
+</script>
+
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
@@ -113,9 +120,9 @@ const data = ref<CNProviderQuotaProbeResult | null>(null)
 // cnQuotaExtraUpdates 对齐）。页面加载即有数据，无需等待探测。
 const SNAPSHOT_STALE_MS = 15 * 60 * 1000
 
-// 自动探测去抖窗口与最近一次自动探测时间（模块级，跨实例共享）。
+// 自动探测去抖窗口与最近一次自动探测时间（Map 定义于上方模块级 <script>，
+// 跨实例共享；此处仅保留常量）。
 const AUTO_PROBE_DEBOUNCE_MS = 5 * 60 * 1000
-const lastAutoProbeAt = new Map<number, number>()
 
 const readExtraNumber = (key: string): number | null => {
   const v = (props.account.extra as Record<string, unknown> | undefined)?.[key]
@@ -202,11 +209,30 @@ const utilizationTextColor = (pct: number) => {
   return 'text-emerald-600 dark:text-emerald-400'
 }
 
+// 响应式时钟：倒计时应随时间递减（达到 GPT 官方组件的倒计时行为），而非仅在
+// 挂载/探测时算一次。每 1s tick 一次，驱动 formatReset 重算；组件卸载时清理。
+const clockNow = ref(Date.now())
+const CLOCK_INTERVAL_MS = 1000
+let clockTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    clockNow.value = Date.now()
+  }, CLOCK_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (clockTimer != null) {
+    clearInterval(clockTimer)
+    clockTimer = null
+  }
+})
+
 // 重置时间相对/绝对简短显示。
 const formatReset = (iso: string) => {
   const d = new Date(iso)
   if (isNaN(d.getTime())) return iso
-  const now = Date.now()
+  const now = clockNow.value
   const diffMs = d.getTime() - now
   if (diffMs <= 0) return t('admin.accounts.cnProviders.resetSoon')
   if (diffMs < 3_600_000) return `${Math.max(1, Math.round(diffMs / 60_000))}m`

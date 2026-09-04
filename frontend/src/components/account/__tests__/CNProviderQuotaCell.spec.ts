@@ -223,4 +223,27 @@ describe('CNProviderQuotaCell', () => {
     // 无 reset_at：不渲染 `· 重置` 片段（formatReset 不会被虚构时间驱动）。
     expect(wrapper.text()).not.toMatch(/·/)
   })
+
+  // 外审 must_fix #4：非 adaptive 账号即便 api_base_urls.chat_completions 指向火山，
+  // 前端也不应识别为火山——后端 GetOpenAIBaseURL 对非 adaptive 一律走 base_url，
+  // 与前端判定不一致会导致前端挂载配额单元格、后端探测却拒绝。
+  it('stays hidden when only api_base_urls is the volcano address but not adaptive', async () => {
+    const nonAdaptiveVolcano = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: {
+        account_mode: 'payg',
+        api_protocol: 'chat_completions',
+        api_base_urls: { chat_completions: 'https://ark.cn-beijing.volces.com/api/coding/v3' },
+        base_url: 'https://api.deepseek.com'
+      },
+      extra: {}
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: nonAdaptiveVolcano } })
+    await flushPromises()
+    // 非 adaptive：resolveAccountBaseURL 走 base_url（deepseek.com，非火山）→ 不挂载单元格。
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
+    expect(queryQuota).not.toHaveBeenCalled()
+  })
 })

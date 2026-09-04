@@ -179,6 +179,39 @@ func TestCNQuotaExtraUpdates(t *testing.T) {
 	require.Equal(t, now.Format(time.RFC3339), updates["kimi_usage_updated_at"])
 }
 
+// 外审 must_fix #2：上游 reset 从有效变为空时，必须清除 DB 中旧 reset 值，
+// 否则前端继续显示过期倒计时、429 冷却仍按旧时间停调。
+func TestCNQuotaExtraUpdates_ClearsStaleResetWhenResetEmpty(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	// 5h 档 reset 变空（上游返回 -1/缺失），weekly 档正常。
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 45, ResetAt: ""},
+		{Window: "weekly", UsedPercent: 60, ResetAt: "2026-08-18T00:00:00Z"},
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	require.Equal(t, 45.0, updates["volcano_5h_used_percent"])
+	// 关键：5h reset 必须被写 nil（cleared），而不是保留旧值。
+	require.Nil(t, updates["volcano_5h_reset_at"], "5h reset 空时必须以 nil 清除，不得残留")
+	require.Equal(t, "2026-08-18T00:00:00Z", updates["volcano_weekly_reset_at"])
+}
+
+// 外审 must_fix #2 变体：上游某档整档缺失（只返回 5h）时，weekly 档 used + reset
+// 都必须被清除，避免上一轮 valid 的 weekly 值在 DB 中 stale 残留。
+func TestCNQuotaExtraUpdates_ClearsMissingWindowKeys(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 45, ResetAt: "2026-08-14T15:00:00Z"},
+		// weekly 档缺失。
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	require.Equal(t, 45.0, updates["volcano_5h_used_percent"])
+	require.Equal(t, "2026-08-14T15:00:00Z", updates["volcano_5h_reset_at"])
+	require.Nil(t, updates["volcano_weekly_used_percent"], "缺档 weekly used 必须以 nil 清除残留")
+	require.Nil(t, updates["volcano_weekly_reset_at"], "缺档 weekly reset 必须以 nil 清除残留")
+}
+
 // TestCNProviderResponseIndicatesInsufficientBalance 覆盖中英文余额不足文案与否定用例。
 func TestCNProviderResponseIndicatesInsufficientBalance(t *testing.T) {
 	t.Parallel()
@@ -389,6 +422,24 @@ func TestCNProviderQuotaSnapshotReset(t *testing.T) {
 		Extra:       map[string]any{"kimi_5h_reset_at": future5h.Format(time.RFC3339)},
 	}
 	require.Nil(t, cnProviderQuotaSnapshotReset(payg, now))
+
+	// 外审 must_fix #1：payg 火山订阅号（platform=deepseek，base_url 指向 volces）
+	// 必须能读到 volcano_* 重置点，供 429 冷却使用真实 5h 窗口。旧实现按 coding
+	// 门控（GetCodingPlanProvider）会返回 nil，导致冷却链路断开。
+	volcanoPayG := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"account_mode": AccountModePayG,
+			"base_url":     "https://ark.cn-beijing.volces.com/api/plan",
+		},
+		Extra: map[string]any{
+			"volcano_5h_reset_at": future5h.Format(time.RFC3339),
+		},
+	}
+	gotVolcano := cnProviderQuotaSnapshotReset(volcanoPayG, now)
+	require.NotNil(t, gotVolcano, "payg 火山账号 429 冷却必须读到 volcano_5h 重置点")
+	require.True(t, future5h.Equal(*gotVolcano))
 }
 
 // TestNormalizeOpenAICompatiblePlatform_SchedulerExactMatch 回归保护：

@@ -643,23 +643,53 @@ func parseZhipuTokenTiers(data gjson.Result) []CNQuotaTier {
 }
 
 // cnQuotaExtraUpdates 根据 tier 列表构造 provider 维度的 Extra 快照更新。
+// 语义：整轮快照替换。对 5h / weekly 两个窗口，本轮有档则写 used + reset
+// （reset 为空时写 nil 清除旧倒计时，避免上游从有效时间变为 -1/缺失后前端
+// 继续显示过期倒计时）；本轮缺档则整档键（used + reset）都写 nil 清除，
+// 防止上游只返回单档时另一档的 stale 值残留。
 func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) map[string]any {
 	updates := map[string]any{
 		cnExtraKey(provider, cnExtraSuffixUsageUpdated): now.Format(time.RFC3339),
 	}
+	// 本轮实际存在的窗口（用于缺档清除判定）。
+	presentWindows := map[string]bool{}
 	for _, t := range tiers {
-		switch t.Window {
-		case "5h":
-			updates[cnExtraKey(provider, cnExtraSuffix5hUsed)] = t.UsedPercent
-			if t.ResetAt != "" {
-				updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = t.ResetAt
-			}
-		case "weekly":
-			updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = t.UsedPercent
-			if t.ResetAt != "" {
-				updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = t.ResetAt
+		presentWindows[t.Window] = true
+	}
+	writeTier := func(usedSuffix, resetSuffix string, used any, resetAt string) {
+		updates[cnExtraKey(provider, usedSuffix)] = used
+		if resetAt != "" {
+			updates[cnExtraKey(provider, resetSuffix)] = resetAt
+		} else {
+			// 上游无有效重置时间：写 nil（JSON null）清除 DB 中旧 reset 值，
+			// 与 parseSchedulingResetAt(nil) → nil、前端 readExtraString(null) → ''
+			// 的读取链一致：既不再参与 429 冷却，也不渲染倒计时。
+			updates[cnExtraKey(provider, resetSuffix)] = nil
+		}
+	}
+	if presentWindows["5h"] {
+		for _, t := range tiers {
+			if t.Window == "5h" {
+				writeTier(cnExtraSuffix5hUsed, cnExtraSuffix5hReset, t.UsedPercent, t.ResetAt)
+				break
 			}
 		}
+	} else {
+		// 缺 5h 档：清除残留的 5h used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffix5hUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = nil
+	}
+	if presentWindows["weekly"] {
+		for _, t := range tiers {
+			if t.Window == "weekly" {
+				writeTier(cnExtraSuffixWeeklyUsed, cnExtraSuffixWeeklyReset, t.UsedPercent, t.ResetAt)
+				break
+			}
+		}
+	} else {
+		// 缺 weekly 档：清除残留的 weekly used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = nil
 	}
 	return updates
 }
