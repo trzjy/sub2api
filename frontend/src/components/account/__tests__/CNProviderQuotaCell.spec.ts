@@ -33,6 +33,25 @@ const account = {
   }
 } as Account
 
+// 火山方舟订阅号：platform=deepseek，靠 base_url=ark.cn-beijing.volces.com 识别，
+// 快照键前缀为 volcano_（而非 deepseek_）。刷新快照直接渲染，无需探测。
+const volcanoAccount = {
+  id: 29,
+  platform: 'deepseek',
+  type: 'apikey',
+  credentials: {
+    account_mode: 'coding',
+    base_url: 'https://ark.cn-beijing.volces.com/api/plan'
+  },
+  extra: {
+    volcano_5h_used_percent: 32.210872,
+    volcano_weekly_used_percent: 9.203106285714286,
+    volcano_5h_reset_at: '2026-09-04T01:10:03Z',
+    volcano_weekly_reset_at: '2026-09-06T16:00:00Z',
+    volcano_usage_updated_at: new Date().toISOString()
+  }
+} as Account
+
 describe('CNProviderQuotaCell', () => {
   beforeEach(() => {
     queryQuota.mockReset()
@@ -91,5 +110,32 @@ describe('CNProviderQuotaCell', () => {
     await probeButton.trigger('click')
     await flushPromises()
     expect(queryQuota).toHaveBeenCalledWith(account.id)
+  })
+
+  it('renders a volcano-coding account from its volcano_* snapshot without probing', async () => {
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: volcanoAccount } })
+    await flushPromises()
+
+    // Fresh snapshot: bars render straight from volcano_* extra keys, no probe call.
+    expect(queryQuota).not.toHaveBeenCalled()
+    const tiers = wrapper.findAll('[data-test="cn-provider-quota-tier"]')
+    expect(tiers).toHaveLength(2)
+    expect(wrapper.text()).toContain('32%')
+    expect(wrapper.text()).toContain('9%')
+  })
+
+  // 非火山 deepseek coding（base_url 非 volces）不渲染该单元格：需后端识别才会探测。
+  it('stays hidden for a deepseek coding account without a volces base_url', async () => {
+    const plainDeepseek = {
+      id: 30,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'coding', base_url: 'https://api.deepseek.com' },
+      extra: { deepseek_5h_used_percent: 10 }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: plainDeepseek } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
+    expect(queryQuota).not.toHaveBeenCalled()
   })
 })

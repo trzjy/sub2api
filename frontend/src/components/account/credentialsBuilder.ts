@@ -338,8 +338,24 @@ export function defaultCNAdaptiveBaseUrls(
 // CNProviderQuotaCell / CNProviderBalanceCell 与 AccountUsageCell 的占位符判定
 // 共用，避免多处复制条件后一处改另一处漏改。
 
-export function cnQuotaCellVisible(platform: string, accountMode: string): boolean {
-  return (platform === 'kimi' || platform === 'zhipu') && accountMode === 'coding'
+// 国内 Coding Plan 供应商的 extra 快照键前缀（与后端 cnQuotaExtraUpdates /
+// GetCodingPlanProvider 对齐：kimi/zhipu 平台即供应商，直接采用；火山方舟订阅号
+// platform=deepseek 但 base_url 指向 ark.cn-beijing.volces.com，须以 base_url
+// 判定映射到 backend 的 providerVolcano）。
+export function cnQuotaProviderPrefix(platform: string, baseURL: string): string {
+  const lower = (baseURL || '').toLowerCase()
+  if (lower.includes('ark.cn-beijing.volces.com')) return 'volcano'
+  if (platform === 'kimi') return 'kimi'
+  if (platform === 'zhipu') return 'zhipu'
+  return ''
+}
+
+export function cnQuotaCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
+  if (accountMode !== 'coding') return false
+  if (platform === 'kimi' || platform === 'zhipu') return true
+  // 火山方舟订阅号：deepseek 平台的 coding 账号，靠 base_url 识别。
+  if (platform === 'deepseek' && (baseURL || '').toLowerCase().includes('ark.cn-beijing.volces.com')) return true
+  return false
 }
 
 export function cnBalanceCellVisible(platform: string, accountMode: string): boolean {

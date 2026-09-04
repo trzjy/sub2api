@@ -85,7 +85,7 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
-import { cnQuotaCellVisible } from './credentialsBuilder'
+import { cnQuotaCellVisible, cnQuotaProviderPrefix } from './credentialsBuilder'
 
 const props = defineProps<{
   account: Account
@@ -98,7 +98,15 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode()))
+const readBaseURL = (): string => {
+  const v = props.account.credentials?.base_url
+  return typeof v === 'string' ? v : ''
+}
+
+// 快照键前缀（kimi/zhipu 平台即供应商；火山 = platform deepseek + volces base_url）。
+const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))
+
+const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -124,23 +132,23 @@ const readExtraString = (key: string): string => {
 
 // 从持久化快照构造展示数据（缺少 5h/weekly 两档键时返回 null）。
 const snapshotData = computed<CNProviderQuotaProbeResult | null>(() => {
-  const platform = props.account.platform
-  const used5h = readExtraNumber(`${platform}_5h_used_percent`)
-  const usedWeekly = readExtraNumber(`${platform}_weekly_used_percent`)
+  const prefix = providerPrefix.value
+  const used5h = readExtraNumber(`${prefix}_5h_used_percent`)
+  const usedWeekly = readExtraNumber(`${prefix}_weekly_used_percent`)
   if (used5h == null && usedWeekly == null) return null
   const tiers: CNProviderQuotaProbeResult['tiers'] = []
   if (used5h != null) {
-    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${platform}_5h_reset_at`) || undefined })
+    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${prefix}_5h_reset_at`) || undefined })
   }
   if (usedWeekly != null) {
-    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${platform}_weekly_reset_at`) || undefined })
+    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${prefix}_weekly_reset_at`) || undefined })
   }
   return { success: true, tiers } as CNProviderQuotaProbeResult
 })
 
 // 快照是否过期（无更新时间或超过 staleness 窗口）→ 挂载时需要自动探测。
 const snapshotIsStale = computed(() => {
-  const updatedAt = readExtraString(`${props.account.platform}_usage_updated_at`)
+  const updatedAt = readExtraString(`${providerPrefix.value}_usage_updated_at`)
   if (!updatedAt) return true
   const ts = new Date(updatedAt).getTime()
   return Number.isNaN(ts) || Date.now() - ts > SNAPSHOT_STALE_MS
