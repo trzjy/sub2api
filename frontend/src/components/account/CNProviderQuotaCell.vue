@@ -85,7 +85,7 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
-import { cnQuotaCellVisible, cnQuotaProviderPrefix } from './credentialsBuilder'
+import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL } from './credentialsBuilder'
 
 const props = defineProps<{
   account: Account
@@ -98,10 +98,7 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-const readBaseURL = (): string => {
-  const v = props.account.credentials?.base_url
-  return typeof v === 'string' ? v : ''
-}
+const readBaseURL = (): string => resolveAccountBaseURL(props.account.credentials)
 
 // 快照键前缀（kimi/zhipu 平台即供应商；火山 = platform deepseek + volces base_url）。
 const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))

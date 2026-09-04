@@ -746,8 +746,8 @@ func TestVolcanoExtraUpdatesAndSnapshotReset(t *testing.T) {
 	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
 	require.Equal(t, 30.0, updates[cnExtraKey(providerVolcano, cnExtraSuffix5hUsed)])
 	reset := cnProviderQuotaSnapshotReset(&Account{
-		Platform:    PlatformDeepseek,
-		Type:        AccountTypeAPIKey,
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
 		Credentials: map[string]any{
 			"account_mode": AccountModeCoding,
 			"base_url":     "https://ark.cn-beijing.volces.com/api/coding",
@@ -804,4 +804,79 @@ func TestVolcanoGetCodingPlanProvider(t *testing.T) {
 		Credentials: map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/plan", "account_mode": AccountModePayG},
 	}
 	require.Equal(t, "", payg.GetCodingPlanProvider())
+}
+
+// TestResolveCNQuotaProvider_VolcanoPayG 火山订阅号账号即使保存为 payg（deepseek
+// 创建/编辑界面默认模式），也按 base_url 识别为 volcano 供应商；普通 CN payg 账号
+// 与非火山 deepseek 仍返回空（保持 coding-only 语义）。
+func TestResolveCNQuotaProvider_VolcanoPayG(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		account  *Account
+		expected string
+	}{
+		{"volcano coding base_url", &Account{
+			Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/coding/v3", "account_mode": AccountModeCoding},
+		}, providerVolcano},
+		{"volcano agent plan base_url", &Account{
+			Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/plan", "account_mode": AccountModePayG},
+		}, providerVolcano},
+		// 火山地址仅存在于 api_base_urls.chat_completions（adaptive 协议），同样识别。
+		{"volcano via api_base_urls.chat_completions", &Account{
+			Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{
+				"account_mode": AccountModePayG,
+				"api_protocol": "adaptive",
+				"api_base_urls": map[string]any{
+					"chat_completions": "https://ark.cn-beijing.volces.com/api/coding/v3",
+					"anthropic":        "https://ark.cn-beijing.volces.com/api/coding",
+				},
+			},
+		}, providerVolcano},
+		{"plain deepseek coding", &Account{
+			Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://api.deepseek.com", "account_mode": AccountModeCoding},
+		}, ""},
+		{"plain deepseek payg", &Account{
+			Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://api.deepseek.com", "account_mode": AccountModePayG},
+		}, ""},
+		{"kimi payg", &Account{
+			Platform: PlatformKimi, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://api.moonshot.cn/v1", "account_mode": AccountModePayG},
+		}, ""},
+		{"zhipu coding", &Account{
+			Platform: PlatformZhipu, Type: AccountTypeAPIKey,
+			Credentials: map[string]any{"base_url": "https://open.bigmodel.cn/api/coding/paas/v4", "account_mode": AccountModeCoding},
+		}, PlatformZhipu},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.expected, resolveCNQuotaProvider(tc.account))
+		})
+	}
+}
+
+// TestValidateCodingPlanAccount_VolcanoPayGAllowed 校验 payg 火山订阅号账号可通过
+// Coding Plan 探测校验；普通 deepseek payg 仍返回 CN_QUOTA_NOT_CODING_PLAN。
+func TestValidateCodingPlanAccount_VolcanoPayGAllowed(t *testing.T) {
+	t.Parallel()
+
+	volcano := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/coding/v3", "account_mode": AccountModePayG},
+	}
+	require.NoError(t, validateCodingPlanAccount(volcano), "payg 火山订阅号应放行 Coding Plan 探测")
+
+	plain := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"base_url": "https://api.deepseek.com", "account_mode": AccountModePayG},
+	}
+	err := validateCodingPlanAccount(plain)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CN_QUOTA_NOT_CODING_PLAN")
 }

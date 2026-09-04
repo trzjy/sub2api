@@ -48,6 +48,25 @@ const providerVolcano = "volcano"
 // cnExtraKey 拼接 provider 维度的 extra 键。
 func cnExtraKey(provider, suffix string) string { return provider + "_" + suffix }
 
+// isVolcanoBaseURL 报告 base_url 是否指向火山方舟订阅号（Agent Plan /api/plan 与
+// Coding Plan /api/coding 共用 ark.cn-beijing.volces.com 域名），与接入模式无关。
+func isVolcanoBaseURL(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "ark.cn-beijing.volces.com")
+}
+
+// resolveCNQuotaProvider 返回账号所属的 Coding Plan 额度供应商（kimi/zhipu/volcano）；
+// 非 coding 或无法识别返回 "". 火山订阅号账号（platform=deepseek，base_url 指向
+// ark.cn-beijing.volces.com）在 deepseek 创建/编辑界面保存为 payg，
+// GetCodingPlanProvider 按 coding 模式门控会返回空，此处按 base_url 兜底识别为
+// volcano；仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+func resolveCNQuotaProvider(account *Account) string {
+	provider := account.GetCodingPlanProvider()
+	if provider == "" && isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
+		return providerVolcano
+	}
+	return provider
+}
+
 // CNQuotaTier 表示一个滚动用量窗口档位（5h / weekly）。
 type CNQuotaTier struct {
 	Window      string  `json:"window"`             // "5h" | "weekly"
@@ -135,7 +154,7 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 }
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
-	provider := account.GetCodingPlanProvider()
+	provider := resolveCNQuotaProvider(account)
 	if provider != PlatformKimi && provider != PlatformZhipu && provider != providerVolcano {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/volcano coding plan account")
 	}
@@ -302,7 +321,10 @@ func validateCodingPlanAccount(account *Account) error {
 	if !account.IsCNProvider() {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_INVALID_PLATFORM", "account is not a CN provider account")
 	}
-	if !account.IsCodingPlan() {
+	// 火山订阅号账号（platform=deepseek，base_url=ark.cn-beijing.volces.com）保存为
+	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；其余 CN 供应商
+	// 仍仅限 coding。
+	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a coding plan account")
 	}
 	return nil

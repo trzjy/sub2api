@@ -681,7 +681,11 @@ import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
-import { cnQuotaCellVisible as cnQuotaCellVisibleFn, cnBalanceCellVisible as cnBalanceCellVisibleFn } from './credentialsBuilder'
+import {
+  cnQuotaCellVisible as cnQuotaCellVisibleFn,
+  cnBalanceCellVisible as cnBalanceCellVisibleFn,
+  resolveAccountBaseURL
+} from './credentialsBuilder'
 
 // Module-level cache shared across all AccountUsageCell instances
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
@@ -799,9 +803,11 @@ const cnAccountMode = computed(() => {
   return typeof mode === 'string' ? mode : ''
 })
 const cnQuotaCellVisible = computed(() =>
-  cnQuotaCellVisibleFn(props.account.platform, cnAccountMode.value, String(props.account.credentials?.base_url ?? ''))
+  cnQuotaCellVisibleFn(props.account.platform, cnAccountMode.value, resolveAccountBaseURL(props.account.credentials))
 )
-const cnBalanceCellVisible = computed(() => cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value))
+const cnBalanceCellVisible = computed(() =>
+  cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, resolveAccountBaseURL(props.account.credentials))
+)
 
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')
 
