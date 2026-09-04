@@ -633,13 +633,19 @@ func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, acc
 		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
-	case account.UsesOpenAIProtocolSharedBaseURL():
-		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与通用 other 复用 OpenAI /v1/models 探测。
-		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
+	case account.IsAnthropic() || account.IsAnthropicProtocol():
+		// 官方 Anthropic 协议枚举：api_protocol=anthropic 的账号（含 platform 属于 OpenAI
+		// 兼容族的国产号：火山方舟订阅 /api/plan||/api/coding、bigmodel /api/anthropic 等）
+		// 按 Anthropic 原生规范 GET {anthropic_base}/v1/models 探测，不得复用 platform 级
+		// OpenAI 兼容族探测——后者把 anthropic 端点 base_url 误解为 OpenAI 路径并改用 OpenAI
+		// 格式 base，可能把订阅 key 发往平台默认 OpenAI 主机（生产账号 29 实测 502）。
+		return s.buildAnthropicUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)
-	case account.IsAnthropic():
-		return s.buildAnthropicUpstreamModelsRequest(ctx, account)
+	case account.UsesOpenAIProtocolSharedBaseURL():
+		// OpenAI 协议账号（api_protocol=chat_completions/responses 的国产 kimi/zhipu/deepseek
+		// 与通用 other）复用 OpenAI /v1/models 探测。
+		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	default:
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported platform for upstream model sync: %s", account.Platform), nil,

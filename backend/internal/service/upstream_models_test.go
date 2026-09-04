@@ -322,15 +322,17 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
 }
 
-func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoSubscriptionToArk(t *testing.T) {
+func TestBuildUpstreamModelsRequestRoutesVolcanoAnthropicSubscriptionToAnthropicModels(t *testing.T) {
 	t.Parallel()
 
 	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
 	ctx := context.Background()
 
-	// 火山订阅号：platform=deepseek + base_url=ark 订阅端点 + api_protocol=anthropic。
-	// 修复前 GetOpenAIFormatBaseURL 会把 deepseek 回落 api.deepseek.com，导致火山密钥发到
-	// 错误主机（生产账号 29 的 sync-upstream 502）；修复后必须发往 ark 的 OpenAI 兼容端点。
+	// 火山订阅号（platform=deepseek、api_protocol=anthropic、base_url=ark /api/plan）。
+	// 修复前 dispatch 依 platform 级 UsesOpenAIProtocolSharedBaseURL 落入 OpenAI 探测，经
+	// GetOpenAIFormatBaseURL 把 deepseek 回落 api.deepseek.com，把火山订阅 key 发到错误主机
+	// （生产账号 29 实测 sync-upstream 502）。修复后必须按 Anthropic 原生规范
+	// GET {anthropic_base}/v1/models，即 https://ark.cn-beijing.volces.com/api/plan/v1/models。
 	account := &Account{
 		Platform: PlatformDeepseek,
 		Type:     AccountTypeAPIKey,
@@ -342,13 +344,16 @@ func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoSubscriptionToArk(t *testi
 		},
 	}
 
-	req, err := svc.buildOpenAIUpstreamModelsRequest(ctx, account)
+	req, err := svc.buildUpstreamModelsRequest(ctx, account)
 	require.NoError(t, err)
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req.URL.String())
-	require.Equal(t, "Bearer ark-sub-key", req.Header.Get("Authorization"))
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/plan/v1/models", req.URL.String())
+	require.Equal(t, "ark-sub-key", req.Header.Get("x-api-key"))
+	require.Equal(t, "2023-06-01", req.Header.Get("anthropic-version"))
 	require.NotContains(t, req.URL.String(), "deepseek.com")
+	require.NotContains(t, req.URL.String(), "/api/v3")
 
-	// /api/coding 同样派生到 /api/v3，密钥发往火山主机而非 deepseek.com。
+	// /api/coding 端点（platform=deepseek、api_protocol=anthropic）同样按 Anthropic 规范派生
+	// 到 {base}/v1/models，密钥发往火山主机而非 deepseek.com 或 ark OpenAI 端点。
 	coding := &Account{
 		Platform: PlatformDeepseek,
 		Type:     AccountTypeAPIKey,
@@ -358,12 +363,14 @@ func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoSubscriptionToArk(t *testi
 			"api_protocol": "anthropic",
 		},
 	}
-	req2, err := svc.buildOpenAIUpstreamModelsRequest(ctx, coding)
+	req2, err := svc.buildUpstreamModelsRequest(ctx, coding)
 	require.NoError(t, err)
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req2.URL.String())
-	require.Equal(t, "Bearer ark-coding-key", req2.Header.Get("Authorization"))
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding/v1/models", req2.URL.String())
+	require.Equal(t, "ark-coding-key", req2.Header.Get("x-api-key"))
+	require.NotContains(t, req2.URL.String(), "deepseek.com")
 
-	// 普通 deepseek（非火山，无自定义 base_url）不受影响：仍走 deepseek 默认端点。
+	// 普通 deepseek（非火山、无自定义 base_url、默认 chat_completions 协议）不受影响：
+	// 仍走 OpenAI 协议探测的 deepseek 默认端点。
 	plainDeepseek := &Account{
 		Platform: PlatformDeepseek,
 		Type:     AccountTypeAPIKey,
@@ -371,10 +378,35 @@ func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoSubscriptionToArk(t *testi
 			"api_key": "plain-key",
 		},
 	}
-	req3, err := svc.buildOpenAIUpstreamModelsRequest(ctx, plainDeepseek)
+	req3, err := svc.buildUpstreamModelsRequest(ctx, plainDeepseek)
 	require.NoError(t, err)
 	require.Equal(t, "https://api.deepseek.com/v1/models", req3.URL.String())
 	require.Equal(t, "Bearer plain-key", req3.Header.Get("Authorization"))
+}
+
+func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoNonAnthropicToArk(t *testing.T) {
+	t.Parallel()
+
+	// 火山方舟账号若按 OpenAI 协议（chat_completions，非 anthropic）接入时，模型目录仍须
+	// 走账号自身的 ark OpenAI 兼容端点（/api/v3），不经 GetOpenAIFormatBaseURL 回落
+	// api.deepseek.com——保留对非 anthropic 协议火山账号的兜底。
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	ctx := context.Background()
+
+	account := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "ark-key",
+			"base_url":     "https://ark.cn-beijing.volces.com/api/plan",
+			"api_protocol": "chat_completions",
+		},
+	}
+	req, err := svc.buildOpenAIUpstreamModelsRequest(ctx, account)
+	require.NoError(t, err)
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req.URL.String())
+	require.Equal(t, "Bearer ark-key", req.Header.Get("Authorization"))
+	require.NotContains(t, req.URL.String(), "deepseek.com")
 }
 
 func TestBuildUpstreamModelsRequestSupportsGrokOAuth(t *testing.T) {
