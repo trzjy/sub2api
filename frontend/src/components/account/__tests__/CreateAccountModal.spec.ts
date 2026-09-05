@@ -655,4 +655,26 @@ describe('CreateAccountModal volcano subscription', () => {
     expect(creds?.api_base_urls?.chat_completions).toBe('https://ark.cn-beijing.volces.com/api/plan')
     expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
   })
+
+  it('keeps Volcano endpoint after switching adaptive -> chat_completions (no silent fallback)', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 进入 adaptive 并在 chat_completions 槽位填写火山端点
+    await selectButtonByText(wrapper, 'adaptive')
+    await flushPromises()
+    await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue('https://ark.cn-beijing.volces.com/api/plan')
+    await flushPromises()
+    // 切回 chat_completions：应从 adaptive 槽位回填，而非丢失为 DeepSeek 默认值（HIGH 修复）
+    await selectButtonByText(wrapper, 'chatCompletions')
+    await flushPromises()
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano acct')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const creds = createAccountMock.mock.calls[0]?.[0]?.credentials
+    expect(creds?.api_protocol).toBe('chat_completions')
+    expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
+  })
 })
