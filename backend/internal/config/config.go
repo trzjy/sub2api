@@ -88,6 +88,7 @@ type Config struct {
 	Default                 DefaultConfig                 `mapstructure:"default"`
 	RateLimit               RateLimitConfig               `mapstructure:"rate_limit"`
 	Pricing                 PricingConfig                 `mapstructure:"pricing"`
+	Volcano                 VolcanoConfig                 `mapstructure:"volcano"`
 	Gateway                 GatewayConfig                 `mapstructure:"gateway"`
 	APIKeyAuth              APIKeyAuthCacheConfig         `mapstructure:"api_key_auth_cache"`
 	SubscriptionCache       SubscriptionCacheConfig       `mapstructure:"subscription_cache"`
@@ -695,6 +696,13 @@ type PricingConfig struct {
 	UpdateIntervalHours int `mapstructure:"update_interval_hours"`
 	// 哈希校验间隔（分钟）
 	HashCheckIntervalMinutes int `mapstructure:"hash_check_interval_minutes"`
+}
+
+// VolcanoConfig 配置火山方舟（Volcengine Ark）Coding/Agent Plan 订阅号支持模型同步。
+type VolcanoConfig struct {
+	// PlanModelsFile 官方候选模型列表 JSON 路径（按 agent/coding 区分），同步时读取，
+	// 绝不运行时爬取官方文档 HTML。
+	PlanModelsFile string `mapstructure:"plan_models_file"`
 }
 
 type ServerConfig struct {
@@ -2329,6 +2337,9 @@ func setDefaults() {
 	viper.SetDefault("pricing.fallback_file", "./resources/model-pricing/model_prices_and_context_window.json")
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
+
+	// Volcano - 火山方舟订阅号支持模型同步（官方候选列表，按 agent/coding 区分）
+	viper.SetDefault("volcano.plan_models_file", "./resources/volcano-plan-models.json")
 
 	// 本地进程插件。插件必须由管理员手动上传，项目默认不携带任何插件能力。
 	viper.SetDefault("plugins.data_dir", "")

@@ -1276,16 +1276,23 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	case AccountTypeAPIKey:
 		// API Key accounts use Platform API or custom base URL
 		baseURL := account.GetOpenAIBaseURL()
-		if account.Platform == PlatformDeepseek && account.IsAdaptiveAPIProtocol() {
-			baseURL = account.GetCNProtocolBaseURL(APIProtocolResponses)
-		}
-		if baseURL == "" {
+		if profile, ok := parseVolcanoPlanProfile(baseURL); ok {
+			// 火山订阅号 Responses 端点为 {base}/v3/responses，优先于任何回落（含
+			// deepseek adaptive 覆盖），杜绝火山 base 被打到 /responses 或官方主机。
+			if _, err := s.validateUpstreamBaseURL(profile.BaseURL); err != nil {
+				return nil, err
+			}
+			targetURL = profile.openAIResponsesURL()
+		} else if baseURL == "" {
 			if account.Platform == PlatformOther {
 				// other 无默认上游：空 base_url 失败关闭，禁止回落官方 OpenAI（外审-2）。
 				return nil, fmt.Errorf("account %d (platform other) has no base_url", account.ID)
 			}
 			targetURL = openaiPlatformAPIURL
 		} else {
+			if account.Platform == PlatformDeepseek && account.IsAdaptiveAPIProtocol() {
+				baseURL = account.GetCNProtocolBaseURL(APIProtocolResponses)
+			}
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
 				return nil, err

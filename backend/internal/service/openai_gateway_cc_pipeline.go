@@ -151,7 +151,9 @@ func (s *OpenAIGatewayService) openAIChatCompletionsTargetURL(account *Account) 
 	if err != nil {
 		return "", fmt.Errorf("invalid base_url: %w", err)
 	}
-	return buildOpenAIChatCompletionsURL(validatedURL), nil
+	// 火山订阅号 OpenAI 端点为 {base}/v3/chat/completions，经 openAI...URLForBase
+	// 识别为火山后派生，绝不回落 /v1/chat/completions 或官方主机。
+	return openAIChatCompletionsURLForBase(validatedURL), nil
 }
 
 // resolveCCFallbackTarget 解析两条 CC 回退路径共用的账号凭证与上游端点

@@ -50,8 +50,17 @@ func cnExtraKey(provider, suffix string) string { return provider + "_" + suffix
 
 // isVolcanoBaseURL 报告 base_url 是否指向火山方舟订阅号（Agent Plan /api/plan 与
 // Coding Plan /api/coding 共用 ark.cn-beijing.volces.com 域名），与接入模式无关。
+// 用 net/url 主机解析精确判定，避免字符串 Contains 把带相似子串的主机误判为火山。
 func isVolcanoBaseURL(baseURL string) bool {
-	return strings.Contains(strings.ToLower(baseURL), "ark.cn-beijing.volces.com")
+	raw := strings.TrimSpace(baseURL)
+	if raw == "" {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), volcanoPlanHost)
 }
 
 // resolveCNQuotaProvider 返回账号所属的 Coding Plan 额度供应商（kimi/zhipu/volcano）；
@@ -369,11 +378,12 @@ const (
 	volcanoQuotaVersion = "2024-01-01"
 )
 
-// volcanoUsageAction 根据账号 base_url 路径选择方舟用量管理 Action。
+// volcanoUsageAction 根据账号 base_url 套餐选择方舟用量管理 Action（路径分类复用与模型
+// 同步/转发同一套 parseVolcanoPlanProfile，不复制第二份识别逻辑）。
 //   - /api/plan  → Agent Plan（方舟）订阅：GetAFPUsage → Result.AFPFiveHour/AFPWeekly
 //   - /api/coding → Coding Plan 订阅：GetCodingPlanUsage → Result.QuotaUsage[]
 func volcanoUsageAction(baseURL string) string {
-	if strings.Contains(baseURL, "/api/plan") {
+	if profile, ok := parseVolcanoPlanProfile(baseURL); ok && profile.Kind == volcanoPlanKindAgent {
 		return "GetAFPUsage"
 	}
 	return "GetCodingPlanUsage"

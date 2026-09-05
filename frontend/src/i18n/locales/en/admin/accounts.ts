@@ -746,6 +746,8 @@ export default {
       syncUpstreamModelsError: 'Failed to sync upstream models: {message}',
       syncUpstreamModelsMetadataIncomplete:
         'Model IDs were synced, but capability metadata is incomplete and was not updated.',
+      syncUpstreamModelsVolcanoPartial:
+        'Some models could not be confirmed during probing (timed out / rate limited / server error). Only confirmed models were added; retry later to probe the rest.',
       clearAllModels: 'Clear all models',
       customModelName: 'Custom model name',
       enterCustomModelName: 'Enter custom model name',

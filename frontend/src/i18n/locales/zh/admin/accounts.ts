@@ -828,6 +828,7 @@ export default {
       syncUpstreamModelsFailed: '同步上游模型失败',
       syncUpstreamModelsError: '同步上游模型失败：{message}',
       syncUpstreamModelsMetadataIncomplete: '模型 ID 已同步，但能力元数据不完整，能力信息未更新。',
+      syncUpstreamModelsVolcanoPartial: '部分模型探测未确认（超时 / 限流 / 服务端错误）。仅加入已确认模型，可稍后重试补齐其余模型。',
       clearAllModels: '清除所有模型',
       customModelName: '自定义模型名称',
       enterCustomModelName: '输入自定义模型名称',

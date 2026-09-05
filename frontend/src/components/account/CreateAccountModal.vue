@@ -4118,6 +4118,8 @@ const syncPreviewCredentials = computed(() => {
     type: form.type,
     base_url: baseUrl || undefined,
     api_key: apiKeyValue.value,
+    api_protocol: isCNPlatform.value ? apiProtocol.value : undefined,
+    account_mode: isCNPlatform.value ? accountMode.value : undefined,
     ...(modelMapping ? { model_mapping: modelMapping } : {})
   }
 })

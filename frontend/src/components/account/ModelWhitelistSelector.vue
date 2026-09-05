@@ -331,6 +331,10 @@ const syncUpstreamModels = async () => {
       appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
       return
     }
+    if (result.warnings?.some(warning => warning.code === 'volcano_model_sync_partial')) {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsVolcanoPartial'))
+      return
+    }
     if (addedCount > 0) {
       appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
     } else {

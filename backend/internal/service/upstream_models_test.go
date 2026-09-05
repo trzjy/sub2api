@@ -322,52 +322,15 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
 }
 
-func TestBuildUpstreamModelsRequestRoutesVolcanoAnthropicSubscriptionToAnthropicModels(t *testing.T) {
+// TestBuildUpstreamModelsRequestPlainDeepseekUnchanged 锁定非火山普通 deepseek 的模型目录
+// 探测不回归：默认 chat_completions 协议仍走 api.deepseek.com/v1/models。火山订阅号已被
+// fetchUpstreamModelList 拦截到 fetchVolcanoPlanSupportedModels（见 volcano_plan_models_test.go），
+// 不再落入通用 /models 目录探测，因此这里不再断言火山账号的 /v1/models 路由。
+func TestBuildUpstreamModelsRequestPlainDeepseekUnchanged(t *testing.T) {
 	t.Parallel()
 
 	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
 	ctx := context.Background()
-
-	// 火山订阅号（platform=deepseek、api_protocol=anthropic、base_url=ark /api/plan）。
-	// 修复前 dispatch 依 platform 级 UsesOpenAIProtocolSharedBaseURL 落入 OpenAI 探测，经
-	// GetOpenAIFormatBaseURL 把 deepseek 回落 api.deepseek.com，把火山订阅 key 发到错误主机
-	// （生产账号 29 实测 sync-upstream 502）。修复后必须按 Anthropic 原生规范
-	// GET {anthropic_base}/v1/models，即 https://ark.cn-beijing.volces.com/api/plan/v1/models。
-	account := &Account{
-		Platform: PlatformDeepseek,
-		Type:     AccountTypeAPIKey,
-		Credentials: map[string]any{
-			"api_key":      "ark-sub-key",
-			"base_url":     "https://ark.cn-beijing.volces.com/api/plan",
-			"api_protocol": "anthropic",
-			"account_mode": "coding",
-		},
-	}
-
-	req, err := svc.buildUpstreamModelsRequest(ctx, account)
-	require.NoError(t, err)
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/plan/v1/models", req.URL.String())
-	require.Equal(t, "ark-sub-key", req.Header.Get("x-api-key"))
-	require.Equal(t, "2023-06-01", req.Header.Get("anthropic-version"))
-	require.NotContains(t, req.URL.String(), "deepseek.com")
-	require.NotContains(t, req.URL.String(), "/api/v3")
-
-	// /api/coding 端点（platform=deepseek、api_protocol=anthropic）同样按 Anthropic 规范派生
-	// 到 {base}/v1/models，密钥发往火山主机而非 deepseek.com 或 ark OpenAI 端点。
-	coding := &Account{
-		Platform: PlatformDeepseek,
-		Type:     AccountTypeAPIKey,
-		Credentials: map[string]any{
-			"api_key":      "ark-coding-key",
-			"base_url":     "https://ark.cn-beijing.volces.com/api/coding",
-			"api_protocol": "anthropic",
-		},
-	}
-	req2, err := svc.buildUpstreamModelsRequest(ctx, coding)
-	require.NoError(t, err)
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding/v1/models", req2.URL.String())
-	require.Equal(t, "ark-coding-key", req2.Header.Get("x-api-key"))
-	require.NotContains(t, req2.URL.String(), "deepseek.com")
 
 	// 普通 deepseek（非火山、无自定义 base_url、默认 chat_completions 协议）不受影响：
 	// 仍走 OpenAI 协议探测的 deepseek 默认端点。
@@ -378,35 +341,14 @@ func TestBuildUpstreamModelsRequestRoutesVolcanoAnthropicSubscriptionToAnthropic
 			"api_key": "plain-key",
 		},
 	}
-	req3, err := svc.buildUpstreamModelsRequest(ctx, plainDeepseek)
+	req, err := svc.buildUpstreamModelsRequest(ctx, plainDeepseek)
 	require.NoError(t, err)
-	require.Equal(t, "https://api.deepseek.com/v1/models", req3.URL.String())
-	require.Equal(t, "Bearer plain-key", req3.Header.Get("Authorization"))
-}
+	require.Equal(t, "https://api.deepseek.com/v1/models", req.URL.String())
+	require.Equal(t, "Bearer plain-key", req.Header.Get("Authorization"))
 
-func TestBuildOpenAIUpstreamModelsRequestRoutesVolcanoNonAnthropicToArk(t *testing.T) {
-	t.Parallel()
-
-	// 火山方舟账号若按 OpenAI 协议（chat_completions，非 anthropic）接入时，模型目录仍须
-	// 走账号自身的 ark OpenAI 兼容端点（/api/v3），不经 GetOpenAIFormatBaseURL 回落
-	// api.deepseek.com——保留对非 anthropic 协议火山账号的兜底。
-	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
-	ctx := context.Background()
-
-	account := &Account{
-		Platform: PlatformDeepseek,
-		Type:     AccountTypeAPIKey,
-		Credentials: map[string]any{
-			"api_key":      "ark-key",
-			"base_url":     "https://ark.cn-beijing.volces.com/api/plan",
-			"api_protocol": "chat_completions",
-		},
-	}
-	req, err := svc.buildOpenAIUpstreamModelsRequest(ctx, account)
-	require.NoError(t, err)
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/v3/models", req.URL.String())
-	require.Equal(t, "Bearer ark-key", req.Header.Get("Authorization"))
-	require.NotContains(t, req.URL.String(), "deepseek.com")
+	// 火山基址的 host 不得被 parseVolcanoPlanProfile 误解为普通 deepseek（普通 host 绝不命中）。
+	_, ok := parseVolcanoPlanProfile("https://api.deepseek.com")
+	require.False(t, ok)
 }
 
 func TestBuildUpstreamModelsRequestSupportsGrokOAuth(t *testing.T) {

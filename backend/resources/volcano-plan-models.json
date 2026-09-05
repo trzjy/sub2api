@@ -1,0 +1,38 @@
+{
+  "source": {
+    "provider": "volcengine_ark",
+    "name": "Volcano Engine Ark Coding Plan / Agent Plan 官方支持模型清单",
+    "url": "https://www.volcengine.com/docs/82379/1559478",
+    "note": "只探测 'auto' 之外的具名模型：'auto' 是供应商侧动态路由别名，无稳定语义，不列入账号可用模型。",
+    "updated": "2026-08"
+  },
+  "plans": {
+    "coding": [
+      "ark-code-latest",
+      "doubao-seed-evolving",
+      "doubao-seed-2.1-turbo",
+      "doubao-seed-2.0-lite",
+      "glm-5.3",
+      "glm-5.3-flash",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+      "kimi-k2.7-code",
+      "minimax-m3"
+    ],
+    "agent": [
+      "ark-code-latest",
+      "doubao-seed-2.0-code",
+      "doubao-seed-2.0-pro",
+      "doubao-seed-2.0-lite",
+      "doubao-seed-2.0-mini",
+      "glm-5.2",
+      "glm-latest",
+      "minimax-m2.7",
+      "minimax-m3",
+      "kimi-k2.6",
+      "kimi-k2.7-code",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro"
+    ]
+  }
+}

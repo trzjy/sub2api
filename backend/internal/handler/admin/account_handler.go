@@ -2840,6 +2840,8 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 			switch syncErr.Kind {
 			case service.UpstreamModelSyncErrorConfiguration, service.UpstreamModelSyncErrorUnsupported:
 				response.BadRequest(c, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorCredential:
+				response.Error(c, http.StatusUnauthorized, syncErr.SafeMessage())
 			case service.UpstreamModelSyncErrorInternal:
 				response.InternalError(c, syncErr.SafeMessage())
 			default:
@@ -2861,11 +2863,13 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 // POST /api/v1/admin/accounts/models/sync-upstream-preview
 func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 	var req struct {
-		Platform     string            `json:"platform" binding:"required"`
-		Type         string            `json:"type" binding:"required"`
-		BaseURL      string            `json:"base_url"`
-		APIKey       string            `json:"api_key" binding:"required"`
-		ModelMapping map[string]string `json:"model_mapping"`
+		Platform       string            `json:"platform" binding:"required"`
+		Type           string            `json:"type" binding:"required"`
+		BaseURL        string            `json:"base_url"`
+		APIKey         string            `json:"api_key" binding:"required"`
+		APIProtocol    string            `json:"api_protocol"`
+		AccountMode    string            `json:"account_mode"`
+		ModelMapping   map[string]string `json:"model_mapping"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -2882,6 +2886,8 @@ func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 		Credentials: map[string]any{
 			"api_key":       req.APIKey,
 			"base_url":      req.BaseURL,
+			"api_protocol":  req.APIProtocol,
+			"account_mode":  req.AccountMode,
 			"model_mapping": modelMapping,
 		},
 	}
@@ -2898,6 +2904,8 @@ func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 			switch syncErr.Kind {
 			case service.UpstreamModelSyncErrorConfiguration, service.UpstreamModelSyncErrorUnsupported:
 				response.BadRequest(c, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorCredential:
+				response.Error(c, http.StatusUnauthorized, syncErr.SafeMessage())
 			case service.UpstreamModelSyncErrorInternal:
 				response.InternalError(c, syncErr.SafeMessage())
 			default:

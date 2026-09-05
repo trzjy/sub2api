@@ -153,6 +153,41 @@ describe('ModelWhitelistSelector', () => {
     expect(showSuccess).not.toHaveBeenCalled()
   })
 
+  it('warns on partial volcano model sync (transient probe failures)', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: ['glm-5.3'],
+      warnings: [
+        {
+          code: 'volcano_model_sync_partial',
+          message: 'some volcano plan models could not be confirmed (transient failures); 1 models available'
+        }
+      ]
+    })
+    const wrapper = mount(ModelWhitelistSelector, {
+      props: {
+        modelValue: [],
+        platform: 'deepseek',
+        accountId: 47
+      },
+      global: {
+        stubs: {
+          ModelIcon: true
+        }
+      }
+    })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsVolcanoPartial')
+    expect(showSuccess).not.toHaveBeenCalled()
+  })
+
   it('reports a successful preview so account creation can persist metadata', async () => {
     syncUpstreamModelsPreview.mockResolvedValue({
       models: ['x-preview-f-free'],
