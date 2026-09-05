@@ -3142,7 +3142,8 @@ watch(editApiProtocol, (protocol, previousProtocol) => {
     return
   }
   if (previousProtocol === 'adaptive') {
-    editBaseUrl.value = editAdaptiveBaseUrls.value[protocol] ||
+    const raw = (editAdaptiveBaseUrls.value[protocol] || '').trim()
+    editBaseUrl.value = raw || editBaseUrl.value.trim() ||
       defaultCNBaseUrl(props.account!.platform, editAccountMode.value, protocol)
     return
   }

@@ -4139,9 +4139,11 @@ watch(apiProtocol, (protocol, previousProtocol) => {
     apiKeyBaseUrl.value = adaptiveBaseUrls.value.chat_completions
     return
   }
-  // 切出 adaptive：优先从 adaptiveBaseUrls 对应协议槽位回填，避免丢失用户在 adaptive 中填写的端点（HIGH 修复）
+  // 切出 adaptive：优先从 adaptiveBaseUrls 对应协议槽位回填；空白槽位（trim 后）回退到当前
+  // 有效 base_url（可能为火山地址），再回退默认，避免空白 URL 覆盖有效端点（HIGH/MEDIUM 修复）
   if (previousProtocol === 'adaptive') {
-    apiKeyBaseUrl.value = adaptiveBaseUrls.value[protocol] || defaultCNBaseUrl(form.platform, accountMode.value, protocol)
+    const raw = (adaptiveBaseUrls.value[protocol] || '').trim()
+    apiKeyBaseUrl.value = raw || apiKeyBaseUrl.value.trim() || defaultCNBaseUrl(form.platform, accountMode.value, protocol)
     return
   }
   // 切换到非 adaptive：保留火山 base_url，不套用 deepseek 默认端点

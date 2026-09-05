@@ -367,8 +367,20 @@ export function resolveAccountBaseURL(credentials: Record<string, unknown> | und
 
 // 仅火山方舟订阅号（Agent Plan /api/plan 与 Coding Plan /api/coding 共用
 // ark.cn-beijing.volces.com 域名），与接入模式无关。
+// 用 URL 主机名精确判定，与后端 cn_provider_quota_service.isVolcanoBaseURL 对齐：
+// 避免字符串 Contains 把带相似子串的主机（如 evil-ark.cn-beijing.volces.com、
+// https://evil.example/?next=ark.cn-beijing.volces.com）误判为火山订阅号，造成
+// 可见性/配额探测/AK-SK 录入前后端不一致。
 export function isVolcanoBaseURL(baseURL: string): boolean {
-  return (baseURL || '').toLowerCase().includes('ark.cn-beijing.volces.com')
+  const raw = (baseURL || '').trim()
+  if (!raw) return false
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  return parsed.hostname.toLowerCase() === 'ark.cn-beijing.volces.com'
 }
 
 export function cnQuotaProviderPrefix(platform: string, baseURL: string): string {

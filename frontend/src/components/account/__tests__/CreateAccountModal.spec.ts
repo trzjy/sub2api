@@ -677,4 +677,35 @@ describe('CreateAccountModal volcano subscription', () => {
     expect(creds?.api_protocol).toBe('chat_completions')
     expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
   })
+
+  it('keeps Volcano endpoint after adaptive -> chat_completions when adaptive chat slot is blank (whitespace falls back to base_url)', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 先在 chat_completions 填入火山地址
+    await selectButtonByText(wrapper, 'chatCompletions')
+    await flushPromises()
+    const baseInput = wrapper
+      .findAll('input')
+      .find((candidate) => candidate.attributes('placeholder') === 'https://api.deepseek.com')
+    await baseInput?.setValue('https://ark.cn-beijing.volces.com/api/plan')
+    await flushPromises()
+    // 切到 adaptive：火山地址同步进 chat 槽位
+    await selectButtonByText(wrapper, 'adaptive')
+    await flushPromises()
+    // 把 adaptive 的 chat_completions 槽位清空为空白串
+    await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue('   ')
+    await flushPromises()
+    // 切回 chat_completions：空白槽位应回退到火山 base_url，而非写成 DeepSeek 默认（MEDIUM 修复）
+    await selectButtonByText(wrapper, 'chatCompletions')
+    await flushPromises()
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano acct')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const creds = createAccountMock.mock.calls[0]?.[0]?.credentials
+    expect(creds?.api_protocol).toBe('chat_completions')
+    expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
+  })
 })
