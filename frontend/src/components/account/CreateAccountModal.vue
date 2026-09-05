@@ -4124,7 +4124,7 @@ watch(accountMode, (mode, previousMode) => {
   }
   apiKeyBaseUrl.value = defaultCNBaseUrl(form.platform, mode, apiProtocol.value)
 })
-watch(apiProtocol, (protocol) => {
+watch(apiProtocol, (protocol, previousProtocol) => {
   if (!isCNPlatform.value) return
   if (protocol === 'adaptive') {
     // 火山地址需同步进 adaptive 的 chat_completions 槽位，避免切换后静默回退 DeepSeek（HIGH 修复）
@@ -4137,6 +4137,11 @@ watch(apiProtocol, (protocol) => {
       if (!adaptiveBaseUrls.value[item.value]) adaptiveBaseUrls.value[item.value] = defaults[item.value]
     }
     apiKeyBaseUrl.value = adaptiveBaseUrls.value.chat_completions
+    return
+  }
+  // 切出 adaptive：优先从 adaptiveBaseUrls 对应协议槽位回填，避免丢失用户在 adaptive 中填写的端点（HIGH 修复）
+  if (previousProtocol === 'adaptive') {
+    apiKeyBaseUrl.value = adaptiveBaseUrls.value[protocol] || defaultCNBaseUrl(form.platform, accountMode.value, protocol)
     return
   }
   // 切换到非 adaptive：保留火山 base_url，不套用 deepseek 默认端点
