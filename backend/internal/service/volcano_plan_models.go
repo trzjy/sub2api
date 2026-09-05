@@ -155,19 +155,6 @@ func openAIResponsesURLForBase(platform string, baseURL string) string {
 	return buildOpenAIResponsesURLForPlatform(platform, baseURL)
 }
 
-// whitelistedAccountModels 返回账号 model_mapping 中已有的具名模型键（白名单，需保留）。
-func whitelistedAccountModels(account *Account) []string {
-	var out []string
-	for modelID := range account.GetModelMapping() {
-		modelID = strings.TrimSpace(modelID)
-		if modelID == "" || strings.Contains(modelID, "*") {
-			continue
-		}
-		out = append(out, modelID)
-	}
-	return out
-}
-
 // buildVolcanoProbeRequest 构造对账号真实对话端点的最小非流式探活请求。
 // Anthropic 协议→ /v1/messages；OpenAI 协议（chat_completions/responses）→ /v3/chat/completions。
 // 复用 setAnthropicAPIKeyAuthHeader / ApplyHeaderOverrides，不复制第二套鉴权。
@@ -320,7 +307,7 @@ type VolcanoPlanSyncResult struct {
 	Unverified  []string               `json:"unverified"`   // 未能确认（提示，不并入）
 	WillAdd     []string               `json:"will_add"`     // 应用后将新增到 model_mapping
 	WillRemove  []string               `json:"will_remove"`  // 完全确认替换时将下架（官方下线收敛）
-	FullConfirm bool                   `json:"full_confirm"` // 完全确认：托管集合替换 vs 部分确认只新增
+	FullConfirm bool                   `json:"full_confirm"` // 完全确认：托管集按候选全集替换；部分确认只取本轮探活确认集
 	Applied     bool                   `json:"applied"`      // 本次是否已落库
 	Evidence    VolcanoPlanDocEvidence `json:"evidence"`
 }
@@ -329,7 +316,7 @@ type VolcanoPlanSyncResult struct {
 const VolcanoPlanManagedModelExtraKey = "volcano_plan_managed_models"
 
 // VolcanoPlanManagedModels 是系统托管的火山订阅号模型集合快照（随账号 extra 持久化）。
-// 用于“部分确认只新增、完全确认替换、绝不删人工映射”的收敛判定。
+// 用于“部分确认取本轮探活确认集、完全确认替换、绝不删人工映射”的收敛判定。
 // Models=最后一次同步的官方候选并集（托管范围）；IdentityKeys=本同步器历次真正写入
 // model_mapping 的身份键（key==value）的累积集合。完全确认下架只允许删除 IdentityKeys
 // 中的键——用户手动添加的 identity（首轮同步前已存在于 mapping，或自行新增但不在
@@ -479,25 +466,26 @@ func (s *AccountTestService) resolveVolcanoPlanScan(ctx context.Context, account
 }
 
 // fetchVolcanoPlanSupportedModels 是通用同步路径（SyncUpstreamModelCatalog → fetchUpstreamModelList）
-// 对火山订阅号的兼容入口：复用同一扫描，追加式返回“白名单 ∪ 新确认”模型列表（不写 model_mapping）。
-// 保留此语义以不改变其它平台与通用同步接口行为。
+// 对火山订阅号的兼容入口：复用同一扫描，只返回本轮真实探活确认的模型（全量语义，
+// 不再并入 model_mapping 旧模型做差量保留；不写 model_mapping）。
 func (s *AccountTestService) fetchVolcanoPlanSupportedModels(ctx context.Context, account *Account) ([]string, []UpstreamModelSyncWarning, error) {
 	scan, err := s.resolveVolcanoPlanScan(ctx, account)
 	if err != nil {
 		return nil, nil, err
 	}
-	result := append(whitelistedAccountModels(account), scan.confirmed...)
-	return dedupeAndSortModelIDs(result), scan.warnings, nil
+	return dedupeAndSortModelIDs(scan.confirmed), scan.warnings, nil
 }
 
 // SyncVolcanoPlanModels 是火山订阅号专用同步服务入口。
 // apply=false 只返回预演（分类 + 差异，不动库）；apply=true 落库系统托管快照并调整
 // model_mapping：
 //
-//   - 完全确认（无 unverified/unavailable 阻断、且新增了已确认模型）→ 托管集合替换为
-//     官方套餐候选并集，官方下线的旧托管模型从 model_mapping 移除（收敛）；
-//   - 部分确认（存在 unverified/unavailable）→ 托管集合 = 旧托管 ∪ 新 confirmed（只新增，
-//     保留旧托管即便官方已下线）；
+//   - 完全确认（全部候选探通、无 unverified/unavailable 阻断）→ 托管集合替换为官方套餐
+//     候选并集，官方已下线的旧托管模型从 model_mapping 移除（收敛）；
+//   - 部分确认（存在 unverified/unavailable）→ 托管集合只取本轮探活确认的 confirmed 模型，
+//     不再并入旧托管（全量语义：旧模型不等候本轮探活结果，官方下线/未探通即退出托管集）。
+//     mapping 键的物理删除仍只由完全确认 + IdentityKeys 收敛驱动，部分确认不删除既有键，
+//     杜绝瞬时 429/超时导致误删可用模型。
 //   - 绝不删除人工映射：model_mapping 中非托管键（含 alias 键）一律保留，人工键永不动。
 //
 // Agent 与 Coding 各自独立：仅对账号 base_url 命中的单一套餐维护一套托管集合。
@@ -507,19 +495,19 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 		return nil, err
 	}
 
-	oldManaged := loadVolcanoManagedModels(account)
 	// 可删身份键集 = 上一快照中由本同步器写入的 identity 键（非用户手动 identity）。
 	oldIdentityKeys := loadVolcanoManagedModelIdentityKeys(account)
 	// 完全确认 = 无 unverified/unavailable 阻断。全量探活下 confirmed 为空只可能是全部
 	// 候选失败，而该情况已由 resolveVolcanoPlanScan fail-closed 返回 error；到达这里时
 	// confirmed 即本轮真实探通的官方候选。
 	fullConfirm := len(scan.unverified) == 0 && len(scan.unavailable) == 0
+	// 全量更新：托管集合每轮以本次官方候选 + 真实探活结果重建，不按旧托管做差量保留。
 	var managed []string
 	if fullConfirm {
 		// 官方套餐候选即权威集：全量探活后候选全集已重新确认，托管集合直接替换为候选并集。
 		managed = append(managed, scan.candidates...)
 	} else {
-		managed = append(managed, oldManaged...)
+		// 部分确认：只取本轮探活确认的模型；官方下线/未探通的旧模型不再通过旧托管保留。
 		managed = append(managed, scan.confirmed...)
 	}
 	managed = dedupeAndSortModelIDs(managed)
@@ -667,15 +655,6 @@ func outsideRemovals(willRemove, allowedRemovals []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// loadVolcanoManagedModels 读取账号 extra 中已持久化的系统托管模型集合。
-func loadVolcanoManagedModels(account *Account) []string {
-	snap := account.GetVolcanoPlanManagedModels()
-	if snap == nil {
-		return nil
-	}
-	return snap.Models
 }
 
 // loadVolcanoManagedModelIdentityKeys 读取快照中"本同步器历次真正写入 model_mapping 的

@@ -254,10 +254,10 @@ func TestFetchVolcanoPlanSupportedModelsProbesOpenAIEndpoint(t *testing.T) {
 	require.NotContains(t, models, "auto")
 }
 
-// TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndReprobesExisting 验证全量
-// 探活语义：白名单已收录的候选仍重新探活（确认当前真实可用性），且既有白名单模型
-// 保留、不删减。
-func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndReprobesExisting(t *testing.T) {
+// TestFetchVolcanoPlanSupportedModelsReturnsConfirmedOnly 验证全量语义：通用同步入口
+// 只返回本轮真实探活确认的 confirmed，不再把 model_mapping 旧模型（白名单并集）并入
+// 结果——即使旧模型带官方候选名，只要本轮未确认就不在返回集。
+func TestFetchVolcanoPlanSupportedModelsReturnsConfirmedOnly(t *testing.T) {
 	t.Parallel()
 
 	var probedMu sync.Mutex
@@ -272,26 +272,30 @@ func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndReprobesExisting(t 
 			if !ok {
 				return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 			}
-			return status, `{"error":"x"}`, nil
+			if status != 200 {
+				return status, `{"error":"x"}`, nil
+			}
+			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
 	svc := newVolcanoSyncService(t, stub)
 
+	// 白名单含 glm-5.3（本轮探通 200 → confirmed）与 legacy-outside（非官方候选，本轮
+	// 无法被确认）。全量语义下二者都不因“白名单并集”被自动保留。
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
-	// 白名单已含 glm-5.3：全量语义下仍重新探活。
-	account.Credentials["model_mapping"] = map[string]any{"glm-5.3": "glm-5.3"}
+	account.Credentials["model_mapping"] = map[string]any{"glm-5.3": "glm-5.3", "legacy-outside": "legacy-outside"}
 
 	models, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
 	require.NoError(t, err)
 
 	probedMu.Lock()
 	defer probedMu.Unlock()
-	// glm-5.3 已收录但仍重新探活（200 确认可用）→ 保留在结果；kimi-k2.7-code 探测 404
-	// → 不可用不入列。
+	// 白名单中的候选仍重新探活；只有本轮确认的进入结果。
 	require.True(t, probed["glm-5.3"], "glm-5.3 whitelisted but must still be re-probed")
 	require.True(t, probed["kimi-k2.7-code"], "kimi-k2.7-code must be probed")
-	require.Contains(t, models, "glm-5.3")
-	require.NotContains(t, models, "kimi-k2.7-code")
+	require.Contains(t, models, "glm-5.3", "本轮探活确认的候选保留")
+	require.NotContains(t, models, "kimi-k2.7-code", "探测 404 → 不可用不入列")
+	require.NotContains(t, models, "legacy-outside", "白名单非候选模型不再并入结果（全量语义：只返回本轮探活确认）")
 }
 
 // 全量语义：候选名即使等于某条已有 mapping 的上游目标值（alias -> 火山模型 v），

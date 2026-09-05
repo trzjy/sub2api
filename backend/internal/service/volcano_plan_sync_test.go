@@ -1,7 +1,7 @@
 package service
 
-// 火山订阅号同步编排测试：预览不动库、部分确认只新增（保留旧托管）、完全确认替换、
-// 绝不删除人工 alias 映射、K3 发现、失败关闭/凭证终止不落库。复用
+// 火山订阅号同步编排测试：预览不动库、部分确认收敛到本轮探活确认集（不保留旧托管）、
+// 完全确认替换、绝不删除人工 alias 映射、K3 发现、失败关闭/凭证终止不落库。复用
 // newVolcanoSyncService（官方文档夹具 + 探活桩）与火山专用探活桩。
 
 import (
@@ -192,13 +192,15 @@ func TestVolcanoSyncPlanFullReplacePreservesManualAlias(t *testing.T) {
 	require.NotZero(t, snap.SyncedAt)
 }
 
-// TestVolcanoSyncPlanPartialKeepsOldManaged 验证部分确认（某候选未探通）→ 托管集合 =
-// 旧托管 ∪ 新 confirmed：官方已不存在的旧托管模型保留，未探通模型不入列，绝不删。
-func TestVolcanoSyncPlanPartialKeepsOldManaged(t *testing.T) {
+// TestVolcanoSyncPlanPartialConvergesToConfirmed 验证部分确认（某候选未探通）→ 托管集合
+// 只取本轮探活确认的 confirmed（全量语义，不再并入旧托管做差量保留）：官方已下线的旧托管
+// 模型退出托管快照；但 mapping 键的物理删除仍只由完全确认 + IdentityKeys 驱动，部分确认
+// 不删既有键（防瞬时 429/超时误删可用模型）。未探通模型不入列。
+func TestVolcanoSyncPlanPartialConvergesToConfirmed(t *testing.T) {
 	t.Parallel()
 
-	// doubao-seed-2.0-mini 只在 Agent 套餐，Coding 官方文档已无它——但若旧托管里有，
-	// 部分确认时必须保留（add-only，即便官方下线也不删）。
+	// doubao-seed-2.0-mini 只在 Agent 套餐，Coding 官方文档已无它。全量语义下部分确认
+	// 不再把它从旧托管并入本轮托管集（官方下线即退出托管快照）。
 	oldManaged := []string{"doubao-seed-2.0-mini"}
 	repo := &volcanoPlanSyncRepoStub{}
 	stub := &volcanoSyncHTTPStub{
@@ -221,24 +223,21 @@ func TestVolcanoSyncPlanPartialKeepsOldManaged(t *testing.T) {
 	require.True(t, result.Applied)
 	require.False(t, result.FullConfirm, "存在 unverified 阻断 → 部分确认")
 	require.Equal(t, []string{"glm-5.3-flash"}, result.Unverified)
-	require.Empty(t, result.WillRemove, "部分确认绝不收敛下架")
+	require.Empty(t, result.WillRemove, "部分确认不物理删除既有 mapping 键")
+	require.NotContains(t, result.WillAdd, "glm-5.3-flash", "未探通模型不得新增")
 
-	// 部分确认绝不收敛下架（will_remove 为空，上面已断言）。旧托管已在 mapping 中
-	// （curSet 命中）故不入 will_add，但必须保留；未探通模型不得新增。
-	require.NotContains(t, result.WillAdd, "glm-5.3-flash")
+	// mapping 键保留：部分确认不删既有键，旧托管 identity 仍在（仅退出托管快照，待完全
+	// 确认时再按 IdentityKeys 收敛）。
+	newMapping := account.Credentials["model_mapping"].(map[string]any)
+	require.Equal(t, "doubao-seed-2.0-mini", newMapping["doubao-seed-2.0-mini"], "部分确认不删既有 mapping 键")
+	require.NotContains(t, newMapping, "glm-5.3-flash", "未探通模型不得并入 mapping")
 
-	newMapping, ok := account.Credentials["model_mapping"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "doubao-seed-2.0-mini", newMapping["doubao-seed-2.0-mini"], "官方下线的旧托管 identity 键在部分确认下保留")
-	_, hasUnverified := newMapping["glm-5.3-flash"]
-	require.False(t, hasUnverified, "未探通模型不得并入 mapping")
-
-	// 托管快照 = 旧托管 ∪ confirmed（共 9 个：8 探通 + 旧托管），不含未探通者。
+	// 托管快照 = 本轮 confirmed（不含未探通者，也不再并入官方下线的旧托管）。
 	snap := account.GetVolcanoPlanManagedModels()
 	require.NotNil(t, snap)
 	require.NotContains(t, snap.Models, "glm-5.3-flash")
-	var expected = append(append([]string(nil), oldManaged...), excludeStrings(codingCandidates, "glm-5.3-flash")...)
-	require.Equal(t, dedupeAndSortModelIDs(expected), snap.Models)
+	require.NotContains(t, snap.Models, "doubao-seed-2.0-mini", "全量语义：官方下线旧托管不再通过部分确认保留")
+	require.Equal(t, excludeStrings(codingCandidates, "glm-5.3-flash"), snap.Models)
 }
 
 func excludeStrings(in []string, drop string) []string {
