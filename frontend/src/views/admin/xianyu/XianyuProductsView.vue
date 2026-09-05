@@ -213,6 +213,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -287,7 +288,7 @@ async function load() {
     rules.value = ruleList
     accounts.value = accountList
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
     loading.value = false
   }
@@ -300,8 +301,8 @@ async function doSync() {
     await load()
     appStore.showSuccess(t('admin.xianyu.products.syncSuccess'))
   } catch (err) {
-    syncResults.value = [{ account_id: '-', success: false, error: String(err) }]
-    appStore.showError(String(err))
+    syncResults.value = [{ account_id: '-', success: false, error: extractApiErrorMessage(err, t('common.error')) }]
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -331,7 +332,7 @@ async function confirmBind() {
     await load()
     appStore.showSuccess(t('admin.xianyu.products.bindSuccess'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -341,7 +342,7 @@ async function unbind(product: XianyuProduct) {
     await load()
     appStore.showSuccess(t('admin.xianyu.products.unbindSuccess'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -394,7 +395,7 @@ async function saveRule() {
     await load()
     appStore.showSuccess(t('admin.xianyu.products.ruleSaved'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -412,7 +413,7 @@ async function toggleRule(rule: XianyuBindingRule) {
     await load()
     appStore.showSuccess(t('admin.xianyu.products.ruleSaved'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 

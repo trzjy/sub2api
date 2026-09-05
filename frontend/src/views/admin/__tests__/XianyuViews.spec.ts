@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import XianyuOverviewView from '../xianyu/XianyuOverviewView.vue'
 import XianyuProductsView from '../xianyu/XianyuProductsView.vue'
+import XianyuInventoryView from '../xianyu/XianyuInventoryView.vue'
 import XianyuDeliveriesView from '../xianyu/XianyuDeliveriesView.vue'
 import XianyuSettingsView from '../xianyu/XianyuSettingsView.vue'
 
@@ -20,6 +21,9 @@ const mocks = vi.hoisted(() => ({
   checkHealth: vi.fn(),
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
+  showWarning: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -53,17 +57,17 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/stores', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
-    showWarning: vi.fn(),
+    showError: mocks.showError,
+    showSuccess: mocks.showSuccess,
+    showWarning: mocks.showWarning,
   }),
 }))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
-    showWarning: vi.fn(),
+    showError: mocks.showError,
+    showSuccess: mocks.showSuccess,
+    showWarning: mocks.showWarning,
   }),
 }))
 
@@ -89,9 +93,9 @@ function mountWithStubs(component: Parameters<typeof mount>[0]) {
         AppLayout: { template: '<div><slot /></div>' },
         BaseDialog: { template: '<div><slot /></div>' },
         ConfirmDialog: { template: '<div></div>' },
-        StatusBadge: { template: '<span>{{ label }}</span>' },
+        StatusBadge: { template: '<span>{{ label }}</span>', props: ['status', 'label'] },
         EmptyState: { template: '<div></div>' },
-        Select: { template: '<select><slot /></select>' },
+        Select: { template: '<div><slot /></div>', props: ['modelValue', 'options'] },
         Pagination: true,
         Toggle: { template: '<input type="checkbox" />' },
       },
@@ -122,6 +126,13 @@ describe('Xianyu OverviewView', () => {
     expect(wrapper.text()).toContain('standard')
     expect(mocks.getOverview).toHaveBeenCalled()
   })
+
+  it('shows readable error message instead of [object Object]', async () => {
+    mocks.getOverview.mockRejectedValue({ message: 'backend overview error' })
+    mountWithStubs(XianyuOverviewView)
+    await flushPromises()
+    expect(mocks.showError).toHaveBeenCalledWith('backend overview error')
+  })
 })
 
 describe('Xianyu ProductsView', () => {
@@ -150,6 +161,37 @@ describe('Xianyu ProductsView', () => {
     // 点击绑定按钮打开弹窗。
     const bindButton = wrapper.findAll('button').find((b) => b.text().includes('bind'))
     expect(bindButton).toBeTruthy()
+  })
+
+  it('shows readable error message instead of [object Object]', async () => {
+    mocks.listProducts.mockRejectedValue({ message: 'backend products error' })
+    mountWithStubs(XianyuProductsView)
+    await flushPromises()
+    expect(mocks.showError).toHaveBeenCalledWith('backend products error')
+  })
+})
+
+describe('Xianyu InventoryView', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mocks.listItemPools.mockResolvedValue([{ id: 1, name: 'standard', slug: 'standard', description: '', low_stock_threshold: 0, status: 'active' }])
+    mocks.getOverview.mockResolvedValue({ pools: [] })
+  })
+
+  afterEach(() => vi.clearAllMocks())
+
+  it('renders inventory pools', async () => {
+    const wrapper = mountWithStubs(XianyuInventoryView)
+    await flushPromises()
+    expect(wrapper.text()).toContain('standard')
+    expect(mocks.listItemPools).toHaveBeenCalled()
+  })
+
+  it('shows readable error message instead of [object Object]', async () => {
+    mocks.listItemPools.mockRejectedValue({ message: 'backend inventory error' })
+    mountWithStubs(XianyuInventoryView)
+    await flushPromises()
+    expect(mocks.showError).toHaveBeenCalledWith('backend inventory error')
   })
 })
 
@@ -184,6 +226,13 @@ describe('Xianyu DeliveriesView', () => {
     const resendBtn = wrapper.findAll('button').find((b) => b.text().includes('resend'))
     expect(resendBtn).toBeTruthy()
   })
+
+  it('shows readable error message instead of [object Object]', async () => {
+    mocks.listDeliveries.mockRejectedValue({ message: 'backend deliveries error' })
+    mountWithStubs(XianyuDeliveriesView)
+    await flushPromises()
+    expect(mocks.showError).toHaveBeenCalledWith('backend deliveries error')
+  })
 })
 
 describe('Xianyu SettingsView', () => {
@@ -205,5 +254,12 @@ describe('Xianyu SettingsView', () => {
     await flushPromises()
     expect(mocks.getSettings).toHaveBeenCalled()
     expect(mocks.getWorkerConfigs).toHaveBeenCalled()
+  })
+
+  it('shows readable error message instead of [object Object]', async () => {
+    mocks.getSettings.mockRejectedValue({ message: 'backend settings error' })
+    mountWithStubs(XianyuSettingsView)
+    await flushPromises()
+    expect(mocks.showError).toHaveBeenCalledWith('backend settings error')
   })
 })

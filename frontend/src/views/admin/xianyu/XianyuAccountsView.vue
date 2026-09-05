@@ -336,7 +336,7 @@ async function pollOnce(sessionID: string) {
 
 function stopPolling() {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    window.clearTimeout(pollTimer)
     pollTimer = null
   }
 }

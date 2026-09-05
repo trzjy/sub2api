@@ -69,8 +69,8 @@ export async function createLoginSession(accountId: string): Promise<XianyuLogin
   return data
 }
 
-export async function queryLoginSession(accountId: string, options?: { signal?: AbortSignal }): Promise<XianyuLoginSessionStatus> {
-  const { data } = await apiClient.get<XianyuLoginSessionStatus>(`/admin/xianyu/accounts/${encodeURIComponent(accountId)}/login-session`, { signal: options?.signal })
+export async function queryLoginSession(sessionId: string, options?: { signal?: AbortSignal }): Promise<XianyuLoginSessionStatus> {
+  const { data } = await apiClient.get<XianyuLoginSessionStatus>(`/admin/xianyu/accounts/login-session/${encodeURIComponent(sessionId)}`, { signal: options?.signal })
   return data
 }
 

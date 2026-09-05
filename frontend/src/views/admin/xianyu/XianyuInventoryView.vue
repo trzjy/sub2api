@@ -111,6 +111,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -131,7 +132,7 @@ async function load() {
     stockError.value = false
   } catch (err) {
     stockError.value = true
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -194,7 +195,7 @@ async function save() {
     await load()
     appStore.showSuccess(t('admin.xianyu.inventory.success'))
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
