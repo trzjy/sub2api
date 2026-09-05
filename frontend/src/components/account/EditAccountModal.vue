@@ -4747,9 +4747,10 @@ const handleSubmit = async () => {
           delete newCredentials.api_base_urls
         }
       }
-      // 火山方舟订阅号：base_url 命中 volces 时写入 SigV4 签名所需的访问密钥；
+      // 火山方舟订阅号：与界面识别一致（isVolcanoSubscription 已按 adaptive/非 adaptive
+      // 取有效 base_url 判定）写入 SigV4 签名所需的访问密钥；
       // 留空不覆盖（依赖后端 MergePreservingSensitiveCreds 保留已有值）。
-      if (isVolcanoBaseURL(String(newCredentials.base_url))) {
+      if (isVolcanoSubscription.value) {
         if (volcanoAccessKey.value.trim()) newCredentials.access_key = volcanoAccessKey.value.trim()
         if (volcanoSecretKey.value.trim()) newCredentials.secret_key = volcanoSecretKey.value.trim()
       }
