@@ -429,8 +429,8 @@
       </div>
     </template>
 
-    <!-- CN providers (Kimi / Zhipu / DeepSeek): coding-plan quota or payg balance -->
-    <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek'">
+    <!-- CN providers (Kimi / Zhipu / DeepSeek / 火山方舟订阅号 base_url 命中 volces): coding-plan quota or payg balance -->
+    <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek' || isVolcanoAccount">
       <div class="space-y-1">
         <!-- 子单元格各自按 模式×平台 判定可见；两者都不可见时（智谱 payg 无公开
              余额端点、coding 探测也不适用）才回落到占位符。 -->
@@ -684,7 +684,8 @@ import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
 import {
   cnQuotaCellVisible as cnQuotaCellVisibleFn,
   cnBalanceCellVisible as cnBalanceCellVisibleFn,
-  resolveAccountBaseURL
+  resolveAccountBaseURL,
+  isVolcanoBaseURL
 } from './credentialsBuilder'
 
 // Module-level cache shared across all AccountUsageCell instances
@@ -766,11 +767,13 @@ const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   if (props.account.platform === 'gemini') return true
   // CN providers: apikey 账号也有滚动用量窗口（coding plan）或余额（payg），
-  // 由 CNProviderQuotaCell / CNProviderBalanceCell 自行探测与展示。
+  // 由 CNProviderQuotaCell / CNProviderBalanceCell 自行探测与展示。火山方舟订阅号
+  // 按 base_url 识别（与 platform 解耦，账号仍存为 deepseek 平台）。
   if (
     props.account.platform === 'kimi' ||
     props.account.platform === 'zhipu' ||
-    props.account.platform === 'deepseek'
+    props.account.platform === 'deepseek' ||
+    isVolcanoAccount.value
   ) {
     return true
   }
@@ -802,11 +805,13 @@ const cnAccountMode = computed(() => {
   const mode = props.account.credentials?.account_mode
   return typeof mode === 'string' ? mode : ''
 })
+const accountBaseURL = computed(() => resolveAccountBaseURL(props.account.credentials))
+const isVolcanoAccount = computed(() => isVolcanoBaseURL(accountBaseURL.value))
 const cnQuotaCellVisible = computed(() =>
-  cnQuotaCellVisibleFn(props.account.platform, cnAccountMode.value, resolveAccountBaseURL(props.account.credentials))
+  cnQuotaCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
 )
 const cnBalanceCellVisible = computed(() =>
-  cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, resolveAccountBaseURL(props.account.credentials))
+  cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
 )
 
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')

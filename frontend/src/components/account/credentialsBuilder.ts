@@ -285,7 +285,10 @@ export const CN_BASE_URL_PRESETS: Record<'kimi' | 'zhipu' | 'deepseek', CnBaseUr
   deepseek: [
     { mode: 'payg', protocol: 'chat_completions', label: 'DeepSeek', url: 'https://api.deepseek.com' },
     { mode: 'payg', protocol: 'anthropic', label: 'DeepSeek Anthropic', url: 'https://api.deepseek.com/anthropic' },
-    { mode: 'payg', protocol: 'responses', label: 'DeepSeek Responses', url: 'https://api.deepseek.com' }
+    { mode: 'payg', protocol: 'responses', label: 'DeepSeek Responses', url: 'https://api.deepseek.com' },
+    // 火山方舟订阅号挂靠 deepseek 平台（方案B：识别只按 base_url，账号仍存为 deepseek 平台）。
+    { mode: 'payg', protocol: 'chat_completions', label: '火山方舟 Agent Plan', url: 'https://ark.cn-beijing.volces.com/api/plan' },
+    { mode: 'coding', protocol: 'chat_completions', label: '火山方舟 Coding Plan', url: 'https://ark.cn-beijing.volces.com/api/coding' }
   ]
 }
 
@@ -340,8 +343,8 @@ export function defaultCNAdaptiveBaseUrls(
 
 // 国内 Coding Plan 供应商的 extra 快照键前缀（与后端 cnQuotaExtraUpdates /
 // GetCodingPlanProvider 对齐：kimi/zhipu 平台即供应商，直接采用；火山方舟订阅号
-// platform=deepseek 但 base_url 指向 ark.cn-beijing.volces.com，须以 base_url
-// 判定映射到 backend 的 providerVolcano）。
+// 由 base_url 命中 ark.cn-beijing.volces.com 判定映射到 backend 的 providerVolcano，
+// 与账号 platform 解耦——火山订阅号仍存为 deepseek 平台，但识别只认 base_url）。
 // 与后端 Account.GetOpenAIBaseURL 的解析优先级保持一致：CN 账号仅在
 // api_protocol === "adaptive" 时优先取 api_base_urls.chat_completions，否则取
 // credentials.base_url。后端（account.go.GetOpenAIBaseURL）只对 adaptive CN 账号
@@ -379,17 +382,17 @@ export function cnQuotaCellVisible(platform: string, accountMode: string, baseUR
   if (platform === 'kimi' || platform === 'zhipu') {
     return accountMode === 'coding'
   }
-  // 火山方舟订阅号：platform=deepseek，靠 base_url 识别，与接入模式无关
-  // （deepseek 订阅号创建/编辑界面保存为 payg）。仅火山放行非 coding，不改
+  // 火山方舟订阅号：按 base_url 识别，与 platform 解耦（账号仍存为 deepseek 平台），
+  // 与接入模式无关（火山订阅号保存为 payg）。仅火山放行非 coding，不改
   // Kimi / 智谱 / 普通 DeepSeek 的模式语义。
-  if (platform === 'deepseek' && isVolcanoBaseURL(baseURL)) return true
+  if (isVolcanoBaseURL(baseURL)) return true
   return false
 }
 
 export function cnBalanceCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
-  // 火山深seek 订阅号按余额走 payg 探测会打到错误的 API Key；订阅套餐没有可查余额，
+  // 火山订阅号按余额走 payg 探测会打到错误的 API Key；订阅套餐没有可查余额，
   // 余额单元格保持隐藏，避免与火山配额单元格双重渲染。
-  if (platform === 'deepseek' && isVolcanoBaseURL(baseURL)) return false
+  if (isVolcanoBaseURL(baseURL)) return false
   return (platform === 'kimi' || platform === 'deepseek') && accountMode !== 'coding'
 }
 

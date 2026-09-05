@@ -143,6 +143,39 @@
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
         </div>
 
+        <!-- 火山方舟订阅号：SigV4 签名需要访问密钥，否则用量探测会报 access_key/secret_key is empty -->
+        <div v-if="isVolcanoSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.cnProviders.volcanoAkSkHint') }}
+          </p>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}</label>
+            <input
+              v-model="volcanoAccessKey"
+              type="password"
+              class="input font-mono"
+              autocomplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              :placeholder="t('admin.accounts.cnProviders.accessKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.secretKey') }}</label>
+            <input
+              v-model="volcanoSecretKey"
+              type="password"
+              class="input font-mono"
+              autocomplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              data-bwignore="true"
+              :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
+            />
+          </div>
+        </div>
+
         <!-- Model Restriction Section (不适用于 Antigravity) -->
         <div v-if="account.platform !== 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
@@ -2922,6 +2955,7 @@ import {
   validateHeaderOverrideRows,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
+  isVolcanoBaseURL,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
   type CnAccountMode,
@@ -3036,6 +3070,15 @@ const editAdaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
   anthropic: '',
   responses: ''
 })
+// 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+const isVolcanoSubscription = computed(() => {
+  const url = editApiProtocol.value === 'adaptive'
+    ? (editAdaptiveBaseUrls.value.chat_completions || editBaseUrl.value)
+    : editBaseUrl.value
+  return isVolcanoBaseURL(url || '')
+})
+const volcanoAccessKey = ref('')
+const volcanoSecretKey = ref('')
 // 回填窗口标志：syncFormFromAccount 会同步改写 editAccountMode / editApiProtocol，
 // 而 watcher（pre-flush）在同步代码执行完之后才触发——若不抑制，会把刚恢复的
 // 存储版 base_url（可能是用户自定义/中转地址）覆盖为官方预设并在下次保存时持久化。
@@ -4703,6 +4746,12 @@ const handleSubmit = async () => {
         } else {
           delete newCredentials.api_base_urls
         }
+      }
+      // 火山方舟订阅号：base_url 命中 volces 时写入 SigV4 签名所需的访问密钥；
+      // 留空不覆盖（依赖后端 MergePreservingSensitiveCreds 保留已有值）。
+      if (isVolcanoBaseURL(String(newCredentials.base_url))) {
+        if (volcanoAccessKey.value.trim()) newCredentials.access_key = volcanoAccessKey.value.trim()
+        if (volcanoSecretKey.value.trim()) newCredentials.secret_key = volcanoSecretKey.value.trim()
       }
 
       // Handle API key

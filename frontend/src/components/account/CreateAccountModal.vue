@@ -1317,6 +1317,31 @@
           <p v-if="apiKeyHint" class="input-hint">{{ apiKeyHint }}</p>
         </div>
 
+        <!-- 火山方舟订阅号：SigV4 签名需要访问密钥，否则用量探测会报 access_key/secret_key is empty -->
+        <div v-if="isVolcanoSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.cnProviders.volcanoAkSkHint') }}
+          </p>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}</label>
+            <input
+              v-model="volcanoAccessKey"
+              type="password"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.cnProviders.accessKeyPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.secretKey') }}</label>
+            <input
+              v-model="volcanoSecretKey"
+              type="password"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
+            />
+          </div>
+        </div>
+
         <!-- 上游倍率自动探测：全部 API-key 平台可用（所在区块已限定 apikey 类型） -->
         <div
           class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3795,6 +3820,7 @@ import {
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
   isHeaderOverrideCapable,
+  isVolcanoBaseURL,
   validateHeaderOverrideRows,
   type CnAccountMode,
   type CnApiProtocol,
@@ -3989,6 +4015,15 @@ const adaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
 const isCNPlatform = computed(
   () => form.platform === 'kimi' || form.platform === 'zhipu' || form.platform === 'deepseek'
 )
+// 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+const isVolcanoSubscription = computed(() => {
+  const url = apiProtocol.value === 'adaptive'
+    ? (adaptiveBaseUrls.value.chat_completions || apiKeyBaseUrl.value)
+    : apiKeyBaseUrl.value
+  return isVolcanoBaseURL(url || '')
+})
+const volcanoAccessKey = ref('')
+const volcanoSecretKey = ref('')
 // CnBaseUrlPresets 的 platform prop 是平台字面量联合类型，模板里不能写
 // `as` 断言（其中的 `|` 会被 eslint 误判为 Vue2 filter 语法），经此 computed 传递。
 const cnPresetPlatform = computed<'kimi' | 'zhipu' | 'deepseek'>(() => {
@@ -5575,6 +5610,11 @@ const handleSubmit = async () => {
     ).trim()
     if (apiProtocol.value !== 'adaptive' && resolvedCNBase) {
       credentials.base_url = resolvedCNBase
+    }
+    // 火山方舟订阅号：base_url 命中 volces 时写入 SigV4 签名所需的访问密钥。
+    if (isVolcanoBaseURL(resolvedCNBase)) {
+      if (volcanoAccessKey.value.trim()) credentials.access_key = volcanoAccessKey.value.trim()
+      if (volcanoSecretKey.value.trim()) credentials.secret_key = volcanoSecretKey.value.trim()
     }
   }
 

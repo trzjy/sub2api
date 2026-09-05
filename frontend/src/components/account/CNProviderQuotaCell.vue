@@ -107,7 +107,7 @@ const readMode = (): string => {
 
 const readBaseURL = (): string => resolveAccountBaseURL(props.account.credentials)
 
-// 快照键前缀（kimi/zhipu 平台即供应商；火山 = platform deepseek + volces base_url）。
+// 快照键前缀（kimi/zhipu 平台即供应商；火山 = base_url 命中 volces，账号仍存为 deepseek 平台）。
 const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))
 
 const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))

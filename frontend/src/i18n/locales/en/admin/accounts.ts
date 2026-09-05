@@ -138,6 +138,11 @@ export default {
         balanceProbeTooltip: 'Query the provider balance endpoint for the account balance',
         balanceLow: 'Insufficient balance',
         noBalanceEndpoint: 'This platform has no balance query endpoint',
+        volcanoAkSkHint: 'Volcano Ark subscription accounts require an Access Key / Secret Key for signing the usage-window probe request. Leave blank to keep existing keys.',
+        accessKey: 'Access Key',
+        accessKeyPlaceholder: 'AKLT...',
+        secretKey: 'Secret Key',
+        secretKeyPlaceholder: 'secret content',
         resetSoon: 'reset soon',
       },
       types: {
