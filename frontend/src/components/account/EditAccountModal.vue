@@ -2955,6 +2955,7 @@ import {
   validateHeaderOverrideRows,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
+  resolveAccountBaseURL,
   isVolcanoBaseURL,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
@@ -3071,11 +3072,12 @@ const editAdaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
   responses: ''
 })
 // 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+// 取有效 base_url 时先 trim，避免仅含空白的 chat_completions 遮蔽真实火山地址（LOW 修复）。
 const isVolcanoSubscription = computed(() => {
   const url = editApiProtocol.value === 'adaptive'
     ? (editAdaptiveBaseUrls.value.chat_completions || editBaseUrl.value)
     : editBaseUrl.value
-  return isVolcanoBaseURL(url || '')
+  return isVolcanoBaseURL((url || '').trim())
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
@@ -3180,8 +3182,10 @@ const isBedrockAPIKeyMode = computed(() =>
   (props.account?.credentials as Record<string, unknown>)?.auth_mode === 'apikey'
 )
 // 供 ModelWhitelistSelector 识别火山 Agent/Coding 订阅号（base_url 判定）。
+// 直接复用 resolveAccountBaseURL，统一 adaptive 与非 adaptive 的端点解析优先级
+// （adaptive 优先 api_base_urls.chat_completions，否则回退 base_url，并做 trim）。
 const accountCredentialBaseUrl = computed(() =>
-  (props.account?.credentials as Record<string, unknown>)?.base_url as string | undefined
+  resolveAccountBaseURL(props.account?.credentials as Record<string, unknown> | undefined)
 )
 const modelMappings = ref<ModelMapping[]>([])
 const openAICompactModelMappings = ref<ModelMapping[]>([])
@@ -3741,6 +3745,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   void nextTick(() => {
     syncingForm.value = false
   })
+  // 清空火山方舟访问密钥输入：避免同一编辑弹窗切换到另一个账号时，残留上一账号的
+  // AK/SK 被误写入新账号（HIGH：跨账号凭据串号/泄露）。
+  volcanoAccessKey.value = ''
+  volcanoSecretKey.value = ''
   antigravityMixedChannelConfirmed.value = false
   showMixedChannelWarning.value = false
   mixedChannelWarningDetails.value = null
@@ -4653,6 +4661,9 @@ const parseDateTimeLocal = parseDateTimeLocalInput
 const handleClose = () => {
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
+  // 关闭时清空火山方舟访问密钥输入，防止下次打开其他账号时残留（HIGH 防御）。
+  volcanoAccessKey.value = ''
+  volcanoSecretKey.value = ''
   emit('close')
 }
 

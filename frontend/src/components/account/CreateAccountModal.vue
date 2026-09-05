@@ -4016,11 +4016,12 @@ const isCNPlatform = computed(
   () => form.platform === 'kimi' || form.platform === 'zhipu' || form.platform === 'deepseek'
 )
 // 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+// 取有效 base_url 时先 trim，避免仅含空白的 chat_completions 遮蔽真实火山地址（LOW 修复）。
 const isVolcanoSubscription = computed(() => {
   const url = apiProtocol.value === 'adaptive'
     ? (adaptiveBaseUrls.value.chat_completions || apiKeyBaseUrl.value)
     : apiKeyBaseUrl.value
-  return isVolcanoBaseURL(url || '')
+  return isVolcanoBaseURL((url || '').trim())
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')

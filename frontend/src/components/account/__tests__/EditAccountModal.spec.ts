@@ -477,6 +477,55 @@ describe('EditAccountModal', () => {
     })
   })
 
+  it('does not carry a previous account volcano AK/SK into a switched account', async () => {
+    const accountA = buildAccount()
+    accountA.id = 11
+    accountA.platform = 'deepseek'
+    accountA.credentials = {
+      api_key: 'sk-deepseek-a',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/plan',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    const accountB = buildAccount()
+    accountB.id = 12
+    accountB.platform = 'deepseek'
+    accountB.credentials = {
+      api_key: 'sk-deepseek-b',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/coding',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/coding',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(accountB)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(accountA)
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
+    await ak.setValue('AK-A-LEAK')
+    await sk.setValue('SK-A-LEAK')
+
+    // 同一编辑弹窗切换到另一个火山账号，应清空前账号的 AK/SK 输入。
+    await wrapper.setProps({ account: accountB })
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted?.access_key).not.toBe('AK-A-LEAK')
+    expect(submitted?.secret_key).not.toBe('SK-A-LEAK')
+  })
+
   it('carries a fixed Chat relay into Adaptive when the user switches protocols', async () => {
     const account = buildAccount()
     account.platform = 'zhipu'
