@@ -53,15 +53,16 @@ const (
 )
 
 // XianyuWorkerConfig 是主程序对单条 Worker 内网连接配置的视图。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuWorkerConfig struct {
-	ID                int64
-	BaseURL           string
-	APITokenEncrypted string
-	Status            string
-	HealthStatus      string
-	LastCheckedAt     *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64      `json:"id"`
+	BaseURL           string     `json:"base_url"`
+	APITokenEncrypted string     `json:"api_token_encrypted"`
+	Status            string     `json:"status"`
+	HealthStatus      string     `json:"health_status"`
+	LastCheckedAt     *time.Time `json:"last_checked_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // XianyuAccountStatus 表示闲鱼账号状态。
@@ -90,18 +91,19 @@ const (
 )
 
 // XianyuAccount 是主程序保存的闲鱼账号状态视图。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuAccount struct {
-	ID             int64
-	WorkerConfigID int64
-	AccountID      string
-	Nickname       string
-	Status         string
-	CookieStatus   string
-	TaskStatus     string
-	LastLoginAt    *time.Time
-	LastSeenAt     *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             int64      `json:"id"`
+	WorkerConfigID int64      `json:"worker_config_id"`
+	AccountID      string     `json:"account_id"`
+	Nickname       string     `json:"nickname"`
+	Status         string     `json:"status"`
+	CookieStatus   string     `json:"cookie_status"`
+	TaskStatus     string     `json:"task_status"`
+	LastLoginAt    *time.Time `json:"last_login_at"`
+	LastSeenAt     *time.Time `json:"last_seen_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // XianyuItemPoolStatus 表示商品池状态。
@@ -111,15 +113,16 @@ const (
 )
 
 // XianyuItemPool 是库存池配置。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuItemPool struct {
-	ID                int64
-	Name              string
-	Slug              string
-	Description       string
-	LowStockThreshold int
-	Status            string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64     `json:"id"`
+	Name              string    `json:"name"`
+	Slug              string    `json:"slug"`
+	Description       string    `json:"description"`
+	LowStockThreshold int       `json:"low_stock_threshold"`
+	Status            string    `json:"status"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // XianyuBindingStatus 表示商品绑定状态。
@@ -145,21 +148,22 @@ const (
 )
 
 // XianyuProduct 是商品映射。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuProduct struct {
-	ID            int64
-	AccountPK     int64
-	AccountID     string
-	ItemID        string
-	Title         string
-	SpecName      string
-	SpecValue     string
-	PoolID        *int64
-	BindingStatus string
-	BindingSource string
-	Status        string
-	LastSeenAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID            int64      `json:"id"`
+	AccountPK     int64      `json:"account_pk"`
+	AccountID     string     `json:"account_id"`
+	ItemID        string     `json:"item_id"`
+	Title         string     `json:"title"`
+	SpecName      string     `json:"spec_name"`
+	SpecValue     string     `json:"spec_value"`
+	PoolID        *int64     `json:"pool_id"`
+	BindingStatus string     `json:"binding_status"`
+	BindingSource string     `json:"binding_source"`
+	Status        string     `json:"status"`
+	LastSeenAt    *time.Time `json:"last_seen_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // XianyuBindingRuleMatchType 表示绑定规则匹配类型。
