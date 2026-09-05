@@ -5611,8 +5611,9 @@ const handleSubmit = async () => {
     if (apiProtocol.value !== 'adaptive' && resolvedCNBase) {
       credentials.base_url = resolvedCNBase
     }
-    // 火山方舟订阅号：base_url 命中 volces 时写入 SigV4 签名所需的访问密钥。
-    if (isVolcanoBaseURL(resolvedCNBase)) {
+    // 火山方舟订阅号：与界面识别一致（isVolcanoSubscription 已按 adaptive/非 adaptive
+    // 取有效 base_url 判定），写入 SigV4 签名所需的访问密钥。
+    if (isVolcanoSubscription.value) {
       if (volcanoAccessKey.value.trim()) credentials.access_key = volcanoAccessKey.value.trim()
       if (volcanoSecretKey.value.trim()) credentials.secret_key = volcanoSecretKey.value.trim()
     }

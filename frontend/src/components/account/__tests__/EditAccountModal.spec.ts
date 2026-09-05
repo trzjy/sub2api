@@ -445,6 +445,38 @@ describe('EditAccountModal', () => {
     })
   })
 
+  it('writes volcano access_key/secret_key on edit when the endpoint is a Volcano base url (adaptive)', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/plan',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
+    await ak.setValue('AKLT-volcano-ak')
+    await sk.setValue('volc-secret')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted).toMatchObject({
+      access_key: 'AKLT-volcano-ak',
+      secret_key: 'volc-secret'
+    })
+  })
+
   it('carries a fixed Chat relay into Adaptive when the user switches protocols', async () => {
     const account = buildAccount()
     account.platform = 'zhipu'
