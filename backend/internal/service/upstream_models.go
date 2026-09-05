@@ -137,6 +137,9 @@ const (
 	UpstreamModelSyncErrorUpstream UpstreamModelSyncErrorKind = "upstream"
 	// UpstreamModelSyncErrorInternal means local persistence or service state failed after a valid upstream response.
 	UpstreamModelSyncErrorInternal UpstreamModelSyncErrorKind = "internal"
+	// UpstreamModelSyncErrorCredential means the upstream rejected the account credentials
+	// (HTTP 401/403); safe to surface to the user as an auth/misconfiguration problem.
+	UpstreamModelSyncErrorCredential UpstreamModelSyncErrorKind = "credential"
 )
 
 // UpstreamModelSyncError keeps internal failure details wrapped while exposing a safe client message.
@@ -188,10 +191,16 @@ func newUpstreamModelSyncInternalError(message string, err error) error {
 	return &UpstreamModelSyncError{Kind: UpstreamModelSyncErrorInternal, Message: message, Err: err}
 }
 
+// newUpstreamModelSyncCredentialError 报告上游凭证被拒（HTTP 401/403），安全地映射为
+// 4xx 客户端错误返回，不当作上游不可用。
+func newUpstreamModelSyncCredentialError(message string, statusCode int, err error) error {
+	return &UpstreamModelSyncError{Kind: UpstreamModelSyncErrorCredential, Message: message, StatusCode: statusCode, Err: err}
+}
+
 // FetchUpstreamSupportedModels fetches only live model IDs. The admin sync path
 // uses SyncUpstreamModelCatalog so capability metadata can also be persisted.
 func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, account *Account) ([]string, error) {
-	models, _, err := s.fetchUpstreamModelList(ctx, account)
+	models, _, _, err := s.fetchUpstreamModelList(ctx, account)
 	return models, err
 }
 
@@ -199,7 +208,7 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // missing capability fields from the provider registry used by the upstream,
 // and persists a normalized account snapshot when metadata is available.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
-	models, body, err := s.fetchUpstreamModelList(ctx, account)
+	models, body, fetchWarnings, err := s.fetchUpstreamModelList(ctx, account)
 	if err != nil {
 		configuredModels := configuredUpstreamModelsForCapabilitySync(account)
 		if !upstreamModelListEndpointUnsupported(err) || len(configuredModels) == 0 {
@@ -215,6 +224,7 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		)
 	}
 	catalog := &UpstreamModelCatalog{Models: models, Metadata: make(map[string]UpstreamModelMetadata)}
+	catalog.Warnings = append(catalog.Warnings, fetchWarnings...)
 	if len(body) > 0 {
 		_, directMetadata, parseErr := extractUpstreamModelCatalog(body, account != nil && account.IsGrok())
 		if parseErr == nil {
@@ -513,7 +523,7 @@ func upstreamModelRegistryBaseURL(account *Account) string {
 		return ""
 	}
 	switch {
-	case account.IsOpenAI() || account.IsCNProvider():
+	case account.UsesOpenAIProtocolSharedBaseURL():
 		return account.GetOpenAIFormatBaseURL()
 	case account.IsGrok():
 		return account.GetGrokBaseURL()
@@ -565,46 +575,55 @@ func normalizeModelRegistryBaseURL(raw string) string {
 	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host) + path
 }
 
-func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, error) {
+// fetchUpstreamModelList 拉取账号的上游支持模型。火山订阅号（platform=deepseek +
+// ark 基址）不走通用 /models 目录，而是复用 volcanoPlanProfile 对真实对话端点做
+// 全量探活（见 fetchVolcanoPlanSupportedModels）。返回 (models, body, warnings, err)。
+func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, []UpstreamModelSyncWarning, error) {
 	if s == nil {
-		return nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
+		return nil, nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
 	}
 	if account == nil {
-		return nil, nil, newUpstreamModelSyncConfigError("Account is required", nil)
+		return nil, nil, nil, newUpstreamModelSyncConfigError("Account is required", nil)
 	}
 
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
 		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
-		return models, nil, err
+		return models, nil, nil, err
 	}
 
 	if s.httpUpstream == nil {
-		return nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
+		return nil, nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
+	}
+
+	// 火山方舟订阅号：跳过 /models，用官方候选 + 对话端点全量探活。
+	if isVolcanoPlanAccount(account) {
+		models, warnings, err := s.fetchVolcanoPlanSupportedModels(ctx, account)
+		return models, nil, warnings, err
 	}
 
 	req, err := s.buildUpstreamModelsRequest(ctx, account)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	proxyURL := upstreamModelsProxyURL(account)
 	resp, err := s.doUpstreamModelsRequest(req, proxyURL, account)
 	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
+		return nil, nil, nil, newUpstreamModelSyncUpstreamError("Failed to request upstream model list", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	bodyLimit := resolveModelsListReadLimit(s.cfg)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream model list", err)
+		return nil, nil, nil, newUpstreamModelSyncUpstreamError("Failed to read upstream model list", err)
 	}
 	if int64(len(body)) > bodyLimit {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
+		return nil, nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response is too large", fmt.Errorf("response exceeds %d bytes", bodyLimit))
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, nil, &UpstreamModelSyncError{
+		return nil, nil, nil, &UpstreamModelSyncError{
 			Kind:       UpstreamModelSyncErrorUpstream,
 			Message:    fmt.Sprintf("Upstream model list request failed with HTTP %d", resp.StatusCode),
 			StatusCode: resp.StatusCode,
@@ -618,13 +637,13 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 	}
 	models, err := extractModels(body)
 	if err != nil {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response was not valid JSON", err)
+		return nil, nil, nil, newUpstreamModelSyncUpstreamError("Upstream model list response was not valid JSON", err)
 	}
 	if len(models) == 0 {
-		return nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
+		return nil, nil, nil, newUpstreamModelSyncUpstreamError("Upstream returned no supported models", nil)
 	}
 
-	return models, body, nil
+	return models, body, nil, nil
 }
 
 func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
@@ -633,13 +652,19 @@ func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, acc
 		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
-	case account.IsOpenAI() || account.IsCNProvider():
-		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）复用 OpenAI /v1/models 探测。
-		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
+	case account.IsAnthropic() || account.IsAnthropicProtocol():
+		// 官方 Anthropic 协议枚举：api_protocol=anthropic 的账号（含 platform 属于 OpenAI
+		// 兼容族的国产号：火山方舟订阅 /api/plan||/api/coding、bigmodel /api/anthropic 等）
+		// 按 Anthropic 原生规范 GET {anthropic_base}/v1/models 探测，不得复用 platform 级
+		// OpenAI 兼容族探测——后者把 anthropic 端点 base_url 误解为 OpenAI 路径并改用 OpenAI
+		// 格式 base，可能把订阅 key 发往平台默认 OpenAI 主机（生产账号 29 实测 502）。
+		return s.buildAnthropicUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)
-	case account.IsAnthropic():
-		return s.buildAnthropicUpstreamModelsRequest(ctx, account)
+	case account.UsesOpenAIProtocolSharedBaseURL():
+		// OpenAI 协议账号（api_protocol=chat_completions/responses 的国产 kimi/zhipu/deepseek
+		// 与通用 other）复用 OpenAI /v1/models 探测。
+		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	default:
 		return nil, newUpstreamModelSyncUnsupportedError(
 			fmt.Sprintf("Unsupported platform for upstream model sync: %s", account.Platform), nil,
@@ -856,6 +881,10 @@ func (s *AccountTestService) buildOpenAIUpstreamModelsRequest(ctx context.Contex
 	// 列表同步需使用 OpenAI 格式 base（供应商 × 模式默认）。
 	baseURL := account.GetOpenAIFormatBaseURL()
 	if strings.TrimSpace(baseURL) == "" {
+		if account.Platform == PlatformOther {
+			// other 无默认上游：模型同步空 base_url 失败关闭，禁止回落官方 OpenAI（外审-2）。
+			return nil, newUpstreamModelSyncConfigError("platform other requires a custom base_url", nil)
+		}
 		baseURL = "https://api.openai.com"
 	}
 	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
@@ -1050,6 +1079,7 @@ func buildV1ModelsURL(base string) string {
 func buildOpenAIModelsURL(base string) string {
 	return buildOpenAIEndpointURL(base, "/v1/models")
 }
+
 
 func buildGeminiModelsURL(base string) string {
 	normalized := strings.TrimRight(strings.TrimSpace(base), "/")

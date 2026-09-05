@@ -778,16 +778,19 @@ func TestAdminService_BatchDeleteRedeemCodes_Success(t *testing.T) {
 }
 
 func TestAdminService_BatchDeleteRedeemCodes_PartialFailures(t *testing.T) {
+	// 哨兵必须在 stub 与断言间复用同一个实例：errors.Is 按身份比较，每次
+	// errors.New 都是新实例必然失配。
+	dbErr := errors.New("db error")
 	repo := &redeemRepoStub{
 		deleteErrByID: map[int64]error{
-			2: errors.New("db error"),
+			2: dbErr,
 		},
 	}
 	svc := &adminServiceImpl{redeemCodeRepo: repo}
 
 	deleted, err := svc.BatchDeleteRedeemCodes(context.Background(), []int64{1, 2, 3})
 	require.Error(t, err)
-	require.ErrorIs(t, err, errors.New("db error"))
+	require.ErrorIs(t, err, dbErr)
 	require.Equal(t, int64(1), deleted)
 	require.Equal(t, []int64{1, 2}, repo.deletedIDs)
 }

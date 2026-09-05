@@ -591,12 +591,17 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		}
 	case AccountTypeAPIKey:
 		baseURL := account.GetOpenAIBaseURL()
+		if baseURL == "" && account.Platform == PlatformOther {
+			// other 无默认上游：空 base_url 失败关闭，禁止 passthrough 回落官方 OpenAI（外审-2 同源路径）。
+			return nil, fmt.Errorf("account %d (platform other) has no base_url", account.ID)
+		}
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
 				return nil, err
 			}
-			targetURL = buildOpenAIResponsesURLForPlatform(account.Platform, validatedURL)
+			// 火山订阅号 Responses 端点为 {base}/v3/responses。
+			targetURL = openAIResponsesURLForBase(account.Platform, validatedURL)
 		}
 	}
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))

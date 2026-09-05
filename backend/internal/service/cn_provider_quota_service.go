@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,8 +39,42 @@ const (
 	cnExtraSuffixUsageUpdated = "usage_updated_at"
 )
 
+// providerVolcano 标识火山方舟（Volcengine Ark）Coding / Agent Plan 订阅账号，
+// 作为 Coding Plan 供应商 token 参与额度快照键（volcano_5h_* 等）与调度路由。
+// 注意它不是 accounts.platform 平台枚举（火山号平台仍为 deepseek），只用于
+// CN 额度探测链路内部识别，与 GetCodingPlanProvider 的返回一致。
+const providerVolcano = "volcano"
+
 // cnExtraKey 拼接 provider 维度的 extra 键。
 func cnExtraKey(provider, suffix string) string { return provider + "_" + suffix }
+
+// isVolcanoBaseURL 报告 base_url 是否指向火山方舟订阅号（Agent Plan /api/plan 与
+// Coding Plan /api/coding 共用 ark.cn-beijing.volces.com 域名），与接入模式无关。
+// 用 net/url 主机解析精确判定，避免字符串 Contains 把带相似子串的主机误判为火山。
+func isVolcanoBaseURL(baseURL string) bool {
+	raw := strings.TrimSpace(baseURL)
+	if raw == "" {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), volcanoPlanHost)
+}
+
+// resolveCNQuotaProvider 返回账号所属的 Coding Plan 额度供应商（kimi/zhipu/volcano）；
+// 非 coding 或无法识别返回 "". 火山订阅号账号（platform=deepseek，base_url 指向
+// ark.cn-beijing.volces.com）在 deepseek 创建/编辑界面保存为 payg，
+// GetCodingPlanProvider 按 coding 模式门控会返回空，此处按 base_url 兜底识别为
+// volcano；仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+func resolveCNQuotaProvider(account *Account) string {
+	provider := account.GetCodingPlanProvider()
+	if provider == "" && isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
+		return providerVolcano
+	}
+	return provider
+}
 
 // CNQuotaTier 表示一个滚动用量窗口档位（5h / weekly）。
 type CNQuotaTier struct {
@@ -128,28 +163,54 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 }
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
-	provider := account.GetCodingPlanProvider()
-	if provider != PlatformKimi && provider != PlatformZhipu {
-		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu coding plan account")
-	}
-
-	apiKey := strings.TrimSpace(account.GetCNAPIKey())
-	if apiKey == "" {
-		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
+	provider := resolveCNQuotaProvider(account)
+	if provider != PlatformKimi && provider != PlatformZhipu && provider != providerVolcano {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/volcano coding plan account")
 	}
 
 	baseURL := account.GetOpenAIBaseURL()
 	var (
-		targetURL  string
-		authHeader string
+		targetURL     string
+		authHeader    string
+		probeHeaders  http.Header // 仅火山签名头；其余走 Authorization/独立覆写
+		skipOverrides bool        // 火山 SigV4 必须精确，禁止账号级请求头覆写污染签名
 	)
 	switch provider {
 	case PlatformKimi:
+		apiKey := strings.TrimSpace(account.GetCNAPIKey())
+		if apiKey == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
+		}
 		targetURL = kimiQuotaURL(baseURL)
 		authHeader = "Bearer " + apiKey
 	case PlatformZhipu:
+		apiKey := strings.TrimSpace(account.GetCNAPIKey())
+		if apiKey == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
+		}
 		targetURL = zhipuQuotaURL(baseURL)
 		authHeader = apiKey // 智谱额度端点鉴权不加 Bearer 前缀
+	case providerVolcano:
+		ak := strings.TrimSpace(account.GetCredential("access_key"))
+		sk := strings.TrimSpace(account.GetCredential("secret_key"))
+		if ak == "" || sk == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_AKSK", "account access_key/secret_key is empty")
+		}
+		// 火山方舟管理接口：open.volcengineapi.com，service=ark，region=cn-beijing。
+		// 探测动作由 base_url 路径决定：/api/plan → GetAFPUsage（Agent Plan 订阅，
+		// 走 Result.AFPFiveHour/AFPWeekly）；/api/coding → GetCodingPlanUsage
+		// （Coding Plan 订阅，走 Result.QuotaUsage[]，session=5h）。
+		host := "open.volcengineapi.com"
+		query := url.Values{}
+		query.Set("Action", volcanoUsageAction(baseURL))
+		query.Set("Version", volcanoQuotaVersion)
+		canonQuery, signedHeaders, err := volcEngineSignQuery(ak, sk, volcanoQuotaRegion, volcanoQuotaService, host, query, time.Now().UTC())
+		if err != nil {
+			return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_SIGN_FAILED", "sign request: %v", err)
+		}
+		targetURL = "https://" + host + "/?" + canonQuery
+		probeHeaders = signedHeaders
+		skipOverrides = true
 	}
 
 	// 探测发起前过出站 URL 安全策略（与网关转发/Grok 探测同一套校验）：
@@ -167,14 +228,23 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
-	req.Header.Set("Authorization", authHeader)
-	req.Header.Set("Accept", "application/json")
-	if provider == PlatformZhipu {
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept-Language", "en-US,en")
+	if provider == providerVolcano {
+		for k := range probeHeaders {
+			req.Header.Set(k, probeHeaders.Get(k))
+		}
+	} else {
+		req.Header.Set("Authorization", authHeader)
+		req.Header.Set("Accept", "application/json")
+		if provider == PlatformZhipu {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept-Language", "en-US,en")
+		}
 	}
 	// 探测与真实转发保持同一套账号级请求头覆写，避免探测通过但转发失败。
-	account.ApplyHeaderOverrides(req.Header)
+	// 火山除外：SigV4 的 SignedHeaders 必须与发送头完全一致，任何覆写都破坏签名。
+	if !skipOverrides {
+		account.ApplyHeaderOverrides(req.Header)
+	}
 
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
 	if err != nil {
@@ -220,6 +290,12 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	case PlatformZhipu:
 		tiers = parseZhipuTokenTiers(gjson.GetBytes(bodyBytes, "data"))
 		result.PlanLevel = strings.TrimSpace(gjson.GetBytes(bodyBytes, "data.level").String())
+	case providerVolcano:
+		if strings.Contains(baseURL, "/api/plan") {
+			tiers = parseVolcanoAgentTiers(bodyBytes)
+		} else {
+			tiers = parseVolcanoCodingTiers(bodyBytes)
+		}
 	}
 	result.Tiers = tiers
 	result.Success = true
@@ -254,7 +330,10 @@ func validateCodingPlanAccount(account *Account) error {
 	if !account.IsCNProvider() {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_INVALID_PLATFORM", "account is not a CN provider account")
 	}
-	if !account.IsCodingPlan() {
+	// 火山订阅号账号（platform=deepseek，base_url=ark.cn-beijing.volces.com）保存为
+	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；其余 CN 供应商
+	// 仍仅限 coding。
+	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a coding plan account")
 	}
 	return nil
@@ -289,6 +368,85 @@ func zhipuQuotaURL(baseURL string) string {
 func kimiQuotaURL(baseURL string) string {
 	base := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/v1")
 	return base + "/v1/usages"
+}
+
+// 火山方舟用量管理接口（open.volcengineapi.com）固定参数。
+// Action/Version 走 GET 查询串签名；service=ark、region=cn-beijing 与账号资源区域一致。
+const (
+	volcanoQuotaService = "ark"
+	volcanoQuotaRegion  = "cn-beijing"
+	volcanoQuotaVersion = "2024-01-01"
+)
+
+// volcanoUsageAction 根据账号 base_url 套餐选择方舟用量管理 Action（路径分类复用与模型
+// 同步/转发同一套 parseVolcanoPlanProfile，不复制第二份识别逻辑）。
+//   - /api/plan  → Agent Plan（方舟）订阅：GetAFPUsage → Result.AFPFiveHour/AFPWeekly
+//   - /api/coding → Coding Plan 订阅：GetCodingPlanUsage → Result.QuotaUsage[]
+func volcanoUsageAction(baseURL string) string {
+	if profile, ok := parseVolcanoPlanProfile(baseURL); ok && profile.Kind == volcanoPlanKindAgent {
+		return "GetAFPUsage"
+	}
+	return "GetCodingPlanUsage"
+}
+
+// parseVolcanoAgentTiers 解析方舟 Agent Plan 订阅（GetAFPUsage）响应。
+//
+//	Result.AFPFiveHour / Result.AFPWeekly：{Quota, Used, ResetTime(ms)}
+//	Used 为 Quota 单位内的已用量，百分比 = Used/Quota*100。立即量参与 5h + weekly 两档。
+func parseVolcanoAgentTiers(body []byte) []CNQuotaTier {
+	var tiers []CNQuotaTier
+	for _, w := range []struct{ path, window string }{
+		{"Result.AFPFiveHour", "5h"},
+		{"Result.AFPWeekly", "weekly"},
+	} {
+		node := gjson.GetBytes(body, w.path)
+		if !node.Exists() {
+			continue
+		}
+		quota, _ := cnParseF64(node.Get("Quota").Value())
+		used, _ := cnParseF64(node.Get("Used").Value())
+		var util float64
+		if quota > 0 {
+			util = used / quota * 100
+		}
+		tiers = append(tiers, CNQuotaTier{
+			Window:      w.window,
+			UsedPercent: util,
+			ResetAt:     cnMillisToRFC3339(node.Get("ResetTime").Int()),
+		})
+	}
+	return tiers
+}
+
+// parseVolcanoCodingTiers 解析 Coding Plan 订阅（GetCodingPlanUsage）响应。
+//
+//	Result.QuotaUsage[]：{Level:"session"|"weekly"|"monthly", Percent, ResetTimestamp(sec)}
+//	Percent 已是百分比（0-100），直接采用；ResetTimestamp 为秒级，-1 表示尚无重置（忽略）。
+//	session 即 5h 滚动窗口，锚定首次请求；monthly 不参与 5h/weekly 档位。
+func parseVolcanoCodingTiers(body []byte) []CNQuotaTier {
+	var tiers []CNQuotaTier
+	gjson.GetBytes(body, "Result.QuotaUsage").ForEach(func(_, item gjson.Result) bool {
+		var window string
+		switch strings.ToLower(item.Get("Level").String()) {
+		case "session":
+			window = "5h"
+		case "weekly":
+			window = "weekly"
+		default:
+			return true // monthly 等不参与 5h/weekly 档位
+		}
+		var percent float64
+		if p, ok := cnParseF64(item.Get("Percent").Value()); ok {
+			percent = p
+		}
+		tiers = append(tiers, CNQuotaTier{
+			Window:      window,
+			UsedPercent: percent,
+			ResetAt:     cnMillisToRFC3339(item.Get("ResetTimestamp").Int()),
+		})
+		return true
+	})
+	return tiers
 }
 
 func zhipuQuotaHost(baseURL string) string {
@@ -495,23 +653,53 @@ func parseZhipuTokenTiers(data gjson.Result) []CNQuotaTier {
 }
 
 // cnQuotaExtraUpdates 根据 tier 列表构造 provider 维度的 Extra 快照更新。
+// 语义：整轮快照替换。对 5h / weekly 两个窗口，本轮有档则写 used + reset
+// （reset 为空时写 nil 清除旧倒计时，避免上游从有效时间变为 -1/缺失后前端
+// 继续显示过期倒计时）；本轮缺档则整档键（used + reset）都写 nil 清除，
+// 防止上游只返回单档时另一档的 stale 值残留。
 func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) map[string]any {
 	updates := map[string]any{
 		cnExtraKey(provider, cnExtraSuffixUsageUpdated): now.Format(time.RFC3339),
 	}
+	// 本轮实际存在的窗口（用于缺档清除判定）。
+	presentWindows := map[string]bool{}
 	for _, t := range tiers {
-		switch t.Window {
-		case "5h":
-			updates[cnExtraKey(provider, cnExtraSuffix5hUsed)] = t.UsedPercent
-			if t.ResetAt != "" {
-				updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = t.ResetAt
-			}
-		case "weekly":
-			updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = t.UsedPercent
-			if t.ResetAt != "" {
-				updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = t.ResetAt
+		presentWindows[t.Window] = true
+	}
+	writeTier := func(usedSuffix, resetSuffix string, used any, resetAt string) {
+		updates[cnExtraKey(provider, usedSuffix)] = used
+		if resetAt != "" {
+			updates[cnExtraKey(provider, resetSuffix)] = resetAt
+		} else {
+			// 上游无有效重置时间：写 nil（JSON null）清除 DB 中旧 reset 值，
+			// 与 parseSchedulingResetAt(nil) → nil、前端 readExtraString(null) → ''
+			// 的读取链一致：既不再参与 429 冷却，也不渲染倒计时。
+			updates[cnExtraKey(provider, resetSuffix)] = nil
+		}
+	}
+	if presentWindows["5h"] {
+		for _, t := range tiers {
+			if t.Window == "5h" {
+				writeTier(cnExtraSuffix5hUsed, cnExtraSuffix5hReset, t.UsedPercent, t.ResetAt)
+				break
 			}
 		}
+	} else {
+		// 缺 5h 档：清除残留的 5h used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffix5hUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = nil
+	}
+	if presentWindows["weekly"] {
+		for _, t := range tiers {
+			if t.Window == "weekly" {
+				writeTier(cnExtraSuffixWeeklyUsed, cnExtraSuffixWeeklyReset, t.UsedPercent, t.ResetAt)
+				break
+			}
+		}
+	} else {
+		// 缺 weekly 档：清除残留的 weekly used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = nil
 	}
 	return updates
 }

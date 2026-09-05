@@ -79,13 +79,20 @@
   </div>
 </template>
 
+<script lang="ts">
+// 模块级共享状态（非 setup 块）：列表页每行一个组件实例，翻页/筛选/刷新会
+// 重复挂载各自副本；lastAutoProbeAt 放在模块作用域才能跨实例去重，避免对
+// 上游形成探测风暴。若放在 <script setup> 内则每实例独立，去抖失效。
+const lastAutoProbeAt = new Map<number, number>()
+</script>
+
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
-import { cnQuotaCellVisible } from './credentialsBuilder'
+import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL } from './credentialsBuilder'
 
 const props = defineProps<{
   account: Account
@@ -98,7 +105,12 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode()))
+const readBaseURL = (): string => resolveAccountBaseURL(props.account.credentials)
+
+// 快照键前缀（kimi/zhipu 平台即供应商；火山 = platform deepseek + volces base_url）。
+const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))
+
+const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -108,9 +120,9 @@ const data = ref<CNProviderQuotaProbeResult | null>(null)
 // cnQuotaExtraUpdates 对齐）。页面加载即有数据，无需等待探测。
 const SNAPSHOT_STALE_MS = 15 * 60 * 1000
 
-// 自动探测去抖窗口与最近一次自动探测时间（模块级，跨实例共享）。
+// 自动探测去抖窗口与最近一次自动探测时间（Map 定义于上方模块级 <script>，
+// 跨实例共享；此处仅保留常量）。
 const AUTO_PROBE_DEBOUNCE_MS = 5 * 60 * 1000
-const lastAutoProbeAt = new Map<number, number>()
 
 const readExtraNumber = (key: string): number | null => {
   const v = (props.account.extra as Record<string, unknown> | undefined)?.[key]
@@ -124,23 +136,23 @@ const readExtraString = (key: string): string => {
 
 // 从持久化快照构造展示数据（缺少 5h/weekly 两档键时返回 null）。
 const snapshotData = computed<CNProviderQuotaProbeResult | null>(() => {
-  const platform = props.account.platform
-  const used5h = readExtraNumber(`${platform}_5h_used_percent`)
-  const usedWeekly = readExtraNumber(`${platform}_weekly_used_percent`)
+  const prefix = providerPrefix.value
+  const used5h = readExtraNumber(`${prefix}_5h_used_percent`)
+  const usedWeekly = readExtraNumber(`${prefix}_weekly_used_percent`)
   if (used5h == null && usedWeekly == null) return null
   const tiers: CNProviderQuotaProbeResult['tiers'] = []
   if (used5h != null) {
-    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${platform}_5h_reset_at`) || undefined })
+    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${prefix}_5h_reset_at`) || undefined })
   }
   if (usedWeekly != null) {
-    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${platform}_weekly_reset_at`) || undefined })
+    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${prefix}_weekly_reset_at`) || undefined })
   }
   return { success: true, tiers } as CNProviderQuotaProbeResult
 })
 
 // 快照是否过期（无更新时间或超过 staleness 窗口）→ 挂载时需要自动探测。
 const snapshotIsStale = computed(() => {
-  const updatedAt = readExtraString(`${props.account.platform}_usage_updated_at`)
+  const updatedAt = readExtraString(`${providerPrefix.value}_usage_updated_at`)
   if (!updatedAt) return true
   const ts = new Date(updatedAt).getTime()
   return Number.isNaN(ts) || Date.now() - ts > SNAPSHOT_STALE_MS
@@ -197,11 +209,30 @@ const utilizationTextColor = (pct: number) => {
   return 'text-emerald-600 dark:text-emerald-400'
 }
 
+// 响应式时钟：倒计时应随时间递减（达到 GPT 官方组件的倒计时行为），而非仅在
+// 挂载/探测时算一次。每 1s tick 一次，驱动 formatReset 重算；组件卸载时清理。
+const clockNow = ref(Date.now())
+const CLOCK_INTERVAL_MS = 1000
+let clockTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    clockNow.value = Date.now()
+  }, CLOCK_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (clockTimer != null) {
+    clearInterval(clockTimer)
+    clockTimer = null
+  }
+})
+
 // 重置时间相对/绝对简短显示。
 const formatReset = (iso: string) => {
   const d = new Date(iso)
   if (isNaN(d.getTime())) return iso
-  const now = Date.now()
+  const now = clockNow.value
   const diffMs = d.getTime() - now
   if (diffMs <= 0) return t('admin.accounts.cnProviders.resetSoon')
   if (diffMs < 3_600_000) return `${Math.max(1, Math.round(diffMs / 60_000))}m`

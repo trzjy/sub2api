@@ -162,6 +162,7 @@ const props = defineProps<{
   platform?: string
   platforms?: string[]
   accountId?: number
+  baseUrl?: string
   syncCredentials?: {
     platform: string
     type: string
@@ -221,19 +222,67 @@ const canSyncUpstream = computed(() => {
   return false
 })
 
+// 火山方舟 Agent/Coding 订阅号识别：platform=deepseek + base_url host 为
+// ark.cn-beijing.volces.com 且 path 落在 /api/plan 或 /api/coding。判定与后端
+// parseVolcanoPlanProfile 一致（不用纯字符串 Contains，避免相似子串主机误判）。
+const isVolcanoPlanAccount = computed(() => {
+  const raw = (props.baseUrl ?? props.syncCredentials?.base_url ?? '').trim()
+  if (!raw) return false
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  // 后端 parseVolcanoPlanProfile 仅接受 https：明文 http 会把携带的 API Key 明文外发，
+  // 前端对齐拒绝，避免把 http 误判为火山订阅号走专用流程。
+  if (parsed.protocol !== 'https:') return false
+  // 与后端 parseVolcanoPlanProfile 的 net/url 主机相等判定对齐：精确 equals，不做
+  // 子串 Contains，避免 notark.cn-beijing.volces.com 等相似子串主机被误判为火山订阅号。
+  if (parsed.hostname.toLowerCase() !== 'ark.cn-beijing.volces.com') return false
+  const path = parsed.pathname.replace(/\/+$/, '')
+  return path === '/api/plan' || path.startsWith('/api/plan/') ||
+    path === '/api/coding' || path.startsWith('/api/coding/')
+})
+
+// 运行时同步模型的登记表：同步（火山订阅号专用 / 通用上游）出来的、静态模型库里
+// 没有的具名模型，登记后并入可搜索下拉，避免用户误删后无法从下拉重新选到。
+const runtimeSyncedModels = ref<string[]>([])
+
+const registerSyncedModels = (models: string[]) => {
+  const staticValues = new Set(allModels.map(m => m.value))
+  const next = [...runtimeSyncedModels.value]
+  for (const raw of models) {
+    const id = raw.trim()
+    if (!id || id.includes('*') || staticValues.has(id) || next.includes(id)) continue
+    next.push(id)
+  }
+  runtimeSyncedModels.value = next
+}
+
 const availableOptions = computed(() => {
+  let base: { value: string; label: string }[]
   if (normalizedPlatforms.value.length === 0) {
-    return allModels
+    base = [...allModels] // 拷贝，避免下方 push 污染全局 allModels
+  } else {
+    const allowedModels = new Set<string>()
+    for (const platform of normalizedPlatforms.value) {
+      for (const model of getModelsByPlatform(platform)) {
+        allowedModels.add(model)
+      }
+    }
+    base = allModels.filter(model => allowedModels.has(model.value))
   }
 
-  const allowedModels = new Set<string>()
-  for (const platform of normalizedPlatforms.value) {
-    for (const model of getModelsByPlatform(platform)) {
-      allowedModels.add(model)
+  if (runtimeSyncedModels.value.length === 0) return base
+  const seen = new Set(base.map(m => m.value))
+  for (const id of runtimeSyncedModels.value) {
+    if (!seen.has(id)) {
+      base.push({ value: id, label: id })
+      seen.add(id)
     }
   }
-
-  return allModels.filter(model => allowedModels.has(model.value))
+  return base
 })
 
 const filteredModels = computed(() => {
@@ -296,6 +345,16 @@ const syncUpstreamModels = async () => {
   if (isSyncingUpstream.value) return
   if (!props.accountId && !props.syncCredentials) return
 
+  // 火山订阅号走专用流程：preview 拿分类与差异 → 确认 → apply 落库（非 append-only）。
+  if (isVolcanoPlanAccount.value) {
+    if (!props.accountId) {
+      appStore.showError(t('admin.accounts.syncVolcanoPlanRequiresAccount'))
+      return
+    }
+    await syncVolcanoPlan()
+    return
+  }
+
   isSyncingUpstream.value = true
   try {
     let result
@@ -317,6 +376,7 @@ const syncUpstreamModels = async () => {
       emit('upstream-synced')
     }
 
+    registerSyncedModels(upstreamModels)
     const newModels = [...props.modelValue]
     let addedCount = 0
     for (const model of upstreamModels) {
@@ -331,11 +391,96 @@ const syncUpstreamModels = async () => {
       appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataIncomplete'))
       return
     }
+    if (result.warnings?.some(warning => warning.code === 'volcano_model_sync_partial')) {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsVolcanoPartial'))
+      return
+    }
     if (addedCount > 0) {
       appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
     } else {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
     }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed')
+    appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
+  } finally {
+    isSyncingUpstream.value = false
+  }
+}
+
+// syncVolcanoPlan 执行火山订阅号专用同步：先 apply=false 预览分类与差异，用户确认后
+// apply=true 落库。unavailable/unverified 只作提示不并入；只有当 full_confirm（完整确认）
+// 才允许“替换下架”，否则只新增。
+const syncVolcanoPlan = async () => {
+  if (isSyncingUpstream.value) return
+  if (!props.accountId) return
+
+  isSyncingUpstream.value = true
+  try {
+    const preview = await accountsAPI.syncVolcanoPlanModels(props.accountId, { apply: false })
+    // 后端全量探活：成功响应的 confirmed 必非空（全部失败已 fail-closed 返回错误），
+    // 空分类数组也稳定输出 [] 而非 null。此处仅作防御性提前退出：无任何确认、无新增、
+    // 且非完全确认时不弹确认框。
+    if (preview.confirmed.length === 0 && preview.will_add.length === 0 && !preview.full_confirm) {
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
+      return
+    }
+
+    const newModels = [...props.modelValue]
+    for (const model of preview.will_add) {
+      if (!newModels.includes(model)) {
+        newModels.push(model)
+      }
+    }
+
+    // 差异摘要：新增 /（完全确认时）下架替换 / 不可用与未确认提示。
+    const lines: string[] = []
+    if (preview.will_add.length > 0) {
+      lines.push(t('admin.accounts.syncVolcanoPlanWillAdd', { count: preview.will_add.length }))
+    }
+    if (preview.will_remove.length > 0) {
+      lines.push(t('admin.accounts.syncVolcanoPlanWillRemove', { count: preview.will_remove.length }))
+    }
+    if (preview.full_confirm) {
+      lines.push(t('admin.accounts.syncVolcanoPlanFullConfirm'))
+    } else {
+      lines.push(t('admin.accounts.syncVolcanoPlanPartialConfirm'))
+    }
+    if (preview.unavailable.length > 0) {
+      lines.push(t('admin.accounts.syncVolcanoPlanUnavailable', { count: preview.unavailable.length }))
+    }
+    if (preview.unverified.length > 0) {
+      lines.push(t('admin.accounts.syncVolcanoPlanUnverified', { count: preview.unverified.length }))
+    }
+
+    const confirmed = window.confirm(lines.join('\n'))
+    if (!confirmed) return
+
+    // apply 下架受 preview 确认绑定：把 preview 展示并经用户确认可移除的集合一并传给后端。
+    // 后端若发现重扫产生 preview 未提示的下架会 fail-closed 拒绝并返回 config 错误（不提交），
+    // 杜绝未获确认的破坏性收敛（R3-1）。此处保留客户端二次防御：即便后端返回了 drifted 结果
+    // （正常不会），也拒绝生效并提示重新预览（reject-and-reconfirm）。
+    const applied = await accountsAPI.syncVolcanoPlanModels(props.accountId, {
+      apply: true,
+      expected_removals: preview.will_remove
+    })
+    const previewRemoves = new Set(preview.will_remove)
+    const unexpectedRemove = applied.will_remove.filter(model => !previewRemoves.has(model))
+    if (unexpectedRemove.length > 0) {
+      appStore.showError(t('admin.accounts.syncVolcanoPlanDrifted', { models: unexpectedRemove.join(', ') }))
+      return
+    }
+    // 应用后以后端为准：完全确认→保留既有白名单中未下架的（含人工 identity，后端
+    // 绝不删除人工映射，前端不得反向丢掉）+ 新确认集合；部分确认→旧值 ∪ 新确认。
+    registerSyncedModels(applied.confirmed)
+    const merged = props.modelValue.filter(model => !applied.will_remove.includes(model))
+    for (const model of applied.confirmed) {
+      if (!merged.includes(model)) {
+        merged.push(model)
+      }
+    }
+    emit('update:modelValue', merged)
+    appStore.showSuccess(t('admin.accounts.syncVolcanoPlanSuccess', { count: applied.confirmed.length }))
   } catch (error) {
     const message = error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed')
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))

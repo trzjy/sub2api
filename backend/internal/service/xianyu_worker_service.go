@@ -192,7 +192,11 @@ func (s *XianyuWorkerService) ClearCredentials(ctx context.Context, accountID st
 		return err
 	}
 	if err := client.ClearCredentials(ctx, accountID); err != nil {
-		return err
+		// Worker 侧账号已不存在（曾被清除）时视为幂等成功：目标终态（禁用/停止）本已达成，
+		// 无需再向用户报 internal error，仍把主程序投影收敛到 disabled/stopped。
+		if !errors.Is(err, ErrXianyuWorkerAccountNotFound) {
+			return err
+		}
 	}
 	account.Status = XianyuAccountStatusDisabled
 	account.CookieStatus = XianyuCookieStatusUnknown

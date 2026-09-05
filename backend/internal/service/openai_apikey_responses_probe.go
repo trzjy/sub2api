@@ -122,6 +122,15 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 	if account.Type != AccountTypeAPIKey {
 		return
 	}
+	if account.Platform == PlatformOther {
+		// 通用自定义上游一般无 /v1/responses 端点：落标 auto+false（不发网络探测），
+		// 让网关按 Chat Completions 直转（外部审查外审-2/4）。
+		_ = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeAuto),
+			openai_compat.ExtraKeyResponsesSupported: false,
+		})
+		return
+	}
 	if account.IsCNProvider() {
 		// 国产 OpenAI 兼容上游（kimi/zhipu/deepseek）普遍仅支持 /v1/chat/completions，
 		// 不存在 /v1/responses 端点。直接落标 false 走 Chat Completions 直转，跳过网络探测。

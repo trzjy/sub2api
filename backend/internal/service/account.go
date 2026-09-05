@@ -295,7 +295,14 @@ func (a *Account) IsCNProvider() bool {
 // 兼容上游，也经 OpenAI 网关转发。
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok ||
-		a.Platform == PlatformKimi || a.Platform == PlatformZhipu || a.Platform == PlatformDeepseek)
+		a.Platform == PlatformKimi || a.Platform == PlatformZhipu || a.Platform == PlatformDeepseek ||
+		a.Platform == PlatformOther)
+}
+
+// UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容
+// base_url / api_key 的平台族（openai OAuth / CN 供应商 / other；不含 grok、composite）。
+func (a *Account) UsesOpenAIProtocolSharedBaseURL() bool {
+	return a != nil && UsesOpenAIProtocolSharedBaseURL(a.Platform)
 }
 
 func (a *Account) GeminiOAuthType() string {
@@ -848,6 +855,11 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 		if a.IsOpenAIOAuth() {
 			return isOpenAIOAuthServableModel(requestedModel)
 		}
+		if a.Platform == PlatformOther {
+			// other 无内置模型目录：模型完全来自账号 model_mapping。空映射 = 无可服务
+			// 模型（避免把任意请求原样发往第三方上游；外部审查外审-3）。
+			return false
+		}
 		return true // 无映射 = 允许所有
 	}
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
@@ -1333,7 +1345,7 @@ func (a *Account) IsOpenAIApiKey() bool {
 // 适用 openai 与国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）；grok 走 GetGrokBaseURL，
 // 此处对 grok 返回 "" 以保持原有行为。
 func (a *Account) GetOpenAIBaseURL() string {
-	if !a.IsOpenAI() && !a.IsCNProvider() {
+	if !a.UsesOpenAIProtocolSharedBaseURL() {
 		return ""
 	}
 	if a.IsCNProvider() && a.IsAdaptiveAPIProtocol() {
@@ -1362,6 +1374,10 @@ func (a *Account) GetOpenAIBaseURL() string {
 		return DefaultZhipuPayGBaseURL
 	case PlatformDeepseek:
 		return DefaultDeepseekBaseURL
+	case PlatformOther:
+		// other 无内置默认上游：仅返回账号自定义 base_url；为空返回空，由上层
+		// 失败关闭，绝不回落官方 OpenAI 端点。
+		return ""
 	default:
 		return "https://api.openai.com"
 	}
@@ -1553,6 +1569,11 @@ func (a *Account) GetCodingPlanProvider() string {
 		return PlatformKimi
 	case strings.Contains(baseURL, "bigmodel.cn"), strings.Contains(baseURL, "api.z.ai"):
 		return PlatformZhipu
+	case isVolcanoBaseURL(a.GetOpenAIBaseURL()):
+		// 火山方舟订阅号：/api/plan（Agent Plan）与 /api/coding（Coding Plan）
+		// 同走 open.volcengineapi.com 管理接口，探测动作按路径区分。用 net/url 主机
+		// 精确判定，避免带相似子串的主机（如 evil-ark.cn-beijing.volces.com）误判。
+		return providerVolcano
 	default:
 		return ""
 	}
@@ -1676,7 +1697,7 @@ func (a *Account) GetOpenAIProtocolAPIKey() string {
 	if a == nil {
 		return ""
 	}
-	if a.IsCNProvider() {
+	if a.IsCNProvider() || a.Platform == PlatformOther {
 		if a.Type != AccountTypeAPIKey {
 			return ""
 		}

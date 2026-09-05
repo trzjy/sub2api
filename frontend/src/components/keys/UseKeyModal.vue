@@ -1228,6 +1228,7 @@ function generateRoutedCodexFiles(
     kimi: 'Kimi',
     zhipu: 'Zhipu',
     deepseek: 'DeepSeek',
+    other: 'Other',
     composite: 'Composite'
   }
   const label = labels[platform]

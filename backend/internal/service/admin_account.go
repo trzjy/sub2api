@@ -398,7 +398,31 @@ func normalizeOpenAILongContextBillingUpdateExtra(account *Account, input *Updat
 
 // Grok media eligibility helpers live in account_grok_media_eligibility.go.
 
+// validateOtherAccountCredential 校验通用 other 平台账号：仅接受 API-Key 类型，且必须提供
+// 自定义 base_url（other 无内置上游默认值；空 base_url 不得落到任何官方 OpenAI 端点）。
+func validateOtherAccountCredential(platform, accountType string, credentials map[string]any) error {
+	if platform != PlatformOther {
+		return nil
+	}
+	if accountType != AccountTypeAPIKey {
+		return fmt.Errorf("platform %s only supports apikey accounts", platform)
+	}
+	raw, ok := credentials["base_url"]
+	if !ok {
+		return fmt.Errorf("platform %s requires a custom base_url", platform)
+	}
+	baseURL, _ := raw.(string)
+	if strings.TrimSpace(baseURL) == "" {
+		return fmt.Errorf("platform %s requires a custom base_url", platform)
+	}
+	return nil
+}
+
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
+	if err := validateOtherAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
+		return nil, err
+	}
+
 	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingRateSyncEnabledExtraKey)
@@ -552,6 +576,29 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	// 更新路径同样守住 other 不变量（创建校验可被 edit/导入/直写绕过）。
+	if account.Platform == PlatformOther {
+		effectiveType := account.Type
+		if input.Type != "" {
+			effectiveType = input.Type
+		}
+		if effectiveType != AccountTypeAPIKey {
+			return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_TYPE_INVALID",
+				"platform other only supports apikey accounts")
+		}
+		if input.Credentials != nil {
+			raw, ok := input.Credentials["base_url"]
+			if !ok {
+				return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
+					"platform other requires a custom base_url")
+			}
+			baseURL, _ := raw.(string)
+			if strings.TrimSpace(baseURL) == "" {
+				return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
+					"platform other requires a custom base_url")
+			}
+		}
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {

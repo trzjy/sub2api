@@ -107,6 +107,7 @@ export default {
         kimi: 'Kimi',
         zhipu: 'Zhipu GLM',
         deepseek: 'DeepSeek',
+        other: 'Other',
       },
       cnProviders: {
         accountMode: {
@@ -745,6 +746,17 @@ export default {
       syncUpstreamModelsError: 'Failed to sync upstream models: {message}',
       syncUpstreamModelsMetadataIncomplete:
         'Model IDs were synced, but capability metadata is incomplete and was not updated.',
+      syncUpstreamModelsVolcanoPartial:
+        'Some models could not be confirmed during probing (timed out / rate limited / server error). Only confirmed models were added; retry later to probe the rest.',
+      syncVolcanoPlanRequiresAccount: 'Volcengine plan model sync requires a saved account.',
+      syncVolcanoPlanWillAdd: '{count} newly confirmed models will be added',
+      syncVolcanoPlanWillRemove: '{count} officially removed models will be replaced/removed',
+      syncVolcanoPlanFullConfirm: 'This is a full confirmation: the account will be converged to the latest official plan set',
+      syncVolcanoPlanPartialConfirm: 'Some models were not confirmed: added only, existing models preserved',
+      syncVolcanoPlanUnavailable: '{count} models explicitly unavailable (not added)',
+      syncVolcanoPlanUnverified: '{count} models unconfirmed (timeout/rate limit/server error, not added)',
+      syncVolcanoPlanSuccess: 'Volcengine plan sync done: {count} models confirmed available',
+      syncVolcanoPlanDrifted: 'Applied result differs from preview with unreviewed removals ({models}); application cancelled, please re-preview and confirm',
       clearAllModels: 'Clear all models',
       customModelName: 'Custom model name',
       enterCustomModelName: 'Enter custom model name',
@@ -948,6 +960,7 @@ export default {
       mixedChannelWarning: 'Warning: Group "{groupName}" contains both {currentPlatform} and {otherPlatform} accounts. Mixing different channels may cause thinking block signature validation issues, which will fallback to non-thinking mode. Are you sure you want to continue?',
       pleaseEnterAccountName: 'Please enter account name',
       pleaseEnterApiKey: 'Please enter API Key',
+      otherBaseUrlRequired: 'Custom upstream (Other) requires a custom base URL',
       bedrockAccessKeyId: 'AWS Access Key ID',
       bedrockSecretAccessKey: 'AWS Secret Access Key',
       bedrockSessionToken: 'AWS Session Token',

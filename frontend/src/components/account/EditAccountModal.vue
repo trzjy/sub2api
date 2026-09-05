@@ -213,7 +213,7 @@
 
             <!-- Whitelist Mode -->
             <div v-if="modelRestrictionMode === 'whitelist'">
-              <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" />
+              <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :base-url="accountCredentialBaseUrl" />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
                 <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -642,7 +642,7 @@
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" />
+            <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :base-url="accountCredentialBaseUrl" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -854,7 +854,7 @@
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" />
+            <ModelWhitelistSelector v-model="allowedModels" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :base-url="accountCredentialBaseUrl" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -3135,6 +3135,10 @@ const editVertexLocation = ref('us-central1')
 const isBedrockAPIKeyMode = computed(() =>
   props.account?.type === 'bedrock' &&
   (props.account?.credentials as Record<string, unknown>)?.auth_mode === 'apikey'
+)
+// 供 ModelWhitelistSelector 识别火山 Agent/Coding 订阅号（base_url 判定）。
+const accountCredentialBaseUrl = computed(() =>
+  (props.account?.credentials as Record<string, unknown>)?.base_url as string | undefined
 )
 const modelMappings = ref<ModelMapping[]>([])
 const openAICompactModelMappings = ref<ModelMapping[]>([])

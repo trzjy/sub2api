@@ -112,11 +112,11 @@ type XianyuWorkerRenewResult struct {
 
 // XianyuWorkerAccountStatus 表示 Worker 侧账号状态（internal_api /cookies/details 投影）。
 type XianyuWorkerAccountStatus struct {
-	AccountID    string `json:"account_id"`
-	Nickname     string `json:"nickname"`
-	Enabled      bool   `json:"enabled"`
-	Status       string `json:"status"`
-	LastLoginAt  string `json:"last_login_at,omitempty"`
+	AccountID     string `json:"account_id"`
+	Nickname      string `json:"nickname"`
+	Enabled       bool   `json:"enabled"`
+	Status        string `json:"status"`
+	LastLoginAt   string `json:"last_login_at,omitempty"`
 	LastRefreshAt string `json:"last_refresh_at,omitempty"`
 }
 
@@ -170,8 +170,8 @@ func (s XianyuWorkerLoginSessionStatus) MarshalJSON() ([]byte, error) {
 		alias
 		QRCode string `json:"qr_code"`
 	}{
-		alias:   alias(s),
-		QRCode:  qrCode,
+		alias:  alias(s),
+		QRCode: qrCode,
 	})
 }
 
@@ -446,6 +446,12 @@ func (c *XianyuWorkerClient) mapError(statusCode int, payload []byte, accountID 
 	reason := wrapped.Reason
 	if reason == "" {
 		reason = http.StatusText(statusCode)
+	}
+	// Worker 对"目标账号不存在"统一返回 404 + {"detail":"账号不存在"}（清除/启停/续期都如此）。
+	// 归类为域错误而非通用 500：重复退出据此可幂等成功，其余操作据此返回干净 404。
+	// 检测显式命中该 detail，避免把真实 500 或路由缺失误判为账号缺失。
+	if statusCode == http.StatusNotFound && bytes.Contains(payload, []byte("账号不存在")) {
+		return ErrXianyuWorkerAccountNotFound
 	}
 	if accountID != "" {
 		msg = strings.TrimSpace(fmt.Sprintf("account %s: %s", accountID, msg))

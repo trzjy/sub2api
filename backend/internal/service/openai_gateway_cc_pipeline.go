@@ -140,13 +140,20 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 func (s *OpenAIGatewayService) openAIChatCompletionsTargetURL(account *Account) (string, error) {
 	baseURL := account.GetOpenAIBaseURL()
 	if baseURL == "" {
+		if account.Platform == PlatformOther {
+			// other 无默认上游：空 base_url 必须失败关闭，绝不把第三方 key 打到官方
+			// OpenAI（外部审查外审-2；建号校验为主防线，此处兜底存量/直写数据）。
+			return "", fmt.Errorf("account %d (platform other) has no base_url", account.ID)
+		}
 		baseURL = "https://api.openai.com"
 	}
 	validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid base_url: %w", err)
 	}
-	return buildOpenAIChatCompletionsURL(validatedURL), nil
+	// 火山订阅号 OpenAI 端点为 {base}/v3/chat/completions，经 openAI...URLForBase
+	// 识别为火山后派生，绝不回落 /v1/chat/completions 或官方主机。
+	return openAIChatCompletionsURLForBase(validatedURL), nil
 }
 
 // resolveCCFallbackTarget 解析两条 CC 回退路径共用的账号凭证与上游端点

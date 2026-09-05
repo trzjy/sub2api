@@ -8,19 +8,19 @@ import (
 )
 
 var (
-	ErrXianyuWorkerConfigNotFound   = infraerrors.NotFound("XIANYU_WORKER_CONFIG_NOT_FOUND", "xianyu worker config not found")
-	ErrXianyuWorkerConfigExists     = infraerrors.Conflict("XIANYU_WORKER_CONFIG_EXISTS", "xianyu worker config already exists")
-	ErrXianyuActiveWorkerExists     = infraerrors.Conflict("XIANYU_ACTIVE_WORKER_EXISTS", "only one active xianyu worker config is allowed")
-	ErrXianyuAccountNotFound        = infraerrors.NotFound("XIANYU_ACCOUNT_NOT_FOUND", "xianyu account not found")
-	ErrXianyuAccountDisabled        = infraerrors.Conflict("XIANYU_ACCOUNT_DISABLED", "xianyu account is disabled")
-	ErrXianyuItemPoolNotFound       = infraerrors.NotFound("XIANYU_ITEM_POOL_NOT_FOUND", "xianyu item pool not found")
-	ErrXianyuItemPoolSlugExists     = infraerrors.Conflict("XIANYU_ITEM_POOL_SLUG_EXISTS", "xianyu item pool slug already exists")
-	ErrXianyuProductNotFound        = infraerrors.NotFound("XIANYU_PRODUCT_NOT_FOUND", "xianyu product not found")
-	ErrXianyuBindingRuleNotFound    = infraerrors.NotFound("XIANYU_BINDING_RULE_NOT_FOUND", "xianyu binding rule not found")
-	ErrXianyuProductUnmapped        = infraerrors.BadRequest("XIANYU_PRODUCT_UNMAPPED", "item is not bound to a redeem-code pool")
-	ErrXianyuDeliveryClaimNotFound  = infraerrors.NotFound("XIANYU_DELIVERY_CLAIM_NOT_FOUND", "xianyu delivery claim not found")
-	ErrXianyuDeliveryAlreadySent    = infraerrors.Conflict("XIANYU_DELIVERY_ALREADY_SENT", "xianyu delivery already sent")
-	ErrXianyuWorkerUnhealthy        = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNHEALTHY", "xianyu worker is unhealthy")
+	ErrXianyuWorkerConfigNotFound  = infraerrors.NotFound("XIANYU_WORKER_CONFIG_NOT_FOUND", "xianyu worker config not found")
+	ErrXianyuWorkerConfigExists    = infraerrors.Conflict("XIANYU_WORKER_CONFIG_EXISTS", "xianyu worker config already exists")
+	ErrXianyuActiveWorkerExists    = infraerrors.Conflict("XIANYU_ACTIVE_WORKER_EXISTS", "only one active xianyu worker config is allowed")
+	ErrXianyuAccountNotFound       = infraerrors.NotFound("XIANYU_ACCOUNT_NOT_FOUND", "xianyu account not found")
+	ErrXianyuAccountDisabled       = infraerrors.Conflict("XIANYU_ACCOUNT_DISABLED", "xianyu account is disabled")
+	ErrXianyuItemPoolNotFound      = infraerrors.NotFound("XIANYU_ITEM_POOL_NOT_FOUND", "xianyu item pool not found")
+	ErrXianyuItemPoolSlugExists    = infraerrors.Conflict("XIANYU_ITEM_POOL_SLUG_EXISTS", "xianyu item pool slug already exists")
+	ErrXianyuProductNotFound       = infraerrors.NotFound("XIANYU_PRODUCT_NOT_FOUND", "xianyu product not found")
+	ErrXianyuBindingRuleNotFound   = infraerrors.NotFound("XIANYU_BINDING_RULE_NOT_FOUND", "xianyu binding rule not found")
+	ErrXianyuProductUnmapped       = infraerrors.BadRequest("XIANYU_PRODUCT_UNMAPPED", "item is not bound to a redeem-code pool")
+	ErrXianyuDeliveryClaimNotFound = infraerrors.NotFound("XIANYU_DELIVERY_CLAIM_NOT_FOUND", "xianyu delivery claim not found")
+	ErrXianyuDeliveryAlreadySent   = infraerrors.Conflict("XIANYU_DELIVERY_ALREADY_SENT", "xianyu delivery already sent")
+	ErrXianyuWorkerUnhealthy       = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNHEALTHY", "xianyu worker is unhealthy")
 	// 传输错误细分：Unreachable = 请求未到达 Worker（仅连接建立前的 dial 失败），可判定"确定未 dispatch"；
 	// Timeout = 请求已发出、结果不确定；Uncertain = 请求可能已写出、结果不确定（连接重置/TLS 等）；
 	// Malformed = 响应解码失败。
@@ -28,6 +28,9 @@ var (
 	ErrXianyuWorkerTimeout     = infraerrors.ServiceUnavailable("XIANYU_WORKER_TIMEOUT", "xianyu worker request timed out")
 	ErrXianyuWorkerUncertain   = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNCERTAIN", "xianyu worker request outcome uncertain")
 	ErrXianyuWorkerMalformed   = infraerrors.BadRequest("XIANYU_WORKER_MALFORMED", "xianyu worker response malformed")
+	// 目标账号在 Worker 侧已不存在（Worker 返回 404 "账号不存在"）。用于区分"账号已被清除/未登录"
+	// 与真实 500 故障，使重复退出幂等、其余操作返回干净 404 而非 internal error。
+	ErrXianyuWorkerAccountNotFound  = infraerrors.NotFound("XIANYU_WORKER_ACCOUNT_NOT_FOUND", "xianyu account not found on worker")
 	ErrXianyuBaseURLInvalid         = infraerrors.BadRequest("XIANYU_BASE_URL_INVALID", "xianyu worker base_url must be http://<docker-hostname>:<port> or http://<private-ip>:<port>")
 	ErrXianyuBaseURLLoopbackInvalid = infraerrors.BadRequest("XIANYU_BASE_URL_LOOPBACK_INVALID", "xianyu worker base_url must not use 127.0.0.1 inside the container deployment")
 	ErrXianyuDeliveryUnavailable    = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_UNAVAILABLE", "xianyu delivery is unavailable")
@@ -53,15 +56,16 @@ const (
 )
 
 // XianyuWorkerConfig 是主程序对单条 Worker 内网连接配置的视图。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuWorkerConfig struct {
-	ID                int64
-	BaseURL           string
-	APITokenEncrypted string
-	Status            string
-	HealthStatus      string
-	LastCheckedAt     *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64      `json:"id"`
+	BaseURL           string     `json:"base_url"`
+	APITokenEncrypted string     `json:"api_token_encrypted"`
+	Status            string     `json:"status"`
+	HealthStatus      string     `json:"health_status"`
+	LastCheckedAt     *time.Time `json:"last_checked_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // XianyuAccountStatus 表示闲鱼账号状态。
@@ -90,18 +94,19 @@ const (
 )
 
 // XianyuAccount 是主程序保存的闲鱼账号状态视图。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuAccount struct {
-	ID             int64
-	WorkerConfigID int64
-	AccountID      string
-	Nickname       string
-	Status         string
-	CookieStatus   string
-	TaskStatus     string
-	LastLoginAt    *time.Time
-	LastSeenAt     *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             int64      `json:"id"`
+	WorkerConfigID int64      `json:"worker_config_id"`
+	AccountID      string     `json:"account_id"`
+	Nickname       string     `json:"nickname"`
+	Status         string     `json:"status"`
+	CookieStatus   string     `json:"cookie_status"`
+	TaskStatus     string     `json:"task_status"`
+	LastLoginAt    *time.Time `json:"last_login_at"`
+	LastSeenAt     *time.Time `json:"last_seen_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // XianyuItemPoolStatus 表示商品池状态。
@@ -111,15 +116,16 @@ const (
 )
 
 // XianyuItemPool 是库存池配置。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuItemPool struct {
-	ID                int64
-	Name              string
-	Slug              string
-	Description       string
-	LowStockThreshold int
-	Status            string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64     `json:"id"`
+	Name              string    `json:"name"`
+	Slug              string    `json:"slug"`
+	Description       string    `json:"description"`
+	LowStockThreshold int       `json:"low_stock_threshold"`
+	Status            string    `json:"status"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // XianyuBindingStatus 表示商品绑定状态。
@@ -145,21 +151,22 @@ const (
 )
 
 // XianyuProduct 是商品映射。
+// 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuProduct struct {
-	ID            int64
-	AccountPK     int64
-	AccountID     string
-	ItemID        string
-	Title         string
-	SpecName      string
-	SpecValue     string
-	PoolID        *int64
-	BindingStatus string
-	BindingSource string
-	Status        string
-	LastSeenAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID            int64      `json:"id"`
+	AccountPK     int64      `json:"account_pk"`
+	AccountID     string     `json:"account_id"`
+	ItemID        string     `json:"item_id"`
+	Title         string     `json:"title"`
+	SpecName      string     `json:"spec_name"`
+	SpecValue     string     `json:"spec_value"`
+	PoolID        *int64     `json:"pool_id"`
+	BindingStatus string     `json:"binding_status"`
+	BindingSource string     `json:"binding_source"`
+	Status        string     `json:"status"`
+	LastSeenAt    *time.Time `json:"last_seen_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // XianyuBindingRuleMatchType 表示绑定规则匹配类型。

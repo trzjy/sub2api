@@ -127,10 +127,17 @@ func (s *RateLimitService) cnBalanceCooldownDuration() time.Duration {
 // 周期额度探测刷新快照后阈值评估会再次停调到正确的时间点。
 // 无快照或均已过期返回 nil。
 func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
-	if account == nil || !account.IsCNProvider() || !account.IsCodingPlan() || len(account.Extra) == 0 {
+	if account == nil || !account.IsCNProvider() || len(account.Extra) == 0 {
 		return nil
 	}
-	provider := account.Platform
+	// 快照键以 coding 供应商为前缀（kimi_/zhipu_/volcano_），与
+	// cnQuotaExtraUpdates 的写入维度一致；不能用 platform（deepseek 火山号）取键。
+	// 用 resolveCNQuotaProvider（兼容 payg 火山）而非 GetCodingPlanProvider，
+	// 否则 payg 火山号的 429 冷却读不到 volcano_* 重置点、落入真实 5h 窗口。
+	provider := resolveCNQuotaProvider(account)
+	if provider == "" {
+		return nil
+	}
 	var earliest *time.Time
 	for _, suffix := range []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset} {
 		t := parseSchedulingResetAt(account.Extra[cnExtraKey(provider, suffix)])
@@ -160,9 +167,11 @@ func (s *RateLimitService) applyCNProviderReactive429(
 		s.handleCNProviderInsufficientBalance(ctx, account, extractUpstreamErrorMessage(responseBody))
 		return true
 	}
-	// 2) Coding Plan 窗口耗尽：冷却到快照中最早的窗口重置点（见
+	// 2) Coding Plan / 火山订阅窗口耗尽：冷却到快照中最早的窗口重置点（见
 	// cnProviderQuotaSnapshotReset：429 多由 5h 窗口触发，取较早点避免过度停调）。
-	if account.IsCodingPlan() {
+	// 判定用「是 coding 供应商（含 payg 火山）」而非 IsCodingPlan，否则 payg 火山
+	// 号 429 会走默认逻辑、不用真实 5h 窗口冷却。
+	if resolveCNQuotaProvider(account) != "" {
 		if until := cnProviderQuotaSnapshotReset(account, time.Now()); until != nil {
 			s.notifyAccountSchedulingBlocked(account, *until, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *until); err != nil {

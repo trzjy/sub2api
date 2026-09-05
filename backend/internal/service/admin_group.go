@@ -249,6 +249,9 @@ func defaultModelsListCandidateIDs(platform string) []string {
 		return xai.DefaultModelIDs()
 	case PlatformComposite:
 		return compositeDefaultModelsListCandidateIDs()
+	case PlatformOther:
+		// other 无平台默认模型候选：候选完全来自账号 model_mapping / 自定义模型清单。
+		return nil
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

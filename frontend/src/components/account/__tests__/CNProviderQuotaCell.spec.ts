@@ -33,6 +33,25 @@ const account = {
   }
 } as Account
 
+// 火山方舟订阅号：platform=deepseek，靠 base_url=ark.cn-beijing.volces.com 识别，
+// 快照键前缀为 volcano_（而非 deepseek_）。刷新快照直接渲染，无需探测。
+const volcanoAccount = {
+  id: 29,
+  platform: 'deepseek',
+  type: 'apikey',
+  credentials: {
+    account_mode: 'coding',
+    base_url: 'https://ark.cn-beijing.volces.com/api/plan'
+  },
+  extra: {
+    volcano_5h_used_percent: 32.210872,
+    volcano_weekly_used_percent: 9.203106285714286,
+    volcano_5h_reset_at: '2026-09-04T01:10:03Z',
+    volcano_weekly_reset_at: '2026-09-06T16:00:00Z',
+    volcano_usage_updated_at: new Date().toISOString()
+  }
+} as Account
+
 describe('CNProviderQuotaCell', () => {
   beforeEach(() => {
     queryQuota.mockReset()
@@ -91,5 +110,140 @@ describe('CNProviderQuotaCell', () => {
     await probeButton.trigger('click')
     await flushPromises()
     expect(queryQuota).toHaveBeenCalledWith(account.id)
+  })
+
+  it('renders a volcano-coding account from its volcano_* snapshot without probing', async () => {
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: volcanoAccount } })
+    await flushPromises()
+
+    // Fresh snapshot: bars render straight from volcano_* extra keys, no probe call.
+    expect(queryQuota).not.toHaveBeenCalled()
+    const tiers = wrapper.findAll('[data-test="cn-provider-quota-tier"]')
+    expect(tiers).toHaveLength(2)
+    expect(wrapper.text()).toContain('32%')
+    expect(wrapper.text()).toContain('9%')
+  })
+
+  // 非火山 deepseek coding（base_url 非 volces）不渲染该单元格：需后端识别才会探测。
+  it('stays hidden for a deepseek coding account without a volces base_url', async () => {
+    const plainDeepseek = {
+      id: 30,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'coding', base_url: 'https://api.deepseek.com' },
+      extra: { deepseek_5h_used_percent: 10 }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: plainDeepseek } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
+    expect(queryQuota).not.toHaveBeenCalled()
+  })
+
+  // 火山订阅号账号在 deepseek 创建/编辑界面保存为 payg：仍应按 base_url 挂载配额单元格。
+  it('shows quota cell for a payg volcano deepseek via credentials.base_url', async () => {
+    const paygVolcano = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'payg', base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3' },
+      extra: {
+        volcano_5h_used_percent: 12.5,
+        volcano_weekly_used_percent: 0,
+        volcano_5h_reset_at: '2026-09-04T01:10:03Z',
+        volcano_usage_updated_at: new Date().toISOString()
+      }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: paygVolcano } })
+    await flushPromises()
+    const root = wrapper.find('[data-test="cn-provider-quota"]')
+    expect(root.exists()).toBe(true)
+    expect(wrapper.text()).toContain('13%')
+  })
+
+  // 火山地址仅存在于 api_base_urls.chat_completions（adaptive 协议）时也应挂载，
+  // 与后端 GetOpenAIBaseURL 的优先级一致。
+  it('shows quota cell when only api_base_urls.chat_completions is the volcano address', async () => {
+    const adaptiveVolcano = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: {
+        account_mode: 'payg',
+        api_protocol: 'adaptive',
+        api_base_urls: { chat_completions: 'https://ark.cn-beijing.volces.com/api/coding/v3' }
+      },
+      extra: {
+        volcano_5h_used_percent: 5,
+        volcano_weekly_used_percent: 0,
+        volcano_5h_reset_at: '2026-09-04T01:10:03Z',
+        volcano_usage_updated_at: new Date().toISOString()
+      }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: adaptiveVolcano } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('5%')
+  })
+
+  // 有 reset_at 时显示真实重置倒计时（非推算）。
+  it('shows the real 5h reset countdown when reset_at is present', async () => {
+    const withReset = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'payg', base_url: 'https://ark.cn-beijing.volces.com/api/plan' },
+      extra: {
+        volcano_5h_used_percent: 40,
+        volcano_weekly_used_percent: 0,
+        volcano_5h_reset_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+        volcano_usage_updated_at: new Date().toISOString()
+      }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: withReset } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('2h')
+  })
+
+  // 没有 reset_at 时仍显示用量条，但不伪造/推算倒计时（不渲染 `·` 重置片段）。
+  it('shows usage but does not fabricate a countdown when reset_at is absent', async () => {
+    const noReset = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'payg', base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3' },
+      extra: {
+        volcano_5h_used_percent: 60,
+        volcano_weekly_used_percent: 0,
+        volcano_usage_updated_at: new Date().toISOString()
+      }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: noReset } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('60%')
+    // 无 reset_at：不渲染 `· 重置` 片段（formatReset 不会被虚构时间驱动）。
+    expect(wrapper.text()).not.toMatch(/·/)
+  })
+
+  // 外审 must_fix #4：非 adaptive 账号即便 api_base_urls.chat_completions 指向火山，
+  // 前端也不应识别为火山——后端 GetOpenAIBaseURL 对非 adaptive 一律走 base_url，
+  // 与前端判定不一致会导致前端挂载配额单元格、后端探测却拒绝。
+  it('stays hidden when only api_base_urls is the volcano address but not adaptive', async () => {
+    const nonAdaptiveVolcano = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: {
+        account_mode: 'payg',
+        api_protocol: 'chat_completions',
+        api_base_urls: { chat_completions: 'https://ark.cn-beijing.volces.com/api/coding/v3' },
+        base_url: 'https://api.deepseek.com'
+      },
+      extra: {}
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: nonAdaptiveVolcano } })
+    await flushPromises()
+    // 非 adaptive：resolveAccountBaseURL 走 base_url（deepseek.com，非火山）→ 不挂载单元格。
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
+    expect(queryQuota).not.toHaveBeenCalled()
   })
 })

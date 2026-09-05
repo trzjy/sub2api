@@ -577,6 +577,8 @@ export interface SyncUpstreamPreviewParams {
   type: string
   base_url?: string
   api_key: string
+  api_protocol?: string
+  account_mode?: string
   model_mapping?: Record<string, string>
 }
 
@@ -587,6 +589,50 @@ export interface SyncUpstreamPreviewParams {
  */
 export async function syncUpstreamModelsPreview(params: SyncUpstreamPreviewParams): Promise<SyncUpstreamModelsResult> {
   const { data } = await apiClient.post<SyncUpstreamModelsResult>('/admin/accounts/models/sync-upstream-preview', params)
+  return data
+}
+
+export interface VolcanoPlanDocEvidence {
+  kind: string
+  urls?: string[]
+  document_ids?: number[]
+  titles?: string[]
+  updated_times?: string[]
+  candidate_count: number
+}
+
+export interface SyncVolcanoPlanResult {
+  kind: string
+  confirmed: string[]
+  unavailable: string[]
+  unverified: string[]
+  will_add: string[]
+  will_remove: string[]
+  full_confirm: boolean
+  applied: boolean
+  evidence: VolcanoPlanDocEvidence
+}
+
+export interface SyncVolcanoPlanParams {
+  apply: boolean
+  /**
+   * apply=true 时必填：preview 已展示并经用户确认允许下架的模型集合。
+   * 后端用它约束：重扫若出现 preview 未提示的下架将拒绝落库（fail-closed），
+   * 杜绝未获确认的破坏性收敛。
+   */
+  expected_removals?: string[]
+}
+
+/**
+ * Preview or apply the volcengine Ark Agent/Coding Plan model sync.
+ * apply=false returns classification + diff without touching the account;
+ * apply=true persists the managed model snapshot and adjusts model_mapping.
+ * @param id - Account ID
+ * @param params - {apply:boolean}
+ * @returns Classified sync result with diff and evidence
+ */
+export async function syncVolcanoPlanModels(id: number, params: SyncVolcanoPlanParams): Promise<SyncVolcanoPlanResult> {
+  const { data } = await apiClient.post<SyncVolcanoPlanResult>(`/admin/accounts/${id}/models/sync-volcano-plan`, params)
   return data
 }
 
@@ -1033,6 +1079,7 @@ export const accountsAPI = {
   getAvailableModels,
   syncUpstreamModels,
   syncUpstreamModelsPreview,
+  syncVolcanoPlanModels,
   generateAuthUrl,
   exchangeCode,
   refreshOpenAIToken,

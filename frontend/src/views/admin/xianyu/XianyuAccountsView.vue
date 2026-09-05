@@ -134,6 +134,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
+import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatDateTime } from '@/utils/format'
 import type { XianyuAccount } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -156,7 +157,7 @@ async function load() {
     accounts.value = await adminAPI.xianyu.listAccounts()
     syncError.value = ''
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
     loading.value = false
   }
@@ -169,8 +170,8 @@ async function sync() {
     await load()
     appStore.showSuccess(t('admin.xianyu.accounts.success'))
   } catch (err) {
-    syncError.value = String(err)
-    appStore.showError(String(err))
+    syncError.value = extractApiErrorMessage(err, t('common.error'))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
 }
 
@@ -205,7 +206,7 @@ function enable(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(String(err))
+        appStore.showError(extractApiErrorMessage(err, t('common.error')))
       }
     }
   )
@@ -221,7 +222,7 @@ function disable(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(String(err))
+        appStore.showError(extractApiErrorMessage(err, t('common.error')))
       }
     }
   )
@@ -237,7 +238,7 @@ function doRefreshCookie(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(String(err))
+        appStore.showError(extractApiErrorMessage(err, t('common.error')))
       }
     }
   )
@@ -253,7 +254,7 @@ function doClearCredentials(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(String(err))
+        appStore.showError(extractApiErrorMessage(err, t('common.error')))
       }
     }
   )
@@ -286,7 +287,7 @@ async function openScan(account: XianyuAccount | null) {
       return
     }
   } catch (err) {
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
     scanVisible.value = false
     return
   }
@@ -324,7 +325,7 @@ async function pollOnce(sessionID: string) {
     }
   } catch (err) {
     stopPolling()
-    appStore.showError(String(err))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
     return
   }
   // 上一轮完成后再调度下一轮，避免 setInterval 并发请求堆积

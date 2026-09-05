@@ -322,6 +322,35 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
 }
 
+// TestBuildUpstreamModelsRequestPlainDeepseekUnchanged 锁定非火山普通 deepseek 的模型目录
+// 探测不回归：默认 chat_completions 协议仍走 api.deepseek.com/v1/models。火山订阅号已被
+// fetchUpstreamModelList 拦截到 fetchVolcanoPlanSupportedModels（见 volcano_plan_models_test.go），
+// 不再落入通用 /models 目录探测，因此这里不再断言火山账号的 /v1/models 路由。
+func TestBuildUpstreamModelsRequestPlainDeepseekUnchanged(t *testing.T) {
+	t.Parallel()
+
+	svc := &AccountTestService{cfg: upstreamModelSyncTestConfig()}
+	ctx := context.Background()
+
+	// 普通 deepseek（非火山、无自定义 base_url、默认 chat_completions 协议）不受影响：
+	// 仍走 OpenAI 协议探测的 deepseek 默认端点。
+	plainDeepseek := &Account{
+		Platform: PlatformDeepseek,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key": "plain-key",
+		},
+	}
+	req, err := svc.buildUpstreamModelsRequest(ctx, plainDeepseek)
+	require.NoError(t, err)
+	require.Equal(t, "https://api.deepseek.com/v1/models", req.URL.String())
+	require.Equal(t, "Bearer plain-key", req.Header.Get("Authorization"))
+
+	// 火山基址的 host 不得被 parseVolcanoPlanProfile 误解为普通 deepseek（普通 host 绝不命中）。
+	_, ok := parseVolcanoPlanProfile("https://api.deepseek.com")
+	require.False(t, ok)
+}
+
 func TestBuildUpstreamModelsRequestSupportsGrokOAuth(t *testing.T) {
 	t.Parallel()
 
