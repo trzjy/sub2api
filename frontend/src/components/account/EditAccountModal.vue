@@ -3121,6 +3121,12 @@ const editAdaptiveProtocolOptions = computed<Array<{ value: CnNativeApiProtocol;
 })
 watch(editApiProtocol, (protocol, previousProtocol) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  // 切换到 adaptive 且当前 base_url 为火山地址：把火山地址同步进 chat_completions 槽位，
+  // 避免后续提交静默回退 DeepSeek（HIGH 修复）。
+  if (protocol === 'adaptive' && isVolcanoBaseURL(editBaseUrl.value.trim())) {
+    editAdaptiveBaseUrls.value = { ...editAdaptiveBaseUrls.value, chat_completions: editBaseUrl.value.trim() }
+    return
+  }
   // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
   // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
   if (isVolcanoSubscription.value || isVolcanoBaseURL(editBaseUrl.value)) return
@@ -4759,7 +4765,13 @@ const handleSubmit = async () => {
           const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
           const protocolBaseUrls: Record<string, string> = {}
           for (const item of editAdaptiveProtocolOptions.value) {
-            protocolBaseUrls[item.value] = (editAdaptiveBaseUrls.value[item.value] || defaults[item.value]).trim()
+            const raw = (editAdaptiveBaseUrls.value[item.value] || '').trim()
+            if (item.value === 'chat_completions') {
+              // 火山场景：空白 chat_completions 应回退到 base_url（editBaseUrl），避免被写成空值（MEDIUM 修复）
+              protocolBaseUrls[item.value] = raw || editBaseUrl.value.trim() || defaults[item.value]
+            } else {
+              protocolBaseUrls[item.value] = raw || defaults[item.value]
+            }
           }
           newCredentials.api_base_urls = protocolBaseUrls
           newCredentials.base_url = protocolBaseUrls.chat_completions
