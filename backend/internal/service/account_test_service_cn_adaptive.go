@@ -156,7 +156,8 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid adaptive Responses base URL: %s", err.Error()))
 	}
-	apiURL := buildOpenAIResponsesURLForPlatform(account.Platform, baseURL)
+	// 火山订阅号 base 命中时派生 {base}/v3/responses，其余供应商回落既有平台感知逻辑。
+	apiURL := openAIResponsesURLForBase(account.Platform, baseURL)
 
 	payload := createOpenAITestPayload(testModelID, false)
 	// DeepSeek's native Responses endpoint is stateless and does not need the

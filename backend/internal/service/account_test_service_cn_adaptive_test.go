@@ -139,6 +139,44 @@ func TestAccountTestService_AdaptiveDeepSeekAlsoTestsResponsesEndpoint(t *testin
 	require.Contains(t, recorder.Body.String(), "已通过原生 /responses 验证")
 }
 
+// 自适应 DeepSeek/火山账号的 Responses 探测必须命中 {base}/v3/responses：
+// /api/plan→Agent、/api/coding→Coding，绝不能回落 {base}/responses（外审-2 火山专用端点路由）。
+func TestAccountTestService_AdaptiveVolcanoResponsesUsesV3Endpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		base string
+		want string
+	}{
+		{"Agent", "https://ark.cn-beijing.volces.com/api/plan", "https://ark.cn-beijing.volces.com/api/plan/v3/responses"},
+		{"Coding", "https://ark.cn-beijing.volces.com/api/coding", "https://ark.cn-beijing.volces.com/api/coding/v3/responses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := adaptiveCNAccountTestAccount(int64(320), PlatformDeepseek)
+			account.Credentials["api_base_urls"] = map[string]any{
+				APIProtocolChatCompletions: "http://chat.example/v1",
+				APIProtocolAnthropic:       "http://anthropic.example",
+				APIProtocolResponses:       tc.base,
+			}
+			svc, upstream := adaptiveCNAccountTestService(
+				account,
+				adaptiveCNChatTestResponse(),
+				adaptiveCNAnthropicTestResponse(),
+				adaptiveCNResponsesTestResponse(),
+			)
+			c, recorder := newTestContext()
+
+			err := svc.TestAccountConnection(c, account.ID, "deepseek-chat", "", AccountTestModeDefault)
+
+			require.NoError(t, err)
+			require.Len(t, upstream.requests, 3)
+			require.Equal(t, tc.want, upstream.requests[2].URL.String())
+			require.Equal(t, "Bearer sk-adaptive-test", upstream.requests[2].Header.Get("Authorization"))
+			require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.requests[2].Context()))
+			require.Contains(t, recorder.Body.String(), `"type":"test_complete"`)
+		})
+	}
+}
+
 func TestAccountTestService_AdaptiveStopsAndNamesFailingEndpoint(t *testing.T) {
 	account := adaptiveCNAccountTestAccount(303, PlatformDeepseek)
 	svc, upstream := adaptiveCNAccountTestService(
