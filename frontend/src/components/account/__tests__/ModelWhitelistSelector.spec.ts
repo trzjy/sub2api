@@ -303,21 +303,23 @@ describe('ModelWhitelistSelector', () => {
     expect(syncUpstreamModels).toHaveBeenCalled()
   })
 
-  it('applies a no-op full confirm to initialize managed state on an already-populated account', async () => {
-    const noop = {
+  it('applies a full confirm re-sync with no diff on an already-populated account', async () => {
+    // 全量探活语义：全已收录账号再次同步仍重新探活，confirmed 携带全部探通候选，
+    // will_add/will_remove 为空（无差异），full_confirm 仍为 true。
+    const resync = {
       kind: 'coding',
-      confirmed: [],
+      confirmed: ['glm-5.3'],
       unavailable: [],
       unverified: [],
       will_add: [],
       will_remove: [],
       full_confirm: true,
       applied: false,
-      evidence: { kind: 'coding', urls: [], document_ids: [], titles: [], updated_times: [], candidate_count: 0 }
+      evidence: { kind: 'coding', urls: [], document_ids: [], titles: [], updated_times: [], candidate_count: 1 }
     }
     syncVolcanoPlanModels
-      .mockResolvedValueOnce(noop)
-      .mockResolvedValueOnce({ ...noop, applied: true })
+      .mockResolvedValueOnce(resync)
+      .mockResolvedValueOnce({ ...resync, applied: true })
     vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     const wrapper = mountSelector({
@@ -328,7 +330,7 @@ describe('ModelWhitelistSelector', () => {
     })
     await clickSync(wrapper)
 
-    // 全已收录 no-op 仍走 apply 以初始化/更新托管快照，不回退为“空即可退出”。
+    // 无差异的完全确认仍走 apply 以初始化/更新托管快照，不回退为“空即可退出”。
     expect(syncVolcanoPlanModels).toHaveBeenLastCalledWith(101, { apply: true, expected_removals: [] })
     expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
     expect(showSuccess).toHaveBeenCalled()

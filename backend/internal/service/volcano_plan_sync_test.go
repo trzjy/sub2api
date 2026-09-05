@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -132,12 +133,22 @@ func TestVolcanoSyncPlanPreviewDoesNotApply(t *testing.T) {
 }
 
 // TestVolcanoSyncPlanFullReplacePreservesManualAlias 验证完全确认→托管替换为新候选集，
-// 人工 alias 键（非 identity）绝不删除；被 alias 覆盖的上游模型不重复落 identity 键。
+// 人工 alias 键（非 identity）绝不删除；被 alias 覆盖的上游模型仍全量探活并进入
+// Confirmed，但不重复落 identity 键。
 func TestVolcanoSyncPlanFullReplacePreservesManualAlias(t *testing.T) {
 	t.Parallel()
 
+	var mu sync.Mutex
+	probed := map[string]bool{}
 	repo := &volcanoPlanSyncRepoStub{}
-	stub := &volcanoSyncHTTPStub{respond: allOKRespond}
+	stub := &volcanoSyncHTTPStub{
+		respond: func(req *http.Request, model string) (int, string, error) {
+			mu.Lock()
+			probed[model] = true
+			mu.Unlock()
+			return allOKRespond(req, model)
+		},
+	}
 	svc := newVolcanoSyncSvc(t, stub, repo)
 	// 人工 alias：my-alias -> glm-5.3（glm-5.3 只是 mapping 目标值）。
 	account := volcanoSyncAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions",
@@ -148,9 +159,11 @@ func TestVolcanoSyncPlanFullReplacePreservesManualAlias(t *testing.T) {
 	require.True(t, result.Applied)
 	require.True(t, result.FullConfirm)
 
-	// 完全确认：被 alias 覆盖的 glm-5.3 已被认作已收录，跳过探活→不在 confirmed；
-	// 其余 8 个候选探活确认。
-	require.Equal(t, excludeStrings(codingCandidates, "glm-5.3"), result.Confirmed)
+	// 全量探活：被 alias 覆盖的 glm-5.3 仍重新探活并进入 Confirmed；9 个候选全部确认。
+	mu.Lock()
+	require.True(t, probed["glm-5.3"], "被 alias 覆盖的候选仍应重新探活")
+	mu.Unlock()
+	require.Equal(t, codingCandidates, result.Confirmed)
 	// glm-5.3 已被 alias 目标值覆盖，不重复加 identity 键；其余 8 个新增。
 	require.NotContains(t, result.WillAdd, "glm-5.3")
 	require.Len(t, result.WillAdd, 8)
@@ -350,18 +363,19 @@ func TestVolcanoSyncPlanCredentialErrorTerminates(t *testing.T) {
 	require.Zero(t, credCalls)
 }
 
-// TestVolcanoSyncPlanAlreadyFullyPopulatedInitializesManagedState 验证全套官方候选已收录于
-// mapping（无待探活）→ 完全确认 no-op，仍落一次托管快照初始化托管状态，且不重复探活。
-func TestVolcanoSyncPlanAlreadyFullyPopulatedInitializesManagedState(t *testing.T) {
+// TestVolcanoSyncPlanFullyPopulatedReprobesAllCandidates 验证全套官方候选已收录于
+// mapping 时仍全量重新探活（不按已收录跳过）：探活次数等于官方候选数量，Confirmed
+// 包含全部成功候选，WillAdd 仍为空；托管快照与 mapping 写入语义保持不变。
+func TestVolcanoSyncPlanFullyPopulatedReprobesAllCandidates(t *testing.T) {
 	t.Parallel()
 
 	var mu sync.Mutex
-	probed := 0
+	probed := map[string]int{}
 	repo := &volcanoPlanSyncRepoStub{}
 	stub := &volcanoSyncHTTPStub{
-		respond: func(_ *http.Request, _ string) (int, string, error) {
+		respond: func(_ *http.Request, model string) (int, string, error) {
 			mu.Lock()
-			probed++
+			probed[model]++
 			mu.Unlock()
 			return 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil
 		},
@@ -375,20 +389,71 @@ func TestVolcanoSyncPlanAlreadyFullyPopulatedInitializesManagedState(t *testing.
 
 	result, err := svc.SyncVolcanoPlanModels(context.Background(), account, true, nil)
 	require.NoError(t, err)
-	require.True(t, result.FullConfirm, "全已收录 → 完全确认 no-op")
-	require.Empty(t, result.Confirmed, "全已收录：无待探活候选，不应探活")
+	require.True(t, result.FullConfirm, "全部探通且无阻断 → 完全确认")
+	require.Equal(t, codingCandidates, result.Confirmed, "全已收录仍重新探活，全部候选进入 Confirmed")
 	require.Empty(t, result.WillAdd, "全已收录：无新增")
-	require.Empty(t, result.WillRemove, "全已收录：无下架")
+	require.Empty(t, result.WillRemove, "无官方下线：无下架")
 	mu.Lock()
-	require.Zero(t, probed, "全已收录时不得发起任何探活请求")
+	require.Len(t, probed, len(codingCandidates), "每个官方候选都必须被重新探活")
+	for _, c := range codingCandidates {
+		require.Equal(t, 1, probed[c], "候选 %s 应恰好探活一次", c)
+	}
 	mu.Unlock()
 
 	snap := account.GetVolcanoPlanManagedModels()
-	require.NotNil(t, snap, "no-op 完全确认仍初始化托管快照")
+	require.NotNil(t, snap, "完全确认仍初始化/更新托管快照")
 	require.Equal(t, codingCandidates, snap.Models)
 	extraCalls, credCalls := repo.counts()
-	require.Equal(t, 1, extraCalls, "no-op 仍落一次托管快照")
-	require.Equal(t, 1, credCalls, "no-op 仍落一次 mapping（幂等覆盖）")
+	require.Equal(t, 1, extraCalls, "仍落一次托管快照")
+	require.Equal(t, 1, credCalls, "仍落一次 mapping（幂等覆盖）")
+}
+
+// TestVolcanoSyncPlanResultJSONEmptyArraysNotNull 验证响应契约：完整成功（无
+// unavailable/unverified/will_remove）与全已收录再同步（will_add 为空）时，所有分类
+// 数组必须序列化为 [] 而非 null——前端直接读 .length，null 会触发 TypeError。
+func TestVolcanoSyncPlanResultJSONEmptyArraysNotNull(t *testing.T) {
+	t.Parallel()
+
+	stub := &volcanoSyncHTTPStub{respond: allOKRespond}
+
+	t.Run("full success with empty categories", func(t *testing.T) {
+		t.Parallel()
+		svc := newVolcanoSyncSvc(t, stub, nil)
+		account := volcanoSyncAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions", nil)
+
+		result, err := svc.SyncVolcanoPlanModels(context.Background(), account, false, nil)
+		require.NoError(t, err)
+		require.True(t, result.FullConfirm)
+
+		body, err := json.Marshal(result)
+		require.NoError(t, err)
+		require.Contains(t, string(body), `"unavailable":[]`)
+		require.Contains(t, string(body), `"unverified":[]`)
+		require.Contains(t, string(body), `"will_remove":[]`)
+		require.NotContains(t, string(body), `"unavailable":null`)
+		require.NotContains(t, string(body), `"unverified":null`)
+		require.NotContains(t, string(body), `"will_add":null`)
+		require.NotContains(t, string(body), `"will_remove":null`)
+	})
+
+	t.Run("re-sync of fully populated account keeps empty will_add as array", func(t *testing.T) {
+		t.Parallel()
+		svc := newVolcanoSyncSvc(t, stub, nil)
+		m := make(map[string]any, len(codingCandidates))
+		for _, c := range codingCandidates {
+			m[c] = c
+		}
+		account := volcanoSyncAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions", m)
+
+		result, err := svc.SyncVolcanoPlanModels(context.Background(), account, false, nil)
+		require.NoError(t, err)
+		require.Empty(t, result.WillAdd)
+
+		body, err := json.Marshal(result)
+		require.NoError(t, err)
+		require.Contains(t, string(body), `"will_add":[]`)
+		require.Contains(t, string(body), `"will_remove":[]`)
+	})
 }
 
 // TestVolcanoSyncPlanMappingPersistFailureLeavesSnapshotUntouched 验证 mapping 持久化失败

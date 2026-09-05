@@ -410,36 +410,18 @@ func (s *AccountTestService) resolveVolcanoPlanScan(ctx context.Context, account
 		return nil, err
 	}
 
-	// 增量：只探测 model_mapping 中尚未收录的候选（命中 key 或已有映射目标值均跳过）。
-	known := make(map[string]struct{}, len(cands.models))
-	for _, m := range cands.models {
-		_ = m // 预保留
-	}
-	for _, m := range whitelistedAccountModels(account) {
-		known[strings.TrimSpace(m)] = struct{}{}
-	}
-	for _, upstream := range account.GetModelMapping() {
-		if trimmed := strings.TrimSpace(upstream); trimmed != "" {
-			known[trimmed] = struct{}{}
-		}
-	}
-	var toProbe []string
-	for _, name := range cands.models {
-		if _, ok := known[name]; !ok {
-			toProbe = append(toProbe, name)
-		}
-	}
-
-	// 受限并发探活：最多 volcanoProbeMaxConcurrent 个并发；每个请求仍有独立 ctx 超时。
+	// 全量探活：每次同步都对官方候选并集全量重新探活，不按 model_mapping 已收录跳过——
+	// 已收录模型可能已被官方下线或失效，只有重新探活才能保证 confirmed 反映当前真实可用性。
 	type probeOut struct {
 		model   string
 		outcome volcanoProbeOutcome
 		status  int
 	}
-	results := make([]probeOut, len(toProbe))
+	// 受限并发探活：最多 volcanoProbeMaxConcurrent 个并发；每个请求仍有独立 ctx 超时。
+	results := make([]probeOut, len(cands.models))
 	sem := make(chan struct{}, volcanoProbeMaxConcurrent)
 	var wg sync.WaitGroup
-	for i, model := range toProbe {
+	for i, model := range cands.models {
 		wg.Add(1)
 		go func(i int, m string) {
 			defer wg.Done()
@@ -451,7 +433,15 @@ func (s *AccountTestService) resolveVolcanoPlanScan(ctx context.Context, account
 	}
 	wg.Wait()
 
-	result := &volcanoPlanScanResult{candidates: cands.models, evidence: cands.evidence}
+	// 分类数组一律初始化为空切片：序列化必须输出 [] 而非 null（API 响应契约，
+	// 前端直接读 .length，null 会触发 TypeError）。
+	result := &volcanoPlanScanResult{
+		candidates:  cands.models,
+		confirmed:   []string{},
+		unavailable: []string{},
+		unverified:  []string{},
+		evidence:    cands.evidence,
+	}
 	unverifiedCount := 0
 	for _, r := range results {
 		switch r.outcome {
@@ -469,8 +459,8 @@ func (s *AccountTestService) resolveVolcanoPlanScan(ctx context.Context, account
 		}
 	}
 
-	// 应对只有不可用候选的情况：明确失败，不静默当作“模型不存在/无模型”。
-	if len(toProbe) > 0 && len(result.confirmed) == 0 && unverifiedCount == 0 && len(result.unavailable) > 0 {
+	// 应对本轮完整候选集合全部明确不可用的情况：明确失败，不静默当作“模型不存在/无模型”。
+	if len(result.confirmed) == 0 && unverifiedCount == 0 && len(result.unavailable) > 0 {
 		return nil, newUpstreamModelSyncUpstreamError(
 			fmt.Sprintf("Volcano account returned no supported models (%d candidates unavailable)", len(result.unavailable)), nil)
 	}
@@ -520,14 +510,13 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 	oldManaged := loadVolcanoManagedModels(account)
 	// 可删身份键集 = 上一快照中由本同步器写入的 identity 键（非用户手动 identity）。
 	oldIdentityKeys := loadVolcanoManagedModelIdentityKeys(account)
-	// 完全确认 = 无 unverified/unavailable 阻断。confirmed 为空只可能有两种情况，二者
-	// 都已由 resolveVolcanoPlanScan 兜底为安全：全部候选失败（fail-closed 返回 error）
-	// 或全部候选已在 model_mapping 内（toProbe 为空——既有完整账号的迁移/首次同步，
-	// 候选即权威集，托管快照可安全初始化，不能误判为 partial 而丢失托管状态）。
+	// 完全确认 = 无 unverified/unavailable 阻断。全量探活下 confirmed 为空只可能是全部
+	// 候选失败，而该情况已由 resolveVolcanoPlanScan fail-closed 返回 error；到达这里时
+	// confirmed 即本轮真实探通的官方候选。
 	fullConfirm := len(scan.unverified) == 0 && len(scan.unavailable) == 0
 	var managed []string
 	if fullConfirm {
-		// 官方套餐候选即权威集：新确认 ∪ 已收录（本轮跳过探活的已知可用模型）都在候选中。
+		// 官方套餐候选即权威集：全量探活后候选全集已重新确认，托管集合直接替换为候选并集。
 		managed = append(managed, scan.candidates...)
 	} else {
 		managed = append(managed, oldManaged...)
@@ -547,7 +536,8 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 		curSet[strings.TrimSpace(k)] = struct{}{}
 		curVals[strings.TrimSpace(v)] = struct{}{}
 	}
-	var willAdd []string
+	// 差异数组初始化为空切片：序列化必须输出 [] 而非 null（API 响应契约）。
+	willAdd := []string{}
 	for _, m := range managed {
 		if _, ok := curSet[m]; ok {
 			continue
@@ -557,7 +547,7 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 		}
 		willAdd = append(willAdd, m)
 	}
-	var willRemove []string
+	willRemove := []string{}
 	if fullConfirm {
 		// 只允许删除"上一快照中由本同步器写入的 identity 键"中官方已下架的：用户手动
 		// identity（不在 IdentityKeys，例如首轮同步前就已存在于 mapping 的用户白名单）

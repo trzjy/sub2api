@@ -254,9 +254,10 @@ func TestFetchVolcanoPlanSupportedModelsProbesOpenAIEndpoint(t *testing.T) {
 	require.NotContains(t, models, "auto")
 }
 
-// TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndSkipsExisting 验证只探测
-// model_mapping 中不存在的候选（增量去重），且既有白名单模型保留、不删减。
-func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndSkipsExisting(t *testing.T) {
+// TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndReprobesExisting 验证全量
+// 探活语义：白名单已收录的候选仍重新探活（确认当前真实可用性），且既有白名单模型
+// 保留、不删减。
+func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndReprobesExisting(t *testing.T) {
 	t.Parallel()
 
 	var probedMu sync.Mutex
@@ -277,7 +278,7 @@ func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndSkipsExisting(t *te
 	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
-	// 白名单已含 glm-5.3：不再探测它。
+	// 白名单已含 glm-5.3：全量语义下仍重新探活。
 	account.Credentials["model_mapping"] = map[string]any{"glm-5.3": "glm-5.3"}
 
 	models, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
@@ -285,50 +286,43 @@ func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndSkipsExisting(t *te
 
 	probedMu.Lock()
 	defer probedMu.Unlock()
-	// glm-5.3 已存在 → 不探测但保留在结果；kimi-k2.7-code 探测 404 → 不可用不入列。
-	require.False(t, probed["glm-5.3"], "glm-5.3 already whitelisted, must not be re-probed")
+	// glm-5.3 已收录但仍重新探活（200 确认可用）→ 保留在结果；kimi-k2.7-code 探测 404
+	// → 不可用不入列。
+	require.True(t, probed["glm-5.3"], "glm-5.3 whitelisted but must still be re-probed")
 	require.True(t, probed["kimi-k2.7-code"], "kimi-k2.7-code must be probed")
 	require.Contains(t, models, "glm-5.3")
 	require.NotContains(t, models, "kimi-k2.7-code")
 }
 
-// 增量语义：候选名若等于某条已有 mapping 的上游目标值（alias -> 火山模型 v），
-// 说明 v 已在账号能力内，不应重复探活（比较 mapping value，而非仅 key）。
-func TestFetchVolcanoPlanSupportedModelsSkipsMappingValueCandidate(t *testing.T) {
+// 全量语义：候选名即使等于某条已有 mapping 的上游目标值（alias -> 火山模型 v），
+// 仍重新探活以确认当前真实可用性（不再按 mapping value 跳过）。
+func TestFetchVolcanoPlanSupportedModelsReprobesMappingValueCandidate(t *testing.T) {
 	t.Parallel()
 
 	var probedMu sync.Mutex
 	probed := map[string]bool{}
-	// 若 glm-5.3 被误探活，返回 404，应能从断言暴露。
-	statusByModel := map[string]int{"glm-5.3": 404, "kimi-k2.7-code": 200}
 	stub := &volcanoSyncHTTPStub{
 		respond: func(_ *http.Request, model string) (int, string, error) {
 			probedMu.Lock()
 			probed[model] = true
 			probedMu.Unlock()
-			status, ok := statusByModel[model]
-			if !ok {
-				return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
-			}
-			if status != 200 {
-				return status, `{"error":"x"}`, nil
-			}
 			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
 	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
-	// alias -> glm-5.3：glm-5.3 只是 mapping 目标值，不是白名单 key，但仍应被认作已收录。
+	// alias -> glm-5.3：glm-5.3 只是 mapping 目标值，不是白名单 key；全量语义下仍重新探活。
 	account.Credentials["model_mapping"] = map[string]any{"my-alias": "glm-5.3"}
 
-	_, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
+	models, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
 	require.NoError(t, err)
 
 	probedMu.Lock()
 	defer probedMu.Unlock()
-	require.False(t, probed["glm-5.3"], "glm-5.3 is an existing mapping value, must not be re-probed")
+	require.True(t, probed["glm-5.3"], "glm-5.3 is an existing mapping value but must still be re-probed")
 	require.True(t, probed["kimi-k2.7-code"], "kimi-k2.7-code (not mapped) must be probed")
+	require.Contains(t, models, "glm-5.3", "探活确认的 glm-5.3 应入列")
 }
 
 // TestFetchVolcanoPlanSupportedModelsCredentialError 验证 401/403 终止并返回凭证错误。

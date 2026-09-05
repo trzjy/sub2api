@@ -577,7 +577,7 @@ func normalizeModelRegistryBaseURL(raw string) string {
 
 // fetchUpstreamModelList 拉取账号的上游支持模型。火山订阅号（platform=deepseek +
 // ark 基址）不走通用 /models 目录，而是复用 volcanoPlanProfile 对真实对话端点做
-// 增量探活（见 fetchVolcanoPlanSupportedModels）。返回 (models, body, warnings, err)。
+// 全量探活（见 fetchVolcanoPlanSupportedModels）。返回 (models, body, warnings, err)。
 func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, []UpstreamModelSyncWarning, error) {
 	if s == nil {
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
@@ -595,7 +595,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
 	}
 
-	// 火山方舟订阅号：跳过 /models，用官方候选 + 对话端点增量探活。
+	// 火山方舟订阅号：跳过 /models，用官方候选 + 对话端点全量探活。
 	if isVolcanoPlanAccount(account) {
 		models, warnings, err := s.fetchVolcanoPlanSupportedModels(ctx, account)
 		return models, nil, warnings, err

@@ -418,9 +418,9 @@ const syncVolcanoPlan = async () => {
   isSyncingUpstream.value = true
   try {
     const preview = await accountsAPI.syncVolcanoPlanModels(props.accountId, { apply: false })
-    // 完全确认且 confirmed 为空，只可能是“全部已收录”的 no-op（其它失败路径后端已
-    // fail-closed），仍继续以初始化/更新托管快照；只有确认没有任何可执行变更（无新增、
-    // 且非完全确认）才提前退出。
+    // 后端全量探活：成功响应的 confirmed 必非空（全部失败已 fail-closed 返回错误），
+    // 空分类数组也稳定输出 [] 而非 null。此处仅作防御性提前退出：无任何确认、无新增、
+    // 且非完全确认时不弹确认框。
     if (preview.confirmed.length === 0 && preview.will_add.length === 0 && !preview.full_confirm) {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
       return
