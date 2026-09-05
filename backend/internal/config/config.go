@@ -699,10 +699,8 @@ type PricingConfig struct {
 }
 
 // VolcanoConfig 配置火山方舟（Volcengine Ark）Coding/Agent Plan 订阅号支持模型同步。
+// 同步依据官方文档读取器（volcano_plan_docs.go）实时获取，不再使用静态候选清单。
 type VolcanoConfig struct {
-	// PlanModelsFile 官方候选模型列表 JSON 路径（按 agent/coding 区分），同步时读取，
-	// 绝不运行时爬取官方文档 HTML。
-	PlanModelsFile string `mapstructure:"plan_models_file"`
 }
 
 type ServerConfig struct {
@@ -2338,8 +2336,7 @@ func setDefaults() {
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
 
-	// Volcano - 火山方舟订阅号支持模型同步（官方候选列表，按 agent/coding 区分）
-	viper.SetDefault("volcano.plan_models_file", "./resources/volcano-plan-models.json")
+	// Volcano - 火山方舟订阅号支持模型同步（依据官方文档读取器，非静态候选列表）
 
 	// 本地进程插件。插件必须由管理员手动上传，项目默认不携带任何插件能力。
 	viper.SetDefault("plugins.data_dir", "")

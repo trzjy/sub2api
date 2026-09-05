@@ -140,7 +140,7 @@ func TestVolcanoAccountTestChatCompletionsUsesV3Endpoint(t *testing.T) {
 			return http.StatusOK, "data: [DONE]\n\n", nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	for _, base := range []string{
 		"https://ark.cn-beijing.volces.com/api/coding",

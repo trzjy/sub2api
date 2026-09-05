@@ -2863,13 +2863,13 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 // POST /api/v1/admin/accounts/models/sync-upstream-preview
 func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 	var req struct {
-		Platform       string            `json:"platform" binding:"required"`
-		Type           string            `json:"type" binding:"required"`
-		BaseURL        string            `json:"base_url"`
-		APIKey         string            `json:"api_key" binding:"required"`
-		APIProtocol    string            `json:"api_protocol"`
-		AccountMode    string            `json:"account_mode"`
-		ModelMapping   map[string]string `json:"model_mapping"`
+		Platform     string            `json:"platform" binding:"required"`
+		Type         string            `json:"type" binding:"required"`
+		BaseURL      string            `json:"base_url"`
+		APIKey       string            `json:"api_key" binding:"required"`
+		APIProtocol  string            `json:"api_protocol"`
+		AccountMode  string            `json:"account_mode"`
+		ModelMapping map[string]string `json:"model_mapping"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -2921,6 +2921,69 @@ func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 	}
 
 	response.Success(c, catalog)
+}
+
+// SyncVolcanoPlanModels handles the volcengine Ark Agent/Coding Plan model sync.
+// POST /api/v1/admin/accounts/:id/models/sync-volcano-plan
+//
+// body: {apply:bool} —— apply=false 只返回预演（官方文档候选分类 + 差异，不动库）；
+// apply=true 落库系统托管快照并调整 model_mapping（完全确认替换 / 部分确认只新增，
+// 绝不删除人工映射）。复用 SyncUpstreamModels 相同的 UpstreamModelSyncError 错误映射。
+func (h *AccountHandler) SyncVolcanoPlanModels(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+
+	account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+	if err != nil {
+		response.NotFound(c, "Account not found")
+		return
+	}
+	if !service.IsVolcanoPlanAccount(account) {
+		response.BadRequest(c, "Only Volcengine Ark Agent/Coding Plan accounts support this sync")
+		return
+	}
+
+	var req struct {
+		Apply            bool     `json:"apply"`
+		ExpectedRemovals []string `json:"expected_removals,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	if h.accountTestService == nil {
+		response.InternalError(c, "Account test service is not configured")
+		return
+	}
+
+	result, err := h.accountTestService.SyncVolcanoPlanModels(c.Request.Context(), account, req.Apply, req.ExpectedRemovals)
+	if err != nil {
+		var syncErr *service.UpstreamModelSyncError
+		if errors.As(err, &syncErr) {
+			switch syncErr.Kind {
+			case service.UpstreamModelSyncErrorConfiguration, service.UpstreamModelSyncErrorUnsupported:
+				response.BadRequest(c, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorCredential:
+				response.Error(c, http.StatusUnauthorized, syncErr.SafeMessage())
+			case service.UpstreamModelSyncErrorInternal:
+				response.InternalError(c, syncErr.SafeMessage())
+			default:
+				slog.Warn("sync_volcano_plan_models_failed", "account_id", accountID, "kind", syncErr.Kind)
+				response.Error(c, http.StatusBadGateway, syncErr.SafeMessage())
+			}
+			return
+		}
+
+		slog.Warn("sync_volcano_plan_models_failed", "account_id", accountID)
+		response.Error(c, http.StatusBadGateway, "Failed to sync volcengine plan models")
+		return
+	}
+
+	response.Success(c, result)
 }
 
 // SetPrivacy handles setting privacy for a single OpenAI/Antigravity OAuth account

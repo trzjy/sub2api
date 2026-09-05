@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +23,53 @@ func volcanoTestConfig() *config.Config {
 		Security: config.SecurityConfig{
 			URLAllowlist: config.URLAllowlistConfig{Enabled: false},
 		},
-		Volcano: config.VolcanoConfig{
-			PlanModelsFile: "../../resources/volcano-plan-models.json",
-		},
 	}
+}
+
+// volcanoFixtureBase 是火山官方文档夹具目录。
+const volcanoFixtureBase = "testdata/volcano"
+
+// loadVolcanoFixture 读取测试夹具文件（getDocDetail 响应体）。
+func loadVolcanoFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(volcanoFixtureBase, name))
+	require.NoError(t, err)
+	return b
+}
+
+// newVolcanoDocFixtureServer 启动一个伪造 docs.volcengine.com 文档 API 的 httptest 服务，
+// 用真实抓取的 getDocList/getDocDetail 夹具响应。返回 (server, cleanup)。
+// 将 svc.volcanoDocClient/server.URL 注入即可让文档读取走夹具（绕过主机守卫）。
+func newVolcanoDocFixtureServer(t *testing.T) (*httptest.Server, func()) {
+	t.Helper()
+	doclist := loadVolcanoFixture(t, "doclist_82379.json")
+	// DocumentID → 夹具文件名 的固定映射（与真实套餐概览一致）。
+	docs := map[string]string{
+		"2366394": "agent_personal_2366394.json",
+		"2374452": "agent_enterprise_2374452.json",
+		"1925114": "coding_personal_1925114.json",
+		"2276791": "coding_enterprise_2276791.json",
+	}
+	loaded := map[string][]byte{}
+	for id, file := range docs {
+		loaded[id] = loadVolcanoFixture(t, file)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(volcanoDocGetListPath, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(doclist)
+	})
+	mux.HandleFunc(volcanoDocGetDetailPath, func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("DocumentID")
+		body, ok := loaded[id]
+		if !ok {
+			http.Error(w, fmt.Sprintf("unknown document %s", id), http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(body)
+	})
+	server := httptest.NewServer(mux)
+	return server, func() { server.Close() }
 }
 
 func volcanoTestAccount(baseURL, protocol string) *Account {
@@ -100,11 +147,20 @@ func readRequestBody(req *http.Request) (string, error) {
 	return payload.Model, nil
 }
 
-func newVolcanoSyncService(stub *volcanoSyncHTTPStub) *AccountTestService {
-	return &AccountTestService{
+// newVolcanoSyncService 构造绑定了官方文档夹具与探测桩的服务。文档客户端与基址经
+// t.Cleanup 自动关闭。既有探活/同步测试调用 fetchVolcanoPlanSupportedModels 时，候选
+// 直接来自真实抓取的官方文档夹具，而不是静态 JSON。
+func newVolcanoSyncService(t *testing.T, stub *volcanoSyncHTTPStub) *AccountTestService {
+	t.Helper()
+	svc := &AccountTestService{
 		cfg:          volcanoTestConfig(),
 		httpUpstream: stub,
 	}
+	server, cleanup := newVolcanoDocFixtureServer(t)
+	svc.volcanoDocClient = server.Client()
+	svc.volcanoDocBaseURL = server.URL
+	t.Cleanup(cleanup)
+	return svc
 }
 
 // TestParseVolcanoPlanProfileRecognizesAgentAndCoding 覆盖 Agent/Coding Plan 自动识别
@@ -125,6 +181,9 @@ func TestParseVolcanoPlanProfileRecognizesAgentAndCoding(t *testing.T) {
 	require.Equal(t, volcanoPlanKindCoding, coding.Kind)
 	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding/v1/messages", coding.anthropicMessagesURL())
 	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions", coding.openAIChatCompletionsURL())
+
+	// 明文 http 一律不命中（探活请求会携带账号 API Key，绝不走非 TLS）。
+	require.False(t, mustParseVolcano(t, "http://ark.cn-beijing.volces.com/api/plan"))
 
 	// 普通 deepseek / openai / 未知 host 一律不命中。
 	require.False(t, mustParseVolcano(t, "https://api.deepseek.com"))
@@ -157,7 +216,7 @@ func TestFetchVolcanoPlanSupportedModelsProbesAnthropicEndpoint(t *testing.T) {
 			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 	models, warnings, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
@@ -186,7 +245,7 @@ func TestFetchVolcanoPlanSupportedModelsProbesOpenAIEndpoint(t *testing.T) {
 			return 200, `{"choices":[{"message":{"content":"hi"}}]}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions")
 	models, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
@@ -215,7 +274,7 @@ func TestFetchVolcanoPlanSupportedModelsPreservesWhitelistAndSkipsExisting(t *te
 			return status, `{"error":"x"}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
 	// 白名单已含 glm-5.3：不再探测它。
@@ -257,7 +316,7 @@ func TestFetchVolcanoPlanSupportedModelsSkipsMappingValueCandidate(t *testing.T)
 			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
 	// alias -> glm-5.3：glm-5.3 只是 mapping 目标值，不是白名单 key，但仍应被认作已收录。
@@ -281,7 +340,7 @@ func TestFetchVolcanoPlanSupportedModelsCredentialError(t *testing.T) {
 			return 401, `{"error":"invalid api key"}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 	_, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
@@ -301,7 +360,7 @@ func TestFetchVolcanoPlanSupportedModelsAllCandidatesFail(t *testing.T) {
 			return 404, `{"error":"model not found"}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 	_, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
@@ -339,7 +398,7 @@ func TestFetchVolcanoPlanSupportedModelsPartialTransientWarning(t *testing.T) {
 					return respond(model)
 				},
 			}
-			svc := newVolcanoSyncService(stub)
+			svc := newVolcanoSyncService(t, stub)
 			account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 			models, warnings, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
 			require.NoError(t, err)
@@ -360,7 +419,7 @@ func TestFetchVolcanoPlanSupportedModelsAllTransientFails(t *testing.T) {
 			return 0, "", errors.New("context deadline exceeded")
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 	_, _, err := svc.fetchVolcanoPlanSupportedModels(context.Background(), account)
 	require.Error(t, err)
@@ -379,7 +438,7 @@ func TestFetchVolcanoPlanSupportedModelsRoutesThroughProxy(t *testing.T) {
 			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/plan", "anthropic")
 	pid := int64(7)
@@ -397,25 +456,6 @@ func TestFetchVolcanoPlanSupportedModelsRoutesThroughProxy(t *testing.T) {
 	}
 }
 
-// TestLoadVolcanoPlanCandidatesSkipsAuto 验证候选列表过滤空名与 auto，按套餐区分。
-func TestLoadVolcanoPlanCandidatesSkipsAuto(t *testing.T) {
-	t.Parallel()
-
-	agent, err := loadVolcanoPlanCandidates("../../resources/volcano-plan-models.json", volcanoPlanKindAgent)
-	require.NoError(t, err)
-	require.Contains(t, agent, "deepseek-v4-pro")
-	require.NotContains(t, agent, "auto")
-
-	coding, err := loadVolcanoPlanCandidates("../../resources/volcano-plan-models.json", volcanoPlanKindCoding)
-	require.NoError(t, err)
-	require.Contains(t, coding, "glm-5.3")
-	require.NotContains(t, coding, "auto")
-	require.NotContains(t, coding, "doubao-seed-2.0-pro") // agent 专属，不应出现在 coding
-
-	// 套餐缺失 → 失败关闭。
-	_, err = loadVolcanoPlanCandidates("../../resources/volcano-plan-models.json", "bogus")
-	require.Error(t, err)
-}
 
 func TestFetchUpstreamModelListVolcanoSkipsModelsDirectory(t *testing.T) {
 	t.Parallel()
@@ -431,7 +471,7 @@ func TestFetchUpstreamModelListVolcanoSkipsModelsDirectory(t *testing.T) {
 			return 200, `{"content":[{"type":"text","text":"hi"}]}`, nil
 		},
 	}
-	svc := newVolcanoSyncService(stub)
+	svc := newVolcanoSyncService(t, stub)
 	account := volcanoTestAccount("https://ark.cn-beijing.volces.com/api/coding", "anthropic")
 	models, body, _, err := svc.fetchUpstreamModelList(context.Background(), account)
 	require.NoError(t, err)

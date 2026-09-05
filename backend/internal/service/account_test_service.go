@@ -156,6 +156,12 @@ type AccountTestService struct {
 	// grokWSDialer is optional; realtime account tests use the default OpenAI-style
 	// WS dialer when nil (supports proxy + coder/websocket handshake).
 	grokWSDialer openAIWSClientDialer
+	// volcanoDocClient 是火山官方文档专用固定客户端（仅 docs.volcengine.com、无凭证、
+	// 无代理、拒绝跳转）。测试可注入；nil 时由 getVolcanoDocClient 懒构造一次。
+	volcanoDocClient     *http.Client
+	volcanoDocClientOnce sync.Once
+	// volcanoDocBaseURL 是文档基址覆盖（测试注入 httptest）；空时用 volcanoDocBaseURL。
+	volcanoDocBaseURL string
 }
 
 func (s *AccountTestService) SetSettingService(settingService *SettingService) {
