@@ -526,6 +526,29 @@ describe('EditAccountModal', () => {
     expect(submitted?.secret_key).not.toBe('SK-A-LEAK')
   })
 
+  it('recognizes Volcano subscription when adaptive chat_completions is whitespace but base_url is volcano', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: '   ',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    // 空白 chat_completions 不应遮蔽真实火山 base_url（LOW 修复）。
+    expect(ak.exists()).toBe(true)
+  })
+
   it('carries a fixed Chat relay into Adaptive when the user switches protocols', async () => {
     const account = buildAccount()
     account.platform = 'zhipu'

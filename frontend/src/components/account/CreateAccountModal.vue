@@ -495,9 +495,9 @@
               <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cnProviders.accountMode.paygDesc') }}</span>
             </div>
           </button>
-          <!-- Coding Plan (kimi / zhipu only — DeepSeek has no coding plan) -->
+          <!-- Coding Plan：kimi / zhipu / 火山方舟订阅号（火山挂靠 deepseek 平台但 base_url 命中 volces，按火山识别放开） -->
           <button
-            v-if="form.platform !== 'deepseek'"
+            v-if="form.platform !== 'deepseek' || isVolcanoSubscription"
             type="button"
             @click="accountMode = 'coding'"
             :class="[
@@ -4016,12 +4016,13 @@ const isCNPlatform = computed(
   () => form.platform === 'kimi' || form.platform === 'zhipu' || form.platform === 'deepseek'
 )
 // 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
-// 取有效 base_url 时先 trim，避免仅含空白的 chat_completions 遮蔽真实火山地址（LOW 修复）。
+// 取有效 base_url 时先对 candidates 各自 trim 再 fallback，避免空白 chat_completions
+// 抢占真实火山 base_url（LOW 修复）。
 const isVolcanoSubscription = computed(() => {
-  const url = apiProtocol.value === 'adaptive'
-    ? (adaptiveBaseUrls.value.chat_completions || apiKeyBaseUrl.value)
-    : apiKeyBaseUrl.value
-  return isVolcanoBaseURL((url || '').trim())
+  const cc = (adaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (apiKeyBaseUrl.value || '').trim()
+  const url = apiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isVolcanoBaseURL(url)
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
@@ -4107,6 +4108,9 @@ function selectOtherPlatform() {
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {
   if (!isCNPlatform.value) return
+  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点，也不强制 payg；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   if (apiProtocol.value === 'adaptive') {
     const previousDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, previousMode)
     const nextDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, mode)
@@ -4122,6 +4126,9 @@ watch(accountMode, (mode, previousMode) => {
 })
 watch(apiProtocol, (protocol) => {
   if (!isCNPlatform.value) return
+  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   if (protocol === 'adaptive') {
     const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, accountMode.value)
     for (const item of cnAdaptiveProtocolOptions.value) {
@@ -5121,6 +5128,9 @@ const resetForm = () => {
   adaptiveBaseUrls.value = { chat_completions: '', anthropic: '', responses: '' }
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
+  // 清空火山方舟访问密钥输入：避免同一次创建流程中切换平台/端点后残留误写入新账号（HIGH）。
+  volcanoAccessKey.value = ''
+  volcanoSecretKey.value = ''
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
   editQuotaDailyLimit.value = null
