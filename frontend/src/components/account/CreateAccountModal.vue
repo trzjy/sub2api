@@ -4126,10 +4126,12 @@ watch(accountMode, (mode, previousMode) => {
 })
 watch(apiProtocol, (protocol) => {
   if (!isCNPlatform.value) return
-  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
-  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
-  if (isVolcanoSubscription.value || isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   if (protocol === 'adaptive') {
+    // 火山地址需同步进 adaptive 的 chat_completions 槽位，避免切换后静默回退 DeepSeek（HIGH 修复）
+    if (isVolcanoBaseURL(apiKeyBaseUrl.value.trim())) {
+      adaptiveBaseUrls.value = { ...adaptiveBaseUrls.value, chat_completions: apiKeyBaseUrl.value.trim() }
+      return
+    }
     const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, accountMode.value)
     for (const item of cnAdaptiveProtocolOptions.value) {
       if (!adaptiveBaseUrls.value[item.value]) adaptiveBaseUrls.value[item.value] = defaults[item.value]
@@ -4137,6 +4139,8 @@ watch(apiProtocol, (protocol) => {
     apiKeyBaseUrl.value = adaptiveBaseUrls.value.chat_completions
     return
   }
+  // 切换到非 adaptive：保留火山 base_url，不套用 deepseek 默认端点
+  if (isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   apiKeyBaseUrl.value = defaultCNBaseUrl(form.platform, accountMode.value, protocol)
 })
 // 点击预设端点：同时回填 base url、账号类型与协议。
@@ -5611,7 +5615,13 @@ const handleSubmit = async () => {
       const defaults = defaultCNAdaptiveBaseUrls(form.platform, accountMode.value)
       const protocolBaseUrls: Record<string, string> = {}
       for (const item of cnAdaptiveProtocolOptions.value) {
-        protocolBaseUrls[item.value] = (adaptiveBaseUrls.value[item.value] || defaults[item.value]).trim()
+        const raw = (adaptiveBaseUrls.value[item.value] || '').trim()
+        if (item.value === 'chat_completions') {
+          // 火山场景：空白 chat_completions 应回退到 base_url（apiKeyBaseUrl），避免被写成空值（MEDIUM 修复）
+          protocolBaseUrls[item.value] = raw || apiKeyBaseUrl.value.trim() || defaults[item.value]
+        } else {
+          protocolBaseUrls[item.value] = raw || defaults[item.value]
+        }
       }
       credentials.api_base_urls = protocolBaseUrls
       credentials.base_url = protocolBaseUrls.chat_completions
