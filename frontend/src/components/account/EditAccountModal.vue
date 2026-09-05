@@ -3072,12 +3072,13 @@ const editAdaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
   responses: ''
 })
 // 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
-// 取有效 base_url 时先 trim，避免仅含空白的 chat_completions 遮蔽真实火山地址（LOW 修复）。
+// 取有效 base_url 时先对 candidates 各自 trim 再 fallback，避免空白 chat_completions
+// 抢占真实火山 base_url（LOW 修复）。
 const isVolcanoSubscription = computed(() => {
-  const url = editApiProtocol.value === 'adaptive'
-    ? (editAdaptiveBaseUrls.value.chat_completions || editBaseUrl.value)
-    : editBaseUrl.value
-  return isVolcanoBaseURL((url || '').trim())
+  const cc = (editAdaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (editBaseUrl.value || '').trim()
+  const url = editApiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isVolcanoBaseURL(url)
 })
 const volcanoAccessKey = ref('')
 const volcanoSecretKey = ref('')
@@ -3088,8 +3089,9 @@ const volcanoSecretKey = ref('')
 const syncingForm = ref(false)
 const cnAccountModeOptions = computed<Array<{ value: CnAccountMode; labelKey: 'payg' | 'coding' }>>(
   () => {
-    // DeepSeek 无 coding 套餐（与创建弹窗一致），仅保留按量付费。
-    if (props.account?.platform === 'deepseek') {
+    // DeepSeek 无 coding 套餐（与创建弹窗一致），仅保留按量付费；
+    // 但火山方舟订阅号挂靠 deepseek 平台、按 base_url 识别，Coding Plan 需放开 coding。
+    if (props.account?.platform === 'deepseek' && !isVolcanoSubscription.value) {
       return [{ value: 'payg', labelKey: 'payg' }]
     }
     return [
@@ -3119,6 +3121,9 @@ const editAdaptiveProtocolOptions = computed<Array<{ value: CnNativeApiProtocol;
 })
 watch(editApiProtocol, (protocol, previousProtocol) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(editBaseUrl.value)) return
   if (protocol === 'adaptive') {
     const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
     for (const item of editAdaptiveProtocolOptions.value) {
@@ -3139,6 +3144,10 @@ watch(editApiProtocol, (protocol, previousProtocol) => {
 })
 watch(editAccountMode, (mode, previousMode) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  // 火山订阅号按 base_url 识别，Coding Plan 允许 coding（不强制回退 payg）；
+  // 且 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(editBaseUrl.value)) return
   // deepseek 无 coding 套餐：防御性回退（UI 已隐藏该选项）。
   const effectiveMode = props.account!.platform === 'deepseek' && mode === 'coding' ? 'payg' : mode
   if (effectiveMode !== mode) {

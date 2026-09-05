@@ -521,3 +521,88 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(false)
   })
 })
+
+describe('CreateAccountModal volcano subscription', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    createAccountMock.mockReset().mockResolvedValue({ id: 1, platform: 'deepseek', type: 'apikey' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+  })
+
+  async function openVolcano(wrapper: ReturnType<typeof mountModal>, baseUrl: string) {
+    await selectButtonByText(wrapper, 'DeepSeek')
+    await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue(baseUrl)
+  }
+
+  it('writes volcano access_key/secret_key on create when endpoint is a Volcano base url', async () => {
+    const wrapper = mountModal()
+    await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/plan')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
+    await ak.setValue('AKLT-create-ak')
+    await sk.setValue('volc-secret')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalled()
+    const creds = createAccountMock.mock.calls[0]?.[0]?.credentials
+    expect(creds).toMatchObject({ access_key: 'AKLT-create-ak', secret_key: 'volc-secret' })
+  })
+
+  it('does not carry volcano AK/SK across create submissions (resetForm clears)', async () => {
+    const wrapper = mountModal()
+    await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/plan')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano A')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
+    await ak.setValue('AK-A')
+    await sk.setValue('SK-A')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    // 关闭再打开 → resetForm 清空火山密钥输入，避免残留误写入下一个账号
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // 火山 B：不重新填写 AK/SK 直接提交
+    createAccountMock.mockResolvedValue({ id: 2, platform: 'deepseek', type: 'apikey' })
+    await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/coding')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano B')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek-2')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalled()
+    const last = createAccountMock.mock.calls[createAccountMock.mock.calls.length - 1]?.[0]?.credentials
+    expect(last?.access_key).not.toBe('AK-A')
+    expect(last?.secret_key).not.toBe('SK-A')
+  })
+
+  it('recognizes Volcano subscription when adaptive chat_completions is whitespace but base_url is volcano', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 切到 chat_completions 协议，露出单 base_url 输入框
+    await selectButtonByText(wrapper, 'chatCompletions')
+    await flushPromises()
+    const baseInput = wrapper
+      .findAll('input')
+      .find((candidate) => candidate.attributes('placeholder') === 'https://api.deepseek.com')
+    expect(baseInput).toBeDefined()
+    await baseInput?.setValue('https://ark.cn-beijing.volces.com/api/plan')
+    await flushPromises()
+    // 切回 adaptive：isVolcanoSubscription 为 true 时 watcher 不覆盖 base_url
+    await selectButtonByText(wrapper, 'adaptive')
+    await flushPromises()
+    // adaptive 下把 chat_completions 设为空白串（旧逻辑会误判为非火山）
+    await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue('   ')
+    await flushPromises()
+    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
+    expect(ak.exists()).toBe(true)
+  })
+})
