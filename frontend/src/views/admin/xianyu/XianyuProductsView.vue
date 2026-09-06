@@ -247,11 +247,12 @@ const bindingOptions = [
 ]
 
 const poolOptions = computed(() => pools.value.filter((p) => p.status === 'active').map((p) => ({ value: String(p.id), label: p.name })))
-const accountOptions = computed(() => accounts.value.map((a) => ({ value: String(a.id), label: a.account_id })))
+const accountOptions = computed(() => accounts.value.map((a) => ({ value: String(a.id), label: a.nickname && a.nickname !== a.account_id ? `${a.nickname} (${a.account_id})` : a.account_id })))
 
 function accountLabel(pk: number): string {
   const a = accounts.value.find((x) => x.id === pk)
-  return a ? a.account_id : String(pk)
+  if (!a) return String(pk)
+  return a.nickname && a.nickname !== a.account_id ? `${a.nickname} (${a.account_id})` : a.account_id
 }
 
 function poolLabel(poolId: number): string {

@@ -110,6 +110,10 @@ func (s *xianyuWorkerControlStub) DeleteBindingRule(context.Context, int64) erro
 	return nil
 }
 
+func (s *xianyuWorkerControlStub) UpdateAccountRemark(context.Context, int64, string) error {
+	return nil
+}
+
 func (s *xianyuWorkerControlStub) UpdateProductBinding(context.Context, int64, string, string, *int64) error {
 	return nil
 }

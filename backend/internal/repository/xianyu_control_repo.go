@@ -122,12 +122,12 @@ func (r *xianyuControlRepository) GetWorkerConfigByID(ctx context.Context, id in
 	return cfg, nil
 }
 
-const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at, created_at, updated_at`
+const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, remark, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at, created_at, updated_at`
 
 func scanAccount(row interface{ Scan(...any) error }) (*service.XianyuAccount, error) {
 	var a service.XianyuAccount
 	var lastLogin, lastSeen sql.NullTime
-	if err := row.Scan(&a.ID, &a.WorkerConfigID, &a.AccountID, &a.Nickname, &a.Status, &a.CookieStatus, &a.CookieDetail, &a.TaskStatus, &lastLogin, &lastSeen, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.WorkerConfigID, &a.AccountID, &a.Nickname, &a.Remark, &a.Status, &a.CookieStatus, &a.CookieDetail, &a.TaskStatus, &lastLogin, &lastSeen, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if lastLogin.Valid {
@@ -307,6 +307,20 @@ func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool servi
 // DeleteItemPool 删除库存池（下架清理）。三层守卫逐层给出可执行提示：
 // 仍有绑定商品 → 先解绑；仍有未使用库存码 → 先在兑换码页删除；
 // 仍有绑定规则指向该池 → 先删除规则。发货记录的 pool_id 为松散引用，删除后保留历史。
+// UpdateAccountRemark 更新账号运营备注（主程序侧管理，Worker 投影不覆盖）。
+func (r *xianyuControlRepository) UpdateAccountRemark(ctx context.Context, accountPK int64, remark string) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE xianyu_accounts SET remark = $2, updated_at = NOW() WHERE id = $1`, accountPK, remark)
+	if err != nil {
+		return fmt.Errorf("update xianyu account remark: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu account remark update: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuAccountNotFound
+	}
+	return nil
+}
+
 func (r *xianyuControlRepository) DeleteItemPool(ctx context.Context, poolID int64) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

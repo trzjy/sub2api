@@ -30,6 +30,7 @@
             <tr class="border-b border-gray-200 bg-gray-50 text-left dark:border-dark-700 dark:bg-dark-800">
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.nickname') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.accountId') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.accounts.remark') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.status') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.cookieStatus') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.accounts.taskStatus') }}</th>
@@ -46,7 +47,13 @@
               :class="account.status === 'logged_out' ? 'opacity-60' : ''"
             >
               <td class="px-4 py-2 font-medium">{{ account.nickname || '-' }}</td>
-              <td class="px-4 py-2">{{ account.account_id }}</td>
+              <td class="px-4 py-2 font-mono text-xs">{{ account.account_id }}</td>
+              <td class="px-4 py-2">
+                <span>{{ account.remark || '-' }}</span>
+                <button class="ml-1 text-xs text-gray-400 hover:text-gray-600" @click="openRemark(account)">
+                  {{ t('common.edit') }}
+                </button>
+              </td>
               <td class="px-4 py-2">
                 <StatusBadge
                   :status="statusTone(account.status)"
@@ -111,6 +118,28 @@
           </button>
         </template>
       </EmptyState>
+
+      <BaseDialog :show="remarkVisible" :title="t('admin.xianyu.accounts.editRemark')" @close="remarkVisible = false">
+        <div class="space-y-4">
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.accounts.accountId') }}</label>
+            <p class="font-mono text-xs">{{ editingAccount?.account_id }}</p>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.accounts.remark') }}</label>
+            <input
+              v-model="remarkForm"
+              class="input w-full"
+              maxlength="200"
+              :placeholder="t('admin.xianyu.accounts.remarkPlaceholder')"
+            />
+          </div>
+          <div class="flex justify-end gap-2">
+            <button class="btn btn-secondary" @click="remarkVisible = false">{{ t('common.cancel') }}</button>
+            <button class="btn btn-primary" @click="saveRemark">{{ t('common.save') }}</button>
+          </div>
+        </div>
+      </BaseDialog>
 
       <BaseDialog :show="scanVisible" :title="t('admin.xianyu.accounts.scanTitle')" @close="stopPollingBehavior">
         <div class="flex flex-col items-center gap-3">
@@ -250,6 +279,28 @@ function disable(account: XianyuAccount) {
       }
     }
   )
+}
+
+const remarkVisible = ref(false)
+const editingAccount = ref<XianyuAccount | null>(null)
+const remarkForm = ref('')
+
+function openRemark(account: XianyuAccount) {
+  editingAccount.value = account
+  remarkForm.value = account.remark || ''
+  remarkVisible.value = true
+}
+
+async function saveRemark() {
+  if (!editingAccount.value) return
+  try {
+    await adminAPI.xianyu.saveAccountRemark(editingAccount.value.id, remarkForm.value.trim())
+    remarkVisible.value = false
+    await load()
+    appStore.showSuccess(t('admin.xianyu.accounts.remarkSaved'))
+  } catch (err) {
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
+  }
 }
 
 function doRefreshCookie(account: XianyuAccount) {

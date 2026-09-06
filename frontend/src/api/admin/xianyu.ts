@@ -65,6 +65,10 @@ export async function clearCredentials(accountId: string): Promise<void> {
   await apiClient.post('/admin/xianyu/accounts/clear-credentials', { account_id: accountId })
 }
 
+export async function saveAccountRemark(accountPk: number, remark: string): Promise<void> {
+  await apiClient.put(`/admin/xianyu/accounts/remark/${encodeURIComponent(String(accountPk))}`, { remark })
+}
+
 export async function createLoginSession(accountId: string): Promise<XianyuLoginSessionStatus> {
   const { data } = await apiClient.post<XianyuLoginSessionStatus>('/admin/xianyu/accounts/login-session', { account_id: accountId })
   return data
@@ -187,6 +191,7 @@ export const xianyuAPI = {
   disableAccount,
   refreshCookie,
   clearCredentials,
+  saveAccountRemark,
   createLoginSession,
   queryLoginSession,
   listProducts,

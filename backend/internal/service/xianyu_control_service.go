@@ -451,6 +451,11 @@ func (s *XianyuControlService) MarkDeliveryClaimSent(ctx context.Context, orderN
 	return s.delivery.MarkClaimSent(ctx, orderNo)
 }
 
+// UpdateAccountRemark 更新账号运营备注。
+func (s *XianyuControlService) UpdateAccountRemark(ctx context.Context, accountPK int64, remark string) error {
+	return s.control.UpdateAccountRemark(ctx, accountPK, remark)
+}
+
 // EnableAccount 启用账号。
 func (s *XianyuControlService) EnableAccount(ctx context.Context, accountID string) error {
 	if s.worker == nil {

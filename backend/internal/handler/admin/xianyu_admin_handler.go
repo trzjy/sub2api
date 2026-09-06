@@ -152,6 +152,32 @@ func (h *XianyuAdminHandler) DeleteBindingRule(c *gin.Context) {
 	response.Success(c, gin.H{"message": "binding rule deleted"})
 }
 
+// UpdateAccountRemark 更新账号运营备注（主程序侧，区分多账号用途）。
+func (h *XianyuAdminHandler) UpdateAccountRemark(c *gin.Context) {
+	accountPK, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountPK <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	var req struct {
+		Remark string `json:"remark"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	remark := strings.TrimSpace(req.Remark)
+	if len(remark) > 200 {
+		response.BadRequest(c, "remark too long (max 200)")
+		return
+	}
+	if err := h.control.UpdateAccountRemark(c.Request.Context(), accountPK, remark); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "account remark updated", "remark": remark})
+}
+
 // MarkDeliverySent 管理员确认待处理发货记录的卡密已线下送达，标记为已发送。
 func (h *XianyuAdminHandler) MarkDeliverySent(c *gin.Context) {
 	var req struct {

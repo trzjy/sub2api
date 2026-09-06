@@ -53,7 +53,7 @@
           <tbody>
             <tr v-for="claim in claims" :key="claim.order_no" class="border-b border-gray-100 dark:border-dark-700">
               <td class="px-4 py-2 font-mono text-xs">{{ claim.order_no }}</td>
-              <td class="px-4 py-2">{{ claim.account_id }}</td>
+              <td class="px-4 py-2 text-xs">{{ accountLabel(claim.account_id) }}</td>
               <td class="px-4 py-2">{{ claim.item_id }}</td>
               <td class="px-4 py-2 font-mono text-xs">{{ claim.code }}</td>
               <td class="px-4 py-2">
@@ -159,7 +159,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { formatDateTime } from '@/utils/format'
-import type { XianyuOrderClaim, XianyuWorkerDelivery } from '@/types'
+import type { XianyuAccount, XianyuOrderClaim, XianyuWorkerDelivery } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -212,6 +212,24 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+const accounts = ref<XianyuAccount[]>([])
+
+async function loadAccounts() {
+  try {
+    accounts.value = await adminAPI.xianyu.listAccounts()
+  } catch {
+    accounts.value = []
+  }
+}
+
+function accountLabel(accountId: string): string {
+  const a = accounts.value.find((x) => x.account_id === accountId)
+  if (!a) return accountId
+  const label = a.nickname && a.nickname !== a.account_id ? a.nickname : ''
+  const remark = a.remark ? `· ${a.remark}` : ''
+  return [label || a.account_id, a.account_id !== label ? a.account_id : '', remark].filter(Boolean).join(' ')
 }
 
 function switchTab(tab: 'inventory' | 'worker') {
@@ -280,5 +298,8 @@ async function doMarkSent() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadAccounts()
+})
 </script>

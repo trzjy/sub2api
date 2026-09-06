@@ -161,6 +161,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.POST("/accounts/disable", h.Admin.Xianyu.DisableAccount)
 		xianyu.POST("/accounts/refresh-cookie", h.Admin.Xianyu.RefreshCookie)
 		xianyu.POST("/accounts/clear-credentials", h.Admin.Xianyu.ClearCredentials)
+		xianyu.PUT("/accounts/remark/:id", h.Admin.Xianyu.UpdateAccountRemark)
 		xianyu.POST("/accounts/login-session", h.Admin.Xianyu.CreateLoginSession)
 		xianyu.GET("/accounts/login-session/:session_id", h.Admin.Xianyu.QueryLoginSession)
 

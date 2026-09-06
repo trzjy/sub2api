@@ -104,6 +104,28 @@ async def _latest_renew_results(
     return out
 
 
+def _account_display_nickname(account) -> str:
+    """账号昵称兜底链：display_name → Cookie tracknick 解码 → account_id。
+
+    Worker 登录流程不总是回填 display_name；闲鱼登录态 Cookie 自带
+    URL 编码的 tracknick，可作为可读昵称兜底。
+    """
+    if account.display_name:
+        return account.display_name
+    try:
+        for part in (account.cookie or "").split(";"):
+            part = part.strip()
+            if part.startswith("tracknick="):
+                from urllib.parse import unquote
+
+                nick = unquote(part.split("=", 1)[1].strip())
+                if nick:
+                    return nick
+    except Exception:
+        pass
+    return account.account_id
+
+
 @router.get("/cookies/details")
 async def internal_list_cookie_details(
     session = Depends(deps.get_db_session),
@@ -125,7 +147,7 @@ async def internal_list_cookie_details(
         data=[
             {
                 "account_id": account.account_id,
-                "nickname": account.display_name or account.account_id,
+                "nickname": _account_display_nickname(account),
                 "enabled": account.status not in {"inactive", "disabled", "suspended", "deleted", "logged_out"},
                 "status": account.status,
                 "remark": account.remark or "",

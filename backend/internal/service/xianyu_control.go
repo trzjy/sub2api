@@ -104,6 +104,7 @@ type XianyuAccount struct {
 	WorkerConfigID int64      `json:"worker_config_id"`
 	AccountID      string     `json:"account_id"`
 	Nickname       string     `json:"nickname"`
+	Remark         string     `json:"remark"`
 	Status         string     `json:"status"`
 	CookieStatus   string     `json:"cookie_status"`
 	// CookieDetail 仅在 CookieStatus 为 invalid 时保存 Worker 续期失败原因，供 UI 悬浮提示。
@@ -259,6 +260,7 @@ type XianyuControlRepository interface {
 	GetAccountByWorkerAndAccountID(ctx context.Context, workerConfigID int64, accountID string) (*XianyuAccount, error)
 	UpsertAccount(ctx context.Context, account XianyuAccount) (*XianyuAccount, error)
 	UpdateAccount(ctx context.Context, account XianyuAccount) (*XianyuAccount, error)
+	UpdateAccountRemark(ctx context.Context, accountPK int64, remark string) error
 
 	// 商品池
 	ListItemPools(ctx context.Context) ([]XianyuItemPool, error)
