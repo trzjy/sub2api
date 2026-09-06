@@ -140,6 +140,8 @@ export default {
         balanceLow: 'Insufficient balance',
         noBalanceEndpoint: 'This platform has no balance query endpoint',
         volcanoAkSkHint: 'Volcano Ark subscription accounts require an Access Key / Secret Key for signing the usage-window probe request. Leave blank to keep existing keys.',
+
+        volcanoAkSkGetLink: 'Get AK/SK → (Volcano Engine console · API access keys)',
         accessKey: 'Access Key',
         accessKeyPlaceholder: 'AKLT...',
         secretKey: 'Secret Key',

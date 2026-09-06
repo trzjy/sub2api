@@ -343,6 +343,7 @@ export default {
         balanceLow: '余额不足',
         noBalanceEndpoint: '该平台暂无余额查询接口',
         volcanoAkSkHint: '火山方舟订阅号需填写访问密钥（Access Key / Secret Key），用于用量窗口探测的签名鉴权。留空则不修改已保存的密钥。',
+        volcanoAkSkGetLink: '获取 AK/SK →（火山引擎控制台 · API 访问密钥）',
         accessKey: '访问密钥 (Access Key)',
         accessKeyPlaceholder: 'AKLT...',
         secretKey: '私密密钥 (Secret Key)',
