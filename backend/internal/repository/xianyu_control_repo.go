@@ -121,12 +121,12 @@ func (r *xianyuControlRepository) GetWorkerConfigByID(ctx context.Context, id in
 	return cfg, nil
 }
 
-const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, status, cookie_status, task_status, last_login_at, last_seen_at, created_at, updated_at`
+const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at, created_at, updated_at`
 
 func scanAccount(row interface{ Scan(...any) error }) (*service.XianyuAccount, error) {
 	var a service.XianyuAccount
 	var lastLogin, lastSeen sql.NullTime
-	if err := row.Scan(&a.ID, &a.WorkerConfigID, &a.AccountID, &a.Nickname, &a.Status, &a.CookieStatus, &a.TaskStatus, &lastLogin, &lastSeen, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.WorkerConfigID, &a.AccountID, &a.Nickname, &a.Status, &a.CookieStatus, &a.CookieDetail, &a.TaskStatus, &lastLogin, &lastSeen, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if lastLogin.Valid {
@@ -179,18 +179,19 @@ func (r *xianyuControlRepository) UpsertAccount(ctx context.Context, account ser
 	}
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO xianyu_accounts
-			(worker_config_id, account_id, nickname, status, cookie_status, task_status, last_login_at, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			(worker_config_id, account_id, nickname, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (worker_config_id, account_id) DO UPDATE SET
 			nickname = EXCLUDED.nickname,
 			status = EXCLUDED.status,
 			cookie_status = EXCLUDED.cookie_status,
+			cookie_detail = EXCLUDED.cookie_detail,
 			task_status = EXCLUDED.task_status,
 			last_login_at = COALESCE(EXCLUDED.last_login_at, xianyu_accounts.last_login_at),
 			last_seen_at = COALESCE(EXCLUDED.last_seen_at, xianyu_accounts.last_seen_at),
 			updated_at = NOW()
 		RETURNING `+xianyuAccountColumns,
-		account.WorkerConfigID, account.AccountID, account.Nickname, account.Status, account.CookieStatus, account.TaskStatus,
+		account.WorkerConfigID, account.AccountID, account.Nickname, account.Status, account.CookieStatus, account.CookieDetail, account.TaskStatus,
 		nullableTime(account.LastLoginAt), nullableTime(account.LastSeenAt))
 	saved, err := scanAccount(row)
 	if err != nil {
@@ -202,11 +203,11 @@ func (r *xianyuControlRepository) UpsertAccount(ctx context.Context, account ser
 func (r *xianyuControlRepository) UpdateAccount(ctx context.Context, account service.XianyuAccount) (*service.XianyuAccount, error) {
 	row := r.db.QueryRowContext(ctx, `
 		UPDATE xianyu_accounts
-		SET nickname = $2, status = $3, cookie_status = $4, task_status = $5,
-		    last_login_at = $6, last_seen_at = $7, updated_at = NOW()
+		SET nickname = $2, status = $3, cookie_status = $4, cookie_detail = $5,
+		    task_status = $6, last_login_at = $7, last_seen_at = $8, updated_at = NOW()
 		WHERE id = $1
 		RETURNING `+xianyuAccountColumns,
-		account.ID, account.Nickname, account.Status, account.CookieStatus, account.TaskStatus,
+		account.ID, account.Nickname, account.Status, account.CookieStatus, account.CookieDetail, account.TaskStatus,
 		nullableTime(account.LastLoginAt), nullableTime(account.LastSeenAt))
 	saved, err := scanAccount(row)
 	if err != nil {

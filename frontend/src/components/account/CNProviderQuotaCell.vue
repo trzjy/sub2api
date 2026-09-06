@@ -21,12 +21,12 @@
         <div class="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-600">
           <div
             class="h-full rounded-full transition-all"
-            :class="utilizationColor(tier.used_percent)"
-            :style="{ width: `${Math.min(100, Math.max(0, tier.used_percent))}%` }"
+            :class="tier.used_percent == null ? 'bg-gray-300 dark:bg-dark-500' : utilizationColor(tier.used_percent)"
+            :style="{ width: tier.used_percent == null ? '0%' : `${Math.min(100, Math.max(0, tier.used_percent))}%` }"
           />
         </div>
-        <span :class="['shrink-0 font-medium', utilizationTextColor(tier.used_percent)]">
-          {{ Math.round(tier.used_percent) }}%
+        <span :class="['shrink-0 font-medium', tier.used_percent == null ? 'text-gray-400 dark:text-gray-500' : utilizationTextColor(tier.used_percent)]">
+          {{ tier.used_percent == null ? '—' : Math.round(tier.used_percent) + '%' }}
         </span>
         <span
           v-if="tier.reset_at"
@@ -134,18 +134,22 @@ const readExtraString = (key: string): string => {
   return typeof v === 'string' ? v : ''
 }
 
-// 从持久化快照构造展示数据（缺少 5h/weekly 两档键时返回 null）。
+// 从持久化快照构造展示数据。5h 档在 used 或 reset_at 存在即渲染
+// （用量上游不可得 → used 为 null 显示“—”，但倒计时仍显示）；周档在 reset_at 存在即渲染
+// （周用量上游不可得 → used 为 null 显示“未知”），不再写假 0 诱出渲染以免误导“未用”。
 const snapshotData = computed<CNProviderQuotaProbeResult | null>(() => {
   const prefix = providerPrefix.value
   const used5h = readExtraNumber(`${prefix}_5h_used_percent`)
   const usedWeekly = readExtraNumber(`${prefix}_weekly_used_percent`)
-  if (used5h == null && usedWeekly == null) return null
+  const reset5h = readExtraString(`${prefix}_5h_reset_at`)
+  const resetWeekly = readExtraString(`${prefix}_weekly_reset_at`)
+  if (used5h == null && reset5h == '' && resetWeekly == '') return null
   const tiers: CNProviderQuotaProbeResult['tiers'] = []
-  if (used5h != null) {
-    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${prefix}_5h_reset_at`) || undefined })
+  if (used5h != null || reset5h != '') {
+    tiers.push({ window: '5h', used_percent: used5h, reset_at: reset5h || undefined })
   }
-  if (usedWeekly != null) {
-    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${prefix}_weekly_reset_at`) || undefined })
+  if (resetWeekly != '') {
+    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: resetWeekly })
   }
   return { success: true, tiers } as CNProviderQuotaProbeResult
 })

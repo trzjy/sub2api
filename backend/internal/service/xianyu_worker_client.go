@@ -111,13 +111,18 @@ type XianyuWorkerRenewResult struct {
 }
 
 // XianyuWorkerAccountStatus 表示 Worker 侧账号状态（internal_api /cookies/details 投影）。
+// LastRenew* 是 Worker 自动续期调度日志的最新一条结果，是 Cookie 健康度的真实数据源。
 type XianyuWorkerAccountStatus struct {
-	AccountID     string `json:"account_id"`
-	Nickname      string `json:"nickname"`
-	Enabled       bool   `json:"enabled"`
-	Status        string `json:"status"`
-	LastLoginAt   string `json:"last_login_at,omitempty"`
-	LastRefreshAt string `json:"last_refresh_at,omitempty"`
+	AccountID       string `json:"account_id"`
+	Nickname        string `json:"nickname"`
+	Enabled         bool   `json:"enabled"`
+	Status          string `json:"status"`
+	LastLoginAt     string `json:"last_login_at,omitempty"`
+	LastRefreshAt   string `json:"last_refresh_at,omitempty"`
+	DisableReason   string `json:"disable_reason,omitempty"`
+	LastRenewStatus string `json:"last_renew_status,omitempty"`
+	LastRenewAt     string `json:"last_renew_at,omitempty"`
+	LastRenewError  string `json:"last_renew_error,omitempty"`
 }
 
 // XianyuWorkerLoginSessionStatus 表示扫码会话状态（internal_api /qr-login 投影）。

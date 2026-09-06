@@ -179,7 +179,7 @@ func parseQuotaWindow(headers http.Header, dimension string) *QuotaWindow {
 		Limit:     parseInt64Ptr(limitHeader),
 		Remaining: parseInt64Ptr(remainingHeader),
 	}
-	if reset := parseResetHeader(resetHeader); reset != nil {
+	if reset := ParseResetHeader(resetHeader); reset != nil {
 		window.ResetUnix = reset
 		window.ResetAt = time.Unix(*reset, 0).UTC().Format(time.RFC3339)
 	}
@@ -189,7 +189,10 @@ func parseQuotaWindow(headers http.Header, dimension string) *QuotaWindow {
 	return window
 }
 
-func parseResetHeader(raw string) *int64 {
+// ParseResetHeader 解析 OpenAI 兼容限流重置头：兼容毫秒 epoch（>=1e12）、秒级 epoch
+// （>=1e9）、相对秒（<1e9）、Go duration 字符串（如 "6m0s"）与 RFC3339 时间戳，返回
+// Unix 秒；无法识别时返回 nil。供各上游配额重置解析复用。
+func ParseResetHeader(raw string) *int64 {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil

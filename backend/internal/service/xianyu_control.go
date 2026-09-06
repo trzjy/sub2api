@@ -31,6 +31,7 @@ var (
 	// 目标账号在 Worker 侧已不存在（Worker 返回 404 "账号不存在"）。用于区分"账号已被清除/未登录"
 	// 与真实 500 故障，使重复退出幂等、其余操作返回干净 404 而非 internal error。
 	ErrXianyuWorkerAccountNotFound  = infraerrors.NotFound("XIANYU_WORKER_ACCOUNT_NOT_FOUND", "xianyu account not found on worker")
+	ErrXianyuAccountLoggedOut       = infraerrors.Conflict("XIANYU_ACCOUNT_LOGGED_OUT", "xianyu account is logged out, scan QR to re-login")
 	ErrXianyuBaseURLInvalid         = infraerrors.BadRequest("XIANYU_BASE_URL_INVALID", "xianyu worker base_url must be http://<docker-hostname>:<port> or http://<private-ip>:<port>")
 	ErrXianyuBaseURLLoopbackInvalid = infraerrors.BadRequest("XIANYU_BASE_URL_LOOPBACK_INVALID", "xianyu worker base_url must not use 127.0.0.1 inside the container deployment")
 	ErrXianyuDeliveryUnavailable    = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_UNAVAILABLE", "xianyu delivery is unavailable")
@@ -69,11 +70,14 @@ type XianyuWorkerConfig struct {
 }
 
 // XianyuAccountStatus 表示闲鱼账号状态。
+// disabled 与 logged_out 是两个不同的状态：disabled 表示凭证仍在、随时可启用；
+// logged_out 表示 Worker 侧凭证已删除，必须重新扫码登录后才能启用。
 const (
-	XianyuAccountStatusEnabled  = "enabled"
-	XianyuAccountStatusDisabled = "disabled"
-	XianyuAccountStatusExpired  = "expired"
-	XianyuAccountStatusSyncing  = "syncing"
+	XianyuAccountStatusEnabled   = "enabled"
+	XianyuAccountStatusDisabled  = "disabled"
+	XianyuAccountStatusExpired   = "expired"
+	XianyuAccountStatusSyncing   = "syncing"
+	XianyuAccountStatusLoggedOut = "logged_out"
 )
 
 // XianyuCookieStatus 表示账号 Cookie 状态。
@@ -102,11 +106,13 @@ type XianyuAccount struct {
 	Nickname       string     `json:"nickname"`
 	Status         string     `json:"status"`
 	CookieStatus   string     `json:"cookie_status"`
-	TaskStatus     string     `json:"task_status"`
-	LastLoginAt    *time.Time `json:"last_login_at"`
-	LastSeenAt     *time.Time `json:"last_seen_at"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	// CookieDetail 仅在 CookieStatus 为 invalid 时保存 Worker 续期失败原因，供 UI 悬浮提示。
+	CookieDetail string     `json:"cookie_detail"`
+	TaskStatus   string     `json:"task_status"`
+	LastLoginAt  *time.Time `json:"last_login_at"`
+	LastSeenAt   *time.Time `json:"last_seen_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // XianyuItemPoolStatus 表示商品池状态。

@@ -143,39 +143,6 @@
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
         </div>
 
-        <!-- 火山方舟订阅号：SigV4 签名需要访问密钥，否则用量探测会报 access_key/secret_key is empty -->
-        <div v-if="isVolcanoSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
-          <p class="text-xs text-gray-500 dark:text-gray-400">
-            {{ t('admin.accounts.cnProviders.volcanoAkSkHint') }}
-          </p>
-          <div>
-            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}</label>
-            <input
-              v-model="volcanoAccessKey"
-              type="password"
-              class="input font-mono"
-              autocomplete="new-password"
-              data-1p-ignore
-              data-lpignore="true"
-              data-bwignore="true"
-              :placeholder="t('admin.accounts.cnProviders.accessKeyPlaceholder')"
-            />
-          </div>
-          <div>
-            <label class="input-label">{{ t('admin.accounts.cnProviders.secretKey') }}</label>
-            <input
-              v-model="volcanoSecretKey"
-              type="password"
-              class="input font-mono"
-              autocomplete="new-password"
-              data-1p-ignore
-              data-lpignore="true"
-              data-bwignore="true"
-              :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
-            />
-          </div>
-        </div>
-
         <!-- Model Restriction Section (不适用于 Antigravity) -->
         <div v-if="account.platform !== 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
@@ -3080,8 +3047,6 @@ const isVolcanoSubscription = computed(() => {
   const url = editApiProtocol.value === 'adaptive' ? (cc || base) : base
   return isVolcanoBaseURL(url)
 })
-const volcanoAccessKey = ref('')
-const volcanoSecretKey = ref('')
 // 回填窗口标志：syncFormFromAccount 会同步改写 editAccountMode / editApiProtocol，
 // 而 watcher（pre-flush）在同步代码执行完之后才触发——若不抑制，会把刚恢复的
 // 存储版 base_url（可能是用户自定义/中转地址）覆盖为官方预设并在下次保存时持久化。
@@ -3761,10 +3726,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   void nextTick(() => {
     syncingForm.value = false
   })
-  // 清空火山方舟访问密钥输入：避免同一编辑弹窗切换到另一个账号时，残留上一账号的
-  // AK/SK 被误写入新账号（HIGH：跨账号凭据串号/泄露）。
-  volcanoAccessKey.value = ''
-  volcanoSecretKey.value = ''
   antigravityMixedChannelConfirmed.value = false
   showMixedChannelWarning.value = false
   mixedChannelWarningDetails.value = null
@@ -4677,9 +4638,6 @@ const parseDateTimeLocal = parseDateTimeLocalInput
 const handleClose = () => {
   antigravityMixedChannelConfirmed.value = false
   clearMixedChannelDialog()
-  // 关闭时清空火山方舟访问密钥输入，防止下次打开其他账号时残留（HIGH 防御）。
-  volcanoAccessKey.value = ''
-  volcanoSecretKey.value = ''
   emit('close')
 }
 
@@ -4779,13 +4737,6 @@ const handleSubmit = async () => {
         } else {
           delete newCredentials.api_base_urls
         }
-      }
-      // 火山方舟订阅号：与界面识别一致（isVolcanoSubscription 已按 adaptive/非 adaptive
-      // 取有效 base_url 判定）写入 SigV4 签名所需的访问密钥；
-      // 留空不覆盖（依赖后端 MergePreservingSensitiveCreds 保留已有值）。
-      if (isVolcanoSubscription.value) {
-        if (volcanoAccessKey.value.trim()) newCredentials.access_key = volcanoAccessKey.value.trim()
-        if (volcanoSecretKey.value.trim()) newCredentials.secret_key = volcanoSecretKey.value.trim()
       }
 
       // Handle API key

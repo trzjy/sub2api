@@ -445,7 +445,7 @@ describe('EditAccountModal', () => {
     })
   })
 
-  it('writes volcano access_key/secret_key on edit when the endpoint is a Volcano base url (adaptive)', async () => {
+  it('edits a Volcano subscription account using only the ark api_key (no AK/SK)', async () => {
     const account = buildAccount()
     account.platform = 'deepseek'
     account.credentials = {
@@ -463,21 +463,16 @@ describe('EditAccountModal', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
 
     const wrapper = mountModal(account)
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
-    await ak.setValue('AKLT-volcano-ak')
-    await sk.setValue('volc-secret')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
-    expect(submitted).toMatchObject({
-      access_key: 'AKLT-volcano-ak',
-      secret_key: 'volc-secret'
-    })
+    // 火山订阅号用量探测无需 AK/SK 签名，编辑时不应写入 access_key/secret_key。
+    expect(submitted?.access_key).toBeUndefined()
+    expect(submitted?.secret_key).toBeUndefined()
   })
 
-  it('does not carry a previous account volcano AK/SK into a switched account', async () => {
+  it('does not write AK/SK when switching to another Volcano account', async () => {
     const accountA = buildAccount()
     accountA.id = 11
     accountA.platform = 'deepseek'
@@ -510,20 +505,15 @@ describe('EditAccountModal', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
 
     const wrapper = mountModal(accountA)
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
-    await ak.setValue('AK-A-LEAK')
-    await sk.setValue('SK-A-LEAK')
-
-    // 同一编辑弹窗切换到另一个火山账号，应清空前账号的 AK/SK 输入。
+    // 同一编辑弹窗切换到另一个火山账号，不应带入任何 AK/SK。
     await wrapper.setProps({ account: accountB })
 
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
-    expect(submitted?.access_key).not.toBe('AK-A-LEAK')
-    expect(submitted?.secret_key).not.toBe('SK-A-LEAK')
+    expect(submitted?.access_key).toBeUndefined()
+    expect(submitted?.secret_key).toBeUndefined()
   })
 
   it('recognizes Volcano subscription when adaptive chat_completions is whitespace but base_url is volcano', async () => {
@@ -544,9 +534,12 @@ describe('EditAccountModal', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
 
     const wrapper = mountModal(account)
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    // 空白 chat_completions 不应遮蔽真实火山 base_url（LOW 修复）。
-    expect(ak.exists()).toBe(true)
+    // 空白 chat_completions 不应遮蔽真实火山 base_url（LOW 修复）；
+    // 火山订阅号应识别成功，展示 api_key 输入框、且不出现 AK/SK 输入框。
+    const pw = wrapper.find('form#edit-account-form input[type="password"]')
+    expect(pw.exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(false)
   })
 
   it('keeps Volcano base_url in payload when adaptive chat_completions is whitespace', async () => {

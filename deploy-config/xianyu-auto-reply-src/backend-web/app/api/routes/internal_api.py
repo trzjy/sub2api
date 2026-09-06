@@ -15,7 +15,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -25,6 +26,82 @@ from common.services.receipt_outcome import ReceiptOutcome, send_status_from_rec
 from common.utils.auth_scope import resolve_owner_scope
 
 router = APIRouter(prefix="/internal", tags=["主程序内网服务"])
+
+# 闲鱼 Worker 写入时间戳所用时区（Asia/Shanghai / UTC+8，无夏令时）。
+# 续期日志 created_at 为无时区北京时间，归一为此时区后比较，避免 24h 级新鲜度判断偏差约 8 小时。
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _as_utc(dt: Optional[datetime], assume_shanghai: bool) -> Optional[datetime]:
+    """将可能为 naive 的 datetime 归一为 UTC 感知时间。
+
+    assume_shanghai=True 时 naive 视为北京时间（续期日志写入约定）；
+    assume_shanghai=False 时 naive 视为 UTC（账号 last_login_at 写入约定）。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=SHANGHAI_TZ if assume_shanghai else timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _latest_renew_results(
+    session, account_ids: List[str], login_times: Dict[str, Optional[datetime]]
+) -> Dict[str, Dict[str, Any]]:
+    """查询每个账号「当前登录会话内」最近一次接口续期结果（来自定时续期日志表）。
+
+    主程序据此推导 Cookie 健康度（valid/invalid/expiring），是 Cookie 状态的真实数据源。
+
+    - 仅采纳 created_at 晚于该账号最近一次登录时间的续期行：QR 重新登录后，旧会话的失败行
+      不会被误报为当前状态（fail-open：无续期行时主程序按 unknown 处理，而非误判 invalid）。
+    - 同一时刻出现并列记录时按 id 决胜（取最大 id），保证确定性，避免成功/失败并列导致状态错乱。
+    - 查询失败时返回空投影（fail-open）：续期明细缺失只影响健康度精度，绝不能阻断账号同步。
+    """
+    import logging
+
+    from sqlalchemy import select
+
+    from common.models.scheduled_api_cookie_renew_log import ScheduledApiCookieRenewLog
+
+    if not account_ids:
+        return {}
+    try:
+        rows = (
+            await session.execute(
+                select(ScheduledApiCookieRenewLog).where(
+                    ScheduledApiCookieRenewLog.account_id.in_(account_ids)
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 - 投影增强字段失败不应拖垮账号同步
+        logging.getLogger(__name__).warning(
+            "查询续期日志投影失败，本次 /cookies/details 不携带 last_renew_* 字段", exc_info=True
+        )
+        return {}
+
+    best: Dict[str, ScheduledApiCookieRenewLog] = {}
+    for row in rows:
+        login_at = _as_utc(login_times.get(row.account_id), assume_shanghai=False)
+        renew_at = _as_utc(row.created_at, assume_shanghai=True)
+        # 登录前（或登录当刻）的续期行属上一会话，忽略；无登录时间信息时保守保留。
+        if login_at is not None and renew_at is not None and not renew_at > login_at:
+            continue
+        cur = best.get(row.account_id)
+        if cur is None:
+            best[row.account_id] = row
+            continue
+        cur_at = _as_utc(cur.created_at, assume_shanghai=True)
+        # 先比 created_at，再比 id，保证并列时确定性取最新一条。
+        if (renew_at, row.id) > (cur_at, cur.id):
+            best[row.account_id] = row
+    out: Dict[str, Dict[str, Any]] = {}
+    for account_id, row in best.items():
+        out[account_id] = {
+            "status": row.status,
+            "error_message": row.error_message or "",
+            "created_at": row.created_at,
+        }
+    return out
 
 
 @router.get("/cookies/details")
@@ -37,6 +114,11 @@ async def internal_list_cookie_details(
 
     owner_id, _ = resolve_owner_scope(service_user)
     accounts = await AccountService(session).list_accounts(owner_id)
+    renew_latest = await _latest_renew_results(
+        session,
+        [a.account_id for a in accounts],
+        {a.account_id: a.last_login_at for a in accounts},
+    )
     return ApiResponse(
         success=True,
         message="查询成功",
@@ -44,12 +126,19 @@ async def internal_list_cookie_details(
             {
                 "account_id": account.account_id,
                 "nickname": account.display_name or account.account_id,
-                "enabled": account.status not in {"inactive", "disabled", "suspended", "deleted"},
+                "enabled": account.status not in {"inactive", "disabled", "suspended", "deleted", "logged_out"},
                 "status": account.status,
                 "remark": account.remark or "",
                 "disable_reason": account.disable_reason or "",
                 "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
                 "last_refresh_at": account.last_refresh_at.isoformat() if account.last_refresh_at else None,
+                "last_renew_status": (renew_latest.get(account.account_id) or {}).get("status", ""),
+                "last_renew_at": (
+                    renew_latest[account.account_id]["created_at"].isoformat()
+                    if account.account_id in renew_latest
+                    else None
+                ),
+                "last_renew_error": (renew_latest.get(account.account_id) or {}).get("error_message", ""),
             }
             for account in accounts
         ],
