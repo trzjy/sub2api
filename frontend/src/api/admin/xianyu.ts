@@ -21,12 +21,12 @@ export interface XianyuDeliveryFilter {
 
 export async function getOverview(options?: { signal?: AbortSignal }): Promise<XianyuOverview> {
   const { data } = await apiClient.get<XianyuOverview>('/admin/xianyu/overview', { signal: options?.signal })
-  return data
+  return { ...data, pools: data.pools ?? [] }
 }
 
 export async function listWorkerConfigs(options?: { signal?: AbortSignal }): Promise<XianyuWorkerConfig[]> {
   const { data } = await apiClient.get<XianyuWorkerConfig[]>('/admin/xianyu/worker-configs', { signal: options?.signal })
-  return data
+  return data ?? []
 }
 
 export async function saveWorkerConfig(input: Partial<XianyuWorkerConfig> & { api_token?: string }): Promise<XianyuWorkerConfig> {
@@ -40,7 +40,7 @@ export async function checkHealth(): Promise<void> {
 
 export async function listAccounts(options?: { signal?: AbortSignal }): Promise<XianyuAccount[]> {
   const { data } = await apiClient.get<XianyuAccount[]>('/admin/xianyu/accounts', { signal: options?.signal })
-  return data
+  return data ?? []
 }
 
 export async function syncAccounts(): Promise<void> {
@@ -76,7 +76,7 @@ export async function queryLoginSession(sessionId: string, options?: { signal?: 
 
 export async function listProducts(options?: { signal?: AbortSignal }): Promise<XianyuProduct[]> {
   const { data } = await apiClient.get<XianyuProduct[]>('/admin/xianyu/products', { signal: options?.signal })
-  return data
+  return data ?? []
 }
 
 export async function syncProducts(): Promise<void> {
@@ -89,7 +89,7 @@ export async function bindProduct(productId: number, poolId?: number | null): Pr
 
 export async function listBindingRules(options?: { signal?: AbortSignal }): Promise<XianyuBindingRule[]> {
   const { data } = await apiClient.get<XianyuBindingRule[]>('/admin/xianyu/binding-rules', { signal: options?.signal })
-  return data
+  return data ?? []
 }
 
 export async function saveBindingRule(input: Partial<XianyuBindingRule>): Promise<XianyuBindingRule> {
@@ -99,7 +99,7 @@ export async function saveBindingRule(input: Partial<XianyuBindingRule>): Promis
 
 export async function listItemPools(options?: { signal?: AbortSignal }): Promise<XianyuItemPool[]> {
   const { data } = await apiClient.get<XianyuItemPool[]>('/admin/xianyu/item-pools', { signal: options?.signal })
-  return data
+  return data ?? []
 }
 
 export async function saveItemPool(input: Partial<XianyuItemPool>): Promise<XianyuItemPool> {

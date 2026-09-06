@@ -163,7 +163,7 @@ func (r *xianyuWorkerDeliveryRepository) ListWorkerDeliveries(ctx context.Contex
 		return nil, 0, fmt.Errorf("list xianyu worker deliveries: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuWorkerDelivery
+	out := make([]service.XianyuWorkerDelivery, 0)
 	for rows.Next() {
 		var d service.XianyuWorkerDelivery
 		var errText string

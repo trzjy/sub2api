@@ -551,7 +551,7 @@ type XianyuPoolOverview struct {
 }
 
 func (s *XianyuControlService) GetOverview(ctx context.Context) (*XianyuOverview, error) {
-	out := &XianyuOverview{}
+	out := &XianyuOverview{Pools: make([]XianyuPoolOverview, 0)}
 
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {

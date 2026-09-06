@@ -80,7 +80,7 @@ func (r *xianyuDeliveryListRepository) ListDeliveryClaims(ctx context.Context, f
 		return nil, 0, fmt.Errorf("list xianyu delivery claims: %w", err)
 	}
 	defer rows.Close()
-	var out []service.XianyuOrderClaim
+	out := make([]service.XianyuOrderClaim, 0)
 	for rows.Next() {
 		var c service.XianyuOrderClaim
 		var amount, deliveryError sql.NullString

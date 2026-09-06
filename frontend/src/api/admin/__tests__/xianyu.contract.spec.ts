@@ -140,4 +140,26 @@ describe('xianyu admin api contract', () => {
     const { syncAccounts } = await import('@/api/admin/xianyu')
     await expect(syncAccounts()).resolves.toBeUndefined()
   })
+
+  describe('legacy empty-list null normalization', () => {
+    it.each([
+      ['listAccounts', 'accounts'],
+      ['listProducts', 'products'],
+      ['listBindingRules', 'binding-rules'],
+      ['listItemPools', 'item-pools'],
+      ['listWorkerConfigs', 'worker-configs']
+    ])('%s normalizes backend null to empty array', async (fn, url) => {
+      adapter.mockResolvedValue(success(null))
+      const { [fn as string]: apiFn } = await import('@/api/admin/xianyu')
+      await expect((apiFn as () => Promise<unknown[]>)()).resolves.toEqual([])
+      expect(adapter.mock.calls[0][0].url).toBe(`/admin/xianyu/${url}`)
+    })
+
+    it('getOverview normalizes null pools to empty array', async () => {
+      const overview = { worker_healthy: false, enabled_accounts: 0, running_tasks: 0, unmapped_products: 0, pools: null, today_delivered: 0, today_failed: 0, pending_deliveries: 0 }
+      adapter.mockResolvedValue(success(overview))
+      const { getOverview } = await import('@/api/admin/xianyu')
+      await expect(getOverview()).resolves.toEqual({ ...overview, pools: [] })
+    })
+  })
 })
