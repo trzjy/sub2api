@@ -32,6 +32,9 @@ func TestDeriveCookieStatus(t *testing.T) {
 		{"unparsable renew time treated fresh", XianyuWorkerAccountStatus{Status: "active", LastRenewStatus: "success", LastRenewAt: "not-a-time"}, XianyuCookieStatusValid},
 		{"no renew data stays unknown", XianyuWorkerAccountStatus{Status: "active"}, XianyuCookieStatusUnknown},
 		{"worker disabled without renew data stays unknown", XianyuWorkerAccountStatus{Status: "disabled"}, XianyuCookieStatusUnknown},
+		{"fresh login counts as valid without renew logs", XianyuWorkerAccountStatus{Status: "active", LastLoginAt: fresh}, XianyuCookieStatusValid},
+		{"stale login without renew logs stays unknown", XianyuWorkerAccountStatus{Status: "active", LastLoginAt: stale}, XianyuCookieStatusUnknown},
+		{"renew failure wins over fresh login", XianyuWorkerAccountStatus{Status: "active", LastRenewStatus: "failed", LastLoginAt: fresh}, XianyuCookieStatusInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

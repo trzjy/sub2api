@@ -270,7 +270,8 @@ func truncateRunes(s string, max int) string {
 // deriveCookieStatus 从 Worker /cookies/details 投影推导主程序 Cookie 状态。
 // 数据优先级：Worker 侧账号状态（inactive/suspended/deleted 视为失效）→ 最近续期结果
 // （failed/need_password_login 视为失效）→ 成功续期超过新鲜窗口视为即将过期 →
-// 无任何续期数据时保持 unknown，不伪造健康度。
+// 无续期日志时，最近一次扫码登录本身就是 Cookie 有效的直接证据（新登录账号尚未
+// 被续期调度覆盖）→ 两者皆无才保持 unknown，不伪造健康度。
 func deriveCookieStatus(acc XianyuWorkerAccountStatus, now time.Time) string {
 	switch acc.Status {
 	case "inactive", "suspended", "deleted":
@@ -283,6 +284,9 @@ func deriveCookieStatus(acc XianyuWorkerAccountStatus, now time.Time) string {
 		if ts, ok := parseWorkerTime(acc.LastRenewAt); ok && now.Sub(ts) > xianyuCookieRenewFreshWindow {
 			return XianyuCookieStatusExpiring
 		}
+		return XianyuCookieStatusValid
+	}
+	if ts, ok := parseWorkerTime(acc.LastLoginAt); ok && now.Sub(ts) <= xianyuCookieRenewFreshWindow {
 		return XianyuCookieStatusValid
 	}
 	return XianyuCookieStatusUnknown
