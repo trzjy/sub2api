@@ -434,8 +434,28 @@ func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuO
 	}
 }
 
+// ListDeliveryCards 拉取 Worker 发货卡券列表（发货模板管理，不含敏感配置）。
+func (s *XianyuWorkerService) ListDeliveryCards(ctx context.Context) ([]XianyuWorkerCard, error) {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
+	return client.ListCards(ctx)
+}
+
+// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
+func (s *XianyuWorkerService) UpdateDeliveryCardDescription(ctx context.Context, cardID int64, description string) error {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
+	return client.UpdateCardDescription(ctx, cardID, description)
+}
+
 // SyncProducts 拉取账号在售商品并落库；只在不覆盖手工绑定映射的前提下更新。
-// 只有该流程完整成功后，才把本轮未出现的主程序记录标记为 removed。
+// 完整成功后，投影中未出现的商品行直接删除（售罄/下架清理，发货记录保留）。
 func (s *XianyuWorkerService) SyncProducts(ctx context.Context) error {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {

@@ -79,6 +79,30 @@
           </div>
         </div>
       </div>
+
+      <div class="mt-6 rounded-lg border border-gray-200 dark:border-dark-700">
+        <div class="border-b border-gray-200 px-5 py-3 dark:border-dark-700">
+          <h2 class="font-semibold">{{ t('admin.xianyu.settings.deliveryTemplates') }}</h2>
+        </div>
+        <div class="space-y-4 p-5">
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.deliveryTemplatesHint') }}</p>
+          <div v-for="card in deliveryCards" :key="card.id" class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
+            <div class="mb-2 flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium">{{ card.name }}</span>
+              <span class="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500 dark:bg-dark-700 dark:text-gray-300">{{ card.type }}</span>
+              <StatusBadge :status="card.enabled ? 'active' : 'disabled'" :label="card.enabled ? t('admin.xianyu.settings.enabled') : t('admin.xianyu.settings.disabled')" />
+              <span v-if="card.item_ids.length" class="text-xs text-gray-400">{{ t('admin.xianyu.settings.cardItems') }}: {{ card.item_ids.join(', ') }}</span>
+            </div>
+            <textarea v-model="card.description" rows="4" class="input w-full font-mono text-xs"></textarea>
+            <div class="mt-2 flex justify-end">
+              <button class="btn btn-primary btn-sm" :disabled="savingCardId === card.id" @click="saveCardTemplate(card)">
+                {{ savingCardId === card.id ? t('admin.xianyu.settings.deliveryTemplateSaving') : t('admin.xianyu.settings.deliveryTemplateSave') }}
+              </button>
+            </div>
+          </div>
+          <div v-if="!deliveryCards.length" class="text-sm text-gray-500">{{ t('admin.xianyu.settings.noDeliveryCards') }}</div>
+        </div>
+      </div>
     </div>
   </AppLayout>
 </template>
@@ -88,7 +112,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import type { XianyuWorkerConfig } from '@/types'
+import type { XianyuDeliveryCard, XianyuWorkerConfig } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import Toggle from '@/components/common/Toggle.vue'
@@ -98,7 +122,29 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const workerConfig = ref<XianyuWorkerConfig | null>(null)
+const deliveryCards = ref<XianyuDeliveryCard[]>([])
+const savingCardId = ref<number | null>(null)
 const form = reactive<{ base_url: string; api_token: string; status?: 'active' | 'disabled' }>({ base_url: '', api_token: '', status: 'active' })
+
+async function loadDeliveryCards() {
+  try {
+    deliveryCards.value = await adminAPI.xianyu.listDeliveryCards()
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
+}
+
+async function saveCardTemplate(card: XianyuDeliveryCard) {
+  savingCardId.value = card.id
+  try {
+    await adminAPI.xianyu.saveDeliveryCardDescription(card.id, card.description)
+    appStore.showSuccess(t('admin.xianyu.settings.deliveryTemplateSaved'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  } finally {
+    savingCardId.value = null
+  }
+}
 
 async function load() {
   try {
@@ -191,5 +237,6 @@ function healthLabel(status: string): string {
 onMounted(() => {
   load()
   loadToggles()
+  loadDeliveryCards()
 })
 </script>

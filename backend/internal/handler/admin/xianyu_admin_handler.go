@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -84,6 +85,43 @@ func (h *XianyuAdminHandler) WorkerConfigs(c *gin.Context) {
 		return
 	}
 	response.Success(c, cfgs)
+}
+
+// DeliveryCards 列出 Worker 发货卡券（发货模板管理）。
+func (h *XianyuAdminHandler) DeliveryCards(c *gin.Context) {
+	cards, err := h.control.ListDeliveryCards(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, cards)
+}
+
+type updateDeliveryCardDescriptionRequest struct {
+	Description string `json:"description"`
+}
+
+// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
+func (h *XianyuAdminHandler) UpdateDeliveryCardDescription(c *gin.Context) {
+	cardID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || cardID <= 0 {
+		response.BadRequest(c, "invalid card id")
+		return
+	}
+	var req updateDeliveryCardDescriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	if len(req.Description) > 2000 {
+		response.BadRequest(c, "description too long (max 2000)")
+		return
+	}
+	if err := h.control.UpdateDeliveryCardDescription(c.Request.Context(), cardID, strings.TrimSpace(req.Description)); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "delivery card template updated"})
 }
 
 type saveWorkerConfigRequest struct {

@@ -18,7 +18,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.api import deps
 from common.schemas.common import ApiResponse
@@ -242,6 +242,88 @@ async def internal_list_items_by_cookie(
 
     items = await ItemService(session).list_items(owner_id, cookie_id)
     return ApiResponse(success=True, message="查询成功", data=items or [])
+
+
+@router.get("/cards")
+async def internal_list_cards(
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """卡券列表（主程序发货模板管理用）。
+
+    返回卡券基础字段与关联商品 ID 列表；不含 api_config 等敏感配置。
+    """
+    from sqlalchemy import select
+
+    from common.models.card import Card
+    from common.models.card_item_relation import CardItemRelation
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    cards = (
+        (await session.execute(select(Card).where(Card.user_id == owner_id).order_by(Card.id)))
+        .scalars()
+        .all()
+    )
+    relations = (
+        (
+            await session.execute(
+                select(CardItemRelation.card_id, CardItemRelation.item_id).where(
+                    CardItemRelation.user_id == owner_id
+                )
+            )
+        )
+        .all()
+    )
+    item_ids_by_card: Dict[int, List[str]] = {}
+    for card_id, item_id in relations:
+        item_ids_by_card.setdefault(card_id, []).append(item_id)
+    data = [
+        {
+            "id": card.id,
+            "name": card.name,
+            "type": card.type,
+            "description": card.description or "",
+            "enabled": bool(card.enabled),
+            "item_ids": item_ids_by_card.get(card.id, []),
+        }
+        for card in cards
+    ]
+    return ApiResponse(success=True, message="查询成功", data=data)
+
+
+@router.put("/cards/{card_id}/description")
+async def internal_update_card_description(
+    card_id: int,
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """更新卡券发货模板（description，即买家收到的消息格式）。"""
+    from sqlalchemy import select
+
+    from common.models.card import Card
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    description = str((body or {}).get("description") or "").strip()[:2000]
+    card = (
+        (
+            await session.execute(
+                select(Card).where(Card.id == card_id, Card.user_id == owner_id)
+            )
+        )
+        .scalar_one_or_none()
+    )
+    if not card:
+        raise HTTPException(status_code=404, detail="卡券不存在")
+    card.description = description or None
+    await session.commit()
+    return ApiResponse(
+        success=True,
+        message="发货模板已更新",
+        data={"id": card.id, "description": card.description or ""},
+    )
 
 
 @router.post("/qr-login/generate")

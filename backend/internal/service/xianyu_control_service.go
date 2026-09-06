@@ -417,6 +417,22 @@ func (s *XianyuControlService) ListAccounts(ctx context.Context) ([]XianyuAccoun
 	return s.control.ListAccounts(ctx, workerCfg.ID)
 }
 
+// ListDeliveryCards 列出 Worker 发货卡券（发货模板管理）。
+func (s *XianyuControlService) ListDeliveryCards(ctx context.Context) ([]XianyuWorkerCard, error) {
+	if s.worker == nil {
+		return nil, ErrXianyuDeliveryNotConfigured
+	}
+	return s.worker.ListDeliveryCards(ctx)
+}
+
+// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
+func (s *XianyuControlService) UpdateDeliveryCardDescription(ctx context.Context, cardID int64, description string) error {
+	if s.worker == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	return s.worker.UpdateDeliveryCardDescription(ctx, cardID, description)
+}
+
 // EnableAccount 启用账号。
 func (s *XianyuControlService) EnableAccount(ctx context.Context, accountID string) error {
 	if s.worker == nil {

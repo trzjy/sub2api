@@ -205,6 +205,13 @@ export default {
       baseUrlInvalid: 'Invalid worker address',
       tokenRequired: 'Worker API Token is required',
       saveToggle: 'Save Toggles',
+      deliveryTemplates: 'Delivery Message Templates',
+      deliveryTemplatesHint: 'The delivery message buyers receive, per card. Variables (wrapped in braces): DELIVERY_CONTENT for the code, item_title, order_id, buyer_name. Leave empty to send the raw code only.',
+      deliveryTemplateSaved: 'Delivery template saved',
+      deliveryTemplateSave: 'Save Template',
+      deliveryTemplateSaving: 'Saving…',
+      noDeliveryCards: 'No delivery cards (none created on the Worker)',
+      cardItems: 'Linked items',
     },
     errors: {
       XIANYU_ACCOUNT_NOT_FOUND: 'Account not found',

@@ -150,6 +150,8 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/worker-configs", h.Admin.Xianyu.WorkerConfigs)
 		xianyu.POST("/worker-configs", h.Admin.Xianyu.SaveWorkerConfig)
 		xianyu.PUT("/worker-configs/:id", h.Admin.Xianyu.SaveWorkerConfig)
+		xianyu.GET("/delivery-cards", h.Admin.Xianyu.DeliveryCards)
+		xianyu.PUT("/delivery-cards/:id/description", h.Admin.Xianyu.UpdateDeliveryCardDescription)
 
 		xianyu.GET("/accounts", h.Admin.Xianyu.Accounts)
 		xianyu.POST("/accounts/sync", h.Admin.Xianyu.SyncAccounts)

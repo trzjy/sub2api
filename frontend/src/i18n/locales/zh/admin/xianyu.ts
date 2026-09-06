@@ -205,6 +205,13 @@ export default {
       baseUrlInvalid: 'Worker 地址格式不合法',
       tokenRequired: '请输入 Worker API Token',
       saveToggle: '保存开关',
+      deliveryTemplates: '发货消息模板',
+      deliveryTemplatesHint: '买家收到的发货消息内容，逐卡券生效。可用变量（用大括号包裹）：DELIVERY_CONTENT 卡密、item_title 商品标题、order_id 订单号、buyer_name 买家昵称。留空则只发卡密本体。',
+      deliveryTemplateSaved: '发货模板已保存',
+      deliveryTemplateSave: '保存模板',
+      deliveryTemplateSaving: '保存中…',
+      noDeliveryCards: '暂无发货卡券（Worker 侧未创建卡券）',
+      cardItems: '关联商品',
     },
     errors: {
       XIANYU_ACCOUNT_NOT_FOUND: '账号不存在',
