@@ -26,7 +26,7 @@
           />
         </div>
         <span :class="['shrink-0 font-medium', tier.used_percent == null ? 'text-gray-400 dark:text-gray-500' : utilizationTextColor(tier.used_percent)]">
-          {{ tier.used_percent == null ? '—' : Math.round(tier.used_percent) + '%' }}
+          {{ tier.used_percent == null ? '上游未提供' : Math.round(tier.used_percent) + '%' }}
         </span>
         <span
           v-if="tier.reset_at"
