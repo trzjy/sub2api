@@ -1321,15 +1321,16 @@
         <div v-if="isVolcanoSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {{ t('admin.accounts.cnProviders.volcanoAkSkHint') }}
-  <a
-    href="https://console.volcengine.com/iam/iamkeymanage"
-    target="_blank"
-    rel="noopener noreferrer"
-    class="text-blue-600 hover:underline dark:text-blue-400"
-  >{{ t('admin.accounts.cnProviders.volcanoAkSkGetLink') }}</a>
           </p>
           <div>
-            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}</label>
+            <label class="input-label">{{ t('admin.accounts.cnProviders.accessKey') }}
+              <a
+                href="https://console.volcengine.com/iam/iamkeymanage"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="ml-1 text-xs font-normal text-blue-600 hover:underline dark:text-blue-400"
+              >{{ t('admin.accounts.cnProviders.volcanoAkSkGetLink') }}</a>
+            </label>
             <input
               v-model="volcanoAccessKey"
               type="password"
