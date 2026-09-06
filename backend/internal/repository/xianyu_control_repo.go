@@ -418,6 +418,33 @@ func (r *xianyuControlRepository) UpdateProduct(ctx context.Context, product ser
 	return updated, nil
 }
 
+// DeleteProduct 删除商品行（下架/售罄清理）。发货记录与商品是外键引用，
+// 删除前将历史发货记录的 product_id 置空以保留完整订单历史。
+func (r *xianyuControlRepository) DeleteProduct(ctx context.Context, productID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin xianyu product delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE xianyu_order_claims SET product_id = NULL WHERE product_id = $1`, productID); err != nil {
+		return fmt.Errorf("detach xianyu order claims: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM xianyu_products WHERE id = $1`, productID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu product: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu product delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuProductNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit xianyu product delete: %w", err)
+	}
+	return nil
+}
+
 func (r *xianyuControlRepository) UpdateProductBinding(ctx context.Context, productID int64, bindingStatus, bindingSource string, poolID *int64) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE xianyu_products

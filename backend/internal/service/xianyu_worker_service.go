@@ -492,20 +492,20 @@ func (s *XianyuWorkerService) SyncProducts(ctx context.Context) error {
 		seenByAccount[account.ID] = seen
 	}
 
-	// 本轮响应成功后，标记未出现的 active 商品为 removed。
+	// 本轮响应成功后，投影中未出现的商品视为已售罄/下架，直接删除商品行
+	// （Worker 侧已同步清理投影，配合主程序删除保持面板干净）。
 	for accountID, seen := range seenByAccount {
 		products, err := s.control.ListProductsByAccount(ctx, accountID)
 		if err != nil {
 			return err
 		}
 		for _, p := range products {
-			if p.Status != XianyuProductStatusActive {
-				continue
-			}
 			key := normalizeProductIdentity(p.ItemID, p.SpecName, p.SpecValue)
 			if !seen[key] {
-				p.Status = XianyuProductStatusRemoved
-				if _, err := s.control.UpdateProduct(ctx, p); err != nil {
+				if err := s.control.DeleteProduct(ctx, p.ID); err != nil {
+					if err == ErrXianyuProductNotFound {
+						continue
+					}
 					return err
 				}
 			}

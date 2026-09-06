@@ -344,6 +344,7 @@ class ItemService:
         total_saved_count = 0
         fetched_pages = 0
         matched_required_title_keyword = False
+        pagination_completed = False
         try:
             page_number = 1
             while True:
@@ -364,6 +365,7 @@ class ItemService:
                 items = result.get("items") or []
                 if not items:
                     logger.info(f"账号[{account.account_id}]商品同步第 {page_number} 页无数据，结束获取")
+                    pagination_completed = True
                     break
 
                 valid_items, skipped_count = self._collect_valid_item_entries(items)
@@ -418,6 +420,7 @@ class ItemService:
 
                 if len(items) < page_size:
                     logger.info(f"账号[{account.account_id}]商品同步第 {page_number} 页数量少于页大小，结束获取")
+                    pagination_completed = True
                     break
 
                 page_number += 1
@@ -426,6 +429,23 @@ class ItemService:
             return {"success": False, "message": f"获取商品失败: {exc}"}
         finally:
             await manager.close()
+
+        # 完整翻页结束后，在售列表即为权威集合：清理投影中已不在售的商品行
+        # （售罄/下架），避免已售商品永久滞留投影与主程序商品面板。
+        # 仅在自然翻页完成时执行；增量提前停止或达到最大页数时列表不完整，不清理。
+        # 只删除目录投影行，不动卡券及其关联（重新上架新 item_id 重新关联即可），
+        # 主程序下次同步会将缺失商品自动标记为 removed。
+        if pagination_completed:
+            try:
+                fetched_item_ids = {
+                    str(item.get("id") or "").strip()
+                    for item in fetched_items
+                    if str(item.get("id") or "").strip()
+                }
+                await self._prune_stale_catalog_items(account, fetched_item_ids)
+            except Exception as exc:
+                await self.session.rollback()
+                logger.warning(f"账号[{account.account_id}]清理已下架商品投影失败: {exc}")
 
         return {
             "success": True,
@@ -436,6 +456,27 @@ class ItemService:
             "page_size": page_size,
             "saved_count": total_saved_count,
         }
+
+    async def _prune_stale_catalog_items(self, account: XYAccount, fetched_item_ids: Set[str]) -> int:
+        """删除投影中已不在售的商品行（售罄/下架清理）。
+
+        仅在完整翻页（自然结束，非增量提前停止/最大页数截断）后调用，
+        此时在售列表即为权威集合。只删除 xy_catalog_items 目录行，
+        不动卡券及其关联；主程序下次同步会将缺失商品删除。
+        """
+        stmt = select(XYCatalogItem).where(XYCatalogItem.account_pk == account.id)
+        rows = (await self.session.execute(stmt)).scalars().all()
+        stale_rows = [row for row in rows if str(row.item_id) not in fetched_item_ids]
+        if not stale_rows:
+            return 0
+        for row in stale_rows:
+            await self.session.delete(row)
+        await self.session.commit()
+        logger.info(
+            f"账号[{account.account_id}]商品同步清理已下架投影 {len(stale_rows)} 件: "
+            f"{[row.item_id for row in stale_rows]}"
+        )
+        return len(stale_rows)
 
     async def fetch_all_items_from_accounts(
         self,

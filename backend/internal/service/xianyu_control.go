@@ -276,6 +276,7 @@ type XianyuControlRepository interface {
 	GetProductByIdentity(ctx context.Context, accountPK int64, itemID, specName, specValue string) (*XianyuProduct, error)
 	UpsertProduct(ctx context.Context, product XianyuProduct) (*XianyuProduct, error)
 	UpdateProduct(ctx context.Context, product XianyuProduct) (*XianyuProduct, error)
+	DeleteProduct(ctx context.Context, productID int64) error
 	UpdateProductBinding(ctx context.Context, productID int64, bindingStatus, bindingSource string, poolID *int64) error
 
 	// 绑定规则

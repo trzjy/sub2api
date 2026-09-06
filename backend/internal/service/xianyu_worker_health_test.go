@@ -98,6 +98,10 @@ func (s *xianyuWorkerControlStub) UpdateProduct(_ context.Context, p XianyuProdu
 	return &p, nil
 }
 
+func (s *xianyuWorkerControlStub) DeleteProduct(context.Context, int64) error {
+	return nil
+}
+
 func (s *xianyuWorkerControlStub) UpdateProductBinding(context.Context, int64, string, string, *int64) error {
 	return nil
 }
