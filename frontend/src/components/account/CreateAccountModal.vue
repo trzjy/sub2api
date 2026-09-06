@@ -495,9 +495,9 @@
               <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cnProviders.accountMode.paygDesc') }}</span>
             </div>
           </button>
-          <!-- Coding Plan (kimi / zhipu only — DeepSeek has no coding plan) -->
+          <!-- Coding Plan：kimi / zhipu / 火山方舟订阅号（火山挂靠 deepseek 平台但 base_url 命中 volces，按火山识别放开） -->
           <button
-            v-if="form.platform !== 'deepseek'"
+            v-if="form.platform !== 'deepseek' || isVolcanoSubscription"
             type="button"
             @click="accountMode = 'coding'"
             :class="[
@@ -3795,6 +3795,7 @@ import {
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
   isHeaderOverrideCapable,
+  isVolcanoBaseURL,
   validateHeaderOverrideRows,
   type CnAccountMode,
   type CnApiProtocol,
@@ -3989,6 +3990,15 @@ const adaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
 const isCNPlatform = computed(
   () => form.platform === 'kimi' || form.platform === 'zhipu' || form.platform === 'deepseek'
 )
+// 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+// 取有效 base_url 时先对 candidates 各自 trim 再 fallback，避免空白 chat_completions
+// 抢占真实火山 base_url（LOW 修复）。
+const isVolcanoSubscription = computed(() => {
+  const cc = (adaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (apiKeyBaseUrl.value || '').trim()
+  const url = apiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isVolcanoBaseURL(url)
+})
 // CnBaseUrlPresets 的 platform prop 是平台字面量联合类型，模板里不能写
 // `as` 断言（其中的 `|` 会被 eslint 误判为 Vue2 filter 语法），经此 computed 传递。
 const cnPresetPlatform = computed<'kimi' | 'zhipu' | 'deepseek'>(() => {
@@ -4071,6 +4081,9 @@ function selectOtherPlatform() {
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {
   if (!isCNPlatform.value) return
+  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点，也不强制 payg；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   if (apiProtocol.value === 'adaptive') {
     const previousDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, previousMode)
     const nextDefaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, mode)
@@ -4084,9 +4097,14 @@ watch(accountMode, (mode, previousMode) => {
   }
   apiKeyBaseUrl.value = defaultCNBaseUrl(form.platform, mode, apiProtocol.value)
 })
-watch(apiProtocol, (protocol) => {
+watch(apiProtocol, (protocol, previousProtocol) => {
   if (!isCNPlatform.value) return
   if (protocol === 'adaptive') {
+    // 火山地址需同步进 adaptive 的 chat_completions 槽位，避免切换后静默回退 DeepSeek（HIGH 修复）
+    if (isVolcanoBaseURL(apiKeyBaseUrl.value.trim())) {
+      adaptiveBaseUrls.value = { ...adaptiveBaseUrls.value, chat_completions: apiKeyBaseUrl.value.trim() }
+      return
+    }
     const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, accountMode.value)
     for (const item of cnAdaptiveProtocolOptions.value) {
       if (!adaptiveBaseUrls.value[item.value]) adaptiveBaseUrls.value[item.value] = defaults[item.value]
@@ -4094,6 +4112,15 @@ watch(apiProtocol, (protocol) => {
     apiKeyBaseUrl.value = adaptiveBaseUrls.value.chat_completions
     return
   }
+  // 切出 adaptive：优先从 adaptiveBaseUrls 对应协议槽位回填；空白槽位（trim 后）回退到当前
+  // 有效 base_url（可能为火山地址），再回退默认，避免空白 URL 覆盖有效端点（HIGH/MEDIUM 修复）
+  if (previousProtocol === 'adaptive') {
+    const raw = (adaptiveBaseUrls.value[protocol] || '').trim()
+    apiKeyBaseUrl.value = raw || apiKeyBaseUrl.value.trim() || defaultCNBaseUrl(form.platform, accountMode.value, protocol)
+    return
+  }
+  // 切换到非 adaptive：保留火山 base_url，不套用 deepseek 默认端点
+  if (isVolcanoBaseURL(apiKeyBaseUrl.value)) return
   apiKeyBaseUrl.value = defaultCNBaseUrl(form.platform, accountMode.value, protocol)
 })
 // 点击预设端点：同时回填 base url、账号类型与协议。
@@ -5565,7 +5592,13 @@ const handleSubmit = async () => {
       const defaults = defaultCNAdaptiveBaseUrls(form.platform, accountMode.value)
       const protocolBaseUrls: Record<string, string> = {}
       for (const item of cnAdaptiveProtocolOptions.value) {
-        protocolBaseUrls[item.value] = (adaptiveBaseUrls.value[item.value] || defaults[item.value]).trim()
+        const raw = (adaptiveBaseUrls.value[item.value] || '').trim()
+        if (item.value === 'chat_completions') {
+          // 火山场景：空白 chat_completions 应回退到 base_url（apiKeyBaseUrl），避免被写成空值（MEDIUM 修复）
+          protocolBaseUrls[item.value] = raw || apiKeyBaseUrl.value.trim() || defaults[item.value]
+        } else {
+          protocolBaseUrls[item.value] = raw || defaults[item.value]
+        }
       }
       credentials.api_base_urls = protocolBaseUrls
       credentials.base_url = protocolBaseUrls.chat_completions

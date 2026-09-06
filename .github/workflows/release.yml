@@ -107,6 +107,7 @@ jobs:
           path: backend/internal/web/dist/
 
       - name: Setup Go
+        id: setup-go
         uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -116,6 +117,22 @@ jobs:
       - name: Verify Go version
         run: |
           go version | grep -q 'go1.27.0'
+
+      - name: Resolve Go build cache dir
+        id: go-cache
+        run: echo "dir=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+
+      # 持久化 Go 编译缓存（GOCACHE），使 GoReleaser builds 阶段的 go build
+      # 跨 CI 运行复用 .a 编译产物，实现增量编译而非每次全量。
+      # 注意：sub2api 的镜像由 Dockerfile.goreleaser 仅 COPY 预编译二进制，
+      # 因此真正的编译瓶颈在 GoReleaser 的 builds 阶段，缓存此目录收益最大。
+      - name: Cache Go build cache (incremental compile across runs)
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache.outputs.dir }}
+          key: go-build-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('backend/go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-
 
       # Docker setup for GoReleaser
       - name: Set up QEMU

@@ -43,6 +43,7 @@
               v-for="account in accounts"
               :key="account.id"
               class="border-b border-gray-100 dark:border-dark-700"
+              :class="account.status === 'logged_out' ? 'opacity-60' : ''"
             >
               <td class="px-4 py-2 font-medium">{{ account.nickname || '-' }}</td>
               <td class="px-4 py-2">{{ account.account_id }}</td>
@@ -52,9 +53,15 @@
                   :label="statusLabel(account.status)"
                 />
               </td>
-              <td class="px-4 py-2">
+              <td class="px-4 py-2" :title="account.cookie_detail || undefined">
                 <StatusBadge
-                  :status="account.cookie_status"
+                  v-if="account.status === 'logged_out'"
+                  status="cleared"
+                  :label="t('admin.xianyu.accounts.cookieCleared')"
+                />
+                <StatusBadge
+                  v-else
+                  :status="cookieTone(account.cookie_status)"
                   :label="cookieLabel(account.cookie_status)"
                 />
               </td>
@@ -68,21 +75,29 @@
               <td class="px-4 py-2 text-gray-500">{{ account.last_seen_at ? formatDateTime(account.last_seen_at) : '-' }}</td>
               <td class="px-4 py-2">
                 <div class="flex items-center justify-end gap-1.5">
-                  <button v-if="account.status !== 'enabled'" class="btn btn-primary btn-xs" @click="enable(account)">
-                    {{ t('admin.xianyu.accounts.enable') }}
-                  </button>
-                  <button v-else class="btn btn-secondary btn-xs" @click="disable(account)">
-                    {{ t('admin.xianyu.accounts.disable') }}
-                  </button>
-                  <button class="btn btn-secondary btn-xs" @click="doRefreshCookie(account)">
-                    {{ t('admin.xianyu.accounts.refreshCookie') }}
-                  </button>
-                  <button class="btn btn-secondary btn-xs" @click="openScan(account)">
-                    {{ t('admin.xianyu.accounts.scanLogin') }}
-                  </button>
-                  <button class="btn btn-danger btn-xs" @click="doClearCredentials(account)">
-                    {{ t('admin.xianyu.accounts.clearCredentials') }}
-                  </button>
+                  <!-- 已退出的账号凭证已删除：仅可重新扫码登录，不再提供启用/刷新/退出 -->
+                  <template v-if="account.status === 'logged_out'">
+                    <button class="btn btn-primary btn-xs" @click="openScan(account)">
+                      {{ t('admin.xianyu.accounts.relogin') }}
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button v-if="account.status !== 'enabled'" class="btn btn-primary btn-xs" @click="enable(account)">
+                      {{ t('admin.xianyu.accounts.enable') }}
+                    </button>
+                    <button v-else class="btn btn-secondary btn-xs" @click="disable(account)">
+                      {{ t('admin.xianyu.accounts.disable') }}
+                    </button>
+                    <button class="btn btn-secondary btn-xs" @click="doRefreshCookie(account)">
+                      {{ t('admin.xianyu.accounts.refreshCookie') }}
+                    </button>
+                    <button class="btn btn-secondary btn-xs" @click="openScan(account)">
+                      {{ t('admin.xianyu.accounts.scanLogin') }}
+                    </button>
+                    <button class="btn btn-danger btn-xs" @click="doClearCredentials(account)">
+                      {{ t('admin.xianyu.accounts.clearCredentials') }}
+                    </button>
+                  </template>
                 </div>
               </td>
             </tr>
@@ -101,6 +116,9 @@
         <div class="flex flex-col items-center gap-3">
           <div v-if="scanStatus === 'success'" class="text-green-600">
             {{ t('admin.xianyu.accounts.scanSuccess') }}
+            <span v-if="scanCountdown > 0" class="ml-1 text-sm text-gray-500">
+              {{ t('admin.xianyu.accounts.scanAutoClose', { seconds: scanCountdown }) }}
+            </span>
           </div>
           <div v-else-if="scanStatus === 'failed'" class="text-red-600">
             {{ scanMessage || t('admin.xianyu.accounts.scanFailed') }}
@@ -134,7 +152,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { extractI18nErrorMessage, extractApiErrorCode } from '@/utils/apiError'
 import { formatDateTime } from '@/utils/format'
 import type { XianyuAccount } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -157,7 +175,7 @@ async function load() {
     accounts.value = await adminAPI.xianyu.listAccounts()
     syncError.value = ''
   } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
   } finally {
     loading.value = false
   }
@@ -170,8 +188,8 @@ async function sync() {
     await load()
     appStore.showSuccess(t('admin.xianyu.accounts.success'))
   } catch (err) {
-    syncError.value = extractApiErrorMessage(err, t('common.error'))
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    syncError.value = extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error'))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
   }
 }
 
@@ -206,7 +224,13 @@ function enable(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(extractApiErrorMessage(err, t('common.error')))
+        appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
+        // 无法唤醒（Worker 侧账号已不存在/已退出登录）→ 直接弹出扫码登录引导重新登录。
+        const code = extractApiErrorCode(err)
+        if (code === 'XIANYU_WORKER_ACCOUNT_NOT_FOUND' || code === 'XIANYU_ACCOUNT_LOGGED_OUT') {
+          await load()
+          openScan(account)
+        }
       }
     }
   )
@@ -222,7 +246,7 @@ function disable(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(extractApiErrorMessage(err, t('common.error')))
+        appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
       }
     }
   )
@@ -238,7 +262,7 @@ function doRefreshCookie(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(extractApiErrorMessage(err, t('common.error')))
+        appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
       }
     }
   )
@@ -254,7 +278,7 @@ function doClearCredentials(account: XianyuAccount) {
         await load()
         appStore.showSuccess(t('admin.xianyu.accounts.success'))
       } catch (err) {
-        appStore.showError(extractApiErrorMessage(err, t('common.error')))
+        appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
       }
     }
   )
@@ -267,8 +291,33 @@ const scanStatus = ref('waiting')
 const scanMessage = ref('')
 const scanQRCode = ref('')
 let pollTimer: number | null = null
+// 登录成功后倒计时自动关闭扫码弹窗。
+let scanCloseTimer: number | null = null
+const scanCountdown = ref(0)
+const SCAN_AUTO_CLOSE_SECONDS = 2
+
+function cancelScanAutoClose() {
+  if (scanCloseTimer !== null) {
+    window.clearInterval(scanCloseTimer)
+    scanCloseTimer = null
+  }
+  scanCountdown.value = 0
+}
+
+function scheduleScanAutoClose() {
+  cancelScanAutoClose()
+  scanCountdown.value = SCAN_AUTO_CLOSE_SECONDS
+  scanCloseTimer = window.setInterval(() => {
+    scanCountdown.value -= 1
+    if (scanCountdown.value <= 0) {
+      cancelScanAutoClose()
+      stopPollingBehavior()
+    }
+  }, 1000)
+}
 
 async function openScan(account: XianyuAccount | null) {
+  cancelScanAutoClose()
   scanAccount.value = account
   scanStatus.value = 'waiting'
   scanMessage.value = ''
@@ -287,7 +336,7 @@ async function openScan(account: XianyuAccount | null) {
       return
     }
   } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
     scanVisible.value = false
     return
   }
@@ -319,13 +368,21 @@ async function pollOnce(sessionID: string) {
     if (session.status === 'success' || session.status === 'failed' || session.status === 'expired') {
       stopPolling()
       if (session.status === 'success') {
+        // 登录成功即开始 2 秒倒计时自动关闭弹窗；同步刷新在后台并行完成。
+        scheduleScanAutoClose()
+        // 重新登录成功后立即同步一次投影，让该行马上回到可启用/已启用状态，而不是等下一轮自动巡检。
+        try {
+          await adminAPI.xianyu.syncAccounts()
+        } catch {
+          // 同步失败不阻塞提示：60 秒健康巡检也会收敛状态。
+        }
         await load()
       }
       return
     }
   } catch (err) {
     stopPolling()
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
     return
   }
   // 上一轮完成后再调度下一轮，避免 setInterval 并发请求堆积
@@ -336,12 +393,13 @@ async function pollOnce(sessionID: string) {
 
 function stopPolling() {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    window.clearTimeout(pollTimer)
     pollTimer = null
   }
 }
 
 function stopPollingBehavior() {
+  cancelScanAutoClose()
   scanVisible.value = false
   stopPolling()
 }
@@ -352,6 +410,7 @@ function statusLabel(status: string): string {
     case 'disabled': return t('admin.xianyu.accounts.disabled')
     case 'expired': return t('admin.xianyu.accounts.expired')
     case 'syncing': return t('admin.xianyu.accounts.syncing')
+    case 'logged_out': return t('admin.xianyu.accounts.loggedOut')
     default: return status
   }
 }
@@ -362,6 +421,16 @@ function cookieLabel(status: string): string {
     case 'invalid': return t('admin.xianyu.accounts.invalid')
     case 'expiring': return t('admin.xianyu.accounts.expiring')
     default: return t('admin.xianyu.accounts.unknown')
+  }
+}
+
+// 映射为 StatusBadge 的语义色：有效绿、即将过期黄、失效红、未知灰。
+function cookieTone(status: string): string {
+  switch (status) {
+    case 'valid': return 'success'
+    case 'expiring': return 'warning'
+    case 'invalid': return 'error'
+    default: return status
   }
 }
 
@@ -376,5 +445,8 @@ function taskLabel(status: string): string {
 }
 
 onMounted(load)
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  cancelScanAutoClose()
+  stopPolling()
+})
 </script>

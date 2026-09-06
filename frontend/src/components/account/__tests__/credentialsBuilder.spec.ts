@@ -17,7 +17,8 @@ import {
   readPlanType,
   serializeHeaderOverrideRows,
   splitHeaderOverridesObject,
-  validateHeaderOverrideRows
+  validateHeaderOverrideRows,
+  isVolcanoBaseURL
 } from '../credentialsBuilder'
 
 describe('applyInterceptWarmup', () => {
@@ -473,5 +474,28 @@ describe('plan_type helpers', () => {
       expect(out).toEqual({ email: 'a@b.c' })
       expect('plan_type' in out).toBe(false)
     })
+  })
+})
+
+describe('isVolcanoBaseURL', () => {
+  it('recognizes Volcano plan base urls', () => {
+    expect(isVolcanoBaseURL('https://ark.cn-beijing.volces.com/api/plan')).toBe(true)
+    expect(isVolcanoBaseURL('https://ark.cn-beijing.volces.com/api/coding')).toBe(true)
+    expect(isVolcanoBaseURL('https://ark.cn-beijing.volces.com:443/api/plan')).toBe(true)
+  })
+  it('is case-insensitive on the host', () => {
+    expect(isVolcanoBaseURL('https://ARK.CN-BEIJING.VOLCES.COM/api/plan')).toBe(true)
+  })
+  it('rejects similar-hostname lookalikes', () => {
+    expect(isVolcanoBaseURL('https://evil-ark.cn-beijing.volces.com/api/plan')).toBe(false)
+    expect(isVolcanoBaseURL('https://notark.cn-beijing.volces.com/api/coding')).toBe(false)
+  })
+  it('rejects a query/param that merely contains the host string', () => {
+    expect(isVolcanoBaseURL('https://evil.example/?next=ark.cn-beijing.volces.com')).toBe(false)
+  })
+  it('rejects empty or unparseable values', () => {
+    expect(isVolcanoBaseURL('')).toBe(false)
+    expect(isVolcanoBaseURL('   ')).toBe(false)
+    expect(isVolcanoBaseURL('not a url')).toBe(false)
   })
 })

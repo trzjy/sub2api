@@ -76,7 +76,8 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-// 仅 kimi / deepseek payg 账号有公开余额端点（智谱 payg 无）；火山订阅号除外。
+// 仅 kimi / deepseek payg 账号有公开余额端点（智谱 payg 无）；火山订阅号按 base_url
+// 识别并隐藏余额单元格（订阅套餐无公开余额端点，避免与配额单元格双重渲染）。
 const visible = computed(() =>
   cnBalanceCellVisible(props.account.platform, readMode(), resolveAccountBaseURL(props.account.credentials))
 )

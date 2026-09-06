@@ -21,12 +21,12 @@
         <div class="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-600">
           <div
             class="h-full rounded-full transition-all"
-            :class="utilizationColor(tier.used_percent)"
-            :style="{ width: `${Math.min(100, Math.max(0, tier.used_percent))}%` }"
+            :class="tier.used_percent == null ? 'bg-gray-300 dark:bg-dark-500' : utilizationColor(tier.used_percent)"
+            :style="{ width: tier.used_percent == null ? '0%' : `${Math.min(100, Math.max(0, tier.used_percent))}%` }"
           />
         </div>
-        <span :class="['shrink-0 font-medium', utilizationTextColor(tier.used_percent)]">
-          {{ Math.round(tier.used_percent) }}%
+        <span :class="['shrink-0 font-medium', tier.used_percent == null ? 'text-gray-400 dark:text-gray-500' : utilizationTextColor(tier.used_percent)]">
+          {{ tier.used_percent == null ? '—' : Math.round(tier.used_percent) + '%' }}
         </span>
         <span
           v-if="tier.reset_at"
@@ -92,7 +92,7 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
-import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL } from './credentialsBuilder'
+import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL, isVolcanoBaseURL } from './credentialsBuilder'
 
 const props = defineProps<{
   account: Account
@@ -105,9 +105,17 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-const readBaseURL = (): string => resolveAccountBaseURL(props.account.credentials)
+// 火山优先：base_url 命中 ark.cn-beijing.volces.com 时强制返回火山 base（而非
+// 自适应账号的 api_base_urls，后者可能指向 kimi），与后端 resolveCNQuotaProvider
+// 的火山优先识别保持一致——否则火山订阅号被误判为 Kimi，去读 kimi_* 快照而拿不到
+// volcano_* 快照（5h/周/月档全空或显示旧值）。
+const readBaseURL = (): string => {
+  const raw = (props.account.credentials?.base_url as string) || ''
+  if (isVolcanoBaseURL(raw)) return raw
+  return resolveAccountBaseURL(props.account.credentials)
+}
 
-// 快照键前缀（kimi/zhipu 平台即供应商；火山 = platform deepseek + volces base_url）。
+// 快照键前缀（kimi/zhipu 平台即供应商；火山 = base_url 命中 volces，账号仍存为 deepseek 平台）。
 const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))
 
 const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))
@@ -134,18 +142,27 @@ const readExtraString = (key: string): string => {
   return typeof v === 'string' ? v : ''
 }
 
-// 从持久化快照构造展示数据（缺少 5h/weekly 两档键时返回 null）。
+// 从持久化快照构造展示数据。5h 档在 used 或 reset_at 存在即渲染
+// （用量上游不可得 → used 为 null 显示“—”，但倒计时仍显示）；周/月档在 reset_at 存在即渲染
+// （用量上游不可得 → used 为 null 显示“未知”），不再写假 0 诱出渲染以免误导“未用”。
 const snapshotData = computed<CNProviderQuotaProbeResult | null>(() => {
   const prefix = providerPrefix.value
   const used5h = readExtraNumber(`${prefix}_5h_used_percent`)
   const usedWeekly = readExtraNumber(`${prefix}_weekly_used_percent`)
-  if (used5h == null && usedWeekly == null) return null
+  const usedMonthly = readExtraNumber(`${prefix}_monthly_used_percent`)
+  const reset5h = readExtraString(`${prefix}_5h_reset_at`)
+  const resetWeekly = readExtraString(`${prefix}_weekly_reset_at`)
+  const resetMonthly = readExtraString(`${prefix}_monthly_reset_at`)
+  if (used5h == null && reset5h == '' && resetWeekly == '' && resetMonthly == '') return null
   const tiers: CNProviderQuotaProbeResult['tiers'] = []
-  if (used5h != null) {
-    tiers.push({ window: '5h', used_percent: used5h, reset_at: readExtraString(`${prefix}_5h_reset_at`) || undefined })
+  if (used5h != null || reset5h != '') {
+    tiers.push({ window: '5h', used_percent: used5h, reset_at: reset5h || undefined })
   }
-  if (usedWeekly != null) {
-    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: readExtraString(`${prefix}_weekly_reset_at`) || undefined })
+  if (resetWeekly != '') {
+    tiers.push({ window: 'weekly', used_percent: usedWeekly, reset_at: resetWeekly })
+  }
+  if (resetMonthly != '') {
+    tiers.push({ window: 'monthly', used_percent: usedMonthly, reset_at: resetMonthly })
   }
   return { success: true, tiers } as CNProviderQuotaProbeResult
 })
@@ -192,10 +209,11 @@ const truncatedError = computed(() => {
   return error.value.length > 80 ? `${error.value.slice(0, 80)}...` : error.value
 })
 
-const windowLabel = (window: string) =>
-  window === 'weekly'
-    ? t('admin.accounts.cnProviders.windowWeekly')
-    : t('admin.accounts.cnProviders.window5h')
+const windowLabel = (window: string) => {
+  if (window === 'weekly') return t('admin.accounts.cnProviders.windowWeekly')
+  if (window === 'monthly') return t('admin.accounts.cnProviders.windowMonthly')
+  return t('admin.accounts.cnProviders.window5h')
+}
 
 const utilizationColor = (pct: number) => {
   if (pct >= 90) return 'bg-red-500'

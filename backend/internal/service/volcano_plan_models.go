@@ -155,11 +155,12 @@ func openAIResponsesURLForBase(platform string, baseURL string) string {
 	return buildOpenAIResponsesURLForPlatform(platform, baseURL)
 }
 
-// buildVolcanoProbeRequest 构造对账号真实对话端点的最小非流式探活请求。
+// buildVolcanoProbeRequest 构造对账号真实对话端点的最小非流式探活请求（协议感知）。
 // Anthropic 协议→ /v1/messages；OpenAI 协议（chat_completions/responses）→ /v3/chat/completions。
+// 供模型同步与额度探测复用，确保 Anthropic 协议火山账号也能命中正确端点、拿到响应头。
 // 复用 setAnthropicAPIKeyAuthHeader / ApplyHeaderOverrides，不复制第二套鉴权。
-func (s *AccountTestService) buildVolcanoProbeRequest(ctx context.Context, account *Account, profile volcanoPlanProfile, model string) (*http.Request, error) {
-	apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
+func buildVolcanoProbeRequest(ctx context.Context, account *Account, profile volcanoPlanProfile, model, apiKey string) (*http.Request, error) {
+	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
 		return nil, newUpstreamModelSyncConfigError("No volcano API key is available", nil)
 	}
@@ -201,7 +202,7 @@ func (s *AccountTestService) probeVolcanoModel(ctx context.Context, account *Acc
 	callCtx, cancel := context.WithTimeout(ctx, volcanoProbeTimeout)
 	defer cancel()
 
-	req, err := s.buildVolcanoProbeRequest(callCtx, account, profile, model)
+	req, err := buildVolcanoProbeRequest(callCtx, account, profile, model, account.GetOpenAIProtocolAPIKey())
 	if err != nil {
 		slog.Warn("volcano_model_probe_request_failed", "model", model, "error", err)
 		return volcanoProbeUnverified, 0

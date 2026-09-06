@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -443,6 +443,196 @@ describe('EditAccountModal', () => {
         anthropic: 'https://open.bigmodel.cn/api/anthropic'
       }
     })
+  })
+
+  it('edits a Volcano subscription account using only the ark api_key (no AK/SK)', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/plan',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    // 火山订阅号用量探测无需 AK/SK 签名，编辑时不应写入 access_key/secret_key。
+    expect(submitted?.access_key).toBeUndefined()
+    expect(submitted?.secret_key).toBeUndefined()
+  })
+
+  it('does not write AK/SK when switching to another Volcano account', async () => {
+    const accountA = buildAccount()
+    accountA.id = 11
+    accountA.platform = 'deepseek'
+    accountA.credentials = {
+      api_key: 'sk-deepseek-a',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/plan',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    const accountB = buildAccount()
+    accountB.id = 12
+    accountB.platform = 'deepseek'
+    accountB.credentials = {
+      api_key: 'sk-deepseek-b',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/coding',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/coding',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(accountB)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(accountA)
+    // 同一编辑弹窗切换到另一个火山账号，不应带入任何 AK/SK。
+    await wrapper.setProps({ account: accountB })
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted?.access_key).toBeUndefined()
+    expect(submitted?.secret_key).toBeUndefined()
+  })
+
+  it('recognizes Volcano subscription when adaptive chat_completions is whitespace but base_url is volcano', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: '   ',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    // 空白 chat_completions 不应遮蔽真实火山 base_url（LOW 修复）；
+    // 火山订阅号应识别成功，展示 api_key 输入框、且不出现 AK/SK 输入框。
+    const pw = wrapper.find('form#edit-account-form input[type="password"]')
+    expect(pw.exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(false)
+  })
+
+  it('keeps Volcano base_url in payload when adaptive chat_completions is whitespace', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: '   ',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    // 空白 chat_completions 提交应回退到火山 base_url，而非写成空值（MEDIUM 修复）。
+    expect(submitted?.api_base_urls?.chat_completions).toBe('https://ark.cn-beijing.volces.com/api/plan')
+    expect(submitted?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
+  })
+
+  it('keeps Volcano endpoint after switching chat_completions -> adaptive (no silent fallback)', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'chat_completions',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan'
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    // 切到 adaptive：火山 base_url 应同步进 chat_completions 槽位（HIGH 修复）
+    const adaptiveButton = wrapper
+      .findAll('button')
+      .find(button => button.text().includes('admin.accounts.cnProviders.apiProtocol.adaptive'))
+    expect(adaptiveButton).toBeDefined()
+    await adaptiveButton!.trigger('click')
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted?.api_base_urls?.chat_completions).toBe('https://ark.cn-beijing.volces.com/api/plan')
+    expect(submitted?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
+  })
+
+  it('keeps Volcano endpoint after adaptive -> chat_completions when adaptive chat slot is blank (whitespace falls back to base_url)', async () => {
+    const account = buildAccount()
+    account.platform = 'deepseek'
+    account.credentials = {
+      api_key: 'sk-deepseek',
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+      api_base_urls: {
+        chat_completions: 'https://ark.cn-beijing.volces.com/api/plan',
+        anthropic: '',
+        responses: ''
+      }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    // 把 adaptive 的 chat_completions 槽位（当前值为火山地址）清空为空白串
+    const ccInput = wrapper.findAll('input').find(input => input.element.value === 'https://ark.cn-beijing.volces.com/api/plan')
+    expect(ccInput).toBeDefined()
+    await ccInput!.setValue('   ')
+    await flushPromises()
+    // 切回 chat_completions：空白槽位应回退到火山 base_url，而非写成 DeepSeek 默认（MEDIUM 修复）
+    const chatButton = wrapper
+      .findAll('button')
+      .find(button => button.text().includes('admin.accounts.cnProviders.apiProtocol.chatCompletions'))
+    expect(chatButton).toBeDefined()
+    await chatButton!.trigger('click')
+    await flushPromises()
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted?.api_protocol).toBe('chat_completions')
+    expect(submitted?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
   })
 
   it('carries a fixed Chat relay into Adaptive when the user switches protocols', async () => {

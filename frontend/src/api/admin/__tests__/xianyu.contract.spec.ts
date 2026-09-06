@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import axios from 'axios'
 import type { AxiosInstance } from 'axios'
 
 vi.mock('@/i18n', () => ({
@@ -89,10 +88,12 @@ describe('xianyu admin api contract', () => {
     await expect(createLoginSession('a1')).resolves.toEqual({ status: 'waiting', qr_code: 'data:image/png;base64,xx' })
   })
 
-  it('queryLoginSession returns session status payload', async () => {
+  it('queryLoginSession queries by session_id and returns session status payload', async () => {
     adapter.mockResolvedValue(success({ status: 'success' }))
     const { queryLoginSession } = await import('@/api/admin/xianyu')
-    await expect(queryLoginSession('a1')).resolves.toEqual({ status: 'success' })
+    await expect(queryLoginSession('sess-9')).resolves.toEqual({ status: 'success' })
+    expect(adapter).toHaveBeenCalledTimes(1)
+    expect(adapter.mock.calls[0][0].url).toBe('/admin/xianyu/accounts/login-session/sess-9')
   })
 
   it('createLoginSession returns session_id so polling uses the Worker session', async () => {

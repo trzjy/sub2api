@@ -199,8 +199,8 @@ func (h *XianyuAdminHandler) CreateLoginSession(c *gin.Context) {
 
 // QueryLoginSession 查询扫码会话状态。
 func (h *XianyuAdminHandler) QueryLoginSession(c *gin.Context) {
-	accountID := c.Param("account_id")
-	session, err := h.control.QueryLoginSession(c.Request.Context(), accountID)
+	sessionID := c.Param("session_id")
+	session, err := h.control.QueryLoginSession(c.Request.Context(), sessionID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

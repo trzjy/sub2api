@@ -2922,6 +2922,8 @@ import {
   validateHeaderOverrideRows,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
+  resolveAccountBaseURL,
+  isVolcanoBaseURL,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
   type CnAccountMode,
@@ -3036,6 +3038,15 @@ const editAdaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
   anthropic: '',
   responses: ''
 })
+// 火山方舟订阅号：base_url 命中 volces 即识别（与 platform 解耦，账号仍存为 deepseek 平台）。
+// 取有效 base_url 时先对 candidates 各自 trim 再 fallback，避免空白 chat_completions
+// 抢占真实火山 base_url（LOW 修复）。
+const isVolcanoSubscription = computed(() => {
+  const cc = (editAdaptiveBaseUrls.value.chat_completions || '').trim()
+  const base = (editBaseUrl.value || '').trim()
+  const url = editApiProtocol.value === 'adaptive' ? (cc || base) : base
+  return isVolcanoBaseURL(url)
+})
 // 回填窗口标志：syncFormFromAccount 会同步改写 editAccountMode / editApiProtocol，
 // 而 watcher（pre-flush）在同步代码执行完之后才触发——若不抑制，会把刚恢复的
 // 存储版 base_url（可能是用户自定义/中转地址）覆盖为官方预设并在下次保存时持久化。
@@ -3043,8 +3054,9 @@ const editAdaptiveBaseUrls = ref<Record<CnNativeApiProtocol, string>>({
 const syncingForm = ref(false)
 const cnAccountModeOptions = computed<Array<{ value: CnAccountMode; labelKey: 'payg' | 'coding' }>>(
   () => {
-    // DeepSeek 无 coding 套餐（与创建弹窗一致），仅保留按量付费。
-    if (props.account?.platform === 'deepseek') {
+    // DeepSeek 无 coding 套餐（与创建弹窗一致），仅保留按量付费；
+    // 但火山方舟订阅号挂靠 deepseek 平台、按 base_url 识别，Coding Plan 需放开 coding。
+    if (props.account?.platform === 'deepseek' && !isVolcanoSubscription.value) {
       return [{ value: 'payg', labelKey: 'payg' }]
     }
     return [
@@ -3074,6 +3086,15 @@ const editAdaptiveProtocolOptions = computed<Array<{ value: CnNativeApiProtocol;
 })
 watch(editApiProtocol, (protocol, previousProtocol) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  // 切换到 adaptive 且当前 base_url 为火山地址：把火山地址同步进 chat_completions 槽位，
+  // 避免后续提交静默回退 DeepSeek（HIGH 修复）。
+  if (protocol === 'adaptive' && isVolcanoBaseURL(editBaseUrl.value.trim())) {
+    editAdaptiveBaseUrls.value = { ...editAdaptiveBaseUrls.value, chat_completions: editBaseUrl.value.trim() }
+    return
+  }
+  // 火山订阅号 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(editBaseUrl.value)) return
   if (protocol === 'adaptive') {
     const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
     for (const item of editAdaptiveProtocolOptions.value) {
@@ -3086,7 +3107,8 @@ watch(editApiProtocol, (protocol, previousProtocol) => {
     return
   }
   if (previousProtocol === 'adaptive') {
-    editBaseUrl.value = editAdaptiveBaseUrls.value[protocol] ||
+    const raw = (editAdaptiveBaseUrls.value[protocol] || '').trim()
+    editBaseUrl.value = raw || editBaseUrl.value.trim() ||
       defaultCNBaseUrl(props.account!.platform, editAccountMode.value, protocol)
     return
   }
@@ -3094,6 +3116,10 @@ watch(editApiProtocol, (protocol, previousProtocol) => {
 })
 watch(editAccountMode, (mode, previousMode) => {
   if (!isCNApiKeyAccount.value || syncingForm.value) return
+  // 火山订阅号按 base_url 识别，Coding Plan 允许 coding（不强制回退 payg）；
+  // 且 URL 由预设/用户填写决定，不套用 deepseek 默认端点；
+  // 即便 chat_completions 是非空非火山串，只要 base_url 本身是火山地址也不覆盖它。
+  if (isVolcanoSubscription.value || isVolcanoBaseURL(editBaseUrl.value)) return
   // deepseek 无 coding 套餐：防御性回退（UI 已隐藏该选项）。
   const effectiveMode = props.account!.platform === 'deepseek' && mode === 'coding' ? 'payg' : mode
   if (effectiveMode !== mode) {
@@ -3137,8 +3163,10 @@ const isBedrockAPIKeyMode = computed(() =>
   (props.account?.credentials as Record<string, unknown>)?.auth_mode === 'apikey'
 )
 // 供 ModelWhitelistSelector 识别火山 Agent/Coding 订阅号（base_url 判定）。
+// 直接复用 resolveAccountBaseURL，统一 adaptive 与非 adaptive 的端点解析优先级
+// （adaptive 优先 api_base_urls.chat_completions，否则回退 base_url，并做 trim）。
 const accountCredentialBaseUrl = computed(() =>
-  (props.account?.credentials as Record<string, unknown>)?.base_url as string | undefined
+  resolveAccountBaseURL(props.account?.credentials as Record<string, unknown> | undefined)
 )
 const modelMappings = ref<ModelMapping[]>([])
 const openAICompactModelMappings = ref<ModelMapping[]>([])
@@ -4696,7 +4724,13 @@ const handleSubmit = async () => {
           const defaults = defaultCNAdaptiveBaseUrls(cnPresetPlatform.value, editAccountMode.value)
           const protocolBaseUrls: Record<string, string> = {}
           for (const item of editAdaptiveProtocolOptions.value) {
-            protocolBaseUrls[item.value] = (editAdaptiveBaseUrls.value[item.value] || defaults[item.value]).trim()
+            const raw = (editAdaptiveBaseUrls.value[item.value] || '').trim()
+            if (item.value === 'chat_completions') {
+              // 火山场景：空白 chat_completions 应回退到 base_url（editBaseUrl），避免被写成空值（MEDIUM 修复）
+              protocolBaseUrls[item.value] = raw || editBaseUrl.value.trim() || defaults[item.value]
+            } else {
+              protocolBaseUrls[item.value] = raw || defaults[item.value]
+            }
           }
           newCredentials.api_base_urls = protocolBaseUrls
           newCredentials.base_url = protocolBaseUrls.chat_completions

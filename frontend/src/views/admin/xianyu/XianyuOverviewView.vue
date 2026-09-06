@@ -79,6 +79,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { extractApiErrorMessage } from '@/utils/apiError'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -103,8 +104,8 @@ async function load() {
   try {
     overview.value = await adminAPI.xianyu.getOverview()
   } catch (err) {
-    loadError.value = String(err)
-    appStore.showError(String(err))
+    loadError.value = extractApiErrorMessage(err, t('common.error'))
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
     loading.value = false
   }

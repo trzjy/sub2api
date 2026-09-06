@@ -15,9 +15,20 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/tidwall/gjson"
 	"golang.org/x/sync/singleflight"
 )
+
+// volcanoPlanLoc 是火山方舟额度刷新使用的官方时区（Asia/Shanghai / UTC+8）。
+// 周窗口刷新锚点固定按该时区计算（见 volcanoNextWeeklyReset）。
+var volcanoPlanLoc = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
 
 // 国产供应商 Coding Plan 滚动窗口额度探测服务（Kimi For Coding / 智谱 GLM Coding Plan）。
 //
@@ -32,11 +43,13 @@ const (
 	cnQuotaMaxBodyBytes    = 256 * 1024
 
 	// Extra 快照键后缀（加 provider 前缀，如 kimi_5h_used_percent）。
-	cnExtraSuffix5hUsed       = "5h_used_percent"
-	cnExtraSuffix5hReset      = "5h_reset_at"
-	cnExtraSuffixWeeklyUsed   = "weekly_used_percent"
-	cnExtraSuffixWeeklyReset  = "weekly_reset_at"
-	cnExtraSuffixUsageUpdated = "usage_updated_at"
+	cnExtraSuffix5hUsed        = "5h_used_percent"
+	cnExtraSuffix5hReset       = "5h_reset_at"
+	cnExtraSuffixWeeklyUsed    = "weekly_used_percent"
+	cnExtraSuffixWeeklyReset   = "weekly_reset_at"
+	cnExtraSuffixMonthlyUsed   = "monthly_used_percent"
+	cnExtraSuffixMonthlyReset  = "monthly_reset_at"
+	cnExtraSuffixUsageUpdated  = "usage_updated_at"
 )
 
 // providerVolcano 标识火山方舟（Volcengine Ark）Coding / Agent Plan 订阅账号，
@@ -64,11 +77,19 @@ func isVolcanoBaseURL(baseURL string) bool {
 }
 
 // resolveCNQuotaProvider 返回账号所属的 Coding Plan 额度供应商（kimi/zhipu/volcano）；
-// 非 coding 或无法识别返回 "". 火山订阅号账号（platform=deepseek，base_url 指向
-// ark.cn-beijing.volces.com）在 deepseek 创建/编辑界面保存为 payg，
-// GetCodingPlanProvider 按 coding 模式门控会返回空，此处按 base_url 兜底识别为
-// volcano；仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+// 非 coding 或无法识别返回 "". 火山识别按凭据原始 base_url 优先（详见下方说明），
+// 仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+//
+// 火山优先的必要性：火山订阅号账号的 platform 常被误存为 kimi/deepseek，且自适应
+// 协议 (api_protocol=adaptive) 账号的 GetOpenAIBaseURL() 优先取 api_base_urls 的
+// chat_completions（会指向 api.kimi.com 而非 ark.cn-beijing.volces.com）。若按
+// GetOpenAIBaseURL 判定，这类账号会被误判为 Kimi、探测发往 Kimi /usages 端点，返回
+// Kimi 结构的 0% 周用量且缺失 5h/月档。凭据 base_url 才是火山订阅号的唯一事实源，
+// 故先用 GetBaseURL()（= ark.cn-beijing.volces.com）强制识别为火山。
 func resolveCNQuotaProvider(account *Account) string {
+	if isVolcanoBaseURL(account.GetBaseURL()) {
+		return providerVolcano
+	}
 	provider := account.GetCodingPlanProvider()
 	if provider == "" && isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
 		return providerVolcano
@@ -81,6 +102,22 @@ type CNQuotaTier struct {
 	Window      string  `json:"window"`             // "5h" | "weekly"
 	UsedPercent float64 `json:"used_percent"`       // 已用百分比（0-100+，不做裁剪）
 	ResetAt     string  `json:"reset_at,omitempty"` // RFC3339，空表示无重置时间
+	// UsedPercentUnknown 标记 used_percent 上游不可得（如火山周窗口：限流响应头仅含
+	// 5h 窗口，周额度无可靠来源）。此时不得写假 0，仅落 reset_at，前端显示“未知”。
+	UsedPercentUnknown bool `json:"used_percent_unknown,omitempty"`
+}
+
+// MarshalJSON 在“用量未知”档位把 used_percent 序列化为 null（而非 0），前端据此显示
+// “未知/—”；其余档位保持数值。仅影响 API 响应序列化，不影响内部计算与持久化快照写入。
+func (t CNQuotaTier) MarshalJSON() ([]byte, error) {
+	type alias CNQuotaTier
+	if !t.UsedPercentUnknown {
+		return json.Marshal(alias(t))
+	}
+	return json.Marshal(struct {
+		alias
+		UsedPercent *float64 `json:"used_percent"`
+	}{alias: alias(t)})
 }
 
 // CNProviderQuotaProbeResult 是 Coding Plan 额度探测的返回结构（管理端 + UI 消费）。
@@ -170,10 +207,10 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 
 	baseURL := account.GetOpenAIBaseURL()
 	var (
-		targetURL     string
-		authHeader    string
-		probeHeaders  http.Header // 仅火山签名头；其余走 Authorization/独立覆写
-		skipOverrides bool        // 火山 SigV4 必须精确，禁止账号级请求头覆写污染签名
+		targetURL      string
+		authHeader     string
+		volcanoAPIKey  string
+		volcanoProfile volcanoPlanProfile
 	)
 	switch provider {
 	case PlatformKimi:
@@ -191,26 +228,31 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 		targetURL = zhipuQuotaURL(baseURL)
 		authHeader = apiKey // 智谱额度端点鉴权不加 Bearer 前缀
 	case providerVolcano:
-		ak := strings.TrimSpace(account.GetCredential("access_key"))
-		sk := strings.TrimSpace(account.GetCredential("secret_key"))
-		if ak == "" || sk == "" {
-			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_AKSK", "account access_key/secret_key is empty")
+		// 火山方舟 Agent/Coding Plan 额度无需 AK/SK，也不走 GetAFPUsage 管理 OpenAPI
+		// （该接口仅接受 AK/SK 签名，且 Agent Plan 额度“不可用于 API 调用”）。改用订阅
+		// API Key（ark-*, Bearer）对真实推理端点发一次最小请求，读取 OpenAI 兼容限流
+		// 响应头获取 5h 重置；周/月窗口按官方刷新规则确定性计算（详见下方 helper）。
+		apiKey := strings.TrimSpace(account.GetCNAPIKey())
+		if apiKey == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
 		}
-		// 火山方舟管理接口：open.volcengineapi.com，service=ark，region=cn-beijing。
-		// 探测动作由 base_url 路径决定：/api/plan → GetAFPUsage（Agent Plan 订阅，
-		// 走 Result.AFPFiveHour/AFPWeekly）；/api/coding → GetCodingPlanUsage
-		// （Coding Plan 订阅，走 Result.QuotaUsage[]，session=5h）。
-		host := "open.volcengineapi.com"
-		query := url.Values{}
-		query.Set("Action", volcanoUsageAction(baseURL))
-		query.Set("Version", volcanoQuotaVersion)
-		canonQuery, signedHeaders, err := volcEngineSignQuery(ak, sk, volcanoQuotaRegion, volcanoQuotaService, host, query, time.Now().UTC())
-		if err != nil {
-			return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_SIGN_FAILED", "sign request: %v", err)
+		// 火山 profile 必须用凭据原始 base_url（= ark.cn-beijing.volces.com）解析，
+		// 不取 baseURL（= GetOpenAIBaseURL，自适应账号会被 api_base_urls 覆盖为 kimi
+		// 端点）；否则 profile 解析失败而误报非火山端点。原生 Anthropic 协议火山账号
+		// 的 base URL 已由 GetAnthropicProtocolBaseURL 返回火山端点，同样可用。
+		volcanoBaseURL := account.GetBaseURL()
+		if account.IsAnthropicProtocol() {
+			volcanoBaseURL = account.GetAnthropicProtocolBaseURL()
 		}
-		targetURL = "https://" + host + "/?" + canonQuery
-		probeHeaders = signedHeaders
-		skipOverrides = true
+		profile, ok := parseVolcanoPlanProfile(volcanoBaseURL)
+		if !ok {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_VOLCANO_BASEURL", "account base_url is not a volcano plan endpoint")
+		}
+		volcanoProfile = profile
+		// targetURL 仅用于出站 URL 策略校验（host 与 Anthropic 端点一致），真实请求由
+		// buildVolcanoProbeRequest 按账号 API 协议构造（Anthropic→/v1/messages，OpenAI→/v3）。
+		targetURL = profile.openAIChatCompletionsURL()
+		volcanoAPIKey = apiKey
 	}
 
 	// 探测发起前过出站 URL 安全策略（与网关转发/Grok 探测同一套校验）：
@@ -224,27 +266,46 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	proxyURL := s.resolveProxyURL(ctx, account)
 	callCtx, cancel := context.WithTimeout(ctx, cnQuotaUpstreamTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	if provider == providerVolcano {
+		// 火山探测按候选模型依次尝试（model_mapping 排序值 + 默认回落模型）。某个 mapping
+		// 模型在当前方舟套餐不可用（model-not-found 类 4xx）时回落下一个候选，避免单一失效
+		// mapping 导致每次刷新都失败（外审 P2）。2xx/429（已获限流头）/鉴权失败（换模型无意义）
+		// 直接返回，不再重试。
+		models := volcanoProbeModels(account)
+		var lastResult *CNProviderQuotaProbeResult
+		for i, model := range models {
+			res, retryable, rerr := s.doVolcanoProbe(callCtx, ctx, account, volcanoProfile, volcanoAPIKey, model, proxyURL)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if res.Success || res.StatusCode == http.StatusTooManyRequests ||
+				res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+				return res, nil
+			}
+			lastResult = res
+			if !retryable || i == len(models)-1 {
+				return res, nil
+			}
+		}
+		if lastResult != nil {
+			return lastResult, nil
+		}
+		return nil, infraerrors.New(http.StatusInternalServerError, "CN_QUOTA_NO_PROBE_MODEL", "no volcano probe model available")
+	}
+
+	var req *http.Request
+	req, err = http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build request: %v", err)
 	}
-	if provider == providerVolcano {
-		for k := range probeHeaders {
-			req.Header.Set(k, probeHeaders.Get(k))
-		}
-	} else {
-		req.Header.Set("Authorization", authHeader)
-		req.Header.Set("Accept", "application/json")
-		if provider == PlatformZhipu {
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Accept-Language", "en-US,en")
-		}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Accept", "application/json")
+	if provider == PlatformZhipu {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept-Language", "en-US,en")
 	}
 	// 探测与真实转发保持同一套账号级请求头覆写，避免探测通过但转发失败。
-	// 火山除外：SigV4 的 SignedHeaders 必须与发送头完全一致，任何覆写都破坏签名。
-	if !skipOverrides {
-		account.ApplyHeaderOverrides(req.Header)
-	}
+	account.ApplyHeaderOverrides(req.Header)
 
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
 	if err != nil {
@@ -290,12 +351,6 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	case PlatformZhipu:
 		tiers = parseZhipuTokenTiers(gjson.GetBytes(bodyBytes, "data"))
 		result.PlanLevel = strings.TrimSpace(gjson.GetBytes(bodyBytes, "data.level").String())
-	case providerVolcano:
-		if strings.Contains(baseURL, "/api/plan") {
-			tiers = parseVolcanoAgentTiers(bodyBytes)
-		} else {
-			tiers = parseVolcanoCodingTiers(bodyBytes)
-		}
 	}
 	result.Tiers = tiers
 	result.Success = true
@@ -370,83 +425,248 @@ func kimiQuotaURL(baseURL string) string {
 	return base + "/v1/usages"
 }
 
-// 火山方舟用量管理接口（open.volcengineapi.com）固定参数。
-// Action/Version 走 GET 查询串签名；service=ark、region=cn-beijing 与账号资源区域一致。
-const (
-	volcanoQuotaService = "ark"
-	volcanoQuotaRegion  = "cn-beijing"
-	volcanoQuotaVersion = "2024-01-01"
-)
+// 火山方舟用量探测说明：
+// 火山方舟 Agent/Coding Plan 额度不可经管理 OpenAPI（GetAFPUsage / GetCodingPlanUsage，
+// 仅接受 AK/SK 签名）查询，且订阅账号创建时无 AK/SK 录入入口。正确做法是复用订阅 API
+// Key（ark-*, Bearer）对真实推理端点（{base}/v3/chat/completions）发一次最小请求，读取
+// OpenAI 兼容限流响应头获取 5h 滚动窗口重置与用量；周窗口按官方刷新规则（每周一 00:00
+// Asia/Shanghai）确定性计算。详见 parseVolcanoHeaderTiers / volcanoNextWeeklyReset。
 
-// volcanoUsageAction 根据账号 base_url 套餐选择方舟用量管理 Action（路径分类复用与模型
-// 同步/转发同一套 parseVolcanoPlanProfile，不复制第二份识别逻辑）。
-//   - /api/plan  → Agent Plan（方舟）订阅：GetAFPUsage → Result.AFPFiveHour/AFPWeekly
-//   - /api/coding → Coding Plan 订阅：GetCodingPlanUsage → Result.QuotaUsage[]
-func volcanoUsageAction(baseURL string) string {
-	if profile, ok := parseVolcanoPlanProfile(baseURL); ok && profile.Kind == volcanoPlanKindAgent {
-		return "GetAFPUsage"
+// volcanoQuotaProbeDefaultModel 是火山探测回落模型（model_mapping 为空时使用）。
+// 必须取方舟官方支持的通用模型 ID（与火山订阅文档候选一致，如 doubao-seed-2.0-lite /
+// doubao-seed-2.0-mini / doubao-seed-2.1-turbo）；基础版 doubao-seed-2.0 不在官方
+// 候选列表中，回落会得到 model-not-found 导致探测失败。Coding/Agent Plan 账号默认可用。
+const volcanoQuotaProbeDefaultModel = "doubao-seed-2.0-lite"
+
+// volcanoProbeModels 返回探测候选模型（按优先级）：账号 model_mapping 中所有非空上游模型
+// （按 key 确定性排序，避免随机命中不可用模型）后追加默认回落模型，去重。探测时依次尝试，
+// 某个 mapping 模型在当前方舟套餐不可用（model-not-found）时回落到下一个候选，保证最小请求
+// 总能拿到 200/429 与限流响应头（外审 P2）。
+func volcanoProbeModels(account *Account) []string {
+	seen := make(map[string]struct{})
+	var models []string
+	if account != nil {
+		if m := account.GetModelMapping(); len(m) > 0 {
+			// model_mapping 为 map，遍历顺序随机；按 key 确定性排序后取所有非空值，
+			// 避免每次探测随机选模型（可能命中不可用模型导致探针失败）。
+			keys := make([]string, 0, len(m))
+			for k := range m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if model := strings.TrimSpace(m[k]); model != "" {
+					if _, dup := seen[model]; !dup {
+						seen[model] = struct{}{}
+						models = append(models, model)
+					}
+				}
+			}
+		}
 	}
-	return "GetCodingPlanUsage"
+	if _, dup := seen[volcanoQuotaProbeDefaultModel]; !dup {
+		models = append(models, volcanoQuotaProbeDefaultModel)
+	}
+	return models
 }
 
-// parseVolcanoAgentTiers 解析方舟 Agent Plan 订阅（GetAFPUsage）响应。
+// volcanoProbeModel 取首个候选（与 volcanoProbeModels()[0] 一致），供测试与单模型路径使用。
+func volcanoProbeModel(account *Account) string {
+	models := volcanoProbeModels(account)
+	if len(models) == 0 {
+		return volcanoQuotaProbeDefaultModel
+	}
+	return models[0]
+}
+
+// doVolcanoProbe 对单个候选模型发一次火山最小探活请求并解析响应。返回值：
+//   - *CNProviderQuotaProbeResult：本次探测结果（含是否已落快照）；
+//   - bool：是否为“模型不可用”可重试错误（model-not-found 类 4xx），调用方据此尝试下一候选；
+//   - error：请求构造/传输层错误（非业务响应），调用方直接返回，不再换模型重试。
+func (s *CNProviderQuotaService) doVolcanoProbe(callCtx, ctx context.Context, account *Account, profile volcanoPlanProfile, apiKey, model, proxyURL string) (*CNProviderQuotaProbeResult, bool, error) {
+	req, err := buildVolcanoProbeRequest(callCtx, account, profile, model, apiKey)
+	if err != nil {
+		return nil, false, infraerrors.Newf(http.StatusInternalServerError, "CN_QUOTA_REQUEST_BUILD_FAILED", "build volcano request: %v", err)
+	}
+	// 探测与真实转发保持同一套账号级请求头覆写，避免探测通过但转发失败。
+	account.ApplyHeaderOverrides(req.Header)
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	if err != nil {
+		return nil, false, infraerrors.Newf(http.StatusBadGateway, "CN_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, cnQuotaMaxBodyBytes))
+	now := time.Now().UTC()
+	result := &CNProviderQuotaProbeResult{
+		Provider:   providerVolcano,
+		Source:     "coding_plan",
+		FetchedAt:  now.Unix(),
+		StatusCode: resp.StatusCode,
+	}
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		// 鉴权失败：不落快照，仅返回失败结果供前端提示。
+		result.Error = fmt.Sprintf("Authentication failed (HTTP %d)", resp.StatusCode)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// 429 同样携带 x-ratelimit-* 头，凭据有效，落 5h 重置快照。
+		if tiers := parseVolcanoHeaderTiers(resp.Header); len(tiers) > 0 {
+			if perr := s.accountRepo.UpdateExtra(ctx, account.ID, cnQuotaExtraUpdates(providerVolcano, tiers, now)); perr != nil {
+				slog.Warn("cn_quota_persist_failed", "account_id", account.ID, "provider", providerVolcano, "error", perr)
+			} else {
+				result.Persisted = true
+			}
+		}
+		result.CredentialValid = true
+		result.Error = fmt.Sprintf("Rate limited (HTTP 429): %s", truncate(strings.TrimSpace(string(bodyBytes)), 240))
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		result.Error = fmt.Sprintf("API error (HTTP %d): %s", resp.StatusCode, truncate(strings.TrimSpace(string(bodyBytes)), 240))
+		// 模型不可用（model-not-found 类 4xx）可触发回落到下一候选模型。
+		return result, isVolcanoModelNotFoundError(bodyBytes, resp.StatusCode), nil
+	default:
+		// 5h 滚动窗口从 OpenAI 兼容限流响应头读取；周窗口按官方刷新规则
+		// （每周一 00:00 Asia/Shanghai）确定性计算，不参与倚赖响应体的解析。
+		tiers := parseVolcanoHeaderTiers(resp.Header)
+		result.Tiers = tiers
+		result.Success = true
+		result.CredentialValid = true
+		if perr := s.accountRepo.UpdateExtra(ctx, account.ID, cnQuotaExtraUpdates(providerVolcano, tiers, now)); perr != nil {
+			slog.Warn("cn_quota_persist_failed", "account_id", account.ID, "provider", providerVolcano, "error", perr)
+		} else {
+			result.Persisted = true
+		}
+	}
+	return result, false, nil
+}
+
+// isVolcanoModelNotFoundError 判断火山响应是否为“模型不可用”类错误（HTTP 400/404 且 error
+// 字段指向模型不存在/不支持）。此类错误应触发探测回落到下一个候选模型，而非判定为账号级故障。
+func isVolcanoModelNotFoundError(body []byte, status int) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound {
+		return false
+	}
+	code := strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	if code != "" {
+		if strings.Contains(code, "model") {
+			return true
+		}
+		// 部分实现用通用 invalid_request_error，需配合 message 含模型关键字才判定为模型错误。
+		if code == "invalid_request_error" && strings.Contains(msg, "model") {
+			return true
+		}
+	}
+	return strings.Contains(msg, "model") &&
+		(strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist") ||
+			strings.Contains(msg, "unsupported") || strings.Contains(msg, "not available") ||
+			strings.Contains(msg, "no access") || strings.Contains(msg, "forbidden"))
+}
+
+// parseVolcanoHeaderTiers 从 OpenAI 兼容限流响应头解析火山方舟滚动窗口用量。
 //
-//	Result.AFPFiveHour / Result.AFPWeekly：{Quota, Used, ResetTime(ms)}
-//	Used 为 Quota 单位内的已用量，百分比 = Used/Quota*100。立即量参与 5h + weekly 两档。
-func parseVolcanoAgentTiers(body []byte) []CNQuotaTier {
+//   - 5h 窗口：x-ratelimit-reset-requests（绝对 Unix 秒级时间戳；部分实现返回相对秒数时
+//     按 now+秒 处理）为重置时间；x-ratelimit-limit/remaining-requests 计算已用百分比。
+//     limit 与 remaining 必须同时可解析才计算用量，否则 remaining 缺失/畸形视为未知（用 0，
+//     绝不算成 100% 满额），避免健康账号被误暂停。
+//   - 周/月窗口：官方控制台展示近一周、近一月两档，但 OpenAI 兼容限流响应头仅含 5h 窗口，
+//     故周、月额度无可靠上游来源，used 标记 Unknown，只落 reset_at，前端显示“未知”而非假 0；
+//     重置时间按官方刷新规则确定性计算（每周一 00:00、每月同一天 23:59:59，Asia/Shanghai）。
+//
+// 只要 5h/周/月窗口有有效重置时间即返回对应 tier，供前端渲染倒计时。
+func parseVolcanoHeaderTiers(h http.Header) []CNQuotaTier {
 	var tiers []CNQuotaTier
-	for _, w := range []struct{ path, window string }{
-		{"Result.AFPFiveHour", "5h"},
-		{"Result.AFPWeekly", "weekly"},
-	} {
-		node := gjson.GetBytes(body, w.path)
-		if !node.Exists() {
-			continue
+	if resetAt, ok := parseVolcanoResetHeader(h.Get("x-ratelimit-reset-requests")); ok {
+		used := 0.0
+		usedUnknown := true
+		if limit, lErr := strconv.ParseFloat(strings.TrimSpace(h.Get("x-ratelimit-limit-requests")), 64); lErr == nil && limit > 0 {
+			if remaining, rErr := strconv.ParseFloat(strings.TrimSpace(h.Get("x-ratelimit-remaining-requests")), 64); rErr == nil {
+				used = (limit - remaining) / limit * 100
+				if used < 0 {
+					used = 0
+				}
+				usedUnknown = false
+			}
+			// remaining 解析失败：保持 used=0 且 usedUnknown=true，前端显示"—"，不误报 100% 满额。
 		}
-		quota, _ := cnParseF64(node.Get("Quota").Value())
-		used, _ := cnParseF64(node.Get("Used").Value())
-		var util float64
-		if quota > 0 {
-			util = used / quota * 100
-		}
+		// limit 缺失/畸形：用量未知（usedUnknown=true），渲染为"—"，不被 scheduler 当作已用满。
 		tiers = append(tiers, CNQuotaTier{
-			Window:      w.window,
-			UsedPercent: util,
-			ResetAt:     cnMillisToRFC3339(node.Get("ResetTime").Int()),
+			Window:             "5h",
+			UsedPercent:        used,
+			ResetAt:            resetAt,
+			UsedPercentUnknown: usedUnknown,
+		})
+	}
+	if reset := volcanoNextWeeklyReset(); reset != "" {
+		tiers = append(tiers, CNQuotaTier{
+			Window:             "weekly",
+			UsedPercent:        0,
+			ResetAt:            reset,
+			UsedPercentUnknown: true,
+		})
+	}
+	if reset := volcanoNextMonthlyReset(); reset != "" {
+		tiers = append(tiers, CNQuotaTier{
+			Window:             "monthly",
+			UsedPercent:        0,
+			ResetAt:            reset,
+			UsedPercentUnknown: true,
 		})
 	}
 	return tiers
 }
 
-// parseVolcanoCodingTiers 解析 Coding Plan 订阅（GetCodingPlanUsage）响应。
-//
-//	Result.QuotaUsage[]：{Level:"session"|"weekly"|"monthly", Percent, ResetTimestamp(sec)}
-//	Percent 已是百分比（0-100），直接采用；ResetTimestamp 为秒级，-1 表示尚无重置（忽略）。
-//	session 即 5h 滚动窗口，锚定首次请求；monthly 不参与 5h/weekly 档位。
-func parseVolcanoCodingTiers(body []byte) []CNQuotaTier {
-	var tiers []CNQuotaTier
-	gjson.GetBytes(body, "Result.QuotaUsage").ForEach(func(_, item gjson.Result) bool {
-		var window string
-		switch strings.ToLower(item.Get("Level").String()) {
-		case "session":
-			window = "5h"
-		case "weekly":
-			window = "weekly"
-		default:
-			return true // monthly 等不参与 5h/weekly 档位
-		}
-		var percent float64
-		if p, ok := cnParseF64(item.Get("Percent").Value()); ok {
-			percent = p
-		}
-		tiers = append(tiers, CNQuotaTier{
-			Window:      window,
-			UsedPercent: percent,
-			ResetAt:     cnMillisToRFC3339(item.Get("ResetTimestamp").Int()),
-		})
-		return true
-	})
-	return tiers
+// parseVolcanoResetHeader 解析 OpenAI 兼容限流重置头（x-ratelimit-reset-*）：
+// 复用 xai.ParseResetHeader，兼容秒级 epoch、毫秒 epoch、相对秒、Go duration（6m0s）、
+// RFC3339 时间戳；结果必须落在未来，否则返回空（避免毫秒 epoch 误读为几万年后的时间戳）。
+func parseVolcanoResetHeader(raw string) (string, bool) {
+	epoch := xai.ParseResetHeader(raw)
+	if epoch == nil {
+		return "", false
+	}
+	t := time.Unix(*epoch, 0)
+	if !t.After(time.Now()) {
+		return "", false
+	}
+	return t.UTC().Format(time.RFC3339), true
+}
+
+// volcanoNextWeeklyReset 返回下一个周一 00:00（Asia/Shanghai）的 RFC3339 字符串。
+// 官方规则：周限额每周一 00:00 刷新，确定性计算，不依赖上游响应。
+func volcanoNextWeeklyReset() string {
+	now := time.Now().In(volcanoPlanLoc)
+	// 本周一 00:00（按 Asia/Shanghai）。
+	weekday := int(now.Weekday()) // Sunday=0 … Saturday=6
+	daysSinceMonday := (weekday + 6) % 7
+	monday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, volcanoPlanLoc).
+		AddDate(0, 0, -daysSinceMonday)
+	if !monday.After(now) {
+		monday = monday.AddDate(0, 0, 7)
+	}
+	return monday.UTC().Format(time.RFC3339)
+}
+
+// volcanoNextMonthlyReset 返回下一个月同一天 23:59:59（Asia/Shanghai）的 RFC3339 字符串。
+// 火山方舟 Agent/Coding Plan 控制台展示近一月用量，月限额随包月订阅周期刷新；无状态时按
+// "下个月同一天 23:59:59" 近似。若目标月份不存在该日期（如 1 月 31 日 → 2 月），则取目标月
+// 最后一天，避免溢出到下下个月。
+func volcanoNextMonthlyReset() string {
+	return volcanoNextMonthlyResetAt(time.Now().In(volcanoPlanLoc))
+}
+
+// volcanoNextMonthlyResetAt 是 volcanoNextMonthlyReset 的可测试版本，接受固定 now。
+func volcanoNextMonthlyResetAt(now time.Time) string {
+	// 先尝试下个月同一天 23:59:59；Go time.Date 会规范化溢出日期。
+	next := time.Date(now.Year(), now.Month()+1, now.Day(), 23, 59, 59, 0, volcanoPlanLoc)
+	if next.Month() != now.Month()+1 && !(now.Month() == 11 && next.Month() == 0) {
+		// 日期溢出导致跳到了下下个月（或跨年异常），回退到目标月最后一天。
+		firstOfTarget := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, volcanoPlanLoc)
+		next = firstOfTarget.AddDate(0, 1, -1)
+		next = time.Date(next.Year(), next.Month(), next.Day(), 23, 59, 59, 0, volcanoPlanLoc)
+	}
+	if !next.After(now) {
+		next = next.AddDate(0, 1, 0)
+	}
+	return next.UTC().Format(time.RFC3339)
 }
 
 func zhipuQuotaHost(baseURL string) string {
@@ -680,7 +900,18 @@ func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) ma
 	if presentWindows["5h"] {
 		for _, t := range tiers {
 			if t.Window == "5h" {
-				writeTier(cnExtraSuffix5hUsed, cnExtraSuffix5hReset, t.UsedPercent, t.ResetAt)
+				if t.UsedPercentUnknown {
+					// 5h 用量上游不可得（limit/remaining 缺失/畸形）时不得写假 0，否则前端渲染为
+					// 0% 误导“未用”并影响调度；仅落重置时间，used 键置 nil 让前端显示“未知/—”。
+					if t.ResetAt != "" {
+						updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = t.ResetAt
+					} else {
+						updates[cnExtraKey(provider, cnExtraSuffix5hReset)] = nil
+					}
+					updates[cnExtraKey(provider, cnExtraSuffix5hUsed)] = nil
+				} else {
+					writeTier(cnExtraSuffix5hUsed, cnExtraSuffix5hReset, t.UsedPercent, t.ResetAt)
+				}
 				break
 			}
 		}
@@ -692,7 +923,18 @@ func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) ma
 	if presentWindows["weekly"] {
 		for _, t := range tiers {
 			if t.Window == "weekly" {
-				writeTier(cnExtraSuffixWeeklyUsed, cnExtraSuffixWeeklyReset, t.UsedPercent, t.ResetAt)
+				if t.UsedPercentUnknown {
+					// 周用量上游不可得（限流响应头仅含 5h 窗口），不得写假 0 覆盖旧值/
+					// 误导“未用”。仅落确定性重置时间；used 键置 nil 让前端显示“未知”。
+					if t.ResetAt != "" {
+						updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = t.ResetAt
+					} else {
+						updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = nil
+					}
+					updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = nil
+				} else {
+					writeTier(cnExtraSuffixWeeklyUsed, cnExtraSuffixWeeklyReset, t.UsedPercent, t.ResetAt)
+				}
 				break
 			}
 		}
@@ -700,6 +942,28 @@ func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) ma
 		// 缺 weekly 档：清除残留的 weekly used + reset 键。
 		updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = nil
 		updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = nil
+	}
+	if presentWindows["monthly"] {
+		for _, t := range tiers {
+			if t.Window == "monthly" {
+				if t.UsedPercentUnknown {
+					// 月用量上游不可得，不得写假 0。仅落确定性重置时间；used 键置 nil。
+					if t.ResetAt != "" {
+						updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = t.ResetAt
+					} else {
+						updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = nil
+					}
+					updates[cnExtraKey(provider, cnExtraSuffixMonthlyUsed)] = nil
+				} else {
+					writeTier(cnExtraSuffixMonthlyUsed, cnExtraSuffixMonthlyReset, t.UsedPercent, t.ResetAt)
+				}
+				break
+			}
+		}
+	} else {
+		// 缺 monthly 档：清除残留的 monthly used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffixMonthlyUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = nil
 	}
 	return updates
 }

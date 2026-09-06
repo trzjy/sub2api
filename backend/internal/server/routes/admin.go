@@ -158,7 +158,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.POST("/accounts/refresh-cookie", h.Admin.Xianyu.RefreshCookie)
 		xianyu.POST("/accounts/clear-credentials", h.Admin.Xianyu.ClearCredentials)
 		xianyu.POST("/accounts/login-session", h.Admin.Xianyu.CreateLoginSession)
-		xianyu.GET("/accounts/:account_id/login-session", h.Admin.Xianyu.QueryLoginSession)
+		xianyu.GET("/accounts/login-session/:session_id", h.Admin.Xianyu.QueryLoginSession)
 
 		xianyu.GET("/products", h.Admin.Xianyu.Products)
 		xianyu.POST("/products/sync", h.Admin.Xianyu.SyncProducts)
