@@ -260,21 +260,14 @@ async def internal_list_cards(
     from common.utils.auth_scope import resolve_owner_scope
 
     owner_id, _ = resolve_owner_scope(service_user)
-    cards = (
-        (await session.execute(select(Card).where(Card.user_id == owner_id).order_by(Card.id)))
-        .scalars()
-        .all()
-    )
-    relations = (
-        (
-            await session.execute(
-                select(CardItemRelation.card_id, CardItemRelation.item_id).where(
-                    CardItemRelation.user_id == owner_id
-                )
-            )
-        )
-        .all()
-    )
+    card_stmt = select(Card).order_by(Card.id)
+    if owner_id is not None:
+        card_stmt = card_stmt.where(Card.user_id == owner_id)
+    cards = (await session.execute(card_stmt)).scalars().all()
+    rel_stmt = select(CardItemRelation.card_id, CardItemRelation.item_id)
+    if owner_id is not None:
+        rel_stmt = rel_stmt.where(CardItemRelation.user_id == owner_id)
+    relations = ((await session.execute(rel_stmt))).all()
     item_ids_by_card: Dict[int, List[str]] = {}
     for card_id, item_id in relations:
         item_ids_by_card.setdefault(card_id, []).append(item_id)
@@ -307,14 +300,10 @@ async def internal_update_card_description(
 
     owner_id, _ = resolve_owner_scope(service_user)
     description = str((body or {}).get("description") or "").strip()[:2000]
-    card = (
-        (
-            await session.execute(
-                select(Card).where(Card.id == card_id, Card.user_id == owner_id)
-            )
-        )
-        .scalar_one_or_none()
-    )
+    card_stmt = select(Card).where(Card.id == card_id)
+    if owner_id is not None:
+        card_stmt = card_stmt.where(Card.user_id == owner_id)
+    card = ((await session.execute(card_stmt))).scalar_one_or_none()
     if not card:
         raise HTTPException(status_code=404, detail="卡券不存在")
     card.description = description or None
