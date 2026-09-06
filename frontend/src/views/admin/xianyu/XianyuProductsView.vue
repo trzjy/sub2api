@@ -127,8 +127,8 @@
                     {{ t('admin.xianyu.products.bind') }}
                   </button>
                   <template v-else>
-                    <button class="btn btn-primary btn-xs" @click="openBind(product)">
-                      {{ t('admin.xianyu.products.bind') }}
+                    <button class="btn btn-secondary btn-xs" @click="openBind(product)">
+                      {{ t('admin.xianyu.products.rebind') }}
                     </button>
                     <button class="btn btn-secondary btn-xs" @click="unbind(product)">
                       {{ t('admin.xianyu.products.unbind') }}

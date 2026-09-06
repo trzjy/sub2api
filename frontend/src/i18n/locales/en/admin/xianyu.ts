@@ -93,6 +93,7 @@ export default {
       removed: 'Removed',
       disabled: 'Disabled',
       bind: 'Bind',
+      rebind: 'Rebind',
       unbind: 'Unbind',
       bindToPool: 'Bind to Pool',
       selectPool: 'Select pool',

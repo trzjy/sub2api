@@ -93,6 +93,7 @@ export default {
       removed: '已下架',
       disabled: '已禁用',
       bind: '绑定',
+      rebind: '换绑',
       unbind: '解绑',
       bindToPool: '绑定到库存池',
       selectPool: '请选择库存池',
