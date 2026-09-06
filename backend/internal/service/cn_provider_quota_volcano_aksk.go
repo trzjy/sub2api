@@ -112,8 +112,10 @@ func (s *CNProviderQuotaService) volcanoAKSKProbe(ctx context.Context, account *
 
 // inheritVolcanoSiblingAKSK 同主体继承：在本账号未录入 AK/SK 时，查找同 base_url
 // （同一火山订阅主体）的其他账号已录入的访问密钥。按 deepseek/kimi 两个挂靠平台各查一遍。
+// base_url 比对前做归一化：OpenAI 协议账号常带 /v3 协议后缀（如 /api/plan/v3），
+// 与订阅主体 base（/api/plan）是同一主体，须视为相同。
 func (s *CNProviderQuotaService) inheritVolcanoSiblingAKSK(ctx context.Context, account *Account) (string, string) {
-	baseURL := strings.TrimRight(account.GetBaseURL(), "/")
+	baseURL := normalizeVolcanoPlanBaseURL(account.GetBaseURL())
 	for _, platform := range []string{PlatformDeepseek, PlatformKimi} {
 		siblings, err := s.accountRepo.ListByPlatform(ctx, platform)
 		if err != nil {
@@ -124,7 +126,7 @@ func (s *CNProviderQuotaService) inheritVolcanoSiblingAKSK(ctx context.Context, 
 			if cand.ID == account.ID {
 				continue
 			}
-			if strings.TrimRight(cand.GetBaseURL(), "/") != baseURL {
+			if normalizeVolcanoPlanBaseURL(cand.GetBaseURL()) != baseURL {
 				continue
 			}
 			ak := strings.TrimSpace(cand.GetCredential("access_key"))
@@ -136,6 +138,15 @@ func (s *CNProviderQuotaService) inheritVolcanoSiblingAKSK(ctx context.Context, 
 		}
 	}
 	return "", ""
+}
+
+// normalizeVolcanoPlanBaseURL 归一化火山订阅 base_url：去尾部斜杠与 OpenAI/Anthropic
+// 协议路径后缀（/v3、/v1），使 /api/plan/v3 与 /api/plan 视为同一订阅主体。
+func normalizeVolcanoPlanBaseURL(raw string) string {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	u = strings.TrimSuffix(u, "/v3")
+	u = strings.TrimSuffix(u, "/v1")
+	return strings.TrimRight(u, "/")
 }
 
 // volcanoUsageAction 根据账号 base_url 路径选择方舟用量管理 Action。
