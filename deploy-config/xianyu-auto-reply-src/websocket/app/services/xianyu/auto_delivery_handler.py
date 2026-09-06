@@ -3413,6 +3413,7 @@ class AutoDeliveryHandler:
                 'spec_name': spec_name or '',
                 'spec_value': spec_value or '',
                 'timestamp': str(int(time.time())),
+                'chat_id': chat_id or '',
             }
 
             # 买家明文昵称：仅当参数中含 {buyer_name} 时才解析（避免无谓的接口请求）
