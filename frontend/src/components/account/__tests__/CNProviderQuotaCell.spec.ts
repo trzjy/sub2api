@@ -246,4 +246,29 @@ describe('CNProviderQuotaCell', () => {
     expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
     expect(queryQuota).not.toHaveBeenCalled()
   })
+
+  // 外审 P1：火山周用量上游不可得（仅 volcano_weekly_reset_at，无 weekly_used_percent）时，
+  // 周档仍渲染倒计时，用量显示为“—/未知”，不再写假 0 诱出渲染、误导“未用”。
+  it('renders volcano weekly countdown with unknown usage when weekly_used_percent is absent', async () => {
+    const unknownWeekly = {
+      id: 29,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'payg', base_url: 'https://ark.cn-beijing.volces.com/api/coding/v3' },
+      extra: {
+        volcano_5h_used_percent: 12.5,
+        volcano_5h_reset_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+        volcano_weekly_reset_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+        volcano_usage_updated_at: new Date().toISOString()
+      }
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: unknownWeekly } })
+    await flushPromises()
+    const tiers = wrapper.findAll('[data-test="cn-provider-quota-tier"]')
+    expect(tiers).toHaveLength(2)
+    // 周档用量未知 → 显示 “—”
+    expect(wrapper.text()).toContain('—')
+    // 5h 档用量仍正常
+    expect(wrapper.text()).toContain('13%')
+  })
 })

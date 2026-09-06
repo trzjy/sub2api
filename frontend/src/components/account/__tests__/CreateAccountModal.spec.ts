@@ -535,55 +535,50 @@ describe('CreateAccountModal volcano subscription', () => {
     await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue(baseUrl)
   }
 
-  it('writes volcano access_key/secret_key on create when endpoint is a Volcano base url', async () => {
+  it('creates a Volcano subscription account using only the ark api_key (no AK/SK)', async () => {
     const wrapper = mountModal()
     await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/plan')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano account')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
-    await ak.setValue('AKLT-create-ak')
-    await sk.setValue('volc-secret')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('ark-test-key')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
     expect(createAccountMock).toHaveBeenCalled()
     const creds = createAccountMock.mock.calls[0]?.[0]?.credentials
-    expect(creds).toMatchObject({ access_key: 'AKLT-create-ak', secret_key: 'volc-secret' })
+    expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
+    // 火山订阅号用量探测走 ark API Key Bearer + 真实请求，无需 AK/SK 签名，
+    // 创建时不应写入 access_key/secret_key。
+    expect(creds?.access_key).toBeUndefined()
+    expect(creds?.secret_key).toBeUndefined()
   })
 
-  it('does not carry volcano AK/SK across create submissions (resetForm clears)', async () => {
+  it('does not write AK/SK for consecutive Volcano account creations', async () => {
     const wrapper = mountModal()
     await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/plan')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano A')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek')
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    const sk = wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]')
-    await ak.setValue('AK-A')
-    await sk.setValue('SK-A')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('ark-key-a')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
-    // 关闭再打开 → resetForm 清空火山密钥输入，避免残留误写入下一个账号
+    // 关闭再打开 → 重新创建第二个火山账号
     await wrapper.setProps({ show: false })
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    // 火山 B：不重新填写 AK/SK 直接提交
     createAccountMock.mockResolvedValue({ id: 2, platform: 'deepseek', type: 'apikey' })
     await openVolcano(wrapper, 'https://ark.cn-beijing.volces.com/api/coding')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('volcano B')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-deepseek-2')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('ark-key-b')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
     expect(createAccountMock).toHaveBeenCalled()
     const last = createAccountMock.mock.calls[createAccountMock.mock.calls.length - 1]?.[0]?.credentials
-    expect(last?.access_key).not.toBe('AK-A')
-    expect(last?.secret_key).not.toBe('SK-A')
+    expect(last?.access_key).toBeUndefined()
+    expect(last?.secret_key).toBeUndefined()
   })
 
-  it('recognizes Volcano subscription when adaptive chat_completions is whitespace but base_url is volcano', async () => {
+  it('recognizes Volcano subscription and preserves endpoint (api_key shown, no AK/SK inputs)', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
@@ -602,8 +597,11 @@ describe('CreateAccountModal volcano subscription', () => {
     // adaptive 下把 chat_completions 设为空白串（旧逻辑会误判为非火山）
     await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue('   ')
     await flushPromises()
-    const ak = wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]')
-    expect(ak.exists()).toBe(true)
+    // 火山订阅号应识别成功：展示 api_key 输入框、且不出现 AK/SK 输入框。
+    const pw = wrapper.find('form#create-account-form input[type="password"]')
+    expect(pw.exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(false)
   })
 
   it('keeps Volcano endpoint after switching chat_completions <-> adaptive (no silent fallback)', async () => {

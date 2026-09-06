@@ -160,7 +160,7 @@ import Select from '@/components/common/Select.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { extractI18nErrorMessage } from '@/utils/apiError'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -201,7 +201,7 @@ async function load() {
       total.value = resp.total ?? 0
     }
   } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
   } finally {
     loading.value = false
   }
@@ -267,7 +267,7 @@ async function doResend() {
     await load()
     appStore.showSuccess(t('admin.xianyu.deliveries.resendConfirmed'))
   } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
   }
 }
 

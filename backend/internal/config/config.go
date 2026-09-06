@@ -2090,6 +2090,7 @@ func setDefaults() {
 		"api.moonshot.ai",
 		"api.moonshot.cn",
 		"open.bigmodel.cn",
+		"ark.cn-beijing.volces.com", // 火山方舟 Agent/Coding Plan 配额探测端点（订阅 API Key Bearer 最小请求）
 		"api.minimaxi.com",
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",

@@ -4,8 +4,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
-	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -741,48 +742,83 @@ func TestGetAnthropicAPIKeyAuthScheme_CNProvider(t *testing.T) {
 	require.Equal(t, AnthropicAPIKeyAuthSchemeAuthorizationBearer, zhipu.GetAnthropicAPIKeyAuthScheme())
 }
 
-// TestVolcanoUsageAction 路径决定管理 Action：/api/plan → GetAFPUsage，其余 → GetCodingPlanUsage。
-func TestVolcanoUsageAction(t *testing.T) {
+// TestParseVolcanoHeaderTiers 火山从 OpenAI 兼容限流响应头解析 5h + 周窗口：
+// x-ratelimit-reset-requests（绝对 Unix 秒）→ 5h 重置；limit/remaining → 5h 已用百分比；
+// 周窗口按官方规则确定性计算，恒有 reset_at。
+func TestParseVolcanoHeaderTiers(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, "GetAFPUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/api/plan"))
-	require.Equal(t, "GetCodingPlanUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/api/coding"))
-	require.Equal(t, "GetCodingPlanUsage", volcanoUsageAction("https://ark.cn-beijing.volces.com/v1/chat/completions"))
-}
-
-// TestParseVolcanoAgentTiers 方舟 Agent Plan：AFPFiveHour/AFPWeekly 的
-// Used/Quota → 百分比，ResetTime(ms) → RFC3339。
-func TestParseVolcanoAgentTiers(t *testing.T) {
-	t.Parallel()
-	body := []byte(`{"Result":{
-		"AFPFiveHour":{"Quota":10000,"Used":2000,"ResetTime":1788484203000},
-		"AFPWeekly":{"Quota":35000,"Used":7000,"ResetTime":1788710400000}
-	}}`)
-	tiers := parseVolcanoAgentTiers(body)
+	resetUnix := time.Now().Add(3 * time.Hour).Unix()
+	h := http.Header{}
+	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(resetUnix, 10))
+	h.Set("x-ratelimit-limit-requests", "100")
+	h.Set("x-ratelimit-remaining-requests", "80")
+	tiers := parseVolcanoHeaderTiers(h)
 	require.Len(t, tiers, 2)
 	require.Equal(t, "5h", tiers[0].Window)
 	require.InDelta(t, 20.0, tiers[0].UsedPercent, 1e-9)
-	require.Equal(t, "2026-09-04T01:10:03Z", tiers[0].ResetAt)
+	require.Equal(t, time.Unix(resetUnix, 0).UTC().Format(time.RFC3339), tiers[0].ResetAt)
+	require.False(t, tiers[0].UsedPercentUnknown, "limit/remaining 齐备时 5h 用量已知")
 	require.Equal(t, "weekly", tiers[1].Window)
-	require.InDelta(t, 20.0, tiers[1].UsedPercent, 1e-9)
+	require.NotEmpty(t, tiers[1].ResetAt)
 }
 
-// TestParseVolcanoCodingTiers Coding Plan：QuotaUsage[] 的 Percent 直接采用，
-// session=5h / weekly，ResetTimestamp(sec) → RFC3339，monthly 丢弃，-1 忽略。
-func TestParseVolcanoCodingTiers(t *testing.T) {
+// TestParseVolcanoHeaderTiersNo5hHeader 缺 5h 限流头时仅确定性周窗口 tier（仍渲染倒计时）。
+func TestParseVolcanoHeaderTiersNo5hHeader(t *testing.T) {
 	t.Parallel()
-	body := []byte(`{"Result":{"QuotaUsage":[
-		{"Level":"session","Percent":0,"ResetTimestamp":-1,"Cap":100},
-		{"Level":"weekly","Percent":55,"ResetTimestamp":1788710400,"Cap":100},
-		{"Level":"monthly","Percent":3,"ResetTimestamp":1791129599,"Cap":100}
-	]}}`)
-	tiers := parseVolcanoCodingTiers(body)
-	require.Len(t, tiers, 2)
-	require.Equal(t, "5h", tiers[0].Window)
-	require.InDelta(t, 0.0, tiers[0].UsedPercent, 1e-9)
-	require.Equal(t, "", tiers[0].ResetAt) // -1 无重置
-	require.Equal(t, "weekly", tiers[1].Window)
-	require.InDelta(t, 55.0, tiers[1].UsedPercent, 1e-9)
-	require.Equal(t, "2026-09-06T16:00:00Z", tiers[1].ResetAt) // 1788710400s
+	tiers := parseVolcanoHeaderTiers(http.Header{})
+	require.Len(t, tiers, 1)
+	require.Equal(t, "weekly", tiers[0].Window)
+	require.NotEmpty(t, tiers[0].ResetAt)
+}
+
+// TestParseVolcanoResetHeader 解析绝对 Unix 秒与相对秒数，拒空/非法/非未来。
+func TestParseVolcanoResetHeader(t *testing.T) {
+	t.Parallel()
+	resetUnix := time.Now().Add(3 * time.Hour).Unix()
+	s, ok := parseVolcanoResetHeader(strconv.FormatInt(resetUnix, 10))
+	require.True(t, ok)
+	require.Equal(t, time.Unix(resetUnix, 0).UTC().Format(time.RFC3339), s)
+
+	// 相对秒数（小整数）→ now+秒，落在未来。
+	rel := strconv.FormatInt(int64(time.Now().Add(2*time.Hour).Sub(time.Now()).Seconds())+1, 10)
+	s2, ok2 := parseVolcanoResetHeader(rel)
+	require.True(t, ok2)
+	require.NotEmpty(t, s2)
+
+	_, ok3 := parseVolcanoResetHeader("")
+	require.False(t, ok3)
+	_, ok4 := parseVolcanoResetHeader("not-a-number")
+	require.False(t, ok4)
+	_, ok5 := parseVolcanoResetHeader("0")
+	require.False(t, ok5)
+}
+
+// TestVolcanoNextWeeklyReset 下一个周一 00:00（Asia/Shanghai），且必在未来。
+func TestVolcanoNextWeeklyReset(t *testing.T) {
+	t.Parallel()
+	reset := volcanoNextWeeklyReset()
+	require.NotEmpty(t, reset)
+	parsed, err := time.Parse(time.RFC3339, reset)
+	require.NoError(t, err)
+	local := parsed.In(volcanoPlanLoc)
+	require.Equal(t, time.Monday, local.Weekday())
+	require.Equal(t, 0, local.Hour())
+	require.Equal(t, 0, local.Minute())
+	require.Equal(t, 0, local.Second())
+	require.True(t, local.After(time.Now().In(volcanoPlanLoc)))
+}
+
+// TestVolcanoProbeModel 取 model_mapping 首个上游模型，缺映射回落默认模型。
+func TestVolcanoProbeModel(t *testing.T) {
+	t.Parallel()
+	acc := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"gpt-4o": "ark-model-x", "gpt-4o-mini": "ark-model-y"},
+		},
+	}
+	require.Equal(t, "ark-model-x", volcanoProbeModel(acc))
+	require.Equal(t, volcanoQuotaProbeDefaultModel, volcanoProbeModel(&Account{Platform: PlatformDeepseek}))
 }
 
 // TestVolcanoExtraUpdatesAndSnapshotReset volcano 快照写 volcano_ 前缀，且
@@ -809,29 +845,225 @@ func TestVolcanoExtraUpdatesAndSnapshotReset(t *testing.T) {
 	require.Equal(t, "2026-09-04T11:00:00Z", reset.UTC().Format(time.RFC3339))
 }
 
-// TestVolcEngineSignQuerySignature 固定输入下幂等且签名头齐全（Host/X-Date/
-// X-Content-Sha256/Authorization），SignedHeaders 为 host;x-content-sha256;x-date。
-func TestVolcEngineSignQuerySignature(t *testing.T) {
+// TestVolcanoRealRequestProbe 火山走真实推理端点最小请求（Bearer ark 密钥 + POST JSON），
+// 不复用已删除的 SigV4 AK/SK 管理 API 签名。验证探测模型与鉴权头构造。
+func TestVolcanoRealRequestProbe(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 9, 4, 1, 30, 0, 0, time.UTC)
-	query := url.Values{}
-	query.Set("Action", "GetAFPUsage")
-	query.Set("Version", "2024-01-01")
-	canon, headers, err := volcEngineSignQuery("AK", "SK", "cn-beijing", "ark", "open.volcengineapi.com", query, now)
+	// 探测模型取首个 mapping 值，回退默认公开模型。
+	acc := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":       "ark-test-key",
+			"base_url":      "https://ark.cn-beijing.volces.com/api/coding",
+			"model_mapping": map[string]any{"gpt-4o": "doubao-seed-2.1"},
+		},
+	}
+	require.Equal(t, "doubao-seed-2.1", volcanoProbeModel(acc))
+
+	// 火山分支应走 POST + Bearer，而非 AK/SK 签名头；此处仅校验模型/鉴权取值逻辑。
+	require.NotEmpty(t, acc.GetCNAPIKey())
+	require.True(t, isVolcanoBaseURL(acc.GetOpenAIBaseURL()))
+}
+
+// 外审 P2：limit 有效但 remaining 缺失/畸形时不得算成 100% 满额（否则健康账号被误暂停）；
+// used 保持 0（未知）。
+func TestParseVolcanoHeaderTiers_RemainingMissingNotFull(t *testing.T) {
+	t.Parallel()
+	resetUnix := time.Now().Add(3 * time.Hour).Unix()
+	h := http.Header{}
+	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(resetUnix, 10))
+	h.Set("x-ratelimit-limit-requests", "100")
+	// 故意不设置 remaining。
+	tiers := parseVolcanoHeaderTiers(h)
+	require.Len(t, tiers, 2)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.Equal(t, 0.0, tiers[0].UsedPercent, "remaining 缺失不得算成 100% 满额")
+	require.True(t, tiers[0].UsedPercentUnknown, "remaining 缺失时 5h 用量未知，前端显示破折号而非假 0%")
+	require.Equal(t, "weekly", tiers[1].Window)
+	require.True(t, tiers[1].UsedPercentUnknown, "周用量上游不可得必须标记 Unknown")
+}
+
+func TestParseVolcanoHeaderTiers_RemainingMalformedNotFull(t *testing.T) {
+	t.Parallel()
+	resetUnix := time.Now().Add(3 * time.Hour).Unix()
+	h := http.Header{}
+	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(resetUnix, 10))
+	h.Set("x-ratelimit-limit-requests", "100")
+	h.Set("x-ratelimit-remaining-requests", "not-a-number")
+	tiers := parseVolcanoHeaderTiers(h)
+	require.Len(t, tiers, 2)
+	require.Equal(t, 0.0, tiers[0].UsedPercent)
+	require.True(t, tiers[0].UsedPercentUnknown, "remaining 畸形时 5h 用量未知")
+}
+
+// F1：5h 重置头存在但 limit/remaining 完全缺失时，用量必须标记 Unknown（前端显示"—"），
+// 不得渲染为假 0%。
+func TestParseVolcanoHeaderTiers_5hUnknownWhenLimitMissing(t *testing.T) {
+	t.Parallel()
+	resetUnix := time.Now().Add(3 * time.Hour).Unix()
+	h := http.Header{}
+	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(resetUnix, 10))
+	// 不设置 limit / remaining。
+	tiers := parseVolcanoHeaderTiers(h)
+	require.Len(t, tiers, 2)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.Equal(t, 0.0, tiers[0].UsedPercent)
+	require.True(t, tiers[0].UsedPercentUnknown, "limit/remaining 全缺时 5h 用量未知")
+}
+
+// F2：火山账号收到 429（已限流）时，x-ratelimit-* 头同样携带重置时间；queryUsageForAccount
+// 的 429 分支即调用 parseVolcanoHeaderTiers + cnQuotaExtraUpdates 落 5h 重置快照。此处验证
+// 该数据通路确实能产出 volcano_5h_reset_at（已限流账号仍应显示倒计时）。
+func TestVolcano429HeaderTiersPersist5hReset(t *testing.T) {
+	t.Parallel()
+	h := http.Header{}
+	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(time.Now().Add(3*time.Hour).Unix(), 10))
+	h.Set("x-ratelimit-limit-requests", "100")
+	h.Set("x-ratelimit-remaining-requests", "70")
+	tiers := parseVolcanoHeaderTiers(h)
+	require.Len(t, tiers, 2)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.False(t, tiers[0].UsedPercentUnknown)
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, time.Now())
+	_, has5hReset := updates[cnExtraKey(providerVolcano, cnExtraSuffix5hReset)]
+	require.True(t, has5hReset, "429 限流头须能落 5h 重置快照")
+}
+
+// F3：重置头兼容 Go duration、RFC3339、毫秒 epoch；过去时间被拒。
+func TestParseVolcanoResetHeader_CompatibleFormats(t *testing.T) {
+	t.Parallel()
+	// 相对 duration "6m0s" → now+6min，落在未来。
+	s, ok := parseVolcanoResetHeader("6m0s")
+	require.True(t, ok)
+	parsed, err := time.Parse(time.RFC3339, s)
 	require.NoError(t, err)
-	require.Contains(t, canon, "Action=GetAFPUsage")
-	require.Contains(t, canon, "Version=2024-01-01")
-	require.Equal(t, "open.volcengineapi.com", headers.Get("Host"))
-	require.Equal(t, "20260904T013000Z", headers.Get("X-Date"))
-	auth := headers.Get("Authorization")
-	require.Contains(t, auth, "HMAC-SHA256 Credential=AK/20260904/cn-beijing/ark/request")
-	require.Contains(t, auth, "SignedHeaders=host;x-content-sha256;x-date")
-	require.Contains(t, auth, "Signature=")
-	// 幂等：同输入二次签名得同签名。
-	canon2, h2, _ := volcEngineSignQuery("AK", "SK", "cn-beijing", "ark", "open.volcengineapi.com", url.Values{"Action": {"GetAFPUsage"}, "Version": {"2024-01-01"}}, now)
-	require.Equal(t, canon, canon2)
-	require.Equal(t, headers.Get("Authorization"), h2.Get("Authorization"))
-	_ = http.Header{}
+	require.True(t, parsed.After(time.Now()))
+
+	// RFC3339 绝对时间（未来）。
+	future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+	s2, ok2 := parseVolcanoResetHeader(future)
+	require.True(t, ok2)
+	require.Equal(t, future, s2)
+
+	// 毫秒 epoch（>=1e12）→ 正确归一为秒级 epoch。
+	ms := strconv.FormatInt(time.Now().Add(90*time.Minute).UnixMilli(), 10)
+	s3, ok3 := parseVolcanoResetHeader(ms)
+	require.True(t, ok3)
+	secParsed, err := time.Parse(time.RFC3339, s3)
+	require.NoError(t, err)
+	require.InDelta(t, time.Now().Add(90*time.Minute).Unix(), secParsed.Unix(), 5)
+
+	// 过去绝对时间被拒。
+	past := strconv.FormatInt(time.Now().Add(-2*time.Hour).Unix(), 10)
+	_, ok4 := parseVolcanoResetHeader(past)
+	require.False(t, ok4)
+}
+
+// F4：naive（无时区）续期时间按 Asia/Shanghai 落地，而非默认 UTC（否则 24h 旧记录被误判约 8h 旧）。
+func TestParseWorkerTime_ShanghaiNaive(t *testing.T) {
+	t.Parallel()
+	// 北京时间 2026-09-04 10:00:00 应为 UTC 2026-09-04 02:00:00。
+	ts, ok := parseWorkerTime("2026-09-04T10:00:00")
+	require.True(t, ok)
+	require.Equal(t, 2026, ts.Year())
+	require.Equal(t, time.September, ts.Month())
+	require.Equal(t, 4, ts.Day())
+	require.Equal(t, 10, ts.Hour(), "Shanghai 落地后本地小时应为 10")
+	require.Equal(t, 0, ts.Minute())
+	require.Equal(t, 2, ts.UTC().Hour(), "naive 时间须按 Asia/Shanghai 解释，UTC 应为 02:00 而非 10:00")
+
+	// RFC3339 带时区仍正确。
+	ts2, ok2 := parseWorkerTime("2026-09-04T10:00:00+08:00")
+	require.True(t, ok2)
+	require.Equal(t, 10, ts2.Hour())
+	require.Equal(t, 2, ts2.UTC().Hour())
+
+	// 空串返回失败。
+	_, ok3 := parseWorkerTime("")
+	require.False(t, ok3)
+}
+
+// 外审 P1：周用量 Unknown 时只落 reset_at，不得写假 0 的 weekly_used_percent（覆盖旧值/
+// 误导“未用”），前端据此渲染倒计时并显示“未知”。
+func TestCNQuotaExtraUpdates_VolcanoWeeklyUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 30, ResetAt: "2026-09-04T11:00:00Z"},
+		{Window: "weekly", UsedPercent: 0, ResetAt: "2026-09-07T08:00:00Z", UsedPercentUnknown: true},
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	require.Equal(t, 30.0, updates[cnExtraKey(providerVolcano, cnExtraSuffix5hUsed)])
+	require.Equal(t, "2026-09-04T11:00:00Z", updates[cnExtraKey(providerVolcano, cnExtraSuffix5hReset)])
+	// 关键：周 reset 必须落库（前端渲染倒计时），weekly_used_percent 必须清空（不得假 0）。
+	require.Equal(t, "2026-09-07T08:00:00Z", updates[cnExtraKey(providerVolcano, cnExtraSuffixWeeklyReset)])
+	require.Nil(t, updates[cnExtraKey(providerVolcano, cnExtraSuffixWeeklyUsed)], "周用量 Unknown 不得写假 0")
+}
+
+// P1（重审）：5h 用量 Unknown（limit/remaining 缺失/畸形）时，volcano_5h_used_percent
+// 必须清空（不得写假 0 误导“未用”），但 volcano_5h_reset_at 仍需落库以渲染倒计时。
+// 此前仅周档处理 Unknown，导致 5h 档把 0 持久化为 0% 假象。
+func TestCNQuotaExtraUpdates_Volcano5hUnknownPersist(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 0, ResetAt: "2026-09-04T11:00:00Z", UsedPercentUnknown: true},
+		{Window: "weekly", UsedPercent: 0, ResetAt: "2026-09-07T08:00:00Z", UsedPercentUnknown: true},
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	// 5h reset 必须落库（前端渲染 5h 倒计时），5h_used_percent 必须清空（不得假 0）。
+	require.Equal(t, "2026-09-04T11:00:00Z", updates[cnExtraKey(providerVolcano, cnExtraSuffix5hReset)])
+	require.Nil(t, updates[cnExtraKey(providerVolcano, cnExtraSuffix5hUsed)], "5h 用量 Unknown 不得写假 0")
+	// 周档同步正确。
+	require.Equal(t, "2026-09-07T08:00:00Z", updates[cnExtraKey(providerVolcano, cnExtraSuffixWeeklyReset)])
+	require.Nil(t, updates[cnExtraKey(providerVolcano, cnExtraSuffixWeeklyUsed)])
+}
+
+// 外审 P1：火山探测按账号 API 协议构造请求——Anthropic→/v1/messages + anthropic-version +
+// x-api-key；OpenAI→/v3/chat/completions + Bearer。确保 Anthropic 协议火山账号也能命中正确
+// 端点拿到响应头，而非永远 404/端点错误导致快照不更新。
+func TestBuildVolcanoProbeRequest_ProtocolBranches(t *testing.T) {
+	t.Parallel()
+	profile, ok := parseVolcanoPlanProfile("https://ark.cn-beijing.volces.com/api/coding")
+	require.True(t, ok)
+
+	anthropicAcc := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "ark-test", "api_protocol": APIProtocolAnthropic},
+	}
+	reqA, err := buildVolcanoProbeRequest(context.Background(), anthropicAcc, profile, "doubao-x", "ark-test")
+	require.NoError(t, err)
+	require.Equal(t, profile.anthropicMessagesURL(), reqA.URL.String())
+	require.Equal(t, "2023-06-01", reqA.Header.Get("anthropic-version"))
+	require.Equal(t, "ark-test", reqA.Header.Get("x-api-key"))
+	require.Empty(t, reqA.Header.Get("Authorization"), "Anthropic 火山默认走 x-api-key，不应带 Authorization")
+
+	openaiAcc := &Account{
+		Platform: PlatformDeepseek, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "ark-test"},
+	}
+	reqO, err := buildVolcanoProbeRequest(context.Background(), openaiAcc, profile, "doubao-x", "ark-test")
+	require.NoError(t, err)
+	require.Equal(t, profile.openAIChatCompletionsURL(), reqO.URL.String())
+	require.Equal(t, "Bearer ark-test", reqO.Header.Get("Authorization"))
+	require.Empty(t, reqO.Header.Get("anthropic-version"))
+}
+
+// 外审 P2：用量未知档位序列化时 used_percent 必须为 null（而非 0），前端据此显示“未知/—”，
+// 与持久化快照（同样以 null 表示未知）保持一致；已知用量仍为数值。
+func TestCNQuotaTier_MarshalUnknownNull(t *testing.T) {
+	t.Parallel()
+	unknown := CNQuotaTier{Window: "weekly", UsedPercent: 0, ResetAt: "2026-09-07T08:00:00Z", UsedPercentUnknown: true}
+	b, err := json.Marshal(unknown)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"used_percent":null`)
+	require.Contains(t, string(b), `"used_percent_unknown":true`)
+
+	known := CNQuotaTier{Window: "5h", UsedPercent: 42.5, ResetAt: "2026-09-04T11:00:00Z"}
+	b2, err := json.Marshal(known)
+	require.NoError(t, err)
+	require.Contains(t, string(b2), `"used_percent":42.5`)
+	require.NotContains(t, string(b2), "null")
 }
 
 // TestVolcanoGetCodingPlanProvider coding 模式 + 火山 base_url 识别为 volcano 供应商。

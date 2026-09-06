@@ -83,10 +83,20 @@ func (s *XianyuWorkerService) SyncAccounts(ctx context.Context) error {
 		if err == nil {
 			status = existing.Status
 		}
-		cookieStatus := XianyuCookieStatusUnknown
+		// Cookie 状态由 Worker 最近一次自动续期结果推导，不再写死 unknown；
+		// 仅失效时保留原因供 UI 提示：优先续期失败原因，其次 Worker 侧禁用原因。
+		cookieStatus := deriveCookieStatus(acc, time.Now())
+		cookieDetail := ""
+		if cookieStatus == XianyuCookieStatusInvalid {
+			cookieDetail = truncateRunes(strings.TrimSpace(acc.LastRenewError), xianyuCookieDetailMaxLen)
+			if cookieDetail == "" {
+				cookieDetail = truncateRunes(strings.TrimSpace(acc.DisableReason), xianyuCookieDetailMaxLen)
+			}
+		}
 		taskStatus := XianyuTaskStatusUnknown
 		if acc.Enabled {
-			if status == XianyuAccountStatusDisabled {
+			// Worker 侧账号存在且启用（含重新扫码登录后的恢复）：投影回到 enabled。
+			if status == XianyuAccountStatusDisabled || status == XianyuAccountStatusLoggedOut {
 				status = XianyuAccountStatusEnabled
 			}
 			taskStatus = XianyuTaskStatusRunning
@@ -103,6 +113,7 @@ func (s *XianyuWorkerService) SyncAccounts(ctx context.Context) error {
 			Nickname:       acc.Nickname,
 			Status:         status,
 			CookieStatus:   cookieStatus,
+			CookieDetail:   cookieDetail,
 			TaskStatus:     taskStatus,
 			LastLoginAt:    lastLoginAt,
 			LastSeenAt:     timePtr(time.Now()),
@@ -124,7 +135,19 @@ func (s *XianyuWorkerService) EnableAccount(ctx context.Context, accountID strin
 	if err != nil {
 		return err
 	}
+	if account.Status == XianyuAccountStatusLoggedOut {
+		// 已退出的账号凭证已删除，启用无从谈起，必须重新扫码登录。
+		return ErrXianyuAccountLoggedOut
+	}
 	if err := client.EnableAccount(ctx, accountID); err != nil {
+		if errors.Is(err, ErrXianyuWorkerAccountNotFound) {
+			// Worker 侧账号已不存在（凭证随之消失）：投影收敛为已退出，
+			// 避免残留"可启用"的停用态误导用户。
+			if cerr := s.convergeLoggedOut(ctx, account); cerr != nil {
+				return cerr
+			}
+			return err
+		}
 		return err
 	}
 	account.Status = XianyuAccountStatusEnabled
@@ -144,6 +167,14 @@ func (s *XianyuWorkerService) DisableAccount(ctx context.Context, accountID stri
 		return err
 	}
 	if err := client.DisableAccount(ctx, accountID); err != nil {
+		if errors.Is(err, ErrXianyuWorkerAccountNotFound) {
+			// Worker 侧账号已不存在：停用目标状态本已达成，幂等成功并收敛为已退出。
+			// 收敛（DB 投影更新）失败必须透传，不得谎报成功。
+			if cerr := s.convergeLoggedOut(ctx, account); cerr != nil {
+				return cerr
+			}
+			return nil
+		}
 		return err
 	}
 	account.Status = XianyuAccountStatusDisabled
@@ -163,15 +194,33 @@ func (s *XianyuWorkerService) RefreshCookie(ctx context.Context, accountID strin
 		return nil, err
 	}
 	if _, err := client.RefreshCookie(ctx, accountID); err != nil {
+		if errors.Is(err, ErrXianyuWorkerAccountNotFound) {
+			// Worker 侧账号已不存在：投影收敛为已退出，并把错误透传给前端引导重新扫码。
+			if cerr := s.convergeLoggedOut(ctx, account); cerr != nil {
+				return nil, cerr
+			}
+			return nil, err
+		}
+		if isCookieRenewFailure(err) {
+			// 续期明确失败：Cookie 状态即时标为失效并保留原因，不等下一轮同步。
+			account.CookieStatus = XianyuCookieStatusInvalid
+			account.CookieDetail = truncateRunes(renewFailureDetail(err), xianyuCookieDetailMaxLen)
+			if _, updateErr := s.control.UpdateAccount(ctx, *account); updateErr != nil {
+				return nil, updateErr
+			}
+			return nil, err
+		}
 		return nil, err
 	}
-	// Worker 续期成功后自动启用账号；主程序账号状态仅按 Worker 启用结果更新为 enabled，
-	// 不把 Worker 的 cookie/续期细节直接写入主程序启停状态字段。
+	// Worker 续期成功后自动启用账号；主程序启停状态仅按 Worker 启用结果更新为 enabled，
+	// Cookie 状态同步收敛为有效（续期成功即凭证可用的直接证据）。
 	if account.Status != XianyuAccountStatusEnabled {
 		account.Status = XianyuAccountStatusEnabled
 		account.TaskStatus = XianyuTaskStatusRunning
 	}
 	now := time.Now()
+	account.CookieStatus = XianyuCookieStatusValid
+	account.CookieDetail = ""
 	account.LastSeenAt = &now
 	saved, err := s.control.UpdateAccount(ctx, *account)
 	if err != nil {
@@ -180,8 +229,90 @@ func (s *XianyuWorkerService) RefreshCookie(ctx context.Context, accountID strin
 	return saved, nil
 }
 
+// xianyuCookieRenewFreshWindow 判定"最近续期成功"的新鲜窗口。
+// Worker 自动续期调度默认 600s 一轮；窗口取保守的 24h，兼容把续期周期放宽到小时级的部署。
+const xianyuCookieRenewFreshWindow = 24 * time.Hour
+
+// xianyuCookieDetailMaxLen 与 xianyu_accounts.cookie_detail VARCHAR(500) 对齐，超长会写库失败。
+const xianyuCookieDetailMaxLen = 500
+
+// truncateRunes 按字符数截断。
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// deriveCookieStatus 从 Worker /cookies/details 投影推导主程序 Cookie 状态。
+// 数据优先级：Worker 侧账号状态（inactive/suspended/deleted 视为失效）→ 最近续期结果
+// （failed/need_password_login 视为失效）→ 成功续期超过新鲜窗口视为即将过期 →
+// 无任何续期数据时保持 unknown，不伪造健康度。
+func deriveCookieStatus(acc XianyuWorkerAccountStatus, now time.Time) string {
+	switch acc.Status {
+	case "inactive", "suspended", "deleted":
+		return XianyuCookieStatusInvalid
+	}
+	switch acc.LastRenewStatus {
+	case "failed", "need_password_login":
+		return XianyuCookieStatusInvalid
+	case "success", "cookie_updated", "browser_renewed":
+		if ts, ok := parseWorkerTime(acc.LastRenewAt); ok && now.Sub(ts) > xianyuCookieRenewFreshWindow {
+			return XianyuCookieStatusExpiring
+		}
+		return XianyuCookieStatusValid
+	}
+	return XianyuCookieStatusUnknown
+}
+
+// xianyuWorkerLoc 是闲鱼 Worker 写入时间戳所用的时区（Asia/Shanghai / UTC+8）。
+// Worker 的 MySQL DATETIME / 续期日志时间为无时区北京时间，解析 naive 格式须按此落地，
+// 否则 time.Parse 默认 UTC 会使 24h 级的续期新鲜度判断偏差约 8 小时。
+var xianyuWorkerLoc = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
+
+// parseWorkerTime 解析 Worker 投影时间：优先 RFC3339（带时区），兼容无时区后缀的 isoformat。
+// 无时区时按 Asia/Shanghai 落地（Worker 时区），避免 24h 级新鲜度判断偏差约 8 小时。
+func parseWorkerTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts, true
+	}
+	if ts, err := time.ParseInLocation("2006-01-02T15:04:05", raw, xianyuWorkerLoc); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
+}
+
+// isCookieRenewFailure 判断续期错误是否为 Worker 明确返回的续期失败（区别于网络错误与账号缺失）。
+func isCookieRenewFailure(err error) bool {
+	var we *XianyuWorkerError
+	if !errors.As(err, &we) {
+		return false
+	}
+	return we.Reason == "COOKIE_RENEW_FAILED" || we.Reason == "ACCOUNT_NOT_IN_RENEW_RESULT"
+}
+
+// renewFailureDetail 提取续期失败的可展示原因。
+func renewFailureDetail(err error) string {
+	var we *XianyuWorkerError
+	if errors.As(err, &we) && we.Message != "" {
+		return we.Message
+	}
+	return ""
+}
+
 // ClearCredentials 退出/清除凭证：停止 Worker 任务并删除 Worker 侧账号（含 Cookie），
-// 主程序投影保留并标记为 disabled。
+// 主程序投影保留并标记为 logged_out（已退出登录）：启用按钮随之隐藏，仅可重新扫码登录。
 func (s *XianyuWorkerService) ClearCredentials(ctx context.Context, accountID string) error {
 	client, workerCfg, err := s.clientForActiveWorker(ctx)
 	if err != nil {
@@ -192,17 +323,35 @@ func (s *XianyuWorkerService) ClearCredentials(ctx context.Context, accountID st
 		return err
 	}
 	if err := client.ClearCredentials(ctx, accountID); err != nil {
-		// Worker 侧账号已不存在（曾被清除）时视为幂等成功：目标终态（禁用/停止）本已达成，
-		// 无需再向用户报 internal error，仍把主程序投影收敛到 disabled/stopped。
+		// Worker 侧账号已不存在（曾被清除）时视为幂等成功：目标终态（已退出）本已达成，
+		// 无需再向用户报 internal error，仍把主程序投影收敛到 logged_out。
 		if !errors.Is(err, ErrXianyuWorkerAccountNotFound) {
 			return err
 		}
 	}
-	account.Status = XianyuAccountStatusDisabled
+	if cerr := s.convergeLoggedOut(ctx, account); cerr != nil {
+		return cerr
+	}
+	return nil
+}
+
+// convergeLoggedOut 把主程序投影收敛为"已退出登录"终态。
+// 适用场景：退出清除凭证，或任一账号操作发现 Worker 侧账号已不存在（凭证随之消失）。
+// 返回 UpdateAccount 的错误：收敛失败（DB 投影未更新）时必须向上传播，禁止以成功掩盖
+// 主程序与 Worker 状态不一致（否则 ClearCredentials / DisableAccount 会向调用方谎报完成）。
+func (s *XianyuWorkerService) convergeLoggedOut(ctx context.Context, account *XianyuAccount) error {
+	if account == nil {
+		return nil
+	}
+	account.Status = XianyuAccountStatusLoggedOut
 	account.CookieStatus = XianyuCookieStatusUnknown
+	account.CookieDetail = ""
 	account.TaskStatus = XianyuTaskStatusStopped
-	_, err = s.control.UpdateAccount(ctx, *account)
-	return err
+	if _, err := s.control.UpdateAccount(ctx, *account); err != nil {
+		slog.Warn("xianyu: converge account to logged_out failed", "account_id", account.AccountID, "error", err)
+		return err
+	}
+	return nil
 }
 
 // ResendDelivery resends an already-claimed code to the same buyer over the

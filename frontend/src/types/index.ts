@@ -2450,8 +2450,9 @@ export interface XianyuAccount {
   worker_config_id: number
   account_id: string
   nickname: string
-  status: 'enabled' | 'disabled' | 'expired' | 'syncing'
+  status: 'enabled' | 'disabled' | 'expired' | 'syncing' | 'logged_out'
   cookie_status: 'valid' | 'invalid' | 'expiring' | 'unknown'
+  cookie_detail?: string
   task_status: 'running' | 'stopped' | 'starting' | 'stopping' | 'unknown'
   last_login_at?: string | null
   last_seen_at?: string | null
