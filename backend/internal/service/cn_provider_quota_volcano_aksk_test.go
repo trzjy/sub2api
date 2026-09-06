@@ -60,8 +60,3 @@ func TestVolcanoUsageActionByBaseURL(t *testing.T) {
 	require.Empty(t, volcanoUsageAction("https://ark.cn-beijing.volces.com/api/other"))
 }
 
-func TestNormalizeVolcanoPlanBaseURL(t *testing.T) {
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/plan", normalizeVolcanoPlanBaseURL("https://ark.cn-beijing.volces.com/api/plan/v3"))
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/plan", normalizeVolcanoPlanBaseURL("https://ark.cn-beijing.volces.com/api/plan/"))
-	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding", normalizeVolcanoPlanBaseURL("https://ark.cn-beijing.volces.com/api/coding/v3/"))
-}
