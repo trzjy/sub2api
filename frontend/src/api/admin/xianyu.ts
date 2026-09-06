@@ -147,6 +147,10 @@ export async function resendDelivery(orderNo: string): Promise<string> {
   return data.code
 }
 
+export async function markDeliverySent(orderNo: string): Promise<void> {
+  await apiClient.post('/admin/xianyu/deliveries/mark-sent', { order_no: orderNo })
+}
+
 export interface XianyuControlSettings {
   delivery_enabled: boolean
   account_auto_refresh: boolean
@@ -197,6 +201,7 @@ export const xianyuAPI = {
   listDeliveries,
   listWorkerDeliveries,
   resendDelivery,
+  markDeliverySent,
   getSettings,
   saveSettings,
   listDeliveryCards,

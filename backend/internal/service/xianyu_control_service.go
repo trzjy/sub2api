@@ -443,6 +443,14 @@ func (s *XianyuControlService) DeleteBindingRule(ctx context.Context, ruleID int
 	return s.control.DeleteBindingRule(ctx, ruleID)
 }
 
+// MarkDeliveryClaimSent 管理员确认待处理发货记录的卡密已线下送达。
+func (s *XianyuControlService) MarkDeliveryClaimSent(ctx context.Context, orderNo string) error {
+	if s.delivery == nil {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	return s.delivery.MarkClaimSent(ctx, orderNo)
+}
+
 // EnableAccount 启用账号。
 func (s *XianyuControlService) EnableAccount(ctx context.Context, accountID string) error {
 	if s.worker == nil {

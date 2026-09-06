@@ -152,6 +152,27 @@ func (h *XianyuAdminHandler) DeleteBindingRule(c *gin.Context) {
 	response.Success(c, gin.H{"message": "binding rule deleted"})
 }
 
+// MarkDeliverySent 管理员确认待处理发货记录的卡密已线下送达，标记为已发送。
+func (h *XianyuAdminHandler) MarkDeliverySent(c *gin.Context) {
+	var req struct {
+		OrderNo string `json:"order_no"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	req.OrderNo = strings.TrimSpace(req.OrderNo)
+	if req.OrderNo == "" {
+		response.BadRequest(c, "order_no is required")
+		return
+	}
+	if err := h.control.MarkDeliveryClaimSent(c.Request.Context(), req.OrderNo); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "delivery marked as sent"})
+}
+
 type saveWorkerConfigRequest struct {
 	ID       int64  `json:"id"`
 	BaseURL  string `json:"base_url"`

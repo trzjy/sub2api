@@ -315,6 +315,31 @@ func (s *XianyuDeliveryService) ListWorkerDeliveries(ctx context.Context, filter
 }
 
 // ResendOriginalCode 人工补发原码。
+// MarkClaimSent 管理员确认待处理记录的卡密已线下送达（如手动发码），标记为已发送。
+// 幂等：已发送的记录重复标记直接成功；失败记录引导走补发原码。
+func (s *XianyuDeliveryService) MarkClaimSent(ctx context.Context, orderNo string) error {
+	if s == nil || s.delivery == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
+		return ErrXianyuDeliveryNotConfigured
+	}
+	claim, err := s.delivery.GetDeliveryClaim(ctx, orderNo)
+	if err != nil {
+		return err
+	}
+	if claim.DeliveryStatus == XianyuDeliveryStatusSent {
+		return nil
+	}
+	if claim.DeliveryStatus == XianyuDeliveryStatusFailed {
+		return infraerrors.Conflict("XIANYU_DELIVERY_FAILED_USE_RESEND", "发货失败的订单请使用补发原码")
+	}
+	return s.delivery.RecordDeliveryResult(ctx, XianyuDeliveryStatusResult{
+		OrderNo:      orderNo,
+		Success:      true,
+		Confirmed:    true,
+		Attempt:      claim.AttemptCount,
+		QuantitySent: 1,
+	})
+}
+
 func (s *XianyuDeliveryService) ResendOriginalCode(ctx context.Context, orderNo string) (string, error) {
 	if s == nil || s.delivery == nil || s.setting == nil || !s.setting.GetXianyuDeliveryRuntime(ctx).Enabled {
 		return "", ErrXianyuDeliveryNotConfigured

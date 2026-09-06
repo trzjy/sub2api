@@ -67,6 +67,9 @@
               <td class="px-4 py-2 text-gray-500">{{ formatDateTime(claim.created_at) }}</td>
               <td class="px-4 py-2">
                 <div class="flex items-center justify-end gap-1.5">
+                  <button v-if="claim.delivery_status === 'pending'" class="btn btn-secondary btn-xs" @click="openMarkSent(claim)">
+                    {{ t('admin.xianyu.deliveries.markSent') }}
+                  </button>
                   <button v-if="claim.delivery_status === 'failed'" class="btn btn-primary btn-xs" @click="resend(claim)">
                     {{ t('admin.xianyu.deliveries.resend') }}
                   </button>
@@ -135,6 +138,16 @@
         :message="t('admin.xianyu.deliveries.confirmResend')"
         @confirm="doResend"
         @cancel="confirmVisible = false"
+      />
+
+      <ConfirmDialog
+        :show="markSentVisible"
+        :title="t('admin.xianyu.deliveries.markSent')"
+        :message="t('admin.xianyu.deliveries.markSentConfirm', { order: markSentTarget?.order_no ?? '' })"
+        :confirm-text="t('admin.xianyu.deliveries.markSent')"
+        :cancel-text="t('common.cancel')"
+        @confirm="doMarkSent"
+        @cancel="markSentVisible = false"
       />
     </div>
   </AppLayout>
@@ -242,6 +255,26 @@ async function doResend() {
     await adminAPI.xianyu.resendDelivery(resendTarget.value.order_no)
     await load()
     appStore.showSuccess(t('admin.xianyu.deliveries.resendConfirmed'))
+  } catch (err) {
+    appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
+  }
+}
+
+const markSentVisible = ref(false)
+const markSentTarget = ref<XianyuOrderClaim | null>(null)
+
+function openMarkSent(claim: XianyuOrderClaim) {
+  markSentTarget.value = claim
+  markSentVisible.value = true
+}
+
+async function doMarkSent() {
+  markSentVisible.value = false
+  if (!markSentTarget.value) return
+  try {
+    await adminAPI.xianyu.markDeliverySent(markSentTarget.value.order_no)
+    await load()
+    appStore.showSuccess(t('admin.xianyu.deliveries.markSentDone'))
   } catch (err) {
     appStore.showError(extractI18nErrorMessage(err, t, 'admin.xianyu.errors', t('common.error')))
   }

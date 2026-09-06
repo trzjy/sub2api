@@ -178,6 +178,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 
 		xianyu.GET("/deliveries", h.Admin.Xianyu.Deliveries)
 		xianyu.POST("/deliveries/resend", h.Admin.Xianyu.ResendDelivery)
+		xianyu.POST("/deliveries/mark-sent", h.Admin.Xianyu.MarkDeliverySent)
 		xianyu.GET("/worker-deliveries", h.Admin.Xianyu.WorkerDeliveries)
 
 		xianyu.GET("/settings", h.Admin.Xianyu.GetSettings)
