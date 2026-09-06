@@ -5,9 +5,9 @@
 
 import { apiClient } from '../client'
 
-/** 滚动用量窗口档（5 小时 / 每周），对齐后端 service.CNQuotaTier。 */
+/** 滚动用量窗口档（5 小时 / 每周 / 每月），对齐后端 service.CNQuotaTier。 */
 export interface CNQuotaTier {
-  window: '5h' | 'weekly'
+  window: '5h' | 'weekly' | 'monthly'
   // used_percent 为 null 表示上游不可得（如火山周窗口：限流头仅含 5h，周额度无可靠来源），
   // 前端渲染为“—/未知”而非假 0。
   used_percent: number | null

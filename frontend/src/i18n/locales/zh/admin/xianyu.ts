@@ -66,6 +66,7 @@ export default {
       scanWaiting: '等待扫码',
       scanScanned: '已扫码，请在手机上确认',
       scanSuccess: '登录成功',
+      scanAutoClose: '{seconds} 秒后自动关闭',
       scanFailed: '登录失败',
       scanExpired: '二维码已过期',
       scanNoSession: '未能创建扫码会话，请检查 Worker 连接',

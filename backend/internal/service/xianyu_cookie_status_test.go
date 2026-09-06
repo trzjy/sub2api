@@ -42,7 +42,9 @@ func TestDeriveCookieStatus(t *testing.T) {
 
 type syncAccountControlStub struct {
 	*xianyuWorkerControlStub
-	upserts map[string]XianyuAccount
+	upserts       map[string]XianyuAccount
+	localAccounts []XianyuAccount
+	updated       []XianyuAccount
 }
 
 func (s *syncAccountControlStub) GetAccountByWorkerAndAccountID(context.Context, int64, string) (*XianyuAccount, error) {
@@ -52,6 +54,54 @@ func (s *syncAccountControlStub) GetAccountByWorkerAndAccountID(context.Context,
 func (s *syncAccountControlStub) UpsertAccount(_ context.Context, a XianyuAccount) (*XianyuAccount, error) {
 	s.upserts[a.AccountID] = a
 	return &a, nil
+}
+
+func (s *syncAccountControlStub) ListAccounts(context.Context, int64) ([]XianyuAccount, error) {
+	return s.localAccounts, nil
+}
+
+func (s *syncAccountControlStub) UpdateAccount(_ context.Context, a XianyuAccount) (*XianyuAccount, error) {
+	s.updated = append(s.updated, a)
+	return &a, nil
+}
+
+// 回归：本地有、Worker 侧已不存在的账号，必须在同步对账时收敛为"已退出登录"，
+// 不能等管理员点启用/刷新触发 404 自愈——否则账号列表长期残留"已停用/可启用"的误导状态。
+func TestSyncAccountsConvergesMissingAccountsToLoggedOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":[` +
+			`{"account_id":"1001","nickname":"a","enabled":true,"status":"active"}` +
+			`]}`))
+	}))
+	defer srv.Close()
+
+	ctrl := &syncAccountControlStub{
+		xianyuWorkerControlStub: &xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{
+			ID: 1, BaseURL: srv.URL, APITokenEncrypted: "ENC:token", Status: XianyuWorkerStatusActive,
+		}},
+		upserts: map[string]XianyuAccount{},
+		localAccounts: []XianyuAccount{
+			{WorkerConfigID: 1, AccountID: "1001", Status: XianyuAccountStatusEnabled},
+			{WorkerConfigID: 1, AccountID: "2002", Status: XianyuAccountStatusDisabled, TaskStatus: XianyuTaskStatusStopped},
+			{WorkerConfigID: 1, AccountID: "3003", Status: XianyuAccountStatusLoggedOut, TaskStatus: XianyuTaskStatusStopped},
+		},
+	}
+	svc := &XianyuWorkerService{
+		control:    ctrl,
+		encryptor:  testSecretEncryptor{},
+		forbidLoop: true,
+		clientFor: func(baseURL, token string) *XianyuWorkerClient {
+			return NewXianyuWorkerClient(baseURL, token, 5*time.Second)
+		},
+	}
+
+	require.NoError(t, svc.SyncAccounts(context.Background()))
+
+	// 只有 Worker 侧消失且尚未收敛的 2002 被收敛为已退出登录。
+	require.Len(t, ctrl.updated, 1)
+	require.Equal(t, "2002", ctrl.updated[0].AccountID)
+	require.Equal(t, XianyuAccountStatusLoggedOut, ctrl.updated[0].Status)
+	require.Equal(t, XianyuTaskStatusStopped, ctrl.updated[0].TaskStatus)
 }
 
 func TestSyncAccountsDerivesCookieStatusAndDetail(t *testing.T) {

@@ -116,6 +116,9 @@
         <div class="flex flex-col items-center gap-3">
           <div v-if="scanStatus === 'success'" class="text-green-600">
             {{ t('admin.xianyu.accounts.scanSuccess') }}
+            <span v-if="scanCountdown > 0" class="ml-1 text-sm text-gray-500">
+              {{ t('admin.xianyu.accounts.scanAutoClose', { seconds: scanCountdown }) }}
+            </span>
           </div>
           <div v-else-if="scanStatus === 'failed'" class="text-red-600">
             {{ scanMessage || t('admin.xianyu.accounts.scanFailed') }}
@@ -288,8 +291,33 @@ const scanStatus = ref('waiting')
 const scanMessage = ref('')
 const scanQRCode = ref('')
 let pollTimer: number | null = null
+// 登录成功后倒计时自动关闭扫码弹窗。
+let scanCloseTimer: number | null = null
+const scanCountdown = ref(0)
+const SCAN_AUTO_CLOSE_SECONDS = 2
+
+function cancelScanAutoClose() {
+  if (scanCloseTimer !== null) {
+    window.clearInterval(scanCloseTimer)
+    scanCloseTimer = null
+  }
+  scanCountdown.value = 0
+}
+
+function scheduleScanAutoClose() {
+  cancelScanAutoClose()
+  scanCountdown.value = SCAN_AUTO_CLOSE_SECONDS
+  scanCloseTimer = window.setInterval(() => {
+    scanCountdown.value -= 1
+    if (scanCountdown.value <= 0) {
+      cancelScanAutoClose()
+      stopPollingBehavior()
+    }
+  }, 1000)
+}
 
 async function openScan(account: XianyuAccount | null) {
+  cancelScanAutoClose()
   scanAccount.value = account
   scanStatus.value = 'waiting'
   scanMessage.value = ''
@@ -340,6 +368,8 @@ async function pollOnce(sessionID: string) {
     if (session.status === 'success' || session.status === 'failed' || session.status === 'expired') {
       stopPolling()
       if (session.status === 'success') {
+        // 登录成功即开始 2 秒倒计时自动关闭弹窗；同步刷新在后台并行完成。
+        scheduleScanAutoClose()
         // 重新登录成功后立即同步一次投影，让该行马上回到可启用/已启用状态，而不是等下一轮自动巡检。
         try {
           await adminAPI.xianyu.syncAccounts()
@@ -369,6 +399,7 @@ function stopPolling() {
 }
 
 function stopPollingBehavior() {
+  cancelScanAutoClose()
   scanVisible.value = false
   stopPolling()
 }
@@ -414,5 +445,8 @@ function taskLabel(status: string): string {
 }
 
 onMounted(load)
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  cancelScanAutoClose()
+  stopPolling()
+})
 </script>

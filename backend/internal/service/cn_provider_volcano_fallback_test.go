@@ -93,7 +93,7 @@ func TestVolcanoProbeFallbackOnModelNotFound(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.StatusCode)
 	require.Equal(t, 2, upstream.calls, "should have tried both candidate models")
 	require.Equal(t, 1, repo.updateExtraCalls, "successful candidate should persist snapshot once")
-	require.Len(t, res.Tiers, 2, "5h + weekly tiers expected")
+	require.Len(t, res.Tiers, 3, "5h + weekly + monthly tiers expected")
 }
 
 // TestVolcanoProbeModels 验证候选模型列表：按 key 确定性排序去重，并追加默认回落模型。

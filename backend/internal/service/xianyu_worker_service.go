@@ -122,6 +122,28 @@ func (s *XianyuWorkerService) SyncAccounts(ctx context.Context) error {
 			return err
 		}
 	}
+	// 对账收敛：本地有、而本次成功的 Worker 列表里已不存在的账号，说明 Worker 侧
+	// 账号已被删除（凭证随之消失）。同步时直接把投影收敛为已退出登录，不再依赖
+	// 启用/刷新等动作触发 404 自愈，避免账号列表长期残留"已停用/可启用"的误导状态。
+	localAccounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
+	if err != nil {
+		return err
+	}
+	workerAccountIDs := make(map[string]struct{}, len(accounts))
+	for _, acc := range accounts {
+		workerAccountIDs[acc.AccountID] = struct{}{}
+	}
+	for _, local := range localAccounts {
+		if _, ok := workerAccountIDs[local.AccountID]; ok {
+			continue
+		}
+		if local.Status == XianyuAccountStatusLoggedOut {
+			continue
+		}
+		slog.Info("xianyu: account missing from worker list, converging projection to logged_out",
+			"account_id", local.AccountID, "previous_status", local.Status)
+		s.convergeLoggedOut(ctx, &local)
+	}
 	return nil
 }
 

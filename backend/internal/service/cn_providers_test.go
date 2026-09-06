@@ -171,12 +171,15 @@ func TestCNQuotaExtraUpdates(t *testing.T) {
 	tiers := []CNQuotaTier{
 		{Window: "5h", UsedPercent: 40, ResetAt: "2026-08-14T15:00:00Z"},
 		{Window: "weekly", UsedPercent: 60, ResetAt: "2026-08-18T00:00:00Z"},
+		{Window: "monthly", UsedPercent: 25, ResetAt: "2026-09-14T15:59:59Z"},
 	}
 	updates := cnQuotaExtraUpdates(PlatformKimi, tiers, now)
 	require.Equal(t, 40.0, updates["kimi_5h_used_percent"])
 	require.Equal(t, "2026-08-14T15:00:00Z", updates["kimi_5h_reset_at"])
 	require.Equal(t, 60.0, updates["kimi_weekly_used_percent"])
 	require.Equal(t, "2026-08-18T00:00:00Z", updates["kimi_weekly_reset_at"])
+	require.Equal(t, 25.0, updates["kimi_monthly_used_percent"])
+	require.Equal(t, "2026-09-14T15:59:59Z", updates["kimi_monthly_reset_at"])
 	require.Equal(t, now.Format(time.RFC3339), updates["kimi_usage_updated_at"])
 }
 
@@ -211,6 +214,42 @@ func TestCNQuotaExtraUpdates_ClearsMissingWindowKeys(t *testing.T) {
 	require.Equal(t, "2026-08-14T15:00:00Z", updates["volcano_5h_reset_at"])
 	require.Nil(t, updates["volcano_weekly_used_percent"], "缺档 weekly used 必须以 nil 清除残留")
 	require.Nil(t, updates["volcano_weekly_reset_at"], "缺档 weekly reset 必须以 nil 清除残留")
+}
+
+// 外审 must_fix #2 变体：上游某档整档缺失（只返回 5h/weekly）时，monthly 档 used + reset
+// 都必须被清除，避免上一轮 valid 的 monthly 值在 DB 中 stale 残留。
+func TestCNQuotaExtraUpdates_ClearsMissingMonthlyKeys(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	tiers := []CNQuotaTier{
+		{Window: "5h", UsedPercent: 45, ResetAt: "2026-08-14T15:00:00Z"},
+		{Window: "weekly", UsedPercent: 60, ResetAt: "2026-08-18T00:00:00Z"},
+		// monthly 档缺失。
+	}
+	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
+	require.Nil(t, updates["volcano_monthly_used_percent"], "缺档 monthly used 必须以 nil 清除残留")
+	require.Nil(t, updates["volcano_monthly_reset_at"], "缺档 monthly reset 必须以 nil 清除残留")
+}
+
+// TestVolcanoNextMonthlyReset 验证月重置为下个月同一天 23:59:59（Asia/Shanghai），
+// 且日期溢出时回落到目标月最后一天。
+func TestVolcanoNextMonthlyReset(t *testing.T) {
+	t.Parallel()
+	loc := volcanoPlanLoc
+
+	// 普通日期：8 月 14 日 -> 9 月 14 日 23:59:59。
+	fixed := time.Date(2026, 8, 14, 12, 0, 0, 0, loc)
+	got, err := time.Parse(time.RFC3339, volcanoNextMonthlyResetAt(fixed))
+	require.NoError(t, err)
+	want := time.Date(2026, 9, 14, 23, 59, 59, 0, loc)
+	require.True(t, got.Equal(want), "got %v want %v", got, want)
+
+	// 月末溢出：1 月 31 日 -> 2 月 28 日 23:59:59。
+	leap := time.Date(2026, 1, 31, 12, 0, 0, 0, loc)
+	got, err = time.Parse(time.RFC3339, volcanoNextMonthlyResetAt(leap))
+	require.NoError(t, err)
+	want = time.Date(2026, 2, 28, 23, 59, 59, 0, loc)
+	require.True(t, got.Equal(want), "got %v want %v", got, want)
 }
 
 // TestCNProviderResponseIndicatesInsufficientBalance 覆盖中英文余额不足文案与否定用例。
@@ -742,9 +781,9 @@ func TestGetAnthropicAPIKeyAuthScheme_CNProvider(t *testing.T) {
 	require.Equal(t, AnthropicAPIKeyAuthSchemeAuthorizationBearer, zhipu.GetAnthropicAPIKeyAuthScheme())
 }
 
-// TestParseVolcanoHeaderTiers 火山从 OpenAI 兼容限流响应头解析 5h + 周窗口：
+// TestParseVolcanoHeaderTiers 火山从 OpenAI 兼容限流响应头解析 5h + 周 + 月窗口：
 // x-ratelimit-reset-requests（绝对 Unix 秒）→ 5h 重置；limit/remaining → 5h 已用百分比；
-// 周窗口按官方规则确定性计算，恒有 reset_at。
+// 周/月窗口按官方规则确定性计算，恒有 reset_at。
 func TestParseVolcanoHeaderTiers(t *testing.T) {
 	t.Parallel()
 	resetUnix := time.Now().Add(3 * time.Hour).Unix()
@@ -753,22 +792,26 @@ func TestParseVolcanoHeaderTiers(t *testing.T) {
 	h.Set("x-ratelimit-limit-requests", "100")
 	h.Set("x-ratelimit-remaining-requests", "80")
 	tiers := parseVolcanoHeaderTiers(h)
-	require.Len(t, tiers, 2)
+	require.Len(t, tiers, 3)
 	require.Equal(t, "5h", tiers[0].Window)
 	require.InDelta(t, 20.0, tiers[0].UsedPercent, 1e-9)
 	require.Equal(t, time.Unix(resetUnix, 0).UTC().Format(time.RFC3339), tiers[0].ResetAt)
 	require.False(t, tiers[0].UsedPercentUnknown, "limit/remaining 齐备时 5h 用量已知")
 	require.Equal(t, "weekly", tiers[1].Window)
 	require.NotEmpty(t, tiers[1].ResetAt)
+	require.Equal(t, "monthly", tiers[2].Window)
+	require.NotEmpty(t, tiers[2].ResetAt)
 }
 
-// TestParseVolcanoHeaderTiersNo5hHeader 缺 5h 限流头时仅确定性周窗口 tier（仍渲染倒计时）。
+// TestParseVolcanoHeaderTiersNo5hHeader 缺 5h 限流头时仍有确定性周/月窗口 tier（仍渲染倒计时）。
 func TestParseVolcanoHeaderTiersNo5hHeader(t *testing.T) {
 	t.Parallel()
 	tiers := parseVolcanoHeaderTiers(http.Header{})
-	require.Len(t, tiers, 1)
+	require.Len(t, tiers, 2)
 	require.Equal(t, "weekly", tiers[0].Window)
 	require.NotEmpty(t, tiers[0].ResetAt)
+	require.Equal(t, "monthly", tiers[1].Window)
+	require.NotEmpty(t, tiers[1].ResetAt)
 }
 
 // TestParseVolcanoResetHeader 解析绝对 Unix 秒与相对秒数，拒空/非法/非未来。
@@ -832,6 +875,9 @@ func TestVolcanoExtraUpdatesAndSnapshotReset(t *testing.T) {
 	}
 	updates := cnQuotaExtraUpdates(providerVolcano, tiers, now)
 	require.Equal(t, 30.0, updates[cnExtraKey(providerVolcano, cnExtraSuffix5hUsed)])
+	// tiers 未含 monthly，相关键应被清除为 nil。
+	require.Nil(t, updates[cnExtraKey(providerVolcano, cnExtraSuffixMonthlyReset)])
+	require.Nil(t, updates[cnExtraKey(providerVolcano, cnExtraSuffixMonthlyUsed)])
 	reset := cnProviderQuotaSnapshotReset(&Account{
 		Platform: PlatformDeepseek,
 		Type:     AccountTypeAPIKey,
@@ -875,12 +921,14 @@ func TestParseVolcanoHeaderTiers_RemainingMissingNotFull(t *testing.T) {
 	h.Set("x-ratelimit-limit-requests", "100")
 	// 故意不设置 remaining。
 	tiers := parseVolcanoHeaderTiers(h)
-	require.Len(t, tiers, 2)
+	require.Len(t, tiers, 3)
 	require.Equal(t, "5h", tiers[0].Window)
 	require.Equal(t, 0.0, tiers[0].UsedPercent, "remaining 缺失不得算成 100% 满额")
 	require.True(t, tiers[0].UsedPercentUnknown, "remaining 缺失时 5h 用量未知，前端显示破折号而非假 0%")
 	require.Equal(t, "weekly", tiers[1].Window)
 	require.True(t, tiers[1].UsedPercentUnknown, "周用量上游不可得必须标记 Unknown")
+	require.Equal(t, "monthly", tiers[2].Window)
+	require.True(t, tiers[2].UsedPercentUnknown, "月用量上游不可得必须标记 Unknown")
 }
 
 func TestParseVolcanoHeaderTiers_RemainingMalformedNotFull(t *testing.T) {
@@ -891,7 +939,7 @@ func TestParseVolcanoHeaderTiers_RemainingMalformedNotFull(t *testing.T) {
 	h.Set("x-ratelimit-limit-requests", "100")
 	h.Set("x-ratelimit-remaining-requests", "not-a-number")
 	tiers := parseVolcanoHeaderTiers(h)
-	require.Len(t, tiers, 2)
+	require.Len(t, tiers, 3)
 	require.Equal(t, 0.0, tiers[0].UsedPercent)
 	require.True(t, tiers[0].UsedPercentUnknown, "remaining 畸形时 5h 用量未知")
 }
@@ -905,7 +953,7 @@ func TestParseVolcanoHeaderTiers_5hUnknownWhenLimitMissing(t *testing.T) {
 	h.Set("x-ratelimit-reset-requests", strconv.FormatInt(resetUnix, 10))
 	// 不设置 limit / remaining。
 	tiers := parseVolcanoHeaderTiers(h)
-	require.Len(t, tiers, 2)
+	require.Len(t, tiers, 3)
 	require.Equal(t, "5h", tiers[0].Window)
 	require.Equal(t, 0.0, tiers[0].UsedPercent)
 	require.True(t, tiers[0].UsedPercentUnknown, "limit/remaining 全缺时 5h 用量未知")
@@ -921,7 +969,7 @@ func TestVolcano429HeaderTiersPersist5hReset(t *testing.T) {
 	h.Set("x-ratelimit-limit-requests", "100")
 	h.Set("x-ratelimit-remaining-requests", "70")
 	tiers := parseVolcanoHeaderTiers(h)
-	require.Len(t, tiers, 2)
+	require.Len(t, tiers, 3)
 	require.Equal(t, "5h", tiers[0].Window)
 	require.False(t, tiers[0].UsedPercentUnknown)
 	updates := cnQuotaExtraUpdates(providerVolcano, tiers, time.Now())
@@ -1142,6 +1190,38 @@ func TestResolveCNQuotaProvider_VolcanoPayG(t *testing.T) {
 			require.Equal(t, tc.expected, resolveCNQuotaProvider(tc.account))
 		})
 	}
+}
+
+// TestResolveCNQuotaProvider_VolcanoPreferBaseURLOverPlatform 锁定用户反馈根因：
+// 火山订阅号账号的 platform 常被误存为 kimi，且 api_protocol=adaptive 时
+// GetOpenAIBaseURL() 优先取 api_base_urls.chat_completions（指向 api.kimi.com）。
+// 若按 GetOpenAIBaseURL 判定会被误判为 Kimi，探测发往 Kimi /usages 返回 0% 周用量
+// 且缺失 5h/月档。凭据 base_url（= ark.cn-beijing.volces.com）才是事实源，必须识别为
+// providerVolcano，与 platform 误存无关。
+func TestResolveCNQuotaProvider_VolcanoPreferBaseURLOverPlatform(t *testing.T) {
+	t.Parallel()
+	acc := &Account{
+		Platform: PlatformKimi, // 误存：实际是火山订阅号
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "ark-x",
+			"base_url":     "https://ark.cn-beijing.volces.com/api/coding",
+			"api_protocol": APIProtocolAdaptive,
+			"api_base_urls": map[string]any{
+				"chat_completions": "https://api.kimi.com/coding/v1", // 会让 GetOpenAIBaseURL 误判
+				"anthropic":        "https://api.kimi.com/coding/anthropic",
+			},
+		},
+	}
+	// 事实校验：GetOpenAIBaseURL 确实会被 adaptive 覆盖成 kimi 端点（即旧判定会误判）。
+	require.Equal(t, "https://api.kimi.com/coding/v1", acc.GetOpenAIBaseURL(),
+		"前置条件：adaptive 账号 GetOpenAIBaseURL 须返回 kimi 端点，方能验证火山优先修复")
+	require.Equal(t, "https://ark.cn-beijing.volces.com/api/coding", acc.GetBaseURL(),
+		"前置条件：凭据原始 base_url 须是火山地址")
+
+	// 核心断言：无论 platform 误存与 GetOpenAIBaseURL 指向 kimi，仍识别为火山。
+	require.Equal(t, providerVolcano, resolveCNQuotaProvider(acc),
+		"platform=kimi 误存 + base_url=火山 的账号必须识别为 volcano，不得发往 kimi 探测")
 }
 
 // TestValidateCodingPlanAccount_VolcanoPayGAllowed 校验 payg 火山订阅号账号可通过

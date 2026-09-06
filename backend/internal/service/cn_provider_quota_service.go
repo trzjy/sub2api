@@ -47,6 +47,8 @@ const (
 	cnExtraSuffix5hReset       = "5h_reset_at"
 	cnExtraSuffixWeeklyUsed    = "weekly_used_percent"
 	cnExtraSuffixWeeklyReset   = "weekly_reset_at"
+	cnExtraSuffixMonthlyUsed   = "monthly_used_percent"
+	cnExtraSuffixMonthlyReset  = "monthly_reset_at"
 	cnExtraSuffixUsageUpdated  = "usage_updated_at"
 )
 
@@ -75,11 +77,19 @@ func isVolcanoBaseURL(baseURL string) bool {
 }
 
 // resolveCNQuotaProvider 返回账号所属的 Coding Plan 额度供应商（kimi/zhipu/volcano）；
-// 非 coding 或无法识别返回 "". 火山订阅号账号（platform=deepseek，base_url 指向
-// ark.cn-beijing.volces.com）在 deepseek 创建/编辑界面保存为 payg，
-// GetCodingPlanProvider 按 coding 模式门控会返回空，此处按 base_url 兜底识别为
-// volcano；仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+// 非 coding 或无法识别返回 "". 火山识别按凭据原始 base_url 优先（详见下方说明），
+// 仅放行火山，不改变 Kimi / 智谱 / 普通 DeepSeek 的 coding-only 语义。
+//
+// 火山优先的必要性：火山订阅号账号的 platform 常被误存为 kimi/deepseek，且自适应
+// 协议 (api_protocol=adaptive) 账号的 GetOpenAIBaseURL() 优先取 api_base_urls 的
+// chat_completions（会指向 api.kimi.com 而非 ark.cn-beijing.volces.com）。若按
+// GetOpenAIBaseURL 判定，这类账号会被误判为 Kimi、探测发往 Kimi /usages 端点，返回
+// Kimi 结构的 0% 周用量且缺失 5h/月档。凭据 base_url 才是火山订阅号的唯一事实源，
+// 故先用 GetBaseURL()（= ark.cn-beijing.volces.com）强制识别为火山。
 func resolveCNQuotaProvider(account *Account) string {
+	if isVolcanoBaseURL(account.GetBaseURL()) {
+		return providerVolcano
+	}
 	provider := account.GetCodingPlanProvider()
 	if provider == "" && isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
 		return providerVolcano
@@ -226,9 +236,11 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 		if apiKey == "" {
 			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
 		}
-		// 原生 Anthropic 协议火山账号的 Volcano plan profile 存于 Anthropic base URL
-		// （GetOpenAIBaseURL 此时为空），须据此解析；OpenAI 协议则用 OpenAI base URL。
-		volcanoBaseURL := baseURL
+		// 火山 profile 必须用凭据原始 base_url（= ark.cn-beijing.volces.com）解析，
+		// 不取 baseURL（= GetOpenAIBaseURL，自适应账号会被 api_base_urls 覆盖为 kimi
+		// 端点）；否则 profile 解析失败而误报非火山端点。原生 Anthropic 协议火山账号
+		// 的 base URL 已由 GetAnthropicProtocolBaseURL 返回火山端点，同样可用。
+		volcanoBaseURL := account.GetBaseURL()
 		if account.IsAnthropicProtocol() {
 			volcanoBaseURL = account.GetAnthropicProtocolBaseURL()
 		}
@@ -556,10 +568,11 @@ func isVolcanoModelNotFoundError(body []byte, status int) bool {
 //     按 now+秒 处理）为重置时间；x-ratelimit-limit/remaining-requests 计算已用百分比。
 //     limit 与 remaining 必须同时可解析才计算用量，否则 remaining 缺失/畸形视为未知（用 0，
 //     绝不算成 100% 满额），避免健康账号被误暂停。
-//   - 周窗口：官方规则每周一 00:00（Asia/Shanghai）刷新，确定性计算，但周额度无可靠上游
-//     来源（限流响应头不含），故 used 标记 Unknown，只落 reset_at，前端显示“未知”而非假 0。
+//   - 周/月窗口：官方控制台展示近一周、近一月两档，但 OpenAI 兼容限流响应头仅含 5h 窗口，
+//     故周、月额度无可靠上游来源，used 标记 Unknown，只落 reset_at，前端显示“未知”而非假 0；
+//     重置时间按官方刷新规则确定性计算（每周一 00:00、每月同一天 23:59:59，Asia/Shanghai）。
 //
-// 只要 5h 或周窗口有有效重置时间即返回对应 tier，供前端渲染倒计时。
+// 只要 5h/周/月窗口有有效重置时间即返回对应 tier，供前端渲染倒计时。
 func parseVolcanoHeaderTiers(h http.Header) []CNQuotaTier {
 	var tiers []CNQuotaTier
 	if resetAt, ok := parseVolcanoResetHeader(h.Get("x-ratelimit-reset-requests")); ok {
@@ -586,6 +599,14 @@ func parseVolcanoHeaderTiers(h http.Header) []CNQuotaTier {
 	if reset := volcanoNextWeeklyReset(); reset != "" {
 		tiers = append(tiers, CNQuotaTier{
 			Window:             "weekly",
+			UsedPercent:        0,
+			ResetAt:            reset,
+			UsedPercentUnknown: true,
+		})
+	}
+	if reset := volcanoNextMonthlyReset(); reset != "" {
+		tiers = append(tiers, CNQuotaTier{
+			Window:             "monthly",
 			UsedPercent:        0,
 			ResetAt:            reset,
 			UsedPercentUnknown: true,
@@ -622,6 +643,30 @@ func volcanoNextWeeklyReset() string {
 		monday = monday.AddDate(0, 0, 7)
 	}
 	return monday.UTC().Format(time.RFC3339)
+}
+
+// volcanoNextMonthlyReset 返回下一个月同一天 23:59:59（Asia/Shanghai）的 RFC3339 字符串。
+// 火山方舟 Agent/Coding Plan 控制台展示近一月用量，月限额随包月订阅周期刷新；无状态时按
+// "下个月同一天 23:59:59" 近似。若目标月份不存在该日期（如 1 月 31 日 → 2 月），则取目标月
+// 最后一天，避免溢出到下下个月。
+func volcanoNextMonthlyReset() string {
+	return volcanoNextMonthlyResetAt(time.Now().In(volcanoPlanLoc))
+}
+
+// volcanoNextMonthlyResetAt 是 volcanoNextMonthlyReset 的可测试版本，接受固定 now。
+func volcanoNextMonthlyResetAt(now time.Time) string {
+	// 先尝试下个月同一天 23:59:59；Go time.Date 会规范化溢出日期。
+	next := time.Date(now.Year(), now.Month()+1, now.Day(), 23, 59, 59, 0, volcanoPlanLoc)
+	if next.Month() != now.Month()+1 && !(now.Month() == 11 && next.Month() == 0) {
+		// 日期溢出导致跳到了下下个月（或跨年异常），回退到目标月最后一天。
+		firstOfTarget := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, volcanoPlanLoc)
+		next = firstOfTarget.AddDate(0, 1, -1)
+		next = time.Date(next.Year(), next.Month(), next.Day(), 23, 59, 59, 0, volcanoPlanLoc)
+	}
+	if !next.After(now) {
+		next = next.AddDate(0, 1, 0)
+	}
+	return next.UTC().Format(time.RFC3339)
 }
 
 func zhipuQuotaHost(baseURL string) string {
@@ -897,6 +942,28 @@ func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) ma
 		// 缺 weekly 档：清除残留的 weekly used + reset 键。
 		updates[cnExtraKey(provider, cnExtraSuffixWeeklyUsed)] = nil
 		updates[cnExtraKey(provider, cnExtraSuffixWeeklyReset)] = nil
+	}
+	if presentWindows["monthly"] {
+		for _, t := range tiers {
+			if t.Window == "monthly" {
+				if t.UsedPercentUnknown {
+					// 月用量上游不可得，不得写假 0。仅落确定性重置时间；used 键置 nil。
+					if t.ResetAt != "" {
+						updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = t.ResetAt
+					} else {
+						updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = nil
+					}
+					updates[cnExtraKey(provider, cnExtraSuffixMonthlyUsed)] = nil
+				} else {
+					writeTier(cnExtraSuffixMonthlyUsed, cnExtraSuffixMonthlyReset, t.UsedPercent, t.ResetAt)
+				}
+				break
+			}
+		}
+	} else {
+		// 缺 monthly 档：清除残留的 monthly used + reset 键。
+		updates[cnExtraKey(provider, cnExtraSuffixMonthlyUsed)] = nil
+		updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = nil
 	}
 	return updates
 }

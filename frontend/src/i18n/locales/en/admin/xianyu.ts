@@ -66,6 +66,7 @@ export default {
       scanWaiting: 'Waiting for scan',
       scanScanned: 'Scanned, confirm on your phone',
       scanSuccess: 'Login successful',
+      scanAutoClose: 'Auto-closing in {seconds}s',
       scanFailed: 'Login failed',
       scanExpired: 'QR code expired',
       scanNoSession: 'Could not create a scan session. Check the Worker connection.',
