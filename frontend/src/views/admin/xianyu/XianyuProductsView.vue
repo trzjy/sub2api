@@ -69,6 +69,7 @@
                     <button class="btn btn-secondary btn-xs" @click="toggleRule(rule)">
                       {{ rule.status === 'active' ? t('admin.xianyu.products.ruleDisabled') : t('admin.xianyu.products.ruleActive') }}
                     </button>
+                    <button class="btn btn-secondary btn-xs" @click="openDeleteRule(rule)">{{ t('common.delete') }}</button>
                   </div>
                 </td>
               </tr>
@@ -196,6 +197,17 @@
           </div>
         </div>
       </BaseDialog>
+
+      <ConfirmDialog
+        :show="deleteRuleVisible"
+        :title="t('admin.xianyu.products.deleteRuleConfirmTitle')"
+        :message="t('admin.xianyu.products.deleteRuleConfirm', { keyword: deletingRule?.keyword || t('admin.xianyu.products.accountDefault') })"
+        :confirm-text="t('common.delete')"
+        :cancel-text="t('common.cancel')"
+        danger
+        @confirm="confirmDeleteRule"
+        @cancel="deleteRuleVisible = false"
+      />
     </div>
   </AppLayout>
 </template>
@@ -210,6 +222,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -412,6 +425,26 @@ async function toggleRule(rule: XianyuBindingRule) {
     })
     await load()
     appStore.showSuccess(t('admin.xianyu.products.ruleSaved'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
+}
+
+const deleteRuleVisible = ref(false)
+const deletingRule = ref<XianyuBindingRule | null>(null)
+
+function openDeleteRule(rule: XianyuBindingRule) {
+  deletingRule.value = rule
+  deleteRuleVisible.value = true
+}
+
+async function confirmDeleteRule() {
+  if (!deletingRule.value) return
+  try {
+    await adminAPI.xianyu.deleteBindingRule(deletingRule.value.id)
+    deleteRuleVisible.value = false
+    await load()
+    appStore.showSuccess(t('admin.xianyu.products.ruleDeleted'))
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }

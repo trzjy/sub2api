@@ -124,6 +124,34 @@ func (h *XianyuAdminHandler) UpdateDeliveryCardDescription(c *gin.Context) {
 	response.Success(c, gin.H{"message": "delivery card template updated"})
 }
 
+// DeleteItemPool 删除库存池（存在绑定商品/剩余库存码/引用规则时拒绝）。
+func (h *XianyuAdminHandler) DeleteItemPool(c *gin.Context) {
+	poolID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || poolID <= 0 {
+		response.BadRequest(c, "invalid pool id")
+		return
+	}
+	if err := h.control.DeleteItemPool(c.Request.Context(), poolID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "item pool deleted"})
+}
+
+// DeleteBindingRule 删除绑定规则。
+func (h *XianyuAdminHandler) DeleteBindingRule(c *gin.Context) {
+	ruleID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || ruleID <= 0 {
+		response.BadRequest(c, "invalid rule id")
+		return
+	}
+	if err := h.control.DeleteBindingRule(c.Request.Context(), ruleID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "binding rule deleted"})
+}
+
 type saveWorkerConfigRequest struct {
 	ID       int64  `json:"id"`
 	BaseURL  string `json:"base_url"`

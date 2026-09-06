@@ -98,6 +98,10 @@ export async function saveBindingRule(input: Partial<XianyuBindingRule>): Promis
   return data
 }
 
+export async function deleteBindingRule(ruleId: number): Promise<void> {
+  await apiClient.delete(`/admin/xianyu/binding-rules/${encodeURIComponent(String(ruleId))}`)
+}
+
 export async function listItemPools(options?: { signal?: AbortSignal }): Promise<XianyuItemPool[]> {
   const { data } = await apiClient.get<XianyuItemPool[]>('/admin/xianyu/item-pools', { signal: options?.signal })
   return data ?? []
@@ -106,6 +110,10 @@ export async function listItemPools(options?: { signal?: AbortSignal }): Promise
 export async function saveItemPool(input: Partial<XianyuItemPool>): Promise<XianyuItemPool> {
   const { data } = await apiClient.post<XianyuItemPool>('/admin/xianyu/item-pools', input)
   return data
+}
+
+export async function deleteItemPool(poolId: number): Promise<void> {
+  await apiClient.delete(`/admin/xianyu/item-pools/${encodeURIComponent(String(poolId))}`)
 }
 
 export async function listDeliveries(filter: XianyuDeliveryFilter = {}, options?: { signal?: AbortSignal }): Promise<PaginatedResponse<XianyuOrderClaim>> {
@@ -182,8 +190,10 @@ export const xianyuAPI = {
   bindProduct,
   listBindingRules,
   saveBindingRule,
+  deleteBindingRule,
   listItemPools,
   saveItemPool,
+  deleteItemPool,
   listDeliveries,
   listWorkerDeliveries,
   resendDelivery,

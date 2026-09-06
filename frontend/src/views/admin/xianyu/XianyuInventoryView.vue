@@ -58,6 +58,9 @@
                   <button class="btn btn-secondary btn-xs" @click="goGenerateCodes(pool)">
                     {{ t('admin.xianyu.inventory.generateCodes') }}
                   </button>
+                  <button class="btn btn-secondary btn-xs" @click="openDeletePool(pool)">
+                    {{ t('common.delete') }}
+                  </button>
                 </div>
               </td>
             </tr>
@@ -94,6 +97,17 @@
           </div>
         </div>
       </BaseDialog>
+
+      <ConfirmDialog
+        :show="deletePoolVisible"
+        :title="t('admin.xianyu.inventory.deletePoolTitle')"
+        :message="t('admin.xianyu.inventory.deletePoolConfirm', { name: deletingPool?.name ?? '' })"
+        :confirm-text="t('common.delete')"
+        :cancel-text="t('common.cancel')"
+        danger
+        @confirm="confirmDeletePool"
+        @cancel="deletePoolVisible = false"
+      />
     </div>
   </AppLayout>
 </template>
@@ -109,6 +123,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -201,6 +216,26 @@ async function save() {
 
 function goManageCodes(pool: XianyuItemPool) {
   router.push({ path: '/admin/redeem', query: { type: 'xianyu_delivery', pool: pool.slug, view: 'list' } })
+}
+
+const deletePoolVisible = ref(false)
+const deletingPool = ref<XianyuItemPool | null>(null)
+
+function openDeletePool(pool: XianyuItemPool) {
+  deletingPool.value = pool
+  deletePoolVisible.value = true
+}
+
+async function confirmDeletePool() {
+  if (!deletingPool.value) return
+  try {
+    await adminAPI.xianyu.deleteItemPool(deletingPool.value.id)
+    deletePoolVisible.value = false
+    await load()
+    appStore.showSuccess(t('admin.xianyu.inventory.deleteSuccess'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
 }
 
 function goGenerateCodes(pool: XianyuItemPool) {

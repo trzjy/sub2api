@@ -266,6 +266,7 @@ type XianyuControlRepository interface {
 	GetItemPoolBySlug(ctx context.Context, slug string) (*XianyuItemPool, error)
 	CreateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)
 	UpdateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)
+	DeleteItemPool(ctx context.Context, poolID int64) error
 	PoolStockCounts(ctx context.Context, poolSlug string) (remaining, used, disabled int, err error)
 	DeliveryStats(ctx context.Context, since time.Time) (sent, failed int, err error)
 	PendingDeliveryCount(ctx context.Context) (int, error)
@@ -283,6 +284,7 @@ type XianyuControlRepository interface {
 	ListBindingRules(ctx context.Context) ([]XianyuBindingRule, error)
 	CreateBindingRule(ctx context.Context, rule XianyuBindingRule) (*XianyuBindingRule, error)
 	UpdateBindingRule(ctx context.Context, rule XianyuBindingRule) (*XianyuBindingRule, error)
+	DeleteBindingRule(ctx context.Context, ruleID int64) error
 }
 
 // XianyuLegacyMigrationMarker 提供旧 item_pools 迁移完成标记。

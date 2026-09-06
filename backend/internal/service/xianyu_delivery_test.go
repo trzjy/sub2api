@@ -190,6 +190,12 @@ func (s *xianyuControlStub) UpdateProduct(_ context.Context, p XianyuProduct) (*
 func (s *xianyuControlStub) DeleteProduct(context.Context, int64) error {
 	return nil
 }
+func (s *xianyuControlStub) DeleteItemPool(context.Context, int64) error {
+	return nil
+}
+func (s *xianyuControlStub) DeleteBindingRule(context.Context, int64) error {
+	return nil
+}
 func (s *xianyuControlStub) UpdateProductBinding(_ context.Context, productID int64, bindingStatus, bindingSource string, poolID *int64) error {
 	s.bindCalls++
 	if s.product != nil {

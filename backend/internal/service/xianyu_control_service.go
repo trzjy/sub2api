@@ -433,6 +433,16 @@ func (s *XianyuControlService) UpdateDeliveryCardDescription(ctx context.Context
 	return s.worker.UpdateDeliveryCardDescription(ctx, cardID, description)
 }
 
+// DeleteItemPool 删除库存池（售罄/下架清理；绑定商品、剩余库存码、引用规则任一存在时拒绝）。
+func (s *XianyuControlService) DeleteItemPool(ctx context.Context, poolID int64) error {
+	return s.control.DeleteItemPool(ctx, poolID)
+}
+
+// DeleteBindingRule 删除绑定规则。
+func (s *XianyuControlService) DeleteBindingRule(ctx context.Context, ruleID int64) error {
+	return s.control.DeleteBindingRule(ctx, ruleID)
+}
+
 // EnableAccount 启用账号。
 func (s *XianyuControlService) EnableAccount(ctx context.Context, accountID string) error {
 	if s.worker == nil {

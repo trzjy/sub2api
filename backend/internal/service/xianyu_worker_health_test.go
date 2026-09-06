@@ -102,6 +102,14 @@ func (s *xianyuWorkerControlStub) DeleteProduct(context.Context, int64) error {
 	return nil
 }
 
+func (s *xianyuWorkerControlStub) DeleteItemPool(context.Context, int64) error {
+	return nil
+}
+
+func (s *xianyuWorkerControlStub) DeleteBindingRule(context.Context, int64) error {
+	return nil
+}
+
 func (s *xianyuWorkerControlStub) UpdateProductBinding(context.Context, int64, string, string, *int64) error {
 	return nil
 }

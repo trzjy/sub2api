@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -303,6 +304,64 @@ func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool servi
 	return updated, nil
 }
 
+// DeleteItemPool 删除库存池（下架清理）。三层守卫逐层给出可执行提示：
+// 仍有绑定商品 → 先解绑；仍有未使用库存码 → 先在兑换码页删除；
+// 仍有绑定规则指向该池 → 先删除规则。发货记录的 pool_id 为松散引用，删除后保留历史。
+func (r *xianyuControlRepository) DeleteItemPool(ctx context.Context, poolID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin xianyu item pool delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var slug string
+	err = tx.QueryRowContext(ctx, `SELECT slug FROM xianyu_item_pools WHERE id = $1`, poolID).Scan(&slug)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("select xianyu item pool: %w", err)
+	}
+
+	var boundProducts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM xianyu_products WHERE pool_id = $1 AND binding_status = 'mapped'`, poolID).Scan(&boundProducts); err != nil {
+		return fmt.Errorf("count bound xianyu products: %w", err)
+	}
+	if boundProducts > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_IN_USE", fmt.Sprintf("仍有 %d 个商品绑定该池，请先解绑后再删除", boundProducts))
+	}
+
+	var unusedCodes int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE type = 'xianyu_delivery' AND status = 'unused' AND notes = $1`, service.XianyuPoolNote(slug)).Scan(&unusedCodes); err != nil {
+		return fmt.Errorf("count unused xianyu codes: %w", err)
+	}
+	if unusedCodes > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_HAS_STOCK", fmt.Sprintf("池内还有 %d 个未使用库存码，请先在兑换码页删除后再删除库存池", unusedCodes))
+	}
+
+	var referencingRules int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM xianyu_binding_rules WHERE pool_id = $1`, poolID).Scan(&referencingRules); err != nil {
+		return fmt.Errorf("count xianyu binding rules: %w", err)
+	}
+	if referencingRules > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_HAS_RULES", fmt.Sprintf("有 %d 条绑定规则指向该池，请先删除规则后再删除库存池", referencingRules))
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, poolID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu item pool: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu item pool delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit xianyu item pool delete: %w", err)
+	}
+	return nil
+}
+
 const xianyuProductColumns = `id, account_pk, account_id, item_id, title, spec_name, spec_value, pool_id, binding_status, binding_source, status, last_seen_at, created_at, updated_at`
 
 func scanProduct(row interface{ Scan(...any) error }) (*service.XianyuProduct, error) {
@@ -518,6 +577,20 @@ func (r *xianyuControlRepository) UpdateBindingRule(ctx context.Context, rule se
 		return nil, fmt.Errorf("update xianyu binding rule: %w", err)
 	}
 	return updated, nil
+}
+
+// DeleteBindingRule 删除绑定规则。
+func (r *xianyuControlRepository) DeleteBindingRule(ctx context.Context, ruleID int64) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules WHERE id = $1`, ruleID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu binding rule: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu binding rule delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuBindingRuleNotFound
+	}
+	return nil
 }
 
 func nullableTime(t *time.Time) any {
