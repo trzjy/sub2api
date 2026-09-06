@@ -49,7 +49,7 @@
               <td class="px-4 py-2">{{ account.account_id }}</td>
               <td class="px-4 py-2">
                 <StatusBadge
-                  :status="account.status"
+                  :status="statusTone(account.status)"
                   :label="statusLabel(account.status)"
                 />
               </td>
@@ -67,7 +67,7 @@
               </td>
               <td class="px-4 py-2">
                 <StatusBadge
-                  :status="account.task_status"
+                  :status="taskTone(account)"
                   :label="taskLabel(account.task_status)"
                 />
               </td>
@@ -421,6 +421,28 @@ function cookieLabel(status: string): string {
     case 'invalid': return t('admin.xianyu.accounts.invalid')
     case 'expiring': return t('admin.xianyu.accounts.expiring')
     default: return t('admin.xianyu.accounts.unknown')
+  }
+}
+
+// 健康状态绿、异常红、中性灰（与 Cookie 列同规则）。
+// 账号状态：已启用绿、已过期红、同步中黄；已停用/已退出登录走 StatusBadge 既有色（黄/灰）。
+function statusTone(status: string): string {
+  switch (status) {
+    case 'enabled': return 'success'
+    case 'expired': return 'error'
+    case 'syncing': return 'warning'
+    default: return status
+  }
+}
+
+// 任务状态：运行中绿、启停中黄；账号仍处于启用态但任务已停止属异常，标红。
+function taskTone(account: XianyuAccount): string {
+  switch (account.task_status) {
+    case 'running': return 'success'
+    case 'starting':
+    case 'stopping': return 'warning'
+    case 'stopped': return account.status === 'enabled' ? 'error' : 'unknown'
+    default: return account.task_status
   }
 }
 
