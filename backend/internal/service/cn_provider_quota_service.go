@@ -228,10 +228,13 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 		targetURL = zhipuQuotaURL(baseURL)
 		authHeader = apiKey // 智谱额度端点鉴权不加 Bearer 前缀
 	case providerVolcano:
-		// 火山方舟 Agent/Coding Plan 额度无需 AK/SK，也不走 GetAFPUsage 管理 OpenAPI
-		// （该接口仅接受 AK/SK 签名，且 Agent Plan 额度“不可用于 API 调用”）。改用订阅
-		// API Key（ark-*, Bearer）对真实推理端点发一次最小请求，读取 OpenAI 兼容限流
-		// 响应头获取 5h 重置；周/月窗口按官方刷新规则确定性计算（详见下方 helper）。
+		// 主路径：AK/SK 管理面用量接口（GetAFPUsage / GetCodingPlanUsage）。生产实测
+		// （2026-09-06）推理端点成功响应不携带任何 x-ratelimit-* 头，官方文档亦明确订阅
+		// 用量只有控制台可查（延迟 0.5~1 天），响应头探测拿不到用量，仅作无 AK/SK 时的
+		// 回落（此时周/月重置仍按官方规则确定性计算，用量档显示"上游未提供"）。
+		if akskResult, handled, perr := s.volcanoAKSKProbe(ctx, account); handled {
+			return akskResult, perr
+		}
 		apiKey := strings.TrimSpace(account.GetCNAPIKey())
 		if apiKey == "" {
 			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
@@ -426,11 +429,12 @@ func kimiQuotaURL(baseURL string) string {
 }
 
 // 火山方舟用量探测说明：
-// 火山方舟 Agent/Coding Plan 额度不可经管理 OpenAPI（GetAFPUsage / GetCodingPlanUsage，
-// 仅接受 AK/SK 签名）查询，且订阅账号创建时无 AK/SK 录入入口。正确做法是复用订阅 API
-// Key（ark-*, Bearer）对真实推理端点（{base}/v3/chat/completions）发一次最小请求，读取
-// OpenAI 兼容限流响应头获取 5h 滚动窗口重置与用量；周窗口按官方刷新规则（每周一 00:00
-// Asia/Shanghai）确定性计算。详见 parseVolcanoHeaderTiers / volcanoNextWeeklyReset。
+// 主路径为 AK/SK 管理面探测（见 cn_provider_quota_volcano_aksk.go）：GetAFPUsage /
+// GetCodingPlanUsage 返回真实 Used/Quota 与官方重置时间，已在生产用真实密钥验证可用
+// （订阅账号凭据中的 access_key/secret_key，或同 base_url 同主体账号的继承值）。
+// 回落路径（无 AK/SK）：复用订阅 API Key（ark-*, Bearer）对真实推理端点
+// （{base}/v3/chat/completions）发一次最小请求——但注意该响应不携带任何 x-ratelimit-*
+// 头（生产实测），故只能落周/月确定性重置时间，用量档不可得。
 
 // volcanoQuotaProbeDefaultModel 是火山探测回落模型（model_mapping 为空时使用）。
 // 必须取方舟官方支持的通用模型 ID（与火山订阅文档候选一致，如 doubao-seed-2.0-lite /
