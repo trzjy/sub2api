@@ -216,6 +216,8 @@ export default {
       deliveryTemplateSaved: '发货模板已保存',
       deliveryTemplateSave: '保存模板',
       deliveryTemplateSaving: '保存中…',
+      deliveryTemplatePreview: '预览（示例数据）',
+      deliveryTemplatePreviewEmpty: '模板为空：买家将只收到卡密本体',
       noDeliveryCards: '暂无发货卡券（Worker 侧未创建卡券）',
       cardItems: '关联商品',
     },

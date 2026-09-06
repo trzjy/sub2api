@@ -94,6 +94,10 @@
               <span v-if="card.item_ids.length" class="text-xs text-gray-400">{{ t('admin.xianyu.settings.cardItems') }}: {{ card.item_ids.join(', ') }}</span>
             </div>
             <textarea v-model="card.description" rows="4" class="input w-full font-mono text-xs"></textarea>
+            <div class="mt-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+              <p class="mb-1 font-medium">{{ t('admin.xianyu.settings.deliveryTemplatePreview') }}</p>
+              <p class="whitespace-pre-wrap">{{ templatePreview(card.description) }}</p>
+            </div>
             <div class="mt-2 flex justify-end">
               <button class="btn btn-primary btn-sm" :disabled="savingCardId === card.id" @click="saveCardTemplate(card)">
                 {{ savingCardId === card.id ? t('admin.xianyu.settings.deliveryTemplateSaving') : t('admin.xianyu.settings.deliveryTemplateSave') }}
@@ -144,6 +148,27 @@ async function saveCardTemplate(card: XianyuDeliveryCard) {
   } finally {
     savingCardId.value = null
   }
+}
+
+const TEMPLATE_PREVIEW_SAMPLES: Record<string, string> = {
+  DELIVERY_CONTENT: '7391e6babc573a773431baa694a6120e',
+  item_title: 'GLM-5.3 24h天卡 不限次数 自动发货',
+  order_id: '5127403682497093139',
+  buyer_name: '买家昵称',
+  buyer_id: '838831211',
+  seller_name: '卖家昵称',
+  item_id: '1080213108214'
+}
+
+function templatePreview(description: string): string {
+  if (!description.trim()) {
+    return t('admin.xianyu.settings.deliveryTemplatePreviewEmpty')
+  }
+  let out = description
+  for (const [key, value] of Object.entries(TEMPLATE_PREVIEW_SAMPLES)) {
+    out = out.split(`{${key}}`).join(value)
+  }
+  return out
 }
 
 async function load() {

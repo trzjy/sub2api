@@ -372,14 +372,14 @@ type SystemUserReader interface {
 // 只记录订单级汇总（数量/状态/错误），不复制 Worker 卡券内容或卡券模型；
 // Worker 保持本地库存与逐份发货实现，两边只通过 order_no、数量和结果回传做幂等关联。
 type XianyuWorkerDelivery struct {
-	OrderNo        string
-	DeliveryKind   string // auto / manual / redelivery
-	Quantity       int
-	QuantitySent   int
-	DeliveryStatus string
-	DeliveryError  *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	OrderNo        string     `json:"order_no"`
+	DeliveryKind   string     `json:"delivery_kind"` // auto / manual / redelivery
+	Quantity       int        `json:"quantity"`
+	QuantitySent   int        `json:"quantity_sent"`
+	DeliveryStatus string     `json:"delivery_status"`
+	DeliveryError  *string    `json:"delivery_error,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // XianyuWorkerDeliveryRepository 维护 Worker 发货记录。

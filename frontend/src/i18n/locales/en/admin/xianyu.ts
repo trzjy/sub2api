@@ -216,6 +216,8 @@ export default {
       deliveryTemplateSaved: 'Delivery template saved',
       deliveryTemplateSave: 'Save Template',
       deliveryTemplateSaving: 'Saving…',
+      deliveryTemplatePreview: 'Preview (sample data)',
+      deliveryTemplatePreviewEmpty: 'Template is empty: buyers will receive the raw code only',
       noDeliveryCards: 'No delivery cards (none created on the Worker)',
       cardItems: 'Linked items',
     },

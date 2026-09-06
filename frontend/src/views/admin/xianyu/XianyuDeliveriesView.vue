@@ -55,13 +55,7 @@
               <td class="px-4 py-2 font-mono text-xs">{{ claim.order_no }}</td>
               <td class="px-4 py-2">{{ claim.account_id }}</td>
               <td class="px-4 py-2">{{ claim.item_id }}</td>
-              <td class="px-4 py-2 font-mono text-xs">
-                <span v-if="revealedCodes.has(claim.order_no)">{{ claim.code }}</span>
-                <span v-else>{{ maskCode(claim.code) }}</span>
-                <button class="ml-1 text-xs text-gray-400 hover:text-gray-600" @click="toggleReveal(claim.order_no)">
-                  {{ revealedCodes.has(claim.order_no) ? t('admin.xianyu.deliveries.hideCode') : t('admin.xianyu.deliveries.showCode') }}
-                </button>
-              </td>
+              <td class="px-4 py-2 font-mono text-xs">{{ claim.code }}</td>
               <td class="px-4 py-2">
                 <StatusBadge :status="claim.delivery_status" :label="deliveryStatusLabel(claim.delivery_status)" />
               </td>
@@ -231,24 +225,6 @@ function deliveryStatusLabel(status: string): string {
     case 'failed': return t('admin.xianyu.deliveries.failed')
     default: return t('admin.xianyu.deliveries.legacyUnverified')
   }
-}
-
-const revealedCodes = ref<Set<string>>(new Set())
-
-function toggleReveal(orderNo: string) {
-  const next = new Set(revealedCodes.value)
-  if (next.has(orderNo)) {
-    next.delete(orderNo)
-  } else {
-    next.add(orderNo)
-  }
-  revealedCodes.value = next
-}
-
-function maskCode(code: string): string {
-  if (!code) return '-'
-  if (code.length <= 4) return '*'.repeat(code.length)
-  return `${code.slice(0, 2)}${'*'.repeat(Math.max(4, code.length - 4))}${code.slice(-2)}`
 }
 
 const confirmVisible = ref(false)

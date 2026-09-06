@@ -204,22 +204,22 @@ const (
 
 // XianyuOrderClaim 是发货记录（幂等事实表视图）。
 type XianyuOrderClaim struct {
-	OrderNo        string
-	RedeemCodeID   int64
-	Code           string
-	AccountID      string
-	ItemID         string
-	BuyerID        string
-	ChatID         string
-	Amount         *string
-	ProductID      *int64
-	PoolID         *int64
-	BindingSource  *string
-	DeliveryStatus string
-	DeliveryError  *string
-	AttemptCount   int
-	LastAttemptAt  *time.Time
-	CreatedAt      time.Time
+	OrderNo        string     `json:"order_no"`
+	RedeemCodeID   int64      `json:"redeem_code_id"`
+	Code           string     `json:"code"`
+	AccountID      string     `json:"account_id"`
+	ItemID         string     `json:"item_id"`
+	BuyerID        string     `json:"buyer_id"`
+	ChatID         string     `json:"chat_id"`
+	Amount         *string    `json:"amount,omitempty"`
+	ProductID      *int64     `json:"product_id,omitempty"`
+	PoolID         *int64     `json:"pool_id,omitempty"`
+	BindingSource  *string    `json:"binding_source,omitempty"`
+	DeliveryStatus string     `json:"delivery_status"`
+	DeliveryError  *string    `json:"delivery_error,omitempty"`
+	AttemptCount   int        `json:"attempt_count"`
+	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // XianyuDeliveryStatusResult 是 Worker 回传的发货结果。
