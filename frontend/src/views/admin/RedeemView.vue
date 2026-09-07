@@ -33,11 +33,7 @@
             <button
               class="ml-0.5 font-semibold hover:text-primary-900"
               :title="t('common.cancel')"
-              @click="
-                poolFilter = ''
-                pagination.page = 1
-                loadCodes()
-              "
+              @click="clearPoolFilter"
             >
               ×
             </button>
@@ -869,6 +865,12 @@ watch(
     }
   }
 )
+
+function clearPoolFilter() {
+  poolFilter.value = ''
+  pagination.page = 1
+  loadCodes()
+}
 
 const buildRedeemQueryFilters = () => ({
   type: (filters.type || undefined) as RedeemCodeType | undefined,
