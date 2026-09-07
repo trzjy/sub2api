@@ -368,6 +368,52 @@ describe('ModelWhitelistSelector', () => {
     expect(wrapper.emitted('update:modelValue')).toEqual([[['x-preview-f-free']]])
   })
 
+  it('shows real upstream sync for other platform in create flow and previews with credentials', async () => {
+    // other 平台必须出现真正的“同步上游模型”按钮（而非仅静态 fillRelated），
+    // 并以填写的 base_url + api_key 走 preview 拉取（如 Token Plan /plan/v3/models）。
+    syncUpstreamModelsPreview.mockResolvedValue({ models: ['glm-5.3', 'deepseek-v4-pro'] })
+    const wrapper = mountSelector({
+      syncCredentials: {
+        platform: 'other',
+        type: 'apikey',
+        base_url: 'https://api.lkeap.cloud.tencent.com/plan/v3',
+        api_key: 'sk-tp-test'
+      }
+    })
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(syncUpstreamModelsPreview).toHaveBeenCalledWith(expect.objectContaining({
+      platform: 'other',
+      base_url: 'https://api.lkeap.cloud.tencent.com/plan/v3'
+    }))
+    expect(wrapper.emitted('upstream-synced')).toEqual([[]])
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3', 'deepseek-v4-pro']]])
+  })
+
+  it('shows real upstream sync for other platform in edit flow', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['tc-code-latest'] })
+    const wrapper = mountSelector({
+      platform: 'other',
+      accountId: 88
+    })
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(syncUpstreamModels).toHaveBeenCalledWith(88)
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['tc-code-latest']]])
+  })
+
   it('rejects volcano apply when the applied diff drifts beyond the confirmed preview', async () => {
     // preview 为部分确认（unverified 存在、无下架）；apply 时临时探活恢复升级为完全确认，
     // 出现 preview 未提示的下架 old-manual-model → 未获用户确认的破坏性收紧，必须拒绝。

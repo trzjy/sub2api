@@ -209,7 +209,10 @@ const upstreamSyncPlatforms = new Set([
   'grok',
   'kimi',
   'zhipu',
-  'deepseek'
+  'deepseek',
+  // other 平台在后端固定按 OpenAI 兼容协议探测 GET {base_url}/models（见
+  // upstream_models.go UsesOpenAIProtocolSharedBaseURL 分支），同样支持在线拉取。
+  'other'
 ])
 const canSyncUpstream = computed(() => {
   if (props.accountId) {
