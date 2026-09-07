@@ -26,7 +26,7 @@
           />
         </div>
         <span :class="['shrink-0 font-medium', tier.used_percent == null ? 'text-gray-400 dark:text-gray-500' : utilizationTextColor(tier.used_percent)]">
-          {{ tier.used_percent == null ? '上游未提供' : Math.round(tier.used_percent) + '%' }}
+          {{ tier.used_percent == null ? '上游未提供' : formatTierPercent(tier.used_percent) }}
         </span>
         <span
           v-if="tier.reset_at"
@@ -93,6 +93,12 @@ import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
 import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL, isVolcanoBaseURL } from './credentialsBuilder'
+
+// 用量百分比显示：<1% 保留两位小数（新窗口刚重置时避免一律显示 0%），其余取整。
+function formatTierPercent(percent: number): string {
+  if (percent > 0 && percent < 1) return percent.toFixed(2) + '%'
+  return Math.round(percent) + '%'
+}
 
 const props = defineProps<{
   account: Account
