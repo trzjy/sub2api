@@ -24,13 +24,16 @@ const variantClass = computed(() => {
   switch (props.status) {
     case 'active':
     case 'success':
+    case 'sent': // 闲鱼发货：已发送
       return 'bg-green-500'
+    case 'pending': // 闲鱼发货：待处理
     case 'disabled':
     case 'inactive':
     case 'warning':
       return 'bg-yellow-500'
     case 'error':
     case 'danger':
+    case 'failed': // 闲鱼发货：失败
       return 'bg-red-500'
     default:
       return 'bg-gray-400'
