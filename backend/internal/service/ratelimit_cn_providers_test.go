@@ -6,27 +6,58 @@ import (
 	"time"
 )
 
-func TestCNProviderResponseIndicatesOverload(t *testing.T) {
-	overload := []byte(`{"error":{"message":"The service is currently unable to handle additional requests due to server overload. Please retry later. Request id: 02178876"}}`)
-	if !cnProviderResponseIndicatesOverload(overload) {
-		t.Fatal("volcano overload 429 body should be detected as overload")
+func TestCNQuotaSnapshotEarliestExhaustedReset(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-1 * time.Hour).Format(time.RFC3339)
+
+	// 无任何窗口触顶 → nil（走短冷却）
+	if got := cnQuotaSnapshotEarliestExhaustedReset(map[string]any{
+		cnExtraKey("volcano", cnExtraSuffix5hUsed):     float64(0),
+		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed): float64(8),
+		cnExtraKey("volcano", cnExtraSuffixMonthlyUsed): float64(13),
+	}, "volcano", now); got != nil {
+		t.Fatalf("expected nil (no exhausted window), got %v", *got)
 	}
-	if cnProviderResponseIndicatesOverload([]byte(`{"error":{"message":"FlowThreshold exceeded: weekly token quota exhausted"}}`)) {
-		t.Fatal("quota exhaustion body must not be classified as overload")
+
+	// 5h 触顶 → 返回 5h 重置点（早于 weekly）
+	weekly := now.Add(6 * 24 * time.Hour)
+	fiveH := now.Add(2 * time.Hour)
+	if got := cnQuotaSnapshotEarliestExhaustedReset(map[string]any{
+		cnExtraKey("volcano", cnExtraSuffix5hUsed):      float64(100),
+		cnExtraKey("volcano", cnExtraSuffix5hReset):     fiveH.Format(time.RFC3339),
+		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed):  float64(100),
+		cnExtraKey("volcano", cnExtraSuffixWeeklyReset): weekly.Format(time.RFC3339),
+	}, "volcano", now); got == nil || got.Sub(fiveH) > time.Minute {
+		t.Fatalf("expected earliest exhausted reset at 5h window, got %v", got)
 	}
-	if cnProviderResponseIndicatesOverload(nil) {
-		t.Fatal("empty body should not be classified as overload")
+
+	// 触顶但重置时间已过期（旧快照）→ 不算耗尽
+	if got := cnQuotaSnapshotEarliestExhaustedReset(map[string]any{
+		cnExtraKey("volcano", cnExtraSuffix5hUsed):  float64(100),
+		cnExtraKey("volcano", cnExtraSuffix5hReset): past,
+	}, "volcano", now); got != nil {
+		t.Fatalf("expired reset must not count as exhausted, got %v", *got)
+	}
+
+	// 快照缺失 → nil
+	if got := cnQuotaSnapshotEarliestExhaustedReset(nil, "volcano", now); got != nil {
+		t.Fatalf("missing snapshot must return nil, got %v", *got)
 	}
 }
 
-func TestCNProviderResponseIndicatesQuotaExhaustion(t *testing.T) {
-	quota := []byte(`{"error":{"message":"FlowThreshold exceeded: weekly token quota exhausted"}}`)
-	if !cnProviderResponseIndicatesQuotaExhaustion(quota) {
-		t.Fatal("quota exhaustion body should be detected")
+func TestCNQuotaSnapshotAnyWindowExhausted(t *testing.T) {
+	if cnQuotaSnapshotAnyWindowExhausted(map[string]any{
+		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed): float64(13),
+	}, "volcano") {
+		t.Fatal("13% usage must not count as exhausted")
 	}
-	overload := []byte(`{"error":{"message":"The service is currently unable to handle additional requests due to server overload. Please retry later."}}`)
-	if cnProviderResponseIndicatesQuotaExhaustion(overload) {
-		t.Fatal("overload body must not be classified as quota exhaustion")
+	if !cnQuotaSnapshotAnyWindowExhausted(map[string]any{
+		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed): float64(100),
+	}, "volcano") {
+		t.Fatal("100% usage must count as exhausted")
+	}
+	if cnQuotaSnapshotAnyWindowExhausted(nil, "volcano") {
+		t.Fatal("missing snapshot must be treated as no evidence")
 	}
 }
 
@@ -43,12 +74,6 @@ func (s *cnReconcileRepoStub) ListByPlatform(context.Context, string) ([]Account
 func (s *cnReconcileRepoStub) ClearRateLimit(_ context.Context, id int64) error {
 	s.cleared = append(s.cleared, id)
 	return nil
-}
-
-func cnVolcanoTestAccount(id int64, resetAt time.Time) Account {
-	a := Account{ID: id, Platform: PlatformZhipu, Type: AccountTypeAPIKey, RateLimitedAt: &resetAt, RateLimitResetAt: &resetAt}
-	a.Credentials = map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/v3"}
-	return a
 }
 
 func TestReconcileCNProviderRateLimitsClearsMisBench(t *testing.T) {
@@ -83,18 +108,8 @@ func TestReconcileCNProviderRateLimitsClearsMisBench(t *testing.T) {
 	}
 }
 
-func TestCNQuotaSnapshotAnyWindowExhausted(t *testing.T) {
-	if cnQuotaSnapshotAnyWindowExhausted(map[string]any{
-		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed): float64(13),
-	}, "volcano") {
-		t.Fatal("13% usage must not count as exhausted")
-	}
-	if !cnQuotaSnapshotAnyWindowExhausted(map[string]any{
-		cnExtraKey("volcano", cnExtraSuffixWeeklyUsed): float64(100),
-	}, "volcano") {
-		t.Fatal("100% usage must count as exhausted")
-	}
-	if cnQuotaSnapshotAnyWindowExhausted(nil, "volcano") {
-		t.Fatal("missing snapshot must be treated as no evidence")
-	}
+func cnVolcanoTestAccount(id int64, resetAt time.Time) Account {
+	a := Account{ID: id, Platform: PlatformZhipu, Type: AccountTypeAPIKey, RateLimitedAt: &resetAt, RateLimitResetAt: &resetAt}
+	a.Credentials = map[string]any{"base_url": "https://ark.cn-beijing.volces.com/api/v3"}
+	return a
 }
