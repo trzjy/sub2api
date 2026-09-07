@@ -339,6 +339,7 @@ export default {
       status: {
         unused: 'Unused',
         used: 'Used',
+        delivered: 'Delivered',
         expired: 'Expired',
         disabled: 'Disabled'
       },

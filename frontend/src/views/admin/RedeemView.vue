@@ -141,7 +141,7 @@
             </span>
           </template>
 
-          <template #cell-status="{ value }">
+          <template #cell-status="{ value, row }">
             <span
               :class="[
                 'badge',
@@ -152,12 +152,22 @@
                     : 'badge-danger'
               ]"
             >
-              {{ t('admin.redeem.status.' + value) }}
+              {{
+                row.type === 'xianyu_delivery' && value === 'used'
+                  ? t('admin.redeem.status.delivered')
+                  : t('admin.redeem.status.' + value)
+              }}
             </span>
           </template>
 
           <template #cell-used_by="{ value, row }">
-            <span class="text-sm text-gray-500 dark:text-dark-400">
+            <!-- 闲鱼发货凭证没有"使用者"：used_by 是系统审计账号，真实买家/订单信息在发货记录页 -->
+            <span
+              v-if="row.type === 'xianyu_delivery'"
+              class="text-sm text-gray-500 dark:text-dark-400"
+              >-</span
+            >
+            <span v-else class="text-sm text-gray-500 dark:text-dark-400">
               {{ row.user?.email || (value ? t('admin.redeem.userPrefix', { id: value }) : '-') }}
             </span>
           </template>

@@ -330,6 +330,7 @@ export default {
       status: {
         unused: '未使用',
         used: '已使用',
+        delivered: '已发货',
         expired: '已过期',
         disabled: '已禁用'
       },
