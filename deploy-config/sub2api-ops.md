@@ -30,7 +30,7 @@
 | 域名 | `corealgos.com` / `www.corealgos.com`（HTTPS 443） |
 | 部署目录 | `/opt/sub2api` |
 | 反向代理 | Nginx → `127.0.0.1:3300` |
-| 应用服务 | `weishaw/sub2api:latest`，容器名 `sub2api` |
+| 应用服务 | 服务器本地构建镜像 `sub2api:<commit>-w`（compose 经 `.env` 的 `SUB2API_IMAGE_TAG` 引用），容器名 `sub2api` |
 | 后端组件 | `postgres:15-alpine`（容器 `sub2api-postgres`）、`redis:7-alpine`（容器 `sub2api-redis`） |
 | 版本 | `v2026.06.10` |
 | 管理员 | `trzjy2013@gmail.com` |
@@ -107,6 +107,7 @@ git push origin main
 |------|------|
 | `BIND_HOST=127.0.0.1` | 仅监听内网，由 Nginx 反代 |
 | `SERVER_PORT=3300` | 宿主机暴露端口（容器内固定 8080） |
+| `SUB2API_IMAGE_TAG=<commit>-w` | 应用镜像标签：服务器本地构建的 `sub2api:<commit>-w`，每次升级随构建产物更新（见第 5 节） |
 | `POSTGRES_USER/PASSWORD/DB` | 数据库凭据 |
 | `REDIS_PASSWORD` | 留空（内网） |
 | `ADMIN_EMAIL/ADMIN_PASSWORD` | 首次启动 `AUTO_SETUP` 创建管理员 |
@@ -175,21 +176,52 @@ docker exec sub2api-redis redis-cli ping   # 期望 PONG
 
 ---
 
-## 5. 升级流程
+## 5. 升级流程（服务器端构建镜像）
+
+> 生产镜像在 `yiyutu-server` 本地构建（不推 registry），以 `<提交短哈希>-w` 打标签，compose 经 `.env` 的 `SUB2API_IMAGE_TAG` 引用。**发布前先在本地把要发布的提交推到 `origin main`**。
 
 ```bash
-# 1. 备份当前数据（见第 6 节）
-# 2. 拉取最新镜像
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env pull sub2api
-# 3. 记录当前镜像供回滚
-docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" weishaw/sub2api
-# 4. 重建容器
-docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --remove-orphans sub2api
+# 本地：提交并推送（前置）
+cd /mnt/data/sub2api && git push origin main
+
+# 1. 备份 .env（改 tag 前）
+ssh yiyutu-server
+cp /opt/sub2api/.env /opt/sub2api/.env.bak-$(date +%Y%m%d-%H%M%S)
+
+# 2. 获取目标提交，生成干净构建暂存
+#    git archive 只含该提交的树，不带工作区未提交改动/杂物；不要直接从
+#    工作区 rsync（会把未提交的本地改动带进生产镜像）。
+cd /opt/sub2api && git fetch origin
+TARGET=$(git rev-parse --short origin/main)          # 或显式指定提交哈希
+rm -rf /opt/sub2api/build-$TARGET && mkdir -p /opt/sub2api/build-$TARGET
+git archive origin/main | tar -x -C /opt/sub2api/build-$TARGET
+# （可选）校验暂存确含目标内容：grep -c "特征串" build-$TARGET/backend/...
+
+# 3. 服务器端构建镜像（后台运行 + 日志，构建约 5-10 分钟）
+cd /opt/sub2api/build-$TARGET && nohup docker build -t sub2api:$TARGET-w \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  --build-arg GOSUMDB=sum.golang.google.cn \
+  -f Dockerfile . > /tmp/build-$TARGET.log 2>&1 &
+# 轮询完成：ps -p <PID> 退出即结束；tail -f /tmp/build-$TARGET.log 查看进度
+
+# 4. 切换镜像标签并重建容器
+sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=$TARGET-w/" /opt/sub2api/.env
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+
 # 5. 验证
-sleep 15 && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps && curl -s http://127.0.0.1:3300/health
+sleep 18
+docker inspect sub2api --format "{{.Image}}" | cut -c1-20          # 应为新构建产物 ID
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps   # Up (healthy)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3300/health         # 200
+curl -s -o /dev/null -w "%{http_code}\n" https://corealgos.com/               # 200
+docker logs --tail=50 sub2api 2>&1 | grep -iE "panic|fatal" || echo NO_FATAL
+
+# 6. 清理旧链：删除已成功部署的构建暂存 + 清理旧镜像
+rm -rf /opt/sub2api/build-<上一目标>
+/usr/local/sbin/sub2api-clean-releases   # 保留 latest + 当前运行 tag + 1 个最近 tag
 ```
 
-> 也可在管理后台左上角"检查更新"一键升级（支持回滚）。
+> 也可在管理后台左上角"检查更新"一键升级（支持回滚），但生产主流程以上述服务器端构建为准。
 
 ---
 
@@ -282,18 +314,21 @@ systemctl reload nginx
 
 ## 9. 回滚操作
 
+本地构建镜像按提交哈希打标签，回滚只需切回上一已构建镜像的 tag：
+
 ```bash
-# 1. 记录/确认要回滚的镜像
-docker images weishaw/sub2api
-# 2. 拉取目标版本并标记
-docker pull weishaw/sub2api:<old-version>
-docker tag weishaw/sub2api:<old-version> weishaw/sub2api:latest
-# 3. 重建
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate sub2api
-# 4. 验证
-curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
+# 1. 列出已构建镜像，确认目标标签（通常是上一个 <commit>-w）
+docker images sub2api
+
+# 2. 切换回目标标签并重建
+sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=<上一哈希>-w/" /opt/sub2api/.env
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+
+# 3. 验证
+sleep 15 && curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 ```
 
+> 若上一版本镜像已被 `sub2api-clean-releases` 清理，需按第 5 节从 `git archive` 旧提交重新构建。
 > 若紧急停服：`docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env stop sub2api`，处理完毕后 `docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env start sub2api`。
 
 ---
@@ -424,7 +459,7 @@ journalctl -u sub2api-cleanup.service -n 50 --no-pager
 
 ```bash
 cd /opt/sub2api
-git pull origin main
+git fetch origin && git reset --hard origin/main   # 与第 5 节部署规范一致（工作区只作部署源）
 install -m 0755 deploy-config/scripts/sub2api-clean-releases /usr/local/sbin/sub2api-clean-releases
 install -m 0644 deploy-config/systemd/sub2api-cleanup.service /etc/systemd/system/sub2api-cleanup.service
 install -m 0644 deploy-config/systemd/sub2api-cleanup.timer /etc/systemd/system/sub2api-cleanup.timer
