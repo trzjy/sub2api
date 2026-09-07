@@ -151,6 +151,113 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 	return earliest
 }
 
+// cnOverload429Cooldown 过载型 429 的默认短冷却（官方语义「稍后重试」）。
+const cnOverload429Cooldown = 90 * time.Second
+
+// cnOverload429CooldownMax Retry-After 的接受上限，防止异常大值造成长禁闭。
+const cnOverload429CooldownMax = 10 * time.Minute
+
+// cnOverload429Reason 过载型 429 临时停调 reason 的稳定前缀。
+const cnOverload429Reason = "cn_overload_429: upstream overloaded, retry shortly"
+
+// cnProviderResponseIndicatesOverload 通过响应体文案识别「过载/繁忙」型 429
+// （火山方舟官方措辞："The service is currently unable to handle additional
+// requests due to server overload. Please retry later."）。
+func cnProviderResponseIndicatesOverload(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "server overload") ||
+		strings.Contains(s, "unable to handle additional requests") ||
+		strings.Contains(s, "currently overloaded")
+}
+
+// cnProviderResponseIndicatesQuotaExhaustion 通过响应体文案识别「配额/窗口耗尽」
+// 型 429——只有该形态才允许冷却到窗口重置点；宁可漏判（交给秒级兜底 + 周期
+// 额度探测的阈值停调接管），不可把瞬时 429 禁闭数天。
+func cnProviderResponseIndicatesQuotaExhaustion(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	s := strings.ToLower(string(body))
+	for _, keyword := range []string{
+		"flowthreshold", "quota", "exhausted", "usage limit",
+		"窗口", "配额", "额度",
+	} {
+		if strings.Contains(s, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileCNProviderRateLimits 对账账号级 429 限流（窗口耗尽路径写入）：
+// 若官方配额快照显示没有任何窗口触顶，而限流重置点仍在 1 小时之外，判定为
+// 「瞬时 429 被误禁闭到窗口重置」，提前解除。短冷却（<1h）自然到期，不参与。
+// 快照缺失/探测失败视为无耗尽证据（宁可解除误禁闭——真实耗尽会由下次 429
+// 或周期阈值停调重新接管）。
+func reconcileCNProviderRateLimits(ctx context.Context, repo AccountRepository, platforms []string, now time.Time) int {
+	if repo == nil {
+		return 0
+	}
+	cleared := 0
+	for _, platform := range platforms {
+		accounts, err := repo.ListByPlatform(ctx, platform)
+		if err != nil {
+			slog.Warn("cn_rate_limit_reconcile_list_failed", "platform", platform, "error", err)
+			continue
+		}
+		for i := range accounts {
+			account := &accounts[i]
+			if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
+				continue
+			}
+			resetAt := *account.RateLimitResetAt
+			if !resetAt.After(now) || resetAt.Sub(now) < time.Hour {
+				continue
+			}
+			provider := resolveCNQuotaProvider(account)
+			if provider == "" {
+				continue
+			}
+			if cnQuotaSnapshotAnyWindowExhausted(account.Extra, provider) {
+				continue
+			}
+			if err := repo.ClearRateLimit(ctx, account.ID); err != nil {
+				slog.Warn("cn_rate_limit_reconcile_clear_failed", "account_id", account.ID, "error", err)
+				continue
+			}
+			cleared++
+			slog.Info("cn_rate_limit_reconcile_cleared",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"was_reset_at", resetAt.UTC(),
+				"reason", "quota snapshot shows no exhausted window; transient 429 mis-benched to window reset",
+			)
+		}
+	}
+	return cleared
+}
+
+// cnQuotaSnapshotAnyWindowExhausted 报告快照中是否有任一窗口用量达到耗尽水位
+// （≥99%，留 1% 容差避免四舍五入误判）。
+func cnQuotaSnapshotAnyWindowExhausted(extra map[string]any, provider string) bool {
+	if len(extra) == 0 {
+		return false
+	}
+	for _, suffix := range []string{cnExtraSuffix5hUsed, cnExtraSuffixWeeklyUsed, cnExtraSuffixMonthlyUsed} {
+		raw, ok := extra[cnExtraKey(provider, suffix)]
+		if !ok {
+			continue
+		}
+		if schedulingPercentValue(raw) >= 99 {
+			return true
+		}
+	}
+	return false
+}
+
 // applyCNProviderReactive429 处理国产供应商的 429 响应。
 // 返回 true 表示已处理（调用方应 return），false 表示未命中、继续走默认 429 逻辑。
 func (s *RateLimitService) applyCNProviderReactive429(
@@ -162,6 +269,29 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	if !account.IsCNProvider() {
 		return false
 	}
+	// 0) 过载型 429（如火山方舟 "server overload / unable to handle additional
+	// requests"）：官方语义是「稍后重试」，不是配额耗尽——短冷却（Retry-After
+	// 优先，上限 10 分钟；默认 90 秒）后即可恢复，绝不禁闭到周/月窗口重置点。
+	// 用临时停调而非账号级限流，保持「限流中」徽章只表达窗口/配额语义。
+	if cnProviderResponseIndicatesOverload(responseBody) {
+		until := time.Now().Add(cnOverload429Cooldown)
+		if ra := parseRetryAfterResetTime(headers, time.Now()); ra != nil && ra.After(time.Now()) {
+			until = *ra
+			if max := time.Now().Add(cnOverload429CooldownMax); until.After(max) {
+				until = max
+			}
+		}
+		s.notifyAccountSchedulingBlocked(account, until, "429_overload")
+		if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, cnOverload429Reason); err != nil {
+			slog.Warn("cn_overload_429_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
+		}
+		slog.Info("cn_provider_429_overload_short_cooldown",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"until", until.UTC(),
+		)
+		return true
+	}
 	// 1) 余额不足文案：可恢复临时停调（含智谱 payg 这类无余额端点的场景）。
 	if cnProviderResponseIndicatesInsufficientBalance(responseBody) {
 		s.handleCNProviderInsufficientBalance(ctx, account, extractUpstreamErrorMessage(responseBody))
@@ -171,7 +301,17 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	// cnProviderQuotaSnapshotReset：429 多由 5h 窗口触发，取较早点避免过度停调）。
 	// 判定用「是 coding 供应商（含 payg 火山）」而非 IsCodingPlan，否则 payg 火山
 	// 号 429 会走默认逻辑、不用真实 5h 窗口冷却。
+	// 仅当响应表明配额/窗口耗尽时才走窗口禁闭；其余 429（无配额语义、也非过载
+	// 文案）交给默认 429 逻辑（秒级兜底），避免瞬时抖动被禁闭数天。
 	if resolveCNQuotaProvider(account) != "" {
+		if !cnProviderResponseIndicatesQuotaExhaustion(responseBody) {
+			slog.Info("cn_provider_429_non_quota",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"body", truncateForLog(responseBody, 200),
+			)
+			return false
+		}
 		if until := cnProviderQuotaSnapshotReset(account, time.Now()); until != nil {
 			s.notifyAccountSchedulingBlocked(account, *until, "429")
 			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *until); err != nil {

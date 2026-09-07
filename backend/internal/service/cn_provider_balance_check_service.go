@@ -179,6 +179,14 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		wg.Wait()
 	}
 
+	// 429 误禁闭对账（自愈）：快照刷新后，若限流账号的官方窗口余量充足，
+	// 提前解除被误禁闭到窗口重置点的账号级限流（瞬时过载 429 误判的自愈）。
+	// 对账范围需覆盖 zhipu（火山订阅号挂在该平台下， volcanos 仅进额度探测）。
+	reconcilePlatforms := append(s.platforms(), PlatformZhipu)
+	if clearedLimits := reconcileCNProviderRateLimits(ctx, s.accountRepo, reconcilePlatforms, time.Now()); clearedLimits > 0 {
+		log.Printf("[CNBalance] rate-limit reconcile cleared=%d", clearedLimits)
+	}
+
 	if paused > 0 || cleared > 0 {
 		log.Printf("[CNBalance] paused=%d cleared=%d (threshold=%.2f)", paused, cleared, threshold)
 	}
