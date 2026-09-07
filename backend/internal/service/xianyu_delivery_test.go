@@ -11,21 +11,18 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
 )
 
 type xianyuClaimRepoStub struct {
 	claim     XianyuDeliveryClaim
-	userID    int64
 	result    string
 	err       error
 	callCount int
 }
 
-func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim, userID int64) (string, error) {
+func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim) (string, error) {
 	r.claim = claim
-	r.userID = userID
 	r.callCount++
 	return r.result, r.err
 }
@@ -143,8 +140,16 @@ func (s *xianyuControlStub) CreateItemPool(_ context.Context, p XianyuItemPool) 
 func (s *xianyuControlStub) UpdateItemPool(_ context.Context, p XianyuItemPool) (*XianyuItemPool, error) {
 	return &p, nil
 }
-func (s *xianyuControlStub) PoolStockCounts(context.Context, string) (int, int, int, error) {
-	return 5, 2, 1, nil
+func (s *xianyuControlStub) PoolStockCounts(context.Context, string) (int, int, int, int, error) {
+	return 5, 2, 1, 0, nil
+}
+
+func (s *xianyuControlStub) GroupSubscriptionType(context.Context, int64) (string, error) {
+	return SubscriptionTypeSubscription, nil
+}
+
+func (s *xianyuControlStub) InsertPoolStock(context.Context, string, int64, int, *time.Time, []string) error {
+	return nil
 }
 func (s *xianyuControlStub) DeliveryStats(context.Context, time.Time) (int, int, error) {
 	return 3, 1, nil
@@ -219,13 +224,13 @@ func (s *xianyuControlStub) UpdateBindingRule(_ context.Context, r XianyuBinding
 }
 
 type xianyuStateStub struct {
-	result           *XianyuDeliveryStatusResult
-	recordedResults  []XianyuDeliveryStatusResult
-	claim            *XianyuOrderClaim
-	resend           string
-	recordErr        error
-	resendErr        error
-	resendCalled     bool
+	result          *XianyuDeliveryStatusResult
+	recordedResults []XianyuDeliveryStatusResult
+	claim           *XianyuOrderClaim
+	resend          string
+	recordErr       error
+	resendErr       error
+	resendCalled    bool
 }
 
 func (s *xianyuStateStub) RecordDeliveryResult(_ context.Context, r XianyuDeliveryStatusResult) error {
@@ -299,7 +304,6 @@ func TestXianyuDeliveryClaimValidatesAndDelegates(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "ABCD-1234", got)
-	require.Equal(t, int64(123), repo.userID)
 	require.Equal(t, int64(11), repo.claim.AccountPK)
 	require.Equal(t, int64(21), repo.claim.ProductID)
 	require.Equal(t, int64(1), repo.claim.PoolID)
@@ -503,130 +507,14 @@ func TestXianyuDeliveryResendMarksPendingBeforeCallingWorker(t *testing.T) {
 	require.Equal(t, 1, rollback.Attempt)
 }
 
-func TestRedeemRejectsXianyuDeliveryCode(t *testing.T) {
+func TestRedeemRejectsUnknownType(t *testing.T) {
 	redeemRepo := &redeemRejectRepo{
-		code: RedeemCode{ID: 1, Code: "XY-001", Type: RedeemTypeXianyuDelivery, Status: StatusUnused},
+		code: RedeemCode{ID: 1, Code: "XY-001", Type: "xianyu_delivery", Status: StatusUnused},
 	}
 	redeemService := NewRedeemService(redeemRepo, nil, nil, nil, nil, nil, nil, nil)
 	_, err := redeemService.Redeem(context.Background(), 2, redeemRepo.code.Code)
 	require.Error(t, err)
 	require.Equal(t, "REDEEM_CODE_UNSUPPORTED_TYPE", infraerrors.Reason(err))
-}
-
-func TestXianyuDeliveryCodeCreationRequiresZeroValue(t *testing.T) {
-	redeemService := NewRedeemService(&redeemRejectRepo{}, nil, nil, nil, nil, nil, nil, nil)
-
-	_, err := redeemService.GenerateCodes(context.Background(), GenerateCodesRequest{
-		Count: 1, Type: RedeemTypeXianyuDelivery, Value: 1,
-	})
-	require.EqualError(t, err, "value must be zero for xianyu_delivery codes")
-
-	err = redeemService.CreateCode(context.Background(), &RedeemCode{
-		Code: "XY-NONZERO", Type: RedeemTypeXianyuDelivery, Value: 1, Status: StatusUnused,
-	})
-	require.EqualError(t, err, "value must be zero for xianyu_delivery codes")
-}
-
-func TestGenerateXianyuDeliveryCodesMarksPool(t *testing.T) {
-	repo := &xianyuGenerateRepo{}
-	redeemService := NewRedeemService(repo, nil, nil, nil, nil, nil, nil, nil)
-
-	codes, err := redeemService.GenerateCodes(context.Background(), GenerateCodesRequest{
-		Count: 2, Type: RedeemTypeXianyuDelivery, Value: 0, Pool: "standard",
-	})
-	require.NoError(t, err)
-	require.Len(t, repo.created, 2)
-	require.Len(t, codes, 2)
-	for _, code := range repo.created {
-		require.Equal(t, XianyuPoolNote("standard"), code.Notes)
-	}
-}
-
-func TestGenerateAndCreateXianyuDeliveryRejectsMissingPool(t *testing.T) {
-	repo := &xianyuGenerateRepo{}
-	redeemService := NewRedeemService(repo, nil, nil, nil, nil, nil, nil, nil)
-
-	_, err := redeemService.GenerateCodes(context.Background(), GenerateCodesRequest{
-		Count: 1, Type: RedeemTypeXianyuDelivery, Value: 0,
-	})
-	require.EqualError(t, err, "pool is required for xianyu_delivery codes")
-
-	err = redeemService.CreateCode(context.Background(), &RedeemCode{
-		Code: "XY-NO-POOL", Type: RedeemTypeXianyuDelivery, Value: 0, Status: StatusUnused,
-	})
-	require.EqualError(t, err, "pool note is required for xianyu_delivery codes")
-
-	err = redeemService.CreateCode(context.Background(), &RedeemCode{
-		Code: "XY-BAD-NOTE", Type: RedeemTypeXianyuDelivery, Value: 0, Status: StatusUnused, Notes: "other",
-	})
-	require.EqualError(t, err, "xianyu_delivery codes must use the xianyu_pool note")
-
-	err = redeemService.CreateCode(context.Background(), &RedeemCode{
-		Code: "XY-OK", Type: RedeemTypeXianyuDelivery, Value: 0, Status: StatusUnused, Notes: XianyuPoolNote("standard"),
-	})
-	require.NoError(t, err)
-	require.Len(t, repo.created, 1)
-	require.Equal(t, XianyuPoolNote("standard"), repo.created[0].Notes)
-}
-
-type xianyuGenerateRepo struct {
-	created []*RedeemCode
-}
-
-func (r *xianyuGenerateRepo) GetByID(ctx context.Context, id int64) (*RedeemCode, error) {
-	panic("unexpected GetByID call")
-}
-
-func (r *xianyuGenerateRepo) GetByCode(ctx context.Context, code string) (*RedeemCode, error) {
-	panic("unexpected GetByCode call")
-}
-
-func (r *xianyuGenerateRepo) Update(ctx context.Context, code *RedeemCode) error {
-	panic("unexpected Update call")
-}
-
-func (r *xianyuGenerateRepo) BatchUpdate(ctx context.Context, ids []int64, fields RedeemCodeBatchUpdateFields) (int64, error) {
-	panic("unexpected BatchUpdate call")
-}
-
-func (r *xianyuGenerateRepo) Delete(ctx context.Context, id int64) error {
-	panic("unexpected Delete call")
-}
-
-func (r *xianyuGenerateRepo) Use(ctx context.Context, id, userID int64) error {
-	panic("unexpected Use call")
-}
-
-func (r *xianyuGenerateRepo) List(ctx context.Context, params pagination.PaginationParams) ([]RedeemCode, *pagination.PaginationResult, error) {
-	panic("unexpected List call")
-}
-
-func (r *xianyuGenerateRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search string) ([]RedeemCode, *pagination.PaginationResult, error) {
-	panic("unexpected ListWithFilters call")
-}
-
-func (r *xianyuGenerateRepo) ListByUser(ctx context.Context, userID int64, limit int) ([]RedeemCode, error) {
-	panic("unexpected ListByUser call")
-}
-
-func (r *xianyuGenerateRepo) ListByUserPaginated(ctx context.Context, userID int64, params pagination.PaginationParams, codeType string) ([]RedeemCode, *pagination.PaginationResult, error) {
-	panic("unexpected ListByUserPaginated call")
-}
-
-func (r *xianyuGenerateRepo) SumPositiveBalanceByUser(ctx context.Context, userID int64) (float64, error) {
-	panic("unexpected SumPositiveBalanceByUser call")
-}
-
-func (r *xianyuGenerateRepo) Create(ctx context.Context, code *RedeemCode) error {
-	r.created = append(r.created, code)
-	return nil
-}
-
-func (r *xianyuGenerateRepo) CreateBatch(ctx context.Context, codes []RedeemCode) error {
-	for i := range codes {
-		r.created = append(r.created, &codes[i])
-	}
-	return nil
 }
 
 type systemUserReaderStub struct {

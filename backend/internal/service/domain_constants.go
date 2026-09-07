@@ -8,12 +8,13 @@ import (
 
 // Status constants
 const (
-	StatusActive   = domain.StatusActive
-	StatusDisabled = domain.StatusDisabled
-	StatusError    = domain.StatusError
-	StatusUnused   = domain.StatusUnused
-	StatusUsed     = domain.StatusUsed
-	StatusExpired  = domain.StatusExpired
+	StatusActive    = domain.StatusActive
+	StatusDisabled  = domain.StatusDisabled
+	StatusError     = domain.StatusError
+	StatusDelivered = domain.StatusDelivered
+	StatusUnused    = domain.StatusUnused
+	StatusUsed      = domain.StatusUsed
+	StatusExpired   = domain.StatusExpired
 )
 
 // Role constants
@@ -158,7 +159,6 @@ const (
 	RedeemTypeSubscription     = domain.RedeemTypeSubscription
 	RedeemTypeInvitation       = domain.RedeemTypeInvitation
 	RedeemTypeAffiliateBalance = "affiliate_balance"
-	RedeemTypeXianyuDelivery   = domain.RedeemTypeXianyu
 )
 
 // PromoCode status constants

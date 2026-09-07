@@ -99,16 +99,17 @@ func (r *redeemCodeRepository) Delete(ctx context.Context, id int64) error {
 }
 
 func (r *redeemCodeRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.RedeemCode, *pagination.PaginationResult, error) {
-	return r.ListWithFilters(ctx, params, "", "", "")
+	return r.ListWithFilters(ctx, params, "", "", "", "")
 }
 
-func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
+func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
 	q := r.client.RedeemCode.Query()
 
 	if codeType != "" {
 		q = q.Where(redeemcode.TypeEQ(codeType))
-	} else {
-		q = q.Where(redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery))
+	}
+	if poolSlug != "" {
+		q = q.Where(redeemcode.NotesEQ(service.XianyuPoolNote(poolSlug)))
 	}
 	if status != "" {
 		now := time.Now()
@@ -285,7 +286,8 @@ func (r *redeemCodeRepository) batchUpdate(ctx context.Context, client *dbent.Cl
 	}
 	if fields.TouchesUsedSensitiveFields() {
 		for _, code := range existing {
-			if code.Status == service.StatusUsed {
+			// delivered = 已发货待兑换的权益，禁止批量改状态/有效期/分组，防止超发或损害买家。
+			if code.Status == service.StatusUsed || code.Status == service.StatusDelivered {
 				return 0, service.ErrRedeemCodeUsed
 			}
 		}
@@ -327,7 +329,7 @@ func (r *redeemCodeRepository) Use(ctx context.Context, id, userID int64) error 
 	now := time.Now()
 	client := clientFromContext(ctx, r.client)
 	affected, err := client.RedeemCode.Update().
-		Where(redeemcode.IDEQ(id), redeemcode.StatusEQ(service.StatusUnused)).
+		Where(redeemcode.IDEQ(id), redeemcode.StatusIn(service.StatusUnused, service.StatusDelivered)).
 		SetStatus(service.StatusUsed).
 		SetUsedBy(userID).
 		SetUsedAt(now).
@@ -347,10 +349,7 @@ func (r *redeemCodeRepository) ListByUser(ctx context.Context, userID int64, lim
 	}
 
 	codes, err := r.client.RedeemCode.Query().
-		Where(
-			redeemcode.UsedByEQ(userID),
-			redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery),
-		).
+		Where(redeemcode.UsedByEQ(userID)).
 		WithGroup().
 		Order(dbent.Desc(redeemcode.FieldUsedAt)).
 		Limit(limit).
@@ -368,10 +367,7 @@ func (r *redeemCodeRepository) ListByUserPaginated(ctx context.Context, userID i
 	q := r.client.RedeemCode.Query().
 		Where(redeemcode.UsedByEQ(userID))
 
-	// External delivery codes are not user balance history.
-	if codeType == "" {
-		q = q.Where(redeemcode.TypeNEQ(service.RedeemTypeXianyuDelivery))
-	} else {
+	if codeType != "" {
 		q = q.Where(redeemcode.TypeEQ(codeType))
 	}
 

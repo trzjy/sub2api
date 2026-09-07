@@ -17,7 +17,9 @@
             <tr class="border-b border-gray-200 bg-gray-50 text-left dark:border-dark-700 dark:bg-dark-800">
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.name') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.slug') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.inventory.cardSpec') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.remaining') }}</th>
+              <th class="px-4 py-2">{{ t('admin.xianyu.inventory.delivered') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.used') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.disabled') }}</th>
               <th class="px-4 py-2">{{ t('admin.xianyu.inventory.lowStockThreshold') }}</th>
@@ -29,6 +31,7 @@
             <tr v-for="pool in pools" :key="pool.id" class="border-b border-gray-100 dark:border-dark-700">
               <td class="px-4 py-2 font-medium">{{ pool.name }}</td>
               <td class="px-4 py-2 text-gray-500">{{ pool.slug }}</td>
+              <td class="px-4 py-2 text-xs text-gray-500">{{ cardSpecText(pool) }}</td>
               <td class="px-4 py-2">
                 <span v-if="stockError" class="text-orange-500">{{ t('admin.xianyu.inventory.stockUnavailable') }}</span>
                 <template v-else>
@@ -38,6 +41,7 @@
                   </span>
                 </template>
               </td>
+              <td class="px-4 py-2">{{ stockError ? '-' : deliveredFor(pool) }}</td>
               <td class="px-4 py-2">{{ stockError ? '-' : usedFor(pool) }}</td>
               <td class="px-4 py-2">{{ stockError ? '-' : disabledFor(pool) }}</td>
               <td class="px-4 py-2">{{ pool.low_stock_threshold }}</td>
@@ -55,7 +59,7 @@
                   <button class="btn btn-secondary btn-xs" @click="goManageCodes(pool)">
                     {{ t('admin.xianyu.inventory.manageCodes') }}
                   </button>
-                  <button class="btn btn-secondary btn-xs" @click="goGenerateCodes(pool)">
+                  <button class="btn btn-secondary btn-xs" @click="openRestock(pool)">
                     {{ t('admin.xianyu.inventory.generateCodes') }}
                   </button>
                   <button class="btn btn-secondary btn-xs" @click="openDeletePool(pool)">
@@ -87,6 +91,17 @@
             <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.lowStockThreshold') }}</label>
             <input v-model.number="form.low_stock_threshold" type="number" min="0" class="input w-full" />
           </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.specGroup') }}</label>
+            <select v-model.number="form.group_id" class="input w-full">
+              <option :value="null" disabled>{{ t('admin.xianyu.inventory.specGroupPlaceholder') }}</option>
+              <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.specDays') }}</label>
+            <input v-model.number="form.validity_days" type="number" min="1" max="365" class="input w-full" />
+          </div>
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">{{ t('admin.xianyu.inventory.active') }}</span>
             <Toggle v-model="formStatus" />
@@ -94,6 +109,29 @@
           <div class="flex justify-end gap-2">
             <button class="btn btn-secondary" @click="editVisible = false">{{ t('common.cancel') }}</button>
             <button class="btn btn-primary" @click="save">{{ t('admin.xianyu.inventory.savePool') }}</button>
+          </div>
+        </div>
+      </BaseDialog>
+
+      <BaseDialog :show="restockVisible" :title="t('admin.xianyu.inventory.restockTitle', { name: restockingPool?.name ?? '' })" @close="restockVisible = false">
+        <div class="space-y-4">
+          <p class="rounded bg-primary-50 px-3 py-2 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300">
+            {{ t('admin.xianyu.inventory.restockHint') }}
+          </p>
+          <p v-if="!poolSpecReady(restockingPool)" class="rounded bg-orange-50 px-3 py-2 text-xs text-orange-600 dark:bg-orange-900/20">
+            {{ t('admin.xianyu.inventory.restockSpecMissing') }}
+          </p>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.restockCount') }}</label>
+            <input v-model.number="restockForm.count" type="number" min="1" max="1000" class="input w-full" />
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.restockExpiry') }}</label>
+            <input v-model.number="restockForm.expires_in_days" type="number" min="0" class="input w-full" :placeholder="t('admin.xianyu.inventory.restockExpiryHint')" />
+          </div>
+          <div class="flex justify-end gap-2">
+            <button class="btn btn-secondary" @click="restockVisible = false">{{ t('common.cancel') }}</button>
+            <button class="btn btn-primary" :disabled="!poolSpecReady(restockingPool)" @click="confirmRestock">{{ t('admin.xianyu.inventory.restockConfirm') }}</button>
           </div>
         </div>
       </BaseDialog>
@@ -118,7 +156,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useRouter } from 'vue-router'
 import { adminAPI } from '@/api/admin'
-import type { XianyuItemPool, XianyuOverview } from '@/types'
+import type { Group, XianyuItemPool, XianyuOverview } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -135,15 +173,21 @@ const router = useRouter()
 const pools = ref<XianyuItemPool[]>([])
 const overview = ref<XianyuOverview | null>(null)
 const stockError = ref(false)
+const groups = ref<Group[]>([])
 
 async function load() {
   try {
-    const [poolList, ov] = await Promise.all([
+    const [poolList, ov, groupList] = await Promise.all([
       adminAPI.xianyu.listItemPools(),
-      adminAPI.xianyu.getOverview()
+      adminAPI.xianyu.getOverview(),
+      adminAPI.groups.getAll().catch(() => [] as Group[])
     ])
     pools.value = poolList
     overview.value = ov
+    // 发码分组仅允许订阅模式分组（后端同样校验）
+    groups.value = (groupList as Array<Group & { subscription_type?: string }>).filter(
+      (g) => !g.subscription_type || g.subscription_type === 'subscription'
+    )
     stockError.value = false
   } catch (err) {
     stockError.value = true
@@ -151,6 +195,22 @@ async function load() {
   }
 }
 
+function groupName(groupID?: number | null): string {
+  if (!groupID) return '-'
+  return groups.value.find((g) => g.id === groupID)?.name || `#${groupID}`
+}
+function cardSpecText(pool: XianyuItemPool): string {
+  if (!pool.group_id || !pool.validity_days) return t('admin.xianyu.inventory.specMissing')
+  return t('admin.xianyu.inventory.specText', { group: groupName(pool.group_id), days: pool.validity_days })
+}
+function poolSpecReady(pool: XianyuItemPool | null): boolean {
+  return !!pool && !!pool.group_id && !!pool.validity_days
+}
+
+function deliveredFor(pool: XianyuItemPool): number {
+  const item = overview.value?.pools.find((p) => p.pool.id === pool.id)
+  return item ? item.delivered : 0
+}
 function remainingFor(pool: XianyuItemPool): number {
   const item = overview.value?.pools.find((p) => p.pool.id === pool.id)
   return item ? item.remaining : 0
@@ -169,7 +229,15 @@ function isLowStock(pool: XianyuItemPool): boolean {
 
 const editVisible = ref(false)
 const editingID = ref<number | null>(null)
-const form = reactive({ name: '', slug: '', description: '', low_stock_threshold: 0, status: 'active' })
+const form = reactive({
+  name: '',
+  slug: '',
+  description: '',
+  low_stock_threshold: 0,
+  status: 'active',
+  group_id: null as number | null,
+  validity_days: 1
+})
 
 const formStatus = computed({
   get: () => form.status === 'active',
@@ -185,6 +253,8 @@ function openEdit(pool?: XianyuItemPool) {
   form.description = pool?.description ?? ''
   form.low_stock_threshold = pool?.low_stock_threshold ?? 0
   form.status = pool?.status ?? 'active'
+  form.group_id = pool?.group_id ?? null
+  form.validity_days = pool?.validity_days ?? 1
   editVisible.value = true
 }
 
@@ -204,7 +274,10 @@ async function save() {
       slug: form.slug.trim(),
       description: form.description.trim(),
       low_stock_threshold: Math.max(0, form.low_stock_threshold || 0),
-      status: form.status as 'active' | 'disabled'
+      status: form.status as 'active' | 'disabled',
+      code_type: 'subscription',
+      group_id: form.group_id,
+      validity_days: form.validity_days
     })
     editVisible.value = false
     await load()
@@ -215,7 +288,7 @@ async function save() {
 }
 
 function goManageCodes(pool: XianyuItemPool) {
-  router.push({ path: '/admin/redeem', query: { type: 'xianyu_delivery', pool: pool.slug, view: 'list' } })
+  router.push({ path: '/admin/redeem', query: { pool: pool.slug, view: 'list' } })
 }
 
 const deletePoolVisible = ref(false)
@@ -238,8 +311,34 @@ async function confirmDeletePool() {
   }
 }
 
-function goGenerateCodes(pool: XianyuItemPool) {
-  router.push({ path: '/admin/redeem', query: { type: 'xianyu_delivery', pool: pool.slug } })
+const restockVisible = ref(false)
+const restockingPool = ref<XianyuItemPool | null>(null)
+const restockForm = reactive({ count: 10, expires_in_days: 0 })
+
+function openRestock(pool: XianyuItemPool) {
+  restockingPool.value = pool
+  restockForm.count = 10
+  restockForm.expires_in_days = 0
+  restockVisible.value = true
+}
+
+async function confirmRestock() {
+  if (!restockingPool.value) return
+  if (restockForm.count < 1 || restockForm.count > 1000) {
+    appStore.showError(t('admin.xianyu.inventory.restockCountInvalid'))
+    return
+  }
+  try {
+    const result = await adminAPI.xianyu.stockItemPool(restockingPool.value.id, {
+      count: restockForm.count,
+      expires_in_days: Math.max(0, restockForm.expires_in_days || 0)
+    })
+    restockVisible.value = false
+    await load()
+    appStore.showSuccess(t('admin.xianyu.inventory.restockSuccess', { created: result.created, remaining: result.remaining }))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
 }
 
 onMounted(load)

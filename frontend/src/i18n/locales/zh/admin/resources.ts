@@ -257,7 +257,6 @@ export default {
         concurrency: '并发数',
         subscription: '订阅',
         invitation: '邀请码',
-        xianyu_delivery: '闲鱼发货凭证',
         // 管理员在用户管理页面调整余额/并发时产生的记录
         admin_balance: '余额（管理员）',
         admin_concurrency: '并发数（管理员）'
@@ -267,11 +266,8 @@ export default {
       concurrency: '并发数',
       subscription: '订阅',
       invitation: '邀请码',
-      xianyuDelivery: '闲鱼发货凭证',
       invitationHint: '邀请码用于限制用户注册，使用后自动标记为已使用。',
-      xianyuPool: '库存池',
-      xianyuPoolHint: '用于匹配部署配置中的商品映射，例如 standard。',
-      xianyuPoolRequired: '请填写库存池',
+      poolFilter: '库存池: {pool}',
       allTypes: '全部类型',
       allStatus: '全部状态',
       unused: '未使用',
@@ -350,7 +346,8 @@ export default {
       },
       filters: {
         type: '类型',
-        allTypes: '全部类型',
+        poolFilter: '库存池: {pool}',
+      allTypes: '全部类型',
         status: '状态',
         allStatuses: '全部状态',
         search: '搜索兑换码'
@@ -526,6 +523,7 @@ export default {
       allModels: '全部模型',
       allAccounts: '全部账户',
       allGroups: '全部分组',
+      poolFilter: '库存池: {pool}',
       allTypes: '全部类型',
       inputCost: '输入费用',
       outputCost: '输出费用',

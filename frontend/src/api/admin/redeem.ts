@@ -24,8 +24,9 @@ export async function list(
   pageSize: number = 20,
   filters?: {
     type?: RedeemCodeType
-    status?: 'active' | 'used' | 'expired' | 'unused' | 'disabled'
+    status?: 'active' | 'used' | 'delivered' | 'expired' | 'unused' | 'disabled'
     search?: string
+    pool?: string
     sort_by?: string
     sort_order?: 'asc' | 'desc'
   },
@@ -70,8 +71,7 @@ export async function generate(
   value: number,
   groupId?: number | null,
   validityDays?: number,
-  expiresInDays?: number | null,
-  pool?: string
+  expiresInDays?: number | null
 ): Promise<RedeemCode[]> {
   const payload: GenerateRedeemCodesRequest = {
     count,
@@ -85,9 +85,6 @@ export async function generate(
     if (validityDays && validityDays > 0) {
       payload.validity_days = validityDays
     }
-  }
-  if (type === 'xianyu_delivery') {
-    payload.pool = (pool || '').trim()
   }
   if (expiresInDays && expiresInDays > 0) {
     payload.expires_in_days = expiresInDays
@@ -183,8 +180,9 @@ export async function getStats(): Promise<{
  */
 export async function exportCodes(filters?: {
   type?: RedeemCodeType
-  status?: 'used' | 'expired' | 'unused' | 'disabled'
+  status?: 'used' | 'delivered' | 'expired' | 'unused' | 'disabled'
   search?: string
+  pool?: string
   sort_by?: string
   sort_order?: 'asc' | 'desc'
 }): Promise<Blob> {

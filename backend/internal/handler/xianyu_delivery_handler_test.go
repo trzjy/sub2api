@@ -18,7 +18,7 @@ import (
 
 type xianyuHandlerRepoStub struct{}
 
-func (xianyuHandlerRepoStub) Claim(context.Context, service.XianyuDeliveryClaim, int64) (string, error) {
+func (xianyuHandlerRepoStub) Claim(context.Context, service.XianyuDeliveryClaim) (string, error) {
 	return "ABCD-1234", nil
 }
 
@@ -74,8 +74,18 @@ func (xianyuHandlerControlStub) CreateItemPool(context.Context, service.XianyuIt
 func (xianyuHandlerControlStub) UpdateItemPool(context.Context, service.XianyuItemPool) (*service.XianyuItemPool, error) {
 	return nil, nil
 }
-func (xianyuHandlerControlStub) PoolStockCounts(context.Context, string) (int, int, int, error) {
-	return 0, 0, 0, nil
+func (xianyuHandlerControlStub) DeleteBindingRule(context.Context, int64) error           { return nil }
+func (xianyuHandlerControlStub) DeleteItemPool(context.Context, int64) error              { return nil }
+func (xianyuHandlerControlStub) DeleteProduct(context.Context, int64) error               { return nil }
+func (xianyuHandlerControlStub) UpdateAccountRemark(context.Context, int64, string) error { return nil }
+func (xianyuHandlerControlStub) GroupSubscriptionType(context.Context, int64) (string, error) {
+	return "", nil
+}
+func (xianyuHandlerControlStub) InsertPoolStock(context.Context, string, int64, int, *time.Time, []string) error {
+	return nil
+}
+func (xianyuHandlerControlStub) PoolStockCounts(context.Context, string) (int, int, int, int, error) {
+	return 0, 0, 0, 0, nil
 }
 func (xianyuHandlerControlStub) DeliveryStats(context.Context, time.Time) (int, int, error) {
 	return 0, 0, nil

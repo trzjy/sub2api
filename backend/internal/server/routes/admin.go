@@ -176,6 +176,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/item-pools", h.Admin.Xianyu.ItemPools)
 		xianyu.POST("/item-pools", h.Admin.Xianyu.SaveItemPool)
 		xianyu.PUT("/item-pools/:id", h.Admin.Xianyu.SaveItemPool)
+		xianyu.POST("/item-pools/:id/stock", h.Admin.Xianyu.StockItemPool)
 
 		xianyu.GET("/deliveries", h.Admin.Xianyu.Deliveries)
 		xianyu.POST("/deliveries/resend", h.Admin.Xianyu.ResendDelivery)

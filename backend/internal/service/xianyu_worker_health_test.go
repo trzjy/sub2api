@@ -66,8 +66,16 @@ func (s *xianyuWorkerControlStub) UpdateItemPool(_ context.Context, p XianyuItem
 	return &p, nil
 }
 
-func (s *xianyuWorkerControlStub) PoolStockCounts(context.Context, string) (int, int, int, error) {
-	return 0, 0, 0, nil
+func (s *xianyuWorkerControlStub) PoolStockCounts(context.Context, string) (int, int, int, int, error) {
+	return 0, 0, 0, 0, nil
+}
+
+func (s *xianyuWorkerControlStub) GroupSubscriptionType(context.Context, int64) (string, error) {
+	return SubscriptionTypeSubscription, nil
+}
+
+func (s *xianyuWorkerControlStub) InsertPoolStock(context.Context, string, int64, int, *time.Time, []string) error {
+	return nil
 }
 
 func (s *xianyuWorkerControlStub) DeliveryStats(context.Context, time.Time) (int, int, error) {

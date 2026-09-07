@@ -19,21 +19,21 @@ import (
 var xianyuAmountPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$`)
 
 var (
-	ErrXianyuDeliveryNotConfigured = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_NOT_CONFIGURED", "xianyu delivery is not configured")
-	ErrXianyuOrderRequired         = infraerrors.BadRequest("XIANYU_ORDER_ID_REQUIRED", "order_id is required")
-	ErrXianyuQuantityUnsupported   = infraerrors.BadRequest("XIANYU_QUANTITY_UNSUPPORTED", "order_quantity must be 1")
-	ErrXianyuItemRequired          = infraerrors.BadRequest("XIANYU_ITEM_ID_REQUIRED", "item_id is required")
-	ErrXianyuAccountRequired       = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_REQUIRED", "cookie_id is required")
-	ErrXianyuBuyerRequired         = infraerrors.BadRequest("XIANYU_BUYER_ID_REQUIRED", "buyer_id is required")
-	ErrXianyuChatRequired          = infraerrors.BadRequest("XIANYU_CHAT_ID_REQUIRED", "chat_id is required")
-	ErrXianyuPoolNotMapped         = infraerrors.BadRequest("XIANYU_ITEM_POOL_NOT_MAPPED", "item is not mapped to a redeem-code pool")
-	ErrXianyuInventoryEmpty        = infraerrors.Conflict("XIANYU_INVENTORY_EMPTY", "no redeem code is available for this item")
-	ErrXianyuInvalidAmount         = infraerrors.BadRequest("XIANYU_AMOUNT_INVALID", "order_amount must be a valid decimal")
-	ErrXianyuOrderTooLong          = infraerrors.BadRequest("XIANYU_ORDER_ID_TOO_LONG", "order_id is too long")
-	ErrXianyuItemTooLong           = infraerrors.BadRequest("XIANYU_ITEM_ID_TOO_LONG", "item_id is too long")
-	ErrXianyuAccountTooLong        = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_TOO_LONG", "cookie_id is too long")
-	ErrXianyuBuyerTooLong          = infraerrors.BadRequest("XIANYU_BUYER_ID_TOO_LONG", "buyer_id is too long")
-	ErrXianyuChatTooLong           = infraerrors.BadRequest("XIANYU_CHAT_ID_TOO_LONG", "chat_id is too long")
+	ErrXianyuDeliveryNotConfigured          = infraerrors.ServiceUnavailable("XIANYU_DELIVERY_NOT_CONFIGURED", "xianyu delivery is not configured")
+	ErrXianyuOrderRequired                  = infraerrors.BadRequest("XIANYU_ORDER_ID_REQUIRED", "order_id is required")
+	ErrXianyuQuantityUnsupported            = infraerrors.BadRequest("XIANYU_QUANTITY_UNSUPPORTED", "order_quantity must be 1")
+	ErrXianyuItemRequired                   = infraerrors.BadRequest("XIANYU_ITEM_ID_REQUIRED", "item_id is required")
+	ErrXianyuAccountRequired                = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_REQUIRED", "cookie_id is required")
+	ErrXianyuBuyerRequired                  = infraerrors.BadRequest("XIANYU_BUYER_ID_REQUIRED", "buyer_id is required")
+	ErrXianyuChatRequired                   = infraerrors.BadRequest("XIANYU_CHAT_ID_REQUIRED", "chat_id is required")
+	ErrXianyuPoolNotMapped                  = infraerrors.BadRequest("XIANYU_ITEM_POOL_NOT_MAPPED", "item is not mapped to a redeem-code pool")
+	ErrXianyuInventoryEmpty                 = infraerrors.Conflict("XIANYU_INVENTORY_EMPTY", "no redeem code is available for this item")
+	ErrXianyuInvalidAmount                  = infraerrors.BadRequest("XIANYU_AMOUNT_INVALID", "order_amount must be a valid decimal")
+	ErrXianyuOrderTooLong                   = infraerrors.BadRequest("XIANYU_ORDER_ID_TOO_LONG", "order_id is too long")
+	ErrXianyuItemTooLong                    = infraerrors.BadRequest("XIANYU_ITEM_ID_TOO_LONG", "item_id is too long")
+	ErrXianyuAccountTooLong                 = infraerrors.BadRequest("XIANYU_ACCOUNT_ID_TOO_LONG", "cookie_id is too long")
+	ErrXianyuBuyerTooLong                   = infraerrors.BadRequest("XIANYU_BUYER_ID_TOO_LONG", "buyer_id is too long")
+	ErrXianyuChatTooLong                    = infraerrors.BadRequest("XIANYU_CHAT_ID_TOO_LONG", "chat_id is too long")
 	ErrXianyuDeliveryQuantitySentOutOfRange = infraerrors.BadRequest("XIANYU_DELIVERY_QUANTITY_SENT_OUT_OF_RANGE", "quantity_sent must be between 0 and order quantity")
 	// ErrXianyuResendUndispatched 标记人工补发"确定未向 Worker 发出发送请求"的错误
 	// （无 active Worker、账号不可用、请求构建前失败等）。这类错误必须回滚 pending→failed，
@@ -76,7 +76,7 @@ type XianyuDeliveryClaim struct {
 
 // XianyuDeliveryRepository 负责幂等领取与发货状态持久化。
 type XianyuDeliveryRepository interface {
-	Claim(ctx context.Context, claim XianyuDeliveryClaim, systemUserID int64) (string, error)
+	Claim(ctx context.Context, claim XianyuDeliveryClaim) (string, error)
 }
 
 type XianyuDeliveryService struct {
@@ -132,7 +132,7 @@ func (s *XianyuDeliveryService) Claim(ctx context.Context, req XianyuDeliveryCla
 	if err != nil {
 		return "", err
 	}
-	return s.repo.Claim(ctx, claim, s.cfg.XianyuDelivery.SystemUserID)
+	return s.repo.Claim(ctx, claim)
 }
 
 // normalizeAndResolveClaim 校验请求并把 cookie_id / item_id 解析为主程序内部身份与库存池。
@@ -397,14 +397,14 @@ type SystemUserReader interface {
 // 只记录订单级汇总（数量/状态/错误），不复制 Worker 卡券内容或卡券模型；
 // Worker 保持本地库存与逐份发货实现，两边只通过 order_no、数量和结果回传做幂等关联。
 type XianyuWorkerDelivery struct {
-	OrderNo        string     `json:"order_no"`
-	DeliveryKind   string     `json:"delivery_kind"` // auto / manual / redelivery
-	Quantity       int        `json:"quantity"`
-	QuantitySent   int        `json:"quantity_sent"`
-	DeliveryStatus string     `json:"delivery_status"`
-	DeliveryError  *string    `json:"delivery_error,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	OrderNo        string    `json:"order_no"`
+	DeliveryKind   string    `json:"delivery_kind"` // auto / manual / redelivery
+	Quantity       int       `json:"quantity"`
+	QuantitySent   int       `json:"quantity_sent"`
+	DeliveryStatus string    `json:"delivery_status"`
+	DeliveryError  *string   `json:"delivery_error,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // XianyuWorkerDeliveryRepository 维护 Worker 发货记录。

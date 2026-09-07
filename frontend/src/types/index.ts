@@ -1653,7 +1653,6 @@ export type RedeemCodeType =
   | 'concurrency'
   | 'subscription'
   | 'invitation'
-  | 'xianyu_delivery'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
@@ -1802,7 +1801,6 @@ export interface GenerateRedeemCodesRequest {
   value: number
   group_id?: number | null // 订阅类型专用
   validity_days?: number // 订阅类型专用
-  pool?: string // xianyu_delivery 类型专用
   expires_at?: string | null
   expires_in_days?: number
 }
@@ -2416,6 +2414,7 @@ export type {
 export interface XianyuOverviewPool {
   pool: XianyuItemPool
   remaining: number
+  delivered: number
   used: number
   disabled: number
   low_stock: boolean
@@ -2468,6 +2467,9 @@ export interface XianyuItemPool {
   description: string
   low_stock_threshold: number
   status: 'active' | 'disabled'
+  code_type?: string
+  group_id?: number | null
+  validity_days?: number | null
   created_at?: string
   updated_at?: string
 }

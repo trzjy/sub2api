@@ -115,7 +115,7 @@ func (r *xianyuDeliveryListRepository) ListDeliveryClaims(ctx context.Context, f
 	return out, total, rows.Err()
 }
 
-func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.XianyuDeliveryClaim, systemUserID int64) (string, error) {
+func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.XianyuDeliveryClaim) (string, error) {
 	if r == nil || r.db == nil {
 		return "", errors.New("xianyu claim database is unavailable")
 	}
@@ -159,8 +159,7 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, code
 		FROM redeem_codes
-		WHERE type = 'xianyu_delivery'
-		  AND status = 'unused'
+		WHERE status = 'unused'
 		  AND notes = $1
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		ORDER BY id
@@ -193,12 +192,13 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 		claim.ChatID, amount, productID, poolID, claim.BindingSource, service.XianyuDeliveryStatusPending); err != nil {
 		return "", fmt.Errorf("insert xianyu claim: %w", err)
 	}
+	// 发货≠核销：码保持可兑换（delivered），买家在站点兑换时才转为 used。
 	result, err := tx.ExecContext(ctx, `
 		UPDATE redeem_codes
-		SET status = 'used', used_by = $1, used_at = NOW()
-		WHERE id = $2 AND status = 'unused'`, systemUserID, codeID)
+		SET status = 'delivered'
+		WHERE id = $1 AND status = 'unused'`, codeID)
 	if err != nil {
-		return "", fmt.Errorf("mark xianyu redeem code used: %w", err)
+		return "", fmt.Errorf("mark xianyu redeem code delivered: %w", err)
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		if err != nil {

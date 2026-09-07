@@ -244,6 +244,7 @@ export default {
       description: 'Generate and manage redeem codes',
       generateCodes: 'Generate Codes',
       searchCodes: 'Search codes or email...',
+      poolFilter: 'Pool: {pool}',
       allTypes: 'All Types',
       allStatus: 'All Status',
       balance: 'Balance',
@@ -251,10 +252,6 @@ export default {
       subscription: 'Subscription',
       invitation: 'Invitation',
       invitationHint: 'Invitation codes are used to restrict user registration. They are automatically marked as used after use.',
-      xianyuDelivery: 'Xianyu Delivery Code',
-      xianyuPool: 'Inventory Pool',
-      xianyuPoolHint: 'Matches the item pool configured in deployment, for example standard.',
-      xianyuPoolRequired: 'Inventory pool is required',
       unused: 'Unused',
       used: 'Used',
       columns: {
@@ -320,7 +317,6 @@ export default {
         concurrency: 'Concurrency',
         subscription: 'Subscription',
         invitation: 'Invitation',
-        xianyu_delivery: 'Xianyu Delivery Code',
         // Admin adjustment types (created when admin modifies user balance/concurrency)
         admin_balance: 'Balance (Admin)',
         admin_concurrency: 'Concurrency (Admin)'
@@ -359,7 +355,8 @@ export default {
       },
       filters: {
         type: 'Type',
-        allTypes: 'All Types',
+        poolFilter: 'Pool: {pool}',
+      allTypes: 'All Types',
         status: 'Status',
         allStatuses: 'All Status',
         search: 'Search codes'
@@ -529,6 +526,7 @@ export default {
       allModels: 'All Models',
       allAccounts: 'All Accounts',
       allGroups: 'All Groups',
+      poolFilter: 'Pool: {pool}',
       allTypes: 'All Types',
       inputCost: 'Input Cost',
       outputCost: 'Output Cost',

@@ -120,6 +120,17 @@ export async function deleteItemPool(poolId: number): Promise<void> {
   await apiClient.delete(`/admin/xianyu/item-pools/${encodeURIComponent(String(poolId))}`)
 }
 
+export async function stockItemPool(
+  poolId: number,
+  input: { count: number; expires_in_days?: number }
+): Promise<{ created: number; remaining: number }> {
+  const { data } = await apiClient.post<{ created: number; remaining: number }>(
+    `/admin/xianyu/item-pools/${encodeURIComponent(String(poolId))}/stock`,
+    input
+  )
+  return data
+}
+
 export async function listDeliveries(filter: XianyuDeliveryFilter = {}, options?: { signal?: AbortSignal }): Promise<PaginatedResponse<XianyuOrderClaim>> {
   const { data } = await apiClient.get<PaginatedResponse<XianyuOrderClaim>>('/admin/xianyu/deliveries', {
     params: {
@@ -202,6 +213,7 @@ export const xianyuAPI = {
   deleteBindingRule,
   listItemPools,
   saveItemPool,
+  stockItemPool,
   deleteItemPool,
   listDeliveries,
   listWorkerDeliveries,

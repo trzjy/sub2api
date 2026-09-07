@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 // legacyTestEncryptor 是可逆明文加密器，供迁移测试使用。
 type legacyTestEncryptor struct{}
 
-func (legacyTestEncryptor) Encrypt(plaintext string) (string, error) { return "cipher:" + plaintext, nil }
+func (legacyTestEncryptor) Encrypt(plaintext string) (string, error) {
+	return "cipher:" + plaintext, nil
+}
 func (legacyTestEncryptor) Decrypt(ciphertext string) (string, error) {
 	return strings.TrimPrefix(ciphertext, "cipher:"), nil
 }
@@ -125,18 +128,74 @@ func TestXianyuControlRepoAccountAndProductLifecycle(t *testing.T) {
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_configs`)
 }
 
+// 回归：池发码规格（code_type/group_id/validity_days）必须持久化并可回读，
+// 否则补货入口会因规格丢失而整体不可用。
+// createIntegrationSubscriptionGroup 建一个订阅模式分组（原生 SQL，避免拉起 ent 客户端）。
+func createIntegrationSubscriptionGroup(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var groupID int64
+	require.NoError(t, db.QueryRowContext(context.Background(), `
+		INSERT INTO "groups" (name, platform, subscription_type, created_at, updated_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		RETURNING id`,
+		fmt.Sprintf("spec-group-%d", time.Now().UnixNano()), "zhipu", "subscription").Scan(&groupID))
+	return groupID
+}
+
+func TestXianyuItemPoolCardSpecRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB
+
+	groupID := createIntegrationSubscriptionGroup(t, db)
+	repo := NewXianyuControlRepository(db).(*xianyuControlRepository)
+
+	created, err := repo.CreateItemPool(ctx, service.XianyuItemPool{
+		Name:         "spec-pool",
+		Slug:         "spec-pool",
+		Status:       service.XianyuItemPoolStatusActive,
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+
+	pools, err := repo.ListItemPools(ctx)
+	require.NoError(t, err)
+	var got *service.XianyuItemPool
+	for i := range pools {
+		if pools[i].ID == created.ID {
+			got = &pools[i]
+		}
+	}
+	require.NotNil(t, got)
+	require.Equal(t, service.XianyuPoolCodeTypeSubscription, got.CodeType)
+	require.NotNil(t, got.GroupID)
+	require.Equal(t, groupID, *got.GroupID)
+	require.Equal(t, 1, got.ValidityDays)
+
+	// 补货：按规格生成真实可兑换订阅码，claims 清理后删除池内码，避免污染其他用例。
+	require.NoError(t, repo.InsertPoolStock(ctx, got.Slug, *got.GroupID, got.ValidityDays, nil, []string{"XYPOOLSPEC0000000000000000001"}))
+	remaining, delivered, used, disabled, err := repo.PoolStockCounts(ctx, got.Slug)
+	require.NoError(t, err)
+	require.Equal(t, 1, remaining)
+	require.Equal(t, 0, delivered)
+	require.Equal(t, 0, used)
+	require.Equal(t, 0, disabled)
+
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote(got.Slug))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, created.ID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
+	require.NoError(t, err)
+}
+
 func TestXianyuDeliveryStateTransitions(t *testing.T) {
 	ctx := context.Background()
 	db := integrationDB
 
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE type = $1`, service.RedeemTypeXianyuDelivery)
-
-	var userID int64
-	require.NoError(t, db.QueryRowContext(ctx, `
-		INSERT INTO users (email, password_hash)
-		VALUES ('xianyu-state-transition@test.local', 'not-a-real-password')
-		RETURNING id`).Scan(&userID))
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
 
 	// 创建池和库存。
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules`)
@@ -150,14 +209,14 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO redeem_codes (code, type, value, status, notes)
 		VALUES ('XY0000000000000000000000000004', $1, 0, 'unused', $2)`,
-		service.RedeemTypeXianyuDelivery, service.XianyuPoolNote("standard"))
+		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
 	require.NoError(t, err)
 
 	claimRepo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	code, err := claimRepo.Claim(ctx, service.XianyuDeliveryClaim{
 		OrderID: "order-state", ItemID: "item", AccountID: "account", BuyerID: "buyer", PoolID: pool.ID,
 		BindingSource: service.XianyuBindingSourceManual,
-	}, userID)
+	})
 	require.NoError(t, err)
 	require.NotEmpty(t, code)
 
@@ -237,11 +296,11 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 
 	// 库存只消耗一个码。
 	var usedCount int
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE type=$1 AND status='used'`, service.RedeemTypeXianyuDelivery).Scan(&usedCount))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE notes=$1 AND status='delivered'`, service.XianyuPoolNote("standard")).Scan(&usedCount))
 	require.Equal(t, 1, usedCount)
 
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE type = $1`, service.RedeemTypeXianyuDelivery)
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_products`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_accounts`)
@@ -270,7 +329,7 @@ func TestXianyuLegacyMigrationBackfills(t *testing.T) {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO redeem_codes (code, type, value, status, notes)
 		VALUES ('XY0000000000000000000000000005', $1, 0, 'used', $2)`,
-		service.RedeemTypeXianyuDelivery, service.XianyuPoolNote("standard"))
+		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
 	require.NoError(t, err)
 	var codeID int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM redeem_codes WHERE code='XY0000000000000000000000000005'`).Scan(&codeID))
@@ -345,7 +404,7 @@ func TestXianyuLegacyMigrationBackfills(t *testing.T) {
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_accounts`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_configs`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE type = $1`, service.RedeemTypeXianyuDelivery)
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
 }
 
 var _ = time.Now

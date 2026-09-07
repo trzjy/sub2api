@@ -59,7 +59,7 @@ type RedeemCodeRepository interface {
 	Use(ctx context.Context, id, userID int64) error
 
 	List(ctx context.Context, params pagination.PaginationParams) ([]RedeemCode, *pagination.PaginationResult, error)
-	ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search string) ([]RedeemCode, *pagination.PaginationResult, error)
+	ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]RedeemCode, *pagination.PaginationResult, error)
 	ListByUser(ctx context.Context, userID int64, limit int) ([]RedeemCode, error)
 	// ListByUserPaginated returns paginated balance/concurrency history for a specific user.
 	// codeType filter is optional - pass empty string to return all types.
@@ -73,7 +73,6 @@ type GenerateCodesRequest struct {
 	Count int     `json:"count"`
 	Value float64 `json:"value"`
 	Type  string  `json:"type"`
-	Pool  string  `json:"pool"`
 }
 
 // RedeemCodeResponse 兑换码响应
@@ -198,12 +197,8 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 		return nil, errors.New("count must be greater than 0")
 	}
 
-	// 邀请码和闲鱼发货凭证不需要数值，其他类型需要非零值（支持负数用于退款）
-	if req.Type == RedeemTypeXianyuDelivery {
-		if req.Value != 0 {
-			return nil, errors.New("value must be zero for xianyu_delivery codes")
-		}
-	} else if req.Type != RedeemTypeInvitation && req.Value == 0 {
+	// 邀请码不需要数值，其他类型需要非零值（支持负数用于退款）
+	if req.Type != RedeemTypeInvitation && req.Value == 0 {
 		return nil, errors.New("value must not be zero")
 	}
 
@@ -216,18 +211,10 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 		codeType = RedeemTypeBalance
 	}
 
-	// 邀请码和闲鱼发货凭证类型的 value 设为 0
+	// 邀请码类型的 value 设为 0
 	value := req.Value
-	if codeType == RedeemTypeInvitation || codeType == RedeemTypeXianyuDelivery {
+	if codeType == RedeemTypeInvitation {
 		value = 0
-	}
-	var notes string
-	if codeType == RedeemTypeXianyuDelivery {
-		pool := strings.TrimSpace(req.Pool)
-		if pool == "" {
-			return nil, errors.New("pool is required for xianyu_delivery codes")
-		}
-		notes = XianyuPoolNote(pool)
 	}
 
 	codes := make([]RedeemCode, 0, req.Count)
@@ -242,7 +229,6 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 			Type:   codeType,
 			Value:  value,
 			Status: StatusUnused,
-			Notes:  notes,
 		})
 	}
 
@@ -268,19 +254,7 @@ func (s *RedeemService) CreateCode(ctx context.Context, code *RedeemCode) error 
 	if code.Type == "" {
 		code.Type = RedeemTypeBalance
 	}
-	if code.Type == RedeemTypeXianyuDelivery {
-		if code.Value != 0 {
-			return errors.New("value must be zero for xianyu_delivery codes")
-		}
-		notes := strings.TrimSpace(code.Notes)
-		if notes == "" {
-			return errors.New("pool note is required for xianyu_delivery codes")
-		}
-		if !strings.HasPrefix(notes, XianyuPoolNote("")) {
-			return errors.New("xianyu_delivery codes must use the xianyu_pool note")
-		}
-		code.Notes = notes
-	} else if code.Type != RedeemTypeInvitation && code.Value == 0 {
+	if code.Type != RedeemTypeInvitation && code.Value == 0 {
 		return errors.New("value must not be zero")
 	}
 	if code.Status == "" {

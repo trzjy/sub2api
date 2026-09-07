@@ -100,13 +100,13 @@ const (
 // XianyuAccount 是主程序保存的闲鱼账号状态视图。
 // 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuAccount struct {
-	ID             int64      `json:"id"`
-	WorkerConfigID int64      `json:"worker_config_id"`
-	AccountID      string     `json:"account_id"`
-	Nickname       string     `json:"nickname"`
-	Remark         string     `json:"remark"`
-	Status         string     `json:"status"`
-	CookieStatus   string     `json:"cookie_status"`
+	ID             int64  `json:"id"`
+	WorkerConfigID int64  `json:"worker_config_id"`
+	AccountID      string `json:"account_id"`
+	Nickname       string `json:"nickname"`
+	Remark         string `json:"remark"`
+	Status         string `json:"status"`
+	CookieStatus   string `json:"cookie_status"`
 	// CookieDetail 仅在 CookieStatus 为 invalid 时保存 Worker 续期失败原因，供 UI 悬浮提示。
 	CookieDetail string     `json:"cookie_detail"`
 	TaskStatus   string     `json:"task_status"`
@@ -125,14 +125,18 @@ const (
 // XianyuItemPool 是库存池配置。
 // 字段 JSON tag 与前端 admin 面板契约（snake_case）保持一致。
 type XianyuItemPool struct {
-	ID                int64     `json:"id"`
-	Name              string    `json:"name"`
-	Slug              string    `json:"slug"`
-	Description       string    `json:"description"`
-	LowStockThreshold int       `json:"low_stock_threshold"`
-	Status            string    `json:"status"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	Slug              string `json:"slug"`
+	Description       string `json:"description"`
+	LowStockThreshold int    `json:"low_stock_threshold"`
+	Status            string `json:"status"`
+	// 发码规格：补货时按此生成真实可兑换的订阅码。
+	CodeType     string    `json:"code_type"`
+	GroupID      *int64    `json:"group_id"`
+	ValidityDays int       `json:"validity_days"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // XianyuBindingStatus 表示商品绑定状态。
@@ -269,7 +273,9 @@ type XianyuControlRepository interface {
 	CreateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)
 	UpdateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)
 	DeleteItemPool(ctx context.Context, poolID int64) error
-	PoolStockCounts(ctx context.Context, poolSlug string) (remaining, used, disabled int, err error)
+	PoolStockCounts(ctx context.Context, poolSlug string) (remaining, delivered, used, disabled int, err error)
+	GroupSubscriptionType(ctx context.Context, groupID int64) (string, error)
+	InsertPoolStock(ctx context.Context, poolSlug string, groupID int64, validityDays int, expiresAt *time.Time, codes []string) error
 	DeliveryStats(ctx context.Context, since time.Time) (sent, failed int, err error)
 	PendingDeliveryCount(ctx context.Context) (int, error)
 

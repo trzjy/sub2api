@@ -44,7 +44,8 @@ func (r *RedeemCode) IsExpiredAt(now time.Time) bool {
 }
 
 func (r *RedeemCode) CanUse() bool {
-	return r.Status == StatusUnused && !r.IsExpired()
+	// delivered = 已通过闲鱼库存池发货、买家尚未兑换，仍然可兑换。
+	return (r.Status == StatusUnused || r.Status == StatusDelivered) && !r.IsExpired()
 }
 
 func GenerateRedeemCode() (string, error) {

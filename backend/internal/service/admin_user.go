@@ -1234,9 +1234,9 @@ func cloneAdminAuthIdentityMetadata(input map[string]any) map[string]any {
 }
 
 // Redeem code management implementations
-func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search string, sortBy, sortOrder string) ([]RedeemCode, int64, error) {
+func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search, poolSlug string, sortBy, sortOrder string) ([]RedeemCode, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
-	codes, result, err := s.redeemCodeRepo.ListWithFilters(ctx, params, codeType, status, search)
+	codes, result, err := s.redeemCodeRepo.ListWithFilters(ctx, params, codeType, status, search, poolSlug)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1266,16 +1266,6 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 			return nil, errors.New("group must be subscription type")
 		}
 	}
-	if input.Type == RedeemTypeXianyuDelivery && input.Value != 0 {
-		return nil, errors.New("value must be zero for xianyu_delivery codes")
-	}
-	if input.Type == RedeemTypeXianyuDelivery && strings.TrimSpace(input.Pool) == "" {
-		return nil, errors.New("pool is required for xianyu_delivery codes")
-	}
-	if input.Type == RedeemTypeXianyuDelivery && strings.ContainsAny(strings.TrimSpace(input.Pool), "\n\r") {
-		return nil, errors.New("pool must not contain line breaks")
-	}
-
 	codes := make([]RedeemCode, 0, input.Count)
 	for i := 0; i < input.Count; i++ {
 		codeValue, err := GenerateRedeemCode()
@@ -1288,9 +1278,6 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 			Value:     input.Value,
 			Status:    StatusUnused,
 			ExpiresAt: input.ExpiresAt,
-		}
-		if input.Type == RedeemTypeXianyuDelivery {
-			code.Notes = XianyuPoolNote(strings.TrimSpace(input.Pool))
 		}
 		// 订阅类型专用字段
 		if input.Type == RedeemTypeSubscription {

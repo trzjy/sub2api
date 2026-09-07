@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -128,8 +129,8 @@ func (s *XianyuControlService) GetActiveWorkerConfig(ctx context.Context) (*Xian
 	return s.control.GetActiveWorkerConfig(ctx)
 }
 
-// PoolStockCounts 返回池库存计数（告警巡检用）。
-func (s *XianyuControlService) PoolStockCounts(ctx context.Context, slug string) (int, int, int, error) {
+// PoolStockCounts 返回池库存计数（剩余/已发货/已兑换/禁用，告警巡检用）。
+func (s *XianyuControlService) PoolStockCounts(ctx context.Context, slug string) (int, int, int, int, error) {
 	return s.control.PoolStockCounts(ctx, slug)
 }
 
@@ -285,6 +286,9 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 	if pool.Status == "" {
 		pool.Status = XianyuItemPoolStatusActive
 	}
+	if err := s.validatePoolCardSpec(ctx, &pool); err != nil {
+		return nil, err
+	}
 	if pool.ID == 0 {
 		created, err := s.control.CreateItemPool(ctx, pool)
 		if err != nil {
@@ -303,6 +307,91 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 		return nil, err
 	}
 	return updated, nil
+}
+
+// XianyuPoolCodeTypeSubscription 当前库存池唯一支持的发码类型：真实可兑换的订阅码。
+const XianyuPoolCodeTypeSubscription = "subscription"
+
+// validatePoolCardSpec 校验池发码规格：订阅码池必须绑定订阅型分组且天数有效。
+func (s *XianyuControlService) validatePoolCardSpec(ctx context.Context, pool *XianyuItemPool) error {
+	if pool.CodeType == "" {
+		pool.CodeType = XianyuPoolCodeTypeSubscription
+	}
+	if pool.CodeType != XianyuPoolCodeTypeSubscription {
+		return infraerrors.BadRequest("XIANYU_POOL_CODE_TYPE_INVALID", "库存池当前仅支持订阅码（subscription）")
+	}
+	if pool.GroupID == nil {
+		return infraerrors.BadRequest("XIANYU_POOL_GROUP_REQUIRED", "请选择库存池的发码分组")
+	}
+	if pool.ValidityDays < 1 || pool.ValidityDays > 365 {
+		return infraerrors.BadRequest("XIANYU_POOL_VALIDITY_INVALID", "发码有效天数须在 1-365 之间")
+	}
+	subType, err := s.control.GroupSubscriptionType(ctx, *pool.GroupID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return infraerrors.BadRequest("XIANYU_POOL_GROUP_NOT_FOUND", "发码分组不存在")
+		}
+		return fmt.Errorf("query group subscription type: %w", err)
+	}
+	if subType != SubscriptionTypeSubscription {
+		return infraerrors.BadRequest("XIANYU_POOL_GROUP_NOT_SUBSCRIPTION", "发码分组必须是订阅模式分组")
+	}
+	return nil
+}
+
+// XianyuPoolStockInput 是池补货请求。
+type XianyuPoolStockInput struct {
+	Count         int `json:"count"`
+	ExpiresInDays int `json:"expires_in_days"` // 0 = 码本身永不过期
+}
+
+// StockItemPool 按池的发码规格批量生成真实可兑换的订阅码，返回生成数量与补货后剩余库存。
+func (s *XianyuControlService) StockItemPool(ctx context.Context, poolID int64, input XianyuPoolStockInput) (int, int, error) {
+	if input.Count < 1 || input.Count > 1000 {
+		return 0, 0, infraerrors.BadRequest("XIANYU_POOL_STOCK_COUNT_INVALID", "单次补货数量须在 1-1000 之间")
+	}
+	if input.ExpiresInDays < 0 || input.ExpiresInDays > 3650 {
+		return 0, 0, infraerrors.BadRequest("XIANYU_POOL_STOCK_EXPIRY_INVALID", "码过期天数须在 0-3650 之间（0 表示永不过期）")
+	}
+	pools, err := s.control.ListItemPools(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	var pool *XianyuItemPool
+	for i := range pools {
+		if pools[i].ID == poolID {
+			pool = &pools[i]
+			break
+		}
+	}
+	if pool == nil {
+		return 0, 0, ErrXianyuItemPoolNotFound
+	}
+	spec := *pool
+	if err := s.validatePoolCardSpec(ctx, &spec); err != nil {
+		return 0, 0, err
+	}
+	var expiresAt *time.Time
+	if input.ExpiresInDays > 0 {
+		t := time.Now().AddDate(0, 0, input.ExpiresInDays)
+		expiresAt = &t
+	}
+	codes := make([]string, 0, input.Count)
+	for i := 0; i < input.Count; i++ {
+		code, err := GenerateRedeemCode()
+		if err != nil {
+			return 0, 0, fmt.Errorf("generate pool stock code: %w", err)
+		}
+		codes = append(codes, code)
+	}
+	if err := s.control.InsertPoolStock(ctx, pool.Slug, *pool.GroupID, pool.ValidityDays, expiresAt, codes); err != nil {
+		return 0, 0, err
+	}
+	remaining, _, _, _, err := s.control.PoolStockCounts(ctx, pool.Slug)
+	if err != nil {
+		return input.Count, 0, err
+	}
+	return input.Count, remaining, nil
 }
 
 func validPoolSlug(slug string) bool {
@@ -569,7 +658,7 @@ func (s *XianyuControlService) ResendOriginalCode(ctx context.Context, orderNo s
 // ---------------------------------------------------------------------------// XianyuOverview 是概览页数据。
 type XianyuOverview struct {
 	WorkerHealthy       bool                 `json:"worker_healthy"`
-	WorkerHealthStatus  string               `json:"worker_health_status"`  // unknown / healthy / unhealthy
+	WorkerHealthStatus  string               `json:"worker_health_status"` // unknown / healthy / unhealthy
 	WorkerLastCheckedAt *time.Time           `json:"worker_last_checked_at,omitempty"`
 	EnabledAccounts     int                  `json:"enabled_accounts"`
 	RunningTasks        int                  `json:"running_tasks"`
@@ -584,6 +673,7 @@ type XianyuOverview struct {
 type XianyuPoolOverview struct {
 	Pool      XianyuItemPool `json:"pool"`
 	Remaining int            `json:"remaining"`
+	Delivered int            `json:"delivered"`
 	Used      int            `json:"used"`
 	Disabled  int            `json:"disabled"`
 	LowStock  bool           `json:"low_stock"`
@@ -634,11 +724,12 @@ func (s *XianyuControlService) GetOverview(ctx context.Context) (*XianyuOverview
 	}
 	for _, pool := range pools {
 		po := XianyuPoolOverview{Pool: pool}
-		remaining, used, disabled, err := s.control.PoolStockCounts(ctx, pool.Slug)
+		remaining, delivered, used, disabled, err := s.control.PoolStockCounts(ctx, pool.Slug)
 		if err != nil {
 			return nil, err
 		}
 		po.Remaining = remaining
+		po.Delivered = delivered
 		po.Used = used
 		po.Disabled = disabled
 		po.LowStock = pool.Status == XianyuItemPoolStatusActive && pool.LowStockThreshold > 0 && po.Remaining <= pool.LowStockThreshold

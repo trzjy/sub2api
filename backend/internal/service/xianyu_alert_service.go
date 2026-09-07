@@ -188,7 +188,7 @@ func (s *XianyuAlertService) evaluatePools(ctx context.Context) {
 		if pool.Status != XianyuItemPoolStatusActive {
 			continue
 		}
-		remaining, _, _, err := s.control.PoolStockCounts(ctx, pool.Slug)
+		remaining, _, _, _, err := s.control.PoolStockCounts(ctx, pool.Slug)
 		if err != nil {
 			continue
 		}

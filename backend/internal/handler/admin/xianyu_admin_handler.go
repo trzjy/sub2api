@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
@@ -443,6 +444,9 @@ type saveItemPoolRequest struct {
 	Description       string `json:"description"`
 	LowStockThreshold int    `json:"low_stock_threshold"`
 	Status            string `json:"status"`
+	CodeType          string `json:"code_type"`
+	GroupID           *int64 `json:"group_id"`
+	ValidityDays      int    `json:"validity_days"`
 }
 
 func (h *XianyuAdminHandler) SaveItemPool(c *gin.Context) {
@@ -458,12 +462,44 @@ func (h *XianyuAdminHandler) SaveItemPool(c *gin.Context) {
 		Description:       req.Description,
 		LowStockThreshold: req.LowStockThreshold,
 		Status:            req.Status,
+		CodeType:          req.CodeType,
+		GroupID:           req.GroupID,
+		ValidityDays:      req.ValidityDays,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 	response.Success(c, saved)
+}
+
+type stockItemPoolRequest struct {
+	Count         int `json:"count"`
+	ExpiresInDays int `json:"expires_in_days"`
+}
+
+// StockItemPool 库存池补货：按池的发码规格生成真实可兑换的订阅码。
+func (h *XianyuAdminHandler) StockItemPool(c *gin.Context) {
+	poolID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || poolID <= 0 {
+		response.BadRequest(c, "invalid pool id")
+		return
+	}
+	var req stockItemPoolRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	executeAdminIdempotentJSON(c, "admin.xianyu.pool_stock", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		created, remaining, err := h.control.StockItemPool(ctx, poolID, service.XianyuPoolStockInput{
+			Count:         req.Count,
+			ExpiresInDays: req.ExpiresInDays,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return gin.H{"created": created, "remaining": remaining}, nil
+	})
 }
 
 // Deliveries 发货记录列表。

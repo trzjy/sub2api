@@ -2,12 +2,13 @@ package domain
 
 // Status constants
 const (
-	StatusActive   = "active"
-	StatusDisabled = "disabled"
-	StatusError    = "error"
-	StatusUnused   = "unused"
-	StatusUsed     = "used"
-	StatusExpired  = "expired"
+	StatusActive    = "active"
+	StatusDisabled  = "disabled"
+	StatusError     = "error"
+	StatusUnused    = "unused"
+	StatusDelivered = "delivered" // 已发货待兑换（闲鱼库存池领取后、买家兑换前）
+	StatusUsed      = "used"
+	StatusExpired   = "expired"
 )
 
 // Role constants
@@ -66,7 +67,6 @@ const (
 	RedeemTypeConcurrency  = "concurrency"
 	RedeemTypeSubscription = "subscription"
 	RedeemTypeInvitation   = "invitation"
-	RedeemTypeXianyu       = "xianyu_delivery"
 )
 
 // PromoCode status constants

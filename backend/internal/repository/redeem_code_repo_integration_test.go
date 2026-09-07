@@ -155,7 +155,7 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_Type() {
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "TYPE-BAL", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "TYPE-SUB", Type: service.RedeemTypeSubscription, Value: 0, Status: service.StatusUnused}))
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.RedeemTypeSubscription, "", "")
+	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.RedeemTypeSubscription, "", "", "")
 	s.Require().NoError(err)
 	s.Require().Len(codes, 1)
 	s.Require().Equal(service.RedeemTypeSubscription, codes[0].Type)
@@ -165,7 +165,7 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_Status() {
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-UNUSED", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-USED", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUsed}))
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusUsed, "")
+	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusUsed, "", "")
 	s.Require().NoError(err)
 	s.Require().Len(codes, 1)
 	s.Require().Equal(service.StatusUsed, codes[0].Status)
@@ -177,12 +177,12 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_StatusExpiredByExpiresAt() {
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-EXPIRED-BY-TIME", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused, ExpiresAt: &past}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "STAT-UNUSED-FUTURE", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused, ExpiresAt: &future}))
 
-	expired, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusExpired, "")
+	expired, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusExpired, "", "")
 	s.Require().NoError(err)
 	s.Require().Len(expired, 1)
 	s.Require().Equal("STAT-EXPIRED-BY-TIME", expired[0].Code)
 
-	unused, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusUnused, "")
+	unused, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", service.StatusUnused, "", "")
 	s.Require().NoError(err)
 	s.Require().Len(unused, 1)
 	s.Require().Equal("STAT-UNUSED-FUTURE", unused[0].Code)
@@ -192,7 +192,7 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_Search() {
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "ALPHA-CODE", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 	s.Require().NoError(s.repo.Create(s.ctx, &service.RedeemCode{Code: "BETA-CODE", Type: service.RedeemTypeBalance, Value: 0, Status: service.StatusUnused}))
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "alpha")
+	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "alpha", "")
 	s.Require().NoError(err)
 	s.Require().Len(codes, 1)
 	s.Require().Contains(codes[0].Code, "ALPHA")
@@ -211,7 +211,7 @@ func (s *RedeemCodeRepoSuite) TestListWithFilters_GroupPreload() {
 		Save(s.ctx)
 	s.Require().NoError(err)
 
-	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "")
+	codes, _, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, "", "", "", "")
 	s.Require().NoError(err)
 	s.Require().Len(codes, 1)
 	s.Require().NotNil(codes[0].Group, "expected Group preload")
@@ -355,6 +355,26 @@ func (s *RedeemCodeRepoSuite) TestBatchUpdate_UsedCodeRejectsSensitiveFields() {
 	s.Require().Equal(service.StatusUsed, got.Status)
 }
 
+func (s *RedeemCodeRepoSuite) TestBatchUpdate_DeliveredCodeRejectsSensitiveFields() {
+	// delivered = 已发货待兑换的权益：批量改回 unused 会导致同一码超发，必须拒绝。
+	code := &service.RedeemCode{
+		Code:   "BATCH-UP-DELIVERED",
+		Type:   service.RedeemTypeSubscription,
+		Value:  0,
+		Status: service.StatusDelivered,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, code))
+	status := service.StatusUnused
+
+	_, err := s.repo.BatchUpdate(s.ctx, []int64{code.ID}, service.RedeemCodeBatchUpdateFields{Status: &status})
+	s.Require().Error(err)
+	s.Require().True(errors.Is(err, service.ErrRedeemCodeUsed))
+
+	got, getErr := s.repo.GetByID(s.ctx, code.ID)
+	s.Require().NoError(getErr)
+	s.Require().Equal(service.StatusDelivered, got.Status)
+}
+
 // --- Use ---
 
 func (s *RedeemCodeRepoSuite) TestUse() {
@@ -481,66 +501,6 @@ func (s *RedeemCodeRepoSuite) TestListByUser_DefaultLimit() {
 	s.Require().Len(codes, 1)
 }
 
-func (s *RedeemCodeRepoSuite) TestListWithFilters_ExcludesXianyuDeliveryByDefault() {
-	xianyuCode := &service.RedeemCode{
-		Code:   "XIANYU-LIST-HIDDEN",
-		Type:   service.RedeemTypeXianyuDelivery,
-		Status: service.StatusUsed,
-	}
-	balanceCode := &service.RedeemCode{
-		Code:   "BALANCE-LIST-SHOWN",
-		Type:   service.RedeemTypeBalance,
-		Value:  10,
-		Status: service.StatusUnused,
-	}
-	s.Require().NoError(s.repo.Create(s.ctx, xianyuCode))
-	s.Require().NoError(s.repo.Create(s.ctx, balanceCode))
-
-	codes, result, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{
-		Page:     1,
-		PageSize: 10,
-	}, "", "", "")
-	s.Require().NoError(err)
-	s.Require().Equal(int64(1), result.Total)
-	s.Require().Len(codes, 1)
-	s.Require().Equal(balanceCode.Code, codes[0].Code)
-
-	codes, result, err = s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{
-		Page:     1,
-		PageSize: 10,
-	}, service.RedeemTypeXianyuDelivery, "", "")
-	s.Require().NoError(err)
-	s.Require().Equal(int64(1), result.Total)
-	s.Require().Len(codes, 1)
-	s.Require().Equal(xianyuCode.Code, codes[0].Code)
-}
-
-func (s *RedeemCodeRepoSuite) TestListByUser_ExcludesXianyuDelivery() {
-	user := s.createUser(uniqueTestValue(s.T(), "xianyu-history") + "@example.com")
-	balanceCode := &service.RedeemCode{
-		Code:   "XIANYU-HISTORY-HIDDEN-BALANCE",
-		Type:   service.RedeemTypeBalance,
-		Value:  0,
-		Status: service.StatusUnused,
-	}
-	xianyuCode := &service.RedeemCode{
-		Code:   "XIANYU-HISTORY-HIDDEN",
-		Type:   service.RedeemTypeXianyuDelivery,
-		Status: service.StatusUnused,
-	}
-	s.Require().NoError(s.repo.Create(s.ctx, balanceCode))
-	s.Require().NoError(s.repo.Create(s.ctx, xianyuCode))
-	s.Require().NoError(s.repo.Use(s.ctx, balanceCode.ID, user.ID))
-	s.Require().NoError(s.repo.Use(s.ctx, xianyuCode.ID, user.ID))
-
-	codes, err := s.repo.ListByUser(s.ctx, user.ID, 10)
-	s.Require().NoError(err)
-	s.Require().Len(codes, 1)
-	s.Require().Equal(balanceCode.Code, codes[0].Code)
-}
-
-// --- Combined original test ---
-
 func (s *RedeemCodeRepoSuite) TestCreateBatch_Filters_Use_Idempotency_ListByUser() {
 	user := s.createUser(uniqueTestValue(s.T(), "rc") + "@example.com")
 	group := s.createGroup(uniqueTestValue(s.T(), "g-rc"))
@@ -552,7 +512,7 @@ func (s *RedeemCodeRepoSuite) TestCreateBatch_Filters_Use_Idempotency_ListByUser
 	}
 	s.Require().NoError(s.repo.CreateBatch(s.ctx, codes), "CreateBatch")
 
-	list, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.RedeemTypeSubscription, service.StatusUnused, "code")
+	list, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{Page: 1, PageSize: 10}, service.RedeemTypeSubscription, service.StatusUnused, "code", "")
 	s.Require().NoError(err, "ListWithFilters")
 	s.Require().Equal(int64(1), page.Total)
 	s.Require().Len(list, 1)

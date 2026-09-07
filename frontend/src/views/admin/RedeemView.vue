@@ -25,6 +25,23 @@
             class="w-36"
             @change="loadCodes"
           />
+          <span
+            v-if="poolFilter"
+            class="flex items-center gap-1 rounded-full bg-primary-50 px-3 py-1.5 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
+          >
+            {{ t('admin.redeem.poolFilter', { pool: poolFilter }) }}
+            <button
+              class="ml-0.5 font-semibold hover:text-primary-900"
+              :title="t('common.cancel')"
+              @click="
+                poolFilter = ''
+                pagination.page = 1
+                loadCodes()
+              "
+            >
+              ×
+            </button>
+          </span>
 
           <!-- Right: Action buttons -->
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
@@ -141,7 +158,7 @@
             </span>
           </template>
 
-          <template #cell-status="{ value, row }">
+          <template #cell-status="{ value }">
             <span
               :class="[
                 'badge',
@@ -152,22 +169,12 @@
                     : 'badge-danger'
               ]"
             >
-              {{
-                row.type === 'xianyu_delivery' && value === 'used'
-                  ? t('admin.redeem.status.delivered')
-                  : t('admin.redeem.status.' + value)
-              }}
+              {{ t('admin.redeem.status.' + value) }}
             </span>
           </template>
 
           <template #cell-used_by="{ value, row }">
-            <!-- 闲鱼发货凭证没有"使用者"：used_by 是系统审计账号，真实买家/订单信息在发货记录页 -->
-            <span
-              v-if="row.type === 'xianyu_delivery'"
-              class="text-sm text-gray-500 dark:text-dark-400"
-              >-</span
-            >
-            <span v-else class="text-sm text-gray-500 dark:text-dark-400">
+            <span class="text-sm text-gray-500 dark:text-dark-400">
               {{ row.user?.email || (value ? t('admin.redeem.userPrefix', { id: value }) : '-') }}
             </span>
           </template>
@@ -299,11 +306,7 @@
             </div>
             <!-- 余额/并发类型：显示数值输入 -->
             <div
-              v-if="
-                generateForm.type !== 'subscription' &&
-                generateForm.type !== 'invitation' &&
-                generateForm.type !== 'xianyu_delivery'
-              "
+              v-if="generateForm.type !== 'subscription' && generateForm.type !== 'invitation'"
             >
               <label class="input-label">
                 {{
@@ -325,13 +328,6 @@
             <div v-if="generateForm.type === 'invitation'" class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
               <p class="text-sm text-blue-700 dark:text-blue-300">
                 {{ t('admin.redeem.invitationHint') }}
-              </p>
-            </div>
-            <div v-if="generateForm.type === 'xianyu_delivery'">
-              <label class="input-label">{{ t('admin.redeem.xianyuPool') }}</label>
-              <input v-model="xianyuPool" type="text" required class="input" />
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {{ t('admin.redeem.xianyuPoolHint') }}
               </p>
             </div>
             <!-- 订阅类型：显示分组选择和有效天数 -->
@@ -759,8 +755,7 @@ const typeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
   { value: 'concurrency', label: t('admin.redeem.concurrency') },
   { value: 'subscription', label: t('admin.redeem.subscription') },
-  { value: 'invitation', label: t('admin.redeem.invitation') },
-  { value: 'xianyu_delivery', label: t('admin.redeem.xianyuDelivery') }
+  { value: 'invitation', label: t('admin.redeem.invitation') }
 ])
 
 const filterTypeOptions = computed(() => [
@@ -768,13 +763,13 @@ const filterTypeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
   { value: 'concurrency', label: t('admin.redeem.concurrency') },
   { value: 'subscription', label: t('admin.redeem.subscription') },
-  { value: 'invitation', label: t('admin.redeem.invitation') },
-  { value: 'xianyu_delivery', label: t('admin.redeem.xianyuDelivery') }
+  { value: 'invitation', label: t('admin.redeem.invitation') }
 ])
 
 const filterStatusOptions = computed(() => [
   { value: '', label: t('admin.redeem.allStatus') },
   { value: 'unused', label: t('admin.redeem.unused') },
+  { value: 'delivered', label: t('admin.redeem.status.delivered') },
   { value: 'used', label: t('admin.redeem.used') },
   { value: 'expired', label: t('admin.redeem.status.expired') },
   { value: 'disabled', label: t('admin.redeem.status.disabled') }
@@ -863,15 +858,11 @@ const generateForm = reactive({
   custom_expiry_days: 7
 })
 
-const xianyuPool = ref('')
-
-// 监听类型变化，邀请码与闲鱼发货凭证不需要数值
+// 监听类型变化，邀请码不需要数值
 watch(
   () => generateForm.type,
   (newType) => {
     if (newType === 'invitation') {
-      generateForm.value = 0
-    } else if (newType === 'xianyu_delivery') {
       generateForm.value = 0
     } else if (generateForm.value === 0) {
       generateForm.value = 10
@@ -881,8 +872,15 @@ watch(
 
 const buildRedeemQueryFilters = () => ({
   type: (filters.type || undefined) as RedeemCodeType | undefined,
-  status: (filters.status || undefined) as 'used' | 'expired' | 'unused' | 'disabled' | undefined,
+  status: (filters.status || undefined) as
+    | 'used'
+    | 'delivered'
+    | 'expired'
+    | 'unused'
+    | 'disabled'
+    | undefined,
   search: searchQuery.value || undefined,
+  pool: poolFilter.value || undefined,
   sort_by: sortState.sort_by,
   sort_order: sortState.sort_order
 })
@@ -1053,11 +1051,6 @@ const handleGenerateCodes = async () => {
     appStore.showError(t('admin.redeem.groupRequired'))
     return
   }
-  if (generateForm.type === 'xianyu_delivery' && !xianyuPool.value.trim()) {
-    appStore.showError(t('admin.redeem.xianyuPoolRequired'))
-    return
-  }
-
   const expiresInDays = getRedeemCodeExpiresInDays()
   if (expiresInDays === null) {
     appStore.showError(t('admin.redeem.expiryDaysRequired'))
@@ -1072,8 +1065,7 @@ const handleGenerateCodes = async () => {
       generateForm.value,
       generateForm.type === 'subscription' ? generateForm.group_id : undefined,
       generateForm.type === 'subscription' ? generateForm.validity_days : undefined,
-      expiresInDays,
-      generateForm.type === 'xianyu_delivery' ? xianyuPool.value : undefined
+      expiresInDays
     )
     showGenerateDialog.value = false
     generatedCodes.value = result
@@ -1083,7 +1075,6 @@ const handleGenerateCodes = async () => {
     generateForm.validity_days = 30
     generateForm.expiry_option = 'never'
     generateForm.custom_expiry_days = 7
-    xianyuPool.value = ''
     loadCodes()
   } catch (error: any) {
     appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToGenerate'))
@@ -1213,21 +1204,9 @@ const loadSubscriptionGroups = async () => {
   }
 }
 
-// 库存池页"生成库存码/管理库存码"会带 type/pool(/view=list) 查询参数跳转到本页，
-// 这里必须在首次 loadCodes 前消费这些参数：应用类型筛选；生成入口（无 view=list）
-// 直接打开发货凭证生成对话框并预填库存池，管理入口只做筛选。
+// 库存池页"管理库存码"带 pool 查询参数跳转到本页，首次 loadCodes 前按池过滤库存码。
 const route = useRoute()
-const queryType = typeof route.query.type === 'string' ? route.query.type : ''
-const queryPool = typeof route.query.pool === 'string' ? route.query.pool : ''
-const queryView = typeof route.query.view === 'string' ? route.query.view : ''
-if (queryType && filterTypeOptions.value.some((option) => option.value === queryType)) {
-  filters.type = queryType
-}
-if (queryType === 'xianyu_delivery' && queryPool && queryView !== 'list') {
-  generateForm.type = 'xianyu_delivery'
-  xianyuPool.value = queryPool
-  showGenerateDialog.value = true
-}
+const poolFilter = ref(typeof route.query.pool === 'string' ? route.query.pool.trim() : '')
 
 onMounted(() => {
   loadCodes()
