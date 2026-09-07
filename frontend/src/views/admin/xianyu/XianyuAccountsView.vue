@@ -49,9 +49,21 @@
               <td class="px-4 py-2 font-medium">{{ account.nickname || '-' }}</td>
               <td class="px-4 py-2 font-mono text-xs">{{ account.account_id }}</td>
               <td class="px-4 py-2">
-                <span>{{ account.remark || '-' }}</span>
-                <button class="ml-1 text-xs text-gray-400 hover:text-gray-600" @click="openRemark(account)">
-                  {{ t('common.edit') }}
+                <button
+                  v-if="account.remark"
+                  class="text-left text-sm hover:text-primary-600 dark:hover:text-primary-400"
+                  :title="t('admin.xianyu.accounts.editRemark')"
+                  @click="openRemark(account)"
+                >
+                  {{ account.remark }}
+                </button>
+                <button
+                  v-else
+                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-dashed border-gray-300 text-sm text-gray-400 hover:border-primary-500 hover:text-primary-500 dark:border-dark-600"
+                  :title="t('admin.xianyu.accounts.editRemark')"
+                  @click="openRemark(account)"
+                >
+                  +
                 </button>
               </td>
               <td class="px-4 py-2">
