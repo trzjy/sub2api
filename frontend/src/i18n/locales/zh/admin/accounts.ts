@@ -637,6 +637,12 @@ export default {
       apiKeyRequired: 'API Key *',
       apiKeyPlaceholder: 'sk-ant-api03-...',
       apiKeyHint: '您的 Claude Console API Key',
+      // Other（通用 OpenAI / Anthropic 兼容自定义上游）
+      other: {
+        baseUrlHint: '上游 OpenAI 兼容端点（如 OpenRouter），请求发往 {base}/chat/completions。',
+        baseUrlHintAnthropic: '上游 Anthropic 兼容端点（如 TokenHub 的 /plan/anthropic），请求发往 {base}/v1/messages。',
+        apiKeyHint: '上游服务的 API Key',
+      },
       // OpenAI specific hints
       openai: {
         baseUrlHint: '留空使用官方 OpenAI API',

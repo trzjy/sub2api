@@ -1401,24 +1401,39 @@ func (a *Account) IsCodingPlan() bool {
 	return a.GetAccountMode() == AccountModeCoding
 }
 
-// GetAPIProtocol 返回国产供应商账号的上游 API 协议。存储于
+// GetAPIProtocol 返回账号的上游 API 协议。存储于
 // credentials["api_protocol"]；缺失或与平台不匹配时回退 chat_completions
 // （与既有行为完全一致）。responses 协议仅 deepseek 支持（官方原生 /responses
-// 端点，适配 Codex）；kimi/zhipu 无此端点。
+// 端点，适配 Codex）；kimi/zhipu 无此端点。国产供应商另支持 adaptive
+// （按入站协议动态选择厂商原生端点）；other 平台无厂商默认端点，仅开放
+// anthropic / chat_completions 双协议（适配 Anthropic 兼容上游，如
+// api.lkeap.cloud.tencent.com/plan/anthropic）。
 func (a *Account) GetAPIProtocol() string {
-	if a == nil || !a.IsCNProvider() {
+	if a == nil {
 		return APIProtocolChatCompletions
 	}
-	switch strings.TrimSpace(a.GetCredential("api_protocol")) {
-	case APIProtocolAdaptive:
-		return APIProtocolAdaptive
-	case APIProtocolAnthropic:
-		return APIProtocolAnthropic
-	case APIProtocolResponses:
-		if a.Platform == PlatformDeepseek {
-			return APIProtocolResponses
+	if a.IsCNProvider() {
+		switch strings.TrimSpace(a.GetCredential("api_protocol")) {
+		case APIProtocolAdaptive:
+			return APIProtocolAdaptive
+		case APIProtocolAnthropic:
+			return APIProtocolAnthropic
+		case APIProtocolResponses:
+			if a.Platform == PlatformDeepseek {
+				return APIProtocolResponses
+			}
+		case APIProtocolChatCompletions:
+			return APIProtocolChatCompletions
 		}
-	case APIProtocolChatCompletions:
+		return APIProtocolChatCompletions
+	}
+	if a.Platform == PlatformOther {
+		switch strings.TrimSpace(a.GetCredential("api_protocol")) {
+		case APIProtocolAnthropic:
+			return APIProtocolAnthropic
+		case APIProtocolChatCompletions:
+			return APIProtocolChatCompletions
+		}
 		return APIProtocolChatCompletions
 	}
 	return APIProtocolChatCompletions
@@ -1542,6 +1557,11 @@ func (a *Account) GetOpenAIFormatBaseURL() string {
 		return DefaultZhipuPayGBaseURL
 	case PlatformDeepseek:
 		return DefaultDeepseekBaseURL
+	case PlatformOther:
+		// other 无厂商默认 OpenAI 端点：anthropic 协议下凭证 base_url 指向 Anthropic
+		// 端点，绝不能拿它拼 OpenAI 格式路径（embeddings 等），返回空由上层失败关闭
+		//（外审-2 同源路径：other 空 base 禁止回落官方 OpenAI）。
+		return ""
 	default:
 		return a.GetOpenAIBaseURL()
 	}

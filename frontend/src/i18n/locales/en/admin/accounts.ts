@@ -553,6 +553,12 @@ export default {
       apiKeyRequired: 'API Key *',
       apiKeyPlaceholder: 'sk-ant-api03-...',
       apiKeyHint: 'Your Claude Console API Key',
+      // Other (generic OpenAI / Anthropic compatible upstream)
+      other: {
+        baseUrlHint: 'OpenAI-compatible upstream (e.g. OpenRouter); requests go to {base}/chat/completions.',
+        baseUrlHintAnthropic: 'Anthropic-compatible upstream (e.g. TokenHub /plan/anthropic); requests go to {base}/v1/messages.',
+        apiKeyHint: 'API Key of the upstream service',
+      },
       // OpenAI specific hints
       openai: {
         baseUrlHint: 'Leave default for official OpenAI API',

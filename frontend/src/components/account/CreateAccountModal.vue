@@ -559,6 +559,40 @@
         </div>
       </div>
 
+      <!-- API Protocol Selection (Other: OpenAI / Anthropic compatible upstream) -->
+      <div v-if="form.platform === 'other'" class="mt-4">
+        <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button
+            v-for="opt in otherProtocolOptions"
+            :key="opt.value"
+            type="button"
+            @click="apiProtocol = opt.value"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              apiProtocol === opt.value
+                ? cnAccentActiveClass
+                : 'border-gray-200 hover:border-gray-400 dark:border-dark-600 dark:hover:border-gray-600'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                apiProtocol === opt.value
+                  ? cnAccentIconClass
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon :name="opt.value === 'anthropic' ? 'sparkles' : 'chat'" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t(`admin.accounts.cnProviders.apiProtocol.${opt.labelKey}`) }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.accounts.cnProviders.apiProtocol.${opt.labelKey}Desc`) }}</span>
+            </div>
+          </button>
+        </div>
+      </div>
+
       <!-- Account Type Selection (Gemini) -->
       <div v-if="form.platform === 'gemini'">
         <div class="flex items-center justify-between">
@@ -3880,6 +3914,11 @@ const baseUrlHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
   if (form.platform === 'grok') return ''
+  if (form.platform === 'other') {
+    return apiProtocol.value === 'anthropic'
+      ? t('admin.accounts.other.baseUrlHintAnthropic')
+      : t('admin.accounts.other.baseUrlHint')
+  }
   return t('admin.accounts.baseUrlHint')
 })
 
@@ -3887,6 +3926,7 @@ const apiKeyHint = computed(() => {
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
   if (form.platform === 'grok') return ''
+  if (form.platform === 'other') return t('admin.accounts.other.apiKeyHint')
   return t('admin.accounts.apiKeyHint')
 })
 
@@ -3902,6 +3942,10 @@ const apiKeyBaseUrlPlaceholder = computed(() => {
       return 'https://generativelanguage.googleapis.com'
     case 'grok':
       return 'https://api.x.ai/v1'
+    case 'other':
+      return apiProtocol.value === 'anthropic'
+        ? 'https://example.com/plan/anthropic'
+        : 'https://example.com/v1'
     default:
       return 'https://api.anthropic.com'
   }
@@ -4061,6 +4105,11 @@ const cnAdaptiveProtocolOptions = computed<Array<{ value: CnNativeApiProtocol; l
   if (form.platform === 'deepseek') opts.push({ value: 'responses', labelKey: 'responses' })
   return opts
 })
+// other 平台双协议：chat_completions（OpenAI 兼容上游）/ anthropic（Anthropic 兼容上游）。
+const otherProtocolOptions = computed<Array<{ value: CnApiProtocol; labelKey: string }>>(() => [
+  { value: 'chat_completions', labelKey: 'chatCompletions' },
+  { value: 'anthropic', labelKey: 'anthropic' }
+])
 
 function resetAdaptiveBaseUrls(platform: 'kimi' | 'zhipu' | 'deepseek', mode: CnAccountMode) {
   adaptiveBaseUrls.value = defaultCNAdaptiveBaseUrls(platform, mode)
@@ -4111,6 +4160,9 @@ function selectOtherPlatform() {
   form.type = 'apikey'
   accountCategory.value = 'apikey'
   apiKeyBaseUrl.value = ''
+  // other 默认 OpenAI 兼容协议（anthropic 需用户显式切换，避免误把 Anthropic
+  // 上游 base_url 当 OpenAI 端点转发）。
+  apiProtocol.value = 'chat_completions'
 }
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {
@@ -4179,7 +4231,7 @@ const syncPreviewCredentials = computed(() => {
     type: form.type,
     base_url: baseUrl || undefined,
     api_key: apiKeyValue.value,
-    api_protocol: isCNPlatform.value ? apiProtocol.value : undefined,
+    api_protocol: isCNPlatform.value || form.platform === 'other' ? apiProtocol.value : undefined,
     account_mode: isCNPlatform.value ? accountMode.value : undefined,
     ...(modelMapping ? { model_mapping: modelMapping } : {})
   }
@@ -5648,6 +5700,10 @@ const handleSubmit = async () => {
       if (volcanoAccessKey.value.trim()) credentials.access_key = volcanoAccessKey.value.trim()
       if (volcanoSecretKey.value.trim()) credentials.secret_key = volcanoSecretKey.value.trim()
     }
+  }
+  // other：双协议（chat_completions | anthropic），写入 api_protocol 供后端路由。
+  if (form.platform === 'other') {
+    credentials.api_protocol = apiProtocol.value
   }
 
   // Add model mapping if configured（OpenAI 开启自动透传时不应用）

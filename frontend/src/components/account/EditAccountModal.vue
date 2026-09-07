@@ -118,6 +118,29 @@
           </div>
           <p class="input-hint">{{ t(`admin.accounts.cnProviders.apiProtocol.${cnProtocolDescKey}Desc`) }}</p>
         </div>
+        <!-- API Protocol Selection (Other: OpenAI / Anthropic compatible upstream) -->
+        <div v-if="isOtherApiKeyAccount">
+          <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button
+              v-for="opt in editOtherProtocolOptions"
+              :key="opt.value"
+              type="button"
+              :class="[
+                'rounded-lg border-2 px-3 py-1.5 text-xs transition-all',
+                editApiProtocol === opt.value
+                  ? 'border-primary-500 bg-primary-50 font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300'
+                  : 'border-gray-200 text-gray-700 hover:border-gray-400 dark:border-dark-600 dark:text-gray-300 dark:hover:border-gray-600'
+              ]"
+              @click="editApiProtocol = opt.value"
+            >
+              {{ t(`admin.accounts.cnProviders.apiProtocol.${opt.labelKey}`) }}
+            </button>
+          </div>
+          <p class="input-hint">
+            {{ editApiProtocol === 'anthropic' ? t('admin.accounts.other.baseUrlHintAnthropic') : t('admin.accounts.other.baseUrlHint') }}
+          </p>
+        </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
           <input
@@ -3062,6 +3085,14 @@ const isCNApiKeyAccount = computed(
       props.account.platform === 'zhipu' ||
       props.account.platform === 'deepseek')
 )
+// other 平台双协议账号（OpenAI / Anthropic 兼容自定义上游），仅可编辑 api_protocol。
+const isOtherApiKeyAccount = computed(
+  () => props.account?.type === 'apikey' && props.account.platform === 'other'
+)
+const editOtherProtocolOptions = computed<Array<{ value: CnApiProtocol; labelKey: string }>>(() => [
+  { value: 'chat_completions', labelKey: 'chatCompletions' },
+  { value: 'anthropic', labelKey: 'anthropic' }
+])
 // CnBaseUrlPresets 的 platform prop 是平台字面量联合类型，模板里不能写
 // `as` 断言（其中的 `|` 会被 eslint 误判为 Vue2 filter 语法），经此 computed 传递。
 const cnPresetPlatform = computed<'kimi' | 'zhipu' | 'deepseek'>(() => {
@@ -3645,6 +3676,8 @@ const defaultBaseUrl = computed(() => {
   if (props.account?.platform === 'openai') return 'https://api.openai.com'
   if (props.account?.platform === 'gemini') return 'https://generativelanguage.googleapis.com'
   if (props.account?.platform === 'grok') return 'https://api.x.ai/v1'
+  // other 无默认上游：禁止清空后回落官方端点（落地外审-2，与创建弹窗一致）。
+  if (props.account?.platform === 'other') return ''
   // CN 供应商：按当前模式/协议回落到官方预设（清空输入框提交时使用），
   // 不能落到 anthropic 默认值（会被当 CC base 拼出错误端点）。
   if (
@@ -4060,6 +4093,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         nextAdaptiveBaseUrls[legacyProtocol] = legacyBaseUrl
       }
       editAdaptiveBaseUrls.value = nextAdaptiveBaseUrls
+    } else if (newAccount.platform === 'other') {
+      // other：双协议，读取存储的 api_protocol（缺失回退 chat_completions）。
+      const storedProtocol = credentials.api_protocol
+      editApiProtocol.value =
+        storedProtocol === 'anthropic' ? 'anthropic' : 'chat_completions'
     }
     const platformDefaultUrl =
       newAccount.platform === 'openai'
@@ -4779,6 +4817,10 @@ const handleSubmit = async () => {
         } else {
           delete newCredentials.api_base_urls
         }
+      }
+      // other：双协议（chat_completions | anthropic）写入凭据。
+      if (isOtherApiKeyAccount.value) {
+        newCredentials.api_protocol = editApiProtocol.value
       }
       // 火山方舟订阅号：base_url 命中 volces 时写入 SigV4 签名所需的访问密钥；
       // 留空不覆盖（依赖后端 MergePreservingSensitiveCreds 保留已有值）。

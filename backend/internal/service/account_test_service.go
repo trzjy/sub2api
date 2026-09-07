@@ -303,8 +303,11 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 
 	// Route to platform-specific test method
 	if account.Platform == PlatformOther {
-		// other 固定 Chat Completions 协议，复用国产供应商的通用 CC 探活
-		// （其内部经 GetOpenAIBaseURL/GetOpenAIProtocolAPIKey 取上游 base 与密钥）。
+		// other 双协议（chat_completions | anthropic），复用国产供应商的通用
+		// 探活（其内部经 GetOpenAIBaseURL/GetOpenAIProtocolAPIKey 取上游 base 与密钥）。
+		if account.GetAPIProtocol() == APIProtocolAnthropic {
+			return s.testCNProviderAnthropicConnection(c, account, modelID)
+		}
 		return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
 	}
 

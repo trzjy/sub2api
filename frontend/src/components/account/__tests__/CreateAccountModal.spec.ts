@@ -396,6 +396,49 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     })
   })
 
+  it('shows a protocol picker and submits anthropic protocol for other accounts', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Other')
+    const textInputs = wrapper.findAll('form#create-account-form input[type="text"]')
+    expect(textInputs.length).toBeGreaterThanOrEqual(2)
+    await textInputs[0]!.setValue('Other anthropic upstream')
+    await textInputs[1]!.setValue('https://api.lkeap.cloud.tencent.com/plan/anthropic')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-lkeap')
+
+    // other 双协议选择器可见（chat_completions 默认选中）。按钮含标题+描述两个 span，
+    // 用 includes 匹配 i18n key 前缀。
+    const chatBtn = wrapper.findAll('button').find(b => b.text().includes('admin.accounts.cnProviders.apiProtocol.chatCompletions'))
+    const anthropicBtn = wrapper.findAll('button').find(b => b.text().includes('admin.accounts.cnProviders.apiProtocol.anthropic'))
+    expect(chatBtn).toBeDefined()
+    expect(anthropicBtn).toBeDefined()
+
+    await anthropicBtn!.trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials).toMatchObject({
+      base_url: 'https://api.lkeap.cloud.tencent.com/plan/anthropic',
+      api_protocol: 'anthropic'
+    })
+  })
+
+  it('sends api_protocol in syncCredentials for other accounts', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Other')
+    const textInputs = wrapper.findAll('form#create-account-form input[type="text"]')
+    await textInputs[1]!.setValue('https://openrouter.ai/api/v1')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-or')
+
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('syncCredentials')).toMatchObject({
+      platform: 'other',
+      type: 'apikey',
+      base_url: 'https://openrouter.ai/api/v1',
+      api_key: 'sk-or',
+      api_protocol: 'chat_completions'
+    })
+  })
+
   it('exposes Agent Identity in the OpenAI authorization methods', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'OpenAI')

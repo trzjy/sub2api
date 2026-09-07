@@ -315,3 +315,50 @@ func TestAccountTestService_AnthropicProtocol401MarksAccountError(t *testing.T) 
 	repo := svc.accountRepo.(*openAIAccountTestRepo)
 	require.Equal(t, account.ID, repo.setErrorID)
 }
+
+// other 双协议探活：api_protocol=anthropic 的 other 账号走原生 Anthropic 端点探活
+// （GET/POST {base}/v1/messages），不再固定走 Chat Completions。
+func TestAccountTestService_OtherAnthropicProtocolProbesNativeEndpoint(t *testing.T) {
+	account := anthropicProtocolCNAccount(321, PlatformOther, map[string]any{
+		"base_url": "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+	})
+	svc, upstream := adaptiveCNAccountTestService(account, adaptiveCNAnthropicTestResponse())
+	c, recorder := newTestContext()
+
+	err := svc.TestAccountConnection(c, account.ID, "hy4-preview", "", AccountTestModeDefault)
+
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+	req := upstream.requests[0]
+	require.Equal(t, "https://api.lkeap.cloud.tencent.com/plan/anthropic/v1/messages", req.URL.String())
+	require.Equal(t, "sk-anthropic-test", req.Header.Get("x-api-key"))
+	require.Equal(t, "2023-06-01", req.Header.Get("anthropic-version"))
+	require.Contains(t, recorder.Body.String(), `"type":"test_complete"`)
+}
+
+// other 默认（chat_completions）探活行为不回退：仍走 OpenAI 兼容 Chat Completions 端点。
+func TestAccountTestService_OtherDefaultChatCompletionsProbe(t *testing.T) {
+	account := &Account{
+		ID:          322,
+		Name:        "other-chat-test",
+		Platform:    PlatformOther,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "openrouter-key",
+			"base_url": "https://openrouter.ai/api/v1",
+		},
+	}
+	svc, upstream := adaptiveCNAccountTestService(account, adaptiveCNChatTestResponse())
+	c, recorder := newTestContext()
+
+	err := svc.TestAccountConnection(c, account.ID, "some-model", "", AccountTestModeDefault)
+
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+	req := upstream.requests[0]
+	require.Equal(t, "https://openrouter.ai/api/v1/chat/completions", req.URL.String())
+	require.Equal(t, "Bearer openrouter-key", req.Header.Get("Authorization"))
+	require.Contains(t, recorder.Body.String(), `"type":"test_complete"`)
+}

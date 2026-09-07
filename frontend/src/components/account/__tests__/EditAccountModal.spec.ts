@@ -416,6 +416,59 @@ describe('EditAccountModal', () => {
     expect(submittedCredentials).not.toHaveProperty('api_base_urls')
   })
 
+  it('edits and persists api_protocol for other accounts', async () => {
+    const account = {
+      ...buildAccount(),
+      platform: 'other',
+      credentials: {
+        api_key: 'sk-or',
+        base_url: 'https://openrouter.ai/api/v1'
+      }
+    } as any
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+
+    // other 双协议选择器可见，默认 chat_completions。
+    const anthropicBtn = wrapper
+      .findAll('button')
+      .find(b => b.text() === 'admin.accounts.cnProviders.apiProtocol.anthropic')
+    expect(anthropicBtn).toBeDefined()
+    await anthropicBtn!.trigger('click')
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
+      base_url: 'https://openrouter.ai/api/v1',
+      api_protocol: 'anthropic'
+    })
+  })
+
+  it('rehydrates stored anthropic protocol for other accounts', async () => {
+    const account = {
+      ...buildAccount(),
+      platform: 'other',
+      credentials: {
+        api_key: 'sk-lkeap',
+        base_url: 'https://api.lkeap.cloud.tencent.com/plan/anthropic',
+        api_protocol: 'anthropic'
+      }
+    } as any
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
+      base_url: 'https://api.lkeap.cloud.tencent.com/plan/anthropic',
+      api_protocol: 'anthropic'
+    })
+  })
+
   it('uses the legacy base_url when adaptive endpoints are missing', async () => {
     const account = buildAccount()
     account.platform = 'zhipu'

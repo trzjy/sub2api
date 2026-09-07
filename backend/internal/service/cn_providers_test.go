@@ -585,7 +585,47 @@ func TestGetAPIProtocol(t *testing.T) {
 	require.Equal(t, APIProtocolChatCompletions, mk(PlatformKimi, APIProtocolResponses).GetAPIProtocol(), "kimi 无 responses 端点")
 	require.Equal(t, APIProtocolChatCompletions, mk(PlatformZhipu, APIProtocolResponses).GetAPIProtocol(), "zhipu 无 responses 端点")
 	require.Equal(t, APIProtocolChatCompletions, mk(PlatformKimi, "bogus").GetAPIProtocol(), "非法值回退默认")
-	require.Equal(t, APIProtocolChatCompletions, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}).GetAPIProtocol(), "非 CN 供应商恒为默认")
+	require.Equal(t, APIProtocolChatCompletions, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}).GetAPIProtocol(), "openai 恒为默认（本次仅 other 开放协议覆盖）")
+
+	// other 双协议：anthropic / chat_completions 生效；responses / adaptive 不支持（
+	// 无原生 responses 端点、无厂商默认端点），缺失/非法回退 chat_completions。
+	require.Equal(t, APIProtocolAnthropic, mk(PlatformOther, APIProtocolAnthropic).GetAPIProtocol())
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOther, APIProtocolChatCompletions).GetAPIProtocol())
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOther, "").GetAPIProtocol(), "other 缺失回退默认")
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOther, "bogus").GetAPIProtocol(), "other 非法值回退默认")
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOther, APIProtocolResponses).GetAPIProtocol(), "other 无 responses 端点")
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOther, APIProtocolAdaptive).GetAPIProtocol(), "other 无 adaptive 厂商默认端点")
+	require.Equal(t, APIProtocolChatCompletions, mk(PlatformOpenAI, APIProtocolAnthropic).GetAPIProtocol(), "openai 不开放协议覆盖")
+}
+
+// TestGetOpenAIFormatBaseURLForAnthropicOther 锁定 anthropic 协议 other 的 OpenAI 格式
+// base 必须失败关闭：凭证 base_url 指向 Anthropic 端点，不能拿来拼 /v1/embeddings 等
+// OpenAI 路径（外审-2 同源：other 空 base 禁止回落官方 OpenAI）。
+func TestGetOpenAIFormatBaseURLForAnthropicOther(t *testing.T) {
+	t.Parallel()
+
+	acct := &Account{
+		Platform: PlatformOther,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "sk-lkeap",
+			"base_url":     "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+			"api_protocol": APIProtocolAnthropic,
+		},
+	}
+	require.Equal(t, "", acct.GetOpenAIFormatBaseURL())
+	require.Equal(t, "https://api.lkeap.cloud.tencent.com/plan/anthropic", acct.GetAnthropicProtocolBaseURL())
+
+	// chat_completions 协议 other 不受影响：OpenAI 格式 base = 凭证 base_url。
+	chatAcct := &Account{
+		Platform: PlatformOther,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "sk-or",
+			"base_url": "https://openrouter.ai/api/v1",
+		},
+	}
+	require.Equal(t, "https://openrouter.ai/api/v1", chatAcct.GetOpenAIFormatBaseURL())
 }
 
 func TestAdaptiveProtocolBaseURLs(t *testing.T) {

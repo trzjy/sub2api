@@ -320,6 +320,34 @@ func TestBuildUpstreamModelsRequestsForAPIKeyAccounts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "https://gateway.example.com/antigravity/v1/models", antigravityReq.URL.String())
 	require.Equal(t, "antigravity-key", antigravityReq.Header.Get("x-api-key"))
+
+	// other 双协议：api_protocol=anthropic 走 Anthropic 探测（GET {base}/v1/models），
+	// 默认 chat_completions 仍走 OpenAI 探测（GET {base}/v1/models），互不串扰。
+	otherAnthropicReq, err := svc.buildUpstreamModelsRequest(ctx, &Account{
+		Platform: PlatformOther,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":      "lkeap-key",
+			"base_url":     "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+			"api_protocol": APIProtocolAnthropic,
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://api.lkeap.cloud.tencent.com/plan/anthropic/v1/models", otherAnthropicReq.URL.String())
+	require.Equal(t, "lkeap-key", otherAnthropicReq.Header.Get("x-api-key"))
+	require.Equal(t, "2023-06-01", otherAnthropicReq.Header.Get("anthropic-version"))
+
+	otherOpenAIReq, err := svc.buildUpstreamModelsRequest(ctx, &Account{
+		Platform: PlatformOther,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "openrouter-key",
+			"base_url": "https://openrouter.ai/api/v1",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://openrouter.ai/api/v1/models", otherOpenAIReq.URL.String())
+	require.Equal(t, "Bearer openrouter-key", otherOpenAIReq.Header.Get("Authorization"))
 }
 
 // TestBuildUpstreamModelsRequestPlainDeepseekUnchanged 锁定非火山普通 deepseek 的模型目录
