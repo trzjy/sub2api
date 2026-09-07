@@ -632,6 +632,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { useClipboard } from '@/composables/useClipboard'
@@ -1210,6 +1211,22 @@ const loadSubscriptionGroups = async () => {
   } catch (error) {
     console.error('Error loading subscription groups:', error)
   }
+}
+
+// 库存池页"生成库存码/管理库存码"会带 type/pool(/view=list) 查询参数跳转到本页，
+// 这里必须在首次 loadCodes 前消费这些参数：应用类型筛选；生成入口（无 view=list）
+// 直接打开发货凭证生成对话框并预填库存池，管理入口只做筛选。
+const route = useRoute()
+const queryType = typeof route.query.type === 'string' ? route.query.type : ''
+const queryPool = typeof route.query.pool === 'string' ? route.query.pool : ''
+const queryView = typeof route.query.view === 'string' ? route.query.view : ''
+if (queryType && filterTypeOptions.value.some((option) => option.value === queryType)) {
+  filters.type = queryType
+}
+if (queryType === 'xianyu_delivery' && queryPool && queryView !== 'list') {
+  generateForm.type = 'xianyu_delivery'
+  xianyuPool.value = queryPool
+  showGenerateDialog.value = true
 }
 
 onMounted(() => {
