@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -21,6 +23,11 @@ type PricingAdminService struct {
 	groupService   *GroupService
 	channelService *ChannelService
 	usageRepo      UsageLogRepository
+
+	// 在用模型候选集缓存（目录视图用）
+	scanMu       sync.Mutex
+	scanCache    []string
+	scanCachedAt time.Time
 }
 
 func NewPricingAdminService(
@@ -77,10 +84,20 @@ func (s *PricingAdminService) SyncNow(ctx context.Context) error {
 
 // --- 价格目录 ---
 
-// CatalogEntry 价格目录条目：单一模型名在全局层（custom/remote/builtin）的生效价。
+// 目录来源补充标识（与 PricingSource* 并列，仅目录视图使用）。
+const (
+	// CatalogSourceFuzzy 无确切条目、仅靠系列/子串兜底匹配出近似价的在用模型。
+	CatalogSourceFuzzy = "fuzzy"
+	// CatalogSourceNone 完全无价的在用模型（按 $0 记账）。
+	CatalogSourceNone = "none"
+)
+
+// CatalogEntry 价格目录条目：单一模型名的生效价。
+// 来源除四层（custom/remote/builtin/group）外，还有在用模型的两种补齐档：
+// fuzzy（无确切条目、按系列/子串兜底计价）与 none（完全无价）。
 type CatalogEntry struct {
 	Model              string  `json:"model"`
-	Source             string  `json:"source"` // custom / remote / builtin
+	Source             string  `json:"source"`
 	CustomID           int64   `json:"custom_id,omitempty"`
 	BillingMode        string  `json:"billing_mode,omitempty"`
 	InputPerMTok       float64 `json:"input_per_mtok"`
@@ -96,8 +113,35 @@ type CatalogResponse struct {
 	Total int            `json:"total"`
 }
 
-// GetCatalog 全局价格目录：custom（精确名）覆盖 remote 覆盖 builtin，同名取最高层。
-func (s *PricingAdminService) GetCatalog(search, source string, page, pageSize int) *CatalogResponse {
+// catalogScanCacheTTL 在用模型候选集的缓存时长：目录搜索走缓存，
+// 避免每次搜索都聚合 usage_logs。
+const catalogScanCacheTTL = time.Minute
+
+// cachedInUseModels 返回在用/已声明模型名列表（TTL 缓存）。
+func (s *PricingAdminService) cachedInUseModels(ctx context.Context) []string {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if s.scanCachedAt.IsZero() || time.Since(s.scanCachedAt) > catalogScanCacheTTL {
+		candidates, _, err := s.collectScanCandidates(ctx, 30)
+		if err != nil {
+			// 收集失败时沿用旧缓存（如有），不让目录搜索直接报错
+			slog.Warn("pricing catalog in-use scan failed", "error", err)
+		} else {
+			names := make([]string, 0, len(candidates))
+			for model := range candidates {
+				names = append(names, model)
+			}
+			sort.Strings(names)
+			s.scanCache = names
+			s.scanCachedAt = time.Now()
+		}
+	}
+	return s.scanCache
+}
+
+// GetCatalog 全局价格目录：custom（精确名）覆盖 remote 覆盖 builtin，同名取最高层；
+// 在用/已声明但无确切条目的模型以 fuzzy/none 来源补齐，保证目录覆盖所有模型。
+func (s *PricingAdminService) GetCatalog(ctx context.Context, search, source string, page, pageSize int) *CatalogResponse {
 	// custom 层按精确模型名建索引（通配模式不进目录，在"自定义价格"页管理）
 	customByName := map[string]*CustomModelPricing{}
 	customSnapshot := s.custom.Snapshot()
@@ -166,6 +210,37 @@ func (s *PricingAdminService) GetCatalog(search, source string, page, pageSize i
 		byName[lower] = cat
 	}
 
+	// 在用/已声明模型（usage + 分组声明 + 渠道模型）：凡是不在上面任何层以确切
+	// 条目存在的名字也进目录，展示它实际被计费的价格档——
+	//   fuzzy：仅靠系列/子串兜底匹配出近似价（如 glm-5.3 → glm-5 兜底价）；
+	//   none：完全无价，按 $0 记账。
+	// 候选集走 TTL 缓存，避免每次搜索都扫 usage_logs。
+	for _, model := range s.cachedInUseModels(ctx) {
+		lower := strings.ToLower(model)
+		if _, ok := byName[lower]; ok {
+			continue
+		}
+		p, err := s.billing.GetModelPricing(model)
+		if err != nil || p == nil {
+			byName[lower] = CatalogEntry{Model: lower, Source: CatalogSourceNone}
+			continue
+		}
+		source := CatalogSourceFuzzy
+		if s.billing.HasIdentifiedTokenPricing(model) {
+			// 不在全局键名清单里却能确定性识别（如远程表对带日期后缀键的去后缀
+			// 识别）——按识别来源标注
+			source = PricingSourceLiteLLM
+		}
+		byName[lower] = CatalogEntry{
+			Model:             lower,
+			Source:            source,
+			InputPerMTok:      p.InputPricePerToken * 1_000_000,
+			OutputPerMTok:     p.OutputPricePerToken * 1_000_000,
+			CacheWritePerMTok: p.CacheCreationPricePerToken * 1_000_000,
+			CacheReadPerMTok:  p.CacheReadPricePerToken * 1_000_000,
+		}
+	}
+
 	// 过滤 + 分页
 	searchLower := strings.ToLower(strings.TrimSpace(search))
 	sourceLower := strings.ToLower(strings.TrimSpace(source))
@@ -212,21 +287,21 @@ const (
 
 // UncoveredEntry 覆盖情况需要关注的已上线模型。
 type UncoveredEntry struct {
-	Model        string                `json:"model"`
-	Verdict      string                `json:"verdict"` // uncovered / fuzzy
-	References   []string              `json:"references"`                 // 引用来源：分组名 / 渠道名 / usage
-	Usage        *usagestats.ModelStat `json:"usage,omitempty"`            // 来自 usage 扫描时附用量
-	ZeroCostOnly bool                  `json:"zero_cost_only,omitempty"`   // 有 token 流量但实际扣费为 0
-	InputPerMTok float64               `json:"input_per_mtok,omitempty"`   // fuzzy：当前按近似价计费的输入单价
-	OutputPerMTok float64              `json:"output_per_mtok,omitempty"`  // fuzzy：近似输出单价
+	Model         string                `json:"model"`
+	Verdict       string                `json:"verdict"`                   // uncovered / fuzzy
+	References    []string              `json:"references"`                // 引用来源：分组名 / 渠道名 / usage
+	Usage         *usagestats.ModelStat `json:"usage,omitempty"`           // 来自 usage 扫描时附用量
+	ZeroCostOnly  bool                  `json:"zero_cost_only,omitempty"`  // 有 token 流量但实际扣费为 0
+	InputPerMTok  float64               `json:"input_per_mtok,omitempty"`  // fuzzy：当前按近似价计费的输入单价
+	OutputPerMTok float64               `json:"output_per_mtok,omitempty"` // fuzzy：近似输出单价
 }
 
 // UncoveredResponse 扫描结果。
 type UncoveredResponse struct {
-	Items    []UncoveredEntry `json:"items"`
-	Scanned  int              `json:"scanned"`   // 候选模型总数
-	Window   string           `json:"window"`    // usage 扫描窗口，如 "720h"
-	ScannedAt time.Time       `json:"scanned_at"`
+	Items     []UncoveredEntry `json:"items"`
+	Scanned   int              `json:"scanned"` // 候选模型总数
+	Window    string           `json:"window"`  // usage 扫描窗口，如 "720h"
+	ScannedAt time.Time        `json:"scanned_at"`
 }
 
 // scanCandidate 扫描候选：一个模型名 + 引用来源 + 近窗用量。
@@ -235,24 +310,17 @@ type scanCandidate struct {
 	usage      *usagestats.ModelStat
 }
 
-// ScanUncovered 多通道扫描覆盖情况存疑的已上线模型：
+// collectScanCandidates 多通道收集候选模型：
 //   - 配置通道：各分组 ModelsListConfig（启用时）、分组模型价格、渠道 SupportedModels
 //     （模型映射 ∪ 渠道定价，含零调用的已配置模型）；
-//   - 用量通道：近 windowDays 天 usage_logs 实际计费模型（对账标记 tokens>0 且 actual_cost=0）。
-//
-// 判定与运行时查价链同源，但区分三档：
-//  1. 精确覆盖（分组价 / 自定义价 / 价格表确定性识别出确切型号）→ 不列出；
-//  2. 模糊覆盖（仅能按系列/子串兜底匹配出近似价，如 glm-5.3 → glm-5 兜底价）→ 列出，verdict=fuzzy；
-//  3. 无价可循（按 $0 记账）→ 列出，verdict=uncovered。
-func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int) (*UncoveredResponse, error) {
+//   - 用量通道：近 windowDays 天 usage_logs 实际计费模型。
+func (s *PricingAdminService) collectScanCandidates(ctx context.Context, windowDays int) (map[string]*scanCandidate, []Group, error) {
 	if windowDays <= 0 {
 		windowDays = 30
 	}
 	window := time.Duration(windowDays) * 24 * time.Hour
 
-	type candidate = scanCandidate
 	candidates := map[string]*scanCandidate{}
-
 	addRef := func(model, ref string) {
 		model = strings.TrimSpace(model)
 		if model == "" || strings.HasSuffix(model, "*") {
@@ -260,16 +328,20 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 		}
 		c, ok := candidates[model]
 		if !ok {
-			c = &candidate{}
+			c = &scanCandidate{}
 			candidates[model] = c
 		}
 		c.references = append(c.references, ref)
 	}
 
 	// 通道一：分组配置
-	groups, err := s.groupService.ListActive(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list groups: %w", err)
+	var groups []Group
+	if s.groupService != nil {
+		var err error
+		groups, err = s.groupService.ListActive(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list groups: %w", err)
+		}
 	}
 	for i := range groups {
 		g := &groups[i]
@@ -289,7 +361,7 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 	if s.channelService != nil {
 		channels, _, err := s.channelService.List(ctx, pagination.PaginationParams{Page: 1, PageSize: 500}, "", "")
 		if err != nil {
-			return nil, fmt.Errorf("list channels: %w", err)
+			return nil, nil, fmt.Errorf("list channels: %w", err)
 		}
 		for i := range channels {
 			ch := &channels[i]
@@ -301,17 +373,36 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 
 	// 通道二：实际用量
 	start := time.Now().Add(-window)
-	stats, err := s.usageRepo.GetModelStatsWithFilters(ctx, start, time.Now(), 0, 0, 0, 0, nil, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("scan usage models: %w", err)
-	}
-	for i := range stats {
-		st := stats[i]
-		addRef(st.Model, "usage")
-		if c, ok := candidates[st.Model]; ok {
-			u := st
-			c.usage = &u
+	if s.usageRepo != nil {
+		stats, err := s.usageRepo.GetModelStatsWithFilters(ctx, start, time.Now(), 0, 0, 0, 0, nil, nil, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("scan usage models: %w", err)
 		}
+		for i := range stats {
+			st := stats[i]
+			addRef(st.Model, "usage")
+			if c, ok := candidates[st.Model]; ok {
+				u := st
+				c.usage = &u
+			}
+		}
+	}
+	return candidates, groups, nil
+}
+
+// ScanUncovered 多通道扫描覆盖情况存疑的已上线模型，判定区分三档：
+//  1. 精确覆盖（分组价 / 自定义价 / 价格表确定性识别出确切型号）→ 不列出；
+//  2. 模糊覆盖（仅能按系列/子串兜底匹配出近似价，如 glm-5.3 → glm-5 兜底价）→ 列出，verdict=fuzzy；
+//  3. 无价可循（按 $0 记账）→ 列出，verdict=uncovered。
+func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int) (*UncoveredResponse, error) {
+	if windowDays <= 0 {
+		windowDays = 30
+	}
+	window := time.Duration(windowDays) * 24 * time.Hour
+
+	candidates, groups, err := s.collectScanCandidates(ctx, windowDays)
+	if err != nil {
+		return nil, err
 	}
 
 	// 覆盖判定（分组列表只查一次）：精确覆盖跳过，模糊/无价列出
@@ -436,7 +527,19 @@ func (s *PricingAdminService) GetPreview(ctx context.Context, model string, grou
 
 	pricing := s.resolver.GetIntervalPricing(resolved, 1)
 	if pricing == nil {
-		return nil, fmt.Errorf("no pricing available for model: %s", model)
+		// 查无此价是正常的查询结果（而非服务端错误）：结构化返回无价档，
+		// 前端据此提示"按 $0 计费"，而非 internal error。
+		resp := &PreviewResponse{
+			Model:       model,
+			Source:      CatalogSourceNone,
+			BillingMode: string(BillingModeToken),
+		}
+		if group != nil {
+			resp.GroupID = group.ID
+			resp.GroupName = group.Name
+			resp.RateMultiplier = group.RateMultiplier
+		}
+		return resp, nil
 	}
 	pricing = s.billing.ApplyModelSpecificPricingPolicy(model, pricing)
 

@@ -41,7 +41,7 @@ func (h *PricingHandler) SyncNow(c *gin.Context) {
 func (h *PricingHandler) GetCatalog(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-	response.Success(c, h.adminService.GetCatalog(c.Query("search"), c.Query("source"), page, pageSize))
+	response.Success(c, h.adminService.GetCatalog(c.Request.Context(), c.Query("search"), c.Query("source"), page, pageSize))
 }
 
 // GetUncovered 未覆盖模型双通道扫描

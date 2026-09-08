@@ -19,6 +19,8 @@ export default {
       custom: 'Custom',
       remote: 'Remote Sync',
       builtin: 'Built-in Fallback',
+      fuzzy: 'Series Fallback',
+      none: 'No Price',
       channel: 'Channel',
       group: 'Group'
     },
@@ -50,7 +52,7 @@ export default {
       searchPlaceholder: 'Model name keyword',
       source: 'Source filter',
       allSources: 'All sources',
-      sourceHint: 'Layering: Custom > Remote Sync > Built-in. The catalog lists the global layers only; group/channel overrides live on their own pages.',
+      sourceHint: 'The catalog covers ALL models: global-layer entries (Custom > Remote > Built-in) plus effective price tiers for in-use/declared models (Series Fallback / No Price). Group/channel overrides live on their own pages.',
       imageOnly: 'image-only',
       override: 'Override',
       empty: 'No matching models'
@@ -62,7 +64,9 @@ export default {
       input: 'Input',
       output: 'Output',
       cacheWrite: 'Cache Write',
-      cacheRead: 'Cache Read'
+      cacheRead: 'Cache Read',
+      noPricingTitle: '{model} has no price — billed as $0',
+      noPricingHint: 'No price layer matched (series fallback included). If this model is in use, review it on the Uncovered Models tab and add a price.'
     },
     uncovered: {
       windowDays: 'Usage window',

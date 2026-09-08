@@ -166,17 +166,16 @@ func TestPricingAdminService_GetCatalog_MergesSources(t *testing.T) {
 	customSvc.entries = []CustomModelPricing{
 		{ID: 3, Models: []string{"gpt-5.6-sol"}, Enabled: true, InputPrice: &customPrice},
 	}
+	bs := newPricingTestBillingService(t, map[string]*LiteLLMModelPricing{
+		"gpt-5.6-sol": {InputCostPerToken: 5e-6},
+	})
 	svc := &PricingAdminService{
-		pricing: newPricingTestBillingService(t, map[string]*LiteLLMModelPricing{
-			"gpt-5.6-sol": {InputCostPerToken: 5e-6},
-		}).pricingService,
-		billing: newPricingTestBillingService(t, map[string]*LiteLLMModelPricing{
-			"gpt-5.6-sol": {InputCostPerToken: 5e-6},
-		}),
-		custom: customSvc,
+		pricing: bs.pricingService,
+		billing: bs,
+		custom:  customSvc,
 	}
 
-	result := svc.GetCatalog("gpt-5.6", "", 1, 50)
+	result := svc.GetCatalog(context.Background(), "gpt-5.6", "", 1, 50)
 	byModel := map[string]CatalogEntry{}
 	for _, item := range result.Items {
 		byModel[item.Model] = item
@@ -184,6 +183,52 @@ func TestPricingAdminService_GetCatalog_MergesSources(t *testing.T) {
 	require.Contains(t, byModel, "gpt-5.6-sol")
 	assert.Equal(t, PricingSourceCustom, byModel["gpt-5.6-sol"].Source)
 	assert.InDelta(t, 7, byModel["gpt-5.6-sol"].InputPerMTok, 1e-9)
+}
+
+// 目录应覆盖所有模型：在用但无确切条目的模型以 fuzzy/none 档补进目录。
+func TestPricingAdminService_GetCatalog_IncludesInUseModelsWithoutExactEntry(t *testing.T) {
+	usageRepo := &fakeUsageRepoForPricing{stats: []usagestats.ModelStat{
+		{Model: "glm-5.3", Requests: 10, TotalTokens: 500},
+		{Model: "brand-new-model", Requests: 1, TotalTokens: 1},
+	}}
+	bs := newPricingTestBillingService(t, map[string]*LiteLLMModelPricing{})
+	svc := &PricingAdminService{
+		pricing:      bs.pricingService,
+		billing:      bs,
+		custom:       NewCustomModelPricingService(nil),
+		groupService: NewGroupService(&fakeGroupRepoForPricing{groups: []Group{}}, nil),
+		usageRepo:    usageRepo,
+	}
+
+	result := svc.GetCatalog(context.Background(), "", "", 1, 200)
+	byModel := map[string]CatalogEntry{}
+	for _, item := range result.Items {
+		byModel[item.Model] = item
+	}
+	// glm-5.3：无确切条目，但运行时按 "glm-5" 系列兜底价计费 → 目录中为 fuzzy 档并附近似价
+	require.Contains(t, byModel, "glm-5.3", "在用模型应进目录")
+	assert.Equal(t, CatalogSourceFuzzy, byModel["glm-5.3"].Source)
+	assert.Greater(t, byModel["glm-5.3"].InputPerMTok, 0.0)
+	// brand-new-model：完全无价 → none 档
+	require.Contains(t, byModel, "brand-new-model")
+	assert.Equal(t, CatalogSourceNone, byModel["brand-new-model"].Source)
+	assert.Equal(t, 0.0, byModel["brand-new-model"].InputPerMTok)
+}
+
+// 试算查无此价应返回结构化结果（source=none）而非错误。
+func TestPricingAdminService_GetPreview_NoPricingStructured(t *testing.T) {
+	bs := newPricingTestBillingService(t, map[string]*LiteLLMModelPricing{})
+	svc := &PricingAdminService{
+		pricing:      bs.pricingService,
+		billing:      bs,
+		custom:       NewCustomModelPricingService(nil),
+		resolver:     NewModelPricingResolver(nil, bs),
+		groupService: NewGroupService(&fakeGroupRepoForPricing{groups: []Group{}}, nil),
+	}
+	resp, err := svc.GetPreview(context.Background(), "glml-5.3", 0)
+	require.NoError(t, err)
+	assert.Equal(t, CatalogSourceNone, resp.Source)
+	assert.Equal(t, 0.0, resp.InputPerMTok)
 }
 
 func TestPricingAdminService_ScanUncovered(t *testing.T) {

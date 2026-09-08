@@ -43,7 +43,7 @@ export interface PricingStatusResponse {
 
 export interface CatalogEntry {
   model: string
-  source: 'custom' | 'litellm' | 'fallback' | string
+  source: 'custom' | 'litellm' | 'fallback' | 'fuzzy' | 'none' | string
   custom_id?: number
   billing_mode?: string
   input_per_mtok: number
@@ -96,7 +96,6 @@ export interface PricingPreview {
   sample_input_cost: number
   sample_output_cost: number
 }
-
 export interface PricingInterval {
   id?: number
   pricing_id?: number

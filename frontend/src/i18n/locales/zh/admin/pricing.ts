@@ -19,6 +19,8 @@ export default {
       custom: '自定义',
       remote: '远程同步',
       builtin: '内置兜底',
+      fuzzy: '系列兜底计价',
+      none: '无价',
       channel: '渠道价',
       group: '分组价'
     },
@@ -49,7 +51,7 @@ export default {
       searchPlaceholder: '输入模型名关键词',
       source: '来源筛选',
       allSources: '全部来源',
-      sourceHint: '来源分层：自定义 > 远程同步 > 内置兜底；价格目录只含全局层，分组/渠道覆盖请到对应页面查看。',
+      sourceHint: '目录包含全部模型：全局层条目（自定义 > 远程同步 > 内置兜底）+ 在用/已声明模型的实际计价档（系列兜底 / 无价）。分组/渠道覆盖请到对应页面查看。',
       imageOnly: '仅图片价',
       override: '自定义覆盖',
       empty: '没有匹配的模型'
@@ -61,7 +63,9 @@ export default {
       input: '输入',
       output: '输出',
       cacheWrite: '缓存写入',
-      cacheRead: '缓存读取'
+      cacheRead: '缓存读取',
+      noPricingTitle: '{model} 无任何价格，实际按 $0 计费',
+      noPricingHint: '该名称在所有价格层（含系列兜底）均未命中。若属在用模型，请到"未覆盖模型"页确认并补价。'
     },
     uncovered: {
       windowDays: '用量扫描窗口',

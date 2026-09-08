@@ -140,31 +140,42 @@
 
       <!-- 试算结果 -->
       <div v-if="preview" class="card p-6">
-        <div class="flex flex-wrap items-center gap-3">
-          <span class="break-all font-mono text-base font-semibold text-gray-900 dark:text-white">{{ preview.model }}</span>
-          <span :class="sourceBadgeClass(preview.source)">{{ sourceLabel(preview.source) }}</span>
-          <span v-if="preview.group_name" class="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
-            {{ preview.group_name }} × {{ preview.rate_multiplier }}
-          </span>
-        </div>
-        <div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
-            <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.input') }}</div>
-            <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.input_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
-          </div>
-          <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
-            <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.output') }}</div>
-            <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.output_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
-          </div>
-          <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
-            <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.cacheWrite') }}</div>
-            <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.cache_write_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
-          </div>
-          <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
-            <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.cacheRead') }}</div>
-            <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.cache_read_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
+        <div v-if="preview.source === 'none'" class="flex items-start gap-3 rounded-xl bg-red-50 p-4 dark:bg-red-900/20">
+          <Icon name="xCircle" size="md" class="mt-0.5 shrink-0 text-red-500" />
+          <div>
+            <p class="text-sm font-semibold text-red-600 dark:text-red-400">
+              {{ t('admin.pricing.preview.noPricingTitle', { model: preview.model }) }}
+            </p>
+            <p class="mt-1 text-xs text-red-500/80 dark:text-red-400/70">{{ t('admin.pricing.preview.noPricingHint') }}</p>
           </div>
         </div>
+        <template v-else>
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="break-all font-mono text-base font-semibold text-gray-900 dark:text-white">{{ preview.model }}</span>
+            <span :class="sourceBadgeClass(preview.source)">{{ sourceLabel(preview.source) }}</span>
+            <span v-if="preview.group_name" class="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+              {{ preview.group_name }} × {{ preview.rate_multiplier }}
+            </span>
+          </div>
+          <div class="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
+              <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.input') }}</div>
+              <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.input_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
+            </div>
+            <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
+              <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.output') }}</div>
+              <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.output_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
+            </div>
+            <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
+              <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.cacheWrite') }}</div>
+              <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.cache_write_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
+            </div>
+            <div class="rounded-xl bg-gray-50 p-3 dark:bg-dark-900">
+              <div class="text-xs font-bold uppercase tracking-wider text-gray-400">{{ t('admin.pricing.preview.cacheRead') }}</div>
+              <div class="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-white">${{ fmtPrice(preview.cache_read_per_mtok) }} / {{ t('admin.pricing.mtok') }}</div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <TablePageLayout>
@@ -495,7 +506,9 @@ const sourceOptions = computed(() => [
   { value: '', label: t('admin.pricing.catalog.allSources') },
   { value: 'custom', label: sourceLabel('custom') },
   { value: 'litellm', label: sourceLabel('litellm') },
-  { value: 'fallback', label: sourceLabel('fallback') }
+  { value: 'fallback', label: sourceLabel('fallback') },
+  { value: 'fuzzy', label: sourceLabel('fuzzy') },
+  { value: 'none', label: sourceLabel('none') }
 ])
 
 const catalogColumns = computed<Column[]>(() => [
@@ -712,6 +725,8 @@ function sourceLabel(source: string): string {
   if (key === 'custom') return t('admin.pricing.source.custom')
   if (key === 'litellm' || key === 'remote') return t('admin.pricing.source.remote')
   if (key === 'fallback') return t('admin.pricing.source.builtin')
+  if (key === 'fuzzy') return t('admin.pricing.source.fuzzy')
+  if (key === 'none') return t('admin.pricing.source.none')
   if (key === 'channel') return t('admin.pricing.source.channel')
   if (key === 'group') return t('admin.pricing.source.group')
   return key
@@ -722,6 +737,8 @@ function sourceBadgeClass(source: string): string {
   if (source === 'custom') return cls + 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
   if (source === 'litellm' || source === 'remote') return cls + 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
   if (source === 'fallback') return cls + 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+  if (source === 'fuzzy') return cls + 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300'
+  if (source === 'none') return cls + 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400'
   return cls + 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-gray-300'
 }
 
