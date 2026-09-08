@@ -281,7 +281,8 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 	}
 	// slug 是纯内部标识（烙进库存码 notes），创建时未提供则自动生成，避免手填出错。
 	autoSlug := pool.ID == 0 && pool.Slug == ""
-	if !autoSlug && !validPoolSlug(pool.Slug) {
+	// 编辑时 slug 不可变且前端不回传：空 slug 在更新路径直接视为"保持原值"。
+	if !autoSlug && pool.Slug != "" && !validPoolSlug(pool.Slug) {
 		return nil, infraerrors.BadRequest("XIANYU_POOL_SLUG_INVALID", "pool slug must be [a-z0-9_-]")
 	}
 	if pool.LowStockThreshold < 0 {
@@ -469,7 +470,9 @@ func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64,
 	}
 	// 主程序绑定即唯一绑定动作：Worker 侧"商品→卡券"关系自动跟上。
 	if err := s.syncProductCardBinding(ctx, product.ItemID, boundPool, poolID != nil); err != nil {
-		return fmt.Errorf("绑定已保存，但同步 Worker 卡券关联失败（Worker 恢复后重新保存绑定即可）: %w", err)
+		// 用 infra 错误携带详情到 UI（普通 error 会被响应层吞成裸 internal error）。
+		return infraerrors.Conflict("XIANYU_WORKER_CARD_SYNC_FAILED",
+			fmt.Sprintf("绑定已保存，但同步 Worker 卡券关联失败：%v。Worker 恢复后重新保存绑定即可", err))
 	}
 	return nil
 }

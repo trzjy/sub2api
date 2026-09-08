@@ -268,6 +268,7 @@ async function save() {
     await adminAPI.xianyu.saveItemPool({
       id: editingID.value ?? undefined,
       name: form.name.trim(),
+      slug: editingID.value ? form.slug.trim() : undefined,
       description: form.description.trim(),
       low_stock_threshold: Math.max(0, form.low_stock_threshold || 0),
       status: form.status as 'active' | 'disabled',

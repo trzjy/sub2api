@@ -21,11 +21,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.api import deps
+from app.core.config import get_settings
 from common.schemas.common import ApiResponse
 from common.services.receipt_outcome import ReceiptOutcome, send_status_from_receipt
 from common.utils.auth_scope import resolve_owner_scope
 
 router = APIRouter(prefix="/internal", tags=["主程序内网服务"])
+
+settings = get_settings()
 
 # 闲鱼 Worker 写入时间戳所用时区（Asia/Shanghai / UTC+8，无夏令时）。
 # 续期日志 created_at 为无时区北京时间，归一为此时区后比较，避免 24h 级新鲜度判断偏差约 8 小时。

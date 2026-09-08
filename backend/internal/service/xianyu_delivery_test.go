@@ -311,7 +311,14 @@ func validXianyuRequest() XianyuDeliveryClaimRequest {
 type poolSaveControlStub struct {
 	xianyuControlStub
 	created *XianyuItemPool
+	updated *XianyuItemPool
 	product *XianyuProduct
+}
+
+func (s *poolSaveControlStub) UpdateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error) {
+	up := pool
+	s.updated = &up
+	return &up, nil
 }
 
 func (s *poolSaveControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
@@ -433,6 +440,27 @@ func TestSyncProductCardBindingBindAndClear(t *testing.T) {
 	}
 	if relationBody["card_id"] != float64(0) {
 		t.Fatalf("unbind must clear relation, got card_id=%v", relationBody["card_id"])
+	}
+}
+
+// 回归：编辑池时前端不回传 slug，更新路径不得对空 slug 做格式校验（slug 本就不可更新）。
+func TestSaveItemPoolUpdateKeepsSlugWhenEmpty(t *testing.T) {
+	created := &XianyuItemPool{ID: 5, Slug: "pool-8x237rxf"}
+	stub := &poolSaveControlStub{updated: created}
+	svc := &XianyuControlService{control: stub}
+	groupID := int64(7)
+
+	updated, err := svc.SaveItemPool(context.Background(), XianyuItemPool{
+		ID:           5,
+		Name:         "claude天卡",
+		CodeType:     XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	if stub.updated == nil {
+		t.Fatal("expected UpdateItemPool to be called")
 	}
 }
 
