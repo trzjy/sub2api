@@ -317,6 +317,11 @@ class DatabaseInitializer:
             "true",
             "登录页是否展示默认账号密码提示",
         ),
+        (
+            "delivery.template",
+            "",
+            "全局发货模板：买家收到的发货消息，对所有卡券统一生效。留空则只发卡密本体。可用变量：DELIVERY_CONTENT/item_title/order_id/buyer_name/buyer_id/seller_name/item_id",
+        ),
     )
 
     DEFAULT_SCHEDULED_TASKS = (

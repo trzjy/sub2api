@@ -9,7 +9,6 @@ import type {
   XianyuOrderClaim,
   XianyuWorkerDelivery,
   XianyuLoginSessionStatus,
-  XianyuDeliveryCard,
   PaginatedResponse
 } from '@/types'
 
@@ -178,13 +177,13 @@ export async function getSettings(options?: { signal?: AbortSignal }): Promise<X
   return data
 }
 
-export async function listDeliveryCards(options?: { signal?: AbortSignal }): Promise<XianyuDeliveryCard[]> {
-  const { data } = await apiClient.get<XianyuDeliveryCard[]>('/admin/xianyu/delivery-cards', { signal: options?.signal })
-  return data ?? []
+export async function getDeliveryTemplate(options?: { signal?: AbortSignal }): Promise<string> {
+  const { data } = await apiClient.get<{ template: string }>('/admin/xianyu/delivery-template', { signal: options?.signal })
+  return data?.template ?? ''
 }
 
-export async function saveDeliveryCardDescription(cardId: number, description: string): Promise<void> {
-  await apiClient.put(`/admin/xianyu/delivery-cards/${encodeURIComponent(String(cardId))}/description`, { description })
+export async function saveDeliveryTemplate(template: string): Promise<void> {
+  await apiClient.put('/admin/xianyu/delivery-template', { template })
 }
 
 export async function saveSettings(input: Partial<XianyuControlSettings>): Promise<void> {
@@ -221,8 +220,8 @@ export const xianyuAPI = {
   markDeliverySent,
   getSettings,
   saveSettings,
-  listDeliveryCards,
-  saveDeliveryCardDescription
+  getDeliveryTemplate,
+  saveDeliveryTemplate
 }
 
 export default xianyuAPI

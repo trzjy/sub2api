@@ -161,32 +161,31 @@ describe('xianyu admin api contract', () => {
       const { getOverview } = await import('@/api/admin/xianyu')
       await expect(getOverview()).resolves.toEqual({ ...overview, pools: [] })
     })
-
-    it('listDeliveryCards normalizes backend null to empty array', async () => {
-      adapter.mockResolvedValue(success(null))
-      const { listDeliveryCards } = await import('@/api/admin/xianyu')
-      await expect(listDeliveryCards()).resolves.toEqual([])
-      expect(adapter.mock.calls[0][0].url).toBe('/admin/xianyu/delivery-cards')
-    })
   })
 
-  describe('delivery card template management', () => {
-    it('listDeliveryCards returns card payloads after unwrap', async () => {
-      const cards = [{ id: 1, name: 'sub2api-test-pool', type: 'api', description: 'tpl', enabled: true, item_ids: ['1080213108214'] }]
-      adapter.mockResolvedValue(success(cards))
-      const { listDeliveryCards } = await import('@/api/admin/xianyu')
-      await expect(listDeliveryCards()).resolves.toEqual(cards)
+  describe('delivery template management', () => {
+    it('getDeliveryTemplate returns stored template after unwrap', async () => {
+      adapter.mockResolvedValue(success({ template: '感谢购买 {DELIVERY_CONTENT}' }))
+      const { getDeliveryTemplate } = await import('@/api/admin/xianyu')
+      await expect(getDeliveryTemplate()).resolves.toBe('感谢购买 {DELIVERY_CONTENT}')
+      expect(adapter.mock.calls[0][0].url).toBe('/admin/xianyu/delivery-template')
     })
 
-    it('saveDeliveryCardDescription PUTs description to the card description endpoint', async () => {
-      adapter.mockResolvedValue(success({ message: 'delivery card template updated' }))
-      const { saveDeliveryCardDescription } = await import('@/api/admin/xianyu')
-      await expect(saveDeliveryCardDescription(1, '感谢购买 {DELIVERY_CONTENT}')).resolves.toBeUndefined()
+    it('getDeliveryTemplate normalizes empty/missing template to empty string', async () => {
+      adapter.mockResolvedValue(success({ template: '' }))
+      const { getDeliveryTemplate } = await import('@/api/admin/xianyu')
+      await expect(getDeliveryTemplate()).resolves.toBe('')
+    })
+
+    it('saveDeliveryTemplate PUTs template to the global template endpoint', async () => {
+      adapter.mockResolvedValue(success({ message: 'delivery template updated' }))
+      const { saveDeliveryTemplate } = await import('@/api/admin/xianyu')
+      await expect(saveDeliveryTemplate('感谢购买 {DELIVERY_CONTENT}')).resolves.toBeUndefined()
       expect(adapter).toHaveBeenCalledTimes(1)
       const config = adapter.mock.calls[0][0]
-      expect(config.url).toBe('/admin/xianyu/delivery-cards/1/description')
+      expect(config.url).toBe('/admin/xianyu/delivery-template')
       expect(config.method).toBe('put')
-      expect(config.data).toBe(JSON.stringify({ description: '感谢购买 {DELIVERY_CONTENT}' }))
+      expect(config.data).toBe(JSON.stringify({ template: '感谢购买 {DELIVERY_CONTENT}' }))
     })
   })
 })

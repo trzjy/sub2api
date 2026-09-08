@@ -512,6 +512,52 @@ func (s *XianyuControlService) ensurePoolWorkerCard(ctx context.Context, pool *X
 	return cardID, nil
 }
 
+// CreateProductSpecBinding 同一商品多档次：手动添加规格绑定。
+// 规格名/规格值必须与闲鱼商品规格文案一致，买家拍下该规格时按此路由到对应池；
+// 若商品行已存在则强制改为该池（幂等）。
+func (s *XianyuControlService) CreateProductSpecBinding(ctx context.Context, productID int64, specName, specValue string, poolID int64) error {
+	parent, err := s.control.GetProductByID(ctx, productID)
+	if err != nil {
+		return err
+	}
+	specName = strings.TrimSpace(specName)
+	specValue = strings.TrimSpace(specValue)
+	if specName == "" || specValue == "" {
+		return infraerrors.BadRequest("XIANYU_SPEC_REQUIRED", "规格名与规格值不能为空")
+	}
+	pool, err := s.control.GetItemPoolByID(ctx, poolID)
+	if err != nil {
+		return err
+	}
+	if pool.Status != XianyuItemPoolStatusActive {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_DISABLED", "cannot bind to a disabled item pool")
+	}
+	created, err := s.control.UpsertProduct(ctx, XianyuProduct{
+		AccountPK:     parent.AccountPK,
+		AccountID:     parent.AccountID,
+		ItemID:        parent.ItemID,
+		Title:         parent.Title,
+		SpecName:      specName,
+		SpecValue:     specValue,
+		PoolID:        &poolID,
+		BindingStatus: XianyuBindingStatusMapped,
+		BindingSource: XianyuBindingSourceManual,
+		Status:        XianyuProductStatusActive,
+	})
+	if err != nil {
+		return err
+	}
+	// 已存在的行 UpsertProduct 不改池，显式强制绑定为该池（幂等）。
+	if err := s.control.UpdateProductBinding(ctx, created.ID, XianyuBindingStatusMapped, XianyuBindingSourceManual, &poolID); err != nil {
+		return err
+	}
+	if err := s.syncProductCardBinding(ctx, parent.ItemID, pool, true); err != nil {
+		return infraerrors.Conflict("XIANYU_WORKER_CARD_SYNC_FAILED",
+			fmt.Sprintf("绑定已保存，但同步 Worker 卡券关联失败：%v。Worker 恢复后重新保存绑定即可", err))
+	}
+	return nil
+}
+
 // AutoBindProducts 对所有 unmapped 商品执行自动绑定。
 func (s *XianyuControlService) AutoBindProducts(ctx context.Context) error {
 	products, err := s.control.ListProducts(ctx)
@@ -604,20 +650,20 @@ func (s *XianyuControlService) ListAccounts(ctx context.Context) ([]XianyuAccoun
 	return s.control.ListAccounts(ctx, workerCfg.ID)
 }
 
-// ListDeliveryCards 列出 Worker 发货卡券（发货模板管理）。
-func (s *XianyuControlService) ListDeliveryCards(ctx context.Context) ([]XianyuWorkerCard, error) {
+// GetDeliveryTemplate 读取 Worker 全局发货模板（对所有卡券统一生效）。
+func (s *XianyuControlService) GetDeliveryTemplate(ctx context.Context) (string, error) {
 	if s.worker == nil {
-		return nil, ErrXianyuDeliveryNotConfigured
+		return "", ErrXianyuDeliveryNotConfigured
 	}
-	return s.worker.ListDeliveryCards(ctx)
+	return s.worker.GetDeliveryTemplate(ctx)
 }
 
-// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
-func (s *XianyuControlService) UpdateDeliveryCardDescription(ctx context.Context, cardID int64, description string) error {
+// UpdateDeliveryTemplate 更新 Worker 全局发货模板。
+func (s *XianyuControlService) UpdateDeliveryTemplate(ctx context.Context, template string) error {
 	if s.worker == nil {
 		return ErrXianyuDeliveryNotConfigured
 	}
-	return s.worker.UpdateDeliveryCardDescription(ctx, cardID, description)
+	return s.worker.UpdateDeliveryTemplate(ctx, template)
 }
 
 // DeleteItemPool 删除库存池（售罄/下架清理；绑定商品、剩余库存码、引用规则任一存在时拒绝）。

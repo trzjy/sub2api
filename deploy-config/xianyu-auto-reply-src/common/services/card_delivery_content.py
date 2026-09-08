@@ -249,13 +249,15 @@ async def build_delivery_content(
     if not image_urls and card.image_url:
         image_urls = [card.image_url]
 
-    card_description = card.description or ''
+    # 发货模板全局统一：从系统设置读取，对所有卡券生效；为空则只发卡密本体
+    from common.services.delivery_template import get_global_delivery_template
+    delivery_template = await get_global_delivery_template(session)
 
     # 组装文本部分
     if text_content:
-        text_part = process_delivery_content_with_description(text_content, card_description, context)
-    elif card_description:
-        text_part = replace_order_context_variables(card_description, context)
+        text_part = process_delivery_content_with_description(text_content, delivery_template, context)
+    elif delivery_template:
+        text_part = replace_order_context_variables(delivery_template, context)
     else:
         text_part = ''
 

@@ -109,7 +109,12 @@ async def test_service_or_user_returns_none_for_non_admin(internal_token):
 
 def test_internal_api_routes_registered():
     """断言全部真实内网路由已注册（FastAPI 0.141 延迟展开，直接断言 router.routes）。"""
-    paths = {route.path: set(route.methods or []) for route in internal_api.router.routes if hasattr(route, "path")}
+    paths: dict[str, set[str]] = {}
+    for route in internal_api.router.routes:
+        route_path = getattr(route, "path", None)
+        if route_path is None:
+            continue
+        paths.setdefault(route_path, set()).update(route.methods or [])
     expected = {
         "/internal/cookies/details": {"GET"},
         "/internal/cookies/{account_id}/status": {"PUT"},
@@ -123,6 +128,7 @@ def test_internal_api_routes_registered():
         "/internal/cards/item/{item_id}": {"PUT"},
         "/internal/cards/provision": {"POST"},
         "/internal/cards/{card_id}": {"DELETE"},
+        "/internal/delivery-template": {"GET", "PUT"},
     }
     for path, methods in expected.items():
         assert path in paths, f"missing internal route {path}"
@@ -1413,3 +1419,100 @@ async def test_provision_pool_card_params_use_order_quantity(monkeypatch):
     assert "quantity" not in params, f"claim 入参不得使用 quantity 字段: {params}"
     assert api_config["url"].endswith("/api/v1/internal/xianyu/redeem-codes/claim")
     assert api_config["response_field"] == "data.content"
+
+
+# ---------------------------------------------------------------------------
+# 全局发货模板（delivery.template）契约回归
+# ---------------------------------------------------------------------------
+
+
+class _SettingRow:
+    """PUT 更新路径的 xy_system_settings 实体行替身。"""
+
+    def __init__(self, value: str = ""):
+        self.value = value
+
+
+class _SettingSession:
+    """delivery-template 路由专用 FakeSession：模拟 xy_system_settings 读写。
+
+    stored 语义：
+    - None         → 记录不存在（PUT 走新建路径）
+    - str          → GET 语义下的裸值
+    - _SettingRow  → PUT 语义下的实体行（更新路径）
+    """
+
+    def __init__(self, stored=None):
+        self._stored = stored
+        self.added = []
+
+    async def execute(self, stmt):
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        if "xy_system_settings" in sql:
+
+            class _Result:
+                def __init__(self, value):
+                    self._value = value
+
+                def scalar_one_or_none(self):
+                    return self._value
+
+            return _Result(self._stored)
+
+        class _Empty:
+            def scalar_one_or_none(self):
+                return None
+
+        return _Empty()
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_internal_get_delivery_template_returns_stored():
+    session = _SettingSession(stored="感谢购买 {DELIVERY_CONTENT}")
+    resp = await internal_api.internal_get_delivery_template(
+        session=session, service_user=FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    )
+    assert resp.data == {"template": "感谢购买 {DELIVERY_CONTENT}"}
+
+
+@pytest.mark.asyncio
+async def test_internal_get_delivery_template_empty_when_missing():
+    session = _SettingSession(stored=None)
+    resp = await internal_api.internal_get_delivery_template(
+        session=session, service_user=FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    )
+    assert resp.data == {"template": ""}
+
+
+@pytest.mark.asyncio
+async def test_internal_update_delivery_template_creates_row():
+    session = _SettingSession(stored=None)
+    resp = await internal_api.internal_update_delivery_template(
+        {"template": "请查收：\n{DELIVERY_CONTENT}"},
+        session=session,
+        service_user=FakeUser(id=1, role="ADMIN", status="ACTIVE"),
+    )
+    assert resp.success is True
+    assert len(session.added) == 1
+    assert session.added[0].value == "请查收：\n{DELIVERY_CONTENT}"
+    assert resp.data == {"template": "请查收：\n{DELIVERY_CONTENT}"}
+
+
+@pytest.mark.asyncio
+async def test_internal_update_delivery_template_updates_existing():
+    row = _SettingRow(value="旧模板")
+    session = _SettingSession(stored=row)
+    resp = await internal_api.internal_update_delivery_template(
+        {"template": "新模板 {order_id}"},
+        session=session,
+        service_user=FakeUser(id=1, role="ADMIN", status="ACTIVE"),
+    )
+    assert resp.success is True
+    assert row.value == "新模板 {order_id}"
+    assert session.added == []

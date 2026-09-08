@@ -228,3 +228,50 @@ func TestXianyuWorkerClientEmptyConfigRejected(t *testing.T) {
 	_, err := client.Health(context.Background())
 	require.ErrorIs(t, err, ErrXianyuDeliveryNotConfigured)
 }
+
+func TestXianyuWorkerClientGetDeliveryTemplate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/internal/delivery-template", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"template":"感谢购买 {DELIVERY_CONTENT}"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	template, err := client.GetDeliveryTemplate(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "感谢购买 {DELIVERY_CONTENT}", template)
+}
+
+func TestXianyuWorkerClientGetDeliveryTemplateEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/internal/delivery-template", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"template":""}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	template, err := client.GetDeliveryTemplate(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "", template)
+}
+
+func TestXianyuWorkerClientUpdateDeliveryTemplate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method)
+		require.Equal(t, "/api/v1/internal/delivery-template", r.URL.Path)
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, "请查收：\n{DELIVERY_CONTENT}", body["template"])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"template":"请查收：\n{DELIVERY_CONTENT}"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewXianyuWorkerClient(srv.URL, "token", 5*time.Second)
+	err := client.UpdateDeliveryTemplate(context.Background(), "请查收：\n{DELIVERY_CONTENT}")
+	require.NoError(t, err)
+}

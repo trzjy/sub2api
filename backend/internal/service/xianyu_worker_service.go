@@ -434,24 +434,24 @@ func (s *XianyuWorkerService) ResendDelivery(ctx context.Context, claim *XianyuO
 	}
 }
 
-// ListDeliveryCards 拉取 Worker 发货卡券列表（发货模板管理，不含敏感配置）。
-func (s *XianyuWorkerService) ListDeliveryCards(ctx context.Context) ([]XianyuWorkerCard, error) {
+// GetDeliveryTemplate 读取 Worker 全局发货模板（对所有卡券统一生效）。
+func (s *XianyuWorkerService) GetDeliveryTemplate(ctx context.Context) (string, error) {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
-	return client.ListCards(ctx)
+	return client.GetDeliveryTemplate(ctx)
 }
 
-// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
-func (s *XianyuWorkerService) UpdateDeliveryCardDescription(ctx context.Context, cardID int64, description string) error {
+// UpdateDeliveryTemplate 更新 Worker 全局发货模板。
+func (s *XianyuWorkerService) UpdateDeliveryTemplate(ctx context.Context, template string) error {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
 		return err
 	}
 	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
-	return client.UpdateCardDescription(ctx, cardID, description)
+	return client.UpdateDeliveryTemplate(ctx, template)
 }
 
 // ProvisionPoolCard 为库存池创建专属 API 发货卡券，返回卡券 ID。

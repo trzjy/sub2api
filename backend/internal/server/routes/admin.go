@@ -153,8 +153,8 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/worker-configs", h.Admin.Xianyu.WorkerConfigs)
 		xianyu.POST("/worker-configs", h.Admin.Xianyu.SaveWorkerConfig)
 		xianyu.PUT("/worker-configs/:id", h.Admin.Xianyu.SaveWorkerConfig)
-		xianyu.GET("/delivery-cards", h.Admin.Xianyu.DeliveryCards)
-		xianyu.PUT("/delivery-cards/:id/description", h.Admin.Xianyu.UpdateDeliveryCardDescription)
+		xianyu.GET("/delivery-template", h.Admin.Xianyu.GetDeliveryTemplate)
+		xianyu.PUT("/delivery-template", h.Admin.Xianyu.UpdateDeliveryTemplate)
 		xianyu.DELETE("/item-pools/:id", h.Admin.Xianyu.DeleteItemPool)
 		xianyu.DELETE("/binding-rules/:id", h.Admin.Xianyu.DeleteBindingRule)
 
@@ -171,6 +171,7 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/products", h.Admin.Xianyu.Products)
 		xianyu.POST("/products/sync", h.Admin.Xianyu.SyncProducts)
 		xianyu.POST("/products/bind", h.Admin.Xianyu.BindProduct)
+		xianyu.POST("/products/spec-binding", h.Admin.Xianyu.CreateProductSpecBinding)
 
 		xianyu.GET("/binding-rules", h.Admin.Xianyu.BindingRules)
 		xianyu.POST("/binding-rules", h.Admin.Xianyu.SaveBindingRule)

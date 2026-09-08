@@ -2474,15 +2474,6 @@ export interface XianyuItemPool {
   updated_at?: string
 }
 
-export interface XianyuDeliveryCard {
-  id: number
-  name: string
-  type: string
-  description: string
-  enabled: boolean
-  item_ids: string[]
-}
-
 export interface XianyuProduct {
   id: number
   account_pk: number

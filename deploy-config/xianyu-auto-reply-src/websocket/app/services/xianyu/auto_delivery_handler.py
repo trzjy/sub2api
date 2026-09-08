@@ -2700,7 +2700,12 @@ class AutoDeliveryHandler:
                 # 检查是否有图片需要发送（所有卡券类型都可以配置图片）
                 image_urls = rule.get('card_image_urls') or []
                 single_image_url = rule.get('card_image_url')
-                card_description = rule.get('card_description', '')
+                # 发货模板全局统一：从系统设置 delivery.template 读取，对所有卡券生效；
+                # 为空则只发卡密本体（不再逐卡券使用备注）
+                from common.services.delivery_template import DELIVERY_TEMPLATE_SETTING_KEY
+                delivery_template = (
+                    db_manager.get_system_setting(DELIVERY_TEMPLATE_SETTING_KEY, '') or ''
+                ).strip()
 
                 # 构建订单上下文变量（用于备注中的变量替换）
                 # 尝试从数据库获取真实商品标题
@@ -2724,7 +2729,7 @@ class AutoDeliveryHandler:
                 # （与订单 buyer_fish_nick 同一套 mtop user.query 逻辑），
                 # 取不到再回退到推送消息携带的昵称 send_user_name
                 buyer_name = await self._resolve_buyer_name_for_variable(
-                    card_description, chat_id, send_user_name
+                    delivery_template, chat_id, send_user_name
                 )
                 order_context = {
                     'order_id': order_id or '',
@@ -2743,10 +2748,10 @@ class AutoDeliveryHandler:
                     urls_str = "|".join(image_urls)
                     # 处理文字内容和备注信息
                     if text_content:
-                        text_part = process_delivery_content_with_description(text_content, card_description, order_context)
-                    elif card_description:
+                        text_part = process_delivery_content_with_description(text_content, delivery_template, order_context)
+                    elif delivery_template:
                         # 图片类型卡券没有text_content，但有备注，直接使用备注作为文字内容
-                        text_part = _replace_order_context_variables(card_description, order_context)
+                        text_part = _replace_order_context_variables(delivery_template, order_context)
                     else:
                         text_part = ""
                     delivery_content = f"__DELIVERY_WITH_IMAGES__{rule['card_id']}|{len(image_urls)}|{urls_str}|{text_part}"
@@ -2754,20 +2759,20 @@ class AutoDeliveryHandler:
                 elif single_image_url:
                     # 单图片模式
                     if text_content:
-                        text_part = process_delivery_content_with_description(text_content, card_description, order_context)
-                    elif card_description:
+                        text_part = process_delivery_content_with_description(text_content, delivery_template, order_context)
+                    elif delivery_template:
                         # 图片类型卡券没有text_content，但有备注，直接使用备注作为文字内容
-                        text_part = _replace_order_context_variables(card_description, order_context)
+                        text_part = _replace_order_context_variables(delivery_template, order_context)
                     else:
                         text_part = ""
                     delivery_content = f"__DELIVERY_WITH_IMAGES__{rule['card_id']}|1|{single_image_url}|{text_part}"
                     logger.info(f"准备发送图片和文字内容 (卡券ID: {rule['card_id']})")
                 elif text_content:
                     # 没有图片，只有文字
-                    delivery_content = process_delivery_content_with_description(text_content, card_description, order_context)
-                elif card_description:
+                    delivery_content = process_delivery_content_with_description(text_content, delivery_template, order_context)
+                elif delivery_template:
                     # 没有图片也没有text_content，但有备注（图片类型卡券只填了备注）
-                    delivery_content = _replace_order_context_variables(card_description, order_context)
+                    delivery_content = _replace_order_context_variables(delivery_template, order_context)
                 else:
                     # 既没有图片也没有文字也没有备注
                     logger.warning(f"卡券没有配置图片和文字内容: 卡券ID={rule['card_id']}")

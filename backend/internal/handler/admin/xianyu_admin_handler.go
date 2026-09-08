@@ -88,41 +88,36 @@ func (h *XianyuAdminHandler) WorkerConfigs(c *gin.Context) {
 	response.Success(c, cfgs)
 }
 
-// DeliveryCards 列出 Worker 发货卡券（发货模板管理）。
-func (h *XianyuAdminHandler) DeliveryCards(c *gin.Context) {
-	cards, err := h.control.ListDeliveryCards(c.Request.Context())
+// GetDeliveryTemplate 读取 Worker 全局发货模板（买家收到的发货消息格式，对所有卡券统一生效）。
+func (h *XianyuAdminHandler) GetDeliveryTemplate(c *gin.Context) {
+	template, err := h.control.GetDeliveryTemplate(c.Request.Context())
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, cards)
+	response.Success(c, gin.H{"template": template})
 }
 
-type updateDeliveryCardDescriptionRequest struct {
-	Description string `json:"description"`
+type updateDeliveryTemplateRequest struct {
+	Template string `json:"template"`
 }
 
-// UpdateDeliveryCardDescription 更新卡券发货模板（买家收到的消息格式）。
-func (h *XianyuAdminHandler) UpdateDeliveryCardDescription(c *gin.Context) {
-	cardID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || cardID <= 0 {
-		response.BadRequest(c, "invalid card id")
-		return
-	}
-	var req updateDeliveryCardDescriptionRequest
+// UpdateDeliveryTemplate 更新 Worker 全局发货模板。
+func (h *XianyuAdminHandler) UpdateDeliveryTemplate(c *gin.Context) {
+	var req updateDeliveryTemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request: "+err.Error())
 		return
 	}
-	if len(req.Description) > 2000 {
-		response.BadRequest(c, "description too long (max 2000)")
+	if len(req.Template) > 2000 {
+		response.BadRequest(c, "template too long (max 2000)")
 		return
 	}
-	if err := h.control.UpdateDeliveryCardDescription(c.Request.Context(), cardID, strings.TrimSpace(req.Description)); err != nil {
+	if err := h.control.UpdateDeliveryTemplate(c.Request.Context(), strings.TrimSpace(req.Template)); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, gin.H{"message": "delivery card template updated"})
+	response.Success(c, gin.H{"message": "delivery template updated"})
 }
 
 // DeleteItemPool 删除库存池（存在绑定商品/剩余库存码/引用规则时拒绝）。
@@ -500,6 +495,31 @@ func (h *XianyuAdminHandler) StockItemPool(c *gin.Context) {
 		}
 		return gin.H{"created": created, "remaining": remaining}, nil
 	})
+}
+
+type createSpecBindingRequest struct {
+	ProductID int64  `json:"product_id"`
+	SpecName  string `json:"spec_name"`
+	SpecValue string `json:"spec_value"`
+	PoolID    int64  `json:"pool_id"`
+}
+
+// CreateProductSpecBinding 同一商品多档次：手动添加规格绑定（规格文案需与闲鱼商品规格一致）。
+func (h *XianyuAdminHandler) CreateProductSpecBinding(c *gin.Context) {
+	var req createSpecBindingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	if req.ProductID <= 0 || req.PoolID <= 0 {
+		response.BadRequest(c, "product_id and pool_id are required")
+		return
+	}
+	if err := h.control.CreateProductSpecBinding(c.Request.Context(), req.ProductID, req.SpecName, req.SpecValue, req.PoolID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "spec binding created"})
 }
 
 // Deliveries 发货记录列表。

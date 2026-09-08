@@ -340,6 +340,59 @@ async def internal_update_card_description(
     )
 
 
+@router.get("/delivery-template")
+async def internal_get_delivery_template(
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """全局发货模板（买家收到的发货消息，对所有卡券统一生效，不逐卡券）。"""
+    from sqlalchemy import select
+
+    from common.models.system_setting import SystemSetting
+    from common.services.delivery_template import DELIVERY_TEMPLATE_SETTING_KEY
+
+    stmt = select(SystemSetting.value).where(SystemSetting.key == DELIVERY_TEMPLATE_SETTING_KEY)
+    value = (await session.execute(stmt)).scalar_one_or_none()
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data={"template": (value or "") if isinstance(value, str) else ""},
+    )
+
+
+@router.put("/delivery-template")
+async def internal_update_delivery_template(
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """更新全局发货模板（买家收到的发货消息格式）。"""
+    from sqlalchemy import select
+
+    from common.models.system_setting import SystemSetting
+    from common.services.delivery_template import (
+        DELIVERY_TEMPLATE_MAX_LENGTH,
+        DELIVERY_TEMPLATE_SETTING_KEY,
+    )
+
+    template = str((body or {}).get("template") or "").strip()[:DELIVERY_TEMPLATE_MAX_LENGTH]
+    existing = (
+        (await session.execute(
+            select(SystemSetting).where(SystemSetting.key == DELIVERY_TEMPLATE_SETTING_KEY)
+        ))
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(SystemSetting(key=DELIVERY_TEMPLATE_SETTING_KEY, value=template))
+    else:
+        existing.value = template
+    await session.commit()
+    return ApiResponse(
+        success=True,
+        message="发货模板已更新",
+        data={"template": template},
+    )
+
+
 @router.put("/cards/item/{item_id}")
 async def internal_sync_item_card(
     item_id: str,

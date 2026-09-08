@@ -88,6 +88,8 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
     "token.api_mode": ("web", "Token获取方式：web-网页接口/remote-远程接口"),
     "token.remote_url": ("", "Token远程接口URL"),
     "token.remote_secret_key": ("", "Token远程接口秘钥"),
+    # 全局发货模板：自由文本（含 {变量} 与换行），对所有卡券统一生效
+    "delivery.template": ("", "全局发货模板：买家收到的发货消息，留空则只发卡密本体"),
 }
 
 # 不需要XSS转义的键（布尔值、数字等）
@@ -151,6 +153,8 @@ NO_ESCAPE_KEYS = {
     # Token远程接口配置：URL 和秘钥不能被 XSS 转义
     TOKEN_REMOTE_URL_SETTING_KEY,
     TOKEN_REMOTE_SECRET_KEY_SETTING_KEY,
+    # 全局发货模板：自由文本含 {变量}/换行/URL，不能被 XSS 转义破坏
+    "delivery.template",
 }
 
 

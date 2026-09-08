@@ -1846,6 +1846,11 @@ async def _deliver_order_impl(request: DeliverOrderRequest):
 
         # 构建订单上下文（仅 text/data/api 文字渲染需要）
         from app.services.xianyu.delivery_utils import process_delivery_content_with_description
+        # 发货模板全局统一：从系统设置读取，对所有卡券生效；为空则只发卡密本体
+        from common.services.delivery_template import DELIVERY_TEMPLATE_SETTING_KEY
+        delivery_template = (
+            db_manager.get_system_setting(DELIVERY_TEMPLATE_SETTING_KEY, '') or ''
+        ).strip()
         _order_context = {
             'order_id': request.order_no or '',
             'item_id': request.item_id or '',
@@ -1864,7 +1869,7 @@ async def _deliver_order_impl(request: DeliverOrderRequest):
             # 买家明文昵称：复用自动发货同一套逻辑（pre_check 阶段已获取 _current_buyer_fish_nick，
             # 缺失则用 chat_id 实时查 mtop user.query），手动发货无推送昵称，兜底传空
             _order_context['buyer_name'] = await xianyu_live.auto_delivery_handler._resolve_buyer_name_for_variable(
-                card.description or '', request.chat_id, ''
+                delivery_template, request.chat_id, ''
             )
         except Exception:
             pass
@@ -1977,7 +1982,7 @@ async def _deliver_order_impl(request: DeliverOrderRequest):
                 else:
                     rendered = process_delivery_content_with_description(
                         content,
-                        card.description or '',
+                        delivery_template,
                         _order_context
                     )
                     logger.info(

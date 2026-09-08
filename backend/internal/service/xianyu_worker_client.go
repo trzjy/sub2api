@@ -189,16 +189,6 @@ type XianyuWorkerProduct struct {
 	SpecValue string `json:"spec_value,omitempty"`
 }
 
-// XianyuWorkerCard 表示 Worker 侧发货卡券（发货模板管理投影，不含 api_config 等敏感配置）。
-type XianyuWorkerCard struct {
-	ID          int64    `json:"id"`
-	Name        string   `json:"name"`
-	Type        string   `json:"type"`
-	Description string   `json:"description"`
-	Enabled     bool     `json:"enabled"`
-	ItemIDs     []string `json:"item_ids"`
-}
-
 // XianyuWorkerSendResult 是 /messages/send 响应的业务级回执载荷（信封 data 内）。
 // 统一回执语义由 Receipt 承载；send_status/dispatched 为过渡兼容字段（新 Worker 同时输出，
 // 旧 Worker 回退用，normalizeSendReceipt 负责归一化）。
@@ -369,19 +359,21 @@ func (c *XianyuWorkerClient) ListProducts(ctx context.Context, accountID string)
 	return out, nil
 }
 
-// ListCards 拉取 Worker 发货卡券列表（发货模板管理投影，不含敏感配置）。
-func (c *XianyuWorkerClient) ListCards(ctx context.Context) ([]XianyuWorkerCard, error) {
-	var out []XianyuWorkerCard
-	if err := c.do(ctx, http.MethodGet, "/api/v1/internal/cards", nil, &out, ""); err != nil {
-		return nil, err
+// GetDeliveryTemplate 读取 Worker 全局发货模板（买家收到的发货消息格式，对所有卡券统一生效）。
+func (c *XianyuWorkerClient) GetDeliveryTemplate(ctx context.Context) (string, error) {
+	var out struct {
+		Template string `json:"template"`
 	}
-	return out, nil
+	if err := c.do(ctx, http.MethodGet, "/api/v1/internal/delivery-template", nil, &out, ""); err != nil {
+		return "", err
+	}
+	return out.Template, nil
 }
 
-// UpdateCardDescription 更新卡券发货模板（买家收到的消息格式）。
-func (c *XianyuWorkerClient) UpdateCardDescription(ctx context.Context, cardID int64, description string) error {
-	body := map[string]any{"description": description}
-	return c.do(ctx, http.MethodPut, fmt.Sprintf("/api/v1/internal/cards/%d/description", cardID), body, nil, "")
+// UpdateDeliveryTemplate 更新 Worker 全局发货模板。
+func (c *XianyuWorkerClient) UpdateDeliveryTemplate(ctx context.Context, template string) error {
+	body := map[string]any{"template": template}
+	return c.do(ctx, http.MethodPut, "/api/v1/internal/delivery-template", body, nil, "")
 }
 
 // ProvisionPoolCard 为库存池创建专属的 API 发货卡券（Worker 按名称幂等：
