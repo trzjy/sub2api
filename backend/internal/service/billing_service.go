@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1029,6 +1030,49 @@ func (s *BillingService) HasIdentifiedTokenPricing(model string) bool {
 	}
 	pricing, ok := s.fallbackPrices[model]
 	return ok && pricing != nil
+}
+
+// RecordPricingGap 记录一次"无价可循"的计费模型（价格管理中心线上缺口展示用）。
+func (s *BillingService) RecordPricingGap(model string) {
+	if s == nil || s.pricingService == nil {
+		return
+	}
+	s.pricingService.RecordPricingGap(model)
+}
+
+// BuiltinFallbackEntries 返回代码内置兜底价目录（价格管理中心展示用）。
+// fallbackPrices 仅在构造时写入、此后只读，无需加锁。
+func (s *BillingService) BuiltinFallbackEntries() []PricingCatalogEntry {
+	if s == nil {
+		return nil
+	}
+	names := make([]string, 0, len(s.fallbackPrices))
+	for name := range s.fallbackPrices {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]PricingCatalogEntry, 0, len(names))
+	for _, name := range names {
+		pricing, err := s.GetModelPricing(name)
+		if err != nil || pricing == nil {
+			continue
+		}
+		out = append(out, PricingCatalogEntry{
+			Model:              name,
+			Provider:           "builtin",
+			InputCostPerToken:  pricing.InputPricePerToken,
+			OutputCostPerToken: pricing.OutputPricePerToken,
+			CacheReadPerToken:  pricing.CacheReadPricePerToken,
+			CacheWritePerToken: pricing.CacheCreationPricePerToken,
+		})
+	}
+	return out
+}
+
+// ApplyModelSpecificPricingPolicy 导出模型特定定价策略（价格管理中心试算用）。
+func (s *BillingService) ApplyModelSpecificPricingPolicy(model string, pricing *ModelPricing) *ModelPricing {
+	return s.applyModelSpecificPricingPolicy(model, pricing)
 }
 
 // GetModelPricing 获取模型价格配置

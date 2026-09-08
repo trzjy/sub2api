@@ -19,6 +19,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"go.uber.org/zap"
+	"sync/atomic"
 )
 
 var (
@@ -170,6 +171,16 @@ type PricingService struct {
 	pricingData  map[string]*LiteLLMModelPricing
 	lastUpdated  time.Time
 	localHash    string
+
+	// 同步尝试状态（价格管理中心状态面板用）
+	lastAttemptAt    time.Time
+	lastAttemptError string
+	syncing          atomic.Bool
+
+	// 线上计费缺口记录：网关计费遇到 ErrModelPricingUnavailable 的模型（按模型去重）
+	gapMu   sync.Mutex
+	gaps    map[string]*PricingGapEntry
+	gapSeen []*PricingGapEntry // 插入序，用于容量淘汰
 
 	// 停止信号
 	stopCh chan struct{}
@@ -348,8 +359,25 @@ func (s *PricingService) syncWithRemote() error {
 	return nil
 }
 
-// downloadPricingData 从远程下载价格数据
+// downloadPricingData 从远程下载价格数据（记录最近一次尝试结果供状态面板展示）
 func (s *PricingService) downloadPricingData() error {
+	s.mu.Lock()
+	s.lastAttemptAt = time.Now()
+	s.mu.Unlock()
+
+	err := s.downloadPricingDataInner()
+
+	s.mu.Lock()
+	if err != nil {
+		s.lastAttemptError = err.Error()
+	} else {
+		s.lastAttemptError = ""
+	}
+	s.mu.Unlock()
+	return err
+}
+
+func (s *PricingService) downloadPricingDataInner() error {
 	remoteURL, err := s.validatePricingURL(s.cfg.Pricing.RemoteURL)
 	if err != nil {
 		return err
@@ -1134,4 +1162,164 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// --- 价格管理中心：状态 / 手动同步 / 目录 / 线上缺口 ---
+
+// PricingSyncStatus 价格表同步状态快照。
+type PricingSyncStatus struct {
+	RemoteURL                string    `json:"remote_url"`
+	HashURL                  string    `json:"hash_url"`
+	DataFile                 string    `json:"data_file"`
+	ModelCount               int       `json:"model_count"`
+	LastUpdated              time.Time `json:"last_updated"`
+	LocalHash                string    `json:"local_hash"`
+	LastAttemptAt            time.Time `json:"last_attempt_at"`
+	LastError                string    `json:"last_error"`
+	Syncing                  bool      `json:"syncing"`
+	SchedulerEnabled         bool      `json:"scheduler_enabled"`
+	HashCheckIntervalMinutes int       `json:"hash_check_interval_minutes"`
+	UpdateIntervalHours      int       `json:"update_interval_hours"`
+}
+
+// SyncStatusSnapshot 返回当前同步状态（只读快照，不触发网络）。
+func (s *PricingService) SyncStatusSnapshot() PricingSyncStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	hashCheckInterval := 0
+	if s.cfg != nil {
+		hashCheckInterval = s.cfg.Pricing.HashCheckIntervalMinutes
+	}
+	updateIntervalHours := 0
+	if s.cfg != nil {
+		updateIntervalHours = s.cfg.Pricing.UpdateIntervalHours
+	}
+	dataFile := ""
+	if s.cfg != nil {
+		dataFile = s.getPricingFilePath()
+	}
+	remoteURL, hashURL := "", ""
+	if s.cfg != nil {
+		remoteURL = s.cfg.Pricing.RemoteURL
+		hashURL = s.cfg.Pricing.HashURL
+	}
+	return PricingSyncStatus{
+		RemoteURL:                remoteURL,
+		HashURL:                  hashURL,
+		DataFile:                 dataFile,
+		ModelCount:               len(s.pricingData),
+		LastUpdated:              s.lastUpdated,
+		LocalHash:                s.localHash,
+		LastAttemptAt:            s.lastAttemptAt,
+		LastError:                s.lastAttemptError,
+		Syncing:                  s.syncing.Load(),
+		SchedulerEnabled:         strings.TrimSpace(remoteURL) != "",
+		HashCheckIntervalMinutes: hashCheckInterval,
+		UpdateIntervalHours:      updateIntervalHours,
+	}
+}
+
+// SyncNow 立即触发一次远程同步（跳过哈希短路，强制下载）。
+// 并发调用直接返回冲突错误。
+func (s *PricingService) SyncNow(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("pricing service unavailable")
+	}
+	if !s.syncing.CompareAndSwap(false, true) {
+		return fmt.Errorf("sync already in progress")
+	}
+	defer s.syncing.Store(false)
+	return s.downloadPricingData()
+}
+
+// PricingCatalogEntry 价格目录条目（来自远程同步表，未叠加 custom/渠道/分组层）。
+type PricingCatalogEntry struct {
+	Model              string  `json:"model"`
+	Provider           string  `json:"provider,omitempty"`
+	Mode               string  `json:"mode,omitempty"`
+	InputCostPerToken  float64 `json:"input_cost_per_token"`
+	OutputCostPerToken float64 `json:"output_cost_per_token"`
+	CacheReadPerToken  float64 `json:"cache_read_per_token"`
+	CacheWritePerToken float64 `json:"cache_write_per_token"`
+	TokenPricingAbsent bool    `json:"token_pricing_absent"` // 仅图片价、无 token 价，token 计费不可用
+}
+
+// CatalogEntries 返回远程价格表全量条目（按模型名排序）。
+func (s *PricingService) CatalogEntries() []PricingCatalogEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]PricingCatalogEntry, 0, len(s.pricingData))
+	for name, p := range s.pricingData {
+		out = append(out, PricingCatalogEntry{
+			Model:              name,
+			Provider:           p.LiteLLMProvider,
+			Mode:               p.Mode,
+			InputCostPerToken:  p.InputCostPerToken,
+			OutputCostPerToken: p.OutputCostPerToken,
+			CacheReadPerToken:  p.CacheReadInputTokenCost,
+			CacheWritePerToken: p.CacheCreationInputTokenCost,
+			TokenPricingAbsent: p.TokenPricingAbsent,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
+	return out
+}
+
+// pricingGapLimit 线上缺口记录容量上限（超限淘汰最早记录）。
+const pricingGapLimit = 256
+
+// PricingGapEntry 线上计费缺口：某模型在计费时无任何价格可用（按 $0 记账）。
+type PricingGapEntry struct {
+	Model     string    `json:"model"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Count     int64     `json:"count"`
+}
+
+// RecordPricingGap 记录一次无价可循的计费（按模型去重累计）。
+// 进程内数据：多实例部署时各实例独立记录，语义与既有日志一致。
+func (s *PricingService) RecordPricingGap(model string) {
+	if s == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	now := time.Now()
+	s.gapMu.Lock()
+	defer s.gapMu.Unlock()
+	if s.gaps == nil {
+		s.gaps = make(map[string]*PricingGapEntry)
+	}
+	if entry, ok := s.gaps[model]; ok {
+		entry.LastSeen = now
+		entry.Count++
+		return
+	}
+	entry := &PricingGapEntry{Model: model, FirstSeen: now, LastSeen: now, Count: 1}
+	s.gaps[model] = entry
+	s.gapSeen = append(s.gapSeen, entry)
+	if len(s.gapSeen) > pricingGapLimit {
+		evicted := s.gapSeen[0]
+		s.gapSeen = s.gapSeen[1:]
+		delete(s.gaps, evicted.Model)
+	}
+}
+
+// PricingGaps 返回当前记录的线上缺口（按最近出现倒序）。
+func (s *PricingService) PricingGaps() []PricingGapEntry {
+	if s == nil {
+		return nil
+	}
+	s.gapMu.Lock()
+	defer s.gapMu.Unlock()
+	out := make([]PricingGapEntry, 0, len(s.gapSeen))
+	for _, entry := range s.gapSeen {
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen.After(out[j].LastSeen) })
+	return out
 }

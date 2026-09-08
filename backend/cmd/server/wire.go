@@ -304,6 +304,10 @@ func provideCleanup(
 				pricing.Stop()
 				return nil
 			}},
+			{"CustomModelPricingService", func() error {
+				customModelPricingService.Stop()
+				return nil
+			}},
 			{"EmailQueueService", func() error {
 				emailQueue.Stop()
 				return nil

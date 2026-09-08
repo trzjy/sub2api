@@ -10,6 +10,7 @@ import (
 const (
 	PricingSourceGroup    = "group"
 	PricingSourceChannel  = "channel"
+	PricingSourceCustom   = "custom"
 	PricingSourceLiteLLM  = "litellm"
 	PricingSourceFallback = "fallback"
 )
@@ -43,11 +44,32 @@ type ResolvedPricing struct {
 	longContextPricingEnabled bool
 }
 
+// CustomModelPricingProvider 全局自定义定价查找（价格管理中心维护）。
+type CustomModelPricingProvider interface {
+	MatchCustomModelPricing(model string) *ChannelModelPricing
+}
+
 // ModelPricingResolver 统一模型定价解析器。
-// 解析链：Group → Channel → LiteLLM → Fallback。
+// 解析链：Group → Channel → Custom → LiteLLM → Fallback。
 type ModelPricingResolver struct {
 	channelService *ChannelService
 	billingService *BillingService
+	customPricing  CustomModelPricingProvider // 可选；未设置时解析行为与无 custom 层一致
+}
+
+// SetCustomPricingProvider 注入全局自定义定价层（启动时接线一次，此后只读）。
+func (r *ModelPricingResolver) SetCustomPricingProvider(p CustomModelPricingProvider) {
+	if r == nil {
+		return
+	}
+	r.customPricing = p
+}
+
+func (r *ModelPricingResolver) matchCustomModelPricing(model string) *ChannelModelPricing {
+	if r == nil || r.customPricing == nil {
+		return nil
+	}
+	return r.customPricing.MatchCustomModelPricing(model)
 }
 
 // NewModelPricingResolver 创建定价解析器实例
@@ -104,6 +126,26 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 		}
 	}
 
+	// 自定义价格层（价格管理中心）：仅在分组、渠道均未命中时生效；
+	// 按次/图片/视频模式直接以 custom 分层为准，token 模式作为基础价的覆盖层。
+	customPricing := r.matchCustomModelPricing(input.Model)
+	if chPricing == nil && customPricing != nil {
+		customMode := customPricing.BillingMode
+		if customMode == "" {
+			customMode = BillingModeToken
+		}
+		if customMode != BillingModeToken {
+			resolved := &ResolvedPricing{
+				Mode:           customMode,
+				Source:         PricingSourceCustom,
+				channelPricing: customPricing,
+			}
+			resolved.longContextPricingEnabled = longContextPricingEnabled
+			r.applyRequestTierOverrides(customPricing, resolved)
+			return resolved
+		}
+	}
+
 	// 1. 获取基础定价
 	basePricing, source := r.resolveBasePricing(input.Model)
 
@@ -115,7 +157,13 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 	}
 	resolved.longContextPricingEnabled = longContextPricingEnabled
 
-	// 2. 如果有 GroupID，尝试渠道覆盖
+	// 2. custom 层覆盖基础价（合并语义：只覆盖显式配置的字段）。
+	if customPricing != nil {
+		applyCustomTokenOverrides(customPricing, resolved)
+		resolved.Source = PricingSourceCustom
+	}
+
+	// 3. 如果有 GroupID，尝试渠道覆盖（渠道显式配置优先于 custom，未配置字段同样归零/合并，维持既有语义）。
 	if chPricing != nil {
 		resolved.Source = PricingSourceChannel
 		resolved.channelPricing = chPricing
@@ -125,6 +173,38 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 	}
 
 	return resolved
+}
+
+// applyCustomTokenOverrides 应用自定义价格层的 token 覆盖。
+// 与渠道覆盖的"覆盖一切"语义不同，custom 层采用合并语义：只改写显式配置的字段，
+// 其余沿用远程表/内置兜底——避免管理员只补 output 价时把 input 意外归零。
+func applyCustomTokenOverrides(custom *ChannelModelPricing, resolved *ResolvedPricing) {
+	if custom == nil {
+		return
+	}
+	if resolved.BasePricing == nil {
+		resolved.BasePricing = &ModelPricing{}
+	} else {
+		cloned := *resolved.BasePricing
+		resolved.BasePricing = &cloned
+	}
+	applyChannelTokenPriceOverrides(resolved.BasePricing, custom)
+	if custom.FastMultiplier != nil {
+		resolved.BasePricing.FastMultiplier = custom.FastMultiplier
+	}
+	if custom.FlexMultiplier != nil {
+		resolved.BasePricing.FlexMultiplier = custom.FlexMultiplier
+	}
+	if custom.ImageOutputPrice != nil {
+		resolved.BasePricing.ImageOutputPricePerToken = *custom.ImageOutputPrice
+		resolved.BasePricing.ImageOutputPriceExplicit = true
+	}
+	if custom.ImageInputPrice != nil {
+		resolved.BasePricing.ImageInputPricePerToken = *custom.ImageInputPrice
+	}
+	if len(custom.Intervals) > 0 {
+		resolved.Intervals = filterValidIntervals(custom.Intervals)
+	}
 }
 
 func (r *ModelPricingResolver) resolveConfiguredPricing(config *ChannelModelPricing, model, source string) *ResolvedPricing {

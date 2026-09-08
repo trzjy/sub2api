@@ -37,6 +37,7 @@ import adminComplianceAPI from './compliance'
 import auditAPI from './audit'
 import pluginsAPI from './plugins'
 import xianyuAPI from './xianyu'
+import pricingAPI from './pricing'
 
 /**
  * Unified admin API object for convenient access
@@ -75,7 +76,8 @@ export const adminAPI = {
   compliance: adminComplianceAPI,
   audit: auditAPI,
   plugins: pluginsAPI,
-  xianyu: xianyuAPI
+  xianyu: xianyuAPI,
+  pricing: pricingAPI
 }
 
 export {
@@ -112,12 +114,22 @@ export {
   adminComplianceAPI,
   auditAPI,
   pluginsAPI,
-  xianyuAPI
+  xianyuAPI,
+  pricingAPI
 }
 export default adminAPI
 
 // Re-export types used by components
 export type { AuditLog, AuditLogQuery, AuditLogListResponse } from './audit'
+export type {
+  PricingStatusResponse,
+  CatalogEntry,
+  UncoveredEntry,
+  UncoveredResponse,
+  PricingPreview,
+  CustomModelPricing,
+  CustomModelPricingPayload
+} from './pricing'
 export type { BalanceHistoryItem } from './users'
 export type { ErrorPassthroughRule, CreateRuleRequest, UpdateRuleRequest } from './errorPassthrough'
 export type { BackupAgentHealth, DataManagementConfig } from './dataManagement'

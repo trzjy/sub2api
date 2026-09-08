@@ -43,6 +43,13 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 	return svc, nil
 }
 
+// ProvideCustomModelPricingService creates and starts the global custom pricing layer.
+func ProvideCustomModelPricingService(repo CustomModelPricingRepository) *CustomModelPricingService {
+	svc := NewCustomModelPricingService(repo)
+	svc.Start()
+	return svc
+}
+
 // ProvideUpdateService creates UpdateService with BuildInfo
 func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
 	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
@@ -913,6 +920,8 @@ var ProviderSet = wire.NewSet(
 	ProvideAPIKeyAuthCacheInvalidator,
 	ProvideAuthCacheInvalidationWorker,
 	NewGroupService,
+	ProvideCustomModelPricingService,
+	NewPricingAdminService,
 	NewCompositeRouteResolver,
 	NewAccountService,
 	NewProxyService,

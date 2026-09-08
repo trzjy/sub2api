@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -1166,6 +1167,9 @@ func (s *GatewayService) calculateTokenCost(
 		LegacyLongContext: legacy,
 	})
 	if err != nil {
+		if errors.Is(err, ErrModelPricingUnavailable) {
+			s.billingService.RecordPricingGap(billingModel)
+		}
 		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
 		return &CostBreakdown{ActualCost: 0}
 	}

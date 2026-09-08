@@ -233,6 +233,11 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		if !isUsagePricingUnavailableError(err) {
 			return err
 		}
+		gapModel := billingModel
+		if gapModel == "" && len(billingModels) > 0 {
+			gapModel = billingModels[0]
+		}
+		s.billingService.RecordPricingGap(gapModel)
 		logger.L().With(
 			zap.String("component", "service.openai_gateway"),
 			zap.Strings("billing_models", billingModels),

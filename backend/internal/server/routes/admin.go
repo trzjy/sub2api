@@ -116,6 +116,9 @@ func RegisterAdminRoutes(
 		// 渠道管理
 		registerChannelRoutes(admin, h)
 
+		// 价格管理中心
+		registerPricingRoutes(admin, h)
+
 		// 渠道监控
 		registerChannelMonitorRoutes(admin, h, settingService)
 		registerChannelMonitorV2Routes(admin, h, settingService)
@@ -843,6 +846,27 @@ func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		channels.POST("", h.Admin.Channel.Create)
 		channels.PUT("/:id", h.Admin.Channel.Update)
 		channels.DELETE("/:id", h.Admin.Channel.Delete)
+	}
+}
+
+// registerPricingRoutes 价格管理中心：状态/手动同步/目录/未覆盖扫描/试算/自定义价格 CRUD。
+// 写操作由 admin 组审计中间件自动留痕。
+func registerPricingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.Pricing == nil {
+		return
+	}
+	pricing := admin.Group("/pricing")
+	{
+		pricing.GET("/status", h.Admin.Pricing.GetStatus)
+		pricing.POST("/sync", h.Admin.Pricing.SyncNow)
+		pricing.GET("/catalog", h.Admin.Pricing.GetCatalog)
+		pricing.GET("/uncovered", h.Admin.Pricing.GetUncovered)
+		pricing.GET("/preview", h.Admin.Pricing.GetPreview)
+		pricing.GET("/custom", h.Admin.Pricing.ListCustom)
+		pricing.GET("/custom/:id", h.Admin.Pricing.GetCustom)
+		pricing.POST("/custom", h.Admin.Pricing.CreateCustom)
+		pricing.PUT("/custom/:id", h.Admin.Pricing.UpdateCustom)
+		pricing.DELETE("/custom/:id", h.Admin.Pricing.DeleteCustom)
 	}
 }
 

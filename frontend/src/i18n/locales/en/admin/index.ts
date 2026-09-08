@@ -8,6 +8,7 @@ import audit from './audit'
 import promptAudit from './promptAudit'
 import plugins from './plugins'
 import xianyu from './xianyu'
+import pricing from './pricing'
 
 export default {
   ...overview,
@@ -20,4 +21,5 @@ export default {
   ...promptAudit,
   ...plugins,
   ...xianyu,
+  ...pricing,
 }
