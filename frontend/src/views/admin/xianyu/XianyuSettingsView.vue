@@ -87,7 +87,7 @@
         <div class="space-y-4 p-5">
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.deliveryTemplatesHint') }}</p>
           <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-600">
-            <textarea v-model="deliveryTemplate" rows="5" class="input w-full font-mono text-xs"></textarea>
+            <textarea v-model="deliveryTemplate" rows="12" class="input w-full resize-y font-mono text-xs"></textarea>
             <div class="mt-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300">
               <p class="mb-1 font-medium">{{ t('admin.xianyu.settings.deliveryTemplatePreview') }}</p>
               <p class="whitespace-pre-wrap">{{ templatePreview(deliveryTemplate) }}</p>
