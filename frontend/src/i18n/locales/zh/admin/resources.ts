@@ -37,7 +37,11 @@ export default {
       maxResultsTooltipExample: '例如填写 100，表示最多保存最近 100 次测试结果；第 101 次结果写入后，最早的一条会被清理。',
       maxResultsTooltipRange: '推荐填写范围：一般可填 20 到 200。只关注近期可用性时可填 20-50；需要回看较长时间的波动趋势时可填 100-200。',
       autoRecover: '自动恢复',
-      autoRecoverHelp: '测试成功后自动恢复异常状态的账号'
+      autoRecoverHelp: '测试成功后自动恢复异常状态的账号',
+      autoDisableThreshold: '连续失败自动暂停调度（次数）',
+      autoDisablePlaceholder: '0 = 关闭（默认）',
+      autoDisableHelp: '连续失败达到该次数后自动暂停账号调度，暂停期间买家请求不再路由到该账号；测试成功后自动恢复。',
+      failingBadge: '连续失败 {n}/{m}'
     },
 
     // Proxies Management

@@ -37,7 +37,11 @@ export default {
       maxResultsTooltipExample: 'For example, 100 means keeping at most the latest 100 test results. When the 101st result is saved, the oldest one is removed.',
       maxResultsTooltipRange: 'Recommended range: usually 20 to 200. Use 20-50 when you only care about recent health status, or 100-200 if you want a longer trend history.',
       autoRecover: 'Auto Recover',
-      autoRecoverHelp: 'Automatically recover account from error/rate-limited state on successful test'
+      autoRecoverHelp: 'Automatically recover account from error/rate-limited state on successful test',
+      autoDisableThreshold: 'Auto-pause after consecutive failures',
+      autoDisablePlaceholder: '0 = disabled (default)',
+      autoDisableHelp: 'When consecutive failures reach this count, the account scheduling is paused until the next scheduled test succeeds.',
+      failingBadge: 'Failing {n}/{m}'
     },
 
     // Proxies

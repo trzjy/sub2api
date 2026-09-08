@@ -3127,6 +3127,12 @@ func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) er
 	return fmt.Errorf("%s", errorMsg)
 }
 
+// PauseAccountScheduling 定时测试连续失败后暂停账号调度（temp-unschedulable 至指定时间；
+// 时间到达或恢复测试成功后自动解除）。
+func (s *AccountTestService) PauseAccountScheduling(ctx context.Context, accountID int64, until time.Time, reason string) error {
+	return s.accountRepo.SetTempUnschedulable(ctx, accountID, until, reason)
+}
+
 // RunTestBackground executes an account test in-memory (no real HTTP client),
 // capturing SSE output via httptest.NewRecorder, then parses the result.
 func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string) (*ScheduledTestResult, error) {

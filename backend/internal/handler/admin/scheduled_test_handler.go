@@ -20,20 +20,22 @@ func NewScheduledTestHandler(scheduledTestSvc *service.ScheduledTestService) *Sc
 }
 
 type createScheduledTestPlanRequest struct {
-	AccountID      int64  `json:"account_id" binding:"required"`
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression" binding:"required"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	AccountID            int64  `json:"account_id" binding:"required"`
+	ModelID              string `json:"model_id"`
+	CronExpression       string `json:"cron_expression" binding:"required"`
+	Enabled              *bool  `json:"enabled"`
+	MaxResults           int    `json:"max_results"`
+	AutoRecover          *bool  `json:"auto_recover"`
+	AutoDisableThreshold int    `json:"auto_disable_threshold"`
 }
 
 type updateScheduledTestPlanRequest struct {
-	ModelID        string `json:"model_id"`
-	CronExpression string `json:"cron_expression"`
-	Enabled        *bool  `json:"enabled"`
-	MaxResults     int    `json:"max_results"`
-	AutoRecover    *bool  `json:"auto_recover"`
+	ModelID              string `json:"model_id"`
+	CronExpression       string `json:"cron_expression"`
+	Enabled              *bool  `json:"enabled"`
+	MaxResults           int    `json:"max_results"`
+	AutoRecover          *bool  `json:"auto_recover"`
+	AutoDisableThreshold *int   `json:"auto_disable_threshold"`
 }
 
 // ListByAccount GET /admin/accounts/:id/scheduled-test-plans
@@ -73,6 +75,9 @@ func (h *ScheduledTestHandler) Create(c *gin.Context) {
 	if req.AutoRecover != nil {
 		plan.AutoRecover = *req.AutoRecover
 	}
+	if req.AutoDisableThreshold > 0 {
+		plan.AutoDisableThreshold = req.AutoDisableThreshold
+	}
 
 	created, err := h.scheduledTestSvc.CreatePlan(c.Request.Context(), plan)
 	if err != nil {
@@ -110,6 +115,9 @@ func (h *ScheduledTestHandler) Update(c *gin.Context) {
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+	}
+	if req.AutoDisableThreshold != nil {
+		existing.AutoDisableThreshold = max(*req.AutoDisableThreshold, 0)
 	}
 	if req.MaxResults > 0 {
 		existing.MaxResults = req.MaxResults

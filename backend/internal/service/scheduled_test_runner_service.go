@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -130,20 +131,55 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d SaveResult error: %v", plan.ID, err)
 	}
 
-	// Auto-recover account if test succeeded and auto_recover is enabled.
-	if result.Status == "success" && plan.AutoRecover {
-		s.tryRecoverAccount(ctx, plan.AccountID, plan.ID)
-	}
-
 	nextRun, err := computeNextRun(plan.CronExpression, time.Now())
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d computeNextRun error: %v", plan.ID, err)
 		return
 	}
 
+	switch {
+	case result.Status == "success":
+		// 任意成功即清零连续失败计数。
+		if plan.ConsecutiveFailures != 0 {
+			if err := s.planRepo.SetConsecutiveFailures(ctx, plan.ID, 0); err != nil {
+				logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d reset failures error: %v", plan.ID, err)
+			}
+		}
+		// Auto-recover account if test succeeded and auto_recover is enabled.
+		if plan.AutoRecover {
+			s.tryRecoverAccount(ctx, plan.AccountID, plan.ID)
+		}
+	case result.Status == "failed" && plan.AutoDisableThreshold > 0:
+		// 连续失败达到阈值：暂停调度至下一次定时测试。
+		// 届时测试成功 → 自动恢复清除暂停；仍失败 → 本逻辑再次顺延暂停窗口。
+		failures := plan.ConsecutiveFailures + 1
+		if err := s.planRepo.SetConsecutiveFailures(ctx, plan.ID, failures); err != nil {
+			logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d record failure error: %v", plan.ID, err)
+			return
+		}
+		if failures >= plan.AutoDisableThreshold {
+			s.pauseAccountScheduling(ctx, plan, nextRun, failures)
+		}
+	}
+
 	if err := s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d UpdateAfterRun error: %v", plan.ID, err)
 	}
+}
+
+// pauseAccountScheduling 连续失败达到阈值：把账号置为临时不可调度（至下次定时测试）。
+func (s *ScheduledTestRunnerService) pauseAccountScheduling(ctx context.Context, plan *ScheduledTestPlan, until time.Time, failures int) {
+	if s.accountTestSvc == nil {
+		return
+	}
+	reason := fmt.Sprintf("定时测试连续失败 %d 次（阈值 %d），自动暂停调度至下次测试",
+		failures, plan.AutoDisableThreshold)
+	if err := s.accountTestSvc.PauseAccountScheduling(ctx, plan.AccountID, until, reason); err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d pause scheduling error: %v", plan.ID, err)
+		return
+	}
+	logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d account=%d paused until %s (failures=%d)",
+		plan.ID, plan.AccountID, until.Format(time.RFC3339), failures)
 }
 
 // tryRecoverAccount attempts to recover an account from recoverable runtime state.

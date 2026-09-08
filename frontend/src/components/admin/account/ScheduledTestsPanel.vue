@@ -179,7 +179,14 @@
 
               <!-- Auto Recover Badge -->
               <span
-                v-if="plan.auto_recover"
+                <span
+                  v-if="plan.auto_disable_threshold && plan.consecutive_failures"
+                  class="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-600 dark:bg-red-900/30 dark:text-red-300"
+                >
+                  {{ t('admin.scheduledTests.failingBadge', { n: plan.consecutive_failures, m: plan.auto_disable_threshold }) }}
+                </span>
+                <span
+                  v-if="plan.auto_recover"
                 class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400"
               >
                 {{ t('admin.scheduledTests.autoRecover') }}
@@ -508,7 +515,8 @@ const editForm = reactive({
   cron_expression: '' as string,
   max_results: '100' as string,
   enabled: true,
-  auto_recover: false
+  auto_recover: false,
+  auto_disable_threshold: 0
 })
 
 const newPlan = reactive({
@@ -516,13 +524,15 @@ const newPlan = reactive({
   cron_expression: '' as string,
   max_results: '100' as string,
   enabled: true,
-  auto_recover: false
+  auto_recover: false,
+  auto_disable_threshold: 0
 })
 
 const resetNewPlan = () => {
   newPlan.model_id = ''
   newPlan.cron_expression = ''
   newPlan.max_results = '100'
+  newPlan.auto_disable_threshold = 0
   newPlan.enabled = true
   newPlan.auto_recover = false
 }
@@ -567,7 +577,8 @@ const handleCreate = async () => {
       cron_expression: newPlan.cron_expression,
       enabled: newPlan.enabled,
       max_results: maxResults,
-      auto_recover: newPlan.auto_recover
+      auto_recover: newPlan.auto_recover,
+      auto_disable_threshold: Math.max(0, Math.floor(newPlan.auto_disable_threshold || 0))
     })
     appStore.showSuccess(t('admin.scheduledTests.createSuccess'))
     showAddForm.value = false
@@ -600,6 +611,7 @@ const startEdit = (plan: ScheduledTestPlan) => {
   editForm.max_results = String(plan.max_results)
   editForm.enabled = plan.enabled
   editForm.auto_recover = plan.auto_recover
+  editForm.auto_disable_threshold = plan.auto_disable_threshold ?? 0
 }
 
 const cancelEdit = () => {
@@ -615,7 +627,8 @@ const handleEdit = async () => {
       cron_expression: editForm.cron_expression,
       max_results: Number(editForm.max_results) || 100,
       enabled: editForm.enabled,
-      auto_recover: editForm.auto_recover
+      auto_recover: editForm.auto_recover,
+      auto_disable_threshold: Math.max(0, Math.floor(editForm.auto_disable_threshold || 0))
     })
     const index = plans.value.findIndex((p) => p.id === editingPlanId.value)
     if (index !== -1) {

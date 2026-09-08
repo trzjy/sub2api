@@ -7,17 +7,21 @@ import (
 
 // ScheduledTestPlan represents a scheduled test plan domain model.
 type ScheduledTestPlan struct {
-	ID             int64      `json:"id"`
-	AccountID      int64      `json:"account_id"`
-	ModelID        string     `json:"model_id"`
-	CronExpression string     `json:"cron_expression"`
-	Enabled        bool       `json:"enabled"`
-	MaxResults     int        `json:"max_results"`
-	AutoRecover    bool       `json:"auto_recover"`
-	LastRunAt      *time.Time `json:"last_run_at"`
-	NextRunAt      *time.Time `json:"next_run_at"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             int64  `json:"id"`
+	AccountID      int64  `json:"account_id"`
+	ModelID        string `json:"model_id"`
+	CronExpression string `json:"cron_expression"`
+	Enabled        bool   `json:"enabled"`
+	MaxResults     int    `json:"max_results"`
+	AutoRecover    bool   `json:"auto_recover"`
+	// AutoDisableThreshold 连续失败自动暂停调度的阈值（0=关闭该功能）。
+	AutoDisableThreshold int `json:"auto_disable_threshold"`
+	// ConsecutiveFailures 当前连续失败次数（成功清零）。
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	LastRunAt           *time.Time `json:"last_run_at"`
+	NextRunAt           *time.Time `json:"next_run_at"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // ScheduledTestResult represents a single test execution result.
@@ -42,6 +46,7 @@ type ScheduledTestPlanRepository interface {
 	Update(ctx context.Context, plan *ScheduledTestPlan) (*ScheduledTestPlan, error)
 	Delete(ctx context.Context, id int64) error
 	UpdateAfterRun(ctx context.Context, id int64, lastRunAt time.Time, nextRunAt time.Time) error
+	SetConsecutiveFailures(ctx context.Context, id int64, count int) error
 }
 
 // ScheduledTestResultRepository defines the data access interface for test results.
