@@ -3436,6 +3436,9 @@ class AutoDeliveryHandler:
                     'order_amount': str(order_info.get('amount', '')),
                     'order_quantity': str(order_info.get('quantity', '')),
                 })
+            # 订单详情拉取失败时数量兜底为 1：占位符原样透传会被主程序
+            # XIANYU_QUANTITY_UNSUPPORTED 拒绝，导致整单发码失败。
+            param_mapping.setdefault('order_quantity', '1')
 
             # 从商品信息中提取参数
             if item_info:
