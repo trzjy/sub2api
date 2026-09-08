@@ -281,7 +281,7 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 	}
 	// slug 是纯内部标识（烙进库存码 notes），创建时未提供则自动生成，避免手填出错。
 	autoSlug := pool.ID == 0 && pool.Slug == ""
-	if !validPoolSlug(pool.Slug) {
+	if !autoSlug && !validPoolSlug(pool.Slug) {
 		return nil, infraerrors.BadRequest("XIANYU_POOL_SLUG_INVALID", "pool slug must be [a-z0-9_-]")
 	}
 	if pool.LowStockThreshold < 0 {

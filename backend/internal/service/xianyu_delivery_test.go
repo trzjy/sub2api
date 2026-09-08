@@ -295,6 +295,35 @@ func validXianyuRequest() XianyuDeliveryClaimRequest {
 	}
 }
 
+
+type poolSaveControlStub struct {
+	xianyuControlStub
+	created *XianyuItemPool
+}
+
+func (s *poolSaveControlStub) CreateItemPool(_ context.Context, pool XianyuItemPool) (*XianyuItemPool, error) {
+	cp := pool
+	s.created = &cp
+	return &cp, nil
+}
+
+// 回归：创建池时未传 slug 必须自动生成（此前校验先于生成执行，空 slug 直接被拒）。
+func TestSaveItemPoolAutoGeneratesSlug(t *testing.T) {
+	stub := &poolSaveControlStub{}
+	svc := &XianyuControlService{control: stub}
+	groupID := int64(7)
+
+	created, err := svc.SaveItemPool(context.Background(), XianyuItemPool{
+		Name:         "Deepseek天卡",
+		CodeType:     XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	require.Regexp(t, `^pool-[a-z0-9]{8}$`, created.Slug)
+	require.Equal(t, created.Slug, stub.created.Slug)
+}
+
 func TestXianyuDeliveryClaimValidatesAndDelegates(t *testing.T) {
 	control := newXianyuControlStub()
 	repo := &xianyuClaimRepoStub{result: "ABCD-1234"}
