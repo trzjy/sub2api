@@ -42,7 +42,8 @@ export default {
     gaps: {
       count: 'Count',
       firstSeen: 'First Seen',
-      lastSeen: 'Last Seen'
+      lastSeen: 'Last Seen',
+      addPrice: 'Add Price'
     },
     catalog: {
       search: 'Search models',

@@ -36,13 +36,13 @@ export default {
       localHash: '本地哈希',
       gapsTitle: '线上计费缺口',
       gapsHint: '计费时找不到任何价格的模型（按 $0 记账，存在漏费）。进程内数据，重启后清零。',
-      noGaps: '暂无缺口，所有计费模型均有价格',
-      addPrice: '补价'
+      noGaps: '暂无缺口，所有计费模型均有价格'
     },
     gaps: {
       count: '次数',
       firstSeen: '首次出现',
-      lastSeen: '最近出现'
+      lastSeen: '最近出现',
+      addPrice: '补价'
     },
     catalog: {
       search: '搜索模型',
