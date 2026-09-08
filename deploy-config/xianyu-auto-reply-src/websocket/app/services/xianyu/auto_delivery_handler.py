@@ -1378,7 +1378,7 @@ class AutoDeliveryHandler:
             local_order_lock = None
             local_lock_acquired = False
             try:
-                lock_result = await try_acquire_delivery_lock(order_id, expire=120, holder_info=self.cookie_id, wait_timeout=5)
+                lock_result = await try_acquire_delivery_lock(order_id, expire=300, holder_info=self.cookie_id, wait_timeout=5)
                 if lock_result.success:
                     redis_lock_acquired = True
                     logger.info(f'[{msg_time}] 【{self.cookie_id}】获取Redis分布式锁成功: {order_id}')

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"time"
 )
@@ -52,14 +53,17 @@ func (s *XianyuAlertService) send(ctx context.Context, event, sourceID, reminder
 		return
 	}
 	for _, to := range recipients {
-		_ = s.notify.Send(ctx, NotificationEmailSendInput{
+		if err := s.notify.Send(ctx, NotificationEmailSendInput{
 			Event:          event,
 			RecipientEmail: to,
 			SourceType:     "xianyu",
 			SourceID:       sourceID,
 			ReminderKey:    reminder, // 状态变化时恢复发送；同状态未恢复去重。
 			Variables:      variables,
-		})
+		}); err != nil {
+			// 告警发送失败必须留痕，否则监控静默失效。
+			slog.Warn("xianyu: send alert notification failed", "event", event, "error", err)
+		}
 	}
 }
 
@@ -157,6 +161,8 @@ func (s *XianyuAlertService) sendAlert(event, sourceID, reminder string, variabl
 func (s *XianyuAlertService) evaluateAccounts(ctx context.Context) {
 	accounts, err := s.control.ListAccounts(ctx)
 	if err != nil {
+		// 拉取失败静默返回会让 Cookie 异常告警整轮失效，留痕定位。
+		slog.Warn("xianyu: alert evaluateAccounts list accounts failed", "error", err)
 		return
 	}
 	for _, account := range accounts {
@@ -209,9 +215,21 @@ func (s *XianyuAlertService) evaluatePendingTimeouts(ctx context.Context) {
 	if err != nil || pending == 0 {
 		return
 	}
-	claims, _, err := s.control.ListDeliveryClaims(ctx, XianyuDeliveryFilter{Status: XianyuDeliveryStatusPending, Limit: 20})
-	if err != nil {
-		return
+	// 扫描全量 pending（分页拉取），避免只覆盖前 20 单造成漏报。
+	var claims []XianyuOrderClaim
+	for page := 1; page <= 100; page++ {
+		batch, total, err := s.control.ListDeliveryClaims(ctx, XianyuDeliveryFilter{
+			Status: XianyuDeliveryStatusPending,
+			Limit:  200,
+			Offset: (page - 1) * 200,
+		})
+		if err != nil {
+			return
+		}
+		claims = append(claims, batch...)
+		if len(claims) >= total || len(batch) == 0 {
+			break
+		}
 	}
 	for _, claim := range claims {
 		if claim.LastAttemptAt != nil && time.Since(*claim.LastAttemptAt) > 10*time.Minute {
