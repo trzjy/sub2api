@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
@@ -1354,3 +1356,60 @@ async def test_delete_account_proceeds_when_stop_succeeds(monkeypatch):
     )
     assert resp.success is True
     assert fake_service.deleted["flag"] is True
+
+
+# ---------------------------------------------------------------------------
+# 供给卡券 params 契约回归（claim 入参必须用 order_quantity）
+# ---------------------------------------------------------------------------
+
+
+class _ProvisionSession:
+    """provision 契约回归专用 FakeSession：拦截新卡券，不落库。"""
+
+    def __init__(self):
+        self.added = []
+
+    async def execute(self, stmt):
+        class _Scalars:
+            def first(self):
+                return None
+
+        class _Result:
+            def scalars(self):
+                return _Scalars()
+
+        return _Result()
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, obj):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_provision_pool_card_params_use_order_quantity(monkeypatch):
+    """回归：建池自动供给卡券的 claim 入参必须用 order_quantity（后端
+    XianyuDeliveryClaimRequest 契约），不得再用 quantity——字段名不匹配会导致
+    池卡券领码全部 400（XIANYU_QUANTITY_UNSUPPORTED）。"""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "sub2api_internal_token", "test-internal-token")
+    monkeypatch.setattr(settings, "sub2api_internal_base_url", "http://sub2api:8080")
+
+    session = _ProvisionSession()
+    resp = await internal_api.internal_provision_pool_card(
+        {"name": "test-pool-card"}, session=session, service_user=FakeUser(id=1, role="ADMIN", status="ACTIVE")
+    )
+    assert resp.success is True
+    assert len(session.added) == 1
+    api_config = json.loads(session.added[0].api_config)
+    params = api_config["params"]
+    assert params.get("order_quantity") == "{order_quantity}"
+    assert "quantity" not in params, f"claim 入参不得使用 quantity 字段: {params}"
+    assert api_config["url"].endswith("/api/v1/internal/xianyu/redeem-codes/claim")
+    assert api_config["response_field"] == "data.content"
