@@ -7,18 +7,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 )
 
 // PricingAdminService 价格管理中心服务：
 // 聚合同步状态、全局价格目录（来源分层）、未覆盖模型双通道扫描与生效价试算。
 type PricingAdminService struct {
-	pricing      *PricingService
-	billing      *BillingService
-	custom       *CustomModelPricingService
-	resolver     *ModelPricingResolver
-	groupService *GroupService
-	usageRepo    UsageLogRepository
+	pricing        *PricingService
+	billing        *BillingService
+	custom         *CustomModelPricingService
+	resolver       *ModelPricingResolver
+	groupService   *GroupService
+	channelService *ChannelService
+	usageRepo      UsageLogRepository
 }
 
 func NewPricingAdminService(
@@ -27,15 +29,17 @@ func NewPricingAdminService(
 	custom *CustomModelPricingService,
 	resolver *ModelPricingResolver,
 	groupService *GroupService,
+	channelService *ChannelService,
 	usageRepo UsageLogRepository,
 ) *PricingAdminService {
 	return &PricingAdminService{
-		pricing:      pricing,
-		billing:      billing,
-		custom:       custom,
-		resolver:     resolver,
-		groupService: groupService,
-		usageRepo:    usageRepo,
+		pricing:        pricing,
+		billing:        billing,
+		custom:         custom,
+		resolver:       resolver,
+		groupService:   groupService,
+		channelService: channelService,
+		usageRepo:      usageRepo,
 	}
 }
 
@@ -197,38 +201,57 @@ func (s *PricingAdminService) GetCatalog(search, source string, page, pageSize i
 
 // --- 未覆盖模型扫描 ---
 
-// UncoveredEntry 未覆盖（或覆盖情况可疑）的已上线模型。
+// 覆盖判定结论。
+const (
+	// VerdictUncovered 无任何价格可循：请求按 $0 记账，存在漏费。
+	VerdictUncovered = "uncovered"
+	// VerdictFuzzy 仅能通过系列/子串兜底匹配出近似价（如 glm-5.3 → glm-5 兜底价）：
+	// 有计费但可能偏离真实定价，列出供管理员审查补价。
+	VerdictFuzzy = "fuzzy"
+)
+
+// UncoveredEntry 覆盖情况需要关注的已上线模型。
 type UncoveredEntry struct {
 	Model        string                `json:"model"`
-	References   []string              `json:"references"`               // 引用来源：分组名 / usage
-	Usage        *usagestats.ModelStat `json:"usage,omitempty"`          // 来自 usage 扫描时附用量
-	ZeroCostOnly bool                  `json:"zero_cost_only,omitempty"` // 有 token 流量但实际扣费为 0
+	Verdict      string                `json:"verdict"` // uncovered / fuzzy
+	References   []string              `json:"references"`                 // 引用来源：分组名 / 渠道名 / usage
+	Usage        *usagestats.ModelStat `json:"usage,omitempty"`            // 来自 usage 扫描时附用量
+	ZeroCostOnly bool                  `json:"zero_cost_only,omitempty"`   // 有 token 流量但实际扣费为 0
+	InputPerMTok float64               `json:"input_per_mtok,omitempty"`   // fuzzy：当前按近似价计费的输入单价
+	OutputPerMTok float64              `json:"output_per_mtok,omitempty"`  // fuzzy：近似输出单价
 }
 
 // UncoveredResponse 扫描结果。
 type UncoveredResponse struct {
-	Items     []UncoveredEntry `json:"items"`
-	Scanned   int              `json:"scanned"` // 候选模型总数
-	Window    string           `json:"window"`  // usage 扫描窗口，如 "720h"
-	ScannedAt time.Time        `json:"scanned_at"`
+	Items    []UncoveredEntry `json:"items"`
+	Scanned  int              `json:"scanned"`   // 候选模型总数
+	Window   string           `json:"window"`    // usage 扫描窗口，如 "720h"
+	ScannedAt time.Time       `json:"scanned_at"`
 }
 
-// ScanUncovered 双通道扫描未覆盖模型：
-//   - 配置通道：各分组 ModelsListConfig（启用时）与分组模型价格中声明的模型；
+// scanCandidate 扫描候选：一个模型名 + 引用来源 + 近窗用量。
+type scanCandidate struct {
+	references []string
+	usage      *usagestats.ModelStat
+}
+
+// ScanUncovered 多通道扫描覆盖情况存疑的已上线模型：
+//   - 配置通道：各分组 ModelsListConfig（启用时）、分组模型价格、渠道 SupportedModels
+//     （模型映射 ∪ 渠道定价，含零调用的已配置模型）；
 //   - 用量通道：近 windowDays 天 usage_logs 实际计费模型（对账标记 tokens>0 且 actual_cost=0）。
 //
-// 判定复用运行时查价链（分组价 → custom → 全局表含家族模糊匹配），杜绝误报。
+// 判定与运行时查价链同源，但区分三档：
+//  1. 精确覆盖（分组价 / 自定义价 / 价格表确定性识别出确切型号）→ 不列出；
+//  2. 模糊覆盖（仅能按系列/子串兜底匹配出近似价，如 glm-5.3 → glm-5 兜底价）→ 列出，verdict=fuzzy；
+//  3. 无价可循（按 $0 记账）→ 列出，verdict=uncovered。
 func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int) (*UncoveredResponse, error) {
 	if windowDays <= 0 {
 		windowDays = 30
 	}
 	window := time.Duration(windowDays) * 24 * time.Hour
 
-	type candidate struct {
-		references []string
-		usage      *usagestats.ModelStat
-	}
-	candidates := map[string]*candidate{}
+	type candidate = scanCandidate
+	candidates := map[string]*scanCandidate{}
 
 	addRef := func(model, ref string) {
 		model = strings.TrimSpace(model)
@@ -262,6 +285,20 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 		}
 	}
 
+	// 通道一（续）：渠道 SupportedModels（模型映射 ∪ 渠道定价），覆盖零调用的已配置模型
+	if s.channelService != nil {
+		channels, _, err := s.channelService.List(ctx, pagination.PaginationParams{Page: 1, PageSize: 500}, "", "")
+		if err != nil {
+			return nil, fmt.Errorf("list channels: %w", err)
+		}
+		for i := range channels {
+			ch := &channels[i]
+			for _, sm := range ch.SupportedModels() {
+				addRef(sm.Name, "渠道 "+ch.Name)
+			}
+		}
+	}
+
 	// 通道二：实际用量
 	start := time.Now().Add(-window)
 	stats, err := s.usageRepo.GetModelStatsWithFilters(ctx, start, time.Now(), 0, 0, 0, 0, nil, nil, nil)
@@ -277,21 +314,19 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 		}
 	}
 
-	// 覆盖判定（复用运行时查价语义；分组列表只查一次）
+	// 覆盖判定（分组列表只查一次）：精确覆盖跳过，模糊/无价列出
 	items := make([]UncoveredEntry, 0)
 	for model, c := range candidates {
-		if s.isModelCovered(groups, model) {
-			continue
+		entry, include := s.judgeCoverage(groups, model, c)
+		if include {
+			items = append(items, entry)
 		}
-		entry := UncoveredEntry{Model: model, References: c.references, Usage: c.usage}
-		if c.usage != nil && c.usage.TotalTokens > 0 && c.usage.ActualCost == 0 {
-			entry.ZeroCostOnly = true
-		}
-		items = append(items, entry)
 	}
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].ZeroCostOnly != items[j].ZeroCostOnly {
-			return items[i].ZeroCostOnly // 漏费风险排前
+		// 未覆盖（$0 漏费）优先于模糊覆盖；同类内按用量降序
+		pi, pj := items[i].Verdict == VerdictUncovered, items[j].Verdict == VerdictUncovered
+		if pi != pj {
+			return pi
 		}
 		ti, tj := int64(0), int64(0)
 		if items[i].Usage != nil {
@@ -311,19 +346,40 @@ func (s *PricingAdminService) ScanUncovered(ctx context.Context, windowDays int)
 	}, nil
 }
 
-// isModelCovered 判定模型在运行时链上是否可解析出 token 价格。
-// 与网关计费一致：分组价 → custom → 全局表（LiteLLM + 内置兜底，含家族模糊匹配）。
-func (s *PricingAdminService) isModelCovered(groups []Group, model string) bool {
+// judgeCoverage 判定单个模型的覆盖档位。返回 (条目, 是否需要列出)。
+func (s *PricingAdminService) judgeCoverage(groups []Group, model string, c *scanCandidate) (UncoveredEntry, bool) {
+	entry := UncoveredEntry{Model: model, References: c.references, Usage: c.usage}
+
+	// 1. 管理员显式配置的分组价 → 精确覆盖
 	for i := range groups {
 		if matchGroupModelPricing(&groups[i], model) != nil {
-			return true
+			return entry, false
 		}
 	}
+	// 2. 自定义价格层 → 精确覆盖
 	if s.custom.MatchCustomModelPricing(model) != nil {
-		return true
+		return entry, false
 	}
-	pricing, err := s.billing.GetModelPricing(model)
-	return err == nil && pricing != nil
+	// 3. 价格表确定性识别（远程表确切型号 / 代码内置确切型号，拒绝子串猜系列）→ 精确覆盖
+	if s.billing.HasIdentifiedTokenPricing(model) {
+		return entry, false
+	}
+	// 4. 仅能按系列/子串兜底匹配出近似价 → 模糊覆盖，列出供审查
+	if pricing, err := s.billing.GetModelPricing(model); err == nil && pricing != nil {
+		entry.Verdict = VerdictFuzzy
+		entry.InputPerMTok = pricing.InputPricePerToken * 1_000_000
+		entry.OutputPerMTok = pricing.OutputPricePerToken * 1_000_000
+		if c.usage != nil && c.usage.TotalTokens > 0 && c.usage.ActualCost == 0 {
+			entry.ZeroCostOnly = true
+		}
+		return entry, true
+	}
+	// 5. 无价可循 → 未覆盖
+	entry.Verdict = VerdictUncovered
+	if c.usage != nil && c.usage.TotalTokens > 0 && c.usage.ActualCost == 0 {
+		entry.ZeroCostOnly = true
+	}
+	return entry, true
 }
 
 // --- 生效价试算 ---

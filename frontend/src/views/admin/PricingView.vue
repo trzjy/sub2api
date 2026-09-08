@@ -236,15 +236,25 @@
             <thead>
               <tr class="border-b border-gray-200 text-left text-xs font-bold uppercase tracking-wider text-gray-400 dark:border-dark-600">
                 <th class="py-2 pr-4">{{ t('admin.pricing.columns.model') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.uncovered.verdict') }}</th>
                 <th class="py-2 pr-4">{{ t('admin.pricing.uncovered.references') }}</th>
                 <th class="py-2 pr-4">{{ t('admin.pricing.uncovered.usage') }}</th>
-                <th class="py-2 pr-4">{{ t('admin.pricing.uncovered.risk') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.uncovered.currentPrice') }}</th>
                 <th class="py-2">{{ t('admin.pricing.actions') }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="item in uncovered?.items || []" :key="item.model" class="border-b border-gray-100 dark:border-dark-700">
                 <td class="py-2 pr-4 font-mono font-medium text-gray-900 dark:text-white">{{ item.model }}</td>
+                <td class="py-2 pr-4">
+                  <span v-if="item.verdict === 'uncovered'" class="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-600 dark:bg-red-900/30 dark:text-red-400">
+                    {{ t('admin.pricing.uncovered.verdictUncovered') }}
+                  </span>
+                  <span v-else-if="item.verdict === 'fuzzy'" class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                    {{ t('admin.pricing.uncovered.verdictFuzzy') }}
+                  </span>
+                  <span v-else class="text-xs text-gray-400">{{ item.verdict }}</span>
+                </td>
                 <td class="max-w-xs py-2 pr-4">
                   <span class="break-words text-xs text-gray-500 dark:text-gray-400">{{ (item.references || []).join('、') || '—' }}</span>
                 </td>
@@ -254,11 +264,12 @@
                   </template>
                   <template v-else>—</template>
                 </td>
-                <td class="py-2 pr-4">
-                  <span v-if="item.zero_cost_only" class="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-600 dark:bg-red-900/30 dark:text-red-400">
-                    {{ t('admin.pricing.uncovered.zeroCost') }}
-                  </span>
-                  <span v-else class="text-xs text-gray-400">—</span>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs text-gray-500 dark:text-gray-400">
+                  <template v-if="item.verdict === 'fuzzy'">
+                    ${{ fmtPrice(item.input_per_mtok) }} / ${{ fmtPrice(item.output_per_mtok) }}
+                  </template>
+                  <span v-else-if="item.zero_cost_only" class="font-semibold text-red-500">$0</span>
+                  <template v-else>—</template>
                 </td>
                 <td class="py-2">
                   <button type="button" class="font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400" @click="openEditFromModel(item.model)">

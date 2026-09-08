@@ -303,7 +303,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	}
 	xianyuAdminHandler := admin.NewXianyuAdminHandler(xianyuControlService)
 	groupService := service.NewGroupService(groupRepository, apiKeyAuthCacheInvalidator)
-	pricingAdminService := service.NewPricingAdminService(pricingService, billingService, customModelPricingService, modelPricingResolver, groupService, usageLogRepository)
+	pricingAdminService := service.NewPricingAdminService(pricingService, billingService, customModelPricingService, modelPricingResolver, groupService, channelService, usageLogRepository)
 	pricingHandler := admin.NewPricingHandler(pricingAdminService, customModelPricingService)
 	upstreamBillingProbeService := service.ProvideUpstreamBillingProbeService(accountRepository, accountTestService, settingService, leaderLockCache, db)
 	ollamaCloudUsageService := service.ProvideOllamaCloudUsageService(accountRepository, httpUpstream, settingService, secretEncryptor, configConfig, leaderLockCache, db)

@@ -68,14 +68,17 @@ export default {
       days7: 'Last 7 days',
       days30: 'Last 30 days',
       days90: 'Last 90 days',
-      hint: 'Dual-channel scan: group config declarations + actual billed usage; verdicts reuse the runtime pricing chain.',
+      hint: 'Multi-channel scan: group declarations + channel models + actual billed usage. Zero-traffic models must be declared in group model lists or channels to enter the scan.',
+      verdict: 'Verdict',
+      verdictUncovered: 'No price (billed $0)',
+      verdictFuzzy: 'Fuzzy (nearby price)',
       references: 'References',
       usage: 'Window usage',
       requests: 'req',
       tokens: 'tokens',
-      risk: 'Leak risk',
+      currentPrice: 'Current $in/$out (per 1M)',
       zeroCost: 'tokens with $0',
-      allCovered: 'All covered ({scanned} candidate models scanned)'
+      allCovered: 'All exactly covered ({scanned} candidate models scanned)'
     },
     custom: {
       hint: 'The custom layer is global and sits between channel prices and the remote table; supports * wildcard suffix; remote sync never overwrites it.',

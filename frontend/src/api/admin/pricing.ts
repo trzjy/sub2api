@@ -67,9 +67,12 @@ export interface ModelStatBrief {
 
 export interface UncoveredEntry {
   model: string
+  verdict: 'uncovered' | 'fuzzy' | string
   references: string[]
   usage?: ModelStatBrief
   zero_cost_only?: boolean
+  input_per_mtok?: number
+  output_per_mtok?: number
 }
 
 export interface UncoveredResponse {

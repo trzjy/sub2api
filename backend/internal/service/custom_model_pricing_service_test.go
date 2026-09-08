@@ -199,6 +199,7 @@ func TestPricingAdminService_ScanUncovered(t *testing.T) {
 	}
 	usageRepo := &fakeUsageRepoForPricing{stats: []usagestats.ModelStat{
 		{Model: "brand-new-model", Requests: 10, TotalTokens: 1000, ActualCost: 0},
+		{Model: "glm-5.3", Requests: 5, TotalTokens: 500, ActualCost: 0.01},
 	}}
 	svc := &PricingAdminService{
 		pricing:      NewPricingService(nil, nil),
@@ -216,9 +217,15 @@ func TestPricingAdminService_ScanUncovered(t *testing.T) {
 	}
 	assert.NotContains(t, byModel, "covered-by-group", "分组价覆盖的模型不应报未覆盖")
 	require.Contains(t, byModel, "brand-new-model", "全局无价的模型应报未覆盖")
+	assert.Equal(t, VerdictUncovered, byModel["brand-new-model"].Verdict)
 	assert.Contains(t, byModel["brand-new-model"].References, "裸分组")
 	assert.Contains(t, byModel["brand-new-model"].References, "usage")
 	assert.True(t, byModel["brand-new-model"].ZeroCostOnly, "有 token 流量但扣费为 0 应打对账标记")
+
+	// glm-5.3：价格表里只有 glm-5.1，运行时按 "glm-5" 系列子串兜底价计费 → 模糊覆盖，应列出供审查
+	require.Contains(t, byModel, "glm-5.3", "仅靠系列子串兜底计价的模型应列出")
+	assert.Equal(t, VerdictFuzzy, byModel["glm-5.3"].Verdict)
+	assert.Greater(t, byModel["glm-5.3"].InputPerMTok, 0.0, "模糊覆盖应附当前近似的输入单价")
 }
 
 // --- 同步状态快照 ---

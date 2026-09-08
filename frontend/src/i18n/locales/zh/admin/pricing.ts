@@ -68,14 +68,17 @@ export default {
       days7: '近 7 天',
       days30: '近 30 天',
       days90: '近 90 天',
-      hint: '双通道扫描：分组配置声明 + 实际计费用量；判定与运行时查价链一致。',
+      hint: '多通道扫描：分组声明 + 渠道模型 + 实际计费用量；零调用模型需在分组"模型列表配置"或渠道中登记才会进入扫描。',
+      verdict: '判定',
+      verdictUncovered: '无价（按 $0 记账）',
+      verdictFuzzy: '模糊计价（按近似价）',
       references: '引用来源',
       usage: '近窗用量',
       requests: '次',
       tokens: 'tokens',
-      risk: '漏费风险',
+      currentPrice: '当前计价 $入/$出 (每百万)',
       zeroCost: '有量无费',
-      allCovered: '全部覆盖（扫描候选 {scanned} 个模型）'
+      allCovered: '全部精确覆盖（扫描候选 {scanned} 个模型）'
     },
     custom: {
       hint: '自定义价格层全局生效，优先级介于渠道价与远程同步表之间；支持 * 后缀通配；远程同步不会覆盖本层配置。',
