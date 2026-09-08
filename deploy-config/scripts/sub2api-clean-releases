@@ -19,8 +19,11 @@
 #   KEEP_RELEASES           每个项目保留 tag 数（含当前运行），默认 2
 #   DEPLOY_DIR              部署根目录，默认 /opt/sub2api
 #   ENV_FILE                sub2api .env 路径，默认 $DEPLOY_DIR/.env
-#   SUB2API_IMAGE           sub2api 镜像名，默认 sub2api
+#   SUB2API_IMAGE           sub2api 镜像名（当前部署主仓库），默认 sub2api
+#   SUB2API_LEGACY_REPOS    历史远程别名仓库（带 registry 前缀），默认 weishaw/sub2api ghcr.io/trzjy/sub2api；
+#                           purge 模式清理：仅保留被运行容器引用的镜像，其余全部删除，避免历史大镜像堆积
 #   WORKER_IMAGE            Worker 镜像名，默认 xianyu-auto-reply
+#   WORKER_LEGACY_REPOS     Worker 历史远程别名仓库，默认空
 #   ENV_BAK_KEEP            .env.bak-* 保留数，默认 3
 
 set -euo pipefail
@@ -35,7 +38,9 @@ KEEP_RELEASES="${KEEP_RELEASES:-2}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/sub2api}"
 ENV_FILE="${ENV_FILE:-$DEPLOY_DIR/.env}"
 SUB2API_IMAGE="${SUB2API_IMAGE:-sub2api}"
+SUB2API_LEGACY_REPOS="${SUB2API_LEGACY_REPOS:-weishaw/sub2api ghcr.io/trzjy/sub2api}"
 WORKER_IMAGE="${WORKER_IMAGE:-xianyu-auto-reply}"
+WORKER_LEGACY_REPOS="${WORKER_LEGACY_REPOS:-}"
 ENV_BAK_KEEP="${ENV_BAK_KEEP:-3}"
 
 if [ "$KEEP_RELEASES" -lt 2 ]; then
@@ -90,45 +95,67 @@ remove_file() {
   fi
 }
 
-# ---- 1. sub2api 镜像 ------------------------------------------------------
-# 保留集合：latest + 当前运行 sub2api 容器加载的 tag
+# ---- 通用：清理某仓库镜像（按保护策略） ----------------------------------
+# 用法: clean_repo <repo> <mode>
+#   mode=recent : 保护 latest + 当前运行 sub2api 容器引用 + 最近 KEEP_RELEASES 个 tag；其余删除
+#   mode=purge  : 仅保护"被当前运行容器引用的镜像 ID"，其余（历史遗留）全部删除
+#
+# 说明: 运行容器可能引用带 registry 前缀的镜像；用镜像 ID 跨仓库匹配保护，避免误删在用镜像。
+#       历史远程别名仓库（如 weishaw/sub2api）当前部署已改用本地 <commit>-w 标签，不再被任何
+#       运行容器引用，purge 模式可将其彻底清理，防止磁盘被历史大镜像持续堆积。
+clean_repo() {
+  local repo="$1" mode="$2"
+  echo "=== images: $repo ($mode) ==="
+  local running_ref running_id
+  running_ref="$(docker inspect sub2api --format '{{.Config.Image}}' 2>/dev/null || true)"
+  # 镜像 ID 归一化为 12 位短 ID，与 `docker images {{.ID}}` 输出对齐，确保 in-use 保护比较一致
+  local running_full
+  running_full="$(docker inspect sub2api --format '{{.Image}}' 2>/dev/null || true)"
+  running_id="${running_full#sha256:}"
+  running_id="${running_id:0:12}"
+  if [ -z "$running_ref" ]; then
+    echo "warning: sub2api container not running; legacy purge may remove a needed image" >&2
+  fi
+
+  local rows=()
+  mapfile -t rows < <(
+    docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}" "$repo" 2>/dev/null |
+      grep -v "<none>" |
+      sort -k2,2 -r
+  )
+  local seen=0
+  for row in "${rows[@]:-}"; do
+    [ -z "$row" ] && continue
+    IFS=$'\t' read -r ref id _created <<< "$row"
+    # 跨仓库保护：运行容器正在使用的镜像 ID 永远保留
+    if [ -n "$running_id" ] && [ "$id" = "$running_id" ]; then
+      echo "keeping protected (in-use): $ref"
+      kept=$((kept + 1)); seen=$((seen + 1)); continue
+    fi
+    if [ "$mode" = "recent" ]; then
+      if [ "$ref" = "$repo:latest" ] || [ "$ref" = "$running_ref" ]; then
+        echo "keeping protected: $ref"
+        kept=$((kept + 1)); seen=$((seen + 1)); continue
+      fi
+      if [ "$seen" -lt "$KEEP_RELEASES" ]; then
+        echo "keeping recent: $ref"
+        kept=$((kept + 1)); seen=$((seen + 1)); continue
+      fi
+    fi
+    remove_image "$ref"
+  done
+}
+
+# ---- 1. sub2api 镜像（当前部署主仓库 + 历史远程别名仓库） -----------------
+# 主仓库用 recent 模式（保护 latest + 运行引用 + 最近 KEEP_RELEASES 个）；
+# 历史远程别名仓库（SUB2API_LEGACY_REPOS）用 purge 模式，仅保护被运行容器引用的
+# 镜像，其余（当前部署已改用本地 <commit>-w 标签）全部清理，避免历史大镜像堆积。
 echo "=== sub2api images ==="
-
-running_sub2api_ref="$(docker inspect sub2api --format '{{.Config.Image}}' 2>/dev/null || true)"
-if [ -z "$running_sub2api_ref" ]; then
-  echo "warning: sub2api container not running, will keep only latest" >&2
-fi
-
-# 收集所有 sub2api:* tag，按 CreatedSince 倒序
-mapfile -t sub2api_tags < <(
-  docker images --format "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" "$SUB2API_IMAGE" |
-    grep -v "<none>" |
-    sort -k2,2 -r
-)
-
-sub2api_protect_set="$(mktemp)"
-trap 'rm -f "$sub2api_protect_set"' EXIT
-{
-  echo "sub2api:latest"
-  if [ -n "$running_sub2api_ref" ]; then echo "$running_sub2api_ref"; fi
-} | sort -u > "$sub2api_protect_set"
-
-seen=0
-while IFS=$'\t' read -r ref _created; do
-  if grep -qxF "$ref" "$sub2api_protect_set"; then
-    echo "keeping protected: $ref"
-    kept=$((kept + 1))
-    seen=$((seen + 1))
-    continue
-  fi
-  if [ "$seen" -lt "$KEEP_RELEASES" ]; then
-    echo "keeping recent: $ref"
-    kept=$((kept + 1))
-    seen=$((seen + 1))
-    continue
-  fi
-  remove_image "$ref"
-done < <(printf "%s\n" "${sub2api_tags[@]}")
+clean_repo "$SUB2API_IMAGE" recent
+for legacy_repo in $SUB2API_LEGACY_REPOS; do
+  [ -z "$legacy_repo" ] && continue
+  clean_repo "$legacy_repo" purge
+done
 
 # ---- 2. xianyu-auto-reply 镜像 --------------------------------------------
 # 保留集合：当前 .env 中 XIANYU_WORKER_IMAGE_TAG + 它前 1 个最近 tag（KEEP_RELEASES-1）
@@ -154,7 +181,7 @@ mapfile -t worker_tags < <(
 )
 
 worker_protect_set="$(mktemp)"
-trap 'rm -f "$sub2api_protect_set" "$worker_protect_set"' EXIT
+trap 'rm -f "$worker_protect_set"' EXIT
 {
   if [ -n "$worker_tag" ]; then echo "$WORKER_IMAGE:$worker_tag"; fi
   if [ -n "$running_worker_ref" ]; then echo "$running_worker_ref"; fi
@@ -177,6 +204,12 @@ while IFS=$'\t' read -r ref _created; do
   fi
   remove_image "$ref"
 done < <(printf "%s\n" "${worker_tags[@]}")
+
+# 历史远程别名仓库（默认空）：purge 模式，仅保护被运行容器引用的镜像，其余全部删除
+for legacy_repo in $WORKER_LEGACY_REPOS; do
+  [ -z "$legacy_repo" ] && continue
+  clean_repo "$legacy_repo" purge
+done
 
 # ---- 3. 悬空镜像：仅清理 sub2api / xianyu-auto-reply 命名空间的 ----
 # 策略：枚举 Repository 为 sub2api 或 xianyu-auto-reply 且 Tag=<none> 的悬挂镜像。
