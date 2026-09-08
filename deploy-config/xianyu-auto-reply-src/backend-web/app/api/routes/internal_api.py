@@ -441,7 +441,7 @@ async def internal_provision_pool_card(
             "spec_name": "{spec_name}",
             "spec_value": "{spec_value}",
             "chat_id": "{chat_id}",
-            "quantity": 1,
+            "order_quantity": "{order_quantity}",
         },
         "response_field": "data.content",
     }
