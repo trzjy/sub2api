@@ -67,6 +67,7 @@ type ModelPlazaService struct {
 	pricingService *PricingService
 	billingService *BillingService
 	resolver       *ModelPricingResolver
+	settingService *SettingService
 }
 
 // NewModelPlazaService 创建模型广场服务。
@@ -76,6 +77,7 @@ func NewModelPlazaService(
 	pricingService *PricingService,
 	billingService *BillingService,
 	resolver *ModelPricingResolver,
+	settingService *SettingService,
 ) *ModelPlazaService {
 	return &ModelPlazaService{
 		channelRepo:    channelRepo,
@@ -83,6 +85,7 @@ func NewModelPlazaService(
 		pricingService: pricingService,
 		billingService: billingService,
 		resolver:       resolver,
+		settingService: settingService,
 	}
 }
 
@@ -330,6 +333,23 @@ func plazaImageDisplayPricing(p *ChannelModelPricing, g *Group) *ChannelModelPri
 // 带 memo 避免同名模型重复解析。官方阶梯按无分组、无渠道的口径查阶梯表。
 // billingService 为 nil（测试场景）或查不到时返回 nil。
 func (s *ModelPlazaService) lookupOfficialPricing(ctx context.Context, modelName string, memo map[string]*PlazaOfficialPricing) *PlazaOfficialPricing {
+	// 官方参考价覆盖层（管理端维护，如 Kimi 官方 I/O 价）优先于计费目录：
+	// 计费目录对部分模型只有兜底近似价，直接当"官方价"展示会失真。
+	if overrides := s.cachedOfficialOverrides(ctx); overrides != nil {
+		if ov, ok := overrides[strings.ToLower(strings.TrimSpace(modelName))]; ok {
+			perTok := func(v float64) *float64 {
+				x := v / 1e6
+				return &x
+			}
+			out := &PlazaOfficialPricing{
+				InputPrice:      perTok(ov.InputPrice),
+				OutputPrice:     perTok(ov.OutputPrice),
+				CacheReadPrice:  perTok(ov.CacheReadPrice),
+				CacheWritePrice: perTok(ov.CacheWritePrice),
+			}
+			return out
+		}
+	}
 	if s.billingService == nil {
 		return nil
 	}

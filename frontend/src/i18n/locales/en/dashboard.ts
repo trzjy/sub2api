@@ -639,6 +639,7 @@ export default {
       timePricingRateHint: 'Effective rate {rate} × period multiplier {multiplier}',
       paidPrice: 'Your Price (Discounted)',
       officialPrice: 'Official Price',
+      discountHint: 'Paid price ÷ official reference price (same traffic cache-mix basis)',
       rate: 'Rate',
       unitPerMillion: '$ / 1M tokens',
       perUnitRequest: '/ request',

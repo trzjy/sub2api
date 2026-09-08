@@ -52,11 +52,15 @@ interface Props {
    * 只关心费率、不关心有效期的场景）。
    */
   alwaysShowRate?: boolean
+  /** 用户端隐藏标准组倍率数字（订阅组天数标签不受影响）。 */
+  hideRate?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   subscriptionType: 'standard',
   showRate: true,
+  /** 用户端隐藏标准组倍率数字（订阅组天数标签不受影响）。 */
+  hideRate: false,
   daysRemaining: null,
   userRateMultiplier: null,
   peakRateEnabled: false,
@@ -104,6 +108,8 @@ const showLabel = computed(() => {
   if (!props.showRate) return false
   // 订阅类型：显示天数或"订阅"
   if (isSubscription.value) return true
+  // 用户端隐藏倍率数字（价格与折扣在模型价格页展示）
+  if (props.hideRate) return false
   // 标准类型：显示倍率（包括专属倍率）
   return props.rateMultiplier !== undefined || hasCustomRate.value
 })

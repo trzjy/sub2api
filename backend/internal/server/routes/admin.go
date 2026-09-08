@@ -119,6 +119,9 @@ func RegisterAdminRoutes(
 		// 价格管理中心
 		registerPricingRoutes(admin, h)
 
+		// 模型广场官方参考价（管理端维护展示用官方价）
+		registerModelPlazaAdminRoutes(admin, h)
+
 		// 渠道监控
 		registerChannelMonitorRoutes(admin, h, settingService)
 		registerChannelMonitorV2Routes(admin, h, settingService)
@@ -977,5 +980,18 @@ func channelMonitorModeV2Guard(settingService *service.SettingService) gin.Handl
 			return
 		}
 		c.Next()
+	}
+}
+
+
+// registerModelPlazaAdminRoutes 模型广场官方参考价覆盖（仅展示，不影响计费）。
+func registerModelPlazaAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.ModelPlaza == nil {
+		return
+	}
+	plaza := admin.Group("/model-plaza")
+	{
+		plaza.GET("/official-pricing", h.ModelPlaza.GetOfficialPricingOverrides)
+		plaza.PUT("/official-pricing", h.ModelPlaza.SaveOfficialPricingOverrides)
 	}
 }

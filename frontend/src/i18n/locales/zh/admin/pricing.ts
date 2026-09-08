@@ -8,7 +8,8 @@ export default {
       status: '同步状态',
       catalog: '价格目录',
       uncovered: '未覆盖模型',
-      custom: '自定义价格'
+      custom: '自定义价格',
+      official: '官方参考价'
     },
     columns: {
       model: '模型',
@@ -84,6 +85,18 @@ export default {
       zeroCost: '有量无费',
       allCovered: '全部精确覆盖（扫描候选 {scanned} 个模型）'
     },
+    official: {
+      hint: '官方参考价仅用于模型广场"官方价格"列与折扣徽章展示，不影响计费。未覆盖的模型回落计费目录价。',
+      add: '新增官方价',
+      addTitle: '新增官方参考价',
+      editTitle: '编辑官方参考价',
+      model: '模型名',
+      unitHint: '价格单位：¥ / 百万 tokens（保存时按 7.15 汇率换算为 $ 存储）。留空表示该项不展示。',
+      empty: '暂无官方参考价覆盖',
+      deleteTitle: '删除官方参考价',
+      deleteMessage: '确定删除「{model}」的官方参考价？删除后该模型回落计费目录价。'
+    },
+    officialTabPlaceholder: '',
     custom: {
       hint: '自定义价格层全局生效，优先级介于渠道价与远程同步表之间；支持 * 后缀通配；远程同步不会覆盖本层配置。',
       add: '新增定价',

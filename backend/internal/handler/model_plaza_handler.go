@@ -2,6 +2,7 @@ package handler
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -244,4 +245,58 @@ func toModelPlazaOfficialPricing(p *service.PlazaOfficialPricing) *modelPlazaOff
 		CacheReadPrice:    p.CacheReadPrice,
 		Intervals:         toUserPricingIntervals(p.Intervals),
 	}
+}
+
+
+// --- 管理端：官方参考价覆盖（仅模型广场展示，不影响计费） ---
+
+// GetOfficialPricingOverrides 获取官方参考价覆盖列表。
+// GET /api/v1/admin/model-plaza/official-pricing
+func (h *ModelPlazaHandler) GetOfficialPricingOverrides(c *gin.Context) {
+	overrides, err := h.plazaService.GetPlazaOfficialPricingOverrides(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"overrides": service.ListPlazaOverrideEntries(overrides)})
+}
+
+// saveOfficialPricingRequest 保存请求（全量替换）。
+type saveOfficialPricingRequest struct {
+	Overrides []struct {
+		Model           string  `json:"model" binding:"required"`
+		InputPrice      float64 `json:"input_price"`
+		OutputPrice     float64 `json:"output_price"`
+		CacheReadPrice  float64 `json:"cache_read_price"`
+		CacheWritePrice float64 `json:"cache_write_price"`
+	} `json:"overrides" binding:"required"`
+}
+
+// SaveOfficialPricingOverrides 保存官方参考价覆盖（全量替换）。
+// PUT /api/v1/admin/model-plaza/official-pricing
+func (h *ModelPlazaHandler) SaveOfficialPricingOverrides(c *gin.Context) {
+	var req saveOfficialPricingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	overrides := make(map[string]service.PlazaOfficialOverride, len(req.Overrides))
+	for _, item := range req.Overrides {
+		model := strings.ToLower(strings.TrimSpace(item.Model))
+		if model == "" {
+			continue
+		}
+		overrides[model] = service.PlazaOfficialOverride{
+			InputPrice:      item.InputPrice,
+			OutputPrice:     item.OutputPrice,
+			CacheReadPrice:  item.CacheReadPrice,
+			CacheWritePrice: item.CacheWritePrice,
+		}
+	}
+	if err := h.plazaService.SavePlazaOfficialPricingOverrides(c.Request.Context(), overrides); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	h.plazaService.InvalidatePlazaOverrideCache()
+	response.Success(c, gin.H{"count": len(overrides)})
 }

@@ -579,11 +579,19 @@ func (s *BillingService) initFallbackPricing() {
 	// Kimi K3 国际站 USD 价目：https://platform.kimi.ai/docs/pricing/chat-k3.md
 	// Kimi Code bare aliases（k3 / k3-256k）官方无按 token 价目；复用 API Platform
 	// kimi-k3 档位作代理计费 fallback（同 kimi-for-coding 对 K2.6 的处理口径）。
+	s.fallbackPrices["kimi-k2.7-code"] = &ModelPricing{
+		InputPricePerToken:         0.90909e-6, // $0.90909 per MTok (¥6.5 cache miss, Moonshot 官方 2026-09)
+		OutputPricePerToken:        3.7762e-6,  // $3.7762 per MTok (¥27)
+		CacheReadPricePerToken:     0.181818e-6, // $0.181818 per MTok (¥1.3 cache hit)
+		CacheCreationPricePerToken: 0.90909e-6,  // 缓存写入按未命中输入价
+		SupportsCacheBreakdown:     false,
+	}
 	s.fallbackPrices["kimi-k3"] = &ModelPricing{
-		InputPricePerToken:     3e-6,    // $3.00 per MTok (cache miss)
-		OutputPricePerToken:    15e-6,   // $15.00 per MTok
-		CacheReadPricePerToken: 0.30e-6, // $0.30 per MTok (cache hit)
-		SupportsCacheBreakdown: false,
+		InputPricePerToken:         2.7972e-6, // $2.7972 per MTok (¥20 cache miss, Moonshot 官方 2026-09)
+		OutputPricePerToken:        13.986e-6, // $13.986 per MTok (¥100)
+		CacheReadPricePerToken:     0.27972e-6, // $0.27972 per MTok (¥2 cache hit)
+		CacheCreationPricePerToken: 2.7972e-6, // 缓存写入按未命中输入价
+		SupportsCacheBreakdown:     false,
 	}
 	s.fallbackPrices["kimi-k2.6"] = &ModelPricing{
 		InputPricePerToken:     0.95e-6, // $0.95 per MTok (cache miss)
@@ -866,6 +874,10 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	// 注意：kimi-k3[1m] 是 Claude Code 上下文选择语法，不是 Kimi API 模型 ID，不进入 fallback。
 	if strings.Contains(modelLower, "kimi-for-coding") {
 		return s.fallbackPrices["kimi-for-coding"]
+	}
+	if modelLower == "kimi-k2.7-code" || strings.HasSuffix(modelLower, "/kimi-k2.7-code") ||
+		modelLower == "kimi-k2.7-coding" || strings.HasSuffix(modelLower, "/kimi-k2.7-coding") {
+		return s.fallbackPrices["kimi-k2.7-code"]
 	}
 	if modelLower == "kimi-k3" || strings.HasSuffix(modelLower, "/kimi-k3") ||
 		modelLower == "k3" || modelLower == "k3-256k" ||

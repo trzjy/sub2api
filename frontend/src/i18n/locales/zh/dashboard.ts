@@ -643,6 +643,7 @@ export default {
       timePricingRateHint: '生效倍率 {rate} × 时段倍率 {multiplier}',
       paidPrice: '实付价格(折后)',
       officialPrice: '官方价格',
+      discountHint: '实付价 ÷ 官方参考价（同流量缓存结构口径）',
       rate: '折扣倍率',
       unitPerMillion: '$ / 1M token',
       perUnitRequest: '/ 次',

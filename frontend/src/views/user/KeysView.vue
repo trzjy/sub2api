@@ -146,6 +146,7 @@
                   :name="row.group.name"
                   :platform="row.group.platform"
                   :subscription-type="row.group.subscription_type"
+                  :hide-rate="true"
                   :rate-multiplier="row.group.rate_multiplier"
                   :user-rate-multiplier="userGroupRates[row.group.id]"
                   :peak-rate-enabled="row.group.peak_rate_enabled"

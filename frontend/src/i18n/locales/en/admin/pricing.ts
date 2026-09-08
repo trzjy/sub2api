@@ -8,7 +8,8 @@ export default {
       status: 'Sync Status',
       catalog: 'Catalog',
       uncovered: 'Uncovered Models',
-      custom: 'Custom Pricing'
+      custom: 'Custom Pricing',
+      official: 'Official Prices'
     },
     columns: {
       model: 'Model',
@@ -85,6 +86,18 @@ export default {
       zeroCost: 'tokens with $0',
       allCovered: 'All exactly covered ({scanned} candidate models scanned)'
     },
+    official: {
+      hint: 'Official reference prices only feed the "Official Price" column and discount badges on the model plaza — billing is unaffected. Models without an override fall back to the billing catalog.',
+      add: 'Add Official Price',
+      addTitle: 'Add Official Reference Price',
+      editTitle: 'Edit Official Reference Price',
+      model: 'Model',
+      unitHint: 'Unit: ¥ / 1M tokens (converted to $ at 7.15 on save). Leave blank to hide the item.',
+      empty: 'No official price overrides yet',
+      deleteTitle: 'Delete Official Reference Price',
+      deleteMessage: 'Delete the official reference price for "{model}"? The model will fall back to the billing catalog price.'
+    },
+    officialTabPlaceholder: '',
     custom: {
       hint: 'The custom layer is global and sits between channel prices and the remote table; supports * wildcard suffix; remote sync never overwrites it.',
       add: 'Add Pricing',

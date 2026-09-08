@@ -350,6 +350,101 @@
       </div>
     </div>
 
+    <!-- ==================== 官方参考价 ==================== -->
+    <div v-if="activeTab === 'official'" class="space-y-4">
+      <div class="card flex flex-wrap items-center justify-between gap-4 p-4">
+        <p class="max-w-3xl text-xs text-gray-500 dark:text-gray-400">{{ t('admin.pricing.official.hint') }}</p>
+        <button type="button" class="btn btn-primary" @click="openOfficialEdit(null)">
+          <Icon name="plus" size="sm" class="mr-1.5" />
+          {{ t('admin.pricing.official.add') }}
+        </button>
+      </div>
+
+      <div class="card p-6">
+        <div v-if="!officialList.length && !officialLoading" class="flex flex-col items-center py-8">
+          <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{{ t('admin.pricing.official.empty') }}</p>
+        </div>
+        <div v-else class="overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 text-left text-xs font-bold uppercase tracking-wider text-gray-400 dark:border-dark-600">
+                <th class="py-2 pr-4">{{ t('admin.pricing.columns.model') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.preview.input') }}（¥/M）</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.preview.output') }}（¥/M）</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.preview.cacheRead') }}（¥/M）</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.preview.cacheWrite') }}（¥/M）</th>
+                <th class="py-2">{{ t('admin.pricing.actions') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="entry in officialList" :key="entry.model" class="border-b border-gray-100 dark:border-dark-700">
+                <td class="py-2 pr-4 font-mono font-medium text-gray-900 dark:text-white">{{ entry.model }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">¥{{ fmtPrice(cnyFromUsd(entry.price.input_price)) }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">¥{{ fmtPrice(cnyFromUsd(entry.price.output_price)) }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">¥{{ fmtPrice(cnyFromUsd(entry.price.cache_read_price)) }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">¥{{ fmtPrice(cnyFromUsd(entry.price.cache_write_price)) }}</td>
+                <td class="whitespace-nowrap py-2">
+                  <button type="button" class="mr-3 font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400" @click="openOfficialEdit(entry)">
+                    {{ t('common.edit') }}
+                  </button>
+                  <button type="button" class="font-medium text-red-600 hover:text-red-700 dark:text-red-400" @click="askOfficialDelete(entry)">
+                    {{ t('common.delete') }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 官方参考价编辑对话框 -->
+    <BaseDialog :show="officialEditVisible" :title="officialEditTitle" width="wide" @close="officialEditVisible = false">
+      <div class="space-y-4 py-2">
+        <div>
+          <label class="input-label">{{ t('admin.pricing.official.model') }}</label>
+          <input v-model.trim="officialForm.model" type="text" class="input" :disabled="!!editingOfficialId" :placeholder="t('admin.pricing.custom.modelsPlaceholder')" />
+        </div>
+        <p class="text-xs text-gray-400">{{ t('admin.pricing.official.unitHint') }}</p>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">{{ t('admin.pricing.preview.input') }}（¥/M）</label>
+            <Input v-model="officialForm.input_cny" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.preview.output') }}（¥/M）</label>
+            <Input v-model="officialForm.output_cny" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.preview.cacheRead') }}（¥/M）</label>
+            <Input v-model="officialForm.cache_read_cny" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.preview.cacheWrite') }}（¥/M）</label>
+            <Input v-model="officialForm.cache_write_cny" type="number" />
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="btn btn-secondary" @click="officialEditVisible = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="btn btn-primary" :disabled="officialSaving || !officialForm.model" @click="saveOfficialEdit">
+            {{ t('common.save') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
+
+    <!-- 官方参考价删除确认 -->
+    <ConfirmDialog
+      :show="officialDeleteVisible"
+      :title="t('admin.pricing.official.deleteTitle')"
+      :message="t('admin.pricing.official.deleteMessage', { model: officialDeleteTarget || '' })"
+      danger
+      @confirm="confirmOfficialDelete"
+      @cancel="officialDeleteVisible = false"
+    />
+
     <!-- 编辑对话框 -->
     <BaseDialog :show="editVisible" :title="editTitle" width="wide" @close="editVisible = false">
       <div class="space-y-4 py-2">
@@ -446,7 +541,7 @@ import { useAppStore } from '@/stores'
 const { t } = useI18n()
 const appStore = useAppStore()
 
-type TabKey = 'status' | 'catalog' | 'uncovered' | 'custom'
+type TabKey = 'status' | 'catalog' | 'uncovered' | 'custom' | 'official'
 const activeTab = ref<TabKey>('status')
 
 const status = ref<PricingStatusResponse | null>(null)
@@ -456,7 +551,8 @@ const tabs = computed(() => [
   { key: 'status' as TabKey, label: 'admin.pricing.tabs.status', badge: () => status.value?.live_gaps.length ?? 0 },
   { key: 'catalog' as TabKey, label: 'admin.pricing.tabs.catalog', badge: () => 0 },
   { key: 'uncovered' as TabKey, label: 'admin.pricing.tabs.uncovered', badge: () => uncovered.value?.items.length ?? 0 },
-  { key: 'custom' as TabKey, label: 'admin.pricing.tabs.custom', badge: () => 0 }
+  { key: 'custom' as TabKey, label: 'admin.pricing.tabs.custom', badge: () => 0 },
+  { key: 'official' as TabKey, label: 'admin.pricing.tabs.official', badge: () => 0 }
 ])
 
 function switchTab(tab: TabKey) {
@@ -465,6 +561,7 @@ function switchTab(tab: TabKey) {
   if (tab === 'catalog' && !catalog.value.length && !catalogLoading.value) fetchCatalog()
   if (tab === 'uncovered' && !uncovered.value) fetchUncovered()
   if (tab === 'custom' && !customList.value.length && !customLoading.value) fetchCustom()
+  if (tab === 'official' && !officialList.value.length && !officialLoading.value) fetchOfficial()
 }
 
 // --- 同步状态 ---
@@ -713,6 +810,108 @@ async function confirmDelete() {
     deleteVisible.value = false
     await fetchCustom()
     fetchStatus()
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  }
+}
+
+// --- 官方参考价（模型广场展示层） ---
+
+const officialList = ref<{ model: string; price: { input_price: number; output_price: number; cache_read_price: number; cache_write_price: number } }[]>([])
+const officialLoading = ref(false)
+const officialEditVisible = ref(false)
+const officialSaving = ref(false)
+const editingOfficialId = ref<string | null>(null)
+const officialForm = reactive({
+  model: '',
+  input_cny: '',
+  output_cny: '',
+  cache_read_cny: '',
+  cache_write_cny: ''
+})
+
+const officialEditTitle = computed(() =>
+  editingOfficialId.value ? t('admin.pricing.official.editTitle') : t('admin.pricing.official.addTitle')
+)
+
+async function fetchOfficial() {
+  officialLoading.value = true
+  try {
+    officialList.value = (await adminAPI.pricing.getPlazaOfficialPricing()) || []
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  } finally {
+    officialLoading.value = false
+  }
+}
+
+function openOfficialEdit(entry: { model: string; price: { input_price: number; output_price: number; cache_read_price: number; cache_write_price: number } } | null) {
+  editingOfficialId.value = entry?.model ?? null
+  officialForm.model = entry?.model ?? ''
+  officialForm.input_cny = cnyFromUsd(entry?.price.input_price) ? String(cnyFromUsd(entry?.price.input_price)) : ''
+  officialForm.output_cny = cnyFromUsd(entry?.price.output_price) ? String(cnyFromUsd(entry?.price.output_price)) : ''
+  officialForm.cache_read_cny = cnyFromUsd(entry?.price.cache_read_price) ? String(cnyFromUsd(entry?.price.cache_read_price)) : ''
+  officialForm.cache_write_cny = cnyFromUsd(entry?.price.cache_write_price) ? String(cnyFromUsd(entry?.price.cache_write_price)) : ''
+  officialEditVisible.value = true
+}
+
+function cnyFromUsd(usd?: number): number {
+  if (usd == null || !Number.isFinite(usd)) return 0
+  return Number((usd * 7.15 * 1e6).toFixed(4)) // $/token → ¥/M
+}
+
+function usdFromCny(cny: string): number {
+  const v = Number(cny)
+  if (!Number.isFinite(v)) return 0
+  return v / 7.15 / 1e6 // ¥/M → $/token
+}
+
+async function saveOfficialEdit() {
+  if (!officialForm.model.trim()) return
+  officialSaving.value = true
+  try {
+    const price = {
+      input_price: usdFromCny(officialForm.input_cny),
+      output_price: usdFromCny(officialForm.output_cny),
+      cache_read_price: usdFromCny(officialForm.cache_read_cny),
+      cache_write_price: usdFromCny(officialForm.cache_write_cny)
+    }
+    const rest = officialList.value.filter((x) => x.model !== officialForm.model.trim())
+    const entries = [
+      ...rest
+        .filter((x) => x.model !== (editingOfficialId.value ?? ''))
+        .map((x) => ({ model: x.model, price: x.price })),
+      { model: officialForm.model.trim(), price }
+    ]
+    await adminAPI.pricing.savePlazaOfficialPricing(entries)
+    appStore.showSuccess(t('common.saved'))
+    officialEditVisible.value = false
+    await fetchOfficial()
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  } finally {
+    officialSaving.value = false
+  }
+}
+
+const officialDeleteVisible = ref(false)
+const officialDeleteTarget = ref<string | null>(null)
+
+function askOfficialDelete(entry: { model: string }) {
+  officialDeleteTarget.value = entry.model
+  officialDeleteVisible.value = true
+}
+
+async function confirmOfficialDelete() {
+  if (!officialDeleteTarget.value) return
+  try {
+    const entries = officialList.value
+      .filter((x) => x.model !== officialDeleteTarget.value)
+      .map((x) => ({ model: x.model, price: x.price }))
+    await adminAPI.pricing.savePlazaOfficialPricing(entries)
+    appStore.showSuccess(t('common.deleted'))
+    officialDeleteVisible.value = false
+    await fetchOfficial()
   } catch (err: any) {
     appStore.showError(err?.message || t('common.error'))
   }

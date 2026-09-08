@@ -102,6 +102,7 @@
                     :rate-multiplier="g.rate_multiplier"
                     :user-rate-multiplier="userGroupRates[g.id] ?? null"
                     always-show-rate
+                    hide-rate
                   />
                   <span
                     v-if="hasPeakRate(g)"
@@ -136,6 +137,7 @@
                     :rate-multiplier="g.rate_multiplier"
                     :user-rate-multiplier="userGroupRates[g.id] ?? null"
                     always-show-rate
+                    hide-rate
                   />
                   <span
                     v-if="hasPeakRate(g)"
@@ -241,6 +243,7 @@
                         :rate-multiplier="g.rate_multiplier"
                         :user-rate-multiplier="userGroupRates[g.id] ?? null"
                         always-show-rate
+                    hide-rate
                       />
                       <span
                         v-if="hasPeakRate(g)"
@@ -276,6 +279,7 @@
                         :rate-multiplier="g.rate_multiplier"
                         :user-rate-multiplier="userGroupRates[g.id] ?? null"
                         always-show-rate
+                    hide-rate
                       />
                       <span
                         v-if="hasPeakRate(g)"

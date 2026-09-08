@@ -207,8 +207,40 @@ export async function deleteCustom(id: number): Promise<{ message: string }> {
   return data
 }
 
+// ==================== 模型广场官方参考价（仅展示，不影响计费） ====================
+
+export interface PlazaOfficialPrice {
+  input_price: number
+  output_price: number
+  cache_read_price: number
+  cache_write_price: number
+}
+
+export interface PlazaOfficialOverrideEntry {
+  model: string
+  price: PlazaOfficialPrice
+}
+
+/** 汇率：管理端录入 ¥/M，存储为 $/M。 */
+export const PLAZA_OFFICIAL_FX = 7.15
+
+export async function getPlazaOfficialPricing(): Promise<PlazaOfficialOverrideEntry[]> {
+  const { data } = await apiClient.get('/admin/model-plaza/official-pricing')
+  return data?.overrides ?? []
+}
+
+export async function savePlazaOfficialPricing(
+  entries: { model: string; price: PlazaOfficialPrice }[]
+): Promise<{ count: number }> {
+  const { data } = await apiClient.put('/admin/model-plaza/official-pricing', { overrides: entries })
+  return data
+}
+
+
 export const pricingAPI = {
   getStatus,
+  getPlazaOfficialPricing,
+  savePlazaOfficialPricing,
   syncNow,
   getCatalog,
   getUncovered,
