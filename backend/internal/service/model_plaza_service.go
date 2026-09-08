@@ -68,6 +68,7 @@ type ModelPlazaService struct {
 	billingService *BillingService
 	resolver       *ModelPricingResolver
 	settingService *SettingService
+	accountRepo    AccountRepository
 }
 
 // NewModelPlazaService 创建模型广场服务。
@@ -78,6 +79,7 @@ func NewModelPlazaService(
 	billingService *BillingService,
 	resolver *ModelPricingResolver,
 	settingService *SettingService,
+	accountRepo AccountRepository,
 ) *ModelPlazaService {
 	return &ModelPlazaService{
 		channelRepo:    channelRepo,
@@ -86,6 +88,7 @@ func NewModelPlazaService(
 		billingService: billingService,
 		resolver:       resolver,
 		settingService: settingService,
+		accountRepo:    accountRepo,
 	}
 }
 
@@ -188,6 +191,50 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 					Name:     m.Name,
 					Platform: m.Platform,
 					Pricing:  m.Pricing,
+				})
+			}
+		}
+	}
+
+	// 账号回退枚举：分组未关联渠道（或渠道未声明模型）时，从组内活跃账号的
+	// 模型映射取模型清单，保证无渠道部署下模型广场仍可展示价格。
+	for _, gid := range order {
+		pg := byGroup[gid]
+		if len(pg.Models) > 0 || s.accountRepo == nil || pg.Platform == PlatformComposite {
+			continue
+		}
+		accounts, err := s.accountRepo.ListByGroup(ctx, gid)
+		if err != nil {
+			continue
+		}
+		seen := make(map[string]struct{})
+		for i := range accounts {
+			acc := &accounts[i]
+			if acc.Status != StatusActive {
+				continue
+			}
+			mapping := acc.GetModelMapping()
+			names := make([]string, 0, len(mapping)*2)
+			for k, v := range mapping {
+				if strings.TrimSpace(k) != "" {
+					names = append(names, k)
+				}
+				if strings.TrimSpace(v) != "" {
+					names = append(names, v)
+				}
+			}
+			for _, name := range names {
+				name = strings.TrimSpace(name)
+				if name == "" || strings.HasSuffix(name, "*") {
+					continue
+				}
+				if _, dup := seen[name]; dup {
+					continue
+				}
+				seen[name] = struct{}{}
+				pg.Models = append(pg.Models, PlazaModel{
+					Name:     name,
+					Platform: pg.Platform,
 				})
 			}
 		}
