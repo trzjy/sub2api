@@ -436,6 +436,20 @@ func (r *xianyuControlRepository) ListProductsByAccount(ctx context.Context, acc
 	return out, rows.Err()
 }
 
+func (r *xianyuControlRepository) GetProductByID(ctx context.Context, productID int64) (*service.XianyuProduct, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuProductColumns+`
+		FROM xianyu_products
+		WHERE id = $1`, productID)
+	p, err := scanProduct(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuProductNotFound
+		}
+		return nil, fmt.Errorf("get xianyu product by id: %w", err)
+	}
+	return p, nil
+}
+
 func (r *xianyuControlRepository) GetProductByIdentity(ctx context.Context, accountPK int64, itemID, specName, specValue string) (*service.XianyuProduct, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuProductColumns+`
 		FROM xianyu_products

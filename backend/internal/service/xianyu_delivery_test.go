@@ -3,9 +3,14 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +147,10 @@ func (s *xianyuControlStub) UpdateItemPool(_ context.Context, p XianyuItemPool) 
 }
 func (s *xianyuControlStub) PoolStockCounts(context.Context, string) (int, int, int, int, error) {
 	return 5, 2, 1, 0, nil
+}
+
+func (s *xianyuControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
+	return nil, nil
 }
 
 func (s *xianyuControlStub) GroupSubscriptionType(context.Context, int64) (string, error) {
@@ -295,10 +304,17 @@ func validXianyuRequest() XianyuDeliveryClaimRequest {
 	}
 }
 
-
 type poolSaveControlStub struct {
 	xianyuControlStub
 	created *XianyuItemPool
+	product *XianyuProduct
+}
+
+func (s *poolSaveControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
+	if s.product != nil {
+		return s.product, nil
+	}
+	return &XianyuProduct{ItemID: "item-test"}, nil
 }
 
 func (s *poolSaveControlStub) CreateItemPool(_ context.Context, pool XianyuItemPool) (*XianyuItemPool, error) {
@@ -323,6 +339,97 @@ func TestSaveItemPoolAutoGeneratesSlug(t *testing.T) {
 	require.Regexp(t, `^pool-[a-z0-9]{8}$`, created.Slug)
 	require.Equal(t, created.Slug, stub.created.Slug)
 }
+
+// 统一绑定回归：配置了统一发货卡券后，绑定同步 card_id、解绑清空（card_id=0）。
+// P0 教训：解绑路径曾被提前返回短路成死代码，买家拍已解绑商品会付款无货。
+func TestSyncProductCardBindingBindAndClear(t *testing.T) {
+	var mu sync.Mutex
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success": true, "message": "ok"}`))
+	}))
+	defer srv.Close()
+
+	workerSvc := NewXianyuWorkerService(
+		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
+		plainEncryptor{},
+	)
+	store := mapSettingStore{"xianyu_delivery_worker_card_id": "42"}
+	ctrl := &XianyuControlService{worker: workerSvc, settingStore: store}
+
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", true); err != nil {
+		t.Fatalf("bind sync: %v", err)
+	}
+	mu.Lock()
+	if gotPath != "/api/v1/internal/cards/item/ITEM-1" || gotBody["card_id"] != float64(42) {
+		mu.Unlock()
+		t.Fatalf("bind sync mismatch: path=%s body=%v", gotPath, gotBody)
+	}
+	mu.Unlock()
+
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", false); err != nil {
+		t.Fatalf("unbind sync: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotBody["card_id"] != float64(0) {
+		t.Fatalf("unbind must clear relation, got card_id=%v", gotBody["card_id"])
+	}
+}
+
+// 未配置统一发货卡券：不触碰 Worker（兼容手工关联老用法）。
+func TestSyncProductCardBindingSkipsWhenUnset(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success": true}`))
+	}))
+	defer srv.Close()
+
+	workerSvc := NewXianyuWorkerService(
+		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
+		plainEncryptor{},
+	)
+	ctrl := &XianyuControlService{worker: workerSvc, settingStore: mapSettingStore{}}
+
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", true); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if hit {
+		t.Fatal("worker must not be called when unified card id is unset")
+	}
+}
+
+// mapSettingStore 是 XianyuSettingStore 的最小 map 实现。
+type mapSettingStore map[string]string
+
+func (m mapSettingStore) GetValue(ctx context.Context, key string) (string, error) {
+	return m[key], nil
+}
+func (m mapSettingStore) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		out[k] = m[k]
+	}
+	return out, nil
+}
+func (m mapSettingStore) SetMultiple(ctx context.Context, values map[string]string) error {
+	return nil
+}
+
+// plainEncryptor 明文加解密替身。
+type plainEncryptor struct{}
+
+func (plainEncryptor) Encrypt(plaintext string) (string, error)  { return plaintext, nil }
+func (plainEncryptor) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
 
 func TestXianyuDeliveryClaimValidatesAndDelegates(t *testing.T) {
 	control := newXianyuControlStub()

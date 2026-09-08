@@ -171,6 +171,7 @@ export interface XianyuControlSettings {
   account_auto_refresh: boolean
   product_auto_bind: boolean
   sync_interval_minutes: number
+  worker_card_id?: number
 }
 
 export async function getSettings(options?: { signal?: AbortSignal }): Promise<XianyuControlSettings> {

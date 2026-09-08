@@ -454,6 +454,16 @@ func (s *XianyuWorkerService) UpdateDeliveryCardDescription(ctx context.Context,
 	return client.UpdateCardDescription(ctx, cardID, description)
 }
 
+// SyncItemCard 同步商品的 Worker 卡券关联（cardID<=0 清空关联）。
+func (s *XianyuWorkerService) SyncItemCard(ctx context.Context, itemID string, cardID int64) error {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
+	return client.SyncItemCard(ctx, itemID, cardID)
+}
+
 // SyncProducts 拉取账号在售商品并落库；只在不覆盖手工绑定映射的前提下更新。
 // 完整成功后，投影中未出现的商品行直接删除（售罄/下架清理，发货记录保留）。
 func (s *XianyuWorkerService) SyncProducts(ctx context.Context) error {

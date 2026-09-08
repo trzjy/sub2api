@@ -64,10 +64,11 @@ func NewXianyuControlService(
 
 // XianyuSettings 是控制面设置视图。
 type XianyuSettings struct {
-	DeliveryEnabled     bool `json:"delivery_enabled"`
-	AccountAutoRefresh  bool `json:"account_auto_refresh"`
-	ProductAutoBind     bool `json:"product_auto_bind"`
-	SyncIntervalMinutes int  `json:"sync_interval_minutes"`
+	DeliveryEnabled     bool  `json:"delivery_enabled"`
+	AccountAutoRefresh  bool  `json:"account_auto_refresh"`
+	ProductAutoBind     bool  `json:"product_auto_bind"`
+	SyncIntervalMinutes int   `json:"sync_interval_minutes"`
+	WorkerCardID        int64 `json:"worker_card_id"` // 统一发货卡券：绑定商品时自动同步到 Worker（0=未配置）
 }
 
 // GetSettings 读取控制面设置。
@@ -80,6 +81,7 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 		SettingKeyXianyuAccountAutoRefresh,
 		SettingKeyXianyuProductAutoBind,
 		SettingKeyXianyuSyncIntervalMinutes,
+		SettingKeyXianyuWorkerCardID,
 	})
 	if err != nil {
 		return XianyuSettings{}, err
@@ -93,6 +95,11 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 	if v := vals[SettingKeyXianyuSyncIntervalMinutes]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			out.SyncIntervalMinutes = n
+		}
+	}
+	if v := vals[SettingKeyXianyuWorkerCardID]; v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			out.WorkerCardID = n
 		}
 	}
 	return out, nil
@@ -114,11 +121,15 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 			return err
 		}
 	}
+	if settings.WorkerCardID < 0 {
+		settings.WorkerCardID = 0
+	}
 	values := map[string]string{
 		SettingKeyXianyuDeliveryEnabled:     strconv.FormatBool(settings.DeliveryEnabled),
 		SettingKeyXianyuAccountAutoRefresh:  strconv.FormatBool(settings.AccountAutoRefresh),
 		SettingKeyXianyuProductAutoBind:     strconv.FormatBool(settings.ProductAutoBind),
 		SettingKeyXianyuSyncIntervalMinutes: strconv.Itoa(settings.SyncIntervalMinutes),
+		SettingKeyXianyuWorkerCardID:        strconv.FormatInt(settings.WorkerCardID, 10),
 	}
 	return s.settingStore.SetMultiple(ctx, values)
 }
@@ -447,6 +458,10 @@ func (s *XianyuControlService) ListProducts(ctx context.Context) ([]XianyuProduc
 
 // BindProduct 手工映射商品到池；解绑传 nil pool。
 func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64, poolID *int64, source string) error {
+	product, err := s.control.GetProductByID(ctx, productID)
+	if err != nil {
+		return err
+	}
 	if poolID != nil {
 		pool, err := s.control.GetItemPoolByID(ctx, *poolID)
 		if err != nil {
@@ -458,9 +473,35 @@ func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64,
 		if err := s.control.UpdateProductBinding(ctx, productID, XianyuBindingStatusMapped, source, poolID); err != nil {
 			return err
 		}
+	} else if err := s.control.UpdateProductBinding(ctx, productID, XianyuBindingStatusUnmapped, source, nil); err != nil {
+		return err
+	}
+	// 主程序绑定即唯一绑定动作：Worker 侧"商品→卡券"关系自动跟上。
+	if err := s.syncProductCardBinding(ctx, product.ItemID, poolID != nil); err != nil {
+		return fmt.Errorf("绑定已保存，但同步 Worker 卡券关联失败（Worker 恢复后重新保存绑定即可）: %w", err)
+	}
+	return nil
+}
+
+// syncProductCardBinding 绑定/解绑后同步 Worker 卡券关联。
+// 配置了统一发货卡券 ID 时：绑定 → 关系覆盖为该卡券；解绑 → 清空关系（cardID=0）。
+// 未配置时跳过（兼容纯 Worker 手工配置的老用法），此时 Worker 侧关系不归主程序管。
+func (s *XianyuControlService) syncProductCardBinding(ctx context.Context, itemID string, bound bool) error {
+	if s.worker == nil || s.settingStore == nil {
 		return nil
 	}
-	return s.control.UpdateProductBinding(ctx, productID, XianyuBindingStatusUnmapped, source, nil)
+	vals, err := s.settingStore.GetMultiple(ctx, []string{SettingKeyXianyuWorkerCardID})
+	if err != nil {
+		return err
+	}
+	cardID, _ := strconv.ParseInt(vals[SettingKeyXianyuWorkerCardID], 10, 64)
+	if cardID <= 0 {
+		return nil // 未配置统一发货卡券：保持 Worker 侧手工关联
+	}
+	if !bound {
+		cardID = 0 // 解绑：清空该商品的卡券关联，避免已解绑商品继续触发 claim
+	}
+	return s.worker.SyncItemCard(ctx, itemID, cardID)
 }
 
 // AutoBindProducts 对所有 unmapped 商品执行自动绑定。
@@ -478,6 +519,22 @@ func (s *XianyuControlService) AutoBindProducts(ctx context.Context) error {
 			continue
 		}
 		if err := autoBindProduct(ctx, s.control, p, rules); err != nil {
+			return err
+		}
+		// 自动绑定同样要保持 Worker 卡券关联同步。
+		// 同步失败时回滚为 unmapped，保证下轮自动绑定会重试；
+		// 否则 mapped 商品被跳过，会出现"已绑定但永不同步"的卡死。
+		fresh, err := s.control.GetProductByID(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.BindingStatus != XianyuBindingStatusMapped {
+			continue
+		}
+		if err := s.syncProductCardBinding(ctx, fresh.ItemID, true); err != nil {
+			if revertErr := s.control.UpdateProductBinding(ctx, fresh.ID, XianyuBindingStatusUnmapped, XianyuBindingSourceAutoNew, nil); revertErr != nil {
+				return fmt.Errorf("sync worker card failed: %v; revert binding also failed: %w", err, revertErr)
+			}
 			return err
 		}
 	}

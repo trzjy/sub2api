@@ -117,6 +117,8 @@ def test_internal_api_routes_registered():
         "/internal/qr-login/generate": {"POST"},
         "/internal/qr-login/status/{session_id}": {"GET"},
         "/internal/messages/send": {"POST"},
+        "/internal/cards/{card_id}/description": {"PUT"},
+        "/internal/cards/item/{item_id}": {"PUT"},
     }
     for path, methods in expected.items():
         assert path in paths, f"missing internal route {path}"

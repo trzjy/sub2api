@@ -44,6 +44,10 @@ type clearCredControlStub struct {
 	enableAccountID string
 }
 
+func (s *clearCredControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
+	return nil, nil
+}
+
 func (s *clearCredControlStub) GetAccountByWorkerAndAccountID(context.Context, int64, string) (*XianyuAccount, error) {
 	return s.account, nil
 }

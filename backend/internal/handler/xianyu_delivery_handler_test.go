@@ -75,6 +75,9 @@ func (xianyuHandlerControlStub) UpdateItemPool(context.Context, service.XianyuIt
 	return nil, nil
 }
 func (xianyuHandlerControlStub) DeleteBindingRule(context.Context, int64) error           { return nil }
+func (xianyuHandlerControlStub) GetProductByID(context.Context, int64) (*service.XianyuProduct, error) {
+	return nil, nil
+}
 func (xianyuHandlerControlStub) DeleteItemPool(context.Context, int64) error              { return nil }
 func (xianyuHandlerControlStub) DeleteProduct(context.Context, int64) error               { return nil }
 func (xianyuHandlerControlStub) UpdateAccountRemark(context.Context, int64, string) error { return nil }

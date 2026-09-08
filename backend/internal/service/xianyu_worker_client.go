@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -362,6 +363,29 @@ func (c *XianyuWorkerClient) ListCards(ctx context.Context) ([]XianyuWorkerCard,
 func (c *XianyuWorkerClient) UpdateCardDescription(ctx context.Context, cardID int64, description string) error {
 	body := map[string]any{"description": description}
 	return c.do(ctx, http.MethodPut, fmt.Sprintf("/api/v1/internal/cards/%d/description", cardID), body, nil, "")
+}
+
+// SyncItemCard 把商品的卡券关联覆盖为指定发货卡券（cardID<=0 清空）。
+// 主程序统一绑定入口：商品绑定/解绑库存池后调用，Worker 侧关系自动跟上。
+// 写操作显式校验响应信封 success：Worker 全局异常处理器会把非 HTTPException
+// 错误包成 200 + success=false，只看状态码会造成"假成功"。
+func (c *XianyuWorkerClient) SyncItemCard(ctx context.Context, itemID string, cardID int64) error {
+	body := map[string]any{"card_id": cardID}
+	raw, err := c.doRequest(ctx, http.MethodPut, "/api/v1/internal/cards/item/"+url.PathEscape(itemID), body, "")
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("%w: sync item card response: %v", ErrXianyuWorkerMalformed, err)
+	}
+	if !envelope.Success {
+		return fmt.Errorf("xianyu worker: sync item card failed: %s", envelope.Message)
+	}
+	return nil
 }
 
 // ResendDelivery asks the Worker to resend an original delivery code through the

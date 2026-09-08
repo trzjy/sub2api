@@ -337,6 +337,58 @@ async def internal_update_card_description(
     )
 
 
+@router.put("/cards/item/{item_id}")
+async def internal_sync_item_card(
+    item_id: str,
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序统一绑定入口：把商品的卡券关联覆盖为指定发货卡券（幂等）。
+
+    body.card_id 为空/<=0 表示清空该商品的卡券关联（主程序侧解绑时调用）。
+    发货卡券本身仍由 Worker 后台配置，本路由只同步"商品→卡券"关系。
+    """
+    from app.services.card_service import CardService
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    card_id = int((body or {}).get("card_id") or 0)
+    relations: List[Dict[str, Any]] = []
+    if card_id <= 0:
+        # 清空时同步清理 legacy item_id 字段：关系表清空后 matcher 会回退到
+        # xy_cards.item_id 匹配，不清会让已解绑商品继续命中老卡券。
+        from sqlalchemy import text
+
+        await session.execute(
+            text("UPDATE xy_cards SET item_id = NULL WHERE item_id = :item_id"),
+            {"item_id": item_id},
+        )
+        await session.commit()
+    if card_id > 0:
+        from sqlalchemy import select
+
+        from common.models.card import Card
+
+        card_stmt = select(Card).where(Card.id == card_id)
+        if owner_id is not None:
+            card_stmt = card_stmt.where(Card.user_id == owner_id)
+        card = ((await session.execute(card_stmt))).scalar_one_or_none()
+        if not card:
+            raise HTTPException(status_code=404, detail="卡券不存在")
+        relations = [{"card_id": card_id, "source": "own", "dock_record_id": None}]
+
+    result = await CardService(session).update_item_card_relations(
+        item_id=item_id,
+        user_id=service_user.id,
+        card_relations=relations,
+    )
+    return ApiResponse(
+        success=True,
+        message=f"商品卡券关联已同步（新增 {result['added']}，移除 {result['removed']}）",
+        data=result,
+    )
+
+
 @router.post("/qr-login/generate")
 async def internal_generate_qr_code(
     service_user = Depends(deps.get_service_or_user),

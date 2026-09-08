@@ -282,6 +282,7 @@ type XianyuControlRepository interface {
 	// 商品映射
 	ListProducts(ctx context.Context) ([]XianyuProduct, error)
 	ListProductsByAccount(ctx context.Context, accountPK int64) ([]XianyuProduct, error)
+	GetProductByID(ctx context.Context, productID int64) (*XianyuProduct, error)
 	GetProductByIdentity(ctx context.Context, accountPK int64, itemID, specName, specValue string) (*XianyuProduct, error)
 	UpsertProduct(ctx context.Context, product XianyuProduct) (*XianyuProduct, error)
 	UpdateProduct(ctx context.Context, product XianyuProduct) (*XianyuProduct, error)
