@@ -167,7 +167,7 @@ export default {
       noPools: '暂无库存池',
       success: '保存成功',
       poolNameRequired: '请输入池名称',
-      poolSlugRequired: '请输入 Slug（小写英文/数字/-_）',
+      slugReadonlyHint: '系统内部标识，创建时自动生成，不可修改。',
     },
     deliveries: {
       title: '发货记录',

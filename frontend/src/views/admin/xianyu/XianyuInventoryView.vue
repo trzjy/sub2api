@@ -79,9 +79,10 @@
             <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.name') }}</label>
             <input v-model="form.name" class="input w-full" :placeholder="t('admin.xianyu.inventory.name')" />
           </div>
-          <div>
+          <div v-if="editingID">
             <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.slug') }}</label>
-            <input v-model="form.slug" class="input w-full" :placeholder="t('admin.xianyu.inventory.slug')" :disabled="!!editingID" />
+            <input v-model="form.slug" class="input w-full" disabled />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.inventory.slugReadonlyHint') }}</p>
           </div>
           <div>
             <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.inventory.description') }}</label>
@@ -263,15 +264,10 @@ async function save() {
     appStore.showError(t('admin.xianyu.inventory.poolNameRequired'))
     return
   }
-  if (!form.slug.trim()) {
-    appStore.showError(t('admin.xianyu.inventory.poolSlugRequired'))
-    return
-  }
   try {
     await adminAPI.xianyu.saveItemPool({
       id: editingID.value ?? undefined,
       name: form.name.trim(),
-      slug: form.slug.trim(),
       description: form.description.trim(),
       low_stock_threshold: Math.max(0, form.low_stock_threshold || 0),
       status: form.status as 'active' | 'disabled',

@@ -167,7 +167,7 @@ export default {
       noPools: 'No inventory pools',
       success: 'Saved',
       poolNameRequired: 'Pool name is required',
-      poolSlugRequired: 'Slug (lowercase letters/digits/-_) is required',
+      slugReadonlyHint: 'Internal identifier, auto-generated at creation and immutable.',
     },
     deliveries: {
       title: 'Deliveries',

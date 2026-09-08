@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -274,9 +276,11 @@ func (s *XianyuControlService) ListItemPools(ctx context.Context) ([]XianyuItemP
 func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error) {
 	pool.Slug = strings.TrimSpace(pool.Slug)
 	pool.Name = strings.TrimSpace(pool.Name)
-	if pool.Slug == "" || pool.Name == "" {
-		return nil, infraerrors.BadRequest("XIANYU_POOL_REQUIRED", "pool name and slug are required")
+	if pool.Name == "" {
+		return nil, infraerrors.BadRequest("XIANYU_POOL_REQUIRED", "pool name is required")
 	}
+	// slug 是纯内部标识（烙进库存码 notes），创建时未提供则自动生成，避免手填出错。
+	autoSlug := pool.ID == 0 && pool.Slug == ""
 	if !validPoolSlug(pool.Slug) {
 		return nil, infraerrors.BadRequest("XIANYU_POOL_SLUG_INVALID", "pool slug must be [a-z0-9_-]")
 	}
@@ -290,14 +294,22 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 		return nil, err
 	}
 	if pool.ID == 0 {
-		created, err := s.control.CreateItemPool(ctx, pool)
-		if err != nil {
-			if isUniqueViolation(err) {
-				return nil, ErrXianyuItemPoolSlugExists
+		for attempt := 0; ; attempt++ {
+			if autoSlug {
+				pool.Slug = generatePoolSlug()
 			}
-			return nil, err
+			created, err := s.control.CreateItemPool(ctx, pool)
+			if err != nil {
+				if isUniqueViolation(err) {
+					if autoSlug && attempt < 5 {
+						continue // 自动生成的 slug 撞名，换一个重试
+					}
+					return nil, ErrXianyuItemPoolSlugExists
+				}
+				return nil, err
+			}
+			return created, nil
 		}
-		return created, nil
 	}
 	updated, err := s.control.UpdateItemPool(ctx, pool)
 	if err != nil {
@@ -307,6 +319,21 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 		return nil, err
 	}
 	return updated, nil
+}
+
+// generatePoolSlug 生成池的内部标识：pool- + 8 位小写字母数字随机串。
+func generatePoolSlug() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
+	for i := range b {
+		n, err := crand.Int(crand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			// crypto/rand 失败极罕见；退化为时间戳保证可用性
+			return fmt.Sprintf("pool-%x", time.Now().UnixNano())
+		}
+		b[i] = alphabet[n.Int64()]
+	}
+	return "pool-" + string(b)
 }
 
 // XianyuPoolCodeTypeSubscription 当前库存池唯一支持的发码类型：真实可兑换的订阅码。
