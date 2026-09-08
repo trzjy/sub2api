@@ -162,6 +162,10 @@ func (s *XianyuDeliveryService) normalizeAndResolveClaim(ctx context.Context, re
 	}
 
 	product, err := s.control.GetProductByIdentity(ctx, account.ID, claim.ItemID, claim.SpecName, claim.SpecValue)
+	if errors.Is(err, ErrXianyuProductNotFound) && (claim.SpecName != "" || claim.SpecValue != "") {
+		// 商品同步投影不含规格：多规格订单按商品级（无规格行）兜底，池绑定本就是商品级。
+		product, err = s.control.GetProductByIdentity(ctx, account.ID, claim.ItemID, "", "")
+	}
 	if err != nil {
 		if err == ErrXianyuProductNotFound {
 			return XianyuDeliveryClaim{}, ErrXianyuPoolNotMapped

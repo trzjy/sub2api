@@ -95,8 +95,13 @@ func (h *XianyuDeliveryHandler) DeliveryResult(c *gin.Context) {
 		QuantitySent: quantitySent,
 	}
 	// 优先按 order_no 路由到 Worker 发货记录（Worker 自动发货路径经 EnsureWorkerDeliveryRecord 创建）；
-	// 该订单无 Worker 记录时再更新主程序库存发货记录（xianyu_order_claims）。两者互斥，幂等关联同一 order_no。
+	// 池卡券订单同时存在 claim 行（领码时创建），worker 行更新后同步推进 claim 行，
+	// 避免发货记录永久 pending、统计与告警失真。两者各自幂等，无 claim 行的订单忽略。
 	if err := h.service.RecordWorkerDeliveryResult(c.Request.Context(), result); err == nil {
+		if err := h.service.RecordDeliveryResult(c.Request.Context(), result); err != nil && !errors.Is(err, service.ErrXianyuDeliveryClaimNotFound) {
+			response.ErrorFrom(c, err)
+			return
+		}
 		response.Success(c, gin.H{"message": "delivery result recorded"})
 		return
 	} else if !errors.Is(err, service.ErrXianyuDeliveryClaimNotFound) {

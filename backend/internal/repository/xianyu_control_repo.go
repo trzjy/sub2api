@@ -297,7 +297,8 @@ func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool servi
 	row := r.db.QueryRowContext(ctx, `
 		UPDATE xianyu_item_pools
 		SET name = $2, description = $3, low_stock_threshold = $4, status = $5,
-		    code_type = $6, group_id = $7, validity_days = $8, worker_card_id = $9, updated_at = NOW()
+		    code_type = $6, group_id = $7, validity_days = $8,
+		    worker_card_id = COALESCE($9, worker_card_id), updated_at = NOW()
 		WHERE id = $1
 		RETURNING `+xianyuItemPoolColumns,
 		pool.ID, pool.Name, pool.Description, pool.LowStockThreshold, pool.Status,

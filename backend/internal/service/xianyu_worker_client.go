@@ -305,12 +305,31 @@ func (c *XianyuWorkerClient) QueryLoginSession(ctx context.Context, sessionID st
 
 // EnableAccount 通过 Worker backend 状态更新启动收消息任务。
 func (c *XianyuWorkerClient) EnableAccount(ctx context.Context, accountID string) error {
-	return c.do(ctx, http.MethodPut, "/api/v1/internal/cookies/"+accountID+"/status", map[string]bool{"enabled": true}, nil, accountID)
+	return c.syncAccountStatus(ctx, accountID, true)
 }
 
 // DisableAccount 通过 Worker backend 状态更新停止收消息任务。
 func (c *XianyuWorkerClient) DisableAccount(ctx context.Context, accountID string) error {
-	return c.do(ctx, http.MethodPut, "/api/v1/internal/cookies/"+accountID+"/status", map[string]bool{"enabled": false}, nil, accountID)
+	return c.syncAccountStatus(ctx, accountID, false)
+}
+
+// syncAccountStatus 状态更新是写操作：显式校验响应信封 success，防 200+success=false 假成功。
+func (c *XianyuWorkerClient) syncAccountStatus(ctx context.Context, accountID string, enabled bool) error {
+	raw, err := c.doRequest(ctx, http.MethodPut, "/api/v1/internal/cookies/"+accountID+"/status", map[string]bool{"enabled": enabled}, accountID)
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("%w: account status response: %v", ErrXianyuWorkerMalformed, err)
+	}
+	if !envelope.Success {
+		return fmt.Errorf("xianyu worker: account status update failed: %s", envelope.Message)
+	}
+	return nil
 }
 
 // RefreshCookie 触发 Worker 侧批量续期（renew-login），并按目标账号校验续期结果。

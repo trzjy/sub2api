@@ -64,10 +64,10 @@ func NewXianyuControlService(
 
 // XianyuSettings 是控制面设置视图。
 type XianyuSettings struct {
-	DeliveryEnabled     bool  `json:"delivery_enabled"`
-	AccountAutoRefresh  bool  `json:"account_auto_refresh"`
-	ProductAutoBind     bool  `json:"product_auto_bind"`
-	SyncIntervalMinutes int `json:"sync_interval_minutes"`
+	DeliveryEnabled     bool `json:"delivery_enabled"`
+	AccountAutoRefresh  bool `json:"account_auto_refresh"`
+	ProductAutoBind     bool `json:"product_auto_bind"`
+	SyncIntervalMinutes int  `json:"sync_interval_minutes"`
 }
 
 // GetSettings 读取控制面设置。
@@ -622,7 +622,18 @@ func (s *XianyuControlService) UpdateDeliveryCardDescription(ctx context.Context
 
 // DeleteItemPool 删除库存池（售罄/下架清理；绑定商品、剩余库存码、引用规则任一存在时拒绝）。
 func (s *XianyuControlService) DeleteItemPool(ctx context.Context, poolID int64) error {
-	return s.control.DeleteItemPool(ctx, poolID)
+	pool, poolErr := s.control.GetItemPoolByID(ctx, poolID)
+	if poolErr != nil {
+		return poolErr
+	}
+	if err := s.control.DeleteItemPool(ctx, poolID); err != nil {
+		return err
+	}
+	// 顺手清理池的专属发货卡券（best-effort：残留卡券无商品关联，无实际危害）。
+	if s.worker != nil && pool.WorkerCardID != nil {
+		_ = s.worker.DeletePoolCard(ctx, *pool.WorkerCardID)
+	}
+	return nil
 }
 
 // DeleteBindingRule 删除绑定规则。
