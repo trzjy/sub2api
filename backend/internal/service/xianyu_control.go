@@ -135,6 +135,8 @@ type XianyuItemPool struct {
 	CodeType     string    `json:"code_type"`
 	GroupID      *int64    `json:"group_id"`
 	ValidityDays int       `json:"validity_days"`
+	// WorkerCardID 该池在 Worker 侧的专属发货卡券（建池/绑定时自动供给，无需手工配置）。
+	WorkerCardID *int64    `json:"worker_card_id"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -269,6 +271,7 @@ type XianyuControlRepository interface {
 	// 商品池
 	ListItemPools(ctx context.Context) ([]XianyuItemPool, error)
 	GetItemPoolByID(ctx context.Context, id int64) (*XianyuItemPool, error)
+	UpdatePoolWorkerCardID(ctx context.Context, poolID int64, cardID *int64) error
 	GetItemPoolBySlug(ctx context.Context, slug string) (*XianyuItemPool, error)
 	CreateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)
 	UpdateItemPool(ctx context.Context, pool XianyuItemPool) (*XianyuItemPool, error)

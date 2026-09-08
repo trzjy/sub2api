@@ -48,6 +48,10 @@ func (s *clearCredControlStub) GetProductByID(context.Context, int64) (*XianyuPr
 	return nil, nil
 }
 
+func (s *clearCredControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
+	return nil
+}
+
 func (s *clearCredControlStub) GetAccountByWorkerAndAccountID(context.Context, int64, string) (*XianyuAccount, error) {
 	return s.account, nil
 }

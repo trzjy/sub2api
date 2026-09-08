@@ -149,6 +149,10 @@ func (s *xianyuControlStub) PoolStockCounts(context.Context, string) (int, int, 
 	return 5, 2, 1, 0, nil
 }
 
+func (s *xianyuControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
+	return nil
+}
+
 func (s *xianyuControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
 	return nil, nil
 }
@@ -310,6 +314,10 @@ type poolSaveControlStub struct {
 	product *XianyuProduct
 }
 
+func (s *poolSaveControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
+	return nil
+}
+
 func (s *poolSaveControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
 	if s.product != nil {
 		return s.product, nil
@@ -340,74 +348,6 @@ func TestSaveItemPoolAutoGeneratesSlug(t *testing.T) {
 	require.Equal(t, created.Slug, stub.created.Slug)
 }
 
-// 统一绑定回归：配置了统一发货卡券后，绑定同步 card_id、解绑清空（card_id=0）。
-// P0 教训：解绑路径曾被提前返回短路成死代码，买家拍已解绑商品会付款无货。
-func TestSyncProductCardBindingBindAndClear(t *testing.T) {
-	var mu sync.Mutex
-	var gotPath string
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		gotPath = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success": true, "message": "ok"}`))
-	}))
-	defer srv.Close()
-
-	workerSvc := NewXianyuWorkerService(
-		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
-		plainEncryptor{},
-	)
-	store := mapSettingStore{"xianyu_delivery_worker_card_id": "42"}
-	ctrl := &XianyuControlService{worker: workerSvc, settingStore: store}
-
-	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", true); err != nil {
-		t.Fatalf("bind sync: %v", err)
-	}
-	mu.Lock()
-	if gotPath != "/api/v1/internal/cards/item/ITEM-1" || gotBody["card_id"] != float64(42) {
-		mu.Unlock()
-		t.Fatalf("bind sync mismatch: path=%s body=%v", gotPath, gotBody)
-	}
-	mu.Unlock()
-
-	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", false); err != nil {
-		t.Fatalf("unbind sync: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotBody["card_id"] != float64(0) {
-		t.Fatalf("unbind must clear relation, got card_id=%v", gotBody["card_id"])
-	}
-}
-
-// 未配置统一发货卡券：不触碰 Worker（兼容手工关联老用法）。
-func TestSyncProductCardBindingSkipsWhenUnset(t *testing.T) {
-	hit := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hit = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success": true}`))
-	}))
-	defer srv.Close()
-
-	workerSvc := NewXianyuWorkerService(
-		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
-		plainEncryptor{},
-	)
-	ctrl := &XianyuControlService{worker: workerSvc, settingStore: mapSettingStore{}}
-
-	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", true); err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if hit {
-		t.Fatal("worker must not be called when unified card id is unset")
-	}
-}
-
 // mapSettingStore 是 XianyuSettingStore 的最小 map 实现。
 type mapSettingStore map[string]string
 
@@ -430,6 +370,79 @@ type plainEncryptor struct{}
 
 func (plainEncryptor) Encrypt(plaintext string) (string, error)  { return plaintext, nil }
 func (plainEncryptor) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
+
+// 统一绑定回归：绑定 → 幂等供给池卡券并把关系覆盖为该卡券；解绑 → 清空关系。
+// P0 教训：解绑路径曾被提前返回短路成死代码，买家拍已解绑商品会付款无货。
+func TestSyncProductCardBindingBindAndClear(t *testing.T) {
+	var mu sync.Mutex
+	provisionHits := 0
+	var relationPath string
+	var relationBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/internal/cards/provision", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		provisionHits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success": true, "data": {"card_id": 42}}`))
+	})
+	mux.HandleFunc("/api/v1/internal/cards/item/ITEM-1", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		relationPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &relationBody)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success": true, "message": "ok"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	workerSvc := NewXianyuWorkerService(
+		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
+		plainEncryptor{},
+	)
+	ctrl := &XianyuControlService{control: &xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL}}, worker: workerSvc}
+	pool := &XianyuItemPool{ID: 7, Slug: "glm-day-card"}
+
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", pool, true); err != nil {
+		t.Fatalf("bind sync: %v", err)
+	}
+	if pool.WorkerCardID == nil || *pool.WorkerCardID != 42 {
+		t.Fatalf("provisioned card id not persisted into pool: %v", pool.WorkerCardID)
+	}
+	mu.Lock()
+	firstProvision, firstPath, firstBody := provisionHits, relationPath, relationBody
+	mu.Unlock()
+	if firstProvision != 1 || firstPath != "/api/v1/internal/cards/item/ITEM-1" || firstBody["card_id"] != float64(42) {
+		t.Fatalf("bind sync mismatch: provision=%d path=%s body=%v", firstProvision, firstPath, firstBody)
+	}
+
+	// 再次绑定：卡券已供给，不再重复建卡，关系仍指向同一张卡。
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", pool, true); err != nil {
+		t.Fatalf("rebind sync: %v", err)
+	}
+	// 解绑：清空关系（card_id=0）。
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", pool, false); err != nil {
+		t.Fatalf("unbind sync: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if provisionHits != 1 {
+		t.Fatalf("provision must be idempotent, hits=%d", provisionHits)
+	}
+	if relationBody["card_id"] != float64(0) {
+		t.Fatalf("unbind must clear relation, got card_id=%v", relationBody["card_id"])
+	}
+}
+
+// worker 未注入时同步必须安全空操作。
+func TestSyncProductCardBindingSkipsWithoutWorker(t *testing.T) {
+	ctrl := &XianyuControlService{settingStore: mapSettingStore{}}
+	if err := ctrl.syncProductCardBinding(context.Background(), "ITEM-1", nil, true); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
 
 func TestXianyuDeliveryClaimValidatesAndDelegates(t *testing.T) {
 	control := newXianyuControlStub()

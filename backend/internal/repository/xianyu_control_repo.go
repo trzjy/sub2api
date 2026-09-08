@@ -220,13 +220,13 @@ func (r *xianyuControlRepository) UpdateAccount(ctx context.Context, account ser
 	return saved, nil
 }
 
-const xianyuItemPoolColumns = `id, name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days, created_at, updated_at`
+const xianyuItemPoolColumns = `id, name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days, worker_card_id, created_at, updated_at`
 
 func scanItemPool(row interface{ Scan(...any) error }) (*service.XianyuItemPool, error) {
 	var p service.XianyuItemPool
 	var validityDays *int // validity_days 可空（旧池未配置规格时为 NULL）
 	if err := row.Scan(&p.ID, &p.Name, &p.Slug, &p.Description, &p.LowStockThreshold, &p.Status,
-		&p.CodeType, &p.GroupID, &validityDays, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.CodeType, &p.GroupID, &validityDays, &p.WorkerCardID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if validityDays != nil {
@@ -281,11 +281,11 @@ func (r *xianyuControlRepository) CreateItemPool(ctx context.Context, pool servi
 		pool.Status = service.XianyuItemPoolStatusActive
 	}
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO xianyu_item_pools (name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO xianyu_item_pools (name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days, worker_card_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING `+xianyuItemPoolColumns,
 		pool.Name, pool.Slug, pool.Description, pool.LowStockThreshold, pool.Status,
-		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays)
+		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays, nullableInt64(pool.WorkerCardID))
 	created, err := scanItemPool(row)
 	if err != nil {
 		return nil, fmt.Errorf("create xianyu item pool: %w", err)
@@ -297,11 +297,11 @@ func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool servi
 	row := r.db.QueryRowContext(ctx, `
 		UPDATE xianyu_item_pools
 		SET name = $2, description = $3, low_stock_threshold = $4, status = $5,
-		    code_type = $6, group_id = $7, validity_days = $8, updated_at = NOW()
+		    code_type = $6, group_id = $7, validity_days = $8, worker_card_id = $9, updated_at = NOW()
 		WHERE id = $1
 		RETURNING `+xianyuItemPoolColumns,
 		pool.ID, pool.Name, pool.Description, pool.LowStockThreshold, pool.Status,
-		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays)
+		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays, nullableInt64(pool.WorkerCardID))
 	updated, err := scanItemPool(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -310,6 +310,20 @@ func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool servi
 		return nil, fmt.Errorf("update xianyu item pool: %w", err)
 	}
 	return updated, nil
+}
+
+// UpdatePoolWorkerCardID 记录池对应的 Worker 自动发货卡券 ID（cardID=nil 清除）。
+func (r *xianyuControlRepository) UpdatePoolWorkerCardID(ctx context.Context, poolID int64, cardID *int64) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE xianyu_item_pools SET worker_card_id = $2, updated_at = NOW() WHERE id = $1`,
+		poolID, nullableInt64(cardID))
+	if err != nil {
+		return fmt.Errorf("update pool worker card id: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	return nil
 }
 
 // DeleteItemPool 删除库存池（下架清理）。三层守卫逐层给出可执行提示：

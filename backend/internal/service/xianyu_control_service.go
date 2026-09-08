@@ -67,8 +67,7 @@ type XianyuSettings struct {
 	DeliveryEnabled     bool  `json:"delivery_enabled"`
 	AccountAutoRefresh  bool  `json:"account_auto_refresh"`
 	ProductAutoBind     bool  `json:"product_auto_bind"`
-	SyncIntervalMinutes int   `json:"sync_interval_minutes"`
-	WorkerCardID        int64 `json:"worker_card_id"` // 统一发货卡券：绑定商品时自动同步到 Worker（0=未配置）
+	SyncIntervalMinutes int `json:"sync_interval_minutes"`
 }
 
 // GetSettings 读取控制面设置。
@@ -81,7 +80,6 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 		SettingKeyXianyuAccountAutoRefresh,
 		SettingKeyXianyuProductAutoBind,
 		SettingKeyXianyuSyncIntervalMinutes,
-		SettingKeyXianyuWorkerCardID,
 	})
 	if err != nil {
 		return XianyuSettings{}, err
@@ -95,11 +93,6 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 	if v := vals[SettingKeyXianyuSyncIntervalMinutes]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			out.SyncIntervalMinutes = n
-		}
-	}
-	if v := vals[SettingKeyXianyuWorkerCardID]; v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			out.WorkerCardID = n
 		}
 	}
 	return out, nil
@@ -121,15 +114,11 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 			return err
 		}
 	}
-	if settings.WorkerCardID < 0 {
-		settings.WorkerCardID = 0
-	}
 	values := map[string]string{
 		SettingKeyXianyuDeliveryEnabled:     strconv.FormatBool(settings.DeliveryEnabled),
 		SettingKeyXianyuAccountAutoRefresh:  strconv.FormatBool(settings.AccountAutoRefresh),
 		SettingKeyXianyuProductAutoBind:     strconv.FormatBool(settings.ProductAutoBind),
 		SettingKeyXianyuSyncIntervalMinutes: strconv.Itoa(settings.SyncIntervalMinutes),
-		SettingKeyXianyuWorkerCardID:        strconv.FormatInt(settings.WorkerCardID, 10),
 	}
 	return s.settingStore.SetMultiple(ctx, values)
 }
@@ -462,6 +451,7 @@ func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64,
 	if err != nil {
 		return err
 	}
+	var boundPool *XianyuItemPool
 	if poolID != nil {
 		pool, err := s.control.GetItemPoolByID(ctx, *poolID)
 		if err != nil {
@@ -470,6 +460,7 @@ func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64,
 		if pool.Status != XianyuItemPoolStatusActive {
 			return infraerrors.Conflict("XIANYU_ITEM_POOL_DISABLED", "cannot bind to a disabled item pool")
 		}
+		boundPool = pool
 		if err := s.control.UpdateProductBinding(ctx, productID, XianyuBindingStatusMapped, source, poolID); err != nil {
 			return err
 		}
@@ -477,31 +468,45 @@ func (s *XianyuControlService) BindProduct(ctx context.Context, productID int64,
 		return err
 	}
 	// 主程序绑定即唯一绑定动作：Worker 侧"商品→卡券"关系自动跟上。
-	if err := s.syncProductCardBinding(ctx, product.ItemID, poolID != nil); err != nil {
+	if err := s.syncProductCardBinding(ctx, product.ItemID, boundPool, poolID != nil); err != nil {
 		return fmt.Errorf("绑定已保存，但同步 Worker 卡券关联失败（Worker 恢复后重新保存绑定即可）: %w", err)
 	}
 	return nil
 }
 
-// syncProductCardBinding 绑定/解绑后同步 Worker 卡券关联。
-// 配置了统一发货卡券 ID 时：绑定 → 关系覆盖为该卡券；解绑 → 清空关系（cardID=0）。
-// 未配置时跳过（兼容纯 Worker 手工配置的老用法），此时 Worker 侧关系不归主程序管。
-func (s *XianyuControlService) syncProductCardBinding(ctx context.Context, itemID string, bound bool) error {
-	if s.worker == nil || s.settingStore == nil {
+// syncProductCardBinding 绑定/解绑后同步 Worker 卡券关联：
+// 绑定 → 关系覆盖为该池的专属发货卡券（缺失则自动供给）；解绑 → 清空关系。
+func (s *XianyuControlService) syncProductCardBinding(ctx context.Context, itemID string, pool *XianyuItemPool, bound bool) error {
+	if s.worker == nil {
 		return nil
 	}
-	vals, err := s.settingStore.GetMultiple(ctx, []string{SettingKeyXianyuWorkerCardID})
+	if !bound {
+		return s.worker.SyncItemCard(ctx, itemID, 0)
+	}
+	if pool == nil {
+		return nil
+	}
+	cardID, err := s.ensurePoolWorkerCard(ctx, pool)
 	if err != nil {
 		return err
 	}
-	cardID, _ := strconv.ParseInt(vals[SettingKeyXianyuWorkerCardID], 10, 64)
-	if cardID <= 0 {
-		return nil // 未配置统一发货卡券：保持 Worker 侧手工关联
-	}
-	if !bound {
-		cardID = 0 // 解绑：清空该商品的卡券关联，避免已解绑商品继续触发 claim
-	}
 	return s.worker.SyncItemCard(ctx, itemID, cardID)
+}
+
+// ensurePoolWorkerCard 返回池的 Worker 发货卡券 ID；缺失时按池名幂等供给并持久化。
+func (s *XianyuControlService) ensurePoolWorkerCard(ctx context.Context, pool *XianyuItemPool) (int64, error) {
+	if pool.WorkerCardID != nil {
+		return *pool.WorkerCardID, nil
+	}
+	cardID, err := s.worker.ProvisionPoolCard(ctx, "pool-"+pool.Slug)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.control.UpdatePoolWorkerCardID(ctx, pool.ID, &cardID); err != nil {
+		return 0, err
+	}
+	pool.WorkerCardID = &cardID
+	return cardID, nil
 }
 
 // AutoBindProducts 对所有 unmapped 商品执行自动绑定。
@@ -531,7 +536,13 @@ func (s *XianyuControlService) AutoBindProducts(ctx context.Context) error {
 		if fresh.BindingStatus != XianyuBindingStatusMapped {
 			continue
 		}
-		if err := s.syncProductCardBinding(ctx, fresh.ItemID, true); err != nil {
+		var boundPool *XianyuItemPool
+		if fresh.PoolID != nil {
+			if pool, poolErr := s.control.GetItemPoolByID(ctx, *fresh.PoolID); poolErr == nil {
+				boundPool = pool
+			}
+		}
+		if err := s.syncProductCardBinding(ctx, fresh.ItemID, boundPool, true); err != nil {
 			if revertErr := s.control.UpdateProductBinding(ctx, fresh.ID, XianyuBindingStatusUnmapped, XianyuBindingSourceAutoNew, nil); revertErr != nil {
 				return fmt.Errorf("sync worker card failed: %v; revert binding also failed: %w", err, revertErr)
 			}

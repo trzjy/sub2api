@@ -518,8 +518,6 @@ const (
 	// automatic-delivery claim endpoint. Secrets and audit identity remain in
 	// deployment config.
 	SettingKeyXianyuDeliveryEnabled = "xianyu_delivery_enabled"
-	// SettingKeyXianyuWorkerCardID 闲鱼发货统一卡券：主程序绑定商品时自动同步到 Worker 的卡券 ID（0=未配置）。
-	SettingKeyXianyuWorkerCardID = "xianyu_delivery_worker_card_id"
 
 	// SettingKeyXianyuAccountAutoRefresh 控制账号自动刷新定时任务。
 	SettingKeyXianyuAccountAutoRefresh = "xianyu_account_auto_refresh"

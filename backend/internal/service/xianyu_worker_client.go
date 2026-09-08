@@ -365,6 +365,48 @@ func (c *XianyuWorkerClient) UpdateCardDescription(ctx context.Context, cardID i
 	return c.do(ctx, http.MethodPut, fmt.Sprintf("/api/v1/internal/cards/%d/description", cardID), body, nil, "")
 }
 
+// ProvisionPoolCard 为库存池创建专属的 API 发货卡券（Worker 按名称幂等：
+// 同名 api 卡券已存在则直接返回既有 ID）。url/token 由 Worker 自身环境填充。
+func (c *XianyuWorkerClient) ProvisionPoolCard(ctx context.Context, name string) (int64, error) {
+	raw, err := c.doRequest(ctx, http.MethodPost, "/api/v1/internal/cards/provision", map[string]any{"name": name}, "")
+	if err != nil {
+		return 0, err
+	}
+	var envelope struct {
+		Success bool `json:"success"`
+		Data    struct {
+			CardID int64 `json:"card_id"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return 0, fmt.Errorf("%w: provision card response: %v", ErrXianyuWorkerMalformed, err)
+	}
+	if !envelope.Success || envelope.Data.CardID <= 0 {
+		return 0, fmt.Errorf("xianyu worker: provision card failed: %s", envelope.Message)
+	}
+	return envelope.Data.CardID, nil
+}
+
+// DeletePoolCard 删除库存池对应的自动发货卡券（幂等：不存在视为成功）。
+func (c *XianyuWorkerClient) DeletePoolCard(ctx context.Context, cardID int64) error {
+	raw, err := c.doRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/internal/cards/%d", cardID), nil, "")
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("%w: delete pool card response: %v", ErrXianyuWorkerMalformed, err)
+	}
+	if !envelope.Success {
+		return fmt.Errorf("xianyu worker: delete pool card failed: %s", envelope.Message)
+	}
+	return nil
+}
+
 // SyncItemCard 把商品的卡券关联覆盖为指定发货卡券（cardID<=0 清空）。
 // 主程序统一绑定入口：商品绑定/解绑库存池后调用，Worker 侧关系自动跟上。
 // 写操作显式校验响应信封 success：Worker 全局异常处理器会把非 HTTPException

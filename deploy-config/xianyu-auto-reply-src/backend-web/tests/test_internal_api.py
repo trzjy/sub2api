@@ -119,6 +119,8 @@ def test_internal_api_routes_registered():
         "/internal/messages/send": {"POST"},
         "/internal/cards/{card_id}/description": {"PUT"},
         "/internal/cards/item/{item_id}": {"PUT"},
+        "/internal/cards/provision": {"POST"},
+        "/internal/cards/{card_id}": {"DELETE"},
     }
     for path, methods in expected.items():
         assert path in paths, f"missing internal route {path}"

@@ -71,11 +71,6 @@
               <input v-model.number="settingsForm.sync_interval_minutes" type="number" min="1" class="input w-full" />
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.productSyncPeriodHint') }}</p>
             </div>
-            <div>
-              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.workerCardId') }}</label>
-              <input v-model.number="settingsForm.worker_card_id" type="number" min="0" class="input w-full" :placeholder="t('admin.xianyu.settings.workerCardIdPlaceholder')" />
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.workerCardIdHint') }}</p>
-            </div>
             <div class="flex justify-end">
               <button class="btn btn-primary" @click="saveToggles">
                 {{ t('admin.xianyu.settings.saveToggle') }}
@@ -227,8 +222,7 @@ const settingsForm = reactive({
   delivery_enabled: false,
   account_auto_refresh: true,
   product_auto_bind: true,
-  sync_interval_minutes: 5,
-  worker_card_id: 0
+  sync_interval_minutes: 5
 })
 
 async function loadToggles() {
@@ -238,7 +232,6 @@ async function loadToggles() {
     settingsForm.account_auto_refresh = s.account_auto_refresh
     settingsForm.product_auto_bind = s.product_auto_bind
     settingsForm.sync_interval_minutes = s.sync_interval_minutes
-    settingsForm.worker_card_id = s.worker_card_id ?? 0
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
@@ -250,8 +243,7 @@ async function saveToggles() {
       delivery_enabled: settingsForm.delivery_enabled,
       account_auto_refresh: settingsForm.account_auto_refresh,
       product_auto_bind: settingsForm.product_auto_bind,
-      sync_interval_minutes: settingsForm.sync_interval_minutes,
-      worker_card_id: Math.max(0, Math.floor(settingsForm.worker_card_id || 0))
+      sync_interval_minutes: settingsForm.sync_interval_minutes
     })
     appStore.showSuccess(t('admin.xianyu.settings.success'))
   } catch (err) {

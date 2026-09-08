@@ -389,6 +389,86 @@ async def internal_sync_item_card(
     )
 
 
+@router.post("/cards/provision")
+async def internal_provision_pool_card(
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序建池时自动创建该池专属的 API 发货卡券（幂等：同名 api 卡券已存在则直接返回）。
+
+    url/token/动态参数全部取自 Worker 自身环境（SUB2API_INTERNAL_BASE_URL /
+    SUB2API_INTERNAL_TOKEN），主程序无需下发任何地址或凭据。
+    """
+    import json
+
+    from app.services.card_service import CardService
+    from common.models.card import Card
+    from sqlalchemy import select
+
+    name = str((body or {}).get("name") or "").strip()[:200]
+    if not name:
+        raise HTTPException(status_code=400, detail="card name is required")
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    existing_stmt = select(Card).where(Card.type == "api", Card.name == name)
+    if owner_id is not None:
+        existing_stmt = existing_stmt.where(Card.user_id == owner_id)
+    existing = ((await session.execute(existing_stmt))).scalars().first()
+    if existing:
+        return ApiResponse(success=True, message="已存在同名发货卡券", data={"card_id": existing.id})
+
+    base_url = (settings.sub2api_internal_base_url or "").rstrip("/")
+    token = (settings.sub2api_internal_token or "").strip()
+    if not base_url or not token:
+        raise HTTPException(
+            status_code=409,
+            detail="SUB2API_INTERNAL_BASE_URL/SUB2API_INTERNAL_TOKEN 未配置，无法自动创建发货卡券",
+        )
+    api_config = {
+        "url": f"{base_url}/api/v1/internal/xianyu/redeem-codes/claim",
+        "method": "POST",
+        "timeout": 10,
+        "headers": {"X-Internal-Token": token},
+        "params": {
+            "order_id": "{order_id}",
+            "item_id": "{item_id}",
+            "buyer_id": "{buyer_id}",
+            "cookie_id": "{cookie_id}",
+            "spec_name": "{spec_name}",
+            "spec_value": "{spec_value}",
+            "chat_id": "{chat_id}",
+            "quantity": 1,
+        },
+        "response_field": "data.content",
+    }
+    card = Card(
+        user_id=service_user.id,
+        name=name,
+        type="api",
+        enabled=True,
+        api_config=json.dumps(api_config, ensure_ascii=False),
+        description="主程序库存池自动创建",
+    )
+    session.add(card)
+    await session.commit()
+    await session.refresh(card)
+    return ApiResponse(success=True, message="发货卡券已创建", data={"card_id": card.id})
+
+
+@router.delete("/cards/{card_id}")
+async def internal_delete_pool_card(
+    card_id: int,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序删池时清理该池的自动发货卡券（幂等：不存在视为成功）。"""
+    from app.services.card_service import CardService
+
+    await CardService(session).delete_card(card_id, service_user.id)
+    return ApiResponse(success=True, message="发货卡券已清理", data={"deleted": True})
+
+
 @router.post("/qr-login/generate")
 async def internal_generate_qr_code(
     service_user = Depends(deps.get_service_or_user),

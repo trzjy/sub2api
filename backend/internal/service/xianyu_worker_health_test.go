@@ -70,6 +70,10 @@ func (s *xianyuWorkerControlStub) PoolStockCounts(context.Context, string) (int,
 	return 0, 0, 0, 0, nil
 }
 
+func (s *xianyuWorkerControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
+	return nil
+}
+
 func (s *xianyuWorkerControlStub) GetProductByID(context.Context, int64) (*XianyuProduct, error) {
 	return nil, nil
 }

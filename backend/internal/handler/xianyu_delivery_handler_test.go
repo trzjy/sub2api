@@ -74,9 +74,13 @@ func (xianyuHandlerControlStub) CreateItemPool(context.Context, service.XianyuIt
 func (xianyuHandlerControlStub) UpdateItemPool(context.Context, service.XianyuItemPool) (*service.XianyuItemPool, error) {
 	return nil, nil
 }
-func (xianyuHandlerControlStub) DeleteBindingRule(context.Context, int64) error           { return nil }
+func (xianyuHandlerControlStub) DeleteBindingRule(context.Context, int64) error { return nil }
 func (xianyuHandlerControlStub) GetProductByID(context.Context, int64) (*service.XianyuProduct, error) {
 	return nil, nil
+}
+
+func (xianyuHandlerControlStub) UpdatePoolWorkerCardID(context.Context, int64, *int64) error {
+	return nil
 }
 func (xianyuHandlerControlStub) DeleteItemPool(context.Context, int64) error              { return nil }
 func (xianyuHandlerControlStub) DeleteProduct(context.Context, int64) error               { return nil }

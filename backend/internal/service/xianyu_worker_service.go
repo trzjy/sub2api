@@ -454,6 +454,26 @@ func (s *XianyuWorkerService) UpdateDeliveryCardDescription(ctx context.Context,
 	return client.UpdateCardDescription(ctx, cardID, description)
 }
 
+// ProvisionPoolCard 为库存池创建专属 API 发货卡券，返回卡券 ID。
+func (s *XianyuWorkerService) ProvisionPoolCard(ctx context.Context, name string) (int64, error) {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return 0, err
+	}
+	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
+	return client.ProvisionPoolCard(ctx, name)
+}
+
+// DeletePoolCard 删除池对应的自动发货卡券（幂等）。
+func (s *XianyuWorkerService) DeletePoolCard(ctx context.Context, cardID int64) error {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	client := s.clientFor(workerCfg.BaseURL, mustDecrypt(s.encryptor, workerCfg.APITokenEncrypted))
+	return client.DeletePoolCard(ctx, cardID)
+}
+
 // SyncItemCard 同步商品的 Worker 卡券关联（cardID<=0 清空关联）。
 func (s *XianyuWorkerService) SyncItemCard(ctx context.Context, itemID string, cardID int64) error {
 	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
