@@ -227,9 +227,9 @@
       </div>
 
       <div class="card p-6">
-        <div v-if="!uncovered?.items.length && !uncoveredLoading" class="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
+        <div v-if="uncovered && !uncovered.items.length && !uncoveredLoading" class="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
           <Icon name="check" size="sm" />
-          {{ t('admin.pricing.uncovered.allCovered', { scanned: uncovered?.scanned ?? 0 }) }}
+          {{ t('admin.pricing.uncovered.allCovered', { scanned: uncovered.scanned }) }}
         </div>
         <div v-else class="overflow-x-auto">
           <table class="min-w-full text-sm">
@@ -452,6 +452,7 @@ const syncing = ref(false)
 async function fetchStatus() {
   try {
     status.value = await adminAPI.pricing.getStatus()
+    if (status.value.live_gaps == null) status.value.live_gaps = []
   } catch (err: any) {
     appStore.showError(err?.message || t('common.error'))
   }
@@ -504,8 +505,8 @@ async function fetchCatalog() {
       page: catalogPage.value,
       page_size: catalogPageSize.value
     })
-    catalog.value = res.items
-    catalogTotal.value = res.total
+    catalog.value = res.items || []
+    catalogTotal.value = res.total || 0
   } catch (err: any) {
     appStore.showError(err?.message || t('common.error'))
   } finally {
@@ -552,6 +553,7 @@ async function fetchUncovered() {
   uncoveredLoading.value = true
   try {
     uncovered.value = await adminAPI.pricing.getUncovered(Number(uncoveredDays.value) || 30)
+    if (!uncovered.value.items) uncovered.value.items = []
   } catch (err: any) {
     appStore.showError(err?.message || t('common.error'))
   } finally {
@@ -593,7 +595,7 @@ const editTitle = computed(() =>
 async function fetchCustom() {
   customLoading.value = true
   try {
-    customList.value = await adminAPI.pricing.listCustom()
+    customList.value = (await adminAPI.pricing.listCustom()) || []
   } catch (err: any) {
     appStore.showError(err?.message || t('common.error'))
   } finally {

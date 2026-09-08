@@ -38,6 +38,11 @@ func (r *customModelPricingRepository) List(ctx context.Context) ([]service.Cust
 	if err != nil {
 		return nil, err
 	}
+	if entries == nil {
+		// 空表返回 [] 而非 nil：nil 会被 encoding/json 序列化成 null，
+		// 前端按数组消费会直接抛错。
+		entries = []service.CustomModelPricing{}
+	}
 	if len(ids) > 0 {
 		intervalMap, err := r.batchLoadIntervals(ctx, ids)
 		if err != nil {
