@@ -753,7 +753,7 @@ describe('CreateAccountModal volcano subscription', () => {
     expect(last?.secret_key).toBeUndefined()
   })
 
-  it('recognizes Volcano subscription and preserves endpoint (api_key shown, no AK/SK inputs)', async () => {
+  it('recognizes Volcano subscription and preserves endpoint (api_key 与 AK/SK 输入均展示)', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
@@ -772,11 +772,11 @@ describe('CreateAccountModal volcano subscription', () => {
     // adaptive 下把 chat_completions 设为空白串（旧逻辑会误判为非火山）
     await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue('   ')
     await flushPromises()
-    // 火山订阅号应识别成功：展示 api_key 输入框、且不出现 AK/SK 输入框。
+    // 火山订阅号识别成功：api_key 输入框展示，AK/SK 录入区同步出现（用量探测签名需要）。
     const pw = wrapper.find('form#create-account-form input[type="password"]')
     expect(pw.exists()).toBe(true)
-    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(false)
-    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(true)
   })
 
   it('keeps Volcano endpoint after switching chat_completions <-> adaptive (no silent fallback)', async () => {

@@ -711,11 +711,11 @@ describe('EditAccountModal', () => {
 
     const wrapper = mountModal(account)
     // 空白 chat_completions 不应遮蔽真实火山 base_url（LOW 修复）；
-    // 火山订阅号应识别成功，展示 api_key 输入框、且不出现 AK/SK 输入框。
+    // 火山订阅号识别成功：api_key 输入框展示，且 AK/SK 录入区同步出现（用量探测签名需要）。
     const pw = wrapper.find('form#edit-account-form input[type="password"]')
     expect(pw.exists()).toBe(true)
-    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(false)
-    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.accessKeyPlaceholder"]').exists()).toBe(true)
+    expect(wrapper.find('input[placeholder="admin.accounts.cnProviders.secretKeyPlaceholder"]').exists()).toBe(true)
   })
 
   it('keeps Volcano base_url in payload when adaptive chat_completions is whitespace', async () => {

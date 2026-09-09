@@ -54,6 +54,9 @@ vi.mock('@/api/admin', () => ({
       getDeliveryTemplate: vi.fn().mockResolvedValue(''),
       saveDeliveryTemplate: vi.fn(),
     },
+    groups: {
+      getAll: vi.fn().mockResolvedValue([]),
+    },
   },
 }))
 

@@ -13,6 +13,11 @@ const { listRedeemCodes, batchUpdateRedeemCodes, getAllGroups, showSuccess, show
     showInfo: vi.fn()
   }))
 
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ path: '/admin/redeem', query: {} }),
+}))
+
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     redeem: {

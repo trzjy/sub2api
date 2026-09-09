@@ -64,8 +64,8 @@ describe('PlazaModelPricingTable', () => {
     // 缓存写 / 读(超过 2 位小数原样保留)
     expect(text).toContain('$3.75')
     expect(text).toContain('$0.30')
-    // 倍率列
-    expect(text).toContain('1x')
+    // 倍率列:折扣徽章(实付÷官方价),10折 = 原价
+    expect(text).toContain('10折')
   })
 
   it('shows the Max reasoning billing multiplier', () => {
@@ -86,7 +86,7 @@ describe('PlazaModelPricingTable', () => {
     // 官方价原值仍在(官方列不乘倍率)
     expect(text).toContain('$3.00')
     expect(text).toContain('$15.00')
-    expect(text).toContain('0.5x')
+    expect(text).toContain('5折')
   })
 
   it('用户专属倍率覆盖分组倍率,并划线展示原倍率', () => {
@@ -95,11 +95,8 @@ describe('PlazaModelPricingTable', () => {
     // 实付按 0.8:3 × 0.8 = 2.4
     expect(text).toContain('$2.40')
     expect(text).toContain('$12.00')
-    // 倍率列:原倍率划线 + 专属倍率
-    const struck = wrapper.find('td .line-through')
-    expect(struck.exists()).toBe(true)
-    expect(struck.text()).toBe('1x')
-    expect(text).toContain('0.8x')
+    // 倍率列:折扣徽章按专属倍率计(8折);原倍率划线展示已随倍率显示清理移除
+    expect(text).toContain('8折')
   })
 
   it('模型按官方输出价从高到低排序,无官方价的排最后', () => {
@@ -196,8 +193,8 @@ describe('PlazaModelPricingTable', () => {
     const text = wrapper.text()
     expect(text).toContain('modelPlaza.table.paidPrice')
     expect(text).toContain('modelPlaza.table.officialPrice')
-    // token 行:模型 + 实付 3 列 + 官方 3 列 + 倍率
-    expect(wrapper.findAll('tbody td')).toHaveLength(8)
+    // token 行:模型 + 实付 3 列 + 官方 3 列(倍率已并入价格单元格内联折扣徽章)
+    expect(wrapper.findAll('tbody td')).toHaveLength(7)
   })
 
   it('官方价包含 1h 缓存写入价;official_pricing 为 null 时官方三列显示 -', () => {
@@ -376,9 +373,8 @@ describe('PlazaModelPricingTable', () => {
     // 0.02 × 1(独立倍率),而非 0.02 × 0.1
     expect(text).toContain('$0.02')
     expect(text).not.toContain('$0.002')
-    // 倍率列展示独立倍率 1x,而非分组倍率 0.1x
-    const rateCell = wrapper.findAll('tbody tr td').at(-1)!
-    expect(rateCell.text()).toBe('1x')
+    // 独立倍率生效:分组倍率(1折)不出现在任何折扣徽章中
+    expect(text).not.toContain('1折')
   })
 
   it('生图独立倍率关闭时,按图价格仍乘分组/专属生效倍率', () => {
@@ -399,9 +395,9 @@ describe('PlazaModelPricingTable', () => {
     })
     const wrapper = mountTable([model], 0.1, null, { imageRateIndependent: false })
     const text = wrapper.text()
+    // 分组倍率生效:0.2 × 0.1 = 0.02,而非原价 0.2
     expect(text).toContain('$0.02')
-    const rateCell = wrapper.findAll('tbody tr td').at(-1)!
-    expect(rateCell.text()).toBe('0.1x')
+    expect(text).not.toContain('$0.20')
   })
 
   it('按图模型主行展示阶梯芯片,不把 image_output_price(每 token)当按次价', () => {
@@ -629,7 +625,7 @@ describe('PlazaModelPricingTable 分时计价', () => {
     const baseCells = trs[0].findAll('td')
     expect(baseCells[0].text()).toBe('deepseek-chat')
     expect(baseCells[1].text()).toContain('$2.40')
-    expect(baseCells[7].text()).toContain('0.8x')
+    expect(baseCells[1].text()).toContain('8折')
 
     // 夜间时段行:输入 3 × 0.8 × 0.5,倍率 0.4x,标注时段不含时区
     const nightCells = trs[1].findAll('td')
@@ -641,13 +637,13 @@ describe('PlazaModelPricingTable 分时计价', () => {
     expect(nightCells[1].text()).toContain('$1.20')
     expect(nightCells[2].text()).toContain('$6.00')
     expect(nightCells[3].text()).toContain('$1.50')
-    expect(nightCells[7].text()).toContain('0.4x')
+    expect(nightCells[1].text()).toContain('4折')
 
     // 晚高峰行:3 × 0.8 × 1.2 = 2.88,倍率 0.96x
     const peakCells = trs[2].findAll('td')
     expect(peakCells[0].text()).toContain('18:00–22:00')
     expect(peakCells[1].text()).toContain('$2.88')
-    expect(peakCells[7].text()).toContain('0.96x')
+    expect(peakCells[1].text()).toContain('9.6折')
 
     // 官方列不受时段影响
     expect(nightCells[4].text()).toContain('$3.00')
@@ -681,9 +677,9 @@ describe('PlazaModelPricingTable 分时计价', () => {
     const nightCells = wrapper.findAll('tbody tr')[1].findAll('td')
     const title = nightCells[0].find('[title*="modelPlaza.table.timePricingRowHint"]').attributes('title')
     expect(title).toContain('modelPlaza.table.timePricingRowHintPeak')
-    // 行内数字仍是 基础倍率 × 时段倍率(0.8 × 0.5),高峰只进披露不进价格
+    // 行内数字仍是 基础倍率 × 时段倍率(0.8 × 0.5 → 4折),高峰只进披露不进价格
     expect(nightCells[1].text()).toContain('$1.20')
-    expect(nightCells[7].text()).toContain('0.4x')
+    expect(nightCells[1].text()).toContain('4折')
   })
 
   it('分组未启用高峰(peakWindow 缺省)时 tooltip 不含高峰披露', () => {

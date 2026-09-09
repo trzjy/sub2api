@@ -16,7 +16,8 @@ describe('admin platform filters', () => {
   it('uses the shared catalogs on the groups page', () => {
     const source = readSource('src/views/admin/GroupsView.vue')
     expect(source).toContain('...GROUP_PLATFORM_OPTIONS')
-    expect(source).toContain('...CONCRETE_PLATFORM_OPTIONS')
+    // Composite 路由的目标平台改用专属目录（仅具体平台，不含 composite 本身）
+    expect(source).toContain('...COMPOSITE_TARGET_PLATFORM_OPTIONS')
   })
 
   it('uses the concrete platform catalog wherever concrete platforms are selected', () => {
