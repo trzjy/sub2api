@@ -16,7 +16,7 @@
           :peak-start="group.peak_start"
           :peak-end="group.peak_end"
           :peak-rate-multiplier="group.peak_rate_multiplier"
-          always-show-rate
+          hide-rate
         />
         <span
           v-if="group.is_exclusive"
