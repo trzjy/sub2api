@@ -1100,6 +1100,7 @@
               :peak-start="option.peakStart"
               :peak-end="option.peakEnd"
               :peak-rate-multiplier="option.peakRateMultiplier"
+              :discount-label="groupDiscount(option.value)"
               :description="option.description"
               :selected="
                 selectedKeyForGroup?.group_id === option.value ||
@@ -1127,6 +1128,7 @@ import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 
 const { t } = useI18n()
 import { keysAPI, authAPI, usageAPI, userGroupsAPI } from '@/api'
+import { getModelPlaza, type ModelPlazaGroup } from '@/api/modelPlaza'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 	import DataTable from '@/components/common/DataTable.vue'
@@ -1406,6 +1408,35 @@ const onGroupFilterChange = (value: string | number | boolean | null) => {
 const onStatusFilterChange = (value: string | number | boolean | null) => {
   filterStatus.value = value as string
   onFilterChange()
+}
+
+// 模型广场数据：分组选择器里展示"相对官方 API 折扣"（仅展示用，静默降级）。
+const plazaGroups = ref<ModelPlazaGroup[]>([])
+onMounted(async () => {
+  try {
+    const plaza = await getModelPlaza()
+    plazaGroups.value = plaza.groups
+  } catch {
+    plazaGroups.value = []
+  }
+})
+
+// 组内模型（输入价）实付 ÷ 官方参考价的简单平均，"官方 X 折"。
+const groupDiscount = (groupId: number | null): string => {
+  if (groupId === null) return ''
+  const g = plazaGroups.value.find((x) => x.id === groupId)
+  if (!g) return ''
+  const ratios: number[] = []
+  for (const m of g.models) {
+    const paid = m.pricing?.input_price
+    const official = m.official_pricing?.input_price
+    if (paid != null && official != null && official > 0 && paid > 0) {
+      ratios.push(paid / official)
+    }
+  }
+  if (!ratios.length) return ''
+  const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length
+  return `官方 ${(avg * 10).toFixed(1).replace(/\.0$/, '')}折`
 }
 
 // Convert groups to Select options format with rate multiplier and subscription type
