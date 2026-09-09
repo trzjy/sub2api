@@ -205,9 +205,10 @@ func TestPricingAdminService_GetCatalog_IncludesInUseModelsWithoutExactEntry(t *
 	for _, item := range result.Items {
 		byModel[item.Model] = item
 	}
-	// glm-5.3：无确切条目，但运行时按 "glm-5" 系列兜底价计费 → 目录中为 fuzzy 档并附近似价
+	// glm-5.3：v0.2.4 起上游内置兜底价目表直接收录该名 → 目录中为 fallback 档（有真实价格），
+	// 不再走「系列子串 → fuzzy」路径。
 	require.Contains(t, byModel, "glm-5.3", "在用模型应进目录")
-	assert.Equal(t, CatalogSourceFuzzy, byModel["glm-5.3"].Source)
+	assert.Equal(t, PricingSourceFallback, byModel["glm-5.3"].Source)
 	assert.Greater(t, byModel["glm-5.3"].InputPerMTok, 0.0)
 	// brand-new-model：完全无价 → none 档
 	require.Contains(t, byModel, "brand-new-model")
@@ -237,7 +238,7 @@ func TestPricingAdminService_ScanUncovered(t *testing.T) {
 		{ID: 1, Name: "已覆盖分组", Platform: "openai", ModelPricing: []ChannelModelPricing{
 			{Models: []string{"covered-by-group"}, BillingMode: BillingModeToken, InputPrice: &in},
 		}},
-		{ID: 2, Name: "裸分组", Platform: "openai", ModelsListConfig: GroupModelsListConfig{
+		{ID: 2, Name: "裸分组", Platform: "openai", ModelAllowlist: GroupModelAllowlist{
 			Enabled: true,
 			Models:  []string{"brand-new-model"},
 		}},
@@ -267,10 +268,9 @@ func TestPricingAdminService_ScanUncovered(t *testing.T) {
 	assert.Contains(t, byModel["brand-new-model"].References, "usage")
 	assert.True(t, byModel["brand-new-model"].ZeroCostOnly, "有 token 流量但扣费为 0 应打对账标记")
 
-	// glm-5.3：价格表里只有 glm-5.1，运行时按 "glm-5" 系列子串兜底价计费 → 模糊覆盖，应列出供审查
-	require.Contains(t, byModel, "glm-5.3", "仅靠系列子串兜底计价的模型应列出")
-	assert.Equal(t, VerdictFuzzy, byModel["glm-5.3"].Verdict)
-	assert.Greater(t, byModel["glm-5.3"].InputPerMTok, 0.0, "模糊覆盖应附当前近似的输入单价")
+	// glm-5.3：v0.2.4 起上游内置兜底价目表直接收录该名 → 视为已覆盖，不再进入未覆盖清单
+	//（verdict=fuzzy 的「系列子串兜底」路径仅在模型完全无内置条目时触发）。
+	assert.NotContains(t, byModel, "glm-5.3", "内置兜底价已覆盖的模型不应报未覆盖")
 }
 
 // --- 同步状态快照 ---
