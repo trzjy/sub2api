@@ -249,6 +249,7 @@ export default {
       generateCodes: 'Generate Codes',
       searchCodes: 'Search codes or email...',
       poolFilter: 'Pool: {pool}',
+      allPools: 'All Pools',
       allTypes: 'All Types',
       allStatus: 'All Status',
       balance: 'Balance',
@@ -362,6 +363,7 @@ export default {
       filters: {
         type: 'Type',
         poolFilter: 'Pool: {pool}',
+        allPools: 'All Pools',
       allTypes: 'All Types',
         status: 'Status',
         allStatuses: 'All Status',
@@ -535,6 +537,7 @@ export default {
       allAccounts: 'All Accounts',
       allGroups: 'All Groups',
       poolFilter: 'Pool: {pool}',
+      allPools: 'All Pools',
       allTypes: 'All Types',
       inputCost: 'Input Cost',
       outputCost: 'Output Cost',

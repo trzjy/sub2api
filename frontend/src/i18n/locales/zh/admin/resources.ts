@@ -272,6 +272,7 @@ export default {
       invitation: '邀请码',
       invitationHint: '邀请码用于限制用户注册，使用后自动标记为已使用。',
       poolFilter: '库存池: {pool}',
+      allPools: '全部库存池',
       allTypes: '全部类型',
       allStatus: '全部状态',
       unused: '未使用',
@@ -353,6 +354,7 @@ export default {
       filters: {
         type: '类型',
         poolFilter: '库存池: {pool}',
+        allPools: '全部库存池',
       allTypes: '全部类型',
         status: '状态',
         allStatuses: '全部状态',
@@ -532,6 +534,7 @@ export default {
       allAccounts: '全部账户',
       allGroups: '全部分组',
       poolFilter: '库存池: {pool}',
+      allPools: '全部库存池',
       allTypes: '全部类型',
       inputCost: '输入费用',
       outputCost: '输出费用',

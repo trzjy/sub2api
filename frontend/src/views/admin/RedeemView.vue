@@ -25,11 +25,17 @@
             class="w-36"
             @change="loadCodes"
           />
+          <Select
+            v-model="poolFilter"
+            :options="poolOptions"
+            class="w-40"
+            @change="onPoolSelect"
+          />
           <span
             v-if="poolFilter"
             class="flex items-center gap-1 rounded-full bg-primary-50 px-3 py-1.5 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300"
           >
-            {{ t('admin.redeem.poolFilter', { pool: poolFilter }) }}
+            {{ t('admin.redeem.poolFilter', { pool: poolDisplayName }) }}
             <button
               class="ml-0.5 font-semibold hover:text-primary-900"
               :title="t('common.cancel')"
@@ -634,6 +640,8 @@ import { useClipboard } from '@/composables/useClipboard'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { adminAPI } from '@/api/admin'
+import { xianyuAPI } from '@/api/admin'
+import type { XianyuItemPool } from '@/types'
 import {
   formatDateTime,
   getBrowserTimeZone,
@@ -1218,9 +1226,39 @@ const loadSubscriptionGroups = async () => {
 const route = useRoute()
 const poolFilter = ref(typeof route.query.pool === 'string' ? route.query.pool.trim() : '')
 
+// 库存池清单（按名称筛选，值为 slug）：管理端库存池接口，失败静默降级为仅芯片筛选。
+const pools = ref<XianyuItemPool[]>([])
+const poolNameBySlug = computed(() => {
+  const map: Record<string, string> = {}
+  for (const p of pools.value) map[p.slug] = p.name
+  return map
+})
+const poolOptions = computed(() => [
+  { value: '', label: t('admin.redeem.allPools') },
+  ...pools.value.map((p) => ({ value: p.slug, label: p.name }))
+])
+const poolDisplayName = computed(
+  () => poolNameBySlug.value[poolFilter.value] || poolFilter.value
+)
+
+const onPoolSelect = (value: string | number | boolean | null) => {
+  poolFilter.value = String(value ?? '')
+  pagination.page = 1
+  loadCodes()
+}
+
+async function loadPools() {
+  try {
+    pools.value = (await xianyuAPI.listItemPools()) || []
+  } catch {
+    pools.value = []
+  }
+}
+
 onMounted(() => {
   loadCodes()
   loadSubscriptionGroups()
+  void loadPools()
 })
 
 onUnmounted(() => {
