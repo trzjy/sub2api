@@ -1050,7 +1050,7 @@ export default {
       },
       modelsList: {
         title: '自定义 /v1/models 模型列表',
-        hint: '仅影响 /v1/models 展示结果，不影响白名单模型调用和账号调度。',
+        hint: '开关 + 下方勾选 = 站点对外提供的模型清单：用于 /v1/models 展示、模型价格页（模型广场）与未覆盖模型扫描；不影响白名单调用与账号调度。',
         loading: '正在加载模型列表...',
         empty: '暂无可展示模型',
         selectedSummary: '已选 {selected} / {total}',
