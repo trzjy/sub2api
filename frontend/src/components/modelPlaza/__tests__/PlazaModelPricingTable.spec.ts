@@ -64,8 +64,8 @@ describe('PlazaModelPricingTable', () => {
     // 缓存写 / 读(超过 2 位小数原样保留)
     expect(text).toContain('$3.75')
     expect(text).toContain('$0.30')
-    // 倍率列:折扣徽章(实付÷官方价),10折 = 原价
-    expect(text).toContain('10折')
+    // 无折扣(10折=原价)不展示折扣徽章,避免满屏噪音
+    expect(text).not.toContain('折')
   })
 
   it('shows the Max reasoning billing multiplier', () => {

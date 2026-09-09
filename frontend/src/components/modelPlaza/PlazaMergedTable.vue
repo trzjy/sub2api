@@ -84,7 +84,6 @@
                 :platform="(row.model.platform as any)"
                 :subscription-type="(entry.subscriptionType as any)"
                 hide-rate
-                class="max-w-full"
               />
             </td>
 
@@ -335,6 +334,8 @@ function discountBadge(
   const paidNum = paid == null ? 0 : paid * 1e6
   if (paidNum <= 0) return ''
   const zhe = (paidNum / off) * 10
+  // 原价（10折）不展示徽章，避免无折扣时满屏噪音；加价（>10折）仍披露
+  if (zhe >= 9.95) return ''
   return `${zhe.toFixed(zhe >= 1 ? 1 : 2).replace(/\.?0+$/, '')}折`
 }
 </script>

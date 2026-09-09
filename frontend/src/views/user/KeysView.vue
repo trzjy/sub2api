@@ -1436,6 +1436,8 @@ const groupDiscount = (groupId: number | null): string => {
   }
   if (!ratios.length) return ''
   const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length
+  // 原价（10折）不展示折扣标签，避免无折扣时噪音
+  if (avg >= 0.995) return ''
   return `官方 ${(avg * 10).toFixed(1).replace(/\.0$/, '')}折`
 }
 

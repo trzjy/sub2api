@@ -440,6 +440,8 @@ function discountBadge(
   if (paidNum <= 0) return ''
   const ratio = paidNum / off
   const zhe = ratio * 10
+  // 原价（10折）不展示徽章，避免无折扣时满屏噪音；加价（>10折）仍披露
+  if (zhe >= 9.95) return ''
   return `${zhe.toFixed(zhe >= 1 ? 1 : 2).replace(/\.?0+$/, '')}折`
 }
 
