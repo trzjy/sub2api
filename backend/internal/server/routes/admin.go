@@ -866,6 +866,8 @@ func registerPricingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		pricing.GET("/catalog", h.Admin.Pricing.GetCatalog)
 		pricing.GET("/uncovered", h.Admin.Pricing.GetUncovered)
 		pricing.GET("/preview", h.Admin.Pricing.GetPreview)
+		pricing.GET("/cost-basis", h.ModelPlaza.GetPricingCostBasis)
+		pricing.PUT("/cost-basis", h.ModelPlaza.SavePricingCostBasis)
 		pricing.GET("/custom", h.Admin.Pricing.ListCustom)
 		pricing.GET("/custom/:id", h.Admin.Pricing.GetCustom)
 		pricing.POST("/custom", h.Admin.Pricing.CreateCustom)
@@ -993,7 +995,5 @@ func registerModelPlazaAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) 
 	{
 		plaza.GET("/official-pricing", h.ModelPlaza.GetOfficialPricingOverrides)
 		plaza.PUT("/official-pricing", h.ModelPlaza.SaveOfficialPricingOverrides)
-		plaza.GET("/cost-basis", h.ModelPlaza.GetPricingCostBasis)
-		plaza.PUT("/cost-basis", h.ModelPlaza.SavePricingCostBasis)
 	}
 }
