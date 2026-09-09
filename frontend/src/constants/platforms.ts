@@ -36,3 +36,24 @@ export const GROUP_PLATFORM_OPTIONS = [
 export const COMPOSITE_TARGET_PLATFORM_OPTIONS = CONCRETE_PLATFORM_OPTIONS.filter(
   (p) => p.value !== 'other',
 )
+
+/**
+ * 模型广场展示排序：claude → gpt → kimi → glm → deepseek，其余平台排在其后。
+ */
+export const PLAZA_PLATFORM_ORDER = [
+  'anthropic',
+  'openai',
+  'kimi',
+  'zhipu',
+  'deepseek',
+  'gemini',
+  'antigravity',
+  'grok',
+  'other',
+  'composite',
+] as const
+
+export function plazaPlatformOrder(platform: string): number {
+  const idx = (PLAZA_PLATFORM_ORDER as readonly string[]).indexOf(platform)
+  return idx === -1 ? PLAZA_PLATFORM_ORDER.length : idx
+}

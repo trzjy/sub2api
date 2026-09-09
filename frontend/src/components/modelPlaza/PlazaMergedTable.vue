@@ -45,7 +45,7 @@
         </tr>
       </thead>
       <tbody>
-        <template v-for="row in props.rows" :key="row.key">
+        <template v-for="row in orderedRows" :key="row.key">
           <tr
             v-for="(entry, eIdx) in row.entries"
             :key="row.key + '-' + entry.groupId"
@@ -225,6 +225,7 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { computed } from 'vue'
 import type { PropType } from 'vue'
 import { formatScaled } from '@/utils/pricing'
 import { platformBadgeLightClass, platformLabel } from '@/utils/platformColors'
@@ -234,6 +235,7 @@ import {
   BILLING_MODE_IMAGE,
   type BillingMode
 } from '@/constants/channel'
+import { plazaPlatformOrder } from '@/constants/platforms'
 import type { PlazaModel, PlazaTimePricingPeriod } from '@/api/modelPlaza'
 import type { UserPricingInterval } from '@/api/channels'
 
@@ -261,6 +263,15 @@ const props = defineProps({
 const { t } = useI18n()
 const PER_MILLION = 1e6
 const MIN_DECIMALS = 2
+
+/** 展示顺序:平台族 claude → gpt → kimi → glm → deepseek,同族内按模型名。 */
+const orderedRows = computed(() =>
+  [...props.rows].sort(
+    (a, b) =>
+      plazaPlatformOrder(a.model.platform) - plazaPlatformOrder(b.model.platform) ||
+      a.model.name.localeCompare(b.model.name)
+  )
+)
 
 function billingMode(m: PlazaModel): BillingMode {
   return (m.pricing?.billing_mode as BillingMode) || BILLING_MODE_TOKEN
