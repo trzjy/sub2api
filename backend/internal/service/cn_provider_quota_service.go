@@ -236,6 +236,10 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 			targetURL += "?type=2"
 		}
 	case PlatformMiniMax:
+		apiKey := strings.TrimSpace(account.GetCNAPIKey())
+		if apiKey == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
+		}
 		targetURL = minimaxQuotaURL(baseURL)
 		authHeader = "Bearer " + apiKey
 	case providerVolcano:

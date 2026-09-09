@@ -187,7 +187,7 @@ func buildVolcanoProbeRequest(ctx context.Context, account *Account, profile vol
 	if account.GetAPIProtocol() == APIProtocolAnthropic {
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
-		setAnthropicAPIKeyAuthHeader(req.Header, account, apiKey)
+		setAnthropicAPIKeyAuthHeader(req.Header, account, apiKey, account.GetBaseURL())
 	} else {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}

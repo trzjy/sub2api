@@ -198,7 +198,7 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 
 	// 模型清单来源优先级：
 	//  1. 渠道声明（SupportedModels，渠道驱动部署）；
-	//  2. 分组"模型列表配置"（ModelsListConfig 启用 = 站点对外声明实际提供的模型）；
+	//  2. 分组"模型列表配置"（ModelAllowlist 启用 = 站点对外声明实际提供的模型）；
 	//  3. 组内活跃账号的模型映射（未声明时的回退，可能含未实际提供的名字）。
 	for _, gid := range order {
 		pg := byGroup[gid]
@@ -206,9 +206,9 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			continue
 		}
 		g := groupEnt[gid]
-		if g.ModelsListConfig.Enabled && len(g.ModelsListConfig.Models) > 0 {
+		if g.ModelAllowlist.Enabled && len(g.ModelAllowlist.Models) > 0 {
 			seen := make(map[string]struct{})
-			for _, name := range g.ModelsListConfig.Models {
+			for _, name := range g.ModelAllowlist.Models {
 				name = strings.TrimSpace(name)
 				if name == "" || strings.HasSuffix(name, "*") {
 					continue

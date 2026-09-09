@@ -345,8 +345,8 @@ func (s *PricingAdminService) collectScanCandidates(ctx context.Context, windowD
 	}
 	for i := range groups {
 		g := &groups[i]
-		if g.ModelsListConfig.Enabled {
-			for _, m := range g.ModelsListConfig.Models {
+		if g.ModelAllowlist.Enabled {
+			for _, m := range g.ModelAllowlist.Models {
 				addRef(m, g.Name)
 			}
 		}
