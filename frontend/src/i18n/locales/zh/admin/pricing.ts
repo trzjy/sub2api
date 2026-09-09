@@ -20,7 +20,7 @@ export default {
     source: {
       custom: '自定义',
       remote: '远程同步',
-      builtin: '内置兜底',
+      builtin: '内置官方价',
       fuzzy: '系列兜底计价',
       none: '无价',
       channel: '渠道价',
@@ -53,7 +53,7 @@ export default {
       searchPlaceholder: '输入模型名关键词',
       source: '来源筛选',
       allSources: '全部来源',
-      sourceHint: '目录包含全部模型：全局层条目（自定义 > 远程同步 > 内置兜底）+ 在用/已声明模型的实际计价档（系列兜底 / 无价）。分组/渠道覆盖请到对应页面查看。',
+      sourceHint: '目录包含全部模型：全局层条目（自定义 > 远程同步 > 内置官方价）+ 在用/已声明模型的实际计价档（系列兜底 / 无价）。分组/渠道覆盖请到对应页面查看。',
       imageOnly: '仅图片价',
       override: '自定义覆盖',
       empty: '没有匹配的模型'

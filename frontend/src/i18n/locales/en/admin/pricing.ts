@@ -20,7 +20,7 @@ export default {
     source: {
       custom: 'Custom',
       remote: 'Remote Sync',
-      builtin: 'Built-in Fallback',
+      builtin: 'Built-in Official',
       fuzzy: 'Series Fallback',
       none: 'No Price',
       channel: 'Channel',
