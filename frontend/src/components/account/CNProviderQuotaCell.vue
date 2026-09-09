@@ -4,38 +4,18 @@
     data-test="cn-provider-quota"
     class="min-w-[220px] space-y-1"
   >
-    <!-- Tier rows: 5h + weekly utilization bars (snapshot renders on mount) -->
+    <!-- Tier rows: 5h + weekly utilization bars (snapshot renders on mount).
+         复用账号页 UsageProgressBar：同阈值配色、同倒计时格式。 -->
     <div v-if="data?.success && data.tiers?.length" class="space-y-1">
-      <div
+      <UsageProgressBar
         v-for="tier in data.tiers"
         :key="tier.window"
         data-test="cn-provider-quota-tier"
-        class="flex min-w-0 items-center gap-1.5 text-[10px] leading-4"
-      >
-        <span
-          data-test="cn-provider-quota-label"
-          class="w-14 shrink-0 whitespace-nowrap text-gray-500 dark:text-gray-400"
-        >
-          {{ windowLabel(tier.window) }}
-        </span>
-        <div class="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-600">
-          <div
-            class="h-full rounded-full transition-all"
-            :class="tier.used_percent == null ? 'bg-gray-300 dark:bg-dark-500' : utilizationColor(tier.used_percent)"
-            :style="{ width: tier.used_percent == null ? '0%' : `${Math.min(100, Math.max(0, tier.used_percent))}%` }"
-          />
-        </div>
-        <span :class="['shrink-0 font-medium', tier.used_percent == null ? 'text-gray-400 dark:text-gray-500' : utilizationTextColor(tier.used_percent)]">
-          {{ tier.used_percent == null ? '上游未提供' : formatTierPercent(tier.used_percent) }}
-        </span>
-        <span
-          v-if="tier.reset_at"
-          class="min-w-0 truncate text-gray-400 dark:text-gray-500"
-          :title="tier.reset_at"
-        >
-          · {{ formatReset(tier.reset_at) }}
-        </span>
-      </div>
+        :label="windowLabel(tier.window)"
+        :color="tier.window === 'weekly' ? 'emerald' : 'indigo'"
+        :utilization="tier.used_percent"
+        :resets-at="tier.reset_at"
+      />
     </div>
 
     <!-- Explicit refresh action (aligned with the OpenAI "Query" / Grok "Probe"
@@ -87,18 +67,13 @@ const lastAutoProbeAt = new Map<number, number>()
 </script>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
 import type { Account } from '@/types'
 import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL, isVolcanoBaseURL } from './credentialsBuilder'
-
-// 用量百分比显示：<1% 保留两位小数（新窗口刚重置时避免一律显示 0%），其余取整。
-function formatTierPercent(percent: number): string {
-  if (percent > 0 && percent < 1) return percent.toFixed(2) + '%'
-  return Math.round(percent) + '%'
-}
+import UsageProgressBar from './UsageProgressBar.vue'
 
 const props = defineProps<{
   account: Account
@@ -219,52 +194,6 @@ const windowLabel = (window: string) => {
   if (window === 'weekly') return t('admin.accounts.cnProviders.windowWeekly')
   if (window === 'monthly') return t('admin.accounts.cnProviders.windowMonthly')
   return t('admin.accounts.cnProviders.window5h')
-}
-
-const utilizationColor = (pct: number) => {
-  if (pct >= 90) return 'bg-red-500'
-  if (pct >= 75) return 'bg-amber-500'
-  return 'bg-emerald-500'
-}
-
-const utilizationTextColor = (pct: number) => {
-  if (pct >= 90) return 'text-red-600 dark:text-red-400'
-  if (pct >= 75) return 'text-amber-600 dark:text-amber-400'
-  return 'text-emerald-600 dark:text-emerald-400'
-}
-
-// 响应式时钟：倒计时应随时间递减（达到 GPT 官方组件的倒计时行为），而非仅在
-// 挂载/探测时算一次。每 1s tick 一次，驱动 formatReset 重算；组件卸载时清理。
-const clockNow = ref(Date.now())
-const CLOCK_INTERVAL_MS = 1000
-let clockTimer: ReturnType<typeof setInterval> | null = null
-
-onMounted(() => {
-  clockTimer = setInterval(() => {
-    clockNow.value = Date.now()
-  }, CLOCK_INTERVAL_MS)
-})
-
-onBeforeUnmount(() => {
-  if (clockTimer != null) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
-})
-
-// 重置时间相对/绝对简短显示。
-const formatReset = (iso: string) => {
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return iso
-  const now = clockNow.value
-  const diffMs = d.getTime() - now
-  if (diffMs <= 0) return t('admin.accounts.cnProviders.resetSoon')
-  if (diffMs < 3_600_000) return `${Math.max(1, Math.round(diffMs / 60_000))}m`
-  const hours = Math.round(diffMs / 3_600_000)
-  if (hours < 48) return `${hours}h`
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${mm}-${dd}`
 }
 
 const handleProbe = async () => {

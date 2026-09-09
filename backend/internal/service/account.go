@@ -285,18 +285,20 @@ func (a *Account) IsDeepseek() bool {
 	return a.Platform == PlatformDeepseek
 }
 
-// IsCNProvider 报告是否为国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）。
+func (a *Account) IsMiniMax() bool {
+	return a.Platform == PlatformMiniMax
+}
+
+// IsCNProvider 报告是否为国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax）。
 func (a *Account) IsCNProvider() bool {
 	return a != nil && IsCNProvider(a.Platform)
 }
 
 // IsOpenAICompatible 报告账号是否走 OpenAI 网关（OpenAI 协议族）。
-// openai/grok 原生走 OpenAI 网关；kimi/zhipu/deepseek 同为 OpenAI Chat Completions
+// openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
 // 兼容上游，也经 OpenAI 网关转发。
 func (a *Account) IsOpenAICompatible() bool {
-	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok ||
-		a.Platform == PlatformKimi || a.Platform == PlatformZhipu || a.Platform == PlatformDeepseek ||
-		a.Platform == PlatformOther)
+	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() || a.Platform == PlatformOther)
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容
@@ -1374,6 +1376,8 @@ func (a *Account) GetOpenAIBaseURL() string {
 		return DefaultZhipuPayGBaseURL
 	case PlatformDeepseek:
 		return DefaultDeepseekBaseURL
+	case PlatformMiniMax:
+		return DefaultMiniMaxBaseURL
 	case PlatformOther:
 		// other 无内置默认上游：仅返回账号自定义 base_url；为空返回空，由上层
 		// 失败关闭，绝不回落官方 OpenAI 端点。
@@ -1403,8 +1407,8 @@ func (a *Account) IsCodingPlan() bool {
 
 // GetAPIProtocol 返回账号的上游 API 协议。存储于
 // credentials["api_protocol"]；缺失或与平台不匹配时回退 chat_completions
-// （与既有行为完全一致）。responses 协议仅 deepseek 支持（官方原生 /responses
-// 端点，适配 Codex）；kimi/zhipu 无此端点。国产供应商另支持 adaptive
+// （与既有行为完全一致）。responses 协议仅 deepseek / kimi / minimax 支持（官方原生
+// Responses 端点，适配 Codex）；zhipu 无此端点。国产供应商另支持 adaptive
 // （按入站协议动态选择厂商原生端点）；other 平台无厂商默认端点，仅开放
 // anthropic / chat_completions 双协议（适配 Anthropic 兼容上游，如
 // api.lkeap.cloud.tencent.com/plan/anthropic）。
@@ -1412,31 +1416,58 @@ func (a *Account) GetAPIProtocol() string {
 	if a == nil {
 		return APIProtocolChatCompletions
 	}
-	if a.IsCNProvider() {
+	if a.Platform == PlatformOther {
+		// other 平台无厂商默认端点，仅开放 anthropic / chat_completions 双协议，
+		// 不支持 adaptive / responses。
 		switch strings.TrimSpace(a.GetCredential("api_protocol")) {
-		case APIProtocolAdaptive:
-			return APIProtocolAdaptive
 		case APIProtocolAnthropic:
 			return APIProtocolAnthropic
-		case APIProtocolResponses:
-			if a.Platform == PlatformDeepseek {
-				return APIProtocolResponses
-			}
 		case APIProtocolChatCompletions:
 			return APIProtocolChatCompletions
 		}
 		return APIProtocolChatCompletions
 	}
-	if a.Platform == PlatformOther {
-		switch strings.TrimSpace(a.GetCredential("api_protocol")) {
-		case APIProtocolAnthropic:
-			return APIProtocolAnthropic
-		case APIProtocolChatCompletions:
-			return APIProtocolChatCompletions
+	switch strings.TrimSpace(a.GetCredential("api_protocol")) {
+	case APIProtocolAdaptive:
+		return APIProtocolAdaptive
+	case APIProtocolAnthropic:
+		return APIProtocolAnthropic
+	case APIProtocolResponses:
+		if a.SupportsNativeCNResponses() {
+			return APIProtocolResponses
 		}
 		return APIProtocolChatCompletions
 	}
 	return APIProtocolChatCompletions
+}
+
+// SupportsNativeCNResponses 报告该国产供应商是否提供原生 Responses 端点。
+// DeepSeek 官方为 /responses（无 /v1）；Kimi 按量付费与 Coding Plan 均为
+// /v1/responses（moonshot.cn / kimi.com/coding）；MiniMax 为 /v1/responses。
+func (a *Account) SupportsNativeCNResponses() bool {
+	if a == nil {
+		return false
+	}
+	switch a.Platform {
+	case PlatformDeepseek, PlatformKimi, PlatformMiniMax:
+		return true
+	default:
+		return false
+	}
+}
+
+// UsesNativeCNResponses 报告当前账号是否应按原生 Responses 协议转发
+// （显式 responses，或 adaptive 且平台具备原生端点）。
+func (a *Account) UsesNativeCNResponses() bool {
+	if a == nil || !a.SupportsNativeCNResponses() {
+		return false
+	}
+	switch a.GetAPIProtocol() {
+	case APIProtocolResponses, APIProtocolAdaptive:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsAdaptiveAPIProtocol 报告账号是否按入站协议动态选择供应商原生端点。
@@ -1479,6 +1510,8 @@ func (a *Account) defaultCNProtocolBaseURL(protocol string) string {
 			return DefaultZhipuAnthropicBaseURL
 		case PlatformDeepseek:
 			return DefaultDeepseekAnthropicBaseURL
+		case PlatformMiniMax:
+			return DefaultMiniMaxAnthropicBaseURL
 		}
 	case APIProtocolChatCompletions, APIProtocolResponses:
 		switch a.Platform {
@@ -1494,6 +1527,8 @@ func (a *Account) defaultCNProtocolBaseURL(protocol string) string {
 			return DefaultZhipuPayGBaseURL
 		case PlatformDeepseek:
 			return DefaultDeepseekBaseURL
+		case PlatformMiniMax:
+			return DefaultMiniMaxBaseURL
 		}
 	}
 	return ""
@@ -1530,6 +1565,8 @@ func (a *Account) GetAnthropicProtocolBaseURL() string {
 		return DefaultZhipuAnthropicBaseURL
 	case PlatformDeepseek:
 		return DefaultDeepseekAnthropicBaseURL
+	case PlatformMiniMax:
+		return DefaultMiniMaxAnthropicBaseURL
 	default:
 		return ""
 	}
@@ -1557,6 +1594,8 @@ func (a *Account) GetOpenAIFormatBaseURL() string {
 		return DefaultZhipuPayGBaseURL
 	case PlatformDeepseek:
 		return DefaultDeepseekBaseURL
+	case PlatformMiniMax:
+		return DefaultMiniMaxBaseURL
 	case PlatformOther:
 		// other 无厂商默认 OpenAI 端点：anthropic 协议下凭证 base_url 指向 Anthropic
 		// 端点，绝不能拿它拼 OpenAI 格式路径（embeddings 等），返回空由上层失败关闭
@@ -1576,9 +1615,9 @@ func (a *Account) GetCNAPIKey() string {
 	return a.GetCredential("api_key")
 }
 
-// GetCodingPlanProvider 根据 base_url 识别 Coding Plan 供应商（kimi / zhipu），
+// GetCodingPlanProvider 根据 base_url 识别 Coding Plan 供应商（kimi / zhipu / minimax），
 // 用于路由到对应的额度查询端点。非 coding 模式或无法识别时返回空串。
-// 判定规则与 cc-switch coding_plan.rs::detect_provider 保持一致。
+// 只认官方域名：自定义中转不得把第三方 Key 发往厂商官方额度端点。
 func (a *Account) GetCodingPlanProvider() string {
 	if a == nil || a.GetAccountMode() != AccountModeCoding {
 		return ""
@@ -1594,6 +1633,10 @@ func (a *Account) GetCodingPlanProvider() string {
 		// 同走 open.volcengineapi.com 管理接口，探测动作按路径区分。用 net/url 主机
 		// 精确判定，避免带相似子串的主机（如 evil-ark.cn-beijing.volces.com）误判。
 		return providerVolcano
+	case strings.Contains(baseURL, "minimax.io"),
+		strings.Contains(baseURL, "minimaxi.com"),
+		strings.Contains(baseURL, "minimax.com"):
+		return PlatformMiniMax
 	default:
 		return ""
 	}
@@ -1852,9 +1895,10 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 }
 
 // GrokMediaGenerationEligibility reports whether a Grok account may receive
-// new image/video generation requests. OAuth media fails closed unless billing
-// observations provide positive paid-entitlement evidence. An explicit
-// operator override takes precedence over probe data.
+// new image/video generation requests. Explicit evidence of a forbidden or
+// free account blocks media, while an incomplete successful billing response
+// remains eligible for backwards compatibility. An explicit operator
+// override takes precedence over probe data.
 func (a *Account) GrokMediaGenerationEligibility() (bool, string) {
 	if a == nil || !a.IsGrok() {
 		return false, "not_grok"
@@ -1880,7 +1924,12 @@ func (a *Account) GrokMediaGenerationEligibility() (bool, string) {
 		return false, "billing_free_tier"
 	}
 	if !grokBillingHasAuthoritativeQuota(billing) {
-		return false, "billing_inconclusive"
+		// Billing endpoints can return 200 with an account-specific schema that
+		// omits plan/quota fields (for example, some SuperGrok accounts). An
+		// incomplete observation is not proof of ineligibility; keep the account
+		// routable and expose the reason for diagnostics. Operators can still
+		// quarantine a known-bad account with grok_media_eligible=false.
+		return true, "billing_inconclusive"
 	}
 	return true, "eligible"
 }

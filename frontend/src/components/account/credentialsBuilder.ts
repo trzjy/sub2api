@@ -42,7 +42,8 @@ export function isHeaderOverrideCapable(platform: string, type: string): boolean
     platform === 'openai' ||
     platform === 'kimi' ||
     platform === 'zhipu' ||
-    platform === 'deepseek'
+    platform === 'deepseek' ||
+    platform === 'minimax'
   ) {
     return type === 'apikey'
   }
@@ -255,10 +256,20 @@ export const GROK_BASE_URL_PRESETS: GrokBaseUrlPreset[] = [
 // 两者正交。同协议请求零转换直通，跨协议组合才走转换链。
 
 export type CnAccountMode = 'payg' | 'coding'
+export type CnProviderPlatform = 'kimi' | 'zhipu' | 'deepseek' | 'minimax'
 
-/** 仅 deepseek 支持原生 responses；adaptive 会按入站协议选择原生端点。 */
+/** deepseek / kimi / minimax 支持原生 responses；adaptive 会按入站协议选择原生端点。 */
 export type CnApiProtocol = 'adaptive' | 'chat_completions' | 'anthropic' | 'responses'
 export type CnNativeApiProtocol = Exclude<CnApiProtocol, 'adaptive'>
+
+export function isCNProviderPlatform(platform: string): platform is CnProviderPlatform {
+  return platform === 'kimi' || platform === 'zhipu' || platform === 'deepseek' || platform === 'minimax'
+}
+
+/** DeepSeek、Kimi 与 MiniMax 提供原生 Responses 端点。 */
+export function cnSupportsNativeResponses(platform: string): boolean {
+  return platform === 'deepseek' || platform === 'kimi' || platform === 'minimax'
+}
 
 export interface CnBaseUrlPreset {
   mode: CnAccountMode
@@ -269,12 +280,14 @@ export interface CnBaseUrlPreset {
 }
 
 /** 各供应商按账号类型 × API 协议分档的快捷端点（点击快速填充，输入框仍可自由填写）。 */
-export const CN_BASE_URL_PRESETS: Record<'kimi' | 'zhipu' | 'deepseek', CnBaseUrlPreset[]> = {
+export const CN_BASE_URL_PRESETS: Record<CnProviderPlatform, CnBaseUrlPreset[]> = {
   kimi: [
     { mode: 'payg', protocol: 'chat_completions', label: 'Moonshot', url: 'https://api.moonshot.cn/v1' },
     { mode: 'payg', protocol: 'anthropic', label: 'Moonshot Anthropic', url: 'https://api.moonshot.cn/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'Moonshot Responses', url: 'https://api.moonshot.cn/v1' },
     { mode: 'coding', protocol: 'chat_completions', label: 'Kimi For Coding', url: 'https://api.kimi.com/coding/v1' },
-    { mode: 'coding', protocol: 'anthropic', label: 'Kimi Coding Anthropic', url: 'https://api.kimi.com/coding' }
+    { mode: 'coding', protocol: 'anthropic', label: 'Kimi Coding Anthropic', url: 'https://api.kimi.com/coding' },
+    { mode: 'coding', protocol: 'responses', label: 'Kimi Coding Responses', url: 'https://api.kimi.com/coding/v1' }
   ],
   zhipu: [
     { mode: 'payg', protocol: 'chat_completions', label: 'GLM PaaS', url: 'https://open.bigmodel.cn/api/paas/v4' },
@@ -289,6 +302,21 @@ export const CN_BASE_URL_PRESETS: Record<'kimi' | 'zhipu' | 'deepseek', CnBaseUr
     // 火山方舟订阅号挂靠 deepseek 平台（方案B：识别只按 base_url，账号仍存为 deepseek 平台）。
     { mode: 'payg', protocol: 'chat_completions', label: '火山方舟 Agent Plan', url: 'https://ark.cn-beijing.volces.com/api/plan' },
     { mode: 'coding', protocol: 'chat_completions', label: '火山方舟 Coding Plan', url: 'https://ark.cn-beijing.volces.com/api/coding' }
+  ],
+  minimax: [
+    { mode: 'payg', protocol: 'chat_completions', label: 'MiniMax CN', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'payg', protocol: 'anthropic', label: 'MiniMax CN Anthropic', url: 'https://api.minimaxi.com/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'MiniMax CN Responses', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'payg', protocol: 'chat_completions', label: 'MiniMax Intl', url: 'https://api.minimax.io/v1' },
+    { mode: 'payg', protocol: 'anthropic', label: 'MiniMax Intl Anthropic', url: 'https://api.minimax.io/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'MiniMax Intl Responses', url: 'https://api.minimax.io/v1' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'MiniMax Coding CN', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'coding', protocol: 'anthropic', label: 'MiniMax Coding CN Anthropic', url: 'https://api.minimaxi.com/anthropic' },
+    { mode: 'coding', protocol: 'responses', label: 'MiniMax Coding CN Responses', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'MiniMax Coding Intl', url: 'https://api.minimax.io/v1' },
+    { mode: 'coding', protocol: 'anthropic', label: 'MiniMax Coding Intl Anthropic', url: 'https://api.minimax.io/anthropic' },
+    { mode: 'coding', protocol: 'responses', label: 'MiniMax Coding Intl Responses', url: 'https://api.minimax.io/v1' }
+>>>>>>> upstream/main
   ]
 }
 
@@ -306,11 +334,13 @@ export function defaultCNBaseUrl(
         return 'https://open.bigmodel.cn/api/anthropic'
       case 'deepseek':
         return 'https://api.deepseek.com/anthropic'
+      case 'minimax':
+        return 'https://api.minimaxi.com/anthropic'
       default:
         return ''
     }
   }
-  // responses 仅 deepseek：base 与 chat_completions 相同（端点路径差异由后端处理）。
+  // responses：Kimi / DeepSeek / MiniMax 的 base 与 chat_completions 相同（端点路径差异由后端处理）。
   switch (platform) {
     case 'kimi':
       return mode === 'coding' ? 'https://api.kimi.com/coding/v1' : 'https://api.moonshot.cn/v1'
@@ -320,6 +350,8 @@ export function defaultCNBaseUrl(
         : 'https://open.bigmodel.cn/api/paas/v4'
     case 'deepseek':
       return 'https://api.deepseek.com'
+    case 'minimax':
+      return 'https://api.minimaxi.com/v1'
     default:
       return ''
   }
@@ -327,13 +359,13 @@ export function defaultCNBaseUrl(
 
 /** 返回自适应模式下需要配置的原生协议及其默认端点。 */
 export function defaultCNAdaptiveBaseUrls(
-  platform: 'kimi' | 'zhipu' | 'deepseek',
+  platform: CnProviderPlatform,
   mode: CnAccountMode
 ): Record<CnNativeApiProtocol, string> {
   return {
     chat_completions: defaultCNBaseUrl(platform, mode, 'chat_completions'),
     anthropic: defaultCNBaseUrl(platform, mode, 'anthropic'),
-    responses: platform === 'deepseek' ? defaultCNBaseUrl(platform, mode, 'responses') : ''
+    responses: cnSupportsNativeResponses(platform) ? defaultCNBaseUrl(platform, mode, 'responses') : ''
   }
 }
 
@@ -342,7 +374,7 @@ export function defaultCNAdaptiveBaseUrls(
 // 共用，避免多处复制条件后一处改另一处漏改。
 
 // 国内 Coding Plan 供应商的 extra 快照键前缀（与后端 cnQuotaExtraUpdates /
-// GetCodingPlanProvider 对齐：kimi/zhipu 平台即供应商，直接采用；火山方舟订阅号
+// GetCodingPlanProvider 对齐：kimi/zhipu/minimax 平台即供应商，直接采用；火山方舟订阅号
 // 由 base_url 命中 ark.cn-beijing.volces.com 判定映射到 backend 的 providerVolcano，
 // 与账号 platform 解耦——火山订阅号仍存为 deepseek 平台，但识别只认 base_url）。
 // 与后端 Account.GetOpenAIBaseURL 的解析优先级保持一致：CN 账号仅在
@@ -363,6 +395,17 @@ export function resolveAccountBaseURL(credentials: Record<string, unknown> | und
   }
   const b = credentials.base_url
   return typeof b === 'string' ? b : ''
+}
+
+export function cnQuotaCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
+  if (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') {
+    return accountMode === 'coding'
+  }
+  // 火山方舟订阅号：按 base_url 识别，与 platform 解耦（账号仍存为 deepseek 平台），
+  // 与接入模式无关（火山订阅号保存为 payg）。仅火山放行非 coding，不改
+  // Kimi / 智谱 / MiniMax / 普通 DeepSeek 的模式语义。
+  if (isVolcanoBaseURL(baseURL)) return true
+  return false
 }
 
 // 仅火山方舟订阅号（Agent Plan /api/plan 与 Coding Plan /api/coding 共用
@@ -387,6 +430,7 @@ export function cnQuotaProviderPrefix(platform: string, baseURL: string): string
   if (isVolcanoBaseURL(baseURL)) return 'volcano'
   if (platform === 'kimi') return 'kimi'
   if (platform === 'zhipu') return 'zhipu'
+  if (platform === 'minimax') return 'minimax'
   return ''
 }
 

@@ -25,12 +25,13 @@ const (
 	PlatformAntigravity = "antigravity"
 	PlatformGrok        = "grok"
 	// 国产 OpenAI 兼容供应商（经 OpenAI 网关转发，按 Chat Completions 协议）。
-	PlatformKimi     = "kimi"     // Kimi (月之暗面 / Moonshot)
-	PlatformZhipu    = "zhipu"    // 智谱 GLM (bigmodel)
-	PlatformDeepseek = "deepseek" // DeepSeek
+	PlatformKimi      = "kimi"     // Kimi (月之暗面 / Moonshot)
+	PlatformZhipu     = "zhipu"    // 智谱 GLM (bigmodel)
+	PlatformDeepseek  = "deepseek" // DeepSeek
 	// PlatformOther 通用 OpenAI 兼容自定义上游：任意第三方 Chat Completions
 	// 兼容端点经 OpenAI 网关转发。无内置 base_url 预设，账号须自填 base_url。
-	PlatformOther     = "other"
+	PlatformOther   = "other"
+	PlatformMiniMax = "minimax"  // MiniMax (M 系列)
 	PlatformComposite = "composite"
 )
 
@@ -47,7 +48,7 @@ const (
 const (
 	APIProtocolChatCompletions = "chat_completions" // OpenAI Chat Completions（默认）
 	APIProtocolAnthropic       = "anthropic"        // 原生 Anthropic /v1/messages（适配 Claude Code）
-	APIProtocolResponses       = "responses"        // OpenAI Responses（仅 deepseek，适配 Codex）
+	APIProtocolResponses       = "responses"        // OpenAI Responses（deepseek / kimi / minimax 原生端点，适配 Codex）
 	APIProtocolAdaptive        = "adaptive"         // 按入站协议优先选择供应商原生端点
 )
 
@@ -102,6 +103,7 @@ const AntigravityGemini31ProAgentModel = "gemini-pro-agent"
 // 与前端 useModelWhitelist.ts 中的 antigravityDefaultMappings 保持一致
 var DefaultAntigravityModelMapping = map[string]string{
 	// Claude 白名单
+	"claude-fable-5-1":           "claude-fable-5-1",         // 官方模型
 	"claude-fable-5":             "claude-fable-5",           // 官方模型
 	"claude-opus-4-8":            "claude-opus-4-8",          // 官方模型
 	"claude-opus-4-7":            "claude-opus-4-7",          // 官方模型
@@ -162,7 +164,8 @@ var DefaultAntigravityModelMapping = map[string]string{
 // aws_region 自动调整为匹配的区域前缀（如 eu.、apac.、jp. 等）
 var DefaultBedrockModelMapping = map[string]string{
 	// Claude Fable
-	"claude-fable-5": "anthropic.claude-fable-5",
+	"claude-fable-5-1": "anthropic.claude-fable-5-1",
+	"claude-fable-5":   "anthropic.claude-fable-5",
 	// Claude Opus
 	"claude-opus-5":            "us.anthropic.claude-opus-5-v1",
 	"claude-opus-4-8":          "us.anthropic.claude-opus-4-8-v1",

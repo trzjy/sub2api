@@ -48,9 +48,9 @@
         @update:search="searchQuery = $event"
       />
 
-      <!-- 分组分节的模型清单(默认按生效倍率升序) -->
-      <div v-if="filteredGroups.length > 0" class="space-y-5">
-        <PlazaGroupSection v-for="g in filteredGroups" :key="g.id" :group="g" />
+      <!-- 模型中心合并视图：同模型多分组相邻排列，分组徽章 + 实付价 + 折扣 -->
+      <div v-if="mergedRows.length > 0" class="space-y-5">
+        <PlazaMergedTable :rows="mergedRows" :platform="selectedPlatform" />
       </div>
       <div
         v-else
@@ -69,9 +69,11 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import Icon from '@/components/icons/Icon.vue'
 import PlazaFilterBar from './PlazaFilterBar.vue'
-import PlazaGroupSection from './PlazaGroupSection.vue'
+import PlazaMergedTable from './PlazaMergedTable.vue'
+import { formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import type { ModelPlazaGroup, ModelPlazaResponse } from '@/api/modelPlaza'
 import { useAuthStore } from '@/stores/auth'
+import { useAppStore } from '@/stores/app'
 
 const props = defineProps<{
   response: ModelPlazaResponse | null
@@ -83,6 +85,7 @@ const props = defineProps<{
 
 const { t } = useI18n()
 const authStore = useAuthStore()
+const appStore = useAppStore()
 const isAuthenticated = computed(() => authStore.isAuthenticated)
 
 const selectedPlatform = ref<string>('all')
@@ -150,6 +153,64 @@ const filteredGroups = computed(() => {
   return [...groups].sort(
     (a, b) => effectiveRate(a) - effectiveRate(b) || a.name.localeCompare(b.name)
   )
+})
+
+/** 模型中心合并：摊平全部分组条目，同模型相邻；组内条目按实付输入价升序。 */
+const mergedRows = computed(() => {
+  const rows: {
+    key: string
+    model: import('@/api/modelPlaza').PlazaModel
+    entries: {
+      model: import('@/api/modelPlaza').PlazaModel
+      groupId: number
+      groupName: string
+      rate: number
+      subscriptionType?: string
+      peakRateText?: string
+      peakRateTitle?: string
+    }[]
+  }[] = []
+  const byKey = new Map<string, (typeof rows)[number]>()
+  for (const g of filteredGroups.value) {
+    const rate = effectiveRate(g)
+    const peak = g.peak_rate_enabled
+      ? formatPeakRateWindow(
+          {
+            peak_rate_enabled: true,
+            peak_start: g.peak_start,
+            peak_end: g.peak_end,
+            peak_rate_multiplier: g.peak_rate_multiplier
+          },
+          appStore.cachedPublicSettings?.server_utc_offset
+        )
+      : ''
+    for (const m of g.models) {
+      const key = `${m.platform}::${m.name.toLowerCase()}`
+      let row = byKey.get(key)
+      if (!row) {
+        row = { key, model: m, entries: [] }
+        byKey.set(key, row)
+        rows.push(row)
+      }
+      row.entries.push({
+        model: m,
+        groupId: g.id,
+        groupName: g.name,
+        rate,
+        subscriptionType: g.subscription_type,
+        peakRateText: peak || undefined,
+        peakRateTitle: peak ? t('payment.planCard.peakRate') + ' (' + serverTimezoneLabel(appStore.cachedPublicSettings?.server_utc_offset) + ')' : undefined
+      })
+    }
+  }
+  for (const row of rows) {
+    row.entries.sort((a, b) => {
+      const pa = a.model.pricing?.input_price ?? Infinity
+      const pb = b.model.pricing?.input_price ?? Infinity
+      return pa * a.rate - pb * b.rate || a.groupName.localeCompare(b.groupName)
+    })
+  }
+  return rows.sort((a, b) => a.model.name.localeCompare(b.model.name))
 })
 </script>
 
