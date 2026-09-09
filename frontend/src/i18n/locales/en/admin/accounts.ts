@@ -747,6 +747,13 @@ export default {
         fileReadFailed: 'Failed to read the selected file',
         noResponseBody: 'No response body from server'
       },
+      balanceProbe: {
+        title: 'Custom Balance Query',
+        description: 'Configure balance probing for relay upstreams with a JSON usage endpoint. It only reads the upstream response and never modifies the local billed balance.',
+        url: 'Balance Endpoint URL',
+        bearerAuth: 'Use Bearer Authentication',
+        notQueried: 'Balance not queried'
+      },
       anthropic: {
         apiKeyPassthrough: 'Auto passthrough (auth only)',
         apiKeyPassthroughDesc:

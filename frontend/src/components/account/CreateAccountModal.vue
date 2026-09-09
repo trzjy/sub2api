@@ -204,8 +204,6 @@
           </button>
           <button
             type="button"
-          <button
-            type="button"
             @click="selectCNPlatform('minimax')"
             :class="[
               'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',

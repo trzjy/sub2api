@@ -19,7 +19,7 @@ export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'kimi', label: 'Kimi' },
   { value: 'zhipu', label: 'Zhipu GLM' },
   { value: 'deepseek', label: 'DeepSeek' },
-  { value: 'other', label: 'Other' }
+  { value: 'other', label: 'Other' },
   { value: 'minimax', label: 'MiniMax' }
 ] as const satisfies readonly PlatformOption<AccountPlatform>[]
 

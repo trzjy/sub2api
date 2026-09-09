@@ -72,6 +72,8 @@ const props = withDefaults(
   defineProps<{
     label: string
     utilization: number // Percentage (0-100+)
+    /** 用量上游不可得（如火山周/月窗口）：条置灰、百分比显示 “—” 而非假 0。 */
+    unknownUsage?: boolean
     resetsAt?: string | null
     color: 'indigo' | 'emerald' | 'purple' | 'amber'
     windowStats?: WindowStats | null
@@ -130,6 +132,7 @@ const labelSizeClass = computed(() =>
 
 // Progress bar color based on utilization
 const barClass = computed(() => {
+  if (props.unknownUsage) return 'bg-gray-300 dark:bg-gray-600'
   if (props.remainingCapacity) {
     if (props.utilization <= 20) {
       return 'bg-red-500'
@@ -168,11 +171,13 @@ const textClass = computed(() => {
 
 // Bar width (capped at 100%)
 const barWidth = computed(() => {
+  if (props.unknownUsage) return '0%'
   return `${Math.min(Math.max(props.utilization, 0), 100)}%`
 })
 
 // Display percentage (cap at 999% for readability)
 const displayPercent = computed(() => {
+  if (props.unknownUsage) return '—'
   const percent = Math.round(
     props.remainingCapacity
       ? Math.min(Math.max(props.utilization, 0), 100)

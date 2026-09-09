@@ -10,8 +10,8 @@ const concretePlatforms = [
   'kimi',
   'zhipu',
   'deepseek',
-  'minimax',
-  'other'
+  'other',
+  'minimax'
 ]
 
 describe('platform option catalogs', () => {

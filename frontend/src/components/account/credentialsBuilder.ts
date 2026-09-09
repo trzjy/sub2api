@@ -316,7 +316,6 @@ export const CN_BASE_URL_PRESETS: Record<CnProviderPlatform, CnBaseUrlPreset[]> 
     { mode: 'coding', protocol: 'chat_completions', label: 'MiniMax Coding Intl', url: 'https://api.minimax.io/v1' },
     { mode: 'coding', protocol: 'anthropic', label: 'MiniMax Coding Intl Anthropic', url: 'https://api.minimax.io/anthropic' },
     { mode: 'coding', protocol: 'responses', label: 'MiniMax Coding Intl Responses', url: 'https://api.minimax.io/v1' }
->>>>>>> upstream/main
   ]
 }
 
@@ -432,17 +431,6 @@ export function cnQuotaProviderPrefix(platform: string, baseURL: string): string
   if (platform === 'zhipu') return 'zhipu'
   if (platform === 'minimax') return 'minimax'
   return ''
-}
-
-export function cnQuotaCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
-  if (platform === 'kimi' || platform === 'zhipu') {
-    return accountMode === 'coding'
-  }
-  // 火山方舟订阅号：按 base_url 识别，与 platform 解耦（账号仍存为 deepseek 平台），
-  // 与接入模式无关（火山订阅号保存为 payg）。仅火山放行非 coding，不改
-  // Kimi / 智谱 / 普通 DeepSeek 的模式语义。
-  if (isVolcanoBaseURL(baseURL)) return true
-  return false
 }
 
 export function cnBalanceCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {

@@ -13,7 +13,8 @@
         data-test="cn-provider-quota-tier"
         :label="windowLabel(tier.window)"
         :color="tier.window === 'weekly' ? 'emerald' : 'indigo'"
-        :utilization="tier.used_percent"
+        :utilization="tier.used_percent ?? 0"
+        :unknown-usage="tier.used_percent == null"
         :resets-at="tier.reset_at"
       />
     </div>

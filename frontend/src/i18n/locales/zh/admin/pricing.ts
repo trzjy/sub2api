@@ -102,8 +102,8 @@ export default {
       window: '配额窗口',
       fxLabel: '汇率（¥/$）',
       weight: '扣减权重',
-      weightHint: '每模型扣减权重（units / M tokens），JSON 对象。示例：{"glm-5.3-flash": 25, "kimi-k2.7-code": 450}',
-      weightPlaceholder: '{"glm-5.3-flash": 25}',
+      weightHint: '每模型扣减权重（units / M tokens），JSON 对象。示例：glm-5.3-flash 填 25、kimi-k2.7-code 填 450',
+      weightPlaceholder: "{'{'}\"glm-5.3-flash\": 25{'}'}",
       weightJsonError: '权重 JSON 格式错误',
       capacity: '满月容量',
       costPerM: '成本（¥/M）',
@@ -125,7 +125,6 @@ export default {
       deleteTitle: '删除官方参考价',
       deleteMessage: '确定删除「{model}」的官方参考价？删除后该模型回落计费目录价。'
     },
-    officialTabPlaceholder: '',
     custom: {
       hint: '自定义价格层全局生效，优先级介于渠道价与远程同步表之间；支持 * 后缀通配；远程同步不会覆盖本层配置。',
       add: '新增定价',

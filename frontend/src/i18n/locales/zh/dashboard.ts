@@ -639,6 +639,7 @@ export default {
     },
     table: {
       model: '模型',
+      group: '分组',
       input: '输入',
       output: '输出',
       cache: '缓存',

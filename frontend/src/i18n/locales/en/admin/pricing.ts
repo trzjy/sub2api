@@ -40,8 +40,7 @@ export default {
       localHash: 'Local Hash',
       gapsTitle: 'Live Billing Gaps',
       gapsHint: 'Models billed with no price found ($0, revenue leak). In-process data, reset on restart.',
-      noGaps: 'No gaps — every billed model has a price',
-      addPrice: 'Add Price'
+      noGaps: 'No gaps — every billed model has a price'
     },
     gaps: {
       count: 'Count',
@@ -103,8 +102,8 @@ export default {
       window: 'Quota window',
       fxLabel: 'FX (¥/$)',
       weight: 'Deduction weight',
-      weightHint: 'Per-model deduction weight (units / M tokens), JSON object. e.g. {"glm-5.3-flash": 25, "kimi-k2.7-code": 450}',
-      weightPlaceholder: '{"glm-5.3-flash": 25}',
+      weightHint: 'Per-model deduction weight (units / M tokens), JSON object. e.g. set glm-5.3-flash to 25 and kimi-k2.7-code to 450',
+      weightPlaceholder: "{'{'}\"glm-5.3-flash\": 25{'}'}",
       weightJsonError: 'Invalid weights JSON',
       capacity: 'Full-quota capacity',
       costPerM: 'Cost (¥/M)',
@@ -126,7 +125,6 @@ export default {
       deleteTitle: 'Delete Official Reference Price',
       deleteMessage: 'Delete the official reference price for "{model}"? The model will fall back to the billing catalog price.'
     },
-    officialTabPlaceholder: '',
     custom: {
       hint: 'The custom layer is global and sits between channel prices and the remote table; supports * wildcard suffix; remote sync never overwrites it.',
       add: 'Add Pricing',

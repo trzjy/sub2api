@@ -334,6 +334,7 @@ describe('ModelWhitelistSelector', () => {
     expect(syncVolcanoPlanModels).toHaveBeenLastCalledWith(101, { apply: true, expected_removals: [] })
     expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3']]])
     expect(showSuccess).toHaveBeenCalled()
+  })
 
   it('shows success and a partial warning when some capabilities were saved', async () => {
     syncUpstreamModels.mockResolvedValue({

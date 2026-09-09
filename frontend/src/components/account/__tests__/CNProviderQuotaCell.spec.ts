@@ -211,7 +211,8 @@ describe('CNProviderQuotaCell', () => {
     } as Account
     const wrapper = mount(CNProviderQuotaCell, { props: { account: withReset } })
     await flushPromises()
-    expect(wrapper.text()).toContain('2h')
+    // UsageProgressBar 以分钟精度渲染倒计时（约 2h → “2h 0m” 或 “1h 59m”）。
+    expect(wrapper.text()).toMatch(/\b[12]h \d{1,2}m\b/)
   })
 
   // 没有 reset_at 时仍显示用量条，但不伪造/推算倒计时（不渲染 `·` 重置片段）。

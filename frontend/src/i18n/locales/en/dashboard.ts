@@ -634,6 +634,7 @@ export default {
     },
     table: {
       model: 'Model',
+      group: 'Group',
       input: 'Input',
       output: 'Output',
       cache: 'Cache',
