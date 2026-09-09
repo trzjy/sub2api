@@ -12,35 +12,39 @@ import (
 	"sync"
 	"time"
 
-	"net/url"
 	"github.com/tidwall/gjson"
+	"net/url"
 )
 
 // 订阅成本实测：控制变量实验。
-// 流程（每模型）：探针官方月配额绝对 Used → 注入已知量调用（输入重载突发）→
-// 等待计量入账 → 再次探针 → 差值 ÷ 注入 token 数 = 该模型扣减权重（units/M tokens）。
-// 权重回写成本核算计划，成本/倍率由前端按计划参数换算。
+// 流程（每模型）：探针官方月配额用量 → 注入已知量调用（输入重载突发）→
+// 等待计量入账 → 再次探针 → 差值 ÷ 注入 token 数求解：
+//   - Agent Plan（GetAFPUsage 绝对 Used）：扣减权重 units/M tokens
+//   - Coding Plan（GetCodingPlanUsage 月百分比）：实测成本 ¥/M tokens（月费 × Δpct/100 ÷ tokensM）
+//
+// 结果回写成本核算计划，成本/倍率由前端按计划参数换算。
 
 const (
-	experimentBurstRequests    = 8
+	experimentBurstRequests     = 16
 	experimentBurstPromptTokens = 35000
-	experimentBurstMaxTokens   = 32
-	experimentBurstConcurrency = 4
-	experimentSettleWait       = 15 * time.Minute
-	experimentChatTimeout      = 300 * time.Second
+	experimentBurstMaxTokens    = 32
+	experimentBurstConcurrency  = 4
+	experimentSettleWait        = 15 * time.Minute
+	experimentChatTimeout       = 300 * time.Second
 )
 
 // PricingExperimentResult 单模型实测结果。
 type PricingExperimentResult struct {
-	Model      string  `json:"model"`
-	TokensIn   int64   `json:"tokens_in"`
-	TokensOut  int64   `json:"tokens_out"`
-	UsedBefore float64 `json:"used_before"`
-	UsedAfter  float64 `json:"used_after"`
-	DeltaUnits float64 `json:"delta_units"`
-	WeightPerM float64 `json:"weight_per_m"` // units / M tokens
-	Skipped    bool    `json:"skipped"`
-	Note       string  `json:"note,omitempty"`
+	Model            string  `json:"model"`
+	TokensIn         int64   `json:"tokens_in"`
+	TokensOut        int64   `json:"tokens_out"`
+	UsedBefore       float64 `json:"used_before"`
+	UsedAfter        float64 `json:"used_after"`
+	DeltaUnits       float64 `json:"delta_units"`                   // AFP: 绝对 units 差；Coding: 月配额百分比差
+	WeightPerM       float64 `json:"weight_per_m,omitempty"`        // units / M tokens（AFP 绝对用量型）
+	MeasuredCostPerM float64 `json:"measured_cost_per_m,omitempty"` // ¥/M tokens（Coding 百分比型直接测得）
+	Skipped          bool    `json:"skipped"`
+	Note             string  `json:"note,omitempty"`
 }
 
 // PricingExperimentState 实测任务状态（进程内，单实例部署）。
@@ -57,9 +61,9 @@ type PricingExperimentState struct {
 }
 
 type pricingExperimentRunner struct {
-	mu        sync.Mutex
-	running   bool
-	state     *PricingExperimentState
+	mu      sync.Mutex
+	running bool
+	state   *PricingExperimentState
 }
 
 // StartPricingCostExperiment 启动一轮实测（同一时间仅允许一个）。
@@ -99,13 +103,15 @@ func (s *ModelPlazaService) StartPricingCostExperiment(ctx context.Context, plan
 	}
 	s.expState = state
 
+	// 用独立 context：HTTP 请求返回后 c.Request.Context() 会被取消，
+	// 突发调用必须与请求生命周期解耦。
 	go func() {
 		defer func() {
 			s.expMu.Lock()
 			s.expRunning = false
 			s.expMu.Unlock()
 		}()
-		s.runPricingExperiment(ctx, plan, basis, state)
+		s.runPricingExperiment(context.Background(), plan, basis, state)
 	}()
 	return nil
 }
@@ -160,13 +166,30 @@ func (s *ModelPlazaService) runPricingExperiment(ctx context.Context, plan *Pric
 		return
 	}
 
-	used0, err := s.probeAFPMonthlyUsed(probeAcc)
+	kind := planProbeKind(probeAcc)
+	if kind == "" {
+		state.Status = "failed"
+		state.Err = fmt.Sprintf("probe account %d base_url supports neither GetAFPUsage nor GetCodingPlanUsage", probeAcc.ID)
+		return
+	}
+	probe := func() (float64, error) {
+		if kind == "coding" {
+			return s.probeCodingMonthlyPercent(probeAcc)
+		}
+		return s.probeAFPMonthlyUsed(probeAcc)
+	}
+
+	used0, err := probe()
 	if err != nil {
 		state.Status = "failed"
 		state.Err = fmt.Sprintf("initial probe: %v", err)
 		return
 	}
-	s.expLog(state, "月配额 Used 起始: %.4f", used0)
+	if kind == "coding" {
+		s.expLog(state, "月配额用量起始: %.6f%%（百分比型订阅，直接测成本 ¥/M）", used0)
+	} else {
+		s.expLog(state, "月配额 Used 起始: %.4f", used0)
+	}
 
 	models := make([]string, 0, len(plan.Weights))
 	for m := range plan.Weights {
@@ -187,7 +210,7 @@ func (s *ModelPlazaService) runPricingExperiment(ctx context.Context, plan *Pric
 			continue
 		}
 
-		ub, err := s.probeAFPMonthlyUsed(probeAcc)
+		ub, err := probe()
 		if err != nil {
 			results = append(results, PricingExperimentResult{Model: model, Skipped: true, Note: fmt.Sprintf("probe: %v", err)})
 			continue
@@ -199,7 +222,7 @@ func (s *ModelPlazaService) runPricingExperiment(ctx context.Context, plan *Pric
 			continue
 		}
 		time.Sleep(experimentSettleWait)
-		ua, err := s.probeAFPMonthlyUsed(probeAcc)
+		ua, err := probe()
 		if err != nil {
 			results = append(results, PricingExperimentResult{Model: model, Skipped: true, Note: fmt.Sprintf("probe: %v", err)})
 			continue
@@ -207,10 +230,6 @@ func (s *ModelPlazaService) runPricingExperiment(ctx context.Context, plan *Pric
 
 		tokensM := float64(burst.promptTokens+burst.completionTok) / 1e6
 		delta := ua - ub
-		w := 0.0
-		if tokensM > 0 {
-			w = delta / tokensM
-		}
 		res := PricingExperimentResult{
 			Model:      model,
 			TokensIn:   burst.promptTokens,
@@ -218,28 +237,55 @@ func (s *ModelPlazaService) runPricingExperiment(ctx context.Context, plan *Pric
 			UsedBefore: ub,
 			UsedAfter:  ua,
 			DeltaUnits: delta,
-			WeightPerM: w,
 		}
-		if w <= 0 {
-			res.Skipped = true
-			res.Note = "Δ≤0（计量滞后或无扣减），建议重测"
+		if kind == "coding" {
+			// 百分比型订阅：Δpct% 直接消耗了月费预算的比例，
+			// 实测成本 ¥/M = 月费 × Δpct/100 ÷ 突发 tokens(M)。
+			cost := 0.0
+			if tokensM > 0 && plan.MonthlyFeeCNY > 0 {
+				cost = plan.MonthlyFeeCNY * delta / 100 / tokensM
+			}
+			res.MeasuredCostPerM = cost
+			if delta <= 0 || cost <= 0 {
+				res.Skipped = true
+				res.Note = "Δpct≤0（计量滞后或无扣减），建议重测"
+			}
+			s.expLog(state, "%s 实测: Δ%.6f%% / %.3fM tokens → 实测成本 ¥%.3f/M", model, delta, tokensM, cost)
+		} else {
+			w := 0.0
+			if tokensM > 0 {
+				w = delta / tokensM
+			}
+			res.WeightPerM = w
+			if w <= 0 {
+				res.Skipped = true
+				res.Note = "Δ≤0（计量滞后或无扣减），建议重测"
+			}
+			s.expLog(state, "%s 实测: Δ%.4f units / %.3fM tokens = %.1f units/M", model, delta, tokensM, w)
 		}
 		results = append(results, res)
-		s.expLog(state, "%s 实测: Δ%.4f units / %.3fM tokens = %.1f units/M", model, delta, tokensM, w)
 		state.Results = results
 		state.UpdatedAt = time.Now().UTC()
 	}
 
 	state.Results = results
-	// 权重回写计划（仅成功实测的模型）
+	// 回写计划：百分比型写实测成本，绝对用量型写扣减权重（仅成功实测项）
 	updated := 0
 	for i := range results {
 		r := results[i]
-		if r.Skipped || r.WeightPerM <= 0 {
+		if r.Skipped {
 			continue
 		}
-		plan.Weights[r.Model] = r.WeightPerM
-		updated++
+		if r.MeasuredCostPerM > 0 {
+			if plan.MeasuredCostPerM == nil {
+				plan.MeasuredCostPerM = map[string]float64{}
+			}
+			plan.MeasuredCostPerM[r.Model] = r.MeasuredCostPerM
+			updated++
+		} else if r.WeightPerM > 0 {
+			plan.Weights[r.Model] = r.WeightPerM
+			updated++
+		}
 	}
 	plan.UpdatedAt = time.Now().UTC().Format("2006-01-02 15:04")
 	if saveErr := s.settingService.SavePricingCostBasis(ctx, basis); saveErr != nil {
@@ -285,6 +331,7 @@ type experimentBurstOut struct {
 // runInputBurst 输入重载突发：唯一 prompt × N 请求，回报实测 tokens。
 func (s *ModelPlazaService) runInputBurst(ctx context.Context, acc *Account, model string) experimentBurstOut {
 	base := strings.TrimSuffix(acc.GetCredential("base_url"), "/")
+	base = strings.TrimSuffix(base, "/v3") // 部分 base_url 已带 /v3（如 /api/coding/v3），避免双拼
 	apiKey := acc.GetCredential("api_key")
 	u := base + "/v3/chat/completions"
 	promptTokens := experimentBurstPromptTokens
@@ -352,28 +399,23 @@ func (s *ModelPlazaService) runInputBurst(ctx context.Context, acc *Account, mod
 	return out
 }
 
-// probeAFPMonthlyUsed 探针 Agent Plan 月配额绝对 Used（AK/SK 管理面）。
-func (s *ModelPlazaService) probeAFPMonthlyUsed(acc *Account) (float64, error) {
+// volcanoUsageProbeGet 用账号 AK/SK 签名调用方舟用量管理接口，返回原始响应体。
+func (s *ModelPlazaService) volcanoUsageProbeGet(acc *Account, action string) ([]byte, error) {
 	ak := strings.TrimSpace(acc.GetCredential("access_key"))
 	sk := strings.TrimSpace(acc.GetCredential("secret_key"))
 	if ak == "" || sk == "" {
-		return 0, fmt.Errorf("account %d has no AK/SK", acc.ID)
-	}
-	base := acc.GetCredential("base_url")
-	action := volcanoUsageAction(base)
-	if action != "GetAFPUsage" {
-		return 0, fmt.Errorf("plan probe unsupported for base %s (percent-only)", base)
+		return nil, fmt.Errorf("account %d has no AK/SK", acc.ID)
 	}
 	query := url.Values{}
 	query.Set("Action", action)
 	query.Set("Version", volcanoQuotaVersion)
 	canonQuery, signedHeaders, err := volcEngineSignQuery(ak, sk, volcanoQuotaRegion, volcanoQuotaService, volcanoQuotaHost, query, time.Now().UTC())
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+volcanoQuotaHost+"/?"+canonQuery, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	for name, values := range signedHeaders {
 		for _, v := range values {
@@ -382,15 +424,61 @@ func (s *ModelPlazaService) probeAFPMonthlyUsed(acc *Account) (float64, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body[:min(len(body), 160)])))
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body[:min(len(body), 160)])))
+	}
+	return body, nil
+}
+
+// planProbeKind 根据探针账号 base_url 判定订阅类型：
+// "afp"=Agent Plan（GetAFPUsage 绝对 Used/Quota），"coding"=Coding Plan（GetCodingPlanUsage 百分比）。
+func planProbeKind(acc *Account) string {
+	base := acc.GetCredential("base_url")
+	switch {
+	case strings.Contains(base, "/api/plan"):
+		return "afp"
+	case strings.Contains(base, "/api/coding"):
+		return "coding"
+	default:
+		return ""
+	}
+}
+
+// probeAFPMonthlyUsed 探针 Agent Plan 月配额绝对 Used（AK/SK 管理面）。
+func (s *ModelPlazaService) probeAFPMonthlyUsed(acc *Account) (float64, error) {
+	body, err := s.volcanoUsageProbeGet(acc, "GetAFPUsage")
+	if err != nil {
+		return 0, err
 	}
 	used := gjson.GetBytes(body, "Result.AFPMonthly.Used").Float()
 	return used, nil
+}
+
+// probeCodingMonthlyPercent 探针 Coding Plan 月配额用量百分比（GetCodingPlanUsage，Level=monthly）。
+// 百分比即"月预算消耗比例"：配合月费可直接换算实测成本（¥/M），无需配额绝对值、无任何借用假设。
+func (s *ModelPlazaService) probeCodingMonthlyPercent(acc *Account) (float64, error) {
+	body, err := s.volcanoUsageProbeGet(acc, "GetCodingPlanUsage")
+	if err != nil {
+		return 0, err
+	}
+	percent := 0.0
+	found := false
+	gjson.GetBytes(body, "Result.QuotaUsage").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("Level").String() == "monthly" {
+			percent = item.Get("Percent").Float()
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		return 0, fmt.Errorf("monthly quota usage missing in response")
+	}
+	return percent, nil
 }
 
 // experimentPrompt 生成唯一长文本（约 targetTokens tokens，数字串 4 chars/token）。
