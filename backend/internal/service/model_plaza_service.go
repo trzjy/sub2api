@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"fmt"
 	"sort"
 	"strings"
@@ -69,6 +70,10 @@ type ModelPlazaService struct {
 	resolver       *ModelPricingResolver
 	settingService *SettingService
 	accountRepo    AccountRepository
+
+	expMu      sync.Mutex
+	expRunning bool
+	expState   *PricingExperimentState
 }
 
 // NewModelPlazaService 创建模型广场服务。

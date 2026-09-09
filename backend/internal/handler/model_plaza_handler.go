@@ -292,6 +292,29 @@ func (h *ModelPlazaHandler) SavePricingCostBasis(c *gin.Context) {
 	response.Success(c, basis)
 }
 
+// StartPricingCostExperiment 启动订阅成本实测（控制变量实验，异步执行）。
+// POST /api/v1/admin/pricing/experiment/start
+func (h *ModelPlazaHandler) StartPricingCostExperiment(c *gin.Context) {
+	var req struct {
+		PlanIndex int `json:"plan_index"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if err := h.plazaService.StartPricingCostExperiment(c.Request.Context(), req.PlanIndex); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, h.plazaService.GetPricingCostExperimentState())
+}
+
+// GetPricingCostExperimentState 查询实测任务状态。
+// GET /api/v1/admin/pricing/experiment/status
+func (h *ModelPlazaHandler) GetPricingCostExperimentState(c *gin.Context) {
+	response.Success(c, h.plazaService.GetPricingCostExperimentState())
+}
+
 // saveOfficialPricingRequest 保存请求（全量替换）。
 type saveOfficialPricingRequest struct {
 	Overrides []struct {

@@ -20,6 +20,7 @@ type PricingCostBasisPlan struct {
 	Window          string             `json:"window"`            // 配额窗口说明（如 "monthly 锚定订阅日"）
 	FX              float64            `json:"fx"`                // 人民币兑美元汇率（保本倍率换算用）
 	Weights         map[string]float64 `json:"weights"`           // 每模型扣减权重（units / M tokens）
+	Accounts        []int64            `json:"accounts"`          // 绑定账号（实测探针/突发用其凭据）
 	Note            string             `json:"note,omitempty"`    // 实测方法/口径备注
 	UpdatedAt       string             `json:"updated_at"`
 }

@@ -874,6 +874,8 @@ func registerPricingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		pricing.GET("/preview", h.Admin.Pricing.GetPreview)
 		pricing.GET("/cost-basis", h.ModelPlaza.GetPricingCostBasis)
 		pricing.PUT("/cost-basis", h.ModelPlaza.SavePricingCostBasis)
+		pricing.POST("/experiment/start", h.ModelPlaza.StartPricingCostExperiment)
+		pricing.GET("/experiment/status", h.ModelPlaza.GetPricingCostExperimentState)
 		pricing.GET("/custom", h.Admin.Pricing.ListCustom)
 		pricing.GET("/custom/:id", h.Admin.Pricing.GetCustom)
 		pricing.POST("/custom", h.Admin.Pricing.CreateCustom)
