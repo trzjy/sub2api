@@ -123,12 +123,15 @@ export default adminAPI
 export type { AuditLog, AuditLogQuery, AuditLogListResponse } from './audit'
 export type {
   PricingStatusResponse,
+  PricingCostBasis,
+  PricingCostBasisPlan,
   CatalogEntry,
   UncoveredEntry,
   UncoveredResponse,
   PricingPreview,
   CustomModelPricing,
-  CustomModelPricingPayload
+  CustomModelPricingPayload,
+  PricingExperimentState,
 } from './pricing'
 export type { BalanceHistoryItem } from './users'
 export type { ErrorPassthroughRule, CreateRuleRequest, UpdateRuleRequest } from './errorPassthrough'

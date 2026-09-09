@@ -248,8 +248,33 @@ export interface PricingCostBasisPlan {
   window: string
   fx: number
   weights: Record<string, number>
+  measured_cost_per_m?: Record<string, number>
+  accounts?: number[]
   note?: string
   updated_at?: string
+}
+
+export interface PricingExperimentState {
+  plan_index: number
+  plan_provider: string
+  status: 'idle' | 'running' | 'completed' | 'failed' | string
+  started_at?: string
+  updated_at?: string
+  current_model?: string
+  log?: string[]
+  results?: {
+    model: string
+    tokens_in: number
+    tokens_out: number
+    used_before: number
+    used_after: number
+    delta_units: number
+    weight_per_m?: number
+    measured_cost_per_m?: number
+    skipped?: boolean
+    note?: string
+  }[]
+  error?: string
 }
 
 export interface PricingCostBasis {
@@ -267,8 +292,21 @@ export async function savePricingCostBasis(basis: PricingCostBasis): Promise<Pri
 }
 
 
+export async function startPricingCostExperiment(planIndex: number): Promise<PricingExperimentState> {
+  const { data } = await apiClient.post('/admin/pricing/experiment/start', { plan_index: planIndex })
+  return data
+}
+
+export async function getPricingExperimentState(): Promise<PricingExperimentState> {
+  const { data } = await apiClient.get('/admin/pricing/experiment/status')
+  return data
+}
+
+
 export const pricingAPI = {
   getStatus,
+  startPricingCostExperiment,
+  getPricingExperimentState,
   getPricingCostBasis,
   savePricingCostBasis,
   getPlazaOfficialPricing,

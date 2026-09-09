@@ -470,6 +470,15 @@
             <p class="mt-1 text-xs text-gray-400">{{ plan.window }}<template v-if="plan.note"> · {{ plan.note }}</template></p>
           </div>
           <div class="flex gap-2">
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :disabled="experiment?.status === 'running' || experiment?.plan_index !== pIdx && experiment?.status === 'running'"
+              :title="t('admin.pricing.cost.runExperimentHint')"
+              @click="startExperiment(pIdx)"
+            >
+              {{ experiment?.status === 'running' && experiment?.plan_index === pIdx ? t('admin.pricing.cost.experimentRunning') : t('admin.pricing.cost.runExperiment') }}
+            </button>
             <button type="button" class="btn btn-secondary" @click="openCostEdit(plan, pIdx)">{{ t('common.edit') }}</button>
             <button type="button" class="btn btn-danger" @click="askCostDelete(pIdx)">{{ t('common.delete') }}</button>
           </div>
@@ -489,15 +498,33 @@
             </thead>
             <tbody>
               <tr v-for="row in costRows(plan)" :key="row.model" class="border-b border-gray-100 dark:border-dark-700">
-                <td class="py-2 pr-4 font-mono font-medium text-gray-900 dark:text-white">{{ row.model }}</td>
-                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.weight }} units/M</td>
-                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ formatTokens(row.capacity) }} M tokens</td>
+                <td class="py-2 pr-4 font-mono font-medium text-gray-900 dark:text-white">
+                  {{ row.model }}
+                  <span
+                    v-if="row.measured"
+                    class="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 align-middle text-[10px] font-bold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+                  >{{ t('admin.pricing.cost.measured') }}</span>
+                </td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.measured ? '—' : `${row.weight} units/M` }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.measured ? '—' : `${formatTokens(row.capacity)} M tokens` }}</td>
                 <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs font-semibold">¥{{ fmtPrice(row.costCny) }}</td>
                 <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.breakeven }}x</td>
                 <td class="whitespace-nowrap py-2 font-mono text-xs font-semibold text-emerald-700 dark:text-emerald-400">{{ row.margin20 }}x</td>
               </tr>
             </tbody>
           </table>
+        </div>
+        <div
+          v-if="experiment && experiment.plan_index === pIdx && experiment.status !== 'idle'"
+          class="mt-3 rounded-xl bg-gray-50 p-3 dark:bg-dark-900"
+        >
+          <p class="text-xs font-semibold" :class="experiment.status === 'failed' ? 'text-red-500' : 'text-gray-700 dark:text-gray-200'">
+            {{ t('admin.pricing.cost.experimentStatus') }}: {{ experiment.status }}
+            <template v-if="experiment.current_model"> · {{ experiment.current_model }}</template>
+          </p>
+          <div v-if="experiment.log?.length" class="mt-1.5 max-h-40 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+            <div v-for="(l, i) in experiment.log" :key="i">{{ l }}</div>
+          </div>
         </div>
         <p class="mt-3 text-xs text-gray-400">{{ plan.updated_at ? t('admin.pricing.cost.updatedAt', { time: plan.updated_at }) : '' }}</p>
       </div>
@@ -539,6 +566,11 @@
             class="input min-h-[120px] font-mono text-xs"
             :placeholder="t('admin.pricing.cost.weightPlaceholder')"
           ></textarea>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.pricing.cost.accounts') }}</label>
+          <input v-model.trim="costForm.accounts" type="text" class="input" :placeholder="t('admin.pricing.cost.accountsPlaceholder')" />
+          <p class="mt-1 text-xs text-gray-400">{{ t('admin.pricing.cost.accountsHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.pricing.custom.remark') }}</label>
@@ -646,9 +678,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { adminAPI } from '@/api/admin'
+import { adminAPI, type PricingCostBasis, type PricingExperimentState } from '@/api/admin'
 import { getModelPlaza } from '@/api/modelPlaza'
 import type {
   CatalogEntry,
@@ -695,6 +727,18 @@ function switchTab(tab: TabKey) {
   if (tab === 'custom' && !customList.value.length && !customLoading.value) fetchCustom()
   if (tab === 'official' && !officialList.value.length && !officialLoading.value) fetchOfficial()
   if (tab === 'cost' && !costBasis.value) fetchCostBasis()
+  if (tab === 'cost') resumeExperimentPolling()
+}
+
+// 页面刷新/切回成本页签时恢复实测进度轮询
+async function resumeExperimentPolling() {
+  if (experimentTimer) return
+  try {
+    experiment.value = await adminAPI.pricing.getPricingExperimentState()
+  } catch {
+    return
+  }
+  if (experiment.value?.status === 'running') pollExperiment()
 }
 
 // --- 同步状态 ---
@@ -1052,7 +1096,7 @@ async function confirmOfficialDelete() {
 
 // --- 成本核算（订阅成本基准） ---
 
-const costBasis = ref<{ plans: { provider: string; plans: string[]; monthly_fee_cny: number; first_month_cny: number; quota_units: number; window: string; fx: number; weights: Record<string, number>; note?: string; updated_at?: string }[] } | null>(null)
+const costBasis = ref<PricingCostBasis | null>(null)
 const costLoading = ref(false)
 const costEditVisible = ref(false)
 const costSaving = ref(false)
@@ -1065,6 +1109,7 @@ const costForm = reactive({
   quota_units: '',
   fx: '7.15',
   weightsText: '',
+  accounts: '',
   note: ''
 })
 
@@ -1102,12 +1147,30 @@ interface CostRow {
   costCny: number
   breakeven: string
   margin20: string
+  measured: boolean
 }
 
-function costRows(plan: { monthly_fee_cny: number; quota_units: number; fx: number; weights: Record<string, number> }): CostRow[] {
+function costRows(plan: {
+  monthly_fee_cny: number
+  quota_units: number
+  fx: number
+  weights: Record<string, number>
+  measured_cost_per_m?: Record<string, number>
+}): CostRow[] {
   const rows: CostRow[] = []
-  const models = Object.keys(plan.weights || {}).sort()
+  const models = Array.from(
+    new Set([...Object.keys(plan.weights || {}), ...Object.keys(plan.measured_cost_per_m || {})])
+  ).sort()
   for (const model of models) {
+    const measuredCost = plan.measured_cost_per_m?.[model] ?? 0
+    if (measuredCost > 0) {
+      // 百分比型订阅：成本由实验直接实测（Δpct × 月费），无需权重/配额
+      const std = plazaStdByModel.value[model] ?? 0
+      const breakeven = std > 0 ? (measuredCost / (plan.fx * std)).toFixed(2) : '-'
+      const margin20 = breakeven === '-' ? '-' : (Number(breakeven) / 0.8).toFixed(2)
+      rows.push({ model, weight: 0, capacity: 0, costCny: measuredCost, breakeven, margin20, measured: true })
+      continue
+    }
     const w = plan.weights[model]
     if (!w || w <= 0 || plan.quota_units <= 0) continue
     const capacity = plan.quota_units / w // M tokens
@@ -1115,12 +1178,12 @@ function costRows(plan: { monthly_fee_cny: number; quota_units: number; fx: numb
     const std = plazaStdByModel.value[model] ?? 0
     const breakeven = std > 0 ? (costCny / (plan.fx * std)).toFixed(2) : '-'
     const margin20 = breakeven === '-' ? '-' : (Number(breakeven) / 0.8).toFixed(2)
-    rows.push({ model, weight: w, capacity, costCny, breakeven, margin20 })
+    rows.push({ model, weight: w, capacity, costCny, breakeven, margin20, measured: false })
   }
   return rows
 }
 
-function openCostEdit(plan: { provider: string; window: string; monthly_fee_cny: number; first_month_cny: number; quota_units: number; fx: number; weights: Record<string, number>; note?: string } | null, idx: number | null = null) {
+function openCostEdit(plan: { provider: string; window: string; monthly_fee_cny: number; first_month_cny: number; quota_units: number; fx: number; weights: Record<string, number>; measured_cost_per_m?: Record<string, number>; accounts?: number[]; note?: string } | null, idx: number | null = null) {
   costEditIndex.value = idx
   costForm.provider = plan?.provider ?? ''
   costForm.window = plan?.window ?? 'monthly'
@@ -1129,6 +1192,7 @@ function openCostEdit(plan: { provider: string; window: string; monthly_fee_cny:
   costForm.quota_units = plan ? String(plan.quota_units) : ''
   costForm.fx = plan ? String(plan.fx || 7.15) : '7.15'
   costForm.weightsText = plan ? JSON.stringify(plan.weights ?? {}, null, 2) : ''
+  costForm.accounts = plan && plan.accounts ? plan.accounts.join(', ') : ''
   costForm.note = plan?.note ?? ''
   costEditVisible.value = true
 }
@@ -1141,15 +1205,23 @@ async function saveCostEdit() {
     appStore.showError(t('admin.pricing.cost.weightJsonError'))
     return
   }
+  const accountIds = costForm.accounts
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((x) => Number.isFinite(x) && x > 0)
+  // 实测成本只能由实测实验产生，手动编辑原样保留
+  const prevMeasured = costEditIndex.value != null ? costBasis.value?.plans[costEditIndex.value]?.measured_cost_per_m : undefined
   const plan = {
     provider: costForm.provider.trim(),
     plans: [] as string[],
+    accounts: accountIds,
     monthly_fee_cny: Number(costForm.monthly_fee_cny) || 0,
     first_month_cny: Number(costForm.first_month_cny) || 0,
     quota_units: Number(costForm.quota_units) || 0,
     window: costForm.window.trim() || 'monthly',
     fx: Number(costForm.fx) || 7.15,
     weights,
+    measured_cost_per_m: prevMeasured && Object.keys(prevMeasured).length ? prevMeasured : undefined,
     note: costForm.note.trim(),
     updated_at: new Date().toISOString().slice(0, 16).replace('T', ' ')
   }
@@ -1184,7 +1256,7 @@ function askCostDelete(idx: number) {
 async function confirmCostDelete() {
   if (costDeleteIndex.value == null || !costBasis.value) return
   try {
-    const plans = costBasis.value.plans.filter((_, i) => i !== costDeleteIndex.value)
+    const plans = costBasis.value.plans.filter((_plan, i: number) => i !== costDeleteIndex.value)
     const saved = await adminAPI.pricing.savePricingCostBasis({ plans })
     costBasis.value = saved
     appStore.showSuccess(t('common.deleted'))
@@ -1193,6 +1265,39 @@ async function confirmCostDelete() {
     appStore.showError(err?.message || t('common.error'))
   }
 }
+
+// 实测任务状态轮询
+const experiment = ref<PricingExperimentState | null>(null)
+let experimentTimer: number | null = null
+
+async function pollExperiment() {
+  try {
+    experiment.value = await adminAPI.pricing.getPricingExperimentState()
+    if (experiment.value.status === 'running') {
+      experimentTimer = window.setTimeout(pollExperiment, 10000)
+    } else {
+      experimentTimer = null
+      await fetchCostBasis()
+    }
+  } catch {
+    experimentTimer = window.setTimeout(pollExperiment, 15000)
+  }
+}
+
+async function startExperiment(planIdx: number) {
+  try {
+    experiment.value = await adminAPI.pricing.startPricingCostExperiment(planIdx)
+    appStore.showSuccess(t('admin.pricing.cost.experimentStarted'))
+    if (experimentTimer) clearTimeout(experimentTimer)
+    pollExperiment()
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  }
+}
+
+onUnmounted(() => {
+  if (experimentTimer) clearTimeout(experimentTimer)
+})
 
 const costEditTitle = computed(() =>
   costEditIndex.value != null ? t('admin.pricing.cost.editTitle') : t('admin.pricing.cost.addTitle')
