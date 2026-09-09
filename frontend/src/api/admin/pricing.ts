@@ -237,8 +237,40 @@ export async function savePlazaOfficialPricing(
 }
 
 
+// ==================== 订阅成本核算（定价基准，手动维护） ====================
+
+export interface PricingCostBasisPlan {
+  provider: string
+  plans: string[]
+  monthly_fee_cny: number
+  first_month_cny: number
+  quota_units: number
+  window: string
+  fx: number
+  weights: Record<string, number>
+  note?: string
+  updated_at?: string
+}
+
+export interface PricingCostBasis {
+  plans: PricingCostBasisPlan[]
+}
+
+export async function getPricingCostBasis(): Promise<PricingCostBasis> {
+  const { data } = await apiClient.get('/admin/pricing/cost-basis')
+  return data
+}
+
+export async function savePricingCostBasis(basis: PricingCostBasis): Promise<PricingCostBasis> {
+  const { data } = await apiClient.put('/admin/pricing/cost-basis', basis)
+  return data
+}
+
+
 export const pricingAPI = {
   getStatus,
+  getPricingCostBasis,
+  savePricingCostBasis,
   getPlazaOfficialPricing,
   savePlazaOfficialPricing,
   syncNow,

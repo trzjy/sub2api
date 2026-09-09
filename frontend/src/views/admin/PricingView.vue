@@ -435,6 +435,136 @@
       </template>
     </BaseDialog>
 
+    <!-- ==================== 成本核算 ==================== -->
+    <div v-if="activeTab === 'cost'" class="space-y-4">
+      <div class="card flex flex-wrap items-center justify-between gap-4 p-4">
+        <p class="max-w-4xl text-xs text-gray-500 dark:text-gray-400">{{ t('admin.pricing.cost.hint') }}</p>
+        <div class="flex gap-2">
+          <button type="button" class="btn btn-secondary" :disabled="costLoading" @click="fetchCostBasis">
+            {{ t('common.refresh') }}
+          </button>
+          <button type="button" class="btn btn-primary" @click="openCostEdit(null)">
+            <Icon name="plus" size="sm" class="mr-1.5" />
+            {{ t('admin.pricing.cost.addPlan') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!costBasis?.plans.length && !costLoading" class="card p-8 text-center">
+        <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{{ t('admin.pricing.cost.empty') }}</p>
+      </div>
+
+      <div v-for="(plan, pIdx) in costBasis?.plans || []" :key="pIdx" class="card p-6">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-base font-semibold text-gray-900 dark:text-white">{{ plan.provider }}</span>
+              <span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-dark-700 dark:text-gray-300">
+                {{ t('admin.pricing.cost.fee') }} ¥{{ plan.monthly_fee_cny }}/月
+                <template v-if="plan.first_month_cny > 0">（{{ t('admin.pricing.cost.firstMonth') }} ¥{{ plan.first_month_cny }}）</template>
+              </span>
+              <span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-dark-700 dark:text-gray-300">
+                {{ t('admin.pricing.cost.quota') }} {{ plan.quota_units }} units
+              </span>
+            </div>
+            <p class="mt-1 text-xs text-gray-400">{{ plan.window }}<template v-if="plan.note"> · {{ plan.note }}</template></p>
+          </div>
+          <div class="flex gap-2">
+            <button type="button" class="btn btn-secondary" @click="openCostEdit(plan, pIdx)">{{ t('common.edit') }}</button>
+            <button type="button" class="btn btn-danger" @click="askCostDelete(pIdx)">{{ t('common.delete') }}</button>
+          </div>
+        </div>
+
+        <div class="mt-4 overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 text-left text-xs font-bold uppercase tracking-wider text-gray-400 dark:border-dark-600">
+                <th class="py-2 pr-4">{{ t('admin.pricing.columns.model') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.cost.weight') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.cost.capacity') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.cost.costPerM') }}</th>
+                <th class="py-2 pr-4">{{ t('admin.pricing.cost.breakeven') }}</th>
+                <th class="py-2">{{ t('admin.pricing.cost.margin20') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in costRows(plan)" :key="row.model" class="border-b border-gray-100 dark:border-dark-700">
+                <td class="py-2 pr-4 font-mono font-medium text-gray-900 dark:text-white">{{ row.model }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.weight }} units/M</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ formatTokens(row.capacity) }} M tokens</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs font-semibold">¥{{ fmtPrice(row.costCny) }}</td>
+                <td class="whitespace-nowrap py-2 pr-4 font-mono text-xs">{{ row.breakeven }}x</td>
+                <td class="whitespace-nowrap py-2 font-mono text-xs font-semibold text-emerald-700 dark:text-emerald-400">{{ row.margin20 }}x</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-xs text-gray-400">{{ plan.updated_at ? t('admin.pricing.cost.updatedAt', { time: plan.updated_at }) : '' }}</p>
+      </div>
+    </div>
+
+    <!-- 成本计划编辑对话框 -->
+    <BaseDialog :show="costEditVisible" :title="costEditTitle" width="wide" @close="costEditVisible = false">
+      <div class="space-y-4 py-2">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.provider') }}</label>
+            <input v-model.trim="costForm.provider" type="text" class="input" :placeholder="t('admin.pricing.cost.providerPlaceholder')" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.window') }}</label>
+            <input v-model.trim="costForm.window" type="text" class="input" placeholder="monthly" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.fee') }}（¥/月）</label>
+            <Input v-model="costForm.monthly_fee_cny" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.firstMonthFee') }}（¥/月）</label>
+            <Input v-model="costForm.first_month_cny" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.quotaUnits') }}</label>
+            <Input v-model="costForm.quota_units" type="number" />
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.pricing.cost.fxLabel') }}</label>
+            <Input v-model="costForm.fx" type="number" />
+          </div>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.pricing.cost.weightHint') }}</label>
+          <textarea
+            v-model="costForm.weightsText"
+            class="input min-h-[120px] font-mono text-xs"
+            :placeholder="t('admin.pricing.cost.weightPlaceholder')"
+          ></textarea>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.pricing.custom.remark') }}</label>
+          <input v-model.trim="costForm.note" type="text" class="input" />
+        </div>
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="btn btn-secondary" @click="costEditVisible = false">{{ t('common.cancel') }}</button>
+          <button type="button" class="btn btn-primary" :disabled="costSaving || !costForm.provider" @click="saveCostEdit">
+            {{ t('common.save') }}
+          </button>
+        </div>
+      </template>
+    </BaseDialog>
+
+    <!-- 成本计划删除确认 -->
+    <ConfirmDialog
+      :show="costDeleteVisible"
+      :title="t('admin.pricing.cost.deleteTitle')"
+      :message="t('admin.pricing.cost.deleteMessage')"
+      danger
+      @confirm="confirmCostDelete"
+      @cancel="costDeleteVisible = false"
+    />
+
     <!-- 官方参考价删除确认 -->
     <ConfirmDialog
       :show="officialDeleteVisible"
@@ -519,6 +649,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
+import { getModelPlaza } from '@/api/modelPlaza'
 import type {
   CatalogEntry,
   CustomModelPricing,
@@ -541,7 +672,7 @@ import { useAppStore } from '@/stores'
 const { t } = useI18n()
 const appStore = useAppStore()
 
-type TabKey = 'status' | 'catalog' | 'uncovered' | 'custom' | 'official'
+type TabKey = 'status' | 'catalog' | 'uncovered' | 'custom' | 'official' | 'cost'
 const activeTab = ref<TabKey>('status')
 
 const status = ref<PricingStatusResponse | null>(null)
@@ -552,7 +683,8 @@ const tabs = computed(() => [
   { key: 'catalog' as TabKey, label: 'admin.pricing.tabs.catalog', badge: () => 0 },
   { key: 'uncovered' as TabKey, label: 'admin.pricing.tabs.uncovered', badge: () => uncovered.value?.items.length ?? 0 },
   { key: 'custom' as TabKey, label: 'admin.pricing.tabs.custom', badge: () => 0 },
-  { key: 'official' as TabKey, label: 'admin.pricing.tabs.official', badge: () => 0 }
+  { key: 'official' as TabKey, label: 'admin.pricing.tabs.official', badge: () => 0 },
+  { key: 'cost' as TabKey, label: 'admin.pricing.tabs.cost', badge: () => 0 }
 ])
 
 function switchTab(tab: TabKey) {
@@ -562,6 +694,7 @@ function switchTab(tab: TabKey) {
   if (tab === 'uncovered' && !uncovered.value) fetchUncovered()
   if (tab === 'custom' && !customList.value.length && !customLoading.value) fetchCustom()
   if (tab === 'official' && !officialList.value.length && !officialLoading.value) fetchOfficial()
+  if (tab === 'cost' && !costBasis.value) fetchCostBasis()
 }
 
 // --- 同步状态 ---
@@ -916,6 +1049,154 @@ async function confirmOfficialDelete() {
     appStore.showError(err?.message || t('common.error'))
   }
 }
+
+// --- 成本核算（订阅成本基准） ---
+
+const costBasis = ref<{ plans: { provider: string; plans: string[]; monthly_fee_cny: number; first_month_cny: number; quota_units: number; window: string; fx: number; weights: Record<string, number>; note?: string; updated_at?: string }[] } | null>(null)
+const costLoading = ref(false)
+const costEditVisible = ref(false)
+const costSaving = ref(false)
+const costEditIndex = ref<number | null>(null)
+const costForm = reactive({
+  provider: '',
+  window: 'monthly',
+  monthly_fee_cny: '',
+  first_month_cny: '',
+  quota_units: '',
+  fx: '7.15',
+  weightsText: '',
+  note: ''
+})
+
+// 组内模型标准价（$/M，来自模型广场公开数据，用于保本/毛利倍率换算）
+const plazaStdByModel = ref<Record<string, number>>({})
+
+async function fetchCostBasis() {
+  costLoading.value = true
+  try {
+    const [basis, plaza] = await Promise.all([
+      adminAPI.pricing.getPricingCostBasis(),
+      getModelPlaza().catch(() => null)
+    ])
+    costBasis.value = basis
+    const std: Record<string, number> = {}
+    for (const g of plaza?.groups ?? []) {
+      for (const m of g.models) {
+        if (m.pricing?.input_price != null && !std[m.name]) {
+          std[m.name] = m.pricing.input_price * 1e6 // $/M
+        }
+      }
+    }
+    plazaStdByModel.value = std
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  } finally {
+    costLoading.value = false
+  }
+}
+
+interface CostRow {
+  model: string
+  weight: number
+  capacity: number
+  costCny: number
+  breakeven: string
+  margin20: string
+}
+
+function costRows(plan: { monthly_fee_cny: number; quota_units: number; fx: number; weights: Record<string, number> }): CostRow[] {
+  const rows: CostRow[] = []
+  const models = Object.keys(plan.weights || {}).sort()
+  for (const model of models) {
+    const w = plan.weights[model]
+    if (!w || w <= 0 || plan.quota_units <= 0) continue
+    const capacity = plan.quota_units / w // M tokens
+    const costCny = (plan.monthly_fee_cny * w) / plan.quota_units
+    const std = plazaStdByModel.value[model] ?? 0
+    const breakeven = std > 0 ? (costCny / (plan.fx * std)).toFixed(2) : '-'
+    const margin20 = breakeven === '-' ? '-' : (Number(breakeven) / 0.8).toFixed(2)
+    rows.push({ model, weight: w, capacity, costCny, breakeven, margin20 })
+  }
+  return rows
+}
+
+function openCostEdit(plan: { provider: string; window: string; monthly_fee_cny: number; first_month_cny: number; quota_units: number; fx: number; weights: Record<string, number>; note?: string } | null, idx: number | null = null) {
+  costEditIndex.value = idx
+  costForm.provider = plan?.provider ?? ''
+  costForm.window = plan?.window ?? 'monthly'
+  costForm.monthly_fee_cny = plan ? String(plan.monthly_fee_cny) : ''
+  costForm.first_month_cny = plan ? String(plan.first_month_cny) : ''
+  costForm.quota_units = plan ? String(plan.quota_units) : ''
+  costForm.fx = plan ? String(plan.fx || 7.15) : '7.15'
+  costForm.weightsText = plan ? JSON.stringify(plan.weights ?? {}, null, 2) : ''
+  costForm.note = plan?.note ?? ''
+  costEditVisible.value = true
+}
+
+async function saveCostEdit() {
+  let weights: Record<string, number> = {}
+  try {
+    weights = JSON.parse(costForm.weightsText || '{}')
+  } catch {
+    appStore.showError(t('admin.pricing.cost.weightJsonError'))
+    return
+  }
+  const plan = {
+    provider: costForm.provider.trim(),
+    plans: [] as string[],
+    monthly_fee_cny: Number(costForm.monthly_fee_cny) || 0,
+    first_month_cny: Number(costForm.first_month_cny) || 0,
+    quota_units: Number(costForm.quota_units) || 0,
+    window: costForm.window.trim() || 'monthly',
+    fx: Number(costForm.fx) || 7.15,
+    weights,
+    note: costForm.note.trim(),
+    updated_at: new Date().toISOString().slice(0, 16).replace('T', ' ')
+  }
+  costSaving.value = true
+  try {
+    const basis = costBasis.value ?? { plans: [] }
+    const plans = [...basis.plans]
+    if (costEditIndex.value != null && plans[costEditIndex.value]) {
+      plans[costEditIndex.value] = plan
+    } else {
+      plans.push(plan)
+    }
+    const saved = await adminAPI.pricing.savePricingCostBasis({ plans })
+    costBasis.value = saved
+    appStore.showSuccess(t('common.saved'))
+    costEditVisible.value = false
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  } finally {
+    costSaving.value = false
+  }
+}
+
+const costDeleteVisible = ref(false)
+const costDeleteIndex = ref<number | null>(null)
+
+function askCostDelete(idx: number) {
+  costDeleteIndex.value = idx
+  costDeleteVisible.value = true
+}
+
+async function confirmCostDelete() {
+  if (costDeleteIndex.value == null || !costBasis.value) return
+  try {
+    const plans = costBasis.value.plans.filter((_, i) => i !== costDeleteIndex.value)
+    const saved = await adminAPI.pricing.savePricingCostBasis({ plans })
+    costBasis.value = saved
+    appStore.showSuccess(t('common.deleted'))
+    costDeleteVisible.value = false
+  } catch (err: any) {
+    appStore.showError(err?.message || t('common.error'))
+  }
+}
+
+const costEditTitle = computed(() =>
+  costEditIndex.value != null ? t('admin.pricing.cost.editTitle') : t('admin.pricing.cost.addTitle')
+)
 
 // --- 工具 ---
 

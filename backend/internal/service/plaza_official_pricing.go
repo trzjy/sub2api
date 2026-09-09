@@ -120,6 +120,16 @@ func (s *ModelPlazaService) SavePlazaOfficialPricingOverrides(ctx context.Contex
 	return nil
 }
 
+// GetPricingCostBasis 管理端读取订阅成本核算。
+func (s *ModelPlazaService) GetPricingCostBasis(ctx context.Context) (*PricingCostBasis, error) {
+	return s.settingService.GetPricingCostBasis(ctx)
+}
+
+// SavePricingCostBasis 管理端保存订阅成本核算。
+func (s *ModelPlazaService) SavePricingCostBasis(ctx context.Context, basis *PricingCostBasis) error {
+	return s.settingService.SavePricingCostBasis(ctx, basis)
+}
+
 // InvalidatePlazaOverrideCache 管理端保存后即时失效缓存。
 func (s *ModelPlazaService) InvalidatePlazaOverrideCache() {
 	plazaCachedOverridesMu.Lock()

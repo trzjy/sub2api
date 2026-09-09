@@ -9,7 +9,8 @@ export default {
       catalog: 'Catalog',
       uncovered: 'Uncovered Models',
       custom: 'Custom Pricing',
-      official: 'Official Prices'
+      official: 'Official Prices',
+      cost: 'Cost Basis'
     },
     columns: {
       model: 'Model',
@@ -86,6 +87,34 @@ export default {
       zeroCost: 'tokens with $0',
       allCovered: 'All exactly covered ({scanned} candidate models scanned)'
     },
+    cost: {
+      hint: 'Subscription cost basis: measured deduction weights × plan fee → per-model full-quota capacity and cost, as the pricing reference. Manually maintained.',
+      addPlan: 'Add Plan',
+      editTitle: 'Edit Plan',
+      addTitle: 'Add Plan',
+      empty: 'No subscription cost data yet',
+      fee: 'Fee',
+      firstMonth: '1st month',
+      firstMonthFee: 'First-month fee',
+      quota: 'Quota',
+      quotaUnits: 'Monthly quota (units)',
+      provider: 'Provider',
+      providerPlaceholder: 'e.g. Volcano Agent Plan (medium)',
+      window: 'Quota window',
+      fxLabel: 'FX (¥/$)',
+      weight: 'Deduction weight',
+      weightHint: 'Per-model deduction weight (units / M tokens), JSON object. e.g. {"glm-5.3-flash": 25, "kimi-k2.7-code": 450}',
+      weightPlaceholder: '{"glm-5.3-flash": 25}',
+      weightJsonError: 'Invalid weights JSON',
+      capacity: 'Full-quota capacity',
+      costPerM: 'Cost (¥/M)',
+      breakeven: 'Breakeven mult',
+      margin20: '20% margin mult',
+      updatedAt: 'Updated {time}',
+      deleteTitle: 'Delete Plan',
+      deleteMessage: 'Delete this subscription cost basis?'
+    },
+
     official: {
       hint: 'Official reference prices only feed the "Official Price" column and discount badges on the model plaza — billing is unaffected. Models without an override fall back to the billing catalog.',
       add: 'Add Official Price',

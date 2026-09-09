@@ -993,5 +993,7 @@ func registerModelPlazaAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) 
 	{
 		plaza.GET("/official-pricing", h.ModelPlaza.GetOfficialPricingOverrides)
 		plaza.PUT("/official-pricing", h.ModelPlaza.SaveOfficialPricingOverrides)
+		plaza.GET("/cost-basis", h.ModelPlaza.GetPricingCostBasis)
+		plaza.PUT("/cost-basis", h.ModelPlaza.SavePricingCostBasis)
 	}
 }

@@ -261,6 +261,32 @@ func (h *ModelPlazaHandler) GetOfficialPricingOverrides(c *gin.Context) {
 	response.Success(c, gin.H{"overrides": service.ListPlazaOverrideEntries(overrides)})
 }
 
+// GetPricingCostBasis 获取订阅成本核算数据。
+// GET /api/v1/admin/pricing/cost-basis
+func (h *ModelPlazaHandler) GetPricingCostBasis(c *gin.Context) {
+	basis, err := h.plazaService.GetPricingCostBasis(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, basis)
+}
+
+// SavePricingCostBasis 保存订阅成本核算数据（全量替换）。
+// PUT /api/v1/admin/pricing/cost-basis
+func (h *ModelPlazaHandler) SavePricingCostBasis(c *gin.Context) {
+	var basis service.PricingCostBasis
+	if err := c.ShouldBindJSON(&basis); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if err := h.plazaService.SavePricingCostBasis(c.Request.Context(), &basis); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, basis)
+}
+
 // saveOfficialPricingRequest 保存请求（全量替换）。
 type saveOfficialPricingRequest struct {
 	Overrides []struct {

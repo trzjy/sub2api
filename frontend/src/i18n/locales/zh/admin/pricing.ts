@@ -9,7 +9,8 @@ export default {
       catalog: '价格目录',
       uncovered: '未覆盖模型',
       custom: '自定义价格',
-      official: '官方参考价'
+      official: '官方参考价',
+      cost: '成本核算'
     },
     columns: {
       model: '模型',
@@ -85,6 +86,34 @@ export default {
       zeroCost: '有量无费',
       allCovered: '全部精确覆盖（扫描候选 {scanned} 个模型）'
     },
+    cost: {
+      hint: '订阅成本基准：实测扣减权重 × 订阅费 → 每模型满月容量与成本价，用于定价调整参考。数据手动维护。',
+      addPlan: '新增订阅计划',
+      editTitle: '编辑订阅计划',
+      addTitle: '新增订阅计划',
+      empty: '暂无订阅成本数据',
+      fee: '月费',
+      firstMonth: '首月',
+      firstMonthFee: '首月月费',
+      quota: '月配额',
+      quotaUnits: '月配额（units）',
+      provider: '订阅来源',
+      providerPlaceholder: '如：火山引擎 Agent Plan (medium)',
+      window: '配额窗口',
+      fxLabel: '汇率（¥/$）',
+      weight: '扣减权重',
+      weightHint: '每模型扣减权重（units / M tokens），JSON 对象。示例：{"glm-5.3-flash": 25, "kimi-k2.7-code": 450}',
+      weightPlaceholder: '{"glm-5.3-flash": 25}',
+      weightJsonError: '权重 JSON 格式错误',
+      capacity: '满月容量',
+      costPerM: '成本（¥/M）',
+      breakeven: '保本倍率',
+      margin20: '20%毛利倍率',
+      updatedAt: '更新于 {time}',
+      deleteTitle: '删除订阅计划',
+      deleteMessage: '确定删除该订阅计划的成本核算数据？'
+    },
+
     official: {
       hint: '官方参考价仅用于模型广场"官方价格"列与折扣徽章展示，不影响计费。未覆盖的模型回落计费目录价。',
       add: '新增官方价',
