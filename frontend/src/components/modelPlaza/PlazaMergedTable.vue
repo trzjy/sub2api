@@ -94,19 +94,19 @@
                     <span class="mr-1 font-sans font-normal text-gray-400 dark:text-dark-500" :title="tierHint(entry.model)">{{ tierLabel(iv) }}</span>
                     {{ paidPerMillion(iv.input_price, null, entry.rate) }}
                     <span
-                      v-if="discountBadge(iv.input_price, entry.model.official_pricing?.input_price)"
+                      v-if="discountBadge(iv.input_price, entry.model.official_pricing?.input_price, entry.rate)"
                       class="ml-1 inline-flex items-center rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                       :title="t('modelPlaza.table.discountHint')"
-                    >{{ discountBadge(iv.input_price, entry.model.official_pricing?.input_price) }}</span>
+                    >{{ discountBadge(iv.input_price, entry.model.official_pricing?.input_price, entry.rate) }}</span>
                   </div>
                 </template>
                 <template v-else>
                   {{ paidPerMillion(entry.model.pricing?.input_price, null, entry.rate) }}
                   <span
-                    v-if="discountBadge(entry.model.pricing?.input_price, entry.model.official_pricing?.input_price)"
+                    v-if="discountBadge(entry.model.pricing?.input_price, entry.model.official_pricing?.input_price, entry.rate)"
                     class="ml-1 inline-flex items-center rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                     :title="t('modelPlaza.table.discountHint')"
-                  >{{ discountBadge(entry.model.pricing?.input_price, entry.model.official_pricing?.input_price) }}</span>
+                  >{{ discountBadge(entry.model.pricing?.input_price, entry.model.official_pricing?.input_price, entry.rate) }}</span>
                 </template>
               </td>
               <td class="pz-cell px-3 py-2.5 align-middle font-mono text-xs text-gray-900 dark:text-gray-50">
@@ -114,19 +114,19 @@
                   <div v-for="(iv, idx) in tokenIntervals(entry.model)" :key="idx" class="whitespace-nowrap leading-5">
                     {{ paidPerMillion(iv.output_price, null, entry.rate) }}
                     <span
-                      v-if="discountBadge(iv.output_price, entry.model.official_pricing?.output_price)"
+                      v-if="discountBadge(iv.output_price, entry.model.official_pricing?.output_price, entry.rate)"
                       class="ml-1 inline-flex items-center rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                       :title="t('modelPlaza.table.discountHint')"
-                    >{{ discountBadge(iv.output_price, entry.model.official_pricing?.output_price) }}</span>
+                    >{{ discountBadge(iv.output_price, entry.model.official_pricing?.output_price, entry.rate) }}</span>
                   </div>
                 </template>
                 <template v-else>
                   {{ paidPerMillion(entry.model.pricing?.output_price, null, entry.rate) }}
                   <span
-                    v-if="discountBadge(entry.model.pricing?.output_price, entry.model.official_pricing?.output_price)"
+                    v-if="discountBadge(entry.model.pricing?.output_price, entry.model.official_pricing?.output_price, entry.rate)"
                     class="ml-1 inline-flex items-center rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                     :title="t('modelPlaza.table.discountHint')"
-                  >{{ discountBadge(entry.model.pricing?.output_price, entry.model.official_pricing?.output_price) }}</span>
+                  >{{ discountBadge(entry.model.pricing?.output_price, entry.model.official_pricing?.output_price, entry.rate) }}</span>
                 </template>
               </td>
               <td class="pz-cell px-3 py-2.5 align-middle font-mono text-xs text-gray-800 dark:text-gray-200">
@@ -327,13 +327,15 @@ function perUnitSuffix(m: PlazaModel): string {
 }
 function discountBadge(
   paid: number | null | undefined,
-  official: number | null | undefined
+  official: number | null | undefined,
+  rate = 1
 ): string {
   const off = official == null ? 0 : official * 1e6
   if (off <= 0) return ''
   const paidNum = paid == null ? 0 : paid * 1e6
   if (paidNum <= 0) return ''
-  const zhe = (paidNum / off) * 10
+  // 徽章口径 = 折后实付 ÷ 官方价：必须乘分组/专属倍率,否则永远显示原价(10折)
+  const zhe = ((paidNum * rate) / off) * 10
   // 原价（10折）不展示徽章，避免无折扣时满屏噪音；加价（>10折）仍披露
   if (zhe >= 9.95) return ''
   return `${zhe.toFixed(zhe >= 1 ? 1 : 2).replace(/\.?0+$/, '')}折`
