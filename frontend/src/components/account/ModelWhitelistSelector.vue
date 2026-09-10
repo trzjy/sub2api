@@ -499,14 +499,21 @@ const syncVolcanoPlan = async () => {
     // 应用后以后端为准：完全确认→保留既有白名单中未下架的（含人工 identity，后端
     // 绝不删除人工映射，前端不得反向丢掉）+ 新确认集合；部分确认→旧值 ∪ 新确认。
     registerSyncedModels(applied.confirmed)
+    // 平台过滤：后端已把跨厂商模型挡在 model_mapping 之外，前端合并时同样不自动加入
+    // （保留在下拉中可手动添加）；已在选中的此类人工键不受影响。
+    const platformFiltered = new Set(applied.platform_filtered ?? [])
     const merged = props.modelValue.filter(model => !applied.will_remove.includes(model))
     for (const model of applied.confirmed) {
+      if (platformFiltered.has(model)) continue
       if (!merged.includes(model)) {
         merged.push(model)
       }
     }
     emit('update:modelValue', merged)
     appStore.showSuccess(t('admin.accounts.syncVolcanoPlanSuccess', { count: applied.confirmed.length }))
+    if (applied.platform_filtered?.length) {
+      appStore.showInfo(t('admin.accounts.syncVolcanoPlanPlatformFiltered', { count: applied.platform_filtered.length }))
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : t('admin.accounts.syncUpstreamModelsFailed')
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))

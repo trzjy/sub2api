@@ -811,6 +811,8 @@ export default {
       syncVolcanoPlanUnavailable: '{count} models explicitly unavailable (not added)',
       syncVolcanoPlanUnverified: '{count} models unconfirmed (timeout/rate limit/server error, not added)',
       syncVolcanoPlanSuccess: 'Volcengine plan sync done: {count} models confirmed available',
+      syncVolcanoPlanPlatformFiltered:
+        '{count} cross-platform model(s) skipped by the platform filter (not whitelisted; add manually from the dropdown if needed)',
       syncVolcanoPlanDrifted: 'Applied result differs from preview with unreviewed removals ({models}); application cancelled, please re-preview and confirm',
       clearAllModels: 'Clear all models',
       customModelName: 'Custom model name',

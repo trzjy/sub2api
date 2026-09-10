@@ -308,6 +308,10 @@ type VolcanoPlanSyncResult struct {
 	Unverified  []string               `json:"unverified"`   // 未能确认（提示，不并入）
 	WillAdd     []string               `json:"will_add"`     // 应用后将新增到 model_mapping
 	WillRemove  []string               `json:"will_remove"`  // 完全确认替换时将下架（官方下线收敛）
+	// PlatformFiltered 是探活确认可用、但因与账号平台不符被平台过滤拦截、不写入
+	// model_mapping 的模型（如 deepseek 平台账号遇到套餐里的 glm/kimi/doubao 模型）。
+	// other/未知平台不过滤时为空。
+	PlatformFiltered []string               `json:"platform_filtered,omitempty"`
 	FullConfirm bool                   `json:"full_confirm"` // 完全确认：托管集按候选全集替换；部分确认只取本轮探活确认集
 	Applied     bool                   `json:"applied"`      // 本次是否已落库
 	Evidence    VolcanoPlanDocEvidence `json:"evidence"`
@@ -513,6 +517,13 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 	}
 	managed = dedupeAndSortModelIDs(managed)
 
+	// 平台过滤：官方套餐常聚合多厂商模型（glm/kimi/doubao/minimax…），按账号平台
+	// 过滤托管写入集——异平台模型不写入 model_mapping、不进托管快照；探活与分类仍
+	// 全量进行。preview 与 apply 走同一过滤口径，R3-1 漂移保护不受影响。other/未知
+	// 平台不过滤。被过滤模型若被用户手动补加属人工映射（非本同步器 identity 键），
+	// 收敛时永不删除（R3-2）。
+	managed, platformFiltered, _ := filterModelsForPlatform(managed, account.Platform)
+
 	// 差异计算。
 	managedSet := map[string]struct{}{}
 	for _, m := range managed {
@@ -553,14 +564,15 @@ func (s *AccountTestService) SyncVolcanoPlanModels(ctx context.Context, account 
 	}
 
 	result := &VolcanoPlanSyncResult{
-		Kind:        scan.evidence.Kind,
-		Confirmed:   scan.confirmed,
-		Unavailable: scan.unavailable,
-		Unverified:  scan.unverified,
-		WillAdd:     willAdd,
-		WillRemove:  willRemove,
-		FullConfirm: fullConfirm,
-		Evidence:    scan.evidence,
+		Kind:             scan.evidence.Kind,
+		Confirmed:        scan.confirmed,
+		Unavailable:      scan.unavailable,
+		Unverified:       scan.unverified,
+		WillAdd:          willAdd,
+		WillRemove:       willRemove,
+		PlatformFiltered: platformFiltered,
+		FullConfirm:      fullConfirm,
+		Evidence:         scan.evidence,
 	}
 	if !apply {
 		return result, nil

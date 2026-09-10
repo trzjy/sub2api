@@ -124,8 +124,13 @@ func TestVolcanoSyncPlanPreviewDoesNotApply(t *testing.T) {
 	require.Empty(t, result.Unavailable)
 	require.Empty(t, result.Unverified)
 	require.Empty(t, result.WillRemove)
-	// 新账号：9 个候选全部将新增为 identity 键。
-	require.Equal(t, codingCandidates, result.WillAdd)
+	// 平台过滤：deepseek 账号只将 deepseek 系模型加入白名单，其余 7 个跨厂商模型被拦截。
+	deepseekKept := []string{"deepseek-v4-flash", "deepseek-v4-pro"}
+	require.Equal(t, deepseekKept, result.WillAdd)
+	require.Equal(t, []string{
+		"doubao-seed-2.0-lite", "doubao-seed-2.1-turbo", "doubao-seed-evolving",
+		"glm-5.3", "glm-5.3-flash", "kimi-k2.7-code", "minimax-m3",
+	}, result.PlatformFiltered)
 
 	extraCalls, credCalls := repo.counts()
 	require.Zero(t, extraCalls, "preview 不得写 extra 快照")
@@ -164,15 +169,16 @@ func TestVolcanoSyncPlanFullReplacePreservesManualAlias(t *testing.T) {
 	require.True(t, probed["glm-5.3"], "被 alias 覆盖的候选仍应重新探活")
 	mu.Unlock()
 	require.Equal(t, codingCandidates, result.Confirmed)
-	// glm-5.3 已被 alias 目标值覆盖，不重复加 identity 键；其余 8 个新增。
+	// glm-5.3 属跨厂商模型被平台过滤（且已被 alias 目标值覆盖），不重复加 identity 键；
+	// 仅 deepseek 系 2 个新增。
 	require.NotContains(t, result.WillAdd, "glm-5.3")
-	require.Len(t, result.WillAdd, 8)
+	require.Len(t, result.WillAdd, 2)
 
 	extraCalls, credCalls := repo.counts()
 	require.Equal(t, 1, extraCalls, "完全确认应用应写一次托管快照")
 	require.Equal(t, 1, credCalls, "完全确认应用应写一次 model_mapping")
 
-	// 落库后的 model_mapping：人工 alias 保留，identity 键 8 个，无重复 glm-5.3。
+	// 落库后的 model_mapping：人工 alias 保留，identity 键 2 个，无重复 glm-5.3。
 	newMapping, ok := account.Credentials["model_mapping"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "glm-5.3", newMapping["my-alias"], "人工 alias 永不删除")
@@ -183,12 +189,12 @@ func TestVolcanoSyncPlanFullReplacePreservesManualAlias(t *testing.T) {
 		sortedKeys = append(sortedKeys, k)
 	}
 	sort.Strings(sortedKeys)
-	require.Equal(t, 9, len(sortedKeys), "8 identity + 1 alias")
+	require.Equal(t, 3, len(sortedKeys), "2 identity + 1 alias")
 
-	// 托管快照 = 完整候选集（含 glm-5.3）。
+	// 托管快照 = 平台过滤后的写入集（跨厂商模型不入快照）。
 	snap := account.GetVolcanoPlanManagedModels()
 	require.NotNil(t, snap)
-	require.Equal(t, codingCandidates, snap.Models)
+	require.Equal(t, []string{"deepseek-v4-flash", "deepseek-v4-pro"}, snap.Models)
 	require.NotZero(t, snap.SyncedAt)
 }
 
@@ -232,12 +238,16 @@ func TestVolcanoSyncPlanPartialConvergesToConfirmed(t *testing.T) {
 	require.Equal(t, "doubao-seed-2.0-mini", newMapping["doubao-seed-2.0-mini"], "部分确认不删既有 mapping 键")
 	require.NotContains(t, newMapping, "glm-5.3-flash", "未探通模型不得并入 mapping")
 
-	// 托管快照 = 本轮 confirmed（不含未探通者，也不再并入官方下线的旧托管）。
+	// 托管快照 = 本轮 confirmed 平台过滤后的写入集（不含未探通者、跨厂商模型与官方
+	// 下线的旧托管）。
 	snap := account.GetVolcanoPlanManagedModels()
 	require.NotNil(t, snap)
 	require.NotContains(t, snap.Models, "glm-5.3-flash")
 	require.NotContains(t, snap.Models, "doubao-seed-2.0-mini", "全量语义：官方下线旧托管不再通过部分确认保留")
-	require.Equal(t, excludeStrings(codingCandidates, "glm-5.3-flash"), snap.Models)
+	require.Equal(t, []string{"deepseek-v4-flash", "deepseek-v4-pro"}, snap.Models)
+	require.Equal(t, excludeStrings(codingCandidates, "glm-5.3-flash"), append([]string{
+		"deepseek-v4-flash", "deepseek-v4-pro",
+	}, result.PlatformFiltered...))
 }
 
 func excludeStrings(in []string, drop string) []string {
@@ -401,7 +411,9 @@ func TestVolcanoSyncPlanFullyPopulatedReprobesAllCandidates(t *testing.T) {
 
 	snap := account.GetVolcanoPlanManagedModels()
 	require.NotNil(t, snap, "完全确认仍初始化/更新托管快照")
-	require.Equal(t, codingCandidates, snap.Models)
+	// 托管快照 = 平台过滤后的写入集；未播种快照时 9 个旧键均为人工映射，保留不删。
+	require.Equal(t, []string{"deepseek-v4-flash", "deepseek-v4-pro"}, snap.Models)
+	require.Len(t, result.PlatformFiltered, 7)
 	extraCalls, credCalls := repo.counts()
 	require.Equal(t, 1, extraCalls, "仍落一次托管快照")
 	require.Equal(t, 1, credCalls, "仍落一次 mapping（幂等覆盖）")
@@ -588,4 +600,69 @@ func TestVolcanoSyncPlanManualIdentityNotDeleted(t *testing.T) {
 	snap := account.GetVolcanoPlanManagedModels()
 	require.NotNil(t, snap)
 	require.Contains(t, snap.Models, "deepseek-v4-flash")
+}
+
+// TestVolcanoSyncPlanPlatformFilterConvergesLegacyManaged 验证平台过滤上线前的旧托管
+// 跨厂商 identity 键（glm/kimi…）在完全确认下经 preview 确认后被收敛下架，deepseek 系
+// 保留；apply 受 R3-1 约束必须携带 preview 确认的 will_remove。
+func TestVolcanoSyncPlanPlatformFilterConvergesLegacyManaged(t *testing.T) {
+	t.Parallel()
+
+	repo := &volcanoPlanSyncRepoStub{}
+	stub := &volcanoSyncHTTPStub{respond: allOKRespond}
+	svc := newVolcanoSyncSvc(t, stub, repo)
+	account := volcanoSyncAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions",
+		map[string]any{
+			"glm-5.3":           "glm-5.3",
+			"kimi-k3":           "kimi-k3",
+			"deepseek-v4-flash": "deepseek-v4-flash",
+		})
+	account.Extra = map[string]any{
+		VolcanoPlanManagedModelExtraKey: &VolcanoPlanManagedModels{
+			Models:       codingCandidates,
+			IdentityKeys: []string{"glm-5.3", "kimi-k3", "deepseek-v4-flash"},
+			SyncedAt:     time.Now().UTC(),
+		},
+	}
+
+	preview, err := svc.SyncVolcanoPlanModels(context.Background(), account, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"glm-5.3", "kimi-k3"}, preview.WillRemove, "跨厂商旧托管键进入收敛清单")
+	require.Equal(t, []string{"deepseek-v4-pro"}, preview.WillAdd)
+
+	// apply 必须携带 preview 确认的 will_remove，否则 R3-1 拒绝。
+	_, err = svc.SyncVolcanoPlanModels(context.Background(), account, true, nil)
+	require.Error(t, err, "preview 有待确认下架时，未携带 allowedRemovals 的 apply 必须被拒")
+
+	result, err := svc.SyncVolcanoPlanModels(context.Background(), account, true, preview.WillRemove)
+	require.NoError(t, err)
+	require.True(t, result.Applied)
+	require.Equal(t, []string{"glm-5.3", "kimi-k3"}, result.WillRemove)
+
+	newMapping := account.Credentials["model_mapping"].(map[string]any)
+	require.NotContains(t, newMapping, "glm-5.3")
+	require.NotContains(t, newMapping, "kimi-k3")
+	require.Equal(t, "deepseek-v4-flash", newMapping["deepseek-v4-flash"])
+	require.Equal(t, "deepseek-v4-pro", newMapping["deepseek-v4-pro"])
+	require.Len(t, newMapping, 2)
+}
+
+// TestVolcanoSyncPlanOtherPlatformNotFiltered 验证 other 平台不做平台过滤，
+// 全部探活确认模型照旧进入白名单。
+func TestVolcanoSyncPlanOtherPlatformNotFiltered(t *testing.T) {
+	t.Parallel()
+
+	repo := &volcanoPlanSyncRepoStub{}
+	stub := &volcanoSyncHTTPStub{respond: allOKRespond}
+	svc := newVolcanoSyncSvc(t, stub, repo)
+	account := volcanoSyncAccount("https://ark.cn-beijing.volces.com/api/coding", "chat_completions", nil)
+	account.Platform = PlatformOther
+
+	result, err := svc.SyncVolcanoPlanModels(context.Background(), account, true, nil)
+	require.NoError(t, err)
+	require.True(t, result.Applied)
+	require.Empty(t, result.PlatformFiltered)
+	require.Equal(t, codingCandidates, result.WillAdd)
+	newMapping := account.Credentials["model_mapping"].(map[string]any)
+	require.Len(t, newMapping, len(codingCandidates))
 }

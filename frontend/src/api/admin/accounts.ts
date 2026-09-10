@@ -669,6 +669,8 @@ export interface SyncVolcanoPlanResult {
   unverified: string[]
   will_add: string[]
   will_remove: string[]
+  /** 探活确认可用、但与账号平台不符被过滤、未写入白名单的模型（other/未知平台不过滤时为空） */
+  platform_filtered?: string[]
   full_confirm: boolean
   applied: boolean
   evidence: VolcanoPlanDocEvidence

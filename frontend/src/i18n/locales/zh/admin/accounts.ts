@@ -884,6 +884,7 @@ export default {
       syncVolcanoPlanUnavailable: '{count} 个模型明确不可用（未并入）',
       syncVolcanoPlanUnverified: '{count} 个模型未确认（超时/限流/服务端错误，未并入）',
       syncVolcanoPlanSuccess: '火山订阅号同步完成，已确认 {count} 个可用模型',
+      syncVolcanoPlanPlatformFiltered: '已按账号平台过滤 {count} 个跨平台模型（未加入白名单，可在下拉中手动添加）',
       syncVolcanoPlanDrifted: '应用结果与预览不一致，出现未确认下架模型（{models}）；已取消应用，请重新预览后确认',
       clearAllModels: '清除所有模型',
       customModelName: '自定义模型名称',
