@@ -31,7 +31,7 @@
           class="inline-flex items-center whitespace-nowrap rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
           :title="t('common.vsOfficialHint')"
         >{{ discountLabel }}</span>
-        <span v-else-if="rateMultiplier !== undefined" :class="['inline-flex items-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold', ratePillClass]">
+        <span v-else-if="rateMultiplier !== undefined && !hideRatePill" :class="['inline-flex items-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold', ratePillClass]">
           <template v-if="hasCustomRate">
             <span class="mr-1 line-through opacity-50">{{ rateMultiplier }}x</span>
             <span class="font-bold">{{ userRateMultiplier }}x</span>
@@ -81,6 +81,8 @@ interface Props {
   userRateMultiplier?: number | null
   /** 相对官方 API 的折扣标签（如"官方 6.6折"）；提供时优先于倍率药丸展示。 */
   discountLabel?: string
+  /** 用户侧统一折扣显示：无折扣标签时隐藏倍率药丸（倍率属运营侧信息）。 */
+  hideRatePill?: boolean
   peakRateEnabled?: boolean
   peakStart?: string
   peakEnd?: string
@@ -95,7 +97,8 @@ const props = withDefaults(defineProps<Props>(), {
   selected: false,
   showCheckmark: true,
   userRateMultiplier: null,
-  peakRateEnabled: false
+  peakRateEnabled: false,
+  hideRatePill: false
 })
 
 // Whether user has a custom rate different from default

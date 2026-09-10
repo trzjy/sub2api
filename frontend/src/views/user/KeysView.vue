@@ -497,6 +497,8 @@
                 :subscription-type="(option as unknown as GroupOption).subscriptionType"
                 :rate-multiplier="(option as unknown as GroupOption).rate"
                 :user-rate-multiplier="(option as unknown as GroupOption).userRate"
+                :discount-label="groupDiscount(option.value, (option as unknown as GroupOption).rate, (option as unknown as GroupOption).userRate)"
+                :hide-rate-pill="true"
                 :peak-rate-enabled="(option as unknown as GroupOption).peakRateEnabled"
                 :peak-start="(option as unknown as GroupOption).peakStart"
                 :peak-end="(option as unknown as GroupOption).peakEnd"
@@ -1100,7 +1102,8 @@
               :peak-start="option.peakStart"
               :peak-end="option.peakEnd"
               :peak-rate-multiplier="option.peakRateMultiplier"
-              :discount-label="groupDiscount(option.value)"
+              :discount-label="groupDiscount(option.value, option.rate, option.userRate)"
+              :hide-rate-pill="true"
               :description="option.description"
               :selected="
                 selectedKeyForGroup?.group_id === option.value ||
@@ -1421,17 +1424,22 @@ onMounted(async () => {
   }
 })
 
-// 组内模型（输入价）实付 ÷ 官方参考价的简单平均，"官方 X 折"。
-const groupDiscount = (groupId: number | null): string => {
+// 组内模型（输入价）实付（标准价 × 实际倍率）÷ 官方参考价的简单平均，"官方 X 折"。
+const groupDiscount = (
+  groupId: number | null,
+  rate?: number,
+  userRate?: number | null
+): string => {
   if (groupId === null) return ''
   const g = plazaGroups.value.find((x) => x.id === groupId)
   if (!g) return ''
+  const effRate = userRate ?? rate ?? 1
   const ratios: number[] = []
   for (const m of g.models) {
     const paid = m.pricing?.input_price
     const official = m.official_pricing?.input_price
     if (paid != null && official != null && official > 0 && paid > 0) {
-      ratios.push(paid / official)
+      ratios.push((paid * effRate) / official)
     }
   }
   if (!ratios.length) return ''
