@@ -154,6 +154,7 @@ import { useClipboard } from '@/composables/useClipboard'
 import ModelIcon from '@/components/common/ModelIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
+import { filterUpstreamModelsByPlatform } from '@/constants/platforms'
 
 const { t } = useI18n()
 
@@ -381,9 +382,17 @@ const syncUpstreamModels = async () => {
     }
 
     registerSyncedModels(upstreamModels)
+    // 按账号平台过滤聚合上游混回的跨平台无关模型：只自动加入平台相关模型；
+    // 全量模型已登记进下拉，需要跨平台模型时仍可手动搜索添加。
+    // 创建流程（preview）的平台以 syncCredentials.platform 为准，编辑流程用账号平台。
+    const filterPlatforms = props.syncCredentials?.platform
+      ? [props.syncCredentials.platform]
+      : normalizedPlatforms.value
+    const { kept: platformModels, skipped: skippedModels, filterApplied } =
+      filterUpstreamModelsByPlatform(upstreamModels, filterPlatforms)
     const newModels = [...props.modelValue]
     let addedCount = 0
-    for (const model of upstreamModels) {
+    for (const model of platformModels) {
       if (!newModels.includes(model)) {
         newModels.push(model)
         addedCount += 1
@@ -407,9 +416,12 @@ const syncUpstreamModels = async () => {
       return
     }
     if (addedCount > 0) {
-      appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: upstreamModels.length }))
-    } else {
-      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: upstreamModels.length }))
+      appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: addedCount, total: platformModels.length }))
+    } else if (platformModels.length > 0 || !filterApplied) {
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsNoChanges', { count: platformModels.length }))
+    }
+    if (filterApplied && skippedModels.length > 0) {
+      appStore.showInfo(t('admin.accounts.syncUpstreamModelsPlatformFiltered', { count: skippedModels.length }))
     }
     if (hasPartialMetadata) {
       appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataPartial'))

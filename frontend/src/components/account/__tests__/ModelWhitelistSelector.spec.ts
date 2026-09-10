@@ -220,7 +220,7 @@ describe('ModelWhitelistSelector', () => {
 
   it('warns when model IDs sync but capability metadata is incomplete', async () => {
     syncUpstreamModels.mockResolvedValue({
-      models: ['x-preview-f-free'],
+      models: ['gpt-preview-f-free'],
       warnings: [
         {
           code: 'upstream_model_metadata_incomplete',
@@ -248,7 +248,7 @@ describe('ModelWhitelistSelector', () => {
     await syncButton!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.emitted('update:modelValue')).toEqual([[['x-preview-f-free']]])
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-preview-f-free']]])
     expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsMetadataIncomplete')
     expect(showSuccess).not.toHaveBeenCalled()
   })
@@ -266,7 +266,7 @@ describe('ModelWhitelistSelector', () => {
     const wrapper = mount(ModelWhitelistSelector, {
       props: {
         modelValue: [],
-        platform: 'deepseek',
+        platform: 'zhipu',
         accountId: 47
       },
       global: {
@@ -373,10 +373,10 @@ describe('ModelWhitelistSelector', () => {
 
   it('reports a successful preview so account creation can persist metadata', async () => {
     syncUpstreamModelsPreview.mockResolvedValue({
-      models: ['x-preview-f-free'],
+      models: ['gpt-preview-f-free'],
       metadata: {
-        'x-preview-f-free': {
-          id: 'x-preview-f-free',
+        'gpt-preview-f-free': {
+          id: 'gpt-preview-f-free',
           reasoning: true,
           supported_reasoning_levels: ['low', 'high', 'max'],
         },
@@ -400,7 +400,7 @@ describe('ModelWhitelistSelector', () => {
 
     expect(syncUpstreamModelsPreview).toHaveBeenCalledOnce()
     expect(wrapper.emitted('upstream-synced')).toEqual([[]])
-    expect(wrapper.emitted('update:modelValue')).toEqual([[['x-preview-f-free']]])
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-preview-f-free']]])
   })
 
   it('shows real upstream sync for other platform in create flow and previews with credentials', async () => {
@@ -518,5 +518,65 @@ describe('ModelWhitelistSelector', () => {
     // 打开下拉后，kimi-k3 应出现在可选项里（动态同步模型进入运行时下拉）。
     await wrapper.get('div.cursor-pointer').trigger('click')
     expect(wrapper.text()).toContain('kimi-k3')
+  })
+
+  it('filters cross-family models on upstream sync for a deepseek account', async () => {
+    // 聚合上游一个 key 常混回全平台模型：同步只自动加入平台词根命中的模型，
+    // 全量模型仍登记进下拉供手动添加。
+    syncUpstreamModels.mockResolvedValue({
+      models: ['deepseek/deepseek-v4-flash', 'deepseek-chat', 'qwen/qwen3-32b', 'anthropic/claude-opus-4.6']
+    })
+    const wrapper = mountSelector({ platform: 'deepseek', accountId: 46 })
+    await clickSync(wrapper)
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['deepseek/deepseek-v4-flash', 'deepseek-chat']]])
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsSuccess')
+    expect(showInfo).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsPlatformFiltered')
+
+    await wrapper.get('div.cursor-pointer').trigger('click')
+    expect(wrapper.text()).toContain('qwen/qwen3-32b')
+    expect(wrapper.text()).toContain('anthropic/claude-opus-4.6')
+  })
+
+  it('does not filter upstream sync results when platform has no family pattern', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['deepseek-chat', 'qwen/qwen3-32b'] })
+    const wrapper = mountSelector({ platform: 'other', accountId: 46 })
+    await clickSync(wrapper)
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['deepseek-chat', 'qwen/qwen3-32b']]])
+    expect(showInfo).not.toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsPlatformFiltered')
+  })
+
+  it('keeps models matching any sub-platform on composite accounts', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['glm-4.6', 'deepseek-chat', 'gpt-4o'] })
+    const wrapper = mountSelector({ platform: undefined, platforms: ['zhipu', 'deepseek'], accountId: 46 })
+    await clickSync(wrapper)
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-4.6', 'deepseek-chat']]])
+    expect(showInfo).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsPlatformFiltered')
+  })
+
+  it('filters preview sync by the syncCredentials platform in the create flow', async () => {
+    // 创建流程账号平台以 syncCredentials.platform 为准（other → 不过滤）。
+    syncUpstreamModelsPreview.mockResolvedValue({ models: ['glm-5.3', 'deepseek-v4-pro'] })
+    const wrapper = mountSelector({
+      platform: undefined,
+      syncCredentials: {
+        platform: 'other',
+        type: 'apikey',
+        base_url: 'https://example.com/v1',
+        api_key: 'sk-test'
+      }
+    })
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['glm-5.3', 'deepseek-v4-pro']]])
+    expect(showInfo).not.toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsPlatformFiltered')
   })
 })

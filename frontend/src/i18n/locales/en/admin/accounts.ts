@@ -790,9 +790,11 @@ export default {
       fillRelatedModels: 'Sync latest supported models',
       syncUpstreamModels: 'Sync upstream supported models',
       syncUpstreamModelsLoading: 'Syncing upstream...',
-      syncUpstreamModelsSuccess: 'Synced {count} new model(s) from upstream ({total} upstream total)',
+      syncUpstreamModelsSuccess: 'Synced {count} new model(s) from upstream ({total} platform-relevant)',
       syncUpstreamModelsNoChanges: 'All {count} upstream model(s) are already in the whitelist',
       syncUpstreamModelsEmpty: 'Upstream returned no models to sync',
+      syncUpstreamModelsPlatformFiltered:
+        '{count} model(s) unrelated to the account platform were skipped (not auto-added; search the dropdown to add them manually)',
       syncUpstreamModelsFailed: 'Failed to sync upstream models',
       syncUpstreamModelsError: 'Failed to sync upstream models: {message}',
       syncUpstreamModelsMetadataIncomplete:
