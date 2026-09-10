@@ -267,10 +267,12 @@ var ErrModelPricingUnavailable = errors.New("pricing not found")
 // Source: https://api-docs.deepseek.com/quick_start/pricing
 // 高峰价 = 2× 低谷价；高峰时段 01:00–04:00 与 06:00–10:00 UTC（仅工作日），
 // 北京时间周六/周日全天低谷。时段判定见 deepseekPeakMultiplierAt。
+// 2026-09-10 官方调价核实：flash 档按 DeepSeek-V4.1-Flash 新价（谷 $0.15/$0.60，
+// 缓存命中 $0.006），官方文档明示旧名 deepseek-v4-flash 亦按此价计费；pro 档未调价。
 const (
-	deepseekFlashOffPeakInputPrice  = 2.2e-7  // $0.22 per MTok (cache miss)
-	deepseekFlashOffPeakOutputPrice = 6.6e-7  // $0.66 per MTok
-	deepseekFlashOffPeakCacheRead   = 7e-9    // $0.007 per MTok (cache hit)
+	deepseekFlashOffPeakInputPrice  = 1.5e-7  // $0.15 per MTok (cache miss)
+	deepseekFlashOffPeakOutputPrice = 6e-7    // $0.60 per MTok
+	deepseekFlashOffPeakCacheRead   = 6e-9    // $0.006 per MTok (cache hit)
 	deepseekProOffPeakInputPrice    = 6.6e-7  // $0.66 per MTok (cache miss)
 	deepseekProOffPeakOutputPrice   = 1.98e-6 // $1.98 per MTok
 	deepseekProOffPeakCacheRead     = 2.2e-8  // $0.022 per MTok (cache hit)
