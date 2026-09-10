@@ -115,6 +115,10 @@ type APIKeyAuthGroupSnapshot struct {
 	// RPMLimit 分组级每分钟请求数上限（0 = 不限制）；用于 billing_cache_service.checkRPM 级联判断。
 	RPMLimit int `json:"rpm_limit"`
 
+	// Concurrency 订阅分组各自并发上限（0 = 不限制）；仅订阅类型分组生效。
+	// 订阅模式下使用该分组的用户各自并发上限，与用户全局并发互不干扰。
+	Concurrency int `json:"concurrency"`
+
 	// MaxReasoningEffort Anthropic/OpenAI 请求的推理强度上限，空字符串表示不限制。
 	MaxReasoningEffort string `json:"max_reasoning_effort,omitempty"`
 	// MaxReasoningEffortOverLimit 超过上限时的访问控制：downgrade（默认）或 deny。

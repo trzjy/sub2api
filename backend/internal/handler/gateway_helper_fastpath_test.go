@@ -11,13 +11,14 @@ import (
 )
 
 type concurrencyCacheMock struct {
-	acquireUserSlotFn     func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error)
-	acquireAccountSlotFn  func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error)
-	acquireIngressLeaseFn func(ctx context.Context, apiKeyID int64, maxConnections int, leaseID string) (bool, error)
-	releaseIngressLeaseFn func(ctx context.Context, apiKeyID int64, leaseID string) error
-	releaseUserCalled     int32
-	releaseAccountCalled  int32
-	releaseIngressCalled  int32
+	acquireUserSlotFn      func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error)
+	acquireAccountSlotFn   func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error)
+	acquireUserGroupSlotFn func(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error)
+	acquireIngressLeaseFn  func(ctx context.Context, apiKeyID int64, maxConnections int, leaseID string) (bool, error)
+	releaseIngressLeaseFn  func(ctx context.Context, apiKeyID int64, leaseID string) error
+	releaseUserCalled      int32
+	releaseAccountCalled   int32
+	releaseIngressCalled   int32
 }
 
 func (m *concurrencyCacheMock) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
@@ -77,6 +78,29 @@ func (m *concurrencyCacheMock) IncrementWaitCount(ctx context.Context, userID in
 }
 
 func (m *concurrencyCacheMock) DecrementWaitCount(ctx context.Context, userID int64) error {
+	return nil
+}
+
+func (m *concurrencyCacheMock) AcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error) {
+	if m.acquireUserGroupSlotFn != nil {
+		return m.acquireUserGroupSlotFn(ctx, groupID, userID, maxConcurrency, requestID)
+	}
+	return true, nil
+}
+
+func (m *concurrencyCacheMock) ReleaseUserGroupSlot(ctx context.Context, groupID, userID int64, requestID string) error {
+	return nil
+}
+
+func (m *concurrencyCacheMock) GetUserGroupConcurrency(ctx context.Context, groupID, userID int64) (int, error) {
+	return 0, nil
+}
+
+func (m *concurrencyCacheMock) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
+	return true, nil
+}
+
+func (m *concurrencyCacheMock) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error {
 	return nil
 }
 

@@ -35,6 +35,7 @@ import (
 // OpenAIGatewayHandler handles OpenAI API gateway requests
 type OpenAIGatewayHandler struct {
 	gatewayService             *service.OpenAIGatewayService
+	settingService             *service.SettingService
 	billingCacheService        *service.BillingCacheService
 	apiKeyService              *service.APIKeyService
 	usageRecordWorkerPool      *service.UsageRecordWorkerPool
@@ -341,6 +342,7 @@ func isResponsesWebSocketCompositePlatform(platform string) bool {
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler
 func NewOpenAIGatewayHandler(
 	gatewayService *service.OpenAIGatewayService,
+	settingService *service.SettingService,
 	concurrencyService *service.ConcurrencyService,
 	billingCacheService *service.BillingCacheService,
 	apiKeyService *service.APIKeyService,
@@ -360,6 +362,7 @@ func NewOpenAIGatewayHandler(
 	}
 	return &OpenAIGatewayHandler{
 		gatewayService:           gatewayService,
+		settingService:           settingService,
 		billingCacheService:      billingCacheService,
 		apiKeyService:            apiKeyService,
 		usageRecordWorkerPool:    usageRecordWorkerPool,
@@ -585,7 +588,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
+	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
 	}
@@ -1223,7 +1226,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
+	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, reqStream, &streamStarted, reqLog)
 	if !acquired {
 		return
 	}
@@ -2010,16 +2013,26 @@ func validCodexDelegationEnvelope(value string) bool {
 func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 	c *gin.Context,
 	userID int64,
-	userConcurrency int,
 	reqStream bool,
 	streamStarted *bool,
 	reqLog *zap.Logger,
 ) (func(), bool) {
 	ctx := c.Request.Context()
-	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, userConcurrency, reqStream, streamStarted)
+	// 判定移进包装内部：订阅分组走 group 维度，计量走 user 维度。
+	subject, _ := middleware2.GetAuthSubjectFromContext(c)
+	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	scope := resolveConcurrencyScope(c, subject, subscription)
+
+	var userReleaseFunc func()
+	var err error
+	if scope.Kind == "group" {
+		userReleaseFunc, err = h.concurrencyHelper.AcquireUserGroupSlotWithWait(c, scope.GroupID, userID, scope.Max, reqStream, streamStarted)
+	} else {
+		userReleaseFunc, err = h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, scope.Max, reqStream, streamStarted)
+	}
 	if err != nil {
 		reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
-		h.handleConcurrencyError(c, err, "user", *streamStarted)
+		h.handleConcurrencyError(c, err, scope.Kind, *streamStarted)
 		return nil, false
 	}
 	return wrapReleaseOnDone(ctx, userReleaseFunc), true
@@ -2169,7 +2182,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_quick_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account")
+		status, errType, code, message := concurrencyErrorResponse(err, "account", "")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
 	}
@@ -2223,7 +2236,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	)
 	if err != nil {
 		reqLog.Warn("openai.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-		status, errType, code, message := concurrencyErrorResponse(err, "account")
+		status, errType, code, message := concurrencyErrorResponse(err, "account", "")
 		writeError(status, errType, code, message)
 		return nil, openAISlotAcquireFailed
 	}
@@ -2460,14 +2473,34 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 必须尽早注册，确保任何 early return 都能释放已获取的并发槽位。
 	defer releaseTurnSlots()
 
-	userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
+	// 订阅分组走 group 维度并发，计量走 user 维度。subscription 必须在取槽前读取
+	// （设计顺序陷阱：原 GetSubscriptionFromContext 在取槽之后，会导致订阅 WS 用户仍被 users.concurrency 卡住）。
+	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+	scope := resolveConcurrencyScope(c, subject, subscription)
+
+	// 订阅/计量用户撞并发上限时渲染可配文案；account 维度（本路径不涉及）保持英文。
+	userSlotLimitMsg := "too many concurrent requests, please retry later"
+	if h.settingService != nil {
+		if tmpl := h.settingService.GetConcurrencyLimitMessage(ctx); strings.TrimSpace(tmpl) != "" {
+			userSlotLimitMsg = renderConcurrencyLimitMessage(tmpl, scope.Kind, scope.Max)
+		}
+	}
+
+	acquireUserSlot := func() (func(), bool, error) {
+		if scope.Kind == "group" {
+			return h.concurrencyHelper.TryAcquireUserGroupSlotForAPIKey(ctx, scope.GroupID, subject.UserID, scope.Max, apiKey.ID)
+		}
+		return h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, scope.Max, apiKey.ID)
+	}
+
+	userReleaseFunc, userAcquired, err := acquireUserSlot()
 	if err != nil {
 		reqLog.Warn("openai.websocket_user_slot_acquire_failed", zap.Error(err))
 		closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
 		return
 	}
 	if !userAcquired {
-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, userSlotLimitMsg)
 		return
 	}
 	currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
@@ -2475,21 +2508,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		if currentUserRelease != nil {
 			return true
 		}
-		userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
+		userReleaseFunc, userAcquired, err := acquireUserSlot()
 		if err != nil {
 			reqLog.Warn("openai.websocket_user_slot_reacquire_failed", zap.Error(err))
 			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "failed to acquire user concurrency slot")
 			return false
 		}
 		if !userAcquired {
-			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "too many concurrent requests, please retry later")
+			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, userSlotLimitMsg)
 			return false
 		}
 		currentUserRelease = wrapReleaseOnDone(ctx, userReleaseFunc)
 		return true
 	}
 
-	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	requestPlatform := openAICompatibleRequestPlatform(ctx, apiKey)
 	requiredTransport := service.OpenAIUpstreamTransportResponsesWebsocketV2Ingress
 	if requestPlatform == service.PlatformGrok {
@@ -2845,13 +2877,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				// 防御式清理：避免异常路径下旧槽位覆盖导致泄漏。
 				releaseTurnSlots()
-				// 非首轮 turn 需要重新抢占并发槽位，避免长连接空闲占槽。
-				userReleaseFunc, userAcquired, err := h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, subject.Concurrency, apiKey.ID)
-				if err != nil {
-					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", err)
+				// 非首轮 turn 重新抢占并发槽位：订阅分组走 group 维度，计量走 user 维度。
+				var userReleaseFunc func()
+				var userAcquired bool
+				var slotErr error
+				if scope.Kind == "group" {
+					userReleaseFunc, userAcquired, slotErr = h.concurrencyHelper.TryAcquireUserGroupSlotForAPIKey(ctx, scope.GroupID, subject.UserID, scope.Max, apiKey.ID)
+				} else {
+					userReleaseFunc, userAcquired, slotErr = h.concurrencyHelper.TryAcquireUserSlotForAPIKey(ctx, subject.UserID, scope.Max, apiKey.ID)
+				}
+				if slotErr != nil {
+					return service.NewOpenAIWSClientCloseError(coderws.StatusInternalError, "failed to acquire user concurrency slot", slotErr)
 				}
 				if !userAcquired {
-					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "too many concurrent requests, please retry later", nil)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, userSlotLimitMsg, nil)
 				}
 				accountReleaseFunc, accountAcquired, err := h.concurrencyHelper.TryAcquireAccountSlot(ctx, account.ID, accountMaxConcurrency)
 				if err != nil {
@@ -3304,7 +3343,11 @@ func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, stream
 
 // handleConcurrencyError handles concurrency-related acquire errors.
 func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error, slotType string, streamStarted bool) {
-	status, errType, code, message := concurrencyErrorResponse(err, slotType)
+	limitMsg := ""
+	if h.settingService != nil {
+		limitMsg = h.settingService.GetConcurrencyLimitMessage(c.Request.Context())
+	}
+	status, errType, code, message := concurrencyErrorResponse(err, slotType, limitMsg)
 	h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, streamStarted, false)
 }
 

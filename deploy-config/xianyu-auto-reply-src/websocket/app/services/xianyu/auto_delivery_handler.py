@@ -14,6 +14,7 @@ import json
 import os
 import time
 import hashlib
+import random
 import aiohttp
 from decimal import Decimal, InvalidOperation
 from loguru import logger
@@ -382,9 +383,9 @@ class AutoDeliveryHandler:
                     else:
                         logger.error(f"【{self.cookie_id}】发送文本消息 {i+1}/{len(messages)} 失败(已重试5次): {error_msg}")
 
-                # 多条消息之间添加短暂延迟
+                # 多条消息之间添加随机延迟（模拟真人阅读/输入节奏，降低被识别为批量机器发送的风险）
                 if i < len(messages) - 1:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
         else:
             # 单条消息直接发送
             result = await self._send_msg_with_retry(websocket, chat_id, send_user_id, text)
@@ -1787,9 +1788,9 @@ class AutoDeliveryHandler:
                                         img_err = img_result.get("error_message", "未知错误") if isinstance(img_result, dict) else "返回值异常"
                                         logger.error(f'[{msg_time}] 【自动发货图片】发送失败(已重试5次): {img_err}')
 
-                                    # 多数量发货时，消息间隔1秒
+                                    # 多数量发货时，消息间隔随机 1.5~3 秒
                                     if len(delivery_contents) > 1 and i < len(delivery_contents) - 1:
-                                        await asyncio.sleep(1)
+                                        await asyncio.sleep(random.uniform(1.5, 3.0))
 
                                 else:
                                     # 普通文本发货内容，支持 ###### 分隔符拆分为多条消息
@@ -1797,9 +1798,9 @@ class AutoDeliveryHandler:
                                     if not text_ok:
                                         any_send_failed = True
 
-                                    # 多数量发货时，消息间隔1秒
+                                    # 多数量发货时，消息间隔随机 1.5~3 秒
                                     if len(delivery_contents) > 1 and i < len(delivery_contents) - 1:
-                                        await asyncio.sleep(1)
+                                        await asyncio.sleep(random.uniform(1.5, 3.0))
 
                             except Exception as e:
                                 any_send_failed = True

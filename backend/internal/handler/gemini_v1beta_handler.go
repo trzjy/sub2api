@@ -304,15 +304,24 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	// For Gemini native API, do not send Claude-style ping frames.
 	geminiConcurrency := NewConcurrencyHelper(h.concurrencyHelper.concurrencyService, SSEPingFormatNone, 0)
 
-	// 1) user concurrency slot
+	// 1) concurrency slot (subscription group → group scope, metering → user scope)
 	streamStarted := false
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
 	}
-	userReleaseFunc, err := geminiConcurrency.AcquireUserSlotWithWait(c, authSubject.UserID, authSubject.Concurrency, stream, &streamStarted)
+	scope := resolveConcurrencyScope(c, authSubject, subscription)
+	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlotWithWait(c, scope, authSubject.UserID, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
-		googleError(c, http.StatusTooManyRequests, err.Error())
+		msg := err.Error()
+		// 订阅/计量用户撞并发上限时渲染可配文案；account 维度（本路径不涉及）保持英文。
+		if tmpl := h.settingService.GetConcurrencyLimitMessage(c.Request.Context()); strings.TrimSpace(tmpl) != "" {
+			var ce *ConcurrencyError
+			if errors.As(err, &ce) && (ce.SlotType == "user" || ce.SlotType == "group") {
+				msg = renderConcurrencyLimitMessage(tmpl, ce.SlotType, ce.Limit)
+			}
+		}
+		googleError(c, http.StatusTooManyRequests, msg)
 		return
 	}
 	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏

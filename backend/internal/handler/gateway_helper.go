@@ -11,6 +11,7 @@ import (
 	"time"
 
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -146,6 +147,8 @@ const (
 type ConcurrencyError struct {
 	SlotType  string
 	IsTimeout bool
+	// Limit 触发本次超限的并发上限值；用于可配文案的 {limit} 占位符。
+	Limit int
 }
 
 func (e *ConcurrencyError) Error() string {
@@ -153,6 +156,52 @@ func (e *ConcurrencyError) Error() string {
 		return fmt.Sprintf("timeout waiting for %s concurrency slot", e.SlotType)
 	}
 	return fmt.Sprintf("%s concurrency limit reached", e.SlotType)
+}
+
+// concurrencyScope 描述一次请求应占用的并发维度。
+// 订阅模式请求走 group 维度（用户+分组独立计数），计量模式走 user 维度。
+type concurrencyScope struct {
+	Kind      string // "user"（计量）| "group"（订阅）
+	Max       int    // 对应上限；0 = 不限
+	GroupID   int64  // 订阅时有效
+	ScopeWord string // 文案 {scope} 维度词："用户" | "订阅"
+}
+
+// resolveConcurrencyScope 判定本次请求走"订阅分组并发"还是"用户全局并发"。
+//
+// 判定口径必须与 service.CheckBillingEligibility 逐字一致：
+//
+//	group.IsSubscriptionType() && subscription != nil
+//
+// 分组取自认证中间件写入 ctxkey.Group 的"认证时刻分组"——取槽位发生在调度覆盖之前，
+// 必须从这里取，不能从可能被 fallback/composite 覆盖的位置取。分组缺失或无效一律回落
+// 用户全局并发（沿用 service.IsGroupContextValid 防御），且订阅与计量两条路之间不得有任何
+// 取小/叠加/回落逻辑。
+func resolveConcurrencyScope(c *gin.Context, subject middleware2.AuthSubject, subscription *service.UserSubscription) concurrencyScope {
+	userScope := concurrencyScope{Kind: "user", Max: subject.Concurrency, ScopeWord: "用户"}
+
+	group, ok := c.Request.Context().Value(ctxkey.Group).(*service.Group)
+	if !ok || !service.IsGroupContextValid(group) {
+		return userScope
+	}
+	if !group.IsSubscriptionType() || subscription == nil {
+		return userScope
+	}
+	return concurrencyScope{
+		Kind:      "group",
+		Max:       group.Concurrency,
+		GroupID:   group.ID,
+		ScopeWord: "订阅",
+	}
+}
+
+// AcquireScopedUserSlotWithWait 按并发作用域分流占槽：订阅走 group 维度，计量走 user 维度。
+// 调用方负责用 scope.Kind 作为并发超限出口的 slotType。
+func (h *ConcurrencyHelper) AcquireScopedUserSlotWithWait(c *gin.Context, scope concurrencyScope, userID int64, isStream bool, streamStarted *bool) (func(), error) {
+	if scope.Kind == "group" {
+		return h.AcquireUserGroupSlotWithWait(c, scope.GroupID, userID, scope.Max, isStream, streamStarted)
+	}
+	return h.AcquireUserSlotWithWait(c, userID, scope.Max, isStream, streamStarted)
 }
 
 type WaitQueueFullError struct {
@@ -221,6 +270,16 @@ func (h *ConcurrencyHelper) DecrementAccountWaitCount(ctx context.Context, accou
 	h.concurrencyService.DecrementAccountWaitCount(ctx, accountID)
 }
 
+// IncrementUserGroupWaitCount increments the wait count for a (groupID, userID) pair
+func (h *ConcurrencyHelper) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
+	return h.concurrencyService.IncrementUserGroupWaitCount(ctx, groupID, userID, maxWait)
+}
+
+// DecrementUserGroupWaitCount decrements the wait count for a (groupID, userID) pair
+func (h *ConcurrencyHelper) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) {
+	h.concurrencyService.DecrementUserGroupWaitCount(ctx, groupID, userID)
+}
+
 // TryAcquireUserSlot 尝试立即获取用户并发槽位。
 // 返回值: (releaseFunc, acquired, error)
 func (h *ConcurrencyHelper) TryAcquireUserSlot(ctx context.Context, userID int64, maxConcurrency int) (func(), bool, error) {
@@ -236,6 +295,27 @@ func (h *ConcurrencyHelper) TryAcquireUserSlot(ctx context.Context, userID int64
 
 func (h *ConcurrencyHelper) TryAcquireUserSlotForAPIKey(ctx context.Context, userID int64, maxConcurrency int, apiKeyID int64) (func(), bool, error) {
 	releaseFunc, acquired, err := h.TryAcquireUserSlot(ctx, userID, maxConcurrency)
+	if err != nil || !acquired {
+		return releaseFunc, acquired, err
+	}
+	return h.withAPIKeySlot(ctx, apiKeyID, releaseFunc), true, nil
+}
+
+// TryAcquireUserGroupSlot 尝试立即获取"用户+分组"并发槽位（订阅分组维度，独立于用户全局并发）。
+// 返回值: (releaseFunc, acquired, error)
+func (h *ConcurrencyHelper) TryAcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int) (func(), bool, error) {
+	result, err := h.concurrencyService.AcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
+	if err != nil {
+		return nil, false, err
+	}
+	if !result.Acquired {
+		return nil, false, nil
+	}
+	return result.ReleaseFunc, true, nil
+}
+
+func (h *ConcurrencyHelper) TryAcquireUserGroupSlotForAPIKey(ctx context.Context, groupID, userID int64, maxConcurrency int, apiKeyID int64) (func(), bool, error) {
+	releaseFunc, acquired, err := h.TryAcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
 	if err != nil || !acquired {
 		return releaseFunc, acquired, err
 	}
@@ -299,6 +379,46 @@ func (h *ConcurrencyHelper) acquireUserSlotWithWaitTimeout(c *gin.Context, userI
 
 	// Need to wait - handle streaming ping if needed
 	releaseFunc, err = h.waitForSlotWithPingTimeout(c, "user", userID, maxConcurrency, timeout, isStream, streamStarted, false)
+	if err != nil {
+		return nil, err
+	}
+	return h.withAPIKeySlotFromGin(c, releaseFunc), nil
+}
+
+// AcquireUserGroupSlotWithWait 获取"用户+分组"并发槽位，必要时等待（订阅分组维度）。
+// slotType 固定为 "group"，与用户全局并发互不干扰。
+func (h *ConcurrencyHelper) AcquireUserGroupSlotWithWait(c *gin.Context, groupID, userID int64, maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
+	return h.acquireUserGroupSlotWithWaitTimeout(c, groupID, userID, maxConcurrency, maxConcurrencyWait, isStream, streamStarted)
+}
+
+func (h *ConcurrencyHelper) acquireUserGroupSlotWithWaitTimeout(c *gin.Context, groupID, userID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
+	ctx := c.Request.Context()
+
+	// Try to acquire immediately
+	releaseFunc, acquired, err := h.TryAcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	if acquired {
+		return h.withAPIKeySlotFromGin(c, releaseFunc), nil
+	}
+
+	queueLimit := service.CalculateMaxWait(maxConcurrency) - maxConcurrency
+	if queueLimit < 1 {
+		queueLimit = 1
+	}
+	canWait, err := h.IncrementUserGroupWaitCount(ctx, groupID, userID, queueLimit)
+	if err != nil {
+		return nil, err
+	}
+	if !canWait {
+		return nil, &WaitQueueFullError{SlotType: "group"}
+	}
+	defer h.DecrementUserGroupWaitCount(ctx, groupID, userID)
+
+	// Need to wait - handle streaming ping if needed
+	releaseFunc, err = h.waitForUserGroupSlotWithPingTimeout(c, "group", groupID, userID, maxConcurrency, timeout, isStream, streamStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +499,27 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 		}
 	}
 
+	if result, err := h.waitForSlotWithRetry(ctx, c, slotType, acquireSlot, maxConcurrency, isStream, streamStarted); err != nil || result != nil {
+		return result, err
+	}
+	return nil, nil
+}
+
+// waitForUserGroupSlotWithPingTimeout 等待"用户+分组"并发槽位（独立维度，逻辑同 waitForSlotWithPingTimeout）。
+func (h *ConcurrencyHelper) waitForUserGroupSlotWithPingTimeout(c *gin.Context, slotType string, groupID, userID int64, maxConcurrency int, timeout time.Duration, isStream bool, streamStarted *bool) (func(), error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+
+	acquireSlot := func() (*service.AcquireResult, error) {
+		return h.concurrencyService.AcquireUserGroupSlot(ctx, groupID, userID, maxConcurrency)
+	}
+
+	return h.waitForSlotWithRetry(ctx, c, slotType, acquireSlot, maxConcurrency, isStream, streamStarted)
+}
+
+// waitForSlotWithRetry 是 user/account/group 三种维度共用的退避+ping 等待核心实现。
+// acquireSlot 闭包负责按具体维度占槽；slotType 仅用于错误上报与可配文案的 {scope} 占位符。
+func (h *ConcurrencyHelper) waitForSlotWithRetry(ctx context.Context, c *gin.Context, slotType string, acquireSlot func() (*service.AcquireResult, error), maxConcurrency int, isStream bool, streamStarted *bool) (func(), error) {
 	// Determine if ping is needed (streaming + ping format defined)
 	needPing := isStream && h.pingFormat != ""
 
@@ -412,6 +553,7 @@ func (h *ConcurrencyHelper) waitForSlotWithPingTimeout(c *gin.Context, slotType 
 			return nil, &ConcurrencyError{
 				SlotType:  slotType,
 				IsTimeout: true,
+				Limit:     maxConcurrency,
 			}
 
 		case <-pingCh:

@@ -296,6 +296,16 @@ func (s *SettingService) GetSiteName(ctx context.Context) string {
 	return value
 }
 
+// GetConcurrencyLimitMessage 获取并发超限文案（支持 {limit}/{scope} 占位符）。
+// 空值或读取失败返回空串，调用方据此回退英文默认文案。
+func (s *SettingService) GetConcurrencyLimitMessage(ctx context.Context) string {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyConcurrencyLimitMessage)
+	if err != nil || value == "" {
+		return ""
+	}
+	return value
+}
+
 // GetDefaultConcurrency 获取默认并发量
 func (s *SettingService) GetDefaultConcurrency(ctx context.Context) int {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyDefaultConcurrency)

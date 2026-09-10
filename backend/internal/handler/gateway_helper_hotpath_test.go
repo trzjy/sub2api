@@ -147,6 +147,26 @@ func (s *helperConcurrencyCacheStub) DecrementWaitCount(ctx context.Context, use
 	return nil
 }
 
+func (s *helperConcurrencyCacheStub) AcquireUserGroupSlot(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error) {
+	return true, nil
+}
+
+func (s *helperConcurrencyCacheStub) ReleaseUserGroupSlot(ctx context.Context, groupID, userID int64, requestID string) error {
+	return nil
+}
+
+func (s *helperConcurrencyCacheStub) GetUserGroupConcurrency(ctx context.Context, groupID, userID int64) (int, error) {
+	return 0, nil
+}
+
+func (s *helperConcurrencyCacheStub) IncrementUserGroupWaitCount(ctx context.Context, groupID, userID int64, maxWait int) (bool, error) {
+	return true, nil
+}
+
+func (s *helperConcurrencyCacheStub) DecrementUserGroupWaitCount(ctx context.Context, groupID, userID int64) error {
+	return nil
+}
+
 func (s *helperConcurrencyCacheStub) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	out := make(map[int64]*service.AccountLoadInfo, len(accounts))
 	for _, acc := range accounts {

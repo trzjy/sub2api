@@ -157,6 +157,9 @@ type SystemSettings struct {
 	DocURL                      string
 	HomeContent                 string
 	CompactHomeEnabled          bool
+
+	// ConcurrencyLimitMessage 并发超限文案（支持 {limit}/{scope} 占位符；空值回退英文默认）。
+	ConcurrencyLimitMessage     string
 	HideCcsImportButton         bool
 	PurchaseSubscriptionEnabled bool
 	PurchaseSubscriptionURL     string

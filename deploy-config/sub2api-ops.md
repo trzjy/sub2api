@@ -386,7 +386,8 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
-| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-09-09，发货模板全局统一——`delivery.template` 取代逐卡券备注，所有发货路径统一渲染；含此前 claim 入参契约修复 + alertttl TTL 修复）：`globaltmpl-20260909-0049`（构建镜像 ID `sha256:4ba19f738d408c0876188a981b73bd8e2a2bbaf36a67a7d94388aa42b07b46f6`）。中间版 `orderqty-fix-20260908-2150` 已由本版本替代。 |
+| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-09-11，定时商品同步新增低频全量轮：默认每天一次完整翻页触发下架商品投影清理，修复"部分下架商品永久滞留在售面板"；详见 11.4）：`fullsync2-20260911-0452`（构建镜像 ID `sha256:b5d0efdfab406a7d292e21bcc369a055cff453182227df1297908754a14ddaae`）。中间版 `fullsync-20260911-0431`（无复审修复）与 `qtyfallback-20260909-0119` 已由本版本替代；2026-09-09 的 `globaltmpl-20260909-0049` 文档记录早于 `qtyfallback-20260909-0119`（后者当时未同步文档）。 |
+| `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS` | 可选。定时商品同步的全量轮间隔（秒），经 compose 注入为容器内 `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`；低频完整翻页触发下架清理，`0`/负数=禁用全量轮（纯增量旧行为）。缺省 `86400`（每天一次；进程重启后首轮即全量） |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
 ### 11.3 验证命令
@@ -404,6 +405,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **cookie_id 透传**：Worker 卡券（发货）调用主程序 Claim 时透传 `cookie_id` 作为账号身份（`XianyuDeliveryClaimRequest.cookie_id`）。
 - **digest 纪律**：旧字段 `XIANYU_WORKER_IMAGE_DIGEST` 已废弃，运行时统一使用 11.2 表格中的 `XIANYU_WORKER_IMAGE_TAG`（本机构建无 registry RepoDigest，固定 tag 引用更可靠）。当前已用 tag 模式替代：表格已记录 `prod-fix34-ensure-20260830-203928` 对应构建镜像 ID `sha256:10e96f9f54638945e131b04e1b969d33865b3de0b8e1f72f1863f3941fa3d640`，升级镜像时只改 tag 与同步该 tag 对应的镜像 ID。部署主机 `/opt/sub2api/xianyu-auto-reply-src/` 是运行时同步副本。
 - **internal 服务间鉴权**：backend-web→websocket/scheduler 的 `/internal/*` 路由要求 `X-Internal-Token` 匹配 `SUB2API_INTERNAL_TOKEN`（空配置失败关闭）；backend-web/scheduler 的 http_client 对 internal 服务 URL 自动注入该头。
+- **商品同步全量轮（2026-09-11 起）**：定时任务 `fetch_items` 默认增量（整页已存在提前停止，控风控请求量）；`scheduler/app/services/scheduler/fetch_items_task.py` 内置低频全量轮——默认每 86400 秒（env `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`，compose 变量 `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS`，0=禁用）跑一次完整翻页，自然结束后以闲鱼「在售」列表为权威集合清理 `xy_catalog_items` 中已售罄/下架的投影行，主程序下次同步（≤5 分钟）随之删除商品行。修复背景：增量提前停止使 `ItemService._prune_stale_catalog_items` 永不执行，部分下架商品永久滞留在售面板。执行互斥（`asyncio.Lock`）防手动触发与定时循环并发双开全量；全量轮"至少一个账号成功"才标记完成，全失败下一周期重试。注意：Worker 侧商品「删除」按钮只删投影行，闲鱼侧仍在售会被下轮同步重新拉回。
 
 ### 11.5 基座底层重构要点（补发/发货链路）
 

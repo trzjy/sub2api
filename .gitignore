@@ -120,6 +120,8 @@ backend/.installed
 tests
 !deploy/tests/
 !deploy/tests/**
+!deploy-config/xianyu-auto-reply-src/scheduler/tests/
+!deploy-config/xianyu-auto-reply-src/scheduler/tests/**
 CLAUDE.md
 .claude
 scripts
@@ -164,3 +166,5 @@ output/
 # 外审工具运行产物（本机，不入库）
 /.omx/
 .hypothesis/
+# CodeBuddy agent 本地缓存/计划（本机，不入库）
+/.zcode/

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -1933,6 +1934,14 @@ type openAIResponsesWSUsageLogCase struct {
 	firstFrameCloseExpected bool
 	// secondTurnCloseExpected：第二个 turn 被拒（连接被 1008 关闭）。
 	secondTurnCloseExpected bool
+	// subscription 注入订阅上下文（用于验证订阅分组走 group 维度并发，绕过用户全局并发）。
+	// 非 nil 时会同时把 tc.group 写入请求上下文的 ctxkey.Group，并使 resolveConcurrencyScope 命中 group 维度。
+	subscription *service.UserSubscription
+	// concurrencyCache 覆盖默认的"全开"并发缓存；nil 时使用默认全开实现。
+	// 用于模拟"用户全局并发耗尽但分组并发可用/不可用"等场景。
+	concurrencyCache *concurrencyCacheMock
+	// concurrencyCloseExpected：首帧后因地并发上限被拒（连接被 StatusTryAgainLater 关闭）。
+	concurrencyCloseExpected bool
 }
 
 type openAIResponsesWSUsageLogResult struct {
@@ -2232,6 +2241,7 @@ func TestOpenAIResponses_APIKeyPassthroughPool5xxRetriesThenExhaustsMaxSwitches(
 	)
 	h := NewOpenAIGatewayHandler(
 		gatewaySvc,
+		nil,
 		service.NewConcurrencyService(nil),
 		billingCacheSvc,
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
@@ -2333,6 +2343,7 @@ func TestOpenAIResponses_APIKeyPassthroughPoolAuthFailureRetriesThenSwitchesToHe
 			)
 			h := NewOpenAIGatewayHandler(
 				gatewaySvc,
+				nil,
 				service.NewConcurrencyService(nil),
 				billingCacheSvc,
 				service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
@@ -2415,6 +2426,7 @@ func TestOpenAIResponses_APIKeyPassthroughSSERateLimitUsesConfiguredPoolRetry(t 
 	)
 	h := NewOpenAIGatewayHandler(
 		gatewaySvc,
+		nil,
 		service.NewConcurrencyService(nil),
 		billingCacheSvc,
 		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
@@ -2989,13 +3001,16 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil, // userPlatformQuotaRepo
 	)
 
-	cache := &concurrencyCacheMock{
-		acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
-			return true, nil
-		},
-		acquireAccountSlotFn: func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
-			return true, nil
-		},
+	cache := tc.concurrencyCache
+	if cache == nil {
+		cache = &concurrencyCacheMock{
+			acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
+				return true, nil
+			},
+			acquireAccountSlotFn: func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
+				return true, nil
+			},
+		}
 	}
 	h := &OpenAIGatewayHandler{
 		gatewayService:      gatewaySvc,
@@ -3016,6 +3031,12 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
+		// 订阅分组并发测试：把分组写入请求上下文（resolveConcurrencyScope 从 ctxkey.Group 读取），
+		// 并把订阅对象注入上下文，使 WS 路径命中 group 维度并发。
+		if tc.subscription != nil {
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.Group, tc.group))
+			c.Set(string(middleware.ContextKeySubscription), tc.subscription)
+		}
 		c.Next()
 	})
 	router.GET("/openai/v1/responses", h.ResponsesWebSocket)
@@ -3052,6 +3073,19 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		require.ErrorAs(t, readErr, &closeErr)
 		require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
 		require.Contains(t, closeErr.Reason, "not available for this group")
+		_ = clientConn.CloseNow()
+		return openAIResponsesWSUsageLogResult{}
+	}
+
+	// 并发上限命中：连接被 StatusTryAgainLater 关闭（取代等待/正常响应）。
+	if tc.concurrencyCloseExpected {
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
+		_, _, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		require.Error(t, readErr, "concurrency-exhausted connection should be closed")
+		var closeErr coderws.CloseError
+		require.ErrorAs(t, readErr, &closeErr)
+		require.Equal(t, coderws.StatusTryAgainLater, closeErr.Code)
 		_ = clientConn.CloseNow()
 		return openAIResponsesWSUsageLogResult{}
 	}
@@ -3197,5 +3231,64 @@ data: {"type":"response.failed","error":{"message":"This content was flagged"}}
 		service.MarkOpsCyberPolicy(c, service.CyberPolicyMark{Message: "blocked", UpstreamStatus: 400})
 
 		require.False(t, openAIForwardErrorAlreadyCommunicated(c, c.Writer.Size(), errors.New("openai cyber_policy: blocked")))
+	})
+}
+
+// TestOpenAIResponsesWebSocket_SubscriptionUserBypassesGlobalUserConcurrency 是 C.5 / F.4①
+// 的 WS handler 端到端证据：订阅分组用户走 group 维度并发，即便其用户全局并发已被耗尽，
+// 仍应正常建立连接并收到 response.completed（不被用户全局并发拦截）。
+func TestOpenAIResponsesWebSocket_SubscriptionUserBypassesGlobalUserConcurrency(t *testing.T) {
+	got := runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload: `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		group: &service.Group{
+			ID:               4201,
+			Platform:         service.PlatformOpenAI,
+			Status:           service.StatusActive,
+			Hydrated:         true,
+			SubscriptionType: service.SubscriptionTypeSubscription,
+			Concurrency:      3,
+			ModelAllowlist:   service.GroupModelAllowlist{Enabled: false},
+		},
+		subscription: &service.UserSubscription{
+			ID:        5501,
+			UserID:    1701,
+			GroupID:   4201,
+			Status:    service.SubscriptionStatusActive,
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+		// 用户全局并发槽耗尽，但分组并发槽可用——订阅用户应走分组线放行。
+		concurrencyCache: &concurrencyCacheMock{
+			acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
+				return false, nil
+			},
+			acquireUserGroupSlotFn: func(ctx context.Context, groupID, userID int64, maxConcurrency int, requestID string) (bool, error) {
+				return true, nil
+			},
+			acquireAccountSlotFn: func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
+				return true, nil
+			},
+		},
+	})
+	if len(got.clientEvents) != 1 {
+		t.Fatalf("expected one completed event, got %d", len(got.clientEvents))
+	}
+}
+
+// TestOpenAIResponsesWebSocket_MeteringUserBlockedWhenGlobalConcurrencyExhausted 是 F.4① 的反向
+// 证据：计量（无订阅）用户走 user 维度并发，当用户全局并发槽耗尽时连接应被 StatusTryAgainLater 关闭，
+// 证明 WS 路径确实按 scope 分流到两条独立的并发线。
+func TestOpenAIResponsesWebSocket_MeteringUserBlockedWhenGlobalConcurrencyExhausted(t *testing.T) {
+	runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
+		firstPayload: `{"type":"response.create","model":"gpt-5.4","stream":false}`,
+		// 无 subscription：按计量（user 维度）处理；用户全局并发槽耗尽 → 被并发上限拦截。
+		concurrencyCache: &concurrencyCacheMock{
+			acquireUserSlotFn: func(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
+				return false, nil
+			},
+			acquireAccountSlotFn: func(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
+				return true, nil
+			},
+		},
+		concurrencyCloseExpected: true,
 	})
 }

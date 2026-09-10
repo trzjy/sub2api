@@ -877,3 +877,200 @@ func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_DeletesEmptySlotKey
 	require.NoError(s.T(), err)
 	require.EqualValues(s.T(), 0, exists)
 }
+
+// TestGroupUserSlot_IndependentAcrossGroups 验证「用户+分组」并发线在分组间相互独立：
+// group1 占用一个槽位不影响 group2 的计数。
+func (s *ConcurrencyCacheSuite) TestGroupUserSlot_IndependentAcrossGroups() {
+	group1, group2 := int64(8101), int64(8102)
+	user := int64(8150)
+	req1, req2 := "grp-req-1", "grp-req-2"
+
+	ok, err := s.cache.AcquireUserGroupSlot(s.ctx, group1, user, 2, req1)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot group1")
+	require.True(s.T(), ok)
+
+	ok, err = s.cache.AcquireUserGroupSlot(s.ctx, group1, user, 2, req2)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot group1 second")
+	require.True(s.T(), ok)
+
+	// group2 独立计数，不受 group1 占用影响
+	cur2, err := s.cache.GetUserGroupConcurrency(s.ctx, group2, user)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 0, cur2, "group2 should be independent of group1")
+
+	cur1, err := s.cache.GetUserGroupConcurrency(s.ctx, group1, user)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 2, cur1, "group1 should hold 2 slots")
+
+	// 同一用户在另一分组仍可占用
+	ok, err = s.cache.AcquireUserGroupSlot(s.ctx, group2, user, 1, "grp-req-g2")
+	require.NoError(s.T(), err, "AcquireUserGroupSlot group2")
+	require.True(s.T(), ok)
+
+	cur2, err = s.cache.GetUserGroupConcurrency(s.ctx, group2, user)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 1, cur2, "group2 should now hold 1 slot")
+}
+
+// TestGroupUserSlot_AcquireReleaseAndMax 验证占槽/释放与上限行为。
+func (s *ConcurrencyCacheSuite) TestGroupUserSlot_AcquireReleaseAndMax() {
+	groupID, userID := int64(8201), int64(8250)
+	req1, req2 := "gu-req-1", "gu-req-2"
+
+	ok, err := s.cache.AcquireUserGroupSlot(s.ctx, groupID, userID, 1, req1)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot")
+	require.True(s.T(), ok, "first acquire should succeed at max=1")
+
+	ok, err = s.cache.AcquireUserGroupSlot(s.ctx, groupID, userID, 1, req2)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot second")
+	require.False(s.T(), ok, "second acquire should fail at max=1")
+
+	cur, err := s.cache.GetUserGroupConcurrency(s.ctx, groupID, userID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 1, cur, "expected concurrency=1")
+
+	require.NoError(s.T(), s.cache.ReleaseUserGroupSlot(s.ctx, groupID, userID, req1))
+	require.NoError(s.T(), s.cache.ReleaseUserGroupSlot(s.ctx, groupID, userID, "non-existent"), "release non-existent must not error")
+
+	cur, err = s.cache.GetUserGroupConcurrency(s.ctx, groupID, userID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 0, cur, "expected concurrency=0 after release")
+}
+
+// TestGroupUserSlot_TTL 验证槽位键带 TTL。
+func (s *ConcurrencyCacheSuite) TestGroupUserSlot_TTL() {
+	groupID, userID := int64(8301), int64(8350)
+	reqID := "gu-ttl-req"
+	slotKey := grpUserSlotKey(groupID, userID)
+
+	ok, err := s.cache.AcquireUserGroupSlot(s.ctx, groupID, userID, 5, reqID)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot")
+	require.True(s.T(), ok)
+
+	ttl, err := s.rdb.TTL(s.ctx, slotKey).Result()
+	require.NoError(s.T(), err, "TTL")
+	s.AssertTTLWithin(ttl, 1*time.Second, testSlotTTL)
+}
+
+// TestGroupUserSlot_UnlimitedOrInvalidIsNoOp 验证 maxConcurrency<=0 或非法分组/用户时
+// 为 no-op（放行请求、不写入任何槽位/索引）。
+func (s *ConcurrencyCacheSuite) TestGroupUserSlot_UnlimitedOrInvalidIsNoOp() {
+	userID := int64(8450)
+
+	// max=0 → 放行且不占槽
+	ok, err := s.cache.AcquireUserGroupSlot(s.ctx, 8401, userID, 0, "gu-unlimited")
+	require.NoError(s.T(), err)
+	require.True(s.T(), ok, "max=0 must no-op succeed")
+	cur, err := s.cache.GetUserGroupConcurrency(s.ctx, 8401, userID)
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 0, cur, "max=0 should not occupy a slot")
+
+	// 非法 groupID / userID → 放行且不占槽
+	ok, err = s.cache.AcquireUserGroupSlot(s.ctx, 0, userID, 2, "gu-badgroup")
+	require.NoError(s.T(), err)
+	require.True(s.T(), ok, "groupID<=0 must no-op succeed")
+
+	ok, err = s.cache.AcquireUserGroupSlot(s.ctx, 8402, 0, 2, "gu-baduser")
+	require.NoError(s.T(), err)
+	require.True(s.T(), ok, "userID<=0 must no-op succeed")
+
+	// 不应在 user 全局并发线留下痕迹
+	userSlotKey := fmt.Sprintf("%s%d", userSlotKeyPrefix, userID)
+	exists, err := s.rdb.Exists(s.ctx, userSlotKey).Result()
+	require.NoError(s.T(), err)
+	require.EqualValues(s.T(), 0, exists, "grpuser acquire must not touch the user global line")
+}
+
+// TestGroupUserActiveIndex_CompositeMember 验证活跃索引成员为复合键 groupID:userID，
+// 且释放后被移除（证明 grpuser 线与 user/account 线互不串扰）。
+func (s *ConcurrencyCacheSuite) TestGroupUserActiveIndex_CompositeMember() {
+	groupID, userID := int64(8501), int64(8550)
+	member := fmt.Sprintf("%d:%d", groupID, userID)
+	reqID := "gu-index-req"
+
+	ok, err := s.cache.AcquireUserGroupSlot(s.ctx, groupID, userID, 2, reqID)
+	require.NoError(s.T(), err, "AcquireUserGroupSlot")
+	require.True(s.T(), ok)
+
+	score, err := s.rdb.ZScore(s.ctx, grpUserActiveIndexKey, member).Result()
+	require.NoError(s.T(), err, "acquire should register grpuser composite index member")
+	require.Greater(s.T(), score, float64(0))
+
+	require.NoError(s.T(), s.cache.ReleaseUserGroupSlot(s.ctx, groupID, userID, reqID))
+
+	_, err = s.rdb.ZScore(s.ctx, grpUserActiveIndexKey, member).Result()
+	require.ErrorIs(s.T(), err, redis.Nil, "grpuser index member should be removed after release")
+}
+
+// TestGroupUserWaitQueue_IncrementAndDecrement 验证分组等待队列计数（复合键）行为。
+func (s *ConcurrencyCacheSuite) TestGroupUserWaitQueue_IncrementAndDecrement() {
+	groupID, userID := int64(8601), int64(8650)
+	waitKey := grpUserWaitKey(groupID, userID)
+
+	ok, err := s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
+	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 1")
+	require.True(s.T(), ok)
+
+	ok, err = s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
+	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 2")
+	require.True(s.T(), ok)
+
+	ok, err = s.cache.IncrementUserGroupWaitCount(s.ctx, groupID, userID, 2)
+	require.NoError(s.T(), err, "IncrementUserGroupWaitCount 3")
+	require.False(s.T(), ok, "expected wait increment over max to fail")
+
+	count, err := s.rdb.Get(s.ctx, waitKey).Int()
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 2, count)
+
+	require.NoError(s.T(), s.cache.DecrementUserGroupWaitCount(s.ctx, groupID, userID))
+	count, err = s.rdb.Get(s.ctx, waitKey).Int()
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 1, count)
+
+	require.NoError(s.T(), s.cache.DecrementUserGroupWaitCount(s.ctx, groupID, userID))
+	count, err = s.rdb.Get(s.ctx, waitKey).Int()
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), 0, count)
+}
+
+// TestCleanupStaleProcessSlots_PreservesGrpUserCompositeMember 验证清理旧进程遗留槽位时，
+// grpuser 活跃索引的复合成员（groupID:userID）按 score（过期时间）而非整数解析处理——
+// 过去的复合成员被清理，未来的复合成员被保留，证明复合键不会被误删。
+func (s *ConcurrencyCacheSuite) TestCleanupStaleProcessSlots_PreservesGrpUserCompositeMember() {
+	now, err := s.rawCache.redisUnixSeconds(s.ctx)
+	require.NoError(s.T(), err)
+
+	staleMember := "9101:9150"
+	liveMember := "9102:9151"
+
+	// 过去的复合成员 → 应被清理
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, grpUserActiveIndexKey, redis.Z{
+		Score:  float64(now - 120),
+		Member: staleMember,
+	}).Err())
+	// 确保对应槽位键存在但属于旧进程（非 activeproc- 前缀）→ 清理时剩余为 0，索引成员被回收
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, grpUserSlotKey(9101, 9150), redis.Z{
+		Score:  float64(now - 120),
+		Member: "stale-req",
+	}).Err())
+	require.NoError(s.T(), s.rdb.Expire(s.ctx, grpUserSlotKey(9101, 9150), testSlotTTL).Err())
+
+	// 未来的复合成员 → 应保留；其槽位键须含当前进程（activeproc- 前缀）请求，剩余 > 0。
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, grpUserActiveIndexKey, redis.Z{
+		Score:  float64(now + 60),
+		Member: liveMember,
+	}).Err())
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, grpUserSlotKey(9102, 9151), redis.Z{
+		Score:  float64(now),
+		Member: "activeproc-live",
+	}).Err())
+	require.NoError(s.T(), s.rdb.Expire(s.ctx, grpUserSlotKey(9102, 9151), testSlotTTL).Err())
+
+	require.NoError(s.T(), s.cache.CleanupStaleProcessSlots(s.ctx, "activeproc-"))
+
+	_, err = s.rdb.ZScore(s.ctx, grpUserActiveIndexKey, staleMember).Result()
+	require.ErrorIs(s.T(), err, redis.Nil, "stale composite member should be reaped")
+	_, err = s.rdb.ZScore(s.ctx, grpUserActiveIndexKey, liveMember).Result()
+	require.NoError(s.T(), err, "live composite member must be preserved")
+}

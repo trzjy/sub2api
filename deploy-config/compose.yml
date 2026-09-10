@@ -116,6 +116,9 @@ services:
       MYSQL_DATABASE: ${XIANYU_WORKER_MYSQL_DB:-xianyu}
       REDIS_HOST: xianyu-worker-redis
       REDIS_PORT: "6379"
+      # 定时商品同步的全量轮间隔（秒）：低频完整翻页触发下架清理；0/负数=禁用。
+      # 缺省 86400（每天一次）；需调整时在 .env 设 XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS。
+      FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS: ${XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS:-86400}
     depends_on:
       xianyu-worker-mysql:
         condition: service_healthy
