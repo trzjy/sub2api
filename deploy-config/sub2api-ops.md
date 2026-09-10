@@ -386,7 +386,7 @@ python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
 |------|------|
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
-| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-09-11，定时商品同步新增低频全量轮：默认每天一次完整翻页触发下架商品投影清理，修复"部分下架商品永久滞留在售面板"；详见 11.4）：`fullsync2-20260911-0452`（构建镜像 ID `sha256:b5d0efdfab406a7d292e21bcc369a055cff453182227df1297908754a14ddaae`）。中间版 `fullsync-20260911-0431`（无复审修复）与 `qtyfallback-20260909-0119` 已由本版本替代；2026-09-09 的 `globaltmpl-20260909-0049` 文档记录早于 `qtyfallback-20260909-0119`（后者当时未同步文档）。 |
+| `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-09-11，重建自 origin/main `dd8c9e9a3`：纳入 `fetch_items_task.py` 全量轮调整与 `auto_delivery_handler.py` 改动；低频全量轮行为见 11.4）：`deliveryfs-20260911-0641`（构建镜像 ID `sha256:3570428aee984353fd5c740660e236eb879697b5f9fb1ea4e7108fb5add933df`）。上一版 `fullsync2-20260911-0452`（构建镜像 ID `sha256:b5d0efdfab406a7d292e21bcc369a055cff453182227df1297908754a14ddaae`）及中间版 `fullsync-20260911-0431`、`qtyfallback-20260909-0119`、`globaltmpl-20260909-0049` 已由本版本替代。 |
 | `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS` | 可选。定时商品同步的全量轮间隔（秒），经 compose 注入为容器内 `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`；低频完整翻页触发下架清理，`0`/负数=禁用全量轮（纯增量旧行为）。缺省 `86400`（每天一次；进程重启后首轮即全量） |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
@@ -472,4 +472,4 @@ systemctl daemon-reload
 
 ---
 
-最后更新：2026-08-30
+最后更新：2026-09-11
