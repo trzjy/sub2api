@@ -16,6 +16,7 @@
 7. [故障排查](#7-故障排查)
 8. [安全注意事项](#8-安全注意事项)
 9. [回滚操作](#9-回滚操作)
+13. [注册邮箱后缀黑名单（防滥用）](#13-注册邮箱后缀黑名单防滥用)
 
 ---
 
@@ -335,35 +336,41 @@ sleep 15 && curl -s http://127.0.0.1:3300/health && docker compose -f deploy-con
 
 ## 10. SMTP 自动发信配置
 
-应用使用 Google Workspace 发送注册验证、密码重置等系统邮件。密码保存在本机 GNOME Keyring，不写入仓库或文档。
+应用使用 **腾讯企业邮箱（企业微信集成版）** 发送注册验证、密码重置等系统邮件。发信域为 `corealgos.com`（在 Cloudflare 托管 DNS）。SMTP 密码为腾讯企业邮箱「客户端专用密码」，存于数据库 `settings.smtp_password`，**不写入仓库或本文档**。
 
-### 10.1 SMTP 参数
-
-| 字段 | 值 |
-|------|------|
-| SMTP Host | `smtp.gmail.com` |
-| Port | `587` |
-| Encryption | `STARTTLS` |
-| Username | `trzjy2013@gmail.com` |
-| From Email | `trzjy2013@gmail.com` |
-| Sender Name | `Sub2API` |
-| Password | 存放于 GNOME Keyring，文档不记录 |
-
-### 10.2 应用专用密码元数据
+### 10.1 SMTP 参数（生产当前值）
 
 | 字段 | 值 |
 |------|------|
-| 应用名称 | `corealgos.com` |
-| 创建时间 | `07:03` |
-| 用途 | Sub2API 自动发信 |
+| SMTP Host | `smtp.exmail.qq.com` |
+| Port | `465` |
+| Encryption | 隐式 TLS（SMTPS，`smtp_use_tls=true`） |
+| Username | `admin@corealgos.com` |
+| From Email | `admin@corealgos.com` |
+| Sender Name | `CoreAlgOS` |
+| Password | 腾讯企业邮箱客户端专用密码，存于 DB `settings.smtp_password` |
 
-### 10.3 本机密钥环取回命令
+> 端口 465 必须配合隐式 TLS（`smtp_use_tls=true`）。若误设为 `587`+STARTTLS 或 `smtp_use_tls=false`，SMTP AUTH 会返回 `535` 认证失败。
 
-```bash
-python3 -m keyring get smtp.gmail.com trzjy2013@gmail.com
-```
+### 10.2 发信域 DNS 记录（Cloudflare，必须「仅 DNS」灰色云）
 
-> 该命令输出即 SMTP Password。粘贴到 sub2api 管理后台时需确认已保存成功，随后关闭终端输出上下文。
+| 记录类型 | 名称 / 主机 | 内容 | 优先级 | 说明 |
+|----------|-------------|------|--------|------|
+| MX | `@` | `mxbiz1.qq.com` | `5` | 腾讯企业邮箱收信 |
+| MX | `@` | `mxbiz2.qq.com` | `10` | 腾讯企业邮箱收信 |
+| TXT | `@` | `v=spf1 include:spf.mail.qq.com ~all` | — | SPF |
+| TXT | `musl2609._domainkey` | 腾讯后台提供的 DKIM 公钥记录 | — | DKIM 选择器 `musl2609` |
+| TXT | `_dmarc` | `v=DMARC1; p=none; rua=mailto:admin@corealgos.com` | — | DMARC 报告 |
+
+> 所有邮件相关记录务必设为 **DNS only（灰色云朵）**；若走 Cloudflare 代理（橙色云）会导致 MX/SPF/DKIM 校验失败，外部（如 Gmail）收件箱会判定为垃圾邮件或拒收。验证：`dig +short mx corealgos.com` 应返回 `mxbiz1.qq.com` / `mxbiz2.qq.com`。
+
+### 10.3 客户端专用密码（SMTP 凭据）生成路径
+
+1. 企业微信管理后台 → **协作 → 邮件 → 安全管理 → 客户端访问权限**：开启 IMAP/SMTP，并记录「客户端专用密码」。
+2. 成员邮箱（admin@corealgos.com）的 **邮箱绑定 → 客户端专用密码** 处生成一次性密码（形如 `Ae6GpaubaYmhZNAc`，空格仅为显示）。
+3. 将该密码填入 sub2api 管理后台「系统设置 → SMTP」的 Password 字段并保存；等价于 `UPDATE settings SET value='<专用密码>' WHERE key='smtp_password';`。
+
+> 该密码是 SMTP 登录凭据，**切勿提交到 Git 或在文档中明文记录**。轮换时只需重新生成并覆盖 `smtp_password`。
 
 ---
 
@@ -469,6 +476,58 @@ systemctl daemon-reload
 ```
 
 > ⚠️ 该脚本严格遵守命名空间白名单，不会误删同机其他项目（newapi / nginx 等）的镜像或卷。
+
+---
+
+## 13. 注册邮箱后缀黑名单（防滥用）
+
+为拦截使用一次性/ disposable 邮箱注册的滥用账号，系统在注册、发送验证码、OAuth/绑定等所有注册入口统一校验 **注册邮箱后缀黑名单** `registration_email_suffix_blacklist`。命中即拒绝（`EMAIL_SUFFIX_BLOCKED`）。
+
+### 13.1 设置键与格式
+
+| 项目 | 值 |
+|------|------|
+| 设置键 | `registration_email_suffix_blacklist` |
+| 类型 | JSON 字符串，内容为字符串数组 `[...]` |
+| 默认 | `[]`（空数组 = 不拦截任何后缀，等价于放行全部） |
+| 匹配字段 | 与白名单 `registration_email_suffix_whitelist` 共用同一解析/归一化逻辑 |
+
+数组内每条规则的格式（大小写不敏感，自动小写、去空格、去重）：
+
+- **精确后缀**：以 `@` 开头，如 `"@mailinator.com"` —— 仅命中该域名本身。
+- **通配后缀**：以 `*..` 开头，如 `"*.yopmail.com"` —— 命中该域名及其所有子域名（`yopmail.com`、`a.yopmail.com` 均命中）。
+
+> 解析/保存时对非法条目严格报错（`INVALID_REGISTRATION_EMAIL_SUFFIX_BLACKLIST`），例如空串、含多个 `@`、非法域名。管理后台保存时若格式错误会直接拒绝，不会静默丢弃。
+
+### 13.2 校验位置（代码）
+
+黑名单在所有注册相关入口的 `validateRegistrationEmailBlacklist` 中统一调用：
+
+- `auth_service.go`：`RegisterWithVerification`、`SendVerifyCode`、`SendVerifyCodeAsync`
+- `validateRegistrationEmailPolicy`（OAuth 注册 / 第三方账号绑定路径的入口，最先校验）
+
+纯匹配逻辑为 `registration_email_suffix_blacklist.go` 的 `IsRegistrationEmailSuffixBlocked(email, blacklist)`（单测 `registration_email_suffix_blacklist_test.go` 覆盖精确/通配/空/畸形用例）。
+
+### 13.3 生产当前名单
+
+生产库已预置 **79 条**一次性邮箱域名（mailinator、guerrillamail、yopmail、tempmail、nada、dispostable、trashmail、10minutemail 等）。查看：
+
+```bash
+docker exec -i sub2api-postgres psql -U sub2api -d sub2api \
+  -c "SELECT json_array_length(value) FROM settings WHERE key='registration_email_suffix_blacklist';"
+```
+
+### 13.4 运维操作
+
+**新增/修改黑名单（管理后台「系统设置 → 注册邮箱后缀黑名单」填入 JSON 数组后保存）**，或直写数据库（注意合法 JSON 且条目格式正确）：
+
+```bash
+docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
+  UPDATE settings SET value='[\"@mailinator.com\",\"*.yopmail.com\"]' \
+  WHERE key='registration_email_suffix_blacklist';"
+```
+
+> 黑名单只拦「一次性域名」。**主流邮箱的 plus 地址（如 `user+tag@gmail.com`）不会被拦截**——Gmail 的 `+tag` 仍属 `@gmail.com` 主域。若需限制 plus 地址或限定每主域注册数，应配合「邮箱域名注册额度」（`registration_email_domain_quota_enabled`）或白名单使用，而非黑名单。
 
 ---
 
