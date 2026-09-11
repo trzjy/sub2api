@@ -207,14 +207,7 @@ func (c *tempUnschedCache) RecordOpenAIAPIKeyHealthFailure(ctx context.Context, 
 	}, nil
 }
 
-// ClearOpenAIAPIKeyHealth resets the rolling failure window and tier state for an
-// account (used when a successful schedule result proves the account healthy).
-func (c *tempUnschedCache) ClearOpenAIAPIKeyHealth(ctx context.Context, accountID int64) error {
-	key := c.openAIAPIKeyHealthKey(accountID)
-	tierKey := c.openAIAPIKeyHealthTierKey(accountID)
-	seqKey := key + ":sequence"
-	if err := c.rdb.Del(ctx, key, tierKey, seqKey).Err(); err != nil {
-		return fmt.Errorf("clear OpenAI API key health: %w", err)
-	}
-	return nil
-}
+// ClearOpenAIAPIKeyHealth was removed: the breaker no longer resets the rolling
+// failure window on a successful schedule, because that defeated the window for
+// flaky channels and added a hot-path Redis write. The window decays via TTL, and
+// the L3 block path persists its own state.

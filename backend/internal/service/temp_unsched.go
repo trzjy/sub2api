@@ -49,10 +49,6 @@ type OpenAIAPIKeyHealthCache interface {
 	// window; watchThreshold/warningThreshold/tripThreshold are the three tier
 	// boundaries (tripThreshold == the L3 failure threshold).
 	RecordOpenAIAPIKeyHealthFailure(ctx context.Context, accountID int64, windowMinutes, watchThreshold, warningThreshold, tripThreshold int) (OpenAIAPIKeyHealthRecordResult, error)
-	// ClearOpenAIAPIKeyHealth resets the rolling failure window and tier state for
-	// an account. The breaker calls it on a successful schedule result so a healthy
-	// account does not stay one failure away from tripping.
-	ClearOpenAIAPIKeyHealth(ctx context.Context, accountID int64) error
 }
 
 // TimeoutCounterCache 超时计数器缓存接口

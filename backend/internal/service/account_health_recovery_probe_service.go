@@ -97,15 +97,13 @@ func (p *AccountHealthRecoveryProbeService) probeEnabled(ctx context.Context) bo
 	return settings.Enabled && settings.Probe.Enabled
 }
 
-// Start launches the probe sweep loop if enabled. It is safe to call when disabled
-// (it returns immediately) and safe to call multiple times (only the first
-// effective start spawns a goroutine).
+// Start launches the probe sweep loop. The loop runs continuously and re-reads
+// the probe switch on every tick (see RunOnce's probeEnabled check), so toggling
+// the switch in admin settings takes effect within one interval (<= IntervalSeconds,
+// default 60s) without a process restart. It is safe to call multiple times (only
+// the first effective start spawns a goroutine) and terminates via Stop.
 func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	if p == nil {
-		return
-	}
-	if !p.probeEnabled(ctx) {
-		logger.L().Info("openai.apikey_health_probe_disabled")
 		return
 	}
 	p.startMu.Lock()
@@ -141,7 +139,8 @@ func (p *AccountHealthRecoveryProbeService) Start(ctx context.Context) {
 	}()
 }
 
-// Stop terminates the probe loop if running.
+// Stop terminates the probe loop if running. It must be called from the process
+// graceful-shutdown path so the goroutine does not leak.
 func (p *AccountHealthRecoveryProbeService) Stop() {
 	if p == nil {
 		return

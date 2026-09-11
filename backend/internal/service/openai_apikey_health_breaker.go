@@ -280,26 +280,20 @@ func (s *RateLimitService) recordHealthWarningAlert(ctx context.Context, account
 	}
 }
 
-// ObserveOpenAIAPIKeyHealthSuccess clears the rolling health window and tier state
-// when an account reports a successful schedule result. A healthy account must not
-// stay one failure away from tripping; success resets the slate. The reset is
-// guarded by the breaker being enabled and the account being in scope so it does
-// not add a Redis round-trip to the hot path for out-of-scope or disabled traffic.
+// ObserveOpenAIAPIKeyHealthSuccess is intentionally a no-op.
+//
+// The rolling health window and the tier state both carry their own TTL
+// (window_minutes) and decay by time on their own, so a healthy account's counts
+// expire naturally without an explicit reset. The L3 trip path already persists the
+// full block state via SetTempUnschedulable, so there is nothing left to clear here
+// either.
+//
+// Clearing on every successful request was removed because it both (a) defeats the
+// breaker for exactly the flaky-chronic-failure channels it exists to catch — each
+// success would reset the count so the threshold is never reached — and (b) added a
+// Redis write to the hot path for every in-scope account's successful request, which
+// the original design explicitly forbade ("must not add a Redis round trip to the
+// hot path").
 func (s *RateLimitService) ObserveOpenAIAPIKeyHealthSuccess(ctx context.Context, account *Account) {
-	if s == nil || s.openAIAPIKeyHealth == nil || account == nil {
-		return
-	}
-	if s.settingService == nil {
-		return
-	}
-	settings, err := s.settingService.GetOpenAIAPIKeyHealthBreakerSettings(ctx)
-	if err != nil || settings == nil || !settings.Enabled {
-		return
-	}
-	if !isOpenAIAPIKeyHealthBreakerAccount(account, settings) {
-		return
-	}
-	if err := s.openAIAPIKeyHealth.ClearOpenAIAPIKeyHealth(ctx, account.ID); err != nil {
-		logger.L().Debug("openai.apikey_health_clear_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-	}
+	// Intentionally a no-op; see comment above.
 }

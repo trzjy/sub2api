@@ -508,9 +508,11 @@ func ProvideRateLimitService(
 	return svc
 }
 
-// ProvideAccountHealthRecoveryProbeService creates and (when enabled) starts the
-// optional health-breaker probe-based recovery sweep. It is a no-op at runtime unless
-// the admin explicitly enables settings.probe.enabled.
+// ProvideAccountHealthRecoveryProbeService creates and starts the optional
+// health-breaker probe-based recovery sweep. The loop runs continuously and
+// re-reads settings.probe.enabled every tick, so toggling the switch in admin
+// settings takes effect within one interval without a restart. When the switch is
+// off the loop is alive but performs no work (RunOnce returns early).
 func ProvideAccountHealthRecoveryProbeService(
 	accountRepo AccountRepository,
 	httpUpstream HTTPUpstream,

@@ -64,7 +64,6 @@ type healthCacheStub struct {
 	recordResult OpenAIAPIKeyHealthRecordResult
 	recordErr    error
 	recordCalls  int
-	clearCalls   int
 	setCalls     int
 	deleteCalls  int
 }
@@ -72,10 +71,6 @@ type healthCacheStub struct {
 func (c *healthCacheStub) RecordOpenAIAPIKeyHealthFailure(_ context.Context, _ int64, _, _, _, _ int) (OpenAIAPIKeyHealthRecordResult, error) {
 	c.recordCalls++
 	return c.recordResult, c.recordErr
-}
-func (c *healthCacheStub) ClearOpenAIAPIKeyHealth(_ context.Context, _ int64) error {
-	c.clearCalls++
-	return nil
 }
 func (c *healthCacheStub) SetTempUnsched(_ context.Context, _ int64, _ *TempUnschedState) error {
 	c.setCalls++
@@ -338,9 +333,10 @@ func TestBreakerDisabledIsNoOp(t *testing.T) {
 	require.Zero(t, repo.setTempCalls)
 	require.Zero(t, blocker.blockCalls)
 
-	// Success path must also avoid touching the cache when disabled.
+	// Success path must also avoid touching the cache when disabled (it is a
+	// no-op in both disabled and enabled modes).
 	svc.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), healthAccount(domain.PlatformOpenAI))
-	require.Zero(t, cache.clearCalls)
+	require.Zero(t, cache.recordCalls)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,21 +391,32 @@ func TestThreeTierEscalationBreakerReactions(t *testing.T) {
 	require.Equal(t, 1, svc.accountRepo.(*healthAccountRepoStub).setTempCalls)
 }
 
-func TestObserveSuccessClearsHealthWindow(t *testing.T) {
+func TestObserveSuccessDoesNotClearWindow(t *testing.T) {
 	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
 		Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
 	})
 	cache := &healthCacheStub{}
 	svc := newRateLimitWithStubCache(t, cache, ss, nil)
 
-	// A success on an in-scope account clears the rolling window.
-	svc.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), healthAccount(domain.PlatformOpenAI))
-	require.Equal(t, 1, cache.clearCalls)
+	// A single failure seeds the rolling window (1 recorded failure).
+	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 1}
+	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway})
+	require.Equal(t, 1, cache.recordCalls)
 
-	// A success on an out-of-scope account is a no-op (no cache round trip).
-	cache.clearCalls = 0
-	svc.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), healthAccount(domain.PlatformGrok))
-	require.Zero(t, cache.clearCalls)
+	// A successful schedule is a NO-OP: it must NOT reset the window and must NOT
+	// touch the cache at all. This is what keeps a flaky channel's failures from
+	// being wiped by an intermittent success.
+	svc.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), healthAccount(domain.PlatformOpenAI))
+	require.Equal(t, 1, cache.recordCalls, "success must not clear or rewrite the window")
+
+	// Further failures keep accumulating on top of the prior failure rather than
+	// starting fresh, so the breaker can still trip.
+	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 2}
+	svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway})
+	require.Equal(t, 2, cache.recordCalls)
+
+	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 3, TrippedTrip: true}
+	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), healthAccount(domain.PlatformOpenAI), &UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +579,42 @@ func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
 
 	require.Zero(t, rlRepo.clearTempCalls)
 	require.Equal(t, 1, repo.setReasonCall)
+}
+
+func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
+	// The probe loop re-reads settings.probe.enabled on every tick, so flipping
+	// the switch in admin settings must take effect on the already-running loop
+	// without restarting the process. This test proves that: disabled RunOnce is a
+	// no-op, and after enabling via the setting service the SAME service instance
+	// performs the sweep on the next tick.
+	rlRepo := &probeRateLimitRepo{}
+	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
+	cand := parkedBreakerAccount(7, 0)
+	repo := &probeRepoMock{
+		accounts:   map[int64]*Account{7: cand},
+		candidates: []*Account{cand},
+	}
+
+	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
+		Enabled: true,
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: false, IntervalSeconds: 30, MaxAttempts: 10},
+	})
+	p := NewAccountHealthRecoveryProbeService(repo, nil, &config.Config{}, rl, ss, nil)
+	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
+
+	// Disabled at start: the running loop never touches the candidate.
+	p.RunOnce(context.Background())
+	require.Zero(t, rlRepo.clearTempCalls)
+
+	// Flip the switch ON through the setting service (simulates an admin toggle).
+	require.NoError(t, ss.SetOpenAIAPIKeyHealthBreakerSettings(context.Background(), &OpenAIAPIKeyHealthBreakerSettings{
+		Enabled: true,
+		Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true, IntervalSeconds: 30, MaxAttempts: 10},
+	}))
+
+	// Same service instance, no restart: the next tick now performs the sweep.
+	p.RunOnce(context.Background())
+	require.Equal(t, 1, rlRepo.clearTempCalls, "enabling the probe must take effect on the running loop")
 }
 
 func TestProbeGivesUpAfterMaxAttempts(t *testing.T) {

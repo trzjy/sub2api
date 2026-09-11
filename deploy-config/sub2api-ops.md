@@ -562,7 +562,7 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 - **L2 预警（warning）**：≥ `warning` 阈值 → 日志 + 写入一条可查询的运维告警（`P1`，经 `OpsRepository.CreateAlertEvent`），**不影响调度**。
 - **L3 熔断（trip）**：≥ `failure_threshold` → 复用既有 `SetTempUnschedulable` 临时禁用该账号并进入冷却（与现有行为完全一致），`TempUnschedState` 中记录 `tier=3`、`matched_keyword=openai_apikey_health_breaker`。
 
-**去抖与状态**：同一窗口周期内档位只升不降；L1/L2 在同一窗口内重复触发不重复告警（Redis companion key 记录已升级到的最高档）。`ObserveOpenAIAPIKeyHealthSuccess`（一次成功调度结果）会**同时清零失败计数与档位状态**；达到 L3 时窗口被清空，冷却到期后从新窗口开始。
+**去抖与状态**：同一窗口周期内档位只升不降；L1/L2 在同一窗口内重复触发不重复告警（Redis companion key 记录已升级到的最高档）。**失败计数与档位状态按时间自然衰减（窗口 TTL），成功请求不会重置窗口、也不产生 Redis 写**——这正是为慢性抖动渠道保留证据：`ObserveOpenAIAPIKeyHealthSuccess` 现为 no-op（一次成功调度结果不再清零窗口）。L3 熔断后窗口同样不主动清空，冷却到期恢复后从新的窗口周期重新累计。
 
 ### 14.3 推荐值与生产开启步骤
 
@@ -619,6 +619,8 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 - 探测失败 → 维持冷却，并将尝试次数 +1（写回 reason 的 `probe_attempts`）；
 - 尝试次数达到 `probe.max_attempts` → 停止探测，退回「到期自动恢复」；
 - 某平台无安全/廉价探测端点 → 探测降级为「到期恢复」，代码注释与本节已说明，不会刷屏。
+
+> **开关热生效（运行时无需重启）**：探测循环在进程启动时即常驻，每个 tick（≤ `probe.interval_seconds`，默认 60s）都会重新读取 `probe.enabled`，因此**在管理后台开启/关闭探测无需重启进程**，最长一个探测间隔内即生效。关闭后循环仍在运行但每个 tick 直接跳过、不发起任何探测请求。进程优雅关闭时会调用 `Stop()` 终止该循环，不会泄漏 goroutine。
 
 #### 探测的局限（开启前须知）
 

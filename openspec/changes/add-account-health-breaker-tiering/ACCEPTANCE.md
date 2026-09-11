@@ -28,13 +28,13 @@
 - **L1 关注（watch）**：窗口计数 ≥ `max(1, floor(FailureThreshold × watch_ratio))` → 结构化日志 `openai.apikey_health_watch` + 可观测指标；不影响调度。
 - **L2 预警（warning）**：≥ `max(1, floor(FailureThreshold × warning_ratio))` → 同上并接入运维告警（`ops_alert` / ops 记录），**同一窗口内去抖，不重复告警**。
 - **L3 禁用（trip）**：≥ `FailureThreshold` → 维持既有 `SetTempUnschedulable` + 冷却到期自动恢复；`TempUnschedState` 新增 `tier` 字段记录档位（兼容旧结构）。
-- 同一窗口周期内档位只升不降；`ObserveOpenAIAPIKeyHealthSuccess` 清零计数时**同时清除档位状态**（新增 `ClearOpenAIAPIKeyHealth`）。
+- 同一窗口周期内档位只升不降；`ObserveOpenAIAPIKeyHealthSuccess` **为 no-op**——窗口与档位状态按 TTL 自然衰减，成功请求不再清零计数（避免慢性抖动渠道被偶发成功重置而永不到达阈值，也避免热路径新增 Redis 写）。`ClearOpenAIAPIKeyHealth` 已从接口与实现中删除（无其余调用方）。
 
 ### Phase C — 探测式恢复（默认关闭）
 - 新增 `AccountHealthRecoveryProbeService`：账号处于熔断冷却期内，按 `probe.interval_seconds`（默认 60，可配 30–600）定时发起**最小廉价探测**——优先 `/models` 类零消耗端点，否则 1 token chat completion（复用 `cn_provider_probe_url.go` / `account_balance_probe.go` 模式），走既有 SSRF 防护，日志/错误不泄漏密钥。
 - 探测成功（2xx 且完成最小补全）→ `ClearTempUnschedulable` 提前解除 + 结构化日志；失败 → 维持冷却并在 `TempUnschedState.probe_attempts` 累计；达到 `probe.max_attempts`（默认 10）后停止探测，退回「到期自动恢复」。
 - 无安全/廉价探测端点的平台退化为到期恢复（代码注释 + 运维文档已说明）。
-- 默认 `probe.enabled=false`；经 `wire.go` / `wire_gen.go` 接入，运行时未启用即为 no-op（不启动 goroutine、不查 Redis）。
+- 默认 `probe.enabled=false`；经 `wire.go` / `wire_gen.go` 接入：探测循环**常驻启动**（`Start()` 不再受 boot-time 开关门禁），每个 tick（≤ `interval_seconds`，默认 60s）重新读取 `probe.enabled` 实时判断，故**开关热生效无需重启进程**；`Stop()` 已注册到 `provideCleanup` 优雅关闭路径，进程退出时终止循环、不泄漏 goroutine。
 
 ### 前端（Phase A3）
 - `settings.ts` 新增 `OpenAIAPIKeyHealthBreakerSettings` / `OpenAIAPIKeyHealthBreakerProbeSettings` 类型。
@@ -56,6 +56,8 @@
 | 2 | `/models` 探测对「models 正常但 chat 上游仍坏」的中转站会过早解除；默认关闭已缓解 | **已文档化**：探针服务 `probeUpstream` 注释 + ops §14.5「探测的局限」说明该场景与开启前提 |
 | 3 | 多实例同时开 probe 会重复探测 | **已文档化**：探针服务顶部注释 + ops §14.5 说明副本各自独立扫描、副作用幂等无害（仅略增上游流量） |
 | 4 | 前端 `vue-tsc` 未独立复跑（worktree 无 node_modules） | 本机 `node_modules` 存在，`npx vue-tsc --noEmit` 已通过（TYPECHECK_EXIT=0）；风险低 |
+| 5 | **P1-1（必修）** `ObserveOpenAIAPIKeyHealthSuccess` 每次成功都清零窗口 → 削弱熔断（慢性抖动渠道永不到达阈值）且给热路径加 Redis 写；评审结论「有条件通过」要求改为 no-op | **已改**：`ObserveOpenAIAPIKeyHealthSuccess` 改为 no-op（窗口按 TTL 衰减，L3 已由 `SetTempUnschedulable` 持久化阻塞态）；`ClearOpenAIAPIKeyHealth` 无其余调用方，已从接口（`temp_unsched.go`）+ 实现（`temp_unsched_cache.go`）删除；测试 `TestObserveSuccessClearsHealthWindow` 改写为 `TestObserveSuccessDoesNotClearWindow`（断言成功不清零、失败仍可累计并触发 L3）；同步修正 ops §14.2 与本文对应描述 |
+| 6 | **P1-2（必修）** 探测开关仅在 `Start()` 启动时读一次，运行时切换需重启；且 `Stop()` 无调用方 → goroutine 泄漏 | **已改**：`Start()` 去掉 boot-time `probeEnabled` 门禁，循环常驻启动；每 tick 由 `RunOnce` 现有的 `probeEnabled` 实时判断（≤ 间隔内生效）；`Stop()` 在 `wire_gen.go` 的 `provideCleanup` 优雅关闭路径注册，进程退出时终止循环；新增 `TestProbeSwitchTogglesAtRuntimeWithoutRestart` 证明同实例运行时切换即生效；修正 ops §14.5 措辞 |
 
 ## 2. commit 列表
 
@@ -90,9 +92,10 @@ VET_OK
 --- PASS: TestGetSettingsBackwardCompatOldJSON          # 旧 JSON 反序列化兼容
 --- PASS: TestBreakerDisabledIsNoOp                     # 关闭 = 现状行为回归
 --- PASS: TestThreeTierEscalationBreakerReactions       # L1 日志 / L2 告警 / L3 禁用
---- PASS: TestObserveSuccessClearsHealthWindow          # 成功清零 + 清除档位
+--- PASS: TestObserveSuccessDoesNotClearWindow         # 成功 no-op，失败仍可累计并触发 L3（原 TestObserveSuccessClearsHealthWindow 改写）
 --- PASS: TestHealthBreakerTripPersistsAndBlocks        # 熔断持久化并阻塞调度
 --- PASS: TestProbeRecoverySuccessClearsEarly
+--- PASS: TestProbeSwitchTogglesAtRuntimeWithoutRestart  # P1-2：同实例运行时切换即生效，无需重启
 --- PASS: TestProbeFailureStaysParkedAndBumpsAttempts
 --- PASS: TestProbeDegradedPlatformFallsBackToExpiry
 --- PASS: TestProbeGivesUpAfterMaxAttempts
@@ -146,10 +149,12 @@ TYPECHECK_EXIT=0   # 类型检查通过
 | A2 设置结构扩展 + 向后兼容 + 边界归一化 | ✅ | 旧 JSON 有专门回归测试 |
 | A3 管理端 GET/PUT + 前端卡片 | ✅ | 复用既有端点；前端卡片 + i18n |
 | B 三档位，仅 L3 影响调度 | ✅ | L1 日志 / L2 告警去抖 / L3 禁用 |
-| B 同窗口档位只升不降、成功清零清档位 | ✅ | 见 `TestObserveSuccessClearsHealthWindow` |
+| B 同窗口档位只升不降、成功 no-op 不清零 | ✅ | 见 `TestObserveSuccessDoesNotClearWindow`（原 `TestObserveSuccessClearsHealthWindow` 改写，P1-1） |
 | C 探测式恢复，默认关闭 | ✅ | `probe.enabled` 默认 false；运行时 no-op |
 | C 最小廉价探测 + SSRF + 不泄漏密钥 | ✅ | 复用既有探测与 SSRF 设施 |
 | C max_attempts 后退回到期恢复 | ✅ | `TestProbeGivesUpAfterMaxAttempts` |
+| P1-1 成功改为 no-op + 删除 ClearOpenAIAPIKeyHealth | ✅ | `TestObserveSuccessDoesNotClearWindow` + 接口/实现删除 + build/vet 通过 |
+| P1-2 探测开关运行时生效 + Stop() 接入优雅关闭 | ✅ | `TestProbeSwitchTogglesAtRuntimeWithoutRestart` + `wire_gen.go` `provideCleanup` 注册 `Stop()` |
 | 测试：范围矩阵 | ✅ | `TestIsOpenAIAPIKeyHealthBreakerAccount` |
 | 测试：三档升级 + 成功清零 + L1/L2 去抖 | ✅ | `TestThreeTierEscalationBreakerReactions` 等 |
 | 测试：设置反序列化向后兼容 + 越界归一化 | ✅ | `TestGetSettingsBackwardCompatOldJSON` 等 |
