@@ -121,7 +121,8 @@ clean_repo() {
   mapfile -t rows < <(
     docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}" "$repo" 2>/dev/null |
       grep -v "<none>" |
-      sort -k2,2 -r
+      # 必须按创建时间（第 3 列）排序；按镜像 ID 排序是随机的，会误删回滚镜像
+      sort -t $'\t' -k3,3 -r
   )
   local seen=0
   for row in "${rows[@]:-}"; do
@@ -177,7 +178,8 @@ fi
 mapfile -t worker_tags < <(
   docker images --format "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" "$WORKER_IMAGE" |
     grep -v "<none>" |
-    sort -k2,2 -r
+    # 制表符分隔后第 2 列为完整时间戳，按创建时间排序（精确到秒）
+    sort -t $'\t' -k2,2 -r
 )
 
 worker_protect_set="$(mktemp)"
