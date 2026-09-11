@@ -43,6 +43,11 @@ type stubConcurrencyCacheForTest struct {
 	trackedAPIKeyRequestIDs  []string
 	releasedAPIKeyIDs        []int64
 	releasedAPIKeyRequestIDs []string
+
+	// 订阅分组并发线记录
+	releasedGroupIDs        []int64
+	releasedGroupUserIDs    []int64
+	releasedGroupRequestIDs []string
 }
 
 type ingressLeaseCacheForTest struct {
@@ -125,6 +130,24 @@ func (c *stubConcurrencyCacheForTest) ReleaseUserSlot(_ context.Context, _ int64
 }
 func (c *stubConcurrencyCacheForTest) GetUserConcurrency(_ context.Context, _ int64) (int, error) {
 	return c.concurrency, c.concurrencyErr
+}
+func (c *stubConcurrencyCacheForTest) AcquireUserGroupSlot(_ context.Context, _ int64, _ int64, _ int, _ string) (bool, error) {
+	return c.acquireResult, c.acquireErr
+}
+func (c *stubConcurrencyCacheForTest) ReleaseUserGroupSlot(_ context.Context, groupID, userID int64, requestID string) error {
+	c.releasedGroupIDs = append(c.releasedGroupIDs, groupID)
+	c.releasedGroupUserIDs = append(c.releasedGroupUserIDs, userID)
+	c.releasedGroupRequestIDs = append(c.releasedGroupRequestIDs, requestID)
+	return c.releaseErr
+}
+func (c *stubConcurrencyCacheForTest) GetUserGroupConcurrency(_ context.Context, _ int64, _ int64) (int, error) {
+	return c.concurrency, c.concurrencyErr
+}
+func (c *stubConcurrencyCacheForTest) IncrementUserGroupWaitCount(_ context.Context, _ int64, _ int64, _ int) (bool, error) {
+	return c.waitAllowed, c.waitErr
+}
+func (c *stubConcurrencyCacheForTest) DecrementUserGroupWaitCount(_ context.Context, _ int64, _ int64) error {
+	return nil
 }
 func (c *stubConcurrencyCacheForTest) TrackAPIKeySlot(_ context.Context, apiKeyID int64, requestID string) error {
 	c.trackedAPIKeyIDs = append(c.trackedAPIKeyIDs, apiKeyID)
@@ -267,6 +290,32 @@ func TestAcquireUserSlot_UnlimitedConcurrency(t *testing.T) {
 	result, err := svc.AcquireUserSlot(context.Background(), 1, 0)
 	require.NoError(t, err)
 	require.True(t, result.Acquired)
+}
+
+func TestAcquireUserGroupSlot_IndependentLine(t *testing.T) {
+	cache := &stubConcurrencyCacheForTest{acquireResult: true}
+	svc := NewConcurrencyService(cache)
+
+	result, err := svc.AcquireUserGroupSlot(context.Background(), 7, 100, 3)
+	require.NoError(t, err)
+	require.True(t, result.Acquired)
+	require.NotNil(t, result.ReleaseFunc)
+
+	result.ReleaseFunc()
+
+	require.Equal(t, []int64{7}, cache.releasedGroupIDs)
+	require.Equal(t, []int64{100}, cache.releasedGroupUserIDs)
+	require.Len(t, cache.releasedGroupRequestIDs, 1)
+	require.NotEmpty(t, cache.releasedGroupRequestIDs[0], "requestID 不应为空")
+}
+
+func TestAcquireUserGroupSlot_UnlimitedConcurrency(t *testing.T) {
+	svc := NewConcurrencyService(&stubConcurrencyCacheForTest{})
+
+	result, err := svc.AcquireUserGroupSlot(context.Background(), 7, 100, 0)
+	require.NoError(t, err)
+	require.True(t, result.Acquired)
+	require.NotNil(t, result.ReleaseFunc, "ReleaseFunc 应为 no-op 函数")
 }
 
 func TestTrackAPIKeySlot_ReleaseDecrements(t *testing.T) {

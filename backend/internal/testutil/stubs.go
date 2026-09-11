@@ -52,6 +52,22 @@ func (c StubConcurrencyCache) IncrementWaitCount(_ context.Context, _ int64, _ i
 	return true, nil
 }
 func (c StubConcurrencyCache) DecrementWaitCount(_ context.Context, _ int64) error { return nil }
+
+func (c StubConcurrencyCache) AcquireUserGroupSlot(_ context.Context, _ int64, _ int64, _ int, _ string) (bool, error) {
+	return true, nil
+}
+func (c StubConcurrencyCache) ReleaseUserGroupSlot(_ context.Context, _ int64, _ int64, _ string) error {
+	return nil
+}
+func (c StubConcurrencyCache) GetUserGroupConcurrency(_ context.Context, _ int64, _ int64) (int, error) {
+	return 0, nil
+}
+func (c StubConcurrencyCache) IncrementUserGroupWaitCount(_ context.Context, _ int64, _ int64, _ int) (bool, error) {
+	return true, nil
+}
+func (c StubConcurrencyCache) DecrementUserGroupWaitCount(_ context.Context, _ int64, _ int64) error {
+	return nil
+}
 func (c StubConcurrencyCache) GetAccountsLoadBatch(_ context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	result := make(map[int64]*service.AccountLoadInfo, len(accounts))
 	for _, acc := range accounts {

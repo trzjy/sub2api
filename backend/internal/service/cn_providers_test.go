@@ -885,7 +885,9 @@ func TestBuildUpstreamModelsRequest_AnthropicProtocol(t *testing.T) {
 	}
 	req, err := svc.buildUpstreamModelsRequest(context.Background(), account)
 	require.NoError(t, err)
-	require.Equal(t, "https://open.bigmodel.cn/api/paas/v4/models", req.URL.String())
+	// anthropic 协议账号按 Anthropic 原生规范探测 {anthropic_base}/v1/models，
+	// 不得复用平台级 OpenAI 兼容探测（否则订阅 key 会被发往平台默认 OpenAI 主机）。
+	require.Equal(t, "https://open.bigmodel.cn/api/anthropic/v1/models", req.URL.String())
 }
 
 // TestBuildOpenAIResponsesURLForPlatform deepseek 官方端点为 /responses（无 /v1）。

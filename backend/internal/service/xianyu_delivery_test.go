@@ -372,11 +372,11 @@ func (m mapSettingStore) SetMultiple(ctx context.Context, values map[string]stri
 	return nil
 }
 
-// plainEncryptor 明文加解密替身。
-type plainEncryptor struct{}
+// identityEncryptor 恒等加解密替身（与 backup_service_test 的 ENC: 包装版区分）。
+type identityEncryptor struct{}
 
-func (plainEncryptor) Encrypt(plaintext string) (string, error)  { return plaintext, nil }
-func (plainEncryptor) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
+func (identityEncryptor) Encrypt(plaintext string) (string, error)  { return plaintext, nil }
+func (identityEncryptor) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
 
 // 统一绑定回归：绑定 → 幂等供给池卡券并把关系覆盖为该卡券；解绑 → 清空关系。
 // P0 教训：解绑路径曾被提前返回短路成死代码，买家拍已解绑商品会付款无货。
@@ -407,7 +407,7 @@ func TestSyncProductCardBindingBindAndClear(t *testing.T) {
 
 	workerSvc := NewXianyuWorkerService(
 		&xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL, APITokenEncrypted: "plain-token"}},
-		plainEncryptor{},
+		identityEncryptor{},
 	)
 	ctrl := &XianyuControlService{control: &xianyuWorkerControlStub{cfg: &XianyuWorkerConfig{BaseURL: srv.URL}}, worker: workerSvc}
 	pool := &XianyuItemPool{ID: 7, Slug: "glm-day-card"}

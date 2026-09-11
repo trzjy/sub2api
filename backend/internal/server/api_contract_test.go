@@ -385,6 +385,7 @@ func TestAPIContracts(t *testing.T) {
 						"video_rate_independent": false,
 						"video_rate_multiplier": 0,
 						"claude_code_only": false,
+					"concurrency": 0,
 						"allow_messages_dispatch": false,
 						"allow_live": false,
 						"fallback_group_id": null,
@@ -718,6 +719,7 @@ func TestAPIContracts(t *testing.T) {
 					"email_verify_enabled": false,
 					"registration_email_suffix_whitelist": [],
 					"registration_email_domain_quota_enabled": false,
+					"registration_email_suffix_blacklist": [],
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 						"frontend_url": "",
@@ -902,6 +904,7 @@ func TestAPIContracts(t *testing.T) {
 					"codex_cli_only_blacklist": "",
 					"codex_cli_only_whitelist": "",
 					"compact_home_enabled": false,
+					"concurrency_limit_message": "",
 					"codex_cli_only_allow_app_server_clients": false,
 					"codex_cli_only_engine_fingerprint_signals": "[{\"type\":\"header_prefix\",\"match\":[\"x-codex-\"],\"required\":true},{\"type\":\"header_exact\",\"match\":[\"session-id\",\"session_id\"],\"required\":false},{\"type\":\"header_exact\",\"match\":[\"thread-id\",\"thread_id\"],\"required\":false},{\"type\":\"body_path\",\"match\":[\"client_metadata.x-codex-window-id\",\"client_metadata.x-codex-installation-id\"],\"required\":false}]",
 					"allow_ungrouped_key_scheduling": false,
@@ -1019,6 +1022,7 @@ func TestAPIContracts(t *testing.T) {
 					"wechat_connect_redirect_url": "",
 					"wechat_connect_frontend_redirect_url": "/auth/wechat/callback",
 					"wechat_connect_scopes": "snsapi_login",
+					"xianyu_delivery_enabled": false,
 					"allow_user_view_error_requests": false
 				}
 			}`,
@@ -1068,6 +1072,7 @@ func TestAPIContracts(t *testing.T) {
 					"email_verify_enabled": false,
 					"registration_email_suffix_whitelist": [],
 					"registration_email_domain_quota_enabled": false,
+					"registration_email_suffix_blacklist": [],
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 					"frontend_url": "",
@@ -1230,6 +1235,7 @@ func TestAPIContracts(t *testing.T) {
 					"codex_cli_only_blacklist": "",
 					"codex_cli_only_whitelist": "",
 					"compact_home_enabled": false,
+					"concurrency_limit_message": "",
 					"codex_cli_only_allow_app_server_clients": false,
 					"codex_cli_only_engine_fingerprint_signals": "[{\"type\":\"header_prefix\",\"match\":[\"x-codex-\"],\"required\":true},{\"type\":\"header_exact\",\"match\":[\"session-id\",\"session_id\"],\"required\":false},{\"type\":\"header_exact\",\"match\":[\"thread-id\",\"thread_id\"],\"required\":false},{\"type\":\"body_path\",\"match\":[\"client_metadata.x-codex-window-id\",\"client_metadata.x-codex-installation-id\"],\"required\":false}]",
 					"web_search_emulation_enabled": false,
@@ -1333,6 +1339,7 @@ func TestAPIContracts(t *testing.T) {
 					"wechat_connect_redirect_url": "",
 					"wechat_connect_frontend_redirect_url": "/auth/wechat/callback",
 					"wechat_connect_scopes": "snsapi_login",
+					"xianyu_delivery_enabled": false,
 					"auth_source_default_email_balance": 0,
 					"auth_source_default_email_concurrency": 5,
 					"auth_source_default_email_subscriptions": [],
@@ -2178,7 +2185,7 @@ func (stubRedeemCodeRepo) List(ctx context.Context, params pagination.Pagination
 	return nil, nil, errors.New("not implemented")
 }
 
-func (stubRedeemCodeRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
+func (stubRedeemCodeRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
 	return nil, nil, errors.New("not implemented")
 }
 
