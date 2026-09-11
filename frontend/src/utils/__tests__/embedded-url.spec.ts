@@ -27,7 +27,7 @@ describe('embedded-url', () => {
 
   it('adds embedded query parameters including locale and source context', () => {
     const result = buildEmbeddedUrl(
-      'https://pay.example.com/checkout?plan=pro',
+      'https://app.example.com/checkout?plan=pro',
       42,
       'token-123',
       'dark',
@@ -43,6 +43,25 @@ describe('embedded-url', () => {
     expect(url.searchParams.get('ui_mode')).toBe('embedded')
     expect(url.searchParams.get('src_host')).toBe('https://app.example.com')
     expect(url.searchParams.get('src_url')).toBe('https://app.example.com/user/purchase')
+  })
+
+  it('strips credentials for cross-origin embeds but keeps presentation params', () => {
+    const result = buildEmbeddedUrl(
+      'https://pay.example.com/checkout?plan=pro',
+      42,
+      'token-123',
+      'dark',
+      'zh-CN',
+    )
+
+    const url = new URL(result)
+    expect(url.searchParams.get('plan')).toBe('pro')
+    expect(url.searchParams.has('user_id')).toBe(false)
+    expect(url.searchParams.has('token')).toBe(false)
+    expect(url.searchParams.get('theme')).toBe('dark')
+    expect(url.searchParams.get('lang')).toBe('zh-CN')
+    expect(url.searchParams.get('ui_mode')).toBe('embedded')
+    expect(url.searchParams.get('src_host')).toBe('https://app.example.com')
   })
 
   it('omits optional params when they are empty', () => {

@@ -82,8 +82,8 @@ describe('custom page open button', () => {
   it('preserves the embedded URL, secure link attributes, and normal clicks with small pointer movements', async () => {
     const { wrapper, button } = mountEmbed()
     expect(button.href).toBe(wrapper.get('iframe').attributes('src'))
-    expect(button.href).toContain('user_id=7')
-    expect(button.href).toContain('token=test-token')
+    expect(button.href).not.toContain('user_id=7')
+    expect(button.href).not.toContain('token=test-token')
     expect(button.target).toBe('_blank')
     expect(button.rel).toBe('noopener noreferrer')
     await pointer(button, 'pointerdown', 700, 24)
@@ -92,6 +92,16 @@ describe('custom page open button', () => {
     expect(button.style.left).toBe('')
     expect(click(button).defaultPrevented).toBe(false)
     expect(click(button, 0).defaultPrevented).toBe(false)
+  })
+
+  it('passes user_id and token only to same-origin embeds', () => {
+    appStore.cachedPublicSettings.custom_menu_items = [
+      { id: 'docs', url: `${window.location.origin}/docs` },
+    ]
+    const wrapper = mountPage()
+    const src = wrapper.get('iframe').attributes('src')
+    expect(src).toContain('user_id=7')
+    expect(src).toContain('token=test-token')
   })
 
   it('captures the pointer across iframe content and suppresses only the click following a drag', async () => {

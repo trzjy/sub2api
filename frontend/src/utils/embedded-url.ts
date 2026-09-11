@@ -1,7 +1,12 @@
 /**
  * Shared URL builder for iframe-embedded pages.
- * Used by PurchaseSubscriptionView and CustomPageView to build consistent URLs
- * with user_id, token, theme, lang, ui_mode, src_host, and src parameters.
+ * Used by CustomPageView to build consistent URLs with
+ * user_id, token, theme, lang, ui_mode, src_host, and src parameters.
+ *
+ * user_id/token are credentials, so they are only appended when the target
+ * URL is same-origin. Third-party embeds must never receive the session
+ * token via query string (it would leak into the remote site's server and
+ * CDN logs), so those only get theme/lang/ui_mode/src parameters.
  */
 
 const EMBEDDED_USER_ID_QUERY_KEY = 'user_id'
@@ -23,10 +28,12 @@ export function buildEmbeddedUrl(
   if (!baseUrl) return baseUrl
   try {
     const url = new URL(baseUrl)
-    if (userId) {
+    const sameOrigin =
+      typeof window === 'undefined' || url.origin === window.location.origin
+    if (userId && sameOrigin) {
       url.searchParams.set(EMBEDDED_USER_ID_QUERY_KEY, String(userId))
     }
-    if (authToken) {
+    if (authToken && sameOrigin) {
       url.searchParams.set(EMBEDDED_AUTH_TOKEN_QUERY_KEY, authToken)
     }
     url.searchParams.set(EMBEDDED_THEME_QUERY_KEY, theme)
