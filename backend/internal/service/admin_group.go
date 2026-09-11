@@ -276,6 +276,11 @@ func compositeRouteFromInput(groupID int64, input CompositeRouteInput) (*Composi
 }
 
 func defaultModelsListCandidateIDs(platform string) []string {
+	// 国产 OpenAI 兼容供应商与 other 一样没有静态默认模型目录，不能落回
+	// default 分支的 Claude 列表；候选只来自账号 model_mapping / 自定义模型清单。
+	if IsCNProvider(platform) {
+		return nil
+	}
 	switch platform {
 	case PlatformOpenAI:
 		return openai.DefaultModelIDs()
