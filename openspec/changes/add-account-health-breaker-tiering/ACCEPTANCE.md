@@ -2,7 +2,7 @@
 
 - 分支：`feature/account-health-breaker-tiering`（基于最新 `origin/main` `b5999aaed`）
 - 关联任务卡：`openspec/changes/add-account-health-breaker-tiering/execution-prompt.md`
-- 执行状态：**Phase A / B / C 全部完成**，build + vet + 测试通过，分支待推送。
+- 执行状态：**Phase A / B / C 与 P1-1 / P1-2 评审修复全部完成**，build + vet + 全量测试（含 Redis 集成）通过，分支待推送。
 - 生产开启（写 settings、热载/重启）由监督方在验收通过后执行，推荐值见 §6。
 
 ---
@@ -67,6 +67,7 @@
 | `9c599ea8d` | `feat(health-breaker)` | Phase C：探测式恢复（默认关闭）+ wire 接入 |
 | `bd7948b62` | `feat(health-breaker)` | Phase A3：管理端前端卡片 + i18n |
 | `d39af8917` | `test(health-breaker)` | 分级熔断单元测试（范围矩阵/三档/兼容/探测/关闭等价） |
+| `94a161d00` | `fix(health-breaker)` | P1 修复：成功观测 no-op + 探测开关运行时生效 + Stop() 优雅关闭 |
 
 > 偏差说明（依据任务卡 §4.7「以实际代码为准，保守选择并标注差异」）：Phase A 的「范围扩展」与 Phase B 的「三级档位」实现同处于 `internal/service/openai_apikey_health_breaker.go`（scope 判定与三档触发强耦合），故合并为同一后端提交；Phase C 因依赖独立的 `account_health_recovery_probe_service.go` 与 wire 探针接线，单独成提交。每个提交均可独立 `go build ./...` 通过。
 
