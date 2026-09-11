@@ -178,7 +178,7 @@
               </div>
 
               <!-- Auto Recover Badge -->
-              <span
+              <span class="flex items-center gap-1.5">
                 <span
                   v-if="plan.auto_disable_threshold && plan.consecutive_failures"
                   class="rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-600 dark:bg-red-900/30 dark:text-red-300"
@@ -187,9 +187,10 @@
                 </span>
                 <span
                   v-if="plan.auto_recover"
-                class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400"
-              >
-                {{ t('admin.scheduledTests.autoRecover') }}
+                  class="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400"
+                >
+                  {{ t('admin.scheduledTests.autoRecover') }}
+                </span>
               </span>
             </div>
 
