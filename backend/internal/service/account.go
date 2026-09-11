@@ -1427,6 +1427,11 @@ func (a *Account) GetAPIProtocol() string {
 		}
 		return APIProtocolChatCompletions
 	}
+	// 协议覆盖仅对国产 OpenAI 兼容供应商开放；openai/gemini 等平台不读该
+	// 凭证字段（本地与上游父版本语义一致，2026-09-09 合并时曾误删此守卫）。
+	if !a.IsCNProvider() {
+		return APIProtocolChatCompletions
+	}
 	switch strings.TrimSpace(a.GetCredential("api_protocol")) {
 	case APIProtocolAdaptive:
 		return APIProtocolAdaptive
