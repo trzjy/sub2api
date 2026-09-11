@@ -562,7 +562,7 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 - **L2 预警（warning）**：≥ `warning` 阈值 → 日志 + 写入一条可查询的运维告警（`P1`，经 `OpsRepository.CreateAlertEvent`），**不影响调度**。
 - **L3 熔断（trip）**：≥ `failure_threshold` → 复用既有 `SetTempUnschedulable` 临时禁用该账号并进入冷却（与现有行为完全一致），`TempUnschedState` 中记录 `tier=3`、`matched_keyword=openai_apikey_health_breaker`。
 
-**去抖与状态**：同一窗口周期内档位只升不降；L1/L2 在同一窗口内重复触发不重复告警（Redis companion key 记录已升级到的最高档）。**失败计数与档位状态按时间自然衰减（窗口 TTL），成功请求不会重置窗口、也不产生 Redis 写**——这正是为慢性抖动渠道保留证据：`ObserveOpenAIAPIKeyHealthSuccess` 现为 no-op（一次成功调度结果不再清零窗口）。L3 熔断后窗口同样不主动清空，冷却到期恢复后从新的窗口周期重新累计。
+**去抖与状态**：同一窗口周期内档位只升不降；L1/L2 在同一窗口内重复触发不重复告警（Redis companion key 记录已升级到的最高档）。**失败计数与档位状态按时间自然衰减（窗口 TTL），成功请求不会重置窗口、也不产生 Redis 写**——这正是为慢性抖动渠道保留证据：`ObserveOpenAIAPIKeyHealthSuccess` 现为 no-op（一次成功调度结果不再清零窗口）。达到 L3 时，Lua 脚本会原子清空窗口、序号与档位 key（保留原熔断器行为），因此冷却到期恢复后从全新窗口重新累计。
 
 ### 14.3 推荐值与生产开启步骤
 
