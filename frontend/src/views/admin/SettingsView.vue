@@ -304,6 +304,285 @@
             </div>
           </div>
 
+          <!-- Account Health Circuit Breaker (tiered governance) Settings -->
+          <div class="card">
+            <div
+              class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
+            >
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t("admin.settings.healthBreaker.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.healthBreaker.description") }}
+              </p>
+            </div>
+            <div class="space-y-5 p-6">
+              <div
+                v-if="healthBreakerLoading"
+                class="flex items-center gap-2 text-gray-500"
+              >
+                <div
+                  class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"
+                ></div>
+                {{ t("common.loading") }}
+              </div>
+
+              <template v-else>
+                <div class="flex items-center justify-between">
+                  <div>
+                    <label class="font-medium text-gray-900 dark:text-white">{{
+                      t("admin.settings.healthBreaker.enabled")
+                    }}</label>
+                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.healthBreaker.enabledHint") }}
+                    </p>
+                  </div>
+                  <Toggle v-model="healthBreakerForm.enabled" />
+                </div>
+
+                <div
+                  v-if="healthBreakerForm.enabled"
+                  class="space-y-5 border-t border-gray-100 pt-5 dark:border-dark-700"
+                >
+                  <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div>
+                      <label
+                        class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >{{
+                          t("admin.settings.healthBreaker.windowMinutes")
+                        }}</label
+                      >
+                      <input
+                        v-model.number="healthBreakerForm.window_minutes"
+                        type="number"
+                        min="1"
+                        max="60"
+                        class="input w-32"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >{{
+                          t("admin.settings.healthBreaker.failureThreshold")
+                        }}</label
+                      >
+                      <input
+                        v-model.number="healthBreakerForm.failure_threshold"
+                        type="number"
+                        min="1"
+                        max="10000"
+                        class="input w-32"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >{{
+                          t("admin.settings.healthBreaker.cooldownMinutes")
+                        }}</label
+                      >
+                      <input
+                        v-model.number="healthBreakerForm.cooldown_minutes"
+                        type="number"
+                        min="1"
+                        max="60"
+                        class="input w-32"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                      >{{
+                        t("admin.settings.healthBreaker.scopePlatforms")
+                      }}</label
+                    >
+                    <div class="flex flex-wrap gap-3">
+                      <label
+                        v-for="p in healthBreakerPlatformOptions"
+                        :key="p.value"
+                        class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                      >
+                        <input
+                          type="checkbox"
+                          :checked="
+                            healthBreakerForm.scope_platforms.includes(p.value)
+                          "
+                          @change="
+                            onHealthBreakerScopeToggle(p.value, ($event.target as HTMLInputElement).checked)
+                          "
+                        />
+                        {{ p.label }}
+                      </label>
+                    </div>
+                    <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.healthBreaker.scopeHint") }}
+                    </p>
+                  </div>
+
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <label
+                        class="font-medium text-gray-900 dark:text-white"
+                        >{{
+                          t("admin.settings.healthBreaker.includeGrok")
+                        }}</label
+                      >
+                      <p class="text-sm text-gray-500 dark:text-gray-400">
+                        {{ t("admin.settings.healthBreaker.includeGrokHint") }}
+                      </p>
+                    </div>
+                    <Toggle v-model="healthBreakerForm.include_grok" />
+                  </div>
+
+                  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                      <label
+                        class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >{{
+                          t("admin.settings.healthBreaker.watchRatio")
+                        }}</label
+                      >
+                      <input
+                        v-model.number="healthBreakerForm.watch_ratio"
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        max="0.99"
+                        class="input w-32"
+                      />
+                      <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                        {{ t("admin.settings.healthBreaker.watchRatioHint") }}
+                      </p>
+                    </div>
+                    <div>
+                      <label
+                        class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                        >{{
+                          t("admin.settings.healthBreaker.warningRatio")
+                        }}</label
+                      >
+                      <input
+                        v-model.number="healthBreakerForm.warning_ratio"
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        max="0.99"
+                        class="input w-32"
+                      />
+                      <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                        {{ t("admin.settings.healthBreaker.warningRatioHint") }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <!-- Probe sub-section (Phase C, default off) -->
+                  <div
+                    v-if="healthBreakerForm.probe"
+                    class="space-y-4 border-t border-gray-100 pt-4 dark:border-dark-700"
+                  >
+                    <div class="flex items-center justify-between">
+                      <div>
+                        <label
+                          class="font-medium text-gray-900 dark:text-white"
+                          >{{
+                            t("admin.settings.healthBreaker.probe.title")
+                          }}</label
+                        >
+                        <p class="text-sm text-gray-500 dark:text-gray-400">
+                          {{
+                            t("admin.settings.healthBreaker.probe.enabledHint")
+                          }}
+                        </p>
+                      </div>
+                      <Toggle v-model="healthBreakerForm.probe!.enabled" />
+                    </div>
+                    <div
+                      v-if="healthBreakerForm.probe!.enabled"
+                      class="grid grid-cols-1 gap-4 sm:grid-cols-2"
+                    >
+                      <div>
+                        <label
+                          class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                          >{{
+                            t(
+                              "admin.settings.healthBreaker.probe.intervalSeconds",
+                            )
+                          }}</label
+                        >
+                        <input
+                          v-model.number="
+                            healthBreakerForm.probe!.interval_seconds
+                          "
+                          type="number"
+                          min="30"
+                          max="600"
+                          class="input w-32"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                          >{{
+                            t(
+                              "admin.settings.healthBreaker.probe.maxAttempts",
+                            )
+                          }}</label
+                        >
+                        <input
+                          v-model.number="healthBreakerForm.probe!.max_attempts"
+                          type="number"
+                          min="1"
+                          max="100"
+                          class="input w-32"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  class="flex justify-end border-t border-gray-100 pt-4 dark:border-dark-700"
+                >
+                  <button
+                    type="button"
+                    @click="saveHealthBreakerSettings"
+                    :disabled="healthBreakerSaving"
+                    class="btn btn-primary btn-sm"
+                  >
+                    <svg
+                      v-if="healthBreakerSaving"
+                      class="mr-1 h-4 w-4 animate-spin"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        class="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        stroke-width="4"
+                      ></circle>
+                      <path
+                        class="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                    {{
+                      healthBreakerSaving
+                        ? t("common.saving")
+                        : t("common.save")
+                    }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <!-- Rate Limit Cooldown (429) Settings -->
           <div class="card">
             <div
@@ -8842,6 +9121,7 @@ import type {
   DefaultSubscriptionSetting,
   DefaultPlatformQuotasMap,
   OpenAIFastPolicyRule,
+  OpenAIAPIKeyHealthBreakerSettings,
   WeChatConnectMode,
   WebSearchEmulationConfig,
   WebSearchProviderConfig,
@@ -9035,6 +9315,47 @@ const overloadCooldownForm = reactive({
   enabled: true,
   cooldown_minutes: 10,
 });
+
+// Account Health Circuit Breaker (tiered governance) 状态
+const healthBreakerLoading = ref(true);
+const healthBreakerSaving = ref(false);
+const healthBreakerForm = reactive<OpenAIAPIKeyHealthBreakerSettings>({
+  enabled: false,
+  window_minutes: 5,
+  failure_threshold: 4,
+  cooldown_minutes: 5,
+  scope_platforms: ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
+  include_grok: false,
+  watch_ratio: 0.4,
+  warning_ratio: 0.7,
+  probe: {
+    enabled: false,
+    interval_seconds: 60,
+    max_attempts: 10,
+  },
+});
+
+const healthBreakerPlatformOptions = [
+  { value: "openai", label: "OpenAI" },
+  { value: "deepseek", label: "DeepSeek" },
+  { value: "kimi", label: "Kimi" },
+  { value: "zhipu", label: "ZhiPu" },
+  { value: "minimax", label: "MiniMax" },
+  { value: "other", label: "Other (OpenAI-compatible)" },
+];
+
+function onHealthBreakerScopeToggle(platform: string, checked: boolean) {
+  const set = new Set(healthBreakerForm.scope_platforms);
+  if (checked) {
+    set.add(platform);
+  } else {
+    set.delete(platform);
+  }
+  // Preserve a stable default order.
+  healthBreakerForm.scope_platforms = healthBreakerPlatformOptions
+    .map((p) => p.value)
+    .filter((v) => set.has(v));
+}
 
 // Rate Limit Cooldown (429) 状态
 const rateLimit429CooldownLoading = ref(true);
@@ -11904,6 +12225,43 @@ async function saveOverloadCooldownSettings() {
   }
 }
 
+// Account Health Circuit Breaker (tiered governance) 方法
+async function loadHealthBreakerSettings() {
+  healthBreakerLoading.value = true;
+  try {
+    const settings = await adminAPI.settings.getSettings();
+    if (settings.openai_apikey_health_breaker_settings) {
+      Object.assign(healthBreakerForm, settings.openai_apikey_health_breaker_settings);
+    }
+  } catch (_error: unknown) {
+    // Silent fail - settings will use defaults
+  } finally {
+    healthBreakerLoading.value = false;
+  }
+}
+
+async function saveHealthBreakerSettings() {
+  healthBreakerSaving.value = true;
+  try {
+    const updated = await adminAPI.settings.updateSettings({
+      openai_apikey_health_breaker_settings: { ...healthBreakerForm },
+    });
+    if (updated.openai_apikey_health_breaker_settings) {
+      Object.assign(healthBreakerForm, updated.openai_apikey_health_breaker_settings);
+    }
+    appStore.showSuccess(t("admin.settings.healthBreaker.saved"));
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(
+        error,
+        t("admin.settings.healthBreaker.saveFailed"),
+      ),
+    );
+  } finally {
+    healthBreakerSaving.value = false;
+  }
+}
+
 // Panel API Rate Limit 方法
 async function loadPanelRateLimitSettings() {
   panelRateLimitLoading.value = true;
@@ -12620,6 +12978,7 @@ onMounted(() => {
   loadUpstreamBillingProbeSettings();
   loadOllamaCloudUsageSettings();
   loadOverloadCooldownSettings();
+  loadHealthBreakerSettings();
   loadRateLimit429CooldownSettings();
   loadPanelRateLimitSettings();
   loadStreamTimeoutSettings();

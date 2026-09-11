@@ -1011,6 +1011,31 @@ export default {
         saved: 'Overload cooldown settings saved',
         saveFailed: 'Failed to save overload cooldown settings'
       },
+      healthBreaker: {
+        title: 'Account Health Circuit Breaker (Tiered Governance)',
+        description: 'Tiered governance for OpenAI-compatible API-key accounts: watch → warning → trip (pause scheduling). Disabled by default.',
+        enabled: 'Enable Health Breaker',
+        enabledHint: 'When enabled, repeated upstream failures temporarily pause the account',
+        windowMinutes: 'Sliding Window (minutes)',
+        failureThreshold: 'Trip Threshold (failures)',
+        cooldownMinutes: 'Cooldown (minutes)',
+        scopePlatforms: 'Covered Platforms',
+        scopeHint: 'API-key accounts on these OpenAI-compatible platforms are covered (grok excluded unless toggled)',
+        includeGrok: 'Include Grok',
+        includeGrokHint: 'Grok has its own media-generation judgement; enable only if you want it covered',
+        watchRatio: 'L1 Watch Ratio',
+        watchRatioHint: 'Watch tier triggers at failure_threshold × this ratio (rounded down, min 1)',
+        warningRatio: 'L2 Warning Ratio',
+        warningRatioHint: 'Warning tier triggers at failure_threshold × this ratio (rounded down, min 1)',
+        saved: 'Health breaker settings saved',
+        saveFailed: 'Failed to save health breaker settings',
+        probe: {
+          title: 'Probe-based Early Recovery (Phase C)',
+          enabledHint: 'During cooldown, periodically probe a cheap endpoint; recover early on success. Default OFF.',
+          intervalSeconds: 'Probe Interval (seconds)',
+          maxAttempts: 'Max Probe Attempts'
+        }
+      },
       rateLimit429Cooldown: {
         title: '429 Default Cooldown',
         description: 'Configure the default account cooldown when upstream returns 429 without an explicit reset time',

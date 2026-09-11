@@ -743,6 +743,9 @@ export interface SystemSettings {
   // OpenAI fast/flex policy
   openai_fast_policy_settings?: OpenAIFastPolicySettings;
 
+  // Account health circuit breaker (tiered governance)
+  openai_apikey_health_breaker_settings?: OpenAIAPIKeyHealthBreakerSettings;
+
   // Allow user view error requests
   allow_user_view_error_requests: boolean;
 }
@@ -1048,6 +1051,9 @@ export interface UpdateSettingsRequest {
 
   // OpenAI fast/flex policy
   openai_fast_policy_settings?: OpenAIFastPolicySettings;
+
+  // Account health circuit breaker (tiered governance)
+  openai_apikey_health_breaker_settings?: OpenAIAPIKeyHealthBreakerSettings;
 
   allow_user_view_error_requests?: boolean;
 }
@@ -1456,6 +1462,28 @@ export interface OpenAIFastPolicyRule {
  */
 export interface OpenAIFastPolicySettings {
   rules: OpenAIFastPolicyRule[];
+}
+
+// ==================== Account Health Circuit Breaker (tiered governance) ====================
+
+/** 探测式恢复（冷却期内定时探测，确认健康提前解除）配置 */
+export interface OpenAIAPIKeyHealthBreakerProbeSettings {
+  enabled: boolean;
+  interval_seconds: number;
+  max_attempts: number;
+}
+
+/** 账号健康熔断（分级治理）配置 */
+export interface OpenAIAPIKeyHealthBreakerSettings {
+  enabled: boolean;
+  window_minutes: number;
+  failure_threshold: number;
+  cooldown_minutes: number;
+  scope_platforms: string[];
+  include_grok: boolean;
+  watch_ratio: number;
+  warning_ratio: number;
+  probe?: OpenAIAPIKeyHealthBreakerProbeSettings;
 }
 
 // ==================== Beta Policy Settings ====================
