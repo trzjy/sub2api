@@ -994,7 +994,6 @@ func channelMonitorModeV2Guard(settingService *service.SettingService) gin.Handl
 	}
 }
 
-
 // registerModelPlazaAdminRoutes 模型广场官方参考价覆盖（仅展示，不影响计费）。
 func registerModelPlazaAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	if h == nil || h.ModelPlaza == nil {
