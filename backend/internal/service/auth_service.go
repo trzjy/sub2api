@@ -38,6 +38,7 @@ var (
 	ErrRefreshTokenReused           = infraerrors.Unauthorized("REFRESH_TOKEN_REUSED", "refresh token has been reused")
 	ErrEmailVerifyRequired          = infraerrors.BadRequest("EMAIL_VERIFY_REQUIRED", "email verification is required")
 	ErrEmailSuffixNotAllowed        = infraerrors.BadRequest("EMAIL_SUFFIX_NOT_ALLOWED", "email suffix is not allowed")
+	ErrEmailSuffixBlocked           = infraerrors.BadRequest("EMAIL_SUFFIX_BLOCKED", "email suffix is blocked")
 	ErrEmailDomainRegistrationLimit = infraerrors.BadRequest(
 		"EMAIL_DOMAIN_REGISTRATION_LIMIT",
 		"this email domain cannot register another account; use a mainstream email or contact support to add the enterprise domain",
@@ -219,6 +220,9 @@ func (s *AuthService) RegisterWithVerification(ctx context.Context, email, passw
 	if err := s.validateRegistrationEmailQuota(ctx, email); err != nil {
 		return "", nil, err
 	}
+	if err := s.validateRegistrationEmailBlacklist(ctx, email); err != nil {
+		return "", nil, err
+	}
 
 	// 密码哈希
 	hashedPassword, err := s.HashPassword(password)
@@ -326,6 +330,9 @@ func (s *AuthService) SendVerifyCode(ctx context.Context, email string, locale .
 	if err := s.validateRegistrationEmailQuota(ctx, email); err != nil {
 		return err
 	}
+	if err := s.validateRegistrationEmailBlacklist(ctx, email); err != nil {
+		return err
+	}
 
 	// 发送验证码
 	if s.emailService == nil {
@@ -365,6 +372,9 @@ func (s *AuthService) SendVerifyCodeAsync(ctx context.Context, email string, loc
 		return nil, ErrEmailExists
 	}
 	if err := s.validateRegistrationEmailQuota(ctx, email); err != nil {
+		return nil, err
+	}
+	if err := s.validateRegistrationEmailBlacklist(ctx, email); err != nil {
 		return nil, err
 	}
 
@@ -1196,9 +1206,25 @@ func (s *AuthService) validateRegistrationEmailPolicy(ctx context.Context, email
 	if s.settingService == nil {
 		return nil
 	}
+	blacklist := s.settingService.GetRegistrationEmailSuffixBlacklist(ctx)
+	if IsRegistrationEmailSuffixBlocked(email, blacklist) {
+		return ErrEmailSuffixBlocked
+	}
 	whitelist := s.settingService.GetRegistrationEmailSuffixWhitelist(ctx)
 	if !IsRegistrationEmailSuffixAllowed(email, whitelist) {
 		return buildEmailSuffixNotAllowedError(whitelist)
+	}
+	return nil
+}
+
+// validateRegistrationEmailBlacklist 拦截位于注册邮箱后缀黑名单中的邮箱，命中即拒绝。
+func (s *AuthService) validateRegistrationEmailBlacklist(ctx context.Context, email string) error {
+	if s.settingService == nil {
+		return nil
+	}
+	blacklist := s.settingService.GetRegistrationEmailSuffixBlacklist(ctx)
+	if IsRegistrationEmailSuffixBlocked(email, blacklist) {
+		return ErrEmailSuffixBlocked
 	}
 	return nil
 }

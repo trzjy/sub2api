@@ -52,6 +52,15 @@ func (s *SettingService) GetRegistrationEmailSuffixWhitelist(ctx context.Context
 	return ParseRegistrationEmailSuffixWhitelist(value)
 }
 
+// GetRegistrationEmailSuffixBlacklist returns normalized registration email suffix blacklist.
+func (s *SettingService) GetRegistrationEmailSuffixBlacklist(ctx context.Context) []string {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyRegistrationEmailSuffixBlacklist)
+	if err != nil {
+		return []string{}
+	}
+	return ParseRegistrationEmailSuffixWhitelist(value)
+}
+
 // IsPromoCodeEnabled 检查是否启用优惠码功能
 func (s *SettingService) IsPromoCodeEnabled(ctx context.Context) bool {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyPromoCodeEnabled)

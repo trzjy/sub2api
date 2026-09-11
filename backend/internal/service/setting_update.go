@@ -110,6 +110,14 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		normalizedWhitelist = []string{}
 	}
 	settings.RegistrationEmailSuffixWhitelist = normalizedWhitelist
+	normalizedBlacklist, err := NormalizeRegistrationEmailSuffixWhitelist(settings.RegistrationEmailSuffixBlacklist)
+	if err != nil {
+		return nil, infraerrors.BadRequest("INVALID_REGISTRATION_EMAIL_SUFFIX_BLACKLIST", err.Error())
+	}
+	if normalizedBlacklist == nil {
+		normalizedBlacklist = []string{}
+	}
+	settings.RegistrationEmailSuffixBlacklist = normalizedBlacklist
 	normalizedForwardedClientIPHeaders, err := config.NormalizeForwardedClientIPHeaders(settings.ForwardedClientIPHeaders)
 	if err != nil {
 		return nil, infraerrors.BadRequest("INVALID_FORWARDED_CLIENT_IP_HEADERS", err.Error())
@@ -169,6 +177,11 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		return nil, fmt.Errorf("marshal registration email suffix whitelist: %w", err)
 	}
 	updates[SettingKeyRegistrationEmailSuffixWhitelist] = string(registrationEmailSuffixWhitelistJSON)
+	registrationEmailSuffixBlacklistJSON, err := json.Marshal(settings.RegistrationEmailSuffixBlacklist)
+	if err != nil {
+		return nil, fmt.Errorf("marshal registration email suffix blacklist: %w", err)
+	}
+	updates[SettingKeyRegistrationEmailSuffixBlacklist] = string(registrationEmailSuffixBlacklistJSON)
 	updates[SettingKeyRegistrationEmailDomainQuotaEnabled] = strconv.FormatBool(settings.RegistrationEmailDomainQuotaEnabled)
 	updates[SettingKeyPromoCodeEnabled] = strconv.FormatBool(settings.PromoCodeEnabled)
 	updates[SettingKeyPasswordResetEnabled] = strconv.FormatBool(settings.PasswordResetEnabled)
