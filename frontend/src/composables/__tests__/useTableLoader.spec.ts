@@ -233,11 +233,15 @@ describe('useTableLoader', () => {
   // --- 错误处理 ---
 
   describe('错误处理', () => {
-    it('非取消错误会被抛出', async () => {
+    it('非取消错误仅记录日志、不向外抛出（调用方多为 fire-and-forget）', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
       const fetchFn = vi.fn().mockRejectedValue(new Error('Server error'))
       const { load } = useTableLoader({ fetchFn })
 
-      await expect(load()).rejects.toThrow('Server error')
+      // 不应抛出
+      await load()
+      expect(consoleError).toHaveBeenCalledWith('Table load error:', expect.any(Error))
+      consoleError.mockRestore()
     })
 
     it('取消错误被静默处理', async () => {

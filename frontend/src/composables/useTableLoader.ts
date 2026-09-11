@@ -60,9 +60,11 @@ export function useTableLoader<T, P extends Record<string, any>>(options: TableL
       pagination.total = response.total || 0
       pagination.pages = response.pages || 0
     } catch (error) {
+      // 失败仅在本地记录、不向外抛：调用方（筛选防抖、批量操作后刷新等）大多是
+      // fire-and-forget，rethrow 只会变成 unhandled rejection。需要感知失败的
+      // 场景应直接调用 fetchFn 自行处理，而不是依赖 load() 抛错。
       if (!isAbortError(error)) {
         console.error('Table load error:', error)
-        throw error
       }
     } finally {
       if (abortController === currentController) {
