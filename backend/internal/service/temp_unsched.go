@@ -16,6 +16,11 @@ type TempUnschedState struct {
 	TriggerCount         int64  `json:"trigger_count,omitempty"`          // 本次触发累计命中次数
 	TriggerThreshold     int    `json:"trigger_threshold,omitempty"`      // 触发阈值
 	TriggerWindowMinutes int    `json:"trigger_window_minutes,omitempty"` // 计数窗口（分钟）
+	// Tier records the health-breaker tier that triggered this block.
+	// 1=watch (informational), 2=warning (alert), 3=trip (circuit opened).
+	Tier int `json:"tier,omitempty"`
+	// ProbeAttempts counts probe-based recovery attempts made while blocked.
+	ProbeAttempts int `json:"probe_attempts,omitempty"`
 }
 
 // TempUnschedCache 临时不可调度缓存接口
@@ -25,10 +30,25 @@ type TempUnschedCache interface {
 	DeleteTempUnsched(ctx context.Context, accountID int64) error
 }
 
+// OpenAIAPIKeyHealthRecordResult is the outcome of recording one failure against
+// the rolling window. TrippedWatch/TrippedWarning/TrippedTrip report whether this
+// record newly crossed the corresponding tier boundary within the current window
+// (debounced so repeated observations in the same window do not re-alert).
+type OpenAIAPIKeyHealthRecordResult struct {
+	Count          int64
+	TrippedWatch   bool
+	TrippedWarning bool
+	TrippedTrip    bool
+}
+
 // OpenAIAPIKeyHealthCache is an optional TempUnschedCache extension used to
 // aggregate pool API-key failures across gateway instances.
 type OpenAIAPIKeyHealthCache interface {
-	RecordOpenAIAPIKeyHealthFailure(ctx context.Context, accountID int64, windowMinutes, threshold int) (count int64, tripped bool, err error)
+	// RecordOpenAIAPIKeyHealthFailure records a failure in the account's rolling
+	// window and returns the resulting tier transitions. windowMinutes is the
+	// window; watchThreshold/warningThreshold/tripThreshold are the three tier
+	// boundaries (tripThreshold == the L3 failure threshold).
+	RecordOpenAIAPIKeyHealthFailure(ctx context.Context, accountID int64, windowMinutes, watchThreshold, warningThreshold, tripThreshold int) (OpenAIAPIKeyHealthRecordResult, error)
 }
 
 // TimeoutCounterCache 超时计数器缓存接口

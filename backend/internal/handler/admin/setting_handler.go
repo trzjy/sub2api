@@ -406,6 +406,13 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		payload.OpenAIFastPolicySettings = openaiFastPolicySettingsToDTO(fastPolicy)
 	}
 
+	// Account health circuit breaker (tiered governance), dedicated settings key.
+	if hb, err := h.settingService.GetOpenAIAPIKeyHealthBreakerSettings(c.Request.Context()); err != nil {
+		slog.Error("openai_apikey_health_breaker_settings_get_failed", "error", err)
+	} else if hb != nil {
+		payload.OpenAIAPIKeyHealthBreakerSettings = openAIAPIKeyHealthBreakerSettingsToDTO(hb)
+	}
+
 	// Default platform quotas（JSON map）
 	if platformQuotas, err := h.settingService.GetDefaultPlatformQuotas(c.Request.Context()); err != nil {
 		slog.Error("default_platform_quotas_get_failed", "error", err)
@@ -448,6 +455,58 @@ func openaiFastPolicySettingsFromDTO(s *dto.OpenAIFastPolicySettings) *service.O
 		rules[i].ServiceTier = tier
 	}
 	return &service.OpenAIFastPolicySettings{Rules: rules}
+}
+
+// openAIAPIKeyHealthBreakerSettingsToDTO converts service -> dto.
+func openAIAPIKeyHealthBreakerSettingsToDTO(s *service.OpenAIAPIKeyHealthBreakerSettings) *dto.OpenAIAPIKeyHealthBreakerSettings {
+	if s == nil {
+		return nil
+	}
+	out := &dto.OpenAIAPIKeyHealthBreakerSettings{
+		Enabled:          s.Enabled,
+		WindowMinutes:    s.WindowMinutes,
+		FailureThreshold: s.FailureThreshold,
+		CooldownMinutes:  s.CooldownMinutes,
+		ScopePlatforms:   append([]string(nil), s.ScopePlatforms...),
+		IncludeGrok:      s.IncludeGrok,
+		WatchRatio:       s.WatchRatio,
+		WarningRatio:     s.WarningRatio,
+	}
+	if s.Probe != nil {
+		out.Probe = &dto.OpenAIAPIKeyHealthBreakerProbeSettings{
+			Enabled:         s.Probe.Enabled,
+			IntervalSeconds: s.Probe.IntervalSeconds,
+			MaxAttempts:     s.Probe.MaxAttempts,
+		}
+	}
+	return out
+}
+
+// openAIAPIKeyHealthBreakerSettingsFromDTO converts dto -> service. The service's
+// SetOpenAIAPIKeyHealthBreakerSettings normalizes and validates bounds, so the DTO
+// only needs to pass values through verbatim.
+func openAIAPIKeyHealthBreakerSettingsFromDTO(s *dto.OpenAIAPIKeyHealthBreakerSettings) *service.OpenAIAPIKeyHealthBreakerSettings {
+	if s == nil {
+		return nil
+	}
+	out := &service.OpenAIAPIKeyHealthBreakerSettings{
+		Enabled:          s.Enabled,
+		WindowMinutes:    s.WindowMinutes,
+		FailureThreshold: s.FailureThreshold,
+		CooldownMinutes:  s.CooldownMinutes,
+		ScopePlatforms:   append([]string(nil), s.ScopePlatforms...),
+		IncludeGrok:      s.IncludeGrok,
+		WatchRatio:       s.WatchRatio,
+		WarningRatio:     s.WarningRatio,
+	}
+	if s.Probe != nil {
+		out.Probe = &service.OpenAIAPIKeyHealthBreakerProbeSettings{
+			Enabled:         s.Probe.Enabled,
+			IntervalSeconds: s.Probe.IntervalSeconds,
+			MaxAttempts:     s.Probe.MaxAttempts,
+		}
+	}
+	return out
 }
 
 func loginAgreementDocumentsToDTO(items []service.LoginAgreementDocument) []dto.LoginAgreementDocument {

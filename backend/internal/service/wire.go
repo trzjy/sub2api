@@ -494,6 +494,7 @@ func ProvideRateLimitService(
 	openAI403CounterCache OpenAI403CounterCache,
 	settingService *SettingService,
 	tokenCacheInvalidator TokenCacheInvalidator,
+	opsRepo OpsRepository,
 ) *RateLimitService {
 	svc := NewRateLimitService(accountRepo, usageRepo, cfg, geminiQuotaService, tempUnschedCache)
 	if healthCache, ok := tempUnschedCache.(OpenAIAPIKeyHealthCache); ok {
@@ -502,7 +503,26 @@ func ProvideRateLimitService(
 	svc.SetTimeoutCounterCache(timeoutCounterCache)
 	svc.SetOpenAI403CounterCache(openAI403CounterCache)
 	svc.SetSettingService(settingService)
+	svc.SetOpsRepository(opsRepo)
 	svc.SetTokenCacheInvalidator(tokenCacheInvalidator)
+	return svc
+}
+
+// ProvideAccountHealthRecoveryProbeService creates and starts the optional
+// health-breaker probe-based recovery sweep. The loop runs continuously and
+// re-reads settings.probe.enabled every tick, so toggling the switch in admin
+// settings takes effect within one interval without a restart. When the switch is
+// off the loop is alive but performs no work (RunOnce returns early).
+func ProvideAccountHealthRecoveryProbeService(
+	accountRepo AccountRepository,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	rateLimitService *RateLimitService,
+	settingService *SettingService,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *AccountHealthRecoveryProbeService {
+	svc := NewAccountHealthRecoveryProbeService(accountRepo, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
+	svc.Start(context.Background())
 	return svc
 }
 

@@ -1005,6 +1005,31 @@ export default {
         saved: '过载冷却设置保存成功',
         saveFailed: '保存过载冷却设置失败'
       },
+      healthBreaker: {
+        title: '账号健康熔断（分级治理）',
+        description: '面向 OpenAI 兼容平台 APIKey 账号的分级治理：关注 → 预警 → 熔断（暂停调度）。默认关闭。',
+        enabled: '启用健康熔断',
+        enabledHint: '启用后，连续上游失败会临时暂停该账号的调度',
+        windowMinutes: '滑动窗口（分钟）',
+        failureThreshold: '熔断阈值（失败次数）',
+        cooldownMinutes: '冷却时长（分钟）',
+        scopePlatforms: '覆盖平台',
+        scopeHint: '这些 OpenAI 兼容平台的 APIKey 账号将被纳入；grok 默认不纳入，除非单独开启',
+        includeGrok: '纳入 Grok',
+        includeGrokHint: 'Grok 有独立的媒体生成判定，仅在确需纳入时开启',
+        watchRatio: 'L1 关注比例',
+        watchRatioHint: '失败次数达到 熔断阈值 × 该比例（向下取整，最小 1）时进入 L1 关注',
+        warningRatio: 'L2 预警比例',
+        warningRatioHint: '失败次数达到 熔断阈值 × 该比例（向下取整，最小 1）时进入 L2 预警',
+        saved: '健康熔断设置保存成功',
+        saveFailed: '保存健康熔断设置失败',
+        probe: {
+          title: '探测式提前恢复（Phase C）',
+          enabledHint: '冷却期内定时探测廉价端点，探测成功则提前解除；默认关闭。',
+          intervalSeconds: '探测间隔（秒）',
+          maxAttempts: '最大探测次数'
+        }
+      },
       rateLimit429Cooldown: {
         title: '429 默认回避',
         description: '配置上游返回 429 且没有明确重置时间时的默认账号回避策略',
