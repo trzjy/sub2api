@@ -41,6 +41,12 @@ type accountHealthProbeRepository interface {
 // The probe is opt-in: Start() is a no-op unless the admin explicitly enables
 // settings.probe.enabled. SSRF protection is enforced via cnValidateProbeURL before
 // any request is built, reusing the same gate as the gateway's own outbound calls.
+//
+// Multi-instance note: each backend replica runs its own independent sweep, so the
+// same temp-unschedulable account may be probed by several instances at once. The
+// probe is read-only against upstream and its effects (ClearTempUnschedulable on
+// success, or an incremented probe_attempts on failure) are idempotent, so the
+// duplication is harmless beyond a little extra upstream traffic.
 type AccountHealthRecoveryProbeService struct {
 	accountRepo         accountHealthProbeRepository
 	httpUpstream        HTTPUpstream
@@ -300,6 +306,14 @@ func (p *AccountHealthRecoveryProbeService) runProbe(ctx context.Context, acc *A
 // forwarding path. It prefers the zero-cost /models endpoint; if that cannot be
 // constructed safely (e.g. a platform without a /models surface) it returns an error
 // so the caller degrades to expiry-based recovery rather than spamming probes.
+//
+// Limitation: for some transit/proxy sites the /models endpoint is served by a
+// lightweight front-end that does NOT exercise the heavy chat upstream. There a 2xx
+// from /models can be green even while chat completions are still failing, so a
+// successful probe would clear the block prematurely. This is mitigated by the
+// probe being opt-in (default off); operators of such sites should keep probe
+// disabled and rely on expiry-based recovery, or only enable it where /models and
+// chat share the same upstream path.
 func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, acc *Account) (bool, error) {
 	if p.httpUpstream == nil || p.cfg == nil {
 		return false, errors.New("probe transport not configured")

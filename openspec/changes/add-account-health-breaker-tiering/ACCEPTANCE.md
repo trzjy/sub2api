@@ -10,7 +10,8 @@
 ## 1. 改动摘要（按 Phase）
 
 ### Phase A — 覆盖面扩展 + 参数管理化
-- **A1 范围扩展**：`isOpenAIAPIKeyHealthBreakerAccount` 从「openai + apikey + pool_mode」扩展为「OpenAI 兼容平台的 APIKey 账号」——`platform ∈ {openai, deepseek, kimi, zhipu, minimax, other}`（沿用 `NormalizeOpenAICompatiblePlatform` 口径）、`type=apikey`、**取消 pool_mode 限制**；OAuth/PAT/Bedrock 不纳入；grok 默认不纳入，由 `include_grok` 开关控制。
+- **A1 范围扩展**：`isOpenAIAPIKeyHealthBreakerAccount` 从「openai + apikey + pool_mode」扩展为「OpenAI 兼容平台的 APIKey 账号」——`platform ∈ {openai, deepseek, kimi, zhipu, minimax, other}`、`type=apikey`、**取消 pool_mode 限制**；OAuth/PAT/Bedrock 不纳入；grok 默认不纳入，由 `include_grok` 开关控制。
+  - **范围匹配为显式白名单（评审修正）**：判定时只接受上述六个受支持平台，**不再**经 `NormalizeOpenAICompatiblePlatform` 兜底（该函数 `default` 分支会把 anthropic/claude/bedrock/gemini/未知/空串 一律归为 `openai`），因此非 OpenAI 账号即使将来观测入口接到共享失败路径也**不会**被误纳。新增 `healthBreakerSupportedPlatforms` 白名单 + `TestIsOpenAIAPIKeyHealthBreakerAccount` 的 anthropic/未知平台反例。
 - **A2 设置结构扩展**（向后兼容）：在 `OpenAIAPIKeyHealthBreakerSettings` 上新增
   `scope_platforms []string`（默认六平台）、`include_grok bool`（默认 false）、
   `watch_ratio float64`（默认 0.4）、`warning_ratio float64`（默认 0.7）、
@@ -44,6 +45,17 @@
 - `deploy-config/sub2api-ops.md` 新增 §14：参数含义、三档位语义、推荐值与生产开启 SQL（含 `openai_apikey_health_breaker_settings` 键）、与其他排除机制的优先级关系（见 §5 全局一致性自查）。
 
 ---
+
+## 1.6 评审修正（review-driven fixes）
+
+监督方评审后补充的修正（已在分支最新提交中落地）：
+
+| # | 评审意见 | 处置 |
+|---|---|---|
+| 1 | scope 匹配经 `NormalizeOpenAICompatiblePlatform` 会把 anthropic 等未知平台兜底归为 `openai`（虽因不走 openai 观测路径暂无实际影响），建议改显式白名单防将来误纳 | **已改**：`isOpenAIAPIKeyHealthBreakerAccount` 改用 `healthBreakerSupportedPlatforms` 显式白名单，未知/非 OpenAI 平台一律 false；补 anthropic + 未知平台反例测试 |
+| 2 | `/models` 探测对「models 正常但 chat 上游仍坏」的中转站会过早解除；默认关闭已缓解 | **已文档化**：探针服务 `probeUpstream` 注释 + ops §14.5「探测的局限」说明该场景与开启前提 |
+| 3 | 多实例同时开 probe 会重复探测 | **已文档化**：探针服务顶部注释 + ops §14.5 说明副本各自独立扫描、副作用幂等无害（仅略增上游流量） |
+| 4 | 前端 `vue-tsc` 未独立复跑（worktree 无 node_modules） | 本机 `node_modules` 存在，`npx vue-tsc --noEmit` 已通过（TYPECHECK_EXIT=0）；风险低 |
 
 ## 2. commit 列表
 

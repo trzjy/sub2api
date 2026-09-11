@@ -23,11 +23,29 @@ const (
 	HealthBreakerTierTrip    = 3
 )
 
+// healthBreakerSupportedPlatforms is the explicit allowlist of platforms the breaker
+// is designed to observe. It deliberately does NOT fold unknown platforms into
+// "openai" the way NormalizeOpenAICompatiblePlatform does: a non-OpenAI account
+// (anthropic / claude / bedrock / gemini / empty / typo) must never be swept into
+// the breaker scope, even if a future refactor starts invoking the observers on a
+// shared failure path. grok is handled separately via IncludeGrok.
+var healthBreakerSupportedPlatforms = map[string]struct{}{
+	PlatformOpenAI:   {},
+	PlatformDeepseek: {},
+	PlatformKimi:     {},
+	PlatformZhipu:    {},
+	PlatformMiniMax:  {},
+	PlatformOther:    {},
+}
+
 // isOpenAIAPIKeyHealthBreakerAccount reports whether the breaker may attribute
 // failures to this account. Coverage:
 //   - Only API-key accounts qualify (OAuth / PAT / Bedrock excluded).
-//   - Platform must be in settings.ScopePlatforms (default: openai/deepseek/kimi/
-//     zhipu/minimax/other). grok is excluded unless settings.IncludeGrok is set.
+//   - Platform must be an explicitly supported OpenAI-compatible platform (see
+//     healthBreakerSupportedPlatforms) AND be listed in settings.ScopePlatforms
+//     (default: openai/deepseek/kimi/zhipu/minimax/other). Unknown platforms are
+//     rejected by the allowlist and can never match.
+//   - grok is excluded unless settings.IncludeGrok is set.
 //   - The legacy pool_mode restriction is intentionally removed: the breaker now
 //     covers all API-key accounts on the supported OpenAI-compatible platforms.
 func isOpenAIAPIKeyHealthBreakerAccount(account *Account, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
@@ -37,12 +55,15 @@ func isOpenAIAPIKeyHealthBreakerAccount(account *Account, settings *OpenAIAPIKey
 	if settings == nil {
 		return false
 	}
-	platform := NormalizeOpenAICompatiblePlatform(account.Platform)
+	platform := strings.ToLower(account.Platform)
 	if platform == PlatformGrok {
 		return settings.IncludeGrok
 	}
+	if _, ok := healthBreakerSupportedPlatforms[platform]; !ok {
+		return false
+	}
 	for _, p := range settings.ScopePlatforms {
-		if NormalizeOpenAICompatiblePlatform(p) == platform {
+		if strings.ToLower(p) == platform {
 			return true
 		}
 	}

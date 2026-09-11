@@ -547,6 +547,8 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 | `failure_threshold` | L3 熔断阈值（窗口内累计失败次数） | 1–10000，默认 10 |
 | `cooldown_minutes` | 熔断后临时禁用时长（分钟），到期自动恢复 | 1–60，默认 5 |
 | `scope_platforms` | 覆盖的 OpenAI 兼容平台集合 | 默认 `openai, deepseek, kimi, zhipu, minimax, other` |
+
+> **范围匹配是显式白名单**：判定时只接受 `openai/deepseek/kimi/zhipu/minimax/other`（grok 由 `include_grok` 单独控制），**不会**像 `NormalizeOpenAICompatiblePlatform` 那样把未知平台（anthropic/claude/bedrock/gemini/空串/拼写错误）兜底归为 `openai`。因此非 OpenAI 账号永远不会被纳入熔断范围，即使将来把观测入口接到共享失败路径也不会误纳。
 | `include_grok` | 是否纳入 grok（其媒体生成有独立判定） | 默认 `false` |
 | `watch_ratio` | L1 关注比例，触发次数 = `⌊failure_threshold × watch_ratio⌋`（最小 1） | 0.01–0.99，默认 0.4 |
 | `warning_ratio` | L2 预警比例，触发次数 = `⌊failure_threshold × warning_ratio⌋`（最小 1，且 > watch） | 0.01–0.99，默认 0.7 |
@@ -617,6 +619,11 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 - 探测失败 → 维持冷却，并将尝试次数 +1（写回 reason 的 `probe_attempts`）；
 - 尝试次数达到 `probe.max_attempts` → 停止探测，退回「到期自动恢复」；
 - 某平台无安全/廉价探测端点 → 探测降级为「到期恢复」，代码注释与本节已说明，不会刷屏。
+
+#### 探测的局限（开启前须知）
+
+- **`/models` 与聊天上游可能不同路**：部分中转/代理站点 `/models` 由轻量前端返回，并不真正打到重上游；此时 `/models` 返回 2xx 但 chat 仍坏，探测会**过早解除**冷却。该局限默认由「探测关闭」兜底；这类站点应保持 `probe.enabled=false`，或仅在 `/models` 与 chat 共用同一上游时开启。
+- **多实例重复探测（幂等无害）**：每个后端副本各自独立运行探测扫描，同一被冷却账号可能被多个实例同时探测。探测对上游是只读的，其副作用（成功则 `ClearTempUnschedulable`、失败则 `probe_attempts` +1）均为幂等，重复探测除略微增加上游流量外无副作用。
 
 > 探测请求日志与错误信息中**不得泄漏密钥**；探测默认关闭，仅管理员显式开启。
 

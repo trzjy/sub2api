@@ -182,7 +182,12 @@ func TestIsOpenAIAPIKeyHealthBreakerAccount(t *testing.T) {
 		{"grok excluded by default", healthAccount(domain.PlatformGrok), defaultScope, false},
 		{"grok included when toggled", healthAccount(domain.PlatformGrok), grokEnabled(), true},
 		{"oauth account never covered", &Account{ID: 1, Platform: domain.PlatformOpenAI, Type: AccountTypeOAuth}, defaultScope, false},
-		{"unknown platform normalized to openai (in scope)", healthAccount("totally-unknown-platform"), defaultScope, true},
+		// Unknown platforms are NOT folded into "openai" by the scope check: an
+		// explicit allowlist rejects them so a non-OpenAI account (anthropic/claude/
+		// bedrock/gemini/typo) can never be swept into the breaker scope.
+		{"unknown platform never swept into scope", healthAccount("totally-unknown-platform"), defaultScope, false},
+		{"anthropic account never covered", healthAccount(domain.PlatformAnthropic), defaultScope, false},
+		{"unknown platform listed in scope still excluded (allowlist wins)", healthAccount("totally-unknown-platform"), &OpenAIAPIKeyHealthBreakerSettings{ScopePlatforms: []string{"totally-unknown-platform"}}, false},
 		{"scope narrowed to openai only", healthAccount(domain.PlatformDeepseek), &OpenAIAPIKeyHealthBreakerSettings{ScopePlatforms: []string{domain.PlatformOpenAI}}, false},
 	}
 
