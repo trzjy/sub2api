@@ -131,7 +131,8 @@ type AdminService interface {
 	CheckProxyQuality(ctx context.Context, id int64) (*ProxyQualityCheckResult, error)
 
 	// Redeem code management
-	ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search, poolSlug string, sortBy, sortOrder string) ([]RedeemCode, int64, error)
+	ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search, poolSlug string, value *float64, sortBy, sortOrder string) ([]RedeemCode, int64, error)
+	ListRedeemCodeValues(ctx context.Context, codeType string) ([]float64, error)
 	GetRedeemCode(ctx context.Context, id int64) (*RedeemCode, error)
 	GenerateRedeemCodes(ctx context.Context, input *GenerateRedeemCodesInput) ([]RedeemCode, error)
 	DeleteRedeemCode(ctx context.Context, id int64) error

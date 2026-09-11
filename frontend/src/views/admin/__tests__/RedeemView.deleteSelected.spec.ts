@@ -3,12 +3,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import RedeemView from '../RedeemView.vue'
 
-const { listRedeemCodes, listRedeemValues, batchUpdateRedeemCodes, getAllGroups, showSuccess, showError, showInfo } =
+const { listRedeemCodes, listRedeemValues, batchDeleteRedeemCodes, showSuccess, showError, showInfo } =
   vi.hoisted(() => ({
     listRedeemCodes: vi.fn(),
     listRedeemValues: vi.fn(),
-    batchUpdateRedeemCodes: vi.fn(),
-    getAllGroups: vi.fn(),
+    batchDeleteRedeemCodes: vi.fn(),
     showSuccess: vi.fn(),
     showError: vi.fn(),
     showInfo: vi.fn()
@@ -26,12 +25,12 @@ vi.mock('@/api/admin', () => ({
       listValues: listRedeemValues,
       generate: vi.fn(),
       delete: vi.fn(),
-      batchDelete: vi.fn(),
-      batchUpdate: batchUpdateRedeemCodes,
+      batchDelete: batchDeleteRedeemCodes,
+      batchUpdate: vi.fn(),
       exportCodes: vi.fn()
     },
     groups: {
-      getAll: getAllGroups
+      getAll: vi.fn().mockResolvedValue([])
     }
   }
 }))
@@ -106,15 +105,44 @@ const SelectStub = {
   `
 }
 
-describe('admin RedeemView batch update', () => {
+const ConfirmDialogStub = {
+  props: ['show', 'title', 'message'],
+  emits: ['confirm', 'cancel'],
+  template: `
+    <div v-if="show" data-test="confirm-dialog">
+      <button data-test="confirm-ok" @click="$emit('confirm')">OK</button>
+    </div>
+  `
+}
+
+const mountOptions = {
+  attachTo: document.body,
+  global: {
+    stubs: {
+      AppLayout: { template: '<div><slot /></div>' },
+      TablePageLayout: {
+        template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+      },
+      DataTable: DataTableStub,
+      Pagination: true,
+      ConfirmDialog: ConfirmDialogStub,
+      Select: SelectStub,
+      GroupBadge: true,
+      GroupOptionItem: true,
+      Icon: true,
+      Teleport: true
+    }
+  }
+}
+
+describe('admin RedeemView value filter and delete selected', () => {
   beforeEach(() => {
     localStorage.clear()
     document.body.innerHTML = ''
 
     listRedeemCodes.mockReset()
     listRedeemValues.mockReset()
-    batchUpdateRedeemCodes.mockReset()
-    getAllGroups.mockReset()
+    batchDeleteRedeemCodes.mockReset()
     showSuccess.mockReset()
     showError.mockReset()
     showInfo.mockReset()
@@ -149,48 +177,54 @@ describe('admin RedeemView batch update', () => {
       page_size: 20,
       pages: 1
     })
-    batchUpdateRedeemCodes.mockResolvedValue({ updated: 1, message: 'ok' })
-    getAllGroups.mockResolvedValue([])
-    listRedeemValues.mockResolvedValue([])
+    listRedeemValues.mockResolvedValue([10, 20])
+    batchDeleteRedeemCodes.mockResolvedValue({ deleted: 2, message: 'ok' })
   })
 
-  it('submits only checked fields for selected redeem codes', async () => {
-    const wrapper = mount(RedeemView, {
-      attachTo: document.body,
-      global: {
-        stubs: {
-          AppLayout: { template: '<div><slot /></div>' },
-          TablePageLayout: {
-            template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
-          },
-          DataTable: DataTableStub,
-          Pagination: true,
-          ConfirmDialog: true,
-          Select: SelectStub,
-          GroupBadge: true,
-          GroupOptionItem: true,
-          Icon: true,
-          Teleport: true
-        }
-      }
-    })
-
+  it('loads face value options and filters the list by selected value', async () => {
+    const wrapper = mount(RedeemView, mountOptions)
     await flushPromises()
+
+    expect(listRedeemValues).toHaveBeenCalledWith(undefined)
+
+    await wrapper.get('[data-test="value-filter"]').setValue('10')
+    await flushPromises()
+
+    expect(listRedeemCodes).toHaveBeenLastCalledWith(
+      1,
+      20,
+      expect.objectContaining({ value: 10 }),
+      expect.anything()
+    )
+  })
+
+  it('deletes selected codes after confirmation and clears the selection', async () => {
+    const wrapper = mount(RedeemView, mountOptions)
+    await flushPromises()
+
     await wrapper.findAll('[data-test="select-code"]')[0].setValue(true)
-    await wrapper.get('[data-test="batch-update-open"]').trigger('click')
+    await wrapper.findAll('[data-test="select-code"]')[1].setValue(true)
+
+    await wrapper.get('[data-test="delete-selected-open"]').trigger('click')
+    await flushPromises()
+    expect(batchDeleteRedeemCodes).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-test="confirm-ok"]').trigger('click')
     await flushPromises()
 
-    await wrapper.get('[data-test="batch-field-status"]').setValue(true)
-    await wrapper.get('[data-test="batch-status-select"]').setValue('disabled')
-    await wrapper.get('[data-test="batch-field-notes"]').setValue(true)
-    await wrapper.get('[data-test="batch-notes-input"]').setValue('maintenance')
-    await wrapper.get('[data-test="batch-update-form"]').trigger('submit')
+    expect(batchDeleteRedeemCodes).toHaveBeenCalledWith([1, 2])
+    expect(showSuccess).toHaveBeenCalledWith('admin.redeem.selectedCodesDeleted')
+    expect(wrapper.find('[data-test="delete-selected-banner"]').exists()).toBe(false)
+  })
+
+  it('keeps the delete selected button disabled until a row is selected', async () => {
+    const wrapper = mount(RedeemView, mountOptions)
     await flushPromises()
 
-    expect(batchUpdateRedeemCodes).toHaveBeenCalledWith([1], {
-      status: 'disabled',
-      notes: 'maintenance'
-    })
-    expect(showSuccess).toHaveBeenCalledWith('admin.redeem.batchUpdateSuccess')
+    const button = wrapper.get('[data-test="delete-selected-open"]').element as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+
+    await wrapper.findAll('[data-test="select-code"]')[0].setValue(true)
+    expect((wrapper.get('[data-test="delete-selected-open"]').element as HTMLButtonElement).disabled).toBe(false)
   })
 })

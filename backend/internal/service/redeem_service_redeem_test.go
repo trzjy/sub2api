@@ -61,8 +61,12 @@ func (r *redeemRejectRepo) List(ctx context.Context, params pagination.Paginatio
 	panic("unexpected List call")
 }
 
-func (r *redeemRejectRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]RedeemCode, *pagination.PaginationResult, error) {
+func (r *redeemRejectRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string, value *float64) ([]RedeemCode, *pagination.PaginationResult, error) {
 	panic("unexpected ListWithFilters call")
+}
+
+func (r *redeemRejectRepo) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	panic("unexpected ListDistinctValues call")
 }
 
 func (r *redeemRejectRepo) ListByUser(ctx context.Context, userID int64, limit int) ([]RedeemCode, error) {

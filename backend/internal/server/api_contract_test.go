@@ -2185,8 +2185,12 @@ func (stubRedeemCodeRepo) List(ctx context.Context, params pagination.Pagination
 	return nil, nil, errors.New("not implemented")
 }
 
-func (stubRedeemCodeRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
+func (stubRedeemCodeRepo) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string, value *float64) ([]service.RedeemCode, *pagination.PaginationResult, error) {
 	return nil, nil, errors.New("not implemented")
+}
+
+func (stubRedeemCodeRepo) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (r *stubRedeemCodeRepo) ListByUser(ctx context.Context, userID int64, limit int) ([]service.RedeemCode, error) {

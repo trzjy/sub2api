@@ -613,6 +613,7 @@ func registerRedeemCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		codes.GET("", h.Admin.Redeem.List)
 		codes.GET("/stats", h.Admin.Redeem.GetStats)
+		codes.GET("/values", h.Admin.Redeem.ListValues)
 		codes.GET("/export", h.Admin.Redeem.Export)
 		codes.GET("/:id", h.Admin.Redeem.GetByID)
 		codes.POST("/create-and-redeem", h.Admin.Redeem.CreateAndRedeem)

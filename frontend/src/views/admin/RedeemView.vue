@@ -17,13 +17,20 @@
             v-model="filters.type"
             :options="filterTypeOptions"
             class="w-36"
-            @change="loadCodes"
+            @change="onTypeFilterChange"
           />
           <Select
             v-model="filters.status"
             :options="filterStatusOptions"
             class="w-36"
             @change="loadCodes"
+          />
+          <Select
+            v-model="valueFilter"
+            :options="valueFilterOptions"
+            class="w-32"
+            data-test="value-filter"
+            @change="onValueFilterSelect"
           />
           <Select
             v-model="poolFilter"
@@ -66,6 +73,14 @@
             >
               <Icon name="edit" size="md" class="mr-2" />
               {{ t('admin.redeem.batchUpdate') }}
+            </button>
+            <button
+              data-test="delete-selected-open"
+              @click="openDeleteSelectedDialog"
+              :disabled="selectedCount === 0 || deletingSelected"
+              class="btn btn-danger"
+            >
+              {{ t('admin.redeem.deleteSelected') }}
             </button>
             <button @click="showGenerateDialog = true" class="btn btn-primary">
               {{ t('admin.redeem.generateCodes') }}
@@ -246,6 +261,14 @@
             >
               {{ t('admin.redeem.batchUpdate') }}
             </button>
+            <button
+              type="button"
+              data-test="delete-selected-banner"
+              class="btn btn-danger btn-sm"
+              @click="openDeleteSelectedDialog"
+            >
+              {{ t('admin.redeem.deleteSelected') }}
+            </button>
           </div>
         </div>
 
@@ -257,13 +280,6 @@
           @update:page="handlePageChange"
           @update:pageSize="handlePageSizeChange"
         />
-
-        <!-- Batch Actions -->
-        <div v-if="filters.status === 'unused'" class="flex justify-end">
-          <button @click="showDeleteUnusedDialog = true" class="btn btn-danger">
-            {{ t('admin.redeem.deleteAllUnused') }}
-          </button>
-        </div>
       </template>
     </TablePageLayout>
 
@@ -279,16 +295,16 @@
       @cancel="showDeleteDialog = false"
     />
 
-    <!-- Delete Unused Codes Dialog -->
+    <!-- Delete Selected Codes Dialog -->
     <ConfirmDialog
-      :show="showDeleteUnusedDialog"
-      :title="t('admin.redeem.deleteAllUnused')"
-      :message="t('admin.redeem.deleteAllUnusedConfirm')"
-      :confirm-text="t('admin.redeem.deleteAll')"
+      :show="showDeleteSelectedDialog"
+      :title="t('admin.redeem.deleteSelected')"
+      :message="t('admin.redeem.deleteSelectedConfirm', { count: selectedCount })"
+      :confirm-text="t('common.delete')"
       :cancel-text="t('common.cancel')"
       danger
-      @confirm="confirmDeleteUnused"
-      @cancel="showDeleteUnusedDialog = false"
+      @confirm="confirmDeleteSelected"
+      @cancel="showDeleteSelectedDialog = false"
     />
 
     <!-- Generate Codes Dialog -->
@@ -820,9 +836,10 @@ const sortState = reactive({
 let abortController: AbortController | null = null
 
 const showDeleteDialog = ref(false)
-const showDeleteUnusedDialog = ref(false)
+const showDeleteSelectedDialog = ref(false)
 const showBatchUpdateDialog = ref(false)
 const deletingCode = ref<RedeemCode | null>(null)
+const deletingSelected = ref(false)
 const copiedCode = ref<string | null>(null)
 
 const {
@@ -888,6 +905,47 @@ function clearPoolFilter() {
   loadCodes()
 }
 
+// 面值筛选：选项来自管理端 distinct values 接口，随类型筛选联动。
+const valueFilter = ref('')
+const distinctValues = ref<number[]>([])
+
+const formatFaceValue = (v: number) =>
+  filters.type === 'balance' ? `$${v.toFixed(2)}` : String(v)
+
+const valueFilterOptions = computed(() => [
+  { value: '', label: t('admin.redeem.allValues') },
+  ...distinctValues.value.map((v) => ({ value: String(v), label: formatFaceValue(v) }))
+])
+
+const refreshValueOptions = async () => {
+  try {
+    distinctValues.value = await adminAPI.redeem.listValues(
+      (filters.type || undefined) as RedeemCodeType | undefined
+    )
+    // 类型切换后旧面值可能不存在，失效则重置
+    if (
+      valueFilter.value !== '' &&
+      !distinctValues.value.some((v) => String(v) === valueFilter.value)
+    ) {
+      valueFilter.value = ''
+    }
+  } catch (error) {
+    console.error('Error loading redeem code values:', error)
+    distinctValues.value = []
+  }
+}
+
+const onTypeFilterChange = () => {
+  pagination.page = 1
+  void refreshValueOptions()
+  loadCodes()
+}
+
+const onValueFilterSelect = () => {
+  pagination.page = 1
+  loadCodes()
+}
+
 const buildRedeemQueryFilters = () => ({
   type: (filters.type || undefined) as RedeemCodeType | undefined,
   status: (filters.status || undefined) as
@@ -899,6 +957,7 @@ const buildRedeemQueryFilters = () => ({
     | undefined,
   search: searchQuery.value || undefined,
   pool: poolFilter.value || undefined,
+  value: valueFilter.value === '' ? undefined : Number(valueFilter.value),
   sort_by: sortState.sort_by,
   sort_order: sortState.sort_order
 })
@@ -1153,26 +1212,34 @@ const confirmDelete = async () => {
   }
 }
 
-const confirmDeleteUnused = async () => {
+const confirmDeleteSelected = async () => {
+  const ids = Array.from(selectedCodeIds.value)
+  if (ids.length === 0) {
+    showDeleteSelectedDialog.value = false
+    return
+  }
+
+  deletingSelected.value = true
   try {
-    // Get all unused codes and delete them
-    const unusedCodesResponse = await adminAPI.redeem.list(1, 1000, { status: 'unused' })
-    const unusedCodeIds = unusedCodesResponse.items.map((code) => code.id)
-
-    if (unusedCodeIds.length === 0) {
-      appStore.showInfo(t('admin.redeem.noUnusedCodes'))
-      showDeleteUnusedDialog.value = false
-      return
-    }
-
-    const result = await adminAPI.redeem.batchDelete(unusedCodeIds)
-    appStore.showSuccess(t('admin.redeem.codesDeleted', { count: result.deleted }))
-    showDeleteUnusedDialog.value = false
+    const result = await adminAPI.redeem.batchDelete(ids)
+    appStore.showSuccess(t('admin.redeem.selectedCodesDeleted', { count: result.deleted }))
+    showDeleteSelectedDialog.value = false
+    clearSelectedCodes()
     loadCodes()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToDeleteUnused'))
-    console.error('Error deleting unused codes:', error)
+    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToDeleteSelected'))
+    console.error('Error deleting selected codes:', error)
+  } finally {
+    deletingSelected.value = false
   }
+}
+
+const openDeleteSelectedDialog = () => {
+  if (selectedCount.value === 0) {
+    appStore.showInfo(t('admin.redeem.selectCodesFirst'))
+    return
+  }
+  showDeleteSelectedDialog.value = true
 }
 
 const handleBatchUpdate = async () => {
@@ -1259,6 +1326,7 @@ onMounted(() => {
   loadCodes()
   loadSubscriptionGroups()
   void loadPools()
+  void refreshValueOptions()
 })
 
 onUnmounted(() => {

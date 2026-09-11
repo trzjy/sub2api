@@ -3002,8 +3002,12 @@ func (r *oauthPendingFlowRedeemCodeRepo) List(context.Context, pagination.Pagina
 	panic("unexpected List call")
 }
 
-func (r *oauthPendingFlowRedeemCodeRepo) ListWithFilters(context.Context, pagination.PaginationParams, string, string, string, string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
+func (r *oauthPendingFlowRedeemCodeRepo) ListWithFilters(context.Context, pagination.PaginationParams, string, string, string, string, *float64) ([]service.RedeemCode, *pagination.PaginationResult, error) {
 	panic("unexpected ListWithFilters call")
+}
+
+func (r *oauthPendingFlowRedeemCodeRepo) ListDistinctValues(context.Context, string) ([]float64, error) {
+	panic("unexpected ListDistinctValues call")
 }
 
 func (r *oauthPendingFlowRedeemCodeRepo) ListByUser(context.Context, int64, int) ([]service.RedeemCode, error) {

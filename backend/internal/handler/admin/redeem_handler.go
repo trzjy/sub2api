@@ -81,6 +81,20 @@ func resolveRedeemCodeExpiresAt(expiresAt *time.Time, expiresInDays *int) (*time
 	return &expires, nil
 }
 
+// redeemValueFilterFromQuery parses the optional exact-match face value filter.
+// Returns nil when absent; a BadRequest error when not a non-negative number.
+func redeemValueFilterFromQuery(c *gin.Context) (*float64, error) {
+	raw := strings.TrimSpace(c.Query("value"))
+	if raw == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return nil, infraerrors.BadRequest("REDEEM_CODE_VALUE_INVALID", "value must be a non-negative number")
+	}
+	return &v, nil
+}
+
 // List handles listing all redeem codes with pagination
 // GET /api/v1/admin/redeem-codes
 func (h *RedeemHandler) List(c *gin.Context) {
@@ -97,7 +111,12 @@ func (h *RedeemHandler) List(c *gin.Context) {
 	}
 
 	poolSlug := strings.TrimSpace(c.Query("pool"))
-	codes, total, err := h.adminService.ListRedeemCodes(c.Request.Context(), page, pageSize, codeType, status, search, poolSlug, sortBy, sortOrder)
+	valueFilter, err := redeemValueFilterFromQuery(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	codes, total, err := h.adminService.ListRedeemCodes(c.Request.Context(), page, pageSize, codeType, status, search, poolSlug, valueFilter, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -388,6 +407,21 @@ func (h *RedeemHandler) GetStats(c *gin.Context) {
 	})
 }
 
+// ListValues handles listing distinct redeem code face values (ascending)
+// GET /api/v1/admin/redeem-codes/values
+func (h *RedeemHandler) ListValues(c *gin.Context) {
+	codeType := c.Query("type")
+	values, err := h.adminService.ListRedeemCodeValues(c.Request.Context(), codeType)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if values == nil {
+		values = []float64{}
+	}
+	response.Success(c, gin.H{"values": values})
+}
+
 // Export handles exporting redeem codes to CSV
 // GET /api/v1/admin/redeem-codes/export
 func (h *RedeemHandler) Export(c *gin.Context) {
@@ -402,7 +436,12 @@ func (h *RedeemHandler) Export(c *gin.Context) {
 
 	// Get all codes without pagination (use large page size)
 	poolSlug := strings.TrimSpace(c.Query("pool"))
-	codes, _, err := h.adminService.ListRedeemCodes(c.Request.Context(), 1, 10000, codeType, status, search, poolSlug, sortBy, sortOrder)
+	valueFilter, err := redeemValueFilterFromQuery(c)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	codes, _, err := h.adminService.ListRedeemCodes(c.Request.Context(), 1, 10000, codeType, status, search, poolSlug, valueFilter, sortBy, sortOrder)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

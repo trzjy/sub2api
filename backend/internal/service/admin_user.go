@@ -1242,13 +1242,17 @@ func cloneAdminAuthIdentityMetadata(input map[string]any) map[string]any {
 }
 
 // Redeem code management implementations
-func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search, poolSlug string, sortBy, sortOrder string) ([]RedeemCode, int64, error) {
+func (s *adminServiceImpl) ListRedeemCodes(ctx context.Context, page, pageSize int, codeType, status, search, poolSlug string, value *float64, sortBy, sortOrder string) ([]RedeemCode, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
-	codes, result, err := s.redeemCodeRepo.ListWithFilters(ctx, params, codeType, status, search, poolSlug)
+	codes, result, err := s.redeemCodeRepo.ListWithFilters(ctx, params, codeType, status, search, poolSlug, value)
 	if err != nil {
 		return nil, 0, err
 	}
 	return codes, result.Total, nil
+}
+
+func (s *adminServiceImpl) ListRedeemCodeValues(ctx context.Context, codeType string) ([]float64, error) {
+	return s.redeemCodeRepo.ListDistinctValues(ctx, codeType)
 }
 
 func (s *adminServiceImpl) GetRedeemCode(ctx context.Context, id int64) (*RedeemCode, error) {

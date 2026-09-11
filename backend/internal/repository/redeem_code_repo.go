@@ -99,10 +99,10 @@ func (r *redeemCodeRepository) Delete(ctx context.Context, id int64) error {
 }
 
 func (r *redeemCodeRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.RedeemCode, *pagination.PaginationResult, error) {
-	return r.ListWithFilters(ctx, params, "", "", "", "")
+	return r.ListWithFilters(ctx, params, "", "", "", "", nil)
 }
 
-func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string) ([]service.RedeemCode, *pagination.PaginationResult, error) {
+func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, codeType, status, search, poolSlug string, value *float64) ([]service.RedeemCode, *pagination.PaginationResult, error) {
 	q := r.client.RedeemCode.Query()
 
 	if codeType != "" {
@@ -110,6 +110,9 @@ func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagin
 	}
 	if poolSlug != "" {
 		q = q.Where(redeemcode.NotesEQ(service.XianyuPoolNote(poolSlug)))
+	}
+	if value != nil {
+		q = q.Where(redeemcode.ValueEQ(*value))
 	}
 	if status != "" {
 		now := time.Now()
@@ -166,6 +169,18 @@ func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagin
 	outCodes := redeemCodeEntitiesToService(codes)
 
 	return outCodes, paginationResultFromTotal(int64(total), params), nil
+}
+
+func (r *redeemCodeRepository) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	q := r.client.RedeemCode.Query()
+	if codeType != "" {
+		q = q.Where(redeemcode.TypeEQ(codeType))
+	}
+	return q.
+		Unique(true).
+		Order(redeemcode.ByValue()).
+		Select(redeemcode.FieldValue).
+		Float64s(ctx)
 }
 
 func redeemCodeListOrder(params pagination.PaginationParams) []func(*entsql.Selector) {

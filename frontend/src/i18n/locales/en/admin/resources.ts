@@ -252,6 +252,7 @@ export default {
       allPools: 'All Pools',
       allTypes: 'All Types',
       allStatus: 'All Status',
+      allValues: 'All Values',
       balance: 'Balance',
       concurrency: 'Concurrency',
       subscription: 'Subscription',
@@ -280,6 +281,11 @@ export default {
       noBatchFieldsSelected: 'Select at least one field to update',
       batchUpdateSuccess: 'Updated {count} redeem code(s)',
       failedToBatchUpdate: 'Failed to batch update redeem codes',
+      deleteSelected: 'Delete Selected',
+      deleteSelectedConfirm:
+        'Are you sure you want to delete the {count} selected redeem codes? This action cannot be undone.',
+      selectedCodesDeleted: 'Successfully deleted {count} redeem code(s)',
+      failedToDeleteSelected: 'Failed to delete selected codes',
       batchFields: {
         status: 'Status',
         expiresAt: 'Expires At',
@@ -288,13 +294,9 @@ export default {
       },
       batchNotesPlaceholder: 'Enter the new note, or leave blank to clear it',
       clearGroup: 'Clear group',
-      deleteAllUnused: 'Delete All Unused Codes',
       deleteCode: 'Delete Redeem Code',
       deleteCodeConfirm:
         'Are you sure you want to delete this redeem code? This action cannot be undone.',
-      deleteAllUnusedConfirm:
-        'Are you sure you want to delete all unused (active) redeem codes? This action cannot be undone.',
-      deleteAll: 'Delete All',
       generateCodesTitle: 'Generate Redeem Codes',
       generatedSuccessfully: 'Generated Successfully',
       codesCreated: '{count} redeem code(s) created',
@@ -309,13 +311,10 @@ export default {
       download: 'Download',
       codesExported: 'Codes exported successfully',
       codeDeleted: 'Redeem code deleted successfully',
-      codesDeleted: 'Successfully deleted {count} unused code(s)',
-      noUnusedCodes: 'No unused codes to delete',
       failedToLoad: 'Failed to load redeem codes',
       failedToGenerate: 'Failed to generate codes',
       failedToExport: 'Failed to export codes',
       failedToDelete: 'Failed to delete code',
-      failedToDeleteUnused: 'Failed to delete unused codes',
       failedToCopy: 'Failed to copy codes',
       types: {
         balance: 'Balance',

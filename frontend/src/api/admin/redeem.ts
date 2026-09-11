@@ -27,6 +27,7 @@ export async function list(
     status?: 'active' | 'used' | 'delivered' | 'expired' | 'unused' | 'disabled'
     search?: string
     pool?: string
+    value?: number
     sort_by?: string
     sort_order?: 'asc' | 'desc'
   },
@@ -183,6 +184,7 @@ export async function exportCodes(filters?: {
   status?: 'used' | 'delivered' | 'expired' | 'unused' | 'disabled'
   search?: string
   pool?: string
+  value?: number
   sort_by?: string
   sort_order?: 'asc' | 'desc'
 }): Promise<Blob> {
@@ -193,8 +195,21 @@ export async function exportCodes(filters?: {
   return response.data
 }
 
+/**
+ * List distinct redeem code face values (ascending)
+ * @param type - Optional redeem code type filter
+ * @returns Distinct face values
+ */
+export async function listValues(type?: RedeemCodeType): Promise<number[]> {
+  const { data } = await apiClient.get<{ values: number[] }>('/admin/redeem-codes/values', {
+    params: type ? { type } : {}
+  })
+  return data.values ?? []
+}
+
 export const redeemAPI = {
   list,
+  listValues,
   getById,
   generate,
   delete: deleteCode,
