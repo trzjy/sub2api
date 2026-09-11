@@ -508,6 +508,22 @@ func ProvideRateLimitService(
 	return svc
 }
 
+// ProvideAccountHealthRecoveryProbeService creates and (when enabled) starts the
+// optional health-breaker probe-based recovery sweep. It is a no-op at runtime unless
+// the admin explicitly enables settings.probe.enabled.
+func ProvideAccountHealthRecoveryProbeService(
+	accountRepo AccountRepository,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	rateLimitService *RateLimitService,
+	settingService *SettingService,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *AccountHealthRecoveryProbeService {
+	svc := NewAccountHealthRecoveryProbeService(accountRepo, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
+	svc.Start(context.Background())
+	return svc
+}
+
 // ProvideOpsMetricsCollector creates and starts OpsMetricsCollector.
 func ProvideOpsMetricsCollector(
 	opsRepo OpsRepository,
