@@ -104,6 +104,14 @@ type AccountRepository interface {
 	SetOverloaded(ctx context.Context, id int64, until time.Time) error
 	SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error
 	ClearTempUnschedulable(ctx context.Context, id int64) error
+	// ListTempUnschedulableAccounts returns accounts currently parked by a
+	// temp-unschedulable block whose expiry is still in the future, ordered by
+	// soonest expiry first. Used by the health-breaker recovery probe sweep.
+	ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
+	// SetTempUnschedulableReason rewrites the block reason for an account that is
+	// still within its temp-unschedulable window (no-op if the block expired or
+	// was cleared). Used to record probe-attempt bookkeeping without re-parking.
+	SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error
 	ClearRateLimit(ctx context.Context, id int64) error
 	ClearAntigravityQuotaScopes(ctx context.Context, id int64) error
 	ClearModelRateLimits(ctx context.Context, id int64) error

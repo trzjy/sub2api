@@ -2416,6 +2416,56 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 	return nil
 }
 
+// SetTempUnschedulableReason updates only the temp-unschedulable reason string for
+// an account that is still inside its cooldown window (e.g. to bump probe attempt
+// counters). It does not extend the cooldown; the scheduling state is unchanged so
+// no scheduler outbox event is emitted.
+func (r *accountRepository) SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error {
+	_, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET temp_unschedulable_reason = $2,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND temp_unschedulable_until IS NOT NULL
+			AND temp_unschedulable_until > NOW()
+	`, id, reason)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// ListTempUnschedulableAccounts returns accounts currently inside a temp-unschedulable
+// cooldown, ordered by soonest expiry and capped at limit. It powers the optional
+// health-breaker probe-based recovery sweep.
+func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*service.Account, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	accounts, err := r.client.Account.Query().
+		Where(
+			dbaccount.TempUnschedulableUntilNotNil(),
+			dbaccount.TempUnschedulableUntilGT(now),
+			dbaccount.DeletedAtIsNil(),
+		).
+		Order(dbent.Asc(dbaccount.FieldTempUnschedulableUntil)).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mapped, err := r.accountsToService(ctx, accounts)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*service.Account, 0, len(mapped))
+	for i := range mapped {
+		out = append(out, &mapped[i])
+	}
+	return out, nil
+}
+
 func (r *accountRepository) ClearRateLimit(ctx context.Context, id int64) error {
 	_, err := r.client.Account.Update().
 		Where(dbaccount.IDEQ(id)).

@@ -31,6 +31,7 @@ type RateLimitService struct {
 	settingService        *SettingService
 	tokenCacheInvalidator TokenCacheInvalidator
 	runtimeBlocker        AccountRuntimeBlocker
+	opsRepo               OpsRepository
 	usageCacheMu          sync.RWMutex
 	usageCache            map[int64]*geminiUsageCacheEntry
 
@@ -129,6 +130,12 @@ func (s *RateLimitService) SetTokenCacheInvalidator(invalidator TokenCacheInvali
 
 func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocker) {
 	s.runtimeBlocker = blocker
+}
+
+// SetOpsRepository sets the ops repository used to record health-breaker warning
+// alerts. Optional; when nil, L2 warnings are logged only.
+func (s *RateLimitService) SetOpsRepository(opsRepo OpsRepository) {
+	s.opsRepo = opsRepo
 }
 
 func (s *RateLimitService) IsOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx context.Context) bool {

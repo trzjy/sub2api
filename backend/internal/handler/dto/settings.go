@@ -341,6 +341,10 @@ type SystemSettings struct {
 	// OpenAI fast/flex policy
 	OpenAIFastPolicySettings *OpenAIFastPolicySettings `json:"openai_fast_policy_settings,omitempty"`
 
+	// Account health circuit breaker (tiered governance). Populated on GET; when
+	// present on PUT it is persisted under its dedicated settings key.
+	OpenAIAPIKeyHealthBreakerSettings *OpenAIAPIKeyHealthBreakerSettings `json:"openai_apikey_health_breaker_settings,omitempty"`
+
 	// 系统全局默认平台配额（key = platform，nil/缺省 = 不限制）
 	DefaultPlatformQuotas map[string]*service.DefaultPlatformQuotaSetting `json:"default_platform_quotas,omitempty"`
 
@@ -518,6 +522,29 @@ type OpenAIFastPolicyRule struct {
 // OpenAIFastPolicySettings OpenAI fast 策略配置 DTO
 type OpenAIFastPolicySettings struct {
 	Rules []OpenAIFastPolicyRule `json:"rules"`
+}
+
+// OpenAIAPIKeyHealthBreakerProbeSettings DTO mirrors the probe sub-config of the
+// account health circuit breaker.
+type OpenAIAPIKeyHealthBreakerProbeSettings struct {
+	Enabled         bool `json:"enabled"`
+	IntervalSeconds int  `json:"interval_seconds"`
+	MaxAttempts     int  `json:"max_attempts"`
+}
+
+// OpenAIAPIKeyHealthBreakerSettings DTO mirrors the API-key health circuit breaker
+// (tiered governance) settings. Field names align with the persisted JSON so the
+// frontend card can serialize the settings object directly.
+type OpenAIAPIKeyHealthBreakerSettings struct {
+	Enabled          bool                                    `json:"enabled"`
+	WindowMinutes    int                                     `json:"window_minutes"`
+	FailureThreshold int                                     `json:"failure_threshold"`
+	CooldownMinutes  int                                     `json:"cooldown_minutes"`
+	ScopePlatforms   []string                                `json:"scope_platforms"`
+	IncludeGrok      bool                                    `json:"include_grok"`
+	WatchRatio       float64                                 `json:"watch_ratio"`
+	WarningRatio     float64                                 `json:"warning_ratio"`
+	Probe            *OpenAIAPIKeyHealthBreakerProbeSettings `json:"probe"`
 }
 
 // EmailTemplateEventOption 描述可编辑的通知邮件事件。

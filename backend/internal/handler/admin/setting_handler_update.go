@@ -370,6 +370,9 @@ type UpdateSettingsRequest struct {
 	// OpenAI fast/flex policy (optional, only updated when provided)
 	OpenAIFastPolicySettings *dto.OpenAIFastPolicySettings `json:"openai_fast_policy_settings,omitempty"`
 
+	// Account health circuit breaker (optional, only updated when provided)
+	OpenAIAPIKeyHealthBreakerSettings *dto.OpenAIAPIKeyHealthBreakerSettings `json:"openai_apikey_health_breaker_settings,omitempty"`
+
 	// 系统全局 platform quota 默认值（整体替换语义：nil = 不修改，non-nil = 整体覆盖）。
 	DefaultPlatformQuotas map[string]*service.DefaultPlatformQuotaSetting `json:"default_platform_quotas"`
 
@@ -2072,6 +2075,14 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	// Update OpenAI fast policy (stored under dedicated key, only when provided).
 	if req.OpenAIFastPolicySettings != nil {
 		if err := h.settingService.SetOpenAIFastPolicySettings(c.Request.Context(), openaiFastPolicySettingsFromDTO(req.OpenAIFastPolicySettings)); err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+	}
+
+	// Update account health circuit breaker (tiered governance), dedicated key.
+	if req.OpenAIAPIKeyHealthBreakerSettings != nil {
+		if err := h.settingService.SetOpenAIAPIKeyHealthBreakerSettings(c.Request.Context(), openAIAPIKeyHealthBreakerSettingsFromDTO(req.OpenAIAPIKeyHealthBreakerSettings)); err != nil {
 			response.BadRequest(c, err.Error())
 			return
 		}

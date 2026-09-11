@@ -585,12 +585,50 @@ const (
 	openAIImagesOAuthUnavailableMaxCooldownMinutes     = 120
 )
 
-// OpenAIAPIKeyHealthBreakerSettings controls cross-instance failure counting for OpenAI pool API keys.
+// OpenAIAPIKeyHealthBreakerProbeSettings controls the optional probe-based
+// early recovery while an account is inside the circuit-breaker cooldown. It is
+// opt-in (Enabled=false by default) and only started on explicit admin action.
+type OpenAIAPIKeyHealthBreakerProbeSettings struct {
+	Enabled         bool `json:"enabled"`
+	IntervalSeconds int  `json:"interval_seconds"`
+	MaxAttempts     int  `json:"max_attempts"`
+}
+
+// OpenAIAPIKeyHealthBreakerSettings controls cross-instance failure counting for
+// OpenAI-compatible API-key accounts. Tiering (L1 watch / L2 warning / L3 trip)
+// and optional probe-based recovery build on top of the rolling failure window.
+//
+// Backward compatibility: every new field is optional in persisted JSON. Missing
+// fields fall back to the defaults produced by DefaultOpenAIAPIKeyHealthBreakerSettings
+// and the clamping in normalizeOpenAIAPIKeyHealthBreakerSettings.
 type OpenAIAPIKeyHealthBreakerSettings struct {
-	Enabled          bool `json:"enabled"`
-	WindowMinutes    int  `json:"window_minutes"`
-	FailureThreshold int  `json:"failure_threshold"`
-	CooldownMinutes  int  `json:"cooldown_minutes"`
+	Enabled          bool                                      `json:"enabled"`
+	WindowMinutes    int                                       `json:"window_minutes"`
+	FailureThreshold int                                       `json:"failure_threshold"`
+	CooldownMinutes  int                                       `json:"cooldown_minutes"`
+	// ScopePlatforms is the set of OpenAI-compatible platforms covered by the
+	// breaker. grok is excluded by default and only covered when IncludeGrok=true.
+	// OAuth / PAT / Bedrock accounts are never covered regardless of platform.
+	ScopePlatforms []string `json:"scope_platforms"`
+	// IncludeGrok toggles coverage of grok API-key accounts (default false).
+	IncludeGrok bool `json:"include_grok"`
+	// WatchRatio is the L1-watch trigger as a fraction of FailureThreshold.
+	WatchRatio float64 `json:"watch_ratio"`
+	// WarningRatio is the L2-warning trigger as a fraction of FailureThreshold.
+	WarningRatio float64 `json:"warning_ratio"`
+	// Probe is the optional probe-based early recovery configuration.
+	Probe *OpenAIAPIKeyHealthBreakerProbeSettings `json:"probe"`
+}
+
+// DefaultAccountHealthBreakerScopePlatforms is the default platform coverage:
+// the six OpenAI-compatible platforms. grok is intentionally excluded.
+var DefaultAccountHealthBreakerScopePlatforms = []string{
+	PlatformOpenAI,
+	PlatformDeepseek,
+	PlatformKimi,
+	PlatformZhipu,
+	PlatformMiniMax,
+	PlatformOther,
 }
 
 func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettings {
@@ -599,6 +637,15 @@ func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettin
 		WindowMinutes:    2,
 		FailureThreshold: 10,
 		CooldownMinutes:  5,
+		ScopePlatforms:   append([]string(nil), DefaultAccountHealthBreakerScopePlatforms...),
+		IncludeGrok:      false,
+		WatchRatio:       0.4,
+		WarningRatio:     0.7,
+		Probe: &OpenAIAPIKeyHealthBreakerProbeSettings{
+			Enabled:         false,
+			IntervalSeconds: 60,
+			MaxAttempts:     10,
+		},
 	}
 }
 

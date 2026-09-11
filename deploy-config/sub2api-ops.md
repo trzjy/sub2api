@@ -17,6 +17,7 @@
 8. [安全注意事项](#8-安全注意事项)
 9. [回滚操作](#9-回滚操作)
 13. [注册邮箱后缀黑名单（防滥用）](#13-注册邮箱后缀黑名单防滥用)
+14. [账号健康熔断（分级治理）](#14-账号健康熔断分级治理)
 
 ---
 
@@ -528,6 +529,96 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 ```
 
 > 黑名单只拦「一次性域名」。**主流邮箱的 plus 地址（如 `user+tag@gmail.com`）不会被拦截**——Gmail 的 `+tag` 仍属 `@gmail.com` 主域。若需限制 plus 地址或限定每主域注册数，应配合「邮箱域名注册额度」（`registration_email_domain_quota_enabled`）或白名单使用，而非黑名单。
+
+---
+
+## 14. 账号健康熔断（分级治理）
+
+> 背景：生产事故 `corealgos.com` 2026-09-11 18:35–18:51，`openai` 分组内某 apikey 账号（流中失败、无法换号 failover、不触发 429 限流标记）持续返回 429/503，16 分钟内 10+ 次失败，调度器却始终视其健康。本机制即为此类「SSE 流已建立后的上游失败」提供分级治理。
+
+账号健康熔断针对 **OpenAI 兼容平台的 APIKey 账号**，对窗口内可归因于该账号的上游失败（429/5xx，排除凭证失败、请求级瞬态、同账号可重试、provider 级过载）做分级处理。**默认关闭**。
+
+### 14.1 参数含义
+
+| 参数 | 含义 | 边界 / 默认 |
+|------|------|-------------|
+| `enabled` | 是否启用熔断 | 默认 `false`（关闭） |
+| `window_minutes` | 滑动窗口长度（分钟），仅统计窗口内的失败 | 1–60，默认 2 |
+| `failure_threshold` | L3 熔断阈值（窗口内累计失败次数） | 1–10000，默认 10 |
+| `cooldown_minutes` | 熔断后临时禁用时长（分钟），到期自动恢复 | 1–60，默认 5 |
+| `scope_platforms` | 覆盖的 OpenAI 兼容平台集合 | 默认 `openai, deepseek, kimi, zhipu, minimax, other` |
+| `include_grok` | 是否纳入 grok（其媒体生成有独立判定） | 默认 `false` |
+| `watch_ratio` | L1 关注比例，触发次数 = `⌊failure_threshold × watch_ratio⌋`（最小 1） | 0.01–0.99，默认 0.4 |
+| `warning_ratio` | L2 预警比例，触发次数 = `⌊failure_threshold × warning_ratio⌋`（最小 1，且 > watch） | 0.01–0.99，默认 0.7 |
+| `probe.enabled` | 冷却期内定时探测、确认健康提前解除（Phase C） | 默认 `false` |
+| `probe.interval_seconds` | 探测间隔（秒） | 30–600，默认 60 |
+| `probe.max_attempts` | 最大探测次数，达上限停止探测、退回到期恢复 | 1–100，默认 10 |
+
+### 14.2 三档位语义
+
+- **L1 关注（watch）**：窗口内失败数 ≥ `watch` 阈值 → 仅结构化日志（`openai.apikey_health_watch`，含 account_id / count / threshold / window）+ 可观测指标，**不影响调度**。
+- **L2 预警（warning）**：≥ `warning` 阈值 → 日志 + 写入一条可查询的运维告警（`P1`，经 `OpsRepository.CreateAlertEvent`），**不影响调度**。
+- **L3 熔断（trip）**：≥ `failure_threshold` → 复用既有 `SetTempUnschedulable` 临时禁用该账号并进入冷却（与现有行为完全一致），`TempUnschedState` 中记录 `tier=3`、`matched_keyword=openai_apikey_health_breaker`。
+
+**去抖与状态**：同一窗口周期内档位只升不降；L1/L2 在同一窗口内重复触发不重复告警（Redis companion key 记录已升级到的最高档）。`ObserveOpenAIAPIKeyHealthSuccess`（一次成功调度结果）会**同时清零失败计数与档位状态**；达到 L3 时窗口被清空，冷却到期后从新窗口开始。
+
+### 14.3 推荐值与生产开启步骤
+
+默认阈值（10 次 / 2 分钟）对慢性故障不敏感。生产推荐（对应事故场景：~18:39 进入 L2、~18:39–18:44 进入 L3）：
+
+```json
+{
+  "enabled": true,
+  "window_minutes": 5,
+  "failure_threshold": 4,
+  "cooldown_minutes": 5,
+  "watch_ratio": 0.4,
+  "warning_ratio": 0.7,
+  "scope_platforms": ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
+  "include_grok": false,
+  "probe": { "enabled": false, "interval_seconds": 60, "max_attempts": 10 }
+}
+```
+
+**写入方式（任选其一）**：
+
+- 管理后台：「系统设置 → 账号健康熔断（分级治理）」卡片，填写后保存（前端会回显同样结构）。
+- 直写数据库（设置键 `openai_apikey_health_breaker_settings`）：
+
+```bash
+docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
+  INSERT INTO settings (key, value) VALUES ('openai_apikey_health_breaker_settings', '{\"enabled\":true,\"window_minutes\":5,\"failure_threshold\":4,\"cooldown_minutes\":5,\"watch_ratio\":0.4,\"warning_ratio\":0.7,\"scope_platforms\":[\"openai\",\"deepseek\",\"kimi\",\"zhipu\",\"minimax\",\"other\"],\"include_grok\":false,\"probe\":{\"enabled\":false,\"interval_seconds\":60,\"max_attempts\":10}}') \
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"
+```
+
+> 写入后 30 秒内进程内缓存自动失效，下一次 `Observe` 即生效，无需重启。
+
+### 14.4 与其他排除/冷却机制的关系与优先级
+
+| 机制 | 触发条件 | 作用 | 与本机制的关系 |
+|------|----------|------|----------------|
+| **账号健康熔断（本文）** | 窗口内可归因的 429/5xx 累计 | L3 临时禁用账号（冷却到期自动恢复；可选探测提前恢复） | 专治「流中失败 / 不触发 429 标记」的慢性坏账号 |
+| **429 限流标记**（`rate_limited_at` + 上游 `reset`） | 上游显式 429 且带 reset 时间 | 按上游 reset 时间禁用 | 两者独立写入，可能**同时**禁用同一账号；恢复条件不同（429 看 reset 时间，本机制看 cooldown）。不冲突，是叠加防护 |
+| **过载冷却**（`overload_until`，529） | 上游 529（provider 级过载） | 按策略暂停调度 | 529 被本机制 `classify` 显式排除（属 provider 级，不应归因到单一账号），因此**不会**误触发本熔断 |
+| **每账号关键词规则**（`matchTempUnschedulableRules`，状态码 + 响应关键词） | 响应匹配关键词 | 按规则临时禁用 | 与本机制使用同一 `TempUnschedState` 体系与运行期 blocker；`matched_keyword` 不同，互不覆盖。关键词规则可更早（单请求即）禁用；本机制是累计型兜底 |
+| **渠道监控 v2**（Channel Monitor v2） | 渠道/模型级成功率、延迟 | 渠道级禁用/降权 | 是**渠道维度**，本机制是**账号维度**；账号被本机制禁用时，其所属渠道不一定被渠道监控禁用，二者维度不同、互补 |
+
+**优先级结论**：
+
+1. `classifyOpenAIAPIHealthFailure` 已把「凭证失败 / 请求级瞬态 / 同账号可重试 / provider 级过载（529）/ 客户端错误（4xx 非 429）」排除在计数之外，所以**不会**与 429 限流或过载冷却争夺同一事件，也不会重复禁用。
+2. 当上游返回 429（无 reset）或 5xx（非 provider 级过载）时，本机制与「每账号关键词规则」可能都动作。关键词规则是「单请求命中即禁用」，更激进；本机制是「窗口累计达阈值才禁用」，更平滑。两者 `matched_keyword` 不同，后写入者不会清除前者的 reason（均经 `SetTempUnschedulable` 的「仅当更晚到期才覆盖」语义）；恢复时分别对应各自的到期/清除路径。
+3. 本机制**关闭时行为与未启用前完全一致**（无 Redis 计数、无日志、不触碰调度），可安全默认关闭、灰度开启。
+
+### 14.5 探测式恢复（Phase C，默认关闭）
+
+启用 `probe.enabled=true` 后，处于冷却期的账号会按 `probe.interval_seconds` 定时发送一次**廉价真实转发请求**（优先 `/models` 零消耗端点，否则 1 token 的最小补全），复用既有转发链路与 SSRF 防护：
+
+- 探测成功（2xx）→ 立即 `ClearTempUnschedulable` 提前解除，写 `openai.apikey_health_probe_recovered` 日志；
+- 探测失败 → 维持冷却，并将尝试次数 +1（写回 reason 的 `probe_attempts`）；
+- 尝试次数达到 `probe.max_attempts` → 停止探测，退回「到期自动恢复」；
+- 某平台无安全/廉价探测端点 → 探测降级为「到期恢复」，代码注释与本节已说明，不会刷屏。
+
+> 探测请求日志与错误信息中**不得泄漏密钥**；探测默认关闭，仅管理员显式开启。
 
 ---
 
