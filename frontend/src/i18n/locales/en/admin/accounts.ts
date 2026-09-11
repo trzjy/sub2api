@@ -189,6 +189,8 @@ export default {
         'Use 1-100. The account becomes temporarily unschedulable after reaching this usage percent; 100 disables it for this account.',
       status: {
         active: 'Active',
+        available: 'Available (Schedulable)',
+        tempLimited: 'Temporarily Limited',
         inactive: 'Inactive',
         expired: 'Expired',
         error: 'Error',

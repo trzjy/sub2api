@@ -489,6 +489,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, toRaw, watch } from 'vue'
 import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
@@ -1066,6 +1067,28 @@ const syncAccountListDerivedParams = () => {
   requestParams.include_scheduler_score = shouldIncludeSchedulerScore() ? '1' : '0'
 }
 
+// 支持通过 URL query 初始化筛选（例如从分组页"可用账号数"下钻跳转过来）。
+const route = useRoute()
+const ACCOUNT_STATUS_FILTER_VALUES = new Set([
+  'active',
+  'inactive',
+  'error',
+  'rate_limited',
+  'temp_unschedulable',
+  'unschedulable',
+  'available',
+  'temp_limited'
+])
+const initialQueryParam = (key: string): string => {
+  // 测试环境中组件可能未挂载 router，此时 route 为 undefined。
+  const value = route?.query?.[key]
+  return typeof value === 'string' ? value : ''
+}
+const initialStatusQueryParam = (): string => {
+  const value = initialQueryParam('status')
+  return ACCOUNT_STATUS_FILTER_VALUES.has(value) ? value : ''
+}
+
 const {
   items: accounts,
   loading,
@@ -1079,12 +1102,12 @@ const {
 } = useTableLoader<AccountListItem, any>({
   fetchFn: adminAPI.accounts.list,
   initialParams: {
-    platform: '',
-    type: '',
-    status: '',
-    privacy_mode: '',
-    group: '',
-    search: '',
+    platform: initialQueryParam('platform'),
+    type: initialQueryParam('type'),
+    status: initialStatusQueryParam(),
+    privacy_mode: initialQueryParam('privacy_mode'),
+    group: initialQueryParam('group'),
+    search: initialQueryParam('search'),
     lite: '1',
     include_scheduler_score: shouldIncludeSchedulerScore() ? '1' : '0',
     sort_by: sortState.sort_by,
@@ -2144,9 +2167,17 @@ const accountMatchesCurrentFilters = (account: Account) => {
     const isRateLimited = Number.isFinite(rateLimitResetAt) && rateLimitResetAt > now
     const tempUnschedUntil = account.temp_unschedulable_until ? new Date(account.temp_unschedulable_until).getTime() : Number.NaN
     const isTempUnschedulable = Number.isFinite(tempUnschedUntil) && tempUnschedUntil > now
+    const overloadUntil = account.overload_until ? new Date(account.overload_until).getTime() : Number.NaN
+    const isOverloaded = Number.isFinite(overloadUntil) && overloadUntil > now
+    // 与后端 available/temp_limited 过滤口径一致：过期但 auto_pause_on_expired=false 的账号仍视为可调度。
+    const expiryBlocksScheduling = account.expires_at != null && account.expires_at * 1000 <= now && account.auto_pause_on_expired
 
     if (filters.status === 'active') {
       if (account.status !== 'active' || isRateLimited || isTempUnschedulable || !account.schedulable) return false
+    } else if (filters.status === 'available') {
+      if (account.status !== 'active' || !account.schedulable || isRateLimited || isTempUnschedulable || isOverloaded || expiryBlocksScheduling) return false
+    } else if (filters.status === 'temp_limited') {
+      if (account.status !== 'active' || !account.schedulable || expiryBlocksScheduling || (!isRateLimited && !isTempUnschedulable && !isOverloaded)) return false
     } else if (filters.status === 'rate_limited') {
       if (account.status !== 'active' || !isRateLimited || isTempUnschedulable) return false
     } else if (filters.status === 'temp_unschedulable') {

@@ -941,6 +941,37 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 					))
 				}),
 			)
+		// available / temp_limited 与分组列表"可用/限流账号数"的统计口径
+		// （group_repo.go 的 groupAccountAvailableSQL / groupAccountTemporarilyLimitedSQL）保持一致，
+		// 用于分组页数字下钻到账号列表。
+		case "available":
+			now := time.Now()
+			q = q.Where(
+				dbaccount.StatusEQ(service.StatusActive),
+				dbaccount.SchedulableEQ(true),
+				notExpiredPredicate(now),
+				dbaccount.Or(
+					dbaccount.RateLimitResetAtIsNil(),
+					dbaccount.RateLimitResetAtLTE(now),
+				),
+				dbaccount.Or(
+					dbaccount.OverloadUntilIsNil(),
+					dbaccount.OverloadUntilLTE(now),
+				),
+				tempUnschedulablePredicate(),
+			)
+		case "temp_limited":
+			now := time.Now()
+			q = q.Where(
+				dbaccount.StatusEQ(service.StatusActive),
+				dbaccount.SchedulableEQ(true),
+				notExpiredPredicate(now),
+				dbaccount.Or(
+					dbaccount.RateLimitResetAtGT(now),
+					dbaccount.OverloadUntilGT(now),
+					dbaccount.TempUnschedulableUntilGT(now),
+				),
+			)
 		case "rate_limited":
 			q = q.Where(
 				dbaccount.StatusEQ(service.StatusActive),

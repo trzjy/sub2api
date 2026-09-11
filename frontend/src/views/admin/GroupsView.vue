@@ -279,9 +279,10 @@
                 <span class="text-gray-500 dark:text-gray-400">{{
                   t("admin.groups.accountsAvailable")
                 }}</span>
-                <span
-                  class="ml-1 font-medium text-emerald-600 dark:text-emerald-400"
-                  >{{ row.active_account_count || 0 }}</span
+                <router-link
+                  :to="{ path: '/admin/accounts', query: { group: String(row.id), status: 'available' } }"
+                  class="ml-1 font-medium text-emerald-600 hover:underline dark:text-emerald-400"
+                  >{{ row.active_account_count || 0 }}</router-link
                 >
                 <span
                   class="ml-1 inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-800 dark:bg-dark-600 dark:text-gray-300"
@@ -292,9 +293,10 @@
                 <span class="text-gray-500 dark:text-gray-400">{{
                   t("admin.groups.accountsRateLimited")
                 }}</span>
-                <span
-                  class="ml-1 font-medium text-amber-600 dark:text-amber-400"
-                  >{{ row.rate_limited_account_count }}</span
+                <router-link
+                  :to="{ path: '/admin/accounts', query: { group: String(row.id), status: 'temp_limited' } }"
+                  class="ml-1 font-medium text-amber-600 hover:underline dark:text-amber-400"
+                  >{{ row.rate_limited_account_count }}</router-link
                 >
                 <span
                   class="ml-1 inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-800 dark:bg-dark-600 dark:text-gray-300"
@@ -305,9 +307,10 @@
                 <span class="text-gray-500 dark:text-gray-400">{{
                   t("admin.groups.accountsTotal")
                 }}</span>
-                <span
-                  class="ml-1 font-medium text-gray-700 dark:text-gray-300"
-                  >{{ row.account_count || 0 }}</span
+                <router-link
+                  :to="{ path: '/admin/accounts', query: { group: String(row.id) } }"
+                  class="ml-1 font-medium text-gray-700 hover:underline dark:text-gray-300"
+                  >{{ row.account_count || 0 }}</router-link
                 >
                 <span
                   class="ml-1 inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 font-medium text-gray-800 dark:bg-dark-600 dark:text-gray-300"
