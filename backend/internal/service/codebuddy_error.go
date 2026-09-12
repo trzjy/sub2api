@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -56,8 +57,9 @@ func (k CodeBuddyErrKind) String() string {
 }
 
 // ClassifyCodeBuddyError 按 §2.6 严格表序（不可调换）对上游错误分类：
-//   1 余额耗尽 → 2 session 死亡 → 3 模型级限流(429+6004) → 4 账号级软限流
-//   → 5 上游故障(404/5xx) → 6 内容审核 → 7 请求体问题。
+//
+//	1 余额耗尽 → 2 session 死亡 → 3 模型级限流(429+6004) → 4 账号级软限流
+//	→ 5 上游故障(404/5xx) → 6 内容审核 → 7 请求体问题。
 //
 // 关键顺序约束（验收要求，已按方案负责人裁决改回严格表序）：
 //   - ModelLimit（429+6004）必须先于 AccountSoftLimit（行 4 之前）：6004 的 body 通常也含
@@ -177,6 +179,32 @@ const codeBuddyResetTimeLayout = "2006-01-02 15:04:05"
 
 // codeBuddyResetTimeLocation 是上游重置时间的时区（固定 UTC+8，与容器时区无关）。
 var codeBuddyResetTimeLocation = time.FixedZone("UTC+8", 8*3600)
+
+// codeBuddyIdentityErrorRedactors 匹配 CodeBuddy 上游错误文本中的账号标识值，
+// 命中即把「值」替换为 ***，保留关键词与 JSON 结构。两条规则覆盖：
+//   - 自然语言：`Offline user session for user 123456`
+//   - 键值 / JSON：`uid=123`、`user_id: 123`、`nickname: 张三`、`"uid":"123"`
+//
+// 值字符集刻意排除引号/逗号/空白/大括号/中括号/反斜杠，避免越界吞掉结构字符；
+// `\\?"?` 兼容嵌入 JSON 字符串时的转义引号（\"uid\":\"123\"）。
+var codeBuddyIdentityErrorRedactors = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(\bfor user\s+)([0-9A-Za-z._-]{1,64})`),
+	regexp.MustCompile(`(?i)(\b(?:uid|user[_-]?id|nickname)\b\\?"?\s*[:=]\s*\\?"?)([^",\s}\\\]]{1,64})`),
+}
+
+// redactCodeBuddyIdentityErrorBody 脱敏 CodeBuddy 上游错误体中的账号标识
+// （uid / user id / nickname）。下游 API 调用方可据 uid 做账号关联或枚举探测，
+// 故在透传给下游之前必须抹去；关键词与 JSON 结构保留，状态码与错误类型语义不变。
+func redactCodeBuddyIdentityErrorBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	out := body
+	for _, re := range codeBuddyIdentityErrorRedactors {
+		out = re.ReplaceAll(out, []byte("${1}***"))
+	}
+	return out
+}
 
 // handleCodeBuddyInsufficientBalance 将 CodeBuddy 余额/积分耗尽标记为可恢复的临时停调
 // （对齐 CN 供应商：写入余额低位标记 + SetTempUnschedulable，由周期性配额探测恢复）。

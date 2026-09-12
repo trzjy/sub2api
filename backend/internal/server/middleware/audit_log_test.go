@@ -152,6 +152,31 @@ func TestPasskeyLoginAuditUsesCanonicalLoginActionAndOmitsCredentialBody(t *test
 	require.Contains(t, auditBodyOmittedRoutes, route)
 }
 
+// TestOAuthCredentialAuditRoutesHaveStableActions 锁定 OAuth 凭证端点的固定动作名，
+// 避免后续重构退回自动推导的 `.create` 形式而失去按「凭证操作」过滤审计的能力。
+func TestOAuthCredentialAuditRoutesHaveStableActions(t *testing.T) {
+	expected := map[string]string{
+		"POST /api/v1/admin/codebuddy/oauth/auth-url":        service.AuditActionCodeBuddyOAuthAuthURL,
+		"POST /api/v1/admin/codebuddy/oauth/poll":            service.AuditActionCodeBuddyOAuthPoll,
+		"POST /api/v1/admin/codebuddy/oauth/refresh-token":   service.AuditActionCodeBuddyOAuthRefresh,
+		"POST /api/v1/admin/antigravity/oauth/auth-url":      service.AuditActionAntigravityOAuthAuthURL,
+		"POST /api/v1/admin/antigravity/oauth/exchange-code": service.AuditActionAntigravityOAuthExchange,
+		"POST /api/v1/admin/antigravity/oauth/refresh-token": service.AuditActionAntigravityOAuthRefresh,
+	}
+	for route, action := range expected {
+		require.Equalf(t, action, auditActionOverrides[route], "%s 必须映射到固定动作名", route)
+	}
+}
+
+// TestOAuthCredentialAuditExtraKeysAreAllowlisted 目标标识（state/账号/代理）必须能
+// 通过 SetAuditExtra 白名单落库，否则 handler 的审计目标会被静默丢弃。
+func TestOAuthCredentialAuditExtraKeysAreAllowlisted(t *testing.T) {
+	for _, key := range []string{"oauth_state", "target_uid", "proxy_id"} {
+		_, ok := auditExtraAllowedKeys[key]
+		require.Truef(t, ok, "审计附加字段 %s 必须在白名单中", key)
+	}
+}
+
 // Ollama 会话保存的请求体整体就是浏览器 Cookie 明文，键级脱敏清单曾漏掉裸键
 // "session"，必须走整体不入库路径，防止会话凭证长期留存在 audit_logs。
 func TestOllamaCloudUsageSessionRouteOmitsAuditBody(t *testing.T) {

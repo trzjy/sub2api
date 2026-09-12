@@ -43,9 +43,9 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	}
 
 	opts := CodeBuddyRewriteOptions{
-		Sanitize:          s.codeBuddySanitizeEnabled(),
-		Model:             upstreamModel,
-		SupportedEfforts:  codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
+		Sanitize:         s.codeBuddySanitizeEnabled(),
+		Model:            upstreamModel,
+		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
 	}
 
 	// §2.5 规则 1-7：出站前改写（强制 stream:true、tool_choice 归一、developer 角色、
@@ -239,7 +239,13 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 		// 5xx/404：上游故障，常规重试（不标记账号状态）。
 	}
 
-	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
+	// A2：下游错误透传前抹去上游文本里的账号标识（uid / nickname / 「for user 123」）。
+	// handleErrorResponse 会从 resp.Body 重新读取错误体构造响应，故 resp.Body 与传入的
+	// requestBody 都必须换成脱敏后的体，否则 400 确定性错误分支与 passthrough-rule 分支
+	// 会原样回写未脱敏的 message。
+	safeBody := redactCodeBuddyIdentityErrorBody(respBody)
+	resp.Body = io.NopCloser(bytes.NewReader(safeBody))
+	return s.handleErrorResponse(ctx, resp, c, account, safeBody, upstreamModel)
 }
 
 func codeBuddyForwardResultFromStreaming(r *openaiStreamingResult, originalModel, upstreamModel string, startTime time.Time, respHeader http.Header) *OpenAIForwardResult {
@@ -251,19 +257,19 @@ func codeBuddyForwardResultFromStreaming(r *openaiStreamingResult, originalModel
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            true,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		FirstTokenMs:      r.firstTokenMs,
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           true,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     r.firstTokenMs,
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
 
@@ -276,17 +282,17 @@ func codeBuddyForwardResultFromNonStreaming(r *openaiNonStreamingResult, origina
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            false,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           false,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
