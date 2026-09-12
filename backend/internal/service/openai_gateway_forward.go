@@ -154,6 +154,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardGrokResponses(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
+	// CodeBuddy（腾讯）原生接入：Chat Completions 变体，走独立转发分支以隔离其改写
+	// 管线 / 指纹头 / 错误分类，避免被 OpenAI Responses 归一化路径误改写出站请求体。
+	if account.Platform == PlatformCodeBuddy {
+		return s.forwardCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
+	}
+
 	// CN 供应商 anthropic 协议账号：/v1/responses 入站是交叉协议组合
 	// （Responses 客户端 × Anthropic 上游），转成 Anthropic 请求走原生端点。
 	// 不能落到下面的 raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。

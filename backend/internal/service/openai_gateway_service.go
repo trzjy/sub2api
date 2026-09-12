@@ -1210,7 +1210,15 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			}
 			return accessToken, "oauth", nil
 		}
-		// 使用 TokenProvider 获取缓存的 token
+		// codebuddy 等国产 OAuth 平台：token 由各自 TokenRefresher 落库在
+		// credentials.access_token，不在 OpenAI token provider 的缓存体系内，直接读取。
+		if account.Platform == PlatformCodeBuddy {
+			if accessToken := account.GetCredential("access_token"); accessToken != "" {
+				return accessToken, "oauth", nil
+			}
+			return "", "", errors.New("access_token not found in credentials")
+		}
+		// OpenAI OAuth 走专属 provider（缓存+刷新）
 		if s.openAITokenProvider != nil {
 			accessToken, err := s.openAITokenProvider.GetAccessToken(ctx, account)
 			if err != nil {

@@ -92,6 +92,7 @@ func NewTokenRefreshService(
 	openaiOAuthService *OpenAIOAuthService,
 	geminiOAuthService *GeminiOAuthService,
 	antigravityOAuthService *AntigravityOAuthService,
+	codeBuddyOAuthService *CodeBuddyOAuthService,
 	cacheInvalidator TokenCacheInvalidator,
 	schedulerCache SchedulerCache,
 	cfg *config.Config,
@@ -123,6 +124,7 @@ func NewTokenRefreshService(
 	claudeRefresher := NewClaudeTokenRefresher(oauthService)
 	geminiRefresher := NewGeminiTokenRefresher(geminiOAuthService)
 	agRefresher := NewAntigravityTokenRefresher(antigravityOAuthService)
+	cbRefresher := NewCodeBuddyTokenRefresher(codeBuddyOAuthService)
 	var grokOAuthService *GrokOAuthService
 	if len(grokOAuthServices) > 0 {
 		grokOAuthService = grokOAuthServices[0]
@@ -136,6 +138,7 @@ func NewTokenRefreshService(
 		{platform: PlatformOpenAI, refresher: openAIRefresher, executor: openAIRefresher},
 		{platform: PlatformGemini, refresher: geminiRefresher, executor: geminiRefresher},
 		{platform: PlatformAntigravity, refresher: agRefresher, executor: agRefresher},
+		{platform: PlatformCodeBuddy, refresher: cbRefresher, executor: cbRefresher},
 		{platform: PlatformGrok, refresher: grokRefresher, executor: grokRefresher},
 	}
 
