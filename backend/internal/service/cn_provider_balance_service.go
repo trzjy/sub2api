@@ -38,6 +38,8 @@ const (
 	// 周期检测据此跳过阈值停调；plan_name 存上游分组名供展示。
 	cnBalanceExtraSuffixUnlimited = "balance_unlimited"
 	cnBalanceExtraSuffixPlanName  = "balance_plan_name"
+	// 上游订阅/额度的到期时间（RFC3339 原文透传，前端格式化展示）。
+	cnBalanceExtraSuffixExpiresAt = "balance_expires_at"
 )
 
 // CNProviderBalanceEntry 是单一币种的余额明细。
@@ -58,8 +60,10 @@ type CNProviderBalanceResult struct {
 	Available bool                     `json:"available"` // 健康标记（deepseek is_available；kimi 无此概念恒 true）
 	// Unlimited 标记上游为订阅制不限量（同程序中转 /v1/usage 返回 remaining<0）：
 	// 无数字余额可比，周期检测必须跳过阈值停调；展示用 PlanName（上游分组名）。
-	Unlimited  bool   `json:"unlimited,omitempty"`
-	PlanName   string `json:"plan_name,omitempty"`
+	Unlimited bool   `json:"unlimited,omitempty"`
+	PlanName  string `json:"plan_name,omitempty"`
+	// ExpiresAt 为上游订阅/额度的到期时间（RFC3339，原文透传；无则空）。
+	ExpiresAt  string `json:"expires_at,omitempty"`
 	StatusCode int    `json:"status_code,omitempty"`
 	FetchedAt  int64  `json:"fetched_at"`
 	Persisted  bool   `json:"persisted"`
@@ -327,6 +331,17 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 	result.Available = available
 	result.Currency = unit
 	result.PlanName = strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String())
+	// 订阅有效期：订阅模式在 subscription.expires_at，限额模式在顶层 expires_at。
+	// 只透传可解析的 RFC3339，坏值静默丢弃（不影响余额主链路）。
+	if raw := strings.TrimSpace(gjson.GetBytes(bodyBytes, "subscription.expires_at").String()); raw != "" {
+		if _, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+			result.ExpiresAt = raw
+		}
+	} else if raw := strings.TrimSpace(gjson.GetBytes(bodyBytes, "expires_at").String()); raw != "" {
+		if _, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+			result.ExpiresAt = raw
+		}
+	}
 	if *remaining < 0 {
 		result.Unlimited = true
 	} else {
@@ -350,6 +365,7 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
 		cnExtraKey(provider, cnBalanceExtraSuffixUnlimited): result.Unlimited,
 		cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
+		cnExtraKey(provider, cnBalanceExtraSuffixExpiresAt): result.ExpiresAt,
 		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
 		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
 	}

@@ -10,6 +10,17 @@
         {{ balanceLabel }}
       </span>
 
+      <!-- 订阅有效期（同程序中转 /v1/usage 探测透传的上游 expires_at） -->
+      <span
+        v-if="expiresLabel"
+        data-test="cn-provider-balance-expires"
+        class="text-[10px] leading-4"
+        :class="expiresSoon ? 'font-medium text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'"
+        :title="expiresTitle"
+      >
+        {{ expiresLabel }}
+      </span>
+
       <!-- Low balance badge (reactive 402/429 marker or probe-detected) -->
       <span
         v-if="balanceLow"
@@ -122,6 +133,31 @@ const planName = computed(() => {
   if (data.value?.success && data.value.plan_name) return data.value.plan_name
   return snapshotPlanName.value
 })
+
+// 订阅有效期：后端探测透传上游 subscription.expires_at（RFC3339 快照），
+// 在余额同行以小字展示，临近到期（≤3 天）或已到期时标红。
+const snapshotExpiresAt = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_expires_at')]
+  return typeof v === 'string' ? v.trim() : ''
+})
+const expiresAt = computed(() => {
+  const raw = data.value?.success && data.value.expires_at ? data.value.expires_at : snapshotExpiresAt.value
+  if (!raw) return null
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? null : d
+})
+const expiresLabel = computed(() => {
+  if (!expiresAt.value) return ''
+  const d = expiresAt.value
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return t('admin.accounts.cnProviders.expiresAt', { date: `${mm}-${dd}` })
+})
+const expiresSoon = computed(() => {
+  if (!expiresAt.value) return false
+  return expiresAt.value.getTime() - Date.now() <= 3 * 24 * 60 * 60 * 1000
+})
+const expiresTitle = computed(() => expiresAt.value?.toLocaleString() ?? '')
 
 // 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
 const currentEntries = computed<CNProviderBalanceEntry[]>(() => {

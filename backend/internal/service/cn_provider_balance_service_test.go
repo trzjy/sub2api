@@ -211,6 +211,54 @@ func TestCNProviderBalanceService_RelayOverrideUnlimitedSubscription(t *testing.
 	require.Equal(t, "DeepSeek订阅", repo.extraWrites[0]["deepseek_balance_plan_name"])
 }
 
+// 订阅有效期透传：subscription.expires_at 解析成功则落结果与快照；
+// 非法时间串静默丢弃，不影响余额主链路。
+func TestCNProviderBalanceService_RelayOverrideParsesExpiresAt(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "subscription expires_at",
+			body: `{"remaining":-1,"unit":"USD","isValid":true,"planName":"DeepSeek订阅","subscription":{"expires_at":"2026-09-20T02:47:56.827014+08:00"}}`,
+			want: "2026-09-20T02:47:56.827014+08:00",
+		},
+		{
+			name: "top-level expires_at (quota mode)",
+			body: `{"remaining":12.5,"unit":"USD","expires_at":"2026-10-01T00:00:00Z"}`,
+			want: "2026-10-01T00:00:00Z",
+		},
+		{
+			name: "invalid expires_at dropped",
+			body: `{"remaining":12.5,"unit":"USD","expires_at":"not-a-time"}`,
+			want: "",
+		},
+		{
+			name: "missing expires_at",
+			body: `{"remaining":12.5,"unit":"USD"}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+				"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+			})}
+			upstream := &cnBalanceResponseUpstream{statusCode: http.StatusOK, body: tt.body}
+			svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+			result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+			require.NoError(t, err)
+			require.True(t, result.Success)
+			require.Equal(t, tt.want, result.ExpiresAt)
+			require.Len(t, repo.extraWrites, 1)
+			require.Equal(t, tt.want, repo.extraWrites[0]["deepseek_balance_expires_at"])
+		})
+	}
+}
+
 // 覆盖地址返回 401：保留 Authentication failed 文案，不抛错、不落快照。
 func TestCNProviderBalanceService_RelayOverrideAuthFailure(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{

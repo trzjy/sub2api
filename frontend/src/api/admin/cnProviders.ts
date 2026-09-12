@@ -48,6 +48,8 @@ export interface CNProviderBalanceResult {
   unlimited?: boolean
   /** 上游订阅分组名（如「DeepSeek 订阅」）。 */
   plan_name?: string
+  /** 上游订阅/额度到期时间（RFC3339）。 */
+  expires_at?: string
   status_code?: number
   fetched_at: number
   persisted: boolean
