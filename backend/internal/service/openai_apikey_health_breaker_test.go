@@ -451,6 +451,41 @@ func TestHealthBreakerTripPersistsAndBlocks(t *testing.T) {
 	require.Equal(t, openAIAPIKeyHealthBreakerReason, state.MatchedKeyword)
 }
 
+// TestHealthBreakerTrip429UsesShortCooldown pins the per-minute-RPM semantics:
+// a 429 trip parks the account for ~1 minute instead of the full 5xx-oriented
+// CooldownMinutes, while a 5xx trip keeps the configured cooldown.
+func TestHealthBreakerTrip429UsesShortCooldown(t *testing.T) {
+	newTripSvc := func() *RateLimitService {
+		ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
+			Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
+		})
+		cache := &healthCacheStub{recordResult: OpenAIAPIKeyHealthRecordResult{TrippedTrip: true}}
+		repo := &healthAccountRepoStub{}
+		blocker := &healthRuntimeBlocker{}
+		svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+		svc.SetSettingService(ss)
+		svc.SetOpenAIAPIKeyHealthCache(cache)
+		svc.SetAccountRuntimeBlocker(blocker)
+		return svc
+	}
+
+	svc429 := newTripSvc()
+	account429 := healthAccount(domain.PlatformDeepseek)
+	require.True(t, svc429.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account429, &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}))
+	require.NotNil(t, account429.TempUnschedulableUntil)
+	cooldown429 := time.Until(*account429.TempUnschedulableUntil)
+	require.Greater(t, cooldown429, 30*time.Second)
+	require.LessOrEqual(t, cooldown429, 70*time.Second)
+
+	svc5xx := newTripSvc()
+	account5xx := healthAccount(domain.PlatformDeepseek)
+	require.True(t, svc5xx.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account5xx, &UpstreamFailoverError{StatusCode: http.StatusBadGateway}))
+	require.NotNil(t, account5xx.TempUnschedulableUntil)
+	cooldown5xx := time.Until(*account5xx.TempUnschedulableUntil)
+	require.Greater(t, cooldown5xx, 4*time.Minute)
+	require.LessOrEqual(t, cooldown5xx, 6*time.Minute)
+}
+
 // ---------------------------------------------------------------------------
 // Phase C: probe-based recovery
 // ---------------------------------------------------------------------------

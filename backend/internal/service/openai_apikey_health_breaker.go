@@ -203,12 +203,23 @@ func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context,
 	return false
 }
 
+// healthBreakerTripCooldown429 caps the L3 trip cooldown for 429 trips. An RPM
+// limit (e.g. "requests-per-minute limit exceeded") resets within a minute, so
+// parking the account for the full 5xx-oriented CooldownMinutes idles it several
+// minutes past recovery; the recovery probe still shortens any overshoot further.
+const healthBreakerTripCooldown429 = time.Minute
+
 // tripAccountForHealth applies the L3 trip: persist temp-unschedulable, block
 // scheduling in-process, and keep the cache in sync. It mirrors the pre-tiering
-// behavior exactly for the trip path.
+// behavior exactly for the trip path, except that 429 trips use the short
+// healthBreakerTripCooldown429 cooldown instead of the configured minutes.
 func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Account, statusCode int, responseBody []byte, count int64, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
 	now := time.Now()
-	until := now.Add(time.Duration(settings.CooldownMinutes) * time.Minute)
+	cooldown := time.Duration(settings.CooldownMinutes) * time.Minute
+	if statusCode == http.StatusTooManyRequests && cooldown > healthBreakerTripCooldown429 {
+		cooldown = healthBreakerTripCooldown429
+	}
+	until := now.Add(cooldown)
 	state := &TempUnschedState{
 		UntilUnix:            until.Unix(),
 		TriggeredAtUnix:      now.Unix(),
@@ -249,7 +260,7 @@ func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Ac
 		zap.Int64("failure_count", count),
 		zap.Int("failure_threshold", settings.FailureThreshold),
 		zap.Int("window_minutes", settings.WindowMinutes),
-		zap.Int("cooldown_minutes", settings.CooldownMinutes),
+		zap.Duration("cooldown", cooldown),
 		zap.Int("upstream_status", statusCode),
 		zap.Time("until", until),
 	)
