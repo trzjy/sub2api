@@ -45,7 +45,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	opts := CodeBuddyRewriteOptions{
 		Sanitize:          s.codeBuddySanitizeEnabled(),
 		Model:             upstreamModel,
-		SupportedEfforts:  nil, // PR3 动态模型列表落地后填入该模型的 supportedEfforts；空表示不降级。
+		SupportedEfforts:  codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
 	}
 
 	// §2.5 规则 1-7：出站前改写（强制 stream:true、tool_choice 归一、developer 角色、

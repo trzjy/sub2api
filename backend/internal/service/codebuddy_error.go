@@ -97,8 +97,9 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 		return CodeBuddyErrKindAccountSoftLimit
 	}
 
-	// 5. 上游偶发/故障（404 / 5xx）。在软限流之后判定：5xx 即便含限流文案也按故障重试，
-	//    而非账号冷却（与行 4 的软限流文案优先并不冲突——行 4 已先按文案判软限流）。
+	// 5. 上游偶发/故障（404 / 5xx）。位于行 4 账号级软限流之后判定：若 5xx 响应体含限流
+	//    文案，已在行 4 被归类为账号级软限流冷却，故此处仅处理「纯故障」5xx（无软限流文案），
+	//    按故障重试而不罚账号（覆盖「5xx + 限流文案」→ 软限流的实战语义，参照 issue #28）。
 	if statusCode == http.StatusNotFound ||
 		(statusCode >= 500 && statusCode <= 599) {
 		return CodeBuddyErrKindUpstreamFault
@@ -205,24 +206,29 @@ func (s *RateLimitService) handleCodeBuddySessionDead(ctx context.Context, accou
 	s.handleAuthError(ctx, account, msg)
 }
 
-// handleCodeBuddyModelLimit 将 429+6004 模型级限流按模型维度冷却：临时停调至上游重置时刻。
+// handleCodeBuddyModelLimit 将 429+6004 模型级限流按模型维度冷却：仅排除该模型，
+// 其它模型仍正常调度（满足方案 §2.6 行 3 语义 + PR3 task 1.5 裁定）。
 //
-// 说明：当前以「账号级临时停调 + 模型标记」实现「不罚账号」（status 保持 active，可恢复），
-// 而非永久 error/disable。真正的按模型排除调度（仅该模型跳过、其它模型仍可用）需要调度器
-// 消费 account.Extra["codebuddy_model_limit"]，属后续增强；此处先保证不把账号整体误杀。
+// 实现：写入现成 model_rate_limits[model] 结构（与 antigravity/anthropic fable 同源），
+// 调度器的 IsSchedulableForModel 据此仅对该模型返回不可调度，而账号整体保持 active。
+// 同时保留可读的 codebuddy_model_limit 标记做可观测。不再做账号级 SetTempUnschedulable
+// （PR2 遗留做法会误杀整账号，违背「仅该模型跳过」）。
 func (s *RateLimitService) handleCodeBuddyModelLimit(ctx context.Context, account *Account, model string, until time.Time) {
-	msg := "CodeBuddy 模型级限流 (模型=" + model + ") 冷却至 " + until.UTC().Format(time.RFC3339)
-	if model != "" {
-		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-			"codebuddy_model_limit": model + "@" + until.UTC().Format(time.RFC3339),
-		}); err != nil {
-			slog.Warn("codebuddy_model_limit_mark_failed", "account_id", account.ID, "error", err)
-		}
-	}
-	s.notifyAccountSchedulingBlocked(account, until, "codebuddy_model_limit")
-	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
-		slog.Warn("codebuddy_model_limit_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
+	if model == "" {
+		// 缺少模型信息无法按模型排除，退化为账号级短冷却，避免死号被反复选。
+		s.handle429(ctx, account, nil, nil)
 		return
+	}
+	reason := "CodeBuddy 模型级限流 (模型=" + model + ") 冷却至 " + until.UTC().Format(time.RFC3339)
+	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, model, until, reason); err != nil {
+		slog.Warn("codebuddy_model_limit_set_failed", "account_id", account.ID, "model", model, "error", err)
+		return
+	}
+	// 保留可读标记做可观测（非调度依据）。
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+		"codebuddy_model_limit": model + "@" + until.UTC().Format(time.RFC3339),
+	}); err != nil {
+		slog.Warn("codebuddy_model_limit_mark_failed", "account_id", account.ID, "error", err)
 	}
 	slog.Info("codebuddy_model_limit", "account_id", account.ID, "model", model, "until", until.UTC())
 }

@@ -335,6 +335,33 @@ func ProvideCNProviderBalanceCheckService(
 	return svc
 }
 
+// ProvideCodeBuddyQuotaService 构造 CodeBuddy 配额/模型服务（计费快照、每日签到、动态模型列表）。
+func ProvideCodeBuddyQuotaService(
+	accountRepo AccountRepository,
+	proxyRepo ProxyRepository,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+) *CodeBuddyQuotaService {
+	return NewCodeBuddyQuotaService(accountRepo, proxyRepo, httpUpstream, cfg)
+}
+
+// ProvideCodeBuddyQuotaCheckService 构造并启动 CodeBuddy 周期额度检测任务。
+// 间隔取自 gateway.codebuddy.quota_check_interval_minutes；<=0 或关闭时不启动。
+func ProvideCodeBuddyQuotaCheckService(
+	accountRepo AccountRepository,
+	quotaService *CodeBuddyQuotaService,
+	rateLimitSvc *RateLimitService,
+	cfg *config.Config,
+) *CodeBuddyQuotaCheckService {
+	minutes := 30
+	if cfg != nil && cfg.Gateway.CodeBuddy.QuotaCheckIntervalMinutes > 0 {
+		minutes = cfg.Gateway.CodeBuddy.QuotaCheckIntervalMinutes
+	}
+	svc := NewCodeBuddyQuotaCheckService(accountRepo, quotaService, rateLimitSvc, cfg, time.Duration(minutes)*time.Minute)
+	svc.Start()
+	return svc
+}
+
 // ProvideGeminiTokenProvider creates GeminiTokenProvider with OAuthRefreshAPI injection
 func ProvideGeminiTokenProvider(
 	accountRepo AccountRepository,
@@ -418,6 +445,13 @@ func ProvideOpenAICodexVersionSyncService(
 // ProvideProxyExpiryService creates and starts ProxyExpiryService.
 func ProvideProxyExpiryService(proxyRepo ProxyRepository) *ProxyExpiryService {
 	svc := NewProxyExpiryService(proxyRepo, time.Minute)
+	svc.Start()
+	return svc
+}
+
+// ProvideWelfareBalanceExpiryService creates and starts WelfareBalanceExpiryService.
+func ProvideWelfareBalanceExpiryService(welfareRepo WelfareRepository) *WelfareBalanceExpiryService {
+	svc := NewWelfareBalanceExpiryService(welfareRepo, time.Minute)
 	svc.Start()
 	return svc
 }
@@ -1018,6 +1052,8 @@ var ProviderSet = wire.NewSet(
 	ProvideCNProviderQuotaService,
 	ProvideCNProviderBalanceService,
 	ProvideCNProviderBalanceCheckService,
+	ProvideCodeBuddyQuotaService,
+	ProvideCodeBuddyQuotaCheckService,
 	ProvideAccountBalanceProbeCheckService,
 	ProvideClaudeTokenProvider, NewAntigravityGatewayService,
 	ProvideRateLimitService,
@@ -1059,6 +1095,7 @@ var ProviderSet = wire.NewSet(
 	ProvideOpenAICodexVersionSyncService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
+	ProvideWelfareBalanceExpiryService,
 	ProvideTimingWheelService,
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,

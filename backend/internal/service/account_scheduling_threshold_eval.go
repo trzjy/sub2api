@@ -60,6 +60,10 @@ func EvaluateAccountSchedulingThreshold(account *Account, thresholds map[string]
 		winner = pickLatestResetSchedulingCandidate(grokThresholdCandidates(account), threshold, now)
 	case PlatformKimi, PlatformZhipu, PlatformMiniMax:
 		winner = pickLatestResetSchedulingCandidate(cnProviderThresholdCandidates(account, decision.Platform), threshold, now)
+	case PlatformCodeBuddy:
+		// CodeBuddy 积分额度快照由 CodeBuddyQuotaService 周期写入
+		// Extra["codebuddy_credit_used_percent"] / ["codebuddy_credit_reset_at"]。
+		winner = pickLatestResetSchedulingCandidate(codeBuddyThresholdCandidates(account), threshold, now)
 	case PlatformDeepseek:
 		// 火山方舟订阅号平台为 deepseek，快照前缀为 volcano_；非 coding 的 deepseek
 		// 账号对应 extra 为空 → 无候选 → 不变更决策，天然安全。
@@ -406,6 +410,27 @@ func pickLatestResetSchedulingCandidate(candidates []*accountSchedulingThreshold
 		}
 	}
 	return winner
+}
+
+// codeBuddyThresholdCandidates 读取 CodeBuddy 积分额度快照（由 CodeBuddyQuotaService
+// 周期写入 account.Extra）。仅一个积分用量窗口：used_percent + 重置时间。无快照则候选为空，
+// 不触发阈值停调。
+func codeBuddyThresholdCandidates(account *Account) []*accountSchedulingThresholdCandidate {
+	if account == nil || len(account.Extra) == 0 {
+		return nil
+	}
+	usedPercent, ok := account.Extra[codebuddyCreditUsedPercentKey]
+	if !ok {
+		return nil
+	}
+	return []*accountSchedulingThresholdCandidate{
+		{
+			window:      "credit",
+			scope:       PlatformCodeBuddy,
+			usedPercent: schedulingPercentValue(usedPercent),
+			until:       parseSchedulingResetAt(account.Extra[codebuddyCreditResetAtKey]),
+		},
+	}
 }
 
 func candidateMatchesThreshold(candidate *accountSchedulingThresholdCandidate, threshold int, now time.Time) bool {

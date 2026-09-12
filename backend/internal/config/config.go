@@ -1182,9 +1182,16 @@ type GatewayCNProvidersConfig struct {
 // GatewayCodeBuddyConfig 控制 CodeBuddy 原生接入的行为。
 //   - ChatUserAgent: 出站 User-Agent 指纹（默认 CLI/2.63.2 CodeBuddy/2.63.2），上游校验 UA 版本时可热更。
 //   - SanitizeEnabled: system 指纹脱敏开关（默认开启），关闭后不再清洗 Claude Code/Codex 注入模板句。
+//   - QuotaCheckEnabled: 周期探测积分额度（POST billing/meter）并落 Extra 快照，供调度阈值评估停调。
+//     默认关闭——计费响应字段需真实 token 抓包确认后再生产启用（见 PR3 计划 §7.1）。
+//   - QuotaCheckIntervalMinutes: 额度探测周期（分钟，默认 30）。
+//   - DailyCheckinEnabled: 每日签到（白嫖积分，属主动行为）。保守默认关闭。
 type GatewayCodeBuddyConfig struct {
-	ChatUserAgent   string `mapstructure:"chat_user_agent"`
-	SanitizeEnabled bool   `mapstructure:"sanitize_enabled"`
+	ChatUserAgent            string `mapstructure:"chat_user_agent"`
+	SanitizeEnabled          bool   `mapstructure:"sanitize_enabled"`
+	QuotaCheckEnabled        bool   `mapstructure:"quota_check_enabled"`
+	QuotaCheckIntervalMinutes int   `mapstructure:"quota_check_interval_minutes"`
+	DailyCheckinEnabled      bool   `mapstructure:"daily_checkin_enabled"`
 }
 
 // GatewayAPIKeyBalanceProbeConfig controls periodic snapshots for controlled
@@ -2523,6 +2530,11 @@ func setDefaults() {
 	// CodeBuddy（腾讯）原生接入：UA 指纹默认对齐官方 CLI；system 指纹脱敏默认开启。
 	viper.SetDefault("gateway.codebuddy.chat_user_agent", "CLI/2.63.2 CodeBuddy/2.63.2")
 	viper.SetDefault("gateway.codebuddy.sanitize_enabled", true)
+	// 额度探测默认关闭：计费响应字段需真实 token 抓包确认后再生产启用（PR3 §7.1）。
+	viper.SetDefault("gateway.codebuddy.quota_check_enabled", false)
+	viper.SetDefault("gateway.codebuddy.quota_check_interval_minutes", 30)
+	// 每日签到（白嫖积分，属主动行为）保守默认关闭。
+	viper.SetDefault("gateway.codebuddy.daily_checkin_enabled", false)
 	viper.SetDefault("gateway.api_key_balance_probe.interval_minutes", 10)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
