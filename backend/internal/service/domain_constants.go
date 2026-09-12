@@ -211,7 +211,7 @@ const (
 	// 注册设置
 	SettingKeyRegistrationEnabled              = "registration_enabled"                // 是否开放注册
 	SettingKeyEmailVerifyEnabled               = "email_verify_enabled"                // 是否开启邮件验证
-	SettingKeyRegistrationEmailSuffixWhitelist  = "registration_email_suffix_whitelist"  // 注册邮箱后缀白名单（JSON 数组）
+	SettingKeyRegistrationEmailSuffixWhitelist = "registration_email_suffix_whitelist" // 注册邮箱后缀白名单（JSON 数组）
 	SettingKeyRegistrationEmailSuffixBlacklist = "registration_email_suffix_blacklist" // 注册邮箱后缀黑名单（JSON 数组），命中即拒绝注册
 	// 白名单非空时，是否放行非白名单域名按主域名限量注册（每域名 1 个账户）。
 	// 默认 false：非白名单域名直接拒绝（白名单严格模式）。
@@ -365,17 +365,17 @@ const (
 	SettingKeyGoogleOAuthFrontendRedirectURL = "google_oauth_frontend_redirect_url"
 
 	// OEM设置
-	SettingKeySiteName                    = "site_name"                     // 网站名称
-	SettingKeySiteLogo                    = "site_logo"                     // 网站Logo (base64)
-	SettingKeySiteSubtitle                = "site_subtitle"                 // 网站副标题
-	SettingKeyAPIBaseURL                  = "api_base_url"                  // API端点地址（用于客户端配置和导入）
-	SettingKeyContactInfo                 = "contact_info"                  // 客服联系方式
-	SettingKeyDocURL                      = "doc_url"                       // 文档链接
-	SettingKeyHomeContent                 = "home_content"                  // 首页内容（支持 Markdown/HTML，或 URL 作为 iframe src）
-	SettingKeyCompactHomeEnabled          = "compact_home_enabled"          // 是否启用内置简洁首页
+	SettingKeySiteName           = "site_name"            // 网站名称
+	SettingKeySiteLogo           = "site_logo"            // 网站Logo (base64)
+	SettingKeySiteSubtitle       = "site_subtitle"        // 网站副标题
+	SettingKeyAPIBaseURL         = "api_base_url"         // API端点地址（用于客户端配置和导入）
+	SettingKeyContactInfo        = "contact_info"         // 客服联系方式
+	SettingKeyDocURL             = "doc_url"              // 文档链接
+	SettingKeyHomeContent        = "home_content"         // 首页内容（支持 Markdown/HTML，或 URL 作为 iframe src）
+	SettingKeyCompactHomeEnabled = "compact_home_enabled" // 是否启用内置简洁首页
 
 	// 并发超限文案（支持 {limit} 与 {scope} 占位符；空值回退英文默认）
-	SettingKeyConcurrencyLimitMessage = "concurrency_limit_message"
+	SettingKeyConcurrencyLimitMessage     = "concurrency_limit_message"
 	SettingKeyHideCcsImportButton         = "hide_ccs_import_button"        // 是否隐藏 API Keys 页面的导入 CCS 按钮
 	SettingKeyPurchaseSubscriptionEnabled = "purchase_subscription_enabled" // 是否展示"购买订阅"页面入口
 	SettingKeyPurchaseSubscriptionURL     = "purchase_subscription_url"     // "购买订阅"页面 URL（作为 iframe src）
@@ -552,9 +552,9 @@ const (
 
 	// SettingKeyModelPlazaDescription stores the Markdown blurb rendered at the top of
 	// the Model Plaza page (global pricing notes, exchange rate, promotions, ...).
-	SettingKeyModelPlazaDescription = "model_plaza_description"
+	SettingKeyModelPlazaDescription     = "model_plaza_description"
 	SettingKeyModelPlazaOfficialPricing = "model_plaza_official_pricing"
-	SettingKeyPricingCostBasis = "pricing_cost_basis"
+	SettingKeyPricingCostBasis          = "pricing_cost_basis"
 
 	// SettingKeyPluginManagementEnabled controls sidebar visibility only; it does
 	// not stop or otherwise change already loaded plugin runtimes.
@@ -717,8 +717,9 @@ const (
 	SettingKeySubscriptionExpiryNotifyEnabled = "subscription_expiry_notify_enabled" // 订阅到期提醒全局开关，默认开启
 
 	// 账号限额通知
-	SettingKeyAccountQuotaNotifyEnabled = "account_quota_notify_enabled" // 全局开关
-	SettingKeyAccountQuotaNotifyEmails  = "account_quota_notify_emails"  // 管理员通知邮箱列表（JSON 数组）
+	SettingKeyAccountQuotaNotifyEnabled = "account_quota_notify_enabled"    // 全局开关
+	SettingKeyAccountQuotaNotifyEmails  = "account_quota_notify_emails"     // 管理员通知邮箱列表（JSON 数组）
+	SettingKeyXianyuReconcileWatermark  = "xianyu_reconcile_last_watermark" // 闲鱼发货对账水位线（RFC3339；首轮建立基线，历史豁免）
 
 	// Web Search Emulation
 	SettingKeyWebSearchEmulationConfig = "web_search_emulation_config" // JSON 配置

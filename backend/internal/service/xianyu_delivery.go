@@ -77,6 +77,9 @@ type XianyuDeliveryClaim struct {
 // XianyuDeliveryRepository 负责幂等领取与发货状态持久化。
 type XianyuDeliveryRepository interface {
 	Claim(ctx context.Context, claim XianyuDeliveryClaim) (string, error)
+	// InsertReconciledClaim 对账补登：Worker 已发货但缺领取记录时，
+	// 以已存在（delivered 态）的兑换码直接登记 sent 记录；码状态不符返回 ErrXianyuReconcileCodeUnmatched。
+	InsertReconciledClaim(ctx context.Context, claim XianyuDeliveryClaim, codeID int64) error
 }
 
 type XianyuDeliveryService struct {
@@ -425,4 +428,6 @@ type XianyuWorkerDeliveryRepository interface {
 	// success+confirmed→sent、!success→failed、其余（unknown）保持 pending；终态不降级。
 	RecordWorkerDeliveryResult(ctx context.Context, orderNo string, result XianyuDeliveryStatusResult) error
 	ListWorkerDeliveries(ctx context.Context, filter XianyuDeliveryFilter) ([]XianyuWorkerDelivery, int, error)
+	// ListWorkerDeliveriesUpdatedSince 增量列出 updated_at >= since 的记录（发货对账用）。
+	ListWorkerDeliveriesUpdatedSince(ctx context.Context, since time.Time, limit int) ([]XianyuWorkerDelivery, error)
 }

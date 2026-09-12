@@ -99,6 +99,7 @@ func provideCleanup(
 	accountExpiry *service.AccountExpiryService,
 	cnProviderBalanceCheck *service.CNProviderBalanceCheckService,
 	apiKeyBalanceProbeCheck *service.AccountBalanceProbeCheckService,
+	accountHealthRecoveryProbe *service.AccountHealthRecoveryProbeService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
 	subscriptionExpiry *service.SubscriptionExpiryService,
@@ -107,6 +108,7 @@ func provideCleanup(
 	batchImageCleanup *service.BatchImageCleanupService,
 	batchImageWorker *service.BatchImageWorkerRuntime,
 	pricing *service.PricingService,
+	customModelPricingService *service.CustomModelPricingService,
 	emailQueue *service.EmailQueueService,
 	billingCache *service.BillingCacheService,
 	usageRecordWorkerPool *service.UsageRecordWorkerPool,
@@ -128,6 +130,7 @@ func provideCleanup(
 	auditLog *service.AuditLogService,
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	xianyuSync *service.XianyuSyncService,
+	xianyuReconcile *service.XianyuReconcileService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 ) func() {
@@ -145,6 +148,12 @@ func provideCleanup(
 			{"XianyuSyncService", func() error {
 				if xianyuSync != nil {
 					xianyuSync.Stop()
+				}
+				return nil
+			}},
+			{"XianyuReconcileService", func() error {
+				if xianyuReconcile != nil {
+					xianyuReconcile.Stop()
 				}
 				return nil
 			}},
@@ -279,6 +288,12 @@ func provideCleanup(
 			{"AccountBalanceProbeCheckService", func() error {
 				if apiKeyBalanceProbeCheck != nil {
 					apiKeyBalanceProbeCheck.Stop()
+				}
+				return nil
+			}},
+			{"AccountHealthRecoveryProbe", func() error {
+				if accountHealthRecoveryProbe != nil {
+					accountHealthRecoveryProbe.Stop()
 				}
 				return nil
 			}},

@@ -99,6 +99,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // auditLog
 		nil, // openAIAutoReset
 		nil, // xianyuSync
+		nil, // xianyuReconcile
 		nil, // promptAudit
 		nil, // pluginManager
 	)

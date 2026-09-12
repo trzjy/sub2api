@@ -878,6 +878,23 @@ func ProvideXianyuSyncService(
 
 var xianyuSyncService *XianyuSyncService
 
+// ProvideXianyuReconcileService 创建闲鱼发货对账任务（启动即建水位线基线，历史豁免）。
+func ProvideXianyuReconcileService(
+	control *XianyuControlService,
+	worker *XianyuWorkerService,
+	state XianyuDeliveryStateUpdater,
+	claimRepo XianyuDeliveryRepository,
+	workerDelivery XianyuWorkerDeliveryRepository,
+	poolLookup XianyuControlRepository,
+	redeemRepo RedeemCodeRepository,
+	settingStore XianyuSettingStore,
+	alert *XianyuAlertService,
+) *XianyuReconcileService {
+	svc := NewXianyuReconcileService(control, worker, state, claimRepo, workerDelivery, poolLookup, redeemRepo, settingStore, alert)
+	svc.Start()
+	return svc
+}
+
 // ProvideXianyuSettingStore adapts the broader setting repository to the
 // xianyu control plane's read/write contract.
 func ProvideXianyuSettingStore(repo SettingRepository) XianyuSettingStore {
@@ -954,6 +971,8 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuControlService,
 	ProvideXianyuAlertService,
 	ProvideXianyuSyncService,
+	ProvideXianyuReconcileService,
+	ProvideAccountHealthRecoveryProbeService,
 	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,
 	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -586,4 +587,38 @@ func validateWorkerBaseURL(raw string, forbidLoopback bool) error {
 		return ErrXianyuBaseURLLoopbackInvalid
 	}
 	return nil
+}
+
+// XianyuWorkerAutoDelivery 是 Worker 自动发货订单的对账投影
+// （internal_api /orders/auto-deliveries 返回结构）。
+type XianyuWorkerAutoDelivery struct {
+	OrderNo            string  `json:"order_no"`
+	Status             string  `json:"status"`
+	AccountID          string  `json:"account_id"`
+	ItemID             string  `json:"item_id"`
+	BuyerID            string  `json:"buyer_id"`
+	ChatID             string  `json:"chat_id"`
+	Quantity           int     `json:"quantity"`
+	Amount             *string `json:"amount"`
+	DeliveryContent    string  `json:"delivery_content"`
+	DeliveryFailReason string  `json:"delivery_fail_reason"`
+	UpdatedAt          string  `json:"updated_at"`
+}
+
+// ListAutoDeliveries 增量拉取 Worker 自动发货订单（发货对账任务用）。
+// since 之后（含）有更新的 delivery_method='auto' 订单，按 updated_at 升序。
+func (c *XianyuWorkerClient) ListAutoDeliveries(ctx context.Context, since time.Time, limit int) ([]XianyuWorkerAutoDelivery, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	q := url.Values{}
+	q.Set("since", since.UTC().Format(time.RFC3339))
+	q.Set("limit", strconv.Itoa(limit))
+	var out struct {
+		Orders []XianyuWorkerAutoDelivery `json:"orders"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/internal/orders/auto-deliveries?"+q.Encode(), nil, &out, ""); err != nil {
+		return nil, err
+	}
+	return out.Orders, nil
 }

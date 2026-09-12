@@ -129,6 +129,7 @@ def test_internal_api_routes_registered():
         "/internal/cards/provision": {"POST"},
         "/internal/cards/{card_id}": {"DELETE"},
         "/internal/delivery-template": {"GET", "PUT"},
+        "/internal/orders/auto-deliveries": {"GET"},
     }
     for path, methods in expected.items():
         assert path in paths, f"missing internal route {path}"
@@ -1584,3 +1585,82 @@ async def test_report_refunded_orders_unconfigured_noop(monkeypatch):
     monkeypatch.setattr(db_session, "async_session_maker", _fail_session)
     reported = await mod.report_refunded_orders_to_sub2api("acc-1")
     assert reported == 0
+
+
+# ---------------------------------------------------------------------------
+# 自动发货订单增量查询（对账任务数据源）
+# ---------------------------------------------------------------------------
+
+
+class _FakeOrder:
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _ScalarResult:
+    def __init__(self, items):
+        self._items = items
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._items)
+
+
+class _OrderSession:
+    """最小会话替身：返回预置订单列表。"""
+
+    def __init__(self, orders):
+        self._orders = orders
+
+    async def execute(self, stmt):
+        return _ScalarResult(self._orders)
+
+
+@pytest.mark.asyncio
+async def test_auto_deliveries_rejects_invalid_since(internal_token):
+    from fastapi import HTTPException
+
+    admin = FakeUser(id=1)
+    try:
+        await internal_api.internal_list_auto_deliveries(
+            since="not-a-time", limit=10,
+            session=_OrderSession([]), service_user=admin,
+        )
+        assert False, "expected 400 for invalid since"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_auto_deliveries_maps_order_fields(internal_token):
+    from datetime import datetime
+
+    admin = FakeUser(id=1)
+    order = _FakeOrder(
+        order_no="o1", status="shipped", account_id="a1", item_id="i1",
+        buyer_id="b1", chat_id="c1", quantity=2, amount="8.00",
+        delivery_content="卡密：f962e8b2cb8e06b655c78e6a6d564c14",
+        delivery_fail_reason=None,
+        created_at=datetime(2026, 9, 12, 3, 57, 8),
+        updated_at=datetime(2026, 9, 12, 3, 57, 11),
+    )
+    resp = await internal_api.internal_list_auto_deliveries(
+        since="2026-09-12T00:00:00+08:00", limit=10,
+        session=_OrderSession([order]), service_user=admin,
+    )
+    assert resp.success is True
+    rows = resp.data["orders"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["order_no"] == "o1"
+    assert row["buyer_id"] == "b1"
+    assert row["chat_id"] == "c1"
+    assert row["quantity"] == 2
+    assert row["amount"] == "8.00"
+    assert "f962e8b2" in row["delivery_content"]
+    assert row["delivery_fail_reason"] == ""
+    # 北京时间 naive 应标注 +08:00
+    assert row["updated_at"].endswith("+08:00")

@@ -732,3 +732,73 @@ async def internal_send_message(
             "send_fail_reason": downstream.get("send_fail_reason"),
         },
     )
+
+
+@router.get("/orders/auto-deliveries")
+async def internal_list_auto_deliveries(
+    since: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """自动发货订单增量列表（主程序发货对账任务用）。
+
+    仅返回 delivery_method='auto' 且 updated_at >= since 的订单，含发货内容，
+    供主程序与 xianyu_order_claims / xianyu_worker_deliveries 做三方对账。
+    since 为 ISO8601（可带时区），缺省取 24 小时前；订单时间戳列为北京时间 naive，
+    比较前统一归一，返回时标注 +08:00。
+    """
+    from sqlalchemy import select
+
+    from common.models.xy_order import XYOrder
+
+    owner_id, _ = resolve_owner_scope(service_user)
+
+    since_dt: Optional[datetime] = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since 必须是 ISO8601 时间")
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
+    else:
+        since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+    # 订单时间戳为北京时间 naive（get_beijing_now_naive 写入约定），比较前归一到同一基准。
+    since_naive = since_dt.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+
+    stmt = (
+        select(XYOrder)
+        .where(XYOrder.delivery_method == "auto")
+        .where(XYOrder.updated_at >= since_naive)
+        .order_by(XYOrder.updated_at.asc(), XYOrder.id.asc())
+        .limit(limit)
+    )
+    if owner_id is not None:
+        stmt = stmt.where(XYOrder.owner_id == owner_id)
+    orders = (await session.execute(stmt)).scalars().all()
+
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        naive = dt if dt.tzinfo is None else dt.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+        return naive.replace(tzinfo=SHANGHAI_TZ).isoformat()
+
+    data = [
+        {
+            "order_no": o.order_no,
+            "status": o.status,
+            "account_id": o.account_id or "",
+            "item_id": o.item_id or "",
+            "buyer_id": o.buyer_id or "",
+            "chat_id": o.chat_id or "",
+            "quantity": int(o.quantity or 1),
+            "amount": str(o.amount) if o.amount is not None else None,
+            "delivery_content": o.delivery_content or "",
+            "delivery_fail_reason": o.delivery_fail_reason or "",
+            "created_at": _iso(o.created_at),
+            "updated_at": _iso(o.updated_at),
+        }
+        for o in orders
+    ]
+    return ApiResponse(success=True, message="查询成功", data={"orders": data})

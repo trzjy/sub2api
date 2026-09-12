@@ -22,6 +22,10 @@ func (xianyuHandlerRepoStub) Claim(context.Context, service.XianyuDeliveryClaim)
 	return "ABCD-1234", nil
 }
 
+func (xianyuHandlerRepoStub) InsertReconciledClaim(context.Context, service.XianyuDeliveryClaim, int64) error {
+	panic("unexpected InsertReconciledClaim call")
+}
+
 func newXianyuHandlerForTest() *XianyuDeliveryHandler {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,

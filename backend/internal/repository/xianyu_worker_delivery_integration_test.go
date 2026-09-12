@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
@@ -85,4 +86,31 @@ func TestXianyuWorkerDeliveryRecordEnsureIdempotentAndResultTransitions(t *testi
 	require.NoError(t, err)
 	require.Len(t, failedList, 1)
 	require.Equal(t, "wd-2", failedList[0].OrderNo)
+}
+
+func TestXianyuWorkerDeliveryListUpdatedSince(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB
+
+	_, err := db.ExecContext(ctx, `DELETE FROM xianyu_worker_deliveries WHERE order_no LIKE 'recon-since-%'`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO xianyu_worker_deliveries (order_no, delivery_kind, quantity, quantity_sent, delivery_status, updated_at)
+		VALUES
+			('recon-since-old', 'auto', 1, 1, 'sent', NOW() - INTERVAL '2 hours'),
+			('recon-since-new', 'auto', 1, 0, 'pending', NOW())`)
+	require.NoError(t, err)
+
+	repo := NewXianyuWorkerDeliveryRepository(db)
+	rows, err := repo.ListWorkerDeliveriesUpdatedSince(ctx, time.Now().Add(-time.Hour), 100)
+	require.NoError(t, err)
+
+	var orderNos []string
+	for _, r := range rows {
+		orderNos = append(orderNos, r.OrderNo)
+	}
+	require.Contains(t, orderNos, "recon-since-new")
+	require.NotContains(t, orderNos, "recon-since-old")
+
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_deliveries WHERE order_no LIKE 'recon-since-%'`)
 }

@@ -8,19 +8,20 @@ import (
 )
 
 var (
-	ErrXianyuWorkerConfigNotFound  = infraerrors.NotFound("XIANYU_WORKER_CONFIG_NOT_FOUND", "xianyu worker config not found")
-	ErrXianyuWorkerConfigExists    = infraerrors.Conflict("XIANYU_WORKER_CONFIG_EXISTS", "xianyu worker config already exists")
-	ErrXianyuActiveWorkerExists    = infraerrors.Conflict("XIANYU_ACTIVE_WORKER_EXISTS", "only one active xianyu worker config is allowed")
-	ErrXianyuAccountNotFound       = infraerrors.NotFound("XIANYU_ACCOUNT_NOT_FOUND", "xianyu account not found")
-	ErrXianyuAccountDisabled       = infraerrors.Conflict("XIANYU_ACCOUNT_DISABLED", "xianyu account is disabled")
-	ErrXianyuItemPoolNotFound      = infraerrors.NotFound("XIANYU_ITEM_POOL_NOT_FOUND", "xianyu item pool not found")
-	ErrXianyuItemPoolSlugExists    = infraerrors.Conflict("XIANYU_ITEM_POOL_SLUG_EXISTS", "xianyu item pool slug already exists")
-	ErrXianyuProductNotFound       = infraerrors.NotFound("XIANYU_PRODUCT_NOT_FOUND", "xianyu product not found")
-	ErrXianyuBindingRuleNotFound   = infraerrors.NotFound("XIANYU_BINDING_RULE_NOT_FOUND", "xianyu binding rule not found")
-	ErrXianyuProductUnmapped       = infraerrors.BadRequest("XIANYU_PRODUCT_UNMAPPED", "item is not bound to a redeem-code pool")
-	ErrXianyuDeliveryClaimNotFound = infraerrors.NotFound("XIANYU_DELIVERY_CLAIM_NOT_FOUND", "xianyu delivery claim not found")
-	ErrXianyuDeliveryAlreadySent   = infraerrors.Conflict("XIANYU_DELIVERY_ALREADY_SENT", "xianyu delivery already sent")
-	ErrXianyuWorkerUnhealthy       = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNHEALTHY", "xianyu worker is unhealthy")
+	ErrXianyuWorkerConfigNotFound   = infraerrors.NotFound("XIANYU_WORKER_CONFIG_NOT_FOUND", "xianyu worker config not found")
+	ErrXianyuWorkerConfigExists     = infraerrors.Conflict("XIANYU_WORKER_CONFIG_EXISTS", "xianyu worker config already exists")
+	ErrXianyuActiveWorkerExists     = infraerrors.Conflict("XIANYU_ACTIVE_WORKER_EXISTS", "only one active xianyu worker config is allowed")
+	ErrXianyuAccountNotFound        = infraerrors.NotFound("XIANYU_ACCOUNT_NOT_FOUND", "xianyu account not found")
+	ErrXianyuAccountDisabled        = infraerrors.Conflict("XIANYU_ACCOUNT_DISABLED", "xianyu account is disabled")
+	ErrXianyuItemPoolNotFound       = infraerrors.NotFound("XIANYU_ITEM_POOL_NOT_FOUND", "xianyu item pool not found")
+	ErrXianyuItemPoolSlugExists     = infraerrors.Conflict("XIANYU_ITEM_POOL_SLUG_EXISTS", "xianyu item pool slug already exists")
+	ErrXianyuProductNotFound        = infraerrors.NotFound("XIANYU_PRODUCT_NOT_FOUND", "xianyu product not found")
+	ErrXianyuBindingRuleNotFound    = infraerrors.NotFound("XIANYU_BINDING_RULE_NOT_FOUND", "xianyu binding rule not found")
+	ErrXianyuProductUnmapped        = infraerrors.BadRequest("XIANYU_PRODUCT_UNMAPPED", "item is not bound to a redeem-code pool")
+	ErrXianyuDeliveryClaimNotFound  = infraerrors.NotFound("XIANYU_DELIVERY_CLAIM_NOT_FOUND", "xianyu delivery claim not found")
+	ErrXianyuDeliveryAlreadySent    = infraerrors.Conflict("XIANYU_DELIVERY_ALREADY_SENT", "xianyu delivery already sent")
+	ErrXianyuReconcileCodeUnmatched = infraerrors.Conflict("XIANYU_RECONCILE_CODE_UNMATCHED", "redeem code is not in delivered status, cannot backfill reconcile claim")
+	ErrXianyuWorkerUnhealthy        = infraerrors.ServiceUnavailable("XIANYU_WORKER_UNHEALTHY", "xianyu worker is unhealthy")
 	// 传输错误细分：Unreachable = 请求未到达 Worker（仅连接建立前的 dial 失败），可判定"确定未 dispatch"；
 	// Timeout = 请求已发出、结果不确定；Uncertain = 请求可能已写出、结果不确定（连接重置/TLS 等）；
 	// Malformed = 响应解码失败。
@@ -132,9 +133,9 @@ type XianyuItemPool struct {
 	LowStockThreshold int    `json:"low_stock_threshold"`
 	Status            string `json:"status"`
 	// 发码规格：补货时按此生成真实可兑换的订阅码。
-	CodeType     string    `json:"code_type"`
-	GroupID      *int64    `json:"group_id"`
-	ValidityDays int       `json:"validity_days"`
+	CodeType     string `json:"code_type"`
+	GroupID      *int64 `json:"group_id"`
+	ValidityDays int    `json:"validity_days"`
 	// WorkerCardID 该池在 Worker 侧的专属发货卡券（建池/绑定时自动供给，无需手工配置）。
 	WorkerCardID *int64    `json:"worker_card_id"`
 	CreatedAt    time.Time `json:"created_at"`

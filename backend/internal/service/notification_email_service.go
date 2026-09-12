@@ -20,24 +20,25 @@ import (
 )
 
 const (
-	NotificationEmailEventAuthVerifyCode              = "auth.verify_code"
-	NotificationEmailEventAuthPasswordReset           = "auth.password_reset"
-	NotificationEmailEventNotificationEmailVerifyCode = "notification_email.verify_code"
-	NotificationEmailEventSubscriptionPurchaseSuccess = "subscription.purchase_success"
-	NotificationEmailEventSubscriptionExpiryReminder  = "subscription.expiry_reminder"
-	NotificationEmailEventBalanceLow                  = "balance.low"
-	NotificationEmailEventBalanceRechargeSuccess      = "balance.recharge_success"
-	NotificationEmailEventAccountQuotaAlert           = "account.quota_alert"
-	NotificationEmailEventContentModerationViolation  = "content_moderation.violation_notice"
-	NotificationEmailEventContentModerationDisabled   = "content_moderation.account_disabled"
-	NotificationEmailEventCyberPolicyNotice           = "content_moderation.cyber_policy_notice"
-	NotificationEmailEventOpsAlert                    = "ops.alert"
-	NotificationEmailEventOpsScheduledReport          = "ops.scheduled_report"
-	NotificationEmailEventXianyuWorkerUnhealthy       = "xianyu.worker_unhealthy"
-	NotificationEmailEventXianyuCookieInvalid         = "xianyu.cookie_invalid"
-	NotificationEmailEventXianyuTaskStopped           = "xianyu.task_stopped"
-	NotificationEmailEventXianyuPoolLowStock          = "xianyu.pool_low_stock"
+	NotificationEmailEventAuthVerifyCode               = "auth.verify_code"
+	NotificationEmailEventAuthPasswordReset            = "auth.password_reset"
+	NotificationEmailEventNotificationEmailVerifyCode  = "notification_email.verify_code"
+	NotificationEmailEventSubscriptionPurchaseSuccess  = "subscription.purchase_success"
+	NotificationEmailEventSubscriptionExpiryReminder   = "subscription.expiry_reminder"
+	NotificationEmailEventBalanceLow                   = "balance.low"
+	NotificationEmailEventBalanceRechargeSuccess       = "balance.recharge_success"
+	NotificationEmailEventAccountQuotaAlert            = "account.quota_alert"
+	NotificationEmailEventContentModerationViolation   = "content_moderation.violation_notice"
+	NotificationEmailEventContentModerationDisabled    = "content_moderation.account_disabled"
+	NotificationEmailEventCyberPolicyNotice            = "content_moderation.cyber_policy_notice"
+	NotificationEmailEventOpsAlert                     = "ops.alert"
+	NotificationEmailEventOpsScheduledReport           = "ops.scheduled_report"
+	NotificationEmailEventXianyuWorkerUnhealthy        = "xianyu.worker_unhealthy"
+	NotificationEmailEventXianyuCookieInvalid          = "xianyu.cookie_invalid"
+	NotificationEmailEventXianyuTaskStopped            = "xianyu.task_stopped"
+	NotificationEmailEventXianyuPoolLowStock           = "xianyu.pool_low_stock"
 	NotificationEmailEventXianyuDeliveryPendingTimeout = "xianyu.delivery_pending_timeout"
+	NotificationEmailEventXianyuDeliveryReconcile      = "xianyu.delivery_reconcile"
 
 	notificationEmailTemplateKeyPrefix    = "notification_email_template:"
 	notificationEmailPreferenceKeyPrefix  = "notification_email_preference:"
@@ -1044,6 +1045,7 @@ var notificationEmailEventOrder = []string{
 	NotificationEmailEventXianyuTaskStopped,
 	NotificationEmailEventXianyuPoolLowStock,
 	NotificationEmailEventXianyuDeliveryPendingTimeout,
+	NotificationEmailEventXianyuDeliveryReconcile,
 }
 
 var notificationEmailEventDefinitions = map[string]NotificationEmailEventInfo{
@@ -1206,6 +1208,15 @@ var notificationEmailEventDefinitions = map[string]NotificationEmailEventInfo{
 		Optional:    false,
 		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
 			"order_no", "created_at", "last_attempt_at"),
+	},
+	NotificationEmailEventXianyuDeliveryReconcile: {
+		Event:       NotificationEmailEventXianyuDeliveryReconcile,
+		Label:       "Xianyu delivery reconcile drift",
+		Description: "Sent to configured admin notification emails when the Xianyu delivery audit auto-heals or detects drift between worker orders and delivery records.",
+		Category:    "xianyu",
+		Optional:    false,
+		Placeholders: append(append([]string{}, notificationEmailCommonPlaceholders...),
+			"order_no", "drift_type", "worker_status", "claim_status", "mirror_status", "detail"),
 	},
 }
 
@@ -1569,6 +1580,28 @@ var notificationEmailOfficialTemplates = map[string]map[string]notificationEmail
 <p><strong>订单号</strong>：{{order_no}}</p>
 <p><strong>创建时间</strong>：{{created_at}}</p>
 <p><strong>最近尝试</strong>：{{last_attempt_at}}</p>`),
+		},
+	},
+	NotificationEmailEventXianyuDeliveryReconcile: {
+		notificationEmailDefaultLocale: {
+			Subject: "[Xianyu Alert] Delivery reconcile {{drift_type}}",
+			HTML: notificationEmailCard("#d97706", "Xianyu delivery reconcile", `
+<p><strong>Order</strong>: {{order_no}}</p>
+<p><strong>Drift type</strong>: {{drift_type}}</p>
+<p><strong>Worker status</strong>: {{worker_status}}</p>
+<p><strong>Claim status</strong>: {{claim_status}}</p>
+<p><strong>Mirror status</strong>: {{mirror_status}}</p>
+<p><strong>Detail</strong>: {{detail}}</p>`),
+		},
+		notificationEmailLocaleChinese: {
+			Subject: "[闲鱼告警] 发货对账 {{drift_type}}",
+			HTML: notificationEmailCard("#d97706", "闲鱼发货对账", `
+<p><strong>订单号</strong>：{{order_no}}</p>
+<p><strong>漂移类型</strong>：{{drift_type}}</p>
+<p><strong>Worker 状态</strong>：{{worker_status}}</p>
+<p><strong>领取记录状态</strong>：{{claim_status}}</p>
+<p><strong>镜像状态</strong>：{{mirror_status}}</p>
+<p><strong>详情</strong>：{{detail}}</p>`),
 		},
 	},
 }

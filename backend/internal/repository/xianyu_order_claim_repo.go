@@ -379,3 +379,63 @@ func (r *xianyuOrderClaimStateRepository) ResendOriginalCode(ctx context.Context
 		return "", 0, service.ErrXianyuDeliveryAlreadySent
 	}
 }
+
+// InsertReconciledClaim 对账补登已存在的兑换码的领取记录（自动发货已成功但缺 claim 时）。
+// 仅当兑换码状态为 delivered（已被领走发货）时建记录；状态直接登记为 sent
+// （Worker 侧已证明买家收到卡密）。码保持 delivered 可兑换——买家已付款，
+// 退款导致的作废由退款追回流程负责，不在对账里处理。
+func (r *xianyuOrderClaimRepository) InsertReconciledClaim(ctx context.Context, claim service.XianyuDeliveryClaim, codeID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("xianyu claim database is unavailable")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin xianyu reconciled claim transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, claim.OrderID); err != nil {
+		return fmt.Errorf("lock xianyu order: %w", err)
+	}
+
+	var codeStatus string
+	var codeNotes sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT status, notes FROM redeem_codes WHERE id = $1 FOR UPDATE`, codeID).
+		Scan(&codeStatus, &codeNotes); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return service.ErrRedeemCodeNotFound
+		}
+		return fmt.Errorf("select xianyu redeem code for reconcile: %w", err)
+	}
+	// 只有 delivered 态的码允许补登：unused 说明没人领过（Worker 发的是别的串），
+	// used/expired 则权益已消耗或已作废，硬建记录会伪造发货证据。
+	if codeStatus != service.StatusDelivered {
+		return fmt.Errorf("%w: code %d status %q", service.ErrXianyuReconcileCodeUnmatched, codeID, codeStatus)
+	}
+
+	var amount any
+	if claim.Amount != nil {
+		amount = *claim.Amount
+	}
+	var productID, poolID any
+	if claim.ProductID > 0 {
+		productID = claim.ProductID
+	}
+	if claim.PoolID > 0 {
+		poolID = claim.PoolID
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO xianyu_order_claims
+		(order_no, redeem_code_id, account_id, item_id, buyer_id, chat_id, amount,
+		 product_id, pool_id, binding_source, delivery_status, attempt_count, last_attempt_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'sent', 0, NOW())
+		ON CONFLICT DO NOTHING`,
+		claim.OrderID, codeID, claim.AccountID, claim.ItemID, claim.BuyerID,
+		claim.ChatID, amount, productID, poolID, claim.BindingSource); err != nil {
+		return fmt.Errorf("insert xianyu reconciled claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit xianyu reconciled claim: %w", err)
+	}
+	return nil
+}

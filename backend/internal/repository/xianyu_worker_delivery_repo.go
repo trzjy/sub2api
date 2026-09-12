@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -180,4 +181,40 @@ func (r *xianyuWorkerDeliveryRepository) ListWorkerDeliveries(ctx context.Contex
 		return nil, 0, fmt.Errorf("iterate xianyu worker deliveries: %w", err)
 	}
 	return out, total, nil
+}
+
+// ListWorkerDeliveriesUpdatedSince 增量列出 updated_at >= since 的 Worker 发货记录
+// （发货对账任务用，按 updated_at 升序）。
+func (r *xianyuWorkerDeliveryRepository) ListWorkerDeliveriesUpdatedSince(ctx context.Context, since time.Time, limit int) ([]service.XianyuWorkerDelivery, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("xianyu worker delivery database is unavailable")
+	}
+	if limit <= 0 {
+		limit = 2000
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT order_no, delivery_kind, quantity, quantity_sent, delivery_status, delivery_error, created_at, updated_at
+		FROM xianyu_worker_deliveries
+		WHERE updated_at >= $1
+		ORDER BY updated_at ASC, order_no ASC
+		LIMIT $2`, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu worker deliveries since: %w", err)
+	}
+	defer rows.Close()
+
+	var out []service.XianyuWorkerDelivery
+	for rows.Next() {
+		var d service.XianyuWorkerDelivery
+		var deliveryError sql.NullString
+		if err := rows.Scan(&d.OrderNo, &d.DeliveryKind, &d.Quantity, &d.QuantitySent,
+			&d.DeliveryStatus, &deliveryError, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan xianyu worker delivery: %w", err)
+		}
+		if deliveryError.Valid {
+			d.DeliveryError = &deliveryError.String
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

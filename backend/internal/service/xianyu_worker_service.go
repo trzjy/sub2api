@@ -594,3 +594,12 @@ func timePtr(t time.Time) *time.Time {
 func normalizeKeyword(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
+
+// ListAutoDeliveries 增量拉取 Worker 自动发货订单（发货对账任务用）。
+func (s *XianyuWorkerService) ListAutoDeliveries(ctx context.Context, since time.Time, limit int) ([]XianyuWorkerAutoDelivery, error) {
+	client, _, err := s.clientForActiveWorker(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListAutoDeliveries(ctx, since, limit)
+}

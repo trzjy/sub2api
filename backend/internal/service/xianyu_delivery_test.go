@@ -32,6 +32,10 @@ func (r *xianyuClaimRepoStub) Claim(_ context.Context, claim XianyuDeliveryClaim
 	return r.result, r.err
 }
 
+func (r *xianyuClaimRepoStub) InsertReconciledClaim(_ context.Context, _ XianyuDeliveryClaim, _ int64) error {
+	panic("unexpected InsertReconciledClaim call")
+}
+
 // xianyuControlStub 是控制面仓库桩，用于断言 Claim 的账号/商品解析。
 type xianyuControlStub struct {
 	workerCfg      *XianyuWorkerConfig

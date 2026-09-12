@@ -242,3 +242,9 @@ func (s *XianyuAlertService) evaluatePendingTimeouts(ctx context.Context) {
 		}
 	}
 }
+
+// SendReconcileAlert 供发货对账任务发送漂移/补平告警（复用收件人解析与去重）。
+// sourceID 建议 "order:<order_no>"；reminder 以漂移类型为键，同类型去重、类型变化重发。
+func (s *XianyuAlertService) SendReconcileAlert(ctx context.Context, sourceID, reminder string, variables map[string]string) {
+	s.send(ctx, NotificationEmailEventXianyuDeliveryReconcile, sourceID, reminder, variables)
+}
