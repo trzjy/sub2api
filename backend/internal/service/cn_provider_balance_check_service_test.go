@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -153,4 +155,75 @@ func TestAllCNBalancesBelowThreshold(t *testing.T) {
 	require.True(t, allCNBalancesBelowThreshold(singleLow, 5.0))
 	singleOK := &CNProviderBalanceResult{Balance: 10.0, Currency: "CNY"}
 	require.False(t, allCNBalancesBelowThreshold(singleOK, 5.0))
+}
+
+// cnBalancePauseRepo 在 cnBalanceProbeRepo 基础上记录 SetTempUnschedulable 调用。
+type cnBalancePauseRepo struct {
+	cnBalanceProbeRepo
+	pauseCalled bool
+}
+
+func (r *cnBalancePauseRepo) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, _ string) error {
+	r.pauseCalled = true
+	return nil
+}
+
+// 订阅制不限量账号（同程序中转，remaining<0 → Unlimited）周期检测不得停调：
+// 无数字余额可比，若按阈值比较 -1 会把订阅 key 误停。
+func TestCNProviderBalanceCheckUnlimitedSubscriptionNeverPaused(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: &Account{
+		ID: 52, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode": AccountModePayG,
+			"api_key":      "sk-test",
+			"base_url":     "https://inferaiapi.example.com",
+			"api_protocol": "anthropic",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+			},
+		},
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","remaining":-1,"unit":"USD","isValid":true,"planName":"DeepSeek订阅"}`,
+	}, nil)
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+
+	outcome := svc.checkOne(context.Background(), repo.account, 1.0)
+
+	require.Equal(t, cnBalanceNoChange, outcome)
+}
+
+// 对照：同地址返回有限数字余额且低于阈值时仍正常停调。
+func TestCNProviderBalanceCheckRelayLowBalancePaused(t *testing.T) {
+	repo := &cnBalancePauseRepo{account: &Account{
+		ID: 56, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode": AccountModePayG,
+			"api_key":      "sk-test",
+			"base_url":     "https://inferaiapi.example.com",
+			"api_protocol": "anthropic",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+			},
+		},
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":0.01,"unit":"USD","isValid":true}`,
+	}, nil)
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+
+	outcome := svc.checkOne(context.Background(), repo.account, 1.0)
+
+	require.Equal(t, cnBalancePaused, outcome)
+	require.True(t, repo.pauseCalled)
 }

@@ -155,6 +155,8 @@ export default {
         probeTooltip: 'Query the provider quota endpoint for 5-hour / weekly / monthly rolling window usage',
         balanceProbeTooltip: 'Query the provider balance endpoint for the account balance',
         balanceLow: 'Insufficient balance',
+        unlimited: 'Subscription · Unlimited',
+        unlimitedWithPlan: '{plan} · Unlimited',
         noBalanceEndpoint: 'This platform has no balance query endpoint',
         volcanoAkSkHint: 'Volcano Ark subscription accounts require an Access Key / Secret Key for signing the usage-window probe request. Leave blank to keep existing keys.',
 

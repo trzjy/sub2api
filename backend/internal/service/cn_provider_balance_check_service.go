@@ -234,8 +234,9 @@ func (s *CNProviderBalanceCheckService) checkOne(ctx context.Context, account *A
 	}
 
 	// 双币种（deepseek CNY+USD）任一币种余额达标即可继续调度；仅当全部低于
-	// 阈值（或不可用）才停调。
-	low := !result.Available || allCNBalancesBelowThreshold(result, threshold)
+	// 阈值（或不可用）才停调。同程序中转的订阅制不限量（Unlimited）无数字余额
+	// 可比，永不因阈值停调（否则 remaining=-1 的订阅 key 会被误停）。
+	low := !result.Available || (!result.Unlimited && allCNBalancesBelowThreshold(result, threshold))
 	if low {
 		// 已被（任何来源）停调时不覆盖其 reason。
 		if !account.IsSchedulable() {

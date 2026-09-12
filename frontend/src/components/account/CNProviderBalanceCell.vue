@@ -110,6 +110,19 @@ const snapshotBalances = computed<CNProviderBalanceEntry[]>(() => {
 })
 const balanceLow = computed(() => props.account.extra?.[extraKey('balance_low')] === true)
 
+// 同程序中转的订阅制不限量：后端探测到 remaining<0 时置 unlimited 快照，
+// 这类账号没有可比的数字余额，展示上游分组名而非「¥ -1」。
+const snapshotUnlimited = computed(() => props.account.extra?.[extraKey('balance_unlimited')] === true)
+const snapshotPlanName = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_plan_name')]
+  return typeof v === 'string' ? v.trim() : ''
+})
+const unlimited = computed(() => (data.value?.success ? data.value.unlimited === true : snapshotUnlimited.value))
+const planName = computed(() => {
+  if (data.value?.success && data.value.plan_name) return data.value.plan_name
+  return snapshotPlanName.value
+})
+
 // 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
 const currentEntries = computed<CNProviderBalanceEntry[]>(() => {
   if (data.value && data.value.success) {
@@ -129,6 +142,11 @@ const formatEntry = (entry: CNProviderBalanceEntry): string => {
 }
 
 const balanceLabel = computed(() => {
+  if (unlimited.value) {
+    return planName.value
+      ? t('admin.accounts.cnProviders.unlimitedWithPlan', { plan: planName.value })
+      : t('admin.accounts.cnProviders.unlimited')
+  }
   if (currentEntries.value.length === 0) {
     // 修复:此前误引 admin.accounts.grokBalance(实际嵌套在 usageWindow 下),
     // 未命中时渲染原始 key。CN 供应商使用自己的占位键。

@@ -358,6 +358,8 @@ export default {
         probeTooltip: '请求供应商额度端点，查询 5 小时 / 每周 / 每月滚动窗口用量',
         balanceProbeTooltip: '请求供应商余额端点，查询账户余额',
         balanceLow: '余额不足',
+        unlimited: '订阅 · 不限量',
+        unlimitedWithPlan: '{plan} · 不限量',
         noBalanceEndpoint: '该平台暂无余额查询接口',
         volcanoAkSkHint: '火山方舟订阅号需填写访问密钥（Access Key / Secret Key），用于用量窗口探测的签名鉴权。留空则不修改已保存的密钥。',
         volcanoAkSkGetLink: '获取 AK/SK →',

@@ -44,6 +44,10 @@ export interface CNProviderBalanceResult {
   /** 多币种明细；缺省时按主币种展示。 */
   balances?: CNProviderBalanceEntry[]
   available: boolean
+  /** 同程序中转订阅制不限量（remaining<0）：无数字余额，展示 plan_name。 */
+  unlimited?: boolean
+  /** 上游订阅分组名（如「DeepSeek 订阅」）。 */
+  plan_name?: string
   status_code?: number
   fetched_at: number
   persisted: boolean
