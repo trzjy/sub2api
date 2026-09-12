@@ -174,6 +174,7 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 
 	// 账号级请求头覆写最后应用，使管理员配置优先。
 	account.ApplyHeaderOverrides(req.Header)
+	codeBuddyCaptureOutboundHeaders(req)
 	return req, nil
 }
 

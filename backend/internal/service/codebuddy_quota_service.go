@@ -298,6 +298,7 @@ func (s *CodeBuddyQuotaService) doBillingRequest(ctx context.Context, account *A
 		return nil, 0, err
 	}
 	s.setBillingHeaders(req, account)
+	codeBuddyCaptureOutboundHeaders(req)
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()

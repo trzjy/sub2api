@@ -89,6 +89,7 @@ func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, method, fullURL stri
 	} else {
 		s.setCommonHeaders(req)
 	}
+	codeBuddyCaptureOutboundHeaders(req)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
