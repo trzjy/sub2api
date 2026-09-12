@@ -297,6 +297,12 @@ export default {
       deleteCode: 'Delete Redeem Code',
       deleteCodeConfirm:
         'Are you sure you want to delete this redeem code? This action cannot be undone.',
+      expireAction: 'Void',
+      expireCode: 'Void Redeem Code',
+      expireCodeConfirm:
+        'Are you sure you want to void this redeem code? The buyer will no longer be able to redeem it. This action cannot be undone.',
+      codeExpired: 'Redeem code voided',
+      failedToExpire: 'Failed to void redeem code',
       generateCodesTitle: 'Generate Redeem Codes',
       generatedSuccessfully: 'Generated Successfully',
       codesCreated: '{count} redeem code(s) created',

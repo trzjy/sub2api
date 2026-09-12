@@ -348,7 +348,7 @@ func (s *RedeemCodeRepoSuite) TestBatchUpdate_UsedCodeRejectsSensitiveFields() {
 
 	_, err := s.repo.BatchUpdate(s.ctx, []int64{code.ID}, service.RedeemCodeBatchUpdateFields{Status: &status})
 	s.Require().Error(err)
-	s.Require().True(errors.Is(err, service.ErrRedeemCodeUsed))
+	s.Require().True(errors.Is(err, service.ErrRedeemCodeBatchUpdateBlocked))
 
 	got, getErr := s.repo.GetByID(s.ctx, code.ID)
 	s.Require().NoError(getErr)
@@ -368,11 +368,44 @@ func (s *RedeemCodeRepoSuite) TestBatchUpdate_DeliveredCodeRejectsSensitiveField
 
 	_, err := s.repo.BatchUpdate(s.ctx, []int64{code.ID}, service.RedeemCodeBatchUpdateFields{Status: &status})
 	s.Require().Error(err)
-	s.Require().True(errors.Is(err, service.ErrRedeemCodeUsed))
+	s.Require().True(errors.Is(err, service.ErrRedeemCodeBatchUpdateBlocked))
 
 	got, getErr := s.repo.GetByID(s.ctx, code.ID)
 	s.Require().NoError(getErr)
 	s.Require().Equal(service.StatusDelivered, got.Status)
+}
+
+func (s *RedeemCodeRepoSuite) TestBatchUpdate_DeliveredCodeVoidToExpiredAllowed() {
+	// 买家退款场景：允许把 delivered 仅改为 expired 作废卡密；但连带改有效期仍必须拒绝。
+	code := &service.RedeemCode{
+		Code:   "BATCH-UP-VOID",
+		Type:   service.RedeemTypeSubscription,
+		Value:  0,
+		Status: service.StatusDelivered,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, code))
+	expired := service.StatusExpired
+
+	updated, err := s.repo.BatchUpdate(s.ctx, []int64{code.ID}, service.RedeemCodeBatchUpdateFields{Status: &expired})
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), updated)
+
+	got, getErr := s.repo.GetByID(s.ctx, code.ID)
+	s.Require().NoError(getErr)
+	s.Require().Equal(service.StatusExpired, got.Status)
+
+	// 连带修改有效期不属于纯作废， delivered 码必须拒绝（换新码验证）。
+	code2 := &service.RedeemCode{
+		Code:   "BATCH-UP-VOID2",
+		Type:   service.RedeemTypeSubscription,
+		Value:  0,
+		Status: service.StatusDelivered,
+	}
+	s.Require().NoError(s.repo.Create(s.ctx, code2))
+	fields := service.RedeemCodeBatchUpdateFields{Status: &expired}
+	fields.ExpiresAt.Set = true
+	_, err = s.repo.BatchUpdate(s.ctx, []int64{code2.ID}, fields)
+	s.Require().ErrorIs(err, service.ErrRedeemCodeBatchUpdateBlocked)
 }
 
 // --- Use ---

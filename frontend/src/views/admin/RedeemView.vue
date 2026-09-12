@@ -232,6 +232,22 @@
                 </svg>
                 <span class="text-xs">{{ t('common.delete') }}</span>
               </button>
+              <button
+                v-else-if="row.status === 'delivered'"
+                data-test="expire-code-open"
+                @click="handleExpire(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-900/20 dark:hover:text-amber-400"
+              >
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
+                  />
+                </svg>
+                <span class="text-xs">{{ t('admin.redeem.expireAction') }}</span>
+              </button>
               <span v-else class="text-gray-400 dark:text-dark-500">-</span>
             </div>
           </template>
@@ -305,6 +321,18 @@
       danger
       @confirm="confirmDeleteSelected"
       @cancel="showDeleteSelectedDialog = false"
+    />
+
+    <!-- Expire (Void) Code Dialog -->
+    <ConfirmDialog
+      :show="showExpireDialog"
+      :title="t('admin.redeem.expireCode')"
+      :message="t('admin.redeem.expireCodeConfirm')"
+      :confirm-text="t('admin.redeem.expireAction')"
+      :cancel-text="t('common.cancel')"
+      danger
+      @confirm="confirmExpire"
+      @cancel="showExpireDialog = false"
     />
 
     <!-- Generate Codes Dialog -->
@@ -805,7 +833,8 @@ const filterStatusOptions = computed(() => [
 
 const batchStatusOptions = computed(() => [
   { value: 'unused', label: t('admin.redeem.status.unused') },
-  { value: 'disabled', label: t('admin.redeem.status.disabled') }
+  { value: 'disabled', label: t('admin.redeem.status.disabled') },
+  { value: 'expired', label: t('admin.redeem.status.expired') }
 ])
 
 const batchExpiryModeOptions = computed(() => [
@@ -837,6 +866,8 @@ let abortController: AbortController | null = null
 
 const showDeleteDialog = ref(false)
 const showDeleteSelectedDialog = ref(false)
+const showExpireDialog = ref(false)
+const expiringCode = ref<RedeemCode | null>(null)
 const showBatchUpdateDialog = ref(false)
 const deletingCode = ref<RedeemCode | null>(null)
 const deletingSelected = ref(false)
@@ -1187,7 +1218,7 @@ const handleExportCodes = async () => {
 
     appStore.showSuccess(t('admin.redeem.codesExported'))
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToExport'))
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.redeem.failedToExport'))
     console.error('Error exporting codes:', error)
   }
 }
@@ -1207,8 +1238,28 @@ const confirmDelete = async () => {
     deletingCode.value = null
     loadCodes()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToDelete'))
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.redeem.failedToDelete'))
     console.error('Error deleting code:', error)
+  }
+}
+
+const handleExpire = (code: RedeemCode) => {
+  expiringCode.value = code
+  showExpireDialog.value = true
+}
+
+const confirmExpire = async () => {
+  if (!expiringCode.value) return
+
+  try {
+    await adminAPI.redeem.expire(expiringCode.value.id)
+    appStore.showSuccess(t('admin.redeem.codeExpired'))
+    showExpireDialog.value = false
+    expiringCode.value = null
+    loadCodes()
+  } catch (error: any) {
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.redeem.failedToExpire'))
+    console.error('Error expiring code:', error)
   }
 }
 
@@ -1227,7 +1278,7 @@ const confirmDeleteSelected = async () => {
     clearSelectedCodes()
     loadCodes()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToDeleteSelected'))
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.redeem.failedToDeleteSelected'))
     console.error('Error deleting selected codes:', error)
   } finally {
     deletingSelected.value = false
@@ -1272,7 +1323,7 @@ const handleBatchUpdate = async () => {
     clearSelectedCodes()
     loadCodes()
   } catch (error: any) {
-    appStore.showError(error.response?.data?.detail || t('admin.redeem.failedToBatchUpdate'))
+    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.redeem.failedToBatchUpdate'))
     console.error('Error batch updating codes:', error)
   } finally {
     batchUpdating.value = false

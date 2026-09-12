@@ -16,12 +16,14 @@ import (
 )
 
 var (
-	ErrRedeemCodeNotFound  = infraerrors.NotFound("REDEEM_CODE_NOT_FOUND", "redeem code not found")
-	ErrRedeemCodeUsed      = infraerrors.Conflict("REDEEM_CODE_USED", "redeem code already used")
-	ErrRedeemCodeExpired   = infraerrors.Conflict("REDEEM_CODE_EXPIRED", "redeem code expired")
-	ErrInsufficientBalance = infraerrors.BadRequest("INSUFFICIENT_BALANCE", "insufficient balance")
-	ErrRedeemRateLimited   = infraerrors.TooManyRequests("REDEEM_RATE_LIMITED", "too many failed attempts, please try again later")
-	ErrRedeemCodeLocked    = infraerrors.Conflict("REDEEM_CODE_LOCKED", "redeem code is being processed, please try again")
+	ErrRedeemCodeNotFound = infraerrors.NotFound("REDEEM_CODE_NOT_FOUND", "redeem code not found")
+	ErrRedeemCodeUsed     = infraerrors.Conflict("REDEEM_CODE_USED", "redeem code already used")
+	ErrRedeemCodeExpired  = infraerrors.Conflict("REDEEM_CODE_EXPIRED", "redeem code expired")
+	// ErrRedeemCodeBatchUpdateBlocked 批量修改命中已使用/已发货兑换码时的拦截原因（作废 delivered 除外）。
+	ErrRedeemCodeBatchUpdateBlocked = infraerrors.Conflict("REDEEM_CODE_BATCH_UPDATE_BLOCKED", "选中项包含已使用或已发货的兑换码，不能批量修改状态/有效期/分组")
+	ErrInsufficientBalance          = infraerrors.BadRequest("INSUFFICIENT_BALANCE", "insufficient balance")
+	ErrRedeemRateLimited            = infraerrors.TooManyRequests("REDEEM_RATE_LIMITED", "too many failed attempts, please try again later")
+	ErrRedeemCodeLocked             = infraerrors.Conflict("REDEEM_CODE_LOCKED", "redeem code is being processed, please try again")
 )
 
 const (
@@ -310,9 +312,9 @@ func (s *RedeemService) BatchUpdate(ctx context.Context, input *RedeemCodeBatchU
 
 	if input.Fields.Status != nil {
 		switch *input.Fields.Status {
-		case StatusUnused, StatusDisabled:
+		case StatusUnused, StatusDisabled, StatusExpired:
 		default:
-			return nil, infraerrors.BadRequest("REDEEM_CODE_STATUS_INVALID", "status must be unused or disabled")
+			return nil, infraerrors.BadRequest("REDEEM_CODE_STATUS_INVALID", "status must be unused, disabled or expired")
 		}
 	}
 	if input.Fields.ExpiresAt.Set && input.Fields.ExpiresAt.Value != nil {

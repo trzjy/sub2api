@@ -1308,8 +1308,11 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 }
 
 func (s *adminServiceImpl) DeleteRedeemCode(ctx context.Context, id int64) error {
+	if err := s.checkRedeemCodeDeletable(ctx, id); err != nil {
+		return err
+	}
 	if err := s.redeemCodeRepo.Delete(ctx, id); err != nil {
-		return fmt.Errorf("delete redeem code %d: %w", id, err)
+		return translateRedeemCodeDeleteError(id, err)
 	}
 	return nil
 }
@@ -1317,12 +1320,39 @@ func (s *adminServiceImpl) DeleteRedeemCode(ctx context.Context, id int64) error
 func (s *adminServiceImpl) BatchDeleteRedeemCodes(ctx context.Context, ids []int64) (int64, error) {
 	var deleted int64
 	for _, id := range ids {
+		if err := s.checkRedeemCodeDeletable(ctx, id); err != nil {
+			return deleted, err
+		}
 		if err := s.redeemCodeRepo.Delete(ctx, id); err != nil {
-			return deleted, fmt.Errorf("delete redeem code %d: %w", id, err)
+			return deleted, translateRedeemCodeDeleteError(id, err)
 		}
 		deleted++
 	}
 	return deleted, nil
+}
+
+// checkRedeemCodeDeletable 在删除前给出具体原因：已使用/已发货的兑换码不允许删除。
+func (s *adminServiceImpl) checkRedeemCodeDeletable(ctx context.Context, id int64) error {
+	code, err := s.redeemCodeRepo.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("delete redeem code %d: %w", id, err)
+	}
+	switch code.Status {
+	case StatusUsed:
+		return infraerrors.BadRequest("REDEEM_CODE_DELETE_USED", fmt.Sprintf("兑换码 #%d 已被使用，不能删除", id))
+	case StatusDelivered:
+		return infraerrors.BadRequest("REDEEM_CODE_DELETE_DELIVERED", fmt.Sprintf("兑换码 #%d 已随订单发货，存在发货记录，不能删除；如需使其失效请使用作废", id))
+	}
+	return nil
+}
+
+// translateRedeemCodeDeleteError 兜底翻译外键约束：作废后的兑换码仍被订单领取记录引用时，
+// ent 只会抛出 constraint failed，这里转换为可读的拦截原因。
+func translateRedeemCodeDeleteError(id int64, err error) error {
+	if strings.Contains(err.Error(), "fk_xianyu_order_claims_redeem_code") {
+		return infraerrors.BadRequest("REDEEM_CODE_DELETE_DELIVERED", fmt.Sprintf("兑换码 #%d 已随订单发货，存在发货记录，不能删除；如需使其失效请使用作废", id))
+	}
+	return fmt.Errorf("delete redeem code %d: %w", id, err)
 }
 
 func (s *adminServiceImpl) ExpireRedeemCode(ctx context.Context, id int64) (*RedeemCode, error) {

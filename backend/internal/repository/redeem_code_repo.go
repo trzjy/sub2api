@@ -300,10 +300,17 @@ func (r *redeemCodeRepository) batchUpdate(ctx context.Context, client *dbent.Cl
 		return 0, service.ErrRedeemCodeNotFound
 	}
 	if fields.TouchesUsedSensitiveFields() {
+		// 唯一放行 delivered 的场景：仅把状态改为 expired（买家退款后作废已发货卡密），
+		// 不连带修改有效期/分组。used 一律禁止，避免破坏已兑换记录。
+		voidOnly := fields.Status != nil && *fields.Status == service.StatusExpired &&
+			!fields.ExpiresAt.Set && !fields.GroupID.Set
 		for _, code := range existing {
-			// delivered = 已发货待兑换的权益，禁止批量改状态/有效期/分组，防止超发或损害买家。
-			if code.Status == service.StatusUsed || code.Status == service.StatusDelivered {
-				return 0, service.ErrRedeemCodeUsed
+			if code.Status == service.StatusUsed {
+				return 0, service.ErrRedeemCodeBatchUpdateBlocked
+			}
+			// delivered = 已发货待兑换的权益，除作废外禁止批量改状态/有效期/分组，防止超发或损害买家。
+			if code.Status == service.StatusDelivered && !voidOnly {
+				return 0, service.ErrRedeemCodeBatchUpdateBlocked
 			}
 		}
 	}

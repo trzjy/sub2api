@@ -413,6 +413,8 @@ func (s *proxyRepoStub) CountExpiringSoon(_ context.Context, _ time.Time) (int64
 type redeemRepoStub struct {
 	deleteErrByID map[int64]error
 	deletedIDs    []int64
+	statusByID    map[int64]string
+	getByIDErr    error
 
 	batchUpdateIDs    []int64
 	batchUpdateFields RedeemCodeBatchUpdateFields
@@ -430,7 +432,14 @@ func (s *redeemRepoStub) CreateBatch(ctx context.Context, codes []RedeemCode) er
 }
 
 func (s *redeemRepoStub) GetByID(ctx context.Context, id int64) (*RedeemCode, error) {
-	panic("unexpected GetByID call")
+	if s.getByIDErr != nil {
+		return nil, s.getByIDErr
+	}
+	status := s.statusByID[id]
+	if status == "" {
+		status = StatusUnused
+	}
+	return &RedeemCode{ID: id, Status: status}, nil
 }
 
 func (s *redeemRepoStub) GetByCode(ctx context.Context, code string) (*RedeemCode, error) {
@@ -819,4 +828,52 @@ func TestAdminService_BatchDeleteRedeemCodes_PartialFailures(t *testing.T) {
 	require.ErrorIs(t, err, dbErr)
 	require.Equal(t, int64(1), deleted)
 	require.Equal(t, []int64{1, 2}, repo.deletedIDs)
+}
+
+func TestAdminService_DeleteRedeemCode_UsedBlocked(t *testing.T) {
+	repo := &redeemRepoStub{statusByID: map[int64]string{7: StatusUsed}}
+	svc := &adminServiceImpl{redeemCodeRepo: repo}
+
+	err := svc.DeleteRedeemCode(context.Background(), 7)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "已被使用")
+	require.Empty(t, repo.deletedIDs, "已使用的兑换码不应进入删除")
+}
+
+func TestAdminService_DeleteRedeemCode_DeliveredBlocked(t *testing.T) {
+	repo := &redeemRepoStub{statusByID: map[int64]string{8: StatusDelivered}}
+	svc := &adminServiceImpl{redeemCodeRepo: repo}
+
+	err := svc.DeleteRedeemCode(context.Background(), 8)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "已随订单发货")
+	require.Contains(t, err.Error(), "作废")
+	require.Empty(t, repo.deletedIDs, "已发货的兑换码不应进入删除")
+}
+
+func TestAdminService_DeleteRedeemCode_OrderClaimFKTranslated(t *testing.T) {
+	// 已作废的兑换码仍被 xianyu_order_claims 引用：ent 只报 constraint failed，
+	// 必须转换为可读的拦截原因而不是原始 500。
+	fkErr := errors.New(`ent: constraint failed: pq: update or delete on table "redeem_codes" violates foreign key constraint "fk_xianyu_order_claims_redeem_code" on table "xianyu_order_claims"`)
+	repo := &redeemRepoStub{
+		statusByID:    map[int64]string{9: StatusExpired},
+		deleteErrByID: map[int64]error{9: fkErr},
+	}
+	svc := &adminServiceImpl{redeemCodeRepo: repo}
+
+	err := svc.DeleteRedeemCode(context.Background(), 9)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "已随订单发货")
+	require.Contains(t, err.Error(), "作废")
+}
+
+func TestAdminService_BatchDeleteRedeemCodes_StopsAtBlockedCode(t *testing.T) {
+	repo := &redeemRepoStub{statusByID: map[int64]string{2: StatusDelivered}}
+	svc := &adminServiceImpl{redeemCodeRepo: repo}
+
+	deleted, err := svc.BatchDeleteRedeemCodes(context.Background(), []int64{1, 2, 3})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "已随订单发货")
+	require.Equal(t, int64(1), deleted, "拦截前已删除的计数应保留")
+	require.Equal(t, []int64{1}, repo.deletedIDs, "被拦截的码及其后的码都不应删除")
 }
