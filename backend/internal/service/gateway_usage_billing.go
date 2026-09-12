@@ -440,7 +440,28 @@ func syncBalanceCacheAfterDeduction(ctx context.Context, p *postUsageBillingPara
 		}
 		return
 	}
-	deps.billingCacheService.QueueDeductBalance(p.User.ID, p.Cost.ActualCost)
+	// 只同步实际从充值余额扣除的部分；福利余额承担的部分不动充值缓存。
+	paid := paidBalanceCost(p, result)
+	if paid <= 0 {
+		return
+	}
+	deps.billingCacheService.QueueDeductBalance(p.User.ID, paid)
+}
+
+// paidBalanceCost 本次实际从充值余额（users.balance）扣除的金额。
+// 福利余额优先承担的部分（WelfareCost）不计入，避免充值缓存/低余额通知按全额误算。
+func paidBalanceCost(p *postUsageBillingParams, result *UsageBillingApplyResult) float64 {
+	if p == nil || p.Cost == nil {
+		return 0
+	}
+	paid := p.Cost.ActualCost
+	if result != nil {
+		paid -= result.WelfareCost
+	}
+	if paid < 0 {
+		paid = 0
+	}
+	return paid
 }
 
 // notifyBalanceLow sends balance low notification after deduction.
@@ -462,23 +483,28 @@ func notifyBalanceLow(p *postUsageBillingParams, deps *billingDeps, result *Usag
 		return
 	}
 
+	// 纯福利扣费不触碰充值余额，不产生低余额通知。
+	paid := paidBalanceCost(p, result)
+	if paid <= 0 {
+		return
+	}
 	oldBalance := resolveOldBalance(p, result)
 	slog.Debug("notifyBalanceLow: calling CheckBalanceAfterDeduction",
 		"user_id", p.User.ID,
 		"old_balance", oldBalance,
-		"cost", p.Cost.ActualCost,
+		"cost", paid,
 		"notify_enabled", p.User.BalanceNotifyEnabled,
 		"threshold", p.User.BalanceNotifyThreshold,
 		"result_has_new_balance", result != nil && result.NewBalance != nil,
 	)
-	deps.balanceNotifyService.CheckBalanceAfterDeduction(context.Background(), p.User, oldBalance, p.Cost.ActualCost)
+	deps.balanceNotifyService.CheckBalanceAfterDeduction(context.Background(), p.User, oldBalance, paid)
 }
 
 // resolveOldBalance returns the pre-deduction balance.
-// Prefers the DB transaction result (newBalance + cost) over snapshot.
+// Prefers the DB transaction result (newBalance + paid cost) over snapshot.
 func resolveOldBalance(p *postUsageBillingParams, result *UsageBillingApplyResult) float64 {
 	if result != nil && result.NewBalance != nil {
-		return *result.NewBalance + p.Cost.ActualCost
+		return *result.NewBalance + paidBalanceCost(p, result)
 	}
 	// Legacy fallback: snapshot balance from request context
 	return p.User.Balance

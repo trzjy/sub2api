@@ -154,6 +154,8 @@ const (
 	EdgeAPIKeys = "api_keys"
 	// EdgeRedeemCodes holds the string denoting the redeem_codes edge name in mutations.
 	EdgeRedeemCodes = "redeem_codes"
+	// EdgeRedeemCodeGroups holds the string denoting the redeem_code_groups edge name in mutations.
+	EdgeRedeemCodeGroups = "redeem_code_groups"
 	// EdgeSubscriptions holds the string denoting the subscriptions edge name in mutations.
 	EdgeSubscriptions = "subscriptions"
 	// EdgeUsageLogs holds the string denoting the usage_logs edge name in mutations.
@@ -182,6 +184,13 @@ const (
 	RedeemCodesInverseTable = "redeem_codes"
 	// RedeemCodesColumn is the table column denoting the redeem_codes relation/edge.
 	RedeemCodesColumn = "group_id"
+	// RedeemCodeGroupsTable is the table that holds the redeem_code_groups relation/edge.
+	RedeemCodeGroupsTable = "redeem_code_groups"
+	// RedeemCodeGroupsInverseTable is the table name for the RedeemCodeGroup entity.
+	// It exists in this package in order to avoid circular dependency with the "redeemcodegroup" package.
+	RedeemCodeGroupsInverseTable = "redeem_code_groups"
+	// RedeemCodeGroupsColumn is the table column denoting the redeem_code_groups relation/edge.
+	RedeemCodeGroupsColumn = "group_id"
 	// SubscriptionsTable is the table that holds the subscriptions relation/edge.
 	SubscriptionsTable = "user_subscriptions"
 	// SubscriptionsInverseTable is the table name for the UserSubscription entity.
@@ -772,6 +781,20 @@ func ByRedeemCodes(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	}
 }
 
+// ByRedeemCodeGroupsCount orders the results by redeem_code_groups count.
+func ByRedeemCodeGroupsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newRedeemCodeGroupsStep(), opts...)
+	}
+}
+
+// ByRedeemCodeGroups orders the results by redeem_code_groups terms.
+func ByRedeemCodeGroups(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newRedeemCodeGroupsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+
 // BySubscriptionsCount orders the results by subscriptions count.
 func BySubscriptionsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -867,6 +890,13 @@ func newRedeemCodesStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(RedeemCodesInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, RedeemCodesTable, RedeemCodesColumn),
+	)
+}
+func newRedeemCodeGroupsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(RedeemCodeGroupsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, RedeemCodeGroupsTable, RedeemCodeGroupsColumn),
 	)
 }
 func newSubscriptionsStep() *sqlgraph.Step {

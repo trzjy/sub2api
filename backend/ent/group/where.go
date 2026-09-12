@@ -2741,6 +2741,29 @@ func HasRedeemCodesWith(preds ...predicate.RedeemCode) predicate.Group {
 	})
 }
 
+// HasRedeemCodeGroups applies the HasEdge predicate on the "redeem_code_groups" edge.
+func HasRedeemCodeGroups() predicate.Group {
+	return predicate.Group(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, RedeemCodeGroupsTable, RedeemCodeGroupsColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasRedeemCodeGroupsWith applies the HasEdge predicate on the "redeem_code_groups" edge with a given conditions (other predicates).
+func HasRedeemCodeGroupsWith(preds ...predicate.RedeemCodeGroup) predicate.Group {
+	return predicate.Group(func(s *sql.Selector) {
+		step := newRedeemCodeGroupsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // HasSubscriptions applies the HasEdge predicate on the "subscriptions" edge.
 func HasSubscriptions() predicate.Group {
 	return predicate.Group(func(s *sql.Selector) {

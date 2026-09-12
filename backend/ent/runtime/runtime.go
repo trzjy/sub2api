@@ -31,7 +31,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
 	"github.com/Wei-Shaw/sub2api/ent/schema"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
@@ -45,6 +47,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/ent/welfarebalance"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
@@ -1721,6 +1724,24 @@ func init() {
 	proxyDescExpiryWarnDays := proxyFields[10].Descriptor()
 	// proxy.DefaultExpiryWarnDays holds the default value on creation for the expiry_warn_days field.
 	proxy.DefaultExpiryWarnDays = proxyDescExpiryWarnDays.Default.(int)
+	redeembatchFields := schema.RedeemBatch{}.Fields()
+	_ = redeembatchFields
+	// redeembatchDescName is the schema descriptor for name field.
+	redeembatchDescName := redeembatchFields[0].Descriptor()
+	// redeembatch.DefaultName holds the default value on creation for the name field.
+	redeembatch.DefaultName = redeembatchDescName.Default.(string)
+	// redeembatchDescCodeCount is the schema descriptor for code_count field.
+	redeembatchDescCodeCount := redeembatchFields[2].Descriptor()
+	// redeembatch.DefaultCodeCount holds the default value on creation for the code_count field.
+	redeembatch.DefaultCodeCount = redeembatchDescCodeCount.Default.(int)
+	// redeembatchDescCreatedBy is the schema descriptor for created_by field.
+	redeembatchDescCreatedBy := redeembatchFields[3].Descriptor()
+	// redeembatch.DefaultCreatedBy holds the default value on creation for the created_by field.
+	redeembatch.DefaultCreatedBy = redeembatchDescCreatedBy.Default.(int64)
+	// redeembatchDescCreatedAt is the schema descriptor for created_at field.
+	redeembatchDescCreatedAt := redeembatchFields[4].Descriptor()
+	// redeembatch.DefaultCreatedAt holds the default value on creation for the created_at field.
+	redeembatch.DefaultCreatedAt = redeembatchDescCreatedAt.Default.(func() time.Time)
 	redeemcodeFields := schema.RedeemCode{}.Fields()
 	_ = redeemcodeFields
 	// redeemcodeDescCode is the schema descriptor for code field.
@@ -1765,6 +1786,12 @@ func init() {
 	redeemcodeDescValidityDays := redeemcodeFields[10].Descriptor()
 	// redeemcode.DefaultValidityDays holds the default value on creation for the validity_days field.
 	redeemcode.DefaultValidityDays = redeemcodeDescValidityDays.Default.(int)
+	redeemcodegroupFields := schema.RedeemCodeGroup{}.Fields()
+	_ = redeemcodegroupFields
+	// redeemcodegroupDescValidityDays is the schema descriptor for validity_days field.
+	redeemcodegroupDescValidityDays := redeemcodegroupFields[2].Descriptor()
+	// redeemcodegroup.DefaultValidityDays holds the default value on creation for the validity_days field.
+	redeemcodegroup.DefaultValidityDays = redeemcodegroupDescValidityDays.Default.(int)
 	securitysecretMixin := schema.SecuritySecret{}.Mixin()
 	securitysecretMixinFields0 := securitysecretMixin[0].Fields()
 	_ = securitysecretMixinFields0
@@ -2482,6 +2509,32 @@ func init() {
 	usersubscriptionDescAssignedAt := usersubscriptionFields[12].Descriptor()
 	// usersubscription.DefaultAssignedAt holds the default value on creation for the assigned_at field.
 	usersubscription.DefaultAssignedAt = usersubscriptionDescAssignedAt.Default.(func() time.Time)
+	welfarebalanceFields := schema.WelfareBalance{}.Fields()
+	_ = welfarebalanceFields
+	// welfarebalanceDescAmountInitial is the schema descriptor for amount_initial field.
+	welfarebalanceDescAmountInitial := welfarebalanceFields[3].Descriptor()
+	// welfarebalance.DefaultAmountInitial holds the default value on creation for the amount_initial field.
+	welfarebalance.DefaultAmountInitial = welfarebalanceDescAmountInitial.Default.(float64)
+	// welfarebalanceDescAmountRemaining is the schema descriptor for amount_remaining field.
+	welfarebalanceDescAmountRemaining := welfarebalanceFields[4].Descriptor()
+	// welfarebalance.DefaultAmountRemaining holds the default value on creation for the amount_remaining field.
+	welfarebalance.DefaultAmountRemaining = welfarebalanceDescAmountRemaining.Default.(float64)
+	// welfarebalanceDescStatus is the schema descriptor for status field.
+	welfarebalanceDescStatus := welfarebalanceFields[5].Descriptor()
+	// welfarebalance.DefaultStatus holds the default value on creation for the status field.
+	welfarebalance.DefaultStatus = welfarebalanceDescStatus.Default.(string)
+	// welfarebalance.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	welfarebalance.StatusValidator = welfarebalanceDescStatus.Validators[0].(func(string) error)
+	// welfarebalanceDescCreatedAt is the schema descriptor for created_at field.
+	welfarebalanceDescCreatedAt := welfarebalanceFields[7].Descriptor()
+	// welfarebalance.DefaultCreatedAt holds the default value on creation for the created_at field.
+	welfarebalance.DefaultCreatedAt = welfarebalanceDescCreatedAt.Default.(func() time.Time)
+	// welfarebalanceDescUpdatedAt is the schema descriptor for updated_at field.
+	welfarebalanceDescUpdatedAt := welfarebalanceFields[8].Descriptor()
+	// welfarebalance.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	welfarebalance.DefaultUpdatedAt = welfarebalanceDescUpdatedAt.Default.(func() time.Time)
+	// welfarebalance.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	welfarebalance.UpdateDefaultUpdatedAt = welfarebalanceDescUpdatedAt.UpdateDefault.(func() time.Time)
 }
 
 const (

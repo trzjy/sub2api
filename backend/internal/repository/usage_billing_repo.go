@@ -179,12 +179,20 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 	}
 
 	if cmd.BalanceCost > 0 {
-		newBalance, sufficient, err := deductUsageBillingBalance(ctx, tx, cmd.UserID, cmd.BalanceCost)
+		// 福利余额优先扣减（离清零最近的行先扣），不足部分再走充值余额。
+		welfareDeducted, remaining, err := deductWelfareBalances(ctx, tx, cmd.UserID, cmd.BalanceCost)
 		if err != nil {
 			return err
 		}
-		result.NewBalance = &newBalance
-		result.BalanceOverdrafted = !sufficient
+		result.WelfareCost = welfareDeducted
+		if remaining > 0 {
+			newBalance, sufficient, err := deductUsageBillingBalance(ctx, tx, cmd.UserID, remaining)
+			if err != nil {
+				return err
+			}
+			result.NewBalance = &newBalance
+			result.BalanceOverdrafted = !sufficient
+		}
 	}
 
 	if cmd.APIKeyQuotaCost > 0 {
@@ -238,6 +246,73 @@ func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscrip
 		return nil
 	}
 	return service.ErrSubscriptionNotFound
+}
+
+// deductWelfareBalances 优先扣减用户可用福利余额（status='active' 且未过期），
+// 按 expires_at 最近优先逐行扣；扣尽的行置 status='exhausted'。
+// 返回本次福利扣减总额与仍需从充值余额扣除的剩余金额。
+// 过期但清零任务尚未扫到的行由 WHERE expires_at > NOW() 自然跳过。
+func deductWelfareBalances(ctx context.Context, tx *sql.Tx, userID int64, amount float64) (deducted float64, remaining float64, err error) {
+	remaining = amount
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, amount_remaining
+		FROM welfare_balances
+		WHERE user_id = $1
+			AND status = 'active'
+			AND amount_remaining > 0
+			AND expires_at > NOW()
+		ORDER BY expires_at ASC, id ASC
+		FOR UPDATE
+	`, userID)
+	if err != nil {
+		return 0, amount, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type welfareRow struct {
+		id        int64
+		remaining float64
+	}
+	var targets []welfareRow
+	for rows.Next() {
+		var row welfareRow
+		if err := rows.Scan(&row.id, &row.remaining); err != nil {
+			return 0, amount, err
+		}
+		targets = append(targets, row)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, amount, err
+	}
+
+	for _, row := range targets {
+		if remaining <= 0 {
+			break
+		}
+		deduct := row.remaining
+		if deduct > remaining {
+			deduct = remaining
+		}
+		// 与计费主路径同一量化口径（NUMERIC(20,8)），避免 float 尾差产生
+		// 粉尘扣减（如 0.3-0.1=0.1999...98 继续触发充值余额扣减）。
+		deduct = service.QuantizeUsageBillingAmount(deduct)
+		newRemaining := service.QuantizeUsageBillingAmount(row.remaining - deduct)
+		newStatus := "active"
+		if newRemaining <= 0 {
+			newRemaining = 0
+			newStatus = "exhausted"
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE welfare_balances
+			SET amount_remaining = $1, status = $2, updated_at = NOW()
+			WHERE id = $3
+		`, newRemaining, newStatus, row.id); err != nil {
+			return 0, amount, err
+		}
+		deducted = service.QuantizeUsageBillingAmount(deducted + deduct)
+		remaining = service.QuantizeUsageBillingAmount(remaining - deduct)
+	}
+	return deducted, remaining, nil
 }
 
 func deductUsageBillingBalance(ctx context.Context, tx *sql.Tx, userID int64, amount float64) (float64, bool, error) {

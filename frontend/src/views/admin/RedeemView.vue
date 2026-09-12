@@ -1,6 +1,114 @@
 <template>
   <AppLayout>
-    <TablePageLayout>
+    <!-- Tab switcher: 福利批次 / 兑换码 -->
+    <div class="mb-4 flex flex-wrap gap-2">
+      <button
+        type="button"
+        class="btn"
+        :class="activeTab === 'welfare' ? 'btn-primary' : 'btn-secondary'"
+        @click="switchTab('welfare')"
+      >
+        {{ t('admin.redeem.tabs.welfare') }}
+      </button>
+      <button
+        type="button"
+        class="btn"
+        :class="activeTab === 'codes' ? 'btn-primary' : 'btn-secondary'"
+        @click="switchTab('codes')"
+      >
+        {{ t('admin.redeem.tabs.codes') }}
+      </button>
+    </div>
+
+    <!-- ==================== 福利批次 Tab ==================== -->
+    <TablePageLayout v-if="activeTab === 'welfare'">
+      <template #filters>
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <button
+              @click="loadWelfareBatches"
+              :disabled="welfareLoading"
+              class="btn btn-secondary"
+              :title="t('common.refresh')"
+            >
+              <Icon name="refresh" size="md" :class="welfareLoading ? 'animate-spin' : ''" />
+            </button>
+            <button data-test="create-welfare-batch-open" @click="openWelfareDialog" class="btn btn-primary">
+              {{ t('admin.redeem.welfare.createBatch') }}
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <template #table>
+        <DataTable :columns="welfareColumns" :data="welfareBatches" :loading="welfareLoading">
+          <template #cell-name="{ value }">
+            <span class="text-sm font-medium text-gray-900 dark:text-white">{{ value }}</span>
+          </template>
+
+          <template #cell-created_at="{ value }">
+            <span class="text-sm text-gray-500 dark:text-dark-400">{{ formatDateTime(value) }}</span>
+          </template>
+
+          <template #cell-code_count="{ value }">
+            <span class="text-sm text-gray-900 dark:text-white">{{ value }}</span>
+          </template>
+
+          <template #cell-usage="{ row }">
+            <span class="text-sm text-gray-900 dark:text-white">
+              {{ row.used_count }} / {{ row.remaining_count }}
+            </span>
+          </template>
+
+          <template #cell-cleared_amount="{ value }">
+            <span class="text-sm text-gray-900 dark:text-white">${{ Number(value || 0).toFixed(2) }}</span>
+          </template>
+
+          <template #cell-actions="{ row }">
+            <div class="flex items-center gap-2">
+              <button
+                data-test="copy-unused-codes"
+                @click="copyUnusedBatchCodes(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 dark:hover:bg-primary-900/20 dark:hover:text-primary-400"
+              >
+                <Icon name="copy" size="sm" :stroke-width="2" />
+                <span class="text-xs">{{ t('admin.redeem.welfare.copyUnused') }}</span>
+              </button>
+              <button
+                data-test="export-batch-csv"
+                @click="exportBatchCsv(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 dark:hover:bg-primary-900/20 dark:hover:text-primary-400"
+              >
+                <Icon name="download" size="sm" :stroke-width="2" />
+                <span class="text-xs">{{ t('admin.redeem.exportCsv') }}</span>
+              </button>
+              <button
+                data-test="view-batch-codes"
+                @click="openBatchCodesDialog(row)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 dark:hover:bg-primary-900/20 dark:hover:text-primary-400"
+              >
+                <Icon name="eye" size="sm" :stroke-width="2" />
+                <span class="text-xs">{{ t('admin.redeem.welfare.viewCodes') }}</span>
+              </button>
+            </div>
+          </template>
+        </DataTable>
+      </template>
+
+      <template #pagination>
+        <Pagination
+          v-if="welfarePagination.total > 0"
+          :page="welfarePagination.page"
+          :total="welfarePagination.total"
+          :page-size="welfarePagination.page_size"
+          @update:page="handleWelfarePageChange"
+          @update:pageSize="handleWelfarePageSizeChange"
+        />
+      </template>
+    </TablePageLayout>
+
+    <!-- ==================== 兑换码 Tab ==================== -->
+    <TablePageLayout v-else>
       <template #filters>
         <div class="flex flex-wrap items-center gap-3">
           <!-- Left: Search + Filters -->
@@ -170,6 +278,10 @@
                 <span v-if="row.group" class="ml-1 text-xs text-gray-500 dark:text-gray-400"
                   >({{ row.group.name }})</span
                 >
+              </template>
+              <template v-else-if="row.type === 'welfare'">
+                <span v-if="value > 0">${{ value.toFixed(2) }}</span>
+                <span v-else>-</span>
               </template>
               <template v-else>{{ value }}</template>
             </span>
@@ -672,6 +784,197 @@
         </div>
       </div>
     </Teleport>
+    <!-- Create Welfare Batch Dialog -->
+    <Teleport to="body">
+      <div v-if="showWelfareDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div class="fixed inset-0 bg-black/50" @click="closeWelfareDialog"></div>
+        <div
+          class="relative z-10 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800"
+        >
+          <h2 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">
+            {{ t('admin.redeem.welfare.createTitle') }}
+          </h2>
+          <form data-test="create-welfare-batch-form" class="space-y-4" @submit.prevent="handleCreateWelfareBatch">
+            <div>
+              <label class="input-label">{{ t('admin.redeem.welfare.batchName') }}</label>
+              <input v-model.trim="welfareForm.name" type="text" required class="input" />
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.redeem.welfare.selectGroups') }}</label>
+              <div
+                class="max-h-56 space-y-2 overflow-y-auto rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+              >
+                <p
+                  v-if="subscriptionGroupOptions.length === 0"
+                  class="text-sm text-gray-400 dark:text-gray-500"
+                >
+                  {{ t('admin.redeem.welfare.noGroups') }}
+                </p>
+                <div
+                  v-for="option in subscriptionGroupOptions"
+                  :key="option.value"
+                  class="flex items-center justify-between gap-3"
+                >
+                  <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                      :checked="welfareForm.groups[option.value] !== undefined"
+                      @change="toggleWelfareGroup(option.value, $event)"
+                    />
+                    <GroupBadge
+                      :name="option.label"
+                      :platform="option.platform"
+                      :subscription-type="option.subscriptionType"
+                      :rate-multiplier="option.rate"
+                    />
+                  </label>
+                  <Select
+                    v-if="welfareForm.groups[option.value] !== undefined"
+                    v-model="welfareForm.groups[option.value]"
+                    :options="welfareValidityOptions"
+                    class="w-36"
+                  />
+                </div>
+              </div>
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.redeem.welfare.amountRange') }}</label>
+              <div class="grid grid-cols-2 gap-2">
+                <input
+                  v-model="welfareForm.amountMin"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  class="input"
+                  :placeholder="t('admin.redeem.welfare.amountMinPlaceholder')"
+                />
+                <input
+                  v-model="welfareForm.amountMax"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  class="input"
+                  :placeholder="t('admin.redeem.welfare.amountMaxPlaceholder')"
+                />
+              </div>
+              <p class="input-hint">{{ t('admin.redeem.welfare.amountRangeHint') }}</p>
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.redeem.count') }}</label>
+              <input
+                v-model.number="welfareForm.count"
+                type="number"
+                min="1"
+                max="1000"
+                required
+                class="input"
+              />
+            </div>
+            <div class="flex justify-end gap-3 pt-2">
+              <button type="button" @click="closeWelfareDialog" class="btn btn-secondary">
+                {{ t('common.cancel') }}
+              </button>
+              <button
+                data-test="create-welfare-batch-submit"
+                type="submit"
+                :disabled="welfareSubmitting"
+                class="btn btn-primary"
+              >
+                {{ welfareSubmitting ? t('common.submitting') : t('common.create') }}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Welfare Batch Codes Dialog -->
+    <Teleport to="body">
+      <div v-if="showBatchCodesDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div class="fixed inset-0 bg-black/50" @click="closeBatchCodesDialog"></div>
+        <div class="relative z-10 w-full max-w-lg rounded-xl bg-white shadow-xl dark:bg-dark-800">
+          <div
+            class="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-dark-600"
+          >
+            <div>
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+                {{ t('admin.redeem.welfare.codesTitle', { name: viewingBatch?.name ?? '' }) }}
+              </h2>
+              <p class="text-sm text-gray-500 dark:text-gray-400">
+                {{ t('admin.redeem.welfare.codesCount', { count: batchCodes.length }) }}
+              </p>
+            </div>
+            <button
+              @click="closeBatchCodesDialog"
+              class="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-dark-700 dark:hover:text-gray-300"
+            >
+              <Icon name="x" size="md" :stroke-width="2" />
+            </button>
+          </div>
+          <div class="max-h-96 overflow-y-auto p-5">
+            <div v-if="batchCodesLoading" class="flex justify-center py-8">
+              <Icon name="refresh" size="lg" class="animate-spin text-gray-400" />
+            </div>
+            <p
+              v-else-if="batchCodes.length === 0"
+              class="py-8 text-center text-sm text-gray-400 dark:text-gray-500"
+            >
+              {{ t('admin.redeem.welfare.noCodes') }}
+            </p>
+            <div v-else class="space-y-2">
+              <div
+                v-for="batchCode in batchCodes"
+                :key="batchCode.id"
+                class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2 dark:border-dark-600"
+              >
+                <code class="font-mono text-sm text-gray-900 dark:text-gray-100">{{
+                  batchCode.code
+                }}</code>
+                <span
+                  :class="[
+                    'badge',
+                    batchCode.status === 'unused'
+                      ? 'badge-success'
+                      : batchCode.status === 'used'
+                        ? 'badge-gray'
+                        : 'badge-danger'
+                  ]"
+                >
+                  {{ t('admin.redeem.status.' + batchCode.status) }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div
+            class="flex justify-end gap-2 rounded-b-xl border-t border-gray-200 bg-gray-50 px-5 py-4 dark:border-dark-600 dark:bg-dark-700/50"
+          >
+            <button
+              @click="copyViewingBatchCodes"
+              :disabled="batchCodes.length === 0"
+              :class="[
+                'btn flex items-center gap-2 transition-all',
+                copiedBatchCodes ? 'btn-success' : 'btn-secondary'
+              ]"
+            >
+              <Icon v-if="!copiedBatchCodes" name="copy" size="sm" :stroke-width="2" />
+              <svg v-else class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+              {{ copiedBatchCodes ? t('admin.redeem.copied') : t('admin.redeem.copyAll') }}
+            </button>
+            <button @click="closeBatchCodesDialog" class="btn btn-primary">
+              {{ t('common.close') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </AppLayout>
 </template>
 
@@ -697,7 +1000,8 @@ import type {
   Group,
   GroupPlatform,
   SubscriptionType,
-  BatchUpdateRedeemCodeFields
+  BatchUpdateRedeemCodeFields,
+  WelfareBatch
 } from '@/types'
 import type { Column } from '@/components/common/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -726,7 +1030,8 @@ interface GroupOption {
 
 const showGenerateDialog = ref(false)
 const showResultDialog = ref(false)
-const generatedCodes = ref<RedeemCode[]>([])
+// 生成结果统一存卡密字符串（普通兑换码与福利批次共用结果弹窗）
+const generatedCodes = ref<string[]>([])
 const subscriptionGroups = ref<Group[]>([])
 
 // 订阅类型分组选项
@@ -749,7 +1054,7 @@ const batchGroupOptions = computed(() => [
 ])
 
 const generatedCodesText = computed(() => {
-  return generatedCodes.value.map((code) => code.code).join('\n')
+  return generatedCodes.value.join('\n')
 })
 
 const textareaHeight = computed(() => {
@@ -819,7 +1124,8 @@ const filterTypeOptions = computed(() => [
   { value: 'balance', label: t('admin.redeem.balance') },
   { value: 'concurrency', label: t('admin.redeem.concurrency') },
   { value: 'subscription', label: t('admin.redeem.subscription') },
-  { value: 'invitation', label: t('admin.redeem.invitation') }
+  { value: 'invitation', label: t('admin.redeem.invitation') },
+  { value: 'welfare', label: t('admin.redeem.welfareCard') }
 ])
 
 const filterStatusOptions = computed(() => [
@@ -1176,7 +1482,7 @@ const handleGenerateCodes = async () => {
       expiresInDays
     )
     showGenerateDialog.value = false
-    generatedCodes.value = result
+    generatedCodes.value = result.map((code) => code.code)
     showResultDialog.value = true
     // 重置表单
     generateForm.group_id = null
@@ -1330,6 +1636,267 @@ const handleBatchUpdate = async () => {
   }
 }
 
+// ==================== 福利批次 Tab ====================
+
+type RedeemTabKey = 'welfare' | 'codes'
+const activeTab = ref<RedeemTabKey>('welfare')
+
+const switchTab = (tab: RedeemTabKey) => {
+  activeTab.value = tab
+}
+
+const welfareBatches = ref<WelfareBatch[]>([])
+const welfareLoading = ref(false)
+const welfarePagination = reactive({
+  page: 1,
+  page_size: getPersistedPageSize(),
+  total: 0,
+  pages: 0
+})
+
+const welfareColumns = computed<Column[]>(() => [
+  { key: 'name', label: t('admin.redeem.welfare.columns.name') },
+  { key: 'created_at', label: t('admin.redeem.welfare.columns.createdAt') },
+  { key: 'code_count', label: t('admin.redeem.welfare.columns.codeCount') },
+  { key: 'usage', label: t('admin.redeem.welfare.columns.usage') },
+  { key: 'cleared_amount', label: t('admin.redeem.welfare.columns.clearedAmount') },
+  { key: 'actions', label: t('admin.redeem.columns.actions') }
+])
+
+const loadWelfareBatches = async () => {
+  welfareLoading.value = true
+  try {
+    const response = await adminAPI.redeem.listWelfareBatches(
+      welfarePagination.page,
+      welfarePagination.page_size
+    )
+    welfareBatches.value = response.items
+    welfarePagination.total = response.total
+    welfarePagination.pages = response.pages
+  } catch (error: any) {
+    appStore.showError(t('admin.redeem.welfare.failedToLoadBatches'))
+    console.error('Error loading welfare batches:', error)
+  } finally {
+    welfareLoading.value = false
+  }
+}
+
+const handleWelfarePageChange = (page: number) => {
+  welfarePagination.page = page
+  loadWelfareBatches()
+}
+
+const handleWelfarePageSizeChange = (pageSize: number) => {
+  welfarePagination.page_size = pageSize
+  welfarePagination.page = 1
+  loadWelfareBatches()
+}
+
+// 新建福利批次
+const showWelfareDialog = ref(false)
+const welfareSubmitting = ref(false)
+const welfareForm = reactive({
+  name: '',
+  // 已勾选分组：key=group_id, value=validity_days（天卡=1/周卡=7/月卡=30）
+  groups: {} as Record<number, number>,
+  amountMin: '',
+  amountMax: '',
+  count: 10
+})
+
+const welfareValidityOptions = computed(() => [
+  { value: 1, label: t('admin.redeem.welfare.dayCard') },
+  { value: 7, label: t('admin.redeem.welfare.weekCard') },
+  { value: 30, label: t('admin.redeem.welfare.monthCard') }
+])
+
+const defaultWelfareBatchName = () => {
+  const d = new Date()
+  const pad = (v: number) => String(v).padStart(2, '0')
+  return `${t('admin.redeem.welfare.defaultBatchName')}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`
+}
+
+const openWelfareDialog = () => {
+  welfareForm.name = defaultWelfareBatchName()
+  welfareForm.groups = {}
+  welfareForm.amountMin = ''
+  welfareForm.amountMax = ''
+  welfareForm.count = 10
+  showWelfareDialog.value = true
+}
+
+const closeWelfareDialog = () => {
+  showWelfareDialog.value = false
+}
+
+const toggleWelfareGroup = (groupId: number, event: Event) => {
+  const checked = (event.target as HTMLInputElement).checked
+  if (checked) {
+    welfareForm.groups[groupId] = 30
+  } else {
+    delete welfareForm.groups[groupId]
+  }
+}
+
+const handleCreateWelfareBatch = async () => {
+  const groups = Object.entries(welfareForm.groups).map(([groupId, validityDays]) => ({
+    group_id: Number(groupId),
+    validity_days: validityDays
+  }))
+
+  const amountMinEmpty = welfareForm.amountMin.trim() === ''
+  const amountMaxEmpty = welfareForm.amountMax.trim() === ''
+  let amountMin = 0
+  let amountMax = 0
+  if (!amountMinEmpty || !amountMaxEmpty) {
+    if (amountMinEmpty || amountMaxEmpty) {
+      appStore.showError(t('admin.redeem.welfare.amountRangeIncomplete'))
+      return
+    }
+    amountMin = Math.round(Number(welfareForm.amountMin) * 100) / 100
+    amountMax = Math.round(Number(welfareForm.amountMax) * 100) / 100
+    if (!Number.isFinite(amountMin) || !Number.isFinite(amountMax) || amountMin < 0 || amountMax < amountMin) {
+      appStore.showError(t('admin.redeem.welfare.amountRangeInvalid'))
+      return
+    }
+  }
+
+  if (groups.length === 0 && amountMax === 0) {
+    appStore.showError(t('admin.redeem.welfare.requireOneBenefit'))
+    return
+  }
+  if (!Number.isInteger(welfareForm.count) || welfareForm.count < 1 || welfareForm.count > 1000) {
+    appStore.showError(t('admin.redeem.welfare.countInvalid'))
+    return
+  }
+
+  welfareSubmitting.value = true
+  try {
+    const result = await adminAPI.redeem.createWelfareBatch({
+      name: welfareForm.name,
+      groups,
+      amount_min: amountMin,
+      amount_max: amountMax,
+      count: welfareForm.count
+    })
+    showWelfareDialog.value = false
+    generatedCodes.value = result.codes
+    showResultDialog.value = true
+    loadWelfareBatches()
+  } catch (error: any) {
+    appStore.showError(
+      error.response?.data?.message ||
+        error.response?.data?.detail ||
+        error.message ||
+        t('admin.redeem.welfare.failedToCreate')
+    )
+    console.error('Error creating welfare batch:', error)
+  } finally {
+    welfareSubmitting.value = false
+  }
+}
+
+// 批次卡密操作
+const showBatchCodesDialog = ref(false)
+const viewingBatch = ref<WelfareBatch | null>(null)
+const batchCodes = ref<RedeemCode[]>([])
+const batchCodesLoading = ref(false)
+const copiedBatchCodes = ref(false)
+
+const copyUnusedBatchCodes = async (batch: WelfareBatch) => {
+  try {
+    const codes = await adminAPI.redeem.listWelfareBatchCodes(batch.id, 'unused')
+    if (codes.length === 0) {
+      appStore.showInfo(t('admin.redeem.welfare.noUnusedCodes'))
+      return
+    }
+    await clipboardCopy(
+      codes.map((c) => c.code).join('\n'),
+      t('admin.redeem.welfare.unusedCopied', { count: codes.length })
+    )
+  } catch (error: any) {
+    appStore.showError(t('admin.redeem.welfare.failedToLoadCodes'))
+    console.error('Error loading unused batch codes:', error)
+  }
+}
+
+const csvEscape = (value: string) => {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+  return value
+}
+
+const exportBatchCsv = async (batch: WelfareBatch) => {
+  try {
+    const codes = await adminAPI.redeem.listWelfareBatchCodes(batch.id)
+    const header = 'code,value,status,used_by_email,used_at,expires_at'
+    const rows = codes.map((c) =>
+      [
+        c.code,
+        c.value.toFixed(2),
+        c.status,
+        c.user?.email ?? '',
+        c.used_at ?? '',
+        c.expires_at ?? ''
+      ]
+        .map(csvEscape)
+        .join(',')
+    )
+    const blob = new Blob(['\uFEFF' + [header, ...rows].join('\n')], {
+      type: 'text/csv;charset=utf-8'
+    })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `welfare-batch-${batch.id}-${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+    appStore.showSuccess(t('admin.redeem.welfare.batchExported'))
+  } catch (error: any) {
+    appStore.showError(t('admin.redeem.welfare.failedToExportBatch'))
+    console.error('Error exporting batch codes:', error)
+  }
+}
+
+const openBatchCodesDialog = async (batch: WelfareBatch) => {
+  viewingBatch.value = batch
+  batchCodes.value = []
+  copiedBatchCodes.value = false
+  showBatchCodesDialog.value = true
+  batchCodesLoading.value = true
+  try {
+    batchCodes.value = await adminAPI.redeem.listWelfareBatchCodes(batch.id)
+  } catch (error: any) {
+    appStore.showError(t('admin.redeem.welfare.failedToLoadCodes'))
+    console.error('Error loading batch codes:', error)
+  } finally {
+    batchCodesLoading.value = false
+  }
+}
+
+const closeBatchCodesDialog = () => {
+  showBatchCodesDialog.value = false
+  viewingBatch.value = null
+  batchCodes.value = []
+  copiedBatchCodes.value = false
+}
+
+const copyViewingBatchCodes = async () => {
+  const success = await clipboardCopy(
+    batchCodes.value.map((c) => c.code).join('\n'),
+    t('admin.redeem.copied')
+  )
+  if (success) {
+    copiedBatchCodes.value = true
+    setTimeout(() => {
+      copiedBatchCodes.value = false
+    }, 2000)
+  }
+}
+
 // 加载订阅类型分组
 const loadSubscriptionGroups = async () => {
   try {
@@ -1375,6 +1942,7 @@ async function loadPools() {
 
 onMounted(() => {
   loadCodes()
+  loadWelfareBatches()
   loadSubscriptionGroups()
   void loadPools()
   void refreshValueOptions()

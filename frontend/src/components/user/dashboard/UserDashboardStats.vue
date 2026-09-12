@@ -13,6 +13,9 @@
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('dashboard.balance') }}</p>
           <p class="text-xl font-bold text-emerald-600 dark:text-emerald-400">${{ formatBalance(balance) }}</p>
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('common.available') }}</p>
+          <p v-if="welfareRemaining > 0" class="text-xs text-amber-600 dark:text-amber-400">
+            {{ t('dashboard.welfareBalance') }} ${{ formatBalance(welfareRemaining) }}<template v-if="welfareNearestExpiry"> · {{ t('dashboard.welfareExpiresAt', { time: welfareNearestExpiry }) }}</template>
+          </p>
         </div>
       </div>
     </div>
@@ -223,9 +226,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
+import { getWelfareSummary } from '@/api/redeem'
 import type { UserDashboardStats as UserStatsType } from '@/api/usage'
 import type { PlatformQuotaItem } from '@/types'
 
@@ -246,6 +250,24 @@ const props = defineProps<{
   platformQuotas?: PlatformQuotaItem[] | null
 }>()
 const { t } = useI18n()
+
+// 福利余额汇总（独立福利池，优先于充值余额扣减，7 天清零）
+const welfareRemaining = ref(0)
+const welfareNearestExpiry = ref('')
+onMounted(async () => {
+  try {
+    const summary = await getWelfareSummary()
+    welfareRemaining.value = summary?.total_remaining ?? 0
+    if (summary?.nearest_expires_at) {
+      const d = new Date(summary.nearest_expires_at)
+      if (!Number.isNaN(d.getTime())) {
+        welfareNearestExpiry.value = `${d.getMonth() + 1}-${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      }
+    }
+  } catch {
+    // 福利余额展示失败不影响主界面
+  }
+})
 
 const PLATFORM_LABELS: Record<string, string> = {
   anthropic: 'Claude',

@@ -12,7 +12,9 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -501,4 +503,96 @@ func (h *RedeemHandler) Export(c *gin.Context) {
 	c.Header("Content-Type", "text/csv")
 	c.Header("Content-Disposition", "attachment; filename=redeem_codes.csv")
 	c.Data(200, "text/csv", buf.Bytes())
+}
+
+// GenerateWelfareBatchRequest 创建福利批次的请求体。
+type GenerateWelfareBatchRequest struct {
+	Name      string                      `json:"name"`
+	Groups    []service.WelfareGroupGrant `json:"groups"`
+	AmountMin float64                     `json:"amount_min"`
+	AmountMax float64                     `json:"amount_max"`
+	Count     int                         `json:"count" binding:"required"`
+}
+
+// GenerateWelfareBatch 创建福利批次并生成卡密。
+// POST /api/v1/admin/redeem-codes/welfare-batches
+func (h *RedeemHandler) GenerateWelfareBatch(c *gin.Context) {
+	if h.redeemService == nil {
+		response.InternalError(c, "redeem service not configured")
+		return
+	}
+	var req GenerateWelfareBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	executeAdminIdempotentJSON(c, "admin.redeem_codes.welfare_batches.generate", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		batch, codes, err := h.redeemService.GenerateWelfareBatch(ctx, &service.GenerateWelfareBatchRequest{
+			Name:      strings.TrimSpace(req.Name),
+			Groups:    req.Groups,
+			AmountMin: req.AmountMin,
+			AmountMax: req.AmountMax,
+			Count:     req.Count,
+			CreatedBy: subject.UserID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(codes))
+		for i := range codes {
+			out = append(out, codes[i].Code)
+		}
+		return gin.H{"batch": batch, "codes": out}, nil
+	})
+}
+
+// ListWelfareBatches 福利批次列表（含已兑/剩余/已清零统计）。
+// GET /api/v1/admin/redeem-codes/welfare-batches
+func (h *RedeemHandler) ListWelfareBatches(c *gin.Context) {
+	if h.redeemService == nil {
+		response.InternalError(c, "redeem service not configured")
+		return
+	}
+	page, pageSize := response.ParsePagination(c)
+	batches, pag, err := h.redeemService.ListWelfareBatches(c.Request.Context(), pagination.PaginationParams{Page: page, PageSize: pageSize})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	var total int64
+	if pag != nil {
+		total = pag.Total
+	}
+	response.Paginated(c, batches, total, page, pageSize)
+}
+
+// ListWelfareBatchCodes 批次卡密列表（status=unused 用于一键复制未兑换卡密）。
+// GET /api/v1/admin/redeem-codes/welfare-batches/:id/codes
+func (h *RedeemHandler) ListWelfareBatchCodes(c *gin.Context) {
+	if h.redeemService == nil {
+		response.InternalError(c, "redeem service not configured")
+		return
+	}
+	batchID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || batchID <= 0 {
+		response.BadRequest(c, "invalid batch id")
+		return
+	}
+	status := strings.TrimSpace(c.Query("status"))
+	codes, err := h.redeemService.ListWelfareBatchCodes(c.Request.Context(), batchID, status)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	out := make([]dto.AdminRedeemCode, 0, len(codes))
+	for i := range codes {
+		out = append(out, *dto.RedeemCodeFromServiceAdmin(&codes[i]))
+	}
+	response.Success(c, out)
 }

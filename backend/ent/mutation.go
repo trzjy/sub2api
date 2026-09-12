@@ -39,7 +39,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
@@ -52,6 +54,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/ent/welfarebalance"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
@@ -90,7 +93,9 @@ const (
 	TypePromoCode                     = "PromoCode"
 	TypePromoCodeUsage                = "PromoCodeUsage"
 	TypeProxy                         = "Proxy"
+	TypeRedeemBatch                   = "RedeemBatch"
 	TypeRedeemCode                    = "RedeemCode"
+	TypeRedeemCodeGroup               = "RedeemCodeGroup"
 	TypeSecuritySecret                = "SecuritySecret"
 	TypeSetting                       = "Setting"
 	TypeSubscriptionPlan              = "SubscriptionPlan"
@@ -103,6 +108,7 @@ const (
 	TypeUserAttributeValue            = "UserAttributeValue"
 	TypeUserPlatformQuota             = "UserPlatformQuota"
 	TypeUserSubscription              = "UserSubscription"
+	TypeWelfareBalance                = "WelfareBalance"
 )
 
 // APIKeyMutation represents an operation that mutates the APIKey nodes in the graph.
@@ -22186,6 +22192,9 @@ type GroupMutation struct {
 	redeem_codes                            map[int64]struct{}
 	removedredeem_codes                     map[int64]struct{}
 	clearedredeem_codes                     bool
+	redeem_code_groups                      map[int64]struct{}
+	removedredeem_code_groups               map[int64]struct{}
+	clearedredeem_code_groups               bool
 	subscriptions                           map[int64]struct{}
 	removedsubscriptions                    map[int64]struct{}
 	clearedsubscriptions                    bool
@@ -25729,6 +25738,60 @@ func (m *GroupMutation) ResetRedeemCodes() {
 	m.removedredeem_codes = nil
 }
 
+// AddRedeemCodeGroupIDs adds the "redeem_code_groups" edge to the RedeemCodeGroup entity by ids.
+func (m *GroupMutation) AddRedeemCodeGroupIDs(ids ...int64) {
+	if m.redeem_code_groups == nil {
+		m.redeem_code_groups = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.redeem_code_groups[ids[i]] = struct{}{}
+	}
+}
+
+// ClearRedeemCodeGroups clears the "redeem_code_groups" edge to the RedeemCodeGroup entity.
+func (m *GroupMutation) ClearRedeemCodeGroups() {
+	m.clearedredeem_code_groups = true
+}
+
+// RedeemCodeGroupsCleared reports if the "redeem_code_groups" edge to the RedeemCodeGroup entity was cleared.
+func (m *GroupMutation) RedeemCodeGroupsCleared() bool {
+	return m.clearedredeem_code_groups
+}
+
+// RemoveRedeemCodeGroupIDs removes the "redeem_code_groups" edge to the RedeemCodeGroup entity by IDs.
+func (m *GroupMutation) RemoveRedeemCodeGroupIDs(ids ...int64) {
+	if m.removedredeem_code_groups == nil {
+		m.removedredeem_code_groups = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.redeem_code_groups, ids[i])
+		m.removedredeem_code_groups[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedRedeemCodeGroups returns the removed IDs of the "redeem_code_groups" edge to the RedeemCodeGroup entity.
+func (m *GroupMutation) RemovedRedeemCodeGroupsIDs() (ids []int64) {
+	for id := range m.removedredeem_code_groups {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// RedeemCodeGroupsIDs returns the "redeem_code_groups" edge IDs in the mutation.
+func (m *GroupMutation) RedeemCodeGroupsIDs() (ids []int64) {
+	for id := range m.redeem_code_groups {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetRedeemCodeGroups resets all changes to the "redeem_code_groups" edge.
+func (m *GroupMutation) ResetRedeemCodeGroups() {
+	m.redeem_code_groups = nil
+	m.clearedredeem_code_groups = false
+	m.removedredeem_code_groups = nil
+}
+
 // AddSubscriptionIDs adds the "subscriptions" edge to the UserSubscription entity by ids.
 func (m *GroupMutation) AddSubscriptionIDs(ids ...int64) {
 	if m.subscriptions == nil {
@@ -27674,12 +27737,15 @@ func (m *GroupMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *GroupMutation) AddedEdges() []string {
-	edges := make([]string, 0, 6)
+	edges := make([]string, 0, 7)
 	if m.api_keys != nil {
 		edges = append(edges, group.EdgeAPIKeys)
 	}
 	if m.redeem_codes != nil {
 		edges = append(edges, group.EdgeRedeemCodes)
+	}
+	if m.redeem_code_groups != nil {
+		edges = append(edges, group.EdgeRedeemCodeGroups)
 	}
 	if m.subscriptions != nil {
 		edges = append(edges, group.EdgeSubscriptions)
@@ -27709,6 +27775,12 @@ func (m *GroupMutation) AddedIDs(name string) []ent.Value {
 	case group.EdgeRedeemCodes:
 		ids := make([]ent.Value, 0, len(m.redeem_codes))
 		for id := range m.redeem_codes {
+			ids = append(ids, id)
+		}
+		return ids
+	case group.EdgeRedeemCodeGroups:
+		ids := make([]ent.Value, 0, len(m.redeem_code_groups))
+		for id := range m.redeem_code_groups {
 			ids = append(ids, id)
 		}
 		return ids
@@ -27742,12 +27814,15 @@ func (m *GroupMutation) AddedIDs(name string) []ent.Value {
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *GroupMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 6)
+	edges := make([]string, 0, 7)
 	if m.removedapi_keys != nil {
 		edges = append(edges, group.EdgeAPIKeys)
 	}
 	if m.removedredeem_codes != nil {
 		edges = append(edges, group.EdgeRedeemCodes)
+	}
+	if m.removedredeem_code_groups != nil {
+		edges = append(edges, group.EdgeRedeemCodeGroups)
 	}
 	if m.removedsubscriptions != nil {
 		edges = append(edges, group.EdgeSubscriptions)
@@ -27777,6 +27852,12 @@ func (m *GroupMutation) RemovedIDs(name string) []ent.Value {
 	case group.EdgeRedeemCodes:
 		ids := make([]ent.Value, 0, len(m.removedredeem_codes))
 		for id := range m.removedredeem_codes {
+			ids = append(ids, id)
+		}
+		return ids
+	case group.EdgeRedeemCodeGroups:
+		ids := make([]ent.Value, 0, len(m.removedredeem_code_groups))
+		for id := range m.removedredeem_code_groups {
 			ids = append(ids, id)
 		}
 		return ids
@@ -27810,12 +27891,15 @@ func (m *GroupMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *GroupMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 6)
+	edges := make([]string, 0, 7)
 	if m.clearedapi_keys {
 		edges = append(edges, group.EdgeAPIKeys)
 	}
 	if m.clearedredeem_codes {
 		edges = append(edges, group.EdgeRedeemCodes)
+	}
+	if m.clearedredeem_code_groups {
+		edges = append(edges, group.EdgeRedeemCodeGroups)
 	}
 	if m.clearedsubscriptions {
 		edges = append(edges, group.EdgeSubscriptions)
@@ -27840,6 +27924,8 @@ func (m *GroupMutation) EdgeCleared(name string) bool {
 		return m.clearedapi_keys
 	case group.EdgeRedeemCodes:
 		return m.clearedredeem_codes
+	case group.EdgeRedeemCodeGroups:
+		return m.clearedredeem_code_groups
 	case group.EdgeSubscriptions:
 		return m.clearedsubscriptions
 	case group.EdgeUsageLogs:
@@ -27869,6 +27955,9 @@ func (m *GroupMutation) ResetEdge(name string) error {
 		return nil
 	case group.EdgeRedeemCodes:
 		m.ResetRedeemCodes()
+		return nil
+	case group.EdgeRedeemCodeGroups:
+		m.ResetRedeemCodeGroups()
 		return nil
 	case group.EdgeSubscriptions:
 		m.ResetSubscriptions()
@@ -38867,31 +38956,848 @@ func (m *ProxyMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Proxy edge %s", name)
 }
 
+// RedeemBatchMutation represents an operation that mutates the RedeemBatch nodes in the graph.
+type RedeemBatchMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *int64
+	name                    *string
+	_config                 *map[string]interface{}
+	code_count              *int
+	addcode_count           *int
+	created_by              *int64
+	addcreated_by           *int64
+	created_at              *time.Time
+	clearedFields           map[string]struct{}
+	redeem_codes            map[int64]struct{}
+	removedredeem_codes     map[int64]struct{}
+	clearedredeem_codes     bool
+	welfare_balances        map[int64]struct{}
+	removedwelfare_balances map[int64]struct{}
+	clearedwelfare_balances bool
+	done                    bool
+	oldValue                func(context.Context) (*RedeemBatch, error)
+	predicates              []predicate.RedeemBatch
+}
+
+var _ ent.Mutation = (*RedeemBatchMutation)(nil)
+
+// redeembatchOption allows management of the mutation configuration using functional options.
+type redeembatchOption func(*RedeemBatchMutation)
+
+// newRedeemBatchMutation creates new mutation for the RedeemBatch entity.
+func newRedeemBatchMutation(c config, op Op, opts ...redeembatchOption) *RedeemBatchMutation {
+	m := &RedeemBatchMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeRedeemBatch,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withRedeemBatchID sets the ID field of the mutation.
+func withRedeemBatchID(id int64) redeembatchOption {
+	return func(m *RedeemBatchMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *RedeemBatch
+		)
+		m.oldValue = func(ctx context.Context) (*RedeemBatch, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().RedeemBatch.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withRedeemBatch sets the old RedeemBatch of the mutation.
+func withRedeemBatch(node *RedeemBatch) redeembatchOption {
+	return func(m *RedeemBatchMutation) {
+		m.oldValue = func(context.Context) (*RedeemBatch, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m RedeemBatchMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m RedeemBatchMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *RedeemBatchMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *RedeemBatchMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().RedeemBatch.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *RedeemBatchMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *RedeemBatchMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the RedeemBatch entity.
+// If the RedeemBatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemBatchMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *RedeemBatchMutation) ResetName() {
+	m.name = nil
+}
+
+// SetConfig sets the "config" field.
+func (m *RedeemBatchMutation) SetConfig(value map[string]interface{}) {
+	m._config = &value
+}
+
+// Config returns the value of the "config" field in the mutation.
+func (m *RedeemBatchMutation) Config() (r map[string]interface{}, exists bool) {
+	v := m._config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfig returns the old "config" field's value of the RedeemBatch entity.
+// If the RedeemBatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemBatchMutation) OldConfig(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfig: %w", err)
+	}
+	return oldValue.Config, nil
+}
+
+// ClearConfig clears the value of the "config" field.
+func (m *RedeemBatchMutation) ClearConfig() {
+	m._config = nil
+	m.clearedFields[redeembatch.FieldConfig] = struct{}{}
+}
+
+// ConfigCleared returns if the "config" field was cleared in this mutation.
+func (m *RedeemBatchMutation) ConfigCleared() bool {
+	_, ok := m.clearedFields[redeembatch.FieldConfig]
+	return ok
+}
+
+// ResetConfig resets all changes to the "config" field.
+func (m *RedeemBatchMutation) ResetConfig() {
+	m._config = nil
+	delete(m.clearedFields, redeembatch.FieldConfig)
+}
+
+// SetCodeCount sets the "code_count" field.
+func (m *RedeemBatchMutation) SetCodeCount(i int) {
+	m.code_count = &i
+	m.addcode_count = nil
+}
+
+// CodeCount returns the value of the "code_count" field in the mutation.
+func (m *RedeemBatchMutation) CodeCount() (r int, exists bool) {
+	v := m.code_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodeCount returns the old "code_count" field's value of the RedeemBatch entity.
+// If the RedeemBatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemBatchMutation) OldCodeCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeCount: %w", err)
+	}
+	return oldValue.CodeCount, nil
+}
+
+// AddCodeCount adds i to the "code_count" field.
+func (m *RedeemBatchMutation) AddCodeCount(i int) {
+	if m.addcode_count != nil {
+		*m.addcode_count += i
+	} else {
+		m.addcode_count = &i
+	}
+}
+
+// AddedCodeCount returns the value that was added to the "code_count" field in this mutation.
+func (m *RedeemBatchMutation) AddedCodeCount() (r int, exists bool) {
+	v := m.addcode_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCodeCount resets all changes to the "code_count" field.
+func (m *RedeemBatchMutation) ResetCodeCount() {
+	m.code_count = nil
+	m.addcode_count = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *RedeemBatchMutation) SetCreatedBy(i int64) {
+	m.created_by = &i
+	m.addcreated_by = nil
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *RedeemBatchMutation) CreatedBy() (r int64, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the RedeemBatch entity.
+// If the RedeemBatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemBatchMutation) OldCreatedBy(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// AddCreatedBy adds i to the "created_by" field.
+func (m *RedeemBatchMutation) AddCreatedBy(i int64) {
+	if m.addcreated_by != nil {
+		*m.addcreated_by += i
+	} else {
+		m.addcreated_by = &i
+	}
+}
+
+// AddedCreatedBy returns the value that was added to the "created_by" field in this mutation.
+func (m *RedeemBatchMutation) AddedCreatedBy() (r int64, exists bool) {
+	v := m.addcreated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *RedeemBatchMutation) ResetCreatedBy() {
+	m.created_by = nil
+	m.addcreated_by = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *RedeemBatchMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *RedeemBatchMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the RedeemBatch entity.
+// If the RedeemBatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemBatchMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *RedeemBatchMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// AddRedeemCodeIDs adds the "redeem_codes" edge to the RedeemCode entity by ids.
+func (m *RedeemBatchMutation) AddRedeemCodeIDs(ids ...int64) {
+	if m.redeem_codes == nil {
+		m.redeem_codes = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.redeem_codes[ids[i]] = struct{}{}
+	}
+}
+
+// ClearRedeemCodes clears the "redeem_codes" edge to the RedeemCode entity.
+func (m *RedeemBatchMutation) ClearRedeemCodes() {
+	m.clearedredeem_codes = true
+}
+
+// RedeemCodesCleared reports if the "redeem_codes" edge to the RedeemCode entity was cleared.
+func (m *RedeemBatchMutation) RedeemCodesCleared() bool {
+	return m.clearedredeem_codes
+}
+
+// RemoveRedeemCodeIDs removes the "redeem_codes" edge to the RedeemCode entity by IDs.
+func (m *RedeemBatchMutation) RemoveRedeemCodeIDs(ids ...int64) {
+	if m.removedredeem_codes == nil {
+		m.removedredeem_codes = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.redeem_codes, ids[i])
+		m.removedredeem_codes[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedRedeemCodes returns the removed IDs of the "redeem_codes" edge to the RedeemCode entity.
+func (m *RedeemBatchMutation) RemovedRedeemCodesIDs() (ids []int64) {
+	for id := range m.removedredeem_codes {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// RedeemCodesIDs returns the "redeem_codes" edge IDs in the mutation.
+func (m *RedeemBatchMutation) RedeemCodesIDs() (ids []int64) {
+	for id := range m.redeem_codes {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetRedeemCodes resets all changes to the "redeem_codes" edge.
+func (m *RedeemBatchMutation) ResetRedeemCodes() {
+	m.redeem_codes = nil
+	m.clearedredeem_codes = false
+	m.removedredeem_codes = nil
+}
+
+// AddWelfareBalanceIDs adds the "welfare_balances" edge to the WelfareBalance entity by ids.
+func (m *RedeemBatchMutation) AddWelfareBalanceIDs(ids ...int64) {
+	if m.welfare_balances == nil {
+		m.welfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.welfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// ClearWelfareBalances clears the "welfare_balances" edge to the WelfareBalance entity.
+func (m *RedeemBatchMutation) ClearWelfareBalances() {
+	m.clearedwelfare_balances = true
+}
+
+// WelfareBalancesCleared reports if the "welfare_balances" edge to the WelfareBalance entity was cleared.
+func (m *RedeemBatchMutation) WelfareBalancesCleared() bool {
+	return m.clearedwelfare_balances
+}
+
+// RemoveWelfareBalanceIDs removes the "welfare_balances" edge to the WelfareBalance entity by IDs.
+func (m *RedeemBatchMutation) RemoveWelfareBalanceIDs(ids ...int64) {
+	if m.removedwelfare_balances == nil {
+		m.removedwelfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.welfare_balances, ids[i])
+		m.removedwelfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedWelfareBalances returns the removed IDs of the "welfare_balances" edge to the WelfareBalance entity.
+func (m *RedeemBatchMutation) RemovedWelfareBalancesIDs() (ids []int64) {
+	for id := range m.removedwelfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// WelfareBalancesIDs returns the "welfare_balances" edge IDs in the mutation.
+func (m *RedeemBatchMutation) WelfareBalancesIDs() (ids []int64) {
+	for id := range m.welfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetWelfareBalances resets all changes to the "welfare_balances" edge.
+func (m *RedeemBatchMutation) ResetWelfareBalances() {
+	m.welfare_balances = nil
+	m.clearedwelfare_balances = false
+	m.removedwelfare_balances = nil
+}
+
+// Where appends a list predicates to the RedeemBatchMutation builder.
+func (m *RedeemBatchMutation) Where(ps ...predicate.RedeemBatch) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the RedeemBatchMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *RedeemBatchMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.RedeemBatch, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *RedeemBatchMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *RedeemBatchMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (RedeemBatch).
+func (m *RedeemBatchMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *RedeemBatchMutation) Fields() []string {
+	fields := make([]string, 0, 5)
+	if m.name != nil {
+		fields = append(fields, redeembatch.FieldName)
+	}
+	if m._config != nil {
+		fields = append(fields, redeembatch.FieldConfig)
+	}
+	if m.code_count != nil {
+		fields = append(fields, redeembatch.FieldCodeCount)
+	}
+	if m.created_by != nil {
+		fields = append(fields, redeembatch.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, redeembatch.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *RedeemBatchMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case redeembatch.FieldName:
+		return m.Name()
+	case redeembatch.FieldConfig:
+		return m.Config()
+	case redeembatch.FieldCodeCount:
+		return m.CodeCount()
+	case redeembatch.FieldCreatedBy:
+		return m.CreatedBy()
+	case redeembatch.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *RedeemBatchMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case redeembatch.FieldName:
+		return m.OldName(ctx)
+	case redeembatch.FieldConfig:
+		return m.OldConfig(ctx)
+	case redeembatch.FieldCodeCount:
+		return m.OldCodeCount(ctx)
+	case redeembatch.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case redeembatch.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown RedeemBatch field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RedeemBatchMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case redeembatch.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case redeembatch.FieldConfig:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfig(v)
+		return nil
+	case redeembatch.FieldCodeCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodeCount(v)
+		return nil
+	case redeembatch.FieldCreatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case redeembatch.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemBatch field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *RedeemBatchMutation) AddedFields() []string {
+	var fields []string
+	if m.addcode_count != nil {
+		fields = append(fields, redeembatch.FieldCodeCount)
+	}
+	if m.addcreated_by != nil {
+		fields = append(fields, redeembatch.FieldCreatedBy)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *RedeemBatchMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case redeembatch.FieldCodeCount:
+		return m.AddedCodeCount()
+	case redeembatch.FieldCreatedBy:
+		return m.AddedCreatedBy()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RedeemBatchMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case redeembatch.FieldCodeCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCodeCount(v)
+		return nil
+	case redeembatch.FieldCreatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCreatedBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemBatch numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *RedeemBatchMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(redeembatch.FieldConfig) {
+		fields = append(fields, redeembatch.FieldConfig)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *RedeemBatchMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *RedeemBatchMutation) ClearField(name string) error {
+	switch name {
+	case redeembatch.FieldConfig:
+		m.ClearConfig()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemBatch nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *RedeemBatchMutation) ResetField(name string) error {
+	switch name {
+	case redeembatch.FieldName:
+		m.ResetName()
+		return nil
+	case redeembatch.FieldConfig:
+		m.ResetConfig()
+		return nil
+	case redeembatch.FieldCodeCount:
+		m.ResetCodeCount()
+		return nil
+	case redeembatch.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case redeembatch.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemBatch field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *RedeemBatchMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.redeem_codes != nil {
+		edges = append(edges, redeembatch.EdgeRedeemCodes)
+	}
+	if m.welfare_balances != nil {
+		edges = append(edges, redeembatch.EdgeWelfareBalances)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *RedeemBatchMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case redeembatch.EdgeRedeemCodes:
+		ids := make([]ent.Value, 0, len(m.redeem_codes))
+		for id := range m.redeem_codes {
+			ids = append(ids, id)
+		}
+		return ids
+	case redeembatch.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.welfare_balances))
+		for id := range m.welfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *RedeemBatchMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.removedredeem_codes != nil {
+		edges = append(edges, redeembatch.EdgeRedeemCodes)
+	}
+	if m.removedwelfare_balances != nil {
+		edges = append(edges, redeembatch.EdgeWelfareBalances)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *RedeemBatchMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case redeembatch.EdgeRedeemCodes:
+		ids := make([]ent.Value, 0, len(m.removedredeem_codes))
+		for id := range m.removedredeem_codes {
+			ids = append(ids, id)
+		}
+		return ids
+	case redeembatch.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.removedwelfare_balances))
+		for id := range m.removedwelfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *RedeemBatchMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedredeem_codes {
+		edges = append(edges, redeembatch.EdgeRedeemCodes)
+	}
+	if m.clearedwelfare_balances {
+		edges = append(edges, redeembatch.EdgeWelfareBalances)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *RedeemBatchMutation) EdgeCleared(name string) bool {
+	switch name {
+	case redeembatch.EdgeRedeemCodes:
+		return m.clearedredeem_codes
+	case redeembatch.EdgeWelfareBalances:
+		return m.clearedwelfare_balances
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *RedeemBatchMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown RedeemBatch unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *RedeemBatchMutation) ResetEdge(name string) error {
+	switch name {
+	case redeembatch.EdgeRedeemCodes:
+		m.ResetRedeemCodes()
+		return nil
+	case redeembatch.EdgeWelfareBalances:
+		m.ResetWelfareBalances()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemBatch edge %s", name)
+}
+
 // RedeemCodeMutation represents an operation that mutates the RedeemCode nodes in the graph.
 type RedeemCodeMutation struct {
 	config
-	op               Op
-	typ              string
-	id               *int64
-	code             *string
-	_type            *string
-	value            *float64
-	addvalue         *float64
-	status           *string
-	used_at          *time.Time
-	notes            *string
-	created_at       *time.Time
-	expires_at       *time.Time
-	validity_days    *int
-	addvalidity_days *int
-	clearedFields    map[string]struct{}
-	user             *int64
-	cleareduser      bool
-	group            *int64
-	clearedgroup     bool
-	done             bool
-	oldValue         func(context.Context) (*RedeemCode, error)
-	predicates       []predicate.RedeemCode
+	op                      Op
+	typ                     string
+	id                      *int64
+	code                    *string
+	_type                   *string
+	value                   *float64
+	addvalue                *float64
+	status                  *string
+	used_at                 *time.Time
+	notes                   *string
+	created_at              *time.Time
+	expires_at              *time.Time
+	validity_days           *int
+	addvalidity_days        *int
+	clearedFields           map[string]struct{}
+	user                    *int64
+	cleareduser             bool
+	group                   *int64
+	clearedgroup            bool
+	batch                   *int64
+	clearedbatch            bool
+	code_groups             map[int64]struct{}
+	removedcode_groups      map[int64]struct{}
+	clearedcode_groups      bool
+	welfare_balances        map[int64]struct{}
+	removedwelfare_balances map[int64]struct{}
+	clearedwelfare_balances bool
+	done                    bool
+	oldValue                func(context.Context) (*RedeemCode, error)
+	predicates              []predicate.RedeemCode
 }
 
 var _ ent.Mutation = (*RedeemCodeMutation)(nil)
@@ -39493,6 +40399,55 @@ func (m *RedeemCodeMutation) ResetValidityDays() {
 	m.addvalidity_days = nil
 }
 
+// SetBatchID sets the "batch_id" field.
+func (m *RedeemCodeMutation) SetBatchID(i int64) {
+	m.batch = &i
+}
+
+// BatchID returns the value of the "batch_id" field in the mutation.
+func (m *RedeemCodeMutation) BatchID() (r int64, exists bool) {
+	v := m.batch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchID returns the old "batch_id" field's value of the RedeemCode entity.
+// If the RedeemCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemCodeMutation) OldBatchID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchID: %w", err)
+	}
+	return oldValue.BatchID, nil
+}
+
+// ClearBatchID clears the value of the "batch_id" field.
+func (m *RedeemCodeMutation) ClearBatchID() {
+	m.batch = nil
+	m.clearedFields[redeemcode.FieldBatchID] = struct{}{}
+}
+
+// BatchIDCleared returns if the "batch_id" field was cleared in this mutation.
+func (m *RedeemCodeMutation) BatchIDCleared() bool {
+	_, ok := m.clearedFields[redeemcode.FieldBatchID]
+	return ok
+}
+
+// ResetBatchID resets all changes to the "batch_id" field.
+func (m *RedeemCodeMutation) ResetBatchID() {
+	m.batch = nil
+	delete(m.clearedFields, redeemcode.FieldBatchID)
+}
+
 // SetUserID sets the "user" edge to the User entity by id.
 func (m *RedeemCodeMutation) SetUserID(id int64) {
 	m.user = &id
@@ -39560,6 +40515,141 @@ func (m *RedeemCodeMutation) ResetGroup() {
 	m.clearedgroup = false
 }
 
+// ClearBatch clears the "batch" edge to the RedeemBatch entity.
+func (m *RedeemCodeMutation) ClearBatch() {
+	m.clearedbatch = true
+	m.clearedFields[redeemcode.FieldBatchID] = struct{}{}
+}
+
+// BatchCleared reports if the "batch" edge to the RedeemBatch entity was cleared.
+func (m *RedeemCodeMutation) BatchCleared() bool {
+	return m.BatchIDCleared() || m.clearedbatch
+}
+
+// BatchIDs returns the "batch" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BatchID instead. It exists only for internal usage by the builders.
+func (m *RedeemCodeMutation) BatchIDs() (ids []int64) {
+	if id := m.batch; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBatch resets all changes to the "batch" edge.
+func (m *RedeemCodeMutation) ResetBatch() {
+	m.batch = nil
+	m.clearedbatch = false
+}
+
+// AddCodeGroupIDs adds the "code_groups" edge to the RedeemCodeGroup entity by ids.
+func (m *RedeemCodeMutation) AddCodeGroupIDs(ids ...int64) {
+	if m.code_groups == nil {
+		m.code_groups = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.code_groups[ids[i]] = struct{}{}
+	}
+}
+
+// ClearCodeGroups clears the "code_groups" edge to the RedeemCodeGroup entity.
+func (m *RedeemCodeMutation) ClearCodeGroups() {
+	m.clearedcode_groups = true
+}
+
+// CodeGroupsCleared reports if the "code_groups" edge to the RedeemCodeGroup entity was cleared.
+func (m *RedeemCodeMutation) CodeGroupsCleared() bool {
+	return m.clearedcode_groups
+}
+
+// RemoveCodeGroupIDs removes the "code_groups" edge to the RedeemCodeGroup entity by IDs.
+func (m *RedeemCodeMutation) RemoveCodeGroupIDs(ids ...int64) {
+	if m.removedcode_groups == nil {
+		m.removedcode_groups = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.code_groups, ids[i])
+		m.removedcode_groups[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedCodeGroups returns the removed IDs of the "code_groups" edge to the RedeemCodeGroup entity.
+func (m *RedeemCodeMutation) RemovedCodeGroupsIDs() (ids []int64) {
+	for id := range m.removedcode_groups {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// CodeGroupsIDs returns the "code_groups" edge IDs in the mutation.
+func (m *RedeemCodeMutation) CodeGroupsIDs() (ids []int64) {
+	for id := range m.code_groups {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetCodeGroups resets all changes to the "code_groups" edge.
+func (m *RedeemCodeMutation) ResetCodeGroups() {
+	m.code_groups = nil
+	m.clearedcode_groups = false
+	m.removedcode_groups = nil
+}
+
+// AddWelfareBalanceIDs adds the "welfare_balances" edge to the WelfareBalance entity by ids.
+func (m *RedeemCodeMutation) AddWelfareBalanceIDs(ids ...int64) {
+	if m.welfare_balances == nil {
+		m.welfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.welfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// ClearWelfareBalances clears the "welfare_balances" edge to the WelfareBalance entity.
+func (m *RedeemCodeMutation) ClearWelfareBalances() {
+	m.clearedwelfare_balances = true
+}
+
+// WelfareBalancesCleared reports if the "welfare_balances" edge to the WelfareBalance entity was cleared.
+func (m *RedeemCodeMutation) WelfareBalancesCleared() bool {
+	return m.clearedwelfare_balances
+}
+
+// RemoveWelfareBalanceIDs removes the "welfare_balances" edge to the WelfareBalance entity by IDs.
+func (m *RedeemCodeMutation) RemoveWelfareBalanceIDs(ids ...int64) {
+	if m.removedwelfare_balances == nil {
+		m.removedwelfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.welfare_balances, ids[i])
+		m.removedwelfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedWelfareBalances returns the removed IDs of the "welfare_balances" edge to the WelfareBalance entity.
+func (m *RedeemCodeMutation) RemovedWelfareBalancesIDs() (ids []int64) {
+	for id := range m.removedwelfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// WelfareBalancesIDs returns the "welfare_balances" edge IDs in the mutation.
+func (m *RedeemCodeMutation) WelfareBalancesIDs() (ids []int64) {
+	for id := range m.welfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetWelfareBalances resets all changes to the "welfare_balances" edge.
+func (m *RedeemCodeMutation) ResetWelfareBalances() {
+	m.welfare_balances = nil
+	m.clearedwelfare_balances = false
+	m.removedwelfare_balances = nil
+}
+
 // Where appends a list predicates to the RedeemCodeMutation builder.
 func (m *RedeemCodeMutation) Where(ps ...predicate.RedeemCode) {
 	m.predicates = append(m.predicates, ps...)
@@ -39594,7 +40684,7 @@ func (m *RedeemCodeMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RedeemCodeMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.code != nil {
 		fields = append(fields, redeemcode.FieldCode)
 	}
@@ -39628,6 +40718,9 @@ func (m *RedeemCodeMutation) Fields() []string {
 	if m.validity_days != nil {
 		fields = append(fields, redeemcode.FieldValidityDays)
 	}
+	if m.batch != nil {
+		fields = append(fields, redeemcode.FieldBatchID)
+	}
 	return fields
 }
 
@@ -39658,6 +40751,8 @@ func (m *RedeemCodeMutation) Field(name string) (ent.Value, bool) {
 		return m.GroupID()
 	case redeemcode.FieldValidityDays:
 		return m.ValidityDays()
+	case redeemcode.FieldBatchID:
+		return m.BatchID()
 	}
 	return nil, false
 }
@@ -39689,6 +40784,8 @@ func (m *RedeemCodeMutation) OldField(ctx context.Context, name string) (ent.Val
 		return m.OldGroupID(ctx)
 	case redeemcode.FieldValidityDays:
 		return m.OldValidityDays(ctx)
+	case redeemcode.FieldBatchID:
+		return m.OldBatchID(ctx)
 	}
 	return nil, fmt.Errorf("unknown RedeemCode field %s", name)
 }
@@ -39775,6 +40872,13 @@ func (m *RedeemCodeMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetValidityDays(v)
 		return nil
+	case redeemcode.FieldBatchID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode field %s", name)
 }
@@ -39847,6 +40951,9 @@ func (m *RedeemCodeMutation) ClearedFields() []string {
 	if m.FieldCleared(redeemcode.FieldGroupID) {
 		fields = append(fields, redeemcode.FieldGroupID)
 	}
+	if m.FieldCleared(redeemcode.FieldBatchID) {
+		fields = append(fields, redeemcode.FieldBatchID)
+	}
 	return fields
 }
 
@@ -39875,6 +40982,9 @@ func (m *RedeemCodeMutation) ClearField(name string) error {
 		return nil
 	case redeemcode.FieldGroupID:
 		m.ClearGroupID()
+		return nil
+	case redeemcode.FieldBatchID:
+		m.ClearBatchID()
 		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode nullable field %s", name)
@@ -39917,18 +41027,30 @@ func (m *RedeemCodeMutation) ResetField(name string) error {
 	case redeemcode.FieldValidityDays:
 		m.ResetValidityDays()
 		return nil
+	case redeemcode.FieldBatchID:
+		m.ResetBatchID()
+		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode field %s", name)
 }
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *RedeemCodeMutation) AddedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 5)
 	if m.user != nil {
 		edges = append(edges, redeemcode.EdgeUser)
 	}
 	if m.group != nil {
 		edges = append(edges, redeemcode.EdgeGroup)
+	}
+	if m.batch != nil {
+		edges = append(edges, redeemcode.EdgeBatch)
+	}
+	if m.code_groups != nil {
+		edges = append(edges, redeemcode.EdgeCodeGroups)
+	}
+	if m.welfare_balances != nil {
+		edges = append(edges, redeemcode.EdgeWelfareBalances)
 	}
 	return edges
 }
@@ -39945,30 +41067,75 @@ func (m *RedeemCodeMutation) AddedIDs(name string) []ent.Value {
 		if id := m.group; id != nil {
 			return []ent.Value{*id}
 		}
+	case redeemcode.EdgeBatch:
+		if id := m.batch; id != nil {
+			return []ent.Value{*id}
+		}
+	case redeemcode.EdgeCodeGroups:
+		ids := make([]ent.Value, 0, len(m.code_groups))
+		for id := range m.code_groups {
+			ids = append(ids, id)
+		}
+		return ids
+	case redeemcode.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.welfare_balances))
+		for id := range m.welfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *RedeemCodeMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 5)
+	if m.removedcode_groups != nil {
+		edges = append(edges, redeemcode.EdgeCodeGroups)
+	}
+	if m.removedwelfare_balances != nil {
+		edges = append(edges, redeemcode.EdgeWelfareBalances)
+	}
 	return edges
 }
 
 // RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
 // the given name in this mutation.
 func (m *RedeemCodeMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case redeemcode.EdgeCodeGroups:
+		ids := make([]ent.Value, 0, len(m.removedcode_groups))
+		for id := range m.removedcode_groups {
+			ids = append(ids, id)
+		}
+		return ids
+	case redeemcode.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.removedwelfare_balances))
+		for id := range m.removedwelfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
+	}
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *RedeemCodeMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 2)
+	edges := make([]string, 0, 5)
 	if m.cleareduser {
 		edges = append(edges, redeemcode.EdgeUser)
 	}
 	if m.clearedgroup {
 		edges = append(edges, redeemcode.EdgeGroup)
+	}
+	if m.clearedbatch {
+		edges = append(edges, redeemcode.EdgeBatch)
+	}
+	if m.clearedcode_groups {
+		edges = append(edges, redeemcode.EdgeCodeGroups)
+	}
+	if m.clearedwelfare_balances {
+		edges = append(edges, redeemcode.EdgeWelfareBalances)
 	}
 	return edges
 }
@@ -39981,6 +41148,12 @@ func (m *RedeemCodeMutation) EdgeCleared(name string) bool {
 		return m.cleareduser
 	case redeemcode.EdgeGroup:
 		return m.clearedgroup
+	case redeemcode.EdgeBatch:
+		return m.clearedbatch
+	case redeemcode.EdgeCodeGroups:
+		return m.clearedcode_groups
+	case redeemcode.EdgeWelfareBalances:
+		return m.clearedwelfare_balances
 	}
 	return false
 }
@@ -39994,6 +41167,9 @@ func (m *RedeemCodeMutation) ClearEdge(name string) error {
 		return nil
 	case redeemcode.EdgeGroup:
 		m.ClearGroup()
+		return nil
+	case redeemcode.EdgeBatch:
+		m.ClearBatch()
 		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode unique edge %s", name)
@@ -40009,8 +41185,587 @@ func (m *RedeemCodeMutation) ResetEdge(name string) error {
 	case redeemcode.EdgeGroup:
 		m.ResetGroup()
 		return nil
+	case redeemcode.EdgeBatch:
+		m.ResetBatch()
+		return nil
+	case redeemcode.EdgeCodeGroups:
+		m.ResetCodeGroups()
+		return nil
+	case redeemcode.EdgeWelfareBalances:
+		m.ResetWelfareBalances()
+		return nil
 	}
 	return fmt.Errorf("unknown RedeemCode edge %s", name)
+}
+
+// RedeemCodeGroupMutation represents an operation that mutates the RedeemCodeGroup nodes in the graph.
+type RedeemCodeGroupMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *int64
+	validity_days      *int
+	addvalidity_days   *int
+	clearedFields      map[string]struct{}
+	redeem_code        *int64
+	clearedredeem_code bool
+	group              *int64
+	clearedgroup       bool
+	done               bool
+	oldValue           func(context.Context) (*RedeemCodeGroup, error)
+	predicates         []predicate.RedeemCodeGroup
+}
+
+var _ ent.Mutation = (*RedeemCodeGroupMutation)(nil)
+
+// redeemcodegroupOption allows management of the mutation configuration using functional options.
+type redeemcodegroupOption func(*RedeemCodeGroupMutation)
+
+// newRedeemCodeGroupMutation creates new mutation for the RedeemCodeGroup entity.
+func newRedeemCodeGroupMutation(c config, op Op, opts ...redeemcodegroupOption) *RedeemCodeGroupMutation {
+	m := &RedeemCodeGroupMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeRedeemCodeGroup,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withRedeemCodeGroupID sets the ID field of the mutation.
+func withRedeemCodeGroupID(id int64) redeemcodegroupOption {
+	return func(m *RedeemCodeGroupMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *RedeemCodeGroup
+		)
+		m.oldValue = func(ctx context.Context) (*RedeemCodeGroup, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().RedeemCodeGroup.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withRedeemCodeGroup sets the old RedeemCodeGroup of the mutation.
+func withRedeemCodeGroup(node *RedeemCodeGroup) redeemcodegroupOption {
+	return func(m *RedeemCodeGroupMutation) {
+		m.oldValue = func(context.Context) (*RedeemCodeGroup, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m RedeemCodeGroupMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m RedeemCodeGroupMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *RedeemCodeGroupMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *RedeemCodeGroupMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().RedeemCodeGroup.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetRedeemCodeID sets the "redeem_code_id" field.
+func (m *RedeemCodeGroupMutation) SetRedeemCodeID(i int64) {
+	m.redeem_code = &i
+}
+
+// RedeemCodeID returns the value of the "redeem_code_id" field in the mutation.
+func (m *RedeemCodeGroupMutation) RedeemCodeID() (r int64, exists bool) {
+	v := m.redeem_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRedeemCodeID returns the old "redeem_code_id" field's value of the RedeemCodeGroup entity.
+// If the RedeemCodeGroup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemCodeGroupMutation) OldRedeemCodeID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRedeemCodeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRedeemCodeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRedeemCodeID: %w", err)
+	}
+	return oldValue.RedeemCodeID, nil
+}
+
+// ResetRedeemCodeID resets all changes to the "redeem_code_id" field.
+func (m *RedeemCodeGroupMutation) ResetRedeemCodeID() {
+	m.redeem_code = nil
+}
+
+// SetGroupID sets the "group_id" field.
+func (m *RedeemCodeGroupMutation) SetGroupID(i int64) {
+	m.group = &i
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *RedeemCodeGroupMutation) GroupID() (r int64, exists bool) {
+	v := m.group
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the RedeemCodeGroup entity.
+// If the RedeemCodeGroup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemCodeGroupMutation) OldGroupID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *RedeemCodeGroupMutation) ResetGroupID() {
+	m.group = nil
+}
+
+// SetValidityDays sets the "validity_days" field.
+func (m *RedeemCodeGroupMutation) SetValidityDays(i int) {
+	m.validity_days = &i
+	m.addvalidity_days = nil
+}
+
+// ValidityDays returns the value of the "validity_days" field in the mutation.
+func (m *RedeemCodeGroupMutation) ValidityDays() (r int, exists bool) {
+	v := m.validity_days
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldValidityDays returns the old "validity_days" field's value of the RedeemCodeGroup entity.
+// If the RedeemCodeGroup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RedeemCodeGroupMutation) OldValidityDays(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldValidityDays is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldValidityDays requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldValidityDays: %w", err)
+	}
+	return oldValue.ValidityDays, nil
+}
+
+// AddValidityDays adds i to the "validity_days" field.
+func (m *RedeemCodeGroupMutation) AddValidityDays(i int) {
+	if m.addvalidity_days != nil {
+		*m.addvalidity_days += i
+	} else {
+		m.addvalidity_days = &i
+	}
+}
+
+// AddedValidityDays returns the value that was added to the "validity_days" field in this mutation.
+func (m *RedeemCodeGroupMutation) AddedValidityDays() (r int, exists bool) {
+	v := m.addvalidity_days
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetValidityDays resets all changes to the "validity_days" field.
+func (m *RedeemCodeGroupMutation) ResetValidityDays() {
+	m.validity_days = nil
+	m.addvalidity_days = nil
+}
+
+// ClearRedeemCode clears the "redeem_code" edge to the RedeemCode entity.
+func (m *RedeemCodeGroupMutation) ClearRedeemCode() {
+	m.clearedredeem_code = true
+	m.clearedFields[redeemcodegroup.FieldRedeemCodeID] = struct{}{}
+}
+
+// RedeemCodeCleared reports if the "redeem_code" edge to the RedeemCode entity was cleared.
+func (m *RedeemCodeGroupMutation) RedeemCodeCleared() bool {
+	return m.clearedredeem_code
+}
+
+// RedeemCodeIDs returns the "redeem_code" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// RedeemCodeID instead. It exists only for internal usage by the builders.
+func (m *RedeemCodeGroupMutation) RedeemCodeIDs() (ids []int64) {
+	if id := m.redeem_code; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetRedeemCode resets all changes to the "redeem_code" edge.
+func (m *RedeemCodeGroupMutation) ResetRedeemCode() {
+	m.redeem_code = nil
+	m.clearedredeem_code = false
+}
+
+// ClearGroup clears the "group" edge to the Group entity.
+func (m *RedeemCodeGroupMutation) ClearGroup() {
+	m.clearedgroup = true
+	m.clearedFields[redeemcodegroup.FieldGroupID] = struct{}{}
+}
+
+// GroupCleared reports if the "group" edge to the Group entity was cleared.
+func (m *RedeemCodeGroupMutation) GroupCleared() bool {
+	return m.clearedgroup
+}
+
+// GroupIDs returns the "group" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// GroupID instead. It exists only for internal usage by the builders.
+func (m *RedeemCodeGroupMutation) GroupIDs() (ids []int64) {
+	if id := m.group; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetGroup resets all changes to the "group" edge.
+func (m *RedeemCodeGroupMutation) ResetGroup() {
+	m.group = nil
+	m.clearedgroup = false
+}
+
+// Where appends a list predicates to the RedeemCodeGroupMutation builder.
+func (m *RedeemCodeGroupMutation) Where(ps ...predicate.RedeemCodeGroup) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the RedeemCodeGroupMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *RedeemCodeGroupMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.RedeemCodeGroup, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *RedeemCodeGroupMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *RedeemCodeGroupMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (RedeemCodeGroup).
+func (m *RedeemCodeGroupMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *RedeemCodeGroupMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.redeem_code != nil {
+		fields = append(fields, redeemcodegroup.FieldRedeemCodeID)
+	}
+	if m.group != nil {
+		fields = append(fields, redeemcodegroup.FieldGroupID)
+	}
+	if m.validity_days != nil {
+		fields = append(fields, redeemcodegroup.FieldValidityDays)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *RedeemCodeGroupMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case redeemcodegroup.FieldRedeemCodeID:
+		return m.RedeemCodeID()
+	case redeemcodegroup.FieldGroupID:
+		return m.GroupID()
+	case redeemcodegroup.FieldValidityDays:
+		return m.ValidityDays()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *RedeemCodeGroupMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case redeemcodegroup.FieldRedeemCodeID:
+		return m.OldRedeemCodeID(ctx)
+	case redeemcodegroup.FieldGroupID:
+		return m.OldGroupID(ctx)
+	case redeemcodegroup.FieldValidityDays:
+		return m.OldValidityDays(ctx)
+	}
+	return nil, fmt.Errorf("unknown RedeemCodeGroup field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RedeemCodeGroupMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case redeemcodegroup.FieldRedeemCodeID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRedeemCodeID(v)
+		return nil
+	case redeemcodegroup.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
+	case redeemcodegroup.FieldValidityDays:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetValidityDays(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemCodeGroup field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *RedeemCodeGroupMutation) AddedFields() []string {
+	var fields []string
+	if m.addvalidity_days != nil {
+		fields = append(fields, redeemcodegroup.FieldValidityDays)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *RedeemCodeGroupMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case redeemcodegroup.FieldValidityDays:
+		return m.AddedValidityDays()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RedeemCodeGroupMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case redeemcodegroup.FieldValidityDays:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddValidityDays(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemCodeGroup numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *RedeemCodeGroupMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *RedeemCodeGroupMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *RedeemCodeGroupMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown RedeemCodeGroup nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *RedeemCodeGroupMutation) ResetField(name string) error {
+	switch name {
+	case redeemcodegroup.FieldRedeemCodeID:
+		m.ResetRedeemCodeID()
+		return nil
+	case redeemcodegroup.FieldGroupID:
+		m.ResetGroupID()
+		return nil
+	case redeemcodegroup.FieldValidityDays:
+		m.ResetValidityDays()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemCodeGroup field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *RedeemCodeGroupMutation) AddedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.redeem_code != nil {
+		edges = append(edges, redeemcodegroup.EdgeRedeemCode)
+	}
+	if m.group != nil {
+		edges = append(edges, redeemcodegroup.EdgeGroup)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *RedeemCodeGroupMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case redeemcodegroup.EdgeRedeemCode:
+		if id := m.redeem_code; id != nil {
+			return []ent.Value{*id}
+		}
+	case redeemcodegroup.EdgeGroup:
+		if id := m.group; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *RedeemCodeGroupMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 2)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *RedeemCodeGroupMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *RedeemCodeGroupMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 2)
+	if m.clearedredeem_code {
+		edges = append(edges, redeemcodegroup.EdgeRedeemCode)
+	}
+	if m.clearedgroup {
+		edges = append(edges, redeemcodegroup.EdgeGroup)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *RedeemCodeGroupMutation) EdgeCleared(name string) bool {
+	switch name {
+	case redeemcodegroup.EdgeRedeemCode:
+		return m.clearedredeem_code
+	case redeemcodegroup.EdgeGroup:
+		return m.clearedgroup
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *RedeemCodeGroupMutation) ClearEdge(name string) error {
+	switch name {
+	case redeemcodegroup.EdgeRedeemCode:
+		m.ClearRedeemCode()
+		return nil
+	case redeemcodegroup.EdgeGroup:
+		m.ClearGroup()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemCodeGroup unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *RedeemCodeGroupMutation) ResetEdge(name string) error {
+	switch name {
+	case redeemcodegroup.EdgeRedeemCode:
+		m.ResetRedeemCode()
+		return nil
+	case redeemcodegroup.EdgeGroup:
+		m.ResetGroup()
+		return nil
+	}
+	return fmt.Errorf("unknown RedeemCodeGroup edge %s", name)
 }
 
 // SecuritySecretMutation represents an operation that mutates the SecuritySecret nodes in the graph.
@@ -48858,6 +50613,9 @@ type UserMutation struct {
 	platform_quotas               map[int64]struct{}
 	removedplatform_quotas        map[int64]struct{}
 	clearedplatform_quotas        bool
+	welfare_balances              map[int64]struct{}
+	removedwelfare_balances       map[int64]struct{}
+	clearedwelfare_balances       bool
 	done                          bool
 	oldValue                      func(context.Context) (*User, error)
 	predicates                    []predicate.User
@@ -50762,6 +52520,60 @@ func (m *UserMutation) ResetPlatformQuotas() {
 	m.removedplatform_quotas = nil
 }
 
+// AddWelfareBalanceIDs adds the "welfare_balances" edge to the WelfareBalance entity by ids.
+func (m *UserMutation) AddWelfareBalanceIDs(ids ...int64) {
+	if m.welfare_balances == nil {
+		m.welfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.welfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// ClearWelfareBalances clears the "welfare_balances" edge to the WelfareBalance entity.
+func (m *UserMutation) ClearWelfareBalances() {
+	m.clearedwelfare_balances = true
+}
+
+// WelfareBalancesCleared reports if the "welfare_balances" edge to the WelfareBalance entity was cleared.
+func (m *UserMutation) WelfareBalancesCleared() bool {
+	return m.clearedwelfare_balances
+}
+
+// RemoveWelfareBalanceIDs removes the "welfare_balances" edge to the WelfareBalance entity by IDs.
+func (m *UserMutation) RemoveWelfareBalanceIDs(ids ...int64) {
+	if m.removedwelfare_balances == nil {
+		m.removedwelfare_balances = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.welfare_balances, ids[i])
+		m.removedwelfare_balances[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedWelfareBalances returns the removed IDs of the "welfare_balances" edge to the WelfareBalance entity.
+func (m *UserMutation) RemovedWelfareBalancesIDs() (ids []int64) {
+	for id := range m.removedwelfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// WelfareBalancesIDs returns the "welfare_balances" edge IDs in the mutation.
+func (m *UserMutation) WelfareBalancesIDs() (ids []int64) {
+	for id := range m.welfare_balances {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetWelfareBalances resets all changes to the "welfare_balances" edge.
+func (m *UserMutation) ResetWelfareBalances() {
+	m.welfare_balances = nil
+	m.clearedwelfare_balances = false
+	m.removedwelfare_balances = nil
+}
+
 // Where appends a list predicates to the UserMutation builder.
 func (m *UserMutation) Where(ps ...predicate.User) {
 	m.predicates = append(m.predicates, ps...)
@@ -51417,7 +53229,7 @@ func (m *UserMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *UserMutation) AddedEdges() []string {
-	edges := make([]string, 0, 13)
+	edges := make([]string, 0, 14)
 	if m.api_keys != nil {
 		edges = append(edges, user.EdgeAPIKeys)
 	}
@@ -51456,6 +53268,9 @@ func (m *UserMutation) AddedEdges() []string {
 	}
 	if m.platform_quotas != nil {
 		edges = append(edges, user.EdgePlatformQuotas)
+	}
+	if m.welfare_balances != nil {
+		edges = append(edges, user.EdgeWelfareBalances)
 	}
 	return edges
 }
@@ -51542,13 +53357,19 @@ func (m *UserMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case user.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.welfare_balances))
+		for id := range m.welfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *UserMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 13)
+	edges := make([]string, 0, 14)
 	if m.removedapi_keys != nil {
 		edges = append(edges, user.EdgeAPIKeys)
 	}
@@ -51587,6 +53408,9 @@ func (m *UserMutation) RemovedEdges() []string {
 	}
 	if m.removedplatform_quotas != nil {
 		edges = append(edges, user.EdgePlatformQuotas)
+	}
+	if m.removedwelfare_balances != nil {
+		edges = append(edges, user.EdgeWelfareBalances)
 	}
 	return edges
 }
@@ -51673,13 +53497,19 @@ func (m *UserMutation) RemovedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case user.EdgeWelfareBalances:
+		ids := make([]ent.Value, 0, len(m.removedwelfare_balances))
+		for id := range m.removedwelfare_balances {
+			ids = append(ids, id)
+		}
+		return ids
 	}
 	return nil
 }
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *UserMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 13)
+	edges := make([]string, 0, 14)
 	if m.clearedapi_keys {
 		edges = append(edges, user.EdgeAPIKeys)
 	}
@@ -51719,6 +53549,9 @@ func (m *UserMutation) ClearedEdges() []string {
 	if m.clearedplatform_quotas {
 		edges = append(edges, user.EdgePlatformQuotas)
 	}
+	if m.clearedwelfare_balances {
+		edges = append(edges, user.EdgeWelfareBalances)
+	}
 	return edges
 }
 
@@ -51752,6 +53585,8 @@ func (m *UserMutation) EdgeCleared(name string) bool {
 		return m.clearedpending_auth_sessions
 	case user.EdgePlatformQuotas:
 		return m.clearedplatform_quotas
+	case user.EdgeWelfareBalances:
+		return m.clearedwelfare_balances
 	}
 	return false
 }
@@ -51806,6 +53641,9 @@ func (m *UserMutation) ResetEdge(name string) error {
 		return nil
 	case user.EdgePlatformQuotas:
 		m.ResetPlatformQuotas()
+		return nil
+	case user.EdgeWelfareBalances:
+		m.ResetWelfareBalances()
 		return nil
 	}
 	return fmt.Errorf("unknown User edge %s", name)
@@ -57100,4 +58938,977 @@ func (m *UserSubscriptionMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown UserSubscription edge %s", name)
+}
+
+// WelfareBalanceMutation represents an operation that mutates the WelfareBalance nodes in the graph.
+type WelfareBalanceMutation struct {
+	config
+	op                  Op
+	typ                 string
+	id                  *int64
+	amount_initial      *float64
+	addamount_initial   *float64
+	amount_remaining    *float64
+	addamount_remaining *float64
+	status              *string
+	expires_at          *time.Time
+	created_at          *time.Time
+	updated_at          *time.Time
+	clearedFields       map[string]struct{}
+	user                *int64
+	cleareduser         bool
+	redeem_code         *int64
+	clearedredeem_code  bool
+	batch               *int64
+	clearedbatch        bool
+	done                bool
+	oldValue            func(context.Context) (*WelfareBalance, error)
+	predicates          []predicate.WelfareBalance
+}
+
+var _ ent.Mutation = (*WelfareBalanceMutation)(nil)
+
+// welfarebalanceOption allows management of the mutation configuration using functional options.
+type welfarebalanceOption func(*WelfareBalanceMutation)
+
+// newWelfareBalanceMutation creates new mutation for the WelfareBalance entity.
+func newWelfareBalanceMutation(c config, op Op, opts ...welfarebalanceOption) *WelfareBalanceMutation {
+	m := &WelfareBalanceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeWelfareBalance,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withWelfareBalanceID sets the ID field of the mutation.
+func withWelfareBalanceID(id int64) welfarebalanceOption {
+	return func(m *WelfareBalanceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *WelfareBalance
+		)
+		m.oldValue = func(ctx context.Context) (*WelfareBalance, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().WelfareBalance.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withWelfareBalance sets the old WelfareBalance of the mutation.
+func withWelfareBalance(node *WelfareBalance) welfarebalanceOption {
+	return func(m *WelfareBalanceMutation) {
+		m.oldValue = func(context.Context) (*WelfareBalance, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m WelfareBalanceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m WelfareBalanceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *WelfareBalanceMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *WelfareBalanceMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().WelfareBalance.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetUserID sets the "user_id" field.
+func (m *WelfareBalanceMutation) SetUserID(i int64) {
+	m.user = &i
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *WelfareBalanceMutation) UserID() (r int64, exists bool) {
+	v := m.user
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldUserID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *WelfareBalanceMutation) ResetUserID() {
+	m.user = nil
+}
+
+// SetRedeemCodeID sets the "redeem_code_id" field.
+func (m *WelfareBalanceMutation) SetRedeemCodeID(i int64) {
+	m.redeem_code = &i
+}
+
+// RedeemCodeID returns the value of the "redeem_code_id" field in the mutation.
+func (m *WelfareBalanceMutation) RedeemCodeID() (r int64, exists bool) {
+	v := m.redeem_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRedeemCodeID returns the old "redeem_code_id" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldRedeemCodeID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRedeemCodeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRedeemCodeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRedeemCodeID: %w", err)
+	}
+	return oldValue.RedeemCodeID, nil
+}
+
+// ResetRedeemCodeID resets all changes to the "redeem_code_id" field.
+func (m *WelfareBalanceMutation) ResetRedeemCodeID() {
+	m.redeem_code = nil
+}
+
+// SetBatchID sets the "batch_id" field.
+func (m *WelfareBalanceMutation) SetBatchID(i int64) {
+	m.batch = &i
+}
+
+// BatchID returns the value of the "batch_id" field in the mutation.
+func (m *WelfareBalanceMutation) BatchID() (r int64, exists bool) {
+	v := m.batch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchID returns the old "batch_id" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldBatchID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchID: %w", err)
+	}
+	return oldValue.BatchID, nil
+}
+
+// ResetBatchID resets all changes to the "batch_id" field.
+func (m *WelfareBalanceMutation) ResetBatchID() {
+	m.batch = nil
+}
+
+// SetAmountInitial sets the "amount_initial" field.
+func (m *WelfareBalanceMutation) SetAmountInitial(f float64) {
+	m.amount_initial = &f
+	m.addamount_initial = nil
+}
+
+// AmountInitial returns the value of the "amount_initial" field in the mutation.
+func (m *WelfareBalanceMutation) AmountInitial() (r float64, exists bool) {
+	v := m.amount_initial
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAmountInitial returns the old "amount_initial" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldAmountInitial(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAmountInitial is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAmountInitial requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAmountInitial: %w", err)
+	}
+	return oldValue.AmountInitial, nil
+}
+
+// AddAmountInitial adds f to the "amount_initial" field.
+func (m *WelfareBalanceMutation) AddAmountInitial(f float64) {
+	if m.addamount_initial != nil {
+		*m.addamount_initial += f
+	} else {
+		m.addamount_initial = &f
+	}
+}
+
+// AddedAmountInitial returns the value that was added to the "amount_initial" field in this mutation.
+func (m *WelfareBalanceMutation) AddedAmountInitial() (r float64, exists bool) {
+	v := m.addamount_initial
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAmountInitial resets all changes to the "amount_initial" field.
+func (m *WelfareBalanceMutation) ResetAmountInitial() {
+	m.amount_initial = nil
+	m.addamount_initial = nil
+}
+
+// SetAmountRemaining sets the "amount_remaining" field.
+func (m *WelfareBalanceMutation) SetAmountRemaining(f float64) {
+	m.amount_remaining = &f
+	m.addamount_remaining = nil
+}
+
+// AmountRemaining returns the value of the "amount_remaining" field in the mutation.
+func (m *WelfareBalanceMutation) AmountRemaining() (r float64, exists bool) {
+	v := m.amount_remaining
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAmountRemaining returns the old "amount_remaining" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldAmountRemaining(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAmountRemaining is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAmountRemaining requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAmountRemaining: %w", err)
+	}
+	return oldValue.AmountRemaining, nil
+}
+
+// AddAmountRemaining adds f to the "amount_remaining" field.
+func (m *WelfareBalanceMutation) AddAmountRemaining(f float64) {
+	if m.addamount_remaining != nil {
+		*m.addamount_remaining += f
+	} else {
+		m.addamount_remaining = &f
+	}
+}
+
+// AddedAmountRemaining returns the value that was added to the "amount_remaining" field in this mutation.
+func (m *WelfareBalanceMutation) AddedAmountRemaining() (r float64, exists bool) {
+	v := m.addamount_remaining
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAmountRemaining resets all changes to the "amount_remaining" field.
+func (m *WelfareBalanceMutation) ResetAmountRemaining() {
+	m.amount_remaining = nil
+	m.addamount_remaining = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *WelfareBalanceMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *WelfareBalanceMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *WelfareBalanceMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *WelfareBalanceMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *WelfareBalanceMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *WelfareBalanceMutation) ResetExpiresAt() {
+	m.expires_at = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *WelfareBalanceMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *WelfareBalanceMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *WelfareBalanceMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *WelfareBalanceMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *WelfareBalanceMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the WelfareBalance entity.
+// If the WelfareBalance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WelfareBalanceMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *WelfareBalanceMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// ClearUser clears the "user" edge to the User entity.
+func (m *WelfareBalanceMutation) ClearUser() {
+	m.cleareduser = true
+	m.clearedFields[welfarebalance.FieldUserID] = struct{}{}
+}
+
+// UserCleared reports if the "user" edge to the User entity was cleared.
+func (m *WelfareBalanceMutation) UserCleared() bool {
+	return m.cleareduser
+}
+
+// UserIDs returns the "user" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// UserID instead. It exists only for internal usage by the builders.
+func (m *WelfareBalanceMutation) UserIDs() (ids []int64) {
+	if id := m.user; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetUser resets all changes to the "user" edge.
+func (m *WelfareBalanceMutation) ResetUser() {
+	m.user = nil
+	m.cleareduser = false
+}
+
+// ClearRedeemCode clears the "redeem_code" edge to the RedeemCode entity.
+func (m *WelfareBalanceMutation) ClearRedeemCode() {
+	m.clearedredeem_code = true
+	m.clearedFields[welfarebalance.FieldRedeemCodeID] = struct{}{}
+}
+
+// RedeemCodeCleared reports if the "redeem_code" edge to the RedeemCode entity was cleared.
+func (m *WelfareBalanceMutation) RedeemCodeCleared() bool {
+	return m.clearedredeem_code
+}
+
+// RedeemCodeIDs returns the "redeem_code" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// RedeemCodeID instead. It exists only for internal usage by the builders.
+func (m *WelfareBalanceMutation) RedeemCodeIDs() (ids []int64) {
+	if id := m.redeem_code; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetRedeemCode resets all changes to the "redeem_code" edge.
+func (m *WelfareBalanceMutation) ResetRedeemCode() {
+	m.redeem_code = nil
+	m.clearedredeem_code = false
+}
+
+// ClearBatch clears the "batch" edge to the RedeemBatch entity.
+func (m *WelfareBalanceMutation) ClearBatch() {
+	m.clearedbatch = true
+	m.clearedFields[welfarebalance.FieldBatchID] = struct{}{}
+}
+
+// BatchCleared reports if the "batch" edge to the RedeemBatch entity was cleared.
+func (m *WelfareBalanceMutation) BatchCleared() bool {
+	return m.clearedbatch
+}
+
+// BatchIDs returns the "batch" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// BatchID instead. It exists only for internal usage by the builders.
+func (m *WelfareBalanceMutation) BatchIDs() (ids []int64) {
+	if id := m.batch; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetBatch resets all changes to the "batch" edge.
+func (m *WelfareBalanceMutation) ResetBatch() {
+	m.batch = nil
+	m.clearedbatch = false
+}
+
+// Where appends a list predicates to the WelfareBalanceMutation builder.
+func (m *WelfareBalanceMutation) Where(ps ...predicate.WelfareBalance) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the WelfareBalanceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *WelfareBalanceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.WelfareBalance, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *WelfareBalanceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *WelfareBalanceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (WelfareBalance).
+func (m *WelfareBalanceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *WelfareBalanceMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.user != nil {
+		fields = append(fields, welfarebalance.FieldUserID)
+	}
+	if m.redeem_code != nil {
+		fields = append(fields, welfarebalance.FieldRedeemCodeID)
+	}
+	if m.batch != nil {
+		fields = append(fields, welfarebalance.FieldBatchID)
+	}
+	if m.amount_initial != nil {
+		fields = append(fields, welfarebalance.FieldAmountInitial)
+	}
+	if m.amount_remaining != nil {
+		fields = append(fields, welfarebalance.FieldAmountRemaining)
+	}
+	if m.status != nil {
+		fields = append(fields, welfarebalance.FieldStatus)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, welfarebalance.FieldExpiresAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, welfarebalance.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, welfarebalance.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *WelfareBalanceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case welfarebalance.FieldUserID:
+		return m.UserID()
+	case welfarebalance.FieldRedeemCodeID:
+		return m.RedeemCodeID()
+	case welfarebalance.FieldBatchID:
+		return m.BatchID()
+	case welfarebalance.FieldAmountInitial:
+		return m.AmountInitial()
+	case welfarebalance.FieldAmountRemaining:
+		return m.AmountRemaining()
+	case welfarebalance.FieldStatus:
+		return m.Status()
+	case welfarebalance.FieldExpiresAt:
+		return m.ExpiresAt()
+	case welfarebalance.FieldCreatedAt:
+		return m.CreatedAt()
+	case welfarebalance.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *WelfareBalanceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case welfarebalance.FieldUserID:
+		return m.OldUserID(ctx)
+	case welfarebalance.FieldRedeemCodeID:
+		return m.OldRedeemCodeID(ctx)
+	case welfarebalance.FieldBatchID:
+		return m.OldBatchID(ctx)
+	case welfarebalance.FieldAmountInitial:
+		return m.OldAmountInitial(ctx)
+	case welfarebalance.FieldAmountRemaining:
+		return m.OldAmountRemaining(ctx)
+	case welfarebalance.FieldStatus:
+		return m.OldStatus(ctx)
+	case welfarebalance.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case welfarebalance.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case welfarebalance.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown WelfareBalance field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *WelfareBalanceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case welfarebalance.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case welfarebalance.FieldRedeemCodeID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRedeemCodeID(v)
+		return nil
+	case welfarebalance.FieldBatchID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchID(v)
+		return nil
+	case welfarebalance.FieldAmountInitial:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAmountInitial(v)
+		return nil
+	case welfarebalance.FieldAmountRemaining:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAmountRemaining(v)
+		return nil
+	case welfarebalance.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case welfarebalance.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case welfarebalance.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case welfarebalance.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown WelfareBalance field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *WelfareBalanceMutation) AddedFields() []string {
+	var fields []string
+	if m.addamount_initial != nil {
+		fields = append(fields, welfarebalance.FieldAmountInitial)
+	}
+	if m.addamount_remaining != nil {
+		fields = append(fields, welfarebalance.FieldAmountRemaining)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *WelfareBalanceMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case welfarebalance.FieldAmountInitial:
+		return m.AddedAmountInitial()
+	case welfarebalance.FieldAmountRemaining:
+		return m.AddedAmountRemaining()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *WelfareBalanceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case welfarebalance.FieldAmountInitial:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAmountInitial(v)
+		return nil
+	case welfarebalance.FieldAmountRemaining:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAmountRemaining(v)
+		return nil
+	}
+	return fmt.Errorf("unknown WelfareBalance numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *WelfareBalanceMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *WelfareBalanceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *WelfareBalanceMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown WelfareBalance nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *WelfareBalanceMutation) ResetField(name string) error {
+	switch name {
+	case welfarebalance.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case welfarebalance.FieldRedeemCodeID:
+		m.ResetRedeemCodeID()
+		return nil
+	case welfarebalance.FieldBatchID:
+		m.ResetBatchID()
+		return nil
+	case welfarebalance.FieldAmountInitial:
+		m.ResetAmountInitial()
+		return nil
+	case welfarebalance.FieldAmountRemaining:
+		m.ResetAmountRemaining()
+		return nil
+	case welfarebalance.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case welfarebalance.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case welfarebalance.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case welfarebalance.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown WelfareBalance field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *WelfareBalanceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 3)
+	if m.user != nil {
+		edges = append(edges, welfarebalance.EdgeUser)
+	}
+	if m.redeem_code != nil {
+		edges = append(edges, welfarebalance.EdgeRedeemCode)
+	}
+	if m.batch != nil {
+		edges = append(edges, welfarebalance.EdgeBatch)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *WelfareBalanceMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case welfarebalance.EdgeUser:
+		if id := m.user; id != nil {
+			return []ent.Value{*id}
+		}
+	case welfarebalance.EdgeRedeemCode:
+		if id := m.redeem_code; id != nil {
+			return []ent.Value{*id}
+		}
+	case welfarebalance.EdgeBatch:
+		if id := m.batch; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *WelfareBalanceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 3)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *WelfareBalanceMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *WelfareBalanceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 3)
+	if m.cleareduser {
+		edges = append(edges, welfarebalance.EdgeUser)
+	}
+	if m.clearedredeem_code {
+		edges = append(edges, welfarebalance.EdgeRedeemCode)
+	}
+	if m.clearedbatch {
+		edges = append(edges, welfarebalance.EdgeBatch)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *WelfareBalanceMutation) EdgeCleared(name string) bool {
+	switch name {
+	case welfarebalance.EdgeUser:
+		return m.cleareduser
+	case welfarebalance.EdgeRedeemCode:
+		return m.clearedredeem_code
+	case welfarebalance.EdgeBatch:
+		return m.clearedbatch
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *WelfareBalanceMutation) ClearEdge(name string) error {
+	switch name {
+	case welfarebalance.EdgeUser:
+		m.ClearUser()
+		return nil
+	case welfarebalance.EdgeRedeemCode:
+		m.ClearRedeemCode()
+		return nil
+	case welfarebalance.EdgeBatch:
+		m.ClearBatch()
+		return nil
+	}
+	return fmt.Errorf("unknown WelfareBalance unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *WelfareBalanceMutation) ResetEdge(name string) error {
+	switch name {
+	case welfarebalance.EdgeUser:
+		m.ResetUser()
+		return nil
+	case welfarebalance.EdgeRedeemCode:
+		m.ResetRedeemCode()
+		return nil
+	case welfarebalance.EdgeBatch:
+		m.ResetBatch()
+		return nil
+	}
+	return fmt.Errorf("unknown WelfareBalance edge %s", name)
 }

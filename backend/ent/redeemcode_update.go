@@ -13,8 +13,11 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/ent/welfarebalance"
 )
 
 // RedeemCodeUpdate is the builder for updating RedeemCode entities.
@@ -214,6 +217,26 @@ func (_u *RedeemCodeUpdate) AddValidityDays(v int) *RedeemCodeUpdate {
 	return _u
 }
 
+// SetBatchID sets the "batch_id" field.
+func (_u *RedeemCodeUpdate) SetBatchID(v int64) *RedeemCodeUpdate {
+	_u.mutation.SetBatchID(v)
+	return _u
+}
+
+// SetNillableBatchID sets the "batch_id" field if the given value is not nil.
+func (_u *RedeemCodeUpdate) SetNillableBatchID(v *int64) *RedeemCodeUpdate {
+	if v != nil {
+		_u.SetBatchID(*v)
+	}
+	return _u
+}
+
+// ClearBatchID clears the value of the "batch_id" field.
+func (_u *RedeemCodeUpdate) ClearBatchID() *RedeemCodeUpdate {
+	_u.mutation.ClearBatchID()
+	return _u
+}
+
 // SetUserID sets the "user" edge to the User entity by ID.
 func (_u *RedeemCodeUpdate) SetUserID(id int64) *RedeemCodeUpdate {
 	_u.mutation.SetUserID(id)
@@ -238,6 +261,41 @@ func (_u *RedeemCodeUpdate) SetGroup(v *Group) *RedeemCodeUpdate {
 	return _u.SetGroupID(v.ID)
 }
 
+// SetBatch sets the "batch" edge to the RedeemBatch entity.
+func (_u *RedeemCodeUpdate) SetBatch(v *RedeemBatch) *RedeemCodeUpdate {
+	return _u.SetBatchID(v.ID)
+}
+
+// AddCodeGroupIDs adds the "code_groups" edge to the RedeemCodeGroup entity by IDs.
+func (_u *RedeemCodeUpdate) AddCodeGroupIDs(ids ...int64) *RedeemCodeUpdate {
+	_u.mutation.AddCodeGroupIDs(ids...)
+	return _u
+}
+
+// AddCodeGroups adds the "code_groups" edges to the RedeemCodeGroup entity.
+func (_u *RedeemCodeUpdate) AddCodeGroups(v ...*RedeemCodeGroup) *RedeemCodeUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddCodeGroupIDs(ids...)
+}
+
+// AddWelfareBalanceIDs adds the "welfare_balances" edge to the WelfareBalance entity by IDs.
+func (_u *RedeemCodeUpdate) AddWelfareBalanceIDs(ids ...int64) *RedeemCodeUpdate {
+	_u.mutation.AddWelfareBalanceIDs(ids...)
+	return _u
+}
+
+// AddWelfareBalances adds the "welfare_balances" edges to the WelfareBalance entity.
+func (_u *RedeemCodeUpdate) AddWelfareBalances(v ...*WelfareBalance) *RedeemCodeUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWelfareBalanceIDs(ids...)
+}
+
 // Mutation returns the RedeemCodeMutation object of the builder.
 func (_u *RedeemCodeUpdate) Mutation() *RedeemCodeMutation {
 	return _u.mutation
@@ -253,6 +311,54 @@ func (_u *RedeemCodeUpdate) ClearUser() *RedeemCodeUpdate {
 func (_u *RedeemCodeUpdate) ClearGroup() *RedeemCodeUpdate {
 	_u.mutation.ClearGroup()
 	return _u
+}
+
+// ClearBatch clears the "batch" edge to the RedeemBatch entity.
+func (_u *RedeemCodeUpdate) ClearBatch() *RedeemCodeUpdate {
+	_u.mutation.ClearBatch()
+	return _u
+}
+
+// ClearCodeGroups clears all "code_groups" edges to the RedeemCodeGroup entity.
+func (_u *RedeemCodeUpdate) ClearCodeGroups() *RedeemCodeUpdate {
+	_u.mutation.ClearCodeGroups()
+	return _u
+}
+
+// RemoveCodeGroupIDs removes the "code_groups" edge to RedeemCodeGroup entities by IDs.
+func (_u *RedeemCodeUpdate) RemoveCodeGroupIDs(ids ...int64) *RedeemCodeUpdate {
+	_u.mutation.RemoveCodeGroupIDs(ids...)
+	return _u
+}
+
+// RemoveCodeGroups removes "code_groups" edges to RedeemCodeGroup entities.
+func (_u *RedeemCodeUpdate) RemoveCodeGroups(v ...*RedeemCodeGroup) *RedeemCodeUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveCodeGroupIDs(ids...)
+}
+
+// ClearWelfareBalances clears all "welfare_balances" edges to the WelfareBalance entity.
+func (_u *RedeemCodeUpdate) ClearWelfareBalances() *RedeemCodeUpdate {
+	_u.mutation.ClearWelfareBalances()
+	return _u
+}
+
+// RemoveWelfareBalanceIDs removes the "welfare_balances" edge to WelfareBalance entities by IDs.
+func (_u *RedeemCodeUpdate) RemoveWelfareBalanceIDs(ids ...int64) *RedeemCodeUpdate {
+	_u.mutation.RemoveWelfareBalanceIDs(ids...)
+	return _u
+}
+
+// RemoveWelfareBalances removes "welfare_balances" edges to WelfareBalance entities.
+func (_u *RedeemCodeUpdate) RemoveWelfareBalances(v ...*WelfareBalance) *RedeemCodeUpdate {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWelfareBalanceIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -404,6 +510,125 @@ func (_u *RedeemCodeUpdate) sqlSave(ctx context.Context) (_node int, err error) 
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(group.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.BatchCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   redeemcode.BatchTable,
+			Columns: []string{redeemcode.BatchColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeembatch.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.BatchIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   redeemcode.BatchTable,
+			Columns: []string{redeemcode.BatchColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeembatch.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.CodeGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedCodeGroupsIDs(); len(nodes) > 0 && !_u.mutation.CodeGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.CodeGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WelfareBalancesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWelfareBalancesIDs(); len(nodes) > 0 && !_u.mutation.WelfareBalancesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WelfareBalancesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {
@@ -615,6 +840,26 @@ func (_u *RedeemCodeUpdateOne) AddValidityDays(v int) *RedeemCodeUpdateOne {
 	return _u
 }
 
+// SetBatchID sets the "batch_id" field.
+func (_u *RedeemCodeUpdateOne) SetBatchID(v int64) *RedeemCodeUpdateOne {
+	_u.mutation.SetBatchID(v)
+	return _u
+}
+
+// SetNillableBatchID sets the "batch_id" field if the given value is not nil.
+func (_u *RedeemCodeUpdateOne) SetNillableBatchID(v *int64) *RedeemCodeUpdateOne {
+	if v != nil {
+		_u.SetBatchID(*v)
+	}
+	return _u
+}
+
+// ClearBatchID clears the value of the "batch_id" field.
+func (_u *RedeemCodeUpdateOne) ClearBatchID() *RedeemCodeUpdateOne {
+	_u.mutation.ClearBatchID()
+	return _u
+}
+
 // SetUserID sets the "user" edge to the User entity by ID.
 func (_u *RedeemCodeUpdateOne) SetUserID(id int64) *RedeemCodeUpdateOne {
 	_u.mutation.SetUserID(id)
@@ -639,6 +884,41 @@ func (_u *RedeemCodeUpdateOne) SetGroup(v *Group) *RedeemCodeUpdateOne {
 	return _u.SetGroupID(v.ID)
 }
 
+// SetBatch sets the "batch" edge to the RedeemBatch entity.
+func (_u *RedeemCodeUpdateOne) SetBatch(v *RedeemBatch) *RedeemCodeUpdateOne {
+	return _u.SetBatchID(v.ID)
+}
+
+// AddCodeGroupIDs adds the "code_groups" edge to the RedeemCodeGroup entity by IDs.
+func (_u *RedeemCodeUpdateOne) AddCodeGroupIDs(ids ...int64) *RedeemCodeUpdateOne {
+	_u.mutation.AddCodeGroupIDs(ids...)
+	return _u
+}
+
+// AddCodeGroups adds the "code_groups" edges to the RedeemCodeGroup entity.
+func (_u *RedeemCodeUpdateOne) AddCodeGroups(v ...*RedeemCodeGroup) *RedeemCodeUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddCodeGroupIDs(ids...)
+}
+
+// AddWelfareBalanceIDs adds the "welfare_balances" edge to the WelfareBalance entity by IDs.
+func (_u *RedeemCodeUpdateOne) AddWelfareBalanceIDs(ids ...int64) *RedeemCodeUpdateOne {
+	_u.mutation.AddWelfareBalanceIDs(ids...)
+	return _u
+}
+
+// AddWelfareBalances adds the "welfare_balances" edges to the WelfareBalance entity.
+func (_u *RedeemCodeUpdateOne) AddWelfareBalances(v ...*WelfareBalance) *RedeemCodeUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddWelfareBalanceIDs(ids...)
+}
+
 // Mutation returns the RedeemCodeMutation object of the builder.
 func (_u *RedeemCodeUpdateOne) Mutation() *RedeemCodeMutation {
 	return _u.mutation
@@ -654,6 +934,54 @@ func (_u *RedeemCodeUpdateOne) ClearUser() *RedeemCodeUpdateOne {
 func (_u *RedeemCodeUpdateOne) ClearGroup() *RedeemCodeUpdateOne {
 	_u.mutation.ClearGroup()
 	return _u
+}
+
+// ClearBatch clears the "batch" edge to the RedeemBatch entity.
+func (_u *RedeemCodeUpdateOne) ClearBatch() *RedeemCodeUpdateOne {
+	_u.mutation.ClearBatch()
+	return _u
+}
+
+// ClearCodeGroups clears all "code_groups" edges to the RedeemCodeGroup entity.
+func (_u *RedeemCodeUpdateOne) ClearCodeGroups() *RedeemCodeUpdateOne {
+	_u.mutation.ClearCodeGroups()
+	return _u
+}
+
+// RemoveCodeGroupIDs removes the "code_groups" edge to RedeemCodeGroup entities by IDs.
+func (_u *RedeemCodeUpdateOne) RemoveCodeGroupIDs(ids ...int64) *RedeemCodeUpdateOne {
+	_u.mutation.RemoveCodeGroupIDs(ids...)
+	return _u
+}
+
+// RemoveCodeGroups removes "code_groups" edges to RedeemCodeGroup entities.
+func (_u *RedeemCodeUpdateOne) RemoveCodeGroups(v ...*RedeemCodeGroup) *RedeemCodeUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveCodeGroupIDs(ids...)
+}
+
+// ClearWelfareBalances clears all "welfare_balances" edges to the WelfareBalance entity.
+func (_u *RedeemCodeUpdateOne) ClearWelfareBalances() *RedeemCodeUpdateOne {
+	_u.mutation.ClearWelfareBalances()
+	return _u
+}
+
+// RemoveWelfareBalanceIDs removes the "welfare_balances" edge to WelfareBalance entities by IDs.
+func (_u *RedeemCodeUpdateOne) RemoveWelfareBalanceIDs(ids ...int64) *RedeemCodeUpdateOne {
+	_u.mutation.RemoveWelfareBalanceIDs(ids...)
+	return _u
+}
+
+// RemoveWelfareBalances removes "welfare_balances" edges to WelfareBalance entities.
+func (_u *RedeemCodeUpdateOne) RemoveWelfareBalances(v ...*WelfareBalance) *RedeemCodeUpdateOne {
+	ids := make([]int64, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveWelfareBalanceIDs(ids...)
 }
 
 // Where appends a list predicates to the RedeemCodeUpdate builder.
@@ -835,6 +1163,125 @@ func (_u *RedeemCodeUpdateOne) sqlSave(ctx context.Context) (_node *RedeemCode, 
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(group.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.BatchCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   redeemcode.BatchTable,
+			Columns: []string{redeemcode.BatchColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeembatch.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.BatchIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   redeemcode.BatchTable,
+			Columns: []string{redeemcode.BatchColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeembatch.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.CodeGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedCodeGroupsIDs(); len(nodes) > 0 && !_u.mutation.CodeGroupsCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.CodeGroupsIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.CodeGroupsTable,
+			Columns: []string{redeemcode.CodeGroupsColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(redeemcodegroup.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.WelfareBalancesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedWelfareBalancesIDs(); len(nodes) > 0 && !_u.mutation.WelfareBalancesCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.WelfareBalancesIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   redeemcode.WelfareBalancesTable,
+			Columns: []string{redeemcode.WelfareBalancesColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(welfarebalance.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

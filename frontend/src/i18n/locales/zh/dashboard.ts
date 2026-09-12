@@ -3,6 +3,8 @@ export default {
     title: '仪表盘',
     welcomeMessage: '欢迎回来！这是您账户的概览。',
     balance: '余额',
+    welfareBalance: '福利余额',
+    welfareExpiresAt: '{time} 清零',
     apiKeys: 'API 密钥',
     todayRequests: '今日请求',
     todayCost: '今日消费',

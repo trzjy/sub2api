@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 
@@ -14,20 +15,26 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
+	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/ent/welfarebalance"
 )
 
 // RedeemCodeQuery is the builder for querying RedeemCode entities.
 type RedeemCodeQuery struct {
 	config
-	ctx        *QueryContext
-	order      []redeemcode.OrderOption
-	inters     []Interceptor
-	predicates []predicate.RedeemCode
-	withUser   *UserQuery
-	withGroup  *GroupQuery
-	modifiers  []func(*sql.Selector)
+	ctx                 *QueryContext
+	order               []redeemcode.OrderOption
+	inters              []Interceptor
+	predicates          []predicate.RedeemCode
+	withUser            *UserQuery
+	withGroup           *GroupQuery
+	withBatch           *RedeemBatchQuery
+	withCodeGroups      *RedeemCodeGroupQuery
+	withWelfareBalances *WelfareBalanceQuery
+	modifiers           []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -101,6 +108,72 @@ func (_q *RedeemCodeQuery) QueryGroup() *GroupQuery {
 			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, selector),
 			sqlgraph.To(group.Table, group.FieldID),
 			sqlgraph.Edge(sqlgraph.M2O, true, redeemcode.GroupTable, redeemcode.GroupColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryBatch chains the current query on the "batch" edge.
+func (_q *RedeemCodeQuery) QueryBatch() *RedeemBatchQuery {
+	query := (&RedeemBatchClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, selector),
+			sqlgraph.To(redeembatch.Table, redeembatch.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, redeemcode.BatchTable, redeemcode.BatchColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryCodeGroups chains the current query on the "code_groups" edge.
+func (_q *RedeemCodeQuery) QueryCodeGroups() *RedeemCodeGroupQuery {
+	query := (&RedeemCodeGroupClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, selector),
+			sqlgraph.To(redeemcodegroup.Table, redeemcodegroup.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeemcode.CodeGroupsTable, redeemcode.CodeGroupsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryWelfareBalances chains the current query on the "welfare_balances" edge.
+func (_q *RedeemCodeQuery) QueryWelfareBalances() *WelfareBalanceQuery {
+	query := (&WelfareBalanceClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, selector),
+			sqlgraph.To(welfarebalance.Table, welfarebalance.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeemcode.WelfareBalancesTable, redeemcode.WelfareBalancesColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -295,13 +368,16 @@ func (_q *RedeemCodeQuery) Clone() *RedeemCodeQuery {
 		return nil
 	}
 	return &RedeemCodeQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]redeemcode.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.RedeemCode{}, _q.predicates...),
-		withUser:   _q.withUser.Clone(),
-		withGroup:  _q.withGroup.Clone(),
+		config:              _q.config,
+		ctx:                 _q.ctx.Clone(),
+		order:               append([]redeemcode.OrderOption{}, _q.order...),
+		inters:              append([]Interceptor{}, _q.inters...),
+		predicates:          append([]predicate.RedeemCode{}, _q.predicates...),
+		withUser:            _q.withUser.Clone(),
+		withGroup:           _q.withGroup.Clone(),
+		withBatch:           _q.withBatch.Clone(),
+		withCodeGroups:      _q.withCodeGroups.Clone(),
+		withWelfareBalances: _q.withWelfareBalances.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -327,6 +403,39 @@ func (_q *RedeemCodeQuery) WithGroup(opts ...func(*GroupQuery)) *RedeemCodeQuery
 		opt(query)
 	}
 	_q.withGroup = query
+	return _q
+}
+
+// WithBatch tells the query-builder to eager-load the nodes that are connected to
+// the "batch" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *RedeemCodeQuery) WithBatch(opts ...func(*RedeemBatchQuery)) *RedeemCodeQuery {
+	query := (&RedeemBatchClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withBatch = query
+	return _q
+}
+
+// WithCodeGroups tells the query-builder to eager-load the nodes that are connected to
+// the "code_groups" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *RedeemCodeQuery) WithCodeGroups(opts ...func(*RedeemCodeGroupQuery)) *RedeemCodeQuery {
+	query := (&RedeemCodeGroupClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withCodeGroups = query
+	return _q
+}
+
+// WithWelfareBalances tells the query-builder to eager-load the nodes that are connected to
+// the "welfare_balances" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *RedeemCodeQuery) WithWelfareBalances(opts ...func(*WelfareBalanceQuery)) *RedeemCodeQuery {
+	query := (&WelfareBalanceClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withWelfareBalances = query
 	return _q
 }
 
@@ -408,9 +517,12 @@ func (_q *RedeemCodeQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*R
 	var (
 		nodes       = []*RedeemCode{}
 		_spec       = _q.querySpec()
-		loadedTypes = [2]bool{
+		loadedTypes = [5]bool{
 			_q.withUser != nil,
 			_q.withGroup != nil,
+			_q.withBatch != nil,
+			_q.withCodeGroups != nil,
+			_q.withWelfareBalances != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -443,6 +555,26 @@ func (_q *RedeemCodeQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*R
 	if query := _q.withGroup; query != nil {
 		if err := _q.loadGroup(ctx, query, nodes, nil,
 			func(n *RedeemCode, e *Group) { n.Edges.Group = e }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withBatch; query != nil {
+		if err := _q.loadBatch(ctx, query, nodes, nil,
+			func(n *RedeemCode, e *RedeemBatch) { n.Edges.Batch = e }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withCodeGroups; query != nil {
+		if err := _q.loadCodeGroups(ctx, query, nodes,
+			func(n *RedeemCode) { n.Edges.CodeGroups = []*RedeemCodeGroup{} },
+			func(n *RedeemCode, e *RedeemCodeGroup) { n.Edges.CodeGroups = append(n.Edges.CodeGroups, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withWelfareBalances; query != nil {
+		if err := _q.loadWelfareBalances(ctx, query, nodes,
+			func(n *RedeemCode) { n.Edges.WelfareBalances = []*WelfareBalance{} },
+			func(n *RedeemCode, e *WelfareBalance) { n.Edges.WelfareBalances = append(n.Edges.WelfareBalances, e) }); err != nil {
 			return nil, err
 		}
 	}
@@ -513,6 +645,98 @@ func (_q *RedeemCodeQuery) loadGroup(ctx context.Context, query *GroupQuery, nod
 	}
 	return nil
 }
+func (_q *RedeemCodeQuery) loadBatch(ctx context.Context, query *RedeemBatchQuery, nodes []*RedeemCode, init func(*RedeemCode), assign func(*RedeemCode, *RedeemBatch)) error {
+	ids := make([]int64, 0, len(nodes))
+	nodeids := make(map[int64][]*RedeemCode)
+	for i := range nodes {
+		if nodes[i].BatchID == nil {
+			continue
+		}
+		fk := *nodes[i].BatchID
+		if _, ok := nodeids[fk]; !ok {
+			ids = append(ids, fk)
+		}
+		nodeids[fk] = append(nodeids[fk], nodes[i])
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	query.Where(redeembatch.IDIn(ids...))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		nodes, ok := nodeids[n.ID]
+		if !ok {
+			return fmt.Errorf(`unexpected foreign-key "batch_id" returned %v`, n.ID)
+		}
+		for i := range nodes {
+			assign(nodes[i], n)
+		}
+	}
+	return nil
+}
+func (_q *RedeemCodeQuery) loadCodeGroups(ctx context.Context, query *RedeemCodeGroupQuery, nodes []*RedeemCode, init func(*RedeemCode), assign func(*RedeemCode, *RedeemCodeGroup)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[int64]*RedeemCode)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(redeemcodegroup.FieldRedeemCodeID)
+	}
+	query.Where(predicate.RedeemCodeGroup(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(redeemcode.CodeGroupsColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.RedeemCodeID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "redeem_code_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *RedeemCodeQuery) loadWelfareBalances(ctx context.Context, query *WelfareBalanceQuery, nodes []*RedeemCode, init func(*RedeemCode), assign func(*RedeemCode, *WelfareBalance)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[int64]*RedeemCode)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(welfarebalance.FieldRedeemCodeID)
+	}
+	query.Where(predicate.WelfareBalance(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(redeemcode.WelfareBalancesColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.RedeemCodeID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "redeem_code_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
 
 func (_q *RedeemCodeQuery) sqlCount(ctx context.Context) (int, error) {
 	_spec := _q.querySpec()
@@ -547,6 +771,9 @@ func (_q *RedeemCodeQuery) querySpec() *sqlgraph.QuerySpec {
 		}
 		if _q.withGroup != nil {
 			_spec.Node.AddColumnOnce(redeemcode.FieldGroupID)
+		}
+		if _q.withBatch != nil {
+			_spec.Node.AddColumnOnce(redeemcode.FieldBatchID)
 		}
 	}
 	if ps := _q.predicates; len(ps) > 0 {

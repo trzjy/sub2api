@@ -84,8 +84,14 @@ type PromoCodeUsage func(*sql.Selector)
 // Proxy is the predicate function for proxy builders.
 type Proxy func(*sql.Selector)
 
+// RedeemBatch is the predicate function for redeembatch builders.
+type RedeemBatch func(*sql.Selector)
+
 // RedeemCode is the predicate function for redeemcode builders.
 type RedeemCode func(*sql.Selector)
+
+// RedeemCodeGroup is the predicate function for redeemcodegroup builders.
+type RedeemCodeGroup func(*sql.Selector)
 
 // SecuritySecret is the predicate function for securitysecret builders.
 type SecuritySecret func(*sql.Selector)
@@ -122,3 +128,6 @@ type UserPlatformQuota func(*sql.Selector)
 
 // UserSubscription is the predicate function for usersubscription builders.
 type UserSubscription func(*sql.Selector)
+
+// WelfareBalance is the predicate function for welfarebalance builders.
+type WelfareBalance func(*sql.Selector)

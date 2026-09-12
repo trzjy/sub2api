@@ -168,6 +168,8 @@ type UsageBillingApplyResult struct {
 	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)
 	BalanceOverdrafted   bool               // true when the sufficient-balance guard missed and debt was still recorded
 	QuotaState           *AccountQuotaState // post-increment quota state (nil = no quota increment)
+	// WelfareCost 本次由福利余额承担的金额（优先于充值余额扣减，不计入返佣/充值统计）。
+	WelfareCost float64
 }
 
 // BatchImageBalanceHoldCommand describes an idempotent balance hold operation.

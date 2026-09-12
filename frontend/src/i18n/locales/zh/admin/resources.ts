@@ -261,6 +261,7 @@ export default {
         concurrency: '并发数',
         subscription: '订阅',
         invitation: '邀请码',
+        welfare: '福利卡',
         // 管理员在用户管理页面调整余额/并发时产生的记录
         admin_balance: '余额（管理员）',
         admin_concurrency: '并发数（管理员）'
@@ -270,6 +271,7 @@ export default {
       concurrency: '并发数',
       subscription: '订阅',
       invitation: '邀请码',
+      welfareCard: '福利卡',
       invitationHint: '邀请码用于限制用户注册，使用后自动标记为已使用。',
       poolFilter: '库存池: {pool}',
       allPools: '全部库存池',
@@ -380,7 +382,50 @@ export default {
       failedToLoad: '加载兑换码列表失败',
       failedToGenerate: '生成兑换码失败',
       failedToUpdate: '更新兑换码失败',
-      failedToDelete: '删除兑换码失败'
+      failedToDelete: '删除兑换码失败',
+      // 福利批次
+      tabs: {
+        welfare: '福利批次',
+        codes: '兑换码'
+      },
+      welfare: {
+        createBatch: '新建福利批次',
+        createTitle: '新建福利批次',
+        batchName: '批次名',
+        defaultBatchName: '福利批次',
+        selectGroups: '订阅分组',
+        noGroups: '暂无订阅类型分组',
+        dayCard: '天卡（1 天）',
+        weekCard: '周卡（7 天）',
+        monthCard: '月卡（30 天）',
+        amountRange: '金额区间 ($)',
+        amountMinPlaceholder: '最低金额',
+        amountMaxPlaceholder: '最高金额',
+        amountRangeHint: '两项都留空表示纯订阅卡',
+        amountRangeIncomplete: '请同时填写最低和最高金额，或两项都留空',
+        amountRangeInvalid: '金额区间需满足 0 ≤ 最低金额 ≤ 最高金额',
+        requireOneBenefit: '请至少勾选订阅分组或填写金额区间',
+        countInvalid: '数量需为 1-1000 的整数',
+        failedToCreate: '创建福利批次失败',
+        failedToLoadBatches: '加载福利批次失败',
+        copyUnused: '复制未兑换',
+        noUnusedCodes: '该批次暂无未兑换卡密',
+        unusedCopied: '已复制 {count} 条未兑换卡密',
+        viewCodes: '查看卡密',
+        codesTitle: '批次卡密 - {name}',
+        codesCount: '共 {count} 张',
+        noCodes: '该批次暂无卡密',
+        failedToLoadCodes: '加载批次卡密失败',
+        batchExported: '批次卡密导出成功',
+        failedToExportBatch: '导出批次卡密失败',
+        columns: {
+          name: '批次名',
+          createdAt: '生成时间',
+          codeCount: '数量',
+          usage: '已兑 / 剩余',
+          clearedAmount: '已清零金额'
+        }
+      }
     },
 
     // Announcements

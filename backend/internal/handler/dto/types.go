@@ -517,6 +517,11 @@ type RedeemCode struct {
 	GroupID      *int64 `json:"group_id"`
 	ValidityDays int    `json:"validity_days"`
 
+	// BatchID 仅 welfare 类型有值：所属福利批次。
+	BatchID *int64 `json:"batch_id,omitempty"`
+	// GroupGrants 仅 welfare 类型兑换成功后填充：分组权益清单（展示用）。
+	GroupGrants []service.WelfareGroupGrant `json:"group_grants,omitempty"`
+
 	// Notes is only populated for admin_balance/admin_concurrency types
 	// so users can see why they were charged or credited
 	Notes *string `json:"notes,omitempty"`

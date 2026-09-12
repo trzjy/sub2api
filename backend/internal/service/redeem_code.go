@@ -21,6 +21,11 @@ type RedeemCode struct {
 	GroupID      *int64
 	ValidityDays int
 
+	// BatchID 仅 welfare 类型有值：所属福利批次。
+	BatchID *int64
+	// GroupGrants 仅 welfare 类型兑换成功后填充：分组权益清单（展示用）。
+	GroupGrants []WelfareGroupGrant
+
 	User  *User
 	Group *Group
 }

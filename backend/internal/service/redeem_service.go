@@ -152,6 +152,7 @@ type RedeemService struct {
 	entClient            *dbent.Client
 	authCacheInvalidator APIKeyAuthCacheInvalidator
 	affiliateService     *AffiliateService
+	welfareRepo          WelfareRepository
 }
 
 // NewRedeemService 创建兑换码服务实例
@@ -177,6 +178,11 @@ func NewRedeemService(
 		authCacheInvalidator: authCacheInvalidator,
 		affiliateService:     affiliateService,
 	}
+}
+
+// SetWelfareRepository 注入福利卡仓储（独立 setter，避免改动大量测试构造点）。
+func (s *RedeemService) SetWelfareRepository(repo WelfareRepository) {
+	s.welfareRepo = repo
 }
 
 // GenerateRandomCode 生成随机兑换码
@@ -219,6 +225,10 @@ func (s *RedeemService) GenerateCodes(ctx context.Context, req GenerateCodesRequ
 	codeType := req.Type
 	if codeType == "" {
 		codeType = RedeemTypeBalance
+	}
+	// 福利卡必须走批次生成入口（GenerateWelfareBatch），通用生成无法表达批次与分组勾选。
+	if codeType == RedeemTypeWelfare {
+		return nil, errors.New("welfare codes must be generated via welfare-batches endpoint")
 	}
 
 	// 邀请码类型的 value 设为 0
@@ -263,6 +273,10 @@ func (s *RedeemService) CreateCode(ctx context.Context, code *RedeemCode) error 
 	}
 	if code.Type == "" {
 		code.Type = RedeemTypeBalance
+	}
+	// 福利卡必须走批次生成入口（GenerateWelfareBatch）。
+	if code.Type == RedeemTypeWelfare {
+		return errors.New("welfare codes must be generated via welfare-batches endpoint")
 	}
 	if code.Type != RedeemTypeInvitation && code.Value == 0 {
 		return errors.New("value must not be zero")
@@ -456,7 +470,7 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 
 	// 验证兑换码类型的前置条件。邀请码属于注册流程，不能通过普通兑换接口使用。
 	switch redeemCode.Type {
-	case RedeemTypeBalance, RedeemTypeConcurrency:
+	case RedeemTypeBalance, RedeemTypeConcurrency, RedeemTypeWelfare:
 	case RedeemTypeSubscription:
 		if redeemCode.GroupID == nil {
 			return nil, infraerrors.BadRequest("REDEEM_CODE_INVALID", "invalid subscription redeem code: missing group_id")
@@ -486,6 +500,9 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 	if err := s.redeemRepo.Use(txCtx, redeemCode.ID, userID); err != nil {
 		if errors.Is(err, ErrRedeemCodeNotFound) || errors.Is(err, ErrRedeemCodeUsed) {
 			return nil, ErrRedeemCodeUsed
+		}
+		if errors.Is(err, ErrRedeemBatchOnePerUser) {
+			return nil, err
 		}
 		return nil, fmt.Errorf("mark code as used: %w", err)
 	}
@@ -541,6 +558,11 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 			}
 		}
 
+	case RedeemTypeWelfare:
+		if err := s.redeemWelfare(txCtx, userID, redeemCode); err != nil {
+			return nil, err
+		}
+
 	default:
 		return nil, unsupportedRedeemTypeError(redeemCode.Type)
 	}
@@ -564,13 +586,21 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 		return nil, fmt.Errorf("get updated redeem code: %w", err)
 	}
 
+	// 福利卡附带分组权益清单，便于前端展示"获得分组 Y 顺延 Z 天"。
+	if redeemCode.Type == RedeemTypeWelfare && s.welfareRepo != nil {
+		if grants, gerr := s.welfareRepo.ListCodeGroups(ctx, redeemCode.ID); gerr == nil {
+			redeemCode.GroupGrants = grants
+		}
+	}
+
 	return redeemCode, nil
 }
 
 // invalidateRedeemCaches 失效兑换相关的缓存
 func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64, redeemCode *RedeemCode) {
 	switch redeemCode.Type {
-	case RedeemTypeBalance:
+	case RedeemTypeBalance, RedeemTypeWelfare:
+		// 福利卡可能改变余额资格（充值余额不足但有福利余额），与余额卡同等失效。
 		if s.authCacheInvalidator != nil {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
 		}
@@ -582,6 +612,19 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 			defer cancel()
 			_ = s.billingCacheService.InvalidateUserBalance(cacheCtx, userID)
 		}()
+		// 福利卡还可能带订阅权益，逐分组失效订阅缓存。
+		if redeemCode.Type == RedeemTypeWelfare && s.welfareRepo != nil {
+			if grants, err := s.welfareRepo.ListCodeGroups(ctx, redeemCode.ID); err == nil {
+				for i := range grants {
+					groupID := grants[i].GroupID
+					go func() {
+						cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
+					}()
+				}
+			}
+		}
 	case RedeemTypeConcurrency:
 		if s.authCacheInvalidator != nil {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)

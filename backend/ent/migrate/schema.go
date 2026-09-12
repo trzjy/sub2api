@@ -1452,6 +1452,28 @@ var (
 			},
 		},
 	}
+	// RedeemBatchesColumns holds the columns for the "redeem_batches" table.
+	RedeemBatchesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "name", Type: field.TypeString, Default: "", SchemaType: map[string]string{"postgres": "text"}},
+		{Name: "config", Type: field.TypeJSON, Nullable: true},
+		{Name: "code_count", Type: field.TypeInt, Default: 0},
+		{Name: "created_by", Type: field.TypeInt64, Default: 0},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// RedeemBatchesTable holds the schema information for the "redeem_batches" table.
+	RedeemBatchesTable = &schema.Table{
+		Name:       "redeem_batches",
+		Columns:    RedeemBatchesColumns,
+		PrimaryKey: []*schema.Column{RedeemBatchesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "redeembatch_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{RedeemBatchesColumns[5]},
+			},
+		},
+	}
 	// RedeemCodesColumns holds the columns for the "redeem_codes" table.
 	RedeemCodesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -1465,6 +1487,7 @@ var (
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
 		{Name: "validity_days", Type: field.TypeInt, Default: 30},
 		{Name: "group_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "batch_id", Type: field.TypeInt64, Nullable: true},
 		{Name: "used_by", Type: field.TypeInt64, Nullable: true},
 	}
 	// RedeemCodesTable holds the schema information for the "redeem_codes" table.
@@ -1480,8 +1503,14 @@ var (
 				OnDelete:   schema.SetNull,
 			},
 			{
-				Symbol:     "redeem_codes_users_redeem_codes",
+				Symbol:     "redeem_codes_redeem_batches_redeem_codes",
 				Columns:    []*schema.Column{RedeemCodesColumns[11]},
+				RefColumns: []*schema.Column{RedeemBatchesColumns[0]},
+				OnDelete:   schema.SetNull,
+			},
+			{
+				Symbol:     "redeem_codes_users_redeem_codes",
+				Columns:    []*schema.Column{RedeemCodesColumns[12]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -1495,7 +1524,7 @@ var (
 			{
 				Name:    "redeemcode_used_by",
 				Unique:  false,
-				Columns: []*schema.Column{RedeemCodesColumns[11]},
+				Columns: []*schema.Column{RedeemCodesColumns[12]},
 			},
 			{
 				Name:    "redeemcode_group_id",
@@ -1506,6 +1535,38 @@ var (
 				Name:    "redeemcode_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{RedeemCodesColumns[8]},
+			},
+			{
+				Name:    "redeemcode_batch_id",
+				Unique:  false,
+				Columns: []*schema.Column{RedeemCodesColumns[11]},
+			},
+		},
+	}
+	// RedeemCodeGroupsColumns holds the columns for the "redeem_code_groups" table.
+	RedeemCodeGroupsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "validity_days", Type: field.TypeInt, Default: 30},
+		{Name: "group_id", Type: field.TypeInt64},
+		{Name: "redeem_code_id", Type: field.TypeInt64},
+	}
+	// RedeemCodeGroupsTable holds the schema information for the "redeem_code_groups" table.
+	RedeemCodeGroupsTable = &schema.Table{
+		Name:       "redeem_code_groups",
+		Columns:    RedeemCodeGroupsColumns,
+		PrimaryKey: []*schema.Column{RedeemCodeGroupsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "redeem_code_groups_groups_redeem_code_groups",
+				Columns:    []*schema.Column{RedeemCodeGroupsColumns[2]},
+				RefColumns: []*schema.Column{GroupsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "redeem_code_groups_redeem_codes_code_groups",
+				Columns:    []*schema.Column{RedeemCodeGroupsColumns[3]},
+				RefColumns: []*schema.Column{RedeemCodesColumns[0]},
+				OnDelete:   schema.NoAction,
 			},
 		},
 	}
@@ -2087,6 +2148,57 @@ var (
 			},
 		},
 	}
+	// WelfareBalancesColumns holds the columns for the "welfare_balances" table.
+	WelfareBalancesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "amount_initial", Type: field.TypeFloat64, Default: 0, SchemaType: map[string]string{"postgres": "decimal(20,8)"}},
+		{Name: "amount_remaining", Type: field.TypeFloat64, Default: 0, SchemaType: map[string]string{"postgres": "decimal(20,8)"}},
+		{Name: "status", Type: field.TypeString, Size: 20, Default: "active"},
+		{Name: "expires_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "batch_id", Type: field.TypeInt64},
+		{Name: "redeem_code_id", Type: field.TypeInt64},
+		{Name: "user_id", Type: field.TypeInt64},
+	}
+	// WelfareBalancesTable holds the schema information for the "welfare_balances" table.
+	WelfareBalancesTable = &schema.Table{
+		Name:       "welfare_balances",
+		Columns:    WelfareBalancesColumns,
+		PrimaryKey: []*schema.Column{WelfareBalancesColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "welfare_balances_redeem_batches_welfare_balances",
+				Columns:    []*schema.Column{WelfareBalancesColumns[7]},
+				RefColumns: []*schema.Column{RedeemBatchesColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "welfare_balances_redeem_codes_welfare_balances",
+				Columns:    []*schema.Column{WelfareBalancesColumns[8]},
+				RefColumns: []*schema.Column{RedeemCodesColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "welfare_balances_users_welfare_balances",
+				Columns:    []*schema.Column{WelfareBalancesColumns[9]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "welfarebalance_user_id_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{WelfareBalancesColumns[9], WelfareBalancesColumns[3], WelfareBalancesColumns[4]},
+			},
+			{
+				Name:    "welfarebalance_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{WelfareBalancesColumns[3], WelfareBalancesColumns[4]},
+			},
+		},
+	}
 	// Tables holds all the tables in the schema.
 	Tables = []*schema.Table{
 		APIKeysTable,
@@ -2115,7 +2227,9 @@ var (
 		PromoCodesTable,
 		PromoCodeUsagesTable,
 		ProxiesTable,
+		RedeemBatchesTable,
 		RedeemCodesTable,
+		RedeemCodeGroupsTable,
 		SecuritySecretsTable,
 		SettingsTable,
 		SubscriptionPlansTable,
@@ -2128,6 +2242,7 @@ var (
 		UserAttributeValuesTable,
 		UserPlatformQuotasTable,
 		UserSubscriptionsTable,
+		WelfareBalancesTable,
 	}
 )
 
@@ -2231,10 +2346,19 @@ func init() {
 	ProxiesTable.Annotation = &entsql.Annotation{
 		Table: "proxies",
 	}
+	RedeemBatchesTable.Annotation = &entsql.Annotation{
+		Table: "redeem_batches",
+	}
 	RedeemCodesTable.ForeignKeys[0].RefTable = GroupsTable
-	RedeemCodesTable.ForeignKeys[1].RefTable = UsersTable
+	RedeemCodesTable.ForeignKeys[1].RefTable = RedeemBatchesTable
+	RedeemCodesTable.ForeignKeys[2].RefTable = UsersTable
 	RedeemCodesTable.Annotation = &entsql.Annotation{
 		Table: "redeem_codes",
+	}
+	RedeemCodeGroupsTable.ForeignKeys[0].RefTable = GroupsTable
+	RedeemCodeGroupsTable.ForeignKeys[1].RefTable = RedeemCodesTable
+	RedeemCodeGroupsTable.Annotation = &entsql.Annotation{
+		Table: "redeem_code_groups",
 	}
 	SecuritySecretsTable.Annotation = &entsql.Annotation{
 		Table: "security_secrets",
@@ -2284,5 +2408,11 @@ func init() {
 	UserSubscriptionsTable.ForeignKeys[2].RefTable = UsersTable
 	UserSubscriptionsTable.Annotation = &entsql.Annotation{
 		Table: "user_subscriptions",
+	}
+	WelfareBalancesTable.ForeignKeys[0].RefTable = RedeemBatchesTable
+	WelfareBalancesTable.ForeignKeys[1].RefTable = RedeemCodesTable
+	WelfareBalancesTable.ForeignKeys[2].RefTable = UsersTable
+	WelfareBalancesTable.Annotation = &entsql.Annotation{
+		Table: "welfare_balances",
 	}
 }

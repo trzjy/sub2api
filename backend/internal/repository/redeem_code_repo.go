@@ -357,6 +357,11 @@ func (r *redeemCodeRepository) Use(ctx context.Context, id, userID int64) error 
 		SetUsedAt(now).
 		Save(ctx)
 	if err != nil {
+		// 命中 idx_redeem_codes_batch_one_per_user：同批次福利卡每人限兑一张。
+		// ent 把唯一约束包装为 ConstraintError{wrap: pq 23505}，两种路径都判定。
+		if isUniqueViolation(err) || dbent.IsConstraintError(err) {
+			return service.ErrRedeemBatchOnePerUser
+		}
 		return err
 	}
 	if affected == 0 {
@@ -450,6 +455,7 @@ func redeemCodeEntityToService(m *dbent.RedeemCode) *service.RedeemCode {
 		ExpiresAt:    m.ExpiresAt,
 		GroupID:      m.GroupID,
 		ValidityDays: m.ValidityDays,
+		BatchID:      m.BatchID,
 	}
 	if m.Edges.User != nil {
 		out.User = userEntityToService(m.Edges.User)

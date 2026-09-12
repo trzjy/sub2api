@@ -72,6 +72,9 @@ func (RedeemCode) Fields() []ent.Field {
 			Nillable(),
 		field.Int("validity_days").
 			Default(30),
+		field.Int64("batch_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -85,6 +88,12 @@ func (RedeemCode) Edges() []ent.Edge {
 			Ref("redeem_codes").
 			Field("group_id").
 			Unique(),
+		edge.From("batch", RedeemBatch.Type).
+			Ref("redeem_codes").
+			Field("batch_id").
+			Unique(),
+		edge.To("code_groups", RedeemCodeGroup.Type),
+		edge.To("welfare_balances", WelfareBalance.Type),
 	}
 }
 
@@ -95,5 +104,8 @@ func (RedeemCode) Indexes() []ent.Index {
 		index.Fields("used_by"),
 		index.Fields("group_id"),
 		index.Fields("expires_at"),
+		index.Fields("batch_id"),
+		// 同批次每人限兑一张（部分唯一索引）由迁移 245 的 SQL 直接维护，
+		// ent 的 Indexes() 无法表达 WHERE 谓词，此处不重复声明。
 	}
 }

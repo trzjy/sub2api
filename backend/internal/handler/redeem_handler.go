@@ -83,3 +83,19 @@ func (h *RedeemHandler) GetHistory(c *gin.Context) {
 	}
 	response.Success(c, out)
 }
+
+// GetWelfareSummary 返回当前用户的福利余额汇总（剩余总额 + 最近清零时间）。
+// GET /api/v1/redeem/welfare-summary
+func (h *RedeemHandler) GetWelfareSummary(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	summary, err := h.redeemService.GetWelfareSummary(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, summary)
+}

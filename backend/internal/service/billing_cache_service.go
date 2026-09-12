@@ -113,6 +113,8 @@ type BillingCacheService struct {
 	cfg                   *config.Config
 	circuitBreaker        *billingCircuitBreaker
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	// welfareRepo 用于余额资格预检的福利余额兜底（充值余额不足时才直查，不设缓存层）。
+	welfareRepo WelfareRepository
 
 	cacheWriteChan     chan cacheWriteTask
 	cacheWriteWg       sync.WaitGroup
@@ -890,10 +892,25 @@ func (s *BillingCacheService) checkBalanceEligibility(ctx context.Context, userI
 	}
 
 	if s.balanceBelowEligibilityThreshold(balance) {
+		// 充值余额不足时兜底直查福利余额：合并后仍达标则放行（design.md 四.5）。
+		// 只有「充值余额不足」的少数请求多一次 SUM 查询，不引入福利缓存层。
+		if s.welfareRepo != nil {
+			welfare, werr := s.welfareRepo.SumActiveRemainingByUser(ctx, userID)
+			if werr != nil {
+				logger.LegacyPrintf("service.billing_cache", "welfare balance fallback query failed for user %d: %v", userID, werr)
+			} else if !s.balanceBelowEligibilityThreshold(balance + welfare) {
+				return nil
+			}
+		}
 		return ErrInsufficientBalance
 	}
 
 	return nil
+}
+
+// SetWelfareRepository 注入福利余额仓储（余额资格预检兜底用）。
+func (s *BillingCacheService) SetWelfareRepository(repo WelfareRepository) {
+	s.welfareRepo = repo
 }
 
 // checkSubscriptionEligibility 检查订阅模式资格

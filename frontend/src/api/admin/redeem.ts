@@ -9,6 +9,9 @@ import type {
   GenerateRedeemCodesRequest,
   BatchUpdateRedeemCodeFields,
   RedeemCodeType,
+  WelfareBatch,
+  CreateWelfareBatchRequest,
+  CreateWelfareBatchResponse,
   PaginatedResponse
 } from '@/types'
 
@@ -207,6 +210,59 @@ export async function listValues(type?: RedeemCodeType): Promise<number[]> {
   return data.values ?? []
 }
 
+/**
+ * Create a welfare batch (welfare redeem cards with subscription groups and/or random balance)
+ * @param payload - Batch config (name, groups, amount range, count)
+ * @returns Created batch and all generated card codes
+ */
+export async function createWelfareBatch(
+  payload: CreateWelfareBatchRequest
+): Promise<CreateWelfareBatchResponse> {
+  const { data } = await apiClient.post<CreateWelfareBatchResponse>(
+    '/admin/redeem-codes/welfare-batches',
+    payload
+  )
+  return data
+}
+
+/**
+ * List welfare batches with pagination and stats
+ * @param page - Page number (default: 1)
+ * @param pageSize - Items per page (default: 20)
+ * @returns Paginated list of welfare batches
+ */
+export async function listWelfareBatches(
+  page: number = 1,
+  pageSize: number = 20
+): Promise<PaginatedResponse<WelfareBatch>> {
+  const { data } = await apiClient.get<PaginatedResponse<WelfareBatch>>(
+    '/admin/redeem-codes/welfare-batches',
+    {
+      params: { page, page_size: pageSize }
+    }
+  )
+  return data
+}
+
+/**
+ * List codes of a welfare batch
+ * @param batchId - Welfare batch ID
+ * @param status - Optional status filter (e.g. 'unused')
+ * @returns Redeem codes belonging to the batch
+ */
+export async function listWelfareBatchCodes(
+  batchId: number,
+  status?: string
+): Promise<RedeemCode[]> {
+  const { data } = await apiClient.get<RedeemCode[]>(
+    `/admin/redeem-codes/welfare-batches/${batchId}/codes`,
+    {
+      params: status ? { status } : {}
+    }
+  )
+  return data
+}
+
 export const redeemAPI = {
   list,
   listValues,
@@ -217,7 +273,10 @@ export const redeemAPI = {
   batchUpdate,
   expire,
   getStats,
-  exportCodes
+  exportCodes,
+  createWelfareBatch,
+  listWelfareBatches,
+  listWelfareBatchCodes
 }
 
 export default redeemAPI

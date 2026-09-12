@@ -321,6 +321,18 @@ func (f ProxyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProxyMutation", m)
 }
 
+// The RedeemBatchFunc type is an adapter to allow the use of ordinary
+// function as RedeemBatch mutator.
+type RedeemBatchFunc func(context.Context, *ent.RedeemBatchMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RedeemBatchFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RedeemBatchMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RedeemBatchMutation", m)
+}
+
 // The RedeemCodeFunc type is an adapter to allow the use of ordinary
 // function as RedeemCode mutator.
 type RedeemCodeFunc func(context.Context, *ent.RedeemCodeMutation) (ent.Value, error)
@@ -331,6 +343,18 @@ func (f RedeemCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RedeemCodeMutation", m)
+}
+
+// The RedeemCodeGroupFunc type is an adapter to allow the use of ordinary
+// function as RedeemCodeGroup mutator.
+type RedeemCodeGroupFunc func(context.Context, *ent.RedeemCodeGroupMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RedeemCodeGroupFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RedeemCodeGroupMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RedeemCodeGroupMutation", m)
 }
 
 // The SecuritySecretFunc type is an adapter to allow the use of ordinary
@@ -475,6 +499,18 @@ func (f UserSubscriptionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserSubscriptionMutation", m)
+}
+
+// The WelfareBalanceFunc type is an adapter to allow the use of ordinary
+// function as WelfareBalance mutator.
+type WelfareBalanceFunc func(context.Context, *ent.WelfareBalanceMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f WelfareBalanceFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.WelfareBalanceMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.WelfareBalanceMutation", m)
 }
 
 // Condition is a hook condition function.

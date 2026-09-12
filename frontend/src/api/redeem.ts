@@ -61,7 +61,22 @@ export async function getHistory(): Promise<RedeemHistoryItem[]> {
 
 export const redeemAPI = {
   redeem,
-  getHistory
+  getHistory,
+  getWelfareSummary
 }
 
 export default redeemAPI
+
+export interface WelfareSummary {
+  total_remaining: number
+  nearest_expires_at?: string
+}
+
+/**
+ * Get current user's welfare (gift) balance summary
+ * @returns Total remaining welfare balance and nearest expiry time
+ */
+export async function getWelfareSummary(): Promise<WelfareSummary> {
+  const { data } = await apiClient.get<WelfareSummary>('/redeem/welfare-summary')
+  return data
+}

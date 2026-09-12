@@ -41,7 +41,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
+	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
 	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/ent/setting"
 	"github.com/Wei-Shaw/sub2api/ent/subscriptionplan"
@@ -54,6 +56,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
 	"github.com/Wei-Shaw/sub2api/ent/userplatformquota"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/ent/welfarebalance"
 
 	stdsql "database/sql"
 )
@@ -115,8 +118,12 @@ type Client struct {
 	PromoCodeUsage *PromoCodeUsageClient
 	// Proxy is the client for interacting with the Proxy builders.
 	Proxy *ProxyClient
+	// RedeemBatch is the client for interacting with the RedeemBatch builders.
+	RedeemBatch *RedeemBatchClient
 	// RedeemCode is the client for interacting with the RedeemCode builders.
 	RedeemCode *RedeemCodeClient
+	// RedeemCodeGroup is the client for interacting with the RedeemCodeGroup builders.
+	RedeemCodeGroup *RedeemCodeGroupClient
 	// SecuritySecret is the client for interacting with the SecuritySecret builders.
 	SecuritySecret *SecuritySecretClient
 	// Setting is the client for interacting with the Setting builders.
@@ -141,6 +148,8 @@ type Client struct {
 	UserPlatformQuota *UserPlatformQuotaClient
 	// UserSubscription is the client for interacting with the UserSubscription builders.
 	UserSubscription *UserSubscriptionClient
+	// WelfareBalance is the client for interacting with the WelfareBalance builders.
+	WelfareBalance *WelfareBalanceClient
 }
 
 // NewClient creates a new client configured with the given options.
@@ -178,7 +187,9 @@ func (c *Client) init() {
 	c.PromoCode = NewPromoCodeClient(c.config)
 	c.PromoCodeUsage = NewPromoCodeUsageClient(c.config)
 	c.Proxy = NewProxyClient(c.config)
+	c.RedeemBatch = NewRedeemBatchClient(c.config)
 	c.RedeemCode = NewRedeemCodeClient(c.config)
+	c.RedeemCodeGroup = NewRedeemCodeGroupClient(c.config)
 	c.SecuritySecret = NewSecuritySecretClient(c.config)
 	c.Setting = NewSettingClient(c.config)
 	c.SubscriptionPlan = NewSubscriptionPlanClient(c.config)
@@ -191,6 +202,7 @@ func (c *Client) init() {
 	c.UserAttributeValue = NewUserAttributeValueClient(c.config)
 	c.UserPlatformQuota = NewUserPlatformQuotaClient(c.config)
 	c.UserSubscription = NewUserSubscriptionClient(c.config)
+	c.WelfareBalance = NewWelfareBalanceClient(c.config)
 }
 
 type (
@@ -309,7 +321,9 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PromoCode:                     NewPromoCodeClient(cfg),
 		PromoCodeUsage:                NewPromoCodeUsageClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
+		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
+		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
 		SecuritySecret:                NewSecuritySecretClient(cfg),
 		Setting:                       NewSettingClient(cfg),
 		SubscriptionPlan:              NewSubscriptionPlanClient(cfg),
@@ -322,6 +336,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UserAttributeValue:            NewUserAttributeValueClient(cfg),
 		UserPlatformQuota:             NewUserPlatformQuotaClient(cfg),
 		UserSubscription:              NewUserSubscriptionClient(cfg),
+		WelfareBalance:                NewWelfareBalanceClient(cfg),
 	}, nil
 }
 
@@ -367,7 +382,9 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PromoCode:                     NewPromoCodeClient(cfg),
 		PromoCodeUsage:                NewPromoCodeUsageClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
+		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
+		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
 		SecuritySecret:                NewSecuritySecretClient(cfg),
 		Setting:                       NewSettingClient(cfg),
 		SubscriptionPlan:              NewSubscriptionPlanClient(cfg),
@@ -380,6 +397,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UserAttributeValue:            NewUserAttributeValueClient(cfg),
 		UserPlatformQuota:             NewUserPlatformQuotaClient(cfg),
 		UserSubscription:              NewUserSubscriptionClient(cfg),
+		WelfareBalance:                NewWelfareBalanceClient(cfg),
 	}, nil
 }
 
@@ -416,10 +434,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.CompositeModelRoute, c.ErrorPassthroughRule, c.Group, c.IdempotencyRecord,
 		c.IdentityAdoptionDecision, c.PaymentAuditLog, c.PaymentOrder,
 		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
-		c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.Proxy, c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret,
+		c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask,
+		c.UsageLog, c.User, c.UserAllowedGroup, c.UserAttributeDefinition,
+		c.UserAttributeValue, c.UserPlatformQuota, c.UserSubscription,
+		c.WelfareBalance,
 	} {
 		n.Use(hooks...)
 	}
@@ -436,10 +455,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.CompositeModelRoute, c.ErrorPassthroughRule, c.Group, c.IdempotencyRecord,
 		c.IdentityAdoptionDecision, c.PaymentAuditLog, c.PaymentOrder,
 		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
-		c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.Proxy, c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret,
+		c.Setting, c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask,
+		c.UsageLog, c.User, c.UserAllowedGroup, c.UserAttributeDefinition,
+		c.UserAttributeValue, c.UserPlatformQuota, c.UserSubscription,
+		c.WelfareBalance,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -500,8 +520,12 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.PromoCodeUsage.mutate(ctx, m)
 	case *ProxyMutation:
 		return c.Proxy.mutate(ctx, m)
+	case *RedeemBatchMutation:
+		return c.RedeemBatch.mutate(ctx, m)
 	case *RedeemCodeMutation:
 		return c.RedeemCode.mutate(ctx, m)
+	case *RedeemCodeGroupMutation:
+		return c.RedeemCodeGroup.mutate(ctx, m)
 	case *SecuritySecretMutation:
 		return c.SecuritySecret.mutate(ctx, m)
 	case *SettingMutation:
@@ -526,6 +550,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UserPlatformQuota.mutate(ctx, m)
 	case *UserSubscriptionMutation:
 		return c.UserSubscription.mutate(ctx, m)
+	case *WelfareBalanceMutation:
+		return c.WelfareBalance.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
 	}
@@ -3156,6 +3182,22 @@ func (c *GroupClient) QueryRedeemCodes(_m *Group) *RedeemCodeQuery {
 	return query
 }
 
+// QueryRedeemCodeGroups queries the redeem_code_groups edge of a Group.
+func (c *GroupClient) QueryRedeemCodeGroups(_m *Group) *RedeemCodeGroupQuery {
+	query := (&RedeemCodeGroupClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(group.Table, group.FieldID, id),
+			sqlgraph.To(redeemcodegroup.Table, redeemcodegroup.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, group.RedeemCodeGroupsTable, group.RedeemCodeGroupsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // QuerySubscriptions queries the subscriptions edge of a Group.
 func (c *GroupClient) QuerySubscriptions(_m *Group) *UserSubscriptionQuery {
 	query := (&UserSubscriptionClient{config: c.config}).Query()
@@ -4654,6 +4696,171 @@ func (c *ProxyClient) mutate(ctx context.Context, m *ProxyMutation) (Value, erro
 	}
 }
 
+// RedeemBatchClient is a client for the RedeemBatch schema.
+type RedeemBatchClient struct {
+	config
+}
+
+// NewRedeemBatchClient returns a client for the RedeemBatch from the given config.
+func NewRedeemBatchClient(c config) *RedeemBatchClient {
+	return &RedeemBatchClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `redeembatch.Hooks(f(g(h())))`.
+func (c *RedeemBatchClient) Use(hooks ...Hook) {
+	c.hooks.RedeemBatch = append(c.hooks.RedeemBatch, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `redeembatch.Intercept(f(g(h())))`.
+func (c *RedeemBatchClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RedeemBatch = append(c.inters.RedeemBatch, interceptors...)
+}
+
+// Create returns a builder for creating a RedeemBatch entity.
+func (c *RedeemBatchClient) Create() *RedeemBatchCreate {
+	mutation := newRedeemBatchMutation(c.config, OpCreate)
+	return &RedeemBatchCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RedeemBatch entities.
+func (c *RedeemBatchClient) CreateBulk(builders ...*RedeemBatchCreate) *RedeemBatchCreateBulk {
+	return &RedeemBatchCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RedeemBatchClient) MapCreateBulk(slice any, setFunc func(*RedeemBatchCreate, int)) *RedeemBatchCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RedeemBatchCreateBulk{err: fmt.Errorf("calling to RedeemBatchClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RedeemBatchCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RedeemBatchCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RedeemBatch.
+func (c *RedeemBatchClient) Update() *RedeemBatchUpdate {
+	mutation := newRedeemBatchMutation(c.config, OpUpdate)
+	return &RedeemBatchUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RedeemBatchClient) UpdateOne(_m *RedeemBatch) *RedeemBatchUpdateOne {
+	mutation := newRedeemBatchMutation(c.config, OpUpdateOne, withRedeemBatch(_m))
+	return &RedeemBatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RedeemBatchClient) UpdateOneID(id int64) *RedeemBatchUpdateOne {
+	mutation := newRedeemBatchMutation(c.config, OpUpdateOne, withRedeemBatchID(id))
+	return &RedeemBatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RedeemBatch.
+func (c *RedeemBatchClient) Delete() *RedeemBatchDelete {
+	mutation := newRedeemBatchMutation(c.config, OpDelete)
+	return &RedeemBatchDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RedeemBatchClient) DeleteOne(_m *RedeemBatch) *RedeemBatchDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RedeemBatchClient) DeleteOneID(id int64) *RedeemBatchDeleteOne {
+	builder := c.Delete().Where(redeembatch.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RedeemBatchDeleteOne{builder}
+}
+
+// Query returns a query builder for RedeemBatch.
+func (c *RedeemBatchClient) Query() *RedeemBatchQuery {
+	return &RedeemBatchQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRedeemBatch},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RedeemBatch entity by its id.
+func (c *RedeemBatchClient) Get(ctx context.Context, id int64) (*RedeemBatch, error) {
+	return c.Query().Where(redeembatch.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RedeemBatchClient) GetX(ctx context.Context, id int64) *RedeemBatch {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryRedeemCodes queries the redeem_codes edge of a RedeemBatch.
+func (c *RedeemBatchClient) QueryRedeemCodes(_m *RedeemBatch) *RedeemCodeQuery {
+	query := (&RedeemCodeClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeembatch.Table, redeembatch.FieldID, id),
+			sqlgraph.To(redeemcode.Table, redeemcode.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeembatch.RedeemCodesTable, redeembatch.RedeemCodesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryWelfareBalances queries the welfare_balances edge of a RedeemBatch.
+func (c *RedeemBatchClient) QueryWelfareBalances(_m *RedeemBatch) *WelfareBalanceQuery {
+	query := (&WelfareBalanceClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeembatch.Table, redeembatch.FieldID, id),
+			sqlgraph.To(welfarebalance.Table, welfarebalance.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeembatch.WelfareBalancesTable, redeembatch.WelfareBalancesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *RedeemBatchClient) Hooks() []Hook {
+	return c.hooks.RedeemBatch
+}
+
+// Interceptors returns the client interceptors.
+func (c *RedeemBatchClient) Interceptors() []Interceptor {
+	return c.inters.RedeemBatch
+}
+
+func (c *RedeemBatchClient) mutate(ctx context.Context, m *RedeemBatchMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RedeemBatchCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RedeemBatchUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RedeemBatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RedeemBatchDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RedeemBatch mutation op: %q", m.Op())
+	}
+}
+
 // RedeemCodeClient is a client for the RedeemCode schema.
 type RedeemCodeClient struct {
 	config
@@ -4794,6 +5001,54 @@ func (c *RedeemCodeClient) QueryGroup(_m *RedeemCode) *GroupQuery {
 	return query
 }
 
+// QueryBatch queries the batch edge of a RedeemCode.
+func (c *RedeemCodeClient) QueryBatch(_m *RedeemCode) *RedeemBatchQuery {
+	query := (&RedeemBatchClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, id),
+			sqlgraph.To(redeembatch.Table, redeembatch.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, redeemcode.BatchTable, redeemcode.BatchColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryCodeGroups queries the code_groups edge of a RedeemCode.
+func (c *RedeemCodeClient) QueryCodeGroups(_m *RedeemCode) *RedeemCodeGroupQuery {
+	query := (&RedeemCodeGroupClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, id),
+			sqlgraph.To(redeemcodegroup.Table, redeemcodegroup.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeemcode.CodeGroupsTable, redeemcode.CodeGroupsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryWelfareBalances queries the welfare_balances edge of a RedeemCode.
+func (c *RedeemCodeClient) QueryWelfareBalances(_m *RedeemCode) *WelfareBalanceQuery {
+	query := (&WelfareBalanceClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcode.Table, redeemcode.FieldID, id),
+			sqlgraph.To(welfarebalance.Table, welfarebalance.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, redeemcode.WelfareBalancesTable, redeemcode.WelfareBalancesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *RedeemCodeClient) Hooks() []Hook {
 	return c.hooks.RedeemCode
@@ -4816,6 +5071,171 @@ func (c *RedeemCodeClient) mutate(ctx context.Context, m *RedeemCodeMutation) (V
 		return (&RedeemCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown RedeemCode mutation op: %q", m.Op())
+	}
+}
+
+// RedeemCodeGroupClient is a client for the RedeemCodeGroup schema.
+type RedeemCodeGroupClient struct {
+	config
+}
+
+// NewRedeemCodeGroupClient returns a client for the RedeemCodeGroup from the given config.
+func NewRedeemCodeGroupClient(c config) *RedeemCodeGroupClient {
+	return &RedeemCodeGroupClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `redeemcodegroup.Hooks(f(g(h())))`.
+func (c *RedeemCodeGroupClient) Use(hooks ...Hook) {
+	c.hooks.RedeemCodeGroup = append(c.hooks.RedeemCodeGroup, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `redeemcodegroup.Intercept(f(g(h())))`.
+func (c *RedeemCodeGroupClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RedeemCodeGroup = append(c.inters.RedeemCodeGroup, interceptors...)
+}
+
+// Create returns a builder for creating a RedeemCodeGroup entity.
+func (c *RedeemCodeGroupClient) Create() *RedeemCodeGroupCreate {
+	mutation := newRedeemCodeGroupMutation(c.config, OpCreate)
+	return &RedeemCodeGroupCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RedeemCodeGroup entities.
+func (c *RedeemCodeGroupClient) CreateBulk(builders ...*RedeemCodeGroupCreate) *RedeemCodeGroupCreateBulk {
+	return &RedeemCodeGroupCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RedeemCodeGroupClient) MapCreateBulk(slice any, setFunc func(*RedeemCodeGroupCreate, int)) *RedeemCodeGroupCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RedeemCodeGroupCreateBulk{err: fmt.Errorf("calling to RedeemCodeGroupClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RedeemCodeGroupCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RedeemCodeGroupCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RedeemCodeGroup.
+func (c *RedeemCodeGroupClient) Update() *RedeemCodeGroupUpdate {
+	mutation := newRedeemCodeGroupMutation(c.config, OpUpdate)
+	return &RedeemCodeGroupUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RedeemCodeGroupClient) UpdateOne(_m *RedeemCodeGroup) *RedeemCodeGroupUpdateOne {
+	mutation := newRedeemCodeGroupMutation(c.config, OpUpdateOne, withRedeemCodeGroup(_m))
+	return &RedeemCodeGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RedeemCodeGroupClient) UpdateOneID(id int64) *RedeemCodeGroupUpdateOne {
+	mutation := newRedeemCodeGroupMutation(c.config, OpUpdateOne, withRedeemCodeGroupID(id))
+	return &RedeemCodeGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RedeemCodeGroup.
+func (c *RedeemCodeGroupClient) Delete() *RedeemCodeGroupDelete {
+	mutation := newRedeemCodeGroupMutation(c.config, OpDelete)
+	return &RedeemCodeGroupDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RedeemCodeGroupClient) DeleteOne(_m *RedeemCodeGroup) *RedeemCodeGroupDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RedeemCodeGroupClient) DeleteOneID(id int64) *RedeemCodeGroupDeleteOne {
+	builder := c.Delete().Where(redeemcodegroup.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RedeemCodeGroupDeleteOne{builder}
+}
+
+// Query returns a query builder for RedeemCodeGroup.
+func (c *RedeemCodeGroupClient) Query() *RedeemCodeGroupQuery {
+	return &RedeemCodeGroupQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRedeemCodeGroup},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RedeemCodeGroup entity by its id.
+func (c *RedeemCodeGroupClient) Get(ctx context.Context, id int64) (*RedeemCodeGroup, error) {
+	return c.Query().Where(redeemcodegroup.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RedeemCodeGroupClient) GetX(ctx context.Context, id int64) *RedeemCodeGroup {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryRedeemCode queries the redeem_code edge of a RedeemCodeGroup.
+func (c *RedeemCodeGroupClient) QueryRedeemCode(_m *RedeemCodeGroup) *RedeemCodeQuery {
+	query := (&RedeemCodeClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcodegroup.Table, redeemcodegroup.FieldID, id),
+			sqlgraph.To(redeemcode.Table, redeemcode.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, redeemcodegroup.RedeemCodeTable, redeemcodegroup.RedeemCodeColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryGroup queries the group edge of a RedeemCodeGroup.
+func (c *RedeemCodeGroupClient) QueryGroup(_m *RedeemCodeGroup) *GroupQuery {
+	query := (&GroupClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(redeemcodegroup.Table, redeemcodegroup.FieldID, id),
+			sqlgraph.To(group.Table, group.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, redeemcodegroup.GroupTable, redeemcodegroup.GroupColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *RedeemCodeGroupClient) Hooks() []Hook {
+	return c.hooks.RedeemCodeGroup
+}
+
+// Interceptors returns the client interceptors.
+func (c *RedeemCodeGroupClient) Interceptors() []Interceptor {
+	return c.inters.RedeemCodeGroup
+}
+
+func (c *RedeemCodeGroupClient) mutate(ctx context.Context, m *RedeemCodeGroupMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RedeemCodeGroupCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RedeemCodeGroupUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RedeemCodeGroupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RedeemCodeGroupDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RedeemCodeGroup mutation op: %q", m.Op())
 	}
 }
 
@@ -6013,6 +6433,22 @@ func (c *UserClient) QueryPlatformQuotas(_m *User) *UserPlatformQuotaQuery {
 	return query
 }
 
+// QueryWelfareBalances queries the welfare_balances edge of a User.
+func (c *UserClient) QueryWelfareBalances(_m *User) *WelfareBalanceQuery {
+	query := (&WelfareBalanceClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(welfarebalance.Table, welfarebalance.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, user.WelfareBalancesTable, user.WelfareBalancesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // QueryUserAllowedGroups queries the user_allowed_groups edge of a User.
 func (c *UserClient) QueryUserAllowedGroups(_m *User) *UserAllowedGroupQuery {
 	query := (&UserAllowedGroupClient{config: c.config}).Query()
@@ -6838,6 +7274,187 @@ func (c *UserSubscriptionClient) mutate(ctx context.Context, m *UserSubscription
 	}
 }
 
+// WelfareBalanceClient is a client for the WelfareBalance schema.
+type WelfareBalanceClient struct {
+	config
+}
+
+// NewWelfareBalanceClient returns a client for the WelfareBalance from the given config.
+func NewWelfareBalanceClient(c config) *WelfareBalanceClient {
+	return &WelfareBalanceClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `welfarebalance.Hooks(f(g(h())))`.
+func (c *WelfareBalanceClient) Use(hooks ...Hook) {
+	c.hooks.WelfareBalance = append(c.hooks.WelfareBalance, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `welfarebalance.Intercept(f(g(h())))`.
+func (c *WelfareBalanceClient) Intercept(interceptors ...Interceptor) {
+	c.inters.WelfareBalance = append(c.inters.WelfareBalance, interceptors...)
+}
+
+// Create returns a builder for creating a WelfareBalance entity.
+func (c *WelfareBalanceClient) Create() *WelfareBalanceCreate {
+	mutation := newWelfareBalanceMutation(c.config, OpCreate)
+	return &WelfareBalanceCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of WelfareBalance entities.
+func (c *WelfareBalanceClient) CreateBulk(builders ...*WelfareBalanceCreate) *WelfareBalanceCreateBulk {
+	return &WelfareBalanceCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *WelfareBalanceClient) MapCreateBulk(slice any, setFunc func(*WelfareBalanceCreate, int)) *WelfareBalanceCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &WelfareBalanceCreateBulk{err: fmt.Errorf("calling to WelfareBalanceClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*WelfareBalanceCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &WelfareBalanceCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for WelfareBalance.
+func (c *WelfareBalanceClient) Update() *WelfareBalanceUpdate {
+	mutation := newWelfareBalanceMutation(c.config, OpUpdate)
+	return &WelfareBalanceUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *WelfareBalanceClient) UpdateOne(_m *WelfareBalance) *WelfareBalanceUpdateOne {
+	mutation := newWelfareBalanceMutation(c.config, OpUpdateOne, withWelfareBalance(_m))
+	return &WelfareBalanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *WelfareBalanceClient) UpdateOneID(id int64) *WelfareBalanceUpdateOne {
+	mutation := newWelfareBalanceMutation(c.config, OpUpdateOne, withWelfareBalanceID(id))
+	return &WelfareBalanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for WelfareBalance.
+func (c *WelfareBalanceClient) Delete() *WelfareBalanceDelete {
+	mutation := newWelfareBalanceMutation(c.config, OpDelete)
+	return &WelfareBalanceDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *WelfareBalanceClient) DeleteOne(_m *WelfareBalance) *WelfareBalanceDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *WelfareBalanceClient) DeleteOneID(id int64) *WelfareBalanceDeleteOne {
+	builder := c.Delete().Where(welfarebalance.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &WelfareBalanceDeleteOne{builder}
+}
+
+// Query returns a query builder for WelfareBalance.
+func (c *WelfareBalanceClient) Query() *WelfareBalanceQuery {
+	return &WelfareBalanceQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeWelfareBalance},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a WelfareBalance entity by its id.
+func (c *WelfareBalanceClient) Get(ctx context.Context, id int64) (*WelfareBalance, error) {
+	return c.Query().Where(welfarebalance.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *WelfareBalanceClient) GetX(ctx context.Context, id int64) *WelfareBalance {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a WelfareBalance.
+func (c *WelfareBalanceClient) QueryUser(_m *WelfareBalance) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(welfarebalance.Table, welfarebalance.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, welfarebalance.UserTable, welfarebalance.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryRedeemCode queries the redeem_code edge of a WelfareBalance.
+func (c *WelfareBalanceClient) QueryRedeemCode(_m *WelfareBalance) *RedeemCodeQuery {
+	query := (&RedeemCodeClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(welfarebalance.Table, welfarebalance.FieldID, id),
+			sqlgraph.To(redeemcode.Table, redeemcode.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, welfarebalance.RedeemCodeTable, welfarebalance.RedeemCodeColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryBatch queries the batch edge of a WelfareBalance.
+func (c *WelfareBalanceClient) QueryBatch(_m *WelfareBalance) *RedeemBatchQuery {
+	query := (&RedeemBatchClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(welfarebalance.Table, welfarebalance.FieldID, id),
+			sqlgraph.To(redeembatch.Table, redeembatch.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, welfarebalance.BatchTable, welfarebalance.BatchColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *WelfareBalanceClient) Hooks() []Hook {
+	return c.hooks.WelfareBalance
+}
+
+// Interceptors returns the client interceptors.
+func (c *WelfareBalanceClient) Interceptors() []Interceptor {
+	return c.inters.WelfareBalance
+}
+
+func (c *WelfareBalanceClient) mutate(ctx context.Context, m *WelfareBalanceMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&WelfareBalanceCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&WelfareBalanceUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&WelfareBalanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&WelfareBalanceDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown WelfareBalance mutation op: %q", m.Op())
+	}
+}
+
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
@@ -6847,10 +7464,11 @@ type (
 		ChannelMonitorRequestTemplate, CompositeModelRoute, ErrorPassthroughRule,
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Hook
+		PromoCodeUsage, Proxy, RedeemBatch, RedeemCode, RedeemCodeGroup,
+		SecuritySecret, Setting, SubscriptionPlan, TLSFingerprintProfile,
+		UsageCleanupTask, UsageLog, User, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription,
+		WelfareBalance []ent.Hook
 	}
 	inters struct {
 		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
@@ -6859,10 +7477,11 @@ type (
 		ChannelMonitorRequestTemplate, CompositeModelRoute, ErrorPassthroughRule,
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Interceptor
+		PromoCodeUsage, Proxy, RedeemBatch, RedeemCode, RedeemCodeGroup,
+		SecuritySecret, Setting, SubscriptionPlan, TLSFingerprintProfile,
+		UsageCleanupTask, UsageLog, User, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription,
+		WelfareBalance []ent.Interceptor
 	}
 )
 

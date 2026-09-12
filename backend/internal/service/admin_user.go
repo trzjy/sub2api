@@ -1264,6 +1264,12 @@ func (s *adminServiceImpl) GenerateRedeemCodes(ctx context.Context, input *Gener
 		return nil, ErrRedeemCodeExpired
 	}
 
+	// 福利卡必须走批次生成（携带批次、分组勾选与随机金额），
+	// 通用生成入口无法表达，在此拦截避免产出兑换时必失败的孤儿码。
+	if input.Type == RedeemTypeWelfare {
+		return nil, errors.New("welfare codes must be generated via welfare-batches endpoint")
+	}
+
 	// 如果是订阅类型，验证必须有 GroupID
 	if input.Type == RedeemTypeSubscription {
 		if input.GroupID == nil {

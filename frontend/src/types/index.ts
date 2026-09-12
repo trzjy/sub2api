@@ -1719,6 +1719,7 @@ export type RedeemCodeType =
   | 'concurrency'
   | 'subscription'
   | 'invitation'
+  | 'welfare'
 export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber' | 'live'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
@@ -1888,6 +1889,47 @@ export interface BatchUpdateRedeemCodesRequest {
 
 export interface RedeemCodeRequest {
   code: string
+}
+
+// ==================== Welfare Batch Types ====================
+
+export interface WelfareGroupGrant {
+  group_id: number
+  validity_days: number // 天卡=1 / 周卡=7 / 月卡=30
+  group_name?: string
+}
+
+export interface WelfareBatchConfig {
+  groups?: WelfareGroupGrant[]
+  amount_min?: number
+  amount_max?: number
+  count?: number
+}
+
+export interface WelfareBatch {
+  id: number
+  name: string
+  config: WelfareBatchConfig
+  code_count: number
+  created_by: number
+  created_at: string
+  // 运营统计（列表接口填充）
+  used_count: number
+  remaining_count: number
+  cleared_amount: number
+}
+
+export interface CreateWelfareBatchRequest {
+  name: string
+  groups: WelfareGroupGrant[]
+  amount_min: number
+  amount_max: number
+  count: number
+}
+
+export interface CreateWelfareBatchResponse {
+  batch: WelfareBatch
+  codes: string[]
 }
 
 // ==================== Dashboard & Statistics ====================

@@ -36,10 +36,18 @@ const (
 	FieldGroupID = "group_id"
 	// FieldValidityDays holds the string denoting the validity_days field in the database.
 	FieldValidityDays = "validity_days"
+	// FieldBatchID holds the string denoting the batch_id field in the database.
+	FieldBatchID = "batch_id"
 	// EdgeUser holds the string denoting the user edge name in mutations.
 	EdgeUser = "user"
 	// EdgeGroup holds the string denoting the group edge name in mutations.
 	EdgeGroup = "group"
+	// EdgeBatch holds the string denoting the batch edge name in mutations.
+	EdgeBatch = "batch"
+	// EdgeCodeGroups holds the string denoting the code_groups edge name in mutations.
+	EdgeCodeGroups = "code_groups"
+	// EdgeWelfareBalances holds the string denoting the welfare_balances edge name in mutations.
+	EdgeWelfareBalances = "welfare_balances"
 	// Table holds the table name of the redeemcode in the database.
 	Table = "redeem_codes"
 	// UserTable is the table that holds the user relation/edge.
@@ -56,6 +64,27 @@ const (
 	GroupInverseTable = "groups"
 	// GroupColumn is the table column denoting the group relation/edge.
 	GroupColumn = "group_id"
+	// BatchTable is the table that holds the batch relation/edge.
+	BatchTable = "redeem_codes"
+	// BatchInverseTable is the table name for the RedeemBatch entity.
+	// It exists in this package in order to avoid circular dependency with the "redeembatch" package.
+	BatchInverseTable = "redeem_batches"
+	// BatchColumn is the table column denoting the batch relation/edge.
+	BatchColumn = "batch_id"
+	// CodeGroupsTable is the table that holds the code_groups relation/edge.
+	CodeGroupsTable = "redeem_code_groups"
+	// CodeGroupsInverseTable is the table name for the RedeemCodeGroup entity.
+	// It exists in this package in order to avoid circular dependency with the "redeemcodegroup" package.
+	CodeGroupsInverseTable = "redeem_code_groups"
+	// CodeGroupsColumn is the table column denoting the code_groups relation/edge.
+	CodeGroupsColumn = "redeem_code_id"
+	// WelfareBalancesTable is the table that holds the welfare_balances relation/edge.
+	WelfareBalancesTable = "welfare_balances"
+	// WelfareBalancesInverseTable is the table name for the WelfareBalance entity.
+	// It exists in this package in order to avoid circular dependency with the "welfarebalance" package.
+	WelfareBalancesInverseTable = "welfare_balances"
+	// WelfareBalancesColumn is the table column denoting the welfare_balances relation/edge.
+	WelfareBalancesColumn = "redeem_code_id"
 )
 
 // Columns holds all SQL columns for redeemcode fields.
@@ -72,6 +101,7 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldGroupID,
 	FieldValidityDays,
+	FieldBatchID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -166,6 +196,11 @@ func ByValidityDays(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldValidityDays, opts...).ToFunc()
 }
 
+// ByBatchID orders the results by the batch_id field.
+func ByBatchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBatchID, opts...).ToFunc()
+}
+
 // ByUserField orders the results by user field.
 func ByUserField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -177,6 +212,41 @@ func ByUserField(field string, opts ...sql.OrderTermOption) OrderOption {
 func ByGroupField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
 		sqlgraph.OrderByNeighborTerms(s, newGroupStep(), sql.OrderByField(field, opts...))
+	}
+}
+
+// ByBatchField orders the results by batch field.
+func ByBatchField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newBatchStep(), sql.OrderByField(field, opts...))
+	}
+}
+
+// ByCodeGroupsCount orders the results by code_groups count.
+func ByCodeGroupsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newCodeGroupsStep(), opts...)
+	}
+}
+
+// ByCodeGroups orders the results by code_groups terms.
+func ByCodeGroups(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newCodeGroupsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+
+// ByWelfareBalancesCount orders the results by welfare_balances count.
+func ByWelfareBalancesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newWelfareBalancesStep(), opts...)
+	}
+}
+
+// ByWelfareBalances orders the results by welfare_balances terms.
+func ByWelfareBalances(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newWelfareBalancesStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
 func newUserStep() *sqlgraph.Step {
@@ -191,5 +261,26 @@ func newGroupStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(GroupInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.M2O, true, GroupTable, GroupColumn),
+	)
+}
+func newBatchStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(BatchInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.M2O, true, BatchTable, BatchColumn),
+	)
+}
+func newCodeGroupsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(CodeGroupsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, CodeGroupsTable, CodeGroupsColumn),
+	)
+}
+func newWelfareBalancesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(WelfareBalancesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, WelfareBalancesTable, WelfareBalancesColumn),
 	)
 }

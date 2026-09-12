@@ -327,6 +327,7 @@ export default {
         concurrency: 'Concurrency',
         subscription: 'Subscription',
         invitation: 'Invitation',
+        welfare: 'Welfare Card',
         // Admin adjustment types (created when admin modifies user balance/concurrency)
         admin_balance: 'Balance (Admin)',
         admin_concurrency: 'Concurrency (Admin)'
@@ -384,7 +385,51 @@ export default {
       codeDisabledSuccess: 'Redeem code disabled',
       codeEnabledSuccess: 'Redeem code enabled',
       codeDeletedSuccess: 'Redeem code deleted successfully',
-      failedToUpdate: 'Failed to update redeem code'
+      failedToUpdate: 'Failed to update redeem code',
+      // Welfare batches
+      tabs: {
+        welfare: 'Welfare Batches',
+        codes: 'Redeem Codes'
+      },
+      welfareCard: 'Welfare Card',
+      welfare: {
+        createBatch: 'New Welfare Batch',
+        createTitle: 'Create Welfare Batch',
+        batchName: 'Batch Name',
+        defaultBatchName: 'Welfare Batch',
+        selectGroups: 'Subscription Groups',
+        noGroups: 'No subscription groups available',
+        dayCard: 'Day Pass (1d)',
+        weekCard: 'Week Pass (7d)',
+        monthCard: 'Month Pass (30d)',
+        amountRange: 'Amount Range ($)',
+        amountMinPlaceholder: 'Min amount',
+        amountMaxPlaceholder: 'Max amount',
+        amountRangeHint: 'Leave both empty for a subscription-only card',
+        amountRangeIncomplete: 'Please fill in both min and max amount, or leave both empty',
+        amountRangeInvalid: 'Amount range must satisfy 0 <= min <= max',
+        requireOneBenefit: 'Select at least one subscription group or fill in the amount range',
+        countInvalid: 'Count must be between 1 and 1000',
+        failedToCreate: 'Failed to create welfare batch',
+        failedToLoadBatches: 'Failed to load welfare batches',
+        copyUnused: 'Copy Unused',
+        noUnusedCodes: 'No unused codes in this batch',
+        unusedCopied: 'Copied {count} unused code(s)',
+        viewCodes: 'View Codes',
+        codesTitle: 'Batch Codes - {name}',
+        codesCount: '{count} code(s) in total',
+        noCodes: 'No codes in this batch',
+        failedToLoadCodes: 'Failed to load batch codes',
+        batchExported: 'Batch codes exported successfully',
+        failedToExportBatch: 'Failed to export batch codes',
+        columns: {
+          name: 'Batch Name',
+          createdAt: 'Created At',
+          codeCount: 'Count',
+          usage: 'Used / Remaining',
+          clearedAmount: 'Cleared Amount'
+        }
+      }
     },
 
     // Announcements

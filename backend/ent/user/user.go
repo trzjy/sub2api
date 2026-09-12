@@ -91,6 +91,8 @@ const (
 	EdgePendingAuthSessions = "pending_auth_sessions"
 	// EdgePlatformQuotas holds the string denoting the platform_quotas edge name in mutations.
 	EdgePlatformQuotas = "platform_quotas"
+	// EdgeWelfareBalances holds the string denoting the welfare_balances edge name in mutations.
+	EdgeWelfareBalances = "welfare_balances"
 	// EdgeUserAllowedGroups holds the string denoting the user_allowed_groups edge name in mutations.
 	EdgeUserAllowedGroups = "user_allowed_groups"
 	// Table holds the table name of the user in the database.
@@ -184,6 +186,13 @@ const (
 	PlatformQuotasInverseTable = "user_platform_quotas"
 	// PlatformQuotasColumn is the table column denoting the platform_quotas relation/edge.
 	PlatformQuotasColumn = "user_id"
+	// WelfareBalancesTable is the table that holds the welfare_balances relation/edge.
+	WelfareBalancesTable = "welfare_balances"
+	// WelfareBalancesInverseTable is the table name for the WelfareBalance entity.
+	// It exists in this package in order to avoid circular dependency with the "welfarebalance" package.
+	WelfareBalancesInverseTable = "welfare_balances"
+	// WelfareBalancesColumn is the table column denoting the welfare_balances relation/edge.
+	WelfareBalancesColumn = "user_id"
 	// UserAllowedGroupsTable is the table that holds the user_allowed_groups relation/edge.
 	UserAllowedGroupsTable = "user_allowed_groups"
 	// UserAllowedGroupsInverseTable is the table name for the UserAllowedGroup entity.
@@ -612,6 +621,20 @@ func ByPlatformQuotas(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	}
 }
 
+// ByWelfareBalancesCount orders the results by welfare_balances count.
+func ByWelfareBalancesCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newWelfareBalancesStep(), opts...)
+	}
+}
+
+// ByWelfareBalances orders the results by welfare_balances terms.
+func ByWelfareBalances(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newWelfareBalancesStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+
 // ByUserAllowedGroupsCount orders the results by user_allowed_groups count.
 func ByUserAllowedGroupsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -714,6 +737,13 @@ func newPlatformQuotasStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(PlatformQuotasInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, PlatformQuotasTable, PlatformQuotasColumn),
+	)
+}
+func newWelfareBalancesStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(WelfareBalancesInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, WelfareBalancesTable, WelfareBalancesColumn),
 	)
 }
 func newUserAllowedGroupsStep() *sqlgraph.Step {
