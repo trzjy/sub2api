@@ -78,8 +78,10 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	for attempt := 0; attempt < 2; attempt++ {
 		sendBody := rewritten
 		if attempt > 0 {
+			// 审核拦截重试：在强制脱敏之外，整体替换/去除 system 消息（§2.6 行 6 最后手段）。
 			forced := opts
 			forced.Sanitize = true
+			forced.ReplaceSystem = true
 			if sb, serr := PrepareCodeBuddyBody(body, forced); serr == nil {
 				sendBody = sb
 			}

@@ -26,6 +26,10 @@ type CodeBuddySanitizePattern struct {
 type CodeBuddyRewriteOptions struct {
 	// Sanitize 开启后清洗 system 消息中的指纹字段（默认开启，见 §2.5 规则 7）。
 	Sanitize bool
+	// ReplaceSystem 为最后手段：在 sanitize 之后再把 system 消息内容整体清空，
+	// 彻底移除可能触发上游审核的指纹（见 §2.6 行 6 审核拦截的降级重试语义）。
+	// 仅用于内容审核重试，不应在首轮请求启用。
+	ReplaceSystem bool
 	// Model 当前请求的模型名（用于 DeepSeek 系 thinking 注入等模型相关规则）。
 	Model string
 	// SupportedEfforts 模型支持的 reasoning_effort 档位；空表示未知，按全档位处理（不降级）。
@@ -104,6 +108,13 @@ func PrepareCodeBuddyBody(src []byte, opts CodeBuddyRewriteOptions) ([]byte, err
 			patterns = codeBuddyDefaultSanitizePatterns
 		}
 		if sanitizeCodeBuddySystem(req, patterns) {
+			changed = true
+		}
+	}
+
+	// 规则 8（最后手段，仅审核重试）：整体清空 system 消息内容，彻底移除指纹。
+	if opts.ReplaceSystem {
+		if replaceCodeBuddySystemMessages(req) {
 			changed = true
 		}
 	}
@@ -307,6 +318,31 @@ func backfillCodeBuddyReasoningContent(req map[string]any) bool {
 		// reasoning 可能是字符串或嵌套结构；仅当为字符串时回填。
 		if r, ok := msg["reasoning"].(string); ok && strings.TrimSpace(r) != "" {
 			msg["reasoning_content"] = r
+			changed = true
+		}
+	}
+	return changed
+}
+
+// replaceCodeBuddySystemMessages 是 §2.6 行 6 审核拦截「替换/去除 system」的最后手段：
+// 将全部 system 消息的 content 置空，彻底清除可能触发上游指纹审核的内容。
+// 返回是否发生了改动。
+func replaceCodeBuddySystemMessages(req map[string]any) bool {
+	msgs, ok := req["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(fmtSprint(msg["role"]), "system") {
+			continue
+		}
+		if cur, _ := msg["content"].(string); cur != "" {
+			msg["content"] = ""
 			changed = true
 		}
 	}

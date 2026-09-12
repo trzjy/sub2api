@@ -55,14 +55,17 @@ func (k CodeBuddyErrKind) String() string {
 	}
 }
 
-// ClassifyCodeBuddyError 按 §2.6 表格顺序（不可调换）对上游错误分类。
+// ClassifyCodeBuddyError 按 §2.6 严格表序（不可调换）对上游错误分类：
+//   1 余额耗尽 → 2 session 死亡 → 3 模型级限流(429+6004) → 4 账号级软限流
+//   → 5 上游故障(404/5xx) → 6 内容审核 → 7 请求体问题。
 //
-// 关键顺序约束（验收要求）：
-//   - ModelLimit（429+6004）必须先于 AccountSoftLimit：6004 的 body 通常也含限流文案，
-//     先判 AccountSoftLimit 会把模型级限流误判为账号级冷却。
+// 关键顺序约束（验收要求，已按方案负责人裁决改回严格表序）：
+//   - ModelLimit（429+6004）必须先于 AccountSoftLimit（行 4 之前）：6004 的 body 通常也含
+//     限流文案，先判 AccountSoftLimit 会把模型级限流误判为账号级冷却。
 //   - SessionDead 必须先于 AccountSoftLimit：12153 与 rate-limit 文案混排时宁可判死，
 //     不留死号在池里反复被选。
-//   - ContentAudit / RequestBody（不罚账号的误报信号）先于 AccountSoftLimit 这种会罚账号的判定。
+//   - AccountSoftLimit（软限流文案/裸 429）优先于 UpstreamFault 的状态码判定，以覆盖
+//     「5xx + 限流文案」场景（参照实现 issue #28 实战结论）。
 func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 	bodyLower := strings.ToLower(string(body))
 
@@ -83,13 +86,25 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 		return CodeBuddyErrKindModelLimit
 	}
 
-	// 4. 上游偶发/故障（404 / 5xx）。5xx 即便含限流文案也应视为故障重试，而非账号冷却。
+	// 4. 账号级软限流（429 或 rate-limit 文案，覆盖 200+code 11140 等非 429 限流语义）。
+	//    软限流文案优先于状态码判定，覆盖「5xx + 限流文案」场景（参照实现 issue #28 实战结论）。
+	if statusCode == http.StatusTooManyRequests ||
+		codeBuddyBodyContains(bodyLower,
+			"rate limit",
+			"rate-limiting",
+			"请求过于频繁",
+			"too many") {
+		return CodeBuddyErrKindAccountSoftLimit
+	}
+
+	// 5. 上游偶发/故障（404 / 5xx）。在软限流之后判定：5xx 即便含限流文案也按故障重试，
+	//    而非账号冷却（与行 4 的软限流文案优先并不冲突——行 4 已先按文案判软限流）。
 	if statusCode == http.StatusNotFound ||
 		(statusCode >= 500 && statusCode <= 599) {
 		return CodeBuddyErrKindUpstreamFault
 	}
 
-	// 5. 内容审核拦截（400 + 审核关键词）。不罚账号，走 sanitize 降级重试。
+	// 6. 内容审核拦截（400 + 审核关键词）。不罚账号，走 sanitize 降级重试。
 	if statusCode == http.StatusBadRequest &&
 		codeBuddyBodyContains(bodyLower,
 			"blocked by security policy",
@@ -98,21 +113,11 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 		return CodeBuddyErrKindContentAudit
 	}
 
-	// 6. 请求体问题（400 + 11101 / Unmarshal）。不罚账号，仍轮转。
+	// 7. 请求体问题（400 + 11101 / Unmarshal）。不罚账号，仍轮转。
 	if statusCode == http.StatusBadRequest &&
 		(codeBuddyBodyHasCode(body, 11101) ||
 			strings.Contains(bodyLower, "unmarshal chat params failed")) {
 		return CodeBuddyErrKindRequestBody
-	}
-
-	// 7. 账号级软限流（429 或 rate-limit 文案，覆盖 200+code 11140 等非 429 限流语义）。
-	if statusCode == http.StatusTooManyRequests ||
-		codeBuddyBodyContains(bodyLower,
-			"rate limit",
-			"rate-limiting",
-			"请求过于频繁",
-			"too many") {
-		return CodeBuddyErrKindAccountSoftLimit
 	}
 
 	return CodeBuddyErrKindNone

@@ -82,11 +82,20 @@ func TestClassifyCodeBuddyError_AccountSoftLimit(t *testing.T) {
 }
 
 func TestClassifyCodeBuddyError_UpstreamFault(t *testing.T) {
+	// 5xx / 404 且无软限流文案 → 上游故障（不罚账号）。
 	if got := ClassifyCodeBuddyError(http.StatusNotFound, []byte(`{}`)); got != CodeBuddyErrKindUpstreamFault {
 		t.Fatalf("expected UpstreamFault for 404, got %s", got)
 	}
-	if got := ClassifyCodeBuddyError(http.StatusInternalServerError, []byte(`rate limit`)); got != CodeBuddyErrKindUpstreamFault {
-		t.Fatalf("expected UpstreamFault for 5xx (even with rate-limit text), got %s", got)
+	if got := ClassifyCodeBuddyError(http.StatusInternalServerError, []byte(`database connection refused`)); got != CodeBuddyErrKindUpstreamFault {
+		t.Fatalf("expected UpstreamFault for 5xx (no rate-limit text), got %s", got)
+	}
+}
+
+func TestClassifyCodeBuddyError_SoftLimitBeforeUpstreamFault(t *testing.T) {
+	// 严格表序：软限流文案优先于状态码判定，覆盖「5xx + 限流文案」场景（参照实现 issue #28）。
+	// 500 + "rate limit" → 账号级软限流（而非上游故障）。
+	if got := ClassifyCodeBuddyError(http.StatusInternalServerError, []byte(`rate limit exceeded`)); got != CodeBuddyErrKindAccountSoftLimit {
+		t.Fatalf("expected AccountSoftLimit for 5xx+rate-limit (soft-limit text precedes status), got %s", got)
 	}
 }
 
