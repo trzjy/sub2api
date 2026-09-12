@@ -59,6 +59,9 @@ func RegisterAdminRoutes(
 		// Antigravity OAuth
 		registerAntigravityOAuthRoutes(admin, h)
 
+		// CodeBuddy OAuth（腾讯代码助手）
+		registerCodeBuddyOAuthRoutes(admin, h)
+
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
 
@@ -554,6 +557,16 @@ func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 		antigravity.POST("/oauth/auth-url", h.Admin.AntigravityOAuth.GenerateAuthURL)
 		antigravity.POST("/oauth/exchange-code", h.Admin.AntigravityOAuth.ExchangeCode)
 		antigravity.POST("/oauth/refresh-token", h.Admin.AntigravityOAuth.RefreshToken)
+	}
+}
+
+// registerCodeBuddyOAuthRoutes 注册 CodeBuddy（腾讯代码助手）OAuth 三步登录端点。
+func registerCodeBuddyOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	codebuddy := admin.Group("/codebuddy")
+	{
+		codebuddy.POST("/oauth/auth-url", h.Admin.CodeBuddyOAuth.GenerateAuthURL)
+		codebuddy.POST("/oauth/poll", h.Admin.CodeBuddyOAuth.PollToken)
+		codebuddy.POST("/oauth/refresh-token", h.Admin.CodeBuddyOAuth.RefreshToken)
 	}
 }
 

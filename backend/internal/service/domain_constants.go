@@ -48,6 +48,7 @@ const (
 	PlatformKimi      = domain.PlatformKimi
 	PlatformZhipu     = domain.PlatformZhipu
 	PlatformDeepseek  = domain.PlatformDeepseek
+	PlatformCodeBuddy = domain.PlatformCodeBuddy
 	PlatformOther     = domain.PlatformOther
 	PlatformMiniMax   = domain.PlatformMiniMax
 	PlatformComposite = domain.PlatformComposite
@@ -80,6 +81,8 @@ const (
 	DefaultDeepseekBaseURL    = "https://api.deepseek.com"
 	// MiniMax 按量付费与 Coding/Token Plan 共用推理域名，靠 API Key 区分套餐。
 	DefaultMiniMaxBaseURL = "https://api.minimaxi.com/v1"
+	// CodeBuddy（腾讯代码助手 / copilot.tencent.com）OAuth 订阅制上游基址。
+	DefaultCodeBuddyBaseURL = "https://copilot.tencent.com"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。
@@ -124,6 +127,7 @@ var AllowedQuotaPlatforms = []string{
 	PlatformDeepseek,
 	PlatformOther,
 	PlatformMiniMax,
+	PlatformCodeBuddy,
 }
 
 // AllowedSchedulingThresholdPlatforms 是允许设置账号自动停调阈值的平台列表。
