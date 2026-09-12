@@ -57,6 +57,10 @@
     <circle cx="18" cy="18" r="3" />
     <path stroke-linecap="round" stroke-linejoin="round" d="M8.7 10.7 15.3 7.3M8.7 13.3l6.6 3.4" />
   </svg>
+  <!-- CodeBuddy logo (stylized chat bubble) -->
+  <svg v-else-if="platform === 'codebuddy'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 3C7.03 3 3 6.36 3 10.5c0 2.36 1.31 4.46 3.34 5.83-.14.78-.58 1.86-1.34 2.83 1.86-.2 3.36-.86 4.31-1.53.73.18 1.5.28 2.69.28 4.97 0 9-3.36 9-7.5S16.97 3 12 3z" />
+  </svg>
   <!-- Fallback: generic platform icon -->
   <svg v-else :class="sizeClass" fill="currentColor" viewBox="0 0 24 24">
     <path

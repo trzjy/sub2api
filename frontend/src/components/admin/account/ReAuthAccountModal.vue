@@ -130,12 +130,14 @@
         :show-help="isAnthropic"
         :show-proxy-warning="isAnthropic"
         :show-cookie-option="isAnthropic"
-        :show-refresh-token-option="isOpenAI || isAntigravity || isGrok"
+        :show-refresh-token-option="isOpenAI || isAntigravity || isGrok || isCodebuddy"
         :show-sso-option="isGrok"
         :show-email-password-option="false"
         :allow-multiple="false"
         :method-label="t('admin.accounts.inputMethod')"
-        :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isGrok ? 'grok' : 'anthropic'"
+        :platform="isOpenAI ? 'openai' : isGemini ? 'gemini' : isAntigravity ? 'antigravity' : isGrok ? 'grok' : isCodebuddy ? 'codebuddy' : 'anthropic'"
+        :polling="codebuddyOAuth.polling.value"
+        :poll-status="codebuddyOAuth.pollStatus.value"
         :show-project-id="isGemini && geminiOAuthType === 'code_assist'"
         :initial-input-method="grokInitialInputMethod"
         @generate-url="handleGenerateUrl"
@@ -152,7 +154,7 @@
           {{ t('common.cancel') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="isManualInputMethod && !isCodebuddy"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -203,7 +205,9 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
+import { useCodebuddyOAuth } from '@/composables/useCodebuddyOAuth'
 import type { Account } from '@/types'
+import type { CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
@@ -239,6 +243,7 @@ const openaiOAuth = useOpenAIOAuth()
 const geminiOAuth = useGeminiOAuth()
 const antigravityOAuth = useAntigravityOAuth()
 const grokOAuth = useGrokOAuth()
+const codebuddyOAuth = useCodebuddyOAuth()
 
 // Refs
 const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
@@ -254,6 +259,7 @@ const isGemini = computed(() => props.account?.platform === 'gemini')
 const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
+const isCodebuddy = computed(() => props.account?.platform === 'codebuddy')
 
 /**
  * Grok reauth default tab (password auth is hidden):
@@ -276,6 +282,7 @@ const currentAuthUrl = computed(() => {
   if (isGemini.value) return geminiOAuth.authUrl.value
   if (isAntigravity.value) return antigravityOAuth.authUrl.value
   if (isGrok.value) return grokOAuth.authUrl.value
+  if (isCodebuddy.value) return codebuddyOAuth.authUrl.value
   return claudeOAuth.authUrl.value
 })
 const currentSessionId = computed(() => {
@@ -283,6 +290,7 @@ const currentSessionId = computed(() => {
   if (isGemini.value) return geminiOAuth.sessionId.value
   if (isAntigravity.value) return antigravityOAuth.sessionId.value
   if (isGrok.value) return grokOAuth.sessionId.value
+  if (isCodebuddy.value) return codebuddyOAuth.state.value
   return claudeOAuth.sessionId.value
 })
 const currentLoading = computed(() => {
@@ -290,6 +298,7 @@ const currentLoading = computed(() => {
   if (isGemini.value) return geminiOAuth.loading.value
   if (isAntigravity.value) return antigravityOAuth.loading.value
   if (isGrok.value) return grokOAuth.loading.value
+  if (isCodebuddy.value) return codebuddyOAuth.loading.value
   return claudeOAuth.loading.value
 })
 const currentError = computed(() => {
@@ -297,6 +306,7 @@ const currentError = computed(() => {
   if (isGemini.value) return geminiOAuth.error.value
   if (isAntigravity.value) return antigravityOAuth.error.value
   if (isGrok.value) return grokOAuth.error.value
+  if (isCodebuddy.value) return codebuddyOAuth.error.value
   return claudeOAuth.error.value
 })
 
@@ -359,6 +369,7 @@ const resetState = () => {
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
+  codebuddyOAuth.resetState()
   oauthFlowRef.value?.reset()
 }
 
@@ -380,6 +391,11 @@ const handleGenerateUrl = async () => {
     await antigravityOAuth.generateAuthUrl(props.account.proxy_id)
   } else if (isGrok.value) {
     await grokOAuth.generateAuthUrl(props.account.proxy_id)
+  } else if (isCodebuddy.value) {
+    const ok = await codebuddyOAuth.generateAuthUrl(props.account.proxy_id)
+    if (ok) {
+      codebuddyOAuth.startPolling({ onSuccess: handleCodebuddyReauthSuccess })
+    }
   } else {
     await claudeOAuth.generateAuthUrl(addMethod.value, props.account.proxy_id)
   }
@@ -387,6 +403,8 @@ const handleGenerateUrl = async () => {
 
 const handleExchangeCode = async () => {
   if (!props.account) return
+  // CodeBuddy 走轮询流程，账号在轮询成功后自动重新授权，无需手动兑换
+  if (isCodebuddy.value) return
 
   const authCode = oauthFlowRef.value?.authCode || ''
   if (!authCode.trim()) return
@@ -626,11 +644,61 @@ const applyGrokReauthTokenInfo = async (tokenInfo: {
   handleClose()
 }
 
+/** CodeBuddy 轮询成功：用 tokenInfo 构建凭据并更新账号 */
+const handleCodebuddyReauthSuccess = async (tokenInfo: CodeBuddyTokenInfo) => {
+  if (!props.account) return
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  try {
+    await adminAPI.accounts.update(props.account.id, {
+      type: 'oauth',
+      credentials
+    })
+    const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
+    appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+    emit('reauthorized', updatedAccount)
+    handleClose()
+  } catch (error: any) {
+    codebuddyOAuth.error.value =
+      error.response?.data?.detail ||
+      error.response?.data?.message ||
+      error.message ||
+      t('admin.accounts.oauth.authFailed')
+    appStore.showError(codebuddyOAuth.error.value)
+  }
+}
+
 /** Re-auth the existing account with one refresh token. */
 const handleValidateRefreshToken = async (refreshTokenInput: string) => {
   if (!props.account) return
   if (isGrok.value) {
     await handleGrokValidateRefreshToken(refreshTokenInput)
+    return
+  }
+
+  if (isCodebuddy.value) {
+    codebuddyOAuth.loading.value = true
+    codebuddyOAuth.error.value = ''
+    try {
+      const tokenInfo = await codebuddyOAuth.validateRefreshToken(refreshTokenInput, props.account.proxy_id)
+      if (!tokenInfo) return
+      await adminAPI.accounts.update(props.account.id, {
+        type: 'oauth',
+        credentials: codebuddyOAuth.buildCredentials(tokenInfo)
+      })
+      const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
+      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+      emit('reauthorized', updatedAccount)
+      handleClose()
+    } catch (error: any) {
+      codebuddyOAuth.error.value =
+        error.response?.data?.detail ||
+        error.response?.data?.message ||
+        error.message ||
+        t('admin.accounts.oauth.authFailed')
+      appStore.showError(codebuddyOAuth.error.value)
+    } finally {
+      codebuddyOAuth.loading.value = false
+    }
     return
   }
 

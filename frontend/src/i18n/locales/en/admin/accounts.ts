@@ -108,6 +108,7 @@ export default {
         zhipu: 'Zhipu GLM',
         deepseek: 'DeepSeek',
         minimax: 'MiniMax',
+        codebuddy: 'CodeBuddy',
         other: 'Other',
       },
       cnProviders: {
@@ -1338,6 +1339,31 @@ export default {
                     validateAndCreate: 'Validate & Create',
                     pleaseEnterRefreshToken: 'Please enter Refresh Token',
                     failedToValidateRT: 'Failed to validate Refresh Token'
+                  },
+                  codebuddy: {
+                    title: 'CodeBuddy Account Authorization',
+                    followSteps: 'Follow these steps to authorize your CodeBuddy account:',
+                    step1GenerateUrl: 'Generate the CodeBuddy authorization URL',
+                    generateAuthUrl: 'Generate Auth URL',
+                    step2OpenUrl: 'Open the URL in your browser and complete authorization',
+                    openUrlDesc: 'Open the authorization URL in a new tab, sign in to CodeBuddy and authorize.',
+                    importantNotice: 'After authorizing in the browser, this page polls automatically. Do NOT paste any code — keep this dialog open until the login completes.',
+                    polling: 'Waiting for the browser login to complete…',
+                    pollingHint: 'We are polling the server for the login result. Finish the sign-in in your browser; this panel updates automatically.',
+                    loginCompleted: 'Login detected — the account will be created automatically.',
+                    pollStopped: 'Polling stopped.',
+                    pollTimeout: 'Login polling timed out. Close and retry, or use a manual refresh token instead.',
+                    failedToGenerateUrl: 'Failed to generate CodeBuddy auth URL',
+                    missingExchangeParams: 'Missing authorization state',
+                    failedToPoll: 'Failed to poll CodeBuddy login status',
+                    // Refresh Token auth
+                    refreshTokenAuth: 'Manual RT Input',
+                    refreshTokenDesc: 'Enter your existing CodeBuddy Refresh Token. The system will validate it and create the account.',
+                    refreshTokenPlaceholder: 'Paste your CodeBuddy Refresh Token…',
+                    validating: 'Validating…',
+                    validateAndCreate: 'Validate & Create Account',
+                    pleaseEnterRefreshToken: 'Please enter Refresh Token',
+                    failedToValidateRT: 'Failed to validate CodeBuddy refresh token'
                   }
                 },      // Gemini specific (platform-wide)
       gemini: {
@@ -1595,6 +1621,7 @@ export default {
         grokRetryAfter: 'Retry after {time}',
         grokProbe: 'Probe',
         grokProbeTooltip: 'Send a minimal xAI Responses probe and read quota headers',
+        codebuddyCredit: 'Credits',
         grokResetUnsupported: 'Reset unsupported',
         grokResetUnsupportedTooltip: 'xAI does not expose reset credits for Grok OAuth accounts',
         grokNoHeaders: 'No quota headers observed',

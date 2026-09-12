@@ -160,6 +160,19 @@
             <PlatformIcon platform="grok" size="sm" />
             Grok
           </button>
+          <button
+            type="button"
+            @click="form.platform = 'codebuddy'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'codebuddy'
+                ? 'bg-white text-sky-600 shadow-sm dark:bg-dark-600 dark:text-sky-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <PlatformIcon platform="codebuddy" size="sm" />
+            CodeBuddy
+          </button>
         </div>
         <!-- CN providers row: Kimi / Zhipu GLM / DeepSeek -->
         <div class="mt-2 flex flex-wrap rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
@@ -3553,7 +3566,7 @@
         :show-proxy-warning="form.platform !== 'openai' && form.platform !== 'grok' && !!form.proxy_id"
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
-        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity' || form.platform === 'grok'"
+        :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity' || form.platform === 'grok' || form.platform === 'codebuddy'"
         :show-mobile-refresh-token-option="form.platform === 'openai'"
         :show-session-token-option="false"
         :show-access-token-option="false"
@@ -3565,6 +3578,8 @@
         :show-manual-option="true"
         :initial-input-method="'manual'"
         :platform="form.platform"
+        :polling="codebuddyOAuth.polling.value"
+        :poll-status="codebuddyOAuth.pollStatus.value"
         :show-project-id="geminiOAuthType === 'code_assist'"
         @generate-url="handleGenerateUrl"
         @cookie-auth="handleCookieAuth"
@@ -3625,7 +3640,7 @@
           {{ t('common.back') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="isManualInputMethod && form.platform !== 'codebuddy'"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -3916,6 +3931,7 @@ import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
+import { useCodebuddyOAuth } from '@/composables/useCodebuddyOAuth'
 import type {
   Proxy,
   AdminGroup,
@@ -3928,6 +3944,7 @@ import type {
   OpenAIResponsesMode,
   OpenAIEndpointCapability
 } from '@/types'
+import type { CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -4005,6 +4022,7 @@ const oauthStepTitle = computed(() => {
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
   if (form.platform === 'grok') return t('admin.accounts.oauth.grok.title')
+  if (form.platform === 'codebuddy') return t('admin.accounts.oauth.codebuddy.title')
   return t('admin.accounts.oauth.title')
 })
 
@@ -4103,6 +4121,7 @@ const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
+const codebuddyOAuth = useCodebuddyOAuth() // For CodeBuddy OAuth (polling device-flow)
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
@@ -4110,6 +4129,7 @@ const currentAuthUrl = computed(() => {
   if (form.platform === 'gemini') return geminiOAuth.authUrl.value
   if (form.platform === 'antigravity') return antigravityOAuth.authUrl.value
   if (form.platform === 'grok') return grokOAuth.authUrl.value
+  if (form.platform === 'codebuddy') return codebuddyOAuth.authUrl.value
   return oauth.authUrl.value
 })
 
@@ -4118,6 +4138,7 @@ const currentSessionId = computed(() => {
   if (form.platform === 'gemini') return geminiOAuth.sessionId.value
   if (form.platform === 'antigravity') return antigravityOAuth.sessionId.value
   if (form.platform === 'grok') return grokOAuth.sessionId.value
+  if (form.platform === 'codebuddy') return codebuddyOAuth.state.value
   return oauth.sessionId.value
 })
 
@@ -4126,6 +4147,7 @@ const currentOAuthLoading = computed(() => {
   if (form.platform === 'gemini') return geminiOAuth.loading.value
   if (form.platform === 'antigravity') return antigravityOAuth.loading.value
   if (form.platform === 'grok') return grokOAuth.loading.value
+  if (form.platform === 'codebuddy') return codebuddyOAuth.loading.value
   return oauth.loading.value
 })
 
@@ -4134,6 +4156,7 @@ const currentOAuthError = computed(() => {
   if (form.platform === 'gemini') return geminiOAuth.error.value
   if (form.platform === 'antigravity') return antigravityOAuth.error.value
   if (form.platform === 'grok') return grokOAuth.error.value
+  if (form.platform === 'codebuddy') return codebuddyOAuth.error.value
   return oauth.error.value
 })
 
@@ -4765,6 +4788,8 @@ const expiresAtInput = computed({
 
 const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
+  // CodeBuddy 走轮询流程，账号在轮询成功后自动创建，不依赖手动粘贴 code
+  if (form.platform === 'codebuddy') return false
   if (form.platform === 'openai') {
     return authCode.trim() && openaiOAuth.sessionId.value && !openaiOAuth.loading.value
   }
@@ -4878,6 +4903,10 @@ watch(
       form.concurrency = 1
       form.load_factor = null
     }
+    if (newPlatform === 'codebuddy') {
+      accountCategory.value = 'oauth-based'
+      addMethod.value = 'oauth'
+    }
     if (newPlatform !== 'gemini' && newPlatform !== 'anthropic' && accountCategory.value === 'service_account') {
       accountCategory.value = 'oauth-based'
     }
@@ -4928,6 +4957,7 @@ watch(
     geminiOAuth.resetState()
     antigravityOAuth.resetState()
     grokOAuth.resetState()
+  codebuddyOAuth.resetState()
   }
 )
 
@@ -5406,6 +5436,7 @@ const resetForm = () => {
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
+  codebuddyOAuth.resetState()
   oauthFlowRef.value?.reset()
   antigravityMixedChannelConfirmed.value = false
   upstreamModelsPreviewed.value = false
@@ -5905,6 +5936,7 @@ const goBackToBasicInfo = () => {
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
+  codebuddyOAuth.resetState()
   oauthFlowRef.value?.reset()
 }
 
@@ -5922,6 +5954,17 @@ const handleGenerateUrl = async () => {
     await antigravityOAuth.generateAuthUrl(form.proxy_id)
   } else if (form.platform === 'grok') {
     await grokOAuth.generateAuthUrl(form.proxy_id)
+  } else if (form.platform === 'codebuddy') {
+    const ok = await codebuddyOAuth.generateAuthUrl(form.proxy_id)
+    // CodeBuddy 走轮询流程：生成链接后立即开始轮询，登录完成后自动创建账号
+    if (ok) {
+      codebuddyOAuth.startPolling({
+        onSuccess: handleCodebuddyPollSuccess,
+        onError: () => {
+          /* 错误已写入 codebuddyOAuth.error，UI 直接展示 */
+        }
+      })
+    }
   } else {
     await oauth.generateAuthUrl(addMethod.value, form.proxy_id)
   }
@@ -5934,6 +5977,8 @@ const handleValidateRefreshToken = (rt: string) => {
     handleAntigravityValidateRT(rt)
   } else if (form.platform === 'grok') {
     handleGrokValidateRT(rt)
+  } else if (form.platform === 'codebuddy') {
+    handleCodebuddyValidateRT(rt)
   }
 }
 
@@ -6900,6 +6945,21 @@ const handleGrokExchange = async (authCode: string) => {
   }
 }
 
+// CodeBuddy OAuth 轮询成功：直接用 tokenInfo 构建凭据并创建账号
+const handleCodebuddyPollSuccess = async (tokenInfo: CodeBuddyTokenInfo) => {
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  await createAccountAndFinish('codebuddy', 'oauth', credentials)
+}
+
+// CodeBuddy 手动 RT 校验并创建账号
+const handleCodebuddyValidateRT = async (rt: string) => {
+  if (!rt.trim()) return
+  const tokenInfo = await codebuddyOAuth.validateRefreshToken(rt, form.proxy_id)
+  if (!tokenInfo) return
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  await createAccountAndFinish('codebuddy', 'oauth', credentials)
+}
+
 // Anthropic OAuth 授权码兑换
 const handleAnthropicExchange = async (authCode: string) => {
   if (!authCode.trim() || !oauth.sessionId.value) return
@@ -7002,6 +7062,9 @@ const handleExchangeCode = async () => {
       return handleAntigravityExchange(authCode)
     case 'grok':
       return handleGrokExchange(authCode)
+    case 'codebuddy':
+      // CodeBuddy 走轮询流程，账号在轮询成功后自动创建，无需手动兑换
+      return
     default:
       return handleAnthropicExchange(authCode)
   }

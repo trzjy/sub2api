@@ -311,6 +311,7 @@ export default {
         zhipu: 'Zhipu GLM',
         deepseek: 'DeepSeek',
         minimax: 'MiniMax',
+        codebuddy: 'CodeBuddy',
         other: 'Other',
       },
       cnProviders: {
@@ -486,6 +487,7 @@ export default {
         grokRetryAfter: '{time} 后重试',
         grokProbe: '探测',
         grokProbeTooltip: '发送最小 xAI Responses 探测请求并读取配额响应头',
+        codebuddyCredit: '积分',
         grokResetUnsupported: '不支持重置',
         grokResetUnsupportedTooltip: 'xAI 未向 Grok OAuth 账号开放重置额度接口',
         grokNoHeaders: '未观察到配额响应头',
@@ -1395,6 +1397,30 @@ export default {
           validateAndCreate: '验证并创建账号',
           pleaseEnterRefreshToken: '请输入 Refresh Token',
           failedToValidateRT: '验证 Refresh Token 失败'
+        },
+        codebuddy: {
+          title: 'CodeBuddy 账户授权',
+          followSteps: '请按照以下步骤完成 CodeBuddy 账户的授权：',
+          step1GenerateUrl: '生成 CodeBuddy 授权链接',
+          generateAuthUrl: '生成授权链接',
+          step2OpenUrl: '在浏览器中打开链接并完成授权',
+          openUrlDesc: '请在新标签页中打开授权链接，登录您的 CodeBuddy 账户并授权。',
+          importantNotice: '在浏览器中完成授权后，本页面会自动轮询。请勿粘贴任何 code —— 保持本对话框打开，直到登录完成。',
+          polling: '正在等待浏览器登录完成…',
+          pollingHint: '我们正在轮询服务端以获取登录结果。请在浏览器中完成登录，本面板会自动更新。',
+          loginCompleted: '已检测到登录 —— 账号将自动创建。',
+          pollStopped: '已停止轮询。',
+          pollTimeout: '登录轮询超时。请关闭后重试，或使用手动 Refresh Token 方式。',
+          failedToGenerateUrl: '生成 CodeBuddy 授权链接失败',
+          missingExchangeParams: '缺少授权 state',
+          failedToPoll: '轮询 CodeBuddy 登录状态失败',
+          refreshTokenAuth: '手动输入 RT',
+          refreshTokenDesc: '输入您已有的 CodeBuddy Refresh Token，系统将自动验证并创建账号。',
+          refreshTokenPlaceholder: '粘贴您的 CodeBuddy Refresh Token…',
+          validating: '验证中...',
+          validateAndCreate: '验证并创建账号',
+          pleaseEnterRefreshToken: '请输入 Refresh Token',
+          failedToValidateRT: '验证 CodeBuddy Refresh Token 失败'
         }
       },
       // Gemini specific (platform-wide)

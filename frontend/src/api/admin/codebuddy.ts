@@ -1,0 +1,79 @@
+/**
+ * Admin CodeBuddy API endpoints
+ * Handles CodeBuddy (Tencent) OAuth device-flow for administrators.
+ *
+ * Unlike Antigravity (paste-code exchange), CodeBuddy uses a true polling loop:
+ * the management UI opens the auth URL in a browser, then repeatedly calls
+ * /oauth/poll until the upstream login completes. While login is pending the
+ * backend responds with HTTP 400 + "登录未完成…", which the frontend must treat
+ * as "keep polling" rather than a fatal error (see §9.8 of the plan).
+ */
+
+import { apiClient } from '../client'
+
+export interface CodeBuddyAuthUrlResponse {
+  auth_url: string
+  state: string
+}
+
+export interface CodeBuddyAuthUrlRequest {
+  proxy_id?: number
+}
+
+export interface CodeBuddyPollRequest {
+  state: string
+}
+
+export interface CodeBuddyRefreshTokenRequest {
+  refresh_token: string
+  uid?: string
+  enterprise_id?: string
+  domain?: string
+}
+
+export interface CodeBuddyTokenInfo {
+  access_token?: string
+  refresh_token?: string
+  expires_in?: number
+  expires_at?: number | string
+  domain?: string
+  uid?: string
+  enterprise_id?: string
+  nickname?: string
+  [key: string]: unknown
+}
+
+/** 生成授权链接（上游签发 state，无 PKCE）。 */
+export async function generateAuthUrl(
+  payload: CodeBuddyAuthUrlRequest
+): Promise<CodeBuddyAuthUrlResponse> {
+  const { data } = await apiClient.post<CodeBuddyAuthUrlResponse>(
+    '/admin/codebuddy/oauth/auth-url',
+    payload
+  )
+  return data
+}
+
+/** 轮询登录结果；pending 时后端返回 400 + "登录未完成…"，由调用方决定是否继续轮询。 */
+export async function pollToken(
+  payload: CodeBuddyPollRequest
+): Promise<CodeBuddyTokenInfo> {
+  const { data } = await apiClient.post<CodeBuddyTokenInfo>(
+    '/admin/codebuddy/oauth/poll',
+    payload
+  )
+  return data
+}
+
+/** 用 refresh token 刷新并返回完整 token 信息。 */
+export async function refreshCodeBuddyToken(
+  payload: CodeBuddyRefreshTokenRequest
+): Promise<CodeBuddyTokenInfo> {
+  const { data } = await apiClient.post<CodeBuddyTokenInfo>(
+    '/admin/codebuddy/oauth/refresh-token',
+    payload
+  )
+  return data
+}
+
+export default { generateAuthUrl, pollToken, refreshCodeBuddyToken }

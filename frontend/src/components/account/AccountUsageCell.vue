@@ -336,6 +336,29 @@
       <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
+    <!-- CodeBuddy OAuth accounts: 积分额度（后端写入 account.Extra） -->
+    <template v-else-if="account.platform === 'codebuddy' && account.type === 'oauth'">
+      <!-- 探测错误状态 -->
+      <div v-if="codebuddyCreditError" class="space-y-1">
+        <span class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+          {{ codebuddyCreditError }}
+        </span>
+      </div>
+      <!-- 额度数据 -->
+      <div v-else-if="codebuddyCredit !== null" class="space-y-1">
+        <UsageProgressBar
+          :label="t('admin.accounts.usageWindow.codebuddyCredit')"
+          :utilization="codebuddyCredit.usedPercent"
+          :resets-at="codebuddyCredit.resetAt"
+          color="indigo"
+        />
+        <div v-if="codebuddyCredit.summary" class="text-[10px] text-gray-500 dark:text-gray-400">
+          {{ codebuddyCredit.summary }}
+        </div>
+      </div>
+      <div v-else class="text-xs text-gray-400">-</div>
+    </template>
+
     <!-- Grok OAuth accounts: passive xAI quota headers + local Sub2API usage -->
     <template v-else-if="account.platform === 'grok' && account.type === 'oauth'">
       <div v-if="loading" class="space-y-1.5">
@@ -804,6 +827,9 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'openai') {
     return props.account.type === 'oauth'
   }
+  if (props.account.platform === 'codebuddy') {
+    return props.account.type === 'oauth'
+  }
   return false
 })
 
@@ -953,6 +979,44 @@ const aiCreditsDisplay = computed(() => {
   if (total <= 0) return null
   return total.toFixed(0)
 })
+
+// ===== CodeBuddy 积分额度（后端周期探测写入 account.Extra） =====
+const toNum = (v: unknown): number | null => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+const codebuddyCredit = computed(() => {
+  const extra = (props.account.extra as Record<string, unknown> | undefined) || undefined
+  if (!extra) return null
+  const usedPercent = toNum(extra.codebuddy_credit_used_percent)
+  const total = toNum(extra.codebuddy_credit_total)
+  const used = toNum(extra.codebuddy_credit_used)
+  const resetAt = typeof extra.codebuddy_credit_reset_at === 'string' ? extra.codebuddy_credit_reset_at : null
+  const updatedAt = typeof extra.codebuddy_credit_updated_at === 'string' ? extra.codebuddy_credit_updated_at : null
+  const error = typeof extra.codebuddy_credit_error === 'string' ? extra.codebuddy_credit_error : null
+  if (usedPercent === null && total === null && used === null && !resetAt && !updatedAt && !error) {
+    return null
+  }
+  let summary = ''
+  if (total != null && used != null) {
+    summary = `${formatCompactNumber(used)} / ${formatCompactNumber(total)}`
+  } else if (updatedAt) {
+    summary = updatedAt
+  }
+  return {
+    usedPercent: usedPercent ?? 0,
+    resetAt,
+    summary,
+    error
+  }
+})
+
+const codebuddyCreditError = computed(() => codebuddyCredit.value?.error ?? null)
 
 // Antigravity 账户类型（从 load_code_assist 响应中提取）
 const antigravityTier = computed(() => {

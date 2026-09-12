@@ -533,7 +533,7 @@ export interface PaginationConfig {
 
 // ==================== API Key & Group Types ====================
 
-export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax'
+export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax' | 'codebuddy'
 
 export type VideoModelPrices = Record<string, Record<string, number>>
 
@@ -916,7 +916,7 @@ export interface UpdateGroupRequest {
 
 // ==================== Account & Proxy Types ====================
 
-export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax'
+export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax' | 'codebuddy'
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
@@ -1433,6 +1433,16 @@ export interface AccountUsageInfo {
   needs_verify?: boolean    // 需要人工验证（forbidden_type=validation）
   is_banned?: boolean       // 账号被封（forbidden_type=violation）
   needs_reauth?: boolean    // token 失效需重新授权（401）
+
+  // CodeBuddy 积分额度快照（后端写入 account.Extra，这里提供类型以便组件读取）
+  codebuddy_credit?: {
+    used_percent?: number
+    total?: number
+    used?: number
+    reset_at?: string
+    updated_at?: string
+    error?: string
+  } | null
 
   // 机器可读错误码：forbidden / unauthenticated / rate_limited / network_error
   error_code?: string

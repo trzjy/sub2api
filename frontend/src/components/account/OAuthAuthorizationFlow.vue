@@ -832,6 +832,38 @@
                 3
               </div>
               <div class="flex-1">
+                <!-- Polling panel (CodeBuddy 设备流轮询，无需手动粘贴 code) -->
+                <template v-if="polling">
+                  <p class="mb-2 font-medium text-sky-900 dark:text-sky-200">
+                    {{ t('admin.accounts.oauth.codebuddy.polling') }}
+                  </p>
+                  <div class="flex items-center gap-3 text-sm text-sky-700 dark:text-sky-300">
+                    <svg
+                      class="-ml-1 mr-2 h-4 w-4 animate-spin"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        class="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        stroke-width="4"
+                      ></circle>
+                      <path
+                        class="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                    <span>{{ pollStatus }}</span>
+                  </div>
+                  <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t('admin.accounts.oauth.codebuddy.pollingHint') }}
+                  </p>
+                </template>
+                <template v-else>
                 <p class="mb-2 font-medium text-blue-900 dark:text-blue-200">
                   {{ oauthStep3EnterCode }}
                 </p>
@@ -874,6 +906,7 @@
                     </div>
                   </div>
                 </div>
+                </template>
 
                 <!-- Error Message -->
                 <div
@@ -932,6 +965,10 @@ interface Props {
   initialEmailPassword?: string
   platform?: AccountPlatform // Platform type for different UI/text
   showProjectId?: boolean // New prop to control project ID visibility
+  /** CodeBuddy polling device-flow: when true, step 3 shows a live polling panel. */
+  polling?: boolean
+  /** Human-readable polling status text (CodeBuddy only). */
+  pollStatus?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -957,7 +994,9 @@ const props = withDefaults(defineProps<Props>(), {
   initialInputMethod: 'manual',
   initialEmailPassword: '',
   platform: 'anthropic',
-  showProjectId: true
+  showProjectId: true,
+  polling: false,
+  pollStatus: ''
 })
 
 const emit = defineEmits<{
@@ -981,7 +1020,9 @@ const emailPasswordOptionEnabled = computed(
   () => props.showEmailPasswordOption && props.platform === 'grok' && passwordAuthEnabled.value
 )
 
-const showLocalCallbackNotice = computed(() => props.platform === 'openai' || props.platform === 'grok')
+const showLocalCallbackNotice = computed(
+  () => props.platform === 'openai' || props.platform === 'grok' || props.platform === 'codebuddy'
+)
 
 // Get translation key based on platform
 const getOAuthKey = (key: string) => {
@@ -989,6 +1030,7 @@ const getOAuthKey = (key: string) => {
   if (props.platform === 'gemini') return `admin.accounts.oauth.gemini.${key}`
   if (props.platform === 'antigravity') return `admin.accounts.oauth.antigravity.${key}`
   if (props.platform === 'grok') return `admin.accounts.oauth.grok.${key}`
+  if (props.platform === 'codebuddy') return `admin.accounts.oauth.codebuddy.${key}`
   return `admin.accounts.oauth.${key}`
 }
 
@@ -1008,6 +1050,7 @@ const oauthImportantNotice = computed(() => {
   if (props.platform === 'openai') return t('admin.accounts.oauth.openai.importantNotice')
   if (props.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.importantNotice')
   if (props.platform === 'grok') return t('admin.accounts.oauth.grok.importantNotice')
+  if (props.platform === 'codebuddy') return t('admin.accounts.oauth.codebuddy.importantNotice')
   return ''
 })
 
@@ -1132,7 +1175,7 @@ watch(inputMethod, (newVal) => {
 // Auto-extract code from callback URL (OpenAI/Gemini/Antigravity/Grok)
 // e.g., http://localhost:8085/callback?code=xxx...&state=...
 watch(authCodeInput, (newVal) => {
-  if (props.platform !== 'openai' && props.platform !== 'gemini' && props.platform !== 'antigravity' && props.platform !== 'grok') return
+  if (props.platform !== 'openai' && props.platform !== 'gemini' && props.platform !== 'antigravity' && props.platform !== 'grok' && props.platform !== 'codebuddy') return
 
   const trimmed = newVal.trim()
   // Check if it looks like a URL with code parameter
@@ -1142,7 +1185,7 @@ watch(authCodeInput, (newVal) => {
       const url = trimmed.includes('?') ? new URL(trimmed) : new URL(`http://localhost/callback?${trimmed.replace(/^\?/, '')}`)
       const code = url.searchParams.get('code')
       const stateParam = url.searchParams.get('state')
-      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'grok') && stateParam) {
+      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'grok' || props.platform === 'codebuddy') && stateParam) {
         oauthState.value = stateParam
       }
       if (code && code !== trimmed) {
@@ -1153,7 +1196,7 @@ watch(authCodeInput, (newVal) => {
       // If URL parsing fails, try regex extraction
       const match = trimmed.match(/[?&]code=([^&]+)/)
       const stateMatch = trimmed.match(/[?&]state=([^&]+)/)
-      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'grok') && stateMatch && stateMatch[1]) {
+      if ((props.platform === 'openai' || props.platform === 'gemini' || props.platform === 'antigravity' || props.platform === 'grok' || props.platform === 'codebuddy') && stateMatch && stateMatch[1]) {
         oauthState.value = stateMatch[1]
       }
       if (match && match[1] && match[1] !== trimmed) {
