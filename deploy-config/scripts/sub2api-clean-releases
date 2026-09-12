@@ -25,6 +25,9 @@
 #   WORKER_IMAGE            Worker 镜像名，默认 xianyu-auto-reply
 #   WORKER_LEGACY_REPOS     Worker 历史远程别名仓库，默认空
 #   ENV_BAK_KEEP            .env.bak-* 保留数，默认 3
+#   BUILD_CACHE_MAX_STORAGE Docker 构建缓存保留上限（--max-storage），默认 5GB；超出部分按最近使用裁剪
+#   TMP_BACKUP_KEEP         /tmp 下 sub2api 备份产物（dump/tar）保留数（按 mtime），默认 2
+#   BUILD_DIR_KEEP          /opt/sub2api/build-<hash> 暂存目录保留数（当前运行 tag 之外），默认 1
 
 set -euo pipefail
 
@@ -42,6 +45,9 @@ SUB2API_LEGACY_REPOS="${SUB2API_LEGACY_REPOS:-weishaw/sub2api ghcr.io/trzjy/sub2
 WORKER_IMAGE="${WORKER_IMAGE:-xianyu-auto-reply}"
 WORKER_LEGACY_REPOS="${WORKER_LEGACY_REPOS:-}"
 ENV_BAK_KEEP="${ENV_BAK_KEEP:-3}"
+BUILD_CACHE_MAX_STORAGE="${BUILD_CACHE_MAX_STORAGE:-5GB}"
+TMP_BACKUP_KEEP="${TMP_BACKUP_KEEP:-2}"
+BUILD_DIR_KEEP="${BUILD_DIR_KEEP:-1}"
 
 if [ "$KEEP_RELEASES" -lt 2 ]; then
   echo "KEEP_RELEASES must be at least 2 (current=$KEEP_RELEASES)" >&2
@@ -91,6 +97,19 @@ remove_file() {
   fi
   if rm -f -- "$f"; then
     echo "removed file: $f"
+    removed=$((removed + 1))
+  fi
+}
+
+remove_dir() {
+  local d="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove dir: $d"
+    removed=$((removed + 1))
+    return
+  fi
+  if rm -rf -- "$d"; then
+    echo "removed dir: $d"
     removed=$((removed + 1))
   fi
 }
@@ -289,6 +308,86 @@ if [ -d "$DEPLOY_DIR" ]; then
   fi
 else
   echo "skip: $DEPLOY_DIR not found"
+fi
+
+# ---- 6. Docker 构建缓存 ----------------------------------------------------
+# 策略：将未使用构建缓存裁剪到 BUILD_CACHE_MAX_STORAGE 以内（超出部分按最近使用淘汰）。
+# 构建缓存由本机所有 Docker 项目共享（sub2api / xianyu / newapi 等），只裁剪"未使用"缓存，
+# 不触碰任何运行中容器或镜像；保留上限内的近期缓存以避免每次构建都从零重来。
+echo "=== docker build cache (prune unused, keep <= ${BUILD_CACHE_MAX_STORAGE}) ==="
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] would run: docker builder prune -f --max-storage ${BUILD_CACHE_MAX_STORAGE}"
+  docker system df 2>/dev/null | grep -i "build cache" || true
+else
+  docker builder prune -f --max-storage "$BUILD_CACHE_MAX_STORAGE" 2>&1 || true
+fi
+
+# ---- 7. /tmp 历史备份产物 --------------------------------------------------
+# 严格白名单：只清理 sub2api 自己产生的 DB dump / 部署 tar（sub2api-db-*.sql /
+# sub2api-predeploy-*.sql / sub2api-*.tar.gz），按 mtime 保留最近 TMP_BACKUP_KEEP 个。
+# 不触碰其他项目的备份，例如 /tmp/new-api-full-backup-*.tar.gz（运维文档 §6.4 标注勿删）。
+echo "=== /tmp sub2api backup artifacts (keep ${TMP_BACKUP_KEEP}) ==="
+mapfile -t tmp_baks < <(
+  find /tmp -maxdepth 1 -type f \
+    \( -name 'sub2api-db-*.sql' -o -name 'sub2api-predeploy-*.sql' -o -name 'sub2api-*.tar.gz' \) \
+    -printf '%T@ %p\n' 2>/dev/null |
+    sort -rn |
+    cut -d' ' -f2-
+)
+if [ "${#tmp_baks[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  t_seen=0
+  for f in "${tmp_baks[@]}"; do
+    if [ "$t_seen" -lt "$TMP_BACKUP_KEEP" ]; then
+      echo "keeping recent: $f"
+      kept=$((kept + 1))
+      t_seen=$((t_seen + 1))
+    else
+      remove_file "$f"
+    fi
+  done
+fi
+
+# ---- 8. 构建暂存目录（/opt/sub2api/build-<hash>） --------------------------
+# 部署流程（运维文档 §5）会在 DEPLOY_DIR 下生成 build-<短哈希> 暂存目录，随版本天然累积。
+# 保留当前 .env 运行 tag 对应的目录 + 最近 BUILD_DIR_KEEP 个，其余删除。为防误删，仅处理
+# 形如 build-<7~40 位十六进制> 的目录，非法名一律跳过。
+echo "=== build staging dirs (keep running + ${BUILD_DIR_KEEP}) ==="
+running_tag=""
+if [ -f "$ENV_FILE" ]; then
+  running_tag="$(grep -E '^SUB2API_IMAGE_TAG=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  running_tag="${running_tag%-w}"
+fi
+mapfile -t build_dirs < <(
+  find "$DEPLOY_DIR" -maxdepth 1 -type d -name 'build-*' -printf '%T@ %p\n' 2>/dev/null |
+    sort -rn |
+    cut -d' ' -f2-
+)
+if [ "${#build_dirs[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  d_seen=0
+  for d in "${build_dirs[@]}"; do
+    base="$(basename "$d")"
+    suffix="${base#build-}"
+    if ! printf '%s' "$suffix" | grep -qE '^[0-9a-f]{7,40}$'; then
+      echo "skip non-hash build dir: $d"
+      continue
+    fi
+    if [ -n "$running_tag" ] && [ "$suffix" = "$running_tag" ]; then
+      echo "keeping protected (running): $d"
+      kept=$((kept + 1))
+      continue
+    fi
+    if [ "$d_seen" -lt "$BUILD_DIR_KEEP" ]; then
+      echo "keeping recent: $d"
+      kept=$((kept + 1))
+      d_seen=$((d_seen + 1))
+      continue
+    fi
+    remove_dir "$d"
+  done
 fi
 
 # ---- 汇总 -----------------------------------------------------------------
