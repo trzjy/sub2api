@@ -338,6 +338,13 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 
 	remaining := firstJSONNumber(bodyBytes, "remaining", "quota.remaining", "balance")
 	if remaining == nil {
+		// 上游订阅到期后 /v1/usage 不再返回 remaining/subscription（订阅信息
+		// 未注入 context）。此时保留上次快照（含到期时间，前端标红展示），
+		// 仅报告可识别的原因，不覆盖历史余额快照。
+		if plan := strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String()); plan != "" {
+			result.Error = fmt.Sprintf("Upstream subscription %q expired or unavailable (missing remaining)", plan)
+			return result, nil
+		}
 		result.Error = "Invalid balance response: missing remaining"
 		return result, nil
 	}

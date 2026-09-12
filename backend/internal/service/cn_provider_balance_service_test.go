@@ -383,3 +383,25 @@ func TestCNProviderBalanceService_EmptyURLOnOfficialHostKeepsOfficialEndpoint(t 
 	require.Equal(t, "https://api.deepseek.com/user/balance", upstream.lastURL)
 	require.Equal(t, 7.5, result.Balance)
 }
+
+// 上游订阅到期：/v1/usage 不再返回 remaining，报错需指出订阅名而非笼统的
+// 解析失败；不覆盖上次快照（UpdateExtra 不调用），前端继续展示历史值+红到期。
+func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","isValid":true,"planName":"kimi订阅 ","unit":"USD"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Contains(t, result.Error, "kimi订阅")
+	require.Contains(t, result.Error, "expired")
+	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
+}
