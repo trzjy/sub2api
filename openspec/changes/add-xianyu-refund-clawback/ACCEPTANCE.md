@@ -82,3 +82,15 @@ Worker（deploy-config/xianyu-auto-reply-src/）：
   xianyu_order_claim_repo.go、xianyu_worker_client.go 等），与本次变更文件不重叠；
   本变更的验证在隔离 worktree（HEAD+仅本变更文件）完成，并已交叉检查无文件冲突。
 - AGENTS.md 协议块未复制/未手改。
+
+## 部署证据（2026-09-12 生产发布）
+
+- 提交 `6608611a8` 推送 origin/main；服务器端 `git archive` 干净构建。
+- 站点镜像 `sub2api:6608611a8-w`（sha256:dddb0ace3…）已切换运行：
+  health 200、无 panic/fatal；迁移 243 已应用（xianyu_order_claims 存在
+  refund_handled_at/refund_action/refund_detail）。
+- Worker 镜像 `xianyu-auto-reply:refundclaw-20260912-2208`（sha256:2da6864d…）已切换：
+  三账号心跳正常、scheduler 运行；worker MySQL xy_orders.refund_reported 列已就绪；
+  源码同步副本 /opt/sub2api/xianyu-auto-reply-src 已含上报客户端与挂钩。
+- 端点验证：`POST /api/v1/internal/xianyu/refund-events` 无 token 返回 401（鉴权生效）。
+- 运维文档已按镜像纪律更新（11.2 表格 worker tag/镜像 ID + 11.4 退款上报条目）。
