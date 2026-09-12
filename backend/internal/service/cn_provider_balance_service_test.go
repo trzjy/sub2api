@@ -211,6 +211,54 @@ func TestCNProviderBalanceService_RelayOverrideUnlimitedSubscription(t *testing.
 	require.Equal(t, "DeepSeek订阅", repo.extraWrites[0]["deepseek_balance_plan_name"])
 }
 
+// 订阅有效期透传：subscription.expires_at 解析成功则落结果与快照；
+// 非法时间串静默丢弃，不影响余额主链路。
+func TestCNProviderBalanceService_RelayOverrideParsesExpiresAt(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "subscription expires_at",
+			body: `{"remaining":-1,"unit":"USD","isValid":true,"planName":"DeepSeek订阅","subscription":{"expires_at":"2026-09-20T02:47:56.827014+08:00"}}`,
+			want: "2026-09-20T02:47:56.827014+08:00",
+		},
+		{
+			name: "top-level expires_at (quota mode)",
+			body: `{"remaining":12.5,"unit":"USD","expires_at":"2026-10-01T00:00:00Z"}`,
+			want: "2026-10-01T00:00:00Z",
+		},
+		{
+			name: "invalid expires_at dropped",
+			body: `{"remaining":12.5,"unit":"USD","expires_at":"not-a-time"}`,
+			want: "",
+		},
+		{
+			name: "missing expires_at",
+			body: `{"remaining":12.5,"unit":"USD"}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+				"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+			})}
+			upstream := &cnBalanceResponseUpstream{statusCode: http.StatusOK, body: tt.body}
+			svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+			result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+			require.NoError(t, err)
+			require.True(t, result.Success)
+			require.Equal(t, tt.want, result.ExpiresAt)
+			require.Len(t, repo.extraWrites, 1)
+			require.Equal(t, tt.want, repo.extraWrites[0]["deepseek_balance_expires_at"])
+		})
+	}
+}
+
 // 覆盖地址返回 401：保留 Authentication failed 文案，不抛错、不落快照。
 func TestCNProviderBalanceService_RelayOverrideAuthFailure(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
@@ -252,4 +300,108 @@ func TestCNProviderBalanceService_RelayOverrideDisabledFallsBackToOfficial(t *te
 	require.True(t, result.Success)
 	require.Equal(t, "https://api.deepseek.com/user/balance", upstream.lastURL)
 	require.Equal(t, 7.5, result.Balance)
+}
+
+// 订阅用量透传：subscription.daily/monthly_usage_usd 落结果与快照。
+func TestCNProviderBalanceService_RelayOverrideParsesSubscriptionUsage(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":-1,"unit":"USD","planName":"DeepSeek订阅","subscription":{"daily_usage_usd":1.83,"monthly_usage_usd":89.22,"expires_at":"2026-09-20T02:47:56+08:00"}}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.True(t, result.Unlimited)
+	require.NotNil(t, result.DailyUsage)
+	require.InDelta(t, 1.83, *result.DailyUsage, 1e-9)
+	require.NotNil(t, result.MonthlyUsage)
+	require.InDelta(t, 89.22, *result.MonthlyUsage, 1e-9)
+	require.Len(t, repo.extraWrites, 1)
+	require.InDelta(t, 1.83, repo.extraWrites[0]["deepseek_balance_daily_used"], 1e-9)
+	require.InDelta(t, 89.22, repo.extraWrites[0]["deepseek_balance_monthly_used"], 1e-9)
+}
+
+// 非订阅账号不写用量快照键（UpdateExtra 合并语义下避免写入 null 覆盖）。
+func TestCNProviderBalanceService_RelayOverrideNonSubscriptionSkipsUsageKeys(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{"remaining":12.5,"unit":"USD"}`}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.Len(t, repo.extraWrites, 1)
+	_, hasDaily := repo.extraWrites[0]["deepseek_balance_daily_used"]
+	_, hasMonthly := repo.extraWrites[0]["deepseek_balance_monthly_used"]
+	require.False(t, hasDaily)
+	require.False(t, hasMonthly)
+}
+
+// 覆盖地址留空时按 base_url + /v1/usage 推导（中转账号只需打开探测开关）。
+func TestCNProviderBalanceService_RelayOverrideEmptyURLDerivesFromBaseURL(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":3.25,"unit":"USD"}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "https://inferaiapi.example.com/v1/usage", upstream.lastURL)
+	require.Equal(t, 3.25, result.Balance)
+}
+
+// 官方域名账号不触发默认推导：enabled 但留空地址时仍走官方余额端点。
+func TestCNProviderBalanceService_EmptyURLOnOfficialHostKeepsOfficialEndpoint(t *testing.T) {
+	account := newDeepSeekBalanceProbeAccount() // base_url=https://relay.example.com 视为自定义；
+	account.Credentials["base_url"] = "https://api.deepseek.com"
+	account.Credentials[BalanceProbeConfigCredentialKey] = map[string]any{"enabled": true, "url": ""}
+	repo := &cnBalanceProbeRepo{account: account}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"7.5"}]}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "https://api.deepseek.com/user/balance", upstream.lastURL)
+	require.Equal(t, 7.5, result.Balance)
+}
+
+// 上游订阅到期：/v1/usage 不再返回 remaining，报错需指出订阅名而非笼统的
+// 解析失败；不覆盖上次快照（UpdateExtra 不调用），前端继续展示历史值+红到期。
+func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","isValid":true,"planName":"kimi订阅 ","unit":"USD"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Contains(t, result.Error, "kimi订阅")
+	require.Contains(t, result.Error, "expired")
+	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
 }
