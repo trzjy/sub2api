@@ -332,10 +332,18 @@ func (s *XianyuReconcileService) healMissingClaim(ctx context.Context, order Xia
 		"Worker 已发货但缺少卡密领取记录，对账已自动补登为已发送")
 }
 
-// healMirrorIfStale 镜像缺失则补登、非终态则按目标状态收口（幂等；已是终态会被仓储层忽略）。
+// healMirrorIfStale 镜像缺失则补登、非终态则按目标状态收口（幂等）。
+// 镜像已是相反终态（failed→sent）时属于"主程序判已发、镜像判失败"的状态分裂，
+// 不覆盖既有终态，升级人工核对。
 func (s *XianyuReconcileService) healMirrorIfStale(ctx context.Context, order XianyuWorkerAutoDelivery, mirror *XianyuWorkerDelivery, targetStatus string) {
 	orderNo := order.OrderNo
 	if mirror != nil && mirror.DeliveryStatus == targetStatus {
+		return
+	}
+	if mirror != nil && targetStatus == XianyuDeliveryStatusSent &&
+		mirror.DeliveryStatus == XianyuDeliveryStatusFailed {
+		s.alertDrift(ctx, orderNo, "conflict-mirror-failed-target-sent", order, mirror, nil,
+			"订单镜像记录为失败，但卡密领取记录/Worker 均显示已发货，状态分裂，请人工核对买家是否收到卡密")
 		return
 	}
 	if mirror == nil {
@@ -350,7 +358,9 @@ func (s *XianyuReconcileService) healMirrorIfStale(ctx context.Context, order Xi
 			return
 		}
 	}
-	result := XianyuDeliveryStatusResult{OrderNo: orderNo, QuantitySent: order.Quantity}
+	// quantity_sent 与既有回执口径一致：单 claim 单码固定为 1
+	// （多份订单的实发份数由 Worker 回执负责写入，对账不猜测）。
+	result := XianyuDeliveryStatusResult{OrderNo: orderNo, QuantitySent: 1}
 	if targetStatus == XianyuDeliveryStatusSent {
 		result.Success = true
 		result.Confirmed = true

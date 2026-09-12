@@ -28,10 +28,10 @@ type reconcileStateStub struct {
 	claim *XianyuOrderClaim
 	err   error
 	// results 记录每次 RecordDeliveryResult 的输入；claimByOrder 决定 GetDeliveryClaim 行为。
-	results     []XianyuDeliveryStatusResult
+	results      []XianyuDeliveryStatusResult
 	claimByOrder map[string]*XianyuOrderClaim
-	insertErr   error
-	inserts     []XianyuDeliveryClaim
+	insertErr    error
+	inserts      []XianyuDeliveryClaim
 }
 
 func (s *reconcileStateStub) GetDeliveryClaim(_ context.Context, orderNo string) (*XianyuOrderClaim, error) {
@@ -68,6 +68,7 @@ type reconcileMirrorStub struct {
 	mirrors []XianyuWorkerDelivery
 	ensured []XianyuWorkerDelivery
 	updated []string
+	results []XianyuDeliveryStatusResult
 	err     error
 }
 
@@ -80,8 +81,9 @@ func (s *reconcileMirrorStub) EnsureWorkerDeliveryRecord(_ context.Context, d Xi
 	return s.err
 }
 
-func (s *reconcileMirrorStub) RecordWorkerDeliveryResult(_ context.Context, orderNo string, _ XianyuDeliveryStatusResult) error {
+func (s *reconcileMirrorStub) RecordWorkerDeliveryResult(_ context.Context, orderNo string, result XianyuDeliveryStatusResult) error {
 	s.updated = append(s.updated, orderNo)
+	s.results = append(s.results, result)
 	return s.err
 }
 
@@ -281,4 +283,40 @@ func watermarkSettings() map[string]string {
 	return map[string]string{
 		SettingKeyXianyuReconcileWatermark: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
 	}
+}
+
+func TestReconcile_MirrorTerminalFailedEscalatesConflict(t *testing.T) {
+	// 状态分裂：claim 与 Worker 均为已发，但镜像是失败终态——不得覆盖，升级人工。
+	worker := &reconcileWorkerStub{orders: []XianyuWorkerAutoDelivery{autoOrder("o1", "卡密：abcd")}}
+	state := &reconcileStateStub{claimByOrder: map[string]*XianyuOrderClaim{
+		"o1": {OrderNo: "o1", DeliveryStatus: XianyuDeliveryStatusSent, AttemptCount: 0},
+	}}
+	mirror := &reconcileMirrorStub{mirrors: []XianyuWorkerDelivery{
+		{OrderNo: "o1", DeliveryKind: "auto", Quantity: 1, DeliveryStatus: XianyuDeliveryStatusFailed, UpdatedAt: time.Now()},
+	}}
+	svc, alert := newReconcileTestService(worker, state, mirror, &reconcileRedeemStub{}, watermarkSettings())
+
+	svc.runOnce()
+
+	require.Empty(t, mirror.updated, "终态镜像不得被对账覆盖")
+	require.Contains(t, strings.Join(alert.calls, ","), "conflict-mirror-failed-target-sent")
+}
+
+func TestReconcile_MirrorHealUsesUnitQuantitySent(t *testing.T) {
+	// claim 与 Worker 均为已发、镜像挂起：补平镜像时 quantity_sent 与回执口径一致（单 claim=1）。
+	workerOrder := autoOrder("o2", "卡密：abcd")
+	workerOrder.Quantity = 3
+	worker := &reconcileWorkerStub{orders: []XianyuWorkerAutoDelivery{workerOrder}}
+	state := &reconcileStateStub{claimByOrder: map[string]*XianyuOrderClaim{
+		"o2": {OrderNo: "o2", DeliveryStatus: XianyuDeliveryStatusSent, AttemptCount: 0},
+	}}
+	mirror := &reconcileMirrorStub{mirrors: []XianyuWorkerDelivery{
+		{OrderNo: "o2", DeliveryKind: "auto", Quantity: 3, DeliveryStatus: XianyuDeliveryStatusPending, UpdatedAt: time.Now()},
+	}}
+	svc, _ := newReconcileTestService(worker, state, mirror, &reconcileRedeemStub{}, watermarkSettings())
+
+	svc.runOnce()
+
+	require.Len(t, mirror.results, 1)
+	require.Equal(t, 1, mirror.results[0].QuantitySent, "对账不猜测实发份数，按单 claim 单码口径写 1")
 }

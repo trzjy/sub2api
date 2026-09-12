@@ -1360,6 +1360,14 @@ func (s *adminServiceImpl) ExpireRedeemCode(ctx context.Context, id int64) (*Red
 	if err != nil {
 		return nil, err
 	}
+	switch code.Status {
+	case StatusUsed:
+		// 权益已消耗，作废只会改写历史状态、无法回收，直接拒绝。
+		return nil, infraerrors.BadRequest("REDEEM_CODE_EXPIRE_USED", fmt.Sprintf("兑换码 #%d 已被使用，权益已消耗，不能作废", id))
+	case StatusExpired:
+		// 幂等：重复作废直接返回当前状态。
+		return code, nil
+	}
 	code.Status = StatusExpired
 	if err := s.redeemCodeRepo.Update(ctx, code); err != nil {
 		return nil, err
