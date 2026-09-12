@@ -1250,6 +1250,7 @@ function generateRoutedCodexFiles(
     zhipu: 'Zhipu',
     deepseek: 'DeepSeek',
     minimax: 'MiniMax',
+    codebuddy: 'CodeBuddy',
     other: 'Other',
     composite: 'Composite'
   }
