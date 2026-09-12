@@ -21,6 +21,15 @@
         {{ expiresLabel }}
       </span>
 
+      <!-- 订阅用量（订阅制账号没有余额数字，月用量是唯一可展示的数值） -->
+      <span
+        v-if="monthlyUsageLabel"
+        data-test="cn-provider-balance-monthly-usage"
+        class="text-[10px] leading-4 text-gray-400 dark:text-gray-500"
+      >
+        {{ monthlyUsageLabel }}
+      </span>
+
       <!-- Low balance badge (reactive 402/429 marker or probe-detected) -->
       <span
         v-if="balanceLow"
@@ -158,6 +167,23 @@ const expiresSoon = computed(() => {
   return expiresAt.value.getTime() - Date.now() <= 3 * 24 * 60 * 60 * 1000
 })
 const expiresTitle = computed(() => expiresAt.value?.toLocaleString() ?? '')
+
+// 订阅月用量：探测结果优先，其次落库快照（<platform>_balance_monthly_used）。
+const snapshotMonthlyUsage = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_monthly_used')]
+  return typeof v === 'number' ? v : null
+})
+const monthlyUsage = computed(() => {
+  if (data.value?.success) {
+    return typeof data.value.monthly_usage === 'number' ? data.value.monthly_usage : null
+  }
+  return snapshotMonthlyUsage.value
+})
+const monthlyUsageLabel = computed(() => {
+  if (monthlyUsage.value == null) return ''
+  const amount = monthlyUsage.value >= 100 ? monthlyUsage.value.toFixed(0) : monthlyUsage.value.toFixed(2)
+  return t('admin.accounts.cnProviders.monthlyUsage', { amount })
+})
 
 // 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
 const currentEntries = computed<CNProviderBalanceEntry[]>(() => {

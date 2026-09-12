@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ const (
 	cnBalanceExtraSuffixPlanName  = "balance_plan_name"
 	// 上游订阅/额度的到期时间（RFC3339 原文透传，前端格式化展示）。
 	cnBalanceExtraSuffixExpiresAt = "balance_expires_at"
+	// 订阅用量（同程序中转 /v1/usage 的 subscription.daily/monthly_usage_usd），
+	// 订阅制账号没有余额数字，用量是唯一可展示的数值。
+	cnBalanceExtraSuffixDailyUsed   = "balance_daily_used"
+	cnBalanceExtraSuffixMonthlyUsed = "balance_monthly_used"
 )
 
 // CNProviderBalanceEntry 是单一币种的余额明细。
@@ -63,11 +68,15 @@ type CNProviderBalanceResult struct {
 	Unlimited bool   `json:"unlimited,omitempty"`
 	PlanName  string `json:"plan_name,omitempty"`
 	// ExpiresAt 为上游订阅/额度的到期时间（RFC3339，原文透传；无则空）。
-	ExpiresAt  string `json:"expires_at,omitempty"`
-	StatusCode int    `json:"status_code,omitempty"`
-	FetchedAt  int64  `json:"fetched_at"`
-	Persisted  bool   `json:"persisted"`
-	Error      string `json:"error,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// DailyUsage/MonthlyUsage 为订阅制账号的当日/当月用量（USD）；订阅没有
+	// 余额数字，用量是唯一可展示的数值。非订阅账号为 nil。
+	DailyUsage   *float64 `json:"daily_usage,omitempty"`
+	MonthlyUsage *float64 `json:"monthly_usage,omitempty"`
+	StatusCode   int      `json:"status_code,omitempty"`
+	FetchedAt    int64    `json:"fetched_at"`
+	Persisted    bool     `json:"persisted"`
+	Error        string   `json:"error,omitempty"`
 }
 
 // CNProviderBalanceService 探测 Kimi / DeepSeek payg 账号的账户余额。
@@ -147,9 +156,23 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 
 	// 同程序中转账号：官方余额端点对中转 key 无效（如 deepseek anthropic 协议
 	// 账号会命中 api.deepseek.com 导致 401），改走账号上配置的余额探测地址
-	//（credentials.balance_probe，通常为上游 /v1/usage）。
-	if probeCfg := account.BalanceProbeConfig(); probeCfg.Enabled && strings.TrimSpace(probeCfg.URL) != "" {
-		return s.queryRelayBalance(ctx, account, apiKey, probeCfg)
+	//（credentials.balance_probe，通常为上游 /v1/usage）。地址留空时按
+	// base_url + /v1/usage 推导——但官方域名账号（base_url 即官方地址）不适用，
+	// 否则官方 kimi/deepseek 账号会被错推到不存在的 /v1/usage。
+	if probeCfg := account.BalanceProbeConfig(); probeCfg.Enabled {
+		overrideURL := strings.TrimSpace(probeCfg.URL)
+		if overrideURL == "" {
+			if base := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/"); base != "" && !cnIsOfficialBalanceHost(account.Platform, base) {
+				overrideURL = base + "/v1/usage"
+			}
+		}
+		if overrideURL != "" {
+			return s.queryRelayBalance(ctx, account, apiKey, BalanceProbeConfig{
+				Enabled:    true,
+				URL:        overrideURL,
+				BearerAuth: probeCfg.BearerAuth,
+			})
+		}
 	}
 
 	targetURL := cnBalanceURL(account)
@@ -331,6 +354,17 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 	result.Available = available
 	result.Currency = unit
 	result.PlanName = strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String())
+	// 订阅用量（订阅制账号没有余额数字，用量是唯一可展示的数值）。
+	if v := gjson.GetBytes(bodyBytes, "subscription.daily_usage_usd"); v.Exists() {
+		if f, parseErr := strconv.ParseFloat(v.String(), 64); parseErr == nil {
+			result.DailyUsage = &f
+		}
+	}
+	if v := gjson.GetBytes(bodyBytes, "subscription.monthly_usage_usd"); v.Exists() {
+		if f, parseErr := strconv.ParseFloat(v.String(), 64); parseErr == nil {
+			result.MonthlyUsage = &f
+		}
+	}
 	// 订阅有效期：订阅模式在 subscription.expires_at，限额模式在顶层 expires_at。
 	// 只透传可解析的 RFC3339，坏值静默丢弃（不影响余额主链路）。
 	if raw := strings.TrimSpace(gjson.GetBytes(bodyBytes, "subscription.expires_at").String()); raw != "" {
@@ -369,12 +403,37 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
 		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
 	}
+	// 订阅用量仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值）。
+	if result.DailyUsage != nil {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixDailyUsed)] = *result.DailyUsage
+	}
+	if result.MonthlyUsage != nil {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixMonthlyUsed)] = *result.MonthlyUsage
+	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
 		slog.Warn("cn_balance_persist_failed", "account_id", account.ID, "provider", provider, "error", err)
 	} else {
 		result.Persisted = true
 	}
 	return result, nil
+}
+
+// cnIsOfficialBalanceHost 判定 base_url 是否指向厂商官方域名（官方账号的余额
+// 探测必须走官方端点，不能被 /v1/usage 默认推导劫持）。
+func cnIsOfficialBalanceHost(platform, baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch platform {
+	case PlatformKimi:
+		return host == "api.moonshot.cn"
+	case PlatformDeepseek:
+		return host == "api.deepseek.com"
+	default:
+		return false
+	}
 }
 
 // loadPayGAccount 加载 payg 模式的国产供应商账号（余额仅对 payg 有意义；coding 走额度）。

@@ -50,6 +50,9 @@ export interface CNProviderBalanceResult {
   plan_name?: string
   /** 上游订阅/额度到期时间（RFC3339）。 */
   expires_at?: string
+  /** 订阅制账号当日/当月用量（USD）；非订阅账号缺省。 */
+  daily_usage?: number
+  monthly_usage?: number
   status_code?: number
   fetched_at: number
   persisted: boolean
