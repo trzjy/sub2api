@@ -1378,6 +1378,10 @@ func (a *Account) GetOpenAIBaseURL() string {
 		return DefaultDeepseekBaseURL
 	case PlatformMiniMax:
 		return DefaultMiniMaxBaseURL
+	case PlatformCodeBuddy:
+		// 注：CodeBuddy 不走 UsesOpenAIProtocolSharedBaseURL 共享 base_url（见计划 §6.1），
+		// 实际路由由 forwardCodeBuddy 直接打到 DefaultCodeBuddyBaseURL。此处仅按平台常量兜底。
+		return DefaultCodeBuddyBaseURL
 	case PlatformOther:
 		// other 无内置默认上游：仅返回账号自定义 base_url；为空返回空，由上层
 		// 失败关闭，绝不回落官方 OpenAI 端点。

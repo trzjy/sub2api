@@ -1130,6 +1130,9 @@ type GatewayConfig struct {
 	// 仅作用于 payg（按量付费）账号：周期探测余额，低于阈值则临时停调。
 	CNProviders GatewayCNProvidersConfig `mapstructure:"cn_providers"`
 
+	// CodeBuddy: CodeBuddy（腾讯）原生接入网关相关配置（OAuth + 改写管线 + 错误分类）。
+	CodeBuddy GatewayCodeBuddyConfig `mapstructure:"codebuddy"`
+
 	// APIKeyBalanceProbe: controlled API-key account balance snapshot cadence.
 	APIKeyBalanceProbe GatewayAPIKeyBalanceProbeConfig `mapstructure:"api_key_balance_probe"`
 }
@@ -1174,6 +1177,14 @@ type GatewayCNProvidersConfig struct {
 	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
 	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
 	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
+}
+
+// GatewayCodeBuddyConfig 控制 CodeBuddy 原生接入的行为。
+//   - ChatUserAgent: 出站 User-Agent 指纹（默认 CLI/2.63.2 CodeBuddy/2.63.2），上游校验 UA 版本时可热更。
+//   - SanitizeEnabled: system 指纹脱敏开关（默认开启），关闭后不再清洗 Claude Code/Codex 注入模板句。
+type GatewayCodeBuddyConfig struct {
+	ChatUserAgent   string `mapstructure:"chat_user_agent"`
+	SanitizeEnabled bool   `mapstructure:"sanitize_enabled"`
 }
 
 // GatewayAPIKeyBalanceProbeConfig controls periodic snapshots for controlled
@@ -2509,6 +2520,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.cn_providers.balance_check_enabled", true)
 	viper.SetDefault("gateway.cn_providers.balance_threshold", 0.5)
 	viper.SetDefault("gateway.cn_providers.balance_check_interval_minutes", 10)
+	// CodeBuddy（腾讯）原生接入：UA 指纹默认对齐官方 CLI；system 指纹脱敏默认开启。
+	viper.SetDefault("gateway.codebuddy.chat_user_agent", "CLI/2.63.2 CodeBuddy/2.63.2")
+	viper.SetDefault("gateway.codebuddy.sanitize_enabled", true)
 	viper.SetDefault("gateway.api_key_balance_probe.interval_minutes", 10)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
