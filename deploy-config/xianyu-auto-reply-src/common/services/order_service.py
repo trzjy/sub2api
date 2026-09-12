@@ -1622,6 +1622,13 @@ class OrderService:
             except Exception as e:
                 logger.error(f"退款订单 {order_no} 触发注销异常: {e}")
 
+        # 退款成功订单兜底批量上报主程序（兑换码作废/追回；内部判断回调配置与 refund_reported 去重）
+        try:
+            from common.services.refund_cancel_service import report_refunded_orders_to_sub2api
+            await report_refunded_orders_to_sub2api(account.account_id)
+        except Exception as e:
+            logger.error(f"账号 {account.account_id} 退款成功订单上报主程序异常: {e}")
+
         logger.info(
             f"获取退款订单完成: 账号 {account.account_id} 处理{total_fetched}条, 更新{updated}条, 失败{failed}"
         )

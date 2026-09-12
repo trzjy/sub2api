@@ -895,12 +895,14 @@ func ProvideXianyuDeliveryService(
 	control XianyuControlRepository,
 	stateUpdater XianyuDeliveryStateUpdater,
 	workerDelivery XianyuWorkerDeliveryRepository,
+	refunds XianyuRefundEventRepository,
+	clawback XianyuRedeemClawback,
 	cfg *config.Config,
 	setting XianyuDeliverySettingReader,
 	workerSvc *XianyuWorkerService,
 	users SystemUserReader,
 ) (*XianyuDeliveryService, error) {
-	svc := NewXianyuDeliveryService(repo, control, stateUpdater, workerDelivery, cfg, setting, workerSvc)
+	svc := NewXianyuDeliveryService(repo, control, stateUpdater, workerDelivery, refunds, clawback, cfg, setting, workerSvc)
 	if err := svc.ValidateStartup(context.Background(), users); err != nil {
 		return nil, err
 	}
@@ -955,6 +957,7 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,
 	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),
+	wire.Bind(new(XianyuRedeemClawback), new(*RedeemService)),
 	NewPromoService,
 	NewUsageService,
 	NewDashboardService,

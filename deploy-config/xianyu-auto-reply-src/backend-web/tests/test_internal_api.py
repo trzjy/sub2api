@@ -1516,3 +1516,71 @@ async def test_internal_update_delivery_template_updates_existing():
     assert resp.success is True
     assert row.value == "新模板 {order_id}"
     assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_refund_event_client_contract(monkeypatch):
+    """退款成功上报 URL/头/载荷与主程序 RefundEvent 契约一致。"""
+    import httpx
+
+    from common.services import sub2api_refund_event_client as mod
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        text = ""
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a, **k):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        mod,
+        "_load_config",
+        lambda: ("http://sub2api:8080", "secret-token"),
+    )
+
+    ok = await mod.report_refund_event("O9", "acc-1")
+    assert ok is True
+    assert captured["url"] == "http://sub2api:8080/api/v1/internal/xianyu/refund-events"
+    assert captured["headers"]["X-Internal-Token"] == "secret-token"
+    assert captured["json"] == {"order_no": "O9", "account_id": "acc-1", "status": "refunded"}
+
+
+@pytest.mark.asyncio
+async def test_refund_event_client_unconfigured_skips(monkeypatch):
+    from common.services import sub2api_refund_event_client as mod
+
+    monkeypatch.setattr(mod, "_load_config", lambda: ("", ""))
+    assert await mod.report_refund_event("O9", "acc-1") is False
+
+
+@pytest.mark.asyncio
+async def test_report_refunded_orders_unconfigured_noop(monkeypatch):
+    """未配置主程序回调时兜底上报直接跳过（单机模式不触碰 DB、不置位标记）。"""
+    import common.db.session as db_session
+    from common.services import refund_cancel_service as mod
+
+    def _fail_session():
+        raise AssertionError("unconfigured mode must not touch the database")
+
+    monkeypatch.setattr(
+        "common.services.sub2api_refund_event_client.is_configured", lambda: False
+    )
+    monkeypatch.setattr(db_session, "async_session_maker", _fail_session)
+    reported = await mod.report_refunded_orders_to_sub2api("acc-1")
+    assert reported == 0

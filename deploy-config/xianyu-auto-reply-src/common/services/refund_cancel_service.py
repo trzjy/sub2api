@@ -116,3 +116,49 @@ async def process_order_unregister(account_id: str, order_no: str) -> None:
             order.unregister_error_reason = f"注销失败: {fail_detail}"[:500]
             logger.warning(f"{pf}订单 {order_no} 退款注销存在失败，记录错误原因，不标记已注销")
         await session.commit()
+
+
+async def report_refunded_orders_to_sub2api(account_id: str, *, batch_limit: int = 20) -> int:
+    """把本账号「退款成功」订单批量上报主程序（兑换码追回/作废）。
+
+    仅当已配置主程序内网回调时执行；以 xy_orders.refund_reported 标记去重，
+    上报成功才置位，失败保留待下轮兜底重报。单轮限量，避免阻塞同步锁。
+
+    Args:
+        account_id: 账号标识（xy_accounts.account_id）
+        batch_limit: 单轮最多上报条数
+
+    Returns:
+        本轮成功上报条数
+    """
+    from common.db.session import async_session_maker
+    from common.models.xy_order import XYOrder
+    from common.services import sub2api_refund_event_client
+
+    if not sub2api_refund_event_client.is_configured():
+        return 0  # 单机模式：未配置主程序回调，不上报
+
+    pf = f"【{account_id}】"
+    async with async_session_maker() as session:
+        orders = (await session.execute(
+            select(XYOrder).where(
+                XYOrder.account_id == account_id,
+                XYOrder.status == 'refunded',
+                XYOrder.refund_reported == False,  # noqa: E712
+            ).order_by(XYOrder.updated_at.desc())
+            .limit(batch_limit)
+        )).scalars().all()
+        if not orders:
+            return 0
+
+        reported = 0
+        for order in orders:
+            ok = await sub2api_refund_event_client.report_refund_event(order.order_no, account_id)
+            if ok:
+                order.refund_reported = True
+                reported += 1
+        if reported:
+            await session.commit()
+        if reported or orders:
+            logger.info(f"{pf}退款成功订单上报主程序：{reported}/{len(orders)} 条")
+        return reported

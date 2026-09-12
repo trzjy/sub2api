@@ -26,7 +26,7 @@ func newXianyuHandlerForTest() *XianyuDeliveryHandler {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,
 	}}
-	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, nil, nil, cfg, newXianyuSettingsStub(true), nil), cfg)
+	return NewXianyuDeliveryHandler(service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, nil, nil, nil, nil, cfg, newXianyuSettingsStub(true), nil), cfg)
 }
 
 // xianyuHandlerControlStub 提供 Claim 所需的最小控制面解析。
@@ -209,7 +209,7 @@ func TestXianyuDeliveryHandlerRecordsResult(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,
 	}}
-	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, cfg, newXianyuSettingsStub(true), nil)
+	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, nil, nil, cfg, newXianyuSettingsStub(true), nil)
 	h := NewXianyuDeliveryHandler(delivery, cfg)
 
 	r := gin.New()
@@ -257,7 +257,7 @@ func TestXianyuDeliveryHandlerForwardsQuantitySent(t *testing.T) {
 	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
 		InternalToken: "test-secret", SystemUserID: 1,
 	}}
-	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, cfg, newXianyuSettingsStub(true), nil)
+	delivery := service.NewXianyuDeliveryService(&xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, state, nil, nil, nil, cfg, newXianyuSettingsStub(true), nil)
 	h := NewXianyuDeliveryHandler(delivery, cfg)
 
 	r := gin.New()
@@ -294,4 +294,95 @@ func TestXianyuDeliveryHandlerForwardsQuantitySent(t *testing.T) {
 	r.ServeHTTP(resp, req)
 	require.Equal(t, http.StatusOK, resp.Code)
 	require.Equal(t, 0, state.recorded.QuantitySent)
+}
+
+type xianyuHandlerRefundRepoStub struct {
+	process func(orderNo, accountID string) (*service.XianyuRefundOutcome, error)
+}
+
+func (s *xianyuHandlerRefundRepoStub) ProcessRefundAtomically(_ context.Context, orderNo, accountID string, _ service.XianyuRedeemClawback) (*service.XianyuRefundOutcome, error) {
+	if s.process != nil {
+		return s.process(orderNo, accountID)
+	}
+	return nil, service.ErrXianyuRefundClaimNotFound
+}
+
+// xianyuHandlerClawbackStub 满足 XianyuRedeemClawback（handler 层测试不触达 used 分支）。
+type xianyuHandlerClawbackStub struct{}
+
+func (xianyuHandlerClawbackStub) ClawbackXianyuRedeemCodeTx(context.Context, *service.RedeemCode) (string, error) {
+	return "", nil
+}
+func (xianyuHandlerClawbackStub) InvalidateAfterClawback(context.Context, *service.RedeemCode) {}
+
+func newXianyuRefundHandlerForTest(refunds *xianyuHandlerRefundRepoStub) (*XianyuDeliveryHandler, *config.Config) {
+	cfg := &config.Config{XianyuDelivery: config.XianyuDeliveryConfig{
+		InternalToken: "test-secret", SystemUserID: 1,
+	}}
+	delivery := service.NewXianyuDeliveryService(xianyuHandlerRepoStub{}, &xianyuHandlerControlStub{}, nil, nil, refunds, &xianyuHandlerClawbackStub{}, cfg, newXianyuSettingsStub(true), nil)
+	return NewXianyuDeliveryHandler(delivery, cfg), cfg
+}
+
+func TestXianyuDeliveryHandlerRefundEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	refunds := &xianyuHandlerRefundRepoStub{}
+	h, cfg := newXianyuRefundHandlerForTest(refunds)
+	r := gin.New()
+	r.POST("/refund-events", h.RefundEvent)
+	token := cfg.XianyuDelivery.InternalToken
+
+	// 缺 token -> 401
+	req := httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-9","account_id":"acc","status":"refunded"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusUnauthorized, resp.Code)
+
+	// 非 refunded 状态 -> 400
+	req = httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-9","account_id":"acc","status":"refunding"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+
+	// 缺 account_id -> 400（绑定校验必填）
+	req = httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-9","status":"refunded"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusBadRequest, resp.Code)
+
+	// 无领取记录 -> 200 no_claim
+	req = httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-9","account_id":"acc","status":"refunded"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.Contains(t, resp.Body.String(), "no_claim")
+
+	// 账号不匹配 -> 409（绑定校验）
+	refunds.process = func(orderNo, accountID string) (*service.XianyuRefundOutcome, error) {
+		return nil, service.ErrXianyuRefundAccountMismatch
+	}
+	req = httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-9","account_id":"other-acc","status":"refunded"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusConflict, resp.Code)
+
+	// delivered 认领 -> 200 voided
+	refunds.process = func(orderNo, accountID string) (*service.XianyuRefundOutcome, error) {
+		return &service.XianyuRefundOutcome{Action: service.XianyuRefundActionVoided, Detail: "退款成功，兑换码已作废"}, nil
+	}
+	req = httptest.NewRequest(http.MethodPost, "/refund-events", bytes.NewBufferString(`{"order_no":"order-8","account_id":"acc","status":"refunded"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", token)
+	resp = httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.Contains(t, resp.Body.String(), "voided")
 }

@@ -1995,6 +1995,7 @@ class DatabaseInitializer:
             ("is_red_flower", "TINYINT(1) DEFAULT 0 COMMENT '是否已求小红花'", "is_rated"),
             ("is_unregistered", "TINYINT(1) DEFAULT 0 COMMENT '是否已请求注销接口'", "is_red_flower"),
             ("unregister_error_reason", "VARCHAR(500) DEFAULT NULL COMMENT '注销接口错误原因'", "is_unregistered"),
+            ("refund_reported", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '退款成功已上报主程序'", "unregister_error_reason"),
         ],
         "xy_cards": [
             ("delivery_count", "INT DEFAULT 0 COMMENT '发货次数'", "delay_seconds"),

@@ -154,6 +154,31 @@ func (h *XianyuDeliveryHandler) EnsureWorkerDeliveryRecord(c *gin.Context) {
 	response.Success(c, gin.H{"message": "worker delivery record ensured"})
 }
 
+// RefundEvent 处理 Worker 上报的闲鱼退款成功事件（幂等）。
+// POST /api/v1/internal/xianyu/refund-events
+func (h *XianyuDeliveryHandler) RefundEvent(c *gin.Context) {
+	if h == nil || h.service == nil || !constantTimeTokenMatch(c.GetHeader("X-Internal-Token"), h.token) {
+		response.Error(c, http.StatusUnauthorized, "invalid internal token")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, xianyuClaimMaxBodyBytes)
+	var req struct {
+		OrderNo   string `json:"order_no"`
+		AccountID string `json:"account_id"`
+		Status    string `json:"status"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request: "+err.Error())
+		return
+	}
+	action, err := h.service.ProcessRefundEvent(c.Request.Context(), req.OrderNo, req.AccountID, strings.TrimSpace(req.Status))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"action": action, "message": "refund event processed"})
+}
+
 func constantTimeTokenMatch(got, expected string) bool {
 	gotHash := sha256.Sum256([]byte(got))
 	expectedHash := sha256.Sum256([]byte(expected))

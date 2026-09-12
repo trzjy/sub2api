@@ -705,6 +705,12 @@ func (s *RedeemService) reduceOrCancelSubscription(ctx context.Context, userID, 
 	if err != nil {
 		return ErrSubscriptionNotFound
 	}
+	// 锁定订阅行再计算剩余天数：与并发续期（GetByIDForUpdate 同款锁）互斥，
+	// 防止基于旧 ExpiresAt 的扣减在续期提交后覆盖其结果。
+	sub, err = s.subscriptionService.userSubRepo.GetByIDForUpdate(ctx, sub.ID)
+	if err != nil {
+		return fmt.Errorf("lock subscription for reduce: %w", err)
+	}
 
 	now := time.Now()
 	remaining := int(sub.ExpiresAt.Sub(now).Hours() / 24)

@@ -88,6 +88,8 @@ type XianyuDeliveryService struct {
 	workerDelivery XianyuWorkerDeliveryRepository
 	workerSvc      *XianyuWorkerService
 	resender       func(ctx context.Context, claim *XianyuOrderClaim) error
+	refunds        XianyuRefundEventRepository
+	clawback       XianyuRedeemClawback
 }
 
 type XianyuDeliverySettingReader interface {
@@ -109,13 +111,16 @@ func NewXianyuDeliveryService(
 	control XianyuControlRepository,
 	stateUpdater XianyuDeliveryStateUpdater,
 	workerDelivery XianyuWorkerDeliveryRepository,
+	refunds XianyuRefundEventRepository,
+	clawback XianyuRedeemClawback,
 	cfg *config.Config,
 	setting XianyuDeliverySettingReader,
 	workerSvc *XianyuWorkerService,
 ) *XianyuDeliveryService {
 	return &XianyuDeliveryService{
 		repo: repo, control: control, delivery: stateUpdater,
-		workerDelivery: workerDelivery, cfg: cfg, setting: setting, workerSvc: workerSvc,
+		workerDelivery: workerDelivery, refunds: refunds, clawback: clawback,
+		cfg: cfg, setting: setting, workerSvc: workerSvc,
 	}
 }
 

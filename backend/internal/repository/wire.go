@@ -77,6 +77,7 @@ var ProviderSet = wire.NewSet(
 	NewProxyRepository,
 	NewRedeemCodeRepository,
 	NewXianyuOrderClaimRepository,
+	NewXianyuRefundEventRepository,
 	NewXianyuOrderClaimStateRepository,
 	NewXianyuDeliveryListRepository,
 	NewXianyuWorkerDeliveryRepository,
