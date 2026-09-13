@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -209,7 +210,25 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 
 	// 账号级请求头覆写最后应用，使管理员配置优先。
 	account.ApplyHeaderOverrides(req.Header)
+	captureCodeBuddyChatHeaders(req)
 	return req, nil
+}
+
+// captureCodeBuddyChatHeaders 是临时插桩（⑥ 抓包留档专用，不入正式代码）：
+// 打印 chat 请求的最终出站头，Authorization 仅打长度。
+func captureCodeBuddyChatHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	hdr := make(map[string]string, len(req.Header))
+	for k, v := range req.Header {
+		joined := strings.Join(v, ",")
+		if strings.EqualFold(k, "Authorization") {
+			joined = fmt.Sprintf("<bearer len=%d>", len(strings.TrimPrefix(joined, "Bearer ")))
+		}
+		hdr[k] = joined
+	}
+	slog.Warn("cb_capture_chat_outbound", "method", req.Method, "url", req.URL.String(), "headers", hdr)
 }
 
 // codeBuddyChatUserAgent 返回出站 User-Agent（配置优先，回落内置常量）。

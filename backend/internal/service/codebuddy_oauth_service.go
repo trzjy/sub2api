@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -327,6 +328,7 @@ func (s *CodeBuddyOAuthService) refreshTokenWithClient(ctx context.Context, clie
 			req.Header.Set("X-Enterprise-Id", enterpriseID)
 		}
 		req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+		captureCodeBuddyRefreshHeaders(req, refreshToken)
 	}
 	data, err := s.doJSON(ctx, client, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyTokenRefreshPath, headers, nil, false)
 	if err != nil {
@@ -420,4 +422,25 @@ func (s *CodeBuddyOAuthService) BuildAccountCredentials(tokenInfo *CodeBuddyToke
 		creds["nickname"] = tokenInfo.Nickname
 	}
 	return creds
+}
+
+// captureCodeBuddyRefreshHeaders 是临时插桩（⑥ 抓包留档专用，不入正式代码）：
+// 打印 refresh 请求的最终出站头，X-Refresh-Token 仅打长度（不落明文）。
+func captureCodeBuddyRefreshHeaders(req *http.Request, refreshToken string) {
+	if req == nil {
+		return
+	}
+	hdr := make(map[string]string, len(req.Header))
+	for k, v := range req.Header {
+		joined := strings.Join(v, ",")
+		if strings.EqualFold(k, "X-Refresh-Token") {
+			joined = fmt.Sprintf("<len=%d>", len(refreshToken))
+		}
+		hdr[k] = joined
+	}
+	slog.Warn("cb_capture_refresh_outbound",
+		"method", req.Method,
+		"url", req.URL.String(),
+		"x_auth_refresh_source", req.Header.Get("X-Auth-Refresh-Source"),
+		"headers", hdr)
 }
