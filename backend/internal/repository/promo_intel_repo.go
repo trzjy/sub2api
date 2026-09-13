@@ -133,13 +133,16 @@ func (r *promoIntelRepository) ListDueSources(ctx context.Context, now time.Time
 		limit = 20
 	}
 	// 行级 interval 判到期：last_fetched_at IS NULL OR last_fetched_at <= now - interval。
+	// $1 必须显式 ::timestamptz：pq 以 unknown 传参时 PG 会把 "$1 - make_interval(...)"
+	// 解析成 interval - interval（报 "operator does not exist: timestamp with time
+	// zone <= interval"），扫描循环每轮失败。
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, name, vendor, category, url, fetch_interval_minutes, enabled, llm_extract,
 		       notes, last_fetched_at, last_extracted_hash, last_status, last_error,
 		       created_by, created_at, updated_at
 		FROM promo_intel_sources
 		WHERE enabled = TRUE
-		  AND (last_fetched_at IS NULL OR last_fetched_at <= $1 - make_interval(mins => fetch_interval_minutes))
+		  AND (last_fetched_at IS NULL OR last_fetched_at <= $1::timestamptz - make_interval(mins => fetch_interval_minutes))
 		ORDER BY last_fetched_at ASC NULLS FIRST, id ASC
 		LIMIT $2`, now, limit)
 	if err != nil {
