@@ -206,10 +206,37 @@ type PromoIntelBriefing struct {
 	Items      []*PromoIntelItem `json:"items"`
 }
 
+// 整理模型协议：OpenAI 兼容 /chat/completions 或 Anthropic 原生 /v1/messages。
+const (
+	PromoIntelLLMProtocolOpenAI    = "openai"
+	PromoIntelLLMProtocolAnthropic = "anthropic"
+)
+
+// 整理模型来源：self = 本系统中转网关（推荐，零外部配置）｜external = 自定义 OpenAI/Anthropic 兼容端点。
+const (
+	PromoIntelLLMSourceSelf     = "self"
+	PromoIntelLLMSourceExternal = "external"
+)
+
+// PromoIntelLLMSources 是前端选择器的全部来源。
+var PromoIntelLLMSources = []string{PromoIntelLLMSourceSelf, PromoIntelLLMSourceExternal}
+
+// PromoIntelLLMProtocols 是前端选择器的全部协议。
+var PromoIntelLLMProtocols = []string{PromoIntelLLMProtocolOpenAI, PromoIntelLLMProtocolAnthropic}
+
 // PromoIntelRuntime 优惠情报运行时开关与 LLM 配置（settings 表读取）。
 type PromoIntelRuntime struct {
 	Enabled bool
-	// LLMConfigured 表示 base_url+model 已配置（api_key 可空——部分本地端点无鉴权）。
+	// Source: self（本系统中转网关）/ external（自定义端点）。
+	Source string
+	// Protocol: openai / anthropic。
+	Protocol string
+	// 本系统中转网关配置：mode 选择的管理员 API Key（ID 与明文在服务端，不回读明文）
+	// + 目标模型。
+	SelfAPIKeyID   int64
+	SelfAPIKeyName string // 仅回读展示（key 明文不回读）
+	SelfModel      string
+	// 自定义端点配置（external 模式）：base_url + 密钥（脱敏）+ 模型。
 	LLMConfigured   bool
 	LLMBaseURL      string
 	LLMAPIKeySet    bool
@@ -217,8 +244,16 @@ type PromoIntelRuntime struct {
 	LLMModel        string
 }
 
-// HasLLM 报告整理层是否可用。
-func (r PromoIntelRuntime) HasLLM() bool { return r.LLMConfigured }
+// HasLLM 报告整理层是否可用：self 模式要求选了 API Key 和模型；external 要求 base_url+model。
+func (r PromoIntelRuntime) HasLLM() bool {
+	if r.Source == PromoIntelLLMSourceSelf {
+		return r.SelfAPIKeyID > 0 && r.SelfModel != ""
+	}
+	return r.LLMConfigured
+}
+
+// Mode 兼容旧字段名：返回当前来源（用于前端展示）。
+func (r PromoIntelRuntime) Mode() string { return r.Source }
 
 // Settings 键（domain_constants.go 有对应常量，此处集中默认值）。
 const (

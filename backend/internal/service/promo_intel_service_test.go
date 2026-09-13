@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -296,7 +297,7 @@ func (f *fakePromoIntelSettings) Set(_ context.Context, key, value string) error
 
 func newTestPromoIntelService(t *testing.T, repo *fakePromoIntelRepo, settings *fakePromoIntelSettings) *PromoIntelService {
 	t.Helper()
-	svc := NewPromoIntelService(repo, settings, &config.PromoIntelConfig{Enabled: true, SeedDefaults: false})
+	svc := NewPromoIntelService(repo, settings, &config.PromoIntelConfig{Enabled: true, SeedDefaults: false}, nil, "")
 	svc.nowFn = func() time.Time { return time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC) }
 	return svc
 }
@@ -318,6 +319,7 @@ func newLLMServer(t *testing.T, content string, calls *int) *httptest.Server {
 func TestProcessSourceLLMPath(t *testing.T) {
 	repo := newFakePromoIntelRepo()
 	settings := &fakePromoIntelSettings{vals: map[string]string{
+		SettingKeyPromoIntelLLMSource: PromoIntelLLMSourceExternal,
 		SettingKeyPromoIntelLLMModel:  "test-model",
 		SettingKeyPromoIntelLLMAPIKey: "sk-secret",
 	}}
@@ -522,7 +524,7 @@ func TestUpdateLLMSettingsKeyMasking(t *testing.T) {
 }
 
 func TestGetPromoIntelRuntimeFailOpen(t *testing.T) {
-	svc := NewPromoIntelService(newFakePromoIntelRepo(), nil, nil)
+	svc := NewPromoIntelService(newFakePromoIntelRepo(), nil, nil, nil, "")
 	rt := svc.GetPromoIntelRuntime(context.Background())
 	require.True(t, rt.Enabled)
 	require.False(t, rt.LLMConfigured)
@@ -561,3 +563,156 @@ func TestExtractPromoIntelTextStripsNUL(t *testing.T) {
 	require.NotContains(t, text, "\x00")
 	require.Contains(t, text, "a b c")
 }
+
+// fakeAPIKeyLister 实现 APIKeyLister（self 模式测试）。
+type fakeAPIKeyLister struct {
+	keys map[int64]string // id -> 明文 key
+	refs []AdminAPIKeyRef
+}
+
+func (f *fakeAPIKeyLister) ListAdminAPIKeys(_ context.Context) ([]AdminAPIKeyRef, error) {
+	return f.refs, nil
+}
+func (f *fakeAPIKeyLister) GetAPIKeyByID(_ context.Context, id int64) (string, error) {
+	if k, ok := f.keys[id]; ok {
+		return k, nil
+	}
+	return "", errorsNewPromoIntel("not found")
+}
+
+func errorsNewPromoIntel(s string) error { return errors.New(s) }
+
+// TestProcessSourceSelfMode 验证 self 模式：走内部网关 /v1/chat/completions，
+// Authorization 用选定的管理员 API Key 明文。
+func TestProcessSourceSelfMode(t *testing.T) {
+	repo := newFakePromoIntelRepo()
+	settings := &fakePromoIntelSettings{vals: map[string]string{
+		SettingKeyPromoIntelLLMSource:    PromoIntelLLMSourceSelf,
+		SettingKeyPromoIntelLLMProtocol:  PromoIntelLLMProtocolOpenAI,
+		SettingKeyPromoIntelSelfAPIKeyID: "7",
+		SettingKeyPromoIntelSelfModel:    "deepseek-chat",
+	}}
+	lister := &fakeAPIKeyLister{keys: map[int64]string{7: "sk-admin-abcdef"}, refs: []AdminAPIKeyRef{{ID: 7, Name: "主 Key"}}}
+	svc := newTestPromoIntelService(t, repo, settings)
+	svc.apiKeyLister = lister
+
+	var llmCalls int
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		llmCalls++
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		require.Equal(t, "Bearer sk-admin-abcdef", r.Header.Get("Authorization"))
+		resp := map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": `[{"title":"半价","relevance":"high"}]`}}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer llm.Close()
+	svc.serverBaseURL = llm.URL
+	svc.testLLMClient = llm.Client()
+
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<p>半价促销</p>"))
+	}))
+	defer page.Close()
+	svc.testFetchClient = page.Client()
+
+	src := &PromoIntelSource{ID: 1, Name: "S", Vendor: "x", URL: page.URL, Enabled: true, LLMExtract: true}
+	repo.sources[1] = src
+
+	res, err := svc.ProcessSource(context.Background(), src)
+	require.NoError(t, err)
+	require.True(t, res.ContentChanged)
+	require.Equal(t, 1, llmCalls)
+	require.Len(t, repo.upserts, 1)
+	require.Equal(t, PromoIntelExtractLLM, repo.upserts[0].ExtractStatus)
+}
+
+// TestProcessSourceAnthropicProtocol 验证 anthropic 协议：走 /v1/messages，
+// x-api-key + anthropic-version 头，解析 content[0].text。
+func TestProcessSourceAnthropicProtocol(t *testing.T) {
+	repo := newFakePromoIntelRepo()
+	settings := &fakePromoIntelSettings{vals: map[string]string{
+		SettingKeyPromoIntelLLMSource:    PromoIntelLLMSourceSelf,
+		SettingKeyPromoIntelLLMProtocol:  PromoIntelLLMProtocolAnthropic,
+		SettingKeyPromoIntelSelfAPIKeyID: "9",
+		SettingKeyPromoIntelSelfModel:    "claude-sonnet",
+	}}
+	lister := &fakeAPIKeyLister{keys: map[int64]string{9: "sk-ant-xyz"}, refs: []AdminAPIKeyRef{{ID: 9, Name: "Anthropic Key"}}}
+	svc := newTestPromoIntelService(t, repo, settings)
+	svc.apiKeyLister = lister
+
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/messages", r.URL.Path)
+		require.Equal(t, "Bearer sk-ant-xyz", r.Header.Get("Authorization"))
+		require.Equal(t, "sk-ant-xyz", r.Header.Get("x-api-key"))
+		require.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+		var reqBody struct {
+			Model     string `json:"model"`
+			MaxTokens int    `json:"max_tokens"`
+			System    string `json:"system"`
+			Messages  []any  `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		require.Equal(t, "claude-sonnet", reqBody.Model)
+		require.Greater(t, reqBody.MaxTokens, 0)
+		require.NotEmpty(t, reqBody.System)
+		require.Len(t, reqBody.Messages, 1)
+		resp := map[string]any{"content": []map[string]any{{"type": "text", "text": `[{"title":"首月49元","category":"subscription","relevance":"high"}]`}}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer llm.Close()
+	svc.serverBaseURL = llm.URL
+	svc.testLLMClient = llm.Client()
+
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<p>首月49元订阅优惠</p>"))
+	}))
+	defer page.Close()
+	svc.testFetchClient = page.Client()
+
+	src := &PromoIntelSource{ID: 1, Name: "S", Vendor: "x", URL: page.URL, Enabled: true, LLMExtract: true}
+	repo.sources[1] = src
+
+	res, err := svc.ProcessSource(context.Background(), src)
+	require.NoError(t, err)
+	require.True(t, res.ContentChanged)
+	require.Len(t, repo.upserts, 1)
+	require.Equal(t, PromoIntelCategorySubscription, repo.upserts[0].Category)
+}
+
+// TestSelfGatewayBaseURLFallback 验证未配置 serverBaseURL 时回退 localhost:<port>。
+func TestSelfGatewayBaseURLFallback(t *testing.T) {
+	svc := newTestPromoIntelService(t, newFakePromoIntelRepo(), &fakePromoIntelSettings{vals: map[string]string{}})
+	svc.cfg = &config.PromoIntelConfig{ServerPort: 3300}
+	require.Equal(t, "http://localhost:3300", svc.selfGatewayBaseURL())
+	svc.serverBaseURL = "http://internal-gw/"
+	require.Equal(t, "http://internal-gw", svc.selfGatewayBaseURL())
+}
+
+// TestUpdateLLMSettingsSelfValidation 验证 self 模式更新：key 不存在时拒绝。
+func TestUpdateLLMSettingsSelfValidation(t *testing.T) {
+	repo := newFakePromoIntelRepo()
+	settings := &fakePromoIntelSettings{vals: map[string]string{}}
+	lister := &fakeAPIKeyLister{keys: map[int64]string{1: "sk-ok"}, refs: []AdminAPIKeyRef{{ID: 1, Name: "A"}}}
+	svc := newTestPromoIntelService(t, repo, settings)
+	svc.apiKeyLister = lister
+
+	// 不存在的 key id → 拒绝。
+	_, err := svc.UpdateLLMSettings(context.Background(), PromoIntelSettingsUpdate{
+		Source:       promoStrPtr(PromoIntelLLMSourceSelf),
+		SelfAPIKeyID: promoInt64Ptr(999),
+		SelfModel:    promoStrPtr("m"),
+	})
+	require.Error(t, err)
+
+	// 存在的 key + model → 成功且 runtime 显示已配置。
+	rt, err := svc.UpdateLLMSettings(context.Background(), PromoIntelSettingsUpdate{
+		Source:       promoStrPtr(PromoIntelLLMSourceSelf),
+		SelfAPIKeyID: promoInt64Ptr(1),
+		SelfModel:    promoStrPtr("deepseek-chat"),
+	})
+	require.NoError(t, err)
+	require.True(t, rt.HasLLM())
+	require.Equal(t, PromoIntelLLMSourceSelf, rt.Source)
+	require.Equal(t, "A", rt.SelfAPIKeyName)
+}
+
+func promoInt64Ptr(v int64) *int64 { return &v }

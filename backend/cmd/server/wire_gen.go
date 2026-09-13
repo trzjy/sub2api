@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -270,7 +271,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	scheduledTestHandler := admin.NewScheduledTestHandler(scheduledTestService)
 	channelHandler := admin.NewChannelHandler(channelService, billingService, pricingService)
 	channelMonitorHandler := admin.NewChannelMonitorHandler(channelMonitorService)
-	promoIntelService := service.ProvidePromoIntelService(promoIntelRepository, settingRepository, configConfig, leaderLockCache, db)
+	// self 模式网关对内地址：容器内监听 localhost:<port>；显式 serverBaseURL 优先。
+	serverBaseURL := "http://localhost:" + strconv.Itoa(configConfig.Server.Port)
+	promoIntelService := service.ProvidePromoIntelService(promoIntelRepository, settingRepository, configConfig, leaderLockCache, db, apiKeyRepository, serverBaseURL)
 	channelMonitorRequestTemplateRepository := repository.NewChannelMonitorRequestTemplateRepository(client, db)
 	channelMonitorRequestTemplateService := service.NewChannelMonitorRequestTemplateService(channelMonitorRequestTemplateRepository)
 	channelMonitorRequestTemplateHandler := admin.NewChannelMonitorRequestTemplateHandler(channelMonitorRequestTemplateService)
@@ -663,14 +666,14 @@ func provideCleanup(
 				proxyExpiry.Stop()
 				return nil
 			}},
-		{"SubscriptionExpiryService", func() error {
-			subscriptionExpiry.Stop()
-			return nil
-		}},
-		{"WelfareBalanceExpiryService", func() error {
-			welfareBalanceExpiry.Stop()
-			return nil
-		}},
+			{"SubscriptionExpiryService", func() error {
+				subscriptionExpiry.Stop()
+				return nil
+			}},
+			{"WelfareBalanceExpiryService", func() error {
+				welfareBalanceExpiry.Stop()
+				return nil
+			}},
 			{"SubscriptionService", func() error {
 				if subscriptionService != nil {
 					subscriptionService.Stop()

@@ -924,6 +924,7 @@ func registerPromoIntelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		intel.GET("/settings", h.Admin.PromoIntel.GetSettings)
 		intel.PUT("/settings", h.Admin.PromoIntel.UpdateSettings)
 		intel.POST("/settings/test", h.Admin.PromoIntel.TestSettings)
+		intel.GET("/api-keys", h.Admin.PromoIntel.ListAPIKeys)
 	}
 }
 

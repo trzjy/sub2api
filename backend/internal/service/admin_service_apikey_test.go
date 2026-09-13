@@ -158,6 +158,14 @@ func (s *apiKeyRepoStubForGroupUpdate) Create(context.Context, *APIKey) error { 
 func (s *apiKeyRepoStubForGroupUpdate) GetKeyAndOwnerID(context.Context, int64) (string, int64, error) {
 	panic("unexpected")
 }
+
+// ListAdminAPIKeys / GetAPIKeyByID 是 APIKeyLister 补全的 no-op 桩（本测试用不到）。
+func (s *apiKeyRepoStubForGroupUpdate) ListAdminAPIKeys(context.Context) ([]AdminAPIKeyRef, error) {
+	return nil, nil
+}
+func (s *apiKeyRepoStubForGroupUpdate) GetAPIKeyByID(context.Context, int64) (string, error) {
+	return "", nil
+}
 func (s *apiKeyRepoStubForGroupUpdate) GetByKey(context.Context, string) (*APIKey, error) {
 	panic("unexpected")
 }

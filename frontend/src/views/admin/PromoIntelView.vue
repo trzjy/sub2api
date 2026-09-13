@@ -341,37 +341,97 @@
             <Toggle :modelValue="settingsForm.enabled" @update:modelValue="settingsForm.enabled = !settingsForm.enabled" />
           </div>
 
+          <!-- 来源：本系统中转网关（默认，零外部配置）｜自定义端点 -->
           <div>
-            <label class="input-label">{{ t('admin.promoIntel.settings.baseUrl') }}</label>
-            <input
-              v-model.trim="settingsForm.llm_base_url"
-              type="text"
-              class="input font-mono text-xs"
-              placeholder="https://api.deepseek.com/v1"
-            />
+            <label class="input-label">{{ t('admin.promoIntel.settings.source') }}</label>
+            <div class="flex gap-2">
+              <button
+                type="button"
+                class="btn flex-1 justify-center"
+                :class="settingsForm.source === 'self' ? 'btn-primary' : 'btn-secondary'"
+                @click="settingsForm.source = 'self'"
+              >
+                {{ t('admin.promoIntel.settings.sourceSelf') }}
+              </button>
+              <button
+                type="button"
+                class="btn flex-1 justify-center"
+                :class="settingsForm.source === 'external' ? 'btn-primary' : 'btn-secondary'"
+                @click="settingsForm.source = 'external'"
+              >
+                {{ t('admin.promoIntel.settings.sourceExternal') }}
+              </button>
+            </div>
+            <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.sourceHint') }}</p>
           </div>
 
+          <!-- 协议：OpenAI 兼容 / Anthropic 原生 -->
           <div>
-            <label class="input-label">{{ t('admin.promoIntel.settings.apiKey') }}</label>
-            <input
-              v-model.trim="settingsForm.llm_api_key"
-              type="password"
-              autocomplete="new-password"
-              class="input font-mono text-xs"
-              :placeholder="settings?.llm_api_key_set ? settings.llm_api_key_mask : t('admin.promoIntel.settings.apiKeyPlaceholder')"
-            />
-            <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.apiKeyHint') }}</p>
+            <label class="input-label">{{ t('admin.promoIntel.settings.protocol') }}</label>
+            <div class="flex gap-2">
+              <button
+                type="button"
+                class="btn flex-1 justify-center"
+                :class="settingsForm.protocol === 'openai' ? 'btn-primary' : 'btn-secondary'"
+                @click="settingsForm.protocol = 'openai'"
+              >
+                OpenAI
+              </button>
+              <button
+                type="button"
+                class="btn flex-1 justify-center"
+                :class="settingsForm.protocol === 'anthropic' ? 'btn-primary' : 'btn-secondary'"
+                @click="settingsForm.protocol = 'anthropic'"
+              >
+                Anthropic
+              </button>
+            </div>
+            <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.protocolHint') }}</p>
           </div>
 
-          <div>
-            <label class="input-label">{{ t('admin.promoIntel.settings.model') }}</label>
-            <input
-              v-model.trim="settingsForm.llm_model"
-              type="text"
-              class="input font-mono text-xs"
-              placeholder="deepseek-chat"
-            />
-          </div>
+          <!-- self 模式：选本系统管理员 API Key + 模型 -->
+          <template v-if="settingsForm.source === 'self'">
+            <div>
+              <label class="input-label">{{ t('admin.promoIntel.settings.selfApiKey') }}</label>
+              <select v-model.number="settingsForm.self_api_key_id" class="input">
+                <option :value="0">{{ t('admin.promoIntel.settings.selfApiKeyPlaceholder') }}</option>
+                <option v-for="k in apiKeyOptions" :key="k.id" :value="k.id">{{ k.name }}（#{{ k.id }}）</option>
+              </select>
+              <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.selfApiKeyHint') }}</p>
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.promoIntel.settings.selfModel') }}</label>
+              <input v-model.trim="settingsForm.self_model" type="text" class="input font-mono text-xs" placeholder="deepseek-chat / claude-sonnet-..." />
+            </div>
+          </template>
+
+          <!-- external 模式：自定义端点 -->
+          <template v-else>
+            <div>
+              <label class="input-label">{{ t('admin.promoIntel.settings.baseUrl') }}</label>
+              <input
+                v-model.trim="settingsForm.llm_base_url"
+                type="text"
+                class="input font-mono text-xs"
+                placeholder="https://api.deepseek.com/v1 或 https://api.anthropic.com"
+              />
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.promoIntel.settings.apiKey') }}</label>
+              <input
+                v-model.trim="settingsForm.llm_api_key"
+                type="password"
+                autocomplete="new-password"
+                class="input font-mono text-xs"
+                :placeholder="settings?.llm_api_key_set ? settings.llm_api_key_mask : t('admin.promoIntel.settings.apiKeyPlaceholder')"
+              />
+              <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.apiKeyHint') }}</p>
+            </div>
+            <div>
+              <label class="input-label">{{ t('admin.promoIntel.settings.model') }}</label>
+              <input v-model.trim="settingsForm.llm_model" type="text" class="input font-mono text-xs" placeholder="deepseek-chat" />
+            </div>
+          </template>
         </div>
 
         <div class="mt-6 flex items-center gap-3">
@@ -801,8 +861,13 @@ function debouncedSourceReload() {
 // ---------- 设置 ----------
 
 const settings = ref<Awaited<ReturnType<typeof adminAPI.promoIntel.getSettings>> | null>(null)
+const apiKeyOptions = ref<{ id: number; name: string }[]>([])
 const settingsForm = reactive({
   enabled: true,
+  source: 'self' as 'self' | 'external',
+  protocol: 'openai' as 'openai' | 'anthropic',
+  self_api_key_id: 0,
+  self_model: '',
   llm_base_url: '',
   llm_api_key: '',
   llm_model: '',
@@ -812,9 +877,17 @@ const settingsTesting = ref(false)
 
 async function reloadSettings() {
   try {
-    const s = await adminAPI.promoIntel.getSettings()
+    const [s, keys] = await Promise.all([
+      adminAPI.promoIntel.getSettings(),
+      adminAPI.promoIntel.listApiKeys(),
+    ])
     settings.value = s
+    apiKeyOptions.value = keys.items || []
     settingsForm.enabled = s.enabled
+    settingsForm.source = s.source === 'external' ? 'external' : 'self'
+    settingsForm.protocol = s.protocol === 'anthropic' ? 'anthropic' : 'openai'
+    settingsForm.self_api_key_id = s.self_api_key_id || 0
+    settingsForm.self_model = s.self_model || ''
     settingsForm.llm_base_url = s.llm_base_url || ''
     settingsForm.llm_api_key = ''
     settingsForm.llm_model = s.llm_model || ''
@@ -827,12 +900,28 @@ async function saveSettings() {
   settingsSaving.value = true
   try {
     const params: Record<string, unknown> = { enabled: settingsForm.enabled }
-    if (settingsForm.llm_base_url !== (settings.value?.llm_base_url || '')) {
-      params.llm_base_url = settingsForm.llm_base_url
+    if (settingsForm.source !== (settings.value?.source || 'self')) {
+      params.source = settingsForm.source
     }
-    if (settingsForm.llm_api_key) params.llm_api_key = settingsForm.llm_api_key
-    if (settingsForm.llm_model !== (settings.value?.llm_model || '')) {
-      params.llm_model = settingsForm.llm_model
+    if (settingsForm.protocol !== (settings.value?.protocol || 'openai')) {
+      params.protocol = settingsForm.protocol
+    }
+    // self 模式字段：有变化才提交。
+    if (settingsForm.self_api_key_id !== (settings.value?.self_api_key_id || 0)) {
+      params.self_api_key_id = settingsForm.self_api_key_id
+    }
+    if (settingsForm.self_model !== (settings.value?.self_model || '')) {
+      params.self_model = settingsForm.self_model
+    }
+    // external 模式字段：仅在该模式下提交。
+    if (settingsForm.source === 'external') {
+      if (settingsForm.llm_base_url !== (settings.value?.llm_base_url || '')) {
+        params.llm_base_url = settingsForm.llm_base_url
+      }
+      if (settingsForm.llm_api_key) params.llm_api_key = settingsForm.llm_api_key
+      if (settingsForm.llm_model !== (settings.value?.llm_model || '')) {
+        params.llm_model = settingsForm.llm_model
+      }
     }
     settings.value = await adminAPI.promoIntel.updateSettings(params)
     settingsForm.llm_api_key = ''

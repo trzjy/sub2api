@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,7 +42,13 @@ const promoIntelSystemPrompt = `你是面向 API 聚合转售业务的优惠情�
 2. 纯营销/品牌宣传、与优惠或产品变化无关的内容判 relevance=none。
 3. 只输出 JSON 数组，不要输出任何其他文字、注释或代码围栏。`
 
-// extractOffersWithLLM 调用可配置端点提取优惠情报；返回归一化后的条目列表。
+// extractOffersWithLLM 按模式与协议调用整理端点，返回归一化后的条目列表。
+//   - self（本系统中转网关）：POST <内部 base>/v1/messages（anthropic）或
+//     /v1/chat/completions（openai），Authorization: Bearer <管理员 API Key 明文>；
+//   - external（自定义端点）：POST base_url/chat/completions（openai）或
+//     base_url/v1/messages（anthropic）。
+//
+// 两种协议都返回各自的「第一段文本」后统一走 JSON 宽容解析。
 func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *PromoIntelSource, text string) ([]*promoIntelOffer, error) {
 	llmCfg := s.promoIntelLLMSettings(ctx)
 	if !llmCfg.Configured {
@@ -51,28 +58,62 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 	capped := capPromoIntelRunes(text, s.llmMaxTextChars())
 	userMsg := fmt.Sprintf("厂商: %s\n页面: %s\n正文:\n<<<\n%s\n>>>", source.Vendor, source.URL, capped)
 
-	payload := map[string]any{
-		"model": llmCfg.Model,
-		"messages": []map[string]string{
-			{"role": "system", "content": promoIntelSystemPrompt},
-			{"role": "user", "content": userMsg},
-		},
-		"temperature": 0.2,
-		"stream":      false,
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal llm request: %w", err)
+	// self 模式：网关对内地址（配置优先，回退 http://localhost:<port>）。
+	baseURL := llmCfg.BaseURL
+	if s.apiKeyLister != nil && llmCfg.SelfAPIKey != "" {
+		baseURL = s.selfGatewayBaseURL()
 	}
 
-	endpoint := normalizePromoIntelLLMEndpoint(llmCfg.BaseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	var endpoint string
+	var reqBody []byte
+	switch llmCfg.Protocol {
+	case PromoIntelLLMProtocolAnthropic:
+		// 复用系统提示词作为 system 消息，正文作为 user 消息。
+		anthropicPayload := map[string]any{
+			"model":      llmCfg.Model,
+			"max_tokens": 4096,
+			"system":     promoIntelSystemPrompt,
+			"messages": []map[string]string{
+				{"role": "user", "content": userMsg},
+			},
+		}
+		body, err := json.Marshal(anthropicPayload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal anthropic request: %w", err)
+		}
+		endpoint = strings.TrimRight(baseURL, "/") + "/v1/messages"
+		reqBody = body
+	default: // openai
+		payload := map[string]any{
+			"model": llmCfg.Model,
+			"messages": []map[string]string{
+				{"role": "system", "content": promoIntelSystemPrompt},
+				{"role": "user", "content": userMsg},
+			},
+			"temperature": 0.2,
+			"stream":      false,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal llm request: %w", err)
+		}
+		endpoint = promoIntelChatCompletionsEndpoint(baseURL, s.apiKeyLister != nil && llmCfg.SelfAPIKey != "")
+		reqBody = body
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("build llm request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if llmCfg.APIKey != "" {
+	if llmCfg.SelfAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+llmCfg.SelfAPIKey)
+	} else if llmCfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+llmCfg.APIKey)
+	}
+	if llmCfg.Protocol == PromoIntelLLMProtocolAnthropic {
+		req.Header.Set("x-api-key", llmCfg.SelfAPIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
 	}
 
 	client := s.promoIntelLLMClient()
@@ -89,20 +130,48 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 		return nil, fmt.Errorf("llm endpoint returned HTTP %d: %s", resp.StatusCode, truncatePromoIntelString(string(respBody), 300))
 	}
 
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
+	// 提取第一段文本：OpenAI 取 choices[0].message.content；Anthropic 取
+	// content[0].text。两种都兜底取整段响应由 parsePromoIntelOffersJSON 宽容解析。
+	content := ""
+	switch llmCfg.Protocol {
+	case PromoIntelLLMProtocolAnthropic:
+		var parsed struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(respBody, &parsed); err == nil && len(parsed.Content) > 0 {
+			content = parsed.Content[0].Text
+		}
+	default:
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(respBody, &parsed); err == nil && len(parsed.Choices) > 0 {
+			content = parsed.Choices[0].Message.Content
+		}
 	}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("parse llm response envelope: %w", err)
+	if content == "" {
+		return nil, fmt.Errorf("llm response has no text content")
 	}
-	if len(parsed.Choices) == 0 {
-		return nil, fmt.Errorf("llm response has no choices")
+	return parsePromoIntelOffersJSON(content)
+}
+
+// selfGatewayBaseURL 返回本系统中转网关的对内地址。
+// 配置优先（部署时显式给内部地址），否则回退 http://localhost:<server_port>。
+func (s *PromoIntelService) selfGatewayBaseURL() string {
+	if s != nil && s.serverBaseURL != "" {
+		return strings.TrimRight(s.serverBaseURL, "/")
 	}
-	return parsePromoIntelOffersJSON(parsed.Choices[0].Message.Content)
+	port := "8080"
+	if s.cfg != nil && s.cfg.ServerPort > 0 {
+		port = strconv.Itoa(s.cfg.ServerPort)
+	}
+	return "http://localhost:" + port
 }
 
 // promoIntelLLMResponseMaxBytes 限制 LLM 响应体读取上限（8MB，防御异常端点）。
@@ -119,6 +188,20 @@ func normalizePromoIntelLLMEndpoint(baseURL string) string {
 		return base
 	}
 	return base + "/chat/completions"
+}
+
+// promoIntelChatCompletionsEndpoint 构造 OpenAI 协议端点。
+// self（本系统网关）：/v1/chat/completions；external（自定义端点）：
+// 走 normalize（base 可能已含 /v1，也可能裸域名 → /chat/completions）。
+func promoIntelChatCompletionsEndpoint(baseURL string, selfMode bool) string {
+	if selfMode {
+		base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+		if strings.HasSuffix(base, "/v1") {
+			return base + "/chat/completions"
+		}
+		return base + "/v1/chat/completions"
+	}
+	return normalizePromoIntelLLMEndpoint(baseURL)
 }
 
 // parsePromoIntelOffersJSON 宽容解析 LLM 输出：剥代码围栏 → 定位首个 '[' 到末个 ']'

@@ -125,6 +125,11 @@ export interface Briefing {
 
 export interface IntelSettings {
   enabled: boolean
+  source: 'self' | 'external'
+  protocol: 'openai' | 'anthropic'
+  self_api_key_id: number
+  self_api_key_name: string
+  self_model: string
   llm_configured: boolean
   llm_base_url: string
   llm_api_key_set: boolean
@@ -132,8 +137,17 @@ export interface IntelSettings {
   llm_model: string
 }
 
+export interface AdminAPIKeyRef {
+  id: number
+  name: string
+}
+
 export interface IntelSettingsUpdateParams {
   enabled?: boolean
+  source?: 'self' | 'external'
+  protocol?: 'openai' | 'anthropic'
+  self_api_key_id?: number
+  self_model?: string
   /** 空串/回显掩码 = 保持不变；"-" = 显式清空 */
   llm_api_key?: string
   llm_base_url?: string
@@ -193,6 +207,11 @@ export async function getBriefing(date?: string): Promise<Briefing> {
   return data
 }
 
+export async function listApiKeys(): Promise<{ items: AdminAPIKeyRef[] }> {
+  const { data } = await apiClient.get<{ items: AdminAPIKeyRef[] }>('/admin/promo-intel/api-keys')
+  return data
+}
+
 export async function getSettings(): Promise<IntelSettings> {
   const { data } = await apiClient.get<IntelSettings>('/admin/promo-intel/settings')
   return data
@@ -217,6 +236,7 @@ export const promoIntelAPI = {
   listItems,
   updateItemStatus,
   getBriefing,
+  listApiKeys,
   getSettings,
   updateSettings,
   testSettings,

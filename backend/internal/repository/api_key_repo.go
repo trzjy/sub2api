@@ -89,6 +89,37 @@ func (r *apiKeyRepository) GetByID(ctx context.Context, id int64) (*service.APIK
 	return apiKeyEntityToService(m), nil
 }
 
+// ListAdminAPIKeys 列出管理端可见 API Key 的选择器条目（ID + 名称，无明文）。
+// 供优惠情报 self 模式选 key 用；范围：非禁用、未删除的 key，按名称升序。
+func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.AdminAPIKeyRef, error) {
+	rows, err := r.client.APIKey.Query().
+		Where(apikey.And(
+			apikey.DeletedAtIsNil(),
+			apikey.StatusNEQ(service.StatusAPIKeyDisabled),
+			apikey.StatusNEQ(service.StatusAPIKeyQuotaExhausted),
+			apikey.StatusNEQ(service.StatusAPIKeyExpired),
+		)).
+		Order(dbent.Asc(apikey.FieldName)).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list admin api keys: %w", err)
+	}
+	out := make([]service.AdminAPIKeyRef, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, service.AdminAPIKeyRef{ID: row.ID, Name: row.Name})
+	}
+	return out, nil
+}
+
+// GetAPIKeyByID 返回某 API Key 的明文（仅服务端使用；绝不回读给前端）。
+func (r *apiKeyRepository) GetAPIKeyByID(ctx context.Context, id int64) (string, error) {
+	key, _, err := r.GetKeyAndOwnerID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
 // GetKeyAndOwnerID 根据 API Key ID 获取其 key 与所有者（用户）ID。
 // 相比 GetByID，此方法性能更优，因为：
 //   - 使用 Select() 只查询必要字段，减少数据传输量

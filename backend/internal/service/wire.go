@@ -1197,19 +1197,33 @@ func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache
 	return svc
 }
 
+// PromoIntelAPIKeySource 是 promo intel self 模式需要的 API Key 读取面
+// （由 APIKeyRepository 的实体仓储实现）。
+type PromoIntelAPIKeySource interface {
+	ListAdminAPIKeys(ctx context.Context) ([]AdminAPIKeyRef, error)
+	GetAPIKeyByID(ctx context.Context, id int64) (string, error)
+}
+
 // ProvidePromoIntelService 构造并启动优惠情报轮询循环（leader lock 防多实例重复）。
+// self 模式经 apiKeyLister 读取管理员 API Key 明文、经 serverBaseURL 走本系统中转网关。
 func ProvidePromoIntelService(
 	repo PromoIntelRepository,
 	settings SettingRepository,
 	cfg *config.Config,
 	lockCache LeaderLockCache,
 	db *sql.DB,
+	apiKeyRepo APIKeyRepository,
+	serverBaseURL string,
 ) *PromoIntelService {
 	var promoCfg *config.PromoIntelConfig
 	if cfg != nil {
 		promoCfg = &cfg.PromoIntel
 	}
-	svc := NewPromoIntelService(repo, settings, promoCfg)
+	var apiKeyLister APIKeyLister
+	if l, ok := apiKeyRepo.(APIKeyLister); ok {
+		apiKeyLister = l
+	}
+	svc := NewPromoIntelService(repo, settings, promoCfg, apiKeyLister, serverBaseURL)
 	svc.SetLeaderLock(lockCache, db)
 	svc.Start()
 	return svc

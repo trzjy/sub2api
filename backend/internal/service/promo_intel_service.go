@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,19 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 )
+
+// APIKeyLister 是 promo intel(self 模式) 需要的最小 API Key 读取面：
+// 列出管理端可见 key、按 ID 取回明文（key 明文仅存于服务端，绝不回读给前端）。
+type APIKeyLister interface {
+	ListAdminAPIKeys(ctx context.Context) ([]AdminAPIKeyRef, error)
+	GetAPIKeyByID(ctx context.Context, id int64) (string, error) // 返回明文 key
+}
+
+// AdminAPIKeyRef 是管理端 API Key 的选择器条目（不含明文）。
+type AdminAPIKeyRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
 
 // PromoIntelRepository 优惠情报仓储契约（service 层定义，repository 层实现）。
 type PromoIntelRepository interface {
@@ -54,6 +68,12 @@ type PromoIntelService struct {
 	settings SettingRepository
 	cfg      *config.PromoIntelConfig
 
+	// apiKeyLister 仅用于 self 模式：列出/读取本系统管理员 API Key（明文在服务端）。
+	apiKeyLister APIKeyLister
+	// serverBaseURL 是本系统中转网关的对内地址（如 http://127.0.0.1:3300），
+	// 未配置时回退 http://localhost:<server_port>。
+	serverBaseURL string
+
 	// 多实例防重复（nil 时单实例直接运行）。
 	lockCache  LeaderLockCache
 	db         *sql.DB
@@ -81,15 +101,19 @@ func NewPromoIntelService(
 	repo PromoIntelRepository,
 	settings SettingRepository,
 	cfg *config.PromoIntelConfig,
+	apiKeyLister APIKeyLister,
+	serverBaseURL string,
 ) *PromoIntelService {
 	return &PromoIntelService{
-		repo:       repo,
-		settings:   settings,
-		cfg:        cfg,
-		instanceID: uuid.NewString(),
-		nowFn:      time.Now,
-		inFlight:   make(map[int64]struct{}),
-		stopCh:     make(chan struct{}),
+		repo:          repo,
+		settings:      settings,
+		cfg:           cfg,
+		apiKeyLister:  apiKeyLister,
+		serverBaseURL: serverBaseURL,
+		instanceID:    uuid.NewString(),
+		nowFn:         time.Now,
+		inFlight:      make(map[int64]struct{}),
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -670,21 +694,33 @@ func parsePromoIntelDate(date string) (time.Time, error) {
 
 // promoIntelLLMSettingsInternal 是内部使用的完整 LLM 配置（含明文 key）。
 type promoIntelLLMSettingsInternal struct {
+	// self 模式
+	SelfAPIKeyID int64
+	SelfAPIKey   string // 明文（仅服务端）
+	SelfModel    string
+	// external 模式
+	BaseURL string
+	APIKey  string
+	Model   string
+	// 协议：openai / anthropic
+	Protocol string
+	// 组合判定
 	Configured bool
-	BaseURL    string
-	APIKey     string
-	Model      string
 }
 
 // GetPromoIntelRuntime 读取运行时开关与 LLM 配置（公开视图，密钥脱敏）。
 // fail-open：读不到 settings 时默认启用（与渠道监控一致），LLM 视为未配置。
 func (s *PromoIntelService) GetPromoIntelRuntime(ctx context.Context) PromoIntelRuntime {
-	rt := PromoIntelRuntime{Enabled: true}
+	rt := PromoIntelRuntime{Enabled: true, Source: PromoIntelLLMSourceSelf, Protocol: PromoIntelLLMProtocolOpenAI}
 	if s == nil || s.settings == nil {
 		return rt
 	}
 	vals, err := s.settings.GetMultiple(ctx, []string{
 		SettingKeyPromoIntelEnabled,
+		SettingKeyPromoIntelLLMSource,
+		SettingKeyPromoIntelLLMProtocol,
+		SettingKeyPromoIntelSelfAPIKeyID,
+		SettingKeyPromoIntelSelfModel,
 		SettingKeyPromoIntelLLMBaseURL,
 		SettingKeyPromoIntelLLMAPIKey,
 		SettingKeyPromoIntelLLMModel,
@@ -694,6 +730,18 @@ func (s *PromoIntelService) GetPromoIntelRuntime(ctx context.Context) PromoIntel
 	}
 	if isFalsePromoIntelSetting(vals[SettingKeyPromoIntelEnabled]) {
 		rt.Enabled = false
+	}
+	rt.Source = normalizePromoIntelEnum(strings.TrimSpace(vals[SettingKeyPromoIntelLLMSource]),
+		PromoIntelLLMSources, PromoIntelLLMSourceSelf)
+	rt.Protocol = normalizePromoIntelEnum(strings.TrimSpace(vals[SettingKeyPromoIntelLLMProtocol]),
+		PromoIntelLLMProtocols, PromoIntelLLMProtocolOpenAI)
+	rt.SelfAPIKeyID = promoIntelParseInt64(vals[SettingKeyPromoIntelSelfAPIKeyID])
+	rt.SelfModel = strings.TrimSpace(vals[SettingKeyPromoIntelSelfModel])
+	if rt.SelfAPIKeyID > 0 {
+		// 展示层补 key 名称（不取明文）。
+		if name := s.adminAPIKeyName(ctx, rt.SelfAPIKeyID); name != "" {
+			rt.SelfAPIKeyName = name
+		}
 	}
 	rt.LLMBaseURL = strings.TrimSpace(vals[SettingKeyPromoIntelLLMBaseURL])
 	rt.LLMModel = strings.TrimSpace(vals[SettingKeyPromoIntelLLMModel])
@@ -711,11 +759,32 @@ func (s *PromoIntelService) promoIntelLLMSettings(ctx context.Context) promoInte
 		return out
 	}
 	vals, err := s.settings.GetMultiple(ctx, []string{
+		SettingKeyPromoIntelLLMSource,
+		SettingKeyPromoIntelLLMProtocol,
+		SettingKeyPromoIntelSelfAPIKeyID,
+		SettingKeyPromoIntelSelfModel,
 		SettingKeyPromoIntelLLMBaseURL,
 		SettingKeyPromoIntelLLMAPIKey,
 		SettingKeyPromoIntelLLMModel,
 	})
 	if err != nil {
+		return out
+	}
+	out.Protocol = normalizePromoIntelEnum(strings.TrimSpace(vals[SettingKeyPromoIntelLLMProtocol]),
+		PromoIntelLLMProtocols, PromoIntelLLMProtocolOpenAI)
+	source := normalizePromoIntelEnum(strings.TrimSpace(vals[SettingKeyPromoIntelLLMSource]),
+		PromoIntelLLMSources, PromoIntelLLMSourceSelf)
+	out.SelfModel = strings.TrimSpace(vals[SettingKeyPromoIntelSelfModel])
+	if source == PromoIntelLLMSourceSelf {
+		out.SelfAPIKeyID = promoIntelParseInt64(vals[SettingKeyPromoIntelSelfAPIKeyID])
+		if out.SelfAPIKeyID > 0 && s.apiKeyLister != nil {
+			if key, err := s.apiKeyLister.GetAPIKeyByID(ctx, out.SelfAPIKeyID); err == nil {
+				out.SelfAPIKey = key
+			}
+		}
+		// Model 统一填充 self 模型，供两种协议共用（anthropic 走 /v1/messages 同样用 model 字段）。
+		out.Model = out.SelfModel
+		out.Configured = out.SelfAPIKeyID > 0 && out.SelfAPIKey != "" && out.SelfModel != ""
 		return out
 	}
 	out.BaseURL = strings.TrimSpace(vals[SettingKeyPromoIntelLLMBaseURL])
@@ -725,15 +794,62 @@ func (s *PromoIntelService) promoIntelLLMSettings(ctx context.Context) promoInte
 	return out
 }
 
-// PromoIntelSettingsUpdate 管理台设置更新（密钥空串或掩码 = 保持不变）。
-type PromoIntelSettingsUpdate struct {
-	Enabled    *bool
-	LLMBaseURL *string
-	LLMAPIKey  *string
-	LLMModel   *string
+// ListAPIKeyRefs 返回 self 模式可选的管理员 API Key（ID + 名称，无明文）。
+func (s *PromoIntelService) ListAPIKeyRefs(ctx context.Context) ([]AdminAPIKeyRef, error) {
+	if s == nil || s.apiKeyLister == nil {
+		return []AdminAPIKeyRef{}, nil
+	}
+	keys, err := s.apiKeyLister.ListAdminAPIKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list admin api keys for promo intel: %w", err)
+	}
+	return keys, nil
 }
 
-// UpdateLLMSettings 写入整理模型设置；LLMAPIKey 为空/掩码时保持原值。
+// adminAPIKeyName 补 key 显示名（self 模式列表回读）。
+func (s *PromoIntelService) adminAPIKeyName(ctx context.Context, id int64) string {
+	if s.apiKeyLister == nil {
+		return ""
+	}
+	keys, err := s.apiKeyLister.ListAdminAPIKeys(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		if k.ID == id {
+			return k.Name
+		}
+	}
+	return ""
+}
+
+// promoIntelParseInt64 宽容解析设置值。
+func promoIntelParseInt64(v string) int64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// PromoIntelSettingsUpdate 管理台设置更新（nil = 不修改）。
+type PromoIntelSettingsUpdate struct {
+	Enabled      *bool
+	Source       *string // self / external
+	Protocol     *string // openai / anthropic
+	SelfAPIKeyID *int64
+	SelfModel    *string
+	LLMBaseURL   *string
+	LLMAPIKey    *string
+	LLMModel     *string
+}
+
+// UpdateLLMSettings 写入整理模型设置；切换来源时校验新来源字段完备性，
+// 外部密钥空/掩码表示保持原值。
 func (s *PromoIntelService) UpdateLLMSettings(ctx context.Context, update PromoIntelSettingsUpdate) (PromoIntelRuntime, error) {
 	if s == nil || s.settings == nil {
 		return PromoIntelRuntime{}, errors.New("settings store unavailable")
@@ -741,6 +857,47 @@ func (s *PromoIntelService) UpdateLLMSettings(ctx context.Context, update PromoI
 	if update.Enabled != nil {
 		if err := s.settings.Set(ctx, SettingKeyPromoIntelEnabled, boolPromoIntelSetting(*update.Enabled)); err != nil {
 			return PromoIntelRuntime{}, fmt.Errorf("save promo intel enabled: %w", err)
+		}
+	}
+	if update.Source != nil {
+		src := normalizePromoIntelEnum(strings.TrimSpace(*update.Source), PromoIntelLLMSources, "")
+		if src == "" {
+			return PromoIntelRuntime{}, infraerrorsBadRequest("llm source must be self or external")
+		}
+		if err := s.settings.Set(ctx, SettingKeyPromoIntelLLMSource, src); err != nil {
+			return PromoIntelRuntime{}, fmt.Errorf("save promo intel llm source: %w", err)
+		}
+	}
+	if update.Protocol != nil {
+		proto := normalizePromoIntelEnum(strings.TrimSpace(*update.Protocol), PromoIntelLLMProtocols, "")
+		if proto == "" {
+			return PromoIntelRuntime{}, infraerrorsBadRequest("llm protocol must be openai or anthropic")
+		}
+		if err := s.settings.Set(ctx, SettingKeyPromoIntelLLMProtocol, proto); err != nil {
+			return PromoIntelRuntime{}, fmt.Errorf("save promo intel llm protocol: %w", err)
+		}
+	}
+	if update.SelfAPIKeyID != nil {
+		if *update.SelfAPIKeyID < 0 {
+			return PromoIntelRuntime{}, infraerrorsBadRequest("invalid self api key id")
+		}
+		if *update.SelfAPIKeyID > 0 && s.apiKeyLister != nil {
+			// 校验该 key 存在且可取到明文。
+			if key, err := s.apiKeyLister.GetAPIKeyByID(ctx, *update.SelfAPIKeyID); err != nil || key == "" {
+				return PromoIntelRuntime{}, infraerrorsBadRequest("self api key not found or unreadable")
+			}
+		}
+		if err := s.settings.Set(ctx, SettingKeyPromoIntelSelfAPIKeyID, strconv.FormatInt(*update.SelfAPIKeyID, 10)); err != nil {
+			return PromoIntelRuntime{}, fmt.Errorf("save promo intel self api key: %w", err)
+		}
+	}
+	if update.SelfModel != nil {
+		model := strings.TrimSpace(*update.SelfModel)
+		if model == "" {
+			return PromoIntelRuntime{}, infraerrorsBadRequest("self model is required")
+		}
+		if err := s.settings.Set(ctx, SettingKeyPromoIntelSelfModel, model); err != nil {
+			return PromoIntelRuntime{}, fmt.Errorf("save promo intel self model: %w", err)
 		}
 	}
 	if update.LLMBaseURL != nil {
@@ -775,7 +932,7 @@ func (s *PromoIntelService) UpdateLLMSettings(ctx context.Context, update PromoI
 	return s.GetPromoIntelRuntime(ctx), nil
 }
 
-// TestLLMSettings 用当前保存的（或传入的候选）配置发一次最小补全，验证连通性。
+// TestLLMSettings 用当前保存的配置发一次最小补全，验证连通性。
 func (s *PromoIntelService) TestLLMSettings(ctx context.Context) (string, error) {
 	cfgInt := s.promoIntelLLMSettings(ctx)
 	if !cfgInt.Configured {
@@ -793,7 +950,7 @@ func (s *PromoIntelService) TestLLMSettings(ctx context.Context) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("ok: endpoint reachable, model=%s, parsed_offers=%d", cfgInt.Model, len(offers)), nil
+	return fmt.Sprintf("ok: endpoint reachable, protocol=%s, model=%s, parsed_offers=%d", cfgInt.Protocol, cfgInt.Model, len(offers)), nil
 }
 
 func isFalsePromoIntelSetting(v string) bool {

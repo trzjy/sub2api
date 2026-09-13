@@ -1201,6 +1201,7 @@ type PromoIntelConfig struct {
 	WorkerConcurrency   int  `mapstructure:"worker_concurrency"`
 	DueBatchSize        int  `mapstructure:"due_batch_size"`
 	SeedDefaults        bool `mapstructure:"seed_defaults"`
+	ServerPort          int  `mapstructure:"server_port"`
 }
 
 // GatewayCodeBuddyConfig 控制 CodeBuddy 原生接入的行为。
@@ -2408,6 +2409,7 @@ viper.SetDefault("promo_intel.llm_max_text_chars", 12000)
 viper.SetDefault("promo_intel.worker_concurrency", 2)
 viper.SetDefault("promo_intel.due_batch_size", 20)
 viper.SetDefault("promo_intel.seed_defaults", true)
+viper.SetDefault("promo_intel.server_port", 8080)
 
 	// Volcano - 火山方舟订阅号支持模型同步（依据官方文档读取器，非静态候选列表）
 

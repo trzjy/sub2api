@@ -110,10 +110,14 @@ type promoIntelItemStatusRequest struct {
 }
 
 type promoIntelSettingsRequest struct {
-	Enabled    *bool   `json:"enabled"`
-	LLMBaseURL *string `json:"llm_base_url" binding:"omitempty,max=500"`
-	LLMAPIKey  *string `json:"llm_api_key" binding:"omitempty,max=500"`
-	LLMModel   *string `json:"llm_model" binding:"omitempty,max=200"`
+	Enabled      *bool   `json:"enabled"`
+	Source       *string `json:"source" binding:"omitempty,oneof=self external"`
+	Protocol     *string `json:"protocol" binding:"omitempty,oneof=openai anthropic"`
+	SelfAPIKeyID *int64  `json:"self_api_key_id"`
+	SelfModel    *string `json:"self_model" binding:"omitempty,max=200"`
+	LLMBaseURL   *string `json:"llm_base_url" binding:"omitempty,max=500"`
+	LLMAPIKey    *string `json:"llm_api_key" binding:"omitempty,max=500"`
+	LLMModel     *string `json:"llm_model" binding:"omitempty,max=200"`
 }
 
 // --- Handlers ---
@@ -308,6 +312,17 @@ func (h *PromoIntelHandler) GetBriefing(c *gin.Context) {
 	})
 }
 
+// ListAPIKeys GET /admin/promo-intel/api-keys
+// 自选模式（self）可用管理员 API Key 列表（仅 ID + 名称，不回明文）。
+func (h *PromoIntelHandler) ListAPIKeys(c *gin.Context) {
+	keys, err := h.intelService.ListAPIKeyRefs(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"items": keys})
+}
+
 // GetSettings GET /admin/promo-intel/settings
 func (h *PromoIntelHandler) GetSettings(c *gin.Context) {
 	response.Success(c, promoIntelRuntimeToResponse(h.intelService.GetPromoIntelRuntime(c.Request.Context())))
@@ -321,10 +336,14 @@ func (h *PromoIntelHandler) UpdateSettings(c *gin.Context) {
 		return
 	}
 	rt, err := h.intelService.UpdateLLMSettings(c.Request.Context(), service.PromoIntelSettingsUpdate{
-		Enabled:    req.Enabled,
-		LLMBaseURL: req.LLMBaseURL,
-		LLMAPIKey:  req.LLMAPIKey,
-		LLMModel:   req.LLMModel,
+		Enabled:      req.Enabled,
+		Source:       req.Source,
+		Protocol:     req.Protocol,
+		SelfAPIKeyID: req.SelfAPIKeyID,
+		SelfModel:    req.SelfModel,
+		LLMBaseURL:   req.LLMBaseURL,
+		LLMAPIKey:    req.LLMAPIKey,
+		LLMModel:     req.LLMModel,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -412,11 +431,16 @@ func promoIntelItemToResponse(item *service.PromoIntelItem) *promoIntelItemRespo
 
 func promoIntelRuntimeToResponse(rt service.PromoIntelRuntime) gin.H {
 	return gin.H{
-		"enabled":          rt.Enabled,
-		"llm_configured":   rt.LLMConfigured,
-		"llm_base_url":     rt.LLMBaseURL,
-		"llm_api_key_set":  rt.LLMAPIKeySet,
-		"llm_api_key_mask": rt.LLMAPIKeyMasked,
-		"llm_model":        rt.LLMModel,
+		"enabled":           rt.Enabled,
+		"source":            rt.Source,
+		"protocol":          rt.Protocol,
+		"self_api_key_id":   rt.SelfAPIKeyID,
+		"self_api_key_name": rt.SelfAPIKeyName,
+		"self_model":        rt.SelfModel,
+		"llm_configured":    rt.HasLLM(),
+		"llm_base_url":      rt.LLMBaseURL,
+		"llm_api_key_set":   rt.LLMAPIKeySet,
+		"llm_api_key_mask":  rt.LLMAPIKeyMasked,
+		"llm_model":         rt.LLMModel,
 	}
 }

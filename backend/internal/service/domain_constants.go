@@ -514,6 +514,21 @@ const (
 	SettingKeyPromoIntelLLMAPIKey  = "promo_intel_llm_api_key"
 	SettingKeyPromoIntelLLMModel   = "promo_intel_llm_model"
 
+	// SettingKeyPromoIntelLLMSource selects the extraction data source:
+	// "self" (本系统中转网关, default) or "external" (custom endpoint).
+	SettingKeyPromoIntelLLMSource = "promo_intel_llm_source"
+
+	// SettingKeyPromoIntelLLMProtocol selects the upstream wire protocol:
+	// "openai" (default) or "anthropic" (POST /v1/messages).
+	SettingKeyPromoIntelLLMProtocol = "promo_intel_llm_protocol"
+
+	// SettingKeyPromoIntelSelfAPIKeyID is the selected admin API key ID for
+	// the self mode. 0 = not configured.
+	SettingKeyPromoIntelSelfAPIKeyID = "promo_intel_self_api_key_id"
+
+	// SettingKeyPromoIntelSelfModel is the target model name for the self mode.
+	SettingKeyPromoIntelSelfModel = "promo_intel_self_model"
+
 	// SettingKeyChannelMonitorDefaultIntervalSeconds controls the default interval (seconds)
 	// pre-filled when creating a new channel monitor from the admin UI. Range: [15, 3600].
 	SettingKeyChannelMonitorDefaultIntervalSeconds = "channel_monitor_default_interval_seconds"
