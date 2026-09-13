@@ -36,7 +36,9 @@ func (RedeemCode) Annotations() []schema.Annotation {
 func (RedeemCode) Fields() []ent.Field {
 	return []ent.Field{
 		field.String("code").
-			MaxLen(32).
+			// 生成器输出 XXXX-XXXX-XXXX-XXXX（35 字符），必须宽于 32，
+			// 见 migrations/248_widen_redeem_code_column.sql。
+			MaxLen(64).
 			NotEmpty().
 			Unique(),
 		field.String("type").

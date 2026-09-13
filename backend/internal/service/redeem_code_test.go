@@ -7,6 +7,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestGenerateRandomCodeFitsColumn 生成码必须放得进 redeem_codes.code 列
+// （迁移 248 放宽到 VARCHAR(64)），否则创建时 ent MaxLen 校验直接失败。
+func TestGenerateRandomCodeFitsColumn(t *testing.T) {
+	s := &RedeemService{}
+	seen := make(map[string]struct{})
+	for i := 0; i < 100; i++ {
+		code, err := s.GenerateRandomCode()
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(code), 64)
+		require.NotEqual(t, "", code)
+		seen[code] = struct{}{}
+	}
+	require.Len(t, seen, 100)
+}
+
 func TestRedeemCodeExpiry(t *testing.T) {
 	now := time.Now().UTC()
 	past := now.Add(-time.Hour)
