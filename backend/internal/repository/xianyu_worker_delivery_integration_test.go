@@ -46,9 +46,11 @@ func TestXianyuWorkerDeliveryRecordEnsureIdempotentAndResultTransitions(t *testi
 	require.Equal(t, "pending", list[0].DeliveryStatus)
 	require.Equal(t, 3, list[0].Quantity, "quantity should merge to larger value")
 
-	// 明确成功回执 → sent，quantity_sent = quantity。
+	// 明确成功回执 → sent。quantity_sent 按 Worker 回传的实发份数写入
+	// （契约：quantity_sent=实际成功份数，非订单 quantity，以支持部分发货），
+	// 因此回执必须携带 QuantitySent。
 	err = repo.RecordWorkerDeliveryResult(ctx, "wd-1", service.XianyuDeliveryStatusResult{
-		OrderNo: "wd-1", Success: true, Confirmed: true,
+		OrderNo: "wd-1", Success: true, Confirmed: true, QuantitySent: 3,
 	})
 	require.NoError(t, err)
 	list, _, _ = repo.ListWorkerDeliveries(ctx, service.XianyuDeliveryFilter{Limit: 10})
