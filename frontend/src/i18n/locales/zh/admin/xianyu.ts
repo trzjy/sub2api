@@ -150,7 +150,7 @@ export default {
       specGroup: '发码分组',
       specGroupPlaceholder: '请选择订阅分组',
       specDays: '卡时长（天）',
-      delivered: '已发货',
+      delivered: '累计发货',
       restockTitle: '库存池补货 · {name}',
       restockHint: '按池的发码规格生成真实可兑换的订阅码，买家收码后在站点兑换开通订阅。',
       restockSpecMissing: '该池尚未配置发码分组或卡时长，请先编辑库存池。',

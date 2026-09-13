@@ -131,7 +131,7 @@ func (s *XianyuControlService) GetActiveWorkerConfig(ctx context.Context) (*Xian
 	return s.control.GetActiveWorkerConfig(ctx)
 }
 
-// PoolStockCounts 返回池库存计数（剩余/已发货/已兑换/禁用，告警巡检用）。
+// PoolStockCounts 返回池库存计数（剩余/累计已发货/已兑换/禁用，告警巡检用）。
 func (s *XianyuControlService) PoolStockCounts(ctx context.Context, slug string) (int, int, int, int, error) {
 	return s.control.PoolStockCounts(ctx, slug)
 }

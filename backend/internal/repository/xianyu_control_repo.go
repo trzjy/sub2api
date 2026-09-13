@@ -658,20 +658,30 @@ func nullableInt64(v *int64) any {
 	return *v
 }
 
-// PoolStockCounts 返回池库存码的剩余/已发货/已兑换/禁用数量。
-// 池内存放真实可兑换的订阅码，delivered 表示已发货、买家尚未兑换。
+// PoolStockCounts 返回池库存码的剩余/累计已发货/已兑换/禁用数量。
+// 池内存放真实可兑换的订阅码；delivered 是历史发货事实数（与发货记录页同口径），
+// 取自 xianyu_order_claims 中 delivery_status='sent' 的订单，不会因买家兑换而减少，
+// 也不包含 pending/failed 及发货后被退款的订单。
 func (r *xianyuControlRepository) PoolStockCounts(ctx context.Context, poolSlug string) (remaining, delivered, used, disabled int, err error) {
 	err = r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) FILTER (WHERE status = 'unused'),
-			COUNT(*) FILTER (WHERE status = 'delivered'),
 			COUNT(*) FILTER (WHERE status = 'used'),
 			COUNT(*) FILTER (WHERE status = 'disabled')
 		FROM redeem_codes
 		WHERE notes = $1`, service.XianyuPoolNote(poolSlug)).
-		Scan(&remaining, &delivered, &used, &disabled)
+		Scan(&remaining, &used, &disabled)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("pool stock counts: %w", err)
+	}
+	err = r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM xianyu_order_claims c
+		JOIN redeem_codes r ON r.id = c.redeem_code_id
+		WHERE r.notes = $1 AND c.delivery_status = 'sent'`, service.XianyuPoolNote(poolSlug)).
+		Scan(&delivered)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("pool delivered count: %w", err)
 	}
 	return remaining, delivered, used, disabled, nil
 }

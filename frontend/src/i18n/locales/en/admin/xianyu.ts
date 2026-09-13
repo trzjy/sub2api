@@ -150,7 +150,7 @@ export default {
       specGroup: 'Issue Group',
       specGroupPlaceholder: 'Select a subscription group',
       specDays: 'Card Duration (days)',
-      delivered: 'Delivered',
+      delivered: 'Delivered (total)',
       restockTitle: 'Restock Pool · {name}',
       restockHint: 'Generates real redeemable subscription codes per the pool spec. Buyers redeem on-site to activate their subscription.',
       restockSpecMissing: 'This pool has no issue group or duration configured. Edit the pool first.',
