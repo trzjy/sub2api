@@ -39,6 +39,13 @@ func NewPricingAdminService(
 	channelService *ChannelService,
 	usageRepo UsageLogRepository,
 ) *PricingAdminService {
+	// F11 修复：价格管理中心的「自定义定价层」必须注入全局定价解析器，否则网关计费
+	// 只走官方目录（litellm 模糊匹配），自定义价形同虚设（价配了但账单仍为 0）。
+	// 这里是该层与 resolver 在生产装配中的唯一共同持有者（wire_gen 中 resolver 先于
+	// custom 构建，无法在 resolver 侧完成注入）。
+	if resolver != nil && custom != nil {
+		resolver.SetCustomPricingProvider(custom)
+	}
 	return &PricingAdminService{
 		pricing:        pricing,
 		billing:        billing,
