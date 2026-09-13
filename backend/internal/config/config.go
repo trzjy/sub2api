@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/spf13/viper"
 	"golang.org/x/net/http/httpguts"
 )
@@ -1998,6 +1999,20 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		slog.Warn("TOTP encryption key auto-generated. Consider setting a fixed key for production.")
 	} else {
 		cfg.Totp.EncryptionKeyConfigured = true
+	}
+
+	// 凭证静态加密（A3-E1）：密钥纯环境变量管理。
+	// 格式非法 fail-fast；未配置时退化为明文 passthrough 并警告（兼容现有部署）。
+	credEncryptionEnabled, err := credcrypt.Configure(
+		os.Getenv(credcrypt.EnvKey),
+		os.Getenv(credcrypt.EnvKeyOld),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("credential encryption key config error: %w", err)
+	}
+	if !credEncryptionEnabled {
+		slog.Warn("CRED_ENCRYPTION_KEY not configured; account credentials will be stored in plaintext. " +
+			"Generate a key with: openssl rand -base64 32")
 	}
 
 	originalJWTSecret := cfg.JWT.Secret

@@ -361,6 +361,11 @@ JWT_SECRET=your_jwt_secret_here
 # TOTP Encryption Key (RECOMMENDED - preserves 2FA after restart)
 TOTP_ENCRYPTION_KEY=your_totp_key_here
 
+# Credential Encryption Key (OPTIONAL - encrypts account credentials at rest
+# with AES-256-GCM; when empty, credentials are stored in plaintext and a
+# startup warning is logged)
+CRED_ENCRYPTION_KEY=your_base64_key_here
+
 # Optional: Admin account
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=your_admin_password
@@ -376,6 +381,9 @@ openssl rand -hex 32
 
 # Generate TOTP_ENCRYPTION_KEY
 openssl rand -hex 32
+
+# Generate CRED_ENCRYPTION_KEY (base64-encoded 32-byte key)
+openssl rand -base64 32
 
 # Generate POSTGRES_PASSWORD
 openssl rand -hex 32
