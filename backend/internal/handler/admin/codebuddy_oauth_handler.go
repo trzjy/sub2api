@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -15,6 +17,22 @@ type CodeBuddyOAuthHandler struct {
 
 func NewCodeBuddyOAuthHandler(codeBuddyOAuthService *service.CodeBuddyOAuthService) *CodeBuddyOAuthHandler {
 	return &CodeBuddyOAuthHandler{codeBuddyOAuthService: codeBuddyOAuthService}
+}
+
+// RefreshAccountCredentials 用账号已存 refresh_token 刷新并返回合并后的新凭证。
+//
+// 供管理端账号「刷新」动作（AccountHandler.refreshSingleAccount）复用 codebuddy
+// 专用刷新链路：该链路的平台分发此前缺 codebuddy 分支，会兜底到通用 OAuth 刷新、
+// 打到错误上游并被 403（活体验收 F10）。此处只做能力适配，不新增业务语义。
+func (h *CodeBuddyOAuthHandler) RefreshAccountCredentials(ctx context.Context, account *service.Account) (map[string]any, error) {
+	if h == nil || h.codeBuddyOAuthService == nil {
+		return nil, fmt.Errorf("codebuddy oauth service is not configured")
+	}
+	tokenInfo, err := h.codeBuddyOAuthService.RefreshAccountToken(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh CodeBuddy credentials: %w", err)
+	}
+	return service.MergeCredentials(account.Credentials, h.codeBuddyOAuthService.BuildAccountCredentials(tokenInfo)), nil
 }
 
 // CodeBuddyGenerateAuthURLRequest 生成授权链接请求。proxy_id 为本次登录选定的

@@ -57,6 +57,7 @@ func ProvideAdminHandlers(
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
 	accountHandler.SetAccountBalanceProbeService(accountBalanceProbe)
+	accountHandler.SetCodeBuddyAccountRefresher(codeBuddyOAuthHandler)
 	return &AdminHandlers{
 		Dashboard:              dashboardHandler,
 		User:                   userHandler,

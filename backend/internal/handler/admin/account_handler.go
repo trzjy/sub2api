@@ -66,7 +66,15 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+	codeBuddyRefresher      codeBuddyAccountRefresher
 	cfg                     *config.Config
+}
+
+// codeBuddyAccountRefresher 是管理端账号「刷新」动作所需的 CodeBuddy 能力，
+// 由 CodeBuddyOAuthHandler 实现。可选注入：未注入时 codebuddy 账号刷新显式报错，
+// 而不是继续落到通用 OAuth 刷新链路打到错误上游（活体验收 F10）。
+type codeBuddyAccountRefresher interface {
+	RefreshAccountCredentials(ctx context.Context, account *service.Account) (map[string]any, error)
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -76,6 +84,13 @@ func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamB
 
 func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUsageService) {
 	h.ollamaCloudUsage = usage
+}
+
+// SetCodeBuddyAccountRefresher attaches the optional CodeBuddy refresher used by the
+// account refresh action（与 upstreamBillingProbe / ollamaCloudUsage 同一 setter 模式，
+// 避免改动 ProvideAdminHandlers 的参数列表与 wire_gen 手工同步）。
+func (h *AccountHandler) SetCodeBuddyAccountRefresher(r codeBuddyAccountRefresher) {
+	h.codeBuddyRefresher = r
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
@@ -1478,6 +1493,17 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		if baseURL := strings.TrimSpace(account.GetCredential("base_url")); baseURL != "" {
 			newCredentials["base_url"] = baseURL
 		}
+	} else if account.Platform == service.PlatformCodeBuddy {
+		// CodeBuddy 必须走专用刷新链路（copilot.tencent.com + §2.4 指纹头）。此前缺该分支，
+		// 会兜底到通用 OAuth 刷新打到 ChatGPT/Codex 后端被 Cloudflare 403（活体验收 F10）。
+		if h.codeBuddyRefresher == nil {
+			return nil, "", fmt.Errorf("codebuddy account refresher is not configured")
+		}
+		refreshed, refreshErr := h.codeBuddyRefresher.RefreshAccountCredentials(ctx, account)
+		if refreshErr != nil {
+			return nil, "", refreshErr
+		}
+		newCredentials = refreshed
 	} else {
 		// Use Anthropic/Claude OAuth service to refresh token
 		tokenInfo, err := h.oauthService.RefreshAccountToken(ctx, account)
