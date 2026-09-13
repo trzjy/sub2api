@@ -125,6 +125,8 @@ func extractPromoIntelText(body []byte) (string, error) {
 	out := b.String()
 
 	out = decodePromoIntelEntities(out)
+	// NUL 字节对指纹无意义且 PG 不收，直接剔除。
+	out = strings.ReplaceAll(out, "\x00", " ")
 	// 空白折叠：换行/制表压成单空格，保证指纹对排版抖动稳定。
 	out = strings.Join(strings.Fields(out), " ")
 	out = strings.TrimSpace(out)
@@ -225,9 +227,14 @@ func decodePromoIntelEntities(s string) string {
 				r, ok = rune(v), true
 			}
 		}
-		if ok && utf8.ValidRune(r) {
+		switch {
+		case ok && r != 0 && utf8.ValidRune(r):
 			out = out[:start] + string(r) + out[start+end+1:]
-		} else {
+		case ok:
+			// NUL（&#0;）即使合法 UTF-8 也会被 PG 拒绝：整体替换为空格，
+			// 不留 "#0;" 残渣。
+			out = out[:start] + " " + out[start+end+1:]
+		default:
 			out = out[:start] + out[start+1:]
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -544,3 +545,19 @@ func TestBriefingAggregation(t *testing.T) {
 
 func promoStrPtr(s string) *string        { return &s }
 func promoDatePtr(t time.Time) *time.Time { return &t }
+
+func TestTruncatePromoIntelStringRuneSafe(t *testing.T) {
+	// 多字节字符串按 rune 截断：结果必须是合法 UTF-8（回归生产 invalid byte sequence）。
+	long := strings.Repeat("模型价格", 3000) // 12000 字节
+	out := truncatePromoIntelString(long, 4000)
+	require.True(t, utf8.ValidString(out))
+	require.LessOrEqual(t, len(out), 4000*4+3)
+}
+
+func TestExtractPromoIntelTextStripsNUL(t *testing.T) {
+	// 字面 NUL 与 &#0; 实体都必须被剔除（PG 拒绝 0x00）。
+	text, err := extractPromoIntelText([]byte("<p>a\x00b&#0;c</p>"))
+	require.NoError(t, err)
+	require.NotContains(t, text, "\x00")
+	require.Contains(t, text, "a b c")
+}

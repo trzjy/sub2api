@@ -197,10 +197,13 @@ func (s *PromoIntelService) llmMaxTextChars() int {
 	return promoIntelLLMTextCap
 }
 
-// truncatePromoIntelString 按字节截断（用于错误消息）。
+// truncatePromoIntelString 按 rune 截断。必须以 rune 为界：按字节切会把
+// 多字节汉字切成非法 UTF-8，入库时被 PG 以 invalid byte sequence 拒绝
+// （生产实测：百度千帆源 0xe8 0x8d 0x2e、DeepSeek 0x00）。
 func truncatePromoIntelString(s string, max int) string {
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	return string(runes[:max]) + "..."
 }
