@@ -173,3 +173,51 @@ func TestForwardCodeBuddy_NoRetryWhenFirstSucceeds(t *testing.T) {
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, CodeBuddyClientUA, upstream.lastReq.Header.Get("User-Agent"))
 }
+
+// TestForwardAsChatCompletions_RoutesCodeBuddyThroughFingerprintPath 钉住 /v1/chat/completions
+// 的第二层平台分发：codebuddy 必须走 forwardCodeBuddy（§2.4 指纹头 + §2.5 改写管线），
+// 而不是通用 OpenAI 路径——后者对 OAuth 账号会打到 ChatGPT/Codex 后端并被 403 阻断。
+//
+// 活体验收 F6 第二轮：ForwardAsChatCompletions 只给 Grok 做了平台分支，codebuddy 漏了，
+// 导致路由白名单修好后仍被通用路径截走。
+func TestForwardAsChatCompletions_RoutesCodeBuddyThroughFingerprintPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"hy3","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	ok200 := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"hy3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n")),
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{ok200}}
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+	account := healthyCodeBuddyGatewayTestAccount(7710, "access-token")
+
+	_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, upstream.requests, "codebuddy chat 必须发出上游请求")
+
+	req := upstream.requests[0]
+	// 必须命中 CodeBuddy 上游端点（通用路径会指向 ChatGPT/Codex 后端）。
+	require.Equal(t, "https://copilot.tencent.com", req.URL.Scheme+"://"+req.URL.Host)
+	require.Equal(t, "/v2/chat/completions", req.URL.Path)
+	// §2.4 指纹头必须齐备。
+	require.Equal(t, "https://www.codebuddy.cn", req.Header.Get("Origin"))
+	require.Equal(t, "https://www.codebuddy.cn/", req.Header.Get("Referer"))
+	require.Equal(t, "SaaS", req.Header.Get("X-Product"))
+	require.Equal(t, "u-1", req.Header.Get("X-User-Id"))
+	require.Equal(t, "tencent.com", req.Header.Get("X-Domain"))
+	require.Equal(t, "Bearer access-token", req.Header.Get("Authorization"))
+	require.Empty(t, req.Header.Get("X-Refresh-Token"), "§2.4 安全红线：chat 不带 X-Refresh-Token")
+}

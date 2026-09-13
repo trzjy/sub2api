@@ -108,6 +108,16 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
+	// CodeBuddy（腾讯）原生接入：chat completions 变体，必须走独立转发分支以注入
+	// §2.4 指纹头（Origin/Referer/X-Product/X-User-Id/X-Domain）并执行 §2.5 出站改写
+	// 管线。缺此分支时会落到下方通用 OpenAI 路径，OAuth 账号将打到 ChatGPT/Codex
+	// 后端并被 403 阻断页拒绝（活体验收 F6 第二轮实证）。
+	// 分发口径与 OpenAIGatewayService.Forward 保持一致的单一列表。
+	if account.Platform == PlatformCodeBuddy {
+		view := newOpenAIRequestView(body)
+		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
+	}
+
 	// Cursor compatibility: some clients send a Responses-shaped body to the
 	// /v1/chat/completions URL. Detect it before adaptive routing so adaptive
 	// accounts never forward the body unchanged to a Chat Completions endpoint.
