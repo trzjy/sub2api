@@ -1744,8 +1744,9 @@ const handleCreateWelfareBatch = async () => {
     validity_days: validityDays
   }))
 
-  const amountMinEmpty = welfareForm.amountMin.trim() === ''
-  const amountMaxEmpty = welfareForm.amountMax.trim() === ''
+  // v-model 绑定 type="number" 输入框时 Vue 会自动把值转成 number，不能用字符串方法
+  const amountMinEmpty = String(welfareForm.amountMin ?? '').trim() === ''
+  const amountMaxEmpty = String(welfareForm.amountMax ?? '').trim() === ''
   let amountMin = 0
   let amountMax = 0
   if (!amountMinEmpty || !amountMaxEmpty) {
