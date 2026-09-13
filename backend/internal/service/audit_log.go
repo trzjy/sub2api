@@ -37,6 +37,15 @@ const (
 	AuditActionSessionBindingMismatch = "auth.session_binding.mismatch"
 	AuditActionStepUpVerify           = "auth.step_up.verify"
 	AuditActionAuditLogClear          = "admin.audit_log.clear"
+
+	// OAuth 凭证操作（管理端获取/轮换平台账号凭证）。动作名固定，便于按
+	// 「谁在何时对哪个账号做了凭证操作」过滤审计记录；记录只留目标标识，不留 token 值。
+	AuditActionCodeBuddyOAuthAuthURL    = "admin.codebuddy.oauth.auth_url"
+	AuditActionCodeBuddyOAuthPoll       = "admin.codebuddy.oauth.poll"
+	AuditActionCodeBuddyOAuthRefresh    = "admin.codebuddy.oauth.refresh_token"
+	AuditActionAntigravityOAuthAuthURL  = "admin.antigravity.oauth.auth_url"
+	AuditActionAntigravityOAuthExchange = "admin.antigravity.oauth.exchange_code"
+	AuditActionAntigravityOAuthRefresh  = "admin.antigravity.oauth.refresh_token"
 )
 
 // AuditLog 一条管理面操作审计记录。
