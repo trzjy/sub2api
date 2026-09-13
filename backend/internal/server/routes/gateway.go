@@ -17,6 +17,29 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// openAICompatibleGatewayPlatforms 是经 OpenAI 网关（h.OpenAIGateway）转发的分组平台集合。
+// 单一权威来源：chat/completions、responses、count_tokens 等入口的分流共用，避免新增平台时漏改。
+//
+// 注意：codebuddy 必须在列——其 §2.4 指纹头与 §2.5 出站改写管线挂在
+// OpenAIGatewayService.forwardCodeBuddy 上；一旦落到 GatewayService 的通用转发路径，
+// 出站会缺少 Origin/Referer/X-Product 等指纹头并被上游 403（活体验收 F6 实证）。
+var openAICompatibleGatewayPlatforms = map[string]struct{}{
+	service.PlatformOpenAI:    {},
+	service.PlatformGrok:      {},
+	service.PlatformKimi:      {},
+	service.PlatformZhipu:     {},
+	service.PlatformDeepseek:  {},
+	service.PlatformMiniMax:   {},
+	service.PlatformCodeBuddy: {},
+	service.PlatformOther:     {},
+}
+
+// isOpenAICompatibleGatewayPlatform 报告该分组平台是否应经 OpenAI 网关转发。
+func isOpenAICompatibleGatewayPlatform(platform string) bool {
+	_, ok := openAICompatibleGatewayPlatforms[platform]
+	return ok
+}
+
 // RegisterGatewayRoutes 注册 API 网关路由（Claude/OpenAI/Gemini 兼容）
 func RegisterGatewayRoutes(
 	r *gin.Engine,
@@ -46,22 +69,19 @@ func RegisterGatewayRoutes(
 	groupModelAllowlist := middleware.GroupModelAllowlist()
 
 	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
-		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI, service.PlatformGrok,
-			service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOther:
-			// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax）、通用 other 与 openai/grok 一样经 OpenAI 网关转发。
-			return true
-		default:
-			return false
-		}
+		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax/codebuddy）、通用 other
+		// 与 openai/grok 一样经 OpenAI 网关转发。
+		return isOpenAICompatibleGatewayPlatform(getGroupPlatform(c))
 	}
 	countTokensHandler := func(c *gin.Context) {
 		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOther:
-			h.OpenAIGateway.CountTokens(c)
 		case service.PlatformGrok:
 			h.OpenAIGateway.GrokCountTokens(c)
 		default:
+			if isOpenAICompatibleGatewayPlatform(getGroupPlatform(c)) {
+				h.OpenAIGateway.CountTokens(c)
+				return
+			}
 			h.Gateway.CountTokens(c)
 		}
 	}
