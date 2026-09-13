@@ -14,6 +14,165 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestOAuthCredentialRoutesHaveStableAuditActions 钉住 6 个 OAuth 凭证端点的固定动作名：
+// 这些端点获取/旋转平台凭证，动作名是审计检索与告警的锚点，不可随路由推导漂移。
+func TestOAuthCredentialRoutesHaveStableAuditActions(t *testing.T) {
+	expected := map[string]string{
+		"POST /api/v1/admin/codebuddy/oauth/auth-url":        service.AuditActionCodeBuddyOAuthAuthURL,
+		"POST /api/v1/admin/codebuddy/oauth/poll":            service.AuditActionCodeBuddyOAuthPoll,
+		"POST /api/v1/admin/codebuddy/oauth/refresh-token":   service.AuditActionCodeBuddyOAuthRefreshToken,
+		"POST /api/v1/admin/antigravity/oauth/auth-url":      service.AuditActionAntigravityOAuthAuthURL,
+		"POST /api/v1/admin/antigravity/oauth/exchange-code": service.AuditActionAntigravityOAuthExchangeCode,
+		"POST /api/v1/admin/antigravity/oauth/refresh-token": service.AuditActionAntigravityOAuthRefreshToken,
+	}
+	for route, action := range expected {
+		require.Equalf(t, action, auditActionOverrides[route], "%s must have a stable audit action", route)
+	}
+	// OAuth 端点的请求体含 token/code 凭证，一律不得走整体入库白名单之外的裸记录：
+	// refresh_token/code 由键级脱敏覆盖，这里断言它们不被列入"整体省略"而完全丢失审计。
+	for route := range expected {
+		_, omitted := auditBodyOmittedRoutes[route]
+		require.Falsef(t, omitted, "%s should keep a redacted body so target identifiers remain auditable", route)
+	}
+}
+
+// TestCodeBuddyOAuthAuditRecordsTargetWithoutToken 全链路验证 codebuddy 凭证端点的审计记录：
+// 操作者、动作、目标（state/uid/enterprise_id）、结果与状态码可见，且记录体不含任何 token 明文。
+func TestCodeBuddyOAuthAuditRecordsTargetWithoutToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 77})
+		c.Set(string(ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	// stub handler 复刻真实 handler 的审计调用（SetAuditExtra 的键与值来源一致）。
+	router.POST("/api/v1/admin/codebuddy/oauth/refresh-token", func(c *gin.Context) {
+		SetAuditExtra(c, map[string]any{"result": "success", "uid": "u-1001", "enterprise_id": "e-9"})
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	router.POST("/api/v1/admin/codebuddy/oauth/poll", func(c *gin.Context) {
+		SetAuditExtra(c, map[string]any{"result": "failed", "state": "state-abc"})
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false})
+	})
+
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/v1/admin/codebuddy/oauth/refresh-token",
+			bytes.NewBufferString(`{"refresh_token":"audit-canary-refresh-token","uid":"u-1001","enterprise_id":"e-9","domain":"tencent.com"}`)),
+		httptest.NewRequest(http.MethodPost, "/api/v1/admin/codebuddy/oauth/poll",
+			bytes.NewBufferString(`{"state":"state-abc"}`)),
+	}
+	for _, request := range requests {
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+	}
+	auditService.Stop()
+
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 2)
+
+	byAction := make(map[string]*service.AuditLog, len(logs))
+	for _, entry := range logs {
+		byAction[entry.Action] = entry
+		// 记录体任何字段都不得含 token 明文。
+		require.NotContains(t, entry.RequestBody, "audit-canary")
+		require.NotContains(t, entry.ActorEmail, "audit-canary")
+		if entry.Extra != nil {
+			for _, v := range entry.Extra {
+				require.NotContains(t, v, "audit-canary")
+			}
+		}
+		require.NotNil(t, entry.ActorUserID)
+		require.EqualValues(t, 77, *entry.ActorUserID)
+	}
+
+	refresh := byAction[service.AuditActionCodeBuddyOAuthRefreshToken]
+	require.NotNil(t, refresh)
+	require.Equal(t, http.StatusOK, refresh.StatusCode)
+	require.Equal(t, "success", refresh.Extra["result"])
+	require.Equal(t, "u-1001", refresh.Extra["uid"])
+	require.Equal(t, "e-9", refresh.Extra["enterprise_id"])
+	// 请求体入库的是脱敏版：refresh_token 被擦除，uid 等目标标识保留可追责。
+	require.Contains(t, refresh.RequestBody, "***")
+	require.Contains(t, refresh.RequestBody, "u-1001")
+
+	poll := byAction[service.AuditActionCodeBuddyOAuthPoll]
+	require.NotNil(t, poll)
+	require.Equal(t, http.StatusInternalServerError, poll.StatusCode)
+	require.Equal(t, "failed", poll.Extra["result"])
+	require.Equal(t, "state-abc", poll.Extra["state"])
+	require.Contains(t, poll.RequestBody, "state-abc")
+}
+
+// TestAntigravityOAuthAuditRedactsCodeAndToken 验证 antigravity 端点审计：
+// authorization code（键级脱敏精确键 "code"）与 refresh_token 均不得入审计记录体。
+func TestAntigravityOAuthAuditRedactsCodeAndToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 88})
+		c.Set(string(ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	router.POST("/api/v1/admin/antigravity/oauth/exchange-code", func(c *gin.Context) {
+		SetAuditExtra(c, map[string]any{"result": "success", "session_id": "sess-1", "state": "state-xyz"})
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	router.POST("/api/v1/admin/antigravity/oauth/refresh-token", func(c *gin.Context) {
+		SetAuditExtra(c, map[string]any{"result": "failed"})
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false})
+	})
+
+	requests := []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/v1/admin/antigravity/oauth/exchange-code",
+			bytes.NewBufferString(`{"session_id":"sess-1","state":"state-xyz","code":"audit-canary-auth-code"}`)),
+		httptest.NewRequest(http.MethodPost, "/api/v1/admin/antigravity/oauth/refresh-token",
+			bytes.NewBufferString(`{"refresh_token":"audit-canary-refresh-token"}`)),
+	}
+	for _, request := range requests {
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+	}
+	auditService.Stop()
+
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 2)
+
+	byAction := make(map[string]*service.AuditLog, len(logs))
+	for _, entry := range logs {
+		byAction[entry.Action] = entry
+		require.NotContains(t, entry.RequestBody, "audit-canary")
+	}
+
+	exchange := byAction[service.AuditActionAntigravityOAuthExchangeCode]
+	require.NotNil(t, exchange)
+	require.Equal(t, http.StatusOK, exchange.StatusCode)
+	require.Equal(t, "success", exchange.Extra["result"])
+	require.Equal(t, "sess-1", exchange.Extra["session_id"])
+	require.Equal(t, "state-xyz", exchange.Extra["state"])
+
+	refresh := byAction[service.AuditActionAntigravityOAuthRefreshToken]
+	require.NotNil(t, refresh)
+	require.Equal(t, http.StatusBadGateway, refresh.StatusCode)
+	require.Equal(t, "failed", refresh.Extra["result"])
+}
+
 func TestDeriveAuditAction(t *testing.T) {
 	cases := []struct {
 		method string

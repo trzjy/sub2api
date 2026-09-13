@@ -58,6 +58,9 @@ var auditExtraAllowedKeys = map[string]struct{}{
 	"http_status": {}, "latency_ms": {}, "token_applied": {}, "retryable": {},
 	"event_id": {}, "requested_count": {}, "deleted_events": {}, "deleted_jobs": {},
 	"matched_count": {}, "snapshot_max_id": {}, "filter_hash": {}, "confirm": {},
+	// OAuth 凭证操作的目标标识（非凭证本身）：state/session_id 是公开 nonce，
+	// uid/enterprise_id 是账号标识。token 类值永远不允许进入该白名单。
+	"state": {}, "session_id": {}, "uid": {}, "enterprise_id": {},
 }
 
 // SetAuditExtra adds allowlisted, scalar details to the current audit entry.
@@ -142,6 +145,13 @@ var auditActionOverrides = map[string]string{
 	"POST /api/v1/admin/prompt-audit/events/batch-delete":     "admin.prompt_audit.events.batch_delete",
 	"POST /api/v1/admin/prompt-audit/events/delete-preview":   "admin.prompt_audit.events.delete_preview",
 	"POST /api/v1/admin/prompt-audit/events/delete-by-filter": "admin.prompt_audit.events.filter_delete",
+	// OAuth 凭证获取/旋转操作：敏感管理动作，固定动作名便于检索与告警。
+	"POST /api/v1/admin/codebuddy/oauth/auth-url":          service.AuditActionCodeBuddyOAuthAuthURL,
+	"POST /api/v1/admin/codebuddy/oauth/poll":              service.AuditActionCodeBuddyOAuthPoll,
+	"POST /api/v1/admin/codebuddy/oauth/refresh-token":     service.AuditActionCodeBuddyOAuthRefreshToken,
+	"POST /api/v1/admin/antigravity/oauth/auth-url":        service.AuditActionAntigravityOAuthAuthURL,
+	"POST /api/v1/admin/antigravity/oauth/exchange-code":   service.AuditActionAntigravityOAuthExchangeCode,
+	"POST /api/v1/admin/antigravity/oauth/refresh-token":   service.AuditActionAntigravityOAuthRefreshToken,
 }
 
 // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。

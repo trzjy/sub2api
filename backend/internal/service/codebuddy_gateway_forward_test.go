@@ -173,3 +173,125 @@ func TestForwardCodeBuddy_NoRetryWhenFirstSucceeds(t *testing.T) {
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, CodeBuddyClientUA, upstream.lastReq.Header.Get("User-Agent"))
 }
+
+// TestRedactCodeBuddyUpstreamErrorBody 钉住 A2 脱敏规则：已知 uid/nickname/enterprise_id
+// 精确替换，"user <digits>" 兜底替换；短值（<4）不做精确替换以免误伤。
+func TestRedactCodeBuddyUpstreamErrorBody(t *testing.T) {
+	account := &Account{Credentials: map[string]any{
+		"uid":            "123456",
+		"nickname":       "CodeFarmerX",
+		"enterprise_id":  "e-90001",
+		"session_remark": "ab", // 短值不参与精确替换
+	}}
+
+	cases := []struct {
+		name  string
+		body  string
+		deny  []string
+		allow []string
+	}{
+		{
+			name:  "offline session carries uid and nickname",
+			body:  `{"code":400,"msg":"Offline user session for user 123456 (CodeFarmerX, ent e-90001)"}`,
+			deny:  []string{"123456", "CodeFarmerX", "e-90001"},
+			allow: []string{`"code":400`, "Offline user session"},
+		},
+		{
+			name:  "unknown uid falls back to user-digits pattern",
+			body:  `{"code":400,"msg":"session expired for user 987654321"}`,
+			deny:  []string{"987654321"},
+			allow: []string{"user ****"},
+		},
+		{
+			name:  "business error code survives",
+			body:  `{"code":12153,"msg":"offline user session not found"}`,
+			deny:  nil,
+			allow: []string{"12153", "offline user session not found"},
+		},
+		{
+			name:  "rate limit text untouched",
+			body:  `{"code":6004,"msg":"rate limit exceeded, 将在 2026-09-13 12:00:00 重置"}`,
+			deny:  nil,
+			allow: []string{"6004", "2026-09-13 12:00:00"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := string(redactCodeBuddyUpstreamErrorBody([]byte(tc.body), account))
+			for _, d := range tc.deny {
+				require.NotContains(t, out, d)
+			}
+			for _, a := range tc.allow {
+				require.Contains(t, out, a)
+			}
+		})
+	}
+
+	require.Empty(t, redactCodeBuddyUpstreamErrorBody(nil, account))
+	require.Equal(t, "x", string(redactCodeBuddyUpstreamErrorBody([]byte("x"), nil)))
+}
+
+// TestForwardCodeBuddy_UpstreamErrorRedactsAccountIdentifiers 端到端验证 A2 修复：
+// 上游 400 错误文案携带账号 uid/nickname/enterprise_id 时，回传给下游 API 调用方的
+// 响应体不含任何账号标识明文，状态码与错误类型语义保留。
+//
+// 覆盖两种上游信封：error.message 形（extractUpstreamErrorMessage 可提取，会真实
+// 透传给下游）与 codebuddy 信封 {"code":..,"msg":..}（提取为空走兜底文案，回归钉住
+// 该路径同样不泄漏）。
+func TestForwardCodeBuddy_UpstreamErrorRedactsAccountIdentifiers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	bodies := map[string]string{
+		"openai_error_envelope": `{"error":{"type":"invalid_request_error","message":"Offline user session for user 123456 (CodeFarmerX, ent e-90001)"}}`,
+		"codebuddy_envelope":    `{"code":400,"msg":"Offline user session for user 123456 (CodeFarmerX, ent e-90001)"}`,
+	}
+	for name, upstreamBody := range bodies {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"model":"codebuddy-model","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+			err400 := &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+			}
+			upstream := &httpUpstreamRecorder{resp: err400}
+
+			cfg := &config.Config{
+				Security: config.SecurityConfig{
+					URLAllowlist: config.URLAllowlistConfig{
+						Enabled:           false,
+						AllowInsecureHTTP: true,
+					},
+				},
+				Gateway: config.GatewayConfig{
+					CodeBuddy: config.GatewayCodeBuddyConfig{SanitizeEnabled: true},
+				},
+			}
+			svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+
+			account := healthyCodeBuddyGatewayTestAccount(7703, "access-token")
+			account.Credentials["uid"] = "123456"
+			account.Credentials["nickname"] = "CodeFarmerX"
+			account.Credentials["enterprise_id"] = "e-90001"
+
+			_, err := svc.forwardCodeBuddy(context.Background(), c, account, body, "codebuddy-model", false, time.Now())
+			require.Error(t, err, "upstream 400 must surface as a forward error")
+
+			downstream := recorder.Body.String()
+			// 泄漏面断言：下游响应体不含 uid / nickname / enterprise_id 明文。
+			require.NotContains(t, downstream, "123456")
+			require.NotContains(t, downstream, "CodeFarmerX")
+			require.NotContains(t, downstream, "e-90001")
+			// 语义保留：状态码与错误类型不变。
+			require.Equal(t, http.StatusBadRequest, recorder.Code)
+			require.Contains(t, downstream, "invalid_request_error")
+			if name == "openai_error_envelope" {
+				// 错误文案主体仍可读（仅标识被替换为占位符）。
+				require.Contains(t, downstream, "Offline user session")
+			}
+		})
+	}
+}

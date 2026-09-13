@@ -2,6 +2,7 @@ package admin
 
 import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -29,10 +30,13 @@ func (h *AntigravityOAuthHandler) GenerateAuthURL(c *gin.Context) {
 
 	result, err := h.antigravityOAuthService.GenerateAuthURL(c.Request.Context(), req.ProxyID)
 	if err != nil {
+		middleware.SetAuditExtra(c, map[string]any{"result": "failed"})
 		response.InternalError(c, "生成授权链接失败: "+err.Error())
 		return
 	}
 
+	// 审计：只记录动作与目标 session/state（公开 nonce），不记录授权 URL 之外的材料。
+	middleware.SetAuditExtra(c, map[string]any{"result": "success", "session_id": result.SessionID, "state": result.State})
 	response.Success(c, result)
 }
 
@@ -59,10 +63,13 @@ func (h *AntigravityOAuthHandler) ExchangeCode(c *gin.Context) {
 		ProxyID:   req.ProxyID,
 	})
 	if err != nil {
+		middleware.SetAuditExtra(c, map[string]any{"result": "failed", "session_id": req.SessionID, "state": req.State})
 		response.BadRequest(c, "Token 交换失败: "+err.Error())
 		return
 	}
 
+	// 审计：记动作与目标 session/state；authorization code 与换得的 token 绝不入审计。
+	middleware.SetAuditExtra(c, map[string]any{"result": "success", "session_id": req.SessionID, "state": req.State})
 	response.Success(c, tokenInfo)
 }
 
@@ -83,9 +90,12 @@ func (h *AntigravityOAuthHandler) RefreshToken(c *gin.Context) {
 
 	tokenInfo, err := h.antigravityOAuthService.ValidateRefreshToken(c.Request.Context(), req.RefreshToken, req.ProxyID)
 	if err != nil {
+		middleware.SetAuditExtra(c, map[string]any{"result": "failed"})
 		response.ErrorFrom(c, err)
 		return
 	}
 
+	// 审计：只记录结果；refresh_token 与返回的 tokenInfo 绝不入审计。
+	middleware.SetAuditExtra(c, map[string]any{"result": "success"})
 	response.Success(c, tokenInfo)
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -31,10 +32,13 @@ func (h *CodeBuddyOAuthHandler) GenerateAuthURL(c *gin.Context) {
 	}
 	result, err := h.codeBuddyOAuthService.GenerateAuthURL(c.Request.Context(), req.ProxyID)
 	if err != nil {
+		middleware.SetAuditExtra(c, map[string]any{"result": "failed"})
 		response.ErrorFrom(c, err)
 		return
 	}
 
+	// 审计：只记录动作与目标 state（公开 nonce），绝不记录 URL 之外的任何凭证材料。
+	middleware.SetAuditExtra(c, map[string]any{"result": "success", "state": result.State})
 	response.Success(c, result)
 }
 
@@ -55,13 +59,17 @@ func (h *CodeBuddyOAuthHandler) PollToken(c *gin.Context) {
 	tokenInfo, err := h.codeBuddyOAuthService.PollToken(c.Request.Context(), req.State, req.ProxyID)
 	if err != nil {
 		if errors.Is(err, service.ErrCodeBuddyLoginPending) {
+			middleware.SetAuditExtra(c, map[string]any{"result": "pending", "state": req.State})
 			response.BadRequest(c, "登录未完成，请先在浏览器完成登录后再重试")
 			return
 		}
+		middleware.SetAuditExtra(c, map[string]any{"result": "failed", "state": req.State})
 		response.InternalError(c, "获取 token 失败: "+err.Error())
 		return
 	}
 
+	// 审计：记动作与目标 state；tokenInfo 中的 access/refresh token 绝不入审计。
+	middleware.SetAuditExtra(c, map[string]any{"result": "success", "state": req.State})
 	response.Success(c, tokenInfo)
 }
 
@@ -84,9 +92,26 @@ func (h *CodeBuddyOAuthHandler) RefreshToken(c *gin.Context) {
 
 	tokenInfo, err := h.codeBuddyOAuthService.RefreshToken(c.Request.Context(), req.RefreshToken, req.UID, req.EnterpriseID, req.Domain, req.ProxyID)
 	if err != nil {
+		setCodeBuddyRefreshAuditExtra(c, "failed", &req)
 		response.ErrorFrom(c, err)
 		return
 	}
 
+	// 审计：记动作与目标账号标识（uid/enterprise_id）；refresh_token 与返回的
+	// tokenInfo 绝不入审计。
+	setCodeBuddyRefreshAuditExtra(c, "success", &req)
 	response.Success(c, tokenInfo)
+}
+
+// setCodeBuddyRefreshAuditExtra 记录 refresh-token 操作的结果与目标账号标识。
+// 只收集非空标量，空字段不写入审计 Extra。
+func setCodeBuddyRefreshAuditExtra(c *gin.Context, result string, req *CodeBuddyRefreshTokenRequest) {
+	extra := map[string]any{"result": result}
+	if req.UID != "" {
+		extra["uid"] = req.UID
+	}
+	if req.EnterpriseID != "" {
+		extra["enterprise_id"] = req.EnterpriseID
+	}
+	middleware.SetAuditExtra(c, extra)
 }

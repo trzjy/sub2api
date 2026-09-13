@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -208,6 +209,14 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 	upstreamModel string,
 ) (*OpenAIForwardResult, error) {
 	kind := ClassifyCodeBuddyError(resp.StatusCode, respBody)
+	// A2 泄漏面修复：上游错误文案可能携带账号 uid/nickname（如
+	// "Offline user session for user 123456"）。handleErrorResponse 会把上游 message
+	// 透传给下游（确定性 400 回写 / 错误透传规则 / failover 兜底），因此在进入透传
+	// 链路前统一脱敏，并重置 resp.Body 使下游构造与 ops 事件都只能读到脱敏版。
+	respBody = redactCodeBuddyUpstreamErrorBody(respBody, account)
+	if resp != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	}
 	upstreamMsg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(respBody))
 	if upstreamMsg == "" {
 		upstreamMsg = fmt.Sprintf("codebuddy upstream returned status %d", resp.StatusCode)
@@ -243,6 +252,33 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 	}
 
 	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
+}
+
+// codeBuddyUpstreamUserIDPattern 兜底匹配错误文案中 "user 123456" / "user id: 123456"
+// 形态的账号标识片段（存储凭证之外的未知值场景）。仅匹配 4 位以上数字，避免误伤
+// 业务错误码等短数字。
+var codeBuddyUpstreamUserIDPattern = regexp.MustCompile(`(?i)(\buser(?:[_ ]?id)?\b[\s:=#]*)(\d{4,})`)
+
+// redactCodeBuddyUpstreamErrorBody 对 CodeBuddy 上游错误响应体做账号标识脱敏：
+//  1. 精确替换该账号已知的 uid / nickname / enterprise_id（长度 >=4 才替换，过短的
+//     值误伤面大，如 "1" 会替换掉所有 "1"）；
+//  2. 兜底正则替换 "user <digits>" 形态的 uid 片段。
+//
+// 只动错误文本内容，不动 JSON 结构与状态码，下游拿到的错误类型语义不变。
+func redactCodeBuddyUpstreamErrorBody(body []byte, account *Account) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	text := string(body)
+	if account != nil {
+		for _, key := range []string{"uid", "nickname", "enterprise_id"} {
+			if v := strings.TrimSpace(account.GetCredential(key)); len(v) >= 4 {
+				text = strings.ReplaceAll(text, v, "***")
+			}
+		}
+	}
+	text = codeBuddyUpstreamUserIDPattern.ReplaceAllString(text, "${1}****")
+	return []byte(text)
 }
 
 func codeBuddyForwardResultFromStreaming(r *openaiStreamingResult, originalModel, upstreamModel string, startTime time.Time, respHeader http.Header) *OpenAIForwardResult {
