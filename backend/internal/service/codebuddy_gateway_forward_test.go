@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -220,4 +221,50 @@ func TestForwardAsChatCompletions_RoutesCodeBuddyThroughFingerprintPath(t *testi
 	require.Equal(t, "tencent.com", req.Header.Get("X-Domain"))
 	require.Equal(t, "Bearer access-token", req.Header.Get("Authorization"))
 	require.Empty(t, req.Header.Get("X-Refresh-Token"), "§2.4 安全红线：chat 不带 X-Refresh-Token")
+}
+
+// TestForwardCodeBuddy_NonStreamAggregatesSSEToJSON 钉住 F9：入站 stream:false 时，
+// 上游被强制流式返回的 chat.completion.chunk SSE 必须聚合为单条 chat.completion JSON，
+// 而不是原样回写 SSE（通用 handleSSEToJSON 只覆盖 Codex/Responses 形状）。
+func TestForwardCodeBuddy_NonStreamAggregatesSSEToJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"hy3","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	sse := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"hy3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"PONG\"},\"finish_reason\":\"\"}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"hy3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}}
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+	account := healthyCodeBuddyGatewayTestAccount(7711, "access-token")
+
+	result, err := svc.forwardCodeBuddy(context.Background(), c, account, body, "hy3", false, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Contains(t, recorder.Header().Get("Content-Type"), "application/json",
+		"非流式响应必须是 JSON，不能是 text/event-stream")
+	out := recorder.Body.String()
+	require.NotContains(t, out, "data:", "不得原样回写 SSE 帧")
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), "响应必须是单条 chat.completion JSON")
+	require.Equal(t, "chat.completion", got["object"])
+	choice := got["choices"].([]any)[0].(map[string]any)
+	require.Equal(t, "stop", choice["finish_reason"])
+	message := choice["message"].(map[string]any)
+	require.Equal(t, "PONG", message["content"])
+	require.Equal(t, float64(2), got["usage"].(map[string]any)["total_tokens"])
 }

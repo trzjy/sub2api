@@ -43,9 +43,9 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	}
 
 	opts := CodeBuddyRewriteOptions{
-		Sanitize:          s.codeBuddySanitizeEnabled(),
-		Model:             upstreamModel,
-		SupportedEfforts:  codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
+		Sanitize:         s.codeBuddySanitizeEnabled(),
+		Model:            upstreamModel,
+		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
 	}
 
 	// §2.5 规则 1-7：出站前改写（强制 stream:true、tool_choice 归一、developer 角色、
@@ -120,11 +120,42 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		}
 		return codeBuddyForwardResultFromStreaming(streamResult, originalModel, upstreamModel, startTime, resp.Header), nil
 	}
-	nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
+	nonStreamResult, err := s.handleCodeBuddyNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
 	return codeBuddyForwardResultFromNonStreaming(nonStreamResult, originalModel, upstreamModel, startTime, resp.Header), nil
+}
+
+// handleCodeBuddyNonStreamingResponse 收口非流式入站：上游被 §2.5 规则 1 强制为
+// stream:true，因此先把 chat.completion.chunk SSE 聚合为单条 chat.completion JSON，
+// 再交给通用 JSON 路径解析（用量提取、响应头过滤、计费口径与其它平台保持一致）。
+//
+// 通用路径的 handleSSEToJSON 只覆盖 Codex/Responses 形状，对 chat.completion.chunk
+// 会原样回写 SSE（活体验收 F9），故此处显式聚合。
+func (s *OpenAIGatewayService) handleCodeBuddyNonStreamingResponse(
+	ctx context.Context,
+	resp *http.Response,
+	c *gin.Context,
+	account *Account,
+	originalModel string,
+	upstreamModel string,
+) (*openaiNonStreamingResult, error) {
+	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	if err != nil {
+		return nil, err
+	}
+	if aggregated, ok := aggregateOpenAIChatCompletionsSSE(body); ok {
+		resp.Body = io.NopCloser(bytes.NewReader(aggregated))
+		// 上游原为 SSE：改写为 JSON 后必须同步内容类型与长度，避免下游收到
+		// text/event-stream 或与实际字节数不符的 Content-Length。
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Del("Content-Length")
+		resp.Header.Del("Transfer-Encoding")
+	} else {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	return s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 }
 
 // buildCodeBuddyChatRequest 构造 CodeBuddy 上游请求并写入 §2.4 指纹头。
@@ -254,19 +285,19 @@ func codeBuddyForwardResultFromStreaming(r *openaiStreamingResult, originalModel
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            true,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		FirstTokenMs:      r.firstTokenMs,
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           true,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     r.firstTokenMs,
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
 
@@ -279,17 +310,17 @@ func codeBuddyForwardResultFromNonStreaming(r *openaiNonStreamingResult, origina
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            false,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           false,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
