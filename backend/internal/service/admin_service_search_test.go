@@ -3,6 +3,7 @@
 package service
 
 import (
+	"time"
 	"context"
 	"testing"
 
@@ -269,3 +270,14 @@ func TestAdminService_ListRedeemCodes_WithSearch(t *testing.T) {
 		require.Empty(t, repo.listWithFiltersPool)
 	})
 }
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *accountRepoStubForAdminList) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *accountRepoStubForAdminList) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+

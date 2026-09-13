@@ -175,3 +175,14 @@ func TestOpenAIImagesTextFallback_RemainsRetryableAndThusCascades(t *testing.T) 
 	require.True(t, IsOpenAIImagesRetryableUpstreamError(err),
 		"文字兜底判据是可重试的——正因如此，写账号冷却会沿号池级联")
 }
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *countingModelRateLimitRepo) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *countingModelRateLimitRepo) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+

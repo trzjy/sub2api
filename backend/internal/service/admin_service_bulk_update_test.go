@@ -3,6 +3,7 @@
 package service
 
 import (
+	"time"
 	"context"
 	"errors"
 	"net/http"
@@ -595,3 +596,14 @@ func TestAdminServiceBulkUpdateAccounts_ValidatesFilterResolvedOpenAITargets(t *
 	require.Equal(t, []int64{7}, repo.getByIDsIDs)
 	require.Zero(t, repo.bulkUpdateCalls)
 }
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *accountRepoStubForBulkUpdate) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *accountRepoStubForBulkUpdate) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+

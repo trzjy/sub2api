@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -78,6 +79,16 @@ type longContextBillingRepoStub struct {
 	createdAccount   *Account
 	updateExtraCalls int
 	bulkUpdateCalls  int
+}
+
+// ListTempUnschedulableAccounts 是健康探测恢复候选接口的 no-op 桩。
+func (s *longContextBillingRepoStub) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+// SetTempUnschedulableReason 是健康探测接口的 no-op 桩（与 ListTempUnschedulableAccounts 成对补齐）。
+func (s *longContextBillingRepoStub) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
 }
 
 func (r *longContextBillingRepoStub) Create(_ context.Context, account *Account) error {

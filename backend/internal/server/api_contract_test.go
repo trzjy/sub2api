@@ -865,7 +865,7 @@ func TestAPIContracts(t *testing.T) {
 					"force_email_on_third_party_signup": false,
 					"default_concurrency": 5,
 					"default_balance": 1.25,
-					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
+					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
 					"auth_source_default_email_platform_quotas": null,
 					"auth_source_default_github_platform_quotas": null,
 					"auth_source_default_google_platform_quotas": null,
@@ -998,6 +998,17 @@ func TestAPIContracts(t *testing.T) {
 					"channel_monitor_show_quota": false,
 					"channel_monitor_hide_user_ranking": false,
 					"channel_monitor_default_interval_seconds": 60,
+					"openai_apikey_health_breaker_settings": {
+						"cooldown_minutes": 5,
+						"enabled": false,
+						"failure_threshold": 10,
+						"include_grok": false,
+						"probe": {"enabled": false, "interval_seconds": 60, "max_attempts": 10},
+						"scope_platforms": ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
+						"warning_ratio": 0.7,
+						"watch_ratio": 0.4,
+						"window_minutes": 2
+					},
 					"available_channels_enabled": false,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
@@ -1187,7 +1198,7 @@ func TestAPIContracts(t *testing.T) {
 					"purchase_subscription_url": "",
 					"table_default_page_size": 20,
 					"table_page_size_options": [10, 20, 50],
-					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
+					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
 					"auth_source_default_email_platform_quotas": null,
 					"auth_source_default_github_platform_quotas": null,
 					"auth_source_default_google_platform_quotas": null,
@@ -1316,6 +1327,17 @@ func TestAPIContracts(t *testing.T) {
 					"channel_monitor_show_quota": false,
 					"channel_monitor_hide_user_ranking": false,
 					"channel_monitor_default_interval_seconds": 60,
+					"openai_apikey_health_breaker_settings": {
+						"cooldown_minutes": 5,
+						"enabled": false,
+						"failure_threshold": 10,
+						"include_grok": false,
+						"probe": {"enabled": false, "interval_seconds": 60, "max_attempts": 10},
+						"scope_platforms": ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
+						"warning_ratio": 0.7,
+						"watch_ratio": 0.4,
+						"window_minutes": 2
+					},
 					"available_channels_enabled": false,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
@@ -2965,3 +2987,13 @@ var (
 	_ service.UsageLogRepository         = (*stubUsageLogRepo)(nil)
 	_ service.SettingRepository          = (*stubSettingRepo)(nil)
 )
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AdminAccountRepository 近期新增方法，本桩无需行为）。
+func (r *stubAccountRepo) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*service.Account, error) {
+	return nil, nil
+}
+
+func (r *stubAccountRepo) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}

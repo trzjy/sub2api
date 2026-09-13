@@ -289,3 +289,13 @@ func TestAccountService_Delete_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []int64{55}, repo.deletedIDs) // 验证正确的 ID 被删除
 }
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *accountRepoStub) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *accountRepoStub) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}

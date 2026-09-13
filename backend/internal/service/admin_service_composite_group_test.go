@@ -3,6 +3,7 @@
 package service
 
 import (
+	"time"
 	"context"
 	"testing"
 
@@ -244,3 +245,14 @@ func TestAdminService_CNProviderGroupModelsListCandidatesUseAccountMappingsOnly(
 	require.NoError(t, err)
 	require.Equal(t, []string{"deepseek-v4-flash"}, candidates)
 }
+
+// ListTempUnschedulableAccounts / SetTempUnschedulableReason 是健康探测恢复
+// 接口补齐的 no-op 桩（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *accountRepoStubForCompositeModelsList) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+func (r *accountRepoStubForCompositeModelsList) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+

@@ -27,6 +27,17 @@ type mockAccountRepoForPlatform struct {
 	getByIDCalls     int
 }
 
+// ListTempUnschedulableAccounts 是健康探测恢复候选接口的 no-op 桩
+// （补齐 AccountRepository 新增方法，行为与既有桩一致：无候选）。
+func (m *mockAccountRepoForPlatform) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
+	return nil, nil
+}
+
+// SetTempUnschedulableReason 是健康探测接口的 no-op 桩（与 ListTempUnschedulableAccounts 成对补齐）。
+func (m *mockAccountRepoForPlatform) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
 func (m *mockAccountRepoForPlatform) GetByID(ctx context.Context, id int64) (*Account, error) {
 	m.getByIDCalls++
 	if acc, ok := m.accountsByID[id]; ok {

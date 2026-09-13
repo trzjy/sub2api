@@ -90,7 +90,7 @@ func (s *redeemCodeRepoStub) List(context.Context, pagination.PaginationParams) 
 	panic("unexpected List call")
 }
 
-func (s *redeemCodeRepoStub) ListWithFilters(context.Context, pagination.PaginationParams, string, string, string, string) ([]RedeemCode, *pagination.PaginationResult, error) {
+func (s *redeemCodeRepoStub) ListWithFilters(_ context.Context, _ pagination.PaginationParams, _ string, _ string, _ string, _ string, _ *float64) ([]RedeemCode, *pagination.PaginationResult, error) {
 	panic("unexpected ListWithFilters call")
 }
 
@@ -550,4 +550,9 @@ func TestFinalizeOAuthEmailAccount_SnapshotsPlatformQuotaDefaults(t *testing.T) 
 	require.Equal(t, int64(99), anthropicRecord.UserID)
 	require.NotNil(t, anthropicRecord.DailyLimitUSD)
 	require.InDelta(t, 5.5, *anthropicRecord.DailyLimitUSD, 0.0001)
+}
+
+// ListDistinctValues 是测试桩补齐的 no-op（RedeemCodeRepository 新增方法）。
+func (r *redeemCodeRepoStub) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	return nil, nil
 }

@@ -1289,3 +1289,8 @@ func TestExecuteSubscriptionFulfillmentDoesNotDuplicateWorkAfterLegacySuccessAud
 
 var _ AffiliateRepository = (*paymentFulfillmentAffiliateRepoStub)(nil)
 var _ SettingRepository = (*paymentFulfillmentSettingRepoStub)(nil)
+
+// ListDistinctValues 是测试桩补齐的 no-op（RedeemCodeRepository 新增方法）。
+func (r *paymentFulfillmentRedeemRepo) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	return nil, nil
+}

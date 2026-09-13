@@ -146,7 +146,7 @@ func (r *paymentOrderLifecycleRedeemRepo) List(context.Context, pagination.Pagin
 	panic("unexpected call")
 }
 
-func (r *paymentOrderLifecycleRedeemRepo) ListWithFilters(context.Context, pagination.PaginationParams, string, string, string, string) ([]RedeemCode, *pagination.PaginationResult, error) {
+func (r *paymentOrderLifecycleRedeemRepo) ListWithFilters(_ context.Context, _ pagination.PaginationParams, _ string, _ string, _ string, _ string, _ *float64) ([]RedeemCode, *pagination.PaginationResult, error) {
 	panic("unexpected call")
 }
 
@@ -863,4 +863,9 @@ func newPaymentOrderLifecycleTestClient(t *testing.T) *dbent.Client {
 	client := enttest.NewClient(t, enttest.WithOptions(dbent.Driver(drv)))
 	t.Cleanup(func() { _ = client.Close() })
 	return client
+}
+
+// ListDistinctValues 是测试桩补齐的 no-op（RedeemCodeRepository 新增方法）。
+func (r *paymentOrderLifecycleRedeemRepo) ListDistinctValues(ctx context.Context, codeType string) ([]float64, error) {
+	return nil, nil
 }
