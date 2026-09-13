@@ -415,6 +415,7 @@ func TestProcessSourceLLMNotConfiguredDegrades(t *testing.T) {
 func TestProcessSourceLLMFailureDegrades(t *testing.T) {
 	repo := newFakePromoIntelRepo()
 	settings := &fakePromoIntelSettings{vals: map[string]string{
+		SettingKeyPromoIntelLLMSource:  PromoIntelLLMSourceExternal,
 		SettingKeyPromoIntelLLMBaseURL: "http://127.0.0.1:1/v1", // 不可达
 		SettingKeyPromoIntelLLMModel:   "m",
 	}}

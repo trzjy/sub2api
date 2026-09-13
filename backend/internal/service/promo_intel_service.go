@@ -955,16 +955,57 @@ func (s *PromoIntelService) TestLLMSettings(ctx context.Context) (string, error)
 	testSrc := &PromoIntelSource{Name: "连通性测试", Vendor: "test", URL: "https://example.com"}
 	offers, err := s.extractOffersWithLLM(ctx, testSrc, "这是一个连通性测试正文。请按规则输出 JSON 数组。")
 	if err != nil {
-		// 网关 404「模型不在分组白名单」是最常见误配：key 的分组不认填写的模型。
-		// 翻译成人话并给出该 key 可用的模型清单，省去盲试。
-		if strings.Contains(err.Error(), "is not available for this group") {
-			if hint := s.selfKeyModelsHint(ctx, cfgInt.SelfAPIKeyID); hint != "" {
-				return "", fmt.Errorf("%w；该 Key 绑定分组可用的模型：%s", err, hint)
-			}
-		}
-		return "", err
+		// 必须返回带明细的业务错误（400 族），否则错误映射层会把普通 error
+		// 兜底成笼统的 "internal error"，管理员在页面上看不到真实原因。
+		return "", s.promoIntelTestError(ctx, err)
 	}
 	return fmt.Sprintf("ok: endpoint reachable, protocol=%s, model=%s, parsed_offers=%d", cfgInt.Protocol, cfgInt.Model, len(offers)), nil
+}
+
+// promoIntelTestError 把整理端点测试失败分类成带明细的 400 业务错误，
+// 让前端 toast 直接显示真实原因（模型不认 / 端点不可达 / 上游报错），
+// 而不是被错误映射兜底成 "internal error"。
+func (s *PromoIntelService) promoIntelTestError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// 最常见误配：key 的分组不认填写的模型（网关 404）。附上可用模型清单。
+	if strings.Contains(msg, "is not available for this group") {
+		hint := s.selfKeyModelsHint(ctx, s.promoIntelSelfKeyID(ctx))
+		if hint != "" {
+			return infraerrors.BadRequest("PROMO_INTEL_LLM_MODEL_REJECTED",
+				"该 Key 所在分组不允许模型 "+extractPromoIntelQuotedModel(msg)+"；该分组可用模型："+hint)
+		}
+		return infraerrors.BadRequest("PROMO_INTEL_LLM_MODEL_REJECTED", msg)
+	}
+	switch {
+	case strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "context deadline exceeded"),
+		strings.Contains(msg, "Client.Timeout"):
+		return infraerrors.BadRequest("PROMO_INTEL_LLM_UNREACHABLE", "无法连接整理端点："+msg)
+	}
+	return infraerrors.BadRequest("PROMO_INTEL_LLM_TEST_FAILED", msg)
+}
+
+// promoIntelSelfKeyID 读当前配置的 self key id（提示用）。
+func (s *PromoIntelService) promoIntelSelfKeyID(ctx context.Context) int64 {
+	return s.promoIntelLLMSettings(ctx).SelfAPIKeyID
+}
+
+// extractPromoIntelQuotedModel 从网关错误消息里抠出被拒的模型名（Model "x" is ...）。
+func extractPromoIntelQuotedModel(msg string) string {
+	i := strings.Index(msg, `Model "`)
+	if i < 0 {
+		return ""
+	}
+	rest := msg[i+len(`Model "`):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // selfKeyModelsHint 返回指定 key 分组白名单模型的逗号串（无白名单返回空）。
