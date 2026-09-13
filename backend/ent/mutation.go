@@ -38,6 +38,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
+	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
+	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
@@ -92,6 +94,8 @@ const (
 	TypePendingAuthSession            = "PendingAuthSession"
 	TypePromoCode                     = "PromoCode"
 	TypePromoCodeUsage                = "PromoCodeUsage"
+	TypePromoIntelItem                = "PromoIntelItem"
+	TypePromoIntelSource              = "PromoIntelSource"
 	TypeProxy                         = "Proxy"
 	TypeRedeemBatch                   = "RedeemBatch"
 	TypeRedeemCode                    = "RedeemCode"
@@ -37683,6 +37687,2595 @@ func (m *PromoCodeUsageMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown PromoCodeUsage edge %s", name)
+}
+
+// PromoIntelItemMutation represents an operation that mutates the PromoIntelItem nodes in the graph.
+type PromoIntelItemMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *int64
+	created_at        *time.Time
+	updated_at        *time.Time
+	vendor            *string
+	category          *string
+	title             *string
+	summary           *string
+	details           *string
+	discount_info     *string
+	valid_until       *string
+	url               *string
+	relevance         *string
+	status            *string
+	fingerprint       *string
+	raw_excerpt       *string
+	extract_status    *string
+	digest_date       *time.Time
+	source_fetched_at *time.Time
+	clearedFields     map[string]struct{}
+	source            *int64
+	clearedsource     bool
+	done              bool
+	oldValue          func(context.Context) (*PromoIntelItem, error)
+	predicates        []predicate.PromoIntelItem
+}
+
+var _ ent.Mutation = (*PromoIntelItemMutation)(nil)
+
+// promointelitemOption allows management of the mutation configuration using functional options.
+type promointelitemOption func(*PromoIntelItemMutation)
+
+// newPromoIntelItemMutation creates new mutation for the PromoIntelItem entity.
+func newPromoIntelItemMutation(c config, op Op, opts ...promointelitemOption) *PromoIntelItemMutation {
+	m := &PromoIntelItemMutation{
+		config:        c,
+		op:            op,
+		typ:           TypePromoIntelItem,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withPromoIntelItemID sets the ID field of the mutation.
+func withPromoIntelItemID(id int64) promointelitemOption {
+	return func(m *PromoIntelItemMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *PromoIntelItem
+		)
+		m.oldValue = func(ctx context.Context) (*PromoIntelItem, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().PromoIntelItem.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withPromoIntelItem sets the old PromoIntelItem of the mutation.
+func withPromoIntelItem(node *PromoIntelItem) promointelitemOption {
+	return func(m *PromoIntelItemMutation) {
+		m.oldValue = func(context.Context) (*PromoIntelItem, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m PromoIntelItemMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m PromoIntelItemMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *PromoIntelItemMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *PromoIntelItemMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().PromoIntelItem.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *PromoIntelItemMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *PromoIntelItemMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *PromoIntelItemMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *PromoIntelItemMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *PromoIntelItemMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *PromoIntelItemMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetSourceID sets the "source_id" field.
+func (m *PromoIntelItemMutation) SetSourceID(i int64) {
+	m.source = &i
+}
+
+// SourceID returns the value of the "source_id" field in the mutation.
+func (m *PromoIntelItemMutation) SourceID() (r int64, exists bool) {
+	v := m.source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceID returns the old "source_id" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldSourceID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceID: %w", err)
+	}
+	return oldValue.SourceID, nil
+}
+
+// ResetSourceID resets all changes to the "source_id" field.
+func (m *PromoIntelItemMutation) ResetSourceID() {
+	m.source = nil
+}
+
+// SetVendor sets the "vendor" field.
+func (m *PromoIntelItemMutation) SetVendor(s string) {
+	m.vendor = &s
+}
+
+// Vendor returns the value of the "vendor" field in the mutation.
+func (m *PromoIntelItemMutation) Vendor() (r string, exists bool) {
+	v := m.vendor
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVendor returns the old "vendor" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldVendor(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVendor is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVendor requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVendor: %w", err)
+	}
+	return oldValue.Vendor, nil
+}
+
+// ResetVendor resets all changes to the "vendor" field.
+func (m *PromoIntelItemMutation) ResetVendor() {
+	m.vendor = nil
+}
+
+// SetCategory sets the "category" field.
+func (m *PromoIntelItemMutation) SetCategory(s string) {
+	m.category = &s
+}
+
+// Category returns the value of the "category" field in the mutation.
+func (m *PromoIntelItemMutation) Category() (r string, exists bool) {
+	v := m.category
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCategory returns the old "category" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldCategory(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCategory is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCategory requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCategory: %w", err)
+	}
+	return oldValue.Category, nil
+}
+
+// ResetCategory resets all changes to the "category" field.
+func (m *PromoIntelItemMutation) ResetCategory() {
+	m.category = nil
+}
+
+// SetTitle sets the "title" field.
+func (m *PromoIntelItemMutation) SetTitle(s string) {
+	m.title = &s
+}
+
+// Title returns the value of the "title" field in the mutation.
+func (m *PromoIntelItemMutation) Title() (r string, exists bool) {
+	v := m.title
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTitle returns the old "title" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldTitle(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTitle is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTitle requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTitle: %w", err)
+	}
+	return oldValue.Title, nil
+}
+
+// ResetTitle resets all changes to the "title" field.
+func (m *PromoIntelItemMutation) ResetTitle() {
+	m.title = nil
+}
+
+// SetSummary sets the "summary" field.
+func (m *PromoIntelItemMutation) SetSummary(s string) {
+	m.summary = &s
+}
+
+// Summary returns the value of the "summary" field in the mutation.
+func (m *PromoIntelItemMutation) Summary() (r string, exists bool) {
+	v := m.summary
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSummary returns the old "summary" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldSummary(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSummary is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSummary requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSummary: %w", err)
+	}
+	return oldValue.Summary, nil
+}
+
+// ResetSummary resets all changes to the "summary" field.
+func (m *PromoIntelItemMutation) ResetSummary() {
+	m.summary = nil
+}
+
+// SetDetails sets the "details" field.
+func (m *PromoIntelItemMutation) SetDetails(s string) {
+	m.details = &s
+}
+
+// Details returns the value of the "details" field in the mutation.
+func (m *PromoIntelItemMutation) Details() (r string, exists bool) {
+	v := m.details
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDetails returns the old "details" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldDetails(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDetails is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDetails requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDetails: %w", err)
+	}
+	return oldValue.Details, nil
+}
+
+// ResetDetails resets all changes to the "details" field.
+func (m *PromoIntelItemMutation) ResetDetails() {
+	m.details = nil
+}
+
+// SetDiscountInfo sets the "discount_info" field.
+func (m *PromoIntelItemMutation) SetDiscountInfo(s string) {
+	m.discount_info = &s
+}
+
+// DiscountInfo returns the value of the "discount_info" field in the mutation.
+func (m *PromoIntelItemMutation) DiscountInfo() (r string, exists bool) {
+	v := m.discount_info
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDiscountInfo returns the old "discount_info" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldDiscountInfo(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDiscountInfo is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDiscountInfo requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDiscountInfo: %w", err)
+	}
+	return oldValue.DiscountInfo, nil
+}
+
+// ResetDiscountInfo resets all changes to the "discount_info" field.
+func (m *PromoIntelItemMutation) ResetDiscountInfo() {
+	m.discount_info = nil
+}
+
+// SetValidUntil sets the "valid_until" field.
+func (m *PromoIntelItemMutation) SetValidUntil(s string) {
+	m.valid_until = &s
+}
+
+// ValidUntil returns the value of the "valid_until" field in the mutation.
+func (m *PromoIntelItemMutation) ValidUntil() (r string, exists bool) {
+	v := m.valid_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldValidUntil returns the old "valid_until" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldValidUntil(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldValidUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldValidUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldValidUntil: %w", err)
+	}
+	return oldValue.ValidUntil, nil
+}
+
+// ResetValidUntil resets all changes to the "valid_until" field.
+func (m *PromoIntelItemMutation) ResetValidUntil() {
+	m.valid_until = nil
+}
+
+// SetURL sets the "url" field.
+func (m *PromoIntelItemMutation) SetURL(s string) {
+	m.url = &s
+}
+
+// URL returns the value of the "url" field in the mutation.
+func (m *PromoIntelItemMutation) URL() (r string, exists bool) {
+	v := m.url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldURL returns the old "url" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldURL(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldURL: %w", err)
+	}
+	return oldValue.URL, nil
+}
+
+// ResetURL resets all changes to the "url" field.
+func (m *PromoIntelItemMutation) ResetURL() {
+	m.url = nil
+}
+
+// SetRelevance sets the "relevance" field.
+func (m *PromoIntelItemMutation) SetRelevance(s string) {
+	m.relevance = &s
+}
+
+// Relevance returns the value of the "relevance" field in the mutation.
+func (m *PromoIntelItemMutation) Relevance() (r string, exists bool) {
+	v := m.relevance
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRelevance returns the old "relevance" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldRelevance(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRelevance is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRelevance requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRelevance: %w", err)
+	}
+	return oldValue.Relevance, nil
+}
+
+// ResetRelevance resets all changes to the "relevance" field.
+func (m *PromoIntelItemMutation) ResetRelevance() {
+	m.relevance = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *PromoIntelItemMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *PromoIntelItemMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *PromoIntelItemMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetFingerprint sets the "fingerprint" field.
+func (m *PromoIntelItemMutation) SetFingerprint(s string) {
+	m.fingerprint = &s
+}
+
+// Fingerprint returns the value of the "fingerprint" field in the mutation.
+func (m *PromoIntelItemMutation) Fingerprint() (r string, exists bool) {
+	v := m.fingerprint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFingerprint returns the old "fingerprint" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldFingerprint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFingerprint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFingerprint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFingerprint: %w", err)
+	}
+	return oldValue.Fingerprint, nil
+}
+
+// ResetFingerprint resets all changes to the "fingerprint" field.
+func (m *PromoIntelItemMutation) ResetFingerprint() {
+	m.fingerprint = nil
+}
+
+// SetRawExcerpt sets the "raw_excerpt" field.
+func (m *PromoIntelItemMutation) SetRawExcerpt(s string) {
+	m.raw_excerpt = &s
+}
+
+// RawExcerpt returns the value of the "raw_excerpt" field in the mutation.
+func (m *PromoIntelItemMutation) RawExcerpt() (r string, exists bool) {
+	v := m.raw_excerpt
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRawExcerpt returns the old "raw_excerpt" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldRawExcerpt(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRawExcerpt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRawExcerpt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRawExcerpt: %w", err)
+	}
+	return oldValue.RawExcerpt, nil
+}
+
+// ResetRawExcerpt resets all changes to the "raw_excerpt" field.
+func (m *PromoIntelItemMutation) ResetRawExcerpt() {
+	m.raw_excerpt = nil
+}
+
+// SetExtractStatus sets the "extract_status" field.
+func (m *PromoIntelItemMutation) SetExtractStatus(s string) {
+	m.extract_status = &s
+}
+
+// ExtractStatus returns the value of the "extract_status" field in the mutation.
+func (m *PromoIntelItemMutation) ExtractStatus() (r string, exists bool) {
+	v := m.extract_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExtractStatus returns the old "extract_status" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldExtractStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExtractStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExtractStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExtractStatus: %w", err)
+	}
+	return oldValue.ExtractStatus, nil
+}
+
+// ResetExtractStatus resets all changes to the "extract_status" field.
+func (m *PromoIntelItemMutation) ResetExtractStatus() {
+	m.extract_status = nil
+}
+
+// SetDigestDate sets the "digest_date" field.
+func (m *PromoIntelItemMutation) SetDigestDate(t time.Time) {
+	m.digest_date = &t
+}
+
+// DigestDate returns the value of the "digest_date" field in the mutation.
+func (m *PromoIntelItemMutation) DigestDate() (r time.Time, exists bool) {
+	v := m.digest_date
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDigestDate returns the old "digest_date" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldDigestDate(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDigestDate is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDigestDate requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDigestDate: %w", err)
+	}
+	return oldValue.DigestDate, nil
+}
+
+// ClearDigestDate clears the value of the "digest_date" field.
+func (m *PromoIntelItemMutation) ClearDigestDate() {
+	m.digest_date = nil
+	m.clearedFields[promointelitem.FieldDigestDate] = struct{}{}
+}
+
+// DigestDateCleared returns if the "digest_date" field was cleared in this mutation.
+func (m *PromoIntelItemMutation) DigestDateCleared() bool {
+	_, ok := m.clearedFields[promointelitem.FieldDigestDate]
+	return ok
+}
+
+// ResetDigestDate resets all changes to the "digest_date" field.
+func (m *PromoIntelItemMutation) ResetDigestDate() {
+	m.digest_date = nil
+	delete(m.clearedFields, promointelitem.FieldDigestDate)
+}
+
+// SetSourceFetchedAt sets the "source_fetched_at" field.
+func (m *PromoIntelItemMutation) SetSourceFetchedAt(t time.Time) {
+	m.source_fetched_at = &t
+}
+
+// SourceFetchedAt returns the value of the "source_fetched_at" field in the mutation.
+func (m *PromoIntelItemMutation) SourceFetchedAt() (r time.Time, exists bool) {
+	v := m.source_fetched_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceFetchedAt returns the old "source_fetched_at" field's value of the PromoIntelItem entity.
+// If the PromoIntelItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelItemMutation) OldSourceFetchedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceFetchedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceFetchedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceFetchedAt: %w", err)
+	}
+	return oldValue.SourceFetchedAt, nil
+}
+
+// ResetSourceFetchedAt resets all changes to the "source_fetched_at" field.
+func (m *PromoIntelItemMutation) ResetSourceFetchedAt() {
+	m.source_fetched_at = nil
+}
+
+// ClearSource clears the "source" edge to the PromoIntelSource entity.
+func (m *PromoIntelItemMutation) ClearSource() {
+	m.clearedsource = true
+	m.clearedFields[promointelitem.FieldSourceID] = struct{}{}
+}
+
+// SourceCleared reports if the "source" edge to the PromoIntelSource entity was cleared.
+func (m *PromoIntelItemMutation) SourceCleared() bool {
+	return m.clearedsource
+}
+
+// SourceIDs returns the "source" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// SourceID instead. It exists only for internal usage by the builders.
+func (m *PromoIntelItemMutation) SourceIDs() (ids []int64) {
+	if id := m.source; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetSource resets all changes to the "source" edge.
+func (m *PromoIntelItemMutation) ResetSource() {
+	m.source = nil
+	m.clearedsource = false
+}
+
+// Where appends a list predicates to the PromoIntelItemMutation builder.
+func (m *PromoIntelItemMutation) Where(ps ...predicate.PromoIntelItem) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the PromoIntelItemMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *PromoIntelItemMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.PromoIntelItem, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *PromoIntelItemMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *PromoIntelItemMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (PromoIntelItem).
+func (m *PromoIntelItemMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *PromoIntelItemMutation) Fields() []string {
+	fields := make([]string, 0, 18)
+	if m.created_at != nil {
+		fields = append(fields, promointelitem.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, promointelitem.FieldUpdatedAt)
+	}
+	if m.source != nil {
+		fields = append(fields, promointelitem.FieldSourceID)
+	}
+	if m.vendor != nil {
+		fields = append(fields, promointelitem.FieldVendor)
+	}
+	if m.category != nil {
+		fields = append(fields, promointelitem.FieldCategory)
+	}
+	if m.title != nil {
+		fields = append(fields, promointelitem.FieldTitle)
+	}
+	if m.summary != nil {
+		fields = append(fields, promointelitem.FieldSummary)
+	}
+	if m.details != nil {
+		fields = append(fields, promointelitem.FieldDetails)
+	}
+	if m.discount_info != nil {
+		fields = append(fields, promointelitem.FieldDiscountInfo)
+	}
+	if m.valid_until != nil {
+		fields = append(fields, promointelitem.FieldValidUntil)
+	}
+	if m.url != nil {
+		fields = append(fields, promointelitem.FieldURL)
+	}
+	if m.relevance != nil {
+		fields = append(fields, promointelitem.FieldRelevance)
+	}
+	if m.status != nil {
+		fields = append(fields, promointelitem.FieldStatus)
+	}
+	if m.fingerprint != nil {
+		fields = append(fields, promointelitem.FieldFingerprint)
+	}
+	if m.raw_excerpt != nil {
+		fields = append(fields, promointelitem.FieldRawExcerpt)
+	}
+	if m.extract_status != nil {
+		fields = append(fields, promointelitem.FieldExtractStatus)
+	}
+	if m.digest_date != nil {
+		fields = append(fields, promointelitem.FieldDigestDate)
+	}
+	if m.source_fetched_at != nil {
+		fields = append(fields, promointelitem.FieldSourceFetchedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *PromoIntelItemMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case promointelitem.FieldCreatedAt:
+		return m.CreatedAt()
+	case promointelitem.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case promointelitem.FieldSourceID:
+		return m.SourceID()
+	case promointelitem.FieldVendor:
+		return m.Vendor()
+	case promointelitem.FieldCategory:
+		return m.Category()
+	case promointelitem.FieldTitle:
+		return m.Title()
+	case promointelitem.FieldSummary:
+		return m.Summary()
+	case promointelitem.FieldDetails:
+		return m.Details()
+	case promointelitem.FieldDiscountInfo:
+		return m.DiscountInfo()
+	case promointelitem.FieldValidUntil:
+		return m.ValidUntil()
+	case promointelitem.FieldURL:
+		return m.URL()
+	case promointelitem.FieldRelevance:
+		return m.Relevance()
+	case promointelitem.FieldStatus:
+		return m.Status()
+	case promointelitem.FieldFingerprint:
+		return m.Fingerprint()
+	case promointelitem.FieldRawExcerpt:
+		return m.RawExcerpt()
+	case promointelitem.FieldExtractStatus:
+		return m.ExtractStatus()
+	case promointelitem.FieldDigestDate:
+		return m.DigestDate()
+	case promointelitem.FieldSourceFetchedAt:
+		return m.SourceFetchedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *PromoIntelItemMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case promointelitem.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case promointelitem.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case promointelitem.FieldSourceID:
+		return m.OldSourceID(ctx)
+	case promointelitem.FieldVendor:
+		return m.OldVendor(ctx)
+	case promointelitem.FieldCategory:
+		return m.OldCategory(ctx)
+	case promointelitem.FieldTitle:
+		return m.OldTitle(ctx)
+	case promointelitem.FieldSummary:
+		return m.OldSummary(ctx)
+	case promointelitem.FieldDetails:
+		return m.OldDetails(ctx)
+	case promointelitem.FieldDiscountInfo:
+		return m.OldDiscountInfo(ctx)
+	case promointelitem.FieldValidUntil:
+		return m.OldValidUntil(ctx)
+	case promointelitem.FieldURL:
+		return m.OldURL(ctx)
+	case promointelitem.FieldRelevance:
+		return m.OldRelevance(ctx)
+	case promointelitem.FieldStatus:
+		return m.OldStatus(ctx)
+	case promointelitem.FieldFingerprint:
+		return m.OldFingerprint(ctx)
+	case promointelitem.FieldRawExcerpt:
+		return m.OldRawExcerpt(ctx)
+	case promointelitem.FieldExtractStatus:
+		return m.OldExtractStatus(ctx)
+	case promointelitem.FieldDigestDate:
+		return m.OldDigestDate(ctx)
+	case promointelitem.FieldSourceFetchedAt:
+		return m.OldSourceFetchedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown PromoIntelItem field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *PromoIntelItemMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case promointelitem.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case promointelitem.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case promointelitem.FieldSourceID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceID(v)
+		return nil
+	case promointelitem.FieldVendor:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVendor(v)
+		return nil
+	case promointelitem.FieldCategory:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCategory(v)
+		return nil
+	case promointelitem.FieldTitle:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTitle(v)
+		return nil
+	case promointelitem.FieldSummary:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSummary(v)
+		return nil
+	case promointelitem.FieldDetails:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDetails(v)
+		return nil
+	case promointelitem.FieldDiscountInfo:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDiscountInfo(v)
+		return nil
+	case promointelitem.FieldValidUntil:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetValidUntil(v)
+		return nil
+	case promointelitem.FieldURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetURL(v)
+		return nil
+	case promointelitem.FieldRelevance:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRelevance(v)
+		return nil
+	case promointelitem.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case promointelitem.FieldFingerprint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFingerprint(v)
+		return nil
+	case promointelitem.FieldRawExcerpt:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRawExcerpt(v)
+		return nil
+	case promointelitem.FieldExtractStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExtractStatus(v)
+		return nil
+	case promointelitem.FieldDigestDate:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDigestDate(v)
+		return nil
+	case promointelitem.FieldSourceFetchedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceFetchedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelItem field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *PromoIntelItemMutation) AddedFields() []string {
+	var fields []string
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *PromoIntelItemMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *PromoIntelItemMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown PromoIntelItem numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *PromoIntelItemMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(promointelitem.FieldDigestDate) {
+		fields = append(fields, promointelitem.FieldDigestDate)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *PromoIntelItemMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *PromoIntelItemMutation) ClearField(name string) error {
+	switch name {
+	case promointelitem.FieldDigestDate:
+		m.ClearDigestDate()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelItem nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *PromoIntelItemMutation) ResetField(name string) error {
+	switch name {
+	case promointelitem.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case promointelitem.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case promointelitem.FieldSourceID:
+		m.ResetSourceID()
+		return nil
+	case promointelitem.FieldVendor:
+		m.ResetVendor()
+		return nil
+	case promointelitem.FieldCategory:
+		m.ResetCategory()
+		return nil
+	case promointelitem.FieldTitle:
+		m.ResetTitle()
+		return nil
+	case promointelitem.FieldSummary:
+		m.ResetSummary()
+		return nil
+	case promointelitem.FieldDetails:
+		m.ResetDetails()
+		return nil
+	case promointelitem.FieldDiscountInfo:
+		m.ResetDiscountInfo()
+		return nil
+	case promointelitem.FieldValidUntil:
+		m.ResetValidUntil()
+		return nil
+	case promointelitem.FieldURL:
+		m.ResetURL()
+		return nil
+	case promointelitem.FieldRelevance:
+		m.ResetRelevance()
+		return nil
+	case promointelitem.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case promointelitem.FieldFingerprint:
+		m.ResetFingerprint()
+		return nil
+	case promointelitem.FieldRawExcerpt:
+		m.ResetRawExcerpt()
+		return nil
+	case promointelitem.FieldExtractStatus:
+		m.ResetExtractStatus()
+		return nil
+	case promointelitem.FieldDigestDate:
+		m.ResetDigestDate()
+		return nil
+	case promointelitem.FieldSourceFetchedAt:
+		m.ResetSourceFetchedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelItem field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *PromoIntelItemMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.source != nil {
+		edges = append(edges, promointelitem.EdgeSource)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *PromoIntelItemMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case promointelitem.EdgeSource:
+		if id := m.source; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *PromoIntelItemMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *PromoIntelItemMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *PromoIntelItemMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedsource {
+		edges = append(edges, promointelitem.EdgeSource)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *PromoIntelItemMutation) EdgeCleared(name string) bool {
+	switch name {
+	case promointelitem.EdgeSource:
+		return m.clearedsource
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *PromoIntelItemMutation) ClearEdge(name string) error {
+	switch name {
+	case promointelitem.EdgeSource:
+		m.ClearSource()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelItem unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *PromoIntelItemMutation) ResetEdge(name string) error {
+	switch name {
+	case promointelitem.EdgeSource:
+		m.ResetSource()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelItem edge %s", name)
+}
+
+// PromoIntelSourceMutation represents an operation that mutates the PromoIntelSource nodes in the graph.
+type PromoIntelSourceMutation struct {
+	config
+	op                        Op
+	typ                       string
+	id                        *int64
+	created_at                *time.Time
+	updated_at                *time.Time
+	name                      *string
+	vendor                    *string
+	category                  *string
+	url                       *string
+	fetch_interval_minutes    *int
+	addfetch_interval_minutes *int
+	enabled                   *bool
+	llm_extract               *bool
+	notes                     *string
+	last_fetched_at           *time.Time
+	last_extracted_hash       *string
+	last_status               *string
+	last_error                *string
+	created_by                *int64
+	addcreated_by             *int64
+	clearedFields             map[string]struct{}
+	items                     map[int64]struct{}
+	removeditems              map[int64]struct{}
+	cleareditems              bool
+	done                      bool
+	oldValue                  func(context.Context) (*PromoIntelSource, error)
+	predicates                []predicate.PromoIntelSource
+}
+
+var _ ent.Mutation = (*PromoIntelSourceMutation)(nil)
+
+// promointelsourceOption allows management of the mutation configuration using functional options.
+type promointelsourceOption func(*PromoIntelSourceMutation)
+
+// newPromoIntelSourceMutation creates new mutation for the PromoIntelSource entity.
+func newPromoIntelSourceMutation(c config, op Op, opts ...promointelsourceOption) *PromoIntelSourceMutation {
+	m := &PromoIntelSourceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypePromoIntelSource,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withPromoIntelSourceID sets the ID field of the mutation.
+func withPromoIntelSourceID(id int64) promointelsourceOption {
+	return func(m *PromoIntelSourceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *PromoIntelSource
+		)
+		m.oldValue = func(ctx context.Context) (*PromoIntelSource, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().PromoIntelSource.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withPromoIntelSource sets the old PromoIntelSource of the mutation.
+func withPromoIntelSource(node *PromoIntelSource) promointelsourceOption {
+	return func(m *PromoIntelSourceMutation) {
+		m.oldValue = func(context.Context) (*PromoIntelSource, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m PromoIntelSourceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m PromoIntelSourceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *PromoIntelSourceMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *PromoIntelSourceMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().PromoIntelSource.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *PromoIntelSourceMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *PromoIntelSourceMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *PromoIntelSourceMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *PromoIntelSourceMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *PromoIntelSourceMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *PromoIntelSourceMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetName sets the "name" field.
+func (m *PromoIntelSourceMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *PromoIntelSourceMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *PromoIntelSourceMutation) ResetName() {
+	m.name = nil
+}
+
+// SetVendor sets the "vendor" field.
+func (m *PromoIntelSourceMutation) SetVendor(s string) {
+	m.vendor = &s
+}
+
+// Vendor returns the value of the "vendor" field in the mutation.
+func (m *PromoIntelSourceMutation) Vendor() (r string, exists bool) {
+	v := m.vendor
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVendor returns the old "vendor" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldVendor(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVendor is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVendor requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVendor: %w", err)
+	}
+	return oldValue.Vendor, nil
+}
+
+// ResetVendor resets all changes to the "vendor" field.
+func (m *PromoIntelSourceMutation) ResetVendor() {
+	m.vendor = nil
+}
+
+// SetCategory sets the "category" field.
+func (m *PromoIntelSourceMutation) SetCategory(s string) {
+	m.category = &s
+}
+
+// Category returns the value of the "category" field in the mutation.
+func (m *PromoIntelSourceMutation) Category() (r string, exists bool) {
+	v := m.category
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCategory returns the old "category" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldCategory(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCategory is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCategory requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCategory: %w", err)
+	}
+	return oldValue.Category, nil
+}
+
+// ResetCategory resets all changes to the "category" field.
+func (m *PromoIntelSourceMutation) ResetCategory() {
+	m.category = nil
+}
+
+// SetURL sets the "url" field.
+func (m *PromoIntelSourceMutation) SetURL(s string) {
+	m.url = &s
+}
+
+// URL returns the value of the "url" field in the mutation.
+func (m *PromoIntelSourceMutation) URL() (r string, exists bool) {
+	v := m.url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldURL returns the old "url" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldURL(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldURL: %w", err)
+	}
+	return oldValue.URL, nil
+}
+
+// ResetURL resets all changes to the "url" field.
+func (m *PromoIntelSourceMutation) ResetURL() {
+	m.url = nil
+}
+
+// SetFetchIntervalMinutes sets the "fetch_interval_minutes" field.
+func (m *PromoIntelSourceMutation) SetFetchIntervalMinutes(i int) {
+	m.fetch_interval_minutes = &i
+	m.addfetch_interval_minutes = nil
+}
+
+// FetchIntervalMinutes returns the value of the "fetch_interval_minutes" field in the mutation.
+func (m *PromoIntelSourceMutation) FetchIntervalMinutes() (r int, exists bool) {
+	v := m.fetch_interval_minutes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFetchIntervalMinutes returns the old "fetch_interval_minutes" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldFetchIntervalMinutes(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFetchIntervalMinutes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFetchIntervalMinutes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFetchIntervalMinutes: %w", err)
+	}
+	return oldValue.FetchIntervalMinutes, nil
+}
+
+// AddFetchIntervalMinutes adds i to the "fetch_interval_minutes" field.
+func (m *PromoIntelSourceMutation) AddFetchIntervalMinutes(i int) {
+	if m.addfetch_interval_minutes != nil {
+		*m.addfetch_interval_minutes += i
+	} else {
+		m.addfetch_interval_minutes = &i
+	}
+}
+
+// AddedFetchIntervalMinutes returns the value that was added to the "fetch_interval_minutes" field in this mutation.
+func (m *PromoIntelSourceMutation) AddedFetchIntervalMinutes() (r int, exists bool) {
+	v := m.addfetch_interval_minutes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetFetchIntervalMinutes resets all changes to the "fetch_interval_minutes" field.
+func (m *PromoIntelSourceMutation) ResetFetchIntervalMinutes() {
+	m.fetch_interval_minutes = nil
+	m.addfetch_interval_minutes = nil
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *PromoIntelSourceMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *PromoIntelSourceMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *PromoIntelSourceMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetLlmExtract sets the "llm_extract" field.
+func (m *PromoIntelSourceMutation) SetLlmExtract(b bool) {
+	m.llm_extract = &b
+}
+
+// LlmExtract returns the value of the "llm_extract" field in the mutation.
+func (m *PromoIntelSourceMutation) LlmExtract() (r bool, exists bool) {
+	v := m.llm_extract
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLlmExtract returns the old "llm_extract" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldLlmExtract(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLlmExtract is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLlmExtract requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLlmExtract: %w", err)
+	}
+	return oldValue.LlmExtract, nil
+}
+
+// ResetLlmExtract resets all changes to the "llm_extract" field.
+func (m *PromoIntelSourceMutation) ResetLlmExtract() {
+	m.llm_extract = nil
+}
+
+// SetNotes sets the "notes" field.
+func (m *PromoIntelSourceMutation) SetNotes(s string) {
+	m.notes = &s
+}
+
+// Notes returns the value of the "notes" field in the mutation.
+func (m *PromoIntelSourceMutation) Notes() (r string, exists bool) {
+	v := m.notes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotes returns the old "notes" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldNotes(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotes: %w", err)
+	}
+	return oldValue.Notes, nil
+}
+
+// ResetNotes resets all changes to the "notes" field.
+func (m *PromoIntelSourceMutation) ResetNotes() {
+	m.notes = nil
+}
+
+// SetLastFetchedAt sets the "last_fetched_at" field.
+func (m *PromoIntelSourceMutation) SetLastFetchedAt(t time.Time) {
+	m.last_fetched_at = &t
+}
+
+// LastFetchedAt returns the value of the "last_fetched_at" field in the mutation.
+func (m *PromoIntelSourceMutation) LastFetchedAt() (r time.Time, exists bool) {
+	v := m.last_fetched_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastFetchedAt returns the old "last_fetched_at" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldLastFetchedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastFetchedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastFetchedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastFetchedAt: %w", err)
+	}
+	return oldValue.LastFetchedAt, nil
+}
+
+// ClearLastFetchedAt clears the value of the "last_fetched_at" field.
+func (m *PromoIntelSourceMutation) ClearLastFetchedAt() {
+	m.last_fetched_at = nil
+	m.clearedFields[promointelsource.FieldLastFetchedAt] = struct{}{}
+}
+
+// LastFetchedAtCleared returns if the "last_fetched_at" field was cleared in this mutation.
+func (m *PromoIntelSourceMutation) LastFetchedAtCleared() bool {
+	_, ok := m.clearedFields[promointelsource.FieldLastFetchedAt]
+	return ok
+}
+
+// ResetLastFetchedAt resets all changes to the "last_fetched_at" field.
+func (m *PromoIntelSourceMutation) ResetLastFetchedAt() {
+	m.last_fetched_at = nil
+	delete(m.clearedFields, promointelsource.FieldLastFetchedAt)
+}
+
+// SetLastExtractedHash sets the "last_extracted_hash" field.
+func (m *PromoIntelSourceMutation) SetLastExtractedHash(s string) {
+	m.last_extracted_hash = &s
+}
+
+// LastExtractedHash returns the value of the "last_extracted_hash" field in the mutation.
+func (m *PromoIntelSourceMutation) LastExtractedHash() (r string, exists bool) {
+	v := m.last_extracted_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastExtractedHash returns the old "last_extracted_hash" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldLastExtractedHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastExtractedHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastExtractedHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastExtractedHash: %w", err)
+	}
+	return oldValue.LastExtractedHash, nil
+}
+
+// ResetLastExtractedHash resets all changes to the "last_extracted_hash" field.
+func (m *PromoIntelSourceMutation) ResetLastExtractedHash() {
+	m.last_extracted_hash = nil
+}
+
+// SetLastStatus sets the "last_status" field.
+func (m *PromoIntelSourceMutation) SetLastStatus(s string) {
+	m.last_status = &s
+}
+
+// LastStatus returns the value of the "last_status" field in the mutation.
+func (m *PromoIntelSourceMutation) LastStatus() (r string, exists bool) {
+	v := m.last_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastStatus returns the old "last_status" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldLastStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastStatus: %w", err)
+	}
+	return oldValue.LastStatus, nil
+}
+
+// ResetLastStatus resets all changes to the "last_status" field.
+func (m *PromoIntelSourceMutation) ResetLastStatus() {
+	m.last_status = nil
+}
+
+// SetLastError sets the "last_error" field.
+func (m *PromoIntelSourceMutation) SetLastError(s string) {
+	m.last_error = &s
+}
+
+// LastError returns the value of the "last_error" field in the mutation.
+func (m *PromoIntelSourceMutation) LastError() (r string, exists bool) {
+	v := m.last_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastError returns the old "last_error" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldLastError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastError: %w", err)
+	}
+	return oldValue.LastError, nil
+}
+
+// ResetLastError resets all changes to the "last_error" field.
+func (m *PromoIntelSourceMutation) ResetLastError() {
+	m.last_error = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *PromoIntelSourceMutation) SetCreatedBy(i int64) {
+	m.created_by = &i
+	m.addcreated_by = nil
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *PromoIntelSourceMutation) CreatedBy() (r int64, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the PromoIntelSource entity.
+// If the PromoIntelSource object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *PromoIntelSourceMutation) OldCreatedBy(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// AddCreatedBy adds i to the "created_by" field.
+func (m *PromoIntelSourceMutation) AddCreatedBy(i int64) {
+	if m.addcreated_by != nil {
+		*m.addcreated_by += i
+	} else {
+		m.addcreated_by = &i
+	}
+}
+
+// AddedCreatedBy returns the value that was added to the "created_by" field in this mutation.
+func (m *PromoIntelSourceMutation) AddedCreatedBy() (r int64, exists bool) {
+	v := m.addcreated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *PromoIntelSourceMutation) ResetCreatedBy() {
+	m.created_by = nil
+	m.addcreated_by = nil
+}
+
+// AddItemIDs adds the "items" edge to the PromoIntelItem entity by ids.
+func (m *PromoIntelSourceMutation) AddItemIDs(ids ...int64) {
+	if m.items == nil {
+		m.items = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.items[ids[i]] = struct{}{}
+	}
+}
+
+// ClearItems clears the "items" edge to the PromoIntelItem entity.
+func (m *PromoIntelSourceMutation) ClearItems() {
+	m.cleareditems = true
+}
+
+// ItemsCleared reports if the "items" edge to the PromoIntelItem entity was cleared.
+func (m *PromoIntelSourceMutation) ItemsCleared() bool {
+	return m.cleareditems
+}
+
+// RemoveItemIDs removes the "items" edge to the PromoIntelItem entity by IDs.
+func (m *PromoIntelSourceMutation) RemoveItemIDs(ids ...int64) {
+	if m.removeditems == nil {
+		m.removeditems = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.items, ids[i])
+		m.removeditems[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedItems returns the removed IDs of the "items" edge to the PromoIntelItem entity.
+func (m *PromoIntelSourceMutation) RemovedItemsIDs() (ids []int64) {
+	for id := range m.removeditems {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ItemsIDs returns the "items" edge IDs in the mutation.
+func (m *PromoIntelSourceMutation) ItemsIDs() (ids []int64) {
+	for id := range m.items {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetItems resets all changes to the "items" edge.
+func (m *PromoIntelSourceMutation) ResetItems() {
+	m.items = nil
+	m.cleareditems = false
+	m.removeditems = nil
+}
+
+// Where appends a list predicates to the PromoIntelSourceMutation builder.
+func (m *PromoIntelSourceMutation) Where(ps ...predicate.PromoIntelSource) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the PromoIntelSourceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *PromoIntelSourceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.PromoIntelSource, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *PromoIntelSourceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *PromoIntelSourceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (PromoIntelSource).
+func (m *PromoIntelSourceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *PromoIntelSourceMutation) Fields() []string {
+	fields := make([]string, 0, 15)
+	if m.created_at != nil {
+		fields = append(fields, promointelsource.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, promointelsource.FieldUpdatedAt)
+	}
+	if m.name != nil {
+		fields = append(fields, promointelsource.FieldName)
+	}
+	if m.vendor != nil {
+		fields = append(fields, promointelsource.FieldVendor)
+	}
+	if m.category != nil {
+		fields = append(fields, promointelsource.FieldCategory)
+	}
+	if m.url != nil {
+		fields = append(fields, promointelsource.FieldURL)
+	}
+	if m.fetch_interval_minutes != nil {
+		fields = append(fields, promointelsource.FieldFetchIntervalMinutes)
+	}
+	if m.enabled != nil {
+		fields = append(fields, promointelsource.FieldEnabled)
+	}
+	if m.llm_extract != nil {
+		fields = append(fields, promointelsource.FieldLlmExtract)
+	}
+	if m.notes != nil {
+		fields = append(fields, promointelsource.FieldNotes)
+	}
+	if m.last_fetched_at != nil {
+		fields = append(fields, promointelsource.FieldLastFetchedAt)
+	}
+	if m.last_extracted_hash != nil {
+		fields = append(fields, promointelsource.FieldLastExtractedHash)
+	}
+	if m.last_status != nil {
+		fields = append(fields, promointelsource.FieldLastStatus)
+	}
+	if m.last_error != nil {
+		fields = append(fields, promointelsource.FieldLastError)
+	}
+	if m.created_by != nil {
+		fields = append(fields, promointelsource.FieldCreatedBy)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *PromoIntelSourceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case promointelsource.FieldCreatedAt:
+		return m.CreatedAt()
+	case promointelsource.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case promointelsource.FieldName:
+		return m.Name()
+	case promointelsource.FieldVendor:
+		return m.Vendor()
+	case promointelsource.FieldCategory:
+		return m.Category()
+	case promointelsource.FieldURL:
+		return m.URL()
+	case promointelsource.FieldFetchIntervalMinutes:
+		return m.FetchIntervalMinutes()
+	case promointelsource.FieldEnabled:
+		return m.Enabled()
+	case promointelsource.FieldLlmExtract:
+		return m.LlmExtract()
+	case promointelsource.FieldNotes:
+		return m.Notes()
+	case promointelsource.FieldLastFetchedAt:
+		return m.LastFetchedAt()
+	case promointelsource.FieldLastExtractedHash:
+		return m.LastExtractedHash()
+	case promointelsource.FieldLastStatus:
+		return m.LastStatus()
+	case promointelsource.FieldLastError:
+		return m.LastError()
+	case promointelsource.FieldCreatedBy:
+		return m.CreatedBy()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *PromoIntelSourceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case promointelsource.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case promointelsource.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case promointelsource.FieldName:
+		return m.OldName(ctx)
+	case promointelsource.FieldVendor:
+		return m.OldVendor(ctx)
+	case promointelsource.FieldCategory:
+		return m.OldCategory(ctx)
+	case promointelsource.FieldURL:
+		return m.OldURL(ctx)
+	case promointelsource.FieldFetchIntervalMinutes:
+		return m.OldFetchIntervalMinutes(ctx)
+	case promointelsource.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case promointelsource.FieldLlmExtract:
+		return m.OldLlmExtract(ctx)
+	case promointelsource.FieldNotes:
+		return m.OldNotes(ctx)
+	case promointelsource.FieldLastFetchedAt:
+		return m.OldLastFetchedAt(ctx)
+	case promointelsource.FieldLastExtractedHash:
+		return m.OldLastExtractedHash(ctx)
+	case promointelsource.FieldLastStatus:
+		return m.OldLastStatus(ctx)
+	case promointelsource.FieldLastError:
+		return m.OldLastError(ctx)
+	case promointelsource.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	}
+	return nil, fmt.Errorf("unknown PromoIntelSource field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *PromoIntelSourceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case promointelsource.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case promointelsource.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case promointelsource.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case promointelsource.FieldVendor:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVendor(v)
+		return nil
+	case promointelsource.FieldCategory:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCategory(v)
+		return nil
+	case promointelsource.FieldURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetURL(v)
+		return nil
+	case promointelsource.FieldFetchIntervalMinutes:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFetchIntervalMinutes(v)
+		return nil
+	case promointelsource.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case promointelsource.FieldLlmExtract:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLlmExtract(v)
+		return nil
+	case promointelsource.FieldNotes:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotes(v)
+		return nil
+	case promointelsource.FieldLastFetchedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastFetchedAt(v)
+		return nil
+	case promointelsource.FieldLastExtractedHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastExtractedHash(v)
+		return nil
+	case promointelsource.FieldLastStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastStatus(v)
+		return nil
+	case promointelsource.FieldLastError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastError(v)
+		return nil
+	case promointelsource.FieldCreatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelSource field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *PromoIntelSourceMutation) AddedFields() []string {
+	var fields []string
+	if m.addfetch_interval_minutes != nil {
+		fields = append(fields, promointelsource.FieldFetchIntervalMinutes)
+	}
+	if m.addcreated_by != nil {
+		fields = append(fields, promointelsource.FieldCreatedBy)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *PromoIntelSourceMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case promointelsource.FieldFetchIntervalMinutes:
+		return m.AddedFetchIntervalMinutes()
+	case promointelsource.FieldCreatedBy:
+		return m.AddedCreatedBy()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *PromoIntelSourceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case promointelsource.FieldFetchIntervalMinutes:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddFetchIntervalMinutes(v)
+		return nil
+	case promointelsource.FieldCreatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCreatedBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelSource numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *PromoIntelSourceMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(promointelsource.FieldLastFetchedAt) {
+		fields = append(fields, promointelsource.FieldLastFetchedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *PromoIntelSourceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *PromoIntelSourceMutation) ClearField(name string) error {
+	switch name {
+	case promointelsource.FieldLastFetchedAt:
+		m.ClearLastFetchedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelSource nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *PromoIntelSourceMutation) ResetField(name string) error {
+	switch name {
+	case promointelsource.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case promointelsource.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case promointelsource.FieldName:
+		m.ResetName()
+		return nil
+	case promointelsource.FieldVendor:
+		m.ResetVendor()
+		return nil
+	case promointelsource.FieldCategory:
+		m.ResetCategory()
+		return nil
+	case promointelsource.FieldURL:
+		m.ResetURL()
+		return nil
+	case promointelsource.FieldFetchIntervalMinutes:
+		m.ResetFetchIntervalMinutes()
+		return nil
+	case promointelsource.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case promointelsource.FieldLlmExtract:
+		m.ResetLlmExtract()
+		return nil
+	case promointelsource.FieldNotes:
+		m.ResetNotes()
+		return nil
+	case promointelsource.FieldLastFetchedAt:
+		m.ResetLastFetchedAt()
+		return nil
+	case promointelsource.FieldLastExtractedHash:
+		m.ResetLastExtractedHash()
+		return nil
+	case promointelsource.FieldLastStatus:
+		m.ResetLastStatus()
+		return nil
+	case promointelsource.FieldLastError:
+		m.ResetLastError()
+		return nil
+	case promointelsource.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelSource field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *PromoIntelSourceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.items != nil {
+		edges = append(edges, promointelsource.EdgeItems)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *PromoIntelSourceMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case promointelsource.EdgeItems:
+		ids := make([]ent.Value, 0, len(m.items))
+		for id := range m.items {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *PromoIntelSourceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.removeditems != nil {
+		edges = append(edges, promointelsource.EdgeItems)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *PromoIntelSourceMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case promointelsource.EdgeItems:
+		ids := make([]ent.Value, 0, len(m.removeditems))
+		for id := range m.removeditems {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *PromoIntelSourceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.cleareditems {
+		edges = append(edges, promointelsource.EdgeItems)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *PromoIntelSourceMutation) EdgeCleared(name string) bool {
+	switch name {
+	case promointelsource.EdgeItems:
+		return m.cleareditems
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *PromoIntelSourceMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown PromoIntelSource unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *PromoIntelSourceMutation) ResetEdge(name string) error {
+	switch name {
+	case promointelsource.EdgeItems:
+		m.ResetItems()
+		return nil
+	}
+	return fmt.Errorf("unknown PromoIntelSource edge %s", name)
 }
 
 // ProxyMutation represents an operation that mutates the Proxy nodes in the graph.

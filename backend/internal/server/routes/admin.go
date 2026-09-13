@@ -127,6 +127,9 @@ func RegisterAdminRoutes(
 
 		// 渠道监控
 		registerChannelMonitorRoutes(admin, h, settingService)
+
+		// 优惠情报
+		registerPromoIntelRoutes(admin, h)
 		registerChannelMonitorV2Routes(admin, h, settingService)
 
 		// 风控中心
@@ -898,6 +901,29 @@ func registerPricingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		pricing.POST("/custom", h.Admin.Pricing.CreateCustom)
 		pricing.PUT("/custom/:id", h.Admin.Pricing.UpdateCustom)
 		pricing.DELETE("/custom/:id", h.Admin.Pricing.DeleteCustom)
+	}
+}
+
+// registerPromoIntelRoutes 优惠情报管理端路由：资讯源 CRUD/立即抓取、
+// 情报列表/分诊、每日简报、整理模型设置与连通性测试。
+func registerPromoIntelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	guard := h.Admin.PromoIntel.FeatureGuard()
+	intel := admin.Group("/promo-intel")
+	intel.Use(guard)
+	{
+		intel.GET("/sources", h.Admin.PromoIntel.ListSources)
+		intel.POST("/sources", h.Admin.PromoIntel.CreateSource)
+		intel.PUT("/sources/:id", h.Admin.PromoIntel.UpdateSource)
+		intel.DELETE("/sources/:id", h.Admin.PromoIntel.DeleteSource)
+		intel.POST("/sources/:id/fetch", h.Admin.PromoIntel.FetchSourceNow)
+
+		intel.GET("/items", h.Admin.PromoIntel.ListItems)
+		intel.PUT("/items/:id/status", h.Admin.PromoIntel.UpdateItemStatus)
+		intel.GET("/briefing", h.Admin.PromoIntel.GetBriefing)
+
+		intel.GET("/settings", h.Admin.PromoIntel.GetSettings)
+		intel.PUT("/settings", h.Admin.PromoIntel.UpdateSettings)
+		intel.POST("/settings/test", h.Admin.PromoIntel.TestSettings)
 	}
 }
 

@@ -499,6 +499,21 @@ const (
 	ChannelMonitorModeV1 = "v1"
 	ChannelMonitorModeV2 = "v2"
 
+	// =========================
+	// Promo Intel (优惠情报)
+	// =========================
+
+	// SettingKeyPromoIntelEnabled is a DB-backed soft switch for the promo intel
+	// feature. When false: the scan loop skips cycles and admin API returns 403.
+	SettingKeyPromoIntelEnabled = "promo_intel_enabled"
+
+	// SettingKeyPromoIntelLLMBaseURL / LLMAPIKey / LLMModel configure the
+	// independent OpenAI-compatible extraction endpoint. Empty base/model means
+	// "not configured": fetches degrade to raw pending items instead of being lost.
+	SettingKeyPromoIntelLLMBaseURL = "promo_intel_llm_base_url"
+	SettingKeyPromoIntelLLMAPIKey  = "promo_intel_llm_api_key"
+	SettingKeyPromoIntelLLMModel   = "promo_intel_llm_model"
+
 	// SettingKeyChannelMonitorDefaultIntervalSeconds controls the default interval (seconds)
 	// pre-filled when creating a new channel monitor from the admin UI. Range: [15, 3600].
 	SettingKeyChannelMonitorDefaultIntervalSeconds = "channel_monitor_default_interval_seconds"

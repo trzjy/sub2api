@@ -34,6 +34,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
+	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
+	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
@@ -784,6 +786,60 @@ func (f TraversePromoCodeUsage) Traverse(ctx context.Context, q ent.Query) error
 	return fmt.Errorf("unexpected query type %T. expect *ent.PromoCodeUsageQuery", q)
 }
 
+// The PromoIntelItemFunc type is an adapter to allow the use of ordinary function as a Querier.
+type PromoIntelItemFunc func(context.Context, *ent.PromoIntelItemQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f PromoIntelItemFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.PromoIntelItemQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.PromoIntelItemQuery", q)
+}
+
+// The TraversePromoIntelItem type is an adapter to allow the use of ordinary function as Traverser.
+type TraversePromoIntelItem func(context.Context, *ent.PromoIntelItemQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraversePromoIntelItem) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraversePromoIntelItem) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.PromoIntelItemQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.PromoIntelItemQuery", q)
+}
+
+// The PromoIntelSourceFunc type is an adapter to allow the use of ordinary function as a Querier.
+type PromoIntelSourceFunc func(context.Context, *ent.PromoIntelSourceQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f PromoIntelSourceFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.PromoIntelSourceQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.PromoIntelSourceQuery", q)
+}
+
+// The TraversePromoIntelSource type is an adapter to allow the use of ordinary function as Traverser.
+type TraversePromoIntelSource func(context.Context, *ent.PromoIntelSourceQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraversePromoIntelSource) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraversePromoIntelSource) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.PromoIntelSourceQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.PromoIntelSourceQuery", q)
+}
+
 // The ProxyFunc type is an adapter to allow the use of ordinary function as a Querier.
 type ProxyFunc func(context.Context, *ent.ProxyQuery) (ent.Value, error)
 
@@ -1296,6 +1352,10 @@ func NewQuery(q ent.Query) (Query, error) {
 		return &query[*ent.PromoCodeQuery, predicate.PromoCode, promocode.OrderOption]{typ: ent.TypePromoCode, tq: q}, nil
 	case *ent.PromoCodeUsageQuery:
 		return &query[*ent.PromoCodeUsageQuery, predicate.PromoCodeUsage, promocodeusage.OrderOption]{typ: ent.TypePromoCodeUsage, tq: q}, nil
+	case *ent.PromoIntelItemQuery:
+		return &query[*ent.PromoIntelItemQuery, predicate.PromoIntelItem, promointelitem.OrderOption]{typ: ent.TypePromoIntelItem, tq: q}, nil
+	case *ent.PromoIntelSourceQuery:
+		return &query[*ent.PromoIntelSourceQuery, predicate.PromoIntelSource, promointelsource.OrderOption]{typ: ent.TypePromoIntelSource, tq: q}, nil
 	case *ent.ProxyQuery:
 		return &query[*ent.ProxyQuery, predicate.Proxy, proxy.OrderOption]{typ: ent.TypeProxy, tq: q}, nil
 	case *ent.RedeemBatchQuery:

@@ -1400,6 +1400,101 @@ var (
 			},
 		},
 	}
+	// PromoIntelItemsColumns holds the columns for the "promo_intel_items" table.
+	PromoIntelItemsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "vendor", Type: field.TypeString, Size: 50, Default: "other"},
+		{Name: "category", Type: field.TypeString, Size: 32, Default: "other"},
+		{Name: "title", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "summary", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "details", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "discount_info", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "valid_until", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "url", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "relevance", Type: field.TypeString, Size: 16, Default: "medium"},
+		{Name: "status", Type: field.TypeString, Size: 16, Default: "pending"},
+		{Name: "fingerprint", Type: field.TypeString, Size: 64},
+		{Name: "raw_excerpt", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "extract_status", Type: field.TypeString, Size: 16, Default: "llm"},
+		{Name: "digest_date", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "date"}},
+		{Name: "source_fetched_at", Type: field.TypeTime},
+		{Name: "source_id", Type: field.TypeInt64},
+	}
+	// PromoIntelItemsTable holds the schema information for the "promo_intel_items" table.
+	PromoIntelItemsTable = &schema.Table{
+		Name:       "promo_intel_items",
+		Columns:    PromoIntelItemsColumns,
+		PrimaryKey: []*schema.Column{PromoIntelItemsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "promo_intel_items_promo_intel_sources_items",
+				Columns:    []*schema.Column{PromoIntelItemsColumns[18]},
+				RefColumns: []*schema.Column{PromoIntelSourcesColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "promointelitem_fingerprint",
+				Unique:  true,
+				Columns: []*schema.Column{PromoIntelItemsColumns[13]},
+			},
+			{
+				Name:    "promointelitem_status_digest_date",
+				Unique:  false,
+				Columns: []*schema.Column{PromoIntelItemsColumns[12], PromoIntelItemsColumns[16]},
+			},
+			{
+				Name:    "promointelitem_vendor",
+				Unique:  false,
+				Columns: []*schema.Column{PromoIntelItemsColumns[3]},
+			},
+			{
+				Name:    "promointelitem_source_id",
+				Unique:  false,
+				Columns: []*schema.Column{PromoIntelItemsColumns[18]},
+			},
+		},
+	}
+	// PromoIntelSourcesColumns holds the columns for the "promo_intel_sources" table.
+	PromoIntelSourcesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "name", Type: field.TypeString, Size: 100},
+		{Name: "vendor", Type: field.TypeString, Size: 50, Default: "other"},
+		{Name: "category", Type: field.TypeString, Size: 32, Default: "announcement"},
+		{Name: "url", Type: field.TypeString, Size: 2048, Default: ""},
+		{Name: "fetch_interval_minutes", Type: field.TypeInt, Default: 1440},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "llm_extract", Type: field.TypeBool, Default: true},
+		{Name: "notes", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "last_fetched_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_extracted_hash", Type: field.TypeString, Size: 64, Default: ""},
+		{Name: "last_status", Type: field.TypeString, Size: 16, Default: ""},
+		{Name: "last_error", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "created_by", Type: field.TypeInt64, Default: 0},
+	}
+	// PromoIntelSourcesTable holds the schema information for the "promo_intel_sources" table.
+	PromoIntelSourcesTable = &schema.Table{
+		Name:       "promo_intel_sources",
+		Columns:    PromoIntelSourcesColumns,
+		PrimaryKey: []*schema.Column{PromoIntelSourcesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "promointelsource_name",
+				Unique:  true,
+				Columns: []*schema.Column{PromoIntelSourcesColumns[3]},
+			},
+			{
+				Name:    "promointelsource_enabled_last_fetched_at",
+				Unique:  false,
+				Columns: []*schema.Column{PromoIntelSourcesColumns[8], PromoIntelSourcesColumns[11]},
+			},
+		},
+	}
 	// ProxiesColumns holds the columns for the "proxies" table.
 	ProxiesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -1479,7 +1574,7 @@ var (
 	// RedeemCodesColumns holds the columns for the "redeem_codes" table.
 	RedeemCodesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
-		{Name: "code", Type: field.TypeString, Unique: true, Size: 32},
+		{Name: "code", Type: field.TypeString, Unique: true, Size: 64},
 		{Name: "type", Type: field.TypeString, Size: 20, Default: "balance"},
 		{Name: "value", Type: field.TypeFloat64, Default: 0, SchemaType: map[string]string{"postgres": "decimal(20,8)"}},
 		{Name: "status", Type: field.TypeString, Size: 20, Default: "unused"},
@@ -2228,6 +2323,8 @@ var (
 		PendingAuthSessionsTable,
 		PromoCodesTable,
 		PromoCodeUsagesTable,
+		PromoIntelItemsTable,
+		PromoIntelSourcesTable,
 		ProxiesTable,
 		RedeemBatchesTable,
 		RedeemCodesTable,
@@ -2343,6 +2440,13 @@ func init() {
 	PromoCodeUsagesTable.ForeignKeys[1].RefTable = UsersTable
 	PromoCodeUsagesTable.Annotation = &entsql.Annotation{
 		Table: "promo_code_usages",
+	}
+	PromoIntelItemsTable.ForeignKeys[0].RefTable = PromoIntelSourcesTable
+	PromoIntelItemsTable.Annotation = &entsql.Annotation{
+		Table: "promo_intel_items",
+	}
+	PromoIntelSourcesTable.Annotation = &entsql.Annotation{
+		Table: "promo_intel_sources",
 	}
 	ProxiesTable.ForeignKeys[0].RefTable = ProxiesTable
 	ProxiesTable.Annotation = &entsql.Annotation{

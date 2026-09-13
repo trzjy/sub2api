@@ -1187,11 +1187,30 @@ var ProviderSet = wire.NewSet(
 	ProvideChannelMonitorV2Aggregator,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
+	ProvidePromoIntelService,
 )
 
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
 func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService) *UserPlatformQuotaUsageFlusher {
 	svc := NewUserPlatformQuotaUsageFlusher(cfg, cache, quotaRepo, tw)
+	svc.Start()
+	return svc
+}
+
+// ProvidePromoIntelService 构造并启动优惠情报轮询循环（leader lock 防多实例重复）。
+func ProvidePromoIntelService(
+	repo PromoIntelRepository,
+	settings SettingRepository,
+	cfg *config.Config,
+	lockCache LeaderLockCache,
+	db *sql.DB,
+) *PromoIntelService {
+	var promoCfg *config.PromoIntelConfig
+	if cfg != nil {
+		promoCfg = &cfg.PromoIntel
+	}
+	svc := NewPromoIntelService(repo, settings, promoCfg)
+	svc.SetLeaderLock(lockCache, db)
 	svc.Start()
 	return svc
 }

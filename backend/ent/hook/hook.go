@@ -309,6 +309,30 @@ func (f PromoCodeUsageFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PromoCodeUsageMutation", m)
 }
 
+// The PromoIntelItemFunc type is an adapter to allow the use of ordinary
+// function as PromoIntelItem mutator.
+type PromoIntelItemFunc func(context.Context, *ent.PromoIntelItemMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f PromoIntelItemFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.PromoIntelItemMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PromoIntelItemMutation", m)
+}
+
+// The PromoIntelSourceFunc type is an adapter to allow the use of ordinary
+// function as PromoIntelSource mutator.
+type PromoIntelSourceFunc func(context.Context, *ent.PromoIntelSourceMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f PromoIntelSourceFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.PromoIntelSourceMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.PromoIntelSourceMutation", m)
+}
+
 // The ProxyFunc type is an adapter to allow the use of ordinary
 // function as Proxy mutator.
 type ProxyFunc func(context.Context, *ent.ProxyMutation) (ent.Value, error)

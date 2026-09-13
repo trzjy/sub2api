@@ -90,6 +90,7 @@ type Config struct {
 	RateLimit               RateLimitConfig               `mapstructure:"rate_limit"`
 	Pricing                 PricingConfig                 `mapstructure:"pricing"`
 	Volcano                 VolcanoConfig                 `mapstructure:"volcano"`
+	PromoIntel              PromoIntelConfig              `mapstructure:"promo_intel"`
 	Gateway                 GatewayConfig                 `mapstructure:"gateway"`
 	APIKeyAuth              APIKeyAuthCacheConfig         `mapstructure:"api_key_auth_cache"`
 	SubscriptionCache       SubscriptionCacheConfig       `mapstructure:"subscription_cache"`
@@ -1178,6 +1179,28 @@ type GatewayCNProvidersConfig struct {
 	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
 	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
 	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
+}
+
+// PromoIntelConfig 优惠情报（厂商优惠/公告每日轮询 + LLM 结构化整理）。
+//   - enabled: 是否启动后台轮询循环（默认 true；settings.promo_intel_enabled 可运行时关闭）
+//   - scan_interval_seconds: 调度循环周期（秒，默认 60，每轮检查到期源）
+//   - fetch_timeout_seconds: 单次页面抓取超时（秒，默认 30）
+//   - fetch_max_bytes: 单次抓取响应体上限（字节，默认 2MB，超限截断）
+//   - llm_timeout_seconds: LLM 整理调用超时（秒，默认 120）
+//   - llm_max_text_chars: 送入 LLM 的正文上限（字符，默认 12000）
+//   - worker_concurrency: 每轮并发抓取源数（默认 2，礼貌抓取）
+//   - due_batch_size: 每轮最多处理的到期源数（默认 20）
+//   - seed_defaults: 启动时幂等补种内置资讯源清单（默认 true）
+type PromoIntelConfig struct {
+	Enabled             bool `mapstructure:"enabled"`
+	ScanIntervalSeconds int  `mapstructure:"scan_interval_seconds"`
+	FetchTimeoutSeconds int  `mapstructure:"fetch_timeout_seconds"`
+	FetchMaxBytes       int  `mapstructure:"fetch_max_bytes"`
+	LLMTimeoutSeconds   int  `mapstructure:"llm_timeout_seconds"`
+	LLMMaxTextChars     int  `mapstructure:"llm_max_text_chars"`
+	WorkerConcurrency   int  `mapstructure:"worker_concurrency"`
+	DueBatchSize        int  `mapstructure:"due_batch_size"`
+	SeedDefaults        bool `mapstructure:"seed_defaults"`
 }
 
 // GatewayCodeBuddyConfig 控制 CodeBuddy 原生接入的行为。
@@ -2374,6 +2397,17 @@ func setDefaults() {
 	viper.SetDefault("pricing.override_file", "")
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
+
+// PromoIntel - 优惠情报：厂商优惠/公告每日轮询 + LLM 结构化整理（端点在管理台配置）。
+viper.SetDefault("promo_intel.enabled", true)
+viper.SetDefault("promo_intel.scan_interval_seconds", 60)
+viper.SetDefault("promo_intel.fetch_timeout_seconds", 30)
+viper.SetDefault("promo_intel.fetch_max_bytes", 2097152)
+viper.SetDefault("promo_intel.llm_timeout_seconds", 120)
+viper.SetDefault("promo_intel.llm_max_text_chars", 12000)
+viper.SetDefault("promo_intel.worker_concurrency", 2)
+viper.SetDefault("promo_intel.due_batch_size", 20)
+viper.SetDefault("promo_intel.seed_defaults", true)
 
 	// Volcano - 火山方舟订阅号支持模型同步（依据官方文档读取器，非静态候选列表）
 

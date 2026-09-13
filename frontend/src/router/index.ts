@@ -502,6 +502,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/promo-intel',
+    name: 'AdminPromoIntel',
+    component: () => import('@/views/admin/PromoIntelView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Promo Intel',
+      titleKey: 'admin.promoIntel.title',
+      descriptionKey: 'admin.promoIntel.description'
+    }
+  },
+  {
     path: '/monitor',
     name: 'ChannelStatus',
     component: () => import('@/views/user/ChannelStatusView.vue'),

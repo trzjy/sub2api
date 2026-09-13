@@ -9,6 +9,7 @@ import promptAudit from './promptAudit'
 import plugins from './plugins'
 import xianyu from './xianyu'
 import pricing from './pricing'
+import promoIntel from './promoIntel'
 
 export default {
   ...overview,
@@ -22,4 +23,5 @@ export default {
   ...plugins,
   ...xianyu,
   ...pricing,
+  ...promoIntel,
 }

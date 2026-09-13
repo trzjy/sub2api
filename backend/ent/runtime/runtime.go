@@ -30,6 +30,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/pendingauthsession"
 	"github.com/Wei-Shaw/sub2api/ent/promocode"
 	"github.com/Wei-Shaw/sub2api/ent/promocodeusage"
+	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
+	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
@@ -1635,6 +1637,204 @@ func init() {
 	promocodeusageDescUsedAt := promocodeusageFields[3].Descriptor()
 	// promocodeusage.DefaultUsedAt holds the default value on creation for the used_at field.
 	promocodeusage.DefaultUsedAt = promocodeusageDescUsedAt.Default.(func() time.Time)
+	promointelitemMixin := schema.PromoIntelItem{}.Mixin()
+	promointelitemMixinFields0 := promointelitemMixin[0].Fields()
+	_ = promointelitemMixinFields0
+	promointelitemFields := schema.PromoIntelItem{}.Fields()
+	_ = promointelitemFields
+	// promointelitemDescCreatedAt is the schema descriptor for created_at field.
+	promointelitemDescCreatedAt := promointelitemMixinFields0[0].Descriptor()
+	// promointelitem.DefaultCreatedAt holds the default value on creation for the created_at field.
+	promointelitem.DefaultCreatedAt = promointelitemDescCreatedAt.Default.(func() time.Time)
+	// promointelitemDescUpdatedAt is the schema descriptor for updated_at field.
+	promointelitemDescUpdatedAt := promointelitemMixinFields0[1].Descriptor()
+	// promointelitem.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	promointelitem.DefaultUpdatedAt = promointelitemDescUpdatedAt.Default.(func() time.Time)
+	// promointelitem.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	promointelitem.UpdateDefaultUpdatedAt = promointelitemDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// promointelitemDescVendor is the schema descriptor for vendor field.
+	promointelitemDescVendor := promointelitemFields[1].Descriptor()
+	// promointelitem.DefaultVendor holds the default value on creation for the vendor field.
+	promointelitem.DefaultVendor = promointelitemDescVendor.Default.(string)
+	// promointelitem.VendorValidator is a validator for the "vendor" field. It is called by the builders before save.
+	promointelitem.VendorValidator = promointelitemDescVendor.Validators[0].(func(string) error)
+	// promointelitemDescCategory is the schema descriptor for category field.
+	promointelitemDescCategory := promointelitemFields[2].Descriptor()
+	// promointelitem.DefaultCategory holds the default value on creation for the category field.
+	promointelitem.DefaultCategory = promointelitemDescCategory.Default.(string)
+	// promointelitem.CategoryValidator is a validator for the "category" field. It is called by the builders before save.
+	promointelitem.CategoryValidator = promointelitemDescCategory.Validators[0].(func(string) error)
+	// promointelitemDescTitle is the schema descriptor for title field.
+	promointelitemDescTitle := promointelitemFields[3].Descriptor()
+	// promointelitem.DefaultTitle holds the default value on creation for the title field.
+	promointelitem.DefaultTitle = promointelitemDescTitle.Default.(string)
+	// promointelitemDescSummary is the schema descriptor for summary field.
+	promointelitemDescSummary := promointelitemFields[4].Descriptor()
+	// promointelitem.DefaultSummary holds the default value on creation for the summary field.
+	promointelitem.DefaultSummary = promointelitemDescSummary.Default.(string)
+	// promointelitemDescDetails is the schema descriptor for details field.
+	promointelitemDescDetails := promointelitemFields[5].Descriptor()
+	// promointelitem.DefaultDetails holds the default value on creation for the details field.
+	promointelitem.DefaultDetails = promointelitemDescDetails.Default.(string)
+	// promointelitemDescDiscountInfo is the schema descriptor for discount_info field.
+	promointelitemDescDiscountInfo := promointelitemFields[6].Descriptor()
+	// promointelitem.DefaultDiscountInfo holds the default value on creation for the discount_info field.
+	promointelitem.DefaultDiscountInfo = promointelitemDescDiscountInfo.Default.(string)
+	// promointelitemDescValidUntil is the schema descriptor for valid_until field.
+	promointelitemDescValidUntil := promointelitemFields[7].Descriptor()
+	// promointelitem.DefaultValidUntil holds the default value on creation for the valid_until field.
+	promointelitem.DefaultValidUntil = promointelitemDescValidUntil.Default.(string)
+	// promointelitemDescURL is the schema descriptor for url field.
+	promointelitemDescURL := promointelitemFields[8].Descriptor()
+	// promointelitem.DefaultURL holds the default value on creation for the url field.
+	promointelitem.DefaultURL = promointelitemDescURL.Default.(string)
+	// promointelitemDescRelevance is the schema descriptor for relevance field.
+	promointelitemDescRelevance := promointelitemFields[9].Descriptor()
+	// promointelitem.DefaultRelevance holds the default value on creation for the relevance field.
+	promointelitem.DefaultRelevance = promointelitemDescRelevance.Default.(string)
+	// promointelitem.RelevanceValidator is a validator for the "relevance" field. It is called by the builders before save.
+	promointelitem.RelevanceValidator = promointelitemDescRelevance.Validators[0].(func(string) error)
+	// promointelitemDescStatus is the schema descriptor for status field.
+	promointelitemDescStatus := promointelitemFields[10].Descriptor()
+	// promointelitem.DefaultStatus holds the default value on creation for the status field.
+	promointelitem.DefaultStatus = promointelitemDescStatus.Default.(string)
+	// promointelitem.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	promointelitem.StatusValidator = promointelitemDescStatus.Validators[0].(func(string) error)
+	// promointelitemDescFingerprint is the schema descriptor for fingerprint field.
+	promointelitemDescFingerprint := promointelitemFields[11].Descriptor()
+	// promointelitem.FingerprintValidator is a validator for the "fingerprint" field. It is called by the builders before save.
+	promointelitem.FingerprintValidator = func() func(string) error {
+		validators := promointelitemDescFingerprint.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(fingerprint string) error {
+			for _, fn := range fns {
+				if err := fn(fingerprint); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// promointelitemDescRawExcerpt is the schema descriptor for raw_excerpt field.
+	promointelitemDescRawExcerpt := promointelitemFields[12].Descriptor()
+	// promointelitem.DefaultRawExcerpt holds the default value on creation for the raw_excerpt field.
+	promointelitem.DefaultRawExcerpt = promointelitemDescRawExcerpt.Default.(string)
+	// promointelitemDescExtractStatus is the schema descriptor for extract_status field.
+	promointelitemDescExtractStatus := promointelitemFields[13].Descriptor()
+	// promointelitem.DefaultExtractStatus holds the default value on creation for the extract_status field.
+	promointelitem.DefaultExtractStatus = promointelitemDescExtractStatus.Default.(string)
+	// promointelitem.ExtractStatusValidator is a validator for the "extract_status" field. It is called by the builders before save.
+	promointelitem.ExtractStatusValidator = promointelitemDescExtractStatus.Validators[0].(func(string) error)
+	// promointelitemDescSourceFetchedAt is the schema descriptor for source_fetched_at field.
+	promointelitemDescSourceFetchedAt := promointelitemFields[15].Descriptor()
+	// promointelitem.DefaultSourceFetchedAt holds the default value on creation for the source_fetched_at field.
+	promointelitem.DefaultSourceFetchedAt = promointelitemDescSourceFetchedAt.Default.(func() time.Time)
+	promointelsourceMixin := schema.PromoIntelSource{}.Mixin()
+	promointelsourceMixinFields0 := promointelsourceMixin[0].Fields()
+	_ = promointelsourceMixinFields0
+	promointelsourceFields := schema.PromoIntelSource{}.Fields()
+	_ = promointelsourceFields
+	// promointelsourceDescCreatedAt is the schema descriptor for created_at field.
+	promointelsourceDescCreatedAt := promointelsourceMixinFields0[0].Descriptor()
+	// promointelsource.DefaultCreatedAt holds the default value on creation for the created_at field.
+	promointelsource.DefaultCreatedAt = promointelsourceDescCreatedAt.Default.(func() time.Time)
+	// promointelsourceDescUpdatedAt is the schema descriptor for updated_at field.
+	promointelsourceDescUpdatedAt := promointelsourceMixinFields0[1].Descriptor()
+	// promointelsource.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	promointelsource.DefaultUpdatedAt = promointelsourceDescUpdatedAt.Default.(func() time.Time)
+	// promointelsource.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	promointelsource.UpdateDefaultUpdatedAt = promointelsourceDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// promointelsourceDescName is the schema descriptor for name field.
+	promointelsourceDescName := promointelsourceFields[0].Descriptor()
+	// promointelsource.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	promointelsource.NameValidator = func() func(string) error {
+		validators := promointelsourceDescName.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(name string) error {
+			for _, fn := range fns {
+				if err := fn(name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// promointelsourceDescVendor is the schema descriptor for vendor field.
+	promointelsourceDescVendor := promointelsourceFields[1].Descriptor()
+	// promointelsource.DefaultVendor holds the default value on creation for the vendor field.
+	promointelsource.DefaultVendor = promointelsourceDescVendor.Default.(string)
+	// promointelsource.VendorValidator is a validator for the "vendor" field. It is called by the builders before save.
+	promointelsource.VendorValidator = promointelsourceDescVendor.Validators[0].(func(string) error)
+	// promointelsourceDescCategory is the schema descriptor for category field.
+	promointelsourceDescCategory := promointelsourceFields[2].Descriptor()
+	// promointelsource.DefaultCategory holds the default value on creation for the category field.
+	promointelsource.DefaultCategory = promointelsourceDescCategory.Default.(string)
+	// promointelsource.CategoryValidator is a validator for the "category" field. It is called by the builders before save.
+	promointelsource.CategoryValidator = promointelsourceDescCategory.Validators[0].(func(string) error)
+	// promointelsourceDescURL is the schema descriptor for url field.
+	promointelsourceDescURL := promointelsourceFields[3].Descriptor()
+	// promointelsource.DefaultURL holds the default value on creation for the url field.
+	promointelsource.DefaultURL = promointelsourceDescURL.Default.(string)
+	// promointelsource.URLValidator is a validator for the "url" field. It is called by the builders before save.
+	promointelsource.URLValidator = promointelsourceDescURL.Validators[0].(func(string) error)
+	// promointelsourceDescFetchIntervalMinutes is the schema descriptor for fetch_interval_minutes field.
+	promointelsourceDescFetchIntervalMinutes := promointelsourceFields[4].Descriptor()
+	// promointelsource.DefaultFetchIntervalMinutes holds the default value on creation for the fetch_interval_minutes field.
+	promointelsource.DefaultFetchIntervalMinutes = promointelsourceDescFetchIntervalMinutes.Default.(int)
+	// promointelsource.FetchIntervalMinutesValidator is a validator for the "fetch_interval_minutes" field. It is called by the builders before save.
+	promointelsource.FetchIntervalMinutesValidator = func() func(int) error {
+		validators := promointelsourceDescFetchIntervalMinutes.Validators
+		fns := [...]func(int) error{
+			validators[0].(func(int) error),
+			validators[1].(func(int) error),
+		}
+		return func(fetch_interval_minutes int) error {
+			for _, fn := range fns {
+				if err := fn(fetch_interval_minutes); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// promointelsourceDescEnabled is the schema descriptor for enabled field.
+	promointelsourceDescEnabled := promointelsourceFields[5].Descriptor()
+	// promointelsource.DefaultEnabled holds the default value on creation for the enabled field.
+	promointelsource.DefaultEnabled = promointelsourceDescEnabled.Default.(bool)
+	// promointelsourceDescLlmExtract is the schema descriptor for llm_extract field.
+	promointelsourceDescLlmExtract := promointelsourceFields[6].Descriptor()
+	// promointelsource.DefaultLlmExtract holds the default value on creation for the llm_extract field.
+	promointelsource.DefaultLlmExtract = promointelsourceDescLlmExtract.Default.(bool)
+	// promointelsourceDescNotes is the schema descriptor for notes field.
+	promointelsourceDescNotes := promointelsourceFields[7].Descriptor()
+	// promointelsource.DefaultNotes holds the default value on creation for the notes field.
+	promointelsource.DefaultNotes = promointelsourceDescNotes.Default.(string)
+	// promointelsourceDescLastExtractedHash is the schema descriptor for last_extracted_hash field.
+	promointelsourceDescLastExtractedHash := promointelsourceFields[9].Descriptor()
+	// promointelsource.DefaultLastExtractedHash holds the default value on creation for the last_extracted_hash field.
+	promointelsource.DefaultLastExtractedHash = promointelsourceDescLastExtractedHash.Default.(string)
+	// promointelsource.LastExtractedHashValidator is a validator for the "last_extracted_hash" field. It is called by the builders before save.
+	promointelsource.LastExtractedHashValidator = promointelsourceDescLastExtractedHash.Validators[0].(func(string) error)
+	// promointelsourceDescLastStatus is the schema descriptor for last_status field.
+	promointelsourceDescLastStatus := promointelsourceFields[10].Descriptor()
+	// promointelsource.DefaultLastStatus holds the default value on creation for the last_status field.
+	promointelsource.DefaultLastStatus = promointelsourceDescLastStatus.Default.(string)
+	// promointelsource.LastStatusValidator is a validator for the "last_status" field. It is called by the builders before save.
+	promointelsource.LastStatusValidator = promointelsourceDescLastStatus.Validators[0].(func(string) error)
+	// promointelsourceDescLastError is the schema descriptor for last_error field.
+	promointelsourceDescLastError := promointelsourceFields[11].Descriptor()
+	// promointelsource.DefaultLastError holds the default value on creation for the last_error field.
+	promointelsource.DefaultLastError = promointelsourceDescLastError.Default.(string)
+	// promointelsourceDescCreatedBy is the schema descriptor for created_by field.
+	promointelsourceDescCreatedBy := promointelsourceFields[12].Descriptor()
+	// promointelsource.DefaultCreatedBy holds the default value on creation for the created_by field.
+	promointelsource.DefaultCreatedBy = promointelsourceDescCreatedBy.Default.(int64)
 	proxyMixin := schema.Proxy{}.Mixin()
 	proxyMixinHooks1 := proxyMixin[1].Hooks()
 	proxy.Hooks[0] = proxyMixinHooks1[0]

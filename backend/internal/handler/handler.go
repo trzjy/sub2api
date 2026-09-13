@@ -46,6 +46,7 @@ type AdminHandlers struct {
 	AuditLog               *admin.AuditLogHandler
 	Xianyu                 *admin.XianyuAdminHandler
 	Pricing                *admin.PricingHandler
+	PromoIntel             *admin.PromoIntelHandler
 }
 
 // Handlers contains all HTTP handlers

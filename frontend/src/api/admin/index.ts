@@ -39,6 +39,7 @@ import auditAPI from './audit'
 import pluginsAPI from './plugins'
 import xianyuAPI from './xianyu'
 import pricingAPI from './pricing'
+import promoIntelAPI from './promoIntel'
 
 /**
  * Unified admin API object for convenient access
@@ -79,7 +80,8 @@ export const adminAPI = {
   audit: auditAPI,
   plugins: pluginsAPI,
   xianyu: xianyuAPI,
-  pricing: pricingAPI
+  pricing: pricingAPI,
+  promoIntel: promoIntelAPI
 }
 
 export {
@@ -118,7 +120,8 @@ export {
   auditAPI,
   pluginsAPI,
   xianyuAPI,
-  pricingAPI
+  pricingAPI,
+  promoIntelAPI
 }
 export default adminAPI
 

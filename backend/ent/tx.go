@@ -64,6 +64,10 @@ type Tx struct {
 	PromoCode *PromoCodeClient
 	// PromoCodeUsage is the client for interacting with the PromoCodeUsage builders.
 	PromoCodeUsage *PromoCodeUsageClient
+	// PromoIntelItem is the client for interacting with the PromoIntelItem builders.
+	PromoIntelItem *PromoIntelItemClient
+	// PromoIntelSource is the client for interacting with the PromoIntelSource builders.
+	PromoIntelSource *PromoIntelSourceClient
 	// Proxy is the client for interacting with the Proxy builders.
 	Proxy *ProxyClient
 	// RedeemBatch is the client for interacting with the RedeemBatch builders.
@@ -254,6 +258,8 @@ func (tx *Tx) init() {
 	tx.PendingAuthSession = NewPendingAuthSessionClient(tx.config)
 	tx.PromoCode = NewPromoCodeClient(tx.config)
 	tx.PromoCodeUsage = NewPromoCodeUsageClient(tx.config)
+	tx.PromoIntelItem = NewPromoIntelItemClient(tx.config)
+	tx.PromoIntelSource = NewPromoIntelSourceClient(tx.config)
 	tx.Proxy = NewProxyClient(tx.config)
 	tx.RedeemBatch = NewRedeemBatchClient(tx.config)
 	tx.RedeemCode = NewRedeemCodeClient(tx.config)
