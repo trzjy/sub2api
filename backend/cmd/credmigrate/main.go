@@ -30,6 +30,7 @@ import (
 func main() {
 	batchSize := flag.Int("batch", 500, "每批读取的账号行数")
 	dryRun := flag.Bool("dry-run", false, "只扫描统计待迁移行，不写库")
+	includeDeleted := flag.Bool("include-deleted", false, "一并处理软删除账号（其明文凭证在 DB 泄漏场景同样可达，建议开启）")
 	timeout := flag.Duration("timeout", 30*time.Minute, "整体执行超时")
 	flag.Parse()
 
@@ -62,9 +63,9 @@ func main() {
 	var stats *repository.CredentialMigrationStats
 	if *dryRun {
 		fmt.Println("dry-run 模式：仅扫描统计，不执行写入。")
-		stats, err = repository.CountLegacyCredentials(ctx, db)
+		stats, err = repository.CountLegacyCredentials(ctx, db, *includeDeleted)
 	} else {
-		stats, err = repository.MigrateLegacyCredentials(ctx, db, *batchSize, func(stats *repository.CredentialMigrationStats) {
+		stats, err = repository.MigrateLegacyCredentials(ctx, db, *batchSize, *includeDeleted, func(stats *repository.CredentialMigrationStats) {
 			fmt.Printf("... 已扫描 %d 行（加密 %d，回填指纹 %d，无变化 %d）\n",
 				stats.Scanned, stats.EncryptedRows, stats.MACBackfillRows, stats.Unchanged)
 		})

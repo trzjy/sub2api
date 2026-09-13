@@ -31,10 +31,10 @@ type CredentialMigrationStats struct {
 }
 
 type legacyCredentialRow struct {
-	id             int64
-	credentials    []byte
-	mac            sql.NullString
-	apiKeyMAC      sql.NullString
+	id          int64
+	credentials []byte
+	mac         sql.NullString
+	apiKeyMAC   sql.NullString
 }
 
 // MigrateLegacyCredentials 扫描全部未删除账号，加密明文敏感子键并回填指纹。
@@ -43,6 +43,7 @@ func MigrateLegacyCredentials(
 	ctx context.Context,
 	db sqlExecutor,
 	batchSize int,
+	includeDeleted bool,
 	progress func(stats *CredentialMigrationStats),
 ) (*CredentialMigrationStats, error) {
 	if db == nil {
@@ -56,11 +57,17 @@ func MigrateLegacyCredentials(
 	}
 	stats := &CredentialMigrationStats{}
 	lastID := int64(0)
+	// includeDeleted=true 时一并处理软删除行：它们虽不参与调度，但 DB 泄漏/备份场景
+	// 下仍会暴露明文凭证（reachable 的敏感键），必须与存活行同等收敛。
+	deletedFilter := "deleted_at IS NULL"
+	if includeDeleted {
+		deletedFilter = "TRUE"
+	}
 	for {
 		rows, err := db.QueryContext(ctx, `
 			SELECT id, credentials, credentials_mac, credentials_api_key_mac
 			FROM accounts
-			WHERE deleted_at IS NULL AND id > $1
+			WHERE `+deletedFilter+` AND id > $1
 			ORDER BY id
 			LIMIT $2
 		`, lastID, batchSize)
@@ -206,7 +213,7 @@ func pointerValueOrEmpty(v *string) string {
 
 // CountLegacyCredentials 是 dry-run 统计：按与 MigrateLegacyCredentials 相同的
 // 判定扫描全表，报告各分类行数，但不执行任何写入。同样要求密钥已配置。
-func CountLegacyCredentials(ctx context.Context, db sqlExecutor) (*CredentialMigrationStats, error) {
+func CountLegacyCredentials(ctx context.Context, db sqlExecutor, includeDeleted bool) (*CredentialMigrationStats, error) {
 	if db == nil {
 		return nil, fmt.Errorf("credential migration: db is nil")
 	}
@@ -215,11 +222,15 @@ func CountLegacyCredentials(ctx context.Context, db sqlExecutor) (*CredentialMig
 	}
 	stats := &CredentialMigrationStats{}
 	lastID := int64(0)
+	deletedFilter := "deleted_at IS NULL"
+	if includeDeleted {
+		deletedFilter = "TRUE"
+	}
 	for {
 		rows, err := db.QueryContext(ctx, `
 			SELECT id, credentials, credentials_mac, credentials_api_key_mac
 			FROM accounts
-			WHERE deleted_at IS NULL AND id > $1
+			WHERE `+deletedFilter+` AND id > $1
 			ORDER BY id
 			LIMIT 500
 		`, lastID)

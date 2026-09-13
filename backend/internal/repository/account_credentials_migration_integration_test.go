@@ -54,7 +54,7 @@ func TestMigrateLegacyCredentialsEncryptsAndBackfillsIdempotently(t *testing.T) 
 			Save(ctx)
 		require.NoError(t, err)
 
-		stats, err := MigrateLegacyCredentials(ctx, db, 2, nil)
+		stats, err := MigrateLegacyCredentials(ctx, db, 2, false, nil)
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, stats.Scanned, 2)
 		require.Equal(t, 1, stats.EncryptedRows, "only the plaintext row needs encryption")
@@ -76,7 +76,7 @@ func TestMigrateLegacyCredentialsEncryptsAndBackfillsIdempotently(t *testing.T) 
 		require.Equal(t, "sk-e3-legacy-secret", loaded.Credentials["api_key"])
 
 		// 幂等：第二遍全部 Unchanged。
-		stats2, err := MigrateLegacyCredentials(ctx, db, 2, nil)
+		stats2, err := MigrateLegacyCredentials(ctx, db, 2, false, nil)
 		require.NoError(t, err)
 		require.Equal(t, stats.Scanned, stats2.Scanned)
 		require.Zero(t, stats2.EncryptedRows)
@@ -93,7 +93,7 @@ func TestMigrateLegacyCredentialsEncryptsAndBackfillsIdempotently(t *testing.T) 
 			SetSchedulable(true).
 			Save(ctx)
 		require.NoError(t, err)
-		stats3, err := MigrateLegacyCredentials(ctx, db, 10, nil)
+		stats3, err := MigrateLegacyCredentials(ctx, db, 10, false, nil)
 		require.NoError(t, err)
 		require.Equal(t, 1, stats3.MACBackfillRows, "row without secrets only needs MAC backfill")
 		row3 := tx.Client().Account.Query().Where(account.IDEQ(noSecret.ID)).OnlyX(ctx)
@@ -107,6 +107,6 @@ func TestMigrateLegacyCredentialsEncryptsAndBackfillsIdempotently(t *testing.T) 
 func TestMigrateLegacyCredentialsRefusesWithoutKey(t *testing.T) {
 	// 未配置密钥（withEncryptedCredentials 未生效）必须拒绝执行。
 	require.False(t, credcrypt.Enabled())
-	_, err := MigrateLegacyCredentials(context.Background(), nil, 0, nil)
+	_, err := MigrateLegacyCredentials(context.Background(), nil, 0, false, nil)
 	require.Error(t, err)
 }
