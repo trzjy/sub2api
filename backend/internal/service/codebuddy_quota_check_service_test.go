@@ -72,8 +72,10 @@ func TestCodeBuddyQuotaCheckService_RunOnceProbesAndAppliesThreshold(t *testing.
 		DailyCheckinEnabled: false,
 	}}}
 
-	resetAt := time.Now().UTC().Add(5 * time.Hour).Format(time.RFC3339)
-	meterBody := `{"code":0,"data":{"creditUsedPercent":99,"reset_at":"` + resetAt + `"}}`
+	// 真实计费 schema（data.Response.Data.Accounts[]，PascalCase 容量计数器）。
+	meterBody := `{"code":0,"data":{"Response":{"Data":{"TotalCount":1,"TotalDosage":100,"Accounts":[
+		{"AccountId":1,"CapacitySize":100,"CapacityUsed":99,"CapacityRemain":1,"CycleEndTime":"2026-10-13 07:46:09"}
+	]}}}}`
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},

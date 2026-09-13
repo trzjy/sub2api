@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,11 +20,11 @@ import (
 // CodeBuddy 计费/积分与模型列表端点（§2.1）。billing 走 www.codebuddy.cn，models 走
 // copilot.tencent.com（与 chat 同源）。
 const (
-	CodeBuddyBillingBaseURL = "https://www.codebuddy.cn"
-	codeBuddyBillingMeterPath   = "/v2/billing/meter/get-user-resource"
-	codeBuddyDailyCheckinPath   = "/v2/billing/meter/daily-checkin"
-	CodeBuddyModelsBaseURL      = "https://copilot.tencent.com"
-	codeBuddyModelsPath         = "/console/enterprises/personal/models"
+	CodeBuddyBillingBaseURL   = "https://www.codebuddy.cn"
+	codeBuddyBillingMeterPath = "/v2/billing/meter/get-user-resource"
+	codeBuddyDailyCheckinPath = "/v2/billing/meter/daily-checkin"
+	CodeBuddyModelsBaseURL    = "https://copilot.tencent.com"
+	codeBuddyModelsPath       = "/console/enterprises/personal/models"
 
 	// Extra 快照键（CodeBuddyQuotaService 周期写入，调度阈值评估与 UI 消费）。
 	codebuddyCreditUsedPercentKey = "codebuddy_credit_used_percent"
@@ -57,16 +58,16 @@ type CodeBuddyModel struct {
 
 // CodeBuddyQuotaProbeResult 是积分额度探测的返回结构（管理端 + UI 消费）。
 type CodeBuddyQuotaProbeResult struct {
-	AccountID     int64   `json:"account_id"`
-	Success       bool    `json:"success"`
-	UsedPercent   float64 `json:"used_percent"`
-	ResetAt       string  `json:"reset_at,omitempty"`
-	TotalCredit   float64 `json:"total_credit,omitempty"`
-	UsedCredit    float64 `json:"used_credit,omitempty"`
-	StatusCode    int     `json:"status_code,omitempty"`
-	FetchedAt     int64   `json:"fetched_at"`
-	Persisted     bool    `json:"persisted"`
-	Error         string  `json:"error,omitempty"`
+	AccountID   int64   `json:"account_id"`
+	Success     bool    `json:"success"`
+	UsedPercent float64 `json:"used_percent"`
+	ResetAt     string  `json:"reset_at,omitempty"`
+	TotalCredit float64 `json:"total_credit,omitempty"`
+	UsedCredit  float64 `json:"used_credit,omitempty"`
+	StatusCode  int     `json:"status_code,omitempty"`
+	FetchedAt   int64   `json:"fetched_at"`
+	Persisted   bool    `json:"persisted"`
+	Error       string  `json:"error,omitempty"`
 }
 
 // CodeBuddyQuotaService 周期探测 CodeBuddy 积分额度、执行每日签到、拉取动态模型列表。
@@ -132,30 +133,26 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 		s.persistError(ctx, account.ID, err.Error())
 		return result, nil
 	}
-	usedPercent, ok := s.extractCreditPercent(body)
+	usage, ok := parseCodeBuddyCreditUsage(body, account.GetCredential("uid"))
 	if !ok {
 		// 报文结构异常：记录错误但不写假百分比（避免误触发阈值停调）。
-		errMsg := "codebuddy quota: 无法从响应解析积分已用百分比"
+		errMsg := "codebuddy quota: 无法从 get-user-resource 响应解析账号容量计数器"
 		result.Error = errMsg
 		s.persistError(ctx, account.ID, errMsg)
 		return result, nil
 	}
-	resetAt := s.extractResetTime(body)
-	if resetAt.IsZero() {
+	resetAt := usage.ResetAt
+	if !usage.HasResetAt || resetAt.IsZero() {
 		resetAt = time.Now().Add(codebuddyCreditDefaultResetWindow)
 	}
 	now := time.Now().UTC()
 	updates := map[string]any{
-		codebuddyCreditUsedPercentKey: usedPercent,
+		codebuddyCreditUsedPercentKey: usage.UsedPercent,
 		codebuddyCreditResetAtKey:     resetAt.UTC().Format(time.RFC3339),
 		codebuddyCreditUpdatedAtKey:   now.Format(time.RFC3339),
 		codebuddyCreditErrorKey:       nil,
-	}
-	if total, ok := s.extractCreditAmount(body, "totalCredit", "total_credit"); ok {
-		updates[codebuddyCreditTotalKey] = total
-	}
-	if used, ok := s.extractCreditAmount(body, "usedCredit", "used_credit"); ok {
-		updates[codebuddyCreditUsedKey] = used
+		codebuddyCreditTotalKey:       usage.TotalCredit,
+		codebuddyCreditUsedKey:        usage.UsedCredit,
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
 		slog.Warn("codebuddy_quota_snapshot_failed", "account_id", account.ID, "error", err)
@@ -164,7 +161,9 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 	}
 	result.Success = true
 	result.Persisted = true
-	result.UsedPercent = usedPercent
+	result.UsedPercent = usage.UsedPercent
+	result.TotalCredit = usage.TotalCredit
+	result.UsedCredit = usage.UsedCredit
 	result.ResetAt = resetAt.UTC().Format(time.RFC3339)
 	return result, nil
 }
@@ -361,36 +360,131 @@ func (s *CodeBuddyQuotaService) setBillingHeaders(req *http.Request, account *Ac
 	}
 }
 
-// extractCreditPercent 从计费响应的 data 中按候选字段名扫描积分已用百分比（0-100+）。
-// 兼容 camelCase/snake_case 多种命名；仅取第一个命中且为数值的字段。
-func (s *CodeBuddyQuotaService) extractCreditPercent(body []byte) (float64, bool) {
-	data := gjson.GetBytes(body, "data")
-	if !data.Exists() {
-		data = gjson.ParseBytes(body)
+// codeBuddyCreditUsage 是 get-user-resource 响应的解析结果。
+type codeBuddyCreditUsage struct {
+	TotalCredit float64
+	UsedCredit  float64
+	UsedPercent float64
+	ResetAt     time.Time
+	HasResetAt  bool
+}
+
+// parseCodeBuddyCreditUsage 解析计费端点 get-user-resource 的**真实**响应结构
+// （2026-09-13 生产抓包核实，PR-C1）：
+//
+//	{"code":0,"data":{"Response":{"Data":{
+//	    "TotalCount":N,"TotalDosage":M,
+//	    "Accounts":[{CapacitySize,CapacityUsed,CapacityRemain,
+//	                CycleCapacitySize,CycleCapacityRemain,*Precise,
+//	                CycleEndTime,BindRecords[]...}]}}}}
+//
+// 旧实现按 data.<camelCase 百分比字段> 扫描，与该 schema 完全不符、永远命不中
+// （额度快照必然失败、阈值停调失效）。
+//
+// uid 匹配：真实响应**不含 OAuth uid**（账号对象仅有 AccountId/Uin/ResourceId/
+// BindRecords[].BindObjectId），因此按 uid 命不中任何账号；此时退回使用响应中的全部
+// 账号——请求以 X-User-Id=uid 认证，返回的 Accounts[] 本就属于当前用户。若上游将来
+// 在账号对象中补上 uid 字段，匹配分支即自动生效。
+//
+// 重置时间：仅采用 CycleEndTime（资源包当前计费周期结束 = 容量重置时刻），取所选账号
+// 中最晚的未来值（聚合用量需全部资源包滚动后才归零）。响应中的 DeductionEndTime 是
+// 扣费有效期、ExpiredTime 是过期时间，语义均非"重置"，不予采用；CycleEndTime 全部
+// 缺失/不可解析时 HasResetAt=false（调用方回退默认窗口），不做猜测。
+func parseCodeBuddyCreditUsage(body []byte, uid string) (codeBuddyCreditUsage, bool) {
+	var out codeBuddyCreditUsage
+	root := gjson.GetBytes(body, "data.Response.Data")
+	if !root.Exists() {
+		return out, false
 	}
-	candidates := []string{
-		"creditUsedPercent", "credit_used_percent", "usedPercent", "used_percent",
-		"creditPercent", "credit_percent", "percent", "usedCreditPercent", "used_credit_percent",
+	accounts := root.Get("Accounts").Array()
+	if len(accounts) == 0 {
+		return out, false
 	}
-	for _, key := range candidates {
-		if v := data.Get(key); v.Exists() {
-			if p, ok := toPercentValue(v); ok {
-				return p, true
+
+	selected := make([]gjson.Result, 0, len(accounts))
+	if strings.TrimSpace(uid) != "" {
+		for _, acc := range accounts {
+			if codeBuddyAccountMatchesUID(acc, uid) {
+				selected = append(selected, acc)
 			}
 		}
 	}
-	return 0, false
+	if len(selected) == 0 {
+		selected = accounts
+	}
+
+	var totalSize, totalUsed float64
+	var latestReset time.Time
+	usable := false
+	for _, acc := range selected {
+		size, sizeOK := codeBuddyFirstNumber(acc, "CapacitySize", "CapacitySizePrecise", "CycleCapacitySize", "CycleCapacitySizePrecise")
+		if !sizeOK || size <= 0 {
+			continue
+		}
+		used, usedOK := codeBuddyFirstNumber(acc, "CapacityUsed", "CapacityUsedPrecise", "CycleCapacityUsedPrecise")
+		if !usedOK {
+			// used 缺失时退化为 size - remain（remain 存在才用）。
+			if remain, remainOK := codeBuddyFirstNumber(acc, "CapacityRemain", "CapacityRemainPrecise", "CycleCapacityRemain", "CycleCapacityRemainPrecise"); remainOK {
+				used, usedOK = size-remain, true
+			}
+		}
+		if !usedOK {
+			continue
+		}
+		totalSize += size
+		totalUsed += used
+		usable = true
+		if t, ok := parseCodeBuddyCycleEnd(acc.Get("CycleEndTime").String()); ok && t.After(latestReset) {
+			latestReset = t
+		}
+	}
+	if !usable || totalSize <= 0 {
+		return out, false
+	}
+
+	out.TotalCredit = totalSize
+	out.UsedCredit = totalUsed
+	out.UsedPercent = totalUsed / totalSize * 100
+	if !latestReset.IsZero() {
+		out.ResetAt = latestReset
+		out.HasResetAt = true
+	}
+	return out, true
 }
 
-// extractCreditAmount 从 data 中按候选字段名提取积分金额（total/used）。
-func (s *CodeBuddyQuotaService) extractCreditAmount(body []byte, keys ...string) (float64, bool) {
-	data := gjson.GetBytes(body, "data")
-	if !data.Exists() {
-		data = gjson.ParseBytes(body)
+// codeBuddyAccountMatchesUID 判断资源账号对象是否属于给定 uid。真实抓包中响应不含
+// uid，各候选身份字段均不可能命中；保留该匹配以便上游补字段后自动生效。
+func codeBuddyAccountMatchesUID(acc gjson.Result, uid string) bool {
+	for _, key := range []string{"uid", "Uid", "UID", "UserId", "user_id"} {
+		if v := strings.TrimSpace(acc.Get(key).String()); v != "" && v == uid {
+			return true
+		}
 	}
+	for _, key := range []string{"AccountId", "Uin", "ResourceId"} {
+		if v := strings.TrimSpace(acc.Get(key).String()); v != "" && v == uid {
+			return true
+		}
+	}
+	for _, rec := range acc.Get("BindRecords").Array() {
+		if v := strings.TrimSpace(rec.Get("BindObjectId").String()); v != "" && v == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// codeBuddyFirstNumber 返回首个存在且可解析为数值的字段（兼容 Number 与数值字符串）。
+func codeBuddyFirstNumber(r gjson.Result, keys ...string) (float64, bool) {
 	for _, key := range keys {
-		if v := data.Get(key); v.Exists() {
-			if f, ok := toFloatValue(v); ok {
+		v := r.Get(key)
+		if !v.Exists() {
+			continue
+		}
+		switch v.Type {
+		case gjson.Number:
+			return v.Float(), true
+		case gjson.String:
+			if f, err := strconv.ParseFloat(strings.TrimSpace(v.String()), 64); err == nil {
 				return f, true
 			}
 		}
@@ -398,24 +492,21 @@ func (s *CodeBuddyQuotaService) extractCreditAmount(body []byte, keys ...string)
 	return 0, false
 }
 
-// extractResetTime 从 data 中按候选字段名提取积分重置时间（RFC3339 或 unix 秒/毫秒）。
-func (s *CodeBuddyQuotaService) extractResetTime(body []byte) time.Time {
-	data := gjson.GetBytes(body, "data")
-	if !data.Exists() {
-		data = gjson.ParseBytes(body)
+// parseCodeBuddyCycleEnd 解析资源包周期结束时间（上游格式 "2006-01-02 15:04:05"，
+// 与 §2.6 一致按 UTC+8 解释；兼容 RFC3339）。
+func parseCodeBuddyCycleEnd(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
 	}
-	candidates := []string{
-		"resetTime", "reset_time", "resetAt", "reset_at",
-		"expireTime", "expire_time", "expireAt", "expire_at",
+	loc := time.FixedZone("UTC+8", 8*3600)
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, loc); err == nil {
+		return t, true
 	}
-	for _, key := range candidates {
-		if v := data.Get(key); v.Exists() {
-			if t, ok := parseCreditTime(v); ok {
-				return t
-			}
-		}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
 	}
-	return time.Time{}
+	return time.Time{}, false
 }
 
 func (s *CodeBuddyQuotaService) persistError(ctx context.Context, accountID int64, errMsg string) {
@@ -427,71 +518,4 @@ func (s *CodeBuddyQuotaService) persistError(ctx context.Context, accountID int6
 	}); err != nil {
 		slog.Warn("codebuddy_quota_error_persist_failed", "account_id", accountID, "error", err)
 	}
-}
-
-// toPercentValue 兼容 0-1 比例与 0-100 百分比两种表达。
-func toPercentValue(v gjson.Result) (float64, bool) {
-	switch v.Type {
-	case gjson.Number:
-		f := v.Float()
-		if f >= 0 && f <= 1 {
-			return f * 100, true
-		}
-		if f >= 0 {
-			return f, true
-		}
-	case gjson.String:
-		if f, err := parseCreditTimeAsFloat(v.String()); err == nil {
-			if f >= 0 && f <= 1 {
-				return f * 100, true
-			}
-			if f >= 0 {
-				return f, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func toFloatValue(v gjson.Result) (float64, bool) {
-	switch v.Type {
-	case gjson.Number:
-		return v.Float(), true
-	case gjson.String:
-		if f, err := parseCreditTimeAsFloat(v.String()); err == nil {
-			return f, true
-		}
-	}
-	return 0, false
-}
-
-func parseCreditTimeAsFloat(s string) (float64, error) {
-	var f float64
-	_, err := fmt.Sscan(strings.TrimSpace(s), &f)
-	return f, err
-}
-
-func parseCreditTime(v gjson.Result) (time.Time, bool) {
-	// 字符串：优先 RFC3339，其次 unix 秒/毫秒。
-	if v.Type == gjson.String {
-		s := strings.TrimSpace(v.String())
-		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			return t, true
-		}
-		if f, err := parseCreditTimeAsFloat(s); err == nil {
-			return unixToTime(f), true
-		}
-		return time.Time{}, false
-	}
-	if v.Type == gjson.Number {
-		return unixToTime(v.Float()), true
-	}
-	return time.Time{}, false
-}
-
-func unixToTime(f float64) time.Time {
-	if f > 1e12 {
-		return time.UnixMilli(int64(f))
-	}
-	return time.Unix(int64(f), 0)
 }
