@@ -347,3 +347,21 @@ func TestOllamaCloudUsageSessionRouteOmitsAuditBody(t *testing.T) {
 	require.Equal(t, "<credential-bearing body omitted>", logs[0].RequestBody)
 	require.NotContains(t, logs[0].RequestBody, "audit-canary")
 }
+
+// TestSetAuditExtra_AllowsCodeBuddySite 钉住 site 进入审计 extra 白名单：
+// CodeBuddy 国际版/国内版操作必须可区分（Phase 2 验收 "审计含 intl 操作"）；
+// 同时确认非白名单键（如凭证）仍被拒绝。
+func TestSetAuditExtra_AllowsCodeBuddySite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	SetAuditExtra(c, map[string]any{"result": "success", "site": "intl"})
+
+	extra, ok := c.MustGet(auditCtxKeyExtra).(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "intl", extra["site"])
+	require.Equal(t, "success", extra["result"])
+
+	SetAuditExtra(c, map[string]any{"access_token": "secret-should-not-pass"})
+	extra2, _ := c.MustGet(auditCtxKeyExtra).(map[string]any)
+	require.NotContains(t, extra2, "access_token")
+}
