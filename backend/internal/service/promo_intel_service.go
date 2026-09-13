@@ -953,7 +953,8 @@ func (s *PromoIntelService) TestLLMSettings(ctx context.Context) (string, error)
 		defer func() { s.testLLMClient = origClient }()
 	}
 	testSrc := &PromoIntelSource{Name: "连通性测试", Vendor: "test", URL: "https://example.com"}
-	offers, err := s.extractOffersWithLLM(ctx, testSrc, "这是一个连通性测试正文。请按规则输出 JSON 数组。")
+	// 正文带一条迷你优惠：parsed_offers 应为 1，顺带验证端到端解析链而不只是连通。
+	offers, err := s.extractOffersWithLLM(ctx, testSrc, "示例厂商发布公告：新用户注册即送 100 万 tokens 体验金，限时活动。")
 	if err != nil {
 		// 必须返回带明细的业务错误（400 族），否则错误映射层会把普通 error
 		// 兜底成笼统的 "internal error"，管理员在页面上看不到真实原因。
@@ -971,6 +972,8 @@ func (s *PromoIntelService) promoIntelTestError(ctx context.Context, err error) 
 	}
 	msg := err.Error()
 	// 最常见误配：key 的分组不认填写的模型（网关 404）。附上可用模型清单。
+	// 网关错误是 JSON 原文，引号带反斜杠转义（\"kimi-k3\"），先还原再匹配/展示。
+	msg = strings.ReplaceAll(msg, `\"`, `"`)
 	if strings.Contains(msg, "is not available for this group") {
 		hint := s.selfKeyModelsHint(ctx, s.promoIntelSelfKeyID(ctx))
 		if hint != "" {
