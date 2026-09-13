@@ -18,6 +18,18 @@ func TestCodeBuddyTokenRefresher_CanRefresh(t *testing.T) {
 		"non-codebuddy platform must not be refreshable")
 	require.False(t, r.CanRefresh(&Account{Platform: PlatformCodeBuddy, Type: AccountTypeAPIKey}),
 		"non-oauth codebuddy account must not be refreshable")
+
+	// 方案 G3/分发跟随母账号：codebuddy 影子 platform=目标分组平台（非 codebuddy），
+	// 不能成为刷新候选——其凭证由母账号刷新并透传（测试/刷新路径防护）。
+	shadow := &Account{
+		ID:               7,
+		Platform:         PlatformDeepseek,
+		Type:             AccountTypeOAuth,
+		ParentAccountID:  ptrI64(5),
+		QuotaDimension:   QuotaDimensionCodeBuddy,
+	}
+	require.False(t, r.CanRefresh(shadow),
+		"codebuddy shadow must not be a refresh candidate")
 }
 
 func TestCodeBuddyTokenRefresher_NeedsRefresh(t *testing.T) {

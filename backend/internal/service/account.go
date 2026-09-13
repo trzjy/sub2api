@@ -1308,6 +1308,27 @@ func (a *Account) IsOpenAIOAuth() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeOAuth
 }
 
+// IsCodeBuddy reports whether the account platform is CodeBuddy (腾讯聚合上游).
+func (a *Account) IsCodeBuddy() bool {
+	return a != nil && a.Platform == PlatformCodeBuddy
+}
+
+// IsCodeBuddyOAuth reports whether the account is a CodeBuddy OAuth account
+// (凭证由各自 TokenRefresher 落库在 credentials.access_token).
+func (a *Account) IsCodeBuddyOAuth() bool {
+	return a.IsCodeBuddy() && a.Type == AccountTypeOAuth
+}
+
+// QuotaDimensionCodeBuddy 是 CodeBuddy OAuth 母账号的影子维度（一母多影）。
+// 它与 spark 维度（OpenAI OAuth 母账号的 spark 影子）语义正交：两者都表示"凭据透传母账号"，
+// 但 codebuddy 影子的 platform 是目标分组平台、调度热路径用 codeBuddyRPMGated 按母账号
+// 聚合 RPM（防 N 倍超售）。对应 DB 枚举值与 chk_accounts_quota_dimension 由迁移 250 放开。
+const QuotaDimensionCodeBuddy = "codebuddy"
+
+// ShadowModelExtraKey 存放 codebuddy 影子所服务的上游模型名（Extra 键）。
+// 用于去重校验与前端展示；spark 影子无此键。
+const ShadowModelExtraKey = "shadow_model"
+
 // IsOpenAIOAuthLike reports OpenAI credentials that use the ChatGPT/Codex
 // inference protocol. Setup tokens share that forwarding contract but do not
 // participate in the refreshable OAuth credential lifecycle.

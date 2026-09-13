@@ -1,0 +1,51 @@
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "models": [
+      {
+        "id": "deepseek-v3-0324",
+        "name": "DeepSeek V3 0324",
+        "maxInputTokens": 65536,
+        "maxOutputTokens": 8192,
+        "disabled": false,
+        "reasoning": {
+          "effort": "medium",
+          "supportedEfforts": ["low", "medium", "high"]
+        }
+      },
+      {
+        "id": "deepseek-v3.2",
+        "name": "DeepSeek V3.2",
+        "maxInputTokens": 131072,
+        "maxOutputTokens": 16384,
+        "disabled": false
+      },
+      {
+        "id": "glm-4.5",
+        "name": "GLM 4.5",
+        "maxInputTokens": 131072,
+        "maxOutputTokens": 16384,
+        "disabled": false,
+        "reasoning": {
+          "effort": "high",
+          "supportedEfforts": ["high"]
+        }
+      },
+      {
+        "id": "disabled-model",
+        "name": "Disabled Model",
+        "maxInputTokens": 4096,
+        "maxOutputTokens": 1024,
+        "disabled": true
+      },
+      {
+        "id": "   ",
+        "name": "Blank ID",
+        "maxInputTokens": 4096,
+        "maxOutputTokens": 1024,
+        "disabled": false
+      }
+    ]
+  }
+}

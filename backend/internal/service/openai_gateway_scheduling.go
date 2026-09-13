@@ -978,10 +978,11 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 		return nil
 	}
 	// CodeBuddy 平台默认 RPM：粘性允许黄区，红区才清绑定换号。
+	// 计数按母账号聚合（codeBuddyRPMKeyAccountID），一母多影共享同一桶。
 	if codeBuddyRPMGated(account) {
 		currentRPM := -1
 		if s.rpmCache != nil {
-			if count, err := s.rpmCache.GetRPM(ctx, account.ID); err == nil {
+			if count, err := s.rpmCache.GetRPM(ctx, codeBuddyRPMKeyAccountID(account)); err == nil {
 				currentRPM = count
 			}
 		}
@@ -1050,8 +1051,9 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			continue
 		}
 		// CodeBuddy 平台默认 RPM：非粘性候选仅绿区可选。
+		// 计数按母账号聚合（codeBuddyRPMKeyAccountID），一母多影共享同一桶。
 		if codeBuddyRPMGated(fresh) {
-			count, ok := codeBuddyRPMCounts[fresh.ID]
+			count, ok := codeBuddyRPMCounts[codeBuddyRPMKeyAccountID(fresh)]
 			if !ok {
 				count = -1
 			}

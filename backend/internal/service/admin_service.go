@@ -423,11 +423,18 @@ type CreateAccountInput struct {
 
 // ShadowOptions is the input for CreateShadow.
 // The shadow holds no credentials — the scheduler transparently delegates to the parent account's tokens.
+//
+// Platform/Model 仅对 CodeBuddy 母账号（一母多影）有意义：Platform 是影子落入的目标分组平台
+// （deepseek/zhipu/kimi/minimax/other，缺省按 Model 名推断），Model 是影子服务的上游模型名
+// （用于默认命名、模型映射去重与前端展示）。OpenAI 母账号（spark 一母一影）忽略这两字段，
+// 影子 platform 恒为 openai。
 type ShadowOptions struct {
 	Name        string
 	Priority    int
 	Concurrency int
 	GroupIDs    []int64
+	Platform    string
+	Model       string
 }
 
 type UpdateAccountInput struct {

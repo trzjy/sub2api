@@ -19,8 +19,28 @@ import (
 //   - RPM 计数不可用（缓存未配置/查询失败）一律失败开放，避免误杀。
 
 // codeBuddyRPMGated 判断账号是否纳入 CodeBuddy 平台默认 RPM 限流。
+// 除原生 CodeBuddy OAuth 账号外，CodeBuddy 母账号的影子（quota_dimension=codebuddy，
+// 平台为目标分组平台）也纳入——其 RPM 按母账号聚合（见 codeBuddyRPMKeyAccountID），
+// 防止一母多影被当成 N 个独立账号、各自独立计数导致 N 倍超售上游真实限额（方案 G3）。
 func codeBuddyRPMGated(account *Account) bool {
-	return account != nil && account.Platform == PlatformCodeBuddy && account.Type == AccountTypeOAuth
+	if account == nil || account.Type != AccountTypeOAuth {
+		return false
+	}
+	return account.Platform == PlatformCodeBuddy ||
+		(account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy)
+}
+
+// codeBuddyRPMKeyAccountID 返回 CodeBuddy RPM 计数桶对应的账号 ID。
+// 原生 CodeBuddy 账号用自身 ID；CodeBuddy 影子（一母多影）用母账号 ID——这样同一母账号的
+// 所有影子共享同一个 RPM 桶，聚合限流而非各自独立计数（方案 G3，防 N 倍超售）。
+func codeBuddyRPMKeyAccountID(account *Account) int64 {
+	if account != nil && account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy && account.ParentAccountID != nil {
+		return *account.ParentAccountID
+	}
+	if account != nil {
+		return account.ID
+	}
+	return 0
 }
 
 // codeBuddyEffectiveRPM 返回账号实际生效的每分钟请求上限：
@@ -43,10 +63,13 @@ func (s *OpenAIGatewayService) codeBuddyEffectiveRPM(ctx context.Context, accoun
 
 // prefetchCodeBuddyRPMCounts 批量预取 CodeBuddy 候选账号当前分钟的 RPM 计数，
 // 避免在选号热路径逐账号查 Redis（N+1）。失败开放：无候选或查询失败返回 nil。
+// 注意：CodeBuddy 影子按母账号聚合，故用 codeBuddyRPMKeyAccountID 去重后批量查询，
+// 避免同一母账号的多个影子重复查同一桶。
 func (s *OpenAIGatewayService) prefetchCodeBuddyRPMCounts(ctx context.Context, accounts []Account) map[int64]int {
 	if s == nil || s.rpmCache == nil {
 		return nil
 	}
+	seen := make(map[int64]struct{})
 	var ids []int64
 	for i := range accounts {
 		acc := &accounts[i]
@@ -56,7 +79,12 @@ func (s *OpenAIGatewayService) prefetchCodeBuddyRPMCounts(ctx context.Context, a
 		if s.codeBuddyEffectiveRPM(ctx, acc) <= 0 {
 			continue
 		}
-		ids = append(ids, acc.ID)
+		key := codeBuddyRPMKeyAccountID(acc)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, key)
 	}
 	if len(ids) == 0 {
 		return nil
@@ -89,6 +117,7 @@ func (s *OpenAIGatewayService) codeBuddyRPMSchedulable(ctx context.Context, acco
 }
 
 // incrementCodeBuddyRPM 成功触达上游后递增账号 RPM 计数。
+// CodeBuddy 影子按母账号聚合（codeBuddyRPMKeyAccountID），确保一母多影共享同一计数桶。
 func (s *OpenAIGatewayService) incrementCodeBuddyRPM(ctx context.Context, account *Account) {
 	if s == nil || s.rpmCache == nil || !codeBuddyRPMGated(account) {
 		return
@@ -96,8 +125,9 @@ func (s *OpenAIGatewayService) incrementCodeBuddyRPM(ctx context.Context, accoun
 	if s.codeBuddyEffectiveRPM(ctx, account) <= 0 {
 		return
 	}
-	if _, err := s.rpmCache.IncrementRPM(ctx, account.ID); err != nil {
-		slog.Warn("codebuddy.rpm_increment_failed", "account_id", account.ID, "error", err)
+	key := codeBuddyRPMKeyAccountID(account)
+	if _, err := s.rpmCache.IncrementRPM(ctx, key); err != nil {
+		slog.Warn("codebuddy.rpm_increment_failed", "account_id", key, "error", err)
 	}
 }
 

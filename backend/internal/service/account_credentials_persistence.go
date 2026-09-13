@@ -30,31 +30,32 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 	return repo.Update(ctx, account)
 }
 
-// sparkShadowAllowedCredentialKeys 是 spark 影子账号唯一可写的凭据键集合(仅模型映射)。
-// 校验(isAllowed)与 sanitize 共用此单一来源,避免两处独立硬编码列表漂移。
-var sparkShadowAllowedCredentialKeys = map[string]struct{}{
+// shadowAllowedCredentialKeys 是影子账号（spark 与 codebuddy 维度）唯一可写的凭据键集合
+// （仅模型映射）。校验(isAllowed)与 sanitize 共用此单一来源,避免两处独立硬编码列表漂移。
+// 两种影子都不持 auth token，仅允许在影子侧配置模型映射（model_mapping）。
+var shadowAllowedCredentialKeys = map[string]struct{}{
 	"model_mapping":         {},
 	"compact_model_mapping": {},
 }
 
-func isAllowedSparkShadowCredentialsUpdate(credentials map[string]any) bool {
+func isAllowedShadowCredentialsUpdate(credentials map[string]any) bool {
 	if credentials == nil {
 		return true
 	}
 	for key := range credentials {
-		if _, ok := sparkShadowAllowedCredentialKeys[key]; !ok {
+		if _, ok := shadowAllowedCredentialKeys[key]; !ok {
 			return false
 		}
 	}
 	return true
 }
 
-func sanitizeSparkShadowCredentials(credentials map[string]any) map[string]any {
+func sanitizeShadowCredentials(credentials map[string]any) map[string]any {
 	if len(credentials) == 0 {
 		return map[string]any{}
 	}
-	out := make(map[string]any, len(sparkShadowAllowedCredentialKeys))
-	for key := range sparkShadowAllowedCredentialKeys {
+	out := make(map[string]any, len(shadowAllowedCredentialKeys))
+	for key := range shadowAllowedCredentialKeys {
 		if value, ok := credentials[key]; ok && value != nil {
 			out[key] = value
 		}

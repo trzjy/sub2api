@@ -85,6 +85,20 @@ export function modelMatchesPlatform(modelId: string, platform: string): boolean
   return pattern.test(modelId)
 }
 
+/**
+ * 根据 CodeBuddy 上游模型名推断影子应落入的目标分组平台（一母多影）。
+ * 规则：deepseek-*→deepseek、glm-*→zhipu、kimi-*→kimi、minimax-*→minimax、其余→other。
+ * openai 不在推断范围（codebuddy 影子刻意排除 openai）。
+ */
+export function inferCodeBuddyShadowPlatform(model: string): string {
+  const m = model.trim().toLowerCase()
+  if (m.startsWith('deepseek')) return 'deepseek'
+  if (m.startsWith('glm')) return 'zhipu'
+  if (m.startsWith('kimi')) return 'kimi'
+  if (m.startsWith('minimax')) return 'minimax'
+  return 'other'
+}
+
 export interface UpstreamModelSyncFilter {
   kept: string[]
   skipped: string[]

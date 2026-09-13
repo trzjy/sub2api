@@ -540,6 +540,10 @@ type CreateShadowRequest struct {
 	Priority    int     `json:"priority"`
 	Concurrency int     `json:"concurrency"`
 	GroupIDs    []int64 `json:"group_ids"`
+	// Platform 与 Model 仅对 CodeBuddy 母账号（一母多影）使用：Platform 为影子目标分组
+	// 平台（缺省按 Model 推断），Model 为影子服务的上游模型名（去重/默认命名/展示用）。
+	Platform string `json:"platform"`
+	Model    string `json:"model"`
 }
 
 // CreateShadow creates a spark-dimension shadow account for a parent OpenAI OAuth account.
@@ -562,6 +566,8 @@ func (h *OpenAIOAuthHandler) CreateShadow(c *gin.Context) {
 		Priority:    req.Priority,
 		Concurrency: req.Concurrency,
 		GroupIDs:    req.GroupIDs,
+		Platform:    req.Platform,
+		Model:       req.Model,
 	})
 	if err != nil {
 		response.ErrorFrom(c, err)
