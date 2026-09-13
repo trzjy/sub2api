@@ -133,6 +133,9 @@ func (r *promoIntelRepository) ListDueSources(ctx context.Context, now time.Time
 		limit = 20
 	}
 	// 行级 interval 判到期：last_fetched_at IS NULL OR last_fetched_at <= now - interval。
+	// 补跑通道：llm_extract 开启但 last_extracted_hash 仍为空（抓到了原文但整理层
+	// 尚未成功过——LLM 未配置或失败）的源，每 30 分钟重进整理队列；否则配置好
+	// 整理模型后要等下一轮整期间隔（默认 24h）才会结构化。
 	// $1 必须显式 ::timestamptz：pq 以 unknown 传参时 PG 会把 "$1 - make_interval(...)"
 	// 解析成 interval - interval（报 "operator does not exist: timestamp with time
 	// zone <= interval"），扫描循环每轮失败。
@@ -142,7 +145,12 @@ func (r *promoIntelRepository) ListDueSources(ctx context.Context, now time.Time
 		       created_by, created_at, updated_at
 		FROM promo_intel_sources
 		WHERE enabled = TRUE
-		  AND (last_fetched_at IS NULL OR last_fetched_at <= $1::timestamptz - make_interval(mins => fetch_interval_minutes))
+		  AND (
+		      last_fetched_at IS NULL
+		      OR last_fetched_at <= $1::timestamptz - make_interval(mins => fetch_interval_minutes)
+		      OR (llm_extract = TRUE AND last_extracted_hash = ''
+		          AND last_fetched_at <= $1::timestamptz - make_interval(mins => 30))
+		  )
 		ORDER BY last_fetched_at ASC NULLS FIRST, id ASC
 		LIMIT $2`, now, limit)
 	if err != nil {
