@@ -632,4 +632,29 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 
 ---
 
-最后更新：2026-09-11
+## 15. CodeBuddy 双站点（CN + 国际版）运维备忘
+
+CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做第二个平台）：
+- 站点 URL 表唯一事实源：`backend/internal/service/codebuddy_site.go`（`cn` / `intl`，**缺省 cn**）。
+- 账号凭据：`credentials.site = "cn" | "intl"`；存量账号无该键 = cn，行为不变。
+- 出站域名：cn → `copilot.tencent.com` / `www.codebuddy.cn`；intl → `www.codebuddy.ai`。
+- 前端：新建账号选站点（CreateAccountModal）；重授权沿用账号既有站点（ReAuthAccountModal）。
+
+### 挂账项（保持，非阻断）
+
+| # | 事项 | 处置触发条件 |
+|---|---|---|
+| 1 | **intl 计费快照 live 验证**：`gateway.codebuddy.quota_check_enabled` 默认关闭，故 intl 未产 Extra 额度快照。已用 Phase 0 直连 billing 200（schema 与 CN 同构）+ 单测钉住 intl base 替代 | **未来任何原因开启 `quota_check_enabled` 时，顺带验证 intl 账号（site=intl）的 Extra 快照** |
+| 2 | `GET /api/v1/admin/accounts/:id/usage` 对 codebuddy 返回 500（`getUsageForAccount` 无 codebuddy 分支，落通用 Claude usage → 上游 403）。**既有缺陷，CN/intl 同样中招** | 下个维护批次：补 codebuddy 分支，改走配额快照（`CodeBuddyQuotaService`） |
+| 3 | CodeBuddy 模型定价配置（如 CN `hy3`、intl `deepseek-v3`）缺失时用量照记、成本计 0 | 运营按需在价格管理中心配置 |
+| 4 | UA 版本监控：默认 `CLI/2.63.2`（共享配置 `gateway.codebuddy.chat_user_agent`），官方 CLI 已 2.150.0，上游当前未校验 | 长期观察；上游若校验版本再热更 |
+
+### intl 实测要点（详见 docs/evidence/codebuddy-intl/）
+- intl token 为 JWT（`domain=www.codebuddy.ai`），refresh 响应无 `domain`；uid 为 UUID、个人账号无 enterpriseId。
+- intl **models 端点认证后 HTTP 500**（动态模型不可用，代码内已对 intl 降级）。
+- intl 首条消息必须为 system（否则 400 `11128`）；非流式 `11101`；模型无效 `11102`。
+- intl 可用模型（该个人账号样本）：`deepseek-v3`、`deepseek-v3-0324`。
+
+---
+
+最后更新：2026-09-13
