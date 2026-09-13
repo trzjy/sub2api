@@ -102,6 +102,7 @@ func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.Admi
 			apikey.HasUserWith(user.RoleEQ(service.RoleAdmin)),
 		)).
 		WithUser().
+		WithGroup().
 		Order(dbent.Asc(apikey.FieldName)).
 		All(ctx)
 	if err != nil {
@@ -112,6 +113,20 @@ func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.Admi
 		ref := service.AdminAPIKeyRef{ID: row.ID, Name: row.Name}
 		if row.Edges.User != nil {
 			ref.OwnerEmail = row.Edges.User.Email
+		}
+		if g := row.Edges.Group; g != nil {
+			gid := g.ID
+			ref.GroupID = &gid
+			ref.GroupName = g.Name
+			ref.Platform = g.Platform
+			// ent 存的是 domain 层白名单结构；转回 service 层判定语义。
+			allowlist := service.DomainGroupModelAllowlist(service.GroupModelAllowlist{
+				Enabled: g.ModelAllowlist.Enabled,
+				Models:  append([]string{}, g.ModelAllowlist.Models...),
+			})
+			if allowlist.Enabled {
+				ref.Models = append([]string{}, allowlist.Models...)
+			}
 		}
 		out = append(out, ref)
 	}

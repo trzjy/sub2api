@@ -395,13 +395,24 @@
               <label class="input-label">{{ t('admin.promoIntel.settings.selfApiKey') }}</label>
               <select v-model.number="settingsForm.self_api_key_id" class="input">
                 <option :value="0">{{ t('admin.promoIntel.settings.selfApiKeyPlaceholder') }}</option>
-                <option v-for="k in apiKeyOptions" :key="k.id" :value="k.id">{{ k.name }}（#{{ k.id }}）</option>
+                <option v-for="k in apiKeyOptions" :key="k.id" :value="k.id">
+                  {{ k.name || ('#' + k.id) }}<template v-if="k.group_name"> · {{ k.group_name }}</template> · #{{ k.id }}
+                </option>
               </select>
               <p class="mt-1 text-xs text-gray-400">{{ t('admin.promoIntel.settings.selfApiKeyHint') }}</p>
             </div>
             <div>
               <label class="input-label">{{ t('admin.promoIntel.settings.selfModel') }}</label>
-              <input v-model.trim="settingsForm.self_model" type="text" class="input font-mono text-xs" placeholder="deepseek-chat / claude-sonnet-..." />
+              <input v-model.trim="settingsForm.self_model" type="text" class="input font-mono text-xs" list="promo-intel-self-models" placeholder="deepseek-chat / claude-sonnet-..." />
+              <datalist id="promo-intel-self-models">
+                <option v-for="m in selectedKeyModels" :key="m" :value="m" />
+              </datalist>
+              <p v-if="selectedKeyModels.length > 0" class="mt-1 text-xs text-gray-400">
+                {{ t('admin.promoIntel.settings.allowedModels', { models: selectedKeyModels.join(', ') }) }}
+              </p>
+              <p v-else-if="selectedKeyGroup" class="mt-1 text-xs text-gray-400">
+                {{ t('admin.promoIntel.settings.noAllowlist') }}
+              </p>
             </div>
           </template>
 
@@ -532,6 +543,7 @@ import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { adminAPI } from '@/api/admin'
 import type {
+  AdminAPIKeyRef,
   Briefing,
   ItemListParams,
   PromoIntelItem,
@@ -861,7 +873,7 @@ function debouncedSourceReload() {
 // ---------- 设置 ----------
 
 const settings = ref<Awaited<ReturnType<typeof adminAPI.promoIntel.getSettings>> | null>(null)
-const apiKeyOptions = ref<{ id: number; name: string }[]>([])
+const apiKeyOptions = ref<AdminAPIKeyRef[]>([])
 const settingsForm = reactive({
   enabled: true,
   source: 'self' as 'self' | 'external',
@@ -874,6 +886,13 @@ const settingsForm = reactive({
 })
 const settingsSaving = ref(false)
 const settingsTesting = ref(false)
+
+// 选中 key 的分组与白名单模型：给模型输入框做候选 + 提示，避免 key 分组不认模型白撞。
+const selectedKey = computed(() =>
+  apiKeyOptions.value.find((k) => k.id === settingsForm.self_api_key_id) || null
+)
+const selectedKeyModels = computed(() => selectedKey.value?.models || [])
+const selectedKeyGroup = computed(() => selectedKey.value?.group_name || '')
 
 async function reloadSettings() {
   try {

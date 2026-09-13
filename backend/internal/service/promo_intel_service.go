@@ -28,10 +28,16 @@ type APIKeyLister interface {
 }
 
 // AdminAPIKeyRef 是管理端 API Key 的选择器条目（不含明文）。
+// 带分组与该分组的模型白名单，让管理员选 key 时就知道能用哪些模型——
+// 否则模型框自由填写只能撞运气（key 的分组不认这个模型时网关会 404）。
 type AdminAPIKeyRef struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	OwnerEmail string `json:"owner_email"`
+	ID         int64    `json:"id"`
+	Name       string   `json:"name"`
+	OwnerEmail string   `json:"owner_email"`
+	GroupID    *int64   `json:"group_id"`
+	GroupName  string   `json:"group_name"`
+	Platform   string   `json:"platform"`
+	Models     []string `json:"models"` // 分组模型白名单；未启用白名单为空（不限）
 }
 
 // PromoIntelRepository 优惠情报仓储契约（service 层定义，repository 层实现）。
@@ -949,9 +955,33 @@ func (s *PromoIntelService) TestLLMSettings(ctx context.Context) (string, error)
 	testSrc := &PromoIntelSource{Name: "连通性测试", Vendor: "test", URL: "https://example.com"}
 	offers, err := s.extractOffersWithLLM(ctx, testSrc, "这是一个连通性测试正文。请按规则输出 JSON 数组。")
 	if err != nil {
+		// 网关 404「模型不在分组白名单」是最常见误配：key 的分组不认填写的模型。
+		// 翻译成人话并给出该 key 可用的模型清单，省去盲试。
+		if strings.Contains(err.Error(), "is not available for this group") {
+			if hint := s.selfKeyModelsHint(ctx, cfgInt.SelfAPIKeyID); hint != "" {
+				return "", fmt.Errorf("%w；该 Key 绑定分组可用的模型：%s", err, hint)
+			}
+		}
 		return "", err
 	}
 	return fmt.Sprintf("ok: endpoint reachable, protocol=%s, model=%s, parsed_offers=%d", cfgInt.Protocol, cfgInt.Model, len(offers)), nil
+}
+
+// selfKeyModelsHint 返回指定 key 分组白名单模型的逗号串（无白名单返回空）。
+func (s *PromoIntelService) selfKeyModelsHint(ctx context.Context, keyID int64) string {
+	if s == nil || s.apiKeyLister == nil || keyID <= 0 {
+		return ""
+	}
+	keys, err := s.apiKeyLister.ListAdminAPIKeys(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, k := range keys {
+		if k.ID == keyID && len(k.Models) > 0 {
+			return strings.Join(k.Models, ", ")
+		}
+	}
+	return ""
 }
 
 func isFalsePromoIntelSetting(v string) bool {

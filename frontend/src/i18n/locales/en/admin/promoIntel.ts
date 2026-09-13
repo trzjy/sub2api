@@ -120,6 +120,8 @@ const promoIntel = {
       selfApiKeyPlaceholder: 'Select an API key...',
       selfApiKeyHint: 'Only the key name is shown; the secret stays server-side.',
       selfModel: 'Model',
+      allowedModels: 'Allowed models for this group: {models}',
+      noAllowlist: 'No model allowlist on this group; any model is accepted',
       model: 'Model name',
       test: 'Test connection',
       testing: 'Testing...',
