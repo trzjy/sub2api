@@ -1732,7 +1732,8 @@ const closeWelfareDialog = () => {
 const toggleWelfareGroup = (groupId: number, event: Event) => {
   const checked = (event.target as HTMLInputElement).checked
   if (checked) {
-    welfareForm.groups[groupId] = 30
+    // 默认天卡：手滑直接创建时损失最小（此前默认 30 天月卡）
+    welfareForm.groups[groupId] = 1
   } else {
     delete welfareForm.groups[groupId]
   }
