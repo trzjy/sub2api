@@ -29,8 +29,9 @@ type APIKeyLister interface {
 
 // AdminAPIKeyRef 是管理端 API Key 的选择器条目（不含明文）。
 type AdminAPIKeyRef struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	OwnerEmail string `json:"owner_email"`
 }
 
 // PromoIntelRepository 优惠情报仓储契约（service 层定义，repository 层实现）。
