@@ -156,7 +156,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 		svc := NewCodeBuddyOAuthService(repo)
 		proxyID := int64(7)
 
-		_, err := svc.GenerateAuthURL(ctx, &proxyID)
+		_, err := svc.GenerateAuthURL(ctx, CodeBuddySiteCN, &proxyID)
 		require.Error(t, err)
 		require.True(t, connectSeen.Load(), "生成授权链接必须经账号代理出站")
 	})
@@ -170,7 +170,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 		svc := NewCodeBuddyOAuthService(repo)
 		proxyID := int64(7)
 
-		_, err := svc.PollToken(ctx, "st-123", &proxyID)
+		_, err := svc.PollToken(ctx, "st-123", CodeBuddySiteCN, &proxyID)
 		require.Error(t, err)
 		require.True(t, connectSeen.Load(), "poll 必须与登录同一账号代理出站")
 	})

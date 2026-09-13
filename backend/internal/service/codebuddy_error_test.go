@@ -125,3 +125,23 @@ func TestParseCodeBuddyResetTime_UTC8(t *testing.T) {
 		t.Fatalf("expected parse failure for missing marker")
 	}
 }
+
+// TestClassifyCodeBuddyError_Phase0NewCodes 覆盖 Phase 0 校准新增码（D7）：
+// 11128（首条须 system）与 11102（模型无效/无权限）均归为「请求/模型问题、不罚账号」。
+func TestClassifyCodeBuddyError_Phase0NewCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"11128 first message is not system prompt", `{"code":11128,"msg":"first message is not system prompt"}`},
+		{"11102 model service info not found", `{"code":11102,"msg":"model [gpt-5] service info not found"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyCodeBuddyError(http.StatusBadRequest, []byte(tc.body))
+			if got != CodeBuddyErrKindRequestBody {
+				t.Fatalf("expected RequestBody, got %s", got)
+			}
+		})
+	}
+}

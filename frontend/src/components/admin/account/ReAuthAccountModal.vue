@@ -207,7 +207,7 @@ import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
 import { useCodebuddyOAuth } from '@/composables/useCodebuddyOAuth'
 import type { Account } from '@/types'
-import type { CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
+import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
@@ -260,6 +260,13 @@ const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
 const isCodebuddy = computed(() => props.account?.platform === 'codebuddy')
+
+// 重新授权必须沿用账号既有站点：intl 账号的 state 只在 intl 存在，不得回落 cn。
+// credentials.site 已在后端响应中脱敏保留（site 非敏感键）。
+const codebuddyReauthSite = computed<CodeBuddySite>(() => {
+  const creds = (props.account?.credentials || {}) as Record<string, unknown>
+  return creds.site === 'intl' ? 'intl' : 'cn'
+})
 
 /**
  * Grok reauth default tab (password auth is hidden):
@@ -392,7 +399,7 @@ const handleGenerateUrl = async () => {
   } else if (isGrok.value) {
     await grokOAuth.generateAuthUrl(props.account.proxy_id)
   } else if (isCodebuddy.value) {
-    const ok = await codebuddyOAuth.generateAuthUrl(props.account.proxy_id)
+    const ok = await codebuddyOAuth.generateAuthUrl(props.account.proxy_id, codebuddyReauthSite.value)
     if (ok) {
       codebuddyOAuth.startPolling({ onSuccess: handleCodebuddyReauthSuccess })
     }
@@ -647,7 +654,7 @@ const applyGrokReauthTokenInfo = async (tokenInfo: {
 /** CodeBuddy 轮询成功：用 tokenInfo 构建凭据并更新账号 */
 const handleCodebuddyReauthSuccess = async (tokenInfo: CodeBuddyTokenInfo) => {
   if (!props.account) return
-  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo, codebuddyReauthSite.value)
   try {
     await adminAPI.accounts.update(props.account.id, {
       type: 'oauth',
@@ -679,11 +686,15 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
     codebuddyOAuth.loading.value = true
     codebuddyOAuth.error.value = ''
     try {
-      const tokenInfo = await codebuddyOAuth.validateRefreshToken(refreshTokenInput, props.account.proxy_id)
+      const tokenInfo = await codebuddyOAuth.validateRefreshToken(
+        refreshTokenInput,
+        props.account.proxy_id,
+        codebuddyReauthSite.value
+      )
       if (!tokenInfo) return
       await adminAPI.accounts.update(props.account.id, {
         type: 'oauth',
-        credentials: codebuddyOAuth.buildCredentials(tokenInfo)
+        credentials: codebuddyOAuth.buildCredentials(tokenInfo, codebuddyReauthSite.value)
       })
       const updatedAccount = await adminAPI.accounts.clearError(props.account.id)
       appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))

@@ -170,7 +170,8 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 	token string,
 	upstreamModel string,
 ) (*http.Request, error) {
-	targetURL := strings.TrimRight(CodeBuddyUpstreamBaseURL, "/") + codeBuddyChatCompletionsPath
+	ep := codeBuddyEndpointsFor(account.CodeBuddySite())
+	targetURL := strings.TrimRight(ep.UpstreamBase, "/") + codeBuddyChatCompletionsPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -181,8 +182,8 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", CodeBuddyOriginReferer)
-	req.Header.Set("Referer", CodeBuddyOriginReferer+"/")
+	req.Header.Set("Origin", ep.OriginReferer)
+	req.Header.Set("Referer", ep.OriginReferer+"/")
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Product", "SaaS")

@@ -27,7 +27,7 @@ const (
 	CodeBuddyErrKindUpstreamFault
 	// CodeBuddyErrKindContentAudit 内容审核拦截（400 + 审核关键词），不罚账号，sanitize 降级重试。
 	CodeBuddyErrKindContentAudit
-	// CodeBuddyErrKindRequestBody 请求体问题（400 + 11101 / Unmarshal），不罚账号。
+	// CodeBuddyErrKindRequestBody 请求体/模型问题（400 + 11101/11102/11128 / Unmarshal），不罚账号。
 	CodeBuddyErrKindRequestBody
 	// CodeBuddyErrKindAccountSoftLimit 账号级软限流（429 或 rate-limit 文案）。
 	CodeBuddyErrKindAccountSoftLimit
@@ -56,8 +56,9 @@ func (k CodeBuddyErrKind) String() string {
 }
 
 // ClassifyCodeBuddyError 按 §2.6 严格表序（不可调换）对上游错误分类：
-//   1 余额耗尽 → 2 session 死亡 → 3 模型级限流(429+6004) → 4 账号级软限流
-//   → 5 上游故障(404/5xx) → 6 内容审核 → 7 请求体问题。
+//
+//	1 余额耗尽 → 2 session 死亡 → 3 模型级限流(429+6004) → 4 账号级软限流
+//	→ 5 上游故障(404/5xx) → 6 内容审核 → 7 请求体/模型问题(11101/11102/11128)。
 //
 // 关键顺序约束（验收要求，已按方案负责人裁决改回严格表序）：
 //   - ModelLimit（429+6004）必须先于 AccountSoftLimit（行 4 之前）：6004 的 body 通常也含
@@ -114,9 +115,14 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 		return CodeBuddyErrKindContentAudit
 	}
 
-	// 7. 请求体问题（400 + 11101 / Unmarshal）。不罚账号，仍轮转。
+	// 7. 请求体/模型问题（400 + 11101 / 11102 / 11128 / Unmarshal）。不罚账号，仍轮转。
+	//    Phase 0 校准新增（D7，见 docs/evidence/codebuddy-intl）：
+	//      - 11102 `model [X] service info not found`：模型无效/无权限；
+	//      - 11128 `first message is not system prompt`：首条消息必须为 system。
 	if statusCode == http.StatusBadRequest &&
 		(codeBuddyBodyHasCode(body, 11101) ||
+			codeBuddyBodyHasCode(body, 11102) ||
+			codeBuddyBodyHasCode(body, 11128) ||
 			strings.Contains(bodyLower, "unmarshal chat params failed")) {
 		return CodeBuddyErrKindRequestBody
 	}

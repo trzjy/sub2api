@@ -19,13 +19,11 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 )
 
-// CodeBuddy 上游协议常量（copilot.tencent.com，非官方公开 API）。
-// 端点与请求头指纹对齐官方 CLI（workbuddy 设备授权流），改动需同步
-// codebuddy_token_refresher.go 与前端 OAuth 流程文案。
+// CodeBuddy 上游协议路径与共享 UA（非官方公开 API）。站点相关的域名/Origin/Referer
+// 已收敛到 codebuddy_site.go 的站点表，由 codeBuddyEndpointsFor(site) 选取；
+// 改动需同步 codebuddy_token_refresher.go 与前端 OAuth 流程文案。
 const (
-	CodeBuddyUpstreamBaseURL = "https://copilot.tencent.com"
-	CodeBuddyOriginReferer   = "https://www.codebuddy.cn"
-	CodeBuddyClientUA        = "CLI/2.63.2 CodeBuddy/2.63.2"
+	CodeBuddyClientUA = "CLI/2.63.2 CodeBuddy/2.63.2"
 
 	codeBuddyAuthStatePath    = "/v2/plugin/auth/state?platform=CLI"
 	codeBuddyAuthTokenPath    = "/v2/plugin/auth/token?state="
@@ -147,20 +145,21 @@ type codeBuddyEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// setCommonHeaders 对齐官方 CLI 的指纹请求头（Origin/Referer/UA）。
-func (s *CodeBuddyOAuthService) setCommonHeaders(req *http.Request) {
+// setCommonHeaders 按站点写入指纹请求头（Origin/Referer 随站点域变化，UA 两站共用）。
+func (s *CodeBuddyOAuthService) setCommonHeaders(req *http.Request, originReferer string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", CodeBuddyOriginReferer)
-	req.Header.Set("Referer", CodeBuddyOriginReferer+"/")
+	req.Header.Set("Origin", originReferer)
+	req.Header.Set("Referer", originReferer+"/")
 	req.Header.Set("User-Agent", CodeBuddyClientUA)
 }
 
 // doJSON 请求上游并解 {code,msg,data} 信封，code != 0 视为业务错误。
 // client 为本次请求使用的 HTTP client（无代理时为共享直连 client）。
+// originReferer 为站点 Origin/Referer（headers 为 nil 时的默认头来源）。
 // loginPending 为 true 时业务错误归类为 ErrCodeBuddyLoginPending（auth/token 轮询场景）。
-func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, client *http.Client, method, fullURL string, headers func(*http.Request), body io.Reader, loginPending bool) (json.RawMessage, error) {
+func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, client *http.Client, method, fullURL, originReferer string, headers func(*http.Request), body io.Reader, loginPending bool) (json.RawMessage, error) {
 	if client == nil {
 		client = s.httpClient
 	}
@@ -171,7 +170,7 @@ func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, client *http.Client,
 	if headers != nil {
 		headers(req)
 	} else {
-		s.setCommonHeaders(req)
+		s.setCommonHeaders(req, originReferer)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -225,13 +224,15 @@ func codeBuddyStateURL(base, path, state string) string {
 }
 
 // GenerateAuthURL 生成 CodeBuddy OAuth 授权链接（上游签发 state，服务端无会话）。
-// proxyID 为本次登录选定的代理（nil = 直连），与后续 poll/账号日常调用保持同一出口 IP。
-func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64) (*CodeBuddyAuthURLResult, error) {
+// site 选择站点 URL 表（空/未知 → cn）；proxyID 为本次登录选定的代理（nil = 直连），
+// 与后续 poll/账号日常调用保持同一出口 IP。poll 必须传相同 site。
+func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context, site string, proxyID *int64) (*CodeBuddyAuthURLResult, error) {
 	client, err := s.clientForProxyID(ctx, proxyID)
 	if err != nil {
 		return nil, err
 	}
-	data, err := s.doJSON(ctx, client, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyAuthStatePath, nil, bytes.NewReader([]byte("{}")), false)
+	ep := codeBuddyEndpointsFor(site)
+	data, err := s.doJSON(ctx, client, http.MethodPost, ep.UpstreamBase+codeBuddyAuthStatePath, ep.OriginReferer, nil, bytes.NewReader([]byte("{}")), false)
 	if err != nil {
 		return nil, fmt.Errorf("获取授权 state 失败: %w", err)
 	}
@@ -247,8 +248,9 @@ func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context, proxyID *in
 
 // PollToken 轮询登录结果：auth/token 为权威登录状态端点，未完成登录时返回
 // ErrCodeBuddyLoginPending；完成后附带拉取 uid/nickname（失败不阻塞）。
+// site 必须与 GenerateAuthURL 一致，否则 state 在另一站点不存在、登录永远 pending。
 // proxyID 必须与 GenerateAuthURL 一致，否则登录请求的出口 IP 与首次登录不一致。
-func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
+func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state, site string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
 	state = strings.TrimSpace(state)
 	if state == "" || len(state) > 128 {
 		return nil, fmt.Errorf("state 不能为空且长度不得超过 128")
@@ -258,9 +260,10 @@ func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string, pro
 	if err != nil {
 		return nil, err
 	}
+	ep := codeBuddyEndpointsFor(site)
 
 	tokData, err := s.doJSON(ctx, client, http.MethodGet,
-		codeBuddyStateURL(CodeBuddyUpstreamBaseURL, codeBuddyAuthTokenPath, state), nil, nil, true)
+		codeBuddyStateURL(ep.UpstreamBase, codeBuddyAuthTokenPath, state), ep.OriginReferer, nil, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -286,11 +289,11 @@ func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string, pro
 
 	// login/account 获取 uid/nickname/enterprise_id（容错，失败不阻塞登录）
 	acctHeaders := func(req *http.Request) {
-		s.setCommonHeaders(req)
+		s.setCommonHeaders(req, ep.OriginReferer)
 		req.Header.Set("Authorization", "Bearer "+info.AccessToken)
 	}
 	if acctData, acctErr := s.doJSON(ctx, client, http.MethodGet,
-		codeBuddyStateURL(CodeBuddyUpstreamBaseURL, codeBuddyLoginAcctPath, state), acctHeaders, nil, false); acctErr == nil {
+		codeBuddyStateURL(ep.UpstreamBase, codeBuddyLoginAcctPath, state), ep.OriginReferer, acctHeaders, nil, false); acctErr == nil {
 		var acct struct {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
@@ -307,28 +310,34 @@ func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string, pro
 
 // RefreshToken 用 refresh_token 换新 access_token。
 // X-Refresh-Token 仅允许出现在刷新请求中，绝不出现在 chat 请求（上游安全红线）。
-// proxyID 为账号绑定的代理（nil = 直连），使 token 轮换与日常调用同一出口 IP。
-func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, uid, enterpriseID, domain string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
+// site 选择站点 URL 表；proxyID 为账号绑定的代理（nil = 直连），使 token 轮换与日常调用同一出口 IP。
+func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, uid, enterpriseID, domain, site string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
 	client, err := s.clientForProxyID(ctx, proxyID)
 	if err != nil {
 		return nil, err
 	}
-	return s.refreshTokenWithClient(ctx, client, refreshToken, uid, enterpriseID, domain)
+	return s.refreshTokenWithClient(ctx, client, refreshToken, uid, enterpriseID, domain, site)
 }
 
-func (s *CodeBuddyOAuthService) refreshTokenWithClient(ctx context.Context, client *http.Client, refreshToken, uid, enterpriseID, domain string) (*CodeBuddyTokenInfo, error) {
+func (s *CodeBuddyOAuthService) refreshTokenWithClient(ctx context.Context, client *http.Client, refreshToken, uid, enterpriseID, domain, site string) (*CodeBuddyTokenInfo, error) {
 	if strings.TrimSpace(refreshToken) == "" {
 		return nil, fmt.Errorf("无可用的 refresh_token")
 	}
+	ep := codeBuddyEndpointsFor(site)
 	headers := func(req *http.Request) {
-		s.setCommonHeaders(req)
+		s.setCommonHeaders(req, ep.OriginReferer)
 		req.Header.Set("X-Refresh-Token", refreshToken)
 		if enterpriseID != "" {
 			req.Header.Set("X-Enterprise-Id", enterpriseID)
 		}
-		req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+		// Phase 0 校准（D8）：intl 实测不带 X-Auth-Refresh-Source 仍 200，该头非必需，
+		// 按其值（workbuddy 为 CN 品牌标识）属多余指纹面，故 intl 不发。
+		// CN 保留原样以保证"无 site=cn 行为不变"（CN 是否必需由 Phase 2 cn 回归确认）。
+		if NormalizeCodeBuddySite(site) == CodeBuddySiteCN {
+			req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+		}
 	}
-	data, err := s.doJSON(ctx, client, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyTokenRefreshPath, headers, nil, false)
+	data, err := s.doJSON(ctx, client, http.MethodPost, ep.UpstreamBase+codeBuddyTokenRefreshPath, ep.OriginReferer, headers, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +389,7 @@ func (s *CodeBuddyOAuthService) RefreshAccountToken(ctx context.Context, account
 		account.GetCredential("uid"),
 		account.GetCredential("enterprise_id"),
 		account.GetCredential("domain"),
+		account.CodeBuddySite(),
 	)
 }
 

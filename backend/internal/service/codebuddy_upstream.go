@@ -54,7 +54,8 @@ var codeBuddyDefaultSanitizePatterns = []CodeBuddySanitizePattern{
 	{Substring: "OpenAI", Replacement: "the model vendor"},
 }
 
-// PrepareCodeBuddyBody 按 §2.5 顺序执行七条改写规则，返回改写后的请求体。
+// PrepareCodeBuddyBody 按 §2.5 顺序执行改写规则（含 Phase 0 校准新增的
+// 「首条消息必须为 system」，D6），返回改写后的请求体。
 // 任何单条规则失败时返回错误（不部分改写），保证调用方可安全替换出站 body。
 func PrepareCodeBuddyBody(src []byte, opts CodeBuddyRewriteOptions) ([]byte, error) {
 	if !json.Valid(src) {
@@ -83,6 +84,11 @@ func PrepareCodeBuddyBody(src []byte, opts CodeBuddyRewriteOptions) ([]byte, err
 
 	// 规则 3：developer 角色归一为上游认可角色（→ system）。
 	if normalizeCodeBuddyDeveloperRole(req) {
+		changed = true
+	}
+
+	// 规则 3b：保证首条消息为 system（Phase 0 D6）。
+	if ensureCodeBuddySystemFirst(req) {
 		changed = true
 	}
 
@@ -184,6 +190,30 @@ func normalizeCodeBuddyDeveloperRole(req map[string]any) bool {
 		}
 	}
 	return changed
+}
+
+// codeBuddyDefaultSystemPrompt 是首条 system 缺失时前置的最小 system 内容。
+// 内容保持中性，避免引入任何上游指纹审核敏感词。
+const codeBuddyDefaultSystemPrompt = "You are a helpful assistant."
+
+// ensureCodeBuddySystemFirst 保证 messages[0] 为 system 角色。
+//
+// Phase 0 校准（D6）：intl 站点对首条非 system 的请求返回 400
+// `{"code":11128,"msg":"first message is not system prompt"}`（见
+// docs/evidence/codebuddy-intl）。此处缺失时前置一条最小 system，不改变原有消息
+// 相对顺序；CN 是否同样强制由 Phase 2 cn 回归比对，暂两站点统一处理避免分叉。
+func ensureCodeBuddySystemFirst(req map[string]any) bool {
+	msgs, ok := req["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return false
+	}
+	if first, ok := msgs[0].(map[string]any); ok &&
+		strings.EqualFold(fmtSprint(first["role"]), "system") {
+		return false
+	}
+	sys := map[string]any{"role": "system", "content": codeBuddyDefaultSystemPrompt}
+	req["messages"] = append([]any{sys}, msgs...)
+	return true
 }
 
 // injectCodeBuddyThinking 对 DeepSeek 系模型注入 thinking.type=enabled。

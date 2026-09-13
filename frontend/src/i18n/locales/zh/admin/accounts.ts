@@ -1422,7 +1422,11 @@ export default {
           validating: '验证中...',
           validateAndCreate: '验证并创建账号',
           pleaseEnterRefreshToken: '请输入 Refresh Token',
-          failedToValidateRT: '验证 CodeBuddy Refresh Token 失败'
+          failedToValidateRT: '验证 CodeBuddy Refresh Token 失败',
+          siteLabel: 'CodeBuddy 站点',
+          siteCn: '国内版（codebuddy.cn）',
+          siteIntl: '国际版（codebuddy.ai）',
+          siteHint: '选择账号所属站点：国内版与国际版域名不同，账号额度与登录方式相互独立。'
         }
       },
       // Gemini specific (platform-wide)

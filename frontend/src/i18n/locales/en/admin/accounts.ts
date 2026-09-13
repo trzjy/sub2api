@@ -1365,7 +1365,11 @@ export default {
                     validating: 'Validating…',
                     validateAndCreate: 'Validate & Create Account',
                     pleaseEnterRefreshToken: 'Please enter Refresh Token',
-                    failedToValidateRT: 'Failed to validate CodeBuddy refresh token'
+                    failedToValidateRT: 'Failed to validate CodeBuddy refresh token',
+                    siteLabel: 'CodeBuddy Site',
+                    siteCn: 'China (codebuddy.cn)',
+                    siteIntl: 'International (codebuddy.ai)',
+                    siteHint: 'Select the account site. The China and International sites use different domains, and their quotas and login methods are independent.'
                   }
                 },      // Gemini specific (platform-wide)
       gemini: {

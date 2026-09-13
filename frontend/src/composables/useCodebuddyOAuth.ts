@@ -2,7 +2,7 @@ import { ref, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import type { CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
+import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 
 /**
  * CodeBuddy OAuth composable.
@@ -35,6 +35,8 @@ export function useCodebuddyOAuth() {
   let pollAborted = false
   // 登录选定的代理：poll 必须沿用同一代理，否则登录出口 IP 与首次请求不一致（风控信号）。
   let currentProxyId: number | null = null
+  // 登录选定的站点：poll/refresh/落库必须与 auth-url 一致（intl 的 state 只在 intl 存在）。
+  let currentSite: CodeBuddySite = 'cn'
 
   const resetState = () => {
     stopPolling()
@@ -45,18 +47,23 @@ export function useCodebuddyOAuth() {
     pollStatus.value = ''
     pollAttempt.value = 0
     currentProxyId = null
+    currentSite = 'cn'
   }
 
-  const generateAuthUrl = async (proxyId: number | null | undefined): Promise<boolean> => {
+  const generateAuthUrl = async (
+    proxyId: number | null | undefined,
+    site: CodeBuddySite = 'cn'
+  ): Promise<boolean> => {
     loading.value = true
     authUrl.value = ''
     state.value = ''
     error.value = ''
 
     try {
-      const payload: Record<string, unknown> = {}
+      const payload: Record<string, unknown> = { site }
       if (proxyId) payload.proxy_id = proxyId
       currentProxyId = proxyId ?? null
+      currentSite = site
 
       const response = await adminAPI.codebuddy.generateAuthUrl(payload as any)
       authUrl.value = response.auth_url
@@ -88,7 +95,7 @@ export function useCodebuddyOAuth() {
     pollAttempt.value += 1
 
     try {
-      const pollPayload: Record<string, unknown> = { state: state.value }
+      const pollPayload: Record<string, unknown> = { state: state.value, site: currentSite }
       if (currentProxyId) pollPayload.proxy_id = currentProxyId
       const tokenInfo = await adminAPI.codebuddy.pollToken(pollPayload as any)
       // Success: login completed.
@@ -133,7 +140,8 @@ export function useCodebuddyOAuth() {
 
   const validateRefreshToken = async (
     refreshToken: string,
-    proxyId?: number | null
+    proxyId?: number | null,
+    site: CodeBuddySite = 'cn'
   ): Promise<CodeBuddyTokenInfo | null> => {
     if (!refreshToken.trim()) {
       error.value = t('admin.accounts.oauth.codebuddy.pleaseEnterRefreshToken')
@@ -144,7 +152,7 @@ export function useCodebuddyOAuth() {
     error.value = ''
 
     try {
-      const payload: Record<string, unknown> = { refresh_token: refreshToken.trim() }
+      const payload: Record<string, unknown> = { refresh_token: refreshToken.trim(), site }
       if (proxyId) payload.proxy_id = proxyId
       const tokenInfo = await adminAPI.codebuddy.refreshCodeBuddyToken(payload as any)
       return tokenInfo as CodeBuddyTokenInfo
@@ -156,10 +164,15 @@ export function useCodebuddyOAuth() {
     }
   }
 
-  const buildCredentials = (tokenInfo: CodeBuddyTokenInfo): Record<string, unknown> => {
+  const buildCredentials = (
+    tokenInfo: CodeBuddyTokenInfo,
+    site: CodeBuddySite = 'cn'
+  ): Record<string, unknown> => {
     const creds: Record<string, unknown> = {
       access_token: tokenInfo.access_token,
-      refresh_token: tokenInfo.refresh_token
+      refresh_token: tokenInfo.refresh_token,
+      // 站点是账号级属性：后端按 credentials.site 选站点 URL 表（缺省 cn）。
+      site
     }
     // Backend persists expires_at as a unix-seconds string.
     if (typeof tokenInfo.expires_at === 'number' && Number.isFinite(tokenInfo.expires_at)) {

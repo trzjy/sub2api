@@ -17,13 +17,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// CodeBuddy 计费/积分与模型列表端点（§2.1）。billing 走 www.codebuddy.cn，models 走
-// copilot.tencent.com（与 chat 同源）。
+// CodeBuddy 计费/积分与模型列表端点路径（§2.1）。域名/Origin/Referer 由站点表
+// （codebuddy_site.go）按账号 site 选取；路径与站点无关。
 const (
-	CodeBuddyBillingBaseURL   = "https://www.codebuddy.cn"
 	codeBuddyBillingMeterPath = "/v2/billing/meter/get-user-resource"
 	codeBuddyDailyCheckinPath = "/v2/billing/meter/daily-checkin"
-	CodeBuddyModelsBaseURL    = "https://copilot.tencent.com"
 	codeBuddyModelsPath       = "/console/enterprises/personal/models"
 
 	// Extra 快照键（CodeBuddyQuotaService 周期写入，调度阈值评估与 UI 消费）。
@@ -202,6 +200,12 @@ func (s *CodeBuddyQuotaService) FetchModels(ctx context.Context, accountID int64
 	if account.Platform != PlatformCodeBuddy {
 		return nil, fmt.Errorf("account %d is not a codebuddy account", accountID)
 	}
+	// Phase 0 校准（D4）：intl 站点 models 端点认证后返回 HTTP 500，动态模型列表不可用。
+	// 此处直接降级返回错误（调用方 SupportedEffortsForModel 会吞掉并返回空），避免每次
+	// 热路径都向上游打一个必 500 的请求。intl 端点若恢复，删除本分支即可自动生效。
+	if account.CodeBuddySite() == CodeBuddySiteIntl {
+		return nil, fmt.Errorf("codebuddy models: 国际版站点 models 端点不可用（Phase 0 实测 HTTP 500）")
+	}
 	body, _, err := s.doBillingRequest(ctx, account, http.MethodGet, codeBuddyModelsPath, nil)
 	if err != nil {
 		return nil, err
@@ -288,9 +292,10 @@ func codeBuddyResolveSupportedEfforts(ctx context.Context, account *Account, mod
 }
 
 func (s *CodeBuddyQuotaService) doBillingRequest(ctx context.Context, account *Account, method, path string, body []byte) ([]byte, int, error) {
-	baseURL := CodeBuddyBillingBaseURL
+	ep := codeBuddyEndpointsFor(account.CodeBuddySite())
+	baseURL := ep.BillingBase
 	if strings.Contains(path, codeBuddyModelsPath) {
-		baseURL = CodeBuddyModelsBaseURL
+		baseURL = ep.ModelsBase
 	}
 	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -327,11 +332,12 @@ func (s *CodeBuddyQuotaService) doBillingRequest(ctx context.Context, account *A
 }
 
 func (s *CodeBuddyQuotaService) setBillingHeaders(req *http.Request, account *Account) {
+	ep := codeBuddyEndpointsFor(account.CodeBuddySite())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", CodeBuddyOriginReferer)
-	req.Header.Set("Referer", CodeBuddyOriginReferer+"/")
+	req.Header.Set("Origin", ep.OriginReferer)
+	req.Header.Set("Referer", ep.OriginReferer+"/")
 	req.Header.Set("User-Agent", CodeBuddyClientUA)
 	req.Header.Set("X-Product", "SaaS")
 

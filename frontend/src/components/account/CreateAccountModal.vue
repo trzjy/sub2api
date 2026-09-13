@@ -3555,6 +3555,22 @@
 
     <!-- Step 2: OAuth Authorization -->
     <div v-else class="space-y-5">
+      <!-- CodeBuddy 站点选择：生成链接前选定（cn 国内版 / intl 国际版）。
+           生成链接后隐藏，避免切换站点导致 state 与站点不一致。 -->
+      <div
+        v-if="form.platform === 'codebuddy' && !codebuddyOAuth.authUrl.value"
+        class="space-y-1"
+      >
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+          {{ t('admin.accounts.oauth.codebuddy.siteLabel') }}
+        </label>
+        <select v-model="codebuddySite" class="input w-full">
+          <option value="cn">{{ t('admin.accounts.oauth.codebuddy.siteCn') }}</option>
+          <option value="intl">{{ t('admin.accounts.oauth.codebuddy.siteIntl') }}</option>
+        </select>
+        <p class="input-hint">{{ t('admin.accounts.oauth.codebuddy.siteHint') }}</p>
+      </div>
+
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="form.platform === 'anthropic' ? addMethod : 'oauth'"
@@ -3944,7 +3960,7 @@ import type {
   OpenAIResponsesMode,
   OpenAIEndpointCapability
 } from '@/types'
-import type { CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
+import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -4122,6 +4138,9 @@ const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
 const codebuddyOAuth = useCodebuddyOAuth() // For CodeBuddy OAuth (polling device-flow)
+
+// CodeBuddy 站点选择（cn=国内版 / intl=国际版）；缺省 cn，与存量账号行为一致。
+const codebuddySite = ref<CodeBuddySite>('cn')
 
 // Computed: current OAuth state for template binding
 const currentAuthUrl = computed(() => {
@@ -4958,6 +4977,7 @@ watch(
     antigravityOAuth.resetState()
     grokOAuth.resetState()
   codebuddyOAuth.resetState()
+  codebuddySite.value = 'cn'
   }
 )
 
@@ -5437,6 +5457,7 @@ const resetForm = () => {
   antigravityOAuth.resetState()
   grokOAuth.resetState()
   codebuddyOAuth.resetState()
+  codebuddySite.value = 'cn'
   oauthFlowRef.value?.reset()
   antigravityMixedChannelConfirmed.value = false
   upstreamModelsPreviewed.value = false
@@ -5937,6 +5958,7 @@ const goBackToBasicInfo = () => {
   antigravityOAuth.resetState()
   grokOAuth.resetState()
   codebuddyOAuth.resetState()
+  codebuddySite.value = 'cn'
   oauthFlowRef.value?.reset()
 }
 
@@ -5955,7 +5977,7 @@ const handleGenerateUrl = async () => {
   } else if (form.platform === 'grok') {
     await grokOAuth.generateAuthUrl(form.proxy_id)
   } else if (form.platform === 'codebuddy') {
-    const ok = await codebuddyOAuth.generateAuthUrl(form.proxy_id)
+    const ok = await codebuddyOAuth.generateAuthUrl(form.proxy_id, codebuddySite.value)
     // CodeBuddy 走轮询流程：生成链接后立即开始轮询，登录完成后自动创建账号
     if (ok) {
       codebuddyOAuth.startPolling({
@@ -6947,16 +6969,16 @@ const handleGrokExchange = async (authCode: string) => {
 
 // CodeBuddy OAuth 轮询成功：直接用 tokenInfo 构建凭据并创建账号
 const handleCodebuddyPollSuccess = async (tokenInfo: CodeBuddyTokenInfo) => {
-  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo, codebuddySite.value)
   await createAccountAndFinish('codebuddy', 'oauth', credentials)
 }
 
 // CodeBuddy 手动 RT 校验并创建账号
 const handleCodebuddyValidateRT = async (rt: string) => {
   if (!rt.trim()) return
-  const tokenInfo = await codebuddyOAuth.validateRefreshToken(rt, form.proxy_id)
+  const tokenInfo = await codebuddyOAuth.validateRefreshToken(rt, form.proxy_id, codebuddySite.value)
   if (!tokenInfo) return
-  const credentials = codebuddyOAuth.buildCredentials(tokenInfo)
+  const credentials = codebuddyOAuth.buildCredentials(tokenInfo, codebuddySite.value)
   await createAccountAndFinish('codebuddy', 'oauth', credentials)
 }
 

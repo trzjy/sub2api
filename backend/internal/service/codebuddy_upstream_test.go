@@ -93,16 +93,17 @@ func TestCodeBuddyRewrite_ReasoningEffortDowngrade(t *testing.T) {
 }
 
 func TestCodeBuddyRewrite_ReasoningContentBackfill(t *testing.T) {
-	in := `{"model":"m","messages":[{"role":"assistant","content":"ok","reasoning":"some chain of thought"}]}`
+	// 首条固定为 system（D6 规则会保证），assistant 位于 index 1。
+	in := `{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"assistant","content":"ok","reasoning":"some chain of thought"}]}`
 	out := mustPrepare(t, in, CodeBuddyRewriteOptions{})
-	if got := gjson.Get(out, "messages.0.reasoning_content").String(); got != "some chain of thought" {
+	if got := gjson.Get(out, "messages.1.reasoning_content").String(); got != "some chain of thought" {
 		t.Fatalf("expected reasoning_content backfilled, got %q", got)
 	}
 
 	// 已有 reasoning_content 则不覆盖。
-	in2 := `{"model":"m","messages":[{"role":"assistant","content":"ok","reasoning":"r","reasoning_content":"existing"}]}`
+	in2 := `{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"assistant","content":"ok","reasoning":"r","reasoning_content":"existing"}]}`
 	out2 := mustPrepare(t, in2, CodeBuddyRewriteOptions{})
-	if got := gjson.Get(out2, "messages.0.reasoning_content").String(); got != "existing" {
+	if got := gjson.Get(out2, "messages.1.reasoning_content").String(); got != "existing" {
 		t.Fatalf("expected reasoning_content unchanged, got %q", got)
 	}
 }
@@ -142,5 +143,45 @@ func TestCodeBuddyRewrite_CustomSanitizePatterns(t *testing.T) {
 	})
 	if got := gjson.Get(out, "messages.0.content").String(); got != "[redacted] present" {
 		t.Fatalf("expected custom pattern applied, got %q", got)
+	}
+}
+
+// TestCodeBuddyRewrite_EnsureSystemFirst 覆盖 Phase 0 D6：首条消息非 system 时前置最小
+// system（intl 上游 11128：first message is not system prompt）；首条已是 system 时不动。
+func TestCodeBuddyRewrite_EnsureSystemFirst(t *testing.T) {
+	// 首条为 user → 前置 system，原消息顺序不变。
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`
+	out := mustPrepare(t, in, CodeBuddyRewriteOptions{})
+	if got := gjson.Get(out, "messages.0.role").String(); got != "system" {
+		t.Fatalf("expected injected system first, got role %q", got)
+	}
+	if got := gjson.Get(out, "messages.0.content").String(); got != codeBuddyDefaultSystemPrompt {
+		t.Fatalf("expected default system prompt, got %q", got)
+	}
+	if got := gjson.Get(out, "messages.1.role").String(); got != "user" {
+		t.Fatalf("expected original first message preserved at index 1, got %q", got)
+	}
+
+	// 首条已是 system → 不新增、原文返回（无改写时不重排字节）。
+	in2 := `{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}]}`
+	out2 := mustPrepare(t, in2, CodeBuddyRewriteOptions{})
+	if got := gjson.Get(out2, "messages.#").Int(); got != 2 {
+		t.Fatalf("expected message count unchanged, got %d", got)
+	}
+}
+
+// TestCodeBuddyRewrite_DeveloperFirstBecomesSystemWithoutInjection 验证规则 3 先把
+// developer 归一为 system，规则 3b 不再重复注入。
+func TestCodeBuddyRewrite_DeveloperFirstBecomesSystemWithoutInjection(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"developer","content":"guidance"}]}`
+	out := mustPrepare(t, in, CodeBuddyRewriteOptions{})
+	if got := gjson.Get(out, "messages.#").Int(); got != 1 {
+		t.Fatalf("expected no extra system injection after developer normalization, got %d messages", got)
+	}
+	if got := gjson.Get(out, "messages.0.role").String(); got != "system" {
+		t.Fatalf("expected developer normalized to system, got %q", got)
+	}
+	if got := gjson.Get(out, "messages.0.content").String(); got != "guidance" {
+		t.Fatalf("expected content preserved, got %q", got)
 	}
 }
