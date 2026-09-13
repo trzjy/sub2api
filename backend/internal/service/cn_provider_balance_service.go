@@ -406,9 +406,13 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
 		cnExtraKey(provider, cnBalanceExtraSuffixUnlimited): result.Unlimited,
 		cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
-		cnExtraKey(provider, cnBalanceExtraSuffixExpiresAt): result.ExpiresAt,
 		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
 		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+	}
+	// 订阅有效期仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值），
+	// 避免上游不再返回 expires_at 时用空串覆盖有效快照。
+	if result.ExpiresAt != "" {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixExpiresAt)] = result.ExpiresAt
 	}
 	// 订阅用量仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值）。
 	if result.DailyUsage != nil {

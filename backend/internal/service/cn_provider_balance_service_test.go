@@ -215,29 +215,34 @@ func TestCNProviderBalanceService_RelayOverrideUnlimitedSubscription(t *testing.
 // 非法时间串静默丢弃，不影响余额主链路。
 func TestCNProviderBalanceService_RelayOverrideParsesExpiresAt(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		want string
+		name             string
+		body             string
+		want             string
+		wantSnapshotKey  bool // 是否期望快照中包含 deepseek_balance_expires_at 键
 	}{
 		{
-			name: "subscription expires_at",
-			body: `{"remaining":-1,"unit":"USD","isValid":true,"planName":"DeepSeek订阅","subscription":{"expires_at":"2026-09-20T02:47:56.827014+08:00"}}`,
-			want: "2026-09-20T02:47:56.827014+08:00",
+			name:            "subscription expires_at",
+			body:            `{"remaining":-1,"unit":"USD","isValid":true,"planName":"DeepSeek订阅","subscription":{"expires_at":"2026-09-20T02:47:56.827014+08:00"}}`,
+			want:            "2026-09-20T02:47:56.827014+08:00",
+			wantSnapshotKey: true,
 		},
 		{
-			name: "top-level expires_at (quota mode)",
-			body: `{"remaining":12.5,"unit":"USD","expires_at":"2026-10-01T00:00:00Z"}`,
-			want: "2026-10-01T00:00:00Z",
+			name:            "top-level expires_at (quota mode)",
+			body:            `{"remaining":12.5,"unit":"USD","expires_at":"2026-10-01T00:00:00Z"}`,
+			want:            "2026-10-01T00:00:00Z",
+			wantSnapshotKey: true,
 		},
 		{
-			name: "invalid expires_at dropped",
-			body: `{"remaining":12.5,"unit":"USD","expires_at":"not-a-time"}`,
-			want: "",
+			name:            "invalid expires_at dropped",
+			body:            `{"remaining":12.5,"unit":"USD","expires_at":"not-a-time"}`,
+			want:            "",
+			wantSnapshotKey: false, // 不应写入空值覆盖旧快照
 		},
 		{
-			name: "missing expires_at",
-			body: `{"remaining":12.5,"unit":"USD"}`,
-			want: "",
+			name:            "missing expires_at",
+			body:            `{"remaining":12.5,"unit":"USD"}`,
+			want:            "",
+			wantSnapshotKey: false, // 不应写入空值覆盖旧快照
 		},
 	}
 	for _, tt := range tests {
@@ -254,7 +259,12 @@ func TestCNProviderBalanceService_RelayOverrideParsesExpiresAt(t *testing.T) {
 			require.True(t, result.Success)
 			require.Equal(t, tt.want, result.ExpiresAt)
 			require.Len(t, repo.extraWrites, 1)
-			require.Equal(t, tt.want, repo.extraWrites[0]["deepseek_balance_expires_at"])
+			if tt.wantSnapshotKey {
+				require.Equal(t, tt.want, repo.extraWrites[0]["deepseek_balance_expires_at"])
+			} else {
+				_, exists := repo.extraWrites[0]["deepseek_balance_expires_at"]
+				require.False(t, exists, "expires_at should not be written to snapshot when upstream does not provide it")
+			}
 		})
 	}
 }
