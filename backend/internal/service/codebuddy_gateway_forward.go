@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -43,9 +44,9 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	}
 
 	opts := CodeBuddyRewriteOptions{
-		Sanitize:          s.codeBuddySanitizeEnabled(),
-		Model:             upstreamModel,
-		SupportedEfforts:  codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
+		Sanitize:         s.codeBuddySanitizeEnabled(),
+		Model:            upstreamModel,
+		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
 	}
 
 	// §2.5 规则 1-7：出站前改写（强制 stream:true、tool_choice 归一、developer 角色、
@@ -95,6 +96,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		if respErr != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, respErr, false)
 		}
+		captureCodeBuddyUpstreamResponse(upstreamCtx, upstreamReq, sendBody, resp)
 		if resp.StatusCode < 400 {
 			break
 		}
@@ -177,7 +179,59 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 
 	// 账号级请求头覆写最后应用，使管理员配置优先。
 	account.ApplyHeaderOverrides(req.Header)
+	captureCodeBuddyOutboundRequest(req, body)
 	return req, nil
+}
+
+// captureCodeBuddyOutboundRequest 是临时插桩（活体验收抓包定位专用，不入正式代码）：
+// 打印实际出站请求的最终头与体，Authorization 仅打长度。
+func captureCodeBuddyOutboundRequest(req *http.Request, body []byte) {
+	if req == nil {
+		return
+	}
+	hdr := make(map[string]string, len(req.Header))
+	for k, v := range req.Header {
+		joined := strings.Join(v, ",")
+		if strings.EqualFold(k, "Authorization") {
+			joined = fmt.Sprintf("<bearer len=%d>", len(strings.TrimPrefix(joined, "Bearer ")))
+		}
+		hdr[k] = joined
+	}
+	b := string(body)
+	if len(b) > 800 {
+		b = b[:800] + "...(truncated)"
+	}
+	slog.Warn("cb_capture_outbound", "method", req.Method, "url", req.URL.String(), "headers", hdr, "body", b)
+}
+
+// captureCodeBuddyUpstreamResponse 是临时插桩（同批，不入正式代码）：打印上游响应头，
+// 并在 403 时用全新默认传输（http.DefaultClient）重放同一请求一次，以隔离传输层差异。
+func captureCodeBuddyUpstreamResponse(ctx context.Context, req *http.Request, body []byte, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	hdr := make(map[string]string, len(resp.Header))
+	for k, v := range resp.Header {
+		hdr[k] = strings.Join(v, ",")
+	}
+	slog.Warn("cb_capture_response", "status", resp.StatusCode, "proto", resp.Proto, "headers", hdr)
+	if resp.StatusCode != http.StatusForbidden || req == nil {
+		return
+	}
+	diagReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("cb_capture_plain_retry_err", "error", err.Error())
+		return
+	}
+	diagReq.Header = req.Header.Clone()
+	diagResp, err := http.DefaultClient.Do(diagReq) //nolint:gosec // 临时诊断用固定上游 URL
+	if err != nil {
+		slog.Warn("cb_capture_plain_retry_err", "error", err.Error())
+		return
+	}
+	defer func() { _ = diagResp.Body.Close() }()
+	db, _ := io.ReadAll(io.LimitReader(diagResp.Body, 2048))
+	slog.Warn("cb_capture_plain_retry_result", "status", diagResp.StatusCode, "proto", diagResp.Proto, "body", string(db))
 }
 
 // codeBuddyChatUserAgent 返回出站 User-Agent（配置优先，回落内置常量）。
@@ -254,19 +308,19 @@ func codeBuddyForwardResultFromStreaming(r *openaiStreamingResult, originalModel
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            true,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		FirstTokenMs:      r.firstTokenMs,
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           true,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		FirstTokenMs:     r.firstTokenMs,
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
 
@@ -279,17 +333,17 @@ func codeBuddyForwardResultFromNonStreaming(r *openaiNonStreamingResult, origina
 		usage = &OpenAIUsage{}
 	}
 	return &OpenAIForwardResult{
-		UpstreamHeaders:   respHeader,
-		ResponseID:        strings.TrimSpace(r.responseID),
-		Usage:             *usage,
-		Model:             originalModel,
-		UpstreamModel:     upstreamModel,
-		Stream:            false,
-		OpenAIWSMode:      false,
-		ResponseHeaders:   respHeader.Clone(),
-		Duration:          time.Since(startTime),
-		SearchCount:       r.searchCount,
-		ImageCount:        r.imageCount,
-		ImageOutputSizes:  r.imageOutputSizes,
+		UpstreamHeaders:  respHeader,
+		ResponseID:       strings.TrimSpace(r.responseID),
+		Usage:            *usage,
+		Model:            originalModel,
+		UpstreamModel:    upstreamModel,
+		Stream:           false,
+		OpenAIWSMode:     false,
+		ResponseHeaders:  respHeader.Clone(),
+		Duration:         time.Since(startTime),
+		SearchCount:      r.searchCount,
+		ImageCount:       r.imageCount,
+		ImageOutputSizes: r.imageOutputSizes,
 	}
 }
