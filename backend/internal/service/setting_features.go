@@ -351,6 +351,71 @@ func (s *SettingService) GetDefaultUserRPMLimit(ctx context.Context) int {
 	return 0
 }
 
+// DefaultCodeBuddyRPM 是 codebuddy_default_rpm 未配置时的出厂默认值。
+const DefaultCodeBuddyRPM = 10
+
+const (
+	codeBuddyDefaultRPMCacheTTL  = 30 * time.Second
+	codeBuddyDefaultRPMErrorTTL  = 5 * time.Second
+	codeBuddyDefaultRPMDBTimeout = 2 * time.Second
+)
+
+type cachedCodeBuddyDefaultRPM struct {
+	value     int
+	expiresAt int64
+}
+
+// GetCodeBuddyDefaultRPM 返回 CodeBuddy 平台默认 RPM：显式配置优先，未配置时回落
+// DefaultCodeBuddyRPM(10)，显式配置 0 表示不启用平台默认（账号仍需显式 base_rpm 才限流）。
+// 选号热路径逐账号调用，故走进程内缓存（30s TTL），DB 失败保留最近已知值。
+func (s *SettingService) GetCodeBuddyDefaultRPM(ctx context.Context) int {
+	if s == nil || s.settingRepo == nil {
+		return DefaultCodeBuddyRPM
+	}
+	if cached, ok := s.codeBuddyDefaultRPMCache.Load().(*cachedCodeBuddyDefaultRPM); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.value
+		}
+	}
+
+	result, _, _ := s.codeBuddyDefaultRPMSF.Do(string(SettingKeyCodeBuddyDefaultRPM), func() (any, error) {
+		if cached, ok := s.codeBuddyDefaultRPMCache.Load().(*cachedCodeBuddyDefaultRPM); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached.value, nil
+			}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codeBuddyDefaultRPMDBTimeout)
+		defer cancel()
+
+		value := DefaultCodeBuddyRPM
+		ttl := codeBuddyDefaultRPMCacheTTL
+		raw, err := s.settingRepo.GetValue(dbCtx, SettingKeyCodeBuddyDefaultRPM)
+		switch {
+		case err != nil:
+			// 未配置按出厂默认处理；真实读取失败保留最近已知值并以短 TTL 快速重试。
+			if !errors.Is(err, ErrSettingNotFound) {
+				if prior, ok := s.codeBuddyDefaultRPMCache.Load().(*cachedCodeBuddyDefaultRPM); ok && prior != nil {
+					value = prior.value
+				}
+				ttl = codeBuddyDefaultRPMErrorTTL
+			}
+		case strings.TrimSpace(raw) != "":
+			if parsed, perr := strconv.Atoi(strings.TrimSpace(raw)); perr == nil && parsed >= 0 {
+				value = parsed
+			}
+		}
+		s.codeBuddyDefaultRPMCache.Store(&cachedCodeBuddyDefaultRPM{value: value, expiresAt: time.Now().Add(ttl).UnixNano()})
+		return value, nil
+	})
+	if v, ok := result.(int); ok {
+		return v
+	}
+	return DefaultCodeBuddyRPM
+}
+
 // GetDefaultSubscriptions 获取新用户默认订阅配置列表。
 func (s *SettingService) GetDefaultSubscriptions(ctx context.Context) []DefaultSubscriptionSetting {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyDefaultSubscriptions)

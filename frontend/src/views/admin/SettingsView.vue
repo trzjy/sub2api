@@ -4169,6 +4169,24 @@
                     {{ t("admin.settings.defaults.defaultUserRpmLimitHint") }}
                   </p>
                 </div>
+                <div>
+                  <label
+                    class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    {{ t("admin.settings.defaults.codebuddyDefaultRpm") }}
+                  </label>
+                  <input
+                    v-model.number="form.codebuddy_default_rpm"
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="input"
+                    placeholder="10"
+                  />
+                  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.defaults.codebuddyDefaultRpmHint") }}
+                  </p>
+                </div>
               </div>
 
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
@@ -9935,6 +9953,7 @@ const form = reactive<SettingsForm>({
   default_subscriptions: [],
   force_email_on_third_party_signup: false,
   default_user_rpm_limit: 0,
+  codebuddy_default_rpm: 10,
   site_name: "Sub2API",
   site_logo: "",
   site_subtitle: "Subscription to API Conversion Platform",
@@ -11574,6 +11593,10 @@ async function saveSettings() {
       default_subscriptions: normalizedDefaultSubscriptions,
       force_email_on_third_party_signup: form.force_email_on_third_party_signup,
       default_user_rpm_limit: form.default_user_rpm_limit,
+      // 空/非法值回退平台默认 10；0 表示关闭 CodeBuddy 平台默认 RPM。
+      codebuddy_default_rpm: Number.isFinite(form.codebuddy_default_rpm)
+        ? form.codebuddy_default_rpm
+        : 10,
       site_name: form.site_name,
       site_logo: form.site_logo,
       site_subtitle: form.site_subtitle,

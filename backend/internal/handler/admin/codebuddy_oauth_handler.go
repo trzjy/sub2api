@@ -16,12 +16,22 @@ func NewCodeBuddyOAuthHandler(codeBuddyOAuthService *service.CodeBuddyOAuthServi
 	return &CodeBuddyOAuthHandler{codeBuddyOAuthService: codeBuddyOAuthService}
 }
 
+// CodeBuddyGenerateAuthURLRequest 生成授权链接请求。proxy_id 为本次登录选定的
+// 代理（可选）：登录/poll 都应从该代理出口，避免登录 IP 与日常调用 IP 不一致。
+type CodeBuddyGenerateAuthURLRequest struct {
+	ProxyID *int64 `json:"proxy_id"`
+}
+
 // GenerateAuthURL generates CodeBuddy OAuth authorization URL
 // POST /api/v1/admin/codebuddy/oauth/auth-url
 func (h *CodeBuddyOAuthHandler) GenerateAuthURL(c *gin.Context) {
-	result, err := h.codeBuddyOAuthService.GenerateAuthURL(c.Request.Context())
+	var req CodeBuddyGenerateAuthURLRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		req = CodeBuddyGenerateAuthURLRequest{}
+	}
+	result, err := h.codeBuddyOAuthService.GenerateAuthURL(c.Request.Context(), req.ProxyID)
 	if err != nil {
-		response.InternalError(c, "生成授权链接失败: "+err.Error())
+		response.ErrorFrom(c, err)
 		return
 	}
 
@@ -29,7 +39,8 @@ func (h *CodeBuddyOAuthHandler) GenerateAuthURL(c *gin.Context) {
 }
 
 type CodeBuddyPollTokenRequest struct {
-	State string `json:"state" binding:"required"`
+	State   string `json:"state" binding:"required"`
+	ProxyID *int64 `json:"proxy_id"`
 }
 
 // PollToken 轮询 CodeBuddy 登录结果（用户在浏览器完成登录后 token 才就绪）
@@ -41,7 +52,7 @@ func (h *CodeBuddyOAuthHandler) PollToken(c *gin.Context) {
 		return
 	}
 
-	tokenInfo, err := h.codeBuddyOAuthService.PollToken(c.Request.Context(), req.State)
+	tokenInfo, err := h.codeBuddyOAuthService.PollToken(c.Request.Context(), req.State, req.ProxyID)
 	if err != nil {
 		if errors.Is(err, service.ErrCodeBuddyLoginPending) {
 			response.BadRequest(c, "登录未完成，请先在浏览器完成登录后再重试")
@@ -59,6 +70,7 @@ type CodeBuddyRefreshTokenRequest struct {
 	UID          string `json:"uid"`
 	EnterpriseID string `json:"enterprise_id"`
 	Domain       string `json:"domain"`
+	ProxyID      *int64 `json:"proxy_id"`
 }
 
 // RefreshToken 用 refresh token 刷新并返回完整 token 信息
@@ -70,7 +82,7 @@ func (h *CodeBuddyOAuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	tokenInfo, err := h.codeBuddyOAuthService.RefreshToken(c.Request.Context(), req.RefreshToken, req.UID, req.EnterpriseID, req.Domain)
+	tokenInfo, err := h.codeBuddyOAuthService.RefreshToken(c.Request.Context(), req.RefreshToken, req.UID, req.EnterpriseID, req.Domain, req.ProxyID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

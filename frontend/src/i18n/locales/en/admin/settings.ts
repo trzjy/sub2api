@@ -404,6 +404,8 @@ export default {
         defaultConcurrencyHint: 'Maximum concurrent requests for new users',
         defaultUserRpmLimit: 'Default User RPM Limit',
         defaultUserRpmLimitHint: 'Default max requests per minute for new users; 0 = unlimited. Only applied at new user creation.',
+        codebuddyDefaultRpm: 'CodeBuddy Default RPM Limit',
+        codebuddyDefaultRpmHint: 'Platform default for CodeBuddy accounts without an explicit Base RPM; 0 disables the platform default. Prevents unconfigured accounts from being flagged by upstream risk control.',
         defaultSubscriptions: 'Default Subscriptions',
         defaultSubscriptionsHint: 'Auto-assign these subscriptions when a new user is created or registered',
         addDefaultSubscription: 'Add Default Subscription',

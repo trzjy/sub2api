@@ -296,9 +296,11 @@ func (a *Account) IsCNProvider() bool {
 
 // IsOpenAICompatible 报告账号是否走 OpenAI 网关（OpenAI 协议族）。
 // openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
-// 兼容上游，也经 OpenAI 网关转发。
+// 兼容上游，也经 OpenAI 网关转发；CodeBuddy 是腾讯 CLI 的 Chat Completions
+// 兼容上游（forwardCodeBuddy 挂在 OpenAIGatewayService.Forward 的 platform 分支）。
 func (a *Account) IsOpenAICompatible() bool {
-	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() || a.Platform == PlatformOther)
+	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() ||
+		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy)
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容
@@ -3099,23 +3101,26 @@ func (a *Account) GetRPMStrategy() string {
 	return "tiered"
 }
 
-// GetRPMStickyBuffer 获取 RPM 粘性缓冲数量
+// GetRPMStickyBuffer 获取 RPM 粘性缓冲数量（base RPM 取账号显式配置）。
+func (a *Account) GetRPMStickyBuffer() int {
+	return a.GetRPMStickyBufferForBase(a.GetBaseRPM())
+}
+
+// GetRPMStickyBufferForBase 用调用方给定的有效 base RPM 计算粘性缓冲数量。
+// 平台默认 RPM 兜底场景（账号 Extra 无 base_rpm）需要显式传入有效值。
 // Cache-driven: buffer = concurrency + maxSessions（覆盖幽灵窗口 + 稳态会话需求）
 // floor = baseRPM / 5（向后兼容 maxSessions=0 且 concurrency=0 场景）
-func (a *Account) GetRPMStickyBuffer() int {
-	if a.Extra == nil {
-		return 0
-	}
-
+func (a *Account) GetRPMStickyBufferForBase(base int) int {
 	// 手动 override 最高优先级
-	if v, ok := a.Extra["rpm_sticky_buffer"]; ok {
-		val := parseExtraInt(v)
-		if val > 0 {
-			return val
+	if a.Extra != nil {
+		if v, ok := a.Extra["rpm_sticky_buffer"]; ok {
+			val := parseExtraInt(v)
+			if val > 0 {
+				return val
+			}
 		}
 	}
 
-	base := a.GetBaseRPM()
 	if base <= 0 {
 		return 0
 	}
@@ -3144,10 +3149,16 @@ func (a *Account) GetRPMStickyBuffer() int {
 	return buffer
 }
 
-// CheckRPMSchedulability 根据当前 RPM 计数检查调度状态
+// CheckRPMSchedulability 根据当前 RPM 计数检查调度状态（base RPM 取账号显式配置）。
 // 复用 WindowCostSchedulability 三态：Schedulable / StickyOnly / NotSchedulable
 func (a *Account) CheckRPMSchedulability(currentRPM int) WindowCostSchedulability {
-	baseRPM := a.GetBaseRPM()
+	return a.CheckRPMSchedulabilityWithBase(currentRPM, a.GetBaseRPM())
+}
+
+// CheckRPMSchedulabilityWithBase 与 CheckRPMSchedulability 同语义，但用调用方传入的
+// 有效 base RPM。用于 CodeBuddy 平台默认 RPM 兜底：账号 Extra 里可能没有 base_rpm，
+// 但调度仍需按平台默认限流。
+func (a *Account) CheckRPMSchedulabilityWithBase(currentRPM, baseRPM int) WindowCostSchedulability {
 	if baseRPM <= 0 {
 		return WindowCostSchedulable
 	}
@@ -3162,7 +3173,7 @@ func (a *Account) CheckRPMSchedulability(currentRPM int) WindowCostSchedulabilit
 	}
 
 	// tiered: 黄区 + 红区
-	buffer := a.GetRPMStickyBuffer()
+	buffer := a.GetRPMStickyBufferForBase(baseRPM)
 	if currentRPM < baseRPM+buffer {
 		return WindowCostStickyOnly
 	}

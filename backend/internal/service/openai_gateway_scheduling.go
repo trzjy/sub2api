@@ -977,6 +977,19 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
 		return nil
 	}
+	// CodeBuddy 平台默认 RPM：粘性允许黄区，红区才清绑定换号。
+	if codeBuddyRPMGated(account) {
+		currentRPM := -1
+		if s.rpmCache != nil {
+			if count, err := s.rpmCache.GetRPM(ctx, account.ID); err == nil {
+				currentRPM = count
+			}
+		}
+		if !s.codeBuddyRPMSchedulable(ctx, account, currentRPM, true) {
+			_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+			return nil
+		}
+	}
 	if groupID != nil && s.needsUpstreamChannelRestrictionCheck(ctx, groupID) &&
 		s.isUpstreamModelRestrictedByChannel(ctx, *groupID, account, requestedModel, requireCompact) {
 		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1005,6 +1018,8 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	eligible := make([]*Account, 0, len(accounts))
 	compactTiers := make(map[int64]int, len(accounts))
+	// CodeBuddy 平台默认 RPM：一次预取候选计数，避免逐账号查 Redis（N+1）。
+	codeBuddyRPMCounts := s.prefetchCodeBuddyRPMCounts(ctx, accounts)
 
 	for i := range accounts {
 		acc := &accounts[i]
@@ -1033,6 +1048,17 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		if vetoed, reason := openAIProfitControlVetoReason(ctx, fresh); vetoed {
 			filterStats.exclude(reason)
 			continue
+		}
+		// CodeBuddy 平台默认 RPM：非粘性候选仅绿区可选。
+		if codeBuddyRPMGated(fresh) {
+			count, ok := codeBuddyRPMCounts[fresh.ID]
+			if !ok {
+				count = -1
+			}
+			if !s.codeBuddyRPMSchedulable(ctx, fresh, count, false) {
+				filterStats.exclude("rpm_limited")
+				continue
+			}
 		}
 		compactTier := 0
 		if requireCompact {

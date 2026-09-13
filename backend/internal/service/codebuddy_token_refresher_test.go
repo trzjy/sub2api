@@ -9,7 +9,7 @@ import (
 )
 
 func TestCodeBuddyTokenRefresher_CanRefresh(t *testing.T) {
-	r := NewCodeBuddyTokenRefresher(NewCodeBuddyOAuthService())
+	r := NewCodeBuddyTokenRefresher(NewCodeBuddyOAuthService(nil))
 
 	require.True(t, r.CanRefresh(&Account{Platform: PlatformCodeBuddy, Type: AccountTypeOAuth}),
 		"codebuddy oauth account should be refreshable")
@@ -21,7 +21,7 @@ func TestCodeBuddyTokenRefresher_CanRefresh(t *testing.T) {
 }
 
 func TestCodeBuddyTokenRefresher_NeedsRefresh(t *testing.T) {
-	r := NewCodeBuddyTokenRefresher(NewCodeBuddyOAuthService())
+	r := NewCodeBuddyTokenRefresher(NewCodeBuddyOAuthService(nil))
 
 	withinWindow := &Account{
 		Platform: PlatformCodeBuddy,

@@ -396,6 +396,10 @@ const (
 	SettingKeyDefaultSubscriptions = "default_subscriptions"  // 新用户默认订阅列表（JSON）
 	SettingKeyDefaultUserRPMLimit  = "default_user_rpm_limit" // 新用户默认 RPM 限制（0 = 不限制）
 
+	// SettingKeyCodeBuddyDefaultRPM 是 CodeBuddy 账号未显式配置 base_rpm 时的平台默认 RPM
+	// （0 = 不启用平台默认）。用于避免逐账号漏配导致账号裸奔被上游风控。
+	SettingKeyCodeBuddyDefaultRPM = "codebuddy_default_rpm"
+
 	// 第三方认证来源默认授予配置
 	SettingKeyAuthSourceDefaultEmailBalance             = "auth_source_default_email_balance"
 	SettingKeyAuthSourceDefaultEmailConcurrency         = "auth_source_default_email_concurrency"

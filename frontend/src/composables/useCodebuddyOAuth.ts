@@ -33,6 +33,8 @@ export function useCodebuddyOAuth() {
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null
   let pollAborted = false
+  // 登录选定的代理：poll 必须沿用同一代理，否则登录出口 IP 与首次请求不一致（风控信号）。
+  let currentProxyId: number | null = null
 
   const resetState = () => {
     stopPolling()
@@ -42,6 +44,7 @@ export function useCodebuddyOAuth() {
     error.value = ''
     pollStatus.value = ''
     pollAttempt.value = 0
+    currentProxyId = null
   }
 
   const generateAuthUrl = async (proxyId: number | null | undefined): Promise<boolean> => {
@@ -53,6 +56,7 @@ export function useCodebuddyOAuth() {
     try {
       const payload: Record<string, unknown> = {}
       if (proxyId) payload.proxy_id = proxyId
+      currentProxyId = proxyId ?? null
 
       const response = await adminAPI.codebuddy.generateAuthUrl(payload as any)
       authUrl.value = response.auth_url
@@ -84,7 +88,9 @@ export function useCodebuddyOAuth() {
     pollAttempt.value += 1
 
     try {
-      const tokenInfo = await adminAPI.codebuddy.pollToken({ state: state.value })
+      const pollPayload: Record<string, unknown> = { state: state.value }
+      if (currentProxyId) pollPayload.proxy_id = currentProxyId
+      const tokenInfo = await adminAPI.codebuddy.pollToken(pollPayload as any)
       // Success: login completed.
       stopPolling()
       pollStatus.value = t('admin.accounts.oauth.codebuddy.loginCompleted')
@@ -127,7 +133,7 @@ export function useCodebuddyOAuth() {
 
   const validateRefreshToken = async (
     refreshToken: string,
-    _proxyId?: number | null
+    proxyId?: number | null
   ): Promise<CodeBuddyTokenInfo | null> => {
     if (!refreshToken.trim()) {
       error.value = t('admin.accounts.oauth.codebuddy.pleaseEnterRefreshToken')
@@ -138,9 +144,9 @@ export function useCodebuddyOAuth() {
     error.value = ''
 
     try {
-      const tokenInfo = await adminAPI.codebuddy.refreshCodeBuddyToken({
-        refresh_token: refreshToken.trim()
-      })
+      const payload: Record<string, unknown> = { refresh_token: refreshToken.trim() }
+      if (proxyId) payload.proxy_id = proxyId
+      const tokenInfo = await adminAPI.codebuddy.refreshCodeBuddyToken(payload as any)
       return tokenInfo as CodeBuddyTokenInfo
     } catch (err: any) {
       error.value = err?.message || t('admin.accounts.oauth.codebuddy.failedToValidateRT')

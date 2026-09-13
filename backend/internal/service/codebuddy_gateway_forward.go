@@ -106,6 +106,9 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		}
 		return s.handleCodeBuddyUpstreamError(ctx, c, account, resp, respBody, originalModel, upstreamModel)
 	}
+	// B1：成功触达上游后计入 CodeBuddy 账号 RPM（平台默认兜底）。TOCTOU 与
+	// Anthropic 侧一致：读计数与递增之间存在窗口，soft-limit 可接受少量超额。
+	s.incrementCodeBuddyRPM(ctx, account)
 	defer func() { _ = resp.Body.Close() }()
 
 	// 成功路径：复用 OpenAI 兼容 SSE 处理（非流式入站时上游被强制为流式，由

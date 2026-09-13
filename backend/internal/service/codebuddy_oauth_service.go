@@ -7,11 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 )
 
 // CodeBuddy 上游协议常量（copilot.tencent.com，非官方公开 API）。
@@ -33,14 +38,89 @@ var ErrCodeBuddyLoginPending = errors.New("codebuddy: login pending")
 
 // CodeBuddyOAuthService 处理 CodeBuddy OAuth 设备授权登录与 token 刷新。
 // 上游签发 state 且无 PKCE，本服务不持久化会话：state 由管理端透传。
+//
+// B3：登录/poll/刷新按账号（或管理端选定的）代理构造独立 http.Client。登录 IP
+// 与日常调用 IP 不一致是风控的典型信号，故统一走账号代理；无代理账号行为不变。
 type CodeBuddyOAuthService struct {
 	httpClient *http.Client
+	proxyRepo  ProxyRepository
 }
 
-func NewCodeBuddyOAuthService() *CodeBuddyOAuthService {
+func NewCodeBuddyOAuthService(proxyRepo ProxyRepository) *CodeBuddyOAuthService {
 	return &CodeBuddyOAuthService{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		proxyRepo:  proxyRepo,
 	}
+}
+
+const (
+	// codeBuddyProxyDialTimeout 代理 TCP 连接超时（含代理握手），代理不通时快速失败。
+	codeBuddyProxyDialTimeout = 5 * time.Second
+	// codeBuddyProxyTLSHandshakeTimeout 代理 TLS 握手超时。
+	codeBuddyProxyTLSHandshakeTimeout = 5 * time.Second
+)
+
+// newCodeBuddyHTTPClient 按代理 URL 构造 http.Client（参照 antigravity.NewClient）。
+// proxyURL 为空时返回不挂 Transport 的直连 client，与改造前行为一致。
+func newCodeBuddyHTTPClient(proxyURL string) (*http.Client, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	_, parsed, err := proxyurl.Parse(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsed != nil {
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: codeBuddyProxyDialTimeout,
+			}).DialContext,
+			TLSHandshakeTimeout: codeBuddyProxyTLSHandshakeTimeout,
+		}
+		if err := proxyutil.ConfigureTransportProxy(transport, parsed); err != nil {
+			return nil, fmt.Errorf("configure proxy: %w", err)
+		}
+		client.Transport = transport
+	}
+	return client, nil
+}
+
+// resolveProxyURL 把代理 ID 解析为代理 URL；无代理返回空串（直连）。
+// 代理仓库缺失/查不到/查询失败均返回可读错误，避免静默直连导致 IP 不一致。
+func (s *CodeBuddyOAuthService) resolveProxyURL(ctx context.Context, proxyID *int64) (string, error) {
+	if proxyID == nil {
+		return "", nil
+	}
+	if s.proxyRepo == nil {
+		return "", infraerrors.New(http.StatusBadRequest, "CODEBUDDY_OAUTH_PROXY_NOT_AVAILABLE", "proxy repository is not available")
+	}
+	proxy, err := s.proxyRepo.GetByID(ctx, *proxyID)
+	if err != nil {
+		if errors.Is(err, ErrProxyNotFound) {
+			return "", infraerrors.New(http.StatusBadRequest, "CODEBUDDY_OAUTH_PROXY_NOT_FOUND", "configured proxy was not found")
+		}
+		return "", infraerrors.New(http.StatusServiceUnavailable, "CODEBUDDY_OAUTH_PROXY_LOOKUP_FAILED", "proxy lookup is temporarily unavailable")
+	}
+	if proxy == nil {
+		return "", infraerrors.New(http.StatusBadRequest, "CODEBUDDY_OAUTH_PROXY_NOT_FOUND", "configured proxy was not found")
+	}
+	return proxy.URL(), nil
+}
+
+// clientForProxy 返回本次请求应使用的 client：无代理复用共享直连 client，
+// 有代理则按代理构造独立 client。
+func (s *CodeBuddyOAuthService) clientForProxy(proxyURL string) (*http.Client, error) {
+	if strings.TrimSpace(proxyURL) == "" {
+		return s.httpClient, nil
+	}
+	return newCodeBuddyHTTPClient(proxyURL)
+}
+
+// clientForProxyID 解析代理 ID 并构造对应 client（无代理 → 共享直连 client）。
+func (s *CodeBuddyOAuthService) clientForProxyID(ctx context.Context, proxyID *int64) (*http.Client, error) {
+	proxyURL, err := s.resolveProxyURL(ctx, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.clientForProxy(proxyURL)
 }
 
 // CodeBuddyAuthURLResult 生成授权链接的结果
@@ -78,8 +158,12 @@ func (s *CodeBuddyOAuthService) setCommonHeaders(req *http.Request) {
 }
 
 // doJSON 请求上游并解 {code,msg,data} 信封，code != 0 视为业务错误。
+// client 为本次请求使用的 HTTP client（无代理时为共享直连 client）。
 // loginPending 为 true 时业务错误归类为 ErrCodeBuddyLoginPending（auth/token 轮询场景）。
-func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, method, fullURL string, headers func(*http.Request), body io.Reader, loginPending bool) (json.RawMessage, error) {
+func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, client *http.Client, method, fullURL string, headers func(*http.Request), body io.Reader, loginPending bool) (json.RawMessage, error) {
+	if client == nil {
+		client = s.httpClient
+	}
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
 		return nil, err
@@ -89,7 +173,7 @@ func (s *CodeBuddyOAuthService) doJSON(ctx context.Context, method, fullURL stri
 	} else {
 		s.setCommonHeaders(req)
 	}
-	resp, err := s.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -141,8 +225,13 @@ func codeBuddyStateURL(base, path, state string) string {
 }
 
 // GenerateAuthURL 生成 CodeBuddy OAuth 授权链接（上游签发 state，服务端无会话）。
-func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context) (*CodeBuddyAuthURLResult, error) {
-	data, err := s.doJSON(ctx, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyAuthStatePath, nil, bytes.NewReader([]byte("{}")), false)
+// proxyID 为本次登录选定的代理（nil = 直连），与后续 poll/账号日常调用保持同一出口 IP。
+func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64) (*CodeBuddyAuthURLResult, error) {
+	client, err := s.clientForProxyID(ctx, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	data, err := s.doJSON(ctx, client, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyAuthStatePath, nil, bytes.NewReader([]byte("{}")), false)
 	if err != nil {
 		return nil, fmt.Errorf("获取授权 state 失败: %w", err)
 	}
@@ -158,13 +247,19 @@ func (s *CodeBuddyOAuthService) GenerateAuthURL(ctx context.Context) (*CodeBuddy
 
 // PollToken 轮询登录结果：auth/token 为权威登录状态端点，未完成登录时返回
 // ErrCodeBuddyLoginPending；完成后附带拉取 uid/nickname（失败不阻塞）。
-func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string) (*CodeBuddyTokenInfo, error) {
+// proxyID 必须与 GenerateAuthURL 一致，否则登录请求的出口 IP 与首次登录不一致。
+func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
 	state = strings.TrimSpace(state)
 	if state == "" || len(state) > 128 {
 		return nil, fmt.Errorf("state 不能为空且长度不得超过 128")
 	}
 
-	tokData, err := s.doJSON(ctx, http.MethodGet,
+	client, err := s.clientForProxyID(ctx, proxyID)
+	if err != nil {
+		return nil, err
+	}
+
+	tokData, err := s.doJSON(ctx, client, http.MethodGet,
 		codeBuddyStateURL(CodeBuddyUpstreamBaseURL, codeBuddyAuthTokenPath, state), nil, nil, true)
 	if err != nil {
 		return nil, err
@@ -194,7 +289,7 @@ func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string) (*C
 		s.setCommonHeaders(req)
 		req.Header.Set("Authorization", "Bearer "+info.AccessToken)
 	}
-	if acctData, acctErr := s.doJSON(ctx, http.MethodGet,
+	if acctData, acctErr := s.doJSON(ctx, client, http.MethodGet,
 		codeBuddyStateURL(CodeBuddyUpstreamBaseURL, codeBuddyLoginAcctPath, state), acctHeaders, nil, false); acctErr == nil {
 		var acct struct {
 			UID          string `json:"uid"`
@@ -212,7 +307,16 @@ func (s *CodeBuddyOAuthService) PollToken(ctx context.Context, state string) (*C
 
 // RefreshToken 用 refresh_token 换新 access_token。
 // X-Refresh-Token 仅允许出现在刷新请求中，绝不出现在 chat 请求（上游安全红线）。
-func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, uid, enterpriseID, domain string) (*CodeBuddyTokenInfo, error) {
+// proxyID 为账号绑定的代理（nil = 直连），使 token 轮换与日常调用同一出口 IP。
+func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, uid, enterpriseID, domain string, proxyID *int64) (*CodeBuddyTokenInfo, error) {
+	client, err := s.clientForProxyID(ctx, proxyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.refreshTokenWithClient(ctx, client, refreshToken, uid, enterpriseID, domain)
+}
+
+func (s *CodeBuddyOAuthService) refreshTokenWithClient(ctx context.Context, client *http.Client, refreshToken, uid, enterpriseID, domain string) (*CodeBuddyTokenInfo, error) {
 	if strings.TrimSpace(refreshToken) == "" {
 		return nil, fmt.Errorf("无可用的 refresh_token")
 	}
@@ -224,7 +328,7 @@ func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, 
 		}
 		req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
 	}
-	data, err := s.doJSON(ctx, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyTokenRefreshPath, headers, nil, false)
+	data, err := s.doJSON(ctx, client, http.MethodPost, CodeBuddyUpstreamBaseURL+codeBuddyTokenRefreshPath, headers, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -262,17 +366,34 @@ func (s *CodeBuddyOAuthService) RefreshToken(ctx context.Context, refreshToken, 
 	return info, nil
 }
 
-// RefreshAccountToken 刷新指定账户的 token
+// RefreshAccountToken 刷新指定账户的 token（按账号代理出站，与日常调用同一出口 IP）。
 func (s *CodeBuddyOAuthService) RefreshAccountToken(ctx context.Context, account *Account) (*CodeBuddyTokenInfo, error) {
 	if account.Platform != PlatformCodeBuddy || account.Type != AccountTypeOAuth {
 		return nil, fmt.Errorf("非 CodeBuddy OAuth 账户")
 	}
-	return s.RefreshToken(ctx,
+	client, err := s.accountClient(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	return s.refreshTokenWithClient(ctx, client,
 		account.GetCredential("refresh_token"),
 		account.GetCredential("uid"),
 		account.GetCredential("enterprise_id"),
 		account.GetCredential("domain"),
 	)
+}
+
+// accountClient 解析账号代理并构造 client：优先用已加载的 account.Proxy，
+// 缺失时按 account.ProxyID 查代理仓库；无代理返回共享直连 client。
+func (s *CodeBuddyOAuthService) accountClient(ctx context.Context, account *Account) (*http.Client, error) {
+	if account != nil && account.Proxy != nil {
+		return s.clientForProxy(account.Proxy.URL())
+	}
+	var proxyID *int64
+	if account != nil {
+		proxyID = account.ProxyID
+	}
+	return s.clientForProxyID(ctx, proxyID)
 }
 
 // BuildAccountCredentials 构建账户凭证

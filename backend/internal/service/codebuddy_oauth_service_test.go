@@ -59,7 +59,7 @@ func (t *codeBuddyRouteTransport) RoundTrip(req *http.Request) (*http.Response, 
 func newCodeBuddyTestService(handler http.Handler) (*CodeBuddyOAuthService, *codeBuddyRouteTransport, func()) {
 	srv := httptest.NewServer(handler)
 	transport := &codeBuddyRouteTransport{serverURL: srv.URL}
-	svc := NewCodeBuddyOAuthService()
+	svc := NewCodeBuddyOAuthService(nil)
 	svc.httpClient = &http.Client{Transport: transport}
 	return svc, transport, srv.Close
 }
@@ -72,7 +72,7 @@ func TestCodeBuddyOAuthService_GenerateAuthURL(t *testing.T) {
 	}))
 	defer closeFn()
 
-	res, err := svc.GenerateAuthURL(t.Context())
+	res, err := svc.GenerateAuthURL(t.Context(), nil)
 	require.NoError(t, err)
 	require.Equal(t, "st-123", res.State)
 	require.Equal(t, "https://www.codebuddy.cn/auth?state=st-123", res.AuthURL)
@@ -85,7 +85,7 @@ func TestCodeBuddyOAuthService_PollToken_Pending(t *testing.T) {
 	}))
 	defer closeFn()
 
-	_, err := svc.PollToken(t.Context(), "st-123")
+	_, err := svc.PollToken(t.Context(), "st-123", nil)
 	require.ErrorIs(t, err, ErrCodeBuddyLoginPending)
 }
 
@@ -103,7 +103,7 @@ func TestCodeBuddyOAuthService_PollToken_Success(t *testing.T) {
 	}))
 	defer closeFn()
 
-	info, err := svc.PollToken(t.Context(), "st-123")
+	info, err := svc.PollToken(t.Context(), "st-123", nil)
 	require.NoError(t, err)
 	require.Equal(t, "at-1", info.AccessToken)
 	require.Equal(t, "rt-1", info.RefreshToken)
@@ -122,7 +122,7 @@ func TestCodeBuddyOAuthService_PollToken_5xxNotPending(t *testing.T) {
 	}))
 	defer closeFn()
 
-	_, err := svc.PollToken(t.Context(), "st-123")
+	_, err := svc.PollToken(t.Context(), "st-123", nil)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrCodeBuddyLoginPending, "5xx 必须如实上报，不能误判为登录未完成")
 }
@@ -135,7 +135,7 @@ func TestCodeBuddyOAuthService_RefreshToken_PreservesMissingFields(t *testing.T)
 	}))
 	defer closeFn()
 
-	info, err := svc.RefreshToken(t.Context(), "rt-old", "u-old", "e-old", "d-old")
+	info, err := svc.RefreshToken(t.Context(), "rt-old", "u-old", "e-old", "d-old", nil)
 	require.NoError(t, err)
 	require.Equal(t, "at-new", info.AccessToken)
 	require.Equal(t, "rt-old", info.RefreshToken, "上游缺省 refreshToken 时应保留旧值")
@@ -152,7 +152,7 @@ func TestCodeBuddyOAuthService_RefreshToken_InvalidRefreshToken(t *testing.T) {
 	}))
 	defer closeFn()
 
-	_, err := svc.RefreshToken(t.Context(), "rt-garbage", "u", "e", "d")
+	_, err := svc.RefreshToken(t.Context(), "rt-garbage", "u", "e", "d", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid_refresh_token",
 		"refresh token 失效错误必须携带 invalid_refresh_token 关键词")
@@ -173,7 +173,7 @@ func TestCodeBuddyOAuthService_PollToken_StateURLSafeEncoding(t *testing.T) {
 	}))
 	defer closeFn()
 
-	_, err := svc.PollToken(t.Context(), rawState)
+	_, err := svc.PollToken(t.Context(), rawState, nil)
 	require.NoError(t, err)
 
 	// 服务端解码后的 state 必须与原始完全一致，且 path 正确（未被特殊字符污染）。

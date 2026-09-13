@@ -132,6 +132,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyAffiliateRebateDurationDays:               strconv.Itoa(AffiliateRebateDurationDaysDefault),
 		SettingKeyAffiliateRebatePerInviteeCap:              strconv.FormatFloat(AffiliateRebatePerInviteeCapDefault, 'f', 2, 64),
 		SettingKeyDefaultUserRPMLimit:                       "0",
+		SettingKeyCodeBuddyDefaultRPM:                       strconv.Itoa(DefaultCodeBuddyRPM),
 		SettingKeyDefaultSubscriptions:                      "[]",
 		SettingKeyAuthSourceDefaultEmailBalance:             "0",
 		SettingKeyAuthSourceDefaultEmailConcurrency:         "5",
@@ -392,6 +393,11 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 
 	if rpm, err := strconv.Atoi(settings[SettingKeyDefaultUserRPMLimit]); err == nil && rpm >= 0 {
 		result.DefaultUserRPMLimit = rpm
+	}
+
+	result.CodeBuddyDefaultRPM = DefaultCodeBuddyRPM
+	if rpm, err := strconv.Atoi(settings[SettingKeyCodeBuddyDefaultRPM]); err == nil && rpm >= 0 {
+		result.CodeBuddyDefaultRPM = rpm
 	}
 
 	// 解析浮点数类型

@@ -537,6 +537,11 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
+	// CodeBuddy 平台默认 RPM：粘性允许黄区（StickyOnly），红区才清绑定换号。
+	if !s.codeBuddyRPMAllowsSticky(ctx, account) {
+		clearBinding()
+		return nil, false, nil
+	}
 	// Free-tier soft gate: sticky session must not pin an over-quota free OAuth account.
 	// Admin QueryQuota / import probes do not use this path.
 	if account != nil && len(s.filterGrokFreeQuotaAccounts(ctx, []Account{*account})) == 0 {
@@ -1399,6 +1404,8 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	if len(accounts) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary(""))
 	}
+	// CodeBuddy 平台默认 RPM：一次预取候选计数，供候选过滤读取，避免逐账号查 Redis（N+1）。
+	ctx = withCodeBuddyRPMCounts(ctx, s.service.prefetchCodeBuddyRPMCounts(ctx, accounts))
 	// Local free-tier soft gate on the Grok scheduling path only (not admin probe).
 	accounts = s.filterGrokFreeQuotaAccounts(ctx, accounts)
 	if len(accounts) == 0 {
@@ -1460,6 +1467,11 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 		if compatible, reason := s.isAccountRequestCompatibleReason(ctx, account, req); !compatible {
 			filterStats.exclude(reason)
+			continue
+		}
+		// CodeBuddy 平台默认 RPM：非粘性候选仅绿区可选（计数来自本次选号预取）。
+		if !s.codeBuddyRPMAllowsCandidate(ctx, account) {
+			filterStats.exclude("rpm_limited")
 			continue
 		}
 		if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
@@ -1756,6 +1768,34 @@ func (s *defaultOpenAIAccountScheduler) lookupShadowParentAccount(ctx context.Co
 func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.Context, account *Account, req OpenAIAccountScheduleRequest) bool {
 	compatible, _ := s.isAccountRequestCompatibleReason(ctx, account, req)
 	return compatible
+}
+
+// codeBuddyRPMAllowsCandidate 判断非粘性候选是否通过 CodeBuddy 平台默认 RPM 筛选。
+// 计数取自本次选号预取（ctx 缺失即失败开放）。
+func (s *defaultOpenAIAccountScheduler) codeBuddyRPMAllowsCandidate(ctx context.Context, account *Account) bool {
+	if s == nil || s.service == nil || !codeBuddyRPMGated(account) {
+		return true
+	}
+	count, ok := codeBuddyRPMCountFromContext(ctx, account.ID)
+	if !ok {
+		count = -1
+	}
+	return s.service.codeBuddyRPMSchedulable(ctx, account, count, false)
+}
+
+// codeBuddyRPMAllowsSticky 判断粘性账号是否通过 CodeBuddy 平台默认 RPM 筛选
+// （粘性允许黄区，红区才清绑定换号）。
+func (s *defaultOpenAIAccountScheduler) codeBuddyRPMAllowsSticky(ctx context.Context, account *Account) bool {
+	if s == nil || s.service == nil || !codeBuddyRPMGated(account) {
+		return true
+	}
+	currentRPM := -1
+	if s.service.rpmCache != nil {
+		if count, err := s.service.rpmCache.GetRPM(ctx, account.ID); err == nil {
+			currentRPM = count
+		}
+	}
+	return s.service.codeBuddyRPMSchedulable(ctx, account, currentRPM, true)
 }
 
 // isAccountRequestCompatibleReason reports whether the account can serve the

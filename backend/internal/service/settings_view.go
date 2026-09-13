@@ -181,6 +181,7 @@ type SystemSettings struct {
 	AffiliateRebatePerInviteeCap float64
 	AdminRechargeRebateEnabled   bool
 	DefaultUserRPMLimit          int
+	CodeBuddyDefaultRPM          int
 	DefaultSubscriptions         []DefaultSubscriptionSetting
 
 	// Model fallback configuration

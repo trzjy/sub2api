@@ -451,6 +451,7 @@ type OpenAIGatewayService struct {
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	rpmCache              RPMCache // 账号级 RPM 计数（当前用于 CodeBuddy 平台默认 RPM 限流）
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 

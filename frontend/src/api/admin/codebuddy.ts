@@ -22,6 +22,8 @@ export interface CodeBuddyAuthUrlRequest {
 
 export interface CodeBuddyPollRequest {
   state: string
+  /** 登录选定的代理；须与 auth-url 一致，保证 poll 与登录同一出口 IP。 */
+  proxy_id?: number
 }
 
 export interface CodeBuddyRefreshTokenRequest {
@@ -29,6 +31,8 @@ export interface CodeBuddyRefreshTokenRequest {
   uid?: string
   enterprise_id?: string
   domain?: string
+  /** 账号绑定的代理；使 token 校验与日常调用同一出口 IP。 */
+  proxy_id?: number
 }
 
 export interface CodeBuddyTokenInfo {

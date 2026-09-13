@@ -400,6 +400,8 @@ export default {
         defaultConcurrencyHint: '新用户的最大并发请求数',
         defaultUserRpmLimit: '默认用户 RPM 限制',
         defaultUserRpmLimitHint: '新用户默认每分钟最大请求数，0 = 不限制；仅作用于新用户创建时初始化',
+        codebuddyDefaultRpm: 'CodeBuddy 默认 RPM 限制',
+        codebuddyDefaultRpmHint: 'CodeBuddy 账号未单独配置「基础 RPM」时的平台默认值，0 = 关闭平台默认；用于防止漏配账号被上游风控',
         defaultSubscriptions: '默认订阅列表',
         defaultSubscriptionsHint: '新用户创建或注册时自动分配这些订阅',
         addDefaultSubscription: '添加默认订阅',

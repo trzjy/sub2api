@@ -141,6 +141,11 @@ type SettingService struct {
 	panelRateLimitCache atomic.Value
 	panelRateLimitSF    singleflight.Group
 
+	// codeBuddyDefaultRPMCache 是 CodeBuddy 平台默认 RPM 的进程内缓存
+	// （*cachedCodeBuddyDefaultRPM）。账号选号热路径逐账号读取，禁止直接查库。
+	codeBuddyDefaultRPMCache atomic.Value
+	codeBuddyDefaultRPMSF    singleflight.Group
+
 	// openAIQuotaAutoPauseSettingsCache holds the most recently observed quota auto-pause
 	// settings. GetOpenAIQuotaAutoPauseSettings reads this atomic.Value on the request hot
 	// path without ever blocking on the DB; when the cached entry expires, a background
