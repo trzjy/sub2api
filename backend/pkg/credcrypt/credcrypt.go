@@ -17,6 +17,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -159,6 +160,7 @@ func Configure(primaryB64, oldB64 string) (bool, error) {
 			return false, fmt.Errorf("credcrypt: %s is set but %s is empty", EnvKeyOld, EnvKey)
 		}
 		defaultCipher.Store(nil)
+		configureMACSeed("")
 		return false, nil
 	}
 	primary, err := ParseKey(primaryB64)
@@ -177,6 +179,7 @@ func Configure(primaryB64, oldB64 string) (bool, error) {
 		return false, err
 	}
 	defaultCipher.Store(c)
+	configureMACSeed(primaryB64)
 	return true, nil
 }
 
@@ -206,4 +209,39 @@ func Decrypt(value string) (string, error) {
 		return value, nil
 	}
 	return c.Decrypt(value)
+}
+
+// macSeedDomain 是 MAC 派生的域分隔前缀，避免加密密钥在 AES-GCM 与 HMAC
+// 两种原语下原样复用。
+const macSeedDomain = "sub2api:credentials-mac:v1:"
+
+// macUnconfiguredSeed 是未配置主密钥时的 MAC 种子。此时凭证本就是明文，
+// MAC 仅承担 SQL 级相等比较职责，不承担保密职责。
+const macUnconfiguredSeed = macSeedDomain + "unconfigured"
+
+// macSeed 是 MAC 的派生种子，随 Configure 同步更新（主密钥 base64 或固定
+// 未配置种子）。用指针快照保证 MACKey 读取到与当前 Cipher 一致的种子。
+var macSeed atomic.Pointer[string]
+
+// MACKey 返回 credentials 指纹（HMAC-SHA256）使用的 32 字节密钥。
+//
+// 已配置主密钥时从主密钥做域分隔派生；未配置时从固定种子派生。注意：
+// 配置主密钥前后派生出的 MAC 不同——存量行的 MAC 由写入路径/E3 迁移按
+// 当时的密钥状态维护，主密钥轮换后旧 MAC 不再匹配，相关 CAS 守卫按
+// "不匹配"处理（安全侧失败），行被下次写入或 E3 迁移刷新。
+func MACKey() []byte {
+	seed := macUnconfiguredSeed
+	if p := macSeed.Load(); p != nil {
+		seed = *p
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return sum[:]
+}
+
+func configureMACSeed(primaryB64 string) {
+	seed := macUnconfiguredSeed
+	if strings.TrimSpace(primaryB64) != "" {
+		seed = macSeedDomain + strings.TrimSpace(primaryB64)
+	}
+	macSeed.Store(&seed)
 }

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -41,10 +40,10 @@ func ollamaCloudUsageRepositoryAccount() *service.Account {
 func TestUpdateOllamaCloudUsageSnapshotRowsAffectedZeroIsIdentityConflict(t *testing.T) {
 	client, mock := newOllamaCloudUsageRepositoryTestClient(t)
 	mock.ExpectBegin()
-	expectOllamaCloudUsageGroupLock(mock, ollamaCloudUsageRepositoryAccount(), true,
+	expectOllamaCloudUsageGroupLock(t, mock, ollamaCloudUsageRepositoryAccount(), true,
 		`"cipher:wos-session=secret"`, `true`, `null`)
 	mock.ExpectExec(`(?s)`+regexp.QuoteMeta("UPDATE accounts")).
-		WithArgs(sqlmock.AnyArg(), "key", sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), credentialsMACOfJSON([]byte("key")), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 	repo := newAccountRepositoryWithSQL(client, nil, nil)
@@ -60,19 +59,22 @@ func TestUpdateOllamaCloudUsageSnapshotRowsAffectedZeroIsIdentityConflict(t *tes
 }
 
 func expectOllamaCloudUsageGroupLock(
+	t *testing.T,
 	mock sqlmock.Sqlmock,
 	account *service.Account,
 	anchorMatches bool,
 	sessionJSON, autoJSON, snapshotJSON string,
 ) {
+	t.Helper()
 	apiKey, _ := account.Credentials["api_key"].(string)
-	credentials, _ := json.Marshal(normalizeJSONMap(account.Credentials))
+	anchorMac, err := credentialsMACOf(account.Credentials)
+	require.NoError(t, err)
 	var proxyID any
 	if account.ProxyID != nil {
 		proxyID = *account.ProxyID
 	}
 	mock.ExpectQuery(`(?s)`+regexp.QuoteMeta("SELECT")+`.*`+regexp.QuoteMeta("FOR NO KEY UPDATE")).
-		WithArgs(apiKey, account.ID, account.Platform, account.Type, string(credentials), proxyID).
+		WithArgs(credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, anchorMac, proxyID).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "anchor_matches", "session", "auto_refresh", "snapshot"}).
 			AddRow(account.ID, anchorMatches, sessionJSON, autoJSON, snapshotJSON))
 }
@@ -117,18 +119,18 @@ func TestSaveAndDeleteOllamaCloudUsageSessionKeepCiphertextOutOfSQL(t *testing.T
 	const replacement = "cipher:wos-session=browser-cookie-secret"
 
 	mock.ExpectBegin()
-	expectOllamaCloudUsageGroupLock(mock, account, true, `"cipher:wos-session=secret"`, `true`, `null`)
+	expectOllamaCloudUsageGroupLock(t, mock, account, true, `"cipher:wos-session=secret"`, `true`, `null`)
 	mock.ExpectExec(`(?s)UPDATE accounts.*ollama_cloud_usage_session.*ollama_cloud_usage_auto_refresh.*ollama_cloud_usage_snapshot`).
-		WithArgs(`{"ollama_cloud_usage_auto_refresh":true,"ollama_cloud_usage_session":"cipher:wos-session=browser-cookie-secret"}`, "key", sqlmock.AnyArg()).
+		WithArgs(`{"ollama_cloud_usage_auto_refresh":true,"ollama_cloud_usage_session":"cipher:wos-session=browser-cookie-secret"}`, credentialsMACOfJSON([]byte("key")), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	require.NoError(t, repo.SaveOllamaCloudUsageSession(context.Background(), account, replacement, true))
 
 	account.Extra[service.OllamaCloudUsageSessionExtraKey] = replacement
 	mock.ExpectBegin()
-	expectOllamaCloudUsageGroupLock(mock, account, true, `"cipher:wos-session=browser-cookie-secret"`, `true`, `null`)
+	expectOllamaCloudUsageGroupLock(t, mock, account, true, `"cipher:wos-session=browser-cookie-secret"`, `true`, `null`)
 	mock.ExpectExec(`(?s)UPDATE accounts.*ollama_cloud_usage_session.*ollama_cloud_usage_auto_refresh.*ollama_cloud_usage_snapshot`).
-		WithArgs(`{}`, "key", sqlmock.AnyArg()).
+		WithArgs(`{}`, credentialsMACOfJSON([]byte("key")), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	require.NoError(t, repo.DeleteOllamaCloudUsageSession(context.Background(), account))
@@ -178,9 +180,9 @@ func TestListOllamaCloudUsageGroupAccountsUsesOneStrictBatchQuery(t *testing.T) 
 	require.NoError(t, err)
 	require.Empty(t, accounts)
 	query := normalizeSQLWhitespace(capturedSQL)
-	require.Contains(t, query, "credentials ->> 'api_key' = ANY($1)")
+	require.Contains(t, query, "credentials_api_key_mac = ANY($1)")
 	require.Contains(t, query, "platform IN ('openai', 'anthropic', 'kimi', 'zhipu', 'deepseek', 'minimax')")
-	require.Contains(t, query, "jsonb_typeof(credentials -> 'api_key') = 'string'")
+	require.Contains(t, query, "credentials_api_key_mac IS NOT NULL")
 	require.Contains(t, query, ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'"))
 	require.NotContains(t, query, "~*")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -261,8 +263,8 @@ func TestBulkUpdateOllamaIdentityCleanupIsValueConditional(t *testing.T) {
 func TestUpdateCredentialsIdentityChangeClearsAllOllamaManagedExtra(t *testing.T) {
 	client, mock := newOllamaCloudUsageRepositoryTestClient(t)
 	mock.ExpectBegin()
-	mock.ExpectExec(`(?s)UPDATE accounts.*credentials -> 'api_key' IS DISTINCT FROM.*ollama_cloud_usage_session.*ollama_cloud_usage_auto_refresh.*ollama_cloud_usage_snapshot`).
-		WithArgs(`{"api_key":"new-key","base_url":"https://ollama.com"}`, int64(17)).
+	mock.ExpectExec(`(?s)UPDATE accounts.*credentials_api_key_mac IS DISTINCT FROM.*ollama_cloud_usage_session.*ollama_cloud_usage_auto_refresh.*ollama_cloud_usage_snapshot`).
+		WithArgs(`{"api_key":"new-key","base_url":"https://ollama.com"}`, int64(17), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
 		WithArgs(service.SchedulerOutboxEventAccountChanged, int64(17), nil, nil, sqlmock.AnyArg()).
@@ -282,9 +284,9 @@ func TestDisableOllamaCloudUsageAutoRefreshUsesGroupIdentityCAS(t *testing.T) {
 	client, mock := newOllamaCloudUsageRepositoryTestClient(t)
 	account := ollamaCloudUsageRepositoryAccount()
 	mock.ExpectBegin()
-	expectOllamaCloudUsageGroupLock(mock, account, true, `"cipher:wos-session=secret"`, `true`, `null`)
+	expectOllamaCloudUsageGroupLock(t, mock, account, true, `"cipher:wos-session=secret"`, `true`, `null`)
 	mock.ExpectExec(`(?s)UPDATE accounts.*ollama_cloud_usage_auto_refresh`).
-		WithArgs(`{"ollama_cloud_usage_auto_refresh":false,"ollama_cloud_usage_session":"cipher:wos-session=secret"}`, "key", sqlmock.AnyArg()).
+		WithArgs(`{"ollama_cloud_usage_auto_refresh":false,"ollama_cloud_usage_session":"cipher:wos-session=secret"}`, credentialsMACOfJSON([]byte("key")), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	repo := newAccountRepositoryWithSQL(client, nil, nil)
@@ -300,8 +302,8 @@ func TestDisableOllamaCloudUsageAutoRefreshUsesGroupIdentityCAS(t *testing.T) {
 func TestUpdateCredentialsCleanupBranchRequiresChangedCredentials(t *testing.T) {
 	client, mock := newOllamaCloudUsageRepositoryTestClient(t)
 	mock.ExpectBegin()
-	mock.ExpectExec(`(?s)UPDATE accounts.*CASE.*AND credentials IS DISTINCT FROM \$1::jsonb\s+AND \(\s+credentials -> 'api_key' IS DISTINCT FROM`).
-		WithArgs(`{"api_key":"same-key","base_url":"https://relay.example.com/v1"}`, int64(17)).
+	mock.ExpectExec(`(?s)UPDATE accounts.*CASE.*AND credentials_mac IS DISTINCT FROM \$3\s+AND \(\s+credentials_api_key_mac IS DISTINCT FROM \$4`).
+		WithArgs(`{"api_key":"same-key","base_url":"https://relay.example.com/v1"}`, int64(17), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
 		WithArgs(service.SchedulerOutboxEventAccountChanged, int64(17), nil, nil, sqlmock.AnyArg()).
@@ -358,7 +360,7 @@ func TestUpdateCredentialsPlainCNAPIKeyAccountCleanupStaysSemanticallyEquivalent
 	t.Cleanup(func() { _ = client.Close() })
 	mock.ExpectBegin()
 	mock.ExpectExec(`(?s)UPDATE accounts.*- 'upstream_billing_probe'.*- 'ollama_cloud_usage_session'.*- 'ollama_cloud_usage_auto_refresh'.*- 'ollama_cloud_usage_snapshot'`).
-		WithArgs(`{"api_key":"rotated-key","base_url":"https://api.moonshot.cn/v1"}`, int64(17)).
+		WithArgs(`{"api_key":"rotated-key","base_url":"https://api.moonshot.cn/v1"}`, int64(17), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO scheduler_outbox")).
 		WithArgs(service.SchedulerOutboxEventAccountChanged, int64(17), nil, nil, sqlmock.AnyArg()).
@@ -373,7 +375,7 @@ func TestUpdateCredentialsPlainCNAPIKeyAccountCleanupStaysSemanticallyEquivalent
 	require.NoError(t, err)
 	query := normalizeSQLWhitespace(capturedSQL)
 	require.Contains(t, query,
-		"platform IN ('openai', 'anthropic', 'kimi', 'zhipu', 'deepseek', 'minimax') AND type = 'apikey' AND credentials IS DISTINCT FROM $1::jsonb")
+		"platform IN ('openai', 'anthropic', 'kimi', 'zhipu', 'deepseek', 'minimax') AND type = 'apikey' AND credentials_mac IS DISTINCT FROM $3")
 	require.Contains(t, query,
 		"THEN COALESCE(extra, '{}'::jsonb) - 'upstream_billing_probe' - 'ollama_cloud_usage_session' - 'ollama_cloud_usage_auto_refresh' - 'ollama_cloud_usage_snapshot'")
 	require.NotContains(t, query, "- 'upstream_billing_probe_enabled'")

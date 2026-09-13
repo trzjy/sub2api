@@ -32,6 +32,10 @@ const (
 	FieldType = "type"
 	// FieldCredentials holds the string denoting the credentials field in the database.
 	FieldCredentials = "credentials"
+	// FieldCredentialsMAC holds the string denoting the credentials_mac field in the database.
+	FieldCredentialsMAC = "credentials_mac"
+	// FieldCredentialsAPIKeyMAC holds the string denoting the credentials_api_key_mac field in the database.
+	FieldCredentialsAPIKeyMAC = "credentials_api_key_mac"
 	// FieldExtra holds the string denoting the extra field in the database.
 	FieldExtra = "extra"
 	// FieldProxyID holds the string denoting the proxy_id field in the database.
@@ -139,6 +143,8 @@ var Columns = []string{
 	FieldPlatform,
 	FieldType,
 	FieldCredentials,
+	FieldCredentialsMAC,
+	FieldCredentialsAPIKeyMAC,
 	FieldExtra,
 	FieldProxyID,
 	FieldProxyFallbackOriginID,
@@ -202,6 +208,10 @@ var (
 	TypeValidator func(string) error
 	// DefaultCredentials holds the default value on creation for the "credentials" field.
 	DefaultCredentials func() map[string]interface{}
+	// CredentialsMACValidator is a validator for the "credentials_mac" field. It is called by the builders before save.
+	CredentialsMACValidator func(string) error
+	// CredentialsAPIKeyMACValidator is a validator for the "credentials_api_key_mac" field. It is called by the builders before save.
+	CredentialsAPIKeyMACValidator func(string) error
 	// DefaultExtra holds the default value on creation for the "extra" field.
 	DefaultExtra func() map[string]interface{}
 	// DefaultConcurrency holds the default value on creation for the "concurrency" field.
@@ -289,6 +299,16 @@ func ByPlatform(opts ...sql.OrderTermOption) OrderOption {
 // ByType orders the results by the type field.
 func ByType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldType, opts...).ToFunc()
+}
+
+// ByCredentialsMAC orders the results by the credentials_mac field.
+func ByCredentialsMAC(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialsMAC, opts...).ToFunc()
+}
+
+// ByCredentialsAPIKeyMAC orders the results by the credentials_api_key_mac field.
+func ByCredentialsAPIKeyMAC(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialsAPIKeyMAC, opts...).ToFunc()
 }
 
 // ByProxyID orders the results by the proxy_id field.

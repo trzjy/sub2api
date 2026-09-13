@@ -403,7 +403,11 @@ func (r *usageLogRepository) loadAccounts(ctx context.Context, ids []int64) (map
 		return nil, err
 	}
 	for _, m := range models {
-		out[m.ID] = accountEntityToService(m)
+		account, err := accountEntityToService(m)
+		if err != nil {
+			return nil, err
+		}
+		out[m.ID] = account
 	}
 	return out, nil
 }

@@ -199,11 +199,19 @@ func mustCreateAccount(t *testing.T, client *dbent.Client, a *service.Account) *
 		a.Extra = map[string]any{}
 	}
 
+	// fixture 直接走 ent 客户端绕过 repository.Create，指纹列必须自行维护，
+	// 否则依赖 credentials_mac / credentials_api_key_mac 的 SQL（Ollama 用量
+	// 分组、Grok CAS 守卫）会把这些行当作"未回填"排除。
+	creds, err := prepareCredentialsForStorage(a.Credentials)
+	require.NoError(t, err, "prepare fixture credentials")
+
 	create := client.Account.Create().
 		SetName(a.Name).
 		SetPlatform(a.Platform).
 		SetType(a.Type).
-		SetCredentials(a.Credentials).
+		SetCredentials(creds.storage).
+		SetCredentialsMAC(creds.mac).
+		SetNillableCredentialsAPIKeyMAC(creds.apiKeyMAC).
 		SetExtra(a.Extra).
 		SetConcurrency(a.Concurrency).
 		SetPriority(a.Priority).

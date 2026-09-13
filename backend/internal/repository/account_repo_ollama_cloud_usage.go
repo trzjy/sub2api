@@ -19,11 +19,13 @@ const (
 	// 镜像：Ollama Cloud key 允许挂在 openai/anthropic 与国产 OpenAI 兼容平台
 	// 下复用。所有平台白名单 SQL 只允许引用本常量，不得各处重写字面量，防止漂移。
 	ollamaCloudUsagePlatformsSQL = "'openai', 'anthropic', 'kimi', 'zhipu', 'deepseek', 'minimax'"
-	ollamaCloudUsageEligibleSQL  = `
+	// 凭证静态加密（A3-E2）后 api_key 以密文落库，SQL 侧无法按明文等值匹配，
+	// 兄弟账号匹配 / 分组聚合一律改用 credentials_api_key_mac 指纹列。
+	ollamaCloudUsageEligibleSQL = `
 	platform IN (` + ollamaCloudUsagePlatformsSQL + `)
 	AND type = 'apikey'
 	AND ` + ollamaCloudBaseURLMatchSQLPrefix + `credentials ->> 'base_url'` + ollamaCloudBaseURLMatchSQLSuffix + `
-	AND jsonb_typeof(credentials -> 'api_key') = 'string'
+	AND credentials_api_key_mac IS NOT NULL
 `
 )
 
@@ -57,14 +59,19 @@ func (r *accountRepository) ListOllamaCloudUsageGroupAccounts(ctx context.Contex
 	if len(keys) == 0 {
 		return []service.Account{}, nil
 	}
+	// api_key 以指纹参与匹配（A3-E2），明文不再进入 SQL。
+	keyMACs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		keyMACs = append(keyMACs, credentialsMACOfJSON([]byte(key)))
+	}
 	rows, err := r.sql.QueryContext(ctx, `
 		SELECT id
 		FROM accounts
 		WHERE deleted_at IS NULL
 			AND `+ollamaCloudUsageEligibleSQL+`
-			AND credentials ->> 'api_key' = ANY($1)
+			AND credentials_api_key_mac = ANY($1)
 		ORDER BY id
-	`, pq.Array(keys))
+	`, pq.Array(keyMACs))
 	if err != nil {
 		return nil, err
 	}
@@ -248,9 +255,9 @@ func (r *accountRepository) updateOllamaCloudUsageGroup(
 				updated_at = NOW()
 			WHERE deleted_at IS NULL
 				AND `+ollamaCloudUsageEligibleSQL+`
-				AND credentials ->> 'api_key' = $2
+				AND credentials_api_key_mac = $2
 				AND id = ANY($3)
-		`, string(encoded), apiKey, pq.Array(memberIDs))
+		`, string(encoded), credentialsMACOfJSON([]byte(apiKey)), pq.Array(memberIDs))
 		if err != nil {
 			return err
 		}
@@ -287,7 +294,8 @@ func lockOllamaCloudUsageGroup(
 	account *service.Account,
 	apiKey string,
 ) ([]lockedOllamaCloudUsageMember, error) {
-	credentials, err := json.Marshal(normalizeJSONMap(account.Credentials))
+	// 锚点一致性与分组匹配均改用指纹（A3-E2），明文凭证与明文 api_key 不进 SQL。
+	anchorMac, err := credentialsMACOf(account.Credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +309,7 @@ func lockOllamaCloudUsageGroup(
 			id = $2
 				AND platform = $3
 				AND type = $4
-				AND credentials = $5::jsonb
+				AND credentials_mac = $5
 				AND proxy_id IS NOT DISTINCT FROM $6,
 			COALESCE((extra -> 'ollama_cloud_usage_session')::text, 'null'),
 			COALESCE((extra -> 'ollama_cloud_usage_auto_refresh')::text, 'null'),
@@ -309,10 +317,10 @@ func lockOllamaCloudUsageGroup(
 		FROM accounts
 		WHERE deleted_at IS NULL
 			AND `+ollamaCloudUsageEligibleSQL+`
-			AND credentials ->> 'api_key' = $1
+			AND credentials_api_key_mac = $1
 		ORDER BY id
 		FOR NO KEY UPDATE
-	`, apiKey, account.ID, account.Platform, account.Type, string(credentials), proxyID)
+	`, credentialsMACOfJSON([]byte(apiKey)), account.ID, account.Platform, account.Type, anchorMac, proxyID)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +437,7 @@ func (r *accountRepository) ListDueOllamaCloudUsageAccounts(
 	rows, err := r.sql.QueryContext(ctx, `
 		WITH eligible AS (
 			SELECT id,
-				credentials ->> 'api_key' AS api_key,
+				credentials_api_key_mac AS api_key,
 				last_used_at,
 				extra -> 'ollama_cloud_usage_snapshot' AS snapshot
 			FROM accounts
@@ -439,13 +447,13 @@ func (r *accountRepository) ListDueOllamaCloudUsageAccounts(
 				AND jsonb_typeof(extra -> 'ollama_cloud_usage_session') = 'string'
 				AND extra @> '{"ollama_cloud_usage_auto_refresh": true}'::jsonb
 		), group_activity AS (
-			SELECT credentials ->> 'api_key' AS api_key,
+			SELECT credentials_api_key_mac AS api_key,
 				MAX(last_used_at) AS group_last_used_at
 			FROM accounts
 			WHERE deleted_at IS NULL
 				AND `+ollamaCloudUsageEligibleSQL+`
-				AND jsonb_typeof(credentials -> 'api_key') = 'string'
-			GROUP BY credentials ->> 'api_key'
+				AND credentials_api_key_mac IS NOT NULL
+			GROUP BY credentials_api_key_mac
 		), joined AS (
 			SELECT e.id, e.api_key, e.snapshot, g.group_last_used_at,
 				e.snapshot #>> '{status}' AS status,

@@ -105,6 +105,34 @@ func (_c *AccountCreate) SetCredentials(v map[string]interface{}) *AccountCreate
 	return _c
 }
 
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (_c *AccountCreate) SetCredentialsMAC(v string) *AccountCreate {
+	_c.mutation.SetCredentialsMAC(v)
+	return _c
+}
+
+// SetNillableCredentialsMAC sets the "credentials_mac" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableCredentialsMAC(v *string) *AccountCreate {
+	if v != nil {
+		_c.SetCredentialsMAC(*v)
+	}
+	return _c
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (_c *AccountCreate) SetCredentialsAPIKeyMAC(v string) *AccountCreate {
+	_c.mutation.SetCredentialsAPIKeyMAC(v)
+	return _c
+}
+
+// SetNillableCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableCredentialsAPIKeyMAC(v *string) *AccountCreate {
+	if v != nil {
+		_c.SetCredentialsAPIKeyMAC(*v)
+	}
+	return _c
+}
+
 // SetExtra sets the "extra" field.
 func (_c *AccountCreate) SetExtra(v map[string]interface{}) *AccountCreate {
 	_c.mutation.SetExtra(v)
@@ -619,6 +647,16 @@ func (_c *AccountCreate) check() error {
 	if _, ok := _c.mutation.Credentials(); !ok {
 		return &ValidationError{Name: "credentials", err: errors.New(`ent: missing required field "Account.credentials"`)}
 	}
+	if v, ok := _c.mutation.CredentialsMAC(); ok {
+		if err := account.CredentialsMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_mac": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.CredentialsAPIKeyMAC(); ok {
+		if err := account.CredentialsAPIKeyMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_api_key_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_api_key_mac": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Extra(); !ok {
 		return &ValidationError{Name: "extra", err: errors.New(`ent: missing required field "Account.extra"`)}
 	}
@@ -716,6 +754,14 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Credentials(); ok {
 		_spec.SetField(account.FieldCredentials, field.TypeJSON, value)
 		_node.Credentials = value
+	}
+	if value, ok := _c.mutation.CredentialsMAC(); ok {
+		_spec.SetField(account.FieldCredentialsMAC, field.TypeString, value)
+		_node.CredentialsMAC = value
+	}
+	if value, ok := _c.mutation.CredentialsAPIKeyMAC(); ok {
+		_spec.SetField(account.FieldCredentialsAPIKeyMAC, field.TypeString, value)
+		_node.CredentialsAPIKeyMAC = value
 	}
 	if value, ok := _c.mutation.Extra(); ok {
 		_spec.SetField(account.FieldExtra, field.TypeJSON, value)
@@ -1032,6 +1078,42 @@ func (u *AccountUpsert) SetCredentials(v map[string]interface{}) *AccountUpsert 
 // UpdateCredentials sets the "credentials" field to the value that was provided on create.
 func (u *AccountUpsert) UpdateCredentials() *AccountUpsert {
 	u.SetExcluded(account.FieldCredentials)
+	return u
+}
+
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (u *AccountUpsert) SetCredentialsMAC(v string) *AccountUpsert {
+	u.Set(account.FieldCredentialsMAC, v)
+	return u
+}
+
+// UpdateCredentialsMAC sets the "credentials_mac" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateCredentialsMAC() *AccountUpsert {
+	u.SetExcluded(account.FieldCredentialsMAC)
+	return u
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (u *AccountUpsert) ClearCredentialsMAC() *AccountUpsert {
+	u.SetNull(account.FieldCredentialsMAC)
+	return u
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (u *AccountUpsert) SetCredentialsAPIKeyMAC(v string) *AccountUpsert {
+	u.Set(account.FieldCredentialsAPIKeyMAC, v)
+	return u
+}
+
+// UpdateCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateCredentialsAPIKeyMAC() *AccountUpsert {
+	u.SetExcluded(account.FieldCredentialsAPIKeyMAC)
+	return u
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (u *AccountUpsert) ClearCredentialsAPIKeyMAC() *AccountUpsert {
+	u.SetNull(account.FieldCredentialsAPIKeyMAC)
 	return u
 }
 
@@ -1585,6 +1667,48 @@ func (u *AccountUpsertOne) SetCredentials(v map[string]interface{}) *AccountUpse
 func (u *AccountUpsertOne) UpdateCredentials() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.UpdateCredentials()
+	})
+}
+
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (u *AccountUpsertOne) SetCredentialsMAC(v string) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetCredentialsMAC(v)
+	})
+}
+
+// UpdateCredentialsMAC sets the "credentials_mac" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateCredentialsMAC() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateCredentialsMAC()
+	})
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (u *AccountUpsertOne) ClearCredentialsMAC() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearCredentialsMAC()
+	})
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (u *AccountUpsertOne) SetCredentialsAPIKeyMAC(v string) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetCredentialsAPIKeyMAC(v)
+	})
+}
+
+// UpdateCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateCredentialsAPIKeyMAC() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateCredentialsAPIKeyMAC()
+	})
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (u *AccountUpsertOne) ClearCredentialsAPIKeyMAC() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearCredentialsAPIKeyMAC()
 	})
 }
 
@@ -2370,6 +2494,48 @@ func (u *AccountUpsertBulk) SetCredentials(v map[string]interface{}) *AccountUps
 func (u *AccountUpsertBulk) UpdateCredentials() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.UpdateCredentials()
+	})
+}
+
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (u *AccountUpsertBulk) SetCredentialsMAC(v string) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetCredentialsMAC(v)
+	})
+}
+
+// UpdateCredentialsMAC sets the "credentials_mac" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateCredentialsMAC() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateCredentialsMAC()
+	})
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (u *AccountUpsertBulk) ClearCredentialsMAC() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearCredentialsMAC()
+	})
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (u *AccountUpsertBulk) SetCredentialsAPIKeyMAC(v string) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetCredentialsAPIKeyMAC(v)
+	})
+}
+
+// UpdateCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateCredentialsAPIKeyMAC() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateCredentialsAPIKeyMAC()
+	})
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (u *AccountUpsertBulk) ClearCredentialsAPIKeyMAC() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearCredentialsAPIKeyMAC()
 	})
 }
 

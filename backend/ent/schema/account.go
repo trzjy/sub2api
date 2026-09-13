@@ -80,6 +80,22 @@ func (Account) Fields() []ent.Field {
 			Default(func() map[string]any { return map[string]any{} }).
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),
 
+		// credentials_mac: credentials 规范化明文 JSON 的 HMAC-SHA256 指纹（hex）。
+		// 凭证敏感子键静态加密后，SQL 级 CAS 守卫（Grok 凭证 CAS、上游倍率探测锚点等）
+		// 与"凭证是否变化"判断无法再对密文做明文相等比对（GCM nonce 随机），改由
+		// repository 写路径统一维护本指纹列、守卫改为指纹等值比对。历史行由 E3
+		// 存量迁移回填；为 NULL 时守卫视为不匹配（安全侧失败）。
+		field.String("credentials_mac").
+			Optional().
+			MaxLen(64),
+
+		// credentials_api_key_mac: credentials.api_key 明文的 HMAC-SHA256 指纹（hex）。
+		// Ollama Cloud 用量分组在 SQL 中按 api_key 匹配兄弟账号/聚合活动，加密后
+		// 明文比较不可行，改用本指纹列；api_key 缺失或为空时为 NULL。
+		field.String("credentials_api_key_mac").
+			Optional().
+			MaxLen(64),
+
 		// extra: 扩展数据，存储平台特定的额外信息
 		// 如 CRS 账户的 crs_account_id、组织信息等
 		field.JSON("extra", map[string]any{}).

@@ -2299,6 +2299,8 @@ type AccountMutation struct {
 	platform                    *string
 	_type                       *string
 	credentials                 *map[string]interface{}
+	credentials_mac             *string
+	credentials_api_key_mac     *string
 	extra                       *map[string]interface{}
 	proxy_fallback_origin_id    *int64
 	addproxy_fallback_origin_id *int64
@@ -2754,6 +2756,104 @@ func (m *AccountMutation) OldCredentials(ctx context.Context) (v map[string]inte
 // ResetCredentials resets all changes to the "credentials" field.
 func (m *AccountMutation) ResetCredentials() {
 	m.credentials = nil
+}
+
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (m *AccountMutation) SetCredentialsMAC(s string) {
+	m.credentials_mac = &s
+}
+
+// CredentialsMAC returns the value of the "credentials_mac" field in the mutation.
+func (m *AccountMutation) CredentialsMAC() (r string, exists bool) {
+	v := m.credentials_mac
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialsMAC returns the old "credentials_mac" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldCredentialsMAC(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialsMAC is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialsMAC requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialsMAC: %w", err)
+	}
+	return oldValue.CredentialsMAC, nil
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (m *AccountMutation) ClearCredentialsMAC() {
+	m.credentials_mac = nil
+	m.clearedFields[account.FieldCredentialsMAC] = struct{}{}
+}
+
+// CredentialsMACCleared returns if the "credentials_mac" field was cleared in this mutation.
+func (m *AccountMutation) CredentialsMACCleared() bool {
+	_, ok := m.clearedFields[account.FieldCredentialsMAC]
+	return ok
+}
+
+// ResetCredentialsMAC resets all changes to the "credentials_mac" field.
+func (m *AccountMutation) ResetCredentialsMAC() {
+	m.credentials_mac = nil
+	delete(m.clearedFields, account.FieldCredentialsMAC)
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (m *AccountMutation) SetCredentialsAPIKeyMAC(s string) {
+	m.credentials_api_key_mac = &s
+}
+
+// CredentialsAPIKeyMAC returns the value of the "credentials_api_key_mac" field in the mutation.
+func (m *AccountMutation) CredentialsAPIKeyMAC() (r string, exists bool) {
+	v := m.credentials_api_key_mac
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCredentialsAPIKeyMAC returns the old "credentials_api_key_mac" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldCredentialsAPIKeyMAC(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCredentialsAPIKeyMAC is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCredentialsAPIKeyMAC requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCredentialsAPIKeyMAC: %w", err)
+	}
+	return oldValue.CredentialsAPIKeyMAC, nil
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (m *AccountMutation) ClearCredentialsAPIKeyMAC() {
+	m.credentials_api_key_mac = nil
+	m.clearedFields[account.FieldCredentialsAPIKeyMAC] = struct{}{}
+}
+
+// CredentialsAPIKeyMACCleared returns if the "credentials_api_key_mac" field was cleared in this mutation.
+func (m *AccountMutation) CredentialsAPIKeyMACCleared() bool {
+	_, ok := m.clearedFields[account.FieldCredentialsAPIKeyMAC]
+	return ok
+}
+
+// ResetCredentialsAPIKeyMAC resets all changes to the "credentials_api_key_mac" field.
+func (m *AccountMutation) ResetCredentialsAPIKeyMAC() {
+	m.credentials_api_key_mac = nil
+	delete(m.clearedFields, account.FieldCredentialsAPIKeyMAC)
 }
 
 // SetExtra sets the "extra" field.
@@ -4144,7 +4244,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 33)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4168,6 +4268,12 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.credentials != nil {
 		fields = append(fields, account.FieldCredentials)
+	}
+	if m.credentials_mac != nil {
+		fields = append(fields, account.FieldCredentialsMAC)
+	}
+	if m.credentials_api_key_mac != nil {
+		fields = append(fields, account.FieldCredentialsAPIKeyMAC)
 	}
 	if m.extra != nil {
 		fields = append(fields, account.FieldExtra)
@@ -4262,6 +4368,10 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.GetType()
 	case account.FieldCredentials:
 		return m.Credentials()
+	case account.FieldCredentialsMAC:
+		return m.CredentialsMAC()
+	case account.FieldCredentialsAPIKeyMAC:
+		return m.CredentialsAPIKeyMAC()
 	case account.FieldExtra:
 		return m.Extra()
 	case account.FieldProxyID:
@@ -4333,6 +4443,10 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldType(ctx)
 	case account.FieldCredentials:
 		return m.OldCredentials(ctx)
+	case account.FieldCredentialsMAC:
+		return m.OldCredentialsMAC(ctx)
+	case account.FieldCredentialsAPIKeyMAC:
+		return m.OldCredentialsAPIKeyMAC(ctx)
 	case account.FieldExtra:
 		return m.OldExtra(ctx)
 	case account.FieldProxyID:
@@ -4443,6 +4557,20 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCredentials(v)
+		return nil
+	case account.FieldCredentialsMAC:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialsMAC(v)
+		return nil
+	case account.FieldCredentialsAPIKeyMAC:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCredentialsAPIKeyMAC(v)
 		return nil
 	case account.FieldExtra:
 		v, ok := value.(map[string]interface{})
@@ -4704,6 +4832,12 @@ func (m *AccountMutation) ClearedFields() []string {
 	if m.FieldCleared(account.FieldNotes) {
 		fields = append(fields, account.FieldNotes)
 	}
+	if m.FieldCleared(account.FieldCredentialsMAC) {
+		fields = append(fields, account.FieldCredentialsMAC)
+	}
+	if m.FieldCleared(account.FieldCredentialsAPIKeyMAC) {
+		fields = append(fields, account.FieldCredentialsAPIKeyMAC)
+	}
 	if m.FieldCleared(account.FieldProxyID) {
 		fields = append(fields, account.FieldProxyID)
 	}
@@ -4768,6 +4902,12 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldNotes:
 		m.ClearNotes()
+		return nil
+	case account.FieldCredentialsMAC:
+		m.ClearCredentialsMAC()
+		return nil
+	case account.FieldCredentialsAPIKeyMAC:
+		m.ClearCredentialsAPIKeyMAC()
 		return nil
 	case account.FieldProxyID:
 		m.ClearProxyID()
@@ -4845,6 +4985,12 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldCredentials:
 		m.ResetCredentials()
+		return nil
+	case account.FieldCredentialsMAC:
+		m.ResetCredentialsMAC()
+		return nil
+	case account.FieldCredentialsAPIKeyMAC:
+		m.ResetCredentialsAPIKeyMAC()
 		return nil
 	case account.FieldExtra:
 		m.ResetExtra()

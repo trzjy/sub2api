@@ -125,6 +125,46 @@ func (_u *AccountUpdate) SetCredentials(v map[string]interface{}) *AccountUpdate
 	return _u
 }
 
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (_u *AccountUpdate) SetCredentialsMAC(v string) *AccountUpdate {
+	_u.mutation.SetCredentialsMAC(v)
+	return _u
+}
+
+// SetNillableCredentialsMAC sets the "credentials_mac" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableCredentialsMAC(v *string) *AccountUpdate {
+	if v != nil {
+		_u.SetCredentialsMAC(*v)
+	}
+	return _u
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (_u *AccountUpdate) ClearCredentialsMAC() *AccountUpdate {
+	_u.mutation.ClearCredentialsMAC()
+	return _u
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (_u *AccountUpdate) SetCredentialsAPIKeyMAC(v string) *AccountUpdate {
+	_u.mutation.SetCredentialsAPIKeyMAC(v)
+	return _u
+}
+
+// SetNillableCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableCredentialsAPIKeyMAC(v *string) *AccountUpdate {
+	if v != nil {
+		_u.SetCredentialsAPIKeyMAC(*v)
+	}
+	return _u
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (_u *AccountUpdate) ClearCredentialsAPIKeyMAC() *AccountUpdate {
+	_u.mutation.ClearCredentialsAPIKeyMAC()
+	return _u
+}
+
 // SetExtra sets the "extra" field.
 func (_u *AccountUpdate) SetExtra(v map[string]interface{}) *AccountUpdate {
 	_u.mutation.SetExtra(v)
@@ -772,6 +812,16 @@ func (_u *AccountUpdate) check() error {
 			return &ValidationError{Name: "type", err: fmt.Errorf(`ent: validator failed for field "Account.type": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.CredentialsMAC(); ok {
+		if err := account.CredentialsMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_mac": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.CredentialsAPIKeyMAC(); ok {
+		if err := account.CredentialsAPIKeyMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_api_key_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_api_key_mac": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := account.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Account.status": %w`, err)}
@@ -828,6 +878,18 @@ func (_u *AccountUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Credentials(); ok {
 		_spec.SetField(account.FieldCredentials, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.CredentialsMAC(); ok {
+		_spec.SetField(account.FieldCredentialsMAC, field.TypeString, value)
+	}
+	if _u.mutation.CredentialsMACCleared() {
+		_spec.ClearField(account.FieldCredentialsMAC, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialsAPIKeyMAC(); ok {
+		_spec.SetField(account.FieldCredentialsAPIKeyMAC, field.TypeString, value)
+	}
+	if _u.mutation.CredentialsAPIKeyMACCleared() {
+		_spec.ClearField(account.FieldCredentialsAPIKeyMAC, field.TypeString)
 	}
 	if value, ok := _u.mutation.Extra(); ok {
 		_spec.SetField(account.FieldExtra, field.TypeJSON, value)
@@ -1262,6 +1324,46 @@ func (_u *AccountUpdateOne) SetNillableType(v *string) *AccountUpdateOne {
 // SetCredentials sets the "credentials" field.
 func (_u *AccountUpdateOne) SetCredentials(v map[string]interface{}) *AccountUpdateOne {
 	_u.mutation.SetCredentials(v)
+	return _u
+}
+
+// SetCredentialsMAC sets the "credentials_mac" field.
+func (_u *AccountUpdateOne) SetCredentialsMAC(v string) *AccountUpdateOne {
+	_u.mutation.SetCredentialsMAC(v)
+	return _u
+}
+
+// SetNillableCredentialsMAC sets the "credentials_mac" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableCredentialsMAC(v *string) *AccountUpdateOne {
+	if v != nil {
+		_u.SetCredentialsMAC(*v)
+	}
+	return _u
+}
+
+// ClearCredentialsMAC clears the value of the "credentials_mac" field.
+func (_u *AccountUpdateOne) ClearCredentialsMAC() *AccountUpdateOne {
+	_u.mutation.ClearCredentialsMAC()
+	return _u
+}
+
+// SetCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field.
+func (_u *AccountUpdateOne) SetCredentialsAPIKeyMAC(v string) *AccountUpdateOne {
+	_u.mutation.SetCredentialsAPIKeyMAC(v)
+	return _u
+}
+
+// SetNillableCredentialsAPIKeyMAC sets the "credentials_api_key_mac" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableCredentialsAPIKeyMAC(v *string) *AccountUpdateOne {
+	if v != nil {
+		_u.SetCredentialsAPIKeyMAC(*v)
+	}
+	return _u
+}
+
+// ClearCredentialsAPIKeyMAC clears the value of the "credentials_api_key_mac" field.
+func (_u *AccountUpdateOne) ClearCredentialsAPIKeyMAC() *AccountUpdateOne {
+	_u.mutation.ClearCredentialsAPIKeyMAC()
 	return _u
 }
 
@@ -1925,6 +2027,16 @@ func (_u *AccountUpdateOne) check() error {
 			return &ValidationError{Name: "type", err: fmt.Errorf(`ent: validator failed for field "Account.type": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.CredentialsMAC(); ok {
+		if err := account.CredentialsMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_mac": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.CredentialsAPIKeyMAC(); ok {
+		if err := account.CredentialsAPIKeyMACValidator(v); err != nil {
+			return &ValidationError{Name: "credentials_api_key_mac", err: fmt.Errorf(`ent: validator failed for field "Account.credentials_api_key_mac": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := account.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Account.status": %w`, err)}
@@ -1998,6 +2110,18 @@ func (_u *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err er
 	}
 	if value, ok := _u.mutation.Credentials(); ok {
 		_spec.SetField(account.FieldCredentials, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.CredentialsMAC(); ok {
+		_spec.SetField(account.FieldCredentialsMAC, field.TypeString, value)
+	}
+	if _u.mutation.CredentialsMACCleared() {
+		_spec.ClearField(account.FieldCredentialsMAC, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialsAPIKeyMAC(); ok {
+		_spec.SetField(account.FieldCredentialsAPIKeyMAC, field.TypeString, value)
+	}
+	if _u.mutation.CredentialsAPIKeyMACCleared() {
+		_spec.ClearField(account.FieldCredentialsAPIKeyMAC, field.TypeString)
 	}
 	if value, ok := _u.mutation.Extra(); ok {
 		_spec.SetField(account.FieldExtra, field.TypeJSON, value)

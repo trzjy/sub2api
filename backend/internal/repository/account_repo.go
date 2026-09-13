@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -137,12 +138,20 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		return service.ErrAccountNilInput
 	}
 
+	// 写路径加密（A3-E2）：敏感子键加密 + 维护 credentials_mac / credentials_api_key_mac。
+	creds, err := prepareCredentialsForStorage(account.Credentials)
+	if err != nil {
+		return err
+	}
+
 	builder := client.Account.Create().
 		SetName(account.Name).
 		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
-		SetCredentials(normalizeJSONMap(account.Credentials)).
+		SetCredentials(creds.storage).
+		SetCredentialsMAC(creds.mac).
+		SetNillableCredentialsAPIKeyMAC(creds.apiKeyMAC).
 		SetExtra(normalizeJSONMap(account.Extra)).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
@@ -324,7 +333,10 @@ func (r *accountRepository) GetByIDs(ctx context.Context, ids []int64) ([]*servi
 
 	outByID := make(map[int64]*service.Account, len(entAccounts))
 	for _, entAcc := range entAccounts {
-		out := accountEntityToService(entAcc)
+		out, err := accountEntityToService(entAcc)
+		if err != nil {
+			return nil, err
+		}
 		if out == nil {
 			continue
 		}
@@ -531,12 +543,20 @@ func (r *accountRepository) updateLockedAccount(
 		schedulable = false
 	}
 
+	// 写路径加密（A3-E2）：敏感子键加密 + 维护 credentials_mac / credentials_api_key_mac。
+	creds, err := prepareCredentialsForStorage(account.Credentials)
+	if err != nil {
+		return nil, err
+	}
+
 	builder := client.Account.UpdateOneID(account.ID).
 		SetName(account.Name).
 		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
-		SetCredentials(normalizeJSONMap(account.Credentials)).
+		SetCredentials(creds.storage).
+		SetCredentialsMAC(creds.mac).
+		SetNillableCredentialsAPIKeyMAC(creds.apiKeyMAC).
 		SetExtra(extra).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
@@ -616,9 +636,20 @@ func lockAndMergeAccountProbeExtra(
 	explicitProbeEnabled *bool,
 	explicitRateSyncEnabled *bool,
 ) (map[string]any, error) {
-	credentials, err := json.Marshal(normalizeJSONMap(account.Credentials))
+	// 凭证一致性判断改用指纹（A3-E2）：GCM nonce 随机导致密文间不可比。
+	// mac 按明文计算；api_key 指纹与 base_url 分开传参，NULL 语义与原先
+	// JSONB 缺键比较一致。
+	incomingMac, err := credentialsMACOf(account.Credentials)
 	if err != nil {
 		return nil, err
+	}
+	incomingApiKeyMac, err := credentialsApiKeyMACOf(account.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	var incomingBaseURL any
+	if baseURL, ok := account.Credentials["base_url"].(string); ok {
+		incomingBaseURL = baseURL
 	}
 	var proxyID any
 	if account.ProxyID != nil {
@@ -628,16 +659,16 @@ func lockAndMergeAccountProbeExtra(
 		SELECT
 			platform = $2
 			AND type = $3
-			AND credentials = $4::jsonb
+			AND credentials_mac IS NOT DISTINCT FROM $4
 			AND proxy_id IS NOT DISTINCT FROM $5,
 			COALESCE(
 				platform IN (`+ollamaCloudUsagePlatformsSQL+`)
 				AND $2 IN (`+ollamaCloudUsagePlatformsSQL+`)
 				AND type = 'apikey'
 				AND $3 = 'apikey'
-				AND credentials -> 'api_key' IS NOT DISTINCT FROM $4::jsonb -> 'api_key'
+				AND credentials_api_key_mac IS NOT DISTINCT FROM $6
 				AND `+ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'")+`
-				AND `+ollamaCloudBaseURLMatchesSQL("$4::jsonb ->> 'base_url'")+`,
+				AND `+ollamaCloudBaseURLMatchesSQL("$7::text")+`,
 				false
 			),
 			proxy_id IS NOT DISTINCT FROM $5,
@@ -650,7 +681,7 @@ func lockAndMergeAccountProbeExtra(
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
-	`, account.ID, account.Platform, account.Type, string(credentials), proxyID)
+	`, account.ID, account.Platform, account.Type, incomingMac, proxyID, incomingApiKeyMac, incomingBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -790,7 +821,14 @@ func decodeAccountExtraJSON(raw []byte) (any, bool, error) {
 }
 
 func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, credentials map[string]any) error {
-	payload, err := json.Marshal(normalizeJSONMap(credentials))
+	// 写路径加密（A3-E2）：敏感子键加密 + 维护指纹列。CASE 里"凭证是否变化"
+	// 的判断改用指纹等值（GCM nonce 随机，密文之间不可直接比较；api_key 的
+	// 变化同样经 credentials_api_key_mac 判断）。指纹始终按明文计算。
+	creds, err := prepareCredentialsForStorage(credentials)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(creds.storage)
 	if err != nil {
 		return err
 	}
@@ -816,14 +854,16 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 		UPDATE accounts
 		SET
 			credentials = $1::jsonb,
+			credentials_mac = $3,
+			credentials_api_key_mac = $4,
 			extra = CASE
 				-- 凭证整体未变化 ⇒ Ollama 组身份必然未变化；顶层 DISTINCT 守卫防止
 				-- 非 Ollama 账号的无变化持久化误清探测快照或重写 NULL extra。
 				WHEN platform IN (`+ollamaCloudUsagePlatformsSQL+`)
 					AND type = 'apikey'
-					AND credentials IS DISTINCT FROM $1::jsonb
+					AND credentials_mac IS DISTINCT FROM $3
 					AND (
-						credentials -> 'api_key' IS DISTINCT FROM $1::jsonb -> 'api_key'
+						credentials_api_key_mac IS DISTINCT FROM $4
 						OR NOT (
 							`+ollamaCloudBaseURLMatchesSQL("credentials ->> 'base_url'")+`
 							AND `+ollamaCloudBaseURLMatchesSQL("$1::jsonb ->> 'base_url'")+`
@@ -837,13 +877,13 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 				-- 上游倍率探测已放宽到全部 API-key 平台：凭证变化即视为探测
 				-- 身份变化，丢弃 stale 快照。
 				WHEN type = 'apikey'
-					AND credentials IS DISTINCT FROM $1::jsonb
+					AND credentials_mac IS DISTINCT FROM $3
 				THEN COALESCE(extra, '{}'::jsonb) - 'upstream_billing_probe'
 				ELSE extra
 			END,
 			updated_at = NOW()
 		WHERE id = $2 AND deleted_at IS NULL
-	`, string(payload), id)
+	`, string(payload), id, creds.mac, creds.apiKeyMAC)
 	if err != nil {
 		return err
 	}
@@ -1415,6 +1455,11 @@ func (r *accountRepository) SetGrokCredentialErrorIfMatch(
 	snapshot service.GrokCredentialMutationSnapshot,
 	errorMsg string,
 ) (bool, error) {
+	// 凭证一致性守卫改用指纹比对（A3-E2）。
+	expectedMac, err := credentialsMACOfJSONString(snapshot.CredentialsJSON)
+	if err != nil {
+		return false, err
+	}
 	result, err := r.sql.ExecContext(ctx, `
 		WITH updated AS (
 		UPDATE accounts AS a
@@ -1432,7 +1477,7 @@ func (r *accountRepository) SetGrokCredentialErrorIfMatch(
 			AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= NOW())
 			AND (a.overload_until IS NULL OR a.overload_until <= NOW())
 			AND (a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > NOW())
-			AND a.credentials = $7::jsonb
+			AND a.credentials_mac = $7
 			AND a.proxy_id IS NOT DISTINCT FROM $8
 			AND ($2 <> $9 OR (
 				a.proxy_id IS NOT NULL AND NOT EXISTS (
@@ -1444,7 +1489,7 @@ func (r *accountRepository) SetGrokCredentialErrorIfMatch(
 		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
 		SELECT $10, updated.id, NULL, NULL FROM updated
 	`, service.StatusError, errorMsg, id, service.StatusActive, service.PlatformGrok, service.AccountTypeOAuth,
-		snapshot.CredentialsJSON, snapshot.ProxyID, string(service.GrokCredentialReasonProxyInvalid),
+		expectedMac, snapshot.ProxyID, string(service.GrokCredentialReasonProxyInvalid),
 		service.SchedulerOutboxEventAccountChanged)
 	if err != nil {
 		return false, err
@@ -1471,7 +1516,9 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
-	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	// 凭证一致性守卫改用指纹比对（A3-E2）；refresh_token 为空的守卫不受加密
+	// 影响：空字符串值不加密，密文存在 ⟺ 明文存在。
+	expectedMac, err := credentialsMACOf(expectedCredentials)
 	if err != nil {
 		return false, err
 	}
@@ -1487,7 +1534,7 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
-			AND a.credentials = $7::jsonb
+			AND a.credentials_mac = $7
 			AND NULLIF(BTRIM(a.credentials->>'refresh_token'), '') IS NULL
 		RETURNING a.id
 		)
@@ -1500,7 +1547,7 @@ func (r *accountRepository) SetGrokOAuthErrorIfCredentialsUnchanged(
 		service.PlatformGrok,
 		service.AccountTypeOAuth,
 		service.StatusActive,
-		string(expectedJSON),
+		expectedMac,
 		service.SchedulerOutboxEventAccountChanged,
 	)
 	if err != nil {
@@ -1532,11 +1579,16 @@ func (r *accountRepository) UpdateGrokOAuthCredentialsIfUnchanged(
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
-	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	// 写路径加密（A3-E2）：新凭证加密落库 + 维护指纹列；一致性守卫改用指纹比对。
+	newCreds, err := prepareCredentialsForStorage(credentials)
 	if err != nil {
 		return false, err
 	}
-	credentialsJSON, err := json.Marshal(normalizeJSONMap(credentials))
+	credentialsJSON, err := json.Marshal(newCreds.storage)
+	if err != nil {
+		return false, err
+	}
+	expectedMac, err := credentialsMACOf(expectedCredentials)
 	if err != nil {
 		return false, err
 	}
@@ -1544,24 +1596,28 @@ func (r *accountRepository) UpdateGrokOAuthCredentialsIfUnchanged(
 		WITH updated AS (
 		UPDATE accounts AS a
 		SET credentials = $1::jsonb,
+			credentials_mac = $7,
+			credentials_api_key_mac = $8,
 			updated_at = NOW()
 		WHERE a.id = $2
 			AND a.deleted_at IS NULL
 			AND a.platform = $3
 			AND a.type = $4
-			AND a.credentials = $5::jsonb
+			AND a.credentials_mac = $5
 			AND a.proxy_id IS NOT DISTINCT FROM $6
 		RETURNING a.id
 		)
 		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
-		SELECT $7, updated.id, NULL, NULL FROM updated
+		SELECT $9, updated.id, NULL, NULL FROM updated
 	`,
 		string(credentialsJSON),
 		id,
 		service.PlatformGrok,
 		service.AccountTypeOAuth,
-		string(expectedJSON),
+		expectedMac,
 		expectedProxyID,
+		newCreds.mac,
+		newCreds.apiKeyMAC,
 		service.SchedulerOutboxEventAccountChanged,
 	)
 	if err != nil {
@@ -1592,7 +1648,8 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
-	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	// 凭证一致性守卫改用指纹比对（A3-E2）。
+	expectedMac, err := credentialsMACOf(expectedCredentials)
 	if err != nil {
 		return false, err
 	}
@@ -1608,7 +1665,7 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
-			AND a.credentials = $7::jsonb
+			AND a.credentials_mac = $7
 			AND a.proxy_id IS NOT DISTINCT FROM $8
 		RETURNING a.id
 		)
@@ -1621,7 +1678,7 @@ func (r *accountRepository) SetGrokOAuthRefreshErrorIfCredentialsUnchanged(
 		service.PlatformGrok,
 		service.AccountTypeOAuth,
 		service.StatusActive,
-		string(expectedJSON),
+		expectedMac,
 		expectedProxyID,
 		service.SchedulerOutboxEventAccountChanged,
 	)
@@ -1653,7 +1710,8 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 	if r == nil || r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
-	expectedJSON, err := json.Marshal(normalizeJSONMap(expectedCredentials))
+	// 凭证一致性守卫改用指纹比对（A3-E2）。
+	expectedMac, err := credentialsMACOf(expectedCredentials)
 	if err != nil {
 		return false, err
 	}
@@ -1668,7 +1726,7 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 			AND a.platform = $4
 			AND a.type = $5
 			AND a.status = $6
-			AND a.credentials = $7::jsonb
+			AND a.credentials_mac = $7
 			AND a.proxy_id IS NOT DISTINCT FROM $8
 			AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until < $1)
 		RETURNING a.id
@@ -1682,7 +1740,7 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 		service.PlatformGrok,
 		service.AccountTypeOAuth,
 		service.StatusActive,
-		string(expectedJSON),
+		expectedMac,
 		expectedProxyID,
 		service.SchedulerOutboxEventAccountChanged,
 	)
@@ -2390,6 +2448,11 @@ func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 	until time.Time,
 	reason string,
 ) (bool, error) {
+	// 凭证一致性守卫改用指纹比对（A3-E2）。
+	expectedMac, err := credentialsMACOfJSONString(snapshot.CredentialsJSON)
+	if err != nil {
+		return false, err
+	}
 	result, err := r.sql.ExecContext(ctx, `
 		WITH updated AS (
 		UPDATE accounts AS a
@@ -2409,14 +2472,14 @@ func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 			AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at <= NOW())
 			AND (a.overload_until IS NULL OR a.overload_until <= NOW())
 			AND (a.auto_pause_on_expired IS NOT TRUE OR a.expires_at IS NULL OR a.expires_at > NOW())
-			AND a.credentials = $7::jsonb
+			AND a.credentials_mac = $7
 			AND a.proxy_id IS NOT DISTINCT FROM $8
 		RETURNING a.id
 		)
 		INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload)
 		SELECT $9, updated.id, NULL, NULL FROM updated
 	`, until, reason, id, service.StatusActive, service.PlatformGrok, service.AccountTypeOAuth,
-		snapshot.CredentialsJSON, snapshot.ProxyID, service.SchedulerOutboxEventAccountChanged)
+		expectedMac, snapshot.ProxyID, service.SchedulerOutboxEventAccountChanged)
 	if err != nil {
 		return false, err
 	}
@@ -2840,10 +2903,6 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 	if err != nil {
 		return err
 	}
-	credentials, err := json.Marshal(account.Credentials)
-	if err != nil {
-		return err
-	}
 	var expectedSnapshot any
 	if account.Extra != nil {
 		expectedSnapshot = account.Extra[service.UpstreamBillingProbeExtraKey]
@@ -2880,6 +2939,11 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 	if account.ProxyID != nil {
 		proxyID = *account.ProxyID
 	}
+	// 凭证一致性守卫改用指纹比对（A3-E2）。
+	credentialsMac, err := credentialsMACOf(account.Credentials)
+	if err != nil {
+		return err
+	}
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET
@@ -2895,13 +2959,13 @@ func (r *accountRepository) updateUpstreamBillingProbeSnapshotInTx(
 		WHERE id = $2
 			AND platform = $3
 			AND type = $4
-			AND credentials = $5::jsonb
+			AND credentials_mac = $5
 			AND proxy_id IS NOT DISTINCT FROM $6
 			AND COALESCE(extra -> 'upstream_billing_probe', 'null'::jsonb) = $7::jsonb
 			AND COALESCE(extra -> 'upstream_billing_probe_enabled', 'null'::jsonb) = $8::jsonb
 			AND COALESCE(extra -> 'upstream_billing_rate_sync_enabled', 'null'::jsonb) = $9::jsonb
 			AND deleted_at IS NULL
-	`, string(payload), account.ID, account.Platform, account.Type, string(credentials), proxyID, string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), rateMultiplier)
+	`, string(payload), account.ID, account.Platform, account.Type, credentialsMac, proxyID, string(expectedSnapshotJSON), string(expectedEnabledJSON), string(expectedRateSyncEnabledJSON), rateMultiplier)
 	if err != nil {
 		return err
 	}
@@ -3060,8 +3124,17 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 	}
 	// JSONB 需要合并而非覆盖，使用 raw SQL 保持旧行为。
 	credentialPlaceholder := ""
+	apiKeyMacPlaceholder := ""
 	if len(updates.Credentials) > 0 {
-		payload, err := json.Marshal(updates.Credentials)
+		// 写路径加密（A3-E2）：payload 敏感子键按键加密后参与 SQL 侧 JSONB 合并，
+		// 逐键加密与合并语义兼容。合并后的整份文档指纹无法在本条 SQL 内计算，
+		// credentials_mac 置 NULL（安全侧失效，CAS 守卫视为不匹配），由下一次
+		// 整体写或 E3 存量迁移回填；api_key 指纹可由 payload 直接计算，照常维护。
+		bulkCreds, err := prepareCredentialsForStorage(updates.Credentials)
+		if err != nil {
+			return 0, err
+		}
+		payload, err := json.Marshal(bulkCreds.storage)
 		if err != nil {
 			return 0, err
 		}
@@ -3069,11 +3142,20 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || "+credentialPlaceholder+"::jsonb")
 		args = append(args, payload)
 		idx++
+		setClauses = append(setClauses, "credentials_mac = NULL")
+		if _, ok := updates.Credentials["api_key"]; ok {
+			apiKeyMacPlaceholder = "$" + itoa(idx)
+			setClauses = append(setClauses, "credentials_api_key_mac = "+apiKeyMacPlaceholder)
+			args = append(args, bulkCreds.apiKeyMAC)
+			idx++
+		}
 	}
 
 	ollamaGroupIdentityChanges := make([]string, 0, 2)
 	if _, ok := updates.Credentials["api_key"]; ok {
-		ollamaGroupIdentityChanges = append(ollamaGroupIdentityChanges, "credentials -> 'api_key' IS DISTINCT FROM "+credentialPlaceholder+"::jsonb -> 'api_key'")
+		// 守卫改为指纹比对（A3-E2）：存量行 api_key 指纹为 NULL 时判"变化"，
+		// 属灰度窗口期的安全侧误报，E3 迁移回填后消失。
+		ollamaGroupIdentityChanges = append(ollamaGroupIdentityChanges, "credentials_api_key_mac IS DISTINCT FROM "+apiKeyMacPlaceholder)
 	}
 	if _, ok := updates.Credentials["base_url"]; ok {
 		ollamaGroupIdentityChanges = append(ollamaGroupIdentityChanges,
@@ -3307,7 +3389,10 @@ func (r *accountRepository) accountsToService(ctx context.Context, accounts []*d
 
 	outAccounts := make([]service.Account, 0, len(accounts))
 	for _, acc := range accounts {
-		out := accountEntityToService(acc)
+		out, err := accountEntityToService(acc)
+		if err != nil {
+			return nil, err
+		}
 		if out == nil {
 			continue
 		}
@@ -3524,12 +3609,19 @@ func buildSchedulerGroupPayload(groupIDs []int64) any {
 	return map[string]any{"group_ids": groupIDs}
 }
 
-func accountEntityToService(m *dbent.Account) *service.Account {
+func accountEntityToService(m *dbent.Account) (*service.Account, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 
 	rateMultiplier := m.RateMultiplier
+
+	// 读路径解密（A3-E2）：敏感子键遇 enc:v1: 前缀解密、无前缀原样返回。
+	// 解密失败（密钥缺失/密文损坏）上抛，绝不把密文当明文放行。
+	credentials, err := decryptCredentialsMap(m.Credentials)
+	if err != nil {
+		return nil, fmt.Errorf("account %d: %w", m.ID, err)
+	}
 
 	return &service.Account{
 		ID:                      m.ID,
@@ -3537,7 +3629,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		Notes:                   m.Notes,
 		Platform:                m.Platform,
 		Type:                    m.Type,
-		Credentials:             copyJSONMap(m.Credentials),
+		Credentials:             credentials,
 		Extra:                   copyJSONMap(m.Extra),
 		ProxyID:                 m.ProxyID,
 		ProxyFallbackOriginID:   m.ProxyFallbackOriginID,
@@ -3563,7 +3655,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		SessionWindowStatus:     derefString(m.SessionWindowStatus),
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
-	}
+	}, nil
 }
 
 func normalizeJSONMap(in map[string]any) map[string]any {
@@ -3988,7 +4080,11 @@ func (r *accountRepository) ListShadowsByParent(ctx context.Context, parentID in
 	}
 	out := make([]*service.Account, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, accountEntityToService(m))
+		account, err := accountEntityToService(m)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, account)
 	}
 	return out, nil
 }

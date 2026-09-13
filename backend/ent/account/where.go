@@ -90,6 +90,16 @@ func Type(v string) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldType, v))
 }
 
+// CredentialsMAC applies equality check predicate on the "credentials_mac" field. It's identical to CredentialsMACEQ.
+func CredentialsMAC(v string) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldCredentialsMAC, v))
+}
+
+// CredentialsAPIKeyMAC applies equality check predicate on the "credentials_api_key_mac" field. It's identical to CredentialsAPIKeyMACEQ.
+func CredentialsAPIKeyMAC(v string) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldCredentialsAPIKeyMAC, v))
+}
+
 // ProxyID applies equality check predicate on the "proxy_id" field. It's identical to ProxyIDEQ.
 func ProxyID(v int64) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldProxyID, v))
@@ -593,6 +603,156 @@ func TypeEqualFold(v string) predicate.Account {
 // TypeContainsFold applies the ContainsFold predicate on the "type" field.
 func TypeContainsFold(v string) predicate.Account {
 	return predicate.Account(sql.FieldContainsFold(FieldType, v))
+}
+
+// CredentialsMACEQ applies the EQ predicate on the "credentials_mac" field.
+func CredentialsMACEQ(v string) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACNEQ applies the NEQ predicate on the "credentials_mac" field.
+func CredentialsMACNEQ(v string) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACIn applies the In predicate on the "credentials_mac" field.
+func CredentialsMACIn(vs ...string) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldCredentialsMAC, vs...))
+}
+
+// CredentialsMACNotIn applies the NotIn predicate on the "credentials_mac" field.
+func CredentialsMACNotIn(vs ...string) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldCredentialsMAC, vs...))
+}
+
+// CredentialsMACGT applies the GT predicate on the "credentials_mac" field.
+func CredentialsMACGT(v string) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACGTE applies the GTE predicate on the "credentials_mac" field.
+func CredentialsMACGTE(v string) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACLT applies the LT predicate on the "credentials_mac" field.
+func CredentialsMACLT(v string) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACLTE applies the LTE predicate on the "credentials_mac" field.
+func CredentialsMACLTE(v string) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACContains applies the Contains predicate on the "credentials_mac" field.
+func CredentialsMACContains(v string) predicate.Account {
+	return predicate.Account(sql.FieldContains(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACHasPrefix applies the HasPrefix predicate on the "credentials_mac" field.
+func CredentialsMACHasPrefix(v string) predicate.Account {
+	return predicate.Account(sql.FieldHasPrefix(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACHasSuffix applies the HasSuffix predicate on the "credentials_mac" field.
+func CredentialsMACHasSuffix(v string) predicate.Account {
+	return predicate.Account(sql.FieldHasSuffix(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACIsNil applies the IsNil predicate on the "credentials_mac" field.
+func CredentialsMACIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldCredentialsMAC))
+}
+
+// CredentialsMACNotNil applies the NotNil predicate on the "credentials_mac" field.
+func CredentialsMACNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldCredentialsMAC))
+}
+
+// CredentialsMACEqualFold applies the EqualFold predicate on the "credentials_mac" field.
+func CredentialsMACEqualFold(v string) predicate.Account {
+	return predicate.Account(sql.FieldEqualFold(FieldCredentialsMAC, v))
+}
+
+// CredentialsMACContainsFold applies the ContainsFold predicate on the "credentials_mac" field.
+func CredentialsMACContainsFold(v string) predicate.Account {
+	return predicate.Account(sql.FieldContainsFold(FieldCredentialsMAC, v))
+}
+
+// CredentialsAPIKeyMACEQ applies the EQ predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACEQ(v string) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACNEQ applies the NEQ predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACNEQ(v string) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACIn applies the In predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACIn(vs ...string) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldCredentialsAPIKeyMAC, vs...))
+}
+
+// CredentialsAPIKeyMACNotIn applies the NotIn predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACNotIn(vs ...string) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldCredentialsAPIKeyMAC, vs...))
+}
+
+// CredentialsAPIKeyMACGT applies the GT predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACGT(v string) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACGTE applies the GTE predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACGTE(v string) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACLT applies the LT predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACLT(v string) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACLTE applies the LTE predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACLTE(v string) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACContains applies the Contains predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACContains(v string) predicate.Account {
+	return predicate.Account(sql.FieldContains(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACHasPrefix applies the HasPrefix predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACHasPrefix(v string) predicate.Account {
+	return predicate.Account(sql.FieldHasPrefix(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACHasSuffix applies the HasSuffix predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACHasSuffix(v string) predicate.Account {
+	return predicate.Account(sql.FieldHasSuffix(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACIsNil applies the IsNil predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldCredentialsAPIKeyMAC))
+}
+
+// CredentialsAPIKeyMACNotNil applies the NotNil predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldCredentialsAPIKeyMAC))
+}
+
+// CredentialsAPIKeyMACEqualFold applies the EqualFold predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACEqualFold(v string) predicate.Account {
+	return predicate.Account(sql.FieldEqualFold(FieldCredentialsAPIKeyMAC, v))
+}
+
+// CredentialsAPIKeyMACContainsFold applies the ContainsFold predicate on the "credentials_api_key_mac" field.
+func CredentialsAPIKeyMACContainsFold(v string) predicate.Account {
+	return predicate.Account(sql.FieldContainsFold(FieldCredentialsAPIKeyMAC, v))
 }
 
 // ProxyIDEQ applies the EQ predicate on the "proxy_id" field.
