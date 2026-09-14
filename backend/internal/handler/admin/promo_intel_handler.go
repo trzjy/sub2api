@@ -306,6 +306,7 @@ func (h *PromoIntelHandler) GetBriefing(c *gin.Context) {
 		"total":       briefing.Total,
 		"high_count":  briefing.HighCount,
 		"pending":     briefing.Pending,
+		"digest":      briefing.Digest,
 		"by_vendor":   briefing.ByVendor,
 		"by_category": briefing.ByCategory,
 		"items":       items,
