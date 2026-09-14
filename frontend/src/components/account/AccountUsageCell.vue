@@ -337,26 +337,35 @@
     </template>
 
     <!-- CodeBuddy OAuth accounts: 积分额度（后端写入 account.Extra） -->
+    <!-- 仅母账号（platform=codebuddy 的真实账号）展示，影子账号 platform 已改为目标平台
+         且无独立配额快照，因此不会走进本分支（方案 N6：不造「影子余额」概念）。 -->
     <template v-else-if="account.platform === 'codebuddy' && account.type === 'oauth'">
-      <!-- 探测错误状态 -->
-      <div v-if="codebuddyCreditError" class="space-y-1">
-        <span class="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+      <div class="space-y-1">
+        <!-- 额度数据：探测失败时保留上次成功快照（错误行另行追加），与 CNProviderBalanceCell 一致 -->
+        <template v-if="codebuddyCredit !== null">
+          <UsageProgressBar
+            :label="t('admin.accounts.usageWindow.codebuddyCredit')"
+            :utilization="codebuddyCredit.usedPercent"
+            :resets-at="codebuddyCredit.resetAt"
+            color="indigo"
+          />
+          <div v-if="codebuddyCredit.summary" class="text-[10px] text-gray-500 dark:text-gray-400">
+            {{ codebuddyCredit.summary }}
+          </div>
+        </template>
+        <!-- 探测错误状态 -->
+        <span
+          v-if="codebuddyCreditError"
+          class="inline-block max-w-full truncate rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+          :title="codebuddyCreditError"
+        >
           {{ codebuddyCreditError }}
         </span>
-      </div>
-      <!-- 额度数据 -->
-      <div v-else-if="codebuddyCredit !== null" class="space-y-1">
-        <UsageProgressBar
-          :label="t('admin.accounts.usageWindow.codebuddyCredit')"
-          :utilization="codebuddyCredit.usedPercent"
-          :resets-at="codebuddyCredit.resetAt"
-          color="indigo"
-        />
-        <div v-if="codebuddyCredit.summary" class="text-[10px] text-gray-500 dark:text-gray-400">
-          {{ codebuddyCredit.summary }}
+        <!-- 无快照空态：不显示 0% -->
+        <div v-else-if="codebuddyCredit === null" class="text-xs text-gray-400">
+          {{ t('admin.accounts.usageWindow.codebuddyCreditNotProbed') }}
         </div>
       </div>
-      <div v-else class="text-xs text-gray-400">-</div>
     </template>
 
     <!-- Grok OAuth accounts: passive xAI quota headers + local Sub2API usage -->
@@ -707,6 +716,7 @@ import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
+import { parseCodeBuddyCredit, parseCodeBuddyCreditError } from '@/utils/codebuddyCredit'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
@@ -981,42 +991,12 @@ const aiCreditsDisplay = computed(() => {
 })
 
 // ===== CodeBuddy 积分额度（后端周期探测写入 account.Extra） =====
-const toNum = (v: unknown): number | null => {
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null
-  if (typeof v === 'string' && v.trim() !== '') {
-    const n = Number(v)
-    return Number.isFinite(n) ? n : null
-  }
-  return null
-}
+// 解析逻辑抽到 @/utils/codebuddyCredit：影子行的「母账号余额」指示（AccountsView，方案 N6）
+// 读的是同一套字段，共用一个纯函数才能保证两处不漂移。
+const codebuddyCredit = computed(() => parseCodeBuddyCredit(props.account.extra))
 
-const codebuddyCredit = computed(() => {
-  const extra = (props.account.extra as Record<string, unknown> | undefined) || undefined
-  if (!extra) return null
-  const usedPercent = toNum(extra.codebuddy_credit_used_percent)
-  const total = toNum(extra.codebuddy_credit_total)
-  const used = toNum(extra.codebuddy_credit_used)
-  const resetAt = typeof extra.codebuddy_credit_reset_at === 'string' ? extra.codebuddy_credit_reset_at : null
-  const updatedAt = typeof extra.codebuddy_credit_updated_at === 'string' ? extra.codebuddy_credit_updated_at : null
-  const error = typeof extra.codebuddy_credit_error === 'string' ? extra.codebuddy_credit_error : null
-  if (usedPercent === null && total === null && used === null && !resetAt && !updatedAt && !error) {
-    return null
-  }
-  let summary = ''
-  if (total != null && used != null) {
-    summary = `${formatCompactNumber(used)} / ${formatCompactNumber(total)}`
-  } else if (updatedAt) {
-    summary = updatedAt
-  }
-  return {
-    usedPercent: usedPercent ?? 0,
-    resetAt,
-    summary,
-    error
-  }
-})
-
-const codebuddyCreditError = computed(() => codebuddyCredit.value?.error ?? null)
+// 错误键单独读取：探测失败时保留上次成功快照，仅额外追加错误行（不整块替换）。
+const codebuddyCreditError = computed(() => parseCodeBuddyCreditError(props.account.extra))
 
 // Antigravity 账户类型（从 load_code_assist 响应中提取）
 const antigravityTier = computed(() => {

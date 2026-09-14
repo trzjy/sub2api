@@ -259,6 +259,14 @@
                 class="mt-0.5 inline-flex w-fit items-center gap-1"
               >
                 <span class="inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-300">{{ t('admin.accounts.codeBuddyShadowBadge') }}</span>
+                <!-- 方案 N3：影子站点徽标（cn/intl），配色复用 platformColors 既有 token -->
+                <span
+                  v-if="codeBuddyShadowSite(row)"
+                  data-test="codebuddy-shadow-site-badge"
+                  class="inline-block rounded border px-1.5 py-0.5 text-[10px] font-medium"
+                  :class="codeBuddySiteBadgeClass(codeBuddyShadowSite(row))"
+                  :title="t('admin.accounts.codeBuddySiteBadgeTitle', { site: codeBuddyShadowSite(row) })"
+                >{{ codeBuddyShadowSite(row) === 'intl' ? t('admin.accounts.codeBuddySiteIntl') : t('admin.accounts.codeBuddySiteCn') }}</span>
                 <button
                   v-if="codeBuddyParentName(row)"
                   class="text-[10px] text-gray-500 underline hover:text-gray-700 dark:text-gray-400"
@@ -329,18 +337,41 @@
             </div>
           </template>
           <template #cell-usage="{ row }">
-            <AccountUsageCell
-              :account="row"
-              :today-stats="todayStatsByAccountId[String(row.id)] ?? null"
-              :today-stats-loading="todayStatsLoading"
-              :manual-refresh-token="usageManualRefreshToken"
-              :batched-usage="usageBatchByAccountId[String(row.id)] ?? null"
-              :batched-usage-error="usageBatchErrorByAccountId[String(row.id)] ?? null"
-              :batched-usage-loading="usageBatchLoadingByAccountId[String(row.id)] === true"
-              :request-batched-usage="isDesktopViewport ? queueBatchedUsage : null"
-              @account-updated="handleAccountUpdated"
-              @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
-            />
+            <div class="flex flex-col gap-1">
+              <AccountUsageCell
+                :account="row"
+                :today-stats="todayStatsByAccountId[String(row.id)] ?? null"
+                :today-stats-loading="todayStatsLoading"
+                :manual-refresh-token="usageManualRefreshToken"
+                :batched-usage="usageBatchByAccountId[String(row.id)] ?? null"
+                :batched-usage-error="usageBatchErrorByAccountId[String(row.id)] ?? null"
+                :batched-usage-loading="usageBatchLoadingByAccountId[String(row.id)] === true"
+                :request-batched-usage="isDesktopViewport ? queueBatchedUsage : null"
+                @account-updated="handleAccountUpdated"
+                @usage-loaded="handleAccountUsageLoaded(row.id, $event)"
+              />
+              <!-- 方案 N6：影子账号没有自己的余额，只额外挂一条明确标注为「母账号」的余额指示；
+                   影子自身的用量仍由上面的 AccountUsageCell 照旧渲染。 -->
+              <div
+                v-if="codeBuddyParentCredit(row)"
+                data-test="codebuddy-parent-credit"
+                class="border-t border-dashed border-gray-200 pt-1 dark:border-dark-600"
+              >
+                <div class="mb-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400">
+                  {{ t('admin.accounts.codeBuddyParentCreditLabel') }}
+                </div>
+                <UsageProgressBar
+                  :label="t('admin.accounts.usageWindow.codebuddyCredit')"
+                  :utilization="codeBuddyParentCredit(row)?.usedPercent ?? 0"
+                  :resets-at="codeBuddyParentCredit(row)?.resetAt ?? null"
+                  color="indigo"
+                />
+                <div
+                  v-if="codeBuddyParentCredit(row)?.summary"
+                  class="text-[10px] text-gray-500 dark:text-gray-400"
+                >{{ codeBuddyParentCredit(row)?.summary }}</div>
+              </div>
+            </div>
           </template>
           <template #cell-proxy="{ row }">
             <div class="flex flex-col gap-1">
@@ -560,6 +591,10 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
+import { codeBuddySiteBadgeClass } from '@/utils/platformColors'
+import { parseCodeBuddyCredit } from '@/utils/codebuddyCredit'
+import UsageProgressBar from '@/components/account/UsageProgressBar.vue'
+import { normalizeCodeBuddySite, parseCodeBuddyShadowSite } from '@/constants/platforms'
 import type { Account, AccountListItem, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
 
 const { t } = useI18n()
@@ -2549,6 +2584,24 @@ const onCodeBuddyJumpParent = () => { closeCodeBuddyWizard() }
 const codeBuddyParentName = (row: AccountListItem): string => {
   if (!row.parent_account_id) return ''
   return accounts.value.find((a) => a.id === row.parent_account_id)?.name ?? ''
+}
+// 影子站点（方案 N3）：影子 credentials 为空，站点只能来自母账号；母账号不在当前页时
+// 回落到影子名里的 site 段。两者都拿不到（存量影子）返回 null —— 不展示徽标，不默认 cn。
+const codeBuddyShadowSite = (row: AccountListItem): 'cn' | 'intl' | null => {
+  if (!row.parent_account_id) return null
+  const parent = accounts.value.find((a) => a.id === row.parent_account_id)
+  const parentSite = parent?.credentials?.site
+  if (typeof parentSite === 'string' && parentSite.trim() !== '') return normalizeCodeBuddySite(parentSite)
+  return parseCodeBuddyShadowSite(row.name)
+}
+// 影子行额外的「母账号」余额（方案 N6）：影子账号没有自己的 CodeBuddy 配额快照
+// （platform 已改为目标平台），这里读 parent_account_id 指向母账号的 extra 快照，
+// 字段解析与母账号自己的额度块共用 parseCodeBuddyCredit，避免两处漂移。
+// 母账号不在当前页（列表为服务端分页）时无法解析 → 返回 null，不展示也不臆造 0。
+const codeBuddyParentCredit = (row: AccountListItem) => {
+  if (row.quota_dimension !== 'codebuddy' || !row.parent_account_id) return null
+  const parent = accounts.value.find((a) => a.id === row.parent_account_id)
+  return parseCodeBuddyCredit(parent?.extra)
 }
 const jumpToCodeBuddyParent = (parentId: number, e: MouseEvent) => {
   const parent = accounts.value.find((a) => a.id === parentId)

@@ -266,6 +266,19 @@ export function platformBadgeLightClass(p: string): string {
   return isPlatform(p) ? BADGE_LIGHT[p] : BADGE_DEFAULT
 }
 
+/**
+ * CodeBuddy cn/intl 站点徽标配色（方案 N3）。
+ *
+ * 站点不是 platform，`Platform` 联合里没有它，因此这里**不新造颜色**、也不在组件里硬编码
+ * 色值：直接复用既有 platform 徽标 token —— cn 取 codebuddy 主色（sky），intl 取
+ * composite 的 cyan，使站点标与平台标同源且两者可区分。未知站点回落 codebuddy 主色。
+ */
+export function codeBuddySiteBadgeClass(site: string | null | undefined): string {
+  return String(site ?? '').trim().toLowerCase() === 'intl'
+    ? platformBadgeClass('composite')
+    : platformBadgeClass('codebuddy')
+}
+
 export function platformBorderClass(p: string): string {
   return isPlatform(p) ? BORDER[p] : BORDER_DEFAULT
 }
