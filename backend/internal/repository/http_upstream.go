@@ -657,6 +657,18 @@ func (s *httpUpstreamService) getOrCreateClient(proxyURL string, accountID int64
 	return s.getClientEntry(proxyURL, accountID, accountConcurrency, service.HTTPUpstreamProfileDefault, false, false)
 }
 
+// directOriginCacheSuffix 直连源站覆盖激活且直连模式下返回独立池后缀；否则空。
+// 用于把直连 Transport 与主池隔离（裁决 #5，同规格连接池）。
+func (s *httpUpstreamService) directOriginCacheSuffix(parsedProxy *url.URL) string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
+	if parsedProxy == nil && service.CodeBuddyDirectOriginActive(s.cfg.Gateway.CodeBuddy.DirectOrigin) {
+		return "|direct"
+	}
+	return ""
+}
+
 // getClientEntry 获取或创建客户端条目
 // markInFlight=true 时会标记进行中请求，用于请求路径防止被淘汰
 // enforceLimit=true 时会限制客户端数量，超限且无法淘汰时返回错误
@@ -674,6 +686,11 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	settings = s.applyProfilePoolSettings(settings, profile)
 	// 构建缓存键（根据隔离策略不同）
 	cacheKey := buildCacheKey(isolation, proxyKey, accountID, protocolMode)
+	// 直连源站覆盖（绕 Cloudflare 隧道）：启用且直连模式下，独立缓存键，使直连
+	// Transport 与主池隔离（策略裁决 #5，同规格连接池）。
+	if suffix := s.directOriginCacheSuffix(parsedProxy); suffix != "" {
+		cacheKey += suffix
+	}
 	// 构建连接池配置键（用于检测配置变更）
 	poolKey := buildPoolKey(settings, protocolMode)
 
@@ -722,6 +739,11 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build transport: %w", err)
+	}
+	// 直连源站覆盖：直连模式下把匹配 CodeBuddy 域名的 TCP 重定向到钉点 IP；
+	// 其余 host 走原 base 拨号，字节不变（仅 Transport 层一处生效，覆盖全部出站）。
+	if parsedProxy == nil && s.cfg != nil && service.CodeBuddyDirectOriginActive(s.cfg.Gateway.CodeBuddy.DirectOrigin) {
+		transport.DialContext = service.WrapDirectOriginDialContext(transport.DialContext, s.cfg.Gateway.CodeBuddy.DirectOrigin)
 	}
 	client := &http.Client{Transport: transport}
 	if s.shouldValidateResolvedIP() {

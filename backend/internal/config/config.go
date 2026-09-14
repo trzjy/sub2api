@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -1217,6 +1218,48 @@ type GatewayCodeBuddyConfig struct {
 	QuotaCheckEnabled        bool   `mapstructure:"quota_check_enabled"`
 	QuotaCheckIntervalMinutes int   `mapstructure:"quota_check_interval_minutes"`
 	DailyCheckinEnabled      bool   `mapstructure:"daily_checkin_enabled"`
+	// DirectOrigin 是"代码层直连源站"覆盖表（按站点 key：cn/intl）。
+	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
+	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
+	// 的 DNS。默认全关；启用需 IP+Host 齐全，否则启动失败（fail-fast）。
+	// 详见 docs/codebuddy-direct-origin-plan.md。
+	DirectOrigin map[string]CodeBuddyDirectOriginConfig `mapstructure:"direct_origin"`
+}
+
+// CodeBuddyDirectOriginConfig 单站点直连源站覆盖。
+type CodeBuddyDirectOriginConfig struct {
+	// Enabled 是否启用本站点直连覆盖（默认 false）。
+	Enabled bool `mapstructure:"enabled"`
+	// IP 源站 IPv4，如 "43.159.104.94"。
+	IP string `mapstructure:"ip"`
+	// Port 源站端口（默认 443）。
+	Port int `mapstructure:"port"`
+	// Host SNI/Host 头域名（如 "copilot.tencent.com"），用于文档与启动校验。
+	Host string `mapstructure:"host"`
+	// InsecureSkipVerify 预留：v1 走 Go 默认 TLS（系统根 CA 校验），此项暂不生效。
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+	// PinnedLeafSHA256 预留：v1 未强制钉扎（见方案文档裁决 #2）。
+	PinnedLeafSHA256 string `mapstructure:"pinned_leaf_sha256"`
+}
+
+// Validate 校验 CodeBuddy 直连覆盖配置：Enabled=true 必须有合法 IP 与 Host，
+// 否则启动阶段 fail-fast 拒绝启动。
+func (c GatewayCodeBuddyConfig) Validate() error {
+	for site, oc := range c.DirectOrigin {
+		if !oc.Enabled {
+			continue
+		}
+		if strings.TrimSpace(oc.IP) == "" {
+			return fmt.Errorf("gateway.codebuddy.direct_origin.%s.enabled=true requires a non-empty ip", site)
+		}
+		if net.ParseIP(strings.TrimSpace(oc.IP)) == nil {
+			return fmt.Errorf("gateway.codebuddy.direct_origin.%s.ip %q is not a valid IP address", site, oc.IP)
+		}
+		if strings.TrimSpace(oc.Host) == "" {
+			return fmt.Errorf("gateway.codebuddy.direct_origin.%s.enabled=true requires a non-empty host", site)
+		}
+	}
+	return nil
 }
 
 // GatewayAPIKeyBalanceProbeConfig controls periodic snapshots for controlled
@@ -2776,6 +2819,9 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Gateway.CodeBuddy.Validate(); err != nil {
+		return fmt.Errorf("gateway.codebuddy: %w", err)
+	}
 	forwardedClientIPHeaders, err := NormalizeForwardedClientIPHeaders(c.Security.ForwardedClientIPHeaders)
 	if err != nil {
 		return fmt.Errorf("security.forwarded_client_ip_headers: %w", err)
