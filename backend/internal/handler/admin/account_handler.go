@@ -2853,6 +2853,38 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
+	// CodeBuddy 账号（母/影子）：模型来自上游动态清单（site 感知），**不存在静态默认目录**。
+	// 只返回已同步的模型快照（extra，只读）+ 显式模型映射；两者都缺时返回空集。
+	// 绝不回落到下方通用的 claude.DefaultModels —— 否则会把通用 Claude 目录误显示为
+	// 该 CodeBuddy 账号的真实授权（实测误导：intl 账号 62 曾被显示成"提供 11 个 Claude 模型"）。
+	if account.Platform == service.PlatformCodeBuddy ||
+		(account.IsShadow() && account.QuotaDimension == service.QuotaDimensionCodeBuddy) {
+		idSet := make(map[string]struct{})
+		if snapshot := account.GetUpstreamModelMetadataSnapshot(); snapshot != nil {
+			for id := range snapshot.Models {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					idSet[trimmed] = struct{}{}
+				}
+			}
+		}
+		for _, mapped := range account.GetModelMapping() {
+			if trimmed := strings.TrimSpace(mapped); trimmed != "" {
+				idSet[trimmed] = struct{}{}
+			}
+		}
+		ids := make([]string, 0, len(idSet))
+		for id := range idSet {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		models := make([]claude.Model, 0, len(ids))
+		for _, id := range ids {
+			models = append(models, claude.Model{ID: id, Type: "model", DisplayName: id})
+		}
+		response.Success(c, models)
+		return
+	}
+
 	// Handle OpenAI accounts
 	if account.IsOpenAI() {
 		// Prefer the shared, account-keyed upstream catalog. If discovery fails,
