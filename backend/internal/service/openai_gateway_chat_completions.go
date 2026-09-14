@@ -108,6 +108,16 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
+	// CodeBuddy 影子分发跟随母账号（方案 G2）：影子 platform 是目标分组平台
+	// （deepseek/zhipu/kimi/minimax/other），不会命中下方 PlatformCodeBuddy 分支。
+	// 必须与 OpenAIGatewayService.Forward 使用同一判定前置路由到 forwardCodeBuddy，
+	// 否则影子会被当作通用 OpenAI OAuth 账号打到 ChatGPT 后端（实证：/v1/chat/
+	// completions 下影子落 chatgpt.com 并返回 Cloudflare 403 阻断页）。
+	if account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy {
+		view := newOpenAIRequestView(body)
+		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
+	}
+
 	// CodeBuddy（腾讯）原生接入：chat completions 变体，必须走独立转发分支以注入
 	// §2.4 指纹头（Origin/Referer/X-Product/X-User-Id/X-Domain）并执行 §2.5 出站改写
 	// 管线。缺此分支时会落到下方通用 OpenAI 路径，OAuth 账号将打到 ChatGPT/Codex
