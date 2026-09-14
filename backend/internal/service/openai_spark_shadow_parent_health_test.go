@@ -9,9 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestParentHealthyForShadow covers the pure helper function used across
-// scheduler + gateway selection + WS forwarder.
-func TestParentHealthyForShadow(t *testing.T) {
+// TestParentHealthyForShadowSparkLegacy covers the pure helper for the spark
+// path. 命名加 Legacy 以区分 codebuddy_shadow_routing_test.go 中的多平台
+// 全量版（该版已覆盖 spark oauth 用例）；保留此文件以免丢失细节用例。
+func TestParentHealthyForShadowSparkLegacy(t *testing.T) {
 	pid := int64(100)
 
 	// 所有母账号 fixture 均设 Type=oauth:parentHealthyForShadow 现要求母账号仍是 OpenAI OAuth

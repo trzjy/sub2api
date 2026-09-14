@@ -359,8 +359,8 @@ func (s *PromoIntelService) ProcessSource(ctx context.Context, src *PromoIntelSo
 	}
 
 	now := s.nowFn()
-	today := now.UTC()
-	digestDate := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
+	// digest_date 按北京时间归属首次发现日（与简报切日一致）。
+	digestDate := promoIntelBusinessDay(now)
 	created, updated := 0, 0
 	for _, o := range offers {
 		if o.Vendor == "" {
@@ -424,8 +424,7 @@ func (s *PromoIntelService) upsertRawPendingItem(ctx context.Context, src *Promo
 		RawExcerpt:    truncatePromoIntelString(text, promoIntelRawExcerptMaxLen),
 		ExtractStatus: PromoIntelExtractPending,
 	}
-	day := now.UTC()
-	dd := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	dd := promoIntelBusinessDay(now)
 	item.DigestDate = &dd
 	item.SourceFetchedAt = now
 	_, err := s.repo.UpsertItem(ctx, item)
@@ -647,7 +646,7 @@ func (s *PromoIntelService) UpdateItemStatus(ctx context.Context, id int64, stat
 	return s.repo.GetItemByID(ctx, id)
 }
 
-// GetBriefing 每日简报：按发现日期聚合当日全部情报（默认今天，UTC），
+// GetBriefing 每日简报：按发现日期聚合当日全部情报（默认今天，北京时间切日），
 // 并生成「今日速读」（LLM 汇总当日新增 + 近 7 天仍有效的优惠；带当日缓存）。
 func (s *PromoIntelService) GetBriefing(ctx context.Context, date string, refresh bool) (*PromoIntelBriefing, error) {
 	day, err := parsePromoIntelDate(date)
@@ -655,8 +654,8 @@ func (s *PromoIntelService) GetBriefing(ctx context.Context, date string, refres
 		return nil, err
 	}
 	if day.IsZero() {
-		t := s.nowFn().UTC()
-		day = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		// 按北京时间切日（用户可见的「今天」），而非 UTC。
+		day = promoIntelBusinessDay(s.nowFn())
 	}
 	items, total, err := s.repo.ListItems(ctx, PromoIntelItemListParams{
 		Page: 1, PageSize: 200, DigestDate: day.Format("2006-01-02"),
@@ -782,6 +781,18 @@ func (s *PromoIntelService) fallbackDigest(b *PromoIntelBriefing) string {
 		sb.WriteString("今日暂无高相关新情报。")
 	}
 	return sb.String()
+}
+
+// promoIntelBusinessTZ 固定东八区（北京）：简报切日与 digest_date 归属使用。
+// 固定偏移无夏令时，跨日边界确定性唯一。
+var promoIntelBusinessTZ = time.FixedZone("UTC+8", 8*3600)
+
+// promoIntelBusinessDay 返回业务时区（北京）下 now 所属日历日的 UTC 零点。
+// 返回 UTC 零点是为了与 digest_date（DATE 列）的等值比较兼容：
+// 'YYYY-MM-DD 00:00+00' 转 date 即该日历日，不受 PG session 时区影响。
+func promoIntelBusinessDay(now time.Time) time.Time {
+	b := now.In(promoIntelBusinessTZ)
+	return time.Date(b.Year(), b.Month(), b.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // parsePromoIntelDate 解析 YYYY-MM-DD；空串返回零值（表示默认今天）。

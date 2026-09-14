@@ -720,3 +720,28 @@ func TestUpdateLLMSettingsSelfValidation(t *testing.T) {
 }
 
 func promoInt64Ptr(v int64) *int64 { return &v }
+
+func TestPromoIntelBusinessDay(t *testing.T) {
+	cst := time.FixedZone("UTC+8", 8*3600)
+	cases := []struct {
+		utc  string
+		want string
+	}{
+		{"2026-09-14T15:59:00Z", "2026-09-14"}, // 北京 23:59 → 当天
+		{"2026-09-14T16:00:00Z", "2026-09-15"}, // 北京 00:00 → 次日（切日边界）
+		{"2026-09-14T10:00:00Z", "2026-09-14"}, // 北京 18:00 → 当天
+		{"2026-09-14T20:00:00Z", "2026-09-15"}, // 北京次日 04:00
+	}
+	for _, tc := range cases {
+		utc, err := time.Parse(time.RFC3339, tc.utc)
+		require.NoError(t, err)
+		got := promoIntelBusinessDay(utc)
+		require.Equal(t, tc.want, got.Format("2006-01-02"), tc.utc)
+		// 返回值必须是该日历日的 UTC 零点（与 digest_date 等值比较兼容）。
+		require.Equal(t, "00:00", got.UTC().Format("15:04"))
+		require.Equal(t, tc.want, got.UTC().Format("2006-01-02"))
+	}
+	// 北京时间显式校验
+	beijing := promoIntelBusinessDay(time.Date(2026, 9, 14, 23, 0, 0, 0, cst))
+	require.Equal(t, "2026-09-14", beijing.Format("2006-01-02"))
+}
