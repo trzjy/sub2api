@@ -35,6 +35,17 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 ) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
+
+	// CodeBuddy 影子分发（方案 G2，判定与 /v1/chat/completions、/v1/responses 完全一致）：
+	// 影子 platform 是目标分组平台（deepseek/zhipu/kimi/minimax/other），不会命中下方任何
+	// 供应商分支；必须前置路由到 CodeBuddy 出站管线（由其解析母账号凭证/site）。
+	// /v1/messages 为 Anthropic 入站：forwardAnthropicViaRawChatCompletions 内完成
+	// Anthropic→Chat Completions 转换 + CC→Anthropic 回桥，其中出站发送对 CodeBuddy 影子
+	// 改走 CodeBuddy 上游（buildCodeBuddyChatRequest + doOpenAIUpstream + 母账号凭证）。
+	if isCodeBuddyShadowAccount(account) {
+		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+	}
+
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}

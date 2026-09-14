@@ -65,7 +65,7 @@ func TestAccountTestServiceSkipsShadow(t *testing.T) {
 
 	err := svc.TestAccountConnection(c, 200, "", "", "")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "resolve spark shadow parent")
+	require.Contains(t, err.Error(), "resolve shadow parent")
 }
 
 // --- 3. EnsureOpenAIPrivacy 守卫 ---

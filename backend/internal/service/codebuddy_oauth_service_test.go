@@ -63,7 +63,7 @@ func (t *codeBuddyRouteTransport) RoundTrip(req *http.Request) (*http.Response, 
 func newCodeBuddyTestService(handler http.Handler) (*CodeBuddyOAuthService, *codeBuddyRouteTransport, func()) {
 	srv := httptest.NewServer(handler)
 	transport := &codeBuddyRouteTransport{serverURL: srv.URL}
-	svc := NewCodeBuddyOAuthService(nil)
+	svc := NewCodeBuddyOAuthService(nil, nil)
 	svc.httpClient = &http.Client{Transport: transport}
 	return svc, transport, srv.Close
 }

@@ -46,21 +46,18 @@ type CodeBuddyOAuthService struct {
 }
 
 // NewCodeBuddyOAuthService 构造 CodeBuddy OAuth 服务。
-// directOrigin 为可选参数（向后兼容）：传入 gateway.codebuddy.direct_origin 配置后，
-// 共享直连 client 会挂上"直连源站"拨号包装，使 token 刷新等也绕开被劫持的 DNS。
-// 不传（如单测）或配置未启用时，行为与改造前完全一致。
-func NewCodeBuddyOAuthService(proxyRepo ProxyRepository, directOrigin ...map[string]config.CodeBuddyDirectOriginConfig) *CodeBuddyOAuthService {
-	var direct map[string]config.CodeBuddyDirectOriginConfig
-	if len(directOrigin) > 0 {
-		direct = directOrigin[0]
-	}
+// directOrigin 为 gateway.codebuddy.direct_origin 配置（由 wire 经
+// ProvideCodeBuddyDirectOrigin 注入）。**必填**（非 variadic）：这样 wire 重生成时
+// 若缺 provider 会显式报错，而不是像可选参数那样被静默丢弃（曾导致 OAuth 侧直连包装
+// 悄悄丢失、与 chat 侧形成"刷新失败但 chat 可用"的分裂态）。单测传 nil 即等价于未启用。
+func NewCodeBuddyOAuthService(proxyRepo ProxyRepository, directOrigin map[string]config.CodeBuddyDirectOriginConfig) *CodeBuddyOAuthService {
 	svc := &CodeBuddyOAuthService{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		proxyRepo:  proxyRepo,
 	}
 	// 直连源站覆盖：仅直连模式（无账号代理）下，给共享 client 挂一个无代理 Transport，
 	// 其 DialContext 经 WrapDirectOriginDialContext 包装，把 CodeBuddy 域名的 TCP 重定向到钉点 IP。
-	if CodeBuddyDirectOriginActive(direct) {
+	if CodeBuddyDirectOriginActive(directOrigin) {
 		base := &http.Transport{
 			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -69,7 +66,7 @@ func NewCodeBuddyOAuthService(proxyRepo ProxyRepository, directOrigin ...map[str
 			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		}
-		base.DialContext = WrapDirectOriginDialContext(base.DialContext, direct)
+		base.DialContext = WrapDirectOriginDialContext(base.DialContext, directOrigin)
 		svc.httpClient.Transport = base
 	}
 	return svc

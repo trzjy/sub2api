@@ -158,7 +158,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// （deepseek/zhipu/kimi/minimax/other），不会命中下方 PlatformCodeBuddy 分支，
 	// 必须在此前置路由到 forwardCodeBuddy，由其解析母账号凭证/site/uid/enterprise_id/domain。
 	// 母账号必为 CodeBuddy OAuth（CreateShadow 已保证 QuotaDimension=codebuddy 仅用于 codebuddy 母）。
-	if account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy {
+	if isCodeBuddyShadowAccount(account) {
 		return s.forwardCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 

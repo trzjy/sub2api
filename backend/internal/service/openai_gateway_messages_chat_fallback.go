@@ -108,20 +108,33 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 		zap.Bool("stream", clientStream),
 	)
 
-	// 3. Build and send upstream request via the shared CC pipeline
-	apiKey, targetURL, err := s.resolveCCFallbackTarget(account)
-	if err != nil {
-		return nil, err
+	// 3. Build and send upstream request via the shared CC pipeline.
+	//    CodeBuddy 影子：出站改走 CodeBuddy 上游（母账号凭证 + §2.5 改写 + §2.4 指纹头），
+	//    其余账号走通用 CC 上游（账号自身 api_key/base_url）。
+	var resp *http.Response
+	var sendErr error
+	if isCodeBuddyShadowAccount(account) {
+		resp, sendErr = s.sendCodeBuddyChatUpstreamAsCC(ctx, c, account, chatBody, upstreamModel)
+	} else {
+		apiKey, targetURL, terr := s.resolveCCFallbackTarget(account)
+		if terr != nil {
+			return nil, terr
+		}
+		resp, sendErr = s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
-	if err != nil {
-		return nil, err
+	if sendErr != nil {
+		return nil, sendErr
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// 4. Handle error responses
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		if isCodeBuddyShadowAccount(account) {
+			// 与 /v1/chat/completions 路径一致的 CodeBuddy 错误副作用（余额/会话/模型冷却），
+			// 内部完成分类 + 脱敏 + 回写 resp.Body；响应本身仍以 Anthropic 格式回传。
+			s.applyCodeBuddyErrorSideEffectsFromBody(ctx, account, resp, respBody, upstreamModel)
+		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}

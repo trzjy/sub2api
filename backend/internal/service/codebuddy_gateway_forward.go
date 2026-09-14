@@ -19,6 +19,15 @@ const codeBuddyChatCompletionsPath = "/v2/chat/completions"
 // codeBuddyBalanceCooldownMinutes CodeBuddy 余额耗尽临时停调时长（分钟），对齐 CN 供应商的 2× 检测周期默认。
 const codeBuddyBalanceCooldownMinutes = 20
 
+// isCodeBuddyShadowAccount 判定账号是否为按母账号分发的 CodeBuddy 影子：
+// 影子标记（ParentAccountID != nil）+ quota_dimension=codebuddy。这是
+// /v1/chat/completions、/v1/responses、/v1/messages 三条入站路径 codebuddy 影子
+// 分发的**唯一判定（SSOT）**——新增平台入口时必须复用，漏改即会把影子当普通账号
+// 误路由到错误上游（实证：/v1/chat/completions 曾因此打到 chatgpt.com）。
+func isCodeBuddyShadowAccount(account *Account) bool {
+	return account != nil && account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy
+}
+
 // forwardCodeBuddy 是 CodeBuddy 平台（Chat Completions 变体）的转发入口，挂在
 // OpenAIGatewayService.Forward 的 platform 分支上（与 forwardGrokResponses 同构）。
 //
@@ -276,6 +285,24 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 		Message:            upstreamMsg,
 	})
 
+	s.applyCodeBuddyErrorSideEffects(ctx, account, resp, respBody, upstreamModel, kind, upstreamMsg)
+
+	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
+}
+
+// applyCodeBuddyErrorSideEffects 依据已分类的 CodeBuddy 上游错误施加账号健康副作用
+// （余额耗尽 / 会话失效 / 模型限流 / 账号软限）。仅副作用，不写响应——供
+// /v1/chat/completions（OpenAI 格式回传）与 /v1/messages（Anthropic 格式回传）共用，
+// 保证两条入站路径对 CodeBuddy 账号的处置口径一致。
+func (s *OpenAIGatewayService) applyCodeBuddyErrorSideEffects(
+	ctx context.Context,
+	account *Account,
+	resp *http.Response,
+	respBody []byte,
+	upstreamModel string,
+	kind CodeBuddyErrKind,
+	upstreamMsg string,
+) {
 	switch kind {
 	case CodeBuddyErrKindBalanceExhausted:
 		s.rateLimitService.handleCodeBuddyInsufficientBalance(ctx, account, upstreamMsg)
@@ -295,8 +322,102 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 	case CodeBuddyErrKindUpstreamFault:
 		// 5xx/404：上游故障，常规重试（不标记账号状态）。
 	}
+}
 
-	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
+// applyCodeBuddyErrorSideEffectsFromBody 便捷入口：对被截断的原始上游错误体自行完成
+// 分类 + 账号标识脱敏 + 生成 upstreamMsg，并把脱敏后的 body 回写 resp.Body（供后续
+// Anthropic 错误回传读取），最后施加账号副作用。
+func (s *OpenAIGatewayService) applyCodeBuddyErrorSideEffectsFromBody(
+	ctx context.Context,
+	account *Account,
+	resp *http.Response,
+	respBody []byte,
+	upstreamModel string,
+) {
+	kind := ClassifyCodeBuddyError(resp.StatusCode, respBody)
+	redacted := redactCodeBuddyUpstreamErrorBody(respBody, account)
+	if resp != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(redacted))
+	}
+	upstreamMsg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(redacted))
+	if upstreamMsg == "" {
+		upstreamMsg = fmt.Sprintf("codebuddy upstream returned status %d", resp.StatusCode)
+	}
+	s.applyCodeBuddyErrorSideEffects(ctx, account, resp, redacted, upstreamModel, kind, upstreamMsg)
+}
+
+// sendCodeBuddyChatUpstreamAsCC 把（已是 Chat Completions 形状的）body 经 CodeBuddy
+// 出站管线发送一次，返回原始 *http.Response，供 /v1/messages（Anthropic 入站）路径复用
+// CodeBuddy 出站语义：解析母账号凭证/site → §2.5 出站改写（含内容审核降级重试一次）→
+// §2.4 指纹头（buildCodeBuddyChatRequest）→ doOpenAIUpstream。不写响应、不做错误分类
+// 副作用（调用方负责 CC→Anthropic 回桥与错误处置）。
+func (s *OpenAIGatewayService) sendCodeBuddyChatUpstreamAsCC(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	upstreamModel string,
+) (*http.Response, error) {
+	if account.Type != AccountTypeOAuth && account.Type != AccountTypeAPIKey {
+		return nil, fmt.Errorf("codebuddy account type %s is not supported", account.Type)
+	}
+	credAccount := account
+	if account.IsShadow() {
+		parent, perr := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if perr != nil {
+			return nil, perr
+		}
+		credAccount = parent
+	}
+	opts := CodeBuddyRewriteOptions{
+		Sanitize:         s.codeBuddySanitizeEnabled(),
+		Model:            upstreamModel,
+		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, credAccount, upstreamModel),
+	}
+	rewritten, err := PrepareCodeBuddyBody(body, opts)
+	if err != nil {
+		return nil, err
+	}
+	token, _, err := s.getRequestCredential(ctx, c, credAccount)
+	if err != nil {
+		return nil, err
+	}
+	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	defer releaseUpstreamCtx()
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		sendBody := rewritten
+		if attempt > 0 {
+			forced := opts
+			forced.Sanitize = true
+			forced.ReplaceSystem = true
+			if sb, serr := PrepareCodeBuddyBody(body, forced); serr == nil {
+				sendBody = sb
+			}
+		}
+		upstreamReq, buildErr := s.buildCodeBuddyChatRequest(upstreamCtx, c, credAccount, sendBody, token, upstreamModel)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode < 400 {
+			return resp, nil
+		}
+		respBody := s.readUpstreamErrorBody(resp)
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		if attempt == 0 && ClassifyCodeBuddyError(resp.StatusCode, respBody) == CodeBuddyErrKindContentAudit {
+			continue
+		}
+		return resp, nil
+	}
+	return resp, nil
 }
 
 // codeBuddyUpstreamUserIDPattern 兜底匹配错误文案中 "user 123456" / "user id: 123456"

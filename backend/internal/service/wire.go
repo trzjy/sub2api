@@ -1040,6 +1040,14 @@ func ProvideXianyuControlService(
 	return controlService, nil
 }
 
+// ProvideCodeBuddyDirectOrigin 把 gateway.codebuddy.direct_origin 配置投影为 map，
+// 供 NewCodeBuddyOAuthService 注入。独立 provider 让 wire 能为该 map 类型解析依赖：
+// 若 NewCodeBuddyOAuthService 的该参数被漏传/缺 provider，wire 重生成会**显式报错**
+// 而非静默丢弃（消除 OAuth 侧直连包装悄悄失效的陷阱）。
+func ProvideCodeBuddyDirectOrigin(cfg *config.Config) map[string]config.CodeBuddyDirectOriginConfig {
+	return cfg.Gateway.CodeBuddy.DirectOrigin
+}
+
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
@@ -1095,6 +1103,7 @@ var ProviderSet = wire.NewSet(
 	wire.Bind(new(TokenCacheInvalidator), new(*CompositeTokenCacheInvalidator)),
 	NewAntigravityOAuthService,
 	NewCodeBuddyOAuthService,
+	ProvideCodeBuddyDirectOrigin,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
 	NewGeminiMessagesCompatService,

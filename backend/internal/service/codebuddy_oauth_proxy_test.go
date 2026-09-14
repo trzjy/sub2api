@@ -59,7 +59,7 @@ func TestNewCodeBuddyHTTPClient(t *testing.T) {
 // 无代理复用共享直连 client；指定代理时构造独立 client 且 Transport.Proxy 指向该代理。
 func TestCodeBuddyOAuthService_ClientForProxyID(t *testing.T) {
 	repo := &codeBuddyProxyRepoStub{proxy: &Proxy{ID: 7, Protocol: "http", Host: "proxy.local", Port: 3128}}
-	svc := NewCodeBuddyOAuthService(repo)
+	svc := NewCodeBuddyOAuthService(repo, nil)
 
 	direct, err := svc.clientForProxyID(context.Background(), nil)
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestCodeBuddyOAuthService_ClientForProxyID(t *testing.T) {
 // 调度快照已加载的 Proxy，避免多余仓库查询；无 Proxy 时才按 ProxyID 查仓库。
 func TestCodeBuddyOAuthService_AccountClientPrefersPreloadedProxy(t *testing.T) {
 	repo := &codeBuddyProxyRepoStub{err: ErrProxyNotFound}
-	svc := NewCodeBuddyOAuthService(repo)
+	svc := NewCodeBuddyOAuthService(repo, nil)
 
 	account := &Account{
 		Platform: PlatformCodeBuddy,
@@ -105,17 +105,17 @@ func TestCodeBuddyOAuthService_ResolveProxyURLErrors(t *testing.T) {
 	ctx := context.Background()
 
 	// 无代理仓库
-	_, err := NewCodeBuddyOAuthService(nil).resolveProxyURL(ctx, &proxyID)
+	_, err := NewCodeBuddyOAuthService(nil, nil).resolveProxyURL(ctx, &proxyID)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "proxy repository")
 
 	// 仓库查不到代理
-	_, err = NewCodeBuddyOAuthService(&codeBuddyProxyRepoStub{err: ErrProxyNotFound}).resolveProxyURL(ctx, &proxyID)
+	_, err = NewCodeBuddyOAuthService(&codeBuddyProxyRepoStub{err: ErrProxyNotFound}, nil).resolveProxyURL(ctx, &proxyID)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "proxy")
 
 	// 无代理 → 空串，不报错
-	resolvedURL, err := NewCodeBuddyOAuthService(nil).resolveProxyURL(ctx, nil)
+	resolvedURL, err := NewCodeBuddyOAuthService(nil, nil).resolveProxyURL(ctx, nil)
 	require.NoError(t, err)
 	require.Empty(t, resolvedURL)
 }
@@ -153,7 +153,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 		defer proxySrv.Close()
 
 		repo := &codeBuddyProxyRepoStub{proxy: proxyFromServer(t, proxySrv)}
-		svc := NewCodeBuddyOAuthService(repo)
+		svc := NewCodeBuddyOAuthService(repo, nil)
 		proxyID := int64(7)
 
 		_, err := svc.GenerateAuthURL(ctx, CodeBuddySiteCN, &proxyID)
@@ -167,7 +167,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 		defer proxySrv.Close()
 
 		repo := &codeBuddyProxyRepoStub{proxy: proxyFromServer(t, proxySrv)}
-		svc := NewCodeBuddyOAuthService(repo)
+		svc := NewCodeBuddyOAuthService(repo, nil)
 		proxyID := int64(7)
 
 		_, err := svc.PollToken(ctx, "st-123", CodeBuddySiteCN, &proxyID)
@@ -181,7 +181,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 		defer proxySrv.Close()
 
 		repo := &codeBuddyProxyRepoStub{}
-		svc := NewCodeBuddyOAuthService(repo)
+		svc := NewCodeBuddyOAuthService(repo, nil)
 		account := &Account{
 			Platform: PlatformCodeBuddy,
 			Type:     AccountTypeOAuth,
@@ -201,7 +201,7 @@ func TestCodeBuddyOAuthService_LoginAndPollGoThroughAccountProxy(t *testing.T) {
 // TestCodeBuddyOAuthService_NoProxyKeepsDirectBehaviour 无代理账号不受改造影响：
 // 仍复用共享直连 client，不产生代理 Transport。
 func TestCodeBuddyOAuthService_NoProxyKeepsDirectBehaviour(t *testing.T) {
-	svc := NewCodeBuddyOAuthService(&codeBuddyProxyRepoStub{})
+	svc := NewCodeBuddyOAuthService(&codeBuddyProxyRepoStub{}, nil)
 	account := &Account{Platform: PlatformCodeBuddy, Type: AccountTypeOAuth}
 	client, err := svc.accountClient(context.Background(), account)
 	require.NoError(t, err)

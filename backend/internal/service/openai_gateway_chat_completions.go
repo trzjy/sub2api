@@ -113,7 +113,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 必须与 OpenAIGatewayService.Forward 使用同一判定前置路由到 forwardCodeBuddy，
 	// 否则影子会被当作通用 OpenAI OAuth 账号打到 ChatGPT 后端（实证：/v1/chat/
 	// completions 下影子落 chatgpt.com 并返回 Cloudflare 403 阻断页）。
-	if account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy {
+	if isCodeBuddyShadowAccount(account) {
 		view := newOpenAIRequestView(body)
 		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
 	}
