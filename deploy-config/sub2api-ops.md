@@ -1,5 +1,7 @@
 # Sub2API 运维部署指南 (Operations & Deployment Guide)
 
+> **本文件是 Sub2API 唯一运维部署文档**（SSOT）。其他历史部署文档（如 `docs/DEPLOY.md`）已废弃删除，内容已并入本文。
+>
 > 本文档描述生产服务器（`yiyutu-server`，域名 `corealgos.com`）当前 Sub2API 部署的完整运维流程。
 > 项目上游：https://github.com/Wei-Shaw/sub2api （LGPL-3.0）
 
@@ -116,6 +118,15 @@ git push origin main
 | `JWT_SECRET` / `TOTP_ENCRYPTION_KEY` | 固定值，保证重启后登录态与 2FA 有效 |
 
 > ⚠️ `JWT_SECRET`、`TOTP_ENCRYPTION_KEY` 必须保持固定。若清空，重启后所有用户被登出、已有 2FA 失效。
+
+**安全密钥（禁止改）**：
+
+| 变量 | 说明 |
+|------|------|
+| `JWT_SECRET` | JWT 签名密钥，修改会使所有活跃会话失效 |
+| `TOTP_ENCRYPTION_KEY` | TOTP 加密密钥，修改会使所有 2FA 失效 |
+| `CRED_ENCRYPTION_KEY` | 账号凭证静态加密主密钥（AES-256-GCM，32 字节 base64，`openssl rand -base64 32` 生成）。可选：留空则凭证明文存储（向后兼容）并输出启动警告；格式非法时启动 fail-fast |
+| `CRED_ENCRYPTION_KEY_OLD` | 轮换前的旧密钥（仅解密用，可选）。轮换步骤：新密钥写入 `CRED_ENCRYPTION_KEY`、旧密钥放这里，重启并完成存量数据重加密后移除本变量。密文值带 `enc:v1:` 前缀，读路径凭前缀自动识别加密形态 |
 
 > **重要**：compose 文件位于 `deploy-config/` 子目录，而真实凭据在根目录 `/opt/sub2api/.env`。因此所有 `docker compose` 命令必须显式加 `--env-file /opt/sub2api/.env`，否则 `${POSTGRES_PASSWORD}` 等插值会缺失，导致数据库/登录异常。示例见第 4 节。
 
@@ -300,6 +311,59 @@ systemctl reload nginx
 - 确认 `JWT_SECRET` 未被清空/更换（否则所有会话失效）
 - 确认 Nginx 含 `underscores_in_headers on;`（否则粘性会话头丢失）
 - 首次登录前需在管理后台完成"管理员合规确认"
+
+### 7.6 登录页提示 "aliyun captcha verification failed"
+
+阿里云验证码验证失败（前端发了 token 但阿里云拒绝）。
+
+```bash
+# 检查当前 aliyun captcha 启用状态
+docker exec sub2api-postgres psql -U sub2api -d sub2api \
+  -c "SELECT key, value FROM settings WHERE key LIKE 'aliyun_captcha%';"
+```
+
+**恢复登录（临时关闭阿里云验证码）**：
+
+```bash
+docker exec sub2api-postgres psql -U sub2api -d sub2api \
+  -c "UPDATE settings SET value='false' WHERE key='aliyun_captcha_enabled';"
+```
+
+确认用户可登录后，再重新配置阿里云验证码。
+
+### 7.7 前端根路径返回 404
+
+原因：Go 二进制未用 `-tags=embed` 编译，前端 SPA 未打包进镜像。
+
+```bash
+# 检查容器镜像是否包含前端资源
+docker run --rm sub2api:<tag> ls /app/ | grep dist
+```
+
+修复：确保构建命令包含 `-tags=embed`（服务器端构建流程默认已含，见第 5 节），必要时回滚到之前用 embed 编译的镜像。
+
+### 7.8 健康检查超时 / 容器启动慢
+
+```bash
+# 查看容器启动日志
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env logs --tail=50 sub2api
+
+# 手动进入容器排查
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env exec sub2api sh
+
+# 检查数据库迁移：容器首次启动可能需执行 AUTO_SETUP 和迁移，耗时长属正常
+```
+
+### 7.9 回滚失败（找不到备份）
+
+```bash
+# 检查备份列表
+ls -1 /opt/sub2api/.env.bak-*
+
+# 手动恢复
+cp /opt/sub2api/.env.bak-<timestamp> /opt/sub2api/.env
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate sub2api
+```
 
 ---
 
@@ -657,4 +721,4 @@ CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做
 
 ---
 
-最后更新：2026-09-13
+最后更新：2026-09-15
