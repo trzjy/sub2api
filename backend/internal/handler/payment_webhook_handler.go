@@ -43,6 +43,12 @@ func (h *PaymentWebhookHandler) EasyPayNotify(c *gin.Context) {
 	h.handleNotify(c, payment.TypeEasyPay)
 }
 
+// XunhupayNotify handles XunhuPay (虎皮椒) payment notifications.
+// POST /api/v1/payment/webhook/xunhupay
+func (h *PaymentWebhookHandler) XunhupayNotify(c *gin.Context) {
+	h.handleNotify(c, payment.TypeXunhupay)
+}
+
 // AlipayNotify handles Alipay payment notifications.
 // POST /api/v1/payment/webhook/alipay
 func (h *PaymentWebhookHandler) AlipayNotify(c *gin.Context) {
@@ -152,6 +158,11 @@ func extractOutTradeNo(rawBody, providerKey string) string {
 		values, err := url.ParseQuery(rawBody)
 		if err == nil {
 			return values.Get("out_trade_no")
+		}
+	case payment.TypeXunhupay:
+		values, err := url.ParseQuery(rawBody)
+		if err == nil {
+			return values.Get("trade_order_id")
 		}
 	case payment.TypeAirwallex:
 		var payload struct {

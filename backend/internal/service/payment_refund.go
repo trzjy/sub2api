@@ -237,6 +237,12 @@ func (s *PaymentService) PrepareRefund(ctx context.Context, oid int64, amt float
 	if amt-o.Amount > paymentAmountToleranceForCurrency(orderCurrency) {
 		return nil, nil, infraerrors.BadRequest("REFUND_AMOUNT_EXCEEDED", "refund amount exceeds recharge")
 	}
+	// XunhuPay only supports full refunds (the API sends no amount parameter).
+	// A partial amount would be silently refunded in full by the gateway while
+	// the system records only the partial amount — a direct credit loss.
+	if strings.EqualFold(strings.TrimSpace(inst.ProviderKey), payment.TypeXunhupay) && math.Abs(amt-o.Amount) > paymentAmountToleranceForCurrency(orderCurrency) {
+		return nil, nil, infraerrors.BadRequest("PARTIAL_REFUND_UNSUPPORTED", "this provider only supports full refunds")
+	}
 	ga := calculateGatewayRefundAmount(o.Amount, o.PayAmount, amt, orderCurrency)
 	rr := strings.TrimSpace(reason)
 	if rr == "" && o.RefundRequestReason != nil {

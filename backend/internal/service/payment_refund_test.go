@@ -676,3 +676,64 @@ type refundQueryProviderTestDouble struct {
 func (p *refundQueryProviderTestDouble) QueryRefund(context.Context, payment.RefundQueryRequest) (*payment.RefundResponse, error) {
 	return p.refundResponse, nil
 }
+
+func TestPrepareRefundRejectsXunhupayPartialRefund(t *testing.T) {
+	ctx := context.Background()
+	client := newPaymentConfigServiceTestClient(t)
+
+	user, err := client.User.Create().
+		SetEmail("refund-xunhupay-admin@example.com").
+		SetPasswordHash("hash").
+		SetUsername("refund-xunhupay-admin-user").
+		Save(ctx)
+	require.NoError(t, err)
+
+	inst, err := client.PaymentProviderInstance.Create().
+		SetProviderKey(payment.TypeXunhupay).
+		SetName("xunhupay-refund-instance").
+		SetConfig(`{"appId":"201906187599","appSecret":"secret","apiBase":"https://api.xunhupay.com","notifyUrl":"https://example.com/api/v1/payment/webhook/xunhupay","returnUrl":"https://example.com/payment/result"}`).
+		SetSupportedTypes("wxpay").
+		SetEnabled(true).
+		SetAllowUserRefund(true).
+		SetRefundEnabled(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	order, err := client.PaymentOrder.Create().
+		SetUserID(user.ID).
+		SetUserEmail(user.Email).
+		SetUserName(user.Username).
+		SetAmount(100).
+		SetPayAmount(100).
+		SetFeeRate(0).
+		SetRechargeCode("REFUND-XUNHUPAY-ORDER").
+		SetOutTradeNo("sub2_refund_xunhupay_order").
+		SetPaymentType(payment.TypeWxpay).
+		SetPaymentTradeNo("trade-xunhupay-refund").
+		SetProviderKey(payment.TypeXunhupay).
+		SetProviderInstanceID(strconv.FormatInt(int64(inst.ID), 10)).
+		SetOrderType(payment.OrderTypeBalance).
+		SetStatus(OrderStatusCompleted).
+		SetExpiresAt(time.Now().Add(time.Hour)).
+		SetPaidAt(time.Now()).
+		SetClientIP("127.0.0.1").
+		SetSrcHost("api.example.com").
+		Save(ctx)
+	require.NoError(t, err)
+
+	svc := &PaymentService{entClient: client}
+
+	// Partial refund must be rejected for XunhuPay (full-refund-only provider).
+	plan, result, err := svc.PrepareRefund(ctx, order.ID, 40, "", false, false)
+	require.Nil(t, plan)
+	require.Nil(t, result)
+	require.Error(t, err)
+	require.Equal(t, "PARTIAL_REFUND_UNSUPPORTED", infraerrors.Reason(err))
+
+	// Full refund is still allowed.
+	fullPlan, result, err := svc.PrepareRefund(ctx, order.ID, 0, "", false, false)
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.NotNil(t, fullPlan)
+	require.InDelta(t, 100, fullPlan.RefundAmount, 1e-9)
+}
