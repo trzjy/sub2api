@@ -128,6 +128,8 @@ func TestParseCodeBuddyResetTime_UTC8(t *testing.T) {
 
 // TestClassifyCodeBuddyError_Phase0NewCodes 覆盖 Phase 0 校准新增码（D7）：
 // 11128（首条须 system）与 11102（模型无效/无权限）均归为「请求/模型问题、不罚账号」。
+// 11133（请求参数被模型提供方拒绝，上游 extError.code=400002）同类，一并钉住
+// （2026-09-14 实测：codex-tui /responses 请求携带 Responses 特有字段时上游返回该码）。
 func TestClassifyCodeBuddyError_Phase0NewCodes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -135,6 +137,7 @@ func TestClassifyCodeBuddyError_Phase0NewCodes(t *testing.T) {
 	}{
 		{"11128 first message is not system prompt", `{"code":11128,"msg":"first message is not system prompt"}`},
 		{"11102 model service info not found", `{"code":11102,"msg":"model [gpt-5] service info not found"}`},
+		{"11133 request parameters rejected by model provider", `{"code":11133,"msg":"the request parameters were rejected by the model provider","extError":{"code":"400002"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

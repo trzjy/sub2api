@@ -155,11 +155,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	// CodeBuddy 影子分发跟随母账号（方案 G2）：影子 platform 是目标分组平台
-	// （deepseek/zhipu/kimi/minimax/other），不会命中下方 PlatformCodeBuddy 分支，
-	// 必须在此前置路由到 forwardCodeBuddy，由其解析母账号凭证/site/uid/enterprise_id/domain。
-	// 母账号必为 CodeBuddy OAuth（CreateShadow 已保证 QuotaDimension=codebuddy 仅用于 codebuddy 母）。
+	// （deepseek/zhipu/kimi/minimax/other），不会命中下方 PlatformCodeBuddy 分支。
+	// /v1/responses 入站是交叉协议组合（Responses 客户端 × CodeBuddy /v2/chat/completions
+	// 上游）：CodeBuddy 上游只认 Chat Completions 形状，直接透传 Responses 形状
+	// （input/instructions/metadata）会被上游以 code=11133 "the request parameters were
+	// rejected by the model provider" 拒绝（实测 2026-09-14：codex-tui /responses 全部
+	// 400，同账号 /v1/chat/completions 与 /v1/messages 全部成功）。先做
+	// Responses→CC 请求转换，经 sendCodeBuddyChatUpstreamAsCC（母账号凭证 + §2.5
+	// 改写 + §2.4 指纹头 + 审核降级重试）出站，再以 CC→Responses 回桥写回客户端，
+	// 与 /v1/messages 路径（先转 CC 再走 codebuddy 上游）保持一致。
 	if isCodeBuddyShadowAccount(account) {
-		return s.forwardCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
+		return s.forwardResponsesViaCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
 	// CodeBuddy（腾讯）原生接入：Chat Completions 变体，走独立转发分支以隔离其改写

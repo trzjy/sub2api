@@ -390,3 +390,71 @@ func TestForwardCodeBuddy_NonStreamAggregatesSSEToJSON(t *testing.T) {
 	require.Equal(t, "PONG", message["content"])
 	require.Equal(t, float64(2), got["usage"].(map[string]any)["total_tokens"])
 }
+
+// TestForwardResponsesViaCodeBuddy_ConvertsResponsesToChatCompletions 钉住
+// /v1/responses 入站 × CodeBuddy 影子账号的交叉协议桥接：Responses 形状请求
+// （input/instructions/metadata）必须先在出站前转换为 Chat Completions 形状
+// （messages），而不是把 Responses 特有字段透传给上游 /v2/chat/completions——
+// 否则上游返回 code=11133 "the request parameters were rejected by the model
+// provider"（2026-09-14 实测：codex-tui /responses 请求全部 400，同账号
+// /v1/chat/completions 与 /v1/messages 全部成功）。
+func TestForwardResponsesViaCodeBuddy_ConvertsResponsesToChatCompletions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{
+		"model":"deepseek-v4.1-flash",
+		"stream":false,
+		"instructions":"You are a helpful assistant.",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"metadata":{"session_id":"abc"},
+		"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]
+	}`)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/responses", bytes.NewReader(body))
+
+	ok200 := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{
+			"id":"chatcmpl-3","object":"chat.completion","model":"deepseek-v4.1-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`)),
+	}
+	upstream := &httpUpstreamRecorder{resp: ok200}
+
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{
+				Enabled:           false,
+				AllowInsecureHTTP: true,
+			},
+		},
+		Gateway: config.GatewayConfig{
+			CodeBuddy: config.GatewayCodeBuddyConfig{
+				SanitizeEnabled: true,
+			},
+		},
+	}
+
+	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
+
+	account := healthyCodeBuddyGatewayTestAccount(7703, "access-token")
+
+	result, err := svc.forwardResponsesViaCodeBuddy(
+		context.Background(), c, account, body, "deepseek-v4.1-flash", false, time.Now(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 出站 body 必须是 Chat Completions 形状：有 messages，无 input/instructions/metadata。
+	require.Len(t, upstream.bodies, 1, "single upstream request")
+	outBody := string(upstream.bodies[0])
+	require.NotContains(t, outBody, `"input"`, "Responses-only field input must not reach upstream")
+	require.NotContains(t, outBody, `"instructions"`, "Responses-only field instructions must not reach upstream")
+	require.NotContains(t, outBody, `"metadata"`, "Responses-only field metadata must not reach upstream")
+	require.Contains(t, outBody, `"messages"`, "outbound body must be Chat Completions shape")
+	require.Contains(t, outBody, `"stream":true`, "codebuddy upstream forces stream:true")
+}
