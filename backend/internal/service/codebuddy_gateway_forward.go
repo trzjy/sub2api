@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 )
 
@@ -344,6 +346,116 @@ func (s *OpenAIGatewayService) applyCodeBuddyErrorSideEffectsFromBody(
 		upstreamMsg = fmt.Sprintf("codebuddy upstream returned status %d", resp.StatusCode)
 	}
 	s.applyCodeBuddyErrorSideEffects(ctx, account, resp, redacted, upstreamModel, kind, upstreamMsg)
+}
+
+// forwardResponsesViaCodeBuddy 是 /v1/responses 入站 × CodeBuddy 影子账号的交叉协议
+// 桥接：Responses 请求 → Chat Completions 请求 → CodeBuddy 上游（/v2/chat/completions）
+// → CC 响应回桥为 Responses 形状写回客户端。与 /v1/messages 路径
+// （forwardAnthropicViaRawChatCompletions 的 isCodeBuddyShadowAccount 分支）对称。
+//
+// 背景（2026-09-14 实测）：CodeBuddy 影子（platform=deepseek 等目标分组平台 + OAuth
+// + quota_dimension=codebuddy）在 /v1/responses 入站时，旧路径把 Responses 形状 body
+// 直接透传给上游 /v2/chat/completions，被上游以 code=11133 "the request parameters
+// were rejected by the model provider" 拒绝；同账号 /v1/chat/completions 与 /v1/messages
+// 因先转成 CC/Anthropic 形状而全部成功。此处补上遗漏的 Responses→CC 请求转换与
+// CC→Responses 响应回桥。
+func (s *OpenAIGatewayService) forwardResponsesViaCodeBuddy(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	originalModel string,
+	clientStream bool,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	var responsesReq apicompat.ResponsesRequest
+	if err := json.Unmarshal(body, &responsesReq); err != nil {
+		setOpsUpstreamError(c, http.StatusBadRequest, "Failed to parse request body", "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request_error", "message": "Failed to parse request body",
+		}})
+		return nil, fmt.Errorf("parse responses request: %w", err)
+	}
+	if strings.TrimSpace(responsesReq.Model) == "" {
+		setOpsUpstreamError(c, http.StatusBadRequest, "model is required", "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request_error", "message": "model is required",
+		}})
+		return nil, fmt.Errorf("missing model in request")
+	}
+
+	// 工具自适应：custom/function/tool_search/namespace 工具在 CC 形状下按名字转发，
+	// 回程再按名字还原为对应 Responses item 类型（与 forwardResponsesViaRawChatCompletions 一致）。
+	effectiveTools, err := apicompat.EffectiveResponsesTools(&responsesReq)
+	if err != nil {
+		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request_error", "message": err.Error(),
+		}})
+		return nil, fmt.Errorf("resolve responses tools: %w", err)
+	}
+	customTools := apicompat.CustomToolNames(effectiveTools)
+	functionTools := apicompat.FunctionToolNames(effectiveTools)
+	toolSearch := apicompat.HasToolSearchTool(effectiveTools)
+	namespaceTools := apicompat.NamespaceToolNames(effectiveTools)
+
+	chatReq, err := apicompat.ResponsesToChatCompletionsRequestWithOptions(&responsesReq, &apicompat.ResponsesToChatOptions{
+		ReasoningContentByID: s.reasoningContentByID,
+	})
+	if err != nil {
+		setOpsUpstreamError(c, http.StatusBadRequest, err.Error(), "")
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+			"type": "invalid_request_error", "message": err.Error(),
+		}})
+		return nil, fmt.Errorf("convert responses to chat completions: %w", err)
+	}
+
+	billingModel := resolveOpenAIForwardModel(account, originalModel, "")
+	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+	chatReq.Model = upstreamModel
+	if clientStream {
+		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
+	}
+	chatBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chat completions request: %w", err)
+	}
+	SetOpsUpstreamModel(c, upstreamModel)
+
+	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
+	serviceTier := extractOpenAIServiceTierFromBody(body)
+
+	resp, err := s.sendCodeBuddyChatUpstreamAsCC(ctx, c, account, chatBody, upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		s.applyCodeBuddyErrorSideEffectsFromBody(ctx, account, resp, respBody, upstreamModel)
+		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
+			return nil, foErr
+		}
+		return s.handleErrorResponse(ctx, resp, c, account, chatBody, billingModel)
+	}
+
+	if clientStream {
+		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	}
+	// CodeBuddy 上游强制 stream:true（§2.5 规则 1），非流式入站时上游返回 SSE 流。
+	// bufferChatCompletionsAsResponses 内部的 readCCUpstreamJSONResponse 假定纯 JSON，
+	// 此处先聚合 SSE→JSON 再走缓冲路径（与 handleCodeBuddyNonStreamingResponse 一致）。
+	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	if err != nil {
+		return nil, err
+	}
+	if aggregated, ok := aggregateOpenAIChatCompletionsSSE(respBody); ok {
+		resp.Body = io.NopCloser(bytes.NewReader(aggregated))
+	} else {
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	}
+	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
 
 // sendCodeBuddyChatUpstreamAsCC 把（已是 Chat Completions 形状的）body 经 CodeBuddy

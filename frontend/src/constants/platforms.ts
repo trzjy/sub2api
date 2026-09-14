@@ -99,6 +99,46 @@ export function inferCodeBuddyShadowPlatform(model: string): string {
   return 'other'
 }
 
+/**
+ * CodeBuddy 站点归一：仅 `intl` 视为国际版，其余（缺失、空串、未知值）一律 `cn`。
+ * 与后端 codebuddy_site.go 的「无 site 键即 cn」缺省行为一致。
+ */
+export function normalizeCodeBuddySite(site: unknown): 'cn' | 'intl' {
+  return typeof site === 'string' && site.trim().toLowerCase() === 'intl' ? 'intl' : 'cn'
+}
+
+/**
+ * 从影子账号名 `<母账号名>:<site>:<model>[:<分组短名>]` 中解析站点段。
+ * 只认 cn/intl；存量影子名（不含 site 段，如 `<母>:<model>`）返回 null —— 此时调用方
+ * 不应展示站点徽标，也不要默认成 cn，避免对存量数据说谎。
+ */
+export function parseCodeBuddyShadowSite(name: string | null | undefined): 'cn' | 'intl' | null {
+  const seg = String(name ?? '').split(':')[1]?.trim().toLowerCase()
+  return seg === 'cn' || seg === 'intl' ? seg : null
+}
+
+/**
+ * 生成 CodeBuddy 影子账号默认名（方案 N3）：
+ *   - 一模型一分组：`<母账号名>:<site>:<model>`
+ *   - 一模型多分组（N4 命名消歧）：`<母账号名>:<site>:<model>:<分组短名>`
+ *
+ * 由前端显式传 `name` 的原因：后端 CreateShadow 的缺省命名只到 `<母>:<model>`，不含站点段。
+ * 后端 ent 列 MaxLen(100) 且空名会变裸 500，故这里按 rune 截断到 100。
+ */
+export function codeBuddyShadowName(
+  parentName: string,
+  site: unknown,
+  model: string,
+  groupName?: string | null,
+): string {
+  const parts = [String(parentName ?? '').trim(), normalizeCodeBuddySite(site), String(model ?? '').trim()]
+  const group = String(groupName ?? '').trim()
+  if (group !== '') parts.push(group)
+  const name = parts.filter((part) => part !== '').join(':')
+  const runes = Array.from(name)
+  return runes.length > 100 ? runes.slice(0, 100).join('') : name
+}
+
 export interface UpstreamModelSyncFilter {
   kept: string[]
   skipped: string[]

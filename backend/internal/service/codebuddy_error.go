@@ -115,14 +115,19 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 		return CodeBuddyErrKindContentAudit
 	}
 
-	// 7. 请求体/模型问题（400 + 11101 / 11102 / 11128 / Unmarshal）。不罚账号，仍轮转。
+	// 7. 请求体/模型问题（400 + 11101 / 11102 / 11128 / 11133 / Unmarshal）。不罚账号，仍轮转。
 	//    Phase 0 校准新增（D7，见 docs/evidence/codebuddy-intl）：
 	//      - 11102 `model [X] service info not found`：模型无效/无权限；
-	//      - 11128 `first message is not system prompt`：首条消息必须为 system。
+	//      - 11128 `first message is not system prompt`：首条消息必须为 system；
+	//      - 11133 `the request parameters were rejected by the model provider`：
+	//        请求参数被模型提供方拒绝（上游 extError.code=400002）。与 11101 同族，
+	//        属于客户端请求体/参数问题，不罚账号（实测：codex-tui /responses 请求
+	//        携带 metadata、tools 等参数时上游返回该码，同账号其它请求正常）。
 	if statusCode == http.StatusBadRequest &&
 		(codeBuddyBodyHasCode(body, 11101) ||
 			codeBuddyBodyHasCode(body, 11102) ||
 			codeBuddyBodyHasCode(body, 11128) ||
+			codeBuddyBodyHasCode(body, 11133) ||
 			strings.Contains(bodyLower, "unmarshal chat params failed")) {
 		return CodeBuddyErrKindRequestBody
 	}

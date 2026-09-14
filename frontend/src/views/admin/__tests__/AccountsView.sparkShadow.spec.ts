@@ -256,6 +256,58 @@ const mountViewWithRow = () =>
     }
   })
 
+// 方案 N6：影子行额外挂的「母账号余额」指示渲染在 cell-usage 里，
+// 上面的 mountViewWithRow 的 DataTable stub 不透传该插槽，故这里单独给一个。
+const mountViewWithUsageRow = () =>
+  mount(AccountsView, {
+    global: {
+      stubs: {
+        AppLayout: { template: '<div><slot /></div>' },
+        TablePageLayout: {
+          template: '<div><slot name="table" /></div>'
+        },
+        DataTable: {
+          props: ['data', 'columns', 'loading'],
+          template: `<div>
+            <div v-for="(row, idx) in (data || [])" :key="idx">
+              <slot name="cell-usage" :row="row" />
+            </div>
+          </div>`
+        },
+        Pagination: true,
+        ConfirmDialog: true,
+        AccountTableActions: { template: '<div><slot name="beforeCreate" /><slot name="after" /></div>' },
+        AccountTableFilters: { template: '<div></div>' },
+        AccountBulkActionsBar: true,
+        AccountActionMenu: true,
+        ImportDataModal: true,
+        ReAuthAccountModal: true,
+        AccountTestModal: true,
+        AccountStatsModal: true,
+        ScheduledTestsPanel: true,
+        SyncFromCrsModal: true,
+        TempUnschedStatusModal: true,
+        ErrorPassthroughRulesModal: true,
+        TLSFingerprintProfilesModal: true,
+        CreateAccountModal: true,
+        EditAccountModal: true,
+        BulkEditAccountModal: true,
+        PlatformTypeBadge: true,
+        AccountCapacityCell: true,
+        AccountStatusIndicator: true,
+        AccountTodayStatsCell: true,
+        AccountGroupsCell: true,
+        AccountUsageCell: true,
+        UsageProgressBar: {
+          props: ['label', 'utilization', 'resetsAt'],
+          template:
+            '<div data-test="parent-credit-bar" :data-utilization="utilization" :data-resets-at="resetsAt">{{ label }}</div>'
+        },
+        Icon: true
+      }
+    }
+  })
+
 describe('admin AccountsView — 账号行展示', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -304,6 +356,123 @@ describe('admin AccountsView — 账号行展示', () => {
     expect(badge.props('privacyMode')).toBe('false')
     expect(badge.props('subscriptionExpiresAt')).toBe('2027-01-01T00:00:00Z')
 
+    wrapper.unmount()
+  })
+
+  it('CodeBuddy 影子行显示站点徽标，站点取自母账号凭据 site（方案 N3）', async () => {
+    const parent = {
+      id: 1,
+      name: 'jossin',
+      platform: 'codebuddy',
+      type: 'oauth',
+      credentials: { site: 'intl' },
+    }
+    const shadow = {
+      id: 100,
+      name: 'jossin:intl:deepseek-v3',
+      platform: 'deepseek',
+      type: 'oauth',
+      quota_dimension: 'codebuddy',
+      parent_account_id: 1,
+      group_ids: [1],
+    }
+    listAccounts.mockResolvedValue({ items: [parent, shadow], total: 2, page: 1, page_size: 20, pages: 1 })
+
+    const wrapper = mountViewWithRow()
+    await flushPromises()
+
+    const badge = wrapper.find('[data-test="codebuddy-shadow-site-badge"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toBe('admin.accounts.codeBuddySiteIntl')
+    wrapper.unmount()
+  })
+
+  it('母账号不在当前页时，影子站点回落到影子名里的 site 段；无 site 段则不显示徽标', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        { id: 100, name: 'jossin:intl:deepseek-v3', platform: 'deepseek', type: 'oauth', quota_dimension: 'codebuddy', parent_account_id: 1, group_ids: [1] },
+        { id: 101, name: 'jossin:deepseek-v3', platform: 'deepseek', type: 'oauth', quota_dimension: 'codebuddy', parent_account_id: 1, group_ids: [2] },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+
+    const wrapper = mountViewWithRow()
+    await flushPromises()
+
+    const badges = wrapper.findAll('[data-test="codebuddy-shadow-site-badge"]')
+    expect(badges).toHaveLength(1)
+    expect(badges[0]!.text()).toBe('admin.accounts.codeBuddySiteIntl')
+    wrapper.unmount()
+  })
+
+  it('CodeBuddy 影子行额外显示「母账号」余额指示，数据取母账号快照（方案 N6）', async () => {
+    const parent = {
+      id: 1,
+      name: 'jossin',
+      platform: 'codebuddy',
+      type: 'oauth',
+      extra: {
+        codebuddy_credit_used_percent: 37,
+        codebuddy_credit_used: 370,
+        codebuddy_credit_total: 1000,
+        codebuddy_credit_reset_at: '2026-09-16T00:00:00Z',
+      },
+    }
+    const shadow = {
+      id: 100,
+      name: 'jossin:cn:deepseek-v3',
+      platform: 'deepseek',
+      type: 'oauth',
+      quota_dimension: 'codebuddy',
+      parent_account_id: 1,
+      group_ids: [1],
+    }
+    listAccounts.mockResolvedValue({ items: [parent, shadow], total: 2, page: 1, page_size: 20, pages: 1 })
+
+    const wrapper = mountViewWithUsageRow()
+    await flushPromises()
+
+    const block = wrapper.find('[data-test="codebuddy-parent-credit"]')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toContain('admin.accounts.codeBuddyParentCreditLabel')
+
+    const bar = block.find('[data-test="parent-credit-bar"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.attributes('data-utilization')).toBe('37')
+    expect(bar.attributes('data-resets-at')).toBe('2026-09-16T00:00:00Z')
+    expect(bar.text()).toBe('admin.accounts.usageWindow.codebuddyCredit')
+
+    // 影子自己的 extra 里没有额度快照 → 不得凭空渲染一份「影子自己的余额」
+    expect(wrapper.findAll('[data-test="codebuddy-parent-credit"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('母账号不在当前页时不渲染母账号余额指示（不臆造 0%）', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        {
+          id: 100,
+          name: 'jossin:cn:deepseek-v3',
+          platform: 'deepseek',
+          type: 'oauth',
+          quota_dimension: 'codebuddy',
+          parent_account_id: 1,
+          group_ids: [1],
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1,
+    })
+
+    const wrapper = mountViewWithUsageRow()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="codebuddy-parent-credit"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
