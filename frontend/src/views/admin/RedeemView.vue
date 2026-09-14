@@ -256,17 +256,29 @@
           </template>
 
           <template #cell-type="{ value }">
-            <span
-              :class="[
-                'badge',
-                value === 'balance'
-                  ? 'badge-success'
-                  : value === 'subscription'
-                    ? 'badge-warning'
-                    : 'badge-primary'
-              ]"
-            >
-              {{ t('admin.redeem.types.' + value) }}
+            <span class="inline-flex items-center gap-1.5">
+              <span
+                :class="[
+                  'badge',
+                  value === 'balance'
+                    ? 'badge-success'
+                    : value === 'subscription'
+                      ? 'badge-warning'
+                      : value === 'admin_balance' || value === 'admin_concurrency'
+                        ? 'badge-gray'
+                        : 'badge-primary'
+                ]"
+              >
+                {{ t('admin.redeem.types.' + value) }}
+              </span>
+              <!-- 管理员调整产生的审计流水，不是可兑换的卡，与真实卡密明确区分 -->
+              <span
+                v-if="value === 'admin_balance' || value === 'admin_concurrency'"
+                class="inline-flex items-center rounded-full border border-dashed border-gray-300 px-2 py-0.5 text-xs text-gray-500 dark:border-dark-600 dark:text-dark-400"
+                :title="t('admin.redeem.auditRecordBadge')"
+              >
+                {{ t('admin.redeem.auditRecordBadge') }}
+              </span>
             </span>
           </template>
 

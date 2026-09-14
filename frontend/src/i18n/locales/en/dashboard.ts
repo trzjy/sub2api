@@ -758,6 +758,11 @@ export default {
     days: ' days',
     codeRedeemSuccess: 'Code redeemed successfully!',
     failedToRedeem: 'Failed to redeem code. Please check the code and try again.',
+    codeUsed: 'This code has already been used. Each code can only be used once.',
+    codeExpired: 'This code has expired and cannot be used.',
+    codeNotFound: 'Code not found. Please check and try again.',
+    codeLocked: 'This code is being processed. Please try again later.',
+    codeRateLimited: 'Too many failed attempts. Please try again later.',
     subscriptionRefreshFailed: 'Redeemed successfully, but failed to refresh subscription status.',
     pleaseEnterCode: 'Please enter a redeem code'
   },

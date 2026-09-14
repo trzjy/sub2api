@@ -762,6 +762,11 @@ export default {
     days: '天',
     codeRedeemSuccess: '兑换成功！',
     failedToRedeem: '兑换失败，请检查兑换码后重试。',
+    codeUsed: '该兑换码已被使用，每个兑换码只能使用一次。',
+    codeExpired: '该兑换码已过期，无法使用。',
+    codeNotFound: '兑换码不存在，请检查后重试。',
+    codeLocked: '该兑换码正在处理中，请稍后重试。',
+    codeRateLimited: '失败次数过多，请稍后再试。',
     subscriptionRefreshFailed: '兑换成功，但订阅状态刷新失败。',
     pleaseEnterCode: '请输入兑换码'
   },
