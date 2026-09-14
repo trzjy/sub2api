@@ -707,10 +707,6 @@ func (s *PromoIntelService) ensureDailyDigest(ctx context.Context, b *PromoIntel
 	if cfgInt.Configured {
 		// 聚合视野：当日新增（b.Items）+ 近 7 天仍待阅/有用的优惠（跨天仍有效的
 		// 机会不该因为「页面没变化」而在今天的简报里消失）。
-		weekAgo := b.Date + "T00:00:00Z"
-		if t, err := time.Parse(time.RFC3339, weekAgo); err == nil {
-			_ = t
-		}
 		active, _, err := s.repo.ListItems(ctx, PromoIntelItemListParams{
 			Page: 1, PageSize: 120,
 			Status:     PromoIntelItemStatusPending,
