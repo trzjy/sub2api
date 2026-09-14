@@ -179,3 +179,52 @@ func TestCodeBuddyQuotaService_SupportedEffortsFromModelList(t *testing.T) {
 	svc2 := NewCodeBuddyQuotaService(repo, nil, codeBuddyModelsRecorder(modelsBody), &config.Config{})
 	require.Equal(t, []string{"low", "medium", "high"}, svc2.SupportedEffortsForModel(context.Background(), account, "codebuddy-model-a"))
 }
+
+func TestCodeBuddyQuotaService_IntlStaticModels(t *testing.T) {
+	account := &Account{ID: 8803, Platform: PlatformCodeBuddy, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "at", "site": "intl"}}
+	repo := &codeBuddyQuotaRepoStub{getByID: account}
+	upstream := &httpUpstreamRecorder{}
+	svc := &CodeBuddyQuotaService{
+		accountRepo:  repo,
+		httpUpstream: upstream,
+		cfg: &config.Config{Gateway: config.GatewayConfig{CodeBuddy: config.GatewayCodeBuddyConfig{
+			StaticModelsIntl: " deepseek-v3, GLM-4, deepseek-v3, GLM-4, , ",
+		}}},
+	}
+
+	models, err := svc.FetchModels(context.Background(), account.ID)
+	require.NoError(t, err)
+	require.Equal(t, []CodeBuddyModel{{ID: "deepseek-v3"}, {ID: "GLM-4"}}, models)
+	require.Empty(t, upstream.requests, "configured intl static models must not call upstream")
+	require.Equal(t, models, svc.cachedModels(account.ID), "static models must populate the process cache")
+}
+
+func TestCodeBuddyQuotaService_IntlStaticModelsEmptyPreservesError(t *testing.T) {
+	account := &Account{ID: 8804, Platform: PlatformCodeBuddy, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "at", "site": "intl"}}
+	repo := &codeBuddyQuotaRepoStub{getByID: account}
+	upstream := &httpUpstreamRecorder{}
+	svc := &CodeBuddyQuotaService{
+		accountRepo:  repo,
+		httpUpstream: upstream,
+		cfg:          &config.Config{},
+	}
+
+	models, err := svc.FetchModels(context.Background(), account.ID)
+	require.Error(t, err)
+	require.Nil(t, models)
+	require.Empty(t, upstream.requests, "empty static config must preserve no-upstream intl fallback")
+}
+
+func TestCodeBuddyQuotaService_FetchModelsInitializesNilCache(t *testing.T) {
+	account := healthyCodeBuddyQuotaAccount(8805)
+	repo := &codeBuddyQuotaRepoStub{getByID: account}
+	upstream := codeBuddyModelsRecorder(`{"code":0,"data":{"models":[{"id":"model-a"}]}}`)
+	svc := &CodeBuddyQuotaService{accountRepo: repo, httpUpstream: upstream, cfg: &config.Config{}}
+
+	models, err := svc.FetchModels(context.Background(), account.ID)
+	require.NoError(t, err)
+	require.Equal(t, []CodeBuddyModel{{ID: "model-a"}}, models)
+	require.Equal(t, models, svc.cachedModels(account.ID))
+}

@@ -222,9 +222,19 @@ func (s *CodeBuddyQuotaService) FetchModels(ctx context.Context, accountID int64
 		return nil, fmt.Errorf("account %d is not a codebuddy account", accountID)
 	}
 	// Phase 0 校准（D4）：intl 站点 models 端点认证后返回 HTTP 500，动态模型列表不可用。
-	// 此处直接降级返回错误（调用方 SupportedEffortsForModel 会吞掉并返回空），避免每次
-	// 热路径都向上游打一个必 500 的请求。intl 端点若恢复，删除本分支即可自动生效。
+	// 管理员可配置静态模型 ID 列表以绕过该端点；空配置保持原有错误降级行为。
 	if account.CodeBuddySite() == CodeBuddySiteIntl {
+		if s.cfg != nil {
+			if models := parseCodeBuddyStaticModels(s.cfg.Gateway.CodeBuddy.StaticModelsIntl); len(models) > 0 {
+				s.modelCacheMu.Lock()
+				if s.modelCache == nil {
+					s.modelCache = make(map[int64]codeBuddyModelCacheEntry)
+				}
+				s.modelCache[accountID] = codeBuddyModelCacheEntry{models: models, fetchedAt: time.Now()}
+				s.modelCacheMu.Unlock()
+				return models, nil
+			}
+		}
 		return nil, fmt.Errorf("codebuddy models: 国际版站点 models 端点不可用（Phase 0 实测 HTTP 500）")
 	}
 	body, _, err := s.doBillingRequest(ctx, account, http.MethodGet, codeBuddyModelsPath, nil)
@@ -236,9 +246,29 @@ func (s *CodeBuddyQuotaService) FetchModels(ctx context.Context, accountID int64
 		return nil, err
 	}
 	s.modelCacheMu.Lock()
+	if s.modelCache == nil {
+		s.modelCache = make(map[int64]codeBuddyModelCacheEntry)
+	}
 	s.modelCache[accountID] = codeBuddyModelCacheEntry{models: models, fetchedAt: time.Now()}
 	s.modelCacheMu.Unlock()
 	return models, nil
+}
+
+func parseCodeBuddyStaticModels(raw string) []CodeBuddyModel {
+	seen := make(map[string]struct{})
+	models := make([]CodeBuddyModel, 0)
+	for _, item := range strings.Split(raw, ",") {
+		id := strings.TrimSpace(item)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, CodeBuddyModel{ID: id})
+	}
+	return models
 }
 
 func (s *CodeBuddyQuotaService) parseModels(body []byte) ([]CodeBuddyModel, error) {

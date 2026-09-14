@@ -1212,12 +1212,14 @@ type PromoIntelConfig struct {
 //     默认关闭——计费响应字段需真实 token 抓包确认后再生产启用（见 PR3 计划 §7.1）。
 //   - QuotaCheckIntervalMinutes: 额度探测周期（分钟，默认 30）。
 //   - DailyCheckinEnabled: 每日签到（白嫖积分，属主动行为）。保守默认关闭。
+//   - StaticModelsIntl: 国际版静态模型 ID 列表（逗号分隔）；非空时跳过上游 models 请求。
 type GatewayCodeBuddyConfig struct {
 	ChatUserAgent            string `mapstructure:"chat_user_agent"`
 	SanitizeEnabled          bool   `mapstructure:"sanitize_enabled"`
 	QuotaCheckEnabled        bool   `mapstructure:"quota_check_enabled"`
 	QuotaCheckIntervalMinutes int   `mapstructure:"quota_check_interval_minutes"`
 	DailyCheckinEnabled      bool   `mapstructure:"daily_checkin_enabled"`
+	StaticModelsIntl         string `mapstructure:"static_models_intl"`
 	// DirectOrigin 是"代码层直连源站"覆盖表（按站点 key：cn/intl）。
 	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
 	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
@@ -2524,6 +2526,7 @@ viper.SetDefault("promo_intel.server_port", 8080)
 
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
+	viper.SetDefault("gateway.codebuddy.static_models_intl", "")
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)

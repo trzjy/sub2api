@@ -208,6 +208,10 @@ security:
 # 网关配置
 # =============================================================================
 gateway:
+  codebuddy:
+    # Comma-separated static model IDs for the intl site; empty keeps the upstream/error behavior.
+    # 国际版静态模型 ID（逗号分隔）；留空保持原有上游/错误降级行为。
+    static_models_intl: ""
   # Timeout for waiting upstream response headers (seconds)
   # 等待上游响应头超时时间（秒）
   response_header_timeout: 600
