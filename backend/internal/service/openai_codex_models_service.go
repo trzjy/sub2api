@@ -94,7 +94,43 @@ func isCodexDedicatedMediaModel(modelID string) bool {
 	canonical := codexProviderQualifiedModelID(modelID)
 	return IsGPTImageGenerationModel(canonical) ||
 		isImageGenerationModel(canonical) ||
+		isDedicatedMediaGenerationModel(canonical) ||
 		xai.IsGrokImagineModel(modelID)
+}
+
+// isDedicatedMediaGenerationModel 识别"通用图像/视频/3D 生成模型"（非 Codex agent 目录条目）。
+//
+// 这类生成模型在公共注册表（models.dev）里通常**没有 context_window/max_output_tokens**，
+// 因此必须排除出"上游模型能力元数据完整性检查"——否则每次同步都会被判为 incomplete，报出
+// "Some model capabilities were saved; remaining models are still incomplete." 的**假告警**，
+// 并把该模型错误地排除出能力快照（实测：CodeBuddy 上游的 `hunyuan-image-v3.0`；既有识别只覆盖
+// gemini-*-image / gpt-image / grok-imagine，漏掉腾讯 Hunyuan 生成模型族）。
+//
+// 判定口径：模型名按 "-" 分词后含独立 image/video/t2i/i2v 段，或命中已知生成模型族前缀。
+// 与既有 gemini-*-image、gpt-image、grok-imagine 识别互补。
+func isDedicatedMediaGenerationModel(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	m = strings.TrimPrefix(m, "models/")
+	if m == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"hunyuan-image", "hunyuan-video", "hunyuan-3d",
+		"seedream", "seedance", "cogview", "kolors", "kling",
+		"qwen-image", "qwen-video",
+		"flux", "stable-diffusion", "sdxl",
+	} {
+		if strings.HasPrefix(m, prefix) || strings.Contains(m, "/"+prefix) {
+			return true
+		}
+	}
+	for _, segment := range strings.Split(m, "-") {
+		switch segment {
+		case "image", "video", "t2i", "i2v":
+			return true
+		}
+	}
+	return false
 }
 
 func codexProviderQualifiedModelID(modelID string) string {
