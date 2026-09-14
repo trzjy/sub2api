@@ -89,8 +89,9 @@ func (r *apiKeyRepository) GetByID(ctx context.Context, id int64) (*service.APIK
 	return apiKeyEntityToService(m), nil
 }
 
-// ListAdminAPIKeys 列出管理端可见 API Key 的选择器条目（ID + 名称，无明文）。
-// 供优惠情报 self 模式选 key 用；范围：非禁用、未删除的 key，按名称升序。
+// ListAdminAPIKeys 列出**管理员本人**的 API Key 选择器条目（ID + 名称 + 拥有者邮箱，无明文）。
+// 供优惠情报 self 模式选 key 用。只列管理员（users.role=admin）自己的 key：
+// 全站用户的 key 命名不可控（"1"/"111" 之类），混进来只会污染选择器。
 func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.AdminAPIKeyRef, error) {
 	rows, err := r.client.APIKey.Query().
 		Where(apikey.And(
@@ -98,7 +99,10 @@ func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.Admi
 			apikey.StatusNEQ(service.StatusAPIKeyDisabled),
 			apikey.StatusNEQ(service.StatusAPIKeyQuotaExhausted),
 			apikey.StatusNEQ(service.StatusAPIKeyExpired),
+			apikey.HasUserWith(user.RoleEQ(service.RoleAdmin)),
 		)).
+		WithUser().
+		WithGroup().
 		Order(dbent.Asc(apikey.FieldName)).
 		All(ctx)
 	if err != nil {
@@ -106,7 +110,25 @@ func (r *apiKeyRepository) ListAdminAPIKeys(ctx context.Context) ([]service.Admi
 	}
 	out := make([]service.AdminAPIKeyRef, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, service.AdminAPIKeyRef{ID: row.ID, Name: row.Name})
+		ref := service.AdminAPIKeyRef{ID: row.ID, Name: row.Name}
+		if row.Edges.User != nil {
+			ref.OwnerEmail = row.Edges.User.Email
+		}
+		if g := row.Edges.Group; g != nil {
+			gid := g.ID
+			ref.GroupID = &gid
+			ref.GroupName = g.Name
+			ref.Platform = g.Platform
+			// ent 存的是 domain 层白名单结构；转回 service 层判定语义。
+			allowlist := service.DomainGroupModelAllowlist(service.GroupModelAllowlist{
+				Enabled: g.ModelAllowlist.Enabled,
+				Models:  append([]string{}, g.ModelAllowlist.Models...),
+			})
+			if allowlist.Enabled {
+				ref.Models = append([]string{}, allowlist.Models...)
+			}
+		}
+		out = append(out, ref)
 	}
 	return out, nil
 }

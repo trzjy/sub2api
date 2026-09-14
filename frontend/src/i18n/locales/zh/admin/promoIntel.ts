@@ -120,6 +120,8 @@ const promoIntel = {
       selfApiKeyPlaceholder: '选择一个 API Key...',
       selfApiKeyHint: '只读 key 名称，密钥明文仅服务端使用，绝不回显。',
       selfModel: '模型',
+      allowedModels: '该分组可用模型：{models}',
+      noAllowlist: '该分组未启用模型白名单，模型不受限',
       model: '模型名称',
       test: '测试连通性',
       testing: '测试中...',

@@ -140,6 +140,11 @@ export interface IntelSettings {
 export interface AdminAPIKeyRef {
   id: number
   name: string
+  owner_email: string
+  group_id: number | null
+  group_name: string
+  platform: string
+  models: string[]
 }
 
 export interface IntelSettingsUpdateParams {
