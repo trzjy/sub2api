@@ -37,3 +37,16 @@
 - [x] 6.1 四圈层候选源收集与逐个验证（可达 + SSR 正文可提取），仅通过的进入内置清单（含「仅公众号/无法抓取」标注清单）
 - [x] 6.2 种子源以静态清单 + `seed_defaults` 开关落地，服务启动幂等补种
 - [x] 6.3 `go build ./...`、`go vet` 通过；`go test -tags=unit ./...` 全仓全绿（顺带修复了分支上既有的测试编译破损与 settings 契约过期期望）；`vue-tsc`、`pnpm build`、i18n 完整性测试全绿
+
+
+## 7. 上线后迭代（2026-09-14，用户反馈驱动；全部已部署并验收）
+
+- [x] 7.1 整理模型改「本系统中转网关」自选：source(self/external) + protocol(openai/anthropic) + 管理员 API Key 下拉（仅管理员本人，带分组/可用模型）+ 模型候选；Anthropic /v1/messages 原生支持（ea6045e3e、dbc956a67、b331522fe）
+- [x] 7.2 连通性测试失败明文化：模型白名单拒绝附被拒模型名+可用清单、端点不可达分类，不再兜底 internal error（ac8e7707d、82a73afef）
+- [x] 7.3 每日简报「今日速读」：LLM 汇总当日新增 + 近 7 天仍有效（pending+high），当日缓存 + refresh 强制重生成 + 无 LLM 文本兜底；前端速读卡 + 重新生成按钮（2692b375c、973037249、ed0e24cc0）
+- [x] 7.4 上线热修：到期扫描 SQL ::timestamptz、摘录 rune 截断 + NUL 剔除、补跑通道（0ffb37b5e、b2bfa9353、1070f7b39）
+- [x] 7.5 生产实测与验收证据落盘：/home/zjy/.sub2api-acceptance/promo-intel-20260914/（00-deploy + 10-live-api + 20-db-state + 99-final-report，脱敏）
+
+## Non-goals 增补（演进后）
+- 原第 3 条「LLM 整理层：可配置独立 OpenAI 兼容端点」已演进为：默认 self（本系统中转网关 + 管理员已有 Key + 任意已有模型，双协议）；external 自定义端点降级为高级选项。
+- 已知限制（记录不阻塞）：速读按 UTC 切日；速读缓存按当日条目数失效；「有用」条目不参与速读聚合；promo_intel.server_port 为 wire 传入 serverBaseURL 缺失时的兜底（当前恒有值，实际未生效）。
