@@ -12,6 +12,7 @@ const promoIntel = {
       total: '当日 {n} 条',
       high: '高相关 {n}',
       pending: '待阅 {n}',
+      regenerate: '重新生成速读',
     },
     items: {
       searchPlaceholder: '搜索标题/摘要/详情...',

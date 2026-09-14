@@ -12,6 +12,7 @@ const promoIntel = {
       total: '{n} today',
       high: '{n} high relevance',
       pending: '{n} unread',
+      regenerate: 'Regenerate digest',
     },
     items: {
       searchPlaceholder: 'Search title/summary/details...',

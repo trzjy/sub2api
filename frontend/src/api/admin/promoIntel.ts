@@ -118,6 +118,7 @@ export interface Briefing {
   total: number
   high_count: number
   pending: number
+  digest: string
   by_vendor: Record<string, number>
   by_category: Record<string, number>
   items: PromoIntelItem[]
@@ -205,9 +206,9 @@ export async function updateItemStatus(id: number, status: PromoIntelItemStatus)
   return data
 }
 
-export async function getBriefing(date?: string): Promise<Briefing> {
+export async function getBriefing(date?: string, refresh = false): Promise<Briefing> {
   const { data } = await apiClient.get<Briefing>('/admin/promo-intel/briefing', {
-    params: date ? { date } : {},
+    params: { ...(date ? { date } : {}), ...(refresh ? { refresh: '1' } : {}) },
   })
   return data
 }

@@ -55,7 +55,15 @@
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="flex items-center gap-2">
               <h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.promoIntel.briefing.title') }}</h2>
-              <input v-model="briefingDate" type="date" class="input h-8 w-40 text-xs" @change="reloadBriefing" />
+              <input v-model="briefingDate" type="date" class="input h-8 w-40 text-xs" @change="reloadBriefing(false)" />
+              <button
+                type="button"
+                class="rounded-lg px-2 py-1 text-xs font-medium text-blue-500 transition hover:bg-blue-50 disabled:opacity-50 dark:hover:bg-blue-900/30"
+                :disabled="briefingLoading"
+                @click="reloadBriefing(true)"
+              >
+                {{ t('admin.promoIntel.briefing.regenerate') }}
+              </button>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
               <span class="rounded-lg bg-gray-100 px-2.5 py-1 font-semibold text-gray-700 dark:bg-dark-700 dark:text-gray-200">
@@ -69,6 +77,10 @@
               </span>
             </div>
           </div>
+          <div
+            v-if="briefing?.digest"
+            class="mt-3 whitespace-pre-wrap rounded-2xl bg-amber-50/70 p-4 text-xs leading-relaxed text-gray-700 dark:bg-amber-900/20 dark:text-gray-200"
+          >{{ briefing.digest }}</div>
           <div v-if="briefing && briefing.total > 0" class="mt-3 flex flex-wrap gap-1.5">
             <span
               v-for="(count, vendor) in briefing.by_vendor"
@@ -575,6 +587,7 @@ const activeTab = ref<'items' | 'sources' | 'settings'>('items')
 const intelItems = ref<PromoIntelItem[]>([])
 const itemsLoading = ref(false)
 const briefing = ref<Briefing | null>(null)
+const briefingLoading = ref(false)
 const briefingDate = ref(todayStr())
 
 const itemFilters = reactive({
@@ -625,11 +638,14 @@ function statusBadgeClass(s: string): string {
   }
 }
 
-async function reloadBriefing() {
+async function reloadBriefing(refresh = false) {
+  briefingLoading.value = true
   try {
-    briefing.value = await adminAPI.promoIntel.getBriefing(briefingDate.value || undefined)
+    briefing.value = await adminAPI.promoIntel.getBriefing(briefingDate.value || undefined, refresh)
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.promoIntel.items.loadError')))
+  } finally {
+    briefingLoading.value = false
   }
 }
 
