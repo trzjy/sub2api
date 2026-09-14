@@ -266,6 +266,7 @@ export default {
         admin_balance: '余额（管理员）',
         admin_concurrency: '并发数（管理员）'
       },
+      auditRecordBadge: '审计记录',
       // 用于选择器和筛选器的直接键
       balance: '余额',
       concurrency: '并发数',

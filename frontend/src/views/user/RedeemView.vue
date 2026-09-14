@@ -468,7 +468,20 @@ const handleRedeem = async () => {
     // Show success toast
     appStore.showSuccess(t('redeem.codeRedeemSuccess'))
   } catch (error: any) {
-    errorMessage.value = error.response?.data?.detail || t('redeem.failedToRedeem')
+    // 后端错误信封经拦截器归一化为 { status, code, reason, message }。
+    // 按 reason 错误码映射明确提示，未识别错误回退到后端消息或通用兜底文案。
+    const reason = error?.reason || error?.code
+    const reasonMessages: Record<string, string> = {
+      REDEEM_CODE_USED: t('redeem.codeUsed'),
+      REDEEM_CODE_EXPIRED: t('redeem.codeExpired'),
+      REDEEM_CODE_NOT_FOUND: t('redeem.codeNotFound'),
+      REDEEM_CODE_LOCKED: t('redeem.codeLocked'),
+      REDEEM_RATE_LIMITED: t('redeem.codeRateLimited')
+    }
+    errorMessage.value =
+      (typeof reason === 'string' && reasonMessages[reason]) ||
+      error.message ||
+      t('redeem.failedToRedeem')
 
     appStore.showError(t('redeem.redeemFailed'))
   } finally {

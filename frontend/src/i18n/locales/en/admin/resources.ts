@@ -332,6 +332,7 @@ export default {
         admin_balance: 'Balance (Admin)',
         admin_concurrency: 'Concurrency (Admin)'
       },
+      auditRecordBadge: 'Audit record',
       selectGroup: 'Select Group',
       selectGroupPlaceholder: 'Choose a subscription group',
       validityDays: 'Validity Days',
