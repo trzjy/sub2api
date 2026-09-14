@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -151,11 +150,9 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 	return earliest
 }
 
-// cnNonQuota429Cooldown 非配额型 429 的默认短冷却（官方语义「稍后重试」）。
-const cnNonQuota429Cooldown = 90 * time.Second
-
-// cnNonQuota429CooldownMax Retry-After 的接受上限，防止异常大值造成长禁闭。
-const cnNonQuota429CooldownMax = 10 * time.Minute
+// cnNonQuota429Cooldown 非配额型 429 的固定短冷却：中转上游按分钟重置限额，
+// 61 秒确保落入下一分钟窗口；忽略上游 Retry-After（其语义对本场景不可靠）。
+const cnNonQuota429Cooldown = 61 * time.Second
 
 // cnNonQuota429Reason 非配额型 429 临时停调 reason 的稳定前缀。
 const cnNonQuota429Reason = "cn_429_short_retry: upstream 429 with quota headroom, retry shortly"
@@ -259,7 +256,6 @@ func cnQuotaSnapshotAnyWindowExhausted(extra map[string]any, provider string) bo
 func (s *RateLimitService) applyCNProviderReactive429(
 	ctx context.Context,
 	account *Account,
-	headers http.Header,
 	responseBody []byte,
 ) bool {
 	if !account.IsCNProvider() {
@@ -273,8 +269,8 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	// 2) 额度判定直接读官方用量快照（与前端「用量窗口」同一数据源），不看响应
 	// 文案——文案措辞不可靠（火山把瞬时过载也写成 429），官方用量百分比才是权威：
 	//    - 任一窗口触顶（≥99%）→ 窗口耗尽，冷却到该窗口重置点
-	//    - 否则（余量充足或快照缺失）→ 短冷却稍后重试（Retry-After 优先，上限
-	//      10 分钟、默认 90s）；真实耗尽由周期额度探测的阈值停调接管
+	//    - 否则（余量充足或快照缺失）→ 固定 61 秒短冷却（中转上游按分钟重置，
+	//      忽略 Retry-After）；真实耗尽由周期额度探测的阈值停调接管
 	// 判定用 resolveCNQuotaProvider（兼容 payg 火山）而非 GetCodingPlanProvider，
 	// 否则 payg 火山号的 429 读不到 volcano_* 快照。
 	provider := resolveCNQuotaProvider(account)
@@ -293,12 +289,6 @@ func (s *RateLimitService) applyCNProviderReactive429(
 			return true
 		}
 		until := time.Now().Add(cnNonQuota429Cooldown)
-		if ra := parseRetryAfterResetTime(headers, time.Now()); ra != nil && ra.After(time.Now()) {
-			until = *ra
-			if max := time.Now().Add(cnNonQuota429CooldownMax); until.After(max) {
-				until = max
-			}
-		}
 		s.notifyAccountSchedulingBlocked(account, until, "429_short_retry")
 		if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, cnNonQuota429Reason); err != nil {
 			slog.Warn("cn_429_short_cooldown_set_failed", "account_id", account.ID, "error", err)
