@@ -1776,7 +1776,7 @@ func (s *defaultOpenAIAccountScheduler) codeBuddyRPMAllowsCandidate(ctx context.
 	if s == nil || s.service == nil || !codeBuddyRPMGated(account) {
 		return true
 	}
-	count, ok := codeBuddyRPMCountFromContext(ctx, account.ID)
+	count, ok := codeBuddyRPMCountFromContext(ctx, codeBuddyRPMKeyAccountID(account))
 	if !ok {
 		count = -1
 	}
@@ -1791,7 +1791,7 @@ func (s *defaultOpenAIAccountScheduler) codeBuddyRPMAllowsSticky(ctx context.Con
 	}
 	currentRPM := -1
 	if s.service.rpmCache != nil {
-		if count, err := s.service.rpmCache.GetRPM(ctx, account.ID); err == nil {
+		if count, err := s.service.rpmCache.GetRPM(ctx, codeBuddyRPMKeyAccountID(account)); err == nil {
 			currentRPM = count
 		}
 	}

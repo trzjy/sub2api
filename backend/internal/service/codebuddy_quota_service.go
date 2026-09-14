@@ -46,12 +46,33 @@ var codeBuddyQuotaInstance *CodeBuddyQuotaService
 
 // CodeBuddyModel 是动态模型列表中的单个模型（§2.3）。
 type CodeBuddyModel struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	MaxInputTokens   int64    `json:"maxInputTokens"`
-	MaxOutputTokens  int64    `json:"maxOutputTokens"`
-	Disabled         bool     `json:"disabled"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	MaxInputTokens   int64                 `json:"maxInputTokens"`
+	MaxOutputTokens  int64                 `json:"maxOutputTokens"`
+	Disabled         bool                  `json:"disabled"`
+	// SupportedEfforts 兼容顶层 supportedEfforts；真实报文亦可能把档位放在
+	// reasoning.supportedEfforts（见 CodeBuddyReasoningInfo），读取统一走 EffortLevels()。
+	SupportedEfforts []string                `json:"supportedEfforts"`
+	Reasoning        *CodeBuddyReasoningInfo `json:"reasoning,omitempty"`
+}
+
+// CodeBuddyReasoningInfo 是模型 reasoning 元数据（§2.3 报文形态之一）。
+type CodeBuddyReasoningInfo struct {
+	Effort           string   `json:"effort"`
 	SupportedEfforts []string `json:"supportedEfforts"`
+}
+
+// EffortLevels 返回模型的 reasoning 档位，兼容顶层与 reasoning 嵌套两种报文形态。
+// 供 F5 目录快照（codeBuddyUpstreamCatalogBody）与热路径 reasoning_effort 降级统一读取。
+func (m CodeBuddyModel) EffortLevels() []string {
+	if len(m.SupportedEfforts) > 0 {
+		return m.SupportedEfforts
+	}
+	if m.Reasoning != nil {
+		return m.Reasoning.SupportedEfforts
+	}
+	return nil
 }
 
 // CodeBuddyQuotaProbeResult 是积分额度探测的返回结构（管理端 + UI 消费）。

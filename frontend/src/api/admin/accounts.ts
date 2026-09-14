@@ -1038,6 +1038,27 @@ export async function createSparkShadow(parentId: number, payload: SparkShadowCr
   return data
 }
 
+export interface CodeBuddyShadowCreatePayload {
+  name?: string
+  priority?: number
+  concurrency?: number
+  group_ids?: number[]
+  /** 影子目标分组平台（deepseek/zhipu/kimi/minimax/other），缺省按 model 推断。 */
+  platform?: string
+  /** 影子所服务的上游模型名（一母多影按模型去重）。 */
+  model?: string
+}
+
+/**
+ * 为 CodeBuddy OAuth 母账号批量/单个创建 codebuddy 影子账号。后端复用同一 `/shadow`
+ * 端点，按母账号平台决定维度：codebuddy 母 → codebuddy 维度、一母多影、platform=目标平台、
+ * 凭证空透传母账号。
+ */
+export async function createCodeBuddyShadow(parentId: number, payload: CodeBuddyShadowCreatePayload): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${parentId}/shadow`, payload)
+  return data
+}
+
 export async function getUpstreamBillingProbeSettings(): Promise<UpstreamBillingProbeSettings> {
   const { data } = await apiClient.get<UpstreamBillingProbeSettings>('/admin/accounts/upstream-billing-probe/settings')
   return data
@@ -1167,6 +1188,7 @@ export const accountsAPI = {
   refreshOpenAIQuota,
   resetOpenAIQuota,
   createSparkShadow,
+  createCodeBuddyShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,
   setUpstreamBillingProbeEnabled,

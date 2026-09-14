@@ -83,7 +83,7 @@ type Account struct {
 	SessionWindowStatus *string `json:"session_window_status,omitempty"`
 	// Parent account id for a linked spark shadow (NULL = normal).
 	ParentAccountID *int64 `json:"parent_account_id,omitempty"`
-	// 'global' (default) or 'spark' (shadow reads codex_bengalfox).
+	// 'global' (default), 'spark' (OpenAI OAuth parent's spark shadow) or 'codebuddy' (CodeBuddy OAuth parent's shadow).
 	QuotaDimension account.QuotaDimension `json:"quota_dimension,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AccountQuery when eager-loading is set.

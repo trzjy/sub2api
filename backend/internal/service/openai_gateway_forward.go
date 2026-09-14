@@ -154,6 +154,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardGrokResponses(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
+	// CodeBuddy 影子分发跟随母账号（方案 G2）：影子 platform 是目标分组平台
+	// （deepseek/zhipu/kimi/minimax/other），不会命中下方 PlatformCodeBuddy 分支，
+	// 必须在此前置路由到 forwardCodeBuddy，由其解析母账号凭证/site/uid/enterprise_id/domain。
+	// 母账号必为 CodeBuddy OAuth（CreateShadow 已保证 QuotaDimension=codebuddy 仅用于 codebuddy 母）。
+	if account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy {
+		return s.forwardCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
+	}
+
 	// CodeBuddy（腾讯）原生接入：Chat Completions 变体，走独立转发分支以隔离其改写
 	// 管线 / 指纹头 / 错误分类，避免被 OpenAI Responses 归一化路径误改写出站请求体。
 	if account.Platform == PlatformCodeBuddy {

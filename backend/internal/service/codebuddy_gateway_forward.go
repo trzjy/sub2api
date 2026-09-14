@@ -38,6 +38,18 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		return nil, fmt.Errorf("codebuddy account type %s is not supported", account.Type)
 	}
 
+	// 解析凭据母账号：CodeBuddy 影子（platform=目标分组平台）凭证透传母账号——
+	// 母账号的 access_token / site / uid / enterprise_id / domain 才是出站的真正身份。
+	// 原生 CodeBuddy 账号 credAccount == account。模型映射与审计事件仍用 account（影子）。
+	credAccount := account
+	if account.IsShadow() {
+		parent, perr := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if perr != nil {
+			return nil, perr
+		}
+		credAccount = parent
+	}
+
 	upstreamModel := account.GetMappedModel(originalModel)
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
@@ -46,7 +58,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 	opts := CodeBuddyRewriteOptions{
 		Sanitize:         s.codeBuddySanitizeEnabled(),
 		Model:            upstreamModel,
-		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, account, upstreamModel),
+		SupportedEfforts: codeBuddyResolveSupportedEfforts(ctx, credAccount, upstreamModel),
 	}
 
 	// §2.5 规则 1-7：出站前改写（强制 stream:true、tool_choice 归一、developer 角色、
@@ -60,7 +72,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		return nil, err
 	}
 
-	token, _, err := s.getRequestCredential(ctx, c, account)
+	token, _, err := s.getRequestCredential(ctx, c, credAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +99,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 				sendBody = sb
 			}
 		}
-		upstreamReq, buildErr := s.buildCodeBuddyChatRequest(upstreamCtx, c, account, sendBody, token, upstreamModel)
+		upstreamReq, buildErr := s.buildCodeBuddyChatRequest(upstreamCtx, c, credAccount, sendBody, token, upstreamModel)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -189,6 +201,7 @@ func (s *OpenAIGatewayService) buildCodeBuddyChatRequest(
 	req.Header.Set("X-Product", "SaaS")
 
 	// §2.4 chat 追加头：空值用 X-No-*: 1 占位（避免上游对空 header 的歧义处理）。
+	// 这些身份头来自母账号（调用方已把 account 解析为母账号；影子自身凭证为空）。
 	uid := account.GetCredential("uid")
 	enterpriseID := account.GetCredential("enterprise_id")
 	domain := account.GetCredential("domain")

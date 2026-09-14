@@ -740,6 +740,32 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return models, nil, nil, err
 	}
 
+	// CodeBuddy 上游模型列表（F5）：codebuddy 父账号（platform=codebuddy）与 codebuddy
+	// 影子账号（platform 为目标厂商、quota_dimension=codebuddy）都走动态模型拉取 + 目录
+	// 报文映射。影子账号自身无凭证、platform 非 codebuddy，需先解析父账号再拉取。
+	if account.Platform == PlatformCodeBuddy || (account.IsShadow() && account.QuotaDimension == QuotaDimensionCodeBuddy) {
+		credAccount := account
+		if account.IsShadow() {
+			parent, perr := resolveCredentialAccount(ctx, s.accountRepo, account)
+			if perr != nil {
+				return nil, nil, nil, newUpstreamModelSyncUpstreamError("Failed to resolve codebuddy parent for model sync", perr)
+			}
+			credAccount = parent
+		}
+		if codeBuddyQuotaInstance == nil {
+			return nil, nil, nil, newUpstreamModelSyncConfigError("CodeBuddy quota service is not configured for model sync", nil)
+		}
+		cbModels, ferr := codeBuddyQuotaInstance.FetchModels(ctx, credAccount.ID)
+		if ferr != nil {
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("Failed to fetch codebuddy upstream models", ferr)
+		}
+		body, ids, merr := codeBuddyUpstreamCatalogBody(cbModels)
+		if merr != nil {
+			return nil, nil, nil, newUpstreamModelSyncInternalError("Failed to build codebuddy catalog body", merr)
+		}
+		return ids, body, nil, nil
+	}
+
 	if s.httpUpstream == nil {
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
 	}

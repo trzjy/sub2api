@@ -215,8 +215,8 @@ func (Account) Fields() []ent.Field {
 
 		field.Int64("parent_account_id").Optional().Nillable().
 			Comment("Parent account id for a linked spark shadow (NULL = normal)."),
-		field.Enum("quota_dimension").Values("global", "spark").Default("global").
-			Comment("'global' (default) or 'spark' (shadow reads codex_bengalfox)."),
+		field.Enum("quota_dimension").Values("global", "spark", "codebuddy").Default("global").
+			Comment("'global' (default), 'spark' (OpenAI OAuth parent's spark shadow) or 'codebuddy' (CodeBuddy OAuth parent's shadow)."),
 	}
 }
 
