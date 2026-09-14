@@ -537,12 +537,15 @@ func TestBriefingAggregation(t *testing.T) {
 	repo.items[1] = &PromoIntelItem{ID: 1, Vendor: "deepseek", Category: PromoIntelCategoryPriceChange,
 		Relevance: PromoIntelRelevanceHigh, Status: PromoIntelItemStatusPending,
 		DigestDate: promoDatePtr(time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC))}
-	b, err := svc.GetBriefing(context.Background(), "2026-09-13")
+	b, err := svc.GetBriefing(context.Background(), "2026-09-13", false)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), b.Total)
 	require.Equal(t, int64(1), b.HighCount)
 	require.Equal(t, int64(1), b.ByVendor["deepseek"])
-	_, err = svc.GetBriefing(context.Background(), "not-a-date")
+	// 无 LLM 时速读退化为自动文本摘要，永远非空。
+	require.NotEmpty(t, b.Digest)
+	require.Contains(t, b.Digest, "今日新增 1 条")
+	_, err = svc.GetBriefing(context.Background(), "not-a-date", false)
 	require.Error(t, err)
 }
 

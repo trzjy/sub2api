@@ -58,6 +58,19 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 	capped := capPromoIntelRunes(text, s.llmMaxTextChars())
 	userMsg := fmt.Sprintf("厂商: %s\n页面: %s\n正文:\n<<<\n%s\n>>>", source.Vendor, source.URL, capped)
 
+	content, err := s.promoIntelComplete(ctx, llmCfg, promoIntelSystemPrompt, userMsg)
+	if err != nil {
+		return nil, err
+	}
+	return parsePromoIntelOffersJSON(content)
+}
+
+// promoIntelComplete 按模式与协议发一次补全请求，返回首段文本。
+//   - self（本系统中转网关）：POST <内部 base>/v1/messages（anthropic）或
+//     /v1/chat/completions（openai），Authorization: Bearer <管理员 API Key 明文>；
+//   - external（自定义端点）：POST base_url/chat/completions（openai）或
+//     base_url/v1/messages（anthropic）。
+func (s *PromoIntelService) promoIntelComplete(ctx context.Context, llmCfg promoIntelLLMSettingsInternal, systemPrompt, userMsg string) (string, error) {
 	// self 模式：网关对内地址（配置优先，回退 http://localhost:<port>）。
 	baseURL := llmCfg.BaseURL
 	if s.apiKeyLister != nil && llmCfg.SelfAPIKey != "" {
@@ -68,18 +81,17 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 	var reqBody []byte
 	switch llmCfg.Protocol {
 	case PromoIntelLLMProtocolAnthropic:
-		// 复用系统提示词作为 system 消息，正文作为 user 消息。
 		anthropicPayload := map[string]any{
 			"model":      llmCfg.Model,
 			"max_tokens": 4096,
-			"system":     promoIntelSystemPrompt,
+			"system":     systemPrompt,
 			"messages": []map[string]string{
 				{"role": "user", "content": userMsg},
 			},
 		}
 		body, err := json.Marshal(anthropicPayload)
 		if err != nil {
-			return nil, fmt.Errorf("marshal anthropic request: %w", err)
+			return "", fmt.Errorf("marshal anthropic request: %w", err)
 		}
 		endpoint = strings.TrimRight(baseURL, "/") + "/v1/messages"
 		reqBody = body
@@ -87,7 +99,7 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 		payload := map[string]any{
 			"model": llmCfg.Model,
 			"messages": []map[string]string{
-				{"role": "system", "content": promoIntelSystemPrompt},
+				{"role": "system", "content": systemPrompt},
 				{"role": "user", "content": userMsg},
 			},
 			"temperature": 0.2,
@@ -95,7 +107,7 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
-			return nil, fmt.Errorf("marshal llm request: %w", err)
+			return "", fmt.Errorf("marshal llm request: %w", err)
 		}
 		endpoint = promoIntelChatCompletionsEndpoint(baseURL, s.apiKeyLister != nil && llmCfg.SelfAPIKey != "")
 		reqBody = body
@@ -103,7 +115,7 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("build llm request: %w", err)
+		return "", fmt.Errorf("build llm request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if llmCfg.SelfAPIKey != "" {
@@ -119,19 +131,18 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 	client := s.promoIntelLLMClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm request failed: %w", err)
+		return "", fmt.Errorf("llm request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, promoIntelLLMResponseMaxBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read llm response: %w", err)
+		return "", fmt.Errorf("read llm response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("llm endpoint returned HTTP %d: %s", resp.StatusCode, truncatePromoIntelString(string(respBody), 300))
+		return "", fmt.Errorf("llm endpoint returned HTTP %d: %s", resp.StatusCode, truncatePromoIntelString(string(respBody), 300))
 	}
 
-	// 提取第一段文本：OpenAI 取 choices[0].message.content；Anthropic 取
-	// content[0].text。两种都兜底取整段响应由 parsePromoIntelOffersJSON 宽容解析。
+	// 提取第一段文本：OpenAI 取 choices[0].message.content；Anthropic 取 content[0].text。
 	content := ""
 	switch llmCfg.Protocol {
 	case PromoIntelLLMProtocolAnthropic:
@@ -156,9 +167,36 @@ func (s *PromoIntelService) extractOffersWithLLM(ctx context.Context, source *Pr
 		}
 	}
 	if content == "" {
-		return nil, fmt.Errorf("llm response has no text content")
+		return "", fmt.Errorf("llm response has no text content")
 	}
-	return parsePromoIntelOffersJSON(content)
+	return content, nil
+}
+
+// promoIntelDigestPrompt 是「今日速读」的系统提示词。
+const promoIntelDigestPrompt = `你是面向 API 聚合转售业务的情报编辑。根据下面的情报条目写一份「今日速读」，让老板 1 分钟读完：
+1. 第一行：一句话总览（今日几条新情报、最值得注意的一件事）。
+2. 「值得行动」：只列有真金白银的优惠/活动/额度（厂商、内容、力度、期限），按价值从高到低，最多 6 条，每条一行。
+3. 「动态」：新模型/新产品/政策变化，一行一条，最多 5 条。
+要求：简体中文；直接给内容，不要客套和总结性废话；「值得行动」为空就写"今日无可直接行动的优惠"。`
+
+// generateDailyDigest 用 LLM 生成今日速读（纯文本）。
+func (s *PromoIntelService) generateDailyDigest(ctx context.Context, llmCfg promoIntelLLMSettingsInternal, b *PromoIntelBriefing) (string, error) {
+	var lines []string
+	for _, it := range b.Items {
+		if len(lines) >= 80 {
+			break
+		}
+		line := fmt.Sprintf("- [%s|%s|%s] %s：%s", it.Vendor, it.Category, it.Relevance, it.Title, it.Summary)
+		if it.DiscountInfo != "" {
+			line += "（力度：" + it.DiscountInfo + "）"
+		}
+		if it.ValidUntil != "" {
+			line += "（期限：" + it.ValidUntil + "）"
+		}
+		lines = append(lines, line)
+	}
+	userMsg := fmt.Sprintf("日期 %s，共 %d 条：\n%s", b.Date, b.Total, strings.Join(lines, "\n"))
+	return s.promoIntelComplete(ctx, llmCfg, promoIntelDigestPrompt, capPromoIntelRunes(userMsg, s.llmMaxTextChars()))
 }
 
 // selfGatewayBaseURL 返回本系统中转网关的对内地址。

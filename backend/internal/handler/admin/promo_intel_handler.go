@@ -292,7 +292,7 @@ func (h *PromoIntelHandler) UpdateItemStatus(c *gin.Context) {
 
 // GetBriefing GET /admin/promo-intel/briefing?date=YYYY-MM-DD
 func (h *PromoIntelHandler) GetBriefing(c *gin.Context) {
-	briefing, err := h.intelService.GetBriefing(c.Request.Context(), strings.TrimSpace(c.Query("date")))
+	briefing, err := h.intelService.GetBriefing(c.Request.Context(), strings.TrimSpace(c.Query("date")), c.Query("refresh") == "1")
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

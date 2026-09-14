@@ -201,6 +201,9 @@ type PromoIntelBriefing struct {
 	Total      int64             `json:"total"`
 	HighCount  int64             `json:"high_count"`
 	Pending    int64             `json:"pending"`
+	// Digest 是 LLM 生成的「今日速读」：总览 + 值得行动的优惠 + 动态。
+	// 聚合当日新增 + 近 7 天仍有效的优惠；LLM 不可用时为自动文本兜底。
+	Digest     string            `json:"digest"`
 	ByVendor   map[string]int64  `json:"by_vendor"`
 	ByCategory map[string]int64  `json:"by_category"`
 	Items      []*PromoIntelItem `json:"items"`

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -646,8 +647,9 @@ func (s *PromoIntelService) UpdateItemStatus(ctx context.Context, id int64, stat
 	return s.repo.GetItemByID(ctx, id)
 }
 
-// GetBriefing 每日简报：按发现日期聚合当日全部情报（默认今天，UTC）。
-func (s *PromoIntelService) GetBriefing(ctx context.Context, date string) (*PromoIntelBriefing, error) {
+// GetBriefing 每日简报：按发现日期聚合当日全部情报（默认今天，UTC），
+// 并生成「今日速读」（LLM 汇总当日新增 + 近 7 天仍有效的优惠；带当日缓存）。
+func (s *PromoIntelService) GetBriefing(ctx context.Context, date string, refresh bool) (*PromoIntelBriefing, error) {
 	day, err := parsePromoIntelDate(date)
 	if err != nil {
 		return nil, err
@@ -679,7 +681,111 @@ func (s *PromoIntelService) GetBriefing(ctx context.Context, date string) (*Prom
 			briefing.Pending++
 		}
 	}
+	briefing.Digest = s.ensureDailyDigest(ctx, briefing, refresh)
 	return briefing, nil
+}
+
+// ensureDailyDigest 取当日速读：优先当日缓存（条目数变化自动失效），
+// 缺失/refresh 时用 LLM 生成（聚合当日新增 + 近 7 天仍有效的优惠），
+// LLM 不可用/失败退化为自动文本摘要——速读永远非空。
+func (s *PromoIntelService) ensureDailyDigest(ctx context.Context, b *PromoIntelBriefing, refresh bool) string {
+	cacheKey := "promo_intel_digest_" + b.Date
+	if !refresh && s.settings != nil {
+		if vals, err := s.settings.GetMultiple(ctx, []string{cacheKey}); err == nil {
+			var cached struct {
+				Digest   string `json:"digest"`
+				NewCount int64  `json:"new_count"`
+			}
+			if json.Unmarshal([]byte(vals[cacheKey]), &cached) == nil && cached.Digest != "" && cached.NewCount == b.Total {
+				return cached.Digest
+			}
+		}
+	}
+
+	digest := ""
+	cfgInt := s.promoIntelLLMSettings(ctx)
+	if cfgInt.Configured {
+		// 聚合视野：当日新增（b.Items）+ 近 7 天仍待阅/有用的优惠（跨天仍有效的
+		// 机会不该因为「页面没变化」而在今天的简报里消失）。
+		weekAgo := b.Date + "T00:00:00Z"
+		if t, err := time.Parse(time.RFC3339, weekAgo); err == nil {
+			_ = t
+		}
+		active, _, err := s.repo.ListItems(ctx, PromoIntelItemListParams{
+			Page: 1, PageSize: 120,
+			Status:     PromoIntelItemStatusPending,
+			Relevance:  PromoIntelRelevanceHigh,
+			DigestDate: "",
+			Search:     "",
+		})
+		if err == nil && len(active) > 0 {
+			// 去掉当日已在 b.Items 里的（按指纹），近 7 天窗口在内存过滤。
+			seen := make(map[string]struct{}, len(b.Items))
+			for _, it := range b.Items {
+				seen[it.Fingerprint] = struct{}{}
+			}
+			cutoff := s.nowFn().UTC().AddDate(0, 0, -7)
+			var merged []*PromoIntelItem
+			merged = append(merged, b.Items...)
+			for _, it := range active {
+				if _, dup := seen[it.Fingerprint]; dup {
+					continue
+				}
+				if it.CreatedAt.Before(cutoff) {
+					continue
+				}
+				merged = append(merged, it)
+			}
+			view := &PromoIntelBriefing{Date: b.Date, Total: b.Total, HighCount: b.HighCount, Items: merged}
+			if d, err := s.generateDailyDigest(ctx, cfgInt, view); err == nil && strings.TrimSpace(d) != "" {
+				digest = strings.TrimSpace(d)
+			}
+		} else if err == nil {
+			if d, err := s.generateDailyDigest(ctx, cfgInt, b); err == nil && strings.TrimSpace(d) != "" {
+				digest = strings.TrimSpace(d)
+			}
+		}
+	}
+	if digest == "" {
+		digest = s.fallbackDigest(b)
+	}
+
+	if s.settings != nil {
+		if payload, err := json.Marshal(map[string]any{
+			"digest": digest, "new_count": b.Total, "generated_at": s.nowFn().UTC().Format(time.RFC3339),
+		}); err == nil {
+			_ = s.settings.Set(ctx, cacheKey, string(payload))
+		}
+	}
+	return digest
+}
+
+// fallbackDigest 无 LLM 时的自动文本摘要（始终非空）。
+func (s *PromoIntelService) fallbackDigest(b *PromoIntelBriefing) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "今日新增 %d 条情报（高相关 %d）。\n值得关注的：", b.Total, b.HighCount)
+	shown := 0
+	for _, it := range b.Items {
+		if it.Relevance != PromoIntelRelevanceHigh {
+			continue
+		}
+		line := fmt.Sprintf("[%s] %s", it.Vendor, it.Title)
+		if it.DiscountInfo != "" {
+			line += "（" + it.DiscountInfo + "）"
+		}
+		if shown > 0 {
+			sb.WriteString("；")
+		}
+		sb.WriteString(line)
+		shown++
+		if shown >= 8 {
+			break
+		}
+	}
+	if shown == 0 {
+		sb.WriteString("今日暂无高相关新情报。")
+	}
+	return sb.String()
 }
 
 // parsePromoIntelDate 解析 YYYY-MM-DD；空串返回零值（表示默认今天）。
