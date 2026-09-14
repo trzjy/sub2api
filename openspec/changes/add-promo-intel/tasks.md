@@ -49,4 +49,5 @@
 
 ## Non-goals 增补（演进后）
 - 原第 3 条「LLM 整理层：可配置独立 OpenAI 兼容端点」已演进为：默认 self（本系统中转网关 + 管理员已有 Key + 任意已有模型，双协议）；external 自定义端点降级为高级选项。
-- 已知限制（记录不阻塞）：速读按 UTC 切日；速读缓存按当日条目数失效；「有用」条目不参与速读聚合；promo_intel.server_port 为 wire 传入 serverBaseURL 缺失时的兜底（当前恒有值，实际未生效）。
+- 已知限制（记录不阻塞）：速读切日已改北京时间（c4f761bde，原为 UTC）；速读缓存按当日条目数失效；「有用」条目不参与速读聚合；promo_intel.server_port 为 wire 传入 serverBaseURL 缺失时的兜底（当前恒有值，实际未生效）。
+- [x] 7.6 简报切日改北京时间（用户要求）：digest_date 归属与默认今天统一东八区；切日边界回归测试；顺带修复 main 上 TestParentHealthyForShadow 双定义编译阻断（c4f761bde）
