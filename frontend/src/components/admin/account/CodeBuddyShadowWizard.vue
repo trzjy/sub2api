@@ -19,6 +19,23 @@
               >{{ siteLabel }}</span>
             </h3>
             <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.codeBuddyWizardOpen', { name: parent.name }) }}</p>
+            <!-- 方案 §0 N1 动作 B-1：显式展示母账号的代理绑定（影子继承同一代理）。
+                 注意：**不**在此建议 intl 母账号绑 HK 出口代理 —— PR-V2a 生产实测
+                 （直连 HK / 经 US 代理 / 本机 SG 三出口）证明 intl models 端点的 500
+                 与出口 IP 无关（代理不可解），写"绑代理可解"属误导。 -->
+            <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+              <span class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.codeBuddyProxyLabel') }}</span>
+              <template v-if="parent.proxy">
+                <span
+                  data-test="codebuddy-parent-proxy"
+                  class="inline-block rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300"
+                >{{ parent.proxy.name }}</span>
+                <span class="text-gray-400">{{ proxySummary }}</span>
+              </template>
+              <span v-else data-test="codebuddy-parent-proxy-none" class="text-gray-400">
+                {{ t('admin.accounts.codeBuddyProxyNone') }}
+              </span>
+            </div>
           </div>
             <button class="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-dark-700" @click="$emit('close')">
             <Icon name="x" size="md" />
@@ -340,6 +357,14 @@ const site = computed(() => normalizeCodeBuddySite(props.parent?.credentials?.si
 const siteLabel = computed(() =>
   site.value === 'intl' ? t('admin.accounts.codeBuddySiteIntl') : t('admin.accounts.codeBuddySiteCn')
 )
+
+/** 母账号代理绑定摘要（影子继承母账号代理，故向导级展示即代表影子出站口径）。 */
+const proxySummary = computed(() => {
+  const p = props.parent?.proxy
+  if (!p) return ''
+  const country = p.country_code ? ` (${p.country_code})` : ''
+  return `${p.host}:${p.port}${country}`
+})
 
 /** 传给 GroupSelector 的分组全集：仅做「启用」过滤，平台过滤语义一律交给 GroupSelector 自身。 */
 const activeGroups = computed(() => props.groups.filter((g) => g.status === 'active'))

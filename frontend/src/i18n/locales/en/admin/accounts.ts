@@ -560,6 +560,8 @@ export default {
       codeBuddyPriceLoading: 'Checking…',
       codeBuddyPriceTooltip: 'Billing catalog price (input / output, USD per million tokens), same source as billing. Use Configure for models the catalog does not cover.',
       codeBuddyConfigurePrice: 'Configure',
+      codeBuddyProxyLabel: 'Proxy',
+      codeBuddyProxyNone: 'No proxy bound',
       codeBuddySiteCn: 'CN',
       codeBuddySiteIntl: 'INTL',
       codeBuddySiteBadgeTitle: 'CodeBuddy site: {site}',

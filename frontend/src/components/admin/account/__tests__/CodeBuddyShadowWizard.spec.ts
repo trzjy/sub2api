@@ -602,3 +602,47 @@ describe('CodeBuddyShadowWizard — 空态与选择态', () => {
     expect(q<HTMLButtonElement>('[data-test="codebuddy-create"]')?.disabled).toBe(true)
   })
 })
+
+// ================= PR-V2c：母账号代理绑定展示 =================
+
+describe('CodeBuddyShadowWizard — V2c 母账号代理绑定展示', () => {
+  const boundProxy = {
+    id: 42,
+    name: 'hk-egress',
+    protocol: 'http',
+    host: '203.0.113.7',
+    port: 8080,
+    username: null,
+    password: null,
+    status: 'active',
+    country_code: 'HK',
+  } as unknown as Account['proxy']
+
+  it('绑定时展示代理名与出站地址（影子继承同一代理）', () => {
+    mountWizard({
+      parent: makeAccount({ id: 10, name: 'jossin', credentials: { site: 'intl' }, proxy: boundProxy }),
+    })
+
+    expect(q('[data-test="codebuddy-parent-proxy"]')?.textContent?.trim()).toBe('hk-egress')
+    expect(document.body.textContent).toContain('203.0.113.7:8080 (HK)')
+    expect(q('[data-test="codebuddy-parent-proxy-none"]')).toBeNull()
+  })
+
+  it('未绑定时显式提示「未绑定代理」，不留空', () => {
+    mountWizard({ parent: makeAccount({ id: 10, name: 'jossin', credentials: { site: 'cn' } }) })
+
+    expect(q('[data-test="codebuddy-parent-proxy-none"]')?.textContent?.trim()).toBe(
+      'admin.accounts.codeBuddyProxyNone',
+    )
+    expect(q('[data-test="codebuddy-parent-proxy"]')).toBeNull()
+  })
+
+  it('不对 intl 母账号暗示「绑代理可解 models 不可用」（PR-V2a 已证与出口 IP 无关）', () => {
+    mountWizard({ parent: makeAccount({ id: 10, name: 'jossin', credentials: { site: 'intl' } }) })
+
+    // intl 不可用由既有横幅说明；代理行只陈述绑定事实，不得出现"建议绑 HK 代理"类引导。
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('admin.accounts.codeBuddyIntlUnavailable')
+    expect(text).not.toMatch(/HK.*代理|代理.*解决/)
+  })
+})

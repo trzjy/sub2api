@@ -649,6 +649,8 @@ export default {
       codeBuddyPriceLoading: '查询中…',
       codeBuddyPriceTooltip: '计费目录价（输入 / 输出，美元/百万 tokens），与计费口径同源；未覆盖的模型可「去配置」',
       codeBuddyConfigurePrice: '去配置',
+      codeBuddyProxyLabel: '代理',
+      codeBuddyProxyNone: '未绑定代理',
       codeBuddySiteCn: 'CN',
       codeBuddySiteIntl: 'INTL',
       codeBuddySiteBadgeTitle: 'CodeBuddy 站点：{site}',
