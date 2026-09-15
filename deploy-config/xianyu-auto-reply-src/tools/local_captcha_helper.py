@@ -104,21 +104,39 @@ class Solver:
             await self.pw.stop()
             self.pw = None
 
+    # Baxia 页面加载时会下发 cookie 可用性探针（如 bx-cookie-test），并非通过凭证。
+    # 若误当作通过信号，人工尚未完成就提前返回，Worker 侧也会因缺少 x5sec 判失败。
+    _PROBE_COOKIES = frozenset({"bx-cookie-test"})
+
     @staticmethod
     def _x5_cookies(cookies: list) -> Dict[str, str]:
         """提取验证相关 cookie。
 
-        通过判定与 orchestrator._has_x5sec 同口径（x5* 或含 x5sec）；
-        但返回集合额外包含 bx* 家族（bx-pp / bx_et 等 Baxia 系），契约 B（商品监控）
-        依赖这三个键。
+        返回集合口径：x5* / 含 x5sec（与 orchestrator._has_x5sec 及
+        cookie_token_manager 成功判定同口径）+ bx* 家族（bx-pp / bx_et 等 Baxia 系，
+        契约 B 依赖），剔除页面加载探针。
         """
         out: Dict[str, str] = {}
         for c in cookies:
             name = str(c.get("name", ""))
             low = name.lower()
+            if low in Solver._PROBE_COOKIES:
+                continue
             if low.startswith("x5") or "x5sec" in low or low.startswith("bx"):
                 out[name] = str(c.get("value", ""))
         return out
+
+    @staticmethod
+    def _has_pass_signal(cookies: Dict[str, str]) -> bool:
+        """是否已出现真正的通过凭证（x5* / 含 x5sec），与 Worker 成功判定同口径。
+
+        仅有 bx* 家族 cookie 时不算通过：真实放行凭证是 x5sec，Worker 侧
+        （cookie_token_manager 成功分支）也只认 x5* 集合。
+        """
+        return any(
+            low.startswith("x5") or "x5sec" in low
+            for low in (str(n).lower() for n in cookies)
+        )
 
     async def _notify(self, account_id: str, deadline: int) -> None:
         if not self.cfg.get("notify", True):
@@ -166,12 +184,19 @@ class Solver:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 loop_start = time.monotonic()
                 last_content_check = 0.0
+                probe_logged = False
                 while True:
                     elapsed = time.monotonic() - loop_start
                     if elapsed >= deadline:
                         log(f"求解超时 account={account_id}")
                         return "fail", {}, None
                     cookies = self._x5_cookies(await context.cookies())
+                    if cookies and not self._has_pass_signal(cookies):
+                        # 仅有 bx* 家族/探针类 cookie，尚无 x5* 凭证：不算通过，继续等人工完成
+                        if not probe_logged:
+                            probe_logged = True
+                            log(f"捕获到非凭证 cookie {sorted(cookies)}（值不落日志），忽略并继续等待")
+                        cookies = {}
                     if cookies:
                         log(f"人工验证通过 account={account_id} cookies={sorted(cookies)}（值不落日志）")
                         if keep_secs > 0 and not headless:
