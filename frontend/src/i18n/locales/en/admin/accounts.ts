@@ -178,6 +178,8 @@ export default {
         codeAssist: 'Code Assist',
         antigravityOauth: 'Antigravity OAuth',
         grokOauth: 'Grok OAuth',
+        codebuddyOauth: 'CodeBuddy OAuth',
+        codebuddyApiKey: 'Custom API Key (ck_ prefix)',
         antigravityApikey: 'Connect via Base URL + API Key',
         upstream: 'Upstream',
         upstreamDesc: 'Connect via Base URL + API Key'
@@ -1422,7 +1424,11 @@ export default {
                     siteIntl: 'International (codebuddy.ai)',
                     siteHint: 'Select the account site. The China and International sites use different domains, and their quotas and login methods are independent.'
                   }
-                },      // Gemini specific (platform-wide)
+                },
+      // CodeBuddy platform-specific
+      codebuddy: {
+        apiKeyHint: 'CodeBuddy custom API Key (ck_ prefix), obtained from CodeBuddy CLI configuration'
+      },      // Gemini specific (platform-wide)
       gemini: {
         helpButton: 'Help',
         helpDialog: {

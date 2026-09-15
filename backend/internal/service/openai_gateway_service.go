@@ -1252,6 +1252,15 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			}
 			return apiKey, "apikey", nil
 		}
+		// codebuddy APIKey（ck_ 定制 key）：不走 OpenAI 协议族 api_key 语义，
+		// 直接从 credentials.api_key 取 Bearer token。
+		if account.Platform == PlatformCodeBuddy {
+			apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+			if apiKey == "" {
+				return "", "", errors.New("api_key not found in credentials")
+			}
+			return apiKey, "apikey", nil
+		}
 		apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
 		if apiKey == "" {
 			return "", "", errors.New("api_key not found in credentials")

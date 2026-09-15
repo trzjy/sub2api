@@ -380,6 +380,8 @@ export default {
         codeAssist: 'Code Assist',
         antigravityOauth: 'Antigravity OAuth',
         grokOauth: 'Grok OAuth',
+        codebuddyOauth: 'CodeBuddy OAuth',
+        codebuddyApiKey: '定制 API Key（ck_ 前缀）',
         antigravityApikey: '通过 Base URL + API Key 连接',
         upstream: '对接上游',
         upstreamDesc: '通过 Base URL + API Key 连接上游'
@@ -1480,6 +1482,10 @@ export default {
           siteIntl: '国际版（codebuddy.ai）',
           siteHint: '选择账号所属站点：国内版与国际版域名不同，账号额度与登录方式相互独立。'
         }
+      },
+      // CodeBuddy platform-specific
+      codebuddy: {
+        apiKeyHint: 'CodeBuddy 定制 API Key（ck_ 前缀），从 CodeBuddy CLI 配置获取'
       },
       // Gemini specific (platform-wide)
       gemini: {

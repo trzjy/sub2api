@@ -68,13 +68,11 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		tokenRefreshSvc,
 		accountExpirySvc,
 		nil, // cnProviderBalanceCheck
-		nil, // codeBuddyQuotaCheck
 		nil, // apiKeyBalanceProbeCheck
 		nil, // accountHealthRecoveryProbe
 		codexVersionSyncSvc,
 		proxyExpirySvc,
 		subscriptionExpirySvc,
-		nil, // welfareBalanceExpiry
 		&service.UsageCleanupService{},
 		idempotencyCleanupSvc,
 		&service.BatchImageCleanupService{},
@@ -104,6 +102,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // openAIAutoReset
 		nil, // xianyuSync
 		nil, // xianyuReconcile
+		nil, // xianyuExposure
 		nil, // promptAudit
 		nil, // pluginManager
 	)

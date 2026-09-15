@@ -12,7 +12,7 @@ import (
 
 func TestXianyuAccessGrantsAdminRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewXianyuAdminHandler(nil)
+	handler := NewXianyuAdminHandler(nil, nil)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -33,7 +33,7 @@ func TestXianyuAccessGrantsAdminRole(t *testing.T) {
 
 func TestXianyuAccessRejectsNonAdminRole(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewXianyuAdminHandler(nil)
+	handler := NewXianyuAdminHandler(nil, nil)
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

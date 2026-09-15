@@ -393,6 +393,10 @@ func (s *CodeBuddyQuotaService) setBillingHeaders(req *http.Request, account *Ac
 	req.Header.Set("X-Product", "SaaS")
 
 	accessToken := account.GetCredential("access_token")
+	if accessToken == "" && account.Type == AccountTypeAPIKey {
+		// APIKey 型（ck_ 定制 key）：token 存于 credentials.api_key。
+		accessToken = account.GetCredential("api_key")
+	}
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 	}
