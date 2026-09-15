@@ -1,0 +1,11 @@
+[Unit]
+Description=SSH reverse tunnel: yiyutu-server:18089 -> local xianyu-captcha-helper
+After=network-online.target xianyu-captcha-helper.service
+
+[Service]
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o BatchMode=yes -R 127.0.0.1:18089:127.0.0.1:18089 yiyutu-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

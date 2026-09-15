@@ -146,6 +146,7 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
+!docs/xianyu-manual-captcha-helper.md
 !docs/platform-other.md
 !docs/legal/
 !docs/legal/*.md
