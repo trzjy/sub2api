@@ -199,6 +199,9 @@ func registerXianyuAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		xianyu.GET("/settings", h.Admin.Xianyu.GetSettings)
 		xianyu.PUT("/settings", h.Admin.Xianyu.SaveSettings)
 
+		xianyu.POST("/products/:id/title-suggestion", h.Admin.Xianyu.TitleSuggestion)
+		xianyu.POST("/exposure/test-push", h.Admin.Xianyu.TestExposurePush)
+
 		xianyu.POST("/health/check", h.Admin.Xianyu.CheckHealth)
 	}
 }

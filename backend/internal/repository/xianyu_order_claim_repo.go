@@ -439,3 +439,33 @@ func (r *xianyuOrderClaimRepository) InsertReconciledClaim(ctx context.Context, 
 	}
 	return nil
 }
+
+// ==================== 曝光助手：出单聚合 ====================
+
+// NewXianyuExposureOrderCounter 创建曝光助手出单聚合仓库（与领取仓库共用 db 句柄）。
+func NewXianyuExposureOrderCounter(db *sql.DB) service.XianyuExposureOrderCounter {
+	return &xianyuOrderClaimRepository{db: db}
+}
+
+// CountClaimsByItem 按闲鱼商品 ID 聚合累计领取（成交）数。
+// key 为 item_id；从未成交的商品不出现在结果中（调用方按 0 处理）。
+func (r *xianyuOrderClaimRepository) CountClaimsByItem(ctx context.Context) (map[string]int, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT item_id, COUNT(*) FROM xianyu_order_claims
+		WHERE item_id <> ''
+		GROUP BY item_id`)
+	if err != nil {
+		return nil, fmt.Errorf("count xianyu claims by item: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]int)
+	for rows.Next() {
+		var itemID string
+		var cnt int
+		if err := rows.Scan(&itemID, &cnt); err != nil {
+			return nil, fmt.Errorf("scan xianyu claim count: %w", err)
+		}
+		out[itemID] = cnt
+	}
+	return out, rows.Err()
+}

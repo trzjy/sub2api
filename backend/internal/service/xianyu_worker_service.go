@@ -41,6 +41,12 @@ func (s *XianyuWorkerService) clientForActiveWorker(ctx context.Context) (*Xiany
 	return s.clientFor(cfg.BaseURL, token), cfg, nil
 }
 
+// ClientForActiveWorker 返回 active Worker 的客户端（曝光助手等内部服务用）。
+func (s *XianyuWorkerService) ClientForActiveWorker(ctx context.Context) (*XianyuWorkerClient, error) {
+	client, _, err := s.clientForActiveWorker(ctx)
+	return client, err
+}
+
 // CheckHealth 检查 active Worker 健康状态并落库。
 func (s *XianyuWorkerService) CheckHealth(ctx context.Context) error {
 	client, cfg, err := s.clientForActiveWorker(ctx)
@@ -602,4 +608,24 @@ func (s *XianyuWorkerService) ListAutoDeliveries(ctx context.Context, since time
 		return nil, err
 	}
 	return client.ListAutoDeliveries(ctx, since, limit)
+}
+
+// ==================== 曝光分析支持（委托给 client） ====================
+
+// SearchKeyword 即席关键词搜索：复用 active Worker 的 cookie。
+func (s *XianyuWorkerService) SearchKeyword(ctx context.Context, keyword string, rowsPerPage int) (*XianyuSearchOnceResult, error) {
+	client, err := s.ClientForActiveWorker(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.SearchKeyword(ctx, keyword, rowsPerPage)
+}
+
+// GetItemDetail 拉取商品详情（含描述正文）：复用 active Worker 的 cookie。
+func (s *XianyuWorkerService) GetItemDetail(ctx context.Context, accountID, itemID string) (*XianyuItemDetailInfo, error) {
+	client, err := s.ClientForActiveWorker(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetItemDetail(ctx, accountID, itemID)
 }

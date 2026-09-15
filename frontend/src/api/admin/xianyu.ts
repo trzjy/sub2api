@@ -170,11 +170,40 @@ export interface XianyuControlSettings {
   account_auto_refresh: boolean
   product_auto_bind: boolean
   sync_interval_minutes: number
+  // 曝光助手
+  exposure_enabled?: boolean
+  exposure_cron?: string
+  exposure_wecom_webhook?: string
+  exposure_ai_base_url?: string
+  exposure_ai_api_key?: string
+  exposure_ai_model?: string
+  exposure_stale_days?: number
+  exposure_max_orders?: number
+  exposure_market_cache_minutes?: number
+  exposure_blocked_words?: string
+}
+
+export interface TitleSuggestion {
+  suggested_title: string
+  evidence: string
 }
 
 export async function getSettings(options?: { signal?: AbortSignal }): Promise<XianyuControlSettings> {
   const { data } = await apiClient.get<XianyuControlSettings>('/admin/xianyu/settings', { signal: options?.signal })
   return data
+}
+
+export async function getTitleSuggestion(productId: number, options?: { signal?: AbortSignal }): Promise<TitleSuggestion> {
+  const { data } = await apiClient.post<TitleSuggestion>(
+    `/admin/xianyu/products/${encodeURIComponent(String(productId))}/title-suggestion`,
+    {},
+    { signal: options?.signal }
+  )
+  return data
+}
+
+export async function testExposurePush(): Promise<void> {
+  await apiClient.post('/admin/xianyu/exposure/test-push')
 }
 
 export async function getDeliveryTemplate(options?: { signal?: AbortSignal }): Promise<string> {
@@ -220,6 +249,8 @@ export const xianyuAPI = {
   markDeliverySent,
   getSettings,
   saveSettings,
+  getTitleSuggestion,
+  testExposurePush,
   getDeliveryTemplate,
   saveDeliveryTemplate
 }

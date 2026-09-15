@@ -100,6 +100,66 @@
           </div>
         </div>
       </div>
+
+      <!-- 曝光助手 -->
+      <div class="mt-6 rounded-lg border border-gray-200 dark:border-dark-700">
+        <div class="flex items-center justify-between border-b border-gray-200 px-5 py-3 dark:border-dark-700">
+          <h2 class="font-semibold">{{ t('admin.xianyu.settings.exposureTitle') }}</h2>
+          <Toggle v-model="settingsForm.exposure_enabled" />
+        </div>
+        <div class="space-y-4 p-5">
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.exposureHint') }}</p>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureCron') }}</label>
+            <input v-model="settingsForm.exposure_cron" class="input w-full font-mono" placeholder="0 10,15,20 * * *" />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianyu.settings.exposureCronHint') }}</p>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureWecomWebhook') }}</label>
+            <input v-model="settingsForm.exposure_wecom_webhook" type="password" class="input w-full" autocomplete="new-password" />
+          </div>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureAIBaseURL') }}</label>
+              <input v-model="settingsForm.exposure_ai_base_url" class="input w-full" placeholder="https://..." />
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureAIKey') }}</label>
+              <input v-model="settingsForm.exposure_ai_api_key" type="password" class="input w-full" autocomplete="new-password" />
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureAIModel') }}</label>
+              <input v-model="settingsForm.exposure_ai_model" class="input w-full" />
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureStaleDays') }}</label>
+              <input v-model.number="settingsForm.exposure_stale_days" type="number" min="0" class="input w-full" />
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureMaxOrders') }}</label>
+              <input v-model.number="settingsForm.exposure_max_orders" type="number" min="0" class="input w-full" />
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureCacheMinutes') }}</label>
+              <input v-model.number="settingsForm.exposure_market_cache_minutes" type="number" min="0" class="input w-full" />
+            </div>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.settings.exposureBlockedWords') }}</label>
+            <input v-model="settingsForm.exposure_blocked_words" class="input w-full" :placeholder="t('admin.xianyu.settings.exposureBlockedWordsHint')" />
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button class="btn btn-primary" :disabled="savingExposure" @click="saveExposure">
+              {{ t('admin.xianyu.settings.saveToggle') }}
+            </button>
+            <button class="btn btn-secondary" :disabled="testingPush" @click="testPush">
+              {{ t('admin.xianyu.settings.exposureTestPush') }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </AppLayout>
 </template>
@@ -215,8 +275,22 @@ const settingsForm = reactive({
   delivery_enabled: false,
   account_auto_refresh: true,
   product_auto_bind: true,
-  sync_interval_minutes: 5
+  sync_interval_minutes: 5,
+  // 曝光助手
+  exposure_enabled: false,
+  exposure_cron: '0 10,15,20 * * *',
+  exposure_wecom_webhook: '',
+  exposure_ai_base_url: '',
+  exposure_ai_api_key: '',
+  exposure_ai_model: '',
+  exposure_stale_days: 7,
+  exposure_max_orders: 1,
+  exposure_market_cache_minutes: 240,
+  exposure_blocked_words: '官方,拼车,共享,换绑,老号,claude,cursor'
 })
+
+const savingExposure = ref(false)
+const testingPush = ref(false)
 
 async function loadToggles() {
   try {
@@ -225,6 +299,16 @@ async function loadToggles() {
     settingsForm.account_auto_refresh = s.account_auto_refresh
     settingsForm.product_auto_bind = s.product_auto_bind
     settingsForm.sync_interval_minutes = s.sync_interval_minutes
+    if (s.exposure_enabled !== undefined) settingsForm.exposure_enabled = s.exposure_enabled
+    if (s.exposure_cron) settingsForm.exposure_cron = s.exposure_cron
+    if (s.exposure_wecom_webhook) settingsForm.exposure_wecom_webhook = s.exposure_wecom_webhook
+    if (s.exposure_ai_base_url) settingsForm.exposure_ai_base_url = s.exposure_ai_base_url
+    if (s.exposure_ai_api_key) settingsForm.exposure_ai_api_key = s.exposure_ai_api_key
+    if (s.exposure_ai_model) settingsForm.exposure_ai_model = s.exposure_ai_model
+    if (s.exposure_stale_days !== undefined) settingsForm.exposure_stale_days = s.exposure_stale_days
+    if (s.exposure_max_orders !== undefined) settingsForm.exposure_max_orders = s.exposure_max_orders
+    if (s.exposure_market_cache_minutes !== undefined) settingsForm.exposure_market_cache_minutes = s.exposure_market_cache_minutes
+    if (s.exposure_blocked_words !== undefined) settingsForm.exposure_blocked_words = s.exposure_blocked_words
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   }
@@ -241,6 +325,41 @@ async function saveToggles() {
     appStore.showSuccess(t('admin.xianyu.settings.success'))
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
+}
+
+async function saveExposure() {
+  savingExposure.value = true
+  try {
+    await adminAPI.xianyu.saveSettings({
+      exposure_enabled: settingsForm.exposure_enabled,
+      exposure_cron: settingsForm.exposure_cron,
+      exposure_wecom_webhook: settingsForm.exposure_wecom_webhook,
+      exposure_ai_base_url: settingsForm.exposure_ai_base_url,
+      exposure_ai_api_key: settingsForm.exposure_ai_api_key,
+      exposure_ai_model: settingsForm.exposure_ai_model,
+      exposure_stale_days: settingsForm.exposure_stale_days,
+      exposure_max_orders: settingsForm.exposure_max_orders,
+      exposure_market_cache_minutes: settingsForm.exposure_market_cache_minutes,
+      exposure_blocked_words: settingsForm.exposure_blocked_words
+    })
+    appStore.showSuccess(t('admin.xianyu.settings.success'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  } finally {
+    savingExposure.value = false
+  }
+}
+
+async function testPush() {
+  testingPush.value = true
+  try {
+    await adminAPI.xianyu.testExposurePush()
+    appStore.showSuccess(t('admin.xianyu.settings.exposureTestPushSent'))
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  } finally {
+    testingPush.value = false
   }
 }
 

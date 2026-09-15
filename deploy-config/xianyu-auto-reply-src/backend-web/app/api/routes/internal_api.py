@@ -802,3 +802,203 @@ async def internal_list_auto_deliveries(
         for o in orders
     ]
     return ApiResponse(success=True, message="查询成功", data={"orders": data})
+
+
+# ==================== 曝光分析支持（即席搜索 / 商品详情） ====================
+
+
+async def _pick_search_account(session, service_user, account_id: Optional[str]):
+    """选取搜索用账号：指定 account_id 或自动取一个有 cookie 的 active 账号。"""
+    from sqlalchemy import select
+
+    from common.models.xy_account import XYAccount
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    stmt = select(XYAccount).where(XYAccount.status == "active")
+    if owner_id is not None:
+        stmt = stmt.where(XYAccount.owner_id == owner_id)
+    if account_id:
+        stmt = stmt.where(XYAccount.account_id == account_id)
+    stmt = stmt.order_by(XYAccount.last_login_at.is_(None), XYAccount.last_login_at.desc())
+    accounts = (await session.execute(stmt)).scalars().all()
+    for acc in accounts:
+        if acc.cookie:
+            return acc
+    return None
+
+
+_WANT_RE = None
+
+
+def _slim_search_item(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把 mtop 搜索返回的原始 resultList 项精简为曝光分析所需字段。
+
+    字段路径以 2026-09 实测为准：title/价格在 data.item.main.exContent 下，
+    想要数在 exContent.fishTags.r3.tagList 的 "N人想要" 标签。
+    """
+    import re
+
+    global _WANT_RE
+    if _WANT_RE is None:
+        _WANT_RE = re.compile(r"(\d+)\s*人想要")
+
+    main = ((raw.get("data") or {}).get("item") or {}).get("main") or {}
+    ex = main.get("exContent") or {}
+    title = str(ex.get("title") or "").strip()
+    if not title:
+        return None
+
+    detail_params = ex.get("detailParams") or {}
+    price = ""
+    sold_price = detail_params.get("soldPrice")
+    if isinstance(sold_price, list):
+        price = "".join(
+            str(seg.get("text", "")) for seg in sold_price if isinstance(seg, dict)
+        )
+    if not price:
+        price = str(raw.get("oriPrice") or detail_params.get("soldPrice") or "")
+
+    want_count = 0
+    tags = ((ex.get("fishTags") or {}).get("r3") or {}).get("tagList") or []
+    for tag in tags:
+        content = str((tag.get("data") or {}).get("content") or "")
+        m = _WANT_RE.match(content)
+        if m:
+            want_count = int(m.group(1))
+            break
+
+    item_id = str(
+        detail_params.get("itemId")
+        or raw.get("itemId")
+        or ((raw.get("data") or {}).get("item") or {}).get("itemId")
+        or ""
+    )
+    return {
+        "item_id": item_id,
+        "title": title,
+        "price": price,
+        "want_count": want_count,
+        "area": str(ex.get("area") or ""),
+    }
+
+
+@router.post("/search-once")
+async def internal_search_once(
+    payload: Dict[str, Any] = Body(...),
+    session=Depends(deps.get_db_session),
+    service_user=Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """即席关键词搜索（轻量 mtop 通道，免建采集任务），主程序曝光分析用。
+
+    入参：{keyword, account_id?, rows_per_page?}
+    返回精简后的商品列表（item_id/title/price/want_count/area）。
+    风控或账号失效时 success=False 并透传 error / punish_url，调用方据此降级。
+    """
+    from common.services.xianyu_search_client import XianyuSearchClient
+
+    keyword = str(payload.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    try:
+        rows = int(payload.get("rows_per_page") or 30)
+    except (TypeError, ValueError):
+        rows = 30
+    rows = max(1, min(rows, 50))
+
+    account = await _pick_search_account(session, service_user, payload.get("account_id"))
+    if account is None:
+        return ApiResponse(success=False, message="无可用账号（需 active 且有 cookie）", data=None)
+
+    client = XianyuSearchClient(
+        cookie_id=account.account_id,
+        cookies_str=account.cookie,
+        owner_id=account.owner_id,
+    )
+    result = await client.search(keyword=keyword, rows_per_page=rows)
+    if not result.get("success"):
+        return ApiResponse(
+            success=False,
+            message=result.get("error") or "搜索失败",
+            data={
+                "account_invalid": bool(result.get("account_invalid")),
+                "punish_url": result.get("punish_url") or "",
+            },
+        )
+
+    items = []
+    for raw in result.get("items") or []:
+        slim = _slim_search_item(raw)
+        if slim is not None:
+            items.append(slim)
+    return ApiResponse(
+        success=True,
+        message="搜索成功",
+        data={
+            "keyword": keyword,
+            "account_id": account.account_id,
+            "has_next_page": bool(result.get("has_next_page")),
+            "items": items,
+        },
+    )
+
+
+@router.get("/items/{account_id}/{item_id}/detail")
+async def internal_get_item_detail(
+    account_id: str,
+    item_id: str,
+    session=Depends(deps.get_db_session),
+    service_user=Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """拉取商品详情（含描述正文），主程序建立商品事实档案用。
+
+    返回 detail 关键子集：desc/title/soldPrice + 账号状态标志。
+    """
+    from sqlalchemy import select
+
+    from common.models.xy_account import XYAccount
+    from common.services.xianyu_detail_client import XianyuItemDetailClient
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    stmt = select(XYAccount).where(XYAccount.account_id == account_id)
+    if owner_id is not None:
+        stmt = stmt.where(XYAccount.owner_id == owner_id)
+    account = (await session.execute(stmt)).scalars().first()
+    if account is None or not account.cookie:
+        raise HTTPException(status_code=404, detail="账号不存在或无 cookie")
+
+    client = XianyuItemDetailClient(
+        cookie_id=account.account_id,
+        cookies_str=account.cookie,
+        owner_id=account.owner_id,
+    )
+    result = await client.get_detail(item_id)
+    if not result.get("success"):
+        return ApiResponse(
+            success=False,
+            message=result.get("error") or "详情获取失败",
+            data={
+                "account_invalid": bool(result.get("account_invalid")),
+                "item_invalid": bool(result.get("item_invalid")),
+            },
+        )
+
+    detail = result.get("detail") or {}
+    item_do = detail.get("itemDO") or {}
+    desc = (
+        item_do.get("desc")
+        or detail.get("desc")
+        or item_do.get("description")
+        or detail.get("description")
+        or ""
+    )
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data={
+            "item_id": str(item_id),
+            "title": str(item_do.get("title") or detail.get("title") or ""),
+            "desc": str(desc),
+            "sold_price": str(item_do.get("soldPrice") or detail.get("soldPrice") or ""),
+            "seller_nick": result.get("seller_nick") or "",
+        },
+    )

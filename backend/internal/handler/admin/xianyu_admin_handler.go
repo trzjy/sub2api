@@ -14,13 +14,15 @@ import (
 // XianyuAdminHandler 处理闲鱼发货控制面管理请求。
 type XianyuAdminHandler struct {
 	control   *service.XianyuControlService
+	exposure  *service.XianyuExposureService
 	adminOnly func(c *gin.Context) bool
 }
 
 // NewXianyuAdminHandler 创建控制面管理 handler。
-func NewXianyuAdminHandler(control *service.XianyuControlService) *XianyuAdminHandler {
+func NewXianyuAdminHandler(control *service.XianyuControlService, exposure *service.XianyuExposureService) *XianyuAdminHandler {
 	return &XianyuAdminHandler{
-		control: control,
+		control:  control,
+		exposure: exposure,
 		adminOnly: func(c *gin.Context) bool {
 			role, _ := middleware.GetUserRoleFromContext(c)
 			return role == service.RoleAdmin
@@ -588,4 +590,42 @@ func (h *XianyuAdminHandler) ResendDelivery(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"code": code})
+}
+
+// ==================== 曝光助手 ====================
+
+// TitleSuggestion 商品"AI 标题"按钮：实时采集市场数据 + AI 生成，返回建议与证据。
+func (h *XianyuAdminHandler) TitleSuggestion(c *gin.Context) {
+	if h.exposure == nil {
+		response.ErrorFrom(c, service.ErrXianyuDeliveryNotConfigured)
+		return
+	}
+	productID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || productID <= 0 {
+		response.BadRequest(c, "invalid product id")
+		return
+	}
+	title, evidence, err := h.exposure.GenerateTitleSuggestion(c.Request.Context(), productID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if title == "" {
+		response.BadRequest(c, "AI 无法生成可用标题（事实档案缺失或配置不完整）")
+		return
+	}
+	response.Success(c, gin.H{"suggested_title": title, "evidence": evidence})
+}
+
+// TestExposurePush 用当前设置立即跑一次测试推送，验证 webhook/AI 配置。
+func (h *XianyuAdminHandler) TestExposurePush(c *gin.Context) {
+	if h.exposure == nil {
+		response.ErrorFrom(c, service.ErrXianyuDeliveryNotConfigured)
+		return
+	}
+	if err := h.exposure.TestPush(c.Request.Context()); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "test push sent"})
 }

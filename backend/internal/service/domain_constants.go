@@ -580,6 +580,29 @@ const (
 	// SettingKeyXianyuSyncIntervalMinutes 商品同步周期（分钟），默认 5。
 	SettingKeyXianyuSyncIntervalMinutes = "xianyu_sync_interval_minutes"
 
+	// 闲鱼曝光助手设置。AI 标题分析基于 Worker 采集的真实市场数据，
+	// 只做建议推送，不写回闲鱼。
+	// SettingKeyXianyuExposureEnabled 曝光助手总开关，默认关。
+	SettingKeyXianyuExposureEnabled = "xianyu_exposure_enabled"
+	// SettingKeyXianyuExposureCron 定时分析的 cron 表达式，默认 "0 10,15,20 * * *"。
+	SettingKeyXianyuExposureCron = "xianyu_exposure_cron"
+	// SettingKeyXianyuExposureWecomWebhook 企业微信群机器人 webhook URL。
+	SettingKeyXianyuExposureWecomWebhook = "xianyu_exposure_wecom_webhook"
+	// SettingKeyXianyuExposureAIBaseURL AI 分析用的 OpenAI 兼容端点（可指向本网关自身）。
+	SettingKeyXianyuExposureAIBaseURL = "xianyu_exposure_ai_base_url"
+	// SettingKeyXianyuExposureAIAPIKey AI 端点的 API Key。
+	SettingKeyXianyuExposureAIAPIKey = "xianyu_exposure_ai_api_key"
+	// SettingKeyXianyuExposureAIModel AI 分析模型名。
+	SettingKeyXianyuExposureAIModel = "xianyu_exposure_ai_model"
+	// SettingKeyXianyuExposureStaleDays 上架超过该天数才进入待优化池，默认 7。
+	SettingKeyXianyuExposureStaleDays = "xianyu_exposure_stale_days"
+	// SettingKeyXianyuExposureMaxOrders 累计出单低于该值算低成交，默认 1。
+	SettingKeyXianyuExposureMaxOrders = "xianyu_exposure_max_orders"
+	// SettingKeyXianyuExposureMarketCacheMinutes 关键词市场数据缓存分钟数，默认 240；0=每次实时采集。
+	SettingKeyXianyuExposureMarketCacheMinutes = "xianyu_exposure_market_cache_minutes"
+	// SettingKeyXianyuExposureBlockedWords 标题违规词黑名单（逗号分隔），AI 生成时硬排除。
+	SettingKeyXianyuExposureBlockedWords = "xianyu_exposure_blocked_words"
+
 	// SettingKeyModelPlazaEnabled is a DB-backed soft switch for the Model Plaza page
 	// (public group/model pricing showcase). When false: the plaza endpoint returns 404
 	// and the header entry is hidden. Defaults to false (opt-in feature).

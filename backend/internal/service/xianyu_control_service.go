@@ -68,19 +68,46 @@ type XianyuSettings struct {
 	AccountAutoRefresh  bool `json:"account_auto_refresh"`
 	ProductAutoBind     bool `json:"product_auto_bind"`
 	SyncIntervalMinutes int  `json:"sync_interval_minutes"`
+
+	// 曝光助手
+	ExposureEnabled            bool   `json:"exposure_enabled"`
+	ExposureCron               string `json:"exposure_cron"`
+	ExposureWecomWebhook       string `json:"exposure_wecom_webhook"`
+	ExposureAIBaseURL          string `json:"exposure_ai_base_url"`
+	ExposureAIAPIKey           string `json:"exposure_ai_api_key"`
+	ExposureAIModel            string `json:"exposure_ai_model"`
+	ExposureStaleDays          int    `json:"exposure_stale_days"`
+	ExposureMaxOrders          int    `json:"exposure_max_orders"`
+	ExposureMarketCacheMinutes int    `json:"exposure_market_cache_minutes"`
+	ExposureBlockedWords       string `json:"exposure_blocked_words"`
+}
+
+// xianyuExposureSettingKeys 曝光助手相关设置键列表。
+var xianyuExposureSettingKeys = []string{
+	SettingKeyXianyuExposureEnabled,
+	SettingKeyXianyuExposureCron,
+	SettingKeyXianyuExposureWecomWebhook,
+	SettingKeyXianyuExposureAIBaseURL,
+	SettingKeyXianyuExposureAIAPIKey,
+	SettingKeyXianyuExposureAIModel,
+	SettingKeyXianyuExposureStaleDays,
+	SettingKeyXianyuExposureMaxOrders,
+	SettingKeyXianyuExposureMarketCacheMinutes,
+	SettingKeyXianyuExposureBlockedWords,
 }
 
 // GetSettings 读取控制面设置。
 func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings, error) {
 	if s.settingStore == nil {
-		return XianyuSettings{DeliveryEnabled: s.Enabled(ctx), AccountAutoRefresh: true, ProductAutoBind: true, SyncIntervalMinutes: 5}, nil
+		return XianyuSettings{DeliveryEnabled: s.Enabled(ctx), AccountAutoRefresh: true, ProductAutoBind: true, SyncIntervalMinutes: 5, ExposureStaleDays: 7, ExposureMaxOrders: 1, ExposureMarketCacheMinutes: 240}, nil
 	}
-	vals, err := s.settingStore.GetMultiple(ctx, []string{
+	keys := append([]string{
 		SettingKeyXianyuDeliveryEnabled,
 		SettingKeyXianyuAccountAutoRefresh,
 		SettingKeyXianyuProductAutoBind,
 		SettingKeyXianyuSyncIntervalMinutes,
-	})
+	}, xianyuExposureSettingKeys...)
+	vals, err := s.settingStore.GetMultiple(ctx, keys)
 	if err != nil {
 		return XianyuSettings{}, err
 	}
@@ -89,10 +116,36 @@ func (s *XianyuControlService) GetSettings(ctx context.Context) (XianyuSettings,
 		AccountAutoRefresh:  isFalseSettingValue(vals[SettingKeyXianyuAccountAutoRefresh]) == false,
 		ProductAutoBind:     isFalseSettingValue(vals[SettingKeyXianyuProductAutoBind]) == false,
 		SyncIntervalMinutes: 5,
+		// 曝光助手默认值
+		ExposureEnabled:            vals[SettingKeyXianyuExposureEnabled] == "true",
+		ExposureCron:               vals[SettingKeyXianyuExposureCron],
+		ExposureWecomWebhook:       vals[SettingKeyXianyuExposureWecomWebhook],
+		ExposureAIBaseURL:          vals[SettingKeyXianyuExposureAIBaseURL],
+		ExposureAIAPIKey:           vals[SettingKeyXianyuExposureAIAPIKey],
+		ExposureAIModel:            vals[SettingKeyXianyuExposureAIModel],
+		ExposureStaleDays:          7,
+		ExposureMaxOrders:          1,
+		ExposureMarketCacheMinutes: 240,
+		ExposureBlockedWords:       vals[SettingKeyXianyuExposureBlockedWords],
 	}
 	if v := vals[SettingKeyXianyuSyncIntervalMinutes]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			out.SyncIntervalMinutes = n
+		}
+	}
+	if v := vals[SettingKeyXianyuExposureStaleDays]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			out.ExposureStaleDays = n
+		}
+	}
+	if v := vals[SettingKeyXianyuExposureMaxOrders]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			out.ExposureMaxOrders = n
+		}
+	}
+	if v := vals[SettingKeyXianyuExposureMarketCacheMinutes]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			out.ExposureMarketCacheMinutes = n
 		}
 	}
 	return out, nil
@@ -119,6 +172,17 @@ func (s *XianyuControlService) SaveSettings(ctx context.Context, settings Xianyu
 		SettingKeyXianyuAccountAutoRefresh:  strconv.FormatBool(settings.AccountAutoRefresh),
 		SettingKeyXianyuProductAutoBind:     strconv.FormatBool(settings.ProductAutoBind),
 		SettingKeyXianyuSyncIntervalMinutes: strconv.Itoa(settings.SyncIntervalMinutes),
+
+		SettingKeyXianyuExposureEnabled:            strconv.FormatBool(settings.ExposureEnabled),
+		SettingKeyXianyuExposureCron:               settings.ExposureCron,
+		SettingKeyXianyuExposureWecomWebhook:       settings.ExposureWecomWebhook,
+		SettingKeyXianyuExposureAIBaseURL:          settings.ExposureAIBaseURL,
+		SettingKeyXianyuExposureAIAPIKey:           settings.ExposureAIAPIKey,
+		SettingKeyXianyuExposureAIModel:            settings.ExposureAIModel,
+		SettingKeyXianyuExposureStaleDays:          strconv.Itoa(settings.ExposureStaleDays),
+		SettingKeyXianyuExposureMaxOrders:          strconv.Itoa(settings.ExposureMaxOrders),
+		SettingKeyXianyuExposureMarketCacheMinutes: strconv.Itoa(settings.ExposureMarketCacheMinutes),
+		SettingKeyXianyuExposureBlockedWords:       settings.ExposureBlockedWords,
 	}
 	return s.settingStore.SetMultiple(ctx, values)
 }

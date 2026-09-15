@@ -752,3 +752,39 @@ func (r *xianyuControlRepository) PendingDeliveryCount(ctx context.Context) (int
 func normalizeXianyuSpecKey(v string) string {
 	return strings.TrimSpace(v)
 }
+
+// ==================== 曝光助手：商品事实档案 ====================
+
+// NewXianyuExposureFactsRepository 创建曝光事实档案仓库（与控制面仓库共用 db 句柄）。
+func NewXianyuExposureFactsRepository(db *sql.DB) service.XianyuExposureFactsStore {
+	return &xianyuControlRepository{db: db}
+}
+
+// GetProductFacts 读取商品事实档案（未建立时返回空字符串）。
+func (r *xianyuControlRepository) GetProductFacts(ctx context.Context, productID int64) (string, error) {
+	var facts sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT exposure_facts FROM xianyu_products WHERE id = $1`, productID).Scan(&facts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", service.ErrXianyuProductNotFound
+		}
+		return "", fmt.Errorf("get xianyu product facts: %w", err)
+	}
+	return facts.String, nil
+}
+
+// UpdateProductFacts 写入商品事实档案。
+func (r *xianyuControlRepository) UpdateProductFacts(ctx context.Context, productID int64, facts string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE xianyu_products
+		SET exposure_facts = $2, exposure_facts_updated_at = NOW()
+		WHERE id = $1`, productID, facts)
+	if err != nil {
+		return fmt.Errorf("update xianyu product facts: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return service.ErrXianyuProductNotFound
+	}
+	return nil
+}

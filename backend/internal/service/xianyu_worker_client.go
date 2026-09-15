@@ -622,3 +622,87 @@ func (c *XianyuWorkerClient) ListAutoDeliveries(ctx context.Context, since time.
 	}
 	return out.Orders, nil
 }
+
+// ==================== 曝光分析支持（即席搜索 / 商品详情） ====================
+
+// XianyuSearchItem 即席搜索返回的精简商品项。
+type XianyuSearchItem struct {
+	ItemID    string `json:"item_id"`
+	Title     string `json:"title"`
+	Price     string `json:"price"`
+	WantCount int    `json:"want_count"`
+	Area      string `json:"area"`
+}
+
+// XianyuSearchOnceResult 即席搜索结果。
+type XianyuSearchOnceResult struct {
+	Keyword     string             `json:"keyword"`
+	AccountID   string             `json:"account_id"`
+	HasNextPage bool               `json:"has_next_page"`
+	Items       []XianyuSearchItem `json:"items"`
+}
+
+// XianyuItemDetailInfo 商品详情（曝光助手建立商品事实档案用）。
+type XianyuItemDetailInfo struct {
+	ItemID     string `json:"item_id"`
+	Title      string `json:"title"`
+	Desc       string `json:"desc"`
+	SoldPrice  string `json:"sold_price"`
+	SellerNick string `json:"seller_nick"`
+}
+
+// doEnvelope 与 do 类似，但额外检查信封的 success 字段：
+// Worker 业务失败（success=false + HTTP 200）时把 message 透传为错误，
+// 避免曝光分析把业务失败当成空结果。
+func (c *XianyuWorkerClient) doEnvelope(ctx context.Context, method, path string, body any, out any, contextAccountID string) error {
+	payload, err := c.doRequest(ctx, method, path, body, contextAccountID)
+	if err != nil {
+		return err
+	}
+	var env struct {
+		Success *bool           `json:"success"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return ErrXianyuWorkerMalformed
+	}
+	if env.Success != nil && !*env.Success {
+		msg := env.Message
+		if msg == "" {
+			msg = "worker 业务处理失败"
+		}
+		return &XianyuWorkerError{StatusCode: http.StatusOK, Reason: "business_failed", Message: msg}
+	}
+	if out == nil || len(env.Data) == 0 || string(env.Data) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(env.Data, out); err != nil {
+		return ErrXianyuWorkerMalformed
+	}
+	return nil
+}
+
+// SearchKeyword 即席关键词搜索（Worker 轻量 mtop 通道，免建采集任务）。
+// rowsPerPage <= 0 时使用 Worker 默认（30）。
+func (c *XianyuWorkerClient) SearchKeyword(ctx context.Context, keyword string, rowsPerPage int) (*XianyuSearchOnceResult, error) {
+	body := map[string]any{"keyword": keyword}
+	if rowsPerPage > 0 {
+		body["rows_per_page"] = rowsPerPage
+	}
+	var out XianyuSearchOnceResult
+	if err := c.doEnvelope(ctx, http.MethodPost, "/api/v1/internal/search-once", body, &out, ""); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetItemDetail 拉取商品详情（含描述正文），曝光助手建立商品事实档案用。
+func (c *XianyuWorkerClient) GetItemDetail(ctx context.Context, accountID, itemID string) (*XianyuItemDetailInfo, error) {
+	var out XianyuItemDetailInfo
+	path := "/api/v1/internal/items/" + url.PathEscape(accountID) + "/" + url.PathEscape(itemID) + "/detail"
+	if err := c.doEnvelope(ctx, http.MethodGet, path, nil, &out, accountID); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

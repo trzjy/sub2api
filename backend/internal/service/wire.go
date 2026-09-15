@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -991,6 +992,32 @@ func ProvideXianyuSettingStore(repo SettingRepository) XianyuSettingStore {
 	return repo
 }
 
+// provideServerBaseURL 构造"本系统服务器对内地址"字符串，供 promo intel 等内部调用自身 API。
+func ProvideServerBaseURL(cfg *config.Config) string {
+	return "http://localhost:" + strconv.Itoa(cfg.Server.Port)
+}
+
+// ProvideXianyuExposureService 创建闲鱼曝光助手服务（cron 定时分析 + 企业微信推送）。
+// 仓库实现由 wire 从 repository 包注入（接口类型在 service 包定义）。
+func ProvideXianyuExposureService(
+	control *XianyuControlService,
+	worker *XianyuWorkerService,
+	factsRepo XianyuExposureFactsStore,
+	orderCounter XianyuExposureOrderCounter,
+	redisClient *redis.Client,
+) *XianyuExposureService {
+	svc := NewXianyuExposureService(
+		factsRepo,
+		orderCounter,
+		control, // XianyuExposureSettingsReader via GetSettings
+		worker,  // XianyuExposureWorkerClient via SearchKeyword/GetItemDetail
+		control, // XianyuExposureProductLister via ListProducts
+		redisClient,
+	)
+	svc.Start()
+	return svc
+}
+
 // ProvideSystemUserReader 将 UserRepository 暴露为 SystemUserReader（启动校验用）。
 func ProvideSystemUserReader(repo UserRepository) SystemUserReader {
 	return repo
@@ -1070,6 +1097,8 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuAlertService,
 	ProvideXianyuSyncService,
 	ProvideXianyuReconcileService,
+	ProvideXianyuExposureService,
+	ProvideServerBaseURL,
 	ProvideAccountHealthRecoveryProbeService,
 	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,

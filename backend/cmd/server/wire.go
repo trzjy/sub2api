@@ -132,6 +132,7 @@ func provideCleanup(
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	xianyuSync *service.XianyuSyncService,
 	xianyuReconcile *service.XianyuReconcileService,
+	xianyuExposure *service.XianyuExposureService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 ) func() {
@@ -155,6 +156,12 @@ func provideCleanup(
 			{"XianyuReconcileService", func() error {
 				if xianyuReconcile != nil {
 					xianyuReconcile.Stop()
+				}
+				return nil
+			}},
+			{"XianyuExposureService", func() error {
+				if xianyuExposure != nil {
+					xianyuExposure.Stop()
 				}
 				return nil
 			}},

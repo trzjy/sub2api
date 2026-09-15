@@ -124,6 +124,9 @@
               </td>
               <td class="px-4 py-2">
                 <div class="flex items-center justify-end gap-1.5">
+                  <button class="btn btn-secondary btn-xs" :disabled="suggestionLoading === product.id" @click="openSuggestion(product)">
+                    {{ t('admin.xianyu.products.aiTitle') }}
+                  </button>
                   <button v-if="product.binding_status !== 'mapped'" class="btn btn-primary btn-xs" @click="openBind(product)">
                     {{ t('admin.xianyu.products.bind') }}
                   </button>
@@ -148,6 +151,39 @@
         </div>
       </div>
       <EmptyState v-else :message="t('admin.xianyu.products.noProducts')" />
+
+      <BaseDialog :show="suggestionVisible" :title="t('admin.xianyu.products.aiTitle')" @close="suggestionVisible = false">
+        <div class="space-y-4">
+          <div v-if="suggestionError" class="rounded-lg bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/30 dark:text-red-400">
+            {{ suggestionError }}
+          </div>
+          <template v-if="suggestionData">
+            <div>
+              <label class="mb-1 block text-sm font-medium text-gray-500">{{ t('admin.xianyu.products.suggestOriginal') }}</label>
+              <p class="text-sm">{{ suggestionProduct?.title }}</p>
+            </div>
+            <div>
+              <label class="mb-1 block text-sm font-medium">{{ t('admin.xianyu.products.suggestTitle') }}</label>
+              <div class="flex items-start gap-2">
+                <textarea :value="suggestionData.suggested_title" readonly rows="2" class="input w-full resize-none font-medium" />
+                <button class="btn btn-secondary btn-sm whitespace-nowrap" @click="copySuggestion">
+                  {{ t('common.copy') }}
+                </button>
+              </div>
+            </div>
+            <div v-if="suggestionData.evidence">
+              <label class="mb-1 block text-sm font-medium text-gray-500">{{ t('admin.xianyu.products.suggestEvidence') }}</label>
+              <pre class="whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300">{{ suggestionData.evidence }}</pre>
+            </div>
+          </template>
+          <div v-else-if="suggestionLoading" class="py-6 text-center text-sm text-gray-500">
+            {{ t('admin.xianyu.products.suggestionLoading') }}
+          </div>
+          <div class="flex justify-end gap-2">
+            <button class="btn btn-secondary" @click="suggestionVisible = false">{{ t('common.close') }}</button>
+          </div>
+        </div>
+      </BaseDialog>
 
       <BaseDialog :show="bindVisible" :title="t('admin.xianyu.products.bindToPool')" @close="bindVisible = false">
         <div class="space-y-4">
@@ -281,6 +317,37 @@ const filteredProducts = computed(() => {
 })
 
 const selectedIDs = ref<number[]>([])
+const suggestionVisible = ref(false)
+const suggestionLoading = ref<number | null>(null)
+const suggestionData = ref<{ suggested_title: string; evidence: string } | null>(null)
+const suggestionError = ref('')
+const suggestionProduct = ref<XianyuProduct | null>(null)
+
+async function openSuggestion(product: XianyuProduct) {
+  suggestionProduct.value = product
+  suggestionData.value = null
+  suggestionError.value = ''
+  suggestionVisible.value = true
+  suggestionLoading.value = product.id
+  try {
+    suggestionData.value = await adminAPI.xianyu.getTitleSuggestion(product.id)
+  } catch (err) {
+    suggestionError.value = extractApiErrorMessage(err, t('common.error'))
+  } finally {
+    suggestionLoading.value = null
+  }
+}
+
+async function copySuggestion() {
+  if (!suggestionData.value) return
+  try {
+    await navigator.clipboard.writeText(suggestionData.value.suggested_title)
+    appStore.showSuccess(t('common.copied'))
+  } catch {
+    appStore.showError(t('common.copyFailed'))
+  }
+}
+
 const selectAll = computed({
   get: () => filteredProducts.value.length > 0 && selectedIDs.value.length === filteredProducts.value.length,
   set: (value: boolean) => {
