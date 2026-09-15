@@ -122,7 +122,7 @@ export default {
       suggestOriginal: '原标题',
       suggestTitle: '建议标题',
       suggestEvidence: '市场证据',
-      suggestLoading: '正在采集市场数据并分析，请稍候…',
+      suggestionLoading: '正在采集市场数据并分析，请稍候…',
       rulePoolRequired: '请选择库存池',
       ruleKeywordRequired: '请输入关键词',
       ruleSaved: '规则已保存',

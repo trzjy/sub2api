@@ -122,7 +122,7 @@ export default {
       suggestOriginal: 'Original title',
       suggestTitle: 'Suggested title',
       suggestEvidence: 'Market evidence',
-      suggestLoading: 'Collecting market data and analyzing, please wait…',
+      suggestionLoading: 'Collecting market data and analyzing, please wait…',
       rulePoolRequired: 'Please select a pool',
       ruleKeywordRequired: 'Please enter a keyword',
       ruleSaved: 'Rule saved',
