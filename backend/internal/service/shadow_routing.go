@@ -24,7 +24,11 @@ func parentHealthyForShadow(account *Account, lookup func(int64) *Account) bool 
 	if parent == nil {
 		return false
 	}
-	return (parent.IsOpenAIOAuth() || parent.IsCodeBuddyOAuth()) && parent.IsCredentialUsableForShadow()
+	// 母账号支持 OpenAI OAuth / CodeBuddy OAuth / CodeBuddy APIKey（透传路径统一
+	// 由 GetAccessToken 处理），凭据可用时影子可调度。
+	isParent := parent.IsOpenAIOAuth() ||
+		(parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey))
+	return isParent && parent.IsCredentialUsableForShadow()
 }
 
 // sparkModelVariants 返回所有归一到 spark 的模型 ID（当前仅 base：spark 无 effort 变体）。

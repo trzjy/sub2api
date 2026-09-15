@@ -68,13 +68,13 @@ func TestParentHealthyForShadow(t *testing.T) {
 		shadow := &Account{ParentAccountID: ptrI64(10), QuotaDimension: QuotaDimensionSpark}
 		require.True(t, parentHealthyForShadow(shadow, parent(newParent(PlatformOpenAI, AccountTypeOAuth))))
 	})
-	t.Run("non-oauth parent rejected", func(t *testing.T) {
+	t.Run("codebuddy apikey parent usable (2026-09-15 APIKey shadow)", func(t *testing.T) {
 		shadow := &Account{ParentAccountID: ptrI64(10), QuotaDimension: QuotaDimensionCodeBuddy}
-		require.False(t, parentHealthyForShadow(shadow, parent(newParent(PlatformCodeBuddy, AccountTypeAPIKey))))
+		require.True(t, parentHealthyForShadow(shadow, parent(newParent(PlatformCodeBuddy, AccountTypeAPIKey))))
 	})
 	t.Run("non-codebuddy/oauth parent rejected", func(t *testing.T) {
 		shadow := &Account{ParentAccountID: ptrI64(10), QuotaDimension: QuotaDimensionCodeBuddy}
-		require.False(t, parentHealthyForShadow(shadow, parent(newParent(PlatformDeepseek, AccountTypeOAuth))))
+		require.False(t, parentHealthyForShadow(shadow, parent(newParent(PlatformCodeBuddy, AccountTypeSetupToken))))
 	})
 	t.Run("parent in cooldown rejected", func(t *testing.T) {
 		shadow := &Account{ParentAccountID: ptrI64(10), QuotaDimension: QuotaDimensionCodeBuddy}

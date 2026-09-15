@@ -1375,9 +1375,12 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	if err != nil {
 		return nil, fmt.Errorf("get parent account: %w", err)
 	}
-	if !parent.IsOpenAIOAuth() && !parent.IsCodeBuddyOAuth() {
+	// CodeBuddy 影子支持 OAuth 与 APIKey 两类母账号：两者都持有上游凭证，
+	// 影子通过 resolveCredentialAccount 透传母账号 credentials（access_token 或 api_key）。
+	isCodeBuddyParent := parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey)
+	if !parent.IsOpenAIOAuth() && !isCodeBuddyParent {
 		return nil, infraerrors.New(http.StatusBadRequest, "SHADOW_INVALID_PARENT",
-			"shadow requires an OpenAI OAuth or CodeBuddy OAuth parent account")
+			"shadow requires an OpenAI OAuth or CodeBuddy (OAuth/APIKey) parent account")
 	}
 	// G6:母账号本身不能是影子,否则会建出二级影子——resolveCredentialAccount 只解一层,
 	// 会解析到无凭据的一级影子,进入坏调度/上游失败。
@@ -1385,8 +1388,6 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, infraerrors.New(http.StatusBadRequest, "SHADOW_PARENT_IS_SHADOW",
 			"shadow parent must be a real account, not another shadow")
 	}
-
-	isCodeBuddyParent := parent.IsCodeBuddyOAuth()
 
 	// 2. 影子维度与目标平台
 	var quotaDimension, shadowPlatform string

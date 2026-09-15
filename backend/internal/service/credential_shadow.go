@@ -7,8 +7,8 @@ import (
 
 // resolveCredentialAccount 解析影子账号到其母账号，用于凭据/Token 透传。
 // - 普通账号（非影子）：直接返回自身。
-// - 影子账号：通过 repo 取母账号，校验母账号存在且为 OpenAI OAuth 或 CodeBuddy OAuth
-//   类型（两种母账号都不持凭据于影子、运行时透传），否则返回错误。
+// - 影子账号：通过 repo 取母账号，校验母账号存在且为支持的 OAuth 类型
+//   （OpenAI OAuth / CodeBuddy OAuth / CodeBuddy APIKey），否则返回错误。
 // 设计为包级函数（非任何 service 的方法），以便 OpenAIGatewayService / OpenAIQuotaService /
 // AccountUsageService 等不同接收者共享同一实现。
 func resolveCredentialAccount(ctx context.Context, repo AccountRepository, account *Account) (*Account, error) {
@@ -27,8 +27,12 @@ func resolveCredentialAccount(ctx context.Context, repo AccountRepository, accou
 	if parent.IsShadow() {
 		return nil, fmt.Errorf("shadow parent %d is itself a shadow", parent.ID)
 	}
-	if !parent.IsOpenAIOAuth() && !parent.IsCodeBuddyOAuth() {
-		return nil, fmt.Errorf("shadow parent %d is not a supported OAuth parent (openai/codebuddy)", parent.ID)
+	// CodeBuddy APIKey 型母账号与 OAuth 型同样持有上游凭证（api_key / access_token），
+	// 透传路径统一由 GetAccessToken 处理。
+	isParent := parent.IsOpenAIOAuth() ||
+		(parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey))
+	if !isParent {
+		return nil, fmt.Errorf("shadow parent %d is not a supported parent (openai/codebuddy OAuth/APIKey)", parent.ID)
 	}
 	return parent, nil
 }
