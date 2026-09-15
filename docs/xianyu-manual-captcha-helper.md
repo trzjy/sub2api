@@ -43,12 +43,25 @@ Worker 容器(yiyutu-server)                 本地工作站(zjy@GL502VML)
 - 服务：`~/.config/systemd/user/xianyu-captcha-helper.service`（DISPLAY=:0）+ `xianyu-captcha-tunnel.service`（`ssh -N -R 127.0.0.1:18089:127.0.0.1:18089 yiyutu-server`，ServerAlive 保活，ExitOnForwardFailure）。
 - 自检：`python3 tools/local_captcha_helper.py --selftest`——headless 起本地 Set-Cookie 页面，验证浏览器→轮询→成功契约全链（2026-09-16 PASS）。
 
-## 5. Worker 侧配置（管理界面，一次性）
+## 5. Worker 侧配置（2026-09-16 已由执行会话落库完成）
 
-1. Worker 管理端（8089）→ 验证码/滑块配置页（`GET/PUT /captcha/remote-config`，仅管理员）。
-2. 填入：`url = http://<网桥网关IP>:18089/solve`、`secret_key = 本地 config.json 中的 secret`；`block_remote_calls` 改为 `false`（默认 true）。
-3. `pass_cookies`（传递 Cookie）建议默认关：人工模式不需要传账号 Cookie，链接过期由 Worker 刷新 URL 重试（`url_expired` 路径）。
-4. 用 `POST /captcha/slider-solve/test` 做一次带真实 punish 链接的端到端测试。
+全局配置存 `xy_system_settings`，管理界面入口为 Worker 管理端（8089）→ 验证码配置页
+（`GET/PUT /captcha/remote-config`，仅管理员）。当前库内状态：
+
+1. `captcha.remote_service_url = http://<网桥网关IP>:18089/solve`（已写入 `http://172.19.0.1:18089/solve`）。
+2. `captcha.remote_secret_key` = 本地 `config.json` 中的 secret（已写入，SHA256 与工作站逐字节核验一致）。
+3. `captcha.remote_pass_cookies = false`（已写入）：人工模式不需要传账号 Cookie，链接过期由 Worker 刷新 URL 重试（`url_expired` 路径）。
+4. `captcha.block_remote_calls` 保持默认 `true`：该开关**只门禁 backend-web 的入站过滑块接口**（`POST /captcha/slider-solve` 模式B，captcha.py:136/:540），不影响 Worker 出站调用本地 helper——本拓扑没有入站调用方，保持关闭是更小攻击面的正确状态。（更正：早期版本手册曾写"需改为 false"，系误读，已依代码证据修正。）
+5. 配置为**每次调用实时读库**（cookie_token_manager.py:607、flow.py:47），改后无需重启 Worker 容器。
+6. 端到端验证：`POST /captcha/slider-solve/test` 带真实 punish 链接（需管理员登录态），或等真实续期挑战自然触发。
+
+### 5b. 契约 B（商品监控）配置——按用户，当前未启用
+
+商品监控的远程过风控是**个人设置**（`xy_user_settings`），不是全局 captcha 配置：
+键 `monitor.remote_risk_url` / `monitor.remote_risk_secret`（个人设置页填写，
+校验逻辑 common/services/monitor_remote_risk_config.py）。当前部署零监控任务、零用户配置——
+无消费者，故未落库。启用时机：创建商品监控任务前，在个人设置填
+url=`http://<网桥网关IP>:18089/risk` + 与契约 A 相同的 secret（helper 三路由共用一个 secret）。
 
 ## 6. 验收清单
 
@@ -58,6 +71,7 @@ Worker 容器(yiyutu-server)                 本地工作站(zjy@GL502VML)
 | 隧道连通 | 服务器 `curl 127.0.0.1:18089/healthz` → 200 | ✅ 2026-09-16 |
 | 容器连通 | Worker 容器内访问 `http://172.19.0.1:18089/healthz` → 200（ufw 需放行 172.19.0.0/16→18089/tcp，已加） | ✅ 2026-09-16 |
 | 契约鉴权负路径 | 错 secret / 缺 X-API-Key → 401（经容器全链实测） | ✅ 2026-09-16 |
+| Worker 全局配置落库 | url+secret+pass_cookies=false 写入 xy_system_settings，SHA256 核验一致；实时读库无需重启 | ✅ 2026-09-16 |
 | 契约端到端 | Worker `/captcha/slider-solve/test` 或真实续期挑战触发本地弹窗+人工通过+回传成功 | 待验（硬性项） |
 | **真实挑战实测** | 真实 Baxia 挑战经人工本地打码后，凭证被 Worker 接受并恢复续期（x5sec IP 绑定风险只能实测排除） | **待验（硬性项，不可用代码推断替代）** |
 | 回退不劣化 | 人不在电脑前：本地超时/失败 → Worker 编排回退本机引擎，续期链路行为与现状一致 | 待验（随真实挑战一并观察） |
