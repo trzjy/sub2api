@@ -30,6 +30,7 @@ type XianyuControlService struct {
 	encryptor    SecretEncryptor
 	delivery     *XianyuDeliveryService
 	worker       *XianyuWorkerService
+	xgjConfig    *XianGuanJiaConfigService
 	sync         *XianyuSyncService
 	setting      XianyuDeliverySettingReader
 	settingStore XianyuSettingStore
@@ -60,6 +61,11 @@ func NewXianyuControlService(
 		setting:      setting,
 		settingStore: settingStore,
 	}
+}
+
+// SetXianGuanJiaConfigService 注入闲管家配置服务（账号托管登录用）。
+func (s *XianyuControlService) SetXianGuanJiaConfigService(xgj *XianGuanJiaConfigService) {
+	s.xgjConfig = xgj
 }
 
 // XianyuSettings 是控制面设置视图。
@@ -820,8 +826,28 @@ func (s *XianyuControlService) SyncProducts(ctx context.Context) error {
 	return s.sync.RunProductSync(ctx)
 }
 
-// CreateLoginSession 创建扫码会话。
+// CreateLoginSession 创建登录会话。
+// 闲管家托管模式下：直接从闲管家 API 同步已授权店铺并落库，返回 success；
+// 同步失败（未授权/IP 未白名单）时返回 failed + message，前端据此显示"前往闲管家授权"引导。
+// 自研 Worker 模式：转发 Worker 扫码会话（回退通道，待退役）。
 func (s *XianyuControlService) CreateLoginSession(ctx context.Context, accountID string) (*XianyuWorkerLoginSessionStatus, error) {
+	if s.xgjConfig != nil {
+		cfg, err := s.xgjConfig.GetActiveConfig(ctx)
+		if err == nil && cfg != nil && cfg.Status == XianGuanJiaConfigStatusActive {
+			if err := s.syncXianGuanJiaShops(ctx); err != nil {
+				// 未授权（401 签名错误 / 403 IP 不在白名单）时把错误信息返回给前端，
+				// 不中断整个请求，让前端能展示"前往闲管家授权"引导。
+				return &XianyuWorkerLoginSessionStatus{
+					Status:  "failed",
+					Message: "闲管家同步失败：" + err.Error(),
+				}, nil
+			}
+			return &XianyuWorkerLoginSessionStatus{
+				Status:  "success",
+				Message: "闲管家已授权店铺同步完成",
+			}, nil
+		}
+	}
 	if s.worker == nil {
 		return nil, ErrXianyuDeliveryNotConfigured
 	}
@@ -832,8 +858,47 @@ func (s *XianyuControlService) CreateLoginSession(ctx context.Context, accountID
 	return client.CreateLoginSession(ctx, accountID)
 }
 
-// QueryLoginSession 按 Worker session_id 查询扫码会话状态。
+// syncXianGuanJiaShops 从闲管家 API 拉取已授权店铺并落库为 xianyu_accounts。
+func (s *XianyuControlService) syncXianGuanJiaShops(ctx context.Context) error {
+	client, err := s.worker.buildXianGuanJiaClient(ctx)
+	if err != nil || client == nil {
+		return err
+	}
+	shops, err := client.ListShops(ctx)
+	if err != nil {
+		return err
+	}
+	// 取 active worker config 作为归属。
+	workerCfg, err := s.worker.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	for _, shop := range shops {
+		if !shop.IsValid {
+			continue
+		}
+		_, _ = s.worker.control.UpsertAccount(ctx, XianyuAccount{
+			WorkerConfigID: workerCfg.ID,
+			AccountID:      shop.UserIdentity, // 闲鱼号唯一标识（H8Kx1...）
+			Nickname:       shop.UserNick,
+			Status:         XianyuAccountStatusEnabled,
+			CookieStatus:   XianyuCookieStatusValid,
+			TaskStatus:     XianyuTaskStatusRunning,
+			LastSeenAt:     timePtr(time.Now()),
+		})
+	}
+	return nil
+}
+
+// QueryLoginSession 查询登录会话状态。
+// 闲管家模式下无真正会话，直接查店铺列表是否已同步。
 func (s *XianyuControlService) QueryLoginSession(ctx context.Context, sessionID string) (*XianyuWorkerLoginSessionStatus, error) {
+	if strings.HasPrefix(sessionID, "xgj_") {
+		return &XianyuWorkerLoginSessionStatus{
+			Status:  "success",
+			Message: "闲管家已授权店铺同步完成",
+		}, nil
+	}
 	if s.worker == nil {
 		return nil, ErrXianyuDeliveryNotConfigured
 	}
@@ -842,6 +907,11 @@ func (s *XianyuControlService) QueryLoginSession(ctx context.Context, sessionID 
 		return nil, err
 	}
 	return client.QueryLoginSession(ctx, sessionID)
+}
+
+// SyncXianGuanJiaShops 供 admin handler 调用：立即刷新闲管家已授权店铺投影。
+func (s *XianyuControlService) SyncXianGuanJiaShops(ctx context.Context) error {
+	return s.syncXianGuanJiaShops(ctx)
 }
 
 // ---------------------------------------------------------------------------

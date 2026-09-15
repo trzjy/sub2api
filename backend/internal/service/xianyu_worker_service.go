@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,6 +17,9 @@ type XianyuWorkerService struct {
 	encryptor  SecretEncryptor
 	forbidLoop bool
 	clientFor  func(baseURL, token string) *XianyuWorkerClient
+	// xgj 闲管家客户端（账号托管模式）。非 nil 时商品同步/搜索/详情走闲管家 API，
+	// 其余（消息发送/卡券）也优先走闲管家；自研 Worker 仅作为降级通道。
+	xgj *XianGuanJiaClient
 }
 
 // NewXianyuWorkerService 创建 Worker 控制面服务。
@@ -26,6 +30,19 @@ func NewXianyuWorkerService(control XianyuControlRepository, encryptor SecretEnc
 		forbidLoop: true,
 		clientFor:  newXianyuWorkerClientForService,
 	}
+}
+
+// SetXianGuanJiaClient 注入闲管家客户端（账号托管模式）。
+func (s *XianyuWorkerService) SetXianGuanJiaClient(client *XianGuanJiaClient) {
+	s.xgj = client
+}
+
+// buildXianGuanJiaClient 返回当前注入的闲管家客户端（未配置时返回 nil,nil）。
+func (s *XianyuWorkerService) buildXianGuanJiaClient(ctx context.Context) (*XianGuanJiaClient, error) {
+	if s.xgj != nil {
+		return s.xgj, nil
+	}
+	return nil, nil
 }
 
 // clientForActiveWorker 读取 active Worker 配置并构建客户端。
@@ -71,6 +88,22 @@ func (s *XianyuWorkerService) CheckHealth(ctx context.Context) error {
 		return ErrXianyuWorkerUnhealthy
 	}
 	return nil
+}
+
+// accountsForWorkerConfig 返回当前账号列表（挂靠 active worker config；无 active 配置时返回空）。
+func (s *XianyuWorkerService) accountsForWorkerConfig(ctx context.Context) ([]XianyuAccount, error) {
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if err != nil {
+		if errors.Is(err, ErrXianyuWorkerConfigNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	accounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	return accounts, nil
 }
 
 // SyncAccounts 拉取 Worker 账号列表并落库。
@@ -492,12 +525,119 @@ func (s *XianyuWorkerService) SyncItemCard(ctx context.Context, itemID string, c
 
 // SyncProducts 拉取账号在售商品并落库；只在不覆盖手工绑定映射的前提下更新。
 // 完整成功后，投影中未出现的商品行直接删除（售罄/下架清理，发货记录保留）。
+// SyncProducts 同步商品投影。
+// 闲管家托管模式下走闲管家 API 拉在售商品；否则回退自研 Worker。
 func (s *XianyuWorkerService) SyncProducts(ctx context.Context) error {
-	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
+	if s.xgj != nil {
+		return s.syncProductsXianGuanJia(ctx)
+	}
+	return s.syncProductsWorker(ctx)
+}
+
+// syncProductsXianGuanJia 通过闲管家开放平台 API 同步商品投影。
+// 闲管家商品列表不分账号（authorize_id 可选），需要逐页拉取所有上架商品；
+// 本地商品按 authorize_id 维度归属：店铺列表里的 authorize_id → 本地 xianyu_accounts.account_id。
+func (s *XianyuWorkerService) syncProductsXianGuanJia(ctx context.Context) error {
+	// 先拉店铺列表，建立 authorize_id → 本地账号映射。
+	shops, err := s.xgj.ListShops(ctx)
 	if err != nil {
 		return err
 	}
-	accounts, err := s.control.ListAccounts(ctx, workerCfg.ID)
+	shopMap := map[string]*XianGuanJiaShop{} // user_identity → shop
+	for i := range shops {
+		shopMap[shops[i].UserIdentity] = &shops[i]
+	}
+	// 逐页拉上架商品（sale_status=2），每页 50。
+	seen := map[string]bool{} // "product_id" → 出现过
+	pageNo := 1
+	for {
+		products, err := s.xgj.ListProducts(ctx, pageNo, 50, 2)
+		if err != nil {
+			return err
+		}
+		if len(products) == 0 {
+			break
+		}
+		for _, p := range products {
+			key := fmt.Sprintf("%d", p.ProductID)
+			seen[key] = true
+			// 用 ItemID（闲鱼商品ID）作为 item_id；SpecName/SpecValue 闲管家不支持（单规格），统一空。
+			itemIDStr := strconv.FormatInt(p.ItemID, 10)
+			// 尝试归属到本地第一个已存在的账号（多账号场景需要再细化）。
+			var accountPK int64
+			var accountIDStr string
+			if acc := s.firstEnabledAccount(ctx); acc != nil {
+				accountPK = acc.ID
+				accountIDStr = acc.AccountID
+			}
+			existing, err := s.control.GetProductByIdentity(ctx, accountPK, itemIDStr, "", "")
+			var product XianyuProduct
+			if err == nil && existing != nil {
+				product = *existing
+				product.Title = p.Title
+				product.LastSeenAt = timePtr(time.Now())
+				if product.Status == XianyuProductStatusRemoved {
+					product.Status = XianyuProductStatusActive
+				}
+				_, err = s.control.UpdateProduct(ctx, product)
+			} else {
+				_, err = s.control.UpsertProduct(ctx, XianyuProduct{
+					AccountPK:     accountPK,
+					AccountID:     accountIDStr,
+					ItemID:        itemIDStr,
+					Title:         p.Title,
+					BindingStatus: XianyuBindingStatusUnmapped,
+					BindingSource: XianyuBindingSourceAutoNew,
+					Status:        XianyuProductStatusActive,
+					LastSeenAt:    timePtr(time.Now()),
+				})
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if len(products) < 50 {
+			break
+		}
+		pageNo++
+	}
+	// 清理：上一轮未出现的商品 → 删除。
+	allLocal, err := s.control.ListProducts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p := range allLocal {
+		if p.Status == XianyuProductStatusRemoved {
+			continue
+		}
+		if !seen[p.ItemID] {
+			_ = s.control.DeleteProduct(ctx, p.ID)
+		}
+	}
+	return nil
+}
+
+// firstEnabledAccount 返回第一个 enabled 状态的本地账号（闲管家多账号归属待细化）。
+func (s *XianyuWorkerService) firstEnabledAccount(ctx context.Context) *XianyuAccount {
+	accounts, err := s.accountsForWorkerConfig(ctx)
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	for _, acc := range accounts {
+		if acc.Status == XianyuAccountStatusEnabled {
+			return &acc
+		}
+	}
+	return nil
+}
+
+// syncProductsWorker 通过自研 Worker 同步商品投影。
+func (s *XianyuWorkerService) syncProductsWorker(ctx context.Context) error {
+	accounts, err := s.accountsForWorkerConfig(ctx)
+	if err != nil {
+		return err
+	}
+	workerCfg, err := s.control.GetActiveWorkerConfig(ctx)
 	if err != nil {
 		return err
 	}
@@ -610,10 +750,15 @@ func (s *XianyuWorkerService) ListAutoDeliveries(ctx context.Context, since time
 	return client.ListAutoDeliveries(ctx, since, limit)
 }
 
-// ==================== 曝光分析支持（委托给 client） ====================
+// ==================== 曝光分析支持（委托给 client / 闲管家） ====================
 
-// SearchKeyword 即席关键词搜索：复用 active Worker 的 cookie。
+// SearchKeyword 即席关键词搜索。
+// 闲管家官方开放平台无搜索接口（是商家侧 API，非 C2C 搜索），闲管家托管模式
+// 下返回明确"不支持"错误；自研 Worker 模式走 Worker。
 func (s *XianyuWorkerService) SearchKeyword(ctx context.Context, keyword string, rowsPerPage int) (*XianyuSearchOnceResult, error) {
+	if s.xgj != nil {
+		return nil, errors.New("xianguanjia open platform does not support keyword search; exposure market collection unavailable")
+	}
 	client, err := s.ClientForActiveWorker(ctx)
 	if err != nil {
 		return nil, err
@@ -621,8 +766,32 @@ func (s *XianyuWorkerService) SearchKeyword(ctx context.Context, keyword string,
 	return client.SearchKeyword(ctx, keyword, rowsPerPage)
 }
 
-// GetItemDetail 拉取商品详情（含描述正文）：复用 active Worker 的 cookie。
+// GetItemDetail 拉取商品详情（含描述正文）。
+// 闲管家托管模式走 /api/open/product/detail；否则回退自研 Worker。
 func (s *XianyuWorkerService) GetItemDetail(ctx context.Context, accountID, itemID string) (*XianyuItemDetailInfo, error) {
+	if s.xgj != nil {
+		// 闲管家商品详情按 product_id 查询；itemID 兼容传入（自研 Worker 用闲鱼 item_id）。
+		productID, err := strconv.ParseInt(itemID, 10, 64)
+		if err != nil {
+			// 非数字（闲鱼 item_id 可能是字符串）时尝试按商品列表反查 product_id。
+			return nil, fmt.Errorf("xianguanjia product detail requires numeric product_id, got %q", itemID)
+		}
+		detail, err := s.xgj.GetProductDetail(ctx, productID)
+		if err != nil {
+			return nil, err
+		}
+		title, _ := detail["title"].(string)
+		desc, _ := detail["desc"].(string)
+		soldPrice, _ := detail["sold_price"].(string)
+		sellerNick, _ := detail["seller_nick"].(string)
+		return &XianyuItemDetailInfo{
+			ItemID:     itemID,
+			Title:      title,
+			Desc:       desc,
+			SoldPrice:  soldPrice,
+			SellerNick: sellerNick,
+		}, nil
+	}
 	client, err := s.ClientForActiveWorker(ctx)
 	if err != nil {
 		return nil, err

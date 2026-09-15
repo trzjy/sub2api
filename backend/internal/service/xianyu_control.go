@@ -39,6 +39,7 @@ var (
 	ErrXianyuResendNotPending       = infraerrors.Conflict("XIANYU_RESEND_NOT_PENDING", "only failed deliveries can be resent")
 	ErrXianyuSyncBusy               = infraerrors.Conflict("XIANYU_SYNC_BUSY", "product sync is already running")
 	ErrXianyuForbidden              = infraerrors.New(403, "XIANYU_MANAGE_FORBIDDEN", "you are not authorized to manage xianyu delivery")
+	ErrXianyuAuthEventNotFound      = infraerrors.NotFound("XIANYU_AUTH_EVENT_NOT_FOUND", "xianguanjia auth event not found")
 )
 
 // Xianyu 控制面领域模型与仓库接口。
