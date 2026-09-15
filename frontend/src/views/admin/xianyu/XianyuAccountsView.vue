@@ -162,34 +162,13 @@
             </span>
           </div>
           <div v-else-if="scanStatus === 'failed'" class="text-red-600">
-            <div class="flex flex-col items-center gap-3">
-              <p>{{ scanMessage || t('admin.xianyu.accounts.scanFailed') }}</p>
-              <template v-if="isScanAuthGuide">
-                <a :href="scanAuthUrl" target="_blank" rel="noopener"
-                   class="inline-block px-6 py-2 bg-primary text-white rounded-lg hover:opacity-90 transition-opacity">
-                  {{ t('admin.xianyu.accounts.authGo') }}
-                </a>
-                <p class="text-xs text-gray-400">{{ t('admin.xianyu.accounts.authCompleteHint') }}</p>
-              </template>
-            </div>
+            {{ scanMessage || t('admin.xianyu.accounts.scanFailed') }}
           </div>
           <div v-else-if="scanStatus === 'expired'" class="text-red-600">
             {{ t('admin.xianyu.accounts.scanExpired') }}
           </div>
           <div v-else-if="scanQRCode" class="flex flex-col items-center gap-2">
-            <template v-if="isScanAuthURL">
-              <div class="flex flex-col items-center gap-3 max-w-sm text-center">
-                <p class="text-gray-700 dark:text-gray-300">{{ t('admin.xianyu.accounts.authHint') }}</p>
-                <a :href="scanQRCode" target="_blank" rel="noopener"
-                   class="inline-block px-6 py-2 bg-primary text-white rounded-lg hover:opacity-90 transition-opacity">
-                  {{ t('admin.xianyu.accounts.authGo') }}
-                </a>
-                <p class="text-xs text-gray-400">{{ t('admin.xianyu.accounts.authCompleteHint') }}</p>
-              </div>
-            </template>
-            <template v-else>
-              <img :src="scanQRCode" class="h-56 w-56 rounded border border-gray-200 dark:border-dark-700" alt="QR" />
-            </template>
+            <img :src="scanQRCode" class="h-56 w-56 rounded border border-gray-200 dark:border-dark-700" alt="QR" />
             <span class="text-sm text-gray-500">
               {{ scanStatus === 'scanned' ? t('admin.xianyu.accounts.scanScanned') : t('admin.xianyu.accounts.scanWaiting') }}
             </span>
@@ -210,7 +189,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
@@ -374,13 +353,6 @@ const scanSessionID = ref('')
 const scanStatus = ref('waiting')
 const scanMessage = ref('')
 const scanQRCode = ref('')
-const scanAuthUrl = ref('')
-
-// 闲管家托管模式下，后端把 qr_code 字段复用为 OAuth 授权 URL（http 链接）。
-// 此时展示授权引导而非二维码图片。
-const isScanAuthURL = computed(() => /^https?:\/\//i.test(scanQRCode.value))
-// 闲管家授权引导（同步失败时显示，跳转开放平台完成授权后回来重新同步）。
-const isScanAuthGuide = computed(() => scanAuthUrl.value !== '')
 let pollTimer: number | null = null
 // 登录成功后倒计时自动关闭扫码弹窗。
 let scanCloseTimer: number | null = null
@@ -414,7 +386,6 @@ async function openScan(account: XianyuAccount | null) {
   scanMessage.value = ''
   scanQRCode.value = ''
   scanSessionID.value = ''
-  scanAuthUrl.value = ''
   scanVisible.value = true
   try {
     const session = await adminAPI.xianyu.createLoginSession(account?.account_id || '')
@@ -422,25 +393,7 @@ async function openScan(account: XianyuAccount | null) {
     scanQRCode.value = session.qr_code || ''
     scanMessage.value = session.message || ''
     scanSessionID.value = session.session_id || ''
-    // 闲管家托管模式：同步失败（未授权/IP 未白名单）时展示"前往闲管家授权"引导。
-    // 前端无法区分签名错误与 IP 错误，统一按"需要授权"处理；qgj 授权地址在
-    // 后端返回的 message 里带不出来，这里用固定开放平台地址做引导。
-    if (session.status === 'failed' && scanMessage.value.includes('闲管家')) {
-      scanAuthUrl.value = 'https://open.goofish.pro'
-    }
     if (!scanSessionID.value) {
-      // 闲管家模式（同步成功或失败）没有 session_id，直接结束，不需要轮询。
-      if (session.status === 'success' || session.status === 'failed') {
-        if (session.status === 'success') {
-          try {
-            await adminAPI.xianyu.syncAccounts()
-          } catch {
-            // 同步失败不阻塞
-          }
-          await load()
-        }
-        return
-      }
       appStore.showError(t('admin.xianyu.accounts.scanNoSession'))
       scanVisible.value = false
       return

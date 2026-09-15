@@ -42,7 +42,4 @@ func RegisterInternalRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
 	v1.POST("/internal/xianyu/delivery-results", h.XianyuDelivery.DeliveryResult)
 	v1.POST("/internal/xianyu/worker-deliveries", h.XianyuDelivery.EnsureWorkerDeliveryRecord)
 	v1.POST("/internal/xianyu/refund-events", h.XianyuDelivery.RefundEvent)
-	if h.XianGuanJiaEvent != nil {
-		v1.POST("/internal/xianyu/xgj-events", h.XianGuanJiaEvent.Events)
-	}
 }

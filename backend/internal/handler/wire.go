@@ -207,7 +207,6 @@ func ProvideHandlers(
 	asyncImageHandler *AsyncImageHandler,
 	batchImageHandler *BatchImageHandler,
 	xianyuDeliveryHandler *XianyuDeliveryHandler,
-	xianGuanJiaEventHandler *XianGuanJiaEventHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 	_ *service.OpenAIQuotaAutoResetService,
@@ -235,7 +234,6 @@ func ProvideHandlers(
 		AsyncImage:       asyncImageHandler,
 		BatchImage:       batchImageHandler,
 		XianyuDelivery:   xianyuDeliveryHandler,
-		XianGuanJiaEvent: xianGuanJiaEventHandler,
 	}
 }
 
@@ -263,7 +261,6 @@ var ProviderSet = wire.NewSet(
 	NewAsyncImageHandler,
 	ProvideBatchImageHandler,
 	NewXianyuDeliveryHandler,
-	NewXianGuanJiaEventHandler,
 	admin.NewXianyuAdminHandler,
 
 	// Admin handlers

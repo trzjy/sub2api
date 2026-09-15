@@ -2,10 +2,6 @@
 二维码扫码登录路由
 
 提供二维码生成、状态查询和Cookie获取接口
-
-DEPRECATED: 账号登录已托管给闲管家（开放平台 OAuth 授权），本路由仅作为
-闲管家未完全接管前的回退通道保留。闲管家稳定运行后应删除本文件及
-services/qr_login 目录。
 """
 from __future__ import annotations
 

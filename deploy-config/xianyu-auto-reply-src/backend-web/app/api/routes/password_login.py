@@ -10,10 +10,6 @@
 - browser：强制浏览器（代理 websocket，现状不变）
 - protocol：强制协议（不做运行期回退）
 - 历史 auto、缺失值或非法值：按 browser 处理，不再读取环境变量决定登录方式
-
-DEPRECATED: 账号登录已托管给闲管家（开放平台 OAuth 授权），本路由仅作为
-闲管家未完全接管前的回退通道保留。闲管家稳定运行后应删除本文件及
-services/password_login 目录。
 """
 from __future__ import annotations
 

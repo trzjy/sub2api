@@ -120,16 +120,6 @@ func InternalError(c *gin.Context, message string) {
 	Error(c, http.StatusInternalServerError, message)
 }
 
-// XianGuanJiaNotifyOK 返回闲管家推送回调成功响应（result=success 才视为成功，否则会重试）。
-func XianGuanJiaNotifyOK(c *gin.Context, msg string) {
-	c.JSON(http.StatusOK, gin.H{"result": "success", "msg": msg})
-}
-
-// XianGuanJiaNotifyFail 返回闲管家推送回调失败响应（触发闲管家最多三次重试）。
-func XianGuanJiaNotifyFail(c *gin.Context, msg string) {
-	c.JSON(http.StatusOK, gin.H{"result": "fail", "msg": msg})
-}
-
 // Paginated 返回分页数据
 func Paginated(c *gin.Context, items any, total int64, page, pageSize int) {
 	pages := int(math.Ceil(float64(total) / float64(pageSize)))

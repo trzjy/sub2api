@@ -603,15 +603,6 @@ const (
 	// SettingKeyXianyuExposureBlockedWords 标题违规词黑名单（逗号分隔），AI 生成时硬排除。
 	SettingKeyXianyuExposureBlockedWords = "xianyu_exposure_blocked_words"
 
-	// SettingKeyXianGuanJiaBaseURL 闲管家开放平台网关地址。
-	SettingKeyXianGuanJiaBaseURL = "xianyu_xianguanjia_base_url"
-	// SettingKeyXianGuanJiaAppID 开放平台应用 ID。
-	SettingKeyXianGuanJiaAppID = "xianyu_xianguanjia_app_id"
-	// SettingKeyXianGuanJiaAppSecret 开放平台应用密钥（加密落库）。
-	SettingKeyXianGuanJiaAppSecret = "xianyu_xianguanjia_app_secret"
-	// SettingKeyXianGuanJiaPushURL 事件推送（pushUrl）回调地址（闲管家推送到主程序的 URL）。
-	SettingKeyXianGuanJiaPushURL = "xianyu_xianguanjia_push_url"
-
 	// SettingKeyModelPlazaEnabled is a DB-backed soft switch for the Model Plaza page
 	// (public group/model pricing showcase). When false: the plaza endpoint returns 404
 	// and the header entry is hidden. Defaults to false (opt-in feature).
