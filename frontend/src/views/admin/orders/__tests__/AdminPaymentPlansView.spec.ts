@@ -58,6 +58,9 @@ describe('AdminPaymentPlansView', () => {
           group_id: 1,
           price: 499,
           original_price: 599,
+          // 046005b11 起 UI 直接显示 price_cny/original_price_cny（消除往返尾差）
+          price_cny: 3567.85,
+          original_price_cny: 4282.85,
           currency: 'CNY',
           validity_days: 30,
           validity_unit: 'day',

@@ -100,9 +100,7 @@ describe('PaymentStatusPanel', () => {
     expect(wrapper.emitted('success')).toHaveLength(1)
   })
 
-  it('shows reopen button in QR mode when payUrl is also available', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue({ closed: false } as Window)
-
+  it('does not show the reopen-pay-window button in QR mode', async () => {
     const wrapper = mount(PaymentStatusPanel, {
       props: {
         orderId: 42,
@@ -120,16 +118,10 @@ describe('PaymentStatusPanel', () => {
     })
 
     await flushPromises()
-    expect(wrapper.text()).toContain('payment.qr.openPayWindow')
-
-    await wrapper.get('button.btn.btn-secondary.text-sm').trigger('click')
-    expect(openSpy).toHaveBeenCalledWith(
-      'https://pay.example.com/session/42',
-      'paymentPopup',
-      expect.any(String),
-    )
-
-    openSpy.mockRestore()
+    // QR 模式下不再展示"打开支付窗口"按钮：xunhupay 的 url 与 url_qrcode
+    // 禁止两段式使用（官方文档明确"不能先显示 url_qrcode 二维码再跳转 url"），
+    // 二维码模式下只保留扫码路径。
+    expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
   })
 
   it('uses generic QR copy for custom methods that contain built-in names', async () => {
@@ -152,6 +144,29 @@ describe('PaymentStatusPanel', () => {
 
     expect(wrapper.text()).toContain('payment.qr.scanToPay')
     expect(wrapper.text()).not.toContain('payment.qr.scanAlipay')
+  })
+
+  // xunhupay 的 qr_code 是虎皮椒直接返回的二维码图片 URL（https://... 302→PNG），
+  // 应直接作为 <img> src 展示，不应经 QRCode.toCanvas 二次编码（会产生多余的中间层二维码）。
+  it('renders xunhupay https qr_code as <img> directly (not via QRCode.toCanvas)', async () => {
+    const wrapper = mount(PaymentStatusPanel, {
+      props: {
+        orderId: 58,
+        qrCode: 'https://api.xunhupay.com/payments/wechat/qrcode_v3?id=20307171935&nonce_str=abc&time=123&appid=201906187599&hash=def',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'wxpay',
+        orderType: 'balance',
+      },
+      global: { stubs: { Icon: true } },
+    })
+
+    await flushPromises()
+
+    // 直接 <img> 展示，不走 QRCode.toCanvas 重编码
+    expect(toCanvas).not.toHaveBeenCalled()
+    const img = wrapper.find('[data-test="direct-qr-img"]')
+    expect(img.exists()).toBe(true)
+    expect(img.attributes('src')).toContain('qrcode_v3')
   })
 
   it('actively verifies a stuck pending order and settles it when upstream confirms payment', async () => {
