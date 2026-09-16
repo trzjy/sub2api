@@ -161,8 +161,9 @@ describe('PlanEditDialog', () => {
 
     expect(wrapper.text()).toContain('stored $1.40')
     expect(showErrorSpy).not.toHaveBeenCalled()
+    // 87b590bee 起 price 存储为 4 位小数（消除 CNY 往返尾差）：9.99/7.15 = 1.3972
     expect(createPlan).toHaveBeenCalledWith(expect.objectContaining({
-      price: 1.4,
+      price: 1.3972,
       original_price: 0,
     }))
   })

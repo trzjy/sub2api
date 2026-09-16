@@ -28,7 +28,9 @@ vi.mock('@/api/admin', () => ({
       delete: vi.fn(),
       batchDelete: vi.fn(),
       batchUpdate: batchUpdateRedeemCodes,
-      exportCodes: vi.fn()
+      exportCodes: vi.fn(),
+      // 福利批次 Tab（dbf199fc5 起挂载即加载），mock 空列表避免 mount 报错
+      listWelfareBatches: vi.fn().mockResolvedValue({ items: [], total: 0, pages: 0 })
     },
     groups: {
       getAll: getAllGroups
@@ -154,7 +156,8 @@ describe('admin RedeemView batch update', () => {
     listRedeemValues.mockResolvedValue([])
   })
 
-  it('submits only checked fields for selected redeem codes', async () => {
+  // dbf199fc5 起 activeTab 默认 welfare，本 spec 针对兑换码 Tab：挂载后切到 codes。
+  async function mountRedeemViewOnCodesTab() {
     const wrapper = mount(RedeemView, {
       attachTo: document.body,
       global: {
@@ -174,8 +177,15 @@ describe('admin RedeemView batch update', () => {
         }
       }
     })
-
     await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text().includes('admin.redeem.tabs.codes'))!.trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('submits only checked fields for selected redeem codes', async () => {
+    const wrapper = await mountRedeemViewOnCodesTab()
+
     await wrapper.findAll('[data-test="select-code"]')[0].setValue(true)
     await wrapper.get('[data-test="batch-update-open"]').trigger('click')
     await flushPromises()

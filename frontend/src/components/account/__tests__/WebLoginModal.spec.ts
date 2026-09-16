@@ -3,12 +3,18 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import WebLoginModal from '../WebLoginModal.vue'
 
-const { validateWebCredentialsMock } = vi.hoisted(() => ({
-  validateWebCredentialsMock: vi.fn()
+const mocks = vi.hoisted(() => ({
+  validateWebCredentialsMock: vi.fn(),
+  createWebLoginProxySessionMock: vi.fn(),
+  getWebLoginProxyCaptureMock: vi.fn(),
+  deleteWebLoginProxySessionMock: vi.fn()
 }))
 
 vi.mock('@/api/admin/accounts', () => ({
-  validateWebCredentials: validateWebCredentialsMock
+  validateWebCredentials: mocks.validateWebCredentialsMock,
+  createWebLoginProxySession: mocks.createWebLoginProxySessionMock,
+  getWebLoginProxyCapture: mocks.getWebLoginProxyCaptureMock,
+  deleteWebLoginProxySession: mocks.deleteWebLoginProxySessionMock
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -31,6 +37,8 @@ const BaseDialogStub = defineComponent({
   template: '<div v-if="show"><slot /></div>'
 })
 
+const PROXY_URL = '/api/v1/web-login-proxy/t1/'
+
 function mountModal(platform: 'web-deepseek' | 'web-zhipu' | 'web-kimi' = 'web-zhipu', show = true) {
   return mount(WebLoginModal, {
     props: { show, platform },
@@ -40,65 +48,143 @@ function mountModal(platform: 'web-deepseek' | 'web-zhipu' | 'web-kimi' = 'web-z
   })
 }
 
+async function flush() {
+  await flushPromises()
+  // captured -> handleValidateAndApply is async; flush a couple of cycles.
+  await flushPromises()
+  await flushPromises()
+}
+
 describe('WebLoginModal', () => {
   beforeEach(() => {
-    validateWebCredentialsMock.mockReset()
-    validateWebCredentialsMock.mockResolvedValue(true)
+    vi.clearAllMocks()
+    // 默认：代理会话成功、轮询未捕获、校验通过。
+    mocks.createWebLoginProxySessionMock.mockResolvedValue({
+      token: 't1',
+      url: PROXY_URL,
+      expires_at: '2099-01-01T00:00:00Z'
+    })
+    mocks.getWebLoginProxyCaptureMock.mockResolvedValue({
+      captured: false,
+      cookie: '',
+      expires_at: ''
+    })
+    mocks.validateWebCredentialsMock.mockResolvedValue(true)
+    mocks.deleteWebLoginProxySessionMock.mockResolvedValue(undefined)
   })
 
-  it('renders cookie textarea for cookie platforms and token JSON for kimi', () => {
+  it('renders cookie textarea for cookie platforms and token JSON for kimi', async () => {
     const zhipu = mountModal('web-zhipu')
+    await flush()
     expect(zhipu.find('[data-testid="web-login-cookie-input"]').exists()).toBe(true)
     expect(zhipu.find('[data-testid="web-login-token-json"]').exists()).toBe(false)
     zhipu.unmount()
 
     const kimi = mountModal('web-kimi')
+    await flush()
     expect(kimi.find('[data-testid="web-login-token-json"]').exists()).toBe(true)
     expect(kimi.find('[data-testid="web-login-cookie-input"]').exists()).toBe(false)
   })
 
-  it('shows new-tab button for all platforms and iframe collapsed by default', () => {
+  it('shows new-tab button for all platforms', async () => {
     const zhipu = mountModal('web-zhipu')
+    await flush()
     expect(zhipu.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
-    expect(zhipu.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(false)
     zhipu.unmount()
 
     const kimi = mountModal('web-kimi')
+    await flush()
     expect(kimi.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
-    expect(kimi.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(false)
   })
 
   it('opens official login page in a new tab on click', async () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
     const wrapper = mountModal('web-deepseek')
+    await flush()
     await wrapper.find('[data-testid="web-login-open-new-tab"]').trigger('click')
     expect(openSpy).toHaveBeenCalledWith('https://chat.deepseek.com/', '_blank', 'noopener')
     openSpy.mockRestore()
   })
 
-  it('shows iframe and fallback button after toggling tryEmbed', async () => {
+  it('embeds proxy iframe when proxy session is created and starts polling', async () => {
     const wrapper = mountModal('web-zhipu')
-    await wrapper.find('[data-testid="web-login-toggle-embed"]').trigger('click')
-    expect(wrapper.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="web-login-open-new-tab-fallback"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="web-login-reload-iframe"]').exists()).toBe(true)
+    await flush()
+    const wrap = wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]')
+    expect(wrap.exists()).toBe(true)
+    expect(wrap.find('iframe').attributes('src')).toBe(PROXY_URL)
+    expect(wrap.find('iframe').attributes('sandbox')).toBeUndefined()
+    // 轮询已启动（首轮已调用 capture）。
+    expect(mocks.getWebLoginProxyCaptureMock).toHaveBeenCalled()
+  })
+
+  it('auto-fills cookie, validates and emits applied + close on capture success', async () => {
+    mocks.getWebLoginProxyCaptureMock.mockResolvedValue({
+      captured: true,
+      cookie: 'sessionid=abc',
+      expires_at: '2099-01-01T00:00:00Z'
+    })
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+
+    expect((wrapper.find('[data-testid="web-login-cookie-input"]').element as HTMLTextAreaElement).value).toBe('sessionid=abc')
+    expect(wrapper.find('[data-testid="web-login-autofilled"]').exists()).toBe(true)
+    expect(mocks.validateWebCredentialsMock).toHaveBeenCalledWith('web-zhipu', expect.objectContaining({ cookie: 'sessionid=abc' }))
+    expect(wrapper.emitted('applied')).toBeTruthy()
+    expect(wrapper.emitted('applied')![0][0]).toEqual({
+      platform: 'web-zhipu',
+      credentials: { cookie: 'sessionid=abc' }
+    })
+    expect(wrapper.emitted('close')).toBeTruthy()
+  })
+
+  it('shows proxy-unavailable hint and does not crash when session creation fails', async () => {
+    mocks.createWebLoginProxySessionMock.mockRejectedValue(new Error('proxy down'))
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+
+    expect(wrapper.find('[data-testid="web-login-proxy-unavailable"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]').exists()).toBe(false)
+    expect(mocks.getWebLoginProxyCaptureMock).not.toHaveBeenCalled()
+  })
+
+  it('does not poll for kimi even when proxy iframe is shown', async () => {
+    const wrapper = mountModal('web-kimi')
+    await flush()
+
+    expect(wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]').exists()).toBe(true)
+    expect(mocks.getWebLoginProxyCaptureMock).not.toHaveBeenCalled()
+  })
+
+  it('deletes the proxy session on close', async () => {
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+    expect(mocks.deleteWebLoginProxySessionMock).not.toHaveBeenCalled()
+
+    const cancel = wrapper.findAll('button').find((b) => b.text() === 'common.cancel')!
+    await cancel.trigger('click')
+    await flush()
+
+    expect(mocks.deleteWebLoginProxySessionMock).toHaveBeenCalledWith('t1')
+    expect(wrapper.emitted('close')).toBeTruthy()
   })
 
   it('shows empty-input error without calling backend', async () => {
     const wrapper = mountModal('web-zhipu')
+    await flush()
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
-    await flushPromises()
+    await flush()
     expect(wrapper.find('[data-testid="web-login-validation-error"]').exists()).toBe(true)
-    expect(validateWebCredentialsMock).not.toHaveBeenCalled()
+    expect(mocks.validateWebCredentialsMock).not.toHaveBeenCalled()
   })
 
   it('validates cookie paste and emits applied + close on success', async () => {
     const wrapper = mountModal('web-zhipu')
+    await flush()
     await wrapper.find('[data-testid="web-login-cookie-input"]').setValue('sessionid=abc; waf_cookie=def')
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
-    await flushPromises()
+    await flush()
 
-    expect(validateWebCredentialsMock).toHaveBeenCalledWith('web-zhipu', expect.objectContaining({ cookie: 'sessionid=abc; waf_cookie=def' }))
+    expect(mocks.validateWebCredentialsMock).toHaveBeenCalledWith('web-zhipu', expect.objectContaining({ cookie: 'sessionid=abc; waf_cookie=def' }))
     expect(wrapper.emitted('applied')).toBeTruthy()
     expect(wrapper.emitted('applied')![0][0]).toEqual({
       platform: 'web-zhipu',
@@ -109,11 +195,12 @@ describe('WebLoginModal', () => {
 
   it('validates kimi token JSON and emits built credentials', async () => {
     const wrapper = mountModal('web-kimi')
+    await flush()
     await wrapper.find('[data-testid="web-login-token-json"]').setValue('{"access_token":"tok","refresh_token":"rt","user_id":"u1"}')
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
-    await flushPromises()
+    await flush()
 
-    expect(validateWebCredentialsMock).toHaveBeenCalledWith('web-kimi', expect.objectContaining({ access_token: 'tok' }))
+    expect(mocks.validateWebCredentialsMock).toHaveBeenCalledWith('web-kimi', expect.objectContaining({ access_token: 'tok' }))
     expect(wrapper.emitted('applied')![0][0]).toEqual({
       platform: 'web-kimi',
       credentials: { access_token: 'tok', refresh_token: 'rt', user_id: 'u1' }
@@ -122,11 +209,12 @@ describe('WebLoginModal', () => {
   })
 
   it('shows validation error and does not emit applied when backend rejects', async () => {
-    validateWebCredentialsMock.mockResolvedValue(false)
+    mocks.validateWebCredentialsMock.mockResolvedValue(false)
     const wrapper = mountModal('web-zhipu')
+    await flush()
     await wrapper.find('[data-testid="web-login-cookie-input"]').setValue('sessionid=abc')
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
-    await flushPromises()
+    await flush()
 
     expect(wrapper.find('[data-testid="web-login-validation-error"]').exists()).toBe(true)
     expect(wrapper.emitted('applied')).toBeFalsy()
@@ -135,8 +223,9 @@ describe('WebLoginModal', () => {
 
   it('does not emit close while validating', async () => {
     let resolveValidate: (v: boolean) => void = () => {}
-    validateWebCredentialsMock.mockReturnValue(new Promise<boolean>((r) => { resolveValidate = r }))
+    mocks.validateWebCredentialsMock.mockReturnValue(new Promise<boolean>((r) => { resolveValidate = r }))
     const wrapper = mountModal('web-zhipu')
+    await flush()
     await wrapper.find('[data-testid="web-login-cookie-input"]').setValue('sessionid=abc')
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
     await wrapper.vm.$nextTick()
@@ -144,16 +233,27 @@ describe('WebLoginModal', () => {
     await wrapper.find('[data-testid="web-login-submit"]').trigger('click')
     expect(wrapper.emitted('close')).toBeFalsy()
     resolveValidate(true)
-    await flushPromises()
+    await flush()
     expect(wrapper.emitted('applied')).toBeTruthy()
   })
 
   it('resets state when reopened', async () => {
     const wrapper = mountModal('web-zhipu', false)
     await wrapper.setProps({ show: true })
+    await flush()
     await wrapper.find('[data-testid="web-login-cookie-input"]').setValue('sessionid=abc')
     await wrapper.setProps({ show: false })
     await wrapper.setProps({ show: true })
+    await flush()
     expect((wrapper.find('[data-testid="web-login-cookie-input"]').element as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('is not disturbed by the capture polling in manual-paste flows', async () => {
+    // 默认未捕获，轮询不应自动填入、不应误触发校验/emit。
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+    expect((wrapper.find('[data-testid="web-login-cookie-input"]').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.emitted('applied')).toBeFalsy()
+    expect(wrapper.emitted('close')).toBeFalsy()
   })
 })

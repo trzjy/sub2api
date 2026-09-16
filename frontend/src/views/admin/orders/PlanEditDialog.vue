@@ -121,7 +121,7 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const saving = ref(false)
-const planForm = reactive({ name: '', group_id: null as number | null, description: '', price: 0, original_price: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
+const planForm = reactive({ name: '', group_id: null as number | null, description: '', price: 0, original_price: 0, price_cny: 0, original_price_cny: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
 const planFeaturesText = ref('')
 
 const validityUnitOptions = computed(() => [
@@ -159,14 +159,19 @@ const storedUsdPreview = computed(() => {
 watch([() => props.show, () => props.plan], ([visible]) => {
   if (!visible) return
     if (props.plan) {
-      // plan.price is stored in USD; convert to CNY for editing
+      // 优先读取 price_cny（管理员输入原值），回退到 USD→CNY 转换（兼容旧数据）
       const rate = cnyRate.value || 1
+      const cnyPrice = props.plan.price_cny || Math.round(props.plan.price * rate * 100) / 100
+      const cnyOrig  = props.plan.original_price_cny
+        || (props.plan.original_price ? Math.round(props.plan.original_price * rate * 100) / 100 : 0)
       Object.assign(planForm, {
         name: props.plan.name,
         group_id: props.plan.group_id,
         description: props.plan.description,
-        price: Math.round(props.plan.price * rate * 100) / 100,
-        original_price: props.plan.original_price ? Math.round(props.plan.original_price * rate * 100) / 100 : 0,
+        price: cnyPrice,
+        original_price: cnyOrig,
+        price_cny: cnyPrice,
+        original_price_cny: cnyOrig,
         currency: props.plan.currency || '',
         validity_days: props.plan.validity_days,
         validity_unit: props.plan.validity_unit || 'days',
@@ -175,7 +180,7 @@ watch([() => props.show, () => props.plan], ([visible]) => {
       })
       planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-      Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
+      Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, price_cny: 0, original_price_cny: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
       planFeaturesText.value = ''
     }
 }, { immediate: true })
@@ -183,17 +188,22 @@ watch([() => props.show, () => props.plan], ([visible]) => {
 /** Build request payload with snake_case keys matching backend JSON tags */
 function buildPlanPayload() {
   const features = planFeaturesText.value.split('\n').map(f => f.trim()).filter(Boolean).join('\n')
+  const cny = Number(planForm.price) || 0
+  const cnyOrig = Number(planForm.original_price) || 0
   return {
     name: planForm.name,
     group_id: planForm.group_id,
     description: planForm.description,
-    price: planForm.price > 0 && cnyRate.value > 0
-      ? Math.round((planForm.price / cnyRate.value) * 10000) / 10000
-      : planForm.price,
+    // USD 用于计费，从 CNY 按当前汇率换算（4 位精度）
+    price: cny > 0 && cnyRate.value > 0
+      ? Math.round((cny / cnyRate.value) * 10000) / 10000
+      : cny,
+    price_cny: cny,
     currency: ACCOUNT_CURRENCY,
-    original_price: planForm.original_price > 0 && cnyRate.value > 0
-      ? Math.round((planForm.original_price / cnyRate.value) * 10000) / 10000
-      : planForm.original_price || 0,
+    original_price: cnyOrig > 0 && cnyRate.value > 0
+      ? Math.round((cnyOrig / cnyRate.value) * 10000) / 10000
+      : cnyOrig || 0,
+    original_price_cny: cnyOrig || 0,
     validity_days: planForm.validity_days,
     validity_unit: planForm.validity_unit,
     sort_order: planForm.sort_order,

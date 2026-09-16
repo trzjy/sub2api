@@ -323,6 +323,53 @@ export async function validateWebCredentials(
   return data.success === true
 }
 
+export interface WebLoginProxySession {
+  token: string
+  url: string
+  expires_at: string
+}
+
+export interface WebLoginCaptureResult {
+  captured: boolean
+  cookie: string
+  expires_at: string
+}
+
+/**
+ * Create a server-side web-login proxy session for capturing the platform
+ * login cookie through a same-origin iframe (W5 web-login capture).
+ * @param platform - web-deepseek / web-zhipu / web-kimi
+ * @returns token + same-origin relative url to embed in the proxy iframe
+ */
+export async function createWebLoginProxySession(platform: string): Promise<WebLoginProxySession> {
+  const { data } = await apiClient.post<WebLoginProxySession>(
+    '/admin/web-login-proxy/sessions',
+    { platform }
+  )
+  return data
+}
+
+/**
+ * Poll the capture state of a web-login proxy session.
+ * @param token - session token from createWebLoginProxySession
+ * @returns captured flag + cookie once available
+ */
+export async function getWebLoginProxyCapture(token: string): Promise<WebLoginCaptureResult> {
+  const { data } = await apiClient.get<WebLoginCaptureResult>(
+    `/admin/web-login-proxy/sessions/${token}/capture`
+  )
+  return data
+}
+
+/**
+ * Best-effort delete of a web-login proxy session (releases the proxy slot).
+ * Swallows errors so callers can fire-and-forget on close/unmount.
+ * @param token - session token from createWebLoginProxySession
+ */
+export async function deleteWebLoginProxySession(token: string): Promise<void> {
+  await apiClient.delete(`/admin/web-login-proxy/sessions/${token}`)
+}
+
 /**
  * Refresh account credentials
  * @param id - Account ID

@@ -29,9 +29,9 @@
         </template>
         <template #cell-price="{ value, row }">
           <div class="text-sm">
-            <span class="font-medium text-gray-900 dark:text-white">{{ planCurrencySymbol }}{{ Math.round((value ?? 0) * cnyRate * 100) / 100 }}</span>
+            <span class="font-medium text-gray-900 dark:text-white">{{ planCurrencySymbol }}{{ row.price_cny ?? Math.round((value ?? 0) * cnyRate * 100) / 100 }}</span>
             <span class="ml-1 text-xs text-gray-400">CNY</span>
-            <span v-if="row.original_price" class="ml-1 text-xs text-gray-400 line-through">{{ planCurrencySymbol }}{{ Math.round(row.original_price * cnyRate * 100) / 100 }}</span>
+            <span v-if="row.original_price_cny" class="ml-1 text-xs text-gray-400 line-through">{{ planCurrencySymbol }}{{ row.original_price_cny }}</span>
             <div class="text-xs text-gray-400 dark:text-gray-500">
               ≈ {{ formatPaymentAmount(row.price, ACCOUNT_CURRENCY) }}（{{ ACCOUNT_CURRENCY }}）
             </div>

@@ -44,6 +44,14 @@ func (SubscriptionPlan) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,4)"}).
 			Optional().
 			Nillable(),
+		// price_cny / original_price_cny 存储管理员输入的人民币原值，用于管理后台回显，
+		// 避免 USD→CNY 双向换算的舍入抖动。保存时写入，显示时直接读取，不做转换。
+		field.Float("price_cny").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(20,4)"}).
+			Default(0),
+		field.Float("original_price_cny").
+			SchemaType(map[string]string{dialect.Postgres: "decimal(20,4)"}).
+			Default(0),
 		// currency 固定 'USD'（历史 display-only 字段，253 迁移统一标记；后端写死、校验只收 USD）。
 		field.String("currency").
 			MaxLen(3).

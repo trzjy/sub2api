@@ -23,6 +23,10 @@ const (
 	FieldPrice = "price"
 	// FieldOriginalPrice holds the string denoting the original_price field in the database.
 	FieldOriginalPrice = "original_price"
+	// FieldPriceCny holds the string denoting the price_cny field in the database.
+	FieldPriceCny = "price_cny"
+	// FieldOriginalPriceCny holds the string denoting the original_price_cny field in the database.
+	FieldOriginalPriceCny = "original_price_cny"
 	// FieldCurrency holds the string denoting the currency field in the database.
 	FieldCurrency = "currency"
 	// FieldValidityDays holds the string denoting the validity_days field in the database.
@@ -53,6 +57,8 @@ var Columns = []string{
 	FieldDescription,
 	FieldPrice,
 	FieldOriginalPrice,
+	FieldPriceCny,
+	FieldOriginalPriceCny,
 	FieldCurrency,
 	FieldValidityDays,
 	FieldValidityUnit,
@@ -79,6 +85,10 @@ var (
 	NameValidator func(string) error
 	// DefaultDescription holds the default value on creation for the "description" field.
 	DefaultDescription string
+	// DefaultPriceCny holds the default value on creation for the "price_cny" field.
+	DefaultPriceCny float64
+	// DefaultOriginalPriceCny holds the default value on creation for the "original_price_cny" field.
+	DefaultOriginalPriceCny float64
 	// DefaultCurrency holds the default value on creation for the "currency" field.
 	DefaultCurrency string
 	// CurrencyValidator is a validator for the "currency" field. It is called by the builders before save.
@@ -138,6 +148,16 @@ func ByPrice(opts ...sql.OrderTermOption) OrderOption {
 // ByOriginalPrice orders the results by the original_price field.
 func ByOriginalPrice(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOriginalPrice, opts...).ToFunc()
+}
+
+// ByPriceCny orders the results by the price_cny field.
+func ByPriceCny(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPriceCny, opts...).ToFunc()
+}
+
+// ByOriginalPriceCny orders the results by the original_price_cny field.
+func ByOriginalPriceCny(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOriginalPriceCny, opts...).ToFunc()
 }
 
 // ByCurrency orders the results by the currency field.

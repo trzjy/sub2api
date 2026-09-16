@@ -171,7 +171,18 @@
         <div class="flex flex-col items-center space-y-4">
           <p class="text-lg font-semibold text-gray-900 dark:text-white">{{ scanTitle }}</p>
           <div :class="['relative rounded-lg border-2 p-4', qrBorderClass]">
-            <canvas ref="qrCanvas" class="mx-auto"></canvas>
+            <!-- xunhupay 微信：qr_code 是虎皮椒生成的二维码图片 URL（302→PNG），直接展示为图片。
+                 官方微信 Native / easypay / alipay：qr_code 是支付串（weixin://、alipays://、opaque token），
+                 需经 QRCode.toCanvas 编码成二维码。 -->
+            <img
+              v-if="isDirectImageQR"
+              :src="qrUrl"
+              alt="微信扫码支付"
+              class="mx-auto"
+              style="width: 220px; height: 220px; object-fit: contain"
+              data-test="direct-qr-img"
+            />
+            <canvas v-else ref="qrCanvas" class="mx-auto"></canvas>
             <!-- Brand logo overlay -->
             <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
               <span :class="['rounded-full p-2 shadow ring-2 ring-white', qrLogoBgClass]">
@@ -180,9 +191,6 @@
             </div>
           </div>
           <p v-if="scanHint" class="text-center text-sm text-gray-500 dark:text-gray-400">{{ scanHint }}</p>
-          <button v-if="payUrl" class="btn btn-secondary text-sm" @click="reopenPopup">
-            {{ t('payment.qr.openPayWindow') }}
-          </button>
         </div>
       </div>
       <div class="card p-4 text-center">
@@ -293,6 +301,10 @@ const VERIFY_RETRY_MAX_ATTEMPTS = 6
 
 const isAlipay = computed(() => isBuiltInAlipayMethod(props.paymentType))
 const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
+// xunhupay 的 qr_code 是虎皮椒直接返回的二维码图片 URL（https://... 302→PNG），
+// 直接 <img> 展示即可扫码支付，不能再编码。其余 provider（官方微信 Native 的
+// weixin:// 串、easypay/alipay 的支付串）必须经 QRCode.toCanvas 编码。
+const isDirectImageQR = computed(() => isWxpay.value && /^https?:\/\//i.test(qrUrl.value))
 const isMobileAlipayDeepLink = computed(() => props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value)
 const showQRCode = computed(() => !!qrUrl.value && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
 
@@ -361,6 +373,7 @@ function setOutcome(next: PaymentOutcome) {
 async function renderQR() {
   await nextTick()
   if (!showQRCode.value || !qrCanvas.value || !qrUrl.value) return
+  if (isDirectImageQR.value) return
   await QRCode.toCanvas(qrCanvas.value, qrUrl.value, {
     width: 220, margin: 2,
     errorCorrectionLevel: 'M',

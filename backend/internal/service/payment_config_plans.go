@@ -142,11 +142,14 @@ func (s *PaymentConfigService) CreatePlan(ctx context.Context, req CreatePlanReq
 	}
 	b := s.entClient.SubscriptionPlan.Create().
 		SetGroupID(req.GroupID).SetName(req.Name).SetDescription(req.Description).
-		SetPrice(req.Price).SetCurrency(currency).SetValidityDays(req.ValidityDays).SetValidityUnit(req.ValidityUnit).
+		SetPrice(req.Price).SetPriceCny(req.PriceCNY).SetCurrency(currency).SetValidityDays(req.ValidityDays).SetValidityUnit(req.ValidityUnit).
 		SetFeatures(req.Features).SetProductName(req.ProductName).
 		SetForSale(req.ForSale).SetSortOrder(req.SortOrder)
 	if req.OriginalPrice != nil {
 		b.SetOriginalPrice(*req.OriginalPrice)
+	}
+	if req.OriginalPriceCNY != nil {
+		b.SetOriginalPriceCny(*req.OriginalPriceCNY)
 	}
 	return b.Save(ctx)
 }
@@ -171,8 +174,14 @@ func (s *PaymentConfigService) UpdatePlan(ctx context.Context, id int64, req Upd
 	if req.Price != nil {
 		u.SetPrice(*req.Price)
 	}
+	if req.PriceCNY != nil {
+		u.SetPriceCny(*req.PriceCNY)
+	}
 	if req.OriginalPrice != nil {
 		u.SetOriginalPrice(*req.OriginalPrice)
+	}
+	if req.OriginalPriceCNY != nil {
+		u.SetOriginalPriceCny(*req.OriginalPriceCNY)
 	}
 	if req.Currency != nil {
 		currency, err := normalizePlanCurrency(*req.Currency)

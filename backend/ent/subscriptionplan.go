@@ -27,6 +27,10 @@ type SubscriptionPlan struct {
 	Price float64 `json:"price,omitempty"`
 	// OriginalPrice holds the value of the "original_price" field.
 	OriginalPrice *float64 `json:"original_price,omitempty"`
+	// PriceCny holds the value of the "price_cny" field.
+	PriceCny float64 `json:"price_cny,omitempty"`
+	// OriginalPriceCny holds the value of the "original_price_cny" field.
+	OriginalPriceCny float64 `json:"original_price_cny,omitempty"`
 	// Currency holds the value of the "currency" field.
 	Currency string `json:"currency,omitempty"`
 	// ValidityDays holds the value of the "validity_days" field.
@@ -55,7 +59,7 @@ func (*SubscriptionPlan) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case subscriptionplan.FieldForSale:
 			values[i] = new(sql.NullBool)
-		case subscriptionplan.FieldPrice, subscriptionplan.FieldOriginalPrice:
+		case subscriptionplan.FieldPrice, subscriptionplan.FieldOriginalPrice, subscriptionplan.FieldPriceCny, subscriptionplan.FieldOriginalPriceCny:
 			values[i] = new(sql.NullFloat64)
 		case subscriptionplan.FieldID, subscriptionplan.FieldGroupID, subscriptionplan.FieldValidityDays, subscriptionplan.FieldSortOrder:
 			values[i] = new(sql.NullInt64)
@@ -114,6 +118,18 @@ func (_m *SubscriptionPlan) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.OriginalPrice = new(float64)
 				*_m.OriginalPrice = value.Float64
+			}
+		case subscriptionplan.FieldPriceCny:
+			if value, ok := values[i].(*sql.NullFloat64); !ok {
+				return fmt.Errorf("unexpected type %T for field price_cny", values[i])
+			} else if value.Valid {
+				_m.PriceCny = value.Float64
+			}
+		case subscriptionplan.FieldOriginalPriceCny:
+			if value, ok := values[i].(*sql.NullFloat64); !ok {
+				return fmt.Errorf("unexpected type %T for field original_price_cny", values[i])
+			} else if value.Valid {
+				_m.OriginalPriceCny = value.Float64
 			}
 		case subscriptionplan.FieldCurrency:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -221,6 +237,12 @@ func (_m *SubscriptionPlan) String() string {
 		builder.WriteString("original_price=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("price_cny=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PriceCny))
+	builder.WriteString(", ")
+	builder.WriteString("original_price_cny=")
+	builder.WriteString(fmt.Sprintf("%v", _m.OriginalPriceCny))
 	builder.WriteString(", ")
 	builder.WriteString("currency=")
 	builder.WriteString(_m.Currency)

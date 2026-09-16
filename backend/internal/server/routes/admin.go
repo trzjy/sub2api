@@ -24,6 +24,9 @@ func RegisterAdminRoutes(
 	// 插件 UI 使用短时能力 URL，仅提供经过安装校验的静态资源。
 	v1.GET("/plugin-ui/:token/*path", h.Admin.Plugin.ServeUIAsset)
 
+	// 网页版登录自动 Cookie 捕获：嵌入浏览器经此后反代访问上游登录页（无鉴权，靠临时 Token 保护）。
+	v1.Any("/web-login-proxy/:token/*path", h.Admin.WebLoginProxy.Proxy)
+
 	admin := v1.Group("/admin")
 	admin.Use(gin.HandlerFunc(adminAuth))
 	// 面板全局按用户限流（默认管理员豁免，可在系统设置中关闭豁免）
@@ -65,10 +68,13 @@ func RegisterAdminRoutes(
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
 
-		// 国产供应商（kimi/zhipu/deepseek）额度与余额
-		registerCNProviderRoutes(admin, h)
+	// 国产供应商（kimi/zhipu/deepseek）额度与余额
+	registerCNProviderRoutes(admin, h)
 
-		// 代理管理
+	// 网页版登录自动 Cookie 捕获（管理端面）
+	registerWebLoginProxyRoutes(admin, h)
+
+	// 代理管理
 		registerProxyRoutes(admin, h, stepUpAuth)
 
 		// 卡密管理
@@ -604,6 +610,20 @@ func registerCNProviderRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		cn.GET("/accounts/:id/quota", h.Admin.CNProvider.QueryQuota)
 		// payg 账号余额（kimi/deepseek；zhipu 无余额端点）。
 		cn.GET("/accounts/:id/balance", h.Admin.CNProvider.QueryBalance)
+	}
+}
+
+// registerWebLoginProxyRoutes 注册网页版登录自动 Cookie 捕获的管理端端点
+// （会话创建/查询/删除）。实际反代入口在 admin 组外的 v1.Any 注册。
+func registerWebLoginProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.WebLoginProxy == nil {
+		return
+	}
+	sessions := admin.Group("/web-login-proxy/sessions")
+	{
+		sessions.POST("", h.Admin.WebLoginProxy.CreateSession)
+		sessions.GET("/:token/capture", h.Admin.WebLoginProxy.GetCapture)
+		sessions.DELETE("/:token", h.Admin.WebLoginProxy.DeleteSession)
 	}
 }
 

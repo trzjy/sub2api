@@ -21,8 +21,8 @@
         {{ platformHint }}
       </p>
 
-      <!-- 新窗口打开官方登录页（默认路径）：官方登录页普遍通过 X-Frame-Options/CSP
-           禁止内嵌展示，iframe 仅作可选尝试。三平台统一新标签页登录 + 下方手动粘贴。 -->
+      <!-- 新窗口打开官方登录页（兜底路径）：官方登录页普遍通过 X-Frame-Options/CSP
+           禁止内嵌展示，代理 iframe 不可用时仍可新标签页登录后手动粘贴。 -->
       <div class="space-y-2">
         <button
           type="button"
@@ -35,61 +35,53 @@
         <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
       </div>
 
-      <!-- 可选尝试：内嵌 iframe 登录页（默认折叠）。
-           跨域限制说明（方案 §2.2 已列风险）：官方登录页与站点不同源，iframe 内
-           Cookie（HttpOnly / 跨域）无法由本站 JS 读取，自动捕获在浏览器层不可行；
-           捕获走下方手动粘贴路径。同域登录回调代理（仅管理端）为后续任务。 -->
-      <div class="space-y-2">
-        <button
-          type="button"
-          data-testid="web-login-toggle-embed"
-          class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
-          @click="showEmbed = !showEmbed"
-        >
-          {{ t('admin.accounts.webLogin.tryEmbed') }}
-        </button>
-        <div v-if="showEmbed && loginUrl" class="space-y-2">
-          <div class="flex items-center justify-between">
-            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-              {{ t('admin.accounts.webLogin.iframeTitle') }}
-            </label>
-            <div class="flex items-center gap-3">
-              <button
-                type="button"
-                data-testid="web-login-open-new-tab-fallback"
-                class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
-                @click="openLoginWindow"
-              >
-                {{ t('admin.accounts.webLogin.openOfficial') }}
-              </button>
-              <button
-                type="button"
-                data-testid="web-login-reload-iframe"
-                class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
-                @click="reloadIframe"
-              >
-                {{ t('admin.accounts.webLogin.reload') }}
-              </button>
-            </div>
-          </div>
-          <div data-testid="web-login-iframe-wrap" class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500">
-            <iframe
-              :key="iframeKey"
-              :src="loginUrl"
-              class="h-full w-full"
-              :sandbox="iframeSandbox"
-              referrerpolicy="no-referrer"
-              :title="t('admin.accounts.webLogin.iframeTitle')"
-              @load="onIframeLoad"
-            ></iframe>
-          </div>
-          <p class="input-hint">
-            {{ iframeBlocked
-              ? t('admin.accounts.webLogin.iframeBlockedHint')
-              : t('admin.accounts.webLogin.iframeHint') }}
-          </p>
-        </div>
+      <!-- 登录代理 iframe：后端提供同源代理登录页，登录态由后端自动捕获 Cookie。
+           不设 sandbox（代理为同源，需要 Cookie 跨请求携带）；referrerpolicy 收紧。
+           Kimi 不启动轮询，保持手动 Token 粘贴。 -->
+      <div
+        v-if="proxyUrl"
+        data-testid="web-login-proxy-iframe-wrap"
+        class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500"
+      >
+        <iframe
+          :src="proxyUrl"
+          class="h-full w-full"
+          referrerpolicy="no-referrer"
+          :title="t('admin.accounts.webLogin.proxyTitle')"
+        ></iframe>
       </div>
+
+      <!-- 代理不可用：降级为官方页登录 + 手动粘贴 -->
+      <p
+        v-if="!proxyUrl && proxyUnavailable"
+        data-testid="web-login-proxy-unavailable"
+        class="text-sm text-amber-600 dark:text-amber-400"
+      >
+        {{ t('admin.accounts.webLogin.proxyUnavailable') }}
+      </p>
+
+      <!-- 自动捕获状态提示 -->
+      <p
+        v-if="capturing"
+        data-testid="web-login-autocapturing"
+        class="text-sm text-primary-600 dark:text-primary-400"
+      >
+        {{ t('admin.accounts.webLogin.autoCapturing') }}
+      </p>
+      <p
+        v-if="capturedCookie"
+        data-testid="web-login-autofilled"
+        class="text-sm text-green-600 dark:text-green-400"
+      >
+        {{ t('admin.accounts.webLogin.autoCaptureSuccess') }}
+      </p>
+      <p
+        v-if="timedOut"
+        data-testid="web-login-autocapture-timeout"
+        class="text-sm text-amber-600 dark:text-amber-400"
+      >
+        {{ t('admin.accounts.webLogin.autoCaptureTimeout') }}
+      </p>
 
       <!-- 手动粘贴凭证（兜底路径，方案 §2.3：三平台都必须支持） -->
       <div class="space-y-2">
@@ -128,11 +120,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { buildWebProviderCredentials, isWebProviderPlatform, webProviderUsesCookie, type WebProviderPlatform } from '@/components/account/credentialsBuilder'
-import { validateWebCredentials } from '@/api/admin/accounts'
+import {
+  validateWebCredentials,
+  createWebLoginProxySession,
+  deleteWebLoginProxySession
+} from '@/api/admin/accounts'
+import { useWebLoginCapture } from '@/composables/useWebLoginCapture'
 
 const props = defineProps<{
   show: boolean
@@ -154,9 +151,22 @@ const webPlatform = computed<WebProviderPlatform>(() =>
 const pastedCredentials = ref('')
 const validating = ref(false)
 const validationError = ref('')
-const iframeKey = ref(0)
-const iframeBlocked = ref(false)
 
+// 登录代理会话状态。
+const proxyUrl = ref('')
+const proxyToken = ref('')
+const proxyUnavailable = ref(false)
+
+// 登录代理轮询：captured 后由 watch 回填并复用既有校验逻辑。
+const {
+  capturing,
+  capturedCookie,
+  timedOut,
+  start: startCapture,
+  stop: stopCapture
+} = useWebLoginCapture()
+
+// 新标签直连官方登录页（兜底路径，始终可用）。
 const loginUrl = computed(() => {
   switch (webPlatform.value) {
     case 'web-deepseek':
@@ -169,13 +179,6 @@ const loginUrl = computed(() => {
       return ''
   }
 })
-
-// 内嵌 iframe 默认折叠（官方登录页普遍禁止被嵌入），展开后才渲染。
-const showEmbed = ref(false)
-
-// iframe sandbox：allow-same-origin 不给（跨域登录页不应获得本站 origin 语义）；
-// allow-scripts 保留让官方登录页自身可运行；allow-forms / allow-popups 支持登录交互。
-const iframeSandbox = 'allow-scripts allow-forms allow-popups'
 
 const platformHint = computed(() =>
   t(`admin.accounts.webLogin.platformHint.${props.platform}`))
@@ -190,35 +193,47 @@ const pastePlaceholder = computed(() =>
     ? t('admin.accounts.webProviders.cookiePlaceholder')
     : t('admin.accounts.webProviders.kimiTokenPlaceholder'))
 
+// 打开弹窗：重置表单并尝试建立登录代理会话。
 watch(() => props.show, (open) => {
   if (open) {
-    pastedCredentials.value = ''
-    validationError.value = ''
-    validating.value = false
-    iframeBlocked.value = false
-    showEmbed.value = false
-    iframeKey.value++
+    void setupProxySession()
+  }
+}, { immediate: true })
+
+/**
+ * 建立登录代理会话（同源代理登录页）。成功则嵌入 proxyUrl 并（非 kimi）启动捕获轮询；
+ * 失败则降级为官方页登录 + 手动粘贴（proxyUnavailable）。
+ */
+async function setupProxySession() {
+  pastedCredentials.value = ''
+  validationError.value = ''
+  validating.value = false
+  proxyUrl.value = ''
+  proxyToken.value = ''
+  proxyUnavailable.value = false
+  stopCapture()
+
+  try {
+    const session = await createWebLoginProxySession(webPlatform.value)
+    proxyUrl.value = session.url
+    proxyToken.value = session.token
+    // Kimi 无自动 Cookie 捕获（手动 Token 粘贴），仅展示代理 iframe。
+    if (webPlatform.value !== 'web-kimi') {
+      startCapture(session.token)
+    }
+  } catch {
+    // 代理不可用：不阻断，降级手动粘贴。
+    proxyUnavailable.value = true
+  }
+}
+
+// 捕获到 Cookie 后回填并复用既有校验/应用逻辑（不直接 emit）。
+watch(() => capturedCookie.value, async (cookie) => {
+  if (cookie) {
+    pastedCredentials.value = cookie
+    await handleValidateAndApply()
   }
 })
-
-function reloadIframe() {
-  iframeBlocked.value = false
-  iframeKey.value++
-}
-
-// onIframeLoad：iframe load 事件对 XFO 拦截页同样触发（浏览器渲染拦截页），
-// 无法可靠探测 X-Frame-Options；跨域 contentDocument 访问必抛，仅作降级探测信号。
-function onIframeLoad() {
-  try {
-    const frame = document.querySelector<HTMLIFrameElement>('[data-testid="web-login-iframe-wrap"] iframe')
-    if (!frame) return
-    // 跨域时该访问抛 SecurityError → 保持 iframe 展示（登录页可交互）。
-    // 同源探测成功与否均不改变捕获路径（跨域捕获不可行，见模板注释）。
-    void frame.contentDocument
-  } catch {
-    // 跨域（预期）：登录页已可交互，不标记阻断。
-  }
-}
 
 function openLoginWindow() {
   window.open(loginUrl.value, '_blank', 'noopener')
@@ -276,8 +291,22 @@ async function handleValidateAndApply() {
   }
 }
 
+/**
+ * 关闭时 best-effort 清理代理会话（吞错），并停止轮询。
+ */
+function cleanupSession() {
+  stopCapture()
+  if (proxyToken.value) {
+    void deleteWebLoginProxySession(proxyToken.value).catch(() => {})
+    proxyToken.value = ''
+  }
+}
+
 function handleClose() {
   if (validating.value) return
+  cleanupSession()
   emit('close')
 }
+
+onUnmounted(() => cleanupSession())
 </script>

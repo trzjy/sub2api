@@ -123,6 +123,8 @@ export interface SubscriptionPlan {
   description: string
   price: number
   original_price?: number
+  price_cny?: number
+  original_price_cny?: number
   /** Display-only currency label — fixed 'USD' by backend (historical field) */
   currency?: string
   validity_days: number

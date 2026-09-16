@@ -79,6 +79,16 @@ func OriginalPrice(v float64) predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldEQ(FieldOriginalPrice, v))
 }
 
+// PriceCny applies equality check predicate on the "price_cny" field. It's identical to PriceCnyEQ.
+func PriceCny(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldPriceCny, v))
+}
+
+// OriginalPriceCny applies equality check predicate on the "original_price_cny" field. It's identical to OriginalPriceCnyEQ.
+func OriginalPriceCny(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldOriginalPriceCny, v))
+}
+
 // Currency applies equality check predicate on the "currency" field. It's identical to CurrencyEQ.
 func Currency(v string) predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldEQ(FieldCurrency, v))
@@ -382,6 +392,86 @@ func OriginalPriceIsNil() predicate.SubscriptionPlan {
 // OriginalPriceNotNil applies the NotNil predicate on the "original_price" field.
 func OriginalPriceNotNil() predicate.SubscriptionPlan {
 	return predicate.SubscriptionPlan(sql.FieldNotNull(FieldOriginalPrice))
+}
+
+// PriceCnyEQ applies the EQ predicate on the "price_cny" field.
+func PriceCnyEQ(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldPriceCny, v))
+}
+
+// PriceCnyNEQ applies the NEQ predicate on the "price_cny" field.
+func PriceCnyNEQ(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNEQ(FieldPriceCny, v))
+}
+
+// PriceCnyIn applies the In predicate on the "price_cny" field.
+func PriceCnyIn(vs ...float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldIn(FieldPriceCny, vs...))
+}
+
+// PriceCnyNotIn applies the NotIn predicate on the "price_cny" field.
+func PriceCnyNotIn(vs ...float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNotIn(FieldPriceCny, vs...))
+}
+
+// PriceCnyGT applies the GT predicate on the "price_cny" field.
+func PriceCnyGT(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGT(FieldPriceCny, v))
+}
+
+// PriceCnyGTE applies the GTE predicate on the "price_cny" field.
+func PriceCnyGTE(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGTE(FieldPriceCny, v))
+}
+
+// PriceCnyLT applies the LT predicate on the "price_cny" field.
+func PriceCnyLT(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLT(FieldPriceCny, v))
+}
+
+// PriceCnyLTE applies the LTE predicate on the "price_cny" field.
+func PriceCnyLTE(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLTE(FieldPriceCny, v))
+}
+
+// OriginalPriceCnyEQ applies the EQ predicate on the "original_price_cny" field.
+func OriginalPriceCnyEQ(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldEQ(FieldOriginalPriceCny, v))
+}
+
+// OriginalPriceCnyNEQ applies the NEQ predicate on the "original_price_cny" field.
+func OriginalPriceCnyNEQ(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNEQ(FieldOriginalPriceCny, v))
+}
+
+// OriginalPriceCnyIn applies the In predicate on the "original_price_cny" field.
+func OriginalPriceCnyIn(vs ...float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldIn(FieldOriginalPriceCny, vs...))
+}
+
+// OriginalPriceCnyNotIn applies the NotIn predicate on the "original_price_cny" field.
+func OriginalPriceCnyNotIn(vs ...float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldNotIn(FieldOriginalPriceCny, vs...))
+}
+
+// OriginalPriceCnyGT applies the GT predicate on the "original_price_cny" field.
+func OriginalPriceCnyGT(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGT(FieldOriginalPriceCny, v))
+}
+
+// OriginalPriceCnyGTE applies the GTE predicate on the "original_price_cny" field.
+func OriginalPriceCnyGTE(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldGTE(FieldOriginalPriceCny, v))
+}
+
+// OriginalPriceCnyLT applies the LT predicate on the "original_price_cny" field.
+func OriginalPriceCnyLT(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLT(FieldOriginalPriceCny, v))
+}
+
+// OriginalPriceCnyLTE applies the LTE predicate on the "original_price_cny" field.
+func OriginalPriceCnyLTE(v float64) predicate.SubscriptionPlan {
+	return predicate.SubscriptionPlan(sql.FieldLTE(FieldOriginalPriceCny, v))
 }
 
 // CurrencyEQ applies the EQ predicate on the "currency" field.
