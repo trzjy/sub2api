@@ -98,6 +98,10 @@
           <template v-else-if="activeTab === 'subscription'">
             <!-- Subscription confirm (inline, replaces plan list) -->
             <template v-if="selectedPlan">
+              <button class="mb-3 inline-flex items-center gap-1.5 text-sm font-medium text-gray-500 transition-colors hover:text-gray-900 dark:text-dark-400 dark:hover:text-white" @click="selectedPlan = null">
+                <Icon name="chevronLeft" size="sm" />
+                {{ t('common.back') }}
+              </button>
               <div class="card p-5">
                 <!-- Header: platform badge + plan name -->
                 <div class="mb-3 flex flex-wrap items-center gap-2">
@@ -174,7 +178,7 @@
                 </span>
                 <span v-else>{{ t('payment.createOrder') }} {{ formatSelectedPaymentAmount(subTotalAmount) }}</span>
               </button>
-              <button class="btn btn-secondary w-full" @click="selectedPlan = null">{{ t('common.cancel') }}</button>
+              <button class="btn btn-secondary w-full" @click="selectedPlan = null">{{ t('common.back') }}</button>
             </template>
             <!-- Plan list -->
             <template v-else>
