@@ -62,6 +62,7 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	originalModel string,
 	reqStream bool,
 	startTime time.Time,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	if account == nil || account.Platform != PlatformWebDeepseek {
 		return nil, fmt.Errorf("forwardWebDeepseek requires a %s account", PlatformWebDeepseek)
@@ -129,9 +130,9 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	}
 
 	if reqStream {
-		return s.handleWebDeepseekStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
+		return s.handleWebDeepseekStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
 	}
-	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webDeepseekExtractPrompt(body))
+	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webDeepseekExtractPrompt(body), mode)
 }
 
 // webDeepseekModelClass 把（已映射的）模型名归一为网页端 model_class 与 thinking 开关。
@@ -415,6 +416,25 @@ func parseWebDeepseekSSEFrame(line string) ([]byte, bool) {
 	return []byte(payload), true
 }
 
+// webDeepseekBareJSONError 判定一行裸 JSON（非 SSE data: 前缀）是否为业务错误：
+// 携带非 0 的 code 字段（实测 40002 形态）按业务错误返回其载荷，否则返回 isError=false。
+// 纯内容裸 JSON（无 code）交由调用方按安全策略忽略。仅解析合法 JSON，杜绝对无法识别
+// 行的臆测处理。
+func webDeepseekBareJSONError(line string) (payload []byte, isError bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "data:") {
+		return nil, false
+	}
+	if !gjson.Valid(trimmed) {
+		return nil, false
+	}
+	code := gjson.GetBytes([]byte(trimmed), "code")
+	if code.Exists() && code.Type == gjson.Number && code.Int() != 0 {
+		return []byte(trimmed), true
+	}
+	return nil, false
+}
+
 // mapWebDeepseekPayload 把一帧通用 JSON 载荷映射为 webDeepseekChunkView。
 //
 // 待登录态实测补全：以下识别顺序按「通用 SSE JSON」由强到弱排列——
@@ -505,6 +525,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	originalModel string,
 	upstreamModel string,
 	startTime time.Time,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -524,12 +545,35 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	var aggregated strings.Builder
 	written := false
 	finishReason := ""
+	st := newWebClientStreamState(mode, originalModel)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
 	for scanner.Scan() {
 		payload, ok := parseWebDeepseekSSEFrame(scanner.Text())
 		if !ok {
+			// #3 裸 JSON 业务错误判定：上游 HTTP 200 返回 {"code":40002,...}（非 SSE、
+			// 无 data: 前缀）时，原 parseWebDeepseekSSEFrame 忽略该行会漏判为正常流，
+			// 最终以 [DONE] 伪成功。含非 0 code 字段的裸 JSON 行按业务错误处理。
+			if errPayload, isErr := webDeepseekBareJSONError(scanner.Text()); isErr {
+				if !written {
+					errResp := &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header,
+						Body:       io.NopCloser(bytes.NewReader(errPayload)),
+					}
+					return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
+				}
+				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					Platform:           account.Platform,
+					AccountID:          account.ID,
+					AccountName:        account.Name,
+					UpstreamStatusCode: resp.StatusCode,
+					Kind:               "midstream_error",
+					Message:            sanitizeUpstreamErrorMessage(webDeepseekUpstreamErrorMessage(errPayload)),
+				})
+				break
+			}
 			continue
 		}
 		view := mapWebDeepseekPayload(payload)
@@ -568,7 +612,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		}
 		aggregated.WriteString(view.Content)
 		written = true
-		if err := writeWebDeepseekClientChunk(c, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
+		if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
 			return nil, err
 		}
 	}
@@ -576,15 +620,12 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		return nil, fmt.Errorf("web-deepseek stream read: %w", err)
 	}
 
-	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再收口 [DONE]。
-	if err := writeWebDeepseekClientChunk(c, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
+	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
-	if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+	if err := finalizeWebStream(c, st); err != nil {
 		return nil, err
-	}
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
 	}
 	MarkResponseCommitted(c)
 
@@ -616,6 +657,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 	inputPrompt string,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -693,12 +735,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		}},
 		"usage": finalUsage,
 	}
-	data, err := json.Marshal(completion)
-	if err != nil {
+	if err := writeWebCompletion(c, newWebClientStreamState(mode, originalModel), completion); err != nil {
 		return nil, err
 	}
-	c.Header("Content-Type", "application/json")
-	c.Data(http.StatusOK, "application/json", data)
 	MarkResponseCommitted(c)
 
 	return &OpenAIForwardResult{

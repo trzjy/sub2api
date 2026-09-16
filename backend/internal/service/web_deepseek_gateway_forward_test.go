@@ -124,7 +124,7 @@ func runForwardWebDeepseek(
 		rateLimitService: rlSvc,
 	}
 
-	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, false, time.Now())
+	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, false, time.Now(), webResponseModeChat)
 	return recorder, err
 }
 
@@ -271,7 +271,7 @@ func runForwardWebDeepseekStream(
 		httpUpstream:     upstream,
 		rateLimitService: &RateLimitService{},
 	}
-	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, true, time.Now())
+	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, true, time.Now(), webResponseModeChat)
 	require.NoError(t, err)
 	return recorder
 }

@@ -98,7 +98,7 @@ func runForwardWebZhipu(
 		rateLimitService: rlSvc,
 	}
 
-	_, err := svc.forwardWebZhipu(context.Background(), c, account, body, "glm-4", false, time.Now())
+	_, err := svc.forwardWebZhipu(context.Background(), c, account, body, "glm-4", false, time.Now(), webResponseModeChat)
 	return recorder, err
 }
 

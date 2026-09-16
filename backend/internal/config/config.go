@@ -727,8 +727,9 @@ type ServerConfig struct {
 	// 显式设为空字符串则禁用隔离 engine（前端 iframe 回退同源，功能不缺失）。
 	WebLoginProxyAddr string `mapstructure:"web_login_proxy_addr"`
 	// WebLoginProxyOrigin 隔离 origin 对外的公开基础地址（供前端 iframe 契约使用）。
-	// 空字符串表示由 WebLoginProxyAddr 推导或回退同源；显式设置可覆盖推导
-	// （例如容器通过端口映射对外暴露在不同 host 时）。
+	// 必填（启用内嵌代理时）：独立 origin 必须显式配置，无法由监听地址推导，
+	// 同源回退已禁止（安全红线）。为空时前端视代理不可用并降级为官方页登录 + 手动粘贴，
+	// 不再回退到主站同源代理路径（避免官方页脚本读取管理端 localStorage）。
 	WebLoginProxyOrigin string `mapstructure:"web_login_proxy_origin"`
 }
 
@@ -1640,35 +1641,22 @@ func (s *ServerConfig) Address() string {
 }
 
 // WebLoginProxyPublicOrigin 返回网页登录代理隔离 origin 对外的公开基础地址，
-// 供 public settings 注入前端（iframe src 契约）。推导规则：
-//   - 显式配置 WebLoginProxyOrigin 时直接采用；
-//   - 否则若 WebLoginProxyAddr 非空且 host 为具体地址（非通配/空），推导
-//     http://host:port（port 缺省 3400）；
-//   - 否则返回空字符串（前端回退同源；代理路由仍注册在主服务 v1，功能不缺失）。
+// 供 public settings 注入前端（iframe src 契约）。
 //
-// 返回值不含任何敏感信息（仅 host:port 的公开访问地址）。
+// 同源回退已禁止（安全红线）：只有显式配置 WebLoginProxyOrigin 非空时才返回该值，
+// 否则一律返回空字符串。前端在 origin 为空时视代理不可用并降级为官方页登录 + 手动粘贴，
+// 不再回退到主站同源代理路径——避免官方页脚本读取管理端 localStorage（auth_token 等）。
+//
+// 独立 origin 必须显式配置（WEB_LOGIN_PROXY_ORIGIN），无法通过监听地址推导：
+// 监听地址（WEB_LOGIN_PROXY_ADDR）常为通配 host（如 :3400 / 0.0.0.0:3400），
+// 无法可靠推导对外可达 host，故不再做推导。若隔离 engine 已启用（Addr 非空）但
+// origin 为空，server 启动时应在日志中 Warn（"web login proxy origin not configured;
+// embedded proxy disabled for clients"），不推导、不回退。
+//
+// 返回值不含任何敏感信息（仅显式配置的 host:port 公开访问地址）。
 func (s *ServerConfig) WebLoginProxyPublicOrigin() string {
-	if origin := strings.TrimSpace(s.WebLoginProxyOrigin); origin != "" {
-		return origin
-	}
-	addr := strings.TrimSpace(s.WebLoginProxyAddr)
-	if addr == "" {
-		return ""
-	}
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		// 无端口：整串当作 host，端口回落 3400。
-		host = addr
-		port = "3400"
-	}
-	if port == "" {
-		port = "3400"
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
-		// 监听在所有接口但无法确定对外可达 host → 回退同源。
-		return ""
-	}
-	return "http://" + host + ":" + port
+	// 独立 origin 必须显式配置；同源回退已禁止（安全红线）。
+	return strings.TrimSpace(s.WebLoginProxyOrigin)
 }
 
 // DatabaseConfig 数据库连接配置

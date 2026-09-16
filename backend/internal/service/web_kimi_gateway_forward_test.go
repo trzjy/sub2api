@@ -104,7 +104,7 @@ func runForwardWebKimi(
 		rateLimitService: rlSvc,
 	}
 
-	_, err := svc.forwardWebKimi(context.Background(), c, account, body, originalModel, false, time.Now())
+	_, err := svc.forwardWebKimi(context.Background(), c, account, body, originalModel, false, time.Now(), webResponseModeChat)
 	return recorder, err
 }
 
@@ -294,7 +294,7 @@ func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	}
 	account := webKimiTestAccount(8925, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), webKimiSSEResponse(), c, account, "kimi-k3", "k3", time.Now())
+		context.Background(), webKimiSSEResponse(), c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
 	require.NoError(t, err)
 	require.True(t, result.Stream)
 

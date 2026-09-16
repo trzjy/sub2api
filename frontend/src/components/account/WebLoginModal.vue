@@ -218,13 +218,20 @@ async function setupProxySession() {
   try {
     const session = await createWebLoginProxySession(webPlatform.value)
     // 隔离 origin：若 public settings 提供 web_login_proxy_origin（独立监听端口的独立源），
-    // 官方页脚本无法读取管理端 :3300 的 auth_token/localStorage；空/缺失则回退同源代理路径。
+    // 官方页脚本无法读取管理端 :3300 的 auth_token/localStorage。
+    // 同源回退已移除（安全红线）：proxyUrl 仅在 proxyOrigin 非空时设置；
+    // origin 空/缺失视为代理不可用，走官方页新标签 + 手动粘贴降级，绝不回退主站同源路径。
     const proxyOrigin = appStore.cachedPublicSettings?.web_login_proxy_origin
-    proxyUrl.value = proxyOrigin ? `${proxyOrigin}${session.url}` : session.url
-    proxyToken.value = session.token
-    // Kimi 无自动 Cookie 捕获（手动 Token 粘贴），仅展示代理 iframe。
-    if (webPlatform.value !== 'web-kimi') {
-      startCapture(session.token)
+    if (proxyOrigin) {
+      proxyUrl.value = `${proxyOrigin}${session.url}`
+      proxyToken.value = session.token
+      // Kimi 无自动 Cookie 捕获（手动 Token 粘贴），仅展示代理 iframe。
+      if (webPlatform.value !== 'web-kimi') {
+        startCapture(session.token)
+      }
+    } else {
+      // 隔离 origin 未配置：代理不可用，降级手动粘贴（不回退同源）。
+      proxyUnavailable.value = true
     }
   } catch {
     // 代理不可用：不阻断，降级手动粘贴。

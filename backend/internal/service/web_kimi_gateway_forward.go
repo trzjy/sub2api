@@ -56,6 +56,7 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 	originalModel string,
 	reqStream bool,
 	startTime time.Time,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	if account == nil || account.Platform != PlatformWebKimi {
 		return nil, fmt.Errorf("forwardWebKimi requires a %s account", PlatformWebKimi)
@@ -133,9 +134,9 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 	}
 
 	if reqStream {
-		return s.handleWebKimiStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
+		return s.handleWebKimiStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
 	}
-	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webKimiExtractPrompt(body))
+	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webKimiExtractPrompt(body), mode)
 }
 
 // webKimiModelName 把（已映射的）模型名归一为网页端模型名。
@@ -476,6 +477,25 @@ type webKimiChunkView struct {
 	Usage        *OpenAIUsage
 	ResponseID   string
 	AuthFailed   bool
+	ErrCode      int64
+}
+
+// webKimiBareJSONError 判定一行裸 JSON（非 SSE data: 前缀）是否为业务错误：携带非 0
+// 的 code 字段时按业务错误返回其载荷，否则 isError=false。与 webDeepseekBareJSONError
+// 同口径（#3）。
+func webKimiBareJSONError(line string) (payload []byte, isError bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "data:") {
+		return nil, false
+	}
+	if !gjson.Valid(trimmed) {
+		return nil, false
+	}
+	code := gjson.GetBytes([]byte(trimmed), "code")
+	if code.Exists() && code.Type == gjson.Number && code.Int() != 0 {
+		return []byte(trimmed), true
+	}
+	return nil, false
 }
 
 // mapWebKimiPayload 把一帧通用 JSON 载荷映射为 webKimiChunkView。
@@ -518,6 +538,9 @@ func mapWebKimiPayload(payload []byte) webKimiChunkView {
 	msg := strings.ToLower(strings.TrimSpace(v.Get("message").String()))
 	if strings.Contains(code, "unauthenticated") || strings.Contains(msg, "unauthenticated") {
 		view.AuthFailed = true
+	}
+	if numericCode := v.Get("code"); numericCode.Exists() && numericCode.Type == gjson.Number {
+		view.ErrCode = numericCode.Int()
 	}
 	return view
 }
@@ -569,6 +592,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	originalModel string,
 	upstreamModel string,
 	startTime time.Time,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -588,19 +612,42 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	var aggregated strings.Builder
 	written := false
 	finishReason := ""
+	st := newWebClientStreamState(mode, originalModel)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
 	for scanner.Scan() {
 		payload, ok := parseWebKimiSSEFrame(scanner.Text())
 		if !ok {
+			// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
+			// 首帧未写任何客户端字节走完整错误路径；流中段出现记 ops 错误不伪造成功。
+			// 纯内容裸 JSON（无 code）按安全策略忽略。
+			if errPayload, isErr := webKimiBareJSONError(scanner.Text()); isErr {
+				if !written {
+					errResp := &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header,
+						Body:       io.NopCloser(bytes.NewReader(errPayload)),
+					}
+					return s.handleWebKimiUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
+				}
+				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					Platform:           account.Platform,
+					AccountID:          account.ID,
+					AccountName:        account.Name,
+					UpstreamStatusCode: resp.StatusCode,
+					Kind:               "midstream_error",
+					Message:            sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(errPayload)),
+				})
+				break
+			}
 			continue
 		}
 		view := mapWebKimiPayload(payload)
 		if view.ResponseID != "" && responseID == "" {
 			responseID = view.ResponseID
 		}
-		if view.AuthFailed {
+		if view.AuthFailed || view.ErrCode != 0 {
 			// 首帧未写任何客户端字节时走完整错误路径；流中后段出现（罕见，未实测）
 			// 则记录 ops 错误后结束流，不伪造正常结束。
 			if !written {
@@ -617,7 +664,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
 				Kind:               "midstream_error",
-				Message:            "web-kimi midstream unauthenticated error",
+				Message:            "web-kimi midstream business error",
 			})
 			break
 		}
@@ -632,7 +679,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		}
 		aggregated.WriteString(view.Content)
 		written = true
-		if err := writeWebKimiClientChunk(c, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
+		if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
 			return nil, err
 		}
 	}
@@ -640,15 +687,12 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		return nil, fmt.Errorf("web-kimi stream read: %w", err)
 	}
 
-	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再收口 [DONE]。
-	if err := writeWebKimiClientChunk(c, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
+	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
-	if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+	if err := finalizeWebStream(c, st); err != nil {
 		return nil, err
-	}
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
 	}
 	MarkResponseCommitted(c)
 
@@ -680,6 +724,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 	inputPrompt string,
+	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -768,12 +813,9 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 		}},
 		"usage": finalUsage,
 	}
-	data, err := json.Marshal(completion)
-	if err != nil {
+	if err := writeWebCompletion(c, newWebClientStreamState(mode, originalModel), completion); err != nil {
 		return nil, err
 	}
-	c.Header("Content-Type", "application/json")
-	c.Data(http.StatusOK, "application/json", data)
 	MarkResponseCommitted(c)
 
 	return &OpenAIForwardResult{

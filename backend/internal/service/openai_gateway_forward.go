@@ -189,11 +189,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		switch account.Platform {
 		case PlatformWebZhipu:
-			return s.forwardWebZhipu(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+			return s.forwardWebZhipu(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
 		case PlatformWebDeepseek:
-			return s.forwardWebDeepseek(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+			return s.forwardWebDeepseek(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
 		case PlatformWebKimi:
-			return s.forwardWebKimi(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+			return s.forwardWebKimi(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
 		}
 	}
 

@@ -185,6 +185,11 @@ func runMainServer() {
 			}
 		}()
 		log.Printf("Web login proxy server started on %s", cfg.Server.WebLoginProxyAddr)
+		// 隔离 origin 必须显式配置（同源回退已禁止，安全红线）：未配置时前端
+		// 自动降级为官方页登录 + 手动粘贴，embedded proxy 对客户端不可用。
+		if strings.TrimSpace(cfg.Server.WebLoginProxyOrigin) == "" {
+			log.Println("web login proxy origin not configured; embedded proxy disabled for clients")
+		}
 	}
 
 	// 等待中断信号

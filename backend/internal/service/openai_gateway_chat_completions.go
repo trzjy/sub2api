@@ -132,15 +132,15 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 口径——经各自适配器转换为官方网页端协议出站，避免落到下方通用 OpenAI 路径。
 	if account.Platform == PlatformWebZhipu {
 		view := newOpenAIRequestView(body)
-		return s.forwardWebZhipu(ctx, c, account, body, view.Model, view.Stream, time.Now())
+		return s.forwardWebZhipu(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}
 	if account.Platform == PlatformWebDeepseek {
 		view := newOpenAIRequestView(body)
-		return s.forwardWebDeepseek(ctx, c, account, body, view.Model, view.Stream, time.Now())
+		return s.forwardWebDeepseek(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}
 	if account.Platform == PlatformWebKimi {
 		view := newOpenAIRequestView(body)
-		return s.forwardWebKimi(ctx, c, account, body, view.Model, view.Stream, time.Now())
+		return s.forwardWebKimi(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}
 
 	// Cursor compatibility: some clients send a Responses-shaped body to the

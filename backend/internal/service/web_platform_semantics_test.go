@@ -1,10 +1,75 @@
 package service
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestValidateWebAccountCredential_BaseURL 覆盖 #4：validateWebAccountCredential 在
+// credentials.base_url 非空时必须校验官方域名后缀（走既有 ValidateWebBaseURL），
+// 非法值（明文 http / 非官方主机 / 内网 IP）保存即拒绝；合法官方域名或空值放行。
+// 不影响其它 / 通用平台分支（validateOtherAccountCredential）的既有逻辑。
+func TestValidateWebAccountCredential_BaseURL(t *testing.T) {
+	// 合法官方域名覆盖：放行（不变量：仅校验形态，不校验可达性）。
+	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": "https://chat.deepseek.com"}))
+	require.NoError(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
+		map[string]any{"cookie": "x", "base_url": "https://chatglm.cn"}))
+	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": "https://www.kimi.com"}))
+
+	// 空 base_url：回落平台默认，放行。
+	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": ""}))
+	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at"}))
+
+	// 非法：明文 http → 拒绝（fail-closed 拦截脏数据）。
+	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": "http://chat.deepseek.com"}))
+
+	// 非法：非官方主机 → 拒绝（杜绝凭证外送 / SSRF）。
+	require.Error(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
+		map[string]any{"cookie": "x", "base_url": "https://evil.example.com"}))
+	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": "https://not-kimi.com"}))
+
+	// 非法：内网 / 环回 IP 字面量 → 拒绝（SSRF 防护）。
+	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": "https://127.0.0.1"}))
+
+	// 非法 base_url 不能绕过 cookie / access_token 必填校验：错误文案须指向 base_url。
+	err := validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": "https://evil.example.com"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "base_url")
+}
+
+// TestTestWebAccountConnection_InvalidBaseURLErrors 覆盖 #4：testWebAccountConnection 在
+// 账号 base_url 非法时显式报错（"invalid base_url"），不静默回落平台默认假通过；上游
+// 即便返回 2xx 也不应被探活（错误校验在出站请求之前）。
+func TestTestWebAccountConnection_InvalidBaseURLErrors(t *testing.T) {
+	account := webDeepseekTestAccount(9930, map[string]any{
+		"cookie":   "ds_session_id=sess-abc; HWWAFSESID=waf-xyz",
+		"base_url": "https://evil.example.com",
+	})
+	// 即便上游返回 200，因 base_url 非法，不得判为 test_complete / success。
+	body := runWebProbe(t, account, refreshResponse(http.StatusOK, "ok"))
+	require.Contains(t, body, "invalid base_url")
+	require.NotContains(t, body, "test_complete", "illegal base_url must NOT false-pass the connection test")
+	require.NotContains(t, body, "success")
+
+	// 对照组：合法 base_url（含上游 200）正常判为成功。
+	good := webDeepseekTestAccount(9931, map[string]any{
+		"cookie":   "ds_session_id=sess-abc; HWWAFSESID=waf-xyz",
+		"base_url": "https://chat.deepseek.com",
+	})
+	goodBody := runWebProbe(t, good, refreshResponse(http.StatusOK, "ok"))
+	require.Contains(t, goodBody, "test_complete")
+	require.Contains(t, goodBody, `"success":true`)
+}
 
 // TestIsWebProviderCoversWebReversePlatforms 锁定网页逆向平台集合判定（方案 §3.1）。
 func TestIsWebProviderCoversWebReversePlatforms(t *testing.T) {

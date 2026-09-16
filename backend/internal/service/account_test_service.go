@@ -436,6 +436,14 @@ func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Cont
 func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 
+	// #4：账号级 base_url 非空时显式校验，非法值直接报错，不静默回落平台默认
+	// （避免转发侧 fail-closed 把非法值吞掉、测试假通过）。合法或空才继续（空走默认）。
+	if rawBaseURL := strings.TrimSpace(account.GetCredential("base_url")); rawBaseURL != "" {
+		if _, err := ValidateWebBaseURL(account.Platform, rawBaseURL); err != nil {
+			return s.sendErrorAndEnd(c, "invalid base_url")
+		}
+	}
+
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	var (
 		chatPath   string

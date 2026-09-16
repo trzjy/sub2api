@@ -439,6 +439,13 @@ func validateWebAccountCredential(platform, accountType string, credentials map[
 	if accountType != AccountTypeAPIKey {
 		return fmt.Errorf("platform %s only supports apikey accounts", platform)
 	}
+	// #4：base_url 为可选的官方域名覆盖；非空时强制校验，非法值保存即拒绝
+	// （fail-closed 提前拦截脏数据，避免账号层落入非官方主机）。空值回落平台默认。
+	if rawURL, ok := credentials["base_url"].(string); ok && strings.TrimSpace(rawURL) != "" {
+		if _, err := ValidateWebBaseURL(platform, strings.TrimSpace(rawURL)); err != nil {
+			return fmt.Errorf("platform %s base_url invalid: %w", platform, err)
+		}
+	}
 	if platform == PlatformWebKimi {
 		raw, _ := credentials["access_token"].(string)
 		if strings.TrimSpace(raw) == "" {
