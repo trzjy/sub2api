@@ -76,12 +76,12 @@
                   <span class="font-medium text-gray-700 dark:text-gray-300">{{ t('payment.actualPay') }}</span>
                   <span class="text-lg font-bold text-primary-600 dark:text-primary-400">{{ formatSelectedPaymentAmount(totalAmount) }}</span>
                 </div>
-                <div v-if="rechargeMarkup !== 1 || selectedCurrency !== ACCOUNT_CURRENCY" class="flex justify-between" :class="{ 'border-t border-gray-200 pt-2 dark:border-dark-600': feeRate <= 0 }">
+                <div v-if="selectedCurrency !== ACCOUNT_CURRENCY" class="flex justify-between" :class="{ 'border-t border-gray-200 pt-2 dark:border-dark-600': feeRate <= 0 }">
                   <span class="text-gray-500 dark:text-gray-400">{{ t('payment.creditedBalance') }}</span>
                   <span class="text-gray-900 dark:text-white">{{ formatAccountMoney(creditedAmount) }}</span>
                 </div>
-                <p v-if="rechargeMarkup !== 1" class="border-t border-gray-200 pt-2 text-xs text-gray-500 dark:border-dark-600 dark:text-gray-400">
-                  {{ t('payment.rechargeRatePreview', { currency: selectedCurrency, fx: (fxRates[selectedCurrency] || 0).toFixed(2), markup: rechargeMarkup.toFixed(2) }) }}
+                <p v-if="selectedCurrency !== ACCOUNT_CURRENCY" class="border-t border-gray-200 pt-2 text-xs text-gray-500 dark:border-dark-600 dark:text-gray-400">
+                  {{ t('payment.rechargeRatePreview', { currency: selectedCurrency, fx: (fxRates[selectedCurrency] || 0).toFixed(2) }) }}
                 </p>
               </div>
             </div>
@@ -183,7 +183,7 @@
                 <p class="text-gray-500 dark:text-gray-400">{{ t('payment.noPlans') }}</p>
               </div>
               <div v-else :class="planGridClass">
-                <SubscriptionPlanCard v-for="plan in checkout.plans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" @select="selectPlan" />
+                <SubscriptionPlanCard v-for="plan in checkout.plans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :cny-rate="fxRates.CNY" :currency="selectedCurrency" @select="selectPlan" />
               </div>
               <!-- Active subscriptions (compact, below plan list) -->
               <div v-if="activeSubscriptions.length > 0">
@@ -232,7 +232,7 @@
             </button>
             <h3 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.selectPlan') }}</h3>
             <div class="space-y-4">
-              <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" @select="selectPlanFromModal" />
+              <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :cny-rate="fxRates.CNY" :currency="selectedCurrency" @select="selectPlanFromModal" />
             </div>
           </div>
         </div>
@@ -508,7 +508,7 @@ function onPaymentSettled() {
 // All checkout data from single API call
 const checkout = ref<CheckoutInfoResponse>({
   methods: {}, global_min: 0, global_max: 0,
-  plans: [], balance_disabled: false, recharge_markup: 1, fx_rates: {}, recharge_fee_rate: 0, help_text: '', help_image_url: '', stripe_publishable_key: '',
+  plans: [], balance_disabled: false, fx_rates: {}, recharge_fee_rate: 0, help_text: '', help_image_url: '', stripe_publishable_key: '',
 })
 
 const renderedHelpText = computed(() => DOMPurify.sanitize(
@@ -525,17 +525,12 @@ const tabs = computed(() => {
 const visibleMethods = computed(() => getVisibleMethods(checkout.value.methods))
 const enabledMethods = computed(() => Object.keys(visibleMethods.value))
 const validAmount = computed(() => amount.value ?? 0)
-const rechargeMarkup = computed(() => {
-  const markup = checkout.value.recharge_markup
-  return Number.isFinite(markup) && markup > 0 ? markup : 1
-})
 const fxRates = computed(() => checkout.value.fx_rates || {})
-// 到账金额 = ToUSD(实付, currency) × markup
+// 到账金额 = ToUSD(实付, 支付币种)，充值折合多少到账多少
 const creditedAmount = computed(() => {
   const cur = selectedCurrency.value
   const rawUSD = toUSDAmount(validAmount.value, cur, fxRates.value)
-  if (cur === ACCOUNT_CURRENCY) return Math.round(rawUSD * rechargeMarkup.value * 100) / 100
-  return Math.round(rawUSD * rechargeMarkup.value * 100) / 100
+  return Math.round(rawUSD * 100) / 100
 })
 
 // Adaptive grid: center single card, 2-col for 2 plans, 3-col for 3+

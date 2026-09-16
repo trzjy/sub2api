@@ -29,7 +29,11 @@ const i18n = createI18n({
   },
 });
 
-const mountPlanCard = (groupPlatform: string, overrides: Partial<SubscriptionPlan> = {}) =>
+const mountPlanCard = (
+  groupPlatform: string,
+  overrides: Partial<SubscriptionPlan> = {},
+  extraProps: Record<string, unknown> = {},
+) =>
   mount(SubscriptionPlanCard, {
     props: {
       plan: {
@@ -47,6 +51,7 @@ const mountPlanCard = (groupPlatform: string, overrides: Partial<SubscriptionPla
         is_active: true,
         ...overrides,
       },
+      ...extraProps,
     },
     global: { plugins: [i18n, createPinia()] },
   });
@@ -78,16 +83,11 @@ describe("SubscriptionPlanCard", () => {
     expect(mountPlanCard("openai", { validity_days: 30, validity_unit: "day" }).text()).toContain("/ 30payment.days");
   });
 
-  it("uses a fixed USD symbol for all plans regardless of the historical currency label (M4)", () => {
-    // M4: plan price is always USD (ACCOUNT_CURRENCY); the display symbol no
-    // longer follows plan.currency (which is display-only and fixed to USD).
-    const cnyPlan = mountPlanCard("openai", { currency: "CNY", original_price: 20 }).text();
-
-    expect(cnyPlan).toContain("$10");
-    expect(cnyPlan).toContain("$20");
-    expect(cnyPlan).not.toContain("¥10");
-    expect(mountPlanCard("openai", { currency: "USD" }).text()).toContain("$10USD");
-    expect(mountPlanCard("openai", { currency: "" }).text()).toContain("$10");
+  it("displays plan amounts as CNY when the FX rate is provided", () => {
+    const cny = mountPlanCard("openai", { original_price: 1.4 }, { cnyRate: 7.15 }).text();
+    expect(cny).toContain("¥71.5");
+    expect(cny).toContain("¥10.0");
+    expect(cny).toContain("CNY");
   });
 
   it.each([
@@ -119,7 +119,7 @@ describe("SubscriptionPlanCard", () => {
     });
     const title = wrapper.get("h3");
     const badge = wrapper.findAll("span").find((node) => node.text() === "OpenAI");
-    const price = wrapper.findAll("span").find((node) => node.text() === "123.45");
+    const price = wrapper.findAll("span").find((node) => node.text() === "¥882.67");
 
     expect(title.element.parentElement?.classList).toContain("min-w-0");
     expect(title.element.parentElement?.classList).toContain("flex-1");
@@ -131,7 +131,10 @@ describe("SubscriptionPlanCard", () => {
     ]));
     expect(badge?.element.parentElement?.textContent).toContain("/ 30payment.days");
     expect(badge?.element.parentElement?.parentElement?.classList).toContain("shrink-0");
-    expect(price?.element.parentElement?.parentElement?.classList).toContain("shrink-0");
+    expect([...(price?.element.parentElement?.classList ?? [])]).toEqual(expect.arrayContaining([
+      "flex",
+      "items-baseline",
+    ]));
     expect(wrapper.get("p").text()).toBe("Includes advanced models and priority support.");
     expect(wrapper.get("button").text()).toBe("payment.subscribeNow");
   });

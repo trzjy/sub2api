@@ -27,8 +27,8 @@
         <div class="shrink-0 text-right">
           <div class="flex items-baseline gap-1">
             <span class="text-xs text-gray-400 dark:text-dark-500">{{ planCurrencySymbol }}</span>
-            <span :class="['text-2xl font-extrabold tracking-tight', textClass]">{{ plan.price }}</span>
-            <span v-if="plan.currency" class="text-xs font-medium text-gray-400 dark:text-dark-500">{{ plan.currency }}</span>
+            <span :class="['text-2xl font-extrabold tracking-tight', textClass]">{{ displayPrice }}</span>
+            <span class="text-xs font-medium text-gray-400 dark:text-dark-500">{{ displayCurrency }}</span>
           </div>
           <div class="flex items-center justify-end gap-1">
             <span :class="['inline-flex shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium', badgeLightClass]">
@@ -37,7 +37,7 @@
             <span class="text-[11px] text-gray-400 dark:text-dark-500">/ {{ validitySuffix }}</span>
           </div>
           <div v-if="plan.original_price" class="mt-0.5 flex items-center justify-end gap-1.5">
-            <span class="text-xs text-gray-400 line-through dark:text-dark-500">{{ planCurrencySymbol }}{{ plan.original_price }}<template v-if="plan.currency"> {{ plan.currency }}</template></span>
+            <span class="text-xs text-gray-400 line-through dark:text-dark-500">{{ planCurrencySymbol }}{{ displayOriginalPrice }}</span>
             <span :class="['rounded px-1 py-0.5 text-[10px] font-semibold', discountClass]">{{ discountText }}</span>
           </div>
         </div>
@@ -112,7 +112,7 @@ import type { UserSubscription } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { hasPeakRate as groupHasPeakRate, formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import { planValiditySuffix } from './validity'
-import { ACCOUNT_CURRENCY, currencySymbol, formatAccountMoney } from '@/utils/money'
+import { normalizePaymentCurrency, currencySymbol, formatAccountMoney } from '@/utils/money'
 import {
   platformAccentBarClass,
   platformBadgeLightClass,
@@ -124,7 +124,12 @@ import {
   platformLabel,
 } from '@/utils/platformColors'
 
-const props = defineProps<{ plan: SubscriptionPlan; activeSubscriptions?: UserSubscription[] }>()
+const props = defineProps<{
+  plan: SubscriptionPlan
+  activeSubscriptions?: UserSubscription[]
+  cnyRate?: number
+  currency?: string
+}>()
 const emit = defineEmits<{ select: [plan: SubscriptionPlan] }>()
 const { t } = useI18n()
 
@@ -155,8 +160,18 @@ const rateDisplay = computed(() => {
 })
 
 const appStore = useAppStore()
-// 套餐价格一律 USD 定价（ACCOUNT_CURRENCY），不随 plan.currency 猜测
-const planCurrencySymbol = computed(() => currencySymbol(ACCOUNT_CURRENCY))
+const displayCurrency = computed(() => normalizePaymentCurrency(props.currency || 'CNY'))
+const planCurrencySymbol = computed(() => currencySymbol(displayCurrency.value))
+const displayPrice = computed(() => subscriptionPaymentAmountForCurrency(props.plan.price, displayCurrency.value))
+const displayOriginalPrice = computed(() =>
+  subscriptionPaymentAmountForCurrency(props.plan.original_price, displayCurrency.value)
+)
+
+function subscriptionPaymentAmountForCurrency(value: number, currency: string): number {
+  if (currency === 'CNY' || currency === 'USD') return Math.round(value * 100) / 100
+  if (currency === 'HKD') return Math.round(value * (props.cnyRate || 0) * 100) / 100
+  return Math.round(value * 100) / 100
+}
 
 const hasPeakRate = computed(() => groupHasPeakRate(props.plan))
 
