@@ -177,6 +177,16 @@ func runMainServer() {
 
 	log.Printf("Server started on %s", app.Server.Addr)
 
+	// 启动网页登录代理隔离 origin 服务器（独立端口；WEB_LOGIN_PROXY_ADDR 为空时未启用）。
+	if app.WebLoginProxyServer != nil {
+		go func() {
+			if err := app.WebLoginProxyServer.Start(); err != nil {
+				log.Printf("Web login proxy server stopped: %v", err)
+			}
+		}()
+		log.Printf("Web login proxy server started on %s", cfg.Server.WebLoginProxyAddr)
+	}
+
 	// 等待中断信号
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -186,6 +196,12 @@ func runMainServer() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	if app.WebLoginProxyServer != nil {
+		if err := app.WebLoginProxyServer.Shutdown(ctx); err != nil {
+			log.Printf("Web login proxy server forced to shutdown: %v", err)
+		}
+	}
 
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)

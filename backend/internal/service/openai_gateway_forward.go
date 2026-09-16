@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -178,14 +180,21 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 协议出站（Zhipu SSE / DeepSeek SSE / Kimi Connect RPC）。必须先于下方通用
 	// OpenAI 路径分流——网页账号为 apikey 类型，会命中
 	// shouldForwardOpenAIResponsesViaRawChatCompletions 的兜底分支被打到错误上游。
-	if account.Platform == PlatformWebZhipu {
-		return s.forwardWebZhipu(ctx, c, account, body, originalModel, reqStream, startTime)
-	}
-	if account.Platform == PlatformWebDeepseek {
-		return s.forwardWebDeepseek(ctx, c, account, body, originalModel, reqStream, startTime)
-	}
-	if account.Platform == PlatformWebKimi {
-		return s.forwardWebKimi(ctx, c, account, body, originalModel, reqStream, startTime)
+	// Responses 形状请求（顶层 "input"，由 /v1/responses 或兼容客户端下发）在进入
+	// 只读取 messages 的网页适配器前先归一为 Chat Completions 形状（C2，#4）。
+	if account.Platform == PlatformWebZhipu || account.Platform == PlatformWebDeepseek || account.Platform == PlatformWebKimi {
+		normalizedBody, normErr := normalizeWebRequestBodyForAdapter(body)
+		if normErr != nil {
+			return nil, normErr
+		}
+		switch account.Platform {
+		case PlatformWebZhipu:
+			return s.forwardWebZhipu(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+		case PlatformWebDeepseek:
+			return s.forwardWebDeepseek(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+		case PlatformWebKimi:
+			return s.forwardWebKimi(ctx, c, account, normalizedBody, originalModel, reqStream, startTime)
+		}
 	}
 
 	// CN 供应商 anthropic 协议账号：/v1/responses 入站是交叉协议组合
@@ -1377,6 +1386,27 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 		}
 	}
 	return !openai_compat.ShouldUseResponsesAPI(account.Extra)
+}
+
+// normalizeWebRequestBodyForAdapter 把 OpenAI Responses 形状（顶层 "input"）的请求体
+// 归一为 Chat Completions 形状（顶层 "messages"），使网页逆向适配器（只读 messages）
+// 能服务 Responses 客户端（C2，#4）。复用了既有的 Responses→ChatCompletions 转换
+// （instructions→system message、input→messages、工具/其他字段按既有平台惯例透传或
+// 安全丢弃）。纯 Chat Completions 请求（无 input 字段）原样返回；转换失败回落原始体，
+// 让适配器自身的 "requires at least one user message" 校验给出明确错误，不臆造兜底。
+func normalizeWebRequestBodyForAdapter(body []byte) ([]byte, error) {
+	if !gjson.GetBytes(body, "input").Exists() {
+		return body, nil
+	}
+	var req apicompat.ResponsesRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body, fmt.Errorf("parse web Responses request: %w", err)
+	}
+	cc, err := apicompat.ResponsesToChatCompletionsRequest(&req)
+	if err != nil {
+		return body, fmt.Errorf("normalize web Responses request to chat completions: %w", err)
+	}
+	return json.Marshal(cc)
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {

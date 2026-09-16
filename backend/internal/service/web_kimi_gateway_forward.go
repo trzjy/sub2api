@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -134,7 +135,7 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 	if reqStream {
 		return s.handleWebKimiStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
 	}
-	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
+	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webKimiExtractPrompt(body))
 }
 
 // webKimiModelName 把（已映射的）模型名归一为网页端模型名。
@@ -291,9 +292,12 @@ func (s *OpenAIGatewayService) buildWebKimiUpstreamRequest(
 // refreshWebKimiAccessToken 用 refresh_token 刷新 access_token。
 //
 // 刷新端点已实测存在（无效 token 时 401 "Session expired"），但成功响应结构未实测。
-// 这里只识别 access_token 在顶层 / data / token 包装下的常见 JSON 位置；均未命中或
-// 刷新失败时返回空串（调用方继续按原 401 走冷却与错误路径），绝不臆造响应语义。
-// 刷新结果不回写 credentials（账号凭证更新属管理端职责，避免调度热路径写库）。
+// 这里只识别 access_token / refresh_token 在顶层 / data / token 包装下的常见 JSON 位置；
+// 均未命中或刷新失败时返回空串（调用方继续按原 401 走冷却与错误路径），绝不臆造响应语义。
+//
+// 刷新成功后把新 access_token（以及上游若一并返回的新 refresh_token）经统一汇聚点
+// persistAccountCredentials 回写账号凭据（D1 持久化）。凭据只写入非影子账号，且错误
+// 文案一律脱敏，绝不回显 token 值。
 func (s *OpenAIGatewayService) refreshWebKimiAccessToken(ctx context.Context, account *Account, proxyURL string) string {
 	refreshToken := strings.TrimSpace(account.GetCredential("refresh_token"))
 	if refreshToken == "" {
@@ -324,12 +328,35 @@ func (s *OpenAIGatewayService) refreshWebKimiAccessToken(ctx context.Context, ac
 	if err != nil {
 		return ""
 	}
+
+	var newAccessToken, newRefreshToken string
 	for _, path := range []string{"accessToken", "data.accessToken", "token", "data.token"} {
 		if v := strings.TrimSpace(gjson.GetBytes(body, path).String()); v != "" {
-			return v
+			newAccessToken = v
+			break
 		}
 	}
-	return ""
+	if newAccessToken == "" {
+		return ""
+	}
+	// refresh_token 仅在上游一并返回时持久化（轮转场景）；缺失则保持原值不变。
+	for _, path := range []string{"refreshToken", "data.refreshToken", "refresh_token", "data.refresh_token"} {
+		if v := strings.TrimSpace(gjson.GetBytes(body, path).String()); v != "" {
+			newRefreshToken = v
+			break
+		}
+	}
+
+	credentials := map[string]any{"access_token": newAccessToken}
+	if newRefreshToken != "" {
+		credentials["refresh_token"] = newRefreshToken
+	}
+	if persistErr := persistAccountCredentials(ctx, s.accountRepo, account, credentials); persistErr != nil {
+		// 持久化失败不阻断本次转发（已拿到新 token 可继续重试），仅脱敏告警。
+		slog.Warn("web-kimi refresh succeeded but credential persist failed",
+			"account_id", account.ID, "error", persistErr.Error())
+	}
+	return newAccessToken
 }
 
 // webKimiErrKind Kimi 网页端上游错误分类（分析文档 §3.4 冷却触发：401 / code=unauthenticated）。
@@ -496,12 +523,16 @@ func mapWebKimiPayload(payload []byte) webKimiChunkView {
 }
 
 // writeWebKimiClientChunk 以 OpenAI chat.completion.chunk 形状向客户端写一帧 SSE。
+// 帧必须带标准 SSE 前缀 `data: `（C1，#3）：标准 OpenAI SDK 只解析 `data: ` 前缀的帧，
+// 缺少前缀会被整帧忽略。终帧由调用方单独写 `data: [DONE]\n\n`。
 func writeWebKimiClientChunk(c *gin.Context, chunk gin.H) error {
 	data, err := json.Marshal(chunk)
 	if err != nil {
 		return err
 	}
-	if _, err := c.Writer.Write(append(data, '\n', '\n')); err != nil {
+	frame := append([]byte("data: "), data...)
+	frame = append(frame, '\n', '\n')
+	if _, err := c.Writer.Write(frame); err != nil {
 		return err
 	}
 	if flusher, ok := c.Writer.(http.Flusher); ok {
@@ -648,6 +679,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	originalModel string,
 	upstreamModel string,
 	startTime time.Time,
+	inputPrompt string,
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -658,7 +690,8 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	var usage *OpenAIUsage
 	var aggregated strings.Builder
 	frames := false
-	for scanner := bufio.NewScanner(bytes.NewReader(body)); scanner.Scan(); {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
 		payload, ok := parseWebKimiSSEFrame(scanner.Text())
 		if !ok {
 			continue
@@ -680,6 +713,10 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 			usage = view.Usage
 		}
 		aggregated.WriteString(view.Content)
+	}
+	if err := scanner.Err(); err != nil {
+		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
+		return nil, fmt.Errorf("web-kimi upstream response scan failed: %w", err)
 	}
 
 	if !frames {
@@ -711,6 +748,13 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	finalUsage := usage
 	if finalUsage == nil {
 		finalUsage = &OpenAIUsage{}
+	}
+	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
+	// 非真实 token 数（estimated）。
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && IsWebProvider(account.Platform) {
+		estimated := estimateWebUsage(inputPrompt, aggregated.String())
+		finalUsage.InputTokens = estimated.InputTokens
+		finalUsage.OutputTokens = estimated.OutputTokens
 	}
 	completion := gin.H{
 		"id":      responseID,

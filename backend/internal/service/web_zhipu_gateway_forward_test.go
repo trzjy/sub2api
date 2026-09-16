@@ -115,7 +115,7 @@ func webZhipuInboundBody(model string) []byte {
 func TestForwardWebZhipu_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	account := webZhipuTestAccount(9001, map[string]any{
 		"cookie":   "chatglm_token=tok-abc; acw_tc=cdn-xyz; cdn_sec_tc=sec-123",
-		"base_url": "https://chatglm.example.com",
+		"base_url": "https://chatglm.cn",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		webZhipuSSECompletionResponse(),
@@ -127,9 +127,9 @@ func TestForwardWebZhipu_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	require.Len(t, upstream.requests, 1)
 	chatReq := upstream.requests[0]
 	require.Equal(t, "/chatglm/backend-api/v1/conversation", chatReq.URL.Path)
-	require.Equal(t, "chatglm.example.com", chatReq.URL.Host, "credentials.base_url must override default base url")
-	require.Equal(t, "https://chatglm.example.com", chatReq.Header.Get("Origin"))
-	require.Equal(t, "https://chatglm.example.com/", chatReq.Header.Get("Referer"))
+	require.Equal(t, "chatglm.cn", chatReq.URL.Host, "credentials.base_url must override default base url")
+	require.Equal(t, "https://chatglm.cn", chatReq.Header.Get("Origin"))
+	require.Equal(t, "https://chatglm.cn/", chatReq.Header.Get("Referer"))
 	require.Equal(t, "application/json", chatReq.Header.Get("Content-Type"))
 	require.Equal(t, "XMLHttpRequest", chatReq.Header.Get("X-Requested-With"))
 	require.Equal(t, webZhipuClientUA, chatReq.Header.Get("User-Agent"))

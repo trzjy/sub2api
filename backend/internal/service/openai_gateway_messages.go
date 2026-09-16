@@ -46,6 +46,39 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
+	// 网页逆向平台（web-*）：适配器只吃 Chat Completions 形状。入站 /v1/messages 为
+	// Anthropic Messages 协议，先归一为 Chat Completions（C3，#5），三平台共用同一归一
+	// 实现，再走对应 web 适配器。落在通用 Responses/Anthropic 管线会因适配器只读
+	// messages 而报"没有 user message"。
+	if IsWebProvider(account.Platform) {
+		var anthropicReq apicompat.AnthropicRequest
+		if err := json.Unmarshal(body, &anthropicReq); err != nil {
+			return nil, fmt.Errorf("parse anthropic request for web adapter: %w", err)
+		}
+		cc, convErr := apicompat.AnthropicToChatCompletionsRequest(&anthropicReq)
+		if convErr != nil {
+			return nil, fmt.Errorf("convert anthropic messages to chat completions for web adapter: %w", convErr)
+		}
+		ccBody, marshalErr := json.Marshal(cc)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		startTime := time.Now()
+		reqModel := cc.Model
+		if strings.TrimSpace(reqModel) == "" {
+			reqModel = anthropicReq.Model
+		}
+		reqStream := cc.Stream
+		switch account.Platform {
+		case PlatformWebZhipu:
+			return s.forwardWebZhipu(ctx, c, account, ccBody, reqModel, reqStream, startTime)
+		case PlatformWebDeepseek:
+			return s.forwardWebDeepseek(ctx, c, account, ccBody, reqModel, reqStream, startTime)
+		case PlatformWebKimi:
+			return s.forwardWebKimi(ctx, c, account, ccBody, reqModel, reqStream, startTime)
+		}
+	}
+
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}

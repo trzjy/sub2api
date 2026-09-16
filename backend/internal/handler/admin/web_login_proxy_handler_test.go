@@ -377,3 +377,102 @@ func TestKimi_NoCapture(t *testing.T) {
 	_, ok := store.Cookie(token)
 	require.False(t, ok)
 }
+
+// TestProxy_DoesNotForwardSiteCookie 验证入站本站 cookie（如 sub2api_session）
+// 不会被原样转发给上游官方站点。
+func TestProxy_DoesNotForwardSiteCookie(t *testing.T) {
+	var upstreamCookie string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCookie = r.Header.Get("Cookie")
+		w.Header().Set("Set-Cookie", "chatglm_token=abc123; Domain=chatglm.cn; Path=/; Secure; HttpOnly")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: "sub2api_session", Value: "leaked-session"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	require.NotContains(t, upstreamCookie, "sub2api_session",
+		"入站本站 cookie 不得转发给上游")
+}
+
+// TestProxy_DoesNotCaptureSiteCookie 验证捕获结果只含上游 Set-Cookie，不含入站本站 cookie。
+func TestProxy_DoesNotCaptureSiteCookie(t *testing.T) {
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "chatglm_token=abc123; Domain=chatglm.cn; Path=/; Secure; HttpOnly")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: "sub2api_session", Value: "leaked-session"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	captured, ok := store.Cookie(token)
+	require.True(t, ok)
+	require.Contains(t, captured, "chatglm_token=abc123")
+	require.NotContains(t, captured, "sub2api_session",
+		"捕获结果不得包含入站本站 cookie")
+}
+
+// TestProxy_AccumulatesUpstreamCookies 验证多次响应的上游 Set-Cookie 会在捕获结果中累积。
+func TestProxy_AccumulatesUpstreamCookies(t *testing.T) {
+	var hit int
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit++
+		if hit == 1 {
+			w.Header().Set("Set-Cookie", "chatglm_token=abc; Domain=chatglm.cn; Path=/; Secure")
+		} else {
+			w.Header().Set("Set-Cookie", "chatglm_uid=u1; Domain=chatglm.cn; Path=/; Secure")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+		resp, e := http.DefaultClient.Do(req)
+		require.NoError(t, e)
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+
+	captured, ok := store.Cookie(token)
+	require.True(t, ok)
+	require.Contains(t, captured, "chatglm_token=abc")
+	require.Contains(t, captured, "chatglm_uid=u1")
+}

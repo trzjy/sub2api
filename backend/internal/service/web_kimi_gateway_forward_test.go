@@ -120,7 +120,7 @@ func webKimiInboundBody(model string) []byte {
 func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	account := webKimiTestAccount(8901, map[string]any{
 		"access_token": "kimi-access-token-abc123",
-		"base_url":     "https://kimi.example.com",
+		"base_url":     "https://www.kimi.com",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		webKimiConnectResponse(),
@@ -132,7 +132,7 @@ func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	require.Len(t, upstream.requests, 1)
 	chatReq := upstream.requests[0]
 	require.Equal(t, "/apiv2/kimi.chat.v1.ChatService/Chat", chatReq.URL.Path)
-	require.Equal(t, "kimi.example.com", chatReq.URL.Host, "credentials.base_url must override default base url")
+	require.Equal(t, "www.kimi.com", chatReq.URL.Host, "credentials.base_url must override default base url")
 	require.Equal(t, "Bearer kimi-access-token-abc123", chatReq.Header.Get("Authorization"))
 	require.Equal(t, "application/json", chatReq.Header.Get("Content-Type"))
 	require.Equal(t, "https://www.kimi.com", chatReq.Header.Get("Origin"))

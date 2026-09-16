@@ -16,7 +16,7 @@ type SystemSettings struct {
 	EmailVerifyEnabled                  bool
 	RegistrationEmailSuffixWhitelist    []string
 	RegistrationEmailSuffixBlacklist    []string // 注册邮箱后缀黑名单（命中即拒绝）
-	RegistrationEmailDomainQuotaEnabled bool // 白名单非空时放行非白名单域名限量注册（默认关闭）
+	RegistrationEmailDomainQuotaEnabled bool     // 白名单非空时放行非白名单域名限量注册（默认关闭）
 	PromoCodeEnabled                    bool
 	PasswordResetEnabled                bool
 	FrontendURL                         string
@@ -150,14 +150,14 @@ type SystemSettings struct {
 	GoogleOAuthRedirectURL            string
 	GoogleOAuthFrontendRedirectURL    string
 
-	SiteName                    string
-	SiteLogo                    string
-	SiteSubtitle                string
-	APIBaseURL                  string
-	ContactInfo                 string
-	DocURL                      string
-	HomeContent                 string
-	CompactHomeEnabled          bool
+	SiteName           string
+	SiteLogo           string
+	SiteSubtitle       string
+	APIBaseURL         string
+	ContactInfo        string
+	DocURL             string
+	HomeContent        string
+	CompactHomeEnabled bool
 
 	// ConcurrencyLimitMessage 并发超限文案（支持 {limit}/{scope} 占位符；空值回退英文默认）。
 	ConcurrencyLimitMessage     string
@@ -414,6 +414,10 @@ type PublicSettings struct {
 
 	// 允许终端用户在用量页查看自己的失败请求
 	AllowUserViewErrorRequests bool `json:"allow_user_view_error_requests"`
+
+	// 网页登录代理隔离 origin 的公开基础地址（前端 iframe 契约）。
+	// 空字符串表示回退同源（代理路由仍注册在主服务 v1）。
+	WebLoginProxyOrigin string `json:"web_login_proxy_origin"`
 }
 
 type LoginAgreementDocument struct {
@@ -603,10 +607,10 @@ type OpenAIAPIKeyHealthBreakerProbeSettings struct {
 // fields fall back to the defaults produced by DefaultOpenAIAPIKeyHealthBreakerSettings
 // and the clamping in normalizeOpenAIAPIKeyHealthBreakerSettings.
 type OpenAIAPIKeyHealthBreakerSettings struct {
-	Enabled          bool                                      `json:"enabled"`
-	WindowMinutes    int                                       `json:"window_minutes"`
-	FailureThreshold int                                       `json:"failure_threshold"`
-	CooldownMinutes  int                                       `json:"cooldown_minutes"`
+	Enabled          bool `json:"enabled"`
+	WindowMinutes    int  `json:"window_minutes"`
+	FailureThreshold int  `json:"failure_threshold"`
+	CooldownMinutes  int  `json:"cooldown_minutes"`
 	// ScopePlatforms is the set of OpenAI-compatible platforms covered by the
 	// breaker. grok is excluded by default and only covered when IncludeGrok=true.
 	// OAuth / PAT / Bedrock accounts are never covered regardless of platform.

@@ -10,6 +10,11 @@ const mocks = vi.hoisted(() => ({
   deleteWebLoginProxySessionMock: vi.fn()
 }))
 
+const appStoreState = vi.hoisted(() => ({
+  // 控制 WebLoginModal 读取的 public settings；默认缺 web_login_proxy_origin → 同源回退。
+  cachedPublicSettings: null as null | { web_login_proxy_origin?: string }
+}))
+
 vi.mock('@/api/admin/accounts', () => ({
   validateWebCredentials: mocks.validateWebCredentialsMock,
   createWebLoginProxySession: mocks.createWebLoginProxySessionMock,
@@ -18,7 +23,7 @@ vi.mock('@/api/admin/accounts', () => ({
 }))
 
 vi.mock('@/stores/app', () => ({
-  useAppStore: () => ({})
+  useAppStore: () => appStoreState
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -58,6 +63,7 @@ async function flush() {
 describe('WebLoginModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    appStoreState.cachedPublicSettings = null
     // 默认：代理会话成功、轮询未捕获、校验通过。
     mocks.createWebLoginProxySessionMock.mockResolvedValue({
       token: 't1',
@@ -115,6 +121,22 @@ describe('WebLoginModal', () => {
     expect(wrap.find('iframe').attributes('sandbox')).toBeUndefined()
     // 轮询已启动（首轮已调用 capture）。
     expect(mocks.getWebLoginProxyCaptureMock).toHaveBeenCalled()
+  })
+
+  it('uses relative proxy path when web_login_proxy_origin is missing (same-origin fallback)', async () => {
+    appStoreState.cachedPublicSettings = null
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+    const wrap = wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]')
+    expect(wrap.find('iframe').attributes('src')).toBe(PROXY_URL)
+  })
+
+  it('prepends web_login_proxy_origin to iframe src when settings provide an isolated origin', async () => {
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    const wrapper = mountModal('web-zhipu')
+    await flush()
+    const wrap = wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]')
+    expect(wrap.find('iframe').attributes('src')).toBe('http://127.0.0.1:3400' + PROXY_URL)
   })
 
   it('auto-fills cookie, validates and emits applied + close on capture success', async () => {

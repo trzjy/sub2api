@@ -11,6 +11,9 @@ services:
         hard: 100000
     ports:
       - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-3300}:8080"
+      # 网页登录代理隔离 origin（独立端口，与主服务 origin 隔离，防官方页脚本读取管理端 localStorage）。
+      # WEB_LOGIN_PROXY_BIND 为对外绑定地址（默认 127.0.0.1，仅本机）；WEB_LOGIN_PROXY_PORT 为映射到宿主机的端口。
+      - "${WEB_LOGIN_PROXY_BIND:-127.0.0.1}:${WEB_LOGIN_PROXY_PORT:-3400}:3400"
     volumes:
       - ../data:/app/data
     env_file:
@@ -32,6 +35,12 @@ services:
       REDIS_ENABLE_TLS: "false"
       TZ: ${TZ:-Asia/Shanghai}
       JWT_SECRET: ${JWT_SECRET}
+      # 网页登录代理隔离 origin 监听地址（独立端口）。空值=禁用隔离 engine（前端回退同源）。
+      # 容器内监听所有接口(`:3400`)，由上方 ports 映射到宿主机 WEB_LOGIN_PROXY_PORT。
+      WEB_LOGIN_PROXY_ADDR: ":3400"
+      # 可选：隔离 origin 对外的公开地址（前端 iframe 契约）。容器经端口映射对外暴露在不同 host 时设置，
+      # 例如 http://your-host:3400；留空则由 WEB_LOGIN_PROXY_ADDR 推导（通配 host 时回退同源）。
+      WEB_LOGIN_PROXY_ORIGIN: ${WEB_LOGIN_PROXY_ORIGIN:-}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}

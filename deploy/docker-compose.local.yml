@@ -35,6 +35,7 @@ services:
         hard: 100000
     ports:
       - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-8080}:8080"
+      - "${WEB_LOGIN_PROXY_BIND:-127.0.0.1}:${WEB_LOGIN_PROXY_PORT:-3400}:3400"
     volumes:
       # Local directory mapping for easy migration
       - ./data:/app/data:Z
@@ -52,6 +53,8 @@ services:
       # =======================================================================
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
+      - WEB_LOGIN_PROXY_ADDR=:3400
+      - WEB_LOGIN_PROXY_ORIGIN=${WEB_LOGIN_PROXY_ORIGIN:-}
       - SERVER_MODE=${SERVER_MODE:-release}
       - ENABLE_SERVER_TIMING=${ENABLE_SERVER_TIMING:-false}
       - RUN_MODE=${RUN_MODE:-standard}

@@ -131,7 +131,7 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	if reqStream {
 		return s.handleWebDeepseekStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
 	}
-	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime)
+	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webDeepseekExtractPrompt(body))
 }
 
 // webDeepseekModelClass 把（已映射的）模型名归一为网页端 model_class 与 thinking 开关。
@@ -459,12 +459,16 @@ func mapWebDeepseekPayload(payload []byte) webDeepseekChunkView {
 }
 
 // writeWebDeepseekClientChunk 以 OpenAI chat.completion.chunk 形状向客户端写一帧 SSE。
+// 帧必须带标准 SSE 前缀 `data: `（C1，#3）：标准 OpenAI SDK 只解析 `data: ` 前缀的帧，
+// 缺少前缀会被整帧忽略。终帧由调用方单独写 `data: [DONE]\n\n`。
 func writeWebDeepseekClientChunk(c *gin.Context, chunk gin.H) error {
 	data, err := json.Marshal(chunk)
 	if err != nil {
 		return err
 	}
-	if _, err := c.Writer.Write(append(data, '\n', '\n')); err != nil {
+	frame := append([]byte("data: "), data...)
+	frame = append(frame, '\n', '\n')
+	if _, err := c.Writer.Write(frame); err != nil {
 		return err
 	}
 	if flusher, ok := c.Writer.(http.Flusher); ok {
@@ -611,6 +615,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	originalModel string,
 	upstreamModel string,
 	startTime time.Time,
+	inputPrompt string,
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -621,7 +626,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	var usage *OpenAIUsage
 	var aggregated strings.Builder
 	frames := false
-	for scanner := bufio.NewScanner(bytes.NewReader(body)); scanner.Scan(); {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
 		payload, ok := parseWebDeepseekSSEFrame(scanner.Text())
 		if !ok {
 			continue
@@ -644,6 +650,10 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		}
 		aggregated.WriteString(view.Content)
 	}
+	if err := scanner.Err(); err != nil {
+		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
+		return nil, fmt.Errorf("web-deepseek upstream response scan failed: %w", err)
+	}
 
 	if !frames {
 		// 非 SSE：业务错误码形态（HTTP 200 + {"code":40002,...}）走错误路径；
@@ -663,6 +673,13 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	finalUsage := usage
 	if finalUsage == nil {
 		finalUsage = &OpenAIUsage{}
+	}
+	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
+	// 非真实 token 数（estimated）。
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && IsWebProvider(account.Platform) {
+		estimated := estimateWebUsage(inputPrompt, aggregated.String())
+		finalUsage.InputTokens = estimated.InputTokens
+		finalUsage.OutputTokens = estimated.OutputTokens
 	}
 	completion := gin.H{
 		"id":      responseID,

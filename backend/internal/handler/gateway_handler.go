@@ -1200,6 +1200,13 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
+	// 网页逆向平台：空 model_mapping 时回落到平台默认模型目录（方案 §3.3 映射表），
+	// 而非误回落到 Claude 默认模型。
+	if service.IsWebProvider(platform) {
+		writeModelsList(c, platform, service.DefaultWebModelIDs(platform))
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   claude.DefaultModels,
@@ -1499,9 +1506,9 @@ func defaultModelIDsForPlatform(platform string) []string {
 		// 返回空列表，避免回落到 Claude 默认模型（外部审查外审-3）。
 		return nil
 	case service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi:
-		// 网页逆向平台同 other：无平台内置模型目录，公开模型列表来自账号
-		// model_mapping（W3 方案任务 1），返回空避免回落 Claude 默认模型。
-		return nil
+		// 网页逆向平台默认模型目录（方案 §3.3 映射表）；空 model_mapping 时回落此表，
+		// 而非误回落到 Claude 默认模型。
+		return service.DefaultWebModelIDs(platform)
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

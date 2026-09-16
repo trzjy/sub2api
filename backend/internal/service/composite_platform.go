@@ -211,3 +211,20 @@ func isConcreteRequestPlatform(platform string) bool {
 		return false
 	}
 }
+
+// DefaultWebModelIDs 返回各网页逆向平台的默认模型目录（方案 §3.3 模型映射表）。
+// 空 model_mapping 时，公开 /models 列表与账号默认模型集回落到此表，而非误回落到
+// Claude 默认模型。集中定义于此，供 gateway_handler 与 admin account_handler 共用，
+// 避免两处各写一份导致漂移。
+func DefaultWebModelIDs(platform string) []string {
+	switch platform {
+	case PlatformWebDeepseek:
+		return []string{"deepseek-chat", "deepseek-reasoner"}
+	case PlatformWebZhipu:
+		return []string{"glm-4.7", "glm-4.7-flash"}
+	case PlatformWebKimi:
+		return []string{"kimi-k3"}
+	default:
+		return nil
+	}
+}

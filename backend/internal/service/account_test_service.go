@@ -396,6 +396,13 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.routeAntigravityTest(c, account, modelID, prompt)
 	}
 
+	// web 逆向平台（web-deepseek / web-zhipu / web-kimi）登录态载体是整串 Cookie
+	// 或 Kimi access_token，走专门的轻量官方探活：仅校验凭证可达性与登录态，
+	// 不把 Claude / OpenAI API Key 风格的请求错误地打到 web 上游。
+	if IsWebProvider(account.Platform) {
+		return s.testWebAccountConnection(c, account, modelID, prompt)
+	}
+
 	return s.testClaudeAccountConnection(c, account, modelID)
 }
 
@@ -418,6 +425,120 @@ func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Cont
 	}
 
 	return s.testOpenAIChatCompletionsConnection(c, account, testModelID, prompt, normalizedBaseURL, authToken)
+}
+
+// testWebAccountConnection 对 web 逆向平台账号做轻量官方探活。
+//
+// 与 Claude / OpenAI API Key 走不同协议，web 平台登录态载体是整串 Cookie
+// （web-deepseek / web-zhipu）或 Kimi access_token（web-kimi）。探活只构造一个
+// 最小出站请求打到达对应官方对话端点，按 HTTP 状态码判定：2xx → 登录态有效；
+// 401/403 → 凭证失效；其余 → 请求失败。错误文案只含状态码，绝不回显凭证值。
+func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	ctx := c.Request.Context()
+
+	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
+	var (
+		chatPath   string
+		authHeader string
+		authValue  string
+		testModel  string
+		reqBody    []byte
+	)
+	switch account.Platform {
+	case PlatformWebDeepseek:
+		if baseURL == "" {
+			baseURL = webDeepseekDefaultBaseURL
+		}
+		chatPath = webDeepseekChatCompletionPath
+		testModel = "deepseek-chat"
+		cookie := strings.TrimSpace(account.GetCredential("cookie"))
+		if cookie == "" {
+			return s.sendErrorAndEnd(c, "web-deepseek account is missing login cookie credential")
+		}
+		if waf := strings.TrimSpace(account.GetCredential("waf_cookie")); waf != "" {
+			cookie = strings.TrimRight(cookie, "; ") + "; " + waf
+		}
+		authHeader, authValue = "Cookie", cookie
+		built, err := buildWebDeepseekRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), account, "deepseek_chat", false)
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to build web-deepseek probe request")
+		}
+		reqBody = built
+	case PlatformWebZhipu:
+		if baseURL == "" {
+			baseURL = DefaultWebZhipuBaseURL
+		}
+		chatPath = webZhipuConversationPath
+		testModel = "glm-4"
+		cookie := strings.TrimSpace(account.GetCredential("cookie"))
+		if cookie == "" {
+			return s.sendErrorAndEnd(c, "web-zhipu account is missing login cookie credential")
+		}
+		if cdn := strings.TrimSpace(account.GetCredential("cdn_cookie")); cdn != "" {
+			cookie = strings.TrimRight(cookie, "; ") + "; " + cdn
+		}
+		authHeader, authValue = "Cookie", cookie
+		reqBody = buildWebZhipuRequestBody("hi", "glm-4", account)
+	case PlatformWebKimi:
+		if baseURL == "" {
+			baseURL = webKimiDefaultBaseURL
+		}
+		chatPath = webKimiChatPath
+		testModel = "kimi-k3"
+		accessToken := strings.TrimSpace(account.GetCredential("access_token"))
+		if accessToken == "" {
+			return s.sendErrorAndEnd(c, "web-kimi account is missing access_token credential")
+		}
+		authHeader, authValue = "Authorization", "Bearer "+accessToken
+		reqBody = buildWebKimiRequestBody("hi", "k3", account)
+	default:
+		return s.testClaudeAccountConnection(c, account, modelID)
+	}
+
+	// SSE 响应头：与真实转发口径一致，便于前端复用同一套 test 事件解析。
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModel})
+	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 " + chatPath + " 探活 web 登录态"})
+
+	apiURL := baseURL + chatPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create web probe request")
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set(authHeader, authValue)
+	// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
+	account.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) request failed: %s", chatPath, err.Error()))
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		s.sendEvent(c, TestEvent{Type: "content", Text: "Web login session is healthy."})
+		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+		return nil
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		// 凭证失效：只回显状态码，绝不回显 Cookie / access_token。
+		return s.sendErrorAndEnd(c, fmt.Sprintf("web login credential is invalid (HTTP %d)", resp.StatusCode))
+	default:
+		return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned HTTP %d", chatPath, resp.StatusCode))
+	}
 }
 
 // testClaudeAccountConnection tests an Anthropic Claude account's connection

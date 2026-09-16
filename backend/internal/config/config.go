@@ -721,6 +721,15 @@ type ServerConfig struct {
 	TrustedProxiesConfigured bool      `mapstructure:"-" json:"-" yaml:"-"`   // 是否显式配置了可信代理列表
 	MaxRequestBodySize       int64     `mapstructure:"max_request_body_size"` // 全局最大请求体限制
 	H2C                      H2CConfig `mapstructure:"h2c"`                   // HTTP/2 Cleartext 配置
+
+	// WebLoginProxyAddr 网页登录代理隔离 origin 的监听地址（独立端口，与主服务
+	// origin 隔离，避免官方页脚本读取管理端 localStorage）。默认 "127.0.0.1:3400"；
+	// 显式设为空字符串则禁用隔离 engine（前端 iframe 回退同源，功能不缺失）。
+	WebLoginProxyAddr string `mapstructure:"web_login_proxy_addr"`
+	// WebLoginProxyOrigin 隔离 origin 对外的公开基础地址（供前端 iframe 契约使用）。
+	// 空字符串表示由 WebLoginProxyAddr 推导或回退同源；显式设置可覆盖推导
+	// （例如容器通过端口映射对外暴露在不同 host 时）。
+	WebLoginProxyOrigin string `mapstructure:"web_login_proxy_origin"`
 }
 
 // H2CConfig HTTP/2 Cleartext 配置
@@ -1214,12 +1223,12 @@ type PromoIntelConfig struct {
 //   - DailyCheckinEnabled: 每日签到（白嫖积分，属主动行为）。保守默认关闭。
 //   - StaticModelsIntl: 国际版静态模型 ID 列表（逗号分隔）；非空时跳过上游 models 请求。
 type GatewayCodeBuddyConfig struct {
-	ChatUserAgent            string `mapstructure:"chat_user_agent"`
-	SanitizeEnabled          bool   `mapstructure:"sanitize_enabled"`
-	QuotaCheckEnabled        bool   `mapstructure:"quota_check_enabled"`
-	QuotaCheckIntervalMinutes int   `mapstructure:"quota_check_interval_minutes"`
-	DailyCheckinEnabled      bool   `mapstructure:"daily_checkin_enabled"`
-	StaticModelsIntl         string `mapstructure:"static_models_intl"`
+	ChatUserAgent             string `mapstructure:"chat_user_agent"`
+	SanitizeEnabled           bool   `mapstructure:"sanitize_enabled"`
+	QuotaCheckEnabled         bool   `mapstructure:"quota_check_enabled"`
+	QuotaCheckIntervalMinutes int    `mapstructure:"quota_check_interval_minutes"`
+	DailyCheckinEnabled       bool   `mapstructure:"daily_checkin_enabled"`
+	StaticModelsIntl          string `mapstructure:"static_models_intl"`
 	// DirectOrigin 是"代码层直连源站"覆盖表（按站点 key：cn/intl）。
 	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
 	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
@@ -1630,6 +1639,38 @@ func (s *ServerConfig) Address() string {
 	return fmt.Sprintf("%s:%d", s.Host, s.Port)
 }
 
+// WebLoginProxyPublicOrigin 返回网页登录代理隔离 origin 对外的公开基础地址，
+// 供 public settings 注入前端（iframe src 契约）。推导规则：
+//   - 显式配置 WebLoginProxyOrigin 时直接采用；
+//   - 否则若 WebLoginProxyAddr 非空且 host 为具体地址（非通配/空），推导
+//     http://host:port（port 缺省 3400）；
+//   - 否则返回空字符串（前端回退同源；代理路由仍注册在主服务 v1，功能不缺失）。
+//
+// 返回值不含任何敏感信息（仅 host:port 的公开访问地址）。
+func (s *ServerConfig) WebLoginProxyPublicOrigin() string {
+	if origin := strings.TrimSpace(s.WebLoginProxyOrigin); origin != "" {
+		return origin
+	}
+	addr := strings.TrimSpace(s.WebLoginProxyAddr)
+	if addr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 无端口：整串当作 host，端口回落 3400。
+		host = addr
+		port = "3400"
+	}
+	if port == "" {
+		port = "3400"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		// 监听在所有接口但无法确定对外可达 host → 回退同源。
+		return ""
+	}
+	return "http://" + host + ":" + port
+}
+
 // DatabaseConfig 数据库连接配置
 // 性能优化：新增连接池参数，避免频繁创建/销毁连接
 type DatabaseConfig struct {
@@ -1929,6 +1970,12 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
 	}
+	if err := viper.BindEnv("server.web_login_proxy_addr", "WEB_LOGIN_PROXY_ADDR"); err != nil {
+		return nil, fmt.Errorf("bind WEB_LOGIN_PROXY_ADDR: %w", err)
+	}
+	if err := viper.BindEnv("server.web_login_proxy_origin", "WEB_LOGIN_PROXY_ORIGIN"); err != nil {
+		return nil, fmt.Errorf("bind WEB_LOGIN_PROXY_ORIGIN: %w", err)
+	}
 
 	// 默认值
 	setDefaults()
@@ -2143,6 +2190,8 @@ func setDefaults() {
 	viper.SetDefault("server.mode", "release")
 	viper.SetDefault("server.enable_server_timing", false)
 	viper.SetDefault("server.frontend_url", "")
+	viper.SetDefault("server.web_login_proxy_addr", "127.0.0.1:3400")
+	viper.SetDefault("server.web_login_proxy_origin", "")
 	viper.SetDefault("server.read_header_timeout", 10) // 10秒读取请求头
 	viper.SetDefault("server.max_header_bytes", 64*1024)
 	viper.SetDefault("server.idle_timeout", 120) // 120秒空闲超时
@@ -2195,8 +2244,8 @@ func setDefaults() {
 		"api.moonshot.cn",
 		"open.bigmodel.cn",
 		"ark.cn-beijing.volces.com", // 火山方舟 Agent/Coding Plan 配额探测端点（订阅 API Key Bearer 最小请求）
-		"api.minimaxi.com", // MiniMax CN quota + inference
-		"api.minimax.io",   // MiniMax intl; frozen allowlists must add this host to use the intl site
+		"api.minimaxi.com",          // MiniMax CN quota + inference
+		"api.minimax.io",            // MiniMax intl; frozen allowlists must add this host to use the intl site
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"*.openai.azure.com",
@@ -2444,17 +2493,17 @@ func setDefaults() {
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
 
-// PromoIntel - 优惠情报：厂商优惠/公告每日轮询 + LLM 结构化整理（端点在管理台配置）。
-viper.SetDefault("promo_intel.enabled", true)
-viper.SetDefault("promo_intel.scan_interval_seconds", 60)
-viper.SetDefault("promo_intel.fetch_timeout_seconds", 30)
-viper.SetDefault("promo_intel.fetch_max_bytes", 2097152)
-viper.SetDefault("promo_intel.llm_timeout_seconds", 120)
-viper.SetDefault("promo_intel.llm_max_text_chars", 12000)
-viper.SetDefault("promo_intel.worker_concurrency", 2)
-viper.SetDefault("promo_intel.due_batch_size", 20)
-viper.SetDefault("promo_intel.seed_defaults", true)
-viper.SetDefault("promo_intel.server_port", 8080)
+	// PromoIntel - 优惠情报：厂商优惠/公告每日轮询 + LLM 结构化整理（端点在管理台配置）。
+	viper.SetDefault("promo_intel.enabled", true)
+	viper.SetDefault("promo_intel.scan_interval_seconds", 60)
+	viper.SetDefault("promo_intel.fetch_timeout_seconds", 30)
+	viper.SetDefault("promo_intel.fetch_max_bytes", 2097152)
+	viper.SetDefault("promo_intel.llm_timeout_seconds", 120)
+	viper.SetDefault("promo_intel.llm_max_text_chars", 12000)
+	viper.SetDefault("promo_intel.worker_concurrency", 2)
+	viper.SetDefault("promo_intel.due_batch_size", 20)
+	viper.SetDefault("promo_intel.seed_defaults", true)
+	viper.SetDefault("promo_intel.server_port", 8080)
 
 	// Volcano - 火山方舟订阅号支持模型同步（依据官方文档读取器，非静态候选列表）
 

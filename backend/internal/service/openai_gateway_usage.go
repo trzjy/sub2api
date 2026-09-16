@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -148,6 +149,48 @@ func groupBillsOpenAIFastAtStandard(apiKey *APIKey, account *Account, serviceTie
 	default:
 		return false
 	}
+}
+
+// estimateWebUsage 在网页逆向平台上游不返回 usage 时做本地估算（D2）。
+//
+// 仅按字符/词近似计数，用于计费兜底，绝非真实 token 数（estimated）；不新增任何
+// 协议字段，估算结果直接写入 OpenAIUsage 的 InputTokens / OutputTokens。
+func estimateWebUsage(inputText, outputText string) OpenAIUsage {
+	return OpenAIUsage{
+		InputTokens:  estimateTokenCount(inputText),
+		OutputTokens: estimateTokenCount(outputText),
+	}
+}
+
+// estimateTokenCount 中英文混合场景下的近似 token 计数：CJK 统一字符计，ASCII
+// 连续词按空白切分计。仅用于网页逆向平台无 usage 时的计费兜底估算。
+func estimateTokenCount(text string) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	tokens := 0
+	inWord := false
+	for _, r := range text {
+		switch {
+		case unicode.Is(unicode.Ideographic, r) || (r >= 0x3000 && r <= 0x9FFF) ||
+			(r >= 0xAC00 && r <= 0xD7AF) || (r >= 0x3040 && r <= 0x30FF):
+			// CJK / 日文假名 / 韩文音节：逐字符计。
+			tokens++
+			inWord = false
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			if !inWord {
+				tokens++
+				inWord = true
+			}
+		case unicode.IsSpace(r):
+			inWord = false
+		default:
+			// 其他标点 / 符号：逐字符计，并打断词边界。
+			tokens++
+			inWord = false
+		}
+	}
+	return tokens
 }
 
 // RecordUsage records usage and deducts balance

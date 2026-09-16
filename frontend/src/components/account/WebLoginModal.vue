@@ -35,8 +35,8 @@
         <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
       </div>
 
-      <!-- 登录代理 iframe：后端提供同源代理登录页，登录态由后端自动捕获 Cookie。
-           不设 sandbox（代理为同源，需要 Cookie 跨请求携带）；referrerpolicy 收紧。
+      <!-- 登录代理 iframe：后端提供代理登录页，登录态由后端自动捕获 Cookie。
+           隔离 origin 已阻断官方页脚本读取后台存储，故不设 sandbox；保留 referrerpolicy 收紧。
            Kimi 不启动轮询，保持手动 Token 粘贴。 -->
       <div
         v-if="proxyUrl"
@@ -122,6 +122,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import { buildWebProviderCredentials, isWebProviderPlatform, webProviderUsesCookie, type WebProviderPlatform } from '@/components/account/credentialsBuilder'
 import {
@@ -142,6 +143,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const appStore = useAppStore()
 
 // 弹窗仅从网页逆向平台表单区打开；platform 为宽 union，非 web 平台时收敛到默认
 // （isWebProviderPlatform 守卫），确保 webProviderUsesCookie 等强类型调用安全。
@@ -215,7 +217,10 @@ async function setupProxySession() {
 
   try {
     const session = await createWebLoginProxySession(webPlatform.value)
-    proxyUrl.value = session.url
+    // 隔离 origin：若 public settings 提供 web_login_proxy_origin（独立监听端口的独立源），
+    // 官方页脚本无法读取管理端 :3300 的 auth_token/localStorage；空/缺失则回退同源代理路径。
+    const proxyOrigin = appStore.cachedPublicSettings?.web_login_proxy_origin
+    proxyUrl.value = proxyOrigin ? `${proxyOrigin}${session.url}` : session.url
     proxyToken.value = session.token
     // Kimi 无自动 Cookie 捕获（手动 Token 粘贴），仅展示代理 iframe。
     if (webPlatform.value !== 'web-kimi') {

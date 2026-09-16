@@ -142,7 +142,7 @@ func webDeepseekInboundBody(model string) []byte {
 func TestForwardWebDeepseek_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	account := webDeepseekTestAccount(8801, map[string]any{
 		"cookie":            "ds_session_id=sess-abc; HWWAFSESID=waf-xyz; HWWAFSESTIME=1726450000",
-		"base_url":          "https://chat.example.com",
+		"base_url":          "https://chat.deepseek.com",
 		"chat_session_id":   "sess-42",
 		"parent_message_id": "msg-9",
 	})
@@ -161,9 +161,9 @@ func TestForwardWebDeepseek_RequestBuildAndNonStreamAggregate(t *testing.T) {
 
 	chatReq := upstream.requests[1]
 	require.Equal(t, "/api/v0/chat/completion", chatReq.URL.Path)
-	require.Equal(t, "chat.example.com", chatReq.URL.Host, "credentials.base_url must override default base url")
-	require.Equal(t, "https://chat.example.com", chatReq.Header.Get("Origin"))
-	require.Equal(t, "https://chat.example.com/", chatReq.Header.Get("Referer"))
+	require.Equal(t, "chat.deepseek.com", chatReq.URL.Host, "credentials.base_url must override default base url")
+	require.Equal(t, "https://chat.deepseek.com", chatReq.Header.Get("Origin"))
+	require.Equal(t, "https://chat.deepseek.com/", chatReq.Header.Get("Referer"))
 	require.Equal(t, "application/json", chatReq.Header.Get("Content-Type"))
 	require.Equal(t, webDeepseekClientUA, chatReq.Header.Get("User-Agent"))
 
@@ -283,7 +283,7 @@ func webDeepseekStreamInboundBody() []byte {
 // TestForwardWebDeepseek_StreamingResponseRelay 覆盖流式回程：上游 SSE 增量经通用映射
 // 重包为 chat.completion.chunk 流，终止帧收口 data: [DONE]，SSE 头齐备，usage 记入结果。
 func TestForwardWebDeepseek_StreamingResponseRelay(t *testing.T) {
-	account := webDeepseekTestAccount(8810, map[string]any{"base_url": "https://chat.example.com"})
+	account := webDeepseekTestAccount(8810, map[string]any{"base_url": "https://chat.deepseek.com"})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		webDeepseekMissingTokenResponse(),
 		webDeepseekSSECompletionResponse(),
@@ -409,7 +409,7 @@ func TestForwardWebDeepseek_CredentialNeverInClientResponse(t *testing.T) {
 	const secretCookie = "ds_session_id=SECRETVALUE123456; HWWAFSESID=WAFSECRETVALUE1"
 	account := webDeepseekTestAccount(8809, map[string]any{
 		"cookie":   secretCookie,
-		"base_url": "https://chat.example.com",
+		"base_url": "https://chat.deepseek.com",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		webDeepseekMissingTokenResponse(),

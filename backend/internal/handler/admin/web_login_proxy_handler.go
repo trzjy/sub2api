@@ -187,12 +187,18 @@ func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 					req.Header.Del(k)
 				}
 			}
-			// Cookie 原样转发（已在 Clone 中复制）。
+			// 出站 Cookie：仅携带已捕获累积的上游 Cookie（store.Cookie(token)），
+			// 绝不原样转发入站 Cookie 头（含本站管理端 cookie，如 sub2api_session）。
+			// 否则会把本站会话凭证泄漏给上游官方站点，且污染捕获结果。
+			req.Header.Del("Cookie")
+			if cookie, ok := h.store.Cookie(token); ok && cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
 		},
 		// 5b. Transport：在传输层校验重定向目标 host 白名单（SSRF 防护）。
 		Transport: &redirectSafeTransport{
-			base:       http.DefaultTransport,
-			allowlist:  service.WebLoginProxyRedirectAllowlist(),
+			base:      http.DefaultTransport,
+			allowlist: service.WebLoginProxyRedirectAllowlist(),
 		},
 		// 5c. ModifyResponse：剥离敏感响应头、重写 Set-Cookie、捕获 Cookie、重写 Location、改写 HTML。
 		ModifyResponse: func(resp *http.Response) error {
@@ -297,21 +303,27 @@ func sanitizeSetCookie(sc string, secure bool) string {
 	return strings.Join(out, "; ")
 }
 
-// captureCookies 把响应 Set-Cookie 与请求 Cookie 头合并为一条完整 Cookie 字符串，
-// 若命中平台关键 Cookie 名则存入 store。仅读取头，不缓冲响应体（红线）。
+// captureCookies 把上游响应 Set-Cookie 与已捕获累积串合并为一条完整 Cookie 字符串，
+// 若命中平台关键 Cookie 名则存入 store。仅读取上游响应头，绝不并入入站 Cookie 头
+// （入站可能含本站管理端 cookie，如 sub2api_session，误捕获会泄漏/污染）。
+// 跨多次响应的累积通过已存储的捕获结果 merge 实现，不读取本站请求头（红线）。
 func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName string, resp *http.Response, req *http.Request) {
-	merged := mergeCookies(req.Header.Get("Cookie"), resp.Cookies())
+	// 仅合并“已捕获累积串 + 本次上游 Set-Cookie”，彻底排除入站 Cookie 头。
+	prev, _ := store.Cookie(token)
+	merged := mergeCookies(prev, resp.Cookies())
 	if merged == "" {
 		return
 	}
 	if keyCookieName != "" {
-		for _, c := range parseCookieHeader(req.Header.Get("Cookie")) {
+		// 本次响应直接回写关键 Cookie。
+		for _, c := range resp.Cookies() {
 			if c.Name == keyCookieName {
 				store.SetCookie(token, merged)
 				return
 			}
 		}
-		for _, c := range resp.Cookies() {
+		// 关键 Cookie 已存在于累积串（上游不再回 Set-Cookie 时）也算命中。
+		for _, c := range parseCookieHeader(prev) {
 			if c.Name == keyCookieName {
 				store.SetCookie(token, merged)
 				return

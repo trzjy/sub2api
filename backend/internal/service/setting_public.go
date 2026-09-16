@@ -372,6 +372,9 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		RiskControlEnabled: settings[SettingKeyRiskControlEnabled] == "true",
 
 		AllowUserViewErrorRequests: settings[SettingKeyAllowUserViewErrorRequests] == "true",
+
+		// 网页登录代理隔离 origin 公开地址（前端 iframe 契约；空=回退同源）。
+		WebLoginProxyOrigin: s.cfg.Server.WebLoginProxyPublicOrigin(),
 	}, nil
 }
 
@@ -648,6 +651,10 @@ type PublicSettingsInjectionPayload struct {
 	AffiliateEnabled              bool `json:"affiliate_enabled"`
 	RiskControlEnabled            bool `json:"risk_control_enabled"`
 	AllowUserViewErrorRequests    bool `json:"allow_user_view_error_requests"`
+
+	// 网页登录代理隔离 origin 的公开基础地址（前端 iframe 契约）。
+	// 空字符串表示回退同源（代理路由仍注册在主服务 v1）。
+	WebLoginProxyOrigin string `json:"web_login_proxy_origin"`
 }
 
 // GetPublicSettingsForInjection returns public settings in a format suitable for HTML injection.
@@ -730,6 +737,8 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		AffiliateEnabled:                     settings.AffiliateEnabled,
 		RiskControlEnabled:                   settings.RiskControlEnabled,
 		AllowUserViewErrorRequests:           settings.AllowUserViewErrorRequests,
+
+		WebLoginProxyOrigin: settings.WebLoginProxyOrigin,
 	}, nil
 }
 

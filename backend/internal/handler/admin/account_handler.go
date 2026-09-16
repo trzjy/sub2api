@@ -3081,6 +3081,18 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		response.Success(c, otherModels)
 		return
 	}
+	// 网页逆向平台：空 model_mapping 时回落到平台默认模型目录（方案 §3.3 映射表），
+	// 而非误回落到 Claude 默认模型。
+	if service.IsWebProvider(account.Platform) {
+		webIDs := service.DefaultWebModelIDs(account.Platform)
+		webModels := make([]claude.Model, 0, len(webIDs))
+		for _, id := range webIDs {
+			webModels = append(webModels, claude.Model{ID: id, Type: "model", DisplayName: id})
+		}
+		response.Success(c, webModels)
+		return
+	}
+
 	if len(mapping) == 0 {
 		// No mapping configured, return default models
 		response.Success(c, claude.DefaultModels)

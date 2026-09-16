@@ -1419,28 +1419,6 @@ func (a *Account) GetOpenAIBaseURL() string {
 	}
 }
 
-// GetWebBaseURL 解析网页逆向账号（web-deepseek / web-zhipu / web-kimi）的上游
-// base_url（docs/web-reverse-embedded-login-plan.md §3.3）：credentials.base_url
-// 覆盖优先，否则回落平台默认官方域名。非网页平台或为空返回 ""（上层失败关闭）。
-func (a *Account) GetWebBaseURL() string {
-	if a == nil || !IsWebProvider(a.Platform) {
-		return ""
-	}
-	if baseURL := strings.TrimSpace(a.GetCredential("base_url")); baseURL != "" {
-		return baseURL
-	}
-	switch a.Platform {
-	case PlatformWebDeepseek:
-		return DefaultWebDeepseekBaseURL
-	case PlatformWebZhipu:
-		return DefaultWebZhipuBaseURL
-	case PlatformWebKimi:
-		return DefaultWebKimiBaseURL
-	default:
-		return ""
-	}
-}
-
 // GetAccountMode 返回国产供应商账号的接入模式（payg / coding）；非国产供应商或未设置时
 // 返回空串。存储于 credentials["account_mode"]。
 func (a *Account) GetAccountMode() string {
