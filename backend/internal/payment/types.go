@@ -249,3 +249,10 @@ type CancelableProvider interface {
 type MerchantIdentityProvider interface {
 	MerchantIdentityMetadata() map[string]string
 }
+
+// ProviderDiagnosticsProvider lets a provider expose a sanitized summary of its
+// most recent upstream response for production troubleshooting. Implementations
+// must never include credentials or full secrets in the returned summary.
+type ProviderDiagnosticsProvider interface {
+	LastCreatePaymentResponseSummary() string
+}

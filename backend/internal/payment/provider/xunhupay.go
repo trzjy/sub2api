@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -36,9 +37,10 @@ const (
 
 // Xunhupay implements payment.Provider for the XunhuPay (虎皮椒) aggregation platform.
 type Xunhupay struct {
-	instanceID string
-	config     map[string]string
-	httpClient *http.Client
+	instanceID                string
+	config                    map[string]string
+	httpClient                *http.Client
+	lastCreatePaymentResponse atomic.Value
 }
 
 // NewXunhupay creates a new XunhuPay provider.
@@ -114,16 +116,16 @@ func (x *Xunhupay) MerchantIdentityMetadata() map[string]string {
 func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentRequest) (*payment.CreatePaymentResponse, error) {
 	notifyURL, returnURL := x.resolveURLs(req)
 	params := map[string]string{
-		"version":         xunhupayVersion,
-		"appid":           x.config["appId"],
-		"trade_order_id":  req.OrderID,
-		"total_fee":       req.Amount,
-		"title":           truncateXunhupayTitle(req.Subject),
-		"time":            strconv.FormatInt(time.Now().Unix(), 10),
-		"notify_url":      notifyURL,
-		"return_url":      returnURL,
-		"nonce_str":       xunhupayNonce(),
-		"plugins":         "sub2api", // 对接程序标识；回调会原样带回，但本实现不依赖它选择 appSecret
+		"version":        xunhupayVersion,
+		"appid":          x.config["appId"],
+		"trade_order_id": req.OrderID,
+		"total_fee":      req.Amount,
+		"title":          truncateXunhupayTitle(req.Subject),
+		"time":           strconv.FormatInt(time.Now().Unix(), 10),
+		"notify_url":     notifyURL,
+		"return_url":     returnURL,
+		"nonce_str":      xunhupayNonce(),
+		"plugins":        "sub2api", // 对接程序标识；回调会原样带回，但本实现不依赖它选择 appSecret
 	}
 	if req.IsMobile {
 		params["type"] = xunhupayWAPType
@@ -131,6 +133,7 @@ func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentR
 	params["hash"] = xunhupaySign(params, x.config["appSecret"])
 
 	body, err := x.post(ctx, x.apiBase()+"/payment/do.html", params)
+	x.lastCreatePaymentResponse.Store(summarizeXunhupayResponse(body))
 	if err != nil {
 		return nil, fmt.Errorf("xunhupay create: %w", err)
 	}
@@ -149,6 +152,17 @@ func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentR
 		PayURL:  resp.Data.URL,
 		QRCode:  resp.Data.URLQRCode,
 	}, nil
+}
+
+func (x *Xunhupay) LastCreatePaymentResponseSummary() string {
+	if x == nil {
+		return ""
+	}
+	summary, ok := x.lastCreatePaymentResponse.Load().(string)
+	if !ok {
+		return ""
+	}
+	return summary
 }
 
 func (x *Xunhupay) QueryOrder(ctx context.Context, tradeNo string) (*payment.QueryOrderResponse, error) {
@@ -488,6 +502,6 @@ func (x *Xunhupay) postRaw(ctx context.Context, endpoint string, params map[stri
 }
 
 var (
-	_ payment.Provider               = (*Xunhupay)(nil)
+	_ payment.Provider                 = (*Xunhupay)(nil)
 	_ payment.MerchantIdentityProvider = (*Xunhupay)(nil)
 )

@@ -467,7 +467,17 @@ func (s *PaymentService) invokeProvider(ctx context.Context, order *dbent.Paymen
 	pr, err := prov.CreatePayment(ctx, providerReq)
 	finishProviderCall()
 	if err != nil {
-		slog.Error("[PaymentService] CreatePayment failed", "provider", sel.ProviderKey, "instance", sel.InstanceID, "error", err)
+		providerResponseSummary := ""
+		if diagnostics, ok := prov.(payment.ProviderDiagnosticsProvider); ok {
+			providerResponseSummary = diagnostics.LastCreatePaymentResponseSummary()
+		}
+		slog.Error(
+			"[PaymentService] CreatePayment failed",
+			"provider", sel.ProviderKey,
+			"instance", sel.InstanceID,
+			"error", err,
+			"provider_response", providerResponseSummary,
+		)
 		if appErr := new(infraerrors.ApplicationError); errors.As(err, &appErr) {
 			return nil, appErr
 		}
