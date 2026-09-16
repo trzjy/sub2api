@@ -165,6 +165,7 @@ func NewRedeemService(
 	entClient *dbent.Client,
 	authCacheInvalidator APIKeyAuthCacheInvalidator,
 	affiliateService *AffiliateService,
+	welfareRepo WelfareRepository,
 ) *RedeemService {
 	redeemUserRepo, _ := userRepo.(RedeemUserAdjustmentRepository)
 	return &RedeemService{
@@ -177,10 +178,11 @@ func NewRedeemService(
 		entClient:            entClient,
 		authCacheInvalidator: authCacheInvalidator,
 		affiliateService:     affiliateService,
+		welfareRepo:          welfareRepo,
 	}
 }
 
-// SetWelfareRepository 注入福利卡仓储（独立 setter，避免改动大量测试构造点）。
+// SetWelfareRepository 注入福利卡仓储（向后兼容旧测试用）。
 func (s *RedeemService) SetWelfareRepository(repo WelfareRepository) {
 	s.welfareRepo = repo
 }

@@ -226,8 +226,7 @@ func TestVerifyOrderByOutTradeNoBackfillsTradeNoFromPaidQuery(t *testing.T) {
 		nil,
 		client,
 		nil,
-		nil,
-	)
+		nil, nil)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
 		resp: &payment.QueryOrderResponse{
@@ -327,8 +326,7 @@ func TestVerifyOrderByOutTradeNoRetriesZeroAmountPaidQueryOnce(t *testing.T) {
 		nil,
 		client,
 		nil,
-		nil,
-	)
+		nil, nil)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
 		responses: []*payment.QueryOrderResponse{
@@ -418,8 +416,7 @@ func TestVerifyOrderByOutTradeNoRejectsPaidQueryWithZeroAmount(t *testing.T) {
 		nil,
 		client,
 		nil,
-		nil,
-	)
+		nil, nil)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
 		resp: &payment.QueryOrderResponse{
@@ -631,8 +628,7 @@ func TestReconcilePendingPaymentOrdersBackfillsPaidOrder(t *testing.T) {
 		nil,
 		client,
 		nil,
-		nil,
-	)
+		nil, nil)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
 		key: payment.TypeWxpay,
@@ -786,8 +782,7 @@ func TestVerifyOrderByOutTradeNoUsesOutTradeNoWhenPaymentTradeNoAlreadyExistsFor
 		nil,
 		client,
 		nil,
-		nil,
-	)
+		nil, nil)
 	registry := payment.NewRegistry()
 	provider := &paymentOrderLifecycleQueryProvider{
 		resp: &payment.QueryOrderResponse{

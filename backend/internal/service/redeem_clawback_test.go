@@ -6,7 +6,7 @@ import (
 )
 
 func TestClawbackXianyuRedeemCodeTxGuards(t *testing.T) {
-	svc := NewRedeemService(nil, nil, nil, nil, nil, nil, nil, nil)
+	svc := NewRedeemService(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// 缺少核销用户：无法定位追回对象
 	code := &RedeemCode{ID: 1, Code: "C1", Type: RedeemTypeBalance, Value: 10}

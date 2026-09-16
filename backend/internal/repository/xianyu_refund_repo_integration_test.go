@@ -87,7 +87,7 @@ func refundClaimState(t *testing.T, ctx context.Context, orderNo string) (bool, 
 // realClawbackService 构造仅启用余额追回原语的 RedeemService（userRepo 提供原子扣减）。
 func realClawbackService() *service.RedeemService {
 	userRepo := NewUserRepository(integrationEntClient, integrationDB)
-	return service.NewRedeemService(nil, userRepo, nil, nil, nil, integrationEntClient, nil, nil)
+	return service.NewRedeemService(nil, userRepo, nil, nil, nil, integrationEntClient, nil, nil, nil, nil)
 }
 
 func userBalance(t *testing.T, ctx context.Context, userID int64) float64 {
@@ -237,7 +237,7 @@ func TestXianyuRefundSubscriptionClawbackLocksSubscriptionRow(t *testing.T) {
 
 	userRepo := NewUserRepository(integrationEntClient, integrationDB)
 	subSvc := service.NewSubscriptionService(nil, NewUserSubscriptionRepository(integrationEntClient), nil, integrationEntClient, nil)
-	clawSvc := service.NewRedeemService(nil, userRepo, subSvc, nil, nil, integrationEntClient, nil, nil)
+	clawSvc := service.NewRedeemService(nil, userRepo, subSvc, nil, nil, integrationEntClient, nil, nil, nil, nil)
 
 	// 1) 模拟续期事务：先持有订阅行锁
 	lockTx, err := integrationDB.BeginTx(ctx, nil)

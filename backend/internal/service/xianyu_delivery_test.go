@@ -692,7 +692,7 @@ func TestRedeemRejectsUnknownType(t *testing.T) {
 	redeemRepo := &redeemRejectRepo{
 		code: RedeemCode{ID: 1, Code: "XY-001", Type: "xianyu_delivery", Status: StatusUnused},
 	}
-	redeemService := NewRedeemService(redeemRepo, nil, nil, nil, nil, nil, nil, nil)
+	redeemService := NewRedeemService(redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil)
 	_, err := redeemService.Redeem(context.Background(), 2, redeemRepo.code.Code)
 	require.Error(t, err)
 	require.Equal(t, "REDEEM_CODE_UNSUPPORTED_TYPE", infraerrors.Reason(err))
