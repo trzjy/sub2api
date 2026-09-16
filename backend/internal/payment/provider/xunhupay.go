@@ -141,10 +141,17 @@ func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentR
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("xunhupay parse create: %w", err)
 	}
+	if resp.Data == nil {
+		resp.Flat = &xunhupayRespData{}
+		if err := json.Unmarshal(body, resp.Flat); err != nil {
+			return nil, fmt.Errorf("xunhupay parse create flat: %w", err)
+		}
+		resp.Data = resp.Flat
+	}
 	if err := resp.checkError(); err != nil {
 		return nil, err
 	}
-	if resp.Data == nil {
+	if resp.Data == nil || (resp.Data.OpenOrderID == "" && resp.Data.URL == "" && resp.Data.URLQRCode == "") {
 		return nil, fmt.Errorf("xunhupay create: empty data")
 	}
 	return &payment.CreatePaymentResponse{
@@ -317,6 +324,7 @@ type xunhupayResponse struct {
 	ErrMsg  string            `json:"errmsg"`
 	Hash    string            `json:"hash"`
 	Data    *xunhupayRespData `json:"data"`
+	Flat    *xunhupayRespData `json:"-"`
 }
 
 type xunhupayRespData struct {
