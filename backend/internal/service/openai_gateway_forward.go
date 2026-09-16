@@ -174,6 +174,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
+	// 网页逆向平台（W3 方案任务 1）：入站 OpenAI 协议经各自适配器转换为官方网页端
+	// 协议出站（Zhipu SSE / DeepSeek SSE / Kimi Connect RPC）。必须先于下方通用
+	// OpenAI 路径分流——网页账号为 apikey 类型，会命中
+	// shouldForwardOpenAIResponsesViaRawChatCompletions 的兜底分支被打到错误上游。
+	if account.Platform == PlatformWebZhipu {
+		return s.forwardWebZhipu(ctx, c, account, body, originalModel, reqStream, startTime)
+	}
+	if account.Platform == PlatformWebDeepseek {
+		return s.forwardWebDeepseek(ctx, c, account, body, originalModel, reqStream, startTime)
+	}
+	if account.Platform == PlatformWebKimi {
+		return s.forwardWebKimi(ctx, c, account, body, originalModel, reqStream, startTime)
+	}
+
 	// CN 供应商 anthropic 协议账号：/v1/responses 入站是交叉协议组合
 	// （Responses 客户端 × Anthropic 上游），转成 Anthropic 请求走原生端点。
 	// 不能落到下面的 raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。

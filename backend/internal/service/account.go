@@ -297,10 +297,14 @@ func (a *Account) IsCNProvider() bool {
 // IsOpenAICompatible 报告账号是否走 OpenAI 网关（OpenAI 协议族）。
 // openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
 // 兼容上游，也经 OpenAI 网关转发；CodeBuddy 是腾讯 CLI 的 Chat Completions
-// 兼容上游（forwardCodeBuddy 挂在 OpenAIGatewayService.Forward 的 platform 分支）。
+// 兼容上游（forwardCodeBuddy 挂在 OpenAIGatewayService.Forward 的 platform 分支）；
+// 网页逆向平台（web-deepseek/web-zhipu/web-kimi）经 OpenAI 网关由各自适配器
+// （forwardWebZhipu / forwardWebDeepseek / forwardWebKimi）转换为官方网页端协议。
+// 调度器的平台匹配谓词依赖本判定（openai_account_scheduler.go），漏加会导致
+// 网页账号永远无法被选中。
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() ||
-		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy)
+		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || IsWebProvider(a.Platform))
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容
@@ -1412,6 +1416,28 @@ func (a *Account) GetOpenAIBaseURL() string {
 		return ""
 	default:
 		return "https://api.openai.com"
+	}
+}
+
+// GetWebBaseURL 解析网页逆向账号（web-deepseek / web-zhipu / web-kimi）的上游
+// base_url（docs/web-reverse-embedded-login-plan.md §3.3）：credentials.base_url
+// 覆盖优先，否则回落平台默认官方域名。非网页平台或为空返回 ""（上层失败关闭）。
+func (a *Account) GetWebBaseURL() string {
+	if a == nil || !IsWebProvider(a.Platform) {
+		return ""
+	}
+	if baseURL := strings.TrimSpace(a.GetCredential("base_url")); baseURL != "" {
+		return baseURL
+	}
+	switch a.Platform {
+	case PlatformWebDeepseek:
+		return DefaultWebDeepseekBaseURL
+	case PlatformWebZhipu:
+		return DefaultWebZhipuBaseURL
+	case PlatformWebKimi:
+		return DefaultWebKimiBaseURL
+	default:
+		return ""
 	}
 }
 

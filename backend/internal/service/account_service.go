@@ -233,6 +233,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := validateOtherAccountCredential(req.Platform, req.Type, req.Credentials); err != nil {
 		return nil, err
 	}
+	if err := validateWebAccountCredential(req.Platform, req.Type, req.Credentials); err != nil {
+		return nil, err
+	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
 		if err := s.validateGroupIDsExist(ctx, req.GroupIDs); err != nil {
@@ -533,6 +536,10 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		return nil
 	case PlatformOther:
 		// 通用 OpenAI 兼容自定义上游：凭证为 API Key，可用性经 /v1/models 预览或转发路径验证。
+		return nil
+	case PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
+		// 网页逆向账号：登录态凭证无独立探测端点，可用性经转发路径验证
+		// （适配器于 W2-W4 接入，见 docs/web-reverse-embedded-login-plan.md）。
 		return nil
 	default:
 		return fmt.Errorf("unsupported platform: %s", account.Platform)

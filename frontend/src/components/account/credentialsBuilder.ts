@@ -25,6 +25,92 @@ export function applyAntigravityProjectID(
   }
 }
 
+// ===== 网页逆向平台（web-deepseek / web-zhipu / web-kimi）=====
+// 官方网页端登录态转发（docs/web-reverse-embedded-login-plan.md §3.2）：
+// DeepSeek / 智谱粘贴整串 Cookie；Kimi 粘贴 Token JSON。内嵌登录（W5）落地前，
+// 手动粘贴是唯一建号路径，落地后仍是降级兜底（§2.3）。字段口径与后端
+// validateWebAccountCredential / SanitizeStoredCredentials（web 平台保留 cookie）保持一致。
+
+export const WEB_PROVIDER_PLATFORMS = ['web-deepseek', 'web-zhipu', 'web-kimi'] as const
+export type WebProviderPlatform = (typeof WEB_PROVIDER_PLATFORMS)[number]
+
+export function isWebProviderPlatform(platform: string): platform is WebProviderPlatform {
+  return (WEB_PROVIDER_PLATFORMS as readonly string[]).includes(platform)
+}
+
+/** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 Token 三元组。 */
+export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
+  return platform === 'web-deepseek' || platform === 'web-zhipu'
+}
+
+export type WebCredentialError =
+  | 'webCookieRequired'
+  | 'webKimiJsonInvalid'
+  | 'webKimiAccessTokenRequired'
+
+export interface WebCredentialBuildInput {
+  /** DeepSeek / Zhipu：整串 Cookie 原文 */
+  cookie: string
+  /** Kimi：粘贴的 JSON 文本（access_token 必填，refresh_token / user_id 可选） */
+  kimiTokenJson: string
+  /** 可选官方域名覆盖；空串不写入 */
+  baseUrl: string
+}
+
+export type WebCredentialBuildResult =
+  | { credentials: Record<string, unknown>; error?: undefined }
+  | { credentials?: undefined; error: WebCredentialError }
+
+/**
+ * 校验并构建网页逆向平台凭证。Cookie 平台仅要求非空；Kimi 要求 JSON 可解析
+ * （扁平对象）且含非空 access_token，refresh_token / user_id 存在时透传。
+ */
+export function buildWebProviderCredentials(
+  platform: string,
+  input: WebCredentialBuildInput
+): WebCredentialBuildResult {
+  if (!isWebProviderPlatform(platform)) {
+    return { error: 'webCookieRequired' }
+  }
+  const credentials: Record<string, unknown> = {}
+  if (webProviderUsesCookie(platform)) {
+    const cookie = input.cookie.trim()
+    if (!cookie) {
+      return { error: 'webCookieRequired' }
+    }
+    credentials.cookie = cookie
+  } else {
+    let parsed: Record<string, unknown>
+    try {
+      const raw: unknown = JSON.parse(input.kimiTokenJson)
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return { error: 'webKimiJsonInvalid' }
+      }
+      parsed = raw as Record<string, unknown>
+    } catch {
+      return { error: 'webKimiJsonInvalid' }
+    }
+    const accessToken = typeof parsed.access_token === 'string' ? parsed.access_token.trim() : ''
+    if (!accessToken) {
+      return { error: 'webKimiAccessTokenRequired' }
+    }
+    credentials.access_token = accessToken
+    if (typeof parsed.refresh_token === 'string' && parsed.refresh_token.trim()) {
+      credentials.refresh_token = parsed.refresh_token.trim()
+    }
+    if (typeof parsed.user_id === 'string' && parsed.user_id.trim()) {
+      credentials.user_id = parsed.user_id.trim()
+    } else if (typeof parsed.user_id === 'number' && Number.isFinite(parsed.user_id)) {
+      credentials.user_id = parsed.user_id
+    }
+  }
+  const baseUrl = input.baseUrl.trim()
+  if (baseUrl) {
+    credentials.base_url = baseUrl
+  }
+  return { credentials }
+}
+
 // ========== 请求头覆写（API-key 平台 + grok 的 api_key/oauth 账号） ==========
 
 export const HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY = 'header_override_enabled'

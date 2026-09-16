@@ -34,7 +34,23 @@ const (
 	PlatformOther     = "other"
 	PlatformMiniMax   = "minimax" // MiniMax (M 系列)
 	PlatformComposite = "composite"
+	// 网页逆向平台（官方网页端登录态转发，非官方 API，存在封号风险）：
+	// 凭证为整串 Cookie（DeepSeek/Zhipu）或 Token 三元组（Kimi），
+	// 统一存 credentials，见 docs/web-reverse-embedded-login-plan.md §3.2。
+	PlatformWebDeepseek = "web-deepseek" // DeepSeek 网页版 (chat.deepseek.com)
+	PlatformWebZhipu    = "web-zhipu"    // 智谱 GLM 网页版 (chatglm.cn)
+	PlatformWebKimi     = "web-kimi"     // Kimi 网页版 (www.kimi.com)
 )
+
+// IsWebProvider 报告 platform 是否为网页逆向平台（官方网页端登录态转发）。
+func IsWebProvider(platform string) bool {
+	switch platform {
+	case PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
+		return true
+	default:
+		return false
+	}
+}
 
 // Account mode constants 区分国产供应商的「按量付费（余额）」与「Coding Plan」两种接入方式。
 // 存储于 credentials["account_mode"]，决定 base_url 预设与额度监控方式。

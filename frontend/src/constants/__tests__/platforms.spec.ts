@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  COMPOSITE_TARGET_PLATFORM_OPTIONS,
   CONCRETE_PLATFORM_OPTIONS,
   GROUP_PLATFORM_OPTIONS,
   filterUpstreamModelsByPlatform,
@@ -17,7 +18,10 @@ const concretePlatforms = [
   'deepseek',
   'other',
   'minimax',
-  'codebuddy'
+  'codebuddy',
+  'web-deepseek',
+  'web-zhipu',
+  'web-kimi'
 ]
 
 describe('platform option catalogs', () => {
@@ -30,6 +34,12 @@ describe('platform option catalogs', () => {
       ...concretePlatforms,
       'composite'
     ])
+  })
+
+  it('includes web reverse platforms as composite targets once gateway routing landed (W6), excluding only other', () => {
+    expect(COMPOSITE_TARGET_PLATFORM_OPTIONS.map((option) => option.value)).toEqual(
+      concretePlatforms.filter((p) => p !== 'other')
+    )
   })
 })
 

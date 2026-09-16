@@ -52,6 +52,11 @@ const (
 	PlatformOther     = domain.PlatformOther
 	PlatformMiniMax   = domain.PlatformMiniMax
 	PlatformComposite = domain.PlatformComposite
+	// 网页逆向平台（官方网页端登录态转发）：凭证为 Cookie / Token，见
+	// docs/web-reverse-embedded-login-plan.md §3.2。W1 仅平台准入与凭证字段定义。
+	PlatformWebDeepseek = domain.PlatformWebDeepseek
+	PlatformWebZhipu    = domain.PlatformWebZhipu
+	PlatformWebKimi     = domain.PlatformWebKimi
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"
@@ -95,6 +100,15 @@ const (
 	DefaultMiniMaxAnthropicBaseURL    = "https://api.minimaxi.com/anthropic"
 )
 
+// 网页逆向平台（web-deepseek / web-zhipu / web-kimi）的默认上游 base_url
+// （docs/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
+// credentials.base_url 覆盖（Account.GetWebBaseURL）。
+const (
+	DefaultWebDeepseekBaseURL = "https://chat.deepseek.com"
+	DefaultWebZhipuBaseURL    = "https://chatglm.cn"
+	DefaultWebKimiBaseURL     = "https://www.kimi.com"
+)
+
 // IsCNProvider 报告 platform 是否为国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax）。
 func IsCNProvider(platform string) bool {
 	switch platform {
@@ -103,6 +117,18 @@ func IsCNProvider(platform string) bool {
 	default:
 		return false
 	}
+}
+
+// IsWebProvider 报告 platform 是否为网页逆向平台（web-deepseek/web-zhipu/web-kimi）。
+// 与 IsCNProvider 正交：网页平台不走 OpenAI 兼容 API 语义（额度/阈值白名单不纳入）。
+func IsWebProvider(platform string) bool {
+	return domain.IsWebProvider(platform)
+}
+
+// ValidateWebAccountCredential 导出网页平台凭证准入校验（W5 预创建校验端点复用，
+// 与创建链路 buildAccountForCreate 内的 validateWebAccountCredential 同一实现）。
+func ValidateWebAccountCredential(platform, accountType string, credentials map[string]any) error {
+	return validateWebAccountCredential(platform, accountType, credentials)
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告 platform 是否属于「走共享 OpenAI 兼容

@@ -1285,6 +1285,36 @@ type PreviewFromCRSRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// ValidateWebCredentialsRequest represents the request body for pre-create web
+// platform credential validation (W5，docs/web-reverse-embedded-login-plan.md §2.1)。
+type ValidateWebCredentialsRequest struct {
+	Platform    string         `json:"platform" binding:"required"`
+	Credentials map[string]any `json:"credentials" binding:"required"`
+}
+
+// ValidateWebCredentials 校验网页逆向平台凭证（建号前预校验）。
+// POST /api/v1/admin/accounts/validate-web-credentials
+//
+// 仅复用创建链路的 validateWebAccountCredential 准入校验（Cookie 非空 / Kimi
+// access_token 非空），不含任何上游请求逻辑——真实上游可用性经转发路径验证
+// （方案 §5.1 W7 验收），本端点不得伪造"上游可达"结论。
+func (h *AccountHandler) ValidateWebCredentials(c *gin.Context) {
+	var req ValidateWebCredentialsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if !service.IsWebProvider(req.Platform) {
+		response.BadRequest(c, "platform "+req.Platform+" is not a web provider")
+		return
+	}
+	if err := service.ValidateWebAccountCredential(req.Platform, service.AccountTypeAPIKey, req.Credentials); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 // Test handles testing account connectivity with SSE streaming
 // POST /api/v1/admin/accounts/:id/test
 func (h *AccountHandler) Test(c *gin.Context) {

@@ -427,8 +427,37 @@ func validateOtherAccountCredential(platform, accountType string, credentials ma
 	return nil
 }
 
+// validateWebAccountCredential 校验网页逆向平台账号（web-deepseek/web-zhipu/web-kimi）：
+// 仅接受 apikey 类型（静态登录态凭证）；DeepSeek/Zhipu 须提供非空整串 Cookie，
+// Kimi 须提供非空 access_token（refresh_token/user_id 可选）；base_url 为可选的
+// 官方域名覆盖。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
+// 仅做准入校验，不含任何上游请求逻辑（适配器见 W2-W4）。
+func validateWebAccountCredential(platform, accountType string, credentials map[string]any) error {
+	if !IsWebProvider(platform) {
+		return nil
+	}
+	if accountType != AccountTypeAPIKey {
+		return fmt.Errorf("platform %s only supports apikey accounts", platform)
+	}
+	if platform == PlatformWebKimi {
+		raw, _ := credentials["access_token"].(string)
+		if strings.TrimSpace(raw) == "" {
+			return fmt.Errorf("platform %s requires a non-empty access_token", platform)
+		}
+		return nil
+	}
+	raw, _ := credentials["cookie"].(string)
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("platform %s requires a non-empty cookie", platform)
+	}
+	return nil
+}
+
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
 	if err := validateOtherAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
+		return nil, err
+	}
+	if err := validateWebAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
 		return nil, err
 	}
 
@@ -612,6 +641,23 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			if strings.TrimSpace(baseURL) == "" {
 				return nil, infraerrors.New(http.StatusBadRequest, "OTHER_ACCOUNT_REQUIRES_BASE_URL",
 					"platform other requires a custom base_url")
+			}
+		}
+	}
+	// 更新路径同样守住网页逆向平台不变量（创建校验可被 edit/导入/直写绕过）。
+	if IsWebProvider(account.Platform) {
+		effectiveType := account.Type
+		if input.Type != "" {
+			effectiveType = input.Type
+		}
+		if effectiveType != AccountTypeAPIKey {
+			return nil, infraerrors.New(http.StatusBadRequest, "WEB_ACCOUNT_TYPE_INVALID",
+				fmt.Sprintf("platform %s only supports apikey accounts", account.Platform))
+		}
+		// input.Credentials == nil 表示本轮不修改凭证，不参与校验。
+		if input.Credentials != nil {
+			if err := validateWebAccountCredential(account.Platform, effectiveType, input.Credentials); err != nil {
+				return nil, infraerrors.New(http.StatusBadRequest, "WEB_ACCOUNT_CREDENTIAL_INVALID", err.Error())
 			}
 		}
 	}
@@ -1048,6 +1094,15 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
 					"spark shadow account %d cannot hold credentials; manage credentials on the parent account", acc.ID)
+			}
+		}
+		// 网页逆向平台账号不接受批量凭证更新：批量载荷无法按平台区分清洗语义
+		// （空平台标签下 cookie 会被 SanitizeStoredCredentials 剥离，静默丢失登录态），
+		// 且批量路径不做 web 凭证校验。逐个编辑才能保证 cookie/access_token 校验与落盘。
+		for _, acc := range cachedTargets {
+			if acc != nil && IsWebProvider(acc.Platform) {
+				return nil, infraerrors.Newf(http.StatusBadRequest, "WEB_ACCOUNT_BULK_CREDENTIALS_UNSUPPORTED",
+					"web provider account %d (%s) does not support bulk credential updates; edit credentials individually", acc.ID, acc.Platform)
 			}
 		}
 	}

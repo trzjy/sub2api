@@ -45,9 +45,15 @@ const (
 	PlatformZhipu       = domain.PlatformZhipu
 	PlatformDeepseek    = domain.PlatformDeepseek
 	PlatformMiniMax     = domain.PlatformMiniMax
+
+	// 网页逆向平台（W3 方案任务 1 共享注册点）
+	PlatformWebDeepseek = domain.PlatformWebDeepseek
+	PlatformWebZhipu    = domain.PlatformWebZhipu
+	PlatformWebKimi     = domain.PlatformWebKimi
 )
 
-// AllPlatforms 返回所有支持的平台列表
+// AllPlatforms 返回所有支持的平台列表（含网页逆向平台 web-deepseek/web-zhipu/
+// web-kimi，允许管理员为其配置错误透传规则）。
 func AllPlatforms() []string {
 	return []string{
 		PlatformAnthropic,
@@ -59,6 +65,9 @@ func AllPlatforms() []string {
 		PlatformZhipu,
 		PlatformDeepseek,
 		PlatformMiniMax,
+		PlatformWebDeepseek,
+		PlatformWebZhipu,
+		PlatformWebKimi,
 	}
 }
 

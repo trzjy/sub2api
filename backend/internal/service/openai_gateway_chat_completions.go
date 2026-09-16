@@ -128,6 +128,21 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
 	}
 
+	// 网页逆向平台（W3 方案任务 1）：与 OpenAIGatewayService.Forward 保持同一分发
+	// 口径——经各自适配器转换为官方网页端协议出站，避免落到下方通用 OpenAI 路径。
+	if account.Platform == PlatformWebZhipu {
+		view := newOpenAIRequestView(body)
+		return s.forwardWebZhipu(ctx, c, account, body, view.Model, view.Stream, time.Now())
+	}
+	if account.Platform == PlatformWebDeepseek {
+		view := newOpenAIRequestView(body)
+		return s.forwardWebDeepseek(ctx, c, account, body, view.Model, view.Stream, time.Now())
+	}
+	if account.Platform == PlatformWebKimi {
+		view := newOpenAIRequestView(body)
+		return s.forwardWebKimi(ctx, c, account, body, view.Model, view.Stream, time.Now())
+	}
+
 	// Cursor compatibility: some clients send a Responses-shaped body to the
 	// /v1/chat/completions URL. Detect it before adaptive routing so adaptive
 	// accounts never forward the body unchanged to a Chat Completions endpoint.

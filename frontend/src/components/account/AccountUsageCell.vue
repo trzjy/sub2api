@@ -613,9 +613,39 @@
         :account="account"
         @updated="handleOllamaCloudUsageUpdated"
       />
+      <!-- 网页逆向平台（W6）：免费额度无标准查询接口，展示本地今日用量统计；
+           失败/冷却状态由账号状态徽标承载，不在此重复。 -->
+      <template v-if="isWebProviderAccount">
+        <div
+          v-if="todayStats"
+          class="mb-0.5 flex items-center"
+        >
+          <div class="flex items-center gap-1.5 text-[9px] text-gray-500 dark:text-gray-400">
+            <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
+              {{ formatKeyRequests }} req
+            </span>
+            <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
+              {{ formatKeyTokens }}
+            </span>
+            <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800" :title="t('usage.accountBilled')">
+              A ${{ formatKeyCost }}
+            </span>
+          </div>
+        </div>
+        <div
+          v-else-if="todayStatsLoading"
+          class="mb-0.5 flex items-center gap-1"
+        >
+          <div class="h-3 w-10 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-3 w-8 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+          <div class="h-3 w-12 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
+        </div>
+        <div v-else class="text-xs text-gray-400">-</div>
+      </template>
+
       <!-- Today stats row (requests, tokens, cost, user_cost) -->
       <div
-        v-if="todayStats"
+        v-if="!isWebProviderAccount && todayStats"
         class="mb-0.5 flex items-center"
       >
         <div class="flex items-center gap-1.5 text-[9px] text-gray-500 dark:text-gray-400">
@@ -639,7 +669,7 @@
       </div>
       <!-- Loading skeleton for today stats -->
       <div
-        v-else-if="todayStatsLoading"
+        v-else-if="!isWebProviderAccount && todayStatsLoading"
         class="mb-0.5 flex items-center gap-1"
       >
         <div class="h-3 w-10 animate-pulse rounded bg-gray-200 dark:bg-gray-700"></div>
@@ -649,21 +679,21 @@
 
       <!-- API Key accounts with quota limits: show progress bars -->
       <UsageProgressBar
-        v-if="quotaDailyBar"
+        v-if="!isWebProviderAccount && quotaDailyBar"
         label="1d"
         :utilization="quotaDailyBar.utilization"
         :resets-at="quotaDailyBar.resetsAt"
         color="indigo"
       />
       <UsageProgressBar
-        v-if="quotaWeeklyBar"
+        v-if="!isWebProviderAccount && quotaWeeklyBar"
         label="7d"
         :utilization="quotaWeeklyBar.utilization"
         :resets-at="quotaWeeklyBar.resetsAt"
         color="emerald"
       />
       <UsageProgressBar
-        v-if="quotaTotalBar"
+        v-if="!isWebProviderAccount && quotaTotalBar"
         label="total"
         :utilization="quotaTotalBar.utilization"
         color="purple"
@@ -671,7 +701,7 @@
 
       <!-- Optional controlled balance probe for custom API-key upstreams -->
       <div
-        v-if="account.balance_probe?.enabled"
+        v-if="!isWebProviderAccount && account.balance_probe?.enabled"
         class="flex flex-wrap items-center gap-1.5"
       >
         <span
@@ -701,7 +731,7 @@
 
       <!-- No data at all -->
       <div
-        v-if="!todayStats && !todayStatsLoading && !hasApiKeyQuota && !account.ollama_cloud_usage?.eligible"
+        v-if="!isWebProviderAccount && !todayStats && !todayStatsLoading && !hasApiKeyQuota && !account.ollama_cloud_usage?.eligible"
         class="text-xs text-gray-400"
       >-</div>
     </div>
@@ -803,9 +833,24 @@ let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = nul
 let visibilityObserver: IntersectionObserver | null = null
 
 // Show usage windows for OAuth and Setup Token accounts
+// 网页逆向平台账号（web-deepseek / web-zhipu / web-kimi）：专用展示分支。
+const isWebProviderAccount = computed(() =>
+  props.account.platform === 'web-deepseek' ||
+  props.account.platform === 'web-zhipu' ||
+  props.account.platform === 'web-kimi')
+
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   if (props.account.platform === 'gemini') return true
+  // 网页逆向平台（W6）：免费额度无标准查询接口，不做探测；但账号参与调度，
+  // 展示本地今日用量统计（web 专用分支，见下方 non-OAuth 分支）。
+  if (
+    props.account.platform === 'web-deepseek' ||
+    props.account.platform === 'web-zhipu' ||
+    props.account.platform === 'web-kimi'
+  ) {
+    return true
+  }
   // CN providers: apikey 账号也有滚动用量窗口（coding plan）或余额（payg），
   // 由 CNProviderQuotaCell / CNProviderBalanceCell 自行探测与展示。火山方舟订阅号
   // 按 base_url 识别（与 platform 解耦，账号仍存为 deepseek 平台）。
@@ -839,6 +884,15 @@ const shouldFetchUsage = computed(() => {
   }
   if (props.account.platform === 'codebuddy') {
     return props.account.type === 'oauth'
+  }
+  // 网页逆向平台（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
+  // 不应触发 getUsage 请求（后端对 web 无用量分支）。
+  if (
+    props.account.platform === 'web-deepseek' ||
+    props.account.platform === 'web-zhipu' ||
+    props.account.platform === 'web-kimi'
+  ) {
+    return false
   }
   return false
 })

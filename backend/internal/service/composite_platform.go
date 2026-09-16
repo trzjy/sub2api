@@ -199,10 +199,13 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 	return decision, decision.Matched, nil
 }
 
+// isConcreteRequestPlatform：composite 目标平台白名单（W6 放开网页逆向平台——
+// 网关转发链路已接入，web-* 请求可经三个适配器转发）。
 func isConcreteRequestPlatform(platform string) bool {
 	switch platform {
 	case PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformGrok,
-		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax:
+		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax,
+		PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
 		return true
 	default:
 		return false

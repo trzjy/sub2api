@@ -1286,7 +1286,9 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	schedulablePlatforms := h.gatewayService.GetSchedulablePlatforms(ctx, groupID)
-	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax} {
+	// 网页逆向平台（web-*）无静态模型目录：模型列表来自账号 model_mapping
+	//（defaultModelIDsForPlatform 对 web-* 返回 nil），与 other 同语义。
+	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi} {
 		platformModels := h.gatewayService.GetAvailableModels(ctx, groupID, platform)
 		if len(platformModels) == 0 {
 			// CN 供应商没有静态默认模型列表（defaultModelIDsForPlatform 的
@@ -1480,7 +1482,9 @@ func defaultModelIDsForPlatform(platform string) []string {
 	case service.PlatformComposite:
 		ids := make([]string, 0)
 		seen := make(map[string]struct{})
-		for _, concretePlatform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax} {
+		// 网页逆向平台（web-*）无静态默认模型目录（见 defaultModelIDsForPlatform
+		// 的 web-* 分支），纳入列表仅为占位一致性；实际贡献为空。
+		for _, concretePlatform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi} {
 			for _, id := range defaultModelIDsForPlatform(concretePlatform) {
 				if _, ok := seen[id]; ok {
 					continue
@@ -1493,6 +1497,10 @@ func defaultModelIDsForPlatform(platform string) []string {
 	case service.PlatformOther:
 		// other 无平台内置模型目录：公开模型列表完全来自组内账号 model_mapping；
 		// 返回空列表，避免回落到 Claude 默认模型（外部审查外审-3）。
+		return nil
+	case service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi:
+		// 网页逆向平台同 other：无平台内置模型目录，公开模型列表来自账号
+		// model_mapping（W3 方案任务 1），返回空避免回落 Claude 默认模型。
 		return nil
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))

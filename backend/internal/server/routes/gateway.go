@@ -23,15 +23,20 @@ import (
 // 注意：codebuddy 必须在列——其 §2.4 指纹头与 §2.5 出站改写管线挂在
 // OpenAIGatewayService.forwardCodeBuddy 上；一旦落到 GatewayService 的通用转发路径，
 // 出站会缺少 Origin/Referer/X-Product 等指纹头并被上游 403（活体验收 F6 实证）。
+// 网页逆向平台（web-*）同理必须在列：经 forwardWebZhipu / forwardWebDeepseek /
+// forwardWebKimi 适配器转换为官方网页端协议（W3 方案任务 1）。
 var openAICompatibleGatewayPlatforms = map[string]struct{}{
-	service.PlatformOpenAI:    {},
-	service.PlatformGrok:      {},
-	service.PlatformKimi:      {},
-	service.PlatformZhipu:     {},
-	service.PlatformDeepseek:  {},
-	service.PlatformMiniMax:   {},
-	service.PlatformCodeBuddy: {},
-	service.PlatformOther:     {},
+	service.PlatformOpenAI:      {},
+	service.PlatformGrok:        {},
+	service.PlatformKimi:        {},
+	service.PlatformZhipu:       {},
+	service.PlatformDeepseek:    {},
+	service.PlatformMiniMax:     {},
+	service.PlatformCodeBuddy:   {},
+	service.PlatformOther:       {},
+	service.PlatformWebDeepseek: {},
+	service.PlatformWebZhipu:    {},
+	service.PlatformWebKimi:     {},
 }
 
 // isOpenAICompatibleGatewayPlatform 报告该分组平台是否应经 OpenAI 网关转发。

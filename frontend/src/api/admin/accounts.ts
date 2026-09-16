@@ -307,6 +307,23 @@ export async function testAccount(id: number): Promise<{
 }
 
 /**
+ * Validate web platform credentials before account creation (W5).
+ * @param platform - web-deepseek / web-zhipu / web-kimi
+ * @param credentials - credential payload built by credentialsBuilder
+ * @returns true when the payload passes the backend admission validation
+ */
+export async function validateWebCredentials(
+  platform: string,
+  credentials: Record<string, unknown>
+): Promise<boolean> {
+  const { data } = await apiClient.post<{ success: boolean }>(
+    '/admin/accounts/validate-web-credentials',
+    { platform, credentials }
+  )
+  return data.success === true
+}
+
+/**
  * Refresh account credentials
  * @param id - Account ID
  * @returns Updated account

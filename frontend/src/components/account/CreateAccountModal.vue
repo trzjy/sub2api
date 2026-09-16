@@ -241,6 +241,48 @@
             Other
           </button>
         </div>
+        <!-- Web reverse providers row: DeepSeek Web / Zhipu GLM Web / Kimi Web（网页登录态转发，封号风险见表单内提示） -->
+        <div class="mt-2 flex flex-wrap rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
+          <button
+            type="button"
+            @click="selectWebPlatform('web-deepseek')"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'web-deepseek'
+                ? 'bg-white text-cyan-600 shadow-sm dark:bg-dark-600 dark:text-cyan-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <PlatformIcon platform="web-deepseek" size="sm" />
+            {{ t('admin.accounts.webProviders.platforms.webDeepseek') }}
+          </button>
+          <button
+            type="button"
+            @click="selectWebPlatform('web-zhipu')"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'web-zhipu'
+                ? 'bg-white text-violet-600 shadow-sm dark:bg-dark-600 dark:text-violet-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <PlatformIcon platform="web-zhipu" size="sm" />
+            {{ t('admin.accounts.webProviders.platforms.webZhipu') }}
+          </button>
+          <button
+            type="button"
+            @click="selectWebPlatform('web-kimi')"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'web-kimi'
+                ? 'bg-white text-fuchsia-600 shadow-sm dark:bg-dark-600 dark:text-fuchsia-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <PlatformIcon platform="web-kimi" size="sm" />
+            {{ t('admin.accounts.webProviders.platforms.webKimi') }}
+          </button>
+        </div>
       </div>
 
       <!-- Account Type Selection (Anthropic) -->
@@ -1431,8 +1473,66 @@
         </div>
       </div>
 
+      <!-- 网页逆向平台：手动粘贴凭证（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底） -->
+      <div v-if="isWebProviderPlatform(form.platform)" class="space-y-4">
+        <!-- 封号风险提示（方案 §2.2）：账号参与站点调度，请使用可接受风险的账号 -->
+        <div data-testid="web-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
+          <p class="text-sm font-medium text-red-700 dark:text-red-300">
+            {{ t('admin.accounts.webProviders.riskWarning.title') }}
+          </p>
+          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            {{ t('admin.accounts.webProviders.riskWarning.body') }}
+          </p>
+        </div>
+        <div v-if="webProviderUsesCookie(form.platform)">
+          <label class="input-label">{{ t('admin.accounts.webProviders.cookieLabel') }}</label>
+          <textarea
+            v-model="webCookieInput"
+            rows="4"
+            required
+            data-testid="web-cookie-input"
+            class="input font-mono"
+            :placeholder="t('admin.accounts.webProviders.cookiePlaceholder')"
+          ></textarea>
+          <p class="input-hint">{{ t('admin.accounts.webProviders.cookieHint') }}</p>
+        </div>
+        <div v-else>
+          <label class="input-label">{{ t('admin.accounts.webProviders.kimiTokenLabel') }}</label>
+          <textarea
+            v-model="webKimiTokenJson"
+            rows="4"
+            required
+            data-testid="web-kimi-token-json"
+            class="input font-mono"
+            :placeholder='t("admin.accounts.webProviders.kimiTokenPlaceholder")'
+          ></textarea>
+          <p class="input-hint">{{ t('admin.accounts.webProviders.kimiTokenHint') }}</p>
+        </div>
+        <div>
+          <button
+            type="button"
+            data-testid="web-open-login-modal"
+            class="btn btn-secondary"
+            @click="showWebLogin = true"
+          >
+            {{ t('admin.accounts.webLogin.openEmbedded') }}
+          </button>
+          <p class="input-hint">{{ t('admin.accounts.webLogin.openEmbeddedHint') }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
+          <input
+            v-model="webBaseUrlInput"
+            type="text"
+            class="input"
+            :placeholder="t('admin.accounts.webProviders.baseUrlPlaceholder')"
+          />
+          <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
+        </div>
+      </div>
+
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
-      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'codebuddy'" class="space-y-4">
+      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'codebuddy' && !isWebProviderPlatform(form.platform)" class="space-y-4">
         <div v-if="!isCNPlatform || apiProtocol !== 'adaptive'">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
@@ -2761,7 +2861,7 @@
             <div>
               <label class="input-label">{{ t('admin.accounts.quotaControl.windowCost.limit') }}</label>
               <div class="relative">
-                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400">$</span>
+                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400">{{ currencySymbol(ACCOUNT_CURRENCY) }}</span>
                 <input
                   v-model.number="windowCostLimit"
                   type="number"
@@ -2776,7 +2876,7 @@
             <div>
               <label class="input-label">{{ t('admin.accounts.quotaControl.windowCost.stickyReserve') }}</label>
               <div class="relative">
-                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400">$</span>
+                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-400">{{ currencySymbol(ACCOUNT_CURRENCY) }}</span>
                 <input
                   v-model.number="windowCostStickyReserve"
                   type="number"
@@ -3774,6 +3874,14 @@
     </template>
   </BaseDialog>
 
+  <!-- 网页逆向平台内嵌登录弹窗（W5） -->
+  <WebLoginModal
+    :show="showWebLogin"
+    :platform="form.platform"
+    @close="showWebLogin = false"
+    @applied="handleWebLoginApplied"
+  />
+
   <!-- Gemini Help Dialog -->
   <BaseDialog
     :show="showGeminiHelpDialog"
@@ -4044,6 +4152,7 @@ import type {
 } from '@/types'
 import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import WebLoginModal from './WebLoginModal.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -4064,18 +4173,22 @@ import {
   applyAntigravityProjectID,
   applyHeaderOverride,
   applyInterceptWarmup,
+  buildWebProviderCredentials,
   cnSupportsNativeResponses,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
   isCNProviderPlatform,
   isHeaderOverrideCapable,
   isVolcanoBaseURL,
+  isWebProviderPlatform,
   validateHeaderOverrideRows,
+  webProviderUsesCookie,
   type CnAccountMode,
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
-  type HeaderOverrideRow
+  type HeaderOverrideRow,
+  type WebProviderPlatform
 } from '@/components/account/credentialsBuilder'
 import {
   formatDateTimeLocalInput,
@@ -4085,6 +4198,7 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -4286,6 +4400,23 @@ const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
+// ── 网页逆向平台（web-deepseek / web-zhipu / web-kimi）粘贴凭证 ──
+const webCookieInput = ref('')
+const webKimiTokenJson = ref('')
+const webBaseUrlInput = ref('')
+const showWebLogin = ref(false)
+
+// handleWebLoginApplied：内嵌登录弹窗校验通过后，把凭证回填到现有粘贴表单
+// （保持单一创建路径，用户确认后仍走同一提交链路）。
+function handleWebLoginApplied(payload: { platform: string; credentials: Record<string, unknown> }) {
+  if (payload.platform === 'web-kimi') {
+    webKimiTokenJson.value = JSON.stringify(payload.credentials, null, 2)
+  } else {
+    const cookie = payload.credentials.cookie
+    webCookieInput.value = typeof cookie === 'string' ? cookie : JSON.stringify(payload.credentials, null, 2)
+  }
+}
+
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
 const accountMode = ref<CnAccountMode>('payg')
 // API 协议决定转发端点与格式：cc=现有转换链，anthropic=原生直通（Claude Code），
@@ -4401,6 +4532,15 @@ function selectOtherPlatform() {
   // other 默认 OpenAI 兼容协议（anthropic 需用户显式切换，避免误把 Anthropic
   // 上游 base_url 当 OpenAI 端点转发）。
   apiProtocol.value = 'chat_completions'
+}
+
+// 网页逆向平台（web-deepseek / web-zhipu / web-kimi）：登录态凭证明文粘贴，
+// 无 base_url 预设与账号模式语义（免费网页额度无标准查询接口，不做额度探测，
+// 可用性经转发路径验证——方案 W6 口径）。
+function selectWebPlatform(platform: WebProviderPlatform) {
+  form.platform = platform
+  form.type = 'apikey'
+  accountCategory.value = 'apikey'
 }
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {
@@ -5450,6 +5590,9 @@ const resetForm = () => {
   adaptiveBaseUrls.value = { chat_completions: '', anthropic: '', responses: '' }
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
+  webCookieInput.value = ''
+  webKimiTokenJson.value = ''
+  webBaseUrlInput.value = ''
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
@@ -5887,6 +6030,26 @@ const handleSubmit = async () => {
       site: codebuddySite.value
     }
     await createAccountAndFinish('codebuddy', 'apikey', credentials)
+    return
+  }
+
+  // 网页逆向平台（web-deepseek / web-zhipu / web-kimi）：手动粘贴登录态凭证建号
+  // （内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底）。
+  if (isWebProviderPlatform(form.platform)) {
+    if (!form.name.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
+      return
+    }
+    const built = buildWebProviderCredentials(form.platform, {
+      cookie: webCookieInput.value,
+      kimiTokenJson: webKimiTokenJson.value,
+      baseUrl: webBaseUrlInput.value
+    })
+    if (built.error || !built.credentials) {
+      appStore.showError(t(`admin.accounts.webProviders.errors.${built.error ?? 'webCookieRequired'}`))
+      return
+    }
+    await createAccountAndFinish(form.platform, 'apikey', built.credentials)
     return
   }
 

@@ -533,7 +533,7 @@ export interface PaginationConfig {
 
 // ==================== API Key & Group Types ====================
 
-export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax' | 'codebuddy'
+export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax' | 'codebuddy' | 'web-deepseek' | 'web-zhipu' | 'web-kimi'
 
 export type VideoModelPrices = Record<string, Record<string, number>>
 
@@ -916,7 +916,7 @@ export interface UpdateGroupRequest {
 
 // ==================== Account & Proxy Types ====================
 
-export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax' | 'codebuddy'
+export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax' | 'codebuddy' | 'web-deepseek' | 'web-zhipu' | 'web-kimi'
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
@@ -2650,8 +2650,9 @@ export interface XianyuWorkerDelivery {
 }
 
 export interface XianyuLoginSessionStatus {
-  status: 'waiting' | 'scanned' | 'success' | 'failed' | 'expired'
+  status: 'waiting' | 'scanned' | 'success' | 'failed' | 'expired' | 'verification_required'
   session_id?: string
   qr_code?: string
+  face_qr_url?: string
   message?: string
 }
