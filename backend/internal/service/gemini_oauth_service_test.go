@@ -1460,6 +1460,108 @@ func TestGeminiOAuthService_ExchangeCode_EmptyState(t *testing.T) {
 }
 
 // =====================
+// Drive scope 403 优雅降级回归测试
+// =====================
+
+// 回归：Drive API 返回 403（scope 未授予）时，FetchGoogleOneTier 应返回 nil error
+// 和 unknown tier，而非传播 error。403 是已知的配置状态，不是运行时故障。
+func TestGeminiOAuthService_FetchGoogleOneTier_ScopeNotGranted(t *testing.T) {
+	t.Parallel()
+
+	svc := NewGeminiOAuthService(nil, nil, nil, &mockDriveClient{
+		getStorageQuotaFunc: func(ctx context.Context, accessToken, proxyURL string) (*geminicli.DriveStorageInfo, error) {
+			return nil, fmt.Errorf("drive API error: status 403")
+		},
+	}, &config.Config{})
+	defer svc.Stop()
+
+	tierID, storageInfo, err := svc.FetchGoogleOneTier(context.Background(), "fake-token", "")
+	if err != nil {
+		t.Fatalf("403 scope 缺失应返回 nil error, got: %v", err)
+	}
+	if tierID != GeminiTierGoogleOneUnknown {
+		t.Fatalf("tierID 应为 unknown, got: %q", tierID)
+	}
+	if storageInfo != nil {
+		t.Fatalf("storageInfo 应为 nil, got: %v", storageInfo)
+	}
+}
+
+// 回归：非 403 的 Drive API 错误仍应返回 error。
+func TestGeminiOAuthService_FetchGoogleOneTier_OtherError(t *testing.T) {
+	t.Parallel()
+
+	svc := NewGeminiOAuthService(nil, nil, nil, &mockDriveClient{
+		getStorageQuotaFunc: func(ctx context.Context, accessToken, proxyURL string) (*geminicli.DriveStorageInfo, error) {
+			return nil, fmt.Errorf("drive API error: status 500")
+		},
+	}, &config.Config{})
+	defer svc.Stop()
+
+	_, _, err := svc.FetchGoogleOneTier(context.Background(), "fake-token", "")
+	if err == nil {
+		t.Fatal("非 403 错误应返回 error")
+	}
+}
+
+// 回归：RefreshAccountGoogleOneTier 在 scope 缺失时应保留已有 tier，而非覆盖为 unknown。
+func TestGeminiOAuthService_RefreshAccountGoogleOneTier_PreservesExistingTier(t *testing.T) {
+	t.Parallel()
+
+	svc := NewGeminiOAuthService(nil, nil, nil, &mockDriveClient{
+		getStorageQuotaFunc: func(ctx context.Context, accessToken, proxyURL string) (*geminicli.DriveStorageInfo, error) {
+			return nil, fmt.Errorf("drive API error: status 403")
+		},
+	}, &config.Config{})
+	defer svc.Stop()
+
+	account := &Account{
+		Credentials: map[string]any{
+			"oauth_type":   "google_one",
+			"access_token": "fake-token",
+			"tier_id":      "google_ai_pro",
+		},
+		Extra: map[string]any{},
+	}
+
+	tierID, _, _, err := svc.RefreshAccountGoogleOneTier(context.Background(), account)
+	if err != nil {
+		t.Fatalf("scope 缺失应返回 nil error, got: %v", err)
+	}
+	if tierID != "google_ai_pro" {
+		t.Fatalf("应保留已有 tier_id=google_ai_pro, got: %q", tierID)
+	}
+}
+
+// 回归：RefreshAccountGoogleOneTier 在 scope 缺失且无已有 tier 时，默认 free。
+func TestGeminiOAuthService_RefreshAccountGoogleOneTier_NoExistingTier_DefaultsFree(t *testing.T) {
+	t.Parallel()
+
+	svc := NewGeminiOAuthService(nil, nil, nil, &mockDriveClient{
+		getStorageQuotaFunc: func(ctx context.Context, accessToken, proxyURL string) (*geminicli.DriveStorageInfo, error) {
+			return nil, fmt.Errorf("drive API error: status 403")
+		},
+	}, &config.Config{})
+	defer svc.Stop()
+
+	account := &Account{
+		Credentials: map[string]any{
+			"oauth_type":   "google_one",
+			"access_token": "fake-token",
+		},
+		Extra: map[string]any{},
+	}
+
+	tierID, _, _, err := svc.RefreshAccountGoogleOneTier(context.Background(), account)
+	if err != nil {
+		t.Fatalf("scope 缺失应返回 nil error, got: %v", err)
+	}
+	if tierID != GeminiTierGoogleOneFree {
+		t.Fatalf("无已有 tier 应默认 free, got: %q", tierID)
+	}
+}
+
+// =====================
 // 辅助函数
 // =====================
 

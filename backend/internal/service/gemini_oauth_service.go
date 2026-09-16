@@ -370,8 +370,11 @@ func (s *GeminiOAuthService) FetchGoogleOneTier(ctx context.Context, accessToken
 	if err != nil {
 		// Check if it's a 403 (scope not granted)
 		if strings.Contains(err.Error(), "status 403") {
-			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Drive API scope not available (403): %v", err)
-			return GeminiTierGoogleOneUnknown, nil, err
+			// Drive API scope was not requested during OAuth — this is a known
+			// configuration state, not a runtime failure. Return unknown tier
+			// with nil error so callers degrade gracefully.
+			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Drive API scope not granted (403), tier detection unavailable")
+			return GeminiTierGoogleOneUnknown, nil, nil
 		}
 		// Other errors
 		logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Failed to fetch Drive storage: %v", err)
@@ -419,6 +422,15 @@ func (s *GeminiOAuthService) RefreshAccountGoogleOneTier(
 	tierID, storageInfo, err := s.FetchGoogleOneTier(ctx, accessToken, proxyURL)
 	if err != nil {
 		return "", nil, nil, err
+	}
+
+	// Drive scope not granted: preserve existing tier instead of overwriting with "unknown"
+	if tierID == "" || tierID == GeminiTierGoogleOneUnknown {
+		if existingTier, ok := account.Credentials["tier_id"].(string); ok && existingTier != "" {
+			tierID = existingTier
+		} else {
+			tierID = GeminiTierGoogleOneFree
+		}
 	}
 
 	// 构建 extra 数据（保留原有 extra 字段）

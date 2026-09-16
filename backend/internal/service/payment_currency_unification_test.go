@@ -193,7 +193,7 @@ func TestUpdatePaymentConfig_RejectsFXRatesDroppingEnabledInstanceCurrency(t *te
 
 	// 删除 HKD → 拒绝保存
 	err = svc.UpdatePaymentConfig(ctx, UpdatePaymentConfigRequest{
-		FXRates: strPtr(`{"CNY": 7.15}`),
+		FXRates: map[string]float64{"CNY": 7.15},
 	})
 	require.Error(t, err)
 	require.Equal(t, payment.FXRateMissingCode, infraErrorReason(t, err))
@@ -202,7 +202,7 @@ func TestUpdatePaymentConfig_RejectsFXRatesDroppingEnabledInstanceCurrency(t *te
 
 	// 保留 HKD → 通过
 	err = svc.UpdatePaymentConfig(ctx, UpdatePaymentConfigRequest{
-		FXRates: strPtr(`{"CNY": 7.2, "HKD": 7.8}`),
+		FXRates: map[string]float64{"CNY": 7.2, "HKD": 7.8},
 	})
 	require.NoError(t, err)
 	require.Contains(t, settingRepo.values[SettingFXRates], "7.2")

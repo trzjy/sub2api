@@ -96,6 +96,9 @@ type XianyuReconcileService struct {
 	stopCh       chan struct{}
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
+
+	// 连续失败计数：用于对账失败的日志降频。
+	consecutiveFailures int
 }
 
 // NewXianyuReconcileService 创建对账任务（尚未启动）。
@@ -180,8 +183,19 @@ func (s *XianyuReconcileService) runOnce() {
 	orders, err := s.worker.ListAutoDeliveries(ctx, since, xianyuReconcileWorkerLimit)
 	if err != nil {
 		// Worker 不可达有独立健康告警覆盖，对账本轮跳过即可。
-		slog.Warn("xianyu reconcile: list worker auto deliveries failed, skip round", "error", err)
+		// 连续失败时降频：首次 warn，后续 debug，避免刷屏。
+		s.consecutiveFailures++
+		if s.consecutiveFailures == 1 {
+			slog.Warn("xianyu reconcile: list worker auto deliveries failed, skip round", "error", err)
+		} else {
+			slog.Debug("xianyu reconcile: list worker auto deliveries failed (repeated), skip round",
+				"error", err, "consecutive_failures", s.consecutiveFailures)
+		}
 		return
+	}
+	if s.consecutiveFailures > 0 {
+		slog.Info("xianyu reconcile: worker recovered", "after_failures", s.consecutiveFailures)
+		s.consecutiveFailures = 0
 	}
 	mirrors, err := s.mirror.ListWorkerDeliveriesUpdatedSince(ctx, since, xianyuReconcileMirrorLimit)
 	if err != nil {
