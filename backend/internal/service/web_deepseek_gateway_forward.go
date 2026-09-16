@@ -517,6 +517,42 @@ func webDeepseekClientChunkEnvelope(responseID, originalModel string, delta gin.
 //
 // 未实测部分（待登录态实测补全）：chunk 具体字段结构、终止条件、usage 出现位置。
 // 首帧即携带业务错误码（实测 {"code":40002,"msg":"..."} 形态）时，按上游错误路径处理。
+// writeWebStreamMidstreamError 流式中段业务错误收口（三平台统一模式）：流已向客户端写出
+// 过正文（HTTP 状态可能已是 200），此时上游突发业务错误——不能伪造正常 finish_reason+usage
+// 终止帧把失败请求当成功流处理。按出站协议向客户端写一帧明确的 error 标记，再按模式发出流
+// 终止符，使客户端能区分「正常完成」与「中途失败」：
+//   - chat 模式：data: {"error":{...}} 后补 data: [DONE]（闭合 SSE）；
+//   - responses / anthropic 模式：event: error 事件本身即终结（不写 response.completed /
+//     message_stop 等成功终止事件）。
+//
+// 与仓库 antigravity_gateway_compat_stream.go 的 WriteError 惯例对齐。message 经
+// sanitizeUpstreamErrorMessage 脱敏，绝不写入任何凭证值。
+func writeWebStreamMidstreamError(c *gin.Context, st *webClientStreamState, message string) error {
+	safe := sanitizeUpstreamErrorMessage(message)
+	if safe == "" {
+		safe = "upstream midstream business error"
+	}
+	switch st.mode {
+	case webResponseModeChat:
+		if _, err := c.Writer.WriteString(fmt.Sprintf(
+			"data: {\"error\":{\"message\":%q,\"type\":\"upstream_error\"}}\n\n", safe)); err != nil {
+			return err
+		}
+		if _, err := c.Writer.WriteString("data: [DONE]\n\n"); err != nil {
+			return err
+		}
+	case webResponseModeResponses, webResponseModeAnthropic:
+		if _, err := c.Writer.WriteString(fmt.Sprintf(
+			"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"upstream_error\",\"message\":%q}}\n\n", safe)); err != nil {
+			return err
+		}
+	}
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
 func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -545,6 +581,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	var aggregated strings.Builder
 	written := false
 	finishReason := ""
+	midstreamErr := false
+	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -555,6 +593,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 			// #3 裸 JSON 业务错误判定：上游 HTTP 200 返回 {"code":40002,...}（非 SSE、
 			// 无 data: 前缀）时，原 parseWebDeepseekSSEFrame 忽略该行会漏判为正常流，
 			// 最终以 [DONE] 伪成功。含非 0 code 字段的裸 JSON 行按业务错误处理。
+			// 首帧未写任何客户端字节（written=false）→ 走完整错误路径（可改写 4xx 状态码）；
+			// 流中后段已写出正文（written=true）→ 记 ops 错误并向客户端写流内 error 标记后
+			// 中断收口（writeWebStreamMidstreamError），不伪造正常 finish_reason+usage 终止帧。
 			if errPayload, isErr := webDeepseekBareJSONError(scanner.Text()); isErr {
 				if !written {
 					errResp := &http.Response{
@@ -572,6 +613,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 					Kind:               "midstream_error",
 					Message:            sanitizeUpstreamErrorMessage(webDeepseekUpstreamErrorMessage(errPayload)),
 				})
+				midstreamErr = true
+				midstreamErrMsg = sanitizeUpstreamErrorMessage(webDeepseekUpstreamErrorMessage(errPayload))
 				break
 			}
 			continue
@@ -581,8 +624,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 			responseID = view.ResponseID
 		}
 		if view.ErrCode != 0 {
-			// 业务错误码（实测 40002 形态）。首帧未写任何客户端字节时走完整错误路径；
-			// 流中后段出现（罕见，未实测）则记录 ops 错误后结束流，不伪造正常结束。
+			// 业务错误码（实测 40002 形态）。首帧未写任何客户端字节（written=false）→
+			// 走完整错误路径（可改写 4xx 状态码）；流中后段已写出正文（written=true，罕见
+			// 未实测）→ 记 ops 错误并向客户端写流内 error 标记后中断收口，绝不伪造正常结束。
 			if !written {
 				errResp := &http.Response{
 					StatusCode: resp.StatusCode,
@@ -599,6 +643,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 				Kind:               "midstream_error",
 				Message:            sanitizeUpstreamErrorMessage(view.ErrMsg),
 			})
+			midstreamErr = true
+			midstreamErrMsg = sanitizeUpstreamErrorMessage(view.ErrMsg)
 			break
 		}
 		if view.Usage != nil {
@@ -620,7 +666,27 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		return nil, fmt.Errorf("web-deepseek stream read: %w", err)
 	}
 
-	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
+	// 写明确 error 标记并终结 SSE（不伪造正常 finish_reason+usage 终止帧）。HTTP 状态可能
+	// 已是 200，但流内 error 标记使客户端能区分「正常完成」与「中途失败」。
+	if midstreamErr {
+		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
+			return nil, err
+		}
+		MarkResponseCommitted(c)
+		return &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webDeepseekChatCompletionPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+		}, nil
+	}
+
+	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
 	if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}

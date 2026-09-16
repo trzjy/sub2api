@@ -71,6 +71,47 @@ func TestTestWebAccountConnection_InvalidBaseURLErrors(t *testing.T) {
 	require.Contains(t, goodBody, `"success":true`)
 }
 
+// TestValidateWebAccountCredential_BaseURLNonStringRejected 覆盖 #4 回归：base_url 键存在
+// 但类型非 string（数字 / 数组 / 对象）时，validateWebAccountCredential 必须 fail-closed
+// 拒绝（"base_url must be a string"），不再因类型断言失败静默跳过保存脏数据。
+//   - base_url=12345 / []string / map → 拒绝；
+//   - base_url 合法 https 官方域名 / 空串 / 缺失 → 仍放行；
+//   - 其余必填字段（cookie / access_token）已满足，确保只校验 base_url 类型。
+func TestValidateWebAccountCredential_BaseURLNonStringRejected(t *testing.T) {
+	// 数字 base_url → 拒绝。
+	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": 12345}))
+	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": 12345}))
+
+	// 数组 base_url → 拒绝。
+	require.Error(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
+		map[string]any{"cookie": "x", "base_url": []string{"https://chatglm.cn"}}))
+
+	// 对象 base_url → 拒绝。
+	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": map[string]any{"url": "https://chat.deepseek.com"}}))
+
+	// nil base_url → 拒绝（类型断言失败，非空串语义）。
+	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": nil}))
+
+	// 错误文案须指向 base_url 且不得含任何凭证值。
+	err := validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": 12345})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "base_url must be a string")
+	require.NotContains(t, err.Error(), "sessionid=abc")
+
+	// 对照：合法 https 官方域名 / 空串 / 缺失 → 仍放行。
+	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at", "base_url": "https://www.kimi.com"}))
+	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
+		map[string]any{"cookie": "sessionid=abc", "base_url": ""}))
+	require.NoError(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
+		map[string]any{"cookie": "x"}))
+}
+
 // TestIsWebProviderCoversWebReversePlatforms 锁定网页逆向平台集合判定（方案 §3.1）。
 func TestIsWebProviderCoversWebReversePlatforms(t *testing.T) {
 	for _, p := range []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi} {

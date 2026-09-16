@@ -443,6 +443,8 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 	var aggregated strings.Builder
 	finishReason := ""
 	written := false
+	midstreamErr := false
+	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -451,8 +453,9 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		payload, ok := parseWebZhipuSSEFrame(scanner.Text())
 		if !ok {
 			// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
-			// 首帧未写任何客户端字节走完整错误路径；流中段出现记 ops 错误不伪造成功。
-			// 纯内容裸 JSON（无 code）按安全策略忽略。
+			// 首帧未写任何客户端字节走完整错误路径；流中段已写出正文则记 ops 错误并向
+			// 客户端写流内 error 标记后中断收口，不伪造成功。纯内容裸 JSON（无 code）
+			// 按安全策略忽略。
 			if errPayload, isErr := webZhipuBareJSONError(scanner.Text()); isErr {
 				if !written {
 					errResp := &http.Response{
@@ -470,6 +473,10 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 					Kind:               "midstream_error",
 					Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload)),
 				})
+				// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
+				// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
+				midstreamErr = true
+				midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload))
 				break
 			}
 			continue
@@ -495,6 +502,10 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 				Kind:               "midstream_error",
 				Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload)),
 			})
+			// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
+			// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
+			midstreamErr = true
+			midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload))
 			break
 		}
 		if view.Usage != nil {
@@ -516,7 +527,27 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		return nil, fmt.Errorf("web-zhipu stream read: %w", err)
 	}
 
-	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
+	// 写明确 error 标记并终结 SSE（不伪造正常 finish_reason+usage 终止帧）。HTTP 状态可能
+	// 已是 200，但流内 error 标记使客户端能区分「正常完成」与「中途失败」。
+	if midstreamErr {
+		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
+			return nil, err
+		}
+		MarkResponseCommitted(c)
+		return &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webZhipuConversationPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+		}, nil
+	}
+
+	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
 	if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}

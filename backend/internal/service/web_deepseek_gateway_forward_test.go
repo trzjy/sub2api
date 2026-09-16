@@ -301,6 +301,86 @@ func TestForwardWebDeepseek_StreamingResponseRelay(t *testing.T) {
 	require.Contains(t, out, `"object":"chat.completion.chunk"`)
 }
 
+// TestForwardWebDeepseek_StreamMidstreamBusinessError 覆盖流式中段业务错误收口（Codex
+// 审查 #1）：首帧已写出正文后，上游在流中抛出业务错误码（实测 40002 形态）时，必须向客户端
+// 写明确 error 标记并终结 SSE，且不得伪造正常 finish_reason+usage 终止帧——否则客户端会把
+// 失败请求当成功流处理（HTTP 已 200 的事实无法再纠错，只能靠流内 error 标记区分）。
+func TestForwardWebDeepseek_StreamMidstreamBusinessError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekStreamInboundBody()))
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	sse := strings.Join([]string{
+		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
+		``,
+		`data: {"code":40002,"msg":"midstream business error"}`,
+		``,
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	account := webDeepseekTestAccount(8820, nil)
+	result, err := svc.handleWebDeepseekStreamingResponse(
+		context.Background(), resp, c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeChat)
+	require.NoError(t, err, "midstream error is conveyed in-stream, not as a Go error")
+	require.True(t, result.Stream)
+
+	out := recorder.Body.String()
+	require.Contains(t, out, `"content":"hello"`, "first content frame must be relayed before the error")
+	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream")
+	require.Contains(t, out, `"upstream_error"`)
+	// 错误帧必须是 [DONE] 之前的最后一帧业务帧：中间没有任何正常 finish_reason+usage 终止帧。
+	require.Contains(t, out,
+		`data: {"error":{"message":"midstream business error","type":"upstream_error"}}`+"\n\n"+`data: [DONE]`,
+		"error frame must immediately precede [DONE], with no normal terminal frame in between")
+	require.NotContains(t, out, `"usage"`, "midstream error must NOT emit a normal usage terminal frame")
+}
+
+// TestForwardWebDeepseek_StreamMidstreamBusinessError_ResponsesMode 同前，但入站为
+// /v1/responses：流内错误标记须为 Responses 协议的 `event: error` 帧（不写 success 终止事件
+// response.completed），且不得出现 chat 模式的 data: [DONE] 收口。验证 writeWebStreamMidstreamError
+// 按出站协议分派。
+func TestForwardWebDeepseek_StreamMidstreamBusinessError_ResponsesMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekStreamInboundBody()))
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	sse := strings.Join([]string{
+		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
+		``,
+		`data: {"code":40002,"msg":"midstream business error"}`,
+		``,
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	account := webDeepseekTestAccount(8821, nil)
+	_, err := svc.handleWebDeepseekStreamingResponse(
+		context.Background(), resp, c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeResponses)
+	require.NoError(t, err)
+
+	out := recorder.Body.String()
+	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream for responses mode")
+	require.Contains(t, out, `"upstream_error"`)
+	require.Contains(t, out, "event: error", "responses mode must emit an event: error frame")
+	require.NotContains(t, out, "data: [DONE]", "responses mode must NOT emit chat-mode [DONE] closing")
+	require.NotContains(t, out, "response.completed", "midstream error must NOT emit a success terminal event")
+}
+
 // TestForwardWebDeepseek_MissingCookieFailsClosed Cookie 缺失必须失败关闭，且不发出
 // 任何上游请求；错误信息不得包含任何凭证值。
 func TestForwardWebDeepseek_MissingCookieFailsClosed(t *testing.T) {

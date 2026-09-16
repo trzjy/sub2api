@@ -305,6 +305,49 @@ func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	require.Contains(t, out, "data: [DONE]")
 }
 
+// TestForwardWebKimi_StreamMidstreamBusinessError 覆盖流式中段业务错误收口（Codex 审查
+// #1）：首帧已写出正文后，上游在流中抛出业务错误（unauthenticated / 非 0 code）时，必须向
+// 客户端写明确 error 标记并终结 SSE，且不得伪造正常 finish_reason+usage 终止帧。
+func TestForwardWebKimi_StreamMidstreamBusinessError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	sse := strings.Join([]string{
+		`data: {"id":"kimi-1","choices":[{"delta":{"content":"hello"}}]}`,
+		``,
+		`data: {"code":"unauthenticated","message":"login expired midstream"}`,
+		``,
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	account := webKimiTestAccount(8935, nil)
+	result, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+	require.NoError(t, err, "midstream error is conveyed in-stream, not as a Go error")
+	require.True(t, result.Stream)
+
+	out := recorder.Body.String()
+	require.Contains(t, out, `"content":"hello"`, "first content frame must be relayed before the error")
+	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream")
+	require.Contains(t, out, `"upstream_error"`)
+	// 错误帧必须是 [DONE] 之前的最后一帧业务帧：中间没有任何正常 finish_reason+usage 终止帧。
+	require.Contains(t, out,
+		`data: {"error":{"message":"web-kimi midstream business error","type":"upstream_error"}}`+"\n\n"+`data: [DONE]`,
+		"error frame must immediately precede [DONE], with no normal terminal frame in between")
+	require.NotContains(t, out, `"usage"`, "midstream error must NOT emit a normal usage terminal frame")
+	// 凭证脱敏：错误响应不得回显 access_token。
+	require.NotContains(t, recorder.Body.String(), "kimi-access-token-abc123")
+}
+
 // TestForwardWebKimi_UnrecognizedShapeFailsClosed 非 SSE 且结构不可识别：失败关闭，
 // 不伪造成功响应。
 func TestForwardWebKimi_UnrecognizedShapeFailsClosed(t *testing.T) {
@@ -328,6 +371,87 @@ func TestForwardWebKimi_UnitClassify(t *testing.T) {
 	require.Equal(t, webKimiErrKindAuth, classifyWebKimiUpstreamError(200, []byte(`{"code":"unauthenticated"}`)))
 	require.Equal(t, webKimiErrKindRateLimited, classifyWebKimiUpstreamError(429, nil))
 	require.Equal(t, webKimiErrKindOther, classifyWebKimiUpstreamError(500, []byte(`{"code":"internal"}`)))
+}
+
+// TestWebKimiBareJSONError 纯函数单测（#3）：裸 JSON（非 SSE data: 前缀）业务错误判定层。
+//   - 字符串 code（如 {"code":"unauthenticated"}）须识别为业务错误，不再被忽略；
+//   - 数字 code 非 0 仍识别为业务错误；数字 0 / 空字符串 code 不识别；
+//   - 纯内容裸 JSON（无 code）仍忽略（isError=false）；data: 前缀行不进入此判定。
+func TestWebKimiBareJSONError(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		isError  bool
+	}{
+		{"string_code_unauthenticated", `{"code":"unauthenticated","message":"token expired"}`, true},
+		{"string_code_empty_message", `{"code":"unauthenticated","message":""}`, true},
+		{"numeric_code_nonzero", `{"code":401,"message":"auth failed"}`, true},
+		{"numeric_code_zero", `{"code":0,"message":"ok"}`, false},
+		{"string_code_empty", `{"code":"","message":"ok"}`, false},
+		{"no_code_content", `{"content":"hello world"}`, false},
+		{"bare_sse_frame_skipped", `data: {"code":"unauthenticated"}`, false},
+		{"empty_line_skipped", ``, false},
+		{"invalid_json_skipped", `not json`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, isErr := webKimiBareJSONError(tc.line)
+			require.Equal(t, tc.isError, isErr, "line=%q", tc.line)
+		})
+	}
+}
+
+// TestForwardWebKimi_BareJSONStringCodeReachesErrorPath 集成验证（#3）：上游返回裸 JSON
+// 字符串 code（{"code":"unauthenticated"}）时，流式回程必须走业务错误路径返回错误，
+// 不再被忽略导致空流伪成功。
+func TestForwardWebKimi_BareJSONStringCodeReachesErrorPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	account := webKimiTestAccount(8930, nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"code":"unauthenticated","message":"login required"}`)),
+	}
+	result, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+	require.Error(t, err, "bare JSON string code must reach the error path")
+	require.Nil(t, result)
+	// 凭证脱敏：错误响应不得回显 access_token。
+	require.NotContains(t, recorder.Body.String(), "kimi-access-token-abc123")
+}
+
+// TestForwardWebKimi_BareJSONContentIgnored 集成对照（#3）：纯内容裸 JSON（无 code）
+// 仍按安全策略忽略，不误判为业务错误。
+func TestForwardWebKimi_BareJSONContentIgnored(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	account := webKimiTestAccount(8931, nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"content":"hello world"}`)),
+	}
+	_, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+	// 纯内容裸 JSON 无 code，无增量可写，扫描结束、收口终止帧，不返回错误。
+	require.NoError(t, err)
 }
 
 // webKimiRateLimitRepoStub 记录 SetRateLimited（冷却写入点）。

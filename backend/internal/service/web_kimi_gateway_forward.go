@@ -492,7 +492,10 @@ func webKimiBareJSONError(line string) (payload []byte, isError bool) {
 		return nil, false
 	}
 	code := gjson.GetBytes([]byte(trimmed), "code")
-	if code.Exists() && code.Type == gjson.Number && code.Int() != 0 {
+	// #3 同时识别数字 code（非 0）与字符串 code（非空）：上游返回
+	// {"code":"unauthenticated"} 这类字符串 code 也应判为业务错误，否则会被忽略
+	// 导致空流伪成功。纯内容裸 JSON（无 code / 空字符串 code）按安全策略忽略。
+	if code.Exists() && ((code.Type == gjson.Number && code.Int() != 0) || (code.Type == gjson.String && code.String() != "")) {
 		return []byte(trimmed), true
 	}
 	return nil, false
@@ -612,6 +615,8 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	var aggregated strings.Builder
 	written := false
 	finishReason := ""
+	midstreamErr := false
+	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -620,8 +625,9 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		payload, ok := parseWebKimiSSEFrame(scanner.Text())
 		if !ok {
 			// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
-			// 首帧未写任何客户端字节走完整错误路径；流中段出现记 ops 错误不伪造成功。
-			// 纯内容裸 JSON（无 code）按安全策略忽略。
+			// 首帧未写任何客户端字节走完整错误路径；流中段已写出正文则记 ops 错误并向
+			// 客户端写流内 error 标记后中断收口，不伪造成功。纯内容裸 JSON（无 code）
+			// 按安全策略忽略。
 			if errPayload, isErr := webKimiBareJSONError(scanner.Text()); isErr {
 				if !written {
 					errResp := &http.Response{
@@ -639,6 +645,10 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 					Kind:               "midstream_error",
 					Message:            sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(errPayload)),
 				})
+				// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
+				// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
+				midstreamErr = true
+				midstreamErrMsg = sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(errPayload))
 				break
 			}
 			continue
@@ -648,8 +658,9 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 			responseID = view.ResponseID
 		}
 		if view.AuthFailed || view.ErrCode != 0 {
-			// 首帧未写任何客户端字节时走完整错误路径；流中后段出现（罕见，未实测）
-			// 则记录 ops 错误后结束流，不伪造正常结束。
+			// 首帧未写任何客户端字节（written=false）→ 走完整错误路径；流中后段已写出正文
+			// （written=true，罕见未实测）→ 记 ops 错误并向客户端写流内 error 标记后中断收口，
+			// 绝不伪造正常结束。
 			if !written {
 				errResp := &http.Response{
 					StatusCode: resp.StatusCode,
@@ -666,6 +677,8 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 				Kind:               "midstream_error",
 				Message:            "web-kimi midstream business error",
 			})
+			midstreamErr = true
+			midstreamErrMsg = "web-kimi midstream business error"
 			break
 		}
 		if view.Usage != nil {
@@ -687,7 +700,27 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		return nil, fmt.Errorf("web-kimi stream read: %w", err)
 	}
 
-	// 终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
+	// 写明确 error 标记并终结 SSE（不伪造正常 finish_reason+usage 终止帧）。HTTP 状态可能
+	// 已是 200，但流内 error 标记使客户端能区分「正常完成」与「中途失败」。
+	if midstreamErr {
+		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
+			return nil, err
+		}
+		MarkResponseCommitted(c)
+		return &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webKimiChatPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+		}, nil
+	}
+
+	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
 	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
