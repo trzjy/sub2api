@@ -33,8 +33,7 @@ export interface PaymentConfig {
   max_pending_orders: number
   order_timeout_minutes: number
   balance_disabled: boolean
-  balance_recharge_multiplier: number
-  subscription_usd_to_cny_rate: number
+  recharge_markup: number
   enabled_payment_types: PaymentType[]
   help_image_url: string
   help_text: string
@@ -67,9 +66,9 @@ export interface CheckoutInfoResponse {
   global_max: number
   plans: SubscriptionPlan[]
   balance_disabled: boolean
-  balance_recharge_multiplier: number
-  /** Subscription CNY conversion rate (1 USD = X CNY); 0 = disabled, plan price is charged as-is */
-  subscription_usd_to_cny_rate: number
+  recharge_markup: number
+  /** 1 USD = X <ccy>; only enabled gateway currencies + CNY are included. */
+  fx_rates: Record<string, number>
   recharge_fee_rate: number
   help_text: string
   help_image_url: string
@@ -126,7 +125,7 @@ export interface SubscriptionPlan {
   description: string
   price: number
   original_price?: number
-  /** Display-only ISO 4217 currency label (e.g. "NZD"); empty means no label */
+  /** Display-only currency label — fixed 'USD' by backend (historical field) */
   currency?: string
   validity_days: number
   validity_unit: string

@@ -25,6 +25,8 @@ from loguru import logger
 if TYPE_CHECKING:
     from app.services.qr_login.manager import QRLoginManager
 
+from common.services.captcha.remote_solver import notify_local_face
+
 
 def render_qr_base64(content: str) -> str:
     """将文本内容渲染为二维码 PNG 的 base64 data-url"""
@@ -41,6 +43,41 @@ def render_qr_base64(content: str) -> str:
     qr_img.save(buffer, format="PNG")
     qr_base64 = base64.b64encode(buffer.getvalue()).decode()
     return f"data:image/png;base64,{qr_base64}"
+
+
+async def notify_local_face_qr(account_id: str, qr_data_url: str) -> None:
+    """推送人脸二维码到本地桌面提醒；失败只记录，不阻断人工验证。"""
+    if not qr_data_url:
+        return
+    try:
+        from sqlalchemy import select
+
+        from common.models.system_setting import SystemSetting
+        from common.db.session import async_session_maker
+
+        async with async_session_maker() as session:
+            rows = (
+                await session.execute(
+                    select(SystemSetting).where(
+                        SystemSetting.key.in_(
+                            ["captcha.remote_service_url", "captcha.remote_secret_key"]
+                        )
+                    )
+                )
+            ).scalars().all()
+        config = {row.key: (row.value or "") for row in rows}
+        remote_url = (config.get("captcha.remote_service_url") or "").strip()
+        remote_secret = (config.get("captcha.remote_secret_key") or "").strip()
+        if not remote_url or not remote_secret:
+            logger.warning("人脸本地提醒未配置 remote helper，跳过")
+            return
+        sent, message = await notify_local_face(remote_url, remote_secret, account_id, qr_data_url)
+        if sent:
+            logger.info(f"【{account_id}】人脸二维码已推送本地桌面")
+        else:
+            logger.warning(f"【{account_id}】人脸本地提醒失败: {message}")
+    except Exception as exc:
+        logger.warning(f"【{account_id}】人脸本地提醒发送失败: {exc}")
 
 
 async def run_face_verification(
@@ -113,6 +150,7 @@ async def run_face_verification(
             face_qr_content = face_qr_match.group(1)
             session.face_qr_content = face_qr_content
             session.face_qr_url = render_qr_base64(face_qr_content)
+            await notify_local_face_qr(session_id, session.face_qr_url)
             logger.info(f"人脸验证二维码已生成，等待用户扫码: {session_id}")
 
             # 步骤5：轮询 check.do 等待用户手机完成人脸验证

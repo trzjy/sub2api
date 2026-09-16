@@ -214,10 +214,21 @@ func TestCalculateCreateOrderPayAmountUsesCurrencyPrecision(t *testing.T) {
 	}
 }
 
-func TestCalculateCreateOrderPayAmountForSubscriptionConvertsCNYPriceWhenRateConfigured(t *testing.T) {
+// FX 单测辅助：构造汇率表（1 USD = X <币种>）。
+func mustFXRates(t *testing.T, raw string) payment.FXRates {
+	t.Helper()
+	rates, err := payment.ParseFXRates(raw)
+	if err != nil {
+		t.Fatalf("parse fx rates %q: %v", raw, err)
+	}
+	return rates
+}
+
+func TestCalculateCreateOrderPayAmountForSubscriptionConvertsUSDPriceViaFX(t *testing.T) {
 	t.Parallel()
 
-	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "CNY", payment.OrderTypeSubscription, 7.15)
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "CNY", payment.OrderTypeSubscription, fx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,7 +240,8 @@ func TestCalculateCreateOrderPayAmountForSubscriptionConvertsCNYPriceWhenRateCon
 func TestCalculateCreateOrderPayAmountForSubscriptionAppliesFeeAfterCNYConversion(t *testing.T) {
 	t.Parallel()
 
-	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 2.5, "CNY", payment.OrderTypeSubscription, 7.15)
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 2.5, "CNY", payment.OrderTypeSubscription, fx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -238,10 +250,12 @@ func TestCalculateCreateOrderPayAmountForSubscriptionAppliesFeeAfterCNYConversio
 	}
 }
 
-func TestCalculateCreateOrderPayAmountForSubscriptionKeepsNonCNYPrice(t *testing.T) {
+// plan.price 一律 USD：USD 渠道 FromUSD 走隐含汇率 1.0，price 直付。
+func TestCalculateCreateOrderPayAmountForSubscriptionKeepsUSDPrice(t *testing.T) {
 	t.Parallel()
 
-	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "USD", payment.OrderTypeSubscription, 7.15)
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "USD", payment.OrderTypeSubscription, fx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,25 +264,41 @@ func TestCalculateCreateOrderPayAmountForSubscriptionKeepsNonCNYPrice(t *testing
 	}
 }
 
-// 换算是 opt-in：未配置汇率（rate=0）时，CNY 订阅保持 price 直付的存量行为。
-// 该测试锁住存量部署升级后行为不变的兼容承诺。
-func TestCalculateCreateOrderPayAmountForSubscriptionKeepsDirectPriceWhenRateDisabled(t *testing.T) {
+// 行为变更（记录在案）：非 CNY 非 USD 渠道（如 Stripe HKD）订阅收款从 price 直付
+// 改为按汇率 FromUSD 换算（原 HK$1 套餐实收 HK$1 属 bug，现按 1 USD = 7.80 HKD 收 HK$7.78）。
+func TestCalculateCreateOrderPayAmountForSubscriptionConvertsNonCNYNonUSDViaFX(t *testing.T) {
 	t.Parallel()
 
-	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "CNY", payment.OrderTypeSubscription, 0)
+	fx := mustFXRates(t, `{"CNY": 7.15, "HKD": 7.8}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(1, 0, "HKD", payment.OrderTypeSubscription, fx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if amountStr != "9.99" || amount != 9.99 {
-		t.Fatalf("subscription CNY pay amount without rate = (%q, %v), want (9.99, 9.99)", amountStr, amount)
+	if amountStr != "7.80" || amount != 7.8 {
+		t.Fatalf("subscription HKD pay amount = (%q, %v), want (7.80, 7.8)", amountStr, amount)
+	}
+}
+
+// 订阅换算遇缺币种汇率时失败关闭（FX_RATE_MISSING），不得静默按 1:1 兜底。
+func TestCalculateCreateOrderPayAmountForSubscriptionFailsClosedOnMissingFXRate(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	_, _, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "HKD", payment.OrderTypeSubscription, fx)
+	if err == nil {
+		t.Fatal("expected missing FX rate error")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "FX_RATE_MISSING" {
+		t.Fatalf("reason = %q, want FX_RATE_MISSING", appErr.Reason)
 	}
 }
 
 // 汇率只作用于订阅订单，余额充值订单不受影响。
-func TestCalculateCreateOrderPayAmountForBalanceIgnoresSubscriptionRate(t *testing.T) {
+func TestCalculateCreateOrderPayAmountForBalanceIgnoresFX(t *testing.T) {
 	t.Parallel()
 
-	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(50, 0, "CNY", payment.OrderTypeBalance, 7.15)
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(50, 0, "CNY", payment.OrderTypeBalance, fx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -277,17 +307,50 @@ func TestCalculateCreateOrderPayAmountForBalanceIgnoresSubscriptionRate(t *testi
 	}
 }
 
-func TestCalculateCreditedBalanceStillUsesRechargeMultiplier(t *testing.T) {
+// 到账公式：credited = (ToUSD(实付, 币种) × markup).Round(2)。
+// CNY ¥100、FX=7.15、markup=1.0 → $13.99；markup=1.1 → $15.38。
+func TestCalculateCreditedBalanceUsesFXAndMarkup(t *testing.T) {
 	t.Parallel()
 
-	got := calculateCreditedBalance(10, 0.14)
-	if got != 1.4 {
-		t.Fatalf("credited balance = %v, want 1.4", got)
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+
+	got, err := calculateCreditedBalance(100, 1.0, "CNY", fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 13.99 {
+		t.Fatalf("credited balance = %v, want 13.99", got)
 	}
 
-	got = calculateCreditedBalance(5, 10)
-	if got != 50 {
-		t.Fatalf("credited balance = %v, want 50", got)
+	got, err = calculateCreditedBalance(100, 1.1, "CNY", fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 15.38 {
+		t.Fatalf("credited balance with markup 1.1 = %v, want 15.38", got)
+	}
+
+	// USD 渠道：$10 × markup=1.0 → $10；markup=2 → $20。
+	got, err = calculateCreditedBalance(10, 2, "USD", fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 20 {
+		t.Fatalf("credited balance USD = %v, want 20", got)
+	}
+}
+
+// 换算遇缺币种汇率时报错（FX_RATE_MISSING），不得按 1:1 兜底入账。
+func TestCalculateCreditedBalanceFailsClosedOnMissingFXRate(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	_, err := calculateCreditedBalance(100, 1.0, "HKD", fx)
+	if err == nil {
+		t.Fatal("expected missing FX rate error")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "FX_RATE_MISSING" {
+		t.Fatalf("reason = %q, want FX_RATE_MISSING", appErr.Reason)
 	}
 }
 

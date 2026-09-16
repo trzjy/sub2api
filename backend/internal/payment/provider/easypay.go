@@ -22,6 +22,9 @@ import (
 
 // EasyPay constants.
 const (
+	// easypayCurrency 是 CN 渠道协议币种（易支付聚合以人民币计价）。
+	// 协议透传行为不变；下单快照据此写 snapshot["currency"]。
+	easypayCurrency        = "CNY"
 	easypayCodeSuccess     = 1
 	easypayStatusPaid      = 1
 	easypayHTTPTimeout     = 10 * time.Second

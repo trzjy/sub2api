@@ -4,6 +4,7 @@
  */
 
 import { i18n, getLocale } from '@/i18n'
+import { ACCOUNT_CURRENCY, currencySymbol, formatPaymentAmount } from '@/utils/money'
 
 /**
  * 格式化相对时间
@@ -53,25 +54,20 @@ export function formatNumber(num: number | null | undefined): string {
 }
 
 /**
- * 格式化货币金额
+ * 格式化货币金额（委托 utils/money.ts，展示层金额最终统一走 money.ts）
  * @param amount 金额
- * @param currency 货币代码，默认 USD
+ * @param currency 货币代码，默认账本货币 USD（ACCOUNT_CURRENCY）
  * @returns 格式化后的字符串，如 "$1.25"
  */
-export function formatCurrency(amount: number | null | undefined, currency: string = 'USD'): string {
-  if (amount === null || amount === undefined) return '$0.00'
+export function formatCurrency(amount: number | null | undefined, currency: string = ACCOUNT_CURRENCY): string {
+  if (amount === null || amount === undefined) return `${currencySymbol(ACCOUNT_CURRENCY)}0.00`
 
   const locale = getLocale()
 
   // For very small amounts, show more decimals
   const fractionDigits = amount > 0 && amount < 0.01 ? 6 : 2
 
-  return new Intl.NumberFormat(locale, {
-    style: 'currency',
-    currency: currency,
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits
-  }).format(amount)
+  return formatPaymentAmount(amount, currency, locale, fractionDigits)
 }
 
 /**

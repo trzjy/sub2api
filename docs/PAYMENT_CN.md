@@ -13,6 +13,7 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 - [服务商实例管理](#服务商实例管理)
 - [Webhook 配置](#webhook-配置)
 - [支付流程](#支付流程)
+- [货币与汇率](#货币与汇率)
 - [从 Sub2ApiPay 迁移](#从-sub2apipay-迁移)
 
 ---
@@ -206,6 +207,8 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 
 支付回调是支付系统的核心环节，必须正确配置：
 
+> **回调携带订单币种**：支付成功后，到账金额由实付金额按订单币种经全局汇率换算得出，详见 [货币与汇率](#货币与汇率)。
+
 ### 回调地址格式
 
 添加服务商时，系统会自动根据站点域名拼接回调地址，格式如下：
@@ -281,6 +284,44 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 - 订单超时后，后台任务会先查询上游支付状态再标记过期
 - 如果用户实际已支付但回调延迟，系统会通过查询补单
 - 后台任务每 60 秒执行一次超时检查
+
+---
+
+## 货币与汇率
+
+支付系统以 **USD 为唯一记账货币**。内部账本值全部是 USD 裸数字：`users.balance`、用量成本、兑换码面值、福利余额、API Key 配额、平台/分组/Key 限额、模型定价、订阅限额（`*_limit_usd`）。代码中常量 `ACCOUNT_CURRENCY = "USD"` 单点声明；schema 注释与本文档均按 USD 解释。
+
+### 全局汇率表 FX_RATES
+
+| 设置项 | 说明 | 默认值 |
+|--------|------|--------|
+| **FX_RATES** | 全局汇率表，JSON 对象，语义 **1 USD = X <币种>**，如 `{"CNY": 7.15, "HKD": 7.80}` | `{"CNY": 7.15}` |
+
+- `CNY` 必填；`USD` 隐含为 `1.0`，不写入表内。
+- 唯一换算入口（`backend/internal/payment/fx.go`，decimal 实现，换算不经过 float 链路）。
+- 保存时校验**所有已启用 stripe/airwallex 实例的币种仍在表内**，否则拒绝保存（错误码 `FX_RATE_MISSING`）；删除被已启用实例使用的币种同样被拒。
+- 替代并删除 `SUBSCRIPTION_USD_TO_CNY_RATE`、前端 `PLAZA_OFFICIAL_FX` 硬编码、`pricing_cost_basis.fx` 的独立语义。
+
+### 充值加价系数 RECHARGE_MARKUP
+
+原 `BALANCE_RECHARGE_MULTIPLIER`，语义从"1 支付币种 = X USD"改为"汇率平价之上的加价系数"：
+
+- **到账 USD = ToUSD(实付金额, 订单币种) × markup**，默认 `1.0` = 按汇率平价入账。
+- `credited` 取 **Round(2)**（USD 账本两位小数），如 FX=7.15、markup=1.0 时 ¥100 到账 **$13.99**。
+
+### 订阅套餐一律 USD 定价
+
+- `subscription_plans.price` / `original_price` 全部按 **USD** 解释；`plan.currency` 保留但语义固定为 `'USD'`（历史 display-only 字段）。
+- 收款金额 = `FromUSD(plan.price, 渠道币种)`。`ccy=CNY` → `price × FX.CNY`；`ccy=USD` → `price`。
+
+### 行为变更清单
+
+- **订阅收款对非 CNY 非 USD 渠道从 price 直付改为按汇率换算**（bug 修正）：例 $1 套餐 × Stripe **HKD** 渠道，原实收 **HK$1**（直付），现收 **HK$7.80**（FX=7.80）。
+- **充值到账对 CNY 渠道从 1:1 直记改为按汇率平价**：¥100 原入账 **$100**，现入账 **$13.99**（markup=1.0 时）。
+
+### 全局充值限额口径
+
+`DAILY_RECHARGE_LIMIT`、`MIN_RECHARGE_AMOUNT`、`MAX_RECHARGE_AMOUNT` 及实例单笔 min/max 均**按支付币种金额计**。全局 min/max（各启用渠道的并集最宽范围）仅在全部启用渠道同币种时返回数值；混币种站点返回 `0`（=不限制），因为跨币种取宽语义不明。
 
 ---
 

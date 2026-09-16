@@ -15,6 +15,9 @@ import (
 
 // Alipay product codes.
 const (
+	// alipayCurrency 是 CN 渠道协议币种（支付宝当面付/WAP/PC 均以人民币计价）。
+	// 协议透传行为不变；下单快照据此写 snapshot["currency"]。
+	alipayCurrency             = "CNY"
 	alipayProductCodePreCreate = "FACE_TO_FACE_PAYMENT"
 	alipayProductCodeWapPay    = "QUICK_WAP_WAY"
 	alipayProductCodePagePay   = "FAST_INSTANT_TRADE_PAY"

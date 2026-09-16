@@ -134,11 +134,14 @@ func (h *PaymentHandler) GetCheckoutInfo(c *gin.Context) {
 			WeeklyLimitUSD: gi.WeeklyLimitUSD, MonthlyLimitUSD: gi.MonthlyLimitUSD,
 			ModelScopes: gi.ModelScopes,
 			Name:        p.Name, Description: p.Description, Price: p.Price, OriginalPrice: p.OriginalPrice,
-			Currency:     p.Currency,
+			Currency:     "USD", // plan.price 一律 USD 定价，checkout 固定返回 USD
 			ValidityDays: p.ValidityDays, ValidityUnit: p.ValidityUnit, Features: parseFeatures(p.Features),
 			ProductName: p.ProductName,
 		})
 	}
+
+	// fx_rates 暴露只含启用渠道币种 + CNY 的汇率子集；CNY 必定包含
+	fxRatesSubset := checkoutFXRatesSubset(limitsResp.Methods, cfg.FXRates)
 
 	response.Success(c, checkoutInfoResponse{
 		Methods:                       limitsResp.Methods,
@@ -146,8 +149,8 @@ func (h *PaymentHandler) GetCheckoutInfo(c *gin.Context) {
 		GlobalMax:                     limitsResp.GlobalMax,
 		Plans:                         planList,
 		BalanceDisabled:               cfg.BalanceDisabled,
-		BalanceRechargeMultiplier:     cfg.BalanceRechargeMultiplier,
-		SubscriptionUSDToCNYRate:      cfg.SubscriptionUSDToCNYRate,
+		RechargeMarkup:                cfg.RechargeMarkup,
+		FXRates:                       fxRatesSubset,
 		RechargeFeeRate:               cfg.RechargeFeeRate,
 		HelpText:                      cfg.HelpText,
 		HelpImageURL:                  cfg.HelpImageURL,
@@ -163,14 +166,31 @@ type checkoutInfoResponse struct {
 	GlobalMax                     float64                         `json:"global_max"`
 	Plans                         []checkoutPlan                  `json:"plans"`
 	BalanceDisabled               bool                            `json:"balance_disabled"`
-	BalanceRechargeMultiplier     float64                         `json:"balance_recharge_multiplier"`
-	SubscriptionUSDToCNYRate      float64                         `json:"subscription_usd_to_cny_rate"`
+	RechargeMarkup                float64                         `json:"recharge_markup"`
+	FXRates                       map[string]float64              `json:"fx_rates"`
 	RechargeFeeRate               float64                         `json:"recharge_fee_rate"`
 	HelpText                      string                          `json:"help_text"`
 	HelpImageURL                  string                          `json:"help_image_url"`
 	StripePublishableKey          string                          `json:"stripe_publishable_key"`
 	AlipayForceQRCode             bool                            `json:"alipay_force_qrcode"`
 	AlipayMobilePrecreateDeepLink bool                            `json:"alipay_mobile_precreate_deep_link"`
+}
+
+// checkoutFXRatesSubset 仅暴露启用渠道币种 + CNY 的汇率子集（DTO 不泄漏后台全部 FX 配置）。
+func checkoutFXRatesSubset(methods map[string]service.MethodLimits, allRates payment.FXRates) map[string]float64 {
+	seen := map[string]bool{"CNY": true} // CNY 必定包含
+	for _, ml := range methods {
+		if c := strings.ToUpper(strings.TrimSpace(ml.Currency)); c != "" {
+			seen[c] = true
+		}
+	}
+	subset := make(payment.FXRates, len(seen))
+	for ccy := range seen {
+		if rate, err := allRates.Rate(ccy); err == nil {
+			subset[ccy] = rate
+		}
+	}
+	return subset.ToFloatMap()
 }
 
 type checkoutPlan struct {

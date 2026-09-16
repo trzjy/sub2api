@@ -15,6 +15,8 @@ import (
 // GetAvailableMethodLimits collects all payment types from enabled provider
 // instances and returns limits for each, plus the global widest range.
 // Stripe sub-types (card, link) are aggregated under "stripe".
+// 全局充值限额（GlobalMin/GlobalMax）：仅当全部启用渠道同币种时返回数值，
+// 混币种返回 0（=不限制，展示层消费，无服务端下单校验依赖）。
 func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*MethodLimitsResponse, error) {
 	instances, err := s.entClient.PaymentProviderInstance.Query().
 		Where(paymentproviderinstance.EnabledEQ(true)).All(ctx)
@@ -36,8 +38,30 @@ func (s *PaymentConfigService) GetAvailableMethodLimits(ctx context.Context) (*M
 		ml.Currency = currency
 		resp.Methods[ml.PaymentType] = ml
 	}
-	resp.GlobalMin, resp.GlobalMax = pcComputeGlobalRange(resp.Methods)
+	// 全局限额仅在同币种时有效；混币种时返回 0（=不限制）。
+	if pcGlobalCurrency(resp.Methods) != "" {
+		resp.GlobalMin, resp.GlobalMax = pcComputeGlobalRange(resp.Methods)
+	}
 	return resp, nil
+}
+
+// pcGlobalCurrency 返回全部启用渠道的统一币种；混币种时返回 ""（GlobalMin/Max 不适用）。
+func pcGlobalCurrency(methods map[string]MethodLimits) string {
+	currency := ""
+	for _, ml := range methods {
+		next := strings.ToUpper(strings.TrimSpace(ml.Currency))
+		if next == "" {
+			continue
+		}
+		if currency == "" {
+			currency = next
+			continue
+		}
+		if currency != next {
+			return ""
+		}
+	}
+	return currency
 }
 
 func (s *PaymentConfigService) pcApplyEnabledVisibleMethodInstances(ctx context.Context, typeInstances map[string][]*dbent.PaymentProviderInstance, instances []*dbent.PaymentProviderInstance) map[string][]*dbent.PaymentProviderInstance {

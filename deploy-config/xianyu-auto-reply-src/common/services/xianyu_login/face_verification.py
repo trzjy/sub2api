@@ -24,6 +24,8 @@ import qrcode
 import qrcode.constants
 from loguru import logger
 
+from common.services.captcha.remote_solver import notify_local_face
+
 # 人脸验证相关接口
 PASSPORT_HOST = "https://passport.goofish.com"
 API_FACE_CHECK = f"{PASSPORT_HOST}/iv/photoVerify/check.do"
@@ -39,6 +41,41 @@ DEFAULT_HEADERS: Dict[str, str] = {
     "Referer": f"{PASSPORT_HOST}/",
     "Origin": PASSPORT_HOST,
 }
+
+
+async def notify_local_face_qr(account_id: str, qr_data_url: str) -> None:
+    """推送人脸二维码到本地桌面提醒；失败只记录，不阻断人工验证。"""
+    if not qr_data_url:
+        return
+    try:
+        from sqlalchemy import select
+
+        from common.models.system_setting import SystemSetting
+        from common.db.session import async_session_maker
+
+        async with async_session_maker() as session:
+            rows = (
+                await session.execute(
+                    select(SystemSetting).where(
+                        SystemSetting.key.in_(
+                            ["captcha.remote_service_url", "captcha.remote_secret_key"]
+                        )
+                    )
+                )
+            ).scalars().all()
+        config = {row.key: (row.value or "") for row in rows}
+        remote_url = (config.get("captcha.remote_service_url") or "").strip()
+        remote_secret = (config.get("captcha.remote_secret_key") or "").strip()
+        if not remote_url or not remote_secret:
+            logger.warning("人脸本地提醒未配置 remote helper，跳过")
+            return
+        sent, message = await notify_local_face(remote_url, remote_secret, account_id, qr_data_url)
+        if sent:
+            logger.info(f"【{account_id}】人脸二维码已推送本地桌面")
+        else:
+            logger.warning(f"【{account_id}】人脸本地提醒失败: {message}")
+    except Exception as exc:
+        logger.warning(f"【{account_id}】人脸本地提醒发送失败: {exc}")
 
 
 class FaceVerificationError(Exception):
@@ -86,6 +123,7 @@ async def run_face_verification_flow(
         FaceVerificationError: 提取失败 / 超时 / 未拿到 unb
     """
     base_headers = dict(headers or DEFAULT_HEADERS)
+    account_id = str((getattr(client, "cookies", None) or {}).get("unb") or "")
 
     # 步骤1：跟随风控跳转，落到 normal_validate.htm
     resp = await client.get(iframe_url, headers=base_headers, follow_redirects=True)
@@ -117,7 +155,9 @@ async def run_face_verification_flow(
     if not face_qr_match:
         raise FaceVerificationError("人脸验证：未能提取人脸验证二维码 URL")
     face_qr_content = face_qr_match.group(1)
-    on_qr_ready(render_qr_base64(face_qr_content))
+    face_qr_data_url = render_qr_base64(face_qr_content)
+    await notify_local_face_qr(account_id, face_qr_data_url)
+    on_qr_ready(face_qr_data_url)
     logger.info("人脸验证二维码已生成，等待用户扫码")
 
     # 步骤5：轮询 check.do 等待用户手机完成人脸验证

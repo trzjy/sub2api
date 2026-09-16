@@ -78,11 +78,14 @@ describe("SubscriptionPlanCard", () => {
     expect(mountPlanCard("openai", { validity_days: 30, validity_unit: "day" }).text()).toContain("/ 30payment.days");
   });
 
-  it("uses the configured currency symbol while preserving USD for legacy plans", () => {
+  it("uses a fixed USD symbol for all plans regardless of the historical currency label (M4)", () => {
+    // M4: plan price is always USD (ACCOUNT_CURRENCY); the display symbol no
+    // longer follows plan.currency (which is display-only and fixed to USD).
     const cnyPlan = mountPlanCard("openai", { currency: "CNY", original_price: 20 }).text();
 
-    expect(cnyPlan).toContain("¥10CNY");
-    expect(cnyPlan).toContain("¥20CNY");
+    expect(cnyPlan).toContain("$10");
+    expect(cnyPlan).toContain("$20");
+    expect(cnyPlan).not.toContain("¥10");
     expect(mountPlanCard("openai", { currency: "USD" }).text()).toContain("$10USD");
     expect(mountPlanCard("openai", { currency: "" }).text()).toContain("$10");
   });

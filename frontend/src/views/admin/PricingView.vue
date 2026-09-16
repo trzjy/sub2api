@@ -405,7 +405,8 @@
           <label class="input-label">{{ t('admin.pricing.official.model') }}</label>
           <input v-model.trim="officialForm.model" type="text" class="input" :disabled="!!editingOfficialId" :placeholder="t('admin.pricing.custom.modelsPlaceholder')" />
         </div>
-        <p class="text-xs text-gray-400">{{ t('admin.pricing.official.unitHint') }}</p>
+        <p v-if="cnyFxRate > 0" class="text-xs text-gray-400">{{ t('admin.pricing.official.unitHint', { fx: cnyFxRate.toFixed(2) }) }}</p>
+        <p v-else class="text-xs text-amber-600 dark:text-amber-400">{{ t('admin.pricing.official.unitHintNoFx') }}</p>
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label class="input-label">{{ t('admin.pricing.preview.input') }}（¥/M）</label>
@@ -709,6 +710,8 @@ const activeTab = ref<TabKey>('status')
 
 const status = ref<PricingStatusResponse | null>(null)
 const uncovered = ref<UncoveredResponse | null>(null)
+const globalFxRates = ref<Record<string, number>>({})
+const cnyFxRate = computed(() => Number(globalFxRates.value.CNY) || 0)
 
 const tabs = computed(() => [
   { key: 'status' as TabKey, label: 'admin.pricing.tabs.status', badge: () => status.value?.live_gaps.length ?? 0 },
@@ -1033,14 +1036,14 @@ function openOfficialEdit(entry: { model: string; price: { input_price: number; 
 }
 
 function cnyFromUsd(usd?: number): number {
-  if (usd == null || !Number.isFinite(usd)) return 0
-  return Number((usd * 7.15 * 1e6).toFixed(4)) // $/token → ¥/M
+  if (usd == null || !Number.isFinite(usd) || cnyFxRate.value <= 0) return 0
+  return Number((usd * cnyFxRate.value * 1e6).toFixed(4)) // $/token → ¥/M
 }
 
 function usdFromCny(cny: string): number {
   const v = Number(cny)
-  if (!Number.isFinite(v)) return 0
-  return v / 7.15 / 1e6 // ¥/M → $/token
+  if (!Number.isFinite(v) || cnyFxRate.value <= 0) return 0
+  return v / cnyFxRate.value / 1e6 // ¥/M → $/token
 }
 
 async function saveOfficialEdit() {
@@ -1190,7 +1193,7 @@ function openCostEdit(plan: { provider: string; window: string; monthly_fee_cny:
   costForm.monthly_fee_cny = plan ? String(plan.monthly_fee_cny) : ''
   costForm.first_month_cny = plan ? String(plan.first_month_cny) : ''
   costForm.quota_units = plan ? String(plan.quota_units) : ''
-  costForm.fx = plan ? String(plan.fx || 7.15) : '7.15'
+  costForm.fx = plan ? String(plan.fx || cnyFxRate.value || 7.15) : String(cnyFxRate.value || 7.15)
   costForm.weightsText = plan ? JSON.stringify(plan.weights ?? {}, null, 2) : ''
   costForm.accounts = plan && plan.accounts ? plan.accounts.join(', ') : ''
   costForm.note = plan?.note ?? ''
@@ -1219,7 +1222,7 @@ async function saveCostEdit() {
     first_month_cny: Number(costForm.first_month_cny) || 0,
     quota_units: Number(costForm.quota_units) || 0,
     window: costForm.window.trim() || 'monthly',
-    fx: Number(costForm.fx) || 7.15,
+    fx: Number(costForm.fx) || cnyFxRate.value || 7.15,
     weights,
     measured_cost_per_m: prevMeasured && Object.keys(prevMeasured).length ? prevMeasured : undefined,
     note: costForm.note.trim(),
@@ -1351,5 +1354,15 @@ function formatTime(value?: string): string {
 
 onMounted(() => {
   fetchStatus()
+  fetchGlobalFx()
 })
+
+async function fetchGlobalFx() {
+  try {
+    const settings = await adminAPI.settings.getSettings()
+    globalFxRates.value = settings.payment_fx_rates || {}
+  } catch {
+    globalFxRates.value = {}
+  }
+}
 </script>

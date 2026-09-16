@@ -55,13 +55,14 @@ Worker 容器(yiyutu-server)                 本地工作站(zjy@GL502VML)
 5. 配置为**每次调用实时读库**（cookie_token_manager.py:607、flow.py:47），改后无需重启 Worker 容器。
 6. 端到端验证：`POST /captcha/slider-solve/test` 带真实 punish 链接（需管理员登录态），或等真实续期挑战自然触发。
 
-### 5b. 契约 B（商品监控）配置——按用户，当前未启用
+### 5b. 契约 B（商品监控）配置——按用户隔离，admin 已启用
 
 商品监控的远程过风控是**个人设置**（`xy_user_settings`），不是全局 captcha 配置：
 键 `monitor.remote_risk_url` / `monitor.remote_risk_secret`（个人设置页填写，
-校验逻辑 common/services/monitor_remote_risk_config.py）。当前部署零监控任务、零用户配置——
-无消费者，故未落库。启用时机：创建商品监控任务前，在个人设置填
-url=`http://<网桥网关IP>:18089/risk` + 与契约 A 相同的 secret（helper 三路由共用一个 secret）。
+校验逻辑 common/services/monitor_remote_risk_config.py）。2026-09-16 已按用户裁定为唯一后台用户
+`admin`（user_id=1）写入 url=`http://172.19.0.1:18089/risk` + 与契约 A 相同的 secret
+（helper 三路由共用一个 secret）；Worker 容器实测负路径 401、有效鉴权可达 helper。
+其他后台用户需分别配置；监控任务真实风控触发待自然发生。
 
 ## 6. 验收清单
 
@@ -72,15 +73,16 @@ url=`http://<网桥网关IP>:18089/risk` + 与契约 A 相同的 secret（helper
 | 容器连通 | Worker 容器内访问 `http://172.19.0.1:18089/healthz` → 200（ufw 需放行 172.19.0.0/16→18089/tcp，已加） | ✅ 2026-09-16 |
 | 契约鉴权负路径 | 错 secret / 缺 X-API-Key → 401（经容器全链实测） | ✅ 2026-09-16 |
 | Worker 全局配置落库 | url+secret+pass_cookies=false 写入 xy_system_settings，SHA256 核验一致；实时读库无需重启 | ✅ 2026-09-16 |
-| 契约端到端 | Worker `/captcha/slider-solve/test` 或真实续期挑战触发本地弹窗+人工通过+回传成功 | 待验（硬性项） |
-| **真实挑战实测** | 真实 Baxia 挑战经人工本地打码后，凭证被 Worker 接受并恢复续期（x5sec IP 绑定风险只能实测排除） | **待验（硬性项，不可用代码推断替代）** |
-| 回退不劣化 | 人不在电脑前：本地超时/失败 → Worker 编排回退本机引擎，续期链路行为与现状一致 | 待验（随真实挑战一并观察） |
+| 契约端到端 | Worker `/captcha/slider-solve/test` 或真实续期挑战触发本地弹窗+人工通过+回传成功 | ✅ 2026-09-16 模拟端到端 |
+| **真实挑战实测** | 真实 Baxia 挑战经人工本地打码后，凭证被 Worker 接受并恢复续期（x5sec IP 绑定风险只能实测排除） | ✅ 2026-09-16 真实挑战通过：`x5sec` 回传后 Worker 判定远程成功、刷新 Token 并重连 WebSocket |
+| 回退不劣化 | 人不在电脑前：本地超时/失败 → Worker 编排回退本机引擎，续期链路行为与现状一致 | ✅ 2026-09-16 已实测远程失败后继续进入本机引擎；验证对象是回退入口与失败语义，不要求回退引擎本次通过风控 |
 
 验收证据：`/home/zjy/.sub2api-acceptance/xianyu-captcha-helper-20260916/`（00-deploy + 01-connectivity + 99-final-report）。
 
 ## 7. 风险与说明
 
-- **IP 绑定**：本地（家宽）解出的 x5sec 由服务器使用。该模式是 Worker 协议原生支持的标准玩法，但有效性必须真实挑战实测；若实测失败，回退方案是服务器侧 xvfb 探针继续调优或回到闲管家路线（历史底稿留存）。
+- **人脸验证**：协议密码登录触发的 `face_qr_url` 已透传主站账号页 UI；本地 `/face-notify` 是桌面提醒，只通知账号与入口，不承担主站二维码展示。服务器浏览器模式当前依赖账号通知渠道，尚未配置通道时本地无法收到。
+- **IP 绑定**：本地（家宽）解出的 x5sec 已由服务器真实挑战验证可用。
 - **时效**：人工 10~60s，Worker 端 300s 读超时足够；人不在 → 超时回退，不阻塞不劣化。
 - **隐私**：默认不传账号 Cookie；开启 pass_cookies 时 Cookie 经隧道到达本地仅存于内存。日志不落 cookie 值/完整验证链接。
 - **网桥网关 IP 动态风险**：docker 网络重建可能改变网关 IP 导致 remote_url 失效；遗留项——后续在 compose 为 `xianyu-internal` 固定子网（需容器重启窗口），触发条件：网关 IP 变更导致打码不通。

@@ -69,6 +69,7 @@ export default {
       scanHint: 'Scan the QR code with the Xianyu app',
       scanWaiting: 'Waiting for scan',
       scanScanned: 'Scanned, confirm on your phone',
+      faceVerificationRequired: 'Face verification required: scan with the bound account on your phone',
       scanSuccess: 'Login successful',
       scanAutoClose: 'Auto-closing in {seconds}s',
       scanFailed: 'Login failed',

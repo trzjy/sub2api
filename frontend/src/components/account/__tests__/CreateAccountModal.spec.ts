@@ -882,3 +882,102 @@ describe('CreateAccountModal volcano subscription', () => {
     expect(creds?.base_url).toBe('https://ark.cn-beijing.volces.com/api/plan')
   })
 })
+
+describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / web-kimi)', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'web-deepseek', type: 'apikey' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    showWarningMock.mockReset()
+    importCodexSessionMock.mockReset().mockResolvedValue({
+      created: 1,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [],
+      warnings: [],
+    })
+    createOpenAICodexPATMock.mockReset().mockResolvedValue({})
+  })
+
+  afterEach(() => vi.useRealTimers())
+
+  it('submits pasted cookie credentials for web-deepseek with apikey type', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webDeepseek')
+    await flushPromises()
+    // 风险提示必须可见（方案 §2.2）
+    expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
+    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=abc; HWWAFSESID=xyz')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('web-deepseek')
+    expect(payload?.type).toBe('apikey')
+    expect(payload?.credentials?.cookie).toBe('sessionid=abc; HWWAFSESID=xyz')
+    expect(payload?.credentials).not.toHaveProperty('api_key')
+  })
+
+  it('submits parsed token JSON for web-kimi and keeps only non-empty optional fields', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webKimi')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
+    await wrapper.get('[data-testid="web-kimi-token-json"]').setValue(
+      JSON.stringify({ access_token: 'at', refresh_token: 'rt', user_id: 'u-9' })
+    )
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('web-kimi')
+    expect(payload?.type).toBe('apikey')
+    expect(payload?.credentials).toEqual({
+      access_token: 'at',
+      refresh_token: 'rt',
+      user_id: 'u-9',
+    })
+  })
+
+  it('rejects blank cookie without calling create API', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webDeepseek')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
+    await wrapper.get('[data-testid="web-cookie-input"]').setValue('   ')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects unparseable kimi token JSON without calling create API', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webKimi')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
+    await wrapper.get('[data-testid="web-kimi-token-json"]').setValue('not-json')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).not.toHaveBeenCalled()
+  })
+
+  it('hides the generic api key block for web platforms', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webZhipu')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="web-cookie-input"]').exists()).toBe(true)
+    expect(wrapper.find('form#create-account-form input[type="password"]').exists()).toBe(false)
+  })
+})

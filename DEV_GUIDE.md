@@ -12,6 +12,10 @@
 | **数据库** | PostgreSQL 16 + Redis |
 | **包管理** | 后端: go modules, 前端: **pnpm**（不是 npm） |
 
+## 一.5、金额展示规约（前端）
+
+新增任何金额展示必须走 `frontend/src/utils/money.ts`（`formatMoney` / `formatAccountMoney` / `currencySymbol`），**禁止在组件里硬编码 `$` / `¥` 符号**。账本类金额（余额/成本/限额/面值/返利）显式 USD（`formatAccountMoney`），收款类金额（实付/手续费/统计）随订单/渠道携带的币种（`formatMoney`），禁止猜测币种。全局汇率配置见 `docs/PAYMENT.md` 的「Currency & FX」章节（记账货币 USD、FX_RATES、充值加价系数、订阅 USD 定价）。
+
 ## 二、本地环境配置
 
 ### PostgreSQL 16 (Windows 服务)

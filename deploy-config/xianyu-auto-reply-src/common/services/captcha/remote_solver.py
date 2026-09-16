@@ -4,6 +4,7 @@
 功能：
 1. 以 async httpx 调用远程过滑块接口，避免在异步管理器里直调同步 requests 阻塞事件循环
 2. 与 orchestrator._call_remote_solve 保持相同的请求协议与返回语义
+3. 本地人脸桌面提醒走 /face-notify，不进入滑块求解链路
 
 对外入口：async solve_remote(...) -> (status, cookies, message)
     status: 'ok'（通过，cookies 为 x5*）/ 'fail'（有返回但未通过）/
@@ -83,3 +84,33 @@ async def solve_remote(
         logger.info(f"【{user_id}】远程反馈验证链接已过期(url_expired)")
         return "url_expired", None, message or "远程反馈验证链接已过期"
     return "fail", None, message or "远程过滑块未通过"
+
+
+async def notify_local_face(
+    remote_base_url: str,
+    remote_secret: str,
+    account_id: str,
+    face_qr_url: str,
+) -> Tuple[bool, str]:
+    """向本地 helper 发送单向人脸二维码提醒；不支持时调用方记录并继续原流程。"""
+    base = (remote_base_url or "").strip()
+    if base.endswith("/solve"):
+        base = base[: -len("/solve")]
+    if not base or not remote_secret or not face_qr_url:
+        return False, "未配置本地 helper 或二维码为空"
+
+    try:
+        async with httpx.AsyncClient(timeout=(8.0, 15.0)) as client:
+            resp = await client.post(
+                f"{base}/face-notify",
+                headers={"X-API-Key": remote_secret},
+                json={"account_id": account_id, "face_qr_url": face_qr_url},
+            )
+        if resp.status_code != 200:
+            return False, f"本地提醒返回 HTTP {resp.status_code}"
+        body = resp.json()
+        if body.get("success"):
+            return True, ""
+        return False, str(body.get("message") or "本地提醒失败")
+    except Exception as exc:
+        return False, f"本地提醒调用失败: {exc}"

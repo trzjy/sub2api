@@ -53,14 +53,6 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 	if s.notificationEmailService != nil {
 		s.notificationEmailService.RememberRecipientLocale(ctx, req.UserID, user.Email, req.Locale)
 	}
-	orderAmount := req.Amount
-	limitAmount := req.Amount
-	if plan != nil {
-		orderAmount = plan.Price
-		limitAmount = plan.Price
-	} else if req.OrderType == payment.OrderTypeBalance {
-		orderAmount = calculateCreditedBalance(req.Amount, cfg.BalanceRechargeMultiplier)
-	}
 	feeRate := cfg.RechargeFeeRate
 	methodCurrency := payment.DefaultPaymentCurrency
 	if s.configService != nil {
@@ -69,7 +61,19 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 			return nil, err
 		}
 	}
-	payAmountStr, payAmount, err := calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate, methodCurrency, req.OrderType, cfg.SubscriptionUSDToCNYRate)
+	orderAmount := req.Amount
+	limitAmount := req.Amount
+	if plan != nil {
+		orderAmount = plan.Price
+		limitAmount = plan.Price
+	} else if req.OrderType == payment.OrderTypeBalance {
+		credited, err := calculateCreditedBalance(req.Amount, cfg.RechargeMarkup, methodCurrency, cfg.FXRates)
+		if err != nil {
+			return nil, infraerrors.BadRequest("FX_RATE_MISSING", "recharge failed: "+err.Error())
+		}
+		orderAmount = credited
+	}
+	payAmountStr, payAmount, err := calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate, methodCurrency, req.OrderType, cfg.FXRates)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +89,7 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 		selectedCurrency = paymentProviderConfigCurrency(sel.ProviderKey, sel.Config)
 	}
 	if selectedCurrency != methodCurrency {
-		payAmountStr, payAmount, err = calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate, selectedCurrency, req.OrderType, cfg.SubscriptionUSDToCNYRate)
+		payAmountStr, payAmount, err = calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate, selectedCurrency, req.OrderType, cfg.FXRates)
 		if err != nil {
 			return nil, err
 		}
@@ -206,6 +210,10 @@ func (s *PaymentService) createOrderInTx(ctx context.Context, req CreateOrderReq
 	if providerSnapshot != nil {
 		b.SetProviderSnapshot(providerSnapshot)
 	}
+	// 订单币种落库：新单以快照 currency（三家 CN 渠道 CNY、stripe/airwallex 实例币种）为准。
+	if currency := psOrderProviderSnapshotCurrency(providerSnapshot); currency != "" {
+		b.SetCurrency(currency)
+	}
 	if plan != nil {
 		b.SetPlanID(plan.ID).SetSubscriptionGroupID(plan.GroupID).SetSubscriptionDays(psComputeValidityDays(plan.ValidityDays, plan.ValidityUnit))
 	}
@@ -290,16 +298,19 @@ func buildPaymentOrderProviderSnapshot(sel *payment.InstanceSelection, req Creat
 		if merchantAppID := strings.TrimSpace(sel.Config["appId"]); merchantAppID != "" {
 			snapshot["merchant_app_id"] = merchantAppID
 		}
+		snapshot["currency"] = payment.DefaultPaymentCurrency
 	}
 	if providerKey == payment.TypeEasyPay {
 		if merchantID := strings.TrimSpace(sel.Config["pid"]); merchantID != "" {
 			snapshot["merchant_id"] = merchantID
 		}
+		snapshot["currency"] = payment.DefaultPaymentCurrency
 	}
 	if providerKey == payment.TypeXunhupay {
 		if merchantID := strings.TrimSpace(sel.Config["appId"]); merchantID != "" {
 			snapshot["merchant_id"] = merchantID
 		}
+		snapshot["currency"] = payment.DefaultPaymentCurrency
 	}
 	if providerKey == payment.TypeStripe {
 		snapshot["currency"] = paymentProviderConfigCurrency(providerKey, sel.Config)
@@ -648,26 +659,31 @@ func calculateCreateOrderPayAmount(limitAmount, feeRate float64, currency string
 	return payAmountStr, payAmount, nil
 }
 
-func calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate float64, currency, orderType string, usdToCnyRate float64) (string, float64, error) {
+func calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate float64, currency, orderType string, fxRates payment.FXRates) (string, float64, error) {
 	paymentAmount := limitAmount
 	if orderType == payment.OrderTypeSubscription {
-		paymentAmount = calculateSubscriptionGatewayBaseAmount(limitAmount, usdToCnyRate, currency)
+		// 缺币种汇率（FX_RATE_MISSING）时失败关闭下单，不得静默按 1:1 兜底。
+		converted, err := calculateSubscriptionGatewayBaseAmount(limitAmount, currency, fxRates)
+		if err != nil {
+			return "", 0, err
+		}
+		paymentAmount = converted
 	}
 	return calculateCreateOrderPayAmount(paymentAmount, feeRate, currency)
 }
 
 // calculateSubscriptionGatewayBaseAmount 计算订阅订单的网关扣款基数。
-// 换算是显式 opt-in：仅当管理员配置了订阅汇率（rate > 0，1 USD = rate CNY）
-// 且网关币种为 CNY 时，按 price × rate 换算；未配置时保持 price 直付的存量行为。
-func calculateSubscriptionGatewayBaseAmount(amount, usdToCnyRate float64, currency string) float64 {
-	rate := normalizeSubscriptionUSDToCNYRate(usdToCnyRate)
-	if rate <= 0 || currency != payment.DefaultPaymentCurrency {
-		return amount
+// plan.price 一律按 USD 定价（D4），收款金额 = FromUSD(price, 渠道币种) 统一走 FX。
+// 注意：这是一个记录在案的行为变更——旧逻辑仅 CNY 渠道且配置了订阅汇率时按 price × rate 换算，
+// 其余币种（如 Stripe HKD）保持 price 数值直付（HK$1 收 HK$1 属 bug）；
+// 现在统一 FromUSD：$1 套餐在 HKD 渠道应收 HK$7.80（按 1 USD = 7.80 HKD 计），属 bug 修正。
+// 换算遇缺币种汇率时报错（FX_RATE_MISSING）关闭下单，不得静默按 1:1 兜底。
+func calculateSubscriptionGatewayBaseAmount(priceUSD float64, currency string, fxRates payment.FXRates) (float64, error) {
+	converted, err := fxRates.FromUSD(decimal.NewFromFloat(priceUSD), currency)
+	if err != nil {
+		return 0, err
 	}
-	return decimal.NewFromFloat(amount).
-		Mul(decimal.NewFromFloat(rate)).
-		Round(int32(payment.CurrencyMaxFractionDigits(currency))).
-		InexactFloat64()
+	return converted.Round(int32(payment.CurrencyMaxFractionDigits(currency))).InexactFloat64(), nil
 }
 
 func validateCreateOrderAmountCurrency(amount float64, currency string) error {

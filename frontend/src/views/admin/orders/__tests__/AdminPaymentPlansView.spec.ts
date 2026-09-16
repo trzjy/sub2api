@@ -82,7 +82,11 @@ describe('AdminPaymentPlansView', () => {
     })
   })
 
-  it('uses the configured currency symbol and keeps legacy prices in USD', async () => {
+  it('uses a fixed USD symbol and shows an approximate CNY row from the global FX rate (M4)', async () => {
+    getConfig.mockResolvedValue({
+      data: { fx_rates: { CNY: 7.15 } },
+    })
+
     const wrapper = mount(AdminPaymentPlansView, {
       global: {
         plugins: [createPinia()],
@@ -99,8 +103,13 @@ describe('AdminPaymentPlansView', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('¥499.00CNY')
-    expect(wrapper.text()).toContain('¥599.00')
-    expect(wrapper.text()).toContain('$10.00')
+    // price 一律固定 USD 符号（ACCOUNT_CURRENCY），不再随 plan.currency 猜测
+    expect(wrapper.text()).toContain('$499.00USD')
+    expect(wrapper.text()).toContain('$599.00')
+    expect(wrapper.text()).toContain('$10.00USD')
+    expect(wrapper.text()).not.toContain('¥499.00')
+    // ≈ CNY 辅助行（499 × 7.15 = 3567.85；10 × 7.15 = 71.50）
+    expect(wrapper.text()).toContain('¥3,567.85')
+    expect(wrapper.text()).toContain('¥71.50')
   })
 })

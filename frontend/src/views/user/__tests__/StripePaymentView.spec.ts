@@ -61,7 +61,7 @@ vi.mock('@stripe/stripe-js/pure', () => ({
 }))
 
 import StripePaymentView from '../StripePaymentView.vue'
-import { formatPaymentAmount } from '@/components/payment/currency'
+import { formatPaymentAmount } from '@/utils/money'
 import type { PaymentOrder } from '@/types/payment'
 
 function orderFactory(overrides: Partial<PaymentOrder> = {}): PaymentOrder {

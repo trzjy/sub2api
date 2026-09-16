@@ -8215,9 +8215,9 @@
                       t("admin.settings.payment.balanceRechargeMultiplier")
                     }}</label>
                     <input
-                      :value="form.payment_balance_recharge_multiplier || ''"
+                      :value="form.payment_recharge_markup || ''"
                       @input="
-                        form.payment_balance_recharge_multiplier =
+                        form.payment_recharge_markup =
                           parseFloat(
                             ($event.target as HTMLInputElement).value,
                           ) || 1
@@ -8240,38 +8240,90 @@
                       {{
                         t("admin.settings.payment.balanceRechargePreview", {
                           usd: (
-                            Number(form.payment_balance_recharge_multiplier) ||
+                            Number(form.payment_recharge_markup) ||
+                            1
+                          ).toFixed(2),
+                          currency: selectedCurrencyForPreview,
+                          fx: cnyFxRateForPreview,
+                          markup: (
+                            Number(form.payment_recharge_markup) ||
                             1
                           ).toFixed(2),
                         })
                       }}
                     </p>
                   </div>
-                  <div>
+                  <!-- FX Rates Table Editor -->
+                  <div class="col-span-full">
                     <label class="input-label">{{
-                      t("admin.settings.payment.subscriptionUsdToCnyRate")
+                      t("admin.settings.payment.fxRatesTitle")
                     }}</label>
-                    <input
-                      :value="form.payment_subscription_usd_to_cny_rate || ''"
-                      @input="
-                        form.payment_subscription_usd_to_cny_rate =
-                          parseFloat(
-                            ($event.target as HTMLInputElement).value,
-                          ) || 0
-                      "
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      class="input"
-                      :placeholder="
-                        t(
-                          'admin.settings.payment.subscriptionUsdToCnyRateDisabled',
-                        )
-                      "
-                    />
-                    <p class="mt-0.5 text-xs text-gray-400">
+                    <p class="mb-2 text-xs text-gray-400 dark:text-gray-500">
+                      {{ t("admin.settings.payment.fxRatesHint") }}
+                    </p>
+                    <div class="space-y-2">
+                      <div
+                        v-for="(rate, currency) in fxRatesTable"
+                        :key="currency"
+                        class="flex items-center gap-2"
+                      >
+                        <span
+                          :class="[
+                            'inline-flex h-[38px] items-center rounded-lg border border-gray-200 bg-gray-100 px-3 text-sm font-medium dark:border-dark-600 dark:bg-dark-700',
+                            currency === 'CNY'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-gray-700 dark:text-gray-300',
+                          ]"
+                        >{{ currency }}</span>
+                        <input
+                          :value="rate"
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          class="input flex-1"
+                          @input="
+                            fxRatesTable[currency] =
+                              parseFloat(($event.target as HTMLInputElement).value) || 0
+                          "
+                        />
+                        <button
+                          v-if="currency !== 'CNY'"
+                          type="button"
+                          class="btn btn-ghost text-red-500 hover:text-red-600"
+                          @click="removeFxRate(currency)"
+                        >
+                          {{ t("admin.settings.payment.fxRatesRemove") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="mt-3 flex items-center gap-2">
+                      <Select
+                        v-model="newFxRateCurrency"
+                        :options="newFxRateCurrencyOptions"
+                        class="w-32"
+                        :placeholder="t('admin.settings.payment.fxRatesAdd')"
+                      />
+                      <button
+                        v-if="newFxRateCurrency"
+                        type="button"
+                        class="btn btn-secondary text-sm"
+                        @click="addFxRate"
+                      >{{ t("admin.settings.payment.fxRatesAdd") }}</button>
+                    </div>
+                    <p
+                      v-if="!fxRatesTable.CNY"
+                      class="mt-2 text-xs font-medium text-red-500"
+                    >
+                      {{ t("admin.settings.payment.fxRatesCnyRequired") }}
+                    </p>
+                    <p
+                      v-if="missingFxRateCurrencies.length > 0"
+                      class="mt-2 text-xs font-medium text-amber-600 dark:text-amber-400"
+                    >
                       {{
-                        t("admin.settings.payment.subscriptionUsdToCnyRateHint")
+                        t("admin.settings.payment.fxRatesMissingChannel", {
+                          currencies: missingFxRateCurrencies.join(", "),
+                        })
                       }}
                     </p>
                   </div>
@@ -8319,6 +8371,7 @@
                           fee: (
                             Number(form.payment_recharge_fee_rate) || 0
                           ).toFixed(2),
+                          currency: selectedCurrencyForPreview,
                         })
                       }}
                     </p>
@@ -8926,7 +8979,7 @@
                 <div class="relative">
                   <span
                     class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-                    >$</span
+                    >{{ currencySymbol(ACCOUNT_CURRENCY) }}</span
                   >
                   <input
                     v-model.number="form.balance_low_notify_threshold"
@@ -9179,6 +9232,7 @@ import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiErro
 import { useAppStore } from "@/stores";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
 import { normalizeVisibleMethod } from "@/components/payment/paymentFlow";
+import { ACCOUNT_CURRENCY, currencySymbol } from "@/utils/money";
 import {
   isRegistrationEmailSuffixDomainValid,
   normalizeRegistrationEmailSuffixDomain,
@@ -9975,8 +10029,8 @@ const form = reactive<SettingsForm>({
   payment_max_pending_orders: 3,
   payment_order_timeout_minutes: 30,
   payment_balance_disabled: false,
-  payment_balance_recharge_multiplier: 1,
-  payment_subscription_usd_to_cny_rate: 0,
+  payment_recharge_markup: 1,
+  payment_fx_rates: {} as Record<string, number>,
   payment_recharge_fee_rate: 0,
   payment_enabled_types: [],
   payment_help_image_url: "",
@@ -11175,6 +11229,7 @@ async function loadSettings() {
       }
     }
     syncCaptchaProviderSelection();
+    syncFxRatesFromSettings(settings);
     if (!form.claude_oauth_system_prompt_blocks?.trim()) {
       form.claude_oauth_system_prompt_blocks =
         defaultClaudeOAuthSystemPromptBlocks;
@@ -11555,6 +11610,34 @@ async function saveSettings() {
     form.claude_oauth_system_prompt_blocks =
       claudeOAuthSystemPromptBlocksJSON;
 
+    // ── FX Rates validation ─────────────────────────────────────────────
+    if (form.payment_enabled) {
+      const rates = fxRatesPayload();
+      // CNY must be present and positive
+      if (!rates.CNY || rates.CNY <= 0) {
+        appStore.showError(
+          localText(
+            '全局汇率表中 CNY 汇率必填。',
+            'CNY FX rate is required in the global FX rates table.',
+          ),
+        );
+        return;
+      }
+      // All enabled channel currencies (excluding USD/CNY) must be present
+      const missing = enabledChannelCurrencies.value.filter(
+        c => c !== 'USD' && c !== 'CNY' && !rates[c],
+      );
+      if (missing.length > 0) {
+        appStore.showError(
+          localText(
+            `已启用支付渠道缺少 FX 汇率：${missing.join(', ')}。请在全局汇率表中配置后再保存。`,
+            `Enabled channel currencies missing FX rate: ${missing.join(', ')}. Please configure in the global FX rates table before saving.`,
+          ),
+        );
+        return;
+      }
+    }
+
     const payload: UpdateSettingsRequest = {
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
@@ -11793,10 +11876,9 @@ async function saveSettings() {
       payment_order_timeout_minutes:
         Number(form.payment_order_timeout_minutes) || 0,
       payment_balance_disabled: form.payment_balance_disabled,
-      payment_balance_recharge_multiplier:
-        Number(form.payment_balance_recharge_multiplier) || 1,
-      payment_subscription_usd_to_cny_rate:
-        Number(form.payment_subscription_usd_to_cny_rate) || 0,
+      payment_recharge_markup:
+        Number(form.payment_recharge_markup) || 1,
+      payment_fx_rates: fxRatesPayload(),
       payment_recharge_fee_rate: Number(form.payment_recharge_fee_rate) || 0,
       payment_enabled_types: form.payment_enabled_types,
       payment_load_balance_strategy: form.payment_load_balance_strategy,
@@ -12652,6 +12734,67 @@ function isPaymentTypeEnabled(type: string): boolean {
 const hasAnyPaymentTypeEnabled = computed(
   () => form.payment_enabled_types.length > 0,
 );
+
+// ── FX Rates Table Editor State ─────────────────────────────────────────
+const fxRatesTable = ref<Record<string, number>>({});
+const newFxRateCurrency = ref('');
+const ALL_KNOWN_CURRENCIES = ['CNY', 'HKD', 'EUR', 'GBP', 'JPY', 'TWD', 'KRW', 'AUD', 'CAD', 'SGD', 'NZD', 'MOP', 'MYR', 'THB', 'PHP', 'INR'];
+const selectedCurrencyForPreview = computed(() => 'CNY');
+const cnyFxRateForPreview = computed(() => {
+  return (Number(fxRatesTable.value.CNY) || 0).toFixed(2);
+});
+const availableNewFxRateCurrencies = computed(() =>
+  ALL_KNOWN_CURRENCIES.filter(c => !(c in fxRatesTable.value))
+);
+const newFxRateCurrencyOptions = computed(() =>
+  availableNewFxRateCurrencies.value.map(c => ({ value: c, label: c }))
+);
+
+/** channel currencies currently enabled in stripe/airwallex configs */
+const enabledChannelCurrencies = computed(() => {
+  const currencies = new Set<string>();
+  for (const key of Object.keys(form)) {
+    if (key.startsWith('provider_') && key.endsWith('_currency')) {
+      const val = (form as Record<string, unknown>)[key];
+      if (typeof val === 'string' && /^[A-Z]{3}$/.test(val)) currencies.add(val);
+    }
+  }
+  return Array.from(currencies);
+});
+
+const missingFxRateCurrencies = computed(() =>
+  enabledChannelCurrencies.value.filter(c => c !== 'USD' && !(c in fxRatesTable.value))
+);
+
+function addFxRate() {
+  const cur = newFxRateCurrency.value.trim().toUpperCase();
+  if (cur && /^[A-Z]{3}$/.test(cur) && !(cur in fxRatesTable.value)) {
+    fxRatesTable.value[cur] = cur === 'CNY' ? 7.15 : 0;
+    newFxRateCurrency.value = '';
+  }
+}
+
+function removeFxRate(currency: string) {
+  if (currency === 'CNY') return;
+  const { [currency]: _, ...rest } = fxRatesTable.value;
+  fxRatesTable.value = rest as Record<string, number>;
+}
+
+function fxRatesPayload(): Record<string, number> {
+  const clean: Record<string, number> = {};
+  for (const [k, v] of Object.entries(fxRatesTable.value)) {
+    const num = Number(v);
+    if (Number.isFinite(num) && num > 0) clean[k] = num;
+  }
+  return clean;
+}
+
+function syncFxRatesFromSettings(settings: { payment_fx_rates?: unknown }) {
+  const raw = settings.payment_fx_rates;
+  fxRatesTable.value = (raw && typeof raw === 'object')
+    ? { ...(raw as Record<string, number>) }
+    : {};
+}
 
 function togglePaymentType(type: string) {
   if (form.payment_enabled_types.includes(type)) {

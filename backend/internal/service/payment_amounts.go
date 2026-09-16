@@ -7,29 +7,24 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const defaultBalanceRechargeMultiplier = 1.0
+const defaultRechargeMarkup = 1.0
 
-func normalizeBalanceRechargeMultiplier(multiplier float64) float64 {
-	if math.IsNaN(multiplier) || math.IsInf(multiplier, 0) || multiplier <= 0 {
-		return defaultBalanceRechargeMultiplier
+func normalizeRechargeMarkup(markup float64) float64 {
+	if math.IsNaN(markup) || math.IsInf(markup, 0) || markup <= 0 {
+		return defaultRechargeMarkup
 	}
-	return multiplier
+	return markup
 }
 
-// normalizeSubscriptionUSDToCNYRate 将非法值归一为 0（换算关闭）。
-// 与余额倍率不同，0 是合法状态：表示订阅保持 price 直付的存量行为。
-func normalizeSubscriptionUSDToCNYRate(rate float64) float64 {
-	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
-		return 0
+// calculateCreditedBalance 计算用户到账金额（USD 账本）。
+// credited = ToUSD(实付金额, 支付币种) × markup × 1.0，精度取 Round(2)。
+func calculateCreditedBalance(paymentAmount float64, markup float64, currency string, fxRates payment.FXRates) (float64, error) {
+	payDecimal := decimal.NewFromFloat(paymentAmount)
+	usd, err := fxRates.ToUSD(payDecimal, currency)
+	if err != nil {
+		return 0, err
 	}
-	return rate
-}
-
-func calculateCreditedBalance(paymentAmount, multiplier float64) float64 {
-	return decimal.NewFromFloat(paymentAmount).
-		Mul(decimal.NewFromFloat(normalizeBalanceRechargeMultiplier(multiplier))).
-		Round(2).
-		InexactFloat64()
+	return usd.Mul(decimal.NewFromFloat(markup)).Round(2).InexactFloat64(), nil
 }
 
 func calculateGatewayRefundAmount(orderAmount, payAmount, refundAmount float64, currency string) float64 {

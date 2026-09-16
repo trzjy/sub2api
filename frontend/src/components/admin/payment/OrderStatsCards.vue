@@ -9,7 +9,7 @@
         <div>
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('payment.admin.todayRevenue') }}</p>
           <p v-for="[currency, amount] in sortedAmounts(stats.today_amount)" :key="currency" class="text-xl font-bold text-gray-900 dark:text-white">
-            {{ formatMoney(currency, amount) }}
+            {{ formatMoney(amount, currency) }}
           </p>
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {{ stats.today_count }} {{ t('payment.admin.orders') }}
@@ -27,7 +27,7 @@
         <div>
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('payment.admin.totalRevenue') }}</p>
           <p v-for="[currency, amount] in sortedAmounts(stats.total_amount)" :key="currency" class="text-xl font-bold text-gray-900 dark:text-white">
-            {{ formatMoney(currency, amount) }}
+            {{ formatMoney(amount, currency) }}
           </p>
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {{ stats.total_count }} {{ t('payment.admin.orders') }}
@@ -58,7 +58,7 @@
         <div>
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('payment.admin.avgAmount') }}</p>
           <p v-for="[currency, amount] in sortedAmounts(stats.avg_amount)" :key="currency" class="text-xl font-bold text-gray-900 dark:text-white">
-            {{ formatMoney(currency, amount) }}
+            {{ formatMoney(amount, currency) }}
           </p>
         </div>
       </div>
@@ -70,6 +70,7 @@
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { CurrencyAmounts, DashboardStats } from '@/types/payment'
+import { formatMoney } from '@/utils/money'
 
 const { t } = useI18n()
 
@@ -81,7 +82,4 @@ function sortedAmounts(amounts: CurrencyAmounts): [string, number][] {
   return Object.entries(amounts).sort(([left], [right]) => left.localeCompare(right))
 }
 
-function formatMoney(currency: string, amount: number): string {
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
-}
 </script>

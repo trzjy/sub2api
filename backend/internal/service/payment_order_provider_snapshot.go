@@ -178,6 +178,15 @@ func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey str
 				return fmt.Errorf("alipay app_id mismatch: expected %s, got %s", expected, actual)
 			}
 		}
+		// 币种一致性校验（对齐 wxpay/stripe 模式）。补 currency 后快照永不为 nil；
+		// 对"快照存在但 merchant 字段缺省"的存量单，币种校验仍执行；
+		// 但 metadata 不含 currency 时（CN 渠道可能不回传币种），跳过校验以避免拒绝正常回调。
+		if expected := strings.TrimSpace(snapshot.Currency); expected != "" {
+			actual := strings.ToUpper(strings.TrimSpace(metadata["currency"]))
+			if actual != "" && !strings.EqualFold(expected, actual) {
+				return fmt.Errorf("alipay currency mismatch: expected %s, got %s", expected, actual)
+			}
+		}
 	case payment.TypeEasyPay:
 		if expected := strings.TrimSpace(snapshot.MerchantID); expected != "" {
 			actual := strings.TrimSpace(metadata["pid"])
@@ -188,6 +197,12 @@ func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey str
 				return fmt.Errorf("easypay pid mismatch: expected %s, got %s", expected, actual)
 			}
 		}
+		if expected := strings.TrimSpace(snapshot.Currency); expected != "" {
+			actual := strings.ToUpper(strings.TrimSpace(metadata["currency"]))
+			if actual != "" && !strings.EqualFold(expected, actual) {
+				return fmt.Errorf("easypay currency mismatch: expected %s, got %s", expected, actual)
+			}
+		}
 	case payment.TypeXunhupay:
 		if expected := strings.TrimSpace(snapshot.MerchantID); expected != "" {
 			actual := strings.TrimSpace(metadata["appid"])
@@ -196,6 +211,12 @@ func validateProviderSnapshotMetadata(order *dbent.PaymentOrder, providerKey str
 			}
 			if !strings.EqualFold(expected, actual) {
 				return fmt.Errorf("xunhupay appid mismatch: expected %s, got %s", expected, actual)
+			}
+		}
+		if expected := strings.TrimSpace(snapshot.Currency); expected != "" {
+			actual := strings.ToUpper(strings.TrimSpace(metadata["currency"]))
+			if actual != "" && !strings.EqualFold(expected, actual) {
+				return fmt.Errorf("xunhupay currency mismatch: expected %s, got %s", expected, actual)
 			}
 		}
 	case payment.TypeStripe:

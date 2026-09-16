@@ -169,7 +169,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { PaymentOrder } from '@/types/payment'
 import { formatOrderDateTime } from '@/components/payment/orderUtils'
-import { currencySymbol } from '@/components/payment/currency'
+import { ACCOUNT_CURRENCY, currencySymbol } from '@/utils/money'
 
 const { t } = useI18n()
 
@@ -187,7 +187,7 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
-const creditedAmountSymbol = currencySymbol('USD')
+const creditedAmountSymbol = currencySymbol(ACCOUNT_CURRENCY)
 
 const paymentAmountSymbol = computed(() => currencySymbol(props.order?.currency))
 

@@ -95,6 +95,12 @@ func (PaymentOrder) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			MaxLen(30),
+		// currency 是订单的支付币种，由 253 迁移新增并回填。
+		// 新单由 buildPaymentOrderProviderSnapshot 写入；存量单由迁移回填
+		// COALESCE(NULLIF(provider_snapshot->>'currency',''),'CNY')。
+		field.String("currency").
+			MaxLen(3).
+			Default("CNY"),
 		field.JSON("provider_snapshot", map[string]any{}).
 			Optional().
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}),

@@ -129,7 +129,8 @@ export default {
       addTitle: '新增官方参考价',
       editTitle: '编辑官方参考价',
       model: '模型名',
-      unitHint: '价格单位：¥ / 百万 tokens（保存时按 7.15 汇率换算为 $ 存储）。留空表示该项不展示。',
+      unitHint: '价格单位：¥ / 百万 tokens（保存时按全局汇率 {fx} 换算为 $ 存储）。留空表示该项不展示。',
+      unitHintNoFx: '尚未配置全局 CNY 汇率（设置 → 支付 → 全局汇率表），换算预览已禁用。请先配置后再录入官方价。',
       empty: '暂无官方参考价覆盖',
       deleteTitle: '删除官方参考价',
       deleteMessage: '确定删除「{model}」的官方参考价？删除后该模型回落计费目录价。'

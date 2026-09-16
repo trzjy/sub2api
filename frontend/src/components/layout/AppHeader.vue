@@ -261,6 +261,7 @@ import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
+import { formatAccountMoney } from '@/utils/money'
 
 const router = useRouter()
 const route = useRoute()
@@ -362,8 +363,7 @@ function handleReplayGuide() {
 }
 
 function formatHeaderMoney(value: number) {
-  if (!Number.isFinite(value)) return '$0.00'
-  return `$${value.toFixed(2)}`
+  return formatAccountMoney(Number.isFinite(value) ? value : 0)
 }
 
 function handleClickOutside(event: MouseEvent) {

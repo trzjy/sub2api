@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/payment"
 )
 
 // PricingCostBasisPlan 单个订阅计划的成本核算基础数据。
@@ -18,7 +20,7 @@ type PricingCostBasisPlan struct {
 	FirstMonthCNY    float64            `json:"first_month_cny"`               // 首月促销价（0 表示无）
 	QuotaUnits       float64            `json:"quota_units"`                   // 满月配额（扣减单位）
 	Window           string             `json:"window"`                        // 配额窗口说明（如 "monthly 锚定订阅日"）
-	FX               float64            `json:"fx"`                            // 人民币兑美元汇率（保本倍率换算用）
+	FX               float64            `json:"fx"`                            // 人民币兑美元汇率（保本倍率换算用）；0/缺省时回落全局 FX_RATES["CNY"]，读取时已填充有效值
 	Weights          map[string]float64 `json:"weights"`                       // 每模型扣减权重（units / M tokens），绝对用量型订阅实测
 	MeasuredCostPerM map[string]float64 `json:"measured_cost_per_m,omitempty"` // 每模型实测成本（¥/M tokens），百分比型订阅直接测得
 	Accounts         []int64            `json:"accounts"`                      // 绑定账号（实测探针/突发用其凭据）
@@ -32,6 +34,7 @@ type PricingCostBasis struct {
 }
 
 // getPricingCostBasis 解析 settings 中的成本核算数据（损坏时返回空并交由调用方兜底）。
+// 各计划 FX 空值（0/缺省）回落全局 FX_RATES["CNY"]（M8：字段保留可覆盖，回落值仅在读取时填充）。
 func getPricingCostBasis(ctx context.Context, settingRepo SettingRepository) (*PricingCostBasis, error) {
 	vals, err := settingRepo.GetMultiple(ctx, []string{SettingKeyPricingCostBasis})
 	if err != nil {
@@ -45,7 +48,36 @@ func getPricingCostBasis(ctx context.Context, settingRepo SettingRepository) (*P
 	if err := json.Unmarshal([]byte(raw), out); err != nil {
 		return nil, fmt.Errorf("parse pricing cost basis: %w", err)
 	}
+	if len(out.Plans) > 0 {
+		globalFX := pricingCostBasisGlobalFXCNY(ctx, settingRepo)
+		for i := range out.Plans {
+			if out.Plans[i].FX <= 0 {
+				out.Plans[i].FX = globalFX
+			}
+		}
+	}
 	return out, nil
+}
+
+// pricingCostBasisGlobalFXCNY 读取全局 FX_RATES["CNY"]（唯一换算 SSOT）。
+// 配置缺失/损坏时回落默认值（ParseFXRates 语义：空串 → {"CNY": 7.15}）。
+func pricingCostBasisGlobalFXCNY(ctx context.Context, settingRepo SettingRepository) float64 {
+	vals, err := settingRepo.GetMultiple(ctx, []string{SettingFXRates})
+	if err != nil {
+		return pricingCostBasisDefaultFXCNY()
+	}
+	fx, err := payment.ParseFXRates(vals[SettingFXRates])
+	if err != nil {
+		return pricingCostBasisDefaultFXCNY()
+	}
+	// ParseFXRates 保证 CNY 必填且为正数。
+	f, _ := fx["CNY"].Float64()
+	return f
+}
+
+func pricingCostBasisDefaultFXCNY() float64 {
+	f, _ := payment.DefaultFXRates()["CNY"].Float64()
+	return f
 }
 
 // GetPricingCostBasis 读取订阅成本核算数据。

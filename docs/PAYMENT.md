@@ -13,6 +13,7 @@ Sub2API has a built-in payment system that enables user self-service top-up with
 - [Provider Instance Management](#provider-instance-management)
 - [Webhook Configuration](#webhook-configuration)
 - [Payment Flow](#payment-flow)
+- [Currency & FX](#currency--fx)
 - [Migrating from Sub2ApiPay](#migrating-from-sub2apipay)
 
 ---
@@ -185,6 +186,8 @@ Each instance supports these limits:
 
 Payment callbacks are essential for the payment system to work correctly.
 
+> **Webhook callbacks carry the order currency**: after a payment is confirmed, the credited amount is derived from the paid amount and the order currency via the global FX rates — see [Currency & FX](#currency--fx).
+
 ### Callback URL Format
 
 When adding a provider, the system auto-generates callback URLs from your site domain:
@@ -259,6 +262,44 @@ User selects amount and payment method
 - Before marking an order as expired, the background job queries the upstream payment status first
 - If the user has actually paid but the callback was delayed, the system will reconcile automatically
 - The background job runs every 60 seconds to check for timed-out orders
+
+---
+
+## Currency & FX
+
+The payment system uses **USD as the single accounting currency**. All internal ledger values are plain USD numbers: `users.balance`, usage costs, redeem-code face values, welfare balances, API key quotas, platform/group/key limits, model pricing, and subscription limits. `ACCOUNT_CURRENCY = "USD"` is declared once in code; schemas and this guide treat every such value as USD.
+
+### FX Rates Table
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| **FX_RATES** | Global exchange rates as a JSON object with the semantic **1 USD = X <currency>**, e.g. `{"CNY": 7.15, "HKD": 7.80}` | `{"CNY": 7.15}` |
+
+- `CNY` is required. `USD` is implied as `1.0` and must not be written into the table.
+- This is the single conversion entry point (`backend/internal/payment/fx.go`, decimal-based; no float math in conversions).
+- On save, the currency of every **enabled Stripe/Airwallex instance** must exist in the table, otherwise saving is rejected (`FX_RATE_MISSING`). Deleted currencies still used by an enabled instance are also rejected.
+- It replaces `SUBSCRIPTION_USD_TO_CNY_RATE`, the frontend `PLAZA_OFFICIAL_FX` hardcode, and the independent `pricing_cost_basis.fx` semantics.
+
+### Top-up Markup (RECHARGE_MARKUP)
+
+Previously `BALANCE_RECHARGE_MULTIPLIER`. Its meaning changed from *"1 paid currency = X USD"* to *"a markup on top of the FX-parity conversion"*:
+
+- **Credited USD = ToUSD(pay_amount, order currency) × markup**, default `1.0` = FX parity.
+- `credited` is rounded to **2 decimal places** (`Round(2)`), e.g. ¥100 with FX 7.15 and markup 1.0 credits **$13.99**.
+
+### Subscription Plans Are Priced in USD
+
+- `subscription_plans.price` / `original_price` are always interpreted as **USD**; `plan.currency` is fixed to `'USD'` (legacy display-only field).
+- Gateway charge amount = `FromUSD(plan.price, gateway currency)`. `ccy = CNY` → `price × FX.CNY`; `ccy = USD` → `price`.
+
+### Behavior Changes
+
+- **Subscription collection on non-CNY, non-USD channels now converts via FX** (bug fix). Example: a $1 plan through a Stripe **HKD** channel previously charged **HK$1** (price passed through directly), now charges **HK$7.80** with FX 7.80.
+- **CNY top-ups no longer credit 1:1** — ¥100 now credits **$13.99** at markup 1.0 (was $100).
+
+### Global Recharge Limits
+
+`DAILY_RECHARGE_LIMIT`, `MIN_RECHARGE_AMOUNT`, `MAX_RECHARGE_AMOUNT` and instance min/max limits are counted in **payment-currency amounts**. The global min/max (widest range across enabled methods) is only returned when all enabled channels share one currency; for mixed-currency sites it returns `0` (= no limit), since cross-currency widening would be ambiguous.
 
 ---
 

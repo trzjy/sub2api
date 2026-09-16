@@ -7,6 +7,9 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// DefaultPaymentCurrency 是 CN 渠道（alipay/easypay/xunhupay/wxpay）的协议币种：
+// 这些渠道协议以人民币计价，下单快照写 snapshot["currency"]="CNY"；订单无币种信息时亦回落 CNY。
+// stripe/airwallex 币种由实例配置决定，必须存在于全局 FX_RATES（fx.go）。
 const DefaultPaymentCurrency = "CNY"
 
 type paymentCurrencyAmountUnit struct {

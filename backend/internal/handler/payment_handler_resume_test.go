@@ -204,6 +204,7 @@ func TestResolveOrderPublicByResumeTokenReturnsFrontendContractFields(t *testing
 		SetPaidAt(time.Now()).
 		SetClientIP("127.0.0.1").
 		SetSrcHost("api.example.com").
+		SetCurrency("USD").
 		SetProviderSnapshot(map[string]any{"currency": "USD"}).
 		Save(context.Background())
 	require.NoError(t, err)
@@ -242,10 +243,10 @@ func TestResolveOrderPublicByResumeTokenReturnsFrontendContractFields(t *testing
 	require.Equal(t, 0, resp.Code)
 	require.Equal(t, float64(order.ID), resp.Data["id"])
 	require.Equal(t, "resolve-order-no", resp.Data["out_trade_no"])
-	require.Equal(t, 100.0, resp.Data["amount"])
-	require.Equal(t, 103.0, resp.Data["pay_amount"])
+	require.Equal(t, float64(100.0), resp.Data["amount"])
+	require.Equal(t, float64(103.0), resp.Data["pay_amount"])
 	require.Equal(t, 0.03, resp.Data["fee_rate"])
-	require.Equal(t, "USD", resp.Data["currency"])
+	require.Equal(t, "USD", resp.Data["currency"]) // 列优先（:233 SetCurrency），快照一致
 	require.Equal(t, payment.TypeAlipay, resp.Data["payment_type"])
 	require.Equal(t, payment.OrderTypeBalance, resp.Data["order_type"])
 	require.Equal(t, service.OrderStatusPaid, resp.Data["status"])

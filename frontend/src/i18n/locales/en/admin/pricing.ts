@@ -129,7 +129,8 @@ export default {
       addTitle: 'Add Official Reference Price',
       editTitle: 'Edit Official Reference Price',
       model: 'Model',
-      unitHint: 'Unit: ¥ / 1M tokens (converted to $ at 7.15 on save). Leave blank to hide the item.',
+      unitHint: 'Unit: ¥ / 1M tokens (converted to $ at the global FX rate {fx} on save). Leave blank to hide the item.',
+      unitHintNoFx: 'No global CNY FX rate configured (Settings → Payment → Global FX Rates Table). Conversion preview is disabled — configure it before entering official prices.',
       empty: 'No official price overrides yet',
       deleteTitle: 'Delete Official Reference Price',
       deleteMessage: 'Delete the official reference price for "{model}"? The model will fall back to the billing catalog price.'

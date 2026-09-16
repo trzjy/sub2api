@@ -37,12 +37,14 @@ func (SubscriptionPlan) Fields() []ent.Field {
 		field.String("description").
 			SchemaType(map[string]string{dialect.Postgres: "text"}).
 			Default(""),
+		// price 一律按 USD 定价（货币计费统一方案 D4）：收款金额 = FromUSD(price, 渠道币种)。
 		field.Float("price").
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,2)"}),
 		field.Float("original_price").
 			SchemaType(map[string]string{dialect.Postgres: "decimal(20,2)"}).
 			Optional().
 			Nillable(),
+		// currency 固定 'USD'（历史 display-only 字段，253 迁移统一标记；后端写死、校验只收 USD）。
 		field.String("currency").
 			MaxLen(3).
 			Default(""),

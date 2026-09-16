@@ -139,10 +139,10 @@ function mountDialog({
 }
 
 describe('PlanEditDialog', () => {
-  it('shows CNY channel charge using the configured subscription rate and fee', async () => {
+  it('shows CNY channel charge using the global FX rate and fee', async () => {
     const wrapper = mountDialog({
       paymentConfig: {
-        subscription_usd_to_cny_rate: 7.15,
+        fx_rates: { CNY: 7.15 },
         recharge_fee_rate: 2.5,
       },
     })
@@ -155,10 +155,10 @@ describe('PlanEditDialog', () => {
     expect(wrapper.text()).toContain('¥73.22')
   })
 
-  it('hides the preview when the subscription rate is not configured', async () => {
+  it('hides the preview when the CNY FX rate is not configured', async () => {
     const wrapper = mountDialog({
       paymentConfig: {
-        subscription_usd_to_cny_rate: 0,
+        fx_rates: {},
         recharge_fee_rate: 2.5,
       },
     })

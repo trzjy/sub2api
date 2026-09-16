@@ -153,6 +153,24 @@ class Solver:
         except Exception as exc:
             log(f"桌面通知发送失败（不影响求解）：{exc}")
 
+    async def _notify_face(self, account_id: str, qr_path: str) -> None:
+        if not self.cfg.get("notify", True):
+            return
+        front_base = str(self.cfg.get("front_base_url") or "").strip().rstrip("/")
+        body = f"账号 {account_id or '?'} 需要人脸验证，请打开二维码完成"
+        if front_base:
+            body += f"：{front_base}/admin/xianyu/accounts"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "notify-send", "-u", "critical", "-a", "xianyu-captcha-helper",
+                "-i", qr_path, "闲鱼人脸验证", body,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception as exc:
+            log(f"人脸桌面通知发送失败（不影响登录链路）：{exc}")
+
     async def solve(self, url: str, account_id: str, deadline: int) -> tuple[str, Dict[str, str], Optional[bool]]:
         """打开浏览器等待人工过滑块。
 
@@ -238,6 +256,24 @@ def _check_secret(provided: str, secret: str) -> bool:
     return bool(provided) and hmac.compare_digest(provided, secret)
 
 
+def save_face_qr(data_url: str) -> Path:
+    """把 data-url 二维码写入 0600 临时文件，供 notify-send 图标展示。"""
+    import base64
+    import tempfile
+
+    if not data_url.startswith("data:image/"):
+        raise ValueError("face_qr_url 必须是图片 data-url")
+    encoded = data_url.split(",", 1)
+    if len(encoded) != 2:
+        raise ValueError("face_qr_url 缺少 base64 数据")
+    payload = base64.b64decode(encoded[1], validate=True)
+    fd, filename = tempfile.mkstemp(prefix="xianyu-face-", suffix=".png")
+    with os.fdopen(fd, "wb") as image_file:
+        image_file.write(payload)
+    os.chmod(filename, 0o600)
+    return Path(filename)
+
+
 def _url_ok(url: str) -> bool:
     return isinstance(url, str) and url.startswith(("http://", "https://")) and len(url) <= 4096
 
@@ -295,10 +331,54 @@ def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
             },
         })
 
+    async def browser_notify(request: web.Request) -> web.Response:
+        # 服务器浏览器模式人脸通知只推送桌面文本，避免依赖第三方渠道。
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"})
+        message = str(body.get("message") or "").strip()
+        if not message:
+            return web.json_response({"success": False, "message": "缺少 message"}, status=400)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "notify-send", "-u", "critical", "-a", "xianyu-captcha-helper",
+                "闲鱼服务器浏览器人脸", message,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception as exc:
+            log(f"服务器浏览器人脸通知发送失败：{exc}")
+            return web.json_response({"success": False, "message": "notified failed"}, status=500)
+        return web.json_response({"success": True, "message": "notified", "data": {}})
+
+    async def face_notify(request: web.Request) -> web.Response:
+        # 人脸验证仅推送本地提醒；二维码瞬时落盘、通知后删除。
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"})
+        account_id = str(body.get("account_id") or "")
+        try:
+            qr_path = save_face_qr(str(body.get("face_qr_url") or ""))
+        except Exception as exc:
+            log(f"人脸二维码校验失败：{exc}")
+            return web.json_response({"success": False, "message": "face_qr_url 无效"}, status=400)
+        await solver._notify_face(account_id, str(qr_path))
+        qr_path.unlink(missing_ok=True)
+        return web.json_response({"success": True, "message": "notified", "data": {}})
+
     app = web.Application(client_max_size=256 * 1024)
     app.router.add_get("/healthz", healthz)
     app.router.add_post("/solve", solve)
     app.router.add_post("/risk", risk)
+    app.router.add_post("/browser-notify", browser_notify)
+    app.router.add_post("/face-notify", face_notify)
     return app
 
 
@@ -348,7 +428,7 @@ async def _amain(cfg: Dict[str, Any], port_override: Optional[int]) -> None:
     port = port_override or int(cfg.get("port", DEFAULT_PORT))
     site = web.TCPSite(runner, bind, port)
     await site.start()
-    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk）")
+    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk /browser-notify /face-notify）")
     try:
         while True:
             await asyncio.sleep(3600)

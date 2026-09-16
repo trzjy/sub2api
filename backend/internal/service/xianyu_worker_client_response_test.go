@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // 验证 do() 对 ApiResponse 包装响应的二次解包是否会覆盖顶层 success。
@@ -64,4 +66,11 @@ func TestReviewMarshalRoundTrip(t *testing.T) {
 	if !bytes.Contains(raw, []byte(`"qr_code_url":"url"`)) {
 		t.Fatal("qr_code_url not emitted")
 	}
+}
+
+func TestUnmarshalLoginSessionStatusPreservesFaceQR(t *testing.T) {
+	var status XianyuWorkerLoginSessionStatus
+	require.NoError(t, json.Unmarshal([]byte(`{"session_id":"s1","status":"verification_required","face_qr_url":"data:image/png;base64,face"}`), &status))
+	require.Equal(t, "verification_required", status.Status)
+	require.Equal(t, "data:image/png;base64,face", status.FaceQRURL)
 }

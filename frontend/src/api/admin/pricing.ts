@@ -221,8 +221,7 @@ export interface PlazaOfficialOverrideEntry {
   price: PlazaOfficialPrice
 }
 
-/** 汇率：管理端录入 ¥/M，存储为 $/M。 */
-export const PLAZA_OFFICIAL_FX = 7.15
+/** 汇率：管理端录入 ¥/M，存储为 $/M。全局 FX 读管理端设置 payment_fx_rates（见 PricingView）。 */
 
 export async function getPlazaOfficialPricing(): Promise<PlazaOfficialOverrideEntry[]> {
   const { data } = await apiClient.get('/admin/model-plaza/official-pricing')

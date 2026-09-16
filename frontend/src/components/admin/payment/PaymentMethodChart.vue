@@ -20,7 +20,7 @@
           </div>
           <div class="space-y-1 text-right">
             <span v-for="[currency, amount] in sortedAmounts(method.amount)" :key="currency" class="block text-sm font-medium text-gray-900 dark:text-white">
-              {{ formatMoney(currency, amount) }}
+              {{ formatMoney(amount, currency) }}
             </span>
             <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">
               ({{ method.count }})
@@ -45,6 +45,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { CurrencyAmounts, PaymentMethodStats } from '@/types/payment'
+import { formatMoney } from '@/utils/money'
 
 const { t } = useI18n()
 
@@ -85,7 +86,4 @@ function barWidth(currency: string, amount: number): number {
   return Math.min((amount / (maxAmounts.value[currency] || 1)) * 100, 100)
 }
 
-function formatMoney(currency: string, amount: number): string {
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
-}
 </script>

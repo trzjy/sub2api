@@ -137,6 +137,7 @@ type XianyuWorkerLoginSessionStatus struct {
 	IsNew           bool   `json:"is_new_account,omitempty"`
 	Message         string `json:"message,omitempty"`
 	VerificationURL string `json:"verification_url,omitempty"`
+	FaceQRURL       string `json:"face_qr_url,omitempty"`
 }
 
 // UnmarshalJSON 兼容 Worker internal_api 返回的 qr_code_url 与前端期望的 qr_code。
@@ -150,6 +151,7 @@ func (s *XianyuWorkerLoginSessionStatus) UnmarshalJSON(data []byte) error {
 		IsNew           bool   `json:"is_new_account"`
 		Message         string `json:"message"`
 		VerificationURL string `json:"verification_url"`
+		FaceQRURL       string `json:"face_qr_url"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -162,6 +164,7 @@ func (s *XianyuWorkerLoginSessionStatus) UnmarshalJSON(data []byte) error {
 	s.IsNew = raw.IsNew
 	s.Message = raw.Message
 	s.VerificationURL = raw.VerificationURL
+	s.FaceQRURL = raw.FaceQRURL
 	return nil
 }
 

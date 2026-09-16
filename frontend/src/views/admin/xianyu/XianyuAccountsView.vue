@@ -167,6 +167,10 @@
           <div v-else-if="scanStatus === 'expired'" class="text-red-600">
             {{ t('admin.xianyu.accounts.scanExpired') }}
           </div>
+          <div v-else-if="scanFaceQRCode" class="flex flex-col items-center gap-2">
+            <img :src="scanFaceQRCode" class="h-56 w-56 rounded border border-gray-200 dark:border-dark-700" alt="Face verification QR" />
+            <span class="text-sm text-gray-500">{{ t('admin.xianyu.accounts.faceVerificationRequired') }}</span>
+          </div>
           <div v-else-if="scanQRCode" class="flex flex-col items-center gap-2">
             <img :src="scanQRCode" class="h-56 w-56 rounded border border-gray-200 dark:border-dark-700" alt="QR" />
             <span class="text-sm text-gray-500">
@@ -353,6 +357,7 @@ const scanSessionID = ref('')
 const scanStatus = ref('waiting')
 const scanMessage = ref('')
 const scanQRCode = ref('')
+const scanFaceQRCode = ref('')
 let pollTimer: number | null = null
 // 登录成功后倒计时自动关闭扫码弹窗。
 let scanCloseTimer: number | null = null
@@ -385,6 +390,7 @@ async function openScan(account: XianyuAccount | null) {
   scanStatus.value = 'waiting'
   scanMessage.value = ''
   scanQRCode.value = ''
+  scanFaceQRCode.value = ''
   scanSessionID.value = ''
   scanVisible.value = true
   try {
@@ -428,6 +434,7 @@ async function pollOnce(sessionID: string) {
     const session = await adminAPI.xianyu.queryLoginSession(sessionID)
     scanStatus.value = session.status
     scanMessage.value = session.message || ''
+    scanFaceQRCode.value = session.face_qr_url || ''
     if (session.status === 'success' || session.status === 'failed' || session.status === 'expired') {
       stopPolling()
       if (session.status === 'success') {

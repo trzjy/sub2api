@@ -55,8 +55,10 @@
         <div><label class="input-label">{{ t('payment.admin.sortOrder') }}</label><input v-model.number="planForm.sort_order" type="number" min="0" class="input" /></div>
         <div>
           <label class="input-label">{{ t('payment.admin.currency') }}</label>
-          <input v-model="planForm.currency" type="text" maxlength="3" class="input uppercase" :placeholder="t('payment.admin.currencyPlaceholder')" />
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.currencyHint') }}</p>
+          <div class="flex items-center gap-2">
+            <span class="input flex h-[38px] items-center bg-gray-100 text-sm font-medium dark:bg-dark-700">{{ ACCOUNT_CURRENCY }}</span>
+          </div>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.currencyHintUsd') }}</p>
         </div>
       </div>
       <div>
@@ -97,7 +99,7 @@ import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
 import type { AdminPaymentConfig } from '@/api/admin/payment'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { formatPaymentAmount } from '@/components/payment/currency'
+import { formatPaymentAmount, ACCOUNT_CURRENCY } from '@/utils/money'
 import type { SubscriptionPlan } from '@/types/payment'
 import type { AdminGroup } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -156,10 +158,12 @@ function ceilCnyAmount(value: number): number {
 
 const subscriptionCnyPreview = computed(() => {
   const price = Number(planForm.price) || 0
-  const rate = Number(props.paymentConfig?.subscription_usd_to_cny_rate) || 0
-  if (price <= 0 || rate <= 0) return null
+  // fx_rates from admin settings (loaded via AdminPaymentConfig.fx_rates)
+  const fxRates = props.paymentConfig?.fx_rates || {}
+  const cnyRate = Number(fxRates.CNY) || 0
+  if (price <= 0 || cnyRate <= 0) return null
 
-  const amount = roundCnyAmount(price * rate)
+  const amount = roundCnyAmount(price * cnyRate)
   const feeRate = Number(props.paymentConfig?.recharge_fee_rate) || 0
   const fee = feeRate > 0 ? ceilCnyAmount((amount * feeRate) / 100) : 0
   const total = feeRate > 0 ? roundCnyAmount(amount + fee) : amount

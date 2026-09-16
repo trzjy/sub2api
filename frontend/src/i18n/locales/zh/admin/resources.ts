@@ -349,7 +349,7 @@ export default {
         selectType: '选择类型',
         valueLabel: '面值',
         valuePlaceholder: '请输入面值',
-        balanceHint: '余额金额（美元）',
+        balanceHint: '余额金额（USD）',
         concurrencyHint: '并发数增量',
         countLabel: '数量',
         countPlaceholder: '请输入数量',

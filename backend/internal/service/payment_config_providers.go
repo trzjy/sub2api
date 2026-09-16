@@ -193,6 +193,13 @@ func (s *PaymentConfigService) CreateProviderInstance(ctx context.Context, req C
 			return nil, err
 		}
 	}
+	// stripe/airwallex 实例币种必须存在于全局 FX_RATES（否则 checkout 换算会失败关闭）。
+	// 仅在启用时校验：停用实例允许先保存草稿、后配置 FX。
+	if req.Enabled {
+		if err := s.validateProviderCurrencyInFXRates(ctx, req.ProviderKey, req.Config); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.validateVisibleMethodEnablementConflicts(ctx, 0, req.ProviderKey, typesStr, req.Enabled); err != nil {
 		return nil, err
 	}
@@ -366,6 +373,13 @@ func (s *PaymentConfigService) UpdateProviderInstance(ctx context.Context, id in
 	finalEnabled := current.Enabled
 	if req.Enabled != nil {
 		finalEnabled = *req.Enabled
+	}
+	// stripe/airwallex 实例币种必须存在于全局 FX_RATES（按合并后的生效币种校验）。
+	// 仅在最终启用时校验；放在 PENDING_ORDERS 检查之后，避免掩盖存量单保护错误。
+	if finalEnabled && (current.ProviderKey == payment.TypeStripe || current.ProviderKey == payment.TypeAirwallex) {
+		if err := s.validateProviderCurrencyInFXRates(ctx, current.ProviderKey, configToValidate); err != nil {
+			return nil, err
+		}
 	}
 	if finalEnabled {
 		if err := s.validateProviderConfig(current.ProviderKey, configToValidate); err != nil {

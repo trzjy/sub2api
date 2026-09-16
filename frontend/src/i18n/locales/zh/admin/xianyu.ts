@@ -69,6 +69,7 @@ export default {
       scanHint: '使用闲鱼 App 扫码完成登录',
       scanWaiting: '等待扫码',
       scanScanned: '已扫码，请在手机上确认',
+      faceVerificationRequired: '需要人脸验证：请用绑定账号的手机扫码完成',
       scanSuccess: '登录成功',
       scanAutoClose: '{seconds} 秒后自动关闭',
       scanFailed: '登录失败',

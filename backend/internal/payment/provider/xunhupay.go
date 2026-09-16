@@ -22,6 +22,9 @@ import (
 
 // XunhuPay constants.
 const (
+	// xunhupayCurrency 是 CN 渠道协议币种（虎皮椒以人民币计价）。
+	// 协议透传行为不变；下单快照据此写 snapshot["currency"]。
+	xunhupayCurrency         = "CNY"
 	xunhupayVersion          = "1.1"
 	xunhupayStatusDone       = "OD" // Order Done — paid
 	xunhupayHTTPTimeout      = 10 * time.Second

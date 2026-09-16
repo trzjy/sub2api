@@ -29,7 +29,7 @@
             <span class="text-sm text-gray-700 dark:text-gray-300">{{ user.email }}</span>
           </div>
           <span class="text-sm font-medium text-gray-900 dark:text-white">
-            {{ formatMoney(currency, user.amount) }}
+            {{ formatMoney(user.amount, currency) }}
           </span>
         </div>
       </div>
@@ -40,6 +40,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import type { TopUserPaymentStats } from '@/types/payment'
+import { formatMoney } from '@/utils/money'
 
 const { t } = useI18n()
 
@@ -62,7 +63,4 @@ function sortedUsers(usersByCurrency: Record<string, TopUserPaymentStats[]>): [s
   return Object.entries(usersByCurrency).sort(([left], [right]) => left.localeCompare(right))
 }
 
-function formatMoney(currency: string, amount: number): string {
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount)
-}
 </script>
