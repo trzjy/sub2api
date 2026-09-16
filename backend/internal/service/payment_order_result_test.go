@@ -9,6 +9,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/shopspring/decimal"
 )
 
 func TestShouldUseAlipayMobilePrecreate(t *testing.T) {
@@ -307,45 +308,42 @@ func TestCalculateCreateOrderPayAmountForBalanceIgnoresFX(t *testing.T) {
 	}
 }
 
-// 到账公式：credited = (ToUSD(实付, 币种) × markup).Round(2)。
-// CNY ¥100、FX=7.15、markup=1.0 → $13.99；markup=1.1 → $15.38。
-func TestCalculateCreditedBalanceUsesFXAndMarkup(t *testing.T) {
+// 到账公式：credited = ToUSD(实付, 币种).Round(2)，充值多少折合多少，不再乘加价系数。
+// CNY ¥100、FX=7.15 → $13.99。
+func TestCreditedBalanceFXParity(t *testing.T) {
 	t.Parallel()
 
 	fx := mustFXRates(t, `{"CNY": 7.15}`)
 
-	got, err := calculateCreditedBalance(100, 1.0, "CNY", fx)
+	payDecimal := decimal.NewFromFloat(100)
+	usd, err := fx.ToUSD(payDecimal, "CNY")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	got := usd.Round(2).InexactFloat64()
 	if got != 13.99 {
 		t.Fatalf("credited balance = %v, want 13.99", got)
 	}
 
-	got, err = calculateCreditedBalance(100, 1.1, "CNY", fx)
+	// USD 渠道：$10 → $10。
+	payDecimal = decimal.NewFromFloat(10)
+	usd, err = fx.ToUSD(payDecimal, "USD")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != 15.38 {
-		t.Fatalf("credited balance with markup 1.1 = %v, want 15.38", got)
-	}
-
-	// USD 渠道：$10 × markup=1.0 → $10；markup=2 → $20。
-	got, err = calculateCreditedBalance(10, 2, "USD", fx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 20 {
-		t.Fatalf("credited balance USD = %v, want 20", got)
+	got = usd.Round(2).InexactFloat64()
+	if got != 10 {
+		t.Fatalf("credited balance USD = %v, want 10", got)
 	}
 }
 
 // 换算遇缺币种汇率时报错（FX_RATE_MISSING），不得按 1:1 兜底入账。
-func TestCalculateCreditedBalanceFailsClosedOnMissingFXRate(t *testing.T) {
+func TestCreditedBalanceFailsClosedOnMissingFXRate(t *testing.T) {
 	t.Parallel()
 
 	fx := mustFXRates(t, `{"CNY": 7.15}`)
-	_, err := calculateCreditedBalance(100, 1.0, "HKD", fx)
+	payDecimal := decimal.NewFromFloat(100)
+	_, err := fx.ToUSD(payDecimal, "HKD")
 	if err == nil {
 		t.Fatal("expected missing FX rate error")
 	}

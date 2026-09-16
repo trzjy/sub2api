@@ -33,7 +33,6 @@ export interface PaymentConfig {
   max_pending_orders: number
   order_timeout_minutes: number
   balance_disabled: boolean
-  recharge_markup: number
   enabled_payment_types: PaymentType[]
   help_image_url: string
   help_text: string
@@ -66,7 +65,6 @@ export interface CheckoutInfoResponse {
   global_max: number
   plans: SubscriptionPlan[]
   balance_disabled: boolean
-  recharge_markup: number
   /** 1 USD = X <ccy>; only enabled gateway currencies + CNY are included. */
   fx_rates: Record<string, number>
   recharge_fee_rate: number

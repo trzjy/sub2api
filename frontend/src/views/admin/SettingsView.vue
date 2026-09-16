@@ -8210,49 +8210,6 @@
                       :placeholder="t('admin.settings.payment.noLimit')"
                     />
                   </div>
-                  <div>
-                    <label class="input-label">{{
-                      t("admin.settings.payment.balanceRechargeMultiplier")
-                    }}</label>
-                    <input
-                      :value="form.payment_recharge_markup || ''"
-                      @input="
-                        form.payment_recharge_markup =
-                          parseFloat(
-                            ($event.target as HTMLInputElement).value,
-                          ) || 1
-                      "
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      class="input"
-                    />
-                    <p class="mt-0.5 text-xs text-gray-400">
-                      {{
-                        t(
-                          "admin.settings.payment.balanceRechargeMultiplierHint",
-                        )
-                      }}
-                    </p>
-                    <p
-                      class="mt-1 text-xs font-medium text-primary-600 dark:text-primary-400"
-                    >
-                      {{
-                        t("admin.settings.payment.balanceRechargePreview", {
-                          usd: (
-                            Number(form.payment_recharge_markup) ||
-                            1
-                          ).toFixed(2),
-                          currency: selectedCurrencyForPreview,
-                          fx: cnyFxRateForPreview,
-                          markup: (
-                            Number(form.payment_recharge_markup) ||
-                            1
-                          ).toFixed(2),
-                        })
-                      }}
-                    </p>
-                  </div>
                   <!-- FX Rates Table Editor -->
                   <div class="col-span-full">
                     <label class="input-label">{{
@@ -10029,7 +9986,6 @@ const form = reactive<SettingsForm>({
   payment_max_pending_orders: 3,
   payment_order_timeout_minutes: 30,
   payment_balance_disabled: false,
-  payment_recharge_markup: 1,
   payment_fx_rates: {} as Record<string, number>,
   payment_recharge_fee_rate: 0,
   payment_enabled_types: [],
@@ -11876,8 +11832,6 @@ async function saveSettings() {
       payment_order_timeout_minutes:
         Number(form.payment_order_timeout_minutes) || 0,
       payment_balance_disabled: form.payment_balance_disabled,
-      payment_recharge_markup:
-        Number(form.payment_recharge_markup) || 1,
       payment_fx_rates: fxRatesPayload(),
       payment_recharge_fee_rate: Number(form.payment_recharge_fee_rate) || 0,
       payment_enabled_types: form.payment_enabled_types,
@@ -12740,9 +12694,6 @@ const fxRatesTable = ref<Record<string, number>>({});
 const newFxRateCurrency = ref('');
 const ALL_KNOWN_CURRENCIES = ['CNY', 'HKD', 'EUR', 'GBP', 'JPY', 'TWD', 'KRW', 'AUD', 'CAD', 'SGD', 'NZD', 'MOP', 'MYR', 'THB', 'PHP', 'INR'];
 const selectedCurrencyForPreview = computed(() => 'CNY');
-const cnyFxRateForPreview = computed(() => {
-  return (Number(fxRatesTable.value.CNY) || 0).toFixed(2);
-});
 const availableNewFxRateCurrencies = computed(() =>
   ALL_KNOWN_CURRENCIES.filter(c => !(c in fxRatesTable.value))
 );

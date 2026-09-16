@@ -671,7 +671,6 @@ export interface SystemSettings {
   payment_max_pending_orders: number;
   payment_enabled_types: string[];
   payment_balance_disabled: boolean;
-  payment_recharge_markup: number;
   /** FX rates: 1 USD = X <ccy>. JSON object from settings key FX_RATES. */
   payment_fx_rates: Record<string, number>;
   payment_recharge_fee_rate: number;
@@ -994,7 +993,6 @@ export interface UpdateSettingsRequest {
   payment_max_pending_orders?: number;
   payment_enabled_types?: string[];
   payment_balance_disabled?: boolean;
-  payment_recharge_markup?: number;
   payment_fx_rates?: Record<string, number>;
   payment_recharge_fee_rate?: number;
   payment_load_balance_strategy?: string;

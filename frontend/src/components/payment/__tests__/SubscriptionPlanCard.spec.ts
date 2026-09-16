@@ -121,10 +121,10 @@ describe("SubscriptionPlanCard", () => {
       price: 123.45,
       currency: "USD",
       description: "Includes advanced models and priority support.",
-    }, { cnyRate: 7.15 });
+    }, { currency: "CNY", displayPrice: 882.67 });
     const title = wrapper.get("h3");
     const badge = wrapper.findAll("span").find((node) => node.text() === "OpenAI");
-    const price = wrapper.findAll("span").find((node) => node.text() === "123.45");
+    const price = wrapper.findAll("span").find((node) => node.text() === "882.67");
 
     expect(title.element.parentElement?.classList).toContain("min-w-0");
     expect(title.element.parentElement?.classList).toContain("flex-1");

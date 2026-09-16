@@ -23,7 +23,6 @@ export interface AdminPaymentConfig {
   max_pending_orders: number
   enabled_payment_types: string[]
   balance_disabled: boolean
-  recharge_markup: number
   /** 1 USD = X <ccy>; only enabled gateway currencies + CNY are included. */
   fx_rates: Record<string, number>
   recharge_fee_rate: number
@@ -44,7 +43,6 @@ export interface UpdatePaymentConfigRequest {
   max_pending_orders?: number
   enabled_payment_types?: string[]
   balance_disabled?: boolean
-  recharge_markup?: number
   fx_rates?: Record<string, number>
   recharge_fee_rate?: number
   load_balance_strategy?: string
