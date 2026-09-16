@@ -144,9 +144,9 @@ export default {
         openOfficial: 'Open official login page in a new tab',
         openOfficialHint: 'The official login page may forbid embedding; log in from a new tab and paste the Cookie manually.',
         platformHint: {
-          webDeepseek: 'Log in to DeepSeek Web and copy the full Cookie string; cross-origin limits prevent automatic capture, so paste manually.',
-          webZhipu: 'Log in to Zhipu GLM Web and copy the full Cookie string; cross-origin limits prevent automatic capture, so paste manually.',
-          webKimi: 'Log in to Kimi Web and copy the Token JSON from local storage, then paste it into the field below.',
+          webDeepseek: 'The login page is embedded via the site proxy; cookies are captured and filled automatically after login. If the proxy is unavailable, open the official page in a new window and paste the full Cookie string manually.',
+          webZhipu: 'The login page is embedded via the site proxy; cookies are captured and filled automatically after login. If the proxy is unavailable, open the official page in a new window and paste the full Cookie string manually.',
+          webKimi: 'The login page is embedded via the site proxy; tokens cannot be captured automatically. After login, copy the Token JSON from local storage and paste it into the field below.',
         },
         proxyTitle: 'Login proxy (auto-capture Cookie)',
         proxyUnavailable: 'Login proxy unavailable, please log in on the official page and paste manually',

@@ -182,8 +182,10 @@ const loginUrl = computed(() => {
   }
 })
 
+// 平台 → 翻译键映射：platform 为 kebab-case（web-deepseek），语言包键为驼峰
+// （webDeepseek），动态拼键前需转换，否则 i18n 缺失直接显示原始 key。
 const platformHint = computed(() =>
-  t(`admin.accounts.webLogin.platformHint.${props.platform}`))
+  t(`admin.accounts.webLogin.platformHint.${props.platform.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())}`))
 
 const pasteLabel = computed(() =>
   webProviderUsesCookie(webPlatform.value)

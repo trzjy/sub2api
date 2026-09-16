@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"log"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +57,12 @@ func SetupRouter(
 	}
 	refreshFrameOrigins() // 启动时初始化
 
+	// Web 登录代理隔离 origin 必须加入主站 CSP frame-src：主站页面内嵌该 origin 的
+	// 官方登录页代理 iframe，origin 含端口（443 与 8443 非同源），'self' 不覆盖，
+	// 缺失会导致 Chrome 以 frame-src 违规拦截（"该内容被屏蔽了"）。仅接受显式配置的
+	// https origin（同源回退已禁止，安全红线），规范化为 scheme://host 形式。
+	proxyFrameOrigin := normalizeProxyFrameOrigin(cfg.Server.WebLoginProxyPublicOrigin())
+
 	// 应用中间件
 	r.Use(middleware2.RequestLogger())
 	// 将客户端 IP + UA 注入 request context，供 token 签发/会话绑定/审计日志统一读取。
@@ -63,10 +71,17 @@ func SetupRouter(
 	r.Use(middleware2.Logger())
 	r.Use(middleware2.CORS(cfg.CORS))
 	r.Use(middleware2.SecurityHeaders(cfg.Security.CSP, func() []string {
+		origins := []string{}
 		if p := cachedFrameOrigins.Load(); p != nil {
-			return *p
+			origins = append(origins, *p...)
 		}
-		return nil
+		if proxyFrameOrigin != "" {
+			origins = append(origins, proxyFrameOrigin)
+		}
+		if len(origins) == 0 {
+			return nil
+		}
+		return origins
 	}))
 	r.Use(middleware2.ServerTiming(cfg.Server.EnableServerTiming))
 
@@ -133,4 +148,18 @@ func registerRoutes(
 	routes.RegisterInternalRoutes(v1, h)
 
 	handler.RegisterPageRoutes(v1, cfg.Pricing.DataDir, gin.HandlerFunc(jwtAuth), gin.HandlerFunc(adminAuth), settingService)
+}
+
+// normalizeProxyFrameOrigin 把显式配置的 web 登录代理 origin 规范化为 CSP frame-src
+// 可用的 scheme://host 形式；空值或非 https（同源回退已禁止，安全红线）返回空。
+func normalizeProxyFrameOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }

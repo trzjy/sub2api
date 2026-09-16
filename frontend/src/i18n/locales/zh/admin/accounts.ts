@@ -347,9 +347,9 @@ export default {
         openOfficial: '在新窗口打开官方登录页',
         openOfficialHint: '官方登录页禁止内嵌展示时，请在新窗口登录后手动粘贴 Cookie。',
         platformHint: {
-          webDeepseek: '登录 DeepSeek 网页版后复制整串 Cookie；跨域限制导致无法自动捕获，需手动粘贴。',
-          webZhipu: '登录智谱 GLM 网页版后复制整串 Cookie；跨域限制导致无法自动捕获，需手动粘贴。',
-          webKimi: '登录 Kimi 网页版后从本地存储复制 Token JSON，手动粘贴到下方输入框。',
+          webDeepseek: '登录页经本站代理内嵌，登录后 Cookie 自动捕获并回填；若代理不可用，可新窗口登录后手动粘贴整串 Cookie。',
+          webZhipu: '登录页经本站代理内嵌，登录后 Cookie 自动捕获并回填；若代理不可用，可新窗口登录后手动粘贴整串 Cookie。',
+          webKimi: '登录页经本站代理内嵌展示；Token 无法自动捕获，登录后请从本地存储复制 Token JSON，手动粘贴到下方输入框。',
         },
         proxyTitle: '登录代理（自动捕获 Cookie）',
         proxyUnavailable: '登录代理不可用，请在官方页面登录后手动粘贴',
