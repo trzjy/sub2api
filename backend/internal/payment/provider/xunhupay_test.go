@@ -3,6 +3,7 @@ package provider
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -274,6 +275,84 @@ func TestXunhupayCreatePaymentError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid sign") {
 		t.Fatalf("expected error containing 'invalid sign', got %v", err)
+	}
+}
+
+// TestXunhupayCreatePaymentFlatNumericOpenID pins the production incident
+// shape: XunhuPay returned a flat success response (no "data" object) with
+// openid encoded as a JSON number. The TradeNo must be the exact decimal text
+// of the number, never a float64 re-encode (the id exceeds 2^53).
+func TestXunhupayCreatePaymentFlatNumericOpenID(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openid":20307169681,"url_qrcode":"https://pay.xunhupay.com/q","url":"https://pay.xunhupay.com/p","errcode":0,"errmsg":"success!"}`))
+	}))
+	defer srv.Close()
+	cfg := xunhupayTestConfig()
+	cfg["apiBase"] = srv.URL
+	p, err := NewXunhupay("inst1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.CreatePayment(t.Context(), payment.CreatePaymentRequest{
+		OrderID: "ORDER1", Amount: "1.00", PaymentType: payment.TypeWxpay, Subject: "充值",
+	})
+	if err != nil {
+		t.Fatalf("CreatePayment: %v", err)
+	}
+	if resp.TradeNo != "20307169681" {
+		t.Fatalf("tradeNo = %q, want exact decimal text 20307169681", resp.TradeNo)
+	}
+	if resp.PayURL != "https://pay.xunhupay.com/p" {
+		t.Fatalf("payUrl = %q, want https://pay.xunhupay.com/p", resp.PayURL)
+	}
+	if resp.QRCode != "https://pay.xunhupay.com/q" {
+		t.Fatalf("qrCode = %q, want https://pay.xunhupay.com/q", resp.QRCode)
+	}
+}
+
+// TestXunhupayOpenIDRejectsInvalidTypes pins fail-closed behavior: a malformed
+// openid shape (bool, object, array, decimal, exponent, leading '+'/'-') must
+// be rejected by the decoder, not silently coerced.
+func TestXunhupayOpenIDRejectsInvalidTypes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "bool", value: `true`},
+		{name: "object", value: `{}`},
+		{name: "array", value: `[1,2]`},
+		{name: "decimal", value: `20307169681.5`},
+		{name: "exponent", value: `2.0307169681e10`},
+		{name: "negative", value: `-20307169681`},
+		{name: "signed", value: `+20307169681`},
+		{name: "blank", value: ``},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var o xunhupayOpenID
+			err := json.Unmarshal([]byte(tc.value), &o)
+			if err == nil {
+				t.Fatalf("openid %s should be rejected, got value %q", tc.value, o)
+			}
+		})
+	}
+}
+
+// TestXunhupayOpenIDNullDecodesEmpty pins that an absent/null openid becomes
+// the empty string (the create handler then falls back to url/url_qrcode
+// presence checks).
+func TestXunhupayOpenIDNullDecodesEmpty(t *testing.T) {
+	t.Parallel()
+	var o xunhupayOpenID
+	if err := json.Unmarshal([]byte(`null`), &o); err != nil {
+		t.Fatalf("null openid should decode without error: %v", err)
+	}
+	if o != "" {
+		t.Fatalf("null openid should decode to empty value, got %q", o)
 	}
 }
 

@@ -2,6 +2,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/md5"
@@ -151,11 +152,11 @@ func (x *Xunhupay) CreatePayment(ctx context.Context, req payment.CreatePaymentR
 	if err := resp.checkError(); err != nil {
 		return nil, err
 	}
-	if resp.Data == nil || (resp.Data.OpenOrderID == "" && resp.Data.URL == "" && resp.Data.URLQRCode == "") {
+	if resp.Data == nil || (string(resp.Data.OpenOrderID) == "" && resp.Data.URL == "" && resp.Data.URLQRCode == "") {
 		return nil, fmt.Errorf("xunhupay create: empty data")
 	}
 	return &payment.CreatePaymentResponse{
-		TradeNo: resp.Data.OpenOrderID,
+		TradeNo: string(resp.Data.OpenOrderID),
 		PayURL:  resp.Data.URL,
 		QRCode:  resp.Data.URLQRCode,
 	}, nil
@@ -328,13 +329,60 @@ type xunhupayResponse struct {
 }
 
 type xunhupayRespData struct {
-	URL           string `json:"url"`
-	URLQRCode     string `json:"url_qrcode"`
-	OpenOrderID   string `json:"openid"`
-	OutTradeOrder string `json:"out_trade_order"`
-	Status        string `json:"status"`
-	TotalAmount   string `json:"total_amount"`
-	TransactionID string `json:"transaction_id"`
+	URL           string         `json:"url"`
+	URLQRCode     string         `json:"url_qrcode"`
+	OpenOrderID   xunhupayOpenID `json:"openid"`
+	OutTradeOrder string         `json:"out_trade_order"`
+	Status        string         `json:"status"`
+	TotalAmount   string         `json:"total_amount"`
+	TransactionID string         `json:"transaction_id"`
+}
+
+// xunhupayOpenID is the gateway openid field. XunhuPay emits it as a JSON
+// string in nested responses and as a bare JSON number in flat responses, so
+// the decoder must accept both while keeping the exact decimal text (the
+// upstream id can exceed 2^53 and must never round-trip through float64).
+// null decodes to an empty value; anything else (bool, object, array, decimal,
+// exponent) is rejected so a malformed id fails closed.
+type xunhupayOpenID string
+
+// UnmarshalJSON accepts a JSON string, a non-negative integer (preserving its
+// decimal text) or null. Other shapes are rejected.
+func (o *xunhupayOpenID) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		*o = ""
+		return nil
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return fmt.Errorf("xunhupay openid string: %w", err)
+		}
+		*o = xunhupayOpenID(s)
+		return nil
+	}
+	if isXunhupayOpenIDUnsignedDecimal(trimmed) {
+		*o = xunhupayOpenID(trimmed)
+		return nil
+	}
+	return fmt.Errorf("xunhupay openid: invalid JSON value %s", trimmed)
+}
+
+// isXunhupayOpenIDUnsignedDecimal reports whether b is the decimal text of a
+// non-negative integer: only ASCII digits, at least one digit, no sign, no
+// fraction, no exponent. It rejects '-' / '+' / '.' / 'e' / 'E' shapes and any
+// empty value.
+func isXunhupayOpenIDUnsignedDecimal(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // checkError validates the response envelope. Only errcode is authoritative
