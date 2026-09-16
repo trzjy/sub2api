@@ -3,8 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,10 +41,10 @@ func webDeepseekTestAccount(id int64, credentials map[string]any) *Account {
 	return acc
 }
 
-// webDeepseekSSECompletionResponse 构造 200 + SSE 响应（通用 OpenAI 兼容形状增量，
-// 映射函数按「通用 SSE JSON」解析；真实 chunk 结构待登录态实测补全）。
-func webDeepseekSSECompletionResponse() *http.Response {
-	sse := strings.Join([]string{
+// webDeepseekSSECompletionBody 构造 SSE 回程体（通用 OpenAI 兼容形状增量；
+// 真实 chunk 结构待登录态实测补全）。
+func webDeepseekSSECompletionBody() string {
+	return strings.Join([]string{
 		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
 		``,
 		`data: {"id":"ds-1","choices":[{"delta":{"content":" world"}}]}`,
@@ -53,10 +54,14 @@ func webDeepseekSSECompletionResponse() *http.Response {
 		`data: [DONE]`,
 		``,
 	}, "\n")
+}
+
+// webDeepseekSSECompletionResponse 构造 200 + SSE 响应。
+func webDeepseekSSECompletionResponse() *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(sse)),
+		Body:       io.NopCloser(strings.NewReader(webDeepseekSSECompletionBody())),
 	}
 }
 
@@ -308,23 +313,42 @@ func TestForwardWebDeepseek_MissingCookieFailsClosed(t *testing.T) {
 	require.Len(t, upstream.requests, 0, "no upstream request may be made without a login cookie")
 }
 
-// TestForwardWebDeepseek_PoWNotImplementedFailsClosed 上游返回 challenge 时，求解未实现
-// 必须以 ErrWebDeepseekPoWNotImplemented 失败关闭（不得臆测 PoW 算法），且不出站对话请求。
-func TestForwardWebDeepseek_PoWNotImplementedFailsClosed(t *testing.T) {
+// TestForwardWebDeepseek_PoWSolvedCarriesHeader 上游返回可解 challenge（实测
+// data.biz_data.challenge 结构）时，求解成功且对话请求携带 x-ds-pow-response 头。
+func TestForwardWebDeepseek_PoWSolvedCarriesHeader(t *testing.T) {
 	account := webDeepseekTestAccount(8806, nil)
+	// 用 nonce=5 求解出的 challenge（确定性：solvableNonceChallenge 在包内计算）。
+	digest := webDeepseekPowStateDigest([]byte("salt123_1739764288699_5"))
+	challengeHex := hex.EncodeToString(digest[:])
+	challengeBody := `{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"` + challengeHex + `","salt":"salt123","signature":"sig","difficulty":100,"expire_at":1739764288699,"target_path":"/api/v0/chat/completion"}}}}`
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		// challenge 结构未实测：按顶层 challenge 字段的常见形态给出。
 		&http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"code":0,"challenge":"pow-payload"}`)),
+			Body:       io.NopCloser(strings.NewReader(challengeBody)),
+		},
+		&http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(webDeepseekSSECompletionBody())),
 		},
 	}}
 
-	_, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrWebDeepseekPoWNotImplemented), "error must wrap ErrWebDeepseekPoWNotImplemented, got: %v", err)
-	require.Len(t, upstream.requests, 1, "completion request must not be sent when PoW solving is unavailable")
+	recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	require.True(t, recorder.Body.Len() > 0)
+	require.Len(t, upstream.requests, 2, "challenge + completion requests expected")
+	powHeader := upstream.requests[1].Header.Get("X-Ds-PoW-Response")
+	require.NotEmpty(t, powHeader, "completion request must carry x-ds-pow-response header")
+	// 头值可解码且 answer 为数值。
+	payload, decodeErr := base64.StdEncoding.DecodeString(powHeader)
+	require.NoError(t, decodeErr)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(payload, &parsed))
+	answer, ok := parsed["answer"].(float64)
+	require.True(t, ok, "answer must be a number, got: %v", parsed["answer"])
+	require.Equal(t, float64(5), answer)
+	require.Equal(t, challengeHex, parsed["challenge"])
 }
 
 // TestForwardWebDeepseek_RateLimitClassification 覆盖 429 / code=40002 分类接入

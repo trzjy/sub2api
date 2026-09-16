@@ -98,11 +98,11 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 		proxyURL = account.Proxy.URL()
 	}
 
-	// PoW：先按实测已知端点取 challenge；拿到 challenge 即失败关闭（求解未实现，
-	// 返回 ErrWebDeepseekPoWNotImplemented）。上游未返回可用 challenge（如未登录态
-	// 40002 / 结构未识别）时按无 PoW 出站——若上游实际要求 PoW，其错误会经
-	// handleWebDeepseekUpstreamError 正常暴露。
-	if err := s.fetchWebDeepseekPoWChallenge(ctx, account, baseURL, cookie, proxyURL); err != nil {
+	// PoW：按实测已知端点取 challenge（data.biz_data.challenge），求解后随对话
+	// 请求携带 x-ds-pow-response 头（公开实现相互印证，登录态抓包最终确认）。
+	// 上游未给出可用 challenge（如未登录态 40002 / 结构未识别）时按无 PoW 出站。
+	powHeader, err := s.fetchWebDeepseekPoWHeader(ctx, account, baseURL, cookie, proxyURL)
+	if err != nil {
 		return nil, err
 	}
 
@@ -112,6 +112,9 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	req, err := s.buildWebDeepseekUpstreamRequest(upstreamCtx, account, baseURL+webDeepseekChatCompletionPath, cookie, upstreamBody)
 	if err != nil {
 		return nil, err
+	}
+	if powHeader != "" {
+		req.Header.Set("X-Ds-PoW-Response", powHeader)
 	}
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(startTime).Milliseconds())
@@ -256,23 +259,22 @@ func webDeepseekOriginFromURL(targetURL string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
-// fetchWebDeepseekPoWChallenge 按实测已知端点请求 PoW challenge。
-// 返回 true 表示上游给出了 challenge（此时求解未实现 → 失败关闭）。
-// 返回 false 表示上游未给出可用 challenge（如未登录态实测形态 {"code":40002,"msg":"Missing Token"}，
-// 或结构未被识别——均为待登录态实测补全场景），调用方按无 PoW 继续出站。
-func (s *OpenAIGatewayService) fetchWebDeepseekPoWChallenge(
+// fetchWebDeepseekPoWHeader 取 challenge 并求解，返回 x-ds-pow-response 头值。
+// 挑战端点不可达或响应无可用 challenge（未登录态 40002 / 结构未识别）时返回空串，
+// 调用方按无 PoW 继续出站；求解失败（nonce 未收敛）失败关闭返回错误。
+func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 	ctx context.Context,
 	account *Account,
 	baseURL string,
 	cookie string,
 	proxyURL string,
-) error {
+) (string, error) {
 	upstreamCtx, release := detachUpstreamContext(ctx)
 	defer release()
 
 	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, baseURL+webDeepseekPoWChallengePath, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Header.Set("Content-Type", "application/json")
@@ -285,45 +287,19 @@ func (s *OpenAIGatewayService) fetchWebDeepseekPoWChallenge(
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	if err != nil {
 		// 挑战端点不可达不阻断出站尝试：是否强制 PoW 待登录态实测补全。
-		return nil
+		return "", nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return nil
+		return "", nil
 	}
 
-	challenge := webDeepseekExtractPoWChallenge(body)
-	if challenge == "" {
-		return nil
+	challenge, ok := webDeepseekExtractPoWChallenge(body)
+	if !ok {
+		return "", nil
 	}
-	// 拿到 challenge：求解格式未实测，失败关闭（绝不臆测 PoW 算法）。
-	_, solveErr := solveWebDeepseekPoW(challenge)
-	return solveErr
-}
-
-// webDeepseekExtractPoWChallenge 从挑战响应中提取 challenge 载荷。
-// 响应结构未实测（仅实测到 {"code":40002,"msg":"Missing Token"} 形态）：
-// 这里只识别 challenge 字段在顶层或 data 包装下的常见 JSON 位置，其余一律视为
-// 不可识别 → 返回空串。待登录态实测补全后收敛。
-func webDeepseekExtractPoWChallenge(body []byte) string {
-	for _, path := range []string{"challenge", "data.challenge"} {
-		if v := strings.TrimSpace(gjson.GetBytes(body, path).String()); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// solveWebDeepseekPoW 计算 PoW 应答。
-//
-// 待登录态实测补全：挑战计算格式（算法、前缀、难度校验方式）未实测，
-// 当前一律返回 ErrWebDeepseekPoWNotImplemented 失败关闭，绝不编造算法。
-func solveWebDeepseekPoW(challenge string) (string, error) {
-	if strings.TrimSpace(challenge) == "" {
-		return "", fmt.Errorf("%w: empty challenge", ErrWebDeepseekPoWNotImplemented)
-	}
-	return "", ErrWebDeepseekPoWNotImplemented
+	return webDeepseekSolvePoW(challenge, webDeepseekChatCompletionPath)
 }
 
 // webDeepseekErrKind DeepSeek 网页端上游错误分类（方案分析文档 §3.4 冷却触发：429 / code=40002）。
