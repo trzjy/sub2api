@@ -21,54 +21,74 @@
         {{ platformHint }}
       </p>
 
-      <!-- Kimi：新窗口引导登录（www.kimi.com） -->
-      <div v-if="platform === 'web-kimi'" class="space-y-2">
+      <!-- 新窗口打开官方登录页（默认路径）：官方登录页普遍通过 X-Frame-Options/CSP
+           禁止内嵌展示，iframe 仅作可选尝试。三平台统一新标签页登录 + 下方手动粘贴。 -->
+      <div class="space-y-2">
         <button
           type="button"
-          data-testid="web-login-kimi-open"
+          data-testid="web-login-open-new-tab"
           class="btn btn-secondary"
-          @click="openKimiWindow"
+          @click="openLoginWindow"
         >
-          {{ t('admin.accounts.webLogin.openKimi') }}
+          {{ t('admin.accounts.webLogin.openOfficial') }}
         </button>
-        <p class="input-hint">{{ t('admin.accounts.webLogin.kimiGuide') }}</p>
+        <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
       </div>
 
-      <!-- DeepSeek / Zhipu：内嵌 iframe 登录页。
+      <!-- 可选尝试：内嵌 iframe 登录页（默认折叠）。
            跨域限制说明（方案 §2.2 已列风险）：官方登录页与站点不同源，iframe 内
            Cookie（HttpOnly / 跨域）无法由本站 JS 读取，自动捕获在浏览器层不可行；
-           本弹窗的主要价值是让用户在弹窗内完成官方登录，捕获走下方手动粘贴路径。
-           同域登录回调代理（仅管理端）为后续任务，落地后自动捕获在此接入。 -->
-      <div v-if="platform !== 'web-kimi'" class="space-y-2">
-        <div class="flex items-center justify-between">
-          <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-            {{ t('admin.accounts.webLogin.iframeTitle') }}
-          </label>
-          <button
-            type="button"
-            data-testid="web-login-reload-iframe"
-            class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
-            @click="reloadIframe"
-          >
-            {{ t('admin.accounts.webLogin.reload') }}
-          </button>
+           捕获走下方手动粘贴路径。同域登录回调代理（仅管理端）为后续任务。 -->
+      <div class="space-y-2">
+        <button
+          type="button"
+          data-testid="web-login-toggle-embed"
+          class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
+          @click="showEmbed = !showEmbed"
+        >
+          {{ t('admin.accounts.webLogin.tryEmbed') }}
+        </button>
+        <div v-if="showEmbed && loginUrl" class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t('admin.accounts.webLogin.iframeTitle') }}
+            </label>
+            <div class="flex items-center gap-3">
+              <button
+                type="button"
+                data-testid="web-login-open-new-tab-fallback"
+                class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
+                @click="openLoginWindow"
+              >
+                {{ t('admin.accounts.webLogin.openOfficial') }}
+              </button>
+              <button
+                type="button"
+                data-testid="web-login-reload-iframe"
+                class="text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400"
+                @click="reloadIframe"
+              >
+                {{ t('admin.accounts.webLogin.reload') }}
+              </button>
+            </div>
+          </div>
+          <div data-testid="web-login-iframe-wrap" class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500">
+            <iframe
+              :key="iframeKey"
+              :src="loginUrl"
+              class="h-full w-full"
+              :sandbox="iframeSandbox"
+              referrerpolicy="no-referrer"
+              :title="t('admin.accounts.webLogin.iframeTitle')"
+              @load="onIframeLoad"
+            ></iframe>
+          </div>
+          <p class="input-hint">
+            {{ iframeBlocked
+              ? t('admin.accounts.webLogin.iframeBlockedHint')
+              : t('admin.accounts.webLogin.iframeHint') }}
+          </p>
         </div>
-        <div data-testid="web-login-iframe-wrap" class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500">
-          <iframe
-            :key="iframeKey"
-            :src="loginUrl"
-            class="h-full w-full"
-            :sandbox="iframeSandbox"
-            referrerpolicy="no-referrer"
-            :title="t('admin.accounts.webLogin.iframeTitle')"
-            @load="onIframeLoad"
-          ></iframe>
-        </div>
-        <p class="input-hint">
-          {{ iframeBlocked
-            ? t('admin.accounts.webLogin.iframeBlockedHint')
-            : t('admin.accounts.webLogin.iframeHint') }}
-        </p>
       </div>
 
       <!-- 手动粘贴凭证（兜底路径，方案 §2.3：三平台都必须支持） -->
@@ -138,15 +158,20 @@ const iframeKey = ref(0)
 const iframeBlocked = ref(false)
 
 const loginUrl = computed(() => {
-  switch (props.platform) {
+  switch (webPlatform.value) {
     case 'web-deepseek':
       return 'https://chat.deepseek.com/'
     case 'web-zhipu':
       return 'https://chatglm.cn/'
+    case 'web-kimi':
+      return 'https://www.kimi.com/'
     default:
       return ''
   }
 })
+
+// 内嵌 iframe 默认折叠（官方登录页普遍禁止被嵌入），展开后才渲染。
+const showEmbed = ref(false)
 
 // iframe sandbox：allow-same-origin 不给（跨域登录页不应获得本站 origin 语义）；
 // allow-scripts 保留让官方登录页自身可运行；allow-forms / allow-popups 支持登录交互。
@@ -171,6 +196,7 @@ watch(() => props.show, (open) => {
     validationError.value = ''
     validating.value = false
     iframeBlocked.value = false
+    showEmbed.value = false
     iframeKey.value++
   }
 })
@@ -194,8 +220,8 @@ function onIframeLoad() {
   }
 }
 
-function openKimiWindow() {
-  window.open('https://www.kimi.com/', '_blank', 'noopener')
+function openLoginWindow() {
+  window.open(loginUrl.value, '_blank', 'noopener')
 }
 
 // handleValidateAndApply：调后端预创建校验端点确认凭证形状可用（真实上游可用性

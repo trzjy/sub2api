@@ -302,13 +302,6 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 - 保存时校验**所有已启用 stripe/airwallex 实例的币种仍在表内**，否则拒绝保存（错误码 `FX_RATE_MISSING`）；删除被已启用实例使用的币种同样被拒。
 - 替代并删除 `SUBSCRIPTION_USD_TO_CNY_RATE`、前端 `PLAZA_OFFICIAL_FX` 硬编码、`pricing_cost_basis.fx` 的独立语义。
 
-### 充值加价系数 RECHARGE_MARKUP
-
-原 `BALANCE_RECHARGE_MULTIPLIER`，语义从"1 支付币种 = X USD"改为"汇率平价之上的加价系数"：
-
-- **到账 USD = ToUSD(实付金额, 订单币种) × markup**，默认 `1.0` = 按汇率平价入账。
-- `credited` 取 **Round(2)**（USD 账本两位小数），如 FX=7.15、markup=1.0 时 ¥100 到账 **$13.99**。
-
 ### 订阅套餐一律 USD 定价
 
 - `subscription_plans.price` / `original_price` 全部按 **USD** 解释；`plan.currency` 保留但语义固定为 `'USD'`（历史 display-only 字段）。
@@ -317,7 +310,7 @@ Sub2API 内置支付系统，支持用户自助充值，无需部署独立的支
 ### 行为变更清单
 
 - **订阅收款对非 CNY 非 USD 渠道从 price 直付改为按汇率换算**（bug 修正）：例 $1 套餐 × Stripe **HKD** 渠道，原实收 **HK$1**（直付），现收 **HK$7.80**（FX=7.80）。
-- **充值到账对 CNY 渠道从 1:1 直记改为按汇率平价**：¥100 原入账 **$100**，现入账 **$13.99**（markup=1.0 时）。
+- **充值到账按汇率平价**：**到账 USD = ToUSD(实付金额, 订单币种)**（Round 2），如 FX=7.15 时 ¥100 到账 **$13.99**。历史倍率/加价系数已移除。
 
 ### 全局充值限额口径
 

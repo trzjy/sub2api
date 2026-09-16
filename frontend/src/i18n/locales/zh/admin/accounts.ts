@@ -344,10 +344,9 @@ export default {
       },
       webLogin: {
         title: '官方网页登录',
-        openEmbedded: '打开官方网页登录',
-        openEmbeddedHint: '在弹窗内完成官方登录，校验后凭证自动回填到上方输入框。',
-        openKimi: '打开 www.kimi.com 登录',
-        kimiGuide: '在新窗口登录后，从浏览器本地存储复制 access_token / refresh_token / user_id 并粘贴到下方输入框。',
+        openOfficial: '在新窗口打开官方登录页',
+        openOfficialHint: '官方登录页禁止内嵌展示时，请在新窗口登录后手动粘贴 Cookie。',
+        tryEmbed: '尝试内嵌打开',
         platformHint: {
           webDeepseek: '登录 DeepSeek 网页版后复制整串 Cookie；跨域限制导致无法自动捕获，需手动粘贴。',
           webZhipu: '登录智谱 GLM 网页版后复制整串 Cookie；跨域限制导致无法自动捕获，需手动粘贴。',
@@ -368,6 +367,8 @@ export default {
           paygDesc: '消耗账户余额，按 Token 计费。余额不足自动冷却，充值后恢复。',
           coding: 'Coding Plan',
           codingDesc: '订阅制编程套餐，按 5 小时 / 每周滚动用量窗口限流。',
+          web: '网页版',
+          webDesc: '官方网页端登录态转发（粘贴 Cookie / Token），无额度探测。',
         },
         apiProtocol: {
           title: 'API 协议',

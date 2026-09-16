@@ -280,13 +280,6 @@ The payment system uses **USD as the single accounting currency**. All internal 
 - On save, the currency of every **enabled Stripe/Airwallex instance** must exist in the table, otherwise saving is rejected (`FX_RATE_MISSING`). Deleted currencies still used by an enabled instance are also rejected.
 - It replaces `SUBSCRIPTION_USD_TO_CNY_RATE`, the frontend `PLAZA_OFFICIAL_FX` hardcode, and the independent `pricing_cost_basis.fx` semantics.
 
-### Top-up Markup (RECHARGE_MARKUP)
-
-Previously `BALANCE_RECHARGE_MULTIPLIER`. Its meaning changed from *"1 paid currency = X USD"* to *"a markup on top of the FX-parity conversion"*:
-
-- **Credited USD = ToUSD(pay_amount, order currency) × markup**, default `1.0` = FX parity.
-- `credited` is rounded to **2 decimal places** (`Round(2)`), e.g. ¥100 with FX 7.15 and markup 1.0 credits **$13.99**.
-
 ### Subscription Plans Are Priced in USD
 
 - `subscription_plans.price` / `original_price` are always interpreted as **USD**; `plan.currency` is fixed to `'USD'` (legacy display-only field).
@@ -295,7 +288,7 @@ Previously `BALANCE_RECHARGE_MULTIPLIER`. Its meaning changed from *"1 paid curr
 ### Behavior Changes
 
 - **Subscription collection on non-CNY, non-USD channels now converts via FX** (bug fix). Example: a $1 plan through a Stripe **HKD** channel previously charged **HK$1** (price passed through directly), now charges **HK$7.80** with FX 7.80.
-- **CNY top-ups no longer credit 1:1** — ¥100 now credits **$13.99** at markup 1.0 (was $100).
+- **Top-ups credit at FX parity**: **Credited USD = ToUSD(pay_amount, order currency)**, rounded to 2 decimals. E.g. ¥100 with FX 7.15 credits **$13.99**. The legacy multiplier (RECHARGE_MARKUP) has been removed.
 
 ### Global Recharge Limits
 

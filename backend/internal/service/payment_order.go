@@ -67,11 +67,13 @@ func (s *PaymentService) CreateOrder(ctx context.Context, req CreateOrderRequest
 		orderAmount = plan.Price
 		limitAmount = plan.Price
 	} else if req.OrderType == payment.OrderTypeBalance {
-		credited, err := calculateCreditedBalance(req.Amount, cfg.RechargeMarkup, methodCurrency, cfg.FXRates)
+		// 充值到账：实付金额按汇率折算 USD 入账（充值多少折合多少，不再乘加价系数）。
+		payDecimal := decimal.NewFromFloat(req.Amount)
+		usd, err := cfg.FXRates.ToUSD(payDecimal, methodCurrency)
 		if err != nil {
 			return nil, infraerrors.BadRequest("FX_RATE_MISSING", "recharge failed: "+err.Error())
 		}
-		orderAmount = credited
+		orderAmount = usd.Round(2).InexactFloat64()
 	}
 	payAmountStr, payAmount, err := calculateCreateOrderPayAmountForOrderType(limitAmount, feeRate, methodCurrency, req.OrderType, cfg.FXRates)
 	if err != nil {

@@ -391,7 +391,7 @@ export default {
     amountTooLow: 'Minimum amount is {min}',
     amountTooHigh: 'Maximum amount is {max}',
     amountNoMethod: 'No payment method available for this amount',
-    rechargeRatePreview: 'FX rate: 1 USD ≈ {fx} {currency} · markup {markup}×',
+    rechargeRatePreview: 'FX rate: 1 USD ≈ {fx} {currency} — credited = paid ÷ rate',
     refundReason: 'Refund Reason',
     refundReasonPlaceholder: 'Please describe your refund reason',
     stripeLoadFailed: 'Failed to load payment component. Please refresh and try again.',
@@ -558,9 +558,10 @@ export default {
       currency: 'Currency Label',
       currencyPlaceholder: 'e.g. USD / NZD / CNY',
       currencyHint: 'Display-only 3-letter ISO currency code shown next to the price; leave empty to hide, does not affect billing',
-      currencyHintUsd: 'All plan prices are fixed in USD (the system ledger currency) and cannot be changed',
-      subscriptionCnyPayPreview: 'CNY channel charge preview: {amount}',
-      subscriptionCnyPayPreviewWithFee: '({feeRate}% fee included: {total})',
+      currencyHintStoredUsd: 'Input is CNY; it is converted at the current FX rate and stored as USD',
+      planPriceCny: 'Price (CNY)',
+      planOriginalPriceCny: 'Original price (CNY)',
+      storedUsdPreview: 'Stored USD preview: {amount}',
       validity: 'Validity',
       validityUnit: 'Validity Unit',
       sortOrder: 'Sort Order',
@@ -619,5 +620,4 @@ export default {
       },
     },
   },
-
 }

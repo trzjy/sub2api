@@ -36,16 +36,13 @@
       <div><label class="input-label">{{ t('payment.admin.planDescription') }} <span class="text-red-500">*</span></label><textarea v-model="planForm.description" rows="2" class="input" required></textarea></div>
       <div class="grid grid-cols-2 gap-4">
         <div>
-          <label class="input-label">{{ t('payment.admin.price') }} <span class="text-red-500">*</span></label>
+          <label class="input-label">{{ t('payment.admin.planPriceCny') }} <span class="text-red-500">*</span></label>
           <input v-model.number="planForm.price" type="number" step="0.01" min="0.01" class="input" required />
-          <p v-if="subscriptionCnyPreview" class="mt-1 text-xs font-medium text-primary-600 dark:text-primary-400">
-            {{ t('payment.admin.subscriptionCnyPayPreview', { amount: subscriptionCnyPreview.amount }) }}
-            <span v-if="subscriptionCnyPreview.feeRate > 0">
-              {{ t('payment.admin.subscriptionCnyPayPreviewWithFee', { feeRate: subscriptionCnyPreview.feeRate, total: subscriptionCnyPreview.total }) }}
-            </span>
+          <p v-if="storedUsdPreview" class="mt-1 text-xs font-medium text-primary-600 dark:text-primary-400">
+            {{ t('payment.admin.storedUsdPreview', { amount: storedUsdPreview }) }}
           </p>
         </div>
-        <div><label class="input-label">{{ t('payment.admin.originalPrice') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
+        <div><label class="input-label">{{ t('payment.admin.planOriginalPriceCny') }}</label><input v-model.number="planForm.original_price" type="number" step="0.01" min="0" class="input" /></div>
       </div>
       <div class="grid grid-cols-2 gap-4">
         <div><label class="input-label">{{ t('payment.admin.validity') }} <span class="text-red-500">*</span></label><input v-model.number="planForm.validity_days" type="number" min="1" class="input" required /></div>
@@ -56,9 +53,9 @@
         <div>
           <label class="input-label">{{ t('payment.admin.currency') }}</label>
           <div class="flex items-center gap-2">
-            <span class="input flex h-[38px] items-center bg-gray-100 text-sm font-medium dark:bg-dark-700">{{ ACCOUNT_CURRENCY }}</span>
+            <span class="input flex h-[38px] items-center bg-gray-100 text-sm font-medium dark:bg-dark-700">{{ currencySymbol('CNY') }}</span>
           </div>
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.currencyHintUsd') }}</p>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('payment.admin.currencyHintStoredUsd') }}</p>
         </div>
       </div>
       <div>
@@ -99,7 +96,7 @@ import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
 import type { AdminPaymentConfig } from '@/api/admin/payment'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { formatPaymentAmount, ACCOUNT_CURRENCY } from '@/utils/money'
+import { currencySymbol, formatPaymentAmount, ACCOUNT_CURRENCY } from '@/utils/money'
 import type { SubscriptionPlan } from '@/types/payment'
 import type { AdminGroup } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -148,44 +145,40 @@ const selectedGroupInfo = computed(() => {
   return props.groups.find(g => g.id === planForm.group_id) || null
 })
 
-function roundCnyAmount(value: number): number {
-  return Math.round(value * 100) / 100
-}
+const cnyRate = computed(() => {
+  return Number(props.paymentConfig?.fx_rates?.CNY) || 0
+})
 
-function ceilCnyAmount(value: number): number {
-  return Math.ceil(value * 100) / 100
-}
-
-const subscriptionCnyPreview = computed(() => {
-  const price = Number(planForm.price) || 0
-  // fx_rates from admin settings (loaded via AdminPaymentConfig.fx_rates)
-  const fxRates = props.paymentConfig?.fx_rates || {}
-  const cnyRate = Number(fxRates.CNY) || 0
-  if (price <= 0 || cnyRate <= 0) return null
-
-  const amount = roundCnyAmount(price * cnyRate)
-  const feeRate = Number(props.paymentConfig?.recharge_fee_rate) || 0
-  const fee = feeRate > 0 ? ceilCnyAmount((amount * feeRate) / 100) : 0
-  const total = feeRate > 0 ? roundCnyAmount(amount + fee) : amount
-
-  return {
-    amount: formatPaymentAmount(amount, 'CNY'),
-    feeRate,
-    total: formatPaymentAmount(total, 'CNY'),
-  }
+const storedUsdPreview = computed(() => {
+  const cnyPrice = Number(planForm.price) || 0
+  if (cnyPrice <= 0 || cnyRate.value <= 0) return ''
+  return formatPaymentAmount(cnyPrice / cnyRate.value, ACCOUNT_CURRENCY)
 })
 
 // Reset form when dialog opens
-watch(() => props.show, (visible) => {
+watch([() => props.show, () => props.plan], ([visible]) => {
   if (!visible) return
-  if (props.plan) {
-    Object.assign(planForm, { name: props.plan.name, group_id: props.plan.group_id, description: props.plan.description, price: props.plan.price, original_price: props.plan.original_price || 0, currency: props.plan.currency || '', validity_days: props.plan.validity_days, validity_unit: props.plan.validity_unit || 'days', sort_order: props.plan.sort_order || 0, for_sale: props.plan.for_sale })
-    planFeaturesText.value = (props.plan.features || []).join('\n')
+    if (props.plan) {
+      // plan.price is stored in USD; convert to CNY for editing
+      const rate = cnyRate.value || 1
+      Object.assign(planForm, {
+        name: props.plan.name,
+        group_id: props.plan.group_id,
+        description: props.plan.description,
+        price: Math.round(props.plan.price * rate * 100) / 100,
+        original_price: props.plan.original_price ? Math.round(props.plan.original_price * rate * 100) / 100 : 0,
+        currency: props.plan.currency || '',
+        validity_days: props.plan.validity_days,
+        validity_unit: props.plan.validity_unit || 'days',
+        sort_order: props.plan.sort_order || 0,
+        for_sale: props.plan.for_sale,
+      })
+      planFeaturesText.value = (props.plan.features || []).join('\n')
   } else {
-    Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
-    planFeaturesText.value = ''
-  }
-})
+      Object.assign(planForm, { name: '', group_id: null, description: '', price: 0, original_price: 0, currency: '', validity_days: 30, validity_unit: 'days', sort_order: 0, for_sale: true })
+      planFeaturesText.value = ''
+    }
+}, { immediate: true })
 
 /** Build request payload with snake_case keys matching backend JSON tags */
 function buildPlanPayload() {
@@ -194,9 +187,13 @@ function buildPlanPayload() {
     name: planForm.name,
     group_id: planForm.group_id,
     description: planForm.description,
-    price: planForm.price,
-    original_price: planForm.original_price || 0,
-    currency: planForm.currency.trim().toUpperCase(),
+    price: planForm.price > 0 && cnyRate.value > 0
+      ? Math.round((planForm.price / cnyRate.value) * 100) / 100
+      : planForm.price,
+    currency: ACCOUNT_CURRENCY,
+    original_price: planForm.original_price > 0 && cnyRate.value > 0
+      ? Math.round((planForm.original_price / cnyRate.value) * 100) / 100
+      : planForm.original_price || 0,
     validity_days: planForm.validity_days,
     validity_unit: planForm.validity_unit,
     sort_order: planForm.sort_order,

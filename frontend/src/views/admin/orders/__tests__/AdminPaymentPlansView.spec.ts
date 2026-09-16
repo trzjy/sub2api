@@ -103,13 +103,14 @@ describe('AdminPaymentPlansView', () => {
 
     await flushPromises()
 
-    // price 一律固定 USD 符号（ACCOUNT_CURRENCY），不再随 plan.currency 猜测
-    expect(wrapper.text()).toContain('$499.00USD')
-    expect(wrapper.text()).toContain('$599.00')
-    expect(wrapper.text()).toContain('$10.00USD')
+    // stored USD amounts display as CNY while keeping the USD ledger value visible
+    expect(wrapper.text()).toContain('¥3567.85CNY')
+    expect(wrapper.text()).toContain('¥4282.85')
+    expect(wrapper.text()).toContain('≈ $499.00（USD）')
+    expect(wrapper.text()).toContain('¥71.5CNY')
+    expect(wrapper.text()).toContain('≈ $10.00（USD）')
     expect(wrapper.text()).not.toContain('¥499.00')
-    // ≈ CNY 辅助行（499 × 7.15 = 3567.85；10 × 7.15 = 71.50）
-    expect(wrapper.text()).toContain('¥3,567.85')
-    expect(wrapper.text()).toContain('¥71.50')
+    expect(wrapper.text()).not.toContain('¥3,567.85')
+    expect(wrapper.text()).not.toContain('¥71.50')
   })
 })

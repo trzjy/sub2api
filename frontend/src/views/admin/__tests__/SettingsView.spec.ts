@@ -484,7 +484,6 @@ const baseSettingsResponse = {
   payment_max_pending_orders: 3,
   payment_enabled_types: [],
   payment_balance_disabled: false,
-  payment_recharge_markup: 1,
   payment_fx_rates: { CNY: 7.15 },
   payment_recharge_fee_rate: 0,
   payment_load_balance_strategy: "round-robin",

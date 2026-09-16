@@ -310,7 +310,6 @@ type UpdateSettingsRequest struct {
 	PaymentMaxPendingOrders          *int     `json:"payment_max_pending_orders"`
 	PaymentEnabledTypes              []string `json:"payment_enabled_types"`
 	PaymentBalanceDisabled           *bool    `json:"payment_balance_disabled"`
-	PaymentRechargeMarkup            *float64 `json:"payment_recharge_markup"`
 	PaymentFXRates                   *string  `json:"payment_fx_rates"`
 	PaymentRechargeFeeRate           *float64 `json:"payment_recharge_fee_rate"`
 	PaymentLoadBalanceStrat          *string  `json:"payment_load_balance_strategy"`
@@ -2102,7 +2101,6 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			MaxPendingOrders:              req.PaymentMaxPendingOrders,
 			EnabledTypes:                  req.PaymentEnabledTypes,
 			BalanceDisabled:               req.PaymentBalanceDisabled,
-			RechargeMarkup:                req.PaymentRechargeMarkup,
 			FXRates:                       req.PaymentFXRates,
 			RechargeFeeRate:               req.PaymentRechargeFeeRate,
 			LoadBalanceStrategy:           req.PaymentLoadBalanceStrat,
@@ -2380,7 +2378,6 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentMaxPendingOrders:                                updatedPaymentCfg.MaxPendingOrders,
 		PaymentEnabledTypes:                                    updatedPaymentCfg.EnabledTypes,
 		PaymentBalanceDisabled:                                 updatedPaymentCfg.BalanceDisabled,
-		PaymentRechargeMarkup:                                  updatedPaymentCfg.RechargeMarkup,
 		PaymentFXRates:                                         updatedPaymentCfg.FXRates.ToString(),
 		PaymentRechargeFeeRate:                                 updatedPaymentCfg.RechargeFeeRate,
 		PaymentLoadBalanceStrat:                                updatedPaymentCfg.LoadBalanceStrategy,
@@ -2457,7 +2454,6 @@ func hasPaymentFields(req UpdateSettingsRequest) bool {
 		req.PaymentMaxAmount != nil || req.PaymentDailyLimit != nil ||
 		req.PaymentOrderTimeoutMin != nil || req.PaymentMaxPendingOrders != nil ||
 		req.PaymentEnabledTypes != nil || req.PaymentBalanceDisabled != nil ||
-		req.PaymentRechargeMarkup != nil || req.PaymentFXRates != nil ||
 		req.PaymentRechargeFeeRate != nil ||
 		req.PaymentLoadBalanceStrat != nil || req.PaymentProductNamePrefix != nil ||
 		req.PaymentProductNameSuffix != nil || req.PaymentHelpImageURL != nil ||

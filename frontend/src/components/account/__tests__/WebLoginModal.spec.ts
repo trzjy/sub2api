@@ -57,14 +57,31 @@ describe('WebLoginModal', () => {
     expect(kimi.find('[data-testid="web-login-cookie-input"]').exists()).toBe(false)
   })
 
-  it('shows iframe section for non-kimi platforms only', () => {
+  it('shows new-tab button for all platforms and iframe collapsed by default', () => {
     const zhipu = mountModal('web-zhipu')
-    expect(zhipu.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(true)
+    expect(zhipu.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
+    expect(zhipu.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(false)
     zhipu.unmount()
 
     const kimi = mountModal('web-kimi')
+    expect(kimi.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
     expect(kimi.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(false)
-    expect(kimi.find('[data-testid="web-login-kimi-open"]').exists()).toBe(true)
+  })
+
+  it('opens official login page in a new tab on click', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
+    const wrapper = mountModal('web-deepseek')
+    await wrapper.find('[data-testid="web-login-open-new-tab"]').trigger('click')
+    expect(openSpy).toHaveBeenCalledWith('https://chat.deepseek.com/', '_blank', 'noopener')
+    openSpy.mockRestore()
+  })
+
+  it('shows iframe and fallback button after toggling tryEmbed', async () => {
+    const wrapper = mountModal('web-zhipu')
+    await wrapper.find('[data-testid="web-login-toggle-embed"]').trigger('click')
+    expect(wrapper.find('[data-testid="web-login-iframe-wrap"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-login-open-new-tab-fallback"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-login-reload-iframe"]').exists()).toBe(true)
   })
 
   it('shows empty-input error without calling backend', async () => {

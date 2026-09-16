@@ -181,7 +181,7 @@
             @click="selectCNPlatform('kimi')"
             :class="[
               'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'kimi'
+              activeCnBasePlatform === 'kimi'
                 ? 'bg-white text-pink-600 shadow-sm dark:bg-dark-600 dark:text-pink-400'
                 : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
             ]"
@@ -194,7 +194,7 @@
             @click="selectCNPlatform('zhipu')"
             :class="[
               'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'zhipu'
+              activeCnBasePlatform === 'zhipu'
                 ? 'bg-white text-indigo-600 shadow-sm dark:bg-dark-600 dark:text-indigo-400'
                 : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
             ]"
@@ -207,7 +207,7 @@
             @click="selectCNPlatform('deepseek')"
             :class="[
               'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'deepseek'
+              activeCnBasePlatform === 'deepseek'
                 ? 'bg-white text-teal-600 shadow-sm dark:bg-dark-600 dark:text-teal-400'
                 : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
             ]"
@@ -239,48 +239,6 @@
             ]"
           >
             Other
-          </button>
-        </div>
-        <!-- Web reverse providers row: DeepSeek Web / Zhipu GLM Web / Kimi Web（网页登录态转发，封号风险见表单内提示） -->
-        <div class="mt-2 flex flex-wrap rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
-          <button
-            type="button"
-            @click="selectWebPlatform('web-deepseek')"
-            :class="[
-              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'web-deepseek'
-                ? 'bg-white text-cyan-600 shadow-sm dark:bg-dark-600 dark:text-cyan-400'
-                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-            ]"
-          >
-            <PlatformIcon platform="web-deepseek" size="sm" />
-            {{ t('admin.accounts.webProviders.platforms.webDeepseek') }}
-          </button>
-          <button
-            type="button"
-            @click="selectWebPlatform('web-zhipu')"
-            :class="[
-              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'web-zhipu'
-                ? 'bg-white text-violet-600 shadow-sm dark:bg-dark-600 dark:text-violet-400'
-                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-            ]"
-          >
-            <PlatformIcon platform="web-zhipu" size="sm" />
-            {{ t('admin.accounts.webProviders.platforms.webZhipu') }}
-          </button>
-          <button
-            type="button"
-            @click="selectWebPlatform('web-kimi')"
-            :class="[
-              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
-              form.platform === 'web-kimi'
-                ? 'bg-white text-fuchsia-600 shadow-sm dark:bg-dark-600 dark:text-fuchsia-400'
-                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
-            ]"
-          >
-            <PlatformIcon platform="web-kimi" size="sm" />
-            {{ t('admin.accounts.webProviders.platforms.webKimi') }}
           </button>
         </div>
       </div>
@@ -592,14 +550,14 @@
         </div>
       </div>
 
-      <!-- Account Mode Selection (Kimi / Zhipu / DeepSeek) -->
-      <div v-if="isCNPlatform">
+      <!-- Account Mode Selection (Kimi / Zhipu / DeepSeek；web-* 为对应基础平台的二级入口，选择器保持可见以便切回) -->
+      <div v-if="isCNPlatform || isWebProviderPlatform(form.platform)">
         <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
-        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" data-tour="account-form-mode">
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3" data-tour="account-form-mode">
           <!-- Pay-as-you-go (token balance) -->
           <button
             type="button"
-            @click="accountMode = 'payg'"
+            @click="selectCNPureMode('payg')"
             :class="[
               'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
               accountMode === 'payg'
@@ -626,7 +584,7 @@
           <button
             v-if="form.platform !== 'deepseek' || isVolcanoSubscription"
             type="button"
-            @click="accountMode = 'coding'"
+            @click="selectCNPureMode('coding')"
             :class="[
               'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
               accountMode === 'coding'
@@ -647,6 +605,34 @@
             <div>
               <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.cnProviders.accountMode.coding') }}</span>
               <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cnProviders.accountMode.codingDesc') }}</span>
+            </div>
+          </button>
+          <!-- 网页版（二级入口）：官方网页端登录态转发，内部仍存为 web-* 平台（封号风险见表单内提示） -->
+          <button
+            v-if="cnSupportsWebMode"
+            type="button"
+            data-testid="cn-web-mode"
+            @click="selectCNWebMode"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              isWebProviderPlatform(form.platform)
+                ? cnAccentActiveClass
+                : 'border-gray-200 hover:border-gray-400 dark:border-dark-600 dark:hover:border-gray-600'
+            ]"
+          >
+            <div
+              :class="[
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                isWebProviderPlatform(form.platform)
+                  ? cnAccentIconClass
+                  : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+              ]"
+            >
+              <Icon name="globe" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.cnProviders.accountMode.web') }}</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cnProviders.accountMode.webDesc') }}</span>
             </div>
           </button>
         </div>
@@ -1515,9 +1501,9 @@
             class="btn btn-secondary"
             @click="showWebLogin = true"
           >
-            {{ t('admin.accounts.webLogin.openEmbedded') }}
+            {{ t('admin.accounts.webLogin.openOfficial') }}
           </button>
-          <p class="input-hint">{{ t('admin.accounts.webLogin.openEmbeddedHint') }}</p>
+          <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
@@ -4515,6 +4501,7 @@ function selectCNPlatform(platform: CnProviderPlatform) {
   form.type = 'apikey'
   accountCategory.value = 'apikey'
   apiProtocol.value = 'adaptive'
+  // 从网页版切回：网页版期间 accountMode 保持 payg，无需额外复位。
   if (platform === 'deepseek') {
     accountMode.value = 'payg'
   }
@@ -4534,13 +4521,32 @@ function selectOtherPlatform() {
   apiProtocol.value = 'chat_completions'
 }
 
-// 网页逆向平台（web-deepseek / web-zhipu / web-kimi）：登录态凭证明文粘贴，
-// 无 base_url 预设与账号模式语义（免费网页额度无标准查询接口，不做额度探测，
-// 可用性经转发路径验证——方案 W6 口径）。
-function selectWebPlatform(platform: WebProviderPlatform) {
-  form.platform = platform
+// 网页版为 CN 基础平台的二级入口：内部仍存为 web-* 平台（登录态凭证明文粘贴，
+// 无 base_url 预设与账号模式语义——免费网页额度无标准查询接口，不做额度探测，
+// 可用性经转发路径验证，方案 W6 口径）。
+const cnWebModeBases = ['kimi', 'zhipu', 'deepseek'] as const
+const cnSupportsWebMode = computed(
+  () => (cnWebModeBases as readonly string[]).includes(form.platform) &&
+    !(form.platform === 'deepseek' && isVolcanoSubscription.value)
+)
+// 网页版选中时 CN 基础卡片保持高亮（web-* 映射回基础平台）。
+const activeCnBasePlatform = computed(() =>
+  isWebProviderPlatform(form.platform) ? form.platform.replace('web-', '') : form.platform
+)
+function selectCNWebMode() {
+  if (!cnSupportsWebMode.value) return
+  form.platform = `web-${form.platform}` as WebProviderPlatform
   form.type = 'apikey'
   accountCategory.value = 'apikey'
+  apiProtocol.value = 'adaptive'
+  accountMode.value = 'payg'
+}
+// payg / coding 点击：若当前处于网页版，先复位到基础平台再切换账号模式。
+function selectCNPureMode(mode: 'payg' | 'coding') {
+  if (isWebProviderPlatform(form.platform)) {
+    form.platform = form.platform.replace('web-', '') as CnProviderPlatform
+  }
+  accountMode.value = mode
 }
 // 账号类型 / 协议变更时同步默认 base url。
 watch(accountMode, (mode, previousMode) => {
@@ -5107,6 +5113,9 @@ watch(
     // Reset base URL based on platform
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
+    } else if (isWebProviderPlatform(newPlatform)) {
+      // 网页版：无 base_url 预设语义（凭证明文粘贴路径），不套用默认端点
+      apiKeyBaseUrl.value = ''
     } else {
       apiKeyBaseUrl.value =
         (newPlatform === 'openai')
@@ -5191,6 +5200,12 @@ watch(
     openAIImagesUrlToB64JsonEnabled.value = false
     grokOAuthCustomBaseUrlEnabled.value = false
     grokOAuthBaseUrl.value = ''
+    // 网页版粘贴输入为平台相关凭证，切换平台时清空
+    if (!isWebProviderPlatform(newPlatform)) {
+      webCookieInput.value = ''
+      webKimiTokenJson.value = ''
+      webBaseUrlInput.value = ''
+    }
     // Reset OAuth states
     oauth.resetState()
     openaiOAuth.resetState()

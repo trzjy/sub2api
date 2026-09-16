@@ -83,11 +83,16 @@ describe("SubscriptionPlanCard", () => {
     expect(mountPlanCard("openai", { validity_days: 30, validity_unit: "day" }).text()).toContain("/ 30payment.days");
   });
 
-  it("displays plan amounts as CNY when the FX rate is provided", () => {
-    const cny = mountPlanCard("openai", { original_price: 1.4 }, { cnyRate: 7.15 }).text();
+  it("displays converted amounts for the selected currency", () => {
+    const cny = mountPlanCard("openai", { original_price: 1.4 }, { currency: "CNY", displayPrice: 71.5, displayOriginalPrice: 10.01 }).text();
     expect(cny).toContain("¥71.5");
-    expect(cny).toContain("¥10.0");
+    expect(cny).toContain("¥10.01");
     expect(cny).toContain("CNY");
+
+    const usd = mountPlanCard("openai", { original_price: 1.4 }, { currency: "USD" }).text();
+    expect(usd).toContain("$10");
+    expect(usd).toContain("USD");
+    expect(usd).toContain("$1.4");
   });
 
   it.each([
@@ -116,10 +121,10 @@ describe("SubscriptionPlanCard", () => {
       price: 123.45,
       currency: "USD",
       description: "Includes advanced models and priority support.",
-    });
+    }, { cnyRate: 7.15 });
     const title = wrapper.get("h3");
     const badge = wrapper.findAll("span").find((node) => node.text() === "OpenAI");
-    const price = wrapper.findAll("span").find((node) => node.text() === "¥882.67");
+    const price = wrapper.findAll("span").find((node) => node.text() === "123.45");
 
     expect(title.element.parentElement?.classList).toContain("min-w-0");
     expect(title.element.parentElement?.classList).toContain("flex-1");

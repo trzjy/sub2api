@@ -183,7 +183,7 @@
                 <p class="text-gray-500 dark:text-gray-400">{{ t('payment.noPlans') }}</p>
               </div>
               <div v-else :class="planGridClass">
-                <SubscriptionPlanCard v-for="plan in checkout.plans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :cny-rate="fxRates.CNY" :currency="selectedCurrency" @select="selectPlan" />
+                <SubscriptionPlanCard v-for="plan in checkout.plans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :currency="selectedCurrency" :display-price="planDisplayPrice(plan)" :display-original-price="planDisplayOriginalPrice(plan)" @select="selectPlan" />
               </div>
               <!-- Active subscriptions (compact, below plan list) -->
               <div v-if="activeSubscriptions.length > 0">
@@ -232,7 +232,7 @@
             </button>
             <h3 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.selectPlan') }}</h3>
             <div class="space-y-4">
-              <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :cny-rate="fxRates.CNY" :currency="selectedCurrency" @select="selectPlanFromModal" />
+              <SubscriptionPlanCard v-for="plan in renewalPlans" :key="plan.id" :plan="plan" :active-subscriptions="activeSubscriptions" :currency="selectedCurrency" :display-price="planDisplayPrice(plan)" :display-original-price="planDisplayOriginalPrice(plan)" @select="selectPlanFromModal" />
             </div>
           </div>
         </div>
@@ -508,7 +508,7 @@ function onPaymentSettled() {
 // All checkout data from single API call
 const checkout = ref<CheckoutInfoResponse>({
   methods: {}, global_min: 0, global_max: 0,
-  plans: [], balance_disabled: false, fx_rates: {}, recharge_fee_rate: 0, help_text: '', help_image_url: '', stripe_publishable_key: '',
+  plans: [], balance_disabled: false, recharge_markup: 0, fx_rates: {}, recharge_fee_rate: 0, help_text: '', help_image_url: '', stripe_publishable_key: '',
 })
 
 const renderedHelpText = computed(() => DOMPurify.sanitize(
@@ -588,6 +588,14 @@ function formatSelectedPaymentAmount(value: number): string {
 
 function formatSelectedSubscriptionPaymentAmount(value: number): string {
   return formatSelectedPaymentAmount(subscriptionPaymentAmountForCurrency(value, selectedCurrency.value))
+}
+
+function planDisplayPrice(plan: SubscriptionPlan): number {
+  return subscriptionPaymentAmountForCurrency(plan.price, selectedCurrency.value)
+}
+
+function planDisplayOriginalPrice(plan: SubscriptionPlan): number {
+  return subscriptionPaymentAmountForCurrency(plan.original_price ?? 0, selectedCurrency.value)
 }
 
 const methodOptions = computed<PaymentMethodOption[]>(() =>

@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 
 import PlanEditDialog from '../PlanEditDialog.vue'
 import type { AdminGroup } from '@/types'
@@ -8,8 +8,7 @@ import type { AdminGroup } from '@/types'
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
-      if (key === 'payment.admin.subscriptionCnyPayPreview') return `preview ${params?.amount}`
-      if (key === 'payment.admin.subscriptionCnyPayPreviewWithFee') return `fee ${params?.feeRate} ${params?.total}`
+      if (key === 'payment.admin.storedUsdPreview') return `stored ${params?.amount}`
       return key
     },
   }),
@@ -17,14 +16,19 @@ vi.mock('vue-i18n', () => ({
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError: showErrorSpy,
     showSuccess: vi.fn(),
   }),
 }))
 
+const { createPlan, showErrorSpy } = vi.hoisted(() => ({
+  createPlan: vi.fn(),
+  showErrorSpy: vi.fn(),
+}))
+
 vi.mock('@/api/admin/payment', () => ({
   adminPaymentAPI: {
-    createPlan: vi.fn(),
+    createPlan,
     updatePlan: vi.fn(),
   },
 }))
@@ -139,34 +143,63 @@ function mountDialog({
 }
 
 describe('PlanEditDialog', () => {
-  it('shows CNY channel charge using the global FX rate and fee', async () => {
+  it('treats the admin price as CNY and stores USD in the request payload', async () => {
+    showErrorSpy.mockClear()
+    createPlan.mockClear()
     const wrapper = mountDialog({
-      paymentConfig: {
-        fx_rates: { CNY: 7.15 },
-        recharge_fee_rate: 2.5,
-      },
+      groups: [groupFixture({ id: 1, name: 'G', platform: 'openai' })],
+      paymentConfig: { fx_rates: { CNY: 7.15 }, recharge_fee_rate: 2.5 },
     })
 
+    // Fill all required fields
+    await wrapper.find('input[type="text"]').setValue('Test Plan')
+    await wrapper.get('select').setValue('1')
+    await wrapper.find('textarea').setValue('Test description')
     await wrapper.find('input[type="number"]').setValue('9.99')
+    await wrapper.find('#plan-form').trigger('submit.prevent')
+    await flushPromises()
 
-    expect(wrapper.text()).toContain('preview')
-    expect(wrapper.text()).toContain('¥71.43')
-    expect(wrapper.text()).toContain('fee 2.5')
-    expect(wrapper.text()).toContain('¥73.22')
+    expect(wrapper.text()).toContain('stored $1.40')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    expect(createPlan).toHaveBeenCalledWith(expect.objectContaining({
+      price: 1.4,
+      original_price: 0,
+    }))
   })
 
-  it('hides the preview when the CNY FX rate is not configured', async () => {
-    const wrapper = mountDialog({
-      paymentConfig: {
-        fx_rates: {},
-        recharge_fee_rate: 2.5,
-      },
-    })
+  it('hides the stored USD preview when the CNY FX rate is not configured', async () => {
+    const wrapper = mountDialog({ paymentConfig: { fx_rates: {}, recharge_fee_rate: 2.5 } })
 
     await wrapper.find('input[type="number"]').setValue('9.99')
 
-    expect(wrapper.text()).not.toContain('preview')
-    expect(wrapper.text()).not.toContain('¥71.43')
+    expect(wrapper.text()).not.toContain('stored')
+  })
+
+  it('converts stored USD price to CNY when editing an existing plan', async () => {
+    const existingPlan = {
+      id: 42,
+      name: 'Test Plan',
+      group_id: 1,
+      description: 'desc',
+      price: 1.4,        // stored as USD
+      original_price: 2.0, // stored as USD
+      currency: 'USD',
+      validity_days: 1,
+      validity_unit: 'days',
+      sort_order: 0,
+      for_sale: true,
+      features: [],
+      status: 'active',
+      group: { id: 1, name: 'G', platform: 'openai', rate_multiplier: 1 },
+    } as any
+    const wrapper = mount(PlanEditDialog, {
+      props: { show: true, plan: existingPlan, groups: [groupFixture({ id: 1, name: 'G', platform: 'openai' })], paymentConfig: { fx_rates: { CNY: 7.15 } } },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, Icon: true, GroupBadge: true } },
+    })
+
+    // price input (first number input) should show CNY value = 1.4 * 7.15 ≈ 10.01
+    const priceInput = wrapper.find('input[type="number"]')
+    expect(priceInput.element.value).toBe('10.01')
   })
 
   it('allows composite subscription groups for payment plans', () => {

@@ -154,6 +154,14 @@ function mountModal(groups: any[] = []) {
   })
 }
 
+// 网页版二级入口：选 CN 基础平台卡片（卡片标签为英文名）→ 点账号类型"网页版"。
+async function selectWebModeViaCnPlatform(wrapper: ReturnType<typeof mountModal>, cardLabel: 'Kimi' | 'Zhipu GLM' | 'DeepSeek') {
+  await selectButtonByText(wrapper, cardLabel)
+  await flushPromises()
+  await wrapper.get('[data-testid="cn-web-mode"]').trigger('click')
+  await flushPromises()
+}
+
 async function selectButtonByText(wrapper: ReturnType<typeof mountModal>, text: string) {
   const button = wrapper.findAll('button').find((candidate) => candidate.text().includes(text))
   expect(button).toBeDefined()
@@ -903,9 +911,10 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
   afterEach(() => vi.useRealTimers())
 
+
   it('submits pasted cookie credentials for web-deepseek with apikey type', async () => {
     const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webDeepseek')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
     // 风险提示必须可见（方案 §2.2）
     expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
@@ -925,7 +934,7 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
   it('submits parsed token JSON for web-kimi and keeps only non-empty optional fields', async () => {
     const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webKimi')
+    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
@@ -948,7 +957,7 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
   it('rejects blank cookie without calling create API', async () => {
     const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webDeepseek')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
@@ -961,7 +970,7 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
   it('rejects unparseable kimi token JSON without calling create API', async () => {
     const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webKimi')
+    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
@@ -974,10 +983,35 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
   it('hides the generic api key block for web platforms', async () => {
     const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'admin.accounts.webProviders.platforms.webZhipu')
+    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
     expect(wrapper.find('[data-testid="web-cookie-input"]').exists()).toBe(true)
     expect(wrapper.find('form#create-account-form input[type="password"]').exists()).toBe(false)
+  })
+
+  it('keeps the CN base card highlighted while web mode selected and resets platform on payg click', async () => {
+    const wrapper = mountModal()
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
+    await flushPromises()
+
+    // DeepSeek 卡片保持高亮（activeCnBasePlatform 映射回基础平台）。
+    const deepseekCard = wrapper.findAll('button').find((b) => b.text().includes('DeepSeek'))
+    expect(deepseekCard).toBeDefined()
+    expect(deepseekCard?.classes().join(' ')).toContain('bg-white')
+
+    // 切回按量付费：platform 复位为基础平台，web 凭证区消失。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="cn-web-mode"]').exists()).toBe(true)
+  })
+
+  it('does not offer web mode for minimax', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'MiniMax')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="cn-web-mode"]').exists()).toBe(false)
   })
 })

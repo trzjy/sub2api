@@ -109,7 +109,6 @@ function checkoutInfoFixture(overrides: Partial<CheckoutInfoResponse> = {}) {
     global_max: 0,
     plans: [],
     balance_disabled: false,
-    recharge_markup: 1,
     fx_rates: {},
     recharge_fee_rate: 0,
     help_text: '',
@@ -365,7 +364,6 @@ describe('PaymentView recharge rate preview', () => {
     routeState.path = '/purchase'
     routeState.query = {}
     getCheckoutInfo.mockReset().mockResolvedValue(checkoutInfoFixture({
-      recharge_markup: 1.1,
       fx_rates: { CNY: 7.15 },
       methods: {
         stripe: {
@@ -391,10 +389,9 @@ describe('PaymentView recharge rate preview', () => {
     expect(translate).toHaveBeenCalledWith('payment.rechargeRatePreview', {
       currency: 'CNY',
       fx: '7.15',
-      markup: '1.10',
     })
-    expect(en.payment.rechargeRatePreview).toBe('FX rate: 1 USD ≈ {fx} {currency} · markup {markup}×')
-    expect(zh.payment.rechargeRatePreview).toBe('按汇率 1 USD ≈ {fx} {currency} · 加价 {markup}×')
+    expect(en.payment.rechargeRatePreview).toBe('FX rate: 1 USD ≈ {fx} {currency} — credited = paid ÷ rate')
+    expect(zh.payment.rechargeRatePreview).toBe('按汇率 1 USD ≈ {fx} {currency}，到账金额 = 实付 ÷ 汇率')
   })
 })
 
@@ -402,7 +399,6 @@ describe('PaymentView subscription confirmation amounts', () => {
   it('shows converted CNY pay amount using the global FX rate', async () => {
     const wrapper = await mountSubscriptionConfirm({
       checkout: {
-        recharge_markup: 1,
         fx_rates: { CNY: 7.15 },
       },
       method: {
@@ -430,7 +426,6 @@ describe('PaymentView subscription confirmation amounts', () => {
     // 未配置 CNY 汇率时，订阅按 price 直付（后端同样不得静默 1:1 兜底以外的行为）
     const cnyWrapper = await mountSubscriptionConfirm({
       checkout: {
-        recharge_markup: 1,
         fx_rates: {},
       },
       method: {
@@ -445,7 +440,6 @@ describe('PaymentView subscription confirmation amounts', () => {
 
     const usdWrapper = await mountSubscriptionConfirm({
       checkout: {
-        recharge_markup: 1,
         fx_rates: { CNY: 7.15 },
       },
       method: {
@@ -464,7 +458,6 @@ describe('PaymentView subscription confirmation amounts', () => {
   it('adds fee rate after CNY rate conversion to match backend pay_amount', async () => {
     const wrapper = await mountSubscriptionConfirm({
       checkout: {
-        recharge_markup: 1,
         fx_rates: { CNY: 7.15 },
         recharge_fee_rate: 2.5,
       },

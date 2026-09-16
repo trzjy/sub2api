@@ -29,11 +29,11 @@
         </template>
         <template #cell-price="{ value, row }">
           <div class="text-sm">
-            <span class="font-medium text-gray-900 dark:text-white">{{ planCurrencySymbol(row.currency) }}{{ (value ?? 0).toFixed(2) }}</span>
-            <span class="ml-1 text-xs text-gray-400">{{ ACCOUNT_CURRENCY }}</span>
-            <span v-if="row.original_price" class="ml-1 text-xs text-gray-400 line-through">{{ planCurrencySymbol(row.currency) }}{{ row.original_price.toFixed(2) }}</span>
-            <div v-if="cnyRate > 0" class="text-xs text-gray-400 dark:text-gray-500">
-              ≈ {{ formatPaymentAmount(Math.round(row.price * cnyRate * 100) / 100, 'CNY') }}（按汇率）
+            <span class="font-medium text-gray-900 dark:text-white">{{ planCurrencySymbol }}{{ Math.round((value ?? 0) * cnyRate * 100) / 100 }}</span>
+            <span class="ml-1 text-xs text-gray-400">CNY</span>
+            <span v-if="row.original_price" class="ml-1 text-xs text-gray-400 line-through">{{ planCurrencySymbol }}{{ Math.round(row.original_price * cnyRate * 100) / 100 }}</span>
+            <div class="text-xs text-gray-400 dark:text-gray-500">
+              ≈ {{ formatPaymentAmount(row.price, ACCOUNT_CURRENCY) }}（{{ ACCOUNT_CURRENCY }}）
             </div>
           </div>
         </template>
@@ -100,9 +100,7 @@ import { platformTextClass } from '@/utils/platformColors'
 const { t } = useI18n()
 const appStore = useAppStore()
 
-function planCurrencySymbol(_currency?: string): string {
-  return currencySymbol(ACCOUNT_CURRENCY)
-}
+const planCurrencySymbol = computed(() => currencySymbol('CNY'))
 
 // ==================== Groups ====================
 

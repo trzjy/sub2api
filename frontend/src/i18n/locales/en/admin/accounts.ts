@@ -141,10 +141,9 @@ export default {
       },
       webLogin: {
         title: 'Official Web Login',
-        openEmbedded: 'Open official web login',
-        openEmbeddedHint: 'Complete the official login in the dialog; credentials are validated and prefilled into the fields above.',
-        openKimi: 'Open www.kimi.com to log in',
-        kimiGuide: 'After logging in from the new window, copy access_token / refresh_token / user_id from browser local storage and paste into the field below.',
+        openOfficial: 'Open official login page in a new tab',
+        openOfficialHint: 'The official login page may forbid embedding; log in from a new tab and paste the Cookie manually.',
+        tryEmbed: 'Try embedding',
         platformHint: {
           webDeepseek: 'Log in to DeepSeek Web and copy the full Cookie string; cross-origin limits prevent automatic capture, so paste manually.',
           webZhipu: 'Log in to Zhipu GLM Web and copy the full Cookie string; cross-origin limits prevent automatic capture, so paste manually.',
@@ -165,6 +164,8 @@ export default {
           paygDesc: 'Consumes account balance, billed per token. Auto-cools down on low balance and recovers after top-up.',
           coding: 'Coding Plan',
           codingDesc: 'Subscription coding package, rate-limited by 5-hour / weekly rolling usage windows.',
+          web: 'Web (reverse)',
+          webDesc: 'Forward via official web-client login state (paste Cookie / Token); no quota probing.',
         },
         apiProtocol: {
           title: 'API Protocol',

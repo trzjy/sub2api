@@ -24,7 +24,6 @@ const (
 	SettingEnabledPaymentTypes = "ENABLED_PAYMENT_TYPES"
 	SettingLoadBalanceStrategy = "LOAD_BALANCE_STRATEGY"
 	SettingBalancePayDisabled  = "BALANCE_PAYMENT_DISABLED"
-	SettingRechargeMarkup      = "RECHARGE_MARKUP"
 	SettingFXRates             = "FX_RATES"
 	SettingRechargeFeeRate     = "RECHARGE_FEE_RATE"
 	SettingProductNamePrefix             = "PRODUCT_NAME_PREFIX"
@@ -56,7 +55,6 @@ type PaymentConfig struct {
 	MaxPendingOrders          int      `json:"max_pending_orders"`
 	EnabledTypes              []string `json:"enabled_payment_types"`
 	BalanceDisabled           bool     `json:"balance_disabled"`
-	RechargeMarkup            float64  `json:"recharge_markup"`
 	FXRates                   payment.FXRates `json:"fx_rates"`
 	RechargeFeeRate           float64  `json:"recharge_fee_rate"`
 	LoadBalanceStrategy      string  `json:"load_balance_strategy"`
@@ -89,7 +87,6 @@ type UpdatePaymentConfigRequest struct {
 	MaxPendingOrders          *int     `json:"max_pending_orders"`
 	EnabledTypes              []string  `json:"enabled_payment_types"`
 	BalanceDisabled           *bool     `json:"balance_disabled"`
-	RechargeMarkup            *float64  `json:"recharge_markup"`
 	FXRates                   *string   `json:"fx_rates"`
 	RechargeFeeRate           *float64  `json:"recharge_fee_rate"`
 	LoadBalanceStrategy       *string  `json:"load_balance_strategy"`
@@ -216,7 +213,6 @@ func (s *PaymentConfigService) GetPaymentConfig(ctx context.Context) (*PaymentCo
 	keys := []string{
 		SettingPaymentEnabled, SettingMinRechargeAmount, SettingMaxRechargeAmount,
 		SettingDailyRechargeLimit, SettingOrderTimeoutMinutes, SettingMaxPendingOrders,
-		SettingEnabledPaymentTypes, SettingBalancePayDisabled, SettingRechargeMarkup, SettingFXRates, SettingRechargeFeeRate, SettingLoadBalanceStrategy,
 		SettingProductNamePrefix, SettingProductNameSuffix,
 		SettingHelpImageURL, SettingHelpText,
 		SettingCancelRateLimitOn, SettingCancelRateLimitMax,
@@ -244,7 +240,6 @@ func (s *PaymentConfigService) parsePaymentConfig(vals map[string]string) *Payme
 		OrderTimeoutMin:           pcParseInt(vals[SettingOrderTimeoutMinutes], defaultOrderTimeoutMin),
 		MaxPendingOrders:          pcParseInt(vals[SettingMaxPendingOrders], defaultMaxPendingOrders),
 		BalanceDisabled:           vals[SettingBalancePayDisabled] == "true",
-		RechargeMarkup:            normalizeRechargeMarkup(pcParseFloat(vals[SettingRechargeMarkup], defaultRechargeMarkup)),
 		RechargeFeeRate:           pcParseFloat(vals[SettingRechargeFeeRate], 0),
 		LoadBalanceStrategy:       vals[SettingLoadBalanceStrategy],
 		ProductNamePrefix:         vals[SettingProductNamePrefix],
@@ -329,11 +324,6 @@ func (s *PaymentConfigService) getStripePublishableKey(ctx context.Context) stri
 // nil-check before serialisation — this is inherent to patch-style update patterns
 // and cannot be meaningfully decomposed without introducing unnecessary abstraction.
 func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req UpdatePaymentConfigRequest) error {
-	if req.RechargeMarkup != nil {
-		if math.IsNaN(*req.RechargeMarkup) || math.IsInf(*req.RechargeMarkup, 0) || *req.RechargeMarkup <= 0 {
-			return infraerrors.BadRequest("INVALID_RECHARGE_MARKUP", "recharge markup must be greater than 0")
-		}
-	}
 	if req.FXRates != nil {
 		fxRates, err := payment.ParseFXRates(*req.FXRates)
 		if err != nil {
@@ -379,9 +369,6 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 	}
 	if req.BalanceDisabled != nil {
 		m[SettingBalancePayDisabled] = formatBoolOrEmpty(req.BalanceDisabled)
-	}
-	if req.RechargeMarkup != nil {
-		m[SettingRechargeMarkup] = formatPositiveFloat(req.RechargeMarkup)
 	}
 	if req.FXRates != nil {
 		m[SettingFXRates] = *req.FXRates

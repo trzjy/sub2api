@@ -112,7 +112,7 @@ import type { UserSubscription } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { hasPeakRate as groupHasPeakRate, formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import { planValiditySuffix } from './validity'
-import { normalizePaymentCurrency, currencySymbol, formatAccountMoney } from '@/utils/money'
+import { normalizePaymentCurrency, currencySymbol, formatAccountMoney, roundPaymentAmount } from '@/utils/money'
 import {
   platformAccentBarClass,
   platformBadgeLightClass,
@@ -127,8 +127,9 @@ import {
 const props = defineProps<{
   plan: SubscriptionPlan
   activeSubscriptions?: UserSubscription[]
-  cnyRate?: number
   currency?: string
+  displayPrice?: number
+  displayOriginalPrice?: number
 }>()
 const emit = defineEmits<{ select: [plan: SubscriptionPlan] }>()
 const { t } = useI18n()
@@ -162,16 +163,12 @@ const rateDisplay = computed(() => {
 const appStore = useAppStore()
 const displayCurrency = computed(() => normalizePaymentCurrency(props.currency || 'CNY'))
 const planCurrencySymbol = computed(() => currencySymbol(displayCurrency.value))
-const displayPrice = computed(() => subscriptionPaymentAmountForCurrency(props.plan.price, displayCurrency.value))
-const displayOriginalPrice = computed(() =>
-  subscriptionPaymentAmountForCurrency(props.plan.original_price, displayCurrency.value)
+const displayPrice = computed(() =>
+  props.displayPrice ?? roundPaymentAmount(props.plan.price ?? 0, displayCurrency.value)
 )
-
-function subscriptionPaymentAmountForCurrency(value: number, currency: string): number {
-  if (currency === 'CNY' || currency === 'USD') return Math.round(value * 100) / 100
-  if (currency === 'HKD') return Math.round(value * (props.cnyRate || 0) * 100) / 100
-  return Math.round(value * 100) / 100
-}
+const displayOriginalPrice = computed(() =>
+  props.displayOriginalPrice ?? roundPaymentAmount(props.plan.original_price ?? 0, displayCurrency.value)
+)
 
 const hasPeakRate = computed(() => groupHasPeakRate(props.plan))
 
