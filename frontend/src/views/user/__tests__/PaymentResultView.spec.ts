@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 
 const routeState = vi.hoisted(() => ({
   query: {} as Record<string, unknown>,
@@ -91,6 +91,7 @@ const recoverySnapshotFactory = (resumeToken: string) => ({
 })
 
 describe('PaymentResultView', () => {
+  enableAutoUnmount(afterEach)
   beforeEach(() => {
     routeState.query = {}
     routerPush.mockReset()
@@ -534,5 +535,62 @@ describe('PaymentResultView', () => {
 
     expect(wrapper.text()).toContain('payment.methods.alipay')
     expect(wrapper.text()).not.toContain('payment.methods.alipay_direct')
+  })
+
+  it('auto-returns to the recharge page 3 seconds after a successful payment', async () => {
+    vi.useFakeTimers()
+    routeState.query = {
+      resume_token: 'resume-auto-return',
+    }
+    resolveOrderPublicByResumeToken.mockResolvedValue({
+      data: orderFactory('COMPLETED'),
+    })
+
+    const wrapper = mount(PaymentResultView, {
+      global: {
+        stubs: {
+          OrderStatusBadge: true,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.result.success')
+    expect(wrapper.text()).toContain('payment.result.autoReturnHint')
+    expect(routerPush).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(routerPush).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(routerPush).toHaveBeenCalledTimes(1)
+    expect(routerPush).toHaveBeenCalledWith('/purchase')
+  })
+
+  it('cancels the auto-return when the order is not successful', async () => {
+    vi.useFakeTimers()
+    routeState.query = {
+      resume_token: 'resume-no-auto-return',
+    }
+    resolveOrderPublicByResumeToken.mockResolvedValue({
+      data: orderFactory('FAILED'),
+    })
+
+    const wrapper = mount(PaymentResultView, {
+      global: {
+        stubs: {
+          OrderStatusBadge: true,
+        },
+      },
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('payment.result.failed')
+    expect(wrapper.text()).not.toContain('payment.result.autoReturnHint')
+
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(routerPush).not.toHaveBeenCalled()
   })
 })

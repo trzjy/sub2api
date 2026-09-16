@@ -91,13 +91,16 @@
           <button class="btn btn-secondary flex-1" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
           <button class="btn btn-primary flex-1" @click="router.push('/orders')">{{ t('payment.result.viewOrders') }}</button>
         </div>
+        <p v-if="isSuccess && successCountdown > 0" class="mt-3 text-center text-xs text-gray-400 dark:text-gray-500">
+          {{ t('payment.result.autoReturnHint', { seconds: successCountdown }) }}
+        </p>
       </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
@@ -139,10 +142,14 @@ const SUCCESS_STATUSES = new Set(['COMPLETED', 'PAID', 'RECHARGING'])
 const PENDING_STATUSES = new Set(['PENDING', 'CREATED', 'WAITING', 'PROCESSING'])
 const STATUS_REFRESH_INTERVAL_MS = 2000
 const STATUS_REFRESH_MAX_ATTEMPTS = 15
+/** 支付成功后停留的秒数，倒计时归零后自动返回充值页。 */
+const AUTO_RETURN_DELAY_SECONDS = 3
 
 let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let autoReturnTimer: ReturnType<typeof setInterval> | null = null
 let userBalanceRefreshStarted = false
 const refreshAttempts = ref(0)
+const successCountdown = ref(AUTO_RETURN_DELAY_SECONDS)
 
 /** 充值金额 = pay_amount / (1 + fee_rate/100)，fee_rate=0 时等于 pay_amount */
 const baseAmount = computed(() => {
@@ -355,6 +362,43 @@ function scheduleStatusRefresh(refreshOrder: (() => Promise<ResolvedOrder | null
   }, STATUS_REFRESH_INTERVAL_MS)
 }
 
+function clearAutoReturnTimer(): void {
+  if (autoReturnTimer !== null) {
+    clearInterval(autoReturnTimer)
+    autoReturnTimer = null
+  }
+}
+
+function startAutoReturnCountdown(): void {
+  clearAutoReturnTimer()
+  successCountdown.value = AUTO_RETURN_DELAY_SECONDS
+  autoReturnTimer = setInterval(() => {
+    successCountdown.value -= 1
+    if (successCountdown.value <= 0) {
+      clearAutoReturnTimer()
+      router.push('/purchase')
+    }
+  }, 1000)
+}
+
+function stopAutoReturnCountdown(): void {
+  clearAutoReturnTimer()
+  successCountdown.value = AUTO_RETURN_DELAY_SECONDS
+}
+
+// 支付成功（或从处理中转入成功）后停留 3 秒，倒计时结束自动返回充值页；
+// 一旦离开成功态（失败/重新变成处理中）立即取消，避免误跳。
+watch(
+  () => isSuccess.value,
+  (success) => {
+    if (success) {
+      startAutoReturnCountdown()
+    } else {
+      stopAutoReturnCountdown()
+    }
+  },
+)
+
 onMounted(async () => {
   const resumeToken = readRouteQueryString('resume_token')
   const routeOrderId = Number(readRouteQueryString('order_id')) || 0
@@ -459,5 +503,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearStatusRefreshTimer()
+  clearAutoReturnTimer()
 })
 </script>

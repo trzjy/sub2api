@@ -376,6 +376,7 @@ export default {
       failed: 'Payment Failed',
       backToRecharge: 'Back to Recharge',
       viewOrders: 'View Orders',
+      autoReturnHint: 'Returning to top-up in {seconds}s',
     },
     currentBalance: 'Current Balance',
     groupFallback: 'Group #{id}',

@@ -400,6 +400,7 @@ export default {
       failed: '支付失败',
       backToRecharge: '返回充值',
       viewOrders: '查看订单',
+      autoReturnHint: '{seconds} 秒后自动返回充值页',
     },
     currentBalance: '当前余额',
     groupFallback: '分组 #{id}',
