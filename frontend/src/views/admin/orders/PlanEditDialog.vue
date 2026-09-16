@@ -188,11 +188,11 @@ function buildPlanPayload() {
     group_id: planForm.group_id,
     description: planForm.description,
     price: planForm.price > 0 && cnyRate.value > 0
-      ? Math.round((planForm.price / cnyRate.value) * 100) / 100
+      ? Math.round((planForm.price / cnyRate.value) * 10000) / 10000
       : planForm.price,
     currency: ACCOUNT_CURRENCY,
     original_price: planForm.original_price > 0 && cnyRate.value > 0
-      ? Math.round((planForm.original_price / cnyRate.value) * 100) / 100
+      ? Math.round((planForm.original_price / cnyRate.value) * 10000) / 10000
       : planForm.original_price || 0,
     validity_days: planForm.validity_days,
     validity_unit: planForm.validity_unit,
