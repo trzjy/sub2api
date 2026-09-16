@@ -17,13 +17,27 @@ type webLoginUpstream struct {
 	Origin string
 	// CookieName 该平台用于登录态判定的关键 Cookie 名，空串表示不捕获（仅内嵌）。
 	CookieName string
+	// AllowedCookies 允许从【入站 Cookie 头】提取的平台白名单字段（前端 JS 写入
+	// 型登录态，如 chatglm_token，服务端不通过 Set-Cookie 下发，只能从浏览器
+	// 后续请求携带的 Cookie 中捕获）。仅这些字段会被并入捕获结果并转发给上游；
+	// 名单之外的入站 Cookie（本站管理端 cookie、wlp_session 等）一律丢弃。
+	// 空列表表示不从入站提取（如 kimi，仅手动粘贴 Token JSON）。
+	AllowedCookies []string
 }
 
 // webLoginUpstreams 固定上游映射表。Platform 名是白名单 key，不在表内一律拒绝。
 var webLoginUpstreams = map[string]webLoginUpstream{
-	"web-zhipu":   {Origin: "https://chatglm.cn", CookieName: "chatglm_token"},
-	"web-deepseek": {Origin: "https://chat.deepseek.com", CookieName: "ds_session_id"},
-	"web-kimi":    {Origin: "https://www.kimi.com", CookieName: ""},
+	"web-zhipu": {
+		Origin:         "https://chatglm.cn",
+		CookieName:     "chatglm_token",
+		AllowedCookies: []string{"chatglm_token", "chatglm_refresh_token", "chatglm_user_id"},
+	},
+	"web-deepseek": {
+		Origin:         "https://chat.deepseek.com",
+		CookieName:     "ds_session_id",
+		AllowedCookies: []string{"ds_session_id"},
+	},
+	"web-kimi": {Origin: "https://www.kimi.com", CookieName: ""},
 }
 
 // ErrWebLoginUnknownPlatform 表示 platform 不在固定映射表内。
@@ -40,6 +54,17 @@ func WebLoginProxyPlatformInfo(platform string) (origin string, cookieName strin
 		return "", "", false
 	}
 	return u.Origin, u.CookieName, true
+}
+
+// WebLoginProxyAllowedCookieNames 返回平台允许从入站 Cookie 头提取的字段白名单
+// （区分大小写，字段名按官方前端 Cookies.set 的实际 key 固定）。空列表表示该平台
+// 不从入站提取任何 Cookie（仅依赖上游 Set-Cookie / 手动粘贴）。
+func WebLoginProxyAllowedCookieNames(platform string) []string {
+	u, found := webLoginUpstreams[platform]
+	if !found {
+		return nil
+	}
+	return u.AllowedCookies
 }
 
 // WebLoginProxyRedirectAllowlist 返回允许出现在上游响应 Location / 页面绝对 URL

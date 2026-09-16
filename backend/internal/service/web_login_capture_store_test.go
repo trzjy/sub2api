@@ -153,3 +153,14 @@ func TestWebLoginProxyPlatformInfo(t *testing.T) {
 	_, _, ok = WebLoginProxyPlatformInfo("nope")
 	require.False(t, ok)
 }
+
+func TestWebLoginProxyAllowedCookieNames(t *testing.T) {
+	require.Equal(t, []string{"chatglm_token", "chatglm_refresh_token", "chatglm_user_id"},
+		WebLoginProxyAllowedCookieNames("web-zhipu"))
+	require.Equal(t, []string{"ds_session_id"},
+		WebLoginProxyAllowedCookieNames("web-deepseek"))
+	// kimi 白名单为空：不从入站 Cookie 提取（仅手动粘贴 Token JSON）。
+	require.Empty(t, WebLoginProxyAllowedCookieNames("web-kimi"))
+	// 未知平台返回 nil（handler 不得据此捕获任何入站 Cookie）。
+	require.Nil(t, WebLoginProxyAllowedCookieNames("nope"))
+}

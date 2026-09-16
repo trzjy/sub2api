@@ -224,13 +224,17 @@ func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath stri
 					req.Header.Del(k)
 				}
 			}
-			// 出站 Cookie：仅携带已捕获累积的上游 Cookie（store.Cookie(token)），
-			// 绝不原样转发入站 Cookie 头（含本站管理端 cookie，如 sub2api_session）。
-			// 因此本站会话 Cookie wlp_session（只存在于入站 Cookie 头）绝不会被
-			// 转发给上游官方站点，也不会污染捕获结果。
+			// 出站 Cookie：携带“已捕获累积串 + 入站 Cookie 中的平台白名单字段”。
+			// 平台白名单字段（如 chatglm_token / chatglm_refresh_token）是官方前端
+			// JS 写入浏览器、服务端不下发 Set-Cookie 的登录态，必须从入站 Cookie 头
+			// 提取才能转发给上游；白名单之外的入站 Cookie（本站管理端 cookie、
+			// wlp_session 等）一律丢弃，绝不原样转发整个入站 Cookie 头。
+			allowed := extractAllowedCookies(req, entry.Platform)
 			req.Header.Del("Cookie")
-			if cookie, ok := h.store.Cookie(token); ok && cookie != "" {
-				req.Header.Set("Cookie", cookie)
+			if stored, ok := h.store.Cookie(token); ok && stored != "" {
+				req.Header.Set("Cookie", mergeCookies(stored, cookiesFromPairs(allowed)))
+			} else if len(allowed) > 0 {
+				req.Header.Set("Cookie", joinCookiePairs(allowed))
 			}
 		},
 		// 5b. Transport：在传输层校验重定向目标 host 白名单（SSRF 防护）。
@@ -240,7 +244,7 @@ func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath stri
 		},
 		// 5c. ModifyResponse：剥离敏感响应头、重写 Set-Cookie、捕获 Cookie、重写 Location、改写 HTML。
 		ModifyResponse: func(resp *http.Response) error {
-			return h.modifyUpstreamResponse(c, token, keyCookieName, origin, resp, c.Request)
+			return h.modifyUpstreamResponse(c, token, keyCookieName, entry.Platform, origin, resp, c.Request)
 		},
 		// 5d. ErrorHandler：上游/重定向错误统一返回 502，且响应体不含目标 URL（防泄露）。
 		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, _ error) {
@@ -295,7 +299,7 @@ func stripSessionCookie(cookieStr string) string {
 // modifyUpstreamResponse 处理上游响应：头剥离、Set-Cookie 重写、Cookie 捕获、Location 重写、HTML 改写。
 func (h *WebLoginProxyHandler) modifyUpstreamResponse(
 	c *gin.Context,
-	token, keyCookieName, origin string,
+	token, keyCookieName, platform, origin string,
 	resp *http.Response,
 	req *http.Request,
 ) error {
@@ -305,8 +309,8 @@ func (h *WebLoginProxyHandler) modifyUpstreamResponse(
 	secure := isSecureRequest(c)
 	rewriteSetCookies(resp, secure)
 
-	// 6. 捕获逻辑：合并 Set-Cookie + 请求 Cookie，命中关键 Cookie 则存储。
-	captureCookies(h.store, token, keyCookieName, resp, req)
+	// 6. 捕获逻辑：合并 Set-Cookie + 入站白名单字段，命中关键 Cookie 则存储。
+	captureCookies(h.store, token, keyCookieName, platform, resp, req)
 	// 滑动续期：任何上游活动都重置过期。
 	h.store.Touch(token)
 
@@ -380,16 +384,23 @@ func sanitizeSetCookie(sc string, secure bool) string {
 	return strings.Join(out, "; ")
 }
 
-// captureCookies 把上游响应 Set-Cookie 与已捕获累积串合并为一条完整 Cookie 字符串，
-// 若命中平台关键 Cookie 名则存入 store。仅读取上游响应头，绝不并入入站 Cookie 头
-// （入站可能含本站管理端 cookie，如 sub2api_session，误捕获会泄漏/污染）。
-// 跨多次响应的累积通过已存储的捕获结果 merge 实现，不读取本站请求头（红线）。
-func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName string, resp *http.Response, req *http.Request) {
-	// 仅合并“已捕获累积串 + 本次上游 Set-Cookie”，彻底排除入站 Cookie 头
-	// 与本站会话 Cookie wlp_session（绝不可把反代会话 Cookie 捕获为上游凭证）。
+// captureCookies 合并三路来源为一条完整 Cookie 字符串，若命中平台关键 Cookie 名则
+// 存入 store：
+//  1. 已捕获累积串（store.Cookie(token)，跨多次响应累积）；
+//  2. 本次上游响应 Set-Cookie（resp.Cookies()）；
+//  3. 入站 Cookie 头中的【平台白名单字段】（extractAllowedCookies）——官方前端 JS
+//     写入型登录态（chatglm_token 等）不走 Set-Cookie，只能从浏览器携带的 Cookie
+//     捕获；白名单之外的一切入站 Cookie（本站管理端 cookie、wlp_session 等）绝不
+//     并入捕获（红线：误捕获会泄漏/污染）。
+func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName, platform string, resp *http.Response, req *http.Request) {
 	prev, _ := store.Cookie(token)
 	prev = stripSessionCookie(prev)
 	merged := mergeCookies(prev, resp.Cookies())
+	// 并入入站 Cookie 中的平台白名单字段（JS 写入型登录态）。
+	inboundAllowed := extractAllowedCookies(req, platform)
+	if len(inboundAllowed) > 0 {
+		merged = mergeCookies(merged, cookiesFromPairs(inboundAllowed))
+	}
 	if merged == "" {
 		return
 	}
@@ -408,7 +419,60 @@ func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName st
 				return
 			}
 		}
+		// 关键 Cookie 存在于入站白名单字段（JS 写入型，首次捕获）也算命中。
+		for _, p := range inboundAllowed {
+			if p.Name == keyCookieName {
+				store.SetCookie(token, merged)
+				return
+			}
+		}
 	}
+}
+
+// extractAllowedCookies 从请求 Cookie 头中提取平台白名单字段（区分大小写）。
+// 白名单之外的 Cookie（含本站管理端 cookie 与 wlp_session）一律丢弃。
+// 平台非法或白名单为空时返回空列表（绝不把入站 Cookie 当上游凭证）。
+func extractAllowedCookies(req *http.Request, platform string) []struct{ Name, Value string } {
+	allowed := service.WebLoginProxyAllowedCookieNames(platform)
+	if len(allowed) == 0 {
+		return nil
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = true
+	}
+	parsed := parseCookieHeader(req.Header.Get("Cookie"))
+	out := make([]struct{ Name, Value string }, 0, len(parsed))
+	for _, p := range parsed {
+		if allowedSet[p.Name] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// cookiesFromPairs 把 name/value 对转换为 *http.Cookie 列表（值原样，无属性）。
+func cookiesFromPairs(pairs []struct{ Name, Value string }) []*http.Cookie {
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make([]*http.Cookie, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, &http.Cookie{Name: p.Name, Value: p.Value})
+	}
+	return out
+}
+
+// joinCookiePairs 把 name/value 对拼接为 Cookie 头字符串（仅 name=value）。
+func joinCookiePairs(pairs []struct{ Name, Value string }) string {
+	if len(pairs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		parts = append(parts, p.Name+"="+p.Value)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // mergeCookies 合并请求 Cookie 与响应 Set-Cookie，后者覆盖前者同名项。

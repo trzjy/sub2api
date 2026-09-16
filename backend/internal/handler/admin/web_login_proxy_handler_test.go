@@ -682,7 +682,7 @@ func TestProxyRoot_SessionCookieNotCaptured(t *testing.T) {
 	require.NotContains(t, captured, "wlp_session", "捕获结果不得包含本代理会话 Cookie")
 }
 
-// TestProxyRoot_StillServesTokenRoute 验证隔离 engine 同时保留 token 路由：
+// TestProxy_StillServesTokenRoute 验证隔离 engine 同时保留 token 路由：
 // 通过 URL token 访问仍能 200（主站 v1 行为不变）。
 func TestProxyRoot_StillServesTokenRoute(t *testing.T) {
 	var upstreamPath string
@@ -709,4 +709,147 @@ func TestProxyRoot_StillServesTokenRoute(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "/dashboard", upstreamPath)
+}
+
+// TestProxy_CapturesInboundAllowedCookies 验证 JS 写入型登录态捕获（根因修复）：
+// ChatGLM 的 chatglm_token 等登录态由官方前端 Cookies.set 写入浏览器、服务端不下发
+// Set-Cookie；浏览器后续请求携带的 Cookie 中命中平台白名单字段 → 捕获成功。
+// 白名单之外（sub2api_session / wlp_session）绝不进入捕获结果。
+func TestProxy_CapturesInboundAllowedCookies(t *testing.T) {
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 上游不返回任何 Set-Cookie：登录态完全由浏览器 JS 写入。
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: "chatglm_token", Value: "tok-1"})
+	req.AddCookie(&http.Cookie{Name: "chatglm_refresh_token", Value: "ref-1"})
+	req.AddCookie(&http.Cookie{Name: "chatglm_user_id", Value: "u-1"})
+	req.AddCookie(&http.Cookie{Name: "sub2api_session", Value: "leaked-session"})
+	req.AddCookie(&http.Cookie{Name: "wlp_session", Value: "leaked-wlp"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	captured, ok := store.Cookie(token)
+	require.True(t, ok, "入站白名单字段命中关键 cookie 应捕获成功")
+	require.Contains(t, captured, "chatglm_token=tok-1")
+	require.Contains(t, captured, "chatglm_refresh_token=ref-1")
+	require.Contains(t, captured, "chatglm_user_id=u-1")
+	require.NotContains(t, captured, "sub2api_session", "捕获结果不得包含本站管理端 cookie")
+	require.NotContains(t, captured, "wlp_session", "捕获结果不得包含本代理会话 Cookie")
+}
+
+// TestProxy_ForwardsOnlyAllowedInboundCookies 验证出站 Cookie 只含“捕获累积串 +
+// 入站白名单字段”：白名单之外（sub2api_session / wlp_session）绝不转发给上游。
+func TestProxy_ForwardsOnlyAllowedInboundCookies(t *testing.T) {
+	var upstreamCookie string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: "chatglm_token", Value: "tok-1"})
+	req.AddCookie(&http.Cookie{Name: "chatglm_refresh_token", Value: "ref-1"})
+	req.AddCookie(&http.Cookie{Name: "sub2api_session", Value: "leaked-session"})
+	req.AddCookie(&http.Cookie{Name: "wlp_session", Value: "leaked-wlp"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Contains(t, upstreamCookie, "chatglm_token=tok-1")
+	require.Contains(t, upstreamCookie, "chatglm_refresh_token=ref-1")
+	require.NotContains(t, upstreamCookie, "sub2api_session", "上游不得收到本站管理端 cookie")
+	require.NotContains(t, upstreamCookie, "wlp_session", "上游不得收到本代理会话 Cookie")
+}
+
+// TestProxy_InboundAllowedOverridesStored 验证入站白名单字段覆盖累积串同名项：
+// JS 每次登录更新 cookie 后，出站与捕获都取最新值（merge 语义：后者覆盖前者）。
+func TestProxy_InboundAllowedOverridesStored(t *testing.T) {
+	var upstreamCookie string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+	store.SetCookie(token, "chatglm_token=old")
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: "chatglm_token", Value: "new"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Contains(t, upstreamCookie, "chatglm_token=new")
+	require.NotContains(t, upstreamCookie, "chatglm_token=old")
+	captured, ok := store.Cookie(token)
+	require.True(t, ok)
+	require.Contains(t, captured, "chatglm_token=new")
+	require.NotContains(t, captured, "chatglm_token=old")
+}
+
+// TestProxy_KimiNeverCapturesInboundCookie 验证 kimi（白名单为空）即使入站带任意
+// Cookie 也绝不捕获/转发（仅手动粘贴 Token JSON 认证）。
+func TestProxy_KimiNeverCapturesInboundCookie(t *testing.T) {
+	var upstreamCookie string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-kimi")
+	require.NoError(t, err)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/chat", nil)
+	req.AddCookie(&http.Cookie{Name: "kimi_anything", Value: "leak"})
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	require.Empty(t, upstreamCookie, "kimi 入站 Cookie 不得转发给上游")
+	_, ok := store.Cookie(token)
+	require.False(t, ok, "kimi 不应捕获任何入站 Cookie")
 }
