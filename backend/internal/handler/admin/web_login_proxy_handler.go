@@ -10,6 +10,8 @@ package admin
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"errors"
 	"io"
 	"net/http"
@@ -181,6 +183,10 @@ func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 			// 仅重写 Origin/Referer 为上游 origin，避免暴露真实反代地址。
 			req.Header.Set("Origin", origin)
 			req.Header.Set("Referer", origin+target.Path)
+			// Accept-Encoding 固定 gzip：HTML 改写层只支持 gzip/deflate 解压
+			// （Go 标准库无 brotli），跟随浏览器原始 Accept-Encoding 可能收到
+			// br 响应导致改写层无法解压注入 <base>。
+			req.Header.Set("Accept-Encoding", "gzip")
 			// 删除所有 X-Forwarded-*，防止上游据此判定真实客户端。
 			for k := range req.Header {
 				if strings.HasPrefix(strings.ToLower(k), "x-forwarded-") {
@@ -424,6 +430,10 @@ func rewriteOrRejectLocation(c *gin.Context, token string, resp *http.Response) 
 
 // maybeRewriteHTML 在满足条件时改写 HTML：注入 <base href> 并将白名单 host 的绝对
 // URL 属性替换为代理前缀路径。改写失败或超限时原样透传。
+// 压缩处理：上游可能返回 gzip/deflate 压缩 body（出站 Accept-Encoding 已固定 gzip，
+// 但压缩仍可能出现）——压缩字节上做字符串注入必然失败，必须先解压再改写；改写后
+// 以明文回传（删除 Content-Encoding，登录页 ≤512KB，明文回传开销可接受且不引入
+// 重新压缩的出错面）。
 func maybeRewriteHTML(c *gin.Context, token string, resp *http.Response) {
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "text/html") {
@@ -442,7 +452,35 @@ func maybeRewriteHTML(c *gin.Context, token string, resp *http.Response) {
 		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 		return
 	}
-	rewritten := rewriteHTMLBody(body, token)
+
+	// 解压（gzip/deflate）：解压失败视为压缩内容原样透传，不做任何改写尝试
+	// （改写前行为一致；浏览器收到时按压缩体原样处理）。
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	decompressed := false
+	plain := body
+	switch encoding {
+	case "gzip":
+		if gr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
+			if p, err := io.ReadAll(io.LimitReader(gr, int64(webLoginProxyMaxBody))); err == nil {
+				plain = p
+				decompressed = true
+			}
+		}
+	case "deflate":
+		if p, err := io.ReadAll(io.LimitReader(flate.NewReader(bytes.NewReader(body)), int64(webLoginProxyMaxBody))); err == nil {
+			plain = p
+			decompressed = true
+		}
+	}
+	if encoding != "" && !decompressed {
+		return
+	}
+	// 解压成功则回传不再压缩：删除 Content-Encoding（明文回传）。
+	if decompressed {
+		resp.Header.Del("Content-Encoding")
+	}
+
+	rewritten := rewriteHTMLBody(plain, token)
 	resp.Body = io.NopCloser(bytes.NewReader(rewritten))
 	resp.ContentLength = int64(len(rewritten))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))

@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -178,6 +179,46 @@ func TestProxy_HTMLRewrite(t *testing.T) {
 	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
 	require.NoError(t, err)
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), `<base href="/api/v1/web-login-proxy/`+token+`/">`)
+	require.Contains(t, string(body), `href="/api/v1/web-login-proxy/`+token+`/foo"`)
+}
+
+// TestProxy_HTMLRewriteGzipBody 验证 gzip 压缩的 HTML 响应也能完成 base 注入与
+// 绝对 URL 改写（生产实测 chatglm shell 以 gzip 回源，压缩字节上字符串注入必然
+// 失败导致相对路径资产 404 → iframe 白板）。改写后以明文回传（无 Content-Encoding）。
+func TestProxy_HTMLRewriteGzipBody(t *testing.T) {
+	plainHTML := `<html><head><title>x</title></head><body><a href="https://chatglm.cn/foo">l</a></body></html>`
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "gzip" {
+			t.Errorf("outbound Accept-Encoding = %q, want gzip", r.Header.Get("Accept-Encoding"))
+		}
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		_, _ = gw.Write([]byte(plainHTML))
+		_ = gw.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	resp, err := http.Get(srv.URL+"/api/v1/web-login-proxy/"+token+"/", )
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	// 客户端声明不接收压缩，确保读到的是改写后的明文。
+	require.Empty(t, resp.Header.Get("Content-Encoding"))
 	body, _ := io.ReadAll(resp.Body)
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
