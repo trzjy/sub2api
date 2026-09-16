@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -87,7 +88,7 @@ type UpdatePaymentConfigRequest struct {
 	MaxPendingOrders          *int     `json:"max_pending_orders"`
 	EnabledTypes              []string  `json:"enabled_payment_types"`
 	BalanceDisabled           *bool     `json:"balance_disabled"`
-	FXRates                   *string   `json:"fx_rates"`
+	FXRates                   map[string]float64 `json:"fx_rates"`
 	RechargeFeeRate           *float64  `json:"recharge_fee_rate"`
 	LoadBalanceStrategy       *string  `json:"load_balance_strategy"`
 	ProductNamePrefix         *string  `json:"product_name_prefix"`
@@ -330,7 +331,12 @@ func (s *PaymentConfigService) getStripePublishableKey(ctx context.Context) stri
 // and cannot be meaningfully decomposed without introducing unnecessary abstraction.
 func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req UpdatePaymentConfigRequest) error {
 	if req.FXRates != nil {
-		fxRates, err := payment.ParseFXRates(*req.FXRates)
+		// Convert map to JSON string for validation
+		fxJSON, err := json.Marshal(req.FXRates)
+		if err != nil {
+			return infraerrors.BadRequest("INVALID_FX_RATES", "failed to marshal FX rates")
+		}
+		fxRates, err := payment.ParseFXRates(string(fxJSON))
 		if err != nil {
 			return err
 		}
@@ -376,7 +382,8 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 		m[SettingBalancePayDisabled] = formatBoolOrEmpty(req.BalanceDisabled)
 	}
 	if req.FXRates != nil {
-		m[SettingFXRates] = *req.FXRates
+		fxJSON, _ := json.Marshal(req.FXRates)
+		m[SettingFXRates] = string(fxJSON)
 	}
 	if req.RechargeFeeRate != nil {
 		m[SettingRechargeFeeRate] = formatNonNegativeFloat(req.RechargeFeeRate)
