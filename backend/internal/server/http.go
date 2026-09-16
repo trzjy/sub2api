@@ -223,11 +223,22 @@ func (w *WebLoginProxyServer) Shutdown(ctx context.Context) error {
 
 // BuildWebLoginProxyEngine 构造隔离 origin 的轻量 gin engine（仅注册代理路由）。
 // 不挂载 admin/audit 等中间件，token 即能力凭证。
+//
+// 路由语义（隔离 origin 全代理）：
+//   - ANY /api/v1/web-login-proxy/:token/*path：URL 携带 token（iframe 首次加载 /
+//     前端显式拼接 origin 的场景）。
+//   - NoRoute → ProxyRoot：整个 origin 的其余所有路径交给根路径全代理，会话由请求
+//     Cookie wlp_session 识别，不再依赖 URL 中的 token。用 NoRoute 实现 catch-all，
+//     避免与上面的 :token 路由树冲突（gin 通配符与既有路由树共存时只能用 NoRoute）。
+//     注意：仅改隔离 engine；主站 engine 的 NoRoute（404）保持不动。
 func BuildWebLoginProxyEngine(handlers *handler.Handlers) *gin.Engine {
 	r := gin.New()
 	r.Use(middleware2.Recovery())
 	if handlers != nil && handlers.Admin != nil && handlers.Admin.WebLoginProxy != nil {
+		// 1) token 路由：URL 携带 token。
 		r.Any("/api/v1/web-login-proxy/:token/*path", handlers.Admin.WebLoginProxy.Proxy)
+		// 2) 根路径全代理：隔离 origin 的其余路径由 Cookie 识别会话。
+		r.NoRoute(handlers.Admin.WebLoginProxy.ProxyRoot)
 	}
 	return r
 }

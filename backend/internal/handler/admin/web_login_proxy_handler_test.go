@@ -112,12 +112,20 @@ func TestProxy_HeaderStrippedAndCookieCaptured(t *testing.T) {
 	require.Empty(t, resp.Header.Get("Cross-Origin-Resource-Policy"))
 
 	// Set-Cookie：Domain 被剥离，SameSite 改为 Lax，非 TLS 请求 Secure 被移除。
-	setCookie := resp.Header.Get("Set-Cookie")
-	require.NotEmpty(t, setCookie)
-	require.NotContains(t, setCookie, "Domain=")
-	require.Contains(t, setCookie, "SameSite=Lax")
-	require.NotContains(t, setCookie, "Secure")
-	require.Contains(t, setCookie, "HttpOnly")
+	// 注意：响应现含两条 Set-Cookie（上游 cookie + 本代理会话 cookie wlp_session），
+	// 这里只断言上游 chatglm_token 那条。
+	var upstreamCookie string
+	for _, sc := range resp.Header.Values("Set-Cookie") {
+		if strings.Contains(sc, "chatglm_token") {
+			upstreamCookie = sc
+			break
+		}
+	}
+	require.NotEmpty(t, upstreamCookie, "上游 Set-Cookie 应存在")
+	require.NotContains(t, upstreamCookie, "Domain=")
+	require.Contains(t, upstreamCookie, "SameSite=Lax")
+	require.NotContains(t, upstreamCookie, "Secure")
+	require.Contains(t, upstreamCookie, "HttpOnly")
 
 	// 捕获命中关键 cookie：GetCapture 应返回 cookie。
 	cookie, ok := store.Cookie(token)
@@ -516,4 +524,189 @@ func TestProxy_AccumulatesUpstreamCookies(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, captured, "chatglm_token=abc")
 	require.Contains(t, captured, "chatglm_uid=u1")
+}
+
+// newProxyRootServer 创建承载隔离 origin 路由的 httptest.Server：既注册 token 路由
+// （Proxy）也注册 NoRoute 根路径全代理（ProxyRoot），用于验证 Cookie 会话识别。
+func newProxyRootServer(h *admin.WebLoginProxyHandler) *httptest.Server {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Any("/api/v1/web-login-proxy/:token/*path", h.Proxy)
+	r.NoRoute(h.ProxyRoot)
+	return httptest.NewServer(r)
+}
+
+// TestProxyRoot_RootPathViaCookie 验证隔离 origin 根路径全代理：先 GET token 路由拿到
+// Set-Cookie wlp_session，再 GET /some/runtime.js 带该 Cookie → 上游收到原路径、200 透传。
+func TestProxyRoot_RootPathViaCookie(t *testing.T) {
+	var upstreamPath string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyRootServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	// 1) 首次 GET token 路由，拿到 Set-Cookie wlp_session。
+	resp1, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	require.Equal(t, http.StatusOK, resp1.StatusCode)
+
+	var sessionCookie *http.Cookie
+	for _, c := range resp1.Cookies() {
+		if c.Name == "wlp_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	require.NotNil(t, sessionCookie, "首次响应应下发 wlp_session")
+	require.Equal(t, token, sessionCookie.Value)
+
+	// 2) GET 根路径任意子路径，携带 wlp_session Cookie → 同 origin 走 Cookie 路径。
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/some/runtime.js", nil)
+	req.AddCookie(sessionCookie)
+	resp2, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	_, _ = io.ReadAll(resp2.Body)
+
+	require.Equal(t, http.StatusOK, resp2.StatusCode)
+	require.Equal(t, "/some/runtime.js", upstreamPath, "根路径原样透传上游，不丢 path")
+}
+
+// TestProxyRoot_MissingOrInvalidCookieGone 验证无 Cookie 与伪造无效 Cookie 均返回 410。
+func TestProxyRoot_MissingOrInvalidCookieGone(t *testing.T) {
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyRootServer(h)
+	defer srv.Close()
+	_, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	// 无 Cookie。
+	resp, err := http.Get(srv.URL + "/anything")
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusGone, resp.StatusCode)
+
+	// 伪造无效 Cookie（token 不存在）。
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/anything", nil)
+	req.AddCookie(&http.Cookie{Name: "wlp_session", Value: "not-a-real-token"})
+	resp2, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	require.Equal(t, http.StatusGone, resp2.StatusCode)
+}
+
+// TestProxyRoot_SessionCookieAttributes 验证 Set-Cookie 属性完整：
+// Secure、SameSite=Lax、HttpOnly、Path=/。
+func TestProxyRoot_SessionCookieAttributes(t *testing.T) {
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyRootServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var sessionCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "wlp_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	require.NotNil(t, sessionCookie)
+	require.Equal(t, "/", sessionCookie.Path)
+	require.True(t, sessionCookie.Secure, "应带 Secure")
+	require.True(t, sessionCookie.HttpOnly, "应带 HttpOnly")
+	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite, "应 SameSite=Lax")
+	require.Equal(t, 600, sessionCookie.MaxAge, "Max-Age 应对齐 store TTL")
+}
+
+// TestProxyRoot_SessionCookieNotCaptured 验证捕获结果不含本代理会话 Cookie wlp_session：
+// 即便已捕获串中混入 wlp_session，合并时也被剥离（绝不作为上游凭证）。
+func TestProxyRoot_SessionCookieNotCaptured(t *testing.T) {
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "chatglm_token=abc123; Domain=chatglm.cn; Path=/; Secure; HttpOnly")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyRootServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	// 预置捕获串混入 wlp_session（模拟其意外进入），验证捕获时被剥离。
+	store.SetCookie(token, "wlp_session=leak; chatglm_token=pre")
+
+	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/dashboard")
+	require.NoError(t, err)
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	captured, ok := store.Cookie(token)
+	require.True(t, ok)
+	require.Contains(t, captured, "chatglm_token=abc123")
+	require.NotContains(t, captured, "wlp_session", "捕获结果不得包含本代理会话 Cookie")
+}
+
+// TestProxyRoot_StillServesTokenRoute 验证隔离 engine 同时保留 token 路由：
+// 通过 URL token 访问仍能 200（主站 v1 行为不变）。
+func TestProxyRoot_StillServesTokenRoute(t *testing.T) {
+	var upstreamPath string
+	mock := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mock.Close()
+	restore := overrideTransport(t, mock)
+	defer restore()
+
+	store := service.NewWebLoginCaptureStore()
+	h := admin.NewWebLoginProxyHandler(store)
+	srv := newProxyRootServer(h)
+	defer srv.Close()
+	token, _, err := store.Create("web-zhipu")
+	require.NoError(t, err)
+
+	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/dashboard")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "/dashboard", upstreamPath)
 }

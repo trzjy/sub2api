@@ -35,6 +35,14 @@ const webLoginProxyBasePathPrefix = "/api/v1/web-login-proxy/"
 // webLoginProxyMaxBody 是 HTML 改写允许读取的最大响应体（512KB）。
 const webLoginProxyMaxBody = 512 << 10
 
+// webLoginProxySessionCookie 是隔离 origin 识别代理会话的 Cookie 名。
+// token 为能力 token（非上游凭证），等价于 URL 中的 token，仅用于让隔离 origin 的
+// 同站点请求免带 token（SameSite=Lax 即可被 iframe 内同站点请求携带）。
+const webLoginProxySessionCookie = "wlp_session"
+
+// webLoginProxySessionMaxAge 对齐 store 会话 TTL（秒）。
+const webLoginProxySessionMaxAge = 600
+
 // htmlHeadTagRegex 匹配首个 <head ...> 标签（不区分大小写）。
 var htmlHeadTagRegex = regexp.MustCompile(`(?i)<head[^>]*>`)
 
@@ -134,12 +142,32 @@ func (h *WebLoginProxyHandler) DeleteSession(c *gin.Context) {
 	response.Success(c, gin.H{"deleted": true})
 }
 
-// Proxy 是网页登录捕获的核心反向代理，嵌入浏览器通过它访问上游登录页。
+// Proxy 是网页登录捕获的核心反向代理（URL token 路径）。主站 v1 与隔离 engine 共用
+// 此路由：从 URL param 取 token，再复用共享代理逻辑。未知 token 仍返回 410。
 //
 //	ANY /api/v1/web-login-proxy/:token/*path
 func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 	token := c.Param("token")
+	h.proxyForToken(c, token, c.Param("path"))
+}
 
+// ProxyRoot 是隔离 origin 的根路径全代理：整个 origin 的所有路径都交给代理，会话不再
+// 依赖 URL 中的 token，而由请求 Cookie wlp_session 识别。Cookie 缺失或无效时返回 410
+// （绝不透传）。隔离 engine 通过 NoRoute 注册此 catch-all。
+func (h *WebLoginProxyHandler) ProxyRoot(c *gin.Context) {
+	token, err := c.Cookie(webLoginProxySessionCookie)
+	if err != nil || token == "" {
+		c.String(http.StatusGone, "session expired")
+		return
+	}
+	// token 合法性由 proxyForToken 内部 Resolve 校验（无效 → 410），此处不重复解析。
+	h.proxyForToken(c, token, c.Request.URL.Path)
+}
+
+// proxyForToken 是代理主体逻辑（方法白名单、1MB 限、上游 URL 构造、ReverseProxy 构造、
+// 响应捕获等），由 Proxy（URL token）与 ProxyRoot（Cookie token）共用。每个响应都会
+// 下发会话 Cookie wlp_session，使隔离 origin 后续同 origin 请求免带 token。
+func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath string) {
 	// 1. 解析会话；失败（过期/未知 Token）直接 410，绝不透传。
 	entry, err := h.store.Resolve(token)
 	if err != nil {
@@ -159,12 +187,15 @@ func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 
 	// 4. 构造上游 URL（path 穿越 / 非法 → 400）。
-	rawPath := c.Param("path")
 	target, err := service.BuildUpstreamURL(entry.Platform, rawPath, c.Request.URL.RawQuery)
 	if err != nil {
 		response.BadRequest(c, "invalid proxy path")
 		return
 	}
+
+	// 下发会话 Cookie wlp_session：隔离 origin 同站点识别，后续请求免带 URL token。
+	// token 为能力 token（非凭证），故本 Cookie 不泄露任何上游凭证。
+	setSessionCookie(c, token)
 
 	origin := target.Scheme + "://" + target.Host
 	keyCookieName, _ := platformKeyCookie(entry.Platform)
@@ -195,7 +226,8 @@ func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 			}
 			// 出站 Cookie：仅携带已捕获累积的上游 Cookie（store.Cookie(token)），
 			// 绝不原样转发入站 Cookie 头（含本站管理端 cookie，如 sub2api_session）。
-			// 否则会把本站会话凭证泄漏给上游官方站点，且污染捕获结果。
+			// 因此本站会话 Cookie wlp_session（只存在于入站 Cookie 头）绝不会被
+			// 转发给上游官方站点，也不会污染捕获结果。
 			req.Header.Del("Cookie")
 			if cookie, ok := h.store.Cookie(token); ok && cookie != "" {
 				req.Header.Set("Cookie", cookie)
@@ -219,6 +251,45 @@ func (h *WebLoginProxyHandler) Proxy(c *gin.Context) {
 	}
 
 	proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// setSessionCookie 在每个代理响应上下发 wlp_session，属性完整：
+// Path=/；Secure；SameSite=Lax；HttpOnly；Max-Age=600（对齐 store TTL）。
+func setSessionCookie(c *gin.Context, token string) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     webLoginProxySessionCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   webLoginProxySessionMaxAge,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// stripSessionCookie 从 Cookie 字符串中移除本站会话 Cookie wlp_session，
+// 确保本代理会话凭证绝不会被捕获/转发为上游凭证（red-line 防御，纵深一层）。
+func stripSessionCookie(cookieStr string) string {
+	if cookieStr == "" {
+		return ""
+	}
+	parts := strings.Split(cookieStr, ";")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		name := p
+		if idx := strings.IndexByte(p, '='); idx >= 0 {
+			name = p[:idx]
+		}
+		if strings.EqualFold(strings.TrimSpace(name), webLoginProxySessionCookie) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "; ")
 }
 
 // modifyUpstreamResponse 处理上游响应：头剥离、Set-Cookie 重写、Cookie 捕获、Location 重写、HTML 改写。
@@ -314,8 +385,10 @@ func sanitizeSetCookie(sc string, secure bool) string {
 // （入站可能含本站管理端 cookie，如 sub2api_session，误捕获会泄漏/污染）。
 // 跨多次响应的累积通过已存储的捕获结果 merge 实现，不读取本站请求头（红线）。
 func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName string, resp *http.Response, req *http.Request) {
-	// 仅合并“已捕获累积串 + 本次上游 Set-Cookie”，彻底排除入站 Cookie 头。
+	// 仅合并“已捕获累积串 + 本次上游 Set-Cookie”，彻底排除入站 Cookie 头
+	// 与本站会话 Cookie wlp_session（绝不可把反代会话 Cookie 捕获为上游凭证）。
 	prev, _ := store.Cookie(token)
+	prev = stripSessionCookie(prev)
 	merged := mergeCookies(prev, resp.Cookies())
 	if merged == "" {
 		return
