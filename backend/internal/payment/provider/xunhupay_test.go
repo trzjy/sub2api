@@ -25,11 +25,11 @@ func xunhupayTestConfig() map[string]string {
 func TestXunhupaySignDeterministic(t *testing.T) {
 	t.Parallel()
 	params := map[string]string{
-		"appid":           "201906187599",
-		"trade_order_id":  "ORDER123",
-		"total_fee":       "10.00",
-		"nonce_str":       "abc",
-		"time":            "1700000000",
+		"appid":          "201906187599",
+		"trade_order_id": "ORDER123",
+		"total_fee":      "10.00",
+		"nonce_str":      "abc",
+		"time":           "1700000000",
 	}
 	secret := "mysecret"
 	sign1 := xunhupaySign(params, secret)
@@ -109,15 +109,15 @@ func TestXunhupayVerifyNotificationSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	params := map[string]string{
-		"appid":           "test_appid_123",
-		"trade_order_id":  "ORDER789",
-		"total_fee":       "10.50",
-		"transaction_id":  "TX999",
-		"open_order_id":   "HPJ2024",
-		"order_title":     "充值",
-		"status":          "OD",
-		"time":            "1700000000",
-		"nonce_str":       "xyz",
+		"appid":          "test_appid_123",
+		"trade_order_id": "ORDER789",
+		"total_fee":      "10.50",
+		"transaction_id": "TX999",
+		"openid":         "HPJ2024",
+		"order_title":    "充值",
+		"status":         "OD",
+		"time":           "1700000000",
+		"nonce_str":      "xyz",
 	}
 	params["hash"] = xunhupaySign(params, "test_appsecret")
 
@@ -205,7 +205,7 @@ func TestXunhupayCreatePayment(t *testing.T) {
 		_ = r.ParseForm()
 		gotBody = r.PostForm
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"success","data":{"url":"https://pay.xunhupay.com/p","url_qrcode":"https://pay.xunhupay.com/q","open_order_id":"HPJ2024"}}`))
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"success","data":{"url":"https://pay.xunhupay.com/p","url_qrcode":"https://pay.xunhupay.com/q","openid":"HPJ2024"}}`))
 	}))
 	defer srv.Close()
 

@@ -322,7 +322,7 @@ type xunhupayResponse struct {
 type xunhupayRespData struct {
 	URL           string `json:"url"`
 	URLQRCode     string `json:"url_qrcode"`
-	OpenOrderID   string `json:"open_order_id"`
+	OpenOrderID   string `json:"openid"`
 	OutTradeOrder string `json:"out_trade_order"`
 	Status        string `json:"status"`
 	TotalAmount   string `json:"total_amount"`
