@@ -54,6 +54,25 @@ var ErrWebDeepseekPoWNotImplemented = errors.New(
 // 与 forwardCodeBuddy 同构：入站 OpenAI Chat Completions → 网页端请求（SSE）→ 回程
 // 通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService.Forward 的 platform
 // 分支按 PlatformWebDeepseek 分发（该分发注册由并行任务落在共享注册点文件中）。
+// assertWebDeepseekAccount 是 forwardWebDeepseek 入口的双断言 fail-closed（隔离红线
+// §6）：旧 web-deepseek 平台（平台本身即判定），或新形态官方 deepseek 平台 + web access
+// mode 双断言。API 模式 deepseek 账号绝不进入网页协议链，web 模式 zhipu/kimi 账号绝不误入。
+func assertWebDeepseekAccount(account *Account) error {
+	if account == nil {
+		return fmt.Errorf("forwardWebDeepseek requires a non-nil account")
+	}
+	if account.Platform == PlatformWebDeepseek {
+		return nil // 旧平台兼容
+	}
+	if account.IsWebAccessMode() && account.IsDeepseek() {
+		return nil
+	}
+	if !account.IsWebAccessMode() {
+		return fmt.Errorf("forwardWebDeepseek requires web access mode, got %q", account.GetAccessMode())
+	}
+	return fmt.Errorf("forwardWebDeepseek requires a deepseek platform, got %q", account.Platform)
+}
+
 func (s *OpenAIGatewayService) forwardWebDeepseek(
 	ctx context.Context,
 	c *gin.Context,
@@ -64,8 +83,8 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	startTime time.Time,
 	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
-	if account == nil || account.Platform != PlatformWebDeepseek {
-		return nil, fmt.Errorf("forwardWebDeepseek requires a %s account", PlatformWebDeepseek)
+	if err := assertWebDeepseekAccount(account); err != nil {
+		return nil, err
 	}
 
 	cookie := strings.TrimSpace(account.GetCredential("cookie"))
@@ -783,8 +802,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		finalUsage = &OpenAIUsage{}
 	}
 	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
-	// 非真实 token 数（estimated）。
-	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && IsWebProvider(account.Platform) {
+	// 非真实 token 数（estimated）。归并后判定源为 web 接入模式（平台已并官方值）。
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
 		estimated := estimateWebUsage(inputPrompt, aggregated.String())
 		finalUsage.InputTokens = estimated.InputTokens
 		finalUsage.OutputTokens = estimated.OutputTokens

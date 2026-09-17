@@ -396,10 +396,11 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.routeAntigravityTest(c, account, modelID, prompt)
 	}
 
-	// web 逆向平台（web-deepseek / web-zhipu / web-kimi）登录态载体是整串 Cookie
-	// 或 Kimi access_token，走专门的轻量官方探活：仅校验凭证可达性与登录态，
-	// 不把 Claude / OpenAI API Key 风格的请求错误地打到 web 上游。
-	if IsWebProvider(account.Platform) {
+	// web 逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）登录态载体是
+	// 整串 Cookie 或 Kimi access_token，走专门的轻量官方探活：仅校验凭证可达性与登录态，
+	// 不把 Claude / OpenAI API Key 风格的请求错误地打到 web 上游。按账号接入模式判定
+	// （方案 §2.4 红线，取代 IsWebProvider(platform)）。
+	if account.IsWebAccessMode() {
 		return s.testWebAccountConnection(c, account, modelID, prompt)
 	}
 
@@ -454,10 +455,17 @@ func resolveWebTestModel(account *Account, modelID, platform string) string {
 func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 
+	// 平台归并重构：web 接入模式账号的 platform 已是官方值（zhipu/deepseek/kimi），
+	// 但 web 探活 / 转发链仍按 web-* 平台分支组织，这里归一到 web 平台值，保持探活逻辑不变。
+	webPlatform := ResolveWebPlatform(account)
+	if webPlatform == "" {
+		webPlatform = account.Platform
+	}
+
 	// #4：账号级 base_url 非空时显式校验，非法值直接报错，不静默回落平台默认
 	// （避免转发侧 fail-closed 把非法值吞掉、测试假通过）。合法或空才继续（空走默认）。
 	if rawBaseURL := strings.TrimSpace(account.GetCredential("base_url")); rawBaseURL != "" {
-		if _, err := ValidateWebBaseURL(account.Platform, rawBaseURL); err != nil {
+		if _, err := ValidateWebBaseURL(webPlatform, rawBaseURL); err != nil {
 			return s.sendErrorAndEnd(c, "invalid base_url")
 		}
 	}
@@ -468,7 +476,7 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		testModel string
 		req       *http.Request
 	)
-	switch account.Platform {
+	switch webPlatform {
 	case PlatformWebDeepseek:
 		if baseURL == "" {
 			baseURL = webDeepseekDefaultBaseURL

@@ -46,11 +46,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
-	// 网页逆向平台（web-*）：适配器只吃 Chat Completions 形状。入站 /v1/messages 为
-	// Anthropic Messages 协议，先归一为 Chat Completions（C3，#5），三平台共用同一归一
-	// 实现，再走对应 web 适配器。落在通用 Responses/Anthropic 管线会因适配器只读
-	// messages 而报"没有 user message"。
-	if IsWebProvider(account.Platform) {
+	// 网页逆向平台（web-* 归并）：适配器只吃 Chat Completions 形状。入站 /v1/messages
+	// 为 Anthropic Messages 协议，先归一为 Chat Completions（C3，#5），三平台共用同一
+	// 归一实现，再走对应 web 适配器。归并后由账号级接入模式（access_mode=web）决定分流
+	// （docs/platform-merge-refactor-plan.md §5.3/§5.4），兼容旧 web-* 平台常量
+	// （形状推断兜底）。落在通用 Responses/Anthropic 管线会因适配器只读 messages 而报
+	// "没有 user message"。/v1/messages 对 web access mode 账号维持设计性拒绝语义不变
+	// （即只经归一→web 适配器路径，不进入原生 Anthropic 协议桥）。
+	if isWebReverseAccount(account) {
 		var anthropicReq apicompat.AnthropicRequest
 		if err := json.Unmarshal(body, &anthropicReq); err != nil {
 			return nil, fmt.Errorf("parse anthropic request for web adapter: %w", err)
@@ -69,7 +72,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			reqModel = anthropicReq.Model
 		}
 		reqStream := cc.Stream
-		switch account.Platform {
+		switch webProviderKeyForAccount(account) {
 		case PlatformWebZhipu:
 			return s.forwardWebZhipu(ctx, c, account, ccBody, reqModel, reqStream, startTime, webResponseModeAnthropic)
 		case PlatformWebDeepseek:

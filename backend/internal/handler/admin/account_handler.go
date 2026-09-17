@@ -1304,7 +1304,10 @@ func (h *AccountHandler) ValidateWebCredentials(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	if !service.IsWebProvider(req.Platform) {
+	// 平台归并：除旧 web-* 平台值外，官方平台（zhipu/deepseek/kimi）+ access_mode=web
+	// 组合也允许预校验（方案 §5.5）。
+	mode, _ := req.Credentials["access_mode"].(string)
+	if !service.IsWebProvider(req.Platform) && strings.TrimSpace(mode) != service.AccountAccessModeWeb {
 		response.BadRequest(c, "platform "+req.Platform+" is not a web provider")
 		return
 	}
@@ -3081,10 +3084,15 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		response.Success(c, otherModels)
 		return
 	}
-	// 网页逆向平台：空 model_mapping 时回落到平台默认模型目录（方案 §3.3 映射表），
-	// 而非误回落到 Claude 默认模型。
-	if service.IsWebProvider(account.Platform) {
-		webIDs := service.DefaultWebModelIDs(account.Platform)
+	// 网页逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）：空 model_mapping
+	// 时回落到平台默认模型目录（方案 §3.3 映射表），而非误回落到 Claude 默认模型。
+	// 按账号接入模式判定（取代 IsWebProvider(platform)，方案 §2.4 红线）。
+	if account.IsWebAccessMode() {
+		webPlatform := account.Platform
+		if mapped := service.WebModelCatalogPlatform(account.Platform); mapped != "" {
+			webPlatform = mapped
+		}
+		webIDs := service.DefaultWebModelIDs(webPlatform)
 		webModels := make([]claude.Model, 0, len(webIDs))
 		for _, id := range webIDs {
 			webModels = append(webModels, claude.Model{ID: id, Type: "model", DisplayName: id})

@@ -156,6 +156,31 @@ func webZhipuResolveChatGLMToken(account *Account) string {
 // forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → 网页端
 // 请求（SSE）→ 回程通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService
 // 的 platform 分支按 PlatformWebZhipu 分发（分发注册由共享注册点接线任务完成）。
+// assertWebZhipuAccount 是 forwardWebZhipu 入口的双断言 fail-closed（隔离红线 §6）：
+//   - 旧 web-zhipu 平台：平台本身即判定（迁移前无 access_mode，兼容读取期）；
+//   - 新形态：官方 zhipu 平台 + web access mode 双断言；
+//   - API 模式 zhipu 账号（或 web 模式 deepseek/kimi 账号）绝不进入网页协议链。
+//
+// 任一断言失败返回明确错误，转发入口与单测共用同一判定。
+func assertWebZhipuAccount(account *Account) error {
+	if account == nil {
+		return fmt.Errorf("forwardWebZhipu requires a non-nil account")
+	}
+	// 旧 web-zhipu 平台兼容：平台本身即判定。
+	if account.Platform == PlatformWebZhipu {
+		return nil
+	}
+	// 新形态：官方 zhipu 平台 + web access mode 双断言。
+	if account.IsWebAccessMode() && account.IsZhipu() {
+		return nil
+	}
+	// 失败关闭：区分两类非法来源以辅助排查。
+	if !account.IsWebAccessMode() {
+		return fmt.Errorf("forwardWebZhipu requires web access mode, got %q", account.GetAccessMode())
+	}
+	return fmt.Errorf("forwardWebZhipu requires a zhipu platform, got %q", account.Platform)
+}
+
 func (s *OpenAIGatewayService) forwardWebZhipu(
 	ctx context.Context,
 	c *gin.Context,
@@ -166,8 +191,8 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	startTime time.Time,
 	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
-	if account == nil || account.Platform != PlatformWebZhipu {
-		return nil, fmt.Errorf("forwardWebZhipu requires a %s account", PlatformWebZhipu)
+	if err := assertWebZhipuAccount(account); err != nil {
+		return nil, err
 	}
 
 	cookie := strings.TrimSpace(account.GetCredential("cookie"))
@@ -1091,8 +1116,8 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 		finalUsage = &OpenAIUsage{}
 	}
 	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
-	// 非真实 token 数（estimated）。
-	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && IsWebProvider(account.Platform) {
+	// 非真实 token 数（estimated）。归并后判定源为 web 接入模式（平台已并官方值）。
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
 		estimated := estimateWebUsage(inputPrompt, aggregated.String())
 		finalUsage.InputTokens = estimated.InputTokens
 		finalUsage.OutputTokens = estimated.OutputTokens

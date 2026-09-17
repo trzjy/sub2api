@@ -1021,7 +1021,13 @@ func IsUpstreamBillingProbeIdentity(platform, accountType string) bool {
 }
 
 func isUpstreamBillingProbeAccount(account *Account) bool {
-	return account != nil && IsUpstreamBillingProbeIdentity(account.Platform, account.Type)
+	if account == nil || IsUpstreamBillingProbeIdentity(account.Platform, account.Type) == false {
+		return false
+	}
+	// 网页逆向接入（web 接入模式账号）不是 API key 探活对象：web 凭证（Cookie/Token）
+	// 不能作为 API key 打 /v1/sub2api/billing。失败关闭排除（方案 §5.6，
+	// 取代旧 web 平台排除语义，归并后 platform 已是官方值）。
+	return !account.IsWebAccessMode()
 }
 
 // upstreamBillingProbeOfficialAPIDomains lists the root domains of official

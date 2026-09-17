@@ -427,17 +427,103 @@ func validateOtherAccountCredential(platform, accountType string, credentials ma
 	return nil
 }
 
+// accessModeFromCredentials 从 credentials 映射提取并归一 access_mode 显式值
+// （credentials["access_mode"]）。用于无 Account 对象、仅持 credentials 的上下文
+// （凭证清洗 / 写入校验 / 模式切换重验），与 Account.GetAccessMode 协同。
+func accessModeFromCredentials(creds map[string]any) string {
+	if creds == nil {
+		return ""
+	}
+	mode, _ := creds["access_mode"].(string)
+	return strings.TrimSpace(mode)
+}
+
+// WebModelCatalogPlatform 把平台值归一到拥有网页逆向模型目录的平台键：旧 web-* 平台值
+// 直接返回；官方 zhipu/deepseek/kimi 在平台归并后与本组 API 账号共存、可含 web 账号，
+// 回落对应 web 模型目录（B4 口径，与 DefaultWebModelIDs 既有 web-* 分支一致）。
+// 非 web 平台返回空串。供 admin / 网关 GetModels 与 web 探活链复用。
+func WebModelCatalogPlatform(platform string) string {
+	switch platform {
+	case PlatformWebZhipu, PlatformWebDeepseek, PlatformWebKimi:
+		return platform
+	case PlatformZhipu:
+		return PlatformWebZhipu
+	case PlatformDeepseek:
+		return PlatformWebDeepseek
+	case PlatformKimi:
+		return PlatformWebKimi
+	}
+	return ""
+}
+
+// ResolveWebPlatform 把官方平台 + web 接入模式的账号归一到对应的旧 web 平台值，供
+// web 探活 / ValidateWebBaseURL / DefaultWebModelIDs 等按 web-* 分支组织的链路复用；
+// 旧 web-* 平台值原样返回，非 web 接入模式返回空串（调用方按各自语义回落）。
+func ResolveWebPlatform(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	switch account.Platform {
+	case PlatformWebZhipu, PlatformWebDeepseek, PlatformWebKimi:
+		return account.Platform
+	case PlatformZhipu, PlatformDeepseek, PlatformKimi:
+		if account.IsWebAccessMode() {
+			return WebModelCatalogPlatform(account.Platform)
+		}
+	}
+	return ""
+}
+
+// apiKeyOf 从 credentials 提取并归一 api_key 值。
+func apiKeyOf(credentials map[string]any) string {
+	if credentials == nil {
+		return ""
+	}
+	v, _ := credentials["api_key"].(string)
+	return strings.TrimSpace(v)
+}
+
+// validateAccessModeCredential 按账号目标接入模式（access_mode）重验凭证：
+// web 模式要求 cookie（zhipu/deepseek）或 access_token（kimi）非空；api 模式要求
+// api_key 非空。缺失即拒绝（防切换后账号不可用，方案 §5.1 混合凭证规则 / §8 风险）。
+// 无显式 access_mode（形状兼容期）时跳过，不强制。
+func validateAccessModeCredential(platform, accountType string, credentials map[string]any) error {
+	mode := accessModeFromCredentials(credentials)
+	switch mode {
+	case AccountAccessModeWeb:
+		return validateWebAccountCredential(platform, accountType, credentials)
+	case AccountAccessModeAPI:
+		if apiKeyOf(credentials) == "" {
+			return fmt.Errorf("access_mode=api requires a non-empty api_key")
+		}
+	}
+	return nil
+}
+
 // validateWebAccountCredential 校验网页逆向平台账号（web-deepseek/web-zhipu/web-kimi）：
 // 仅接受 apikey 类型（静态登录态凭证）；DeepSeek/Zhipu 须提供非空整串 Cookie，
 // Kimi 须提供非空 access_token（refresh_token/user_id 可选）；base_url 为可选的
 // 官方域名覆盖。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
 // 仅做准入校验，不含任何上游请求逻辑（适配器见 W2-W4）。
+//
+// 平台归并重构（方案 §5.1 / §5.5）：除旧 web-* 平台值外，官方平台
+// （zhipu/deepseek/kimi）+ credentials["access_mode"]="web" 组合也走本校验；两者
+// 并集判定（形状兼容期）防止归并前 web-* 账号与新官方平台 + web 账号被遗漏。
+// access_mode 非法显式值（非 api/web/空）在此拒绝持久化。
 func validateWebAccountCredential(platform, accountType string, credentials map[string]any) error {
-	if !IsWebProvider(platform) {
+	mode := accessModeFromCredentials(credentials)
+	// 接入模式写入侧校验：非法显式值（非 api/web/空）拒绝持久化。
+	if mode != "" && mode != AccountAccessModeAPI && mode != AccountAccessModeWeb {
+		return fmt.Errorf("access_mode %q is invalid: must be %q or %q", mode, AccountAccessModeAPI, AccountAccessModeWeb)
+	}
+	// web 接入模式：旧 web-* 平台值，或官方平台 + access_mode=web。
+	// 形状兼容期两者并集判定，保证归并前 web-* 账号与新官方平台 + web 账号都走 web 准入。
+	isWeb := IsWebProvider(platform) || mode == AccountAccessModeWeb
+	if !isWeb {
 		return nil
 	}
 	if accountType != AccountTypeAPIKey {
-		return fmt.Errorf("platform %s only supports apikey accounts", platform)
+		return fmt.Errorf("web access mode only supports apikey accounts")
 	}
 	// #4：base_url 为可选的官方域名覆盖。
 	// 键存在但类型非 string（数字 / 数组 / 对象）→ fail-closed 拒绝，不再静默跳过保存脏数据；
@@ -448,12 +534,20 @@ func validateWebAccountCredential(platform, accountType string, credentials map[
 			return fmt.Errorf("platform %s base_url must be a string", platform)
 		}
 		if strings.TrimSpace(baseURL) != "" {
-			if _, err := ValidateWebBaseURL(platform, strings.TrimSpace(baseURL)); err != nil {
+			// 官方平台 + web 接入模式时先归一到 web 平台键（ValidateWebBaseURL 后缀表
+			// 按 web-* 平台组织，zhipu 等官方值不在表内）。
+			validatePlatform := platform
+			if mapped := WebModelCatalogPlatform(platform); mapped != "" && IsWebProvider(platform) == false {
+				validatePlatform = mapped
+			}
+			if _, err := ValidateWebBaseURL(validatePlatform, strings.TrimSpace(baseURL)); err != nil {
 				return fmt.Errorf("platform %s base_url invalid: %w", platform, err)
 			}
 		}
 	}
-	if platform == PlatformWebKimi {
+	// 判定网页供应商家族：kimi 用 access_token，其余（zhipu/deepseek）用整串 cookie。
+	isKimi := platform == PlatformWebKimi || (platform == PlatformKimi && mode == AccountAccessModeWeb)
+	if isKimi {
 		raw, _ := credentials["access_token"].(string)
 		if strings.TrimSpace(raw) == "" {
 			return fmt.Errorf("platform %s requires a non-empty access_token", platform)
@@ -658,8 +752,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			}
 		}
 	}
-	// 更新路径同样守住网页逆向平台不变量（创建校验可被 edit/导入/直写绕过）。
-	if IsWebProvider(account.Platform) {
+	// 更新路径同样守住网页逆向平台 / web 接入模式不变量（创建校验可被 edit/导入/直写绕过）。
+	// 平台归并后 web 账号 platform 已是官方值，按账号接入模式判定（§5.5）。
+	isWebAccount := IsWebProvider(account.Platform) || account.IsWebAccessMode()
+	if isWebAccount {
 		effectiveType := account.Type
 		if input.Type != "" {
 			effectiveType = input.Type
@@ -749,6 +845,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
+		// 接入模式切换重验（方案 §5.1 混合凭证规则 / §8 风险）：本轮携带凭证时，按目标
+		// 接入模式重验凭证（web 要求 cookie/access_token 非空、api 要求 api_key 非空），
+		// 缺失即拒绝，防切换后账号不可用。
+		if err := validateAccessModeCredential(account.Platform, account.Type, account.Credentials); err != nil {
+			return nil, infraerrors.New(http.StatusBadRequest, "ACCESS_MODE_CREDENTIAL_INVALID", err.Error())
+		}
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
@@ -1114,7 +1216,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		// （空平台标签下 cookie 会被 SanitizeStoredCredentials 剥离，静默丢失登录态），
 		// 且批量路径不做 web 凭证校验。逐个编辑才能保证 cookie/access_token 校验与落盘。
 		for _, acc := range cachedTargets {
-			if acc != nil && IsWebProvider(acc.Platform) {
+			if acc != nil && (IsWebProvider(acc.Platform) || acc.IsWebAccessMode()) {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "WEB_ACCOUNT_BULK_CREDENTIALS_UNSUPPORTED",
 					"web provider account %d (%s) does not support bulk credential updates; edit credentials individually", acc.ID, acc.Platform)
 			}

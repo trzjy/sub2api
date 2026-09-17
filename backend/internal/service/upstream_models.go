@@ -216,6 +216,15 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	// 网页逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）不参与上游
+	// /v1/models 模型同步：web 凭证（Cookie/Token）不是 API key，打上游 API 端点
+	// 既无意义也泄漏凭证形状。失败关闭返回 unsupported，管理端 /models 已按
+	// IsWebAccessMode 回落 web 模型目录（方案 §5.6，取代旧 web 平台排除语义）。
+	if account != nil && account.IsWebAccessMode() {
+		return nil, newUpstreamModelSyncUnsupportedError(
+			fmt.Sprintf("Unsupported platform for upstream model sync: %s (web access mode)", account.Platform), nil,
+		)
+	}
 	models, body, fetchWarnings, err := s.fetchUpstreamModelList(ctx, account)
 	liveListAvailable := err == nil
 	if err != nil {

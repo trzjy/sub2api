@@ -217,7 +217,29 @@ func isConcreteRequestPlatform(platform string) bool {
 // 空 model_mapping 时，公开 /models 列表与账号默认模型集回落到此表，而非误回落到
 // Claude 默认模型。集中定义于此，供 gateway_handler 与 admin account_handler 共用，
 // 避免两处各写一份导致漂移。
-func DefaultWebModelIDs(platform string) []string {
+//
+// 归并后支持双键形态（docs/platform-merge-refactor-plan.md §5.6）：
+//   - DefaultWebModelIDs(PlatformWebZhipu) 等旧式单键调用保持原语义（兼容旧 web-* 平台）；
+//   - DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb) 等 (provider, access_mode)
+//     双键调用，官方平台 + access_mode=web 取与旧 web-* 平台相同的目录
+//     （web-zhipu→zhipu+web、web-deepseek→deepseek+web、web-kimi→kimi+web）。
+//
+// 公开模型 ID 固定无前缀（glm-5.3-flash / deepseek-chat / deepseek-reasoner / kimi-k3），
+// 前缀标注仅限管理端标签，不影响公开 ID、请求路由或调度匹配。
+func DefaultWebModelIDs(platform string, mode ...string) []string {
+	// (provider, access_mode) 双键：仅 access_mode=web 有意义，取与旧 web-* 平台相同目录。
+	if len(mode) > 0 && mode[0] == AccountAccessModeWeb {
+		switch platform {
+		case PlatformZhipu:
+			return []string{"glm-5.3-flash"}
+		case PlatformDeepseek:
+			return []string{"deepseek-chat", "deepseek-reasoner"}
+		case PlatformKimi:
+			return []string{"kimi-k3"}
+		default:
+			return nil
+		}
+	}
 	switch platform {
 	case PlatformWebDeepseek:
 		return []string{"deepseek-chat", "deepseek-reasoner"}
@@ -231,6 +253,58 @@ func DefaultWebModelIDs(platform string) []string {
 	default:
 		return nil
 	}
+}
+
+// ValidateWebModel 校验指定官方平台的 web 接入模式账号入站模型是否在默认目录内；
+// model 为空或不在允许集合内时返回非 nil error，使未知模型失败关闭
+// （docs/platform-merge-refactor-plan.md §5.6：Web 账号不得回落 API 模型目录、不猜测）。
+// 错误信息仅含模型名与平台，不泄露任何凭证。
+//
+// 各 web 适配器接受的公开 ID（与适配器映射一致；kimi 额外接受 agent-ultra 内部变体，
+// 公开目录以固定 ID kimi-k3 为准）：
+//   - zhipu:    glm-5.3-flash
+//   - deepseek: deepseek-chat, deepseek-reasoner
+//   - kimi:     kimi-k3, kimi-k3-agent-ultra
+func ValidateWebModel(provider, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("%s web model is required but was empty", provider)
+	}
+	var allowed []string
+	switch provider {
+	case PlatformZhipu:
+		allowed = []string{"glm-5.3-flash"}
+	case PlatformDeepseek:
+		allowed = []string{"deepseek-chat", "deepseek-reasoner"}
+	case PlatformKimi:
+		allowed = []string{"kimi-k3", "kimi-k3-agent-ultra"}
+	default:
+		allowed = DefaultWebModelIDs(provider, AccountAccessModeWeb)
+	}
+	for _, a := range allowed {
+		if model == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s web model %q is not supported", provider, model)
+}
+
+// MergeAndDedupModelIDs 合并多个模型目录源并对同名 ID 去重，保留首次出现顺序。用于
+// /models 聚合输出：web 账号与 API 账号同组时，deepseek-chat / deepseek-reasoner 等同名
+// 单条目只出现一次（docs/platform-merge-refactor-plan.md §5.6 B4 同名模型去重）。
+func MergeAndDedupModelIDs(sources ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, src := range sources {
+		for _, m := range src {
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // ValidateWebZhipuModel 校验 web-zhipu 平台入站模型是否在默认目录内；model 为空或不在

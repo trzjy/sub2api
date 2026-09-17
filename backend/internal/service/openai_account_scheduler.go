@@ -521,6 +521,16 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		clearBinding()
 		return nil, false, nil
 	}
+	// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，清理绑定后回落两级池。
+	if account.IsWebAccessMode() {
+		clearBinding()
+		return nil, false, nil
+	}
+	// 显式非法 access_mode fail-closed：粘性命中也判为不可选（§5.1 规则 2）。
+	if openAIAccessModeExcludeReason(account) != "" {
+		clearBinding()
+		return nil, false, nil
+	}
 	if shouldClearStickySession(account, req.RequestedModel) || account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() || !account.IsSchedulable() {
 		clearBinding()
 		return nil, false, nil
@@ -1478,6 +1488,16 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			filterStats.exclude("transport_incompatible")
 			continue
 		}
+		// B2: /v1/messages 候选过滤 —— Web 接入模式账号永不入选。
+		if isOpenAIMessagesDispatchContext(ctx) && account.IsWebAccessMode() {
+			filterStats.exclude("web_excluded_for_messages")
+			continue
+		}
+		// 显式非法 access_mode fail-closed：调度判为不可选（B3/§5.1 规则 2）。
+		if reason := openAIAccessModeExcludeReason(account); reason != "" {
+			filterStats.exclude(reason)
+			continue
+		}
 		filtered = append(filtered, account)
 		loadReq = append(loadReq, AccountWithConcurrency{
 			ID:             account.ID,
@@ -1495,54 +1515,74 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 	}
 
-	if req.SubscriptionPriority {
-		subscriptionAccounts, regularAccounts := partitionOpenAIChatGPTSubscriptionAccounts(filtered)
-		if len(subscriptionAccounts) > 0 {
-			attempt := s.trySelectByLoadBalancePool(ctx, req, subscriptionAccounts, loadMap, budget)
-			if attempt.err != nil && (!attempt.noCompactCandidates || len(regularAccounts) <= 0) {
-				return nil, attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
-			}
-			if attempt.result != nil {
-				return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
-			}
-			if len(regularAccounts) > 0 {
-				regularAttempt := s.trySelectByLoadBalancePool(ctx, req, regularAccounts, loadMap, budget)
-				if regularAttempt.err != nil && !regularAttempt.noCompactCandidates {
-					return nil, regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew, regularAttempt.err
-				}
-				if regularAttempt.result != nil {
-					return regularAttempt.result, regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew, nil
-				}
-				var result *AccountSelectionResult
-				candidateCount, topK, loadSkew := regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew
-				fallbackErr := regularAttempt.err
-				if regularAttempt.err == nil {
-					result, candidateCount, topK, loadSkew, fallbackErr = s.finishLoadBalanceSelectionFallback(ctx, req, regularAttempt, budget, filterStats)
-					if fallbackErr == nil && result != nil {
-						return result, candidateCount, topK, loadSkew, nil
-					}
-				}
-				// 常规池既无法获取也无法排队（含仅剩不支持 compact 的候选）时，
-				// 回退到订阅池的等待计划：busy-but-waitable 的订阅账号不应因常规池存在
-				// 而被丢弃，否则开启订阅优先反而让本可排队成功的请求硬失败。
-				subResult, subCandidateCount, subTopK, subLoadSkew, subErr := s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
-				if subErr == nil && subResult != nil {
-					return subResult, subCandidateCount, subTopK, subLoadSkew, nil
-				}
-				return result, candidateCount, topK, loadSkew, fallbackErr
-			}
-			return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+	// B3 两级池：将合格候选按接入模式拆成 API 池 / Web 池，先完整尝试 API 池，
+	// 仅当 API 池未产出任何可选账号（含订阅/常规/等待计划兜底）时才回落 Web 池。
+	// 池内保留原有评分/负载/订阅优先等规则（runPoolSelection 复用既有选择管线）。
+	runPoolSelection := func(pool []*Account) (*AccountSelectionResult, int, int, float64, error) {
+		if len(pool) == 0 {
+			return nil, 0, 0, 0, nil
 		}
+		if req.SubscriptionPriority {
+			subscriptionAccounts, regularAccounts := partitionOpenAIChatGPTSubscriptionAccounts(pool)
+			if len(subscriptionAccounts) > 0 {
+				attempt := s.trySelectByLoadBalancePool(ctx, req, subscriptionAccounts, loadMap, budget)
+				if attempt.err != nil && (!attempt.noCompactCandidates || len(regularAccounts) <= 0) {
+					return nil, attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
+				}
+				if attempt.result != nil {
+					return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
+				}
+				if len(regularAccounts) > 0 {
+					regularAttempt := s.trySelectByLoadBalancePool(ctx, req, regularAccounts, loadMap, budget)
+					if regularAttempt.err != nil && !regularAttempt.noCompactCandidates {
+						return nil, regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew, regularAttempt.err
+					}
+					if regularAttempt.result != nil {
+						return regularAttempt.result, regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew, nil
+					}
+					var result *AccountSelectionResult
+					candidateCount, topK, loadSkew := regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew
+					fallbackErr := regularAttempt.err
+					if regularAttempt.err == nil {
+						result, candidateCount, topK, loadSkew, fallbackErr = s.finishLoadBalanceSelectionFallback(ctx, req, regularAttempt, budget, filterStats)
+						if fallbackErr == nil && result != nil {
+							return result, candidateCount, topK, loadSkew, nil
+						}
+					}
+					// 常规池既无法获取也无法排队（含仅剩不支持 compact 的候选）时，
+					// 回退到订阅池的等待计划：busy-but-waitable 的订阅账号不应因常规池存在
+					// 而被丢弃，否则开启订阅优先反而让本可排队成功的请求硬失败。
+					subResult, subCandidateCount, subTopK, subLoadSkew, subErr := s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+					if subErr == nil && subResult != nil {
+						return subResult, subCandidateCount, subTopK, subLoadSkew, nil
+					}
+					return result, candidateCount, topK, loadSkew, fallbackErr
+				}
+				return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+			}
+		}
+
+		attempt := s.trySelectByLoadBalancePool(ctx, req, pool, loadMap, budget)
+		if attempt.err != nil {
+			return nil, attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
+		}
+		if attempt.result != nil {
+			return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
+		}
+		return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
 	}
 
-	attempt := s.trySelectByLoadBalancePool(ctx, req, filtered, loadMap, budget)
-	if attempt.err != nil {
-		return nil, attempt.candidateCount, attempt.topK, attempt.loadSkew, attempt.err
+	apiPool, webPool := partitionOpenAIAccessModePools(filtered)
+	if res, candidateCount, topK, loadSkew, selErr := runPoolSelection(apiPool); res != nil {
+		return res, candidateCount, topK, loadSkew, nil
+	} else if selErr != nil && len(webPool) == 0 {
+		return nil, candidateCount, topK, loadSkew, selErr
 	}
-	if attempt.result != nil {
-		return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
+	if res, candidateCount, topK, loadSkew, selErr := runPoolSelection(webPool); res != nil {
+		return res, candidateCount, topK, loadSkew, nil
+	} else {
+		return nil, candidateCount, topK, loadSkew, selErr
 	}
-	return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
 }
 
 func partitionOpenAIChatGPTSubscriptionAccounts(accounts []*Account) ([]*Account, []*Account) {

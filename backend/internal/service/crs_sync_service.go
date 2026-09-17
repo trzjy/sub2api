@@ -1174,7 +1174,13 @@ func reconcileCRSUpstreamBillingProbeExtra(
 		return
 	}
 	target := &Account{Platform: targetPlatform, Type: targetType, Credentials: targetCredentials}
-	if IsUpstreamBillingProbeIdentity(targetPlatform, targetType) {
+	// 网页逆向接入（access_mode=web）不是 API key 探活对象，失败关闭排除
+	// （方案 §5.6，归并后平台值已是官方值）。
+	probeEligible := IsUpstreamBillingProbeIdentity(targetPlatform, targetType)
+	if probeEligible && accessModeFromCredentials(targetCredentials) == AccountAccessModeWeb {
+		probeEligible = false
+	}
+	if probeEligible {
 		probeEnabled := false
 		if enabled, ok := existing.Extra[UpstreamBillingProbeEnabledExtraKey]; ok {
 			extra[UpstreamBillingProbeEnabledExtraKey] = enabled

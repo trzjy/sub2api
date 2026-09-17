@@ -68,6 +68,13 @@ const (
 	AccountModeCoding = domain.AccountModeCoding
 )
 
+// 账号接入方式（官方平台归并）：官方 API vs 网页逆向。
+// 与 account_mode 正交，存 credentials["access_mode"]。
+const (
+	AccountAccessModeAPI = domain.AccountAccessModeAPI
+	AccountAccessModeWeb = domain.AccountAccessModeWeb
+)
+
 // 上游 API 协议（国产供应商）：决定转发端点与格式，与接入模式正交。
 const (
 	APIProtocolChatCompletions = domain.APIProtocolChatCompletions

@@ -128,17 +128,18 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		return s.forwardCodeBuddy(ctx, c, account, body, view.Model, view.Stream, time.Now())
 	}
 
-	// 网页逆向平台（W3 方案任务 1）：与 OpenAIGatewayService.Forward 保持同一分发
-	// 口径——经各自适配器转换为官方网页端协议出站，避免落到下方通用 OpenAI 路径。
-	if account.Platform == PlatformWebZhipu {
+	// 网页逆向平台（W3 方案任务 1）：归并后由账号级接入模式（access_mode=web）决定
+	// 适配器选择（docs/platform-merge-refactor-plan.md §5.3），与 OpenAIGatewayService
+	// .Forward 保持同一分发口径。兼容旧 web-* 平台常量（形状推断兜底）。
+	if isWebZhipuAccount(account) {
 		view := newOpenAIRequestView(body)
 		return s.forwardWebZhipu(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}
-	if account.Platform == PlatformWebDeepseek {
+	if isWebDeepseekAccount(account) {
 		view := newOpenAIRequestView(body)
 		return s.forwardWebDeepseek(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}
-	if account.Platform == PlatformWebKimi {
+	if isWebKimiAccount(account) {
 		view := newOpenAIRequestView(body)
 		return s.forwardWebKimi(ctx, c, account, body, view.Model, view.Stream, time.Now(), webResponseModeChat)
 	}

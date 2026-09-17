@@ -59,6 +59,15 @@ const (
 	AccountModeCoding = "coding" // Coding Plan：滚动用量窗口冷却（5h / weekly）
 )
 
+// Account access mode constants 区分同一官方平台账号的「官方 API」与「网页逆向」
+// 两种接入方式（平台归并重构，docs/platform-merge-refactor-plan.md §5.1）。
+// 存储于 credentials["access_mode"]，与 account_mode（payg/coding）正交、互不调用。
+// 归并后 web-zhipu 等独立平台退役，网页/API 区分由本字段唯一承载。
+const (
+	AccountAccessModeAPI = "api" // 官方 API 接入（api_key / OAuth 凭证）
+	AccountAccessModeWeb = "web" // 网页逆向接入（整串 Cookie / Token 三元组）
+)
+
 // API protocol constants 国产供应商的上游 API 协议维度。存储于
 // credentials["api_protocol"]，与 account_mode 正交：协议决定转发端点与格式，
 // 模式决定额度监控方式。同协议请求零转换直通；跨协议组合才走转换链。

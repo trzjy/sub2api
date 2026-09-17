@@ -9,11 +9,76 @@ import (
 
 // webBaseURLSuffixes 是每个 web 平台（web-deepseek / web-zhipu / web-kimi）允许的
 // 官方域名后缀。credentials.base_url 只允许指向这些官方域名，杜绝 SSRF / 凭证外送
-// （docs/web-login-proxy-security-fix-plan.md 阶段 B #6）。
+// （docs/web-login-proxy-security-fix-plan.md 阶段 B #6）。归并后官方平台 + web access
+// mode 账号复用同一后缀集合（经 webProviderKeyForAccount 归一为 web-* 键）。
 var webBaseURLSuffixes = map[string][]string{
 	PlatformWebDeepseek: {"deepseek.com"},
 	PlatformWebZhipu:    {"bigmodel.cn", "chatglm.cn"},
 	PlatformWebKimi:     {"kimi.com", "moonshot.cn"},
+}
+
+// isWebZhipuAccount 报告账号是否应走 forwardWebZhipu：旧 web-zhipu 平台（迁移前无
+// access_mode，平台本身即判定），或官方 zhipu 平台 + web access mode（归并后新形态）。
+// API 模式 zhipu 账号返回 false（隔离红线 §6：API 模式账号绝不误入网页协议链）。
+func isWebZhipuAccount(a *Account) bool {
+	if a == nil {
+		return false
+	}
+	if a.Platform == PlatformWebZhipu {
+		return true // 旧平台兼容
+	}
+	return a.IsWebAccessMode() && a.IsZhipu()
+}
+
+// isWebDeepseekAccount 同构：旧 web-deepseek 平台，或官方 deepseek 平台 + web access mode。
+func isWebDeepseekAccount(a *Account) bool {
+	if a == nil {
+		return false
+	}
+	if a.Platform == PlatformWebDeepseek {
+		return true // 旧平台兼容
+	}
+	return a.IsWebAccessMode() && a.IsDeepseek()
+}
+
+// isWebKimiAccount 同构：旧 web-kimi 平台，或官方 kimi 平台 + web access mode。
+func isWebKimiAccount(a *Account) bool {
+	if a == nil {
+		return false
+	}
+	if a.Platform == PlatformWebKimi {
+		return true // 旧平台兼容
+	}
+	return a.IsWebAccessMode() && a.IsKimi()
+}
+
+// isWebReverseAccount 是网页逆向账号的兼容并集判定（归并后取代裸 IsWebProvider）：
+// 旧 web-* 平台（平台本身即判定），或官方平台（zhipu/deepseek/kimi）且 access_mode=web
+// 的账号均命中（/v1/messages 分派口径）。
+func isWebReverseAccount(a *Account) bool {
+	if a == nil {
+		return false
+	}
+	if IsWebProvider(a.Platform) {
+		return true // 旧平台兼容
+	}
+	return a.IsWebAccessMode() && (a.IsZhipu() || a.IsDeepseek() || a.IsKimi())
+}
+
+// webProviderKeyForAccount 把账号归一为 web 宇宙平台键（PlatformWeb*），用于模型目录 /
+// base_url 域名后缀查表（归并后官方平台 + web access mode 复用旧 web-* 目录）。
+func webProviderKeyForAccount(a *Account) string {
+	if a != nil {
+		switch {
+		case a.Platform == PlatformWebZhipu || a.IsZhipu():
+			return PlatformWebZhipu
+		case a.Platform == PlatformWebDeepseek || a.IsDeepseek():
+			return PlatformWebDeepseek
+		case a.Platform == PlatformWebKimi || a.IsKimi():
+			return PlatformWebKimi
+		}
+	}
+	return ""
 }
 
 // ValidateWebBaseURL 校验网页逆向账号的 base_url 是否为官方域名（fail-closed）。
@@ -68,17 +133,20 @@ func ValidateWebBaseURL(platform, raw string) (string, error) {
 // （内网 IP、http:// 明文、非官方主机）一律 fail-closed 返回空串，转发方按
 // 空 base_url 失败关闭，绝不把请求发往非官方主机。
 func (a *Account) GetWebBaseURL() string {
-	if a == nil || !IsWebProvider(a.Platform) {
+	// 兼容并集判定（归并后取代裸 IsWebProvider）：旧 web-* 平台或官方平台 + web access
+	// mode 的账号走网页 base_url 链；API 模式账号一律回落空串（不进入网页协议）。
+	if a == nil || !isWebReverseAccount(a) {
 		return ""
 	}
+	key := webProviderKeyForAccount(a)
 	if raw := strings.TrimSpace(a.GetCredential("base_url")); raw != "" {
 		// 非法值 fail-closed：返回空串，转发方按空 base_url 失败。
-		if validated, err := ValidateWebBaseURL(a.Platform, raw); err == nil {
+		if validated, err := ValidateWebBaseURL(key, raw); err == nil {
 			return validated
 		}
 		return ""
 	}
-	switch a.Platform {
+	switch key {
 	case PlatformWebDeepseek:
 		return DefaultWebDeepseekBaseURL
 	case PlatformWebZhipu:

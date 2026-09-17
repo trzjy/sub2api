@@ -48,6 +48,25 @@ const (
 // forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → Connect
 // RPC 请求 → 回程通用解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService.Forward
 // 的 platform 分支按 PlatformWebKimi 分发（分发注册由共享注册点接线任务完成）。
+// assertWebKimiAccount 是 forwardWebKimi 入口的双断言 fail-closed（隔离红线 §6）：旧
+// web-kimi 平台（平台本身即判定），或新形态官方 kimi 平台 + web access mode 双断言。API
+// 模式 kimi 账号绝不进入网页协议链，web 模式 zhipu/deepseek 账号绝不误入。
+func assertWebKimiAccount(account *Account) error {
+	if account == nil {
+		return fmt.Errorf("forwardWebKimi requires a non-nil account")
+	}
+	if account.Platform == PlatformWebKimi {
+		return nil // 旧平台兼容
+	}
+	if account.IsWebAccessMode() && account.IsKimi() {
+		return nil
+	}
+	if !account.IsWebAccessMode() {
+		return fmt.Errorf("forwardWebKimi requires web access mode, got %q", account.GetAccessMode())
+	}
+	return fmt.Errorf("forwardWebKimi requires a kimi platform, got %q", account.Platform)
+}
+
 func (s *OpenAIGatewayService) forwardWebKimi(
 	ctx context.Context,
 	c *gin.Context,
@@ -58,8 +77,8 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 	startTime time.Time,
 	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
-	if account == nil || account.Platform != PlatformWebKimi {
-		return nil, fmt.Errorf("forwardWebKimi requires a %s account", PlatformWebKimi)
+	if err := assertWebKimiAccount(account); err != nil {
+		return nil, err
 	}
 
 	accessToken := strings.TrimSpace(account.GetCredential("access_token"))
@@ -828,8 +847,8 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 		finalUsage = &OpenAIUsage{}
 	}
 	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
-	// 非真实 token 数（estimated）。
-	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && IsWebProvider(account.Platform) {
+	// 非真实 token 数（estimated）。归并后判定源为 web 接入模式（平台已并官方值）。
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
 		estimated := estimateWebUsage(inputPrompt, aggregated.String())
 		finalUsage.InputTokens = estimated.InputTokens
 		finalUsage.OutputTokens = estimated.OutputTokens

@@ -1,10 +1,36 @@
 package service
 
 import (
+	"context"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
+
+// openAIMessagesDispatchContextKey marks a selection request as originating from the
+// /v1/messages (Anthropic Messages) entry. Web access-mode accounts must never be
+// admitted for /v1/messages (B2): the candidate filter drops them when this flag is set.
+// The OpenAI-compatible /v1/messages handler installs the flag on the request context
+// before account selection; chat/completions and responses requests leave it unset so
+// Web accounts remain eligible there under the two-tier pool (B3).
+type openAIMessagesDispatchContextKeyT struct{}
+
+var openAIMessagesDispatchContextKey = openAIMessagesDispatchContextKeyT{}
+
+func WithOpenAIMessagesDispatchContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openAIMessagesDispatchContextKey, struct{}{})
+}
+
+func isOpenAIMessagesDispatchContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	_, ok := ctx.Value(openAIMessagesDispatchContextKey).(struct{})
+	return ok
+}
 
 const (
 	defaultOpenAIMessagesDispatchOpusMappedModel   = "gpt-5.4"

@@ -16,7 +16,9 @@ func SanitizeStoredCredentials(platform string, creds map[string]any) map[string
 		return nil
 	}
 	keys := []string{"password", "sso_token", "sso", "sso-rw", "clearTextPassword", "cookie"}
-	if IsWebProvider(platform) {
+	// 形状兼容期：旧 web-* 平台值或 credentials["access_mode"]="web" 都豁免 cookie 剥离，
+	// 防止归并前 cookie 被清洗剥离（红线 §2.4，方案 §6）。
+	if IsWebProvider(platform) || accessModeFromCredentials(creds) == AccountAccessModeWeb {
 		keys = []string{"password", "sso_token", "sso", "sso-rw", "clearTextPassword"}
 	}
 	for _, key := range keys {

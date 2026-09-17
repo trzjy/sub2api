@@ -4,6 +4,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log/slog"
 	"net/url"
@@ -1435,6 +1436,58 @@ func (a *Account) GetAccountMode() string {
 // IsCodingPlan 报告账号是否为 Coding Plan 模式（用于滚动用量窗口冷却）。
 func (a *Account) IsCodingPlan() bool {
 	return a.GetAccountMode() == AccountModeCoding
+}
+
+// GetAccessMode 返回账号的接入模式（api / web），与 GetAccountMode 同构，取值规则
+// （docs/platform-merge-refactor-plan.md §5.1）：
+//  1) 显式合法值：credentials["access_mode"] 为 "api"/"web" 时直接使用；
+//  2) 显式非法值：返回空串（与非法 account_mode 一致）——但调度与转发路径必须走
+//     ResolveAccessMode() 失败关闭，不得按空串当 "api" 继续调度；
+//  3) 形状推断（仅兼容读取）：仅当字段真正缺失时，允许按凭证形状推断
+//     （cookie / access_token 键存在且非空且平台 ∈ {zhipu,deepseek,kimi} → "web"），
+//     仅限 PR-1～PR-3 兼容期；
+//  4) 缺失且形状不命中 → "api"。
+//
+// 与 GetAccountMode（payg/coding）互不调用：接入模式与额度监控模式正交。
+func (a *Account) GetAccessMode() string {
+	if a == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(a.GetCredential("access_mode"))
+	switch mode {
+	case AccountAccessModeAPI, AccountAccessModeWeb:
+		return mode
+	case "":
+		// 字段真正缺失才允许形状推断（显式非法值在第 2 分支已被拦下）。
+		if IsWebProvider(a.Platform) || a.IsZhipu() || a.IsDeepseek() || a.IsKimi() {
+			if a.GetCredential("cookie") != "" || a.GetCredential("access_token") != "" {
+				return AccountAccessModeWeb
+			}
+		}
+		return AccountAccessModeAPI
+	default:
+		return ""
+	}
+}
+
+// ResolveAccessMode 在 GetAccessMode 基础上对「显式非法值」失败关闭：返回错误并附
+// 账号 ID，调度与转发必须据此把账号判为不可选/拒绝转发，不得推断、不得默认 "api"
+// （docs/platform-merge-refactor-plan.md §5.1 规则 2）。
+func (a *Account) ResolveAccessMode() (string, error) {
+	mode := a.GetAccessMode()
+	if mode == "" {
+		if a == nil {
+			return "", errors.New("account access_mode explicitly invalid: nil account")
+		}
+		return "", fmt.Errorf("account %d access_mode explicitly invalid (fail-closed)", a.ID)
+	}
+	return mode, nil
+}
+
+// IsWebAccessMode 报告账号是否为网页逆向接入（web）。归并后取代
+// IsWebProvider(platform) 作为适配器/隔离判定源（红线清单 §2.4/§7）。
+func (a *Account) IsWebAccessMode() bool {
+	return a.GetAccessMode() == AccountAccessModeWeb
 }
 
 // GetAPIProtocol 返回账号的上游 API 协议。存储于

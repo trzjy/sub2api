@@ -182,19 +182,33 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// shouldForwardOpenAIResponsesViaRawChatCompletions 的兜底分支被打到错误上游。
 	// Responses 形状请求（顶层 "input"，由 /v1/responses 或兼容客户端下发）在进入
 	// 只读取 messages 的网页适配器前先归一为 Chat Completions 形状（C2，#4）。
-	if account.Platform == PlatformWebZhipu || account.Platform == PlatformWebDeepseek || account.Platform == PlatformWebKimi {
+	// 网页逆向平台（W3 方案任务 1）：归并后由账号级接入模式（access_mode=web）决定
+	// 适配器选择，而非平台名精确匹配（docs/platform-merge-refactor-plan.md §5.3）。
+	// 兼容旧 web-* 平台常量（形状推断兜底），新版统一走官方平台 + web access mode。
+	// 必须先于下方通用 OpenAI 路径分流——网页账号为 apikey 类型，会命中
+	// shouldForwardOpenAIResponsesViaRawChatCompletions 的兜底分支被打到错误上游。
+	// Responses 形状请求（顶层 "input"，由 /v1/responses 或兼容客户端下发）在进入
+	// 只读取 messages 的网页适配器前先归一为 Chat Completions 形状（C2，#4）。
+	if isWebZhipuAccount(account) {
 		normalizedBody, normErr := normalizeWebRequestBodyForAdapter(body)
 		if normErr != nil {
 			return nil, normErr
 		}
-		switch account.Platform {
-		case PlatformWebZhipu:
-			return s.forwardWebZhipu(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
-		case PlatformWebDeepseek:
-			return s.forwardWebDeepseek(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
-		case PlatformWebKimi:
-			return s.forwardWebKimi(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
+		return s.forwardWebZhipu(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
+	}
+	if isWebDeepseekAccount(account) {
+		normalizedBody, normErr := normalizeWebRequestBodyForAdapter(body)
+		if normErr != nil {
+			return nil, normErr
 		}
+		return s.forwardWebDeepseek(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
+	}
+	if isWebKimiAccount(account) {
+		normalizedBody, normErr := normalizeWebRequestBodyForAdapter(body)
+		if normErr != nil {
+			return nil, normErr
+		}
+		return s.forwardWebKimi(ctx, c, account, normalizedBody, originalModel, reqStream, startTime, webResponseModeResponses)
 	}
 
 	// CN 供应商 anthropic 协议账号：/v1/responses 入站是交叉协议组合

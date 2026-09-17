@@ -733,6 +733,11 @@ func lockAndMergeAccountProbeExtra(
 		delete(extra, key)
 	}
 	probeAccount := service.IsUpstreamBillingProbeIdentity(account.Platform, account.Type)
+	// 网页逆向接入（web 接入模式账号）不是 API key 探活对象，失败关闭排除
+	// （方案 §5.6，归并后 platform 已是官方值）。
+	if probeAccount && account.IsWebAccessMode() {
+		probeAccount = false
+	}
 	probeEnabled := false
 	probeEnabledPresent := false
 	if probeAccount {

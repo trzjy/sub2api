@@ -1262,7 +1262,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	effectiveMappedModel := preferredMappedModel
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
-	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	// B2 /v1/messages 标记（docs/platform-merge-refactor-plan.md §5.2）：本入口装上
+	// messages dispatch flag，调度候选过滤据此对 Web 接入模式账号永不入选；
+	// chat/completions 与 responses 入口不装此 flag，Web 账号在两级池语义下保持可选。
+	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(
+		service.WithOpenAIMessagesDispatchContext(c.Request.Context()), apiKey.GroupID)
 	c.Request = c.Request.WithContext(msgPricingCtx)
 
 	for {

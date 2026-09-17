@@ -1200,10 +1200,12 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
-	// 网页逆向平台：空 model_mapping 时回落到平台默认模型目录（方案 §3.3 映射表），
-	// 而非误回落到 Claude 默认模型。
-	if service.IsWebProvider(platform) {
-		writeModelsList(c, platform, service.DefaultWebModelIDs(platform))
+	// 网页逆向接入（web 接入模式账号，平台归并后 group platform 已是官方值）：空
+	// model_mapping 时回落到 web 模型目录（方案 §3.3 映射表 / B4 口径），而非误回落到
+	// Claude 默认模型。按 WebModelCatalogPlatform 归一（旧 web-* 平台值与原样；官方
+	// zhipu/deepseek/kimi 归到对应 web 目录），取代 IsWebProvider(platform)。
+	if webPlatform := service.WebModelCatalogPlatform(platform); webPlatform != "" {
+		writeModelsList(c, platform, service.DefaultWebModelIDs(webPlatform))
 		return
 	}
 

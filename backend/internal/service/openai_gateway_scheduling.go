@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -768,6 +769,172 @@ func (s *OpenAIGatewayService) withOpenAIQuotaAutoPauseContext(ctx context.Conte
 	return withOpenAIQuotaAutoPauseSettings(ctx, s.settingService.GetOpenAIQuotaAutoPauseSettings(ctx))
 }
 
+// partitionOpenAIAccessModePools splits OpenAI-compatible candidate accounts into the
+// B3 two-tier pools: API pool (access_mode != "web", i.e. "api" or compatibility-shape
+// inferred) and Web pool (IsWebAccessMode()). Accounts with an explicitly invalid
+// access_mode are excluded by the caller's eligibility filter before reaching this split,
+// so they never enter either pool.
+func partitionOpenAIAccessModePools(accounts []*Account) (apiPool []*Account, webPool []*Account) {
+	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
+		if acc.IsWebAccessMode() {
+			webPool = append(webPool, acc)
+		} else {
+			apiPool = append(apiPool, acc)
+		}
+	}
+	return apiPool, webPool
+}
+
+// openAIAccessModeExcludeReason returns a non-empty filter reason when the account must be
+// judged unschedulable because its access_mode is explicitly invalid. Per
+// docs/platform-merge-refactor-plan.md §5.1 rule 2, an explicit illegal access_mode value
+// is fail-closed: ResolveAccessMode returns an error and the account is excluded from all
+// scheduling pools (neither API nor Web).
+func openAIAccessModeExcludeReason(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if _, err := account.ResolveAccessMode(); err != nil {
+		return "access_mode_invalid"
+	}
+	return ""
+}
+
+// openAIAccountWebMode reports whether the account belongs to the Web access pool
+// (access_mode == "web"). API pool is the complement (access_mode != "web", i.e. "api"
+// or compatibility-shape inferred). Used as the B3 two-tier pool boundary.
+func openAIAccountWebMode(account *Account) bool {
+	return account != nil && account.IsWebAccessMode()
+}
+
+// sortOpenAITwoTierByPriorityAndLastUsed orders OpenAI-compatible candidates for the B3
+// two-tier pool: priority dominates; within the same priority the API pool (access_mode
+// != "web") precedes the Web pool (IsWebAccessMode); ties fall back to least-recently-used
+// (and OAuth preference when enabled). It mirrors sortAccountsByPriorityAndLastUsed but
+// injects the pool boundary so the two-tier pool stays consistent with the advanced
+// scheduler path. The within-(priority, pool) shuffle is preserved to keep concurrency
+// distribution intact without breaking the pool boundary.
+func sortOpenAITwoTierByPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
+	sort.SliceStable(accounts, func(i, j int) bool {
+		a, b := accounts[i], accounts[j]
+		if a.Priority != b.Priority {
+			return a.Priority < b.Priority
+		}
+		if wa, wb := openAIAccountWebMode(a), openAIAccountWebMode(b); wa != wb {
+			return !wa
+		}
+		switch {
+		case a.LastUsedAt == nil && b.LastUsedAt != nil:
+			return true
+		case a.LastUsedAt != nil && b.LastUsedAt == nil:
+			return false
+		case a.LastUsedAt == nil && b.LastUsedAt == nil:
+			if preferOAuth && a.Type != b.Type {
+				return a.Type == AccountTypeOAuth
+			}
+			return false
+		default:
+			return a.LastUsedAt.Before(*b.LastUsedAt)
+		}
+	})
+	shuffleWithinPriorityAndTwoTierPool(accounts, preferOAuth)
+}
+
+// shuffleWithinPriorityAndTwoTierPool is shuffleWithinPriorityAndLastUsed made pool-aware:
+// the shuffle group key adds the access-mode pool (Priority, pool, LastUsedAt) so that
+// API-pool and Web-pool accounts within the same priority are never randomly reordered
+// across the B3 two-tier boundary.
+func shuffleWithinPriorityAndTwoTierPool(accounts []*Account, preferOAuth bool) {
+	if len(accounts) <= 1 {
+		return
+	}
+	i := 0
+	for i < len(accounts) {
+		j := i + 1
+		for j < len(accounts) && sameTwoTierAccountGroup(accounts[i], accounts[j]) {
+			j++
+		}
+		if j-i > 1 {
+			if preferOAuth {
+				oauth := make([]*Account, 0, j-i)
+				others := make([]*Account, 0, j-i)
+				for _, acc := range accounts[i:j] {
+					if acc.Type == AccountTypeOAuth {
+						oauth = append(oauth, acc)
+					} else {
+						others = append(others, acc)
+					}
+				}
+				if len(oauth) > 1 {
+					rand.Shuffle(len(oauth), func(a, b int) { oauth[a], oauth[b] = oauth[b], oauth[a] })
+				}
+				if len(others) > 1 {
+					rand.Shuffle(len(others), func(a, b int) { others[a], others[b] = others[b], others[a] })
+				}
+				copy(accounts[i:], oauth)
+				copy(accounts[i+len(oauth):], others)
+			} else {
+				rand.Shuffle(j-i, func(a, b int) {
+					accounts[i+a], accounts[i+b] = accounts[i+b], accounts[i+a]
+				})
+			}
+		}
+		i = j
+	}
+}
+
+// sameTwoTierAccountGroup 判断两个 Account 是否属于同一 B3 两级池排序组
+// （Priority + 接入模式池 + LastUsedAt），保证池边界不被随机打乱破坏。
+func sameTwoTierAccountGroup(a, b *Account) bool {
+	if a.Priority != b.Priority {
+		return false
+	}
+	if openAIAccountWebMode(a) != openAIAccountWebMode(b) {
+		return false
+	}
+	return sameLastUsedAt(a.LastUsedAt, b.LastUsedAt)
+}
+
+// shuffleWithinSortGroupsTwoTier is shuffleWithinSortGroups made pool-aware: the
+// grouping key adds the access-mode pool (Priority, pool, LoadRate, LastUsedAt) so the
+// B3 two-tier boundary survives the within-group random distribution in the load-aware
+// immediate-acquire path.
+func shuffleWithinSortGroupsTwoTier(accounts []accountWithLoad) {
+	if len(accounts) <= 1 {
+		return
+	}
+	i := 0
+	for i < len(accounts) {
+		j := i + 1
+		for j < len(accounts) && sameAccountWithLoadGroupTwoTier(accounts[i], accounts[j]) {
+			j++
+		}
+		if j-i > 1 {
+			rand.Shuffle(j-i, func(a, b int) {
+				accounts[i+a], accounts[i+b] = accounts[i+b], accounts[i+a]
+			})
+		}
+		i = j
+	}
+}
+
+// sameAccountWithLoadGroupTwoTier 判断两个 accountWithLoad 是否属于同一 B3 两级池排序组。
+func sameAccountWithLoadGroupTwoTier(a, b accountWithLoad) bool {
+	if a.account.Priority != b.account.Priority {
+		return false
+	}
+	if openAIAccountWebMode(a.account) != openAIAccountWebMode(b.account) {
+		return false
+	}
+	if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
+		return false
+	}
+	return sameLastUsedAt(a.account.LastUsedAt, b.account.LastUsedAt)
+}
+
 // prioritizeOpenAICompactAccounts re-orders a slice so that accounts with known
 // compact support are tried first, followed by unknown, then explicitly unsupported.
 // The relative order within each tier is preserved.
@@ -954,6 +1121,17 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 		return nil
 	}
 
+	// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，清理绑定后回落两级池。
+	if account != nil && account.IsWebAccessMode() {
+		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		return nil
+	}
+	// 显式非法 access_mode fail-closed：粘性命中也判为不可选（§5.1 规则 2）。
+	if account != nil && openAIAccessModeExcludeReason(account) != "" {
+		_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+		return nil
+	}
+
 	// 检查账号是否需要清理粘性会话
 	// Check if sticky session should be cleared
 	if shouldClearStickySession(account, requestedModel) {
@@ -1044,6 +1222,16 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			filterStats.exclude("ineligible")
 			continue
 		}
+		// B2: /v1/messages 候选过滤 —— Web 接入模式账号永不入选。
+		if isOpenAIMessagesDispatchContext(ctx) && fresh.IsWebAccessMode() {
+			filterStats.exclude("web_excluded_for_messages")
+			continue
+		}
+		// 显式非法 access_mode fail-closed：调度判为不可选（B3/§5.1 规则 2）。
+		if reason := openAIAccessModeExcludeReason(fresh); reason != "" {
+			filterStats.exclude(reason)
+			continue
+		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			filterStats.exclude("channel_restricted")
 			continue
@@ -1111,6 +1299,12 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 	}
 	if candidate.Priority > current.Priority {
 		return false
+	}
+
+	// B3 两级池：同优先级内 API 池先于 Web 池（access_mode=web 排后），
+	// 但优先级仍主导（管理员提升 Web 账号优先级时照常先行）。
+	if candidate.IsWebAccessMode() != current.IsWebAccessMode() {
+		return !candidate.IsWebAccessMode()
 	}
 
 	// 同优先级，比较最后使用时间
@@ -1214,6 +1408,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if accountID > 0 && !isExcluded(accountID) {
 			account, err := s.getSchedulableAccount(ctx, accountID)
 			if err == nil {
+				// B3 sticky 不入 Web 池：Web 接入模式账号不得经粘性会话路由，
+				// 清理绑定后回落两级池（与 tryStickySessionHit 同一口径）。
+				if account != nil && account.IsWebAccessMode() {
+					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+					return nil, nil
+				}
 				clearSticky := shouldClearStickySession(account, requestedModel)
 				if clearSticky {
 					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
@@ -1300,6 +1500,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			filterStats.exclude("channel_upstream_restricted")
 			continue
 		}
+		// B2: /v1/messages 候选过滤 —— Web 接入模式账号永不入选。
+		if isOpenAIMessagesDispatchContext(ctx) && acc.IsWebAccessMode() {
+			filterStats.exclude("web_excluded_for_messages")
+			continue
+		}
+		// 显式非法 access_mode fail-closed：调度判为不可选（B3/§5.1 规则 2）。
+		if reason := openAIAccessModeExcludeReason(acc); reason != "" {
+			filterStats.exclude(reason)
+			continue
+		}
 		baseCandidateCount++
 		candidates = append(candidates, acc)
 	}
@@ -1344,6 +1554,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			if a.account.Priority != b.account.Priority {
 				return a.account.Priority < b.account.Priority
 			}
+			// B3 两级池：同优先级内 API 池先于 Web 池（access_mode=web 排后）。
+			if wa, wb := openAIAccountWebMode(a.account), openAIAccountWebMode(b.account); wa != wb {
+				return !wa
+			}
 			if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
 				return a.loadInfo.LoadRate < b.loadInfo.LoadRate
 			}
@@ -1358,7 +1572,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return a.account.LastUsedAt.Before(*b.account.LastUsedAt)
 			}
 		})
-		shuffleWithinSortGroups(available)
+		shuffleWithinSortGroupsTwoTier(available)
 		if rateOrder.enabled {
 			sort.SliceStable(available, func(i, j int) bool {
 				return rateOrder.compare(available[i].account, available[j].account) < 0
@@ -1414,7 +1628,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
 	if err != nil {
 		ordered := append([]*Account(nil), candidates...)
-		sortAccountsByPriorityAndLastUsed(ordered, false)
+		sortOpenAITwoTierByPriorityAndLastUsed(ordered, false)
 		if rateOrder.enabled {
 			sort.SliceStable(ordered, func(i, j int) bool {
 				return rateOrder.compare(ordered[i], ordered[j]) < 0
@@ -1464,7 +1678,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 
 	// ============ Layer 3: Fallback wait ============
-	sortAccountsByPriorityAndLastUsed(candidates, false)
+	sortOpenAITwoTierByPriorityAndLastUsed(candidates, false)
 	if rateOrder.enabled {
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return rateOrder.compare(candidates[i], candidates[j]) < 0
