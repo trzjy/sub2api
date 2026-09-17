@@ -432,6 +432,7 @@ func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Cont
 //  2. 应用账号现有 model_mapping（复用 GetMappedModel，不另写映射逻辑）；
 //  3. 仅当 modelID 为空时，回落 DefaultWebModelIDs 的平台默认值（公开名口径，
 //     与 /models 列表和 model_mapping 键一致；出站归一由各平台转发链同款函数完成）。
+//
 // 返回值即最终出站模型名（与 test_start 事件、请求体 model 字段一致）。
 func resolveWebTestModel(account *Account, modelID, platform string) string {
 	candidate := strings.TrimSpace(modelID)
@@ -463,9 +464,9 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	var (
-		chatPath string
+		chatPath  string
 		testModel string
-		req      *http.Request
+		req       *http.Request
 	)
 	switch account.Platform {
 	case PlatformWebDeepseek:
@@ -502,20 +503,24 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		if baseURL == "" {
 			baseURL = DefaultWebZhipuBaseURL
 		}
-		chatPath = webZhipuConversationPath
+		chatPath = webZhipuStreamPath
 		// 优先非空 modelID → 现有 model_mapping（GetMappedModel）→ 默认 DefaultWebModelIDs。
 		testModel = resolveWebTestModel(account, modelID, PlatformWebZhipu)
 		cookie := strings.TrimSpace(account.GetCredential("cookie"))
 		if cookie == "" {
 			return s.sendErrorAndEnd(c, "web-zhipu account is missing login cookie credential")
 		}
-		// 复用正式转发链构造函数：完整指纹头（Content-Type/Accept/X-Requested-With/
-		// Origin/Referer/User-Agent/Cookie(+cdn_cookie)/账号头覆写），禁止第二套 GLM 头逻辑。
-		reqBody := buildWebZhipuRequestBody("hi", testModel, account)
+		// 复用正式转发链构造函数：完整指纹头（Content-Type/Accept/Authorization Bearer/
+		// app-name/x-app-*/x-device-id/Origin/Referer/User-Agent/Cookie(+cdn_cookie)/
+		// 账号头覆写），禁止第二套 GLM 头逻辑。
+		reqBody := buildWebZhipuRequestBody([]webZhipuMessage{{
+			Role:    "user",
+			Content: []webZhipuMessageContent{{Type: "text", Text: "hi"}},
+		}}, testModel, account)
 		if s.openaiGatewayService == nil {
 			return s.sendErrorAndEnd(c, "openai gateway service is unavailable for web-zhipu probe")
 		}
-		r, err := s.openaiGatewayService.buildWebZhipuUpstreamRequest(ctx, account, baseURL+webZhipuConversationPath, cookie, reqBody)
+		r, err := s.openaiGatewayService.buildWebZhipuUpstreamRequest(ctx, account, baseURL+webZhipuStreamPath, cookie, reqBody)
 		if err != nil {
 			return s.sendErrorAndEnd(c, "Failed to build web-zhipu probe request")
 		}

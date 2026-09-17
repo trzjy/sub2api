@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,29 +18,59 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// web-zhipu 网页逆向适配器（方案 W3，docs/web-reverse-embedded-login-plan.md §4.2、
-// docs/web-reverse-analysis-plan.md §1.2/§3.3/§3.4）。
+// web-zhipu 网页逆向适配器（方案 W3，docs/web-reverse-embedded-login-plan.md §4.2）。
 //
-// 协议状态声明（权威来源：两份方案文档的实测记录，2026-09-16）：
-//   - 已实测：对话端点 POST /chatglm/backend-api/v1/conversation（SSE，未登录 401
-//     "You need to be authenticated"）、Cookie 认证 + X-Requested-With: XMLHttpRequest、
-//     阿里 CDN Cookie（acw_tc / cdn_sec_tc）、模型名前端硬编码（glm-4 等，不走
-//     model_version 端点）。
-//   - 未实测（登录态缺失）：完整请求体、SSE chunk 结构、Cookie 有效期。
-//     本文件对全部未知格式做集中封装并标注「待登录态实测补全」，不做任何臆测编造。
+// 协议状态声明（权威来源：官网登录态抓包实测，2026-09-17）：
+//   - 已实测：对话端点 POST /chatglm/backend-api/assistant/stream（SSE）；请求体以
+//     assistant_id + meta_data.selected_model 选模型（不存在旧 v1/conversation 的
+//     model 字段）；认证为 Cookie(chatglm_token) + Authorization: Bearer <chatglm_token>
+//     双载体 + app-name/x-app-* /x-device-id 指纹头；响应 SSE 为 parts[].content[]
+//     结构，按 content.type 分派（text=正文增量 / think=思考 / tool_calls=工具调用），
+//     part 级 status=finish + 顶层 status=finish 终止，无 usage 字段。
+//   - 官网请求还携带 x-sign/x-nonce/x-timestamp 签名三件套（算法未知）；当前实现
+//     不发送，若真实验收被上游以签名类错误拒绝再回补。
 //
-// 安全红线：凭证（cookie）不得出现在日志或错误响应中——上游错误体在任何透传前先经
-// redactWebZhipuUpstreamErrorBody 脱敏。
+// 安全红线：凭证（cookie/chatglm_token）不得出现在日志或错误响应中——上游错误体在
+// 任何透传前先经 redactWebZhipuUpstreamErrorBody 脱敏。
 //
-// 刷新语义（分析文档 §3.5）：Zhipu 无刷新机制，Cookie 过期即冷却——401 不做刷新重试，
-// 直接走冷却与错误回传。
+// 刷新语义（分析文档 §3.5）：Cookie 携带 chatglm_refresh_token，但刷新端点未实测；
+// 401 仍不做刷新重试，直接走冷却与错误回传。
 
 const (
-	// webZhipuClientUA 指纹对齐用浏览器 UA（方案 §3.5；具体 UA 以登录态抓包为准）。
-	webZhipuClientUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-	// webZhipuConversationPath 对话端点（SSE，实测）。
-	webZhipuConversationPath = "/chatglm/backend-api/v1/conversation"
+	// webZhipuClientUA 指纹对齐用浏览器 UA（以登录态抓包为准）。
+	webZhipuClientUA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+	// webZhipuStreamPath 对话端点（SSE，2026-09-17 登录态实测）。
+	webZhipuStreamPath = "/chatglm/backend-api/assistant/stream"
+	// webZhipuDefaultAssistantID GLM-Flash（极致）助手的内部 assistant_id
+	// （2026-09-17 登录态抓包实测：meta_data.selected_model=glm-5.3-flash 时使用）。
+	// 管理员可用 credentials["assistant_id"] 覆盖。
+	webZhipuDefaultAssistantID = "65940acff94777010aa6b796"
 )
+
+// webZhipuExtractCookieField 从整串 Cookie 中提取指定字段的值。
+func webZhipuExtractCookieField(cookie, name string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		kv := strings.TrimSpace(part)
+		if v, ok := strings.CutPrefix(kv, name+"="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// webZhipuDeviceIDFromToken 从 chatglm_token JWT payload 解出 device_id
+// （payload 为 base64url JSON，含 device_id 字段；解析失败返回空串，不阻断请求）。
+func webZhipuDeviceIDFromToken(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(gjson.GetBytes(payload, "device_id").String())
+}
 
 // forwardWebZhipu 是 Zhipu 网页逆向平台（web-zhipu）的转发入口，函数链模式与
 // forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → 网页端
@@ -72,8 +103,8 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	}
 
 	// 模型映射：account.GetModelMapping() 默认透传（GetMappedModel 未命中即原样返回）。
-	// 网页端模型名前端硬编码（实测：glm-4 等），未知模型名按「默认透传同名」处理，
-	// 真实取值待登录态实测补全。
+	// 出站模型即 meta_data.selected_model（2026-09-17 实测：请求 selected_model 公开名，
+	// 上游 parts[].model 返回内部名 moe_5）；未知模型名按「默认透传同名」处理。
 	upstreamModel := account.GetMappedModel(originalModel)
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
@@ -84,7 +115,8 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	if strings.TrimSpace(prompt) == "" {
 		return nil, errors.New("web-zhipu requires at least one user message in the request")
 	}
-	upstreamBody := buildWebZhipuRequestBody(prompt, upstreamModel, account)
+	messages := webZhipuExtractUserMessages(body)
+	upstreamBody := buildWebZhipuRequestBody(messages, upstreamModel, account)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -94,7 +126,7 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	defer releaseUpstreamCtx()
 
-	req, err := s.buildWebZhipuUpstreamRequest(upstreamCtx, account, baseURL+webZhipuConversationPath, cookie, upstreamBody)
+	req, err := s.buildWebZhipuUpstreamRequest(upstreamCtx, account, baseURL+webZhipuStreamPath, cookie, upstreamBody)
 	if err != nil {
 		return nil, err
 	}
@@ -116,25 +148,73 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	return s.handleWebZhipuNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webZhipuExtractPrompt(body), mode)
 }
 
-// buildWebZhipuRequestBody 把入站 prompt 转换为网页端对话请求体。
-// 实测已知字段仅 prompt / model（分析文档 §1.2）；完整请求体待登录态实测补全，
-// 此处只设已实测字段，其余一律不设（不臆测填充）。
+// webZhipuUpstreamRequest 官网 /assistant/stream 请求体（2026-09-17 登录态实测结构；
+// 字段仅设实测存在的项，不臆测填充）。模型选择 = meta_data.selected_model，
+// 助手选择 = assistant_id（官方 GLM-Flash 助手默认值，credentials["assistant_id"] 可覆盖）。
 type webZhipuUpstreamRequest struct {
-	Prompt string `json:"prompt"`
-	Model  string `json:"model"`
+	AssistantID    string            `json:"assistant_id"`
+	ConversationID string            `json:"conversation_id"`
+	ProjectID      string            `json:"project_id"`
+	ChatType       string            `json:"chat_type"`
+	MetaData       webZhipuMetaData  `json:"meta_data"`
+	Messages       []webZhipuMessage `json:"messages"`
 }
 
-func buildWebZhipuRequestBody(prompt, model string, account *Account) []byte {
+// webZhipuMetaData 实测 meta_data 结构（官网请求体原样字段）。
+type webZhipuMetaData struct {
+	Cogview           webZhipuCogview `json:"cogview"`
+	IsTest            bool            `json:"is_test"`
+	InputQuestionType string          `json:"input_question_type"`
+	Channel           string          `json:"channel"`
+	DraftID           string          `json:"draft_id"`
+	ChatMode          string          `json:"chat_mode"`
+	SelectedModel     string          `json:"selected_model"`
+	IsNetworking      bool            `json:"is_networking"`
+	QuoteLogID        string          `json:"quote_log_id"`
+	Platform          string          `json:"platform"`
+}
+
+type webZhipuCogview struct {
+	RmLabelWatermark bool `json:"rm_label_watermark"`
+}
+
+// webZhipuMessage 实测 messages 元素：content 为类型数组形态（text 片段）。
+type webZhipuMessage struct {
+	Role    string                   `json:"role"`
+	Content []webZhipuMessageContent `json:"content"`
+}
+
+type webZhipuMessageContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func buildWebZhipuRequestBody(messages []webZhipuMessage, model string, account *Account) []byte {
+	assistantID := strings.TrimSpace(account.GetCredential("assistant_id"))
+	if assistantID == "" {
+		assistantID = webZhipuDefaultAssistantID
+	}
 	req := webZhipuUpstreamRequest{
-		Prompt: prompt,
-		Model:  model,
+		AssistantID:    assistantID,
+		ConversationID: "",
+		ProjectID:      "",
+		ChatType:       "user_chat",
+		MetaData: webZhipuMetaData{
+			Cogview:       webZhipuCogview{RmLabelWatermark: false},
+			IsTest:        false,
+			ChatMode:      "deep_thinking",
+			SelectedModel: model,
+			Platform:      "pc",
+		},
+		Messages: messages,
 	}
 	data, _ := json.Marshal(req)
 	return data
 }
 
-// webZhipuExtractPrompt 从入站 OpenAI 请求取最后一条 user 消息文本作为 prompt
-// （网页端单 prompt 语义；多轮上下文展开方式待登录态实测补全）。
+// webZhipuExtractPrompt 取最后一条 user 消息文本（多轮历史展开方式未实测——官网
+// 同会话续传走 conversation_id，本适配器每轮新会话，故只发最后一条 user 消息，
+// 多轮上下文合并语义待实测补全）。纯字符串 content 直接取值；数组形态取 text 片段拼接。
 func webZhipuExtractPrompt(body []byte) string {
 	messages := gjson.GetBytes(body, "messages").Array()
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -146,7 +226,6 @@ func webZhipuExtractPrompt(body []byte) string {
 		if content.Type == gjson.String {
 			return content.String()
 		}
-		// 多模态数组形态：取 text 片段拼接。
 		var b strings.Builder
 		for _, part := range content.Array() {
 			if part.Get("type").String() == "text" {
@@ -158,11 +237,22 @@ func webZhipuExtractPrompt(body []byte) string {
 	return ""
 }
 
-// buildWebZhipuUpstreamRequest 构造网页端出站请求（指纹头对齐方案 §3.5）。
+// webZhipuExtractUserMessages 把 prompt 包为实测 messages 元素形态
+// {role:"user", content:[{type:"text", text}]}。
+func webZhipuExtractUserMessages(body []byte) []webZhipuMessage {
+	return []webZhipuMessage{{
+		Role:    "user",
+		Content: []webZhipuMessageContent{{Type: "text", Text: webZhipuExtractPrompt(body)}},
+	}}
+}
+
+// buildWebZhipuUpstreamRequest 构造网页端出站请求（指纹头按 2026-09-17 登录态抓包对齐）。
 //
-// Cookie 同串携带：登录 Cookie 为整串（通常已含阿里 CDN Cookie acw_tc/cdn_sec_tc）；
-// 如管理员把 CDN Cookie 单独存入 credentials["cdn_cookie"]，则追加到同一 Cookie 串。
-// X-Requested-With: XMLHttpRequest 为实测已知要求。
+// 认证双载体（实测）：Cookie 串（含 chatglm_token）+ Authorization: Bearer
+// <chatglm_token>（从 Cookie 串提取；管理员可用 credentials["chatglm_token"] 覆盖）。
+// 指纹头：app-name / x-app-platform / x-app-version / x-app-fr / x-lang / x-device-id
+// （device_id 从 chatglm_token JWT payload 解出）。官网请求还携带 x-sign/x-nonce/
+// x-timestamp（算法未知），当前不发送——见文件头协议状态声明。
 func (s *OpenAIGatewayService) buildWebZhipuUpstreamRequest(
 	ctx context.Context,
 	account *Account,
@@ -177,17 +267,30 @@ func (s *OpenAIGatewayService) buildWebZhipuUpstreamRequest(
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 
 	origin := webZhipuOriginFromURL(targetURL)
-	req.Header.Set("Content-Type", "application/json")
-	// 对话端点为 SSE（分析文档 §1.2 实测）；Accept 精确形态待登录态实测补全。
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", webZhipuClientUA)
-
 	fullCookie := cookie
 	if cdn := strings.TrimSpace(account.GetCredential("cdn_cookie")); cdn != "" {
 		fullCookie = strings.TrimRight(fullCookie, "; ") + "; " + cdn
+	}
+	token := strings.TrimSpace(account.GetCredential("chatglm_token"))
+	if token == "" {
+		token = webZhipuExtractCookieField(fullCookie, "chatglm_token")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", webZhipuClientUA)
+	req.Header.Set("app-name", "chatglm")
+	req.Header.Set("x-app-platform", "pc")
+	req.Header.Set("x-app-version", "0.0.1")
+	req.Header.Set("x-app-fr", "default")
+	req.Header.Set("x-lang", "zh")
+	if deviceID := webZhipuDeviceIDFromToken(token); deviceID != "" {
+		req.Header.Set("x-device-id", deviceID)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("Cookie", fullCookie)
 
@@ -292,9 +395,7 @@ func webZhipuUpstreamErrorMessage(body []byte) string {
 	return sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
 }
 
-// webZhipuChunkView 通用 SSE JSON 载荷的解析视图。
-// 字段映射集中在此（待登录态实测补全）：只识别 OpenAI 兼容形状与网页端常见的
-// 顶层 content 字段，绝不编造未实测的 Zhipu 专有字段。
+// webZhipuChunkView 单帧解析视图（parts[].content[] 实测结构）。
 type webZhipuChunkView struct {
 	Content      string
 	FinishReason string
@@ -303,8 +404,7 @@ type webZhipuChunkView struct {
 	ErrCode      int64
 }
 
-// parseWebZhipuSSEFrame 解析单行 SSE 帧，返回 data 载荷（标准 SSE 单行 JSON 处理；
-// Zhipu 具体 SSE 形态待登录态实测补全）。
+// parseWebZhipuSSEFrame 解析单行 SSE 帧，返回 data 载荷（标准 SSE 单行 JSON 处理）。
 func parseWebZhipuSSEFrame(line string) ([]byte, bool) {
 	line = strings.TrimSpace(line)
 	if !strings.HasPrefix(line, "data:") {
@@ -338,41 +438,45 @@ func webZhipuBareJSONError(line string) (payload []byte, isError bool) {
 	return nil, false
 }
 
-// mapWebZhipuPayload 把一帧通用 JSON 载荷映射为 webZhipuChunkView。
-//
-// 待登录态实测补全：以下识别顺序按「通用 SSE JSON」由强到弱排列——
-//  1. OpenAI 兼容：choices[0].delta.content（流式增量）；
-//  2. OpenAI 兼容：choices[0].message.content（末帧整段形态）；
-//  3. 网页端常见：顶层 content 字符串字段；
-//  4. usage：OpenAI 命名（prompt_tokens/completion_tokens）或 input_tokens/output_tokens。
+// mapWebZhipuPayload 把一帧 /assistant/stream JSON 载荷映射为 webZhipuChunkView
+// （2026-09-17 登录态实测结构）：
+//   - 顶层 parts[] 每个 part 内 content[] 按 type 分派：text → 正文增量（part 内
+//     多个 text 元素取最后一个非空——实测同 logic_id 的 text 元素为「累积全文」形态，
+//     取最后一个即最新全文，不做拼接防重复）；think → 思考过程，不进正文；
+//     tool_calls → name=finish 时视为收尾标记。
+//   - part.status=finish + 顶层 status=finish → 终止（FinishReason=stop）。
+//   - 实测无 usage 字段 → 计费沿用本地估算兜底（非流式聚合路径）。
 func mapWebZhipuPayload(payload []byte) webZhipuChunkView {
 	v := gjson.ParseBytes(payload)
 	view := webZhipuChunkView{}
 	if id := strings.TrimSpace(v.Get("id").String()); id != "" {
 		view.ResponseID = id
 	}
-	switch {
-	case v.Get("choices.0.delta.content").Exists():
-		view.Content = v.Get("choices.0.delta.content").String()
-	case v.Get("choices.0.message.content").Exists():
-		view.Content = v.Get("choices.0.message.content").String()
-	case v.Get("content").Type == gjson.String:
-		view.Content = v.Get("content").String()
+	parts := v.Get("parts").Array()
+	for _, part := range parts {
+		status := part.Get("status").String()
+		for _, c := range part.Get("content").Array() {
+			switch c.Get("type").String() {
+			case "text":
+				// 累积全文形态：取最后一个非空 text 元素。
+				if t := c.Get("text").String(); t != "" {
+					view.Content = t
+				}
+			case "tool_calls":
+				if c.Get("tool_calls.name").String() == "finish" && view.FinishReason == "" {
+					view.FinishReason = "stop"
+				}
+			}
+		}
+		if status == "finish" && view.FinishReason == "" {
+			view.FinishReason = "stop"
+		}
 	}
-	if fr := v.Get("choices.0.finish_reason"); fr.Exists() && fr.Type == gjson.String {
-		view.FinishReason = fr.String()
+	if v.Get("status").String() == "finish" {
+		view.FinishReason = "stop"
 	}
 	if code := v.Get("code"); code.Exists() && code.Type == gjson.Number {
 		view.ErrCode = code.Int()
-	}
-	if usage := v.Get("usage"); usage.IsObject() {
-		u := &OpenAIUsage{
-			InputTokens:  int(usage.Get("prompt_tokens").Int()) + int(usage.Get("input_tokens").Int()),
-			OutputTokens: int(usage.Get("completion_tokens").Int()) + int(usage.Get("output_tokens").Int()),
-		}
-		if u.InputTokens > 0 || u.OutputTokens > 0 {
-			view.Usage = u
-		}
 	}
 	return view
 }
@@ -517,9 +621,16 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		if view.Content == "" {
 			continue
 		}
+		// 实测 text 元素为累积全文形态（917 → 1714 → 9171714 均为全文），出站只发增量：
+		// delta = 全文去掉已聚合前缀；前缀不匹配时（上游形态变化）回退发全文，宁重不丢。
+		delta := strings.TrimPrefix(view.Content, aggregated.String())
+		aggregated.Reset()
 		aggregated.WriteString(view.Content)
+		if delta == "" {
+			continue
+		}
 		written = true
-		if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
+		if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{"content": delta}, "", nil)); err != nil {
 			return nil, err
 		}
 	}
@@ -540,7 +651,7 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 			ResponseID:       responseID,
 			Model:            originalModel,
 			UpstreamModel:    upstreamModel,
-			UpstreamEndpoint: webZhipuConversationPath,
+			UpstreamEndpoint: webZhipuStreamPath,
 			Stream:           true,
 			ResponseHeaders:  resp.Header.Clone(),
 			Duration:         time.Since(startTime),
@@ -561,7 +672,7 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		ResponseID:       responseID,
 		Model:            originalModel,
 		UpstreamModel:    upstreamModel,
-		UpstreamEndpoint: webZhipuConversationPath,
+		UpstreamEndpoint: webZhipuStreamPath,
 		Stream:           true,
 		ResponseHeaders:  resp.Header.Clone(),
 		Duration:         time.Since(startTime),
@@ -609,7 +720,14 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 		if view.Usage != nil {
 			usage = view.Usage
 		}
-		aggregated.WriteString(view.Content)
+		// 实测 text 元素为累积全文形态（与流式回程同一口径）：前缀延续时只追加增量，
+		// 形态变化（非前缀）时整段替换，避免累积全文被重复拼接。
+		if strings.HasPrefix(view.Content, aggregated.String()) {
+			aggregated.WriteString(strings.TrimPrefix(view.Content, aggregated.String()))
+		} else {
+			aggregated.Reset()
+			aggregated.WriteString(view.Content)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
@@ -656,7 +774,7 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 		Usage:            *finalUsage,
 		Model:            originalModel,
 		UpstreamModel:    upstreamModel,
-		UpstreamEndpoint: webZhipuConversationPath,
+		UpstreamEndpoint: webZhipuStreamPath,
 		Stream:           false,
 		ResponseHeaders:  resp.Header.Clone(),
 		Duration:         time.Since(startTime),

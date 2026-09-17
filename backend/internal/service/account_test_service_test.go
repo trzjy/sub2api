@@ -81,8 +81,9 @@ func okSSEResponse() *http.Response {
 	}
 }
 
-// TestWebZhipuTestRespectsSelectedModel 选中某模型时，出站请求体 model 必须是该模型，
-// 且不得再固定发送 glm-4；测试链与正式转发链一致包含关键请求头。
+// TestWebZhipuTestRespectsSelectedModel 选中某模型时，出站请求体 meta_data.selected_model
+// 必须是该模型（2026-09-17 实测协议：/assistant/stream 无 model 字段，模型选择走
+// selected_model + assistant_id 双载体）；测试链与正式转发链一致包含关键请求头。
 func TestWebZhipuTestRespectsSelectedModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, rec := newWebTestContext()
@@ -95,26 +96,54 @@ func TestWebZhipuTestRespectsSelectedModel(t *testing.T) {
 		Credentials: map[string]any{"cookie": "SECRET_COOKIE=abc"},
 	}
 
-	err := svc.testWebAccountConnection(ctx, account, "glm-4.7-flash", "")
+	err := svc.testWebAccountConnection(ctx, account, "glm-5.3-flash", "")
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastReq, "web-zhipu probe must issue an upstream request")
 
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
-	outboundModel := gjson.GetBytes(body, "model").String()
-	require.Equal(t, "glm-4.7-flash", outboundModel, "selected model must be the outbound model")
-	// 历史 bug：无论选中什么都固定发送 glm-4，必须不再发生。
-	require.NotEqual(t, "glm-4", outboundModel)
+	// 旧协议 model 字段已随 /v1/conversation 端点删除，不得再出现。
+	require.False(t, gjson.GetBytes(body, "model").Exists(), "outbound body must not carry legacy model field")
+	outboundModel := gjson.GetBytes(body, "meta_data.selected_model").String()
+	require.Equal(t, "glm-5.3-flash", outboundModel, "selected model must be the outbound selected_model")
 
-	// 与正式转发链一致的关键请求头。
-	require.Equal(t, "XMLHttpRequest", upstream.lastReq.Header.Get("X-Requested-With"))
+	// 实测协议请求体关键载体：assistant_id（实测 GLM-Flash 助手值）+ chat_type。
+	require.Equal(t, webZhipuDefaultAssistantID, gjson.GetBytes(body, "assistant_id").String())
+	require.Equal(t, "user_chat", gjson.GetBytes(body, "chat_type").String())
+
+	// 与正式转发链一致的关键请求头（2026-09-17 实测认证/指纹头）。
 	require.NotEmpty(t, upstream.lastReq.Header.Get("Origin"))
 	require.NotEmpty(t, upstream.lastReq.Header.Get("Referer"))
 	require.NotEmpty(t, upstream.lastReq.Header.Get("User-Agent"))
+	require.Equal(t, "chatglm", upstream.lastReq.Header.Get("app-name"))
+	require.Equal(t, "pc", upstream.lastReq.Header.Get("X-App-Platform"))
 	require.Contains(t, upstream.lastReq.Header.Get("Cookie"), "SECRET_COOKIE=abc")
 
 	// test_start 显示模型 == 实际出站模型。
-	require.Equal(t, "glm-4.7-flash", parseTestStartModel(rec.Body.String()))
+	require.Equal(t, "glm-5.3-flash", parseTestStartModel(rec.Body.String()))
+}
+
+// TestWebZhipuTestAuthorizationBearerFromCookie Authorization Bearer 双载体：chatglm_token
+// 从 Cookie 串自动提取为 Bearer 凭证（2026-09-17 实测认证形态），x-device-id 从 JWT 解出。
+func TestWebZhipuTestAuthorizationBearerFromCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := newWebTestContext()
+	upstream := &webProbeUpstream{}
+	svc := newWebTestService(upstream, okSSEResponse())
+	// JWT payload: {"device_id":"dev123","typ":"access"}（base64url）
+	jwt := "header.eyJkZXZpY2VfaWQiOiJkZXYxMjMiLCJ0eXAiOiJhY2Nlc3MifQ.sig"
+	account := &Account{
+		ID:          4,
+		Platform:    PlatformWebZhipu,
+		Concurrency: 1,
+		Credentials: map[string]any{"cookie": "chatglm_token=" + jwt + "; acw_tc=x"},
+	}
+
+	err := svc.testWebAccountConnection(ctx, account, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, upstream.lastReq)
+	require.Equal(t, "Bearer "+jwt, upstream.lastReq.Header.Get("Authorization"))
+	require.Equal(t, "dev123", upstream.lastReq.Header.Get("X-Device-Id"))
 }
 
 // TestWebZhipuTestEmptyModelUsesDefaultAndMappingApplies 空 modelID 才回落默认模型；
@@ -130,7 +159,7 @@ func TestWebZhipuTestEmptyModelUsesDefaultAndMappingApplies(t *testing.T) {
 		Concurrency: 1,
 		Credentials: map[string]any{
 			"cookie":        "C=1",
-			"model_mapping": map[string]any{"glm-4.7": "glm-4-flash"},
+			"model_mapping": map[string]any{"glm-5.3-flash": "glm-4-flash"},
 		},
 	}
 
@@ -140,8 +169,8 @@ func TestWebZhipuTestEmptyModelUsesDefaultAndMappingApplies(t *testing.T) {
 
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
-	// 空 modelID → 默认 glm-4.7；命中 model_mapping → 出站 glm-4-flash。
-	require.Equal(t, "glm-4-flash", gjson.GetBytes(body, "model").String())
+	// 空 modelID → 默认 glm-5.3-flash；命中 model_mapping → 出站 glm-4-flash。
+	require.Equal(t, "glm-4-flash", gjson.GetBytes(body, "meta_data.selected_model").String())
 	require.Equal(t, "glm-4-flash", parseTestStartModel(rec.Body.String()))
 }
 
@@ -163,7 +192,7 @@ func TestWebZhipuProbe401DoesNotAssertCredentialAndLeaksNoCookie(t *testing.T) {
 		Credentials: map[string]any{"cookie": "SUPER_SECRET=xyz"},
 	}
 
-	err := svc.testWebAccountConnection(ctx, account, "glm-4.7", "")
+	err := svc.testWebAccountConnection(ctx, account, "", "")
 	require.Error(t, err)
 	body := rec.Body.String()
 	require.Contains(t, body, "web probe rejected by upstream")
@@ -173,11 +202,11 @@ func TestWebZhipuProbe401DoesNotAssertCredentialAndLeaksNoCookie(t *testing.T) {
 }
 
 // TestDefaultWebModelIDsZhipuDefaultIsFirstEntry 确认 web-zhipu 默认模型目录首项是
-// DefaultWebModelIDs 提供的值（空 modelID 回落依据）。
+// DefaultWebModelIDs 提供的值（空 modelID 回落依据；2026-09-17 实测目录）。
 func TestDefaultWebModelIDsZhipuDefaultIsFirstEntry(t *testing.T) {
 	ids := DefaultWebModelIDs(PlatformWebZhipu)
 	require.NotEmpty(t, ids)
-	require.Equal(t, "glm-4.7", ids[0])
+	require.Equal(t, "glm-5.3-flash", ids[0])
 }
 
 // TestWebAccountConnection_DeepSeekProbeNoRegression deepseek 探活不回归：空 modelID 回落

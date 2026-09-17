@@ -39,14 +39,12 @@ func TestDefaultWebModelIDs(t *testing.T) {
 	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformWebKimi))
 	require.Nil(t, DefaultWebModelIDs(PlatformOpenAI))
 
-	// PlatformWebZhipu 默认目录：本测试仅为当前实现的证据，不是模型目录的权威来源。
-	// 目录值待真实登录态脱敏实测验证（官网展示名≠上游内部标识），断言不应过度锁定，
-	// 以免阻止未来取得实测证据后的目录更新。故只校验：非空、包含既有历史依据值、
-	// 且不得回落到 Claude 默认模型（防误回落保护必须保留）。
+	// PlatformWebZhipu 默认目录（2026-09-17 官网登录态抓包实测：请求体
+	// meta_data.selected_model 原值 glm-5.3-flash）。本测试仅为当前实现的证据，
+	// 不是模型目录的权威来源；防误回落到 Claude 默认模型的保护必须保留。
 	zhipu := DefaultWebModelIDs(PlatformWebZhipu)
 	require.NotEmpty(t, zhipu, "web-zhipu 应有非空默认目录，而非回落为 nil")
-	require.Contains(t, zhipu, "glm-4.7", "应包含历史依据值 glm-4.7（待实测验证）")
-	require.Contains(t, zhipu, "glm-4.7-flash", "应包含历史依据值 glm-4.7-flash（待实测验证）")
+	require.Equal(t, []string{"glm-5.3-flash"}, zhipu, "实测目录：glm-5.3-flash")
 	for _, m := range zhipu {
 		require.NotContains(t, []string{"claude-3-5-sonnet", "claude-3-7-sonnet", "claude-sonnet-4"}, m,
 			"web-zhipu 目录不得误回落到 Claude 默认模型")

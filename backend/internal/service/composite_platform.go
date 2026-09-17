@@ -221,11 +221,10 @@ func DefaultWebModelIDs(platform string) []string {
 	case PlatformWebDeepseek:
 		return []string{"deepseek-chat", "deepseek-reasoner"}
 	case PlatformWebZhipu:
-		// 待真实登录态脱敏实测验证：此目录值（glm-4.7 / glm-4.7-flash）仅为方案 §3.3
-		// 映射表的历史依据默认值，未经当前真实登录态实测确认。
-		// 注意：官网展示名（如 GLM-5.3-Flash）≠ 上游内部模型标识；取得脱敏实测证据前
-		// 不得仅凭展示名新增/替换模型值，也不得宣称 GLM-5.3 已支持。
-		return []string{"glm-4.7", "glm-4.7-flash"}
+		// 2026-09-17 官网登录态抓包实测：请求体 meta_data.selected_model 原值
+		// "glm-5.3-flash"（GLM-Flash 极致，assistant_id=webZhipuDefaultAssistantID）。
+		// 旧 glm-4.7/glm-4.7-flash 目录无当前官网依据，已删除。
+		return []string{"glm-5.3-flash"}
 	case PlatformWebKimi:
 		return []string{"kimi-k3"}
 	default:
