@@ -38,6 +38,28 @@ export function isWebProviderPlatform(platform: string): platform is WebProvider
   return (WEB_PROVIDER_PLATFORMS as readonly string[]).includes(platform)
 }
 
+// ===== 上游倍率自动探测（upstream billing probe）平台资格 =====
+// 与后端 IsUpstreamBillingProbeIdentity（backend/internal/service/upstream_billing_probe.go）
+// 保持同一白名单：仅这些平台的 apikey 账号持有可对上游 /v1/sub2api/billing 探测的
+// 静态密钥。web-* 网页平台、other、codebuddy 不在名单内：其创建/编辑请求不得携带
+// upstream_billing_probe_enabled=true，否则后端按契约 fail-closed 返回 400
+// UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。修改名单时必须与后端同步。
+export const UPSTREAM_BILLING_PROBE_PLATFORMS = [
+  'openai',
+  'anthropic',
+  'gemini',
+  'antigravity',
+  'grok',
+  'kimi',
+  'zhipu',
+  'deepseek',
+  'minimax',
+] as const
+
+export function isUpstreamBillingProbeEligible(platform: string, type: string): boolean {
+  return type === 'apikey' && (UPSTREAM_BILLING_PROBE_PLATFORMS as readonly string[]).includes(platform)
+}
+
 /** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 Token 三元组。 */
 export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
   return platform === 'web-deepseek' || platform === 'web-zhipu'

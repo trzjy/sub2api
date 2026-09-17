@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isWebProviderPlatform,
   buildWebProviderCredentials,
+  isUpstreamBillingProbeEligible,
   webProviderUsesCookie,
 } from '../credentialsBuilder'
 
@@ -25,6 +26,60 @@ describe('webProviderUsesCookie', () => {
     expect(webProviderUsesCookie('web-deepseek')).toBe(true)
     expect(webProviderUsesCookie('web-zhipu')).toBe(true)
     expect(webProviderUsesCookie('web-kimi')).toBe(false)
+  })
+})
+
+describe('isUpstreamBillingProbeEligible', () => {
+  // 与后端 IsUpstreamBillingProbeIdentity 共享白名单：仅这些平台的 apikey 账号
+  // 可持有对上游 /v1/sub2api/billing 探测的静态密钥。web-* / other / codebuddy
+  // 不在名单内，创建请求不得携带 upstream_billing_probe_enabled=true。
+  it('returns true for the eligible apikey platforms', () => {
+    for (const platform of [
+      'openai',
+      'anthropic',
+      'gemini',
+      'antigravity',
+      'grok',
+      'kimi',
+      'zhipu',
+      'deepseek',
+      'minimax',
+    ]) {
+      expect(isUpstreamBillingProbeEligible(platform, 'apikey')).toBe(true)
+    }
+  })
+
+  it('returns false for web reverse / other / codebuddy platforms even as apikey', () => {
+    for (const platform of [
+      'web-zhipu',
+      'web-deepseek',
+      'web-kimi',
+      'other',
+      'codebuddy',
+    ]) {
+      expect(isUpstreamBillingProbeEligible(platform, 'apikey')).toBe(false)
+    }
+  })
+
+  it('returns false for the eligible platforms when type is not apikey (e.g. oauth)', () => {
+    for (const platform of [
+      'openai',
+      'anthropic',
+      'gemini',
+      'antigravity',
+      'grok',
+      'kimi',
+      'zhipu',
+      'deepseek',
+      'minimax',
+    ]) {
+      expect(isUpstreamBillingProbeEligible(platform, 'oauth')).toBe(false)
+    }
+  })
+
+  it('returns false for an unknown platform regardless of type', () => {
+    expect(isUpstreamBillingProbeEligible('does-not-exist', 'apikey')).toBe(false)
+    expect(isUpstreamBillingProbeEligible('', 'apikey')).toBe(false)
   })
 })
 

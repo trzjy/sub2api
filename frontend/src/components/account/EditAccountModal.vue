@@ -1708,7 +1708,7 @@
             }}
           </p>
           <div
-            v-if="account?.type === 'apikey'"
+            v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type)"
             class="mt-3 flex items-center justify-between gap-3"
           >
             <div class="min-w-0">
@@ -1975,7 +1975,7 @@
       </div>
 
       <div
-        v-if="account?.type === 'apikey'"
+        v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type)"
         class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div>
@@ -3127,7 +3127,8 @@ import {
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
-  type HeaderOverrideRow
+  type HeaderOverrideRow,
+  isUpstreamBillingProbeEligible
 } from '@/components/account/credentialsBuilder'
 import {
   formatDateTime,
@@ -5040,7 +5041,10 @@ const handleSubmit = async () => {
       updatePayload.load_factor = 0
     }
     updatePayload.auto_pause_on_expired = autoPauseOnExpired.value
-    if (props.account.type === 'apikey') {
+    if (
+      props.account.type === 'apikey' &&
+      isUpstreamBillingProbeEligible(props.account.platform, props.account.type)
+    ) {
       updatePayload.upstream_billing_probe_enabled = upstreamBillingAutoProbeEnabled.value
       updatePayload.upstream_billing_rate_sync_enabled = upstreamBillingRateSyncEnabled.value
       if (upstreamBillingRateSyncEnabled.value) {

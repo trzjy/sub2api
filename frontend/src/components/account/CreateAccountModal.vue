@@ -1606,8 +1606,11 @@
           </div>
         </div>
 
-        <!-- 上游倍率自动探测：全部 API-key 平台可用（所在区块已限定 apikey 类型） -->
+        <!-- 上游倍率自动探测：仅探测资格平台显示（isUpstreamBillingProbeEligible
+             与后端 IsUpstreamBillingProbeIdentity 同名单）；web-*/other/codebuddy
+             等非资格平台隐藏开关且不发送该字段。 -->
         <div
+          v-if="isUpstreamBillingProbeEligible(form.platform, form.type)"
           class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
         >
           <div>
@@ -4165,6 +4168,7 @@ import {
   defaultCNBaseUrl,
   isCNProviderPlatform,
   isHeaderOverrideCapable,
+  isUpstreamBillingProbeEligible,
   isVolcanoBaseURL,
   isWebProviderPlatform,
   validateHeaderOverrideRows,
@@ -5524,7 +5528,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
     })
     return false
   } catch (error: any) {
-    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate'))
+    appStore.showError(error?.message || t('admin.accounts.failedToCreate'))
     return false
   }
 }
@@ -5567,9 +5571,9 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
     emit('created')
     handleClose()
   } catch (error: any) {
-    if (error.response?.status === 409 && error.response?.data?.error === 'mixed_channel_warning' && needsMixedChannelCheck(form.platform)) {
+    if (error?.status === 409 && error?.error === 'mixed_channel_warning' && needsMixedChannelCheck(form.platform)) {
       openMixedChannelDialog({
-        message: error.response?.data?.message,
+        message: error?.message,
         onConfirm: async () => {
           antigravityMixedChannelConfirmed.value = true
           await submitCreateAccount(payload)
@@ -5577,7 +5581,7 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
       })
       return
     }
-    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate'))
+    appStore.showError(error?.message || t('admin.accounts.failedToCreate'))
   } finally {
     submitting.value = false
   }
@@ -6223,7 +6227,7 @@ const handleSubmit = async () => {
     ...form,
     group_ids: form.group_ids,
     extra: withUpstreamRequestIdHeader(extra),
-    upstream_billing_probe_enabled: upstreamBillingAutoProbeEnabled.value,
+    upstream_billing_probe_enabled: isUpstreamBillingProbeEligible(form.platform, form.type) ? upstreamBillingAutoProbeEnabled.value : undefined,
     auto_pause_on_expired: autoPauseOnExpired.value
   })
 }
@@ -6367,9 +6371,10 @@ const createAccountAndFinish = async (
     rate_multiplier: form.rate_multiplier,
     group_ids: form.group_ids,
     expires_at: form.expires_at,
-    // 上游倍率探测对全部 API-key 平台开放（antigravity upstream 走本 helper）；
-    // 非 apikey 类型（bedrock/oauth）不传，后端不动作。
-    upstream_billing_probe_enabled: type === 'apikey' ? upstreamBillingAutoProbeEnabled.value : undefined,
+    // 探测资格按平台白名单门控（isUpstreamBillingProbeEligible，与后端
+    // IsUpstreamBillingProbeIdentity 同名单）；web-*/other/codebuddy 等非资格平台
+    // 不传该字段，否则后端 fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。
+    upstream_billing_probe_enabled: isUpstreamBillingProbeEligible(platform, type) ? upstreamBillingAutoProbeEnabled.value : undefined,
     auto_pause_on_expired: autoPauseOnExpired.value
   })
 }

@@ -6,6 +6,7 @@ const {
   createAccountMock,
   probeUpstreamBillingMock,
   syncUpstreamModelsMock,
+  showErrorMock,
   showWarningMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
@@ -14,6 +15,7 @@ const {
   createAccountMock: vi.fn(),
   probeUpstreamBillingMock: vi.fn(),
   syncUpstreamModelsMock: vi.fn(),
+  showErrorMock: vi.fn(),
   showWarningMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
@@ -22,7 +24,7 @@ const {
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError: showErrorMock,
     showSuccess: vi.fn(),
     showWarning: showWarningMock,
   }),
@@ -1013,5 +1015,67 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
     await flushPromises()
 
     expect(wrapper.find('[data-testid="cn-web-mode"]').exists()).toBe(false)
+  })
+})
+
+// 上游倍率自动探测的"资格门控 + 错误展示"：web 平台建号不得携带探测开关；
+// 后端按契约 fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID 时，
+// 前端应把拦截器摊平的平面错误 message 透传给 showError，而非套用通用失败文案。
+describe('CreateAccountModal upstream billing probe eligibility', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    showErrorMock.mockReset()
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'web-zhipu', type: 'apikey' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+  })
+
+  // (a) 载荷门控：web-zhipu 走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
+  it('omits upstream_billing_probe_enabled from the create payload for web-zhipu web credentials', async () => {
+    const wrapper = mountModal()
+    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
+    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('web-zhipu')
+    expect(payload?.type).toBe('apikey')
+    expect(payload?.credentials?.cookie).toBe('sessionid=test-cookie')
+    // isUpstreamBillingProbeEligible('web-zhipu','apikey') 为 false → 该字段为 undefined（或省略），
+    // 后端契约要求 web 平台建号请求不得携带 upstream_billing_probe_enabled=true。
+    expect(payload?.upstream_billing_probe_enabled).toBeUndefined()
+    expect(showErrorMock).not.toHaveBeenCalled()
+  })
+
+  // (b) 错误展示：create reject 为拦截器摊平的平面对象（无 response 属性），
+  // showError 应收到 message 原文，而非通用 failedToCreate 文案。
+  it('surfaces the flat interceptor error message instead of the generic failedToCreate copy', async () => {
+    createAccountMock.mockRejectedValue({
+      status: 400,
+      code: 400,
+      reason: 'UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID',
+      message: 'account is not an API key account',
+    })
+
+    const wrapper = mountModal()
+    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
+    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    // submitCreateAccount 的 catch 走 error?.message || t('failedToCreate')；
+    // 平面错误含 message，应原样透传。useI18n 在 spec 内为 key->key，故通用文案即字面 i18n key。
+    expect(showErrorMock).toHaveBeenCalledWith('account is not an API key account')
+    expect(showErrorMock).not.toHaveBeenCalledWith('admin.accounts.failedToCreate')
+    // 创建失败，不应派发 created 事件。
+    expect(wrapper.emitted('created')).toBeUndefined()
   })
 })
