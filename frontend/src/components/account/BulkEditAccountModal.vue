@@ -1504,6 +1504,7 @@ import {
   validateHeaderOverrideRows,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
+  isUpstreamBillingProbeEligible,
   type HeaderOverrideRow
 } from '@/components/account/credentialsBuilder'
 import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
@@ -1591,12 +1592,17 @@ const allOpenAIAPIKey = computed(() => {
   )
 })
 
-// 上游倍率自动探测已放宽到全部 API-key 平台：只要求所选类型全为 apikey，
-// 平台不限（sub2api 上游即可应答 /v1/sub2api/billing）。
+// 上游倍率自动探测资格：按所选平台 × 类型的交叉积判定，所有组合均须
+// isUpstreamBillingProbeEligible（与后端 IsUpstreamBillingProbeIdentity 同名单）。
+// 实际选中账号是该组合的子集，交叉积判定偏保守但绝不放行不合资格的账号
+// （如 web-zhipu/web-deepseek/web-kimi 网页平台）。
 const allBillingProbeCapable = computed(() => {
   return (
+    targetSelectedPlatforms.value.length > 0 &&
     targetSelectedTypes.value.length > 0 &&
-    targetSelectedTypes.value.every(t => t === 'apikey')
+    targetSelectedPlatforms.value.every(p =>
+      targetSelectedTypes.value.every(ty => isUpstreamBillingProbeEligible(p, ty))
+    )
   )
 })
 

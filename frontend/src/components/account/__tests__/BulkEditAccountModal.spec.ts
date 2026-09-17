@@ -781,6 +781,36 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
   })
 
+  it.each(['web-zhipu', 'web-deepseek', 'web-kimi'])(
+    '网页平台 %s 即使类型为 apikey 也不显示探测开关且提交不携带 upstream_billing_probe_enabled',
+    async (platform) => {
+      const wrapper = mountModal({
+        selectedPlatforms: [platform],
+        selectedTypes: ['apikey']
+      })
+
+      expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
+
+      // 启用一个其他字段以便表单能提交
+      await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+      await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+      const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
+      expect(payload).not.toHaveProperty('upstream_billing_probe_enabled')
+    }
+  )
+
+  it('网页平台与其他 API-key 平台混合选择时不显示探测开关', () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai', 'web-zhipu'],
+      selectedTypes: ['apikey']
+    })
+
+    expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
+  })
+
   it('筛选结果批量编辑可统一开启上游倍率自动探测', async () => {
     const wrapper = mountModal({
       accountIds: [],

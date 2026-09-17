@@ -278,6 +278,21 @@ describe('UpstreamBillingRateCell', () => {
     expect(wrapper.text()).toBe('-')
   })
 
+  it('hides probe button for web reverse platforms even with apikey type', async () => {
+    // 网页平台（web-zhipu/web-deepseek/web-kimi）不在上游探测白名单内，
+    // 不应显示探测按钮，否则点击后后端会返回 400。
+    for (const platform of ['web-zhipu', 'web-deepseek', 'web-kimi'] as const) {
+      const wrapper = mount(UpstreamBillingRateCell, {
+        props: {
+          account: makeAccount({ platform, type: 'apikey' }),
+          now: Date.now()
+        }
+      })
+      expect(wrapper.findAll('button')).toHaveLength(0)
+      expect(wrapper.text()).toBe('-')
+    }
+  })
+
   it('fails neutral for malformed data and timestamps', async () => {
     const malformedAccount = (
       dataOverrides: Partial<typeof billingData> = {},
