@@ -4,17 +4,21 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -27,8 +31,10 @@ import (
 //     双载体 + app-name/x-app-* /x-device-id 指纹头；响应 SSE 为 parts[].content[]
 //     结构，按 content.type 分派（text=正文增量 / think=思考 / tool_calls=工具调用），
 //     part 级 status=finish + 顶层 status=finish 终止，无 usage 字段。
-//   - 官网请求还携带 x-sign/x-nonce/x-timestamp 签名三件套（算法未知）；当前实现
-//     不发送，若真实验收被上游以签名类错误拒绝再回补。
+//   - 官网请求校验 x-sign/x-nonce/x-timestamp 签名三件套：算法来自 2026-09-17 官方
+//     main.js 逆向 + 真实抓包验证（md5 与官方 x-sign 完全一致），出站由
+//     buildWebZhipuUpstreamRequest 按 webZhipuComputeSign 补齐；不带 → HTTP 400
+//     {"status":40011}，带错 → 40012。
 //
 // 安全红线：凭证（cookie/chatglm_token）不得出现在日志或错误响应中——上游错误体在
 // 任何透传前先经 redactWebZhipuUpstreamErrorBody 脱敏。
@@ -45,6 +51,11 @@ const (
 	// （2026-09-17 登录态抓包实测：meta_data.selected_model=glm-5.3-flash 时使用）。
 	// 管理员可用 credentials["assistant_id"] 覆盖。
 	webZhipuDefaultAssistantID = "65940acff94777010aa6b796"
+
+	// webZhipuSignSalt 签名盐值（x-sign 计算输入末尾段）：来源 2026-09-17 官方 main.js
+	// 逆向 + 真实抓包验证（md5 与官方 x-sign 完全一致）。盐值本身为公开常量，严禁将任何
+	// Cookie / Token / 登录态内容写入本常量或周边注释。
+	webZhipuSignSalt = "8a1317a7468aa3ad86e997d08f3f31cb"
 )
 
 // webZhipuExtractCookieField 从整串 Cookie 中提取指定字段的值。
@@ -108,6 +119,12 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	upstreamModel := account.GetMappedModel(originalModel)
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
+	}
+	// 未知模型失败关闭：仅允许默认目录内模型（DefaultWebModelIDs(PlatformWebZhipu)），
+	// 与 "web-zhipu requires at least one user message" 同风格，在 handleErrorResponse
+	// 之前直接 return error，不发出任何上游请求。
+	if err := ValidateWebZhipuModel(upstreamModel); err != nil {
+		return nil, err
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
 
@@ -189,11 +206,20 @@ type webZhipuMessageContent struct {
 	Text string `json:"text"`
 }
 
-func buildWebZhipuRequestBody(messages []webZhipuMessage, model string, account *Account) []byte {
+// webZhipuResolveAssistantID 是 assistant_id 的单一事实来源（credentials["assistant_id"]
+// 凭证覆盖 > 默认常量）。默认值 webZhipuDefaultAssistantID 是 2026-09-17 登录态抓包实测的
+// 公共 GLM-Flash 助手 ID，管理员可用 credentials["assistant_id"] 按账号覆盖。动态同步
+// 目录（从官网 available_models 拉取）待有官网权威证据后再做。
+func webZhipuResolveAssistantID(account *Account) string {
 	assistantID := strings.TrimSpace(account.GetCredential("assistant_id"))
 	if assistantID == "" {
-		assistantID = webZhipuDefaultAssistantID
+		return webZhipuDefaultAssistantID
 	}
+	return assistantID
+}
+
+func buildWebZhipuRequestBody(messages []webZhipuMessage, model string, account *Account) []byte {
+	assistantID := webZhipuResolveAssistantID(account)
 	req := webZhipuUpstreamRequest{
 		AssistantID:    assistantID,
 		ConversationID: "",
@@ -251,8 +277,9 @@ func webZhipuExtractUserMessages(body []byte) []webZhipuMessage {
 // 认证双载体（实测）：Cookie 串（含 chatglm_token）+ Authorization: Bearer
 // <chatglm_token>（从 Cookie 串提取；管理员可用 credentials["chatglm_token"] 覆盖）。
 // 指纹头：app-name / x-app-platform / x-app-version / x-app-fr / x-lang / x-device-id
-// （device_id 从 chatglm_token JWT payload 解出）。官网请求还携带 x-sign/x-nonce/
-// x-timestamp（算法未知），当前不发送——见文件头协议状态声明。
+// （device_id 从 chatglm_token JWT payload 解出）。官网请求还校验 x-sign/x-nonce/
+// x-timestamp 签名三件套（算法来自 2026-09-17 官方 main.js 逆向 + 抓包验证，见本文件
+// webZhipuComputeSign），出站按算法补齐——不带/带错均被上游以签名类错误拒绝。
 func (s *OpenAIGatewayService) buildWebZhipuUpstreamRequest(
 	ctx context.Context,
 	account *Account,
@@ -294,9 +321,64 @@ func (s *OpenAIGatewayService) buildWebZhipuUpstreamRequest(
 	}
 	req.Header.Set("Cookie", fullCookie)
 
+	// 签名三件套（2026-09-17 官方 main.js 逆向 + 抓包验证）：x-timestamp / x-nonce /
+	// x-sign，算法见 webZhipuComputeSign。每条出站请求即时生成，盐值取 webZhipuSignSalt。
+	// 三个头必须由同一次 webZhipuComputeSign 生成，避免 nonce 不一致导致 x-sign 校验失败。
+	nowMs := time.Now().UnixMilli()
+	xTimestamp, xNonce, xSign := webZhipuComputeSign(nowMs)
+	req.Header.Set("X-Timestamp", xTimestamp)
+	req.Header.Set("X-Nonce", xNonce)
+	req.Header.Set("X-Sign", xSign)
+
+	// 每个请求新生成 32 hex 随机 X-Request-Id（与官方形态一致）。
+	req.Header.Set("X-Request-Id", webZhipuUUIDHex())
+
 	// 账号级请求头覆写最后应用，使管理员配置优先（与 CodeBuddy 出站口径一致）。
+	// 签名头先于本步设置，故管理员覆写仍可覆盖签名头（不被破坏）。
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
+}
+
+// webZhipuSignTimestamp 官方 x-timestamp 变换（2026-09-17 main.js 逆向 + 抓包验证）：
+// now 为 13 位毫秒串；digits 为其各位数字；t = sum(digits) - digits[len-2]；
+// 返回 now[0:len-2] + str(t%10) + now[len-1]。纯函数，便于单测固定输入断言。
+func webZhipuSignTimestamp(nowMs int64) string {
+	now := strconv.FormatInt(nowMs, 10)
+	if len(now) < 3 {
+		return now
+	}
+	digits := make([]int, len(now))
+	sum := 0
+	for i, c := range now {
+		d := int(c - '0')
+		digits[i] = d
+		sum += d
+	}
+	t := sum - digits[len(digits)-2]
+	return now[:len(now)-2] + strconv.Itoa(t%10) + string(now[len(now)-1])
+}
+
+// webZhipuUUIDHex 返回 UUID v4 去连字符的 32 hex 串（与官方 x-nonce / x-request-id 形态一致）。
+func webZhipuUUIDHex() string {
+	return strings.ReplaceAll(uuid.NewString(), "-", "")
+}
+
+// webZhipuSignFrom 由已确定的 x-timestamp 与 x-nonce 计算 x-sign（纯函数，便于单测）。
+// x-sign = md5( xTimestamp + "-" + xNonce + "-" + webZhipuSignSalt )，32 位小写 hex。
+func webZhipuSignFrom(xTimestamp, xNonce string) string {
+	raw := xTimestamp + "-" + xNonce + "-" + webZhipuSignSalt
+	sum := md5.Sum([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+// webZhipuComputeSign 生成签名三件套（x-timestamp / x-nonce / x-sign）。x-nonce 取
+// UUID v4 去连字符的 32 hex（github.com/google/uuid）；x-sign 经 webZhipuSignFrom 计算。
+// 纯函数（nowMs 为入参），便于单测。
+func webZhipuComputeSign(nowMs int64) (xTimestamp, xNonce, xSign string) {
+	xTimestamp = webZhipuSignTimestamp(nowMs)
+	xNonce = webZhipuUUIDHex()
+	xSign = webZhipuSignFrom(xTimestamp, xNonce)
+	return
 }
 
 func webZhipuOriginFromURL(targetURL string) string {

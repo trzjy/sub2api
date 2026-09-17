@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,18 @@ func TestForwardWebZhipu_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	require.Equal(t, webZhipuDefaultAssistantID, gjson.GetBytes(body, "assistant_id").String())
 	require.Equal(t, "user_chat", gjson.GetBytes(body, "chat_type").String())
 
+	// 签名三件套 + X-Request-Id（2026-09-17 官方 main.js 逆向 + 抓包验证）：
+	// 13 位数字时间戳 / 32 hex nonce / 32 hex sign / 32 hex request-id。
+	xTimestamp := chatReq.Header.Get("X-Timestamp")
+	require.Regexp(t, regexp.MustCompile(`^\d{13}$`), xTimestamp, "X-Timestamp must be 13 digits")
+	xNonce := chatReq.Header.Get("X-Nonce")
+	require.Regexp(t, regexp.MustCompile(`^[0-9a-f]{32}$`), xNonce, "X-Nonce must be 32 lower-hex")
+	xSign := chatReq.Header.Get("X-Sign")
+	require.Regexp(t, regexp.MustCompile(`^[0-9a-f]{32}$`), xSign, "X-Sign must be 32 lower-hex")
+	require.Regexp(t, regexp.MustCompile(`^[0-9a-f]{32}$`), chatReq.Header.Get("X-Request-Id"), "X-Request-Id must be 32 lower-hex")
+	// 自洽性：X-Sign 必须能由出站 X-Timestamp + X-Nonce 重算得到。
+	require.Equal(t, webZhipuSignFrom(xTimestamp, xNonce), xSign, "X-Sign must match x-timestamp + x-nonce")
+
 	// 回程聚合：SSE → 单条 chat.completion JSON，模型回填原始请求模型。
 	// 实测响应无 usage 字段 → 本地估算兜底（D2）。
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -248,7 +261,7 @@ func TestForwardWebZhipu_AuthErrorCoolsAccount(t *testing.T) {
 		{
 			StatusCode: http.StatusUnauthorized,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"message":"You need to be authenticated `+secretCookie+`"}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"message":"You need to be authenticated ` + secretCookie + `"}`)),
 		},
 	}}
 	recorder, err := runForwardWebZhipu(t, account, webZhipuInboundBody("glm-5.3-flash"), upstream, rlSvc)
@@ -285,4 +298,89 @@ func TestForwardWebZhipu_UnitClassify(t *testing.T) {
 	require.Equal(t, webZhipuErrKindRateLimited, classifyWebZhipuUpstreamError(429, nil))
 	require.Equal(t, webZhipuErrKindOther, classifyWebZhipuUpstreamError(500, []byte(`{"message":"boom"}`)))
 	require.Equal(t, webZhipuErrKindOther, classifyWebZhipuUpstreamError(200, []byte(`{"message":"ok"}`)))
+}
+
+// runForwardWebZhipuWithModel 与 runForwardWebZhipu 同构，但允许指定入站原始模型名
+// （用于未知模型失败关闭测试）。
+func runForwardWebZhipuWithModel(
+	t *testing.T,
+	account *Account,
+	body []byte,
+	upstream *httpUpstreamRecorder,
+	rlSvc *RateLimitService,
+	originalModel string,
+) (*httptest.ResponseRecorder, error) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+		httpUpstream:     upstream,
+		rateLimitService: rlSvc,
+	}
+
+	_, err := svc.forwardWebZhipu(context.Background(), c, account, body, originalModel, false, time.Now(), webResponseModeChat)
+	return recorder, err
+}
+
+// TestValidateWebZhipuModel 覆盖 ValidateWebZhipuModel：默认目录内模型通过；空串、
+// glm-4、glm-4.7、未知值必须报错。
+func TestValidateWebZhipuModel(t *testing.T) {
+	// 允许：默认目录内的实测模型。
+	require.NoError(t, ValidateWebZhipuModel("glm-5.3-flash"))
+	// 拒绝：空串 / 已知旧模型 / 未知值（均不在当前默认目录内）。
+	for _, m := range []string{"", "glm-4", "glm-4.7", "glm-999"} {
+		require.Error(t, ValidateWebZhipuModel(m), "model %q must be rejected", m)
+	}
+	// 错误信息仅含模型名，不泄露敏感信息。
+	require.Contains(t, ValidateWebZhipuModel("glm-999").Error(), "glm-999")
+	require.Contains(t, ValidateWebZhipuModel("").Error(), "empty")
+}
+
+// TestForwardWebZhipu_UnknownModelFailsClosed 未知模型入站必须失败关闭，且不发出任何
+// 上游请求（与 "web-zhipu requires at least one user message" 同风格，直接 return error）。
+func TestForwardWebZhipu_UnknownModelFailsClosed(t *testing.T) {
+	account := webZhipuTestAccount(9103, nil)
+	upstream := &httpUpstreamRecorder{}
+
+	_, err := runForwardWebZhipuWithModel(t, account, webZhipuInboundBody("glm-999"), upstream, &RateLimitService{}, "glm-999")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "glm-999")
+	require.Len(t, upstream.requests, 0, "no upstream request may be made for an unsupported model")
+}
+
+// TestWebZhipuResolveAssistantID 覆盖 assistant_id 单一事实来源：凭证覆盖生效；
+// 无凭证回落默认公共助手 ID。
+func TestWebZhipuResolveAssistantID(t *testing.T) {
+	withOverride := webZhipuTestAccount(9101, map[string]any{"assistant_id": "custom-assistant-123"})
+	require.Equal(t, "custom-assistant-123", webZhipuResolveAssistantID(withOverride))
+
+	noCred := webZhipuTestAccount(9102, nil)
+	require.Equal(t, webZhipuDefaultAssistantID, webZhipuResolveAssistantID(noCred))
+}
+
+// TestWebZhipuSignTimestamp 覆盖官方 x-timestamp 变换（2026-09-17 main.js 逆向 + 抓包验证）：
+//   - 黄金用例：输入 "1789648837735"（真实抓包实测 now）输出必须仍为 "1789648837735"；
+//   - 非回文用例：输入 1700000000001，按公式手工算得 digits sum=9、digits[len-2]=0、
+//     t=9、t%10=9，输出 "1700000000091"。
+func TestWebZhipuSignTimestamp(t *testing.T) {
+	require.Equal(t, "1789648837735", webZhipuSignTimestamp(1789648837735),
+		"golden captured now must be invariant under the transform")
+	require.Equal(t, "1700000000091", webZhipuSignTimestamp(1700000000001),
+		"non-palindrome case hand-computed from the formula")
+}
+
+// TestWebZhipuComputeSign 覆盖 x-sign 生成黄金用例（2026-09-17 真实抓包验证值）：
+// 输入 ts="1789648837735"、nonce="68c8bc6d488c4869961703710a72eb33" 时
+// x-sign 必须是 "3a19f494b85cd19deb788467b154e76e"。
+func TestWebZhipuComputeSign(t *testing.T) {
+	got := webZhipuSignFrom("1789648837735", "68c8bc6d488c4869961703710a72eb33")
+	require.Equal(t, "3a19f494b85cd19deb788467b154e76e", got,
+		"x-sign must match the 2026-09-17 captured value")
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -230,4 +231,20 @@ func DefaultWebModelIDs(platform string) []string {
 	default:
 		return nil
 	}
+}
+
+// ValidateWebZhipuModel 校验 web-zhipu 平台入站模型是否在默认目录内；model 为空或不在
+// DefaultWebModelIDs(PlatformWebZhipu) 内时返回非 nil error，使未知模型失败关闭（避免误
+// 回落到未实测模型）。错误信息仅含模型名，不泄露任何凭证或其他敏感信息。
+func ValidateWebZhipuModel(model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("web-zhipu model is required but was empty")
+	}
+	for _, allowed := range DefaultWebModelIDs(PlatformWebZhipu) {
+		if model == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("web-zhipu model %q is not supported", model)
 }

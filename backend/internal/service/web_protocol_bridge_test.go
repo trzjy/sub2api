@@ -72,7 +72,8 @@ func webBridgeModel(platform string) string {
 	case PlatformWebDeepseek:
 		return "deepseek-chat"
 	case PlatformWebZhipu:
-		return "glm-4"
+		// 2026-09-17 实测目录：glm-5.3-flash（ValidateWebZhipuModel 对目录外模型失败关闭）。
+		return "glm-5.3-flash"
 	case PlatformWebKimi:
 		return "kimi-k3"
 	}
