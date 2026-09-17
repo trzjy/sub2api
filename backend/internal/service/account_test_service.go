@@ -427,12 +427,29 @@ func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Cont
 	return s.testOpenAIChatCompletionsConnection(c, account, testModelID, prompt, normalizedBaseURL, authToken)
 }
 
+// resolveWebTestModel 把账号测试选中的 modelID 归一到实际出站模型：
+//  1. 优先使用非空 modelID；
+//  2. 应用账号现有 model_mapping（复用 GetMappedModel，不另写映射逻辑）；
+//  3. 仅当 modelID 为空时，回落 DefaultWebModelIDs 的平台默认值（公开名口径，
+//     与 /models 列表和 model_mapping 键一致；出站归一由各平台转发链同款函数完成）。
+// 返回值即最终出站模型名（与 test_start 事件、请求体 model 字段一致）。
+func resolveWebTestModel(account *Account, modelID, platform string) string {
+	candidate := strings.TrimSpace(modelID)
+	if candidate == "" {
+		if ids := DefaultWebModelIDs(platform); len(ids) > 0 {
+			candidate = ids[0]
+		}
+	}
+	return account.GetMappedModel(candidate)
+}
+
 // testWebAccountConnection 对 web 逆向平台账号做轻量官方探活。
 //
 // 与 Claude / OpenAI API Key 走不同协议，web 平台登录态载体是整串 Cookie
 // （web-deepseek / web-zhipu）或 Kimi access_token（web-kimi）。探活只构造一个
 // 最小出站请求打到达对应官方对话端点，按 HTTP 状态码判定：2xx → 登录态有效；
-// 401/403 → 凭证失效；其余 → 请求失败。错误文案只含状态码，绝不回显凭证值。
+// 401/403 → 上游拒绝（历史 401 不足为凭：测试链此前不完整，不能断言凭证失效）；
+// 其余 → 请求失败。错误文案只含平台/端点/状态码，绝不回显凭证值。
 func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 
@@ -446,11 +463,9 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	var (
-		chatPath   string
-		authHeader string
-		authValue  string
-		testModel  string
-		reqBody    []byte
+		chatPath string
+		testModel string
+		req      *http.Request
 	)
 	switch account.Platform {
 	case PlatformWebDeepseek:
@@ -458,7 +473,7 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 			baseURL = webDeepseekDefaultBaseURL
 		}
 		chatPath = webDeepseekChatCompletionPath
-		testModel = "deepseek-chat"
+		testModel = resolveWebTestModel(account, modelID, PlatformWebDeepseek)
 		cookie := strings.TrimSpace(account.GetCredential("cookie"))
 		if cookie == "" {
 			return s.sendErrorAndEnd(c, "web-deepseek account is missing login cookie credential")
@@ -466,39 +481,68 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		if waf := strings.TrimSpace(account.GetCredential("waf_cookie")); waf != "" {
 			cookie = strings.TrimRight(cookie, "; ") + "; " + waf
 		}
-		authHeader, authValue = "Cookie", cookie
-		built, err := buildWebDeepseekRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), account, "deepseek_chat", false)
+		// 复用原生 model_class 归一（与正式转发 forwardWebDeepseek 同口径），保持行为兼容。
+		modelClass, thinkingEnabled := webDeepseekModelClass(testModel)
+		built, err := buildWebDeepseekRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), account, modelClass, thinkingEnabled)
 		if err != nil {
 			return s.sendErrorAndEnd(c, "Failed to build web-deepseek probe request")
 		}
-		reqBody = built
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+webDeepseekChatCompletionPath, bytes.NewReader(built))
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to create web-deepseek probe request")
+		}
+		r = r.WithContext(WithHTTPUpstreamProfile(r.Context(), HTTPUpstreamProfileOpenAI))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Accept", "text/event-stream")
+		r.Header.Set("Cookie", cookie)
+		// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
+		account.ApplyHeaderOverrides(r.Header)
+		req = r
 	case PlatformWebZhipu:
 		if baseURL == "" {
 			baseURL = DefaultWebZhipuBaseURL
 		}
 		chatPath = webZhipuConversationPath
-		testModel = "glm-4"
+		// 优先非空 modelID → 现有 model_mapping（GetMappedModel）→ 默认 DefaultWebModelIDs。
+		testModel = resolveWebTestModel(account, modelID, PlatformWebZhipu)
 		cookie := strings.TrimSpace(account.GetCredential("cookie"))
 		if cookie == "" {
 			return s.sendErrorAndEnd(c, "web-zhipu account is missing login cookie credential")
 		}
-		if cdn := strings.TrimSpace(account.GetCredential("cdn_cookie")); cdn != "" {
-			cookie = strings.TrimRight(cookie, "; ") + "; " + cdn
+		// 复用正式转发链构造函数：完整指纹头（Content-Type/Accept/X-Requested-With/
+		// Origin/Referer/User-Agent/Cookie(+cdn_cookie)/账号头覆写），禁止第二套 GLM 头逻辑。
+		reqBody := buildWebZhipuRequestBody("hi", testModel, account)
+		if s.openaiGatewayService == nil {
+			return s.sendErrorAndEnd(c, "openai gateway service is unavailable for web-zhipu probe")
 		}
-		authHeader, authValue = "Cookie", cookie
-		reqBody = buildWebZhipuRequestBody("hi", "glm-4", account)
+		r, err := s.openaiGatewayService.buildWebZhipuUpstreamRequest(ctx, account, baseURL+webZhipuConversationPath, cookie, reqBody)
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to build web-zhipu probe request")
+		}
+		req = r
 	case PlatformWebKimi:
 		if baseURL == "" {
 			baseURL = webKimiDefaultBaseURL
 		}
 		chatPath = webKimiChatPath
-		testModel = "kimi-k3"
+		testModel = resolveWebTestModel(account, modelID, PlatformWebKimi)
 		accessToken := strings.TrimSpace(account.GetCredential("access_token"))
 		if accessToken == "" {
 			return s.sendErrorAndEnd(c, "web-kimi account is missing access_token credential")
 		}
-		authHeader, authValue = "Authorization", "Bearer "+accessToken
-		reqBody = buildWebKimiRequestBody("hi", "k3", account)
+		// 出站归一与正式转发同款（forwardWebKimi 同口径）：公开名 kimi-k3 → k3。
+		// test_start 事件保留公开名，出站请求体用归一后内部名。
+		reqBody := buildWebKimiRequestBody("hi", webKimiModelName(testModel), account)
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+webKimiChatPath, bytes.NewReader(reqBody))
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to create web-kimi probe request")
+		}
+		r = r.WithContext(WithHTTPUpstreamProfile(r.Context(), HTTPUpstreamProfileOpenAI))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Accept", "text/event-stream")
+		r.Header.Set("Authorization", "Bearer "+accessToken)
+		account.ApplyHeaderOverrides(r.Header)
+		req = r
 	default:
 		return s.testClaudeAccountConnection(c, account, modelID)
 	}
@@ -513,17 +557,9 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModel})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 " + chatPath + " 探活 web 登录态"})
 
-	apiURL := baseURL + chatPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return s.sendErrorAndEnd(c, "Failed to create web probe request")
+	if req == nil {
+		return s.sendErrorAndEnd(c, "web probe request was not constructed")
 	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set(authHeader, authValue)
-	// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
-	account.ApplyHeaderOverrides(req.Header)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -542,7 +578,12 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 		return nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		// 凭证失效：只回显状态码，绝不回显 Cookie / access_token。
+		// web-zhipu 测试链此前不完整（缺指纹头），历史 401 不足为凭，不得直接断言凭证失效；
+		// 只回显平台、端点与状态码，绝不回显 Cookie / access_token。
+		// deepseek/kimi 探活头已完整（回归红线 #5），保留既有「凭证失效」判定与文案。
+		if account.Platform == PlatformWebZhipu {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("web probe rejected by upstream (%s %s HTTP %d)", account.Platform, chatPath, resp.StatusCode))
+		}
 		return s.sendErrorAndEnd(c, fmt.Sprintf("web login credential is invalid (HTTP %d)", resp.StatusCode))
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned HTTP %d", chatPath, resp.StatusCode))
