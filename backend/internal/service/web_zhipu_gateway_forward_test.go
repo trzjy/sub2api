@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,6 +18,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+// makeFakeWebZhipuJWT 手工拼一个假 chatglm_token JWT（header.payload.sig），仅用于测试。
+// 不携带任何真实凭证，payload 按入参编码；sig 段为占位串。
+func makeFakeWebZhipuJWT(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	body := base64.RawURLEncoding.EncodeToString(raw)
+	return header + "." + body + ".fakesig"
+}
 
 // webZhipuTestAccount 构造 web-zhipu 转发测试账号：整串 Cookie 落 credentials
 // （含阿里 CDN Cookie，与线上同串携带口径一致），base_url 覆盖默认域名便于断言出站目标。
@@ -383,4 +395,43 @@ func TestWebZhipuComputeSign(t *testing.T) {
 	got := webZhipuSignFrom("1789648837735", "68c8bc6d488c4869961703710a72eb33")
 	require.Equal(t, "3a19f494b85cd19deb788467b154e76e", got,
 		"x-sign must match the 2026-09-17 captured value")
+}
+
+// TestWebZhipuTokenIsGuest 覆盖游客态判定纯函数：
+//   - 游客 JWT（payload is_guest=true）→ true；
+//   - 真实登录态形态（无 is_guest 字段）→ false（不得误伤）；
+//   - is_guest=false → false；
+//   - 乱串 → false；空串 → false。
+//
+// 全部用手工拼的假 JWT，不携带任何真实凭证。
+func TestWebZhipuTokenIsGuest(t *testing.T) {
+	guest := makeFakeWebZhipuJWT(t, map[string]any{"is_guest": true, "device_id": "dev-guest"})
+	real := makeFakeWebZhipuJWT(t, map[string]any{"device_id": "dev-real"})
+	explicitFalse := makeFakeWebZhipuJWT(t, map[string]any{"is_guest": false, "device_id": "dev-real"})
+
+	require.True(t, webZhipuTokenIsGuest(guest), "is_guest=true must be detected as guest")
+	require.False(t, webZhipuTokenIsGuest(real), "real login token without is_guest must NOT be treated as guest")
+	require.False(t, webZhipuTokenIsGuest(explicitFalse), "is_guest=false must NOT be treated as guest")
+	require.False(t, webZhipuTokenIsGuest("garbage-not-a-jwt"), "garbage token must NOT be treated as guest")
+	require.False(t, webZhipuTokenIsGuest(""), "empty token must NOT be treated as guest")
+}
+
+// TestForwardWebZhipu_GuestTokenFailsClosed 游客态 token（is_guest=true）必须在发出任何
+// 上游请求前失败关闭：mock 上游 recorder 断言 0 次上游请求；错误信息含 "guest"；错误信息
+// 不得含任何 token 内容（安全红线）。
+func TestForwardWebZhipu_GuestTokenFailsClosed(t *testing.T) {
+	guestJWT := makeFakeWebZhipuJWT(t, map[string]any{"is_guest": true, "device_id": "guest-device-id"})
+	account := webZhipuTestAccount(9110, map[string]any{
+		"cookie": "chatglm_token=" + guestJWT + "; acw_tc=cdn-xyz",
+	})
+	upstream := &httpUpstreamRecorder{}
+
+	_, err := runForwardWebZhipu(t, account, webZhipuInboundBody("glm-5.3-flash"), upstream, &RateLimitService{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "guest", "guest failure must be diagnosable from the message")
+	require.Len(t, upstream.requests, 0, "guest token must not issue any upstream request")
+
+	// 安全红线：错误信息不得含 token / device_id 等凭证内容。
+	require.NotContains(t, err.Error(), guestJWT, "error message must not leak the token")
+	require.NotContains(t, err.Error(), "guest-device-id", "error message must not leak token payload")
 }

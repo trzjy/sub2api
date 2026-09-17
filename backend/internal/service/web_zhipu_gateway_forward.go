@@ -83,6 +83,50 @@ func webZhipuDeviceIDFromToken(token string) string {
 	return strings.TrimSpace(gjson.GetBytes(payload, "device_id").String())
 }
 
+// webZhipuTokenIsGuest 解析 chatglm_token JWT payload，判定是否为游客登录态
+// （is_guest=true）。2026-09-17 生产消融实验证实：游客态 token 出站必被上游以
+// HTTP 400 {"status":40011} 拒绝，属登录态问题而非凭证失效，需在上游请求发出前
+// 失败关闭（详见 forwardWebZhipu 的游客态防线）。
+//
+// 解析失败 / is_guest 字段缺失 / token 空 均返回 false：真实登录态 token 无该字段
+// （或 false），不得误伤；Cookie 缺失由 forwardWebZhipu 的独立失败关闭处理，本函数
+// 不重复报错。参考 webZhipuDeviceIDFromToken 的 base64.RawURLEncoding 解析口径。
+func webZhipuTokenIsGuest(token string) bool {
+	if strings.TrimSpace(token) == "" {
+		return false
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	// is_guest 缺失或非布尔时 gjson.Bool() 返回 false（真实登录态不误伤）。
+	return gjson.GetBytes(payload, "is_guest").Bool()
+}
+
+// webZhipuResolveChatGLMToken 从账号凭证解析用于出站鉴权的 chatglm_token：优先
+// credentials["chatglm_token"] 显式 Bearer，否则从整串 Cookie 提取。取值口径与
+// buildWebZhipuUpstreamRequest 完全一致（含 cdn_cookie 合并），便于登录态判定与正式
+// 转发链共用同一 token 来源，避免口径漂移。仅用于登录态判定，不对外脱敏传递。
+func webZhipuResolveChatGLMToken(account *Account) string {
+	token := strings.TrimSpace(account.GetCredential("chatglm_token"))
+	if token != "" {
+		return token
+	}
+	cookie := strings.TrimSpace(account.GetCredential("cookie"))
+	if cookie == "" {
+		return ""
+	}
+	fullCookie := cookie
+	if cdn := strings.TrimSpace(account.GetCredential("cdn_cookie")); cdn != "" {
+		fullCookie = strings.TrimRight(fullCookie, "; ") + "; " + cdn
+	}
+	return webZhipuExtractCookieField(fullCookie, "chatglm_token")
+}
+
 // forwardWebZhipu 是 Zhipu 网页逆向平台（web-zhipu）的转发入口，函数链模式与
 // forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → 网页端
 // 请求（SSE）→ 回程通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService
@@ -127,6 +171,15 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 		return nil, err
 	}
 	SetOpsUpstreamModel(c, upstreamModel)
+
+	// 登录态防线（2026-09-17 生产消融实验证实）：chatglm_token 为游客态
+	// （is_guest=true）时，上游 /assistant/stream 必返 HTTP 400 {"status":40011}，
+	// 这是注定失败的请求——属登录态问题而非凭证失效。故在发出任何上游请求前失败关闭，
+	// 且不调用 SetError/SetRateLimited 冷却账号（不误判为凭证失效）。错误信息不得含
+	// 任何 token/cookie 内容（安全红线）。
+	if webZhipuTokenIsGuest(webZhipuResolveChatGLMToken(account)) {
+		return nil, errors.New("web-zhipu login state is a guest token, please re-capture login cookie")
+	}
 
 	prompt := webZhipuExtractPrompt(body)
 	if strings.TrimSpace(prompt) == "" {

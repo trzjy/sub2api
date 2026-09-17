@@ -12,6 +12,8 @@ package service
 //   - deepseek / kimi 探活不回归。
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +25,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+// makeFakeWebZhipuJWTProbe 手工拼假 chatglm_token JWT（仅测试用，不携带真实凭证）。
+func makeFakeWebZhipuJWTProbe(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	return header + "." + base64.RawURLEncoding.EncodeToString(raw) + ".fakesig"
+}
 
 // webProbeUpstream 记录唯一出站请求并回放注入响应（不发起真实网络）。
 type webProbeUpstream struct {
@@ -302,4 +313,29 @@ func TestWebAccountConnection_KimiRespectsModelID(t *testing.T) {
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
 	require.Equal(t, "k3-agent-ultra", gjson.GetBytes(body, "options.model").String())
+}
+
+// TestWebZhipuProbeGuestTokenFailsClosed 探活与正式转发共用同一登录态判定：游客态 token
+// （is_guest=true）必须在发出任何上游请求前失败关闭，错误文案含 "guest"，且不得泄露 JWT
+// 内容（安全红线）。upstream.lastReq 必须保持 nil（0 次上游请求）。
+func TestWebZhipuProbeGuestTokenFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, rec := newWebTestContext()
+	upstream := &webProbeUpstream{}
+	svc := newWebTestService(upstream, okSSEResponse())
+	guestJWT := makeFakeWebZhipuJWTProbe(t, map[string]any{"is_guest": true, "device_id": "probe-guest-id"})
+	account := &Account{
+		ID:          5,
+		Platform:    PlatformWebZhipu,
+		Concurrency: 1,
+		Credentials: map[string]any{"cookie": "chatglm_token=" + guestJWT + "; acw_tc=x"},
+	}
+
+	err := svc.testWebAccountConnection(ctx, account, "", "")
+	require.Error(t, err)
+	require.Nil(t, upstream.lastReq, "guest token probe must not issue any upstream request")
+	body := rec.Body.String()
+	require.Contains(t, body, "guest", "guest failure must be diagnosable from the probe output")
+	require.NotContains(t, body, guestJWT, "probe output must not leak the guest token")
+	require.NotContains(t, body, "probe-guest-id", "probe output must not leak token payload")
 }

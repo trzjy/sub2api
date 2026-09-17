@@ -510,6 +510,13 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		if cookie == "" {
 			return s.sendErrorAndEnd(c, "web-zhipu account is missing login cookie credential")
 		}
+		// 探活与正式转发共用同一登录态判定：游客态 token（is_guest=true）出站必被上游
+		// 以 HTTP 400 {"status":40011} 拒绝，属登录态问题而非凭证失效，提前失败关闭
+		// （不重复实现 JWT 解析，直接调用 webZhipuTokenIsGuest，token 取值口径与正式
+		// 转发链完全一致）。错误信息不得含任何 token/cookie 内容。
+		if webZhipuTokenIsGuest(webZhipuResolveChatGLMToken(account)) {
+			return s.sendErrorAndEnd(c, "web-zhipu login state is a guest token, please re-capture login cookie")
+		}
 		// 复用正式转发链构造函数：完整指纹头（Content-Type/Accept/Authorization Bearer/
 		// app-name/x-app-*/x-device-id/Origin/Referer/User-Agent/Cookie(+cdn_cookie)/
 		// 账号头覆写），禁止第二套 GLM 头逻辑。
