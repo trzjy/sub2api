@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,8 +40,10 @@ import (
 // 安全红线：凭证（cookie/chatglm_token）不得出现在日志或错误响应中——上游错误体在
 // 任何透传前先经 redactWebZhipuUpstreamErrorBody 脱敏。
 //
-// 刷新语义（分析文档 §3.5）：Cookie 携带 chatglm_refresh_token，但刷新端点未实测；
-// 401 仍不做刷新重试，直接走冷却与错误回传。
+// 刷新语义（2026-09-17 官方 main.js 逆向确认）：Cookie 携带 chatglm_refresh_token，
+// 401 时先用 refresh token 静默续期（POST {base}/user-api/user/refresh）并重试一次，
+// 续期失败（或无 refresh token）才走冷却与错误回传（见 refreshWebZhipuAccessToken 与
+// forwardWebZhipu 401 分支）。
 
 const (
 	// webZhipuClientUA 指纹对齐用浏览器 UA（以登录态抓包为准）。
@@ -67,6 +70,28 @@ func webZhipuExtractCookieField(cookie, name string) string {
 		}
 	}
 	return ""
+}
+
+// webZhipuSetCookieFieldValue 在整串 Cookie 中把指定字段 name 的值替换为 value，
+// 其余字段与原始字符串（含字段间空白）原样保留；字段不存在则追加到末尾。用于刷新成功后
+// 就地更新 cookie 中的 chatglm_token / chatglm_refresh_token，不破坏其它字段（如 CDN Cookie）。
+func webZhipuSetCookieFieldValue(cookie, name, value string) string {
+	if cookie == "" {
+		return name + "=" + value
+	}
+	parts := strings.Split(cookie, ";")
+	found := false
+	for i, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == name {
+			parts[i] = name + "=" + value
+			found = true
+		}
+	}
+	if !found {
+		return cookie + "; " + name + "=" + value
+	}
+	return strings.Join(parts, ";")
 }
 
 // webZhipuDeviceIDFromToken 从 chatglm_token JWT payload 解出 device_id
@@ -206,6 +231,29 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		// 401 → 先用 chatglm_refresh_token 静默续期一次再重试（官方前端同款刷新链，
+		// 2026-09-17 官方 main.js 逆向确认）。续期失败（或无 refresh token）则保持原
+		// 冷却与错误路径不变（不重复请求，仅重试一次）。
+		if resp.StatusCode == http.StatusUnauthorized {
+			if refreshed := s.refreshWebZhipuAccessToken(ctx, account); refreshed != "" {
+				retryCtx, releaseRetry := detachUpstreamContext(ctx)
+				defer releaseRetry()
+				newCookie := strings.TrimSpace(account.GetCredential("cookie"))
+				retryReq, reqErr := s.buildWebZhipuUpstreamRequest(retryCtx, account, baseURL+webZhipuStreamPath, newCookie, upstreamBody)
+				if reqErr != nil {
+					return nil, reqErr
+				}
+				retryResp, retryErr := s.doOpenAIUpstream(retryReq, proxyURL, account)
+				if retryErr != nil {
+					return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, retryErr, false)
+				}
+				_ = resp.Body.Close()
+				resp = retryResp
+			}
+		}
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
@@ -461,6 +509,169 @@ func classifyWebZhipuUpstreamError(statusCode int, body []byte) webZhipuErrKind 
 		return webZhipuErrKindRateLimited
 	}
 	return webZhipuErrKindOther
+}
+
+// webZhipuRefreshPath 官方前端 refresh 端点（2026-09-17 官方 main.js 逆向确认）：
+// ${r}/user-api/user/refresh（r 为站点根，无 /chatglm 前缀差异；base 即现有
+// DefaultWebZhipuBaseURL 域）。
+const webZhipuRefreshPath = "/user-api/user/refresh"
+
+// refreshWebZhipuAccessToken 用 chatglm_refresh_token 静默续期 access token（官方前端同款
+// 刷新链，端点与形态源自 2026-09-17 官方 main.js 逆向）：
+//   - 解析 chatglm_refresh_token：优先显式 credentials["refresh_token"] /
+//     credentials["chatglm_token"]，否则从整串 Cookie 的 chatglm_refresh_token 字段取；
+//   - POST {base}/user-api/user/refresh，Authorization: Bearer <chatglm_refresh_token>，
+//     空 JSON 请求体 + 与 assistant/stream 同款指纹头（含 refresh token 的 device_id claim、
+//     签名三件套、X-Request-Id）；
+//   - 200 → 取 result.access_token / result.refresh_token（refresh token 也会轮换），持久化到
+//     账号（cookie 两字段就地替换、显式键仅当原凭证存在才写）；返回新 access token；
+//   - 非 200 / 解析失败 / 无 refresh token → 返回 ""，不写库。
+//
+// 与 web-kimi 刷新链同构：刷新成功持久化新凭证，失败不写库。
+func (s *OpenAIGatewayService) refreshWebZhipuAccessToken(ctx context.Context, account *Account) string {
+	if account == nil {
+		return ""
+	}
+	cookie := strings.TrimSpace(account.GetCredential("cookie"))
+
+	// 解析 chatglm_refresh_token：显式 credentials 优先，否则从整串 Cookie 字段取。
+	refreshToken := strings.TrimSpace(account.GetCredential("refresh_token"))
+	if refreshToken == "" {
+		refreshToken = webZhipuExtractCookieField(cookie, "chatglm_refresh_token")
+	}
+	if refreshToken == "" {
+		// 无 refresh token：不发刷新请求，交由调用方原 401 冷却路径。
+		return ""
+	}
+
+	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
+	if baseURL == "" {
+		return ""
+	}
+	refreshURL := baseURL + webZhipuRefreshPath
+
+	upstreamCtx, release := detachUpstreamContext(ctx)
+	defer release()
+
+	body := []byte("{}")
+	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, refreshURL, bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+
+	origin := webZhipuOriginFromURL(refreshURL)
+	fullCookie := cookie
+	if cdn := strings.TrimSpace(account.GetCredential("cdn_cookie")); cdn != "" {
+		fullCookie = strings.TrimRight(fullCookie, "; ") + "; " + cdn
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", webZhipuClientUA)
+	req.Header.Set("app-name", "chatglm")
+	req.Header.Set("x-app-platform", "pc")
+	req.Header.Set("x-app-version", "0.0.1")
+	req.Header.Set("x-app-fr", "default")
+	req.Header.Set("x-lang", "zh")
+	if deviceID := webZhipuDeviceIDFromToken(refreshToken); deviceID != "" {
+		req.Header.Set("x-device-id", deviceID)
+	}
+	req.Header.Set("Authorization", "Bearer "+refreshToken)
+	if fullCookie != "" {
+		req.Header.Set("Cookie", fullCookie)
+	}
+
+	// 签名三件套（与 assistant/stream 同款，即时生成）+ 32 hex X-Request-Id。
+	nowMs := time.Now().UnixMilli()
+	xTimestamp, xNonce, xSign := webZhipuComputeSign(nowMs)
+	req.Header.Set("X-Timestamp", xTimestamp)
+	req.Header.Set("X-Nonce", xNonce)
+	req.Header.Set("X-Sign", xSign)
+	req.Header.Set("X-Request-Id", webZhipuUUIDHex())
+
+	// 账号级请求头覆写最后应用，使管理员配置优先（与 assistant/stream 出站口径一致）。
+	account.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		// 续期失败（401/400 等）：不持久化任何值。
+		return ""
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return ""
+	}
+
+	newAccessToken := strings.TrimSpace(gjson.GetBytes(respBody, "result.access_token").String())
+	newRefreshToken := strings.TrimSpace(gjson.GetBytes(respBody, "result.refresh_token").String())
+	if newAccessToken == "" {
+		return ""
+	}
+	if newRefreshToken == "" {
+		// refresh token 未轮换：保持原值不变（仍按原字段写回 cookie）。
+		newRefreshToken = refreshToken
+	}
+
+	if err := s.persistWebZhipuRefreshedCredentials(ctx, account, cookie, newAccessToken, newRefreshToken); err != nil {
+		// 持久化失败不阻断本次重试（已拿到新 token），仅脱敏告警。
+		slog.Warn("web-zhipu refresh succeeded but credential persist failed",
+			"account_id", account.ID, "error", err.Error())
+	}
+	return newAccessToken
+}
+
+// persistWebZhipuRefreshedCredentials 把续期后的新凭证写回账号：就地替换 cookie 中的
+// chatglm_token 与 chatglm_refresh_token 两个字段（其余 cookie 字段原样保留），并仅当
+// 原凭证已存在 chatglm_token / refresh_token 显式键时才同步覆写（不凭空新增键）。
+// 影子账号恒不持凭据（defense-in-depth，与 persistAccountCredentials 同口径）。
+func (s *OpenAIGatewayService) persistWebZhipuRefreshedCredentials(
+	ctx context.Context,
+	account *Account,
+	originalCookie string,
+	newAccessToken string,
+	newRefreshToken string,
+) error {
+	if account == nil {
+		return nil
+	}
+	if account.IsCredentialShadow() {
+		return nil
+	}
+	newCreds := shallowCopyMap(account.Credentials)
+	if originalCookie != "" {
+		updated := webZhipuSetCookieFieldValue(originalCookie, "chatglm_token", newAccessToken)
+		updated = webZhipuSetCookieFieldValue(updated, "chatglm_refresh_token", newRefreshToken)
+		newCreds["cookie"] = updated
+	}
+	// 显式键仅当原凭证存在时才写（不凭空新增）。
+	if _, ok := account.Credentials["chatglm_token"]; ok {
+		newCreds["chatglm_token"] = newAccessToken
+	}
+	if _, ok := account.Credentials["refresh_token"]; ok {
+		newCreds["refresh_token"] = newRefreshToken
+	}
+
+	account.Credentials = newCreds
+	if s.accountRepo == nil {
+		return nil
+	}
+	// 持久化触点与 persistAccountCredentials 同口径：优先 accountCredentialsUpdater，
+	// 否则回落 repo.Update（仓库未实现细粒度 UpdateCredentials 时仍可写回）。
+	if updater, ok := any(s.accountRepo).(accountCredentialsUpdater); ok {
+		return updater.UpdateCredentials(ctx, account.ID, newCreds)
+	}
+	return s.accountRepo.Update(ctx, account)
 }
 
 // redactWebZhipuUpstreamErrorBody 上游错误体脱敏：清除可能被上游回显的凭证片段

@@ -262,8 +262,8 @@ func TestForwardWebZhipu_MissingCookieFailsClosed(t *testing.T) {
 	require.Len(t, upstream.requests, 0, "no upstream request may be made without a login cookie")
 }
 
-// TestForwardWebZhipu_AuthErrorCoolsAccount 401（实测 Cookie 过期形态）→ 冷却账号，
-// 无刷新重试（Zhipu 无刷新机制，分析文档 §3.5），凭证不出现在错误响应。
+// TestForwardWebZhipu_AuthErrorCoolsAccount 401（实测 Cookie 过期形态）→ 冷却账号；
+// 本账号 Cookie 无 chatglm_refresh_token，故不发刷新请求、直接冷却，凭证不出现在错误响应。
 func TestForwardWebZhipu_AuthErrorCoolsAccount(t *testing.T) {
 	repo := &webZhipuRateLimitRepoStub{}
 	rlSvc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
@@ -278,7 +278,7 @@ func TestForwardWebZhipu_AuthErrorCoolsAccount(t *testing.T) {
 	}}
 	recorder, err := runForwardWebZhipu(t, account, webZhipuInboundBody("glm-5.3-flash"), upstream, rlSvc)
 	require.Error(t, err)
-	require.Len(t, upstream.requests, 1, "no refresh retry: zhipu has no refresh mechanism")
+	require.Len(t, upstream.requests, 1, "no refresh request without chatglm_refresh_token")
 	require.Equal(t, 1, repo.setRateLimitedCalls, "401 must cool the account via RateLimitService")
 	// 凭证脱敏：错误响应不得回显 Cookie（上游错误体回显片段须被脱敏）。
 	require.NotContains(t, recorder.Body.String(), "SECRETVALUE123456")
@@ -434,4 +434,208 @@ func TestForwardWebZhipu_GuestTokenFailsClosed(t *testing.T) {
 	// 安全红线：错误信息不得含 token / device_id 等凭证内容。
 	require.NotContains(t, err.Error(), guestJWT, "error message must not leak the token")
 	require.NotContains(t, err.Error(), "guest-device-id", "error message must not leak token payload")
+}
+
+// --- D1: web-zhipu 刷新成功后把新凭证持久化到账号凭据（同构 web-kimi 刷新链） ---
+
+// webZhipuRefreshRepoStub 记录 UpdateCredentials 调用（刷新成功持久化断言用）。
+// 全部用手工拼的假值，不携带任何真实 Cookie / JWT。
+type webZhipuRefreshRepoStub struct {
+	AccountRepository // 嵌入接口：其余方法提升为 nil（本测试不调用）
+	updatedID         int64
+	updatedCreds      map[string]any
+}
+
+func (r *webZhipuRefreshRepoStub) UpdateCredentials(_ context.Context, id int64, creds map[string]any) error {
+	r.updatedID = id
+	r.updatedCreds = creds
+	return nil
+}
+
+// webZhipuRefreshResponse 构造刷新端点响应（status / body 由调用方给定）。
+func webZhipuRefreshResponse(code int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: code,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader([]byte(body))),
+	}
+}
+
+func TestRefreshWebZhipuAccessTokenPersistsCredentials(t *testing.T) {
+	t.Run("cookie_fields_replaced_others_preserved", func(t *testing.T) {
+		account := &Account{
+			ID:       9801,
+			Platform: PlatformWebZhipu,
+			Credentials: map[string]any{
+				"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz; cdn_sec_tc=sec-123",
+			},
+		}
+		repo := &webZhipuRefreshRepoStub{}
+		svc := &OpenAIGatewayService{
+			accountRepo: repo,
+			httpUpstream: &httpUpstreamRecorder{resp: webZhipuRefreshResponse(http.StatusOK,
+				`{"result":{"access_token":"new-access","refresh_token":"new-refresh"}}`)},
+		}
+
+		got := svc.refreshWebZhipuAccessToken(context.Background(), account)
+		require.Equal(t, "new-access", got, "应返回刷新后的 access_token")
+
+		require.Equal(t, int64(9801), repo.updatedID)
+		// cookie 中两字段已替换。
+		newCookie := repo.updatedCreds["cookie"].(string)
+		require.Contains(t, newCookie, "chatglm_token=new-access")
+		require.Contains(t, newCookie, "chatglm_refresh_token=new-refresh")
+		// 其余 cookie 字段原样保留。
+		require.Contains(t, newCookie, "acw_tc=cdn-xyz")
+		require.Contains(t, newCookie, "cdn_sec_tc=sec-123")
+		require.NotContains(t, newCookie, "old-access")
+		require.NotContains(t, newCookie, "old-refresh")
+
+		// 账号内存凭据同步更新。
+		require.Equal(t, newCookie, account.Credentials["cookie"])
+
+		// 原凭证无显式 chatglm_token / refresh_token 键 → 不应凭空新增。
+		_, hasChatglmToken := repo.updatedCreds["chatglm_token"]
+		_, hasRefreshToken := repo.updatedCreds["refresh_token"]
+		require.False(t, hasChatglmToken, "原凭证无显式键时不应新增 chatglm_token")
+		require.False(t, hasRefreshToken, "原凭证无显式键时不应新增 refresh_token")
+	})
+
+	t.Run("explicit_keys_synced_when_present", func(t *testing.T) {
+		account := &Account{
+			ID:       9802,
+			Platform: PlatformWebZhipu,
+			Credentials: map[string]any{
+				"cookie":        "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
+				"chatglm_token": "old-access",
+				"refresh_token": "old-refresh",
+			},
+		}
+		repo := &webZhipuRefreshRepoStub{}
+		svc := &OpenAIGatewayService{
+			accountRepo: repo,
+			httpUpstream: &httpUpstreamRecorder{resp: webZhipuRefreshResponse(http.StatusOK,
+				`{"result":{"access_token":"new-access","refresh_token":"new-refresh"}}`)},
+		}
+
+		got := svc.refreshWebZhipuAccessToken(context.Background(), account)
+		require.Equal(t, "new-access", got)
+		require.Equal(t, "new-access", repo.updatedCreds["chatglm_token"], "显式 chatglm_token 应同步写新 access token")
+		require.Equal(t, "new-refresh", repo.updatedCreds["refresh_token"], "显式 refresh_token 应同步写新 refresh token")
+		require.Contains(t, repo.updatedCreds["cookie"].(string), "chatglm_token=new-access")
+	})
+}
+
+func TestRefreshWebZhipuAccessTokenNoPersistOnFailure(t *testing.T) {
+	account := &Account{
+		ID:       9803,
+		Platform: PlatformWebZhipu,
+		Credentials: map[string]any{
+			"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
+		},
+	}
+	repo := &webZhipuRefreshRepoStub{}
+	// 刷新端点返回非 200 → 刷新失败，不持久化。
+	svc := &OpenAIGatewayService{
+		accountRepo:  repo,
+		httpUpstream: &httpUpstreamRecorder{resp: webZhipuRefreshResponse(http.StatusUnauthorized, `{"message":"invalid refresh token"}`)},
+	}
+	got := svc.refreshWebZhipuAccessToken(context.Background(), account)
+	require.Equal(t, "", got)
+	require.Equal(t, int64(0), repo.updatedID, "刷新失败不应写库")
+	require.Nil(t, repo.updatedCreds, "刷新失败不应写库")
+}
+
+func TestRefreshWebZhipuAccessTokenNoRefreshTokenNoRequest(t *testing.T) {
+	account := &Account{
+		ID:       9804,
+		Platform: PlatformWebZhipu,
+		Credentials: map[string]any{
+			// 整串 Cookie 中无 chatglm_refresh_token，也无显式 refresh_token / chatglm_token。
+			"cookie": "chatglm_token=old-access; acw_tc=cdn-xyz",
+		},
+	}
+	// 若误发刷新请求，返回 200 空 JSON（newAccessToken 空 → 返回 ""），由 requests 数断言捕获。
+	upstream := &httpUpstreamRecorder{resp: webZhipuRefreshResponse(http.StatusOK, `{}`)}
+	svc := &OpenAIGatewayService{
+		accountRepo:  &webZhipuRefreshRepoStub{},
+		httpUpstream: upstream,
+	}
+	got := svc.refreshWebZhipuAccessToken(context.Background(), account)
+	require.Equal(t, "", got, "无 refresh token 应返回空")
+	require.Len(t, upstream.requests, 0, "无 refresh token 不应发出刷新请求")
+}
+
+// TestForwardWebZhipu_RefreshOn401 覆盖 401 → refresh_token 刷新 → 重试一次：
+//   - 刷新成功：刷新端点收到 Bearer <chatglm_refresh_token> 与空 JSON 体，成功后用新 token 重试；
+//   - 刷新失败（401）：按原 401 走冷却与错误路径，凭证不出现在错误响应，且不写库。
+func TestForwardWebZhipu_RefreshOn401(t *testing.T) {
+	t.Run("refresh_success_then_retry", func(t *testing.T) {
+		account := webZhipuTestAccount(9805, map[string]any{
+			"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
+		})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			{ // 第一次对话：401
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"message":"expired"}`)),
+			},
+			webZhipuRefreshResponse(http.StatusOK, `{"result":{"access_token":"new-access","refresh_token":"new-refresh"}}`),
+			webZhipuSSECompletionResponse(), // 重试：成功
+		}}
+		recorder, err := runForwardWebZhipu(t, account, webZhipuInboundBody("glm-5.3-flash"), upstream, &RateLimitService{})
+		require.NoError(t, err)
+		require.Len(t, upstream.requests, 3, "chat 401 + refresh + chat retry")
+
+		// 1) 首次对话请求：Bearer 旧 access token。
+		require.Equal(t, "/chatglm/backend-api/assistant/stream", upstream.requests[0].URL.Path)
+		require.Equal(t, "Bearer old-access", upstream.requests[0].Header.Get("Authorization"))
+
+		// 2) 刷新请求：端点、Bearer 旧 refresh token、空 JSON 体、指纹头。
+		refreshReq := upstream.requests[1]
+		require.Equal(t, "/user-api/user/refresh", refreshReq.URL.Path)
+		require.Equal(t, "Bearer old-refresh", refreshReq.Header.Get("Authorization"))
+		require.Equal(t, "chatglm", refreshReq.Header.Get("app-name"))
+		require.Equal(t, "pc", refreshReq.Header.Get("x-app-platform"))
+		require.NotEmpty(t, refreshReq.Header.Get("x-sign"), "刷新请求须带签名头")
+		require.JSONEq(t, `{}`, string(upstream.bodies[1]), "刷新请求体为空 JSON")
+
+		// 3) 重试请求：Bearer 新 access token，Cookie 中两字段已更新。
+		retryReq := upstream.requests[2]
+		require.Equal(t, "/chatglm/backend-api/assistant/stream", retryReq.URL.Path)
+		require.Equal(t, "Bearer new-access", retryReq.Header.Get("Authorization"))
+		require.Contains(t, retryReq.Header.Get("Cookie"), "chatglm_token=new-access")
+		require.Contains(t, retryReq.Header.Get("Cookie"), "chatglm_refresh_token=new-refresh")
+		require.Contains(t, retryReq.Header.Get("Cookie"), "acw_tc=cdn-xyz")
+
+		// 账号内存凭据同步更新（无 accountRepo 时仍就地更新，供重试使用）。
+		require.Contains(t, account.Credentials["cookie"], "chatglm_token=new-access")
+		require.Equal(t, http.StatusOK, recorder.Code)
+	})
+
+	t.Run("refresh_failure_cools_account", func(t *testing.T) {
+		repo := &webZhipuRateLimitRepoStub{}
+		rlSvc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+		account := webZhipuTestAccount(9806, map[string]any{
+			"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
+		})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			{ // 第一次对话：401
+				StatusCode: http.StatusUnauthorized,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"message":"expired"}`)),
+			},
+			webZhipuRefreshResponse(http.StatusUnauthorized, `{"message":"invalid refresh token"}`), // 刷新端点：401
+		}}
+		recorder, err := runForwardWebZhipu(t, account, webZhipuInboundBody("glm-5.3-flash"), upstream, rlSvc)
+		require.Error(t, err)
+		require.Len(t, upstream.requests, 2, "chat 401 + refresh attempt; no third request")
+		require.Equal(t, 1, repo.setRateLimitedCalls, "刷新失败必须回落到 401 错误路径并冷却账号")
+		// 刷新失败不写库：cookie 原样保留。
+		require.Contains(t, account.Credentials["cookie"], "chatglm_token=old-access")
+		require.NotContains(t, account.Credentials["cookie"], "new-access")
+		// 凭证脱敏：错误响应不得回显 token。
+		require.NotContains(t, recorder.Body.String(), "old-access")
+		require.NotContains(t, recorder.Body.String(), "old-refresh")
+	})
 }
