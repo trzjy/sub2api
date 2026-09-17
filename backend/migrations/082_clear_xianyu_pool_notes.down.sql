@@ -1,0 +1,9 @@
+-- 082_clear_xianyu_pool_notes.down.sql
+-- 库存池统一口径方案（inventory-pool-unified-spec-counting）数据迁移「回滚」说明（仅文档，不可执行）。
+-- 本迁移的 up 清除了 redeem_codes.notes 上的 'xianyu_pool=<slug>' 历史标记，
+-- 使这些码归位为按规格（group_id + validity_days + type='subscription'）纳管的普通订阅码。
+-- 由于原 slug 标记已被清空，且无法从其他字段反推出原本属于哪个池，down 无法精确恢复这些标记，
+-- 故本文件不写入任何可执行 SQL，仅保留说明。
+-- 如需回滚到带标记状态，应做业务级补偿：把目标码重新打回其 (group_id, validity_days) 对应池的
+-- slug 标记（notes = 'xianyu_pool=<slug>'），而非依赖自动迁移。
+-- 参考方案文档：docs/inventory-pool-unified-spec-counting-plan.md 第 4 节（数据迁移 / down 注释）。

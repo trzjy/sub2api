@@ -351,8 +351,10 @@ func (r *xianyuControlRepository) DeleteItemPool(ctx context.Context, poolID int
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var slug string
-	err = tx.QueryRowContext(ctx, `SELECT slug FROM xianyu_item_pools WHERE id = $1`, poolID).Scan(&slug)
+	var groupID sql.NullInt64
+	var validityDays int
+	// 统一口径：删除闸按 (group_id, validity_days, type='subscription') 统计未使用库存，不依赖 notes 标记。
+	err = tx.QueryRowContext(ctx, `SELECT group_id, validity_days FROM xianyu_item_pools WHERE id = $1`, poolID).Scan(&groupID, &validityDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		return service.ErrXianyuItemPoolNotFound
 	}
@@ -369,7 +371,11 @@ func (r *xianyuControlRepository) DeleteItemPool(ctx context.Context, poolID int
 	}
 
 	var unusedCodes int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE status = 'unused' AND notes = $1`, service.XianyuPoolNote(slug)).Scan(&unusedCodes); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM redeem_codes
+		WHERE status = 'unused' AND type = 'subscription'
+		  AND group_id = $1 AND validity_days = $2`,
+		groupID, validityDays).Scan(&unusedCodes); err != nil {
 		return fmt.Errorf("count unused xianyu codes: %w", err)
 	}
 	if unusedCodes > 0 {
@@ -659,26 +665,40 @@ func nullableInt64(v *int64) any {
 }
 
 // PoolStockCounts 返回池库存码的剩余/累计已发货/已兑换/禁用数量。
-// 池内存放真实可兑换的订阅码；delivered 是历史发货事实数（与发货记录页同口径），
-// 取自 xianyu_order_claims 中 delivery_status='sent' 的订单，不会因买家兑换而减少，
-// 也不包含 pending/failed 及发货后被退款的订单。
+// 统一口径：池库存身份 = (group_id, validity_days, type='subscription')，直接按这三个字段统计，
+// 不再依赖 redeem_codes.notes 标记。入参为池 slug，先解析出统一口径所需的 group_id + validity_days。
+// delivered 是历史发货事实数（与发货记录页同口径），取自 xianyu_order_claims 中
+// delivery_status='sent' 的订单，不会因买家兑换而减少，也不包含 pending/failed 及发货后被退款的订单。
 func (r *xianyuControlRepository) PoolStockCounts(ctx context.Context, poolSlug string) (remaining, delivered, used, disabled int, err error) {
+	pool, perr := r.GetItemPoolBySlug(ctx, poolSlug)
+	if perr != nil {
+		return 0, 0, 0, 0, fmt.Errorf("pool stock resolve pool: %w", perr)
+	}
+	groupID := int64(0)
+	if pool.GroupID != nil {
+		groupID = *pool.GroupID
+	}
+	// 剩余/已兑换/禁用：按规格 + 订阅类型统计，纳入分组内未打标记的码。
 	err = r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) FILTER (WHERE status = 'unused'),
 			COUNT(*) FILTER (WHERE status = 'used'),
 			COUNT(*) FILTER (WHERE status = 'disabled')
 		FROM redeem_codes
-		WHERE notes = $1`, service.XianyuPoolNote(poolSlug)).
+		WHERE group_id = $1 AND validity_days = $2 AND type = 'subscription'`,
+		groupID, pool.ValidityDays).
 		Scan(&remaining, &used, &disabled)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("pool stock counts: %w", err)
 	}
+	// 累计已发货：同规格订阅码且已被 Worker 实际送达（delivery_status='sent'）。
 	err = r.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM xianyu_order_claims c
 		JOIN redeem_codes r ON r.id = c.redeem_code_id
-		WHERE r.notes = $1 AND c.delivery_status = 'sent'`, service.XianyuPoolNote(poolSlug)).
+		WHERE r.group_id = $1 AND r.validity_days = $2 AND r.type = 'subscription'
+		  AND c.delivery_status = 'sent'`,
+		groupID, pool.ValidityDays).
 		Scan(&delivered)
 	if err != nil {
 		return 0, 0, 0, 0, fmt.Errorf("pool delivered count: %w", err)
@@ -696,7 +716,9 @@ func (r *xianyuControlRepository) GroupSubscriptionType(ctx context.Context, gro
 	return subscriptionType, nil
 }
 
-// InsertPoolStock 向池内批量写入真实可兑换的订阅码（notes 标记池归属）。
+// InsertPoolStock 向池内批量写入真实可兑换的订阅码。
+// 统一口径：生成即纳管，码按自身 group_id/validity_days 归属池中，不再打 notes 标记
+// （notes 列 NOT NULL，此处写空串，真实归属由 group_id + validity_days 决定）。
 func (r *xianyuControlRepository) InsertPoolStock(ctx context.Context, poolSlug string, groupID int64, validityDays int, expiresAt *time.Time, codes []string) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -712,9 +734,8 @@ func (r *xianyuControlRepository) InsertPoolStock(ctx context.Context, poolSlug 
 	}
 	defer stmt.Close()
 
-	note := service.XianyuPoolNote(poolSlug)
 	for _, code := range codes {
-		if _, err := stmt.ExecContext(ctx, code, note, nullableTime(expiresAt), nullableInt64(&groupID), validityDays); err != nil {
+		if _, err := stmt.ExecContext(ctx, code, "", nullableTime(expiresAt), nullableInt64(&groupID), validityDays); err != nil {
 			return fmt.Errorf("insert pool stock code: %w", err)
 		}
 	}

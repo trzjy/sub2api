@@ -149,8 +149,11 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 
 	var codeID int64
 	var code string
-	var poolSlug string
-	if err := tx.QueryRowContext(ctx, `SELECT slug FROM xianyu_item_pools WHERE id = $1`, claim.PoolID).Scan(&poolSlug); err != nil {
+	// 统一口径：池 = (group_id, validity_days, type='subscription') 的视图，
+	// 取码按池规格（分组+天数）从 redeem_codes 选码，不再依赖 notes 标记。
+	var poolGroupID, poolValidityDays sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT group_id, validity_days FROM xianyu_item_pools WHERE id = $1`, claim.PoolID).
+		Scan(&poolGroupID, &poolValidityDays); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", service.ErrXianyuItemPoolNotFound
 		}
@@ -160,11 +163,13 @@ func (r *xianyuOrderClaimRepository) Claim(ctx context.Context, claim service.Xi
 		SELECT id, code
 		FROM redeem_codes
 		WHERE status = 'unused'
-		  AND notes = $1
+		  AND type = 'subscription'
+		  AND group_id = $1
+		  AND validity_days = $2
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		ORDER BY id
 		FOR UPDATE SKIP LOCKED
-		LIMIT 1`, service.XianyuPoolNote(poolSlug)).Scan(&codeID, &code)
+		LIMIT 1`, poolGroupID.Int64, poolValidityDays.Int64).Scan(&codeID, &code)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", service.ErrXianyuInventoryEmpty
 	}

@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/user"
@@ -109,7 +112,21 @@ func (r *redeemCodeRepository) ListWithFilters(ctx context.Context, params pagin
 		q = q.Where(redeemcode.TypeEQ(codeType))
 	}
 	if poolSlug != "" {
-		q = q.Where(redeemcode.NotesEQ(service.XianyuPoolNote(poolSlug)))
+		// 统一口径：池 = (group_id, validity_days, type='subscription') 的视图，
+		// 不再依赖 redeem_codes.notes 标记。先按 slug 查池拿到规格，再按规格过滤；
+		// 池不存在时返回空结果集，避免退化为全量。
+		poolGroupID, poolValidityDays, ok, err := r.queryPoolSpecBySlug(ctx, poolSlug)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			return []service.RedeemCode{}, paginationResultFromTotal(0, params), nil
+		}
+		q = q.Where(
+			redeemcode.GroupIDEQ(poolGroupID),
+			redeemcode.ValidityDaysEQ(poolValidityDays),
+			redeemcode.TypeEQ(domain.RedeemTypeSubscription),
+		)
 	}
 	if value != nil {
 		q = q.Where(redeemcode.ValueEQ(*value))
@@ -464,6 +481,28 @@ func redeemCodeEntityToService(m *dbent.RedeemCode) *service.RedeemCode {
 		out.Group = groupEntityToService(m.Edges.Group)
 	}
 	return out
+}
+
+// queryPoolSpecBySlug 按 slug 查库存池规格（group_id + validity_days）。
+// 池不存在或规格为空（group_id/validity_days 为 NULL）时 ok=false，
+// 调用方应返回空结果集而非全量，避免误纳其它规格的码。
+func (r *redeemCodeRepository) queryPoolSpecBySlug(ctx context.Context, slug string) (groupID int64, validityDays int, ok bool, err error) {
+	rows, qerr := r.client.QueryContext(ctx, `SELECT group_id, validity_days FROM xianyu_item_pools WHERE slug = $1`, slug)
+	if qerr != nil {
+		return 0, 0, false, fmt.Errorf("select xianyu item pool by slug: %w", qerr)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return 0, 0, false, rows.Err()
+	}
+	var gid, vd sql.NullInt64
+	if serr := rows.Scan(&gid, &vd); serr != nil {
+		return 0, 0, false, fmt.Errorf("scan xianyu item pool spec: %w", serr)
+	}
+	if !gid.Valid || !vd.Valid {
+		return 0, 0, false, nil
+	}
+	return gid.Int64, int(vd.Int64), true, nil
 }
 
 func redeemCodeEntitiesToService(models []*dbent.RedeemCode) []service.RedeemCode {

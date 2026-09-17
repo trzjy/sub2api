@@ -15,23 +15,31 @@ func TestXianyuOrderClaimRepositoryConcurrentFirstClaim(t *testing.T) {
 	ctx := context.Background()
 	db := integrationDB
 
+	groupID := createIntegrationSubscriptionGroup(t, db)
 	_, err := db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 1)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO redeem_codes (code, type, value, status, notes)
+		INSERT INTO redeem_codes (code, type, value, status, notes, group_id, validity_days)
 		VALUES
-			('XY0000000000000000000000000001', $1, 0, 'unused', $2),
-			('XY0000000000000000000000000002', $1, 0, 'unused', $2)`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
+			('XY0000000000000000000000000001', $1, 0, 'unused', '', $2, 1),
+			('XY0000000000000000000000000002', $1, 0, 'unused', '', $2, 1)`,
+		service.RedeemTypeSubscription, groupID)
 	require.NoError(t, err)
 
-	// 创建池记录，供 claim 通过 PoolID 定位 slug。
-	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE slug = 'standard'`)
-	var poolID int64
-	require.NoError(t, db.QueryRowContext(ctx, `
-		INSERT INTO xianyu_item_pools (name, slug) VALUES ('standard', 'standard') RETURNING id`).Scan(&poolID))
+	// 创建池记录（含规格）：统一口径下 claim 通过 PoolID 取 group_id+validity_days 选码，不再读 notes。
+	control := NewXianyuControlRepository(db)
+	pool, err := control.CreateItemPool(ctx, service.XianyuItemPool{
+		Name:         "std-conc",
+		Slug:         "std-conc",
+		Status:       service.XianyuItemPoolStatusActive,
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	poolID := pool.ID
 
 	repo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	claim := service.XianyuDeliveryClaim{
@@ -66,15 +74,19 @@ func TestXianyuOrderClaimRepositoryConcurrentFirstClaim(t *testing.T) {
 	var deliveredCount int
 	require.NoError(t, db.QueryRowContext(ctx, `
 		SELECT count(*) FROM redeem_codes
-		WHERE notes = $1 AND status = 'delivered'`,
-		service.XianyuPoolNote("standard")).Scan(&deliveredCount))
+		WHERE group_id = $1 AND validity_days = $2 AND status = 'delivered'`,
+		groupID, 1).Scan(&deliveredCount))
 	require.Equal(t, 1, deliveredCount)
 
 	_, err = db.ExecContext(ctx, `
 		DELETE FROM xianyu_order_claims WHERE order_no = $1`, claim.OrderID)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
-		DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+		DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 1)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, poolID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
 	require.NoError(t, err)
 }
 
@@ -82,20 +94,28 @@ func TestXianyuOrderClaimRepositoryRejectsRedeemCodeDelete(t *testing.T) {
 	ctx := context.Background()
 	db := integrationDB
 
+	groupID := createIntegrationSubscriptionGroup(t, db)
 	_, err := db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 1)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO redeem_codes (code, type, value, status, notes)
-		VALUES ('XY0000000000000000000000000003', $1, 0, 'unused', $2)`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
+		INSERT INTO redeem_codes (code, type, value, status, notes, group_id, validity_days)
+		VALUES ('XY0000000000000000000000000003', $1, 0, 'unused', '', $2, 1)`,
+		service.RedeemTypeSubscription, groupID)
 	require.NoError(t, err)
 
-	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE slug = 'standard'`)
-	var poolID int64
-	require.NoError(t, db.QueryRowContext(ctx, `
-		INSERT INTO xianyu_item_pools (name, slug) VALUES ('standard', 'standard') RETURNING id`).Scan(&poolID))
+	control := NewXianyuControlRepository(db)
+	pool, err := control.CreateItemPool(ctx, service.XianyuItemPool{
+		Name:         "std-protect",
+		Slug:         "std-protect",
+		Status:       service.XianyuItemPoolStatusActive,
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	poolID := pool.ID
 
 	repo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	code, err := repo.Claim(ctx, service.XianyuDeliveryClaim{
@@ -112,7 +132,11 @@ func TestXianyuOrderClaimRepositoryRejectsRedeemCodeDelete(t *testing.T) {
 
 	_, err = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims WHERE order_no = 'order-protect'`)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 1)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, poolID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
 	require.NoError(t, err)
 }
 
@@ -122,21 +146,21 @@ func TestXianyuOrderClaimRepositoryInsertReconciledClaim(t *testing.T) {
 
 	_, err := db.ExecContext(ctx, `DELETE FROM xianyu_order_claims WHERE order_no LIKE 'order-reconcile%'`)
 	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("recon"))
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE code LIKE 'XYRECON%'`)
 	require.NoError(t, err)
 
-	// delivered 码：可补登
+	// delivered 码：可补登（统一口径下 notes 不再打池标记，留空串）。
 	var deliveredID int64
 	require.NoError(t, db.QueryRowContext(ctx, `
 		INSERT INTO redeem_codes (code, type, value, status, notes)
-		VALUES ('XYRECON00000000000000000000001', $1, 0, 'delivered', $2) RETURNING id`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("recon")).Scan(&deliveredID))
+		VALUES ('XYRECON00000000000000000000001', $1, 0, 'delivered', '') RETURNING id`,
+		service.RedeemTypeSubscription).Scan(&deliveredID))
 	// unused 码：不允许补登
 	var unusedID int64
 	require.NoError(t, db.QueryRowContext(ctx, `
 		INSERT INTO redeem_codes (code, type, value, status, notes)
-		VALUES ('XYRECON00000000000000000000002', $1, 0, 'unused', $2) RETURNING id`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("recon")).Scan(&unusedID))
+		VALUES ('XYRECON00000000000000000000002', $1, 0, 'unused', '') RETURNING id`,
+		service.RedeemTypeSubscription).Scan(&unusedID))
 
 	repo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
 	claim := service.XianyuDeliveryClaim{
@@ -173,5 +197,5 @@ func TestXianyuOrderClaimRepositoryInsertReconciledClaim(t *testing.T) {
 	require.ErrorIs(t, err, service.ErrXianyuReconcileCodeUnmatched)
 
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims WHERE order_no LIKE 'order-reconcile%'`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("recon"))
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE code LIKE 'XYRECON%'`)
 }

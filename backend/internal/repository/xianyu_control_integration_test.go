@@ -182,7 +182,7 @@ func TestXianyuItemPoolCardSpecRoundTrip(t *testing.T) {
 	require.Equal(t, 0, used)
 	require.Equal(t, 0, disabled)
 
-	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote(got.Slug))
+	_, err = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, *got.GroupID, got.ValidityDays)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, created.ID)
 	require.NoError(t, err)
@@ -194,22 +194,29 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 	ctx := context.Background()
 	db := integrationDB
 
+	groupID := createIntegrationSubscriptionGroup(t, db)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
 
-	// 创建池和库存。
+	// 创建池和库存（统一口径：池归属由 group_id + validity_days + type 表达，notes 留空串）。
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_products`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_accounts`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_configs`)
 	control := NewXianyuControlRepository(db)
-	pool, err := control.CreateItemPool(ctx, service.XianyuItemPool{Name: "standard", Slug: "standard"})
+	pool, err := control.CreateItemPool(ctx, service.XianyuItemPool{
+		Name:         "standard",
+		Slug:         "standard",
+		Status:       service.XianyuItemPoolStatusActive,
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO redeem_codes (code, type, value, status, notes)
-		VALUES ('XY0000000000000000000000000004', $1, 0, 'unused', $2)`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
+		INSERT INTO redeem_codes (code, type, value, status, notes, group_id, validity_days)
+		VALUES ('XY0000000000000000000000000004', $1, 0, 'unused', '', $2, 1)`,
+		service.RedeemTypeSubscription, groupID)
 	require.NoError(t, err)
 
 	claimRepo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
@@ -296,16 +303,17 @@ func TestXianyuDeliveryStateTransitions(t *testing.T) {
 
 	// 库存只消耗一个码。
 	var usedCount int
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE notes=$1 AND status='delivered'`, service.XianyuPoolNote("standard")).Scan(&usedCount))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM redeem_codes WHERE group_id=$1 AND validity_days=$2 AND status='delivered'`, groupID, 1).Scan(&usedCount))
 	require.Equal(t, 1, usedCount)
 
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 1)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_products`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_accounts`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_configs`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
 }
 
 func TestXianyuLegacyMigrationBackfills(t *testing.T) {
@@ -328,8 +336,8 @@ func TestXianyuLegacyMigrationBackfills(t *testing.T) {
 		RETURNING id`).Scan(&userID))
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO redeem_codes (code, type, value, status, notes)
-		VALUES ('XY0000000000000000000000000005', $1, 0, 'used', $2)`,
-		service.RedeemTypeSubscription, service.XianyuPoolNote("standard"))
+		VALUES ('XY0000000000000000000000000005', $1, 0, 'used', '')`,
+		service.RedeemTypeSubscription)
 	require.NoError(t, err)
 	var codeID int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM redeem_codes WHERE code='XY0000000000000000000000000005'`).Scan(&codeID))
@@ -404,7 +412,117 @@ func TestXianyuLegacyMigrationBackfills(t *testing.T) {
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_accounts`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools`)
 	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_worker_configs`)
-	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE notes = $1`, service.XianyuPoolNote("standard"))
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE code = 'XY0000000000000000000000000005'`)
 }
 
 var _ = time.Now
+
+// TestXianyuItemPoolSpecStockCountsUnmarkedCodes 验收第 6 节第 3 条 a)：
+// 分组里未打 notes 标记的 unused 订阅码，应被 PoolStockCounts 计入剩余，且能被发货取码取到。
+// 统一口径下池归属完全由 (group_id, validity_days, type='subscription') 决定，不依赖任何 notes 标记。
+func TestXianyuItemPoolSpecStockCountsUnmarkedCodes(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB
+
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims`)
+
+	groupID := createIntegrationSubscriptionGroup(t, db)
+	repo := NewXianyuControlRepository(db).(*xianyuControlRepository)
+	pool, err := repo.CreateItemPool(ctx, service.XianyuItemPool{
+		Name:         "spec-unmarked",
+		Slug:         "spec-unmarked",
+		Status:       service.XianyuItemPoolStatusActive,
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 7,
+	})
+	require.NoError(t, err)
+
+	// 造数：不打 notes 标记（notes 留空串），池归属由 group_id + validity_days + type 表达。
+	codes := []string{
+		"XYPOOLSPECUNMARKED0000000000000001",
+		"XYPOOLSPECUNMARKED0000000000000002",
+	}
+	for _, c := range codes {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO redeem_codes (code, type, value, status, notes, group_id, validity_days)
+			VALUES ($1, $2, 0, 'unused', '', $3, $4)`,
+			c, service.RedeemTypeSubscription, groupID, 7)
+		require.NoError(t, err)
+	}
+
+	// a) 未打标记的 unused 码被 PoolStockCounts 按规格计入剩余。
+	remaining, delivered, used, disabled, err := repo.PoolStockCounts(ctx, pool.Slug)
+	require.NoError(t, err)
+	require.Equal(t, len(codes), remaining)
+	require.Equal(t, 0, delivered)
+	require.Equal(t, 0, used)
+	require.Equal(t, 0, disabled)
+
+	// a) 未打标记的 unused 码能被发货取码按规格取到。
+	claimRepo := NewXianyuOrderClaimRepository(db).(*xianyuOrderClaimRepository)
+	got, err := claimRepo.Claim(ctx, service.XianyuDeliveryClaim{
+		OrderID: "order-spec-unmarked", ItemID: "item", AccountID: "account", BuyerID: "buyer", PoolID: pool.ID,
+	})
+	require.NoError(t, err)
+	require.Contains(t, codes, got)
+
+	var deliveredCount int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT count(*) FROM redeem_codes WHERE group_id = $1 AND validity_days = $2 AND status = 'delivered'`,
+		groupID, 7).Scan(&deliveredCount))
+	require.Equal(t, 1, deliveredCount)
+
+	// 清理（按测试专用 group_id 定位）。
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_order_claims WHERE order_no = 'order-spec-unmarked'`)
+	_, _ = db.ExecContext(ctx, `DELETE FROM redeem_codes WHERE group_id = $1 AND validity_days = $2`, groupID, 7)
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, pool.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
+}
+
+// TestXianyuItemPoolSpecUniquenessRejected 验收第 6 节第 3 条 c)：
+// 同 (group_id, validity_days) 创建第二个库存池必须被拒（XIANYU_POOL_SPEC_TAKEN）。
+// 统一口径下池按规格筛码，重复规格会导致两池互相侵吞对方库存，故 (group_id, validity_days) 唯一。
+func TestXianyuItemPoolSpecUniquenessRejected(t *testing.T) {
+	ctx := context.Background()
+	db := integrationDB
+
+	groupID := createIntegrationSubscriptionGroup(t, db)
+	// 规格唯一性校验位于控制面服务（validatePoolCardSpec），经 SaveItemPool 生效。
+	control := NewXianyuControlRepository(db)
+	svc := service.NewXianyuControlService(control, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+
+	_, err := svc.SaveItemPool(ctx, service.XianyuItemPool{
+		Name:         "spec-taken-first",
+		Slug:         "spec-taken-first",
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 30,
+	})
+	require.NoError(t, err)
+
+	// c) 同 (group_id, validity_days) 创建第二个池被拒。
+	_, err = svc.SaveItemPool(ctx, service.XianyuItemPool{
+		Name:         "spec-taken-second",
+		Slug:         "spec-taken-second",
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 30,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "XIANYU_POOL_SPEC_TAKEN")
+
+	// 不同 (group_id, validity_days) 仍然允许（换天数不冲突）。
+	_, err = svc.SaveItemPool(ctx, service.XianyuItemPool{
+		Name:         "spec-taken-otherdays",
+		Slug:         "spec-taken-otherdays",
+		CodeType:     service.XianyuPoolCodeTypeSubscription,
+		GroupID:      &groupID,
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+
+	// 清理（按测试专用 group_id 定位）。
+	_, _ = db.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE group_id = $1`, groupID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM "groups" WHERE id = $1`, groupID)
+}

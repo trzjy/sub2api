@@ -93,6 +93,13 @@ func (s reconcilePoolsStub) GetItemPoolBySlug(context.Context, string) (*XianyuI
 	return &XianyuItemPool{ID: s.id, Slug: "pool-test"}, nil
 }
 
+func (s reconcilePoolsStub) ListItemPools(context.Context) ([]XianyuItemPool, error) {
+	// 统一口径：按码的 group_id+validity_days 规格反推池，不再读 notes 标记。
+	return []XianyuItemPool{{ID: s.id, Slug: "pool-test", GroupID: ptrInt64(57), ValidityDays: 1}}, nil
+}
+
+func ptrInt64(v int64) *int64 { return &v }
+
 type reconcileRedeemStub struct {
 	code *RedeemCode
 	err  error
@@ -208,7 +215,7 @@ func TestReconcile_ClaimPendingClosedAsSent(t *testing.T) {
 func TestReconcile_MissingClaimHealedWhenCodeDelivered(t *testing.T) {
 	worker := &reconcileWorkerStub{orders: []XianyuWorkerAutoDelivery{autoOrder("o1", "卡密：f962e8b2cb8e06b655c78e6a6d564c14")}}
 	state := &reconcileStateStub{claimByOrder: map[string]*XianyuOrderClaim{}}
-	redeem := &reconcileRedeemStub{code: &RedeemCode{ID: 7, Code: "f962e8b2cb8e06b655c78e6a6d564c14", Status: StatusDelivered, Notes: "xianyu_pool=pool-test"}}
+	redeem := &reconcileRedeemStub{code: &RedeemCode{ID: 7, Code: "f962e8b2cb8e06b655c78e6a6d564c14", Status: StatusDelivered, GroupID: ptrInt64(57), ValidityDays: 1}}
 	svc, alert := newReconcileTestService(worker, state, &reconcileMirrorStub{}, redeem, watermarkSettings())
 
 	svc.runOnce()

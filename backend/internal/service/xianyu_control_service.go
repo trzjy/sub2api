@@ -343,7 +343,7 @@ func (s *XianyuControlService) SaveItemPool(ctx context.Context, pool XianyuItem
 	if pool.Name == "" {
 		return nil, infraerrors.BadRequest("XIANYU_POOL_REQUIRED", "pool name is required")
 	}
-	// slug 是纯内部标识（烙进库存码 notes），创建时未提供则自动生成，避免手填出错。
+	// slug 是纯内部标识（保留为历史订单投影的松散引用），创建时未提供则自动生成，避免手填出错。
 	autoSlug := pool.ID == 0 && pool.Slug == ""
 	// 编辑时 slug 不可变且前端不回传：空 slug 在更新路径直接视为"保持原值"。
 	if !autoSlug && pool.Slug != "" && !validPoolSlug(pool.Slug) {
@@ -427,6 +427,23 @@ func (s *XianyuControlService) validatePoolCardSpec(ctx context.Context, pool *X
 	}
 	if subType != SubscriptionTypeSubscription {
 		return infraerrors.BadRequest("XIANYU_POOL_GROUP_NOT_SUBSCRIPTION", "发码分组必须是订阅模式分组")
+	}
+	// 同 (group_id, validity_days) 只允许一个库存池（含 disabled），避免取码跨池共享库存。
+	// 统一口径下池按规格筛码，重复规格会导致两池互相侵吞对方库存。
+	allPools, err := s.control.ListItemPools(ctx)
+	if err != nil {
+		return fmt.Errorf("list item pools for spec uniqueness: %w", err)
+	}
+	for i := range allPools {
+		if allPools[i].ID == pool.ID {
+			continue // 排除自身，支持更新场景
+		}
+		if allPools[i].GroupID == nil || pool.GroupID == nil {
+			continue
+		}
+		if *allPools[i].GroupID == *pool.GroupID && allPools[i].ValidityDays == pool.ValidityDays {
+			return infraerrors.BadRequest("XIANYU_POOL_SPEC_TAKEN", "该分组+天数规格已被其他库存池占用")
+		}
 	}
 	return nil
 }

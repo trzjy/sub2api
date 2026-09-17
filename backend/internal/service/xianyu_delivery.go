@@ -255,15 +255,6 @@ func integerDigits(amount string) int {
 	return len(integerPart)
 }
 
-func xianyuPoolNote(pool string) string {
-	return "xianyu_pool=" + pool
-}
-
-// XianyuPoolNote is the immutable pool marker format used by inventory rows.
-func XianyuPoolNote(pool string) string {
-	return xianyuPoolNote(strings.TrimSpace(pool))
-}
-
 func (s *XianyuDeliveryService) ValidateConfiguration() error {
 	if s == nil || s.cfg == nil || strings.TrimSpace(s.cfg.XianyuDelivery.InternalToken) == "" || s.cfg.XianyuDelivery.SystemUserID <= 0 {
 		return ErrXianyuDeliveryNotConfigured

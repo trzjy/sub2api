@@ -57,9 +57,11 @@ type XianyuReconcileMirrorRepository interface {
 	RecordWorkerDeliveryResult(ctx context.Context, orderNo string, result XianyuDeliveryStatusResult) error
 }
 
-// XianyuReconcilePoolLookup 按库存池 slug 解析池（*xianyuControlRepository 实现）。
+// XianyuReconcilePoolLookup 提供对账反推归属所需的库存池查询（*xianyuControlRepository 实现）。
 type XianyuReconcilePoolLookup interface {
 	GetItemPoolBySlug(ctx context.Context, slug string) (*XianyuItemPool, error)
+	// ListItemPools 返回全部库存池，供反推归属时按规格内存匹配。
+	ListItemPools(ctx context.Context) ([]XianyuItemPool, error)
 }
 
 // XianyuReconcileAlerter 是对账漂移告警出口（*XianyuAlertService 实现）。
@@ -303,12 +305,11 @@ func (s *XianyuReconcileService) healMissingClaim(ctx context.Context, order Xia
 		return
 	}
 
-	// 从码的库存标记反推归属池（库存码 notes 约定为 xianyu_pool=<slug>）。
+	// 统一口径：码归属由码自身的 group_id+validity_days 决定，不再读 notes 标记。
+	// 在内存中按规格匹配库存池；匹配不到时 poolID 保持 0。
 	var poolID, productID int64
-	if slug, ok := strings.CutPrefix(code.Notes, "xianyu_pool="); ok && slug != "" {
-		if pool, err := s.pools.GetItemPoolBySlug(ctx, slug); err == nil && pool != nil {
-			poolID = pool.ID
-		}
+	if pools, err := s.pools.ListItemPools(ctx); err == nil {
+		poolID = findPoolIDBySpec(pools, code.GroupID, code.ValidityDays)
 	}
 
 	insertClaim := XianyuDeliveryClaim{
@@ -438,4 +439,19 @@ func (s *XianyuReconcileService) saveWatermark(ctx context.Context, ts time.Time
 	return s.setting.SetMultiple(ctx, map[string]string{
 		SettingKeyXianyuReconcileWatermark: ts.UTC().Format(time.RFC3339),
 	})
+}
+
+// findPoolIDBySpec 按 (group_id, validity_days) 在库存池列表中匹配池 ID。
+// 统一口径下库存池即该规格下兑换码集合的视图；匹配不到（含码无分组）返回 0。
+func findPoolIDBySpec(pools []XianyuItemPool, groupID *int64, validityDays int) int64 {
+	if groupID == nil {
+		return 0
+	}
+	for i := range pools {
+		p := &pools[i]
+		if p.GroupID != nil && *p.GroupID == *groupID && p.ValidityDays == validityDays {
+			return p.ID
+		}
+	}
+	return 0
 }
