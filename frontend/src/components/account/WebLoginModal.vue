@@ -145,10 +145,11 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const appStore = useAppStore()
 
-// 弹窗仅从网页逆向平台表单区打开；platform 为宽 union，非 web 平台时收敛到默认
-// （isWebProviderPlatform 守卫），确保 webProviderUsesCookie 等强类型调用安全。
+// 弹窗仅从网页接入模式表单区打开；platform 为官方 CN 平台（kimi/zhipu/deepseek），
+// 非网页接入平台时收敛到默认（isWebProviderPlatform 守卫），确保 webProviderUsesCookie
+// 等强类型调用安全。
 const webPlatform = computed<WebProviderPlatform>(() =>
-  isWebProviderPlatform(props.platform) ? props.platform : 'web-deepseek')
+  isWebProviderPlatform(props.platform) ? props.platform : 'deepseek')
 
 const pastedCredentials = ref('')
 const validating = ref(false)
@@ -171,19 +172,19 @@ const {
 // 新标签直连官方登录页（兜底路径，始终可用）。
 const loginUrl = computed(() => {
   switch (webPlatform.value) {
-    case 'web-deepseek':
+    case 'deepseek':
       return 'https://chat.deepseek.com/'
-    case 'web-zhipu':
+    case 'zhipu':
       return 'https://chatglm.cn/'
-    case 'web-kimi':
+    case 'kimi':
       return 'https://www.kimi.com/'
     default:
       return ''
   }
 })
 
-// 平台 → 翻译键映射：platform 为 kebab-case（web-deepseek），语言包键为驼峰
-// （webDeepseek），动态拼键前需转换，否则 i18n 缺失直接显示原始 key。
+// 平台 → 翻译键映射：platform 为官方平台（deepseek），语言包键为驼峰
+// （deepseek），动态拼键前需转换，否则 i18n 缺失直接显示原始 key。
 const platformHint = computed(() =>
   t(`admin.accounts.webLogin.platformHint.${props.platform.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())}`))
 
@@ -228,7 +229,7 @@ async function setupProxySession() {
       proxyUrl.value = `${proxyOrigin}${session.url}`
       proxyToken.value = session.token
       // Kimi 无自动 Cookie 捕获（手动 Token 粘贴），仅展示代理 iframe。
-      if (webPlatform.value !== 'web-kimi') {
+      if (webPlatform.value !== 'kimi') {
         startCapture(session.token)
       }
     } else {
