@@ -153,11 +153,13 @@ func TestMigrateWebPlatformAccountsUpDryRun(t *testing.T) {
 	require.Equal(t, 2, report.Total)
 	// dry-run 不写库。
 	require.Len(t, repo.migrateCalls, 0)
-	// 显式 access_mode=web 归入 skipped，形状待迁移的归入 migrated。
-	require.Len(t, report.Skipped, 1)
-	require.Equal(t, int64(84), report.Skipped[0].ID)
-	require.Len(t, report.Migrated, 1)
-	require.Equal(t, int64(85), report.Migrated[0].ID)
+	// legacy 平台账号全部是迁移候选：不能用 GetAccessMode()（形状推断
+	// 恒为 web）判定已归并——否则 dry-run 恒报"已归并"误导运维。
+	require.Len(t, report.Migrated, 2)
+	require.Equal(t, int64(84), report.Migrated[0].ID)
+	require.False(t, report.Migrated[0].AlreadyMerged)
+	require.Equal(t, int64(85), report.Migrated[1].ID)
+	require.Len(t, report.Skipped, 0)
 }
 
 func TestMigrateWebPlatformAccountsDown(t *testing.T) {

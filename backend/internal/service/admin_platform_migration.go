@@ -101,13 +101,11 @@ func (s *adminServiceImpl) runWebPlatformMigrationUp(ctx context.Context, dryRun
 			ToPlatform:   toPlatform,
 		}
 		if dryRun {
-			// dry-run 只核对：显式 access_mode 已是 web 视为已归并。
-			entry.AlreadyMerged = account.GetAccessMode() == AccountAccessModeWeb
-			if entry.AlreadyMerged {
-				report.Skipped = append(report.Skipped, entry)
-			} else {
-				report.Migrated = append(report.Migrated, entry)
-			}
+			// dry-run 只核对不写库。legacy 平台账号全部是迁移候选：
+			// up 的幂等跳过只发生在「官方平台 + marker」的账号上，那类
+			// 账号不会出现在 ListLegacyWebPlatformAccounts 的结果里；
+			// 不能用 GetAccessMode()（形状推断恒为 web）判定已归并。
+			report.Migrated = append(report.Migrated, entry)
 			continue
 		}
 		migrated, err := migrationRepo.MigrateAccountPlatform(ctx, account.ID, account.Platform, toPlatform)
@@ -144,11 +142,10 @@ func (s *adminServiceImpl) runWebPlatformMigrationDown(ctx context.Context, dryR
 	for _, account := range accounts {
 		fromPlatform := account.GetExtraString("migrated_from_platform")
 		entry := WebPlatformMigrationEntry{
-			ID:            account.ID,
-			Name:          account.Name,
-			FromPlatform:  account.Platform,
-			ToPlatform:    fromPlatform,
-			AlreadyMerged: false,
+			ID:           account.ID,
+			Name:         account.Name,
+			FromPlatform: account.Platform,
+			ToPlatform:   fromPlatform,
 		}
 		if dryRun {
 			report.Migrated = append(report.Migrated, entry)
