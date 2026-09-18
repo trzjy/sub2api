@@ -3,10 +3,12 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -39,35 +41,51 @@ func webKimiTestAccount(id int64, credentials map[string]any) *Account {
 	return acc
 }
 
-// webKimiSSEResponse 构造 200 + SSE 响应（通用 OpenAI 兼容形状增量，映射函数按
-// 「通用 SSE JSON」解析；真实 chunk 结构待登录态实测补全）。
-func webKimiSSEResponse() *http.Response {
-	sse := strings.Join([]string{
-		`data: {"id":"kimi-1","choices":[{"delta":{"content":"hello"}}]}`,
-		``,
-		`data: {"id":"kimi-1","choices":[{"delta":{"content":" world"}}]}`,
-		``,
-		`data: {"id":"kimi-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`,
-		``,
-		`data: [DONE]`,
-		``,
-	}, "\n")
+// webKimiFixtureEnvelopeFrames 是回放/单测用的 Connect envelope 载荷集合（登录态实测 10 §4
+// 结构的精简等价）：chat.id 首帧、assistant message 生成帧、block.text.content 正文增量帧、
+// message.status 完成帧、done 终止帧。
+var webKimiFixtureEnvelopeFrames = []string{
+	`{"op":"set","eventOffset":1,"chat":{"id":"chat-1","name":"未命名会话"}}`,
+	`{"op":"set","mask":"message","eventOffset":5,"message":{"id":"asst-1","parentId":"u1","role":"assistant","status":"MESSAGE_STATUS_GENERATING"}}`,
+	`{"op":"append","mask":"block.text.content","eventOffset":10,"block":{"id":"4","parentId":"","text":{"content":"hi "}}}`,
+	`{"op":"append","mask":"block.text.content","eventOffset":11,"block":{"id":"4","parentId":"","text":{"content":"there"}}}`,
+	`{"op":"set","mask":"message.status","eventOffset":12,"message":{"id":"asst-1","status":"MESSAGE_STATUS_COMPLETED"}}`,
+	`{"eventOffset":13,"done":{}}`,
+}
+
+// wrapWebKimiEnvelope 把一帧 JSON 载荷包成 Connect RPC envelope（1 字节 flag=0x00 + 4 字节
+// 大端长度 + payload），与上游实测线格式一致。
+func wrapWebKimiEnvelope(jsonStr string) []byte {
+	b := []byte(jsonStr)
+	buf := make([]byte, 5+len(b))
+	buf[0] = 0x00
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(b)))
+	copy(buf[5:], b)
+	return buf
+}
+
+// webKimiEnvelopeResponse 构造 200 + Connect RPC envelope 流响应（登录态实测 10 §4 线格式）。
+func webKimiEnvelopeResponse(payloads []string) *http.Response {
+	var body []byte
+	for _, p := range payloads {
+		body = append(body, wrapWebKimiEnvelope(p)...)
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(sse)),
+		Header:     http.Header{"Content-Type": []string{"application/connect+json"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
 	}
 }
 
-// webKimiConnectResponse 构造非流式 Connect RPC JSON 响应（正文落在已验证请求结构的
-// 对称位置 message.blocks[].content.value.content；响应侧结构待登录态实测补全）。
+// webKimiConnectResponse 构造非流式 Connect RPC envelope 响应（登录态实测回放用）：聚合后应
+// 得到正文 "hi there"、响应 id asst-1、chat.id chat-1。
 func webKimiConnectResponse() *http.Response {
-	body := `{"id":"kimi-2","message":{"blocks":[{"content":{"case":"text","value":{"$typeName":"kimi.chat.v1.TextBlock","content":"hi there"}}}]}}`
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
+	return webKimiEnvelopeResponse(webKimiFixtureEnvelopeFrames)
+}
+
+// webKimiStreamResponse 构造流式 Connect RPC envelope 响应（与 webKimiConnectResponse 同载荷）。
+func webKimiStreamResponse() *http.Response {
+	return webKimiEnvelopeResponse(webKimiFixtureEnvelopeFrames)
 }
 
 // webKimiUnauthenticatedResponse 实测形态：401 unauthenticated。
@@ -113,8 +131,10 @@ func webKimiInboundBody(model string) []byte {
 }
 
 // TestForwardWebKimi_RequestBuildAndNonStreamAggregate 覆盖：
-//   - 出站端点 /apiv2/kimi.chat.v1.ChatService/Chat、Connect RPC 头（Bearer / Origin / Referer / UA）；
-//   - 请求体已验证结构（kimiPlusId=ok-computer、message.blocks text、options.model、role=1）；
+//   - 出站端点 /apiv2/kimi.chat.v1.ChatService/Chat、Connect RPC 头（Bearer / Cookie 候选 /
+//     Origin / Referer / UA / x-language / x-msh-platform / x-msh-version）；
+//   - 请求体已验证结构（blocks[].text.content 简单形态、options.model=官方值、
+//     scenario=SCENARIO_CHAT、thinking/enable_plugin/reasoning_effort 实测默认、**不带 chatId**）；
 //   - base_url 凭证覆盖默认域名；
 //   - 非流式 Connect 响应聚合为单条 chat.completion JSON，模型名回填原始请求模型。
 func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
@@ -134,21 +154,32 @@ func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	require.Equal(t, "/apiv2/kimi.chat.v1.ChatService/Chat", chatReq.URL.Path)
 	require.Equal(t, "www.kimi.com", chatReq.URL.Host, "credentials.base_url must override default base url")
 	require.Equal(t, "Bearer kimi-access-token-abc123", chatReq.Header.Get("Authorization"))
-	require.Equal(t, "application/json", chatReq.Header.Get("Content-Type"))
+	require.Equal(t, "application/connect+json", chatReq.Header.Get("Content-Type"))
 	require.Equal(t, "https://www.kimi.com", chatReq.Header.Get("Origin"))
 	require.Equal(t, webKimiClientUA, chatReq.Header.Get("User-Agent"))
+	// 头族实测（10 §2）：x-language / x-msh-platform / x-msh-version 常量。
+	require.Equal(t, "zh-CN", chatReq.Header.Get("x-language"))
+	require.Equal(t, "web", chatReq.Header.Get("x-msh-platform"))
+	require.Equal(t, "2.2.0", chatReq.Header.Get("x-msh-version"))
 
-	// 请求体：已验证结构（方案 §4.3）。
+	// 请求体：登录态实测结构（10 §3）。
 	body := upstream.bodies[0]
-	require.Equal(t, "ok-computer", gjson.GetBytes(body, "kimiPlusId").String())
 	require.Equal(t, "k3", gjson.GetBytes(body, "options.model").String())
-	require.False(t, gjson.GetBytes(body, "options.thinking").Bool())
-	require.Equal(t, float64(1), gjson.GetBytes(body, "message.role").Float())
-	require.Equal(t, "hi", gjson.GetBytes(body, "message.blocks.0.content.value.content").String())
-	require.Equal(t, "text", gjson.GetBytes(body, "message.blocks.0.content.case").String())
-	require.True(t, gjson.GetBytes(body, "message.references.$typeName").Exists())
+	require.True(t, gjson.GetBytes(body, "options.thinking").Bool())
+	require.True(t, gjson.GetBytes(body, "options.enable_plugin").Bool())
+	require.Equal(t, "REASONING_EFFORT_LOW", gjson.GetBytes(body, "options.reasoning_effort").String())
+	require.Equal(t, "SCENARIO_CHAT", gjson.GetBytes(body, "scenario").String())
+	require.Equal(t, "user", gjson.GetBytes(body, "message.role").String())
+	require.Equal(t, "hi", gjson.GetBytes(body, "message.blocks.0.text.content").String())
+	require.Equal(t, "", gjson.GetBytes(body, "message.blocks.0.message_id").String())
+	require.Equal(t, "", gjson.GetBytes(body, "project_id").String())
+	require.Len(t, gjson.GetBytes(body, "tools").Array(), 2)
+	// 登录态实测：请求体不带 chatId / kimiPlusId（chatId 服务端生成）。
+	require.False(t, gjson.GetBytes(body, "chatId").Exists(), "request must not carry chatId")
+	require.False(t, gjson.GetBytes(body, "kimiPlusId").Exists(), "request must not carry kimiPlusId")
+	require.Equal(t, http.MethodPost, upstream.requests[0].Method)
 
-	// 回程聚合：Connect JSON → 单条 chat.completion，模型回填原始请求模型。
+	// 回程聚合：Connect envelope → 单条 chat.completion，模型回填原始请求模型。
 	require.Equal(t, http.StatusOK, recorder.Code)
 	var completion map[string]any
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &completion))
@@ -161,6 +192,7 @@ func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	message, ok := first["message"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "hi there", message["content"])
+	require.Equal(t, "asst-1", completion["id"])
 }
 
 // TestForwardWebKimi_ModelMappingPassthrough 覆盖模型映射（方案 §3.3 实测映射：
@@ -278,8 +310,8 @@ func TestForwardWebKimi_401WithoutRefreshToken(t *testing.T) {
 	require.Equal(t, 1, repo.setRateLimitedCalls)
 }
 
-// TestForwardWebKimi_StreamingResponse 覆盖流式回程：SSE 增量重包为
-// chat.completion.chunk 流 + 终止 [DONE]，usage 提取。
+// TestForwardWebKimi_StreamingResponse 覆盖流式回程：Connect envelope 增量重包为
+// chat.completion.chunk 流 + 终止 [DONE]。
 func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -294,13 +326,13 @@ func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	}
 	account := webKimiTestAccount(8925, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), webKimiSSEResponse(), c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+		context.Background(), webKimiStreamResponse(), c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
 	require.NoError(t, err)
 	require.True(t, result.Stream)
 
 	out := recorder.Body.String()
-	require.Contains(t, out, `"content":"hello"`)
-	require.Contains(t, out, `"content":" world"`)
+	require.Contains(t, out, `"content":"hi "`)
+	require.Contains(t, out, `"content":"there"`)
 	require.Contains(t, out, "chat.completion.chunk")
 	require.Contains(t, out, "data: [DONE]")
 }
@@ -318,17 +350,11 @@ func TestForwardWebKimi_StreamMidstreamBusinessError(t *testing.T) {
 			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
 		},
 	}
-	sse := strings.Join([]string{
-		`data: {"id":"kimi-1","choices":[{"delta":{"content":"hello"}}]}`,
-		``,
-		`data: {"code":"unauthenticated","message":"login expired midstream"}`,
-		``,
-	}, "\n")
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(sse)),
-	}
+	resp := webKimiEnvelopeResponse([]string{
+		`{"op":"set","mask":"message","eventOffset":5,"message":{"id":"asst-1","role":"assistant","status":"MESSAGE_STATUS_GENERATING"}}`,
+		`{"op":"append","mask":"block.text.content","eventOffset":10,"block":{"id":"4","parentId":"","text":{"content":"hello"}}}`,
+		`{"code":"unauthenticated","message":"login expired midstream"}`,
+	})
 	account := webKimiTestAccount(8935, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
 		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
@@ -340,24 +366,21 @@ func TestForwardWebKimi_StreamMidstreamBusinessError(t *testing.T) {
 	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream")
 	require.Contains(t, out, `"upstream_error"`)
 	// 错误帧必须是 [DONE] 之前的最后一帧业务帧：中间没有任何正常 finish_reason+usage 终止帧。
+	// 错误信息采用上游真实 message（经 sanitize，不回显凭证），而非写死文案。
 	require.Contains(t, out,
-		`data: {"error":{"message":"web-kimi midstream business error","type":"upstream_error"}}`+"\n\n"+`data: [DONE]`,
+		`data: {"error":{"message":"login expired midstream","type":"upstream_error"}}`+"\n\n"+`data: [DONE]`,
 		"error frame must immediately precede [DONE], with no normal terminal frame in between")
 	require.NotContains(t, out, `"usage"`, "midstream error must NOT emit a normal usage terminal frame")
 	// 凭证脱敏：错误响应不得回显 access_token。
 	require.NotContains(t, recorder.Body.String(), "kimi-access-token-abc123")
 }
 
-// TestForwardWebKimi_UnrecognizedShapeFailsClosed 非 SSE 且结构不可识别：失败关闭，
-// 不伪造成功响应。
+// TestForwardWebKimi_UnrecognizedShapeFailsClosed Connect envelope 单帧但结构不可识别
+// （无 heartbeat/done/code/chat/message/block）：聚合为空，失败关闭，不伪造成功响应。
 func TestForwardWebKimi_UnrecognizedShapeFailsClosed(t *testing.T) {
 	account := webKimiTestAccount(8926, nil)
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"weird":"shape"}`)),
-		},
+		webKimiEnvelopeResponse([]string{`{"weird":"shape"}`}),
 	}}
 	recorder, err := runForwardWebKimi(t, account, webKimiInboundBody("kimi-k3"), "kimi-k3", upstream, &RateLimitService{})
 	require.Error(t, err)
@@ -401,57 +424,169 @@ func TestWebKimiBareJSONError(t *testing.T) {
 	}
 }
 
-// TestForwardWebKimi_BareJSONStringCodeReachesErrorPath 集成验证（#3）：上游返回裸 JSON
-// 字符串 code（{"code":"unauthenticated"}）时，流式回程必须走业务错误路径返回错误，
-// 不再被忽略导致空流伪成功。
-func TestForwardWebKimi_BareJSONStringCodeReachesErrorPath(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
-
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
-	}
-	account := webKimiTestAccount(8930, nil)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"code":"unauthenticated","message":"login required"}`)),
-	}
-	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
-	require.Error(t, err, "bare JSON string code must reach the error path")
-	require.Nil(t, result)
-	// 凭证脱敏：错误响应不得回显 access_token。
-	require.NotContains(t, recorder.Body.String(), "kimi-access-token-abc123")
+// TestParseWebKimiEnvelopePayload 解析器单测：覆盖登录态实测（10 §4）各帧型——
+// 心跳跳过、done 终止、chat.id / assistant message.id 提取、block.text.content 正文增量、
+// block.think.content 思考增量、mask "block.text" 的 set 帧（首段正文）、认证/业务错误、
+// 以及 user role 消息正文必须排除（不得混入用户提问）。
+func TestParseWebKimiEnvelopePayload(t *testing.T) {
+	t.Run("heartbeat_skips_content", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"heartbeat":{}}`))
+		require.True(t, ev.Heartbeat)
+		require.Empty(t, ev.TextDelta)
+		require.Empty(t, ev.ThinkDelta)
+	})
+	t.Run("done_termination", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"eventOffset":88,"done":{}}`))
+		require.True(t, ev.Done)
+	})
+	t.Run("chat_id_first_frame", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","eventOffset":1,"chat":{"id":"c1","name":"x"}}`))
+		require.Equal(t, "c1", ev.ChatID)
+	})
+	t.Run("assistant_message_id", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","mask":"message","eventOffset":5,"message":{"id":"a1","role":"assistant","status":"MESSAGE_STATUS_GENERATING"}}`))
+		require.Equal(t, "a1", ev.AssistantID)
+	})
+	t.Run("text_delta_append", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"append","mask":"block.text.content","eventOffset":10,"block":{"id":"4","text":{"content":"hi "}}}`))
+		require.Equal(t, "hi ", ev.TextDelta)
+	})
+	t.Run("think_delta", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"append","mask":"block.think.content","eventOffset":11,"block":{"id":"3","think":{"content":"thinking"}}}`))
+		require.Equal(t, "thinking", ev.ThinkDelta)
+	})
+	t.Run("set_block_text_first_segment", func(t *testing.T) {
+		// 实测首段正文以 op=set + mask "block.text"（而非 block.text.content）下发。
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","mask":"block.text","eventOffset":75,"block":{"id":"4","parentId":"","text":{"content":"你好"}}}`))
+		require.Equal(t, "你好", ev.TextDelta)
+	})
+	t.Run("unauthenticated_error", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"code":"unauthenticated","message":"expired"}`))
+		require.True(t, ev.AuthFailed)
+	})
+	t.Run("numeric_code_error", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"code":401,"message":"auth failed"}`))
+		require.NotZero(t, ev.ErrCode)
+	})
+	t.Run("user_role_text_excluded", func(t *testing.T) {
+		// 用户消息帧（role=user）的正文不得被当作助手正文聚合。
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","mask":"message","eventOffset":4,"message":{"id":"u1","role":"user","blocks":[{"text":{"content":"你好"}}]}}`))
+		require.Empty(t, ev.AssistantID)
+		require.Empty(t, ev.TextDelta)
+	})
 }
 
-// TestForwardWebKimi_BareJSONContentIgnored 集成对照（#3）：纯内容裸 JSON（无 code）
-// 仍按安全策略忽略，不误判为业务错误。
-func TestForwardWebKimi_BareJSONContentIgnored(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
+// kimiExtractJSONObjects 从原始 Connect 流字节中恢复各帧 JSON 载荷。
+//
+// 实测 fixture（raw/kimi-chat-decoded.txt）的 envelope 长度前缀字节因 UTF-8 重编码损坏
+// （>=0x80 的长度字节被替换为 U+FFFD 三字节序列），故不能依赖 1 字节 flag + 4 字节长度
+// 去切帧。所有真实 payload 均为以 `{"` 开头的完整 JSON 对象，这里锚定 `{"` 后用
+// 括号/字符串/转义感知的匹配器逐帧提取，与 parseWebKimiEnvelopePayload 解耦（解析器单测
+// 已独立覆盖）。
+func kimiExtractJSONObjects(data []byte) [][]byte {
+	var objs [][]byte
+	start := 0
+	for start < len(data) {
+		idx := bytes.Index(data[start:], []byte(`{"`))
+		if idx < 0 {
+			break
+		}
+		p := start + idx
+		end, ok := matchJSONObject(data, p)
+		if !ok {
+			start = p + 1
+			continue
+		}
+		objs = append(objs, data[p:end])
+		start = end
+	}
+	return objs
+}
 
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
+// matchJSONObject 从 data[start]（须为 '{'）起，按深度/字符串/转义感知匹配到配对的 '}，
+// 返回结束位置（不含）；非法结构返回 ok=false。
+func matchJSONObject(data []byte, start int) (int, bool) {
+	if start >= len(data) || data[start] != '{' {
+		return 0, false
 	}
-	account := webKimiTestAccount(8931, nil)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"content":"hello world"}`)),
+	depth := 0
+	inStr := false
+	esc := false
+	for i := start; i < len(data); i++ {
+		c := data[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		case '"':
+			inStr = true
+		}
 	}
-	_, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
-	// 纯内容裸 JSON 无 code，无增量可写，扫描结束、收口终止帧，不返回错误。
-	require.NoError(t, err)
+	return 0, false
+}
+
+// TestForwardWebKimi_FixtureReplay 用登录态实测流（raw/kimi-chat-decoded.txt）做回放
+// fixture：解析器须正确提取思考块、正文块、chat.id、assistant message.id、done 终止；
+// heartbeat 帧不产出正文。聚合正文须等于实测内容
+// 「你好！很高兴见到你。有什么我可以帮你的吗？」。fixture 不在仓库内，缺失时跳过。
+func TestForwardWebKimi_FixtureReplay(t *testing.T) {
+	const fixturePath = "/home/zjy/.sub2api-acceptance/sub2api-20260918-web-deepseek-kimi-evidence/raw/kimi-chat-decoded.txt"
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Skipf("kimi fixture unavailable (expected outside repo): %v", err)
+	}
+	objs := kimiExtractJSONObjects(raw)
+	require.NotEmpty(t, objs, "fixture must yield at least one JSON frame")
+
+	var (
+		chatID      string
+		assistantID string
+		text        strings.Builder
+		think       strings.Builder
+		heartbeats  int
+		done        bool
+	)
+	for _, o := range objs {
+		ev := parseWebKimiEnvelopePayload(o)
+		if ev.Heartbeat {
+			heartbeats++
+			continue
+		}
+		if ev.ChatID != "" {
+			chatID = ev.ChatID
+		}
+		if ev.AssistantID != "" {
+			assistantID = ev.AssistantID
+		}
+		if ev.Done {
+			done = true
+		}
+		text.WriteString(ev.TextDelta)
+		think.WriteString(ev.ThinkDelta)
+	}
+
+	require.Equal(t, "你好！很高兴见到你。有什么我可以帮你的吗？", text.String(),
+		"replayed fixture text must match measured stream content")
+	require.Equal(t, "1a0b0c27-46e2-88b2-8000-0914bdb43c0e", chatID, "chat.id from first frame")
+	require.Equal(t, "1a0b0c27-46e2-88b4-8000-0a1448151b8d", assistantID, "assistant message.id")
+	require.True(t, done, "done termination frame must be detected")
+	require.Equal(t, 3, heartbeats, "3 heartbeat frames must be skipped (produce no text)")
+	require.GreaterOrEqual(t, think.Len(), 100, "thinking block must be extracted")
+	require.Contains(t, think.String(), "你好", "thinking references the greeting")
 }
 
 // webKimiRateLimitRepoStub 记录 SetRateLimited（冷却写入点）。

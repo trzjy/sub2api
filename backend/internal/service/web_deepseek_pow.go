@@ -15,18 +15,38 @@ import (
 
 // DeepSeek 网页版 PoW（DeepSeekHashV1）求解器。
 //
-// 算法依据（公开实现相互印证，登录态抓包最终确认前作为当前权威路径）：
-//   - aiodeepseek C++ 求解器（github.com/boykopovar/aiodeepseek aiodeepseek/pow/_pow.cpp）：
-//     输入 base = f"{salt}_{expire_at}_"，找 nonce ∈ [0, difficulty) 使
-//     23 轮 Keccak-256（第一轮使用 rc[1]，省略标准第 24 轮）对
-//     base + strconv(nonce) 的状态前 32 字节（lane 0-3 小端）与 challenge hex 全等；
-//     SHA-3 终止填充 0x06，块尾 0x80，RATE=136。
-//   - x-ds-pow-response 头：base64(JSON{algorithm, challenge, salt, signature,
-//     answer(数值), target_path})，JSON 无空格分隔（jishuzhan.net 逆向分析 +
-//     91fans.com.cn 实测抓包一致）。
+// ============================================================================
+// 算法取证依据（官方来源，已实证，非猜测）
+// ----------------------------------------------------------------------------
+// 官方前端主包引用 WASM：
+//   https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm
+// （留档 /tmp/sha3_wasm_bg.wasm，source 路径戳 sha3-wasm/src/lib.rs）。
+// 该 wasm 导出两个函数：
+//   - wasm_deepseek_hash_v1(ret_slot, input_ptr, input_len)：
+//       对输入字节串做 DeepSeekHashV1 摘要，结果以 64 字符小写 hex 字符串写回
+//       ret_slot（bindgen &str -> String 约定：首参为返回槽 (ptr,len)）。
+//   - wasm_solve(ret_slot, challenge_ptr, challenge_len, salt_ptr, salt_len,
+//       difficulty:i32, expire_at:i64)：在 nonce ∈ [0, difficulty) 内暴力搜索，
+//       直到 hash(salt_expire_nonce) 的 32 字节与 challenge 字节全等（wasm 内
+//       为 32 次 i32.ne + br_if 的逐字节比较循环，非前导零阈值），返回命中的
+//       nonce 数值。
 //
-// 与标准 Keccak-256 的差异仅在轮数（23 轮）；x/crypto/sha3 的 keccakF1600
-// 是 24 轮且不可配置，因此这里内联 23 轮置换（轮常数表与标准一致）。
+// 本实现与官方 wasm 的实证对照（输入串 = salt + "_" + expire_at + "_" + nonce，
+// 十进制拼 nonce；expire_at 取 challenge.expire_at 的十进制串）：
+//   salt123_1739764288699_0     -> 369a2319faf63a9d8af03c55d41c6ba3c0f08824643f069874d5b1bdb86f6fd8
+//   salt123_1739764288699_42    -> 6de3393aba4cece63e3e6a761752722b05f2cfe531bc1b5c82e01985e93fddd2
+//   salt123_1739764288699_77906 -> ce810d6ec165115438096ce6cf0b11fda1e99fd95ff670b48e8d8347260e18a4
+// 以上三行由官方 wasm_deepseek_hash_v1 与 webDeepseekPowStateDigest 各自独立计算，
+// 输出逐字节一致（见 web_deepseek_pow_test.go 已知向量用例）。
+//
+// 摘要内部语义（与官方一致）：23 轮 Keccak-f[1600]（首轮使用 rc[1]，省略标准第
+// 24 轮；轮常数表与标准一致），RATE=136，SHA-3 终止填充 0x06 + 块尾 0x80，取状态
+// lane 0-3（32 字节小端）。x/crypto/sha3 的 keccakF1600 是 24 轮且不可配置，故内联
+// 23 轮置换。
+//
+// 社区逆向（aiodeepseek C++ 求解器 github.com/boykopovar/aiodeepseek、jishuzhan.net
+// 逆向、91fans.com.cn 实测抓包）结论与上述官方取证相互印证，仅作为交叉佐证。
+// ============================================================================
 
 // webDeepseekKeccakRC Keccak-f[1600] 轮常数（与标准 24 轮一致；23 轮实现用 rc[1..23]）。
 var webDeepseekKeccakRC = [24]uint64{
@@ -119,13 +139,18 @@ func webDeepseekPowStateDigest(message []byte) [32]byte {
 }
 
 // webDeepseekPowChallenge 挑战载荷（create_pow_challenge 响应 data.biz_data.challenge）。
+// 字段结构与登录态实测（09 §3）一致：algorithm/challenge/salt/signature/difficulty/
+// expire_at/expire_after/target_path。其中 expire_after 为有效期（毫秒，本次求解未使用），
+// target_path 在打包出站头时由 webDeepseekSolvePoW 的 targetPath 参数提供。
 type webDeepseekPowChallenge struct {
-	Algorithm  string `json:"algorithm"`
-	Challenge  string `json:"challenge"`
-	Salt       string `json:"salt"`
-	Signature  string `json:"signature"`
-	Difficulty int64  `json:"difficulty"`
-	ExpireAt   int64  `json:"expire_at"`
+	Algorithm   string `json:"algorithm"`
+	Challenge   string `json:"challenge"`
+	Salt        string `json:"salt"`
+	Signature   string `json:"signature"`
+	Difficulty  int64  `json:"difficulty"`
+	ExpireAt    int64  `json:"expire_at"`
+	ExpireAfter int64  `json:"expire_after"`
+	TargetPath  string `json:"target_path"`
 }
 
 // webDeepseekSolvePoW 求解挑战，返回出站 x-ds-pow-response 头值

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -39,15 +40,26 @@ func makeFakeWebZhipuJWTProbe(t *testing.T, payload map[string]any) string {
 type webProbeUpstream struct {
 	lastReq *http.Request
 	resp    *http.Response
+	// respSeq 非空时按序出队（Do 与 DoWithTLS 共用同一队列），耗尽后回落单响应。
+	respSeq []*http.Response
 }
 
-func (u *webProbeUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	return nil, http.ErrNotSupported
+func (u *webProbeUpstream) next() *http.Response {
+	if len(u.respSeq) > 0 {
+		r := u.respSeq[0]
+		u.respSeq = u.respSeq[1:]
+		return r
+	}
+	return u.resp
+}
+
+func (u *webProbeUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return u.next(), nil
 }
 
 func (u *webProbeUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	u.lastReq = req
-	return u.resp, nil
+	return u.next(), nil
 }
 
 func newWebTestContext() (*gin.Context, *httptest.ResponseRecorder) {
@@ -77,10 +89,16 @@ func parseTestStartModel(body string) string {
 // httpUpstream / tlsFPProfileService / openaiGatewayService 三项）。
 func newWebTestService(upstream *webProbeUpstream, resp *http.Response) *AccountTestService {
 	upstream.resp = resp
+	gw := &OpenAIGatewayService{
+		httpUpstream: upstream,
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
 	return &AccountTestService{
 		httpUpstream:         upstream,
 		tlsFPProfileService:  &TLSFingerprintProfileService{},
-		openaiGatewayService: &OpenAIGatewayService{},
+		openaiGatewayService: gw,
 	}
 }
 
@@ -221,12 +239,19 @@ func TestDefaultWebModelIDsZhipuDefaultIsFirstEntry(t *testing.T) {
 }
 
 // TestWebAccountConnection_DeepSeekProbeNoRegression deepseek 探活不回归：空 modelID 回落
-// 既有默认（deepseek_chat），出站 model_class 正确，测试成功。
+// 既有默认（deepseek-chat → model_type "default"，2026-09-18 登录态实测），出站 model_type
+// 正确，测试成功。
 func TestWebAccountConnection_DeepSeekProbeNoRegression(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newWebTestContext()
-	upstream := &webProbeUpstream{}
+	// 新协议探活走完整三跳：PoW 挑战 → 建会话 → completion（09 §1/§3 登录态强制）。
+	upstream := &webProbeUpstream{respSeq: []*http.Response{
+		webDeepseekSolvablePowChallengeResponse(),
+		webDeepseekSessionCreateResponse(),
+		nil, // completion 响应稍后注入（newWebTestService 设置 upstream.resp）
+	}}
 	svc := newWebTestService(upstream, okSSEResponse())
+	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          11,
 		Platform:    PlatformWebDeepseek,
@@ -237,11 +262,15 @@ func TestWebAccountConnection_DeepSeekProbeNoRegression(t *testing.T) {
 	err := svc.testWebAccountConnection(ctx, account, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastReq)
+	// 探活与正式转发同链：completion 出站必须携带 PoW 头（09 §3）。
+	require.NotEmpty(t, upstream.lastReq.Header.Get("X-Ds-PoW-Response"), "probe completion request must carry the PoW header")
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
-	// 默认 deepseek-chat → model_class deepseek_chat（与既有行为一致）。
-	require.Equal(t, "deepseek_chat", gjson.GetBytes(body, "model_class").String())
+	// 默认 deepseek-chat → model_type "default"（2026-09-18 登录态实测，09 §4）。
+	require.Equal(t, "default", gjson.GetBytes(body, "model_type").String())
 	require.False(t, gjson.GetBytes(body, "thinking_enabled").Bool())
+	// 自动建会话：出站体携带非空 chat_session_id（探活不再发无会话请求）。
+	require.Equal(t, "sess-new-123", gjson.GetBytes(body, "chat_session_id").String())
 }
 
 // TestWebAccountConnection_DeepSeekRespectsModelIDAndMapping deepseek 尊重非空
@@ -249,8 +278,13 @@ func TestWebAccountConnection_DeepSeekProbeNoRegression(t *testing.T) {
 func TestWebAccountConnection_DeepSeekRespectsModelIDAndMapping(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newWebTestContext()
-	upstream := &webProbeUpstream{}
+	upstream := &webProbeUpstream{respSeq: []*http.Response{
+		webDeepseekSolvablePowChallengeResponse(),
+		webDeepseekSessionCreateResponse(),
+		nil,
+	}}
 	svc := newWebTestService(upstream, okSSEResponse())
+	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          12,
 		Platform:    PlatformWebDeepseek,
@@ -266,7 +300,7 @@ func TestWebAccountConnection_DeepSeekRespectsModelIDAndMapping(t *testing.T) {
 	require.NotNil(t, upstream.lastReq)
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
-	require.Equal(t, "deepseek_chat", gjson.GetBytes(body, "model_class").String())
+	require.Equal(t, "default", gjson.GetBytes(body, "model_type").String())
 	require.True(t, gjson.GetBytes(body, "thinking_enabled").Bool())
 }
 
@@ -286,6 +320,8 @@ func TestWebAccountConnection_KimiProbeNoRegression(t *testing.T) {
 	err := svc.testWebAccountConnection(ctx, account, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, upstream.lastReq)
+	// 探活与正式转发同链：Connect RPC 头族与 forwardWebKimi 完全一致（10 §2 实测）。
+	require.Equal(t, "application/connect+json", upstream.lastReq.Header.Get("Content-Type"))
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
 	require.Equal(t, "k3", gjson.GetBytes(body, "options.model").String())

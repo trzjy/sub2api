@@ -61,12 +61,16 @@ func TestTestWebAccountConnection_InvalidBaseURLErrors(t *testing.T) {
 	require.NotContains(t, body, "test_complete", "illegal base_url must NOT false-pass the connection test")
 	require.NotContains(t, body, "success")
 
-	// 对照组：合法 base_url（含上游 200）正常判为成功。
+	// 对照组：合法 base_url（含上游 200）正常判为成功（新协议三跳：PoW → 建会话 → completion）。
 	good := webDeepseekTestAccount(9931, map[string]any{
 		"cookie":   "ds_session_id=sess-abc; HWWAFSESID=waf-xyz",
 		"base_url": "https://chat.deepseek.com",
 	})
-	goodBody := runWebProbe(t, good, refreshResponse(http.StatusOK, "ok"))
+	goodBody := runWebProbeWithResponses(t, good,
+		webDeepseekSolvablePowChallengeResponse(),
+		webDeepseekSessionCreateResponse(),
+		refreshResponse(http.StatusOK, "ok"),
+	)
 	require.Contains(t, goodBody, "test_complete")
 	require.Contains(t, goodBody, `"success":true`)
 }

@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,44 +20,49 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// web-deepseek 网页逆向适配器（方案 W4，docs/web-reverse-embedded-login-plan.md §4.1、
-// docs/web-reverse-analysis-plan.md §1.1/§3.3/§3.4）。
+// web-deepseek 网页逆向适配器（协议重写：依据 09-deepseek-logged-in-probe.md 登录态实测）。
 //
-// 协议状态声明（权威来源：两份方案文档的实测记录，2026-09-16）：
-//   - 已实测：对话端点 POST /api/v0/chat/completion（SSE）、PoW 挑战端点
-//     POST /api/v0/chat/create_pow_challenge、WAF Cookie（HWWAFSESID/HWWAFSESTIME）、
-//     关键请求字段 chat_session_id / parent_message_id / ref_file_ids / model_class /
-//     prompt / thinking_enabled / search_enabled、业务错误码形态 {"code":40002,"msg":"..."}。
-//   - 未实测（登录态缺失）：PoW 计算格式、SSE chunk 结构、登录后 Token 获取流程。
-//     本文件对全部未知格式做集中封装并标注「待登录态实测补全」，不做任何臆测编造；
-//     PoW 求解当前失败关闭（ErrWebDeepseekPoWNotImplemented）。
+// 协议状态声明（权威来源：09 登录态实测 + 06 实施包 §A/§A'，全部来自真实抓包，不再臆测）：
+//   - 认证：Cookie 载体（无 Authorization 头）+ x-client-* / x-device-id / x-ds-pow-response /
+//     x-hif-dliq / x-hif-leim 头族（09 §2）。
+//   - 每轮链：POST /api/v0/chat/create_pow_challenge（target_path）→ POST /api/v0/chat_session/create
+//     （body {}）→ POST /api/v0/chat/completion（SSE）。网关无状态：每轮新建会话，parent_message_id
+//     恒 null，历史多轮以单 prompt 拼接（09 §1/§4/§5）。
+//   - 请求体字段：chat_session_id / parent_message_id(null) / model_type / prompt / ref_file_ids /
+//     thinking_enabled / search_enabled(true) / source(缺省省略) / action(null) / preempt(false)。
+//   - SSE：event:/data: 帧对；delta 为 JSON-Patch（p/o/v，省略形态沿用当前路径）；正文取 RESPONSE
+//     fragment content，THINK 丢弃；usage 为 accumulated_token_usage（BATCH 更新，语义累计 token）；
+//     终止 event:close / event:finish + response/status=FINISHED；无 [DONE]。
+//   - 错误：HTTP 200 + {"code":0,...,"data":{"biz_code":N,"biz_msg","biz_data":null}} 双路径判定
+//     （顶层 code 或 data.biz_code 非 0 均按业务错误）；WAF：x-amzn-waf-action / 405 失败关闭。
 //
 // 安全红线：凭证（cookie / waf_cookie）不得出现在日志或错误响应中——上游错误体在
 // 任何透传前先经 redactWebDeepseekUpstreamErrorBody 脱敏。
 
 const (
-	// webDeepseekDefaultBaseURL 默认官方网页端域名（分析文档 §1.1 实测）。
+	// webDeepseekDefaultBaseURL 默认官方网页端域名（09 §2）。
 	webDeepseekDefaultBaseURL = "https://chat.deepseek.com"
-	// webDeepseekChatCompletionPath 对话端点（SSE，实测）。
+	// webDeepseekChatCompletionPath 对话端点（SSE，09 §1）。
 	webDeepseekChatCompletionPath = "/api/v0/chat/completion"
-	// webDeepseekPoWChallengePath PoW 挑战获取端点（实测，登录态下返回 challenge，格式未实测）。
+	// webDeepseekPoWChallengePath PoW 挑战获取端点（09 §1，body {"target_path":...}）。
 	webDeepseekPoWChallengePath = "/api/v0/chat/create_pow_challenge"
-	// webDeepseekClientUA 指纹对齐用浏览器 UA（方案 §3.5：请求头严格模拟官方网页端；
-	// 具体 UA 以登录态抓包为准，当前为通用现代浏览器形态）。
+	// webDeepseekChatSessionCreatePath 会话创建端点（09 §1，body {}）。
+	webDeepseekChatSessionCreatePath = "/api/v0/chat_session/create"
+	// webDeepseekClientUA 指纹对齐用浏览器 UA（09 §2 实测请求头族）。
 	webDeepseekClientUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-// ErrWebDeepseekPoWNotImplemented PoW 求解未实现（挑战计算格式未实测）。
-// 在登录态实测补全之前，任何要求 PoW 的请求一律失败关闭，绝不臆测算法。
+// ErrWebDeepseekPoWNotImplemented PoW 求解不可用（挑战不可达 / 结构未识别 / 求解失败）。
+// 登录态实测确认 PoW 强制（09 §3），因此任何不可解的 PoW 一律失败关闭，绝不臆测算法或绕过。
 var ErrWebDeepseekPoWNotImplemented = errors.New(
-	"web-deepseek: PoW challenge solving is not implemented (pending logged-in traffic capture)")
+	"web-deepseek: PoW challenge is mandatory (logged-in capture) but could not be solved")
 
 // forwardWebDeepseek 是 DeepSeek 网页逆向平台（web-deepseek）的转发入口，函数链模式
 // 与 forwardCodeBuddy 同构：入站 OpenAI Chat Completions → 网页端请求（SSE）→ 回程
 // 通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService.Forward 的 platform
 // 分支按 PlatformWebDeepseek 分发（该分发注册由并行任务落在共享注册点文件中）。
-// assertWebDeepseekAccount 是 forwardWebDeepseek 入口的双断言 fail-closed（隔离红线
-// §6）：旧 web-deepseek 平台（平台本身即判定），或新形态官方 deepseek 平台 + web access
+// assertWebDeepseekAccount 是 forwardWebDeepseek 入口的双断言 fail-closed（隔离红线）：
+// 旧 web-deepseek 平台（平台本身即判定），或新形态官方 deepseek 平台 + web access
 // mode 双断言。API 模式 deepseek 账号绝不进入网页协议链，web 模式 zhipu/kimi 账号绝不误入。
 func assertWebDeepseekAccount(account *Account) error {
 	if account == nil {
@@ -99,29 +106,32 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 		return nil, errors.New("web-deepseek account has no base_url")
 	}
 
-	// 模型映射：account.GetModelMapping() 默认透传（GetMappedModel 未命中即原样返回），
-	// 再做 model_class 归一（方案 §3.3 模型映射表；未知模型名按「默认透传同名」处理）。
+	// 模型映射：account.GetModelMapping() 默认透传；归一为网页端 model_type（09 §4 实测
+	// deepseek-chat → "default"；deepseek-reasoner → "default" + thinking_enabled=true）。
 	upstreamModel := account.GetMappedModel(originalModel)
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
 	}
-	modelClass, thinkingEnabled := webDeepseekModelClass(upstreamModel)
+	modelType, thinkingEnabled := webDeepseekModelClass(upstreamModel)
 	SetOpsUpstreamModel(c, upstreamModel)
 
-	upstreamBody, err := buildWebDeepseekRequestBody(body, account, modelClass, thinkingEnabled)
+	// PoW：登录态强制（09 §3）。取 challenge（target_path=/api/v0/chat/completion）并求解，
+	// 失败一律 fail-closed（不再"无 PoW 继续出站"——实测证明强制）。
+	powHeader, err := s.fetchWebDeepseekPoWHeader(ctx, account, baseURL, cookie, accountProxyURL(account))
 	if err != nil {
 		return nil, err
 	}
 
-	proxyURL := ""
-	if account.ProxyID != nil && account.Proxy != nil {
-		proxyURL = account.Proxy.URL()
+	// 自动建会话：credentials 有 chat_session_id 覆盖则跳过创建；否则每轮新建（网关无状态）。
+	sessionID, err := s.ensureWebDeepseekSession(ctx, account, baseURL, cookie, accountProxyURL(account))
+	if err != nil {
+		return nil, err
 	}
 
-	// PoW：按实测已知端点取 challenge（data.biz_data.challenge），求解后随对话
-	// 请求携带 x-ds-pow-response 头（公开实现相互印证，登录态抓包最终确认）。
-	// 上游未给出可用 challenge（如未登录态 40002 / 结构未识别）时按无 PoW 出站。
-	powHeader, err := s.fetchWebDeepseekPoWHeader(ctx, account, baseURL, cookie, proxyURL)
+	// 多轮上下文：入站 messages 全部文本拼接进单 prompt（网页端单 prompt 语义）；
+	// parent_message_id 恒 null（无状态，不跨请求链式）。
+	prompt := webDeepseekExtractPrompt(body)
+	upstreamBody, err := buildWebDeepseekCompletionBody(account, sessionID, modelType, thinkingEnabled, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -136,12 +146,21 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	if powHeader != "" {
 		req.Header.Set("X-Ds-PoW-Response", powHeader)
 	}
-	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(req, accountProxyURL(account), account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(startTime).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	// WAF 失败关闭（09/01 §8）：响应头含 x-amzn-waf-action，或状态 405/202（challenge/captcha）。
+	// 不将 WAF 正文透传给客户端。
+	if wafAction := resp.Header.Get("x-amzn-waf-action"); wafAction != "" ||
+		resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusAccepted {
+		return nil, fmt.Errorf(
+			"web-deepseek upstream returned a WAF challenge/captcha (x-amzn-waf-action=%q, status %d); failing closed without forwarding the body",
+			wafAction, resp.StatusCode)
+	}
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
@@ -154,91 +173,148 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webDeepseekExtractPrompt(body), mode)
 }
 
-// webDeepseekModelClass 把（已映射的）模型名归一为网页端 model_class 与 thinking 开关。
+// accountProxyURL 返回账号代理 URL（与旧实现一致；隔离取值避免重复内联）。
+func accountProxyURL(account *Account) string {
+	if account == nil || account.ProxyID == nil || account.Proxy == nil {
+		return ""
+	}
+	return account.Proxy.URL()
+}
+
+// webDeepseekModelClass 把（已映射的）模型名归一为网页端 model_type 与 thinking 开关
+// （字段名 model_type，09 §4 实测；旧名 model_class 在 main.js 中 0 次出现）。
 //
-// 方案 §3.3（分析文档）唯一实测映射：deepseek-chat → deepseek_chat；
-// deepseek-reasoner → deepseek_chat + thinking_enabled=true；默认透传同名。
-// 除 deepseek_chat 外的 model_class 取值未实测，透传行为待登录态实测补全。
-func webDeepseekModelClass(model string) (modelClass string, thinkingEnabled bool) {
+// 实测映射：deepseek-chat → model_type "default"；deepseek-reasoner → "default" +
+// thinking_enabled=true（thinking 字段 09 §4 确认存在）；默认透传同名（其它 model_type
+// 值域 unverified）。返回值在此文件内按 model_type 语义使用；函数名保留以兼容
+// account_test_service.go 的探活调用。
+func webDeepseekModelClass(model string) (modelType string, thinkingEnabled bool) {
 	switch strings.ToLower(strings.TrimSpace(model)) {
 	case "deepseek-chat", "deepseek_chat":
-		return "deepseek_chat", false
+		return "default", false
 	case "deepseek-reasoner", "deepseek_reasoner":
-		return "deepseek_chat", true
+		return "default", true
 	default:
-		return model, false
+		return strings.TrimSpace(model), false
 	}
 }
 
-// buildWebDeepseekRequestBody 把入站 OpenAI Chat Completions 请求体转换为网页端
-// 对话请求体。字段仅使用分析文档 §1.1 实测已知字段；未实测字段一律不设。
+// webDeepseekUpstreamRequest 网页端对话请求体（09 §4 实测原文）。
 type webDeepseekUpstreamRequest struct {
-	ChatSessionID   string `json:"chat_session_id,omitempty"`
-	ParentMessageID string `json:"parent_message_id,omitempty"`
-	// RefFileIDs 入站 OpenAI 请求不含文件引用，恒缺省（omitempty）；结构待登录态实测补全。
-	RefFileIDs      []any  `json:"ref_file_ids,omitempty"`
-	ModelClass      string `json:"model_class"`
-	Prompt          string `json:"prompt"`
-	ThinkingEnabled bool   `json:"thinking_enabled"`
-	SearchEnabled   bool   `json:"search_enabled"`
+	ChatSessionID   string  `json:"chat_session_id"`
+	ParentMessageID *string `json:"parent_message_id"` // 首轮/无状态恒 null（JSON null，非 omitempty）
+	RefFileIDs      []any   `json:"ref_file_ids"`
+	ModelType       string  `json:"model_type"`
+	Prompt          string  `json:"prompt"`
+	Source          *string `json:"source,omitempty"` // 缺省省略（实测样例不含）
+	ThinkingEnabled bool    `json:"thinking_enabled"`
+	SearchEnabled   bool    `json:"search_enabled"` // 09 §4 实测默认 true
+	Action          *string `json:"action"`         // action:null（实测）
+	Preempt         bool    `json:"preempt"`
 }
 
-func buildWebDeepseekRequestBody(
-	inboundBody []byte,
+// buildWebDeepseekCompletionBody 构造网页端对话请求体（带显式 sessionID）。
+// parent_message_id 与 action 恒为 JSON null（实测）；source 缺省省略；preempt false。
+func buildWebDeepseekCompletionBody(
 	account *Account,
-	modelClass string,
+	sessionID string,
+	modelType string,
 	thinkingEnabled bool,
+	prompt string,
 ) ([]byte, error) {
-	// 会话字段：credentials 可选覆盖（chat_session_id / parent_message_id）。
-	// 会话创建端点 /api/v0/chat_session/create 已实测存在但登录态行为未实测，
-	// 此处不主动建会话，待登录态实测补全后再决定是否自动创建。
-	req := webDeepseekUpstreamRequest{
-		ChatSessionID:   strings.TrimSpace(account.GetCredential("chat_session_id")),
-		ParentMessageID: strings.TrimSpace(account.GetCredential("parent_message_id")),
-		ModelClass:      modelClass,
-		Prompt:          webDeepseekExtractPrompt(inboundBody),
-		ThinkingEnabled: thinkingEnabled,
-		// search_enabled 恒 false：入站协议无对应开关，是否支持联网待登录态实测补全。
-		SearchEnabled: false,
-	}
-	if strings.TrimSpace(req.Prompt) == "" {
+	if strings.TrimSpace(prompt) == "" {
 		return nil, errors.New("web-deepseek requires at least one user message in the request")
+	}
+	req := webDeepseekUpstreamRequest{
+		ChatSessionID:   strings.TrimSpace(sessionID),
+		ParentMessageID: nil, // 无状态每轮恒 null（实测 09 §4）
+		RefFileIDs:      []any{},
+		ModelType:       modelType,
+		Prompt:          prompt,
+		ThinkingEnabled: thinkingEnabled,
+		SearchEnabled:   true, // 09 §4 实测默认 true
+		Action:          nil,  // action:null（实测）
+		Preempt:         false,
 	}
 	return json.Marshal(req)
 }
 
-// webDeepseekExtractPrompt 从入站 OpenAI 请求取最后一条 user 消息文本作为 prompt
-// （网页端单 prompt 语义，实测已知字段仅 prompt；多轮上下文展开方式待登录态实测补全）。
+// webDeepseekExtractPrompt 从入站 OpenAI 请求拼接全部 messages 文本为单 prompt（网页端单
+// prompt 语义，09 §5 多轮以多段文本拼接进 prompt；parent_message_id 不跨请求链式）。
+// content 支持字符串与多模态数组（取 text 片段）；各消息以换行分隔。
 func webDeepseekExtractPrompt(body []byte) string {
 	messages := gjson.GetBytes(body, "messages").Array()
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
-		if m.Get("role").String() != "user" {
-			continue
-		}
+	var b strings.Builder
+	for _, m := range messages {
 		content := m.Get("content")
-		if content.Type == gjson.String {
-			return content.String()
-		}
-		// 多模态数组形态：取 text 片段拼接。
-		var b strings.Builder
-		for _, part := range content.Array() {
-			if part.Get("type").String() == "text" {
-				b.WriteString(part.Get("text").String())
+		switch content.Type {
+		case gjson.String:
+			b.WriteString(content.String())
+		case gjson.JSON:
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "text" {
+					b.WriteString(part.Get("text").String())
+				}
 			}
 		}
-		return b.String()
+		b.WriteString("\n")
 	}
-	return ""
+	return strings.TrimSpace(b.String())
 }
 
-// buildWebDeepseekUpstreamRequest 构造网页端出站请求（指纹头对齐方案 §3.5）。
+// ensureWebDeepseekSession 取得本轮对话的 chat_session_id：credentials 有覆盖则直接用
+// （跳过创建）；否则 POST /api/v0/chat_session/create（body {}）→ data.biz_data.chat_session.id。
+// 网关无状态：每轮新建会话，不跨请求持久化。
+func (s *OpenAIGatewayService) ensureWebDeepseekSession(
+	ctx context.Context,
+	account *Account,
+	baseURL string,
+	cookie string,
+	proxyURL string,
+) (string, error) {
+	if cred := strings.TrimSpace(account.GetCredential("chat_session_id")); cred != "" {
+		return cred, nil
+	}
+	upstreamCtx, release := detachUpstreamContext(ctx)
+	defer release()
+
+	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, baseURL+webDeepseekChatSessionCreatePath, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("Content-Type", "application/json")
+	origin := webDeepseekOriginFromURL(baseURL)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", webDeepseekClientUA)
+	req.Header.Set("Cookie", cookie)
+	webDeepseekApplyRequestHeaders(req, account)
+
+	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	if err != nil {
+		return "", fmt.Errorf("web-deepseek session create transport error: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("web-deepseek session create read error: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("web-deepseek session create failed: status %d", resp.StatusCode)
+	}
+	id := strings.TrimSpace(gjson.GetBytes(b, "data.biz_data.chat_session.id").String())
+	if id == "" {
+		return "", fmt.Errorf("web-deepseek session create returned no chat_session.id")
+	}
+	return id, nil
+}
+
+// buildWebDeepseekUpstreamRequest 构造网页端出站请求（指纹头对齐 09 §2 实测头族）。
 //
 // Cookie 同串携带：登录 Cookie 为整串（通常已含 WAF Cookie HWWAFSESID/HWWAFSESTIME）；
 // 如管理员把 WAF Cookie 单独存入 credentials["waf_cookie"]，则追加到同一 Cookie 串。
-//
-// PoW 携带头名称未实测：当前求解未实现（ErrWebDeepseekPoWNotImplemented），落地时
-// 需一并实测确认头名并在此补全，绝不臆测。
+// 账号级请求头覆写最后应用，使管理员配置优先（与 CodeBuddy 出站口径一致）。
 func (s *OpenAIGatewayService) buildWebDeepseekUpstreamRequest(
 	ctx context.Context,
 	account *Account,
@@ -254,7 +330,7 @@ func (s *OpenAIGatewayService) buildWebDeepseekUpstreamRequest(
 
 	origin := webDeepseekOriginFromURL(targetURL)
 	req.Header.Set("Content-Type", "application/json")
-	// 对话端点为 SSE（分析文档 §1.1 实测）；Accept 精确形态待登录态实测补全。
+	// 对话端点为 SSE（09 §1 实测）。
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
@@ -266,9 +342,49 @@ func (s *OpenAIGatewayService) buildWebDeepseekUpstreamRequest(
 	}
 	req.Header.Set("Cookie", fullCookie)
 
-	// 账号级请求头覆写最后应用，使管理员配置优先（与 CodeBuddy 出站口径一致）。
+	webDeepseekApplyRequestHeaders(req, account)
+	// 账号级请求头覆写最后应用，使管理员配置优先。
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
+}
+
+// webDeepseekApplyRequestHeaders 注入 09 §2 实测头族：x-client-* 常量头、x-device-id
+// （credentials 覆盖，缺省按 account.ID 派生确定性 UUIDv4，每账号稳定）、x-device-model(空)、
+// x-hif-dliq / x-hif-leim（指纹签名头，生成算法 unverified：credentials 有值则透传，无值不带）。
+func webDeepseekApplyRequestHeaders(req *http.Request, account *Account) {
+	req.Header.Set("x-client-bundle-id", "com.deepseek.chat")
+	req.Header.Set("x-client-platform", "web")
+	req.Header.Set("x-client-version", "2.5.0")
+	req.Header.Set("x-client-locale", "zh_CN")
+	req.Header.Set("x-client-timezone-offset", "28800")
+
+	deviceID := strings.TrimSpace(account.GetCredential("device_id"))
+	if deviceID == "" {
+		deviceID = webDeepseekDeviceID(account) // 缺省：account.ID 派生确定性 UUIDv4（每账号稳定）
+	}
+	req.Header.Set("x-device-id", deviceID)
+	req.Header.Set("x-device-model", "") // 实测为空串
+
+	// x-hif-*：生成算法未实测（unverified），仅当 credentials 显式提供时透传。
+	if hif := strings.TrimSpace(account.GetCredential("x-hif-dliq")); hif != "" {
+		req.Header.Set("x-hif-dliq", hif)
+	}
+	if hif := strings.TrimSpace(account.GetCredential("x-hif-leim")); hif != "" {
+		req.Header.Set("x-hif-leim", hif)
+	}
+}
+
+// webDeepseekDeviceID 按 account.ID 派生确定性 UUIDv4（版本 4 + RFC4122 variant 位）。
+// 每账号稳定生成（同一账号每次出站相同），避免随机 device_id 触发风控；credentials 可覆盖。
+func webDeepseekDeviceID(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("web-deepseek-device-%d", account.ID)))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40 // 版本 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func webDeepseekOriginFromURL(targetURL string) string {
@@ -279,9 +395,10 @@ func webDeepseekOriginFromURL(targetURL string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
-// fetchWebDeepseekPoWHeader 取 challenge 并求解，返回 x-ds-pow-response 头值。
-// 挑战端点不可达或响应无可用 challenge（未登录态 40002 / 结构未识别）时返回空串，
-// 调用方按无 PoW 继续出站；求解失败（nonce 未收敛）失败关闭返回错误。
+// fetchWebDeepseekPoWHeader 取 challenge 并求解，返回 x-ds-pow-response 头值（base64 JSON）。
+// 登录态强制 PoW（09 §3）：挑战端点不可达 / 响应无可用 challenge / 求解失败 → 一律失败关闭
+// 返回错误（不再"无 PoW 继续出站"——实测证明强制）。挑战请求体为 {"target_path":"/api/v0/chat/completion"}。
+// 求解器本体在 web_deepseek_pow.go（并行任务实现），调用 webDeepseekSolvePoW 签名不变。
 func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 	ctx context.Context,
 	account *Account,
@@ -292,7 +409,8 @@ func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 	upstreamCtx, release := detachUpstreamContext(ctx)
 	defer release()
 
-	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, baseURL+webDeepseekPoWChallengePath, bytes.NewReader([]byte("{}")))
+	challengeBody := []byte(`{"target_path":` + strconv.Quote(webDeepseekChatCompletionPath) + `}`)
+	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, baseURL+webDeepseekPoWChallengePath, bytes.NewReader(challengeBody))
 	if err != nil {
 		return "", err
 	}
@@ -303,43 +421,72 @@ func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", webDeepseekClientUA)
 	req.Header.Set("Cookie", cookie)
+	webDeepseekApplyRequestHeaders(req, account)
 
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	if err != nil {
-		// 挑战端点不可达不阻断出站尝试：是否强制 PoW 待登录态实测补全。
-		return "", nil
+		return "", fmt.Errorf("%w: pow challenge transport error: %v", ErrWebDeepseekPoWNotImplemented, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return "", nil
+		return "", fmt.Errorf("%w: pow challenge read error: %v", ErrWebDeepseekPoWNotImplemented, err)
 	}
-
-	challenge, ok := webDeepseekExtractPoWChallenge(body)
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("%w: pow challenge returned status %d", ErrWebDeepseekPoWNotImplemented, resp.StatusCode)
+	}
+	challenge, ok := webDeepseekExtractPoWChallenge(b)
 	if !ok {
-		return "", nil
+		return "", fmt.Errorf("%w: no solvable challenge found in response", ErrWebDeepseekPoWNotImplemented)
 	}
 	return webDeepseekSolvePoW(challenge, webDeepseekChatCompletionPath)
 }
 
-// webDeepseekErrKind DeepSeek 网页端上游错误分类（方案分析文档 §3.4 冷却触发：429 / code=40002）。
+// webDeepseekErrKind DeepSeek 网页端上游错误分类（06 §A 错误映射）。
 type webDeepseekErrKind int
 
 const (
 	webDeepseekErrKindOther webDeepseekErrKind = iota
-	webDeepseekErrKindRateLimited
+	webDeepseekErrKindRateLimited // 429 / 40029(IP 受限) → 冷却
+	webDeepseekErrKindAuthFailed  // 40002/40003(认证失效) / 50006(禁言) → 账号处置
+	webDeepseekErrKindPoWError    // 40300/40301(PoW 错误) → 失败关闭
 )
 
-// classifyWebDeepseekUpstreamError 纯函数错误分类：HTTP 429 或业务码 code=40002
-// （实测形态 {"code":40002,"msg":"Missing Token"}，HTTP 200 亦可能返回）→ 限流类。
-func classifyWebDeepseekUpstreamError(statusCode int, body []byte) webDeepseekErrKind {
+// webDeepseekEffectiveErrorCode 双路径错误判定（08 §4 / 06 §A）：HTTP 429，或响应体顶层
+// code 非 0，或 data.biz_code 非 0。返回生效业务码与是否错误。嵌套错误以 data.biz_code 为准，
+// 顶层 code 为兜底（旧形态）。
+func webDeepseekEffectiveErrorCode(statusCode int, body []byte) (code int64, isErr bool) {
 	if statusCode == http.StatusTooManyRequests {
-		return webDeepseekErrKindRateLimited
+		return 429, true
 	}
-	if gjson.GetBytes(body, "code").Int() == 40002 {
-		return webDeepseekErrKindRateLimited
+	topCode := gjson.GetBytes(body, "code").Int()
+	bizCode := gjson.GetBytes(body, "data.biz_code").Int()
+	if bizCode != 0 {
+		return bizCode, true
 	}
-	return webDeepseekErrKindOther
+	if topCode != 0 {
+		return topCode, true
+	}
+	return 0, false
+}
+
+// classifyWebDeepseekUpstreamError 纯函数错误分类：HTTP 429 / 业务码 40029 → 限流；
+// 40002/40003/50006 → 认证/账号失效；40300/40301 → PoW 错误；其余非 0 业务码 → Other。
+func classifyWebDeepseekUpstreamError(statusCode int, body []byte) webDeepseekErrKind {
+	code, isErr := webDeepseekEffectiveErrorCode(statusCode, body)
+	if !isErr {
+		return webDeepseekErrKindOther
+	}
+	switch code {
+	case 40002, 40003, 50006:
+		return webDeepseekErrKindAuthFailed
+	case 40029, 429:
+		return webDeepseekErrKindRateLimited
+	case 40300, 40301:
+		return webDeepseekErrKindPoWError
+	default:
+		return webDeepseekErrKindOther
+	}
 }
 
 // redactWebDeepseekUpstreamErrorBody 上游错误体脱敏：清除可能被上游回显的凭证片段
@@ -357,10 +504,12 @@ func redactWebDeepseekUpstreamErrorBody(body []byte, account *Account) []byte {
 	return []byte(text)
 }
 
-// handleWebDeepseekUpstreamError 对上游错误做分类、脱敏，最后经 handleErrorResponse
-// 把错误回传客户端。限流副作用复用 CN 供应商语义：handleErrorResponse 内部的
-// handleOpenAIAccountUpstreamError 会以（归一化后的）状态码调用
-// RateLimitService.HandleUpstreamError（429 → 冷却，401 → 认证处置），此处不重复调用。
+// handleWebDeepseekUpstreamError 对上游错误做分类、脱敏，按类别归一到标准 HTTP 状态后，
+// 经 handleErrorResponse 把错误回传客户端并触发对应冷却/账号处置链路：
+//   - RateLimited：归一 429 → 冷却（RateLimitService.HandleUpstreamError）；
+//   - AuthFailed：归一 401 → 账号失效处置（SetError）；
+//   - PoWError：归一 403 → 失败关闭（不重试，返回错误）；
+//   - Other：HTTP 200 携带未知业务错误时归一 502（不得伪造成功）。
 func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 	ctx context.Context,
 	c *gin.Context,
@@ -374,10 +523,35 @@ func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 	if resp != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
-	if kind == webDeepseekErrKindRateLimited && resp.StatusCode < 400 {
-		// 实测形态：业务错误码随 HTTP 200 返回（{"code":40002,"msg":"..."}）；
-		// 冷却语义按 429 归一（分析文档 §3.4 冷却触发：429 / code=40002）。
-		resp.StatusCode = http.StatusTooManyRequests
+	switch kind {
+	case webDeepseekErrKindRateLimited:
+		if resp.StatusCode < http.StatusTooManyRequests {
+			resp.StatusCode = http.StatusTooManyRequests
+		}
+	case webDeepseekErrKindAuthFailed:
+		resp.StatusCode = http.StatusUnauthorized
+	case webDeepseekErrKindPoWError:
+		// PoW 错误（40300/40301）：失败关闭，但不处置账号——PoW 为请求级挑战，客户端
+		// 重新求解即可，并非账号健康度问题。直接回 403 给客户端，绕开账号失效链
+		// （避免把可重试挑战误判为账号失效导致账号被禁用，06 §A 错误映射）。
+		bizCode, _ := webDeepseekEffectiveErrorCode(resp.StatusCode, respBody)
+		msg := webDeepseekUpstreamErrorMessage(respBody)
+		if msg == "" {
+			msg = "web-deepseek upstream returned a PoW challenge/validation error"
+		}
+		setOpsUpstreamError(c, http.StatusForbidden, msg, "")
+		MarkResponseCommitted(c)
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": msg,
+			},
+		})
+		return nil, fmt.Errorf("web-deepseek upstream PoW error (biz_code %d): %s", bizCode, msg)
+	default:
+		if resp.StatusCode < http.StatusBadRequest {
+			resp.StatusCode = http.StatusBadGateway
+		}
 	}
 	upstreamMsg := webDeepseekUpstreamErrorMessage(respBody)
 	if upstreamMsg == "" {
@@ -397,49 +571,23 @@ func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
 }
 
-// webDeepseekUpstreamErrorMessage 提取上游错误文案：实测形态为 {"code":...,"msg":"..."}，
-// 其余回落通用提取。
+// webDeepseekUpstreamErrorMessage 提取上游错误文案：优先 data.biz_msg（嵌套实测形态），
+// 回落顶层 msg，再回落通用提取。
 func webDeepseekUpstreamErrorMessage(body []byte) string {
+	if m := strings.TrimSpace(gjson.GetBytes(body, "data.biz_msg").String()); m != "" {
+		return sanitizeUpstreamErrorMessage(m)
+	}
 	if m := strings.TrimSpace(gjson.GetBytes(body, "msg").String()); m != "" {
 		return sanitizeUpstreamErrorMessage(m)
 	}
 	return sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
 }
 
-// webDeepseekChunkView 通用 SSE JSON 载荷的解析视图。
-// 字段映射集中在此（待登录态实测补全）：只识别 OpenAI 兼容形状与网页端常见的
-// 顶层 content 字段，绝不编造未实测的 DeepSeek 专有字段。
-type webDeepseekChunkView struct {
-	Content      string
-	FinishReason string
-	Usage        *OpenAIUsage
-	ResponseID   string
-	ErrCode      int64
-	ErrMsg       string
-}
-
-// parseWebDeepseekSSEFrame 解析单行 SSE 帧，返回 data 载荷。
-// 标准 SSE 允许多行 data（待登录态实测补全是否出现）；当前按单行 JSON 处理。
-func parseWebDeepseekSSEFrame(line string) ([]byte, bool) {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "data:") {
-		return nil, false
-	}
-	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-	if payload == "" || payload == "[DONE]" {
-		return nil, false
-	}
-	if !gjson.Valid(payload) {
-		return nil, false
-	}
-	return []byte(payload), true
-}
-
-// webDeepseekBareJSONError 判定一行裸 JSON（非 SSE data: 前缀）是否为业务错误：
-// 携带非 0 的 code 字段（实测 40002 形态）按业务错误返回其载荷，否则返回 isError=false。
-// 纯内容裸 JSON（无 code）交由调用方按安全策略忽略。仅解析合法 JSON，杜绝对无法识别
-// 行的臆测处理。
-func webDeepseekBareJSONError(line string) (payload []byte, isError bool) {
+// webDeepseekBareJSONError 判定一行裸 JSON（非 SSE data: 前缀）是否为业务错误（双路径：
+// 顶层 code 或 data.biz_code 非 0 均按业务错误）。纯内容裸 JSON（无 code）交由调用方按安全
+// 策略忽略。仅解析合法 JSON，杜绝对无法识别行的臆测处理。保留为共享 helper（web_protocol_bridge_test
+// 等跨平台测试复用同口径）。
+func webDeepseekBareJSONError(line string) ([]byte, bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "data:") {
 		return nil, false
@@ -447,75 +595,214 @@ func webDeepseekBareJSONError(line string) (payload []byte, isError bool) {
 	if !gjson.Valid(trimmed) {
 		return nil, false
 	}
-	code := gjson.GetBytes([]byte(trimmed), "code")
-	if code.Exists() && code.Type == gjson.Number && code.Int() != 0 {
+	topCode := gjson.Get(trimmed, "code").Int()
+	bizCode := gjson.Get(trimmed, "data.biz_code").Int()
+	if topCode != 0 || bizCode != 0 {
 		return []byte(trimmed), true
 	}
 	return nil, false
 }
 
-// mapWebDeepseekPayload 把一帧通用 JSON 载荷映射为 webDeepseekChunkView。
-//
-// 待登录态实测补全：以下识别顺序按「通用 SSE JSON」由强到弱排列——
-//  1. OpenAI 兼容：choices[0].delta.content（流式增量）；
-//  2. OpenAI 兼容：choices[0].message.content（末帧整段形态）；
-//  3. 网页端常见：顶层 content 字符串字段；
-//  4. usage：OpenAI 命名（prompt_tokens/completion_tokens）或 input_tokens/output_tokens；
-//  5. 业务错误码：code（非 0）/msg（实测 40002 形态）。
-func mapWebDeepseekPayload(payload []byte) webDeepseekChunkView {
-	v := gjson.ParseBytes(payload)
-	view := webDeepseekChunkView{}
-	if id := strings.TrimSpace(v.Get("id").String()); id != "" {
-		view.ResponseID = id
+// ---------------------------------------------------------------------------
+// SSE 解析器（09 §5 实测，JSON-Patch 形态 + 省略状态机）
+// ---------------------------------------------------------------------------
+
+// webDeepseekFragment 流内消息 fragment（THINK / RESPONSE 等）。content 为已累积文本。
+type webDeepseekFragment struct {
+	typ     string
+	content string
+}
+
+// webDeepseekSSEParser 维护 SSE delta 解析状态机：当前路径 currentPath 与操作 currentOp，
+// 使省略形态（仅 {"v":...}）能沿用上一帧路径/操作。正文只取 RESPONSE fragment content，
+// THINK 等思考 fragment 丢弃（09 §5）。usage 取 accumulated_token_usage 最终值（累计语义）。
+type webDeepseekSSEParser struct {
+	responseID string
+	body       strings.Builder
+	usage      int64
+	finished   bool
+	hasError   bool
+	errCode    int64
+	errMsg     string
+
+	fragments   []*webDeepseekFragment
+	currentPath string
+	currentOp   string
+}
+
+func newWebDeepseekSSEParser() *webDeepseekSSEParser { return &webDeepseekSSEParser{} }
+
+// applyDelta 解析一帧 delta/业务错误数据，返回新增正文增量（RESPONSE 正文，思考丢弃）。
+// 双路径错误判定（08 §4）：顶层 code 或 data.biz_code 非 0 → 标记 hasError。
+func (p *webDeepseekSSEParser) applyDelta(data string) (string, bool, int64, string) {
+	if !gjson.Valid(data) {
+		return "", false, 0, ""
 	}
+	v := gjson.Parse(data)
+
+	// 双路径业务错误（HTTP 200 也可能携带，06 §A / 08 §4）。
+	topCode := v.Get("code").Int()
+	bizCode := v.Get("data.biz_code").Int()
+	if topCode != 0 || bizCode != 0 {
+		msg := strings.TrimSpace(v.Get("data.biz_msg").String())
+		if msg == "" {
+			msg = strings.TrimSpace(v.Get("msg").String())
+		}
+		code := bizCode
+		if code == 0 {
+			code = topCode
+		}
+		p.hasError = true
+		p.errCode = code
+		p.errMsg = msg
+		return "", true, code, msg
+	}
+
+	pObj := v.Get("p")
+	oObj := v.Get("o")
+	val := v.Get("v")
+
+	if pObj.Exists() && pObj.Type == gjson.String {
+		p.currentPath = pObj.String()
+	}
+	if oObj.Exists() && oObj.Type == gjson.String {
+		p.currentOp = oObj.String()
+	}
+
+	if !pObj.Exists() {
+		// 无 p：完整初始响应（v 内含 response）或续写省略形态（v 为标量）。
+		if val.IsObject() {
+			if resp := val.Get("response"); resp.IsObject() {
+				p.applyFullResponse(resp)
+			}
+			return "", false, 0, ""
+		}
+		// 续写省略形态：沿用当前路径与操作。
+	}
+
+	if p.currentPath == "" {
+		return "", false, 0, ""
+	}
+	return p.applyAtPath(p.currentPath, p.currentOp, val), false, 0, ""
+}
+
+// applyFullResponse 处理首帧完整 response 对象（data: {"v":{"response":{...}}}）。
+func (p *webDeepseekSSEParser) applyFullResponse(resp gjson.Result) {
+	if id := resp.Get("message_id").Int(); id != 0 {
+		p.responseID = strconv.FormatInt(id, 10)
+	}
+	for _, f := range resp.Get("fragments").Array() {
+		typ := f.Get("type").String()
+		content := f.Get("content").String()
+		p.fragments = append(p.fragments, &webDeepseekFragment{typ: typ, content: content})
+		if typ == "RESPONSE" && content != "" {
+			p.body.WriteString(content)
+		}
+	}
+	if u := resp.Get("accumulated_token_usage").Int(); u != 0 {
+		p.usage = u
+	}
+}
+
+// applyAtPath 把一条 patch 应用到对应路径。返回新增 RESPONSE 正文增量（思考丢弃时为 ""）。
+func (p *webDeepseekSSEParser) applyAtPath(path, op string, val gjson.Result) string {
 	switch {
-	case v.Get("choices.0.delta.content").Exists():
-		view.Content = v.Get("choices.0.delta.content").String()
-	case v.Get("choices.0.message.content").Exists():
-		view.Content = v.Get("choices.0.message.content").String()
-	case v.Get("content").Type == gjson.String:
-		view.Content = v.Get("content").String()
-	}
-	if fr := v.Get("choices.0.finish_reason"); fr.Exists() && fr.Type == gjson.String {
-		view.FinishReason = fr.String()
-	}
-	if usage := v.Get("usage"); usage.IsObject() {
-		u := &OpenAIUsage{
-			InputTokens:  int(usage.Get("prompt_tokens").Int()) + int(usage.Get("input_tokens").Int()),
-			OutputTokens: int(usage.Get("completion_tokens").Int()) + int(usage.Get("output_tokens").Int()),
+	case path == "response/fragments" && op == "APPEND" && val.IsArray():
+		// 追加 fragment 数组：新增 RESPONSE fragment 的初值 content 必须计入正文增量与
+		// body 累计（实测首 RESPONSE fragment 经此帧带入初值 "哈哈"，后续仅 -1/content 续写）。
+		var delta strings.Builder
+		for _, item := range val.Array() {
+			typ := item.Get("type").String()
+			content := item.Get("content").String()
+			p.fragments = append(p.fragments, &webDeepseekFragment{typ: typ, content: content})
+			if typ == "RESPONSE" && content != "" {
+				p.body.WriteString(content)
+				delta.WriteString(content)
+			}
 		}
-		if u.InputTokens > 0 || u.OutputTokens > 0 {
-			view.Usage = u
+		return delta.String()
+	case path == "response/fragments/-1/content":
+		if len(p.fragments) == 0 {
+			return ""
 		}
+		last := p.fragments[len(p.fragments)-1]
+		if op == "SET" {
+			last.content = val.String()
+		} else {
+			// APPEND 及缺省 op 的续写省略形态
+			last.content += val.String()
+		}
+		if last.typ == "RESPONSE" {
+			p.body.WriteString(val.String())
+			return val.String()
+		}
+		return "" // THINK 等思考 fragment 不进正文
+	case path == "response/accumulated_token_usage":
+		p.usage = val.Int()
+		return ""
+	case path == "response/status":
+		if strings.EqualFold(val.String(), "FINISHED") {
+			p.finished = true
+		}
+		return ""
+	case op == "BATCH" && val.IsArray():
+		// BATCH 的 v 为数组，路径按当前路径前缀拼接（实测 response BATCH →
+		// response/accumulated_token_usage、response/quasi_status 等），逐项以 SET 应用。
+		for _, item := range val.Array() {
+			itemP := item.Get("p").String()
+			itemV := item.Get("v")
+			p.applyAtPath(webDeepseekJoinPath(path, itemP), "SET", itemV)
+		}
+		return ""
 	}
-	if code := v.Get("code"); code.Exists() && code.Type == gjson.Number {
-		view.ErrCode = code.Int()
-	}
-	if m := v.Get("msg"); m.Type == gjson.String {
-		view.ErrMsg = m.String()
-	}
-	return view
+	return ""
 }
 
-// writeWebDeepseekClientChunk 以 OpenAI chat.completion.chunk 形状向客户端写一帧 SSE。
-// 帧必须带标准 SSE 前缀 `data: `（C1，#3）：标准 OpenAI SDK 只解析 `data: ` 前缀的帧，
-// 缺少前缀会被整帧忽略。终帧由调用方单独写 `data: [DONE]\n\n`。
-func writeWebDeepseekClientChunk(c *gin.Context, chunk gin.H) error {
-	data, err := json.Marshal(chunk)
-	if err != nil {
-		return err
+func webDeepseekJoinPath(a, b string) string {
+	if a == "" {
+		return b
 	}
-	frame := append([]byte("data: "), data...)
-	frame = append(frame, '\n', '\n')
-	if _, err := c.Writer.Write(frame); err != nil {
-		return err
-	}
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	return nil
+	return a + "/" + b
 }
 
+// webDeepseekNextSSEEvent 从 scanner 读取一个 SSE 事件（event 名 + data 载荷）。
+// 默认事件名为 "delta"（无 event: 行的纯 data: 帧）；遇空行派发；EOF 无完整事件返回 ok=false。
+func webDeepseekNextSSEEvent(sc *bufio.Scanner) (name, data string, ok bool) {
+	name = "delta"
+	var dataBuf strings.Builder
+	sawData := false
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" {
+			if sawData || name != "delta" {
+				return name, dataBuf.String(), true
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue // SSE 注释行
+		}
+		if strings.HasPrefix(line, "event:") {
+			name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			d := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if dataBuf.Len() > 0 {
+				dataBuf.WriteByte('\n')
+			}
+			dataBuf.WriteString(d)
+			sawData = true
+			continue
+		}
+	}
+	if sawData {
+		return name, dataBuf.String(), true
+	}
+	return "", "", false
+}
+
+// webDeepseekClientChunkEnvelope 构造 OpenAI chat.completion.chunk 包络（供 writeWebStreamChunk 回桥）。
 func webDeepseekClientChunkEnvelope(responseID, originalModel string, delta gin.H, finishReason string, usage *OpenAIUsage) gin.H {
 	choice := gin.H{"index": 0, "delta": delta, "finish_reason": finishReason}
 	chunk := gin.H{
@@ -531,11 +818,6 @@ func webDeepseekClientChunkEnvelope(responseID, originalModel string, delta gin.
 	return chunk
 }
 
-// handleWebDeepseekStreamingResponse 流式回程：对上游 SSE 做通用 JSON 增量解析，
-// 重包为 OpenAI chat.completion.chunk 流回写客户端，终止写 data: [DONE]。
-//
-// 未实测部分（待登录态实测补全）：chunk 具体字段结构、终止条件、usage 出现位置。
-// 首帧即携带业务错误码（实测 {"code":40002,"msg":"..."} 形态）时，按上游错误路径处理。
 // writeWebStreamMidstreamError 流式中段业务错误收口（三平台统一模式）：流已向客户端写出
 // 过正文（HTTP 状态可能已是 200），此时上游突发业务错误——不能伪造正常 finish_reason+usage
 // 终止帧把失败请求当成功流处理。按出站协议向客户端写一帧明确的 error 标记，再按模式发出流
@@ -595,64 +877,54 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
 
+	parser := newWebDeepseekSSEParser()
 	responseID := ""
 	var usage *OpenAIUsage
 	var aggregated strings.Builder
 	written := false
-	finishReason := ""
+	finishReason := "stop"
 	midstreamErr := false
 	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
-	scanner := bufio.NewScanner(resp.Body)
+	// TeeReader 留存原始响应体：流结束无内容帧时用于整包业务错误判定/失败关闭
+	// （与非流式路径同口径，HTTP 200 裸 JSON 错误不得被伪造成空成功流）。
+	var rawUpstreamBody bytes.Buffer
+	scanner := bufio.NewScanner(io.TeeReader(resp.Body, &rawUpstreamBody))
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
-	for scanner.Scan() {
-		payload, ok := parseWebDeepseekSSEFrame(scanner.Text())
+	for {
+		name, data, ok := webDeepseekNextSSEEvent(scanner)
 		if !ok {
-			// #3 裸 JSON 业务错误判定：上游 HTTP 200 返回 {"code":40002,...}（非 SSE、
-			// 无 data: 前缀）时，原 parseWebDeepseekSSEFrame 忽略该行会漏判为正常流，
-			// 最终以 [DONE] 伪成功。含非 0 code 字段的裸 JSON 行按业务错误处理。
-			// 首帧未写任何客户端字节（written=false）→ 走完整错误路径（可改写 4xx 状态码）；
-			// 流中后段已写出正文（written=true）→ 记 ops 错误并向客户端写流内 error 标记后
-			// 中断收口（writeWebStreamMidstreamError），不伪造正常 finish_reason+usage 终止帧。
-			if errPayload, isErr := webDeepseekBareJSONError(scanner.Text()); isErr {
-				if !written {
-					errResp := &http.Response{
-						StatusCode: resp.StatusCode,
-						Header:     resp.Header,
-						Body:       io.NopCloser(bytes.NewReader(errPayload)),
-					}
-					return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
-				}
-				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-					Platform:           account.Platform,
-					AccountID:          account.ID,
-					AccountName:        account.Name,
-					UpstreamStatusCode: resp.StatusCode,
-					Kind:               "midstream_error",
-					Message:            sanitizeUpstreamErrorMessage(webDeepseekUpstreamErrorMessage(errPayload)),
-				})
-				midstreamErr = true
-				midstreamErrMsg = sanitizeUpstreamErrorMessage(webDeepseekUpstreamErrorMessage(errPayload))
-				break
+			break
+		}
+		switch name {
+		case "ready":
+			// ready 事件：提取 response_message_id 作 response ID（09 §5）。
+			if id := gjson.Get(data, "response_message_id").Int(); id != 0 {
+				responseID = strconv.FormatInt(id, 10)
 			}
 			continue
+		case "close", "finish":
+			// 正常终止（09 §5，无 [DONE]）。
+			finishReason = "stop"
+			break
 		}
-		view := mapWebDeepseekPayload(payload)
-		if view.ResponseID != "" && responseID == "" {
-			responseID = view.ResponseID
+
+		contentDelta, isErr, _, errMsg := parser.applyDelta(data)
+		if parser.responseID != "" && responseID == "" {
+			responseID = parser.responseID
 		}
-		if view.ErrCode != 0 {
-			// 业务错误码（实测 40002 形态）。首帧未写任何客户端字节（written=false）→
-			// 走完整错误路径（可改写 4xx 状态码）；流中后段已写出正文（written=true，罕见
-			// 未实测）→ 记 ops 错误并向客户端写流内 error 标记后中断收口，绝不伪造正常结束。
+		if isErr {
+			// 业务错误：首帧未写任何客户端字节（written=false）→ 走完整错误路径
+			// （可改写 4xx 状态码）；流中后段已写出正文（written=true）→ 记 ops 错误并向
+			// 客户端写流内 error 标记后中断收口，绝不伪造正常结束。
 			if !written {
 				errResp := &http.Response{
 					StatusCode: resp.StatusCode,
 					Header:     resp.Header,
-					Body:       io.NopCloser(bytes.NewReader(payload)),
+					Body:       io.NopCloser(bytes.NewReader([]byte(data))),
 				}
-				return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
+				return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, []byte(data), upstreamModel)
 			}
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
@@ -660,34 +932,48 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
 				Kind:               "midstream_error",
-				Message:            sanitizeUpstreamErrorMessage(view.ErrMsg),
+				Message:            sanitizeUpstreamErrorMessage(errMsg),
 			})
 			midstreamErr = true
-			midstreamErrMsg = sanitizeUpstreamErrorMessage(view.ErrMsg)
+			midstreamErrMsg = sanitizeUpstreamErrorMessage(errMsg)
 			break
 		}
-		if view.Usage != nil {
-			usage = view.Usage
+		if parser.usage != 0 {
+			usage = &OpenAIUsage{InputTokens: 0, OutputTokens: int(parser.usage)}
 		}
-		if view.FinishReason != "" {
-			finishReason = view.FinishReason
+		if contentDelta != "" {
+			aggregated.WriteString(contentDelta)
+			written = true
+			if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": contentDelta}, "", nil)); err != nil {
+				return nil, err
+			}
 		}
-		if view.Content == "" {
-			continue
-		}
-		aggregated.WriteString(view.Content)
-		written = true
-		if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
-			return nil, err
+		if parser.finished {
+			finishReason = "stop"
+			break
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("web-deepseek stream read: %w", err)
 	}
 
-	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
-	// 写明确 error 标记并终结 SSE（不伪造正常 finish_reason+usage 终止帧）。HTTP 状态可能
-	// 已是 200，但流内 error 标记使客户端能区分「正常完成」与「中途失败」。
+	// 无任何内容帧：可能是 HTTP 200 裸 JSON 业务错误（08 §4）或不可识别结构；
+	// 与非流式路径同口径走错误路径/失败关闭，绝不伪造成空成功流。
+	if aggregated.Len() == 0 && !parser.hasError {
+		raw := rawUpstreamBody.Bytes()
+		if _, isErr := webDeepseekEffectiveErrorCode(resp.StatusCode, raw); isErr {
+			errResp := &http.Response{
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header,
+				Body:       io.NopCloser(bytes.NewReader(raw)),
+			}
+			return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, raw, upstreamModel)
+		}
+		return nil, errors.New(
+			"web-deepseek upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
+	}
+
+	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。
 	if midstreamErr {
 		if err := writeWebStreamMidstreamError(c, st, midstreamErrMsg); err != nil {
 			return nil, err
@@ -705,7 +991,10 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		}, nil
 	}
 
-	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	// 正常终止帧：finish_reason + usage（流内最后 accumulated_token_usage 值），再按出站协议收口。
+	if parser.usage != 0 {
+		usage = &OpenAIUsage{InputTokens: 0, OutputTokens: int(parser.usage)}
+	}
 	if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
@@ -730,9 +1019,8 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	return result, nil
 }
 
-// handleWebDeepseekNonStreamingResponse 非流式回程：读取完整上游响应。SSE 时经通用
-// 映射聚合为单条 chat.completion JSON；纯 JSON 且携带业务错误码（实测 40002 形态）
-// 时走上游错误路径；结构不可识别时失败关闭并给出明确错误（不伪造成功响应）。
+// handleWebDeepseekNonStreamingResponse 非流式回程：读取完整上游响应，SSE 经新解析器聚合为
+// 单条 chat.completion JSON；纯 JSON 业务错误走上游错误路径；结构不可识别时失败关闭。
 func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -749,19 +1037,33 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		return nil, err
 	}
 
+	parser := newWebDeepseekSSEParser()
 	responseID := ""
-	var usage *OpenAIUsage
 	var aggregated strings.Builder
-	frames := false
 	scanner := bufio.NewScanner(bytes.NewReader(body))
-	for scanner.Scan() {
-		payload, ok := parseWebDeepseekSSEFrame(scanner.Text())
+	scanner.Buffer(make([]byte, 64*1024), defaultMaxLineSize)
+	for {
+		name, data, ok := webDeepseekNextSSEEvent(scanner)
 		if !ok {
-			continue
+			break
 		}
-		frames = true
-		view := mapWebDeepseekPayload(payload)
-		if view.ErrCode != 0 {
+		switch name {
+		case "ready":
+			if id := gjson.Get(data, "response_message_id").Int(); id != 0 {
+				responseID = strconv.FormatInt(id, 10)
+			}
+			continue
+		case "close", "finish":
+			finishReason := "stop"
+			_ = finishReason
+			break
+		}
+
+		contentDelta, isErr, _, _ := parser.applyDelta(data)
+		if parser.responseID != "" && responseID == "" {
+			responseID = parser.responseID
+		}
+		if isErr {
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -769,23 +1071,20 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 			}
 			return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, body, upstreamModel)
 		}
-		if view.ResponseID != "" && responseID == "" {
-			responseID = view.ResponseID
+		if contentDelta != "" {
+			aggregated.WriteString(contentDelta)
 		}
-		if view.Usage != nil {
-			usage = view.Usage
+		if parser.finished {
+			break
 		}
-		aggregated.WriteString(view.Content)
 	}
 	if err := scanner.Err(); err != nil {
-		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
 		return nil, fmt.Errorf("web-deepseek upstream response scan failed: %w", err)
 	}
 
-	if !frames {
-		// 非 SSE：业务错误码形态（HTTP 200 + {"code":40002,...}）走错误路径；
-		// 其余未识别结构失败关闭，待登录态实测补全后再扩展。
-		if classifyWebDeepseekUpstreamError(resp.StatusCode, body) == webDeepseekErrKindRateLimited {
+	// 无任何内容帧：可能是纯 JSON 业务错误（HTTP 200）或不可识别结构。
+	if aggregated.Len() == 0 && !parser.hasError {
+		if _, isErr := webDeepseekEffectiveErrorCode(resp.StatusCode, body); isErr {
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -794,16 +1093,17 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 			return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, body, upstreamModel)
 		}
 		return nil, errors.New(
-			"web-deepseek upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
+			"web-deepseek upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
 	}
 
-	finalUsage := usage
-	if finalUsage == nil {
-		finalUsage = &OpenAIUsage{}
-	}
-	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
-	// 非真实 token 数（estimated）。归并后判定源为 web 接入模式（平台已并官方值）。
-	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
+	finalUsage := &OpenAIUsage{}
+	if parser.usage != 0 {
+		// accumulated_token_usage 为累计 token 语义（非 prompt/completion 拆分）；
+		// OpenAIUsage 映射：InputTokens=0, OutputTokens=累计值（token 生命周期 unverified）。
+		finalUsage.InputTokens = 0
+		finalUsage.OutputTokens = int(parser.usage)
+	} else if account.IsWebAccessMode() {
+		// 上游未返回 usage 时本地估算兜底（D2），避免计费为 0（仅估算，非真实 token 数）。
 		estimated := estimateWebUsage(inputPrompt, aggregated.String())
 		finalUsage.InputTokens = estimated.InputTokens
 		finalUsage.OutputTokens = estimated.OutputTokens

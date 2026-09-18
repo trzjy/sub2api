@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// 已知向量：与参考实现（aiodeepseek 23 轮 Keccak 语义）同构的独立 Go 实现生成，
-// 用于锁定 webDeepseekPowStateDigest 的位级正确性。
+// 已知向量：与官方 wasm（sha3_wasm_bg.7b9ca65ddd.wasm 导出 wasm_deepseek_hash_v1）
+// 逐字节一致地独立计算生成，用于锁定 webDeepseekPowStateDigest 的位级正确性。
+// 实证：对 salt123_1739764288699_<nonce> 分别求得上述 hex，与官方 wasm 输出完全相同
+// （见 web_deepseek_pow.go 头部取证依据）。
 func TestWebDeepseekPowStateDigest_KnownVectors(t *testing.T) {
 	base := "salt123_1739764288699_"
 	vectors := map[int64]string{

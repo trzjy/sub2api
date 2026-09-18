@@ -487,23 +487,35 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		if cookie == "" {
 			return s.sendErrorAndEnd(c, "web-deepseek account is missing login cookie credential")
 		}
-		if waf := strings.TrimSpace(account.GetCredential("waf_cookie")); waf != "" {
-			cookie = strings.TrimRight(cookie, "; ") + "; " + waf
+		// waf_cookie 追加由 buildWebDeepseekUpstreamRequest 内部统一处理，此处不再预拼。
+		// 复用原生 model_type 归一（与正式转发 forwardWebDeepseek 同口径，09 §4 实测字段名）。
+		modelType, thinkingEnabled := webDeepseekModelClass(testModel)
+		// 新协议探活与正式转发同链：登录态强制 PoW（09 §3）+ 自动建会话（09 §1）。
+		// 复用 openaiGatewayService 的同一实现，禁止第二套探活链（与 zhipu 探活同模式）。
+		if s.openaiGatewayService == nil {
+			return s.sendErrorAndEnd(c, "openai gateway service is unavailable for web-deepseek probe")
 		}
-		// 复用原生 model_class 归一（与正式转发 forwardWebDeepseek 同口径），保持行为兼容。
-		modelClass, thinkingEnabled := webDeepseekModelClass(testModel)
-		built, err := buildWebDeepseekRequestBody([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), account, modelClass, thinkingEnabled)
+		powHeader, err := s.openaiGatewayService.fetchWebDeepseekPoWHeader(ctx, account, baseURL, cookie, accountProxyURL(account))
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("web-deepseek probe failed to obtain PoW challenge: %v", err))
+		}
+		sessionID, err := s.openaiGatewayService.ensureWebDeepseekSession(ctx, account, baseURL, cookie, accountProxyURL(account))
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("web-deepseek probe failed to create chat session: %v", err))
+		}
+		built, err := buildWebDeepseekCompletionBody(account, sessionID, modelType, thinkingEnabled, "hi")
 		if err != nil {
 			return s.sendErrorAndEnd(c, "Failed to build web-deepseek probe request")
 		}
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+webDeepseekChatCompletionPath, bytes.NewReader(built))
+		// 复用正式转发链构造函数：头族（x-client-*、Origin/Referer/UA、Cookie+waf_cookie）
+		// 与真实转发完全一致，禁止第二套头逻辑；PoW 头随后单独附加。
+		r, err := s.openaiGatewayService.buildWebDeepseekUpstreamRequest(ctx, account, baseURL+webDeepseekChatCompletionPath, cookie, built)
 		if err != nil {
-			return s.sendErrorAndEnd(c, "Failed to create web-deepseek probe request")
+			return s.sendErrorAndEnd(c, "Failed to build web-deepseek probe request")
 		}
-		r = r.WithContext(WithHTTPUpstreamProfile(r.Context(), HTTPUpstreamProfileOpenAI))
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Accept", "text/event-stream")
-		r.Header.Set("Cookie", cookie)
+		if powHeader != "" {
+			r.Header.Set("X-Ds-PoW-Response", powHeader)
+		}
 		// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
 		account.ApplyHeaderOverrides(r.Header)
 		req = r
@@ -553,14 +565,16 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		// 出站归一与正式转发同款（forwardWebKimi 同口径）：公开名 kimi-k3 → k3。
 		// test_start 事件保留公开名，出站请求体用归一后内部名。
 		reqBody := buildWebKimiRequestBody("hi", webKimiModelName(testModel), account)
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+webKimiChatPath, bytes.NewReader(reqBody))
-		if err != nil {
-			return s.sendErrorAndEnd(c, "Failed to create web-kimi probe request")
+		// 复用正式转发链构造函数：Connect RPC 头族（content-type/accept application/connect+json、
+		// x-language/x-msh-*、双载体认证）与真实转发完全一致，禁止第二套头逻辑。
+		if s.openaiGatewayService == nil {
+			return s.sendErrorAndEnd(c, "openai gateway service is unavailable for web-kimi probe")
 		}
-		r = r.WithContext(WithHTTPUpstreamProfile(r.Context(), HTTPUpstreamProfileOpenAI))
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Accept", "text/event-stream")
-		r.Header.Set("Authorization", "Bearer "+accessToken)
+		r, err := s.openaiGatewayService.buildWebKimiUpstreamRequest(ctx, account, baseURL+webKimiChatPath, accessToken, reqBody)
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to build web-kimi probe request")
+		}
+		// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
 		account.ApplyHeaderOverrides(r.Header)
 		req = r
 	default:

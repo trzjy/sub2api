@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -41,42 +42,449 @@ func webDeepseekTestAccount(id int64, credentials map[string]any) *Account {
 	return acc
 }
 
-// webDeepseekSSECompletionBody 构造 SSE 回程体（通用 OpenAI 兼容形状增量；
-// 真实 chunk 结构待登录态实测补全）。
-func webDeepseekSSECompletionBody() string {
-	return strings.Join([]string{
-		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
-		``,
-		`data: {"id":"ds-1","choices":[{"delta":{"content":" world"}}]}`,
-		``,
-		`data: {"id":"ds-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
-		``,
-		`data: [DONE]`,
-		``,
-	}, "\n")
-}
+// webDeepseekFixtureSSE 是登录态实测 SSE 流全文（来源 raw/deepseek-sse-decoded.txt，09 §5）。
+// 含 ready / update_session / THINK fragment（思考，须丢弃）/ RESPONSE fragment（正文）/
+// BATCH accumulated_token_usage(42→112) / response/status FINISHED / close 终止；
+// 关键覆盖 delta 无 p 省略形态（首帧带 p/o，后续仅 v）。
+const webDeepseekFixtureSSE = `event: ready
+data: {"request_message_id":3,"response_message_id":4,"model_type":"default"}
 
-// webDeepseekSSECompletionResponse 构造 200 + SSE 响应。
-func webDeepseekSSECompletionResponse() *http.Response {
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(webDeepseekSSECompletionBody())),
+event: update_session
+data: {"updated_at":1789671814.046746}
+
+data: {"v":{"response":{"message_id":4,"parent_id":3,"model":"","role":"ASSISTANT","thinking_enabled":true,"ban_edit":false,"ban_regenerate":false,"status":"WIP","incomplete_message":null,"accumulated_token_usage":42,"feedback":null,"inserted_at":1789671814.035786,"search_enabled":true,"fragments":[{"id":2,"type":"THINK","content":"我们需要","elapsed_secs":null,"references":[],"stage_id":1}],"conversation_mode":"DEFAULT","has_pending_fragment":false,"auto_continue":false,"search_triggered":false,"extra_search_providers":[]}}}
+
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"回答"}
+
+data: {"v":"用户"}
+
+data: {"v":"。"}
+
+data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":1.220857351}
+
+data: {"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"哈哈","references":[],"stage_id":1}]}
+
+data: {"p":"response/fragments/-1/content","v":"，"}
+
+data: {"v":"我又"}
+
+data: {"v":"好"}
+
+data: {"v":"～"}
+
+data: {"v":" "}
+
+data: {"v":"你好"}
+
+data: {"v":"我也"}
+
+data: {"v":"好"}
+
+data: {"v":" 😄"}
+
+data: {"v":"  \n"}
+
+data: {"v":"今天"}
+
+data: {"v":"有什么"}
+
+data: {"v":"想"}
+
+data: {"v":"聊"}
+
+data: {"v":"的"}
+
+data: {"v":"，"}
+
+data: {"v":"或者"}
+
+data: {"v":"需要"}
+
+data: {"v":"我"}
+
+data: {"v":"帮忙"}
+
+data: {"v":"的吗"}
+
+data: {"v":"？"}
+
+data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":112},{"p":"quasi_status","v":"FINISHED"}]}
+
+data: {"p":"response/status","o":"SET","v":"FINISHED"}
+
+event: update_session
+data: {"updated_at":1789671814.72859}
+
+event: close
+data: {"click_behavior":"none","auto_resume":false}
+`
+
+// webDeepseekParseFixture 用实测 SSE 流全文回放解析器，返回解析结果。
+func webDeepseekParseFixture(t *testing.T) *webDeepseekSSEParser {
+	t.Helper()
+	parser := newWebDeepseekSSEParser()
+	scanner := bufio.NewScanner(strings.NewReader(webDeepseekFixtureSSE))
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for {
+		name, data, ok := webDeepseekNextSSEEvent(scanner)
+		if !ok {
+			break
+		}
+		switch name {
+		case "ready":
+			if id := gjson.Get(data, "response_message_id").Int(); id != 0 {
+				parser.responseID = gjson.Get(data, "response_message_id").String()
+			}
+			continue
+		case "close", "finish":
+			continue
+		}
+		parser.applyDelta(data)
 	}
+	require.NoError(t, scanner.Err())
+	return parser
 }
 
-// webDeepseekMissingTokenResponse 实测形态：PoW 端点未登录态返回 200 + {"code":40002}。
-func webDeepseekMissingTokenResponse() *http.Response {
+// TestWebDeepseekSSEParser_FixtureReplay 覆盖 SSE 解析器回放（09 §5）：正文提取（THINK 丢弃）、
+// ready 的 response_message_id、accumulated_token_usage 最终值（112）、close 终止、无 p 省略形态。
+func TestWebDeepseekSSEParser_FixtureReplay(t *testing.T) {
+	parser := webDeepseekParseFixture(t)
+
+	// 正文只取 RESPONSE fragment，THINK（"我们需要"/"回答用户说..."）须丢弃。
+	body := parser.body.String()
+	require.Contains(t, body, "哈哈，我又好～")
+	require.Contains(t, body, "需要我帮忙的吗？")
+	require.NotContains(t, body, "我们需要", "THINK fragment content must be discarded from body")
+	require.NotContains(t, body, "回答用户说", "THINK fragment content must be discarded from body")
+
+	// ready 的 response_message_id 数字 ID。
+	require.Equal(t, "4", parser.responseID)
+
+	// accumulated_token_usage 最终值（BATCH 42→112，累计语义）。
+	require.Equal(t, int64(112), parser.usage)
+
+	// close 事件 + response/status=FINISHED 均触发终止；解析器 finished 置位。
+	require.True(t, parser.finished, "stream must be marked finished by close/status FINISHED")
+
+	// 无 p 省略形态：fixture 原生含首帧 {p,o,v} 后仅 {v} 续写——解析后正文非空即证明状态机生效。
+	require.Greater(t, parser.body.Len(), 0, "omit-form frames must have been applied to the current path")
+}
+
+// webDeepseekSolvablePowChallengeBody 返回 nonce=5 可解的 challenge 响应（base=salt123_1739764288699_5）。
+func webDeepseekSolvablePowChallengeBody() string {
+	digest := webDeepseekPowStateDigest([]byte("salt123_1739764288699_5"))
+	challengeHex := hex.EncodeToString(digest[:])
+	return `{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"` + challengeHex + `","salt":"salt123","signature":"sig","difficulty":100,"expire_at":1739764288699,"target_path":"/api/v0/chat/completion"}}}}`
+}
+
+// webDeepseekSolvablePowChallengeResponse 为 web_protocol_bridge_test.go 的 mock 序列提供
+// 可解 PoW 挑战响应（无需 *testing.T 的包装）。
+func webDeepseekSolvablePowChallengeResponse() *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"code":40002,"msg":"Missing Token"}`)),
+		Body:       io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody())),
 	}
 }
 
-// webDeepseekRateLimitRepoStub 记录 SetRateLimited（429 兜底冷却写入点）与 SetError
-// （401 认证禁用写入点），用于断言 429 / code=40002 分类确实接入了
-// RateLimitService.HandleUpstreamError（CN 供应商语义）。
+func webDeepseekSessionCreateResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"chat_session":{"id":"sess-new-123"}}}}`)),
+	}
+}
+
+func webDeepseekFixtureSSEResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(webDeepseekFixtureSSE)),
+	}
+}
+
+// runForwardWebDeepseek 驱动一次 forwardWebDeepseek（非流式入站），返回 gin recorder、结果及上游 recorder。
+func runForwardWebDeepseek(
+	t *testing.T,
+	account *Account,
+	body []byte,
+	model string,
+	upstream *httpUpstreamRecorder,
+	rlSvc *RateLimitService,
+) (*httptest.ResponseRecorder, *OpenAIForwardResult, error) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+		httpUpstream:     upstream,
+		rateLimitService: rlSvc,
+	}
+
+	result, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, false, time.Now(), webResponseModeChat)
+	return recorder, result, err
+}
+
+func webDeepseekInboundBody(model string) []byte {
+	return []byte(`{"model":"` + model + `","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+}
+
+// TestForwardWebDeepseek_RequestBuild_NewProtocol 覆盖请求体重写（09 §4 / 06 §A）：
+//   - model_type 字段名（非 model_class）、parent_message_id 恒 null、action null、source 缺省省略；
+//   - search_enabled 实测默认 true、ref_file_ids 空数组；
+//   - 自动建会话：无 credentials chat_session_id 覆盖时每轮新建，completion 体 chat_session_id 取新建 id。
+func TestForwardWebDeepseek_RequestBuild_NewProtocol(t *testing.T) {
+	account := webDeepseekTestAccount(8801, map[string]any{
+		"cookie":   "ds_session_id=sess-abc; HWWAFSESID=waf-xyz; HWWAFSESTIME=1726450000",
+		"base_url": "https://chat.deepseek.com",
+	})
+	// 出站点序：0=PoW 挑战、1=会话创建、2=对话完成。
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+
+	require.Len(t, upstream.requests, 3, "PoW challenge + session create + completion requests expected")
+
+	// 端点顺序与头族。
+	require.Equal(t, "/api/v0/chat/create_pow_challenge", upstream.requests[0].URL.Path)
+	require.Equal(t, "/api/v0/chat_session/create", upstream.requests[1].URL.Path)
+	require.Equal(t, "/api/v0/chat/completion", upstream.requests[2].URL.Path)
+
+	chatReq := upstream.requests[2]
+	require.Equal(t, "chat.deepseek.com", chatReq.URL.Host)
+	require.Equal(t, webDeepseekClientUA, chatReq.Header.Get("User-Agent"))
+	require.Equal(t, "com.deepseek.chat", chatReq.Header.Get("x-client-bundle-id"))
+	require.Equal(t, "web", chatReq.Header.Get("x-client-platform"))
+	require.Equal(t, "2.5.0", chatReq.Header.Get("x-client-version"))
+	require.Equal(t, "zh_CN", chatReq.Header.Get("x-client-locale"))
+	require.Equal(t, "28800", chatReq.Header.Get("x-client-timezone-offset"))
+	require.NotEmpty(t, chatReq.Header.Get("x-device-id"), "x-device-id must be present (derived or credential)")
+	require.Equal(t, "", chatReq.Header.Get("x-device-model"))
+	require.NotEmpty(t, chatReq.Header.Get("X-Ds-PoW-Response"), "completion must carry x-ds-pow-response")
+
+	// 请求体字段（09 §4 实测）。
+	body := upstream.bodies[2]
+	require.Equal(t, "default", gjson.GetBytes(body, "model_type").String(), "model_type field name (not model_class)")
+	require.False(t, gjson.GetBytes(body, "model_type").Exists() == false)
+	require.Nil(t, gjson.GetBytes(body, "model_class").Value(), "legacy model_class must be absent")
+	require.Equal(t, "null", gjson.GetBytes(body, "parent_message_id").Raw, "parent_message_id must be JSON null")
+	require.Equal(t, "null", gjson.GetBytes(body, "action").Raw, "action must be JSON null")
+	require.False(t, gjson.GetBytes(body, "source").Exists(), "source default omitted")
+	require.False(t, gjson.GetBytes(body, "thinking_enabled").Bool(), "deepseek-chat maps to thinking_enabled=false (09 §4: only deepseek-reasoner enables thinking)")
+	require.True(t, gjson.GetBytes(body, "search_enabled").Bool(), "search_enabled default true (09 §4)")
+	require.True(t, gjson.GetBytes(body, "ref_file_ids").IsArray())
+	require.Equal(t, "hi", gjson.GetBytes(body, "prompt").String())
+	require.Equal(t, "sess-new-123", gjson.GetBytes(body, "chat_session_id").String(), "chat_session_id from session create")
+
+	// x-hif-*：无 credentials 时不带。
+	require.Equal(t, "", chatReq.Header.Get("x-hif-dliq"))
+	require.Equal(t, "", chatReq.Header.Get("x-hif-leim"))
+}
+
+// TestForwardWebDeepseek_SessionCreateOverrideSkipped 覆盖 credentials chat_session_id 覆盖时
+// 跳过自动建会话（直接复用），出站仅 PoW + completion 两次请求。
+func TestForwardWebDeepseek_SessionCreateOverrideSkipped(t *testing.T) {
+	account := webDeepseekTestAccount(8802, map[string]any{
+		"base_url":          "https://chat.deepseek.com",
+		"chat_session_id":   "sess-override-9",
+	})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekFixtureSSEResponse(),
+	}}
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 2, "override skips session create: PoW + completion only")
+	require.Equal(t, "/api/v0/chat/completion", upstream.requests[1].URL.Path)
+	require.Equal(t, "sess-override-9", gjson.GetBytes(upstream.bodies[1], "chat_session_id").String())
+}
+
+// TestForwardWebDeepseek_HeaderFamily_HifPassthrough 覆盖 x-hif-* 在 credentials 提供时透传。
+func TestForwardWebDeepseek_HeaderFamily_HifPassthrough(t *testing.T) {
+	account := webDeepseekTestAccount(8803, map[string]any{
+		"base_url":     "https://chat.deepseek.com",
+		"device_id":   "11111111-1111-4111-8111-111111111111",
+		"x-hif-dliq":  "hif-dliq-value",
+		"x-hif-leim":  "hif-leim-value",
+	})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	chatReq := upstream.requests[2]
+	require.Equal(t, "11111111-1111-4111-8111-111111111111", chatReq.Header.Get("x-device-id"), "device_id credential override")
+	require.Equal(t, "hif-dliq-value", chatReq.Header.Get("x-hif-dliq"))
+	require.Equal(t, "hif-leim-value", chatReq.Header.Get("x-hif-leim"))
+}
+
+// TestForwardWebDeepseek_ModelTypeMapping 覆盖模型映射：deepseek-chat → "default"；
+// deepseek-reasoner → "default" + thinking_enabled=true；未知模型透传同名。
+func TestForwardWebDeepseek_ModelTypeMapping(t *testing.T) {
+	cases := []struct {
+		in        string
+		modelType string
+		thinking  bool
+	}{
+		{"deepseek-chat", "default", false},
+		{"deepseek-reasoner", "default", true},
+		{"custom-model", "custom-model", false},
+	}
+	for _, tc := range cases {
+		account := webDeepseekTestAccount(8800+int64(len(tc.in)), map[string]any{"base_url": "https://chat.deepseek.com"})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			webDeepseekFixtureSSEResponse(),
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody(tc.in), tc.in, upstream, &RateLimitService{})
+		require.NoError(t, err, "model %s", tc.in)
+		require.Equal(t, tc.modelType, gjson.GetBytes(upstream.bodies[2], "model_type").String(), "model %s model_type", tc.in)
+		require.Equal(t, tc.thinking, gjson.GetBytes(upstream.bodies[2], "thinking_enabled").Bool(), "model %s thinking", tc.in)
+	}
+}
+
+// TestForwardWebDeepseek_MultiTurnPromptConcat 覆盖多轮上下文拼接为单 prompt（09 §5）：
+// 全部 user/assistant 文本拼接进 prompt（parent_message_id 不跨请求链式）。
+func TestForwardWebDeepseek_MultiTurnPromptConcat(t *testing.T) {
+	account := webDeepseekTestAccount(8804, map[string]any{"base_url": "https://chat.deepseek.com"})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+	inbound := []byte(`{"model":"deepseek-chat","stream":false,"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"},{"role":"assistant","content":"hi there"},{"role":"user","content":"bye"}]}`)
+	_, _, err := runForwardWebDeepseek(t, account, inbound, "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	prompt := gjson.GetBytes(upstream.bodies[2], "prompt").String()
+	require.Contains(t, prompt, "hello")
+	require.Contains(t, prompt, "hi there")
+	require.Contains(t, prompt, "bye")
+	require.Contains(t, prompt, "sys")
+	require.Equal(t, "null", gjson.GetBytes(upstream.bodies[2], "parent_message_id").Raw)
+}
+
+// TestForwardWebDeepseek_FixtureStreamingRelay 覆盖流式回程：实测 fixture 流经解析器重包为
+// chat.completion.chunk 流，正文正确、usage 取最后 accumulated_token_usage、终止 [DONE]。
+func TestForwardWebDeepseek_FixtureStreamingRelay(t *testing.T) {
+	account := webDeepseekTestAccount(8810, map[string]any{"base_url": "https://chat.deepseek.com"})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekInboundBody("deepseek-chat")))
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}}},
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{},
+	}
+	_, err := svc.forwardWebDeepseek(context.Background(), c, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", true, time.Now(), webResponseModeChat)
+	require.NoError(t, err)
+
+	out := recorder.Body.String()
+	require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+	// 正文分段为多个 chunk（chunk 间有 JSON 帧），需抽取各 delta.content 拼接后再断言，
+	// 不能直接对原始 SSE 串做子串匹配（与解析器 body 累计口径一致）。
+	var concat strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			continue
+		}
+		concat.WriteString(gjson.Get(payload, "choices.0.delta.content").String())
+	}
+	body := concat.String()
+	require.Contains(t, body, "哈哈，我又好～", "body fragment must be relayed")
+	require.Contains(t, body, "需要我帮忙的吗？", "body fragment must be relayed")
+	require.NotContains(t, body, "我们需要", "THINK content must not appear in stream")
+	require.Contains(t, out, `"output_tokens":112`, "final usage from accumulated_token_usage")
+	require.True(t, strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]"), "stream must terminate with [DONE], got: %s", out)
+}
+
+// TestForwardWebDeepseek_MissingCookieFailsClosed Cookie 缺失必须失败关闭，且不发出任何上游请求；
+// 错误信息不得包含任何凭证值。
+func TestForwardWebDeepseek_MissingCookieFailsClosed(t *testing.T) {
+	account := webDeepseekTestAccount(8805, map[string]any{"cookie": ""})
+	upstream := &httpUpstreamRecorder{}
+
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cookie")
+	require.Len(t, upstream.requests, 0, "no upstream request may be made without a login cookie")
+}
+
+// TestForwardWebDeepseek_PoWRequiredFailClosed 覆盖 PoW 强制（09 §3）：挑战不可达/无可用 challenge
+// 时失败关闭，不再"无 PoW 继续出站"。用 401 不可解响应模拟挑战失败。
+func TestForwardWebDeepseek_PoWRequiredFailClosed(t *testing.T) {
+	account := webDeepseekTestAccount(8806, map[string]any{"base_url": "https://chat.deepseek.com"})
+	// 挑战端点返回 401（无可用 challenge）→ 失败关闭，不进入会话创建/对话。
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"code":401,"msg":"unauthorized"}`))},
+	}}
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.Error(t, err, "PoW failure must fail closed")
+	require.Len(t, upstream.requests, 1, "must not proceed past PoW challenge")
+}
+
+// TestForwardWebDeepseek_PoWSolvedCarriesHeader 上游返回可解 challenge 时，求解成功且对话请求
+// 携带 x-ds-pow-response 头（answer 为数值、challenge 回显）。
+func TestForwardWebDeepseek_PoWSolvedCarriesHeader(t *testing.T) {
+	account := webDeepseekTestAccount(8807, map[string]any{"base_url": "https://chat.deepseek.com"})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+	recorder, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	require.True(t, recorder.Body.Len() > 0)
+	powHeader := upstream.requests[2].Header.Get("X-Ds-PoW-Response")
+	require.NotEmpty(t, powHeader, "completion request must carry x-ds-pow-response header")
+	payload, decodeErr := base64.StdEncoding.DecodeString(powHeader)
+	require.NoError(t, decodeErr)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(payload, &parsed))
+	answer, ok := parsed["answer"].(float64)
+	require.True(t, ok, "answer must be a number, got: %v", parsed["answer"])
+	require.Equal(t, float64(5), answer)
+}
+
+// TestForwardWebDeepseek_PoWChallengeTargetPath 覆盖 PoW 挑战请求体为 {"target_path":"/api/v0/chat/completion"}（09 §1）。
+func TestForwardWebDeepseek_PoWChallengeTargetPath(t *testing.T) {
+	account := webDeepseekTestAccount(8808, map[string]any{"base_url": "https://chat.deepseek.com"})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	require.Equal(t, `/api/v0/chat/completion`, gjson.GetBytes(upstream.bodies[0], "target_path").String())
+}
+
+// webDeepseekRateLimitRepoStub 记录 SetRateLimited / SetError，用于断言冷却/账号处置接入。
 type webDeepseekRateLimitRepoStub struct {
 	stubOpenAIAccountRepo
 	setRateLimitedCalls int
@@ -93,398 +501,108 @@ func (r *webDeepseekRateLimitRepoStub) SetError(_ context.Context, _ int64, _ st
 	return nil
 }
 
-// newWebDeepseekTestRateLimitService 构造带 repo stub 的 RateLimitService（与其它
-// service 层测试同口径：仅注入账号 repo，其余依赖为空）。
 func newWebDeepseekTestRateLimitService(repo *webDeepseekRateLimitRepoStub) *RateLimitService {
 	return NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 }
 
-// runForwardWebDeepseek 驱动一次 forwardWebDeepseek（非流式入站），返回 gin recorder
-// 与上游 recorder，并把 forward 错误记入测试对象。
-func runForwardWebDeepseek(
-	t *testing.T,
-	account *Account,
-	body []byte,
-	model string,
-	upstream *httpUpstreamRecorder,
-	rlSvc *RateLimitService,
-) (*httptest.ResponseRecorder, error) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
-
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
-		httpUpstream:     upstream,
-		rateLimitService: rlSvc,
-	}
-
-	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, false, time.Now(), webResponseModeChat)
-	return recorder, err
-}
-
-func webDeepseekInboundBody(model string) []byte {
-	return []byte(`{"model":"` + model + `","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
-}
-
-// TestForwardWebDeepseek_RequestBuildAndNonStreamAggregate 覆盖：
-//   - PoW 端点返回实测 40002 形态时按无 PoW 出站；
-//   - 出站端点 /api/v0/chat/completion、指纹头（Cookie 同串携带 / Origin / Referer / UA）；
-//   - 请求体实测已知字段（chat_session_id / parent_message_id / model_class / prompt /
-//     thinking_enabled=false / search_enabled=false）；
-//   - base_url 凭证覆盖默认域名；
-//   - SSE 回程聚合为单条 chat.completion JSON，模型名回填原始请求模型。
-func TestForwardWebDeepseek_RequestBuildAndNonStreamAggregate(t *testing.T) {
-	account := webDeepseekTestAccount(8801, map[string]any{
-		"cookie":            "ds_session_id=sess-abc; HWWAFSESID=waf-xyz; HWWAFSESTIME=1726450000",
-		"base_url":          "https://chat.deepseek.com",
-		"chat_session_id":   "sess-42",
-		"parent_message_id": "msg-9",
-	})
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(), // PoW 挑战端点
-		webDeepseekSSECompletionResponse(),
-	}}
-
-	recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
-	require.NoError(t, err)
-
-	require.Len(t, upstream.requests, 2, "PoW challenge fetch + completion request")
-
-	powReq := upstream.requests[0]
-	require.Equal(t, "/api/v0/chat/create_pow_challenge", powReq.URL.Path)
-
-	chatReq := upstream.requests[1]
-	require.Equal(t, "/api/v0/chat/completion", chatReq.URL.Path)
-	require.Equal(t, "chat.deepseek.com", chatReq.URL.Host, "credentials.base_url must override default base url")
-	require.Equal(t, "https://chat.deepseek.com", chatReq.Header.Get("Origin"))
-	require.Equal(t, "https://chat.deepseek.com/", chatReq.Header.Get("Referer"))
-	require.Equal(t, "application/json", chatReq.Header.Get("Content-Type"))
-	require.Equal(t, webDeepseekClientUA, chatReq.Header.Get("User-Agent"))
-
-	// Cookie 同串携带：整串登录 Cookie（含 WAF Cookie）原样出现在 Cookie 头。
-	cookieHeader := chatReq.Header.Get("Cookie")
-	require.Contains(t, cookieHeader, "ds_session_id=sess-abc")
-	require.Contains(t, cookieHeader, "HWWAFSESID=waf-xyz")
-	require.Contains(t, cookieHeader, "HWWAFSESTIME=1726450000")
-
-	// 请求体：实测已知字段。
-	body := upstream.bodies[1]
-	require.Equal(t, "deepseek_chat", gjson.GetBytes(body, "model_class").String())
-	require.Equal(t, "hi", gjson.GetBytes(body, "prompt").String())
-	require.Equal(t, "sess-42", gjson.GetBytes(body, "chat_session_id").String())
-	require.Equal(t, "msg-9", gjson.GetBytes(body, "parent_message_id").String())
-	require.False(t, gjson.GetBytes(body, "thinking_enabled").Bool())
-	require.False(t, gjson.GetBytes(body, "search_enabled").Bool())
-	require.True(t, gjson.GetBytes(body, "model_class").Exists())
-	require.True(t, gjson.GetBytes(body, "prompt").Exists())
-
-	// 回程聚合：SSE → 单条 chat.completion JSON，模型回填原始请求模型，usage 提取。
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
-	var completion map[string]any
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &completion))
-	require.Equal(t, "chat.completion", completion["object"])
-	require.Equal(t, "deepseek-chat", completion["model"])
-	choices, ok := completion["choices"].([]any)
-	require.True(t, ok)
-	require.Len(t, choices, 1)
-	first, ok := choices[0].(map[string]any)
-	require.True(t, ok)
-	message, ok := first["message"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, "hello world", message["content"])
-	usage, ok := completion["usage"].(map[string]any)
-	require.True(t, ok)
-	require.EqualValues(t, 3, usage["input_tokens"])
-	require.EqualValues(t, 2, usage["output_tokens"])
-}
-
-// TestForwardWebDeepseek_ReasonerThinkingEnabled 覆盖方案 §3.3：
-// deepseek-reasoner → model_class=deepseek_chat + thinking_enabled=true。
-func TestForwardWebDeepseek_ReasonerThinkingEnabled(t *testing.T) {
-	account := webDeepseekTestAccount(8802, nil)
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(),
-		webDeepseekSSECompletionResponse(),
-	}}
-
-	_, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-reasoner"), "deepseek-reasoner", upstream, &RateLimitService{})
-	require.NoError(t, err)
-	require.Len(t, upstream.bodies, 2)
-	require.Equal(t, "deepseek_chat", gjson.GetBytes(upstream.bodies[1], "model_class").String())
-	require.True(t, gjson.GetBytes(upstream.bodies[1], "thinking_enabled").Bool())
-}
-
-// TestForwardWebDeepseek_ModelMappingPassthrough 覆盖模型映射：账号 model_mapping 命中
-// 时按映射后的模型归一 model_class；未配置映射时默认透传（未知模型名 model_class 原样）。
-func TestForwardWebDeepseek_ModelMappingPassthrough(t *testing.T) {
-	// 命中映射：my-alias → deepseek-chat → model_class=deepseek_chat。
-	account := webDeepseekTestAccount(8803, map[string]any{
-		"model_mapping": map[string]any{"my-alias": "deepseek-chat"},
-	})
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(),
-		webDeepseekSSECompletionResponse(),
-	}}
-	_, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("my-alias"), "my-alias", upstream, &RateLimitService{})
-	require.NoError(t, err)
-	require.Len(t, upstream.bodies, 2)
-	require.Equal(t, "deepseek_chat", gjson.GetBytes(upstream.bodies[1], "model_class").String())
-
-	// 未配置映射：未知模型名透传同名（方案 §3.3 默认透传；真实取值待登录态实测补全）。
-	passthrough := webDeepseekTestAccount(8804, nil)
-	upstream2 := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(),
-		webDeepseekSSECompletionResponse(),
-	}}
-	_, err = runForwardWebDeepseek(t, passthrough, webDeepseekInboundBody("custom-model"), "custom-model", upstream2, &RateLimitService{})
-	require.NoError(t, err)
-	require.Len(t, upstream2.bodies, 2)
-	require.Equal(t, "custom-model", gjson.GetBytes(upstream2.bodies[1], "model_class").String())
-}
-
-// runForwardWebDeepseekStream 驱动一次流式入站的 forwardWebDeepseek，返回 gin recorder。
-func runForwardWebDeepseekStream(
-	t *testing.T,
-	account *Account,
-	body []byte,
-	model string,
-	upstream *httpUpstreamRecorder,
-) *httptest.ResponseRecorder {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
-
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
-		httpUpstream:     upstream,
-		rateLimitService: &RateLimitService{},
-	}
-	_, err := svc.forwardWebDeepseek(context.Background(), c, account, body, model, true, time.Now(), webResponseModeChat)
-	require.NoError(t, err)
-	return recorder
-}
-
-func webDeepseekStreamInboundBody() []byte {
-	return []byte(`{"model":"deepseek-chat","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-}
-
-// TestForwardWebDeepseek_StreamingResponseRelay 覆盖流式回程：上游 SSE 增量经通用映射
-// 重包为 chat.completion.chunk 流，终止帧收口 data: [DONE]，SSE 头齐备，usage 记入结果。
-func TestForwardWebDeepseek_StreamingResponseRelay(t *testing.T) {
-	account := webDeepseekTestAccount(8810, map[string]any{"base_url": "https://chat.deepseek.com"})
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(),
-		webDeepseekSSECompletionResponse(),
-	}}
-
-	recorder := runForwardWebDeepseekStream(t, account, webDeepseekStreamInboundBody(), "deepseek-chat", upstream)
-
-	require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
-	out := recorder.Body.String()
-	require.True(t, strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]"), "stream must terminate with [DONE], got: %s", out)
-	require.Contains(t, out, `"content":"hello"`)
-	require.Contains(t, out, `"content":" world"`)
-	require.Contains(t, out, `"finish_reason":"stop"`)
-	require.Contains(t, out, `"model":"deepseek-chat"`)
-	require.Contains(t, out, `"object":"chat.completion.chunk"`)
-}
-
-// TestForwardWebDeepseek_StreamMidstreamBusinessError 覆盖流式中段业务错误收口（Codex
-// 审查 #1）：首帧已写出正文后，上游在流中抛出业务错误码（实测 40002 形态）时，必须向客户端
-// 写明确 error 标记并终结 SSE，且不得伪造正常 finish_reason+usage 终止帧——否则客户端会把
-// 失败请求当成功流处理（HTTP 已 200 的事实无法再纠错，只能靠流内 error 标记区分）。
-func TestForwardWebDeepseek_StreamMidstreamBusinessError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekStreamInboundBody()))
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
-	}
-	sse := strings.Join([]string{
-		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
-		``,
-		`data: {"code":40002,"msg":"midstream business error"}`,
-		``,
-	}, "\n")
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(sse)),
-	}
-	account := webDeepseekTestAccount(8820, nil)
-	result, err := svc.handleWebDeepseekStreamingResponse(
-		context.Background(), resp, c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeChat)
-	require.NoError(t, err, "midstream error is conveyed in-stream, not as a Go error")
-	require.True(t, result.Stream)
-
-	out := recorder.Body.String()
-	require.Contains(t, out, `"content":"hello"`, "first content frame must be relayed before the error")
-	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream")
-	require.Contains(t, out, `"upstream_error"`)
-	// 错误帧必须是 [DONE] 之前的最后一帧业务帧：中间没有任何正常 finish_reason+usage 终止帧。
-	require.Contains(t, out,
-		`data: {"error":{"message":"midstream business error","type":"upstream_error"}}`+"\n\n"+`data: [DONE]`,
-		"error frame must immediately precede [DONE], with no normal terminal frame in between")
-	require.NotContains(t, out, `"usage"`, "midstream error must NOT emit a normal usage terminal frame")
-}
-
-// TestForwardWebDeepseek_StreamMidstreamBusinessError_ResponsesMode 同前，但入站为
-// /v1/responses：流内错误标记须为 Responses 协议的 `event: error` 帧（不写 success 终止事件
-// response.completed），且不得出现 chat 模式的 data: [DONE] 收口。验证 writeWebStreamMidstreamError
-// 按出站协议分派。
-func TestForwardWebDeepseek_StreamMidstreamBusinessError_ResponsesMode(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekStreamInboundBody()))
-	svc := &OpenAIGatewayService{
-		cfg: &config.Config{
-			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
-		},
-	}
-	sse := strings.Join([]string{
-		`data: {"id":"ds-1","choices":[{"delta":{"content":"hello"}}]}`,
-		``,
-		`data: {"code":40002,"msg":"midstream business error"}`,
-		``,
-	}, "\n")
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(sse)),
-	}
-	account := webDeepseekTestAccount(8821, nil)
-	_, err := svc.handleWebDeepseekStreamingResponse(
-		context.Background(), resp, c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeResponses)
-	require.NoError(t, err)
-
-	out := recorder.Body.String()
-	require.Contains(t, out, `"error"`, "midstream error must be marked in-stream for responses mode")
-	require.Contains(t, out, `"upstream_error"`)
-	require.Contains(t, out, "event: error", "responses mode must emit an event: error frame")
-	require.NotContains(t, out, "data: [DONE]", "responses mode must NOT emit chat-mode [DONE] closing")
-	require.NotContains(t, out, "response.completed", "midstream error must NOT emit a success terminal event")
-}
-
-// TestForwardWebDeepseek_MissingCookieFailsClosed Cookie 缺失必须失败关闭，且不发出
-// 任何上游请求；错误信息不得包含任何凭证值。
-func TestForwardWebDeepseek_MissingCookieFailsClosed(t *testing.T) {
-	account := webDeepseekTestAccount(8805, map[string]any{"cookie": ""})
-	upstream := &httpUpstreamRecorder{}
-
-	_, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cookie")
-	require.Len(t, upstream.requests, 0, "no upstream request may be made without a login cookie")
-}
-
-// TestForwardWebDeepseek_PoWSolvedCarriesHeader 上游返回可解 challenge（实测
-// data.biz_data.challenge 结构）时，求解成功且对话请求携带 x-ds-pow-response 头。
-func TestForwardWebDeepseek_PoWSolvedCarriesHeader(t *testing.T) {
-	account := webDeepseekTestAccount(8806, nil)
-	// 用 nonce=5 求解出的 challenge（确定性：solvableNonceChallenge 在包内计算）。
-	digest := webDeepseekPowStateDigest([]byte("salt123_1739764288699_5"))
-	challengeHex := hex.EncodeToString(digest[:])
-	challengeBody := `{"code":0,"msg":"","data":{"biz_code":0,"biz_msg":"","biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"` + challengeHex + `","salt":"salt123","signature":"sig","difficulty":100,"expire_at":1739764288699,"target_path":"/api/v0/chat/completion"}}}}`
-	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		&http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(challengeBody)),
-		},
-		&http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body:       io.NopCloser(strings.NewReader(webDeepseekSSECompletionBody())),
-		},
-	}}
-
-	recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
-	require.NoError(t, err)
-	require.True(t, recorder.Body.Len() > 0)
-	require.Len(t, upstream.requests, 2, "challenge + completion requests expected")
-	powHeader := upstream.requests[1].Header.Get("X-Ds-PoW-Response")
-	require.NotEmpty(t, powHeader, "completion request must carry x-ds-pow-response header")
-	// 头值可解码且 answer 为数值。
-	payload, decodeErr := base64.StdEncoding.DecodeString(powHeader)
-	require.NoError(t, decodeErr)
-	var parsed map[string]any
-	require.NoError(t, json.Unmarshal(payload, &parsed))
-	answer, ok := parsed["answer"].(float64)
-	require.True(t, ok, "answer must be a number, got: %v", parsed["answer"])
-	require.Equal(t, float64(5), answer)
-	require.Equal(t, challengeHex, parsed["challenge"])
-}
-
-// TestForwardWebDeepseek_RateLimitClassification 覆盖 429 / code=40002 分类接入
-// RateLimitService.HandleUpstreamError（CN 供应商语义：冷却账号）。
-func TestForwardWebDeepseek_RateLimitClassification(t *testing.T) {
-	newAccount := func(id int64) *Account { return webDeepseekTestAccount(id, nil) }
-
-	t.Run("http_429", func(t *testing.T) {
-		repo := &webDeepseekRateLimitRepoStub{}
-		rlSvc := newWebDeepseekTestRateLimitService(repo)
-		account := newAccount(8807)
-		upstream := &httpUpstreamRecorder{responses: []*http.Response{
-			webDeepseekMissingTokenResponse(),
-			&http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"code":429,"msg":"rate limited"}`)),
-			},
-		}}
-		recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, rlSvc)
-		require.Error(t, err)
-		require.Equal(t, 1, repo.setRateLimitedCalls, "429 must cool the account via RateLimitService")
-		// 凭证脱敏：错误响应不得回显 Cookie。
-		require.NotContains(t, recorder.Body.String(), "ds_session_id=sess-abc")
-		require.NotContains(t, recorder.Body.String(), "waf-xyz")
-	})
-
-	t.Run("http_200_code_40002", func(t *testing.T) {
-		repo := &webDeepseekRateLimitRepoStub{}
-		rlSvc := newWebDeepseekTestRateLimitService(repo)
-		account := newAccount(8808)
-		upstream := &httpUpstreamRecorder{responses: []*http.Response{
-			webDeepseekMissingTokenResponse(),
-			// 实测形态：业务错误码随 HTTP 200 返回（{"code":40002,"msg":"Missing Token"}）。
-			&http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"code":40002,"msg":"Missing Token"}`)),
-			},
-		}}
-		recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, rlSvc)
-		_ = recorder
-		require.Error(t, err)
-		require.Equal(t, 1, repo.setRateLimitedCalls, "code=40002 (HTTP 200) must be classified as rate limit and cool the account")
-	})
-
-	t.Run("unit_classify", func(t *testing.T) {
+// TestForwardWebDeepseek_ErrorClassification 覆盖双路径错误判定与分类接入
+// （06 §A 错误映射）：顶层 code 与 data.biz_code 双路径；40002/40003/50006 → 认证处置(SetError)；
+// 40029/429 → 限流冷却(SetRateLimited)；40300/40301 → PoW 错误（失败关闭，归一 403）。
+func TestForwardWebDeepseek_ErrorClassification(t *testing.T) {
+	t.Run("unit_classify_double_path", func(t *testing.T) {
+		// 双路径：data.biz_code 非 0（嵌套形态）。
+		body := `{"code":0,"msg":"","data":{"biz_code":40002,"biz_msg":"invalid token","biz_data":null}}`
+		require.Equal(t, webDeepseekErrKindAuthFailed, classifyWebDeepseekUpstreamError(200, []byte(body)))
+		// 顶层 code 非 0（旧形态）。
+		require.Equal(t, webDeepseekErrKindAuthFailed, classifyWebDeepseekUpstreamError(200, []byte(`{"code":40002,"msg":"Missing Token"}`)))
+		// 40029 IP 受限 → 限流。
+		require.Equal(t, webDeepseekErrKindRateLimited, classifyWebDeepseekUpstreamError(200, []byte(`{"code":0,"data":{"biz_code":40029}}`)))
+		// 40300 PoW 错误。
+		require.Equal(t, webDeepseekErrKindPoWError, classifyWebDeepseekUpstreamError(200, []byte(`{"code":0,"data":{"biz_code":40300}}`)))
+		// 50006 禁言 → 认证处置。
+		require.Equal(t, webDeepseekErrKindAuthFailed, classifyWebDeepseekUpstreamError(200, []byte(`{"code":0,"data":{"biz_code":50006}}`)))
+		// 429 状态 → 限流。
 		require.Equal(t, webDeepseekErrKindRateLimited, classifyWebDeepseekUpstreamError(429, nil))
-		require.Equal(t, webDeepseekErrKindRateLimited, classifyWebDeepseekUpstreamError(200, []byte(`{"code":40002,"msg":"Missing Token"}`)))
+		// 无错误。
 		require.Equal(t, webDeepseekErrKindOther, classifyWebDeepseekUpstreamError(200, []byte(`{"code":0}`)))
-		require.Equal(t, webDeepseekErrKindOther, classifyWebDeepseekUpstreamError(500, []byte(`{"code":500,"msg":"boom"}`)))
+	})
+
+	t.Run("auth_40002_triggers_set_error", func(t *testing.T) {
+		repo := &webDeepseekRateLimitRepoStub{}
+		rlSvc := newWebDeepseekTestRateLimitService(repo)
+		account := webDeepseekTestAccount(8811, map[string]any{"base_url": "https://chat.deepseek.com"})
+		errBody := `{"code":0,"msg":"","data":{"biz_code":40002,"biz_msg":"invalid token","biz_data":null}}`
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(errBody))},
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, rlSvc)
+		require.Error(t, err)
+		require.Equal(t, 1, repo.setErrorCalls, "40002 must disable account (SetError)")
+	})
+
+	t.Run("ip_restricted_40029_triggers_cooldown", func(t *testing.T) {
+		repo := &webDeepseekRateLimitRepoStub{}
+		rlSvc := newWebDeepseekTestRateLimitService(repo)
+		account := webDeepseekTestAccount(8812, map[string]any{"base_url": "https://chat.deepseek.com"})
+		errBody := `{"code":0,"msg":"","data":{"biz_code":40029,"biz_msg":"ip restricted","biz_data":null}}`
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(errBody))},
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, rlSvc)
+		require.Error(t, err)
+		require.Equal(t, 1, repo.setRateLimitedCalls, "40029 must cool the account (SetRateLimited)")
+	})
+
+	t.Run("pow_error_40300_fail_closed", func(t *testing.T) {
+		repo := &webDeepseekRateLimitRepoStub{}
+		rlSvc := newWebDeepseekTestRateLimitService(repo)
+		account := webDeepseekTestAccount(8813, map[string]any{"base_url": "https://chat.deepseek.com"})
+		errBody := `{"code":0,"msg":"","data":{"biz_code":40300,"biz_msg":"pow header error","biz_data":null}}`
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(errBody))},
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, rlSvc)
+		require.Error(t, err)
+		require.Equal(t, 0, repo.setRateLimitedCalls)
+		require.Equal(t, 0, repo.setErrorCalls)
 	})
 }
 
-// TestForwardWebDeepseek_CredentialNeverInClientResponse 凭证不出现在任何客户端可见
-// 错误响应中（含缺 Cookie 与上游错误两条路径）。
+// TestForwardWebDeepseek_WAFFailClosed 覆盖 WAF 失败关闭（01 §8 / 09）：响应头含 x-amzn-waf-action
+// 或状态 405 → 失败关闭，不将 WAF 正文透传客户端。
+func TestForwardWebDeepseek_WAFFailClosed(t *testing.T) {
+	t.Run("x_amzn_waf_action", func(t *testing.T) {
+		account := webDeepseekTestAccount(8814, map[string]any{"base_url": "https://chat.deepseek.com"})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Amzn-Waf-Action": []string{"challenge"}, "Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(`<html>waf</html>`))},
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "WAF")
+	})
+	t.Run("status_405", func(t *testing.T) {
+		account := webDeepseekTestAccount(8815, map[string]any{"base_url": "https://chat.deepseek.com"})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+			webDeepseekSessionCreateResponse(),
+			&http.Response{StatusCode: http.StatusMethodNotAllowed, Header: http.Header{"x-amzn-waf-action": []string{"captcha"}}, Body: io.NopCloser(strings.NewReader(`captcha`))},
+		}}
+		_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "WAF")
+	})
+}
+
+// TestForwardWebDeepseek_CredentialNeverInClientResponse 凭证不出现在任何客户端可见错误响应中
+// （含缺 Cookie 与上游错误两条路径）。
 func TestForwardWebDeepseek_CredentialNeverInClientResponse(t *testing.T) {
 	const secretCookie = "ds_session_id=SECRETVALUE123456; HWWAFSESID=WAFSECRETVALUE1"
 	account := webDeepseekTestAccount(8809, map[string]any{
@@ -492,18 +610,41 @@ func TestForwardWebDeepseek_CredentialNeverInClientResponse(t *testing.T) {
 		"base_url": "https://chat.deepseek.com",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
-		webDeepseekMissingTokenResponse(),
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
 		// 上游错误体回显 Cookie 片段（最坏情况），必须被脱敏后再透传。
-		&http.Response{
-			StatusCode: http.StatusUnauthorized,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"code":401,"msg":"bad session ` + secretCookie + `"}`)),
-		},
+		&http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"code":401,"msg":"bad session ` + secretCookie + `"}`))},
 	}}
-	repo := &webDeepseekRateLimitRepoStub{}
-	recorder, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, newWebDeepseekTestRateLimitService(repo))
+	recorder, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, newWebDeepseekTestRateLimitService(&webDeepseekRateLimitRepoStub{}))
 	require.Error(t, err)
-	require.Equal(t, 1, repo.setErrorCalls, "401 must be handled as auth error via RateLimitService")
 	require.NotContains(t, recorder.Body.String(), "SECRETVALUE123456")
 	require.NotContains(t, recorder.Body.String(), "WAFSECRETVALUE1")
+}
+
+// TestForwardWebDeepseek_NonStreamingFixtureAggregate 覆盖非流式聚合（同步改用新解析器）：
+// 实测 fixture 流聚合为单条 chat.completion JSON，正文正确、usage=112、模型回填。
+func TestForwardWebDeepseek_NonStreamingFixtureAggregate(t *testing.T) {
+	account := webDeepseekTestAccount(8820, map[string]any{"base_url": "https://chat.deepseek.com"})
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		webDeepseekFixtureSSEResponse(),
+	}}
+	recorder, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var completion map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &completion))
+	require.Equal(t, "chat.completion", completion["object"])
+	require.Equal(t, "deepseek-chat", completion["model"])
+	choices := completion["choices"].([]any)
+	first := choices[0].(map[string]any)
+	message := first["message"].(map[string]any)
+	content := message["content"].(string)
+	require.Contains(t, content, "哈哈，我又好～")
+	require.Contains(t, content, "需要我帮忙的吗？")
+	require.NotContains(t, content, "我们需要")
+	usage := completion["usage"].(map[string]any)
+	require.EqualValues(t, 0, usage["input_tokens"])
+	require.EqualValues(t, 112, usage["output_tokens"])
 }

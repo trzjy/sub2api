@@ -55,12 +55,18 @@ func webBridgeTestAccount(platform string, id int64) *Account {
 func webBridgeUpstream(platform string, stream bool) []*http.Response {
 	switch platform {
 	case PlatformWebDeepseek:
-		return []*http.Response{webDeepseekMissingTokenResponse(), webDeepseekSSECompletionResponse()}
+		// 新协议（2026-09-18 登录态实测）：可解 PoW 挑战 → 自动建会话 → 实测 SSE fixture。
+		return []*http.Response{
+			webDeepseekSolvablePowChallengeResponse(),
+			webDeepseekSessionCreateResponse(),
+			webDeepseekFixtureSSEResponse(),
+		}
 	case PlatformWebZhipu:
 		return []*http.Response{webZhipuSSECompletionResponse()}
 	case PlatformWebKimi:
+		// 新协议（2026-09-18 登录态实测）：Connect RPC envelope 流（流式/非流式同载荷）。
 		if stream {
-			return []*http.Response{webKimiSSEResponse()}
+			return []*http.Response{webKimiStreamResponse()}
 		}
 		return []*http.Response{webKimiConnectResponse()}
 	}
@@ -84,13 +90,12 @@ func webBridgeModel(platform string) string {
 func webBridgeExpectedContent(platform string, stream bool) string {
 	switch platform {
 	case PlatformWebDeepseek:
-		return "hello world"
+		// 实测 fixture（raw/deepseek-sse-decoded.txt 回放）RESPONSE fragment 全文。
+		return "哈哈，我又好～ 你好我也好 😄  \n今天有什么想聊的，或者需要我帮忙的吗？"
 	case PlatformWebZhipu:
 		return "hello world"
 	case PlatformWebKimi:
-		if stream {
-			return "hello world"
-		}
+		// envelope fixture 载荷聚合正文（流式/非流式同载荷）。
 		return "hi there"
 	}
 	return ""
@@ -181,8 +186,10 @@ func TestWebProtocolBridge_ResponseShape(t *testing.T) {
 					require.Equal(t, "message", out["type"], "anthropic mode must emit Anthropic message")
 					require.Equal(t, "assistant", out["role"])
 				}
-				// 正文须正确透出（跨回桥不丢内容）。
-				require.Contains(t, rec.Body.String(), webBridgeExpectedContent(platform, false),
+				// 正文须正确透出（跨回桥不丢内容）：JSON 体按 JSON 转义形态比对。
+				expectedJSON, err := json.Marshal(webBridgeExpectedContent(platform, false))
+				require.NoError(t, err)
+				require.Contains(t, rec.Body.String(), string(expectedJSON[1:len(expectedJSON)-1]),
 					"aggregated content must survive the protocol bridge")
 				// 非流式不得出现 SSE 帧前缀。
 				require.NotContains(t, rec.Body.String(), "event:")
@@ -215,12 +222,64 @@ func TestWebProtocolBridge_ResponseShape(t *testing.T) {
 					require.Contains(t, body, "event: content_block_delta")
 					require.NotContains(t, body, "data: [DONE]", "Anthropic stream must not emit OpenAI [DONE]")
 				}
-				// 流式正文分帧为 "hello" / " world"，跨回桥仍以增量透出（不丢内容）。
-				require.Contains(t, body, "hello")
-				require.Contains(t, body, " world")
+				// 流式正文跨回桥仍以增量透出（分帧边界与上游一致，正文不丢不改序）：
+				// 按出站协议逐帧提取 delta 并聚合后与期望正文全等。
+				require.Equal(t, webBridgeExpectedContent(platform, true),
+					webBridgeStreamAggregatedContent(t, m.mode, body))
 			})
 		}
 	}
+}
+
+
+// webBridgeStreamAggregatedContent 按出站协议从 SSE 流帧中逐行提取正文增量并聚合：
+//   - chat：choices[0].delta.content（OpenAI chat.completion.chunk）；
+//   - responses：type=response.output_text.delta 的顶层 delta 字段；
+//   - anthropic：type=content_block_delta 的 delta.text 字段。
+func webBridgeStreamAggregatedContent(t *testing.T, mode webResponseMode, body string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var frame map[string]any
+		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+			continue
+		}
+		switch mode {
+		case webResponseModeChat:
+			if choices, ok := frame["choices"].([]any); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]any); ok {
+					if delta, ok := choice["delta"].(map[string]any); ok {
+						if content, ok := delta["content"].(string); ok {
+							sb.WriteString(content)
+						}
+					}
+				}
+			}
+		case webResponseModeResponses:
+			if typ, _ := frame["type"].(string); typ == "response.output_text.delta" {
+				if delta, ok := frame["delta"].(string); ok {
+					sb.WriteString(delta)
+				}
+			}
+		case webResponseModeAnthropic:
+			if typ, _ := frame["type"].(string); typ == "content_block_delta" {
+				if delta, ok := frame["delta"].(map[string]any); ok {
+					if text, ok := delta["text"].(string); ok {
+						sb.WriteString(text)
+					}
+				}
+			}
+		}
+	}
+	return sb.String()
 }
 
 // --- #3：流式业务错误（裸 JSON 200 错误 / SSE 业务错误码）不得被漏判为正常流并伪 [DONE] ---
@@ -293,7 +352,8 @@ func webSSEFrameBusinessErrorResponse() *http.Response {
 }
 
 func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
-	// 三平台 ×（裸 JSON 200 错误 / SSE 帧业务错误码）均须走错误路径，不得伪 [DONE]。
+	// 三平台 ×（裸 JSON 200 错误 / 流帧业务错误码）均须走错误路径，不得伪 [DONE]。
+	// DeepSeek 走 SSE data: 帧错误；Kimi 新协议（Connect envelope）对应为 envelope 错误帧。
 	platforms := []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi}
 	for _, platform := range platforms {
 		model := webBridgeModel(platform)
@@ -302,9 +362,18 @@ func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
 		t.Run(platform+"/bare_json_200_error", func(t *testing.T) {
 			// deepseek 需先消耗一个 PoW 挑战响应，再给裸 JSON 错误（对话端点 HTTP 200）。
 			var upstream []*http.Response
-			if platform == PlatformWebDeepseek {
-				upstream = []*http.Response{webDeepseekMissingTokenResponse(), webBareJSONErrorResponse()}
-			} else {
+			switch platform {
+			case PlatformWebDeepseek:
+				// 新协议三跳：可解 PoW → 建会话 → completion 返回 HTTP 200 裸 JSON 业务错误。
+				upstream = []*http.Response{
+					webDeepseekSolvablePowChallengeResponse(),
+					webDeepseekSessionCreateResponse(),
+					webBareJSONErrorResponse(),
+				}
+			case PlatformWebKimi:
+				// Connect envelope 业务错误帧（数字 code 非 0，与 webKimiBareJSONError 同口径）。
+				upstream = []*http.Response{webKimiEnvelopeResponse([]string{`{"code":40002,"message":"Missing Token"}`})}
+			default:
 				upstream = []*http.Response{webBareJSONErrorResponse()}
 			}
 			rec, err := runWebForwardForModeErr(t, platform, account, model, true, webResponseModeChat,
@@ -315,9 +384,18 @@ func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
 
 		t.Run(platform+"/sse_frame_business_error_code", func(t *testing.T) {
 			var upstream []*http.Response
-			if platform == PlatformWebDeepseek {
-				upstream = []*http.Response{webDeepseekMissingTokenResponse(), webSSEFrameBusinessErrorResponse()}
-			} else {
+			switch platform {
+			case PlatformWebDeepseek:
+				// 三跳前缀后，completion SSE 流首帧携带顶层非 0 code（解析器 applyDelta 双路径判定）。
+				upstream = []*http.Response{
+					webDeepseekSolvablePowChallengeResponse(),
+					webDeepseekSessionCreateResponse(),
+					webSSEFrameBusinessErrorResponse(),
+				}
+			case PlatformWebKimi:
+				// Connect envelope 协议原生业务错误形态（字符串 code=unauthenticated，实测 401 对称形态）。
+				upstream = []*http.Response{webKimiEnvelopeResponse([]string{`{"code":"unauthenticated","message":"login expired midstream"}`})}
+			default:
 				upstream = []*http.Response{webSSEFrameBusinessErrorResponse()}
 			}
 			rec, err := runWebForwardForModeErr(t, platform, account, model, true, webResponseModeChat,

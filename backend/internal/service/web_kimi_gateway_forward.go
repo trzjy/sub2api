@@ -3,7 +3,9 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,17 +23,28 @@ import (
 // web-kimi 网页逆向适配器（方案 W2，docs/web-reverse-embedded-login-plan.md §4.3、
 // docs/web-reverse-analysis-plan.md §1.3/§3.3/§3.4）。
 //
-// 协议状态声明（权威来源：两份方案文档的实测记录，2026-09-16）：
-//   - 已实测：对话端点 POST /apiv2/kimi.chat.v1.ChatService/Chat（Connect RPC，401
-//     unauthenticated）、模型列表端点（免登录，k3 / k3-agent-ultra）、Token 刷新端点
-//     POST auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken、设备注册端点、
-//     已验证请求体结构（方案 §4.3：chatId / kimiPlusId / scenario / projectId / tools /
-//     message.blocks / options.thinking+model）。
-//   - 未实测（登录态缺失）：SSE chunk 结构、刷新成功响应结构、TrustDecision 设备指纹要求。
-//     本文件对全部未知格式做集中封装并标注「待登录态实测补全」，不做任何臆测编造。
+// 协议状态声明（权威来源：登录态实测 10-kimi-logged-in-probe.md，2026-09-18）：
+//   - 已实测（10 §3/§4/§2）：对话端点 POST /apiv2/kimi.chat.v1.ChatService/Chat 走
+//     Connect RPC 流式（envelope：1 字节 flag + 4 字节大端长度 + payload JSON）；请求体块
+//     结构为 blocks[].text.content 简单形态、scenario=SCENARIO_CHAT、options 含
+//     thinking/enable_plugin/reasoning_effort/model、project_id，**请求体无 chatId**
+//     （chatId 由服务端在流首帧 chat.id 返回）；流式增量走 op/mask/eventOffset
+//     （block.text.content 正文、block.think.content 思考），终止为 done 帧 +
+//     message.status=MESSAGE_STATUS_COMPLETED，首帧/中途 heartbeat 帧跳过。
+//   - 头族实测：content-type application/connect+json、x-language / x-msh-device-id /
+//     x-msh-platform: web / x-msh-session-id / x-msh-version: 2.2.0 / x-traffic-id。
+//   - 残余 unverified（不得补猜，按兼容/缺省处理并标注）：
+//     · 认证载体：HAR 无 Authorization/Cookie（Chrome 隐藏凭据头）；实现为 access_token 仍带
+//       Authorization: Bearer（兼容期双载体），credentials 有 cookie 时另带 Cookie 头（候选载体）。
+//     · x-msh-shield-data：生成算法未逆向，不实现生成；仅 credentials 有值时透传。
+//     · x-msh-device-id / x-msh-session-id / x-traffic-id：实测为动态值，不生成；仅 credentials
+//       有值时透传（管理员抓包配置），缺省不带。
+//     · 刷新成功响应结构、access/refresh token 生命周期：历史未见 RefreshToken 请求，沿用
+//       现有多路径提取（unverified）。
+//     · usage：流内无 usage/token 字段（实测 0 处），本地 estimateWebUsage 兜底。
 //
-// 安全红线：凭证（access_token / refresh_token）不得出现在日志或错误响应中——上游错误体
-// 在任何透传前先经 redactWebKimiUpstreamErrorBody 脱敏。
+// 安全红线：凭证（access_token / refresh_token / cookie）不得出现在日志或错误响应中——上游
+// 错误体在任何透传前先经 redactWebKimiUpstreamErrorBody 脱敏。
 
 const (
 	// webKimiDefaultBaseURL 默认官方网页端域名（分析文档 §1.3 实测）。
@@ -159,7 +172,8 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 }
 
 // webKimiModelName 把（已映射的）模型名归一为网页端模型名。
-// 方案 §3.3（分析文档）唯一实测映射：kimi-k3 → k3、kimi-k3-agent-ultra → k3-agent-ultra；
+// 方案 §3.3（分析文档）+ 登录态实测（10 §3：默认 k2d6-chat）：kimi-k3 → k3、
+// kimi-k3-agent-ultra → k3-agent-ultra、kimi-k2d6 → k2d6、kimi-k2d6-chat → k2d6-chat；
 // 默认透传同名。其余取值待登录态实测补全。
 func webKimiModelName(model string) string {
 	switch strings.ToLower(strings.TrimSpace(model)) {
@@ -167,93 +181,76 @@ func webKimiModelName(model string) string {
 		return "k3"
 	case "kimi-k3-agent-ultra", "k3-agent-ultra":
 		return "k3-agent-ultra"
+	case "kimi-k2d6", "k2d6":
+		return "k2d6"
+	case "kimi-k2d6-chat", "k2d6-chat":
+		return "k2d6-chat"
 	default:
 		return model
 	}
 }
 
-// buildWebKimiRequestBody 按方案 §4.3 已验证请求结构构建 Connect RPC 请求体。
-// 仅使用已验证字段；未实测字段一律缺省（不臆测填充）。
-type webKimiTextBlockValue struct {
-	TypeName string `json:"$typeName"`
-	Content  string `json:"content"`
+// buildWebKimiRequestBody 按登录态实测（10 §3）构建 Connect RPC 请求体：
+//   - 块结构实测为 blocks[].text.content 简单形态（非历史 content{case,value} 复杂形态）；
+//   - 请求体不带 chatId（chatId 由服务端在流首帧 chat.id 返回）；
+//   - options 含 thinking / enable_plugin / reasoning_effort / model，scenario=SCENARIO_CHAT；
+//     实测请求 thinking=true、enable_plugin=true、reasoning_effort=REASONING_EFFORT_LOW。
+//
+// 未实测字段一律缺省（不臆测填充）；thinking 开关与入站映射 unverified，按实测默认 true。
+type webKimiTextBlock struct {
+	MessageID string `json:"message_id"`
+	Text      webKimiText `json:"text"`
 }
 
-type webKimiBlockContent struct {
-	Case  string               `json:"case"`
-	Value webKimiTextBlockValue `json:"value"`
-}
-
-type webKimiBlock struct {
-	ID        string              `json:"id"`
-	ParentID  string              `json:"parentId"`
-	MessageID string              `json:"messageId"`
-	Content   webKimiBlockContent `json:"content"`
-}
-
-type webKimiRefs struct {
-	TypeName string `json:"$typeName"`
+type webKimiText struct {
+	Content string `json:"content"`
 }
 
 type webKimiMessage struct {
-	ID                  string      `json:"id"`
-	ParentID            string      `json:"parentId"`
-	ChildrenMessageIDs  []any       `json:"childrenMessageIds"`
-	Role                int         `json:"role"`
-	Blocks              []webKimiBlock `json:"blocks"`
-	Scenario            string      `json:"scenario"`
-	Labels              []any       `json:"labels"`
-	References          webKimiRefs `json:"references"`
+	Role     string            `json:"role"`     // "user"
+	Blocks   []webKimiTextBlock `json:"blocks"`
+	Scenario string            `json:"scenario"`
+	IsGoal   bool              `json:"is_goal"`
 }
 
 type webKimiRequestOptions struct {
-	TypeName string `json:"$typeName"`
-	// Thinking 网页端样例为 true，但入站协议到 thinking 开关的映射未实测：
-	// 当前恒 false（保守默认），映射规则待登录态实测补全。
-	Thinking bool   `json:"thinking"`
-	Model    string `json:"model"`
+	Thinking        bool   `json:"thinking"`
+	EnablePlugin    bool   `json:"enable_plugin"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	Model           string `json:"model"`
 }
 
 type webKimiUpstreamRequest struct {
-	ChatID     string               `json:"chatId"`
-	KimiPlusID string               `json:"kimiPlusId"`
-	Scenario   string               `json:"scenario"`
-	ProjectID  string               `json:"projectId"`
-	Tools      []any                `json:"tools"`
-	Message    webKimiMessage       `json:"message"`
-	Options    webKimiRequestOptions `json:"options"`
+	Scenario  string             `json:"scenario"`
+	Tools     []any              `json:"tools"`
+	Message   webKimiMessage     `json:"message"`
+	Options   webKimiRequestOptions `json:"options"`
+	ProjectID string             `json:"project_id"`
+}
+
+// webKimiDefaultTools 实测（10 §3）默认工具清单：搜索 + 定时任务。
+var webKimiDefaultTools = []any{
+	map[string]any{"type": "TOOL_TYPE_SEARCH", "search": map[string]any{}},
+	map[string]any{"type": "TOOL_TYPE_CRON_JOB"},
 }
 
 func buildWebKimiRequestBody(prompt, webModel string, account *Account) []byte {
 	req := webKimiUpstreamRequest{
-		// kimiPlusId=ok-computer 为方案 §4.3 已验证样例值（免费长上下文口径）。
-		KimiPlusID: "ok-computer",
-		Tools:      []any{},
+		Scenario: "SCENARIO_CHAT",
+		Tools:    webKimiDefaultTools,
 		Message: webKimiMessage{
-			Role:               1,
-			ChildrenMessageIDs: []any{},
-			Labels:             []any{},
-			Blocks: []webKimiBlock{{
-				Content: webKimiBlockContent{
-					Case: "text",
-					Value: webKimiTextBlockValue{
-						TypeName: "kimi.chat.v1.TextBlock",
-						Content:  prompt,
-					},
-				},
-			}},
-			References: webKimiRefs{TypeName: "kimi.chat.v1.Refs"},
+			Role:     "user",
+			Blocks:   []webKimiTextBlock{{MessageID: "", Text: webKimiText{Content: prompt}}},
+			Scenario: "SCENARIO_CHAT",
+			IsGoal:   false,
 		},
 		Options: webKimiRequestOptions{
-			TypeName: "kimi.gateway.chat.v1.ChatRequestOptions",
-			Thinking: false,
-			Model:    webModel,
+			Thinking:        true,
+			EnablePlugin:    true,
+			ReasoningEffort: "REASONING_EFFORT_LOW",
+			Model:           webModel,
 		},
-	}
-	// chatId/scenario/projectId 缺省：会话管理语义未实测，待登录态实测补全。
-	// credentials 可选覆盖 chat_id（管理员显式配置时透传）。
-	if chatID := strings.TrimSpace(account.GetCredential("chat_id")); chatID != "" {
-		req.ChatID = chatID
+		ProjectID: "",
 	}
 	data, _ := json.Marshal(req)
 	return data
@@ -283,7 +280,18 @@ func webKimiExtractPrompt(body []byte) string {
 	return ""
 }
 
-// buildWebKimiUpstreamRequest 构造 Connect RPC 出站请求（指纹头对齐方案 §3.5）。
+// buildWebKimiUpstreamRequest 构造 Connect RPC 出站请求（头族对齐登录态实测 10 §2）。
+//
+// 认证载体（unverified）：HAR 未见 Authorization/Cookie。实现为兼容期双载体——
+//   - access_token 仍带 Authorization: Bearer（历史实现口径，兼容期保留）；
+//   - credentials 有 cookie 时另带 Cookie 头（候选载体，待二次验证）。
+//
+// 头族（10 §2 实测）：content-type/accept 用 application/connect+json（Connect RPC 流式）；
+// x-language / x-msh-platform: web / x-msh-version: 2.2.0 为实测常量直接设置；
+// x-msh-device-id / x-msh-session-id / x-traffic-id 实测为动态值、生成算法未逆向——
+// 仅 credentials 有值时透传（管理员抓包配置），缺省不带（unverified，注释标注）；
+// x-msh-shield-data 生成算法未逆向——不实现生成，仅 credentials 有值时透传（unverified）。
+// 账号级请求头覆写最后应用，使管理员配置优先。
 func (s *OpenAIGatewayService) buildWebKimiUpstreamRequest(
 	ctx context.Context,
 	account *Account,
@@ -297,12 +305,37 @@ func (s *OpenAIGatewayService) buildWebKimiUpstreamRequest(
 	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	// Connect RPC 流式协议：content-type / accept 实测为 application/connect+json。
+	req.Header.Set("Content-Type", "application/connect+json")
+	req.Header.Set("Accept", "application/connect+json")
 	req.Header.Set("Origin", webKimiDefaultBaseURL)
 	req.Header.Set("Referer", webKimiDefaultBaseURL+"/")
 	req.Header.Set("User-Agent", webKimiClientUA)
+
+	// 认证载体（unverified，兼容期双载体）：access_token 仍带 Bearer；cookie 候选载体。
 	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if cookie := strings.TrimSpace(account.GetCredential("cookie")); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	// 头族实测常量（10 §2）。
+	req.Header.Set("x-language", "zh-CN")
+	req.Header.Set("x-msh-platform", "web")
+	req.Header.Set("x-msh-version", "2.2.0")
+	// 动态值（unverified）：仅在管理员抓包配置 credentials 时透传，缺省不带。
+	if v := strings.TrimSpace(account.GetCredential("x_msh_device_id")); v != "" {
+		req.Header.Set("x-msh-device-id", v)
+	}
+	if v := strings.TrimSpace(account.GetCredential("x_msh_session_id")); v != "" {
+		req.Header.Set("x-msh-session-id", v)
+	}
+	if v := strings.TrimSpace(account.GetCredential("x_traffic_id")); v != "" {
+		req.Header.Set("x-traffic-id", v)
+	}
+	// TrustDecision 设备指纹（unverified）：生成算法未逆向，不实现生成，仅透传。
+	if v := strings.TrimSpace(account.GetCredential("x_msh_shield_data")); v != "" {
+		req.Header.Set("x-msh-shield-data", v)
+	}
 
 	// 账号级请求头覆写最后应用，使管理员配置优先（与 CodeBuddy 出站口径一致）。
 	account.ApplyHeaderOverrides(req.Header)
@@ -470,38 +503,133 @@ func webKimiUpstreamErrorMessage(body []byte) string {
 	return sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
 }
 
-// parseWebKimiSSEFrame 解析单行 SSE 帧，返回 data 载荷（标准 SSE 单行 JSON 处理；
-// Kimi 具体 SSE 形态待登录态实测补全）。
-func parseWebKimiSSEFrame(line string) ([]byte, bool) {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "data:") {
-		return nil, false
-	}
-	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-	if payload == "" || payload == "[DONE]" {
-		return nil, false
-	}
-	if !gjson.Valid(payload) {
-		return nil, false
-	}
-	return []byte(payload), true
+// webKimiStreamEvent 是单帧 Connect envelope 载荷解析后的结构化视图。
+// 解析只识别登录态实测（10 §4）的字段，绝不编造未实测结构。
+type webKimiStreamEvent struct {
+	Heartbeat   bool   // {"heartbeat":{}} 心跳帧，跳过
+	Done        bool   // {"eventOffset":N,"done":{}} 终止帧
+	ChatID      string // 首帧 chat.id（服务端生成的会话 ID）
+	AssistantID string // assistant message 的 id（响应 id 来源）
+	TextDelta   string // block.text.content 增量（正文，op set/append 均追加）
+	ThinkDelta  string // block.think.content 增量（思考，op set/append 均追加）
+	AuthFailed  bool   // code/message 含 unauthenticated
+	ErrCode     int64  // 业务错误码（非 0）
 }
 
-// webKimiChunkView 通用 SSE JSON 载荷的解析视图。
-// 字段映射集中在此（待登录态实测补全）：只识别 OpenAI 兼容形状与 Connect RPC 常见的
-// 嵌套位置，绝不编造未实测的 Kimi 专有字段。
-type webKimiChunkView struct {
-	Content      string
-	FinishReason string
-	Usage        *OpenAIUsage
-	ResponseID   string
-	AuthFailed   bool
-	ErrCode      int64
+// readWebKimiConnectEnvelope 读取一帧 Connect RPC 流式 envelope：
+// 1 字节 flag（0x00 不压缩 / 0x01 gzip，实测为 0x00）+ 4 字节大端长度 + payload JSON。
+// 返回 payload、是否还有后续帧（more）、错误。more=false 表示流结束（正常 EOF 或截断）。
+func readWebKimiConnectEnvelope(r *bufio.Reader) (payload []byte, more bool, err error) {
+	header := make([]byte, 5)
+	if _, err := io.ReadFull(r, header); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	flag := header[0]
+	length := binary.BigEndian.Uint32(header[1:5])
+	if length == 0 {
+		// 零长消息（keepalive 等），跳过不产出，继续读下一帧。
+		return nil, true, nil
+	}
+	payload = make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if flag == 0x01 {
+		// gzip 压缩 envelope（理论存在，实测未出现，unverified 最佳努力解压）。
+		if decoded, derr := webKimiGunzip(payload); derr == nil {
+			payload = decoded
+		}
+		// 解压失败则原样返回（避免丢帧，交由 JSON 解析失败安全忽略）。
+	}
+	return payload, true, nil
+}
+
+// webKimiGunzip 解 gzip；仅用于 flag=0x01 的 envelope（unverified 分支）。
+func webKimiGunzip(data []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+// parseWebKimiEnvelopePayload 把一帧 Connect envelope 的 JSON payload 解析为 webKimiStreamEvent。
+//
+// 登录态实测（10 §4）字段语义：
+//   - {"heartbeat":{}} → 心跳，跳过；
+//   - {"eventOffset":N,"done":{}} → 终止；
+//   - op/mask/eventOffset 信封：mask "block.text.content" 为正文增量、"block.think.content"
+//     为思考增量（op=set 时值为当前完整内容，op=append 时为增量，按追加重排即可还原）；
+//   - 顶层 chat.id 提取会话 id；mask "message" 的 assistant message.id 提取响应 id；
+//   - usage 流内无（实测 0 处），本地估算兜底；
+//   - 业务/认证错误：携带非 0 的 code 或 message 含 unauthenticated（Connect 业务错误随
+//     HTTP 200 返回，与 401 unauthenticated 对称）。
+func parseWebKimiEnvelopePayload(payload []byte) webKimiStreamEvent {
+	var ev webKimiStreamEvent
+	if !gjson.Valid(string(payload)) {
+		return ev
+	}
+	v := gjson.ParseBytes(payload)
+	if v.Get("heartbeat").Exists() {
+		ev.Heartbeat = true
+		return ev
+	}
+	if v.Get("done").Exists() {
+		ev.Done = true
+		return ev
+	}
+	// 业务/认证错误判定。
+	if code := v.Get("code"); code.Exists() {
+		if (code.Type == gjson.String && code.String() != "") || (code.Type == gjson.Number && code.Int() != 0) {
+			ev.ErrCode = code.Int()
+		}
+	}
+	codeStr := strings.ToLower(strings.TrimSpace(v.Get("code").String()))
+	msgStr := strings.ToLower(strings.TrimSpace(v.Get("message").String()))
+	if strings.Contains(codeStr, "unauthenticated") || strings.Contains(msgStr, "unauthenticated") {
+		ev.AuthFailed = true
+	}
+	// 会话 id（首帧 chat.id 返回）。
+	if id := strings.TrimSpace(v.Get("chat.id").String()); id != "" {
+		ev.ChatID = id
+	}
+	// message 帧：assistant message.id 作为响应 id；assistant 整消息块全文（非流式全量
+	// 形态兜底）也并入正文增量。
+	if m := v.Get("message"); m.Exists() {
+		if role := strings.TrimSpace(m.Get("role").String()); role == "assistant" {
+			if id := strings.TrimSpace(m.Get("id").String()); id != "" {
+				ev.AssistantID = id
+			}
+			for _, b := range m.Get("blocks").Array() {
+				if t := strings.TrimSpace(b.Get("text.content").String()); t != "" {
+					ev.TextDelta += t
+				}
+			}
+		}
+	}
+	// block 增量：block.text.content（正文）/ block.think.content（思考）。
+	if blk := v.Get("block"); blk.Exists() {
+		if t := blk.Get("text.content"); t.Exists() {
+			ev.TextDelta += t.String()
+		}
+		if t := blk.Get("think.content"); t.Exists() {
+			ev.ThinkDelta += t.String()
+		}
+	}
+	return ev
 }
 
 // webKimiBareJSONError 判定一行裸 JSON（非 SSE data: 前缀）是否为业务错误：携带非 0
 // 的 code 字段时按业务错误返回其载荷，否则 isError=false。与 webDeepseekBareJSONError
-// 同口径（#3）。
+// 同口径（#3）。注意：Connect envelope 协议下裸 JSON 行不会出现，本函数仅保留给共享
+// 测试判定（web_protocol_bridge_test.go）使用，转发链路已改用 envelope 解析。
 func webKimiBareJSONError(line string) (payload []byte, isError bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "data:") {
@@ -520,73 +648,17 @@ func webKimiBareJSONError(line string) (payload []byte, isError bool) {
 	return nil, false
 }
 
-// mapWebKimiPayload 把一帧通用 JSON 载荷映射为 webKimiChunkView。
-//
-// 待登录态实测补全：以下识别顺序按「通用 SSE JSON」由强到弱排列——
-//  1. OpenAI 兼容：choices[0].delta.content / choices[0].message.content；
-//  2. Connect RPC 常见嵌套：message.blocks[].content.value.content（对话正文位置）；
-//  3. 顶层 content 字符串；
-//  4. usage：OpenAI 命名或 input_tokens/output_tokens；
-//  5. 认证错误：code/message 含 unauthenticated。
-func mapWebKimiPayload(payload []byte) webKimiChunkView {
-	v := gjson.ParseBytes(payload)
-	view := webKimiChunkView{}
-	if id := strings.TrimSpace(v.Get("id").String()); id != "" {
-		view.ResponseID = id
+// webKimiClientChunkEnvelope 以 OpenAI chat.completion.chunk 形状构造一帧回_client 包络。
+// content 为正文增量，reasoningContent 为思考增量（reasoning_content 字段，DeepSeek/
+// Kimi 思考模式同口径）；二者可单独或同时出现。终帧由调用方单独写 data: [DONE]。
+func webKimiClientChunkEnvelope(responseID, originalModel, content, reasoningContent, finishReason string, usage *OpenAIUsage) gin.H {
+	delta := gin.H{}
+	if content != "" {
+		delta["content"] = content
 	}
-	switch {
-	case v.Get("choices.0.delta.content").Exists():
-		view.Content = v.Get("choices.0.delta.content").String()
-	case v.Get("choices.0.message.content").Exists():
-		view.Content = v.Get("choices.0.message.content").String()
-	case v.Get("message.blocks.0.content.value.content").Exists():
-		view.Content = v.Get("message.blocks.0.content.value.content").String()
-	case v.Get("content").Type == gjson.String:
-		view.Content = v.Get("content").String()
+	if reasoningContent != "" {
+		delta["reasoning_content"] = reasoningContent
 	}
-	if fr := v.Get("choices.0.finish_reason"); fr.Exists() && fr.Type == gjson.String {
-		view.FinishReason = fr.String()
-	}
-	if usage := v.Get("usage"); usage.IsObject() {
-		u := &OpenAIUsage{
-			InputTokens:  int(usage.Get("prompt_tokens").Int()) + int(usage.Get("input_tokens").Int()),
-			OutputTokens: int(usage.Get("completion_tokens").Int()) + int(usage.Get("output_tokens").Int()),
-		}
-		if u.InputTokens > 0 || u.OutputTokens > 0 {
-			view.Usage = u
-		}
-	}
-	code := strings.ToLower(strings.TrimSpace(v.Get("code").String()))
-	msg := strings.ToLower(strings.TrimSpace(v.Get("message").String()))
-	if strings.Contains(code, "unauthenticated") || strings.Contains(msg, "unauthenticated") {
-		view.AuthFailed = true
-	}
-	if numericCode := v.Get("code"); numericCode.Exists() && numericCode.Type == gjson.Number {
-		view.ErrCode = numericCode.Int()
-	}
-	return view
-}
-
-// writeWebKimiClientChunk 以 OpenAI chat.completion.chunk 形状向客户端写一帧 SSE。
-// 帧必须带标准 SSE 前缀 `data: `（C1，#3）：标准 OpenAI SDK 只解析 `data: ` 前缀的帧，
-// 缺少前缀会被整帧忽略。终帧由调用方单独写 `data: [DONE]\n\n`。
-func writeWebKimiClientChunk(c *gin.Context, chunk gin.H) error {
-	data, err := json.Marshal(chunk)
-	if err != nil {
-		return err
-	}
-	frame := append([]byte("data: "), data...)
-	frame = append(frame, '\n', '\n')
-	if _, err := c.Writer.Write(frame); err != nil {
-		return err
-	}
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	return nil
-}
-
-func webKimiClientChunkEnvelope(responseID, originalModel string, delta gin.H, finishReason string, usage *OpenAIUsage) gin.H {
 	choice := gin.H{"index": 0, "delta": delta, "finish_reason": finishReason}
 	chunk := gin.H{
 		"id":      responseID,
@@ -601,11 +673,12 @@ func webKimiClientChunkEnvelope(responseID, originalModel string, delta gin.H, f
 	return chunk
 }
 
-// handleWebKimiStreamingResponse 流式回程：对上游 SSE 做通用 JSON 增量解析，重包为
-// OpenAI chat.completion.chunk 流回写客户端，终止写 data: [DONE]。
+// handleWebKimiStreamingResponse 流式回程：解析 Connect RPC envelope 流（op/mask/eventOffset），
+// 重包为 OpenAI chat.completion.chunk 流回写客户端；正文走 block.text.content、思考走
+// block.think.content（reasoning_content）；终止为 done 帧 + message.status=COMPLETED。
 //
-// 未实测部分（待登录态实测补全）：chunk 具体字段结构、终止条件、usage 出现位置。
-// 首帧即携带 unauthenticated 错误时，按上游错误路径处理。
+// 登录态实测（10 §4）：心跳帧跳过、done 帧终止、usage 流内无（本地估算，流式此处保持 nil
+// 不伪造）。首帧即携带 unauthenticated 错误时，按上游错误路径处理。
 func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -624,62 +697,35 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
-
 	responseID := ""
 	var usage *OpenAIUsage
-	var aggregated strings.Builder
+	var textAggregated strings.Builder
 	written := false
-	finishReason := ""
+	finishReason := "stop"
 	midstreamErr := false
 	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
-	for scanner.Scan() {
-		payload, ok := parseWebKimiSSEFrame(scanner.Text())
-		if !ok {
-			// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
-			// 首帧未写任何客户端字节走完整错误路径；流中段已写出正文则记 ops 错误并向
-			// 客户端写流内 error 标记后中断收口，不伪造成功。纯内容裸 JSON（无 code）
-			// 按安全策略忽略。
-			if errPayload, isErr := webKimiBareJSONError(scanner.Text()); isErr {
-				if !written {
-					errResp := &http.Response{
-						StatusCode: resp.StatusCode,
-						Header:     resp.Header,
-						Body:       io.NopCloser(bytes.NewReader(errPayload)),
-					}
-					return s.handleWebKimiUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
-				}
-				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-					Platform:           account.Platform,
-					AccountID:          account.ID,
-					AccountName:        account.Name,
-					UpstreamStatusCode: resp.StatusCode,
-					Kind:               "midstream_error",
-					Message:            sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(errPayload)),
-				})
-				// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
-				// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
-				midstreamErr = true
-				midstreamErrMsg = sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(errPayload))
-				break
-			}
+	reader := bufio.NewReader(resp.Body)
+	for {
+		payload, more, err := readWebKimiConnectEnvelope(reader)
+		if err != nil {
+			return nil, fmt.Errorf("web-kimi stream read: %w", err)
+		}
+		if !more {
+			break
+		}
+		ev := parseWebKimiEnvelopePayload(payload)
+		if ev.Heartbeat {
 			continue
 		}
-		view := mapWebKimiPayload(payload)
-		if view.ResponseID != "" && responseID == "" {
-			responseID = view.ResponseID
+		if ev.AssistantID != "" {
+			responseID = ev.AssistantID
 		}
-		if view.AuthFailed || view.ErrCode != 0 {
-			// 首帧未写任何客户端字节（written=false）→ 走完整错误路径；流中后段已写出正文
-			// （written=true，罕见未实测）→ 记 ops 错误并向客户端写流内 error 标记后中断收口，
-			// 绝不伪造正常结束。
+		// 业务/认证错误：首帧未写任何客户端字节（written=false）走完整错误路径；流中后段已
+		// 写出正文（written=true）则记 ops 错误并向客户端写流内 error 标记后中断收口，
+		// 绝不伪造正常结束。
+		if ev.AuthFailed || ev.ErrCode != 0 {
 			if !written {
 				errResp := &http.Response{
 					StatusCode: resp.StatusCode,
@@ -688,35 +734,35 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 				}
 				return s.handleWebKimiUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
 			}
+			opsMsg := sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(payload))
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
 				Kind:               "midstream_error",
-				Message:            "web-kimi midstream business error",
+				Message:            opsMsg,
 			})
 			midstreamErr = true
-			midstreamErrMsg = "web-kimi midstream business error"
+			midstreamErrMsg = opsMsg
 			break
 		}
-		if view.Usage != nil {
-			usage = view.Usage
+		if ev.Done {
+			break
 		}
-		if view.FinishReason != "" {
-			finishReason = view.FinishReason
+		if ev.ThinkDelta != "" {
+			written = true
+			if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", ev.ThinkDelta, "", nil)); err != nil {
+				return nil, err
+			}
 		}
-		if view.Content == "" {
-			continue
+		if ev.TextDelta != "" {
+			textAggregated.WriteString(ev.TextDelta)
+			written = true
+			if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, ev.TextDelta, "", "", nil)); err != nil {
+				return nil, err
+			}
 		}
-		aggregated.WriteString(view.Content)
-		written = true
-		if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{"content": view.Content}, "", nil)); err != nil {
-			return nil, err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("web-kimi stream read: %w", err)
 	}
 
 	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
@@ -739,8 +785,9 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		}, nil
 	}
 
-	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
-	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
+	// 正常终止帧：写出终帧（finish_reason + usage 若观测到；usage 实测流内无，保持 nil 不伪造），
+	// 再按出站协议收口写 data: [DONE]。
+	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", "", finishReason, usage)); err != nil {
 		return nil, err
 	}
 	if err := finalizeWebStream(c, st); err != nil {
@@ -764,9 +811,13 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	return result, nil
 }
 
-// handleWebKimiNonStreamingResponse 非流式回程：读取完整上游响应。SSE 时经通用映射
-// 聚合为单条 chat.completion JSON；纯 JSON 且携带 unauthenticated 时走上游错误路径；
-// 结构不可识别时失败关闭并给出明确错误（不伪造成功响应）。
+// handleWebKimiNonStreamingResponse 非流式回程：读取完整上游响应，解析 Connect RPC
+// envelope 流聚合为单条 chat.completion JSON。正文来自 block.text.content（思考不进正文）；
+// chat.id / assistant message.id 提取为响应 id；终止为 done 帧。usage 流内无（实测 0 处）
+// 走本地估算兜底。
+//
+// 兼容兜底：若整体不是 envelope 流（frames=false，例如 Connect RPC 单 JSON 响应或错误体），
+// 回落到单 JSON 提取（message.blocks.0.content.value.content / content）与认证错误判定。
 func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -785,41 +836,42 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 
 	responseID := ""
 	var usage *OpenAIUsage
-	var aggregated strings.Builder
+	var textAggregated strings.Builder
 	frames := false
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	for scanner.Scan() {
-		payload, ok := parseWebKimiSSEFrame(scanner.Text())
-		if !ok {
-			continue
+
+	reader := bufio.NewReader(bytes.NewReader(body))
+	for {
+		payload, more, rerr := readWebKimiConnectEnvelope(reader)
+		if rerr != nil {
+			return nil, fmt.Errorf("web-kimi upstream response read: %w", rerr)
+		}
+		if !more {
+			break
 		}
 		frames = true
-		view := mapWebKimiPayload(payload)
-		if view.AuthFailed {
+		ev := parseWebKimiEnvelopePayload(payload)
+		if ev.Heartbeat {
+			continue
+		}
+		if ev.AssistantID != "" {
+			responseID = ev.AssistantID
+		}
+		if ev.ChatID != "" && responseID == "" {
+			responseID = ev.ChatID
+		}
+		if ev.AuthFailed || ev.ErrCode != 0 {
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
-				Body:       io.NopCloser(bytes.NewReader(body)),
+				Body:       io.NopCloser(bytes.NewReader(payload)),
 			}
-			return s.handleWebKimiUpstreamError(ctx, c, account, errResp, body, upstreamModel)
+			return s.handleWebKimiUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
 		}
-		if view.ResponseID != "" && responseID == "" {
-			responseID = view.ResponseID
-		}
-		if view.Usage != nil {
-			usage = view.Usage
-		}
-		aggregated.WriteString(view.Content)
-	}
-	if err := scanner.Err(); err != nil {
-		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
-		return nil, fmt.Errorf("web-kimi upstream response scan failed: %w", err)
+		textAggregated.WriteString(ev.TextDelta)
 	}
 
 	if !frames {
-		// 非 SSE：Connect RPC 单 JSON 响应——正文落在 message.blocks[].content.value.content
-		// （已验证请求结构的对称位置，响应侧待登录态实测补全）；unauthenticated 走错误路径；
-		// 其余未识别结构失败关闭，待登录态实测补全后再扩展。
+		// 非 envelope：Connect RPC 单 JSON 响应或错误体——回落到单 JSON 提取与认证错误判定。
 		if classifyWebKimiUpstreamError(resp.StatusCode, body) == webKimiErrKindAuth {
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
@@ -836,10 +888,16 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 			return nil, errors.New(
 				"web-kimi upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
 		}
-		aggregated.WriteString(content)
+		textAggregated.WriteString(content)
 		if id := strings.TrimSpace(gjson.GetBytes(body, "id").String()); id != "" {
 			responseID = id
 		}
+	}
+
+	text := strings.TrimSpace(textAggregated.String())
+	if text == "" && resp.StatusCode < 400 {
+		return nil, errors.New(
+			"web-kimi upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
 	}
 
 	finalUsage := usage
@@ -849,7 +907,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	// 网页逆向平台上游不返回 usage 时本地估算（D2），避免计费为 0；仅估算兜底，
 	// 非真实 token 数（estimated）。归并后判定源为 web 接入模式（平台已并官方值）。
 	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
-		estimated := estimateWebUsage(inputPrompt, aggregated.String())
+		estimated := estimateWebUsage(inputPrompt, text)
 		finalUsage.InputTokens = estimated.InputTokens
 		finalUsage.OutputTokens = estimated.OutputTokens
 	}
@@ -860,7 +918,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 		"model":   originalModel,
 		"choices": []gin.H{{
 			"index":         0,
-			"message":       gin.H{"role": "assistant", "content": aggregated.String()},
+			"message":       gin.H{"role": "assistant", "content": text},
 			"finish_reason": "stop",
 		}},
 		"usage": finalUsage,

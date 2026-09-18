@@ -136,15 +136,33 @@ func TestRefreshWebKimiAccessTokenNoPersistOnFailure(t *testing.T) {
 // --- C5: web 平台走轻量官方探活（2xx 有效 / 401 失效） ---
 
 func newWebProbeTestService(resp *http.Response) *AccountTestService {
-	return &AccountTestService{
-		httpUpstream: &httpUpstreamRecorder{resp: resp},
-		cfg: &config.Config{
-			Security: config.SecurityConfig{
-				URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
-			},
+	// deepseek 探活与正式转发同链（PoW + 自动建会话），探活服务与网关共用同一 recorder。
+	upstream := &httpUpstreamRecorder{resp: resp}
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
 		},
-		tlsFPProfileService: &TLSFingerprintProfileService{},
 	}
+	return &AccountTestService{
+		httpUpstream:         upstream,
+		cfg:                  cfg,
+		tlsFPProfileService:  &TLSFingerprintProfileService{},
+		openaiGatewayService: &OpenAIGatewayService{httpUpstream: upstream, cfg: cfg},
+	}
+}
+
+// runWebProbeWithResponses 按序回放多跳响应（deepseek 探活新协议：PoW → 建会话 → completion）。
+func runWebProbeWithResponses(t *testing.T, account *Account, responses ...*http.Response) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	svc := newWebProbeTestService(nil)
+	svc.httpUpstream.(*httpUpstreamRecorder).responses = responses
+	_ = svc.testWebAccountConnection(c, account, "", "")
+	return rec.Body.String()
 }
 
 func runWebProbe(t *testing.T, account *Account, resp *http.Response) string {
@@ -167,7 +185,11 @@ func TestTestWebAccountConnection_WebDeepseekProbeSuccess(t *testing.T) {
 			"cookie": "ds_session_id=sess; HWWAFSESID=waf",
 		},
 	}
-	body := runWebProbe(t, account, refreshResponse(http.StatusOK, "ok"))
+	body := runWebProbeWithResponses(t, account,
+		webDeepseekSolvablePowChallengeResponse(),
+		webDeepseekSessionCreateResponse(),
+		refreshResponse(http.StatusOK, "ok"),
+	)
 	require.Contains(t, body, "test_complete")
 	require.Contains(t, body, `"success":true`)
 	require.NotContains(t, body, "invalid")
@@ -181,7 +203,11 @@ func TestTestWebAccountConnection_WebDeepseekProbeInvalidCredential(t *testing.T
 			"cookie": "ds_session_id=sess; HWWAFSESID=waf",
 		},
 	}
-	body := runWebProbe(t, account, refreshResponse(http.StatusUnauthorized, `{"code":40002}`))
+	body := runWebProbeWithResponses(t, account,
+		webDeepseekSolvablePowChallengeResponse(),
+		webDeepseekSessionCreateResponse(),
+		refreshResponse(http.StatusUnauthorized, `{"code":40002}`),
+	)
 	require.Contains(t, body, "error")
 	require.Contains(t, body, "invalid", "401 应判为凭证失效")
 	require.NotContains(t, body, "sess", "错误文案不得回显 Cookie 凭证")
