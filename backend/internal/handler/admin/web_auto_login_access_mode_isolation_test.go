@@ -59,7 +59,6 @@ func newIsolationHandler(adminSvc *walAdminStub, auto webPlatformAutoLoginServic
 	return &AccountHandler{
 		adminService:         adminSvc,
 		webPlatformAutoLogin: auto,
-		webLoginSessionStore: newStubSessionStore(),
 	}
 }
 
@@ -137,7 +136,7 @@ func TestAccessModeIsolation_BatchLogin(t *testing.T) {
 func TestAccessModeIsolation_BatchTest(t *testing.T) {
 	apiZhipu := apiAccount(7, service.PlatformZhipu)
 	adminSvc := newWALAdminStub(apiZhipu)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 	h.accountTestService = &service.AccountTestService{}
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-test", gin.H{
@@ -169,7 +168,7 @@ func TestAccessModeIsolation_BatchDeleteBanned(t *testing.T) {
 	webZhipu.ErrorMessage = "账号已被封禁"
 
 	adminSvc := newWALAdminStub(apiZhipu, webZhipu)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	// 列表模式：候选只含 web 账号。
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-delete-banned", gin.H{"confirm": false})
@@ -207,7 +206,7 @@ func TestAccessModeIsolation_BatchStatus(t *testing.T) {
 	webDs.Status = service.StatusActive
 
 	adminSvc := newWALAdminStub(apiDs, webDs)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-status", gin.H{
 		"ids":    []int64{21, 22},
@@ -249,7 +248,7 @@ func TestAccessModeIsolation_ExportWebAccounts(t *testing.T) {
 	webDs.Credentials["login_email"] = "web@example.com"
 
 	adminSvc := newWALAdminStub(apiDs, webDs)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodGet, "/api/v1/admin/accounts/export?platform="+service.PlatformDeepseek, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -273,7 +272,7 @@ func TestAccessModeIsolation_ExportWebAccounts(t *testing.T) {
 func TestAccessModeIsolation_WebLoginPasswordSingleAccount(t *testing.T) {
 	apiZhipu := apiAccount(41, service.PlatformZhipu)
 	adminSvc := newWALAdminStub(apiZhipu)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-password", gin.H{
 		"platform":    service.PlatformZhipu,

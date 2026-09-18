@@ -7,10 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -160,50 +158,14 @@ func (s *stubAutoLogin) RecoverAccount(_ context.Context, account *service.Accou
 func (s *stubAutoLogin) Start(_ context.Context) { s.started = true }
 func (s *stubAutoLogin) Stop()                   {}
 
-// stubSessionStore 是 webLoginSessionStore 的可配置内存桩。
-type stubSessionStore struct {
-	sessions map[string]*service.WebLoginSession
-}
-
-func newStubSessionStore() *stubSessionStore {
-	return &stubSessionStore{sessions: map[string]*service.WebLoginSession{}}
-}
-
-func (s *stubSessionStore) Create(platform string, accountID int64, loginEmail, loginPhone string) (string, time.Time, error) {
-	tok := "tok-" + strings.Repeat("x", 8)
-	// 用长度+计数生成唯一 token。
-	tok = "tok-" + time.Now().Format("150405.000000000")
-	expires := time.Now().Add(10 * time.Minute)
-	s.sessions[tok] = &service.WebLoginSession{
-		Platform:   platform,
-		AccountID:  accountID,
-		LoginEmail: loginEmail,
-		LoginPhone: loginPhone,
-		ExpiresAt:  expires,
-	}
-	return tok, expires, nil
-}
-
-func (s *stubSessionStore) Resolve(token string) (*service.WebLoginSession, error) {
-	if sess, ok := s.sessions[token]; ok {
-		return sess, nil
-	}
-	return nil, service.ErrWebAutoLoginSessionExpired
-}
-
-func (s *stubSessionStore) Delete(token string) {
-	delete(s.sessions, token)
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newTestAccountHandler(adminSvc *walAdminStub, auto *stubAutoLogin, store webLoginSessionStore) *AccountHandler {
+func newTestAccountHandler(adminSvc *walAdminStub, auto *stubAutoLogin) *AccountHandler {
 	h := &AccountHandler{
 		adminService:         adminSvc,
 		webPlatformAutoLogin: auto,
-		webLoginSessionStore: store,
 	}
 	return h
 }
@@ -215,7 +177,6 @@ func doRequest(t *testing.T, h *AccountHandler, method, path string, body any) *
 
 	group := r.Group("/api/v1/admin/accounts")
 	group.POST("/web-login-password", h.WebLoginPassword)
-	group.POST("/web-login-sms", h.WebLoginSMS)
 	group.POST("/batch-login", h.BatchLogin)
 	group.POST("/batch-test", h.BatchTest)
 	group.POST("/batch-delete-banned", h.BatchDeleteBanned)
@@ -266,7 +227,7 @@ func TestWebLoginPassword_DeepseekSuccess(t *testing.T) {
 	}
 	adminSvc := newWALAdminStub(acc)
 	auto := &stubAutoLogin{cookieForEmail: "cookie=ds_session_id=abc"}
-	h := newTestAccountHandler(adminSvc, auto, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, auto)
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-password", gin.H{
 		"platform":       service.PlatformDeepseek,
@@ -291,74 +252,36 @@ func TestWebLoginPassword_DeepseekSuccess(t *testing.T) {
 	require.Equal(t, "u@e.com", updated.GetCredential("login_email"))
 }
 
-func TestWebLoginPassword_ZhipuNeedsSMS(t *testing.T) {
-	adminSvc := newWALAdminStub()
-	auto := &stubAutoLogin{}
-	h := newTestAccountHandler(adminSvc, auto, newStubSessionStore())
+func TestWebLoginPassword_ZhipuKimiRejected(t *testing.T) {
+	// zhipu/kimi 官方网页端无密码登录（微信扫码/短信码），后端拒绝密码登录请求。
+	for _, platform := range []string{service.PlatformZhipu, service.PlatformKimi} {
+		t.Run(platform, func(t *testing.T) {
+			adminSvc := newWALAdminStub()
+			auto := &stubAutoLogin{}
+			h := newTestAccountHandler(adminSvc, auto)
 
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-password", gin.H{
-		"platform":       service.PlatformZhipu,
-		"login_phone":    "13800000000",
-		"login_password": "pw",
-	})
+			w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-password", gin.H{
+				"platform":       platform,
+				"login_phone":    "13800000000",
+				"login_password": "pw",
+			})
 
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	env := decodeEnvelope(t, w)
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Equal(t, true, data["success"])
-	require.Equal(t, true, data["needs_sms"])
-	require.NotEmpty(t, data["session_token"])
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			env := decodeEnvelope(t, w)
+			require.NotEqual(t, 0, env.Code)
+		})
+	}
 }
 
 func TestWebLoginPassword_UnsupportedPlatform(t *testing.T) {
 	adminSvc := newWALAdminStub()
 	auto := &stubAutoLogin{}
-	h := newTestAccountHandler(adminSvc, auto, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, auto)
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-password", gin.H{
 		"platform": "openai",
 	})
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-}
-
-func TestWebLoginSMS_StubSemantics(t *testing.T) {
-	store := newStubSessionStore()
-	tok, _, err := store.Create(service.PlatformKimi, 0, "", "13800000000")
-	require.NoError(t, err)
-	h := newTestAccountHandler(newWALAdminStub(), &stubAutoLogin{}, store)
-
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
-		"session_token": tok,
-		"sms_code":      "123456",
-	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	env := decodeEnvelope(t, w)
-	var data map[string]any
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Equal(t, false, data["success"])
-	require.Equal(t, "短信码登录尚未接入发码通道", data["detail"])
-}
-
-func TestWebLoginSMS_DeepseekNoSMS(t *testing.T) {
-	store := newStubSessionStore()
-	tok, _, err := store.Create(service.PlatformDeepseek, 0, "u@e.com", "")
-	require.NoError(t, err)
-	h := newTestAccountHandler(newWALAdminStub(), &stubAutoLogin{}, store)
-
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
-		"session_token": tok,
-	})
-	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-}
-
-func TestWebLoginSMS_InvalidSessionGone(t *testing.T) {
-	h := newTestAccountHandler(newWALAdminStub(), &stubAutoLogin{}, newStubSessionStore())
-
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
-		"session_token": "nonexistent",
-	})
-	require.Equal(t, http.StatusGone, w.Code, w.Body.String())
 }
 
 func TestBatchLogin_PerAccountStructure(t *testing.T) {
@@ -373,7 +296,7 @@ func TestBatchLogin_PerAccountStructure(t *testing.T) {
 		},
 		refreshErrs: map[int64]error{3: errors.New("refresh failed")},
 	}
-	h := newTestAccountHandler(adminSvc, auto, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, auto)
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-login", gin.H{
 		"ids": []int64{1, 2, 3},
@@ -420,7 +343,7 @@ func TestBatchDeleteBanned_ListMode(t *testing.T) {
 	normal := &service.Account{ID: 2, Name: "n", Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
 	other := &service.Account{ID: 3, Name: "o", Platform: service.PlatformOpenAI}
 	adminSvc := newWALAdminStub(banned, normal, other)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-delete-banned", gin.H{"confirm": false})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -444,7 +367,7 @@ func TestBatchDeleteBanned_ConfirmDeletes(t *testing.T) {
 	banned := &service.Account{ID: 1, Name: "b", Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}, Status: service.StatusError, ErrorMessage: "account banned"}
 	normal := &service.Account{ID: 2, Name: "n", Platform: service.PlatformZhipu, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
 	adminSvc := newWALAdminStub(banned, normal)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-delete-banned", gin.H{"confirm": true})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -460,7 +383,7 @@ func TestBatchDeleteBanned_ConfirmDeletes(t *testing.T) {
 func TestBatchStatus_ValueValidation(t *testing.T) {
 	acc := &service.Account{ID: 1, Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
 	adminSvc := newWALAdminStub(acc)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	// 非法状态值 → 400。
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-status", gin.H{
@@ -489,7 +412,7 @@ func TestExportWebAccounts_NoCredentialsLeak(t *testing.T) {
 		Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb, "login_email": "u@e.com", "cookie": "cookie=secret", "login_password": "pw"},
 	}
 	adminSvc := newWALAdminStub(acc)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{}, newStubSessionStore())
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
 	w := doRequest(t, h, http.MethodGet, "/api/v1/admin/accounts/export?platform="+service.PlatformDeepseek, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -509,20 +432,4 @@ func TestExportWebAccounts_NoCredentialsLeak(t *testing.T) {
 	require.NotContains(t, body, "pw")
 	require.NotContains(t, body, "\"cookie\"")
 	require.NotContains(t, body, "\"login_password\"")
-}
-
-func TestWebLoginSMS_SessionTTLExpiry(t *testing.T) {
-	// 使用真实内存存储（包级默认单例），创建后手动使其过期，再提交应返回 410。
-	store := service.NewWebLoginSessionStore()
-	h := newTestAccountHandler(newWALAdminStub(), &stubAutoLogin{}, store)
-	tok, _, err := store.Create(service.PlatformKimi, 0, "", "13800000000")
-	require.NoError(t, err)
-
-	// 直接移除会话以模拟过期（绕过 1 分钟清理间隔）。
-	store.Delete(tok)
-
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
-		"session_token": tok,
-	})
-	require.Equal(t, http.StatusGone, w.Code, w.Body.String())
 }

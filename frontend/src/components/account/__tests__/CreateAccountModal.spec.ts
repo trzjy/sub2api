@@ -961,6 +961,21 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     })
   })
 
+  // 账号密码自动登录仅 deepseek 支持（zhipu/kimi 官方无密码登录），入口只对 deepseek 渲染。
+  it('renders the password auto-login toggle only for deepseek web access mode', async () => {
+    const deepseekWrapper = mountModal()
+    await selectWebModeViaCnPlatform(deepseekWrapper, 'DeepSeek')
+    await flushPromises()
+    expect(deepseekWrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(true)
+
+    for (const cardLabel of ['Kimi', 'Zhipu GLM'] as const) {
+      const wrapper = mountModal()
+      await selectWebModeViaCnPlatform(wrapper, cardLabel)
+      await flushPromises()
+      expect(wrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(false)
+    }
+  })
+
   it('fills the create payload from a captured login (applied event) and submits it', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')

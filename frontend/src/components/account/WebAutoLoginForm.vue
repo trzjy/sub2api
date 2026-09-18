@@ -72,6 +72,10 @@
 </template>
 
 <script setup lang="ts">
+// 注意：zhipu / kimi 官方网页端没有密码登录（微信扫码/短信码），其账号密码 UI 入口
+// 已由 supportsPasswordAutoLogin（credentialsBuilder）在两个调用点关闭，本组件当前
+// 仅对 deepseek 可达。zhipu/kimi 的手机号 + 短信码分支为短信发码通道接入后的预留路径
+// （后端 web-login-password 对这两平台也只返回 needs_sms 桩），接入时恢复入口即可。
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {

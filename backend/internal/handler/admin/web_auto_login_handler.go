@@ -2,12 +2,10 @@ package admin
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -29,16 +27,6 @@ type webPlatformAutoLoginService interface {
 	Start(ctx context.Context)
 	Stop()
 }
-
-// webLoginSessionStore 是半自动登录（短信码）会话存储的本地接口，便于测试替换。
-type webLoginSessionStore interface {
-	Create(platform string, accountID int64, loginEmail, loginPhone string) (token string, expires time.Time, err error)
-	Resolve(token string) (*service.WebLoginSession, error)
-	Delete(token string)
-}
-
-// defaultWebLoginSessionStore 是未显式注入会话存储时的包级默认单例（仅内存）。
-var defaultWebLoginSessionStore = service.NewWebLoginSessionStore()
 
 // adminAutoLoginStoreAdapter 将 service.AdminService 适配为自动登录服务所需的
 // AutoLoginAccountStore 接口（ListAccounts / UpdateAccountCredentials /
@@ -215,17 +203,15 @@ func (h *AccountHandler) WebLoginPassword(c *gin.Context) {
 		}
 		response.Success(c, gin.H{"success": true, "cookie": cookie})
 	case service.PlatformZhipu, service.PlatformKimi:
-		accountID := int64(0)
-		if req.AccountID != nil {
-			accountID = *req.AccountID
-		}
-		token, _, err := h.webLoginSessions().Create(req.Platform, accountID, req.LoginEmail, req.LoginPhone)
-		if err != nil {
-			response.InternalError(c, "failed to create login session")
-			return
-		}
-		// 发码桩：本期仅返回会话 token，实际发码后续接入。
-		response.Success(c, gin.H{"success": true, "needs_sms": true, "session_token": token})
+		// zhipu/kimi 官方网页端没有密码登录（微信扫码/手机号短信码，发码被数美滑块/
+		// 易盾验证码保护），账号密码自动登录不适用；登录态经由浏览器登录（登录代理
+		// iframe 人工完成滑块/短信验证）捕获回传。
+		title, hint := service.WebPlatformErrorDetail(req.Platform, 0, "login")
+		response.ErrorWithDetails(c, http.StatusBadRequest, title, "",
+			map[string]string{
+				"detail": "该平台官方网页端不提供密码登录，请使用浏览器登录（人工完成滑块/短信验证）",
+				"hint":   hint,
+			})
 	default:
 		response.BadRequest(c, "unsupported web platform: "+req.Platform)
 	}
@@ -265,45 +251,6 @@ func (h *AccountHandler) webPlatformAutoLoginStoreStatus(ctx context.Context, id
 		}
 	}
 	return nil
-}
-
-// WebLoginSMS 半自动短信码提交（桩，不伪造成功）。
-// POST /api/v1/admin/accounts/web-login-sms
-//
-//	body {session_token, sms_code}
-//
-// 安全：会话仅内存、重启失效，绝不落库；本端点为桩实现，明确返回"尚未接入发码通道"。
-func (h *AccountHandler) WebLoginSMS(c *gin.Context) {
-	var req struct {
-		SessionToken string `json:"session_token" binding:"required"`
-		SMSCode      string `json:"sms_code"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-
-	sess, err := h.webLoginSessions().Resolve(req.SessionToken)
-	if errors.Is(err, service.ErrWebAutoLoginSessionExpired) || sess == nil {
-		// 无效/过期会话：410 Gone。
-		c.JSON(http.StatusGone, response.Response{
-			Code:    http.StatusGone,
-			Message: "login session expired or not found",
-		})
-		return
-	}
-
-	// deepseek 平台无需短信码（其走邮箱登录直接返回 Cookie）。
-	if sess.Platform == service.PlatformDeepseek {
-		response.BadRequest(c, "this platform does not require SMS code")
-		return
-	}
-
-	// 桩语义：本期短信码登录尚未接入发码通道，明确返回失败，绝不伪造成功。
-	response.Success(c, gin.H{
-		"success": false,
-		"detail":  "短信码登录尚未接入发码通道",
-	})
 }
 
 // BatchLogin 按平台分派的批量自动登录/恢复。

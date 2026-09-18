@@ -64,7 +64,6 @@ func ProvideAdminHandlers(
 	accountHandler.SetAccountBalanceProbeService(accountBalanceProbe)
 	accountHandler.SetCodeBuddyAccountRefresher(codeBuddyOAuthHandler)
 	// 注入网页版平台自动登录服务（其 Start 由 handler 内 lazy + idempotent 触发）。
-	accountHandler.SetWebLoginSessionStore(service.NewWebLoginSessionStore())
 	accountHandler.SetWebPlatformAutoLoginService(service.NewWebPlatformAutoLoginService(
 		admin.NewAutoLoginStoreAdapter(adminService), httpUpstream, cfg,
 	))

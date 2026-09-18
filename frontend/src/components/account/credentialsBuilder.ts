@@ -84,6 +84,12 @@ export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
   return platform === 'deepseek' || platform === 'zhipu'
 }
 
+// 官方网页端密码登录仅 deepseek 支持；zhipu（微信扫码/短信码）与 kimi（短信码/App 扫码）
+// 官方均不提供密码登录，账号密码自动登录入口只对 deepseek 开放。
+export function webPlatformSupportsPasswordLogin(platform: WebProviderPlatform): boolean {
+  return platform === 'deepseek'
+}
+
 export type WebCredentialError =
   | 'webCookieRequired'
   | 'webKimiJsonInvalid'

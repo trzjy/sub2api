@@ -1516,8 +1516,12 @@
           <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
         </div>
 
-        <!-- 自动登录（账号密码自动登录并回填 Cookie；折叠表单） -->
-        <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-500">
+        <!-- 自动登录（账号密码自动登录并回填 Cookie；折叠表单）。
+             密码登录仅 deepseek 官方支持；zhipu/kimi 无密码登录，不渲染该入口。 -->
+        <div
+          v-if="supportsPasswordAutoLogin"
+          class="rounded-lg border border-gray-200 p-3 dark:border-dark-500"
+        >
           <button
             type="button"
             data-testid="web-auto-login-toggle"
@@ -4192,6 +4196,7 @@ import {
   isVolcanoBaseURL,
   isWebProviderPlatform,
   validateHeaderOverrideRows,
+  webPlatformSupportsPasswordLogin,
   webProviderUsesCookie,
   type CnAccountMode,
   type CnApiProtocol,
@@ -4567,6 +4572,10 @@ const webAccessModeUsesCookie = computed(() => {
   if (!isWebAccessModePlatform.value) return false
   return webProviderUsesCookie(form.platform as WebProviderPlatform)
 })
+// 账号密码自动登录入口：仅 deepseek（zhipu/kimi 官方无密码登录，不渲染折叠表单）。
+const supportsPasswordAutoLogin = computed(
+  () => isWebAccessModePlatform.value && webPlatformSupportsPasswordLogin(form.platform as WebProviderPlatform)
+)
 const cnWebModeBases = ['kimi', 'zhipu', 'deepseek'] as const
 const cnSupportsWebMode = computed(
   () => (cnWebModeBases as readonly string[]).includes(form.platform) &&

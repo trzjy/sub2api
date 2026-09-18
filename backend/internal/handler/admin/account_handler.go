@@ -72,8 +72,6 @@ type AccountHandler struct {
 	// webPlatformAutoLogin 是网页版平台自动登录服务（由并行任务实现并注入）。
 	// 以本地接口类型持有，便于在测试中替换为 mock。
 	webPlatformAutoLogin webPlatformAutoLoginService
-	// webLoginSessionStore 是半自动登录（短信码）会话存储，仅内存、重启失效。
-	webLoginSessionStore webLoginSessionStore
 	// webAutoLoginStarted 保证自动登录服务 lazy Start 幂等。
 	webAutoLoginStarted sync.Once
 }
@@ -108,11 +106,6 @@ func (h *AccountHandler) SetWebPlatformAutoLoginService(s *service.WebPlatformAu
 	h.webPlatformAutoLogin = s
 }
 
-// SetWebLoginSessionStore 注入半自动登录（短信码）会话存储。
-func (h *AccountHandler) SetWebLoginSessionStore(s webLoginSessionStore) {
-	h.webLoginSessionStore = s
-}
-
 // ensureWebAutoLoginStarted 幂等地随首个请求 lazy 启动自动登录服务。
 func (h *AccountHandler) ensureWebAutoLoginStarted() {
 	if h == nil || h.webPlatformAutoLogin == nil {
@@ -121,14 +114,6 @@ func (h *AccountHandler) ensureWebAutoLoginStarted() {
 	h.webAutoLoginStarted.Do(func() {
 		h.webPlatformAutoLogin.Start(context.Background())
 	})
-}
-
-// webLoginSessions 返回当前生效的会话存储；未注入时使用包级默认单例。
-func (h *AccountHandler) webLoginSessions() webLoginSessionStore {
-	if h != nil && h.webLoginSessionStore != nil {
-		return h.webLoginSessionStore
-	}
-	return defaultWebLoginSessionStore
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {

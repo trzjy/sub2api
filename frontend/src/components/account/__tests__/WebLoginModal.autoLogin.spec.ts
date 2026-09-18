@@ -81,4 +81,28 @@ describe('WebLoginModal auto-login tab', () => {
     expect(wrapper.find('[data-testid="web-auto-login-form"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
   })
+
+  // zhipu / kimi 官方无密码登录（微信扫码/短信码），自动登录 Tab 不渲染，
+  // 仅保留 Cookie 捕获路径。
+  it.each(['zhipu', 'kimi'])('hides the Auto Login tab for %s', async (platform) => {
+    const wrapper = mountModal(platform)
+    await flush()
+    expect(wrapper.find('[data-testid="web-login-tab-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="web-login-tab-capture"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-auto-login-form"]').exists()).toBe(false)
+  })
+
+  it('falls back to the capture tab if the platform switches away from deepseek while auto tab is active', async () => {
+    const wrapper = mountModal('deepseek')
+    await flush()
+    await wrapper.find('[data-testid="web-login-tab-auto"]').trigger('click')
+    await flush()
+    expect(wrapper.find('[data-testid="web-auto-login-form"]').exists()).toBe(true)
+    await wrapper.setProps({ platform: 'zhipu' })
+    await flush()
+    expect(wrapper.find('[data-testid="web-login-tab-auto"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="web-auto-login-form"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="web-login-open-new-tab"]').exists()).toBe(true)
+  })
 })

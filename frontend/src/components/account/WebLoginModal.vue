@@ -18,6 +18,7 @@
           {{ t('admin.accounts.webLogin.tabs.capture') }}
         </button>
         <button
+          v-if="supportsAutoLogin"
           type="button"
           data-testid="web-login-tab-auto"
           class="btn btn-sm"
@@ -159,7 +160,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import WebAutoLoginForm from '@/components/account/WebAutoLoginForm.vue'
-import { buildWebProviderCredentials, isWebProviderPlatform, webProviderUsesCookie, type WebProviderPlatform } from '@/components/account/credentialsBuilder'
+import { buildWebProviderCredentials, isWebProviderPlatform, webPlatformSupportsPasswordLogin, webProviderUsesCookie, type WebProviderPlatform } from '@/components/account/credentialsBuilder'
 import {
   validateWebCredentials,
   createWebLoginProxySession,
@@ -180,7 +181,8 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const appStore = useAppStore()
 
-// 自动登录 / Cookie 捕获 双 Tab。
+// 自动登录 / Cookie 捕获 双 Tab。密码登录仅 deepseek 支持；zhipu / kimi 官方
+// 无密码登录（微信扫码/短信码），不展示自动登录 Tab，仅保留 Cookie 捕获。
 const activeTab = ref<'capture' | 'auto'>('capture')
 
 // 弹窗仅从网页接入模式表单区打开；platform 为官方 CN 平台（kimi/zhipu/deepseek），
@@ -188,6 +190,13 @@ const activeTab = ref<'capture' | 'auto'>('capture')
 // 等强类型调用安全。
 const webPlatform = computed<WebProviderPlatform>(() =>
   isWebProviderPlatform(props.platform) ? props.platform : 'deepseek')
+
+// 平台能力守卫：不支持密码登录的平台收敛回捕获 Tab（平台切换/复用时防残留）。
+const supportsAutoLogin = computed(() => webPlatformSupportsPasswordLogin(webPlatform.value))
+
+watch(supportsAutoLogin, (supported) => {
+  if (!supported) activeTab.value = 'capture'
+})
 
 const pastedCredentials = ref('')
 const validating = ref(false)
@@ -383,6 +392,9 @@ async function handleValidateAndApply() {
  * 本期不会触发 recovered，由表单内如实展示未接入发码通道。
  */
 function setActiveTab(tab: 'capture' | 'auto') {
+  // 不支持密码登录的平台（zhipu/kimi）不进入自动登录 Tab；Tab 按钮虽已隐藏，
+  // 这里再做一层程序化守卫。
+  if (tab === 'auto' && !supportsAutoLogin.value) return
   activeTab.value = tab
 }
 
