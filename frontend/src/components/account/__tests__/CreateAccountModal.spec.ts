@@ -1046,11 +1046,13 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('web-zhipu')
+    // 平台归并 PR-3：网页接入模式平台为官方值 zhipu，网页语义在 credentials["access_mode"]="web"。
+    expect(payload?.platform).toBe('zhipu')
     expect(payload?.type).toBe('apikey')
+    expect(payload?.credentials?.access_mode).toBe('web')
     expect(payload?.credentials?.cookie).toBe('sessionid=test-cookie')
-    // isUpstreamBillingProbeEligible('web-zhipu','apikey') 为 false → 该字段为 undefined（或省略），
-    // 后端契约要求 web 平台建号请求不得携带 upstream_billing_probe_enabled=true。
+    // isUpstreamBillingProbeEligible('zhipu','apikey') + access_mode==='web' → 不在探测白名单，
+    // 后端契约要求网页接入模式建号请求不得携带 upstream_billing_probe_enabled=true。
     expect(payload?.upstream_billing_probe_enabled).toBeUndefined()
     expect(showErrorMock).not.toHaveBeenCalled()
   })

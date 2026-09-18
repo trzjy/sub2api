@@ -4410,7 +4410,7 @@ const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
-// ── 网页逆向平台（web-deepseek / web-zhipu / web-kimi）粘贴凭证 ──
+// ── 网页接入模式（kimi / zhipu / deepseek，access_mode="web"）粘贴凭证 ──
 const webCookieInput = ref('')
 const webKimiTokenJson = ref('')
 const webBaseUrlInput = ref('')
@@ -6333,6 +6333,11 @@ const createAccountAndFinish = async (
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
+  // 平台归并 PR-3：网页接入模式账号（平台为官方值但 credentials["access_mode"]="web"，
+  // 无静态密钥）不在探测白名单内，isUpstreamBillingProbeEligible(官方平台, apikey) 会命中
+  // true，需在此显式排除，否则后端 fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。
+  const isWebAccessModeCredentials =
+    type === 'apikey' && credentials?.access_mode === 'web'
   // Inject quota limits for apikey/bedrock accounts
   let finalExtra = withUpstreamRequestIdHeader(extra)
   if (type === 'apikey' || type === 'bedrock') {
@@ -6403,8 +6408,12 @@ const createAccountAndFinish = async (
     expires_at: form.expires_at,
     // 探测资格按平台白名单门控（isUpstreamBillingProbeEligible，与后端
     // IsUpstreamBillingProbeIdentity 同名单）；web-*/other/codebuddy 等非资格平台
-    // 不传该字段，否则后端 fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。
-    upstream_billing_probe_enabled: isUpstreamBillingProbeEligible(platform, type) ? upstreamBillingAutoProbeEnabled.value : undefined,
+    // 及网页接入模式账号（isWebAccessModeCredentials）不传该字段，否则后端
+    // fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。
+    upstream_billing_probe_enabled:
+      isUpstreamBillingProbeEligible(platform, type) && !isWebAccessModeCredentials
+        ? upstreamBillingAutoProbeEnabled.value
+        : undefined,
     auto_pause_on_expired: autoPauseOnExpired.value
   })
 }

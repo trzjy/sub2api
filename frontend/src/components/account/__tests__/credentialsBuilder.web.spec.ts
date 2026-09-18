@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  WEB_PROVIDER_PLATFORMS,
   isWebProviderPlatform,
   buildWebProviderCredentials,
   isUpstreamBillingProbeEligible,
@@ -7,25 +8,28 @@ import {
 } from '../credentialsBuilder'
 
 describe('isWebProviderPlatform', () => {
-  it('accepts the three web reverse platforms', () => {
-    expect(isWebProviderPlatform('web-deepseek')).toBe(true)
-    expect(isWebProviderPlatform('web-zhipu')).toBe(true)
-    expect(isWebProviderPlatform('web-kimi')).toBe(true)
+  it('accepts the official provider platforms that support web access mode', () => {
+    // 平台归并（PR-3）：web-* 不再是独立枚举，网页接入下沉为账号级 access_mode='web'。
+    expect(WEB_PROVIDER_PLATFORMS).toEqual(['kimi', 'zhipu', 'deepseek'])
+    for (const platform of WEB_PROVIDER_PLATFORMS) {
+      expect(isWebProviderPlatform(platform)).toBe(true)
+    }
   })
 
-  it('rejects API platforms and unknown values', () => {
-    expect(isWebProviderPlatform('kimi')).toBe(false)
-    expect(isWebProviderPlatform('deepseek')).toBe(false)
-    expect(isWebProviderPlatform('web-other')).toBe(false)
+  it('rejects non-web providers and unknown values', () => {
+    expect(isWebProviderPlatform('openai')).toBe(false)
+    expect(isWebProviderPlatform('anthropic')).toBe(false)
+    expect(isWebProviderPlatform('other')).toBe(false)
+    expect(isWebProviderPlatform('codebuddy')).toBe(false)
     expect(isWebProviderPlatform('')).toBe(false)
   })
 })
 
 describe('webProviderUsesCookie', () => {
   it('cookie auth for DeepSeek / Zhipu web, token auth for Kimi web', () => {
-    expect(webProviderUsesCookie('web-deepseek')).toBe(true)
-    expect(webProviderUsesCookie('web-zhipu')).toBe(true)
-    expect(webProviderUsesCookie('web-kimi')).toBe(false)
+    expect(webProviderUsesCookie('deepseek')).toBe(true)
+    expect(webProviderUsesCookie('zhipu')).toBe(true)
+    expect(webProviderUsesCookie('kimi')).toBe(false)
   })
 })
 
@@ -51,9 +55,7 @@ describe('isUpstreamBillingProbeEligible', () => {
 
   it('returns false for web reverse / other / codebuddy platforms even as apikey', () => {
     for (const platform of [
-      'web-zhipu',
-      'web-deepseek',
-      'web-kimi',
+      'web-other',
       'other',
       'codebuddy',
     ]) {
@@ -85,30 +87,31 @@ describe('isUpstreamBillingProbeEligible', () => {
 
 describe('buildWebProviderCredentials', () => {
   it('builds cookie credentials for DeepSeek web with optional base_url', () => {
-    const result = buildWebProviderCredentials('web-deepseek', {
+    const result = buildWebProviderCredentials('deepseek', {
       cookie: '  sessionid=abc; HWWAFSESID=xyz  ',
       kimiTokenJson: '',
       baseUrl: 'https://chat.example.com'
     })
     expect(result.error).toBeUndefined()
     expect(result.credentials).toEqual({
+      access_mode: 'web',
       cookie: 'sessionid=abc; HWWAFSESID=xyz',
       base_url: 'https://chat.example.com'
     })
   })
 
   it('omits base_url when blank', () => {
-    const result = buildWebProviderCredentials('web-zhipu', {
+    const result = buildWebProviderCredentials('zhipu', {
       cookie: 'chatglm_token=abc',
       kimiTokenJson: '',
       baseUrl: '   '
     })
     expect(result.error).toBeUndefined()
-    expect(result.credentials).toEqual({ cookie: 'chatglm_token=abc' })
+    expect(result.credentials).toEqual({ access_mode: 'web', cookie: 'chatglm_token=abc' })
   })
 
   it('rejects blank cookie', () => {
-    const result = buildWebProviderCredentials('web-zhipu', {
+    const result = buildWebProviderCredentials('zhipu', {
       cookie: '   ',
       kimiTokenJson: '',
       baseUrl: ''
@@ -117,7 +120,7 @@ describe('buildWebProviderCredentials', () => {
   })
 
   it('builds kimi credentials from a full token JSON', () => {
-    const result = buildWebProviderCredentials('web-kimi', {
+    const result = buildWebProviderCredentials('kimi', {
       cookie: '',
       kimiTokenJson: JSON.stringify({
         access_token: ' at ',
@@ -128,6 +131,7 @@ describe('buildWebProviderCredentials', () => {
     })
     expect(result.error).toBeUndefined()
     expect(result.credentials).toEqual({
+      access_mode: 'web',
       access_token: 'at',
       refresh_token: 'rt',
       user_id: 'u-123'
@@ -135,28 +139,28 @@ describe('buildWebProviderCredentials', () => {
   })
 
   it('accepts kimi JSON with only access_token', () => {
-    const result = buildWebProviderCredentials('web-kimi', {
+    const result = buildWebProviderCredentials('kimi', {
       cookie: '',
       kimiTokenJson: '{"access_token":"at"}',
       baseUrl: ''
     })
     expect(result.error).toBeUndefined()
-    expect(result.credentials).toEqual({ access_token: 'at' })
+    expect(result.credentials).toEqual({ access_mode: 'web', access_token: 'at' })
   })
 
   it('accepts numeric kimi user_id', () => {
-    const result = buildWebProviderCredentials('web-kimi', {
+    const result = buildWebProviderCredentials('kimi', {
       cookie: '',
       kimiTokenJson: '{"access_token":"at","user_id":42}',
       baseUrl: ''
     })
     expect(result.error).toBeUndefined()
-    expect(result.credentials).toEqual({ access_token: 'at', user_id: 42 })
+    expect(result.credentials).toEqual({ access_mode: 'web', access_token: 'at', user_id: 42 })
   })
 
   it('rejects unparseable / non-object kimi JSON', () => {
     for (const raw of ['not json', '[1,2]', '"str"', 'null']) {
-      const result = buildWebProviderCredentials('web-kimi', {
+      const result = buildWebProviderCredentials('kimi', {
         cookie: '',
         kimiTokenJson: raw,
         baseUrl: ''
@@ -166,7 +170,7 @@ describe('buildWebProviderCredentials', () => {
   })
 
   it('rejects kimi JSON without access_token', () => {
-    const result = buildWebProviderCredentials('web-kimi', {
+    const result = buildWebProviderCredentials('kimi', {
       cookie: '',
       kimiTokenJson: '{"refresh_token":"rt"}',
       baseUrl: ''
