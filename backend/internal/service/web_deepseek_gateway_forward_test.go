@@ -20,16 +20,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// webDeepseekTestAccount 构造 web-deepseek 转发测试账号：整串 Cookie 落 credentials
+// webDeepseekTestAccount 构造 deepseek 网页转发测试账号：整串 Cookie 落 credentials
 // （含 WAF Cookie，与线上同串携带口径一致），base_url 覆盖默认域名便于断言出站目标。
 func webDeepseekTestAccount(id int64, credentials map[string]any) *Account {
 	if credentials == nil {
 		credentials = map[string]any{}
 	}
+	credentials["access_mode"] = AccountAccessModeWeb
 	acc := &Account{
 		ID:          id,
-		Name:        "web-deepseek-test",
-		Platform:    PlatformWebDeepseek,
+		Name:        "deepseek-web-test",
+		Platform:    PlatformDeepseek,
 		Type:        AccountTypeAPIKey,
 		Status:      StatusActive,
 		Schedulable: true,

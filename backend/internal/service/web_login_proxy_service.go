@@ -26,18 +26,20 @@ type webLoginUpstream struct {
 }
 
 // webLoginUpstreams 固定上游映射表。Platform 名是白名单 key，不在表内一律拒绝。
+// 平台归并（PR-4 旧链归零）：键为支持网页登录的官方平台值（zhipu/deepseek/kimi），
+// 网页接入由账号级 credentials["access_mode"]="web" 承载，web-* 旧平台键已删除。
 var webLoginUpstreams = map[string]webLoginUpstream{
-	"web-zhipu": {
+	PlatformZhipu: {
 		Origin:         "https://chatglm.cn",
 		CookieName:     "chatglm_token",
 		AllowedCookies: []string{"chatglm_token", "chatglm_refresh_token", "chatglm_user_id"},
 	},
-	"web-deepseek": {
+	PlatformDeepseek: {
 		Origin:         "https://chat.deepseek.com",
 		CookieName:     "ds_session_id",
 		AllowedCookies: []string{"ds_session_id"},
 	},
-	"web-kimi": {Origin: "https://www.kimi.com", CookieName: ""},
+	PlatformKimi: {Origin: "https://www.kimi.com", CookieName: ""},
 }
 
 // ErrWebLoginUnknownPlatform 表示 platform 不在固定映射表内。

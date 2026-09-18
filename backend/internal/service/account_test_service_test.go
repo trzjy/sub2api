@@ -1,10 +1,10 @@
 package service
 
-// web 逆向平台（web-deepseek / web-zhipu / web-kimi）账号测试链回归测试。
+// web 逆向平台（官方 zhipu / deepseek / kimi + access_mode=web）账号测试链回归测试。
 //
 // 这些测试不依赖 //go:build unit 下的共享桩，自成一体，确保默认 `go test` 即可运行
 // （验证命令不含 -tags unit）。重点覆盖：
-//   - web-zhipu 探活复用正式转发链构造函数（buildWebZhipuUpstreamRequest），头一致；
+//   - zhipu web 探活复用正式转发链构造函数（buildWebZhipuUpstreamRequest），头一致；
 //   - modelID 线程化：选中模型 → 实际出站模型，且选择 glm-4.7-flash 不再固定 glm-4；
 //   - 空 modelID 回落默认模型（DefaultWebModelIDs），非空 model_mapping 生效；
 //   - test_start 事件 Model == 实际出站模型；
@@ -120,14 +120,14 @@ func TestWebZhipuTestRespectsSelectedModel(t *testing.T) {
 	svc := newWebTestService(upstream, okSSEResponse())
 	account := &Account{
 		ID:          1,
-		Platform:    PlatformWebZhipu,
+		Platform:    PlatformZhipu,
 		Concurrency: 1,
-		Credentials: map[string]any{"cookie": "SECRET_COOKIE=abc"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "SECRET_COOKIE=abc"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "glm-5.3-flash", "")
 	require.NoError(t, err)
-	require.NotNil(t, upstream.lastReq, "web-zhipu probe must issue an upstream request")
+	require.NotNil(t, upstream.lastReq, "zhipu web probe must issue an upstream request")
 
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
@@ -163,9 +163,9 @@ func TestWebZhipuTestAuthorizationBearerFromCookie(t *testing.T) {
 	jwt := "header.eyJkZXZpY2VfaWQiOiJkZXYxMjMiLCJ0eXAiOiJhY2Nlc3MifQ.sig"
 	account := &Account{
 		ID:          4,
-		Platform:    PlatformWebZhipu,
+		Platform:    PlatformZhipu,
 		Concurrency: 1,
-		Credentials: map[string]any{"cookie": "chatglm_token=" + jwt + "; acw_tc=x"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "chatglm_token=" + jwt + "; acw_tc=x"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "", "")
@@ -184,9 +184,10 @@ func TestWebZhipuTestEmptyModelUsesDefaultAndMappingApplies(t *testing.T) {
 	svc := newWebTestService(upstream, okSSEResponse())
 	account := &Account{
 		ID:          3,
-		Platform:    PlatformWebZhipu,
+		Platform:    PlatformZhipu,
 		Concurrency: 1,
 		Credentials: map[string]any{
+			"access_mode":   AccountAccessModeWeb,
 			"cookie":        "C=1",
 			"model_mapping": map[string]any{"glm-5.3-flash": "glm-4-flash"},
 		},
@@ -216,9 +217,9 @@ func TestWebZhipuProbe401DoesNotAssertCredentialAndLeaksNoCookie(t *testing.T) {
 	})
 	account := &Account{
 		ID:          2,
-		Platform:    PlatformWebZhipu,
+		Platform:    PlatformZhipu,
 		Concurrency: 1,
-		Credentials: map[string]any{"cookie": "SUPER_SECRET=xyz"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "SUPER_SECRET=xyz"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "", "")
@@ -230,10 +231,10 @@ func TestWebZhipuProbe401DoesNotAssertCredentialAndLeaksNoCookie(t *testing.T) {
 	require.NotContains(t, body, "credential is invalid", "must not assert credential invalidity on 401")
 }
 
-// TestDefaultWebModelIDsZhipuDefaultIsFirstEntry 确认 web-zhipu 默认模型目录首项是
+// TestDefaultWebModelIDsZhipuDefaultIsFirstEntry 确认 zhipu 默认 web 模型目录首项是
 // DefaultWebModelIDs 提供的值（空 modelID 回落依据；2026-09-17 实测目录）。
 func TestDefaultWebModelIDsZhipuDefaultIsFirstEntry(t *testing.T) {
-	ids := DefaultWebModelIDs(PlatformWebZhipu)
+	ids := DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb)
 	require.NotEmpty(t, ids)
 	require.Equal(t, "glm-5.3-flash", ids[0])
 }
@@ -254,9 +255,9 @@ func TestWebAccountConnection_DeepSeekProbeNoRegression(t *testing.T) {
 	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          11,
-		Platform:    PlatformWebDeepseek,
+		Platform:    PlatformDeepseek,
 		Concurrency: 1,
-		Credentials: map[string]any{"cookie": "D=1"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "D=1"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "", "")
@@ -287,9 +288,10 @@ func TestWebAccountConnection_DeepSeekRespectsModelIDAndMapping(t *testing.T) {
 	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          12,
-		Platform:    PlatformWebDeepseek,
+		Platform:    PlatformDeepseek,
 		Concurrency: 1,
 		Credentials: map[string]any{
+			"access_mode":   AccountAccessModeWeb,
 			"cookie":        "D=1",
 			"model_mapping": map[string]any{"my-ds": "deepseek-reasoner"},
 		},
@@ -312,9 +314,9 @@ func TestWebAccountConnection_KimiProbeNoRegression(t *testing.T) {
 	svc := newWebTestService(upstream, okSSEResponse())
 	account := &Account{
 		ID:          21,
-		Platform:    PlatformWebKimi,
+		Platform:    PlatformKimi,
 		Concurrency: 1,
-		Credentials: map[string]any{"access_token": "AT=1"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "AT=1"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "", "")
@@ -335,9 +337,10 @@ func TestWebAccountConnection_KimiRespectsModelID(t *testing.T) {
 	svc := newWebTestService(upstream, okSSEResponse())
 	account := &Account{
 		ID:          22,
-		Platform:    PlatformWebKimi,
+		Platform:    PlatformKimi,
 		Concurrency: 1,
 		Credentials: map[string]any{
+			"access_mode":   AccountAccessModeWeb,
 			"access_token":  "AT=1",
 			"model_mapping": map[string]any{"kimi-k3": "k3-agent-ultra"},
 		},
@@ -362,9 +365,9 @@ func TestWebZhipuProbeGuestTokenFailsClosed(t *testing.T) {
 	guestJWT := makeFakeWebZhipuJWTProbe(t, map[string]any{"is_guest": true, "device_id": "probe-guest-id"})
 	account := &Account{
 		ID:          5,
-		Platform:    PlatformWebZhipu,
+		Platform:    PlatformZhipu,
 		Concurrency: 1,
-		Credentials: map[string]any{"cookie": "chatglm_token=" + guestJWT + "; acw_tc=x"},
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "chatglm_token=" + guestJWT + "; acw_tc=x"},
 	}
 
 	err := svc.testWebAccountConnection(ctx, account, "", "")

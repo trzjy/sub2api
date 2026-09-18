@@ -7,19 +7,14 @@ import (
 )
 
 // Task B：平台归并重构隔离红线单测（docs/platform-merge-refactor-plan.md §2.4/§5.1/§6）。
-// 钉住：判定源从 IsWebProvider(platform) 迁移到 Account.IsWebAccessMode()；web 账号
+// 钉住：判定源为 Account.IsWebAccessMode()（PR-4 旧链归零后平台值判定已退役）；web 账号
 // 不被吸入 CN 余额/额度/403/429 冷却链；cookie 清洗豁免；凭证写入校验与模式切换重验。
 
 // 1. cookie 清洗豁免：access_mode=web 账号 cookie 不被剥离；旧平台值仍豁免；api 账号被剥离。
 func TestTaskBCookieSanitizeExemptsWebAccessMode(t *testing.T) {
 	cookie := "sessionid=abc; chatglm_token=xyz"
 
-	// 旧 web-* 平台值：cookie 豁免。
-	oldWeb := map[string]any{"cookie": cookie}
-	require.Equal(t, cookie, SanitizeStoredCredentials(PlatformWebZhipu, oldWeb)["cookie"],
-		"old web-* platform must keep cookie")
-
-	// 官方平台 + access_mode=web：形状兼容期并集判定，cookie 豁免。
+	// 官方平台 + access_mode=web：cookie 豁免（按账号接入模式判定，PR-4 旧链归零）。
 	merged := map[string]any{"cookie": cookie, "access_mode": AccountAccessModeWeb}
 	require.Equal(t, cookie, SanitizeStoredCredentials(PlatformZhipu, merged)["cookie"],
 		"official platform + access_mode=web must keep cookie")
@@ -36,7 +31,7 @@ func TestTaskBCookieSanitizeExemptsWebAccessMode(t *testing.T) {
 }
 
 // 2. validateWebAccountCredential：官方平台 + access_mode=web 组合生效；非法 access_mode 拒绝。
-func TestTaskBValidateWebAccountCredentialOfficialPlatformWebMode(t *testing.T) {
+func TestTaskBValidateWebAccountCredentialOfficialWebAccessMode(t *testing.T) {
 	// zhipu + web：要求非空 cookie。
 	require.NoError(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey,
 		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}))
@@ -49,11 +44,9 @@ func TestTaskBValidateWebAccountCredentialOfficialPlatformWebMode(t *testing.T) 
 	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
 		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}), "kimi+web requires access_token")
 
-	// deepseek + web：要求非空 cookie；旧 web-deepseek 平台值仍兼容。
+	// deepseek + web：要求非空 cookie。
 	require.NoError(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
 		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "c"}))
 
 	// web 接入模式仅支持 apikey 类型。
 	require.Error(t, validateWebAccountCredential(PlatformZhipu, AccountTypeOAuth,
@@ -103,10 +96,6 @@ func TestTaskBIsCNCoolingEligibleExcludesWeb(t *testing.T) {
 	require.True(t, webZhipu.IsCNProvider(), "web zhipu is still a CN provider by platform")
 	require.True(t, webZhipu.IsWebAccessMode(), "web zhipu is web access mode")
 
-	// 旧 web-zhipu 平台值（形状推断为 web）：排除。
-	legacyWeb := &Account{Platform: PlatformWebZhipu, Credentials: map[string]any{"cookie": "c"}}
-	require.False(t, isCNCoolingEligible(legacyWeb), "legacy web-zhipu excluded from CN cooling")
-
 	// openai 不受影响。
 	openaiAcct := &Account{Platform: PlatformOpenAI, Credentials: map[string]any{"api_key": "sk-x"}}
 	require.False(t, isCNCoolingEligible(openaiAcct), "openai not CN cooling")
@@ -117,11 +106,11 @@ func TestTaskBWebTestDispatchByAccessMode(t *testing.T) {
 	webAcct := &Account{Platform: PlatformZhipu, Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}}
 	require.True(t, webAcct.IsWebAccessMode(), "web account dispatched to web probe")
 
-	// ResolveWebPlatform 把官方平台 + web 模式归一到 web 平台值，供 web 探活链复用。
-	require.Equal(t, PlatformWebZhipu, ResolveWebPlatform(webAcct), "official zhipu+web resolves to web-zhipu")
-	require.Equal(t, PlatformWebKimi, ResolveWebPlatform(&Account{
+	// ResolveWebPlatform 把官方平台 + web 模式归一到网页目录键（即官方平台值本身，PR-4）。
+	require.Equal(t, PlatformZhipu, ResolveWebPlatform(webAcct), "official zhipu+web resolves to zhipu")
+	require.Equal(t, PlatformKimi, ResolveWebPlatform(&Account{
 		Platform: PlatformKimi, Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at"}}))
-	require.Equal(t, PlatformWebDeepseek, ResolveWebPlatform(&Account{
+	require.Equal(t, PlatformDeepseek, ResolveWebPlatform(&Account{
 		Platform: PlatformDeepseek, Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}}))
 
 	// api 账号不归一到 web 平台值。
@@ -130,11 +119,10 @@ func TestTaskBWebTestDispatchByAccessMode(t *testing.T) {
 	require.Equal(t, "", ResolveWebPlatform(apiAcct), "api account does not resolve to web platform")
 }
 
-// 6. WebModelCatalogPlatform：旧 web-* 平台值原样；官方平台归到对应 web 目录；非 web 返回空。
+// 6. WebModelCatalogPlatform：支持网页登录的官方平台返回平台值本身（网页目录键）；其余为空。
 func TestTaskBWebModelCatalogPlatform(t *testing.T) {
-	require.Equal(t, PlatformWebZhipu, WebModelCatalogPlatform(PlatformWebZhipu))
-	require.Equal(t, PlatformWebZhipu, WebModelCatalogPlatform(PlatformZhipu))
-	require.Equal(t, PlatformWebKimi, WebModelCatalogPlatform(PlatformKimi))
-	require.Equal(t, PlatformWebDeepseek, WebModelCatalogPlatform(PlatformDeepseek))
+	require.Equal(t, PlatformZhipu, WebModelCatalogPlatform(PlatformZhipu))
+	require.Equal(t, PlatformKimi, WebModelCatalogPlatform(PlatformKimi))
+	require.Equal(t, PlatformDeepseek, WebModelCatalogPlatform(PlatformDeepseek))
 	require.Equal(t, "", WebModelCatalogPlatform(PlatformOpenAI), "non-web platform returns empty")
 }

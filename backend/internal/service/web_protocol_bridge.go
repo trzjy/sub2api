@@ -1,6 +1,6 @@
 package service
 
-// web_protocol_bridge.go 把网页逆向适配器（web-deepseek / web-zhipu / web-kimi）产出的
+// web_protocol_bridge.go 把网页逆向适配器（zhipu / deepseek / kimi 官方平台 + access_mode=web）产出的
 // 通用 OpenAI chat.completion / chat.completion.chunk 包络，按入站协议回桥为对应形态
 // （#2，Codex 审查回执）：
 //

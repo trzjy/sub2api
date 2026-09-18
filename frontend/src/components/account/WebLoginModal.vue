@@ -6,114 +6,148 @@
     @close="handleClose"
   >
     <div class="space-y-4">
-      <!-- 封号风险提示（方案 §2.2） -->
-      <div data-testid="web-login-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
-        <p class="text-sm font-medium text-red-700 dark:text-red-300">
-          {{ t('admin.accounts.webProviders.riskWarning.title') }}
-        </p>
-        <p class="mt-1 text-xs text-red-600 dark:text-red-400">
-          {{ t('admin.accounts.webProviders.riskWarning.body') }}
-        </p>
-      </div>
-
-      <!-- 平台说明 -->
-      <p class="text-sm text-gray-600 dark:text-gray-400">
-        {{ platformHint }}
-      </p>
-
-      <!-- 新窗口打开官方登录页（兜底路径）：官方登录页普遍通过 X-Frame-Options/CSP
-           禁止内嵌展示，代理 iframe 不可用时仍可新标签页登录后手动粘贴。 -->
-      <div class="space-y-2">
+      <!-- Tab 切换：Cookie 捕获（现状保留）/ 自动登录（账号密码自动登录） -->
+      <div class="flex gap-2 border-b border-gray-200 pb-2 dark:border-dark-500">
         <button
           type="button"
-          data-testid="web-login-open-new-tab"
-          class="btn btn-secondary"
-          @click="openLoginWindow"
+          data-testid="web-login-tab-capture"
+          class="btn btn-sm"
+          :class="activeTab === 'capture' ? 'btn-primary' : 'btn-secondary'"
+          @click="setActiveTab('capture')"
         >
-          {{ t('admin.accounts.webLogin.openOfficial') }}
-        </button>
-        <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
-      </div>
-
-      <!-- 登录代理 iframe：后端提供代理登录页，登录态由后端自动捕获 Cookie。
-           隔离 origin 已阻断官方页脚本读取后台存储，故不设 sandbox；保留 referrerpolicy 收紧。
-           Kimi 不启动轮询，保持手动 Token 粘贴。 -->
-      <div
-        v-if="proxyUrl"
-        data-testid="web-login-proxy-iframe-wrap"
-        class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500"
-      >
-        <iframe
-          :src="proxyUrl"
-          class="h-full w-full"
-          referrerpolicy="no-referrer"
-          :title="t('admin.accounts.webLogin.proxyTitle')"
-        ></iframe>
-      </div>
-
-      <!-- 代理不可用：降级为官方页登录 + 手动粘贴 -->
-      <p
-        v-if="!proxyUrl && proxyUnavailable"
-        data-testid="web-login-proxy-unavailable"
-        class="text-sm text-amber-600 dark:text-amber-400"
-      >
-        {{ t('admin.accounts.webLogin.proxyUnavailable') }}
-      </p>
-
-      <!-- 自动捕获状态提示 -->
-      <p
-        v-if="capturing"
-        data-testid="web-login-autocapturing"
-        class="text-sm text-primary-600 dark:text-primary-400"
-      >
-        {{ t('admin.accounts.webLogin.autoCapturing') }}
-      </p>
-      <p
-        v-if="capturedCookie"
-        data-testid="web-login-autofilled"
-        class="text-sm text-green-600 dark:text-green-400"
-      >
-        {{ t('admin.accounts.webLogin.autoCaptureSuccess') }}
-      </p>
-      <p
-        v-if="timedOut"
-        data-testid="web-login-autocapture-timeout"
-        class="text-sm text-amber-600 dark:text-amber-400"
-      >
-        {{ t('admin.accounts.webLogin.autoCaptureTimeout') }}
-      </p>
-
-      <!-- 手动粘贴凭证（兜底路径，方案 §2.3：三平台都必须支持） -->
-      <div class="space-y-2">
-        <label class="input-label">{{ pasteLabel }}</label>
-        <textarea
-          v-model="pastedCredentials"
-          rows="4"
-          :data-testid="webProviderUsesCookie(webPlatform) ? 'web-login-cookie-input' : 'web-login-token-json'"
-          class="input font-mono"
-          :placeholder="pastePlaceholder"
-        ></textarea>
-        <p class="input-hint">{{ t('admin.accounts.webLogin.pasteHint') }}</p>
-      </div>
-
-      <!-- 校验结果 -->
-      <p v-if="validationError" data-testid="web-login-validation-error" class="text-sm text-red-600 dark:text-red-400">
-        {{ validationError }}
-      </p>
-
-      <div class="flex justify-end gap-2">
-        <button type="button" class="btn btn-secondary" @click="handleClose">
-          {{ t('common.cancel') }}
+          {{ t('admin.accounts.webLogin.tabs.capture') }}
         </button>
         <button
           type="button"
-          data-testid="web-login-submit"
-          class="btn btn-primary"
-          :disabled="validating"
-          @click="handleValidateAndApply"
+          data-testid="web-login-tab-auto"
+          class="btn btn-sm"
+          :class="activeTab === 'auto' ? 'btn-primary' : 'btn-secondary'"
+          @click="setActiveTab('auto')"
         >
-          {{ validating ? t('common.loading') + '...' : t('admin.accounts.webLogin.apply') }}
+          {{ t('admin.accounts.webLogin.tabs.auto') }}
         </button>
+      </div>
+
+      <!-- Cookie 捕获（现状保留：iframe + 手动粘贴 Token 路径不变） -->
+      <div v-if="activeTab === 'capture'" class="space-y-4">
+        <!-- 封号风险提示（方案 §2.2） -->
+        <div data-testid="web-login-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
+          <p class="text-sm font-medium text-red-700 dark:text-red-300">
+            {{ t('admin.accounts.webProviders.riskWarning.title') }}
+          </p>
+          <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+            {{ t('admin.accounts.webProviders.riskWarning.body') }}
+          </p>
+        </div>
+
+        <!-- 平台说明 -->
+        <p class="text-sm text-gray-600 dark:text-gray-400">
+          {{ platformHint }}
+        </p>
+
+        <!-- 新窗口打开官方登录页（兜底路径）：官方登录页普遍通过 X-Frame-Options/CSP
+             禁止内嵌展示，代理 iframe 不可用时仍可新标签页登录后手动粘贴。 -->
+        <div class="space-y-2">
+          <button
+            type="button"
+            data-testid="web-login-open-new-tab"
+            class="btn btn-secondary"
+            @click="openLoginWindow"
+          >
+            {{ t('admin.accounts.webLogin.openOfficial') }}
+          </button>
+          <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
+        </div>
+
+        <!-- 登录代理 iframe：后端提供代理登录页，登录态由后端自动捕获 Cookie。
+             隔离 origin 已阻断官方页脚本读取后台存储，故不设 sandbox；保留 referrerpolicy 收紧。
+             Kimi 不启动轮询，保持手动 Token 粘贴。 -->
+        <div
+          v-if="proxyUrl"
+          data-testid="web-login-proxy-iframe-wrap"
+          class="relative h-[420px] w-full overflow-hidden rounded-lg border border-gray-200 dark:border-dark-500"
+        >
+          <iframe
+            :src="proxyUrl"
+            class="h-full w-full"
+            referrerpolicy="no-referrer"
+            :title="t('admin.accounts.webLogin.proxyTitle')"
+          ></iframe>
+        </div>
+
+        <!-- 代理不可用：降级为官方页登录 + 手动粘贴 -->
+        <p
+          v-if="!proxyUrl && proxyUnavailable"
+          data-testid="web-login-proxy-unavailable"
+          class="text-sm text-amber-600 dark:text-amber-400"
+        >
+          {{ t('admin.accounts.webLogin.proxyUnavailable') }}
+        </p>
+
+        <!-- 自动捕获状态提示 -->
+        <p
+          v-if="capturing"
+          data-testid="web-login-autocapturing"
+          class="text-sm text-primary-600 dark:text-primary-400"
+        >
+          {{ t('admin.accounts.webLogin.autoCapturing') }}
+        </p>
+        <p
+          v-if="capturedCookie"
+          data-testid="web-login-autofilled"
+          class="text-sm text-green-600 dark:text-green-400"
+        >
+          {{ t('admin.accounts.webLogin.autoCaptureSuccess') }}
+        </p>
+        <p
+          v-if="timedOut"
+          data-testid="web-login-autocapture-timeout"
+          class="text-sm text-amber-600 dark:text-amber-400"
+        >
+          {{ t('admin.accounts.webLogin.autoCaptureTimeout') }}
+        </p>
+
+        <!-- 手动粘贴凭证（兜底路径，方案 §2.3：三平台都必须支持） -->
+        <div class="space-y-2">
+          <label class="input-label">{{ pasteLabel }}</label>
+          <textarea
+            v-model="pastedCredentials"
+            rows="4"
+            :data-testid="webProviderUsesCookie(webPlatform) ? 'web-login-cookie-input' : 'web-login-token-json'"
+            class="input font-mono"
+            :placeholder="pastePlaceholder"
+          ></textarea>
+          <p class="input-hint">{{ t('admin.accounts.webLogin.pasteHint') }}</p>
+        </div>
+
+        <!-- 校验结果 -->
+        <p v-if="validationError" data-testid="web-login-validation-error" class="text-sm text-red-600 dark:text-red-400">
+          {{ validationError }}
+        </p>
+
+        <div class="flex justify-end gap-2">
+          <button type="button" class="btn btn-secondary" @click="handleClose">
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            type="button"
+            data-testid="web-login-submit"
+            class="btn btn-primary"
+            :disabled="validating"
+            @click="handleValidateAndApply"
+          >
+            {{ validating ? t('common.loading') + '...' : t('admin.accounts.webLogin.apply') }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 自动登录（账号密码自动登录，回填 Cookie；Kimi 手动 Token 路径不变） -->
+      <div v-else class="space-y-3">
+        <p class="input-hint">{{ t('admin.accounts.webLogin.autoLogin.title') }}</p>
+        <WebAutoLoginForm
+          :platform="webPlatform"
+          @recovered="handleAutoRecovered"
+        />
       </div>
     </div>
   </BaseDialog>
@@ -124,6 +158,7 @@ import { computed, ref, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import WebAutoLoginForm from '@/components/account/WebAutoLoginForm.vue'
 import { buildWebProviderCredentials, isWebProviderPlatform, webProviderUsesCookie, type WebProviderPlatform } from '@/components/account/credentialsBuilder'
 import {
   validateWebCredentials,
@@ -144,6 +179,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const appStore = useAppStore()
+
+// 自动登录 / Cookie 捕获 双 Tab。
+const activeTab = ref<'capture' | 'auto'>('capture')
 
 // 弹窗仅从网页接入模式表单区打开；platform 为官方 CN 平台（kimi/zhipu/deepseek），
 // 非网页接入平台时收敛到默认（isWebProviderPlatform 守卫），确保 webProviderUsesCookie
@@ -201,6 +239,7 @@ const pastePlaceholder = computed(() =>
 // 打开弹窗：重置表单并尝试建立登录代理会话。
 watch(() => props.show, (open) => {
   if (open) {
+    activeTab.value = 'capture'
     void setupProxySession()
   }
 }, { immediate: true })
@@ -304,6 +343,29 @@ async function handleValidateAndApply() {
   } finally {
     validating.value = false
   }
+}
+
+/**
+ * 自动登录成功：构建与手动粘贴同构的 credentials，复用既有 applied → 回填路径
+ * （handleWebLoginApplied 把 Cookie 写入父表单的 webCookieInput）。Kimi 因 needs_sms
+ * 本期不会触发 recovered，由表单内如实展示未接入发码通道。
+ */
+function setActiveTab(tab: 'capture' | 'auto') {
+  activeTab.value = tab
+}
+
+function handleAutoRecovered(payload: { platform: string; cookie: string }) {
+  const usesCookie = webProviderUsesCookie(webPlatform.value)
+  const built = buildWebProviderCredentials(webPlatform.value, {
+    cookie: usesCookie ? payload.cookie : '',
+    kimiTokenJson: usesCookie ? '' : payload.cookie,
+    baseUrl: ''
+  })
+  if (built.error || !built.credentials) {
+    return
+  }
+  emit('applied', { platform: props.platform, credentials: built.credentials })
+  emit('close')
 }
 
 /**

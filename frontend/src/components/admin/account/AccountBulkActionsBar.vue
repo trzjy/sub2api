@@ -51,6 +51,15 @@
         <button @click="$emit('toggle-schedulable', true)" class="btn btn-success btn-sm">{{ t('admin.accounts.bulkActions.enableScheduling') }}</button>
         <button @click="$emit('toggle-schedulable', false)" class="btn btn-warning btn-sm">{{ t('admin.accounts.bulkActions.disableScheduling') }}</button>
         <button @click="$emit('edit-selected')" class="btn btn-primary btn-sm">{{ t('admin.accounts.bulkActions.edit') }}</button>
+        <template v-if="showWebActions">
+          <span class="mx-1 h-5 w-px bg-gray-300 dark:bg-primary-800"></span>
+          <button @click="$emit('web-login')" class="btn btn-secondary btn-sm">{{ t('admin.accounts.batch.login') }}</button>
+          <button @click="$emit('web-test')" class="btn btn-secondary btn-sm">{{ t('admin.accounts.batch.test') }}</button>
+          <button @click="$emit('delete-banned')" class="btn btn-danger btn-sm">{{ t('admin.accounts.batch.deleteBanned') }}</button>
+          <button @click="$emit('web-enable')" class="btn btn-success btn-sm">{{ t('admin.accounts.batch.enable') }}</button>
+          <button @click="$emit('web-disable')" class="btn btn-warning btn-sm">{{ t('admin.accounts.batch.disable') }}</button>
+          <button @click="$emit('web-export')" class="btn btn-secondary btn-sm">{{ t('admin.accounts.batch.export') }}</button>
+        </template>
       </template>
       <button @click="$emit('edit-filtered')" class="btn btn-primary btn-sm">
         {{ t('admin.accounts.bulkEdit.submit') }}
@@ -60,14 +69,25 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { isWebAccessAccount } from '@/components/account/credentialsBuilder'
 
-defineProps<{
+const props = defineProps<{
   selectedIds: number[]
+  selectedAccounts?: { platform?: string; credentials?: Record<string, unknown> | null }[]
   totalResults: number
   selectingAll: boolean
   allResultsSelected: boolean
 }>()
+
+// Web 专属按钮（登录/测试/删除封禁/启用/停用/导出）仅在选中项全部为 web access
+// 账号时展示：平台归并后同一官方平台可共存普通 API 账号，仅凭 platform 放行会
+// 让 API 账号误触 Web 逆向操作。
+const showWebActions = computed(() => {
+  const list = props.selectedAccounts
+  return !!list && list.length > 0 && list.every(account => isWebAccessAccount(account))
+})
 
 defineEmits([
   'delete',
@@ -79,7 +99,13 @@ defineEmits([
   'toggle-schedulable',
   'reset-status',
   'refresh-token',
-  'probe-upstream-billing'
+  'probe-upstream-billing',
+  'web-login',
+  'web-test',
+  'delete-banned',
+  'web-enable',
+  'web-disable',
+  'web-export'
 ])
 
 const { t } = useI18n()

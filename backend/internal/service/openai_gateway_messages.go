@@ -73,11 +73,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 		reqStream := cc.Stream
 		switch webProviderKeyForAccount(account) {
-		case PlatformWebZhipu:
+		case PlatformZhipu:
 			return s.forwardWebZhipu(ctx, c, account, ccBody, reqModel, reqStream, startTime, webResponseModeAnthropic)
-		case PlatformWebDeepseek:
+		case PlatformDeepseek:
 			return s.forwardWebDeepseek(ctx, c, account, ccBody, reqModel, reqStream, startTime, webResponseModeAnthropic)
-		case PlatformWebKimi:
+		case PlatformKimi:
 			return s.forwardWebKimi(ctx, c, account, ccBody, reqModel, reqStream, startTime, webResponseModeAnthropic)
 		}
 	}

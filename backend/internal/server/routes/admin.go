@@ -515,6 +515,15 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/batch-clear-error", h.Admin.Account.BatchClearError)
 		accounts.POST("/batch-refresh", h.Admin.Account.BatchRefresh)
 
+		// 网页版平台自动登录 + 批量端点
+		accounts.POST("/web-login-password", h.Admin.Account.WebLoginPassword)
+		accounts.POST("/web-login-sms", h.Admin.Account.WebLoginSMS)
+		accounts.POST("/batch-login", h.Admin.Account.BatchLogin)
+		accounts.POST("/batch-test", h.Admin.Account.BatchTest)
+		accounts.POST("/batch-delete-banned", h.Admin.Account.BatchDeleteBanned)
+		accounts.POST("/batch-status", h.Admin.Account.BatchStatus)
+		accounts.GET("/export", h.Admin.Account.ExportWebAccounts)
+
 		// Antigravity 默认模型映射
 		accounts.GET("/antigravity/default-model-mapping", h.Admin.Account.GetAntigravityDefaultModelMapping)
 

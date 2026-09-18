@@ -200,55 +200,45 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 	return decision, decision.Matched, nil
 }
 
-// isConcreteRequestPlatform：composite 目标平台白名单（W6 放开网页逆向平台——
-// 网关转发链路已接入，web-* 请求可经三个适配器转发）。
+// isConcreteRequestPlatform：composite 目标平台白名单。平台归并后（PR-4）网页接入
+// 挂在官方平台 zhipu/deepseek/kimi 账号级 access_mode 上，web-* 不再是目标平台。
 func isConcreteRequestPlatform(platform string) bool {
 	switch platform {
 	case PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformGrok,
-		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax,
-		PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
+		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax:
 		return true
 	default:
 		return false
 	}
 }
 
-// DefaultWebModelIDs 返回各网页逆向平台的默认模型目录（方案 §3.3 模型映射表）。
+// DefaultWebModelIDs 返回各官方平台网页接入（access_mode=web）的默认模型目录
+// （方案 §3.3 模型映射表）。
 // 空 model_mapping 时，公开 /models 列表与账号默认模型集回落到此表，而非误回落到
 // Claude 默认模型。集中定义于此，供 gateway_handler 与 admin account_handler 共用，
 // 避免两处各写一份导致漂移。
 //
-// 归并后支持双键形态（docs/platform-merge-refactor-plan.md §5.6）：
-//   - DefaultWebModelIDs(PlatformWebZhipu) 等旧式单键调用保持原语义（兼容旧 web-* 平台）；
-//   - DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb) 等 (provider, access_mode)
-//     双键调用，官方平台 + access_mode=web 取与旧 web-* 平台相同的目录
-//     （web-zhipu→zhipu+web、web-deepseek→deepseek+web、web-kimi→kimi+web）。
+// 归并后签名（docs/platform-merge-refactor-plan.md §5.6，PR-4 旧链归零）：键为官方
+// 平台值（zhipu/deepseek/kimi）+ 显式 access_mode="web" 双键；失败关闭——缺省 mode
+// 或 mode 非 "web" 一律返回 nil，调用方必须显式声明 web 语境，杜绝「只按平台、
+// 不按接入模式」的模糊判定（本轮重构红线）。
 //
 // 公开模型 ID 固定无前缀（glm-5.3-flash / deepseek-chat / deepseek-reasoner / kimi-k3），
 // 前缀标注仅限管理端标签，不影响公开 ID、请求路由或调度匹配。
 func DefaultWebModelIDs(platform string, mode ...string) []string {
-	// (provider, access_mode) 双键：仅 access_mode=web 有意义，取与旧 web-* 平台相同目录。
-	if len(mode) > 0 && mode[0] == AccountAccessModeWeb {
-		switch platform {
-		case PlatformZhipu:
-			return []string{"glm-5.3-flash"}
-		case PlatformDeepseek:
-			return []string{"deepseek-chat", "deepseek-reasoner"}
-		case PlatformKimi:
-			return []string{"kimi-k3"}
-		default:
-			return nil
-		}
+	// 失败关闭：仅显式 access_mode=web 返回 web 目录；缺省或其他值返回 nil。
+	if len(mode) == 0 || mode[0] != AccountAccessModeWeb {
+		return nil
 	}
 	switch platform {
-	case PlatformWebDeepseek:
-		return []string{"deepseek-chat", "deepseek-reasoner"}
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		// 2026-09-17 官网登录态抓包实测：请求体 meta_data.selected_model 原值
 		// "glm-5.3-flash"（GLM-Flash 极致，assistant_id=webZhipuDefaultAssistantID）。
 		// 旧 glm-4.7/glm-4.7-flash 目录无当前官网依据，已删除。
 		return []string{"glm-5.3-flash"}
-	case PlatformWebKimi:
+	case PlatformDeepseek:
+		return []string{"deepseek-chat", "deepseek-reasoner"}
+	case PlatformKimi:
 		return []string{"kimi-k3"}
 	default:
 		return nil
@@ -307,18 +297,19 @@ func MergeAndDedupModelIDs(sources ...[]string) []string {
 	return out
 }
 
-// ValidateWebZhipuModel 校验 web-zhipu 平台入站模型是否在默认目录内；model 为空或不在
-// DefaultWebModelIDs(PlatformWebZhipu) 内时返回非 nil error，使未知模型失败关闭（避免误
-// 回落到未实测模型）。错误信息仅含模型名，不泄露任何凭证或其他敏感信息。
+// ValidateWebZhipuModel 校验 zhipu 网页接入（access_mode=web）入站模型是否在默认目录内；
+// model 为空或不在 DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb) 内时返回非 nil
+// error，使未知模型失败关闭（避免误回落到未实测模型）。错误信息仅含模型名与平台，
+// 不泄露任何凭证或其他敏感信息。
 func ValidateWebZhipuModel(model string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return fmt.Errorf("web-zhipu model is required but was empty")
+		return fmt.Errorf("zhipu web model is required but was empty")
 	}
-	for _, allowed := range DefaultWebModelIDs(PlatformWebZhipu) {
+	for _, allowed := range DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb) {
 		if model == allowed {
 			return nil
 		}
 	}
-	return fmt.Errorf("web-zhipu model %q is not supported", model)
+	return fmt.Errorf("zhipu web model %q is not supported", model)
 }

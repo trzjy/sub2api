@@ -36,12 +36,8 @@ func TestIsUpstreamBillingProbeAccountExcludesWebAccessMode(t *testing.T) {
 		Credentials: map[string]any{"access_mode": "web", "cookie": "c"}}
 	api := &Account{Platform: domain.PlatformZhipu, Type: AccountTypeAPIKey,
 		Credentials: map[string]any{"access_mode": "api", "api_key": "sk-x"}}
-	legacy := &Account{Platform: domain.PlatformWebZhipu, Type: AccountTypeAPIKey,
-		Credentials: map[string]any{"cookie": "c"}}
 	require.False(t, isUpstreamBillingProbeAccount(web))
 	require.True(t, isUpstreamBillingProbeAccount(api))
-	// 旧 web-* 平台值本就不在 probe 平台白名单内，维持排除。
-	require.False(t, isUpstreamBillingProbeAccount(legacy))
 	var nilAccount *Account
 	require.False(t, isUpstreamBillingProbeAccount(nilAccount))
 }

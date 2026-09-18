@@ -1200,12 +1200,12 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
-	// 网页逆向接入（web 接入模式账号，平台归并后 group platform 已是官方值）：空
+	// 网页接入（web 接入模式账号，平台归并后 group platform 已是官方值）：空
 	// model_mapping 时回落到 web 模型目录（方案 §3.3 映射表 / B4 口径），而非误回落到
-	// Claude 默认模型。按 WebModelCatalogPlatform 归一（旧 web-* 平台值与原样；官方
-	// zhipu/deepseek/kimi 归到对应 web 目录），取代 IsWebProvider(platform)。
+	// Claude 默认模型。按 WebModelCatalogPlatform 判定（官方平台 zhipu/deepseek/kimi
+	// 即网页目录键，PR-4 旧链归零）。
 	if webPlatform := service.WebModelCatalogPlatform(platform); webPlatform != "" {
-		writeModelsList(c, platform, service.DefaultWebModelIDs(webPlatform))
+		writeModelsList(c, platform, service.DefaultWebModelIDs(webPlatform, service.AccountAccessModeWeb))
 		return
 	}
 
@@ -1295,9 +1295,9 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	schedulablePlatforms := h.gatewayService.GetSchedulablePlatforms(ctx, groupID)
-	// 网页逆向平台（web-*）无静态模型目录：模型列表来自账号 model_mapping
-	//（defaultModelIDsForPlatform 对 web-* 返回 nil），与 other 同语义。
-	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi} {
+	// 网页接入账号无静态模型目录：模型列表来自账号 model_mapping
+	//（defaultModelIDsForPlatform 对官方平台返回 nil/CN 分支），与 other 同语义。
+	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax} {
 		platformModels := h.gatewayService.GetAvailableModels(ctx, groupID, platform)
 		if len(platformModels) == 0 {
 			// CN 供应商没有静态默认模型列表（defaultModelIDsForPlatform 的
@@ -1491,9 +1491,9 @@ func defaultModelIDsForPlatform(platform string) []string {
 	case service.PlatformComposite:
 		ids := make([]string, 0)
 		seen := make(map[string]struct{})
-		// 网页逆向平台（web-*）无静态默认模型目录（见 defaultModelIDsForPlatform
-		// 的 web-* 分支），纳入列表仅为占位一致性；实际贡献为空。
-		for _, concretePlatform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi} {
+		// 网页接入无静态默认模型目录（defaultModelIDsForPlatform 对官方平台
+		// 返回空），纳入列表仅为占位一致性；实际贡献为空。
+		for _, concretePlatform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax} {
 			for _, id := range defaultModelIDsForPlatform(concretePlatform) {
 				if _, ok := seen[id]; ok {
 					continue
@@ -1507,10 +1507,6 @@ func defaultModelIDsForPlatform(platform string) []string {
 		// other 无平台内置模型目录：公开模型列表完全来自组内账号 model_mapping；
 		// 返回空列表，避免回落到 Claude 默认模型（外部审查外审-3）。
 		return nil
-	case service.PlatformWebDeepseek, service.PlatformWebZhipu, service.PlatformWebKimi:
-		// 网页逆向平台默认模型目录（方案 §3.3 映射表）；空 model_mapping 时回落此表，
-		// 而非误回落到 Claude 默认模型。
-		return service.DefaultWebModelIDs(platform)
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

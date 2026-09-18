@@ -34,18 +34,15 @@ const (
 	PlatformOther     = "other"
 	PlatformMiniMax   = "minimax" // MiniMax (M 系列)
 	PlatformComposite = "composite"
-	// 网页逆向平台（官方网页端登录态转发，非官方 API，存在封号风险）：
-	// 凭证为整串 Cookie（DeepSeek/Zhipu）或 Token 三元组（Kimi），
-	// 统一存 credentials，见 docs/web-reverse-embedded-login-plan.md §3.2。
-	PlatformWebDeepseek = "web-deepseek" // DeepSeek 网页版 (chat.deepseek.com)
-	PlatformWebZhipu    = "web-zhipu"    // 智谱 GLM 网页版 (chatglm.cn)
-	PlatformWebKimi     = "web-kimi"     // Kimi 网页版 (www.kimi.com)
 )
 
-// IsWebProvider 报告 platform 是否为网页逆向平台（官方网页端登录态转发）。
-func IsWebProvider(platform string) bool {
+// IsWebLoginPlatform 报告 platform 是否为支持网页登录的官方平台（kimi/zhipu/deepseek）。
+// 平台归并重构（docs/platform-merge-refactor-plan.md §5.5 / PR-4）：网页接入不再是
+// 独立平台（web-* 已退役），而是官方平台账号级 credentials["access_mode"]="web"；
+// 「是否支持网页登录」由官方平台集合判定（取代旧平台值判定）。
+func IsWebLoginPlatform(platform string) bool {
 	switch platform {
-	case PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
+	case PlatformKimi, PlatformZhipu, PlatformDeepseek:
 		return true
 	default:
 		return false
@@ -62,7 +59,7 @@ const (
 // Account access mode constants 区分同一官方平台账号的「官方 API」与「网页逆向」
 // 两种接入方式（平台归并重构，docs/platform-merge-refactor-plan.md §5.1）。
 // 存储于 credentials["access_mode"]，与 account_mode（payg/coding）正交、互不调用。
-// 归并后 web-zhipu 等独立平台退役，网页/API 区分由本字段唯一承载。
+// 归并后网页逆向独立平台退役，网页/API 区分由本字段唯一承载。
 const (
 	AccountAccessModeAPI = "api" // 官方 API 接入（api_key / OAuth 凭证）
 	AccountAccessModeWeb = "web" // 网页逆向接入（整串 Cookie / Token 三元组）

@@ -9,7 +9,7 @@ import (
 
 func TestWebLoginCaptureStore_CreateResolve(t *testing.T) {
 	store := NewWebLoginCaptureStore()
-	token, expires, err := store.Create("web-zhipu")
+	token, expires, err := store.Create("zhipu")
 	require.NoError(t, err)
 	require.NotEmpty(t, token)
 	require.False(t, expires.IsZero())
@@ -17,21 +17,21 @@ func TestWebLoginCaptureStore_CreateResolve(t *testing.T) {
 	entry, err := store.Resolve(token)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
-	require.Equal(t, "web-zhipu", entry.Platform)
+	require.Equal(t, "zhipu", entry.Platform)
 	require.Empty(t, entry.Cookie)
 }
 
 func TestWebLoginCaptureStore_CreateRejectsUnknownPlatformStillStores(t *testing.T) {
 	// Create 不校验 platform 合法性（仅 handler 校验），这里仅验证 token 唯一性。
 	store := NewWebLoginCaptureStore()
-	t1, _, _ := store.Create("web-zhipu")
-	t2, _, _ := store.Create("web-deepseek")
+	t1, _, _ := store.Create("zhipu")
+	t2, _, _ := store.Create("deepseek")
 	require.NotEqual(t, t1, t2)
 }
 
 func TestWebLoginCaptureStore_Expired(t *testing.T) {
 	store := NewWebLoginCaptureStore()
-	token, _, err := store.Create("web-kimi")
+	token, _, err := store.Create("kimi")
 	require.NoError(t, err)
 
 	// 未过期前应可解析。
@@ -50,7 +50,7 @@ func TestWebLoginCaptureStore_Expired(t *testing.T) {
 
 func TestWebLoginCaptureStore_SetCookieOverwrite(t *testing.T) {
 	store := NewWebLoginCaptureStore()
-	token, _, err := store.Create("web-deepseek")
+	token, _, err := store.Create("deepseek")
 	require.NoError(t, err)
 
 	require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestWebLoginCaptureStore_SetCookieOverwrite(t *testing.T) {
 
 func TestWebLoginCaptureStore_TouchExtends(t *testing.T) {
 	store := NewWebLoginCaptureStore()
-	token, expires, err := store.Create("web-zhipu")
+	token, expires, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 等待极短时间后 Touch，过期时间应被显著推后。
@@ -88,7 +88,7 @@ func TestWebLoginCaptureStore_TouchExtends(t *testing.T) {
 
 func TestWebLoginCaptureStore_Delete(t *testing.T) {
 	store := NewWebLoginCaptureStore()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	store.Delete(token)
@@ -108,13 +108,13 @@ func TestBuildUpstreamURL(t *testing.T) {
 		wantErr  bool
 		want    string
 	}{
-		{"zhipu ok", "web-zhipu", "/", "", false, "https://chatglm.cn/"},
-		{"deepseek ok with query", "web-deepseek", "/login", "a=1", false, "https://chat.deepseek.com/login?a=1"},
-		{"kimi ok", "web-kimi", "/chat", "", false, "https://www.kimi.com/chat"},
-		{"unknown platform", "web-x", "/", "", true, ""},
-		{"path not leading slash", "web-zhipu", "foo", "", true, ""},
-		{"traversal", "web-zhipu", "/../etc", "", true, ""},
-		{"nested traversal", "web-zhipu", "/a/b/../c", "", true, ""},
+		{"zhipu ok", "zhipu", "/", "", false, "https://chatglm.cn/"},
+		{"deepseek ok with query", "deepseek", "/login", "a=1", false, "https://chat.deepseek.com/login?a=1"},
+		{"kimi ok", "kimi", "/chat", "", false, "https://www.kimi.com/chat"},
+		{"unknown platform", "unknown", "/", "", true, ""},
+		{"path not leading slash", "zhipu", "foo", "", true, ""},
+		{"traversal", "zhipu", "/../etc", "", true, ""},
+		{"nested traversal", "zhipu", "/a/b/../c", "", true, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -140,12 +140,12 @@ func TestWebLoginProxyRedirectAllowlist(t *testing.T) {
 }
 
 func TestWebLoginProxyPlatformInfo(t *testing.T) {
-	origin, cookie, ok := WebLoginProxyPlatformInfo("web-zhipu")
+	origin, cookie, ok := WebLoginProxyPlatformInfo("zhipu")
 	require.True(t, ok)
 	require.Equal(t, "https://chatglm.cn", origin)
 	require.Equal(t, "chatglm_token", cookie)
 
-	origin, cookie, ok = WebLoginProxyPlatformInfo("web-kimi")
+	origin, cookie, ok = WebLoginProxyPlatformInfo("kimi")
 	require.True(t, ok)
 	require.Equal(t, "https://www.kimi.com", origin)
 	require.Equal(t, "", cookie)
@@ -156,11 +156,11 @@ func TestWebLoginProxyPlatformInfo(t *testing.T) {
 
 func TestWebLoginProxyAllowedCookieNames(t *testing.T) {
 	require.Equal(t, []string{"chatglm_token", "chatglm_refresh_token", "chatglm_user_id"},
-		WebLoginProxyAllowedCookieNames("web-zhipu"))
+		WebLoginProxyAllowedCookieNames("zhipu"))
 	require.Equal(t, []string{"ds_session_id"},
-		WebLoginProxyAllowedCookieNames("web-deepseek"))
+		WebLoginProxyAllowedCookieNames("deepseek"))
 	// kimi 白名单为空：不从入站 Cookie 提取（仅手动粘贴 Token JSON）。
-	require.Empty(t, WebLoginProxyAllowedCookieNames("web-kimi"))
+	require.Empty(t, WebLoginProxyAllowedCookieNames("kimi"))
 	// 未知平台返回 nil（handler 不得据此捕获任何入站 Cookie）。
 	require.Nil(t, WebLoginProxyAllowedCookieNames("nope"))
 }

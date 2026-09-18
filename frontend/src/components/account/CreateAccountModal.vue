@@ -1485,10 +1485,10 @@
         <div v-else>
           <label class="input-label">{{ t('admin.accounts.webProviders.kimiTokenLabel') }}</label>
           <textarea
-            v-model="webKimiTokenJson"
+            v-model="kimiTokenJson"
             rows="4"
             required
-            data-testid="web-kimi-token-json"
+            data-testid="kimi-token-json"
             class="input font-mono"
             :placeholder='t("admin.accounts.webProviders.kimiTokenPlaceholder")'
           ></textarea>
@@ -4412,7 +4412,7 @@ const upstreamBillingAutoProbeEnabled = ref(true)
 
 // ── 网页接入模式（kimi / zhipu / deepseek，access_mode="web"）粘贴凭证 ──
 const webCookieInput = ref('')
-const webKimiTokenJson = ref('')
+const kimiTokenJson = ref('')
 const webBaseUrlInput = ref('')
 const showWebLogin = ref(false)
 // 网页接入模式：「自动登录」折叠表单（账号密码自动登录并回填 Cookie）。
@@ -4422,7 +4422,7 @@ const showAutoLogin = ref(false)
 // （保持单一创建路径，用户确认后仍走同一提交链路）。
 function handleWebLoginApplied(payload: { platform: string; credentials: Record<string, unknown> }) {
   if (payload.platform === 'kimi') {
-    webKimiTokenJson.value = JSON.stringify(payload.credentials, null, 2)
+    kimiTokenJson.value = JSON.stringify(payload.credentials, null, 2)
   } else {
     const cookie = payload.credentials.cookie
     webCookieInput.value = typeof cookie === 'string' ? cookie : JSON.stringify(payload.credentials, null, 2)
@@ -5152,7 +5152,7 @@ watch(
     // 平台切换即退出网页接入模式，粘贴输入随平台清空。
     cnWebAccessMode.value = false
     webCookieInput.value = ''
-    webKimiTokenJson.value = ''
+    kimiTokenJson.value = ''
     webBaseUrlInput.value = ''
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
@@ -5640,7 +5640,7 @@ const resetForm = () => {
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
   webCookieInput.value = ''
-  webKimiTokenJson.value = ''
+  kimiTokenJson.value = ''
   webBaseUrlInput.value = ''
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
@@ -6091,7 +6091,7 @@ const handleSubmit = async () => {
     }
     const built = buildWebProviderCredentials(form.platform, {
       cookie: webCookieInput.value,
-      kimiTokenJson: webKimiTokenJson.value,
+      kimiTokenJson: kimiTokenJson.value,
       baseUrl: webBaseUrlInput.value
     })
     if (built.error || !built.credentials) {

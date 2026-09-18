@@ -20,7 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// web-deepseek 网页逆向适配器（协议重写：依据 09-deepseek-logged-in-probe.md 登录态实测）。
+// deepseek web 网页逆向适配器（协议重写：依据 09-deepseek-logged-in-probe.md 登录态实测）。
 //
 // 协议状态声明（权威来源：09 登录态实测 + 06 实施包 §A/§A'，全部来自真实抓包，不再臆测）：
 //   - 认证：Cookie 载体（无 Authorization 头）+ x-client-* / x-device-id / x-ds-pow-response /
@@ -55,21 +55,18 @@ const (
 // ErrWebDeepseekPoWNotImplemented PoW 求解不可用（挑战不可达 / 结构未识别 / 求解失败）。
 // 登录态实测确认 PoW 强制（09 §3），因此任何不可解的 PoW 一律失败关闭，绝不臆测算法或绕过。
 var ErrWebDeepseekPoWNotImplemented = errors.New(
-	"web-deepseek: PoW challenge is mandatory (logged-in capture) but could not be solved")
+	"deepseek web: PoW challenge is mandatory (logged-in capture) but could not be solved")
 
-// forwardWebDeepseek 是 DeepSeek 网页逆向平台（web-deepseek）的转发入口，函数链模式
+// forwardWebDeepseek 是 DeepSeek 网页逆向平台（deepseek web）的转发入口，函数链模式
 // 与 forwardCodeBuddy 同构：入站 OpenAI Chat Completions → 网页端请求（SSE）→ 回程
-// 通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService.Forward 的 platform
-// 分支按 PlatformWebDeepseek 分发（该分发注册由并行任务落在共享注册点文件中）。
+// 通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService 转发链的
+// isWebDeepseekAccount 断言分发。
 // assertWebDeepseekAccount 是 forwardWebDeepseek 入口的双断言 fail-closed（隔离红线）：
-// 旧 web-deepseek 平台（平台本身即判定），或新形态官方 deepseek 平台 + web access
-// mode 双断言。API 模式 deepseek 账号绝不进入网页协议链，web 模式 zhipu/kimi 账号绝不误入。
+// 官方 deepseek 平台 + web access mode 双断言（平台归并后唯一形态，PR-4）。
+// API 模式 deepseek 账号绝不进入网页协议链，web 模式 zhipu/kimi 账号绝不误入。
 func assertWebDeepseekAccount(account *Account) error {
 	if account == nil {
 		return fmt.Errorf("forwardWebDeepseek requires a non-nil account")
-	}
-	if account.Platform == PlatformWebDeepseek {
-		return nil // 旧平台兼容
 	}
 	if account.IsWebAccessMode() && account.IsDeepseek() {
 		return nil
@@ -97,13 +94,13 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	cookie := strings.TrimSpace(account.GetCredential("cookie"))
 	if cookie == "" {
 		// 网页账号登录态载体就是整串 Cookie（credentials_sanitize.go 对 web 平台的例外语义）。
-		return nil, errors.New("web-deepseek account is missing login cookie credential")
+		return nil, errors.New("deepseek web account is missing login cookie credential")
 	}
 
 	// base_url 统一走 account.GetWebBaseURL()（覆盖优先 → 平台默认），避免内联重复实现漂移。
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	if baseURL == "" {
-		return nil, errors.New("web-deepseek account has no base_url")
+		return nil, errors.New("deepseek web account has no base_url")
 	}
 
 	// 模型映射：account.GetModelMapping() 默认透传；归一为网页端 model_type（09 §4 实测
@@ -158,7 +155,7 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	if wafAction := resp.Header.Get("x-amzn-waf-action"); wafAction != "" ||
 		resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusAccepted {
 		return nil, fmt.Errorf(
-			"web-deepseek upstream returned a WAF challenge/captcha (x-amzn-waf-action=%q, status %d); failing closed without forwarding the body",
+			"deepseek web upstream returned a WAF challenge/captcha (x-amzn-waf-action=%q, status %d); failing closed without forwarding the body",
 			wafAction, resp.StatusCode)
 	}
 
@@ -223,7 +220,7 @@ func buildWebDeepseekCompletionBody(
 	prompt string,
 ) ([]byte, error) {
 	if strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("web-deepseek requires at least one user message in the request")
+		return nil, errors.New("deepseek web requires at least one user message in the request")
 	}
 	req := webDeepseekUpstreamRequest{
 		ChatSessionID:   strings.TrimSpace(sessionID),
@@ -293,19 +290,19 @@ func (s *OpenAIGatewayService) ensureWebDeepseekSession(
 
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	if err != nil {
-		return "", fmt.Errorf("web-deepseek session create transport error: %w", err)
+		return "", fmt.Errorf("deepseek web session create transport error: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return "", fmt.Errorf("web-deepseek session create read error: %w", err)
+		return "", fmt.Errorf("deepseek web session create read error: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("web-deepseek session create failed: status %d", resp.StatusCode)
+		return "", fmt.Errorf("deepseek web session create failed: status %d", resp.StatusCode)
 	}
 	id := strings.TrimSpace(gjson.GetBytes(b, "data.biz_data.chat_session.id").String())
 	if id == "" {
-		return "", fmt.Errorf("web-deepseek session create returned no chat_session.id")
+		return "", fmt.Errorf("deepseek web session create returned no chat_session.id")
 	}
 	return id, nil
 }
@@ -380,7 +377,7 @@ func webDeepseekDeviceID(account *Account) string {
 	if account == nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("web-deepseek-device-%d", account.ID)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("deepseek web-device-%d", account.ID)))
 	b := sum[:16]
 	b[6] = (b[6] & 0x0f) | 0x40 // 版本 4
 	b[8] = (b[8] & 0x3f) | 0x80 // RFC4122 variant
@@ -537,7 +534,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 		bizCode, _ := webDeepseekEffectiveErrorCode(resp.StatusCode, respBody)
 		msg := webDeepseekUpstreamErrorMessage(respBody)
 		if msg == "" {
-			msg = "web-deepseek upstream returned a PoW challenge/validation error"
+			msg = "deepseek web upstream returned a PoW challenge/validation error"
 		}
 		setOpsUpstreamError(c, http.StatusForbidden, msg, "")
 		MarkResponseCommitted(c)
@@ -547,7 +544,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 				"message": msg,
 			},
 		})
-		return nil, fmt.Errorf("web-deepseek upstream PoW error (biz_code %d): %s", bizCode, msg)
+		return nil, fmt.Errorf("deepseek web upstream PoW error (biz_code %d): %s", bizCode, msg)
 	default:
 		if resp.StatusCode < http.StatusBadRequest {
 			resp.StatusCode = http.StatusBadGateway
@@ -555,7 +552,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekUpstreamError(
 	}
 	upstreamMsg := webDeepseekUpstreamErrorMessage(respBody)
 	if upstreamMsg == "" {
-		upstreamMsg = fmt.Sprintf("web-deepseek upstream returned status %d", resp.StatusCode)
+		upstreamMsg = fmt.Sprintf("deepseek web upstream returned status %d", resp.StatusCode)
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		ProxyID:            opsUpstreamProxyID(account),
@@ -954,7 +951,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("web-deepseek stream read: %w", err)
+		return nil, fmt.Errorf("deepseek web stream read: %w", err)
 	}
 
 	// 无任何内容帧：可能是 HTTP 200 裸 JSON 业务错误（08 §4）或不可识别结构；
@@ -970,7 +967,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 			return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, raw, upstreamModel)
 		}
 		return nil, errors.New(
-			"web-deepseek upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
+			"deepseek web upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
 	}
 
 	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。
@@ -1079,7 +1076,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("web-deepseek upstream response scan failed: %w", err)
+		return nil, fmt.Errorf("deepseek web upstream response scan failed: %w", err)
 	}
 
 	// 无任何内容帧：可能是纯 JSON 业务错误（HTTP 200）或不可识别结构。
@@ -1093,7 +1090,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 			return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, body, upstreamModel)
 		}
 		return nil, errors.New(
-			"web-deepseek upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
+			"deepseek web upstream returned an unrecognized non-stream response shape (logged-in capture required for extension)")
 	}
 
 	finalUsage := &OpenAIUsage{}

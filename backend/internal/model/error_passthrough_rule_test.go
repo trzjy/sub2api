@@ -17,8 +17,5 @@ func TestAllPlatformsIncludesEveryConcretePlatform(t *testing.T) {
 		"zhipu",
 		"deepseek",
 		"minimax",
-		"web-deepseek",
-		"web-zhipu",
-		"web-kimi",
 	}, AllPlatforms())
 }

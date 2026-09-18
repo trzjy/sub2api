@@ -86,7 +86,7 @@ type createSessionRequest struct {
 // CreateSession 创建一个网页登录捕获会话，返回 Token 与代理入口 URL。
 //
 //	POST /api/v1/admin/web-login-proxy/sessions
-//	body: {"platform":"web-zhipu"}
+//	body: {"platform":"zhipu"}
 func (h *WebLoginProxyHandler) CreateSession(c *gin.Context) {
 	var req createSessionRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.Platform == "" {

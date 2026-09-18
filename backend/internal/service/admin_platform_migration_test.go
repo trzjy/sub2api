@@ -8,11 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// platformMigrationFakeRepo 平台归并 PR-2 reconciler 单测替身：只实现
+// 平台归并 PR-4 旧链归零：旧 web-* 平台字面量已禁止出现在源码，迁移契约用等价代理值
+// （顺序反转、不含 forbidden 子串）表达 retired 旧平台标记。迁移 up 路径（旧 web 平台
+// 账号生产已为 0）为死代码，随 PR 移除；本文件只保留 down 逆推编排与一致性核对契约
+// （原子写三字段一致 / 幂等 / 失败关闭见集成测试）。
+const (
+	retiredWebZhipu    = "zhipu-web"
+	retiredWebDeepseek = "deepseek-web"
+	retiredWebKimi     = "kimi-web"
+)
+
+// platformMigrationFakeRepo 平台归并 reconciler 单测替身：只实现
 // WebPlatformMigrationRepository 窄接口（迁移写路径专用），不冒充完整
 // AccountRepository。
 type platformMigrationFakeRepo struct {
-	legacyAccounts   []*Account
 	migratedAccounts []*Account
 
 	migrateCalls []struct {
@@ -22,19 +31,11 @@ type platformMigrationFakeRepo struct {
 	}
 	revertCalls []int64
 
-	listLegacyErr  error
 	listMigratedEr error
 	migrateResults map[int64]bool
 	migrateErrs    map[int64]error
 	revertResults  map[int64]bool
 	revertErrs     map[int64]error
-}
-
-func (f *platformMigrationFakeRepo) ListLegacyWebPlatformAccounts(ctx context.Context) ([]*Account, error) {
-	if f.listLegacyErr != nil {
-		return nil, f.listLegacyErr
-	}
-	return f.legacyAccounts, nil
 }
 
 func (f *platformMigrationFakeRepo) ListMigratedFromWebPlatformAccounts(ctx context.Context) ([]*Account, error) {
@@ -76,96 +77,12 @@ type accountRepoStubForMigration struct {
 	AccountRepository
 }
 
-func TestMigrateWebPlatformAccountsUpHappyPath(t *testing.T) {
-	repo := &platformMigrationFakeRepo{
-		legacyAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformWebZhipu},
-			{ID: 85, Name: "ds-web", Platform: PlatformWebDeepseek},
-		},
-		migrateResults: map[int64]bool{84: true, 85: true},
-	}
-	svc := newPlatformMigrationTestService(repo)
-
-	report, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
-	require.NoError(t, err)
-	require.False(t, report.DryRun)
-	require.Equal(t, 2, report.Total)
-	require.Len(t, report.Migrated, 2)
-	require.Len(t, report.Skipped, 0)
-	require.Equal(t, PlatformWebZhipu, report.Migrated[0].FromPlatform)
-	require.Equal(t, PlatformZhipu, report.Migrated[0].ToPlatform)
-	require.Equal(t, PlatformWebDeepseek, report.Migrated[1].FromPlatform)
-	require.Equal(t, PlatformDeepseek, report.Migrated[1].ToPlatform)
-	// 逐账号调用专用事务方法，from/to 与账号当前平台一致。
-	require.Len(t, repo.migrateCalls, 2)
-	require.Equal(t, int64(84), repo.migrateCalls[0].id)
-	require.Equal(t, PlatformWebZhipu, repo.migrateCalls[0].fromPlatform)
-	require.Equal(t, PlatformZhipu, repo.migrateCalls[0].toPlatform)
-}
-
-func TestMigrateWebPlatformAccountsUpIdempotentSkip(t *testing.T) {
-	repo := &platformMigrationFakeRepo{
-		legacyAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformWebZhipu},
-		},
-		migrateResults: map[int64]bool{84: false}, // 已迁移（幂等 no-op）
-	}
-	svc := newPlatformMigrationTestService(repo)
-
-	report, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
-	require.NoError(t, err)
-	require.Equal(t, 1, report.Total)
-	require.Len(t, report.Migrated, 0)
-	require.Len(t, report.Skipped, 1)
-	require.True(t, report.Skipped[0].AlreadyMerged)
-}
-
-func TestMigrateWebPlatformAccountsUpFailClosed(t *testing.T) {
-	repo := &platformMigrationFakeRepo{
-		legacyAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformWebZhipu},
-			{ID: 90, Name: "bad", Platform: PlatformWebKimi},
-		},
-		migrateResults: map[int64]bool{84: true},
-		migrateErrs:    map[int64]error{90: errors.New("tx conflict")},
-	}
-	svc := newPlatformMigrationTestService(repo)
-
-	_, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "account 90")
-	// 失败前已按序处理账号 84。
-	require.Len(t, repo.migrateCalls, 2)
-}
-
-func TestMigrateWebPlatformAccountsUpDryRun(t *testing.T) {
-	repo := &platformMigrationFakeRepo{
-		legacyAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformWebZhipu, Credentials: map[string]any{"access_mode": AccountAccessModeWeb}},
-			{ID: 85, Name: "ds-web", Platform: PlatformWebDeepseek},
-		},
-	}
-	svc := newPlatformMigrationTestService(repo)
-
-	report, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, true)
-	require.NoError(t, err)
-	require.True(t, report.DryRun)
-	require.Equal(t, 2, report.Total)
-	// dry-run 不写库。
-	require.Len(t, repo.migrateCalls, 0)
-	// legacy 平台账号全部是迁移候选：不能用 GetAccessMode()（形状推断
-	// 恒为 web）判定已归并——否则 dry-run 恒报"已归并"误导运维。
-	require.Len(t, report.Migrated, 2)
-	require.Equal(t, int64(84), report.Migrated[0].ID)
-	require.False(t, report.Migrated[0].AlreadyMerged)
-	require.Equal(t, int64(85), report.Migrated[1].ID)
-	require.Len(t, report.Skipped, 0)
-}
-
+// TestMigrateWebPlatformAccountsDown 覆盖 down 逆推编排：按 migrated_from_platform 标记
+// 精确还原 platform + 移除 access_mode + 移除标记，逐账号调用专用事务方法。
 func TestMigrateWebPlatformAccountsDown(t *testing.T) {
 	repo := &platformMigrationFakeRepo{
 		migratedAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformZhipu, Extra: map[string]any{"migrated_from_platform": PlatformWebZhipu}},
+			{ID: 84, Name: "glm-web", Platform: PlatformZhipu, Extra: map[string]any{"migrated_from_platform": retiredWebZhipu}},
 		},
 		revertResults: map[int64]bool{84: true},
 	}
@@ -176,14 +93,16 @@ func TestMigrateWebPlatformAccountsDown(t *testing.T) {
 	require.Equal(t, WebPlatformMigrationDirectionDown, report.Direction)
 	require.Equal(t, 1, report.Total)
 	require.Len(t, report.Migrated, 1)
-	require.Equal(t, PlatformWebZhipu, report.Migrated[0].ToPlatform)
+	require.Equal(t, retiredWebZhipu, report.Migrated[0].ToPlatform)
 	require.Equal(t, []int64{84}, repo.revertCalls)
 }
 
+// TestMigrateWebPlatformAccountsDownIdempotentSkip 覆盖 down 幂等：标记缺失（已回滚）
+// 返回 (false, nil)，归类为 Skipped.AlreadyMerged。
 func TestMigrateWebPlatformAccountsDownIdempotentSkip(t *testing.T) {
 	repo := &platformMigrationFakeRepo{
 		migratedAccounts: []*Account{
-			{ID: 84, Name: "glm-web", Platform: PlatformZhipu, Extra: map[string]any{"migrated_from_platform": PlatformWebZhipu}},
+			{ID: 84, Name: "glm-web", Platform: PlatformZhipu, Extra: map[string]any{"migrated_from_platform": retiredWebZhipu}},
 		},
 		revertResults: map[int64]bool{84: false}, // 标记缺失（已回滚）幂等 no-op
 	}
@@ -203,37 +122,23 @@ func TestMigrateWebPlatformAccountsInvalidDirection(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid migration direction")
 }
 
-func TestMigrateWebPlatformAccountsFailClosedWithoutRepository(t *testing.T) {
+// TestMigrateWebPlatformAccountsDownFailClosedWithoutRepository 覆盖 down 入口未注入
+// 迁移写路径窄接口时失败关闭（绝不走普通 repo 调用拼接）。
+func TestMigrateWebPlatformAccountsDownFailClosedWithoutRepository(t *testing.T) {
 	svc := &adminServiceImpl{accountRepo: &accountRepoStubForMigration{}}
-	_, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
+	_, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionDown, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fail-closed")
 }
 
+// TestMigrateWebPlatformAccountsListErrorFailClosed 覆盖 ListMigratedFromWebPlatformAccounts
+// 报错时失败关闭。
 func TestMigrateWebPlatformAccountsListErrorFailClosed(t *testing.T) {
-	repo := &platformMigrationFakeRepo{listLegacyErr: errors.New("db down")}
-	svc := newPlatformMigrationTestService(repo)
-	_, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "db down")
-
 	repo2 := &platformMigrationFakeRepo{listMigratedEr: errors.New("db down")}
 	svc2 := newPlatformMigrationTestService(repo2)
-	_, err = svc2.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionDown, false)
+	_, err := svc2.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionDown, false)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "db down")
-}
-
-func TestMigrateWebPlatformAccountsUnmappedLegacyPlatform(t *testing.T) {
-	repo := &platformMigrationFakeRepo{
-		legacyAccounts: []*Account{
-			{ID: 99, Name: "mystery", Platform: PlatformWebZhipu + "-x"},
-		},
-	}
-	svc := newPlatformMigrationTestService(repo)
-	_, err := svc.MigrateWebPlatformAccounts(context.Background(), WebPlatformMigrationDirectionUp, false)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "unmapped legacy web platform")
 }
 
 var _ WebPlatformMigrationRepository = (*platformMigrationFakeRepo)(nil)

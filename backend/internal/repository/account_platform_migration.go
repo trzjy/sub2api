@@ -24,41 +24,17 @@ const migratedFromPlatformExtraKey = "migrated_from_platform"
 // accessModeCredentialKey 与 service 层 GetAccessMode 读取的键一致。
 const accessModeCredentialKey = "access_mode"
 
-// LegacyWebPlatformValues PR-1 兼容期仍存在的 web-* 旧平台值。
-var LegacyWebPlatformValues = []string{
-	string(service.PlatformWebZhipu),
-	string(service.PlatformWebDeepseek),
-	string(service.PlatformWebKimi),
-}
-
-// ListLegacyWebPlatformAccounts 返回仍挂在 web-* 旧平台上的未删除账号。
-func (r *accountRepository) ListLegacyWebPlatformAccounts(ctx context.Context) ([]*service.Account, error) {
-	ids, err := r.listMigrationCandidateIDs(ctx, `
-		SELECT id
-		FROM accounts
-		WHERE platform IN ($1, $2, $3) AND deleted_at IS NULL
-		ORDER BY id
-	`, LegacyWebPlatformValues[0], LegacyWebPlatformValues[1], LegacyWebPlatformValues[2])
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	return r.GetByIDs(ctx, ids)
-}
-
 // ListMigratedFromWebPlatformAccounts 返回已迁移（extra 带 migrated_from_platform 标记）
-// 且当前已落在官方平台上的账号，供 down 逆推与一致性核对。
+// 的账号，供 down 逆推与一致性核对。PR-4 旧链归零后不再按 platform 守卫（web-* 旧平台
+// 已退役，down 严格按 migrated_from_platform 标记精确逆推，方案 §7）。
 func (r *accountRepository) ListMigratedFromWebPlatformAccounts(ctx context.Context) ([]*service.Account, error) {
 	ids, err := r.listMigrationCandidateIDs(ctx, `
 		SELECT id
 		FROM accounts
 		WHERE extra ? $1
-		  AND platform NOT IN ($2, $3, $4)
 		  AND deleted_at IS NULL
 		ORDER BY id
-	`, migratedFromPlatformExtraKey, LegacyWebPlatformValues[0], LegacyWebPlatformValues[1], LegacyWebPlatformValues[2])
+	`, migratedFromPlatformExtraKey)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +61,9 @@ func (r *accountRepository) listMigrationCandidateIDs(ctx context.Context, query
 	return ids, rows.Err()
 }
 
-// MigrateAccountPlatform 把单个 web-* 旧平台账号迁移到官方平台（up，逐账号单事务）。
+// MigrateAccountPlatform 把单个账号迁移到目标官方平台并显式化 access_mode=web
+// （up，逐账号单事务）。PR-4 旧链归零后旧 web-* 平台已退役，本方法作为三字段原子写
+// 原语保留（平台归并一致性 / 幂等 / 失败关闭的单测与集成验证仍依赖它）。
 // 单事务内完成：platform → 官方值、credentials["access_mode"]="web"（经既有凭证
 // 写路径重算 MAC）、extra["migrated_from_platform"]=旧平台值、scheduler outbox 入队。
 // 幂等：已迁移（platform=官方值且标记存在）返回 (false, nil)；platform 与

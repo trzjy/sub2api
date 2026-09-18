@@ -39,6 +39,24 @@ export function isWebProviderPlatform(platform: string): platform is WebProvider
   return (WEB_PROVIDER_PLATFORMS as readonly string[]).includes(platform)
 }
 
+/**
+ * 单一事实源：账号是否为"网页接入"账号。
+ * 平台归并（PR-3）后 web 接入不再等价于"平台是 kimi/zhipu/deepseek"——普通 API
+ * 账号可与 web 账号同平台共存，必须再校验 credentials.access_mode === "web"。
+ * 登录状态徽标、批量 Web 操作/导出等所有 web 专属 UI 一律走本判定，避免各处
+ * 各写一遍导致漏判。
+ */
+export function isWebAccessAccount(account: {
+  platform?: string
+  credentials?: Record<string, unknown> | null
+}): boolean {
+  return (
+    !!account.platform &&
+    isWebProviderPlatform(account.platform) &&
+    account.credentials?.access_mode === 'web'
+  )
+}
+
 // ===== 上游倍率自动探测（upstream billing probe）平台资格 =====
 // 与后端 IsUpstreamBillingProbeIdentity（backend/internal/service/upstream_billing_probe.go）
 // 保持同一白名单：仅这些平台的 apikey 账号持有可对上游 /v1/sub2api/billing 探测的

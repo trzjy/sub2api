@@ -11,10 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Task B：管理端入口按接入模式放行 web 凭证预校验（官方平台 + access_mode=web 组合生效，
-// 旧 web-* 平台值保持兼容，方案 §5.5）。
+// Task B：管理端入口按接入模式放行 web 凭证预校验（官方平台 + access_mode=web 组合生效，方案 §5.5）。
 
-func TestTaskBValidateWebCredentials_AcceptsOfficialPlatformWebMode(t *testing.T) {
+func TestTaskBValidateWebCredentials_AcceptsOfficialWebAccessMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	// 官方 zhipu + access_mode=web + cookie：放行。
@@ -37,17 +36,6 @@ func TestTaskBValidateWebCredentials_AcceptsOfficialPlatformWebMode(t *testing.T
 			strings.NewReader(`{"platform":"kimi","credentials":{"access_mode":"web","access_token":"at"}}`))
 		h.ValidateWebCredentials(c)
 		require.Equal(t, http.StatusOK, rec.Code, "official kimi + web mode accepted")
-	}
-
-	// 旧 web-zhipu 平台值仍兼容。
-	{
-		h := &AccountHandler{}
-		rec := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(rec)
-		c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/validate-web-credentials",
-			strings.NewReader(`{"platform":"web-zhipu","credentials":{"cookie":"c"}}`))
-		h.ValidateWebCredentials(c)
-		require.Equal(t, http.StatusOK, rec.Code, "legacy web-zhipu still accepted")
 	}
 
 	// 官方 zhipu 无 access_mode=web（api 账号）走 /v1/models 而非 web 预校验：拒绝（非 web 平台）。

@@ -20,7 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// web-kimi 网页逆向适配器（方案 W2，docs/web-reverse-embedded-login-plan.md §4.3、
+// kimi web 网页逆向适配器（方案 W2，docs/web-reverse-embedded-login-plan.md §4.3、
 // docs/web-reverse-analysis-plan.md §1.3/§3.3/§3.4）。
 //
 // 协议状态声明（权威来源：登录态实测 10-kimi-logged-in-probe.md，2026-09-18）：
@@ -57,19 +57,16 @@ const (
 	webKimiClientUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-// forwardWebKimi 是 Kimi 网页逆向平台（web-kimi）的转发入口，函数链模式与
+// forwardWebKimi 是 Kimi 网页逆向平台（kimi web）的转发入口，函数链模式与
 // forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → Connect
-// RPC 请求 → 回程通用解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService.Forward
-// 的 platform 分支按 PlatformWebKimi 分发（分发注册由共享注册点接线任务完成）。
-// assertWebKimiAccount 是 forwardWebKimi 入口的双断言 fail-closed（隔离红线 §6）：旧
-// web-kimi 平台（平台本身即判定），或新形态官方 kimi 平台 + web access mode 双断言。API
-// 模式 kimi 账号绝不进入网页协议链，web 模式 zhipu/deepseek 账号绝不误入。
+// RPC 请求 → 回程通用解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService 转发链的
+// isWebKimiAccount 断言分发。
+// assertWebKimiAccount 是 forwardWebKimi 入口的双断言 fail-closed（隔离红线 §6）：官方
+// kimi 平台 + web access mode 双断言（平台归并后唯一形态，PR-4）。API 模式 kimi 账号
+// 绝不进入网页协议链，web 模式 zhipu/deepseek 账号绝不误入。
 func assertWebKimiAccount(account *Account) error {
 	if account == nil {
 		return fmt.Errorf("forwardWebKimi requires a non-nil account")
-	}
-	if account.Platform == PlatformWebKimi {
-		return nil // 旧平台兼容
 	}
 	if account.IsWebAccessMode() && account.IsKimi() {
 		return nil
@@ -96,13 +93,13 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 
 	accessToken := strings.TrimSpace(account.GetCredential("access_token"))
 	if accessToken == "" {
-		return nil, errors.New("web-kimi account is missing access_token credential")
+		return nil, errors.New("kimi web account is missing access_token credential")
 	}
 
 	// base_url 统一走 account.GetWebBaseURL()（覆盖优先 → 平台默认），避免内联重复实现漂移。
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	if baseURL == "" {
-		return nil, fmt.Errorf("web-kimi account has no base_url (platform %s)", account.Platform)
+		return nil, fmt.Errorf("kimi web account has no base_url (platform %s)", account.Platform)
 	}
 
 	// 模型映射：account.GetModelMapping() 默认透传（GetMappedModel 未命中即原样返回），
@@ -116,7 +113,7 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 
 	prompt := webKimiExtractPrompt(body)
 	if strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("web-kimi requires at least one user message in the request")
+		return nil, errors.New("kimi web requires at least one user message in the request")
 	}
 	upstreamBody := buildWebKimiRequestBody(prompt, webModel, account)
 
@@ -406,7 +403,7 @@ func (s *OpenAIGatewayService) refreshWebKimiAccessToken(ctx context.Context, ac
 	}
 	if persistErr := persistAccountCredentials(ctx, s.accountRepo, account, credentials); persistErr != nil {
 		// 持久化失败不阻断本次转发（已拿到新 token 可继续重试），仅脱敏告警。
-		slog.Warn("web-kimi refresh succeeded but credential persist failed",
+		slog.Warn("kimi web refresh succeeded but credential persist failed",
 			"account_id", account.ID, "error", persistErr.Error())
 	}
 	return newAccessToken
@@ -468,7 +465,7 @@ func (s *OpenAIGatewayService) handleWebKimiUpstreamError(
 	}
 	upstreamMsg := webKimiUpstreamErrorMessage(respBody)
 	if upstreamMsg == "" {
-		upstreamMsg = fmt.Sprintf("web-kimi upstream returned status %d", resp.StatusCode)
+		upstreamMsg = fmt.Sprintf("kimi web upstream returned status %d", resp.StatusCode)
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		ProxyID:            opsUpstreamProxyID(account),
@@ -710,7 +707,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	for {
 		payload, more, err := readWebKimiConnectEnvelope(reader)
 		if err != nil {
-			return nil, fmt.Errorf("web-kimi stream read: %w", err)
+			return nil, fmt.Errorf("kimi web stream read: %w", err)
 		}
 		if !more {
 			break
@@ -843,7 +840,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	for {
 		payload, more, rerr := readWebKimiConnectEnvelope(reader)
 		if rerr != nil {
-			return nil, fmt.Errorf("web-kimi upstream response read: %w", rerr)
+			return nil, fmt.Errorf("kimi web upstream response read: %w", rerr)
 		}
 		if !more {
 			break
@@ -886,7 +883,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 		}
 		if content == "" && resp.StatusCode < 400 {
 			return nil, errors.New(
-				"web-kimi upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
+				"kimi web upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
 		}
 		textAggregated.WriteString(content)
 		if id := strings.TrimSpace(gjson.GetBytes(body, "id").String()); id != "" {
@@ -897,7 +894,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 	text := strings.TrimSpace(textAggregated.String())
 	if text == "" && resp.StatusCode < 400 {
 		return nil, errors.New(
-			"web-kimi upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
+			"kimi web upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
 	}
 
 	finalUsage := usage

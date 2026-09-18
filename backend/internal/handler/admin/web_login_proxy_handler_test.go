@@ -90,7 +90,7 @@ func TestProxy_HeaderStrippedAndCookieCaptured(t *testing.T) {
 	srv := newProxyServer(h)
 	defer srv.Close()
 
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 捕获日志输出，断言不出现 cookie 值。
@@ -151,7 +151,7 @@ func TestProxy_NoLogOfCookie(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	var logBuf bytes.Buffer
@@ -181,7 +181,7 @@ func TestProxy_HTMLRewrite(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
@@ -219,7 +219,7 @@ func TestProxy_HTMLRewriteGzipBody(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := http.Get(srv.URL+"/api/v1/web-login-proxy/"+token+"/", )
@@ -253,7 +253,7 @@ func TestProxy_MethodNotAllowed(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
@@ -277,7 +277,7 @@ func TestProxy_RedirectRewrite(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := noFollowClient().Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/start")
@@ -303,7 +303,7 @@ func TestProxy_RedirectNonAllowlistBlocked(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := noFollowClient().Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/start")
@@ -336,7 +336,7 @@ func TestCreateSession_Validation(t *testing.T) {
 
 	// 合法平台 → 200，返回 token/url/expires_at。
 	w = httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/admin/web-login-proxy/sessions", strings.NewReader(`{"platform":"web-zhipu"}`)))
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/admin/web-login-proxy/sessions", strings.NewReader(`{"platform":"zhipu"}`)))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var resp struct {
@@ -360,7 +360,7 @@ func TestGetCapture_AfterCapture(t *testing.T) {
 	r := gin.New()
 	r.GET("/api/v1/admin/web-login-proxy/sessions/:token/capture", h.GetCapture)
 
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 捕获前：captured=false。
@@ -415,7 +415,7 @@ func TestKimi_NoCapture(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-kimi")
+	token, _, err := store.Create("kimi")
 	require.NoError(t, err)
 
 	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
@@ -444,7 +444,7 @@ func TestProxy_DoesNotForwardSiteCookie(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
@@ -472,7 +472,7 @@ func TestProxy_DoesNotCaptureSiteCookie(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
@@ -509,7 +509,7 @@ func TestProxy_AccumulatesUpstreamCookies(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	for i := 0; i < 2; i++ {
@@ -554,7 +554,7 @@ func TestProxyRoot_RootPathViaCookie(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyRootServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 1) 首次 GET token 路由，拿到 Set-Cookie wlp_session。
@@ -592,7 +592,7 @@ func TestProxyRoot_MissingOrInvalidCookieGone(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyRootServer(h)
 	defer srv.Close()
-	_, _, err := store.Create("web-zhipu")
+	_, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 无 Cookie。
@@ -627,7 +627,7 @@ func TestProxyRoot_SessionCookieAttributes(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyRootServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/")
@@ -665,7 +665,7 @@ func TestProxyRoot_SessionCookieNotCaptured(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyRootServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	// 预置捕获串混入 wlp_session（模拟其意外进入），验证捕获时被剥离。
@@ -699,7 +699,7 @@ func TestProxyRoot_StillServesTokenRoute(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyRootServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	resp, err := http.Get(srv.URL + "/api/v1/web-login-proxy/" + token + "/dashboard")
@@ -729,7 +729,7 @@ func TestProxy_CapturesInboundAllowedCookies(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
@@ -769,7 +769,7 @@ func TestProxy_ForwardsOnlyAllowedInboundCookies(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/dashboard", nil)
@@ -804,7 +804,7 @@ func TestProxy_InboundAllowedOverridesStored(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-zhipu")
+	token, _, err := store.Create("zhipu")
 	require.NoError(t, err)
 	store.SetCookie(token, "chatglm_token=old")
 
@@ -839,7 +839,7 @@ func TestProxy_KimiNeverCapturesInboundCookie(t *testing.T) {
 	h := admin.NewWebLoginProxyHandler(store)
 	srv := newProxyServer(h)
 	defer srv.Close()
-	token, _, err := store.Create("web-kimi")
+	token, _, err := store.Create("kimi")
 	require.NoError(t, err)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/web-login-proxy/"+token+"/chat", nil)

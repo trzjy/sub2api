@@ -317,7 +317,7 @@ export default {
       },
       webProviders: {
         platforms: {
-          webDeepseek: 'DeepSeek 网页版',
+          deepseek: 'DeepSeek 网页版',
           zhipu: '智谱 GLM 网页版',
           kimi: 'Kimi 网页版',
         },

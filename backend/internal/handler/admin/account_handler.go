@@ -68,6 +68,14 @@ type AccountHandler struct {
 	ollamaCloudUsage        *service.OllamaCloudUsageService
 	codeBuddyRefresher      codeBuddyAccountRefresher
 	cfg                     *config.Config
+
+	// webPlatformAutoLogin 是网页版平台自动登录服务（由并行任务实现并注入）。
+	// 以本地接口类型持有，便于在测试中替换为 mock。
+	webPlatformAutoLogin webPlatformAutoLoginService
+	// webLoginSessionStore 是半自动登录（短信码）会话存储，仅内存、重启失效。
+	webLoginSessionStore webLoginSessionStore
+	// webAutoLoginStarted 保证自动登录服务 lazy Start 幂等。
+	webAutoLoginStarted sync.Once
 }
 
 // codeBuddyAccountRefresher 是管理端账号「刷新」动作所需的 CodeBuddy 能力，
@@ -91,6 +99,36 @@ func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUs
 // 避免改动 ProvideAdminHandlers 的参数列表与 wire_gen 手工同步）。
 func (h *AccountHandler) SetCodeBuddyAccountRefresher(r codeBuddyAccountRefresher) {
 	h.codeBuddyRefresher = r
+}
+
+// SetWebPlatformAutoLoginService 注入网页版平台自动登录服务（由并行任务实现）。
+// 以 *service.WebPlatformAutoLoginService 注入，因它实现了本包的本地接口
+// webPlatformAutoLoginService。
+func (h *AccountHandler) SetWebPlatformAutoLoginService(s *service.WebPlatformAutoLoginService) {
+	h.webPlatformAutoLogin = s
+}
+
+// SetWebLoginSessionStore 注入半自动登录（短信码）会话存储。
+func (h *AccountHandler) SetWebLoginSessionStore(s webLoginSessionStore) {
+	h.webLoginSessionStore = s
+}
+
+// ensureWebAutoLoginStarted 幂等地随首个请求 lazy 启动自动登录服务。
+func (h *AccountHandler) ensureWebAutoLoginStarted() {
+	if h == nil || h.webPlatformAutoLogin == nil {
+		return
+	}
+	h.webAutoLoginStarted.Do(func() {
+		h.webPlatformAutoLogin.Start(context.Background())
+	})
+}
+
+// webLoginSessions 返回当前生效的会话存储；未注入时使用包级默认单例。
+func (h *AccountHandler) webLoginSessions() webLoginSessionStore {
+	if h != nil && h.webLoginSessionStore != nil {
+		return h.webLoginSessionStore
+	}
+	return defaultWebLoginSessionStore
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
@@ -1304,11 +1342,13 @@ func (h *AccountHandler) ValidateWebCredentials(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	// 平台归并：除旧 web-* 平台值外，官方平台（zhipu/deepseek/kimi）+ access_mode=web
-	// 组合也允许预校验（方案 §5.5）。
+	// 平台归并后 web-* 平台已退役，网页接入 = 官方平台（deepseek/zhipu/kimi）
+	// + credentials.access_mode == "web"（方案 §5.5 / web-platform-account-pool-
+	// auto-login-plan.md）。严格语义：当且仅当官方平台且 access_mode(trim)=="web"
+	// 时才放行；普通 API 账号（无论是否带 access_mode）一律 400。
 	mode, _ := req.Credentials["access_mode"].(string)
-	if !service.IsWebProvider(req.Platform) && strings.TrimSpace(mode) != service.AccountAccessModeWeb {
-		response.BadRequest(c, "platform "+req.Platform+" is not a web provider")
+	if !service.IsWebLoginPlatform(req.Platform) || strings.TrimSpace(mode) != service.AccountAccessModeWeb {
+		response.BadRequest(c, "platform "+req.Platform+" is not a web provider (requires access_mode=web)")
 		return
 	}
 	if err := service.ValidateWebAccountCredential(req.Platform, service.AccountTypeAPIKey, req.Credentials); err != nil {
@@ -3086,13 +3126,13 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	}
 	// 网页逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）：空 model_mapping
 	// 时回落到平台默认模型目录（方案 §3.3 映射表），而非误回落到 Claude 默认模型。
-	// 按账号接入模式判定（取代 IsWebProvider(platform)，方案 §2.4 红线）。
+	// 按账号接入模式判定（取代旧平台值判定，方案 §2.4 红线）。
 	if account.IsWebAccessMode() {
 		webPlatform := account.Platform
 		if mapped := service.WebModelCatalogPlatform(account.Platform); mapped != "" {
 			webPlatform = mapped
 		}
-		webIDs := service.DefaultWebModelIDs(webPlatform)
+		webIDs := service.DefaultWebModelIDs(webPlatform, service.AccountAccessModeWeb)
 		webModels := make([]claude.Model, 0, len(webIDs))
 		for _, id := range webIDs {
 			webModels = append(webModels, claude.Model{ID: id, Type: "model", DisplayName: id})

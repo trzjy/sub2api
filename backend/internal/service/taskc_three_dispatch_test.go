@@ -12,14 +12,9 @@ import (
 
 // --- 测试账号构造：平台归并后官方平台 + access_mode 维度 ---
 
-// taskcWebZhipuNew: 官方 zhipu 平台 + 显式 access_mode=web（归并后新形态）。
+// taskcWebZhipuNew: 官方 zhipu 平台 + 显式 access_mode=web（归并后唯一形态）。
 func taskcWebZhipuNew() *Account {
 	return &Account{Platform: PlatformZhipu, Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "chatglm_token=x"}}
-}
-
-// taskcWebZhipuOld: 旧 web-zhipu 平台常量 + cookie（形状推断兜底，迁移前兼容读取）。
-func taskcWebZhipuOld() *Account {
-	return &Account{Platform: PlatformWebZhipu, Credentials: map[string]any{"cookie": "chatglm_token=x"}}
 }
 
 // taskcAPIZhipu: 官方 zhipu 平台 API 模式（无 access_mode、无 cookie）→ 走 CN API forwarder。
@@ -46,7 +41,6 @@ func taskcAPIKimi() *Account {
 func TestTaskC_ThreeDispatchPredicates(t *testing.T) {
 	// zhipu 维度
 	require.True(t, isWebZhipuAccount(taskcWebZhipuNew()), "new zhipu+web must dispatch to forwardWebZhipu")
-	require.True(t, isWebZhipuAccount(taskcWebZhipuOld()), "legacy web-zhipu must dispatch to forwardWebZhipu")
 	require.False(t, isWebZhipuAccount(taskcAPIZhipu()), "API zhipu must NOT enter forwardWebZhipu")
 	require.False(t, isWebZhipuAccount(taskcWebDeepseekNew()), "web deepseek must NOT enter forwardWebZhipu")
 
@@ -61,20 +55,19 @@ func TestTaskC_ThreeDispatchPredicates(t *testing.T) {
 	require.False(t, isWebKimiAccount(taskcWebDeepseekNew()), "web deepseek must NOT enter forwardWebKimi")
 }
 
-// TestTaskC_WebReverseAccountUnion 锁定兼容并集判定：旧 web-* 平台或官方平台 + web
-// access mode 均命中 isWebReverseAccount（/v1/messages 分派口径）。
+// TestTaskC_WebReverseAccountUnion 锁定兼容并集判定：官方平台 + web access mode 命中
+// isWebReverseAccount（/v1/messages 分派口径）。
 func TestTaskC_WebReverseAccountUnion(t *testing.T) {
 	require.True(t, isWebReverseAccount(taskcWebZhipuNew()))
-	require.True(t, isWebReverseAccount(taskcWebZhipuOld()))
 	require.True(t, isWebReverseAccount(taskcWebDeepseekNew()))
 	require.True(t, isWebReverseAccount(taskcWebKimiNew()))
 	require.False(t, isWebReverseAccount(taskcAPIZhipu()))
 	require.False(t, isWebReverseAccount(taskcAPIDeepseek()))
 	require.False(t, isWebReverseAccount(taskcAPIKimi()))
-	// 归一键：官方平台 + web 取对应 web-* 键。
-	require.Equal(t, PlatformWebZhipu, webProviderKeyForAccount(taskcWebZhipuNew()))
-	require.Equal(t, PlatformWebDeepseek, webProviderKeyForAccount(taskcWebDeepseekNew()))
-	require.Equal(t, PlatformWebKimi, webProviderKeyForAccount(taskcWebKimiNew()))
+	// 归一键：官方平台 + web 取对应官方平台键。
+	require.Equal(t, PlatformZhipu, webProviderKeyForAccount(taskcWebZhipuNew()))
+	require.Equal(t, PlatformDeepseek, webProviderKeyForAccount(taskcWebDeepseekNew()))
+	require.Equal(t, PlatformKimi, webProviderKeyForAccount(taskcWebKimiNew()))
 }
 
 // TestTaskC_WebZhipuDoubleAssertion 锁定 forwardWebZhipu 入口双断言 fail-closed（隔离红线 §6）：
@@ -90,9 +83,8 @@ func TestTaskC_WebZhipuDoubleAssertion(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "zhipu platform")
 
-	// web 模式 zhipu（新/旧）双断言通过。
+	// web 模式 zhipu（官方平台 + web）双断言通过。
 	require.NoError(t, assertWebZhipuAccount(taskcWebZhipuNew()))
-	require.NoError(t, assertWebZhipuAccount(taskcWebZhipuOld()))
 
 	// nil 账号。
 	require.Error(t, assertWebZhipuAccount(nil))
@@ -150,8 +142,8 @@ func TestTaskC_WebZhipuUnknownModelFailClosed(t *testing.T) {
 
 	svc := &OpenAIGatewayService{}
 	acct := &Account{
-		Platform:    PlatformWebZhipu,
-		Credentials: map[string]any{"cookie": "chatglm_token=x", "base_url": "https://chatglm.cn"},
+		Platform:    PlatformZhipu,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "chatglm_token=x", "base_url": "https://chatglm.cn"},
 	}
 	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
 	_, err := svc.forwardWebZhipu(context.Background(), c, acct, body, "gpt-4", false, time.Now(), webResponseModeChat)

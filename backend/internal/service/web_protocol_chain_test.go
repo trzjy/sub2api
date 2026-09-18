@@ -35,19 +35,19 @@ func TestEstimateTokenCountMixedScript(t *testing.T) {
 // --- C6: 网页逆向平台默认模型目录（共享常量表） ---
 
 func TestDefaultWebModelIDs(t *testing.T) {
-	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformWebDeepseek))
-	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformWebKimi))
+	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))
+	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb))
 	require.Nil(t, DefaultWebModelIDs(PlatformOpenAI))
 
-	// PlatformWebZhipu 默认目录（2026-09-17 官网登录态抓包实测：请求体
+	// PlatformZhipu 默认目录（2026-09-17 官网登录态抓包实测：请求体
 	// meta_data.selected_model 原值 glm-5.3-flash）。本测试仅为当前实现的证据，
 	// 不是模型目录的权威来源；防误回落到 Claude 默认模型的保护必须保留。
-	zhipu := DefaultWebModelIDs(PlatformWebZhipu)
-	require.NotEmpty(t, zhipu, "web-zhipu 应有非空默认目录，而非回落为 nil")
+	zhipu := DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb)
+	require.NotEmpty(t, zhipu, "zhipu web 应有非空默认目录，而非回落为 nil")
 	require.Equal(t, []string{"glm-5.3-flash"}, zhipu, "实测目录：glm-5.3-flash")
 	for _, m := range zhipu {
 		require.NotContains(t, []string{"claude-3-5-sonnet", "claude-3-7-sonnet", "claude-sonnet-4"}, m,
-			"web-zhipu 目录不得误回落到 Claude 默认模型")
+			"zhipu web 目录不得误回落到 Claude 默认模型")
 	}
 }
 
@@ -69,7 +69,7 @@ func TestNormalizeWebRequestBodyForAdapter(t *testing.T) {
 	require.NotContains(t, string(out), `"input"`)
 }
 
-// --- D1: web-kimi 刷新成功后把新 token 持久化到账号凭据 ---
+// --- D1: kimi 网页刷新成功后把新 token 持久化到账号凭据 ---
 
 type kimiRefreshRepoStub struct {
 	AccountRepository // 嵌入接口：其余方法提升为 nil（本测试不调用）
@@ -94,8 +94,9 @@ func refreshResponse(code int, body string) *http.Response {
 func TestRefreshWebKimiAccessTokenPersistsCredentials(t *testing.T) {
 	account := &Account{
 		ID:       9901,
-		Platform: PlatformWebKimi,
+		Platform: PlatformKimi,
 		Credentials: map[string]any{
+			"access_mode":  AccountAccessModeWeb,
 			"refresh_token": "old-refresh",
 			"access_token":  "old-access",
 		},
@@ -117,8 +118,9 @@ func TestRefreshWebKimiAccessTokenPersistsCredentials(t *testing.T) {
 func TestRefreshWebKimiAccessTokenNoPersistOnFailure(t *testing.T) {
 	account := &Account{
 		ID:       9902,
-		Platform: PlatformWebKimi,
+		Platform: PlatformKimi,
 		Credentials: map[string]any{
+			"access_mode":  AccountAccessModeWeb,
 			"refresh_token": "old-refresh",
 		},
 	}
@@ -180,9 +182,10 @@ func runWebProbe(t *testing.T, account *Account, resp *http.Response) string {
 func TestTestWebAccountConnection_WebDeepseekProbeSuccess(t *testing.T) {
 	account := &Account{
 		ID:       9911,
-		Platform: PlatformWebDeepseek,
+		Platform: PlatformDeepseek,
 		Credentials: map[string]any{
-			"cookie": "ds_session_id=sess; HWWAFSESID=waf",
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "ds_session_id=sess; HWWAFSESID=waf",
 		},
 	}
 	body := runWebProbeWithResponses(t, account,
@@ -198,9 +201,10 @@ func TestTestWebAccountConnection_WebDeepseekProbeSuccess(t *testing.T) {
 func TestTestWebAccountConnection_WebDeepseekProbeInvalidCredential(t *testing.T) {
 	account := &Account{
 		ID:       9912,
-		Platform: PlatformWebDeepseek,
+		Platform: PlatformDeepseek,
 		Credentials: map[string]any{
-			"cookie": "ds_session_id=sess; HWWAFSESID=waf",
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "ds_session_id=sess; HWWAFSESID=waf",
 		},
 	}
 	body := runWebProbeWithResponses(t, account,
@@ -216,8 +220,9 @@ func TestTestWebAccountConnection_WebDeepseekProbeInvalidCredential(t *testing.T
 func TestTestWebAccountConnection_WebKimiProbeSuccess(t *testing.T) {
 	account := &Account{
 		ID:       9913,
-		Platform: PlatformWebKimi,
+		Platform: PlatformKimi,
 		Credentials: map[string]any{
+			"access_mode":  AccountAccessModeWeb,
 			"access_token": "kimi-tok",
 		},
 	}

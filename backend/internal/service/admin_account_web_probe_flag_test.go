@@ -8,8 +8,8 @@ import (
 )
 
 // 以下测试锁定账号创建链路上 upstream_billing_probe_enabled 契约：
-// 网页逆向平台（web-zhipu / web-deepseek / web-kimi）与通用 other 上游
-// 不在计费探测资格名单内（见 IsUpstreamBillingProbeIdentity）。管理端即便在
+// 网页逆向平台（官方 zhipu / deepseek / kimi + access_mode=web）与通用 other 上游
+// 不在计费探测资格名单内（见 IsUpstreamBillingProbeIdentity / isUpstreamBillingProbeAccount）。管理端即便在
 // 创建请求里显式打开 ProbeEnabled=true，也必须被 fail-closed 拒绝，而不是
 // 静默写入无法服务的探测开关。资格平台（OpenAI/Anthropic/...）的创建探测契约
 // 由同包内 TestCreateAccountAcceptsDedicatedUpstreamBillingProbeSetting 覆盖。
@@ -24,22 +24,22 @@ func TestCreateAccountWebPlatformProbeFlagContract(t *testing.T) {
 		credentials map[string]any
 	}{
 		{
-			// web-zhipu：整串 Cookie 作为静态登录态凭证。
-			name:        "web-zhipu cookie",
-			platform:    PlatformWebZhipu,
-			credentials: map[string]any{"cookie": "sessionid=test-cookie"},
+			// zhipu web：整串 Cookie 作为静态登录态凭证。
+			name:        "zhipu web cookie",
+			platform:    PlatformZhipu,
+			credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=test-cookie"},
 		},
 		{
-			// web-deepseek：与 zhipu 同为整串 Cookie 准入口径。
-			name:        "web-deepseek cookie",
-			platform:    PlatformWebDeepseek,
-			credentials: map[string]any{"cookie": "sessionid=test-cookie"},
+			// deepseek web：与 zhipu 同为整串 Cookie 准入口径。
+			name:        "deepseek web cookie",
+			platform:    PlatformDeepseek,
+			credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=test-cookie"},
 		},
 		{
-			// web-kimi：凭证键是 access_token 而非 cookie，准入口径不同但同属资格外平台。
-			name:        "web-kimi access_token",
-			platform:    PlatformWebKimi,
-			credentials: map[string]any{"access_token": "test-token"},
+			// kimi web：凭证键是 access_token 而非 cookie，准入口径不同但同属资格外平台。
+			name:        "kimi web access_token",
+			platform:    PlatformKimi,
+			credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "test-token"},
 		},
 	}
 
@@ -97,25 +97,25 @@ func TestCreateAccountOtherProbeFlagRejected(t *testing.T) {
 // 准入不变量（创建期即校验，不依赖后续编辑路径）：
 // 空 Cookie 视为非法凭证；仅允许 apikey 类型，oauth 直接拒绝。
 func TestCreateAccountWebCredentialValidationAndTypeAdmission(t *testing.T) {
-	t.Run("web-zhipu empty cookie is rejected", func(t *testing.T) {
+	t.Run("zhipu web empty cookie is rejected", func(t *testing.T) {
 		repo := &upstreamBillingProbeAccountRepo{}
 		_, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
-			Name:                 "web-zhipu-empty-cookie",
-			Platform:             PlatformWebZhipu,
+			Name:                 "zhipu-web-empty-cookie",
+			Platform:             PlatformZhipu,
 			Type:                 AccountTypeAPIKey,
-			Credentials:          map[string]any{"cookie": ""},
+			Credentials:          map[string]any{"access_mode": AccountAccessModeWeb, "cookie": ""},
 			SkipDefaultGroupBind: true,
 		})
 		require.Error(t, err)
 	})
 
-	t.Run("web-zhipu only supports apikey", func(t *testing.T) {
+	t.Run("zhipu web only supports apikey", func(t *testing.T) {
 		repo := &upstreamBillingProbeAccountRepo{}
 		_, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
-			Name:                 "web-zhipu-oauth",
-			Platform:             PlatformWebZhipu,
+			Name:                 "zhipu-web-oauth",
+			Platform:             PlatformZhipu,
 			Type:                 AccountTypeOAuth,
-			Credentials:          map[string]any{"cookie": "sessionid=test-cookie"},
+			Credentials:          map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=test-cookie"},
 			SkipDefaultGroupBind: true,
 		})
 		require.Error(t, err)

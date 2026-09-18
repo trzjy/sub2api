@@ -299,13 +299,13 @@ func (a *Account) IsCNProvider() bool {
 // openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
 // 兼容上游，也经 OpenAI 网关转发；CodeBuddy 是腾讯 CLI 的 Chat Completions
 // 兼容上游（forwardCodeBuddy 挂在 OpenAIGatewayService.Forward 的 platform 分支）；
-// 网页逆向平台（web-deepseek/web-zhipu/web-kimi）经 OpenAI 网关由各自适配器
+// 网页逆向接入账号（官方平台 + access_mode=web）经 OpenAI 网关由各自适配器
 // （forwardWebZhipu / forwardWebDeepseek / forwardWebKimi）转换为官方网页端协议。
 // 调度器的平台匹配谓词依赖本判定（openai_account_scheduler.go），漏加会导致
 // 网页账号永远无法被选中。
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() ||
-		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || IsWebProvider(a.Platform))
+		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || a.IsWebAccessMode())
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容
@@ -1439,14 +1439,12 @@ func (a *Account) IsCodingPlan() bool {
 }
 
 // GetAccessMode 返回账号的接入模式（api / web），与 GetAccountMode 同构，取值规则
-// （docs/platform-merge-refactor-plan.md §5.1）：
+// （docs/platform-merge-refactor-plan.md §5.1；PR-4 已移除形状推断——PR-2 reconciler
+// 已把存量 web 账号的 access_mode 显式化，不再按凭证形状读取）：
 //  1) 显式合法值：credentials["access_mode"] 为 "api"/"web" 时直接使用；
 //  2) 显式非法值：返回空串（与非法 account_mode 一致）——但调度与转发路径必须走
 //     ResolveAccessMode() 失败关闭，不得按空串当 "api" 继续调度；
-//  3) 形状推断（仅兼容读取）：仅当字段真正缺失时，允许按凭证形状推断
-//     （cookie / access_token 键存在且非空且平台 ∈ {zhipu,deepseek,kimi} → "web"），
-//     仅限 PR-1～PR-3 兼容期；
-//  4) 缺失且形状不命中 → "api"。
+//  3) 缺失 → "api"。
 //
 // 与 GetAccountMode（payg/coding）互不调用：接入模式与额度监控模式正交。
 func (a *Account) GetAccessMode() string {
@@ -1458,12 +1456,6 @@ func (a *Account) GetAccessMode() string {
 	case AccountAccessModeAPI, AccountAccessModeWeb:
 		return mode
 	case "":
-		// 字段真正缺失才允许形状推断（显式非法值在第 2 分支已被拦下）。
-		if IsWebProvider(a.Platform) || a.IsZhipu() || a.IsDeepseek() || a.IsKimi() {
-			if a.GetCredential("cookie") != "" || a.GetCredential("access_token") != "" {
-				return AccountAccessModeWeb
-			}
-		}
 		return AccountAccessModeAPI
 	default:
 		return ""
@@ -1484,8 +1476,8 @@ func (a *Account) ResolveAccessMode() (string, error) {
 	return mode, nil
 }
 
-// IsWebAccessMode 报告账号是否为网页逆向接入（web）。归并后取代
-// IsWebProvider(platform) 作为适配器/隔离判定源（红线清单 §2.4/§7）。
+// IsWebAccessMode 报告账号是否为网页逆向接入（web）。归并后取代旧平台值判定
+// 作为适配器/隔离判定源（红线清单 §2.4/§7，平台归并重构 PR-4）。
 func (a *Account) IsWebAccessMode() bool {
 	return a.GetAccessMode() == AccountAccessModeWeb
 }

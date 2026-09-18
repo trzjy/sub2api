@@ -113,7 +113,7 @@ export default {
       },
       webProviders: {
         platforms: {
-          webDeepseek: 'DeepSeek Web',
+          deepseek: 'DeepSeek Web',
           zhipu: 'Zhipu GLM Web',
           kimi: 'Kimi Web',
         },

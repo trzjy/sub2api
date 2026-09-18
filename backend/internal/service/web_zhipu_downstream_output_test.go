@@ -1,6 +1,6 @@
 package service
 
-// web-zhipu 下游三协议输出测试（webResponseModeChat 为主）。
+// zhipu 网页下游三协议输出测试（webResponseModeChat 为主）。
 //
 // 仅新增测试，不改动任何被测代码。覆盖回程链路（上游 SSE parts[].content[] 结构 →
 // handleWebZhipuStreamingResponse / handleWebZhipuNonStreamingResponse → 客户端）的
@@ -231,8 +231,8 @@ func TestWebZhipuDownstream_UpstreamErrorNoCredentialLeak(t *testing.T) {
 // TestWebZhipuDownstream_WebModelIDAnchor 覆盖场景6：DeepSeek/Kimi 默认模型目录防误改
 // 锚点（纯新增测试文件，不改任何既有代码即天然满足）。
 func TestWebZhipuDownstream_WebModelIDAnchor(t *testing.T) {
-	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformWebDeepseek),
-		"web-deepseek default model catalogue must not regress")
-	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformWebKimi),
-		"web-kimi default model catalogue must not regress")
+	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb),
+		"deepseek web default model catalogue must not regress")
+	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb),
+		"kimi web default model catalogue must not regress")
 }

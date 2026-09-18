@@ -38,11 +38,11 @@ func (r *webBridgeRateLimitRepoStub) SetError(_ context.Context, _ int64, _ stri
 // 便于 #2 跨协议回桥测试不需关心转发层 base_url 校验）。
 func webBridgeTestAccount(platform string, id int64) *Account {
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		return webDeepseekTestAccount(id, map[string]any{"base_url": "https://chat.deepseek.com"})
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		return webZhipuTestAccount(id, map[string]any{"base_url": "https://chatglm.cn"})
-	case PlatformWebKimi:
+	case PlatformKimi:
 		return webKimiTestAccount(id, map[string]any{"base_url": "https://www.kimi.com"})
 	}
 	return nil
@@ -54,16 +54,16 @@ func webBridgeTestAccount(platform string, id int64) *Account {
 //   - kimi 非流式走 Connect RPC 单 JSON（正文落在 message.blocks），流式走 SSE。
 func webBridgeUpstream(platform string, stream bool) []*http.Response {
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		// 新协议（2026-09-18 登录态实测）：可解 PoW 挑战 → 自动建会话 → 实测 SSE fixture。
 		return []*http.Response{
 			webDeepseekSolvablePowChallengeResponse(),
 			webDeepseekSessionCreateResponse(),
 			webDeepseekFixtureSSEResponse(),
 		}
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		return []*http.Response{webZhipuSSECompletionResponse()}
-	case PlatformWebKimi:
+	case PlatformKimi:
 		// 新协议（2026-09-18 登录态实测）：Connect RPC envelope 流（流式/非流式同载荷）。
 		if stream {
 			return []*http.Response{webKimiStreamResponse()}
@@ -75,12 +75,12 @@ func webBridgeUpstream(platform string, stream bool) []*http.Response {
 
 func webBridgeModel(platform string) string {
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		return "deepseek-chat"
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		// 2026-09-17 实测目录：glm-5.3-flash（ValidateWebZhipuModel 对目录外模型失败关闭）。
 		return "glm-5.3-flash"
-	case PlatformWebKimi:
+	case PlatformKimi:
 		return "kimi-k3"
 	}
 	return ""
@@ -89,12 +89,12 @@ func webBridgeModel(platform string) string {
 // webBridgeExpectedContent 返回该平台在 mock 上游下应聚合出的正文（用于断言响应形态）。
 func webBridgeExpectedContent(platform string, stream bool) string {
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		// 实测 fixture（raw/deepseek-sse-decoded.txt 回放）RESPONSE fragment 全文。
 		return "哈哈，我又好～ 你好我也好 😄  \n今天有什么想聊的，或者需要我帮忙的吗？"
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		return "hello world"
-	case PlatformWebKimi:
+	case PlatformKimi:
 		// envelope fixture 载荷聚合正文（流式/非流式同载荷）。
 		return "hi there"
 	}
@@ -132,11 +132,11 @@ func runWebForwardForMode(
 
 	var err error
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		_, err = svc.forwardWebDeepseek(ctx, c, account, body, model, stream, time.Now(), mode)
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		_, err = svc.forwardWebZhipu(ctx, c, account, body, model, stream, time.Now(), mode)
-	case PlatformWebKimi:
+	case PlatformKimi:
 		_, err = svc.forwardWebKimi(ctx, c, account, body, model, stream, time.Now(), mode)
 	}
 	require.NoError(t, err, "forwardWeb* must succeed for a valid mock upstream")
@@ -148,7 +148,7 @@ func runWebForwardForMode(
 // 产出通用 chat.completion 包络，出站协议形态全部由 web_protocol_bridge.go 复用既有
 // apicompat 回桥在写边界统一回桥。
 func TestWebProtocolBridge_ResponseShape(t *testing.T) {
-	platforms := []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi}
+	platforms := []string{PlatformDeepseek, PlatformZhipu, PlatformKimi}
 	modes := []struct {
 		name string
 		mode webResponseMode
@@ -315,11 +315,11 @@ func runWebForwardForModeErr(
 
 	var err error
 	switch platform {
-	case PlatformWebDeepseek:
+	case PlatformDeepseek:
 		_, err = svc.forwardWebDeepseek(ctx, c, account, body, model, stream, time.Now(), mode)
-	case PlatformWebZhipu:
+	case PlatformZhipu:
 		_, err = svc.forwardWebZhipu(ctx, c, account, body, model, stream, time.Now(), mode)
-	case PlatformWebKimi:
+	case PlatformKimi:
 		_, err = svc.forwardWebKimi(ctx, c, account, body, model, stream, time.Now(), mode)
 	}
 	return recorder, err
@@ -354,7 +354,7 @@ func webSSEFrameBusinessErrorResponse() *http.Response {
 func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
 	// 三平台 ×（裸 JSON 200 错误 / 流帧业务错误码）均须走错误路径，不得伪 [DONE]。
 	// DeepSeek 走 SSE data: 帧错误；Kimi 新协议（Connect envelope）对应为 envelope 错误帧。
-	platforms := []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi}
+	platforms := []string{PlatformDeepseek, PlatformZhipu, PlatformKimi}
 	for _, platform := range platforms {
 		model := webBridgeModel(platform)
 		account := webBridgeTestAccount(platform, 7100)
@@ -363,14 +363,14 @@ func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
 			// deepseek 需先消耗一个 PoW 挑战响应，再给裸 JSON 错误（对话端点 HTTP 200）。
 			var upstream []*http.Response
 			switch platform {
-			case PlatformWebDeepseek:
+			case PlatformDeepseek:
 				// 新协议三跳：可解 PoW → 建会话 → completion 返回 HTTP 200 裸 JSON 业务错误。
 				upstream = []*http.Response{
 					webDeepseekSolvablePowChallengeResponse(),
 					webDeepseekSessionCreateResponse(),
 					webBareJSONErrorResponse(),
 				}
-			case PlatformWebKimi:
+			case PlatformKimi:
 				// Connect envelope 业务错误帧（数字 code 非 0，与 webKimiBareJSONError 同口径）。
 				upstream = []*http.Response{webKimiEnvelopeResponse([]string{`{"code":40002,"message":"Missing Token"}`})}
 			default:
@@ -385,14 +385,14 @@ func TestWebStreamingBusinessError_NotFakeDone(t *testing.T) {
 		t.Run(platform+"/sse_frame_business_error_code", func(t *testing.T) {
 			var upstream []*http.Response
 			switch platform {
-			case PlatformWebDeepseek:
+			case PlatformDeepseek:
 				// 三跳前缀后，completion SSE 流首帧携带顶层非 0 code（解析器 applyDelta 双路径判定）。
 				upstream = []*http.Response{
 					webDeepseekSolvablePowChallengeResponse(),
 					webDeepseekSessionCreateResponse(),
 					webSSEFrameBusinessErrorResponse(),
 				}
-			case PlatformWebKimi:
+			case PlatformKimi:
 				// Connect envelope 协议原生业务错误形态（字符串 code=unauthenticated，实测 401 对称形态）。
 				upstream = []*http.Response{webKimiEnvelopeResponse([]string{`{"code":"unauthenticated","message":"login expired midstream"}`})}
 			default:

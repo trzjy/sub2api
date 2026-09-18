@@ -30,7 +30,7 @@ func makeFakeWebZhipuJWT(t *testing.T, payload map[string]any) string {
 	return header + "." + body + ".fakesig"
 }
 
-// webZhipuTestAccount 构造 web-zhipu 转发测试账号：整串 Cookie 落 credentials
+// webZhipuTestAccount 构造 zhipu 网页转发测试账号：整串 Cookie 落 credentials
 // （含阿里 CDN Cookie，与线上同串携带口径一致），base_url 覆盖默认域名便于断言出站目标。
 func webZhipuTestAccount(id int64, credentials map[string]any) *Account {
 	if credentials == nil {
@@ -38,8 +38,8 @@ func webZhipuTestAccount(id int64, credentials map[string]any) *Account {
 	}
 	acc := &Account{
 		ID:          id,
-		Name:        "web-zhipu-test",
-		Platform:    PlatformWebZhipu,
+		Name:        "zhipu-web-test",
+		Platform:    PlatformZhipu,
 		Type:        AccountTypeAPIKey,
 		Status:      StatusActive,
 		Schedulable: true,
@@ -48,6 +48,9 @@ func webZhipuTestAccount(id int64, credentials map[string]any) *Account {
 	}
 	if _, ok := credentials["cookie"]; !ok {
 		acc.Credentials["cookie"] = "chatglm_token=tok-abc; acw_tc=cdn-xyz; cdn_sec_tc=sec-123"
+	}
+	if _, ok := credentials["access_mode"]; !ok {
+		acc.Credentials["access_mode"] = AccountAccessModeWeb
 	}
 	return acc
 }
@@ -356,7 +359,7 @@ func TestValidateWebZhipuModel(t *testing.T) {
 }
 
 // TestForwardWebZhipu_UnknownModelFailsClosed 未知模型入站必须失败关闭，且不发出任何
-// 上游请求（与 "web-zhipu requires at least one user message" 同风格，直接 return error）。
+// 上游请求（与 "zhipu web requires at least one user message" 同风格，直接 return error）。
 func TestForwardWebZhipu_UnknownModelFailsClosed(t *testing.T) {
 	account := webZhipuTestAccount(9103, nil)
 	upstream := &httpUpstreamRecorder{}
@@ -436,7 +439,7 @@ func TestForwardWebZhipu_GuestTokenFailsClosed(t *testing.T) {
 	require.NotContains(t, err.Error(), "guest-device-id", "error message must not leak token payload")
 }
 
-// --- D1: web-zhipu 刷新成功后把新凭证持久化到账号凭据（同构 web-kimi 刷新链） ---
+// --- D1: zhipu 网页刷新成功后把新凭证持久化到账号凭据（同构 kimi 网页刷新链） ---
 
 // webZhipuRefreshRepoStub 记录 UpdateCredentials 调用（刷新成功持久化断言用）。
 // 全部用手工拼的假值，不携带任何真实 Cookie / JWT。
@@ -465,9 +468,10 @@ func TestRefreshWebZhipuAccessTokenPersistsCredentials(t *testing.T) {
 	t.Run("cookie_fields_replaced_others_preserved", func(t *testing.T) {
 		account := &Account{
 			ID:       9801,
-			Platform: PlatformWebZhipu,
+			Platform: PlatformZhipu,
 			Credentials: map[string]any{
-				"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz; cdn_sec_tc=sec-123",
+				"access_mode": AccountAccessModeWeb,
+				"cookie":      "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz; cdn_sec_tc=sec-123",
 			},
 		}
 		repo := &webZhipuRefreshRepoStub{}
@@ -504,8 +508,9 @@ func TestRefreshWebZhipuAccessTokenPersistsCredentials(t *testing.T) {
 	t.Run("explicit_keys_synced_when_present", func(t *testing.T) {
 		account := &Account{
 			ID:       9802,
-			Platform: PlatformWebZhipu,
+			Platform: PlatformZhipu,
 			Credentials: map[string]any{
+				"access_mode":   AccountAccessModeWeb,
 				"cookie":        "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
 				"chatglm_token": "old-access",
 				"refresh_token": "old-refresh",
@@ -529,9 +534,10 @@ func TestRefreshWebZhipuAccessTokenPersistsCredentials(t *testing.T) {
 func TestRefreshWebZhipuAccessTokenNoPersistOnFailure(t *testing.T) {
 	account := &Account{
 		ID:       9803,
-		Platform: PlatformWebZhipu,
+		Platform: PlatformZhipu,
 		Credentials: map[string]any{
-			"cookie": "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "chatglm_token=old-access; chatglm_refresh_token=old-refresh; acw_tc=cdn-xyz",
 		},
 	}
 	repo := &webZhipuRefreshRepoStub{}
@@ -549,10 +555,11 @@ func TestRefreshWebZhipuAccessTokenNoPersistOnFailure(t *testing.T) {
 func TestRefreshWebZhipuAccessTokenNoRefreshTokenNoRequest(t *testing.T) {
 	account := &Account{
 		ID:       9804,
-		Platform: PlatformWebZhipu,
+		Platform: PlatformZhipu,
 		Credentials: map[string]any{
 			// 整串 Cookie 中无 chatglm_refresh_token，也无显式 refresh_token / chatglm_token。
-			"cookie": "chatglm_token=old-access; acw_tc=cdn-xyz",
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "chatglm_token=old-access; acw_tc=cdn-xyz",
 		},
 	}
 	// 若误发刷新请求，返回 200 空 JSON（newAccessToken 空 → 返回 ""），由 requests 数断言捕获。

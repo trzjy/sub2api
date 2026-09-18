@@ -13,9 +13,8 @@ import (
 // 与 MAC、scheduler outbox 的原子变更一律由 repository 层专用事务方法完成，
 // 禁止在这里拼接多个普通 repo 调用模拟原子性。
 
-// webPlatformMigrationDirection 迁移方向。
+// webPlatformMigrationDirection 迁移方向（PR-4 旧链归零：up 已退役，仅保留 down 逆推入口，方案 §7）。
 const (
-	WebPlatformMigrationDirectionUp   = "up"
 	WebPlatformMigrationDirectionDown = "down"
 )
 
@@ -37,20 +36,8 @@ type WebPlatformMigrationReport struct {
 	Skipped   []WebPlatformMigrationEntry `json:"skipped"`
 }
 
-// legacyWebPlatformTargetMapping web-* 旧平台 → 官方平台（方案 A §3）。
-var legacyWebPlatformTargetMapping = map[string]string{
-	string(PlatformWebZhipu):    string(PlatformZhipu),
-	string(PlatformWebDeepseek): string(PlatformDeepseek),
-	string(PlatformWebKimi):     string(PlatformKimi),
-}
-
-// MigrateWebPlatformAccounts 执行 web-* 平台迁移 reconciler。
-// direction=up：把仍挂在 web-* 旧平台的账号迁移到官方平台并显式化 access_mode=web；
-// direction=down：按 migrated_from_platform 标记回滚。
-// dryRun=true 只做核对分类，不写库。
-// 失败关闭：任一账号失败即中止，已处理账号三字段一致，续跑幂等补完。
-// webPlatformMigrationRepository 迁移写路径依赖 repository 层专用事务方法，
-// 由构造时的窄接口断言注入；未注入即失败关闭，绝不走普通 repo 调用拼接。
+// webPlatformMigrationRepository 返回迁移写路径依赖的 repository 层专用事务方法窄接口；
+// 未注入（测试替身未实现）即失败关闭，绝不走普通 repo 调用拼接模拟原子性。
 func (s *adminServiceImpl) webPlatformMigrationRepository() (WebPlatformMigrationRepository, error) {
 	if s.webPlatformMigrationRepo == nil {
 		return nil, fmt.Errorf("web platform migration repository not available (fail-closed)")
@@ -58,69 +45,20 @@ func (s *adminServiceImpl) webPlatformMigrationRepository() (WebPlatformMigratio
 	return s.webPlatformMigrationRepo, nil
 }
 
+// MigrateWebPlatformAccounts 执行平台归并迁移 reconciler（PR-4 旧链归零后仅保留 down
+// 逆推入口：web-* 旧平台账号生产已为 0，up 迁移路径为死代码，已随本 PR 移除；down 按
+// migrated_from_platform 标记回滚，三字段原子变更由 repository 层专用事务方法完成）。
 func (s *adminServiceImpl) MigrateWebPlatformAccounts(
 	ctx context.Context,
 	direction string,
 	dryRun bool,
 ) (*WebPlatformMigrationReport, error) {
 	switch direction {
-	case WebPlatformMigrationDirectionUp:
-		return s.runWebPlatformMigrationUp(ctx, dryRun)
 	case WebPlatformMigrationDirectionDown:
 		return s.runWebPlatformMigrationDown(ctx, dryRun)
 	default:
-		return nil, fmt.Errorf("invalid migration direction %q (must be up or down)", direction)
+		return nil, fmt.Errorf("invalid migration direction %q (only down is supported)", direction)
 	}
-}
-
-func (s *adminServiceImpl) runWebPlatformMigrationUp(ctx context.Context, dryRun bool) (*WebPlatformMigrationReport, error) {
-	migrationRepo, err := s.webPlatformMigrationRepository()
-	if err != nil {
-		return nil, err
-	}
-	accounts, err := migrationRepo.ListLegacyWebPlatformAccounts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	report := &WebPlatformMigrationReport{
-		Direction: WebPlatformMigrationDirectionUp,
-		DryRun:    dryRun,
-		Total:     len(accounts),
-		Migrated:  []WebPlatformMigrationEntry{},
-		Skipped:   []WebPlatformMigrationEntry{},
-	}
-	for _, account := range accounts {
-		toPlatform, ok := legacyWebPlatformTargetMapping[account.Platform]
-		if !ok {
-			return nil, fmt.Errorf("account %d has unmapped legacy web platform %q", account.ID, account.Platform)
-		}
-		entry := WebPlatformMigrationEntry{
-			ID:           account.ID,
-			Name:         account.Name,
-			FromPlatform: account.Platform,
-			ToPlatform:   toPlatform,
-		}
-		if dryRun {
-			// dry-run 只核对不写库。legacy 平台账号全部是迁移候选：
-			// up 的幂等跳过只发生在「官方平台 + marker」的账号上，那类
-			// 账号不会出现在 ListLegacyWebPlatformAccounts 的结果里；
-			// 不能用 GetAccessMode()（形状推断恒为 web）判定已归并。
-			report.Migrated = append(report.Migrated, entry)
-			continue
-		}
-		migrated, err := migrationRepo.MigrateAccountPlatform(ctx, account.ID, account.Platform, toPlatform)
-		if err != nil {
-			// 失败关闭：中止并携带账号上下文，已处理账号三字段一致。
-			return nil, fmt.Errorf("migrate account %d (%s): %w", account.ID, account.Platform, err)
-		}
-		if migrated {
-			report.Migrated = append(report.Migrated, entry)
-		} else {
-			entry.AlreadyMerged = true
-			report.Skipped = append(report.Skipped, entry)
-		}
-	}
-	return report, nil
 }
 
 func (s *adminServiceImpl) runWebPlatformMigrationDown(ctx context.Context, dryRun bool) (*WebPlatformMigrationReport, error) {

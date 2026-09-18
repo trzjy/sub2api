@@ -286,16 +286,15 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 	)
 }
 
-// NormalizeOpenAICompatiblePlatform 保留 grok、国产 OpenAI 兼容供应商（kimi/zhipu/
-// deepseek）与网页逆向平台（web-deepseek/web-zhipu/web-kimi，经各自适配器由
-// OpenAI 网关转发）的原值，其他值一律归一为 openai。调度器据此对账号与请求做
-// 精确平台匹配：kimi 分组请求只命中 kimi 账号，语义与 openai/grok 一致。
+// NormalizeOpenAICompatiblePlatform 保留 grok 与国产 OpenAI 兼容供应商（kimi/zhipu/
+// deepseek/minimax/codebuddy/other）的原值，其他值一律归一为 openai。调度器据此对
+// 账号与请求做精确平台匹配：kimi 分组请求只命中 kimi 账号，语义与 openai/grok 一致。
+// 平台归并后（PR-4）网页接入挂在官方平台账号级 access_mode=web 上，web-* 平台值退役。
 // （upstream 曾将本函数改为未导出 normalizeOpenAICompatiblePlatform，本分支的
 // handler 调度入口仍需导出，保持导出名。）
 func NormalizeOpenAICompatiblePlatform(platform string) string {
 	switch platform {
-	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformCodeBuddy, PlatformOther,
-		PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
+	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformCodeBuddy, PlatformOther:
 		return platform
 	default:
 		return PlatformOpenAI

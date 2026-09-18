@@ -140,13 +140,12 @@ type AccountRepository interface {
 // 普通 repo 调用模拟原子性。独立窄接口：只由真实账号仓储实现，避免扩大
 // AccountRepository 通用接口面。
 type WebPlatformMigrationRepository interface {
-	// ListLegacyWebPlatformAccounts 返回仍挂在 web-* 旧平台上的未删除账号。
-	ListLegacyWebPlatformAccounts(ctx context.Context) ([]*Account, error)
-	// ListMigratedFromWebPlatformAccounts 返回已迁移（extra 带
-	// migrated_from_platform 标记）且当前已落在官方平台上的账号。
+	// ListMigratedFromWebPlatformAccounts 返回已迁移（extra 带 migrated_from_platform
+	// 标记）的账号，供 down 逆推与一致性核对（PR-4 旧链归零后不再按 platform 守卫）。
 	ListMigratedFromWebPlatformAccounts(ctx context.Context) ([]*Account, error)
-	// MigrateAccountPlatform 把单个 web-* 旧平台账号迁移到官方平台（up，
-	// 逐账号单事务）。幂等：已迁移返回 (false, nil)；失败关闭。
+	// MigrateAccountPlatform 把单个账号迁移到目标官方平台并显式化 access_mode=web
+	// （up，逐账号单事务）。幂等：已迁移返回 (false, nil)；失败关闭。作为三字段原子写
+	// 原语保留，平台归并一致性 / 幂等 / 失败关闭验证仍依赖它。
 	MigrateAccountPlatform(ctx context.Context, id int64, fromPlatform, toPlatform string) (bool, error)
 	// RevertMigratedAccountPlatform 按 migrated_from_platform 标记回滚单个
 	// 已迁移账号（down，逐账号单事务）。幂等：标记缺失返回 (false, nil)。
@@ -550,16 +549,14 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		return nil
 	case PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax:
 		// 国产 OpenAI 兼容供应商：凭证为 API Key，实际可用性经余额/额度探测与转发路径验证。
+		// 网页接入账号（官方平台 + access_mode=web）同样无独立探测端点，可用性经
+		// 转发路径验证（探活分派按账号接入模式判定，见 account_test_service）。
 		return nil
 	case PlatformCodeBuddy:
 		// CodeBuddy OAuth 订阅制账号：凭证可用性经 chat 转发路径验证（GET models 探测可选）。
 		return nil
 	case PlatformOther:
 		// 通用 OpenAI 兼容自定义上游：凭证为 API Key，可用性经 /v1/models 预览或转发路径验证。
-		return nil
-	case PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi:
-		// 网页逆向账号：登录态凭证无独立探测端点，可用性经转发路径验证
-		// （适配器于 W2-W4 接入，见 docs/web-reverse-embedded-login-plan.md）。
 		return nil
 	default:
 		return fmt.Errorf("unsupported platform: %s", account.Platform)

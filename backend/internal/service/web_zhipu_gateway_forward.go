@@ -23,7 +23,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// web-zhipu 网页逆向适配器（方案 W3，docs/web-reverse-embedded-login-plan.md §4.2）。
+// zhipu web 网页逆向适配器（方案 W3，docs/web-reverse-embedded-login-plan.md §4.2）。
 //
 // 协议状态声明（权威来源：官网登录态抓包实测，2026-09-17）：
 //   - 已实测：对话端点 POST /chatglm/backend-api/assistant/stream（SSE）；请求体以
@@ -152,13 +152,12 @@ func webZhipuResolveChatGLMToken(account *Account) string {
 	return webZhipuExtractCookieField(fullCookie, "chatglm_token")
 }
 
-// forwardWebZhipu 是 Zhipu 网页逆向平台（web-zhipu）的转发入口，函数链模式与
-// forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat Completions → 网页端
-// 请求（SSE）→ 回程通用 SSE 解析 → OpenAI 形状回写。挂载点由 OpenAIGatewayService
-// 的 platform 分支按 PlatformWebZhipu 分发（分发注册由共享注册点接线任务完成）。
+// forwardWebZhipu 是 Zhipu 网页接入（官方 zhipu 平台 + access_mode=web）的转发入口，
+// 函数链模式与 forwardCodeBuddy / forwardWebDeepseek 同构：入站 OpenAI Chat
+// Completions → 网页端请求（SSE）→ 回程通用 SSE 解析 → OpenAI 形状回写。挂载点由
+// OpenAIGatewayService 转发链的 isWebZhipuAccount 断言分发。
 // assertWebZhipuAccount 是 forwardWebZhipu 入口的双断言 fail-closed（隔离红线 §6）：
-//   - 旧 web-zhipu 平台：平台本身即判定（迁移前无 access_mode，兼容读取期）；
-//   - 新形态：官方 zhipu 平台 + web access mode 双断言；
+//   - 官方 zhipu 平台 + web access mode 双断言（平台归并后唯一形态，PR-4）；
 //   - API 模式 zhipu 账号（或 web 模式 deepseek/kimi 账号）绝不进入网页协议链。
 //
 // 任一断言失败返回明确错误，转发入口与单测共用同一判定。
@@ -166,11 +165,7 @@ func assertWebZhipuAccount(account *Account) error {
 	if account == nil {
 		return fmt.Errorf("forwardWebZhipu requires a non-nil account")
 	}
-	// 旧 web-zhipu 平台兼容：平台本身即判定。
-	if account.Platform == PlatformWebZhipu {
-		return nil
-	}
-	// 新形态：官方 zhipu 平台 + web access mode 双断言。
+	// 官方 zhipu 平台 + web access mode 双断言。
 	if account.IsWebAccessMode() && account.IsZhipu() {
 		return nil
 	}
@@ -198,13 +193,13 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	cookie := strings.TrimSpace(account.GetCredential("cookie"))
 	if cookie == "" {
 		// 网页账号登录态载体就是整串 Cookie（credentials_sanitize.go 对 web 平台的例外语义）。
-		return nil, errors.New("web-zhipu account is missing login cookie credential")
+		return nil, errors.New("zhipu web account is missing login cookie credential")
 	}
 
 	// base_url 统一走 account.GetWebBaseURL()（覆盖优先 → 平台默认），避免内联重复实现漂移。
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	if baseURL == "" {
-		return nil, errors.New("web-zhipu account has no base_url")
+		return nil, errors.New("zhipu web account has no base_url")
 	}
 
 	// 模型映射：account.GetModelMapping() 默认透传（GetMappedModel 未命中即原样返回）。
@@ -214,9 +209,9 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = originalModel
 	}
-	// 未知模型失败关闭：仅允许默认目录内模型（DefaultWebModelIDs(PlatformWebZhipu)），
-	// 与 "web-zhipu requires at least one user message" 同风格，在 handleErrorResponse
-	// 之前直接 return error，不发出任何上游请求。
+	// 未知模型失败关闭：仅允许默认目录内模型（DefaultWebModelIDs(PlatformZhipu,
+	// AccountAccessModeWeb)），与 "zhipu web requires at least one user message" 同风格，
+	// 在 handleErrorResponse 之前直接 return error，不发出任何上游请求。
 	if err := ValidateWebZhipuModel(upstreamModel); err != nil {
 		return nil, err
 	}
@@ -228,12 +223,12 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	// 且不调用 SetError/SetRateLimited 冷却账号（不误判为凭证失效）。错误信息不得含
 	// 任何 token/cookie 内容（安全红线）。
 	if webZhipuTokenIsGuest(webZhipuResolveChatGLMToken(account)) {
-		return nil, errors.New("web-zhipu login state is a guest token, please re-capture login cookie")
+		return nil, errors.New("zhipu web login state is a guest token, please re-capture login cookie")
 	}
 
 	prompt := webZhipuExtractPrompt(body)
 	if strings.TrimSpace(prompt) == "" {
-		return nil, errors.New("web-zhipu requires at least one user message in the request")
+		return nil, errors.New("zhipu web requires at least one user message in the request")
 	}
 	messages := webZhipuExtractUserMessages(body)
 	upstreamBody := buildWebZhipuRequestBody(messages, upstreamModel, account)
@@ -552,7 +547,7 @@ const webZhipuRefreshPath = "/user-api/user/refresh"
 //     账号（cookie 两字段就地替换、显式键仅当原凭证存在才写）；返回新 access token；
 //   - 非 200 / 解析失败 / 无 refresh token → 返回 ""，不写库。
 //
-// 与 web-kimi 刷新链同构：刷新成功持久化新凭证，失败不写库。
+// 与 kimi web 刷新链同构：刷新成功持久化新凭证，失败不写库。
 func (s *OpenAIGatewayService) refreshWebZhipuAccessToken(ctx context.Context, account *Account) string {
 	if account == nil {
 		return ""
@@ -650,7 +645,7 @@ func (s *OpenAIGatewayService) refreshWebZhipuAccessToken(ctx context.Context, a
 
 	if err := s.persistWebZhipuRefreshedCredentials(ctx, account, cookie, newAccessToken, newRefreshToken); err != nil {
 		// 持久化失败不阻断本次重试（已拿到新 token），仅脱敏告警。
-		slog.Warn("web-zhipu refresh succeeded but credential persist failed",
+		slog.Warn("zhipu web refresh succeeded but credential persist failed",
 			"account_id", account.ID, "error", err.Error())
 	}
 	return newAccessToken
@@ -731,7 +726,7 @@ func (s *OpenAIGatewayService) handleWebZhipuUpstreamError(
 	}
 	upstreamMsg := webZhipuUpstreamErrorMessage(respBody)
 	if upstreamMsg == "" {
-		upstreamMsg = fmt.Sprintf("web-zhipu upstream returned status %d", resp.StatusCode)
+		upstreamMsg = fmt.Sprintf("zhipu web upstream returned status %d", resp.StatusCode)
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		ProxyID:            opsUpstreamProxyID(account),
@@ -1006,7 +1001,7 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("web-zhipu stream read: %w", err)
+		return nil, fmt.Errorf("zhipu web stream read: %w", err)
 	}
 
 	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
@@ -1102,13 +1097,13 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 	}
 	if err := scanner.Err(); err != nil {
 		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
-		return nil, fmt.Errorf("web-zhipu upstream response scan failed: %w", err)
+		return nil, fmt.Errorf("zhipu web upstream response scan failed: %w", err)
 	}
 
 	if !frames {
 		// 非 SSE：结构未识别（完整请求体/响应体均待登录态实测补全）→ 失败关闭。
 		return nil, errors.New(
-			"web-zhipu upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
+			"zhipu web upstream returned an unrecognized non-stream response shape (pending logged-in traffic capture)")
 	}
 
 	finalUsage := usage

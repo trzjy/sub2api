@@ -10,39 +10,40 @@ import (
 // TestValidateWebAccountCredential_BaseURL 覆盖 #4：validateWebAccountCredential 在
 // credentials.base_url 非空时必须校验官方域名后缀（走既有 ValidateWebBaseURL），
 // 非法值（明文 http / 非官方主机 / 内网 IP）保存即拒绝；合法官方域名或空值放行。
-// 不影响其它 / 通用平台分支（validateOtherAccountCredential）的既有逻辑。
+// 归并后网页接入由官方平台账号级 access_mode=web 承载（credentials 须显式带
+// access_mode="web" 方进入网页校验分支）。
 func TestValidateWebAccountCredential_BaseURL(t *testing.T) {
 	// 合法官方域名覆盖：放行（不变量：仅校验形态，不校验可达性）。
-	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": "https://chat.deepseek.com"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
-		map[string]any{"cookie": "x", "base_url": "https://chatglm.cn"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": "https://www.kimi.com"}))
+	require.NoError(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": "https://chat.deepseek.com"}))
+	require.NoError(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "x", "base_url": "https://chatglm.cn"}))
+	require.NoError(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": "https://www.kimi.com"}))
 
 	// 空 base_url：回落平台默认，放行。
-	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": ""}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at"}))
+	require.NoError(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": ""}))
+	require.NoError(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at"}))
 
 	// 非法：明文 http → 拒绝（fail-closed 拦截脏数据）。
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": "http://chat.deepseek.com"}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": "http://chat.deepseek.com"}))
 
 	// 非法：非官方主机 → 拒绝（杜绝凭证外送 / SSRF）。
-	require.Error(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
-		map[string]any{"cookie": "x", "base_url": "https://evil.example.com"}))
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": "https://not-kimi.com"}))
+	require.Error(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "x", "base_url": "https://evil.example.com"}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": "https://not-kimi.com"}))
 
 	// 非法：内网 / 环回 IP 字面量 → 拒绝（SSRF 防护）。
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": "https://127.0.0.1"}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": "https://127.0.0.1"}))
 
 	// 非法 base_url 不能绕过 cookie / access_token 必填校验：错误文案须指向 base_url。
-	err := validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": "https://evil.example.com"})
+	err := validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": "https://evil.example.com"})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "base_url")
 }
@@ -83,102 +84,102 @@ func TestTestWebAccountConnection_InvalidBaseURLErrors(t *testing.T) {
 //   - 其余必填字段（cookie / access_token）已满足，确保只校验 base_url 类型。
 func TestValidateWebAccountCredential_BaseURLNonStringRejected(t *testing.T) {
 	// 数字 base_url → 拒绝。
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": 12345}))
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": 12345}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": 12345}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": 12345}))
 
 	// 数组 base_url → 拒绝。
-	require.Error(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
-		map[string]any{"cookie": "x", "base_url": []string{"https://chatglm.cn"}}))
+	require.Error(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "x", "base_url": []string{"https://chatglm.cn"}}))
 
 	// 对象 base_url → 拒绝。
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": map[string]any{"url": "https://chat.deepseek.com"}}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": map[string]any{"url": "https://chat.deepseek.com"}}))
 
 	// nil base_url → 拒绝（类型断言失败，非空串语义）。
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": nil}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": nil}))
 
 	// 错误文案须指向 base_url 且不得含任何凭证值。
-	err := validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": 12345})
+	err := validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": 12345})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "base_url must be a string")
 	require.NotContains(t, err.Error(), "sessionid=abc")
 
 	// 对照：合法 https 官方域名 / 空串 / 缺失 → 仍放行。
-	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey,
-		map[string]any{"access_token": "at", "base_url": "https://www.kimi.com"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey,
-		map[string]any{"cookie": "sessionid=abc", "base_url": ""}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey,
-		map[string]any{"cookie": "x"}))
+	require.NoError(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "base_url": "https://www.kimi.com"}))
+	require.NoError(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc", "base_url": ""}))
+	require.NoError(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey,
+		map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "x"}))
 }
 
-// TestIsWebProviderCoversWebReversePlatforms 锁定网页逆向平台集合判定（方案 §3.1）。
-func TestIsWebProviderCoversWebReversePlatforms(t *testing.T) {
-	for _, p := range []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi} {
-		require.Truef(t, IsWebProvider(p), "platform %q should be a web provider", p)
+// TestIsWebLoginPlatformCoversWebReversePlatforms 锁定网页登录平台集合判定（方案 §5.5）。
+func TestIsWebLoginPlatformCoversWebReversePlatforms(t *testing.T) {
+	for _, p := range []string{PlatformZhipu, PlatformDeepseek, PlatformKimi} {
+		require.Truef(t, IsWebLoginPlatform(p), "platform %q should be a web login platform", p)
 	}
-	for _, p := range []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformOpenAI, PlatformOther, PlatformComposite, "", "web-other"} {
-		require.Falsef(t, IsWebProvider(p), "platform %q must NOT be a web provider", p)
+	for _, p := range []string{PlatformOpenAI, PlatformOther, PlatformComposite, "", "web-other"} {
+		require.Falsef(t, IsWebLoginPlatform(p), "platform %q must NOT be a web login platform", p)
 	}
 }
 
-// TestWebProviderExcludedFromOpenAICompatFamily 锁定网页平台不使用共享 OpenAI
-// base_url 族与用户×平台额度白名单（不从 API 平台复制额度语义——方案 §0
-// forbidden_inferences）。调度族成员资格见 account.go IsOpenAICompatible（W6 已含 web，
-// 经 web-* 专用适配器转发），共享 base_url 与额度语义仍排除。
-func TestWebProviderExcludedFromOpenAICompatFamily(t *testing.T) {
-	for _, p := range []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi} {
-		require.Falsef(t, UsesOpenAIProtocolSharedBaseURL(p), "platform %q must NOT use shared OpenAI base", p)
-		require.Falsef(t, IsAllowedQuotaPlatform(p), "platform %q must NOT allow user quota", p)
+// TestWebLoginPlatformInCNProviderFamily 锁定网页登录平台（官方 zhipu/deepseek/kimi）归并后
+// 作为国产 CN 供应商，复用共享 OpenAI 兼容 base_url 族并纳入用户×平台额度白名单
+// （方案 §5.5：网页接入由官方平台 access_mode=web 承载，不再有独立 web-* 平台值；
+// 旧「web 平台排除共享 base_url / 额度」契约随平台归并撤销）。
+func TestWebLoginPlatformInCNProviderFamily(t *testing.T) {
+	for _, p := range []string{PlatformZhipu, PlatformDeepseek, PlatformKimi} {
+		require.Truef(t, UsesOpenAIProtocolSharedBaseURL(p), "web login platform %q must use shared OpenAI base", p)
+		require.Truef(t, IsAllowedQuotaPlatform(p), "web login platform %q must allow user quota", p)
 	}
 }
 
 // TestValidateWebAccountCredential 锁定网页平台建号不变量：仅 apikey 类型；
-// web-deepseek / web-zhipu 须有非空整串 cookie；web-kimi 须有非空 access_token；
+// deepseek / zhipu 须有非空整串 cookie；kimi 须有非空 access_token；
 // base_url 可选。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
 func TestValidateWebAccountCredential(t *testing.T) {
 	// 非网页平台不受影响。
 	require.NoError(t, validateWebAccountCredential(PlatformOpenAI, AccountTypeOAuth, nil))
 
 	// 仅接受 apikey 类型。
-	for _, p := range []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi} {
-		require.Error(t, validateWebAccountCredential(p, AccountTypeOAuth, map[string]any{"cookie": "c"}), p)
+	for _, p := range []string{PlatformDeepseek, PlatformZhipu, PlatformKimi} {
+		require.Error(t, validateWebAccountCredential(p, AccountTypeOAuth, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}), p)
 	}
 
 	// cookie 平台：非空整串 cookie 必填。
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey, nil))
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey, map[string]any{}))
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey, map[string]any{"cookie": ""}))
-	require.Error(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey, map[string]any{"cookie": "   "}))
-	require.Error(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey, map[string]any{"cookie": nil}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebDeepseek, AccountTypeAPIKey, map[string]any{"cookie": "sessionid=abc"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebZhipu, AccountTypeAPIKey, map[string]any{"cookie": "chatglm_token=x", "base_url": "https://chatglm.cn"}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": ""}))
+	require.Error(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "   "}))
+	require.Error(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": nil}))
+	require.NoError(t, validateWebAccountCredential(PlatformDeepseek, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "sessionid=abc"}))
+	require.NoError(t, validateWebAccountCredential(PlatformZhipu, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "chatglm_token=x", "base_url": "https://chatglm.cn"}))
 
 	// kimi 平台：access_token 必填，refresh_token / user_id / base_url 可选。
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey, map[string]any{}))
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey, map[string]any{"access_token": ""}))
-	require.Error(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey, map[string]any{"refresh_token": "rt"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey, map[string]any{"access_token": "at"}))
-	require.NoError(t, validateWebAccountCredential(PlatformWebKimi, AccountTypeAPIKey, map[string]any{"access_token": "at", "refresh_token": "rt", "user_id": "u-1"}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "access_token": ""}))
+	require.Error(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "refresh_token": "rt"}))
+	require.NoError(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at"}))
+	require.NoError(t, validateWebAccountCredential(PlatformKimi, AccountTypeAPIKey, map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at", "refresh_token": "rt", "user_id": "u-1"}))
 }
 
-// TestSanitizeStoredCredentials_KeepsCookieForWebProviders 锁定清洗链路的网页平台例外：
-// cookie 就是网页平台的登录态凭证本身，显式平台标签下必须保留；空平台标签
+// TestSanitizeStoredCredentials_KeepsCookieForWebProviders 锁定清洗链路的网页接入账号例外：
+// cookie 就是网页接入账号的登录态凭证本身，账号级 access_mode=web 下必须保留；空平台标签
 // （批量路径）仍剥离，防止 session-jar 残留落盘。
 func TestSanitizeStoredCredentials_KeepsCookieForWebProviders(t *testing.T) {
-	for _, platform := range []string{PlatformWebDeepseek, PlatformWebZhipu, PlatformWebKimi} {
+	for _, platform := range []string{PlatformZhipu, PlatformDeepseek, PlatformKimi} {
 		creds := map[string]any{
+			"access_mode":  AccountAccessModeWeb,
 			"cookie":       "session",
 			"access_token": "at",
 			"password":     "x",
 			"sso_token":    "sso",
 		}
 		out := SanitizeStoredCredentials(platform, creds)
-		require.Equalf(t, "session", out["cookie"], "web platform %q must keep cookie", platform)
+		require.Equalf(t, "session", out["cookie"], "web access mode %q must keep cookie", platform)
 		require.Equalf(t, "at", out["access_token"], platform)
 		require.NotContainsf(t, out, "password", platform)
 		require.NotContainsf(t, out, "sso_token", platform)

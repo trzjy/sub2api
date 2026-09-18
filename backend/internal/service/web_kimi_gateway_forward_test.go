@@ -19,16 +19,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// webKimiTestAccount 构造 web-kimi 转发测试账号：access_token 落 credentials，
+// webKimiTestAccount 构造 kimi 网页转发测试账号：access_token 落 credentials，
 // base_url 覆盖默认域名便于断言出站目标。
 func webKimiTestAccount(id int64, credentials map[string]any) *Account {
 	if credentials == nil {
 		credentials = map[string]any{}
 	}
+	credentials["access_mode"] = AccountAccessModeWeb
 	acc := &Account{
 		ID:          id,
-		Name:        "web-kimi-test",
-		Platform:    PlatformWebKimi,
+		Name:        "kimi-web-test",
+		Platform:    PlatformKimi,
 		Type:        AccountTypeAPIKey,
 		Status:      StatusActive,
 		Schedulable: true,
@@ -544,7 +545,7 @@ func matchJSONObject(data []byte, start int) (int, bool) {
 // heartbeat 帧不产出正文。聚合正文须等于实测内容
 // 「你好！很高兴见到你。有什么我可以帮你的吗？」。fixture 不在仓库内，缺失时跳过。
 func TestForwardWebKimi_FixtureReplay(t *testing.T) {
-	const fixturePath = "/home/zjy/.sub2api-acceptance/sub2api-20260918-web-deepseek-kimi-evidence/raw/kimi-chat-decoded.txt"
+	const fixturePath = "/home/zjy/.sub2api-acceptance/sub2api-20260918-deepseek-kimi-evidence/raw/kimi-chat-decoded.txt"
 	raw, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Skipf("kimi fixture unavailable (expected outside repo): %v", err)

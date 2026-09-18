@@ -177,6 +177,7 @@
       <template #table>
         <AccountBulkActionsBar
           :selected-ids="selIds"
+          :selected-accounts="selectedAccounts"
           :total-results="pagination.total"
           :selecting-all="selectingAllResults"
           :all-results-selected="allResultsSelected"
@@ -190,6 +191,12 @@
           @select-page="selectPage"
           @select-all-results="handleSelectAllResults"
           @toggle-schedulable="handleBulkToggleSchedulable"
+          @web-login="handleBulkWebLogin"
+          @web-test="handleBulkWebTest"
+          @delete-banned="handleBulkDeleteBanned"
+          @web-enable="handleBulkWebStatus('active')"
+          @web-disable="handleBulkWebStatus('inactive')"
+          @web-export="handleBulkExportWeb"
         />
         <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
@@ -314,6 +321,16 @@
             <div class="flex items-center gap-1.5">
               <AccountStatusIndicator :account="row" @show-temp-unsched="handleShowTempUnsched" />
             </div>
+          </template>
+          <template #cell-loginStatus="{ row }">
+            <span
+              data-testid="login-status-badge"
+              class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium"
+              :class="loginStatusBadgeClass(computeLoginStatus(row))"
+              :title="loginStatusTitle(row)"
+            >
+              {{ loginStatusLabel(computeLoginStatus(row)) }}
+            </span>
           </template>
           <template #cell-schedulable="{ row }">
             <button @click="handleToggleSchedulable(row)" :disabled="togglingSchedulable === row.id" class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:focus:ring-offset-dark-800" :class="[row.schedulable ? 'bg-primary-500 hover:bg-primary-600' : 'bg-gray-200 hover:bg-gray-300 dark:bg-dark-600 dark:hover:bg-dark-500']" :title="row.schedulable ? t('admin.accounts.schedulableEnabled') : t('admin.accounts.schedulableDisabled')">
@@ -588,6 +605,8 @@ import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/ac
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { webAutoLoginAPI } from '@/api/admin/webAutoLogin'
+import { isWebAccessAccount } from '@/components/account/credentialsBuilder'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
@@ -1203,6 +1222,11 @@ const {
   rows: accounts,
   getId: (account) => account.id
 })
+
+// 选中账号明细：批量操作栏据此判断是否全部为 web access 账号，从而收敛 Web 专属按钮。
+const selectedAccounts = computed(() =>
+  accounts.value.filter(account => selIds.value.includes(account.id))
+)
 
 const selectingAllResults = ref(false)
 const selectedAllResultIDs = ref<Set<number> | null>(null)
@@ -1880,6 +1904,7 @@ const allColumns = computed(() => {
     { key: 'platform_type', label: t('admin.accounts.columns.platformType'), sortable: false },
     { key: 'capacity', label: t('admin.accounts.columns.capacity'), sortable: false },
     { key: 'status', label: t('admin.accounts.columns.status'), sortable: true },
+    { key: 'loginStatus', label: t('admin.accounts.columns.loginStatus'), sortable: false },
     { key: 'schedulable', label: t('admin.accounts.columns.schedulable'), sortable: true },
     { key: 'today_stats', label: t('admin.accounts.columns.todayStats'), sortable: false }
   ]
@@ -1906,6 +1931,100 @@ const allColumns = computed(() => {
 const toggleableColumns = computed(() =>
   allColumns.value.filter(col => col.key !== 'select' && col.key !== 'name' && col.key !== 'actions')
 )
+
+// ── 登录状态徽标（网页接入自动登录辅助）──
+// 数据源：账号 credentials 的 login_last_error / login_last_at（列表 DTO 已透出
+// credentials map，见 types/AccountListItem；若后端未返回该字段则回退既有
+// error_message / status 渲染，绝不伪造状态）。
+// TODO: 待后端在 credentials 中稳定返回 login_last_error / login_last_at 后，
+//       移除 status/error_message 兜底分支。
+export type LoginStatusKind = 'active' | 'failed' | 'banned' | 'unconfigured'
+
+function isBannedErrorMessage(msg: string | null | undefined): boolean {
+  if (!msg) return false
+  const m = msg.toLowerCase()
+  return /封禁|封号|禁用|ban|banned|account.{0,12}banned|账号被|已封/.test(m)
+}
+
+type LoginStatusAccount = {
+  status?: string
+  error_message?: string | null
+  credentials?: Record<string, unknown> | null
+  platform?: string
+}
+
+// 列表 DTO 可能透出 credentials.login_last_error；不存在时回退既有 error_message。
+function extractLoginLastError(account: LoginStatusAccount): string | undefined {
+  const creds = account.credentials
+  const raw = creds?.login_last_error
+  const fromCreds = typeof raw === 'string' && raw.length > 0 ? raw : undefined
+  return fromCreds || (account.error_message ?? undefined) || undefined
+}
+
+function computeLoginStatus(account: LoginStatusAccount): LoginStatusKind {
+  const loginLastError = extractLoginLastError(account)
+  const hasLoginError = !!loginLastError
+  // 平台归并后 web 专属态（unconfigured 等）只属于 access_mode="web" 的账号；
+  // 同平台的普通 API 账号不得因为 platform 命中而显示 web 登录状态。
+  const isWeb = isWebAccessAccount(account)
+
+  if (hasLoginError) {
+    return isBannedErrorMessage(loginLastError) ? 'banned' : 'failed'
+  }
+  if (account.status === 'error') {
+    return 'failed'
+  }
+  if (isWeb) {
+    const creds = account.credentials
+    const rawCookie = creds?.cookie
+    const rawToken = creds?.access_token
+    const hasCookie = typeof rawCookie === 'string' && rawCookie.length > 0
+    const hasToken = typeof rawToken === 'string' && rawToken.length > 0
+    if (!hasCookie && !hasToken) return 'unconfigured'
+  }
+  return 'active'
+}
+
+function loginStatusLabel(kind: LoginStatusKind): string {
+  switch (kind) {
+    case 'active':
+      return t('admin.accounts.loginStatus.active')
+    case 'failed':
+      return t('admin.accounts.loginStatus.failed')
+    case 'banned':
+      return t('admin.accounts.loginStatus.banned')
+    case 'unconfigured':
+      return t('admin.accounts.loginStatus.unconfigured')
+  }
+}
+
+const loginStatusBadgeClassMap: Record<LoginStatusKind, string> = {
+  active: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+  failed: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+  banned: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  unconfigured: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+}
+
+function loginStatusBadgeClass(kind: LoginStatusKind): string {
+  return loginStatusBadgeClassMap[kind]
+}
+
+function loginStatusTitle(account: LoginStatusAccount): string {
+  const kind = computeLoginStatus(account)
+  if (kind === 'failed') {
+    const detail = extractLoginLastError(account) ?? ''
+    return detail
+      ? t('admin.accounts.loginStatus.failedTitleWithDetail', { detail })
+      : t('admin.accounts.loginStatus.failedTitle')
+  }
+  if (kind === 'banned') {
+    const detail = extractLoginLastError(account) ?? ''
+    return detail
+      ? t('admin.accounts.loginStatus.bannedTitleWithDetail', { detail })
+      : t('admin.accounts.loginStatus.bannedTitle')
+  }
+  return loginStatusLabel(kind)
+}
 
 // Filtered columns based on visibility
 const cols = computed(() =>
@@ -2035,6 +2154,136 @@ const handleBulkProbeUpstreamBilling = async () => {
     accountIDs.forEach(id => probingUpstreamBilling.delete(id))
   }
 }
+
+// ── 网页接入自动登录批量操作 ──
+const handleBulkWebLogin = async () => {
+  const accountIds = [...selIds.value]
+  if (accountIds.length === 0) {
+    appStore.showError(t('admin.accounts.batch.noSelection'))
+    return
+  }
+  try {
+    const result = await webAutoLoginAPI.batchLogin(accountIds)
+    const needsSms = result.results.filter(r => r.needs_sms).length
+    if (result.summary.failed > 0 || needsSms > 0) {
+      // needs_sms 账号本期无法自动完成（短信发码通道未接入），提示用户手动处理。
+      appStore.showWarning(
+        t('admin.accounts.batch.loginPartial', {
+          success: result.summary.success,
+          failed: result.summary.failed,
+          needsSms
+        })
+      )
+    } else {
+      appStore.showSuccess(
+        t('admin.accounts.batch.loginSuccess', {
+          success: result.summary.success,
+          failed: 0,
+          needsSms: 0
+        })
+      )
+      clearSelection()
+    }
+    await reload()
+  } catch (error) {
+    console.error('Failed to bulk web-login accounts:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.loginFailed')))
+  }
+}
+
+const handleBulkWebTest = async () => {
+  const accountIds = [...selIds.value]
+  if (accountIds.length === 0) {
+    appStore.showError(t('admin.accounts.batch.noSelection'))
+    return
+  }
+  try {
+    const result = await webAutoLoginAPI.batchTest(accountIds)
+    const failed = result.results.filter(r => !r.success).length
+    const success = result.results.length - failed
+    if (failed > 0) {
+      appStore.showWarning(t('admin.accounts.batch.testPartial', { success, failed }))
+    } else {
+      appStore.showSuccess(t('admin.accounts.batch.testSuccess', { success, failed: 0 }))
+    }
+  } catch (error) {
+    console.error('Failed to bulk test accounts:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.testFailed')))
+  }
+}
+
+// 两步：先取封禁候选清单 → 用户确认 → 再删除。
+const handleBulkDeleteBanned = async () => {
+  try {
+    const candidates = await webAutoLoginAPI.batchDeleteBanned(false)
+    if (candidates.candidates.length === 0) {
+      appStore.showInfo(t('admin.accounts.batch.deleteBannedNone'))
+      return
+    }
+    const names = candidates.candidates.map(c => c.name).join('、')
+    if (!confirm(t('admin.accounts.batch.deleteBannedConfirm', { count: candidates.candidates.length, names }))) {
+      return
+    }
+    const deleted = await webAutoLoginAPI.batchDeleteBanned(true)
+    appStore.showSuccess(t('admin.accounts.batch.deleteBannedSuccess', { count: deleted.deleted }))
+    await reload()
+  } catch (error) {
+    console.error('Failed to delete banned accounts:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.deleteBannedFailed')))
+  }
+}
+
+const handleBulkWebStatus = async (status: 'active' | 'inactive') => {
+  const accountIds = [...selIds.value]
+  if (accountIds.length === 0) {
+    appStore.showError(t('admin.accounts.batch.noSelection'))
+    return
+  }
+  try {
+    const result = await webAutoLoginAPI.batchStatus({ ids: accountIds, status })
+    if (result.failed > 0) {
+      appStore.showError(t('admin.accounts.batch.statusPartial', { success: result.success, failed: result.failed }))
+    } else {
+      appStore.showSuccess(t('admin.accounts.batch.statusSuccess', { count: result.success }))
+      clearSelection()
+    }
+    await reload()
+  } catch (error) {
+    console.error('Failed to set account status in batch:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.statusFailed')))
+  }
+}
+
+const handleBulkExportWeb = async () => {
+  const accountIds = [...selIds.value]
+  if (accountIds.length === 0) {
+    appStore.showError(t('admin.accounts.batch.noSelection'))
+    return
+  }
+  // 必须校验全部选中项均为 web access 账号（不能只看第一个）：同平台普通 API
+  // 账号与 web 账号可共存，混选或纯 API 账号一律拒绝导出。
+  const selected = accounts.value.filter(a => accountIds.includes(a.id))
+  if (selected.length === 0 || !selected.every(a => isWebAccessAccount(a))) {
+    appStore.showError(t('admin.accounts.batch.selectWebOnly'))
+    return
+  }
+  const platform = selected[0].platform
+  try {
+    const blob = await webAutoLoginAPI.exportWebAccounts(platform)
+    const timestamp = formatExportTimestamp()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `sub2api-web-accounts-${platform}-${timestamp}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+    appStore.showSuccess(t('admin.accounts.batch.exportSuccess'))
+  } catch (error) {
+    console.error('Failed to export web accounts:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.exportFailed')))
+  }
+}
+
 const updateSchedulableInList = (accountIds: number[], schedulable: boolean) => {
   if (accountIds.length === 0) return
   const idSet = new Set(accountIds)

@@ -7,8 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// GetAccessMode 四态语义钉住（docs/platform-merge-refactor-plan.md §5.1）：
-// 显式合法 / 显式非法失败关闭 / 缺失形状推断 / 缺失默认 api。
+// GetAccessMode 语义钉住（docs/platform-merge-refactor-plan.md §5.1；PR-4 已移除
+// 形状推断）：显式合法 / 显式非法失败关闭 / 缺失默认 api。
 func TestGetAccessModeFourStates(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -35,21 +35,16 @@ func TestGetAccessModeFourStates(t *testing.T) {
 			want:       "",
 		},
 		{
-			name:       "missing + cookie shape infers web",
+			// PR-4：形状推断移除，缺失 access_mode 一律按 api（不按凭证形状读取）。
+			name:       "missing + cookie shape defaults api (no inference)",
 			platform:   domain.PlatformZhipu,
 			credential: map[string]any{"cookie": "x"},
-			want:       AccountAccessModeWeb,
+			want:       AccountAccessModeAPI,
 		},
 		{
-			name:       "missing + access_token shape infers web",
+			name:       "missing + access_token shape defaults api (no inference)",
 			platform:   domain.PlatformKimi,
 			credential: map[string]any{"access_token": "x"},
-			want:       AccountAccessModeWeb,
-		},
-		{
-			name:       "missing + empty cookie does not infer web",
-			platform:   domain.PlatformZhipu,
-			credential: map[string]any{"cookie": ""},
 			want:       AccountAccessModeAPI,
 		},
 		{
@@ -77,10 +72,12 @@ func TestGetAccessModeFourStates(t *testing.T) {
 			want:       AccountAccessModeWeb,
 		},
 		{
-			name:       "legacy web-zhipu platform with cookie infers web",
-			platform:   domain.PlatformWebZhipu,
+			// PR-4：形状推断已移除（PR-2 reconciler 已把存量 web 账号 access_mode
+			// 显式化），缺失 access_mode 一律按 "api"，不按凭证形状读取。
+			name:       "missing access_mode with cookie-shaped credentials defaults to api",
+			platform:   domain.PlatformDeepseek,
 			credential: map[string]any{"cookie": "c"},
-			want:       AccountAccessModeWeb,
+			want:       AccountAccessModeAPI,
 		},
 	}
 	for _, tt := range tests {

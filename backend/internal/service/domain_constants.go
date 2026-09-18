@@ -52,11 +52,6 @@ const (
 	PlatformOther     = domain.PlatformOther
 	PlatformMiniMax   = domain.PlatformMiniMax
 	PlatformComposite = domain.PlatformComposite
-	// 网页逆向平台（官方网页端登录态转发）：凭证为 Cookie / Token，见
-	// docs/web-reverse-embedded-login-plan.md §3.2。W1 仅平台准入与凭证字段定义。
-	PlatformWebDeepseek = domain.PlatformWebDeepseek
-	PlatformWebZhipu    = domain.PlatformWebZhipu
-	PlatformWebKimi     = domain.PlatformWebKimi
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"
@@ -107,7 +102,7 @@ const (
 	DefaultMiniMaxAnthropicBaseURL    = "https://api.minimaxi.com/anthropic"
 )
 
-// 网页逆向平台（web-deepseek / web-zhipu / web-kimi）的默认上游 base_url
+// 官方平台网页接入（zhipu / deepseek / kimi）的默认上游 base_url
 // （docs/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
 // credentials.base_url 覆盖（Account.GetWebBaseURL）。
 const (
@@ -126,10 +121,11 @@ func IsCNProvider(platform string) bool {
 	}
 }
 
-// IsWebProvider 报告 platform 是否为网页逆向平台（web-deepseek/web-zhipu/web-kimi）。
-// 与 IsCNProvider 正交：网页平台不走 OpenAI 兼容 API 语义（额度/阈值白名单不纳入）。
-func IsWebProvider(platform string) bool {
-	return domain.IsWebProvider(platform)
+// IsWebLoginPlatform 报告 platform 是否为支持网页登录的官方平台（kimi/zhipu/deepseek）。
+// 平台归并重构（§5.5）：网页接入由官方平台账号级 access_mode=web 承载，
+// 「是否支持网页登录」由官方平台集合判定（取代旧平台值判定）。
+func IsWebLoginPlatform(platform string) bool {
+	return domain.IsWebLoginPlatform(platform)
 }
 
 // ValidateWebAccountCredential 导出网页平台凭证准入校验（W5 预创建校验端点复用，
@@ -847,3 +843,54 @@ const AdminAPIKeyPrefix = "admin-"
 // SettingKeyAllowUserViewErrorRequests controls whether end users can view
 // their own failed requests on the usage page. Default false (opt-in).
 const SettingKeyAllowUserViewErrorRequests = "allow_user_view_error_requests"
+
+// =========================
+// Web 平台自动登录服务（zhipu / deepseek / kimi 官方平台 + access_mode=web）
+// =========================
+//
+// 凭据键全部落在既有 Credentials map（不加 DB 列）。自动登录的「业务凭据」（cookie /
+// access_token / refresh_token / chatglm_token）仍沿用转发链既有键，保证转发适配器
+// 无需改动即可消费；login_* 键为自动登录服务自身的簿记字段。
+
+const (
+	// 自动登录簿记凭据键。
+	CredKeyLoginEmail            = "login_email"
+	CredKeyLoginPassword         = "login_password"
+	CredKeyLoginPhone            = "login_phone"
+	CredKeyLoginDeviceID         = "login_device_id"
+	CredKeyLoginRefreshToken     = "login_refresh_token"
+	CredKeyLoginRefreshExpiresAt = "login_refresh_expires_at"
+	CredKeyLoginLastAt           = "login_last_at"   // RFC3339，上次尝试时间（退避冷却基准）
+	CredKeyLoginFailCount        = "login_fail_count" // 连续失败次数（退避档位依据）
+	CredKeyLoginLastError        = "login_last_error" // 仅含文案+码，绝不写 Cookie/密码/响应体
+	// login_non_retryable 是内部簿记键：标记 banned/密码错/WAF/PoW 等不可重试类错误，
+	// 维护池见此标记即跳过（只保留 login_last_error，不再重试）。
+	CredKeyLoginNonRetryable = "login_non_retryable"
+)
+
+// Web 平台自动登录出站端点（取证结论，已核实，不要重新猜测协议）。
+const (
+	WebDeepseekLoginEndpoint = "/api/v0/users/login"
+	WebZhipuRefreshEndpoint  = "/user-api/user/refresh"
+	WebKimiRefreshEndpoint   = "/api/kimi.gateway.auth.v1.AuthService/RefreshToken"
+)
+
+// 自动登录错误 kind（用于 WebPlatformErrorDetail 与分类）。
+const (
+	WebLoginKindLogin   = "login"
+	WebLoginKindRefresh = "refresh"
+	WebLoginKindWAF     = "waf"
+)
+
+// 关键业务码（三平台共用细化表）。
+const (
+	WebLoginCodeSuccess        int64 = 0
+	WebLoginCodeBadCredential  int64 = 2     // deepseek：邮箱或密码错误
+	WebLoginCodeBanned         int64 = 10    // deepseek：账号被封禁
+	WebLoginCodeAuthExpired    int64 = 40002 // 认证失效
+	WebLoginCodeAuthExpired2   int64 = 40003 // 认证失效（变体）
+	WebLoginCodeRateLimited    int64 = 40029 // IP/请求受限
+	WebLoginCodeHTTPTooMany    int64 = 429   // 限流
+	WebLoginCodePoW1           int64 = 40300 // PoW 错误
+	WebLoginCodePoW2           int64 = 40301 // PoW 错误（变体）
+)

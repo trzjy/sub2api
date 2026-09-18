@@ -7,11 +7,11 @@ import (
 )
 
 // TestTaskC_DefaultWebModelIDsModeKey 锁定 DefaultWebModelIDs 归并后 (provider, web) 双键
-// 与旧 web-* 平台目录完全一致（方案 §5.6：web-zhipu→zhipu+web 等同）。
+// 与官方平台 + access_mode=web 目录完全一致（方案 §5.6：网页接入由官方平台承载）。
 func TestTaskC_DefaultWebModelIDsModeKey(t *testing.T) {
-	require.Equal(t, DefaultWebModelIDs(PlatformWebZhipu), DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb))
-	require.Equal(t, DefaultWebModelIDs(PlatformWebDeepseek), DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))
-	require.Equal(t, DefaultWebModelIDs(PlatformWebKimi), DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb))
+	require.Equal(t, DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb), DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb))
+	require.Equal(t, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb), DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))
+	require.Equal(t, DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb), DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb))
 
 	require.Equal(t, []string{"glm-5.3-flash"}, DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb))
 	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))

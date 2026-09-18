@@ -942,7 +942,7 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="web-kimi-token-json"]').setValue(
+    await wrapper.get('[data-testid="kimi-token-json"]').setValue(
       JSON.stringify({ access_token: 'at', refresh_token: 'rt', user_id: 'u-9' })
     )
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
@@ -979,7 +979,7 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="web-kimi-token-json"]').setValue('not-json')
+    await wrapper.get('[data-testid="kimi-token-json"]').setValue('not-json')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 

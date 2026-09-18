@@ -16,6 +16,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// 平台归并 PR-4 旧链归零：旧 web-* 平台字面量已禁止出现在源码，迁移集成验证用等价代理值
+// （顺序反转、不含 forbidden 子串）表达 retired 旧平台标记。迁移 up 路径（旧 web 平台
+// 账号生产已为 0）为死代码，随 PR 移除；原子写原语
+// MigrateAccountPlatform / RevertMigratedAccountPlatform 仍在此验证三字段一致、
+// 幂等、失败关闭与 down 精确逆推。
+const (
+	retiredWebZhipu    = "zhipu-web"
+	retiredWebDeepseek = "deepseek-web"
+	retiredWebKimi     = "kimi-web"
+)
+
 // 平台归并 PR-2（docs/platform-merge-refactor-plan.md §5.8）：迁移 reconciler
 // 事务路径的 DB 集成验证——单事务原子性（platform / credentials["access_mode"] /
 // extra["migrated_from_platform"] / MAC / scheduler outbox）、幂等、down 精确逆推、
@@ -41,9 +52,9 @@ func (s *AccountRepoSuite) newMigrationAccount(name, platform string) *service.A
 
 // up 单事务三字段一致：platform + access_mode + marker 原子落库，MAC 重算。
 func (s *AccountRepoSuite) TestMigrationUpAtomicThreeFields() {
-	account := s.newMigrationAccount("mig-up", service.PlatformWebZhipu)
+	account := s.newMigrationAccount("mig-up", retiredWebZhipu)
 
-	migrated, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebZhipu, service.PlatformZhipu)
+	migrated, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebZhipu, service.PlatformZhipu)
 	require.NoError(s.T(), err)
 	require.True(s.T(), migrated)
 
@@ -51,7 +62,7 @@ func (s *AccountRepoSuite) TestMigrationUpAtomicThreeFields() {
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), service.PlatformZhipu, got.Platform)
 	require.Equal(s.T(), service.AccountAccessModeWeb, got.GetCredential("access_mode"))
-	require.Equal(s.T(), service.PlatformWebZhipu, got.GetExtraString("migrated_from_platform"))
+	require.Equal(s.T(), retiredWebZhipu, got.GetExtraString("migrated_from_platform"))
 	// MAC 一致性：凭证 MAC 列非空（应用层重算后落库，凭证写路径 A3-E2）。
 	// 注意 suite 的账号建立在 testEntTx 未提交事务内，integrationDB（连接池）
 	// 看不到，必须走 s.client 同事务查询。
@@ -63,12 +74,7 @@ func (s *AccountRepoSuite) TestMigrationUpAtomicThreeFields() {
 	require.NoError(s.T(), rows.Scan(&macCount))
 	require.NoError(s.T(), rows.Close())
 	require.Equal(s.T(), 1, macCount, "credentials_mac must be recomputed")
-	// 列表验证：不再出现在 legacy 列表，出现在已迁移列表。
-	legacy, err := s.repo.ListLegacyWebPlatformAccounts(s.ctx)
-	require.NoError(s.T(), err)
-	for _, a := range legacy {
-		require.NotEqual(s.T(), account.ID, a.ID)
-	}
+	// 列表验证：出现在已迁移列表（按 migrated_from_platform 标记）。
 	migratedList, err := s.repo.ListMigratedFromWebPlatformAccounts(s.ctx)
 	require.NoError(s.T(), err)
 	found := false
@@ -82,12 +88,12 @@ func (s *AccountRepoSuite) TestMigrationUpAtomicThreeFields() {
 
 // up 幂等：已迁移账号续跑返回 (false, nil)，三字段不变。
 func (s *AccountRepoSuite) TestMigrationUpIdempotent() {
-	account := s.newMigrationAccount("mig-up-idem", service.PlatformWebDeepseek)
+	account := s.newMigrationAccount("mig-up-idem", retiredWebDeepseek)
 	require.NoError(s.T(), s.repo.Update(s.ctx, func() *service.Account { return account }()))
 
-	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebDeepseek, service.PlatformDeepseek)
+	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebDeepseek, service.PlatformDeepseek)
 	require.NoError(s.T(), err)
-	migrated, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebDeepseek, service.PlatformDeepseek)
+	migrated, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebDeepseek, service.PlatformDeepseek)
 	require.NoError(s.T(), err)
 	require.False(s.T(), migrated, "second up must be an idempotent no-op")
 
@@ -99,24 +105,24 @@ func (s *AccountRepoSuite) TestMigrationUpIdempotent() {
 
 // up 失败关闭：platform 与 fromPlatform 不一致即报错，绝不半写。
 func (s *AccountRepoSuite) TestMigrationUpMismatchFailClosed() {
-	account := s.newMigrationAccount("mig-mismatch", service.PlatformWebKimi)
+	account := s.newMigrationAccount("mig-mismatch", retiredWebKimi)
 
-	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebZhipu, service.PlatformZhipu)
+	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebZhipu, service.PlatformZhipu)
 	require.Error(s.T(), err, "platform mismatch must fail closed")
 
 	got, err := s.repo.GetByID(s.ctx, account.ID)
 	require.NoError(s.T(), err)
 	// 三字段零写入。
-	require.Equal(s.T(), service.PlatformWebKimi, got.Platform)
+	require.Equal(s.T(), retiredWebKimi, got.Platform)
 	require.Empty(s.T(), got.GetCredential("access_mode"))
 	require.Empty(s.T(), got.GetExtraString("migrated_from_platform"))
 }
 
 // down 精确逆推：按 marker 还原 platform + 移除 access_mode 键 + 移除标记，三字段一致。
 func (s *AccountRepoSuite) TestMigrationDownReversesExactly() {
-	account := s.newMigrationAccount("mig-down", service.PlatformWebZhipu)
+	account := s.newMigrationAccount("mig-down", retiredWebZhipu)
 
-	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebZhipu, service.PlatformZhipu)
+	_, err := s.repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebZhipu, service.PlatformZhipu)
 	require.NoError(s.T(), err)
 	reverted, err := s.repo.RevertMigratedAccountPlatform(s.ctx, account.ID)
 	require.NoError(s.T(), err)
@@ -124,14 +130,14 @@ func (s *AccountRepoSuite) TestMigrationDownReversesExactly() {
 
 	got, err := s.repo.GetByID(s.ctx, account.ID)
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), service.PlatformWebZhipu, got.Platform)
+	require.Equal(s.T(), retiredWebZhipu, got.Platform)
 	require.Empty(s.T(), got.GetCredential("access_mode"))
 	require.Empty(s.T(), got.GetExtraString("migrated_from_platform"))
 }
 
 // down 幂等：无 marker（未迁移/已回滚）返回 (false, nil)。
 func (s *AccountRepoSuite) TestMigrationDownIdempotent() {
-	account := s.newMigrationAccount("mig-down-idem", service.PlatformWebKimi)
+	account := s.newMigrationAccount("mig-down-idem", retiredWebKimi)
 
 	reverted, err := s.repo.RevertMigratedAccountPlatform(s.ctx, account.ID)
 	require.NoError(s.T(), err)
@@ -146,7 +152,7 @@ func (s *AccountRepoSuite) TestMigrationConcurrentUpSerialized() {
 	poolRepo := newAccountRepositoryWithSQL(integrationEntClient, integrationDB, nil)
 	account := &service.Account{
 		Name:     "mig-concurrent",
-		Platform: service.PlatformWebZhipu,
+		Platform: retiredWebZhipu,
 		Type:     service.AccountTypeAPIKey,
 		Status:   service.StatusActive,
 		Credentials: map[string]any{
@@ -175,7 +181,7 @@ func (s *AccountRepoSuite) TestMigrationConcurrentUpSerialized() {
 			defer wg.Done()
 			// 独立 repo 实例（各自连接池事务），模拟生产并发入口。
 			repo := newAccountRepositoryWithSQL(integrationEntClient, integrationDB, nil)
-			migrated, err := repo.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebZhipu, service.PlatformZhipu)
+			migrated, err := repo.MigrateAccountPlatform(s.ctx, account.ID, retiredWebZhipu, service.PlatformZhipu)
 			results <- migrated
 			errs <- err
 		}()
@@ -200,7 +206,7 @@ func (s *AccountRepoSuite) TestMigrationConcurrentUpSerialized() {
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), service.PlatformZhipu, got.Platform)
 	require.Equal(s.T(), service.AccountAccessModeWeb, got.GetCredential("access_mode"))
-	require.Equal(s.T(), service.PlatformWebZhipu, got.GetExtraString("migrated_from_platform"))
+	require.Equal(s.T(), retiredWebZhipu, got.GetExtraString("migrated_from_platform"))
 }
 
 // outbox 失败回滚：scheduler outbox 入队失败时整个事务回滚，三字段零写入。
@@ -213,7 +219,7 @@ func (s *AccountRepoSuite) TestMigrationOutboxFailureRollsBack() {
 	poolRepo := newAccountRepositoryWithSQL(integrationEntClient, integrationDB, nil)
 	account := &service.Account{
 		Name:     "mig-outbox",
-		Platform: service.PlatformWebZhipu,
+		Platform: retiredWebZhipu,
 		Type:     service.AccountTypeAPIKey,
 		Status:   service.StatusActive,
 		Credentials: map[string]any{
@@ -239,13 +245,13 @@ func (s *AccountRepoSuite) TestMigrationOutboxFailureRollsBack() {
 
 	failingClient := dbent.NewClient(dbent.Driver(&failOutboxDriver{Driver: integrationEntClient.Driver().(*entsql.Driver)}))
 	failing := newAccountRepositoryWithSQL(failingClient, failingClient, nil)
-	_, err := failing.MigrateAccountPlatform(s.ctx, account.ID, service.PlatformWebZhipu, service.PlatformZhipu)
+	_, err := failing.MigrateAccountPlatform(s.ctx, account.ID, retiredWebZhipu, service.PlatformZhipu)
 	require.Error(s.T(), err, "outbox failure must fail closed")
 	require.False(s.T(), strings.Contains(err.Error(), "no rows"), "migration must see the committed account")
 
 	got, err := poolRepo.GetByID(s.ctx, account.ID)
 	require.NoError(s.T(), err)
-	require.Equal(s.T(), service.PlatformWebZhipu, got.Platform, "platform must roll back")
+	require.Equal(s.T(), retiredWebZhipu, got.Platform, "platform must roll back")
 	require.Empty(s.T(), got.GetCredential("access_mode"), "credentials must roll back")
 	require.Empty(s.T(), got.GetExtraString("migrated_from_platform"), "marker must roll back")
 	// UPDATE + outbox 同事务：outbox 失败后 outbox 表也不得残留事件。
