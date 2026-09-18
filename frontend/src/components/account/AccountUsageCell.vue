@@ -833,22 +833,20 @@ let desktopViewportListener: ((event: MediaQueryListEvent) => void) | null = nul
 let visibilityObserver: IntersectionObserver | null = null
 
 // Show usage windows for OAuth and Setup Token accounts
-// 网页逆向平台账号（web-deepseek / web-zhipu / web-kimi）：专用展示分支。
-const isWebProviderAccount = computed(() =>
-  props.account.platform === 'web-deepseek' ||
-  props.account.platform === 'web-zhipu' ||
-  props.account.platform === 'web-kimi')
+// 网页接入模式账号（平台归并 PR-3：官方 CN 平台 + credentials["access_mode"]="web"）：
+// 专用展示分支。
+const isWebProviderAccount = computed(() => isWebAccessModeAccount.value)
+const isWebAccessModeAccount = computed(() => {
+  const mode = props.account.credentials?.access_mode
+  return props.account.type === 'apikey' && typeof mode === 'string' && mode === 'web'
+})
 
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   if (props.account.platform === 'gemini') return true
-  // 网页逆向平台（W6）：免费额度无标准查询接口，不做探测；但账号参与调度，
+  // 网页接入模式（W6）：免费额度无标准查询接口，不做探测；但账号参与调度，
   // 展示本地今日用量统计（web 专用分支，见下方 non-OAuth 分支）。
-  if (
-    props.account.platform === 'web-deepseek' ||
-    props.account.platform === 'web-zhipu' ||
-    props.account.platform === 'web-kimi'
-  ) {
+  if (isWebAccessModeAccount.value) {
     return true
   }
   // CN providers: apikey 账号也有滚动用量窗口（coding plan）或余额（payg），
@@ -885,13 +883,9 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'codebuddy') {
     return props.account.type === 'oauth'
   }
-  // 网页逆向平台（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
+  // 网页接入模式（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
   // 不应触发 getUsage 请求（后端对 web 无用量分支）。
-  if (
-    props.account.platform === 'web-deepseek' ||
-    props.account.platform === 'web-zhipu' ||
-    props.account.platform === 'web-kimi'
-  ) {
+  if (isWebAccessModeAccount.value) {
     return false
   }
   return false

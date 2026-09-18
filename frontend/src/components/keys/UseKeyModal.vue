@@ -1252,9 +1252,6 @@ function generateRoutedCodexFiles(
     minimax: 'MiniMax',
     codebuddy: 'CodeBuddy',
     other: 'Other',
-    'web-deepseek': 'DeepSeek Web',
-    'web-zhipu': 'Zhipu GLM Web',
-    'web-kimi': 'Kimi Web',
     composite: 'Composite'
   }
   const label = labels[platform]

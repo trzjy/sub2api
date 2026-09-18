@@ -108,7 +108,15 @@ defineEmits<{
 const { t } = useI18n()
 const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000
 // 探测资格按平台白名单门控（isUpstreamBillingProbeEligible，与后端 IsUpstreamBillingProbeIdentity 同名单）。
-const eligible = computed(() => isUpstreamBillingProbeEligible(props.account.platform, props.account.type))
+// 平台归并 PR-3：网页接入模式账号（平台为官方值但 credentials["access_mode"]="web"，
+// 无静态密钥）同样不在探测白名单内。
+const eligible = computed(() =>
+  isUpstreamBillingProbeEligible(props.account.platform, props.account.type) &&
+  !isWebAccessModeAccount.value)
+const isWebAccessModeAccount = computed(() => {
+  const mode = props.account.credentials?.access_mode
+  return props.account.type === 'apikey' && typeof mode === 'string' && mode === 'web'
+})
 const snapshot = computed<UpstreamBillingProbeSnapshot | undefined>(() => props.account.extra?.upstream_billing_probe)
 const data = computed(() => snapshot.value?.data)
 const probeEnabled = computed(() => props.account.extra?.upstream_billing_probe_enabled === true)

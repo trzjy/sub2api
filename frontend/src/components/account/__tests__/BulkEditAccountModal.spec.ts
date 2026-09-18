@@ -781,30 +781,30 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
   })
 
-  it.each(['web-zhipu', 'web-deepseek', 'web-kimi'])(
-    '网页平台 %s 即使类型为 apikey 也不显示探测开关且提交不携带 upstream_billing_probe_enabled',
-    async (platform) => {
-      const wrapper = mountModal({
-        selectedPlatforms: [platform],
-        selectedTypes: ['apikey']
-      })
-
-      expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
-
-      // 启用一个其他字段以便表单能提交
-      await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
-      await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
-      await flushPromises()
-
-      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
-      const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
-      expect(payload).not.toHaveProperty('upstream_billing_probe_enabled')
-    }
-  )
-
-  it('网页平台与其他 API-key 平台混合选择时不显示探测开关', () => {
+  it('非探测白名单平台（other）即使类型为 apikey 也不显示探测开关且提交不携带 upstream_billing_probe_enabled', async () => {
+    // 平台归并 PR-3：web-* 平台值已删除，网页接入下沉为账号级 access_mode，
+    // 批量编辑按平台 × 类型交叉积判定（无法按账号 access_mode 收敛），
+    // 官方 CN 平台恢复资格；other/codebuddy 仍不在白名单。
     const wrapper = mountModal({
-      selectedPlatforms: ['openai', 'web-zhipu'],
+      selectedPlatforms: ['other'],
+      selectedTypes: ['apikey']
+    })
+
+    expect(wrapper.find('#bulk-edit-upstream-billing-auto-probe-enabled').exists()).toBe(false)
+
+    // 启用一个其他字段以便表单能提交
+    await wrapper.get('#bulk-edit-concurrency-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0][1] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('upstream_billing_probe_enabled')
+  })
+
+  it('非白名单平台与其他 API-key 平台混合选择时不显示探测开关', () => {
+    const wrapper = mountModal({
+      selectedPlatforms: ['openai', 'other'],
       selectedTypes: ['apikey']
     })
 

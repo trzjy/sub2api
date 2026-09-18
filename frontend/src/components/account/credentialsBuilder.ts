@@ -25,13 +25,14 @@ export function applyAntigravityProjectID(
   }
 }
 
-// ===== 网页逆向平台（web-deepseek / web-zhipu / web-kimi）=====
-// 官方网页端登录态转发（docs/web-reverse-embedded-login-plan.md §3.2）：
+// ===== 网页接入模式（kimi / zhipu / deepseek + access_mode=web）=====
+// 平台归并（PR-3）后 web-* 不再是独立平台：官方网页端登录态转发下沉为账号级
+// credentials["access_mode"]="web"（docs/web-reverse-embedded-login-plan.md §3.2）：
 // DeepSeek / 智谱粘贴整串 Cookie；Kimi 粘贴 Token JSON。内嵌登录（W5）落地前，
 // 手动粘贴是唯一建号路径，落地后仍是降级兜底（§2.3）。字段口径与后端
-// validateWebAccountCredential / SanitizeStoredCredentials（web 平台保留 cookie）保持一致。
+// validateWebAccountCredential / SanitizeStoredCredentials（web 模式保留 cookie）保持一致。
 
-export const WEB_PROVIDER_PLATFORMS = ['web-deepseek', 'web-zhipu', 'web-kimi'] as const
+export const WEB_PROVIDER_PLATFORMS = ['kimi', 'zhipu', 'deepseek'] as const
 export type WebProviderPlatform = (typeof WEB_PROVIDER_PLATFORMS)[number]
 
 export function isWebProviderPlatform(platform: string): platform is WebProviderPlatform {
@@ -62,7 +63,7 @@ export function isUpstreamBillingProbeEligible(platform: string, type: string): 
 
 /** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 Token 三元组。 */
 export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
-  return platform === 'web-deepseek' || platform === 'web-zhipu'
+  return platform === 'deepseek' || platform === 'zhipu'
 }
 
 export type WebCredentialError =
@@ -94,7 +95,10 @@ export function buildWebProviderCredentials(
   if (!isWebProviderPlatform(platform)) {
     return { error: 'webCookieRequired' }
   }
-  const credentials: Record<string, unknown> = {}
+  const credentials: Record<string, unknown> = {
+    // 平台归并：网页接入模式唯一适配器判定源（与后端 accessModeFromCredentials 一致）。
+    access_mode: 'web',
+  }
   if (webProviderUsesCookie(platform)) {
     const cookie = input.cookie.trim()
     if (!cookie) {

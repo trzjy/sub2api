@@ -550,8 +550,8 @@
         </div>
       </div>
 
-      <!-- Account Mode Selection (Kimi / Zhipu / DeepSeek；web-* 为对应基础平台的二级入口，选择器保持可见以便切回) -->
-      <div v-if="isCNPlatform || isWebProviderPlatform(form.platform)">
+      <!-- Account Mode Selection (Kimi / Zhipu / DeepSeek；网页接入为账号级 access_mode 二级状态，选择器保持可见以便切回) -->
+      <div v-if="isCNPlatform">
         <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
         <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3" data-tour="account-form-mode">
           <!-- Pay-as-you-go (token balance) -->
@@ -607,7 +607,7 @@
               <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.cnProviders.accountMode.codingDesc') }}</span>
             </div>
           </button>
-          <!-- 网页版（二级入口）：官方网页端登录态转发，内部仍存为 web-* 平台（封号风险见表单内提示） -->
+          <!-- 网页接入（账号级 access_mode=web）：官方网页端登录态转发（封号风险见表单内提示） -->
           <button
             v-if="cnSupportsWebMode"
             type="button"
@@ -615,7 +615,7 @@
             @click="selectCNWebMode"
             :class="[
               'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
-              isWebProviderPlatform(form.platform)
+              isWebAccessModePlatform
                 ? cnAccentActiveClass
                 : 'border-gray-200 hover:border-gray-400 dark:border-dark-600 dark:hover:border-gray-600'
             ]"
@@ -623,7 +623,7 @@
             <div
               :class="[
                 'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
-                isWebProviderPlatform(form.platform)
+                isWebAccessModePlatform
                   ? cnAccentIconClass
                   : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
               ]"
@@ -1459,8 +1459,8 @@
         </div>
       </div>
 
-      <!-- 网页逆向平台：手动粘贴凭证（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底） -->
-      <div v-if="isWebProviderPlatform(form.platform)" class="space-y-4">
+      <!-- 网页接入模式：手动粘贴登录态凭证（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底） -->
+      <div v-if="isWebAccessModePlatform" class="space-y-4">
         <!-- 封号风险提示（方案 §2.2）：账号参与站点调度，请使用可接受风险的账号 -->
         <div data-testid="web-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
           <p class="text-sm font-medium text-red-700 dark:text-red-300">
@@ -1470,7 +1470,7 @@
             {{ t('admin.accounts.webProviders.riskWarning.body') }}
           </p>
         </div>
-        <div v-if="webProviderUsesCookie(form.platform)">
+        <div v-if="webAccessModeUsesCookie">
           <label class="input-label">{{ t('admin.accounts.webProviders.cookieLabel') }}</label>
           <textarea
             v-model="webCookieInput"
@@ -1515,10 +1515,29 @@
           />
           <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
         </div>
+
+        <!-- 自动登录（账号密码自动登录并回填 Cookie；折叠表单） -->
+        <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-500">
+          <button
+            type="button"
+            data-testid="web-auto-login-toggle"
+            class="flex w-full items-center justify-between text-sm font-medium text-primary-600 dark:text-primary-400"
+            @click="showAutoLogin = !showAutoLogin"
+          >
+            <span>{{ t('admin.accounts.webLogin.autoLogin.title') }}</span>
+            <span>{{ showAutoLogin ? '▾' : '▸' }}</span>
+          </button>
+          <div v-if="showAutoLogin" class="mt-3">
+            <WebAutoLoginForm
+              :platform="form.platform"
+              @recovered="handleAutoLoginRecovered"
+            />
+          </div>
+        </div>
       </div>
 
       <!-- API Key input (only for apikey type, excluding Antigravity which has its own fields) -->
-      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'codebuddy' && !isWebProviderPlatform(form.platform)" class="space-y-4">
+      <div v-if="form.type === 'apikey' && form.platform !== 'antigravity' && form.platform !== 'codebuddy' && !isWebAccessModePlatform" class="space-y-4">
         <div v-if="!isCNPlatform || apiProtocol !== 'adaptive'">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
@@ -1607,10 +1626,10 @@
         </div>
 
         <!-- 上游倍率自动探测：仅探测资格平台显示（isUpstreamBillingProbeEligible
-             与后端 IsUpstreamBillingProbeIdentity 同名单）；web-*/other/codebuddy
-             等非资格平台隐藏开关且不发送该字段。 -->
+             与后端 IsUpstreamBillingProbeIdentity 同名单）；网页接入模式（平台归并后
+             平台为官方值但无静态密钥）/other/codebuddy 等非资格平台隐藏开关且不发送该字段。 -->
         <div
-          v-if="isUpstreamBillingProbeEligible(form.platform, form.type)"
+          v-if="isUpstreamBillingProbeEligible(form.platform, form.type) && !isWebAccessModePlatform"
           class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
         >
           <div>
@@ -4142,6 +4161,7 @@ import type {
 import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import WebLoginModal from './WebLoginModal.vue'
+import WebAutoLoginForm from './WebAutoLoginForm.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -4395,16 +4415,24 @@ const webCookieInput = ref('')
 const webKimiTokenJson = ref('')
 const webBaseUrlInput = ref('')
 const showWebLogin = ref(false)
+// 网页接入模式：「自动登录」折叠表单（账号密码自动登录并回填 Cookie）。
+const showAutoLogin = ref(false)
 
 // handleWebLoginApplied：内嵌登录弹窗校验通过后，把凭证回填到现有粘贴表单
 // （保持单一创建路径，用户确认后仍走同一提交链路）。
 function handleWebLoginApplied(payload: { platform: string; credentials: Record<string, unknown> }) {
-  if (payload.platform === 'web-kimi') {
+  if (payload.platform === 'kimi') {
     webKimiTokenJson.value = JSON.stringify(payload.credentials, null, 2)
   } else {
     const cookie = payload.credentials.cookie
     webCookieInput.value = typeof cookie === 'string' ? cookie : JSON.stringify(payload.credentials, null, 2)
   }
+}
+
+// 自动登录成功：与 iframe 捕获同一条回填路径——把返回的整串 Cookie 写入 webCookieInput。
+// zhipu / kimi 本期走 needs_sms，自动登录不会触发 recovered（由表单内如实展示未接入）。
+function handleAutoLoginRecovered(payload: { platform: string; cookie: string }) {
+  webCookieInput.value = payload.cookie
 }
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
@@ -4505,7 +4533,8 @@ function selectCNPlatform(platform: CnProviderPlatform) {
   form.type = 'apikey'
   accountCategory.value = 'apikey'
   apiProtocol.value = 'adaptive'
-  // 从网页版切回：网页版期间 accountMode 保持 payg，无需额外复位。
+  // 切换平台即退出网页接入模式（access_mode 为平台内二级状态）。
+  cnWebAccessMode.value = false
   if (platform === 'deepseek') {
     accountMode.value = 'payg'
   }
@@ -4525,31 +4554,36 @@ function selectOtherPlatform() {
   apiProtocol.value = 'chat_completions'
 }
 
-// 网页版为 CN 基础平台的二级入口：内部仍存为 web-* 平台（登录态凭证明文粘贴，
-// 无 base_url 预设与账号模式语义——免费网页额度无标准查询接口，不做额度探测，
-// 可用性经转发路径验证，方案 W6 口径）。
+// 网页接入为 CN 平台的账号模式（平台归并 PR-3）：platform 保持官方值，
+// 网页登录态凭证下沉为 credentials["access_mode"]="web"（免费网页额度无标准
+// 查询接口，不做额度探测，可用性经转发路径验证，方案 W6 口径）。
+const cnWebAccessMode = ref(false)
+// 网页接入模式生效：官方 CN 平台 + 网页接入开关（平台归并后 web-* 不再是平台值）。
+const isWebAccessModePlatform = computed(() => cnWebAccessMode.value && isWebProviderPlatform(form.platform))
+// 网页接入模式使用整串 Cookie（DeepSeek / 智谱）；Kimi 网页端用 Token 三元组。
+// webProviderUsesCookie 参数是平台字面量联合，模板里不能写 `as` 断言，经 narrow
+// computed 传递（isWebProviderPlatform 收敛后必为 WebProviderPlatform）。
+const webAccessModeUsesCookie = computed(() => {
+  if (!isWebAccessModePlatform.value) return false
+  return webProviderUsesCookie(form.platform as WebProviderPlatform)
+})
 const cnWebModeBases = ['kimi', 'zhipu', 'deepseek'] as const
 const cnSupportsWebMode = computed(
   () => (cnWebModeBases as readonly string[]).includes(form.platform) &&
     !(form.platform === 'deepseek' && isVolcanoSubscription.value)
 )
-// 网页版选中时 CN 基础卡片保持高亮（web-* 映射回基础平台）。
-const activeCnBasePlatform = computed(() =>
-  isWebProviderPlatform(form.platform) ? form.platform.replace('web-', '') : form.platform
-)
+// 网页接入模式下 CN 基础卡片保持高亮（platform 即基础平台）。
+const activeCnBasePlatform = computed(() => form.platform)
 function selectCNWebMode() {
   if (!cnSupportsWebMode.value) return
-  form.platform = `web-${form.platform}` as WebProviderPlatform
+  cnWebAccessMode.value = true
   form.type = 'apikey'
   accountCategory.value = 'apikey'
-  apiProtocol.value = 'adaptive'
   accountMode.value = 'payg'
 }
-// payg / coding 点击：若当前处于网页版，先复位到基础平台再切换账号模式。
+// payg / coding 点击：退出网页接入模式再切换账号模式。
 function selectCNPureMode(mode: 'payg' | 'coding') {
-  if (isWebProviderPlatform(form.platform)) {
-    form.platform = form.platform.replace('web-', '') as CnProviderPlatform
-  }
+  cnWebAccessMode.value = false
   accountMode.value = mode
 }
 // 账号类型 / 协议变更时同步默认 base url。
@@ -5115,11 +5149,13 @@ watch(
   () => form.platform,
   (newPlatform) => {
     // Reset base URL based on platform
+    // 平台切换即退出网页接入模式，粘贴输入随平台清空。
+    cnWebAccessMode.value = false
+    webCookieInput.value = ''
+    webKimiTokenJson.value = ''
+    webBaseUrlInput.value = ''
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
-    } else if (isWebProviderPlatform(newPlatform)) {
-      // 网页版：无 base_url 预设语义（凭证明文粘贴路径），不套用默认端点
-      apiKeyBaseUrl.value = ''
     } else {
       apiKeyBaseUrl.value =
         (newPlatform === 'openai')
@@ -5204,12 +5240,6 @@ watch(
     openAIImagesUrlToB64JsonEnabled.value = false
     grokOAuthCustomBaseUrlEnabled.value = false
     grokOAuthBaseUrl.value = ''
-    // 网页版粘贴输入为平台相关凭证，切换平台时清空
-    if (!isWebProviderPlatform(newPlatform)) {
-      webCookieInput.value = ''
-      webKimiTokenJson.value = ''
-      webBaseUrlInput.value = ''
-    }
     // Reset OAuth states
     oauth.resetState()
     openaiOAuth.resetState()
@@ -6052,9 +6082,9 @@ const handleSubmit = async () => {
     return
   }
 
-  // 网页逆向平台（web-deepseek / web-zhipu / web-kimi）：手动粘贴登录态凭证建号
-  // （内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底）。
-  if (isWebProviderPlatform(form.platform)) {
+  // 网页接入模式（kimi / zhipu / deepseek + access_mode=web）：手动粘贴登录态
+  // 凭证建号（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底）。
+  if (isWebAccessModePlatform.value) {
     if (!form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return

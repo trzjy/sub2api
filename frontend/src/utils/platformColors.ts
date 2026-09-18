@@ -18,9 +18,6 @@ export type Platform =
   | 'minimax'
   | 'composite'
   | 'codebuddy'
-  | 'web-deepseek'
-  | 'web-zhipu'
-  | 'web-kimi'
 
 // ── Badge (bg + text + border, for inline badges with border) ───────
 const BADGE: Record<Platform, string> = {
@@ -36,10 +33,6 @@ const BADGE: Record<Platform, string> = {
   composite: 'bg-cyan-500/10 text-cyan-700 border-cyan-500/30 dark:text-cyan-300',
   other: 'bg-slate-500/10 text-slate-600 border-slate-500/30 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 border-sky-500/30 dark:text-sky-400',
-  // 网页逆向平台徽标配色（W6）：沿用对应 API 平台色板
-  'web-deepseek': 'bg-teal-500/10 text-teal-600 border-teal-500/30 dark:text-teal-400',
-  'web-zhipu': 'bg-indigo-500/10 text-indigo-600 border-indigo-500/30 dark:text-indigo-400',
-  'web-kimi': 'bg-pink-500/10 text-pink-600 border-pink-500/30 dark:text-pink-400',
 }
 const BADGE_DEFAULT = 'bg-slate-500/10 text-slate-600 border-slate-500/30 dark:text-slate-400'
 
@@ -57,9 +50,6 @@ const BADGE_LIGHT: Record<Platform, string> = {
   composite: 'bg-cyan-500/10 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300',
   other: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/10 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 dark:bg-sky-500/10 dark:text-sky-300',
-  'web-deepseek': 'bg-teal-500/10 text-teal-600 dark:bg-teal-500/10 dark:text-teal-300',
-  'web-zhipu': 'bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300',
-  'web-kimi': 'bg-pink-500/10 text-pink-600 dark:bg-pink-500/10 dark:text-pink-300',
 }
 
 // ── Border ──────────────────────────────────────────────────────────
@@ -76,9 +66,6 @@ const BORDER: Record<Platform, string> = {
   composite: 'border-cyan-500/20 dark:border-cyan-500/20',
   other: 'border-slate-500/20 dark:border-slate-500/20',
   codebuddy: 'border-sky-500/20 dark:border-sky-500/20',
-  'web-deepseek': 'border-teal-500/20 dark:border-teal-500/20',
-  'web-zhipu': 'border-indigo-500/20 dark:border-indigo-500/20',
-  'web-kimi': 'border-pink-500/20 dark:border-pink-500/20',
 }
 const BORDER_DEFAULT = 'border-gray-200 dark:border-dark-700'
 
@@ -96,9 +83,6 @@ const BORDER_STRONG: Record<Platform, string> = {
   composite: 'border-cyan-500/35 dark:border-cyan-500/30',
   other: 'border-slate-500/35 dark:border-slate-500/30',
   codebuddy: 'border-sky-500/35 dark:border-sky-500/30',
-  'web-deepseek': 'border-teal-500/35 dark:border-teal-500/30',
-  'web-zhipu': 'border-indigo-500/35 dark:border-indigo-500/30',
-  'web-kimi': 'border-pink-500/35 dark:border-pink-500/30',
 }
 const BORDER_STRONG_DEFAULT = 'border-gray-300 dark:border-dark-600'
 
@@ -117,9 +101,6 @@ const ACCENT: Record<Platform, string> = {
   composite: '#06b6d4', // cyan-500
   other: '#64748b', // slate-500
   codebuddy: '#0ea5e9', // sky-500
-  'web-deepseek': '#14b8a6', // teal-500
-  'web-zhipu': '#6366f1', // indigo-500
-  'web-kimi': '#ec4899', // pink-500
 }
 const ACCENT_DEFAULT = '#14b8a6' // primary-500 (teal)
 
@@ -137,9 +118,6 @@ const ACCENT_BAR: Record<Platform, string> = {
   composite: 'bg-gradient-to-r from-slate-500 to-cyan-500',
   other: 'bg-gradient-to-r from-slate-500 to-slate-600',
   codebuddy: 'bg-gradient-to-r from-sky-400 to-sky-500',
-  'web-deepseek': 'bg-gradient-to-r from-teal-400 to-teal-500',
-  'web-zhipu': 'bg-gradient-to-r from-indigo-400 to-indigo-500',
-  'web-kimi': 'bg-gradient-to-r from-pink-400 to-pink-500',
 }
 const ACCENT_BAR_DEFAULT = 'bg-gradient-to-r from-primary-400 to-primary-500'
 
@@ -157,9 +135,6 @@ const TEXT: Record<Platform, string> = {
   composite: 'text-cyan-700 dark:text-cyan-300',
   other: 'text-slate-600 dark:text-slate-300',
   codebuddy: 'text-sky-600 dark:text-sky-400',
-  'web-deepseek': 'text-teal-600 dark:text-teal-400',
-  'web-zhipu': 'text-indigo-600 dark:text-indigo-400',
-  'web-kimi': 'text-pink-600 dark:text-pink-400',
 }
 const TEXT_DEFAULT = 'text-primary-600 dark:text-primary-400'
 
@@ -177,9 +152,6 @@ const ICON: Record<Platform, string> = {
   composite: 'text-cyan-600 dark:text-cyan-300',
   other: 'text-slate-500 dark:text-slate-300',
   codebuddy: 'text-sky-500 dark:text-sky-400',
-  'web-deepseek': 'text-teal-500 dark:text-teal-400',
-  'web-zhipu': 'text-indigo-500 dark:text-indigo-400',
-  'web-kimi': 'text-pink-500 dark:text-pink-400',
 }
 const ICON_DEFAULT = 'text-primary-500 dark:text-primary-400'
 
@@ -197,9 +169,6 @@ const BUTTON: Record<Platform, string> = {
   composite: 'bg-cyan-700 text-white hover:bg-cyan-800 active:bg-cyan-900 dark:bg-cyan-600 dark:hover:bg-cyan-500',
   other: 'bg-slate-600 text-white hover:bg-slate-700 active:bg-slate-800 dark:bg-slate-600/80 dark:hover:bg-slate-600',
   codebuddy: 'bg-sky-500 text-white hover:bg-sky-600 active:bg-sky-700 dark:bg-sky-500/80 dark:hover:bg-sky-500',
-  'web-deepseek': 'bg-teal-500 text-white hover:bg-teal-600 active:bg-teal-700 dark:bg-teal-500/80 dark:hover:bg-teal-500',
-  'web-zhipu': 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700 dark:bg-indigo-500/80 dark:hover:bg-indigo-500',
-  'web-kimi': 'bg-pink-500 text-white hover:bg-pink-600 active:bg-pink-700 dark:bg-pink-500/80 dark:hover:bg-pink-500',
 }
 const BUTTON_DEFAULT = 'bg-primary-500 text-white hover:bg-primary-600 dark:bg-primary-600 dark:hover:bg-primary-500'
 
@@ -217,9 +186,6 @@ const DISCOUNT: Record<Platform, string> = {
   composite: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300',
   other: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
   codebuddy: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
-  'web-deepseek': 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
-  'web-zhipu': 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
-  'web-kimi': 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
 }
 const DISCOUNT_DEFAULT = 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
 
@@ -237,9 +203,6 @@ const GRADIENT: Record<Platform, string> = {
   composite: 'from-slate-600 to-cyan-600',
   other: 'from-slate-600 to-slate-700',
   codebuddy: 'from-sky-500 to-sky-600',
-  'web-deepseek': 'from-teal-500 to-teal-600',
-  'web-zhipu': 'from-indigo-500 to-indigo-600',
-  'web-kimi': 'from-pink-500 to-pink-600',
 }
 const GRADIENT_DEFAULT = 'from-primary-500 to-primary-600'
 
@@ -257,9 +220,6 @@ const GRADIENT_TEXT: Record<Platform, string> = {
   composite: 'text-cyan-100',
   other: 'text-slate-100',
   codebuddy: 'text-sky-100',
-  'web-deepseek': 'text-teal-100',
-  'web-zhipu': 'text-indigo-100',
-  'web-kimi': 'text-pink-100',
 }
 const GRADIENT_TEXT_DEFAULT = 'text-primary-100'
 
@@ -276,9 +236,6 @@ const GRADIENT_SUBTEXT: Record<Platform, string> = {
   composite: 'text-cyan-200',
   other: 'text-slate-200',
   codebuddy: 'text-sky-200',
-  'web-deepseek': 'text-teal-200',
-  'web-zhipu': 'text-indigo-200',
-  'web-kimi': 'text-pink-200',
 }
 const GRADIENT_SUBTEXT_DEFAULT = 'text-primary-200'
 
@@ -297,10 +254,7 @@ function isPlatform(p: string): p is Platform {
     p === 'other' ||
     p === 'minimax' ||
     p === 'composite' ||
-    p === 'codebuddy' ||
-    p === 'web-deepseek' ||
-    p === 'web-zhipu' ||
-    p === 'web-kimi'
+    p === 'codebuddy'
   )
 }
 
@@ -383,9 +337,6 @@ export function platformLabel(p: string): string {
     case 'minimax': return 'MiniMax'
     case 'composite': return 'Composite'
     case 'codebuddy': return 'CodeBuddy'
-    case 'web-deepseek': return 'DeepSeek Web'
-    case 'web-zhipu': return 'Zhipu GLM Web'
-    case 'web-kimi': return 'Kimi Web'
     default: return p || 'API'
   }
 }

@@ -18,10 +18,7 @@ const concretePlatforms = [
   'deepseek',
   'other',
   'minimax',
-  'codebuddy',
-  'web-deepseek',
-  'web-zhipu',
-  'web-kimi'
+  'codebuddy'
 ]
 
 describe('platform option catalogs', () => {

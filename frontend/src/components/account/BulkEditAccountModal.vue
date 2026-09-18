@@ -1595,7 +1595,7 @@ const allOpenAIAPIKey = computed(() => {
 // 上游倍率自动探测资格：按所选平台 × 类型的交叉积判定，所有组合均须
 // isUpstreamBillingProbeEligible（与后端 IsUpstreamBillingProbeIdentity 同名单）。
 // 实际选中账号是该组合的子集，交叉积判定偏保守但绝不放行不合资格的账号
-// （如 web-zhipu/web-deepseek/web-kimi 网页平台）。
+// （如网页接入模式账号——平台为官方值但无静态密钥，与 other/codebuddy 同排除）。
 const allBillingProbeCapable = computed(() => {
   return (
     targetSelectedPlatforms.value.length > 0 &&

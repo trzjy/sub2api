@@ -308,7 +308,8 @@ export async function testAccount(id: number): Promise<{
 
 /**
  * Validate web platform credentials before account creation (W5).
- * @param platform - web-deepseek / web-zhipu / web-kimi
+ * @param platform - official CN platform (kimi / zhipu / deepseek; web access mode
+ * via credentials.access_mode="web" after platform merge PR-3)
  * @param credentials - credential payload built by credentialsBuilder
  * @returns true when the payload passes the backend admission validation
  */
@@ -338,7 +339,8 @@ export interface WebLoginCaptureResult {
 /**
  * Create a server-side web-login proxy session for capturing the platform
  * login cookie through a same-origin iframe (W5 web-login capture).
- * @param platform - web-deepseek / web-zhipu / web-kimi
+ * @param platform - official CN platform (kimi / zhipu / deepseek) after platform
+ * merge PR-3
  * @returns token + same-origin relative url to embed in the proxy iframe
  */
 export async function createWebLoginProxySession(platform: string): Promise<WebLoginProxySession> {

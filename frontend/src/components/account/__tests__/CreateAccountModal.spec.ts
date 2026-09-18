@@ -893,10 +893,10 @@ describe('CreateAccountModal volcano subscription', () => {
   })
 })
 
-describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / web-kimi)', () => {
+describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_mode=web)', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
-    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'web-deepseek', type: 'apikey' })
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'deepseek', type: 'apikey' })
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
     showWarningMock.mockReset()
@@ -914,7 +914,7 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
   afterEach(() => vi.useRealTimers())
 
 
-  it('submits pasted cookie credentials for web-deepseek with apikey type', async () => {
+  it('submits pasted cookie credentials for deepseek web access mode with apikey type', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
@@ -928,13 +928,15 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('web-deepseek')
+    expect(payload?.platform).toBe('deepseek')
     expect(payload?.type).toBe('apikey')
     expect(payload?.credentials?.cookie).toBe('sessionid=abc; HWWAFSESID=xyz')
+    // 平台归并 PR-3：网页接入下沉为 credentials["access_mode"]="web"。
+    expect(payload?.credentials?.access_mode).toBe('web')
     expect(payload?.credentials).not.toHaveProperty('api_key')
   })
 
-  it('submits parsed token JSON for web-kimi and keeps only non-empty optional fields', async () => {
+  it('submits parsed token JSON for kimi web access mode and keeps only non-empty optional fields', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'Kimi')
     await flushPromises()
@@ -948,9 +950,10 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('web-kimi')
+    expect(payload?.platform).toBe('kimi')
     expect(payload?.type).toBe('apikey')
     expect(payload?.credentials).toEqual({
+      access_mode: 'web',
       access_token: 'at',
       refresh_token: 'rt',
       user_id: 'u-9',
@@ -997,7 +1000,7 @@ describe('CreateAccountModal web reverse providers (web-deepseek / web-zhipu / w
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    // DeepSeek 卡片保持高亮（activeCnBasePlatform 映射回基础平台）。
+    // DeepSeek 卡片保持高亮（平台归并后 platform 即基础平台）。
     const deepseekCard = wrapper.findAll('button').find((b) => b.text().includes('DeepSeek'))
     expect(deepseekCard).toBeDefined()
     expect(deepseekCard?.classes().join(' ')).toContain('bg-white')
@@ -1025,13 +1028,13 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
   beforeEach(() => {
     authIsSimpleMode.value = true
     showErrorMock.mockReset()
-    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'web-zhipu', type: 'apikey' })
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'zhipu', type: 'apikey' })
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
   })
 
-  // (a) 载荷门控：web-zhipu 走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
-  it('omits upstream_billing_probe_enabled from the create payload for web-zhipu web credentials', async () => {
+  // (a) 载荷门控：网页接入模式走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
+  it('omits upstream_billing_probe_enabled from the create payload for zhipu web access mode credentials', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()

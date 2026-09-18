@@ -278,13 +278,13 @@ describe('UpstreamBillingRateCell', () => {
     expect(wrapper.text()).toBe('-')
   })
 
-  it('hides probe button for web reverse platforms even with apikey type', async () => {
-    // 网页平台（web-zhipu/web-deepseek/web-kimi）不在上游探测白名单内，
-    // 不应显示探测按钮，否则点击后后端会返回 400。
-    for (const platform of ['web-zhipu', 'web-deepseek', 'web-kimi'] as const) {
+  it('hides probe button for web access-mode accounts even with apikey type', async () => {
+    // 平台归并 PR-3：网页接入下沉为 credentials["access_mode"]="web"（平台为官方值），
+    // 无静态密钥，不在上游探测白名单内，不应显示探测按钮，否则点击后后端会返回 400。
+    for (const platform of ['zhipu', 'deepseek', 'kimi'] as const) {
       const wrapper = mount(UpstreamBillingRateCell, {
         props: {
-          account: makeAccount({ platform, type: 'apikey' }),
+          account: makeAccount({ platform, type: 'apikey', credentials: { access_mode: 'web', cookie: 'c=1' } }),
           now: Date.now()
         }
       })
