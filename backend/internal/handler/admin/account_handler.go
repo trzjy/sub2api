@@ -1079,6 +1079,23 @@ func (h *AccountHandler) Create(c *gin.Context) {
 	var createdAccount *service.Account
 
 	result, err := executeAdminIdempotent(c, "admin.accounts.create", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		// 登录会话去重（纵深防御，web-platform-account-pool-auto-login-plan.md §0）：
+		// ValidateWebCredentials 预校验端点之外的创建路径（CreateAccountModal 主表单
+		// 直接粘贴、直连 API 调用）同样不得复用既有账号登录态伪装成新账号。
+		// 此检查必须位于幂等执行闭包内：相同 Idempotency-Key 重试已成功的建号请求
+		// 走 coordinator 重放路径（不执行闭包），直接重放第一次成功响应；若检查位于
+		// 闭包之外，重放请求会被去重误判 409 而非重放。命中即 409 且不落库。
+		if service.IsWebLoginPlatform(req.Platform) {
+			if mode, _ := req.Credentials["access_mode"].(string); strings.TrimSpace(mode) == service.AccountAccessModeWeb {
+				existing, dupErr := h.duplicateWebCredentialAccount(ctx, req.Platform, req.Credentials, 0)
+				if dupErr != nil {
+					return nil, dupErr
+				}
+				if existing != "" {
+					return nil, &webCredentialDuplicateError{existing: existing}
+				}
+			}
+		}
 		account, execErr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 			Name:                  req.Name,
 			Notes:                 req.Notes,
@@ -1108,6 +1125,14 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		return h.buildAccountResponseWithRuntime(ctx, account), nil
 	})
 	if err != nil {
+		// 幂等闭包内登录会话去重命中：映射回 409 + reason=web_credential_duplicate
+		//（闭包错误经 coordinator 透传，状态码语义在 handler 层还原）。
+		var dupErr *webCredentialDuplicateError
+		if errors.As(err, &dupErr) {
+			respondWebCredentialDuplicate(c, dupErr.existing)
+			return
+		}
+
 		// 检查是否为混合渠道错误
 		var mixedErr *service.MixedChannelError
 		if errors.As(err, &mixedErr) {
@@ -1145,6 +1170,18 @@ func (h *AccountHandler) Duplicate(c *gin.Context) {
 		return
 	}
 	actorScope := adminActorScope(c)
+
+	// 登录会话去重：web 平台（IsWebLoginPlatform + access_mode=web）账号持有
+	// 唯一的网页登录会话，复制产生的是共享同一登录态的第二账号而非新账号，
+	// 显式 409 拒绝（web-platform-account-pool-auto-login-plan.md §0）。
+	// 账号不存在/查询失败时不拦截，交由 DuplicateAccount 返回规范错误。
+	if srcAccount, getErr := h.adminService.GetAccount(c.Request.Context(), accountID); getErr == nil && srcAccount != nil &&
+		service.IsWebLoginPlatform(srcAccount.Platform) && srcAccount.Type == service.AccountTypeAPIKey {
+		if mode, _ := srcAccount.Credentials["access_mode"].(string); strings.TrimSpace(mode) == service.AccountAccessModeWeb {
+			respondWebCredentialDuplicate(c, srcAccount.Name)
+			return
+		}
+	}
 
 	result, err := executeAdminIdempotent(
 		c,
@@ -1210,6 +1247,33 @@ func (h *AccountHandler) Update(c *gin.Context) {
 
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
+
+	// 登录会话去重（排除自身）：web 平台账号更新携带 Cookie/access_token 时，
+	// 不得把它改成其他账号已持有的登录态（否则两个账号共享同一网页登录会话）。
+	// 去重门仅对"合并后目标 access_mode 仍为 web"生效：请求 credentials 中
+	// access_mode 显式为 web，或未显式提供 access_mode 且原账号 access_mode=web
+	//（沿用原模式）。web→api 模式切换时 Cookie 由 SanitizeStoredCredentials
+	// 常规剥离，不做 web 登录态去重。排除自身 ID：更新自身当前登录态（值不变）
+	// 不受影响。账号查询失败不拦截，交由 UpdateAccount 返回规范错误。
+	targetAccessModeWeb := false
+	if srcAccount, getErr := h.adminService.GetAccount(c.Request.Context(), accountID); getErr == nil && srcAccount != nil &&
+		service.IsWebLoginPlatform(srcAccount.Platform) && len(req.Credentials) > 0 {
+		if reqMode, ok := req.Credentials["access_mode"].(string); ok && strings.TrimSpace(reqMode) != "" {
+			targetAccessModeWeb = strings.TrimSpace(reqMode) == service.AccountAccessModeWeb
+		} else {
+			srcMode, _ := srcAccount.Credentials["access_mode"].(string)
+			targetAccessModeWeb = strings.TrimSpace(srcMode) == service.AccountAccessModeWeb
+		}
+		if targetAccessModeWeb {
+			if existing, err := h.duplicateWebCredentialAccount(c.Request.Context(), srcAccount.Platform, req.Credentials, accountID); err != nil {
+				response.InternalError(c, "检查重复登录会话失败")
+				return
+			} else if existing != "" {
+				respondWebCredentialDuplicate(c, existing)
+				return
+			}
+		}
+	}
 
 	account, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, &service.UpdateAccountInput{
 		Name:                  req.Name,
@@ -1355,7 +1419,121 @@ func (h *AccountHandler) ValidateWebCredentials(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	// 登录会话去重：同平台既有 web 账号已持有相同登录态（Cookie / Kimi
+	// access_token）时拒绝创建——新建会话复用同一网页登录会话不是新账号，
+	// 必须给出明确错误而不是伪装成多账号成功（web-platform-account-pool-
+	// auto-login-plan.md §0：登录会话隔离）。
+	if existing, err := h.duplicateWebCredentialAccount(c.Request.Context(), req.Platform, req.Credentials, 0); err != nil {
+		response.InternalError(c, "检查重复登录会话失败")
+		return
+	} else if existing != "" {
+		respondWebCredentialDuplicate(c, existing)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// webCredentialDuplicateMessage 登录会话重复 409 文案（不含候选凭证值），
+// 供 respondWebCredentialDuplicate 与批量导入类逐项错误复用。
+func webCredentialDuplicateMessage(existing string) string {
+	return "检测到已有账号（" + existing + "）持有相同登录会话的凭证：新建账号会复用同一网页登录会话而非新账号。请先在官方页面退出当前账号，或使用无痕窗口/独立浏览器 Profile 登录新账号后再试。"
+}
+
+// webCredentialDuplicateError 登录会话重复错误：幂等执行闭包内产生（Create），
+// 经 executeAdminIdempotent 错误透传后由 handler 错误分支映射回
+// 409 + reason=web_credential_duplicate（respondWebCredentialDuplicate）。
+type webCredentialDuplicateError struct {
+	existing string
+}
+
+func (e *webCredentialDuplicateError) Error() string {
+	return webCredentialDuplicateMessage(e.existing)
+}
+
+// respondWebCredentialDuplicate 统一返回登录会话重复 409
+// （reason=web_credential_duplicate），文案不含候选凭证值。
+func respondWebCredentialDuplicate(c *gin.Context, existing string) {
+	response.ErrorWithDetails(c, http.StatusConflict,
+		webCredentialDuplicateMessage(existing),
+		"web_credential_duplicate", map[string]string{"existing_account": existing})
+}
+
+// duplicateWebCredentialAccount 检查同平台既有 web 账号是否持有与候选凭证相同的
+// 登录态（zhipu/deepseek 按 credentials["cookie"] 整串比较；kimi 按
+// credentials["access_token"] 比较）。命中返回既有账号名，无命中返回空串。
+// 仅比较 type=apikey 且 access_mode=web 的账号。Cookie 比较做顺序无关归一化
+// （按 name=value 对集合比较）：同一会话的 Cookie 串字段顺序/空白差异不影响判定。
+// excludeAccountID 用于更新场景排除自身账号：更新账号自身登录态（含不变值）
+// 不得被误判为与他人重复；传 0 表示不排除（创建类路径）。
+func (h *AccountHandler) duplicateWebCredentialAccount(ctx context.Context, platform string, credentials map[string]any, excludeAccountID int64) (string, error) {
+	if h.adminService == nil {
+		return "", nil
+	}
+	// 候选登录态：kimi 用 access_token，其余（zhipu/deepseek）用整串 cookie。
+	candidate := ""
+	if platform == service.PlatformKimi {
+		candidate, _ = credentials["access_token"].(string)
+	} else {
+		candidate, _ = credentials["cookie"].(string)
+	}
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", nil
+	}
+	// 全量扫描（不分页）：分页查询在账号数超过单页上限时会截断，导致超出
+	// 部分的既有账号登录态漏判。仅按 platform + type=apikey 过滤，凭证比较
+	// 在内存做（与 Cookie 归一化比较逻辑一致）。
+	accounts, err := h.adminService.ListAccountsForSchedulerScoreFilter(ctx, platform, service.AccountTypeAPIKey, "", "", 0, "")
+	if err != nil {
+		return "", err
+	}
+	for _, acc := range accounts {
+		if excludeAccountID != 0 && acc.ID == excludeAccountID {
+			continue
+		}
+		if acc.Type != service.AccountTypeAPIKey {
+			continue
+		}
+		mode, _ := acc.Credentials["access_mode"].(string)
+		if mode != service.AccountAccessModeWeb {
+			continue
+		}
+		existing := ""
+		if platform == service.PlatformKimi {
+			existing, _ = acc.Credentials["access_token"].(string)
+		} else {
+			existing, _ = acc.Credentials["cookie"].(string)
+		}
+		if sameLoginState(platform, existing, candidate) {
+			return acc.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// sameLoginState 比较登录态是否相同：kimi 按 access_token 精确比较（trim 后）；
+// Cookie 平台按顺序无关归一化比较（name=value 对集合）。
+func sameLoginState(platform, existing, candidate string) bool {
+	if platform == service.PlatformKimi {
+		return strings.TrimSpace(existing) == candidate
+	}
+	return normalizeCookieString(existing) == normalizeCookieString(candidate)
+}
+
+// normalizeCookieString 把 Cookie 串归一化为顺序无关的 name=value 对集合：
+// 按 ";" 切分、trim、排序后重新拼接。
+func normalizeCookieString(cookieStr string) string {
+	parts := strings.Split(cookieStr, ";")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return strings.Join(out, "; ")
 }
 
 // Test handles testing account connectivity with SSE streaming
@@ -2203,6 +2381,33 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 			}
 
 			skipCheck := item.ConfirmMixedChannelRisk != nil && *item.ConfirmMixedChannelRisk
+
+			// 登录会话去重（与 Create 同一语义）：web 平台 + access_mode=web 的
+			// 批量项不得复用既有账号登录态（含同批次先建成功的项）伪装成新账号。
+			// 命中按批量语义计为该项 failed，其余项继续。
+			if service.IsWebLoginPlatform(item.Platform) {
+				if mode, _ := item.Credentials["access_mode"].(string); strings.TrimSpace(mode) == service.AccountAccessModeWeb {
+					existing, derr := h.duplicateWebCredentialAccount(ctx, item.Platform, item.Credentials, 0)
+					if derr != nil {
+						failed++
+						results = append(results, gin.H{
+							"name":    item.Name,
+							"success": false,
+							"error":   "检查重复登录会话失败",
+						})
+						continue
+					}
+					if existing != "" {
+						failed++
+						results = append(results, gin.H{
+							"name":    item.Name,
+							"success": false,
+							"error":   webCredentialDuplicateMessage(existing),
+						})
+						continue
+					}
+				}
+			}
 
 			account, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
 				Name:                  item.Name,

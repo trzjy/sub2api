@@ -338,10 +338,11 @@ export interface WebLoginCaptureResult {
 
 /**
  * Create a server-side web-login proxy session for capturing the platform
- * login cookie through a same-origin iframe (W5 web-login capture).
+ * login cookie through an isolated-origin proxy iframe (W5 web-login capture).
  * @param platform - official CN platform (kimi / zhipu / deepseek) after platform
  * merge PR-3
- * @returns token + same-origin relative url to embed in the proxy iframe
+ * @returns token + proxy-relative url to embed in the proxy iframe (prefixed with
+ * the explicit HTTPS web_login_proxy_origin; same-origin fallback is forbidden)
  */
 export async function createWebLoginProxySession(platform: string): Promise<WebLoginProxySession> {
   const { data } = await apiClient.post<WebLoginProxySession>(

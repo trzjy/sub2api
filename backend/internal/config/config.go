@@ -724,12 +724,13 @@ type ServerConfig struct {
 
 	// WebLoginProxyAddr 网页登录代理隔离 origin 的监听地址（独立端口，与主服务
 	// origin 隔离，避免官方页脚本读取管理端 localStorage）。默认 "127.0.0.1:3400"；
-	// 显式设为空字符串则禁用隔离 engine（前端 iframe 回退同源，功能不缺失）。
+	// 显式设为空字符串则禁用隔离 engine（前端自动降级为官方页登录 + 手动粘贴，不回退同源）。
 	WebLoginProxyAddr string `mapstructure:"web_login_proxy_addr"`
 	// WebLoginProxyOrigin 隔离 origin 对外的公开基础地址（供前端 iframe 契约使用）。
-	// 必填（启用内嵌代理时）：独立 origin 必须显式配置，无法由监听地址推导，
-	// 同源回退已禁止（安全红线）。为空时前端视代理不可用并降级为官方页登录 + 手动粘贴，
-	// 不再回退到主站同源代理路径（避免官方页脚本读取管理端 localStorage）。
+	// 必填（启用内嵌代理时）且必须为显式 HTTPS origin（https://host[:port]，安全红线）：
+	// HTTP、空值、非法 host 一律 fail-closed 视为未配置，无法由监听地址推导，
+	// 同源回退已禁止（安全红线）。未配置时前端视代理不可用并降级为官方页登录 +
+	// 手动粘贴，不再回退到主站同源代理路径（避免官方页脚本读取管理端 localStorage）。
 	WebLoginProxyOrigin string `mapstructure:"web_login_proxy_origin"`
 }
 
@@ -1643,20 +1644,51 @@ func (s *ServerConfig) Address() string {
 // WebLoginProxyPublicOrigin 返回网页登录代理隔离 origin 对外的公开基础地址，
 // 供 public settings 注入前端（iframe src 契约）。
 //
-// 同源回退已禁止（安全红线）：只有显式配置 WebLoginProxyOrigin 非空时才返回该值，
-// 否则一律返回空字符串。前端在 origin 为空时视代理不可用并降级为官方页登录 + 手动粘贴，
-// 不再回退到主站同源代理路径——避免官方页脚本读取管理端 localStorage（auth_token 等）。
+// 仅接受显式配置的 HTTPS origin（fail-closed 安全红线）：
+//   - 空值/空白 → 返回空（前端视代理不可用，降级为官方页登录 + 手动粘贴）；
+//   - 非空但非法（无法解析、缺 host）→ 返回空；
+//   - 显式 HTTP origin → 返回空（禁止明文传输登录代理流量，凭证 Cookie 必须
+//     经 TLS 携带，Secure Cookie 在明文源上会被浏览器丢弃）；
+//   - 非纯 origin（携带 path/query/fragment/userinfo）→ 返回空：前端以
+//     proxyUrl = proxyOrigin + session.url 直接拼接，path/query/fragment 会
+//     破坏拼接契约，userinfo（user:pass@host）可能泄漏进公开 settings。
 //
-// 独立 origin 必须显式配置（WEB_LOGIN_PROXY_ORIGIN），无法通过监听地址推导：
-// 监听地址（WEB_LOGIN_PROXY_ADDR）常为通配 host（如 :3400 / 0.0.0.0:3400），
-// 无法可靠推导对外可达 host，故不再做推导。若隔离 engine 已启用（Addr 非空）但
-// origin 为空，server 启动时应在日志中 Warn（"web login proxy origin not configured;
-// embedded proxy disabled for clients"），不推导、不回退。
+// 同源回退已禁止（安全红线）：不从监听地址（WEB_LOGIN_PROXY_ADDR）推导公开 origin
+// ——监听地址常为通配 host（如 :3400 / 0.0.0.0:3400），无法可靠推导对外可达 host。
+// 若隔离 engine 已启用（Addr 非空）但 origin 为空，server 启动时应在日志中 Warn
+// （"web login proxy origin not configured; embedded proxy disabled for clients"），
+// 不推导、不回退。
 //
-// 返回值不含任何敏感信息（仅显式配置的 host:port 公开访问地址）。
+// 返回值不含任何敏感信息（仅显式配置的 HTTPS host[:port] 公开访问地址）。
 func (s *ServerConfig) WebLoginProxyPublicOrigin() string {
-	// 独立 origin 必须显式配置；同源回退已禁止（安全红线）。
-	return strings.TrimSpace(s.WebLoginProxyOrigin)
+	raw := strings.TrimSpace(s.WebLoginProxyOrigin)
+	if raw == "" {
+		return ""
+	}
+	// 仅 HTTPS：HTTP、未知 scheme、缺 host 一律 fail-closed 返回空。
+	// u.Host 非空不足以证明存在 hostname（https://:8443 只有端口），须再查
+	// u.Hostname()；Host 中端口若存在须为 1-65535 数字，非数字/越界 fail-closed。
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" {
+		return ""
+	}
+	if host, port, splitErr := net.SplitHostPort(u.Host); splitErr == nil && port != "" {
+		if host == "" {
+			return ""
+		}
+		portNum, convErr := strconv.Atoi(port)
+		if convErr != nil || portNum < 1 || portNum > 65535 {
+			return ""
+		}
+	}
+	// 严格纯 origin：path/query/fragment/userinfo 任一存在即 fail-closed 返回空
+	//（前端 proxyUrl = proxyOrigin + session.url 直接拼接，非纯 origin 破坏契约
+	// 且 userinfo 可能经 public settings 泄漏）。仅 path == "/" 视为根路径归一化放行。
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery ||
+		(u.Path != "" && u.Path != "/") {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // DatabaseConfig 数据库连接配置

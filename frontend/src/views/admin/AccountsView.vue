@@ -1950,7 +1950,31 @@ type LoginStatusAccount = {
   status?: string
   error_message?: string | null
   credentials?: Record<string, unknown> | null
+  // 后端 RedactCredentials 产出的 has_<key> 存在性 map（旧后端可能缺省）。
+  credentials_status?: Record<string, boolean> | null
   platform?: string
+}
+
+// Web 账号登录载体平台语义（与 credentialsBuilder.webProviderUsesCookie 一致）：
+// kimi 用 access_token，zhipu/deepseek 用 cookie。
+// 后端列表接口 RedactCredentials 已脱敏移除 cookie/access_token 明文，仅通过
+// credentials_status.has_<key> 暴露存在性；status map 缺省（旧后端）时才回退
+// 明文 credentials 字段判断。
+function webAccountHasCredential(
+  platform: string,
+  status: Record<string, boolean> | null | undefined,
+  creds: Record<string, unknown> | null | undefined
+): boolean {
+  const usesCookie = platform !== 'kimi'
+  if (status) {
+    return usesCookie ? !!status.has_cookie : !!status.has_access_token
+  }
+  if (usesCookie) {
+    const raw = creds?.cookie
+    return typeof raw === 'string' && raw.length > 0
+  }
+  const raw = creds?.access_token
+  return typeof raw === 'string' && raw.length > 0
 }
 
 // 列表 DTO 可能透出 credentials.login_last_error；不存在时回退既有 error_message。
@@ -1975,12 +1999,12 @@ function computeLoginStatus(account: LoginStatusAccount): LoginStatusKind {
     return 'failed'
   }
   if (isWeb) {
-    const creds = account.credentials
-    const rawCookie = creds?.cookie
-    const rawToken = creds?.access_token
-    const hasCookie = typeof rawCookie === 'string' && rawCookie.length > 0
-    const hasToken = typeof rawToken === 'string' && rawToken.length > 0
-    if (!hasCookie && !hasToken) return 'unconfigured'
+    const hasCredential = webAccountHasCredential(
+      account.platform ?? '',
+      account.credentials_status,
+      account.credentials
+    )
+    if (!hasCredential) return 'unconfigured'
   }
   return 'active'
 }

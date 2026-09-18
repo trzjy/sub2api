@@ -373,7 +373,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 
 		AllowUserViewErrorRequests: settings[SettingKeyAllowUserViewErrorRequests] == "true",
 
-		// 网页登录代理隔离 origin 公开地址（前端 iframe 契约；空=回退同源）。
+		// 网页登录代理隔离 origin 公开地址（前端 iframe 契约；空=代理不可用，不回退同源）。
 		WebLoginProxyOrigin: s.cfg.Server.WebLoginProxyPublicOrigin(),
 	}, nil
 }
@@ -652,8 +652,8 @@ type PublicSettingsInjectionPayload struct {
 	RiskControlEnabled            bool `json:"risk_control_enabled"`
 	AllowUserViewErrorRequests    bool `json:"allow_user_view_error_requests"`
 
-	// 网页登录代理隔离 origin 的公开基础地址（前端 iframe 契约）。
-	// 空字符串表示回退同源（代理路由仍注册在主服务 v1）。
+	// 网页登录代理隔离 origin 的公开基础地址（前端 iframe 契约，仅显式 HTTPS origin 有效）。
+	// 空字符串表示代理不可用（前端自动降级为官方页登录 + 手动粘贴，不回退同源）。
 	WebLoginProxyOrigin string `json:"web_login_proxy_origin"`
 }
 

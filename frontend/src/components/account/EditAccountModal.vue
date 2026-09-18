@@ -28,7 +28,7 @@
 
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
-        <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
+        <div v-if="!isWebEditAccount && (!isCNApiKeyAccount || editApiProtocol !== 'adaptive')">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
             v-model="editBaseUrl"
@@ -62,7 +62,7 @@
             @select="onCnPresetSelect"
           />
         </div>
-        <div v-else>
+        <div v-else-if="!isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.endpoints') }}</label>
           <div class="mt-2 space-y-3">
             <div v-for="item in editAdaptiveProtocolOptions" :key="item.value">
@@ -77,7 +77,7 @@
           </p>
         </div>
         <!-- Account Mode Selection (CN providers) -->
-        <div v-if="isCNApiKeyAccount">
+        <div v-if="isCNApiKeyAccount && !isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.accountMode.title') }}</label>
           <div class="mt-2 flex flex-wrap gap-2">
             <button
@@ -98,7 +98,7 @@
           <p class="input-hint">{{ t(`admin.accounts.cnProviders.accountMode.${editAccountMode}Desc`) }}</p>
         </div>
         <!-- API Protocol Selection (CN providers) -->
-        <div v-if="isCNApiKeyAccount">
+        <div v-if="isCNApiKeyAccount && !isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
           <div class="mt-2 flex flex-wrap gap-2">
             <button
@@ -119,7 +119,7 @@
           <p class="input-hint">{{ t(`admin.accounts.cnProviders.apiProtocol.${cnProtocolDescKey}Desc`) }}</p>
         </div>
         <!-- API Protocol Selection (Other: OpenAI / Anthropic compatible upstream) -->
-        <div v-if="isOtherApiKeyAccount">
+        <div v-if="isOtherApiKeyAccount && !isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.cnProviders.apiProtocol.title') }}</label>
           <div class="mt-2 flex flex-wrap gap-2">
             <button
@@ -142,7 +142,7 @@
           </p>
         </div>
         <!-- Zhipu 团队版 Coding Plan：组织/项目 ID（可选，填写后用量查询走团队版端点） -->
-        <div v-if="account.platform === 'zhipu' && editAccountMode === 'coding'">
+        <div v-if="account.platform === 'zhipu' && editAccountMode === 'coding' && !isWebEditAccount">
           <div class="flex items-center">
             <label class="input-label">{{ t('admin.accounts.cnProviders.zhipuTeam.title') }}</label>
             <HelpTooltip trigger="click" width-class="w-80">
@@ -170,7 +170,7 @@
           </div>
           <p class="input-hint mt-2">{{ t('admin.accounts.cnProviders.zhipuTeam.hint') }}</p>
         </div>
-        <div>
+        <div v-if="!isWebEditAccount">
           <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
           <input
             v-model="editApiKey"
@@ -196,7 +196,7 @@
         </div>
 
         <!-- 火山方舟订阅号：SigV4 签名需要访问密钥，否则用量探测会报 access_key/secret_key is empty -->
-        <div v-if="isVolcanoSubscription" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div v-if="isVolcanoSubscription && !isWebEditAccount" class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {{ t('admin.accounts.cnProviders.volcanoAkSkHint') }}
           </p>
@@ -232,6 +232,51 @@
               data-bwignore="true"
               :placeholder="t('admin.accounts.cnProviders.secretKeyPlaceholder')"
             />
+          </div>
+        </div>
+
+        <!-- 网页接入模式（access_mode=web）：编辑登录态凭证；API 专属字段已隐藏 -->
+        <div v-if="isWebEditAccount" class="space-y-4">
+          <div data-testid="web-edit-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
+            <p class="text-sm font-medium text-red-700 dark:text-red-300">
+              {{ t('admin.accounts.webProviders.riskWarning.title') }}
+            </p>
+            <p class="mt-1 text-xs text-red-600 dark:text-red-400">
+              {{ t('admin.accounts.webProviders.riskWarning.body') }}
+            </p>
+          </div>
+          <div v-if="webEditUsesCookie">
+            <label class="input-label">{{ t('admin.accounts.webProviders.cookieLabel') }}</label>
+            <textarea
+              v-model="webEditCookie"
+              rows="4"
+              data-testid="web-edit-cookie-input"
+              class="input font-mono"
+              :placeholder="t('admin.accounts.webProviders.cookiePlaceholder')"
+            ></textarea>
+            <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }} {{ t('admin.accounts.webProviders.cookieHint') }}</p>
+          </div>
+          <div v-else>
+            <label class="input-label">{{ t('admin.accounts.webProviders.kimiTokenLabel') }}</label>
+            <textarea
+              v-model="webEditKimiTokenJson"
+              rows="4"
+              data-testid="web-edit-kimi-token-input"
+              class="input font-mono"
+              :placeholder='t("admin.accounts.webProviders.kimiTokenPlaceholder")'
+            ></textarea>
+            <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }} {{ t('admin.accounts.webProviders.kimiTokenHint') }}</p>
+          </div>
+          <div>
+            <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
+            <input
+              v-model="webEditBaseUrl"
+              type="text"
+              data-testid="web-edit-base-url-input"
+              class="input"
+              :placeholder="t('admin.accounts.webProviders.baseUrlPlaceholder')"
+            />
+            <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
           </div>
         </div>
 
@@ -1708,7 +1753,7 @@
             }}
           </p>
           <div
-            v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type)"
+            v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type) && !isWebEditAccount"
             class="mt-3 flex items-center justify-between gap-3"
           >
             <div class="min-w-0">
@@ -1975,7 +2020,7 @@
       </div>
 
       <div
-        v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type)"
+        v-if="account && isUpstreamBillingProbeEligible(account.platform, account.type) && !isWebEditAccount"
         class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div>
@@ -1993,7 +2038,7 @@
       </div>
 
       <div
-        v-if="account?.type === 'apikey'"
+        v-if="account?.type === 'apikey' && !isWebEditAccount"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -3111,8 +3156,12 @@ import {
   applyPlanType,
   buildPlanTypeOptions,
   readPlanType,
+  buildWebProviderCredentials,
   isCustomGrokBaseUrl,
   isHeaderOverrideCapable,
+  isWebAccessAccount,
+  webProviderUsesCookie,
+  type WebProviderPlatform,
   splitHeaderOverridesObject,
   validateHeaderOverrideRows,
   cnSupportsNativeResponses,
@@ -3234,6 +3283,23 @@ const editApiKey = ref('')
 // 二者均可修正（早期创建的账号可能存错默认值），切换时重置 base_url 预置。
 const isCNApiKeyAccount = computed(
   () => props.account?.type === 'apikey' && isCNProviderPlatform(props.account.platform)
+)
+// 网页接入账号（平台归并 PR-3）：平台为官方值（zhipu/deepseek/kimi）且
+// credentials["access_mode"]="web"。access_mode 是 Web/API 唯一判定源——
+// 平台相同的一类账号里 API 账号与 Web 账号共存，必须双条件判定，避免
+// Web 账号被套用 API 表单后提交时报"API Key 是必需的"。
+const isWebEditAccount = computed(() =>
+  isWebAccessAccount({
+    platform: props.account?.platform,
+    credentials: (props.account?.credentials as Record<string, unknown> | null) || null
+  })
+)
+// 网页接入凭证编辑（敏感值不回显，留空保留原凭证）。
+const webEditCookie = ref('')
+const webEditKimiTokenJson = ref('')
+const webEditBaseUrl = ref('')
+const webEditUsesCookie = computed(() =>
+  isWebEditAccount.value && webProviderUsesCookie(props.account!.platform as WebProviderPlatform)
 )
 // other 平台双协议账号（OpenAI / Anthropic 兼容自定义上游），仅可编辑 api_protocol。
 const isOtherApiKeyAccount = computed(
@@ -4423,6 +4489,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     selectedErrorCodes.value = []
   }
   editApiKey.value = ''
+  // 网页接入凭证编辑框：敏感值不回显，每次打开弹窗重置为空（留空保留原凭证）。
+  webEditCookie.value = ''
+  webEditKimiTokenJson.value = ''
+  webEditBaseUrl.value = ''
 }
 
 async function loadTLSProfiles() {
@@ -5043,7 +5113,10 @@ const handleSubmit = async () => {
     updatePayload.auto_pause_on_expired = autoPauseOnExpired.value
     if (
       props.account.type === 'apikey' &&
-      isUpstreamBillingProbeEligible(props.account.platform, props.account.type)
+      isUpstreamBillingProbeEligible(props.account.platform, props.account.type) &&
+      // 网页接入账号不在探测白名单内（PR-3）：后端 fail-closed 400
+      // UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID，Web 账号不得携带探测开关。
+      !isWebEditAccount.value
     ) {
       updatePayload.upstream_billing_probe_enabled = upstreamBillingAutoProbeEnabled.value
       updatePayload.upstream_billing_rate_sync_enabled = upstreamBillingRateSyncEnabled.value
@@ -5055,7 +5128,11 @@ const handleSubmit = async () => {
     // For apikey type, handle credentials update
     if (props.account.type === 'apikey') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
-      const newBaseUrl = editBaseUrl.value.trim() || defaultBaseUrl.value
+      // 网页接入账号：base_url 是可选的官方域名覆盖，留空保留原值；
+      // 不回落 API 默认端点（Web 账号不走 API base_url 语义）。
+      const newBaseUrl = isWebEditAccount.value
+        ? (webEditBaseUrl.value.trim() || (typeof currentCredentials.base_url === 'string' ? currentCredentials.base_url : ''))
+        : (editBaseUrl.value.trim() || defaultBaseUrl.value)
       const shouldApplyModelMapping = !(props.account.platform === 'openai' && openaiPassthroughEnabled.value)
 
       // Always update credentials for apikey type to handle model mapping changes
@@ -5065,7 +5142,9 @@ const handleSubmit = async () => {
       }
 
       // 国产供应商：模式与协议写入凭据（决定额度/余额探测与转发端点/格式）。
-      if (isCNApiKeyAccount.value) {
+      // 网页接入账号不适用：access_mode=web 是唯一判定源，account_mode/api_protocol
+      // 为 API 专属语义，Web 账号不得被写入 API 字段。
+      if (isCNApiKeyAccount.value && !isWebEditAccount.value) {
         newCredentials.account_mode = editAccountMode.value
         newCredentials.api_protocol = editApiProtocol.value
         if (editApiProtocol.value === 'adaptive') {
@@ -5111,6 +5190,29 @@ const handleSubmit = async () => {
       }
 
       // Handle API key
+      // 网页接入账号：登录态 Cookie/Token 即凭证，不走 API Key 校验。
+      // 填写新 Cookie/Token 时经 buildWebProviderCredentials 校验（口径与后端
+      // validateWebAccountCredential 一致），请求带 access_mode="web"；留空保留
+      // 原凭证（后端 MergePreservingSensitiveCreds 保留已有 cookie/access_token）。
+      if (isWebEditAccount.value) {
+        if (webEditCookie.value.trim() || webEditKimiTokenJson.value.trim()) {
+          const built = buildWebProviderCredentials(props.account.platform, {
+            cookie: webEditCookie.value,
+            kimiTokenJson: webEditKimiTokenJson.value,
+            baseUrl: webEditBaseUrl.value
+          })
+          if (built.error || !built.credentials) {
+            appStore.showError(t(`admin.accounts.webProviders.errors.${built.error ?? 'webCookieRequired'}`))
+            return
+          }
+          Object.assign(newCredentials, built.credentials)
+          if (webEditBaseUrl.value.trim()) {
+            newCredentials.base_url = webEditBaseUrl.value.trim()
+          }
+        }
+        // access_mode="web" 必须保留（平台归并后 Web/API 唯一判定源）。
+        newCredentials.access_mode = 'web'
+      } else {
       // 后端响应已脱敏：currentCredentials 不会再包含 api_key 原文。
       // 用户填入新值则覆盖；留空时优先看 credentials_status.has_api_key；
       // 若后端尚未升级（无 credentials_status），回退读旧结构 currentCredentials.api_key。
@@ -5122,6 +5224,7 @@ const handleSubmit = async () => {
       } else if (!hasExistingApiKey) {
         appStore.showError(t('admin.accounts.apiKeyIsRequired'))
         return
+      }
       }
 
       if (balanceProbeEnabled.value) {

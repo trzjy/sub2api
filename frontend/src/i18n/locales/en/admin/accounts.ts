@@ -134,12 +134,13 @@ export default {
           webCookieRequired: 'Please paste a non-empty full Cookie string',
           webKimiJsonInvalid: 'Invalid Token JSON: paste a parseable JSON object',
           webKimiAccessTokenRequired: 'Token JSON is missing a non-empty access_token',
+          webCredentialDuplicate: 'An existing account already holds the same login session credentials: one web login session cannot serve as a second account. Log out of the current account on the official page, or use an incognito window / separate browser profile to log in with the new account, then retry.',
         },
       },
       webLogin: {
         title: 'Official Web Login',
         openOfficial: 'Open official login page in a new tab',
-        openOfficialHint: 'The official login page may forbid embedding; log in from a new tab and paste the Cookie manually.',
+        openOfficialHint: 'The official login page may forbid embedding; log in from a new tab and paste the Cookie manually. Note: the new tab reuses the browser\'s current login session on the official domain and cannot be isolated automatically — log out of the official account first, or use an incognito window / separate browser profile, otherwise the new account will duplicate the currently logged-in one.',
         platformHint: {
           deepseek: 'The login page is embedded via the site proxy; cookies are captured and filled automatically after login. If the proxy is unavailable, open the official page in a new window and paste the full Cookie string manually.',
           zhipu: 'The login page is embedded via the site proxy; cookies are captured and filled automatically after login. If the proxy is unavailable, open the official page in a new window and paste the full Cookie string manually.',

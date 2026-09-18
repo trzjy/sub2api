@@ -283,9 +283,10 @@ export interface PublicSettings {
   affiliate_enabled: boolean
   allow_user_view_error_requests?: boolean
   /**
-   * 网页登录代理隔离 origin（字符串，形如 `http://<host>:3400`）。
+   * 网页登录代理隔离 origin（字符串，仅显式 HTTPS origin，形如 `https://<host>[:port]`）。
    * 非空 = 隔离 origin 可用，前端 iframe src 拼为 `${web_login_proxy_origin}${session.url}`，
-   * 官方页脚本无法读取管理端存储；空/缺失 = 代理不可用或未启用隔离，前端回退同源代理路径。
+   * 官方页脚本无法读取管理端存储；空/缺失 = 代理不可用或未启用隔离，前端降级为官方页
+   * 新标签 + 手动粘贴（同源回退已删除，禁止）。
    */
   web_login_proxy_origin?: string
 }

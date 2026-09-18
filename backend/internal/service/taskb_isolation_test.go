@@ -79,9 +79,37 @@ func TestTaskBAccessModeSwitchRevalidation(t *testing.T) {
 	require.NoError(t, validateAccessModeCredential(PlatformZhipu, AccountTypeAPIKey,
 		map[string]any{"access_mode": AccountAccessModeAPI, "api_key": "sk-x"}), "switch to api with api_key ok")
 
-	// 无显式 access_mode（形状兼容期）：不强制。
+	// 凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定）：web 登录平台携带网页登录形状凭证
+	// （cookie/access_token）但缺显式 access_mode → fail-closed 拒绝；api 形状凭证
+	// 仍经 GetAccessMode 默认 "api"，不强制显式（既有官方平台 API 账号语义）。
+	require.Error(t, validateAccessModeCredential(PlatformZhipu, AccountTypeAPIKey,
+		map[string]any{"cookie": "c"}), "web-shaped credential without explicit access_mode rejected")
+	require.Error(t, validateAccessModeCredential(PlatformKimi, AccountTypeAPIKey,
+		map[string]any{"access_token": "at"}), "kimi web-shaped credential without explicit access_mode rejected")
 	require.NoError(t, validateAccessModeCredential(PlatformZhipu, AccountTypeAPIKey,
-		map[string]any{"api_key": "sk-x"}))
+		map[string]any{"api_key": "sk-x"}), "api-shaped credential without explicit access_mode not forced")
+	require.NoError(t, validateAccessModeCredential(PlatformOpenAI, AccountTypeAPIKey,
+		map[string]any{"cookie": "residue"}), "non-web platform unaffected")
+}
+
+// 3b. 凭证形状隐式归属兼容期关闭回归（创建链路）：web 形状凭证缺显式 access_mode 建号被拒；
+// 显式 access_mode=web 正常；api 形状无显式 access_mode 不受影响。
+func TestTaskBWebShapeCredentialCreateRejected(t *testing.T) {
+	build := func(creds map[string]any) error {
+		_, err := buildAccountForCreate(&CreateAccountInput{
+			Name:        "shape-compat-closed",
+			Platform:    PlatformZhipu,
+			Type:        AccountTypeAPIKey,
+			Credentials: creds,
+		}, map[string]any{})
+		return err
+	}
+	// cookie 非空但无 access_mode：拒绝。
+	require.Error(t, build(map[string]any{"cookie": "c"}), "web-shaped create without access_mode rejected")
+	// 显式 access_mode=web + cookie：正常。
+	require.NoError(t, build(map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}), "explicit web create ok")
+	// api 形状无显式 access_mode：不受影响（GetAccessMode 默认 api）。
+	require.NoError(t, build(map[string]any{"api_key": "sk-x", "base_url": "https://open.bigmodel.cn/api/paas/v4"}), "api-shaped create without access_mode ok")
 }
 
 // 4. web 接入模式账号不进 CN 余额/额度/403/429 冷却链。

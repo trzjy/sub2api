@@ -338,12 +338,13 @@ export default {
           webCookieRequired: '请粘贴非空的整串 Cookie',
           webKimiJsonInvalid: 'Token JSON 格式无效：请粘贴可解析的 JSON 对象',
           webKimiAccessTokenRequired: 'Token JSON 中缺少非空的 access_token',
+          webCredentialDuplicate: '检测到已有账号持有相同登录会话的凭证：同一网页登录会话不能作为第二个账号。请先在官方页面退出当前账号，或使用无痕窗口 / 独立浏览器 Profile 登录新账号后再试。',
         },
       },
       webLogin: {
         title: '官方网页登录',
         openOfficial: '在新窗口打开官方登录页',
-        openOfficialHint: '官方登录页禁止内嵌展示时，请在新窗口登录后手动粘贴 Cookie。',
+        openOfficialHint: '官方登录页禁止内嵌展示时，请在新窗口登录后手动粘贴 Cookie。注意：新窗口会复用浏览器当前在官方域名的登录会话，无法自动隔离——打开前请先退出官方账号，或使用无痕窗口 / 独立浏览器 Profile 登录，否则新建账号会得到与当前登录相同的账号。',
         platformHint: {
           deepseek: '登录页经本站代理内嵌，登录后 Cookie 自动捕获并回填；若代理不可用，可新窗口登录后手动粘贴整串 Cookie。',
           zhipu: '登录页经本站代理内嵌，登录后 Cookie 自动捕获并回填；若代理不可用，可新窗口登录后手动粘贴整串 Cookie。',

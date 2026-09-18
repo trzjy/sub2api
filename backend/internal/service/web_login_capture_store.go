@@ -27,11 +27,17 @@ const webLoginSessionTTL = 10 * time.Minute
 const webLoginSessionCleanup = time.Minute
 
 // webLoginCaptureEntry 是单个网页登录捕获会话的缓存条目。
+//
+// baseline 是会话隔离基线：会话首个代理请求时浏览器已携带的平台 Cookie 值
+// （上一会话/浏览器遗留登录态）。与基线相同的入站 Cookie 值视为遗留登录态，
+// 不参与捕获，防止「新建账号实际复用上一账号网页会话」被伪装成新账号。
 type webLoginCaptureEntry struct {
 	Platform    string
 	Cookie      string
 	CapturedAt  time.Time
 	ExpiresAt   time.Time
+	baseline    map[string]string
+	baselineSet bool
 }
 
 // WebLoginCaptureStore 网页登录捕获会话存储（内存实现）。
@@ -128,4 +134,42 @@ func (s *WebLoginCaptureStore) Touch(token string) {
 // Delete 删除会话（best-effort）。
 func (s *WebLoginCaptureStore) Delete(token string) {
 	s.cache.Delete(token)
+}
+
+// EnsureBaseline 在会话首个代理请求时记录入站平台 Cookie 基线（浏览器上一会话
+// 遗留登录态）。已记录则原样返回既有基线（幂等，并发首个请求取先到者）。
+// 返回生效基线；会话不存在/已过期返回 nil。
+func (s *WebLoginCaptureStore) EnsureBaseline(token string, inbound map[string]string) map[string]string {
+	val, ok := s.cache.Get(token)
+	if !ok {
+		return nil
+	}
+	entry, ok := val.(*webLoginCaptureEntry)
+	if !ok {
+		return nil
+	}
+	if entry.baselineSet {
+		return entry.baseline
+	}
+	entry.baseline = inbound
+	entry.baselineSet = true
+	// 重新写入以保留存储语义（与 SetCookie/Touch 一致）。
+	s.cache.Set(token, entry, gocache.DefaultExpiration)
+	return entry.baseline
+}
+
+// Baseline 返回会话基线；未记录或会话不存在返回 nil。
+func (s *WebLoginCaptureStore) Baseline(token string) map[string]string {
+	val, ok := s.cache.Get(token)
+	if !ok {
+		return nil
+	}
+	entry, ok := val.(*webLoginCaptureEntry)
+	if !ok {
+		return nil
+	}
+	if !entry.baselineSet {
+		return nil
+	}
+	return entry.baseline
 }

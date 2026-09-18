@@ -4,7 +4,7 @@ import { getWebLoginProxyCapture } from '@/api/admin/accounts'
 /**
  * Web-login cookie capture composable.
  *
- * After the backend opens a same-origin proxy session (createWebLoginProxySession),
+ * After the backend opens an isolated-origin proxy session (createWebLoginProxySession),
  * the login page is embedded in an iframe pointing at the proxy url. We poll the
  * backend for the captured cookie and, once available, surface it via `capturedCookie`.
  *

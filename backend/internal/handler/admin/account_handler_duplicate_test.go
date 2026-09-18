@@ -55,6 +55,12 @@ func (r *failOnceMarkSucceededRepo) MarkSucceeded(ctx context.Context, id int64,
 	return r.memoryIdempotencyRepoStub.MarkSucceeded(ctx, id, responseStatus, responseBody, expiresAt)
 }
 
+// GetAccount 供 Duplicate 处理器的登录会话去重门调用：返回被复制的源账号
+// （非 web 平台或空账号均放行，不影响本文件既有断言）。
+func (s *duplicateAccountAdminServiceStub) GetAccount(_ context.Context, _ int64) (*service.Account, error) {
+	return s.account, nil
+}
+
 func (s *duplicateAccountAdminServiceStub) DuplicateAccount(_ context.Context, accountID int64, actorScope, operationKey string) (*service.Account, error) {
 	s.calls++
 	s.accountID = accountID
@@ -74,6 +80,10 @@ func (s *duplicateAccountAdminServiceStub) RecoverDuplicateAccount(_ context.Con
 	if !s.created {
 		return nil, nil
 	}
+	return s.account, nil
+}
+
+func (s *blockingDuplicateAdminServiceStub) GetAccount(_ context.Context, _ int64) (*service.Account, error) {
 	return s.account, nil
 }
 

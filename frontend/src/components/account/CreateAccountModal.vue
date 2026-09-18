@@ -1459,7 +1459,7 @@
         </div>
       </div>
 
-      <!-- 网页接入模式：手动粘贴登录态凭证（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底） -->
+      <!-- 网页接入模式：手动粘贴登录态凭证（内嵌登录 WebLoginModal 已集成，web 登录代理为主路径，粘贴为降级兜底） -->
       <div v-if="isWebAccessModePlatform" class="space-y-4">
         <!-- 封号风险提示（方案 §2.2）：账号参与站点调度，请使用可接受风险的账号 -->
         <div data-testid="web-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
@@ -6083,7 +6083,7 @@ const handleSubmit = async () => {
   }
 
   // 网页接入模式（kimi / zhipu / deepseek + access_mode=web）：手动粘贴登录态
-  // 凭证建号（内嵌登录 WebLoginModal 为 W5 范围，当前粘贴为唯一路径，落地后作降级兜底）。
+  // 凭证建号（内嵌登录 WebLoginModal 已集成，web 登录代理为主路径，粘贴为降级兜底）。
   if (isWebAccessModePlatform.value) {
     if (!form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))

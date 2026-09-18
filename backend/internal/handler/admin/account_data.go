@@ -433,6 +433,33 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 
 		enrichCredentialsFromIDToken(&item)
 
+		// 登录会话去重（与 Create 同一语义）：导出文件可能携带与目标环境既有
+		// web 账号相同的登录态，导入不得复用其网页登录会话伪装成新账号。
+		// 命中按导入语义计为该项失败，其余项继续。
+		if service.IsWebLoginPlatform(item.Platform) {
+			if mode, _ := item.Credentials["access_mode"].(string); strings.TrimSpace(mode) == service.AccountAccessModeWeb {
+				existing, derr := h.duplicateWebCredentialAccount(ctx, item.Platform, item.Credentials, 0)
+				if derr != nil {
+					result.AccountFailed++
+					result.Errors = append(result.Errors, DataImportError{
+						Kind:    "account",
+						Name:    item.Name,
+						Message: "检查重复登录会话失败",
+					})
+					continue
+				}
+				if existing != "" {
+					result.AccountFailed++
+					result.Errors = append(result.Errors, DataImportError{
+						Kind:    "account",
+						Name:    item.Name,
+						Message: webCredentialDuplicateMessage(existing),
+					})
+					continue
+				}
+			}
+		}
+
 		accountInput := &service.CreateAccountInput{
 			Name:                 item.Name,
 			Notes:                item.Notes,

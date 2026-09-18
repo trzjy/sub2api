@@ -199,6 +199,19 @@ func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath stri
 
 	origin := target.Scheme + "://" + target.Host
 	keyCookieName, _ := platformKeyCookie(entry.Platform)
+	// 上游平台 Cookie 的浏览器路径作用域：限定到本会话 token 前缀，使平台
+	// Set-Cookie 只在浏览器内本会话路径下生效，下一会话（新 token）不再读到
+	// 上一会话的平台 Cookie（会话隔离，防跨账号串 Cookie）。
+	sessionCookiePath := webLoginProxyBasePathPrefix + token + "/"
+
+	// 会话隔离基线：会话首个代理请求时浏览器已携带的平台 Cookie 值（上一会话/
+	// 浏览器遗留登录态）。与基线相同的入站 Cookie 值不转发给上游也不参与捕获，
+	// 强制本会话产生全新登录态（新建账号不得复用上一账号网页会话）。
+	rawInbound := extractAllowedCookies(c.Request, entry.Platform)
+	inboundAllowed := dropBaselineCookies(
+		rawInbound,
+		h.store.EnsureBaseline(token, pairsToCookieMap(rawInbound)),
+	)
 
 	proxy := &httputil.ReverseProxy{
 		// 5a. Director：设定上游 scheme/host，转发受控头，重写 Origin/Referer，删除 X-Forwarded-*。
@@ -224,12 +237,13 @@ func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath stri
 					req.Header.Del(k)
 				}
 			}
-			// 出站 Cookie：携带“已捕获累积串 + 入站 Cookie 中的平台白名单字段”。
-			// 平台白名单字段（如 chatglm_token / chatglm_refresh_token）是官方前端
-			// JS 写入浏览器、服务端不下发 Set-Cookie 的登录态，必须从入站 Cookie 头
-			// 提取才能转发给上游；白名单之外的入站 Cookie（本站管理端 cookie、
-			// wlp_session 等）一律丢弃，绝不原样转发整个入站 Cookie 头。
-			allowed := extractAllowedCookies(req, entry.Platform)
+			// 出站 Cookie：携带“已捕获累积串 + 入站 Cookie 中的平台白名单字段（已剔除
+			// 会话隔离基线遗留值）”。平台白名单字段（如 chatglm_token /
+			// chatglm_refresh_token）是官方前端 JS 写入浏览器、服务端不下发 Set-Cookie
+			// 的登录态，必须从入站 Cookie 头提取才能转发给上游；白名单之外的入站
+			// Cookie（本站管理端 cookie、wlp_session 等）一律丢弃，绝不原样转发整个
+			// 入站 Cookie 头。入站列表已在 proxyForToken 内完成白名单提取与基线过滤。
+			allowed := inboundAllowed
 			req.Header.Del("Cookie")
 			if stored, ok := h.store.Cookie(token); ok && stored != "" {
 				req.Header.Set("Cookie", mergeCookies(stored, cookiesFromPairs(allowed)))
@@ -244,7 +258,7 @@ func (h *WebLoginProxyHandler) proxyForToken(c *gin.Context, token, rawPath stri
 		},
 		// 5c. ModifyResponse：剥离敏感响应头、重写 Set-Cookie、捕获 Cookie、重写 Location、改写 HTML。
 		ModifyResponse: func(resp *http.Response) error {
-			return h.modifyUpstreamResponse(c, token, keyCookieName, entry.Platform, origin, resp, c.Request)
+			return h.modifyUpstreamResponse(c, token, keyCookieName, entry.Platform, origin, sessionCookiePath, resp, c.Request)
 		},
 		// 5d. ErrorHandler：上游/重定向错误统一返回 502，且响应体不含目标 URL（防泄露）。
 		ErrorHandler: func(_ http.ResponseWriter, _ *http.Request, _ error) {
@@ -299,15 +313,16 @@ func stripSessionCookie(cookieStr string) string {
 // modifyUpstreamResponse 处理上游响应：头剥离、Set-Cookie 重写、Cookie 捕获、Location 重写、HTML 改写。
 func (h *WebLoginProxyHandler) modifyUpstreamResponse(
 	c *gin.Context,
-	token, keyCookieName, platform, origin string,
+	token, keyCookieName, platform, origin, cookiePath string,
 	resp *http.Response,
 	req *http.Request,
 ) error {
 	stripResponseSecurityHeaders(resp)
 
-	// 5c-1. 重写 Set-Cookie：删 Domain=、SameSite 改 Lax；非 TLS 访问则删 Secure。
+	// 5c-1. 重写 Set-Cookie：删 Domain=、SameSite 改 Lax、Path 限定到本会话
+	// token 前缀（会话隔离）；非 TLS 访问则删 Secure。
 	secure := isSecureRequest(c)
-	rewriteSetCookies(resp, secure)
+	rewriteSetCookies(resp, secure, cookiePath)
 
 	// 6. 捕获逻辑：合并 Set-Cookie + 入站白名单字段，命中关键 Cookie 则存储。
 	captureCookies(h.store, token, keyCookieName, platform, resp, req)
@@ -336,24 +351,28 @@ func stripResponseSecurityHeaders(resp *http.Response) {
 }
 
 // rewriteSetCookies 重写每条 Set-Cookie：移除 Domain 属性、SameSite 改为 Lax、
-// 若非安全请求（未经过 TLS）则移除 Secure 属性。
-func rewriteSetCookies(resp *http.Response, secure bool) {
+// Path 限定到 cookiePath（会话隔离：平台 Cookie 只在本会话 token 路径下生效，
+// 下一会话不再读到上一会话的平台 Cookie）、若非安全请求（未经过 TLS）则移除
+// Secure 属性。
+func rewriteSetCookies(resp *http.Response, secure bool, cookiePath string) {
 	setCookies := resp.Header.Values("Set-Cookie")
 	if len(setCookies) == 0 {
 		return
 	}
 	resp.Header.Del("Set-Cookie")
 	for _, sc := range setCookies {
-		resp.Header.Add("Set-Cookie", sanitizeSetCookie(sc, secure))
+		resp.Header.Add("Set-Cookie", sanitizeSetCookie(sc, secure, cookiePath))
 	}
 }
 
-// sanitizeSetCookie 重写单条 Set-Cookie 字符串：删 Domain=，SameSite=Lax，按需删 Secure。
-func sanitizeSetCookie(sc string, secure bool) string {
+// sanitizeSetCookie 重写单条 Set-Cookie 字符串：删 Domain=，SameSite=Lax，
+// Path 强制限定到 cookiePath（会话隔离），按需删 Secure。
+func sanitizeSetCookie(sc string, secure bool, cookiePath string) string {
 	// 首段为 name=value。
 	parts := strings.SplitN(sc, ";", 2)
 	if len(parts) == 1 {
-		return sc
+		// 无属性段：补会话隔离 Path。
+		return parts[0] + "; Path=" + cookiePath
 	}
 	nameVal := parts[0]
 	attrs := parts[1]
@@ -370,6 +389,10 @@ func sanitizeSetCookie(sc string, secure bool) string {
 		if strings.HasPrefix(lower, "domain=") {
 			continue
 		}
+		// 删除原 Path，统一改为会话隔离路径。
+		if strings.HasPrefix(lower, "path=") {
+			continue
+		}
 		// SameSite 统一改为 Lax。
 		if strings.HasPrefix(lower, "samesite=") {
 			out = append(out, "SameSite=Lax")
@@ -381,6 +404,7 @@ func sanitizeSetCookie(sc string, secure bool) string {
 		}
 		out = append(out, attr)
 	}
+	out = append(out, "Path="+cookiePath)
 	return strings.Join(out, "; ")
 }
 
@@ -392,12 +416,21 @@ func sanitizeSetCookie(sc string, secure bool) string {
 //     写入型登录态（chatglm_token 等）不走 Set-Cookie，只能从浏览器携带的 Cookie
 //     捕获；白名单之外的一切入站 Cookie（本站管理端 cookie、wlp_session 等）绝不
 //     并入捕获（红线：误捕获会泄漏/污染）。
+//
+// 会话隔离：入站白名单字段中与基线（会话首个请求时的浏览器遗留值）完全相同的值
+// 视为上一会话遗留登录态，不参与捕获——防止「新建账号实际复用上一账号网页会话」
+// 被伪装成新账号。本会话内登录态发生变化（JS 重写/登出后重登）时值与基线不同，
+// 照常捕获。关键 Cookie 为空值（如登出清空）时不捕获。
 func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName, platform string, resp *http.Response, req *http.Request) {
 	prev, _ := store.Cookie(token)
 	prev = stripSessionCookie(prev)
+	baseline := store.Baseline(token)
 	merged := mergeCookies(prev, resp.Cookies())
-	// 并入入站 Cookie 中的平台白名单字段（JS 写入型登录态）。
-	inboundAllowed := extractAllowedCookies(req, platform)
+	// 并入入站 Cookie 中的平台白名单字段（JS 写入型登录态，已剔除基线遗留值）。
+	inboundAllowed := dropBaselineCookies(
+		extractAllowedCookies(req, platform),
+		baseline,
+	)
 	if len(inboundAllowed) > 0 {
 		merged = mergeCookies(merged, cookiesFromPairs(inboundAllowed))
 	}
@@ -405,28 +438,70 @@ func captureCookies(store *service.WebLoginCaptureStore, token, keyCookieName, p
 		return
 	}
 	if keyCookieName != "" {
-		// 本次响应直接回写关键 Cookie。
+		// 本次响应直接回写关键 Cookie（空值为登出清空语义，不捕获）。
 		for _, c := range resp.Cookies() {
 			if c.Name == keyCookieName {
+				if c.Value == "" {
+					return
+				}
 				store.SetCookie(token, merged)
 				return
 			}
 		}
 		// 关键 Cookie 已存在于累积串（上游不再回 Set-Cookie 时）也算命中。
 		for _, c := range parseCookieHeader(prev) {
-			if c.Name == keyCookieName {
+			if c.Name == keyCookieName && c.Value != "" {
 				store.SetCookie(token, merged)
 				return
 			}
 		}
-		// 关键 Cookie 存在于入站白名单字段（JS 写入型，首次捕获）也算命中。
+		// 关键 Cookie 存在于入站白名单字段（JS 写入型，值与基线不同 = 本会话
+		// 全新登录态）也算命中；与基线相同视为上一会话遗留，拒绝捕获。
 		for _, p := range inboundAllowed {
-			if p.Name == keyCookieName {
+			if p.Name == keyCookieName && p.Value != "" && !isBaselineValue(baseline, p.Name, p.Value) {
 				store.SetCookie(token, merged)
 				return
 			}
 		}
 	}
+}
+
+// isBaselineValue 报告 name=value 是否与会话隔离基线完全相同（遗留登录态）。
+// 基线未记录（nil）时不视为遗留。
+func isBaselineValue(baseline map[string]string, name, value string) bool {
+	if baseline == nil {
+		return false
+	}
+	bv, ok := baseline[name]
+	return ok && bv == value
+}
+
+// dropBaselineCookies 过滤与基线值完全相同的入站平台 Cookie（浏览器上一会话遗留
+// 登录态）。基线为空（未记录/无遗留）时原样返回。
+func dropBaselineCookies(pairs []struct{ Name, Value string }, baseline map[string]string) []struct{ Name, Value string } {
+	if len(baseline) == 0 || len(pairs) == 0 {
+		return pairs
+	}
+	out := make([]struct{ Name, Value string }, 0, len(pairs))
+	for _, p := range pairs {
+		if isBaselineValue(baseline, p.Name, p.Value) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// pairsToCookieMap 把 name/value 对转换为 map（EnsureBaseline 入参）。
+func pairsToCookieMap(pairs []struct{ Name, Value string }) map[string]string {
+	if len(pairs) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		m[p.Name] = p.Value
+	}
+	return m
 }
 
 // extractAllowedCookies 从请求 Cookie 头中提取平台白名单字段（区分大小写）。

@@ -183,7 +183,7 @@ func derefInt64(p *int64) int64 {
 //     WebLoginProxyHandler 实例（捕获存储共享，会话创建/轮询仍走主 v1 admin 端点）。
 //   - 不挂载 adminAuth / auditLog 等 admin 中间件：token 即能力凭证（现状不变）。
 //   - WebLoginProxyAddr 为空时 ProvideWebLoginProxyServer 返回 nil（不启用，
-//     前端 iframe 回退同源，代理路由仍注册在主服务 v1，功能不缺失）。
+//     前端自动降级为官方页登录 + 手动粘贴，不回退同源）。
 type WebLoginProxyServer struct {
 	srv *http.Server
 }

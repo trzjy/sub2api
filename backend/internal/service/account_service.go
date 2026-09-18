@@ -255,6 +255,12 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := validateWebAccountCredential(req.Platform, req.Type, req.Credentials); err != nil {
 		return nil, err
 	}
+	// 凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定）：与 admin 创建链路同口径，
+	// web 登录形状凭证缺显式 access_mode 即拒绝（在 SanitizeStoredCredentials
+	// 剥离非 web 账号 cookie 之前判定）。
+	if err := validateAccessModeCredential(req.Platform, req.Type, req.Credentials); err != nil {
+		return nil, err
+	}
 	// 验证分组是否存在（如果指定了分组）
 	if len(req.GroupIDs) > 0 {
 		if err := s.validateGroupIDsExist(ctx, req.GroupIDs); err != nil {

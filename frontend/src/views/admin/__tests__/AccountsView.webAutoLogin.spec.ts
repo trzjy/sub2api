@@ -328,4 +328,129 @@ describe('AccountsView web auto-login batch actions', () => {
     expect(webAutoLogin.exportWebAccounts).not.toHaveBeenCalled()
     expect(showError).toHaveBeenCalledWith('admin.accounts.batch.selectWebOnly')
   })
+
+  it('keeps active login status for kimi when the list response only carries credentials_status.has_access_token', async () => {
+    // 后端列表接口 RedactCredentials 移除 access_token 明文，仅保留 has_access_token；
+    // 已保存凭证的 kimi web 账号必须仍显示 active 而不是 unconfigured。
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_access_token: true }
+        })
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badge = wrapper.find('[data-testid="login-status-badge"]')
+    expect(badge.text()).toBe('admin.accounts.loginStatus.active')
+    expect(badge.classes()).toContain('bg-green-100')
+  })
+
+  it('keeps active login status for zhipu/deepseek when the list response only carries credentials_status.has_cookie', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'zhipu',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_cookie: true }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_cookie: true }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.active')
+      expect(badge.classes()).toContain('bg-green-100')
+    }
+  })
+
+  it('falls back to plaintext credentials fields when credentials_status is absent (legacy backend)', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web', access_token: 'tok' }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web', cookie: 'ck=1' }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.active')
+      expect(badge.classes()).toContain('bg-green-100')
+    }
+  })
+
+  it('shows unconfigured only when the web account truly has no credential', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_access_token: false }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web' }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.unconfigured')
+      expect(badge.classes()).toContain('bg-gray-100')
+    }
+  })
 })

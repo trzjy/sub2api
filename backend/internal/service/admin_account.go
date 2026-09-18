@@ -475,7 +475,12 @@ func apiKeyOf(credentials map[string]any) string {
 // validateAccessModeCredential 按账号目标接入模式（access_mode）重验凭证：
 // web 模式要求 cookie（zhipu/deepseek）或 access_token（kimi）非空；api 模式要求
 // api_key 非空。缺失即拒绝（防切换后账号不可用，方案 §5.1 混合凭证规则 / §8 风险）。
-// 无显式 access_mode（形状兼容期）时跳过，不强制。
+// 凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定：不保留兼容）：web 登录平台的 apikey 账号
+// 携带网页登录形状凭证（cookie/access_token）但缺显式 access_mode 时 fail-closed
+// 拒绝——网页登录态必须显式声明 credentials.access_mode，不得按凭证形状隐式归属
+// （否则 SanitizeStoredCredentials 会把 cookie 当 API 账号残留剥离，账号静默不可用）。
+// api 形状凭证仍经 Account.GetAccessMode 默认 "api"，不强制显式（与既有官方平台
+// API 账号语义一致）。
 func validateAccessModeCredential(platform, accountType string, credentials map[string]any) error {
 	mode := accessModeFromCredentials(credentials)
 	switch mode {
@@ -485,8 +490,29 @@ func validateAccessModeCredential(platform, accountType string, credentials map[
 		if apiKeyOf(credentials) == "" {
 			return fmt.Errorf("access_mode=api requires a non-empty api_key")
 		}
+	case "":
+		if IsWebLoginPlatform(platform) && accountType == AccountTypeAPIKey && hasWebLoginShapeCredential(platform, credentials) {
+			return fmt.Errorf(
+				"platform %s web login credentials (cookie/access_token) require an explicit credentials.access_mode (%q or %q)",
+				platform, AccountAccessModeWeb, AccountAccessModeAPI)
+		}
 	}
 	return nil
+}
+
+// hasWebLoginShapeCredential 报告 credentials 是否携带网页登录形状凭证：
+// zhipu/deepseek 的非空 cookie、kimi 的非空 access_token（与
+// validateWebAccountCredential 的网页供应商家族判定同口径）。
+func hasWebLoginShapeCredential(platform string, credentials map[string]any) bool {
+	if credentials == nil {
+		return false
+	}
+	key := "cookie"
+	if platform == PlatformKimi {
+		key = "access_token"
+	}
+	raw, _ := credentials[key].(string)
+	return strings.TrimSpace(raw) != ""
 }
 
 // validateWebAccountCredential 校验网页接入账号（官方平台 zhipu/deepseek/kimi +
@@ -547,6 +573,11 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		return nil, err
 	}
 	if err := validateWebAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
+		return nil, err
+	}
+	// 凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定）：web 登录形状凭证缺显式 access_mode
+	// 即拒绝建号（复制账号/导入等旁路统一收敛到本校验，与创建主路径同口径）。
+	if err := validateAccessModeCredential(input.Platform, input.Type, input.Credentials); err != nil {
 		return nil, err
 	}
 
@@ -654,6 +685,12 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 
 	// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 	if err := NormalizeHeaderOverrideCredentials(input.Credentials); err != nil {
+		return nil, err
+	}
+	// 凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定）：必须在脱敏前完成 web 登录形状判定——
+	// SanitizeStoredCredentials 会剥离非 web 账号的 cookie，脱敏后再校验将失去判定依据，
+	// web 形状凭证会被静默剥离登录态后当作 API 账号落库。
+	if err := validateAccessModeCredential(input.Platform, input.Type, input.Credentials); err != nil {
 		return nil, err
 	}
 	// Never persist ephemeral SSO/password secrets after OAuth conversion.
@@ -824,14 +861,16 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err
 		}
-		// Strip SSO/password residue that must never sit next to OAuth tokens.
-		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
 		// 接入模式切换重验（方案 §5.1 混合凭证规则 / §8 风险）：本轮携带凭证时，按目标
 		// 接入模式重验凭证（web 要求 cookie/access_token 非空、api 要求 api_key 非空），
-		// 缺失即拒绝，防切换后账号不可用。
+		// 缺失即拒绝，防切换后账号不可用。凭证形状隐式归属的兼容期已关闭（2026-09-19 用户裁定）：
+		// web 登录形状凭证缺显式 access_mode 在此 fail-closed 拒绝；必须在脱敏前判定，
+		// 否则非 web 账号的 cookie 被 SanitizeStoredCredentials 剥离后失去判定依据。
 		if err := validateAccessModeCredential(account.Platform, account.Type, account.Credentials); err != nil {
 			return nil, infraerrors.New(http.StatusBadRequest, "ACCESS_MODE_CREDENTIAL_INVALID", err.Error())
 		}
+		// Strip SSO/password residue that must never sit next to OAuth tokens.
+		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。

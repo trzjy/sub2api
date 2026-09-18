@@ -236,19 +236,31 @@ const pastePlaceholder = computed(() =>
     ? t('admin.accounts.webProviders.cookiePlaceholder')
     : t('admin.accounts.webProviders.kimiTokenPlaceholder'))
 
+// 代理会话请求代际计数：弹窗关闭/卸载与异步创建请求并发时，旧请求返回后不得
+// 重新启动捕获轮询或遗留会话（旧会话立即删除，不等 TTL）。
+// 声明于 watch 之前：watch immediate: true 首轮即调用 setupProxySession，
+// 若计数在其后声明会触发 TDZ ReferenceError。
+let proxySessionGeneration = 0
+
 // 打开弹窗：重置表单并尝试建立登录代理会话。
+// 关闭弹窗（show true→false）：清理代理会话并停止轮询——父组件仅置 show=false，
+// 子组件常驻不卸载，若不清理则 session 保留到 TTL、轮询/代理槽位持续占用。
+// cleanupSession 幂等（token 已清空时不重复删除），重复触发安全。
 watch(() => props.show, (open) => {
   if (open) {
     activeTab.value = 'capture'
     void setupProxySession()
+  } else {
+    cleanupSession()
   }
 }, { immediate: true })
 
 /**
- * 建立登录代理会话（同源代理登录页）。成功则嵌入 proxyUrl 并（非 kimi）启动捕获轮询；
- * 失败则降级为官方页登录 + 手动粘贴（proxyUnavailable）。
+ * 建立登录代理会话（隔离 origin 代理登录页）。成功则嵌入 proxyUrl 并（非 kimi）启动
+ * 捕获轮询；origin 缺失或创建失败则降级为官方页登录 + 手动粘贴（proxyUnavailable）。
  */
 async function setupProxySession() {
+  const generation = ++proxySessionGeneration
   pastedCredentials.value = ''
   validationError.value = ''
   validating.value = false
@@ -259,6 +271,13 @@ async function setupProxySession() {
 
   try {
     const session = await createWebLoginProxySession(webPlatform.value)
+    if (generation !== proxySessionGeneration) {
+      // 弹窗已重新打开或已关闭/卸载：本次会话作废，立即删除，不等 TTL。
+      void deleteWebLoginProxySession(session.token).catch((err) => {
+        console.warn('[WebLoginModal] failed to clean up stale proxy session (waits for TTL)', err)
+      })
+      return
+    }
     // 隔离 origin：若 public settings 提供 web_login_proxy_origin（独立监听端口的独立源），
     // 官方页脚本无法读取管理端 :3300 的 auth_token/localStorage。
     // 同源回退已移除（安全红线）：proxyUrl 仅在 proxyOrigin 非空时设置；
@@ -272,7 +291,11 @@ async function setupProxySession() {
         startCapture(session.token)
       }
     } else {
-      // 隔离 origin 未配置：代理不可用，降级手动粘贴（不回退同源）。
+      // 隔离 origin 未配置：会话已创建但代理不可用 → 立即删除已创建 session，不等
+      // TTL（会话占用代理槽位），降级手动粘贴（不回退同源）。
+      void deleteWebLoginProxySession(session.token).catch((err) => {
+        console.warn('[WebLoginModal] failed to clean up proxy session without origin (waits for TTL)', err)
+      })
       proxyUnavailable.value = true
     }
   } catch {
@@ -336,10 +359,19 @@ async function handleValidateAndApply() {
       return
     }
     emit('applied', { platform: props.platform, credentials })
+    // 成功关闭前清理代理会话（直接 emit('close') 不走 handleClose）：
+    // 不清理则 session 保留到 TTL、轮询/代理槽位持续占用。
+    cleanupSession()
     emit('close')
-  } catch {
-    // 后端错误文案不透传凭证值；统一回落通用失败提示。
-    validationError.value = t('admin.accounts.webLogin.validationFailed')
+  } catch (err) {
+    // 后端错误文案不透传凭证值；登录会话重复（同平台既有账号已持有相同登录态）
+    // 用专门提示，其余统一回落通用失败提示。
+    const errInfo = err as { message?: string; reason?: string }
+    if (errInfo?.reason === 'web_credential_duplicate') {
+      validationError.value = t('admin.accounts.webProviders.errors.webCredentialDuplicate')
+      return
+    }
+    validationError.value = errInfo?.message || t('admin.accounts.webLogin.validationFailed')
   } finally {
     validating.value = false
   }
@@ -365,16 +397,23 @@ function handleAutoRecovered(payload: { platform: string; cookie: string }) {
     return
   }
   emit('applied', { platform: props.platform, credentials: built.credentials })
+  // 成功关闭前清理代理会话（幂等，auto tab 通常无活跃 session）。
+  cleanupSession()
   emit('close')
 }
 
 /**
- * 关闭时 best-effort 清理代理会话（吞错），并停止轮询。
+ * 关闭时 best-effort 清理代理会话（失败记录日志、由 TTL 兜底），并停止轮询。
+ * 同时递增代际计数：关闭/卸载与异步创建请求并发时，挂起请求返回后走
+ * stale 分支立即删除已创建 session，不重启捕获轮询、不遗留会话。
  */
 function cleanupSession() {
+  proxySessionGeneration++
   stopCapture()
   if (proxyToken.value) {
-    void deleteWebLoginProxySession(proxyToken.value).catch(() => {})
+    void deleteWebLoginProxySession(proxyToken.value).catch((err) => {
+      console.warn('[WebLoginModal] proxy session cleanup failed (waits for TTL)', err)
+    })
     proxyToken.value = ''
   }
 }

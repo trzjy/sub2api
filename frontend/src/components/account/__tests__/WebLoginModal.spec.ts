@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 const appStoreState = vi.hoisted(() => ({
-  // 控制 WebLoginModal 读取的 public settings；默认缺 web_login_proxy_origin → 同源回退。
+  // 控制 WebLoginModal 读取的 public settings；默认缺 web_login_proxy_origin → 代理不可用降级。
   cachedPublicSettings: null as null | { web_login_proxy_origin?: string }
 }))
 
@@ -113,13 +113,13 @@ describe('WebLoginModal', () => {
   })
 
   it('embeds proxy iframe when an isolated origin is configured and starts polling', async () => {
-    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'https://wlp.example.com:8443' }
     const wrapper = mountModal('zhipu')
     await flush()
     const wrap = wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]')
     expect(wrap.exists()).toBe(true)
     // iframe src 带隔离 origin 前缀（同源回退已移除）。
-    expect(wrap.find('iframe').attributes('src')).toBe('http://127.0.0.1:3400' + PROXY_URL)
+    expect(wrap.find('iframe').attributes('src')).toBe('https://wlp.example.com:8443' + PROXY_URL)
     expect(wrap.find('iframe').attributes('sandbox')).toBeUndefined()
     // 轮询已启动（首轮已调用 capture）。
     expect(mocks.getWebLoginProxyCaptureMock).toHaveBeenCalled()
@@ -137,15 +137,15 @@ describe('WebLoginModal', () => {
   })
 
   it('prepends web_login_proxy_origin to iframe src when settings provide an isolated origin', async () => {
-    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'https://wlp.example.com:8443' }
     const wrapper = mountModal('zhipu')
     await flush()
     const wrap = wrapper.find('[data-testid="web-login-proxy-iframe-wrap"]')
-    expect(wrap.find('iframe').attributes('src')).toBe('http://127.0.0.1:3400' + PROXY_URL)
+    expect(wrap.find('iframe').attributes('src')).toBe('https://wlp.example.com:8443' + PROXY_URL)
   })
 
   it('auto-fills cookie, validates and emits applied + close on capture success', async () => {
-    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'https://wlp.example.com:8443' }
     mocks.getWebLoginProxyCaptureMock.mockResolvedValue({
       captured: true,
       cookie: 'sessionid=abc',
@@ -176,7 +176,7 @@ describe('WebLoginModal', () => {
   })
 
   it('does not poll for kimi even when proxy iframe is shown', async () => {
-    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'https://wlp.example.com:8443' }
     const wrapper = mountModal('kimi')
     await flush()
 
@@ -185,7 +185,7 @@ describe('WebLoginModal', () => {
   })
 
   it('deletes the proxy session on close', async () => {
-    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'http://127.0.0.1:3400' }
+    appStoreState.cachedPublicSettings = { web_login_proxy_origin: 'https://wlp.example.com:8443' }
     const wrapper = mountModal('zhipu')
     await flush()
     expect(mocks.deleteWebLoginProxySessionMock).not.toHaveBeenCalled()

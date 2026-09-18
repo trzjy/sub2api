@@ -71,6 +71,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
+import WebLoginModal from '../WebLoginModal.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -958,6 +959,35 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
       refresh_token: 'rt',
       user_id: 'u-9',
     })
+  })
+
+  it('fills the create payload from a captured login (applied event) and submits it', async () => {
+    const wrapper = mountModal()
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
+    await flushPromises()
+    await wrapper.get('[data-testid="web-open-login-modal"]').trigger('click')
+    await flushPromises()
+
+    // 捕获回填路径：内嵌登录弹窗校验通过后 emit applied，凭证必须真正写入创建请求
+    // （登录成功本身不建号，回填后仍走同一提交链路）。
+    const loginModal = wrapper.findComponent(WebLoginModal)
+    expect(loginModal.exists()).toBe(true)
+    loginModal.vm.$emit('applied', {
+      platform: 'deepseek',
+      credentials: { access_mode: 'web', cookie: 'sessionid=captured' },
+    })
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('captured account')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('deepseek')
+    expect(payload?.type).toBe('apikey')
+    expect(payload?.credentials?.cookie).toBe('sessionid=captured')
+    expect(payload?.credentials?.access_mode).toBe('web')
   })
 
   it('rejects blank cookie without calling create API', async () => {
