@@ -1672,8 +1672,10 @@ func (s *ServerConfig) WebLoginProxyPublicOrigin() string {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" {
 		return ""
 	}
-	if host, port, splitErr := net.SplitHostPort(u.Host); splitErr == nil && port != "" {
-		if host == "" {
+	if host, port, splitErr := net.SplitHostPort(u.Host); splitErr == nil {
+		// 显式空端口（https://example.com: / https://[::1]:）→ fail-closed 拒绝，
+		// 否则会返回带尾部冒号的非纯 origin，破坏前端拼接契约。
+		if port == "" || host == "" {
 			return ""
 		}
 		portNum, convErr := strconv.Atoi(port)

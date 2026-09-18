@@ -75,4 +75,8 @@ func TestServerConfig_WebLoginProxyPublicOrigin_HostnameAndPort(t *testing.T) {
 		(&config.ServerConfig{WebLoginProxyOrigin: "https://example.com:1"}).WebLoginProxyPublicOrigin())
 	require.Equal(t, "https://example.com:65535",
 		(&config.ServerConfig{WebLoginProxyOrigin: "https://example.com:65535"}).WebLoginProxyPublicOrigin())
+	// 显式空端口（SplitHostPort 成功但 port 为空）→ 拒绝，不得产生带尾部
+	// 冒号的非纯 origin（如 https://example.com:）。
+	require.Equal(t, "", (&config.ServerConfig{WebLoginProxyOrigin: "https://example.com:"}).WebLoginProxyPublicOrigin())
+	require.Equal(t, "", (&config.ServerConfig{WebLoginProxyOrigin: "https://[::1]:"}).WebLoginProxyPublicOrigin())
 }
