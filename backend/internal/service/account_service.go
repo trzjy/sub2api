@@ -133,6 +133,26 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// WebPlatformMigrationRepository 平台归并重构 PR-2（docs/platform-merge-refactor-plan.md
+// §5.8）迁移 reconciler 的 repository 层专用事务方法。三字段（platform /
+// credentials["access_mode"] / extra["migrated_from_platform"]）与 MAC、
+// scheduler outbox 必须由本接口的原子事务方法更新，禁止 service 层拼接多个
+// 普通 repo 调用模拟原子性。独立窄接口：只由真实账号仓储实现，避免扩大
+// AccountRepository 通用接口面。
+type WebPlatformMigrationRepository interface {
+	// ListLegacyWebPlatformAccounts 返回仍挂在 web-* 旧平台上的未删除账号。
+	ListLegacyWebPlatformAccounts(ctx context.Context) ([]*Account, error)
+	// ListMigratedFromWebPlatformAccounts 返回已迁移（extra 带
+	// migrated_from_platform 标记）且当前已落在官方平台上的账号。
+	ListMigratedFromWebPlatformAccounts(ctx context.Context) ([]*Account, error)
+	// MigrateAccountPlatform 把单个 web-* 旧平台账号迁移到官方平台（up，
+	// 逐账号单事务）。幂等：已迁移返回 (false, nil)；失败关闭。
+	MigrateAccountPlatform(ctx context.Context, id int64, fromPlatform, toPlatform string) (bool, error)
+	// RevertMigratedAccountPlatform 按 migrated_from_platform 标记回滚单个
+	// 已迁移账号（down，逐账号单事务）。幂等：标记缺失返回 (false, nil)。
+	RevertMigratedAccountPlatform(ctx context.Context, id int64) (bool, error)
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

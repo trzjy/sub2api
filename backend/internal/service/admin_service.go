@@ -114,6 +114,10 @@ type AdminService interface {
 	// 影子账号不持凭据（Credentials 恒为空），透传母账号凭据；继承母账号的 ProxyID。
 	CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error)
 
+	// 平台归并重构 PR-2：web-* 平台迁移 reconciler（应用层一次性执行）。
+	// 三字段原子性由 repository 层专用事务方法保证（见 AccountRepository）。
+	MigrateWebPlatformAccounts(ctx context.Context, direction string, dryRun bool) (*WebPlatformMigrationReport, error)
+
 	// Proxy management
 	ListProxies(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]Proxy, int64, error)
 	ListProxiesWithAccountCount(ctx context.Context, page, pageSize int, protocol, status, search string, sortBy, sortOrder string) ([]ProxyWithAccountCount, int64, error)
@@ -703,6 +707,9 @@ type adminServiceImpl struct {
 	accountRepo          AccountRepository
 	accountDuplicateRepo AccountDuplicateRepository
 	accountBillingRepo   AccountBillingSettingsRepository
+	// webPlatformMigrationRepo 平台归并 PR-2 迁移专用事务方法（窄接口，
+	// 由真实账号仓储实现；测试替身未实现时为 nil，迁移入口失败关闭）。
+	webPlatformMigrationRepo WebPlatformMigrationRepository
 	proxyRepo            ProxyRepository
 	apiKeyRepo           APIKeyRepository
 	redeemCodeRepo       RedeemCodeRepository
@@ -774,6 +781,14 @@ func NewAdminService(
 		accountRepo:          accountRepo,
 		accountDuplicateRepo: accountRepo,
 		accountBillingRepo:   accountRepo,
+		// 迁移写路径窄接口：真实仓储实现四方法；测试替身未实现时保持 nil，
+		// 迁移入口失败关闭（不强制所有 AccountRepository 替身实现迁移事务）。
+		webPlatformMigrationRepo: func() WebPlatformMigrationRepository {
+			if migrationRepo, ok := accountRepo.(WebPlatformMigrationRepository); ok {
+				return migrationRepo
+			}
+			return nil
+		}(),
 		proxyRepo:            proxyRepo,
 		apiKeyRepo:           apiKeyRepo,
 		redeemCodeRepo:       redeemCodeRepo,

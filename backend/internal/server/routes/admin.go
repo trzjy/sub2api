@@ -502,6 +502,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/models/sync-upstream", h.Admin.Account.SyncUpstreamModels)
 		accounts.POST("/:id/models/sync-volcano-plan", h.Admin.Account.SyncVolcanoPlanModels)
 		accounts.POST("/batch", h.Admin.Account.BatchCreate)
+		// 平台归并迁移会改写账号凭证三字段（platform/access_mode/migrated_from_platform），
+		// 与账号导出同级敏感——要求 step-up 2FA
+		accounts.POST("/platform-migration", gin.HandlerFunc(stepUpAuth), h.Admin.Account.RunPlatformMigration)
 		// 账号导出泄露上游凭证原文——要求 step-up 2FA
 		accounts.GET("/data", gin.HandlerFunc(stepUpAuth), h.Admin.Account.ExportData)
 		accounts.POST("/data", h.Admin.Account.ImportData)
