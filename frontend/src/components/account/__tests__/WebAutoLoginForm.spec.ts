@@ -47,11 +47,15 @@ describe('WebAutoLoginForm', () => {
     })
   })
 
-  it('zhipu: send_code reveals the SMS code step and never uses a session_token', async () => {
+  it('zhipu: send_code (after captcha solved) reveals the SMS code step and never uses a session_token', async () => {
     webLoginSmsMock.mockResolvedValue({ success: true })
     const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
 
     await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    // 模拟数美滑块已解出（onSuccess 自动回填挑战字段）。
+    await wrapper.find('[data-testid="web-auto-login-zhipu-rid"]').setValue('rid-abc')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-md5"]').setValue('md5-xyz')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-phone-code"]').setValue('86')
     await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
     await flushPromises()
 
@@ -63,7 +67,7 @@ describe('WebAutoLoginForm', () => {
     expect(wrapper.find('[data-testid="web-auto-login-sms-code"]').exists()).toBe(true)
   })
 
-  it('zhipu: send_code needs_challenge shows the challenge banner and does not fake success', async () => {
+  it('zhipu: send_code needs_challenge (captcha provided but upstream still challenges) shows the challenge banner and does not fake success', async () => {
     webLoginSmsMock.mockRejectedValue({
       status: 400,
       code: 400,
@@ -73,6 +77,10 @@ describe('WebAutoLoginForm', () => {
     const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
 
     await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    // 已解出滑块（挑战值已回填），但上游仍返回 needs_challenge（如滑块过期）。
+    await wrapper.find('[data-testid="web-auto-login-zhipu-rid"]').setValue('rid-abc')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-md5"]').setValue('md5-xyz')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-phone-code"]').setValue('86')
     await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
     await flushPromises()
 
@@ -93,6 +101,10 @@ describe('WebAutoLoginForm', () => {
     const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
 
     await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    // 模拟数美滑块已解出（onSuccess 自动回填挑战字段）。
+    await wrapper.find('[data-testid="web-auto-login-zhipu-rid"]').setValue('rid-abc')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-md5"]').setValue('md5-xyz')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-phone-code"]').setValue('86')
     await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
     await flushPromises()
     await wrapper.find('[data-testid="web-auto-login-sms-code"]').setValue('123456')
@@ -115,6 +127,8 @@ describe('WebAutoLoginForm', () => {
     const wrapper = mount(WebAutoLoginForm, { props: { platform: 'kimi' } })
 
     await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000001')
+    // 模拟易盾已解出（onSuccess 自动回填 validate）。
+    await wrapper.find('[data-testid="web-auto-login-kimi-validate"]').setValue('yidun-validate-1')
     await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
     await flushPromises()
     await wrapper.find('[data-testid="web-auto-login-sms-code"]').setValue('654321')
@@ -131,6 +145,10 @@ describe('WebAutoLoginForm', () => {
     const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
 
     await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('abc')
+    // 已解出滑块（挑战值已回填），后端返回非挑战类错误（如手机号格式）。
+    await wrapper.find('[data-testid="web-auto-login-zhipu-rid"]').setValue('rid-abc')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-md5"]').setValue('md5-xyz')
+    await wrapper.find('[data-testid="web-auto-login-zhipu-phone-code"]').setValue('86')
     await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
     await flushPromises()
 

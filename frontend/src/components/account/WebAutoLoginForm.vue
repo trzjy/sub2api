@@ -58,8 +58,77 @@
         />
       </div>
 
+      <!-- 人机验证组件（主路径）：在管理页内嵌真实验证码，解出值自动回填并触发送码。
+           zhipu 渲染数美滑块（内联），kimi 点击后弹出易盾；加载失败回退手动框。 -->
+      <div
+        v-if="!manualMode && !captchaSolved"
+        data-testid="web-auto-login-captcha-widget"
+        class="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/40"
+      >
+        <p class="text-sm font-medium text-slate-700 dark:text-slate-200">
+          {{ t('admin.accounts.webLogin.autoLogin.captchaWidgetTitle') }}
+        </p>
+        <p class="text-xs text-slate-500 dark:text-slate-400">
+          {{
+            platform === 'zhipu'
+              ? t('admin.accounts.webLogin.autoLogin.captchaHintZhipu')
+              : t('admin.accounts.webLogin.autoLogin.captchaHintKimi')
+          }}
+        </p>
+        <!-- zhipu：数美滑块内联容器（mountShumeiCaptcha 渲染到该 id） -->
+        <div
+          v-if="platform === 'zhipu'"
+          id="zhipu-shumei-captcha"
+          data-testid="web-auto-login-shumei-captcha"
+          class="min-h-[40px]"
+        ></div>
+        <!-- kimi：易盾弹窗触发按钮 -->
+        <button
+          v-if="platform === 'kimi'"
+          type="button"
+          data-testid="web-auto-login-yidun-btn"
+          class="btn btn-secondary btn-sm"
+          :disabled="submitting"
+          @click="launchYidun"
+        >
+          {{ t('admin.accounts.webLogin.autoLogin.captchaLaunchKimi') }}
+        </button>
+        <p
+          v-if="captchaLoadError"
+          data-testid="web-auto-login-captcha-error"
+          class="text-xs text-red-600 dark:text-red-400"
+        >
+          {{ t('admin.accounts.webLogin.autoLogin.captchaLoadFailed') }}
+        </p>
+      </div>
+
+      <!-- 验证已通过状态 -->
+      <div
+        v-if="captchaSolved"
+        data-testid="web-auto-login-captcha-solved"
+        class="rounded-lg border border-green-200 bg-green-50 p-2 text-sm text-green-700 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300"
+      >
+        {{
+          platform === 'zhipu'
+            ? t('admin.accounts.webLogin.autoLogin.captchaSolvedZhipu')
+            : t('admin.accounts.webLogin.autoLogin.captchaSolvedKimi')
+        }}
+      </div>
+
+      <!-- 手动填写回退开关 -->
+      <button
+        v-if="!captchaSolved"
+        type="button"
+        data-testid="web-auto-login-manual-toggle"
+        class="text-xs text-slate-500 underline dark:text-slate-400"
+        @click="manualMode = true"
+      >
+        {{ t('admin.accounts.webLogin.autoLogin.manualFallbackToggle') }}
+      </button>
+
       <!-- 人机验证回传：用户在自有浏览器完成滑块/验证码后，把求解值回填到下方字段，
-           随发码与登录请求一并回传（挑战值仅作验证求解值，非登录载体）。 -->
+           随发码与登录请求一并回传（挑战值仅作验证求解值，非登录载体）。
+           验证码组件成功时这些字段由 onSuccess 自动回填；加载失败时可手动填写。 -->
       <div
         v-if="isSmsMode"
         data-testid="web-auto-login-challenge-fields"
@@ -187,15 +256,22 @@
 // zhipu / kimi 官方网页端没有密码登录（微信扫码/短信码），其唯一用户入口是手机号 +
 // 短信码双步骤登录（后端 web-login-sms）；deepseek 仍走账号密码登录。两种模式由平台决定，
 // deepseek 分支逻辑保持现状不变，zhipu/kimi 直接呈现 send_code → login 流程。
-// 人机验证挑战值（滑块 rid/md5、易盾 validate 等）由用户在自有浏览器完成验证后回填表单，
-// 随发码与登录请求一并回传，仅作为验证求解值，而非登录载体。
-import { computed, ref } from 'vue'
+//
+// 人机验证：本组件在管理页内嵌真实验证码（zhipu 数美滑块 / kimi 易盾），解出 rid/validate 后
+// 自动回填挑战字段并触发送码；验证码 SDK 加载/验证失败（如供应商 referer 域校验）时回退到
+// 手动回填框。挑战值仅作验证求解值，随发码/登录请求回传，非登录载体。
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   webLoginPassword,
   webLoginSms,
   type WebLoginPasswordRequest
 } from '@/api/admin/webAutoLogin'
+import {
+  launchYidunCaptcha,
+  mountShumeiCaptcha,
+  type ShumeiCaptchaResult
+} from '@/utils/webLoginCaptcha'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
 const props = defineProps<{
@@ -286,7 +362,13 @@ const smsSuccess = ref(false)
 const challengeWaiting = ref(false)
 const challengeText = ref('')
 
-// 人机验证挑战值：用户在自有浏览器完成滑块/验证码后回填，随发码与登录请求回传。
+// 验证码组件状态：已解出（自动回填+自动发码）/ 已切手动回退 / 加载失败提示。
+const captchaSolved = ref(false)
+const manualMode = ref(false)
+const captchaLoadError = ref(false)
+const shumeiMounted = ref(false)
+
+// 人机验证挑战值：验证码组件 onSuccess 自动回填，或用户在手动框填写，随发码与登录请求回传。
 const zhipuCaptchaRid = ref('')
 const zhipuCaptchaMd5 = ref('')
 const zhipuPhoneCode = ref('')
@@ -303,6 +385,17 @@ function resolveSmsError(err: unknown): { isChallenge: boolean; text: string } {
   return { isChallenge: false, text: extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.loginFailed')) }
 }
 
+// 挑战字段已被手动填写（用于判定是否走手动发码路径，跳过验证码弹窗）。
+function challengeFieldsFilled(): boolean {
+  if (props.platform === 'zhipu') {
+    return zhipuCaptchaRid.value.trim() !== '' && zhipuCaptchaMd5.value.trim() !== ''
+  }
+  if (props.platform === 'kimi') {
+    return kimiCaptchaValidate.value.trim() !== ''
+  }
+  return false
+}
+
 function buildSmsPayload(action: 'send_code' | 'login'): Parameters<typeof webLoginSms>[0] {
   const payload: Parameters<typeof webLoginSms>[0] = {
     action,
@@ -311,7 +404,7 @@ function buildSmsPayload(action: 'send_code' | 'login'): Parameters<typeof webLo
   }
   if (props.accountId != null) payload.account_id = props.accountId
   if (action === 'login') payload.sms_code = smsCode.value.trim()
-  // 挑战求解值：用户在自有浏览器完成滑块/验证码后回填，已填才拼入（空字符串不拼），
+  // 挑战求解值：验证码组件 onSuccess 自动回填或用户在手动框填写，已填才拼入（空字符串不拼），
   // 随 send_code 与 login 两个 action 一并回传；zhipu 需三个字段，kimi 仅需 validate。
   const zhipuRid = zhipuCaptchaRid.value.trim()
   const zhipuMd5 = zhipuCaptchaMd5.value.trim()
@@ -322,6 +415,18 @@ function buildSmsPayload(action: 'send_code' | 'login'): Parameters<typeof webLo
   if (zhipuPhoneCodeVal) payload.zhipu_phone_code = zhipuPhoneCodeVal
   if (kimiValidate) payload.kimi_captcha_validate = kimiValidate
   return payload
+}
+
+// 真正发码（send_code）。验证成功进入第二步；缺挑战值后端 needs_challenge 提示手动回填。
+async function performSendCode() {
+  const resp = await webLoginSms(buildSmsPayload('send_code'))
+  if (resp.success) {
+    smsStepReady.value = true
+    challengeWaiting.value = false
+    challengeText.value = ''
+    return true
+  }
+  return false
 }
 
 async function sendCode() {
@@ -335,16 +440,25 @@ async function sendCode() {
   }
   submitting.value = true
   try {
-    const resp = await webLoginSms(buildSmsPayload('send_code'))
-    if (resp.success) {
-      // 发码成功（后端不回传会话令牌，E0 取证）：进入第二步输入短信码；清除挑战等待态。
-      smsStepReady.value = true
-      challengeWaiting.value = false
-      challengeText.value = ''
-      return
+    // 挑战未解出且未手动填写：先尝试在管理页内嵌真实验证码。
+    // 验证码组件 onSuccess 会回填挑战字段并自动调用 performSendCode；此处仍走一次发码：
+    // 若挑战值已就位则成功；若未就位（如验证码 SDK 加载失败、用户尚未滑动），后端
+    // needs_challenge 提示手动回填——与旧链路一致，且保证测试/降级路径可达。
+    const manual = challengeFieldsFilled() || manualMode.value
+    if (!captchaSolved.value && !manual) {
+      if (props.platform === 'kimi') {
+        launchYidun()
+        // 易盾弹窗为异步：加载失败回退到发码（后端 needs_challenge 提示手动）；
+        // 加载成功则 onSuccess 内自动 performSendCode。此处不再重复发码，避免双发。
+        return
+      }
+      if (props.platform === 'zhipu') {
+        if (!shumeiMounted.value) mountShumei()
+        errorMsg.value = t('admin.accounts.webLogin.autoLogin.captchaWaitZhipu')
+        return
+      }
     }
-    // 合约上 send_code 成功为 {success:true}，fail-closed 兜底（不应出现）。
-    errorMsg.value = resp.detail || t('admin.accounts.webLogin.autoLogin.sendCodeFailed')
+    await performSendCode()
   } catch (err) {
     const { isChallenge, text } = resolveSmsError(err)
     if (isChallenge) {
@@ -357,6 +471,50 @@ async function sendCode() {
   } finally {
     submitting.value = false
   }
+}
+
+// zhipu：在管理页内联渲染数美滑块；解出 rid 后自动回填并触发送码。
+function mountShumei() {
+  if (shumeiMounted.value) return
+  shumeiMounted.value = true
+  mountShumeiCaptcha(
+    'zhipu-shumei-captcha',
+    (res: ShumeiCaptchaResult) => {
+      // onSuccess：rid 必回填；md5/token/validate 尽力回填（数美 image 模式可能带 md5）。
+      if (res.rid) zhipuCaptchaRid.value = String(res.rid)
+      const md5 = res.md5 ?? res.token ?? res.validate
+      if (md5) zhipuCaptchaMd5.value = String(md5)
+      if (!zhipuPhoneCode.value.trim()) zhipuPhoneCode.value = '86'
+      captchaSolved.value = true
+      manualMode.value = false
+      captchaLoadError.value = false
+      void performSendCode()
+    },
+    () => {
+      // 数美 SDK 加载/渲染失败：回退手动框。
+      captchaLoadError.value = true
+      manualMode.value = true
+    }
+  )
+}
+
+// kimi：弹窗易盾；解出 validate 后自动回填并触发送码（加载失败回退发码→后端 needs_challenge）。
+function launchYidun() {
+  launchYidunCaptcha(
+    (validate: string) => {
+      kimiCaptchaValidate.value = validate
+      captchaSolved.value = true
+      manualMode.value = false
+      captchaLoadError.value = false
+      void performSendCode()
+    },
+    () => {
+      captchaLoadError.value = true
+      manualMode.value = true
+      // 回退：直接发码，由后端 needs_challenge 提示手动填写 validate。
+      void performSendCode()
+    }
+  )
 }
 
 async function submitSms() {
@@ -400,4 +558,23 @@ async function submitSms() {
     submitting.value = false
   }
 }
+
+// 进入 zhipu 短信模式时自动挂载数美滑块（用户无需额外点击）。
+watch(
+  () => [props.platform, isSmsMode.value],
+  () => {
+    captchaSolved.value = false
+    manualMode.value = false
+    captchaLoadError.value = false
+    shumeiMounted.value = false
+    if (props.platform === 'zhipu' && isSmsMode.value) {
+      mountShumei()
+    }
+  },
+  { immediate: true }
+)
+
+onBeforeUnmount(() => {
+  shumeiMounted.value = false
+})
 </script>
