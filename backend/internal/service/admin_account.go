@@ -856,7 +856,17 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	} else if len(input.Credentials) > 0 {
 		// 敏感子键采用"incoming 没提供就保留"的合并语义：前端响应已脱敏，
 		// 全对象 PUT 编辑时不会再带回 token，避免覆盖时清空已有凭证。
-		account.Credentials = MergePreservingSensitiveCreds(account.Credentials, input.Credentials)
+		// web 自动续期凭证（login_email / login_password / login_phone / login_refresh_token）
+		// 不在全局敏感清单内（login_email 需回显编辑框），但同样需要"缺省保留"语义，
+		// 防止编辑回写时误清空已存续期凭证——经 extraPreserveKeys 按需追加，不动全局清单。
+		account.Credentials = MergePreservingSensitiveCreds(
+			account.Credentials,
+			input.Credentials,
+			CredKeyLoginEmail,
+			CredKeyLoginPassword,
+			CredKeyLoginPhone,
+			CredKeyLoginRefreshToken,
+		)
 		// 校验并规范化请求头覆写配置（header 名小写化、格式检查）
 		if err := NormalizeHeaderOverrideCredentials(account.Credentials); err != nil {
 			return nil, err

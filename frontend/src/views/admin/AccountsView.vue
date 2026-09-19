@@ -177,7 +177,6 @@
       <template #table>
         <AccountBulkActionsBar
           :selected-ids="selIds"
-          :selected-accounts="selectedAccounts"
           :total-results="pagination.total"
           :selecting-all="selectingAllResults"
           :all-results-selected="allResultsSelected"
@@ -191,12 +190,6 @@
           @select-page="selectPage"
           @select-all-results="handleSelectAllResults"
           @toggle-schedulable="handleBulkToggleSchedulable"
-          @web-login="handleBulkWebLogin"
-          @web-test="handleBulkWebTest"
-          @delete-banned="handleBulkDeleteBanned"
-          @web-enable="handleBulkWebStatus('active')"
-          @web-disable="handleBulkWebStatus('inactive')"
-          @web-export="handleBulkExportWeb"
         />
         <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
@@ -605,7 +598,6 @@ import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/ac
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { webAutoLoginAPI } from '@/api/admin/webAutoLogin'
 import { isWebAccessAccount } from '@/components/account/credentialsBuilder'
 import { sanitizeUrl } from '@/utils/url'
 import { getFloatingPanelPosition } from '@/utils/floatingPanel'
@@ -1222,11 +1214,6 @@ const {
   rows: accounts,
   getId: (account) => account.id
 })
-
-// 选中账号明细：批量操作栏据此判断是否全部为 web access 账号，从而收敛 Web 专属按钮。
-const selectedAccounts = computed(() =>
-  accounts.value.filter(account => selIds.value.includes(account.id))
-)
 
 const selectingAllResults = ref(false)
 const selectedAllResultIDs = ref<Set<number> | null>(null)
@@ -1958,23 +1945,17 @@ type LoginStatusAccount = {
 // Web 账号登录载体平台语义（与 credentialsBuilder.webProviderUsesCookie 一致）：
 // kimi 用 access_token，zhipu/deepseek 用 cookie。
 // 后端列表接口 RedactCredentials 已脱敏移除 cookie/access_token 明文，仅通过
-// credentials_status.has_<key> 暴露存在性；status map 缺省（旧后端）时才回退
-// 明文 credentials 字段判断。
+// credentials_status.has_<key> 暴露存在性；明文兜底已删除——单入口改造后明文
+// 永不应出现，且后端必然返回 credentials_status，status map 缺省时视为无登录态。
 function webAccountHasCredential(
   platform: string,
-  status: Record<string, boolean> | null | undefined,
-  creds: Record<string, unknown> | null | undefined
+  status: Record<string, boolean> | null | undefined
 ): boolean {
   const usesCookie = platform !== 'kimi'
   if (status) {
     return usesCookie ? !!status.has_cookie : !!status.has_access_token
   }
-  if (usesCookie) {
-    const raw = creds?.cookie
-    return typeof raw === 'string' && raw.length > 0
-  }
-  const raw = creds?.access_token
-  return typeof raw === 'string' && raw.length > 0
+  return false
 }
 
 // 列表 DTO 可能透出 credentials.login_last_error；不存在时回退既有 error_message。
@@ -2001,8 +1982,7 @@ function computeLoginStatus(account: LoginStatusAccount): LoginStatusKind {
   if (isWeb) {
     const hasCredential = webAccountHasCredential(
       account.platform ?? '',
-      account.credentials_status,
-      account.credentials
+      account.credentials_status
     )
     if (!hasCredential) return 'unconfigured'
   }
@@ -2176,135 +2156,6 @@ const handleBulkProbeUpstreamBilling = async () => {
     appStore.showError(extractApiErrorMessage(error, t('admin.accounts.upstreamBilling.probeFailed')))
   } finally {
     accountIDs.forEach(id => probingUpstreamBilling.delete(id))
-  }
-}
-
-// ── 网页接入自动登录批量操作 ──
-const handleBulkWebLogin = async () => {
-  const accountIds = [...selIds.value]
-  if (accountIds.length === 0) {
-    appStore.showError(t('admin.accounts.batch.noSelection'))
-    return
-  }
-  try {
-    const result = await webAutoLoginAPI.batchLogin(accountIds)
-    const needsSms = result.results.filter(r => r.needs_sms).length
-    if (result.summary.failed > 0 || needsSms > 0) {
-      // needs_sms 账号本期无法自动完成（短信发码通道未接入），提示用户手动处理。
-      appStore.showWarning(
-        t('admin.accounts.batch.loginPartial', {
-          success: result.summary.success,
-          failed: result.summary.failed,
-          needsSms
-        })
-      )
-    } else {
-      appStore.showSuccess(
-        t('admin.accounts.batch.loginSuccess', {
-          success: result.summary.success,
-          failed: 0,
-          needsSms: 0
-        })
-      )
-      clearSelection()
-    }
-    await reload()
-  } catch (error) {
-    console.error('Failed to bulk web-login accounts:', error)
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.loginFailed')))
-  }
-}
-
-const handleBulkWebTest = async () => {
-  const accountIds = [...selIds.value]
-  if (accountIds.length === 0) {
-    appStore.showError(t('admin.accounts.batch.noSelection'))
-    return
-  }
-  try {
-    const result = await webAutoLoginAPI.batchTest(accountIds)
-    const failed = result.results.filter(r => !r.success).length
-    const success = result.results.length - failed
-    if (failed > 0) {
-      appStore.showWarning(t('admin.accounts.batch.testPartial', { success, failed }))
-    } else {
-      appStore.showSuccess(t('admin.accounts.batch.testSuccess', { success, failed: 0 }))
-    }
-  } catch (error) {
-    console.error('Failed to bulk test accounts:', error)
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.testFailed')))
-  }
-}
-
-// 两步：先取封禁候选清单 → 用户确认 → 再删除。
-const handleBulkDeleteBanned = async () => {
-  try {
-    const candidates = await webAutoLoginAPI.batchDeleteBanned(false)
-    if (candidates.candidates.length === 0) {
-      appStore.showInfo(t('admin.accounts.batch.deleteBannedNone'))
-      return
-    }
-    const names = candidates.candidates.map(c => c.name).join('、')
-    if (!confirm(t('admin.accounts.batch.deleteBannedConfirm', { count: candidates.candidates.length, names }))) {
-      return
-    }
-    const deleted = await webAutoLoginAPI.batchDeleteBanned(true)
-    appStore.showSuccess(t('admin.accounts.batch.deleteBannedSuccess', { count: deleted.deleted }))
-    await reload()
-  } catch (error) {
-    console.error('Failed to delete banned accounts:', error)
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.deleteBannedFailed')))
-  }
-}
-
-const handleBulkWebStatus = async (status: 'active' | 'inactive') => {
-  const accountIds = [...selIds.value]
-  if (accountIds.length === 0) {
-    appStore.showError(t('admin.accounts.batch.noSelection'))
-    return
-  }
-  try {
-    const result = await webAutoLoginAPI.batchStatus({ ids: accountIds, status })
-    if (result.failed > 0) {
-      appStore.showError(t('admin.accounts.batch.statusPartial', { success: result.success, failed: result.failed }))
-    } else {
-      appStore.showSuccess(t('admin.accounts.batch.statusSuccess', { count: result.success }))
-      clearSelection()
-    }
-    await reload()
-  } catch (error) {
-    console.error('Failed to set account status in batch:', error)
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.statusFailed')))
-  }
-}
-
-const handleBulkExportWeb = async () => {
-  const accountIds = [...selIds.value]
-  if (accountIds.length === 0) {
-    appStore.showError(t('admin.accounts.batch.noSelection'))
-    return
-  }
-  // 必须校验全部选中项均为 web access 账号（不能只看第一个）：同平台普通 API
-  // 账号与 web 账号可共存，混选或纯 API 账号一律拒绝导出。
-  const selected = accounts.value.filter(a => accountIds.includes(a.id))
-  if (selected.length === 0 || !selected.every(a => isWebAccessAccount(a))) {
-    appStore.showError(t('admin.accounts.batch.selectWebOnly'))
-    return
-  }
-  const platform = selected[0].platform
-  try {
-    const blob = await webAutoLoginAPI.exportWebAccounts(platform)
-    const timestamp = formatExportTimestamp()
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `sub2api-web-accounts-${platform}-${timestamp}.json`
-    link.click()
-    URL.revokeObjectURL(url)
-    appStore.showSuccess(t('admin.accounts.batch.exportSuccess'))
-  } catch (error) {
-    console.error('Failed to export web accounts:', error)
-    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.batch.exportFailed')))
   }
 }
 

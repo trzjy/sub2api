@@ -860,11 +860,11 @@ const (
 	CredKeyLoginDeviceID         = "login_device_id"
 	CredKeyLoginRefreshToken     = "login_refresh_token"
 	CredKeyLoginRefreshExpiresAt = "login_refresh_expires_at"
-	CredKeyLoginLastAt           = "login_last_at"   // RFC3339，上次尝试时间（退避冷却基准）
-	CredKeyLoginFailCount        = "login_fail_count" // 连续失败次数（退避档位依据）
+	CredKeyLoginLastAt           = "login_last_at"    // RFC3339，上次尝试时间（仅作展示/诊断）
+	CredKeyLoginFailCount        = "login_fail_count" // 连续失败次数（仅作展示/诊断，不再用于自动退避）
 	CredKeyLoginLastError        = "login_last_error" // 仅含文案+码，绝不写 Cookie/密码/响应体
 	// login_non_retryable 是内部簿记键：标记 banned/密码错/WAF/PoW 等不可重试类错误，
-	// 维护池见此标记即跳过（只保留 login_last_error，不再重试）。
+	// 置 "true" 后不再自动重试（实行失败关闭，不新增维护池/退避）。
 	CredKeyLoginNonRetryable = "login_non_retryable"
 )
 
@@ -872,7 +872,10 @@ const (
 const (
 	WebDeepseekLoginEndpoint = "/api/v0/users/login"
 	WebZhipuRefreshEndpoint  = "/user-api/user/refresh"
-	WebKimiRefreshEndpoint   = "/api/kimi.gateway.auth.v1.AuthService/RefreshToken"
+	// 05-kimi-refresh-endpoint-probe.md（2026-09-19 决定性）：正确的 kimi 续期端点为
+	// account.gateway.v1 命名空间（401 unauthenticated=可达）；旧值 kimi.gateway.auth.v1
+	// 实测 404。同域 DeviceService 亦为 account.gateway.v1（08 号证据 200）。
+	WebKimiRefreshEndpoint = "/api/account.gateway.v1.AuthService/RefreshToken"
 )
 
 // 自动登录错误 kind（用于 WebPlatformErrorDetail 与分类）。
@@ -884,13 +887,13 @@ const (
 
 // 关键业务码（三平台共用细化表）。
 const (
-	WebLoginCodeSuccess        int64 = 0
-	WebLoginCodeBadCredential  int64 = 2     // deepseek：邮箱或密码错误
-	WebLoginCodeBanned         int64 = 10    // deepseek：账号被封禁
-	WebLoginCodeAuthExpired    int64 = 40002 // 认证失效
-	WebLoginCodeAuthExpired2   int64 = 40003 // 认证失效（变体）
-	WebLoginCodeRateLimited    int64 = 40029 // IP/请求受限
-	WebLoginCodeHTTPTooMany    int64 = 429   // 限流
-	WebLoginCodePoW1           int64 = 40300 // PoW 错误
-	WebLoginCodePoW2           int64 = 40301 // PoW 错误（变体）
+	WebLoginCodeSuccess       int64 = 0
+	WebLoginCodeBadCredential int64 = 2     // deepseek：邮箱或密码错误
+	WebLoginCodeBanned        int64 = 10    // deepseek：账号被封禁
+	WebLoginCodeAuthExpired   int64 = 40002 // 认证失效
+	WebLoginCodeAuthExpired2  int64 = 40003 // 认证失效（变体）
+	WebLoginCodeRateLimited   int64 = 40029 // IP/请求受限
+	WebLoginCodeHTTPTooMany   int64 = 429   // 限流
+	WebLoginCodePoW1          int64 = 40300 // PoW 错误
+	WebLoginCodePoW2          int64 = 40301 // PoW 错误（变体）
 )

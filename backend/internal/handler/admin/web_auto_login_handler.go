@@ -3,15 +3,13 @@ package admin
 import (
 	"context"
 	"net/http"
-	"sort"
 	"strings"
-	"sync"
+	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/sync/errgroup"
 )
 
 // webAutoLoginCookieKey 是网页版账号凭据中存放整串 Cookie 头的键名（与
@@ -19,13 +17,13 @@ import (
 const webAutoLoginCookieKey = "cookie"
 
 // webPlatformAutoLoginService 是网页版平台自动登录服务的本地接口，便于测试替换。
-// 其方法签名与 service.WebPlatformAutoLoginService 对齐（由并行任务实现）。
+// 其方法签名与 service.WebPlatformAutoLoginService 对齐。
 type webPlatformAutoLoginService interface {
 	LoginByEmail(ctx context.Context, account *service.Account) (string, error)
 	RefreshToken(ctx context.Context, account *service.Account) error
 	RecoverAccount(ctx context.Context, account *service.Account) service.WebRecoverResult
-	Start(ctx context.Context)
-	Stop()
+	SendSmsCode(ctx context.Context, platform, phone string, challenge service.WebSMSChallenge, account *service.Account) (string, error)
+	VerifySmsCode(ctx context.Context, platform, phone, code string, challenge service.WebSMSChallenge, account *service.Account) (*service.SMSLoginResult, error)
 }
 
 // adminAutoLoginStoreAdapter 将 service.AdminService 适配为自动登录服务所需的
@@ -100,11 +98,11 @@ func (a *adminAutoLoginStoreAdapter) UpdateAccountStatus(ctx context.Context, id
 // 仅在此成功响应返回，绝不写入日志/错误响应。
 func (h *AccountHandler) WebLoginPassword(c *gin.Context) {
 	var req struct {
-		Platform     string `json:"platform" binding:"required"`
-		LoginEmail   string `json:"login_email"`
-		LoginPhone   string `json:"login_phone"`
+		Platform      string `json:"platform" binding:"required"`
+		LoginEmail    string `json:"login_email"`
+		LoginPhone    string `json:"login_phone"`
 		LoginPassword string `json:"login_password"`
-		AccountID    *int64 `json:"account_id"`
+		AccountID     *int64 `json:"account_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -117,7 +115,6 @@ func (h *AccountHandler) WebLoginPassword(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	h.ensureWebAutoLoginStarted()
 	if h.webPlatformAutoLogin == nil {
 		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
 		return
@@ -203,18 +200,243 @@ func (h *AccountHandler) WebLoginPassword(c *gin.Context) {
 		}
 		response.Success(c, gin.H{"success": true, "cookie": cookie})
 	case service.PlatformZhipu, service.PlatformKimi:
-		// zhipu/kimi 官方网页端没有密码登录（微信扫码/手机号短信码，发码被数美滑块/
-		// 易盾验证码保护），账号密码自动登录不适用；登录态经由浏览器登录（登录代理
-		// iframe 人工完成滑块/短信验证）捕获回传。
+		// zhipu/kimi 官方网页端没有密码登录（手机号短信码，发码被数美滑块/易盾验证码
+		// 保护）；唯一用户入口是手机号+短信码登录（WebLoginSMS）。
 		title, hint := service.WebPlatformErrorDetail(req.Platform, 0, "login")
 		response.ErrorWithDetails(c, http.StatusBadRequest, title, "",
 			map[string]string{
-				"detail": "该平台官方网页端不提供密码登录，请使用浏览器登录（人工完成滑块/短信验证）",
+				"detail": "该平台官方网页端不提供密码登录，请使用手机号+短信验证码登录",
 				"hint":   hint,
 			})
 	default:
 		response.BadRequest(c, "unsupported web platform: "+req.Platform)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// WebLoginSMS 网页版平台手机号 + 短信码登录（zhipu / kimi 唯一用户入口）。
+// POST /api/v1/admin/accounts/web-login-sms
+//
+//	action=send_code: {action, platform, phone, account_id?,
+//	                   zhipu_captcha_rid?, zhipu_captcha_md5?, zhipu_phone_code?,
+//	                   kimi_captcha_validate?}
+//	  → {success:true}（发码成功无需回传客户端 token：zhipu 无 session_token 概念；
+//	    kimi SendVerifyCodeResponse 为 proto 空消息，E0 取证确认无 session_token）
+//	action=login:     {action, platform, phone, sms_code,
+//	                   zhipu_captcha_rid?, zhipu_captcha_md5?, zhipu_phone_code?,
+//	                   kimi_captcha_validate?, account_id?, name?}
+//	  → {success:true, account_id, cookie?|access_token?, login_refresh_token?}
+//
+// 挑战处理（计划 §3）：zhipu/kimi 发码/登录受数美滑块/易盾验证码保护，所需求解值
+// （zhipu: captcha_rid + captcha_md5 + phone_code；kimi: captcha_validate）由用户在
+// 本机浏览器完成验证后，随同一次请求在 challeng 内回传、绑定本次请求（无状态短期会话，
+// 不依赖外部打码助手、不新增维护池/常驻任务）。缺失或上游 WAF/PoW 时失败关闭，响应带
+// needs_challenge 标记（Kind=WAF），提示前端经本机浏览器人工验证后回填挑战值再重试，
+// 绝不伪造成功。
+//
+// 落库：登录成功后在 handler 中把本次所得凭据一次性写入账号（zhipu: 整串 cookie +
+// login_refresh_token；kimi: access_token + login_refresh_token）；无 account_id 时
+// 先校验平台必需凭证再 CreateAccount（access_mode=web/apikey），失败绝不落库。
+// 安全：成功响应回传的凭据属一次性操作结果（非账号导出），绝不写入日志/错误响应。
+// ---------------------------------------------------------------------------
+
+// webLoginSMSRequest 是 POST /web-login-sms 的请求体。
+type webLoginSMSRequest struct {
+	Action    string `json:"action" binding:"required"`
+	Platform  string `json:"platform" binding:"required"`
+	Phone     string `json:"phone"`
+	AccountID *int64 `json:"account_id"`
+	Name      string `json:"name"`
+
+	SMSCode string `json:"sms_code"`
+
+	ZhipuCaptchaRid     string `json:"zhipu_captcha_rid"`
+	ZhipuCaptchaMD5     string `json:"zhipu_captcha_md5"`
+	ZhipuPhoneCode      string `json:"zhipu_phone_code"`
+	KimiCaptchaValidate string `json:"kimi_captcha_validate"`
+}
+
+// challenge 把请求中的求解值组装为 service.WebSMSChallenge（空值即缺失，失败关闭口径）。
+func (r *webLoginSMSRequest) challenge() service.WebSMSChallenge {
+	return service.WebSMSChallenge{
+		ZhipuCaptchaRid:     strings.TrimSpace(r.ZhipuCaptchaRid),
+		ZhipuCaptchaMD5:     strings.TrimSpace(r.ZhipuCaptchaMD5),
+		ZhipuPhoneCode:      strings.TrimSpace(r.ZhipuPhoneCode),
+		KimiCaptchaValidate: strings.TrimSpace(r.KimiCaptchaValidate),
+	}
+}
+
+// WebLoginSMS 处理 zhipu/kimi 手机号短信码登录的发码与提交。
+func (h *AccountHandler) WebLoginSMS(c *gin.Context) {
+	var req webLoginSMSRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if req.Platform != service.PlatformZhipu && req.Platform != service.PlatformKimi {
+		response.BadRequest(c, "platform must be one of: zhipu, kimi")
+		return
+	}
+	if req.Action != "send_code" && req.Action != "login" {
+		response.BadRequest(c, "action must be one of: send_code, login")
+		return
+	}
+	if strings.TrimSpace(req.Phone) == "" {
+		response.BadRequest(c, "phone is required")
+		return
+	}
+
+	ctx := c.Request.Context()
+	if h.webPlatformAutoLogin == nil {
+		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
+		return
+	}
+
+	// 既有账号 / 临时账号：取到完整账号对象后按 access_mode 隔离，拒绝把普通 API
+	// 账号当 Web 账号登录（与 WebLoginPassword 同语义）。
+	account := &service.Account{
+		Platform:    req.Platform,
+		Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb},
+	}
+	if req.AccountID != nil {
+		existing, err := h.adminService.GetAccount(ctx, *req.AccountID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		if existing != nil && !existing.IsWebAccessMode() {
+			response.ErrorWithDetails(c, http.StatusBadRequest, "not a web access-mode account", "",
+				map[string]string{"hint": "web login is only supported for web access-mode accounts"})
+			return
+		}
+		if existing != nil {
+			account = existing
+		}
+	}
+
+	challenge := req.challenge()
+
+	if req.Action == "send_code" {
+		_, err := h.webPlatformAutoLogin.SendSmsCode(ctx, req.Platform, req.Phone, challenge, account)
+		if err != nil {
+			respondWebLoginSMSFailure(c, req.Platform, err)
+			return
+		}
+		// 发码成功无需回传客户端 token（zhipu 无 session_token；kimi SendVerifyCodeResponse 空消息，E0 取证）。
+		response.Success(c, gin.H{"success": true})
+		return
+	}
+
+	// action == login
+	res, err := h.webPlatformAutoLogin.VerifySmsCode(ctx, req.Platform, req.Phone, req.SMSCode, challenge, account)
+	if err != nil {
+		respondWebLoginSMSFailure(c, req.Platform, err)
+		return
+	}
+	updates := buildSMSLoginCredentialUpdates(req.Platform, req.Phone, res)
+	// 服务端再次执行平台凭证准入校验：未取得平台必需凭证（zhipu cookie / kimi
+	// access_token）时失败关闭，绝不落库半成品网页账号（计划 §2/§5.2）。
+	if err := service.ValidateWebAccountCredential(req.Platform, service.AccountTypeAPIKey, updates); err != nil {
+		respondWebLoginSMSFailure(c, req.Platform, err)
+		return
+	}
+
+	var accountID int64
+	if req.AccountID != nil {
+		accountID = *req.AccountID
+		if err := h.webPlatformAutoLoginStoreUpdateCreds(ctx, accountID, updates); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		if err := h.webPlatformAutoLoginStoreStatus(ctx, accountID, service.StatusActive, ""); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	} else {
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			name = req.Platform + "-web-" + strings.TrimSpace(req.Phone)
+		}
+		created, err := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
+			Name:        name,
+			Platform:    req.Platform,
+			Type:        service.AccountTypeAPIKey,
+			Credentials: updates,
+		})
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+		accountID = created.ID
+	}
+
+	// 凭据仅在此成功响应一次性回传；不写日志。
+	data := gin.H{"success": true, "account_id": accountID}
+	if req.Platform == service.PlatformZhipu {
+		if res.Cookie != "" {
+			data["cookie"] = res.Cookie
+		}
+	} else if res.AccessToken != "" {
+		data["access_token"] = res.AccessToken
+	}
+	if res.LoginRefreshToken != "" {
+		data["login_refresh_token"] = res.LoginRefreshToken
+	}
+	response.Success(c, data)
+}
+
+// buildSMSLoginCredentialUpdates 组装短信登录成功的账号凭据更新（同一次写入）：
+//   - zhipu：整串 cookie（webAutoLoginCookieKey）+ 显式 login_refresh_token（从 cookie
+//     提取 chatglm_refresh_token；缺失时仅记 cookie，续期依赖 refreshZhipu 的 cookie 兜底）；
+//   - kimi：access_token（既有转发键）+ login_refresh_token = RefreshToken（cookie 键不写）。
+//
+// refresh_token 为转发链既有业务键（forward 401 续期读取），与 login_* 簿记键一并写入。
+func buildSMSLoginCredentialUpdates(platform, phone string, res *service.SMSLoginResult) map[string]any {
+	updates := map[string]any{
+		"access_mode":                    service.AccountAccessModeWeb,
+		"login_phone":                    strings.TrimSpace(phone),
+		service.CredKeyLoginLastAt:       time.Now().UTC().Format(time.RFC3339),
+		service.CredKeyLoginFailCount:    0,
+		service.CredKeyLoginLastError:    "",
+		service.CredKeyLoginNonRetryable: "false",
+	}
+	if platform == service.PlatformZhipu {
+		updates[webAutoLoginCookieKey] = res.Cookie
+	} else {
+		updates["access_token"] = res.AccessToken
+	}
+	if res.LoginRefreshToken != "" {
+		updates[service.CredKeyLoginRefreshToken] = res.LoginRefreshToken
+		updates["refresh_token"] = res.LoginRefreshToken
+	}
+	return updates
+}
+
+// respondWebLoginSMSFailure 把失败关闭错误映射为细化响应：Kind=WAF 时附
+// needs_challenge=true，并补充分平台挑战回填提示（zhipu 需 captcha_rid/md5/phone_code；
+// kimi 需 captcha_validate），提示前端经本机浏览器人工验证后随同一次请求回传挑战值。
+// 绝不暴露凭据值。
+func respondWebLoginSMSFailure(c *gin.Context, platform string, err error) {
+	kind, code, _ := service.WebLoginErrorKind(err)
+	title, hint := service.WebPlatformErrorDetail(platform, code, kind)
+	if title == "" {
+		title = "网页登录失败"
+	}
+	details := map[string]string{"detail": err.Error()}
+	if hint != "" {
+		details["hint"] = hint
+	}
+	if kind == service.WebLoginKindWAF {
+		details["needs_challenge"] = "true"
+		// 平台特定挑战回填提示：用户在本机浏览器完成验证后随请求回传。
+		switch platform {
+		case service.PlatformZhipu:
+			details["challenge_hint"] = "请在浏览器完成数美滑块验证，回填 zhipu_captcha_rid、zhipu_captcha_md5、zhipu_phone_code 后重试"
+		case service.PlatformKimi:
+			details["challenge_hint"] = "请在浏览器完成易盾验证，回填 kimi_captcha_validate 后重试"
+		}
+	}
+	response.ErrorWithDetails(c, http.StatusBadRequest, title, "", details)
 }
 
 // webPlatformAutoLoginStoreUpdateCreds / webPlatformAutoLoginStoreStatus 是对
@@ -251,507 +473,4 @@ func (h *AccountHandler) webPlatformAutoLoginStoreStatus(ctx context.Context, id
 		}
 	}
 	return nil
-}
-
-// BatchLogin 按平台分派的批量自动登录/恢复。
-// POST /api/v1/admin/accounts/batch-login
-//
-//	body {ids:[]int64}
-//
-// deepseek web 账号调 RecoverAccount（第一级自动恢复）；
-// zhipu/kimi 调 RefreshToken（失败 → NeedsSemiAuto）。并发 ≤3。
-func (h *AccountHandler) BatchLogin(c *gin.Context) {
-	var req struct {
-		IDs []int64 `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-	if len(req.IDs) == 0 {
-		response.BadRequest(c, "ids is required")
-		return
-	}
-
-	ctx := c.Request.Context()
-	h.ensureWebAutoLoginStarted()
-	if h.webPlatformAutoLogin == nil {
-		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
-		return
-	}
-
-	accounts, err := h.adminService.GetAccountsByIDs(ctx, req.IDs)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	byID := make(map[int64]*service.Account, len(accounts))
-	for _, acc := range accounts {
-		if acc != nil {
-			byID[acc.ID] = acc
-		}
-	}
-
-	const maxConcurrency = 3
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(maxConcurrency)
-
-	var mu sync.Mutex
-	results := make([]gin.H, 0, len(req.IDs))
-	var successCount, failedCount int
-
-	for _, id := range req.IDs {
-		accountID := id
-		g.Go(func() error {
-			acc := byID[accountID]
-			if acc == nil {
-				mu.Lock()
-				results = append(results, gin.H{
-					"id":       accountID,
-					"recovered": false,
-					"needs_sms": false,
-					"detail":   "account not found",
-				})
-				failedCount++
-				mu.Unlock()
-				return nil
-			}
-			// 归并后同平台可共存普通 API 账号与 Web 账号，必须按账号级 access_mode
-			// 隔离：非 web access_mode 账号不得进入自动登录，作为失败项返回。
-			if !acc.IsWebAccessMode() {
-				mu.Lock()
-				results = append(results, gin.H{
-					"id":        accountID,
-					"recovered": false,
-					"needs_sms": false,
-					"detail":    "not a web access-mode account",
-				})
-				failedCount++
-				mu.Unlock()
-				return nil
-			}
-			var res gin.H
-			switch acc.Platform {
-			case service.PlatformDeepseek:
-				outcome := h.webPlatformAutoLogin.RecoverAccount(gctx, acc)
-				res = gin.H{
-					"id":        accountID,
-					"recovered": outcome.Recovered,
-					"needs_sms": outcome.NeedsSemiAuto,
-					"detail":    outcome.Detail,
-				}
-			case service.PlatformZhipu, service.PlatformKimi:
-				if refreshErr := h.webPlatformAutoLogin.RefreshToken(gctx, acc); refreshErr != nil {
-					title, _ := service.WebPlatformErrorDetail(acc.Platform, 0, "refresh")
-					res = gin.H{
-						"id":        accountID,
-						"recovered": false,
-						"needs_sms": true,
-						"detail":    title,
-					}
-				} else {
-					res = gin.H{
-						"id":        accountID,
-						"recovered": true,
-						"needs_sms": false,
-						"detail":    "",
-					}
-				}
-			default:
-				res = gin.H{
-					"id":        accountID,
-					"recovered": false,
-					"needs_sms": false,
-					"detail":    "unsupported platform",
-				}
-			}
-			mu.Lock()
-			results = append(results, res)
-			if v, ok := res["recovered"].(bool); ok && v {
-				successCount++
-			} else {
-				failedCount++
-			}
-			mu.Unlock()
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i]["id"].(int64) < results[j]["id"].(int64)
-	})
-
-	response.Success(c, gin.H{
-		"results": results,
-		"summary": gin.H{"success": successCount, "failed": failedCount},
-	})
-}
-
-// BatchTest 对选中账号逐个复用既有 AccountTestService 测试内核（不走 SSE）。
-// POST /api/v1/admin/accounts/batch-test
-//
-//	body {ids:[]int64}
-func (h *AccountHandler) BatchTest(c *gin.Context) {
-	var req struct {
-		IDs []int64 `json:"ids"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-	if len(req.IDs) == 0 {
-		response.BadRequest(c, "ids is required")
-		return
-	}
-	if h.accountTestService == nil {
-		response.Error(c, http.StatusServiceUnavailable, "account test service unavailable")
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	accounts, err := h.adminService.GetAccountsByIDs(ctx, req.IDs)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	byID := make(map[int64]*service.Account, len(accounts))
-	for _, acc := range accounts {
-		if acc != nil {
-			byID[acc.ID] = acc
-		}
-	}
-
-	const maxConcurrency = 3
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(maxConcurrency)
-
-	var mu sync.Mutex
-	results := make([]gin.H, 0, len(req.IDs))
-
-	for _, id := range req.IDs {
-		accountID := id
-		g.Go(func() error {
-			acc := byID[accountID]
-			if acc == nil {
-				mu.Lock()
-				results = append(results, gin.H{
-					"id":      accountID,
-					"success": false,
-					"error":   "account not found",
-				})
-				mu.Unlock()
-				return nil
-			}
-			// 同平台可共存普通 API 账号与 Web 账号，按账号级 access_mode 隔离：
-			// 非 web access_mode 账号不发起测试，作为失败项返回。
-			if !acc.IsWebAccessMode() {
-				mu.Lock()
-				results = append(results, gin.H{
-					"id":      accountID,
-					"success": false,
-					"error":   "not a web access-mode account",
-				})
-				mu.Unlock()
-				return nil
-			}
-			outcome, testErr := h.accountTestService.RunTestBackground(gctx, accountID, "")
-			mu.Lock()
-			defer mu.Unlock()
-			if testErr != nil {
-				results = append(results, gin.H{
-					"id":      accountID,
-					"success": false,
-					"error":   testErr.Error(),
-				})
-				return nil
-			}
-			success := outcome.Status == "success"
-			errMsg := outcome.ErrorMessage
-			if success && errMsg == "" {
-				errMsg = ""
-			}
-			results = append(results, gin.H{
-				"id":      accountID,
-				"success": success,
-				"error":   errMsg,
-			})
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i]["id"].(int64) < results[j]["id"].(int64)
-	})
-
-	response.Success(c, gin.H{"results": results})
-}
-
-// webBanKeywords 是判定账号是否被上游封禁（含"封禁(10)"）的关键词集合。
-// 命中 ErrorMessage 或凭据 login_last_error 即视为待清理候选。
-var webBanKeywords = []string{"封禁", "banned"}
-
-// isBanCandidate 判定账号是否命中封禁（安全红线只做识别，不做任何凭据导出）。
-func isBanCandidate(account *service.Account) (bool, string) {
-	if account == nil {
-		return false, ""
-	}
-	var texts []string
-	if account.ErrorMessage != "" {
-		texts = append(texts, account.ErrorMessage)
-	}
-	if account.Credentials != nil {
-		if v, ok := account.Credentials["login_last_error"].(string); ok && v != "" {
-			texts = append(texts, v)
-		}
-	}
-	lower := strings.ToLower(strings.Join(texts, " "))
-	for _, kw := range webBanKeywords {
-		if strings.Contains(lower, strings.ToLower(kw)) {
-			return true, strings.TrimSpace(strings.Join(texts, "; "))
-		}
-	}
-	return false, ""
-}
-
-// BatchDeleteBanned 批量清理被封禁（10）账号。
-// POST /api/v1/admin/accounts/batch-delete-banned
-//
-//	body {confirm:bool}
-//
-// 默认（confirm=false）仅返回待删清单，不删；confirm=true 走删除逻辑。
-func (h *AccountHandler) BatchDeleteBanned(c *gin.Context) {
-	var req struct {
-		Confirm bool `json:"confirm"`
-	}
-	// 允许空 body。
-	_ = c.ShouldBindJSON(&req)
-
-	ctx := c.Request.Context()
-
-	webPlatforms := []string{service.PlatformDeepseek, service.PlatformZhipu, service.PlatformKimi}
-	var all []service.Account
-	for _, p := range webPlatforms {
-		accounts, _, err := h.adminService.ListAccounts(ctx, 1, 100000, p, "", "", "", 0, "", "", "")
-		if err != nil {
-			response.ErrorFrom(c, err)
-			return
-		}
-		all = append(all, accounts...)
-	}
-
-	candidates := make([]gin.H, 0)
-	for i := range all {
-		acc := &all[i]
-		// 平台列举可能带回同平台的普通 API 账号（如 zhipu + api_key）：它们即使
-		// 错误文本命中封禁词也不得进入删除候选，必须先按账号级 access_mode 隔离。
-		if !acc.IsWebAccessMode() {
-			continue
-		}
-		if ok, reason := isBanCandidate(acc); ok {
-			candidates = append(candidates, gin.H{
-				"id":     acc.ID,
-				"name":   acc.Name,
-				"reason": reason,
-			})
-		}
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i]["id"].(int64) < candidates[j]["id"].(int64)
-	})
-
-	if !req.Confirm {
-		response.Success(c, gin.H{"candidates": candidates, "deleted": 0})
-		return
-	}
-
-	var mu sync.Mutex
-	deleted := 0
-	var deleteErrors []gin.H
-	for _, cand := range candidates {
-		id := cand["id"].(int64)
-		if err := h.adminService.DeleteAccount(ctx, id); err != nil {
-			mu.Lock()
-			deleteErrors = append(deleteErrors, gin.H{"account_id": id, "error": err.Error()})
-			mu.Unlock()
-			continue
-		}
-		mu.Lock()
-		deleted++
-		mu.Unlock()
-	}
-
-	response.Success(c, gin.H{"candidates": candidates, "deleted": deleted, "errors": deleteErrors})
-}
-
-// BatchStatus 批量置账号状态（仅 active/disabled）。
-// POST /api/v1/admin/accounts/batch-status
-//
-//	body {ids:[]int64, status:"active"|"disabled"}
-func (h *AccountHandler) BatchStatus(c *gin.Context) {
-	var req struct {
-		IDs    []int64 `json:"ids"`
-		Status string  `json:"status" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-	if req.Status != service.StatusActive && req.Status != service.StatusDisabled {
-		response.BadRequest(c, "status must be one of: active, disabled")
-		return
-	}
-	if len(req.IDs) == 0 {
-		response.BadRequest(c, "ids is required")
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	accounts, err := h.adminService.GetAccountsByIDs(ctx, req.IDs)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	byID := make(map[int64]*service.Account, len(accounts))
-	for _, acc := range accounts {
-		if acc != nil {
-			byID[acc.ID] = acc
-		}
-	}
-
-	const maxConcurrency = 3
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(maxConcurrency)
-
-	var mu sync.Mutex
-	var successCount, failedCount int
-	var errorsList []gin.H
-
-	for _, id := range req.IDs {
-		accountID := id
-		g.Go(func() error {
-			acc := byID[accountID]
-			if acc == nil {
-				mu.Lock()
-				failedCount++
-				errorsList = append(errorsList, gin.H{"account_id": accountID, "error": "account not found"})
-				mu.Unlock()
-				return nil
-			}
-			// 同平台可共存普通 API 账号与 Web 账号，按账号级 access_mode 隔离：
-			// 非 web access_mode 账号不得被改状态，作为失败项返回。
-			if !acc.IsWebAccessMode() {
-				mu.Lock()
-				failedCount++
-				errorsList = append(errorsList, gin.H{"account_id": accountID, "error": "not a web access-mode account"})
-				mu.Unlock()
-				return nil
-			}
-			if _, err := h.adminService.UpdateAccount(gctx, accountID, &service.UpdateAccountInput{Status: req.Status}); err != nil {
-				mu.Lock()
-				failedCount++
-				errorsList = append(errorsList, gin.H{"account_id": accountID, "error": err.Error()})
-				mu.Unlock()
-				return nil
-			}
-			mu.Lock()
-			successCount++
-			mu.Unlock()
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	response.Success(c, gin.H{
-		"total":   len(req.IDs),
-		"success": successCount,
-		"failed":  failedCount,
-		"errors":  errorsList,
-	})
-}
-
-// ExportedWebAccount 是账号导出 DTO（安全红线：绝不导出凭据）。
-type ExportedWebAccount struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Platform        string `json:"platform"`
-	EmailOrPhone    string `json:"email_or_phone"`
-	Status          string `json:"status"`
-	LoginLastAt     string `json:"login_last_at"`
-	LoginLastError  string `json:"login_last_error"`
-}
-
-// ExportWebAccounts 导出网页版账号清单（ID/名称/邮箱或手机号/状态/last_at/last_error）。
-// GET /api/v1/admin/accounts/export?platform=deepseek
-//
-// 安全红线：凭据（cookie / token / password 等）绝不出现在响应中。
-func (h *AccountHandler) ExportWebAccounts(c *gin.Context) {
-	platform := c.Query("platform")
-	if platform == "" {
-		response.BadRequest(c, "platform is required")
-		return
-	}
-	if !service.IsWebLoginPlatform(platform) {
-		response.BadRequest(c, "platform must be a web provider")
-		return
-	}
-
-	ctx := c.Request.Context()
-	accounts, _, err := h.adminService.ListAccounts(ctx, 1, 100000, platform, "", "", "", 0, "", "", "")
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-
-	out := make([]ExportedWebAccount, 0, len(accounts))
-	for i := range accounts {
-		acc := &accounts[i]
-		// ListAccounts 按平台取回，可能混入同平台的普通 API 账号：导出清单只允许
-		// 含账号级 access_mode == web 的账号，普通 API 账号不得出现在导出 JSON 中。
-		if !acc.IsWebAccessMode() {
-			continue
-		}
-		emailOrPhone := ""
-		loginLastAt := ""
-		loginLastError := acc.ErrorMessage
-		if acc.Credentials != nil {
-			if v, ok := acc.Credentials["login_email"].(string); ok && v != "" {
-				emailOrPhone = v
-			} else if v, ok := acc.Credentials["login_phone"].(string); ok && v != "" {
-				emailOrPhone = v
-			}
-			if v, ok := acc.Credentials["login_last_at"].(string); ok {
-				loginLastAt = v
-			}
-			if v, ok := acc.Credentials["login_last_error"].(string); ok && v != "" {
-				loginLastError = v
-			}
-		}
-		out = append(out, ExportedWebAccount{
-			ID:             acc.ID,
-			Name:           acc.Name,
-			Platform:       acc.Platform,
-			EmailOrPhone:   emailOrPhone,
-			Status:         acc.Status,
-			LoginLastAt:    loginLastAt,
-			LoginLastError: loginLastError,
-		})
-	}
-
-	response.Success(c, gin.H{"accounts": out, "total": len(out)})
 }

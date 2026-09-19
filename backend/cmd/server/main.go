@@ -177,21 +177,6 @@ func runMainServer() {
 
 	log.Printf("Server started on %s", app.Server.Addr)
 
-	// 启动网页登录代理隔离 origin 服务器（独立端口；WEB_LOGIN_PROXY_ADDR 为空时未启用）。
-	if app.WebLoginProxyServer != nil {
-		go func() {
-			if err := app.WebLoginProxyServer.Start(); err != nil {
-				log.Printf("Web login proxy server stopped: %v", err)
-			}
-		}()
-		log.Printf("Web login proxy server started on %s", cfg.Server.WebLoginProxyAddr)
-		// 隔离 origin 必须显式配置（同源回退已禁止，安全红线）：未配置时前端
-		// 自动降级为官方页登录 + 手动粘贴，embedded proxy 对客户端不可用。
-		if strings.TrimSpace(cfg.Server.WebLoginProxyOrigin) == "" {
-			log.Println("web login proxy origin not configured; embedded proxy disabled for clients")
-		}
-	}
-
 	// 等待中断信号
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -201,12 +186,6 @@ func runMainServer() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	if app.WebLoginProxyServer != nil {
-		if err := app.WebLoginProxyServer.Shutdown(ctx); err != nil {
-			log.Printf("Web login proxy server forced to shutdown: %v", err)
-		}
-	}
 
 	if err := app.Server.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)

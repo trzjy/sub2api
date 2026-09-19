@@ -89,7 +89,6 @@ describe('buildWebProviderCredentials', () => {
   it('builds cookie credentials for DeepSeek web with optional base_url', () => {
     const result = buildWebProviderCredentials('deepseek', {
       cookie: '  sessionid=abc; HWWAFSESID=xyz  ',
-      kimiTokenJson: '',
       baseUrl: 'https://chat.example.com'
     })
     expect(result.error).toBeUndefined()
@@ -103,7 +102,6 @@ describe('buildWebProviderCredentials', () => {
   it('omits base_url when blank', () => {
     const result = buildWebProviderCredentials('zhipu', {
       cookie: 'chatglm_token=abc',
-      kimiTokenJson: '',
       baseUrl: '   '
     })
     expect(result.error).toBeUndefined()
@@ -113,68 +111,55 @@ describe('buildWebProviderCredentials', () => {
   it('rejects blank cookie', () => {
     const result = buildWebProviderCredentials('zhipu', {
       cookie: '   ',
-      kimiTokenJson: '',
       baseUrl: ''
     })
     expect(result.error).toBe('webCookieRequired')
   })
 
-  it('builds kimi credentials from a full token JSON', () => {
+  it('fails closed for kimi (SMS login only, no manual token paste)', () => {
     const result = buildWebProviderCredentials('kimi', {
       cookie: '',
-      kimiTokenJson: JSON.stringify({
-        access_token: ' at ',
-        refresh_token: ' rt ',
-        user_id: 'u-123'
-      }),
       baseUrl: ''
+    })
+    expect(result.error).toBe('webKimiAccessTokenRequired')
+  })
+
+  it('writes auto-renewal login credentials when provided (deepseek)', () => {
+    const result = buildWebProviderCredentials('deepseek', {
+      cookie: 'sessionid=abc',
+      baseUrl: '',
+      loginEmail: '  user@deepseek.com  ',
+      loginPassword: '  pw  ',
+      loginPhone: ' 13800000000 '
     })
     expect(result.error).toBeUndefined()
     expect(result.credentials).toEqual({
       access_mode: 'web',
-      access_token: 'at',
-      refresh_token: 'rt',
-      user_id: 'u-123'
+      cookie: 'sessionid=abc',
+      login_email: 'user@deepseek.com',
+      login_password: 'pw',
+      login_phone: '13800000000'
     })
   })
 
-  it('accepts kimi JSON with only access_token', () => {
-    const result = buildWebProviderCredentials('kimi', {
-      cookie: '',
-      kimiTokenJson: '{"access_token":"at"}',
+  it('omits login_* keys when not provided (default behavior unchanged)', () => {
+    const result = buildWebProviderCredentials('deepseek', {
+      cookie: 'sessionid=abc',
       baseUrl: ''
     })
     expect(result.error).toBeUndefined()
-    expect(result.credentials).toEqual({ access_mode: 'web', access_token: 'at' })
+    expect(result.credentials).toEqual({ access_mode: 'web', cookie: 'sessionid=abc' })
   })
 
-  it('accepts numeric kimi user_id', () => {
-    const result = buildWebProviderCredentials('kimi', {
-      cookie: '',
-      kimiTokenJson: '{"access_token":"at","user_id":42}',
-      baseUrl: ''
+  it('omits login_* keys when provided as blank', () => {
+    const result = buildWebProviderCredentials('deepseek', {
+      cookie: 'sessionid=abc',
+      baseUrl: '',
+      loginEmail: '   ',
+      loginPassword: '   ',
+      loginPhone: ''
     })
     expect(result.error).toBeUndefined()
-    expect(result.credentials).toEqual({ access_mode: 'web', access_token: 'at', user_id: 42 })
-  })
-
-  it('rejects unparseable / non-object kimi JSON', () => {
-    for (const raw of ['not json', '[1,2]', '"str"', 'null']) {
-      const result = buildWebProviderCredentials('kimi', {
-        cookie: '',
-        kimiTokenJson: raw,
-        baseUrl: ''
-      })
-      expect(result.error).toBe('webKimiJsonInvalid')
-    }
-  })
-
-  it('rejects kimi JSON without access_token', () => {
-    const result = buildWebProviderCredentials('kimi', {
-      cookie: '',
-      kimiTokenJson: '{"refresh_token":"rt"}',
-      baseUrl: ''
-    })
-    expect(result.error).toBe('webKimiAccessTokenRequired')
+    expect(result.credentials).toEqual({ access_mode: 'web', cookie: 'sessionid=abc' })
   })
 })

@@ -8,6 +8,7 @@ const {
   syncUpstreamModelsMock,
   showErrorMock,
   showWarningMock,
+  showSuccessMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
   authIsSimpleMode,
@@ -17,6 +18,7 @@ const {
   syncUpstreamModelsMock: vi.fn(),
   showErrorMock: vi.fn(),
   showWarningMock: vi.fn(),
+  showSuccessMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
   authIsSimpleMode: { value: true },
@@ -25,7 +27,7 @@ const {
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: showErrorMock,
-    showSuccess: vi.fn(),
+    showSuccess: showSuccessMock,
     showWarning: showWarningMock,
   }),
 }))
@@ -71,7 +73,6 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
-import WebLoginModal from '../WebLoginModal.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -901,6 +902,7 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
     showWarningMock.mockReset()
+    showSuccessMock.mockReset()
     importCodexSessionMock.mockReset().mockResolvedValue({
       created: 1,
       updated: 0,
@@ -915,120 +917,77 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
   afterEach(() => vi.useRealTimers())
 
 
-  it('submits pasted cookie credentials for deepseek web access mode with apikey type', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
-    await flushPromises()
-    // 风险提示必须可见（方案 §2.2）
-    expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=abc; HWWAFSESID=xyz')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('deepseek')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.cookie).toBe('sessionid=abc; HWWAFSESID=xyz')
-    // 平台归并 PR-3：网页接入下沉为 credentials["access_mode"]="web"。
-    expect(payload?.credentials?.access_mode).toBe('web')
-    expect(payload?.credentials).not.toHaveProperty('api_key')
-  })
-
-  it('submits parsed token JSON for kimi web access mode and keeps only non-empty optional fields', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
-    await flushPromises()
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="kimi-token-json"]').setValue(
-      JSON.stringify({ access_token: 'at', refresh_token: 'rt', user_id: 'u-9' })
-    )
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('kimi')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials).toEqual({
-      access_mode: 'web',
-      access_token: 'at',
-      refresh_token: 'rt',
-      user_id: 'u-9',
-    })
-  })
-
-  // 账号密码自动登录仅 deepseek 支持（zhipu/kimi 官方无密码登录），入口只对 deepseek 渲染。
-  it('renders the password auto-login toggle only for deepseek web access mode', async () => {
-    const deepseekWrapper = mountModal()
-    await selectWebModeViaCnPlatform(deepseekWrapper, 'DeepSeek')
-    await flushPromises()
-    expect(deepseekWrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(true)
-
-    for (const cardLabel of ['Kimi', 'Zhipu GLM'] as const) {
+  // 账号密码自动登录仅 deepseek；zhipu/kimi 走手机号 + 短信码。三个官方平台的 web 接入
+  // 模式均渲染自动登录入口（zhipu/kimi 不再被 password→短信发码桩关闭）。
+  it('renders the auto-login toggle and risk warning for every web access platform', async () => {
+    for (const cardLabel of ['DeepSeek', 'Kimi', 'Zhipu GLM'] as const) {
       const wrapper = mountModal()
       await selectWebModeViaCnPlatform(wrapper, cardLabel)
       await flushPromises()
-      expect(wrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(false)
+      // 风险提示必须可见（方案 §2.2）
+      expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(true)
     }
   })
 
-  it('fills the create payload from a captured login (applied event) and submits it', async () => {
+  // zhipu/kimi 短信登录成功：后端已在 login 成功时新建/回填账号，弹窗不得二次建号，
+  // 直接刷新账号列表并展示成功（E6 契约：前端按 account_id 判定短信登录成功）。
+  it('zhipu SMS login success refreshes the list without creating a second account', async () => {
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
-    await flushPromises()
-    await wrapper.get('[data-testid="web-open-login-modal"]').trigger('click')
+    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
-    // 捕获回填路径：内嵌登录弹窗校验通过后 emit applied，凭证必须真正写入创建请求
-    // （登录成功本身不建号，回填后仍走同一提交链路）。
-    const loginModal = wrapper.findComponent(WebLoginModal)
-    expect(loginModal.exists()).toBe(true)
-    loginModal.vm.$emit('applied', {
-      platform: 'deepseek',
-      credentials: { access_mode: 'web', cookie: 'sessionid=captured' },
+    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
+    await flushPromises()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    expect(autoLoginForm.exists()).toBe(true)
+    autoLoginForm.vm.$emit('recovered', {
+      platform: 'zhipu',
+      account_id: 77,
+      cookie: 'zck=1'
     })
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('captured account')
+    // 后端已落库：弹窗不二次建号。
+    expect(createAccountMock).not.toHaveBeenCalled()
+    // 刷新账号列表（父级监听 created 事件）。
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    expect(showSuccessMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.smsLoginSuccess')
+  })
+
+  // 自动登录成功（recovered）：Cookie 回填 webCookieInput，登录邮箱/密码保存到组件级 ref，
+  // 建号提交时一并写入 credentials（Cookie 失效后自动续期用）。
+  it('saves auto-login email/password into the created account credentials', async () => {
+    const wrapper = mountModal()
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
+    await flushPromises()
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds auto login')
+    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
+    await flushPromises()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    expect(autoLoginForm.exists()).toBe(true)
+    autoLoginForm.vm.$emit('recovered', {
+      platform: 'deepseek',
+      cookie: 'sessionid=auto',
+      login_email: 'u@deepseek.com',
+      login_password: 'pw-auto',
+    })
+    await flushPromises()
+
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     const payload = createAccountMock.mock.calls[0]?.[0]
     expect(payload?.platform).toBe('deepseek')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.cookie).toBe('sessionid=captured')
-    expect(payload?.credentials?.access_mode).toBe('web')
-  })
-
-  it('rejects blank cookie without calling create API', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
-    await flushPromises()
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('   ')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).not.toHaveBeenCalled()
-  })
-
-  it('rejects unparseable kimi token JSON without calling create API', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
-    await flushPromises()
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="kimi-token-json"]').setValue('not-json')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(payload?.credentials).toEqual({
+      access_mode: 'web',
+      cookie: 'sessionid=auto',
+      login_email: 'u@deepseek.com',
+      login_password: 'pw-auto',
+    })
+    expect(payload?.credentials).not.toHaveProperty('api_key')
   })
 
   it('hides the generic api key block for web platforms', async () => {
@@ -1036,7 +995,6 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="web-cookie-input"]').exists()).toBe(true)
     expect(wrapper.find('form#create-account-form input[type="password"]').exists()).toBe(false)
   })
 
@@ -1079,24 +1037,32 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
   })
 
   // (a) 载荷门控：网页接入模式走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
-  it('omits upstream_billing_probe_enabled from the create payload for zhipu web access mode credentials', async () => {
+  it('omits upstream_billing_probe_enabled from the create payload for web access mode credentials', async () => {
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
+    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
+    await flushPromises()
+    wrapper.findComponent({ name: 'WebAutoLoginForm' }).vm.$emit('recovered', {
+      platform: 'deepseek',
+      cookie: 'sessionid=test-cookie',
+      login_email: 'u@deepseek.com',
+      login_password: 'pw',
+    })
+    await flushPromises()
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
     expect(createAccountMock).toHaveBeenCalledTimes(1)
     const payload = createAccountMock.mock.calls[0]?.[0]
-    // 平台归并 PR-3：网页接入模式平台为官方值 zhipu，网页语义在 credentials["access_mode"]="web"。
-    expect(payload?.platform).toBe('zhipu')
+    // 平台归并 PR-3：网页接入模式平台为官方值 deepseek，网页语义在 credentials["access_mode"]="web"。
+    expect(payload?.platform).toBe('deepseek')
     expect(payload?.type).toBe('apikey')
     expect(payload?.credentials?.access_mode).toBe('web')
     expect(payload?.credentials?.cookie).toBe('sessionid=test-cookie')
-    // isUpstreamBillingProbeEligible('zhipu','apikey') + access_mode==='web' → 不在探测白名单，
+    // isUpstreamBillingProbeEligible('deepseek','apikey') + access_mode==='web' → 不在探测白名单，
     // 后端契约要求网页接入模式建号请求不得携带 upstream_billing_probe_enabled=true。
     expect(payload?.upstream_billing_probe_enabled).toBeUndefined()
     expect(showErrorMock).not.toHaveBeenCalled()
@@ -1113,11 +1079,19 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
     })
 
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
+    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
+    await flushPromises()
+    wrapper.findComponent({ name: 'WebAutoLoginForm' }).vm.$emit('recovered', {
+      platform: 'deepseek',
+      cookie: 'sessionid=test-cookie',
+      login_email: 'u@deepseek.com',
+      login_password: 'pw',
+    })
+    await flushPromises()
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 

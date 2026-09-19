@@ -37,12 +37,18 @@ func IsSensitiveCredentialKey(key string) bool {
 // 直接覆盖会清空已有 token。此函数保证：
 //   - 非敏感键：完全由 incoming 决定（用户可以编辑、删除非敏感字段）。
 //   - 敏感键：incoming 显式提供则覆盖（用户主动旋转 token），否则保留 existing。
-func MergePreservingSensitiveCreds(existing, incoming map[string]any) map[string]any {
-	out := make(map[string]any, len(incoming)+len(SensitiveCredentialKeys))
+//
+// extraPreserveKeys 是本函数的调用方追加保留清单：web 自动续期的 login_email / login_password /
+// login_phone 等键不在全局 SensitiveCredentialKeys 脱敏清单内（login_email 需回显给编辑框），但
+// 编辑回写时前端可能不会带回，必须走"incoming 没提供就保留 existing"的语义。为了避免把更多键
+// 推入全局敏感清单影响脱敏/加密/导出全链，采用调用方按需传入的方式。
+func MergePreservingSensitiveCreds(existing, incoming map[string]any, extraPreserveKeys ...string) map[string]any {
+	out := make(map[string]any, len(incoming)+len(SensitiveCredentialKeys)+len(extraPreserveKeys))
 	for k, v := range incoming {
 		out[k] = v
 	}
-	for _, key := range SensitiveCredentialKeys {
+	preserve := append(append([]string{}, SensitiveCredentialKeys...), extraPreserveKeys...)
+	for _, key := range preserve {
 		if _, hasIncoming := incoming[key]; hasIncoming {
 			continue
 		}

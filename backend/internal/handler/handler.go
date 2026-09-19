@@ -21,7 +21,6 @@ type AdminHandlers struct {
 	GrokOAuth              *admin.GrokOAuthHandler
 	CodeBuddyOAuth         *admin.CodeBuddyOAuthHandler
 	CNProvider             *admin.CNProviderHandler
-	WebLoginProxy          *admin.WebLoginProxyHandler
 	Proxy                  *admin.ProxyHandler
 	Redeem                 *admin.RedeemHandler
 	Promo                  *admin.PromoHandler

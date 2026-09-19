@@ -1459,7 +1459,7 @@
         </div>
       </div>
 
-      <!-- 网页接入模式：手动粘贴登录态凭证（内嵌登录 WebLoginModal 已集成，web 登录代理为主路径，粘贴为降级兜底） -->
+      <!-- 网页接入模式：登录态凭证由自动登录取得（zhipu/kimi 短信入口后续接入） -->
       <div v-if="isWebAccessModePlatform" class="space-y-4">
         <!-- 封号风险提示（方案 §2.2）：账号参与站点调度，请使用可接受风险的账号 -->
         <div data-testid="web-risk-warning" class="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/20">
@@ -1469,41 +1469,6 @@
           <p class="mt-1 text-xs text-red-600 dark:text-red-400">
             {{ t('admin.accounts.webProviders.riskWarning.body') }}
           </p>
-        </div>
-        <div v-if="webAccessModeUsesCookie">
-          <label class="input-label">{{ t('admin.accounts.webProviders.cookieLabel') }}</label>
-          <textarea
-            v-model="webCookieInput"
-            rows="4"
-            required
-            data-testid="web-cookie-input"
-            class="input font-mono"
-            :placeholder="t('admin.accounts.webProviders.cookiePlaceholder')"
-          ></textarea>
-          <p class="input-hint">{{ t('admin.accounts.webProviders.cookieHint') }}</p>
-        </div>
-        <div v-else>
-          <label class="input-label">{{ t('admin.accounts.webProviders.kimiTokenLabel') }}</label>
-          <textarea
-            v-model="kimiTokenJson"
-            rows="4"
-            required
-            data-testid="kimi-token-json"
-            class="input font-mono"
-            :placeholder='t("admin.accounts.webProviders.kimiTokenPlaceholder")'
-          ></textarea>
-          <p class="input-hint">{{ t('admin.accounts.webProviders.kimiTokenHint') }}</p>
-        </div>
-        <div>
-          <button
-            type="button"
-            data-testid="web-open-login-modal"
-            class="btn btn-secondary"
-            @click="showWebLogin = true"
-          >
-            {{ t('admin.accounts.webLogin.openOfficial') }}
-          </button>
-          <p class="input-hint">{{ t('admin.accounts.webLogin.openOfficialHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
@@ -1516,10 +1481,10 @@
           <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
         </div>
 
-        <!-- 自动登录（账号密码自动登录并回填 Cookie；折叠表单）。
-             密码登录仅 deepseek 官方支持；zhipu/kimi 无密码登录，不渲染该入口。 -->
+        <!-- 自动登录（折叠表单）：deepseek 走账号密码；zhipu/kimi 走手机号 + 短信码。
+             web 接入模式对三个官方平台均开放入口（zhipu/kimi 不再走 password→短信发码桩）。 -->
         <div
-          v-if="supportsPasswordAutoLogin"
+          v-if="supportsWebAutoLogin"
           class="rounded-lg border border-gray-200 p-3 dark:border-dark-500"
         >
           <button
@@ -1528,7 +1493,7 @@
             class="flex w-full items-center justify-between text-sm font-medium text-primary-600 dark:text-primary-400"
             @click="showAutoLogin = !showAutoLogin"
           >
-            <span>{{ t('admin.accounts.webLogin.autoLogin.title') }}</span>
+            <span>{{ autoLoginIsSms ? t('admin.accounts.webLogin.autoLogin.titleSms') : t('admin.accounts.webLogin.autoLogin.title') }}</span>
             <span>{{ showAutoLogin ? '▾' : '▸' }}</span>
           </button>
           <div v-if="showAutoLogin" class="mt-3">
@@ -3886,14 +3851,6 @@
     </template>
   </BaseDialog>
 
-  <!-- 网页逆向平台内嵌登录弹窗（W5） -->
-  <WebLoginModal
-    :show="showWebLogin"
-    :platform="form.platform"
-    @close="showWebLogin = false"
-    @applied="handleWebLoginApplied"
-  />
-
   <!-- Gemini Help Dialog -->
   <BaseDialog
     :show="showGeminiHelpDialog"
@@ -4164,7 +4121,6 @@ import type {
 } from '@/types'
 import type { CodeBuddySite, CodeBuddyTokenInfo } from '@/api/admin/codebuddy'
 import BaseDialog from '@/components/common/BaseDialog.vue'
-import WebLoginModal from './WebLoginModal.vue'
 import WebAutoLoginForm from './WebAutoLoginForm.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
@@ -4196,14 +4152,11 @@ import {
   isVolcanoBaseURL,
   isWebProviderPlatform,
   validateHeaderOverrideRows,
-  webPlatformSupportsPasswordLogin,
-  webProviderUsesCookie,
   type CnAccountMode,
   type CnApiProtocol,
   type CnNativeApiProtocol,
   type CnProviderPlatform,
-  type HeaderOverrideRow,
-  type WebProviderPlatform
+  type HeaderOverrideRow
 } from '@/components/account/credentialsBuilder'
 import {
   formatDateTimeLocalInput,
@@ -4415,29 +4368,42 @@ const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
-// ── 网页接入模式（kimi / zhipu / deepseek，access_mode="web"）粘贴凭证 ──
+// ── 网页接入模式（kimi / zhipu / deepseek，access_mode="web"）登录态载体 ──
+// webCookieInput：自动登录成功回填的整串 Cookie（deepseek 密码登录；不再有手工粘贴入口）。
 const webCookieInput = ref('')
-const kimiTokenJson = ref('')
 const webBaseUrlInput = ref('')
-const showWebLogin = ref(false)
 // 网页接入模式：「自动登录」折叠表单（账号密码自动登录并回填 Cookie）。
 const showAutoLogin = ref(false)
+// DeepSeek 自动续期登录凭证（自动登录成功时回填，随建号一并写入 credentials）
+const webAutoLoginEmail = ref('')
+const webAutoLoginPassword = ref('')
+const webAutoLoginPhone = ref('')
 
-// handleWebLoginApplied：内嵌登录弹窗校验通过后，把凭证回填到现有粘贴表单
-// （保持单一创建路径，用户确认后仍走同一提交链路）。
-function handleWebLoginApplied(payload: { platform: string; credentials: Record<string, unknown> }) {
-  if (payload.platform === 'kimi') {
-    kimiTokenJson.value = JSON.stringify(payload.credentials, null, 2)
-  } else {
-    const cookie = payload.credentials.cookie
-    webCookieInput.value = typeof cookie === 'string' ? cookie : JSON.stringify(payload.credentials, null, 2)
+// 自动登录成功回调（来自 WebAutoLoginForm @recovered）：
+// - deepseek 密码登录：把返回的整串 Cookie 写入 webCookieInput，并保存登录邮箱/密码，
+//   随后续「创建账号」一并写入 credentials（Cookie 失效后自动续期用）。
+// - zhipu / kimi 短信登录：后端已在 login 成功时新建/回填账号并回传 account_id，无需
+//   再由弹窗二次建号；直接刷新账号列表并展示成功，不得伪造成功、不得重复落库。
+function handleAutoLoginRecovered(payload: {
+  platform: string
+  cookie?: string
+  account_id?: number
+  access_token?: string
+  login_email?: string
+  login_phone?: string
+  login_password?: string
+}) {
+  // 短信登录成功：后端已落库，刷新列表 + 成功提示（弹窗保持打开，由表单展示成功态）。
+  if (payload.account_id != null) {
+    appStore.showSuccess(t('admin.accounts.webLogin.autoLogin.smsLoginSuccess'))
+    emit('created')
+    return
   }
-}
-
-// 自动登录成功：与 iframe 捕获同一条回填路径——把返回的整串 Cookie 写入 webCookieInput。
-// zhipu / kimi 本期走 needs_sms，自动登录不会触发 recovered（由表单内如实展示未接入）。
-function handleAutoLoginRecovered(payload: { platform: string; cookie: string }) {
-  webCookieInput.value = payload.cookie
+  // deepseek 密码登录：保存 Cookie 与登录标识，供手动「创建账号」写入 credentials。
+  webCookieInput.value = payload.cookie ?? ''
+  webAutoLoginEmail.value = payload.login_email ?? ''
+  webAutoLoginPhone.value = payload.login_phone ?? ''
+  webAutoLoginPassword.value = payload.login_password ?? ''
 }
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
@@ -4565,17 +4531,10 @@ function selectOtherPlatform() {
 const cnWebAccessMode = ref(false)
 // 网页接入模式生效：官方 CN 平台 + 网页接入开关（平台归并后 web-* 不再是平台值）。
 const isWebAccessModePlatform = computed(() => cnWebAccessMode.value && isWebProviderPlatform(form.platform))
-// 网页接入模式使用整串 Cookie（DeepSeek / 智谱）；Kimi 网页端用 Token 三元组。
-// webProviderUsesCookie 参数是平台字面量联合，模板里不能写 `as` 断言，经 narrow
-// computed 传递（isWebProviderPlatform 收敛后必为 WebProviderPlatform）。
-const webAccessModeUsesCookie = computed(() => {
-  if (!isWebAccessModePlatform.value) return false
-  return webProviderUsesCookie(form.platform as WebProviderPlatform)
-})
-// 账号密码自动登录入口：仅 deepseek（zhipu/kimi 官方无密码登录，不渲染折叠表单）。
-const supportsPasswordAutoLogin = computed(
-  () => isWebAccessModePlatform.value && webPlatformSupportsPasswordLogin(form.platform as WebProviderPlatform)
-)
+// 网页自动登录入口：web 接入模式下三个官方平台均开放（deepseek 密码；zhipu/kimi 短信码）。
+const supportsWebAutoLogin = computed(() => isWebAccessModePlatform.value)
+// 当前平台自动登录是否走短信码模式（zhipu / kimi）。
+const autoLoginIsSms = computed(() => form.platform === 'zhipu' || form.platform === 'kimi')
 const cnWebModeBases = ['kimi', 'zhipu', 'deepseek'] as const
 const cnSupportsWebMode = computed(
   () => (cnWebModeBases as readonly string[]).includes(form.platform) &&
@@ -5158,10 +5117,9 @@ watch(
   () => form.platform,
   (newPlatform) => {
     // Reset base URL based on platform
-    // 平台切换即退出网页接入模式，粘贴输入随平台清空。
+    // 平台切换即退出网页接入模式，登录态载体随平台清空。
     cnWebAccessMode.value = false
     webCookieInput.value = ''
-    kimiTokenJson.value = ''
     webBaseUrlInput.value = ''
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
@@ -5649,7 +5607,6 @@ const resetForm = () => {
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
   webCookieInput.value = ''
-  kimiTokenJson.value = ''
   webBaseUrlInput.value = ''
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
@@ -6091,8 +6048,9 @@ const handleSubmit = async () => {
     return
   }
 
-  // 网页接入模式（kimi / zhipu / deepseek + access_mode=web）：手动粘贴登录态
-  // 凭证建号（内嵌登录 WebLoginModal 已集成，web 登录代理为主路径，粘贴为降级兜底）。
+  // 网页接入模式（kimi / zhipu / deepseek + access_mode=web）：登录态凭证由自动登录
+  // 取得（deepseek 密码登录；zhipu/kimi 短信登录，成功后由后端建号回传 account_id，
+  // 不会走到本手动创建分支）。缺少必需凭证时失败关闭，不创建半成品账号。
   if (isWebAccessModePlatform.value) {
     if (!form.name.trim()) {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
@@ -6100,8 +6058,10 @@ const handleSubmit = async () => {
     }
     const built = buildWebProviderCredentials(form.platform, {
       cookie: webCookieInput.value,
-      kimiTokenJson: kimiTokenJson.value,
-      baseUrl: webBaseUrlInput.value
+      baseUrl: webBaseUrlInput.value,
+      loginEmail: webAutoLoginEmail.value,
+      loginPassword: webAutoLoginPassword.value,
+      loginPhone: webAutoLoginPhone.value
     })
     if (built.error || !built.credentials) {
       appStore.showError(t(`admin.accounts.webProviders.errors.${built.error ?? 'webCookieRequired'}`))

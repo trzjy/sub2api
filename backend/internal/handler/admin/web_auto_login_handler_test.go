@@ -28,16 +28,21 @@ type walAdminStub struct {
 	accounts []*service.Account
 	byID     map[int64]*service.Account
 	deleted  []int64
+	nextID   int64
 }
 
 func newWALAdminStub(accounts ...*service.Account) *walAdminStub {
 	byID := make(map[int64]*service.Account, len(accounts))
+	var maxID int64
 	for _, a := range accounts {
 		if a != nil {
 			byID[a.ID] = a
+			if a.ID > maxID {
+				maxID = a.ID
+			}
 		}
 	}
-	return &walAdminStub{accounts: accounts, byID: byID}
+	return &walAdminStub{accounts: accounts, byID: byID, nextID: maxID}
 }
 
 func (s *walAdminStub) ListAccounts(_ context.Context, _ int, _ int, platform, _, _, _ string, _ int64, _, _, _ string) ([]service.Account, int64, error) {
@@ -101,6 +106,28 @@ func (s *walAdminStub) UpdateAccount(_ context.Context, id int64, input *service
 	return &cp, nil
 }
 
+func (s *walAdminStub) CreateAccount(_ context.Context, input *service.CreateAccountInput) (*service.Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	creds := map[string]any{}
+	for k, v := range input.Credentials {
+		creds[k] = v
+	}
+	a := &service.Account{
+		ID:          s.nextID,
+		Name:        input.Name,
+		Platform:    input.Platform,
+		Type:        input.Type,
+		Credentials: creds,
+		Status:      service.StatusActive,
+	}
+	s.byID[a.ID] = a
+	s.accounts = append(s.accounts, a)
+	cp := *a
+	return &cp, nil
+}
+
 func (s *walAdminStub) DeleteAccount(_ context.Context, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,7 +161,10 @@ type stubAutoLogin struct {
 	emailErr       error
 	recoverResults map[int64]service.WebRecoverResult
 	refreshErrs    map[int64]error
-	started        bool
+
+	smsResult    *service.SMSLoginResult
+	smsSendErr   error
+	smsVerifyErr error
 }
 
 func (s *stubAutoLogin) LoginByEmail(_ context.Context, _ *service.Account) (string, error) {
@@ -155,8 +185,22 @@ func (s *stubAutoLogin) RecoverAccount(_ context.Context, account *service.Accou
 	return service.WebRecoverResult{Recovered: true}
 }
 
-func (s *stubAutoLogin) Start(_ context.Context) { s.started = true }
-func (s *stubAutoLogin) Stop()                   {}
+func (s *stubAutoLogin) SendSmsCode(_ context.Context, _, _ string, _ service.WebSMSChallenge, _ *service.Account) (string, error) {
+	if s.smsSendErr != nil {
+		return "", s.smsSendErr
+	}
+	return "", nil
+}
+
+func (s *stubAutoLogin) VerifySmsCode(_ context.Context, _, _, _ string, _ service.WebSMSChallenge, _ *service.Account) (*service.SMSLoginResult, error) {
+	if s.smsVerifyErr != nil {
+		return nil, s.smsVerifyErr
+	}
+	if s.smsResult != nil {
+		return s.smsResult, nil
+	}
+	return &service.SMSLoginResult{}, nil
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -177,11 +221,7 @@ func doRequest(t *testing.T, h *AccountHandler, method, path string, body any) *
 
 	group := r.Group("/api/v1/admin/accounts")
 	group.POST("/web-login-password", h.WebLoginPassword)
-	group.POST("/batch-login", h.BatchLogin)
-	group.POST("/batch-test", h.BatchTest)
-	group.POST("/batch-delete-banned", h.BatchDeleteBanned)
-	group.POST("/batch-status", h.BatchStatus)
-	group.GET("/export", h.ExportWebAccounts)
+	group.POST("/web-login-sms", h.WebLoginSMS)
 
 	var reqBody *bytes.Reader
 	if body != nil {
@@ -214,7 +254,7 @@ func decodeEnvelope(t *testing.T, w *httptest.ResponseRecorder) respEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// WebLoginPassword（deepseek 密码登录）
 // ---------------------------------------------------------------------------
 
 func TestWebLoginPassword_DeepseekSuccess(t *testing.T) {
@@ -253,7 +293,7 @@ func TestWebLoginPassword_DeepseekSuccess(t *testing.T) {
 }
 
 func TestWebLoginPassword_ZhipuKimiRejected(t *testing.T) {
-	// zhipu/kimi 官方网页端无密码登录（微信扫码/短信码），后端拒绝密码登录请求。
+	// zhipu/kimi 官方网页端无密码登录（手机号短信码），后端拒绝密码登录请求。
 	for _, platform := range []string{service.PlatformZhipu, service.PlatformKimi} {
 		t.Run(platform, func(t *testing.T) {
 			adminSvc := newWALAdminStub()
@@ -284,152 +324,177 @@ func TestWebLoginPassword_UnsupportedPlatform(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }
 
-func TestBatchLogin_PerAccountStructure(t *testing.T) {
-	dsOK := &service.Account{ID: 1, Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
-	dsFail := &service.Account{ID: 2, Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
-	zpFail := &service.Account{ID: 3, Platform: service.PlatformZhipu, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
-	adminSvc := newWALAdminStub(dsOK, dsFail, zpFail)
-	auto := &stubAutoLogin{
-		recoverResults: map[int64]service.WebRecoverResult{
-			1: {Recovered: true, NeedsSemiAuto: false, Detail: ""},
-			2: {Recovered: false, NeedsSemiAuto: false, Detail: "boom"},
-		},
-		refreshErrs: map[int64]error{3: errors.New("refresh failed")},
-	}
+// ---------------------------------------------------------------------------
+// WebLoginSMS（zhipu / kimi 手机号+短信码）
+// ---------------------------------------------------------------------------
+
+func TestWebLoginSMS_SendCodeSuccess(t *testing.T) {
+	adminSvc := newWALAdminStub()
+	auto := &stubAutoLogin{}
 	h := newTestAccountHandler(adminSvc, auto)
 
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-login", gin.H{
-		"ids": []int64{1, 2, 3},
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":   "send_code",
+		"platform": service.PlatformKimi,
+		"phone":    "19900000000",
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	env := decodeEnvelope(t, w)
-	var data struct {
-		Results []struct {
-			ID        int64  `json:"id"`
-			Recovered bool   `json:"recovered"`
-			NeedsSMS  bool   `json:"needs_sms"`
-			Detail    string `json:"detail"`
-		} `json:"results"`
-		Summary struct {
-			Success int `json:"success"`
-			Failed  int `json:"failed"`
-		} `json:"summary"`
-	}
+	var data map[string]any
 	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Len(t, data.Results, 3)
-	require.Equal(t, 1, data.Summary.Success)
-	require.Equal(t, 2, data.Summary.Failed)
-
-	byID := map[int64]struct {
-		Recovered bool
-		NeedsSMS  bool
-	}{}
-	for _, r := range data.Results {
-		byID[r.ID] = struct {
-			Recovered bool
-			NeedsSMS  bool
-		}{r.Recovered, r.NeedsSMS}
-	}
-	require.True(t, byID[1].Recovered)
-	require.False(t, byID[1].NeedsSMS)
-	require.False(t, byID[2].Recovered)
-	require.False(t, byID[2].NeedsSMS)
-	require.False(t, byID[3].Recovered)
-	require.True(t, byID[3].NeedsSMS)
+	require.Equal(t, true, data["success"])
+	require.NotContains(t, data, "session_token") // 发码成功不再回传 session_token（E0 取证）
 }
 
-func TestBatchDeleteBanned_ListMode(t *testing.T) {
-	banned := &service.Account{ID: 1, Name: "b", Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}, Status: service.StatusError, ErrorMessage: "账号已被封禁"}
-	normal := &service.Account{ID: 2, Name: "n", Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
-	other := &service.Account{ID: 3, Name: "o", Platform: service.PlatformOpenAI}
-	adminSvc := newWALAdminStub(banned, normal, other)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
+func TestWebLoginSMS_SendCodeFailClosed(t *testing.T) {
+	adminSvc := newWALAdminStub()
+	auto := &stubAutoLogin{smsSendErr: errors.New("发码需数美滑块 rid（pic_captcha_id），请在浏览器完成验证后回填挑战值再重试")}
+	h := newTestAccountHandler(adminSvc, auto)
 
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-delete-banned", gin.H{"confirm": false})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	env := decodeEnvelope(t, w)
-	var data struct {
-		Candidates []struct {
-			ID     int64  `json:"id"`
-			Name   string `json:"name"`
-			Reason string `json:"reason"`
-		} `json:"candidates"`
-		Deleted int `json:"deleted"`
-	}
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Len(t, data.Candidates, 1)
-	require.Equal(t, int64(1), data.Candidates[0].ID)
-	require.Equal(t, 0, data.Deleted)
-	require.Empty(t, adminSvc.deleted)
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":   "send_code",
+		"platform": service.PlatformZhipu,
+		"phone":    "13800000000",
+	})
+	// 失败关闭：非 2xx，且不落任何账号。
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Empty(t, adminSvc.accounts)
+	require.Contains(t, w.Body.String(), "挑战值")
 }
 
-func TestBatchDeleteBanned_ConfirmDeletes(t *testing.T) {
-	banned := &service.Account{ID: 1, Name: "b", Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}, Status: service.StatusError, ErrorMessage: "account banned"}
-	normal := &service.Account{ID: 2, Name: "n", Platform: service.PlatformZhipu, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
-	adminSvc := newWALAdminStub(banned, normal)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
-
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-delete-banned", gin.H{"confirm": true})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	env := decodeEnvelope(t, w)
-	var data struct {
-		Deleted int `json:"deleted"`
+func TestWebLoginSMS_LoginPersistsZhipuCredentials(t *testing.T) {
+	acc := &service.Account{
+		ID:          2,
+		Name:        "zp-acc",
+		Platform:    service.PlatformZhipu,
+		Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb},
+		Status:      service.StatusError,
 	}
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Equal(t, 1, data.Deleted)
-	require.Equal(t, []int64{1}, adminSvc.deleted)
-}
-
-func TestBatchStatus_ValueValidation(t *testing.T) {
-	acc := &service.Account{ID: 1, Platform: service.PlatformDeepseek, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}
 	adminSvc := newWALAdminStub(acc)
-	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
+	auto := &stubAutoLogin{smsResult: &service.SMSLoginResult{
+		Cookie:            "chatglm_token=CT-1; chatglm_refresh_token=RFT-1",
+		ChatGLMToken:      "CT-1",
+		LoginRefreshToken: "RFT-1",
+	}}
+	h := newTestAccountHandler(adminSvc, auto)
 
-	// 非法状态值 → 400。
-	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-status", gin.H{
-		"ids":    []int64{1},
-		"status": "weird",
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":     "login",
+		"platform":   service.PlatformZhipu,
+		"phone":      "13800000000",
+		"account_id": 2,
+		"sms_code":   "123456",
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	env := decodeEnvelope(t, w)
+	var data map[string]any
+	require.NoError(t, json.Unmarshal(env.Data, &data))
+	require.Equal(t, true, data["success"])
+	require.EqualValues(t, 2, data["account_id"])
+	require.Equal(t, "chatglm_token=CT-1; chatglm_refresh_token=RFT-1", data["cookie"])
+	require.Equal(t, "RFT-1", data["login_refresh_token"])
+
+	updated, err := adminSvc.GetAccount(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, service.StatusActive, updated.Status)
+	require.Equal(t, "chatglm_token=CT-1; chatglm_refresh_token=RFT-1", updated.GetCredential("cookie"))
+	require.Equal(t, "RFT-1", updated.GetCredential(service.CredKeyLoginRefreshToken))
+	require.Equal(t, "RFT-1", updated.GetCredential("refresh_token"))
+	require.Equal(t, "13800000000", updated.GetCredential("login_phone"))
+	require.Equal(t, service.AccountAccessModeWeb, updated.GetCredential("access_mode"))
+}
+
+func TestWebLoginSMS_LoginCreatesKimiAccount(t *testing.T) {
+	adminSvc := newWALAdminStub()
+	auto := &stubAutoLogin{smsResult: &service.SMSLoginResult{
+		AccessToken:       "AT-1",
+		RefreshToken:      "RT-1",
+		LoginRefreshToken: "RT-1",
+	}}
+	h := newTestAccountHandler(adminSvc, auto)
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":   "login",
+		"platform": service.PlatformKimi,
+		"phone":    "19900000000",
+		"sms_code": "123456",
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	env := decodeEnvelope(t, w)
+	var data map[string]any
+	require.NoError(t, json.Unmarshal(env.Data, &data))
+	require.Equal(t, true, data["success"])
+	require.NotZero(t, data["account_id"])
+
+	id := int64(data["account_id"].(float64))
+	created, err := adminSvc.GetAccount(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, service.PlatformKimi, created.Platform)
+	require.Equal(t, service.AccountTypeAPIKey, created.Type)
+	require.Equal(t, "AT-1", created.GetCredential("access_token"))
+	require.Equal(t, "RT-1", created.GetCredential(service.CredKeyLoginRefreshToken))
+	require.Equal(t, "RT-1", created.GetCredential("refresh_token"))
+	require.Equal(t, service.AccountAccessModeWeb, created.GetCredential("access_mode"))
+	require.Empty(t, created.GetCredential("cookie")) // kimi 不写 cookie 键
+}
+
+// 登录成功但未取得平台必需凭证（如 zhipu 无 cookie）→ 失败关闭，不落库。
+func TestWebLoginSMS_LoginFailClosedNoCredential(t *testing.T) {
+	acc := &service.Account{
+		ID:          3,
+		Name:        "zp-acc",
+		Platform:    service.PlatformZhipu,
+		Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb},
+	}
+	adminSvc := newWALAdminStub(acc)
+	auto := &stubAutoLogin{smsResult: &service.SMSLoginResult{}} // 无 cookie / token
+	h := newTestAccountHandler(adminSvc, auto)
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":     "login",
+		"platform":   service.PlatformZhipu,
+		"phone":      "13800000000",
+		"account_id": 3,
+		"sms_code":   "123456",
 	})
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 
-	// 合法状态值 → 成功。
-	w = doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/batch-status", gin.H{
-		"ids":    []int64{1},
-		"status": service.StatusDisabled,
-	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	updated, err := adminSvc.GetAccount(context.Background(), 1)
+	updated, err := adminSvc.GetAccount(context.Background(), 3)
 	require.NoError(t, err)
-	require.Equal(t, service.StatusDisabled, updated.Status)
+	require.Empty(t, updated.GetCredential("cookie"))
+	require.Empty(t, updated.GetCredential(service.CredKeyLoginRefreshToken))
 }
 
-func TestExportWebAccounts_NoCredentialsLeak(t *testing.T) {
-	acc := &service.Account{
-		ID:          1,
-		Name:        "ds-acc",
-		Platform:    service.PlatformDeepseek,
-		Status:      service.StatusActive,
-		Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb, "login_email": "u@e.com", "cookie": "cookie=secret", "login_password": "pw"},
-	}
-	adminSvc := newWALAdminStub(acc)
+func TestWebLoginSMS_RejectsNonWebAccount(t *testing.T) {
+	api := &service.Account{ID: 4, Platform: service.PlatformZhipu, Credentials: map[string]any{"api_key": "sk-x"}}
+	adminSvc := newWALAdminStub(api)
 	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
-	w := doRequest(t, h, http.MethodGet, "/api/v1/admin/accounts/export?platform="+service.PlatformDeepseek, nil)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	env := decodeEnvelope(t, w)
-	var data struct {
-		Accounts []ExportedWebAccount `json:"accounts"`
-		Total    int                  `json:"total"`
-	}
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Len(t, data.Accounts, 1)
-	require.Equal(t, "u@e.com", data.Accounts[0].EmailOrPhone)
-	require.Equal(t, service.StatusActive, data.Accounts[0].Status)
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":     "login",
+		"platform":   service.PlatformZhipu,
+		"phone":      "13800000000",
+		"account_id": 4,
+		"sms_code":   "123456",
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "not a web access-mode account")
+}
 
-	// 安全红线：响应体绝不出现凭据值（cookie / password）。
-	body := w.Body.String()
-	require.NotContains(t, body, "cookie=secret")
-	require.NotContains(t, body, "pw")
-	require.NotContains(t, body, "\"cookie\"")
-	require.NotContains(t, body, "\"login_password\"")
+func TestWebLoginSMS_RejectsUnsupportedPlatformAndAction(t *testing.T) {
+	h := newTestAccountHandler(newWALAdminStub(), &stubAutoLogin{})
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":   "send_code",
+		"platform": service.PlatformDeepseek,
+		"phone":    "13800000000",
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	w = doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action":   "delete",
+		"platform": service.PlatformZhipu,
+		"phone":    "13800000000",
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }

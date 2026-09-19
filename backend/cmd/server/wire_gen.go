@@ -229,8 +229,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	cnProviderQuotaService := service.ProvideCNProviderQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	cnProviderBalanceService := service.ProvideCNProviderBalanceService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	cnProviderHandler := admin.NewCNProviderHandler(cnProviderQuotaService, cnProviderBalanceService)
-	webLoginCaptureStore := service.NewWebLoginCaptureStore()
-	webLoginProxyHandler := admin.NewWebLoginProxyHandler(webLoginCaptureStore)
 	proxyHandler := admin.NewProxyHandler(adminService)
 	adminRedeemHandler := admin.NewRedeemHandler(adminService, redeemService)
 	promoHandler := admin.NewPromoHandler(promoService)
@@ -322,7 +320,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	upstreamBillingProbeService := service.ProvideUpstreamBillingProbeService(accountRepository, accountTestService, settingService, leaderLockCache, db)
 	ollamaCloudUsageService := service.ProvideOllamaCloudUsageService(accountRepository, httpUpstream, settingService, secretEncryptor, configConfig, leaderLockCache, db)
 	accountBalanceProbeService := service.ProvideAccountBalanceProbeService(accountRepository, httpUpstream)
-	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, webLoginProxyHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig)
+	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig)
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)
 	userMessageQueueService := service.ProvideUserMessageQueueService(userMsgQueueCache, rpmCache, configConfig)
@@ -368,7 +366,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	stepUpAuthMiddleware := middleware.NewStepUpAuthMiddleware(totpService, userService, settingService)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)
-	webLoginProxyServer := server.ProvideWebLoginProxyServer(configConfig, handlers)
 	opsMetricsCollector := service.ProvideOpsMetricsCollector(opsRepository, settingRepository, accountRepository, concurrencyService, db, redisClient, configConfig)
 	opsAggregationService := service.ProvideOpsAggregationService(opsRepository, settingRepository, db, redisClient, configConfig)
 	opsAlertEvaluatorService := service.ProvideOpsAlertEvaluatorService(opsService, opsRepository, emailService, redisClient, configConfig, proxyRepository)
@@ -394,11 +391,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
 	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
 	application := &Application{
-		Server:              httpServer,
-		WebLoginProxyServer: webLoginProxyServer,
-		PromptAudit:         promptService,
-		PluginManager:       pluginManager,
-		Cleanup:             v2,
+		Server:        httpServer,
+		PromptAudit:   promptService,
+		PluginManager: pluginManager,
+		Cleanup:       v2,
 	}
 	return application, nil
 }
@@ -406,11 +402,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 // wire.go:
 
 type Application struct {
-	Server              *http.Server
-	WebLoginProxyServer *server.WebLoginProxyServer
-	PromptAudit         *securityaudit.PromptService
-	PluginManager       *service.PluginManager
-	Cleanup             func()
+	Server        *http.Server
+	PromptAudit   *securityaudit.PromptService
+	PluginManager *service.PluginManager
+	Cleanup       func()
 }
 
 func providePrivacyClientFactory() service.PrivacyClientFactory {

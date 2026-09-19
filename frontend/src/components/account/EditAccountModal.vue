@@ -245,27 +245,31 @@
               {{ t('admin.accounts.webProviders.riskWarning.body') }}
             </p>
           </div>
-          <div v-if="webEditUsesCookie">
-            <label class="input-label">{{ t('admin.accounts.webProviders.cookieLabel') }}</label>
-            <textarea
-              v-model="webEditCookie"
-              rows="4"
-              data-testid="web-edit-cookie-input"
-              class="input font-mono"
-              :placeholder="t('admin.accounts.webProviders.cookiePlaceholder')"
-            ></textarea>
-            <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }} {{ t('admin.accounts.webProviders.cookieHint') }}</p>
-          </div>
-          <div v-else>
-            <label class="input-label">{{ t('admin.accounts.webProviders.kimiTokenLabel') }}</label>
-            <textarea
-              v-model="webEditKimiTokenJson"
-              rows="4"
-              data-testid="web-edit-kimi-token-input"
-              class="input font-mono"
-              :placeholder='t("admin.accounts.webProviders.kimiTokenPlaceholder")'
-            ></textarea>
-            <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }} {{ t('admin.accounts.webProviders.kimiTokenHint') }}</p>
+          <!-- deepseek 自动续期邮箱/密码：登录凭证一并保存，Cookie 失效后自动登录续期。
+               zhipu 也 usesCookie 但官方无密码登录，仅 deepseek 展示。密码敏感不回显，
+               留空表示保留原值（后端 merge 不覆盖）。 -->
+          <div v-if="webEditShowsDeepseekRenewal" class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+            <div>
+              <label class="input-label">{{ t('admin.accounts.webProviders.renewalEmailLabel') }}</label>
+              <input
+                v-model="webEditLoginEmail"
+                type="text"
+                data-testid="web-edit-login-email-input"
+                class="input"
+                :placeholder="t('admin.accounts.webProviders.renewalEmailPlaceholder')"
+              />
+            </div>
+            <div class="mt-3">
+              <label class="input-label">{{ t('admin.accounts.webProviders.renewalPasswordLabel') }}</label>
+              <input
+                v-model="webEditLoginPassword"
+                type="password"
+                data-testid="web-edit-login-password-input"
+                class="input"
+                :placeholder="t('admin.accounts.webProviders.renewalPasswordPlaceholder')"
+              />
+              <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+            </div>
           </div>
           <div>
             <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
@@ -3156,7 +3160,6 @@ import {
   applyPlanType,
   buildPlanTypeOptions,
   readPlanType,
-  buildWebProviderCredentials,
   isCustomGrokBaseUrl,
   isHeaderOverrideCapable,
   isWebAccessAccount,
@@ -3294,12 +3297,20 @@ const isWebEditAccount = computed(() =>
     credentials: (props.account?.credentials as Record<string, unknown> | null) || null
   })
 )
-// 网页接入凭证编辑（敏感值不回显，留空保留原凭证）。
-const webEditCookie = ref('')
-const webEditKimiTokenJson = ref('')
+// 网页接入凭证编辑：baseUrl 与 deepseek 续期邮箱/密码。手工 Cookie/Token 旧链已于 E5 归零，
+// 登录态凭证由登录流程（deepseek 密码自动登录 / zhipu-kimi 短信登录）重新取得后写入，
+// 编辑面板不再承担"手工填凭证"职责。
 const webEditBaseUrl = ref('')
+// 网页接入（deepseek）自动续期邮箱/密码：login_email 明文回显（非敏感键），
+// login_password 敏感不回显——密码留空 = 保留原值（后端 merge 不覆盖）。
+const webEditLoginEmail = ref('')
+const webEditLoginPassword = ref('')
 const webEditUsesCookie = computed(() =>
   isWebEditAccount.value && webProviderUsesCookie(props.account!.platform as WebProviderPlatform)
+)
+// deepseek web 账号展示自动续期邮箱/密码编辑区（zhipu 也 usesCookie 但官方无密码登录）。
+const webEditShowsDeepseekRenewal = computed(
+  () => webEditUsesCookie.value && props.account?.platform === 'deepseek'
 )
 // other 平台双协议账号（OpenAI / Anthropic 兼容自定义上游），仅可编辑 api_protocol。
 const isOtherApiKeyAccount = computed(
@@ -4489,10 +4500,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     selectedErrorCodes.value = []
   }
   editApiKey.value = ''
-  // 网页接入凭证编辑框：敏感值不回显，每次打开弹窗重置为空（留空保留原凭证）。
-  webEditCookie.value = ''
-  webEditKimiTokenJson.value = ''
+  // 网页接入凭证编辑框：baseUrl 每次打开重置为空（留空保留原凭证）；续期邮箱
+  // （login_email 非敏感键）从 credentials 明文回显；续期密码敏感，一律留空（留空保留原值）。
   webEditBaseUrl.value = ''
+  const creds = (newAccount.credentials as Record<string, unknown>) || {}
+  webEditLoginEmail.value = typeof creds.login_email === 'string' ? creds.login_email : ''
+  webEditLoginPassword.value = ''
 }
 
 async function loadTLSProfiles() {
@@ -5190,28 +5203,33 @@ const handleSubmit = async () => {
       }
 
       // Handle API key
-      // 网页接入账号：登录态 Cookie/Token 即凭证，不走 API Key 校验。
-      // 填写新 Cookie/Token 时经 buildWebProviderCredentials 校验（口径与后端
-      // validateWebAccountCredential 一致），请求带 access_mode="web"；留空保留
-      // 原凭证（后端 MergePreservingSensitiveCreds 保留已有 cookie/access_token）。
+      // 网页接入账号：登录态凭证由登录流程（deepseek 密码自动登录 / zhipu-kimi 短信登录）
+      // 重新取得后写入，编辑面板不再处理手工 Cookie/Token（E5 归零旧链）。此处仅写入可选
+      // baseUrl 并强制 access_mode="web"；留空保留原凭证（后端 MergePreservingSensitiveCreds）。
       if (isWebEditAccount.value) {
-        if (webEditCookie.value.trim() || webEditKimiTokenJson.value.trim()) {
-          const built = buildWebProviderCredentials(props.account.platform, {
-            cookie: webEditCookie.value,
-            kimiTokenJson: webEditKimiTokenJson.value,
-            baseUrl: webEditBaseUrl.value
-          })
-          if (built.error || !built.credentials) {
-            appStore.showError(t(`admin.accounts.webProviders.errors.${built.error ?? 'webCookieRequired'}`))
-            return
-          }
-          Object.assign(newCredentials, built.credentials)
-          if (webEditBaseUrl.value.trim()) {
-            newCredentials.base_url = webEditBaseUrl.value.trim()
-          }
+        if (webEditBaseUrl.value.trim()) {
+          newCredentials.base_url = webEditBaseUrl.value.trim()
         }
         // access_mode="web" 必须保留（平台归并后 Web/API 唯一判定源）。
         newCredentials.access_mode = 'web'
+        // deepseek 自动续期凭证：login_email 为空则从 credentials 明文回显值写入
+        // （防止用户打开弹窗不改邮箱时把已存邮箱删掉）；login_password 仅非空时写入，
+        // 留空绝不上送该键（newCredentials 已 spread currentCredentials，需显式删除；
+        // 后端 merge 保留原值，避免清空已存密码）。
+        if (props.account.platform === 'deepseek') {
+          const typedEmail = webEditLoginEmail.value.trim()
+          if (typedEmail) {
+            newCredentials.login_email = typedEmail
+          } else if (typeof currentCredentials.login_email === 'string' && currentCredentials.login_email) {
+            newCredentials.login_email = currentCredentials.login_email
+          }
+          const typedPassword = webEditLoginPassword.value.trim()
+          if (typedPassword) {
+            newCredentials.login_password = typedPassword
+          } else {
+            delete newCredentials.login_password
+          }
+        }
       } else {
       // 后端响应已脱敏：currentCredentials 不会再包含 api_key 原文。
       // 用户填入新值则覆盖；留空时优先看 credentials_status.has_api_key；

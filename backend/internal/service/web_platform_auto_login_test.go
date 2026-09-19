@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -323,27 +322,6 @@ func TestWebPlatformAutoLogin_DeepseekFailNoSemiAuto(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 退避取档
-// ---------------------------------------------------------------------------
-
-func TestWebPlatformAutoLogin_BackoffTiers(t *testing.T) {
-	cases := []struct {
-		fc   int
-		want time.Duration
-	}{
-		{0, 5 * time.Minute},
-		{1, 15 * time.Minute},
-		{2, 1 * time.Hour},
-		{3, 6 * time.Hour},
-		{4, 24 * time.Hour},
-		{10, 24 * time.Hour},
-	}
-	for _, c := range cases {
-		require.Equal(t, c.want, autoLoginBackoffForFailCount(c.fc), "fail_count=%d", c.fc)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // 凭据合并：保留既有键
 // ---------------------------------------------------------------------------
 
@@ -395,75 +373,6 @@ func TestWebPlatformAutoLogin_FailureKeepsCookie(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 维护池
-// ---------------------------------------------------------------------------
-
-func TestWebPlatformAutoLogin_MaintenanceCycleSkipsNonRetryable(t *testing.T) {
-	acc := &Account{
-		ID:       11,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginEmail:        "u@x.com",
-			CredKeyLoginPassword:     "bad",
-			CredKeyLoginNonRetryable: "true",
-			CredKeyLoginLastError:    "账号已被封禁",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 10}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, 0, len(up.requests))       // 不可重试类：不发起任何出站请求
-	require.Equal(t, StatusError, acc.Status)   // 状态未被改动
-	require.Empty(t, store.statuses[11].status) // 维护池未写入任何状态更新
-}
-
-func TestWebPlatformAutoLogin_MaintenanceCycleRetries(t *testing.T) {
-	acc := &Account{
-		ID:       12,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":         AccountAccessModeWeb,
-			CredKeyLoginEmail:     "u@x.com",
-			CredKeyLoginPassword:  "pw",
-			CredKeyLoginLastAt:    time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), // 冷却已过
-			CredKeyLoginFailCount: 0,
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, StatusActive, store.statuses[12].status)
-}
-
-func TestWebPlatformAutoLogin_MaintenanceCycleBackoffCooldown(t *testing.T) {
-	acc := &Account{
-		ID:       13,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":         AccountAccessModeWeb,
-			CredKeyLoginEmail:     "u@x.com",
-			CredKeyLoginPassword:  "pw",
-			CredKeyLoginLastAt:    time.Now().UTC().Format(time.RFC3339), // 刚刚尝试，仍在 5m 退避内
-			CredKeyLoginFailCount: 0,
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, 0, len(up.requests)) // 退避冷却中：不发起请求
-}
-
-// ---------------------------------------------------------------------------
 // 错误细化表（三平台共用）
 // ---------------------------------------------------------------------------
 
@@ -501,4 +410,51 @@ func TestWebPlatformErrorDetail_Table(t *testing.T) {
 	// 成功码 → 空文案。
 	title, _ = WebPlatformErrorDetail(PlatformDeepseek, WebLoginCodeSuccess, WebLoginKindLogin)
 	require.Equal(t, "", title)
+}
+
+// ---------------------------------------------------------------------------
+// zhipu refresh：cookie 兜底（对齐转发侧 refreshWebZhipuAccessToken 口径）
+// ---------------------------------------------------------------------------
+
+// TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback：显式 refresh_token /
+// login_refresh_token 均缺失时，从账号已保存的整串 cookie 解析 chatglm_refresh_token。
+func TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback(t *testing.T) {
+	acc := &Account{
+		ID:       8,
+		Platform: PlatformZhipu,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "chatglm_token=CT-1; chatglm_refresh_token=RFT-COOKIE",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{zhipuOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	require.NoError(t, svc.RefreshToken(context.Background(), acc))
+	require.NotEmpty(t, up.requests)
+	// 续期请求使用的正是 cookie 兜底解析出的 refresh token。
+	require.Equal(t, "chatglm_refresh_token=RFT-COOKIE", up.requests[len(up.requests)-1].Header.Get("Cookie"))
+	require.Equal(t, "RFT-COOKIE", store.creds[8][CredKeyLoginRefreshToken])
+	require.Equal(t, "NEWTOKEN", store.creds[8]["chatglm_token"])
+}
+
+// TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed：显式键与 cookie 兜底都
+// 取不到 refresh_token 时，失败关闭且不发续期请求。
+func TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed(t *testing.T) {
+	acc := &Account{
+		ID:          9,
+		Platform:    PlatformZhipu,
+		Status:      StatusError,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{zhipuOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	err := svc.RefreshToken(context.Background(), acc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "refresh_token")
+	require.Empty(t, up.requests)
 }

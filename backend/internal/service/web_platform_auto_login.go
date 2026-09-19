@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,7 +19,7 @@ import (
 )
 
 // WebPlatformAutoLoginService 实现三官方平台（zhipu / deepseek / kimi）网页接入统一
-// 自动登录内核 + 维护池 + 错误细化。
+// 自动登录内核 + 错误细化。
 //
 // 设计要点（与仓库既有约定一致）：
 //   - 出站请求统一经注入的 HTTPUpstream 接口；目标 URL 经 config.Config.Security.
@@ -34,13 +33,6 @@ type WebPlatformAutoLoginService struct {
 	httpUpstream HTTPUpstream
 	cfg         *config.Config
 	logger      *slog.Logger
-
-	scanInterval time.Duration
-
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	running bool
-	wg     sync.WaitGroup
 }
 
 // AutoLoginAccountStore 是自动登录服务所需的账号持久化能力（由 handler / 仓储层实现）。
@@ -60,7 +52,6 @@ func NewWebPlatformAutoLoginService(store AutoLoginAccountStore, upstream HTTPUp
 		httpUpstream: upstream,
 		cfg:          cfg,
 		logger:       slog.Default(),
-		scanInterval: 5 * time.Minute,
 	}
 }
 
@@ -86,11 +77,27 @@ type webLoginHTTPError struct {
 
 func (e *webLoginHTTPError) Error() string { return e.Msg }
 
+// WebLoginErrorKind 提取 *webLoginHTTPError 的类别与业务码；非该类型返回 ok=false。
+// 供 handler 把失败关闭错误映射为 needs_challenge（Kind==WebLoginKindWAF）与细化文案。
+func WebLoginErrorKind(err error) (kind string, code int64, ok bool) {
+	var le *webLoginHTTPError
+	if errors.As(err, &le) {
+		return le.Kind, le.Code, true
+	}
+	return "", 0, false
+}
+
+// isWebLoginWAFError 报告 err 是否为 WAF/PoW 类失败（Kind==WebLoginKindWAF）。
+func isWebLoginWAFError(err error) bool {
+	kind, _, ok := WebLoginErrorKind(err)
+	return ok && kind == WebLoginKindWAF
+}
+
 // webLoginErrorClass 标记一次失败的可重试性。
 type webLoginErrorClass int
 
 const (
-	webLoginRetryable    webLoginErrorClass = iota // 可自动重试（进维护池退避重试）
+	webLoginRetryable    webLoginErrorClass = iota // 可自动重试
 	webLoginNonRetryable                           // 彻底不可重试（banned/密码错/WAF/PoW）
 )
 
@@ -178,8 +185,16 @@ type webDeepseekLoginResponse struct {
 
 // LoginByEmail 执行 deepseek web 无头密码登录。成功返回整串 Cookie 头（由调用方写入
 // 凭据 cookie 键），失败返回 *webLoginHTTPError（含业务码供分类）。本方法不落库，
-// 落库由 RecoverAccount / 维护池统一编排，保证状态与凭据一致。
+// 落库由 RecoverAccount 统一编排，保证状态与凭据一致。
+//
+// deepseek 官方网页端无密码登录之外的挑战关卡（证据：login 接口无 captcha 字段），
+// 故遇 WAF（HTTP 403）直接失败关闭，绝不调用外部打码助手、绝不伪造成功。
 func (s *WebPlatformAutoLoginService) LoginByEmail(ctx context.Context, account *Account) (string, error) {
+	return s.loginByEmailRaw(ctx, account)
+}
+
+// loginByEmailRaw 执行 deepseek web 无头密码登录的原始请求。
+func (s *WebPlatformAutoLoginService) loginByEmailRaw(ctx context.Context, account *Account) (string, error) {
 	base := strings.TrimRight(account.GetWebBaseURL(), "/")
 	if base == "" {
 		return "", &webLoginHTTPError{
@@ -236,6 +251,13 @@ func (s *WebPlatformAutoLoginService) LoginByEmail(ctx context.Context, account 
 		return "", fmt.Errorf("deepseek web 登录响应读取失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		// 403 按 WAF 分类（可能为人机验证）：直接失败关闭，由前端提示人工处理，绝不伪造成功。
+		if resp.StatusCode == http.StatusForbidden {
+			return "", &webLoginHTTPError{
+				Platform: PlatformDeepseek, Code: int64(resp.StatusCode), Kind: WebLoginKindWAF,
+				Msg: "deepseek web 登录被安全拦截（HTTP 403，可能需人机验证）",
+			}
+		}
 		return "", &webLoginHTTPError{
 			Platform: PlatformDeepseek, Code: int64(resp.StatusCode), Kind: WebLoginKindLogin,
 			Msg: fmt.Sprintf("deepseek web 登录返回 HTTP %d", resp.StatusCode),
@@ -295,6 +317,14 @@ func (s *WebPlatformAutoLoginService) refreshZhipu(ctx context.Context, account 
 	refreshToken := strings.TrimSpace(account.GetCredential(CredKeyLoginRefreshToken))
 	if refreshToken == "" {
 		refreshToken = strings.TrimSpace(account.GetCredential("refresh_token"))
+	}
+	// cookie 兜底：与转发侧 refreshWebZhipuAccessToken（web_zhipu_gateway_forward.go:557）
+	// 同口径——显式键缺失时从账号已保存的整串 Cookie 解析 chatglm_refresh_token，
+	// 使两条续期路径凭据口径一致。
+	if refreshToken == "" {
+		if cookie := strings.TrimSpace(account.GetCredential("cookie")); cookie != "" {
+			refreshToken = webZhipuExtractCookieField(cookie, "chatglm_refresh_token")
+		}
 	}
 	if refreshToken == "" {
 		return &webLoginHTTPError{
@@ -535,7 +565,7 @@ func (s *WebPlatformAutoLoginService) failAccount(ctx context.Context, account *
 	info := classifyWebLoginError(account.Platform, code, kind)
 
 	// zhipu/kimi 的 refresh 是其唯一自动恢复手段；一旦失败即需半自动短信登录，
-	// 维护池不应继续自动重试（标记不可重试，跳过后续轮次）。
+	// 标记不可重试，不再自动退避重试。
 	isSemiAutoPlatform := account.Platform == PlatformZhipu || account.Platform == PlatformKimi
 	if isSemiAutoPlatform {
 		info.NonRetryable = true
@@ -626,7 +656,7 @@ func classifyWebLoginError(platform string, code int64, kind string) webLoginErr
 }
 
 // ---------------------------------------------------------------------------
-// 维护池
+// 平台键归一
 // ---------------------------------------------------------------------------
 
 // webAutoLoginPlatformKey 返回账号自动登录的平台键（平台归并后唯一口径）：
@@ -645,114 +675,3 @@ func webAutoLoginPlatformKey(account *Account) string {
 	return ""
 }
 
-// autoLoginBackoffForFailCount 按 login_fail_count 取退避档位：
-// 0→5m, 1→15m, 2→1h, 3→6h, 4+→24h（封顶）。
-func autoLoginBackoffForFailCount(failCount int) time.Duration {
-	switch {
-	case failCount <= 0:
-		return 5 * time.Minute
-	case failCount == 1:
-		return 15 * time.Minute
-	case failCount == 2:
-		return 1 * time.Hour
-	case failCount == 3:
-		return 6 * time.Hour
-	default:
-		return 24 * time.Hour
-	}
-}
-
-// readyForRetry 依据上次尝试时间 + 当前 fail_count 档位判断是否已冷却完毕。
-func (s *WebPlatformAutoLoginService) readyForRetry(acc *Account) bool {
-	last := acc.GetCredentialAsTime(CredKeyLoginLastAt)
-	if last == nil {
-		return true
-	}
-	backoff := autoLoginBackoffForFailCount(int(acc.GetCredentialAsInt64(CredKeyLoginFailCount)))
-	return time.Since(*last) >= backoff
-}
-
-// Start 启动维护池：每 5 分钟扫描 Status==StatusError 的 web-* 账号 → 分类 → 两级恢复 →
-// 指数退避（单轮并发 ≤3）。已标记不可重试的账号直接跳过。重复调用为空操作。
-func (s *WebPlatformAutoLoginService) Start(ctx context.Context) {
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		return
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-	s.running = true
-	s.mu.Unlock()
-
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.scanInterval)
-		defer ticker.Stop()
-		s.runMaintenanceCycle(runCtx)
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case <-ticker.C:
-				s.runMaintenanceCycle(runCtx)
-			}
-		}
-	}()
-}
-
-// Stop 停止维护池，等待在途扫描完成。
-func (s *WebPlatformAutoLoginService) Stop() {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
-		return
-	}
-	s.running = false
-	cancel := s.cancel
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	s.wg.Wait()
-}
-
-// runMaintenanceCycle 执行一轮扫描与恢复（可被测试直接调用）。
-func (s *WebPlatformAutoLoginService) runMaintenanceCycle(ctx context.Context) {
-	accounts, err := s.store.ListAccounts(ctx)
-	if err != nil {
-		s.logger.Error("web auto-login: list accounts failed", "error", err)
-		return
-	}
-
-	sem := make(chan struct{}, 3) // 单轮并发 ≤3
-	var wg sync.WaitGroup
-	for _, acc := range accounts {
-		if webAutoLoginPlatformKey(acc) == "" {
-			continue
-		}
-		if acc.Status != StatusError {
-			continue
-		}
-		if strings.EqualFold(acc.GetCredential(CredKeyLoginNonRetryable), "true") {
-			continue // 不可重试类：只保留 login_last_error，不重试
-		}
-		if !s.readyForRetry(acc) {
-			continue // 退避冷却中
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(a *Account) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			s.RecoverAccount(ctx, a)
-		}(acc)
-	}
-	wg.Wait()
-}
