@@ -1470,17 +1470,6 @@
             {{ t('admin.accounts.webProviders.riskWarning.body') }}
           </p>
         </div>
-        <div>
-          <label class="input-label">{{ t('admin.accounts.webProviders.baseUrlLabel') }}</label>
-          <input
-            v-model="webBaseUrlInput"
-            type="text"
-            class="input"
-            :placeholder="t('admin.accounts.webProviders.baseUrlPlaceholder')"
-          />
-          <p class="input-hint">{{ t('admin.accounts.webProviders.baseUrlHint') }}</p>
-        </div>
-
         <!-- 自动登录（折叠表单）：deepseek 走账号密码；zhipu/kimi 走手机号 + 短信码。
              web 接入模式对三个官方平台均开放入口（zhipu/kimi 不再走 password→短信发码桩）。 -->
         <div
@@ -1499,6 +1488,7 @@
           <div v-if="showAutoLogin" class="mt-3">
             <WebAutoLoginForm
               :platform="form.platform"
+              :account-draft="webAccountDraft"
               @recovered="handleAutoLoginRecovered"
             />
           </div>
@@ -4085,6 +4075,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import { extractApiErrorMessage } from '@/utils/apiError'
 
 import {
   claudeModels,
@@ -4142,7 +4133,6 @@ import {
   applyAntigravityProjectID,
   applyHeaderOverride,
   applyInterceptWarmup,
-  buildWebProviderCredentials,
   cnSupportsNativeResponses,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
@@ -4368,42 +4358,32 @@ const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
-// ── 网页接入模式（kimi / zhipu / deepseek，access_mode="web"）登录态载体 ──
-// webCookieInput：自动登录成功回填的整串 Cookie（deepseek 密码登录；不再有手工粘贴入口）。
-const webCookieInput = ref('')
-const webBaseUrlInput = ref('')
-// 网页接入模式：「自动登录」折叠表单（账号密码自动登录并回填 Cookie）。
+// ── 网页接入模式 ──
 const showAutoLogin = ref(false)
-// DeepSeek 自动续期登录凭证（自动登录成功时回填，随建号一并写入 credentials）
-const webAutoLoginEmail = ref('')
-const webAutoLoginPassword = ref('')
-const webAutoLoginPhone = ref('')
 
-// 自动登录成功回调（来自 WebAutoLoginForm @recovered）：
-// - deepseek 密码登录：把返回的整串 Cookie 写入 webCookieInput，并保存登录邮箱/密码，
-//   随后续「创建账号」一并写入 credentials（Cookie 失效后自动续期用）。
-// - zhipu / kimi 短信登录：后端已在 login 成功时新建/回填账号并回传 account_id，无需
-//   再由弹窗二次建号；直接刷新账号列表并展示成功，不得伪造成功、不得重复落库。
-function handleAutoLoginRecovered(payload: {
-  platform: string
-  cookie?: string
-  account_id?: number
-  access_token?: string
-  login_email?: string
-  login_phone?: string
-  login_password?: string
-}) {
-  // 短信登录成功：后端已落库，刷新列表 + 成功提示（弹窗保持打开，由表单展示成功态）。
-  if (payload.account_id != null) {
-    appStore.showSuccess(t('admin.accounts.webLogin.autoLogin.smsLoginSuccess'))
-    emit('created')
-    return
-  }
-  // deepseek 密码登录：保存 Cookie 与登录标识，供手动「创建账号」写入 credentials。
-  webCookieInput.value = payload.cookie ?? ''
-  webAutoLoginEmail.value = payload.login_email ?? ''
-  webAutoLoginPhone.value = payload.login_phone ?? ''
-  webAutoLoginPassword.value = payload.login_password ?? ''
+const webAccountDraft = computed<CreateAccountRequest>(() => ({
+  name: form.name.trim(),
+  notes: form.notes || null,
+  platform: form.platform,
+  type: form.type,
+  credentials: { access_mode: 'web' },
+  extra: {},
+  proxy_id: form.proxy_id,
+  concurrency: form.concurrency,
+  priority: form.priority,
+  rate_multiplier: form.rate_multiplier,
+  load_factor: form.load_factor,
+  group_ids: [...form.group_ids],
+  expires_at: form.expires_at,
+  auto_pause_on_expired: autoPauseOnExpired.value,
+  upstream_billing_probe_enabled: isUpstreamBillingProbeEligible(form.platform, form.type)
+    ? upstreamBillingAutoProbeEnabled.value
+    : undefined
+}))
+
+function handleAutoLoginRecovered() {
+  appStore.showSuccess(t('admin.accounts.webLogin.autoLogin.smsLoginSuccess'))
+  emit('created')
 }
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
@@ -5117,10 +5097,9 @@ watch(
   () => form.platform,
   (newPlatform) => {
     // Reset base URL based on platform
-    // 平台切换即退出网页接入模式，登录态载体随平台清空。
+    // 平台切换即退出网页接入模式并折叠登录表单。
     cnWebAccessMode.value = false
-    webCookieInput.value = ''
-    webBaseUrlInput.value = ''
+    showAutoLogin.value = false
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
     } else {
@@ -5550,8 +5529,8 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
         } else if (warnings.some(warning => warning.code === 'upstream_model_metadata_partial')) {
           appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataPartial'))
         }
-      } catch {
-        appStore.showWarning(t('admin.accounts.syncUpstreamModelsFailed'))
+      } catch (error) {
+        appStore.showWarning(t('admin.accounts.syncUpstreamModelsError', { message: extractApiErrorMessage(error, t('admin.accounts.syncUpstreamModelsFailed')) }))
       }
     }
     if (
@@ -5606,8 +5585,7 @@ const resetForm = () => {
   adaptiveBaseUrls.value = { chat_completions: '', anthropic: '', responses: '' }
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
-  webCookieInput.value = ''
-  webBaseUrlInput.value = ''
+  showAutoLogin.value = false
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
@@ -6048,26 +6026,10 @@ const handleSubmit = async () => {
     return
   }
 
-  // 网页接入模式（kimi / zhipu / deepseek + access_mode=web）：登录态凭证由自动登录
-  // 取得（deepseek 密码登录；zhipu/kimi 短信登录，成功后由后端建号回传 account_id，
-  // 不会走到本手动创建分支）。缺少必需凭证时失败关闭，不创建半成品账号。
+  // 网页接入账号只允许由登录接口在验证凭证后原子创建，禁止普通建号产生半成品账号。
   if (isWebAccessModePlatform.value) {
-    if (!form.name.trim()) {
-      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
-      return
-    }
-    const built = buildWebProviderCredentials(form.platform, {
-      cookie: webCookieInput.value,
-      baseUrl: webBaseUrlInput.value,
-      loginEmail: webAutoLoginEmail.value,
-      loginPassword: webAutoLoginPassword.value,
-      loginPhone: webAutoLoginPhone.value
-    })
-    if (built.error || !built.credentials) {
-      appStore.showError(t(`admin.accounts.webProviders.errors.${built.error ?? 'webCookieRequired'}`))
-      return
-    }
-    await createAccountAndFinish(form.platform, 'apikey', built.credentials)
+    showAutoLogin.value = true
+    appStore.showError(t('admin.accounts.webLogin.autoLogin.completeLoginFirst'))
     return
   }
 

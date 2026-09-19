@@ -280,7 +280,7 @@ import { useI18n } from 'vue-i18n'
 import { Icon } from '@/components/icons'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import type { Account, AdminGroup, AccountListItem, GroupPlatform } from '@/types'
-import { syncUpstreamModels, createCodeBuddyShadow } from '@/api/admin/accounts'
+import { syncUpstreamModels, getAvailableModels, createCodeBuddyShadow } from '@/api/admin/accounts'
 import type { UpstreamModelMetadata } from '@/api/admin/accounts'
 import {
   loadOfficialPrices,
@@ -295,6 +295,7 @@ import {
   parseCodeBuddyShadowSite,
 } from '@/constants/platforms'
 import { codeBuddySiteBadgeClass, platformBadgeLightClass } from '@/utils/platformColors'
+import { extractApiErrorMessage } from '@/utils/apiError'
 
 // 影子允许落入的目标分组平台（排除 openai/codebuddy 等，与后端 CreateShadow 守卫一致）。
 const TARGET_PLATFORMS = ['deepseek', 'zhipu', 'kimi', 'minimax', 'other']
@@ -505,18 +506,33 @@ async function onSync() {
   createResults.value = null
   pickerModel.value = null
   try {
-    const res = await syncUpstreamModels(props.parent.id)
-    if (!res || !res.models || res.models.length === 0) {
+    let models: string[]
+    // web 逆向接入的 CodeBuddy 母账号无 API key，上游 /v1/models 同步按设计不支持
+    // （SyncUpstreamModelCatalog 失败关闭返回 400）。此类账号改走 web 模型目录端点
+    // （GET /admin/accounts/:id/models 的 web 回落分支），模型列表同样可用于建影子。
+    if (props.parent.credentials?.access_mode === 'web') {
+      const webModels = await getAvailableModels(props.parent.id)
+      models = (webModels ?? []).map((m) => m.id).filter((id): id is string => !!id && id.trim() !== '')
+    } else {
+      const res = await syncUpstreamModels(props.parent.id)
+      if (!res || !res.models || res.models.length === 0) {
+        syncError.value = t('admin.accounts.codeBuddySyncFailed', { error: 'no models returned' })
+        state.value = 'guide'
+        return
+      }
+      models = res.models
+    }
+    if (models.length === 0) {
       syncError.value = t('admin.accounts.codeBuddySyncFailed', { error: 'no models returned' })
       state.value = 'guide'
       return
     }
-    rows.value = buildRows(res.metadata, res.models)
+    rows.value = buildRows(undefined, models)
     state.value = 'table'
-    syncError.value = res.warnings?.length ? res.warnings.map((w) => w.message).join('; ') : ''
+    syncError.value = ''
     void loadOfficialPrices(rows.value.map((r) => r.model))
   } catch (err) {
-    syncError.value = t('admin.accounts.codeBuddySyncFailed', { error: err instanceof Error ? err.message : String(err) })
+    syncError.value = t('admin.accounts.codeBuddySyncFailed', { error: extractApiErrorMessage(err, t('admin.accounts.syncUpstreamModelsFailed')) })
     state.value = 'guide'
   } finally {
     syncing.value = false
