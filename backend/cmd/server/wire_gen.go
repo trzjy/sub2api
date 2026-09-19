@@ -221,8 +221,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	openAIOAuthHandler := admin.NewOpenAIOAuthHandler(openAIOAuthService, adminService, openAIQuotaService, rateLimitService)
 	geminiOAuthHandler := admin.NewGeminiOAuthHandler(geminiOAuthService)
 	antigravityOAuthHandler := admin.NewAntigravityOAuthHandler(antigravityOAuthService)
-	codeBuddyDirectOrigin := service.ProvideCodeBuddyDirectOrigin(configConfig)
-	codeBuddyOAuthService := service.NewCodeBuddyOAuthService(proxyRepository, codeBuddyDirectOrigin)
+	v := service.ProvideCodeBuddyDirectOrigin(configConfig)
+	codeBuddyOAuthService := service.NewCodeBuddyOAuthService(proxyRepository, v)
 	tokenRefreshService := service.ProvideTokenRefreshService(accountRepository, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, grokOAuthService, compositeTokenCacheInvalidator, schedulerCache, configConfig, tempUnschedCache, privacyClientFactory, proxyRepository, oAuthRefreshAPI, openAIGatewayService)
 	grokOAuthHandler := admin.NewGrokOAuthHandler(grokOAuthService, adminService, grokQuotaService, tokenRefreshService)
 	codeBuddyOAuthHandler := admin.NewCodeBuddyOAuthHandler(codeBuddyOAuthService)
@@ -377,6 +377,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	opsIngressRejectAggregator := service.ProvideOpsIngressRejectAggregator(opsRepository, opsService)
 	accountExpiryService := service.ProvideAccountExpiryService(accountRepository)
 	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, configConfig)
+	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
+	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
 	accountHealthRecoveryProbeService := service.ProvideAccountHealthRecoveryProbeService(accountRepository, httpUpstream, configConfig, rateLimitService, settingService, tlsFingerprintProfileService)
 	openAICodexVersionSyncService := service.ProvideOpenAICodexVersionSyncService(settingRepository, settingService, gitHubReleaseClient)
@@ -392,7 +394,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
-	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
+	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
 	application := &Application{
 		Server:              httpServer,
 		WebLoginProxyServer: webLoginProxyServer,
@@ -448,6 +450,7 @@ func provideCleanup(
 	tokenRefresh *service.TokenRefreshService,
 	accountExpiry *service.AccountExpiryService,
 	cnProviderBalanceCheck *service.CNProviderBalanceCheckService,
+	codeBuddyQuotaCheck *service.CodeBuddyQuotaCheckService,
 	apiKeyBalanceProbeCheck *service.AccountBalanceProbeCheckService,
 	accountHealthRecoveryProbe *service.AccountHealthRecoveryProbeService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
@@ -639,6 +642,12 @@ func provideCleanup(
 			{"CNProviderBalanceCheckService", func() error {
 				if cnProviderBalanceCheck != nil {
 					cnProviderBalanceCheck.Stop()
+				}
+				return nil
+			}},
+			{"CodeBuddyQuotaCheckService", func() error {
+				if codeBuddyQuotaCheck != nil {
+					codeBuddyQuotaCheck.Stop()
 				}
 				return nil
 			}},
