@@ -28,6 +28,8 @@ type autoLoginUpstream struct {
 	deepseekVerifyStatus int
 	zhipuOK              bool
 	kimiOK               bool
+	kimiDataOK           bool
+	kimiNoToken          bool
 }
 
 func newMockResp(status int, header http.Header, body string) *http.Response {
@@ -70,8 +72,13 @@ func (m *autoLoginUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*ht
 		}
 		return newMockResp(http.StatusUnauthorized, h, `{"code":40002,"msg":"unauthorized"}`), nil
 	case strings.Contains(req.URL.Path, "RefreshToken"):
-		if m.kimiOK {
+		switch {
+		case m.kimiOK:
 			return newMockResp(http.StatusOK, http.Header{}, `{"accessToken":"AT-1","refreshToken":"RT-1"}`), nil
+		case m.kimiDataOK:
+			return newMockResp(http.StatusOK, http.Header{}, `{"data":{"accessToken":"AT-2"}}`), nil
+		case m.kimiNoToken:
+			return newMockResp(http.StatusOK, http.Header{}, `{"foo":1}`), nil
 		}
 		return newMockResp(http.StatusBadRequest, http.Header{}, `{"code":40002,"msg":"bad refresh"}`), nil
 	}
@@ -297,10 +304,64 @@ func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
 	up := &autoLoginUpstream{kimiOK: true}
 	svc := newTestAutoLoginService(store, up)
 
+	require.NoError(t, svc.RefreshToken(context.Background(), acc))
+	merged := store.creds[5]
+	require.Equal(t, "AT-1", merged["access_token"])
+	require.Equal(t, "RT-1", merged["refresh_token"])
+	require.Equal(t, "RT-1", merged[CredKeyLoginRefreshToken])
+	require.Equal(t, "0", fmt.Sprint(merged[CredKeyLoginFailCount]))
+
+	// 两级恢复：kimi refresh 成功 → 状态转 active。
+	res := svc.RecoverAccount(context.Background(), acc)
+	require.True(t, res.Recovered)
+	require.Equal(t, StatusActive, acc.Status)
+	require.Equal(t, "", acc.ErrorMessage)
+}
+
+// 宽容解析：响应为 data.accessToken 包装且无 refresh 轮换 → 取新 access_token，
+// refresh_token 保持原值（缺失轮换保持原值的既有语义）。
+func TestWebPlatformAutoLogin_KimiRefreshLenientDataPathKeepsRefreshToken(t *testing.T) {
+	acc := &Account{
+		ID:       12,
+		Platform: PlatformKimi,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":            AccountAccessModeWeb,
+			CredKeyLoginRefreshToken: "RT0",
+			"refresh_token":          "RT0",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{kimiDataOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	require.NoError(t, svc.RefreshToken(context.Background(), acc))
+	merged := store.creds[12]
+	require.Equal(t, "AT-2", merged["access_token"])
+	require.Equal(t, "RT0", merged["refresh_token"])
+	require.Equal(t, "RT0", merged[CredKeyLoginRefreshToken])
+}
+
+// 失败关闭：2xx 但响应缺 accessToken → 错误透出且不落库。
+func TestWebPlatformAutoLogin_KimiRefreshMissingAccessTokenFailsClosed(t *testing.T) {
+	acc := &Account{
+		ID:       13,
+		Platform: PlatformKimi,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":            AccountAccessModeWeb,
+			CredKeyLoginRefreshToken: "RT0",
+			"refresh_token":          "RT0",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{kimiNoToken: true}
+	svc := newTestAutoLoginService(store, up)
+
 	err := svc.RefreshToken(context.Background(), acc)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "context_gap")
-	require.Nil(t, store.creds[5])
+	require.Contains(t, err.Error(), "缺少 accessToken")
+	require.Nil(t, store.creds[13], "解析失败时不得落库")
 }
 
 // ---------------------------------------------------------------------------
