@@ -209,7 +209,7 @@ class Solver:
                     channel=channel,
                     args=["--window-size=520,680", "--disable-blink-features=AutomationControlled"],
                 )
-                context = await browser.new_context(locale="zh-CN")
+                context = await browser.new_context(locale="zh-CN", no_viewport=True)
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 loop_start = time.monotonic()
@@ -302,9 +302,9 @@ class ManualChallengeManager:
 <title>网页登录人工验证</title>
 <style>
   html, body { margin: 0; padding: 20px 10px; min-height: 100vh; box-sizing: border-box; overflow-y: auto; }
-  /* 挑战页需给足视口高度：SDK 的弹层/图片区域依赖足够大的文档尺寸，否则会塌陷成细条。
-     留出上内边距避免图片贴顶被窗口 chrome 裁切；body 可滚动兜底。 */
-  #glm-captcha { width: 100%; min-height: 520px; margin-top: 20px; }
+  /* SDK 宿主宽度必须受限，避免固定高度的验证码图片随过宽视口横向拉伸；
+     min-height 保留足够的组件空间，body 可滚动兜底。 */
+  #glm-captcha { width: 100%; max-width: 480px; min-height: 520px; margin: 20px auto 0; }
 </style>
 </head><body>
 <h3>请在此窗口完成人工验证</h3><p id="status">正在加载官方验证组件…</p>
@@ -328,6 +328,7 @@ script.onload = () => {{
   if (typeof window.initNECaptcha !== 'function') return fail('易盾 SDK 未就绪');
   window.initNECaptcha({{
     captchaId: {json.dumps(KIMI_CAPTCHA_ID)}, element: '#glm-captcha', mode: 'embed', apiVersion: 2,
+    width: '100%',
     onVerify: (err, data) => {{ if (err) return; handleValidate(data && data.validate); }},
     onSuccess: (_instance, data) => handleValidate(data && data.validate),
     onError: () => fail('易盾验证失败'),
@@ -435,7 +436,7 @@ document.head.appendChild(script);
                 headless=headless, channel=channel,
                 args=["--window-size=520,680", "--disable-blink-features=AutomationControlled"],
             )
-            context = await browser.new_context(locale="zh-CN")
+            context = await browser.new_context(locale="zh-CN", no_viewport=True)
             page = await context.new_page()
             await page.expose_binding("challengeComplete", challenge_complete)
             await page.expose_binding("challengeFail", challenge_fail)
