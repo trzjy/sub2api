@@ -4483,8 +4483,11 @@ function selectCNPlatform(platform: CnProviderPlatform) {
   form.type = 'apikey'
   accountCategory.value = 'apikey'
   apiProtocol.value = 'adaptive'
-  // 切换平台即退出网页接入模式（access_mode 为平台内二级状态）。
-  cnWebAccessMode.value = false
+  // 网页接入平台（kimi/zhipu/deepseek）默认直接进入网页接入模式：官方网页端
+  // 只有手机号/密码一种登录方式，无需用户再手动点一次"网页接入"卡片
+  // （deepseek 火山订阅号除外，仍走 API）。
+  cnWebAccessMode.value = isWebProviderPlatform(platform) &&
+    !(platform === 'deepseek' && isVolcanoSubscription.value)
   if (platform === 'deepseek') {
     accountMode.value = 'payg'
   }
@@ -5100,9 +5103,11 @@ watch(
   () => form.platform,
   (newPlatform) => {
     // Reset base URL based on platform
-    // 平台切换时，若是网页接入平台则自动展开登录表单（单一方式无需折叠），
-    // 否则退出网页接入模式并折叠。
-    cnWebAccessMode.value = false
+    // 平台切换时：网页接入平台（kimi/zhipu/deepseek）自动进入网页接入模式并展开
+    // 登录表单（官方网页端只有一种登录方式，无需再手动点一次"网页接入"）；
+    // 非网页平台退出网页接入模式并折叠。
+    cnWebAccessMode.value = isWebProviderPlatform(newPlatform) &&
+      !(newPlatform === 'deepseek' && isVolcanoSubscription.value)
     showAutoLogin.value = isWebProviderPlatform(newPlatform)
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)

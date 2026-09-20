@@ -460,6 +460,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   it('submits adaptive Kimi protocol endpoints', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')
+    // 网页接入平台默认进入网页接入模式；本用例验证 API(payg) 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('Kimi adaptive')
     await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')
 
@@ -527,6 +529,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   it('uses the edited adaptive Chat endpoint when previewing upstream models', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper
       .get('[data-testid="cn-adaptive-base-url-chat_completions"]')
       .setValue('https://relay.example.com/v1')
@@ -719,6 +723,8 @@ describe('CreateAccountModal volcano subscription', () => {
 
   async function openVolcano(wrapper: ReturnType<typeof mountModal>, baseUrl: string) {
     await selectButtonByText(wrapper, 'DeepSeek')
+    // 火山订阅号（volces base_url）不走网页接入默认模式；本流程验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue(baseUrl)
   }
 
@@ -769,6 +775,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     // 切到 chat_completions 协议，露出单 base_url 输入框
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
@@ -795,6 +804,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
     const baseInput = wrapper
@@ -818,6 +830,9 @@ describe('CreateAccountModal volcano subscription', () => {
   it('keeps Volcano base_url in payload when adaptive chat_completions is whitespace', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await flushPromises()
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
@@ -845,6 +860,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     // 进入 adaptive 并在 chat_completions 槽位填写火山端点
     await selectButtonByText(wrapper, 'adaptive')
     await flushPromises()
@@ -866,6 +884,9 @@ describe('CreateAccountModal volcano subscription', () => {
   it('keeps Volcano endpoint after adaptive -> chat_completions when adaptive chat slot is blank (whitespace falls back to base_url)', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await flushPromises()
     // 先在 chat_completions 填入火山地址
     await selectButtonByText(wrapper, 'chatCompletions')
