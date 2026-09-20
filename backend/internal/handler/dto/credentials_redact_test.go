@@ -21,6 +21,9 @@ func TestRedactCredentials_StripsSensitiveKeysAndReportsStatus(t *testing.T) {
 		"service_account_json":  map[string]any{"private_key": "..."},
 		"private_key":           "raw-key",
 		"agent_private_key":     "agent-key-secret",
+		"login_email":           "user@example.com",
+		"login_password":        "password-secret",
+		"login_refresh_token":   "login-refresh-secret",
 		// 非敏感
 		"base_url":      "https://api.example.com",
 		"model_mapping": map[string]any{"foo": "bar"},
@@ -37,6 +40,9 @@ func TestRedactCredentials_StripsSensitiveKeysAndReportsStatus(t *testing.T) {
 	require.NotContains(t, out, "service_account_json")
 	require.NotContains(t, out, "private_key")
 	require.NotContains(t, out, "agent_private_key")
+	require.NotContains(t, out, "login_email")
+	require.NotContains(t, out, "login_password")
+	require.NotContains(t, out, "login_refresh_token")
 
 	require.Equal(t, "https://api.example.com", out["base_url"])
 	require.Equal(t, map[string]any{"foo": "bar"}, out["model_mapping"])
@@ -50,6 +56,9 @@ func TestRedactCredentials_StripsSensitiveKeysAndReportsStatus(t *testing.T) {
 	require.True(t, status["has_service_account_json"])
 	require.True(t, status["has_private_key"])
 	require.True(t, status["has_agent_private_key"])
+	require.True(t, status["has_login_email"])
+	require.True(t, status["has_login_password"])
+	require.True(t, status["has_login_refresh_token"])
 
 	// 状态 map 不应携带非敏感键的 has_*
 	require.NotContains(t, status, "has_base_url")
@@ -84,6 +93,7 @@ func TestRedactCredentials_DoesNotMutateInput(t *testing.T) {
 func TestRedactCredentials_AllKnownSensitiveKeys(t *testing.T) {
 	keys := []string{
 		"access_token", "refresh_token", "id_token",
+		"login_email", "login_password", "login_refresh_token",
 		"api_key", "session_key", "cookie",
 		"aws_secret_access_key", "aws_session_token",
 		"service_account_json", "service_account", "private_key",

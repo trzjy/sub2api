@@ -41,6 +41,7 @@ import os
 import secrets
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -49,6 +50,11 @@ from playwright.async_api import async_playwright
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "xianyu-captcha-helper" / "config.json"
 DEFAULT_PORT = 18089
+# 下列参数来自官方线上 bundle 的既有取证，不从请求接收，也不允许配置成任意脚本 URL。
+KIMI_CAPTCHA_SDK_URL = "https://cstaticdun.126.net/load.min.js"
+KIMI_CAPTCHA_ID = "2752f01d87dc45948de1a1e0ac2b7160"
+GLM_CAPTCHA_SDK_URL = "https://chatglm.cn/smcp/smcp.min.js"
+GLM_CAPTCHA_ORGANIZATION = "599zinRadlRxTLrOkTR9"
 # 与 Worker 读超时对齐：契约 A ≥300s、契约 B =120s，各留网络余量。
 MAX_WAIT_CONTRACT_A = 285
 MAX_WAIT_CONTRACT_B = 110
@@ -76,6 +82,7 @@ def load_or_create_config(path: Path) -> Dict[str, Any]:
         "bind": "127.0.0.1",
         "port": DEFAULT_PORT,
         "max_wait": MAX_WAIT_CONTRACT_A,
+        "challenge_max_wait": 180,
         "headless": False,
         "notify": True,
         "post_success_keep_secs": 8,
@@ -244,6 +251,272 @@ class Solver:
                         pass
 
 
+@dataclass
+class ChallengeSession:
+    session_id: str
+    platform: str
+    login_session_id: str
+    phone: str
+    phone_code: str
+    deadline: float
+    status: str = "pending"
+    result: Dict[str, str] = field(default_factory=dict)
+    context_gap: bool = False
+    message: str = ""
+    task: Optional[asyncio.Task] = None
+    consumed: bool = False
+
+
+class ManualChallengeManager:
+    """GLM/Kimi 官方 SDK 人工挑战；单槽位、短 TTL、结果一次性消费。"""
+
+    SUPPORTED = frozenset({"glm", "kimi"})
+    PLATFORM_ALIASES = {"glm": "glm", "zhipu": "glm", "kimi": "kimi"}
+
+    def __init__(self, solver: Solver, cfg: Dict[str, Any]):
+        self.solver = solver
+        self.cfg = cfg
+        self.max_wait = max(1, min(int(cfg.get("challenge_max_wait", 180)), 300))
+        self._session: Optional[ChallengeSession] = None
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _normalize_platform(platform: str) -> str:
+        return ManualChallengeManager.PLATFORM_ALIASES.get(str(platform).strip().lower(), "")
+
+    @staticmethod
+    def _valid_binding(value: str, max_length: int) -> bool:
+        return bool(value) and len(value) <= max_length and all(ord(char) >= 32 for char in value)
+
+    @staticmethod
+    def _sdk_html(session: ChallengeSession) -> str:
+        """返回仅加载已取证官方 SDK 的本地页面；不会导航到 SDK 脚本 URL。"""
+        common = """
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网页登录人工验证</title></head><body>
+<h3>请在此窗口完成人工验证</h3><p id="status">正在加载官方验证组件…</p>
+<div id="glm-captcha"></div><script>
+const statusNode = document.getElementById('status');
+function fail(message) {
+  statusNode.textContent = message || '官方验证组件未完成';
+  window.challengeFail(message || 'sdk_error');
+}
+"""
+        if session.platform == "kimi":
+            return common + f"""
+const script = document.createElement('script');
+script.src = {json.dumps(KIMI_CAPTCHA_SDK_URL)};
+script.onload = () => {{
+  if (typeof window.initNECaptcha !== 'function') return fail('易盾 SDK 未就绪');
+  window.initNECaptcha({{
+    captchaId: {json.dumps(KIMI_CAPTCHA_ID)}, mode: 'popup', apiVersion: 2,
+    onSuccess: (_instance, data) => {{
+      if (!data || typeof data.validate !== 'string' || !data.validate) return fail('易盾回调缺少 validate');
+      statusNode.textContent = '验证完成，可以返回管理页';
+      window.challengeComplete({{validate: data.validate}});
+    }},
+    onError: () => fail('易盾验证失败'),
+    onClose: () => fail('验证窗口已关闭')
+  }});
+}};
+script.onerror = () => fail('易盾 SDK 加载失败');
+document.head.appendChild(script);
+</script></body></html>"""
+        return common + f"""
+const script = document.createElement('script');
+script.src = {json.dumps(GLM_CAPTCHA_SDK_URL)};
+script.onload = () => {{
+  if (typeof window.initSMCaptcha !== 'function') return fail('数美 SDK 未就绪');
+  const instance = window.initSMCaptcha({{
+    organization: {json.dumps(GLM_CAPTCHA_ORGANIZATION)}, appendTo: '#glm-captcha',
+    product: 'embed', width: '100%'
+  }});
+  if (!instance || typeof instance.onSuccess !== 'function') return fail('数美组件初始化失败');
+  instance.onSuccess((data) => {{
+    if (!data || typeof data.rid !== 'string' || !data.rid) return fail('数美回调缺少 rid');
+    if (typeof data.md5 !== 'string' || !data.md5) return fail('数美回调缺少已取证 md5');
+    statusNode.textContent = '验证完成，可以返回管理页';
+    window.challengeComplete({{rid: data.rid, md5: data.md5}});
+  }});
+  if (typeof instance.onClose === 'function') instance.onClose(() => fail('验证窗口已关闭'));
+}};
+script.onerror = () => fail('数美 SDK 加载失败');
+document.head.appendChild(script);
+</script></body></html>"""
+
+    async def start(self, platform: str, login_session_id: str, phone: str,
+                    phone_code: str = "", timeout: Optional[int] = None) -> ChallengeSession:
+        platform = self._normalize_platform(platform)
+        if platform not in self.SUPPORTED:
+            raise ValueError("platform 必须是 glm(zhipu) 或 kimi")
+        login_session_id = str(login_session_id).strip()
+        phone = str(phone).strip()
+        phone_code = str(phone_code).strip()
+        if not self._valid_binding(login_session_id, 256):
+            raise ValueError("login_session_id 无效")
+        if not self._valid_binding(phone, 64):
+            raise ValueError("phone 无效")
+        if phone_code and not self._valid_binding(phone_code, 8):
+            raise ValueError("phone_code 无效")
+        if platform == "glm" and not phone_code:
+            raise ValueError("GLM 挑战缺少 phone_code")
+        async with self._lock:
+            await self._release_expired_locked()
+            if self._session is not None:
+                raise RuntimeError("已有人工挑战占用单槽位")
+            wait = self.max_wait if timeout is None else max(1, min(int(timeout), self.max_wait))
+            session = ChallengeSession(
+                session_id=secrets.token_urlsafe(24), platform=platform,
+                login_session_id=login_session_id, phone=phone, phone_code=phone_code,
+                deadline=time.monotonic() + wait,
+            )
+            self._session = session
+            session.task = asyncio.create_task(self._run(session))
+            return session
+
+    async def _release_expired_locked(self) -> None:
+        session = self._session
+        if session is None or time.monotonic() < session.deadline:
+            return
+        if session.task and not session.task.done():
+            session.task.cancel()
+        self._session = None
+
+    async def _run(self, session: ChallengeSession) -> None:
+        browser = None
+        page = None
+        done = asyncio.Event()
+        callback_result: Dict[str, str] = {}
+        callback_failure = ""
+
+        async def challenge_complete(_source: Any, payload: Any) -> None:
+            if not isinstance(payload, dict):
+                return
+            allowed = ("validate",) if session.platform == "kimi" else ("rid", "md5")
+            values = {
+                field_name: str(payload.get(field_name) or "").strip()
+                for field_name in allowed
+                if isinstance(payload.get(field_name), str) and str(payload.get(field_name)).strip()
+            }
+            callback_result.clear()
+            callback_result.update(values)
+            done.set()
+
+        async def challenge_fail(_source: Any, reason: Any = None) -> None:
+            nonlocal callback_failure
+            callback_failure = str(reason or "sdk_error")[:80]
+            done.set()
+
+        try:
+            if self.solver.pw is None:
+                raise RuntimeError("求解器未初始化")
+            headless = bool(self.solver.cfg.get("headless", False))
+            channel = self.solver.cfg.get("browser_channel") or None
+            browser = await self.solver.pw.chromium.launch(
+                headless=headless, channel=channel,
+                args=["--window-size=520,700", "--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(locale="zh-CN")
+            page = await context.new_page()
+            await page.expose_binding("challengeComplete", challenge_complete)
+            await page.expose_binding("challengeFail", challenge_fail)
+            await page.set_content(self._sdk_html(session), wait_until="domcontentloaded", timeout=30_000)
+            session.status = "running"
+            log(f"已打开 SDK 人工挑战 platform={session.platform} deadline={max(0, int(session.deadline - time.monotonic()))}s")
+            while time.monotonic() < session.deadline and not done.is_set():
+                if page.is_closed():
+                    callback_failure = "browser_closed"
+                    break
+                await asyncio.sleep(0.25)
+            required = {"validate"} if session.platform == "kimi" else {"rid", "md5"}
+            if done.is_set() and required.issubset(callback_result):
+                session.result = dict(callback_result)
+                if session.platform == "glm":
+                    session.result["phone_code"] = session.phone_code
+                session.status = "ok"
+                session.message = "人工挑战完成"
+            else:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.message = "官方 SDK 回调缺少所需字段；未猜测或伪造结果"
+                if callback_failure:
+                    log(f"SDK 人工挑战未完成 platform={session.platform} reason={callback_failure}")
+        except asyncio.CancelledError:
+            session.context_gap = True
+            session.status = "context_gap"
+            session.message = "人工挑战已过期"
+        except Exception as exc:
+            session.context_gap = True
+            session.status = "context_gap"
+            session.message = f"人工挑战未完成：{type(exc).__name__}"
+            log(f"人工挑战异常 platform={session.platform}：{type(exc).__name__}")
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+    async def status(self, session_id: str, platform: str, login_session_id: str,
+                     phone: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                return None
+            if not self._matches(session, platform, login_session_id, phone):
+                raise PermissionError("挑战会话绑定不匹配")
+            if time.monotonic() >= session.deadline and session.status not in {"ok", "context_gap"}:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.message = "人工挑战已过期"
+                if session.task and not session.task.done():
+                    session.task.cancel()
+            return {
+                "status": session.status, "session_id": session.session_id,
+                "platform": session.platform, "login_session_id": session.login_session_id,
+                "expires_in": max(0, int(session.deadline - time.monotonic())),
+            }
+
+    async def result(self, session_id: str, platform: str, login_session_id: str,
+                     phone: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            session = self._session
+            if session is None or session.session_id != session_id:
+                return None
+            if not self._matches(session, platform, login_session_id, phone):
+                raise PermissionError("挑战会话绑定不匹配")
+            if time.monotonic() >= session.deadline and session.status not in {"ok", "context_gap"}:
+                session.context_gap = True
+                session.status = "context_gap"
+                session.message = "人工挑战已过期"
+                if session.task and not session.task.done():
+                    session.task.cancel()
+            if session.status not in {"ok", "context_gap"}:
+                return {"status": session.status, "session_id": session.session_id}
+            payload: Dict[str, Any] = {
+                "status": session.status, "session_id": session.session_id,
+                "platform": session.platform, "login_session_id": session.login_session_id,
+                "message": session.message,
+            }
+            if session.status == "ok":
+                payload["data"] = dict(session.result)
+            else:
+                payload["context_gap"] = True
+            session.consumed = True
+            self._session = None
+            return payload
+
+    @classmethod
+    def _matches(cls, session: ChallengeSession, platform: str,
+                 login_session_id: str, phone: str) -> bool:
+        return (
+            cls._normalize_platform(platform) == session.platform
+            and hmac.compare_digest(str(login_session_id), session.login_session_id)
+            and hmac.compare_digest(str(phone), session.phone)
+        )
+
+
 def _host_of(url: str) -> str:
     try:
         from urllib.parse import urlsplit
@@ -280,6 +553,68 @@ def _url_ok(url: str) -> bool:
 
 def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
     secret = cfg["secret"]
+    challenge_manager = ManualChallengeManager(solver, cfg)
+
+    async def challenge_start(request: web.Request) -> web.Response:
+        # GLM/Kimi 人工挑战：凭证只能来自浏览器真实 SDK 回调。
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"}, status=400)
+        platform = str(body.get("platform") or "").strip().lower()
+        try:
+            session = await challenge_manager.start(
+                platform, str(body.get("login_session_id") or ""),
+                str(body.get("phone") or ""), str(body.get("phone_code") or ""),
+                body.get("timeout"),
+            )
+        except RuntimeError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        except ValueError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=400)
+        return web.json_response({
+            "success": True, "session_id": session.session_id, "platform": session.platform,
+            "login_session_id": session.login_session_id,
+            "status": session.status, "expires_in": max(0, int(session.deadline - time.monotonic())),
+        })
+
+    async def challenge_result(request: web.Request) -> web.Response:
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "message": "请求体不是合法 JSON"}, status=400)
+        try:
+            payload = await challenge_manager.result(
+                request.match_info["session_id"], str(body.get("platform") or ""),
+                str(body.get("login_session_id") or ""), str(body.get("phone") or ""),
+            )
+        except PermissionError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        if payload is None:
+            return web.json_response({"success": False, "message": "挑战会话不存在或已消费"}, status=404)
+        if payload["status"] == "ok":
+            return web.json_response({"success": True, **payload})
+        if payload["status"] == "context_gap":
+            return web.json_response({"success": False, **payload}, status=422)
+        return web.json_response({"success": False, **payload})
+
+    async def challenge_status(request: web.Request) -> web.Response:
+        if not _check_secret(request.headers.get("X-API-Key", ""), secret):
+            return web.json_response({"success": False, "message": "X-API-Key 校验失败"}, status=401)
+        try:
+            payload = await challenge_manager.status(
+                request.match_info["session_id"], str(request.query.get("platform") or ""),
+                str(request.query.get("login_session_id") or ""), str(request.query.get("phone") or ""),
+            )
+        except PermissionError as exc:
+            return web.json_response({"success": False, "message": str(exc)}, status=409)
+        if payload is None:
+            return web.json_response({"success": False, "message": "挑战会话不存在或已消费"}, status=404)
+        return web.json_response({"success": True, **payload})
 
     async def healthz(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
@@ -375,11 +710,117 @@ def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
 
     app = web.Application(client_max_size=256 * 1024)
     app.router.add_get("/healthz", healthz)
+    app.router.add_post("/challenge/start", challenge_start)
+    app.router.add_post("/challenge/sdk-start", challenge_start)
+    app.router.add_get("/challenge/{session_id}/status", challenge_status)
+    app.router.add_post("/challenge/{session_id}/result", challenge_result)
     app.router.add_post("/solve", solve)
     app.router.add_post("/risk", risk)
     app.router.add_post("/browser-notify", browser_notify)
     app.router.add_post("/face-notify", face_notify)
     return app
+
+
+class _MockSDKPage:
+    def __init__(self, outcome: Dict[str, str]):
+        self.outcome = outcome
+        self.bindings: Dict[str, Any] = {}
+        self.closed = False
+
+    async def expose_binding(self, name: str, callback: Any) -> None:
+        self.bindings[name] = callback
+
+    async def set_content(self, html: str, **_: Any) -> None:
+        if KIMI_CAPTCHA_ID in html and "validate" in self.outcome:
+            await self.bindings["challengeComplete"](None, {"validate": self.outcome["validate"]})
+        elif GLM_CAPTCHA_ORGANIZATION in html:
+            payload = {key: value for key, value in self.outcome.items() if key in {"rid", "md5"}}
+            if payload:
+                await self.bindings["challengeComplete"](None, payload)
+            else:
+                await self.bindings["challengeFail"](None, "missing_md5")
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+
+class _MockSDKContext:
+    def __init__(self, outcome: Dict[str, str]):
+        self.page = _MockSDKPage(outcome)
+
+    async def new_page(self) -> _MockSDKPage:
+        return self.page
+
+
+class _MockSDKBrowser:
+    def __init__(self, outcome: Dict[str, str]):
+        self.context = _MockSDKContext(outcome)
+
+    async def new_context(self, **_: Any) -> _MockSDKContext:
+        return self.context
+
+    async def close(self) -> None:
+        pass
+
+
+class _MockSDKChromium:
+    def __init__(self, outcome: Dict[str, str]):
+        self.outcome = outcome
+
+    async def launch(self, **_: Any) -> _MockSDKBrowser:
+        return _MockSDKBrowser(self.outcome)
+
+
+class _MockSDKPlaywright:
+    def __init__(self, outcome: Dict[str, str]):
+        self.chromium = _MockSDKChromium(outcome)
+
+
+async def _challenge_selftest(cfg: Dict[str, Any]) -> bool:
+    async def finish(manager: ManualChallengeManager, session: ChallengeSession) -> None:
+        if session.task:
+            await session.task
+
+    kimi_solver = Solver(cfg)
+    kimi_solver.pw = _MockSDKPlaywright({"validate": "real-callback-validate"})
+    kimi = ManualChallengeManager(kimi_solver, cfg)
+    kimi_session = await kimi.start("kimi", "login-kimi", "13800000000", timeout=2)
+    try:
+        await kimi.start("glm", "busy", "13800000001", "86", timeout=2)
+        return False
+    except RuntimeError:
+        pass
+    await finish(kimi, kimi_session)
+    try:
+        await kimi.result(kimi_session.session_id, "glm", "login-kimi", "13800000000")
+        return False
+    except PermissionError:
+        pass
+    kimi_result = await kimi.result(kimi_session.session_id, "kimi", "login-kimi", "13800000000")
+    if not kimi_result or kimi_result.get("data") != {"validate": "real-callback-validate"}:
+        return False
+    if await kimi.result(kimi_session.session_id, "kimi", "login-kimi", "13800000000") is not None:
+        return False
+
+    glm_solver = Solver(cfg)
+    glm_solver.pw = _MockSDKPlaywright({"rid": "real-rid"})
+    glm = ManualChallengeManager(glm_solver, cfg)
+    glm_session = await glm.start("glm", "login-glm", "13900000000", "86", timeout=2)
+    await finish(glm, glm_session)
+    glm_result = await glm.result(glm_session.session_id, "glm", "login-glm", "13900000000")
+    if not glm_result or glm_result.get("status") != "context_gap" or "data" in glm_result:
+        return False
+
+    expiry_solver = Solver(cfg)
+    expiry_solver.pw = _MockSDKPlaywright({})
+    expiry = ManualChallengeManager(expiry_solver, cfg)
+    expired_session = ChallengeSession(
+        session_id="expired", platform="kimi", login_session_id="login-expired",
+        phone="13700000000", phone_code="", deadline=time.monotonic() - 1,
+    )
+    expiry._session = expired_session
+    expired_result = await expiry.result("expired", "kimi", "login-expired", "13700000000")
+    return bool(expired_result and expired_result.get("status") == "context_gap")
 
 
 async def _selftest() -> int:
@@ -394,8 +835,12 @@ async def _selftest() -> int:
 
     cfg = {
         "secret": "selftest", "bind": "127.0.0.1", "port": 0, "headless": True,
-        "notify": False, "post_success_keep_secs": 0, "max_wait": 20, "browser_channel": "",
+        "notify": False, "post_success_keep_secs": 0, "max_wait": 20,
+        "challenge_max_wait": 5, "browser_channel": "",
     }
+    if not await _challenge_selftest(cfg):
+        log("SELFTEST FAIL：GLM/Kimi SDK 挑战会话契约失败")
+        return 1
     solver = Solver(cfg)
     await solver.start()
     try:
@@ -410,7 +855,7 @@ async def _selftest() -> int:
         status, cookies, url_expired = await solver.solve(f"http://127.0.0.1:{port}/", "selftest", 20)
         await runner.cleanup()
         if status == "ok" and cookies.get("x5sec") == "selftest-value" and cookies.get("bx-pp") == "pp-value":
-            log("SELFTEST PASS：浏览器启动/加载/cookie 轮询命中/成功契约 全部正常")
+            log("SELFTEST PASS：Kimi SDK 回调、GLM 缺 md5、重复/超时/绑定失败及 cookie 求解链全部正常")
             return 0
         log(f"SELFTEST FAIL：status={status} cookies={cookies} url_expired={url_expired}")
         return 1
@@ -428,7 +873,7 @@ async def _amain(cfg: Dict[str, Any], port_override: Optional[int]) -> None:
     port = port_override or int(cfg.get("port", DEFAULT_PORT))
     site = web.TCPSite(runner, bind, port)
     await site.start()
-    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk /browser-notify /face-notify）")
+    log(f"xianyu-captcha-helper 监听 {bind}:{port}（/healthz /solve /risk /challenge/sdk-start /challenge/{{id}}/status /challenge/{{id}}/result /browser-notify /face-notify）")
     try:
         while True:
             await asyncio.sleep(3600)

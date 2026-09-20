@@ -463,7 +463,28 @@ sleep 15 && curl -s http://127.0.0.1:3300/health && docker compose -f deploy-con
 | `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS` | 可选。定时商品同步的全量轮间隔（秒），经 compose 注入为容器内 `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`；低频完整翻页触发下架清理，`0`/负数=禁用全量轮（纯增量旧行为）。缺省 `86400`（每天一次；进程重启后首轮即全量） |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
-### 11.3 验证命令
+### 11.3 本地 GLM/Kimi 人工挑战入口
+
+`deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py` 在本地工作站提供真实可点击的有头 Chromium 挑战入口；它不恢复管理页第三方 SDK，也不接受人工手填验证码结果。
+
+```bash
+cd /mnt/data/sub2api
+a=deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py
+python3 "$a" --selftest
+python3 "$a"  # 默认 127.0.0.1:18089
+curl -s http://127.0.0.1:18089/healthz
+```
+
+调用契约（所有非 healthz 请求均须 `X-API-Key: <config.json 中 secret>`）：
+
+- `POST /challenge/sdk-start`：`{"platform":"glm|kimi","login_session_id":"...","phone":"...","phone_code":"86","timeout":180}`，返回一次性 `session_id`。同一时刻仅一个槽位，忙时 409；必须使用 `X-API-Key`，不接受 body secret。旧 `/challenge/start` 暂为同一路由别名。
+- `GET /challenge/{session_id}/status?platform=...&login_session_id=...&phone=...`：按平台、登录会话和手机号绑定查询 `pending/running/ok/context_gap`，不匹配返回 409。
+- `POST /challenge/{session_id}/result`：body 同样带 `platform/login_session_id/phone`，终态一次性消费。GLM 只有 SDK 回调同时给出真实 `rid+md5` 才成功并附启动时 `phone_code`；Kimi 只返回真实回调 `validate`；重复消费 404。
+- helper 不会 `page.goto` SDK 脚本 URL，而是在有头 Playwright 本地最小页面加载已取证官方 SDK：Kimi `initNECaptcha({captchaId,mode:"popup",apiVersion:2})`，GLM `initSMCaptcha({organization,product:"embed"})`。GLM 官方回调的 `md5` 尚未取证；若实际只回 `rid`，必须关闭为 HTTP 422 `context_gap`，禁止把 `token/validate/pass` 当 md5。超时、浏览器关闭、回调缺字段同样关闭浏览器并失败。
+
+详细背景、隧道和安全边界见 `docs/xianyu-manual-captcha-helper.md`。secret、挑战 URL、登录会话值及凭证不写日志或长期落盘；结果仅内存保存，读取后立即删除。
+
+### 11.4 验证命令
 
 ```bash
 docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
@@ -471,7 +492,7 @@ docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 bash deploy/tests/xianyu-deployment-boundary-test.sh
 ```
 
-### 11.4 Worker 镜像构建与回传补丁
+### 11.5 Worker 镜像构建与回传补丁
 
 - **镜像构建**：以 `deploy-config/xianyu-auto-reply-src/backend-web/Dockerfile` 构建（该 Dockerfile 已统一 `COPY common/backend-web/websocket/scheduler/launcher`，EXPOSE 8089/8090/8091，并安装三端依赖）；`launcher/entrypoint.py` 在单容器内并行启动 backend-web(8089)/websocket(8090)/scheduler(8091)。
 - **delivery-results 回传**：Worker 端 `common/services/sub2api_delivery_result_client.py` 在自动发货获得平台最终发送回执后回传 `POST {SUB2API_INTERNAL_BASE_URL}/api/v1/internal/xianyu/delivery-results`（`confirmed=true` 才标记 sent）；未配置 base_url/token 时静默跳过，不影响本地/单机模式。主程序保持 `pending` 直至收到 `confirmed=true`，否则最终转人工。
@@ -481,7 +502,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **internal 服务间鉴权**：backend-web→websocket/scheduler 的 `/internal/*` 路由要求 `X-Internal-Token` 匹配 `SUB2API_INTERNAL_TOKEN`（空配置失败关闭）；backend-web/scheduler 的 http_client 对 internal 服务 URL 自动注入该头。
 - **商品同步全量轮（2026-09-11 起）**：定时任务 `fetch_items` 默认增量（整页已存在提前停止，控风控请求量）；`scheduler/app/services/scheduler/fetch_items_task.py` 内置低频全量轮——默认每 86400 秒（env `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`，compose 变量 `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS`，0=禁用）跑一次完整翻页，自然结束后以闲鱼「在售」列表为权威集合清理 `xy_catalog_items` 中已售罄/下架的投影行，主程序下次同步（≤5 分钟）随之删除商品行。修复背景：增量提前停止使 `ItemService._prune_stale_catalog_items` 永不执行，部分下架商品永久滞留在售面板。执行互斥（`asyncio.Lock`）防手动触发与定时循环并发双开全量；全量轮"至少一个账号成功"才标记完成，全失败下一周期重试。注意：Worker 侧商品「删除」按钮只删投影行，闲鱼侧仍在售会被下轮同步重新拉回。
 
-### 11.5 基座底层重构要点（补发/发货链路）
+### 11.6 基座底层重构要点（补发/发货链路）
 
 - **attempt_count 语义统一**：`0`=初始自动发货（未补发），`N>=1`=第 N 次补发。`Claim` 写入 `0`；`ResendOriginalCode` 每次 `attempt_count+1`。存量数据经迁移 `backend/migrations/234_xianyu_attempt_count_normalize.sql` 归一化（`GREATEST(attempt_count-1,0)`）。此修复使自动发货回执（attempt=0）能正确关闭新 claim（旧实现 Claim 写 1 导致回执被静默丢弃、订单永久 pending）。
 - **中心化状态转换**：`xianyu_order_claim_state.go` 新增 `applyClaimTransition` 原语，统一承担 advisory lock + attempt CAS + 幂等/冲突分类。`RecordDeliveryResult`（唯一回执入口，含补发成功/回滚）与 `ResendOriginalCode` 全部收敛于此；原 `FailResendClaim`/`MarkResendSent` 已删除合并。对 sent/legacy 终态或 attempt 不匹配的迟到回执按幂等忽略（2xx ack），消除回传重试循环。

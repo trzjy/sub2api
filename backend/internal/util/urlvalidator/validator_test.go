@@ -72,6 +72,21 @@ func TestValidateHTTPURL(t *testing.T) {
 	if _, err := ValidateHTTPURL("https://localhost", false, ValidationOptions{AllowPrivate: false}); err == nil {
 		t.Fatalf("expected localhost to be blocked when allow_private_hosts is false")
 	}
+
+	// 三平台网页登录/转发的官方域名须通过 allowlist（web 登录链 validateUpstreamURL 口径）
+	webLoginHosts := []string{
+		"https://chat.deepseek.com",
+		"https://chatglm.cn",
+		"https://auth.kimi.com",
+		"https://www.kimi.com",
+	}
+	for _, raw := range webLoginHosts {
+		if _, err := ValidateHTTPURL(raw, false, ValidationOptions{
+			AllowedHosts: []string{"api.kimi.com", "chat.deepseek.com", "chatglm.cn", "auth.kimi.com", "www.kimi.com"},
+		}); err != nil {
+			t.Fatalf("expected web login host %s to pass allowlist, got %v", raw, err)
+		}
+	}
 }
 
 func TestIsBlockedHost(t *testing.T) {

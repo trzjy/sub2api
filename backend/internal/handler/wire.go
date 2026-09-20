@@ -66,6 +66,11 @@ func ProvideAdminHandlers(
 	accountHandler.SetWebPlatformAutoLoginService(service.NewWebPlatformAutoLoginService(
 		admin.NewAutoLoginStoreAdapter(adminService), httpUpstream, cfg,
 	))
+	accountHandler.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{
+		BaseURL: cfg.LocalCaptchaHelper.BaseURL,
+		APIKey:  cfg.LocalCaptchaHelper.APIKey,
+		Timeout: cfg.LocalCaptchaHelper.Timeout,
+	}))
 	return &AdminHandlers{
 		Dashboard:              dashboardHandler,
 		User:                   userHandler,

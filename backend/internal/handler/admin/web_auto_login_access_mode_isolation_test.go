@@ -113,12 +113,19 @@ func TestAccessModeIsolation_WebLoginSMSSingleAccount(t *testing.T) {
 	adminSvc := newWALAdminStub(apiZhipu)
 	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
 
+	// 先建出一个 status=succeeded、绑定到 account_id=42 的 challenge session。
+	accountID := int64(42)
+	challengeSessionID := seedSMSChallenge(t, h, service.PlatformZhipu, "13800000000", "login", service.WebSMSChallenge{
+		ZhipuCaptchaRid: "rid-1", ZhipuCaptchaMD5: "md5-1", ZhipuPhoneCode: "86",
+	}, service.WebLoginChallengeCreateInput{AccountID: &accountID})
+
 	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
-		"action":     "login",
-		"platform":   service.PlatformZhipu,
-		"phone":      "13800000000",
-		"account_id": 42,
-		"sms_code":   "123456",
+		"action":               "login",
+		"platform":             service.PlatformZhipu,
+		"phone":                "13800000000",
+		"account_id":           42,
+		"sms_code":             "123456",
+		"challenge_session_id": challengeSessionID,
 	})
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	require.Contains(t, w.Body.String(), "not a web access-mode account")

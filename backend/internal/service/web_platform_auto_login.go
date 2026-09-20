@@ -29,10 +29,10 @@ import (
 //     合并，保留 cookie / access_token / model_mapping 等既有键，只更新 login_* 与业务键。
 //   - 安全红线：日志与错误信息绝不出现 Cookie / token / 密码值。
 type WebPlatformAutoLoginService struct {
-	store       AutoLoginAccountStore
+	store        AutoLoginAccountStore
 	httpUpstream HTTPUpstream
-	cfg         *config.Config
-	logger      *slog.Logger
+	cfg          *config.Config
+	logger       *slog.Logger
 }
 
 // AutoLoginAccountStore 是自动登录服务所需的账号持久化能力（由 handler / 仓储层实现）。
@@ -137,6 +137,9 @@ func (s *WebPlatformAutoLoginService) mergeCredentials(account *Account, updates
 	}
 	for k, v := range updates {
 		merged[k] = v
+	}
+	if strings.TrimSpace(fmt.Sprint(merged[CredKeyLoginDeviceID])) != "" {
+		delete(merged, "device_id")
 	}
 	return merged
 }
@@ -284,7 +287,59 @@ func (s *WebPlatformAutoLoginService) loginByEmailRaw(ctx context.Context, accou
 			Msg: "deepseek web 登录成功但未返回 Set-Cookie（不可重试）",
 		}
 	}
+	if err := s.verifyDeepseekCookie(ctx, account, base, cookie); err != nil {
+		return "", err
+	}
 	return cookie, nil
+}
+
+// verifyDeepseekCookie 用已取证的 PoW challenge 端点验证新 Cookie 确实建立了登录态。
+// 未登录态会返回 40002/Missing Token 且无 challenge；验证请求复用账号代理、UA 和 login_device_id。
+func (s *WebPlatformAutoLoginService) verifyDeepseekCookie(ctx context.Context, account *Account, base, cookie string) error {
+	target := strings.TrimRight(base, "/") + webDeepseekPoWChallengePath
+	if _, err := s.validateUpstreamURL(target); err != nil {
+		return fmt.Errorf("deepseek web 登录验证目标被 URL 白名单拒绝: %w", err)
+	}
+	body := []byte(`{"target_path":"` + webDeepseekChatCompletionPath + `"}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", webDeepseekOriginFromURL(base))
+	req.Header.Set("Referer", webDeepseekOriginFromURL(base)+"/")
+	req.Header.Set("User-Agent", webDeepseekLoginUA)
+	req.Header.Set("Cookie", cookie)
+	webDeepseekApplyRequestHeaders(req, account)
+
+	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), account.ID, account.Concurrency)
+	if err != nil {
+		return fmt.Errorf("deepseek web 登录验证网络错误: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("deepseek web 登录验证响应读取失败: %w", err)
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusAccepted || resp.Header.Get("x-amzn-waf-action") != "" {
+		return &webLoginHTTPError{Platform: PlatformDeepseek, Code: int64(resp.StatusCode), Kind: WebLoginKindWAF, Msg: "deepseek web 登录验证被安全拦截"}
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &webLoginHTTPError{Platform: PlatformDeepseek, Code: WebLoginCodeHTTPTooMany, Kind: WebLoginKindLogin, Msg: "deepseek web 登录验证触发限流"}
+	}
+	code, isErr := webDeepseekEffectiveErrorCode(resp.StatusCode, raw)
+	if resp.StatusCode >= 400 || isErr {
+		return &webLoginHTTPError{Platform: PlatformDeepseek, Code: code, Kind: WebLoginKindLogin, Msg: "deepseek web 登录 Cookie 验证失败"}
+	}
+	challenge, ok := webDeepseekExtractPoWChallenge(raw)
+	if !ok {
+		return &webLoginHTTPError{Platform: PlatformDeepseek, Code: -1, Kind: WebLoginKindLogin, Msg: "deepseek web 登录验证响应缺少已取证的 PoW challenge"}
+	}
+	if _, err := webDeepseekSolvePoW(challenge, webDeepseekChatCompletionPath); err != nil {
+		return &webLoginHTTPError{Platform: PlatformDeepseek, Code: WebLoginCodePoW1, Kind: WebLoginKindWAF, Msg: "deepseek web 登录验证 PoW challenge 不可解"}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +358,8 @@ type webKimiRefreshResponse struct {
 // RefreshToken 对 zhipu / kimi 网页接入执行 refresh token 续期。成功时内部原子更新凭据
 // （refresh_token / 新 cookie / access_token），失败返回 *webLoginHTTPError。
 func (s *WebPlatformAutoLoginService) RefreshToken(ctx context.Context, account *Account) error {
+	ctx, cancel := context.WithTimeout(ctx, webSMSRequestTimeout)
+	defer cancel()
 	switch webAutoLoginPlatformKey(account) {
 	case PlatformZhipu:
 		return s.refreshZhipu(ctx, account)
@@ -366,10 +423,11 @@ func (s *WebPlatformAutoLoginService) refreshZhipu(ctx context.Context, account 
 	}
 
 	newCookie := combineSetCookies(resp)
-	if newCookie == "" {
+	chatGLMToken := extractCookieValue(newCookie, "chatglm_token")
+	if chatGLMToken == "" {
 		return &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "zhipu web 续期成功但未返回 Set-Cookie（不可重试）",
+			Msg: "zhipu web 续期响应缺少 chatglm_token（不可重试）",
 		}
 	}
 
@@ -377,7 +435,7 @@ func (s *WebPlatformAutoLoginService) refreshZhipu(ctx context.Context, account 
 	updates := map[string]any{
 		// 业务键：与转发链既有键保持一致，forward 方可直接消费。
 		"cookie":                 newCookie,
-		"chatglm_token":          extractCookieValue(newCookie, "chatglm_token"),
+		"chatglm_token":          chatGLMToken,
 		"refresh_token":          refreshToken,
 		CredKeyLoginRefreshToken: refreshToken,
 		CredKeyLoginLastAt:       now,
@@ -399,6 +457,8 @@ func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *
 			Msg: "缺少 refresh_token（需半自动短信登录）",
 		}
 	}
+	return smsContextGapErrorKind(PlatformKimi, WebLoginKindRefresh, "RefreshToken 成功响应结构尚未取证")
+
 	target := strings.TrimRight(webKimiAuthBaseURL, "/") + WebKimiRefreshEndpoint
 	if _, err := s.validateUpstreamURL(target); err != nil {
 		return fmt.Errorf("kimi web 续期目标被 URL 白名单拒绝: %w", err)
@@ -449,8 +509,8 @@ func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *
 	now := time.Now().UTC().Format(time.RFC3339)
 	updates := map[string]any{
 		// 业务键：与转发链既有键保持一致。
-		"access_token":          parsed.AccessToken,
-		"refresh_token":         parsed.RefreshToken,
+		"access_token":           parsed.AccessToken,
+		"refresh_token":          parsed.RefreshToken,
 		CredKeyLoginRefreshToken: parsed.RefreshToken,
 		// kimi refresh 同时回换新 refresh，记录过期基准。
 		CredKeyLoginRefreshExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339),
@@ -530,9 +590,13 @@ func (s *WebPlatformAutoLoginService) recoverDeepseek(ctx context.Context, accou
 			CredKeyLoginNonRetryable: "false",
 		}
 		merged := s.mergeCredentials(account, updates)
-		_ = s.store.UpdateAccountCredentials(ctx, account.ID, merged)
+		if err := s.store.UpdateAccountCredentials(ctx, account.ID, merged); err != nil {
+			return s.failAccount(ctx, account, fmt.Errorf("deepseek 登录凭据写入失败: %w", err))
+		}
 		account.Credentials = merged
-		_ = s.store.UpdateAccountStatus(ctx, account.ID, StatusActive, "")
+		if err := s.store.UpdateAccountStatus(ctx, account.ID, StatusActive, ""); err != nil {
+			return s.failAccount(ctx, account, fmt.Errorf("deepseek 登录状态写入失败: %w", err))
+		}
 		account.Status = StatusActive
 		account.ErrorMessage = ""
 		return WebRecoverResult{Recovered: true}
@@ -543,7 +607,9 @@ func (s *WebPlatformAutoLoginService) recoverDeepseek(ctx context.Context, accou
 func (s *WebPlatformAutoLoginService) recoverZhipuKimi(ctx context.Context, account *Account) WebRecoverResult {
 	err := s.RefreshToken(ctx, account)
 	if err == nil {
-		_ = s.store.UpdateAccountStatus(ctx, account.ID, StatusActive, "")
+		if err := s.store.UpdateAccountStatus(ctx, account.ID, StatusActive, ""); err != nil {
+			return s.failAccount(ctx, account, fmt.Errorf("网页登录态状态写入失败: %w", err))
+		}
 		account.Status = StatusActive
 		account.ErrorMessage = ""
 		return WebRecoverResult{Recovered: true}
@@ -591,9 +657,13 @@ func (s *WebPlatformAutoLoginService) failAccount(ctx context.Context, account *
 	}
 
 	merged := s.mergeCredentials(account, updates)
-	_ = s.store.UpdateAccountCredentials(ctx, account.ID, merged)
+	if writeErr := s.store.UpdateAccountCredentials(ctx, account.ID, merged); writeErr != nil {
+		return WebRecoverResult{Recovered: false, Detail: "自动登录失败：凭据写入失败"}
+	}
 	account.Credentials = merged
-	_ = s.store.UpdateAccountStatus(ctx, account.ID, StatusError, detail)
+	if writeErr := s.store.UpdateAccountStatus(ctx, account.ID, StatusError, detail); writeErr != nil {
+		return WebRecoverResult{Recovered: false, Detail: "自动登录失败：状态写入失败"}
+	}
 	account.Status = StatusError
 	account.ErrorMessage = detail
 
@@ -674,4 +744,3 @@ func webAutoLoginPlatformKey(account *Account) string {
 	}
 	return ""
 }
-

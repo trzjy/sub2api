@@ -110,6 +110,7 @@ type Config struct {
 	ImageStorage            ImageStorageConfig            `mapstructure:"image_storage"`
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
 	XianyuDelivery          XianyuDeliveryConfig          `mapstructure:"xianyu_delivery"`
+	LocalCaptchaHelper      LocalCaptchaHelperConfig      `mapstructure:"local_captcha_helper"`
 }
 
 // PluginConfig 控制管理员手动上传的本地进程插件。
@@ -132,6 +133,12 @@ type XianyuDeliveryConfig struct {
 	InternalToken string `mapstructure:"internal_token"`
 	// SystemUserID 系统审计用户 ID（兑换码领用 audit 归属）。
 	SystemUserID int64 `mapstructure:"system_user_id"`
+}
+
+type LocalCaptchaHelperConfig struct {
+	BaseURL string `mapstructure:"base_url"`
+	APIKey  string `mapstructure:"api_key"`
+	Timeout int    `mapstructure:"timeout_seconds"`
 }
 
 func (c *XianyuDeliveryConfig) setDefaultsFromEnv() {
@@ -2762,6 +2769,9 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("gateway.session_idle_timeout_minutes", 0)
 	viper.SetDefault("gateway.user_message_queue.mode", "")
 	viper.SetDefault("update.proxy_url", "")
+	viper.SetDefault("local_captcha_helper.base_url", "")
+	viper.SetDefault("local_captcha_helper.api_key", "")
+	viper.SetDefault("local_captcha_helper.timeout_seconds", 0)
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.

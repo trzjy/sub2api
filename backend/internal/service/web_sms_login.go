@@ -9,9 +9,19 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/tidwall/gjson"
 )
+
+const webSMSRequestTimeout = 30 * time.Second
+
+type webKimiSendSMSResponse struct{}
+
+type webKimiLoginWithSMSResponse struct {
+	AccessToken  string          `json:"access_token"`
+	RefreshToken string          `json:"refresh_token"`
+	NewUser      json.RawMessage `json:"new_user"`
+	UserID       json.RawMessage `json:"user_id"`
+	Deactivating json.RawMessage `json:"deactivating"`
+}
 
 // ---------------------------------------------------------------------------
 // 短信登录（半自动）内核：zhipu / kimi 通过手机号验证码完成登录。
@@ -54,8 +64,10 @@ const (
 // kimi 发码 / 登录端点（E0 决定性取证，2026-09-19：auth.kimi.com 空 body 实测 400/404）。
 // 命名空间 = oauth（account 登录），baseUrl = ${AUTH_API_HOST}/api（AUTH_API_HOST 默认
 // https://auth.kimi.com）。完整路径已实测可达：
-//   · 发码 POST https://auth.kimi.com/api/account.gateway.v1.SMSService/SendVerifyCode
-//   · 登录 POST https://auth.kimi.com/api/account.gateway.v1.AuthService/LoginWithSMS
+//
+//	· 发码 POST https://auth.kimi.com/api/account.gateway.v1.SMSService/SendVerifyCode
+//	· 登录 POST https://auth.kimi.com/api/account.gateway.v1.AuthService/LoginWithSMS
+//
 // 任务候选 /apiv2/ 前缀实测 404 不成立（/apiv2/ 是 kimi chat 命名空间）。
 // host 复用 web_platform_auto_login.go 的 webKimiAuthBaseURL（= https://auth.kimi.com）。
 const (
@@ -115,6 +127,8 @@ type WebSMSChallenge struct {
 // 概念，登录时以 phone+code 直接验证；kimi SendVerifyCodeResponse 为 proto 空消息，
 // E0 取证确认无 session_token）。遇 WAF / PoW / 限流返回 *webLoginHTTPError。
 func (s *WebPlatformAutoLoginService) SendSmsCode(ctx context.Context, platform, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, webSMSRequestTimeout)
+	defer cancel()
 	phone = strings.TrimSpace(phone)
 	if phone == "" {
 		return "", &webLoginHTTPError{
@@ -125,9 +139,9 @@ func (s *WebPlatformAutoLoginService) SendSmsCode(ctx context.Context, platform,
 	var send func(WebSMSChallenge) (string, error)
 	switch platform {
 	case PlatformZhipu:
-		send = func(c WebSMSChallenge) (string, error) { return s.sendSmsCodeZhipu(ctx, phone, c) }
+		send = func(c WebSMSChallenge) (string, error) { return s.sendSmsCodeZhipu(ctx, phone, c, account) }
 	case PlatformKimi:
-		send = func(c WebSMSChallenge) (string, error) { return s.sendSmsCodeKimi(ctx, phone, c) }
+		send = func(c WebSMSChallenge) (string, error) { return s.sendSmsCodeKimi(ctx, phone, c, account) }
 	default:
 		return "", &webLoginHTTPError{
 			Platform: platform, Code: -1, Kind: WebLoginKindLogin,
@@ -156,6 +170,8 @@ func (s *WebPlatformAutoLoginService) SendSmsCode(ctx context.Context, platform,
 // 求解值（zhipu 数美 rid）由调用方在请求内随短信码回传，缺失即失败关闭（Kind=WAF），
 // 绝不调用外部助手、绝不伪造成功。遇 WAF / PoW / 限流返回 *webLoginHTTPError。
 func (s *WebPlatformAutoLoginService) VerifySmsCode(ctx context.Context, platform, phone, code string, challenge WebSMSChallenge, account *Account) (*SMSLoginResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, webSMSRequestTimeout)
+	defer cancel()
 	phone = strings.TrimSpace(phone)
 	code = strings.TrimSpace(code)
 	if phone == "" || code == "" {
@@ -167,10 +183,12 @@ func (s *WebPlatformAutoLoginService) VerifySmsCode(ctx context.Context, platfor
 	var verify func(WebSMSChallenge) (*SMSLoginResult, error)
 	switch platform {
 	case PlatformZhipu:
-		verify = func(c WebSMSChallenge) (*SMSLoginResult, error) { return s.verifySmsCodeZhipu(ctx, phone, code, c) }
+		verify = func(c WebSMSChallenge) (*SMSLoginResult, error) {
+			return s.verifySmsCodeZhipu(ctx, phone, code, c, account)
+		}
 	case PlatformKimi:
 		verify = func(WebSMSChallenge) (*SMSLoginResult, error) {
-			return s.verifySmsCodeKimi(ctx, phone, code)
+			return s.verifySmsCodeKimi(ctx, phone, code, account)
 		}
 	default:
 		return nil, &webLoginHTTPError{
@@ -229,51 +247,14 @@ func smsVerifyChallengeMissing(platform string) func(WebSMSChallenge) string {
 // body {phone, pic_captcha_id, md5, phone_code}。
 // 数美滑块参数（rid/md5）来自前端滑块交互，证据 02-sign-algorithm.md 缺失生成算法；
 // challenge 必须携带已求解值，缺失即失败关闭。
-func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge) (string, error) {
+func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
 	if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuCaptchaMD5 == "" {
 		return "", &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
 			Msg: "zhipu 发码需数美滑块+图形验证参数（pic_captcha_id/md5），证据缺失或未求解，无法自动发码",
 		}
 	}
-	target := strings.TrimRight(DefaultWebZhipuBaseURL, "/") + webZhipuSendSMSCodeEndpoint
-	if _, err := s.validateUpstreamURL(target); err != nil {
-		return "", fmt.Errorf("zhipu 短信登录目标被 URL 白名单拒绝: %w", err)
-	}
-	// body 字段按 13 号证据：phone / pic_captcha_id / md5 / phone_code。
-	payload, err := json.Marshal(map[string]any{
-		"phone":          phone,
-		"pic_captcha_id": challenge.ZhipuCaptchaRid,
-		"md5":            challenge.ZhipuCaptchaMD5,
-		"phone_code":     challenge.ZhipuPhoneCode,
-	})
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := s.httpUpstream.Do(req, "", 0, 0)
-	if err != nil {
-		return "", fmt.Errorf("zhipu 短信验证码发送网络错误: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", fmt.Errorf("zhipu 短信验证码发送响应读取失败: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return "", s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信验证码发送")
-	}
-	_ = raw // zhipu 响应结构未取证：发码成功判定 = HTTP 2xx，不探测业务码（留待实测）
-	// （无证据不猜测 data.code/data.biz_code/code 三路径）。zhipu 协议无 session_token 概念。
-	s.logger.Debug("zhipu 短信验证码发送成功", "platform", PlatformZhipu)
-	return "", nil
+	return "", smsContextGapError(PlatformZhipu, "发码响应业务成功字段尚未取证")
 }
 
 // verifySmsCodeZhipu zhipu 短信登录。证据：POST /user-api/user/phone_login，
@@ -281,70 +262,14 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 // tI 签名三件套在方法内部用 webZhipuComputeSign 生成（签名算法已取证
 // 02-sign-algorithm.md，web_zhipu_gateway_forward.go:498 实现）；
 // 数美滑块 rid 仍须调用方传入，缺失即失败关闭。
-func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, phone, code string, challenge WebSMSChallenge) (*SMSLoginResult, error) {
+func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, phone, code string, challenge WebSMSChallenge, account *Account) (*SMSLoginResult, error) {
 	if challenge.ZhipuCaptchaRid == "" {
 		return nil, &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
 			Msg: "zhipu 短信登录缺少数美滑块参数（pic_captcha_id），无法登录",
 		}
 	}
-	target := strings.TrimRight(DefaultWebZhipuBaseURL, "/") + webZhipuPhoneLoginEndpoint
-	if _, err := s.validateUpstreamURL(target); err != nil {
-		return nil, fmt.Errorf("zhipu 短信登录目标被 URL 白名单拒绝: %w", err)
-	}
-	// tI 签名三件套：签名算法已取证（02-sign-algorithm.md）并由既有 webZhipuComputeSign
-	// 实现（web_zhipu_gateway_forward.go:498，黄金用例 TestWebZhipuComputeSign 验证通过），
-	// 此处直接复用，不要求调用方传入。
-	xTimestamp, xNonce, xSign := webZhipuComputeSign(time.Now().UnixMilli())
-	// body 字段按 13 号证据：phone + captcha(短信码) + pic_captcha_id + phone_code +
-	// tI 签名三件套（timestamp/xNonce/sign）。
-	payload, err := json.Marshal(map[string]any{
-		"phone":          phone,
-		"captcha":        code,
-		"pic_captcha_id": challenge.ZhipuCaptchaRid,
-		"phone_code":     challenge.ZhipuPhoneCode,
-		"timestamp":      xTimestamp,
-		"xNonce":         xNonce,
-		"sign":           xSign,
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := s.httpUpstream.Do(req, "", 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("zhipu 短信登录网络错误: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("zhipu 短信登录响应读取失败: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信登录")
-	}
-	_ = raw // zhipu 响应结构未取证：登录成功判定 = HTTP 2xx + Set-Cookie 含 chatglm_token（既有判定保留）
-	// chatglm_token（既有判定保留），不探测业务码（无证据不猜测）。
-	// zhipu 成功登录凭据来自 Set-Cookie（chatglm_token / chatglm_refresh_token）。
-	cookie := combineSetCookies(resp)
-	if cookie == "" {
-		return nil, &webLoginHTTPError{
-			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
-			Msg: "zhipu 短信登录成功但未返回 Set-Cookie（不可重试）",
-		}
-	}
-	return &SMSLoginResult{
-		Cookie:            cookie,
-		ChatGLMToken:      extractCookieValue(cookie, "chatglm_token"),
-		LoginRefreshToken: extractCookieValue(cookie, "chatglm_refresh_token"),
-	}, nil
+	return nil, smsContextGapError(PlatformZhipu, "登录响应业务成功字段尚未取证")
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +284,7 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 // 头：unary ⇒ Content-Type: application/json + Connect-Protocol-Version: 1。
 // x-msh-* 设备头（x-msh-device-id / x-msh-session-id 等）依赖 DeviceService.RegisterDevice 响应契约，
 // E0 取证未覆盖，按缺口处理：不臆造 id，不加 x-msh-* 头簇，待实测。
-func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone string, challenge WebSMSChallenge) (string, error) {
+func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
 	if challenge.KimiCaptchaValidate == "" {
 		return "", &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
@@ -394,21 +319,28 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
 
-	resp, err := s.httpUpstream.Do(req, "", 0, 0)
+	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), smsAccountID(account), smsAccountConcurrency(account))
 	if err != nil {
 		return "", fmt.Errorf("kimi 短信验证码发送网络错误: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if _, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
 		return "", fmt.Errorf("kimi 短信验证码发送响应读取失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		return "", s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信验证码发送")
 	}
+	var parsed webKimiSendSMSResponse
+	if err := decodeStrictSMSJSON(raw, &parsed); err != nil {
+		return "", &webLoginHTTPError{
+			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "kimi 短信验证码发送响应不符合 SendVerifyCodeResponse 契约",
+		}
+	}
 
-	// E0 取证：SendVerifyCodeResponse 为 proto 空消息，无 session_token / 无业务码字段。
-	// 发码成功即 HTTP 2xx，返回空串；登录时以 phone+code 直接验证。
+	// E0 取证：SendVerifyCodeResponse 是空 proto message；严格 JSON 解码为 {} 才算成功。
 	s.logger.Debug("kimi 短信验证码发送成功", "platform", PlatformKimi)
 	return "", nil
 }
@@ -419,7 +351,7 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 // ...} 为 Connect unary 成功响应 = proto message 顶层 JSON（snake_case）。
 // 头：unary ⇒ Content-Type: application/json + Connect-Protocol-Version: 1。
 // x-msh-* 设备头同 sendSmsCodeKimi，按缺口处理不加。
-func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, phone, code string) (*SMSLoginResult, error) {
+func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, phone, code string, account *Account) (*SMSLoginResult, error) {
 	target := strings.TrimRight(webKimiAuthBaseURL, "/") + webKimiLoginWithSMSEndpoint
 	if _, err := s.validateUpstreamURL(target); err != nil {
 		return nil, fmt.Errorf("kimi 短信登录目标被 URL 白名单拒绝: %w", err)
@@ -446,7 +378,7 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
 
-	resp, err := s.httpUpstream.Do(req, "", 0, 0)
+	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), smsAccountID(account), smsAccountConcurrency(account))
 	if err != nil {
 		return nil, fmt.Errorf("kimi 短信登录网络错误: %w", err)
 	}
@@ -460,10 +392,17 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		return nil, s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信登录")
 	}
 
-	// E0 决定性证据：登录响应按 LoginWithSMSResponse 单一路径提取（禁用多路径宽松探测）。
+	// E0 决定性证据：登录响应按 LoginWithSMSResponse 单一路径严格解码。
 	// Connect unary 成功响应 = proto message 顶层 JSON（snake_case），无 data 包裹、无 camel 兜底。
-	accessToken := strings.TrimSpace(gjson.GetBytes(raw, "access_token").String())
-	refreshToken := strings.TrimSpace(gjson.GetBytes(raw, "refresh_token").String())
+	var parsed webKimiLoginWithSMSResponse
+	if err := decodeStrictSMSJSON(raw, &parsed); err != nil {
+		return nil, &webLoginHTTPError{
+			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "kimi 短信登录响应解析失败（不可重试）",
+		}
+	}
+	accessToken := strings.TrimSpace(parsed.AccessToken)
+	refreshToken := strings.TrimSpace(parsed.RefreshToken)
 	if accessToken == "" || refreshToken == "" {
 		return nil, &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
@@ -475,6 +414,44 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		RefreshToken:      refreshToken,
 		LoginRefreshToken: refreshToken,
 	}, nil
+}
+
+func decodeStrictSMSJSON(raw []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func smsContextGapError(platform, detail string) *webLoginHTTPError {
+	return smsContextGapErrorKind(platform, WebLoginKindLogin, detail)
+}
+
+func smsContextGapErrorKind(platform, kind, detail string) *webLoginHTTPError {
+	return &webLoginHTTPError{Platform: platform, Code: -1, Kind: kind, Msg: "context_gap: " + detail}
+}
+
+func smsAccountID(account *Account) int64 {
+	if account == nil {
+		return 0
+	}
+	return account.ID
+}
+
+func smsAccountConcurrency(account *Account) int {
+	if account == nil {
+		return 0
+	}
+	return account.Concurrency
 }
 
 // splitSMSPhone 拆分手机号为国家码 + 号码（kimi loginWithSMS 的 phone{countryCode,number}）。

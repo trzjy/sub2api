@@ -194,7 +194,7 @@ func webKimiModelName(model string) string {
 //
 // 未实测字段一律缺省（不臆测填充）；thinking 开关与入站映射 unverified，按实测默认 true。
 type webKimiTextBlock struct {
-	MessageID string `json:"message_id"`
+	MessageID string      `json:"message_id"`
 	Text      webKimiText `json:"text"`
 }
 
@@ -203,10 +203,10 @@ type webKimiText struct {
 }
 
 type webKimiMessage struct {
-	Role     string            `json:"role"`     // "user"
+	Role     string             `json:"role"` // "user"
 	Blocks   []webKimiTextBlock `json:"blocks"`
-	Scenario string            `json:"scenario"`
-	IsGoal   bool              `json:"is_goal"`
+	Scenario string             `json:"scenario"`
+	IsGoal   bool               `json:"is_goal"`
 }
 
 type webKimiRequestOptions struct {
@@ -217,11 +217,11 @@ type webKimiRequestOptions struct {
 }
 
 type webKimiUpstreamRequest struct {
-	Scenario  string             `json:"scenario"`
-	Tools     []any              `json:"tools"`
-	Message   webKimiMessage     `json:"message"`
+	Scenario  string                `json:"scenario"`
+	Tools     []any                 `json:"tools"`
+	Message   webKimiMessage        `json:"message"`
 	Options   webKimiRequestOptions `json:"options"`
-	ProjectID string             `json:"project_id"`
+	ProjectID string                `json:"project_id"`
 }
 
 // webKimiDefaultTools 实测（10 §3）默认工具清单：搜索 + 定时任务。
@@ -391,7 +391,8 @@ func (s *OpenAIGatewayService) refreshWebKimiAccessToken(ctx context.Context, ac
 		}
 	}
 
-	credentials := map[string]any{"access_token": newAccessToken}
+	credentials := shallowCopyMap(account.Credentials)
+	credentials["access_token"] = newAccessToken
 	if newRefreshToken != "" {
 		credentials["refresh_token"] = newRefreshToken
 	}

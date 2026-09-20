@@ -65,11 +65,11 @@ func RegisterAdminRoutes(
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
 
-	// 国产供应商（kimi/zhipu/deepseek）额度与余额
-	registerCNProviderRoutes(admin, h)
+		// 国产供应商（kimi/zhipu/deepseek）额度与余额
+		registerCNProviderRoutes(admin, h)
 
-	// 代理管理
-	registerProxyRoutes(admin, h, stepUpAuth)
+		// 代理管理
+		registerProxyRoutes(admin, h, stepUpAuth)
 
 		// 卡密管理
 		registerRedeemCodeRoutes(admin, h)
@@ -512,6 +512,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		// 网页版平台登录入口：deepseek 密码登录 / zhipu·kimi 手机号短信码登录
 		accounts.POST("/web-login-password", h.Admin.Account.WebLoginPassword)
 		accounts.POST("/web-login-sms", h.Admin.Account.WebLoginSMS)
+		accounts.POST("/web-login-challenge/start", h.Admin.Account.WebLoginChallengeStart)
+		accounts.GET("/web-login-challenge/:session_id/status", h.Admin.Account.WebLoginChallengeStatus)
+		accounts.POST("/web-login-challenge/:session_id/consume", h.Admin.Account.WebLoginChallengeConsume)
 
 		// Antigravity 默认模型映射
 		accounts.GET("/antigravity/default-model-mapping", h.Admin.Account.GetAntigravityDefaultModelMapping)

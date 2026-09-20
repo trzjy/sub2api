@@ -943,8 +943,7 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     expect(autoLoginForm.exists()).toBe(true)
     autoLoginForm.vm.$emit('recovered', {
       platform: 'zhipu',
-      account_id: 77,
-      cookie: 'zck=1'
+      account_id: 77
     })
     await flushPromises()
 
@@ -955,9 +954,8 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     expect(showSuccessMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.smsLoginSuccess')
   })
 
-  // 自动登录成功（recovered）：Cookie 回填 webCookieInput，登录邮箱/密码保存到组件级 ref，
-  // 建号提交时一并写入 credentials（Cookie 失效后自动续期用）。
-  it('saves auto-login email/password into the created account credentials', async () => {
+  // 自动登录成功后后端已原子建号，弹窗仅刷新列表，不再二次创建。
+  it('does not create a second account after DeepSeek auto-login success', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
@@ -969,25 +967,13 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     expect(autoLoginForm.exists()).toBe(true)
     autoLoginForm.vm.$emit('recovered', {
       platform: 'deepseek',
-      cookie: 'sessionid=auto',
-      login_email: 'u@deepseek.com',
-      login_password: 'pw-auto',
+      account_id: 78,
     })
     await flushPromises()
 
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('deepseek')
-    expect(payload?.credentials).toEqual({
-      access_mode: 'web',
-      cookie: 'sessionid=auto',
-      login_email: 'u@deepseek.com',
-      login_password: 'pw-auto',
-    })
-    expect(payload?.credentials).not.toHaveProperty('api_key')
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    expect(showSuccessMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.smsLoginSuccess')
   })
 
   it('hides the generic api key block for web platforms', async () => {
@@ -1036,8 +1022,8 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
   })
 
-  // (a) 载荷门控：网页接入模式走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
-  it('omits upstream_billing_probe_enabled from the create payload for web access mode credentials', async () => {
+  // (a) 载荷门控：网页接入模式把完整草稿交给登录组件，并排除上游计费探测开关。
+  it('passes a complete draft without upstream_billing_probe_enabled to web auto-login', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
@@ -1045,61 +1031,31 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
     await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
     await flushPromises()
-    wrapper.findComponent({ name: 'WebAutoLoginForm' }).vm.$emit('recovered', {
-      platform: 'deepseek',
-      cookie: 'sessionid=test-cookie',
-      login_email: 'u@deepseek.com',
-      login_password: 'pw',
-    })
-    await flushPromises()
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
 
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    // 平台归并 PR-3：网页接入模式平台为官方值 deepseek，网页语义在 credentials["access_mode"]="web"。
-    expect(payload?.platform).toBe('deepseek')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.access_mode).toBe('web')
-    expect(payload?.credentials?.cookie).toBe('sessionid=test-cookie')
-    // isUpstreamBillingProbeEligible('deepseek','apikey') + access_mode==='web' → 不在探测白名单，
-    // 后端契约要求网页接入模式建号请求不得携带 upstream_billing_probe_enabled=true。
-    expect(payload?.upstream_billing_probe_enabled).toBeUndefined()
-    expect(showErrorMock).not.toHaveBeenCalled()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    const draft = autoLoginForm.props('accountDraft')
+    expect(draft).toMatchObject({
+      name: 'web ds account',
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { access_mode: 'web' },
+    })
+    expect(draft.upstream_billing_probe_enabled).toBe(true)
+    expect(createAccountMock).not.toHaveBeenCalled()
   })
 
-  // (b) 错误展示：create reject 为拦截器摊平的平面对象（无 response 属性），
-  // showError 应收到 message 原文，而非通用 failedToCreate 文案。
-  it('surfaces the flat interceptor error message instead of the generic failedToCreate copy', async () => {
-    createAccountMock.mockRejectedValue({
-      status: 400,
-      code: 400,
-      reason: 'UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID',
-      message: 'account is not an API key account',
-    })
-
+  // (b) 普通提交入口不得绕过网页登录验证创建半成品账号。
+  it('blocks direct form submission until web auto-login succeeds', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
-    await flushPromises()
-    wrapper.findComponent({ name: 'WebAutoLoginForm' }).vm.$emit('recovered', {
-      platform: 'deepseek',
-      cookie: 'sessionid=test-cookie',
-      login_email: 'u@deepseek.com',
-      login_password: 'pw',
-    })
-    await flushPromises()
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
-    // submitCreateAccount 的 catch 走 error?.message || t('failedToCreate')；
-    // 平面错误含 message，应原样透传。useI18n 在 spec 内为 key->key，故通用文案即字面 i18n key。
-    expect(showErrorMock).toHaveBeenCalledWith('account is not an API key account')
-    expect(showErrorMock).not.toHaveBeenCalledWith('admin.accounts.failedToCreate')
-    // 创建失败，不应派发 created 事件。
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.completeLoginFirst')
     expect(wrapper.emitted('created')).toBeUndefined()
   })
 })

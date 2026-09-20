@@ -71,7 +71,9 @@ type AccountHandler struct {
 
 	// webPlatformAutoLogin 是网页版平台自动登录服务（由并行任务实现并注入）。
 	// 以本地接口类型持有，便于在测试中替换为 mock。
-	webPlatformAutoLogin webPlatformAutoLoginService
+	webPlatformAutoLogin   webPlatformAutoLoginService
+	webLoginChallengeStore *service.WebLoginChallengeSessionStore
+	webLoginCaptchaHelper  service.LocalCaptchaHelper
 }
 
 // codeBuddyAccountRefresher 是管理端账号「刷新」动作所需的 CodeBuddy 能力，
@@ -102,6 +104,11 @@ func (h *AccountHandler) SetCodeBuddyAccountRefresher(r codeBuddyAccountRefreshe
 // webPlatformAutoLoginService。
 func (h *AccountHandler) SetWebPlatformAutoLoginService(s *service.WebPlatformAutoLoginService) {
 	h.webPlatformAutoLogin = s
+}
+
+// SetWebLoginCaptchaHelper 注入本地人工挑战 helper；未注入时保持 context_gap 失败关闭。
+func (h *AccountHandler) SetWebLoginCaptchaHelper(helper service.LocalCaptchaHelper) {
+	h.webLoginCaptchaHelper = helper
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
@@ -140,6 +147,7 @@ func NewAccountHandler(
 		sessionLimitCache:       sessionLimitCache,
 		rpmCache:                rpmCache,
 		tokenCacheInvalidator:   tokenCacheInvalidator,
+		webLoginChallengeStore:  service.NewWebLoginChallengeSessionStore(),
 	}
 }
 

@@ -21,12 +21,13 @@ import (
 
 // autoLoginUpstream 按请求路径脚本化返回响应，覆盖 deepseek 登录 / zhipu / kimi 续期。
 type autoLoginUpstream struct {
-	mu              sync.Mutex
-	requests        []*http.Request
-	loginBizCode    int64
-	loginHTTPStatus int
-	zhipuOK         bool
-	kimiOK          bool
+	mu                   sync.Mutex
+	requests             []*http.Request
+	loginBizCode         int64
+	loginHTTPStatus      int
+	deepseekVerifyStatus int
+	zhipuOK              bool
+	kimiOK               bool
 }
 
 func newMockResp(status int, header http.Header, body string) *http.Response {
@@ -53,6 +54,12 @@ func (m *autoLoginUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*ht
 			h.Add("Set-Cookie", "user=me; Path=/")
 		}
 		return newMockResp(m.loginHTTPStatus, h, body), nil
+	case strings.HasSuffix(req.URL.Path, webDeepseekPoWChallengePath):
+		status := m.deepseekVerifyStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return newMockResp(status, http.Header{}, `{"code":0,"data":{"biz_code":0,"biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"6de3393aba4cece63e3e6a761752722b05f2cfe531bc1b5c82e01985e93fddd2","salt":"salt123","signature":"sig","difficulty":43,"expire_at":1739764288699}}}}`), nil
 	case strings.HasSuffix(req.URL.Path, WebZhipuRefreshEndpoint):
 		h := http.Header{}
 		if m.zhipuOK {
@@ -176,6 +183,29 @@ func TestWebPlatformAutoLogin_DeepseekLoginSuccess(t *testing.T) {
 	require.NotEmpty(t, merged[CredKeyLoginDeviceID]) // 首次生成后复用
 }
 
+func TestWebPlatformAutoLogin_DeepseekLoginVerificationFailNoWrite(t *testing.T) {
+	acc := &Account{
+		ID:       11,
+		Platform: PlatformDeepseek,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":        AccountAccessModeWeb,
+			CredKeyLoginEmail:    "u@x.com",
+			CredKeyLoginPassword: "pw",
+			"cookie":             "OLDCOOKIE",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK, deepseekVerifyStatus: http.StatusForbidden}
+	svc := newTestAutoLoginService(store, up)
+
+	cookie, err := svc.LoginByEmail(context.Background(), acc)
+	require.Error(t, err)
+	require.Empty(t, cookie)
+	require.Empty(t, store.creds[11], "verification failure must not persist credentials")
+	require.Equal(t, "OLDCOOKIE", acc.GetCredential("cookie"), "verification failure must not mutate account credentials")
+}
+
 func TestWebPlatformAutoLogin_DeepseekCode2(t *testing.T) {
 	acc := &Account{
 		ID:       2,
@@ -233,7 +263,7 @@ func TestWebPlatformAutoLogin_ZhipuRefreshSuccess(t *testing.T) {
 		Platform: PlatformZhipu,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT",
 			"refresh_token":          "RT",
 		},
@@ -258,7 +288,7 @@ func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
 		Platform: PlatformKimi,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT0",
 			"refresh_token":          "RT0",
 		},
@@ -267,13 +297,10 @@ func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
 	up := &autoLoginUpstream{kimiOK: true}
 	svc := newTestAutoLoginService(store, up)
 
-	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	require.Equal(t, "AT-1", store.creds[5]["access_token"])
-	require.Equal(t, "RT-1", store.creds[5]["refresh_token"])
-	require.Equal(t, "RT-1", store.creds[5][CredKeyLoginRefreshToken])
-
-	res := svc.RecoverAccount(context.Background(), acc)
-	require.True(t, res.Recovered)
+	err := svc.RefreshToken(context.Background(), acc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Nil(t, store.creds[5])
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +313,7 @@ func TestWebPlatformAutoLogin_ZhipuRefreshFailNeedsSemiAuto(t *testing.T) {
 		Platform: PlatformZhipu,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT",
 		},
 	}

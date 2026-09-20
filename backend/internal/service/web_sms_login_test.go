@@ -106,12 +106,10 @@ func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
 	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"code":0}`}
 	svc := newSmsTestService(up)
 
-	session, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
-	require.NoError(t, err)
-	require.Equal(t, "", session) // zhipu 协议无 session_token，登录时以 phone+code 直接验证
-	require.Len(t, up.requests, 1)
-	require.Equal(t, webZhipuSendSMSCodeEndpoint, up.requests[0].URL.Path)
-	require.Equal(t, DefaultWebZhipuBaseURL+webZhipuSendSMSCodeEndpoint, up.requests[0].URL.String())
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 // 证据缺失 → 失败关闭：zhipu 发码缺数美滑块 rid/md5，挑战值未随请求内回传即失败关闭。
@@ -134,10 +132,8 @@ func TestWebSMS_ZhipuSendWAFPoW(t *testing.T) {
 
 	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
 	require.Error(t, err)
-	require.Equal(t, WebLoginCodePoW1, smsErrorCode(t, err))
-	require.Equal(t, WebLoginKindWAF, smsErrorKind(t, err))
-	// 真实 WAF/PoW（HTTP 403）失败关闭，无续跑路径：仅一次原始发码请求。
-	require.Len(t, up.requests, 1)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 // E0 取证：zhipu 响应结构未取证，body 业务码不猜测；限流以 HTTP 429 触发。
@@ -147,7 +143,8 @@ func TestWebSMS_ZhipuSendRateLimited(t *testing.T) {
 
 	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
 	require.Error(t, err)
-	require.Equal(t, WebLoginCodeHTTPTooMany, smsErrorCode(t, err))
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 func TestWebSMS_ZhipuSendHTTP429(t *testing.T) {
@@ -156,7 +153,8 @@ func TestWebSMS_ZhipuSendHTTP429(t *testing.T) {
 
 	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
 	require.Error(t, err)
-	require.Equal(t, WebLoginCodeHTTPTooMany, smsErrorCode(t, err))
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,21 +169,10 @@ func TestWebSMS_ZhipuVerifySuccess(t *testing.T) {
 	}
 	svc := newSmsTestService(up)
 
-	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
-	require.NoError(t, err)
-	require.NotNil(t, res)
-	require.Equal(t, "chatglm_token=CT-1; chatglm_refresh_token=RFT-1", res.Cookie)
-	require.Equal(t, "CT-1", res.ChatGLMToken)
-	require.Equal(t, "RFT-1", res.LoginRefreshToken)
-	require.Len(t, up.requests, 1)
-	require.Equal(t, webZhipuPhoneLoginEndpoint, up.requests[0].URL.Path)
-	// tI 签名三件套由方法内部生成并填入请求体（签名算法已取证，黄金用例 TestWebZhipuComputeSign）。
-	var reqBody map[string]any
-	require.NoError(t, readJSONBody(up.requests[0], &reqBody))
-	require.NotEmpty(t, reqBody["timestamp"])
-	require.NotEmpty(t, reqBody["xNonce"])
-	require.NotEmpty(t, reqBody["sign"])
-	require.NotEmpty(t, reqBody["pic_captcha_id"])
+	_, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 // 证据缺失 → 失败关闭：zhipu 登录缺数美滑块 rid，挑战值未随请求内回传即失败关闭。
@@ -205,8 +192,19 @@ func TestWebSMS_ZhipuVerifyFailClosedNoCaptchaRid(t *testing.T) {
 // tI 签名由方法内部 webZhipuComputeSign 生成（02-sign-algorithm.md 已取证），
 // 不再要求调用方传入，故无「缺签名」失败关闭点。
 
-// E0 取证：zhipu 响应结构未取证，body 业务码（如 code=403）不猜测；登录成功判定 =
-// HTTP 2xx + Set-Cookie 含 chatglm_token。即使 body 带疑似错误码，只要带 Cookie 即成功。
+// requireNoSMSCredentials 断言登录失败时未产出任何登录凭据：结果为 nil（无值），
+// 或（防御性）Cookie/AccessToken/RefreshToken/ChatGLMToken/LoginRefreshToken 全为空串。
+func requireNoSMSCredentials(t *testing.T, res *SMSLoginResult) {
+	t.Helper()
+	require.True(t,
+		res == nil || (res.Cookie == "" && res.AccessToken == "" && res.RefreshToken == "" &&
+			res.ChatGLMToken == "" && res.LoginRefreshToken == ""),
+		"登录失败时不得返回任何凭据，got %+v", res)
+}
+
+// 短信码错误 → 失败关闭：GLM 登录响应契约未取证（context_gap），VerifySmsCode
+// 返回错误且不产出任何凭据；请求不会发往上游（本地闸门直接失败），疑似成功
+// Set-Cookie 一律不采纳。
 func TestWebSMS_ZhipuVerifyWrongCode(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -216,9 +214,29 @@ func TestWebSMS_ZhipuVerifyWrongCode(t *testing.T) {
 	svc := newSmsTestService(up)
 
 	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "000000", zhipuChallenge(), nil)
-	require.NoError(t, err) // body code 被忽略，Cookie 决定成功
-	require.NotNil(t, res)
-	require.Equal(t, "CT-1", res.ChatGLMToken)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+	require.Len(t, up.requests, 0)
+}
+
+// HTTP 200 + 业务错误体 / 结构未知体（即使携带疑似成功 Set-Cookie）→ 失败关闭：
+// GLM 登录响应业务成功字段尚未取证，不存在成功解析路径，任意 2xx 响应体都不会
+// 被解析为凭据，绝不把任意 2xx 当成功、绝不用任意 Cookie 充当必需凭据。
+func TestWebSMS_ZhipuVerifyHTTP200BizErrorOrUnknownBodyFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"code":0,"data":{"token":"T-1"},"unknown_field":true}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-9; Path=/", "chatglm_refresh_token=RFT-9; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "context_gap")
+	require.Len(t, up.requests, 0)
 }
 
 func TestWebSMS_ZhipuVerifyNoCookie(t *testing.T) {
@@ -309,14 +327,23 @@ func TestWebSMS_KimiVerifyPoW(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-func TestWebSMS_KimiVerifyMissingTokenField(t *testing.T) {
-	up := &smsUpstream{kimiVerifyStatus: http.StatusOK, kimiVerifyBody: `{"access_token":"AT-1"}`}
+func TestWebSMS_KimiSendUnknownResponseFieldFailsClosed(t *testing.T) {
+	up := &smsUpstream{kimiSendStatus: http.StatusOK, kimiSendBody: `{"session_token":"unexpected"}`}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformKimi, "19900000000", WebSMSChallenge{KimiCaptchaValidate: "yidun-v1"}, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "响应不符合")
+	require.Len(t, up.requests, 1)
+}
+
+func TestWebSMS_KimiVerifyMalformedResponseFailsClosed(t *testing.T) {
+	up := &smsUpstream{kimiVerifyStatus: http.StatusOK, kimiVerifyBody: `{not-json`}
 	svc := newSmsTestService(up)
 
 	_, err := svc.VerifySmsCode(context.Background(), PlatformKimi, "19900000000", "123456", WebSMSChallenge{}, nil)
 	require.Error(t, err)
-	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
-	require.NotContains(t, err.Error(), "AT-1") // 不暴露凭据值
+	require.Contains(t, err.Error(), "解析失败")
 }
 
 // ---------------------------------------------------------------------------
