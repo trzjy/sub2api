@@ -154,6 +154,7 @@ export default {
           sendCodeFailed: 'Failed to send the code, please retry',
           success: 'Auto-login succeeded, login state filled',
           smsLoginSuccess: 'SMS login succeeded, account created / linked',
+          challengeUnavailable: 'Challenge service unavailable',
           challengeSectionTitle: 'Human verification status',
           challengeStatus: {
             pending: 'Waiting for verification',

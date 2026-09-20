@@ -358,6 +358,7 @@ export default {
           sendCodeFailed: '获取验证码失败，请重试',
           success: '自动登录成功，已回填登录态',
           smsLoginSuccess: '短信登录成功，账号已创建 / 绑定',
+          challengeUnavailable: '人工挑战服务不可用',
           challengeSectionTitle: '人机验证状态',
           challengeStatus: {
             pending: '等待验证',
