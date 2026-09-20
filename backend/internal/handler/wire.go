@@ -57,15 +57,15 @@ func ProvideAdminHandlers(
 	adminService service.AdminService,
 	httpUpstream service.HTTPUpstream,
 	cfg *config.Config,
+	webPlatformAutoLogin *service.WebPlatformAutoLoginService,
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
 	accountHandler.SetAccountBalanceProbeService(accountBalanceProbe)
 	accountHandler.SetCodeBuddyAccountRefresher(codeBuddyOAuthHandler)
-	// 注入网页版平台自动登录服务（其 Start 由 handler 内 lazy + idempotent 触发）。
-	accountHandler.SetWebPlatformAutoLoginService(service.NewWebPlatformAutoLoginService(
-		admin.NewAutoLoginStoreAdapter(adminService), httpUpstream, cfg,
-	))
+	// 注入网页版平台自动登录服务（service 层 provider 构造，与 TokenRefreshService
+	// 共享同一实例；其 Start 由 handler 内 lazy + idempotent 触发）。
+	accountHandler.SetWebPlatformAutoLoginService(webPlatformAutoLogin)
 	accountHandler.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{
 		BaseURL: cfg.LocalCaptchaHelper.BaseURL,
 		APIKey:  cfg.LocalCaptchaHelper.APIKey,

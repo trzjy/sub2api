@@ -181,6 +181,14 @@ func ProvideOpenAIOAuthService(
 	return svc
 }
 
+// ProvideWebPlatformAutoLoginService 构造网页平台自动登录服务（service 层 provider）。
+// 构造依赖与 handler/wire.go 既有用法一致（AutoLoginStoreAdapter(adminService) +
+// httpUpstream + cfg），上移到 service 层后由 TokenRefreshService 与 handler 共享
+// 同一实例，避免重复创建。
+func ProvideWebPlatformAutoLoginService(adminService AdminService, httpUpstream HTTPUpstream, cfg *config.Config) *WebPlatformAutoLoginService {
+	return NewWebPlatformAutoLoginService(NewAdminAutoLoginStoreAdapter(adminService), httpUpstream, cfg)
+}
+
 // ProvideTokenRefreshService creates and starts TokenRefreshService
 func ProvideTokenRefreshService(
 	accountRepo AccountRepository,
@@ -198,8 +206,10 @@ func ProvideTokenRefreshService(
 	proxyRepo ProxyRepository,
 	refreshAPI *OAuthRefreshAPI,
 	runtimeBlocker AccountRuntimeBlocker,
+	openaiGatewayService *OpenAIGatewayService,
+	webPlatformAutoLogin *WebPlatformAutoLoginService,
 ) *TokenRefreshService {
-	svc := NewTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, grokOAuthService)
+	svc := newTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, openaiGatewayService, webPlatformAutoLogin, grokOAuthService)
 	// 注入 OpenAI privacy opt-out 依赖
 	svc.SetPrivacyDeps(privacyClientFactory, proxyRepo)
 	// 注入统一 OAuth 刷新 API（消除 TokenRefreshService 与 TokenProvider 之间的竞争条件）
@@ -1078,6 +1088,7 @@ func ProvideCodeBuddyDirectOrigin(cfg *config.Config) map[string]config.CodeBudd
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	// Core services
+	ProvideWebPlatformAutoLoginService,
 	ProvideAuthService,
 	NewPasskeyService,
 	NewUserService,
