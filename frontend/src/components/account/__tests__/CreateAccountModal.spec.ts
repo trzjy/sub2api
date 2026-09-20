@@ -8,6 +8,7 @@ const {
   syncUpstreamModelsMock,
   showErrorMock,
   showWarningMock,
+  showSuccessMock,
   importCodexSessionMock,
   createOpenAICodexPATMock,
   authIsSimpleMode,
@@ -17,6 +18,7 @@ const {
   syncUpstreamModelsMock: vi.fn(),
   showErrorMock: vi.fn(),
   showWarningMock: vi.fn(),
+  showSuccessMock: vi.fn(),
   importCodexSessionMock: vi.fn(),
   createOpenAICodexPATMock: vi.fn(),
   authIsSimpleMode: { value: true },
@@ -25,7 +27,7 @@ const {
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: showErrorMock,
-    showSuccess: vi.fn(),
+    showSuccess: showSuccessMock,
     showWarning: showWarningMock,
   }),
 }))
@@ -71,7 +73,6 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
-import WebLoginModal from '../WebLoginModal.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -459,6 +460,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   it('submits adaptive Kimi protocol endpoints', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')
+    // 网页接入平台默认进入网页接入模式；本用例验证 API(payg) 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('Kimi adaptive')
     await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')
 
@@ -526,6 +529,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
   it('uses the edited adaptive Chat endpoint when previewing upstream models', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper
       .get('[data-testid="cn-adaptive-base-url-chat_completions"]')
       .setValue('https://relay.example.com/v1')
@@ -718,6 +723,8 @@ describe('CreateAccountModal volcano subscription', () => {
 
   async function openVolcano(wrapper: ReturnType<typeof mountModal>, baseUrl: string) {
     await selectButtonByText(wrapper, 'DeepSeek')
+    // 火山订阅号（volces base_url）不走网页接入默认模式；本流程验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await wrapper.get('[data-testid="cn-adaptive-base-url-chat_completions"]').setValue(baseUrl)
   }
 
@@ -768,6 +775,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     // 切到 chat_completions 协议，露出单 base_url 输入框
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
@@ -794,6 +804,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
     const baseInput = wrapper
@@ -817,6 +830,9 @@ describe('CreateAccountModal volcano subscription', () => {
   it('keeps Volcano base_url in payload when adaptive chat_completions is whitespace', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await flushPromises()
     await selectButtonByText(wrapper, 'chatCompletions')
     await flushPromises()
@@ -844,6 +860,9 @@ describe('CreateAccountModal volcano subscription', () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
     await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
+    await flushPromises()
     // 进入 adaptive 并在 chat_completions 槽位填写火山端点
     await selectButtonByText(wrapper, 'adaptive')
     await flushPromises()
@@ -865,6 +884,9 @@ describe('CreateAccountModal volcano subscription', () => {
   it('keeps Volcano endpoint after adaptive -> chat_completions when adaptive chat slot is blank (whitespace falls back to base_url)', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'DeepSeek')
+    await flushPromises()
+    // 网页接入平台默认进入网页接入模式；本用例验证 API 模式，先切回按量付费。
+    await selectButtonByText(wrapper, 'admin.accounts.cnProviders.accountMode.payg')
     await flushPromises()
     // 先在 chat_completions 填入火山地址
     await selectButtonByText(wrapper, 'chatCompletions')
@@ -901,6 +923,7 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     probeUpstreamBillingMock.mockReset().mockResolvedValue({})
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
     showWarningMock.mockReset()
+    showSuccessMock.mockReset()
     importCodexSessionMock.mockReset().mockResolvedValue({
       created: 1,
       updated: 0,
@@ -915,120 +938,61 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
   afterEach(() => vi.useRealTimers())
 
 
-  it('submits pasted cookie credentials for deepseek web access mode with apikey type', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
-    await flushPromises()
-    // 风险提示必须可见（方案 §2.2）
-    expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=abc; HWWAFSESID=xyz')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('deepseek')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.cookie).toBe('sessionid=abc; HWWAFSESID=xyz')
-    // 平台归并 PR-3：网页接入下沉为 credentials["access_mode"]="web"。
-    expect(payload?.credentials?.access_mode).toBe('web')
-    expect(payload?.credentials).not.toHaveProperty('api_key')
-  })
-
-  it('submits parsed token JSON for kimi web access mode and keeps only non-empty optional fields', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
-    await flushPromises()
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="kimi-token-json"]').setValue(
-      JSON.stringify({ access_token: 'at', refresh_token: 'rt', user_id: 'u-9' })
-    )
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('kimi')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials).toEqual({
-      access_mode: 'web',
-      access_token: 'at',
-      refresh_token: 'rt',
-      user_id: 'u-9',
-    })
-  })
-
-  // 账号密码自动登录仅 deepseek 支持（zhipu/kimi 官方无密码登录），入口只对 deepseek 渲染。
-  it('renders the password auto-login toggle only for deepseek web access mode', async () => {
-    const deepseekWrapper = mountModal()
-    await selectWebModeViaCnPlatform(deepseekWrapper, 'DeepSeek')
-    await flushPromises()
-    expect(deepseekWrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(true)
-
-    for (const cardLabel of ['Kimi', 'Zhipu GLM'] as const) {
+  // 账号密码自动登录仅 deepseek；zhipu/kimi 走手机号 + 短信码。三个官方平台的 web 接入
+  // 模式均渲染自动登录入口（zhipu/kimi 不再被 password→短信发码桩关闭）。
+  it('renders the auto-login toggle and risk warning for every web access platform', async () => {
+    for (const cardLabel of ['DeepSeek', 'Kimi', 'Zhipu GLM'] as const) {
       const wrapper = mountModal()
       await selectWebModeViaCnPlatform(wrapper, cardLabel)
       await flushPromises()
-      expect(wrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(false)
+      // 风险提示必须可见（方案 §2.2）
+      expect(wrapper.find('[data-testid="web-risk-warning"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="web-auto-login-toggle"]').exists()).toBe(true)
     }
   })
 
-  it('fills the create payload from a captured login (applied event) and submits it', async () => {
+  // zhipu/kimi 短信登录成功：后端已在 login 成功时新建/回填账号，弹窗不得二次建号，
+  // 直接刷新账号列表并展示成功（E6 契约：前端按 account_id 判定短信登录成功）。
+  it('zhipu SMS login success refreshes the list without creating a second account', async () => {
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
-    await flushPromises()
-    await wrapper.get('[data-testid="web-open-login-modal"]').trigger('click')
+    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
-    // 捕获回填路径：内嵌登录弹窗校验通过后 emit applied，凭证必须真正写入创建请求
-    // （登录成功本身不建号，回填后仍走同一提交链路）。
-    const loginModal = wrapper.findComponent(WebLoginModal)
-    expect(loginModal.exists()).toBe(true)
-    loginModal.vm.$emit('applied', {
-      platform: 'deepseek',
-      credentials: { access_mode: 'web', cookie: 'sessionid=captured' },
+    await flushPromises()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    expect(autoLoginForm.exists()).toBe(true)
+    autoLoginForm.vm.$emit('recovered', {
+      platform: 'zhipu',
+      account_id: 77
     })
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('captured account')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload?.platform).toBe('deepseek')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.cookie).toBe('sessionid=captured')
-    expect(payload?.credentials?.access_mode).toBe('web')
+    // 后端已落库：弹窗不二次建号。
+    expect(createAccountMock).not.toHaveBeenCalled()
+    // 刷新账号列表（父级监听 created 事件）。
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    expect(showSuccessMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.smsLoginSuccess')
   })
 
-  it('rejects blank cookie without calling create API', async () => {
+  // 自动登录成功后后端已原子建号，弹窗仅刷新列表，不再二次创建。
+  it('does not create a second account after DeepSeek auto-login success', async () => {
     const wrapper = mountModal()
     await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('   ')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds auto login')
+    await flushPromises()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    expect(autoLoginForm.exists()).toBe(true)
+    autoLoginForm.vm.$emit('recovered', {
+      platform: 'deepseek',
+      account_id: 78,
+    })
     await flushPromises()
 
     expect(createAccountMock).not.toHaveBeenCalled()
-  })
-
-  it('rejects unparseable kimi token JSON without calling create API', async () => {
-    const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Kimi')
-    await flushPromises()
-
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web kimi account')
-    await wrapper.get('[data-testid="kimi-token-json"]').setValue('not-json')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(wrapper.emitted('created')).toHaveLength(1)
+    expect(showSuccessMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.smsLoginSuccess')
   })
 
   it('hides the generic api key block for web platforms', async () => {
@@ -1036,7 +1000,6 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="web-cookie-input"]').exists()).toBe(true)
     expect(wrapper.find('form#create-account-form input[type="password"]').exists()).toBe(false)
   })
 
@@ -1078,54 +1041,39 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
     syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
   })
 
-  // (a) 载荷门控：网页接入模式走网页凭证路径，payload 不得携带 upstream_billing_probe_enabled。
-  it('omits upstream_billing_probe_enabled from the create payload for zhipu web access mode credentials', async () => {
+  // (a) 载荷门控：网页接入模式把完整草稿交给登录组件，并排除上游计费探测开关。
+  it('passes a complete draft without upstream_billing_probe_enabled to web auto-login', async () => {
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
     await flushPromises()
 
-    expect(createAccountMock).toHaveBeenCalledTimes(1)
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    // 平台归并 PR-3：网页接入模式平台为官方值 zhipu，网页语义在 credentials["access_mode"]="web"。
-    expect(payload?.platform).toBe('zhipu')
-    expect(payload?.type).toBe('apikey')
-    expect(payload?.credentials?.access_mode).toBe('web')
-    expect(payload?.credentials?.cookie).toBe('sessionid=test-cookie')
-    // isUpstreamBillingProbeEligible('zhipu','apikey') + access_mode==='web' → 不在探测白名单，
-    // 后端契约要求网页接入模式建号请求不得携带 upstream_billing_probe_enabled=true。
-    expect(payload?.upstream_billing_probe_enabled).toBeUndefined()
-    expect(showErrorMock).not.toHaveBeenCalled()
+    const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
+    const draft = autoLoginForm.props('accountDraft')
+    expect(draft).toMatchObject({
+      name: 'web ds account',
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { access_mode: 'web' },
+    })
+    expect(draft.upstream_billing_probe_enabled).toBe(true)
+    expect(createAccountMock).not.toHaveBeenCalled()
   })
 
-  // (b) 错误展示：create reject 为拦截器摊平的平面对象（无 response 属性），
-  // showError 应收到 message 原文，而非通用 failedToCreate 文案。
-  it('surfaces the flat interceptor error message instead of the generic failedToCreate copy', async () => {
-    createAccountMock.mockRejectedValue({
-      status: 400,
-      code: 400,
-      reason: 'UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID',
-      message: 'account is not an API key account',
-    })
-
+  // (b) 普通提交入口不得绕过网页登录验证创建半成品账号。
+  it('blocks direct form submission until web auto-login succeeds', async () => {
     const wrapper = mountModal()
-    await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
+    await selectWebModeViaCnPlatform(wrapper, 'DeepSeek')
     await flushPromises()
 
-    await wrapper.get('form#create-account-form input[type="text"]').setValue('web zhipu account')
-    await wrapper.get('[data-testid="web-cookie-input"]').setValue('sessionid=test-cookie')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     await flushPromises()
 
-    // submitCreateAccount 的 catch 走 error?.message || t('failedToCreate')；
-    // 平面错误含 message，应原样透传。useI18n 在 spec 内为 key->key，故通用文案即字面 i18n key。
-    expect(showErrorMock).toHaveBeenCalledWith('account is not an API key account')
-    expect(showErrorMock).not.toHaveBeenCalledWith('admin.accounts.failedToCreate')
-    // 创建失败，不应派发 created 事件。
+    expect(createAccountMock).not.toHaveBeenCalled()
+    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.webLogin.autoLogin.completeLoginFirst')
     expect(wrapper.emitted('created')).toBeUndefined()
   })
 })

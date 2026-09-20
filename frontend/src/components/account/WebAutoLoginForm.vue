@@ -1,193 +1,301 @@
 <template>
   <div data-testid="web-auto-login-form" class="space-y-3">
     <p class="input-hint">
-      {{ needsPhone ? t('admin.accounts.webLogin.autoLogin.zhipuKimiHint') : t('admin.accounts.webLogin.autoLogin.deepseekHint') }}
+      {{ isSmsMode ? t('admin.accounts.webLogin.autoLogin.zhipuKimiHint') : t('admin.accounts.webLogin.autoLogin.deepseekHint') }}
     </p>
 
-    <!-- 账号密码登录（第一步） -->
-    <div v-if="!needsSms" class="space-y-3">
+    <div v-if="!isSmsMode" class="space-y-3">
       <div>
-        <label class="input-label">{{ identifierLabel }}</label>
-        <input
-          v-model="identifierValue"
-          type="text"
-          data-testid="web-auto-login-identifier"
-          class="input"
-          :placeholder="identifierPlaceholder"
-        />
+        <label class="input-label">{{ t('admin.accounts.webLogin.autoLogin.emailLabel') }}</label>
+        <input v-model="identifierValue" type="text" data-testid="web-auto-login-identifier" class="input" :placeholder="t('admin.accounts.webLogin.autoLogin.emailPlaceholder')" />
       </div>
       <div>
         <label class="input-label">{{ t('admin.accounts.webLogin.autoLogin.passwordLabel') }}</label>
-        <input
-          v-model="passwordValue"
-          type="password"
-          data-testid="web-auto-login-password"
-          class="input"
-          :placeholder="t('admin.accounts.webLogin.autoLogin.passwordPlaceholder')"
-        />
+        <input v-model="passwordValue" type="password" data-testid="web-auto-login-password" class="input" :placeholder="t('admin.accounts.webLogin.autoLogin.passwordPlaceholder')" />
       </div>
-      <p v-if="errorMsg" data-testid="web-auto-login-error" class="text-sm text-red-600 dark:text-red-400">
-        {{ errorMsg }}
-      </p>
-      <button
-        type="button"
-        data-testid="web-auto-login-submit"
-        class="btn btn-primary btn-sm"
-        :disabled="submitting"
-        @click="submitPassword"
-      >
+      <p v-if="errorMsg" data-testid="web-auto-login-error" class="text-sm text-red-600 dark:text-red-400">{{ errorMsg }}</p>
+      <button type="button" data-testid="web-auto-login-submit" class="btn btn-primary btn-sm" :disabled="submitting" @click="submitPassword">
         {{ submitting ? t('admin.accounts.webLogin.autoLogin.submitting') : t('admin.accounts.webLogin.autoLogin.submit') }}
       </button>
     </div>
 
-    <!-- 短信验证码登录（第二步：zhipu / kimi needs_sms 时） -->
-    <div v-else data-testid="web-auto-login-sms" class="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">
-      <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
-        {{ t('admin.accounts.webLogin.autoLogin.smsStepTitle') }}
-      </p>
+    <div v-else class="space-y-3">
       <div>
-        <label class="input-label">{{ t('admin.accounts.webLogin.autoLogin.smsCodeLabel') }}</label>
-        <input
-          v-model="smsCode"
-          type="text"
-          data-testid="web-auto-login-sms-code"
-          class="input"
-          :placeholder="t('admin.accounts.webLogin.autoLogin.smsCodePlaceholder')"
-        />
+        <label class="input-label">{{ t('admin.accounts.webLogin.autoLogin.phoneLabel') }}</label>
+        <input v-model="phoneValue" type="text" data-testid="web-auto-login-phone" class="input" :placeholder="t('admin.accounts.webLogin.autoLogin.phonePlaceholder')" />
       </div>
-      <p v-if="smsError" data-testid="web-auto-login-sms-error" class="text-sm text-red-600 dark:text-red-400">
-        {{ smsError }}
-      </p>
-      <button
-        type="button"
-        data-testid="web-auto-login-sms-submit"
-        class="btn btn-primary btn-sm"
-        :disabled="submitting"
-        @click="submitSms"
-      >
-        {{ submitting ? t('admin.accounts.webLogin.autoLogin.submitting') : t('admin.accounts.webLogin.autoLogin.smsSubmit') }}
+
+      <div data-testid="web-auto-login-challenge" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm dark:border-slate-700 dark:bg-slate-800/40">
+        <p class="font-medium text-slate-700 dark:text-slate-200">{{ t('admin.accounts.webLogin.autoLogin.challengeSectionTitle') }}</p>
+        <p data-testid="web-auto-login-challenge-status" class="mt-1 text-slate-500 dark:text-slate-400">{{ challengeStatusText }}</p>
+        <p v-if="challengeText" data-testid="web-auto-login-challenge-text" class="mt-1">{{ challengeText }}</p>
+      </div>
+
+      <button type="button" data-testid="web-auto-login-send-code" class="btn btn-primary btn-sm" :disabled="submitting" @click="sendCode">
+        {{ submitting ? t('admin.accounts.webLogin.autoLogin.smsSending') : t('admin.accounts.webLogin.autoLogin.smsSendCode') }}
       </button>
+
+      <div v-if="smsStepReady" class="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-900/20">
+        <p class="text-sm font-medium text-amber-700 dark:text-amber-300">{{ t('admin.accounts.webLogin.autoLogin.smsStepTitle') }}</p>
+        <div>
+          <label class="input-label">{{ t('admin.accounts.webLogin.autoLogin.smsCodeLabel') }}</label>
+          <input v-model="smsCode" type="text" data-testid="web-auto-login-sms-code" class="input" :placeholder="t('admin.accounts.webLogin.autoLogin.smsCodePlaceholder')" />
+        </div>
+        <p v-if="smsError" data-testid="web-auto-login-sms-error" class="text-sm text-red-600 dark:text-red-400">{{ smsError }}</p>
+        <button type="button" data-testid="web-auto-login-sms-submit" class="btn btn-primary btn-sm" :disabled="submitting" @click="submitSms">
+          {{ submitting ? t('admin.accounts.webLogin.autoLogin.submitting') : t('admin.accounts.webLogin.autoLogin.smsSubmit') }}
+        </button>
+      </div>
+
+      <p v-if="errorMsg" data-testid="web-auto-login-error" class="text-sm text-red-600 dark:text-red-400">{{ errorMsg }}</p>
+      <p v-if="smsSuccess" data-testid="web-auto-login-success" class="text-sm text-green-600 dark:text-green-400">{{ t('admin.accounts.webLogin.autoLogin.smsLoginSuccess') }}</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 注意：zhipu / kimi 官方网页端没有密码登录（微信扫码/短信码），其账号密码 UI 入口
-// 已由 supportsPasswordAutoLogin（credentialsBuilder）在两个调用点关闭，本组件当前
-// 仅对 deepseek 可达。zhipu/kimi 的手机号 + 短信码分支为短信发码通道接入后的预留路径
-// （后端 web-login-password 对这两平台也只返回 needs_sms 桩），接入时恢复入口即可。
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import {
-  webLoginPassword,
-  webLoginSms,
-  type WebLoginPasswordRequest
-} from '@/api/admin/webAutoLogin'
+import { webLoginPassword, webLoginSms, startWebLoginChallenge, getWebLoginChallengeStatus, consumeWebLoginChallenge, type WebLoginPasswordRequest, type WebLoginChallengeRequest } from '@/api/admin/webAutoLogin'
+import type { CreateAccountRequest } from '@/types'
 import { extractApiErrorMessage } from '@/utils/apiError'
 
-const props = defineProps<{
-  platform: string
-  /** 已有账号重登回填时携带，新建账号省略 */
-  accountId?: number
-}>()
-
-const emit = defineEmits<{
-  (e: 'recovered', payload: { platform: string; cookie: string }): void
-}>()
-
+const props = defineProps<{ platform: string; accountId?: number; accountDraft?: CreateAccountRequest }>()
+const emit = defineEmits<{ (e: 'recovered', payload: { platform: string; account_id: number }): void }>()
 const { t } = useI18n()
-
-// zhipu / kimi 使用手机号；deepseek 使用邮箱。
-const needsPhone = computed(() =>
-  props.platform === 'zhipu' || props.platform === 'kimi'
-)
-const identifierLabel = computed(() =>
-  needsPhone.value
-    ? t('admin.accounts.webLogin.autoLogin.phoneLabel')
-    : t('admin.accounts.webLogin.autoLogin.emailLabel')
-)
-const identifierPlaceholder = computed(() =>
-  needsPhone.value
-    ? t('admin.accounts.webLogin.autoLogin.phonePlaceholder')
-    : t('admin.accounts.webLogin.autoLogin.emailPlaceholder')
-)
-
+const isSmsMode = computed(() => props.platform === 'zhipu' || props.platform === 'kimi')
 const identifierValue = ref('')
 const passwordValue = ref('')
+const phoneValue = ref('')
+const smsCode = ref('')
+const smsStepReady = ref(false)
+const smsError = ref('')
+const smsSuccess = ref(false)
 const submitting = ref(false)
 const errorMsg = ref('')
+const challengeStatus = ref<'pending' | 'succeeded' | 'failed' | 'expired' | 'context_gap'>('pending')
+const challengeText = ref('')
+const challengeSessionId = ref<string | null>(null)
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let requestGeneration = 0
+let mounted = true
 
-const needsSms = ref(false)
-const sessionToken = ref('')
-const smsCode = ref('')
-const smsError = ref('')
+const challengeStatusText = computed(() => t(`admin.accounts.webLogin.autoLogin.challengeStatus.${challengeStatus.value}`))
+
+function clearPollTimer() {
+  if (pollTimer !== undefined) {
+    clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
+}
+
+function challengePayload(): WebLoginChallengeRequest {
+  const payload: WebLoginChallengeRequest = {
+    platform: props.platform as 'zhipu' | 'kimi',
+    phone: phoneValue.value.trim()
+  }
+  if (props.accountId != null) payload.account_id = props.accountId
+  else if (props.accountDraft) payload.account_draft = props.accountDraft
+  return payload
+}
+
+function isContextGapError(err: unknown) {
+  const e = err as { status?: number; code?: number | string; metadata?: Record<string, unknown> } | null
+  return e?.status === 501 || e?.code === 501 || e?.metadata?.reason === 'context_gap' || e?.metadata?.code === 'context_gap'
+}
+
+function webLoginErrorText(err: unknown, fallback: string) {
+  const detail = (err as { metadata?: { detail?: unknown } } | null)?.metadata?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  return extractApiErrorMessage(err, fallback)
+}
+
+function stopChallenge(message: string, status: 'failed' | 'expired' | 'context_gap' = 'failed') {
+  clearPollTimer()
+  challengeStatus.value = status
+  challengeSessionId.value = null
+  smsStepReady.value = false
+  errorMsg.value = message
+}
+
+async function pollChallenge(sessionId: string, generation: number): Promise<boolean> {
+  while (mounted && generation === requestGeneration) {
+    try {
+      const resp = await getWebLoginChallengeStatus(sessionId)
+      if (!mounted || generation !== requestGeneration) return false
+      const status = resp.status
+      if (status === 'succeeded') {
+        challengeStatus.value = 'succeeded'
+        return true
+      }
+      if (status === 'context_gap') {
+        stopChallenge(resp.detail || t('admin.accounts.webLogin.autoLogin.challengeUnavailable'), 'context_gap')
+        return false
+      }
+      if (status === 'failed' || status === 'expired') {
+        stopChallenge(resp.detail || t('admin.accounts.webLogin.autoLogin.loginFailed'), status)
+        return false
+      }
+      await new Promise<void>((resolve) => {
+        pollTimer = setTimeout(resolve, 1000)
+      })
+    } catch (err) {
+      if (mounted && generation === requestGeneration) {
+        stopChallenge(isContextGapError(err)
+          ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
+          : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed')),
+        isContextGapError(err) ? 'context_gap' : 'failed')
+      }
+      return false
+    }
+  }
+  return false
+}
 
 async function submitPassword() {
+  if (submitting.value) return
   errorMsg.value = ''
-  smsError.value = ''
+  // identifier 可 trim；密码必须保留原始值（首尾空格可能是密码的一部分），仅空检查时 trim。
   const identifier = identifierValue.value.trim()
-  const password = passwordValue.value.trim()
-  if (!identifier || !password) {
+  const password = passwordValue.value
+  if (!identifier || !password.trim()) {
     errorMsg.value = t('admin.accounts.webLogin.autoLogin.fillRequired')
     return
   }
   submitting.value = true
+  const generation = ++requestGeneration
   try {
-    const payload: WebLoginPasswordRequest = {
-      platform: props.platform,
-      login_password: password
-    }
-    if (needsPhone.value) payload.login_phone = identifier
-    else payload.login_email = identifier
+    const payload: WebLoginPasswordRequest = { platform: props.platform, login_email: identifier, login_password: password }
     if (props.accountId != null) payload.account_id = props.accountId
-
+    else if (props.accountDraft) payload.account_draft = props.accountDraft
     const resp = await webLoginPassword(payload)
-    if (!resp.success) {
-      // 业务级失败：如实展示后端 detail（中文），前端兜底 i18n key。
+    if (!mounted || generation !== requestGeneration) return
+    if (!resp.success || resp.account_id == null) {
       errorMsg.value = resp.detail || t('admin.accounts.webLogin.autoLogin.loginFailed')
       return
     }
-    if (resp.needs_sms) {
-      needsSms.value = true
-      sessionToken.value = resp.session_token ?? ''
-      return
-    }
-    if (resp.cookie) {
-      emit('recovered', { platform: props.platform, cookie: resp.cookie })
-      return
-    }
-    errorMsg.value = t('admin.accounts.webLogin.autoLogin.loginFailed')
+    challengeStatus.value = 'succeeded'
+    emit('recovered', { platform: props.platform, account_id: resp.account_id })
   } catch (err) {
-    errorMsg.value = extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
+    if (mounted && generation === requestGeneration) errorMsg.value = webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
   } finally {
-    submitting.value = false
+    if (mounted && generation === requestGeneration) submitting.value = false
+  }
+}
+
+function buildSmsPayload(action: 'send_code' | 'login'): Parameters<typeof webLoginSms>[0] {
+  const payload: Parameters<typeof webLoginSms>[0] = { action, platform: props.platform as 'zhipu' | 'kimi', phone: phoneValue.value.trim() }
+  if (challengeSessionId.value) payload.challenge_session_id = challengeSessionId.value
+  if (action === 'login') payload.sms_code = smsCode.value.trim()
+  return payload
+}
+
+async function sendCode() {
+  if (submitting.value) return
+  errorMsg.value = ''
+  smsError.value = ''
+  smsSuccess.value = false
+  clearPollTimer()
+  challengeSessionId.value = null
+  if (!phoneValue.value.trim()) {
+    errorMsg.value = t('admin.accounts.webLogin.autoLogin.phoneRequired')
+    return
+  }
+  if (props.accountId == null && props.accountDraft && !String(props.accountDraft.name || '').trim()) {
+    errorMsg.value = t('admin.accounts.webLogin.autoLogin.accountNameRequired')
+    return
+  }
+  submitting.value = true
+  challengeStatus.value = 'pending'
+  challengeText.value = ''
+  const generation = ++requestGeneration
+  try {
+    const resp = await startWebLoginChallenge(challengePayload())
+    if (!mounted || generation !== requestGeneration) return
+    if (!resp.success || !resp.session_id) {
+      stopChallenge(resp.detail || t('admin.accounts.webLogin.autoLogin.challengeUnavailable'), resp.status === 'context_gap' ? 'context_gap' : 'failed')
+      return
+    }
+    challengeSessionId.value = resp.session_id
+    if (!(await pollChallenge(resp.session_id, generation))) return
+    if (!mounted || generation !== requestGeneration) return
+    const consumed = await consumeWebLoginChallenge(resp.session_id, challengePayload())
+    if (!mounted || generation !== requestGeneration) return
+    if (!consumed.success || (consumed.status !== 'consumed' && consumed.status !== 'succeeded')) {
+      stopChallenge(consumed.detail || t('admin.accounts.webLogin.autoLogin.challengeUnavailable'))
+      return
+    }
+    const smsResp = await webLoginSms(buildSmsPayload('send_code'))
+    if (!mounted || generation !== requestGeneration) return
+    if (!smsResp.success) {
+      errorMsg.value = smsResp.detail || t('admin.accounts.webLogin.autoLogin.sendCodeFailed')
+      return
+    }
+    smsStepReady.value = true
+  } catch (err) {
+    if (mounted && generation === requestGeneration) {
+      stopChallenge(isContextGapError(err)
+        ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
+        : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.sendCodeFailed')),
+      isContextGapError(err) ? 'context_gap' : 'failed')
+    }
+  } finally {
+    if (mounted && generation === requestGeneration) submitting.value = false
   }
 }
 
 async function submitSms() {
+  if (submitting.value) return
+  errorMsg.value = ''
   smsError.value = ''
-  const code = smsCode.value.trim()
-  if (!code) {
+  smsSuccess.value = false
+  if (!challengeSessionId.value || challengeStatus.value !== 'succeeded') {
+    smsError.value = t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
+    return
+  }
+  if (!smsCode.value.trim()) {
     smsError.value = t('admin.accounts.webLogin.autoLogin.smsCodeRequired')
     return
   }
   submitting.value = true
+  const generation = ++requestGeneration
   try {
-    const resp = await webLoginSms({ session_token: sessionToken.value, sms_code: code })
-    if (!resp.success) {
-      // 本期短信发码通道尚未接入：如实展示后端返回的细化错误，不伪造成功。
-      smsError.value = resp.detail || t('admin.accounts.webLogin.autoLogin.smsNotConnected')
+    const resp = await webLoginSms(buildSmsPayload('login'))
+    if (!mounted || generation !== requestGeneration) return
+    if (!resp.success || resp.account_id == null) {
+      smsError.value = resp.detail || t('admin.accounts.webLogin.autoLogin.loginFailed')
       return
     }
-    if (resp.cookie) {
-      emit('recovered', { platform: props.platform, cookie: resp.cookie })
-      return
-    }
-    smsError.value = t('admin.accounts.webLogin.autoLogin.smsNotConnected')
+    smsSuccess.value = true
+    emit('recovered', { platform: props.platform, account_id: resp.account_id })
   } catch (err) {
-    smsError.value = extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.smsNotConnected'))
+    if (mounted && generation === requestGeneration) {
+      smsError.value = isContextGapError(err)
+        ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
+        : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
+    }
   } finally {
-    submitting.value = false
+    if (mounted && generation === requestGeneration) submitting.value = false
   }
 }
+
+watch(() => props.platform, () => {
+  clearPollTimer()
+  requestGeneration += 1
+  submitting.value = false
+  smsStepReady.value = false
+  challengeSessionId.value = null
+  smsCode.value = ''
+  smsError.value = ''
+  smsSuccess.value = false
+  errorMsg.value = ''
+  challengeStatus.value = 'pending'
+  challengeText.value = ''
+})
+
+onBeforeUnmount(() => {
+  mounted = false
+  clearPollTimer()
+  requestGeneration += 1
+})
 </script>

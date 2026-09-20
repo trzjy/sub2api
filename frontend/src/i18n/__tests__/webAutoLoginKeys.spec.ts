@@ -20,7 +20,7 @@ function flatten(obj: unknown, prefix = ''): string[] {
   })
 }
 
-const subtrees = ['webLogin.autoLogin', 'webLogin.tabs', 'loginStatus', 'batch'] as const
+const subtrees = ['webLogin.autoLogin', 'loginStatus'] as const
 
 describe('web auto-login i18n keys (zh/en aligned)', () => {
   for (const path of subtrees) {

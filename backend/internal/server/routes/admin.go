@@ -24,9 +24,6 @@ func RegisterAdminRoutes(
 	// 插件 UI 使用短时能力 URL，仅提供经过安装校验的静态资源。
 	v1.GET("/plugin-ui/:token/*path", h.Admin.Plugin.ServeUIAsset)
 
-	// 网页版登录自动 Cookie 捕获：嵌入浏览器经此后反代访问上游登录页（无鉴权，靠临时 Token 保护）。
-	v1.Any("/web-login-proxy/:token/*path", h.Admin.WebLoginProxy.Proxy)
-
 	admin := v1.Group("/admin")
 	admin.Use(gin.HandlerFunc(adminAuth))
 	// 面板全局按用户限流（默认管理员豁免，可在系统设置中关闭豁免）
@@ -68,13 +65,10 @@ func RegisterAdminRoutes(
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
 
-	// 国产供应商（kimi/zhipu/deepseek）额度与余额
-	registerCNProviderRoutes(admin, h)
+		// 国产供应商（kimi/zhipu/deepseek）额度与余额
+		registerCNProviderRoutes(admin, h)
 
-	// 网页版登录自动 Cookie 捕获（管理端面）
-	registerWebLoginProxyRoutes(admin, h)
-
-	// 代理管理
+		// 代理管理
 		registerProxyRoutes(admin, h, stepUpAuth)
 
 		// 卡密管理
@@ -515,13 +509,12 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/batch-clear-error", h.Admin.Account.BatchClearError)
 		accounts.POST("/batch-refresh", h.Admin.Account.BatchRefresh)
 
-		// 网页版平台自动登录 + 批量端点
+		// 网页版平台登录入口：deepseek 密码登录 / zhipu·kimi 手机号短信码登录
 		accounts.POST("/web-login-password", h.Admin.Account.WebLoginPassword)
-		accounts.POST("/batch-login", h.Admin.Account.BatchLogin)
-		accounts.POST("/batch-test", h.Admin.Account.BatchTest)
-		accounts.POST("/batch-delete-banned", h.Admin.Account.BatchDeleteBanned)
-		accounts.POST("/batch-status", h.Admin.Account.BatchStatus)
-		accounts.GET("/export", h.Admin.Account.ExportWebAccounts)
+		accounts.POST("/web-login-sms", h.Admin.Account.WebLoginSMS)
+		accounts.POST("/web-login-challenge/start", h.Admin.Account.WebLoginChallengeStart)
+		accounts.GET("/web-login-challenge/:session_id/status", h.Admin.Account.WebLoginChallengeStatus)
+		accounts.POST("/web-login-challenge/:session_id/consume", h.Admin.Account.WebLoginChallengeConsume)
 
 		// Antigravity 默认模型映射
 		accounts.GET("/antigravity/default-model-mapping", h.Admin.Account.GetAntigravityDefaultModelMapping)
@@ -621,20 +614,6 @@ func registerCNProviderRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		cn.GET("/accounts/:id/quota", h.Admin.CNProvider.QueryQuota)
 		// payg 账号余额（kimi/deepseek；zhipu 无余额端点）。
 		cn.GET("/accounts/:id/balance", h.Admin.CNProvider.QueryBalance)
-	}
-}
-
-// registerWebLoginProxyRoutes 注册网页版登录自动 Cookie 捕获的管理端端点
-// （会话创建/查询/删除）。实际反代入口在 admin 组外的 v1.Any 注册。
-func registerWebLoginProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	if h == nil || h.Admin == nil || h.Admin.WebLoginProxy == nil {
-		return
-	}
-	sessions := admin.Group("/web-login-proxy/sessions")
-	{
-		sessions.POST("", h.Admin.WebLoginProxy.CreateSession)
-		sessions.GET("/:token/capture", h.Admin.WebLoginProxy.GetCapture)
-		sessions.DELETE("/:token", h.Admin.WebLoginProxy.DeleteSession)
 	}
 }
 

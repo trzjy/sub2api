@@ -24,6 +24,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -481,6 +482,7 @@ type OpenAIGatewayService struct {
 	grokCredentialMutationLocks         sync.Map // key: int64(accountID), value: *sync.Mutex
 	openaiOAuth429WindowStartUnixNano   atomic.Int64
 	openaiOAuth429WindowCount           atomic.Int64
+	deepseekReloginGroup                singleflight.Group
 	openaiWSRetryMetrics                openAIWSRetryMetrics
 	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
 	codexSnapshotThrottle               *accountWriteThrottle

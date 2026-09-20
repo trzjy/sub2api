@@ -82,9 +82,55 @@ func TestMergePreservingSensitiveCreds_NonSensitiveDeletionAllowed(t *testing.T)
 
 func TestIsSensitiveCredentialKey(t *testing.T) {
 	require.True(t, IsSensitiveCredentialKey("refresh_token"))
+	require.True(t, IsSensitiveCredentialKey("login_email"))
+	require.True(t, IsSensitiveCredentialKey("login_password"))
+	require.True(t, IsSensitiveCredentialKey("login_refresh_token"))
 	require.True(t, IsSensitiveCredentialKey("api_key"))
 	require.True(t, IsSensitiveCredentialKey("private_key"))
 	require.False(t, IsSensitiveCredentialKey("base_url"))
 	require.False(t, IsSensitiveCredentialKey(""))
 	require.False(t, IsSensitiveCredentialKey("model_mapping"))
+}
+
+// 网页登录秘密由全局 SensitiveCredentialKeys 自动保留；login_phone 通过 extraPreserveKeys
+// 获得相同的缺省保留语义，incoming 没带时绝不误清空。
+func TestMergePreservingSensitiveCreds_ExtraPreserveKeys(t *testing.T) {
+	existing := map[string]any{
+		"login_email":         "u@x.com",
+		"login_password":      "pw-old",
+		"login_phone":         "13800000000",
+		"login_refresh_token": "rt-old",
+		"cookie":              "COOKIE-OLD",
+	}
+	incoming := map[string]any{
+		"cookie": "COOKIE-NEW",
+		// 没带 login_* —— 应保留
+	}
+	out := MergePreservingSensitiveCreds(existing, incoming, "login_phone")
+	require.Equal(t, "u@x.com", out["login_email"])
+	require.Equal(t, "pw-old", out["login_password"])
+	require.Equal(t, "13800000000", out["login_phone"])
+	require.Equal(t, "rt-old", out["login_refresh_token"])
+	require.Equal(t, "COOKIE-NEW", out["cookie"], "全局敏感键 cookie 仍按原语义：incoming 提供则覆盖")
+}
+
+func TestMergePreservingSensitiveCreds_ExtraPreserveKeysOverwritesWhenIncomingProvides(t *testing.T) {
+	existing := map[string]any{
+		"login_email":    "old@x.com",
+		"login_password": "pw-old",
+	}
+	incoming := map[string]any{
+		"login_email":    "new@x.com",
+		"login_password": "pw-new",
+	}
+	out := MergePreservingSensitiveCreds(existing, incoming, "login_phone")
+	require.Equal(t, "new@x.com", out["login_email"], "incoming 显式传入应覆盖")
+	require.Equal(t, "pw-new", out["login_password"])
+}
+
+func TestMergePreservingSensitiveCreds_LoginSecretsIncludedByDefault(t *testing.T) {
+	existing := map[string]any{"login_email": "u@x.com"}
+	incoming := map[string]any{"cookie": "ck"}
+	out := MergePreservingSensitiveCreds(existing, incoming)
+	require.Equal(t, "u@x.com", out["login_email"], "login_email 纳入全局敏感清单后默认保留")
 }

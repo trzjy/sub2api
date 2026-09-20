@@ -56,18 +56,21 @@ func TestPrepareCredentialsForStorage_PassthroughKeepsPlaintext(t *testing.T) {
 func TestPrepareCredentialsForStorage_EncryptsSensitiveKeysOnly(t *testing.T) {
 	withTestCredCipher(t, func() {
 		in := map[string]any{
-			"access_token": "at-secret",
-			"refresh_token": "",
-			"api_key":      "sk-live-123",
-			"base_url":     "https://example.com",
-			"expires_at":   "1893456000",
-			"session_key":  12345, // 非字符串值不加密
+			"access_token":        "at-secret",
+			"refresh_token":       "",
+			"login_email":         "user@example.com",
+			"login_password":      "password-secret",
+			"login_refresh_token": "login-refresh-secret",
+			"api_key":             "sk-live-123",
+			"base_url":            "https://example.com",
+			"expires_at":          "1893456000",
+			"session_key":         12345, // 非字符串值不加密
 		}
 		prepared, err := prepareCredentialsForStorage(in)
 		require.NoError(t, err)
 
 		// 敏感字符串子键全部带前缀。
-		for _, key := range []string{"access_token", "api_key"} {
+		for _, key := range []string{"access_token", "login_email", "login_password", "login_refresh_token", "api_key"} {
 			value, ok := prepared.storage[key].(string)
 			require.True(t, ok, key)
 			require.True(t, credcrypt.IsEncrypted(value), key)

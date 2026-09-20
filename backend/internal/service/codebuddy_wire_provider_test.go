@@ -32,6 +32,6 @@ func TestWireGenPassesCodeBuddyDirectOrigin(t *testing.T) {
 
 	require.Contains(t, src, "service.ProvideCodeBuddyDirectOrigin(configConfig)",
 		"wire_gen.go 必须经 ProvideCodeBuddyDirectOrigin 注入 codebuddy direct-origin 配置")
-	require.Regexp(t, `service\.NewCodeBuddyOAuthService\(proxyRepository,\s*codeBuddyDirectOrigin\)`, src,
-		"wire_gen.go 必须把 codebuddyDirectOrigin 传给 NewCodeBuddyOAuthService（非 variadic 双参调用）")
+	require.Regexp(t, `service\.NewCodeBuddyOAuthService\(proxyRepository,\s*\w+\)`, src,
+		"wire_gen.go 必须把 ProvideCodeBuddyDirectOrigin 的返回值传给 NewCodeBuddyOAuthService（非 variadic 双参调用；不约束生成器变量名）")
 }

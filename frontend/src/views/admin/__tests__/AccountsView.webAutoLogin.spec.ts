@@ -38,14 +38,6 @@ const {
   showInfo: vi.fn()
 }))
 
-const webAutoLogin = vi.hoisted(() => ({
-  batchLogin: vi.fn(),
-  batchTest: vi.fn(),
-  batchDeleteBanned: vi.fn(),
-  batchStatus: vi.fn(),
-  exportWebAccounts: vi.fn()
-}))
-
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
@@ -62,9 +54,6 @@ vi.mock('@/api/admin', () => ({
     proxies: { getAll: getAllProxies },
     groups: { getAll: getAllGroups }
   }
-}))
-vi.mock('@/api/admin/webAutoLogin', () => ({
-  webAutoLoginAPI: webAutoLogin
 }))
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({ showError, showSuccess, showWarning, showInfo })
@@ -176,79 +165,14 @@ async function flush() {
   await flushPromises()
 }
 
-describe('AccountsView web auto-login batch actions', () => {
-  it('one-click login calls batchLogin and shows a success toast', async () => {
-    webAutoLogin.batchLogin.mockResolvedValue({ results: [{ id: 1, recovered: true, needs_sms: false }], summary: { success: 1, failed: 0 } })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkWebLogin()
-    await flush()
-
-    expect(webAutoLogin.batchLogin).toHaveBeenCalledWith([1])
-    expect(showSuccess).toHaveBeenCalled()
-  })
-
-  it('one-click test calls batchTest', async () => {
-    webAutoLogin.batchTest.mockResolvedValue({ results: [{ id: 1, success: true }] })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkWebTest()
-    await flush()
-
-    expect(webAutoLogin.batchTest).toHaveBeenCalledWith([1])
-    expect(showSuccess).toHaveBeenCalled()
-  })
-
-  it('delete banned runs the two-step confirm flow', async () => {
-    webAutoLogin.batchDeleteBanned
-      .mockResolvedValueOnce({ candidates: [{ id: 1, name: 'web-acct', reason: 'banned' }], deleted: 0 })
-      .mockResolvedValueOnce({ candidates: [{ id: 1, name: 'web-acct', reason: 'banned' }], deleted: 1 })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkDeleteBanned()
-    await flush()
-
-    expect(webAutoLogin.batchDeleteBanned).toHaveBeenCalledTimes(2)
-    expect(webAutoLogin.batchDeleteBanned).toHaveBeenLastCalledWith(true)
-    expect(showSuccess).toHaveBeenCalled()
-  })
-
-  it('batch enable calls batchStatus with active', async () => {
-    webAutoLogin.batchStatus.mockResolvedValue({ success: 1, failed: 0 })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkWebStatus('active')
-    await flush()
-
-    expect(webAutoLogin.batchStatus).toHaveBeenCalledWith({ ids: [1], status: 'active' })
-    expect(showSuccess).toHaveBeenCalled()
-  })
-
-  it('export web requires a web-platform selection', async () => {
-    webAutoLogin.exportWebAccounts.mockResolvedValue(new Blob(['{}'], { type: 'application/json' }))
-    // 初始列表加载一个非 web（openai）账号：选中项必须真的是非 web 平台，
-    // 否则 handleBulkExportWeb 会从 accounts.value 读到 web 平台而误触发导出。
-    listAccounts.mockResolvedValue({ items: [webAccount({ id: 1, platform: 'openai' })], total: 1, page: 1, page_size: 20, pages: 1 })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkExportWeb()
-    await flush()
-    expect(webAutoLogin.exportWebAccounts).not.toHaveBeenCalled()
-    expect(showError).toHaveBeenCalled()
-  })
-
+describe('AccountsView web login status badges', () => {
   it('renders a login-status badge for each account', async () => {
     listAccounts.mockResolvedValue({
       items: [
-        webAccount({ id: 1, status: 'active', credentials: { access_mode: 'web', cookie: 'ck' } }),
-        webAccount({ id: 2, status: 'error', error_message: 'token expired', credentials: { access_mode: 'web', cookie: 'ck' } }),
+        webAccount({ id: 1, status: 'active', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
+        webAccount({ id: 2, status: 'error', error_message: 'token expired', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
         webAccount({ id: 3, credentials: { access_mode: 'web' }, error_message: null }),
-        webAccount({ id: 4, status: 'active', credentials: { access_mode: 'web', cookie: 'ck' }, error_message: '账号已被封禁' })
+        webAccount({ id: 4, status: 'active', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true }, error_message: '账号已被封禁' })
       ],
       total: 4,
       page: 1,
@@ -285,48 +209,6 @@ describe('AccountsView web auto-login batch actions', () => {
     expect(badges[0].text()).toBe('admin.accounts.loginStatus.active')
     expect(badges[0].classes()).toContain('bg-green-100')
     expect(badges[0].classes()).not.toContain('bg-gray-100')
-  })
-
-  it('blocks web export for a same-platform ordinary API account', async () => {
-    webAutoLogin.exportWebAccounts.mockResolvedValue(new Blob(['{}'], { type: 'application/json' }))
-    listAccounts.mockResolvedValue({
-      items: [webAccount({ id: 1, platform: 'zhipu', type: 'apikey', credentials: {} })],
-      total: 1,
-      page: 1,
-      page_size: 20,
-      pages: 1
-    })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1])
-    await wrapper.vm.handleBulkExportWeb()
-    await flush()
-
-    expect(webAutoLogin.exportWebAccounts).not.toHaveBeenCalled()
-    expect(showError).toHaveBeenCalledWith('admin.accounts.batch.selectWebOnly')
-  })
-
-  it('blocks web export when the selection mixes a web account with an API account', async () => {
-    // 第一个选中项是 web 账号：必须校验全部选中项，不能只看第一个。
-    webAutoLogin.exportWebAccounts.mockResolvedValue(new Blob(['{}'], { type: 'application/json' }))
-    listAccounts.mockResolvedValue({
-      items: [
-        webAccount({ id: 1, platform: 'deepseek', credentials: { access_mode: 'web', cookie: 'ck' } }),
-        webAccount({ id: 2, platform: 'zhipu', type: 'apikey', credentials: {} })
-      ],
-      total: 2,
-      page: 1,
-      page_size: 20,
-      pages: 1
-    })
-    const wrapper = mountView()
-    await flush()
-    wrapper.vm.setSelectedIds([1, 2])
-    await wrapper.vm.handleBulkExportWeb()
-    await flush()
-
-    expect(webAutoLogin.exportWebAccounts).not.toHaveBeenCalled()
-    expect(showError).toHaveBeenCalledWith('admin.accounts.batch.selectWebOnly')
   })
 
   it('keeps active login status for kimi when the list response only carries credentials_status.has_access_token', async () => {
@@ -389,7 +271,9 @@ describe('AccountsView web auto-login batch actions', () => {
     }
   })
 
-  it('falls back to plaintext credentials fields when credentials_status is absent (legacy backend)', async () => {
+  it('does not fall back to plaintext credentials fields when credentials_status is absent', async () => {
+    // 明文兜底已删除：即使 credentials 里仍有 cookie/access_token 明文，只要
+    // credentials_status 缺省就视为无登录态（unconfigured）。
     listAccounts.mockResolvedValue({
       items: [
         webAccount({
@@ -416,8 +300,8 @@ describe('AccountsView web auto-login batch actions', () => {
     const badges = wrapper.findAll('[data-testid="login-status-badge"]')
     expect(badges.length).toBe(2)
     for (const badge of badges) {
-      expect(badge.text()).toBe('admin.accounts.loginStatus.active')
-      expect(badge.classes()).toContain('bg-green-100')
+      expect(badge.text()).toBe('admin.accounts.loginStatus.unconfigured')
+      expect(badge.classes()).toContain('bg-gray-100')
     }
   })
 

@@ -155,9 +155,9 @@ describe('EditAccountModal web access mode', () => {
     })
     const wrapper = mountModal(account)
 
-    // Web 模式隐藏 API 专属字段
+    // Web 模式隐藏 API 专属字段；手工 Cookie 输入旧链已归零（E5），不再渲染
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="web-edit-cookie-input"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-edit-cookie-input"]').exists()).toBe(false)
 
     await submit(wrapper)
 
@@ -176,8 +176,11 @@ describe('EditAccountModal web access mode', () => {
     })
     const wrapper = mountModal(account)
 
-    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="web-edit-cookie-input"]').exists()).toBe(true)
+    // Web 模式隐藏 API 专属字段；手工 Cookie 输入旧链已归零（E5）。
+    // deepseek web 账号仍额外展示自动续期邮箱/密码输入（续期专用，不替代 API Key 语义）。
+    expect(wrapper.find('[data-testid="web-edit-cookie-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="web-edit-login-email-input"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="web-edit-login-password-input"]').exists()).toBe(true)
 
     await submit(wrapper)
 
@@ -185,6 +188,9 @@ describe('EditAccountModal web access mode', () => {
     expect(submitted.access_mode).toBe('web')
     expect(submitted.cookie).toBe('sessionid=xyz')
     expect(submitted.api_key).toBeUndefined()
+    // 未填写续期邮箱/密码：login_* 键不得出现（后端 merge 保留原值）
+    expect(submitted.login_email).toBeUndefined()
+    expect(submitted.login_password).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -198,7 +204,8 @@ describe('EditAccountModal web access mode', () => {
 
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="web-edit-cookie-input"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="web-edit-kimi-token-input"]').exists()).toBe(true)
+    // 手工 Token JSON 输入旧链已归零（E5），不再渲染
+    expect(wrapper.find('[data-testid="web-edit-kimi-token-input"]').exists()).toBe(false)
 
     await submit(wrapper)
 
@@ -240,55 +247,81 @@ describe('EditAccountModal web access mode', () => {
     wrapper.unmount()
   })
 
-  it('keeps the stored cookie when the edit input is left empty and saves a new one when provided', async () => {
+  it('keeps the stored cookie when editing a web account (no manual cookie input)', async () => {
     const account = buildWebAccount('zhipu', {
       access_mode: 'web',
       cookie: 'old=cookie'
     })
-    // 不回显敏感值：Cookie 输入初始为空
+    // 手工 Cookie 输入旧链已归零（E5）：编辑面板不再承担"手工填凭证"职责，
+    // 原凭证始终由后端 merge 保留，无手动入口。
     const wrapper = mountModal(account)
-    const cookieInput = wrapper.get<HTMLTextAreaElement>('[data-testid="web-edit-cookie-input"]')
-    expect(cookieInput.element.value).toBe('')
 
-    // 留空提交：保留原凭证
-    await submit(wrapper)
-    expect(updateAccountMock).toHaveBeenCalledTimes(1)
-    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials.cookie).toBe('old=cookie')
-
-    // 填写新 Cookie 提交：正确保存
-    updateAccountMock.mockClear()
-    await cookieInput.setValue('new=cookie')
+    // 提交：保留原 Cookie 凭证，access_mode 强制 web
     await submit(wrapper)
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
-    expect(submitted.cookie).toBe('new=cookie')
+    expect(submitted.cookie).toBe('old=cookie')
     expect(submitted.access_mode).toBe('web')
     wrapper.unmount()
   })
 
-  it('saves a new kimi access_token and rejects an invalid token json', async () => {
+  it('keeps the stored kimi access_token when editing (no manual token input)', async () => {
     const account = buildWebAccount('kimi', {
       access_mode: 'web',
       access_token: 'token-old'
     })
+    // 手工 Token JSON 输入旧链已归零（E5）：编辑面板不再承担"手工填凭证"职责，
+    // 登录态凭证由登录流程重新取得后写入，原值由后端 merge 保留。
     const wrapper = mountModal(account)
-    const tokenInput = wrapper.get<HTMLTextAreaElement>('[data-testid="web-edit-kimi-token-input"]')
-    expect(tokenInput.element.value).toBe('')
 
-    // 无效 JSON：报错且不提交
-    await tokenInput.setValue('not-json')
-    await submit(wrapper)
-    expect(updateAccountMock).not.toHaveBeenCalled()
-    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.webProviders.errors.webKimiJsonInvalid')
-
-    // 有效 JSON：保存新 access_token，保留 access_mode
-    updateAccountMock.mockClear()
-    await tokenInput.setValue('{"access_token":"token-new"}')
+    // 提交：保留原 access_token，access_mode 强制 web
     await submit(wrapper)
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
-    expect(submitted.access_token).toBe('token-new')
+    expect(submitted.access_token).toBe('token-old')
     expect(submitted.access_mode).toBe('web')
+    wrapper.unmount()
+  })
+
+  it('deepseek: echoes stored login_email and saves renewal email/password when provided', async () => {
+    const account = buildWebAccount('deepseek', {
+      access_mode: 'web',
+      cookie: 'sessionid=xyz',
+      login_email: 'u@deepseek.com',
+      login_password: 'old-secret'
+    })
+    const wrapper = mountModal(account)
+
+    // 明文回显已存续期邮箱；续期密码敏感，一律留空不回显
+    const emailInput = wrapper.get<HTMLInputElement>('[data-testid="web-edit-login-email-input"]')
+    const passwordInput = wrapper.get<HTMLInputElement>('[data-testid="web-edit-login-password-input"]')
+    expect(emailInput.element.value).toBe('u@deepseek.com')
+    expect(passwordInput.element.value).toBe('')
+
+    // 填写新密码提交：login_password 上送新值，login_email 保留
+    updateAccountMock.mockClear()
+    await passwordInput.setValue('new-secret')
+    await submit(wrapper)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted.login_email).toBe('u@deepseek.com')
+    expect(submitted.login_password).toBe('new-secret')
+    wrapper.unmount()
+  })
+
+  it('deepseek: leaves login_password absent when the renewal password field is empty', async () => {
+    const account = buildWebAccount('deepseek', {
+      access_mode: 'web',
+      cookie: 'sessionid=xyz',
+      login_email: 'u@deepseek.com',
+      login_password: 'old-secret'
+    })
+    const wrapper = mountModal(account)
+
+    // 密码留空提交：不带 login_password 键（后端 merge 保留原值，防误清空）
+    await submit(wrapper)
+    const submitted = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(submitted.login_email).toBe('u@deepseek.com')
+    expect(submitted.login_password).toBeUndefined()
     wrapper.unmount()
   })
 })

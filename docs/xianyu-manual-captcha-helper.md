@@ -64,6 +64,19 @@ Worker 容器(yiyutu-server)                 本地工作站(zjy@GL502VML)
 （helper 三路由共用一个 secret）；Worker 容器实测负路径 401、有效鉴权可达 helper。
 其他后台用户需分别配置；监控任务真实风控触发待自然发生。
 
+## 5c. GLM/Kimi 本地人工 SDK 挑战入口
+
+helper 复用既有本地有头 Playwright 进程打开官方验证码组件；管理页不加载第三方 SDK，也不允许管理员手填凭证：
+
+- 启动：`python3 deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py`（默认监听 `127.0.0.1:18089`；配置项 `challenge_max_wait` 默认 180 秒，最大 300 秒）。
+- 健康：`GET /healthz`，无需鉴权，仅返回 `{"ok":true}`。
+- 创建：`POST /challenge/sdk-start`，`X-API-Key: <secret>`，body `{"platform":"glm|kimi","login_session_id":"...","phone":"...","phone_code":"86","timeout":180}`；旧 `/challenge/start` 是同一路由别名。平台、登录会话和手机号共同绑定短期会话，单槽位占用时返回 409。
+- 查询：`GET /challenge/{session_id}/status?platform=...&login_session_id=...&phone=...`，带 `X-API-Key`；绑定不匹配返回 409。
+- 一次性取结果：`POST /challenge/{session_id}/result`，带 `X-API-Key`，body 含同一组 `platform/login_session_id/phone`。Kimi 成功只返回 `data={validate}`；GLM 仅在真实 SDK 回调含 `rid+md5` 时返回 `data={rid,md5,phone_code}`。终态读取后立即消费，重复读取 404。
+- SDK 页面：不把脚本 URL 当网页导航。helper 用 `page.set_content` 建立最小有头页面后加载已取证 SDK：Kimi `initNECaptcha` 使用已取证 `captchaId`、`mode:"popup"`、`apiVersion:2`；GLM `initSMCaptcha` 使用已取证 `organization`、`product:"embed"`。
+- 失败关闭：GLM 当前只有 `rid` 回调得到取证，`md5` 来源仍缺证；若真实回调缺 md5，返回 HTTP 422 `context_gap`，不得把 `token`、`validate` 或 `pass` 当 md5。SDK 加载失败、弹窗关闭、超时也返回 `context_gap`。
+- 日志不打印手机号、登录会话或凭证；结果仅暂存内存，单次消费后删除。
+
 ## 6. 验收清单
 
 | 项 | 口径 | 状态 |

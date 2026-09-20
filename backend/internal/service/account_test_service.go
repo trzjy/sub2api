@@ -357,6 +357,12 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return nil
 	}
 
+	// web逆向账号必须先于官方CN平台API分支判定；归并后两者共享platform，
+	// 以官方平台+access_mode=web双键SSOT严格隔离，避免web账号误读api_key。
+	if ResolveWebPlatform(account) != "" {
+		return s.testWebAccountConnection(c, account, modelID, prompt)
+	}
+
 	// Route to platform-specific test method
 	if account.Platform == PlatformOther {
 		// other 双协议（chat_completions | anthropic），复用国产供应商的通用
@@ -394,14 +400,6 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 
 	if account.Platform == PlatformAntigravity {
 		return s.routeAntigravityTest(c, account, modelID, prompt)
-	}
-
-	// web 逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）登录态载体是
-	// 整串 Cookie 或 Kimi access_token，走专门的轻量官方探活：仅校验凭证可达性与登录态，
-	// 不把 Claude / OpenAI API Key 风格的请求错误地打到 web 上游。按账号接入模式判定
-	// （方案 §2.4 红线，取代旧平台值判定）。
-	if account.IsWebAccessMode() {
-		return s.testWebAccountConnection(c, account, modelID, prompt)
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)

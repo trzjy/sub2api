@@ -3,11 +3,9 @@ package server
 
 import (
 	"context"
-	"errors"
 	"log"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -26,7 +24,6 @@ import (
 var ProviderSet = wire.NewSet(
 	ProvideRouter,
 	ProvideHTTPServer,
-	ProvideWebLoginProxyServer,
 )
 
 // ProvideRouter 提供路由器
@@ -171,91 +168,4 @@ func derefInt64(p *int64) int64 {
 		return 0
 	}
 	return *p
-}
-
-// WebLoginProxyServer 是网页登录代理的隔离 origin HTTP 服务器（独立监听端口）。
-//
-// 隔离目的（docs/web-login-proxy-security-fix-plan.md 阶段 A #1）：让代理运行在与
-// 主管理 API 不同的 origin 上，官方页脚本无法读取管理端 localStorage.auth_token。
-//
-// 安全约定：
-//   - 仅注册 ANY /api/v1/web-login-proxy/:token/*path，复用主服务的同一个
-//     WebLoginProxyHandler 实例（捕获存储共享，会话创建/轮询仍走主 v1 admin 端点）。
-//   - 不挂载 adminAuth / auditLog 等 admin 中间件：token 即能力凭证（现状不变）。
-//   - WebLoginProxyAddr 为空时 ProvideWebLoginProxyServer 返回 nil（不启用，
-//     前端自动降级为官方页登录 + 手动粘贴，不回退同源）。
-type WebLoginProxyServer struct {
-	srv *http.Server
-}
-
-// Enabled 报告是否配置了隔离代理服务器（addr 非空）。
-func (w *WebLoginProxyServer) Enabled() bool {
-	return w != nil && w.srv != nil
-}
-
-// Addr 返回监听地址（用于日志，不含任何敏感值）。
-func (w *WebLoginProxyServer) Addr() string {
-	if w == nil || w.srv == nil {
-		return ""
-	}
-	return w.srv.Addr
-}
-
-// Start 在调用方提供的 goroutine 中启动服务器；错误通过返回暴露（不含敏感值）。
-// ListenAndServe 在正常关闭时返回 http.ErrServerClosed，视为成功。
-func (w *WebLoginProxyServer) Start() error {
-	if w == nil || w.srv == nil {
-		return nil
-	}
-	if err := w.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
-}
-
-// Shutdown 优雅关停，跟随主服务的 shutdown 链。
-func (w *WebLoginProxyServer) Shutdown(ctx context.Context) error {
-	if w == nil || w.srv == nil {
-		return nil
-	}
-	return w.srv.Shutdown(ctx)
-}
-
-// BuildWebLoginProxyEngine 构造隔离 origin 的轻量 gin engine（仅注册代理路由）。
-// 不挂载 admin/audit 等中间件，token 即能力凭证。
-//
-// 路由语义（隔离 origin 全代理）：
-//   - ANY /api/v1/web-login-proxy/:token/*path：URL 携带 token（iframe 首次加载 /
-//     前端显式拼接 origin 的场景）。
-//   - NoRoute → ProxyRoot：整个 origin 的其余所有路径交给根路径全代理，会话由请求
-//     Cookie wlp_session 识别，不再依赖 URL 中的 token。用 NoRoute 实现 catch-all，
-//     避免与上面的 :token 路由树冲突（gin 通配符与既有路由树共存时只能用 NoRoute）。
-//     注意：仅改隔离 engine；主站 engine 的 NoRoute（404）保持不动。
-func BuildWebLoginProxyEngine(handlers *handler.Handlers) *gin.Engine {
-	r := gin.New()
-	r.Use(middleware2.Recovery())
-	if handlers != nil && handlers.Admin != nil && handlers.Admin.WebLoginProxy != nil {
-		// 1) token 路由：URL 携带 token。
-		r.Any("/api/v1/web-login-proxy/:token/*path", handlers.Admin.WebLoginProxy.Proxy)
-		// 2) 根路径全代理：隔离 origin 的其余路径由 Cookie 识别会话。
-		r.NoRoute(handlers.Admin.WebLoginProxy.ProxyRoot)
-	}
-	return r
-}
-
-// ProvideWebLoginProxyServer 构造隔离 origin 的网页登录代理服务器。
-// WEB_LOGIN_PROXY_ADDR 为空（未配置）时返回 nil（不启用）。
-func ProvideWebLoginProxyServer(cfg *config.Config, handlers *handler.Handlers) *WebLoginProxyServer {
-	addr := strings.TrimSpace(cfg.Server.WebLoginProxyAddr)
-	if addr == "" {
-		return nil
-	}
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           BuildWebLoginProxyEngine(handlers),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    64 * 1024,
-	}
-	return &WebLoginProxyServer{srv: srv}
 }

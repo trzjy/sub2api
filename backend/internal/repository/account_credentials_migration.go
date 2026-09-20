@@ -181,25 +181,37 @@ func migrateOneLegacyCredentialRow(ctx context.Context, db sqlExecutor, row lega
 	// 仅当确有加密发生时才重写 credentials；否则保持列不动，只补指纹，
 	// 最小化对并发读写的扰动。
 	if encryptedNow {
-		if _, err := db.ExecContext(ctx, `
+		result, err := db.ExecContext(ctx, `
 			UPDATE accounts
 			SET credentials = $1::jsonb,
 				credentials_mac = $2,
 				credentials_api_key_mac = $3,
 				updated_at = NOW()
-			WHERE id = $4
-		`, string(payload), prepared.mac, apiKeyMAC, row.id); err != nil {
+			WHERE id = $4 AND credentials IS NOT DISTINCT FROM CASE WHEN $5 = '' THEN '{}'::jsonb ELSE $5::jsonb END
+		`, string(payload), prepared.mac, apiKeyMAC, row.id, string(row.credentials))
+		if err != nil {
 			return migrationRowUnchanged, err
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return migrationRowUnchanged, fmt.Errorf("check update result: %w", err)
+		} else if affected != 1 {
+			return migrationRowUnchanged, fmt.Errorf("concurrent credentials change; refusing to overwrite")
 		}
 		return migrationRowEncrypted, nil
 	}
-	if _, err := db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE accounts
 		SET credentials_mac = $1,
 			credentials_api_key_mac = $2
-		WHERE id = $3
-	`, prepared.mac, apiKeyMAC, row.id); err != nil {
+		WHERE id = $3 AND credentials IS NOT DISTINCT FROM CASE WHEN $4 = '' THEN '{}'::jsonb ELSE $4::jsonb END
+	`, prepared.mac, apiKeyMAC, row.id, string(row.credentials))
+	if err != nil {
 		return migrationRowUnchanged, err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return migrationRowUnchanged, fmt.Errorf("check update result: %w", err)
+	} else if affected != 1 {
+		return migrationRowUnchanged, fmt.Errorf("concurrent credentials change; refusing to overwrite")
 	}
 	return migrationRowMACBackfilled, nil
 }

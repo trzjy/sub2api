@@ -34,8 +34,7 @@ import (
 //   - 头族实测：content-type application/connect+json、x-language / x-msh-device-id /
 //     x-msh-platform: web / x-msh-session-id / x-msh-version: 2.2.0 / x-traffic-id。
 //   - 残余 unverified（不得补猜，按兼容/缺省处理并标注）：
-//     · 认证载体：HAR 无 Authorization/Cookie（Chrome 隐藏凭据头）；实现为 access_token 仍带
-//       Authorization: Bearer（兼容期双载体），credentials 有 cookie 时另带 Cookie 头（候选载体）。
+//     · 认证载体：access_token 带 Authorization: Bearer（单入口短信登录后仅此一种，不再有 cookie 候选）。
 //     · x-msh-shield-data：生成算法未逆向，不实现生成；仅 credentials 有值时透传。
 //     · x-msh-device-id / x-msh-session-id / x-traffic-id：实测为动态值，不生成；仅 credentials
 //       有值时透传（管理员抓包配置），缺省不带。
@@ -195,7 +194,7 @@ func webKimiModelName(model string) string {
 //
 // 未实测字段一律缺省（不臆测填充）；thinking 开关与入站映射 unverified，按实测默认 true。
 type webKimiTextBlock struct {
-	MessageID string `json:"message_id"`
+	MessageID string      `json:"message_id"`
 	Text      webKimiText `json:"text"`
 }
 
@@ -204,10 +203,10 @@ type webKimiText struct {
 }
 
 type webKimiMessage struct {
-	Role     string            `json:"role"`     // "user"
+	Role     string             `json:"role"` // "user"
 	Blocks   []webKimiTextBlock `json:"blocks"`
-	Scenario string            `json:"scenario"`
-	IsGoal   bool              `json:"is_goal"`
+	Scenario string             `json:"scenario"`
+	IsGoal   bool               `json:"is_goal"`
 }
 
 type webKimiRequestOptions struct {
@@ -218,11 +217,11 @@ type webKimiRequestOptions struct {
 }
 
 type webKimiUpstreamRequest struct {
-	Scenario  string             `json:"scenario"`
-	Tools     []any              `json:"tools"`
-	Message   webKimiMessage     `json:"message"`
+	Scenario  string                `json:"scenario"`
+	Tools     []any                 `json:"tools"`
+	Message   webKimiMessage        `json:"message"`
 	Options   webKimiRequestOptions `json:"options"`
-	ProjectID string             `json:"project_id"`
+	ProjectID string                `json:"project_id"`
 }
 
 // webKimiDefaultTools 实测（10 §3）默认工具清单：搜索 + 定时任务。
@@ -279,9 +278,7 @@ func webKimiExtractPrompt(body []byte) string {
 
 // buildWebKimiUpstreamRequest 构造 Connect RPC 出站请求（头族对齐登录态实测 10 §2）。
 //
-// 认证载体（unverified）：HAR 未见 Authorization/Cookie。实现为兼容期双载体——
-//   - access_token 仍带 Authorization: Bearer（历史实现口径，兼容期保留）；
-//   - credentials 有 cookie 时另带 Cookie 头（候选载体，待二次验证）。
+// 认证载体：access_token 带 Authorization: Bearer（单入口短信登录后仅此一种，不再有 cookie 候选）。
 //
 // 头族（10 §2 实测）：content-type/accept 用 application/connect+json（Connect RPC 流式）；
 // x-language / x-msh-platform: web / x-msh-version: 2.2.0 为实测常量直接设置；
@@ -309,11 +306,8 @@ func (s *OpenAIGatewayService) buildWebKimiUpstreamRequest(
 	req.Header.Set("Referer", webKimiDefaultBaseURL+"/")
 	req.Header.Set("User-Agent", webKimiClientUA)
 
-	// 认证载体（unverified，兼容期双载体）：access_token 仍带 Bearer；cookie 候选载体。
+	// 认证载体：Bearer access_token（单入口后仅此一种）。
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	if cookie := strings.TrimSpace(account.GetCredential("cookie")); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
 
 	// 头族实测常量（10 §2）。
 	req.Header.Set("x-language", "zh-CN")
@@ -397,7 +391,8 @@ func (s *OpenAIGatewayService) refreshWebKimiAccessToken(ctx context.Context, ac
 		}
 	}
 
-	credentials := map[string]any{"access_token": newAccessToken}
+	credentials := shallowCopyMap(account.Credentials)
+	credentials["access_token"] = newAccessToken
 	if newRefreshToken != "" {
 		credentials["refresh_token"] = newRefreshToken
 	}

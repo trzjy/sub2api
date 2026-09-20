@@ -459,10 +459,32 @@ sleep 15 && curl -s http://127.0.0.1:3300/health && docker compose -f deploy-con
 | `XIANYU_INTERNAL_TOKEN` | Worker↔主程序双向认证 token，与 `xianyu_delivery.internal_token` 同值；同时作为 Worker 镜像内 `SUB2API_INTERNAL_TOKEN`（经 compose `environment` 注入） |
 | `SUB2API_INTERNAL_BASE_URL` | Worker 容器内注入（compose 固定 `http://sub2api:8080`），用于 Worker 回传主程序 delivery-results |
 | `XIANYU_WORKER_IMAGE_TAG` | Worker 镜像固定 tag（禁止 latest/reviewed 漂浮标签）。**必填**：镜像在部署主机直接构建（本机构建无 registry RepoDigest，`@sha256` digest 引用无法解析，故用固定 tag 引用）。旧 `sha256:8343c385...46d5` 已废弃（不含 launcher / `/api/v1/internal/*` / delivery-results 回传）。部署后通过 `docker inspect <容器> --format '{{.Image}}'` 校验运行容器镜像 ID 与构建产物一致（见 11.4）。**当前生产值**（2026-09-17，主程序 `5748f4b16`：web 登录代理 JS 写入型 Cookie 捕获修复——ChatGLM 登录 Token 由官方前端 `Cookies.set` 写入（chatglm_token/chatglm_refresh_token/chatglm_user_id），服务端不下发 Set-Cookie；现从入站 Cookie 头按平台白名单提取捕获并仅转发白名单字段，`wlp_session` 与管理站 cookie（sub2api_session 等）全程排除；上一版 `9654dee8a`：root-path 根路径全代理 + wlp_session 会话 Cookie；再上一版 `f142b9ac5`：web 登录代理 CSP frame-src 注入修复（WEB_LOGIN_PROXY_ORIGIN 进主站 CSP，修 Chrome 拦截内嵌 iframe）+ WebLoginModal platform i18n 键 kebab→camel 修复；主程序 ops 修复 `ab69bfff4`：Gemini Drive scope 403 优雅降级（不再误报 error 级告警）+ 闲鱼对账日志降频（连续失败首条 warn 后续 debug）；上一版 `ef06893c0`：web 网关流中段业务错误收口（chat 写 error 帧+[DONE]、responses/anthropic 写 event: error，不再伪成功）+ kimi 字符串 code 识别 + base_url 类型守卫；上一版 `7bc043253`：web 登录代理要求显式 WEB_LOGIN_PROXY_ORIGIN + 响应协议桥接。**Worker 镜像**）：`reconcile-expose-af9286cf0`（构建镜像 ID `sha256:3ecaa9412aa45...`；源码 af9286cf0 = 对账 + 曝光助手 + 人脸/打码增量；修复运行中 faceqr-localnotify-20260916 缺 `/orders/auto-deliveries` 路由导致对账 404 的问题；Worker 源码副本 `/opt/sub2api/xianyu-auto-reply-src/` 已同步 af9286cf0；Worker 测试 51 passed）。前序（2026-09-14，主程序 `657794af9`：每日简报「今日速读」上线（LLM 汇总当日新增+近7天有效优惠，缓存/refresh/兜底）；速读前端渲染补提交（ed0e24cc0）；自审清理。前序 `82a73afef`：连通性测试失败显示真实原因（模型白名单拒绝附可用清单/端点不可达），不再兜底成 internal error；全链路管理端 API 验收通过——正路径 kimi-k3 parsed_offers=1、负路径人话提示、简报 205 条结构化情报（97 高相关）。前序 `b331522fe`：优惠情报 key 选择器只列管理员本人 key 并带分组/可用模型清单（修复全站用户 key 污染下拉 + 模型盲配 404）；整理模型已配置 self 模式 kimi key + kimi-k3。前序 `ea6045e3e`：整理模型自选本系统中转网关——管理台选已有管理员 API Key + 模型即可，支持 OpenAI/Anthropic 双协议，零外部配置；自定义端点降级为高级选项。同日 03:00 首版 `1070f7b39`：优惠情报中心上线——迁移 247 新增 promo_intel_sources/promo_intel_items，37 个实测验证的厂商官方资讯源每日轮询，独立可配置 LLM 结构化整理（管理台「优惠情报→整理模型」配置，未配置时降级原文待整理、30 分钟补跑通道自动结构化），管理台按日简报；含三个上线热修：到期扫描 SQL 显式 ::timestamptz、原文摘录 rune 截断 + NUL 剔除、补跑通道。同日的前序热修链：`b2bfa9353`（编码修复）→ `0ffb37b5e`（SQL 类型修复）→ `597c0c0ab`（功能主体））。镜像 `sub2api:657794af9-w`（构建镜像 ID `sha256:bf380594d2eb160696cb8919d25902864354f24bdbac7d01f514291296bbf203`；前序 `82a73afef-w` / `sha256:6acc1bce02dd...`；前序 `b331522fe-w` / `sha256:b14bee0fb705e19e7defc13364d367808d21ad470125d624845f5b0ddc4808cd`；前序 `ea6045e3e-w` / `sha256:4d4faba49a3b5811...`、`1070f7b39-w` / `63989e0e76f728a2...`）。上一版主程序（2026-09-13，`eef9ef8ef`：闲鱼发货对账任务上线——Worker 新增 `GET /api/v1/internal/orders/auto-deliveries` 增量接口，主程序 5 分钟一轮三方对账（Worker 自动发货订单 / 卡密领取记录 / 订单镜像），漂移自动补平+邮件告警，首轮水位线基线 `2026-09-12T16:12:32Z`，历史豁免；Worker 镜像）：`reconcile-eef9ef8ef`（构建镜像 ID `sha256:51271e673c603dc767a913a33717aab673f391a85d9c9a40f75bbbfa7a0eeafa`；主程序镜像已升级 `sub2api:8a662e838-w`（自审修复：单码作废 used 拒绝/expired 幂等、镜像终态分裂升级人工、QuantitySent 对齐回执口径）。在 `refundclaw-20260912-2208` 源码之上新增对账增量接口）。上一版主程序 `c4cf5db23`（兑换码作废功能）。再上一版（2026-09-12，在 `deliveryfs-20260911-0641` 源码之上：新账号创建默认 `auto_confirm=True` + `send_before_confirm=True`，覆盖扫码/密码/手动三条创建路径，解决新账号漏开自动发货导致订单卡 `pending_ship` 的问题）：`refundclaw-20260912-2208`（构建镜像 ID `sha256:2da6864d301876c2e7dcf8c1700afd0709135c73bbf19623aad612150d80cf5b`；在 `autoconf-20260912-0629` 源码之上新增：scheduler 退款同步尾部把「退款成功」订单批量上报主程序 `POST /api/v1/internal/xianyu/refund-events`（`common/services/sub2api_refund_event_client.py` + `report_refunded_orders_to_sub2api` 兜底扫描，`xy_orders.refund_reported` 去重，未配置 SUB2API_INTERNAL_* 静默跳过），主程序据此作废未兑换码/追回已兑换权益，堵退款白嫖漏洞）。上一版 `autoconf-20260912-0629`（构建镜像 ID `sha256:177e93f56149ab4d8be1d2adc8e7f55d24c09f18c8718a0d1c14dbef8a1160d6`）。再上一版 `deliveryfs-20260911-0641`（构建镜像 ID `sha256:3570428aee984353fd5c740660e236eb879697b5f9fb1ea4e7108fb5add933df`）、`fullsync2-20260911-0452`（构建镜像 ID `sha256:b5d0efdfab406a7d292e21bcc369a055cff453182227df1297908754a14ddaae`）及中间版 `fullsync-20260911-0431`、`qtyfallback-20260909-0119`、`globaltmpl-20260909-0049` 已由本版本替代。 |
+| （历史提示）WEB_LOGIN_PROXY_* | 该版本已退役：web-login-proxy 服务于 2026-09 实施 web-platform-single-entry-login 后删除，配置项已失效。上方 `XIANYU_WORKER_IMAGE_TAG` 历史版本日志中的 `WEB_LOGIN_PROXY_ORIGIN` / `wlp_session` / ChatGLM Cookie 捕获等旧链生产值仅作历史事实留档，不再对应任何在运行的配置或代码。 |
 | `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS` | 可选。定时商品同步的全量轮间隔（秒），经 compose 注入为容器内 `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`；低频完整翻页触发下架清理，`0`/负数=禁用全量轮（纯增量旧行为）。缺省 `86400`（每天一次；进程重启后首轮即全量） |
 | `XIANYU_WORKER_MYSQL_USER/PASSWORD/ROOT_PASSWORD/DB` | Worker 独立 MySQL 凭据 |
 
-### 11.3 验证命令
+### 11.3 本地 GLM/Kimi 人工挑战入口
+
+`deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py` 在本地工作站提供真实可点击的有头 Chromium 挑战入口；它不恢复管理页第三方 SDK，也不接受人工手填验证码结果。
+
+```bash
+cd /mnt/data/sub2api
+a=deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py
+python3 "$a" --selftest
+python3 "$a"  # 默认 127.0.0.1:18089
+curl -s http://127.0.0.1:18089/healthz
+```
+
+调用契约（所有非 healthz 请求均须 `X-API-Key: <config.json 中 secret>`）：
+
+- `POST /challenge/sdk-start`：`{"platform":"glm|kimi","login_session_id":"...","phone":"...","phone_code":"86","timeout":180}`，返回一次性 `session_id`。同一时刻仅一个槽位，忙时 409；必须使用 `X-API-Key`，不接受 body secret。旧 `/challenge/start` 暂为同一路由别名。
+- `GET /challenge/{session_id}/status?platform=...&login_session_id=...&phone=...`：按平台、登录会话和手机号绑定查询 `pending/running/ok/context_gap`，不匹配返回 409。
+- `POST /challenge/{session_id}/result`：body 同样带 `platform/login_session_id/phone`，终态一次性消费。GLM 只有 SDK 回调同时给出真实 `rid+md5` 才成功并附启动时 `phone_code`；Kimi 只返回真实回调 `validate`；重复消费 404。
+- helper 不会 `page.goto` SDK 脚本 URL，而是在有头 Playwright 本地最小页面加载已取证官方 SDK：Kimi `initNECaptcha({captchaId,element,mode:"embed",apiVersion:2})`，GLM `initSMCaptcha({organization,product:"embed"})`。页面必须运行在真实 http 源下（`http://127.0.0.1:18089/__challenge_page__`，由 Playwright 路由拦截注入 HTML，不实际访问该路径）；`about:blank`/`data:` 等不透明源会因浏览器拒绝 `document.cookie` 而使 SDK 初始化失败（易盾 curl 直连正常但页面卡在“正在加载”）。Kimi 成功以 `onVerify(err==null)` 或隐藏输入 `NecaptchaValidate` 轮询兜底捕获 `validate`。GLM 官方回调的 `md5` 尚未取证；若实际只回 `rid`，必须关闭为 HTTP 422 `context_gap`，禁止把 `token/validate/pass` 当 md5。超时、浏览器关闭、回调缺字段同样关闭浏览器并失败。
+
+详细背景、隧道和安全边界见 `docs/xianyu-manual-captcha-helper.md`。secret、挑战 URL、登录会话值及凭证不写日志或长期落盘；结果仅内存保存，读取后立即删除。
+
+### 11.4 验证命令
 
 ```bash
 docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
@@ -470,7 +492,7 @@ docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
 bash deploy/tests/xianyu-deployment-boundary-test.sh
 ```
 
-### 11.4 Worker 镜像构建与回传补丁
+### 11.5 Worker 镜像构建与回传补丁
 
 - **镜像构建**：以 `deploy-config/xianyu-auto-reply-src/backend-web/Dockerfile` 构建（该 Dockerfile 已统一 `COPY common/backend-web/websocket/scheduler/launcher`，EXPOSE 8089/8090/8091，并安装三端依赖）；`launcher/entrypoint.py` 在单容器内并行启动 backend-web(8089)/websocket(8090)/scheduler(8091)。
 - **delivery-results 回传**：Worker 端 `common/services/sub2api_delivery_result_client.py` 在自动发货获得平台最终发送回执后回传 `POST {SUB2API_INTERNAL_BASE_URL}/api/v1/internal/xianyu/delivery-results`（`confirmed=true` 才标记 sent）；未配置 base_url/token 时静默跳过，不影响本地/单机模式。主程序保持 `pending` 直至收到 `confirmed=true`，否则最终转人工。
@@ -480,7 +502,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **internal 服务间鉴权**：backend-web→websocket/scheduler 的 `/internal/*` 路由要求 `X-Internal-Token` 匹配 `SUB2API_INTERNAL_TOKEN`（空配置失败关闭）；backend-web/scheduler 的 http_client 对 internal 服务 URL 自动注入该头。
 - **商品同步全量轮（2026-09-11 起）**：定时任务 `fetch_items` 默认增量（整页已存在提前停止，控风控请求量）；`scheduler/app/services/scheduler/fetch_items_task.py` 内置低频全量轮——默认每 86400 秒（env `FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS`，compose 变量 `XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS`，0=禁用）跑一次完整翻页，自然结束后以闲鱼「在售」列表为权威集合清理 `xy_catalog_items` 中已售罄/下架的投影行，主程序下次同步（≤5 分钟）随之删除商品行。修复背景：增量提前停止使 `ItemService._prune_stale_catalog_items` 永不执行，部分下架商品永久滞留在售面板。执行互斥（`asyncio.Lock`）防手动触发与定时循环并发双开全量；全量轮"至少一个账号成功"才标记完成，全失败下一周期重试。注意：Worker 侧商品「删除」按钮只删投影行，闲鱼侧仍在售会被下轮同步重新拉回。
 
-### 11.5 基座底层重构要点（补发/发货链路）
+### 11.6 基座底层重构要点（补发/发货链路）
 
 - **attempt_count 语义统一**：`0`=初始自动发货（未补发），`N>=1`=第 N 次补发。`Claim` 写入 `0`；`ResendOriginalCode` 每次 `attempt_count+1`。存量数据经迁移 `backend/migrations/234_xianyu_attempt_count_normalize.sql` 归一化（`GREATEST(attempt_count-1,0)`）。此修复使自动发货回执（attempt=0）能正确关闭新 claim（旧实现 Claim 写 1 导致回执被静默丢弃、订单永久 pending）。
 - **中心化状态转换**：`xianyu_order_claim_state.go` 新增 `applyClaimTransition` 原语，统一承担 advisory lock + attempt CAS + 幂等/冲突分类。`RecordDeliveryResult`（唯一回执入口，含补发成功/回滚）与 `ResendOriginalCode` 全部收敛于此；原 `FailResendClaim`/`MarkResendSent` 已删除合并。对 sent/legacy 终态或 attempt 不匹配的迟到回执按幂等忽略（2xx ack），消除回传重试循环。
@@ -710,7 +732,7 @@ CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做
 |---|---|---|
 | 1 | **intl 计费快照 live 验证**：`gateway.codebuddy.quota_check_enabled` 默认关闭，故 intl 未产 Extra 额度快照。已用 Phase 0 直连 billing 200（schema 与 CN 同构）+ 单测钉住 intl base 替代 | **未来任何原因开启 `quota_check_enabled` 时，顺带验证 intl 账号（site=intl）的 Extra 快照** |
 | 2 | `GET /api/v1/admin/accounts/:id/usage` 对 codebuddy 返回 500（`getUsageForAccount` 无 codebuddy 分支，落通用 Claude usage → 上游 403）。**既有缺陷，CN/intl 同样中招** | 下个维护批次：补 codebuddy 分支，改走配额快照（`CodeBuddyQuotaService`） |
-| 3 | CodeBuddy 模型定价配置（如 CN `hy3`、intl `deepseek-v3`）缺失时用量照记、成本计 0 | 运营按需在价格管理中心配置 |
+| 3 | CodeBuddy 模型定价配置（如 CN `hy3`、intl `deepseek-v3`）缺失时用量照记、成本计 0 | ~~运营按需配置~~ **已配置（2026-09-21）**：CN 全模型按 credits 实测扣费价写入 custom_model_pricing（28 行），详见 §16 |
 | 4 | UA 版本监控：默认 `CLI/2.63.2`（共享配置 `gateway.codebuddy.chat_user_agent`），官方 CLI 已 2.150.0，上游当前未校验 | 长期观察；上游若校验版本再热更 |
 
 ### intl 实测要点（详见 docs/evidence/codebuddy-intl/）
@@ -721,4 +743,44 @@ CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做
 
 ---
 
-最后更新：2026-09-17
+## §16 CodeBuddy CN 定价：credits 实测标定与 custom_model_pricing 配置（2026-09-21）
+
+### 计费公式（活体探针标定，8 次探针全部 200）
+
+```
+credits = mult × (300 × prompt_tokens + 1500 × completion_tokens) / 1e6
+```
+
+- 基准价：输入 $3/M、输出 $15/M（Claude Sonnet 官价口径）；**1 credit = $0.01**。
+- 倍率 `mult` 来自 `GET /console/enterprises/personal/models` 响应中每个模型的 `credits` 字段（形如 `"x0.06 credits"`，需解析数字）。
+- 上游 SSE 最后 chunk 的 `usage.credit` 字段即本次请求真实扣费（**含折扣后**）；非流式同样有。
+- 余额侧：扣减落在 `get-user-resource` 响应的 `CycleCapacityUsedPrecise`（`CapacityUsedPrecise` 恒 0，勿看错列）；扣减有分钟级聚合延迟。
+
+### 关键实测结论
+
+| 事项 | 结论 |
+|---|---|
+| kimi-k3-1（标称 x1.62） | **100% 按标称扣**（探针 1.84/14.12 vs 预测 1.840/14.130，误差 <0.1%） |
+| glm 系（flash/5.3 等） | **实际按标称 ×0.44~0.45 扣**（限时活动折扣，5 个探针一致）；客户端显示 x0.06 实扣 x0.0264 |
+| hy3 | `credits: "x0.00 credits"` → 免费 |
+| auto / default / hunyuan-chat / hunyuan-image | 无 credits 字段 |
+| CN token 长期有效 | expires_at ≈ 一年后；CN models 端点正常（intl 才 500） |
+
+### custom_model_pricing 配置格局（方案 A：贴真实扣费）
+
+- 换算：`input_price = eff_mult × 3e-6`、`output_price = eff_mult × 15e-6` USD/token。
+- glm 系乘 0.45 活动系数；kimi/deepseek/hy/minimax/hunyuan 按标称 ×1.0。
+- 现有 28 行全部启用；覆盖更新了原价格钉 id=3（glm-5.3-flash）、id=4（glm-5.3）、id=7（deepseek-v4-flash 拆分独立）；id=5（kimi-k2.7-code，Moonshot 官方钉价）与 id=8（hy3 腾讯云官方价）**保留未动**（非 CodeBuddy credits 口径）。
+- remark 统一注明 `CodeBuddy credits 实测标定 2026-09-20`。
+
+### 维护注意（踩过的坑）
+
+1. **同名冲突**：custom 层匹配按 `ORDER BY id` 先到先得（`custom_model_pricing_repo.go` List），写库前必须查重：
+   `SELECT e1.id FROM custom_model_pricing e1, custom_model_pricing e2 WHERE e1.id<e2.id AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(e1.models) m1 JOIN jsonb_array_elements_text(e2.models) m2 ON m1=m2);`
+2. **created_by 必填**：SQL 直插该列为 NULL 会让快照刷新循环报 `scan error column created_by`（int64 不收 NULL），custom 层整体失效。直插时填 admin user id。
+3. **活动折扣会失效**：glm 系 0.45 系数是限时活动价，活动结束后需重标（重跑探针法：小 prompt 大 max_tokens 请求读 usage.credit）。
+4. kimi-k2.x / deepseek-v4-pro / hy4 等是否也有活动折扣未逐个实测（按标称配置，偏保守多记）。
+
+---
+
+最后更新：2026-09-21

@@ -77,6 +77,25 @@ func assertWebDeepseekAccount(account *Account) error {
 	return fmt.Errorf("forwardWebDeepseek requires a deepseek platform, got %q", account.Platform)
 }
 
+type webDeepseekAuthFailureError struct {
+	status int
+	body   []byte
+	// contentProduced 标记本次转发已产出（可写未提交或部分已写出）正文内容。
+	// 用于顶层重登闸门：已产出内容后遇 auth 失败应流内失败关闭，不再重登（SSOT）。
+	contentProduced bool
+}
+
+type webDeepseekProbeAuthKey struct{}
+
+func webDeepseekProbeAuth(ctx context.Context) bool {
+	v, _ := ctx.Value(webDeepseekProbeAuthKey{}).(bool)
+	return v
+}
+
+func (e *webDeepseekAuthFailureError) Error() string {
+	return "deepseek web upstream authentication failed"
+}
+
 func (s *OpenAIGatewayService) forwardWebDeepseek(
 	ctx context.Context,
 	c *gin.Context,
@@ -87,8 +106,39 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 	startTime time.Time,
 	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
+	result, err := s.forwardWebDeepseekAttempt(ctx, c, account, body, originalModel, reqStream, startTime, mode, true)
+	var authErr *webDeepseekAuthFailureError
+	if !errors.As(err, &authErr) {
+		return result, err
+	}
+	if authErr.contentProduced || IsResponseCommitted(c) {
+		// 已产出/写出内容：流内失败关闭，不再重登（SSOT：已写出内容只能流内失败关闭）。
+		return result, err
+	}
+	fresh, reloginErr := s.reloginDeepseek(ctx, account)
+	if reloginErr != nil {
+		resp := &http.Response{StatusCode: authErr.status, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(authErr.body))}
+		return s.handleWebDeepseekUpstreamError(ctx, c, account, resp, authErr.body, originalModel)
+	}
+	return s.forwardWebDeepseekAttempt(ctx, c, fresh, body, originalModel, reqStream, startTime, mode, false)
+}
+
+func (s *OpenAIGatewayService) forwardWebDeepseekAttempt(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	originalModel string,
+	reqStream bool,
+	startTime time.Time,
+	mode webResponseMode,
+	probeAuth bool,
+) (*OpenAIForwardResult, error) {
 	if err := assertWebDeepseekAccount(account); err != nil {
 		return nil, err
+	}
+	if probeAuth {
+		ctx = context.WithValue(ctx, webDeepseekProbeAuthKey{}, true)
 	}
 
 	cookie := strings.TrimSpace(account.GetCredential("cookie"))
@@ -161,6 +211,9 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 
 	if resp.StatusCode >= 400 {
 		respBody := s.readUpstreamErrorBody(resp)
+		if probeAuth && classifyWebDeepseekUpstreamError(resp.StatusCode, respBody) == webDeepseekErrKindAuthFailed {
+			return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), respBody...)}
+		}
 		return s.handleWebDeepseekUpstreamError(ctx, c, account, resp, respBody, upstreamModel)
 	}
 
@@ -168,6 +221,54 @@ func (s *OpenAIGatewayService) forwardWebDeepseek(
 		return s.handleWebDeepseekStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
 	}
 	return s.handleWebDeepseekNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webDeepseekExtractPrompt(body), mode)
+}
+
+func (s *OpenAIGatewayService) reloginDeepseek(ctx context.Context, account *Account) (*Account, error) {
+	if s == nil || account == nil || s.accountRepo == nil {
+		return account, errors.New("deepseek relogin persistence unavailable")
+	}
+	key := fmt.Sprintf("deepseek-relogin:%d", account.ID)
+	value, err, _ := s.deepseekReloginGroup.Do(key, func() (any, error) {
+		fresh := account
+		if s.accountRepo != nil {
+			loaded, loadErr := s.accountRepo.GetByID(ctx, account.ID)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if loaded != nil {
+				fresh = loaded
+			}
+		}
+		oldCookie := strings.TrimSpace(account.GetCredential("cookie"))
+		if newCookie := strings.TrimSpace(fresh.GetCredential("cookie")); newCookie != "" && newCookie != oldCookie {
+			return fresh, nil
+		}
+		login := NewWebPlatformAutoLoginService(nil, s.httpUpstream, s.cfg)
+		cookie, loginErr := login.LoginByEmail(ctx, fresh)
+		if loginErr != nil {
+			return nil, loginErr
+		}
+		creds := shallowCopyMap(fresh.Credentials)
+		if creds == nil {
+			creds = make(map[string]any)
+		}
+		creds["cookie"] = cookie
+		if deviceID := strings.TrimSpace(fresh.GetCredential(CredKeyLoginDeviceID)); deviceID != "" {
+			creds[CredKeyLoginDeviceID] = deviceID
+		}
+		if err := persistAccountCredentials(ctx, s.accountRepo, fresh, creds); err != nil {
+			return nil, err
+		}
+		return fresh, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	fresh, ok := value.(*Account)
+	if !ok || fresh == nil {
+		return nil, errors.New("deepseek relogin returned no account")
+	}
+	return fresh, nil
 }
 
 // accountProxyURL 返回账号代理 URL（与旧实现一致；隔离取值避免重复内联）。
@@ -297,6 +398,9 @@ func (s *OpenAIGatewayService) ensureWebDeepseekSession(
 	if err != nil {
 		return "", fmt.Errorf("deepseek web session create read error: %w", err)
 	}
+	if webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, b) == webDeepseekErrKindAuthFailed {
+		return "", &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), b...)}
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("deepseek web session create failed: status %d", resp.StatusCode)
 	}
@@ -355,7 +459,7 @@ func webDeepseekApplyRequestHeaders(req *http.Request, account *Account) {
 	req.Header.Set("x-client-locale", "zh_CN")
 	req.Header.Set("x-client-timezone-offset", "28800")
 
-	deviceID := strings.TrimSpace(account.GetCredential("device_id"))
+	deviceID := strings.TrimSpace(account.GetCredential(CredKeyLoginDeviceID))
 	if deviceID == "" {
 		deviceID = webDeepseekDeviceID(account) // 缺省：account.ID 派生确定性 UUIDv4（每账号稳定）
 	}
@@ -429,6 +533,9 @@ func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 	if err != nil {
 		return "", fmt.Errorf("%w: pow challenge read error: %v", ErrWebDeepseekPoWNotImplemented, err)
 	}
+	if webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, b) == webDeepseekErrKindAuthFailed {
+		return "", &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), b...)}
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("%w: pow challenge returned status %d", ErrWebDeepseekPoWNotImplemented, resp.StatusCode)
 	}
@@ -443,10 +550,10 @@ func (s *OpenAIGatewayService) fetchWebDeepseekPoWHeader(
 type webDeepseekErrKind int
 
 const (
-	webDeepseekErrKindOther webDeepseekErrKind = iota
-	webDeepseekErrKindRateLimited // 429 / 40029(IP 受限) → 冷却
-	webDeepseekErrKindAuthFailed  // 40002/40003(认证失效) / 50006(禁言) → 账号处置
-	webDeepseekErrKindPoWError    // 40300/40301(PoW 错误) → 失败关闭
+	webDeepseekErrKindOther       webDeepseekErrKind = iota
+	webDeepseekErrKindRateLimited                    // 429 / 40029(IP 受限) → 冷却
+	webDeepseekErrKindAuthFailed                     // 40002/40003(认证失效) / 50006(禁言) → 账号处置
+	webDeepseekErrKindPoWError                       // 40300/40301(PoW 错误) → 失败关闭
 )
 
 // webDeepseekEffectiveErrorCode 双路径错误判定（08 §4 / 06 §A）：HTTP 429，或响应体顶层
@@ -912,6 +1019,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 			responseID = parser.responseID
 		}
 		if isErr {
+			if !written && webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, []byte(data)) == webDeepseekErrKindAuthFailed {
+				return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), []byte(data)...)}
+			}
 			// 业务错误：首帧未写任何客户端字节（written=false）→ 走完整错误路径
 			// （可改写 4xx 状态码）；流中后段已写出正文（written=true）→ 记 ops 错误并向
 			// 客户端写流内 error 标记后中断收口，绝不伪造正常结束。
@@ -959,6 +1069,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	if aggregated.Len() == 0 && !parser.hasError {
 		raw := rawUpstreamBody.Bytes()
 		if _, isErr := webDeepseekEffectiveErrorCode(resp.StatusCode, raw); isErr {
+			if webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, raw) == webDeepseekErrKindAuthFailed {
+				return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), raw...)}
+			}
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -1061,6 +1174,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 			responseID = parser.responseID
 		}
 		if isErr {
+			if webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, []byte(data)) == webDeepseekErrKindAuthFailed {
+				return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), []byte(data)...), contentProduced: aggregated.Len() > 0}
+			}
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -1082,6 +1198,9 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 	// 无任何内容帧：可能是纯 JSON 业务错误（HTTP 200）或不可识别结构。
 	if aggregated.Len() == 0 && !parser.hasError {
 		if _, isErr := webDeepseekEffectiveErrorCode(resp.StatusCode, body); isErr {
+			if webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, body) == webDeepseekErrKindAuthFailed {
+				return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), body...), contentProduced: aggregated.Len() > 0}
+			}
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,

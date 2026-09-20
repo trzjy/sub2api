@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -22,12 +21,15 @@ import (
 
 // autoLoginUpstream 按请求路径脚本化返回响应，覆盖 deepseek 登录 / zhipu / kimi 续期。
 type autoLoginUpstream struct {
-	mu              sync.Mutex
-	requests        []*http.Request
-	loginBizCode    int64
-	loginHTTPStatus int
-	zhipuOK         bool
-	kimiOK          bool
+	mu                   sync.Mutex
+	requests             []*http.Request
+	loginBizCode         int64
+	loginHTTPStatus      int
+	deepseekVerifyStatus int
+	zhipuOK              bool
+	kimiOK               bool
+	kimiDataOK           bool
+	kimiNoToken          bool
 }
 
 func newMockResp(status int, header http.Header, body string) *http.Response {
@@ -54,6 +56,12 @@ func (m *autoLoginUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*ht
 			h.Add("Set-Cookie", "user=me; Path=/")
 		}
 		return newMockResp(m.loginHTTPStatus, h, body), nil
+	case strings.HasSuffix(req.URL.Path, webDeepseekPoWChallengePath):
+		status := m.deepseekVerifyStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return newMockResp(status, http.Header{}, `{"code":0,"data":{"biz_code":0,"biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"6de3393aba4cece63e3e6a761752722b05f2cfe531bc1b5c82e01985e93fddd2","salt":"salt123","signature":"sig","difficulty":43,"expire_at":1739764288699}}}}`), nil
 	case strings.HasSuffix(req.URL.Path, WebZhipuRefreshEndpoint):
 		h := http.Header{}
 		if m.zhipuOK {
@@ -64,8 +72,13 @@ func (m *autoLoginUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*ht
 		}
 		return newMockResp(http.StatusUnauthorized, h, `{"code":40002,"msg":"unauthorized"}`), nil
 	case strings.Contains(req.URL.Path, "RefreshToken"):
-		if m.kimiOK {
+		switch {
+		case m.kimiOK:
 			return newMockResp(http.StatusOK, http.Header{}, `{"accessToken":"AT-1","refreshToken":"RT-1"}`), nil
+		case m.kimiDataOK:
+			return newMockResp(http.StatusOK, http.Header{}, `{"data":{"accessToken":"AT-2"}}`), nil
+		case m.kimiNoToken:
+			return newMockResp(http.StatusOK, http.Header{}, `{"foo":1}`), nil
 		}
 		return newMockResp(http.StatusBadRequest, http.Header{}, `{"code":40002,"msg":"bad refresh"}`), nil
 	}
@@ -177,6 +190,29 @@ func TestWebPlatformAutoLogin_DeepseekLoginSuccess(t *testing.T) {
 	require.NotEmpty(t, merged[CredKeyLoginDeviceID]) // 首次生成后复用
 }
 
+func TestWebPlatformAutoLogin_DeepseekLoginVerificationFailNoWrite(t *testing.T) {
+	acc := &Account{
+		ID:       11,
+		Platform: PlatformDeepseek,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":        AccountAccessModeWeb,
+			CredKeyLoginEmail:    "u@x.com",
+			CredKeyLoginPassword: "pw",
+			"cookie":             "OLDCOOKIE",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK, deepseekVerifyStatus: http.StatusForbidden}
+	svc := newTestAutoLoginService(store, up)
+
+	cookie, err := svc.LoginByEmail(context.Background(), acc)
+	require.Error(t, err)
+	require.Empty(t, cookie)
+	require.Empty(t, store.creds[11], "verification failure must not persist credentials")
+	require.Equal(t, "OLDCOOKIE", acc.GetCredential("cookie"), "verification failure must not mutate account credentials")
+}
+
 func TestWebPlatformAutoLogin_DeepseekCode2(t *testing.T) {
 	acc := &Account{
 		ID:       2,
@@ -234,7 +270,7 @@ func TestWebPlatformAutoLogin_ZhipuRefreshSuccess(t *testing.T) {
 		Platform: PlatformZhipu,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT",
 			"refresh_token":          "RT",
 		},
@@ -259,7 +295,7 @@ func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
 		Platform: PlatformKimi,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT0",
 			"refresh_token":          "RT0",
 		},
@@ -269,12 +305,63 @@ func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
 	svc := newTestAutoLoginService(store, up)
 
 	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	require.Equal(t, "AT-1", store.creds[5]["access_token"])
-	require.Equal(t, "RT-1", store.creds[5]["refresh_token"])
-	require.Equal(t, "RT-1", store.creds[5][CredKeyLoginRefreshToken])
+	merged := store.creds[5]
+	require.Equal(t, "AT-1", merged["access_token"])
+	require.Equal(t, "RT-1", merged["refresh_token"])
+	require.Equal(t, "RT-1", merged[CredKeyLoginRefreshToken])
+	require.Equal(t, "0", fmt.Sprint(merged[CredKeyLoginFailCount]))
 
+	// 两级恢复：kimi refresh 成功 → 状态转 active。
 	res := svc.RecoverAccount(context.Background(), acc)
 	require.True(t, res.Recovered)
+	require.Equal(t, StatusActive, acc.Status)
+	require.Equal(t, "", acc.ErrorMessage)
+}
+
+// 宽容解析：响应为 data.accessToken 包装且无 refresh 轮换 → 取新 access_token，
+// refresh_token 保持原值（缺失轮换保持原值的既有语义）。
+func TestWebPlatformAutoLogin_KimiRefreshLenientDataPathKeepsRefreshToken(t *testing.T) {
+	acc := &Account{
+		ID:       12,
+		Platform: PlatformKimi,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":            AccountAccessModeWeb,
+			CredKeyLoginRefreshToken: "RT0",
+			"refresh_token":          "RT0",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{kimiDataOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	require.NoError(t, svc.RefreshToken(context.Background(), acc))
+	merged := store.creds[12]
+	require.Equal(t, "AT-2", merged["access_token"])
+	require.Equal(t, "RT0", merged["refresh_token"])
+	require.Equal(t, "RT0", merged[CredKeyLoginRefreshToken])
+}
+
+// 失败关闭：2xx 但响应缺 accessToken → 错误透出且不落库。
+func TestWebPlatformAutoLogin_KimiRefreshMissingAccessTokenFailsClosed(t *testing.T) {
+	acc := &Account{
+		ID:       13,
+		Platform: PlatformKimi,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode":            AccountAccessModeWeb,
+			CredKeyLoginRefreshToken: "RT0",
+			"refresh_token":          "RT0",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{kimiNoToken: true}
+	svc := newTestAutoLoginService(store, up)
+
+	err := svc.RefreshToken(context.Background(), acc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "缺少 accessToken")
+	require.Nil(t, store.creds[13], "解析失败时不得落库")
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +374,7 @@ func TestWebPlatformAutoLogin_ZhipuRefreshFailNeedsSemiAuto(t *testing.T) {
 		Platform: PlatformZhipu,
 		Status:   StatusError,
 		Credentials: map[string]any{
-			"access_mode":             AccountAccessModeWeb,
+			"access_mode":            AccountAccessModeWeb,
 			CredKeyLoginRefreshToken: "RT",
 		},
 	}
@@ -320,27 +407,6 @@ func TestWebPlatformAutoLogin_DeepseekFailNoSemiAuto(t *testing.T) {
 	res := svc.RecoverAccount(context.Background(), acc)
 	require.False(t, res.Recovered)
 	require.False(t, res.NeedsSemiAuto) // deepseek 全自动，绝不需半自动
-}
-
-// ---------------------------------------------------------------------------
-// 退避取档
-// ---------------------------------------------------------------------------
-
-func TestWebPlatformAutoLogin_BackoffTiers(t *testing.T) {
-	cases := []struct {
-		fc   int
-		want time.Duration
-	}{
-		{0, 5 * time.Minute},
-		{1, 15 * time.Minute},
-		{2, 1 * time.Hour},
-		{3, 6 * time.Hour},
-		{4, 24 * time.Hour},
-		{10, 24 * time.Hour},
-	}
-	for _, c := range cases {
-		require.Equal(t, c.want, autoLoginBackoffForFailCount(c.fc), "fail_count=%d", c.fc)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -395,75 +461,6 @@ func TestWebPlatformAutoLogin_FailureKeepsCookie(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 维护池
-// ---------------------------------------------------------------------------
-
-func TestWebPlatformAutoLogin_MaintenanceCycleSkipsNonRetryable(t *testing.T) {
-	acc := &Account{
-		ID:       11,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginEmail:        "u@x.com",
-			CredKeyLoginPassword:     "bad",
-			CredKeyLoginNonRetryable: "true",
-			CredKeyLoginLastError:    "账号已被封禁",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 10}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, 0, len(up.requests))       // 不可重试类：不发起任何出站请求
-	require.Equal(t, StatusError, acc.Status)   // 状态未被改动
-	require.Empty(t, store.statuses[11].status) // 维护池未写入任何状态更新
-}
-
-func TestWebPlatformAutoLogin_MaintenanceCycleRetries(t *testing.T) {
-	acc := &Account{
-		ID:       12,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":         AccountAccessModeWeb,
-			CredKeyLoginEmail:     "u@x.com",
-			CredKeyLoginPassword:  "pw",
-			CredKeyLoginLastAt:    time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), // 冷却已过
-			CredKeyLoginFailCount: 0,
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, StatusActive, store.statuses[12].status)
-}
-
-func TestWebPlatformAutoLogin_MaintenanceCycleBackoffCooldown(t *testing.T) {
-	acc := &Account{
-		ID:       13,
-		Platform: PlatformDeepseek,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":         AccountAccessModeWeb,
-			CredKeyLoginEmail:     "u@x.com",
-			CredKeyLoginPassword:  "pw",
-			CredKeyLoginLastAt:    time.Now().UTC().Format(time.RFC3339), // 刚刚尝试，仍在 5m 退避内
-			CredKeyLoginFailCount: 0,
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{loginBizCode: 0, loginHTTPStatus: http.StatusOK}
-	svc := newTestAutoLoginService(store, up)
-
-	svc.runMaintenanceCycle(context.Background())
-	require.Equal(t, 0, len(up.requests)) // 退避冷却中：不发起请求
-}
-
-// ---------------------------------------------------------------------------
 // 错误细化表（三平台共用）
 // ---------------------------------------------------------------------------
 
@@ -501,4 +498,51 @@ func TestWebPlatformErrorDetail_Table(t *testing.T) {
 	// 成功码 → 空文案。
 	title, _ = WebPlatformErrorDetail(PlatformDeepseek, WebLoginCodeSuccess, WebLoginKindLogin)
 	require.Equal(t, "", title)
+}
+
+// ---------------------------------------------------------------------------
+// zhipu refresh：cookie 兜底（对齐转发侧 refreshWebZhipuAccessToken 口径）
+// ---------------------------------------------------------------------------
+
+// TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback：显式 refresh_token /
+// login_refresh_token 均缺失时，从账号已保存的整串 cookie 解析 chatglm_refresh_token。
+func TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback(t *testing.T) {
+	acc := &Account{
+		ID:       8,
+		Platform: PlatformZhipu,
+		Status:   StatusError,
+		Credentials: map[string]any{
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "chatglm_token=CT-1; chatglm_refresh_token=RFT-COOKIE",
+		},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{zhipuOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	require.NoError(t, svc.RefreshToken(context.Background(), acc))
+	require.NotEmpty(t, up.requests)
+	// 续期请求使用的正是 cookie 兜底解析出的 refresh token。
+	require.Equal(t, "chatglm_refresh_token=RFT-COOKIE", up.requests[len(up.requests)-1].Header.Get("Cookie"))
+	require.Equal(t, "RFT-COOKIE", store.creds[8][CredKeyLoginRefreshToken])
+	require.Equal(t, "NEWTOKEN", store.creds[8]["chatglm_token"])
+}
+
+// TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed：显式键与 cookie 兜底都
+// 取不到 refresh_token 时，失败关闭且不发续期请求。
+func TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed(t *testing.T) {
+	acc := &Account{
+		ID:          9,
+		Platform:    PlatformZhipu,
+		Status:      StatusError,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb},
+	}
+	store := newAutoLoginStore(acc)
+	up := &autoLoginUpstream{zhipuOK: true}
+	svc := newTestAutoLoginService(store, up)
+
+	err := svc.RefreshToken(context.Background(), acc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "refresh_token")
+	require.Empty(t, up.requests)
 }

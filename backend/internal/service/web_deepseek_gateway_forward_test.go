@@ -297,8 +297,8 @@ func TestForwardWebDeepseek_RequestBuild_NewProtocol(t *testing.T) {
 // 跳过自动建会话（直接复用），出站仅 PoW + completion 两次请求。
 func TestForwardWebDeepseek_SessionCreateOverrideSkipped(t *testing.T) {
 	account := webDeepseekTestAccount(8802, map[string]any{
-		"base_url":          "https://chat.deepseek.com",
-		"chat_session_id":   "sess-override-9",
+		"base_url":        "https://chat.deepseek.com",
+		"chat_session_id": "sess-override-9",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
@@ -314,10 +314,10 @@ func TestForwardWebDeepseek_SessionCreateOverrideSkipped(t *testing.T) {
 // TestForwardWebDeepseek_HeaderFamily_HifPassthrough 覆盖 x-hif-* 在 credentials 提供时透传。
 func TestForwardWebDeepseek_HeaderFamily_HifPassthrough(t *testing.T) {
 	account := webDeepseekTestAccount(8803, map[string]any{
-		"base_url":     "https://chat.deepseek.com",
-		"device_id":   "11111111-1111-4111-8111-111111111111",
-		"x-hif-dliq":  "hif-dliq-value",
-		"x-hif-leim":  "hif-leim-value",
+		"base_url":        "https://chat.deepseek.com",
+		"login_device_id": "11111111-1111-4111-8111-111111111111",
+		"x-hif-dliq":      "hif-dliq-value",
+		"x-hif-leim":      "hif-leim-value",
 	})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
 		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
@@ -327,7 +327,7 @@ func TestForwardWebDeepseek_HeaderFamily_HifPassthrough(t *testing.T) {
 	_, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
 	require.NoError(t, err)
 	chatReq := upstream.requests[2]
-	require.Equal(t, "11111111-1111-4111-8111-111111111111", chatReq.Header.Get("x-device-id"), "device_id credential override")
+	require.Equal(t, "11111111-1111-4111-8111-111111111111", chatReq.Header.Get("x-device-id"), "login_device_id credential override")
 	require.Equal(t, "hif-dliq-value", chatReq.Header.Get("x-hif-dliq"))
 	require.Equal(t, "hif-leim-value", chatReq.Header.Get("x-hif-leim"))
 }
@@ -378,8 +378,58 @@ func TestForwardWebDeepseek_MultiTurnPromptConcat(t *testing.T) {
 	require.Equal(t, "null", gjson.GetBytes(upstream.bodies[2], "parent_message_id").Raw)
 }
 
-// TestForwardWebDeepseek_FixtureStreamingRelay 覆盖流式回程：实测 fixture 流经解析器重包为
-// chat.completion.chunk 流，正文正确、usage 取最后 accumulated_token_usage、终止 [DONE]。
+// TestForwardWebDeepseek_StreamingAuthAfterContentDoesNotRelogin 覆盖流式回程：
+// HTTP 200 SSE 已写出 partial 正文帧后跟 auth 错误帧 → contentProduced 顶层闸门生效，
+// 不触发重登/重试（requests 恰 3 个），流内收口（upstream_error），无 panic。
+func TestForwardWebDeepseek_StreamingAuthAfterContentDoesNotRelogin(t *testing.T) {
+	account := webDeepseekTestAccount(8899, map[string]any{"base_url": "https://chat.deepseek.com"})
+	authBody := `{"code":0,"data":{"biz_code":40002,"biz_msg":"invalid token"}}`
+	stream := "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"partial\"}]}\n\n" + "data: " + authBody + "\n\n"
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))},
+	}}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekInboundBody("deepseek-chat")))
+	svc := &OpenAIGatewayService{
+		cfg:              &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}}},
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{},
+	}
+	_, err := svc.forwardWebDeepseek(context.Background(), c, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", true, time.Now(), webResponseModeChat)
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 3, "midstream auth failure must not trigger relogin/retry")
+	require.Contains(t, recorder.Body.String(), "partial")
+	require.Contains(t, recorder.Body.String(), "upstream_error")
+}
+
+// TestForwardWebDeepseek_NonStreamingAuthAfterContentDoesNotRelogin 覆盖非流式回程回归：
+// HTTP 200 SSE 含 partial 内容帧后跟 auth 错误帧、reqStream=false → contentProduced 闸门
+// 生效，不触发重登（requests 恰 3 个）、返回 auth 错误，且 recorder 无凭证泄漏。
+func TestForwardWebDeepseek_NonStreamingAuthAfterContentDoesNotRelogin(t *testing.T) {
+	const secretCookie = "ds_session_id=SECRETVALUE123456; HWWAFSESID=WAFSECRETVALUE1"
+	account := webDeepseekTestAccount(8821, map[string]any{
+		"cookie":   secretCookie,
+		"base_url": "https://chat.deepseek.com",
+	})
+	authBody := `{"code":0,"data":{"biz_code":40002,"biz_msg":"invalid token"}}`
+	stream := "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"type\":\"RESPONSE\",\"content\":\"partial\"}]}\n\n" + "data: " + authBody + "\n\n"
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(webDeepseekSolvablePowChallengeBody()))},
+		webDeepseekSessionCreateResponse(),
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))},
+	}}
+	recorder, _, err := runForwardWebDeepseek(t, account, webDeepseekInboundBody("deepseek-chat"), "deepseek-chat", upstream, &RateLimitService{})
+	require.Error(t, err)
+	require.Len(t, upstream.requests, 3, "auth failure after aggregated content must not trigger relogin/retry")
+	require.NotContains(t, recorder.Body.String(), "SECRETVALUE123456", "credentials must not leak into client response")
+	require.NotContains(t, recorder.Body.String(), "WAFSECRETVALUE1", "credentials must not leak into client response")
+}
+
 func TestForwardWebDeepseek_FixtureStreamingRelay(t *testing.T) {
 	account := webDeepseekTestAccount(8810, map[string]any{"base_url": "https://chat.deepseek.com"})
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{
@@ -393,7 +443,7 @@ func TestForwardWebDeepseek_FixtureStreamingRelay(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekInboundBody("deepseek-chat")))
 	svc := &OpenAIGatewayService{
-		cfg: &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}}},
+		cfg:              &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}}},
 		httpUpstream:     upstream,
 		rateLimitService: &RateLimitService{},
 	}

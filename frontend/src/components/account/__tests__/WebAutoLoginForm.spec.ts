@@ -1,17 +1,21 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import type { CreateAccountRequest } from '@/types'
 
-const {
-  webLoginPasswordMock,
-  webLoginSmsMock
-} = vi.hoisted(() => ({
+const { webLoginPasswordMock, webLoginSmsMock, startChallengeMock, statusChallengeMock, consumeChallengeMock } = vi.hoisted(() => ({
   webLoginPasswordMock: vi.fn(),
-  webLoginSmsMock: vi.fn()
+  webLoginSmsMock: vi.fn(),
+  startChallengeMock: vi.fn(),
+  statusChallengeMock: vi.fn(),
+  consumeChallengeMock: vi.fn()
 }))
 
 vi.mock('@/api/admin/webAutoLogin', () => ({
   webLoginPassword: webLoginPasswordMock,
-  webLoginSms: webLoginSmsMock
+  webLoginSms: webLoginSmsMock,
+  startWebLoginChallenge: startChallengeMock,
+  getWebLoginChallengeStatus: statusChallengeMock,
+  consumeWebLoginChallenge: consumeChallengeMock
 }))
 
 vi.mock('vue-i18n', () => ({
@@ -20,73 +24,257 @@ vi.mock('vue-i18n', () => ({
 
 import WebAutoLoginForm from '../WebAutoLoginForm.vue'
 
+const accountDraft: CreateAccountRequest = {
+  name: 'draft web account',
+  platform: 'deepseek',
+  type: 'apikey',
+  credentials: { access_mode: 'web' },
+  group_ids: [3],
+  concurrency: 4
+}
+
+beforeEach(() => {
+  webLoginPasswordMock.mockReset()
+  webLoginSmsMock.mockReset()
+  startChallengeMock.mockReset()
+  statusChallengeMock.mockReset()
+  consumeChallengeMock.mockReset()
+  startChallengeMock.mockResolvedValue({ success: true, session_id: 'opaque-session' })
+  statusChallengeMock.mockResolvedValue({ success: true, session_id: 'opaque-session', status: 'succeeded' })
+  consumeChallengeMock.mockResolvedValue({ success: true, session_id: 'opaque-session', status: 'consumed' })
+})
+
 describe('WebAutoLoginForm', () => {
-  it('deepseek: submits with login_email and emits recovered with the cookie', async () => {
-    webLoginPasswordMock.mockResolvedValue({ success: true, cookie: 'ck=123' })
-    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek' } })
+  it('password new-account request carries account_draft and success emits only platform/account_id', async () => {
+    webLoginPasswordMock.mockResolvedValue({ success: true, account_id: 12 })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek', accountDraft } })
 
     await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('user@deepseek.com')
     await wrapper.find('[data-testid="web-auto-login-password"]').setValue('pw')
     await wrapper.find('[data-testid="web-auto-login-submit"]').trigger('click')
     await flushPromises()
 
-    expect(webLoginPasswordMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        platform: 'deepseek',
-        login_email: 'user@deepseek.com',
-        login_password: 'pw'
-      })
-    )
-    const emitted = wrapper.emitted('recovered')
-    expect(emitted).toBeTruthy()
-    expect(emitted![0][0]).toEqual({ platform: 'deepseek', cookie: 'ck=123' })
+    expect(webLoginPasswordMock).toHaveBeenCalledWith({
+      platform: 'deepseek',
+      login_email: 'user@deepseek.com',
+      login_password: 'pw',
+      account_draft: accountDraft
+    })
+    expect(webLoginPasswordMock.mock.calls[0][0]).not.toHaveProperty('account_id')
+    expect(wrapper.emitted('recovered')).toEqual([[{ platform: 'deepseek', account_id: 12 }]])
   })
 
-  it('zhipu: uses login_phone and reveals the SMS step on needs_sms', async () => {
-    webLoginPasswordMock.mockResolvedValue({ success: true, needs_sms: true, session_token: 'tok' })
-    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+  it('existing password re-login carries account_id and omits account_draft', async () => {
+    webLoginPasswordMock.mockResolvedValue({ success: true, account_id: 77 })
+    const wrapper = mount(WebAutoLoginForm, {
+      props: { platform: 'deepseek', accountId: 77, accountDraft }
+    })
 
-    await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('user@deepseek.com')
     await wrapper.find('[data-testid="web-auto-login-password"]').setValue('pw')
     await wrapper.find('[data-testid="web-auto-login-submit"]').trigger('click')
     await flushPromises()
 
-    expect(webLoginPasswordMock).toHaveBeenCalledWith(
-      expect.objectContaining({ platform: 'zhipu', login_phone: '13800000000' })
-    )
-    expect(wrapper.find('[data-testid="web-auto-login-sms"]').exists()).toBe(true)
+    expect(webLoginPasswordMock).toHaveBeenCalledWith({
+      platform: 'deepseek',
+      login_email: 'user@deepseek.com',
+      login_password: 'pw',
+      account_id: 77
+    })
+    expect(webLoginPasswordMock.mock.calls[0][0]).not.toHaveProperty('account_draft')
   })
 
-  it('zhipu: SMS submit shows the honest not-connected error and never fakes success', async () => {
-    webLoginPasswordMock.mockResolvedValue({ success: true, needs_sms: true, session_token: 'tok' })
-    webLoginSmsMock.mockResolvedValue({ success: false, detail: '短信码登录尚未接入发码通道' })
-    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+  it('password with leading/trailing spaces is sent verbatim (only trimmed for the empty check)', async () => {
+    webLoginPasswordMock.mockResolvedValue({ success: true, account_id: 31 })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek' } })
 
-    await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('13800000000')
-    await wrapper.find('[data-testid="web-auto-login-password"]').setValue('pw')
+    await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('user@deepseek.com')
+    await wrapper.find('[data-testid="web-auto-login-password"]').setValue('  pw spaced  ')
     await wrapper.find('[data-testid="web-auto-login-submit"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-testid="web-auto-login-sms-code"]').setValue('123456')
+
+    expect(webLoginPasswordMock).toHaveBeenCalledWith({
+      platform: 'deepseek',
+      login_email: 'user@deepseek.com',
+      login_password: '  pw spaced  '
+    })
+  })
+
+  it('SMS new-account send/login requests carry account_draft and emit only account identity', async () => {
+    webLoginSmsMock.mockImplementation(async (request: { action: string }) =>
+      request.action === 'send_code' ? { success: true } : { success: true, account_id: 8 }
+    )
+    const wrapper = mount(WebAutoLoginForm, {
+      props: { platform: 'kimi', accountDraft: { ...accountDraft, platform: 'kimi' } }
+    })
+
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000001')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="web-auto-login-sms-code"]').setValue('654321')
     await wrapper.find('[data-testid="web-auto-login-sms-submit"]').trigger('click')
     await flushPromises()
 
-    expect(webLoginSmsMock).toHaveBeenCalledWith({ session_token: 'tok', sms_code: '123456' })
-    expect(wrapper.find('[data-testid="web-auto-login-sms-error"]').text()).toContain(
-      '短信码登录尚未接入发码通道'
-    )
-    // 未伪造成功
-    expect(wrapper.emitted('recovered')).toBeFalsy()
+    expect(startChallengeMock).toHaveBeenCalledWith({
+      platform: 'kimi',
+      phone: '13800000001',
+      account_draft: { ...accountDraft, platform: 'kimi' }
+    })
+    expect(statusChallengeMock).toHaveBeenCalledWith('opaque-session')
+    expect(consumeChallengeMock).toHaveBeenCalledWith('opaque-session', {
+      platform: 'kimi',
+      phone: '13800000001',
+      account_draft: { ...accountDraft, platform: 'kimi' }
+    })
+    expect(webLoginSmsMock).toHaveBeenNthCalledWith(1, {
+      action: 'send_code',
+      platform: 'kimi',
+      phone: '13800000001',
+      challenge_session_id: 'opaque-session'
+    })
+    expect(webLoginSmsMock).toHaveBeenNthCalledWith(2, {
+      action: 'login',
+      platform: 'kimi',
+      phone: '13800000001',
+      sms_code: '654321',
+      challenge_session_id: 'opaque-session'
+    })
+    expect(wrapper.emitted('recovered')).toEqual([[{ platform: 'kimi', account_id: 8 }]])
   })
 
-  it('surfaces the interceptor flat-object error message verbatim', async () => {
-    webLoginPasswordMock.mockRejectedValue({ status: 400, message: 'boom' })
-    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek' } })
+  it('requires an account name before sending the SMS code in new-account mode', async () => {
+    const wrapper = mount(WebAutoLoginForm, {
+      props: { platform: 'kimi', accountDraft: { ...accountDraft, platform: 'kimi', name: '' } }
+    })
 
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000001')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+
+    expect(startChallengeMock).not.toHaveBeenCalled()
+    expect(webLoginSmsMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="web-auto-login-error"]').text()).toContain('accountNameRequired')
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('pending')
+  })
+
+  it('existing SMS re-login carries account_id and omits account_draft', async () => {
+    webLoginSmsMock.mockResolvedValue({ success: true })
+    const wrapper = mount(WebAutoLoginForm, {
+      props: { platform: 'zhipu', accountId: 19, accountDraft }
+    })
+
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+
+    expect(webLoginSmsMock).toHaveBeenCalledWith({
+      action: 'send_code', platform: 'zhipu', phone: '13800000000', challenge_session_id: 'opaque-session'
+    })
+    expect(webLoginSmsMock.mock.calls[0][0]).not.toHaveProperty('account_id')
+    expect(webLoginSmsMock.mock.calls[0][0]).not.toHaveProperty('account_draft')
+  })
+
+  it.each([
+    ['success', { success: true, status: 'succeeded' }, 'succeeded'],
+    ['failure', { success: false, status: 'failed', detail: 'failed' }, 'failed']
+  ])('challenge status is %s without exposing credentials', async (_label, response, status) => {
+    statusChallengeMock.mockResolvedValue(response)
+    consumeChallengeMock.mockResolvedValue({ success: true, status: 'consumed' })
+    webLoginSmsMock.mockResolvedValue({ success: true })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain(status)
+  })
+
+  it('stops without sending SMS when challenge context is unavailable', async () => {
+    startChallengeMock.mockResolvedValue({ success: false, status: 'context_gap', detail: 'context gap' })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+
+    expect(webLoginSmsMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('context_gap')
+  })
+
+  it('maps an expired challenge response to expired status', async () => {
+    statusChallengeMock.mockResolvedValue({ success: true, status: 'expired', detail: 'expired' })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('expired')
+  })
+
+
+  it('does not update or emit after an in-flight request resolves after unmount', async () => {
+    let resolveRequest!: (value: { success: boolean; account_id?: number }) => void
+    webLoginPasswordMock.mockReturnValue(new Promise((resolve) => { resolveRequest = resolve }))
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek', accountDraft } })
     await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('a@b.com')
     await wrapper.find('[data-testid="web-auto-login-password"]').setValue('pw')
     await wrapper.find('[data-testid="web-auto-login-submit"]').trigger('click')
+    wrapper.unmount()
+    resolveRequest({ success: true, account_id: 55 })
     await flushPromises()
+    expect(wrapper.emitted('recovered')).toBeUndefined()
+  })
 
-    expect(wrapper.find('[data-testid="web-auto-login-error"]').text()).toBe('boom')
+  it('does not enter the SMS step when an in-flight challenge request resolves after unmount', async () => {
+    let resolveRequest!: (value: { success: boolean; session_id?: string }) => void
+    startChallengeMock.mockReturnValue(new Promise((resolve) => { resolveRequest = resolve }))
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu', accountDraft } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    wrapper.unmount()
+    resolveRequest({ success: true, session_id: 'late-session' })
+    await flushPromises()
+    expect(wrapper.emitted('recovered')).toBeUndefined()
+  })
+
+  it('keeps challenge status pending before the challenge response', async () => {
+    let resolveRequest!: (value: { success: boolean; session_id?: string }) => void
+    startChallengeMock.mockReturnValue(new Promise((resolve) => { resolveRequest = resolve }))
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('pending')
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('pending')
+    resolveRequest({ success: true })
+    await flushPromises()
+  })
+
+  it('ignores repeated send-code clicks while a request is pending', async () => {
+    let resolveRequest!: (value: { success: boolean }) => void
+    webLoginSmsMock.mockReturnValue(new Promise((resolve) => { resolveRequest = resolve }))
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu' } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    const button = wrapper.find('[data-testid="web-auto-login-send-code"]')
+    await button.trigger('click')
+    await button.trigger('click')
+    expect(webLoginSmsMock).toHaveBeenCalledTimes(1)
+    resolveRequest({ success: true })
+    await flushPromises()
+  })
+
+  it('ignores repeated SMS login clicks while account creation is pending', async () => {
+    let resolveLogin!: (value: { success: boolean; account_id?: number }) => void
+    webLoginSmsMock
+      .mockResolvedValueOnce({ success: true })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveLogin = resolve }))
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'zhipu', accountDraft } })
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000000')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="web-auto-login-sms-code"]').setValue('123456')
+    const button = wrapper.find('[data-testid="web-auto-login-sms-submit"]')
+    await button.trigger('click')
+    await button.trigger('click')
+    expect(webLoginSmsMock).toHaveBeenCalledTimes(2)
+    resolveLogin({ success: true, account_id: 21 })
+    await flushPromises()
+    expect(wrapper.emitted('recovered')).toEqual([[{ platform: 'zhipu', account_id: 21 }]])
   })
 })

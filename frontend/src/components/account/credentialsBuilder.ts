@@ -27,9 +27,10 @@ export function applyAntigravityProjectID(
 
 // ===== 网页接入模式（kimi / zhipu / deepseek + access_mode=web）=====
 // 平台归并（PR-3）后 web-* 不再是独立平台：官方网页端登录态转发下沉为账号级
-// credentials["access_mode"]="web"（docs/web-reverse-embedded-login-plan.md §3.2）：
-// DeepSeek / 智谱粘贴整串 Cookie；Kimi 粘贴 Token JSON。内嵌登录（W5）落地前，
-// 手动粘贴是唯一建号路径，落地后仍是降级兜底（§2.3）。字段口径与后端
+// credentials["access_mode"]="web"。登录态凭证由自动登录取得并随建号写入：
+// DeepSeek = 密码登录（cookie + login_email + login_password，供失效后自动续期）；
+// Zhipu / Kimi = 短信码登录（后端取得 cookie / access_token + login_refresh_token）。
+// 手工粘贴 Cookie / Kimi Token JSON 入口已随单入口登录整改归零（点七）。字段口径与后端
 // validateWebAccountCredential / SanitizeStoredCredentials（web 模式保留 cookie）保持一致。
 
 export const WEB_PROVIDER_PLATFORMS = ['kimi', 'zhipu', 'deepseek'] as const
@@ -79,7 +80,7 @@ export function isUpstreamBillingProbeEligible(platform: string, type: string): 
   return type === 'apikey' && (UPSTREAM_BILLING_PROBE_PLATFORMS as readonly string[]).includes(platform)
 }
 
-/** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 Token 三元组。 */
+/** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 access_token（短信登录后端自动取得）。 */
 export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
   return platform === 'deepseek' || platform === 'zhipu'
 }
@@ -90,18 +91,19 @@ export function webPlatformSupportsPasswordLogin(platform: WebProviderPlatform):
   return platform === 'deepseek'
 }
 
-export type WebCredentialError =
-  | 'webCookieRequired'
-  | 'webKimiJsonInvalid'
-  | 'webKimiAccessTokenRequired'
+export type WebCredentialError = 'webCookieRequired' | 'webKimiAccessTokenRequired'
 
 export interface WebCredentialBuildInput {
   /** DeepSeek / Zhipu：整串 Cookie 原文 */
   cookie: string
-  /** Kimi：粘贴的 JSON 文本（access_token 必填，refresh_token / user_id 可选） */
-  kimiTokenJson: string
   /** 可选官方域名覆盖；空串不写入 */
   baseUrl: string
+  /** DeepSeek 自动续期：登录邮箱（非空才写入 login_email） */
+  loginEmail?: string
+  /** DeepSeek 自动续期：登录密码（非空才写入 login_password） */
+  loginPassword?: string
+  /** zhipu / kimi 短信登录：手机号（非空才写入 login_phone） */
+  loginPhone?: string
 }
 
 export type WebCredentialBuildResult =
@@ -109,8 +111,8 @@ export type WebCredentialBuildResult =
   | { credentials?: undefined; error: WebCredentialError }
 
 /**
- * 校验并构建网页逆向平台凭证。Cookie 平台仅要求非空；Kimi 要求 JSON 可解析
- * （扁平对象）且含非空 access_token，refresh_token / user_id 存在时透传。
+ * 校验并构建网页接入模式凭证。Cookie 平台（deepseek/zhipu）仅要求非空 Cookie；
+ * Kimi 仅支持短信登录创建（后端自动取得 access_token），无手工凭证输入。
  */
 export function buildWebProviderCredentials(
   platform: string,
@@ -130,33 +132,27 @@ export function buildWebProviderCredentials(
     }
     credentials.cookie = cookie
   } else {
-    let parsed: Record<string, unknown>
-    try {
-      const raw: unknown = JSON.parse(input.kimiTokenJson)
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-        return { error: 'webKimiJsonInvalid' }
-      }
-      parsed = raw as Record<string, unknown>
-    } catch {
-      return { error: 'webKimiJsonInvalid' }
-    }
-    const accessToken = typeof parsed.access_token === 'string' ? parsed.access_token.trim() : ''
-    if (!accessToken) {
-      return { error: 'webKimiAccessTokenRequired' }
-    }
-    credentials.access_token = accessToken
-    if (typeof parsed.refresh_token === 'string' && parsed.refresh_token.trim()) {
-      credentials.refresh_token = parsed.refresh_token.trim()
-    }
-    if (typeof parsed.user_id === 'string' && parsed.user_id.trim()) {
-      credentials.user_id = parsed.user_id.trim()
-    } else if (typeof parsed.user_id === 'number' && Number.isFinite(parsed.user_id)) {
-      credentials.user_id = parsed.user_id
-    }
+    // Kimi：无手工凭证输入（点七归零，短信登录由后端自动取得 access_token）。
+    // 手动创建路径不可达即失败关闭，不产生半成品账号。
+    return { error: 'webKimiAccessTokenRequired' }
   }
   const baseUrl = input.baseUrl.trim()
   if (baseUrl) {
     credentials.base_url = baseUrl
+  }
+  // 自动续期登录凭证（deepseek 密码登录；zhipu/kimi 短信登录）：可选字段非空才写入，
+  // 键名与后端 CredKeyLoginEmail / CredKeyLoginPassword / CredKeyLoginPhone 保持一致。
+  const loginEmail = input.loginEmail?.trim()
+  if (loginEmail) {
+    credentials.login_email = loginEmail
+  }
+  const loginPassword = input.loginPassword?.trim()
+  if (loginPassword) {
+    credentials.login_password = loginPassword
+  }
+  const loginPhone = input.loginPhone?.trim()
+  if (loginPhone) {
+    credentials.login_phone = loginPhone
   }
   return { credentials }
 }

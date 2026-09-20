@@ -132,7 +132,7 @@ func webKimiInboundBody(model string) []byte {
 }
 
 // TestForwardWebKimi_RequestBuildAndNonStreamAggregate 覆盖：
-//   - 出站端点 /apiv2/kimi.chat.v1.ChatService/Chat、Connect RPC 头（Bearer / Cookie 候选 /
+//   - 出站端点 /apiv2/kimi.chat.v1.ChatService/Chat、Connect RPC 头（Bearer 认证载体 /
 //     Origin / Referer / UA / x-language / x-msh-platform / x-msh-version）；
 //   - 请求体已验证结构（blocks[].text.content 简单形态、options.model=官方值、
 //     scenario=SCENARIO_CHAT、thinking/enable_plugin/reasoning_effort 实测默认、**不带 chatId**）；
