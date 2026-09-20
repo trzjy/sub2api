@@ -715,6 +715,8 @@ func (h *AccountHandler) WebLoginSMS(c *gin.Context) {
 			Type: accountDraft.Type, Credentials: createdCreds,
 			Extra: accountDraft.Extra, ProxyID: claim.ProxyID, Concurrency: accountDraft.Concurrency,
 			Priority: accountDraft.Priority, GroupIDs: accountDraft.GroupIDs, ExpiresAt: accountDraft.ExpiresAt,
+			RateMultiplier: accountDraft.RateMultiplier, LoadFactor: accountDraft.LoadFactor,
+			AutoPauseOnExpired: accountDraft.AutoPauseOnExpired, ProbeEnabled: accountDraft.ProbeEnabled,
 		})
 		if err != nil {
 			response.ErrorFrom(c, err)

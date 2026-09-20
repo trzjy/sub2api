@@ -95,6 +95,12 @@ func (s *WebLoginChallengeSessionStore) Create(in WebLoginChallengeCreateInput) 
 	}
 	sess := &WebLoginChallengeSession{ID: id, AdminID: in.AdminID, Platform: platform, Phone: phone, Stage: stage, AccountID: cloneOptionalInt64(in.AccountID), AccountDraft: in.AccountDraft, ProxyID: cloneOptionalInt64(in.ProxyID), CreatedAt: now, ExpiresAt: now.Add(WebLoginChallengeTTL), Status: "pending"}
 	s.mu.Lock()
+	// 惰性清扫：创建时顺带删除全部已过期 session（无后台定时器；访问频率与创建频率同阶，足以防积累）。
+	for k, v := range s.sessions {
+		if !now.Before(v.ExpiresAt) {
+			delete(s.sessions, k)
+		}
+	}
 	s.sessions[id] = sess
 	s.mu.Unlock()
 	return cloneChallengeSession(sess), nil
@@ -289,6 +295,8 @@ func (s *WebLoginChallengeSessionStore) lookupLocked(id string, adminID int64, p
 		return nil, ErrWebLoginChallengeNotFound
 	}
 	if !s.now().Before(sess.ExpiresAt) {
+		// 惰性清理：命中过期即删除，避免长期运行内存无限积累（TTL 3 分钟）。
+		delete(s.sessions, id)
 		sess.Status = "expired"
 		return nil, ErrWebLoginChallengeExpired
 	}

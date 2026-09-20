@@ -261,3 +261,28 @@ func TestWebLoginChallengeSessionStoreBindingMismatchAndExpiry(t *testing.T) {
 	_, err = store.BeginConsume(expired.ID, 7, PlatformZhipu, "13800138000")
 	require.ErrorIs(t, err, ErrWebLoginChallengeExpired)
 }
+
+// 惰性清理：命中过期的 session 被 delete，Create 时顺带清扫全部过期 session，
+// 防止长期运行内存无限积累（无后台定时器）。
+func TestWebLoginChallengeSessionStoreLazyEvictionOfExpired(t *testing.T) {
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	store := NewWebLoginChallengeSessionStore()
+	store.now = func() time.Time { return now }
+
+	old1, err := store.Create(WebLoginChallengeCreateInput{AdminID: 7, Platform: PlatformKimi, Phone: "13800138000"})
+	require.NoError(t, err)
+	_, err = store.Create(WebLoginChallengeCreateInput{AdminID: 7, Platform: PlatformZhipu, Phone: "13800138001"})
+	require.NoError(t, err)
+
+	// 时间推进使两个 session 全部过期，再创建一个新 session。
+	now = old1.ExpiresAt.Add(time.Second)
+	fresh, err := store.Create(WebLoginChallengeCreateInput{AdminID: 7, Platform: PlatformKimi, Phone: "13800138002"})
+	require.NoError(t, err)
+	require.Len(t, store.sessions, 1, "expired sessions must be swept on Create")
+
+	// Get 命中过期 session 时同样删除并返回未找到/过期错误。
+	store.now = func() time.Time { return fresh.ExpiresAt.Add(time.Second) }
+	_, err = store.Status(fresh.ID, 7)
+	require.ErrorIs(t, err, ErrWebLoginChallengeExpired)
+	require.Empty(t, store.sessions, "expired session must be deleted on lookup")
+}

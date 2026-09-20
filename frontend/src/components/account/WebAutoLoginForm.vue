@@ -155,9 +155,10 @@ async function pollChallenge(sessionId: string, generation: number): Promise<boo
 async function submitPassword() {
   if (submitting.value) return
   errorMsg.value = ''
+  // identifier 可 trim；密码必须保留原始值（首尾空格可能是密码的一部分），仅空检查时 trim。
   const identifier = identifierValue.value.trim()
-  const password = passwordValue.value.trim()
-  if (!identifier || !password) {
+  const password = passwordValue.value
+  if (!identifier || !password.trim()) {
     errorMsg.value = t('admin.accounts.webLogin.autoLogin.fillRequired')
     return
   }

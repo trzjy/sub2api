@@ -2207,6 +2207,11 @@ func setDefaults() {
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"*.openai.azure.com",
+		// 三平台网页接入（web 登录/续期/转发）默认放行；与 deploy/config.example.yaml 保持一致。
+		"chat.deepseek.com", // DeepSeek web（邮箱密码登录 + 转发）
+		"chatglm.cn",        // zhipu web（短信发码/登录/续期/转发）
+		"auth.kimi.com",     // kimi oauth 命名空间（发码/登录/refresh）
+		"www.kimi.com",      // kimi web（转发）
 	})
 	viper.SetDefault("security.url_allowlist.pricing_hosts", []string{
 		"raw.githubusercontent.com",

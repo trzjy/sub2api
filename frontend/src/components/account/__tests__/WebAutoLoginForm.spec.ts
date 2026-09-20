@@ -84,6 +84,22 @@ describe('WebAutoLoginForm', () => {
     expect(webLoginPasswordMock.mock.calls[0][0]).not.toHaveProperty('account_draft')
   })
 
+  it('password with leading/trailing spaces is sent verbatim (only trimmed for the empty check)', async () => {
+    webLoginPasswordMock.mockResolvedValue({ success: true, account_id: 31 })
+    const wrapper = mount(WebAutoLoginForm, { props: { platform: 'deepseek' } })
+
+    await wrapper.find('[data-testid="web-auto-login-identifier"]').setValue('user@deepseek.com')
+    await wrapper.find('[data-testid="web-auto-login-password"]').setValue('  pw spaced  ')
+    await wrapper.find('[data-testid="web-auto-login-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(webLoginPasswordMock).toHaveBeenCalledWith({
+      platform: 'deepseek',
+      login_email: 'user@deepseek.com',
+      login_password: '  pw spaced  '
+    })
+  })
+
   it('SMS new-account send/login requests carry account_draft and emit only account identity', async () => {
     webLoginSmsMock.mockImplementation(async (request: { action: string }) =>
       request.action === 'send_code' ? { success: true } : { success: true, account_id: 8 }
