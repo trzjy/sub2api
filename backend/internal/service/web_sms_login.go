@@ -409,18 +409,24 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 	accessToken := strings.TrimSpace(parsed.AccessToken)
 	refreshToken := strings.TrimSpace(parsed.RefreshToken)
 	if accessToken == "" || refreshToken == "" {
-		// 诊断探针：只记响应结构与字段名/类型/长度，绝不记字段值（凭据零泄漏）。
-		// 用于定位"HTTP 2xx 但缺 token"的真实响应形状（E0 取证只覆盖了路径存在性，未覆盖成功体）。
-		s.logger.Warn("kimi 短信登录成功响应缺 token",
+		// HTTP 2xx 但缺凭据：大概率是业务错误体（如 code/message）。
+		// 提取上游可读文案返回给前端；同时记 INFO 级诊断日志（只记结构，不落值）。
+		bizMsg := smsFirstStringValue(raw, "message", "msg", "detail", "error", "error_message", "description")
+		errText := "kimi 短信登录响应缺少 access_token/refresh_token（不可重试）"
+		if bizMsg != "" {
+			errText = fmt.Sprintf("kimi 短信登录失败：%s", bizMsg)
+		}
+		s.logger.Info("kimi 短信登录响应诊断",
 			"platform", PlatformKimi,
 			"status", resp.StatusCode,
 			"content_type", resp.Header.Get("Content-Type"),
 			"body_bytes", len(raw),
 			"json_keys", smsJSONShape(raw),
+			"has_biz_message", bizMsg != "",
 		)
 		return nil, &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
-			Msg: "kimi 短信登录响应缺少 access_token/refresh_token（不可重试）",
+			Msg: errText,
 		}
 	}
 	return &SMSLoginResult{
@@ -475,6 +481,35 @@ func smsJSONShape(raw []byte) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// smsFirstStringValue 从 JSON 体中按候选键顺序提取第一个非空字符串值，
+// 用于读取 Kimi/平台业务错误文案（不泄露 token 等凭据）。
+func smsFirstStringValue(raw []byte, keys ...string) string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return ""
+	}
+	want := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		want[k] = struct{}{}
+	}
+	// 优先按传入顺序
+	for _, k := range keys {
+		v, ok := top[k]
+		if !ok {
+			continue
+		}
+		v = bytes.TrimSpace(v)
+		if len(v) == 0 || v[0] != '"' {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func arrayLen(raw json.RawMessage) int {
