@@ -394,10 +394,12 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		return nil, s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信登录")
 	}
 
-	// E0 决定性证据：登录响应按 LoginWithSMSResponse 单一路径严格解码。
-	// Connect unary 成功响应 = proto message 顶层 JSON（snake_case），无 data 包裹、无 camel 兜底。
+	// Kimi AuthService.loginWithSMS 的 Connect unary 成功响应为 proto message 顶层 JSON
+	//（snake_case），无 data 包裹。真实响应可能携带 access_token/refresh_token 之外的额
+	// 外字段（如 token_type、expires_in、scope 等），使用普通 Unmarshal 忽略未知字段，
+	// 仅在必填凭据缺失或 JSON 本身非法时失败关闭。
 	var parsed webKimiLoginWithSMSResponse
-	if err := decodeStrictSMSJSON(raw, &parsed); err != nil {
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
 			Msg: "kimi 短信登录响应解析失败（不可重试）",
