@@ -104,6 +104,12 @@ function isContextGapError(err: unknown) {
   return e?.status === 501 || e?.code === 501 || e?.metadata?.reason === 'context_gap' || e?.metadata?.code === 'context_gap'
 }
 
+function webLoginErrorText(err: unknown, fallback: string) {
+  const detail = (err as { metadata?: { detail?: unknown } } | null)?.metadata?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  return extractApiErrorMessage(err, fallback)
+}
+
 function stopChallenge(message: string, status: 'failed' | 'expired' | 'context_gap' = 'failed') {
   clearPollTimer()
   challengeStatus.value = status
@@ -137,7 +143,7 @@ async function pollChallenge(sessionId: string, generation: number): Promise<boo
       if (mounted && generation === requestGeneration) {
         stopChallenge(isContextGapError(err)
           ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
-          : extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.loginFailed')),
+          : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed')),
         isContextGapError(err) ? 'context_gap' : 'failed')
       }
       return false
@@ -170,7 +176,7 @@ async function submitPassword() {
     challengeStatus.value = 'succeeded'
     emit('recovered', { platform: props.platform, account_id: resp.account_id })
   } catch (err) {
-    if (mounted && generation === requestGeneration) errorMsg.value = extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
+    if (mounted && generation === requestGeneration) errorMsg.value = webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
   } finally {
     if (mounted && generation === requestGeneration) submitting.value = false
   }
@@ -192,6 +198,10 @@ async function sendCode() {
   challengeSessionId.value = null
   if (!phoneValue.value.trim()) {
     errorMsg.value = t('admin.accounts.webLogin.autoLogin.phoneRequired')
+    return
+  }
+  if (props.accountId == null && props.accountDraft && !String(props.accountDraft.name || '').trim()) {
+    errorMsg.value = t('admin.accounts.webLogin.autoLogin.accountNameRequired')
     return
   }
   submitting.value = true
@@ -225,7 +235,7 @@ async function sendCode() {
     if (mounted && generation === requestGeneration) {
       stopChallenge(isContextGapError(err)
         ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
-        : extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.sendCodeFailed')),
+        : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.sendCodeFailed')),
       isContextGapError(err) ? 'context_gap' : 'failed')
     }
   } finally {
@@ -261,7 +271,7 @@ async function submitSms() {
     if (mounted && generation === requestGeneration) {
       smsError.value = isContextGapError(err)
         ? t('admin.accounts.webLogin.autoLogin.challengeUnavailable')
-        : extractApiErrorMessage(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
+        : webLoginErrorText(err, t('admin.accounts.webLogin.autoLogin.loginFailed'))
     }
   } finally {
     if (mounted && generation === requestGeneration) submitting.value = false

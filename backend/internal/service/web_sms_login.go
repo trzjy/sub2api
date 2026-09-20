@@ -31,7 +31,7 @@ type webKimiLoginWithSMSResponse struct {
 //     · zhipu 发码 POST /backend-api/v1/user/send_sms，body {phone, pic_captcha_id, md5, phone_code}
 //     · zhipu 登录 POST /user-api/user/phone_login，body {phone, captcha(短信码), pic_captcha_id,
 //       phone_code, tI 签名三件套 timestamp/xNonce/sign}
-//     · kimi 发码 SMSService.sendVerifyCode({scene:"LOGIN", phone:{country_code,number},
+//     · kimi 发码 SMSService.sendVerifyCode({scene:"SCENE_LOGIN", phone:{country_code,number},
 //        captcha:{captcha_id, validate}})，host=auth.kimi.com（oauth 命名空间 /api 前缀，E0 实测）
 //     · kimi 登录 AuthService.loginWithSMS({phone:{country_code,number}, verify_code})，请求体不带
 //        captcha、不带 session_token；响应 LoginWithSMSResponse{access_token,refresh_token,...} 顶层 snake_case
@@ -72,7 +72,7 @@ const (
 // host 复用 web_platform_auto_login.go 的 webKimiAuthBaseURL（= https://auth.kimi.com）。
 const (
 	// webKimiSendSMSCodeEndpoint kimi 发送短信验证码（SMSService.sendVerifyCode）。
-	// 请求体 {scene:"LOGIN", phone:{country_code,number}, captcha:{captcha_id, validate}}（snake_case，
+	// 请求体 {scene:"SCENE_LOGIN", phone:{country_code,number}, captcha:{captcha_id, validate}}（snake_case，
 	// useProtoFieldName:true；400 必填字段解码验证 scene+phone，captcha 非强制）。
 	webKimiSendSMSCodeEndpoint = "/api/account.gateway.v1.SMSService/SendVerifyCode"
 	// webKimiLoginWithSMSEndpoint kimi 短信登录（AuthService.loginWithSMS）。
@@ -278,7 +278,7 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 
 // sendSmsCodeKimi kimi 发码。E0 决定性证据：SMSService.sendVerifyCode，
 // host = webKimiAuthBaseURL（auth.kimi.com），baseUrl 路径 /api/account.gateway.v1.SMSService/SendVerifyCode。
-// 线格式 snake_case（useProtoFieldName:true）：{scene:"LOGIN", phone:{country_code,number},
+// 线格式 snake_case（useProtoFieldName:true）：{scene:"SCENE_LOGIN", phone:{country_code,number},
 // captcha:{captcha_id, validate}}。易盾 validate 来自前端易盾组件交互，由调用方回传；缺失即失败关闭。
 // 响应：SendVerifyCodeResponse 为 proto 空消息 —— 无 session_token 概念；发码成功即 HTTP 2xx 返回空串。
 // 头：unary ⇒ Content-Type: application/json + Connect-Protocol-Version: 1。
@@ -296,9 +296,11 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 		return "", fmt.Errorf("kimi 短信登录目标被 URL 白名单拒绝: %w", err)
 	}
 	// body 字段按 E0 snake_case：scene + phone{country_code,number} + captcha{captcha_id 固定值, validate}。
+	// scene 枚举值经线上实测为 "SCENE_LOGIN"（proto enum 名，非 "LOGIN"；错值会被 buf.validate
+	// 判为 required 违反 → HTTP 400 invalid_argument）。
 	countryCode, number := splitSMSPhone(phone)
 	payload, err := json.Marshal(map[string]any{
-		"scene": "LOGIN",
+		"scene": "SCENE_LOGIN",
 		"phone": map[string]string{
 			"country_code": countryCode,
 			"number":       number,

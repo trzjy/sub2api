@@ -126,6 +126,21 @@ describe('WebAutoLoginForm', () => {
     expect(wrapper.emitted('recovered')).toEqual([[{ platform: 'kimi', account_id: 8 }]])
   })
 
+  it('requires an account name before sending the SMS code in new-account mode', async () => {
+    const wrapper = mount(WebAutoLoginForm, {
+      props: { platform: 'kimi', accountDraft: { ...accountDraft, platform: 'kimi', name: '' } }
+    })
+
+    await wrapper.find('[data-testid="web-auto-login-phone"]').setValue('13800000001')
+    await wrapper.find('[data-testid="web-auto-login-send-code"]').trigger('click')
+    await flushPromises()
+
+    expect(startChallengeMock).not.toHaveBeenCalled()
+    expect(webLoginSmsMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="web-auto-login-error"]').text()).toContain('accountNameRequired')
+    expect(wrapper.find('[data-testid="web-auto-login-challenge-status"]').text()).toContain('pending')
+  })
+
   it('existing SMS re-login carries account_id and omits account_draft', async () => {
     webLoginSmsMock.mockResolvedValue({ success: true })
     const wrapper = mount(WebAutoLoginForm, {

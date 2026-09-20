@@ -144,6 +144,7 @@ export default {
           phoneLabel: 'Phone number',
           phonePlaceholder: 'Phone number used to log in to the official web client',
           phoneRequired: 'Please enter the phone number',
+          accountNameRequired: 'Please enter an account name first',
           passwordLabel: 'Password',
           passwordPlaceholder: 'Account password',
           submit: 'Auto Login',

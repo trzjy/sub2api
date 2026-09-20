@@ -348,6 +348,7 @@ export default {
           phoneLabel: '手机号',
           phonePlaceholder: '登录官方网页端所用的手机号',
           phoneRequired: '请填写手机号',
+          accountNameRequired: '请先填写账号名称',
           passwordLabel: '密码',
           passwordPlaceholder: '账号密码',
           submit: '自动登录',

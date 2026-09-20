@@ -105,7 +105,7 @@ type webLoginChallengeBindingRequest struct {
 func (h *AccountHandler) WebLoginChallengeStart(c *gin.Context) {
 	var req webLoginChallengeBindingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
+		response.BadRequest(c, "请求参数不完整或格式错误")
 		return
 	}
 	adminID, ok := webLoginChallengeAdminID(c)

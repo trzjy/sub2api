@@ -299,7 +299,13 @@ class ManualChallengeManager:
         common = """
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>网页登录人工验证</title></head><body>
+<title>网页登录人工验证</title>
+<style>
+  html, body { margin: 0; padding: 10px; min-height: 100vh; box-sizing: border-box; }
+  /* 挑战页需给足视口高度：SDK 的弹层/图片区域依赖足够大的文档尺寸，否则会塌陷成细条。 */
+  #glm-captcha { width: 100%; min-height: 480px; }
+</style>
+</head><body>
 <h3>请在此窗口完成人工验证</h3><p id="status">正在加载官方验证组件…</p>
 <div id="glm-captcha"></div><script>
 const statusNode = document.getElementById('status');
