@@ -4359,8 +4359,6 @@ const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
 // ── 网页接入模式 ──
-const showAutoLogin = ref(false)
-
 const webAccountDraft = computed<CreateAccountRequest>(() => ({
   name: form.name.trim(),
   notes: form.notes || null,
@@ -4993,6 +4991,10 @@ const form = reactive({
   expires_at: null as number | null
 })
 
+// 网页接入平台只有一种自动登录方式（deepseek 账号密码、zhipu/kimi 手机号短信），
+// 默认展开，避免用户多一次无意义点击。
+const showAutoLogin = ref(isWebProviderPlatform(form.platform))
+
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
   // Antigravity upstream 类型不需要 OAuth 流程
@@ -5097,9 +5099,10 @@ watch(
   () => form.platform,
   (newPlatform) => {
     // Reset base URL based on platform
-    // 平台切换即退出网页接入模式并折叠登录表单。
+    // 平台切换时，若是网页接入平台则自动展开登录表单（单一方式无需折叠），
+    // 否则退出网页接入模式并折叠。
     cnWebAccessMode.value = false
-    showAutoLogin.value = false
+    showAutoLogin.value = isWebProviderPlatform(newPlatform)
     if (isCNProviderPlatform(newPlatform)) {
       apiKeyBaseUrl.value = defaultCNBaseUrl(newPlatform, accountMode.value, apiProtocol.value)
     } else {

@@ -17,10 +17,10 @@ const webSMSRequestTimeout = 30 * time.Second
 type webKimiSendSMSResponse struct{}
 
 type webKimiLoginWithSMSResponse struct {
-	AccessToken  string          `json:"access_token"`
-	RefreshToken string          `json:"refresh_token"`
-	NewUser      json.RawMessage `json:"new_user"`
-	UserID       json.RawMessage `json:"user_id"`
+	AccessToken  string          `json:"accessToken"`
+	RefreshToken string          `json:"refreshToken"`
+	NewUser      json.RawMessage `json:"newUser"`
+	UserID       json.RawMessage `json:"userId"`
 	Deactivating json.RawMessage `json:"deactivating"`
 }
 
@@ -395,10 +395,10 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		return nil, s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信登录")
 	}
 
-	// Kimi AuthService.loginWithSMS 的 Connect unary 成功响应为 proto message 顶层 JSON
-	//（snake_case），无 data 包裹。真实响应可能携带 access_token/refresh_token 之外的额
-	// 外字段（如 token_type、expires_in、scope 等），使用普通 Unmarshal 忽略未知字段，
-	// 仅在必填凭据缺失或 JSON 本身非法时失败关闭。
+	// Kimi AuthService.loginWithSMS 的 Connect unary 成功响应为 proto message 顶层 JSON，
+	// 无 data 包裹。线上实测字段名为 camelCase（accessToken/refreshToken/userId 等），与
+	// 早期 snake_case 取证不同。使用普通 Unmarshal 忽略未知字段，仅在必填凭据缺失或 JSON
+	// 本身非法时失败关闭。
 	var parsed webKimiLoginWithSMSResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, &webLoginHTTPError{

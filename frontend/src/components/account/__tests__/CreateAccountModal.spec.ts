@@ -937,7 +937,6 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await selectWebModeViaCnPlatform(wrapper, 'Zhipu GLM')
     await flushPromises()
 
-    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
     await flushPromises()
     const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
     expect(autoLoginForm.exists()).toBe(true)
@@ -961,7 +960,6 @@ describe('CreateAccountModal web access mode (kimi / zhipu / deepseek + access_m
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds auto login')
-    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
     await flushPromises()
     const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })
     expect(autoLoginForm.exists()).toBe(true)
@@ -1029,7 +1027,6 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
     await flushPromises()
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('web ds account')
-    await wrapper.get('[data-testid="web-auto-login-toggle"]').trigger('click')
     await flushPromises()
 
     const autoLoginForm = wrapper.findComponent({ name: 'WebAutoLoginForm' })

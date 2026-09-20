@@ -298,9 +298,9 @@ func TestWebSMS_KimiSendSuccessEmpty(t *testing.T) {
 func TestWebSMS_KimiVerifySuccess(t *testing.T) {
 	up := &smsUpstream{
 		kimiVerifyStatus: http.StatusOK,
-		// E0 决定性证据：LoginWithSMSResponse 为 Connect unary 顶层 JSON（snake_case），
-		// 无 data 包裹、无 camel 兜底。
-		kimiVerifyBody: `{"access_token":"AT-9","refresh_token":"RT-9"}`,
+		// 线上实测：LoginWithSMSResponse 为 Connect unary 顶层 JSON（camelCase），
+		// 无 data 包裹。字段包括 accessToken/refreshToken/userId 等。
+		kimiVerifyBody: `{"accessToken":"AT-9","refreshToken":"RT-9","userId":"kimi-user-1"}`,
 	}
 	svc := newSmsTestService(up)
 
