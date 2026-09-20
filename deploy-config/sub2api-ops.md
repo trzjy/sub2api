@@ -732,7 +732,7 @@ CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做
 |---|---|---|
 | 1 | **intl 计费快照 live 验证**：`gateway.codebuddy.quota_check_enabled` 默认关闭，故 intl 未产 Extra 额度快照。已用 Phase 0 直连 billing 200（schema 与 CN 同构）+ 单测钉住 intl base 替代 | **未来任何原因开启 `quota_check_enabled` 时，顺带验证 intl 账号（site=intl）的 Extra 快照** |
 | 2 | `GET /api/v1/admin/accounts/:id/usage` 对 codebuddy 返回 500（`getUsageForAccount` 无 codebuddy 分支，落通用 Claude usage → 上游 403）。**既有缺陷，CN/intl 同样中招** | 下个维护批次：补 codebuddy 分支，改走配额快照（`CodeBuddyQuotaService`） |
-| 3 | CodeBuddy 模型定价配置（如 CN `hy3`、intl `deepseek-v3`）缺失时用量照记、成本计 0 | 运营按需在价格管理中心配置 |
+| 3 | CodeBuddy 模型定价配置（如 CN `hy3`、intl `deepseek-v3`）缺失时用量照记、成本计 0 | ~~运营按需配置~~ **已配置（2026-09-21）**：CN 全模型按 credits 实测扣费价写入 custom_model_pricing（28 行），详见 §16 |
 | 4 | UA 版本监控：默认 `CLI/2.63.2`（共享配置 `gateway.codebuddy.chat_user_agent`），官方 CLI 已 2.150.0，上游当前未校验 | 长期观察；上游若校验版本再热更 |
 
 ### intl 实测要点（详见 docs/evidence/codebuddy-intl/）
@@ -743,4 +743,44 @@ CodeBuddy 平台以**账号级站点属性**支持国内版与国际版（不做
 
 ---
 
-最后更新：2026-09-17
+## §16 CodeBuddy CN 定价：credits 实测标定与 custom_model_pricing 配置（2026-09-21）
+
+### 计费公式（活体探针标定，8 次探针全部 200）
+
+```
+credits = mult × (300 × prompt_tokens + 1500 × completion_tokens) / 1e6
+```
+
+- 基准价：输入 $3/M、输出 $15/M（Claude Sonnet 官价口径）；**1 credit = $0.01**。
+- 倍率 `mult` 来自 `GET /console/enterprises/personal/models` 响应中每个模型的 `credits` 字段（形如 `"x0.06 credits"`，需解析数字）。
+- 上游 SSE 最后 chunk 的 `usage.credit` 字段即本次请求真实扣费（**含折扣后**）；非流式同样有。
+- 余额侧：扣减落在 `get-user-resource` 响应的 `CycleCapacityUsedPrecise`（`CapacityUsedPrecise` 恒 0，勿看错列）；扣减有分钟级聚合延迟。
+
+### 关键实测结论
+
+| 事项 | 结论 |
+|---|---|
+| kimi-k3-1（标称 x1.62） | **100% 按标称扣**（探针 1.84/14.12 vs 预测 1.840/14.130，误差 <0.1%） |
+| glm 系（flash/5.3 等） | **实际按标称 ×0.44~0.45 扣**（限时活动折扣，5 个探针一致）；客户端显示 x0.06 实扣 x0.0264 |
+| hy3 | `credits: "x0.00 credits"` → 免费 |
+| auto / default / hunyuan-chat / hunyuan-image | 无 credits 字段 |
+| CN token 长期有效 | expires_at ≈ 一年后；CN models 端点正常（intl 才 500） |
+
+### custom_model_pricing 配置格局（方案 A：贴真实扣费）
+
+- 换算：`input_price = eff_mult × 3e-6`、`output_price = eff_mult × 15e-6` USD/token。
+- glm 系乘 0.45 活动系数；kimi/deepseek/hy/minimax/hunyuan 按标称 ×1.0。
+- 现有 28 行全部启用；覆盖更新了原价格钉 id=3（glm-5.3-flash）、id=4（glm-5.3）、id=7（deepseek-v4-flash 拆分独立）；id=5（kimi-k2.7-code，Moonshot 官方钉价）与 id=8（hy3 腾讯云官方价）**保留未动**（非 CodeBuddy credits 口径）。
+- remark 统一注明 `CodeBuddy credits 实测标定 2026-09-20`。
+
+### 维护注意（踩过的坑）
+
+1. **同名冲突**：custom 层匹配按 `ORDER BY id` 先到先得（`custom_model_pricing_repo.go` List），写库前必须查重：
+   `SELECT e1.id FROM custom_model_pricing e1, custom_model_pricing e2 WHERE e1.id<e2.id AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(e1.models) m1 JOIN jsonb_array_elements_text(e2.models) m2 ON m1=m2);`
+2. **created_by 必填**：SQL 直插该列为 NULL 会让快照刷新循环报 `scan error column created_by`（int64 不收 NULL），custom 层整体失效。直插时填 admin user id。
+3. **活动折扣会失效**：glm 系 0.45 系数是限时活动价，活动结束后需重标（重跑探针法：小 prompt 大 max_tokens 请求读 usage.credit）。
+4. kimi-k2.x / deepseek-v4-pro / hy4 等是否也有活动折扣未逐个实测（按标称配置，偏保守多记）。
+
+---
+
+最后更新：2026-09-21
