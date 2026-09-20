@@ -691,6 +691,10 @@ type TokenRefreshConfig struct {
 	AttemptTimeoutSeconds int `mapstructure:"attempt_timeout_seconds"`
 	// 单个后台刷新周期的总超时（秒）
 	CycleTimeoutSeconds int `mapstructure:"cycle_timeout_seconds"`
+	// WebRefreshMinIntervalHours: kimi/zhipu 网页账号后台保活最小间隔；<=0 禁用。
+	WebRefreshMinIntervalHours float64 `mapstructure:"web_refresh_min_interval_hours"`
+	// WebReloginMinIntervalHours: deepseek 后台密码重登最小间隔；<=0 禁用。
+	WebReloginMinIntervalHours float64 `mapstructure:"web_relogin_min_interval_hours"`
 }
 
 type PricingConfig struct {
@@ -2736,6 +2740,8 @@ func setDefaults() {
 	viper.SetDefault("token_refresh.provider_failure_threshold", 3)
 	viper.SetDefault("token_refresh.attempt_timeout_seconds", 15)
 	viper.SetDefault("token_refresh.cycle_timeout_seconds", 240)
+	viper.SetDefault("token_refresh.web_refresh_min_interval_hours", 72)  // kimi/zhipu 网页保活最小间隔
+	viper.SetDefault("token_refresh.web_relogin_min_interval_hours", 168) // deepseek 密码重登最小间隔
 
 	// Gemini OAuth - configure via environment variables or config file
 	// GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET
