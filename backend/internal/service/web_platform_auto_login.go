@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -350,11 +351,6 @@ type webKimiRefreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
-type webKimiRefreshResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-}
-
 // RefreshToken 对 zhipu / kimi 网页接入执行 refresh token 续期。成功时内部原子更新凭据
 // （refresh_token / 新 cookie / access_token），失败返回 *webLoginHTTPError。
 func (s *WebPlatformAutoLoginService) RefreshToken(ctx context.Context, account *Account) error {
@@ -457,7 +453,6 @@ func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *
 			Msg: "缺少 refresh_token（需半自动短信登录）",
 		}
 	}
-	return smsContextGapErrorKind(PlatformKimi, WebLoginKindRefresh, "RefreshToken 成功响应结构尚未取证")
 
 	target := strings.TrimRight(webKimiAuthBaseURL, "/") + WebKimiRefreshEndpoint
 	if _, err := s.validateUpstreamURL(target); err != nil {
@@ -474,6 +469,7 @@ func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", webKimiClientUA)
 
 	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), account.ID, account.Concurrency)
 	if err != nil {
@@ -492,26 +488,45 @@ func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *
 		}
 	}
 
-	var parsed webKimiRefreshResponse
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return &webLoginHTTPError{
-			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "kimi web 续期响应解析失败",
+	// 单口径：解析与转发链 refreshWebKimiAccessToken（web_kimi_gateway_forward.go:376-392）
+	// 完全同款——access_token 在顶层/data/token 包装下的常见位置宽容查找（成功响应结构
+	// 未活体取证，绝不臆造单一契约）；refresh_token 仅在上游一并返回时轮换，缺失保持原值。
+	var newAccessToken, newRefreshToken string
+	for _, path := range []string{"accessToken", "data.accessToken", "token", "data.token", "access_token", "data.access_token"} {
+		if v := strings.TrimSpace(gjson.GetBytes(raw, path).String()); v != "" {
+			newAccessToken = v
+			break
 		}
 	}
-	if parsed.AccessToken == "" || parsed.RefreshToken == "" {
+	if newAccessToken == "" {
+		s.logger.Info("kimi web 续期响应诊断",
+			"platform", PlatformKimi,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+		)
 		return &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "kimi web 续期响应缺少 accessToken/refreshToken（不可重试）",
+			Msg: "kimi web 续期响应缺少 accessToken（不可重试）",
 		}
+	}
+	for _, path := range []string{"refreshToken", "data.refreshToken", "refresh_token", "data.refresh_token"} {
+		if v := strings.TrimSpace(gjson.GetBytes(raw, path).String()); v != "" {
+			newRefreshToken = v
+			break
+		}
+	}
+	if newRefreshToken == "" {
+		newRefreshToken = refreshToken
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	updates := map[string]any{
 		// 业务键：与转发链既有键保持一致。
-		"access_token":           parsed.AccessToken,
-		"refresh_token":          parsed.RefreshToken,
-		CredKeyLoginRefreshToken: parsed.RefreshToken,
+		"access_token":           newAccessToken,
+		"refresh_token":          newRefreshToken,
+		CredKeyLoginRefreshToken: newRefreshToken,
 		// kimi refresh 同时回换新 refresh，记录过期基准。
 		CredKeyLoginRefreshExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339),
 		CredKeyLoginLastAt:           now,

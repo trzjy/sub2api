@@ -772,6 +772,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	// 更新路径同样守住网页逆向平台 / web 接入模式不变量（创建校验可被 edit/导入/直写绕过）。
 	// 平台归并后 web 账号 platform 已是官方值，按账号接入模式判定（§5.5）。
+	// 注意：此处不得对 input.Credentials 直接跑 validateWebAccountCredential——前端
+	// 全对象 PUT 上送的是脱敏后凭证（access_token/cookie 已被 RedactCredentials 剥离），
+	// 预合并校验必然误伤（kimi 报 requires a non-empty access_token、zhipu/deepseek 报
+	// requires a non-empty cookie）。凭证准入统一在下方 MergePreservingSensitiveCreds
+	// 合并后由 validateAccessModeCredential 按目标接入模式校验（敏感键缺省保留语义保证
+	// 合并结果持有完整登录态），不变量不丢失。
 	isWebAccount := account.IsWebAccessMode()
 	if isWebAccount {
 		effectiveType := account.Type
@@ -781,12 +787,6 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		if effectiveType != AccountTypeAPIKey {
 			return nil, infraerrors.New(http.StatusBadRequest, "WEB_ACCOUNT_TYPE_INVALID",
 				fmt.Sprintf("platform %s only supports apikey accounts", account.Platform))
-		}
-		// input.Credentials == nil 表示本轮不修改凭证，不参与校验。
-		if input.Credentials != nil {
-			if err := validateWebAccountCredential(account.Platform, effectiveType, input.Credentials); err != nil {
-				return nil, infraerrors.New(http.StatusBadRequest, "WEB_ACCOUNT_CREDENTIAL_INVALID", err.Error())
-			}
 		}
 	}
 	var normalizedExtra map[string]any

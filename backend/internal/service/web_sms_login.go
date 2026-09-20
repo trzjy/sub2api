@@ -245,9 +245,13 @@ func smsVerifyChallengeMissing(platform string) func(WebSMSChallenge) string {
 // ---------------------------------------------------------------------------
 
 // sendSmsCodeZhipu zhipu 发码。证据：POST /backend-api/v1/user/send_sms，
-// body {phone, pic_captcha_id, md5, phone_code}。
+// body {phone, pic_captcha_id, md5, phone_code}（13 号证据，main.js 逆向）。
 // 数美滑块参数（rid/md5）来自前端滑块交互，证据 02-sign-algorithm.md 缺失生成算法；
 // challenge 必须携带已求解值，缺失即失败关闭。
+//
+// 响应判定（宽容解析 + 失败关闭）：2xx 初步成功；body 候选业务失败标志
+// （success=false / code(ret) 非 0 且非空）→ 透出文案失败关闭；其余 2xx 形状仅记
+// 诊断日志（smsJSONShape，零凭据）。真实成功语义待活体验收固化（成功无 token 回传需求）。
 func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
 	if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuCaptchaMD5 == "" {
 		return "", &webLoginHTTPError{
@@ -255,14 +259,67 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 			Msg: "zhipu 发码需数美滑块+图形验证参数（pic_captcha_id/md5），证据缺失或未求解，无法自动发码",
 		}
 	}
-	return "", smsContextGapError(PlatformZhipu, "发码响应业务成功字段尚未取证")
+	base := strings.TrimRight(DefaultWebZhipuBaseURL, "/")
+	target := base + webZhipuSendSMSCodeEndpoint
+	if _, err := s.validateUpstreamURL(target); err != nil {
+		return "", fmt.Errorf("zhipu 发码目标被 URL 白名单拒绝: %w", err)
+	}
+	xTimestamp, xNonce, xSign := s.webZhipuSignTriplet()
+	payload, err := json.Marshal(map[string]string{
+		"phone":          phone,
+		"pic_captcha_id": challenge.ZhipuCaptchaRid,
+		"md5":            challenge.ZhipuCaptchaMD5,
+		"phone_code":     challenge.ZhipuPhoneCode,
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	applyZhipuFingerprintHeaders(req, xTimestamp, xNonce, xSign)
+	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), smsAccountID(account), smsAccountConcurrency(account))
+	if err != nil {
+		return "", fmt.Errorf("zhipu 短信验证码发送网络错误: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("zhipu 短信验证码发送响应读取失败: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return "", s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信验证码发送")
+	}
+	if msg, failed := zhipuBizFailure(raw); failed {
+		return "", &webLoginHTTPError{
+			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "zhipu 短信验证码发送失败：" + msg,
+		}
+	}
+	s.logger.Info("zhipu 短信验证码发送响应诊断",
+		"platform", PlatformZhipu,
+		"status", resp.StatusCode,
+		"content_type", resp.Header.Get("Content-Type"),
+		"body_bytes", len(raw),
+		"json_keys", smsJSONShape(raw),
+	)
+	return "", nil
 }
 
 // verifySmsCodeZhipu zhipu 短信登录。证据：POST /user-api/user/phone_login，
-// body {phone, captcha(短信码), pic_captcha_id, phone_code, tI 签名三件套}。
-// tI 签名三件套在方法内部用 webZhipuComputeSign 生成（签名算法已取证
-// 02-sign-algorithm.md，web_zhipu_gateway_forward.go:498 实现）；
+// body {phone, captcha(短信码), pic_captcha_id, phone_code, tI 签名三件套
+// timestamp/xNonce/sign}（13 号证据：三件套在请求体内；02 号证据：签名算法已取证）。
+// 三件套在方法内部用 webZhipuComputeSign 生成（web_zhipu_gateway_forward.go:498）；
 // 数美滑块 rid 仍须调用方传入，缺失即失败关闭。
+//
+// 成功判定（宽容解析 + 失败关闭，成功契约待活体验收固化）：
+//  1. HTTP 2xx 且 Set-Cookie 含 chatglm_token → 成功：整串 Cookie 提取
+//     chatglm_token / chatglm_refresh_token 返回（LoginRefreshToken 缺失允许空，
+//     handler 侧有 refreshZhipu cookie 兜底语义）；
+//  2. body 候选业务失败标志（success=false / code 非 0 且非空）→ 失败关闭透出文案；
+//  3. 其余 2xx（无 cookie、无明确失败）→ 失败关闭 + INFO 诊断日志（smsJSONShape 零凭据）。
 func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, phone, code string, challenge WebSMSChallenge, account *Account) (*SMSLoginResult, error) {
 	if challenge.ZhipuCaptchaRid == "" {
 		return nil, &webLoginHTTPError{
@@ -270,7 +327,128 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 			Msg: "zhipu 短信登录缺少数美滑块参数（pic_captcha_id），无法登录",
 		}
 	}
-	return nil, smsContextGapError(PlatformZhipu, "登录响应业务成功字段尚未取证")
+	base := strings.TrimRight(DefaultWebZhipuBaseURL, "/")
+	target := base + webZhipuPhoneLoginEndpoint
+	if _, err := s.validateUpstreamURL(target); err != nil {
+		return nil, fmt.Errorf("zhipu 短信登录目标被 URL 白名单拒绝: %w", err)
+	}
+	xTimestamp, xNonce, xSign := s.webZhipuSignTriplet()
+	payload, err := json.Marshal(map[string]string{
+		"phone":          phone,
+		"captcha":        code,
+		"pic_captcha_id": challenge.ZhipuCaptchaRid,
+		"phone_code":     challenge.ZhipuPhoneCode,
+		"timestamp":      xTimestamp,
+		"xNonce":         xNonce,
+		"sign":           xSign,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	applyZhipuFingerprintHeaders(req, xTimestamp, xNonce, xSign)
+
+	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), smsAccountID(account), smsAccountConcurrency(account))
+	if err != nil {
+		return nil, fmt.Errorf("zhipu 短信登录网络错误: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("zhipu 短信登录响应读取失败: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信登录")
+	}
+	if msg, failed := zhipuBizFailure(raw); failed {
+		return nil, &webLoginHTTPError{
+			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "zhipu 短信登录失败：" + msg,
+		}
+	}
+	newCookie := combineSetCookies(resp)
+	chatGLMToken := extractCookieValue(newCookie, "chatglm_token")
+	if chatGLMToken == "" {
+		// 2xx 但无 chatglm_token：大概率业务错误体或未知成功契约 → 失败关闭 + 诊断日志。
+		s.logger.Info("zhipu 短信登录响应诊断",
+			"platform", PlatformZhipu,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+			"set_cookie_count", len(resp.Header.Values("Set-Cookie")),
+		)
+		return nil, &webLoginHTTPError{
+			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "zhipu 短信登录响应缺少 chatglm_token（不可重试）",
+		}
+	}
+	return &SMSLoginResult{
+		Cookie:            newCookie,
+		ChatGLMToken:      chatGLMToken,
+		LoginRefreshToken: extractCookieValue(newCookie, "chatglm_refresh_token"),
+	}, nil
+}
+
+// webZhipuSignTriplet 即时生成签名三件套（同一次生成，nonce 一致性保证 x-sign 有效）。
+func (s *WebPlatformAutoLoginService) webZhipuSignTriplet() (xTimestamp, xNonce, xSign string) {
+	return webZhipuComputeSign(time.Now().UnixMilli())
+}
+
+// applyZhipuFingerprintHeaders 按 2026-09-17 登录态抓包对齐的指纹头组装（与
+// buildWebZhipuUpstreamRequest 同源；登录前无 Cookie/token，故无 Authorization/Cookie/
+// x-device-id）。签名三件套同时以 header 与 body（phone_login）双形态携带，值同源一致。
+func applyZhipuFingerprintHeaders(req *http.Request, xTimestamp, xNonce, xSign string) {
+	origin := strings.TrimRight(DefaultWebZhipuBaseURL, "/")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", webZhipuClientUA)
+	req.Header.Set("app-name", "chatglm")
+	req.Header.Set("x-app-platform", "pc")
+	req.Header.Set("x-app-version", "0.0.1")
+	req.Header.Set("x-app-fr", "default")
+	req.Header.Set("x-lang", "zh")
+	req.Header.Set("X-Timestamp", xTimestamp)
+	req.Header.Set("X-Nonce", xNonce)
+	req.Header.Set("X-Sign", xSign)
+	req.Header.Set("X-Request-Id", webZhipuUUIDHex())
+}
+
+// zhipuBizFailure 从 zhipu user-api 响应体提取明确的业务失败标志（宽容解析：
+// 仅识别确定性失败形态，未知形状不算失败）。返回 (文案, 是否失败)。
+// 候选形态（与既有取证错误体一致）：success=false；code/status/ret 为非 0 数值。
+// 文案取 message/msg/detail 候选，绝不携带凭据值。
+func zhipuBizFailure(raw []byte) (string, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return "", false
+	}
+	if v, ok := top["success"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err == nil && !b {
+			return smsFirstStringValue(raw, "message", "msg", "detail"), true
+		}
+	}
+	for _, key := range []string{"code", "status", "ret"} {
+		v, ok := top[key]
+		if !ok {
+			continue
+		}
+		var n int64
+		if err := json.Unmarshal(v, &n); err == nil && n != 0 {
+			return fmt.Sprintf("%s=%d", key, n), true
+		}
+	}
+	return "", false
 }
 
 // ---------------------------------------------------------------------------
