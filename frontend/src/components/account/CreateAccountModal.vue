@@ -4382,6 +4382,7 @@ const webAccountDraft = computed<CreateAccountRequest>(() => ({
 function handleAutoLoginRecovered() {
   appStore.showSuccess(t('admin.accounts.webLogin.autoLogin.smsLoginSuccess'))
   emit('created')
+  handleClose()
 }
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
