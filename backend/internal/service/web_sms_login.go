@@ -477,7 +477,7 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 	// body 字段按 E0 snake_case：scene + phone{country_code,number} + captcha{captcha_id 固定值, validate}。
 	// scene 枚举值经线上实测为 "SCENE_LOGIN"（proto enum 名，非 "LOGIN"；错值会被 buf.validate
 	// 判为 required 违反 → HTTP 400 invalid_argument）。
-	countryCode, number := splitSMSPhone(phone)
+	countryCode, number := SplitSMSPhone(phone)
 	payload, err := json.Marshal(map[string]any{
 		"scene": "SCENE_LOGIN",
 		"phone": map[string]string{
@@ -539,7 +539,7 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 	}
 	// body 字段按 E0 snake_case：phone{country_code, number} + verify_code。
 	// countryCode 从手机号国家码推导；缺省按 86（中国大陆）建模。
-	countryCode, number := splitSMSPhone(phone)
+	countryCode, number := SplitSMSPhone(phone)
 	body := map[string]any{
 		"phone": map[string]string{
 			"country_code": countryCode,
@@ -736,10 +736,11 @@ func smsAccountConcurrency(account *Account) int {
 	return account.Concurrency
 }
 
-// splitSMSPhone 拆分手机号为国家码 + 号码（kimi loginWithSMS 的 phone{countryCode,number}）。
-// 支持 "86-138..." / "+86 138..." / 纯 11 位（默认 countryCode="86"）等形态。
+// SplitSMSPhone 拆分手机号为国家码 + 号码（kimi loginWithSMS 的 phone{countryCode,number}，
+// 以及 zhipu 人工挑战 helper 的 phone_code）。支持 "86-138..." / "+86 138..." / 纯 11 位
+// （默认 countryCode="86"）等形态。
 // 证据未给 countryCode 推导规则，缺省按中国大陆 86 建模，待联调确认。
-func splitSMSPhone(phone string) (countryCode, number string) {
+func SplitSMSPhone(phone string) (countryCode, number string) {
 	phone = strings.TrimSpace(phone)
 	phone = strings.TrimPrefix(phone, "+")
 	if i := strings.IndexAny(phone, "- "); i > 0 {
