@@ -55,6 +55,11 @@ KIMI_CAPTCHA_SDK_URL = "https://cstaticdun.126.net/load.min.js"
 KIMI_CAPTCHA_ID = "2752f01d87dc45948de1a1e0ac2b7160"
 GLM_CAPTCHA_SDK_URL = "https://chatglm.cn/smcp/smcp.min.js"
 GLM_CAPTCHA_ORGANIZATION = "599zinRadlRxTLrOkTR9"
+# 挑战页必须运行在**真实 http 源**下：about:blank / data: 等不透明源会被浏览器拒绝
+# 读取 document.cookie（"Access is denied for this document"），导致易盾/数美 SDK 初始化
+# 抛异常、页面卡在“正在加载官方验证组件…”。该地址仅作为页面源，HTML 由 Playwright 路由
+# 拦截注入，不实际访问该路径（端口无需与监听端口一致）。
+CHALLENGE_PAGE_URL = "http://127.0.0.1:18089/__challenge_page__"
 # 与 Worker 读超时对齐：契约 A ≥300s、契约 B =120s，各留网络余量。
 MAX_WAIT_CONTRACT_A = 285
 MAX_WAIT_CONTRACT_B = 110
@@ -305,23 +310,29 @@ function fail(message) {
 """
         if session.platform == "kimi":
             return common + f"""
+function handleValidate(value) {{
+  if (typeof value !== 'string' || !value) return;
+  statusNode.textContent = '验证完成，可以返回管理页';
+  window.challengeComplete({{validate: value}});
+}}
 const script = document.createElement('script');
 script.src = {json.dumps(KIMI_CAPTCHA_SDK_URL)};
 script.onload = () => {{
   if (typeof window.initNECaptcha !== 'function') return fail('易盾 SDK 未就绪');
   window.initNECaptcha({{
-    captchaId: {json.dumps(KIMI_CAPTCHA_ID)}, mode: 'popup', apiVersion: 2,
-    onSuccess: (_instance, data) => {{
-      if (!data || typeof data.validate !== 'string' || !data.validate) return fail('易盾回调缺少 validate');
-      statusNode.textContent = '验证完成，可以返回管理页';
-      window.challengeComplete({{validate: data.validate}});
-    }},
+    captchaId: {json.dumps(KIMI_CAPTCHA_ID)}, element: '#glm-captcha', mode: 'embed', apiVersion: 2,
+    onVerify: (err, data) => {{ if (err) return; handleValidate(data && data.validate); }},
+    onSuccess: (_instance, data) => handleValidate(data && data.validate),
     onError: () => fail('易盾验证失败'),
     onClose: () => fail('验证窗口已关闭')
   }});
 }};
 script.onerror = () => fail('易盾 SDK 加载失败');
 document.head.appendChild(script);
+// 兜底：易盾成功后会写入隐藏输入 NECaptchaValidate，覆盖回调名差异与无感知自动通过场景。
+setInterval(() => {{
+  document.querySelectorAll('input[name=NECaptchaValidate]').forEach((el) => handleValidate(el.value));
+}}, 500);
 </script></body></html>"""
         return common + f"""
 const script = document.createElement('script');
@@ -421,7 +432,17 @@ document.head.appendChild(script);
             page = await context.new_page()
             await page.expose_binding("challengeComplete", challenge_complete)
             await page.expose_binding("challengeFail", challenge_fail)
-            await page.set_content(self._sdk_html(session), wait_until="domcontentloaded", timeout=30_000)
+            challenge_html = self._sdk_html(session)
+
+            async def _serve_challenge(route: Any) -> None:
+                await route.fulfill(
+                    status=200, content_type="text/html; charset=utf-8", body=challenge_html
+                )
+
+            # 用真实源承载内联页面（路由拦截注入 HTML，不实际访问远端）：不透明源下
+            # SDK 读 document.cookie 会被拒绝，导致组件初始化失败。
+            await page.route(CHALLENGE_PAGE_URL, _serve_challenge)
+            await page.goto(CHALLENGE_PAGE_URL, wait_until="domcontentloaded", timeout=30_000)
             session.status = "running"
             log(f"已打开 SDK 人工挑战 platform={session.platform} deadline={max(0, int(session.deadline - time.monotonic()))}s")
             while time.monotonic() < session.deadline and not done.is_set():
@@ -721,16 +742,36 @@ def build_app(cfg: Dict[str, Any], solver: Solver) -> web.Application:
     return app
 
 
+class _MockSDKRoute:
+    def __init__(self) -> None:
+        self.body = ""
+
+    async def fulfill(self, *, status: int = 200, content_type: str = "", body: str = "") -> None:
+        self.body = body
+
+
 class _MockSDKPage:
     def __init__(self, outcome: Dict[str, str]):
         self.outcome = outcome
         self.bindings: Dict[str, Any] = {}
         self.closed = False
+        self._route_handler: Any = None
 
     async def expose_binding(self, name: str, callback: Any) -> None:
         self.bindings[name] = callback
 
+    async def route(self, url: str, handler: Any) -> None:
+        self._route_handler = handler
+
+    async def goto(self, url: str, **_: Any) -> None:
+        route = _MockSDKRoute()
+        await self._route_handler(route)
+        await self._deliver(route.body)
+
     async def set_content(self, html: str, **_: Any) -> None:
+        await self._deliver(html)
+
+    async def _deliver(self, html: str) -> None:
         if KIMI_CAPTCHA_ID in html and "validate" in self.outcome:
             await self.bindings["challengeComplete"](None, {"validate": self.outcome["validate"]})
         elif GLM_CAPTCHA_ORGANIZATION in html:
