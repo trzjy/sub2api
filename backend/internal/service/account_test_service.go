@@ -470,9 +470,10 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 
 	baseURL := strings.TrimRight(account.GetWebBaseURL(), "/")
 	var (
-		chatPath  string
-		testModel string
-		req       *http.Request
+		chatPath     string
+		testModel    string
+		req          *http.Request
+		probeReqBody []byte // kimi/zhipu 出站请求体（401 续期重试时按新凭据重建请求复用）
 	)
 	switch webPlatform {
 	case PlatformDeepseek:
@@ -550,6 +551,7 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 			return s.sendErrorAndEnd(c, "Failed to build zhipu web probe request")
 		}
 		req = r
+		probeReqBody = reqBody
 	case PlatformKimi:
 		if baseURL == "" {
 			baseURL = webKimiDefaultBaseURL
@@ -575,6 +577,7 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		// 账号级请求头覆写：探活请求与真实转发保持一致的最终头。
 		account.ApplyHeaderOverrides(r.Header)
 		req = r
+		probeReqBody = reqBody
 	default:
 		return s.testClaudeAccountConnection(c, account, modelID)
 	}
@@ -610,6 +613,30 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 		return nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		// 401 单口径：与真实转发链同款 401→refresh→重试一次（kimi/zhipu 调用与
+		// forwardWebKimi / forwardWebZhipu 完全同一 refresh 实现，对原账号凭据续期，
+		// 无任何备用账号语义）。刷新成功 → 新凭据重建请求重试一次；再失败/无
+		// refresh_token/刷新失败 → 落入下方既有文案分支。403 是封禁/拒绝语义，
+		// refresh 无意义，不续期（与转发链一致）。deepseek 转发链本无 401→refresh
+		// 语义，同样不续期（单口径=各自平台与转发对齐）。
+		if resp.StatusCode == http.StatusUnauthorized &&
+			(webPlatform == PlatformKimi || webPlatform == PlatformZhipu) && s.openaiGatewayService != nil {
+			retryResp, retryErr := s.retryWebProbeWithRefresh(c, account, webPlatform, baseURL, chatPath, probeReqBody, proxyURL)
+			if retryErr == nil && retryResp != nil {
+				switch {
+				case retryResp.StatusCode >= 200 && retryResp.StatusCode < 300:
+					s.sendEvent(c, TestEvent{Type: "content", Text: "Web login session is healthy."})
+					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+					return nil
+				case retryResp.StatusCode == http.StatusUnauthorized || retryResp.StatusCode == http.StatusForbidden:
+					// 续期后仍被拒 → 落入既有口径报错（续期无效/凭证真失效）。
+				default:
+					return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned HTTP %d", chatPath, retryResp.StatusCode))
+				}
+				resp = retryResp
+			}
+			// retryErr != nil（重建请求失败）或刷新失败/无 refresh_token → 落入既有文案分支。
+		}
 		// zhipu web 测试链此前不完整（缺指纹头），历史 401 不足为凭，不得直接断言凭证失效；
 		// 只回显平台、端点与状态码，绝不回显 Cookie / access_token。
 		// deepseek/kimi 探活头已完整（回归红线 #5），保留既有「凭证失效」判定与文案。
@@ -620,6 +647,67 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned HTTP %d", chatPath, resp.StatusCode))
 	}
+}
+
+// retryWebProbeWithRefresh 探活 401 的单口径静默续期重试：按平台调用与真实转发链
+// **完全同一** 的 refresh 实现（kimi: refreshWebKimiAccessToken；zhipu:
+// refreshWebZhipuAccessToken），对原账号凭据续期，无任何备用账号语义。刷新成功时补发
+// 一条脱敏 status 事件（不含任何 token 值），并用新凭据经同一 build*UpstreamRequest
+// 重建探活请求重试一次。刷新失败/无 refresh_token/重建失败 → 返回 (nil, err/nil)，
+// 由调用方落入既有 401 文案分支（不发续期 status 事件，与转发链行为一致）。
+func (s *AccountTestService) retryWebProbeWithRefresh(
+	c *gin.Context,
+	account *Account,
+	webPlatform string,
+	baseURL string,
+	chatPath string,
+	reqBody []byte,
+	proxyURL string,
+) (*http.Response, error) {
+	gw := s.openaiGatewayService
+	if gw == nil {
+		return nil, fmt.Errorf("openai gateway service is unavailable for web probe refresh")
+	}
+	var newToken string
+	switch webPlatform {
+	case PlatformKimi:
+		// 与 forwardWebKimi（web_kimi_gateway_forward.go:141）同一刷新实现。
+		newToken = gw.refreshWebKimiAccessToken(c.Request.Context(), account, proxyURL)
+	case PlatformZhipu:
+		// 与 forwardWebZhipu（web_zhipu_gateway_forward.go:260）同一刷新实现；
+		// 刷新就地更新 cookie 串中的 chatglm_token/chatglm_refresh_token 并同步内存
+		// account.Credentials，重试请求按转发链同款取法取最新 cookie。
+		newToken = gw.refreshWebZhipuAccessToken(c.Request.Context(), account)
+	default:
+		return nil, fmt.Errorf("platform %s does not support web probe refresh", webPlatform)
+	}
+	if newToken == "" {
+		return nil, fmt.Errorf("web probe refresh returned no new credential")
+	}
+
+	// 刷新成功，补发脱敏续期 status（不得包含任何 token/cookie 值）。
+	s.sendEvent(c, TestEvent{Type: "status", Text: "登录态已过期，正在用 refresh token 静默续期并重试"})
+
+	var (
+		req *http.Request
+		err error
+	)
+	switch webPlatform {
+	case PlatformKimi:
+		req, err = gw.buildWebKimiUpstreamRequest(c.Request.Context(), account, baseURL+webKimiChatPath, newToken, reqBody)
+	case PlatformZhipu:
+		newCookie := strings.TrimSpace(account.GetCredential("cookie"))
+		req, err = gw.buildWebZhipuUpstreamRequest(c.Request.Context(), account, baseURL+webZhipuStreamPath, newCookie, reqBody)
+	}
+	if err != nil {
+		return nil, err
+	}
+	account.ApplyHeaderOverrides(req.Header)
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	if err != nil {
+		return nil, fmt.Errorf("web upstream (%s) retry request failed: %s", chatPath, err.Error())
+	}
+	return resp, nil
 }
 
 // testClaudeAccountConnection tests an Anthropic Claude account's connection
