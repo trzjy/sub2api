@@ -207,7 +207,7 @@ class Solver:
                 browser = await self.pw.chromium.launch(
                     headless=headless,
                     channel=channel,
-                    args=["--window-size=520,700", "--disable-blink-features=AutomationControlled"],
+                    args=["--window-size=520,640", "--disable-blink-features=AutomationControlled"],
                 )
                 context = await browser.new_context(locale="zh-CN")
                 page = await context.new_page()
@@ -432,7 +432,7 @@ document.head.appendChild(script);
             channel = self.solver.cfg.get("browser_channel") or None
             browser = await self.solver.pw.chromium.launch(
                 headless=headless, channel=channel,
-                args=["--window-size=520,700", "--disable-blink-features=AutomationControlled"],
+                args=["--window-size=520,640", "--disable-blink-features=AutomationControlled"],
             )
             context = await browser.new_context(locale="zh-CN")
             page = await context.new_page()
