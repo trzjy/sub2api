@@ -305,6 +305,13 @@ class ManualChallengeManager:
   /* SDK 宿主宽度必须受限，避免固定高度的验证码图片随过宽视口横向拉伸；
      min-height 保留足够的组件空间，body 可滚动兜底。 */
   #glm-captcha { width: 100%; max-width: 480px; min-height: 520px; margin: 20px auto 0; }
+  /* 易盾嵌入式挑战默认以 40px 智能检测条为锚点向上展开；改为文档流向下展开，避免覆盖标题和状态。 */
+  #glm-captcha .yidun_classic-container {
+    position: relative !important;
+    top: auto !important;
+    bottom: auto !important;
+    left: auto !important;
+  }
 </style>
 </head><body>
 <h3>请在此窗口完成人工验证</h3><p id="status">正在加载官方验证组件…</p>
@@ -364,6 +371,74 @@ script.onerror = () => fail('数美 SDK 加载失败');
 document.head.appendChild(script);
 </script></body></html>"""
 
+    @staticmethod
+    async def _capture_kimi_layout(page: Any) -> Optional[Dict[str, Any]]:
+        """图片挑战出现后采集一次不含内容与凭证的布局元数据。"""
+        return await page.evaluate("""
+() => {
+  const imageSelectors = ['.yidun_bgimg', '.yidun_bg-img'];
+  const hasVisibleImage = imageSelectors.some((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  });
+  if (!hasVisibleImage) return null;
+
+  const number = (value) => Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
+  const css = (value) => String(value || '').slice(0, 160);
+  const snapshot = (element) => {
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    const computed = getComputedStyle(element);
+    const result = {
+      className: (typeof element.className === 'string' ? element.className : '').slice(0, 160),
+      rect: {
+        x: number(rect.x), y: number(rect.y),
+        width: number(rect.width), height: number(rect.height)
+      },
+      computed: {
+        position: css(computed.position), top: css(computed.top), bottom: css(computed.bottom),
+        left: css(computed.left), overflow: css(computed.overflow), display: css(computed.display),
+        boxSizing: css(computed.boxSizing), padding: css(computed.padding),
+        transform: css(computed.transform)
+      }
+    };
+    if (element instanceof HTMLImageElement) {
+      result.naturalWidth = number(element.naturalWidth);
+      result.naturalHeight = number(element.naturalHeight);
+    }
+    return result;
+  };
+  const selectors = [
+    '.yidun_intellisense', '.yidun_classic-container', '.yidun_cover-frame',
+    '.yidun_classic-wrapper', '.yidun', '.yidun_panel',
+    '.yidun_panel-placeholder', '.yidun_bgimg', '.yidun_bg-img', '.yidun_control'
+  ];
+  const elements = {};
+  selectors.forEach((selector) => { elements[selector] = snapshot(document.querySelector(selector)); });
+  return {
+    window: {
+      innerWidth: number(window.innerWidth), innerHeight: number(window.innerHeight),
+      outerWidth: number(window.outerWidth), outerHeight: number(window.outerHeight),
+      devicePixelRatio: number(window.devicePixelRatio)
+    },
+    landmarks: {
+      h3: snapshot(document.querySelector('h3')),
+      status: snapshot(document.querySelector('#status')),
+      host: snapshot(document.querySelector('#glm-captcha'))
+    },
+    elements,
+    document: {
+      bodyScrollWidth: number(document.body && document.body.scrollWidth),
+      bodyScrollHeight: number(document.body && document.body.scrollHeight),
+      documentScrollWidth: number(document.documentElement.scrollWidth),
+      documentScrollHeight: number(document.documentElement.scrollHeight)
+    }
+  };
+}
+""")
+
     async def start(self, platform: str, login_session_id: str, phone: str,
                     phone_code: str = "", timeout: Optional[int] = None) -> ChallengeSession:
         platform = self._normalize_platform(platform)
@@ -408,6 +483,8 @@ document.head.appendChild(script);
         done = asyncio.Event()
         callback_result: Dict[str, str] = {}
         callback_failure = ""
+        kimi_layout_captured = False
+        kimi_layout_error_logged = False
 
         async def challenge_complete(_source: Any, payload: Any) -> None:
             if not isinstance(payload, dict):
@@ -457,6 +534,19 @@ document.head.appendChild(script);
                 if page.is_closed():
                     callback_failure = "browser_closed"
                     break
+                if session.platform == "kimi" and not kimi_layout_captured:
+                    try:
+                        layout = await self._capture_kimi_layout(page)
+                        if layout is not None:
+                            payload = json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
+                            if len(payload) > 24000:
+                                raise ValueError("layout_snapshot_too_large")
+                            log("Kimi 图片挑战布局（脱敏） " + payload)
+                            kimi_layout_captured = True
+                    except Exception as exc:
+                        if not kimi_layout_error_logged:
+                            kimi_layout_error_logged = True
+                            log(f"Kimi 图片挑战布局（脱敏）采集失败：{type(exc).__name__}")
                 await asyncio.sleep(0.25)
             required = {"validate"} if session.platform == "kimi" else {"rid", "md5"}
             if done.is_set() and required.issubset(callback_result):
