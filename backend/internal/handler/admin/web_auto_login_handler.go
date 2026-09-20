@@ -133,7 +133,15 @@ func (h *AccountHandler) WebLoginChallengeStart(c *gin.Context) {
 		respondWebLoginChallengeContextGap(c, sess)
 		return
 	}
-	helperSession, err := h.webLoginCaptchaHelper.Start(c.Request.Context(), platform, sess.ID, phone, "")
+	// zhipu 人工挑战需要国家码作为 phone_code（helper 侧 client.Start 对 PlatformZhipu
+	// 校验非空，否则返回 "GLM challenge requires phone_code" → context_gap 501）；
+	// kimi 不需要，保持空串。SplitSMSPhone 支持 "86-138..."/"+86 138..."/纯 11 位默认 "86"。
+	helperPhoneCode := ""
+	if platform == service.PlatformZhipu {
+		cc, _ := service.SplitSMSPhone(phone)
+		helperPhoneCode = cc
+	}
+	helperSession, err := h.webLoginCaptchaHelper.Start(c.Request.Context(), platform, sess.ID, phone, helperPhoneCode)
 	if err != nil || strings.TrimSpace(helperSession.ID) == "" {
 		_ = h.webLoginChallengeStore.SetStatus(sess.ID, adminID, "context_gap")
 		respondWebLoginChallengeContextGap(c, sess)

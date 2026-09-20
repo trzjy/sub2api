@@ -238,10 +238,24 @@ type stubCaptchaHelper struct {
 	resultCalls   int
 	resultStarted chan struct{}
 	releaseResult chan struct{}
+
+	// Start 入参捕获（验证 zhipu/kimi 平台的 phone_code 传递）。
+	startPlatform  string
+	startPhoneCode string
 }
 
-func (s *stubCaptchaHelper) Start(context.Context, string, string, string, string) (service.LocalCaptchaHelperSession, error) {
+func (s *stubCaptchaHelper) Start(_ context.Context, platform, _, _, phoneCode string) (service.LocalCaptchaHelperSession, error) {
+	s.mu.Lock()
+	s.startPlatform = platform
+	s.startPhoneCode = phoneCode
+	s.mu.Unlock()
 	return service.LocalCaptchaHelperSession{ID: "helper-session"}, nil
+}
+
+func (s *stubCaptchaHelper) StartArgs() (platform, phoneCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startPlatform, s.startPhoneCode
 }
 
 func (s *stubCaptchaHelper) Status(context.Context, service.LocalCaptchaHelperSession, string, string, string) (string, error) {
@@ -390,6 +404,47 @@ func TestWebLoginChallengeStartReturnsContextGapAndOpaqueSession(t *testing.T) {
 
 	consume := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/"+sessionID+"/consume", nil)
 	require.Equal(t, http.StatusBadRequest, consume.Code)
+}
+
+func TestWebLoginChallengeStartPassesCountryCodeAsZhipuPhoneCode(t *testing.T) {
+	// zhipu：helper.Start 必须收到国家码作为 phone_code（空值会导致 helper 返回
+	// "GLM challenge requires phone_code" → context_gap 501，外呼从未发出）。
+	adminSvc := newWALAdminStub(&service.Account{ID: 1, Platform: service.PlatformZhipu, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}})
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
+	helper := h.webLoginCaptchaHelper.(*stubCaptchaHelper)
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/start", map[string]any{
+		"platform": "zhipu", "phone": "13800138000", "stage": "send_code", "account_id": 1,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	platform, phoneCode := helper.StartArgs()
+	require.Equal(t, service.PlatformZhipu, platform)
+	require.Equal(t, "86", phoneCode)
+
+	// 带国家码前缀的形态同样拆出 "86"。
+	w = doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/start", map[string]any{
+		"platform": "zhipu", "phone": "+86 13900139000", "stage": "send_code", "account_id": 1,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	_, phoneCode = helper.StartArgs()
+	require.Equal(t, "86", phoneCode)
+}
+
+func TestWebLoginChallengeStartKeepsEmptyPhoneCodeForKimi(t *testing.T) {
+	// kimi：helper 不需要 phone_code，保持空串。
+	adminSvc := newWALAdminStub(&service.Account{ID: 1, Platform: service.PlatformKimi, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}})
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
+	helper := h.webLoginCaptchaHelper.(*stubCaptchaHelper)
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/start", map[string]any{
+		"platform": "kimi", "phone": "13800138000", "stage": "send_code", "account_id": 1,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	platform, phoneCode := helper.StartArgs()
+	require.Equal(t, service.PlatformKimi, platform)
+	require.Equal(t, "", phoneCode)
 }
 
 func TestWebLoginPassword_DeepseekSuccess(t *testing.T) {
