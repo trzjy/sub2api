@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -408,6 +409,15 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 	accessToken := strings.TrimSpace(parsed.AccessToken)
 	refreshToken := strings.TrimSpace(parsed.RefreshToken)
 	if accessToken == "" || refreshToken == "" {
+		// 诊断探针：只记响应结构与字段名/类型/长度，绝不记字段值（凭据零泄漏）。
+		// 用于定位"HTTP 2xx 但缺 token"的真实响应形状（E0 取证只覆盖了路径存在性，未覆盖成功体）。
+		s.logger.Warn("kimi 短信登录成功响应缺 token",
+			"platform", PlatformKimi,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+		)
 		return nil, &webLoginHTTPError{
 			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindLogin,
 			Msg: "kimi 短信登录响应缺少 access_token/refresh_token（不可重试）",
@@ -418,6 +428,61 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		RefreshToken:      refreshToken,
 		LoginRefreshToken: refreshToken,
 	}, nil
+}
+
+// smsJSONShape 返回 JSON 响应的结构摘要（顶层键名 + 值类型 + 字符串长度），
+// **绝不返回字段值**：用于诊断"HTTP 2xx 但缺凭据"的响应形状，满足日志零凭据约束。
+// 嵌套对象只描述一行（键名与类型），避免把深层结构展开成可复原内容。
+func smsJSONShape(raw []byte) string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return "not-an-object"
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v := bytes.TrimSpace(top[k])
+		switch {
+		case len(v) > 0 && v[0] == '{':
+			var nested map[string]json.RawMessage
+			if err := json.Unmarshal(v, &nested); err == nil {
+				nk := make([]string, 0, len(nested))
+				for n := range nested {
+					nk = append(nk, n)
+				}
+				sort.Strings(nk)
+				parts = append(parts, fmt.Sprintf("%s=object{%s}", k, strings.Join(nk, ",")))
+				continue
+			}
+			parts = append(parts, k+"=object")
+		case len(v) > 0 && v[0] == '[':
+			parts = append(parts, fmt.Sprintf("%s=array(len=%d)", k, arrayLen(v)))
+		case len(v) > 0 && v[0] == '"':
+			var s string
+			if err := json.Unmarshal(v, &s); err == nil {
+				parts = append(parts, fmt.Sprintf("%s=string(len=%d)", k, len(s)))
+				continue
+			}
+			parts = append(parts, k+"=string")
+		case string(v) == "null":
+			parts = append(parts, k+"=null")
+		default:
+			parts = append(parts, k+"=scalar")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func arrayLen(raw json.RawMessage) int {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return -1
+	}
+	return len(arr)
 }
 
 func decodeStrictSMSJSON(raw []byte, out any) error {

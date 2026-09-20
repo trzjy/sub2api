@@ -363,3 +363,20 @@ func TestWebSMS_UnsupportedPlatform(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "暂不支持")
 }
+
+// smsJSONShape 只输出结构（键名/类型/长度），绝不输出字段值——诊断日志零凭据红线。
+func TestSMSJSONShapeNoValueLeak(t *testing.T) {
+	raw := []byte(`{"access_token":"SECRET-AT-VALUE","refresh_token":"SECRET-RT","new_user":false,"deactivating":{"reason":"SECRET-REASON"},"list":[1,2,3]}`)
+	shape := smsJSONShape(raw)
+	require.Contains(t, shape, "access_token=string(len=15)")
+	require.NotContains(t, shape, "SECRET")
+	require.NotContains(t, shape, "SECRET-AT-VALUE")
+	require.Contains(t, shape, "new_user=scalar")
+	require.Contains(t, shape, "deactivating=object{reason}")
+	require.Contains(t, shape, "list=array(len=3)")
+}
+
+func TestSMSJSONShapeNonObject(t *testing.T) {
+	require.Equal(t, "not-an-object", smsJSONShape([]byte(`[1,2]`)))
+	require.Equal(t, "not-an-object", smsJSONShape([]byte(`"x"`)))
+}
