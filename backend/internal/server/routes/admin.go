@@ -521,6 +521,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 
 		// Spark 影子账号
 		accounts.POST("/:id/shadow", h.Admin.OpenAIOAuth.CreateShadow)
+		// 影子账号摘要列表（含 spark/codebuddy 维度；影子按平台筛选的普通列表不可见）
+		accounts.GET("/:id/shadows", h.Admin.Account.ListShadows)
 
 		// Claude OAuth routes
 		accounts.POST("/generate-auth-url", h.Admin.OAuth.GenerateAuthURL)

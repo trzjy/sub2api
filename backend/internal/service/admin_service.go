@@ -113,6 +113,8 @@ type AdminService interface {
 	// CreateShadow 为指定 OpenAI OAuth 母账号创建 spark 维度影子账号（一母一影）。
 	// 影子账号不持凭据（Credentials 恒为空），透传母账号凭据；继承母账号的 ProxyID。
 	CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error)
+	// ListAccountShadows 返回指定母账号的全部影子账号摘要（含 spark 与 codebuddy 维度）。
+	ListAccountShadows(ctx context.Context, parentID int64) ([]AccountShadowSummary, error)
 
 	// 平台归并重构 PR-2：web-* 平台迁移 reconciler（应用层一次性执行）。
 	// 三字段原子性由 repository 层专用事务方法保证（见 AccountRepository）。
@@ -443,6 +445,17 @@ type ShadowOptions struct {
 	GroupIDs    []int64
 	Platform    string
 	Model       string
+}
+
+// AccountShadowSummary 是影子账号的摘要投影（GET /admin/accounts/:id/shadows）。
+// ShadowModel 为该影子服务的上游模型名（extra.shadow_model；直连建号未传 model 时为空），
+// 前端向导据此做「已创建」标记与同模型去重比对。
+type AccountShadowSummary struct {
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Platform    string  `json:"platform"`
+	ShadowModel string  `json:"shadow_model"`
+	GroupIDs    []int64 `json:"group_ids"`
 }
 
 type UpdateAccountInput struct {

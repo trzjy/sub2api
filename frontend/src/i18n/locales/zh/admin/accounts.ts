@@ -724,6 +724,8 @@ export default {
       codeBuddyHideGroupPicker: '收起分组选择器',
       codeBuddyRemoveGroup: '移除「{name}」',
       codeBuddyCreateFailedItem: '「{model}」→「{group}」：{error}',
+      codeBuddyBatchCreateSkipped: '已跳过 {count} 个已有二级账号的模型',
+      codeBuddyCreateSkippedItem: '「{model}」→「{groups}」：已存在，跳过',
       codeBuddyPriceUnpriced: '未定价',
       codeBuddyPriceLoading: '查询中…',
       codeBuddyPriceTooltip: '计费目录价（输入 / 输出，美元/百万 tokens），与计费口径同源；未覆盖的模型可「去配置」',

@@ -4091,12 +4091,24 @@ func (r *accountRepository) ListShadowsByParent(ctx context.Context, parentID in
 		return nil, err
 	}
 	out := make([]*service.Account, 0, len(rows))
+	ids := make([]int64, 0, len(rows))
 	for _, m := range rows {
 		account, err := accountEntityToService(m)
 		if err != nil {
 			return nil, err
 		}
+		ids = append(ids, account.ID)
 		out = append(out, account)
+	}
+	// 影子行补分组绑定（accountEntityToService 不加载 edge）；向导需要 group_ids 做已建分组比对。
+	_, groupIDsByAccount, _, err := r.loadAccountGroups(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, account := range out {
+		if groupIDs, ok := groupIDsByAccount[account.ID]; ok {
+			account.GroupIDs = groupIDs
+		}
 	}
 	return out, nil
 }

@@ -842,6 +842,10 @@ func (s *stubAdminService) CreateShadow(ctx context.Context, parentID int64, opt
 	}, nil
 }
 
+func (s *stubAdminService) ListAccountShadows(ctx context.Context, parentID int64) ([]service.AccountShadowSummary, error) {
+	return []service.AccountShadowSummary{}, nil
+}
+
 func (s *stubAdminService) MigrateWebPlatformAccounts(ctx context.Context, direction string, dryRun bool) (*service.WebPlatformMigrationReport, error) {
 	return &service.WebPlatformMigrationReport{Direction: direction, DryRun: dryRun, Migrated: []service.WebPlatformMigrationEntry{}, Skipped: []service.WebPlatformMigrationEntry{}}, nil
 }

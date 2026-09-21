@@ -106,12 +106,12 @@
               <button
                 data-test="codebuddy-create"
                 class="ml-auto rounded-lg bg-cyan-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60"
-                :disabled="creating || validCombos.length === 0"
+                :disabled="creating || validSubmissions.length === 0"
                 @click="onCreate"
               >
                 <Icon v-if="creating" name="refresh" size="sm" class="mr-1 inline animate-spin" />
                 {{ t('admin.accounts.codeBuddyBatchCreate') }}
-                <template v-if="validCombos.length > 0"> ({{ validCombos.length }})</template>
+                <template v-if="validSubmissions.length > 0"> ({{ validSubmissions.length }})</template>
               </button>
             </div>
 
@@ -256,14 +256,22 @@
               </table>
             </div>
 
-            <!-- 创建结果：按 (模型, 分组) 二元组展示 -->
+            <!-- 创建结果：按模型展示（每模型一条，列出绑定的全部分组） -->
             <div v-if="createResults" class="mt-3 rounded-lg border px-3 py-2 text-sm"
               :class="createResults.failed.length === 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700/50 dark:bg-emerald-900/20 dark:text-emerald-300' : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300'">
               <template v-if="createResults.failed.length === 0">{{ t('admin.accounts.codeBuddyBatchCreateSuccess', { count: createResults.success.length }) }}</template>
               <template v-else>{{ t('admin.accounts.codeBuddyBatchCreatePartial', { success: createResults.success.length, failed: createResults.failed.length }) }}</template>
+              <template v-if="createResults.skipped.length > 0">
+                {{ t('admin.accounts.codeBuddyBatchCreateSkipped', { count: createResults.skipped.length }) }}
+              </template>
+              <ul v-if="createResults.skipped.length > 0" class="mt-1 list-inside list-disc text-xs">
+                <li v-for="s in createResults.skipped" :key="`skipped-${s.model}`" :data-test="`codebuddy-create-skipped-${s.model}`">
+                  {{ t('admin.accounts.codeBuddyCreateSkippedItem', { model: s.model, groups: s.groupNames.join(', ') }) }}
+                </li>
+              </ul>
               <ul v-if="createResults.failed.length > 0" class="mt-1 list-inside list-disc text-xs">
-                <li v-for="f in createResults.failed" :key="`${f.model}::${f.groupId}`" :data-test="`codebuddy-create-failed-${f.model}-${f.groupId}`">
-                  {{ t('admin.accounts.codeBuddyCreateFailedItem', { model: f.model, group: f.groupName, error: f.error }) }}
+                <li v-for="f in createResults.failed" :key="`failed-${f.model}`" :data-test="`codebuddy-create-failed-${f.model}`">
+                  {{ t('admin.accounts.codeBuddyCreateFailedItem', { model: f.model, group: f.groupNames.join(', '), error: f.error }) }}
                 </li>
               </ul>
             </div>
@@ -280,8 +288,8 @@ import { useI18n } from 'vue-i18n'
 import { Icon } from '@/components/icons'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import type { Account, AdminGroup, AccountListItem, GroupPlatform } from '@/types'
-import { syncUpstreamModels, getAvailableModels, createCodeBuddyShadow } from '@/api/admin/accounts'
-import type { UpstreamModelMetadata } from '@/api/admin/accounts'
+import { syncUpstreamModels, getAvailableModels, createCodeBuddyShadow, listAccountShadows } from '@/api/admin/accounts'
+import type { UpstreamModelMetadata, AccountShadowSummary } from '@/api/admin/accounts'
 import {
   loadOfficialPrices,
   officialPriceLabel,
@@ -306,7 +314,7 @@ export interface CodeBuddyShadowWizardRow {
   contextWindow: number
   maxOutput: number
   platform: string
-  /** 用户在本行勾选的目标分组（提交时按 (模型 × 分组) 展开） */
+  /** 用户在本行勾选的目标分组（提交时按模型聚合成一条请求，group_ids 携带全部分组） */
   groupIds: number[]
   priority: number
   /** 既有影子已覆盖的分组（来自 props.shadows[].group_ids），用于 (模型, 分组) 去重 */
@@ -347,9 +355,20 @@ const selected = ref<Set<string>>(new Set())
 /** 当前展开分组选择器的行（模型名）；null 表示无展开行 */
 const pickerModel = ref<string | null>(null)
 const createResults = ref<{
-  success: { model: string; groupId: number; groupName: string }[]
-  failed: { model: string; groupId: number; groupName: string; error: string }[]
+  success: { model: string; groupNames: string[] }[]
+  failed: { model: string; groupNames: string[]; error: string }[]
+  skipped: { model: string; groupNames: string[] }[]
 } | null>(null)
+
+/** 向导内用的影子摘要（来自 GET /admin/accounts/:id/shadows，或回落 props.shadows）。 */
+interface WizardShadow {
+  id: number
+  name: string
+  shadowModel: string
+  /** null 表示列表未带分组信息，回落模型级去重避免重复建号 */
+  groupIds: number[] | null
+}
+const shadowList = ref<WizardShadow[]>([])
 
 const isIntl = computed(() => props.parent?.credentials?.site === 'intl')
 const selectedCount = computed(() => selected.value.size)
@@ -384,6 +403,25 @@ function formatTokens(n: number): string {
 // 只在表格态（同步成功后）触发；引导态/组件挂载时不打接口。
 
 // ===== 行构建与 (模型, 分组) 去重 =====
+function toWizardShadows(list: AccountShadowSummary[]): WizardShadow[] {
+  return (list ?? []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    shadowModel: String(s.shadow_model ?? ''),
+    groupIds: Array.isArray(s.group_ids) ? s.group_ids : null,
+  }))
+}
+
+/** 新端点不可用时的回落：props.shadows 是账号列表按 parent 的客户端过滤（可能被平台筛选挡住）。 */
+function toWizardShadowsFromProps(list: AccountListItem[]): WizardShadow[] {
+  return (list ?? []).map((s) => ({
+    id: s.id,
+    name: s.name,
+    shadowModel: String(s.extra?.shadow_model ?? ''),
+    groupIds: Array.isArray(s.group_ids) ? s.group_ids : null,
+  }))
+}
+
 function buildRows(metadata: Record<string, UpstreamModelMetadata> | undefined, modelIds: string[]) {
   const result: CodeBuddyShadowWizardRow[] = []
   const seen = new Set<string>()
@@ -393,12 +431,12 @@ function buildRows(metadata: Record<string, UpstreamModelMetadata> | undefined, 
     if (!key || seen.has(key)) continue
     seen.add(key)
     const meta: UpstreamModelMetadata | undefined = metadata?.[key]
-    const modelShadows = props.shadows.filter((s) => s.extra?.shadow_model === key)
-    // group_ids 用 omitempty 序列化：后端返回该键即代表真实分组（codebuddy 影子必有分组），
-    // 键整体缺失说明列表未带分组信息，此时回落到模型级去重避免重复建号。
-    const hasGroupInfo = modelShadows.some((s) => Array.isArray(s.group_ids))
+    const modelShadows = shadowList.value.filter((s) => s.shadowModel === key)
+    // group_ids 为空数组即代表无分组绑定；键整体缺失（null）说明列表未带分组信息，
+    // 此时回落到模型级去重避免重复建号。
+    const hasGroupInfo = modelShadows.some((s) => Array.isArray(s.groupIds))
     const existingGroupIds = hasGroupInfo
-      ? Array.from(new Set(modelShadows.flatMap((s) => s.group_ids ?? [])))
+      ? Array.from(new Set(modelShadows.flatMap((s) => s.groupIds ?? [])))
       : []
     const shadowSites = modelShadows
       .map((s) => parseCodeBuddyShadowSite(s.name))
@@ -450,15 +488,6 @@ function rowHasAnyShadow(row: CodeBuddyShadowWizardRow): boolean {
 const rowFullyCovered = (row: CodeBuddyShadowWizardRow): boolean =>
   row.groupIds.length > 0 && pendingGroupIds(row).length === 0
 
-/**
- * 是否需要在影子名后追加分组短名做消歧（方案 N4）。
- * 需要的情况：本行一次绑多个分组，或该模型已有影子（否则先建 `<母>:<site>:<模型>`、
- * 之后为同模型另一分组再建时会生成同名影子）。
- */
-function needsGroupSuffix(row: CodeBuddyShadowWizardRow): boolean {
-  return row.groupIds.length > 1 || row.existingGroupIds.length > 0 || row.createdGroupIds.length > 0
-}
-
 // ===== 交互 =====
 function togglePicker(model: string) {
   pickerModel.value = pickerModel.value === model ? null : model
@@ -483,20 +512,27 @@ function deselectAll() {
   selected.value = new Set()
 }
 
-/** 提交展开：(模型 × 分组) 二元组，各自独立优先级（N4 不做「一账号多组」新轨道）。 */
-const validCombos = computed(() =>
+/**
+ * 提交聚合：按模型聚合，每个选中模型一条创建请求，group_ids 携带该模型全部待建分组。
+ * 后端 CreateShadow 支持多数组绑定，且同模型去重——逐分组提交会让第二个及之后的
+ * 请求撞 409 CODEBUDDY_SHADOW_MODEL_EXISTS，只有首个分组绑上。
+ */
+const validSubmissions = computed(() =>
   rows.value
     .filter((r) => selected.value.has(r.model))
-    .flatMap((r) =>
-      pendingGroupIds(r).map((groupId) => ({
-        model: r.model,
-        groupId,
-        groupName: groupNameById(groupId),
-        platform: r.platform,
-        priority: r.priority,
-        suffix: needsGroupSuffix(r),
-      }))
-    )
+    .flatMap((r) => {
+      const pending = pendingGroupIds(r)
+      if (pending.length === 0) return []
+      return [
+        {
+          model: r.model,
+          groupIds: pending,
+          groupNames: pending.map(groupNameById),
+          platform: r.platform,
+          priority: r.priority,
+        },
+      ]
+    })
 )
 
 async function onSync() {
@@ -527,6 +563,16 @@ async function onSync() {
       state.value = 'guide'
       return
     }
+    // 拉全量影子做「已创建」标记：影子 platform=目标平台（zhipu/deepseek 等），
+    // 母账号平台筛选下的普通列表被后端 platform 过滤挡住，props.shadows 常为空。
+    // 新端点失败时回落 props.shadows 的客户端过滤。
+    let wizardShadows: WizardShadow[]
+    try {
+      wizardShadows = toWizardShadows(await listAccountShadows(props.parent.id))
+    } catch {
+      wizardShadows = toWizardShadowsFromProps(props.shadows)
+    }
+    shadowList.value = wizardShadows
     rows.value = buildRows(undefined, models)
     state.value = 'table'
     syncError.value = ''
@@ -542,42 +588,47 @@ async function onSync() {
 async function onCreate() {
   const parent = props.parent
   if (!parent) return
-  const combos = validCombos.value
-  if (combos.length === 0) {
+  const subs = validSubmissions.value
+  if (subs.length === 0) {
     syncError.value = t('admin.accounts.codeBuddyNoSelection')
     return
   }
   creating.value = true
   syncError.value = ''
-  const success: { model: string; groupId: number; groupName: string }[] = []
-  const failed: { model: string; groupId: number; groupName: string; error: string }[] = []
+  const success: { model: string; groupNames: string[] }[] = []
+  const failed: { model: string; groupNames: string[]; error: string }[] = []
+  const skipped: { model: string; groupNames: string[] }[] = []
   const parentSite = parent.credentials?.site
-  for (const combo of combos) {
+  for (const sub of subs) {
+    const row = rows.value.find((r) => r.model === sub.model)
+    // 已有影子的模型跳过：后端同模型去重（CODEBUDDY_SHADOW_MODEL_EXISTS），重复提交必 409。
+    if (row && rowHasAnyShadow(row)) {
+      skipped.push({ model: sub.model, groupNames: sub.groupNames })
+      continue
+    }
     try {
       const created = await createCodeBuddyShadow(parent.id, {
         // 后端 CreateShadow 的缺省名不含站点段，故由前端显式传 name（N3）。
-        name: codeBuddyShadowName(parent.name, parentSite, combo.model, combo.suffix ? combo.groupName : null),
-        model: combo.model,
-        platform: combo.platform,
-        group_ids: [combo.groupId],
-        priority: combo.priority,
+        name: codeBuddyShadowName(parent.name, parentSite, sub.model, null),
+        model: sub.model,
+        platform: sub.platform,
+        group_ids: sub.groupIds,
+        priority: sub.priority,
       })
-      success.push({ model: combo.model, groupId: combo.groupId, groupName: combo.groupName })
-      const row = rows.value.find((r) => r.model === combo.model)
-      if (row && !row.createdGroupIds.includes(combo.groupId)) {
-        row.createdGroupIds = [...row.createdGroupIds, combo.groupId]
+      success.push({ model: sub.model, groupNames: sub.groupNames })
+      if (row) {
+        row.createdGroupIds = [...row.createdGroupIds, ...sub.groupIds]
         if (row.shadowId == null) row.shadowId = created?.id ?? null
       }
     } catch (err) {
       failed.push({
-        model: combo.model,
-        groupId: combo.groupId,
-        groupName: combo.groupName,
-        error: err instanceof Error ? err.message : String(err),
+        model: sub.model,
+        groupNames: sub.groupNames,
+        error: extractApiErrorMessage(err, err instanceof Error ? err.message : String(err)),
       })
     }
   }
-  createResults.value = { success, failed }
+  createResults.value = { success, failed, skipped }
   selected.value = new Set()
   creating.value = false
   if (success.length > 0) emit('created')
@@ -591,6 +642,7 @@ watch(
     if (visible) {
       state.value = 'guide'
       rows.value = []
+      shadowList.value = []
       selected.value = new Set()
       pickerModel.value = null
       syncError.value = ''

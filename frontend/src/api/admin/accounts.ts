@@ -1077,6 +1077,21 @@ export async function createCodeBuddyShadow(parentId: number, payload: CodeBuddy
   return data
 }
 
+/** 影子账号摘要（GET /admin/accounts/:id/shadows）：shadow_model 为该影子服务的上游模型名。 */
+export interface AccountShadowSummary {
+  id: number
+  name: string
+  platform: string
+  shadow_model: string
+  group_ids: number[]
+}
+
+/** 拉取母账号的全部影子账号摘要（影子按平台筛选的普通列表不可见，向导标记依赖本端点）。 */
+export async function listAccountShadows(parentId: number): Promise<AccountShadowSummary[]> {
+  const { data } = await apiClient.get<AccountShadowSummary[]>(`/admin/accounts/${parentId}/shadows`)
+  return data
+}
+
 export async function getUpstreamBillingProbeSettings(): Promise<UpstreamBillingProbeSettings> {
   const { data } = await apiClient.get<UpstreamBillingProbeSettings>('/admin/accounts/upstream-billing-probe/settings')
   return data
@@ -1207,6 +1222,7 @@ export const accountsAPI = {
   resetOpenAIQuota,
   createSparkShadow,
   createCodeBuddyShadow,
+  listAccountShadows,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,
   setUpstreamBillingProbeEnabled,

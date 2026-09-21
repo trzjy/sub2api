@@ -2921,6 +2921,24 @@ func (h *AccountHandler) ResetQuota(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
+// ListShadows handles listing all shadow accounts of a parent account.
+// GET /api/v1/admin/accounts/:id/shadows
+func (h *AccountHandler) ListShadows(c *gin.Context) {
+	parentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+
+	shadows, err := h.adminService.ListAccountShadows(c.Request.Context(), parentID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, shadows)
+}
+
 // GetTempUnschedulable handles getting temporary unschedulable status
 // GET /api/v1/admin/accounts/:id/temp-unschedulable
 func (h *AccountHandler) GetTempUnschedulable(c *gin.Context) {

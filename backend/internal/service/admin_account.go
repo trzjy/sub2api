@@ -1858,6 +1858,30 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	return shadow, nil
 }
 
+// ListAccountShadows 返回指定母账号的全部影子账号摘要。
+// 影子的 platform 是目标平台（zhipu/deepseek 等），在母账号平台的普通列表筛选下
+// 被 repo 的平台过滤挡住，前端向导的「已创建」标记依赖本端点拉全量。
+func (s *adminServiceImpl) ListAccountShadows(ctx context.Context, parentID int64) ([]AccountShadowSummary, error) {
+	if _, err := s.accountRepo.GetByID(ctx, parentID); err != nil {
+		return nil, err
+	}
+	shadows, err := s.accountRepo.ListShadowsByParent(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("list shadows for parent %d: %w", parentID, err)
+	}
+	out := make([]AccountShadowSummary, 0, len(shadows))
+	for _, sh := range shadows {
+		out = append(out, AccountShadowSummary{
+			ID:          sh.ID,
+			Name:        sh.Name,
+			Platform:    sh.Platform,
+			ShadowModel: sh.GetExtraString(ShadowModelExtraKey),
+			GroupIDs:    append([]int64(nil), sh.GroupIDs...),
+		})
+	}
+	return out, nil
+}
+
 // propagateProxyToShadows syncs proxyID to all spark shadow accounts of parentID.
 // It is called synchronously so that proxy changes are immediately consistent;
 // accountRepo.Update triggers the scheduler outbox + cache propagation internally.

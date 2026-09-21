@@ -635,6 +635,8 @@ export default {
       codeBuddyHideGroupPicker: 'Hide group picker',
       codeBuddyRemoveGroup: 'Remove "{name}"',
       codeBuddyCreateFailedItem: '"{model}" → "{group}": {error}',
+      codeBuddyBatchCreateSkipped: 'Skipped {count} model(s) that already have sub-accounts',
+      codeBuddyCreateSkippedItem: '"{model}" → "{groups}": already exists, skipped',
       codeBuddyPriceUnpriced: 'Unpriced',
       codeBuddyPriceLoading: 'Checking…',
       codeBuddyPriceTooltip: 'Billing catalog price (input / output, USD per million tokens), same source as billing. Use Configure for models the catalog does not cover.',
