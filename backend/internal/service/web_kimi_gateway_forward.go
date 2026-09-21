@@ -775,7 +775,11 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 				}
 				return s.handleWebKimiUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
 			}
-			opsMsg := sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(payload))
+			// 凭证红线：与 handleWebKimiUpstreamError 同口径，先把可能被上游回显在
+			// trailer 里的 access_token / refresh_token 擦掉，再提取错误文案。本分支
+			// 不走 handleWebKimiUpstreamError，缺这一步会把凭证原文写进客户端 SSE
+			// error 帧与 ops_error_logs。
+			opsMsg := sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(redactWebKimiUpstreamErrorBody(payload, account)))
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
 				AccountID:          account.ID,

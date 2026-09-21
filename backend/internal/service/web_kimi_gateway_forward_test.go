@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -269,6 +270,15 @@ func TestForwardWebKimi_RequestBodyIsFramedOnce(t *testing.T) {
 		require.Equal(t, uint32(len(frame)-5), binary.BigEndian.Uint32(frame[1:5]),
 			"the 4-byte big-endian length prefix must equal the trailing payload size")
 		require.True(t, gjson.ValidBytes(frame[5:]), "payload after the header must be valid JSON")
+		// 恰好一帧：解码端回读一帧后必须到流尾；若存在第二帧即为双帧（重试链路的历史陷阱）。
+		rd := bufio.NewReader(bytes.NewReader(frame))
+		payload, more, rerr := readWebKimiConnectEnvelope(rd)
+		require.NoError(t, rerr)
+		require.True(t, more)
+		require.JSONEq(t, string(frame[5:]), string(payload))
+		_, more, rerr = readWebKimiConnectEnvelope(rd)
+		require.NoError(t, rerr)
+		require.False(t, more, "exactly one envelope frame, otherwise the body is double framed")
 	})
 
 	t.Run("401_retry_does_not_double_frame", func(t *testing.T) {
