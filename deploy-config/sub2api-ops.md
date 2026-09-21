@@ -161,6 +161,24 @@ scp yiyutu-server:/tmp/backup.tar.gz ./
 
 > 前提：本机 `~/.ssh/config` 已配置 `Host yiyutu-server`（HostName、User、IdentityFile），私钥权限必须为 `600`。
 
+#### Windows 工作站 / 双系统说明（实测 2026-09-21）
+
+- 该 SSH 密钥**同时部署在 Windows 侧**：`C:\Users\trzjy\.ssh\yiyutu_root_ed25519`（公钥 `*.pub`），且 `C:\Users\trzjy\.ssh\config` 已配好同样的 `Host yiyutu-server` 别名（指向 `43.250.173.110`，`User root`，`IdentityFile ~/.ssh/yiyutu_root_ed25519`，`IdentitiesOnly yes`）。与 Linux 侧为**同一把私钥的副本**，登录方式完全一致。
+- Windows OpenSSH 对私钥 ACL 有要求，若遇 "Permissions for ... are too open" 拒绝，收紧权限：
+  ```powershell
+  icacls yiyutu_root_ed25519 /inheritance:r /grant:r "trzjy:R"
+  ```
+- **⚠️ 代理白名单（关键坑）**：本机 Clash 等代理软件会劫持发往服务器的流量，导致 SSH 握手在 `kex_exchange_identification` 阶段被远端秒关（`Connection closed by remote host`）、HTTPS 访问 `corealgos.com` 也异常。**必须将服务器加入代理直连白名单**：
+  - Clash Verge：在**当前激活 profile 的「Rules 增强」**（`prepend` 段，最高优先级）加入：
+    ```yaml
+    prepend:
+      - IP-CIDR,43.250.173.110/32,DIRECT
+      - DOMAIN-SUFFIX,corealgos.com,DIRECT
+    ```
+  - 改完需**重新应用该 profile / 重启 Clash** 让 `clash-verge.yaml` 重新生成并热重载，否则规则不生效。
+  - 验证：`ssh yiyutu-server "echo SSH_OK"` 能回显即说明白名单生效。
+- 双系统共用同一把密钥，改了一侧另一侧为同步副本；不要在两侧各自生成不同密钥，否则一侧失效。
+
 ```bash
 # 查看服务状态
 cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps

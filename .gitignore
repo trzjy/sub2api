@@ -171,3 +171,8 @@ output/
 .hypothesis/
 # CodeBuddy agent 本地缓存/计划（本机，不入库）
 /.zcode/
+
+# 本地工具私有目录（workbuddy 日记等，不入库）
+.workbuddy/
+# 临时探针脚本（排查用，不入库）
+tmp-probe/
