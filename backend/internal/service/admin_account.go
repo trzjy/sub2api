@@ -1659,7 +1659,8 @@ func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id in
 //   - OpenAI OAuth 母账号 → spark 维度、一母一影（platform=openai，仅 model_mapping 凭据）。
 //   - CodeBuddy OAuth 母账号 → codebuddy 维度、一母多影（platform=目标分组平台，凭证空走母账号）。
 //
-// 安全不变量：影子账号 Credentials 恒不含 auth token（spark 仅 model_mapping；codebuddy 默认空=透传）。
+// 安全不变量：影子账号 Credentials 恒不含 auth token（spark 仅 model_mapping；
+// codebuddy 凭证空=透传，model_mapping 自动写入官方 ID→shadow_model 映射，无清单平台为空）。
 func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error) {
 	// 1. 加载母账号并校验平台/类型
 	parent, err := s.accountRepo.GetByID(ctx, parentID)
@@ -1785,9 +1786,15 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 
 	var credentials map[string]any
 	if isCodeBuddyParent {
-		// codebuddy 影子凭证空，运行时透传母账号；model_mapping 默认空=原样透传
-		// （GetMappedModel 对空 mapping 返回原模型名，向导可后续按官方名微调）。
+		// codebuddy 影子凭证空，运行时透传母账号。model_mapping 由向导创建即自动写入
+		// （官方模型 ID → shadow_model + identity，清单取自 DefaultWebModelIDs SSOT，
+		// 见 defaultCodeBuddyShadowModelMapping）；平台无官方清单（minimax/other 等）
+		// 时保持空 mapping=原样透传。ShadowOptions 无 mapping 入参字段（2026-09-22 核对），
+		// 故不存在「入参优先」分支。
 		credentials = map[string]any{}
+		if mapping := defaultCodeBuddyShadowModelMapping(shadowPlatform, opts.Model); len(mapping) > 0 {
+			credentials["model_mapping"] = mapping
+		}
 	} else {
 		credentials = map[string]any{"model_mapping": defaultSparkShadowModelMapping()}
 	}

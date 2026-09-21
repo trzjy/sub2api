@@ -7,6 +7,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDefaultCodeBuddyShadowModelMapping 覆盖向导创建影子时自动写入的默认
+// model_mapping（2026-09-22 用户拍板）：官方 ID 清单一律取自 DefaultWebModelIDs
+// SSOT，附 shadow_model identity 键；无清单平台/空模型保持 nil（不臆造）。
+func TestDefaultCodeBuddyShadowModelMapping(t *testing.T) {
+	t.Run("deepseek shadow writes official ids plus identity", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "deepseek-v4.1-flash")
+		require.Equal(t, map[string]any{
+			"deepseek-chat":       "deepseek-v4.1-flash",
+			"deepseek-reasoner":   "deepseek-v4.1-flash",
+			"deepseek-v4.1-flash": "deepseek-v4.1-flash",
+		}, m)
+	})
+
+	t.Run("zhipu shadow writes single official id plus identity", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping(PlatformZhipu, "glm-5.3-pro")
+		require.Equal(t, map[string]any{
+			"glm-5.3-flash": "glm-5.3-pro",
+			"glm-5.3-pro":   "glm-5.3-pro",
+		}, m)
+	})
+
+	t.Run("kimi shadow writes single official id plus identity", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping(PlatformKimi, "kimi-k3-turbo")
+		require.Equal(t, map[string]any{
+			"kimi-k3":       "kimi-k3-turbo",
+			"kimi-k3-turbo": "kimi-k3-turbo",
+		}, m)
+	})
+
+	t.Run("platform without official catalog stays nil", func(t *testing.T) {
+		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformMiniMax, "minimax-m2"),
+			"minimax 无代码内官方清单，必须保持空 mapping=透传")
+		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformOther, "qwen-coder"))
+	})
+
+	t.Run("empty or blank shadow model stays nil", func(t *testing.T) {
+		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformDeepseek, ""))
+		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "   "))
+	})
+
+	t.Run("shadow model already an official id collapses to identity entries", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "deepseek-chat")
+		require.Equal(t, map[string]any{
+			"deepseek-chat":     "deepseek-chat",
+			"deepseek-reasoner": "deepseek-chat",
+		}, m)
+	})
+}
+
+// TestCreateShadowCodeBuddyAutoModelMapping 见 admin_service_spark_shadow_test.go
+// （依赖 unit 标签下的 sparkShadowRepoStub 测试设施）。
+
 // TestInferCodeBuddyShadowPlatform 覆盖方案 §2.2 一母多影目标平台推断。
 func TestInferCodeBuddyShadowPlatform(t *testing.T) {
 	cases := []struct {

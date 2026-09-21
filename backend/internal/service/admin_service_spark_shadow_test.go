@@ -1031,3 +1031,62 @@ func TestForceOpenAIPrivacy_SkipsShadow(t *testing.T) {
 	shadow := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &pid}
 	require.Equal(t, "", svc.ForceOpenAIPrivacy(context.Background(), shadow), "影子隐私设置应跳过")
 }
+
+// TestCreateShadowCodeBuddyAutoModelMapping 端到端验证 CreateShadow 对 codebuddy 影子
+// 自动写入 model_mapping（2026-09-22 用户拍板）：deepseek 目标平台 → 官方 ID→shadow_model
+// + identity 键；无官方清单平台（minimax）保持空 mapping=透传。纯函数单测见
+// codebuddy_shadow_routing_test.go 的 TestDefaultCodeBuddyShadowModelMapping。
+func TestCreateShadowCodeBuddyAutoModelMapping(t *testing.T) {
+	ctx := context.Background()
+	repo := newSparkShadowRepoStub()
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	parent := &Account{
+		Name:     "cb-parent",
+		Platform: PlatformCodeBuddy,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token": "AT",
+		},
+	}
+	require.NoError(t, repo.Create(ctx, parent))
+
+	shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
+		Platform: PlatformDeepseek,
+		Model:    "deepseek-v4.1-flash",
+		GroupIDs: []int64{1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, QuotaDimensionCodeBuddy, shadow.QuotaDimension)
+	require.Empty(t, shadow.Credentials["access_token"], "影子不得持有 auth token")
+
+	mapping, ok := shadow.Credentials["model_mapping"].(map[string]any)
+	require.True(t, ok, "deepseek 影子应自动写入 model_mapping")
+	require.Equal(t, map[string]any{
+		"deepseek-chat":       "deepseek-v4.1-flash",
+		"deepseek-reasoner":   "deepseek-v4.1-flash",
+		"deepseek-v4.1-flash": "deepseek-v4.1-flash",
+	}, mapping)
+
+	// 出站解析：官方名与 shadow_model 直呼都应命中映射；mapping 即白名单，未列模型拒绝。
+	mapped, matched := shadow.ResolveMappedModel("deepseek-chat")
+	require.True(t, matched)
+	require.Equal(t, "deepseek-v4.1-flash", mapped)
+	mapped, matched = shadow.ResolveMappedModel("deepseek-v4.1-flash")
+	require.True(t, matched)
+	require.Equal(t, "deepseek-v4.1-flash", mapped)
+	require.True(t, shadow.IsModelSupported("deepseek-chat"))
+	require.True(t, shadow.IsModelSupported("deepseek-v4.1-flash"))
+	require.False(t, shadow.IsModelSupported("glm-5.3-flash"), "mapping 即白名单，未列模型应拒绝")
+
+	// 无清单平台（minimax）：credentials 保持空映射=透传，不臆造清单。
+	shadow2, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
+		Platform: PlatformMiniMax,
+		Model:    "minimax-m2",
+		GroupIDs: []int64{1},
+	})
+	require.NoError(t, err)
+	require.Empty(t, shadow2.Credentials["model_mapping"],
+		"无官方清单平台应保持空 mapping=原样透传")
+}
