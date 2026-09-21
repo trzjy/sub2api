@@ -456,8 +456,8 @@ func codeBuddyTestAccessToken(credentialAccount *Account) string {
 //
 // 出站域名/Origin/Referer 一律走站点 SSOT（codebuddy_site.go，缺省 cn）；
 // Authorization 为 Bearer + token（与 buildCodeBuddyChatRequest 同口径）。
-// 判定：2xx → 健康；401/403 → 上游拒绝；其余 → 失败。错误文案只含站点/端点/状态码，
-// 绝不回显凭证值。
+// 判定：2xx 且响应体通过内容校验（非空 + 无错误码）→ 健康；401/403 → 上游拒绝；
+// 其余 → 失败。错误文案只含站点/端点/状态码，绝不回显凭证值。
 func (s *AccountTestService) testCodeBuddyAccountConnection(c *gin.Context, account *Account, credentialAccount *Account, modelID string) error {
 	ctx := c.Request.Context()
 	if credentialAccount == nil {
@@ -546,14 +546,102 @@ func (s *AccountTestService) testCodeBuddyAccountConnection(c *gin.Context, acco
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe failed (%s HTTP %d)", site, codeBuddyBillingMeterPath, resp.StatusCode))
 	}
-	// 业务信封 code != 0 视为上游拒绝（凭证失效/账号异常），与配额服务同口径。
-	if code := gjson.GetBytes(raw, "code"); code.Exists() && code.Int() != 0 {
-		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe rejected by upstream (%s code=%d)", site, codeBuddyBillingMeterPath, code.Int()))
+	// 2xx 不等于成功：配额端点的认证/业务错误随 HTTP 200 返回，上游异常时也可能只回
+	// 空 body 或字符串 code。只看状态码会把失效账号判成 healthy —— 与 web 探活同源缺陷
+	// （见 evaluateCodeBuddyProbeBody），必须按响应体内容判定后才能判成功。
+	if reason := evaluateCodeBuddyProbeBody(raw); reason != "" {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe rejected by upstream (%s HTTP %d, %s)", site, codeBuddyBillingMeterPath, resp.StatusCode, reason))
 	}
 
 	s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("CodeBuddy (%s) account is healthy.", site)})
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
+}
+
+// CodeBuddy 探活 2xx 响应体的判定结论（拼在 "codebuddy (%s) probe rejected by upstream
+// (%s HTTP %d, %s)" 末尾）。常量只描述结论本身，绝不回显上游原文（可能携带凭证/内部信息）。
+const (
+	// 空 body：响应体剔除首尾空白后没有任何内容（"upstream returned empty response" 与
+	// antigravity_gateway_service.go 既有措辞对齐）。
+	codeBuddyProbeReasonEmptyBody = "upstream returned empty response"
+	// 认证类语义：code/msg/message 含 unauthenticated 等登录态失效信号。
+	codeBuddyProbeReasonAuthErr = "upstream auth error (login state invalid)"
+	// 业务信封非 0：code 为数字且 != 0，或为非空且非 "0" 的字符串。
+	codeBuddyProbeReasonBusinessErr = "upstream business error"
+)
+
+// evaluateCodeBuddyProbeBody 判定 CodeBuddy 探活 2xx 响应体：返回 "" 表示健康，非空为
+// 已脱敏的失败结论。仅当「body 非空 且 无错误码（数字 != 0 / 字符串非空且 != "0"）」
+// 时才判健康。
+//
+// 背景（线上故障同源）：只看状态码时两种形态会被误判成功 ——
+//   - 空 body：gjson 取不到 code → 直接跳过判成功；
+//   - {"code":"unauthenticated"}：gjson.Int() 对字符串返回 0 → 同样跳过。
+func evaluateCodeBuddyProbeBody(raw []byte) string {
+	body := bytes.TrimSpace(raw)
+	if len(body) == 0 {
+		return codeBuddyProbeReasonEmptyBody
+	}
+	if codeBuddyProbeBodyHasAuthError(body) {
+		return codeBuddyProbeReasonAuthErr
+	}
+	if reason, bad := codeBuddyProbeEnvelopeCode(body); bad {
+		return reason
+	}
+	return ""
+}
+
+// codeBuddyProbeBodyHasAuthError 识别认证类语义：只看 code / msg / message 三个顶层字段，
+// 与 web kimi 的分类器同口径（strings.Contains(lower, "unauthenticated")），不回显字段原文。
+func codeBuddyProbeBodyHasAuthError(body []byte) bool {
+	for _, field := range []string{"code", "msg", "message"} {
+		value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, field).String()))
+		if strings.Contains(value, "unauthenticated") || strings.Contains(value, "unauthorized") {
+			return true
+		}
+	}
+	return false
+}
+
+// codeBuddyProbeEnvelopeCode 解析业务信封 code：
+//   - 数字：!= 0 → 失败，回显数字 code（数值 ID 非凭证），保持既有 code=%d 口径；
+//   - 字符串：非空且 != "0" → 失败；仅整串为数字时才回显，避免把上游原文拼进文案。
+//
+// 其余类型（bool / object / null / 不存在）按无信封处理。
+func codeBuddyProbeEnvelopeCode(body []byte) (string, bool) {
+	code := gjson.GetBytes(body, "code")
+	if !code.Exists() {
+		return "", false
+	}
+	switch code.Type {
+	case gjson.Number:
+		if code.Int() != 0 {
+			return fmt.Sprintf("%s (code=%d)", codeBuddyProbeReasonBusinessErr, code.Int()), true
+		}
+	case gjson.String:
+		value := strings.TrimSpace(code.String())
+		if value == "" || value == "0" {
+			return "", false
+		}
+		if allDigits(value) {
+			return fmt.Sprintf("%s (code=%s)", codeBuddyProbeReasonBusinessErr, value), true
+		}
+		return codeBuddyProbeReasonBusinessErr, true
+	}
+	return "", false
+}
+
+// allDigits 判断字符串是否全为 ASCII 数字（决定字符串 code 能否安全回显到错误文案）。
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
