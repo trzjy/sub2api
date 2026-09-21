@@ -126,7 +126,7 @@ func TestTaskBWebShapeCredentialCreateRejected(t *testing.T) {
 // 3c. 普通创建入口旁路拒绝（收敛项 2）：CreateAccount 显式 access_mode=web 一律拒绝，
 // 文案指向 web 登录入口；FromWebLogin 内部标记豁免（web 登录链建号成功路径回归）。
 func TestTaskBNormalCreateEntryRejectsWebCredential(t *testing.T) {
-	repo := newWebRedactUpdateAdminRepo()
+	repo := &taskbWebCreateRepo{webRedactUpdateAdminRepo: newWebRedactUpdateAdminRepo()}
 	svc := &adminServiceImpl{accountRepo: repo}
 
 	_, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
@@ -149,14 +149,32 @@ func TestTaskBNormalCreateEntryRejectsWebCredential(t *testing.T) {
 
 	// web 登录链内部建号（FromWebLogin）：成功路径回归。
 	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
-		Name:         "web-chain-created",
-		Platform:     PlatformZhipu,
-		Type:         AccountTypeAPIKey,
-		Credentials:  map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
-		FromWebLogin: true,
+		Name:                  "web-chain-created",
+		Platform:              PlatformZhipu,
+		Type:                  AccountTypeAPIKey,
+		Credentials:           map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
+		FromWebLogin:          true,
+		SkipDefaultGroupBind:  true,
+		SkipMixedChannelCheck: true,
 	})
 	require.NoError(t, err, "web login chain internal create must succeed")
-	require.NotZero(t, created.ID)
+	require.NotNil(t, created)
+	require.Equal(t, "c", created.GetCredential("cookie"))
+	require.Equal(t, AccountAccessModeWeb, created.GetCredential("access_mode"))
+}
+
+// taskbWebCreateRepo 为本文件提供支持 Create 的最小账号仓储（复用
+// webRedactUpdateAdminRepo 的 GetByID/Update，补齐 Create 落库）。
+type taskbWebCreateRepo struct {
+	*webRedactUpdateAdminRepo
+}
+
+func (r *taskbWebCreateRepo) Create(_ context.Context, account *Account) error {
+	r.mu <- struct{}{}
+	defer func() { <-r.mu }()
+	cp := *account
+	r.accounts[account.ID] = &cp
+	return nil
 }
 
 // 3d. 普通更新入口旁路拒绝（收敛项 2）：web 账号登录态凭据变更/模式切换注入一律拒绝；
