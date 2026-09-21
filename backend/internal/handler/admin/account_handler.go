@@ -3131,6 +3131,13 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 				idSet[trimmed] = struct{}{}
 			}
 		}
+		// CodeBuddy 影子账号创建时只写入 extra[ShadowModelExtraKey]（上游服务模型名），
+		// 无 model_mapping、也无上游快照，否则测试模型下拉列表为空。把它作为真实可用模型补入。
+		if account.IsShadow() {
+			if shadowModel := strings.TrimSpace(account.GetExtraString(service.ShadowModelExtraKey)); shadowModel != "" {
+				idSet[shadowModel] = struct{}{}
+			}
+		}
 		ids := make([]string, 0, len(idSet))
 		for id := range idSet {
 			ids = append(ids, id)
