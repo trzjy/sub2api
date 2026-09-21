@@ -135,6 +135,33 @@ func ClassifyCodeBuddyError(statusCode int, body []byte) CodeBuddyErrKind {
 	return CodeBuddyErrKindNone
 }
 
+// isCodeBuddyContentSafetyError 检测上游响应体是否为 CodeBuddy 内容安全审核拒绝
+// （生产实测形态：HTTP 403 + {"code":11140,"msg":"request illegal","requestId":"...",
+//   "displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}）。
+//
+// 这是**请求级内容拒绝**：同一账号换一个合规内容即可成功，不构成账号凭据或权限
+// 失效的证据——不得据此把账号置 error / temp-unschedulable（与 HTML 403 #5334
+// 豁免同类：只跳过账号处罚，不改 failover 行为）。
+//
+// 宽容解析：命中任一即 true——①顶层 code 字段（数字或字符串）== 11140；
+// ②顶层 displayMsg 对象任一语言值含「安全审核」或 "safety review"（大小写不敏感）。
+// 解析失败 / 非 JSON 对象 / 不命中 → false。
+func isCodeBuddyContentSafetyError(responseBody []byte) bool {
+	if len(responseBody) == 0 {
+		return false
+	}
+	if codeBuddyBodyHasCode(responseBody, 11140) {
+		return true
+	}
+	displayMsg := gjson.GetBytes(responseBody, "displayMsg")
+	if !displayMsg.IsObject() {
+		return false
+	}
+	lower := strings.ToLower(displayMsg.Raw)
+	return strings.Contains(lower, "安全审核") ||
+		strings.Contains(lower, "safety review")
+}
+
 // codeBuddyBodyIndicatesInsufficientBalance 通过响应体文案识别余额/积分不足。
 func codeBuddyBodyIndicatesInsufficientBalance(bodyLower string) bool {
 	return strings.Contains(bodyLower, "积分不足") ||

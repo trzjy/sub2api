@@ -1008,6 +1008,19 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 	if account.Platform == PlatformOpenAI || isCNCoolingEligible(account) {
 		return s.handleOpenAI403(ctx, account, upstreamMsg, responseBody)
 	}
+	// CodeBuddy 原生路径（platform=codebuddy 直连账号，非影子）：403 + code=11140 /
+	// displayMsg「安全审核」是内容安全审核拒绝（请求级错误），同账号换内容即可成功。
+	// 原有通用分支会首次 403 即 handleAuthError → SetError 永久禁用（比 OpenAI 路径
+	// 的 3 次计数更激进），放大误禁。与 handleOpenAI403 的内容审核豁免同构：跳过账号
+	// 处罚，failover 行为不变。
+	if account.Platform == PlatformCodeBuddy && isCodeBuddyContentSafetyError(responseBody) {
+		slog.Warn(
+			"codebuddy_403_content_safety_skips_account_penalty",
+			"account_id", account.ID,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
 	// 非 Antigravity 平台：保持原有行为
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
@@ -1036,6 +1049,18 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 	if isHTMLResponse(responseBody) {
 		slog.Warn(
 			"openai_403_html_body_skips_account_penalty",
+			"account_id", account.ID,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
+
+	// CodeBuddy 上游（CN 站点/经 OpenAI 兼容路径的影子账号）的 403 + code=11140 是
+	// 内容安全审核拒绝：请求级错误，换内容同账号即可成功，不构成账号凭据/权限失效
+	// 的证据。与上方 HTML 403 豁免同构：不计数、不冷却、不禁用，failover 行为不变。
+	if isCodeBuddyContentSafetyError(responseBody) {
+		slog.Warn(
+			"openai_403_content_safety_skips_account_penalty",
 			"account_id", account.ID,
 			"upstream_message", upstreamMsg,
 		)

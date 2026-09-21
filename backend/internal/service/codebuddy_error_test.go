@@ -105,6 +105,41 @@ func TestClassifyCodeBuddyError_None(t *testing.T) {
 	}
 }
 
+// TestIsCodeBuddyContentSafetyError 覆盖内容安全审核拒绝检测（403 + 11140）：
+// 正例（数字/字符串 code、displayMsg 中英文）与负例（429、11128、无 displayMsg
+// 的普通 403、非 JSON、空体）。
+func TestIsCodeBuddyContentSafetyError(t *testing.T) {
+	positive := []string{
+		// 生产实测形态：数字 code + displayMsg 中英双语。
+		`{"code":11140,"msg":"request illegal","requestId":"abc","displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}`,
+		// 字符串 code。
+		`{"code":"11140","msg":"request illegal"}`,
+		// 仅 displayMsg 中文命中。
+		`{"code":0,"displayMsg":{"zh":"内容未通过安全审核，请调整后重试。"}}`,
+		// 仅 displayMsg 英文命中（大小写不敏感）。
+		`{"code":0,"displayMsg":{"en":"Content did not pass the SAFETY REVIEW"}}`,
+	}
+	for _, body := range positive {
+		if !isCodeBuddyContentSafetyError([]byte(body)) {
+			t.Fatalf("expected true for body %q", body)
+		}
+	}
+
+	negative := []string{
+		`{"code":429,"msg":"rate limit"}`,
+		`{"code":11128,"msg":"first message is not system prompt"}`,
+		`{"error":{"message":"temporary edge rejection"}}`, // 无 displayMsg 的普通 403 结构
+		`{"code":"not-a-number"}`,
+		`plain text error page`,
+		``,
+	}
+	for _, body := range negative {
+		if isCodeBuddyContentSafetyError([]byte(body)) {
+			t.Fatalf("expected false for body %q", body)
+		}
+	}
+}
+
 func TestParseCodeBuddyResetTime_UTC8(t *testing.T) {
 	body := `将在 2026-09-13 12:00:00 重置，请稍后再试`
 	got, ok := parseCodeBuddyResetTime([]byte(body))
