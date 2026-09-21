@@ -357,52 +357,203 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return nil
 	}
 
+	// 影子账号（CodeBuddy 影子等）自身 credentials 恒空（运行时透传母账号），
+	// 因此平台判定与凭证读取必须走母账号；account 仍保留用于身份与模型映射。
+	// 与 testOpenAICompactConnection 同范式：resolveCredentialAccount 只解一层，
+	// 且内置二级影子防御；解析失败即 fail-closed 报错，绝不拿空凭证去探活。
+	credentialAccount := account
+	if account.IsShadow() {
+		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil {
+			return s.sendErrorAndEnd(c, "Failed to resolve account credentials")
+		}
+		credentialAccount = resolved
+	}
+
 	// web逆向账号必须先于官方CN平台API分支判定；归并后两者共享platform，
 	// 以官方平台+access_mode=web双键SSOT严格隔离，避免web账号误读api_key。
-	if ResolveWebPlatform(account) != "" {
-		return s.testWebAccountConnection(c, account, modelID, prompt)
+	if ResolveWebPlatform(credentialAccount) != "" {
+		return s.testWebAccountConnection(c, credentialAccount, modelID, prompt)
 	}
 
 	// Route to platform-specific test method
-	if account.Platform == PlatformOther {
+	if credentialAccount.Platform == PlatformOther {
 		// other 双协议（chat_completions | anthropic），复用国产供应商的通用
 		// 探活（其内部经 GetOpenAIBaseURL/GetOpenAIProtocolAPIKey 取上游 base 与密钥）。
-		if account.GetAPIProtocol() == APIProtocolAnthropic {
-			return s.testCNProviderAnthropicConnection(c, account, modelID)
+		if credentialAccount.GetAPIProtocol() == APIProtocolAnthropic {
+			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID)
 		}
-		return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
+		return s.testCNProviderChatCompletionsConnection(c, credentialAccount, modelID, prompt)
 	}
 
-	if account.IsCNProvider() {
-		switch account.GetAPIProtocol() {
+	if credentialAccount.IsCNProvider() {
+		switch credentialAccount.GetAPIProtocol() {
 		case APIProtocolAdaptive:
-			return s.testCNProviderAdaptiveConnection(c, account, modelID, prompt)
+			return s.testCNProviderAdaptiveConnection(c, credentialAccount, modelID, prompt)
 		case APIProtocolResponses:
-			return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode))
+			return s.testOpenAIAccountConnection(c, credentialAccount, modelID, prompt, normalizeAccountTestMode(mode))
 		case APIProtocolChatCompletions:
-			return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
+			return s.testCNProviderChatCompletionsConnection(c, credentialAccount, modelID, prompt)
 		case APIProtocolAnthropic:
-			return s.testCNProviderAnthropicConnection(c, account, modelID)
+			return s.testCNProviderAnthropicConnection(c, credentialAccount, modelID)
 		}
 	}
 
-	if account.IsOpenAI() {
-		return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode))
+	if credentialAccount.IsOpenAI() {
+		return s.testOpenAIAccountConnection(c, credentialAccount, modelID, prompt, normalizeAccountTestMode(mode))
 	}
 
-	if account.IsGemini() {
-		return s.testGeminiAccountConnection(c, account, modelID, prompt)
+	if credentialAccount.IsGemini() {
+		return s.testGeminiAccountConnection(c, credentialAccount, modelID, prompt)
 	}
 
-	if account.Platform == PlatformGrok {
-		return s.testGrokAccountConnection(c, account, modelID, prompt, mode, testOpts)
+	if credentialAccount.Platform == PlatformGrok {
+		return s.testGrokAccountConnection(c, credentialAccount, modelID, prompt, mode, testOpts)
 	}
 
-	if account.Platform == PlatformAntigravity {
-		return s.routeAntigravityTest(c, account, modelID, prompt)
+	if credentialAccount.Platform == PlatformAntigravity {
+		return s.routeAntigravityTest(c, credentialAccount, modelID, prompt)
+	}
+
+	// CodeBuddy（含解析到 CodeBuddy 母账号的影子）：此前无任何测试出口，影子会落进
+	// CN 分支读到自己的空凭证（"No API key available"），非影子则掉进 claude 兜底。
+	if credentialAccount.IsCodeBuddy() {
+		return s.testCodeBuddyAccountConnection(c, account, credentialAccount, modelID)
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
+}
+
+// codeBuddyTestAccessToken 取 CodeBuddy 探活的 Bearer token，与正式转发链同口径
+// （OpenAIGatewayService.GetAccessToken 的 codebuddy 分支：OAuth → credentials.access_token、
+// APIKey（ck_ 定制 key）→ credentials.api_key；与配额服务 setBillingHeaders 一致）。
+// 不能用 GetOpenAIProtocolAPIKey / GetOpenAIAccessToken：前者对 CN provider 且
+// Type != apikey 恒返回空，后者要求 IsOpenAI()，对 codebuddy 恒为空。
+func codeBuddyTestAccessToken(credentialAccount *Account) string {
+	if credentialAccount == nil {
+		return ""
+	}
+	if token := strings.TrimSpace(credentialAccount.GetCredential("access_token")); token != "" {
+		return token
+	}
+	if credentialAccount.Type == AccountTypeAPIKey {
+		return strings.TrimSpace(credentialAccount.GetCredential("api_key"))
+	}
+	return ""
+}
+
+// testCodeBuddyAccountConnection 对 CodeBuddy 账号（含解析到 CodeBuddy 母账号的影子）
+// 做轻量探活。
+//
+// 参数分工与正式转发 forwardCodeBuddy 一致：account 只承载身份与模型映射（影子的
+// model_mapping 决定上游模型），credentialAccount（影子→母账号）承载站点与凭证。
+//
+// 探活端点选配额快照端点 POST {BillingBase}/v2/billing/meter/get-user-resource（body {}）：
+//   - 只读、零模型消耗，比最小 token 的补全更廉价；
+//   - intl 站点实测 HTTP 200 且 schema 与 CN 同构（docs/evidence/codebuddy-intl）；
+//   - 绕开 intl 的两个坑：models 端点认证后 HTTP 500（动态模型不可用），
+//     chat 补全要求首条消息为 system（否则 400 code=11128）。
+//
+// 出站域名/Origin/Referer 一律走站点 SSOT（codebuddy_site.go，缺省 cn）；
+// Authorization 为 Bearer + token（与 buildCodeBuddyChatRequest 同口径）。
+// 判定：2xx → 健康；401/403 → 上游拒绝；其余 → 失败。错误文案只含站点/端点/状态码，
+// 绝不回显凭证值。
+func (s *AccountTestService) testCodeBuddyAccountConnection(c *gin.Context, account *Account, credentialAccount *Account, modelID string) error {
+	ctx := c.Request.Context()
+	if credentialAccount == nil {
+		credentialAccount = account
+	}
+	site := credentialAccount.CodeBuddySite()
+	ep := codeBuddyEndpointsFor(site)
+
+	// 账号级 base_url 非空时显式校验，非法值直接报错（与 web/国产探活同范式），
+	// 避免测试在错误出站目标上假通过。空值走站点默认。
+	if rawBaseURL := strings.TrimSpace(credentialAccount.GetCredential("base_url")); rawBaseURL != "" {
+		if _, err := s.validateUpstreamBaseURL(rawBaseURL); err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+		}
+	}
+
+	token := codeBuddyTestAccessToken(credentialAccount)
+	if token == "" {
+		return s.sendErrorAndEnd(c, "codebuddy account is missing access_token credential")
+	}
+
+	// 模型名只作展示/映射用途（探活端点不消费模型），映射取影子自身，与转发一致。
+	testModelID := strings.TrimSpace(modelID)
+	if testModelID != "" {
+		testModelID = account.GetMappedModel(testModelID)
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	apiURL := strings.TrimRight(ep.BillingBase, "/") + codeBuddyBillingMeterPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create codebuddy probe request")
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", ep.OriginReferer)
+	req.Header.Set("Referer", ep.OriginReferer+"/")
+	req.Header.Set("User-Agent", CodeBuddyClientUA)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("Authorization", "Bearer "+token)
+	// 身份头与配额服务 setBillingHeaders 同口径：空值用 X-No-*: 1 占位。
+	uid := credentialAccount.GetCredential("uid")
+	enterpriseID := credentialAccount.GetCredential("enterprise_id")
+	domain := credentialAccount.GetCredential("domain")
+	if uid != "" {
+		req.Header.Set("X-User-Id", uid)
+	} else {
+		req.Header.Set("X-No-User-Id", "1")
+	}
+	if enterpriseID != "" {
+		req.Header.Set("X-Enterprise-Id", enterpriseID)
+	} else {
+		req.Header.Set("X-No-Enterprise-Id", "1")
+	}
+	if domain != "" {
+		req.Header.Set("X-Domain", domain)
+	} else {
+		req.Header.Set("X-No-Domain", "1")
+	}
+	// 账号级请求头覆写最后应用，使管理员配置优先。
+	credentialAccount.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe request failed: %s", site, err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe rejected by upstream (%s HTTP %d)", site, codeBuddyBillingMeterPath, resp.StatusCode))
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe failed (%s HTTP %d)", site, codeBuddyBillingMeterPath, resp.StatusCode))
+	}
+	// 业务信封 code != 0 视为上游拒绝（凭证失效/账号异常），与配额服务同口径。
+	if code := gjson.GetBytes(raw, "code"); code.Exists() && code.Int() != 0 {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("codebuddy (%s) probe rejected by upstream (%s code=%d)", site, codeBuddyBillingMeterPath, code.Int()))
+	}
+
+	s.sendEvent(c, TestEvent{Type: "content", Text: fmt.Sprintf("CodeBuddy (%s) account is healthy.", site)})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
 }
 
 func (s *AccountTestService) testCNProviderChatCompletionsConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
