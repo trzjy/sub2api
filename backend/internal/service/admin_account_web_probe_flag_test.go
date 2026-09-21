@@ -45,14 +45,28 @@ func TestCreateAccountWebPlatformProbeFlagContract(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 1) 不带 ProbeEnabled：创建成功，且绝不携带受管探测键。
+			// 1) 旁路关闭（收敛项 2，2026-09-21 裁定）：普通创建入口携带 web 凭据
+			//    一律拒绝（web 凭据账号只能经 web 登录链创建）；探测键契约仅在
+			//    FromWebLogin 豁免路径上继续生效。
 			repo := &upstreamBillingProbeAccountRepo{}
+			_, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+				Name:                 "web-probe-off",
+				Platform:             tt.platform,
+				Type:                 AccountTypeAPIKey,
+				Credentials:          tt.credentials,
+				SkipDefaultGroupBind: true,
+			})
+			require.Error(t, err, "normal entry with web credentials must be rejected")
+			require.Contains(t, err.Error(), "只能通过短信/密码登录创建")
+
+			// FromWebLogin 豁免路径（web 登录链内部建号）：创建成功，且绝不携带受管探测键。
 			created, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 				Name:                 "web-probe-off",
 				Platform:             tt.platform,
 				Type:                 AccountTypeAPIKey,
 				Credentials:          tt.credentials,
 				SkipDefaultGroupBind: true,
+				FromWebLogin:         true,
 			})
 			require.NoError(t, err)
 			require.NotContains(t, created.Extra, UpstreamBillingProbeEnabledExtraKey)
@@ -62,7 +76,8 @@ func TestCreateAccountWebPlatformProbeFlagContract(t *testing.T) {
 			require.Equal(t, AccountTypeAPIKey, created.Type)
 
 			// 2) 显式 ProbeEnabled=true：资格外平台必须 fail-closed 拒绝，
-			//    不允许把无法服务的探测开关写进新建账号。
+			//    不允许把无法服务的探测开关写进新建账号（FromWebLogin 豁免路径上
+			//    探测资格判定不变——旁路豁免不放宽探测准入）。
 			enabled := true
 			_, err = (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
 				Name:                 "web-probe-on",
@@ -71,6 +86,7 @@ func TestCreateAccountWebPlatformProbeFlagContract(t *testing.T) {
 				Credentials:          tt.credentials,
 				ProbeEnabled:         &enabled,
 				SkipDefaultGroupBind: true,
+				FromWebLogin:         true,
 			})
 			require.ErrorIs(t, err, ErrUpstreamBillingProbeAccountInvalid)
 		})

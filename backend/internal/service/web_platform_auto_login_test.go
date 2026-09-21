@@ -26,10 +26,6 @@ type autoLoginUpstream struct {
 	loginBizCode         int64
 	loginHTTPStatus      int
 	deepseekVerifyStatus int
-	zhipuOK              bool
-	kimiOK               bool
-	kimiDataOK           bool
-	kimiNoToken          bool
 }
 
 func newMockResp(status int, header http.Header, body string) *http.Response {
@@ -62,25 +58,6 @@ func (m *autoLoginUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*ht
 			status = http.StatusOK
 		}
 		return newMockResp(status, http.Header{}, `{"code":0,"data":{"biz_code":0,"biz_data":{"challenge":{"algorithm":"DeepSeekHashV1","challenge":"6de3393aba4cece63e3e6a761752722b05f2cfe531bc1b5c82e01985e93fddd2","salt":"salt123","signature":"sig","difficulty":43,"expire_at":1739764288699}}}}`), nil
-	case strings.HasSuffix(req.URL.Path, WebZhipuRefreshEndpoint):
-		h := http.Header{}
-		if m.zhipuOK {
-			h.Add("Set-Cookie", "chatglm_token=NEWTOKEN; Path=/")
-		}
-		if m.zhipuOK {
-			return newMockResp(http.StatusOK, h, ""), nil
-		}
-		return newMockResp(http.StatusUnauthorized, h, `{"code":40002,"msg":"unauthorized"}`), nil
-	case strings.Contains(req.URL.Path, "RefreshToken"):
-		switch {
-		case m.kimiOK:
-			return newMockResp(http.StatusOK, http.Header{}, `{"accessToken":"AT-1","refreshToken":"RT-1"}`), nil
-		case m.kimiDataOK:
-			return newMockResp(http.StatusOK, http.Header{}, `{"data":{"accessToken":"AT-2"}}`), nil
-		case m.kimiNoToken:
-			return newMockResp(http.StatusOK, http.Header{}, `{"foo":1}`), nil
-		}
-		return newMockResp(http.StatusBadRequest, http.Header{}, `{"code":40002,"msg":"bad refresh"}`), nil
 	}
 	return newMockResp(http.StatusOK, http.Header{}, "{}"), nil
 }
@@ -260,133 +237,24 @@ func TestWebPlatformAutoLogin_DeepseekCode10Banned(t *testing.T) {
 	require.Equal(t, "1", fmt.Sprint(store.creds[3][CredKeyLoginFailCount]))
 }
 
-// ---------------------------------------------------------------------------
-// zhipu / kimi：refresh 续期
-// ---------------------------------------------------------------------------
+func TestWebPlatformAutoLogin_ZhipuKimiRecoverDelegatesToSemiAuto(t *testing.T) {
+	// 裁定（2026-09-21）：auto_login 侧 refresh 实现已删除（单口径收敛到转发链
+	// refreshWebKimiAccessToken / refreshWebZhipuAccessToken），RecoverAccount 对
+	// zhipu/kimi 不再自动续期，直接要求半自动短信登录。
+	for _, platform := range []string{PlatformZhipu, PlatformKimi} {
+		acc := &Account{
+			ID:          60,
+			Platform:    platform,
+			Status:      StatusError,
+			Credentials: map[string]any{"access_mode": AccountAccessModeWeb},
+		}
+		store := newAutoLoginStore(acc)
+		svc := newTestAutoLoginService(store, &autoLoginUpstream{})
 
-func TestWebPlatformAutoLogin_ZhipuRefreshSuccess(t *testing.T) {
-	acc := &Account{
-		ID:       4,
-		Platform: PlatformZhipu,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginRefreshToken: "RT",
-			"refresh_token":          "RT",
-		},
+		res := svc.RecoverAccount(context.Background(), acc)
+		require.False(t, res.Recovered, platform)
+		require.True(t, res.NeedsSemiAuto, platform)
 	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{zhipuOK: true}
-	svc := newTestAutoLoginService(store, up)
-
-	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	require.Equal(t, "NEWTOKEN", store.creds[4]["chatglm_token"])
-
-	res := svc.RecoverAccount(context.Background(), acc)
-	require.True(t, res.Recovered)
-	require.Equal(t, StatusActive, acc.Status)
-	require.Equal(t, "NEWTOKEN", store.creds[4]["chatglm_token"])
-	require.Equal(t, "0", fmt.Sprint(store.creds[4][CredKeyLoginFailCount]))
-}
-
-func TestWebPlatformAutoLogin_KimiRefreshSuccess(t *testing.T) {
-	acc := &Account{
-		ID:       5,
-		Platform: PlatformKimi,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginRefreshToken: "RT0",
-			"refresh_token":          "RT0",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{kimiOK: true}
-	svc := newTestAutoLoginService(store, up)
-
-	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	merged := store.creds[5]
-	require.Equal(t, "AT-1", merged["access_token"])
-	require.Equal(t, "RT-1", merged["refresh_token"])
-	require.Equal(t, "RT-1", merged[CredKeyLoginRefreshToken])
-	require.Equal(t, "0", fmt.Sprint(merged[CredKeyLoginFailCount]))
-
-	// 两级恢复：kimi refresh 成功 → 状态转 active。
-	res := svc.RecoverAccount(context.Background(), acc)
-	require.True(t, res.Recovered)
-	require.Equal(t, StatusActive, acc.Status)
-	require.Equal(t, "", acc.ErrorMessage)
-}
-
-// 宽容解析：响应为 data.accessToken 包装且无 refresh 轮换 → 取新 access_token，
-// refresh_token 保持原值（缺失轮换保持原值的既有语义）。
-func TestWebPlatformAutoLogin_KimiRefreshLenientDataPathKeepsRefreshToken(t *testing.T) {
-	acc := &Account{
-		ID:       12,
-		Platform: PlatformKimi,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginRefreshToken: "RT0",
-			"refresh_token":          "RT0",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{kimiDataOK: true}
-	svc := newTestAutoLoginService(store, up)
-
-	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	merged := store.creds[12]
-	require.Equal(t, "AT-2", merged["access_token"])
-	require.Equal(t, "RT0", merged["refresh_token"])
-	require.Equal(t, "RT0", merged[CredKeyLoginRefreshToken])
-}
-
-// 失败关闭：2xx 但响应缺 accessToken → 错误透出且不落库。
-func TestWebPlatformAutoLogin_KimiRefreshMissingAccessTokenFailsClosed(t *testing.T) {
-	acc := &Account{
-		ID:       13,
-		Platform: PlatformKimi,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginRefreshToken: "RT0",
-			"refresh_token":          "RT0",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{kimiNoToken: true}
-	svc := newTestAutoLoginService(store, up)
-
-	err := svc.RefreshToken(context.Background(), acc)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "缺少 accessToken")
-	require.Nil(t, store.creds[13], "解析失败时不得落库")
-}
-
-// ---------------------------------------------------------------------------
-// 两级恢复语义
-// ---------------------------------------------------------------------------
-
-func TestWebPlatformAutoLogin_ZhipuRefreshFailNeedsSemiAuto(t *testing.T) {
-	acc := &Account{
-		ID:       6,
-		Platform: PlatformZhipu,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode":            AccountAccessModeWeb,
-			CredKeyLoginRefreshToken: "RT",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{zhipuOK: false}
-	svc := newTestAutoLoginService(store, up)
-
-	res := svc.RecoverAccount(context.Background(), acc)
-	require.False(t, res.Recovered)
-	require.True(t, res.NeedsSemiAuto) // zhipu refresh 失败 → 需半自动短信
-	require.Equal(t, StatusError, acc.Status)
-	require.Equal(t, "true", store.creds[6][CredKeyLoginNonRetryable])
 }
 
 func TestWebPlatformAutoLogin_DeepseekFailNoSemiAuto(t *testing.T) {
@@ -498,51 +366,4 @@ func TestWebPlatformErrorDetail_Table(t *testing.T) {
 	// 成功码 → 空文案。
 	title, _ = WebPlatformErrorDetail(PlatformDeepseek, WebLoginCodeSuccess, WebLoginKindLogin)
 	require.Equal(t, "", title)
-}
-
-// ---------------------------------------------------------------------------
-// zhipu refresh：cookie 兜底（对齐转发侧 refreshWebZhipuAccessToken 口径）
-// ---------------------------------------------------------------------------
-
-// TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback：显式 refresh_token /
-// login_refresh_token 均缺失时，从账号已保存的整串 cookie 解析 chatglm_refresh_token。
-func TestWebPlatformAutoLogin_ZhipuRefreshCookieFallback(t *testing.T) {
-	acc := &Account{
-		ID:       8,
-		Platform: PlatformZhipu,
-		Status:   StatusError,
-		Credentials: map[string]any{
-			"access_mode": AccountAccessModeWeb,
-			"cookie":      "chatglm_token=CT-1; chatglm_refresh_token=RFT-COOKIE",
-		},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{zhipuOK: true}
-	svc := newTestAutoLoginService(store, up)
-
-	require.NoError(t, svc.RefreshToken(context.Background(), acc))
-	require.NotEmpty(t, up.requests)
-	// 续期请求使用的正是 cookie 兜底解析出的 refresh token。
-	require.Equal(t, "chatglm_refresh_token=RFT-COOKIE", up.requests[len(up.requests)-1].Header.Get("Cookie"))
-	require.Equal(t, "RFT-COOKIE", store.creds[8][CredKeyLoginRefreshToken])
-	require.Equal(t, "NEWTOKEN", store.creds[8]["chatglm_token"])
-}
-
-// TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed：显式键与 cookie 兜底都
-// 取不到 refresh_token 时，失败关闭且不发续期请求。
-func TestWebPlatformAutoLogin_ZhipuRefreshNoTokenFailClosed(t *testing.T) {
-	acc := &Account{
-		ID:          9,
-		Platform:    PlatformZhipu,
-		Status:      StatusError,
-		Credentials: map[string]any{"access_mode": AccountAccessModeWeb},
-	}
-	store := newAutoLoginStore(acc)
-	up := &autoLoginUpstream{zhipuOK: true}
-	svc := newTestAutoLoginService(store, up)
-
-	err := svc.RefreshToken(context.Background(), acc)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "refresh_token")
-	require.Empty(t, up.requests)
 }

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -343,212 +342,8 @@ func (s *WebPlatformAutoLoginService) verifyDeepseekCookie(ctx context.Context, 
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// zhipu / kimi：refresh token 续期
-// ---------------------------------------------------------------------------
-
-type webKimiRefreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-// RefreshToken 对 zhipu / kimi 网页接入执行 refresh token 续期。成功时内部原子更新凭据
-// （refresh_token / 新 cookie / access_token），失败返回 *webLoginHTTPError。
-func (s *WebPlatformAutoLoginService) RefreshToken(ctx context.Context, account *Account) error {
-	ctx, cancel := context.WithTimeout(ctx, webSMSRequestTimeout)
-	defer cancel()
-	switch webAutoLoginPlatformKey(account) {
-	case PlatformZhipu:
-		return s.refreshZhipu(ctx, account)
-	case PlatformKimi:
-		return s.refreshKimi(ctx, account)
-	default:
-		return fmt.Errorf("RefreshToken 不支持平台 %q", account.Platform)
-	}
-}
-
-func (s *WebPlatformAutoLoginService) refreshZhipu(ctx context.Context, account *Account) error {
-	refreshToken := strings.TrimSpace(account.GetCredential(CredKeyLoginRefreshToken))
-	if refreshToken == "" {
-		refreshToken = strings.TrimSpace(account.GetCredential("refresh_token"))
-	}
-	// cookie 兜底：与转发侧 refreshWebZhipuAccessToken（web_zhipu_gateway_forward.go:557）
-	// 同口径——显式键缺失时从账号已保存的整串 Cookie 解析 chatglm_refresh_token，
-	// 使两条续期路径凭据口径一致。
-	if refreshToken == "" {
-		if cookie := strings.TrimSpace(account.GetCredential("cookie")); cookie != "" {
-			refreshToken = webZhipuExtractCookieField(cookie, "chatglm_refresh_token")
-		}
-	}
-	if refreshToken == "" {
-		return &webLoginHTTPError{
-			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "缺少 refresh_token（需半自动短信登录）",
-		}
-	}
-	base := strings.TrimRight(account.GetWebBaseURL(), "/")
-	if base == "" {
-		base = DefaultWebZhipuBaseURL
-	}
-	target := base + WebZhipuRefreshEndpoint
-	if _, err := s.validateUpstreamURL(target); err != nil {
-		return fmt.Errorf("zhipu web 续期目标被 URL 白名单拒绝: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Cookie", "chatglm_refresh_token="+refreshToken)
-
-	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), account.ID, account.Concurrency)
-	if err != nil {
-		return fmt.Errorf("zhipu web 续期网络错误: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// 读取并丢弃响应体（保证连接复用），业务结果以 Set-Cookie 为准。
-	if _, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); err != nil {
-		return fmt.Errorf("zhipu web 续期响应读取失败: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return &webLoginHTTPError{
-			Platform: PlatformZhipu, Code: int64(resp.StatusCode), Kind: WebLoginKindRefresh,
-			Msg: fmt.Sprintf("zhipu web 续期返回 HTTP %d", resp.StatusCode),
-		}
-	}
-
-	newCookie := combineSetCookies(resp)
-	chatGLMToken := extractCookieValue(newCookie, "chatglm_token")
-	if chatGLMToken == "" {
-		return &webLoginHTTPError{
-			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "zhipu web 续期响应缺少 chatglm_token（不可重试）",
-		}
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	updates := map[string]any{
-		// 业务键：与转发链既有键保持一致，forward 方可直接消费。
-		"cookie":                 newCookie,
-		"chatglm_token":          chatGLMToken,
-		"refresh_token":          refreshToken,
-		CredKeyLoginRefreshToken: refreshToken,
-		CredKeyLoginLastAt:       now,
-		CredKeyLoginFailCount:    0,
-		CredKeyLoginLastError:    "",
-		CredKeyLoginNonRetryable: "false",
-	}
-	return s.persistRecoveredCredentials(ctx, account, updates)
-}
-
-func (s *WebPlatformAutoLoginService) refreshKimi(ctx context.Context, account *Account) error {
-	refreshToken := strings.TrimSpace(account.GetCredential(CredKeyLoginRefreshToken))
-	if refreshToken == "" {
-		refreshToken = strings.TrimSpace(account.GetCredential("refresh_token"))
-	}
-	if refreshToken == "" {
-		return &webLoginHTTPError{
-			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "缺少 refresh_token（需半自动短信登录）",
-		}
-	}
-
-	target := strings.TrimRight(webKimiAuthBaseURL, "/") + WebKimiRefreshEndpoint
-	if _, err := s.validateUpstreamURL(target); err != nil {
-		return fmt.Errorf("kimi web 续期目标被 URL 白名单拒绝: %w", err)
-	}
-
-	body, err := json.Marshal(webKimiRefreshRequest{RefreshToken: refreshToken})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", webKimiClientUA)
-
-	resp, err := s.httpUpstream.Do(req, accountProxyURL(account), account.ID, account.Concurrency)
-	if err != nil {
-		return fmt.Errorf("kimi web 续期网络错误: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("kimi web 续期响应读取失败: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return &webLoginHTTPError{
-			Platform: PlatformKimi, Code: int64(resp.StatusCode), Kind: WebLoginKindRefresh,
-			Msg: fmt.Sprintf("kimi web 续期返回 HTTP %d", resp.StatusCode),
-		}
-	}
-
-	// 单口径：解析与转发链 refreshWebKimiAccessToken（web_kimi_gateway_forward.go:376-392）
-	// 完全同款——access_token 在顶层/data/token 包装下的常见位置宽容查找（成功响应结构
-	// 未活体取证，绝不臆造单一契约）；refresh_token 仅在上游一并返回时轮换，缺失保持原值。
-	var newAccessToken, newRefreshToken string
-	for _, path := range []string{"accessToken", "data.accessToken", "token", "data.token", "access_token", "data.access_token"} {
-		if v := strings.TrimSpace(gjson.GetBytes(raw, path).String()); v != "" {
-			newAccessToken = v
-			break
-		}
-	}
-	if newAccessToken == "" {
-		s.logger.Info("kimi web 续期响应诊断",
-			"platform", PlatformKimi,
-			"status", resp.StatusCode,
-			"content_type", resp.Header.Get("Content-Type"),
-			"body_bytes", len(raw),
-			"json_keys", smsJSONShape(raw),
-		)
-		return &webLoginHTTPError{
-			Platform: PlatformKimi, Code: -1, Kind: WebLoginKindRefresh,
-			Msg: "kimi web 续期响应缺少 accessToken（不可重试）",
-		}
-	}
-	for _, path := range []string{"refreshToken", "data.refreshToken", "refresh_token", "data.refresh_token"} {
-		if v := strings.TrimSpace(gjson.GetBytes(raw, path).String()); v != "" {
-			newRefreshToken = v
-			break
-		}
-	}
-	if newRefreshToken == "" {
-		newRefreshToken = refreshToken
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	updates := map[string]any{
-		// 业务键：与转发链既有键保持一致。
-		"access_token":           newAccessToken,
-		"refresh_token":          newRefreshToken,
-		CredKeyLoginRefreshToken: newRefreshToken,
-		// kimi refresh 同时回换新 refresh，记录过期基准。
-		CredKeyLoginRefreshExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339),
-		CredKeyLoginLastAt:           now,
-		CredKeyLoginFailCount:        0,
-		CredKeyLoginLastError:        "",
-		CredKeyLoginNonRetryable:     "false",
-	}
-	return s.persistRecoveredCredentials(ctx, account, updates)
-}
-
-// persistRecoveredCredentials 原子合并写回凭据（保留既有键），并同步更新内存对象。
-func (s *WebPlatformAutoLoginService) persistRecoveredCredentials(ctx context.Context, account *Account, updates map[string]any) error {
-	merged := s.mergeCredentials(account, updates)
-	if err := s.store.UpdateAccountCredentials(ctx, account.ID, merged); err != nil {
-		return err
-	}
-	account.Credentials = merged
-	return nil
-}
-
-// extractCookieValue 从整串 Cookie 中提取指定键的值（用于把 refresh 返回的新 token
-// 同步到 forward 既有的单键字段）。
+// extractCookieValue 从整串 Cookie 中提取指定键的值。web_sms_login.go 的 zhipu
+// 短信登录响应用它解析 chatglm_token / chatglm_refresh_token。
 func extractCookieValue(cookie, key string) string {
 	for _, part := range strings.Split(cookie, ";") {
 		part = strings.TrimSpace(part)
@@ -574,7 +369,9 @@ type WebRecoverResult struct {
 
 // RecoverAccount 对单个 web-* 账号执行两级恢复：
 //   - deepseek：第一级 LoginByEmail（全自动）；
-//   - zhipu/kimi：第一级 RefreshToken，失败 → 返回需半自动（短信码）。
+//   - zhipu/kimi：无自动 refresh（2026-09-21 撤销 Web 后台保活后，refresh 自动恢复
+//     已删除；转发链 refreshWebKimiAccessToken / refreshWebZhipuAccessToken 是唯一
+//     refresh 实现）→ 直接返回需半自动（短信登录重新授权）。
 //
 // 恢复成功 → StatusActive + 清 ErrorMessage；失败 → 保留 StatusError +
 // 写 ErrorMessage=细化摘要（同时更新凭据内 login_last_error）。状态与凭据原子落库。
@@ -586,7 +383,10 @@ func (s *WebPlatformAutoLoginService) RecoverAccount(ctx context.Context, accoun
 	case PlatformDeepseek:
 		return s.recoverDeepseek(ctx, account)
 	case PlatformZhipu, PlatformKimi:
-		return s.recoverZhipuKimi(ctx, account)
+		return WebRecoverResult{
+			NeedsSemiAuto: true,
+			Detail:        "请通过短信登录重新授权",
+		}
 	default:
 		return WebRecoverResult{Detail: "不支持的自动登录平台：" + account.Platform}
 	}
@@ -616,20 +416,6 @@ func (s *WebPlatformAutoLoginService) recoverDeepseek(ctx context.Context, accou
 		account.ErrorMessage = ""
 		return WebRecoverResult{Recovered: true}
 	}
-	return s.failAccount(ctx, account, err)
-}
-
-func (s *WebPlatformAutoLoginService) recoverZhipuKimi(ctx context.Context, account *Account) WebRecoverResult {
-	err := s.RefreshToken(ctx, account)
-	if err == nil {
-		if err := s.store.UpdateAccountStatus(ctx, account.ID, StatusActive, ""); err != nil {
-			return s.failAccount(ctx, account, fmt.Errorf("网页登录态状态写入失败: %w", err))
-		}
-		account.Status = StatusActive
-		account.ErrorMessage = ""
-		return WebRecoverResult{Recovered: true}
-	}
-	// refresh 失败 → 需半自动（短信码）；同时落库错误与不可重试标记。
 	return s.failAccount(ctx, account, err)
 }
 

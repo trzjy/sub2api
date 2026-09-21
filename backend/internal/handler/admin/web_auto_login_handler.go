@@ -22,7 +22,6 @@ const webAutoLoginCookieKey = "cookie"
 // 其方法签名与 service.WebPlatformAutoLoginService 对齐。
 type webPlatformAutoLoginService interface {
 	LoginByEmail(ctx context.Context, account *service.Account) (string, error)
-	RefreshToken(ctx context.Context, account *service.Account) error
 	RecoverAccount(ctx context.Context, account *service.Account) service.WebRecoverResult
 	SendSmsCode(ctx context.Context, platform, phone string, challenge service.WebSMSChallenge, account *service.Account) (string, error)
 	VerifySmsCode(ctx context.Context, platform, phone, code string, challenge service.WebSMSChallenge, account *service.Account) (*service.SMSLoginResult, error)
@@ -70,7 +69,7 @@ func (a *adminAutoLoginStoreAdapter) UpdateAccountCredentials(ctx context.Contex
 	for k, v := range creds {
 		merged[k] = v
 	}
-	_, err = a.svc.UpdateAccount(ctx, id, &service.UpdateAccountInput{Credentials: merged})
+	_, err = a.svc.UpdateAccount(ctx, id, &service.UpdateAccountInput{Credentials: merged, FromWebLogin: true})
 	return err
 }
 
@@ -512,6 +511,7 @@ func (h *AccountHandler) WebLoginPassword(c *gin.Context) {
 				Priority: req.AccountDraft.Priority, RateMultiplier: req.AccountDraft.RateMultiplier, LoadFactor: req.AccountDraft.LoadFactor,
 				GroupIDs: req.AccountDraft.GroupIDs, ExpiresAt: req.AccountDraft.ExpiresAt,
 				AutoPauseOnExpired: req.AccountDraft.AutoPauseOnExpired, ProbeEnabled: req.AccountDraft.ProbeEnabled,
+				FromWebLogin: true,
 			})
 			if err != nil {
 				response.ErrorFrom(c, err)
@@ -725,6 +725,7 @@ func (h *AccountHandler) WebLoginSMS(c *gin.Context) {
 			Priority: accountDraft.Priority, GroupIDs: accountDraft.GroupIDs, ExpiresAt: accountDraft.ExpiresAt,
 			RateMultiplier: accountDraft.RateMultiplier, LoadFactor: accountDraft.LoadFactor,
 			AutoPauseOnExpired: accountDraft.AutoPauseOnExpired, ProbeEnabled: accountDraft.ProbeEnabled,
+			FromWebLogin: true,
 		})
 		if err != nil {
 			response.ErrorFrom(c, err)
@@ -743,7 +744,7 @@ func (h *AccountHandler) WebLoginSMS(c *gin.Context) {
 
 // buildSMSLoginCredentialUpdates 组装短信登录成功的账号凭据更新（同一次写入）：
 //   - zhipu：整串 cookie（webAutoLoginCookieKey）+ 显式 login_refresh_token（从 cookie
-//     提取 chatglm_refresh_token；缺失时仅记 cookie，续期依赖 refreshZhipu 的 cookie 兜底）；
+//     提取 chatglm_refresh_token；强制要求：内核侧缺失即失败关闭，无 cookie 兜底语义）；
 //   - kimi：access_token（既有转发键）+ login_refresh_token = RefreshToken（cookie 键不写）。
 //
 // refresh_token 为转发链既有业务键（forward 401 续期读取），与 login_* 簿记键一并写入。
@@ -804,7 +805,7 @@ func (h *AccountHandler) webPlatformAutoLoginStoreUpdateCreds(ctx context.Contex
 	for k, v := range creds {
 		merged[k] = v
 	}
-	_, err = h.adminService.UpdateAccount(ctx, id, &service.UpdateAccountInput{Credentials: merged})
+	_, err = h.adminService.UpdateAccount(ctx, id, &service.UpdateAccountInput{Credentials: merged, FromWebLogin: true})
 	return err
 }
 

@@ -177,7 +177,6 @@ type stubAutoLogin struct {
 	loginCalls     int
 	loginAccount   *service.Account
 	recoverResults map[int64]service.WebRecoverResult
-	refreshErrs    map[int64]error
 
 	smsResult        *service.SMSLoginResult
 	smsSendErr       error
@@ -196,13 +195,6 @@ func (s *stubAutoLogin) LoginByEmail(_ context.Context, account *service.Account
 		account.Credentials[service.CredKeyLoginDeviceID] = s.loginDeviceID
 	}
 	return s.cookieForEmail, s.emailErr
-}
-
-func (s *stubAutoLogin) RefreshToken(_ context.Context, account *service.Account) error {
-	if e, ok := s.refreshErrs[account.ID]; ok {
-		return e
-	}
-	return nil
 }
 
 func (s *stubAutoLogin) RecoverAccount(_ context.Context, account *service.Account) service.WebRecoverResult {

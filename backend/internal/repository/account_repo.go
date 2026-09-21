@@ -1298,43 +1298,14 @@ func (r *accountRepository) ListOAuthRefreshCandidatePage(ctx context.Context, o
 		query += `
 			AND status = 'active'`
 	}
-	if options.WebAccessMode {
-		// 网页接入账号分支：type=apikey + credentials.access_mode=web，
-		// 按平台组合各自凭据条件（凭据值零拼接，全部常量拼接）。
-		// IncludeSetupToken / RequireRefreshToken 在此分支下忽略，网页账号
-		// 凭据条件自含。
-		webConds := make([]string, 0, 4)
-		platformSet := make(map[string]struct{}, len(options.Platforms))
-		for _, p := range options.Platforms {
-			platformSet[p] = struct{}{}
-		}
-		if _, ok := platformSet["kimi"]; ok {
-			webConds = append(webConds, `(platform = 'kimi' AND credentials ? 'refresh_token' AND btrim(credentials->>'refresh_token') <> '')`)
-		}
-		if _, ok := platformSet["zhipu"]; ok {
-			webConds = append(webConds, `(platform = 'zhipu' AND (credentials->>'cookie' LIKE '%chatglm_refresh_token=%' OR (credentials ? 'login_refresh_token' AND btrim(credentials->>'login_refresh_token') <> '')))`)
-		}
-		if _, ok := platformSet["deepseek"]; ok {
-			webConds = append(webConds, `(platform = 'deepseek' AND credentials ? 'login_email' AND btrim(credentials->>'login_email') <> '' AND credentials ? 'login_password' AND btrim(credentials->>'login_password') <> '')`)
-		}
-		if len(webConds) > 0 {
-			query += `
-			AND type = 'apikey'
-			AND credentials->>'access_mode' = 'web'
-			AND (` + strings.Join(webConds, " OR ") + `)`
-		} else {
-			// 注册平台集合中没有任何支持网页接入的平台：不可能有候选。
-			query += `
-			AND FALSE`
-		}
-	} else if options.IncludeSetupToken {
+	if options.IncludeSetupToken {
 		query += `
 			AND type IN ('oauth', 'setup-token')`
 	} else {
 		query += `
 			AND type = 'oauth'`
 	}
-	if options.RequireRefreshToken && !options.WebAccessMode {
+	if options.RequireRefreshToken {
 		query += `
 			AND credentials ? 'refresh_token'
 			AND btrim(credentials->>'refresh_token') <> ''`

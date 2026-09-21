@@ -354,18 +354,39 @@ const script = document.createElement('script');
 script.src = {json.dumps(GLM_CAPTCHA_SDK_URL)};
 script.onload = () => {{
   if (typeof window.initSMCaptcha !== 'function') return fail('数美 SDK 未就绪');
-  const instance = window.initSMCaptcha({{
-    organization: {json.dumps(GLM_CAPTCHA_ORGANIZATION)}, appendTo: '#glm-captcha',
-    product: 'embed', width: '100%'
-  }});
-  if (!instance || typeof instance.onSuccess !== 'function') return fail('数美组件初始化失败');
-  instance.onSuccess((data) => {{
-    if (!data || typeof data.rid !== 'string' || !data.rid) return fail('数美回调缺少 rid');
-    if (typeof data.md5 !== 'string' || !data.md5) return fail('数美回调缺少已取证 md5');
-    statusNode.textContent = '验证完成，可以返回管理页';
-    window.challengeComplete({{rid: data.rid, md5: data.md5}});
-  }});
-  if (typeof instance.onClose === 'function') instance.onClose(() => fail('验证窗口已关闭'));
+  // 2026-09-21 双重实证（chatglm.cn 线上 smcp.min.js 行为 + 官方 main bundle 集成代码逆向）：
+  // 1) 新版 API 为 initSMCaptcha(options, instanceCallback)——实例经第二个参数回调交付，
+  //    返回值恒为 undefined；options 内 onSuccess/onError 不再被调用（旧式写法导致
+  //    "滑块已过、组件显示成功，但回调永不触发"）。
+  // 2) instance.onSuccess(data)，data 至少含 {{rid, pass}}；官方仅解构 rid+pass，
+  //    md5 是否仍存在以运行时为准——helper 日志记录回调完整键名（不记值）。
+  let gotInstance = false;
+  try {{
+    window.initSMCaptcha({{
+      organization: {json.dumps(GLM_CAPTCHA_ORGANIZATION)}, appendTo: '#glm-captcha',
+      product: 'embed', width: '100%'
+    }}, (instance) => {{
+      gotInstance = true;
+      if (!instance || typeof instance.onSuccess !== 'function') return fail('数美组件实例未交付');
+      instance.onSuccess((data) => {{
+        if (!data || typeof data.rid !== 'string' || !data.rid) return fail('数美回调缺少 rid');
+        if (data.pass === false) return fail('数美验证未通过');
+        statusNode.textContent = '验证完成，可以返回管理页';
+        window.challengeComplete(Object.assign({{}}, data));
+      }});
+      if (typeof instance.onError === 'function') {{
+        instance.onError((e) => fail('数美验证失败: ' + String(e && e.msg || e).slice(0, 80)));
+      }}
+    }});
+  }} catch (e) {{ return fail('数美组件初始化异常: ' + String(e.message).slice(0, 80)); }}
+  // 渲染兜底：3 秒无滑块节点，或 6 秒实例回调未到达，均判定失败。
+  setTimeout(() => {{
+    const box = document.querySelector('#glm-captcha .shumei_captcha');
+    if (!box) fail('数美组件渲染失败（容器无滑块节点）');
+  }}, 3000);
+  setTimeout(() => {{
+    if (!gotInstance) fail('数美组件实例未交付（回调超时）');
+  }}, 6000);
 }};
 script.onerror = () => fail('数美 SDK 加载失败');
 document.head.appendChild(script);
@@ -489,6 +510,8 @@ document.head.appendChild(script);
         async def challenge_complete(_source: Any, payload: Any) -> None:
             if not isinstance(payload, dict):
                 return
+            # 只记键名不记值：实锤新版 SDK onSuccess 载荷字段集（rid/pass/md5 有无）。
+            log(f"SDK 挑战回调字段 platform={session.platform} keys={sorted(payload.keys())}")
             allowed = ("validate",) if session.platform == "kimi" else ("rid", "md5")
             values = {
                 field_name: str(payload.get(field_name) or "").strip()
@@ -548,7 +571,9 @@ document.head.appendChild(script);
                             kimi_layout_error_logged = True
                             log(f"Kimi 图片挑战布局（脱敏）采集失败：{type(exc).__name__}")
                 await asyncio.sleep(0.25)
-            required = {"validate"} if session.platform == "kimi" else {"rid", "md5"}
+            # 2026-09-21 官方 bundle 实证：新版数美 onSuccess 至少含 {rid, pass}，md5 是否
+            # 附带以运行时为准，故 glm 仅硬性要求 rid（md5 有则透传，无则空）。
+            required = {"validate"} if session.platform == "kimi" else {"rid"}
             if done.is_set() and required.issubset(callback_result):
                 session.result = dict(callback_result)
                 if session.platform == "glm":

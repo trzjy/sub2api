@@ -162,6 +162,7 @@ export default {
             succeeded: 'Verification succeeded',
             failed: 'Verification failed',
             expired: 'Verification expired',
+            context_gap: 'Verification environment unavailable; check the manual challenge service',
           },
           completeLoginFirst: 'Complete web login first; the account will be created after successful verification',
           fillRequired: 'Please fill in the login identifier and password',

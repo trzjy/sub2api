@@ -866,19 +866,15 @@ const (
 	// login_non_retryable 是内部簿记键：标记 banned/密码错/WAF/PoW 等不可重试类错误，
 	// 置 "true" 后不再自动重试（实行失败关闭，不新增维护池/退避）。
 	CredKeyLoginNonRetryable = "login_non_retryable"
-	// web_refresh_last_ok_at 是后台保活（TokenRefreshService web refresher）的簿记键：
-	// RFC3339，上次后台续期/重登成功时间。供 NeedsRefresh 做"距上次成功超过保活间隔"判定。
-	CredKeyWebRefreshLastOKAt = "web_refresh_last_ok_at"
 )
 
 // Web 平台自动登录出站端点（取证结论，已核实，不要重新猜测协议）。
+// 2026-09-21 收敛：zhipu/kimi 的 Web refresh 自动恢复已撤销（转发链
+// refreshWebZhipuAccessToken / refreshWebKimiAccessToken 是唯一 refresh 实现），
+// 原 WebZhipuRefreshEndpoint / WebKimiRefreshEndpoint 常量随 auto_login 侧
+// refreshKimi/refreshZhipu 一并删除（转发链各自持有同值私有常量）。
 const (
 	WebDeepseekLoginEndpoint = "/api/v0/users/login"
-	WebZhipuRefreshEndpoint  = "/user-api/user/refresh"
-	// 05-kimi-refresh-endpoint-probe.md（2026-09-19 决定性）：正确的 kimi 续期端点为
-	// account.gateway.v1 命名空间（401 unauthenticated=可达）；旧值 kimi.gateway.auth.v1
-	// 实测 404。同域 DeviceService 亦为 account.gateway.v1（08 号证据 200）。
-	WebKimiRefreshEndpoint = "/api/account.gateway.v1.AuthService/RefreshToken"
 )
 
 // 自动登录错误 kind（用于 WebPlatformErrorDetail 与分类）。

@@ -94,7 +94,7 @@ type SMSLoginResult struct {
 	// ChatGLMToken zhipu 的 chatglm_token 单键（从 Cookie 中提取，供 forward 侧直接消费）。
 	ChatGLMToken string
 	// LoginRefreshToken 显式 login_refresh_token 落库值：zhipu 从整串 Cookie 提取
-	// chatglm_refresh_token（缺失则为空，续期由 refreshZhipu 的 cookie 兜底），
+	// chatglm_refresh_token（强制要求：缺失即失败关闭，不再有兜底续期语义），
 	// kimi 即 RefreshToken。
 	LoginRefreshToken string
 }
@@ -249,9 +249,10 @@ func smsVerifyChallengeMissing(platform string) func(WebSMSChallenge) string {
 // 数美滑块参数（rid/md5）来自前端滑块交互，证据 02-sign-algorithm.md 缺失生成算法；
 // challenge 必须携带已求解值，缺失即失败关闭。
 //
-// 响应判定（宽容解析 + 失败关闭）：2xx 初步成功；body 候选业务失败标志
-// （success=false / code(ret) 非 0 且非空）→ 透出文案失败关闭；其余 2xx 形状仅记
-// 诊断日志（smsJSONShape，零凭据）。真实成功语义待活体验收固化（成功无 token 回传需求）。
+// 响应判定（已取证契约白名单 + 失败关闭）：成功 ⇔ HTTP 2xx 且 body 解析出
+// code==0 或 success==true（二者任一，均为已取证字段名）。2xx 但 body 无这两个
+// 可判定字段 → 失败关闭（不再放行），附 smsJSONShape 零凭据诊断日志；body 明确
+// 失败标志（success=false / code 非 0）→ 失败关闭透出文案。
 func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
 	if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuCaptchaMD5 == "" {
 		return "", &webLoginHTTPError{
@@ -298,13 +299,21 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 			Msg: "zhipu 短信验证码发送失败：" + msg,
 		}
 	}
-	s.logger.Info("zhipu 短信验证码发送响应诊断",
-		"platform", PlatformZhipu,
-		"status", resp.StatusCode,
-		"content_type", resp.Header.Get("Content-Type"),
-		"body_bytes", len(raw),
-		"json_keys", smsJSONShape(raw),
-	)
+	// 已取证契约白名单：成功 ⇔ body 明确 code==0 或 success==true；
+	// 2xx 但无可判定字段 → 失败关闭（不再放行），附零凭据诊断日志。
+	if !zhipuBizSuccess(raw) {
+		s.logger.Info("zhipu 短信验证码发送响应诊断",
+			"platform", PlatformZhipu,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+		)
+		return "", &webLoginHTTPError{
+			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "发码响应无法确认成功（缺少已取证成功标志）",
+		}
+	}
 	return "", nil
 }
 
@@ -314,12 +323,17 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 // 三件套在方法内部用 webZhipuComputeSign 生成（web_zhipu_gateway_forward.go:498）；
 // 数美滑块 rid 仍须调用方传入，缺失即失败关闭。
 //
-// 成功判定（宽容解析 + 失败关闭，成功契约待活体验收固化）：
-//  1. HTTP 2xx 且 Set-Cookie 含 chatglm_token → 成功：整串 Cookie 提取
-//     chatglm_token / chatglm_refresh_token 返回（LoginRefreshToken 缺失允许空，
-//     handler 侧有 refreshZhipu cookie 兜底语义）；
-//  2. body 候选业务失败标志（success=false / code 非 0 且非空）→ 失败关闭透出文案；
-//  3. 其余 2xx（无 cookie、无明确失败）→ 失败关闭 + INFO 诊断日志（smsJSONShape 零凭据）。
+// 成功判定（已取证契约 + 失败关闭，正向条件齐全才算成功）：
+//  1. HTTP 2xx 且 body 携带已取证成功标志（zhipuBizSuccess：code==0 或
+//     success==true，与发码共用同一白名单实现）且 Set-Cookie 同时提取到
+//     chatglm_token 与 chatglm_refresh_token → 成功：整串 Cookie 提取两键返回
+//     （LoginRefreshToken 强制要求，缺失即失败关闭，不再保留兜底续期语义）；
+//  2. body 候选业务失败标志（success=false / 顶层 code/status/ret 或嵌套
+//     data.code、data.status 为非 0 数值或字符串数字）→ 失败关闭透出文案；
+//  3. 2xx 但 zhipuBizSuccess=false（无可判定成功标志，即使带 Cookie）→ 失败关闭，
+//     文案"GLM 登录响应缺少已取证成功标志" + INFO 诊断日志（smsJSONShape 零凭据）；
+//  4. 2xx 有成功标志但缺 chatglm_token 或缺 chatglm_refresh_token → 失败关闭 +
+//     INFO 诊断日志（smsJSONShape 零凭据）。
 func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, phone, code string, challenge WebSMSChallenge, account *Account) (*SMSLoginResult, error) {
 	if challenge.ZhipuCaptchaRid == "" {
 		return nil, &webLoginHTTPError{
@@ -361,7 +375,8 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 	if err != nil {
 		return nil, fmt.Errorf("zhipu 短信登录响应读取失败: %w", err)
 	}
-	if resp.StatusCode >= 400 {
+	// 正向成功条件 1：仅 HTTP 2xx 可继续（3xx/4xx/5xx 一律失败关闭）。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信登录")
 	}
 	if msg, failed := zhipuBizFailure(raw); failed {
@@ -370,10 +385,10 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 			Msg: "zhipu 短信登录失败：" + msg,
 		}
 	}
-	newCookie := combineSetCookies(resp)
-	chatGLMToken := extractCookieValue(newCookie, "chatglm_token")
-	if chatGLMToken == "" {
-		// 2xx 但无 chatglm_token：大概率业务错误体或未知成功契约 → 失败关闭 + 诊断日志。
+	// 正向成功条件：2xx 但无可取证成功标志（含 code 为字符串数字等宽容失败形态
+	// 均未命中成功白名单）→ 失败关闭，即使响应带了 Cookie 也绝不采纳为登录成功。
+	// 成功 ⇔ zhipuBizSuccess 为真（code==0 / success==true，已取证白名单）。
+	if !zhipuBizSuccess(raw) {
 		s.logger.Info("zhipu 短信登录响应诊断",
 			"platform", PlatformZhipu,
 			"status", resp.StatusCode,
@@ -384,13 +399,40 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeZhipu(ctx context.Context, ph
 		)
 		return nil, &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
-			Msg: "zhipu 短信登录响应缺少 chatglm_token（不可重试）",
+			Msg: "GLM 登录响应缺少已取证成功标志",
+		}
+	}
+	newCookie := combineSetCookies(resp)
+	chatGLMToken := extractCookieValue(newCookie, "chatglm_token")
+	refreshToken := extractCookieValue(newCookie, "chatglm_refresh_token")
+	if chatGLMToken == "" || refreshToken == "" {
+		// 正向成功条件 4：有成功标志但缺 chatglm_token 或缺 chatglm_refresh_token：
+		// 失败关闭 + 诊断日志（零凭据）。
+		s.logger.Info("zhipu 短信登录响应诊断",
+			"platform", PlatformZhipu,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+			"set_cookie_count", len(resp.Header.Values("Set-Cookie")),
+			"has_chatglm_token", chatGLMToken != "",
+			"has_chatglm_refresh_token", refreshToken != "",
+		)
+		if chatGLMToken == "" {
+			return nil, &webLoginHTTPError{
+				Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+				Msg: "zhipu 短信登录响应缺少 chatglm_token（不可重试）",
+			}
+		}
+		return nil, &webLoginHTTPError{
+			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "GLM 登录成功但响应缺少 chatglm_refresh_token（续期凭证），拒绝建号——请重试或检查账号风控状态",
 		}
 	}
 	return &SMSLoginResult{
 		Cookie:            newCookie,
 		ChatGLMToken:      chatGLMToken,
-		LoginRefreshToken: extractCookieValue(newCookie, "chatglm_refresh_token"),
+		LoginRefreshToken: refreshToken,
 	}, nil
 }
 
@@ -420,10 +462,41 @@ func applyZhipuFingerprintHeaders(req *http.Request, xTimestamp, xNonce, xSign s
 	req.Header.Set("X-Request-Id", webZhipuUUIDHex())
 }
 
+// zhipuBizSuccess 报告 zhipu 响应体是否携带已取证的成功标志：
+// code==0 或 success==true（二者任一，字段名与成功值均已取证）。
+// 其余形状（无字段、解析失败、非对象体）一律视为不可确认成功，由调用方失败关闭。
+func zhipuBizSuccess(raw []byte) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return false
+	}
+	if v, ok := top["success"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err == nil && b {
+			return true
+		}
+	}
+	for _, key := range []string{"code", "ret"} {
+		v, ok := top[key]
+		if !ok {
+			continue
+		}
+		var n int64
+		if err := json.Unmarshal(v, &n); err == nil && n == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // zhipuBizFailure 从 zhipu user-api 响应体提取明确的业务失败标志（宽容解析：
 // 仅识别确定性失败形态，未知形状不算失败）。返回 (文案, 是否失败)。
-// 候选形态（与既有取证错误体一致）：success=false；code/status/ret 为非 0 数值。
-// 文案取 message/msg/detail 候选，绝不携带凭据值。
+// 候选形态（与既有取证错误体一致）：success=false；顶层或 data 嵌套的
+// code/status/ret 为非 0 数值，或为字符串数字（如 "code":"403"，解析为数值后
+// 非 0 即失败）。文案取 message/msg/detail 候选，绝不携带凭据值。
 func zhipuBizFailure(raw []byte) (string, bool) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "", false
@@ -439,16 +512,42 @@ func zhipuBizFailure(raw []byte) (string, bool) {
 		}
 	}
 	for _, key := range []string{"code", "status", "ret"} {
-		v, ok := top[key]
-		if !ok {
-			continue
-		}
-		var n int64
-		if err := json.Unmarshal(v, &n); err == nil && n != 0 {
+		if n, ok := zhipuNumericField(top[key]); ok && n != 0 {
 			return fmt.Sprintf("%s=%d", key, n), true
 		}
 	}
+	// 嵌套错误体常见位置：data.code / data.status（数值或字符串数字，非 0 即失败）。
+	if dataRaw, ok := top["data"]; ok {
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(dataRaw, &data); err == nil {
+			for _, key := range []string{"code", "status"} {
+				if n, ok := zhipuNumericField(data[key]); ok && n != 0 {
+					return fmt.Sprintf("data.%s=%d", key, n), true
+				}
+			}
+		}
+	}
 	return "", false
+}
+
+// zhipuNumericField 把 JSON 字段值宽容解析为数值：接受数值字面量与字符串数字
+// （如 "403"），其余形状（null/bool/对象/字符串非数字）返回 not-ok，不算失败。
+func zhipuNumericField(raw json.RawMessage) (int64, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return 0, false
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		var n2 int64
+		if _, err := fmt.Sscan(s, &n2); err == nil {
+			return n2, true
+		}
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------------------
