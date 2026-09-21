@@ -59,32 +59,19 @@ func defaultSparkShadowModelMapping() map[string]any {
 
 // defaultCodeBuddyShadowModelMapping 返回 codebuddy 影子创建时的默认 model_mapping。
 //
-// 影子的上游模型名（extra[ShadowModelExtraKey]，即 shadow_model）通常与目标平台的
-// 官方公开模型 ID 不同（如官方 "deepseek-chat" vs 上游 "deepseek-v4.1-flash"）。
-// 官方 ID 清单一律取自 DefaultWebModelIDs（代码内唯一 SSOT，覆盖向导支持的
-// deepseek/zhipu/kimi），禁止手写硬编码清单：
-//   - 每个官方 ID → shadow_model：官方名请求命中映射后被改写为上游模型名；
-//   - shadow_model → shadow_model（identity）：直接请求上游模型名也能命中
-//     （mapping 同时是调度白名单，写入后仅映射键可命中，identity 键保证
-//     直呼 shadow_model 不被白名单挡掉）。
+// 仅 identity 白名单（2026-09-22 用户拍板，废弃官方名别名路径）：站内模型目录以
+// shadow_model（extra[ShadowModelExtraKey]，如 deepseek-v4.1-flash）为唯一名字，
+// 请求名=出站名=目录名。官方名别名（官方 "deepseek-chat" → 上游 shadow_model）
+// 曾造成全局两套模型名并存，计费/用量/目录混乱，故不再生成。
+// mapping 即调度白名单，下游只认 shadow_model 这一个名字。
 //
-// 平台无代码内官方清单（如 minimax/other）或 shadow_model 为空时返回 nil，
-// 调用方保持空 mapping=原样透传（旧行为），不臆造清单。
-func defaultCodeBuddyShadowModelMapping(platform, shadowModel string) map[string]any {
+// shadow_model 为空/空白时返回 nil，调用方保持空 mapping=原样透传。
+func defaultCodeBuddyShadowModelMapping(shadowModel string) map[string]any {
 	shadowModel = strings.TrimSpace(shadowModel)
 	if shadowModel == "" {
 		return nil
 	}
-	officialIDs := DefaultWebModelIDs(platform, AccountAccessModeWeb)
-	if len(officialIDs) == 0 {
-		return nil
-	}
-	mapping := make(map[string]any, len(officialIDs)+1)
-	for _, id := range officialIDs {
-		mapping[id] = shadowModel
-	}
-	mapping[shadowModel] = shadowModel
-	return mapping
+	return map[string]any{shadowModel: shadowModel}
 }
 
 // inferCodeBuddyShadowPlatform 根据上游模型名推断 codebuddy 影子应落入的目标分组平台

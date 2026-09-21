@@ -1033,9 +1033,9 @@ func TestForceOpenAIPrivacy_SkipsShadow(t *testing.T) {
 }
 
 // TestCreateShadowCodeBuddyAutoModelMapping 端到端验证 CreateShadow 对 codebuddy 影子
-// 自动写入 model_mapping（2026-09-22 用户拍板）：deepseek 目标平台 → 官方 ID→shadow_model
-// + identity 键；无官方清单平台（minimax）保持空 mapping=透传。纯函数单测见
-// codebuddy_shadow_routing_test.go 的 TestDefaultCodeBuddyShadowModelMapping。
+// 自动写入 model_mapping（2026-09-22 用户拍板，语义修正）：仅 identity 白名单
+// {shadow_model: shadow_model}，下游只认 shadow_model 一个名字；官方名别名路径废弃。
+// 纯函数单测见 codebuddy_shadow_routing_test.go 的 TestDefaultCodeBuddyShadowModelMapping。
 func TestCreateShadowCodeBuddyAutoModelMapping(t *testing.T) {
 	ctx := context.Background()
 	repo := newSparkShadowRepoStub()
@@ -1064,29 +1064,27 @@ func TestCreateShadowCodeBuddyAutoModelMapping(t *testing.T) {
 	mapping, ok := shadow.Credentials["model_mapping"].(map[string]any)
 	require.True(t, ok, "deepseek 影子应自动写入 model_mapping")
 	require.Equal(t, map[string]any{
-		"deepseek-chat":       "deepseek-v4.1-flash",
-		"deepseek-reasoner":   "deepseek-v4.1-flash",
 		"deepseek-v4.1-flash": "deepseek-v4.1-flash",
 	}, mapping)
 
-	// 出站解析：官方名与 shadow_model 直呼都应命中映射；mapping 即白名单，未列模型拒绝。
-	mapped, matched := shadow.ResolveMappedModel("deepseek-chat")
+	// 出站解析：shadow_model 直呼命中 identity；mapping 即白名单，
+	// 官方名别名 deepseek-chat 不再放行（废弃别名路径）。
+	mapped, matched := shadow.ResolveMappedModel("deepseek-v4.1-flash")
 	require.True(t, matched)
 	require.Equal(t, "deepseek-v4.1-flash", mapped)
-	mapped, matched = shadow.ResolveMappedModel("deepseek-v4.1-flash")
-	require.True(t, matched)
-	require.Equal(t, "deepseek-v4.1-flash", mapped)
-	require.True(t, shadow.IsModelSupported("deepseek-chat"))
 	require.True(t, shadow.IsModelSupported("deepseek-v4.1-flash"))
+	_, matched = shadow.ResolveMappedModel("deepseek-chat")
+	require.False(t, matched, "官方名别名已废弃，mapping 只认 shadow_model")
+	require.False(t, shadow.IsModelSupported("deepseek-chat"), "官方名别名已废弃")
 	require.False(t, shadow.IsModelSupported("glm-5.3-flash"), "mapping 即白名单，未列模型应拒绝")
 
-	// 无清单平台（minimax）：credentials 保持空映射=透传，不臆造清单。
+	// 无官方清单平台（minimax）：语义修正后同样写入 identity 白名单，不再空 mapping 透传。
 	shadow2, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
 		Platform: PlatformMiniMax,
 		Model:    "minimax-m2",
 		GroupIDs: []int64{1},
 	})
 	require.NoError(t, err)
-	require.Empty(t, shadow2.Credentials["model_mapping"],
-		"无官方清单平台应保持空 mapping=原样透传")
+	require.Equal(t, map[string]any{"minimax-m2": "minimax-m2"},
+		shadow2.Credentials["model_mapping"], "所有 codebuddy 影子统一 identity 白名单")
 }

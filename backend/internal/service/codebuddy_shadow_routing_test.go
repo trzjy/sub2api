@@ -8,56 +8,34 @@ import (
 )
 
 // TestDefaultCodeBuddyShadowModelMapping 覆盖向导创建影子时自动写入的默认
-// model_mapping（2026-09-22 用户拍板）：官方 ID 清单一律取自 DefaultWebModelIDs
-// SSOT，附 shadow_model identity 键；无清单平台/空模型保持 nil（不臆造）。
+// model_mapping（2026-09-22 用户拍板，语义修正）：仅 identity 白名单
+// {shadow_model: shadow_model}，下游只认 shadow_model 一个名字；官方名别名
+// 路径废弃。空/空白 shadow_model 保持 nil。
 func TestDefaultCodeBuddyShadowModelMapping(t *testing.T) {
-	t.Run("deepseek shadow writes official ids plus identity", func(t *testing.T) {
-		m := defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "deepseek-v4.1-flash")
+	t.Run("identity single key", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping("deepseek-v4.1-flash")
 		require.Equal(t, map[string]any{
-			"deepseek-chat":       "deepseek-v4.1-flash",
-			"deepseek-reasoner":   "deepseek-v4.1-flash",
 			"deepseek-v4.1-flash": "deepseek-v4.1-flash",
 		}, m)
 	})
 
-	t.Run("zhipu shadow writes single official id plus identity", func(t *testing.T) {
-		m := defaultCodeBuddyShadowModelMapping(PlatformZhipu, "glm-5.3-pro")
-		require.Equal(t, map[string]any{
-			"glm-5.3-flash": "glm-5.3-pro",
-			"glm-5.3-pro":   "glm-5.3-pro",
-		}, m)
-	})
-
-	t.Run("kimi shadow writes official ids plus identity", func(t *testing.T) {
-		// 官方 ID 清单随 DefaultWebModelIDs SSOT 走：2026-09-22 补全 kimi 目录
-		// （免费档 k2d6 / k2d6-chat 可用）后，影子默认 mapping 同步覆盖全部目录项。
-		m := defaultCodeBuddyShadowModelMapping(PlatformKimi, "kimi-k3-turbo")
-		require.Equal(t, map[string]any{
-			"kimi-k2d6-chat":      "kimi-k3-turbo",
-			"kimi-k2d6":           "kimi-k3-turbo",
-			"kimi-k3":             "kimi-k3-turbo",
-			"kimi-k3-agent-ultra": "kimi-k3-turbo",
-			"kimi-k3-turbo":       "kimi-k3-turbo",
-		}, m)
-	})
-
-	t.Run("platform without official catalog stays nil", func(t *testing.T) {
-		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformMiniMax, "minimax-m2"),
-			"minimax 无代码内官方清单，必须保持空 mapping=透传")
-		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformOther, "qwen-coder"))
+	t.Run("other platform shadows also identity", func(t *testing.T) {
+		// 语义修正后不再区分平台：minimax/other 等统一 identity 白名单，
+		// 不再回落「空 mapping=透传」旧分支。
+		require.Equal(t, map[string]any{"minimax-m2": "minimax-m2"},
+			defaultCodeBuddyShadowModelMapping("minimax-m2"))
+		require.Equal(t, map[string]any{"qwen-coder": "qwen-coder"},
+			defaultCodeBuddyShadowModelMapping("qwen-coder"))
 	})
 
 	t.Run("empty or blank shadow model stays nil", func(t *testing.T) {
-		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformDeepseek, ""))
-		require.Nil(t, defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "   "))
+		require.Nil(t, defaultCodeBuddyShadowModelMapping(""))
+		require.Nil(t, defaultCodeBuddyShadowModelMapping("   "))
 	})
 
-	t.Run("shadow model already an official id collapses to identity entries", func(t *testing.T) {
-		m := defaultCodeBuddyShadowModelMapping(PlatformDeepseek, "deepseek-chat")
-		require.Equal(t, map[string]any{
-			"deepseek-chat":     "deepseek-chat",
-			"deepseek-reasoner": "deepseek-chat",
-		}, m)
+	t.Run("whitespace is trimmed to identity key", func(t *testing.T) {
+		m := defaultCodeBuddyShadowModelMapping("  glm-5.3-pro  ")
+		require.Equal(t, map[string]any{"glm-5.3-pro": "glm-5.3-pro"}, m)
 	})
 }
 

@@ -1787,12 +1787,11 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	var credentials map[string]any
 	if isCodeBuddyParent {
 		// codebuddy 影子凭证空，运行时透传母账号。model_mapping 由向导创建即自动写入
-		// （官方模型 ID → shadow_model + identity，清单取自 DefaultWebModelIDs SSOT，
-		// 见 defaultCodeBuddyShadowModelMapping）；平台无官方清单（minimax/other 等）
-		// 时保持空 mapping=原样透传。ShadowOptions 无 mapping 入参字段（2026-09-22 核对），
-		// 故不存在「入参优先」分支。
+		// identity 白名单（{shadow_model: shadow_model}，见 defaultCodeBuddyShadowModelMapping）：
+		// 下游只认 shadow_model 一个名字，请求名=出站名=目录名，全局模型名统一。
+		// ShadowOptions 无 mapping 入参字段（2026-09-22 核对），故不存在「入参优先」分支。
 		credentials = map[string]any{}
-		if mapping := defaultCodeBuddyShadowModelMapping(shadowPlatform, opts.Model); len(mapping) > 0 {
+		if mapping := defaultCodeBuddyShadowModelMapping(opts.Model); len(mapping) > 0 {
 			credentials["model_mapping"] = mapping
 		}
 	} else {
