@@ -29,10 +29,6 @@ type OAuthRefreshPageOptions struct {
 	IncludeSetupToken    bool
 	RequireRefreshToken  bool
 	ExcludeRetryCooldown bool
-	// WebAccessMode 为 true 时，候选查询面向网页接入账号（type=apikey +
-	// credentials.access_mode=web），按注册表平台集合匹配各平台凭据条件；
-	// 为 false（默认）时保持既有 OAuth 候选语义不变。
-	WebAccessMode bool
 }
 
 // OAuthRefreshCandidatePage keeps cursor metadata from the raw SQL ID page.

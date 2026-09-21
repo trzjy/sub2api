@@ -41,12 +41,6 @@ type tokenRefreshRegistration struct {
 	platform  string
 	refresher TokenRefresher
 	executor  OAuthRefreshExecutor
-	// webAccessMode 候选查询走网页账号分支（account_repo WebAccessMode=true）。
-	webAccessMode bool
-	// failureBlocksScheduling true=重试耗尽临时停调（OAuth 现状）；
-	// false=只簿记不停调（web 三平台：后台刷新失败 ≠ access_token 失效，
-	// 请求期 401 自愈链路自会兜底）。
-	failureBlocksScheduling bool
 }
 
 // GrokOAuthRefreshMutationRepository protects background refresh failure
@@ -82,8 +76,7 @@ type TokenRefreshService struct {
 	runCtx        context.Context
 	runCancel     context.CancelFunc
 	candidateMu   sync.Mutex
-	afterID       int64 // OAuth 组游标（type=oauth 候选）
-	webAfterID    int64 // web 组游标（type=apikey + access_mode=web 候选）
+	afterID       int64
 	providerMu    sync.Mutex
 	providerGates map[string]*tokenRefreshRateGate
 	providerPools map[string]*tokenRefreshConcurrencyGate
@@ -140,16 +133,13 @@ func NewTokenRefreshService(
 
 	// Each provider is registered exactly once. The same registry supplies both
 	// execution and repository eligibility, preventing future platform drift.
-	// web 三平台（kimi/zhipu/deepseek）不再注册后台保活（2026-09-21 撤销未授权的
-	// Web 周期后台保活；续期唯一实现仍是转发链 refreshWebKimi/refreshWebZhipu 与
-	// RecoverAccount 手动恢复）。
 	s.registrations = []tokenRefreshRegistration{
-		{platform: PlatformAnthropic, refresher: claudeRefresher, executor: claudeRefresher, failureBlocksScheduling: true},
-		{platform: PlatformOpenAI, refresher: openAIRefresher, executor: openAIRefresher, failureBlocksScheduling: true},
-		{platform: PlatformGemini, refresher: geminiRefresher, executor: geminiRefresher, failureBlocksScheduling: true},
-		{platform: PlatformAntigravity, refresher: agRefresher, executor: agRefresher, failureBlocksScheduling: true},
-		{platform: PlatformCodeBuddy, refresher: cbRefresher, executor: cbRefresher, failureBlocksScheduling: true},
-		{platform: PlatformGrok, refresher: grokRefresher, executor: grokRefresher, failureBlocksScheduling: true},
+		{platform: PlatformAnthropic, refresher: claudeRefresher, executor: claudeRefresher},
+		{platform: PlatformOpenAI, refresher: openAIRefresher, executor: openAIRefresher},
+		{platform: PlatformGemini, refresher: geminiRefresher, executor: geminiRefresher},
+		{platform: PlatformAntigravity, refresher: agRefresher, executor: agRefresher},
+		{platform: PlatformCodeBuddy, refresher: cbRefresher, executor: cbRefresher},
+		{platform: PlatformGrok, refresher: grokRefresher, executor: grokRefresher},
 	}
 
 	return s
@@ -532,17 +522,62 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 	}
 
 	stats := tokenRefreshPageStats{}
+	afterID := s.candidateAfterID()
+	for {
+		if ctx.Err() != nil {
+			slog.Warn("token_refresh.cycle_stopped", "error", ctx.Err(), "resume_after_id", afterID)
+			break
+		}
+		page, err := pager.ListOAuthRefreshCandidatePage(ctx, OAuthRefreshPageOptions{
+			Platforms:            platforms,
+			AfterID:              afterID,
+			Limit:                pageSize,
+			ActiveOnly:           true,
+			IncludeSetupToken:    true,
+			RequireRefreshToken:  true,
+			ExcludeRetryCooldown: true,
+		})
+		if err != nil {
+			slog.Error("token_refresh.list_accounts_failed", "error", err, "after_id", afterID)
+			break
+		}
+		if page == nil {
+			slog.Error("token_refresh.nil_candidate_page", "after_id", afterID)
+			break
+		}
+		accounts := page.Accounts
+		if !page.HasMore && page.NextAfterID == 0 && len(accounts) == 0 {
+			s.setCandidateAfterID(0)
+			break
+		}
+		if page.NextAfterID <= afterID {
+			slog.Error("token_refresh.invalid_candidate_page_metadata", "after_id", afterID)
+			break
+		}
+		if !isStrictlyIncreasingAccountPage(accounts, afterID) {
+			slog.Error("token_refresh.invalid_candidate_page", "after_id", afterID, "count", len(accounts))
+			break
+		}
 
-	// 注册表含 webAccessMode 平台时，候选查询拆成 OAuth 组 / web 组
-	// 两轮独立游标扫描（各自 afterID 游标），保持既有漏页/重页语义：
-	// 每组独立从自己的游标续扫，页校验/推进/重置规则与单组扫描一致。
-	oauthPlatforms, webPlatforms := s.splitPlatformsByAccessMode()
-	hasWebGroup := len(webPlatforms) > 0
-	if hasWebGroup {
-		s.scanCandidateGroup(ctx, pager, oauthPlatforms, false, s.candidateAfterID(), pageSize, providerStates, refreshWindow, &stats)
-		s.scanCandidateGroup(ctx, pager, webPlatforms, true, s.webCandidateAfterID(), pageSize, providerStates, refreshWindow, &stats)
-	} else {
-		s.scanCandidateGroup(ctx, pager, platforms, false, s.candidateAfterID(), pageSize, providerStates, refreshWindow, &stats)
+		pageStats := s.processCandidatePage(ctx, accounts, providerStates, refreshWindow)
+		stats.total += pageStats.total
+		stats.oauth += pageStats.oauth
+		stats.needsRefresh += pageStats.needsRefresh
+		stats.refreshed += pageStats.refreshed
+		stats.skipped += pageStats.skipped
+		stats.failed += pageStats.failed
+
+		// Never advance past a partially processed page. Re-reading a page is
+		// safe because OAuthRefreshAPI re-reads DB state and checks expiry again.
+		if ctx.Err() != nil {
+			break
+		}
+		afterID = page.NextAfterID
+		s.setCandidateAfterID(afterID)
+		if !page.HasMore {
+			s.setCandidateAfterID(0)
+			break
+		}
 	}
 
 	if stats.needsRefresh == 0 && stats.failed == 0 {
@@ -567,110 +602,6 @@ func isStrictlyIncreasingAccountPage(accounts []Account, afterID int64) bool {
 		previous = accounts[i].ID
 	}
 	return true
-}
-
-// splitPlatformsByAccessMode 按注册表标记把平台集合拆成 OAuth 组 / web 组。
-func (s *TokenRefreshService) splitPlatformsByAccessMode() (oauthPlatforms, webPlatforms []string) {
-	for _, registration := range s.registrations {
-		if registration.platform == "" || registration.refresher == nil {
-			continue
-		}
-		if registration.webAccessMode {
-			webPlatforms = append(webPlatforms, registration.platform)
-		} else {
-			oauthPlatforms = append(oauthPlatforms, registration.platform)
-		}
-	}
-	return oauthPlatforms, webPlatforms
-}
-
-// webCandidateAfterID / setWebCandidateAfterID web 组独立游标（与 OAuth 组互不干扰）。
-func (s *TokenRefreshService) webCandidateAfterID() int64 {
-	s.candidateMu.Lock()
-	defer s.candidateMu.Unlock()
-	return s.webAfterID
-}
-
-func (s *TokenRefreshService) setWebCandidateAfterID(afterID int64) {
-	s.candidateMu.Lock()
-	s.webAfterID = afterID
-	s.candidateMu.Unlock()
-}
-
-// scanCandidateGroup 对单一候选组（OAuth 或 web）做一整轮带游标续扫的分页扫描。
-// 游标读写、页校验、终止条件与既有单组扫描语义逐条对应，仅游标落点按组区分。
-func (s *TokenRefreshService) scanCandidateGroup(
-	ctx context.Context,
-	pager OAuthRefreshCandidatePager,
-	platforms []string,
-	webAccessMode bool,
-	afterID int64,
-	pageSize int,
-	providerStates map[string]*tokenRefreshProviderState,
-	refreshWindow time.Duration,
-	stats *tokenRefreshPageStats,
-) {
-	setAfterID := s.setCandidateAfterID
-	if webAccessMode {
-		setAfterID = s.setWebCandidateAfterID
-	}
-	for {
-		if ctx.Err() != nil {
-			slog.Warn("token_refresh.cycle_stopped", "error", ctx.Err(), "resume_after_id", afterID, "web_access_mode", webAccessMode)
-			break
-		}
-		page, err := pager.ListOAuthRefreshCandidatePage(ctx, OAuthRefreshPageOptions{
-			Platforms:            platforms,
-			AfterID:              afterID,
-			Limit:                pageSize,
-			ActiveOnly:           true,
-			IncludeSetupToken:    true,
-			RequireRefreshToken:  true,
-			ExcludeRetryCooldown: true,
-			WebAccessMode:        webAccessMode,
-		})
-		if err != nil {
-			slog.Error("token_refresh.list_accounts_failed", "error", err, "after_id", afterID, "web_access_mode", webAccessMode)
-			break
-		}
-		if page == nil {
-			slog.Error("token_refresh.nil_candidate_page", "after_id", afterID, "web_access_mode", webAccessMode)
-			break
-		}
-		accounts := page.Accounts
-		if !page.HasMore && page.NextAfterID == 0 && len(accounts) == 0 {
-			setAfterID(0)
-			break
-		}
-		if page.NextAfterID <= afterID {
-			slog.Error("token_refresh.invalid_candidate_page_metadata", "after_id", afterID, "web_access_mode", webAccessMode)
-			break
-		}
-		if !isStrictlyIncreasingAccountPage(accounts, afterID) {
-			slog.Error("token_refresh.invalid_candidate_page", "after_id", afterID, "count", len(accounts), "web_access_mode", webAccessMode)
-			break
-		}
-
-		pageStats := s.processCandidatePage(ctx, accounts, providerStates, refreshWindow)
-		stats.total += pageStats.total
-		stats.oauth += pageStats.oauth
-		stats.needsRefresh += pageStats.needsRefresh
-		stats.refreshed += pageStats.refreshed
-		stats.skipped += pageStats.skipped
-		stats.failed += pageStats.failed
-
-		// Never advance past a partially processed page. Re-reading a page is
-		// safe because OAuthRefreshAPI re-reads DB state and checks expiry again.
-		if ctx.Err() != nil {
-			break
-		}
-		afterID = page.NextAfterID
-		setAfterID(afterID)
-		if !page.HasMore {
-			setAfterID(0)
-			break
-		}
-	}
 }
 
 func (s *TokenRefreshService) processCandidatePage(
@@ -898,24 +829,6 @@ func (s *TokenRefreshService) maxRetries() int {
 // refreshWithRetry 带重试的刷新
 func (s *TokenRefreshService) refreshWithRetry(ctx context.Context, account *Account, refresher TokenRefresher, executor OAuthRefreshExecutor, refreshWindow time.Duration) error {
 	return s.refreshWithRetryWithRateGate(ctx, account, refresher, executor, refreshWindow, nil)
-}
-
-// webRefreshAccount 判定账号是否属于 failureBlocksScheduling=false 的 web 平台
-// 注册（重试耗尽只簿记不停调）。多副本下注册表是进程内静态结构，按平台匹配即可。
-func (s *TokenRefreshService) webRefreshAccount(account *Account) bool {
-	if account == nil {
-		return false
-	}
-	for i := range s.registrations {
-		registration := &s.registrations[i]
-		// 正向判定：只认显式置位 webAccessMode 的注册项。failureBlocksScheduling
-		// 是 bool 零值 false，用它反向推断会把未显式配置的注册项误判为 web 平台。
-		if registration.platform == account.Platform && registration.refresher != nil &&
-			registration.webAccessMode {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *TokenRefreshService) refreshWithRetryWithRateGate(
@@ -1163,12 +1076,6 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		return err
 	}
 
-	// web 平台（failureBlocksScheduling=false）失败语义降级：只簿记不停调，
-	// 不走下面的 temp-unsched / Grok CAS 分支。
-	if s.webRefreshAccount(account) {
-		return s.handleWebRefreshExhausted(ctx, account, lastErr, maxRetries)
-	}
-
 	// 可重试错误耗尽：临时标记账号不可调度，避免请求路径反复命中已知失败的账号
 	slog.Warn("token_refresh.retry_exhausted",
 		"account_id", account.ID,
@@ -1232,41 +1139,6 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		)
 	}
 
-	return lastErr
-}
-
-// handleWebRefreshExhausted web 平台（webAccessMode=true）重试耗尽的降级路径：
-// 只在内存中就地更新 credentials[login_last_error] 人话摘要（不含凭据）+ 结构化
-// 日志，绝不临时停调——后台刷新失败 ≠ access_token 立即失效，请求期 401 自愈
-// 链路（转发/测试）自会兜底。对 OAuth 组 / web 组双游标扫出的候选都生效。
-//
-// 簿记摘要刻意不持久化：attempt deadline 之后不得触碰任何持久化点（包括凭据
-// 写入），且簿记摘要非关键数据、无需落库；后台保活失败 ≠ 凭据失效，落库反而
-// 污染凭据更新时间线。真正需要落库的错误状态走既有 SetError/temp-unsched 路径
-// （web 平台按设计跳过）。
-func (s *TokenRefreshService) handleWebRefreshExhausted(ctx context.Context, account *Account, lastErr error, maxRetries int) error {
-	summary := "网页账号后台保活失败（重试耗尽）"
-	if lastErr != nil {
-		summary += ": " + logredact.RedactText(lastErr.Error())
-	}
-	// 就地内存簿记：credentials 为 nil 时跳过，不触发任何 repo 写入。
-	if account.Credentials != nil {
-		account.Credentials[CredKeyLoginLastError] = summary
-	}
-	slog.Warn("token_refresh.web_refresh_exhausted",
-		"account_id", account.ID,
-		"platform", account.Platform,
-		"max_retries", maxRetries,
-		"error", logredact.RedactText(func() string {
-			if lastErr != nil {
-				return lastErr.Error()
-			}
-			return ""
-		}()),
-	)
-	if lastErr == nil {
-		return errors.New("web refresh retry exhausted")
-	}
 	return lastErr
 }
 

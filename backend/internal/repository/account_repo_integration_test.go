@@ -405,148 +405,8 @@ func (s *AccountRepoSuite) TestListOAuthRefreshCandidatePage_GrokCursorAndExclus
 	s.Require().NotContains([]int64{first[0].ID, first[1].ID}, second[0].ID)
 }
 
-func (s *AccountRepoSuite) TestListOAuthRefreshCandidatePage_WebAccessMode() {
-	// 命中：三个平台的网页接入账号，各凭据条件满足。
-	kimiHit := mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "kimi-web-hit",
-		Platform: service.PlatformKimi,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":   "web",
-			"refresh_token": "kimi-refresh",
-		},
-	})
-	zhipuCookieHit := mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "zhipu-web-cookie-hit",
-		Platform: service.PlatformZhipu,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode": "web",
-			"cookie":      "chatglm_refresh_token=abc; other=1",
-		},
-	})
-	zhipuLoginHit := mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "zhipu-web-login-hit",
-		Platform: service.PlatformZhipu,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":        "web",
-			"login_refresh_token": "zhipu-login-refresh",
-		},
-	})
-	deepseekHit := mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "deepseek-web-hit",
-		Platform: service.PlatformDeepseek,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":    "web",
-			"login_email":    "a@example.com",
-			"login_password": "secret",
-		},
-	})
-
-	// 排除：oauth 账号（即使平台+凭据满足）。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "kimi-oauth-excluded",
-		Platform: service.PlatformKimi,
-		Type:     service.AccountTypeOAuth,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":   "web",
-			"refresh_token": "kimi-oauth-refresh",
-		},
-	})
-	// 排除：apikey 但 access_mode != web。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "kimi-api-mode-excluded",
-		Platform: service.PlatformKimi,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":   "api",
-			"refresh_token": "kimi-api-refresh",
-		},
-	})
-	// 排除：web 但平台凭据条件不满足（kimi 无 refresh_token）。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "kimi-web-no-refresh-excluded",
-		Platform: service.PlatformKimi,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode": "web",
-		},
-	})
-	// 排除：web 但 zhipu cookie 不含 chatglm_refresh_token= 且无 login_refresh_token。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "zhipu-web-no-cred-excluded",
-		Platform: service.PlatformZhipu,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode": "web",
-			"cookie":      "session=xyz",
-		},
-	})
-	// 排除：web 但 deepseek 缺 login_password。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "deepseek-web-no-password-excluded",
-		Platform: service.PlatformDeepseek,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode": "web",
-			"login_email": "b@example.com",
-		},
-	})
-
-	options := service.OAuthRefreshPageOptions{
-		Platforms: []string{service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek},
-		Limit:     100,
-		// IncludeSetupToken / RequireRefreshToken 在 WebAccessMode 分支下必须被忽略。
-		IncludeSetupToken:   true,
-		RequireRefreshToken: true,
-	}
-	page, err := s.repo.ListOAuthRefreshCandidatePage(s.ctx, options)
-	s.Require().NoError(err)
-	gotIDs := make([]int64, 0, len(page.Accounts))
-	for _, a := range page.Accounts {
-		gotIDs = append(gotIDs, a.ID)
-	}
-	s.Require().ElementsMatch(
-		[]int64{kimiHit.ID, zhipuCookieHit.ID, zhipuLoginHit.ID, deepseekHit.ID},
-		gotIDs,
-	)
-}
-
-func (s *AccountRepoSuite) TestListOAuthRefreshCandidatePage_WebAccessMode_NoWebPlatform() {
-	// 注册平台集合中没有任何支持网页接入的平台：查询应返回空而非全量。
-	mustCreateAccount(s.T(), s.client, &service.Account{
-		Name:     "grok-web-ignored",
-		Platform: service.PlatformGrok,
-		Type:     service.AccountTypeAPIKey,
-		Status:   service.StatusActive,
-		Credentials: map[string]any{
-			"access_mode":   "web",
-			"refresh_token": "grok-refresh",
-		},
-	})
-	options := service.OAuthRefreshPageOptions{
-		Platforms:     []string{service.PlatformGrok},
-		Limit:         100,
-		WebAccessMode: true,
-	}
-	page, err := s.repo.ListOAuthRefreshCandidatePage(s.ctx, options)
-	s.Require().NoError(err)
-	s.Require().Empty(page.Accounts)
-}
-
 func (s *AccountRepoSuite) TestListOAuthRefreshCandidatePage_WebAccessModeFalse_Regression() {
-	// WebAccessMode=false：既有 OAuth 语义零变化，apikey+web 账号不可见。
+	// 既有 OAuth 语义零变化，apikey+web 账号不可见。
 	oauthHit := mustCreateAccount(s.T(), s.client, &service.Account{
 		Name:     "zhipu-oauth-regression",
 		Platform: service.PlatformZhipu,
@@ -570,7 +430,6 @@ func (s *AccountRepoSuite) TestListOAuthRefreshCandidatePage_WebAccessModeFalse_
 		Platforms:           []string{service.PlatformZhipu},
 		Limit:               100,
 		RequireRefreshToken: true,
-		WebAccessMode:       false,
 	}
 	page, err := s.repo.ListOAuthRefreshCandidatePage(s.ctx, options)
 	s.Require().NoError(err)

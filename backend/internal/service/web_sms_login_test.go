@@ -306,7 +306,8 @@ func TestWebSMS_ZhipuVerifyHTTP200BizErrorFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-// HTTP 200 + 无 cookie 无失败标志（未知形状）→ 失败关闭（宽容解析不猜测成功契约）。
+// HTTP 200 + 无 cookie 无失败标志（未知形状）→ 失败关闭（正向成功条件缺失：
+// 无已取证成功标志即拒绝，不再走到 Cookie 检查）。
 func TestWebSMS_ZhipuVerifyHTTP200UnknownBodyFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -317,7 +318,105 @@ func TestWebSMS_ZhipuVerifyHTTP200UnknownBodyFailsClosed(t *testing.T) {
 	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
 	require.Error(t, err)
 	requireNoSMSCredentials(t, res)
-	require.Contains(t, err.Error(), "缺少 chatglm_token")
+	require.Contains(t, err.Error(), "GLM 登录响应缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
+}
+
+// 审查核心场景：2xx + 字符串数字错误码（"code":"403"）+ 错误响应带双 Cookie
+// → 不得判成功（zhipuBizFailure 识别字符串数字 + zhipuBizSuccess 正向门槛双保险）。
+func TestWebSMS_ZhipuVerifyStringCodeWithCookiesFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"code":"403","msg":"wrong code"}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "000000", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "code=403")
+	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+	require.Len(t, up.requests, 1)
+}
+
+// 嵌套错误体（data.code 非 0）+ 响应带双 Cookie → 失败关闭，Cookie 不采纳。
+func TestWebSMS_ZhipuVerifyNestedDataCodeWithCookiesFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"data":{"code":40002}}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "data.code=40002")
+	require.Len(t, up.requests, 1)
+}
+
+// 2xx 无任何业务成功标志 + 响应带双 Cookie → 失败关闭（正向条件缺失），
+// 错误文案为"缺少已取证成功标志"。
+func TestWebSMS_ZhipuVerifyNoBizFlagWithCookiesFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"message":"accepted"}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "GLM 登录响应缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
+}
+
+// 嵌套字符串数字（data.status:"500"）也算业务失败（类型容错覆盖嵌套位置）。
+func TestWebSMS_ZhipuVerifyNestedDataStatusStringFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"data":{"status":"500"},"msg":"upstream error"}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "data.status=500")
+	require.Len(t, up.requests, 1)
+}
+
+// 成功正向用例：success==true + 双 Cookie → 成功（与 code==0 同为已取证白名单）。
+func TestWebSMS_ZhipuVerifySuccessTrueWithCookies(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"success":true}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-2; Path=/", "chatglm_refresh_token=RFT-2; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.NoError(t, err)
+	require.Equal(t, "CT-2", res.ChatGLMToken)
+	require.Equal(t, "RFT-2", res.LoginRefreshToken)
+	require.Len(t, up.requests, 1)
+}
+
+// 非正向状态：HTTP 302 带 Cookie 也不得继续判定（仅 2xx 属正向成功条件）。
+func TestWebSMS_ZhipuVerifyNon2xxStatusFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusFound,
+		zhipuVerifyBody:   `{"code":0}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
 	require.Len(t, up.requests, 1)
 }
 

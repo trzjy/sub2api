@@ -866,9 +866,6 @@ const (
 	// login_non_retryable 是内部簿记键：标记 banned/密码错/WAF/PoW 等不可重试类错误，
 	// 置 "true" 后不再自动重试（实行失败关闭，不新增维护池/退避）。
 	CredKeyLoginNonRetryable = "login_non_retryable"
-	// web_refresh_last_ok_at 是后台保活（TokenRefreshService web refresher）的簿记键：
-	// RFC3339，上次后台续期/重登成功时间。供 NeedsRefresh 做"距上次成功超过保活间隔"判定。
-	CredKeyWebRefreshLastOKAt = "web_refresh_last_ok_at"
 )
 
 // Web 平台自动登录出站端点（取证结论，已核实，不要重新猜测协议）。
