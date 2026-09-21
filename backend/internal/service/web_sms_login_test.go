@@ -192,6 +192,38 @@ func TestWebSMS_ZhipuSendBodyCodeFailureFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
+// 已取证契约白名单：success=true 也算成功（与 code==0 同为已取证字段名）。
+func TestWebSMS_ZhipuSendSuccessTrue(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"success":true}`}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.NoError(t, err)
+	require.Len(t, up.requests, 1)
+}
+
+// 2xx 但 body 无已取证成功标志（code/success 均缺失）→ 失败关闭（不再宽容放行）。
+func TestWebSMS_ZhipuSendUnknownBodyFailsClosed(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"ok":1,"message":"accepted"}`}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
+}
+
+// 2xx 空 body → 失败关闭。
+func TestWebSMS_ZhipuSendEmptyBodyFailsClosed(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{}`}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
+}
+
 // ---------------------------------------------------------------------------
 // zhipu 登录（证据：POST /user-api/user/phone_login，需数美 rid + tI 签名三件套）
 // ---------------------------------------------------------------------------
@@ -296,6 +328,25 @@ func TestWebSMS_ZhipuVerifyNoCookie(t *testing.T) {
 	_, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
 	require.Error(t, err)
 	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+}
+
+// 强制 refresh token（收敛项 4）：chatglm_token 有但 chatglm_refresh_token 缺失
+// → 失败关闭，拒绝建号；不再存在"缺失允许空"的宽容分支。
+func TestWebSMS_ZhipuVerifyMissingRefreshTokenFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"code":0}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "缺少 chatglm_refresh_token")
+	require.Contains(t, err.Error(), "拒绝建号")
+	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+	require.Len(t, up.requests, 1)
 }
 
 // ---------------------------------------------------------------------------

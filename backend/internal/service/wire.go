@@ -206,10 +206,8 @@ func ProvideTokenRefreshService(
 	proxyRepo ProxyRepository,
 	refreshAPI *OAuthRefreshAPI,
 	runtimeBlocker AccountRuntimeBlocker,
-	openaiGatewayService *OpenAIGatewayService,
-	webPlatformAutoLogin *WebPlatformAutoLoginService,
 ) *TokenRefreshService {
-	svc := newTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, openaiGatewayService, webPlatformAutoLogin, grokOAuthService)
+	svc := NewTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, grokOAuthService)
 	// 注入 OpenAI privacy opt-out 依赖
 	svc.SetPrivacyDeps(privacyClientFactory, proxyRepo)
 	// 注入统一 OAuth 刷新 API（消除 TokenRefreshService 与 TokenProvider 之间的竞争条件）

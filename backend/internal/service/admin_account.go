@@ -500,6 +500,84 @@ func validateAccessModeCredential(platform, accountType string, credentials map[
 	return nil
 }
 
+// errWebCredentialBypassRejected 普通创建/更新入口携带 web 凭据的统一拒绝错误
+// （收敛项 2：web 凭据账号只能经 web 登录链创建，任务卡 TC-converge-b-20260921）。
+func errWebCredentialBypassRejected(platform string) error {
+	return fmt.Errorf("platform %s: web 凭据账号只能通过短信/密码登录创建（web-login-password / web-login-sms），请使用对应登录入口", platform)
+}
+
+// webLoginStateKeys 返回 platform 的 web 登录态凭据键（zhipu/deepseek 整串 cookie、
+// kimi access_token，加两平台共有的 refresh 簿记键）。
+func webLoginStateKeys(platform string) []string {
+	keys := []string{"refresh_token", "login_refresh_token"}
+	if platform == PlatformKimi {
+		return append(keys, "access_token")
+	}
+	return append(keys, "cookie")
+}
+
+// webLoginCredentialChanged 报告 incoming 凭据相对既有凭据是否携带 web 登录态键的
+// 实际变更（新增非空值或值不同；非字符串值按变更处理 fail-closed）。
+// 服务端读出后原样回写（键值均相同，如批量单字段编辑的全量凭据回传）不算变更。
+func webLoginCredentialChanged(platform string, existing, incoming map[string]any) bool {
+	for _, key := range webLoginStateKeys(platform) {
+		raw, ok := incoming[key]
+		if !ok {
+			continue
+		}
+		s, isString := raw.(string)
+		if !isString {
+			return true
+		}
+		prev, _ := existing[key].(string)
+		if strings.TrimSpace(s) != strings.TrimSpace(prev) {
+			return true
+		}
+	}
+	return false
+}
+
+// rejectWebCredentialForNormalEntry 普通创建/更新入口的 web 凭据旁路关闭：
+// 显式 access_mode=web 的凭据（或 web 形状凭据）一律拒绝，除非调用方来自 web 登录链
+// （fromWebLogin=true，内部原子建号/凭据写入）。既有 web 账号的读取路径
+// （ResolveWebPlatform 等）不受影响。
+// 更新路径语义（isUpdate=true）：web 账号服务端读出后原样回写全量凭据（键值不变）
+// 放行；仅登录态键发生实际变更（含 api→web 模式切换注入）时拒绝。
+func rejectWebCredentialForNormalEntry(platform, accountType string, credentials map[string]any, fromWebLogin bool) error {
+	if fromWebLogin {
+		return nil
+	}
+	if accessModeFromCredentials(credentials) != AccountAccessModeWeb {
+		return nil
+	}
+	if !IsWebLoginPlatform(platform) {
+		return nil
+	}
+	_ = accountType
+	return errWebCredentialBypassRejected(platform)
+}
+
+// rejectWebCredentialForNormalUpdate UpdateAccount 专用守卫：判定目标接入模式是否为
+// web（既有账号为 web，或本次显式切到 web），并按登录态键变更/模式切换注入拒绝。
+func rejectWebCredentialForNormalUpdate(account *Account, input *UpdateAccountInput) error {
+	if input.FromWebLogin {
+		return nil
+	}
+	targetModeWeb := account.IsWebAccessMode()
+	if raw, ok := input.Credentials["access_mode"].(string); ok && strings.TrimSpace(raw) != "" {
+		targetModeWeb = strings.TrimSpace(raw) == AccountAccessModeWeb
+	}
+	if !targetModeWeb || !IsWebLoginPlatform(account.Platform) {
+		return nil
+	}
+	// 非 web 账号切到 web：任何 web 登录态注入都是旁路（只能经 web 登录链）。
+	// 已是 web 账号：服务端原样回写（值不变）放行，登录态键实际变更拒绝。
+	if !account.IsWebAccessMode() || webLoginCredentialChanged(account.Platform, account.Credentials, input.Credentials) {
+		return errWebCredentialBypassRejected(account.Platform)
+	}
+	return nil
+}
+
 // hasWebLoginShapeCredential 报告 credentials 是否携带网页登录形状凭证：
 // zhipu/deepseek 的非空 cookie、kimi 的非空 access_token（与
 // validateWebAccountCredential 的网页供应商家族判定同口径）。
@@ -570,6 +648,11 @@ func validateWebAccountCredential(platform, accountType string, credentials map[
 
 func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]any) (*Account, error) {
 	if err := validateOtherAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
+		return nil, err
+	}
+	// web 凭据旁路关闭（收敛项 2）：普通创建入口（含复制账号/导入等 buildAccountForCreate
+	// 复用链）不得直接携带 web 凭据建号；web 登录链内部建号经 FromWebLogin 豁免。
+	if err := rejectWebCredentialForNormalEntry(input.Platform, input.Type, input.Credentials, input.FromWebLogin); err != nil {
 		return nil, err
 	}
 	if err := validateWebAccountCredential(input.Platform, input.Type, input.Credentials); err != nil {
@@ -644,6 +727,11 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	// web 凭据旁路关闭（收敛项 2）：普通创建入口显式 access_mode=web 一律拒绝；
+	// web 登录链（web-login-password / web-login-sms）内部建号经 FromWebLogin 豁免。
+	if err := rejectWebCredentialForNormalEntry(input.Platform, input.Type, input.Credentials, input.FromWebLogin); err != nil {
+		return nil, err
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -854,6 +942,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if account.IsCredentialShadow() && input.Credentials != nil {
 		account.Credentials = sanitizeShadowCredentials(input.Credentials)
 	} else if len(input.Credentials) > 0 {
+		// web 凭据旁路关闭（收敛项 2）：web 接入模式账号的登录态凭据写入/切换注入只允许
+		// web 登录链（FromWebLogin 内部标记）——EditAccountModal 手工改 web 账号登录态
+		// 凭据同受控；服务端读出后原样回写全量凭据（键值不变，如批量单字段编辑）不受影响。
+		if err := rejectWebCredentialForNormalUpdate(account, input); err != nil {
+			return nil, infraerrors.New(http.StatusBadRequest, "WEB_CREDENTIAL_ENTRY_REJECTED", err.Error())
+		}
 		// 敏感子键采用"incoming 没提供就保留"的合并语义：前端响应已脱敏，
 		// 全对象 PUT 编辑时不会再带回 token，避免覆盖时清空已有凭证。
 		// 网页登录秘密已纳入全局敏感清单，自动获得缺省保留语义；login_phone 不是认证秘密，

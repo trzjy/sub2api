@@ -423,6 +423,10 @@ type CreateAccountInput struct {
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
 	// This should only be set when the caller has explicitly confirmed the risk.
 	SkipMixedChannelCheck bool
+	// FromWebLogin 内部标记：仅由 web 登录链（web-login-password / web-login-sms 的
+	// 原子建号）赋值，API DTO 不暴露。普通 CreateAccount 入口携带 web 凭据一律拒绝，
+	// web 凭据账号只能通过短信/密码登录创建（收敛项 2，任务卡 TC-converge-b-20260921）。
+	FromWebLogin bool
 }
 
 // ShadowOptions is the input for CreateShadow.
@@ -459,6 +463,10 @@ type UpdateAccountInput struct {
 	ProbeEnabled          *bool
 	RateSyncEnabled       *bool
 	SkipMixedChannelCheck bool // 跳过混合渠道检查（用户已确认风险）
+	// FromWebLogin 内部标记：仅由 web 登录链（短信/密码登录成功后的凭据写入）赋值，
+	// API DTO 不暴露。普通 UpdateAccount 入口对 web 接入模式账号一律拒绝写入
+	// （收敛项 2，任务卡 TC-converge-b-20260921）。
+	FromWebLogin bool
 }
 
 // BulkUpdateAccountsInput describes the payload for bulk updating accounts.
@@ -710,24 +718,24 @@ type adminServiceImpl struct {
 	// webPlatformMigrationRepo 平台归并 PR-2 迁移专用事务方法（窄接口，
 	// 由真实账号仓储实现；测试替身未实现时为 nil，迁移入口失败关闭）。
 	webPlatformMigrationRepo WebPlatformMigrationRepository
-	proxyRepo            ProxyRepository
-	apiKeyRepo           APIKeyRepository
-	redeemCodeRepo       RedeemCodeRepository
-	userGroupRateRepo    UserGroupRateRepository
-	userRPMCache         UserRPMCache
-	billingCacheService  *BillingCacheService
-	proxyProber          ProxyExitInfoProber
-	proxyLatencyCache    ProxyLatencyCache
-	authCacheInvalidator APIKeyAuthCacheInvalidator
-	entClient            *dbent.Client // 用于开启数据库事务
-	settingService       *SettingService
-	defaultSubAssigner   DefaultSubscriptionAssigner
-	userSubRepo          UserSubscriptionRepository
-	privacyClientFactory PrivacyClientFactory
-	runtimeBlocker       AccountRuntimeBlocker
-	affiliateService     adminRechargeAffiliateAccruer
-	compositeRouteRepo   CompositeModelRouteRepository
-	compositeResolver    *CompositeRouteResolver
+	proxyRepo                ProxyRepository
+	apiKeyRepo               APIKeyRepository
+	redeemCodeRepo           RedeemCodeRepository
+	userGroupRateRepo        UserGroupRateRepository
+	userRPMCache             UserRPMCache
+	billingCacheService      *BillingCacheService
+	proxyProber              ProxyExitInfoProber
+	proxyLatencyCache        ProxyLatencyCache
+	authCacheInvalidator     APIKeyAuthCacheInvalidator
+	entClient                *dbent.Client // 用于开启数据库事务
+	settingService           *SettingService
+	defaultSubAssigner       DefaultSubscriptionAssigner
+	userSubRepo              UserSubscriptionRepository
+	privacyClientFactory     PrivacyClientFactory
+	runtimeBlocker           AccountRuntimeBlocker
+	affiliateService         adminRechargeAffiliateAccruer
+	compositeRouteRepo       CompositeModelRouteRepository
+	compositeResolver        *CompositeRouteResolver
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
 }

@@ -36,6 +36,8 @@ func (a *adminAutoLoginStoreAdapter) ListAccounts(ctx context.Context) ([]*Accou
 }
 
 // UpdateAccountCredentials 将凭据合并写入账号（保留既有 credentials）。
+// FromWebLogin 内部标记：本适配器是自动登录服务（登录恢复/续期链）的持久化管道，
+// 属 web 登录链内部来源，豁免普通更新入口的 web 凭据旁路拒绝（收敛项 2）。
 func (a *adminAutoLoginStoreAdapter) UpdateAccountCredentials(ctx context.Context, id int64, creds map[string]any) error {
 	account, err := a.svc.GetAccount(ctx, id)
 	if err != nil {
@@ -48,7 +50,7 @@ func (a *adminAutoLoginStoreAdapter) UpdateAccountCredentials(ctx context.Contex
 	for k, v := range creds {
 		merged[k] = v
 	}
-	_, err = a.svc.UpdateAccount(ctx, id, &UpdateAccountInput{Credentials: merged})
+	_, err = a.svc.UpdateAccount(ctx, id, &UpdateAccountInput{Credentials: merged, FromWebLogin: true})
 	return err
 }
 

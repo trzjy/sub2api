@@ -106,26 +106,6 @@ func NewTokenRefreshService(
 	tempUnschedCache TempUnschedCache,
 	grokOAuthServices ...*GrokOAuthService,
 ) *TokenRefreshService {
-	return newTokenRefreshService(accountRepo, oauthService, openaiOAuthService, geminiOAuthService, antigravityOAuthService, codeBuddyOAuthService, cacheInvalidator, schedulerCache, cfg, tempUnschedCache, nil, nil, grokOAuthServices...)
-}
-
-// newTokenRefreshService 内部构造：web 依赖（openaiGatewayService/webPlatformAutoLogin）
-// 非nil 时注册对应网页平台保活。
-func newTokenRefreshService(
-	accountRepo AccountRepository,
-	oauthService *OAuthService,
-	openaiOAuthService *OpenAIOAuthService,
-	geminiOAuthService *GeminiOAuthService,
-	antigravityOAuthService *AntigravityOAuthService,
-	codeBuddyOAuthService *CodeBuddyOAuthService,
-	cacheInvalidator TokenCacheInvalidator,
-	schedulerCache SchedulerCache,
-	cfg *config.Config,
-	tempUnschedCache TempUnschedCache,
-	openaiGatewayService *OpenAIGatewayService,
-	webPlatformAutoLogin *WebPlatformAutoLoginService,
-	grokOAuthServices ...*GrokOAuthService,
-) *TokenRefreshService {
 	refreshCfg := &config.TokenRefreshConfig{}
 	if cfg != nil {
 		refreshCfg = &cfg.TokenRefresh
@@ -160,6 +140,9 @@ func newTokenRefreshService(
 
 	// Each provider is registered exactly once. The same registry supplies both
 	// execution and repository eligibility, preventing future platform drift.
+	// web 三平台（kimi/zhipu/deepseek）不再注册后台保活（2026-09-21 撤销未授权的
+	// Web 周期后台保活；续期唯一实现仍是转发链 refreshWebKimi/refreshWebZhipu 与
+	// RecoverAccount 手动恢复）。
 	s.registrations = []tokenRefreshRegistration{
 		{platform: PlatformAnthropic, refresher: claudeRefresher, executor: claudeRefresher, failureBlocksScheduling: true},
 		{platform: PlatformOpenAI, refresher: openAIRefresher, executor: openAIRefresher, failureBlocksScheduling: true},
@@ -167,39 +150,6 @@ func newTokenRefreshService(
 		{platform: PlatformAntigravity, refresher: agRefresher, executor: agRefresher, failureBlocksScheduling: true},
 		{platform: PlatformCodeBuddy, refresher: cbRefresher, executor: cbRefresher, failureBlocksScheduling: true},
 		{platform: PlatformGrok, refresher: grokRefresher, executor: grokRefresher, failureBlocksScheduling: true},
-	}
-
-	// 网页三平台后台保活：依赖 nil 时对应平台不注册（部署形态可裁剪）。
-	// 单口径红线：续期实现各只有一处（转发链函数 / RecoverAccount），
-	// 这里仅注册调用方。web 平台重试耗尽只簿记不停调。
-	if openaiGatewayService != nil {
-		s.registrations = append(s.registrations,
-			tokenRefreshRegistration{
-				platform:                PlatformKimi,
-				refresher:               NewWebKimiTokenRefresher(openaiGatewayService, refreshCfg),
-				executor:                NewWebKimiTokenRefresher(openaiGatewayService, refreshCfg),
-				webAccessMode:           true,
-				failureBlocksScheduling: false,
-			},
-			tokenRefreshRegistration{
-				platform:                PlatformZhipu,
-				refresher:               NewWebZhipuTokenRefresher(openaiGatewayService, refreshCfg),
-				executor:                NewWebZhipuTokenRefresher(openaiGatewayService, refreshCfg),
-				webAccessMode:           true,
-				failureBlocksScheduling: false,
-			},
-		)
-	}
-	if webPlatformAutoLogin != nil {
-		s.registrations = append(s.registrations,
-			tokenRefreshRegistration{
-				platform:                PlatformDeepseek,
-				refresher:               NewWebDeepseekTokenRefresher(webPlatformAutoLogin, refreshCfg),
-				executor:                NewWebDeepseekTokenRefresher(webPlatformAutoLogin, refreshCfg),
-				webAccessMode:           true,
-				failureBlocksScheduling: false,
-			},
-		)
 	}
 
 	return s

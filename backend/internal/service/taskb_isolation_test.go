@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -106,10 +107,110 @@ func TestTaskBWebShapeCredentialCreateRejected(t *testing.T) {
 	}
 	// cookie 非空但无 access_mode：拒绝。
 	require.Error(t, build(map[string]any{"cookie": "c"}), "web-shaped create without access_mode rejected")
-	// 显式 access_mode=web + cookie：正常。
-	require.NoError(t, build(map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}), "explicit web create ok")
+	// 显式 access_mode=web + cookie：拒绝（收敛项 2，2026-09-21 裁定：web 凭据账号
+	// 只能经 web 登录链创建，buildAccountForCreate 复用链属普通入口）。
+	require.Error(t, build(map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"}), "explicit web create rejected (web-entry only)")
+	// 显式 access_mode=web + FromWebLogin 内部标记（web 登录链原子建号）：放行。
+	_, webChainErr := buildAccountForCreate(&CreateAccountInput{
+		Name:         "web-login-chain-create",
+		Platform:     PlatformZhipu,
+		Type:         AccountTypeAPIKey,
+		Credentials:  map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
+		FromWebLogin: true,
+	}, map[string]any{})
+	require.NoError(t, webChainErr, "explicit web create via web login chain ok")
 	// api 形状无显式 access_mode：不受影响（GetAccessMode 默认 api）。
 	require.NoError(t, build(map[string]any{"api_key": "sk-x", "base_url": "https://open.bigmodel.cn/api/paas/v4"}), "api-shaped create without access_mode ok")
+}
+
+// 3c. 普通创建入口旁路拒绝（收敛项 2）：CreateAccount 显式 access_mode=web 一律拒绝，
+// 文案指向 web 登录入口；FromWebLogin 内部标记豁免（web 登录链建号成功路径回归）。
+func TestTaskBNormalCreateEntryRejectsWebCredential(t *testing.T) {
+	repo := newWebRedactUpdateAdminRepo()
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	_, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:        "bypass-zhipu",
+		Platform:    PlatformZhipu,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
+	})
+	require.Error(t, err, "normal create entry must reject explicit web credential")
+	require.Contains(t, err.Error(), "web 凭据账号只能通过短信/密码登录创建")
+	require.Contains(t, err.Error(), "web-login-password / web-login-sms")
+
+	_, err = svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:        "bypass-kimi",
+		Platform:    PlatformKimi,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "at"},
+	})
+	require.Error(t, err, "normal create entry must reject kimi web credential")
+
+	// web 登录链内部建号（FromWebLogin）：成功路径回归。
+	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:         "web-chain-created",
+		Platform:     PlatformZhipu,
+		Type:         AccountTypeAPIKey,
+		Credentials:  map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
+		FromWebLogin: true,
+	})
+	require.NoError(t, err, "web login chain internal create must succeed")
+	require.NotZero(t, created.ID)
+}
+
+// 3d. 普通更新入口旁路拒绝（收敛项 2）：web 账号登录态凭据变更/模式切换注入一律拒绝；
+// 服务端原样回写全量凭据（键值不变）放行；FromWebLogin 内部写入豁免。
+func TestTaskBNormalUpdateEntryRejectsWebCredentialChange(t *testing.T) {
+	accountID := int64(9101)
+	repo := newWebRedactUpdateAdminRepo(&Account{
+		ID:       accountID,
+		Name:     "zp-web",
+		Platform: PlatformZhipu,
+		Type:     AccountTypeAPIKey,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_mode": AccountAccessModeWeb,
+			"cookie":      "old-cookie",
+		},
+	})
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	// 手工改 web 账号登录态 cookie（EditAccountModal 场景）：拒绝。
+	_, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "new-cookie"},
+	})
+	require.Error(t, err, "manual web credential change on normal update entry rejected")
+	require.Contains(t, err.Error(), "web 凭据账号只能通过短信/密码登录创建")
+
+	// api→web 模式切换注入（api 账号凭据里带 access_mode=web + cookie）：拒绝。
+	repo2 := newWebRedactUpdateAdminRepo(&Account{
+		ID:          9102,
+		Name:        "zp-api",
+		Platform:    PlatformZhipu,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Credentials: map[string]any{"access_mode": AccountAccessModeAPI, "api_key": "sk-x"},
+	})
+	svc2 := &adminServiceImpl{accountRepo: repo2}
+	_, err = svc2.UpdateAccount(context.Background(), 9102, &UpdateAccountInput{
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "c"},
+	})
+	require.Error(t, err, "api->web switch injecting web credential via normal update rejected")
+
+	// 服务端原样回写全量凭据（键值不变，批量单字段编辑场景）：放行。
+	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "old-cookie"},
+	})
+	require.NoError(t, err, "server-side verbatim credential write-back passes")
+	require.Equal(t, "old-cookie", updated.GetCredential("cookie"))
+
+	// web 登录链内部写入（FromWebLogin）：放行。
+	_, err = svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Credentials:  map[string]any{"access_mode": AccountAccessModeWeb, "cookie": "new-cookie"},
+		FromWebLogin: true,
+	})
+	require.NoError(t, err, "web login chain internal credential write passes")
 }
 
 // 4. web 接入模式账号不进 CN 余额/额度/403/429 冷却链。
