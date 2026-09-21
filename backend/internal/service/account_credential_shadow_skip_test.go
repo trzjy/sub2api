@@ -51,6 +51,11 @@ func TestOpenAITokenRefresherSkipsShadow(t *testing.T) {
 // --- 2. TestAccountConnection 影子凭据解析 ---
 
 // TestAccountTestServiceSkipsShadow 验证影子账号连接测试不再早拒,而是尝试解析母账号凭据。
+//
+// 2026-09-22 验收更新：主分发（TestAccountConnection）现在与 testOpenAICompactConnection
+// 同口径，先把影子解析到母账号再判定平台；解析失败统一 fail-closed 返回
+// "Failed to resolve account credentials"（不再透出内部 "resolve shadow parent" 细节）。
+// 断言随之更新为新的 fail-closed 文案，语义（不早拒、尝试解析、失败即报错）不变。
 func TestAccountTestServiceSkipsShadow(t *testing.T) {
 	pid := int64(100)
 	shadow := &Account{
@@ -65,7 +70,7 @@ func TestAccountTestServiceSkipsShadow(t *testing.T) {
 
 	err := svc.TestAccountConnection(c, 200, "", "", "")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "resolve shadow parent")
+	require.Contains(t, err.Error(), "Failed to resolve account credentials")
 }
 
 // --- 3. EnsureOpenAIPrivacy 守卫 ---

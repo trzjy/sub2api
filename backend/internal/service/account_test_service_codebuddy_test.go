@@ -14,6 +14,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,21 +22,57 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
+// newCodeBuddyCountingService 在既有装配基础上再加一层出站计数器，用于验收
+// "只发一次上游请求"（不得重试刷量）与非影子账号"不解析母账号"。
+func newCodeBuddyCountingService(accounts map[int64]*Account, resp *http.Response) (*AccountTestService, *countingUpstream, *codebuddyDispatchRepo) {
+	base := &webProbeUpstream{resp: resp}
+	svc := newCodeBuddyProbeTestService(accounts, base, resp)
+	repo := svc.accountRepo.(*codebuddyDispatchRepo)
+	counting := &countingUpstream{HTTPUpstream: base}
+	svc.httpUpstream = counting
+	return svc, counting, repo
+}
+
 // codebuddyDispatchRepo 按 ID 返回账号（影子→母账号解析需要至少两个账号）。
+// calls 统计 GetByID 次数，用于区分"非影子不解析（1 次）/ 影子解析母账号（2 次）"。
 type codebuddyDispatchRepo struct {
 	AccountRepository
 	accounts map[int64]*Account
+	calls    int
 }
 
 func (r *codebuddyDispatchRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	r.calls++
 	if acc, ok := r.accounts[id]; ok && acc != nil {
 		return acc, nil
 	}
 	return nil, fmt.Errorf("account %d not found", id)
+}
+
+// countingUpstream 统计出站请求次数：探活必须只发一次，不得重试刷量。
+type countingUpstream struct {
+	HTTPUpstream
+	doCalls  int
+	tlsCalls int
+	tlsErr   error
+}
+
+func (u *countingUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	u.doCalls++
+	return u.HTTPUpstream.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func (u *countingUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	u.tlsCalls++
+	if u.tlsErr != nil {
+		return nil, u.tlsErr
+	}
+	return u.HTTPUpstream.DoWithTLS(req, proxyURL, accountID, accountConcurrency, profile)
 }
 
 func newCodeBuddyProbeTestService(accounts map[int64]*Account, upstream *webProbeUpstream, resp *http.Response) *AccountTestService {
@@ -294,4 +331,263 @@ func TestAccountTestService_NonShadowCNAPIKeyAccountUnchanged(t *testing.T) {
 	require.Equal(t, "Bearer sk-test-dispatch", upstream.lastReq.Header.Get("Authorization"))
 	require.Contains(t, recorder.Body.String(), "已通过 /v1/chat/completions 验证")
 	require.NotContains(t, recorder.Body.String(), "No API key available")
+}
+
+// --- 以下为独立验收补充用例（2026-09-22 验收会话追加） ---
+//
+// 目的：把实现代理的"存在性断言"升级为"行为断言"——出站次数、方法/路径/请求体/关键头、
+// 业务信封判定、以及影子解析的三条 fail-closed 支线（母账号缺失 / 二级影子 / 母账号
+// 平台不受支持 / 母账号是 web 模式 CN 账号）与非影子不解析回归。
+
+// TestAccountTestService_CodeBuddyShadowProbeSendsExactlyOneRequest 探活只能发一次
+// 上游请求（不重试刷量），且方法/URL/请求体/关键头必须与宣称一致。
+func TestAccountTestService_CodeBuddyShadowProbeSendsExactlyOneRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := codebuddyProbeParentAccount(109, CodeBuddySiteCN)
+
+	svc, counting, repo := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent}, codebuddyQuotaOKResponse())
+	ctx, recorder := newWebTestContext()
+
+	require.NoError(t, svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault))
+
+	require.Equal(t, 1, counting.tlsCalls, "codebuddy 探活必须只发一次上游请求")
+	require.Equal(t, 0, counting.doCalls, "不得额外走无指纹通道重试")
+	require.Equal(t, 2, repo.calls, "影子账号须解析母账号（自身 + 母账号两次读取）")
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	require.NotContains(t, recorder.Body.String(), "No API key available")
+}
+
+// TestAccountTestService_CodeBuddyProbeRequestShape 校验出站请求形状：POST、站点
+// SSOT 域名、零消耗配额端点、body {}、Bearer 母账号 token、身份头占位。
+func TestAccountTestService_CodeBuddyProbeRequestShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := codebuddyProbeParentAccount(109, CodeBuddySiteCN)
+	parent.Credentials["uid"] = "u-1"
+	parent.Credentials["enterprise_id"] = "e-1"
+
+	svc, counting, _ := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent}, codebuddyQuotaOKResponse())
+	ctx, recorder := newWebTestContext()
+
+	require.NoError(t, svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault))
+	require.Equal(t, 1, counting.tlsCalls)
+
+	// 通过内层桩取回实际请求。
+	inner := counting.HTTPUpstream.(*webProbeUpstream)
+	req := inner.lastReq
+	require.NotNil(t, req)
+	require.Equal(t, http.MethodPost, req.Method)
+	require.Equal(t, "https://www.codebuddy.cn/v2/billing/meter/get-user-resource", req.URL.String())
+
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, "{}", string(body), "探活请求体必须是零消耗的 {}")
+	require.Equal(t, "Bearer PARENT_TOKEN_SECRET", req.Header.Get("Authorization"))
+	require.Equal(t, "https://www.codebuddy.cn", req.Header.Get("Origin"))
+	require.Equal(t, "https://www.codebuddy.cn/", req.Header.Get("Referer"))
+	require.Equal(t, CodeBuddyClientUA, req.Header.Get("User-Agent"))
+	require.Equal(t, "SaaS", req.Header.Get("X-Product"))
+	require.Equal(t, "u-1", req.Header.Get("X-User-Id"))
+	require.Equal(t, "e-1", req.Header.Get("X-Enterprise-Id"))
+	require.Equal(t, "1", req.Header.Get("X-No-Domain"))
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+}
+
+// TestAccountTestService_CodeBuddyProbeDoesNotRetryOnTransportError 传输层失败
+// 只发一次，不重试，且错误文案不回显凭证。
+func TestAccountTestService_CodeBuddyProbeDoesNotRetryOnTransportError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := codebuddyProbeParentAccount(109, CodeBuddySiteCN)
+
+	svc, counting, _ := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent}, codebuddyQuotaOKResponse())
+	counting.tlsErr = errors.New("dial tcp www.codebuddy.cn:443: i/o timeout")
+	ctx, recorder := newWebTestContext()
+
+	err := svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault)
+	require.Error(t, err)
+	require.Equal(t, 1, counting.tlsCalls, "传输失败不得重试")
+	require.Contains(t, err.Error(), "probe request failed")
+	require.NotContains(t, err.Error(), "PARENT_TOKEN_SECRET")
+	require.NotContains(t, recorder.Body.String(), "PARENT_TOKEN_SECRET")
+	require.NotContains(t, recorder.Body.String(), `"success":true`)
+}
+
+// TestAccountTestService_CodeBuddyProbeStatusAndEnvelopeHandling 非 2xx 与业务信封
+// code != 0 都判定为失败，且每次只发一次请求。
+func TestAccountTestService_CodeBuddyProbeStatusAndEnvelopeHandling(t *testing.T) {
+	cases := []struct {
+		name     string
+		resp     *http.Response
+		errParts []string
+	}{
+		{
+			name: "http500",
+			resp: &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":1}`)),
+			},
+			errParts: []string{"probe failed", "HTTP 500"},
+		},
+		{
+			name: "403",
+			resp: &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":1}`)),
+			},
+			errParts: []string{"rejected by upstream", "HTTP 403"},
+		},
+		{
+			name: "envelope-code",
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"code":1001,"msg":"offline user session"}`)),
+			},
+			errParts: []string{"rejected by upstream", "code=1001"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			account := codebuddyProbeParentAccount(109, CodeBuddySiteIntl)
+			svc, counting, _ := newCodeBuddyCountingService(map[int64]*Account{109: account}, tc.resp)
+			ctx, _ := newWebTestContext()
+
+			err := svc.TestAccountConnection(ctx, 109, "", "", AccountTestModeDefault)
+			require.Error(t, err)
+			for _, part := range tc.errParts {
+				require.Contains(t, err.Error(), part)
+			}
+			require.Equal(t, 1, counting.tlsCalls)
+			require.NotContains(t, err.Error(), "PARENT_TOKEN_SECRET")
+		})
+	}
+}
+
+// TestAccountTestService_CodeBuddyShadowParentIsShadowFailsClosed 二级影子
+// （母账号自身也是影子）必须 fail-closed：不 panic、不发上游请求。
+func TestAccountTestService_CodeBuddyShadowParentIsShadowFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := codebuddyProbeParentAccount(109, CodeBuddySiteCN)
+	parent.ParentAccountID = int64Ptr(108) // 母账号自身还是影子
+
+	svc, counting, _ := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent, 108: codebuddyProbeParentAccount(108, "")},
+		codebuddyQuotaOKResponse())
+	ctx, recorder := newWebTestContext()
+
+	var err error
+	require.NotPanics(t, func() {
+		err = svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault)
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Failed to resolve account credentials")
+	require.Equal(t, 0, counting.tlsCalls, "二级影子不得发出任何上游请求")
+	require.Contains(t, recorder.Body.String(), "Failed to resolve account credentials")
+}
+
+// TestAccountTestService_CodeBuddyShadowParentOpenAIAPIKeyFailsClosed 母账号是
+// openai 但非 OAuth（apikey）时不受支持，fail-closed。
+func TestAccountTestService_CodeBuddyShadowParentOpenAIAPIKeyFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := &Account{
+		ID: 109, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-parent-openai"},
+	}
+
+	svc, counting, _ := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent}, codebuddyQuotaOKResponse())
+	ctx, _ := newWebTestContext()
+
+	err := svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Failed to resolve account credentials")
+	require.Equal(t, 0, counting.tlsCalls)
+	require.NotContains(t, err.Error(), "sk-parent-openai", "错误文案不得回显母账号密钥")
+}
+
+// TestAccountTestService_CodeBuddyShadowWebCNParentFailsClosedAndSkipsWebProbe
+// 影子母账号是 web 模式 CN 账号（zhipu + access_mode=web）时：resolveCredentialAccount
+// 直接判为不受支持的母账号并 fail-closed，因此绝不会带着母账号进入
+// testWebAccountConnection —— 即"影子自身 model_mapping 在 web 分支丢失"的场景
+// 在本分发链上不可达（不构成回归）。
+func TestAccountTestService_CodeBuddyShadowWebCNParentFailsClosedAndSkipsWebProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	shadow := codebuddyProbeShadowAccount(112, 109)
+	parent := dispatchWebAccount(PlatformZhipu, 109)
+
+	svc, counting, _ := newCodeBuddyCountingService(
+		map[int64]*Account{112: shadow, 109: parent}, okSSEResponse())
+	ctx, recorder := newWebTestContext()
+
+	err := svc.TestAccountConnection(ctx, 112, "", "", AccountTestModeDefault)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Failed to resolve account credentials")
+	require.Equal(t, 0, counting.tlsCalls, "不得带着母账号走 web 探活")
+	require.NotContains(t, recorder.Body.String(), "Web login session is healthy.")
+	require.NotContains(t, err.Error(), "test-cookie=1", "错误文案不得回显母账号 cookie")
+}
+
+// TestAccountTestService_NonShadowAccountsAreNeverResolved 回归保护：非影子账号
+// 不得去解析母账号（GetByID 只应发生一次，即取账号本身），行为与改造前完全一致。
+func TestAccountTestService_NonShadowAccountsAreNeverResolved(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// CN apikey 账号（kimi/zhipu/deepseek）：改造前后都走 /v1/chat/completions。
+	for _, platform := range []string{PlatformKimi, PlatformZhipu, PlatformDeepseek} {
+		t.Run(platform, func(t *testing.T) {
+			account := &Account{
+				ID: 200, Platform: platform, Type: AccountTypeAPIKey, Concurrency: 1,
+				Credentials: map[string]any{
+					"access_mode":  AccountAccessModeAPI,
+					"api_key":      "sk-test-dispatch",
+					"api_protocol": APIProtocolChatCompletions,
+					"base_url":     "https://api.example",
+				},
+			}
+			svc, counting, repo := newCodeBuddyCountingService(
+				map[int64]*Account{200: account}, chatCompletionsProbeResponse())
+			ctx, recorder := newWebTestContext()
+
+			require.NoError(t, svc.TestAccountConnection(ctx, 200, "test-model", "", AccountTestModeDefault))
+			require.Equal(t, 1, repo.calls, "非影子账号不得解析母账号")
+			require.Equal(t, 1, counting.tlsCalls)
+			inner := counting.HTTPUpstream.(*webProbeUpstream)
+			require.NotNil(t, inner.lastReq)
+			require.Equal(t, "/v1/chat/completions", inner.lastReq.URL.Path)
+			require.Equal(t, "Bearer sk-test-dispatch", inner.lastReq.Header.Get("Authorization"))
+			require.Contains(t, recorder.Body.String(), "已通过 /v1/chat/completions 验证")
+		})
+	}
+}
+
+// TestAccountTestService_NonShadowOpenAIOAuthStillUsesCodexProbe 非影子 openai
+// oauth 账号仍走 ChatGPT Codex 探活，且不再触发母账号解析。
+func TestAccountTestService_NonShadowOpenAIOAuthStillUsesCodexProbe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	account := &Account{
+		ID: 300, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "OPENAI_ACCESS_TOKEN", "account_id": "acc-1"},
+	}
+	svc, counting, repo := newCodeBuddyCountingService(
+		map[int64]*Account{300: account}, okSSEResponse())
+	ctx, _ := newWebTestContext()
+
+	_ = svc.TestAccountConnection(ctx, 300, "", "", AccountTestModeDefault)
+	require.Equal(t, 1, repo.calls, "非影子账号不得解析母账号")
+	require.Equal(t, 1, counting.tlsCalls)
+	inner := counting.HTTPUpstream.(*webProbeUpstream)
+	require.NotNil(t, inner.lastReq)
+	require.Equal(t, "chatgpt.com", inner.lastReq.Host)
+	require.Equal(t, "/backend-api/codex/responses", inner.lastReq.URL.Path)
+	require.Equal(t, "Bearer OPENAI_ACCESS_TOKEN", inner.lastReq.Header.Get("Authorization"))
 }
