@@ -54,15 +54,47 @@ var webKimiFixtureEnvelopeFrames = []string{
 	`{"eventOffset":13,"done":{}}`,
 }
 
-// wrapWebKimiEnvelope 把一帧 JSON 载荷包成 Connect RPC envelope（1 字节 flag=0x00 + 4 字节
-// 大端长度 + payload），与上游实测线格式一致。
-func wrapWebKimiEnvelope(jsonStr string) []byte {
+func webKimiEnvelopeFrameWithFlag(flag byte, jsonStr string) []byte {
 	b := []byte(jsonStr)
 	buf := make([]byte, 5+len(b))
-	buf[0] = 0x00
+	buf[0] = flag
 	binary.BigEndian.PutUint32(buf[1:5], uint32(len(b)))
 	copy(buf[5:], b)
 	return buf
+}
+
+// wrapWebKimiEnvelope 把一帧 JSON 载荷包成 Connect RPC envelope（1 字节 flag=0x00 + 4 字节
+// 大端长度 + payload），与上游实测线格式一致。
+func wrapWebKimiEnvelope(jsonStr string) []byte {
+	return webKimiEnvelopeFrameWithFlag(0x00, jsonStr)
+}
+
+// webKimiTrailerResponse 构造只回 Connect trailer 错误帧的 200 响应（flag=0x02 是 trailer
+// 语义；readWebKimiConnectEnvelope 只把 flag=0x01 当 gzip，其余读 payload），即生产上
+// 免费档请求 k3 被订阅墙拒绝的实测形态。
+func webKimiTrailerResponse(payloads ...string) *http.Response {
+	var body []byte
+	for _, p := range payloads {
+		body = append(body, webKimiEnvelopeFrameWithFlag(0x02, p)...)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/connect+json"}},
+		Body:       io.NopCloser(bytes.NewReader(body)),
+	}
+}
+
+// unwrapWebKimiEnvelope 剥掉出站请求体的 Connect envelope 头（5 字节），返回 payload JSON。
+// 必要性：请求体帧化修复后（buildWebKimiRequestBody → encodeWebKimiConnectEnvelope），
+// 直接 gjson 解原始 body 会全部失配。剥壳过程同时对帧头做回归断言（flag=0x00 +
+// 大端长度 == 剩余字节数），即请求体帧化的回归锚点。
+func unwrapWebKimiEnvelope(t *testing.T, frame []byte) []byte {
+	t.Helper()
+	require.GreaterOrEqual(t, len(frame), 5, "outbound kimi body must carry a 5-byte Connect envelope header")
+	require.Equal(t, byte(0x00), frame[0], "envelope flag must be 0x00 (uncompressed)")
+	declared := int(binary.BigEndian.Uint32(frame[1:5]))
+	require.Equal(t, declared, len(frame)-5, "envelope length prefix must match the payload size")
+	return frame[5:]
 }
 
 // webKimiEnvelopeResponse 构造 200 + Connect RPC envelope 流响应（登录态实测 10 §4 线格式）。
@@ -163,8 +195,8 @@ func TestForwardWebKimi_RequestBuildAndNonStreamAggregate(t *testing.T) {
 	require.Equal(t, "web", chatReq.Header.Get("x-msh-platform"))
 	require.Equal(t, "2.2.0", chatReq.Header.Get("x-msh-version"))
 
-	// 请求体：登录态实测结构（10 §3）。
-	body := upstream.bodies[0]
+	// 请求体：登录态实测结构（10 §3）。出站体已 Connect 帧化，断言前先剥掉 5 字节帧头。
+	body := unwrapWebKimiEnvelope(t, upstream.bodies[0])
 	require.Equal(t, "k3", gjson.GetBytes(body, "options.model").String())
 	require.True(t, gjson.GetBytes(body, "options.thinking").Bool())
 	require.True(t, gjson.GetBytes(body, "options.enable_plugin").Bool())
@@ -213,8 +245,83 @@ func TestForwardWebKimi_ModelMappingPassthrough(t *testing.T) {
 		_, err := runForwardWebKimi(t, account, webKimiInboundBody(tc.inbound), tc.inbound, upstream, &RateLimitService{})
 		require.NoError(t, err)
 		require.Len(t, upstream.bodies, 1)
-		require.Equal(t, tc.expected, gjson.GetBytes(upstream.bodies[0], "options.model").String())
+		payload := unwrapWebKimiEnvelope(t, upstream.bodies[0])
+		require.Equal(t, tc.expected, gjson.GetBytes(payload, "options.model").String())
 	}
+}
+
+// TestForwardWebKimi_RequestBodyIsFramedOnce 请求体帧化的回归锚点（分析文档 §1.4）：
+// Connect RPC 流式 RPC 的请求体必须打 envelope 帧（flag=0x00 + 4 字节大端长度），否则上游
+// 一律回 HTTP 200 + trailer {"error":{"code":"invalid_argument"}}。
+// 帧化点必须是 buildWebKimiRequestBody（而非 buildWebKimiUpstreamRequest）：后者会被
+// 401→refresh→重试链路复用同一份 body，在那里帧化会导致重试请求出现双帧。
+func TestForwardWebKimi_RequestBodyIsFramedOnce(t *testing.T) {
+	t.Run("single_envelope_frame", func(t *testing.T) {
+		account := webKimiTestAccount(8941, nil)
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{webKimiConnectResponse()}}
+		_, err := runForwardWebKimi(t, account, webKimiInboundBody("kimi-k2d6-chat"), "kimi-k2d6-chat", upstream, &RateLimitService{})
+		require.NoError(t, err)
+		require.Len(t, upstream.bodies, 1)
+
+		frame := upstream.bodies[0]
+		require.GreaterOrEqual(t, len(frame), 5, "outbound body must carry the envelope header")
+		require.Equal(t, byte(0x00), frame[0], "flag byte must be 0x00 (uncompressed)")
+		require.Equal(t, uint32(len(frame)-5), binary.BigEndian.Uint32(frame[1:5]),
+			"the 4-byte big-endian length prefix must equal the trailing payload size")
+		require.True(t, gjson.ValidBytes(frame[5:]), "payload after the header must be valid JSON")
+	})
+
+	t.Run("401_retry_does_not_double_frame", func(t *testing.T) {
+		account := webKimiTestAccount(8942, map[string]any{"refresh_token": "refresh-token-abc12345"})
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{
+			webKimiUnauthenticatedResponse(),
+			{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"accessToken":"new-token-xyz98765"}`)),
+			},
+			webKimiConnectResponse(),
+		}}
+		_, err := runForwardWebKimi(t, account, webKimiInboundBody("kimi-k3"), "kimi-k3", upstream, &RateLimitService{})
+		require.NoError(t, err)
+		require.Len(t, upstream.bodies, 3)
+		require.Equal(t, upstream.bodies[0], upstream.bodies[2], "retry must resend the same framed body, not re-framed")
+		// 逐字节校验重试帧仍是单帧（无第二层帧头）。
+		retry := upstream.bodies[2]
+		require.Equal(t, uint32(len(retry)-5), binary.BigEndian.Uint32(retry[1:5]))
+		require.True(t, gjson.ValidBytes(retry[5:]))
+	})
+}
+
+// TestForwardWebKimi_TrailerOnlyErrorFailsClosed 上游只回 trailer 错误帧（HTTP 200 +
+// flag=2 + {"error":{"code":"invalid_argument"}}，生产免费档请求付费模型的实测形态）：
+// 流式不得伪成功（不得写正常 [DONE]），非流式不得返回空正文。
+func TestForwardWebKimi_TrailerOnlyErrorFailsClosed(t *testing.T) {
+	const trailer = `{"error":{"code":"invalid_argument","message":"subscription required","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo"}]}}`
+
+	t.Run("non_streaming", func(t *testing.T) {
+		account := webKimiTestAccount(8943, nil)
+		upstream := &httpUpstreamRecorder{responses: []*http.Response{webKimiTrailerResponse(trailer)}}
+		recorder, err := runForwardWebKimi(t, account, webKimiInboundBody("kimi-k3"), "kimi-k3", upstream, &RateLimitService{})
+		require.Error(t, err, "trailer-only error must fail closed, not return an empty completion")
+		require.NotContains(t, recorder.Body.String(), `"object":"chat.completion"`, "must not emit a completion object")
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webKimiInboundBody("kimi-k3")))
+		svc := &OpenAIGatewayService{
+			cfg: &config.Config{
+				Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+			},
+		}
+		_, err := svc.handleWebKimiStreamingResponse(context.Background(), webKimiTrailerResponse(trailer),
+			c, webKimiTestAccount(8944, nil), "kimi-k3", "k3", time.Now(), webResponseModeChat)
+		require.Error(t, err, "trailer-only error must not be reported as a successful stream")
+		require.NotContains(t, recorder.Body.String(), "data: [DONE]", "must not emit a normal terminal frame")
+	})
 }
 
 // TestForwardWebKimi_MissingTokenFailsClosed access_token 缺失必须失败关闭，且不发出
@@ -468,6 +575,25 @@ func TestParseWebKimiEnvelopePayload(t *testing.T) {
 	t.Run("numeric_code_error", func(t *testing.T) {
 		ev := parseWebKimiEnvelopePayload([]byte(`{"code":401,"message":"auth failed"}`))
 		require.NotZero(t, ev.ErrCode)
+	})
+	t.Run("trailer_nested_string_code", func(t *testing.T) {
+		// Connect trailer 实测形态：flag=2 + {"error":{"code":"invalid_argument",...}}。
+		// 修复前顶层无 code/message → 全零值事件 → 不计有效帧 → 探活报「空流」。
+		ev := parseWebKimiEnvelopePayload([]byte(`{"error":{"code":"invalid_argument","message":"subscription required","details":[{"@type":"x"}]}}`))
+		require.Equal(t, "invalid_argument", ev.ErrCodeStr, "string business code must survive normalization")
+		require.Zero(t, ev.ErrCode, "string codes must not collapse into ErrCode=0 silently")
+		require.False(t, ev.AuthFailed)
+	})
+	t.Run("trailer_nested_unauthenticated", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"error":{"code":"unauthenticated","message":"token expired"}}`))
+		require.True(t, ev.AuthFailed, "nested unauthenticated must set AuthFailed")
+		require.Equal(t, "unauthenticated", ev.ErrCodeStr)
+	})
+	t.Run("trailer_nested_numeric_code", func(t *testing.T) {
+		ev := parseWebKimiEnvelopePayload([]byte(`{"error":{"code":16,"message":"quota exceeded"}}`))
+		require.Equal(t, int64(16), ev.ErrCode)
+		require.Empty(t, ev.ErrCodeStr)
+		require.False(t, ev.AuthFailed)
 	})
 	t.Run("user_role_text_excluded", func(t *testing.T) {
 		// 用户消息帧（role=user）的正文不得被当作助手正文聚合。

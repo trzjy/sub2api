@@ -249,7 +249,11 @@ func buildWebKimiRequestBody(prompt, webModel string, account *Account) []byte {
 		ProjectID: "",
 	}
 	data, _ := json.Marshal(req)
-	return data
+	// Connect RPC 流式 RPC 的**请求体**同样必须帧化（分析文档 §1.4 生产复测：发裸 JSON
+	// 会被上游以 HTTP 200 + flag=2 trailer {"error":{"code":"invalid_argument"}} 拒绝）。
+	// 帧化放在这里而不是 buildWebKimiUpstreamRequest：探活与转发的 401 重试都复用同一份
+	// 已构建 body，在 build-request 处帧化会导致重试时二次封帧（双帧）。
+	return encodeWebKimiConnectEnvelope(data)
 }
 
 // webKimiExtractPrompt 从入站 OpenAI 请求取最后一条 user 消息文本
@@ -504,8 +508,23 @@ type webKimiStreamEvent struct {
 	AssistantID string // assistant message 的 id（响应 id 来源）
 	TextDelta   string // block.text.content 增量（正文，op set/append 均追加）
 	ThinkDelta  string // block.think.content 增量（思考，op set/append 均追加）
-	AuthFailed  bool   // code/message 含 unauthenticated
-	ErrCode     int64  // 业务错误码（非 0）
+	AuthFailed  bool   // code/message（含嵌套 error）含 unauthenticated
+	ErrCode     int64  // 业务错误码：数字码（非 0）
+	ErrCodeStr  string // 业务错误码：字符串码（如 "invalid_argument" / "unauthenticated"）
+}
+
+// encodeWebKimiConnectEnvelope 是 readWebKimiConnectEnvelope 的对称编码端：把一帧 payload
+// 包成 Connect envelope（flag=0x00 + 4 字节大端长度 + payload）。
+//
+// 必要性（分析文档 §1.4，2026-09-21 生产复测）：Kimi Connect RPC 流式 RPC 的**请求体**也
+// 必须走 envelope 帧；此前生产侧只 Marshal 裸 JSON，上游一律回 HTTP 200 + flag=2 trailer
+// {"error":{"code":"invalid_argument"}}，转发表象为 502、探活表象为 "no valid frames parsed"。
+func encodeWebKimiConnectEnvelope(payload []byte) []byte {
+	out := make([]byte, 5+len(payload))
+	out[0] = 0x00 // 不压缩
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
+	copy(out[5:], payload)
+	return out
 }
 
 // readWebKimiConnectEnvelope 读取一帧 Connect RPC 流式 envelope：
@@ -552,6 +571,22 @@ func webKimiGunzip(data []byte) ([]byte, error) {
 	return io.ReadAll(r)
 }
 
+// webKimiExtractCode 归一化读取一个 code 节点：数字非 0 → int64，非空字符串 → 原样字符串；
+// 其余（缺失 / 数字 0 / 空串）返回零值。用于顶层 code 与 trailer 嵌套 error.code 同口径。
+func webKimiExtractCode(node gjson.Result) (int64, string) {
+	switch node.Type {
+	case gjson.Number:
+		if n := node.Int(); n != 0 {
+			return n, ""
+		}
+	case gjson.String:
+		if s := strings.TrimSpace(node.String()); s != "" {
+			return 0, s
+		}
+	}
+	return 0, ""
+}
+
 // parseWebKimiEnvelopePayload 把一帧 Connect envelope 的 JSON payload 解析为 webKimiStreamEvent。
 //
 // 登录态实测（10 §4）字段语义：
@@ -561,8 +596,12 @@ func webKimiGunzip(data []byte) ([]byte, error) {
 //     为思考增量（op=set 时值为当前完整内容，op=append 时为增量，按追加重排即可还原）；
 //   - 顶层 chat.id 提取会话 id；mask "message" 的 assistant message.id 提取响应 id；
 //   - usage 流内无（实测 0 处），本地估算兜底；
-//   - 业务/认证错误：携带非 0 的 code 或 message 含 unauthenticated（Connect 业务错误随
-//     HTTP 200 返回，与 401 unauthenticated 对称）。
+//   - 业务/认证错误：扁平形态为顶层 code/message，Connect trailer 形态（flag=2，实测
+//     {"error":{"code":"invalid_argument","details":[...]}}）嵌套在 error 对象里。二者必须
+//     统一识别——只认顶层会让 trailer 帧被判为「无字段的空事件」，进而不计有效帧、表象为
+//     "an empty response (no valid frames parsed)"（线上故障，2026-09-21）。
+//     数字码 → ErrCode，字符串码 → ErrCodeStr（gjson 对字符串 code 取 Int() 恒为 0，
+//     历史上字符串业务码被吞正是此原因）。
 func parseWebKimiEnvelopePayload(payload []byte) webKimiStreamEvent {
 	var ev webKimiStreamEvent
 	if !gjson.Valid(string(payload)) {
@@ -577,15 +616,25 @@ func parseWebKimiEnvelopePayload(payload []byte) webKimiStreamEvent {
 		ev.Done = true
 		return ev
 	}
-	// 业务/认证错误判定。
-	if code := v.Get("code"); code.Exists() {
-		if (code.Type == gjson.String && code.String() != "") || (code.Type == gjson.Number && code.Int() != 0) {
-			ev.ErrCode = code.Int()
+	// 业务/认证错误判定：顶层 code / error.code 取其一即可，字符串码落到 ErrCodeStr。
+	for _, node := range []gjson.Result{v, v.Get("error")} {
+		num, str := webKimiExtractCode(node.Get("code"))
+		if num != 0 {
+			ev.ErrCode = num
+		}
+		if str != "" && ev.ErrCodeStr == "" {
+			ev.ErrCodeStr = str
 		}
 	}
-	codeStr := strings.ToLower(strings.TrimSpace(v.Get("code").String()))
-	msgStr := strings.ToLower(strings.TrimSpace(v.Get("message").String()))
-	if strings.Contains(codeStr, "unauthenticated") || strings.Contains(msgStr, "unauthenticated") {
+	// 认证错误：任一处 code/message（含 trailer 嵌套）含 unauthenticated 即置位。
+	authText := strings.ToLower(strings.Join([]string{
+		ev.ErrCodeStr,
+		v.Get("code").String(),
+		v.Get("message").String(),
+		v.Get("error.code").String(),
+		v.Get("error.message").String(),
+	}, " "))
+	if strings.Contains(authText, "unauthenticated") {
 		ev.AuthFailed = true
 	}
 	// 会话 id（首帧 chat.id 返回）。
@@ -717,7 +766,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		// 业务/认证错误：首帧未写任何客户端字节（written=false）走完整错误路径；流中后段已
 		// 写出正文（written=true）则记 ops 错误并向客户端写流内 error 标记后中断收口，
 		// 绝不伪造正常结束。
-		if ev.AuthFailed || ev.ErrCode != 0 {
+		if ev.AuthFailed || ev.ErrCode != 0 || ev.ErrCodeStr != "" {
 			if !written {
 				errResp := &http.Response{
 					StatusCode: resp.StatusCode,
@@ -851,7 +900,7 @@ func (s *OpenAIGatewayService) handleWebKimiNonStreamingResponse(
 		if ev.ChatID != "" && responseID == "" {
 			responseID = ev.ChatID
 		}
-		if ev.AuthFailed || ev.ErrCode != 0 {
+		if ev.AuthFailed || ev.ErrCode != 0 || ev.ErrCodeStr != "" {
 			errResp := &http.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,

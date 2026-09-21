@@ -956,12 +956,18 @@ func evaluateWebKimiProbeStream(body io.Reader) string {
 	// 巨型帧，故直接用同一个 parseWebKimiEnvelopePayload 判定。
 	if head, err := reader.Peek(1); err == nil && head[0] == '{' {
 		raw, _ := io.ReadAll(reader)
+		// 裸 JSON 分支与下方帧分支同口径：先判认证/业务错误，再看有效帧（chat.id /
+		// 正文 / assistant id / done）。此前本分支无条件返回 empty，会把
+		// {"error":{"code":"invalid_argument"}} 报成「空流」，掩盖真实错误。
 		ev := parseWebKimiEnvelopePayload(raw)
 		switch {
 		case ev.AuthFailed:
 			return webProbeReasonAuthErr
-		case ev.ErrCode != 0:
+		case ev.ErrCode != 0 || ev.ErrCodeStr != "":
 			return webProbeReasonBusinessErr
+		}
+		if ev.TextDelta != "" || ev.ThinkDelta != "" || ev.AssistantID != "" || ev.ChatID != "" || ev.Done {
+			return ""
 		}
 		return webProbeReasonEmptyStream
 	}
@@ -979,7 +985,7 @@ func evaluateWebKimiProbeStream(body io.Reader) string {
 		switch {
 		case ev.AuthFailed:
 			return webProbeReasonAuthErr
-		case ev.ErrCode != 0:
+		case ev.ErrCode != 0 || ev.ErrCodeStr != "":
 			return webProbeReasonBusinessErr
 		case ev.Heartbeat:
 			continue

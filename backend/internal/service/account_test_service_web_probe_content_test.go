@@ -197,6 +197,72 @@ func TestWebProbe_KimiUnauthenticatedEnvelopeFailsClosed(t *testing.T) {
 	require.NotContains(t, body, "access token expired", "失败文案不得回显上游原文")
 }
 
+// webKimiEnvelopeTrailerFrame 构造 flag=0x02 的 Connect trailer 帧（错误/元数据位），
+// 即生产上「HTTP 200 + trailer {"error":{"code":"invalid_argument"}}」的实测线格式
+// （分析文档 §1.4）。flag=0x02 对 readWebKimiConnectEnvelope 仍是「读 4 字节长度 + payload」。
+func webKimiEnvelopeTrailerFrame(payload string) []byte {
+	frame := webKimiEnvelopeFrame(payload)
+	frame[0] = 0x02
+	return frame
+}
+
+// webKimiEnvelopeTrailerStream 把若干错误载荷组 trailer 帧拼成一条完整 Connect 流。
+func webKimiEnvelopeTrailerStream(payloads ...string) []byte {
+	var out bytes.Buffer
+	for _, p := range payloads {
+		out.Write(webKimiEnvelopeTrailerFrame(p))
+	}
+	return out.Bytes()
+}
+
+// --- kimi：HTTP 200 + flag=2 trailer 业务错误（invalid_argument）→ 业务错误口径 ---
+
+// 线上故障形态（分析文档 §1.4）：请求体未帧化时上游一律回 HTTP 200 + trailer
+// {"error":{"code":"invalid_argument"}}。修复前解析器只认顶层 code → 事件全零 → 不计有效帧
+// → 探活报 "an empty response (no valid frames parsed)"，掩盖真实业务错误。
+func TestWebProbe_KimiTrailerBusinessErrorFailsClosed(t *testing.T) {
+	svc, _ := webProbeService(webProbeResponse(http.StatusOK, string(webKimiEnvelopeTrailerStream(
+		`{"error":{"code":"invalid_argument","message":"subscription required","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo"}]}}`,
+	))))
+	account := &Account{
+		ID: 8107, Platform: PlatformKimi, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "SUPER_SECRET_TOKEN_8877"},
+	}
+	ctx, rec := newWebTestContext()
+
+	err := svc.testWebAccountConnection(ctx, account, "", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "business error", "trailer business error must NOT be reported as an empty stream")
+	require.NotContains(t, err.Error(), "empty response")
+
+	body := rec.Body.String()
+	require.NotContains(t, body, "Web login session is healthy.")
+	require.NotContains(t, body, `"success":true`)
+	require.NotContains(t, body, "SUPER_SECRET_TOKEN_8877", "失败文案不得回显 token 明文")
+}
+
+// --- kimi：HTTP 200 + trailer unauthenticated → 认证错误口径 ---
+
+func TestWebProbe_KimiTrailerUnauthenticatedReportsAuthError(t *testing.T) {
+	svc, _ := webProbeService(webProbeResponse(http.StatusOK, string(webKimiEnvelopeTrailerStream(
+		`{"error":{"code":"unauthenticated","message":"access token expired"}}`,
+	))))
+	account := &Account{
+		ID: 8108, Platform: PlatformKimi, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "SUPER_SECRET_TOKEN_8877"},
+	}
+	ctx, rec := newWebTestContext()
+
+	err := svc.testWebAccountConnection(ctx, account, "", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unauthenticated", "nested unauthenticated must be classified as an auth error")
+
+	body := rec.Body.String()
+	require.NotContains(t, body, "Web login session is healthy.")
+	require.NotContains(t, body, `"success":true`)
+	require.NotContains(t, body, "access token expired", "失败文案不得回显上游原文")
+}
+
 // --- kimi：HTTP 200 + 非 0 业务码帧 → 失败（业务错误口径） ---
 
 func TestWebProbe_KimiBusinessErrorCodeFailsClosed(t *testing.T) {
@@ -217,6 +283,24 @@ func TestWebProbe_KimiBusinessErrorCodeFailsClosed(t *testing.T) {
 	body := rec.Body.String()
 	require.NotContains(t, body, `"success":true`)
 	require.NotContains(t, body, "quota exceeded", "失败文案不得回显上游原文")
+}
+
+// --- kimi：HTTP 200 + 裸 JSON（非 envelope）携带会话/正文 → 健康 ---
+//
+// 裸 JSON 分支（异常形态）必须与 envelope 帧分支同口径：不得因为「不是二进制帧」就无条件
+// 报空流，只要载荷里有 chat.id / 正文 / done 等有效信号即判健康。
+func TestWebProbe_KimiBareJSONWithChatIDReportsHealthy(t *testing.T) {
+	svc, _ := webProbeService(webProbeResponse(http.StatusOK,
+		`{"chat":{"id":"chat-bare-1"},"message":{"id":"msg-bare-1","role":"assistant"}}`))
+	account := &Account{
+		ID: 8109, Platform: PlatformKimi, Type: AccountTypeAPIKey, Concurrency: 1,
+		Credentials: map[string]any{"access_mode": AccountAccessModeWeb, "access_token": "kimi-access-token"},
+	}
+	ctx, rec := newWebTestContext()
+
+	require.NoError(t, svc.testWebAccountConnection(ctx, account, "", ""))
+	require.Contains(t, rec.Body.String(), "Web login session is healthy.")
+	require.Contains(t, rec.Body.String(), `"success":true`)
 }
 
 // --- zhipu：空返回 → 失败；有效帧 → 健康 ---
