@@ -610,6 +610,13 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 		return "", fmt.Errorf("kimi 短信验证码发送响应读取失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		s.logger.Info("kimi 短信验证码发送 HTTP 错误诊断",
+			"platform", PlatformKimi,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+		)
 		return "", s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信验证码发送")
 	}
 	var parsed webKimiSendSMSResponse
@@ -669,6 +676,15 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 		return nil, fmt.Errorf("kimi 短信登录响应读取失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		bizMsg := smsFirstStringValue(raw, "message", "msg", "detail", "error", "error_message", "description")
+		s.logger.Info("kimi 短信登录 HTTP 错误诊断",
+			"platform", PlatformKimi,
+			"status", resp.StatusCode,
+			"content_type", resp.Header.Get("Content-Type"),
+			"body_bytes", len(raw),
+			"json_keys", smsJSONShape(raw),
+			"has_biz_message", bizMsg != "",
+		)
 		return nil, s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信登录")
 	}
 
