@@ -1058,7 +1058,7 @@ describe('CreateAccountModal upstream billing probe eligibility', () => {
       type: 'apikey',
       credentials: { access_mode: 'web' },
     })
-    expect(draft.upstream_billing_probe_enabled).toBe(true)
+    expect(draft.upstream_billing_probe_enabled).toBeUndefined()
     expect(createAccountMock).not.toHaveBeenCalled()
   })
 

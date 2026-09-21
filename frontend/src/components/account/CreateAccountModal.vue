@@ -4374,9 +4374,13 @@ const webAccountDraft = computed<CreateAccountRequest>(() => ({
   group_ids: [...form.group_ids],
   expires_at: form.expires_at,
   auto_pause_on_expired: autoPauseOnExpired.value,
-  upstream_billing_probe_enabled: isUpstreamBillingProbeEligible(form.platform, form.type)
-    ? upstreamBillingAutoProbeEnabled.value
-    : undefined
+  // 网页接入模式账号（平台为官方值但 credentials["access_mode"]="web"，无静态密钥）
+  // 不在探测白名单内，isUpstreamBillingProbeEligible(官方平台, apikey) 会命中 true，
+  // 需在此显式排除，否则后端 fail-closed 返回 400 UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。
+  upstream_billing_probe_enabled:
+    isUpstreamBillingProbeEligible(form.platform, form.type) && !isWebAccessModePlatform.value
+      ? upstreamBillingAutoProbeEnabled.value
+      : undefined,
 }))
 
 function handleAutoLoginRecovered() {
