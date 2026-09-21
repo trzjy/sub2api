@@ -610,12 +610,17 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeKimi(ctx context.Context, phone
 		return "", fmt.Errorf("kimi 短信验证码发送响应读取失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		// Connect 错误信封的真实原因在 details[0]，仅凭 status/json_keys 无法定位，
+		// 故补 err_code 与 err_details（脱敏：不含 value 载荷与 debug 值）。
+		errCode, errDetails := smsConnectErrorShape(raw)
 		s.logger.Info("kimi 短信验证码发送 HTTP 错误诊断",
 			"platform", PlatformKimi,
 			"status", resp.StatusCode,
 			"content_type", resp.Header.Get("Content-Type"),
 			"body_bytes", len(raw),
 			"json_keys", smsJSONShape(raw),
+			"err_code", errCode,
+			"err_details", errDetails,
 		)
 		return "", s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信验证码发送")
 	}
@@ -677,6 +682,9 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 	}
 	if resp.StatusCode >= 400 {
 		bizMsg := smsFirstStringValue(raw, "message", "msg", "detail", "error", "error_message", "description")
+		// 上游响应体无可读文案键（生产实证 has_biz_message=false），失败原因只存在于
+		// Connect 错误信封的 details[0]，故补 err_code 与 err_details（脱敏形状）。
+		errCode, errDetails := smsConnectErrorShape(raw)
 		s.logger.Info("kimi 短信登录 HTTP 错误诊断",
 			"platform", PlatformKimi,
 			"status", resp.StatusCode,
@@ -684,6 +692,8 @@ func (s *WebPlatformAutoLoginService) verifySmsCodeKimi(ctx context.Context, pho
 			"body_bytes", len(raw),
 			"json_keys", smsJSONShape(raw),
 			"has_biz_message", bizMsg != "",
+			"err_code", errCode,
+			"err_details", errDetails,
 		)
 		return nil, s.smsHTTPStatusError(PlatformKimi, resp.StatusCode, "kimi 短信登录")
 	}
@@ -774,6 +784,100 @@ func smsJSONShape(raw []byte) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// smsConnectUnparsed 用于 smsConnectErrorShape 的降级标记：响应体不是对象 / JSON 解析失败 /
+// details 不是数组时，用它占位，保证诊断字段永不为 nil 也不 panic。
+const smsConnectUnparsed = "<unparsed>"
+
+// smsConnectErrorShape 从 Connect-Go 标准错误信封 {"code": "...", "details": [...]} 提取
+// 定位失败原因所需的结构摘要，返回 (code, details)。
+// 生产实证动机（镜像 e74fe85cf-w，2026-09-21）：kimi 上游 auth.kimi.com 的 HTTP 4xx 响应体
+// 顶层只有 code + details 两个键（code 为 15 字符即 Connect 码 unauthenticated），既没有
+// message/msg/detail/error 等可读文案键，smsJSONShape 也只能给出 details=array(len=1)。
+// 真实原因只存在于 details[0]（Connect ErrorDetail 形态 {type, value, debug}），
+// 只打长度等于仍然瞎，因此本函数把 details 展开到「类型 + 是否含 value + debug 键名」这一层。
+//
+// 零凭据红线：返回值**绝不**包含 details[].value 载荷（base64 proto，可能含手机号/验证码/token）
+// 与 debug 的具体值；只输出 code 字符串（错误码枚举名，非凭据）、type 字符串、value 的存在性
+// 布尔与 debug 的键名列表。
+func smsConnectErrorShape(raw []byte) (string, string) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return "", smsConnectUnparsed
+	}
+	code := ""
+	if v := bytes.TrimSpace(top["code"]); len(v) > 0 && v[0] == '"' {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			code = s
+		}
+	}
+	detailsRaw, ok := top["details"]
+	if !ok {
+		return code, ""
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(detailsRaw, &items); err != nil {
+		return code, smsConnectUnparsed
+	}
+	parts := make([]string, 0, len(items))
+	for i, item := range items {
+		parts = append(parts, fmt.Sprintf("#%d%s", i, smsConnectDetailShape(item)))
+	}
+	return code, strings.Join(parts, " ")
+}
+
+// smsConnectDetailShape 描述单个 Connect ErrorDetail 的形状，与 smsConnectErrorShape 同红线：
+// 只输出 type 值、value 的存在性、debug 的键名，绝不输出 value 载荷与 debug 的值。
+func smsConnectDetailShape(raw json.RawMessage) string {
+	var detail map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		return "{<unparsed>}"
+	}
+	keys := make([]string, 0, len(detail))
+	for k := range detail {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		switch k {
+		case "value":
+			// value 是 base64 编码的 proto 载荷，可能含手机号/验证码/token：只报存在性。
+			parts = append(parts, "value_present=true")
+		case "debug":
+			parts = append(parts, "debug_keys="+smsDebugKeys(detail[k]))
+		case "type":
+			var s string
+			if err := json.Unmarshal(detail[k], &s); err == nil {
+				parts = append(parts, "type="+s)
+				continue
+			}
+			parts = append(parts, "type=<non-string>")
+		default:
+			// 其余键（未知扩展字段）一律只报键名，避免值泄露。
+			parts = append(parts, k+"=<omitted>")
+		}
+	}
+	return "{" + strings.Join(parts, " ") + "}"
+}
+
+// smsDebugKeys 返回 debug 子对象的键名列表（只留键名，不留值），非对象时降级。
+func smsDebugKeys(raw json.RawMessage) string {
+	var debug map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &debug); err != nil {
+		return "<non-object>"
+	}
+	if len(debug) == 0 {
+		return "<empty>"
+	}
+	keys := make([]string, 0, len(debug))
+	for k := range debug {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // smsFirstStringValue 从 JSON 体中按候选键顺序提取第一个非空字符串值，

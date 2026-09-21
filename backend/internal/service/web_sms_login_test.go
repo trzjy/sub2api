@@ -580,3 +580,47 @@ func TestSMSJSONShapeNonObject(t *testing.T) {
 	require.Equal(t, "not-an-object", smsJSONShape([]byte(`[1,2]`)))
 	require.Equal(t, "not-an-object", smsJSONShape([]byte(`"x"`)))
 }
+
+// smsConnectErrorShape 从 Connect 错误信封提取 code 与 details 形状，
+// **绝不输出 details[].value（base64 proto 载荷）与 debug 的值**——诊断日志零凭据红线。
+func TestSMSConnectErrorShapeExtractsCodeAndDetailType(t *testing.T) {
+	// 形态取自生产实证：顶层只有 code + details；value 为不可泄露的 base64 载荷。
+	raw := []byte(`{"code":"unauthenticated","details":[` +
+		`{"type":"account.gateway.v1.SMSVerifyError","value":"Q0xBU1NJRklFRC1WQUxVRS0xMzgwMDAwMDAwMA==",` +
+		`"debug":{"reason":"sms code expired","phone":"13800000000"}}]}`)
+	code, details := smsConnectErrorShape(raw)
+	require.Equal(t, "unauthenticated", code)
+	require.Contains(t, details, "#0{")
+	require.Contains(t, details, "type=account.gateway.v1.SMSVerifyError")
+	require.Contains(t, details, "value_present=true")
+	require.Contains(t, details, "debug_keys=phone,reason")
+
+	// 红线：base64 载荷、debug 值、手机号一律不出现在输出里。
+	require.NotContains(t, details, "Q0xBU1NJRklFRC1WQUxVRS0xMzgwMDAwMDAwMA==")
+	require.NotContains(t, details, "13800000000")
+	require.NotContains(t, details, "sms code expired")
+}
+
+// 非信封体 / 非法 JSON / details 非数组：优雅降级不 panic，也不泄露内容。
+func TestSMSConnectErrorShapeDegrades(t *testing.T) {
+	code, details := smsConnectErrorShape([]byte(`not json`))
+	require.Equal(t, "", code)
+	require.Equal(t, smsConnectUnparsed, details)
+
+	code, details = smsConnectErrorShape([]byte(`[1,2]`))
+	require.Equal(t, "", code)
+	require.Equal(t, smsConnectUnparsed, details)
+
+	code, details = smsConnectErrorShape([]byte(`{"code":"unauthenticated"}`))
+	require.Equal(t, "unauthenticated", code)
+	require.Equal(t, "", details)
+
+	code, details = smsConnectErrorShape([]byte(`{"code":"invalid_argument","details":"oops"}`))
+	require.Equal(t, "invalid_argument", code)
+	require.Equal(t, smsConnectUnparsed, details)
+
+	code, details = smsConnectErrorShape([]byte(`{"code":"x","details":[1,"two"]}`))
+	require.Equal(t, "x", code)
+	require.Contains(t, details, "#0{<unparsed>}")
+	require.Contains(t, details, "#1{<unparsed>}")
+}
