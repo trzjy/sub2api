@@ -3325,7 +3325,21 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		if mapped := service.WebModelCatalogPlatform(account.Platform); mapped != "" {
 			webPlatform = mapped
 		}
-		webIDs := service.DefaultWebModelIDs(webPlatform, service.AccountAccessModeWeb)
+		// 返回 = 平台默认目录 ∪ 账号 model_mapping 的键（去重、保序），与上方
+		// CodeBuddy 分支同口径。此前只返回硬编码目录、完全忽略 model_mapping，
+		// 导致管理员配的救命映射（如 kimi-k3 → k2d6-chat）在下拉里根本选不到
+		// （2026-09-22 线上故障）。
+		mappingKeys := make([]string, 0, len(mapping))
+		for requestedModel := range mapping {
+			if trimmed := strings.TrimSpace(requestedModel); trimmed != "" {
+				mappingKeys = append(mappingKeys, trimmed)
+			}
+		}
+		sort.Strings(mappingKeys)
+		webIDs := service.MergeAndDedupModelIDs(
+			service.DefaultWebModelIDs(webPlatform, service.AccountAccessModeWeb),
+			mappingKeys,
+		)
 		webModels := make([]claude.Model, 0, len(webIDs))
 		for _, id := range webIDs {
 			webModels = append(webModels, claude.Model{ID: id, Type: "model", DisplayName: id})

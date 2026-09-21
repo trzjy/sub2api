@@ -233,6 +233,9 @@ func TestWebZhipuDownstream_UpstreamErrorNoCredentialLeak(t *testing.T) {
 func TestWebZhipuDownstream_WebModelIDAnchor(t *testing.T) {
 	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb),
 		"deepseek web default model catalogue must not regress")
-	require.Equal(t, []string{"kimi-k3"}, DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb),
+	// kimi：2026-09-22 补全（此前只有 kimi-k3，恰是免费档会被 upstream 以
+	// invalid_argument 拒绝的付费模型）；防误改锚点改为「目录不得退化回单项」。
+	require.Equal(t, []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"},
+		DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb),
 		"kimi web default model catalogue must not regress")
 }

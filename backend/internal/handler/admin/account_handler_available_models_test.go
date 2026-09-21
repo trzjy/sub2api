@@ -526,3 +526,135 @@ func TestAccountHandlerSyncUpstreamModels_MetadataEnrichmentFailureReturnsWarnin
 	require.Len(t, resp.Data.Warnings, 1)
 	require.Equal(t, "upstream_model_metadata_incomplete", resp.Data.Warnings[0].Code)
 }
+
+func webAvailableModelsAccount(id int64, credentials map[string]any) service.Account {
+	return service.Account{
+		ID:          id,
+		Name:        "kimi-web",
+		Platform:    service.PlatformKimi,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Credentials: credentials,
+	}
+}
+
+// TestAccountHandlerGetAvailableModels_WebPlatformCatalog 回归：web 接入模式账号空
+// model_mapping 时回落到平台默认目录（不误回落 Claude 默认模型），且 kimi 目录不再是
+// 单项（2026-09-22 线上故障：免费档可用模型选不到）。
+func TestAccountHandlerGetAvailableModels_WebPlatformCatalog(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: webAvailableModelsAccount(51, map[string]any{
+			"access_mode": service.AccountAccessModeWeb,
+		}),
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/51/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	var ids []string
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+	require.Equal(t, service.DefaultWebModelIDs(service.PlatformKimi, service.AccountAccessModeWeb), ids)
+	require.GreaterOrEqual(t, len(ids), 4)
+	require.Contains(t, ids, "kimi-k2d6")
+	require.Contains(t, ids, "kimi-k2d6-chat")
+}
+
+// TestAccountHandlerGetAvailableModels_WebMergesModelMapping 锁定 web 分支返回
+// 平台目录 ∪ 账号 model_mapping 键（去重、保序）：管理员配的映射键必须能在下拉里
+// 出现并可选——此前完全被忽略，配了 kimi-k3 → k2d6-chat 也选不到（线上故障）。
+func TestAccountHandlerGetAvailableModels_WebMergesModelMapping(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: webAvailableModelsAccount(52, map[string]any{
+			"access_mode": service.AccountAccessModeWeb,
+			"model_mapping": map[string]any{
+				"kimi-k3":        "k2d6-chat",
+				"kimi-k2d6-chat": "k2d6-chat", // 与目录同名，须去重
+				"custom-kimi":    "k2d6-chat", // 目录外映射键，须出现
+			},
+		}),
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/52/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	var ids []string
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+
+	// 目录项全部保留（顺序在前）
+	require.Equal(t, service.DefaultWebModelIDs(service.PlatformKimi, service.AccountAccessModeWeb), ids[:4])
+	// 目录外映射键补入（sorted 追加）
+	require.Equal(t, []string{"custom-kimi"}, ids[4:])
+	// 目录内同名映射键不重复出现
+	require.Len(t, ids, 5)
+	require.Equal(t, len(ids), len(dedupStrings(ids)))
+}
+
+// TestAccountHandlerGetAvailableModels_NonWebAccountUnaffected 回归：非 web 接入模式
+// 的 kimi API 账号不受本次改动影响，仍按既有 mapping / 默认模型口径返回。
+func TestAccountHandlerGetAvailableModels_NonWebAccountUnaffected(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: webAvailableModelsAccount(53, map[string]any{
+			"model_mapping": map[string]any{
+				"kimi-k3": "kimi-k3",
+			},
+		}),
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/53/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.Equal(t, "kimi-k3", resp.Data[0].ID)
+}
+
+func dedupStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}

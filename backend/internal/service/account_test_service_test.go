@@ -326,7 +326,10 @@ func TestWebAccountConnection_KimiProbeNoRegression(t *testing.T) {
 	require.Equal(t, "application/connect+json", upstream.lastReq.Header.Get("Content-Type"))
 	body, rErr := io.ReadAll(upstream.lastReq.Body)
 	require.NoError(t, rErr)
-	require.Equal(t, "k3", gjson.GetBytes(body, "options.model").String())
+	// 空 modelID 回落 DefaultWebModelIDs 目录首项。2026-09-22 起目录首项为免费档实测
+	// 可用的 kimi-k2d6-chat（原首项 kimi-k3 是付费模型，免费档探活会被上游以
+	// invalid_argument 拒绝），出站归一 k2d6-chat 由转发链 webKimiModelName 完成。
+	require.Equal(t, "k2d6-chat", gjson.GetBytes(body, "options.model").String())
 }
 
 // TestWebAccountConnection_KimiRespectsModelID kimi 尊重非空 modelID + model_mapping。

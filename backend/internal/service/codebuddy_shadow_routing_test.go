@@ -28,11 +28,16 @@ func TestDefaultCodeBuddyShadowModelMapping(t *testing.T) {
 		}, m)
 	})
 
-	t.Run("kimi shadow writes single official id plus identity", func(t *testing.T) {
+	t.Run("kimi shadow writes official ids plus identity", func(t *testing.T) {
+		// 官方 ID 清单随 DefaultWebModelIDs SSOT 走：2026-09-22 补全 kimi 目录
+		// （免费档 k2d6 / k2d6-chat 可用）后，影子默认 mapping 同步覆盖全部目录项。
 		m := defaultCodeBuddyShadowModelMapping(PlatformKimi, "kimi-k3-turbo")
 		require.Equal(t, map[string]any{
-			"kimi-k3":       "kimi-k3-turbo",
-			"kimi-k3-turbo": "kimi-k3-turbo",
+			"kimi-k2d6-chat":      "kimi-k3-turbo",
+			"kimi-k2d6":           "kimi-k3-turbo",
+			"kimi-k3":             "kimi-k3-turbo",
+			"kimi-k3-agent-ultra": "kimi-k3-turbo",
+			"kimi-k3-turbo":       "kimi-k3-turbo",
 		}, m)
 	})
 

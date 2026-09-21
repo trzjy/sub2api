@@ -239,7 +239,16 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 	case PlatformDeepseek:
 		return []string{"deepseek-chat", "deepseek-reasoner"}
 	case PlatformKimi:
-		return []string{"kimi-k3"}
+		// 2026-09-22 线上故障修复：目录此前只有 kimi-k3 一项——而它恰恰是免费档账号
+		// 请求会被上游以 invalid_argument 拒绝的付费模型；免费档实测可用的 k2d6 /
+		// k2d6-chat 从未出现在下拉里，管理员配的账号级 model_mapping 又被 web 分支
+		// 忽略，形成死循环。
+		// 依据 docs/web-reverse-analysis-plan.md §60（免费档实测仅 k2d6 / k2d6-chat 可用）
+		// 与 §167（kimi-k3 → k3 需付费订阅，生产建议映射 kimi-k3 → k2d6-chat）补全。
+		// 免费档可用项置前，便于用户选到能用的；付费档 k3 / k3-agent-ultra 保留。
+		// 出站归一（kimi-k2d6-chat → k2d6-chat 等）由转发链 webKimiModelName 完成，
+		// 此处一律用公开模型名（与 /models 列表和 model_mapping 键同口径）。
+		return []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"}
 	default:
 		return nil
 	}
@@ -250,26 +259,23 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 // （docs/platform-merge-refactor-plan.md §5.6：Web 账号不得回落 API 模型目录、不猜测）。
 // 错误信息仅含模型名与平台，不泄露任何凭证。
 //
-// 各 web 适配器接受的公开 ID（与适配器映射一致；kimi 额外接受 agent-ultra 内部变体，
-// 公开目录以固定 ID kimi-k3 为准）：
+// 各 web 适配器接受的公开 ID 一律取自 DefaultWebModelIDs（唯一 SSOT），避免两份名单
+// 漂移（2026-09-22 线上故障：kimi 目录与校验集合曾各自硬编码且已漂移）；kimi 额外
+// 接受转发链归一的内部变体（webKimiModelName 同款，当前公开目录已含，此处仅兜底）。
 //   - zhipu:    glm-5.3-flash
 //   - deepseek: deepseek-chat, deepseek-reasoner
-//   - kimi:     kimi-k3, kimi-k3-agent-ultra
+//   - kimi:     kimi-k2d6-chat, kimi-k2d6, kimi-k3, kimi-k3-agent-ultra
 func ValidateWebModel(provider, model string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return fmt.Errorf("%s web model is required but was empty", provider)
 	}
-	var allowed []string
-	switch provider {
-	case PlatformZhipu:
-		allowed = []string{"glm-5.3-flash"}
-	case PlatformDeepseek:
-		allowed = []string{"deepseek-chat", "deepseek-reasoner"}
-	case PlatformKimi:
-		allowed = []string{"kimi-k3", "kimi-k3-agent-ultra"}
-	default:
-		allowed = DefaultWebModelIDs(provider, AccountAccessModeWeb)
+	allowed := DefaultWebModelIDs(provider, AccountAccessModeWeb)
+	if provider == PlatformKimi {
+		allowed = MergeAndDedupModelIDs(allowed, []string{"kimi-k3-agent-ultra"})
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("%s web model %q is not supported", provider, model)
 	}
 	for _, a := range allowed {
 		if model == a {
