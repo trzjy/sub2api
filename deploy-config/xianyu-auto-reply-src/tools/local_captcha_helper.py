@@ -354,18 +354,30 @@ const script = document.createElement('script');
 script.src = {json.dumps(GLM_CAPTCHA_SDK_URL)};
 script.onload = () => {{
   if (typeof window.initSMCaptcha !== 'function') return fail('数美 SDK 未就绪');
-  const instance = window.initSMCaptcha({{
+  // 2026-09-21 实测（smcp.min.js 当前线上版）：initSMCaptcha 返回 undefined（旧版返回实例，
+  // instance.onSuccess 检查必失败 → "数美组件初始化失败"），组件自渲染到 appendTo 容器
+  // （shumei_captcha product-embed mode-slide），成功/失败回调走 options 内 onSuccess/onError。
+  // 兼容两种形态：回调注册进 options，同时若返回了实例且带 onSuccess 也挂一份。
+  const opts = {{
     organization: {json.dumps(GLM_CAPTCHA_ORGANIZATION)}, appendTo: '#glm-captcha',
-    product: 'embed', width: '100%'
-  }});
-  if (!instance || typeof instance.onSuccess !== 'function') return fail('数美组件初始化失败');
-  instance.onSuccess((data) => {{
-    if (!data || typeof data.rid !== 'string' || !data.rid) return fail('数美回调缺少 rid');
-    if (typeof data.md5 !== 'string' || !data.md5) return fail('数美回调缺少已取证 md5');
-    statusNode.textContent = '验证完成，可以返回管理页';
-    window.challengeComplete({{rid: data.rid, md5: data.md5}});
-  }});
-  if (typeof instance.onClose === 'function') instance.onClose(() => fail('验证窗口已关闭'));
+    product: 'embed', width: '100%',
+    onSuccess: (data) => {{
+      if (!data || typeof data.rid !== 'string' || !data.rid) return fail('数美回调缺少 rid');
+      if (typeof data.md5 !== 'string' || !data.md5) return fail('数美回调缺少已取证 md5');
+      statusNode.textContent = '验证完成，可以返回管理页';
+      window.challengeComplete({{rid: data.rid, md5: data.md5}});
+    }},
+    onError: (e) => fail('数美验证失败: ' + String(e && e.msg || e).slice(0, 80)),
+  }};
+  let instance = null;
+  try {{ instance = window.initSMCaptcha(opts); }} catch (e) {{ return fail('数美组件初始化异常: ' + String(e.message).slice(0, 80)); }}
+  // 渲染兜底确认：容器内出现 shumei_captcha 节点即组件已挂载（否则 3 秒后失败）。
+  setTimeout(() => {{
+    const box = document.querySelector('#glm-captcha .shumei_captcha');
+    if (!box) fail('数美组件渲染失败（容器无滑块节点）');
+  }}, 3000);
+  if (instance && typeof instance.onSuccess === 'function') instance.onSuccess(opts.onSuccess);
+  if (instance && typeof instance.onClose === 'function') instance.onClose(() => fail('验证窗口已关闭'));
 }};
 script.onerror = () => fail('数美 SDK 加载失败');
 document.head.appendChild(script);
