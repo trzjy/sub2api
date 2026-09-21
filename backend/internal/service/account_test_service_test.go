@@ -117,7 +117,7 @@ func TestWebZhipuTestRespectsSelectedModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, rec := newWebTestContext()
 	upstream := &webProbeUpstream{}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebZhipuProbeResponse())
 	account := &Account{
 		ID:          1,
 		Platform:    PlatformZhipu,
@@ -158,7 +158,7 @@ func TestWebZhipuTestAuthorizationBearerFromCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newWebTestContext()
 	upstream := &webProbeUpstream{}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebZhipuProbeResponse())
 	// JWT payload: {"device_id":"dev123","typ":"access"}（base64url）
 	jwt := "header.eyJkZXZpY2VfaWQiOiJkZXYxMjMiLCJ0eXAiOiJhY2Nlc3MifQ.sig"
 	account := &Account{
@@ -181,7 +181,7 @@ func TestWebZhipuTestEmptyModelUsesDefaultAndMappingApplies(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, rec := newWebTestContext()
 	upstream := &webProbeUpstream{}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebZhipuProbeResponse())
 	account := &Account{
 		ID:          3,
 		Platform:    PlatformZhipu,
@@ -251,7 +251,7 @@ func TestWebAccountConnection_DeepSeekProbeNoRegression(t *testing.T) {
 		webDeepseekSessionCreateResponse(),
 		nil, // completion 响应稍后注入（newWebTestService 设置 upstream.resp）
 	}}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebDeepseekProbeResponse())
 	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          11,
@@ -284,7 +284,7 @@ func TestWebAccountConnection_DeepSeekRespectsModelIDAndMapping(t *testing.T) {
 		webDeepseekSessionCreateResponse(),
 		nil,
 	}}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebDeepseekProbeResponse())
 	upstream.respSeq[2] = upstream.resp
 	account := &Account{
 		ID:          12,
@@ -311,7 +311,7 @@ func TestWebAccountConnection_KimiProbeNoRegression(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newWebTestContext()
 	upstream := &webProbeUpstream{}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebKimiProbeResponse())
 	account := &Account{
 		ID:          21,
 		Platform:    PlatformKimi,
@@ -334,7 +334,7 @@ func TestWebAccountConnection_KimiRespectsModelID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := newWebTestContext()
 	upstream := &webProbeUpstream{}
-	svc := newWebTestService(upstream, okSSEResponse())
+	svc := newWebTestService(upstream, okWebKimiProbeResponse())
 	account := &Account{
 		ID:          22,
 		Platform:    PlatformKimi,

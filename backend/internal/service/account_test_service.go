@@ -598,9 +598,15 @@ func resolveWebTestModel(account *Account, modelID, platform string) string {
 //
 // 与 Claude / OpenAI API Key 走不同协议，web 平台登录态载体是整串 Cookie
 // （deepseek web / zhipu web）或 Kimi access_token（kimi web）。探活只构造一个
-// 最小出站请求打到达对应官方对话端点，按 HTTP 状态码判定：2xx → 登录态有效；
-// 401/403 → 上游拒绝（历史 401 不足为凭：测试链此前不完整，不能断言凭证失效）；
-// 其余 → 请求失败。错误文案只含平台/端点/状态码，绝不回显凭证值。
+// 最小出站请求打到达对应官方对话端点，按「状态码 + 响应流内容」双口径判定：
+//   - 2xx → 继续消费响应体校验有效帧：≥1 个有效帧且无错误帧 → 登录态有效；
+//     空 body / 只有心跳 / 上游业务错误帧 → 失败（见 evaluateWebProbeStream）；
+//   - 401/403 → 上游拒绝（历史 401 不足为凭：测试链此前不完整，不能断言凭证失效）；
+//   - 其余 → 请求失败。
+//
+// 双口径由来（线上故障）：Kimi Connect RPC 的认证/业务错误随 HTTP 200 返回，上游异常时
+// 也可能只回空 body 或纯心跳帧，只看状态码会把过期 access_token 的坏账号判成 healthy。
+// 错误文案只含平台/端点/状态码，绝不回显凭证值（含上游原文，可能携带凭证）。
 func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 
@@ -760,6 +766,12 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		// 2xx 不等于成功：Kimi Connect / zhipu / deepseek 的业务与认证错误都可能随
+		// HTTP 200 返回，且上游异常时可能只回空 body 或纯心跳帧。必须消费响应体并
+		// 校验有效帧（≥1 个有效帧且无错误帧），否则坏账号会被判成 healthy。
+		if reason := evaluateWebProbeStream(webPlatform, resp.Body); reason != "" {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned %s", chatPath, reason))
+		}
 		s.sendEvent(c, TestEvent{Type: "content", Text: "Web login session is healthy."})
 		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 		return nil
@@ -776,6 +788,12 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 			if retryErr == nil && retryResp != nil {
 				switch {
 				case retryResp.StatusCode >= 200 && retryResp.StatusCode < 300:
+					// 与首发同口径：续期成功不等于登录态可用，2xx 仍须消费流校验有效帧。
+					if reason := evaluateWebProbeStream(webPlatform, retryResp.Body); reason != "" {
+						_, _ = io.Copy(io.Discard, retryResp.Body)
+						_ = retryResp.Body.Close()
+						return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned %s", chatPath, reason))
+					}
 					s.sendEvent(c, TestEvent{Type: "content", Text: "Web login session is healthy."})
 					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 					return nil
@@ -798,6 +816,152 @@ func (s *AccountTestService) testWebAccountConnection(c *gin.Context, account *A
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("web upstream (%s) returned HTTP %d", chatPath, resp.StatusCode))
 	}
+}
+
+// web 探活 2xx 响应体的判定结论（拼在 "web upstream (%s) returned %s" 之后）。
+// 常量只描述结论本身，绝不回显上游原文（上游错误体可能携带凭证/内部信息）。
+const (
+	// 空流：正常结束（done / EOF）但没有任何有效帧（空 body、只有心跳、不可识别结构）。
+	webProbeReasonEmptyStream = "an empty response (no valid frames parsed)"
+	// 上游业务错误：HTTP 200 + 非 0 code 帧（zhipu code / deepseek code|data.biz_code）。
+	webProbeReasonBusinessErr = "an upstream business error (login state rejected)"
+	// 上游认证错误：帧内 code/message 含 unauthenticated（kimi 登录态失效典型形态）。
+	webProbeReasonAuthErr = "an upstream auth error (unauthenticated)"
+)
+
+// webProbeMaxStreamBytes 探活响应体的读取上限：判定只需前若干帧，无需消费整条长流
+// （超出部分由调用方的 drain defer 丢弃）。
+const webProbeMaxStreamBytes = 1 << 20
+
+// evaluateWebProbeStream 消费 web 探活 2xx 响应体并判定登录态是否真的可用：
+// 返回 "" 表示健康（≥1 个有效帧且无错误帧），非空为失败原因（已脱敏）。
+//
+// 背景（线上故障）：Kimi Connect RPC 的认证/业务错误随 HTTP 200 返回，上游异常时也可能
+// 只回空 body 或纯心跳帧 —— 只看 HTTP 状态码会把坏账号判成 healthy。
+//
+// 解析器一律复用转发链既有实现，禁止第二套：
+//   - kimi: readWebKimiConnectEnvelope + parseWebKimiEnvelopePayload；
+//   - zhipu: parseWebZhipuSSEFrame + mapWebZhipuPayload（裸 JSON 走 webZhipuBareJSONError）；
+//   - deepseek: webDeepseekNextSSEEvent + webDeepseekSSEParser.applyDelta。
+//
+// ⚠️ 不可用 usage 判空：kimi / zhipu 流内无 usage 字段（转发链靠 estimateWebUsage 本地估算）。
+func evaluateWebProbeStream(webPlatform string, body io.Reader) string {
+	limited := io.LimitReader(body, webProbeMaxStreamBytes)
+	switch webPlatform {
+	case PlatformKimi:
+		return evaluateWebKimiProbeStream(limited)
+	case PlatformZhipu:
+		return evaluateWebZhipuProbeStream(limited)
+	case PlatformDeepseek:
+		return evaluateWebDeepseekProbeStream(limited)
+	}
+	// 未知平台不做内容判定（保持既有状态码口径），避免误伤。
+	return ""
+}
+
+// evaluateWebKimiProbeStream 逐帧读 Connect envelope 判定 kimi 登录态。
+// 有效信号：TextDelta / ThinkDelta / AssistantID / ChatID / Done（与转发链同款字段）。
+func evaluateWebKimiProbeStream(body io.Reader) string {
+	reader := bufio.NewReader(body)
+	// Connect 流首字节是 envelope flag（实测 0x00）。以 '{' 起始说明上游回了裸 JSON
+	// （异常形态，如 {"code":"unauthenticated"}）：此时按二进制帧读会把长度字段解释成
+	// 巨型帧，故直接用同一个 parseWebKimiEnvelopePayload 判定。
+	if head, err := reader.Peek(1); err == nil && head[0] == '{' {
+		raw, _ := io.ReadAll(reader)
+		ev := parseWebKimiEnvelopePayload(raw)
+		switch {
+		case ev.AuthFailed:
+			return webProbeReasonAuthErr
+		case ev.ErrCode != 0:
+			return webProbeReasonBusinessErr
+		}
+		return webProbeReasonEmptyStream
+	}
+
+	validFrames := 0
+	for {
+		payload, more, err := readWebKimiConnectEnvelope(reader)
+		if err != nil || !more {
+			break // 读错/截断按流结束处理，结论交给有效帧计数
+		}
+		if len(payload) == 0 {
+			continue // 零长 keepalive 帧
+		}
+		ev := parseWebKimiEnvelopePayload(payload)
+		switch {
+		case ev.AuthFailed:
+			return webProbeReasonAuthErr
+		case ev.ErrCode != 0:
+			return webProbeReasonBusinessErr
+		case ev.Heartbeat:
+			continue
+		}
+		if ev.TextDelta != "" || ev.ThinkDelta != "" || ev.AssistantID != "" || ev.ChatID != "" || ev.Done {
+			validFrames++
+		}
+	}
+	if validFrames == 0 {
+		return webProbeReasonEmptyStream
+	}
+	return ""
+}
+
+// evaluateWebZhipuProbeStream 逐帧读 /assistant/stream SSE 判定 zhipu 登录态。
+// 有效信号：正文增量 / response id / 终止标记（mapWebZhipuPayload 与转发链同款字段）。
+func evaluateWebZhipuProbeStream(body io.Reader) string {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), webProbeMaxStreamBytes)
+	validFrames := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if payload, ok := parseWebZhipuSSEFrame(line); ok {
+			view := mapWebZhipuPayload(payload)
+			if view.ErrCode != 0 {
+				return webProbeReasonBusinessErr
+			}
+			if view.Content != "" || view.ResponseID != "" || view.FinishReason != "" {
+				validFrames++
+			}
+			continue
+		}
+		// 非 SSE 行：裸 JSON 业务错误与转发链同口径（webZhipuBareJSONError）。
+		if _, isErr := webZhipuBareJSONError(line); isErr {
+			return webProbeReasonBusinessErr
+		}
+	}
+	if validFrames == 0 {
+		return webProbeReasonEmptyStream
+	}
+	return ""
+}
+
+// evaluateWebDeepseekProbeStream 逐事件读 completion SSE 判定 deepseek 登录态。
+// 有效信号：正文增量 / response id（首帧完整 response）/ 终止标记；
+// 顶层 code 或 data.biz_code 非 0 → 业务错误（与转发链双路径同口径）。
+func evaluateWebDeepseekProbeStream(body io.Reader) string {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), webProbeMaxStreamBytes)
+	parser := newWebDeepseekSSEParser()
+	validFrames := 0
+	for {
+		_, data, ok := webDeepseekNextSSEEvent(scanner)
+		if !ok {
+			break
+		}
+		prevResponseID := parser.responseID
+		prevFinished := parser.finished
+		delta, isErr, _, _ := parser.applyDelta(data)
+		if isErr {
+			return webProbeReasonBusinessErr
+		}
+		if delta != "" || parser.responseID != prevResponseID || parser.finished != prevFinished {
+			validFrames++
+		}
+	}
+	if validFrames == 0 {
+		return webProbeReasonEmptyStream
+	}
+	return ""
 }
 
 // retryWebProbeWithRefresh 探活 401 的单口径静默续期重试：按平台调用与真实转发链

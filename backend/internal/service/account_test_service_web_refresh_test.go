@@ -85,7 +85,7 @@ func TestAccountTestService_KimiWebProbe401RefreshesAndRetries(t *testing.T) {
 	recorder.responses = []*http.Response{
 		unauthorizedTextResponse(), // 首发 401
 		refreshResponse(http.StatusOK, `{"accessToken":"NEW-ACCESS-TOKEN"}`), // refresh 成功
-		okSSEResponse(), // 新 token 重试 200
+		okWebKimiProbeResponse(), // 新 token 重试 200（有效帧）
 	}
 	c, rec := newWebRefreshTestContext()
 
@@ -169,7 +169,7 @@ func TestAccountTestService_ZhipuWebProbe401RefreshesAndRetries(t *testing.T) {
 	recorder.responses = []*http.Response{
 		unauthorizedTextResponse(),
 		refreshResponse(http.StatusOK, `{"result":{"access_token":"NEW-TOKEN","refresh_token":"NEW-REFRESH"}}`),
-		okSSEResponse(),
+		okWebZhipuProbeResponse(),
 	}
 	c, rec := newWebRefreshTestContext()
 

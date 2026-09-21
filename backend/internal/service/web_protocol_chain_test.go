@@ -188,10 +188,11 @@ func TestTestWebAccountConnection_WebDeepseekProbeSuccess(t *testing.T) {
 			"cookie":      "ds_session_id=sess; HWWAFSESID=waf",
 		},
 	}
+	// 成功桩必须是 deepseek 真实 SSE 形态：2xx 还需校验有效帧（空流不再伪成功）。
 	body := runWebProbeWithResponses(t, account,
 		webDeepseekSolvablePowChallengeResponse(),
 		webDeepseekSessionCreateResponse(),
-		refreshResponse(http.StatusOK, "ok"),
+		okWebDeepseekProbeResponse(),
 	)
 	require.Contains(t, body, "test_complete")
 	require.Contains(t, body, `"success":true`)
@@ -226,7 +227,8 @@ func TestTestWebAccountConnection_WebKimiProbeSuccess(t *testing.T) {
 			"access_token": "kimi-tok",
 		},
 	}
-	body := runWebProbe(t, account, refreshResponse(http.StatusOK, "ok"))
+	// 成功桩必须是 kimi Connect envelope 形态：2xx 还需校验有效帧（空流不再伪成功）。
+	body := runWebProbe(t, account, okWebKimiProbeResponse())
 	require.Contains(t, body, "test_complete")
 	require.Contains(t, body, `"success":true`)
 }

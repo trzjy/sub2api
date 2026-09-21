@@ -70,7 +70,7 @@ func TestTestWebAccountConnection_InvalidBaseURLErrors(t *testing.T) {
 	goodBody := runWebProbeWithResponses(t, good,
 		webDeepseekSolvablePowChallengeResponse(),
 		webDeepseekSessionCreateResponse(),
-		refreshResponse(http.StatusOK, "ok"),
+		okWebDeepseekProbeResponse(),
 	)
 	require.Contains(t, goodBody, "test_complete")
 	require.Contains(t, goodBody, `"success":true`)

@@ -83,14 +83,14 @@ func TestAccountTestService_WebAccountsUseWebProbeThroughPublicEntryPoint(t *tes
 				upstream.respSeq = []*http.Response{
 					webDeepseekSolvablePowChallengeResponse(),
 					webDeepseekSessionCreateResponse(),
-					okSSEResponse(),
+					okWebDeepseekProbeResponse(),
 				}
 			} else {
-				upstream.resp = okSSEResponse()
+				upstream.resp = webProbeOKResponse(tt.platform)
 			}
 			svc := newDispatchTestService(account, upstream)
 			if tt.platform != PlatformDeepseek {
-				upstream.resp = okSSEResponse()
+				upstream.resp = webProbeOKResponse(tt.platform)
 			}
 			ctx, recorder := newWebTestContext()
 
@@ -160,9 +160,9 @@ func TestAccountTestService_WebAccountsMissingLoginCredentialFailBeforeUpstream(
 
 func TestAccountTestService_RunTestBackgroundKimiWebUsesWebProbe(t *testing.T) {
 	account := dispatchWebAccount(PlatformKimi, 400)
-	upstream := &webProbeUpstream{resp: okSSEResponse()}
+	upstream := &webProbeUpstream{resp: okWebKimiProbeResponse()}
 	svc := newDispatchTestService(account, upstream)
-	upstream.resp = okSSEResponse()
+	upstream.resp = okWebKimiProbeResponse()
 
 	result, err := svc.RunTestBackground(context.Background(), account.ID, "")
 
