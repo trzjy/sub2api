@@ -366,6 +366,7 @@ export default {
             succeeded: '验证通过',
             failed: '验证失败',
             expired: '验证已过期',
+            context_gap: '验证环境不可用，请检查人工挑战服务',
           },
           completeLoginFirst: '请先完成网页登录，系统将在验证成功后自动创建账号',
           fillRequired: '请填写登录凭证与密码',
