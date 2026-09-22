@@ -183,6 +183,10 @@ type stubAutoLogin struct {
 	smsVerifyErr     error
 	smsSendAccount   *service.Account
 	smsVerifyAccount *service.Account
+	// Lane G：捕获传入的 challenge（验证 helper result 扩展字段经 challenge session
+	// 存取后到达登录服务）。
+	smsSendChallenge   *service.WebSMSChallenge
+	smsVerifyChallenge *service.WebSMSChallenge
 }
 
 func (s *stubAutoLogin) LoginByEmail(_ context.Context, account *service.Account) (string, error) {
@@ -204,16 +208,20 @@ func (s *stubAutoLogin) RecoverAccount(_ context.Context, account *service.Accou
 	return service.WebRecoverResult{Recovered: true}
 }
 
-func (s *stubAutoLogin) SendSmsCode(_ context.Context, _, _ string, _ service.WebSMSChallenge, account *service.Account) (string, error) {
+func (s *stubAutoLogin) SendSmsCode(_ context.Context, _, _ string, challenge service.WebSMSChallenge, account *service.Account) (string, error) {
 	s.smsSendAccount = account
+	ch := challenge
+	s.smsSendChallenge = &ch
 	if s.smsSendErr != nil {
 		return "", s.smsSendErr
 	}
 	return "", nil
 }
 
-func (s *stubAutoLogin) VerifySmsCode(_ context.Context, _, _, _ string, _ service.WebSMSChallenge, account *service.Account) (*service.SMSLoginResult, error) {
+func (s *stubAutoLogin) VerifySmsCode(_ context.Context, _, _, _ string, challenge service.WebSMSChallenge, account *service.Account) (*service.SMSLoginResult, error) {
 	s.smsVerifyAccount = account
+	ch := challenge
+	s.smsVerifyChallenge = &ch
 	if s.smsVerifyErr != nil {
 		return nil, s.smsVerifyErr
 	}
@@ -236,7 +244,7 @@ type stubCaptchaHelper struct {
 	startPhoneCode string
 }
 
-func (s *stubCaptchaHelper) Start(_ context.Context, platform, _, _, phoneCode string) (service.LocalCaptchaHelperSession, error) {
+func (s *stubCaptchaHelper) Start(_ context.Context, platform, _, _, phoneCode string, _ service.LocalCaptchaHelperSignParams) (service.LocalCaptchaHelperSession, error) {
 	s.mu.Lock()
 	s.startPlatform = platform
 	s.startPhoneCode = phoneCode

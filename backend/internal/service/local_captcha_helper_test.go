@@ -46,7 +46,7 @@ func TestLocalCaptchaHelperHTTPClientFlow(t *testing.T) {
 	defer server.Close()
 
 	client := NewLocalCaptchaHelperHTTPClient(LocalCaptchaHelperConfig{BaseURL: server.URL, APIKey: "test-secret", Timeout: 2})
-	session, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "")
+	session, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "", LocalCaptchaHelperSignParams{})
 	require.NoError(t, err)
 	require.Equal(t, "helper-1", session.ID)
 	status, err := client.Status(context.Background(), session, PlatformKimi, "opaque-login", "13800138000")
@@ -57,6 +57,43 @@ func TestLocalCaptchaHelperHTTPClientFlow(t *testing.T) {
 	require.Equal(t, "ok", result.Status)
 	require.Equal(t, "v-1", result.Data["validate"])
 	require.Equal(t, []string{"/challenge/sdk-start", "/challenge/helper-1/status", "/challenge/helper-1/result"}, paths)
+}
+
+// Lane G（任务卡 2026-09-22）：zhipu sdk-start body 下发签名三件套（x_timestamp/
+// x_nonce/x_sign）；kimi 传零值 → body 不含对应键（流程零改动）。
+func TestLocalCaptchaHelperHTTPClientStartCarriesZhipuSignTriplet(t *testing.T) {
+	var startBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/challenge/sdk-start":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&startBody))
+			_, _ = w.Write([]byte(`{"success":true,"session_id":"helper-z","status":"pending"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewLocalCaptchaHelperHTTPClient(LocalCaptchaHelperConfig{BaseURL: server.URL, APIKey: "test-secret", Timeout: 2})
+
+	// zhipu：三件套随 sdk-start body 下发（假数据值）。
+	_, err := client.Start(context.Background(), PlatformZhipu, "opaque-login", "13800138000", "86",
+		LocalCaptchaHelperSignParams{XTimestamp: "fake-ts", XNonce: "fake-nonce", XSign: "fake-sign"})
+	require.NoError(t, err)
+	require.Equal(t, "fake-ts", startBody["x_timestamp"])
+	require.Equal(t, "fake-nonce", startBody["x_nonce"])
+	require.Equal(t, "fake-sign", startBody["x_sign"])
+
+	// kimi：零值 → body 不含三件套键（零改动兼容）。
+	startBody = nil
+	_, err = client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "",
+		LocalCaptchaHelperSignParams{})
+	require.NoError(t, err)
+	for _, key := range []string{"x_timestamp", "x_nonce", "x_sign"} {
+		_, present := startBody[key]
+		require.False(t, present, "kimi sdk-start body 不应含 %s", key)
+	}
 }
 
 func TestLocalCaptchaHelperHTTPClientFailsClosedForHTTPStatusErrors(t *testing.T) {
@@ -77,7 +114,7 @@ func TestLocalCaptchaHelperHTTPClientFailsClosedForHTTPStatusErrors(t *testing.T
 			defer server.Close()
 
 			client := NewLocalCaptchaHelperHTTPClient(LocalCaptchaHelperConfig{BaseURL: server.URL, APIKey: "test-secret", Timeout: 2})
-			_, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "")
+			_, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "", LocalCaptchaHelperSignParams{})
 			require.ErrorContains(t, err, "helper HTTP "+strconv.Itoa(tc.statusCode))
 			require.NotContains(t, err.Error(), "request rejected")
 		})
@@ -97,7 +134,7 @@ func TestLocalCaptchaHelperHTTPClientFailsClosedForMissingRequiredFields(t *test
 			path:     "/challenge/sdk-start",
 			response: `{"success":true,"status":"pending"}`,
 			call: func(client *LocalCaptchaHelperHTTPClient) error {
-				_, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "")
+				_, err := client.Start(context.Background(), PlatformKimi, "opaque-login", "13800138000", "", LocalCaptchaHelperSignParams{})
 				return err
 			},
 			want: "missing session_id",
@@ -177,7 +214,7 @@ func TestLocalCaptchaHelperHTTPClientRejectsUnsuccessfulStatusAndResult(t *testi
 
 func TestLocalCaptchaHelperHTTPClientRejectsIncompleteAndTimeout(t *testing.T) {
 	client := NewLocalCaptchaHelperHTTPClient(LocalCaptchaHelperConfig{BaseURL: "http://127.0.0.1:1", Timeout: 1})
-	_, err := client.Start(context.Background(), PlatformZhipu, "opaque-login", "13800138000", "")
+	_, err := client.Start(context.Background(), PlatformZhipu, "opaque-login", "13800138000", "", LocalCaptchaHelperSignParams{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "phone_code")
 

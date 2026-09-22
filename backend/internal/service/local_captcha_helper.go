@@ -22,9 +22,22 @@ type LocalCaptchaHelperConfig struct {
 
 // LocalCaptchaHelper is the narrow helper contract used by the web-login challenge handler.
 type LocalCaptchaHelper interface {
-	Start(context.Context, string, string, string, string) (LocalCaptchaHelperSession, error)
+	// Start 创建 helper 挑战会话。sign 携带 sdk-start body 下发的签名三件套参数
+	// （Lane G，任务卡 2026-09-22：zhipu 发码由 helper 在同会话内执行，签名三件套由
+	// Go 侧 webZhipuComputeSign 生成下发；kimi 传零值，body 不含对应键）。
+	Start(context.Context, string, string, string, string, LocalCaptchaHelperSignParams) (LocalCaptchaHelperSession, error)
 	Status(context.Context, LocalCaptchaHelperSession, string, string, string) (string, error)
 	Result(context.Context, LocalCaptchaHelperSession, string, string, string) (LocalCaptchaHelperResult, error)
+}
+
+// LocalCaptchaHelperSignParams sdk-start body 下发的签名三件套（键 x_timestamp /
+// x_nonce / x_sign，与 helper 协议既有 snake_case 键风格一致）。零值 = 不下发
+// （kimi 流程零改动；旧版 helper 忽略未知键，向后兼容）。值仅进 sdk-start 请求体，
+// 绝不写日志（零凭据红线：nonce/sign 为一次性请求签名，不下发即作废）。
+type LocalCaptchaHelperSignParams struct {
+	XTimestamp string `json:"x_timestamp,omitempty"`
+	XNonce     string `json:"x_nonce,omitempty"`
+	XSign      string `json:"x_sign,omitempty"`
 }
 
 type LocalCaptchaHelperSession struct {
@@ -43,6 +56,10 @@ type localCaptchaHelperStartRequest struct {
 	Phone          string `json:"phone"`
 	PhoneCode      string `json:"phone_code,omitempty"`
 	Timeout        int    `json:"timeout,omitempty"`
+	// 签名三件套（Lane G 下发，zhipu 同会话发码用；零值省键，kimi body 不变）。
+	XTimestamp string `json:"x_timestamp,omitempty"`
+	XNonce     string `json:"x_nonce,omitempty"`
+	XSign      string `json:"x_sign,omitempty"`
 }
 
 type localCaptchaHelperStartResponse struct {
@@ -83,7 +100,7 @@ func NewLocalCaptchaHelperHTTPClient(cfg LocalCaptchaHelperConfig) *LocalCaptcha
 	return &LocalCaptchaHelperHTTPClient{baseURL: base, apiKey: strings.TrimSpace(cfg.APIKey), http: &http.Client{Timeout: timeout}}
 }
 
-func (c *LocalCaptchaHelperHTTPClient) Start(ctx context.Context, platform, loginSessionID, phone, phoneCode string) (LocalCaptchaHelperSession, error) {
+func (c *LocalCaptchaHelperHTTPClient) Start(ctx context.Context, platform, loginSessionID, phone, phoneCode string, sign LocalCaptchaHelperSignParams) (LocalCaptchaHelperSession, error) {
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	loginSessionID = strings.TrimSpace(loginSessionID)
 	phone = strings.TrimSpace(phone)
@@ -105,6 +122,8 @@ func (c *LocalCaptchaHelperHTTPClient) Start(ctx context.Context, platform, logi
 	err := c.doJSON(ctx, http.MethodPost, "/challenge/sdk-start", localCaptchaHelperStartRequest{
 		Platform: helperPlatform, LoginSessionID: loginSessionID, Phone: phone, PhoneCode: phoneCode,
 		Timeout: 180,
+		// 签名三件套下发（Lane G）：零值 omitempty 省键（kimi 零改动，旧 helper 兼容）。
+		XTimestamp: sign.XTimestamp, XNonce: sign.XNonce, XSign: sign.XSign,
 	}, &out)
 	if err != nil {
 		return LocalCaptchaHelperSession{}, err

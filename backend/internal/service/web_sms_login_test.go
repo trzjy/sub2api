@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -120,7 +122,8 @@ func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
 	require.Equal(t, "13800000000", body["phone"])
 	require.Equal(t, "rid-abc", body["pic_captcha_id"])
 	// 2026-09-22 抓包契约：发码 body.phone_code="+86"（带加号）；challenge 输入
-	// 仍是 "86"，证明组包处发生归一（仅发码路径，登录路径待抓包终证）。
+	// 仍是 "86"，证明组包处发生归一（2026-09-22 登录步抓包终证登录 body.phone_code
+	// 同为 "+86"，发码/登录两路径共用同一归一函数）。
 	require.Equal(t, "+86", body["phone_code"])
 	require.Equal(t, "pc", body["tm"])
 	require.Equal(t, "default", body["fr"])
@@ -256,14 +259,19 @@ func TestWebSMS_ZhipuSendEmptyBodyFailsClosed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// zhipu 登录（证据：POST /user-api/user/phone_login，需数美 rid + tI 签名三件套）
+// zhipu 登录（2026-09-22 22:59 登录步生产抓包终证：POST /chatglm/user-api/user/phone_login，
+// body 七键 {phone, captcha, pic_captcha_id, phone_code:"+86", tm, fr, sensors_id}，
+// 无任何签名键——三件套在请求头；成功响应 {"status":0,...,"result":{access_token,refresh_token}}，
+// token 在 body result 内，非 Set-Cookie）
 // ---------------------------------------------------------------------------
 
+// status:0 + result 双 token 的成功正例：断言请求契约（路径 /chatglm 前缀、body
+// 七键、无签名键、请求头含三件套）与结果提取（单一路径来自 body，Cookie 串按
+// 既有同族键名组装）。
 func TestWebSMS_ZhipuVerifySuccess(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
-		zhipuVerifyBody:   `{"code":0}`,
-		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+		zhipuVerifyBody:   `{"status":0,"message":"success","result":{"user_id":"u-1","access_token":"CT-1","refresh_token":"RFT-1"},"rid":"r-1"}`,
 	}
 	svc := newSmsTestService(up)
 
@@ -274,7 +282,84 @@ func TestWebSMS_ZhipuVerifySuccess(t *testing.T) {
 	require.Contains(t, res.Cookie, "chatglm_token=CT-1")
 	require.Contains(t, res.Cookie, "chatglm_refresh_token=RFT-1")
 	require.Len(t, up.requests, 1)
-	require.Equal(t, webZhipuPhoneLoginEndpoint, up.requests[0].URL.Path)
+
+	// 请求契约（2026-09-22 登录步抓包终证）：路径带 /chatglm 前缀，与发码同构。
+	req := up.requests[0]
+	require.Equal(t, webZhipuPhoneLoginEndpoint, req.URL.Path)
+
+	// body 七键对齐；无任何签名键（timestamp/xNonce/sign 在请求头，不在 body）。
+	var body map[string]string
+	require.NoError(t, readJSONBody(req, &body))
+	require.Len(t, body, 7)
+	require.Equal(t, "13800000000", body["phone"])
+	require.Equal(t, "123456", body["captcha"])
+	require.Equal(t, "rid-abc", body["pic_captcha_id"])
+	// phone_code 归一与发码同一函数：challenge 输入 "86"，body 为 "+86"。
+	require.Equal(t, "+86", body["phone_code"])
+	require.Equal(t, "pc", body["tm"])
+	require.Equal(t, "default", body["fr"])
+	require.Equal(t, "", body["sensors_id"])
+	for _, key := range []string{"timestamp", "xNonce", "sign"} {
+		_, present := body[key]
+		require.False(t, present, "抓包 body 无 %s 键（签名三件套在请求头）", key)
+	}
+
+	// 请求头含签名三件套（与发码头同构，applyZhipuFingerprintHeaders 单一口径）。
+	require.NotEmpty(t, req.Header.Get("x-sign"))
+	require.NotEmpty(t, req.Header.Get("x-nonce"))
+	require.NotEmpty(t, req.Header.Get("x-timestamp"))
+}
+
+// status:0 但 result 缺 token → 失败关闭（缺 access_token）。
+func TestWebSMS_ZhipuVerifyStatusZeroMissingTokensFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"status":0,"message":"ok"}`,
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "缺少 result.access_token")
+	require.Len(t, up.requests, 1)
+}
+
+// 强制 refresh token（收敛项 4，2026-09-22 登录步抓包终证契约）：status:0 但
+// result 缺 refresh_token → 失败关闭，拒绝建号；不再存在"缺失允许空"的宽容分支。
+func TestWebSMS_ZhipuVerifyMissingRefreshTokenFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"status":0,"message":"success","result":{"access_token":"CT-1"}}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "缺少 result.refresh_token")
+	require.Contains(t, err.Error(), "拒绝建号")
+	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+	require.Len(t, up.requests, 1)
+}
+
+// 防回归（旧白名单移除）：success=true 无 status → 登录失败关闭（2026-09-22
+// 登录步抓包终证成功标志为顶层 status==0，旧 code/ret/success 白名单不再采信，
+// 即使响应带双 Cookie 也绝不采纳）。
+func TestWebSMS_ZhipuVerifySuccessTrueNoStatusFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"success":true}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-2; Path=/", "chatglm_refresh_token=RFT-2; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
 }
 
 // 证据缺失 → 失败关闭：zhipu 登录缺数美滑块 rid，挑战值未随请求内回传即失败关闭。
@@ -291,7 +376,8 @@ func TestWebSMS_ZhipuVerifyFailClosedNoCaptchaRid(t *testing.T) {
 	require.Len(t, up.requests, 0)
 }
 
-// tI 签名由方法内部 webZhipuComputeSign 生成（02-sign-algorithm.md 已取证），
+// tI 签名三件套由方法内部 webZhipuComputeSign 生成并放入请求头（02-sign-algorithm.md
+// 已取证；2026-09-22 登录步抓包终证三件套在请求头、body 无签名键），
 // 不再要求调用方传入，故无「缺签名」失败关闭点。
 
 // requireNoSMSCredentials 断言登录失败时未产出任何登录凭据：结果为 nil（无值），
@@ -337,8 +423,8 @@ func TestWebSMS_ZhipuVerifyHTTP200BizErrorFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-// HTTP 200 + 无 cookie 无失败标志（未知形状）→ 失败关闭（正向成功条件缺失：
-// 无已取证成功标志即拒绝，不再走到 Cookie 检查）。
+// HTTP 200 + 无 status 无失败标志（未知形状）→ 失败关闭（正向成功条件缺失：
+// 顶层 status==0 才算成功，即使响应带 Set-Cookie 也不采纳）。
 func TestWebSMS_ZhipuVerifyHTTP200UnknownBodyFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -354,7 +440,8 @@ func TestWebSMS_ZhipuVerifyHTTP200UnknownBodyFailsClosed(t *testing.T) {
 }
 
 // 审查核心场景：2xx + 字符串数字错误码（"code":"403"）+ 错误响应带双 Cookie
-// → 不得判成功（zhipuBizFailure 识别字符串数字 + zhipuBizSuccess 正向门槛双保险）。
+// → 不得判成功（zhipuBizFailure 识别字符串数字，先于成功判定拦截；即使带
+// Set-Cookie 也绝不采纳）。
 func TestWebSMS_ZhipuVerifyStringCodeWithCookiesFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -387,8 +474,8 @@ func TestWebSMS_ZhipuVerifyNestedDataCodeWithCookiesFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-// 2xx 无任何业务成功标志 + 响应带双 Cookie → 失败关闭（正向条件缺失），
-// 错误文案为"缺少已取证成功标志"。
+// 旧白名单形态（success=true + Set-Cookie 双 Cookie）→ 失败关闭（成功标志为
+// status==0 + result 双 token，旧形态不被采信，Cookie 不采纳）。
 func TestWebSMS_ZhipuVerifyNoBizFlagWithCookiesFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -404,9 +491,8 @@ func TestWebSMS_ZhipuVerifyNoBizFlagWithCookiesFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-// 防回归（整改 2）：status:0 仅发码路径采信——登录响应 {"status":0} + 双 Cookie
-// 但无 code/ret/success → 登录失败关闭，Cookie 不采纳（登录路径待登录步抓包
-// 终证后单独立项才放开）。
+// 防回归（2026-09-22 登录步抓包终证收敛）：status:0 但 result 缺 token → 失败关闭，
+// 即使响应带同族 Set-Cookie 也绝不采纳（结果提取单一路径来自 body）。
 func TestWebSMS_ZhipuVerifyStatusZeroWithCookiesFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -418,7 +504,7 @@ func TestWebSMS_ZhipuVerifyStatusZeroWithCookiesFailsClosed(t *testing.T) {
 	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
 	require.Error(t, err)
 	requireNoSMSCredentials(t, res)
-	require.Contains(t, err.Error(), "GLM 登录响应缺少已取证成功标志")
+	require.Contains(t, err.Error(), "缺少 result.access_token")
 	require.Len(t, up.requests, 1)
 }
 
@@ -438,25 +524,13 @@ func TestWebSMS_ZhipuVerifyNestedDataStatusStringFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-// 成功正向用例：success==true + 双 Cookie → 成功（与 code==0 同为已取证白名单）。
-func TestWebSMS_ZhipuVerifySuccessTrueWithCookies(t *testing.T) {
-	up := &smsUpstream{
-		zhipuVerifyStatus: http.StatusOK,
-		zhipuVerifyBody:   `{"success":true}`,
-		zhipuSetCookies:   []string{"chatglm_token=CT-2; Path=/", "chatglm_refresh_token=RFT-2; Path=/"},
-	}
-	svc := newSmsTestService(up)
-
-	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
-	require.NoError(t, err)
-	require.Equal(t, "CT-2", res.ChatGLMToken)
-	require.Equal(t, "RFT-2", res.LoginRefreshToken)
-	require.Len(t, up.requests, 1)
-}
+// 旧成功正例（success==true + 双 Cookie）已废弃：2026-09-22 登录步抓包终证成功
+// 标志为顶层 status==0 + result 双 token，success=true 不再判成功（见
+// TestWebSMS_ZhipuVerifySuccessTrueNoStatusFailsClosed）。
 
 // 防回归（2026-09-22 整改轮 must_fix）：{"status":500,"success":true} 冲突响应
-// + 双 Cookie → 顶层 status 非 0 须先于 zhipuBizSuccess 的 success 放行被
-// zhipuBizFailure 拦截，登录失败关闭，Cookie 绝不采纳。
+// + 双 Cookie → 顶层 status 非 0 先被共享 zhipuBizFailure 拦截，登录失败关闭，
+// Cookie 绝不采纳。
 func TestWebSMS_ZhipuVerifyStatusNonZeroWithSuccessTrueFailsClosed(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
@@ -487,37 +561,178 @@ func TestWebSMS_ZhipuVerifyNon2xxStatusFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
-func TestWebSMS_ZhipuVerifyNoCookie(t *testing.T) {
-	up := &smsUpstream{zhipuVerifyStatus: http.StatusOK, zhipuVerifyBody: `{"code":0}`}
-	svc := newSmsTestService(up)
-
-	_, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
-	require.Error(t, err)
-	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
-}
-
-// 强制 refresh token（收敛项 4）：chatglm_token 有但 chatglm_refresh_token 缺失
-// → 失败关闭，拒绝建号；不再存在"缺失允许空"的宽容分支。
-func TestWebSMS_ZhipuVerifyMissingRefreshTokenFailsClosed(t *testing.T) {
+// 结果提取单一路径来自 body：status:0 + result 双 token 且响应不带任何
+// Set-Cookie → 仍判成功（不依赖 Set-Cookie；旧"缺 Cookie 即失败"分支随抓包
+// 终证契约移除）。
+func TestWebSMS_ZhipuVerifySuccessWithoutSetCookie(t *testing.T) {
 	up := &smsUpstream{
 		zhipuVerifyStatus: http.StatusOK,
-		zhipuVerifyBody:   `{"code":0}`,
-		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/"},
+		zhipuVerifyBody:   `{"status":0,"message":"success","result":{"user_id":"u-1","access_token":"CT-3","refresh_token":"RFT-3"},"rid":"r-3"}`,
 	}
 	svc := newSmsTestService(up)
 
 	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
-	require.Error(t, err)
-	requireNoSMSCredentials(t, res)
-	require.Contains(t, err.Error(), "缺少 chatglm_refresh_token")
-	require.Contains(t, err.Error(), "拒绝建号")
-	require.Equal(t, WebLoginKindLogin, smsErrorKind(t, err))
+	require.NoError(t, err)
+	require.Equal(t, "CT-3", res.ChatGLMToken)
+	require.Equal(t, "RFT-3", res.LoginRefreshToken)
+	require.Contains(t, res.Cookie, "chatglm_token=CT-3")
+	require.Contains(t, res.Cookie, "chatglm_refresh_token=RFT-3")
 	require.Len(t, up.requests, 1)
 }
 
+// 旧 Cookie 提取路径（combineSetCookies/extractCookieValue）已随 2026-09-22 登录步
+// 抓包终证移除：token 在 body result 内，结果提取不依赖 Set-Cookie；
+// 「缺 refresh token → 失败关闭拒绝建号」用例由上方
+// TestWebSMS_ZhipuVerifyMissingRefreshTokenFailsClosed 承载（status:0 + result
+// 缺 refresh_token，且响应携带 chatglm_token Set-Cookie 也不采纳）。
+
 // ---------------------------------------------------------------------------
-// kimi 发码（证据：SMSService.sendVerifyCode，需易盾 validate）
+// Lane G（任务卡 2026-09-22）：helper 同会话发码结果消费 / 会话上下文复用 /
+// 非 2xx 最小脱敏诊断。测试值全用假数据（零凭据红线）。
 // ---------------------------------------------------------------------------
+
+// helperInt 辅助：构造 *int（goes into WebSMSChallenge 扩展字段）。
+func helperInt(v int) *int { return &v }
+
+// helper challenge：带 helper 同会话发码成功结果 + 会话上下文（假数据）。
+func zhipuHelperChallenge(sendStatus, bodyStatus int) WebSMSChallenge {
+	ch := zhipuChallenge()
+	ch.ZhipuHelperSendStatus = helperInt(sendStatus)
+	ch.ZhipuHelperSendBodyStatus = helperInt(bodyStatus)
+	ch.ZhipuHelperSendMessage = "fake-helper-message"
+	ch.ZhipuSessionCookie = "chatglm_token=fake-guest; other=fake"
+	ch.ZhipuDeviceID = "fake-device-id"
+	return ch
+}
+
+// send_status 存在且 status==0（helper 同会话发码成功）→ 成功，后端不再重复发码
+// （upstream 零请求）；send_status/body_status 为 nil（Lane H 未上线）→ 沿用后端直发。
+func TestWebSMS_ZhipuHelperSendStatusConsumed(t *testing.T) {
+	up := &smsUpstream{}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuHelperChallenge(200, 0), nil)
+	require.NoError(t, err)
+	require.Len(t, up.requests, 0, "helper 同会话已发码，后端绝不重复发码")
+
+	// Lane H 未上线兼容：字段缺失 → 后端直发路径照常执行。
+	up2 := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"status":0}`}
+	svc2 := newSmsTestService(up2)
+	_, err = svc2.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.NoError(t, err)
+	require.Len(t, up2.requests, 1)
+}
+
+// send_status 非 2xx → 失败关闭，状态码透出，后端不重复发码。
+func TestWebSMS_ZhipuHelperSendStatusNon2xxFailsClosed(t *testing.T) {
+	up := &smsUpstream{}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuHelperChallenge(400, -1), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "HTTP 400")
+	require.Len(t, up.requests, 0)
+}
+
+// 2xx 但 body_status 缺失 → 失败关闭（无成功证据，不重复发码）。
+func TestWebSMS_ZhipuHelperSendMissingBodyStatusFailsClosed(t *testing.T) {
+	up := &smsUpstream{}
+	svc := newSmsTestService(up)
+
+	ch := zhipuHelperChallenge(200, 0)
+	ch.ZhipuHelperSendBodyStatus = nil
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", ch, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "缺少 status 判定字段")
+	require.Len(t, up.requests, 0)
+}
+
+// body_status 非 0 → 失败关闭透出，不重复发码。
+func TestWebSMS_ZhipuHelperSendBodyStatusNonZeroFailsClosed(t *testing.T) {
+	up := &smsUpstream{}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuHelperChallenge(200, 1204), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "status=1204")
+	require.Len(t, up.requests, 0)
+}
+
+// 会话上下文（cookies/device_id）一旦存在必须附加到出站请求头（Cookie 头 + x-device-id 头）。
+// 发码路径：send_status 存在时后端不重复发码（无出站可断言）；send_status 缺失但
+// cookies/device_id 存在（Lane H 部分上线）→ 后端直发且必须携带会话头。
+func TestWebSMS_ZhipuSessionContextApplied(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"status":0}`}
+	svc := newSmsTestService(up)
+
+	ch := zhipuChallenge()
+	ch.ZhipuSessionCookie = "chatglm_token=fake-guest; other=fake"
+	ch.ZhipuDeviceID = "fake-device-id"
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", ch, nil)
+	require.NoError(t, err)
+	require.Len(t, up.requests, 1)
+	require.Equal(t, "chatglm_token=fake-guest; other=fake", up.requests[0].Header.Get("Cookie"))
+	require.Equal(t, "fake-device-id", up.requests[0].Header.Get("x-device-id"))
+
+	// 字段全缺（Lane H 未上线）→ 后端直发且不带会话头（沿用现行为）。
+	up2 := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"status":0}`}
+	svc2 := newSmsTestService(up2)
+	_, err = svc2.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.NoError(t, err)
+	require.Len(t, up2.requests, 1)
+	require.Equal(t, "", up2.requests[0].Header.Get("Cookie"))
+	require.Equal(t, "", up2.requests[0].Header.Get("x-device-id"))
+}
+
+// 登录步复用会话上下文：Cookie 头 + x-device-id 头附加到 phone_login 出站请求。
+func TestWebSMS_ZhipuVerifyReusesSessionContext(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"status":0,"message":"success","result":{"access_token":"CT-1","refresh_token":"RFT-1"}}`,
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuHelperChallenge(200, 0), nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Cookie)
+	require.Len(t, up.requests, 1)
+	req := up.requests[0]
+	require.Equal(t, "chatglm_token=fake-guest; other=fake", req.Header.Get("Cookie"))
+	require.Equal(t, "fake-device-id", req.Header.Get("x-device-id"))
+	// 既有签名三件套与指纹头不受影响。
+	require.NotEmpty(t, req.Header.Get("x-sign"))
+	require.NotEmpty(t, req.Header.Get("app-name"))
+}
+
+// 非 2xx 最小脱敏诊断：仅状态码 + json_keys + 上下文存在布尔，绝不落 Cookie/device_id 值
+// （零凭据红线，smsJSONShape 复用既有零值形状器）。
+func TestWebSMS_ZhipuNon2xxDiagnosticsZeroCredential(t *testing.T) {
+	// 后端直发路径 400：捕获 slog 输出，断言诊断只含状态码 + json_keys 形状 + 上下文
+	// 存在布尔，绝不落 Cookie/device_id/响应体值（零凭据红线直接证据）。
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	up := &smsUpstream{zhipuSendStatus: http.StatusBadRequest, zhipuSendBody: `{"message":"bad request fake"}`}
+	svc := newSmsTestService(up)
+	ch := zhipuChallenge()
+	ch.ZhipuSessionCookie = "chatglm_token=fake-guest"
+	ch.ZhipuDeviceID = "fake-device-id"
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", ch, nil)
+	require.Error(t, err)
+	require.Len(t, up.requests, 1)
+
+	logged := buf.String()
+	require.Contains(t, logged, "status=400")
+	require.Contains(t, logged, "json_keys=")
+	require.Contains(t, logged, "has_session_cookie=true")
+	require.Contains(t, logged, "has_session_device_id=true")
+	// 红线：Cookie/device_id 值与响应体值绝不进日志。
+	require.NotContains(t, logged, "fake-guest")
+	require.NotContains(t, logged, "fake-device-id")
+	require.NotContains(t, logged, "bad request fake")
+}
 
 func TestWebSMS_KimiSendSuccess(t *testing.T) {
 	up := &smsUpstream{kimiSendStatus: http.StatusOK, kimiSendBody: `{}`}

@@ -141,11 +141,17 @@ func (h *AccountHandler) WebLoginChallengeStart(c *gin.Context) {
 	// 校验非空，否则返回 "GLM challenge requires phone_code" → context_gap 501）；
 	// kimi 不需要，保持空串。SplitSMSPhone 支持 "86-138..."/"+86 138..."/纯 11 位默认 "86"。
 	helperPhoneCode := ""
+	// Lane G（任务卡 2026-09-22）：zhipu 发码由 helper 在同会话内执行，sdk-start body
+	// 下发签名三件套（webZhipuComputeSign 已取证实现；kimi 传零值，body 不含对应键，
+	// 流程零改动）。三件套一次性即时生成，不缓存。
+	signParams := service.LocalCaptchaHelperSignParams{}
 	if platform == service.PlatformZhipu {
 		cc, _ := service.SplitSMSPhone(phone)
 		helperPhoneCode = cc
+		ts, nonce, sign := service.WebZhipuComputeSignForHelper()
+		signParams = service.LocalCaptchaHelperSignParams{XTimestamp: ts, XNonce: nonce, XSign: sign}
 	}
-	helperSession, err := h.webLoginCaptchaHelper.Start(c.Request.Context(), platform, sess.ID, phone, helperPhoneCode)
+	helperSession, err := h.webLoginCaptchaHelper.Start(c.Request.Context(), platform, sess.ID, phone, helperPhoneCode, signParams)
 	if err != nil || strings.TrimSpace(helperSession.ID) == "" {
 		_ = h.webLoginChallengeStore.SetStatus(sess.ID, adminID, "context_gap")
 		respondWebLoginChallengeContextGap(c, sess)
@@ -206,6 +212,15 @@ func (h *AccountHandler) WebLoginChallengeStatus(c *gin.Context) {
 	})
 }
 
+// localCaptchaResultChallenge 把 helper result.Data 组装为服务端 challenge 值。
+// Lane G（任务卡 2026-09-22）zhipu 扩展字段消费：
+//   - send_status/send_body_status（int 形态字符串）：helper 同会话发码结果；
+//     send_status 存在即以 helper 发码为准（后端不再重复发码），status==0 成功；
+//     字段缺失（Lane H 未上线）保持 nil → 后端直发路径，绝不因字段缺失而失败；
+//   - cookies/device_id：同会话匿名 Cookie 串与站点 device_id，仅存 challenge session
+//     内存（TTL 同既有），登录步复用；一旦存在必须使用。
+//
+// 零凭据红线：字段值只进内存会话，绝不写日志；解析失败按字段缺失处理（不失败）。
 func localCaptchaResultChallenge(platform string, data map[string]string) (service.WebSMSChallenge, error) {
 	challenge := service.WebSMSChallenge{}
 	switch platform {
@@ -219,6 +234,16 @@ func localCaptchaResultChallenge(platform string, data map[string]string) (servi
 		if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuPhoneCode == "" {
 			return service.WebSMSChallenge{}, errors.New("incomplete zhipu helper result")
 		}
+		// Lane G 扩展消费：send_status/send_body_status（宽容解析，失败按缺失处理）。
+		if v, ok := localCaptchaIntField(data, "send_status"); ok {
+			challenge.ZhipuHelperSendStatus = &v
+		}
+		if v, ok := localCaptchaIntField(data, "send_body_status"); ok {
+			challenge.ZhipuHelperSendBodyStatus = &v
+		}
+		challenge.ZhipuHelperSendMessage = strings.TrimSpace(data["send_message"])
+		challenge.ZhipuSessionCookie = strings.TrimSpace(data["cookies"])
+		challenge.ZhipuDeviceID = strings.TrimSpace(data["device_id"])
 	case service.PlatformKimi:
 		challenge.KimiCaptchaValidate = strings.TrimSpace(data["validate"])
 		if challenge.KimiCaptchaValidate == "" {
@@ -228,6 +253,20 @@ func localCaptchaResultChallenge(platform string, data map[string]string) (servi
 		return service.WebSMSChallenge{}, errors.New("unsupported helper platform")
 	}
 	return challenge, nil
+}
+
+// localCaptchaIntField 从 helper result data（map[string]string）宽容解析整数字段：
+// 空串/非数字按字段缺失处理（Lane H 未上线兼容，绝不因字段形态异常而失败）。
+func localCaptchaIntField(data map[string]string, key string) (int, bool) {
+	raw := strings.TrimSpace(data[key])
+	if raw == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func mapLocalCaptchaStatus(status string) string {
