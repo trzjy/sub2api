@@ -99,7 +99,8 @@ func zhipuChallenge() WebSMSChallenge {
 }
 
 // ---------------------------------------------------------------------------
-// zhipu 发码（证据：POST /backend-api/v1/user/send_sms，需数美滑块 rid+md5）
+// zhipu 发码（2026-09-22 chatglm.cn 再取证：rid 必填；md5 为 query 可选参数，
+// 官方正常滑块流 onSuccess 仅回调 {rid, pass}，md5 省键）
 // ---------------------------------------------------------------------------
 
 func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
@@ -110,7 +111,7 @@ func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, up.requests, 1)
 
-	// 请求契约（13 号证据）：POST /backend-api/v1/user/send_sms，body 四字段齐全。
+	// 请求契约（2026-09-22 再取证）：rid+phone_code 必填；challenge 携带 md5 时透传。
 	req := up.requests[0]
 	require.Equal(t, webZhipuSendSMSCodeEndpoint, req.URL.Path)
 	var body map[string]string
@@ -121,7 +122,27 @@ func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
 	require.Equal(t, "86", body["phone_code"])
 }
 
-// 证据缺失 → 失败关闭：zhipu 发码缺数美滑块 rid/md5，挑战值未随请求内回传即失败关闭。
+// 官方正常滑块流：onSuccess 仅回调 {rid, pass}，md5 缺失 → 发码仍放行，
+// 且 body 不得出现 md5 键（与官方 undefined-省键序列化行为一致）。
+func TestWebSMS_ZhipuSendRidOnlyOmitsMD5(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"code":0}`}
+	svc := newSmsTestService(up)
+
+	ch := zhipuChallenge()
+	ch.ZhipuCaptchaMD5 = ""
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", ch, nil)
+	require.NoError(t, err)
+	require.Len(t, up.requests, 1)
+
+	req := up.requests[0]
+	var body map[string]string
+	require.NoError(t, readJSONBody(req, &body))
+	require.Equal(t, "rid-abc", body["pic_captcha_id"])
+	_, present := body["md5"]
+	require.False(t, present, "缺 md5 时 body 不得包含 md5 键")
+}
+
+// 证据缺失 → 失败关闭：zhipu 发码缺数美滑块 rid，挑战值未随请求内回传即失败关闭。
 func TestWebSMS_ZhipuSendFailClosedNoCaptcha(t *testing.T) {
 	up := &smsUpstream{}
 	svc := newSmsTestService(up)

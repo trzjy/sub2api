@@ -169,7 +169,10 @@ func (s *WebLoginChallengeSessionStore) SetConsumeResult(id, claimToken string, 
 	if sess.Consumed {
 		return ErrWebLoginChallengeConsumed
 	}
-	if sess.Platform == PlatformZhipu && (strings.TrimSpace(challenge.ZhipuCaptchaRid) == "" || strings.TrimSpace(challenge.ZhipuCaptchaMD5) == "" || strings.TrimSpace(challenge.ZhipuPhoneCode) == "") {
+	// md5 可选（2026-09-22 chatglm.cn 线上取证：官方滑块 onSuccess 仅回调
+	// {rid, pass}，md5 是落地链接 query 可选参数，正常滑块流不带）；
+	// rid 必填失败关闭不变。
+	if sess.Platform == PlatformZhipu && (strings.TrimSpace(challenge.ZhipuCaptchaRid) == "" || strings.TrimSpace(challenge.ZhipuPhoneCode) == "") {
 		return errors.New("incomplete zhipu challenge result")
 	}
 	if sess.Platform == PlatformKimi && strings.TrimSpace(challenge.KimiCaptchaValidate) == "" {

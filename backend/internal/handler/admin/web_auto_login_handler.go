@@ -3,15 +3,20 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // webAutoLoginCookieKey 是网页版账号凭据中存放整串 Cookie 头的键名（与
@@ -208,7 +213,10 @@ func localCaptchaResultChallenge(platform string, data map[string]string) (servi
 		challenge.ZhipuCaptchaRid = strings.TrimSpace(data["rid"])
 		challenge.ZhipuCaptchaMD5 = strings.TrimSpace(data["md5"])
 		challenge.ZhipuPhoneCode = strings.TrimSpace(data["phone_code"])
-		if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuCaptchaMD5 == "" || challenge.ZhipuPhoneCode == "" {
+		// md5 可选（2026-09-22 chatglm.cn 线上取证：官方滑块 onSuccess 仅回调
+		// {rid, pass}，md5 是落地链接 query 可选参数，正常滑块流不带）；
+		// rid 必填失败关闭不变。
+		if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuPhoneCode == "" {
 			return service.WebSMSChallenge{}, errors.New("incomplete zhipu helper result")
 		}
 	case service.PlatformKimi:
@@ -822,4 +830,320 @@ func (h *AccountHandler) webPlatformAutoLoginStoreStatus(ctx context.Context, id
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// DeepSeek 邮箱验证码注册自动接入（deepseek-email-register-plan.md §1.2，任务卡 T1）
+// POST /api/v1/admin/accounts/web-register-email-code
+// POST /api/v1/admin/accounts/web-register
+//
+// 两个端点的出站与建号全程包在 executeAdminIdempotent 幂等闭包内（外审 F1）；
+// 登录会话去重在幂等闭包内显式调用 duplicateWebCredentialAccount（外审 F2）；
+// 代理显式解析 Proxy 对象取 URL，查不到即 400，不静默回退（外审 F3）；注册成功后的
+// 任何失败统一 F4 文案，不得让用户重试注册（上游会返回 EMAIL_EXISTS）。
+// 安全：成功响应仅返回 success/account_id/send_window_secs；凭据不回传客户端。
+// ---------------------------------------------------------------------------
+
+// webDeepseekRegisterService 是 DeepSeek 邮箱注册链所需的 service 能力（真实现为
+// *service.WebPlatformAutoLoginService）。以接口断言获取，避免改动既有
+// webPlatformAutoLoginService 本地接口（其既有测试桩位于本任务白名单之外的文件）。
+type webDeepseekRegisterService interface {
+	SendRegisterEmailCode(ctx context.Context, email, locale, deviceID, scenario, proxyURL string) (int64, error)
+	RegisterByEmail(ctx context.Context, email, code, password, region, deviceID, proxyURL string) error
+}
+
+// webDeepseekRegisterSvc 从注入的自动登录服务断言出注册链能力；未注入或未实现时返回 nil
+// （handler 统一 503 失败关闭，与 WebLoginPassword 同口径）。
+func (h *AccountHandler) webDeepseekRegisterSvc() webDeepseekRegisterService {
+	if h.webPlatformAutoLogin == nil {
+		return nil
+	}
+	if s, ok := h.webPlatformAutoLogin.(webDeepseekRegisterService); ok {
+		return s
+	}
+	return nil
+}
+
+// webRegisterPostSuccessMessage F4 统一文案（方案 §1.2-4）：上游注册已成功之后的失败
+// 一律返回本指引，不得让用户重试注册。
+const webRegisterPostSuccessMessage = "账号已在 DeepSeek 注册成功，请使用邮箱+密码在『密码登录』入口完成创建"
+
+// webRegisterPostSuccessError 标记「上游注册 biz_code=0 之后」的失败（LoginByEmail /
+// 去重检查 / CreateAccount）。
+//
+// 外审 2026-09-22 P1-2：这类失败是终态——上游账号已存在，重试绝不能再打上游注册。
+// 因此闭包不把它作为 error 返回（那会被协调器记 failed_retryable，退避后重试会
+// 重打上游拿到 EMAIL_EXISTS），而是编码为可持久化的成功结果
+// webRegisterPostSuccessResult；闭包外由 respondWebRegisterPostSuccess 统一映射为
+// F4 文案（HTTP 400 级业务错误）或 409 去重响应。同键重试时协调器直接重放该终态，
+// 不触上游。
+type webRegisterPostSuccessError struct{ err error }
+
+func (e *webRegisterPostSuccessError) Error() string { return e.err.Error() }
+
+func (e *webRegisterPostSuccessError) Unwrap() error { return e.err }
+
+// webRegisterPostSuccessResultKind 区分 post-success 终态结果的两类形态。
+type webRegisterPostSuccessResultKind string
+
+const (
+	webRegisterPostSuccessKindFailure   webRegisterPostSuccessResultKind = "post_success_failure"   // F4：HTTP 400 + detail
+	webRegisterPostSuccessKindDuplicate webRegisterPostSuccessResultKind = "post_success_duplicate" // 409 去重命中
+)
+
+// webRegisterPostSuccessResult 幂等闭包的终态结果（走协调器 succeeded 持久化路径，
+// 可重放）。Kind/DupAccountID/ErrorReason 固定键编码，重放解码后语义不变。
+type webRegisterPostSuccessResult struct {
+	Kind         webRegisterPostSuccessResultKind `json:"kind"`
+	DupAccountID string                           `json:"dup_account_id,omitempty"`
+	ErrorReason  string                           `json:"error_reason,omitempty"`
+}
+
+// validateWebRegisterEmail 邮箱基础格式校验（任务卡 §2.2-1：含 @，长度上限 254）。
+func validateWebRegisterEmail(email string) bool {
+	return strings.Contains(email, "@") && len(email) <= 254
+}
+
+// validateWebRegisterPassword 密码 ≥8 位且含字母+数字（上游规则，方案 §1.2-4 预校验前移）。
+func validateWebRegisterPassword(password string) bool {
+	if len(password) < 8 {
+		return false
+	}
+	hasLetter, hasDigit := false, false
+	for _, r := range password {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+// respondWebRegisterFailure 注册阶段（上游 biz_code=0 之前）失败的响应映射：
+// webLoginHTTPError → 分类文案透传（人机验证/邮箱域名/地域门控等自带中文文案；
+// WAF 用既有统一标题并附 needs_challenge）；其余错误走 ErrorFrom。
+func respondWebRegisterFailure(c *gin.Context, err error) {
+	kind, code, ok := service.WebLoginErrorKind(err)
+	if !ok {
+		response.ErrorFrom(c, err)
+		return
+	}
+	title := err.Error()
+	details := map[string]string{"detail": err.Error()}
+	if kind == service.WebLoginKindWAF {
+		title, _ = service.WebPlatformErrorDetail(service.PlatformDeepseek, code, kind)
+		details["needs_challenge"] = "true"
+	}
+	response.ErrorWithDetails(c, http.StatusBadRequest, title, "", details)
+}
+
+// respondWebRegisterIdempotentError 两个注册端点共用的幂等闭包错误映射：
+// 注册阶段（上游 biz_code=0 之前）失败按分类透传。post-success 终态不再走 error 路径
+//（外审 2026-09-22 P1-2：编码为 webRegisterPostSuccessResult 成功结果持久化可重放），
+// 由 respondWebRegisterOutcome 在闭包外统一映射 HTTP 响应。
+func respondWebRegisterIdempotentError(c *gin.Context, err error) {
+	if retryAfter := service.RetryAfterSecondsFromError(err); retryAfter > 0 {
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+	}
+	respondWebRegisterFailure(c, err)
+}
+
+// respondWebRegisterPostSuccess 把 post-success 终态结果映射为 HTTP 响应：
+// F4 文案（HTTP 400，metadata.detail 携带原始失败原因 + message 携带 F4 指引，
+// 外审 P1-3：前端两个通道都要可读）；409 去重命中按既有文案。
+func respondWebRegisterPostSuccess(c *gin.Context, res webRegisterPostSuccessResult) {
+	switch res.Kind {
+	case webRegisterPostSuccessKindDuplicate:
+		respondWebCredentialDuplicate(c, res.DupAccountID)
+	case webRegisterPostSuccessKindFailure:
+		response.ErrorWithDetails(c, http.StatusBadRequest, webRegisterPostSuccessMessage, "",
+			map[string]string{"detail": res.ErrorReason, "post_success_register": "true"})
+	default:
+		response.ErrorWithDetails(c, http.StatusBadRequest, webRegisterPostSuccessMessage, "",
+			map[string]string{"detail": "未知终态结果", "post_success_register": "true"})
+	}
+}
+
+// WebRegisterEmailCode 处理 DeepSeek 邮箱注册发码（任务卡 §2.2-1）。
+// body {platform:"deepseek", email} → {success:true, send_window_secs:N, device_id}。
+// 无 account_draft，固定走默认出站（proxyURL=""，当前即香港服务器，方案 §1.2-3）；
+// device_id 生成稳定 UUID，仅本次请求内使用并回传给前端不落库（建号时由 web-register
+// 端点再生成并落 login_device_id）。
+func (h *AccountHandler) WebRegisterEmailCode(c *gin.Context) {
+	var req struct {
+		Platform string `json:"platform" binding:"required"`
+		Email    string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	svc := h.webDeepseekRegisterSvc()
+	if svc == nil {
+		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
+		return
+	}
+
+	result, err := executeAdminIdempotent(c, "admin.accounts.web-register-email-code", req,
+		service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+			platform := strings.ToLower(strings.TrimSpace(req.Platform))
+			if platform != service.PlatformDeepseek {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_PLATFORM_UNSUPPORTED", "platform must be deepseek")
+			}
+			email := strings.TrimSpace(req.Email)
+			if !validateWebRegisterEmail(email) {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_EMAIL_INVALID", "邮箱格式不正确（需包含 @ 且长度不超过 254）")
+			}
+			deviceID := uuid.NewString()
+			secs, sendErr := svc.SendRegisterEmailCode(ctx, email, "en", deviceID, "register", "")
+			if sendErr != nil {
+				return nil, sendErr
+			}
+			return gin.H{"success": true, "send_window_secs": secs, "device_id": deviceID}, nil
+		})
+	if err != nil {
+		respondWebRegisterIdempotentError(c, err)
+		return
+	}
+	if result != nil && result.Replayed {
+		c.Header("X-Idempotency-Replayed", "true")
+	}
+	response.Success(c, result.Data)
+}
+
+// WebRegister 处理 DeepSeek 邮箱验证码注册 + 登录 + 建号一体化（任务卡 §2.2-2）。
+// body {platform:"deepseek", email, email_verification_code, password, account_draft}
+// → {success:true, account_id}。全程包在 executeAdminIdempotent 闭包内（外审 F1）。
+func (h *AccountHandler) WebRegister(c *gin.Context) {
+	var req struct {
+		Platform              string                `json:"platform" binding:"required"`
+		Email                 string                `json:"email" binding:"required"`
+		EmailVerificationCode string                `json:"email_verification_code" binding:"required"`
+		Password              string                `json:"password" binding:"required"`
+		AccountDraft          *CreateAccountRequest `json:"account_draft" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	svc := h.webDeepseekRegisterSvc()
+	if svc == nil {
+		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
+		return
+	}
+
+	result, err := executeAdminIdempotent(c, "admin.accounts.web-register", req,
+		service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+			// a. 预校验前移（方案 §1.2-4）：密码强度 / account_draft 基本字段不通过直接
+			// 400，不触上游。
+			platform := strings.ToLower(strings.TrimSpace(req.Platform))
+			if platform != service.PlatformDeepseek {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_PLATFORM_UNSUPPORTED", "platform must be deepseek")
+			}
+			email := strings.TrimSpace(req.Email)
+			if !validateWebRegisterEmail(email) {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_EMAIL_INVALID", "邮箱格式不正确（需包含 @ 且长度不超过 254）")
+			}
+			verifyCode := strings.TrimSpace(req.EmailVerificationCode)
+			if verifyCode == "" {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_CODE_REQUIRED", "email_verification_code 不能为空")
+			}
+			if !validateWebRegisterPassword(req.Password) {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_PASSWORD_WEAK", "密码需至少 8 位且包含字母和数字")
+			}
+			draft := req.AccountDraft
+			if strings.TrimSpace(draft.Name) == "" {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_DRAFT_INVALID", "account_draft.name 不能为空")
+			}
+			if draft.Type != service.AccountTypeAPIKey {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_DRAFT_INVALID", "account_draft.type 必须为 apikey")
+			}
+
+			// b. 代理解析（外审 F3）：proxy_id 非空时显式查 Proxy 对象取 URL，查不到即 400，
+			// 不静默回退；为空走默认出站（当前即香港服务器）。
+			proxyURL := ""
+			var proxyObj *service.Proxy
+			if draft.ProxyID != nil && *draft.ProxyID != 0 {
+				proxy, perr := h.adminService.GetProxy(ctx, *draft.ProxyID)
+				if perr != nil || proxy == nil {
+					return nil, infraerrors.BadRequest("WEB_REGISTER_PROXY_NOT_FOUND",
+						fmt.Sprintf("指定的代理不存在（proxy_id=%d），不回退默认出站", *draft.ProxyID))
+				}
+				proxyURL = proxy.URL()
+				proxyObj = proxy
+			}
+
+			// c. device_id：本次注册生成，注册与紧随的登录复用同一 device_id，落 login_device_id。
+			deviceID := uuid.NewString()
+
+			// d. 上游注册（region 固定 "HK"，方案 §1.2-1/§2 取证 7）；PoW 由 service 层
+			// 一次一换（每次上游请求前实时取挑战求解，禁止缓存）。非 0 业务码透传文案。
+			if rerr := svc.RegisterByEmail(ctx, email, verifyCode, req.Password, "HK", deviceID, proxyURL); rerr != nil {
+				return nil, rerr
+			}
+
+			// e. 注册成功 → 立即用同一邮箱密码走既有 LoginByEmail 取 Cookie（内含
+			// verifyDeepseekCookie 验证，不因上游行为放宽）。以下任何失败统一 F4 文案（外审 F4）。
+			loginAccount := &service.Account{
+				Platform: service.PlatformDeepseek,
+				Type:     service.AccountTypeAPIKey,
+				Credentials: map[string]any{
+					"access_mode":                service.AccountAccessModeWeb,
+					service.CredKeyLoginEmail:    email,
+					service.CredKeyLoginPassword: req.Password,
+					service.CredKeyLoginDeviceID: deviceID,
+				},
+				ProxyID:     draft.ProxyID,
+				Proxy:       proxyObj,
+				Concurrency: draft.Concurrency,
+			}
+			cookie, lerr := h.webPlatformAutoLogin.LoginByEmail(ctx, loginAccount)
+			if lerr != nil {
+				return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindFailure, ErrorReason: lerr.Error()}, nil
+			}
+
+			// f. 登录会话去重（外审 F2）：以取得的 Cookie 在幂等闭包内显式查重
+			//（excludeAccountID=0），命中返回既有 409，不落库。
+			dupCreds := map[string]any{"cookie": cookie, "access_mode": service.AccountAccessModeWeb}
+			existing, derr := h.duplicateWebCredentialAccount(ctx, service.PlatformDeepseek, dupCreds, 0)
+			if derr != nil {
+				return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindFailure, ErrorReason: derr.Error()}, nil
+			}
+			if existing != "" {
+				return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindDuplicate, DupAccountID: existing}, nil
+			}
+
+			// g. 建号落库（FromWebLogin:true）：凭据五键齐（cookie/login_email/login_password/
+			// login_device_id/access_mode=web，服务端强制兜底 access_mode=web），其余字段取
+			// account_draft。
+			createdCreds := mergeWebLoginCredentials(draft.Credentials, nil)
+			createdCreds[webAutoLoginCookieKey] = cookie
+			createdCreds[service.CredKeyLoginEmail] = email
+			createdCreds[service.CredKeyLoginPassword] = req.Password
+			createdCreds[service.CredKeyLoginDeviceID] = deviceID
+			createdCreds["access_mode"] = service.AccountAccessModeWeb
+			created, cerr := h.adminService.CreateAccount(ctx, &service.CreateAccountInput{
+				Name: draft.Name, Notes: draft.Notes, Platform: service.PlatformDeepseek,
+				Type: draft.Type, Credentials: createdCreds,
+				Extra: draft.Extra, ProxyID: draft.ProxyID, Concurrency: draft.Concurrency,
+				Priority: draft.Priority, RateMultiplier: draft.RateMultiplier, LoadFactor: draft.LoadFactor,
+				GroupIDs: draft.GroupIDs, ExpiresAt: draft.ExpiresAt,
+				AutoPauseOnExpired: draft.AutoPauseOnExpired, ProbeEnabled: draft.ProbeEnabled,
+				FromWebLogin: true,
+			})
+			if cerr != nil {
+				return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindFailure, ErrorReason: cerr.Error()}, nil
+			}
+			return gin.H{"success": true, "account_id": created.ID}, nil
+		})
+	if err != nil {
+		respondWebRegisterIdempotentError(c, err)
+		return
+	}
+	if result != nil && result.Replayed {
+		c.Header("X-Idempotency-Replayed", "true")
+	}
+	response.Success(c, result.Data)
 }

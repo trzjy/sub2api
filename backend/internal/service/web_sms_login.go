@@ -30,6 +30,9 @@ type webKimiLoginWithSMSResponse struct {
 // 协议依据（已取证，非猜测）：
 //   - 13-zhipu-kimi-login-probe.md（2026-09-18，main.js 逆向）：
 //     · zhipu 发码 POST /backend-api/v1/user/send_sms，body {phone, pic_captcha_id, md5, phone_code}
+//       （2026-09-22 chatglm.cn main.2b260a10.js 再取证修正：md5 是落地链接 query 的可选参数，
+//       官方滑块 onSuccess 仅回调 {rid, pass}，正常滑块流 md5=undefined 省键——
+//       md5 不作为必填校验，仅 challenge 携带时透传）
 //     · zhipu 登录 POST /user-api/user/phone_login，body {phone, captcha(短信码), pic_captcha_id,
 //       phone_code, tI 签名三件套 timestamp/xNonce/sign}
 //     · kimi 发码 SMSService.sendVerifyCode({scene:"SCENE_LOGIN", phone:{country_code,number},
@@ -38,15 +41,15 @@ type webKimiLoginWithSMSResponse struct {
 //        captcha、不带 session_token；响应 LoginWithSMSResponse{access_token,refresh_token,...} 顶层 snake_case
 //
 // 证据缺失（失败关闭点，绝不发假参数请求）：
-//   - 数美滑块参数（pic_captcha_id=rid、md5）来自前端滑块交互，无自动生成算法；
-//     必须由调用方在请求内通过 WebSMSChallenge 回传，否则失败关闭。
+//   - 数美滑块参数（pic_captcha_id=rid）来自前端滑块交互，无自动生成算法；
+//     必须由调用方在请求内通过 WebSMSChallenge 回传，否则失败关闭（md5 可选，见上）。
 //   - kimi 发码的易盾 validate 来自前端易盾组件交互，同样由调用方在请求内回传；缺失则失败关闭。
 //   - 挑战值绑定当前 sub2api 请求（无状态短期会话），不调用任何外部打码助手，不引入闲鱼契约。
 //
 // 签名：zhipu phone_login 的 tI 签名三件套（timestamp/xNonce/sign）算法已取证
 //   - 02-sign-algorithm.md（2026-09-17，main.js 逆向 + 抓包黄金用例）并由既有
 //     webZhipuComputeSign（web_zhipu_gateway_forward.go:498）实现；本文件 phone_login
-//     分支直接复用，不再要求调用方传入。数美滑块（rid/md5）仍须调用方传入。
+//     分支直接复用，不再要求调用方传入。数美滑块 rid 仍须调用方传入（md5 可选）。
 //
 // 失败分类统一返回 *webLoginHTTPError（Kind=WebLoginKind*、Code=WebLoginCode*），
 // 日志与错误文案绝不携带手机号以外的凭据值。
@@ -55,7 +58,7 @@ type webKimiLoginWithSMSResponse struct {
 // zhipu 发码 / 登录端点（13 号证据，已取证）。
 const (
 	// webZhipuSendSMSCodeEndpoint zhipu 发送短信验证码（证据：POST /backend-api/v1/user/send_sms，
-	// body {phone, pic_captcha_id, md5, phone_code}，data 原样透传）。
+	// body {phone, pic_captcha_id, phone_code[, md5]}，data 原样透传；md5 可选，见文件头）。
 	webZhipuSendSMSCodeEndpoint = "/backend-api/v1/user/send_sms"
 	// webZhipuPhoneLoginEndpoint zhipu 手机号登录（证据：POST /user-api/user/phone_login，
 	// body {phone, captcha(短信码), pic_captcha_id, phone_code, tI 签名三件套}）。
@@ -107,7 +110,8 @@ type WebSMSChallenge struct {
 	// ZhipuCaptchaRid zhipu 数美滑块 onSuccess 的 rid（localStorage captcha_rid）。
 	// 证据：发码 body.pic_captcha_id = rid。
 	ZhipuCaptchaRid string
-	// ZhipuCaptchaMD5 zhipu 图形校验值（发码 body.md5）。
+	// ZhipuCaptchaMD5 zhipu 图形校验值（发码 body.md5，可选：官方正常滑块流不带，
+	// 仅落地链接 query 携带时透传；2026-09-22 线上取证）。
 	ZhipuCaptchaMD5 string
 	// ZhipuPhoneCode zhipu 手机号国家码（发码 body.phone_code；与 phone 组装，如 "86"）。
 	ZhipuPhoneCode string
@@ -117,7 +121,7 @@ type WebSMSChallenge struct {
 
 // SendSmsCode 向 platform 平台手机号发送登录短信验证码。
 //
-// challenge 承载验证码关卡求解结果（zhipu 数美滑块 rid/md5/phone_code、kimi 易盾
+// challenge 承载验证码关卡求解结果（zhipu 数美滑块 rid/phone_code[+可选 md5]、kimi 易盾
 // validate），由调用方在请求内随手机号一并回传（挑战值绑定本次请求）。缺失即失败关闭
 // （Kind=WAF，提示需在本机浏览器完成验证后回填），绝不调用外部助手、绝不发假参数请求。
 //
@@ -149,7 +153,7 @@ func (s *WebPlatformAutoLoginService) SendSmsCode(ctx context.Context, platform,
 			Msg: fmt.Sprintf("短信登录暂不支持平台 %q", platform),
 		}
 	}
-	// 挑战值（zhipu 数美 rid+md5；kimi 易盾 validate）由调用方在请求内回传，绑定本次请求；
+	// 挑战值（zhipu 数美 rid；kimi 易盾 validate）由调用方在请求内回传，绑定本次请求；
 	// 缺失即失败关闭（Kind=WAF），提示需在本机浏览器完成验证后回填，绝不调用外部助手。
 	if miss := smsSendChallengeMissing(platform)(challenge); miss != "" {
 		return "", &webLoginHTTPError{
@@ -209,16 +213,15 @@ func (s *WebPlatformAutoLoginService) VerifySmsCode(ctx context.Context, platfor
 }
 
 // smsSendChallengeMissing 返回发码操作必需求解值的缺失检查函数：返回缺失项名称，
-// 空串表示齐备（zhipu 需数美 rid+md5；kimi 需易盾 validate）。
+// 空串表示齐备（zhipu 需数美 rid；kimi 需易盾 validate）。
+// md5 不再必填（2026-09-22 chatglm.cn 线上取证：官方滑块 onSuccess 仅回调
+// {rid, pass}，发码 body 的 md5 是落地链接 query 的可选参数，正常滑块流省键）。
 func smsSendChallengeMissing(platform string) func(WebSMSChallenge) string {
 	return func(ch WebSMSChallenge) string {
 		switch platform {
 		case PlatformZhipu:
 			if ch.ZhipuCaptchaRid == "" {
 				return "数美滑块 rid（pic_captcha_id）"
-			}
-			if ch.ZhipuCaptchaMD5 == "" {
-				return "图形校验 md5"
 			}
 		case PlatformKimi:
 			if ch.KimiCaptchaValidate == "" {
@@ -244,20 +247,21 @@ func smsVerifyChallengeMissing(platform string) func(WebSMSChallenge) string {
 // zhipu 短信登录
 // ---------------------------------------------------------------------------
 
-// sendSmsCodeZhipu zhipu 发码。证据：POST /backend-api/v1/user/send_sms，
-// body {phone, pic_captcha_id, md5, phone_code}（13 号证据，main.js 逆向）。
-// 数美滑块参数（rid/md5）来自前端滑块交互，证据 02-sign-algorithm.md 缺失生成算法；
-// challenge 必须携带已求解值，缺失即失败关闭。
+// sendSmsCodeZhipu zhipu 发码。证据：POST /backend-api/v1/user/send_sms
+// （2026-09-22 chatglm.cn main.2b260a10.js 再取证）。body {phone, pic_captcha_id,
+// phone_code}；md5 为落地链接 query 可选参数（加密手机号快捷登录链路），正常滑块
+// 登录流官方 onSuccess 仅回调 {rid, pass}，md5 为 undefined 序列化时省键——故
+// md5 仅在 challenge 携带时透传，缺失不阻断。数美滑块 rid 必填，缺失即失败关闭。
 //
 // 响应判定（已取证契约白名单 + 失败关闭）：成功 ⇔ HTTP 2xx 且 body 解析出
 // code==0 或 success==true（二者任一，均为已取证字段名）。2xx 但 body 无这两个
 // 可判定字段 → 失败关闭（不再放行），附 smsJSONShape 零凭据诊断日志；body 明确
 // 失败标志（success=false / code 非 0）→ 失败关闭透出文案。
 func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
-	if challenge.ZhipuCaptchaRid == "" || challenge.ZhipuCaptchaMD5 == "" {
+	if challenge.ZhipuCaptchaRid == "" {
 		return "", &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
-			Msg: "zhipu 发码需数美滑块+图形验证参数（pic_captcha_id/md5），证据缺失或未求解，无法自动发码",
+			Msg: "zhipu 发码需数美滑块参数（pic_captcha_id），证据缺失或未求解，无法自动发码",
 		}
 	}
 	base := strings.TrimRight(DefaultWebZhipuBaseURL, "/")
@@ -266,12 +270,16 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 		return "", fmt.Errorf("zhipu 发码目标被 URL 白名单拒绝: %w", err)
 	}
 	xTimestamp, xNonce, xSign := s.webZhipuSignTriplet()
-	payload, err := json.Marshal(map[string]string{
+	// 与官方序列化行为对齐：md5 仅在 challenge 携带时写入（正常滑块流省键）。
+	body := map[string]string{
 		"phone":          phone,
 		"pic_captcha_id": challenge.ZhipuCaptchaRid,
-		"md5":            challenge.ZhipuCaptchaMD5,
 		"phone_code":     challenge.ZhipuPhoneCode,
-	})
+	}
+	if challenge.ZhipuCaptchaMD5 != "" {
+		body["md5"] = challenge.ZhipuCaptchaMD5
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return "", err
 	}

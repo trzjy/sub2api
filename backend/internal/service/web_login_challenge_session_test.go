@@ -286,3 +286,24 @@ func TestWebLoginChallengeSessionStoreLazyEvictionOfExpired(t *testing.T) {
 	require.ErrorIs(t, err, ErrWebLoginChallengeExpired)
 	require.Empty(t, store.sessions, "expired session must be deleted on lookup")
 }
+
+// 2026-09-22 chatglm.cn 线上取证：官方滑块 onSuccess 仅回调 {rid, pass}，md5 可选。
+// zhipu 挑战结果 rid+phone_code（无 md5）须能通过 SetConsumeResult 完整 consume 链路；
+// 缺 rid 仍拒绝。
+func TestWebLoginChallengeSessionStoreSetConsumeResultZhipuRidOnly(t *testing.T) {
+	store := NewWebLoginChallengeSessionStore()
+
+	sess, err := store.Create(WebLoginChallengeCreateInput{AdminID: 7, Platform: PlatformZhipu, Phone: "13800138000"})
+	require.NoError(t, err)
+	claim, err := store.BeginConsume(sess.ID, 7, PlatformZhipu, "13800138000")
+	require.NoError(t, err)
+	require.NoError(t, store.SetConsumeResult(sess.ID, claim.Token, WebSMSChallenge{ZhipuCaptchaRid: "rid-1", ZhipuPhoneCode: "86"}))
+	require.NoError(t, store.FinishConsume(sess.ID, claim.Token, true))
+
+	// 缺 rid（仅 md5+phone_code）仍失败关闭。
+	sess2, err := store.Create(WebLoginChallengeCreateInput{AdminID: 7, Platform: PlatformZhipu, Phone: "13800138001"})
+	require.NoError(t, err)
+	claim2, err := store.BeginConsume(sess2.ID, 7, PlatformZhipu, "13800138001")
+	require.NoError(t, err)
+	require.Error(t, store.SetConsumeResult(sess2.ID, claim2.Token, WebSMSChallenge{ZhipuCaptchaMD5: "md5-1", ZhipuPhoneCode: "86"}))
+}

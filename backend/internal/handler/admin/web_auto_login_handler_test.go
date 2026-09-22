@@ -900,3 +900,21 @@ func TestWebLoginSMS_RejectsUnsupportedPlatformAndAction(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }
+
+// 2026-09-22 chatglm.cn 线上取证：官方滑块 onSuccess 仅回调 {rid, pass}，
+// md5 是落地链接 query 可选参数 → helper 结果 rid+phone_code 即可受理，
+// md5 缺失不拒收；缺 rid 仍失败关闭。
+func TestLocalCaptchaResultChallenge_ZhipuRidOnly(t *testing.T) {
+	ch, err := localCaptchaResultChallenge(service.PlatformZhipu, map[string]string{
+		"rid": "rid-1", "phone_code": "86",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "rid-1", ch.ZhipuCaptchaRid)
+	require.Equal(t, "86", ch.ZhipuPhoneCode)
+	require.Equal(t, "", ch.ZhipuCaptchaMD5)
+
+	_, err = localCaptchaResultChallenge(service.PlatformZhipu, map[string]string{
+		"md5": "md5-1", "phone_code": "86",
+	})
+	require.Error(t, err)
+}
