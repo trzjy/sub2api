@@ -28,11 +28,11 @@ type webKimiLoginWithSMSResponse struct {
 // 短信登录（半自动）内核：zhipu / kimi 通过手机号验证码完成登录。
 //
 // 协议依据（已取证，非猜测）：
-//   - 13-zhipu-kimi-login-probe.md（2026-09-18，main.js 逆向）：
-//     · zhipu 发码 POST /backend-api/v1/user/send_sms，body {phone, pic_captcha_id, md5, phone_code}
-//       （2026-09-22 chatglm.cn main.2b260a10.js 再取证修正：md5 是落地链接 query 的可选参数，
-//       官方滑块 onSuccess 仅回调 {rid, pass}，正常滑块流 md5=undefined 省键——
-//       md5 不作为必填校验，仅 challenge 携带时透传）
+//   - 2026-09-22 生产抓包修正（决定性，推翻 13 号 bundle 逆向）：zhipu 发码
+//     POST /chatglm/user-api/user/login_captcha（/chatglm 前缀 + user-api 挂载点），
+//     body {phone, phone_code, pic_captcha_id, tm:"pc", fr:"default", distinct_id:""}，
+//     无 md5 键；成功响应 {"status":0,"message":"...","result":null,"rid":"..."}。
+//     /backend-api/v1/user/send_sms 实测 405 不存在。
 //     · zhipu 登录 POST /user-api/user/phone_login，body {phone, captcha(短信码), pic_captcha_id,
 //       phone_code, tI 签名三件套 timestamp/xNonce/sign}
 //     · kimi 发码 SMSService.sendVerifyCode({scene:"SCENE_LOGIN", phone:{country_code,number},
@@ -55,13 +55,20 @@ type webKimiLoginWithSMSResponse struct {
 // 日志与错误文案绝不携带手机号以外的凭据值。
 // ---------------------------------------------------------------------------
 
-// zhipu 发码 / 登录端点（13 号证据，已取证）。
+// zhipu 发码 / 登录端点。
+// 发码端点（2026-09-22 21:40 生产抓包取证，决定性）：POST /chatglm/user-api/user/login_captcha，
+// body {phone, phone_code:"+86", pic_captcha_id, tm:"pc", fr:"default", distinct_id:""}，
+// 成功响应 {"status":0,"message":"短信验证码已发送","result":null,"rid":"..."}。
+// （旧证据 13 号的 /backend-api/v1/user/send_sms 实测 405 不存在——bundle 静态逆向
+// 误判调用点；E0 空探针 405 与本次抓包共同证伪。）
+// 登录端点：POST /user-api/user/phone_login（13 号证据；2026-09-22 发码抓包仅
+// 终证发码路径带 /chatglm 前缀，登录路径是否同样带前缀待登录步抓包终证后再改，
+// 单独立项，见 verifySmsCodeZhipu 注释）。
 const (
-	// webZhipuSendSMSCodeEndpoint zhipu 发送短信验证码（证据：POST /backend-api/v1/user/send_sms，
-	// body {phone, pic_captcha_id, phone_code[, md5]}，data 原样透传；md5 可选，见文件头）。
-	webZhipuSendSMSCodeEndpoint = "/backend-api/v1/user/send_sms"
-	// webZhipuPhoneLoginEndpoint zhipu 手机号登录（证据：POST /user-api/user/phone_login，
-	// body {phone, captcha(短信码), pic_captcha_id, phone_code, tI 签名三件套}）。
+	// webZhipuSendSMSCodeEndpoint zhipu 发送短信验证码（2026-09-22 生产抓包）。
+	webZhipuSendSMSCodeEndpoint = "/chatglm/user-api/user/login_captcha"
+	// webZhipuPhoneLoginEndpoint zhipu 手机号登录（13 号证据；/chatglm 前缀待登录
+	// 步抓包终证，当前不改）。
 	webZhipuPhoneLoginEndpoint = "/user-api/user/phone_login"
 )
 
@@ -247,16 +254,18 @@ func smsVerifyChallengeMissing(platform string) func(WebSMSChallenge) string {
 // zhipu 短信登录
 // ---------------------------------------------------------------------------
 
-// sendSmsCodeZhipu zhipu 发码。证据：POST /backend-api/v1/user/send_sms
-// （2026-09-22 chatglm.cn main.2b260a10.js 再取证）。body {phone, pic_captcha_id,
-// phone_code}；md5 为落地链接 query 可选参数（加密手机号快捷登录链路），正常滑块
-// 登录流官方 onSuccess 仅回调 {rid, pass}，md5 为 undefined 序列化时省键——故
-// md5 仅在 challenge 携带时透传，缺失不阻断。数美滑块 rid 必填，缺失即失败关闭。
+// sendSmsCodeZhipu zhipu 发码。证据：2026-09-22 21:40 生产抓包（决定性）——
+// POST /chatglm/user-api/user/login_captcha，body {phone, phone_code:"+86",
+// pic_captcha_id, tm:"pc", fr:"default", distinct_id:""}；无 md5 键（13 号证据的
+// /backend-api/v1/user/send_sms 实测 405，bundle 逆向误判调用点，已证伪）。
+// 数美滑块 rid 必填，缺失即失败关闭；md5 按旧证据链保留可选透传（抓包 body 未含，
+// 不再写入）。
 //
-// 响应判定（已取证契约白名单 + 失败关闭）：成功 ⇔ HTTP 2xx 且 body 解析出
-// code==0 或 success==true（二者任一，均为已取证字段名）。2xx 但 body 无这两个
-// 可判定字段 → 失败关闭（不再放行），附 smsJSONShape 零凭据诊断日志；body 明确
-// 失败标志（success=false / code 非 0）→ 失败关闭透出文案。
+// 响应判定（抓包契约 + 失败关闭，发码专用判定）：成功 ⇔ HTTP 2xx 且 body 解析出
+// status==0（2026-09-22 抓包成功体为 {"status":0,...}）/ code==0 / ret==0 /
+// success==true（后三者为历史白名单形态，向后兼容）。2xx 但无可判定字段 →
+// 失败关闭，附 smsJSONShape 零凭据诊断日志；body 明确失败标志（status 非 0 /
+// success=false / code 非 0）→ 失败关闭透出文案。
 func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phone string, challenge WebSMSChallenge, account *Account) (string, error) {
 	if challenge.ZhipuCaptchaRid == "" {
 		return "", &webLoginHTTPError{
@@ -270,14 +279,17 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 		return "", fmt.Errorf("zhipu 发码目标被 URL 白名单拒绝: %w", err)
 	}
 	xTimestamp, xNonce, xSign := s.webZhipuSignTriplet()
-	// 与官方序列化行为对齐：md5 仅在 challenge 携带时写入（正常滑块流省键）。
+	// 与 2026-09-22 抓包 body 完全对齐：无 md5；tm/fr/distinct_id 为官方固定值。
+	// phone_code 归一：抓包（2026-09-22）发码 body 中 phone_code="+86"（带加号），
+	// SplitSMSPhone 返回 "86"（无加号），组包前统一补 "+" 前缀（仅发码路径应用；
+	// 登录路径 phone_code 是否带加号待登录步抓包终证，暂保持原样）。
 	body := map[string]string{
 		"phone":          phone,
+		"phone_code":     zhipuNormalizePhoneCode(challenge.ZhipuPhoneCode),
 		"pic_captcha_id": challenge.ZhipuCaptchaRid,
-		"phone_code":     challenge.ZhipuPhoneCode,
-	}
-	if challenge.ZhipuCaptchaMD5 != "" {
-		body["md5"] = challenge.ZhipuCaptchaMD5
+		"tm":             "pc",
+		"fr":             "default",
+		"distinct_id":    "",
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -301,15 +313,16 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 	if resp.StatusCode >= 400 {
 		return "", s.smsHTTPStatusError(PlatformZhipu, resp.StatusCode, "zhipu 短信验证码发送")
 	}
-	if msg, failed := zhipuBizFailure(raw); failed {
+	if msg, failed := zhipuSendBizFailure(raw); failed {
 		return "", &webLoginHTTPError{
 			Platform: PlatformZhipu, Code: -1, Kind: WebLoginKindLogin,
 			Msg: "zhipu 短信验证码发送失败：" + msg,
 		}
 	}
-	// 已取证契约白名单：成功 ⇔ body 明确 code==0 或 success==true；
+	// 发码专用判定（2026-09-22 抓包成功体 {"status":0}）：status==0 优先，
+	// 其余历史白名单（code==0 / ret==0 / success==true）经回退保持成功；
 	// 2xx 但无可判定字段 → 失败关闭（不再放行），附零凭据诊断日志。
-	if !zhipuBizSuccess(raw) {
+	if !zhipuSendBizSuccess(raw) {
 		s.logger.Info("zhipu 短信验证码发送响应诊断",
 			"platform", PlatformZhipu,
 			"status", resp.StatusCode,
@@ -336,8 +349,10 @@ func (s *WebPlatformAutoLoginService) sendSmsCodeZhipu(ctx context.Context, phon
 //     success==true，与发码共用同一白名单实现）且 Set-Cookie 同时提取到
 //     chatglm_token 与 chatglm_refresh_token → 成功：整串 Cookie 提取两键返回
 //     （LoginRefreshToken 强制要求，缺失即失败关闭，不再保留兜底续期语义）；
-//  2. body 候选业务失败标志（success=false / 顶层 code/status/ret 或嵌套
+//  2. body 候选业务失败标志（success=false / 顶层 status、code/ret 或嵌套
 //     data.code、data.status 为非 0 数值或字符串数字）→ 失败关闭透出文案；
+//     顶层 status 非 0 失败拦截由共享 zhipuBizFailure 先于 zhipuBizSuccess
+//     生效（见 zhipuBizFailure）。
 //  3. 2xx 但 zhipuBizSuccess=false（无可判定成功标志，即使带 Cookie）→ 失败关闭，
 //     文案"GLM 登录响应缺少已取证成功标志" + INFO 诊断日志（smsJSONShape 零凭据）；
 //  4. 2xx 有成功标志但缺 chatglm_token 或缺 chatglm_refresh_token → 失败关闭 +
@@ -449,9 +464,10 @@ func (s *WebPlatformAutoLoginService) webZhipuSignTriplet() (xTimestamp, xNonce,
 	return webZhipuComputeSign(time.Now().UnixMilli())
 }
 
-// applyZhipuFingerprintHeaders 按 2026-09-17 登录态抓包对齐的指纹头组装（与
-// buildWebZhipuUpstreamRequest 同源；登录前无 Cookie/token，故无 Authorization/Cookie/
-// x-device-id）。签名三件套同时以 header 与 body（phone_login）双形态携带，值同源一致。
+// applyZhipuFingerprintHeaders 按 2026-09-17 登录态抓包 + 2026-09-22 发码抓包对齐的
+// 指纹头组装（与 buildWebZhipuUpstreamRequest 同源；登录前无 Cookie/token，故无
+// Authorization/Cookie；x-device-id 抓包确认携带——22 号发码抓包带匿名 guest token
+// 的 device_id，本链路无 token 可解析则不携带）。签名三件套 header 形态抓包确认。
 func applyZhipuFingerprintHeaders(req *http.Request, xTimestamp, xNonce, xSign string) {
 	origin := strings.TrimRight(DefaultWebZhipuBaseURL, "/")
 	req.Header.Set("Content-Type", "application/json")
@@ -473,6 +489,11 @@ func applyZhipuFingerprintHeaders(req *http.Request, xTimestamp, xNonce, xSign s
 // zhipuBizSuccess 报告 zhipu 响应体是否携带已取证的成功标志：
 // code==0 或 success==true（二者任一，字段名与成功值均已取证）。
 // 其余形状（无字段、解析失败、非对象体）一律视为不可确认成功，由调用方失败关闭。
+//
+// 注意：status==0 不在共享白名单内——2026-09-22 抓包仅终证发码响应为
+// {"status":0,...}，登录响应是否使用 status 字段未终证；发码路径经
+// zhipuSendBizSuccess 判定 status==0，登录路径（verifySmsCodeZhipu）保持
+// 仅认 code/ret/success 白名单，待登录步抓包终证后再统一。
 func zhipuBizSuccess(raw []byte) bool {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return false
@@ -500,11 +521,37 @@ func zhipuBizSuccess(raw []byte) bool {
 	return false
 }
 
+// zhipuSendBizSuccess 发码专用成功判定：2026-09-22 生产抓包终证发码成功体为
+// {"status":0,...}，故先查 status==0，再回退共享 zhipuBizSuccess（code==0 /
+// ret==0 / success==true 历史白名单）。status==0 仅发码路径采信；登录路径
+// 未终证前不经由此函数。
+func zhipuSendBizSuccess(raw []byte) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return false
+	}
+	if v, ok := top["status"]; ok {
+		var n int64
+		if err := json.Unmarshal(v, &n); err == nil && n == 0 {
+			return true
+		}
+	}
+	return zhipuBizSuccess(raw)
+}
+
 // zhipuBizFailure 从 zhipu user-api 响应体提取明确的业务失败标志（宽容解析：
 // 仅识别确定性失败形态，未知形状不算失败）。返回 (文案, 是否失败)。
 // 候选形态（与既有取证错误体一致）：success=false；顶层或 data 嵌套的
-// code/status/ret 为非 0 数值，或为字符串数字（如 "code":"403"，解析为数值后
+// code/ret 为非 0 数值，或为字符串数字（如 "code":"403"，解析为数值后
 // 非 0 即失败）。文案取 message/msg/detail 候选，绝不携带凭据值。
+//
+// 注意：顶层 status 非 0 的失败识别于 2026-09-22 整改轮恢复至共享函数（登录
+// 路径原有语义：status 非 0 先于 zhipuBizSuccess 的 success 放行被拦截，
+// 杜绝 {"status":500,"success":true} 冲突响应判成功）；发码路径经
+// zhipuSendBizFailure 先行检查，判定结果不变。
 func zhipuBizFailure(raw []byte) (string, bool) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "", false
@@ -519,7 +566,12 @@ func zhipuBizFailure(raw []byte) (string, bool) {
 			return smsFirstStringValue(raw, "message", "msg", "detail"), true
 		}
 	}
-	for _, key := range []string{"code", "status", "ret"} {
+	// 顶层 status 非 0 即失败（与 code/ret 检查同构；先于 zhipuBizSuccess 的
+	// success 放行被调用，见 verifySmsCodeZhipu 的调用顺序）。
+	if n, ok := zhipuNumericField(top["status"]); ok && n != 0 {
+		return fmt.Sprintf("status=%d", n), true
+	}
+	for _, key := range []string{"code", "ret"} {
 		if n, ok := zhipuNumericField(top[key]); ok && n != 0 {
 			return fmt.Sprintf("%s=%d", key, n), true
 		}
@@ -536,6 +588,33 @@ func zhipuBizFailure(raw []byte) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// zhipuSendBizFailure 发码专用失败判定：先查顶层 status 非 0（2026-09-22 发码
+// 抓包响应使用 status 字段），再回退共享 zhipuBizFailure（status/code/ret/success
+// + data 嵌套）。共享判定器已恢复顶层 status 非 0 检查，此处的先行检查成为
+// 重复但无行为变化，保留以保证发码路径不依赖共享判定器实现顺序。
+func zhipuSendBizFailure(raw []byte) (string, bool) {
+	if len(bytes.TrimSpace(raw)) != 0 {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &top); err == nil {
+			if n, ok := zhipuNumericField(top["status"]); ok && n != 0 {
+				return fmt.Sprintf("status=%d", n), true
+			}
+		}
+	}
+	return zhipuBizFailure(raw)
+}
+
+// zhipuNormalizePhoneCode 把国家码归一为抓包契约形态（2026-09-22 生产抓包：
+// 发码 body.phone_code="+86"，带加号）：去空白后，已带 "+" 前缀原样返回，
+// 否则补 "+" 前缀（"86" → "+86"；空值原样返回空串）。仅发码路径组包处应用。
+func zhipuNormalizePhoneCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" || strings.HasPrefix(code, "+") {
+		return code
+	}
+	return "+" + code
 }
 
 // zhipuNumericField 把 JSON 字段值宽容解析为数值：接受数值字面量与字符串数字

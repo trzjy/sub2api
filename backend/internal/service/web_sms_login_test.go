@@ -99,47 +99,45 @@ func zhipuChallenge() WebSMSChallenge {
 }
 
 // ---------------------------------------------------------------------------
-// zhipu 发码（2026-09-22 chatglm.cn 再取证：rid 必填；md5 为 query 可选参数，
-// 官方正常滑块流 onSuccess 仅回调 {rid, pass}，md5 省键）
+// zhipu 发码（2026-09-22 21:40 生产抓包终证：POST /chatglm/user-api/user/login_captcha，
+// body {phone, phone_code, pic_captcha_id, tm, fr, distinct_id}，无 md5 键；
+// 成功响应 {"status":0,...}；旧 13 号证据 send_sms 端点实测 405 已证伪）
 // ---------------------------------------------------------------------------
 
 func TestWebSMS_ZhipuSendSuccess(t *testing.T) {
-	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"code":0}`}
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"status":0,"message":"短信验证码已发送","result":null,"rid":"x"}`}
 	svc := newSmsTestService(up)
 
 	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
 	require.NoError(t, err)
 	require.Len(t, up.requests, 1)
 
-	// 请求契约（2026-09-22 再取证）：rid+phone_code 必填；challenge 携带 md5 时透传。
+	// 请求契约（抓包终证）：路径 /chatglm 前缀；body 六键对齐，无 md5。
 	req := up.requests[0]
 	require.Equal(t, webZhipuSendSMSCodeEndpoint, req.URL.Path)
 	var body map[string]string
 	require.NoError(t, readJSONBody(req, &body))
 	require.Equal(t, "13800000000", body["phone"])
 	require.Equal(t, "rid-abc", body["pic_captcha_id"])
-	require.Equal(t, "md5-xyz", body["md5"])
-	require.Equal(t, "86", body["phone_code"])
+	// 2026-09-22 抓包契约：发码 body.phone_code="+86"（带加号）；challenge 输入
+	// 仍是 "86"，证明组包处发生归一（仅发码路径，登录路径待抓包终证）。
+	require.Equal(t, "+86", body["phone_code"])
+	require.Equal(t, "pc", body["tm"])
+	require.Equal(t, "default", body["fr"])
+	require.Equal(t, "", body["distinct_id"])
+	_, present := body["md5"]
+	require.False(t, present, "抓包 body 无 md5 键")
 }
 
-// 官方正常滑块流：onSuccess 仅回调 {rid, pass}，md5 缺失 → 发码仍放行，
-// 且 body 不得出现 md5 键（与官方 undefined-省键序列化行为一致）。
-func TestWebSMS_ZhipuSendRidOnlyOmitsMD5(t *testing.T) {
-	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"code":0}`}
-	svc := newSmsTestService(up)
-
-	ch := zhipuChallenge()
-	ch.ZhipuCaptchaMD5 = ""
-	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", ch, nil)
-	require.NoError(t, err)
-	require.Len(t, up.requests, 1)
-
-	req := up.requests[0]
-	var body map[string]string
-	require.NoError(t, readJSONBody(req, &body))
-	require.Equal(t, "rid-abc", body["pic_captcha_id"])
-	_, present := body["md5"]
-	require.False(t, present, "缺 md5 时 body 不得包含 md5 键")
+// status==0 之外的历史白名单形态（success=true / code==0）保持成功
+// （发码专用判定回退共享 zhipuBizSuccess：code==0 / ret==0 / success==true）。
+func TestWebSMS_ZhipuSendSuccessLegacyShapes(t *testing.T) {
+	for _, body := range []string{`{"success":true}`, `{"code":0}`} {
+		up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: body}
+		svc := newSmsTestService(up)
+		_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+		require.NoError(t, err, "body=%s", body)
+	}
 }
 
 // 证据缺失 → 失败关闭：zhipu 发码缺数美滑块 rid，挑战值未随请求内回传即失败关闭。
@@ -210,6 +208,18 @@ func TestWebSMS_ZhipuSendBodyCodeFailureFailsClosed(t *testing.T) {
 	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "code=1001")
+	require.Len(t, up.requests, 1)
+}
+
+// 2xx + body 业务失败（status 非 0，2026-09-22 抓包响应使用 status 字段）→
+// 发码专用判定失败关闭透出文案。
+func TestWebSMS_ZhipuSendBodyStatusFailureFailsClosed(t *testing.T) {
+	up := &smsUpstream{zhipuSendStatus: http.StatusOK, zhipuSendBody: `{"status":500,"message":"upstream error"}`}
+	svc := newSmsTestService(up)
+
+	_, err := svc.SendSmsCode(context.Background(), PlatformZhipu, "13800000000", zhipuChallenge(), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "status=500")
 	require.Len(t, up.requests, 1)
 }
 
@@ -394,6 +404,24 @@ func TestWebSMS_ZhipuVerifyNoBizFlagWithCookiesFailsClosed(t *testing.T) {
 	require.Len(t, up.requests, 1)
 }
 
+// 防回归（整改 2）：status:0 仅发码路径采信——登录响应 {"status":0} + 双 Cookie
+// 但无 code/ret/success → 登录失败关闭，Cookie 不采纳（登录路径待登录步抓包
+// 终证后单独立项才放开）。
+func TestWebSMS_ZhipuVerifyStatusZeroWithCookiesFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"status":0,"message":"ok"}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "GLM 登录响应缺少已取证成功标志")
+	require.Len(t, up.requests, 1)
+}
+
 // 嵌套字符串数字（data.status:"500"）也算业务失败（类型容错覆盖嵌套位置）。
 func TestWebSMS_ZhipuVerifyNestedDataStatusStringFailsClosed(t *testing.T) {
 	up := &smsUpstream{
@@ -423,6 +451,24 @@ func TestWebSMS_ZhipuVerifySuccessTrueWithCookies(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "CT-2", res.ChatGLMToken)
 	require.Equal(t, "RFT-2", res.LoginRefreshToken)
+	require.Len(t, up.requests, 1)
+}
+
+// 防回归（2026-09-22 整改轮 must_fix）：{"status":500,"success":true} 冲突响应
+// + 双 Cookie → 顶层 status 非 0 须先于 zhipuBizSuccess 的 success 放行被
+// zhipuBizFailure 拦截，登录失败关闭，Cookie 绝不采纳。
+func TestWebSMS_ZhipuVerifyStatusNonZeroWithSuccessTrueFailsClosed(t *testing.T) {
+	up := &smsUpstream{
+		zhipuVerifyStatus: http.StatusOK,
+		zhipuVerifyBody:   `{"status":500,"success":true}`,
+		zhipuSetCookies:   []string{"chatglm_token=CT-1; Path=/", "chatglm_refresh_token=RFT-1; Path=/"},
+	}
+	svc := newSmsTestService(up)
+
+	res, err := svc.VerifySmsCode(context.Background(), PlatformZhipu, "13800000000", "123456", zhipuChallenge(), nil)
+	require.Error(t, err)
+	requireNoSMSCredentials(t, res)
+	require.Contains(t, err.Error(), "status=500")
 	require.Len(t, up.requests, 1)
 }
 
