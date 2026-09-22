@@ -173,10 +173,18 @@ scp yiyutu-server:/tmp/backup.tar.gz ./
     ```yaml
     prepend:
       - IP-CIDR,43.250.173.110/32,DIRECT
+      - IP-CIDR,43.250.173.198/32,DIRECT
       - DOMAIN-SUFFIX,corealgos.com,DIRECT
     ```
+  - **两条 IP-CIDR 都必须保留**：`.110` 是本站服务器（SSH 入口），`.198` 是同网段另一台服务器（承载 `cnca.one`，属另一部署项目；此条继承自历史 profile，切 profile 时容易漏带）。域名规则只覆盖 HTTPS 域名访问，直连 IP 的流量（SSH、IP 直连 API）必须靠 IP-CIDR 规则。
+  - **2026-09-21 实测坑**：域名 DIRECT 规则生效时仍可能出现 502 —— `corealgos.com` 挂在 Cloudflare 后面，DIRECT 拨号的目标是 CF 边缘 IP；本机运营商到 CF 网段抖动时 IPv4/IPv6 全部 `i/o timeout`，mihomo 匹配到 DIRECT 也拨不通，代理层向上层返回 502。这**不是规则问题**，是本机→Cloudflare 链路问题；验证方法：看 mihomo core 日志里 `dial DIRECT (match DomainSuffix/corealgos.com) ... error: i/o timeout` 字样，或指定 CF IP 直拨 `curl --resolve corealgos.com:443:104.21.33.161 https://corealgos.com/`。
+  - Linux 本机当前使用 mihomo-party（配置目录 `~/.config/mihomo-party/`），规则增强文件在 `rules/<当前profile-id>.yaml`（当前 profile id 见 `profile.yaml` 的 `current:` 字段）；改完规则文件后可在 UI 里重新应用 profile，或直接改 `work/config.yaml` 后通过 unix socket 热重载：
+    ```bash
+    curl -s --unix-socket /tmp/mihomo-party-1000-*.sock -X PUT "http://localhost/configs?force=true" \
+      -H 'Content-Type: application/json' -d '{"path": "'"$HOME"'/.config/mihomo-party/work/config.yaml"}' -w '%{http_code}\n'
+    ```
   - 改完需**重新应用该 profile / 重启 Clash** 让 `clash-verge.yaml` 重新生成并热重载，否则规则不生效。
-  - 验证：`ssh yiyutu-server "echo SSH_OK"` 能回显即说明白名单生效。
+  - 验证：`ssh yiyutu-server "echo SSH_OK"` 能回显即说明白名单生效；`curl -s https://corealgos.com/` 返回正常页面即域名直连生效。
 - 双系统共用同一把密钥，改了一侧另一侧为同步副本；不要在两侧各自生成不同密钥，否则一侧失效。
 
 ```bash

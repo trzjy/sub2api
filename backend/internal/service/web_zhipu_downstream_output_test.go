@@ -234,8 +234,10 @@ func TestWebZhipuDownstream_WebModelIDAnchor(t *testing.T) {
 	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb),
 		"deepseek web default model catalogue must not regress")
 	// kimi：2026-09-22 补全（此前只有 kimi-k3，恰是免费档会被 upstream 以
-	// invalid_argument 拒绝的付费模型）；防误改锚点改为「目录不得退化回单项」。
-	require.Equal(t, []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"},
+	// invalid_argument 拒绝的付费模型）；同日命名修正：公开目录用可读名
+	// kimi-2.6 系（上游内部代号 k2d6 系由转发链归一）；防误改锚点改为
+	// 「目录不得退化回单项」。
+	require.Equal(t, []string{"kimi-2.6-chat", "kimi-2.6", "kimi-k3", "kimi-k3-agent-ultra"},
 		DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb),
 		"kimi web default model catalogue must not regress")
 }

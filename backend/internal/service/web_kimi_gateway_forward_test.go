@@ -238,6 +238,11 @@ func TestForwardWebKimi_ModelMappingPassthrough(t *testing.T) {
 	}{
 		{"kimi-k3", "k3"},
 		{"kimi-k3-agent-ultra", "k3-agent-ultra"},
+		{"kimi-2.6", "k2d6"},
+		{"kimi-2.6-chat", "k2d6-chat"},
+		{"kimi-k2d6", "k2d6"},
+		{"kimi-k2d6-chat", "k2d6-chat"},
+		{"k2d6", "k2d6"},
 		{"custom-model", "custom-model"},
 	}
 	for i, tc := range cases {

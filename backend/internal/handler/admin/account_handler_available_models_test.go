@@ -569,8 +569,8 @@ func TestAccountHandlerGetAvailableModels_WebPlatformCatalog(t *testing.T) {
 	}
 	require.Equal(t, service.DefaultWebModelIDs(service.PlatformKimi, service.AccountAccessModeWeb), ids)
 	require.GreaterOrEqual(t, len(ids), 4)
-	require.Contains(t, ids, "kimi-k2d6")
-	require.Contains(t, ids, "kimi-k2d6-chat")
+	require.Contains(t, ids, "kimi-2.6")
+	require.Contains(t, ids, "kimi-2.6-chat")
 }
 
 // TestAccountHandlerGetAvailableModels_WebMergesModelMapping 锁定 web 分支返回
@@ -582,9 +582,9 @@ func TestAccountHandlerGetAvailableModels_WebMergesModelMapping(t *testing.T) {
 		account: webAvailableModelsAccount(52, map[string]any{
 			"access_mode": service.AccountAccessModeWeb,
 			"model_mapping": map[string]any{
-				"kimi-k3":        "k2d6-chat",
-				"kimi-k2d6-chat": "k2d6-chat", // 与目录同名，须去重
-				"custom-kimi":    "k2d6-chat", // 目录外映射键，须出现
+				"kimi-k3":       "k2d6-chat",
+				"kimi-2.6-chat": "k2d6-chat", // 与目录同名（可读名），须去重
+				"custom-kimi":   "k2d6-chat", // 目录外映射键，须出现
 			},
 		}),
 	}

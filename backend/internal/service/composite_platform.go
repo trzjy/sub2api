@@ -246,9 +246,14 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 		// 依据 docs/web-reverse-analysis-plan.md §60（免费档实测仅 k2d6 / k2d6-chat 可用）
 		// 与 §167（kimi-k3 → k3 需付费订阅，生产建议映射 kimi-k3 → k2d6-chat）补全。
 		// 免费档可用项置前，便于用户选到能用的；付费档 k3 / k3-agent-ultra 保留。
-		// 出站归一（kimi-k2d6-chat → k2d6-chat 等）由转发链 webKimiModelName 完成，
+		//
+		// 2026-09-22 命名修正：k2d6 是上游内部代号（官方列表 displayName=Instant、
+		// 场景 SCENARIO_K2D5，即 Kimi 2.6 代次），对外可读名用 kimi-2.6 /
+		// kimi-2.6-chat。旧名 kimi-k2d6 / kimi-k2d6-chat 仍被 ValidateWebModel 与
+		// 转发链 webKimiModelName 兼容（历史客户端与 model_mapping 不破坏）。
+		// 出站归一（kimi-2.6-chat → k2d6-chat 等）由转发链 webKimiModelName 完成，
 		// 此处一律用公开模型名（与 /models 列表和 model_mapping 键同口径）。
-		return []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"}
+		return []string{"kimi-2.6-chat", "kimi-2.6", "kimi-k3", "kimi-k3-agent-ultra"}
 	default:
 		return nil
 	}
@@ -261,10 +266,11 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 //
 // 各 web 适配器接受的公开 ID 一律取自 DefaultWebModelIDs（唯一 SSOT），避免两份名单
 // 漂移（2026-09-22 线上故障：kimi 目录与校验集合曾各自硬编码且已漂移）；kimi 额外
-// 接受转发链归一的内部变体（webKimiModelName 同款，当前公开目录已含，此处仅兜底）。
+// 接受转发链归一的内部变体（webKimiModelName 同款，此处显式兜底）。
 //   - zhipu:    glm-5.3-flash
 //   - deepseek: deepseek-chat, deepseek-reasoner
-//   - kimi:     kimi-k2d6-chat, kimi-k2d6, kimi-k3, kimi-k3-agent-ultra
+//   - kimi:     kimi-2.6-chat, kimi-2.6, kimi-k3, kimi-k3-agent-ultra
+//     （兼容旧公开名 kimi-k2d6-chat / kimi-k2d6 与裸代号 k2d6-chat / k2d6）
 func ValidateWebModel(provider, model string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -272,7 +278,10 @@ func ValidateWebModel(provider, model string) error {
 	}
 	allowed := DefaultWebModelIDs(provider, AccountAccessModeWeb)
 	if provider == PlatformKimi {
-		allowed = MergeAndDedupModelIDs(allowed, []string{"kimi-k3-agent-ultra"})
+		// 兼容别名（2026-09-22 命名修正）：旧公开名与上游裸代号继续放行，
+		// 转发链 webKimiModelName 统一归一为上游内部代号。
+		allowed = MergeAndDedupModelIDs(allowed,
+			[]string{"kimi-k2d6-chat", "kimi-k2d6", "k2d6-chat", "k2d6", "kimi-k3-agent-ultra"})
 	}
 	if len(allowed) == 0 {
 		return fmt.Errorf("%s web model %q is not supported", provider, model)

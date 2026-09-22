@@ -171,15 +171,21 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 // 方案 §3.3（分析文档）+ 登录态实测（10 §3：默认 k2d6-chat）：kimi-k3 → k3、
 // kimi-k3-agent-ultra → k3-agent-ultra、kimi-k2d6 → k2d6、kimi-k2d6-chat → k2d6-chat；
 // 默认透传同名。其余取值待登录态实测补全。
+//
+// 公开名与内部代号（2026-09-22 命名修正）：上游网页端模型 ID 实为内部代号 k2d6
+// （官方模型列表 displayName=Instant、场景代号 SCENARIO_K2D5，即 Kimi 2.6 代次），
+// 对外不可读。公开目录（DefaultWebModelIDs）改用 kimi-2.6 / kimi-2.6-chat 可读名，
+// 由此处归一回上游代号；旧公开名 kimi-k2d6 / kimi-k2d6-chat 与裸代号 k2d6 /
+// k2d6-chat 继续兼容（已下发客户端与历史 model_mapping 不破坏）。
 func webKimiModelName(model string) string {
 	switch strings.ToLower(strings.TrimSpace(model)) {
 	case "kimi-k3", "k3":
 		return "k3"
 	case "kimi-k3-agent-ultra", "k3-agent-ultra":
 		return "k3-agent-ultra"
-	case "kimi-k2d6", "k2d6":
+	case "kimi-2.6", "kimi-k2d6", "k2d6":
 		return "k2d6"
-	case "kimi-k2d6-chat", "k2d6-chat":
+	case "kimi-2.6-chat", "kimi-k2d6-chat", "k2d6-chat":
 		return "k2d6-chat"
 	default:
 		return model

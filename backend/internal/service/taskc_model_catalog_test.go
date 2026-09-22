@@ -16,8 +16,9 @@ func TestTaskC_DefaultWebModelIDsModeKey(t *testing.T) {
 
 	require.Equal(t, []string{"glm-5.3-flash"}, DefaultWebModelIDs(PlatformZhipu, AccountAccessModeWeb))
 	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))
-	// kimi：免费档实测可用项置前（k2d6-chat / k2d6），付费档 k3 / k3-agent-ultra 保留。
-	require.Equal(t, []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"},
+	// kimi：免费档实测可用项置前（kimi-2.6-chat / kimi-2.6 可读名，对应上游内部
+	// 代号 k2d6-chat / k2d6），付费档 k3 / k3-agent-ultra 保留。
+	require.Equal(t, []string{"kimi-2.6-chat", "kimi-2.6", "kimi-k3", "kimi-k3-agent-ultra"},
 		DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb))
 
 	// 双键语义不等于 api 模式：官方平台单键（无 mode）不应返回 web 目录。
@@ -37,13 +38,13 @@ func TestWebKimiCatalogCoversFreeTierModels(t *testing.T) {
 	ids := DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb)
 
 	require.GreaterOrEqual(t, len(ids), 4, "kimi web 目录应至少含 4 个公开模型")
-	require.Contains(t, ids, "kimi-k2d6")
-	require.Contains(t, ids, "kimi-k2d6-chat")
+	require.Contains(t, ids, "kimi-2.6")
+	require.Contains(t, ids, "kimi-2.6-chat")
 	// 付费档保留，不因补免费档而丢失。
 	require.Contains(t, ids, "kimi-k3")
 	require.Contains(t, ids, "kimi-k3-agent-ultra")
 	// 免费档可用项置前：空 modelID 回落（resolveWebTestModel 取 ids[0]）应是可用的那个。
-	require.Equal(t, "kimi-k2d6-chat", ids[0])
+	require.Equal(t, "kimi-2.6-chat", ids[0])
 	// 目录项均为公开名，出站归一由转发链 webKimiModelName 完成。
 	for _, id := range ids {
 		require.True(t, strings.HasPrefix(id, "kimi-"), "公开目录用 kimi- 前缀名，实际为 %q", id)
@@ -71,10 +72,16 @@ func TestTaskC_ValidateWebModelFailClosed(t *testing.T) {
 	require.Error(t, ValidateWebModel(PlatformDeepseek, "gpt-4"))
 
 	// kimi：目录项全部放行（含 agent-ultra 内部变体），未知模型失败关闭。
+	// 2026-09-22 命名修正：公开目录 kimi-2.6 系；旧公开名 kimi-k2d6 系与上游裸代号
+	// k2d6 系作为兼容别名继续放行。
 	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-k3"))
 	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-k3-agent-ultra"))
+	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-2.6"))
+	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-2.6-chat"))
 	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-k2d6"))
 	require.NoError(t, ValidateWebModel(PlatformKimi, "kimi-k2d6-chat"))
+	require.NoError(t, ValidateWebModel(PlatformKimi, "k2d6"))
+	require.NoError(t, ValidateWebModel(PlatformKimi, "k2d6-chat"))
 	require.Error(t, ValidateWebModel(PlatformKimi, "gpt-4"))
 
 	// 校验集合与目录同源（DefaultWebModelIDs SSOT），不得再各自硬编码漂移。

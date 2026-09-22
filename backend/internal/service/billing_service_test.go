@@ -117,6 +117,23 @@ func TestGetModelPricing_FallbackMatchesByFamily(t *testing.T) {
 	}
 }
 
+// TestGetModelPricing_KimiWebInternalCodenames kimi web 内部代号（k2d6 系，含
+// kimi- 前缀公开名变体）按 kimi-k2.6 档位兜底计费（2026-09-22 命名修正：上游
+// 网页端免费档模型 ID 为内部代号 k2d6，官方 displayName=Instant，即 2.6 代次）。
+func TestGetModelPricing_KimiWebInternalCodenames(t *testing.T) {
+	svc := newTestBillingService()
+
+	base, err := svc.GetModelPricing("kimi-k2.6")
+	require.NoError(t, err)
+
+	for _, model := range []string{"kimi-2.6", "kimi-2.6-chat", "kimi-k2d6", "kimi-k2d6-chat", "k2d6", "k2d6-chat"} {
+		pricing, err := svc.GetModelPricing(model)
+		require.NoError(t, err, "模型 %s", model)
+		require.Equal(t, base.InputPricePerToken, pricing.InputPricePerToken, "模型 %s 应命中 kimi-k2.6 档位", model)
+		require.Equal(t, base.OutputPricePerToken, pricing.OutputPricePerToken, "模型 %s 输出价应一致", model)
+	}
+}
+
 func TestGetModelPricing_CaseInsensitive(t *testing.T) {
 	svc := newTestBillingService()
 

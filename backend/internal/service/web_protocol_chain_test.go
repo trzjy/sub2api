@@ -36,8 +36,9 @@ func TestEstimateTokenCountMixedScript(t *testing.T) {
 
 func TestDefaultWebModelIDs(t *testing.T) {
 	require.Equal(t, []string{"deepseek-chat", "deepseek-reasoner"}, DefaultWebModelIDs(PlatformDeepseek, AccountAccessModeWeb))
-	// kimi（2026-09-22 补全）：免费档实测可用项置前，付费档 k3 / k3-agent-ultra 保留。
-	require.Equal(t, []string{"kimi-k2d6-chat", "kimi-k2d6", "kimi-k3", "kimi-k3-agent-ultra"},
+	// kimi（2026-09-22 补全 + 命名修正）：免费档实测可用项置前，公开名 kimi-2.6 系
+	// （上游内部代号 k2d6 系由转发链归一），付费档 k3 / k3-agent-ultra 保留。
+	require.Equal(t, []string{"kimi-2.6-chat", "kimi-2.6", "kimi-k3", "kimi-k3-agent-ultra"},
 		DefaultWebModelIDs(PlatformKimi, AccountAccessModeWeb))
 	require.Nil(t, DefaultWebModelIDs(PlatformOpenAI))
 
