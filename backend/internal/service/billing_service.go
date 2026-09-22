@@ -1018,11 +1018,14 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 		strings.HasSuffix(modelLower, "/k3") || strings.HasSuffix(modelLower, "/k3-256k") {
 		return s.fallbackPrices["kimi-k3"]
 	}
-	// kimi web 内部代号（k2d6 / k2d6-chat，含 kimi- 前缀变体）按 Kimi 2.6 档位兜底
-	// 计费：上游网页端免费档模型 ID 为内部代号 k2d6（官方 displayName=Instant，
-	// SCENARIO_K2D5，即 2.6 代次）；公开名 kimi-2.6 / kimi-2.6-chat 已被上方
-	// kimi-k2.6 Contains 规则覆盖，此处补代号形态，消除 kimi-k2d6 计价 fallback miss。
+	// kimi web 免费档（2026-09-22 命名修正）：上游网页端模型 ID 为内部代号
+	// k2d6 / k2d6-chat（官方 displayName=Instant，SCENARIO_K2D5，即 2.6 代次），
+	// 对外公开名 kimi-2.6 / kimi-2.6-chat。两类命名（含 / 路径后缀变体）统一按
+	// kimi-k2.6 档位兜底计费，消除 kimi-k2d6 / kimi-2.6 计价 fallback miss
+	// （生产日志实证 "[Billing] Using fallback pricing for model: kimi-k2d6"）。
 	if strings.Contains(modelLower, "kimi-k2.6") || strings.Contains(modelLower, "kimi-k2-6") ||
+		modelLower == "kimi-2.6" || modelLower == "kimi-2.6-chat" ||
+		strings.HasSuffix(modelLower, "/kimi-2.6") || strings.HasSuffix(modelLower, "/kimi-2.6-chat") ||
 		modelLower == "k2d6" || modelLower == "k2d6-chat" ||
 		strings.HasSuffix(modelLower, "/k2d6") || strings.HasSuffix(modelLower, "/k2d6-chat") ||
 		modelLower == "kimi-k2d6" || modelLower == "kimi-k2d6-chat" ||
