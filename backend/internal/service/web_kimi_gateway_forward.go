@@ -489,14 +489,22 @@ func (s *OpenAIGatewayService) handleWebKimiUpstreamError(
 
 // webKimiUpstreamErrorMessage 提取上游错误文案；Connect RPC 错误常见 message 字段，
 // 其余回落通用提取。
+//
+// 标量守卫：message 字段在业务帧里承载消息对象（op/set mask=message 的 user/assistant
+// 回显），gjson 对对象值取 String() 会返回其 JSON 序列化——把它当错误文案透传会把用户
+// prompt 全文塞进客户端 error 响应与 ops_error_logs（2026-09-22 线上事故伴随损伤）。
+// 因此 message / error.message / detail 仅在为标量（gjson Type != JSON）时才视为错误
+// 文案；对象值一律跳过，宁可回落到通用 status 文案也不回显业务载荷。
 func webKimiUpstreamErrorMessage(body []byte) string {
-	if m := strings.TrimSpace(gjson.GetBytes(body, "message").String()); m != "" {
-		return m
+	for _, path := range []string{"message", "error.message", "detail"} {
+		m := gjson.GetBytes(body, path)
+		if m.Exists() && m.Type != gjson.JSON {
+			if s := strings.TrimSpace(m.String()); s != "" {
+				return s
+			}
+		}
 	}
-	if m := strings.TrimSpace(gjson.GetBytes(body, "error.message").String()); m != "" {
-		return m
-	}
-	return sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
+	return ""
 }
 
 // webKimiStreamEvent 是单帧 Connect envelope 载荷解析后的结构化视图。
@@ -626,15 +634,32 @@ func parseWebKimiEnvelopePayload(payload []byte) webKimiStreamEvent {
 			ev.ErrCodeStr = str
 		}
 	}
-	// 认证错误：任一处 code/message（含 trailer 嵌套）含 unauthenticated 即置位。
-	authText := strings.ToLower(strings.Join([]string{
-		ev.ErrCodeStr,
-		v.Get("code").String(),
-		v.Get("message").String(),
-		v.Get("error.code").String(),
-		v.Get("error.message").String(),
-	}, " "))
-	if strings.Contains(authText, "unauthenticated") {
+	// 认证错误判定（只认结构化错误位置，绝不扫业务载荷文本）：
+	//   - code 字段值本身含 unauthenticated（顶层或 trailer 嵌套）；或
+	//   - HTTP 401 对称形态：error.message 是【标量文案】时对它做子串匹配。
+	//
+	// 线上事故（2026-09-22）：旧实现把顶层 message 也拼进扫描文本，而 op/set mask=message
+	// 的用户消息回显帧里 message.role=user、message.blocks[].text.content 承载的是用户
+	// prompt 全文——正文里出现英文单词 "unauthenticated"（来自 AGENTS.md 协议文本）即被
+	// 误判为认证失败，正常流被收口成 502。message 字段承载业务载荷，不参与错误判定；
+	// error.message 仅在其为标量（gjson Type 不是 JSON 对象）时才可能是错误文案。
+	authFailed := strings.Contains(strings.ToLower(ev.ErrCodeStr), "unauthenticated")
+	if !authFailed {
+		if em := v.Get("error.message"); em.Exists() && em.Type != gjson.JSON &&
+			strings.Contains(strings.ToLower(em.String()), "unauthenticated") {
+			authFailed = true
+		}
+	}
+	if !authFailed {
+		// 顶层 message 仅在【没有 code 字段且是标量】时才可能是错误文案
+		//（实测 401 的 HTTP 层错误体 {"code":"unauthenticated","message":"..."} 已由
+		// code 覆盖；此处兜底 code 缺失但 message 为标量文案的形态）。
+		if m := v.Get("message"); m.Exists() && m.Type != gjson.JSON &&
+			strings.Contains(strings.ToLower(m.String()), "unauthenticated") {
+			authFailed = true
+		}
+	}
+	if authFailed {
 		ev.AuthFailed = true
 	}
 	// 会话 id（首帧 chat.id 返回）。

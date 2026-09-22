@@ -455,6 +455,39 @@ func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	require.Contains(t, out, "data: [DONE]")
 }
 
+// TestForwardWebKimi_StreamingUserEchoFrameWithUnauthenticatedWord 端到端复现 2026-09-22
+// 线上事故：上游正常首帧为 op/set mask=message role=user 的用户消息回显帧，其正文携带的
+// prompt 全文里含英文单词 "unauthenticated"（AGENTS.md 协议文本随 ZCode 会话注入）。
+// 旧实现全文扫描误判认证失败 → 502；修复后该流必须正常回写。
+func TestForwardWebKimi_StreamingUserEchoFrameWithUnauthenticatedWord(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{}`)))
+
+	frames := []string{
+		`{"op":"set", "mask":"message", "eventOffset":4, "message":{"id":"u1","parentId":"p1","role":"user","status":"MESSAGE_STATUS_COMPLETED","blocks":[{"messageId":"","text":{"content":"<system-reminder>\nAGENTS.md: If a required CLI is unavailable or unauthenticated, stop and repair that CLI setup.\n</system-reminder>\nkimi反代，获取模型列表失败这个问题根因分析一下。"}}],"scenario":"SCENARIO_CHAT","createTime":"2026-09-22T09:00:29.204302Z","isGoal":false}}`,
+		`{"op":"set","mask":"message","eventOffset":5,"message":{"id":"asst-1","parentId":"u1","role":"assistant","status":"MESSAGE_STATUS_GENERATING"}}`,
+		`{"op":"append","mask":"block.text.content","eventOffset":10,"block":{"id":"4","text":{"content":"root cause analysis"}}}`,
+		`{"eventOffset":13,"done":{}}`,
+	}
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+		},
+	}
+	account := webKimiTestAccount(111, nil)
+	result, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), webKimiEnvelopeResponse(frames), c, account, "kimi-k2d6", "k2d6", time.Now(), webResponseModeAnthropic)
+	require.NoError(t, err, "user-echo frame with 'unauthenticated' word must not fail the stream")
+	require.True(t, result.Stream)
+
+	out := recorder.Body.String()
+	require.Contains(t, out, "message_start")
+	require.Contains(t, out, "root cause analysis")
+	require.NotContains(t, out, "unauthenticated", "user prompt echo must never leak into client SSE")
+}
+
 // TestForwardWebKimi_StreamMidstreamBusinessError 覆盖流式中段业务错误收口（Codex 审查
 // #1）：首帧已写出正文后，上游在流中抛出业务错误（unauthenticated / 非 0 code）时，必须向
 // 客户端写明确 error 标记并终结 SSE，且不得伪造正常 finish_reason+usage 终止帧。
@@ -610,6 +643,43 @@ func TestParseWebKimiEnvelopePayload(t *testing.T) {
 		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","mask":"message","eventOffset":4,"message":{"id":"u1","role":"user","blocks":[{"text":{"content":"你好"}}]}}`))
 		require.Empty(t, ev.AssistantID)
 		require.Empty(t, ev.TextDelta)
+	})
+	t.Run("user_echo_frame_with_unauthenticated_word_not_auth_failure", func(t *testing.T) {
+		// 线上事故回归（2026-09-22）：op/set mask=message 的用户消息回显帧里
+		// blocks[].text.content 承载用户 prompt 全文；正文出现英文单词
+		// "unauthenticated"（如 AGENTS.md 协议文本被注入 prompt）时，旧实现把
+		// 顶层 message 序列化后做全文扫描误判为认证失败，正常流被收口成 502。
+		// 修复后认证判定只认结构化错误位置（code 字段值 / 标量 message 文案）。
+		frame := `{"op":"set", "mask":"message", "eventOffset":4, "message":{"id":"m1","parentId":"p1","role":"user","status":"MESSAGE_STATUS_COMPLETED","blocks":[{"messageId":"","text":{"content":"If a required CLI is unavailable or unauthenticated, stop and repair that CLI setup."}}],"scenario":"SCENARIO_CHAT","createTime":"2026-09-22T09:00:29.204302Z","isGoal":false}}`
+		ev := parseWebKimiEnvelopePayload([]byte(frame))
+		require.False(t, ev.AuthFailed, "benign user-echo frame must not be classified as auth failure")
+		require.Empty(t, ev.ErrCodeStr)
+		require.Zero(t, ev.ErrCode)
+	})
+	t.Run("assistant_message_with_unauthenticated_word_not_auth_failure", func(t *testing.T) {
+		// assistant 消息帧同理：message 对象承载业务载荷，不参与认证扫描。
+		ev := parseWebKimiEnvelopePayload([]byte(`{"op":"set","mask":"message","eventOffset":6,"message":{"id":"a1","role":"assistant","status":"MESSAGE_STATUS_GENERATING","blocks":[{"text":{"content":"the token is unauthenticated"}}]}}`))
+		require.False(t, ev.AuthFailed)
+	})
+	t.Run("scalar_message_fallback_auth_detection", func(t *testing.T) {
+		// code 缺失但 message 为标量错误文案的兜底形态仍要识别。
+		ev := parseWebKimiEnvelopePayload([]byte(`{"message":"request rejected: unauthenticated"}`))
+		require.True(t, ev.AuthFailed)
+	})
+	t.Run("object_message_never_error_text", func(t *testing.T) {
+		// message 为对象（业务消息帧）时不得被字符串化提取为错误文案（防用户 prompt
+		// 全文泄漏进客户端 error 响应与 ops_error_logs，2026-09-22 事故伴随损伤）。
+		frame := []byte(`{"op":"set","mask":"message","eventOffset":4,"message":{"id":"u1","role":"user","blocks":[{"text":{"content":"hi"}}]}}`)
+		ev := parseWebKimiEnvelopePayload(frame)
+		msg := webKimiUpstreamErrorMessage(frame)
+		require.False(t, ev.AuthFailed)
+		require.Empty(t, msg, "object-valued message must not be stringified into error text")
+	})
+	t.Run("scalar_message_error_text_still_extracted", func(t *testing.T) {
+		msg := webKimiUpstreamErrorMessage([]byte(`{"code":"unauthenticated","message":"Session expired"}`))
+		require.Equal(t, "Session expired", msg)
+		msg2 := webKimiUpstreamErrorMessage([]byte(`{"error":{"code":"invalid_argument","message":"subscription required"}}`))
+		require.Equal(t, "subscription required", msg2)
 	})
 }
 
