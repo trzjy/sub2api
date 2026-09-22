@@ -102,7 +102,9 @@ type registerAutoLoginStub struct {
 	registerCalls  int
 	registerCalls_ int // 供幂等断言直接读取（registerCalls 同值）
 	registerProxy  string
-	registerErr    error
+	// registerErrInject 显式注入 RegisterByEmail 的返回错误（外审 R3-P2 结果不明
+	// 用例；nil=注册成功）。与 sendErr 同语义。
+	registerErrInject error
 
 	loginCalls      int
 	loginProxyURL   string
@@ -129,10 +131,9 @@ func (s *registerAutoLoginStub) RegisterByEmail(_ context.Context, _, _, _, _, d
 	s.registerCalls++
 	s.registerCalls_ = s.registerCalls
 	s.registerProxy = proxyURL
-	s.registerErr = nil
 	// 记录注册用 deviceID（登录应复用同一 device_id）。
 	s.loginDeviceID = deviceID
-	return nil
+	return s.registerErrInject
 }
 
 func (s *registerAutoLoginStub) LoginByEmail(_ context.Context, account *service.Account) (string, error) {
@@ -481,3 +482,206 @@ func TestWebRegisterEmailCodeSendReturnsWindowAndDeviceID(t *testing.T) {
 }
 
 var _ = fmt.Sprintf // 保持 fmt 引用（代理错误文案断言使用）
+
+// 外审 2026-09-22 P1-2：post-success 终态（注册成功后登录/建号失败）以成功结果持久化，
+// 同键重试重放终态响应，绝不再次触上游（否则上游返回 EMAIL_EXISTS）。
+func TestWebRegisterPostSuccessFailureReplayDoesNotCallUpstreamAgain(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	admin.createErr = errors.New("凭据校验失败：group 不存在")
+	auto := &registerAutoLoginStub{loginCookie: "ds_session_id=terminal"}
+	th := newRegisterTestHarness(t, admin, auto)
+
+	rec1 := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "reg-post-success-replay")
+	require.Equal(t, http.StatusBadRequest, rec1.Code, rec1.Body.String())
+	require.Contains(t, rec1.Body.String(), "账号已在 DeepSeek 注册成功")
+	require.Equal(t, 1, th.regCalls(), "首次请求触上游 register 一次")
+	require.Equal(t, 1, th.loginCalls())
+
+	// 同键重试：协调器重放终态结果，上游 register / 登录 / 建号都不得再触。
+	rec2 := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "reg-post-success-replay")
+	require.Equal(t, http.StatusBadRequest, rec2.Code, rec2.Body.String())
+	require.Equal(t, "true", rec2.Header().Get("X-Idempotency-Replayed"))
+	require.Contains(t, rec2.Body.String(), "账号已在 DeepSeek 注册成功")
+	require.Equal(t, 1, th.regCalls(), "重放不得再次请求上游 register")
+	require.Equal(t, 1, th.loginCalls(), "重放不得再次登录")
+	require.Equal(t, 1, admin.createCalls, "重放不得再次落库")
+}
+
+// 外审 2026-09-22 P1-2：去重 409 命中同样以终态结果持久化，同键重试重放 409 响应，
+// 不再触上游、不再落库。
+func TestWebRegisterDuplicateReplayReturns409WithoutUpstream(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	admin.accounts = []service.Account{{
+		Name: "既有账号",
+		Type: service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"access_mode": service.AccountAccessModeWeb,
+			"cookie":      "ds_session_id=duplicated-session",
+		},
+	}}
+	auto := &registerAutoLoginStub{loginCookie: "ds_session_id=duplicated-session"}
+	th := newRegisterTestHarness(t, admin, auto)
+
+	rec1 := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "reg-dup-replay")
+	require.Equal(t, http.StatusConflict, rec1.Code, rec1.Body.String())
+	require.Equal(t, 1, th.regCalls())
+
+	rec2 := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "reg-dup-replay")
+	require.Equal(t, http.StatusConflict, rec2.Code, rec2.Body.String())
+	require.Equal(t, "true", rec2.Header().Get("X-Idempotency-Replayed"))
+	require.Contains(t, rec2.Body.String(), "web_credential_duplicate")
+	require.Equal(t, 1, th.regCalls(), "重放不得再次请求上游 register")
+	require.Equal(t, 0, admin.createCalls)
+}
+
+// 外审 2026-09-22 R3-P4：发码出站代理与注册/登录同口径（方案 §1.2-3/验收 5）——
+// 请求带 proxy_id 非空时显式查 Proxy 对象并透传其 URL；查不到 400 失败关闭；
+// 为空走默认出站。
+func TestWebRegisterEmailCodeProxyResolution(t *testing.T) {
+	t.Run("proxy_found_passes_url", func(t *testing.T) {
+		admin := newRegisterAdminStub(map[int64]*service.Proxy{
+			9: {ID: 9, Protocol: "http", Host: "hk.proxy", Port: 8080},
+		})
+		auto := &registerAutoLoginStub{}
+		th := newRegisterTestHarness(t, admin, auto)
+
+		rec := th.post(t, "/api/v1/admin/accounts/web-register-email-code", map[string]any{
+			"platform": service.PlatformDeepseek,
+			"email":    "user@example.com",
+			"proxy_id": 9,
+		}, "reg-send-proxy-1")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		admin.mu.Lock()
+		require.Equal(t, []int64{9}, admin.proxyMisses, "发码 proxy_id 非空必须显式查 Proxy 对象")
+		admin.mu.Unlock()
+		auto.mu.Lock()
+		require.Equal(t, "http://hk.proxy:8080", auto.sendProxyURLs[len(auto.sendProxyURLs)-1])
+		auto.mu.Unlock()
+	})
+
+	t.Run("proxy_missing_returns_400_without_upstream", func(t *testing.T) {
+		admin := newRegisterAdminStub(nil)
+		auto := &registerAutoLoginStub{}
+		th := newRegisterTestHarness(t, admin, auto)
+
+		rec := th.post(t, "/api/v1/admin/accounts/web-register-email-code", map[string]any{
+			"platform": service.PlatformDeepseek,
+			"email":    "user@example.com",
+			"proxy_id": 42,
+		}, "reg-send-proxy-404")
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "代理不存在")
+		require.Equal(t, 0, th.sendCalls(), "代理解析失败不得触上游发码")
+	})
+
+	t.Run("proxy_empty_uses_default_egress", func(t *testing.T) {
+		admin := newRegisterAdminStub(nil)
+		auto := &registerAutoLoginStub{}
+		th := newRegisterTestHarness(t, admin, auto)
+
+		rec := th.post(t, "/api/v1/admin/accounts/web-register-email-code", map[string]any{
+			"platform": service.PlatformDeepseek,
+			"email":    "user@example.com",
+		}, "reg-send-proxy-empty")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		admin.mu.Lock()
+		require.Empty(t, admin.proxyMisses, "proxy_id 缺省不得发起 GetProxy 调用")
+		admin.mu.Unlock()
+		auto.mu.Lock()
+		require.Equal(t, "", auto.sendProxyURLs[len(auto.sendProxyURLs)-1], "默认出站 proxyURL 必须为空串")
+		auto.mu.Unlock()
+	})
+}
+
+// 外审 2026-09-22 R3-P2：注册出站后结果不明（RegisterOutcomeUnknownError）必须走
+// 终态结果路径——HTTP 400 + post_success_register 标记 + 密码登录恢复指引；同键重试
+// 由协调器直接重放，不重打上游注册。
+func TestWebRegisterOutcomeUnknownReturnsPostSuccessTerminal(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	auto := &registerAutoLoginStub{loginCookie: "ds_session_id=x"}
+	// 通过 stub 注入结果不明哨兵（RegisterOutcomeUnknownError）。
+	auto.mu.Lock()
+	auto.registerErrInject = &service.RegisterOutcomeUnknownError{Err: errors.New("connection reset")}
+	auto.mu.Unlock()
+	th := newRegisterTestHarness(t, admin, auto)
+
+	key := "reg-unknown-1"
+	rec := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), key)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "密码登录")
+	require.Contains(t, rec.Body.String(), "post_success_register")
+	require.Equal(t, 0, admin.createCalls, "结果不明不得继续建号")
+
+	// 同键重试：协调器直接重放终态，上游注册不得被再次调用。
+	rec2 := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), key)
+	require.Equal(t, http.StatusBadRequest, rec2.Code, rec2.Body.String())
+	require.Equal(t, "true", rec2.Header().Get("X-Idempotency-Replayed"))
+	require.Equal(t, 1, th.regCalls(), "结果不明后同键重试不得重打上游注册")
+}
+
+// 外审 R6-P1：注册是不可幂等外呼的上游写操作，全局幂等协调器默认 ObserveOnly=true
+// 不拒绝缺键请求（会直接执行且不保存结果，重试重复触上游），因此 handler 层强制
+// 幂等键。缺 Idempotency-Key → 400 IDEMPOTENCY_KEY_REQUIRED，零上游调用、零落库。
+func TestWebRegisterMissingIdempotencyKeyRejectedBeforeUpstream(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	auto := &registerAutoLoginStub{}
+	th := newRegisterTestHarness(t, admin, auto)
+
+	rec := th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "IDEMPOTENCY_KEY_REQUIRED")
+	require.Equal(t, 0, th.regCalls(), "缺幂等键不得触上游注册")
+	require.Equal(t, 0, th.loginCalls(), "缺幂等键不得触上游登录")
+	require.Equal(t, 0, admin.createCalls, "缺幂等键不得落库")
+
+	// 纯空白 key 同样拒绝（handler 预检覆盖空串/纯空白）。
+	rec = th.post(t, "/api/v1/admin/accounts/web-register", validRegisterBody(), "   ")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "IDEMPOTENCY_KEY_REQUIRED")
+	require.Equal(t, 0, th.regCalls(), "纯空白幂等键不得触上游注册")
+}
+
+// 外审 R6-P1：发码端点同样 handler 层强制幂等键。缺 Idempotency-Key → 400
+// IDEMPOTENCY_KEY_REQUIRED，零上游发码调用。
+func TestWebRegisterEmailCodeMissingIdempotencyKeyRejectedBeforeUpstream(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	auto := &registerAutoLoginStub{}
+	th := newRegisterTestHarness(t, admin, auto)
+
+	rec := th.post(t, "/api/v1/admin/accounts/web-register-email-code", map[string]any{
+		"platform": service.PlatformDeepseek,
+		"email":    "user@example.com",
+	}, "")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "IDEMPOTENCY_KEY_REQUIRED")
+	require.Equal(t, 0, th.sendCalls(), "缺幂等键不得触上游发码")
+
+	// 纯空白 key 同样拒绝。
+	rec = th.post(t, "/api/v1/admin/accounts/web-register-email-code", map[string]any{
+		"platform": service.PlatformDeepseek,
+		"email":    "user@example.com",
+	}, "   ")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "IDEMPOTENCY_KEY_REQUIRED")
+	require.Equal(t, 0, th.sendCalls(), "纯空白幂等键不得触上游发码")
+}
+
+// 外审 R6-P2：account_draft.platform 必须与请求 platform 一致（契约对齐
+// WebLoginPassword 既有检查），复用既有错误码 WEB_REGISTER_DRAFT_INVALID；
+// 预校验在闭包内前移，不匹配直接 400，不触上游。
+func TestWebRegisterDraftPlatformMismatchRejectedBeforeUpstream(t *testing.T) {
+	admin := newRegisterAdminStub(nil)
+	auto := &registerAutoLoginStub{}
+	th := newRegisterTestHarness(t, admin, auto)
+
+	body := validRegisterBody()
+	draft := body["account_draft"].(map[string]any)
+	draft["platform"] = service.PlatformKimi
+
+	rec := th.post(t, "/api/v1/admin/accounts/web-register", body, "reg-draft-mismatch")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "WEB_REGISTER_DRAFT_INVALID")
+	require.Contains(t, rec.Body.String(), "account_draft.platform 必须与 platform 一致")
+	require.Equal(t, 0, th.regCalls(), "draft 平台不匹配不得触上游注册")
+	require.Equal(t, 0, admin.createCalls, "draft 平台不匹配不得落库")
+}

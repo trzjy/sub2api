@@ -155,19 +155,49 @@ export interface WebRegisterResponse {
   account_id?: number
 }
 
-/** 发送注册验证码（POST /admin/accounts/web-register-email-code）。 */
-export async function webRegisterEmailCode(platform: string, email: string): Promise<WebRegisterEmailCodeResponse> {
+/** 发送注册验证码（POST /admin/accounts/web-register-email-code）。
+ * proxyId 非空时随请求传 proxy_id：外审 R3-P4，发码与注册/登录同口径走草稿指定代理。 */
+export async function webRegisterEmailCode(
+  platform: string,
+  email: string,
+  proxyId?: number | null
+): Promise<WebRegisterEmailCodeResponse> {
   const { data } = await apiClient.post<WebRegisterEmailCodeResponse>(
     '/admin/accounts/web-register-email-code',
-    { platform, email }
+    { platform, email, ...(proxyId != null && proxyId !== 0 ? { proxy_id: proxyId } : {}) },
+    { headers: { 'Idempotency-Key': newWebRegisterIdempotencyKey('email-code') } }
   )
   return data
 }
 
-/** 邮箱验证码注册并创建账号（POST /admin/accounts/web-register）。 */
-export async function webRegister(payload: WebRegisterRequest): Promise<WebRegisterResponse> {
-  const { data } = await apiClient.post<WebRegisterResponse>('/admin/accounts/web-register', payload)
+/**
+ * 邮箱验证码注册并创建账号（POST /admin/accounts/web-register）。
+ *
+ * 幂等键语义（外审 2026-09-22 R2-P2）：键由调用方通过 options.idempotencyKey 显式
+ * 注入并在「结果不明」的重试间复用——若服务端已注册建号但响应在浏览器侧丢失，同键
+ * 重试会重放首次结果（success/account_id 或 F4/409 终态），而不是再打上游收到
+ * EMAIL_EXISTS。调用方（表单）负责：开始一次新注册操作时生成新键，请求返回明确结果
+ * （成功或后端明确业务终态响应）后废弃，仅在结果不明（网络错误/超时/5xx）时复用。
+ */
+export async function webRegister(
+  payload: WebRegisterRequest,
+  options?: { idempotencyKey?: string }
+): Promise<WebRegisterResponse> {
+  const key = options?.idempotencyKey ?? newWebRegisterIdempotencyKey('register')
+  const { data } = await apiClient.post<WebRegisterResponse>('/admin/accounts/web-register', payload, {
+    headers: { 'Idempotency-Key': key }
+  })
   return data
+}
+
+/**
+ * 生成注册链幂等键（外审 2026-09-22 P1-1：后端 executeAdminIdempotent RequireKey=true，
+ * 缺键请求直接 400，且响应丢失后无法重放）。每次用户操作生成新键；同一次调用的
+ * axios 层重试共享同一键（键在调用开始时生成一次）。
+ */
+export function newWebRegisterIdempotencyKey(operation: 'email-code' | 'register'): string {
+  const requestID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `web-register-${operation}-${requestID}`
 }
 
 export const webAutoLoginAPI = {

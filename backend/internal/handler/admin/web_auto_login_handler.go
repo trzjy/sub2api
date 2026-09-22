@@ -907,20 +907,12 @@ func (h *AccountHandler) webDeepseekRegisterSvc() webDeepseekRegisterService {
 // 一律返回本指引，不得让用户重试注册。
 const webRegisterPostSuccessMessage = "账号已在 DeepSeek 注册成功，请使用邮箱+密码在『密码登录』入口完成创建"
 
-// webRegisterPostSuccessError 标记「上游注册 biz_code=0 之后」的失败（LoginByEmail /
-// 去重检查 / CreateAccount）。
-//
-// 外审 2026-09-22 P1-2：这类失败是终态——上游账号已存在，重试绝不能再打上游注册。
-// 因此闭包不把它作为 error 返回（那会被协调器记 failed_retryable，退避后重试会
-// 重打上游拿到 EMAIL_EXISTS），而是编码为可持久化的成功结果
-// webRegisterPostSuccessResult；闭包外由 respondWebRegisterPostSuccess 统一映射为
-// F4 文案（HTTP 400 级业务错误）或 409 去重响应。同键重试时协调器直接重放该终态，
-// 不触上游。
-type webRegisterPostSuccessError struct{ err error }
-
-func (e *webRegisterPostSuccessError) Error() string { return e.err.Error() }
-
-func (e *webRegisterPostSuccessError) Unwrap() error { return e.err }
+// 外审 2026-09-22 P1-2：上游注册 biz_code=0 之后的失败（LoginByEmail / 去重检查 /
+// CreateAccount）是终态——上游账号已存在，重试绝不能再打上游注册。因此闭包不把它
+// 作为 error 返回（那会被协调器记 failed_retryable，退避后重试会重打上游拿到
+// EMAIL_EXISTS），而是编码为可持久化的成功结果 webRegisterPostSuccessResult（走
+// 协调器 succeeded 持久化路径）；闭包外由 respondWebRegisterPostSuccess 统一映射为
+// F4 文案（HTTP 400）或 409 去重响应。同键重试时协调器直接重放该终态，不触上游。
 
 // webRegisterPostSuccessResultKind 区分 post-success 终态结果的两类形态。
 type webRegisterPostSuccessResultKind string
@@ -928,6 +920,10 @@ type webRegisterPostSuccessResultKind string
 const (
 	webRegisterPostSuccessKindFailure   webRegisterPostSuccessResultKind = "post_success_failure"   // F4：HTTP 400 + detail
 	webRegisterPostSuccessKindDuplicate webRegisterPostSuccessResultKind = "post_success_duplicate" // 409 去重命中
+	// webRegisterPostSuccessKindOutcomeUnknown 注册结果不明（外审 R3-P2）：注册 POST
+	// 已出站但响应丢失，上游可能已建号。同样走终态持久化（HTTP 400 + post_success_register
+	// 标记），同键重试直接重放，不自动重打注册。
+	webRegisterPostSuccessKindOutcomeUnknown webRegisterPostSuccessResultKind = "post_success_outcome_unknown"
 )
 
 // webRegisterPostSuccessResult 幂等闭包的终态结果（走协调器 succeeded 持久化路径，
@@ -980,7 +976,7 @@ func respondWebRegisterFailure(c *gin.Context, err error) {
 
 // respondWebRegisterIdempotentError 两个注册端点共用的幂等闭包错误映射：
 // 注册阶段（上游 biz_code=0 之前）失败按分类透传。post-success 终态不再走 error 路径
-//（外审 2026-09-22 P1-2：编码为 webRegisterPostSuccessResult 成功结果持久化可重放），
+// （外审 2026-09-22 P1-2：编码为 webRegisterPostSuccessResult 成功结果持久化可重放），
 // 由 respondWebRegisterOutcome 在闭包外统一映射 HTTP 响应。
 func respondWebRegisterIdempotentError(c *gin.Context, err error) {
 	if retryAfter := service.RetryAfterSecondsFromError(err); retryAfter > 0 {
@@ -996,7 +992,7 @@ func respondWebRegisterPostSuccess(c *gin.Context, res webRegisterPostSuccessRes
 	switch res.Kind {
 	case webRegisterPostSuccessKindDuplicate:
 		respondWebCredentialDuplicate(c, res.DupAccountID)
-	case webRegisterPostSuccessKindFailure:
+	case webRegisterPostSuccessKindFailure, webRegisterPostSuccessKindOutcomeUnknown:
 		response.ErrorWithDetails(c, http.StatusBadRequest, webRegisterPostSuccessMessage, "",
 			map[string]string{"detail": res.ErrorReason, "post_success_register": "true"})
 	default:
@@ -1005,15 +1001,18 @@ func respondWebRegisterPostSuccess(c *gin.Context, res webRegisterPostSuccessRes
 	}
 }
 
-// WebRegisterEmailCode 处理 DeepSeek 邮箱注册发码（任务卡 §2.2-1）。
-// body {platform:"deepseek", email} → {success:true, send_window_secs:N, device_id}。
-// 无 account_draft，固定走默认出站（proxyURL=""，当前即香港服务器，方案 §1.2-3）；
+// WebRegisterEmailCode 处理 DeepSeek 邮箱注册发码（任务卡 §2.2-1；外审 R3-P4 契约收敛：
+// 与方案 §1.2-3/验收 5 对齐——account_draft.proxy_id 非空时发码出站走该 Proxy 对象 URL，
+// 查不到即 400 失败关闭；为空走默认出站（当前即香港服务器））。前端从 accountDraft 取
+// proxy_id 随请求传入（发码时账号尚未创建，无法服务端自查绑定）。
+// body {platform:"deepseek", email, proxy_id?} → {success:true, send_window_secs:N, device_id}；
 // device_id 生成稳定 UUID，仅本次请求内使用并回传给前端不落库（建号时由 web-register
 // 端点再生成并落 login_device_id）。
 func (h *AccountHandler) WebRegisterEmailCode(c *gin.Context) {
 	var req struct {
 		Platform string `json:"platform" binding:"required"`
 		Email    string `json:"email" binding:"required"`
+		ProxyID  *int64 `json:"proxy_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -1022,6 +1021,15 @@ func (h *AccountHandler) WebRegisterEmailCode(c *gin.Context) {
 	svc := h.webDeepseekRegisterSvc()
 	if svc == nil {
 		response.Error(c, http.StatusServiceUnavailable, "web auto-login service unavailable")
+		return
+	}
+
+	// R6-P1：handler 层强制幂等键。发码是不可幂等外呼的上游写操作，而全局幂等协调器
+	// 默认 ObserveOnly=true（idempotency.go: Execute 中 RequireKey 只在非 ObserveOnly
+	// 时拒绝），缺键会直接执行且不保存结果——重试会重复触发上游发码。非法字符校验由
+	// 协调器内 NormalizeIdempotencyKey 承担，此处仅拦截空串/纯空白。
+	if strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		response.ErrorFrom(c, service.ErrIdempotencyKeyRequired)
 		return
 	}
 
@@ -1036,7 +1044,18 @@ func (h *AccountHandler) WebRegisterEmailCode(c *gin.Context) {
 				return nil, infraerrors.BadRequest("WEB_REGISTER_EMAIL_INVALID", "邮箱格式不正确（需包含 @ 且长度不超过 254）")
 			}
 			deviceID := uuid.NewString()
-			secs, sendErr := svc.SendRegisterEmailCode(ctx, email, "en", deviceID, "register", "")
+			// 外审 R3-P4：发码与注册/登录同口径——proxy_id 非空时显式解析 Proxy 对象，
+			// 查不到即 400 失败关闭（不静默回退默认出站，避免地域门控 REGISTER_FROM_MAINLAND）。
+			proxyURL := ""
+			if req.ProxyID != nil && *req.ProxyID != 0 {
+				proxy, perr := h.adminService.GetProxy(ctx, *req.ProxyID)
+				if perr != nil || proxy == nil {
+					return nil, infraerrors.BadRequest("WEB_REGISTER_PROXY_NOT_FOUND",
+						fmt.Sprintf("指定的代理不存在（proxy_id=%d），不回退默认出站", *req.ProxyID))
+				}
+				proxyURL = proxy.URL()
+			}
+			secs, sendErr := svc.SendRegisterEmailCode(ctx, email, "en", deviceID, "register", proxyURL)
 			if sendErr != nil {
 				return nil, sendErr
 			}
@@ -1073,6 +1092,15 @@ func (h *AccountHandler) WebRegister(c *gin.Context) {
 		return
 	}
 
+	// R6-P1：handler 层强制幂等键。注册是不可幂等外呼的上游写操作（重试会重复触发
+	// 上游注册），不受全局幂等协调器 ObserveOnly=true 豁免（idempotency.go: RequireKey
+	// 只在非 ObserveOnly 时拒绝，缺键会直接执行且不保存结果）。非法字符校验由协调器内
+	// NormalizeIdempotencyKey 承担，此处仅拦截空串/纯空白。
+	if strings.TrimSpace(c.GetHeader("Idempotency-Key")) == "" {
+		response.ErrorFrom(c, service.ErrIdempotencyKeyRequired)
+		return
+	}
+
 	result, err := executeAdminIdempotent(c, "admin.accounts.web-register", req,
 		service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
 			// a. 预校验前移（方案 §1.2-4）：密码强度 / account_draft 基本字段不通过直接
@@ -1099,6 +1127,12 @@ func (h *AccountHandler) WebRegister(c *gin.Context) {
 			if draft.Type != service.AccountTypeAPIKey {
 				return nil, infraerrors.BadRequest("WEB_REGISTER_DRAFT_INVALID", "account_draft.type 必须为 apikey")
 			}
+			// R6-P2：draft 平台必须与请求 platform 一致（契约对齐 WebLoginPassword
+			// 既有检查：account_draft.platform must match platform）。
+			draftPlatform := strings.ToLower(strings.TrimSpace(draft.Platform))
+			if draftPlatform != platform {
+				return nil, infraerrors.BadRequest("WEB_REGISTER_DRAFT_INVALID", "account_draft.platform 必须与 platform 一致")
+			}
 
 			// b. 代理解析（外审 F3）：proxy_id 非空时显式查 Proxy 对象取 URL，查不到即 400，
 			// 不静默回退；为空走默认出站（当前即香港服务器）。
@@ -1119,7 +1153,18 @@ func (h *AccountHandler) WebRegister(c *gin.Context) {
 
 			// d. 上游注册（region 固定 "HK"，方案 §1.2-1/§2 取证 7）；PoW 由 service 层
 			// 一次一换（每次上游请求前实时取挑战求解，禁止缓存）。非 0 业务码透传文案。
+			// 外审 2026-09-22 R3-P2：注册 POST 出站后响应丢失 → RegisterOutcomeUnknownError，
+			// 结果不明（上游可能已建号）。不得作为 error 交给协调器（failed_retryable 自动
+			// 重试会二次打上游拿 EMAIL_EXISTS），转终态结果路径返回密码登录恢复指引；
+			// 同键重试由协调器直接重放本终态，不再触上游。
 			if rerr := svc.RegisterByEmail(ctx, email, verifyCode, req.Password, "HK", deviceID, proxyURL); rerr != nil {
+				var unknown *service.RegisterOutcomeUnknownError
+				if errors.As(rerr, &unknown) {
+					return webRegisterPostSuccessResult{
+						Kind:        webRegisterPostSuccessKindOutcomeUnknown,
+						ErrorReason: rerr.Error(),
+					}, nil
+				}
 				return nil, rerr
 			}
 
@@ -1184,5 +1229,40 @@ func (h *AccountHandler) WebRegister(c *gin.Context) {
 	if result != nil && result.Replayed {
 		c.Header("X-Idempotency-Replayed", "true")
 	}
+	// post-success 终态结果（外审 P1-2）：闭包以成功结果持久化，此处映射为 F4/409
+	// 响应。直接执行与同键重放都会落到这里，语义一致。
+	if result != nil {
+		if res, ok := result.Data.(webRegisterPostSuccessResult); ok {
+			respondWebRegisterPostSuccess(c, res)
+			return
+		}
+		// 重放路径经 JSON 解码为 map[string]any，按固定键还原终态。
+		if m, ok := result.Data.(map[string]any); ok {
+			if res, ok := webRegisterPostSuccessResultFromMap(m); ok {
+				respondWebRegisterPostSuccess(c, res)
+				return
+			}
+		}
+	}
 	response.Success(c, result.Data)
+}
+
+// webRegisterPostSuccessResultFromMap 从重放解码的 map 还原 post-success 终态
+// （固定键 kind / dup_account_id / error_reason，与 webRegisterPostSuccessResult JSON
+// 标签一致）。
+func webRegisterPostSuccessResultFromMap(m map[string]any) (webRegisterPostSuccessResult, bool) {
+	kindRaw, _ := m["kind"].(string)
+	switch webRegisterPostSuccessResultKind(kindRaw) {
+	case webRegisterPostSuccessKindDuplicate:
+		dupID, _ := m["dup_account_id"].(string)
+		return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindDuplicate, DupAccountID: dupID}, true
+	case webRegisterPostSuccessKindFailure:
+		reason, _ := m["error_reason"].(string)
+		return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindFailure, ErrorReason: reason}, true
+	case webRegisterPostSuccessKindOutcomeUnknown:
+		reason, _ := m["error_reason"].(string)
+		return webRegisterPostSuccessResult{Kind: webRegisterPostSuccessKindOutcomeUnknown, ErrorReason: reason}, true
+	default:
+		return webRegisterPostSuccessResult{}, false
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
@@ -631,6 +632,20 @@ func (s *WebPlatformAutoLoginService) webDeepseekPostGuestJSON(ctx context.Conte
 	return resp, raw, nil
 }
 
+// RegisterOutcomeUnknownError 标记「注册 POST 已出站，但响应在服务端丢失/不可解析前
+// 即失败」的错误（外审 2026-09-22 R3-P2）。注册是非幂等出站：此时上游账号可能已创建，
+// 调用方（web-register 端点幂等闭包）不得把本错误交给协调器走 failed_retryable 自动
+// 重试（会二次打上游拿 EMAIL_EXISTS），必须转终态结果路径返回密码登录恢复指引。
+type RegisterOutcomeUnknownError struct {
+	Err error
+}
+
+func (e *RegisterOutcomeUnknownError) Error() string {
+	return fmt.Sprintf("deepseek web 注册结果不明（出站后响应丢失，上游账号可能已创建）: %v", e.Err)
+}
+
+func (e *RegisterOutcomeUnknownError) Unwrap() error { return e.Err }
+
 // webDeepseekGuestChallengeResponse create_guest_challenge 响应（方案 §2 取证 2：
 // data.biz_data.guest_challenge，字段结构与登录态 challenge 一致）。
 type webDeepseekGuestChallengeResponse struct {
@@ -753,6 +768,15 @@ type webDeepseekEmailCodeSendResponse struct {
 	} `json:"data"`
 }
 
+// webDeepseekJSONNumberIsZero 判定 raw 中 path 位置的值是否为「明确的数值零」
+// （外审 2026-09-22 R3-P1）：gjson 只验字段存在不够——`{"biz_code":null}` 经
+// json.Unmarshal 会把 Go 整数字段留作零值，无法与真实 0 区分；此处直接在原始
+// JSON 上要求 JSONNumber 类型且值等于 0，null/字符串/缺失/对象一律不算。
+func webDeepseekJSONNumberIsZero(raw []byte, path string) bool {
+	res := gjson.GetBytes(raw, path)
+	return res.Type == gjson.Number && res.Int() == 0
+}
+
 // SendRegisterEmailCode 调上游发码接口：先取 guest PoW（target_path=发码自身路径）→
 // POST create_email_verification_code → biz_code=0 返回 send_window_secs（缺失返回 0）；
 // 2 → RECAPTCHA 人机验证文案；9 → 邮箱域不支持文案；其余按既有分类失败关闭。
@@ -783,13 +807,20 @@ func (s *WebPlatformAutoLoginService) SendRegisterEmailCode(ctx context.Context,
 	}
 
 	var parsed webDeepseekEmailCodeSendResponse
-	if uerr := json.Unmarshal(raw, &parsed); uerr != nil || parsed.Data.BizCode < 0 {
-		// 外审 2026-09-22 P1-4：HTTP 200 但响应体为空/格式异常/顶层 code 非零形态
-		// 一律失败关闭，不得把零值 biz_code 误报为已发送（外审建议沿用失败关闭口径，
-		// 与注册方法同款防御）。
+	uerr := json.Unmarshal(raw, &parsed)
+	// 外审 2026-09-22 R2-P1 + R3-P1：顶层 code 与 data.biz_code 必须是「明确的数值零」
+	// （gjson Number 且 ==0）才允许判为已发送；字段缺失、JSON null（Unmarshal 后零值
+	// 不可分辨）、字符串、格式异常一律失败关闭。明确的正值数值业务码放行到下方枚举
+	// 映射（人机验证/域不支持等）；其余异常失败关闭。
+	bizCodeIsZero := webDeepseekJSONNumberIsZero(raw, "data.biz_code")
+	topCodeIsZero := webDeepseekJSONNumberIsZero(raw, "code")
+	bizCodeValue := gjson.GetBytes(raw, "data.biz_code")
+	passToBizEnum := uerr == nil && topCodeIsZero && bizCodeValue.Type == gjson.Number && bizCodeValue.Int() > 0
+	if uerr != nil || (!passToBizEnum && (!topCodeIsZero || !bizCodeIsZero)) {
 		return 0, &webLoginHTTPError{
 			Platform: PlatformDeepseek, Kind: WebLoginKindLogin,
-			Msg: fmt.Sprintf("deepseek web 发码响应异常，失败关闭（unmarshal=%v biz_code=%d）", uerr, parsed.Data.BizCode),
+			Msg: fmt.Sprintf("deepseek web 发码响应异常，失败关闭（unmarshal=%v top_code_num0=%v biz_code_num0=%v）",
+				uerr, topCodeIsZero, bizCodeIsZero),
 		}
 	}
 	switch parsed.Data.BizCode {
@@ -879,27 +910,46 @@ func (s *WebPlatformAutoLoginService) RegisterByEmail(ctx context.Context, email
 
 	resp, raw, err := s.webDeepseekPostGuestJSON(ctx, guest, WebDeepseekRegisterPath, powHeader, body)
 	if err != nil {
-		return err
+		// 外审 2026-09-22 R3-P2：注册 POST 已出站但响应在服务端丢失/读取失败 → 结果
+		// 不明（上游可能已创建账号），用哨兵错误标记，调用方不得自动重试注册。
+		// 注意 WAF/429 类错误是上游明确拒绝（响应可见，注册未发生），不在此包装。
+		return &RegisterOutcomeUnknownError{Err: err}
 	}
 	if err := s.webDeepseekGuestUpstreamError(resp, raw, "注册"); err != nil {
+		// 外审 2026-09-22 R5-P1：注册出站后仅 HTTP 5xx 无法证明「注册未发生」（网关
+		// 可能在上游处理完成后才失败，账号可能已创建）→ 并入结果不明终态。明确拒绝
+		// （WAF 403 / 429 限流 / 其余 4xx，注册未发生）保留原分类文案。
+		if resp.StatusCode >= 500 {
+			return &RegisterOutcomeUnknownError{Err: err}
+		}
 		return err
 	}
 
 	var parsed webDeepseekRegisterResponse
-	if uerr := json.Unmarshal(raw, &parsed); uerr != nil || parsed.Data.BizCode < 0 {
-		// 外审 2026-09-22 P1-4：HTTP 200 但响应体为空/格式异常（biz_code 保持零值）
-		// 不得误判为注册成功；顶层 code 非零同理失败关闭。反序列化失败或 biz_code
-		// 非法（<0，成功应为明确 0）一律失败关闭，不做成功推断。
+	uerr := json.Unmarshal(raw, &parsed)
+	// 外审 2026-09-22 R2-P1 + R3-P1：成功判定收紧——顶层 code 与 data.biz_code 必须
+	// 都是「明确的数值零」（gjson Number 且 ==0）。顶层 code 非零（如
+	// {"code":500,"data":{"biz_code":0}}）、biz_code 缺失、JSON null（Unmarshal 后
+	// 与真实 0 不可分辨，gjson.Exists 只证明字段存在）、字符串/格式异常一律失败关闭，
+	// 不得推断成功。正值业务码走枚举映射文案。
+	bizCodeIsZero := webDeepseekJSONNumberIsZero(raw, "data.biz_code")
+	topCodeIsZero := webDeepseekJSONNumberIsZero(raw, "code")
+	bizCodeValue := gjson.GetBytes(raw, "data.biz_code")
+	if uerr == nil && topCodeIsZero && bizCodeValue.Type == gjson.Number && bizCodeValue.Int() > 0 {
+		// 可解析且为明确业务码错误（正值）→ 走枚举映射文案（明确拒绝，响应可见）。
 		return &webLoginHTTPError{
-			Platform: PlatformDeepseek, Kind: WebLoginKindLogin,
-			Msg: fmt.Sprintf("deepseek web 注册响应异常，失败关闭（unmarshal=%v biz_code=%d）", uerr, parsed.Data.BizCode),
+			Platform: PlatformDeepseek, Code: bizCodeValue.Int(), Kind: WebLoginKindLogin,
+			Msg: webDeepseekRegisterBizCodeMessage(bizCodeValue.Int()),
 		}
 	}
-	if parsed.Data.BizCode != 0 {
-		return &webLoginHTTPError{
-			Platform: PlatformDeepseek, Code: parsed.Data.BizCode, Kind: WebLoginKindLogin,
-			Msg: webDeepseekRegisterBizCodeMessage(parsed.Data.BizCode),
-		}
+	if uerr != nil || !topCodeIsZero || !bizCodeIsZero {
+		// 外审 2026-09-22 R4-P1：注册 POST 已出站，但响应为空体/截断 JSON/缺业务码等
+		// 无法确认业务结果的形态——上游账号可能已创建。不得作为普通错误交协调器
+		// failed_retryable（同键重试会重打上游拿 EMAIL_EXISTS），并入结果不明哨兵终态；
+		// 明确的业务拒绝（上方正值分支）不在此列。
+		return &RegisterOutcomeUnknownError{Err: fmt.Errorf(
+			"deepseek web 注册响应异常，失败关闭（unmarshal=%v top_code_num0=%v biz_code_num0=%v）",
+			uerr, topCodeIsZero, bizCodeIsZero)}
 	}
 	return nil
 }

@@ -118,9 +118,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { webLoginPassword, webLoginSms, startWebLoginChallenge, getWebLoginChallengeStatus, consumeWebLoginChallenge, webRegisterEmailCode, webRegister, type WebLoginPasswordRequest, type WebLoginChallengeRequest } from '@/api/admin/webAutoLogin'
+import { webLoginPassword, webLoginSms, startWebLoginChallenge, getWebLoginChallengeStatus, consumeWebLoginChallenge, webRegisterEmailCode, webRegister, newWebRegisterIdempotencyKey, type WebLoginPasswordRequest, type WebLoginChallengeRequest, type WebRegisterRequest } from '@/api/admin/webAutoLogin'
 import type { CreateAccountRequest } from '@/types'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { extractApiErrorMessage, extractApiErrorCode } from '@/utils/apiError'
 
 const props = defineProps<{ platform: string; accountId?: number; accountDraft?: CreateAccountRequest }>()
 const emit = defineEmits<{ (e: 'recovered', payload: { platform: string; account_id: number }): void }>()
@@ -152,6 +152,18 @@ const registerPassword = ref('')
 const registerSendingCode = ref(false)
 const codeSent = ref(false)
 const registerCountdown = ref(0)
+// 外审 2026-09-22 R2-P2：本次注册操作的幂等键。提交开始时生成；出站前即与请求快照
+// 登记配对（外审 R6-P1）；结果不明（网络错误/超时/5xx，服务端可能已注册建号）时保留，
+// 用户重试复用同键 → 协调器重放首次结果；收到明确结果（成功/F4/409/业务码终态）、
+// 切换平台或显式重发码时废弃。
+let registerIdempotencyKey: string | null = null
+// 外审 2026-09-22 R3-P3：与幂等键配对保留的原提交 payload（出站前即登记，外审
+// R6-P1——在途期间退出重进也能据此判漂移，不再依赖失败响应路径补写）。同键重试必须
+// 用原验证码原 payload（协调器 fingerprint 校验 payload 一致；真实重发码会得到新
+// 验证码导致 payload 漂移，旧键触发 fingerprint 冲突无法重放）。重进注册模式时回填
+// 原字段（codeSent 视为已发，可直接提交同键重试）；用户显式重发码 = 明确开启新操作，
+// 轮换新键并清除本配对（首次注册可能已成功，重试后端按 EMAIL_EXISTS/终态指引收敛）。
+let registerRetryPayload: { payload: WebRegisterRequest; idempotencyKey: string } | null = null
 
 const codeSentHintText = computed(() => {
   if (registerCountdown.value > 0) return t('admin.accounts.webLogin.register.codeSentHint', { secs: registerCountdown.value })
@@ -184,6 +196,16 @@ function enterRegisterMode() {
   if (props.accountId != null) return
   registerMode.value = true
   errorMsg.value = ''
+  // 外审 R3-P3：结果不明后的重进 = 同键重试路径——回填原提交字段（含原验证码），
+  // codeSent 视为已发，用户可直接提交复用原键原 payload。
+  if (registerRetryPayload) {
+    const p = registerRetryPayload.payload
+    registerEmail.value = String(p.email ?? '')
+    registerCode.value = String(p.email_verification_code ?? '')
+    registerPassword.value = String(p.password ?? '')
+    codeSent.value = true
+    return
+  }
   codeSent.value = false
   registerCode.value = ''
 }
@@ -202,6 +224,9 @@ function exitRegisterMode() {
   registerSendingCode.value = false
   codeSent.value = false
   registerCode.value = ''
+  // 幂等键与重试 payload 不在此废弃（外审 R2-P2/R3-P3）：结果不明（网络错误/5xx）
+  // 后的 fallback 正是「切走再切回重试」的路径，键+原 payload 必须跨模式切换保留，
+  // 重进时回填原字段供同键重试。只随明确结果或显式重发码（新操作）废弃。
 }
 
 /**
@@ -250,7 +275,23 @@ function isRegisteredUsePasswordLoginError(err: unknown) {
   return detail.includes('密码登录') || detail.toUpperCase().includes('EMAIL_EXISTS')
 }
 
+// 外审 2026-09-22 P1-3：post-success 终态（上游注册已成功、登录/建号失败）由后端以
+// metadata.post_success_register=true 显式标记，F4 恢复指引在 message、原始原因在
+// metadata.detail。必须先识别该标记再取 detail，否则 detail 会把恢复指引顶掉，
+// 用户不知道账号已注册、不能再次注册。
+function isPostSuccessRegisterError(err: unknown) {
+  return Boolean((err as { metadata?: Record<string, unknown> } | null)?.metadata?.post_success_register)
+}
+
 function registerErrorText(err: unknown): string {
+  if (isPostSuccessRegisterError(err)) {
+    // F4 恢复指引（本地化文案）+ 原始失败原因（后端 metadata.detail）同屏展示。
+    const detail = typeof (err as { metadata?: Record<string, unknown> } | null)?.metadata?.detail === 'string'
+      ? String((err as { metadata?: Record<string, unknown> }).metadata!.detail)
+      : ''
+    const guide = t('admin.accounts.webLogin.register.errorRegisteredUsePasswordLogin')
+    return detail && detail !== guide ? `${guide}（${detail}）` : guide
+  }
   if (isRecaptchaError(err)) return t('admin.accounts.webLogin.register.errorRecaptcha')
   if (isEmailDomainError(err)) return t('admin.accounts.webLogin.register.errorEmailDomain')
   // 409 web_credential_duplicate：按任务卡 §2.2.3 展示后端返回的既有文案（透传 detail）。
@@ -272,12 +313,17 @@ async function sendRegisterCode() {
     errorMsg.value = t('admin.accounts.webLogin.register.emailInvalid')
     return
   }
+  // 外审 R3-P3：显式重发码 = 明确开启新操作。旧键配对的原验证码作废（真实重发得到
+  // 新验证码，同键+新 payload 会触发协调器 fingerprint 冲突），轮换新键并清除重试
+  // 配对；首次注册可能已成功——重试若命中 EMAIL_EXISTS/终态指引，按既定文案收敛。
+  registerIdempotencyKey = null
+  registerRetryPayload = null
   registerSendingCode.value = true
   // 请求代次（外审 2026-09-22 P2）：发码与提交共用 requestGeneration——等待期间
   // 切换平台/退出注册模式/其他提交都会使本请求过期，响应不得回写注册状态。
   const generation = ++requestGeneration
   try {
-    const resp = await webRegisterEmailCode(props.platform, email)
+    const resp = await webRegisterEmailCode(props.platform, email, props.accountDraft?.proxy_id ?? null)
     if (!mounted || generation !== requestGeneration) return
     if (!resp.success) {
       errorMsg.value = t('admin.accounts.webLogin.register.sendCodeFailed')
@@ -332,9 +378,61 @@ async function submitRegister() {
   }
   submitting.value = true
   const generation = ++requestGeneration
+  // 幂等键管理（外审 R2-P2 + R3-P3 + R4-P2 + R6-P1）：键与完整请求快照配对，且配对
+  // 在出站前即登记。后续提交先比较配对快照：仅当表单可控字段完全一致（含 account_
+  // draft——父组件草稿可变）才复用同键重试；任何漂移（新验证码/改草稿名称/分组/代理等）
+  // = 明确新操作，轮换新键，避免协调器 fingerprint 冲突使已完成的建号结果无法重放。
+  // 结果不明（网络错误/超时/5xx）时保留键+快照配对供同键重试；明确结果（成功/400/
+  // 409/422/success:false）到达即废弃。
+  // 外审 R5-P3：出站前即冻结完整载荷——account_draft 深拷贝。父组件在在途期间
+  // 原地修改草稿（名称/分组/代理）不得改变已出站请求的语义；同一冻结快照既用于
+  // 发送也用于重试配对保存，保证同键重试与首次出站字节一致。
+  const payload: WebRegisterRequest = {
+    platform: props.platform,
+    email,
+    email_verification_code: code,
+    password,
+    account_draft: JSON.parse(JSON.stringify(props.accountDraft ?? {})) as CreateAccountRequest
+  }
+  if (registerRetryPayload) {
+    const paired = registerRetryPayload.payload
+    // 漂移判定只看表单可控字段（邮箱/验证码/密码/平台）——account_draft 不参与：
+    // 父组件可在在途期间原地变异草稿对象（外审 R5-P3），变异不是本表单的用户操作，
+    // 不得被判为「新操作」轮换键。同操作重试直接复用配对的冻结快照出站，
+    // 保证同键重试与首次出站字节一致（协调器 fingerprint 重放才能命中）。
+    const sameOperation =
+      paired.platform === payload.platform &&
+      paired.email === payload.email &&
+      paired.email_verification_code === payload.email_verification_code &&
+      paired.password === payload.password
+    if (!sameOperation) {
+      // 表单字段漂移（改邮箱/换验证码/改密码）= 新操作：轮换键并清除旧配对。
+      registerIdempotencyKey = null
+      registerRetryPayload = null
+    } else {
+      payload.account_draft = paired.account_draft
+    }
+  }
+  if (!registerIdempotencyKey) {
+    registerIdempotencyKey = newWebRegisterIdempotencyKey('register')
+  }
+  const usedKey = registerIdempotencyKey
+  // 外审 R6-P1：出站前即登记键+冻结快照配对——在途期间用户退出重进改表单再提交时，
+  // 后续提交能先比较该快照判漂移（漂移则轮换新键），而不是拿旧键发新载荷触发指纹冲突。
+  // 此时 payload.account_draft 可能已被同操作分支替换为上一轮配对的冻结快照——这正是
+  // 要保存的对象。演进说明：R4-P3 曾以「仅持键者可写」守卫在响应路径补写配对，本条
+  // 前置登记使所有响应路径都不再写配对，过期响应无从覆盖，守卫职责自然终结。
+  registerRetryPayload = { payload: JSON.parse(JSON.stringify(payload)), idempotencyKey: usedKey }
   try {
-    const resp = await webRegister({ platform: props.platform, email, email_verification_code: code, password, account_draft: props.accountDraft as CreateAccountRequest })
-    if (!mounted || generation !== requestGeneration) return
+    const resp = await webRegister(payload, { idempotencyKey: usedKey })
+    if (!mounted || generation !== requestGeneration) {
+      // 代次已过期（用户切走/后续请求已发起）：结果对当前界面不可见，静默丢弃。
+      // 配对已在出站前登记（外审 R6-P1），此处不再有任何配对写点。
+      return
+    }
+    // 明确结果：废弃键与重试配对，后续提交是新操作。
+    registerIdempotencyKey = null
+    registerRetryPayload = null
     if (!resp.success || resp.account_id == null) {
       errorMsg.value = t('admin.accounts.webLogin.register.registerFailed')
       // HTTP 200 但业务失败（success:false）同样按任务卡 §2.2-3 切回「密码登录」
@@ -345,6 +443,26 @@ async function submitRegister() {
     emit('recovered', { platform: props.platform, account_id: resp.account_id })
   } catch (err) {
     if (mounted && generation === requestGeneration) {
+      const status = (err as { status?: number } | null)?.status
+      const errCode = extractApiErrorCode(err)
+      // 外审 R5-P2：409 分两类——协调器 processing/退避冲突（IDEMPOTENCY_IN_PROGRESS /
+      // IDEMPOTENCY_RETRY_BACKOFF）不是终态：首次请求仍在处理，必须保留键与快照，
+      // 按 Retry-After 走同键重试重放；仅明确业务终态（web_credential_duplicate 去重、
+      // IDEMPOTENCY_KEY_CONFLICT 指纹冲突）与其他 4xx 才弃键。
+      const isCoordinatorConflict409 =
+        status === 409 &&
+        (errCode === 'IDEMPOTENCY_IN_PROGRESS' || errCode === 'IDEMPOTENCY_RETRY_BACKOFF')
+      const outcomeKnown =
+        status === 409
+          ? !isCoordinatorConflict409
+          : status === 400 || status === 422 || (typeof status === 'number' && status < 500)
+      if (outcomeKnown) {
+        // 后端明确业务终态（400 F4/结果不明指引/409 去重/422 校验）：该键已消费，废弃。
+        registerIdempotencyKey = null
+        registerRetryPayload = null
+      }
+      // 结果不明（5xx/网络错误）分支：配对已在出站前登记（外审 R6-P1），此处不再
+      // 需要写点——R4-P3「仅持键者可写」守卫随响应路径写点消失而自然终结。
       errorMsg.value = registerErrorText(err)
       // 任何注册链路错误都切回「密码登录」并带回已填邮箱/密码（任务卡 §2.2 第 3 条）。
       fallbackToPasswordMode(email, password)
@@ -575,6 +693,10 @@ watch(() => props.platform, () => {
   registerCode.value = ''
   registerPassword.value = ''
   codeSent.value = false
+  // 外审 R6-P2：切平台 = 新上下文，清掉旧平台的注册幂等键与重试配对——
+  // 否则切走再切回会 enterRegisterMode 回填旧邮箱/验证码并复用旧键重放前一次注册。
+  registerIdempotencyKey = null
+  registerRetryPayload = null
 })
 
 onBeforeUnmount(() => {
