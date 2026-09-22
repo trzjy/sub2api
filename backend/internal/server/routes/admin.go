@@ -512,6 +512,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		// 网页版平台登录入口：deepseek 密码登录 / zhipu·kimi 手机号短信码登录
 		accounts.POST("/web-login-password", h.Admin.Account.WebLoginPassword)
 		accounts.POST("/web-login-sms", h.Admin.Account.WebLoginSMS)
+		// deepseek 邮箱验证码注册自动接入（deepseek-email-register-plan.md §1.2）
+		accounts.POST("/web-register-email-code", h.Admin.Account.WebRegisterEmailCode)
+		accounts.POST("/web-register", h.Admin.Account.WebRegister)
 		accounts.POST("/web-login-challenge/start", h.Admin.Account.WebLoginChallengeStart)
 		accounts.GET("/web-login-challenge/:session_id/status", h.Admin.Account.WebLoginChallengeStatus)
 		accounts.POST("/web-login-challenge/:session_id/consume", h.Admin.Account.WebLoginChallengeConsume)

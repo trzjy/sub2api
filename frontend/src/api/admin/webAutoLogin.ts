@@ -128,12 +128,56 @@ export async function webLoginSms(payload: WebLoginSmsRequest): Promise<WebLogin
   return data
 }
 
+/**
+ * DeepSeek 邮箱注册接口（契约：docs/deepseek-email-register-plan.md §1.2）。
+ * 成功响应为原始 JSON（不包裹 code/message/data）；失败关闭（HTTP 4xx）由拦截器
+ * 以平面错误 reject：{ message, metadata:{ detail, ... } }。
+ */
+
+export interface WebRegisterEmailCodeResponse {
+  success: boolean
+  /** 发送窗口秒数：窗口内不允许重复发码（缺省 60s，由 UI 兜底） */
+  send_window_secs?: number
+}
+
+export interface WebRegisterRequest {
+  platform: string
+  email: string
+  email_verification_code: string
+  password: string
+  /** 与既有 webLoginPassword 的 account_draft 同型 */
+  account_draft: CreateAccountRequest
+}
+
+export interface WebRegisterResponse {
+  success: boolean
+  /** 注册并建号成功时返回账号 ID */
+  account_id?: number
+}
+
+/** 发送注册验证码（POST /admin/accounts/web-register-email-code）。 */
+export async function webRegisterEmailCode(platform: string, email: string): Promise<WebRegisterEmailCodeResponse> {
+  const { data } = await apiClient.post<WebRegisterEmailCodeResponse>(
+    '/admin/accounts/web-register-email-code',
+    { platform, email }
+  )
+  return data
+}
+
+/** 邮箱验证码注册并创建账号（POST /admin/accounts/web-register）。 */
+export async function webRegister(payload: WebRegisterRequest): Promise<WebRegisterResponse> {
+  const { data } = await apiClient.post<WebRegisterResponse>('/admin/accounts/web-register', payload)
+  return data
+}
+
 export const webAutoLoginAPI = {
   webLoginPassword,
   startWebLoginChallenge,
   getWebLoginChallengeStatus,
   consumeWebLoginChallenge,
-  webLoginSms
+  webLoginSms,
+  webRegisterEmailCode,
+  webRegister
 }
 
 export default webAutoLoginAPI

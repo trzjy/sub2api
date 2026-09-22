@@ -545,3 +545,361 @@ func webAutoLoginPlatformKey(account *Account) string {
 	}
 	return ""
 }
+
+// ---------------------------------------------------------------------------
+// deepseek 邮箱注册自动接入（deepseek-email-register-plan.md §1.2/§1.3）
+// ---------------------------------------------------------------------------
+
+// webDeepseekGuestPoWChallengePath guest PoW 挑战端点（方案 §1.3/§2 取证 2：注册链路
+// 用 create_guest_challenge，target_path 指向待调用端点自身；与登录态转发链的
+// create_pow_challenge 是不同端点，不得混用）。
+const webDeepseekGuestPoWChallengePath = "/api/v0/users/create_guest_challenge"
+
+// WebDeepseekEmailCodeSendPath 发送邮箱验证码端点（方案 §1.3 取证钉死）。
+const WebDeepseekEmailCodeSendPath = "/api/v0/users/create_email_verification_code"
+
+// WebDeepseekRegisterPath 邮箱注册端点（方案 §1.3 取证钉死）。
+const WebDeepseekRegisterPath = "/api/v0/users/register"
+
+// webDeepseekRegisterErrorCode 枚举（方案 §2 取证 5，main.js REGISTER_ERROR_CODE）。
+const (
+	webDeepseekRegisterCodeEmailExists     int64 = 1
+	webDeepseekRegisterCodeInvalidPassword int64 = 4
+	webDeepseekRegisterCodeTooManyAttempts int64 = 5
+	webDeepseekRegisterCodeFromMainland    int64 = 6
+	webDeepseekRegisterCodeEmailExpired    int64 = 7
+	webDeepseekRegisterCodePasscodeFailed  int64 = 8
+	webDeepseekRegisterCodeDomainNotSupp   int64 = 9
+)
+
+// webDeepseekEmailCodeBizCode 发码业务码（方案 §2 取证 4）。
+const (
+	webDeepseekEmailCodeBizCaptcha     int64 = 2 // RECAPTCHA_VERIFY_FAILED（人机验证拦截）
+	webDeepseekEmailCodeBizDomainNotSu int64 = 9 // EMAIL_DOMAIN_NOT_SUPPORTED
+)
+
+// webDeepseekRegisterGuestContext 一次 guest PoW 出站所需的公共参数。
+type webDeepseekRegisterGuestContext struct {
+	baseURL  string
+	proxyURL string
+	deviceID string
+}
+
+// webDeepseekPostGuestJSON 以注册链路公共头族 POST JSON body，返回响应。
+// 公共头（方案 §1.2/§1.3）：Content-Type/Accept: application/json、Origin/Referer
+// 官方域、User-Agent=webDeepseekLoginUA、x-client-platform=web、x-client-version=1.1、
+// x-client-locale=en、x-device-id、X-DS-Guest-PoW-Response。
+func (s *WebPlatformAutoLoginService) webDeepseekPostGuestJSON(ctx context.Context, guest webDeepseekRegisterGuestContext, path, powHeader string, body any) (*http.Response, []byte, error) {
+	target := guest.baseURL + path
+	if _, err := s.validateUpstreamURL(target); err != nil {
+		return nil, nil, fmt.Errorf("deepseek web 注册链路目标被 URL 白名单拒绝: %w", err)
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	origin := webDeepseekOriginFromURL(guest.baseURL)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", webDeepseekLoginUA)
+	req.Header.Set("x-client-platform", "web")
+	req.Header.Set("x-client-version", "1.1")
+	req.Header.Set("x-client-locale", "en")
+	req.Header.Set("x-device-id", guest.deviceID)
+	if powHeader != "" {
+		req.Header.Set("X-DS-Guest-PoW-Response", powHeader)
+	}
+
+	resp, err := s.httpUpstream.Do(req, guest.proxyURL, 0, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("deepseek web 注册链路网络错误: %w", err)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return nil, nil, fmt.Errorf("deepseek web 注册链路响应读取失败: %w", err)
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	return resp, raw, nil
+}
+
+// webDeepseekGuestChallengeResponse create_guest_challenge 响应（方案 §2 取证 2：
+// data.biz_data.guest_challenge，字段结构与登录态 challenge 一致）。
+type webDeepseekGuestChallengeResponse struct {
+	Code int64 `json:"code"`
+	Data struct {
+		BizCode int64 `json:"biz_code"`
+		BizData struct {
+			GuestChallenge *webDeepseekPowChallenge `json:"guest_challenge"`
+		} `json:"biz_data"`
+	} `json:"data"`
+}
+
+// webDeepseekSolveGuestPoW 实时取 guest 挑战并本地求解，返回 X-DS-Guest-PoW-Response 头值。
+// PoW 单次有效（方案 §2 取证 6）：每次上游请求前实时「取挑战→求解→立即用」，禁止缓存——
+// 因此不提供任何挑战缓存，调用方每次调用本函数都是一次全新出站。挑战缺失 / 算法不符 /
+// 求解失败一律失败关闭（WAF 类，与登录链同分类），绝不伪造应答。
+func (s *WebPlatformAutoLoginService) webDeepseekSolveGuestPoW(ctx context.Context, guest webDeepseekRegisterGuestContext, targetPath string) (string, error) {
+	resp, raw, err := s.webDeepseekPostGuestJSON(ctx, guest, webDeepseekGuestPoWChallengePath, "", map[string]string{"target_path": targetPath})
+	if err != nil {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: -1, Kind: WebLoginKindWAF,
+			Msg: "deepseek web guest PoW 挑战获取失败: " + err.Error(),
+		}
+	}
+	if resp.StatusCode >= 400 || resp.StatusCode == http.StatusForbidden || resp.Header.Get("x-amzn-waf-action") != "" {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: int64(resp.StatusCode), Kind: WebLoginKindWAF,
+			Msg: fmt.Sprintf("deepseek web guest PoW 挑战被安全拦截（HTTP %d）", resp.StatusCode),
+		}
+	}
+	var parsed webDeepseekGuestChallengeResponse
+	_ = json.Unmarshal(raw, &parsed)
+	if parsed.Data.BizData.GuestChallenge == nil {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: -1, Kind: WebLoginKindWAF,
+			Msg: "deepseek web guest PoW 挑战缺失（响应无 data.biz_data.guest_challenge）",
+		}
+	}
+	header, err := webDeepseekSolvePoW(*parsed.Data.BizData.GuestChallenge, targetPath)
+	if err != nil {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: WebLoginCodePoW1, Kind: WebLoginKindWAF,
+			Msg: "deepseek web guest PoW 求解失败: " + err.Error(),
+		}
+	}
+	return header, nil
+}
+
+// webDeepseekGuestUpstreamError 把 HTTP 层失败统一映射为失败关闭错误
+// （WAF/429 按既有分类；HTTP>=400 复用 webDeepseekEffectiveErrorCode 双路径判定取码）。
+// 响应体业务码（data.biz_code）的专项枚举映射由各调用方在本函数之后完成——本函数
+// 不得提前消费 body 业务码，否则专项文案（人机验证/邮箱域名/注册枚举）永远走不到。
+func (s *WebPlatformAutoLoginService) webDeepseekGuestUpstreamError(resp *http.Response, raw []byte, action string) error {
+	if resp.StatusCode == http.StatusForbidden || resp.Header.Get("x-amzn-waf-action") != "" {
+		return &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: int64(resp.StatusCode), Kind: WebLoginKindWAF,
+			Msg: "deepseek web " + action + "被安全拦截（HTTP 403，可能需人机验证）",
+		}
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: WebLoginCodeHTTPTooMany, Kind: WebLoginKindLogin,
+			Msg: "deepseek web " + action + "触发限流",
+		}
+	}
+	if resp.StatusCode >= 400 {
+		code, _ := webDeepseekEffectiveErrorCode(resp.StatusCode, raw)
+		return &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: code, Kind: WebLoginKindLogin,
+			Msg: fmt.Sprintf("deepseek web %s失败 biz_code=%d", action, code),
+		}
+	}
+	return nil
+}
+
+// CreateGuestPoWHeader 取 guest 挑战并求解，返回 X-DS-Guest-PoW-Response 头值。
+// 每次调用都是一次全新出站（PoW 一次一换，方案 §2 取证 6），不做任何缓存。
+func (s *WebPlatformAutoLoginService) CreateGuestPoWHeader(ctx context.Context, baseURL, proxyURL, deviceID, targetPath string) (string, error) {
+	guest := webDeepseekRegisterGuestContext{
+		baseURL:  strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		proxyURL: proxyURL,
+		deviceID: deviceID,
+	}
+	if guest.baseURL == "" {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "deepseek web 注册链路缺少可用的 web base_url（不可重试）",
+		}
+	}
+	if guest.deviceID == "" {
+		return "", &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: -1, Kind: WebLoginKindLogin,
+			Msg: "deepseek web 注册链路缺少 device_id（不可重试）",
+		}
+	}
+	return s.webDeepseekSolveGuestPoW(ctx, guest, targetPath)
+}
+
+// webDeepseekEmailCodeSendRequest 发码请求体（方案 §1.3 取证钉死：shumei_verification
+// 字段必须存在——可为空串——缺失时上游 422 校验错误）。
+type webDeepseekEmailCodeSendRequest struct {
+	Email              string `json:"email"`
+	TurnstileToken     string `json:"turnstile_token"`
+	Locale             string `json:"locale"`
+	ShumeiVerification string `json:"shumei_verification"`
+	HcaptchaToken      string `json:"hcaptcha_token"`
+	DeviceID           string `json:"device_id"`
+	Scenario           string `json:"scenario"`
+}
+
+// webDeepseekEmailCodeSendResponse 发码响应（biz_data.send_window_secs 为发送窗口秒数）。
+type webDeepseekEmailCodeSendResponse struct {
+	Code int64 `json:"code"`
+	Data struct {
+		BizCode int64  `json:"biz_code"`
+		BizMsg  string `json:"biz_msg"`
+		BizData struct {
+			SendWindowSecs int64 `json:"send_window_secs"`
+		} `json:"biz_data"`
+	} `json:"data"`
+}
+
+// SendRegisterEmailCode 调上游发码接口：先取 guest PoW（target_path=发码自身路径）→
+// POST create_email_verification_code → biz_code=0 返回 send_window_secs（缺失返回 0）；
+// 2 → RECAPTCHA 人机验证文案；9 → 邮箱域不支持文案；其余按既有分类失败关闭。
+func (s *WebPlatformAutoLoginService) SendRegisterEmailCode(ctx context.Context, email, locale, deviceID, scenario, proxyURL string) (int64, error) {
+	base := strings.TrimRight(DefaultWebDeepseekBaseURL, "/")
+	guest := webDeepseekRegisterGuestContext{baseURL: base, proxyURL: proxyURL, deviceID: deviceID}
+
+	// PoW 一次一换：发码请求前实时取挑战求解，禁止缓存（方案 §1.2/§2 取证 6）。
+	powHeader, err := s.webDeepseekSolveGuestPoW(ctx, guest, WebDeepseekEmailCodeSendPath)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, raw, err := s.webDeepseekPostGuestJSON(ctx, guest, WebDeepseekEmailCodeSendPath, powHeader, webDeepseekEmailCodeSendRequest{
+		Email:              email,
+		TurnstileToken:     "",
+		Locale:             locale,
+		ShumeiVerification: "", // 字段必须存在（方案 §2 取证 4），空串可过格式校验
+		HcaptchaToken:      "",
+		DeviceID:           deviceID,
+		Scenario:           scenario,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := s.webDeepseekGuestUpstreamError(resp, raw, "发码"); err != nil {
+		return 0, err
+	}
+
+	var parsed webDeepseekEmailCodeSendResponse
+	if uerr := json.Unmarshal(raw, &parsed); uerr != nil || parsed.Data.BizCode < 0 {
+		// 外审 2026-09-22 P1-4：HTTP 200 但响应体为空/格式异常/顶层 code 非零形态
+		// 一律失败关闭，不得把零值 biz_code 误报为已发送（外审建议沿用失败关闭口径，
+		// 与注册方法同款防御）。
+		return 0, &webLoginHTTPError{
+			Platform: PlatformDeepseek, Kind: WebLoginKindLogin,
+			Msg: fmt.Sprintf("deepseek web 发码响应异常，失败关闭（unmarshal=%v biz_code=%d）", uerr, parsed.Data.BizCode),
+		}
+	}
+	switch parsed.Data.BizCode {
+	case 0:
+		return parsed.Data.BizData.SendWindowSecs, nil
+	case webDeepseekEmailCodeBizCaptcha:
+		return 0, &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: parsed.Data.BizCode, Kind: WebLoginKindLogin,
+			Msg: "上游要求人机验证（RECAPTCHA_VERIFY_FAILED），请改用密码登录入口或稍后再试",
+		}
+	case webDeepseekEmailCodeBizDomainNotSu:
+		return 0, &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: parsed.Data.BizCode, Kind: WebLoginKindLogin,
+			Msg: "该邮箱域名不被上游支持（EMAIL_DOMAIN_NOT_SUPPORTED），请更换邮箱后重试",
+		}
+	default:
+		return 0, &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: parsed.Data.BizCode, Kind: WebLoginKindLogin,
+			Msg: fmt.Sprintf("deepseek web 发码失败 biz_code=%d", parsed.Data.BizCode),
+		}
+	}
+}
+
+// webDeepseekRegisterRequest 注册请求体（方案 §1.3 取证钉死：payload 内层 + os=web）。
+type webDeepseekRegisterRequest struct {
+	Locale  string `json:"locale"`
+	Region  string `json:"region"`
+	Payload struct {
+		Email                 string `json:"email"`
+		EmailVerificationCode string `json:"email_verification_code"`
+		Password              string `json:"password"`
+	} `json:"payload"`
+	DeviceID string `json:"device_id"`
+	OS       string `json:"os"`
+}
+
+// webDeepseekRegisterResponse 注册响应（仅 biz_code 参与判定）。
+type webDeepseekRegisterResponse struct {
+	Code int64 `json:"code"`
+	Data struct {
+		BizCode int64  `json:"biz_code"`
+		BizMsg  string `json:"biz_msg"`
+	} `json:"data"`
+}
+
+// webDeepseekRegisterBizCodeMessage 把注册业务码映射为中文文案（方案 §2 取证 5 枚举）。
+func webDeepseekRegisterBizCodeMessage(code int64) string {
+	switch code {
+	case webDeepseekRegisterCodeEmailExists:
+		return "该邮箱已在 DeepSeek 注册（EMAIL_EXISTS），请改用密码登录入口"
+	case webDeepseekRegisterCodeInvalidPassword:
+		return "密码不符合上游要求（INVALID_PASSWORD），需至少 8 位且包含字母和数字"
+	case webDeepseekRegisterCodeTooManyAttempts:
+		return "验证码尝试次数过多（EMAIL_VERIFY_TOO_MANY_ATTEMPTS），请稍后重试"
+	case webDeepseekRegisterCodeFromMainland:
+		return "注册被上游地域门控拒绝（REGISTER_FROM_MAINLAND）：出口 IP 需为非大陆（当前服务端为香港出口，请检查代理配置）"
+	case webDeepseekRegisterCodeEmailExpired:
+		return "邮箱验证码已过期（EMAIL_EXPIRED），请重新发送验证码"
+	case webDeepseekRegisterCodePasscodeFailed:
+		return "邮箱验证码错误（EMAIL_PASSCODE_FAILED），请核对后重试"
+	case webDeepseekRegisterCodeDomainNotSupp:
+		return "该邮箱域名不被上游支持（EMAIL_DOMAIN_NOT_SUPPORTED），请更换邮箱后重试"
+	default:
+		return fmt.Sprintf("deepseek web 注册失败 biz_code=%d", code)
+	}
+}
+
+// RegisterByEmail 调上游注册接口：先取 guest PoW（target_path=/api/v0/users/register）→
+// POST register → biz_code=0 即成功；1/4/5/6/7/8/9 按 §2 取证 5 枚举映射中文文案；
+// WAF/429 按既有分类失败关闭。本方法不落库、不回传任何 Cookie。
+func (s *WebPlatformAutoLoginService) RegisterByEmail(ctx context.Context, email, code, password, region, deviceID, proxyURL string) error {
+	base := strings.TrimRight(DefaultWebDeepseekBaseURL, "/")
+	guest := webDeepseekRegisterGuestContext{baseURL: base, proxyURL: proxyURL, deviceID: deviceID}
+
+	// PoW 一次一换：注册请求前实时取挑战求解，禁止缓存（方案 §1.2/§2 取证 6）。
+	powHeader, err := s.webDeepseekSolveGuestPoW(ctx, guest, WebDeepseekRegisterPath)
+	if err != nil {
+		return err
+	}
+
+	body := webDeepseekRegisterRequest{
+		Locale: "en", Region: region, DeviceID: deviceID, OS: "web",
+	}
+	body.Payload.Email = email
+	body.Payload.EmailVerificationCode = code
+	body.Payload.Password = password
+
+	resp, raw, err := s.webDeepseekPostGuestJSON(ctx, guest, WebDeepseekRegisterPath, powHeader, body)
+	if err != nil {
+		return err
+	}
+	if err := s.webDeepseekGuestUpstreamError(resp, raw, "注册"); err != nil {
+		return err
+	}
+
+	var parsed webDeepseekRegisterResponse
+	if uerr := json.Unmarshal(raw, &parsed); uerr != nil || parsed.Data.BizCode < 0 {
+		// 外审 2026-09-22 P1-4：HTTP 200 但响应体为空/格式异常（biz_code 保持零值）
+		// 不得误判为注册成功；顶层 code 非零同理失败关闭。反序列化失败或 biz_code
+		// 非法（<0，成功应为明确 0）一律失败关闭，不做成功推断。
+		return &webLoginHTTPError{
+			Platform: PlatformDeepseek, Kind: WebLoginKindLogin,
+			Msg: fmt.Sprintf("deepseek web 注册响应异常，失败关闭（unmarshal=%v biz_code=%d）", uerr, parsed.Data.BizCode),
+		}
+	}
+	if parsed.Data.BizCode != 0 {
+		return &webLoginHTTPError{
+			Platform: PlatformDeepseek, Code: parsed.Data.BizCode, Kind: WebLoginKindLogin,
+			Msg: webDeepseekRegisterBizCodeMessage(parsed.Data.BizCode),
+		}
+	}
+	return nil
+}
