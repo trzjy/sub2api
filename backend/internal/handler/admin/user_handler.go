@@ -122,6 +122,7 @@ type BindUserAuthIdentityChannelRequest struct {
 //   - attr[{id}]: filter by custom attribute value, e.g. attr[1]=company
 //   - group_name: fuzzy filter by allowed group name
 //   - api_key_group_id: filter by the exact group bound to the user's API keys
+//   - has_active_subscription: "true"=有生效订阅的用户, "false"=无生效订阅的用户
 func (h *UserHandler) List(c *gin.Context) {
 	page, pageSize := response.ParsePagination(c)
 
@@ -142,6 +143,11 @@ func (h *UserHandler) List(c *gin.Context) {
 	if raw := strings.TrimSpace(c.Query("api_key_group_id")); raw != "" {
 		if id, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && id > 0 {
 			filters.APIKeyGroupID = id
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("has_active_subscription")); raw != "" {
+		if v, parseErr := strconv.ParseBool(raw); parseErr == nil {
+			filters.HasActiveSubscription = &v
 		}
 	}
 	sortBy := c.DefaultQuery("sort_by", "created_at")

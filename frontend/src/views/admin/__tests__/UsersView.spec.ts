@@ -119,6 +119,36 @@ const BulkEditUserModalStub = {
   `
 }
 
+const mountUsersView = () => mount(UsersView, {
+  global: {
+    stubs: {
+      AppLayout: { template: '<div><slot /></div>' },
+      TablePageLayout: {
+        template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+      },
+      DataTable: DataTableStub,
+      Pagination: true,
+      ConfirmDialog: true,
+      EmptyState: true,
+      GroupBadge: true,
+      Select: true,
+      UserAttributesConfigModal: true,
+      UserConcurrencyCell: true,
+      UserCreateModal: true,
+      UserEditModal: true,
+      BulkEditUserModal: BulkEditUserModalStub,
+      UserPlatformQuotaModal: true,
+      UserApiKeysModal: true,
+      UserAllowedGroupsModal: true,
+      UserBalanceModal: true,
+      UserBalanceHistoryModal: true,
+      GroupReplaceModal: true,
+      Icon: true,
+      Teleport: true
+    }
+  }
+})
+
 describe('admin UsersView', () => {
   beforeEach(() => {
     vi.useRealTimers()
@@ -368,5 +398,34 @@ describe('admin UsersView', () => {
     expect(wrapper.get('[data-test="row-order"]').text()).toBe('refreshed-page-two@example.com')
     expect(wrapper.find('[data-test="bulk-edit-limits"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="selected-keys"]').text()).toBe('')
+  })
+
+  it.each([
+    ['true', true],
+    ['false', false]
+  ])('passes has_active_subscription=%s to users.list when subscription filter is set', async (subscription, expected) => {
+    localStorage.setItem('user-visible-filters', JSON.stringify(['subscription']))
+    localStorage.setItem(
+      'user-filter-values',
+      JSON.stringify({ subscription })
+    )
+
+    mountUsersView()
+
+    await flushPromises()
+
+    expect(listUsers).toHaveBeenCalled()
+    const params = listUsers.mock.calls[listUsers.mock.calls.length - 1][2]
+    expect(params.has_active_subscription).toBe(expected)
+  })
+
+  it('omits has_active_subscription when subscription filter is all', async () => {
+    mountUsersView()
+
+    await flushPromises()
+
+    expect(listUsers).toHaveBeenCalled()
+    const params = listUsers.mock.calls[listUsers.mock.calls.length - 1][2]
+    expect(params.has_active_subscription).toBeUndefined()
   })
 })

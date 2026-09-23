@@ -74,7 +74,12 @@ type UserListFilters struct {
 	// bound to this group (api_keys.group_id). 0 = no filter. Covers all three
 	// group types since it matches the key's group directly, not allowed_groups.
 	APIKeyGroupID int64
-	Attributes    map[int64]string // Custom attribute filters: attributeID -> value
+	// HasActiveSubscription 过滤"是否拥有生效中订阅"：true=有（EXISTS）、false=无（NOT EXISTS）、
+	// nil=不过滤。「生效」与 service.UserSubscription.IsActive() 同语义
+	// （status=active AND expires_at>now AND deleted_at IS NULL）；吊销走软删而 status 保持
+	// active，必须显式排除软删行，否则已吊销订阅会被误计为生效（同 dashboard active_subscription_users 口径）。
+	HasActiveSubscription *bool
+	Attributes            map[int64]string // Custom attribute filters: attributeID -> value
 	// IncludeSubscriptions controls whether ListWithFilters should load active subscriptions.
 	// For large datasets this can be expensive; admin list pages should enable it on demand.
 	// nil means not specified (default: load subscriptions for backward compatibility).

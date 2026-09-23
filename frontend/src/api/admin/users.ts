@@ -72,6 +72,7 @@ export async function list(
     search?: string
     group_name?: string         // fuzzy filter by allowed group name
     api_key_group_id?: number   // filter users by the group their API keys are bound to
+    has_active_subscription?: boolean  // true = has active subscription, false = no active subscription
     attributes?: Record<number, string>  // attributeId -> value
     include_subscriptions?: boolean
     sort_by?: string
@@ -90,6 +91,7 @@ export async function list(
     search: filters?.search,
     group_name: filters?.group_name,
     api_key_group_id: filters?.api_key_group_id,
+    has_active_subscription: filters?.has_active_subscription,
     include_subscriptions: filters?.include_subscriptions,
     sort_by: filters?.sort_by,
     sort_order: filters?.sort_order

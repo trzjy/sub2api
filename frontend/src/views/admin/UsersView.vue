@@ -72,6 +72,19 @@
               />
             </div>
 
+            <!-- Subscription Filter (visible when enabled) -->
+            <div v-if="visibleFilters.has('subscription')" class="w-full sm:w-32">
+              <Select
+                v-model="filters.subscription"
+                :options="[
+                  { value: '', label: t('admin.users.allSubscriptions') },
+                  { value: 'true', label: t('admin.users.hasActiveSubscription') },
+                  { value: 'false', label: t('admin.users.noActiveSubscription') }
+                ]"
+                @change="applyFilter"
+              />
+            </div>
+
             <!-- Dynamic Attribute Filters -->
             <template v-for="(value, attrId) in activeAttributeFilters" :key="attrId">
               <div
@@ -1110,7 +1123,8 @@ const filters = reactive({
   role: '',
   status: '',
   group: '',  // group name for fuzzy match, '' = all
-  apiKeyGroup: null as number | null  // group id bound to the user's API keys, null = all
+  apiKeyGroup: null as number | null,  // group id bound to the user's API keys, null = all
+  subscription: '' as '' | 'true' | 'false'  // '' = all, 'true' = has active subscription, 'false' = no active subscription
 })
 const activeAttributeFilters = reactive<Record<number, string>>({})
 
@@ -1140,7 +1154,8 @@ const builtInFilters = computed(() => [
   { key: 'role', name: t('admin.users.columns.role'), type: 'select' as const },
   { key: 'status', name: t('admin.users.columns.status'), type: 'select' as const },
   { key: 'group', name: t('admin.users.authorizedGroupFilter'), type: 'select' as const },
-  { key: 'apiKeyGroup', name: t('admin.users.apiKeyGroupFilter'), type: 'select' as const }
+  { key: 'apiKeyGroup', name: t('admin.users.apiKeyGroupFilter'), type: 'select' as const },
+  { key: 'subscription', name: t('admin.users.subscriptionFilter'), type: 'select' as const }
 ])
 
 // Load saved filters from localStorage
@@ -1160,6 +1175,7 @@ const loadSavedFilters = () => {
       if (parsed.status) filters.status = parsed.status
       if (parsed.group) filters.group = parsed.group
       if (typeof parsed.apiKeyGroup === 'number') filters.apiKeyGroup = parsed.apiKeyGroup
+      if (parsed.subscription === 'true' || parsed.subscription === 'false') filters.subscription = parsed.subscription
       if (parsed.attributes) {
         Object.assign(activeAttributeFilters, parsed.attributes)
       }
@@ -1180,6 +1196,7 @@ const saveFiltersToStorage = () => {
       status: filters.status,
       group: filters.group,
       apiKeyGroup: filters.apiKeyGroup,
+      subscription: filters.subscription,
       attributes: activeAttributeFilters
     }
     localStorage.setItem(FILTER_VALUES_KEY, JSON.stringify(values))
@@ -1583,6 +1600,7 @@ const loadUsers = async () => {
         search: searchQuery.value || undefined,
         group_name: filters.group || undefined,
         api_key_group_id: filters.apiKeyGroup ?? undefined,
+        has_active_subscription: filters.subscription === '' ? undefined : filters.subscription === 'true',
         attributes: Object.keys(attrFilters).length > 0 ? attrFilters : undefined,
         // 始终请求 subscriptions：列隐藏时仍需用于 UserPlatformQuotaModal 的 active-subscription 警示 banner
         include_subscriptions: true,
@@ -1674,6 +1692,7 @@ const toggleBuiltInFilter = (key: string) => {
     if (key === 'status') filters.status = ''
     if (key === 'group') filters.group = ''
     if (key === 'apiKeyGroup') filters.apiKeyGroup = null
+    if (key === 'subscription') filters.subscription = ''
   } else {
     visibleFilters.add(key)
     if (key === 'group') loadAllGroups()

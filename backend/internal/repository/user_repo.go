@@ -566,6 +566,22 @@ func (r *userRepository) ListWithFilters(ctx context.Context, params pagination.
 		))
 	}
 
+	if filters.HasActiveSubscription != nil {
+		// 「生效订阅」判定与 service.UserSubscription.IsActive() 同语义。SoftDeleteMixin
+		// 拦截器不会下沉到 HasSubscriptionsWith 子查询，必须显式 DeletedAtIsNil()，
+		// 否则已吊销（软删）订阅会污染结果——与 dashboard active_subscription_users 同口径。
+		activeSubPreds := []predicate.UserSubscription{
+			usersubscription.StatusEQ(service.SubscriptionStatusActive),
+			usersubscription.ExpiresAtGT(time.Now()),
+			usersubscription.DeletedAtIsNil(),
+		}
+		if *filters.HasActiveSubscription {
+			q = q.Where(dbuser.HasSubscriptionsWith(activeSubPreds...))
+		} else {
+			q = q.Where(dbuser.Not(dbuser.HasSubscriptionsWith(activeSubPreds...)))
+		}
+	}
+
 	// If attribute filters are specified, we need to filter by user IDs first
 	var allowedUserIDs []int64
 	if len(filters.Attributes) > 0 {
