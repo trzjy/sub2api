@@ -330,3 +330,52 @@ describe('AnnouncementsView image upload', () => {
     )
   })
 })
+
+describe('AnnouncementsView editor preview tab', () => {
+  it('renders markdown content in the preview tab and restores the textarea on switch back', async () => {
+    const wrapper = mountView()
+    await flush()
+    await openCreateDialog(wrapper)
+
+    const dialog = wrapper.find('[data-testid="edit-dialog"]')
+    await dialog.find('textarea').setValue('# Hello\n\n**bold** text')
+
+    // 默认编辑态：预览容器不存在
+    expect(wrapper.find('[data-testid="announcement-content-preview"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="announcement-editor-tab-preview"]').trigger('click')
+
+    // 预览态：真实 MarkdownContent 渲染，编辑件隐藏
+    const preview = wrapper.find('[data-testid="announcement-content-preview"]')
+    expect(preview.exists()).toBe(true)
+    expect(preview.find('h1').text()).toBe('Hello')
+    expect(preview.find('strong').text()).toBe('bold')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="announcement-insert-image-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="announcement-image-paste-hint"]').exists()).toBe(false)
+
+    // 切回编辑态：textarea 恢复且内容保留，预览容器消失
+    await wrapper.find('[data-testid="announcement-editor-tab-edit"]').trigger('click')
+
+    const textarea = wrapper.find('textarea')
+    expect(textarea.exists()).toBe(true)
+    expect((textarea.element as HTMLTextAreaElement).value).toBe('# Hello\n\n**bold** text')
+    expect(wrapper.find('[data-testid="announcement-content-preview"]').exists()).toBe(false)
+  })
+
+  it('resets to the edit tab when the dialog is reopened', async () => {
+    const wrapper = mountView()
+    await flush()
+    await openCreateDialog(wrapper)
+
+    await wrapper.find('[data-testid="announcement-editor-tab-preview"]').trigger('click')
+    expect(wrapper.find('[data-testid="announcement-content-preview"]').exists()).toBe(true)
+
+    await clickCancel(wrapper)
+    await flush()
+    await openCreateDialog(wrapper)
+
+    expect(wrapper.find('[data-testid="announcement-content-preview"]').exists()).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(true)
+  })
+})

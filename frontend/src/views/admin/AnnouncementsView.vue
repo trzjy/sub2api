@@ -184,22 +184,46 @@
         <div>
           <div class="mb-1 flex items-center justify-between">
             <label class="input-label">{{ t('admin.announcements.form.content') }}</label>
-            <span
-              data-testid="announcement-image-paste-hint"
-              class="text-xs text-gray-400 dark:text-dark-400"
-            >{{ t('admin.announcements.pasteHint') }}</span>
+            <div class="flex items-center gap-2">
+              <div class="flex items-center gap-0.5 rounded-lg bg-gray-100 p-0.5 dark:bg-dark-700">
+                <button
+                  type="button"
+                  data-testid="announcement-editor-tab-edit"
+                  class="rounded-md px-2 py-0.5 text-xs font-medium transition-colors"
+                  :class="editorTab === 'edit'
+                    ? 'bg-white text-gray-900 shadow-sm dark:bg-dark-600 dark:text-white'
+                    : 'text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-gray-300'"
+                  @click="editorTab = 'edit'"
+                >{{ t('common.edit') }}</button>
+                <button
+                  type="button"
+                  data-testid="announcement-editor-tab-preview"
+                  class="rounded-md px-2 py-0.5 text-xs font-medium transition-colors"
+                  :class="editorTab === 'preview'
+                    ? 'bg-white text-gray-900 shadow-sm dark:bg-dark-600 dark:text-white'
+                    : 'text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-gray-300'"
+                  @click="editorTab = 'preview'"
+                >{{ t('admin.announcements.preview') }}</button>
+              </div>
+              <span
+                v-if="editorTab === 'edit'"
+                data-testid="announcement-image-paste-hint"
+                class="text-xs text-gray-400 dark:text-dark-400"
+              >{{ t('admin.announcements.pasteHint') }}</span>
+            </div>
           </div>
-          <textarea
-            ref="contentTextarea"
-            v-model="form.content"
-            rows="6"
-            class="input"
-            required
-            @paste="handleTextareaPaste"
-            @drop="handleTextareaDrop"
-            @dragover.prevent
-          ></textarea>
-          <div class="mt-1 flex items-center gap-2">
+          <template v-if="editorTab === 'edit'">
+            <textarea
+              ref="contentTextarea"
+              v-model="form.content"
+              rows="6"
+              class="input"
+              required
+              @paste="handleTextareaPaste"
+              @drop="handleTextareaDrop"
+              @dragover.prevent
+            ></textarea>
+            <div class="mt-1 flex items-center gap-2">
             <button
               type="button"
               data-testid="announcement-insert-image-btn"
@@ -223,6 +247,14 @@
               data-testid="announcement-upload-error"
               class="text-xs text-red-600 dark:text-red-400"
             >{{ uploadError }}</span>
+            </div>
+          </template>
+          <div
+            v-else
+            data-testid="announcement-content-preview"
+            class="max-h-80 min-h-[8.75rem] overflow-auto rounded-xl border border-gray-200 bg-white p-3 dark:border-dark-600 dark:bg-dark-800"
+          >
+            <MarkdownContent :content="form.content" />
           </div>
           <input
             ref="imageFileInput"
@@ -326,6 +358,7 @@ import Icon from '@/components/icons/Icon.vue'
 import AnnouncementTargetingEditor from '@/components/admin/announcements/AnnouncementTargetingEditor.vue'
 import AnnouncementReadStatusDialog from '@/components/admin/announcements/AnnouncementReadStatusDialog.vue'
 import AnnouncementPopup from '@/components/common/AnnouncementPopup.vue'
+import MarkdownContent from '@/components/common/MarkdownContent.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -471,6 +504,8 @@ function handleSearch() {
 const showEditDialog = ref(false)
 const saving = ref(false)
 const editingAnnouncement = ref<Announcement | null>(null)
+// 内容区 编辑|预览 页签：每次打开弹窗重置回编辑态
+const editorTab = ref<'edit' | 'preview'>('edit')
 
 const isEditing = computed(() => !!editingAnnouncement.value)
 
@@ -523,6 +558,7 @@ function openCreateDialog() {
   editingAnnouncement.value = null
   resetForm()
   resetDraftState()
+  editorTab.value = 'edit'
   showEditDialog.value = true
 }
 
@@ -530,6 +566,7 @@ function openEditDialog(row: Announcement) {
   editingAnnouncement.value = row
   fillFormFromAnnouncement(row)
   resetDraftState()
+  editorTab.value = 'edit'
   showEditDialog.value = true
 }
 

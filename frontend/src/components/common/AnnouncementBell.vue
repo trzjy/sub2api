@@ -265,10 +265,7 @@
                 <div class="absolute left-0 top-0 bottom-0 w-1 rounded-full bg-gradient-to-b from-blue-500 via-indigo-500 to-purple-500"></div>
 
                 <div class="pl-6">
-                  <div
-                    class="markdown-body prose prose-sm max-w-none dark:prose-invert"
-                    v-html="renderMarkdown(selectedAnnouncement.content)"
-                  ></div>
+                  <MarkdownContent :content="selectedAnnouncement?.content || ''" />
                 </div>
               </div>
             </div>
@@ -315,24 +312,16 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { storeToRefs } from 'pinia'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import { useAppStore } from '@/stores/app'
 import { useAnnouncementStore } from '@/stores/announcements'
 import { formatRelativeTime, formatRelativeWithDateTime } from '@/utils/format'
 import type { UserAnnouncement } from '@/types'
 import Icon from '@/components/icons/Icon.vue'
-import '@/styles/announcement-markdown.css'
+import MarkdownContent from '@/components/common/MarkdownContent.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
 const announcementStore = useAnnouncementStore()
-
-// Configure marked
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-})
 
 // Use store state (storeToRefs for reactivity)
 const { announcements, loading } = storeToRefs(announcementStore)
@@ -344,12 +333,6 @@ const detailModalOpen = ref(false)
 const selectedAnnouncement = ref<UserAnnouncement | null>(null)
 
 // Methods
-function renderMarkdown(content: string): string {
-  if (!content) return ''
-  const html = marked.parse(content) as string
-  return DOMPurify.sanitize(html)
-}
-
 function openModal() {
   isModalOpen.value = true
 }

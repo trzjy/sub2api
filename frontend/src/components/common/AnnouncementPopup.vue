@@ -53,10 +53,7 @@
             <div class="relative">
               <div class="absolute left-0 top-0 bottom-0 w-1 rounded-full bg-gradient-to-b from-amber-500 via-orange-500 to-yellow-500"></div>
               <div class="pl-6">
-                <div
-                  class="markdown-body prose prose-sm max-w-none dark:prose-invert"
-                  v-html="renderedContent"
-                ></div>
+                <MarkdownContent :content="displayedAnnouncement?.content || ''" />
               </div>
             </div>
           </div>
@@ -90,12 +87,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import { useAnnouncementStore } from '@/stores/announcements'
 import { formatRelativeWithDateTime } from '@/utils/format'
 import type { Announcement, UserAnnouncement } from '@/types'
-import '@/styles/announcement-markdown.css'
+import MarkdownContent from '@/components/common/MarkdownContent.vue'
 
 type PreviewAnnouncement = Pick<Announcement | UserAnnouncement, 'title' | 'content' | 'created_at'>
 
@@ -116,18 +111,6 @@ const announcementStore = useAnnouncementStore()
 const displayedAnnouncement = computed(() => (
   props.preview ? props.announcement : announcementStore.currentPopup
 ))
-
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-})
-
-const renderedContent = computed(() => {
-  const content = displayedAnnouncement.value?.content
-  if (!content) return ''
-  const html = marked.parse(content) as string
-  return DOMPurify.sanitize(html)
-})
 
 function handleDismiss() {
   if (props.preview) {

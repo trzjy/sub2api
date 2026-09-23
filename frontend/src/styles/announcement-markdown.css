@@ -100,8 +100,11 @@
   @apply transition-colors hover:bg-gray-50 dark:hover:bg-dark-700/30;
 }
 
+/* 图片自适应：自然尺寸优先，超出容器宽度或 420px 高度上限时等比缩小；
+   点击（MarkdownContent 事件委托）可全屏放大查看——二维码等小图不被拉伸，
+   大图不撑满弹窗。 */
 .markdown-body img {
-  @apply my-5 max-w-full rounded-xl border border-gray-200 shadow-md dark:border-dark-600;
+  @apply my-5 h-auto w-auto max-w-full max-h-[420px] cursor-zoom-in rounded-xl border border-gray-200 shadow-md dark:border-dark-600;
 }
 
 .markdown-body strong {
