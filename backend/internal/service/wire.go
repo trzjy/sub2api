@@ -801,7 +801,10 @@ func ProvideImageStorageSettingService(
 		logger.L().Warn("image_storage.enabled is true in config but object storage is not fully configured; configure it in the admin UI or complete the config file",
 			zap.Strings("missing_keys", cfg.ImageStorage.MissingCredentialKeys()))
 	}
-	return NewImageStorageSettingService(settingRepo, encryptor, backup, factory, cfg.ImageStorage)
+	settings := NewImageStorageSettingService(settingRepo, encryptor, backup, factory, cfg.ImageStorage)
+	// 公告图片配置守卫（R4-2）：经 setter 注入 BackupService，复用 SetLeaderLock 模式。
+	backup.SetS3ChangeGuard(settings.GuardBackupS3Change, settings.InvalidateResolverCache)
+	return settings
 }
 
 // ProvideImageTaskService 构造异步图片任务服务。
@@ -811,6 +814,18 @@ func ProvideImageStorageSettingService(
 // 启用状态由 settings 服务在运行时解析，因此后台改开关后无需重启即可生效。
 func ProvideImageTaskService(store ImageTaskStore, settings *ImageStorageSettingService) *ImageTaskService {
 	return NewImageTaskServiceWithResolver(store, settings.Resolver(), defaultImageTaskTTL, defaultImageTaskExecutionTimeout)
+}
+
+// ProvideAnnouncementService 构造公告服务，注入公告图片存储临界区（方案 3.2(b)）。
+// 生产注入 settings.WithAnnouncementStorage 方法值；上传/删除全程持同一把互斥锁。
+func ProvideAnnouncementService(
+	announcementRepo AnnouncementRepository,
+	readRepo AnnouncementReadRepository,
+	userRepo UserRepository,
+	userSubRepo UserSubscriptionRepository,
+	settings *ImageStorageSettingService,
+) *AnnouncementService {
+	return NewAnnouncementService(announcementRepo, readRepo, userRepo, userSubRepo, settings.WithAnnouncementStorage)
 }
 
 // ProvideBackupService creates and starts BackupService
@@ -1119,7 +1134,7 @@ var ProviderSet = wire.NewSet(
 	ProvidePricingService,
 	NewBillingService,
 	ProvideBillingCacheService,
-	NewAnnouncementService,
+	ProvideAnnouncementService,
 	NewAdminService,
 	NewGatewayService,
 	ProvideOpenAIGatewayService,

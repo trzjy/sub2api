@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// announcementImageMaxUploadBytes 是公告图片上传的请求体上限（方案 3.4 #7：10 MiB）。
+const announcementImageMaxUploadBytes int64 = 10 << 20
 
 // AnnouncementHandler handles admin announcement management
 type AnnouncementHandler struct {
@@ -218,6 +223,61 @@ func (h *AnnouncementHandler) Delete(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{"message": "Announcement deleted successfully"})
+}
+
+// UploadImage handles uploading an image bound to an announcement
+// POST /api/v1/admin/announcements/:id/upload-image (multipart/form-data: file=<image>)
+func (h *AnnouncementHandler) UploadImage(c *gin.Context) {
+	announcementID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || announcementID <= 0 {
+		response.BadRequest(c, "Invalid announcement ID")
+		return
+	}
+
+	if _, ok := middleware2.GetAuthSubjectFromContext(c); !ok {
+		response.Unauthorized(c, "User not found in context")
+		return
+	}
+
+	// 服务端强制 10 MiB 上限（gin 默认不封请求体，方案 3.2(e)）。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, announcementImageMaxUploadBytes)
+	if err := c.Request.ParseMultipartForm(1 << 20); err != nil {
+		response.BadRequest(c, "Invalid multipart form: "+err.Error())
+		return
+	}
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		response.BadRequest(c, "Missing file field")
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	// 不信任客户端 Content-Type：嗅探首 512 字节复核（方案 3.2(e)）。
+	// SVG 被拒属有意设计——Go 嗅探表不含 SVG，SVG 直开可执行脚本是存储型 XSS 向量。
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	contentType := http.DetectContentType(head[:n])
+	if !strings.HasPrefix(contentType, "image/") {
+		response.BadRequest(c, "Only image uploads are allowed")
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		response.BadRequest(c, "Failed to read uploaded file")
+		return
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		response.BadRequest(c, "Failed to read uploaded file")
+		return
+	}
+
+	url, err := h.announcementService.UploadImage(c.Request.Context(), announcementID, contentType, data)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{"url": url})
 }
 
 // ListReadStatus handles listing users read status for an announcement

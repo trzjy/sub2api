@@ -16,6 +16,11 @@ import (
 
 const defaultImageMaxDownloadBytes int64 = 32 << 20 // 32 MiB
 
+// AnnouncementImagesPrefix 是公告图片对象的固定顶层命名空间（方案 3.1/R2）。
+// 公告图片 key 不拼接后台 Prefix 设置，后台 prefix 变更不影响公告图片的寻址；
+// 与生图对象（走 <Prefix> 下的自有目录）天然隔离。
+const AnnouncementImagesPrefix = "announcements/"
+
 // ImageStorage 把图片字节写入对象存储并返回可访问 URL。
 //
 // 这是对象存储的可插拔抽象：适配一个新的对象存储厂商，只需实现本接口
@@ -25,6 +30,19 @@ type ImageStorage interface {
 	// Save 把 data 以 key 存入对象存储，返回可下载的 URL（公开直链或 presigned 临时链接）。
 	// contentType 为图片 MIME 类型，如 "image/png"。
 	Save(ctx context.Context, key, contentType string, data []byte) (url string, err error)
+	// DeleteByPrefix 删除指定前缀下的所有对象，返回确认删除的数量。
+	// 前缀下无对象时返回 (0, nil)（幂等）。ListObjectsV2 翻页 + DeleteObjects 批量删除。
+	// 逐对象 Errors 必须检查：只统计确认删除的 key，存在逐对象错误时返回非空 error（汇总失败 key）。
+	DeleteByPrefix(ctx context.Context, prefix string) (deleted int, err error)
+	// HasObjectsByPrefix 只读探测前缀下是否有对象（ListObjectsV2 MaxKeys=1）。
+	// 探测失败返回 error（fail-closed），调用方不得把错误当"无对象"。
+	HasObjectsByPrefix(ctx context.Context, prefix string) (bool, error)
+}
+
+// ResolvedImageStorage 是公告图片可用的解析结果。
+type ResolvedImageStorage struct {
+	Storage    ImageStorage
+	DirectLink bool // public_base_url 已配置，Save 返回长期直链
 }
 
 // ImageResultUploader 是 ImageStorage 的上层编排器（与具体厂商无关）：

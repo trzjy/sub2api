@@ -506,7 +506,14 @@ export default {
       failedToUpdate: 'Failed to update announcement',
       failedToDelete: 'Failed to delete announcement',
       failedToLoadReadStatus: 'Failed to load read status',
-      deleteConfirm: 'Are you sure you want to delete this announcement? This action cannot be undone.'
+      deleteConfirm: 'Are you sure you want to delete this announcement? This action cannot be undone.',
+      insertImage: 'Insert Image',
+      uploading: 'Uploading…',
+      uploadSuccess: 'Image uploaded',
+      uploadFailed: 'Image upload failed',
+      untitledDraft: 'Untitled announcement',
+      draftPlaceholder: '(draft)',
+      pasteHint: 'Paste or drop images here'
     },
 
     // Promo Codes

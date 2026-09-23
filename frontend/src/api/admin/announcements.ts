@@ -51,6 +51,13 @@ export async function deleteAnnouncement(id: number): Promise<{ message: string 
   return data
 }
 
+export async function uploadImage(id: number, file: File): Promise<{ url: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await apiClient.post<{ url: string }>(`/admin/announcements/${id}/upload-image`, form)
+  return data
+}
+
 export async function getReadStatus(
   id: number,
   page: number = 1,
@@ -80,6 +87,7 @@ const announcementsAPI = {
   create,
   update,
   delete: deleteAnnouncement,
+  uploadImage,
   getReadStatus
 }
 

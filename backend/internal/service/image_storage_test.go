@@ -46,6 +46,14 @@ func (f *fakeImageStorage) Save(_ context.Context, key, contentType string, data
 	return "https://cdn.test/" + key, nil
 }
 
+func (f *fakeImageStorage) DeleteByPrefix(context.Context, string) (int, error) {
+	return 0, nil
+}
+
+func (f *fakeImageStorage) HasObjectsByPrefix(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func TestImageResultUploaderRewritesB64JSON(t *testing.T) {
 	storage := &fakeImageStorage{}
 	uploader := NewImageResultUploader(storage, "images/", 0, nil)

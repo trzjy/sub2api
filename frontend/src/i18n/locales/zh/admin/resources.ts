@@ -502,7 +502,14 @@ export default {
       failedToUpdate: '更新公告失败',
       failedToDelete: '删除公告失败',
       failedToLoadReadStatus: '加载已读情况失败',
-      deleteConfirm: '确定要删除该公告吗？此操作无法撤销。'
+      deleteConfirm: '确定要删除该公告吗？此操作无法撤销。',
+      insertImage: '插入图片',
+      uploading: '上传中…',
+      uploadSuccess: '图片上传成功',
+      uploadFailed: '图片上传失败',
+      untitledDraft: '未命名公告',
+      draftPlaceholder: '（草稿）',
+      pasteHint: '可粘贴或拖拽图片'
     },
 
     // Promo Codes

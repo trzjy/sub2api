@@ -185,6 +185,15 @@ type BackupService struct {
 	db         *sql.DB
 	instanceID string
 
+	// s3ChangeGuard/s3ChangeAfterCommit 是公告图片存储配置守卫钩子（方案 3.2(f) R4），
+	// 经 SetS3ChangeGuard 注入（守卫语义单一属主是 ImageStorageSettingService，
+	// 经 setter 注入以避免 settings→BackupService 构造依赖环）。
+	// guard 在备份 S3 配置持久化前以候选配置（明文凭证）做新旧有效绑定对比；
+	// afterCommit 在持久化成功后失效公告图片 resolver 缓存。
+	// 两者为 nil 时 UpdateS3Config 行为与注入前完全一致。
+	s3ChangeGuard       func(ctx context.Context, candidate BackupS3Config) error
+	s3ChangeAfterCommit func()
+
 	wg            sync.WaitGroup     // 追踪活跃的备份/恢复 goroutine
 	shuttingDown  atomic.Bool        // 阻止新备份启动
 	bgCtx         context.Context    // 所有后台操作的 parent context
@@ -223,6 +232,18 @@ func (s *BackupService) SetLeaderLock(lockCache LeaderLockCache, db *sql.DB) {
 	}
 	s.lockCache = lockCache
 	s.db = db
+}
+
+// SetS3ChangeGuard 注入公告图片存储配置守卫钩子（R4-2，复用 SetLeaderLock 注入模式）。
+// guard 在备份 S3 配置持久化前以候选配置（SecretAccessKey 为解密后明文）做新旧有效
+// 绑定对比，拒绝会破坏已落盘公告图片的变更；afterCommit 在持久化成功后失效公告图片
+// resolver 缓存。两者可为 nil（守卫未启用时行为与现状完全一致）。
+func (s *BackupService) SetS3ChangeGuard(guard func(ctx context.Context, candidate BackupS3Config) error, afterCommit func()) {
+	if s == nil {
+		return
+	}
+	s.s3ChangeGuard = guard
+	s.s3ChangeAfterCommit = afterCommit
 }
 
 // Start 启动定时备份调度器并清理孤立记录
@@ -363,9 +384,19 @@ func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) 
 		if old != nil {
 			cfg.SecretAccessKey = old.SecretAccessKey
 		}
-	} else {
-		// 拒绝用自动生成的临时密钥加密：该密钥每次重启都会变化，落库的密文在
-		// 重启/升级后无法解密（#4524）。与支付、TOTP 的处理保持一致。
+	}
+
+	// 公告图片配置守卫（R4）：持久化前以候选配置（此刻 SecretAccessKey 仍为明文）
+	// 做新旧有效绑定对比，拒绝会破坏已落盘公告图片的变更。
+	if s.s3ChangeGuard != nil {
+		if err := s.s3ChangeGuard(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	// 拒绝用自动生成的临时密钥加密：该密钥每次重启都会变化，落库的密文在
+	// 重启/升级后无法解密（#4524）。与支付、TOTP 的处理保持一致。
+	if cfg.SecretAccessKey != "" {
 		if !s.encryptionKeyConfigured {
 			return nil, ErrSecretEncryptionKeyNotConfigured
 		}
@@ -390,6 +421,11 @@ func (s *BackupService) UpdateS3Config(ctx context.Context, cfg BackupS3Config) 
 	s.store = nil
 	s.s3Cfg = nil
 	s.storeMu.Unlock()
+
+	// 持久化成功后失效公告图片 resolver 缓存（守卫钩子的 afterCommit 部分）。
+	if s.s3ChangeAfterCommit != nil {
+		s.s3ChangeAfterCommit()
+	}
 
 	cfg.SecretAccessKey = ""
 	return &cfg, nil

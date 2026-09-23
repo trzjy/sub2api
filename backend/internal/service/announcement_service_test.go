@@ -44,7 +44,7 @@ func (*announcementRepoStub) ListActive(context.Context, time.Time) ([]Announcem
 
 func TestAnnouncementServiceCreateRejectsEqualStartEndTimes(t *testing.T) {
 	repo := &announcementRepoStub{}
-	svc := NewAnnouncementService(repo, nil, nil, nil)
+	svc := NewAnnouncementService(repo, nil, nil, nil, nil)
 	now := time.Unix(1776790020, 0)
 
 	_, err := svc.Create(context.Background(), &CreateAnnouncementInput{
@@ -68,7 +68,7 @@ func TestAnnouncementServiceUpdateRejectsEqualStartEndTimes(t *testing.T) {
 			NotifyMode: AnnouncementNotifyModePopup,
 		},
 	}
-	svc := NewAnnouncementService(repo, nil, nil, nil)
+	svc := NewAnnouncementService(repo, nil, nil, nil, nil)
 	now := time.Unix(1776790020, 0)
 	startsAt := &now
 	endsAt := &now

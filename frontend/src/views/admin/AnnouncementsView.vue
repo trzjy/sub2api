@@ -182,8 +182,55 @@
         </div>
 
         <div>
-          <label class="input-label">{{ t('admin.announcements.form.content') }}</label>
-          <textarea v-model="form.content" rows="6" class="input" required></textarea>
+          <div class="mb-1 flex items-center justify-between">
+            <label class="input-label">{{ t('admin.announcements.form.content') }}</label>
+            <span
+              data-testid="announcement-image-paste-hint"
+              class="text-xs text-gray-400 dark:text-dark-400"
+            >{{ t('admin.announcements.pasteHint') }}</span>
+          </div>
+          <textarea
+            ref="contentTextarea"
+            v-model="form.content"
+            rows="6"
+            class="input"
+            required
+            @paste="handleTextareaPaste"
+            @drop="handleTextareaDrop"
+            @dragover.prevent
+          ></textarea>
+          <div class="mt-1 flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="announcement-insert-image-btn"
+              class="btn btn-secondary"
+              :disabled="uploading"
+              @click="openImagePicker"
+            >
+              <Icon name="upload" size="sm" class="mr-1" />
+              {{ t('admin.announcements.insertImage') }}
+            </button>
+            <span
+              v-if="uploading"
+              data-testid="announcement-upload-loading"
+              class="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400"
+            >
+              <Icon name="refresh" size="sm" class="animate-spin" />
+              {{ t('admin.announcements.uploading') }}
+            </span>
+            <span
+              v-else-if="uploadError"
+              data-testid="announcement-upload-error"
+              class="text-xs text-red-600 dark:text-red-400"
+            >{{ uploadError }}</span>
+          </div>
+          <input
+            ref="imageFileInput"
+            type="file"
+            accept="image/*"
+            class="hidden"
+            @change="handleFileInputChange"
+          />
         </div>
 
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -219,10 +266,10 @@
 
       <template #footer>
         <div class="flex justify-end gap-3">
-          <button type="button" @click="closeEdit" class="btn btn-secondary">
+          <button type="button" :disabled="uploading" @click="closeEdit" class="btn btn-secondary">
             {{ t('common.cancel') }}
           </button>
-          <button type="submit" form="announcement-form" :disabled="saving" class="btn btn-primary">
+          <button type="submit" form="announcement-form" :disabled="saving || uploading" class="btn btn-primary">
             {{ saving ? t('common.saving') : t('common.save') }}
           </button>
         </div>
@@ -475,18 +522,201 @@ function fillFormFromAnnouncement(a: Announcement) {
 function openCreateDialog() {
   editingAnnouncement.value = null
   resetForm()
+  resetDraftState()
   showEditDialog.value = true
 }
 
 function openEditDialog(row: Announcement) {
   editingAnnouncement.value = row
   fillFormFromAnnouncement(row)
+  resetDraftState()
   showEditDialog.value = true
 }
 
+// ===== Image upload (paste/drop + placeholder draft state machine) =====
+// R2 串行化：单一 uploading 互斥 + pendingFiles 串行队列；上传期间 handleSave/closeEdit no-op。
+const contentTextarea = ref<HTMLTextAreaElement | null>(null)
+const imageFileInput = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+const uploadError = ref('')
+const pendingFiles = ref<File[]>([])
+const draftId = ref<number | null>(null)
+const draftCreatedByThisSession = ref(false)
+// 占位草稿响应：保存时作为 update-diff 的 original（编辑基线）
+const draftBaseline = ref<Announcement | null>(null)
+// 草稿标题是否为自动生成的占位文案（用户贴图时标题为空）——取消清理的判定条件
+const draftTitleIsPlaceholder = ref(false)
+const draftPlaceholderTitle = ref('')
+
+function resetDraftState() {
+  draftId.value = null
+  draftCreatedByThisSession.value = false
+  draftBaseline.value = null
+  draftTitleIsPlaceholder.value = false
+  draftPlaceholderTitle.value = ''
+  pendingFiles.value = []
+  uploadError.value = ''
+}
+
+function isImageFile(file: File | null | undefined): file is File {
+  return !!file && file.type.startsWith('image/')
+}
+
+function handleTextareaPaste(event: ClipboardEvent) {
+  const items = event.clipboardData?.items
+  if (!items) return
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (isImageFile(file)) {
+        // 仅当确有图片才拦截，不影响纯文本粘贴
+        event.preventDefault()
+        enqueueImageUpload(file)
+        return
+      }
+    }
+  }
+}
+
+function handleTextareaDrop(event: DragEvent) {
+  const files = event.dataTransfer?.files
+  if (!files) return
+  const imageFile = Array.from(files).find((f) => isImageFile(f))
+  if (imageFile) {
+    event.preventDefault()
+    enqueueImageUpload(imageFile)
+  }
+}
+
+function openImagePicker() {
+  uploadError.value = ''
+  imageFileInput.value?.click()
+}
+
+function handleFileInputChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (isImageFile(file)) enqueueImageUpload(file)
+}
+
+function enqueueImageUpload(file: File) {
+  uploadError.value = ''
+  pendingFiles.value.push(file)
+  if (uploading.value) return // 入队，由进行中的队列依次消费
+  void processUploadQueue()
+}
+
+async function processUploadQueue() {
+  if (uploading.value) return
+  uploading.value = true
+  try {
+    while (pendingFiles.value.length > 0) {
+      const file = pendingFiles.value[0]
+      try {
+        const url = await uploadAnnouncementImage(file)
+        insertImageAtCursor(`![announcement-image](${url})`)
+        appStore.showSuccess(t('admin.announcements.uploadSuccess'))
+      } catch (error: any) {
+        console.error('Failed to upload announcement image:', error)
+        const detail =
+          error?.response?.data?.detail || error?.message || t('admin.announcements.uploadFailed')
+        uploadError.value = detail
+        appStore.showError(detail)
+      }
+      pendingFiles.value.shift()
+    }
+  } finally {
+    uploading.value = false
+  }
+}
+
+// 方案 §3.2(c) 唯一时序：新建态先建占位草稿（title/content 占位值必过后端非空校验），
+// 编辑基线切换为该草稿响应；编辑态直接用现有公告 id。
+async function resolveUploadTargetId(): Promise<number> {
+  if (editingAnnouncement.value) return editingAnnouncement.value.id
+  if (draftId.value != null) return draftId.value
+
+  const titleIsPlaceholder = !form.title.trim()
+  const placeholderTitle = titleIsPlaceholder
+    ? `${t('admin.announcements.untitledDraft')} ${formatDraftTimestamp(new Date())}`
+    : form.title.trim()
+  const placeholderContent = form.content || t('admin.announcements.draftPlaceholder')
+
+  const created = await adminAPI.announcements.create({
+    title: placeholderTitle,
+    content: placeholderContent,
+    status: 'draft',
+    notify_mode: form.notify_mode as any,
+    targeting: form.targeting,
+    starts_at: parseDateTimeLocalInput(form.starts_at_str) ?? undefined,
+    ends_at: parseDateTimeLocalInput(form.ends_at_str) ?? undefined
+  })
+
+  draftId.value = created.id
+  draftCreatedByThisSession.value = true
+  draftBaseline.value = created
+  draftTitleIsPlaceholder.value = titleIsPlaceholder
+  draftPlaceholderTitle.value = placeholderTitle
+
+  // 同步表单：占位值回填空字段，保证 required 校验通过且保存时 update-diff 一致
+  if (titleIsPlaceholder) form.title = placeholderTitle
+  if (!form.content) form.content = placeholderContent
+
+  return created.id
+}
+
+function formatDraftTimestamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+async function uploadAnnouncementImage(file: File): Promise<string> {
+  const targetId = await resolveUploadTargetId()
+  const { url } = await adminAPI.announcements.uploadImage(targetId, file)
+  return url
+}
+
+function insertImageAtCursor(markdown: string) {
+  const textarea = contentTextarea.value
+  if (!textarea) {
+    form.content = form.content ? `${form.content}\n${markdown}` : markdown
+    return
+  }
+  const start = textarea.selectionStart ?? form.content.length
+  const end = textarea.selectionEnd ?? start
+  const before = form.content.slice(0, start)
+  const after = form.content.slice(end)
+  const needsSpaceBefore = before.length > 0 && !before.endsWith('\n') && !before.endsWith(' ')
+  const needsSpaceAfter = after.length > 0 && !after.startsWith('\n') && !after.startsWith(' ')
+  form.content = `${before}${needsSpaceBefore ? ' ' : ''}${markdown}${needsSpaceAfter ? ' ' : ''}${after}`
+}
+
+// 取消清理（方案 §3.2(c)）：仅当草稿由本会话自动创建且标题仍为占位文案时删除草稿（级联删图）。
+async function cleanupPlaceholderDraft() {
+  const shouldCleanup =
+    draftCreatedByThisSession.value &&
+    draftId.value != null &&
+    draftTitleIsPlaceholder.value &&
+    form.title === draftPlaceholderTitle.value
+  const draftIdToClean = draftId.value
+  resetDraftState()
+  if (!shouldCleanup || draftIdToClean == null) return
+  try {
+    await adminAPI.announcements.delete(draftIdToClean)
+  } catch (error) {
+    // 清理失败静默记 console，不阻塞关闭
+    console.error('Failed to clean up placeholder draft:', error)
+  }
+}
+
 function closeEdit() {
-  showEditDialog.value = false
-  editingAnnouncement.value = null
+  if (uploading.value) return // R2: 上传期间取消 no-op
+  void cleanupPlaceholderDraft().finally(() => {
+    showEditDialog.value = false
+    editingAnnouncement.value = null
+  })
 }
 
 function buildCreatePayload() {
@@ -535,6 +765,9 @@ function buildUpdatePayload(original: Announcement) {
 }
 
 async function handleSave() {
+  // R2: 上传期间保存 no-op（保证建草稿→传图→插入完成后才允许状态转换）
+  if (uploading.value) return
+
   // Frontend validation for targeting (to avoid ANNOUNCEMENT_INVALID_TARGET)
   const anyOf = form.targeting?.any_of ?? []
   if (anyOf.length > 50) {
@@ -552,9 +785,16 @@ async function handleSave() {
   saving.value = true
   try {
     if (!editingAnnouncement.value) {
-      const payload = buildCreatePayload()
-      await adminAPI.announcements.create(payload)
+      if (draftId.value != null && draftBaseline.value) {
+        // 本会话贴图已建占位草稿 → 走 update-diff 保存（不再 POST create）
+        const payload = buildUpdatePayload(draftBaseline.value)
+        await adminAPI.announcements.update(draftId.value, payload)
+      } else {
+        const payload = buildCreatePayload()
+        await adminAPI.announcements.create(payload)
+      }
       appStore.showSuccess(t('common.success'))
+      resetDraftState()
       showEditDialog.value = false
       await loadAnnouncements()
       return
@@ -564,6 +804,7 @@ async function handleSave() {
     const payload = buildUpdatePayload(original)
     await adminAPI.announcements.update(original.id, payload)
     appStore.showSuccess(t('common.success'))
+    resetDraftState()
     showEditDialog.value = false
     editingAnnouncement.value = null
     await loadAnnouncements()

@@ -2,20 +2,47 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
+
+var (
+	// ErrAnnouncementImageStorageDisabled 表示对象存储未启用（构造参数为 nil，或
+	// WithAnnouncementStorage 临界区解析出 ok=false）。见方案 3.2(c)。
+	ErrAnnouncementImageStorageDisabled = infraerrors.BadRequest(
+		"ANNOUNCEMENT_IMAGE_STORAGE_DISABLED",
+		"图片存储未启用",
+	)
+	// ErrAnnouncementImageRequiresDirectLink 表示存储已启用但未配置 public_base_url，
+	// Save 只能返回 presigned 临时链接，与公告图片长期可访问语义矛盾（方案 3.1 直链强制）。
+	ErrAnnouncementImageRequiresDirectLink = infraerrors.BadRequest(
+		"ANNOUNCEMENT_IMAGE_REQUIRES_DIRECT_LINK",
+		"公告图片要求配置 public_base_url 直链",
+	)
+)
+
+// AnnouncementStorageCriticalSection 是公告图片存储临界区（方案 3.2(b)）：
+// 在互斥锁内解析当前存储绑定并执行 fn；ok=false 表示存储未启用（不执行 fn）。
+type AnnouncementStorageCriticalSection = func(ctx context.Context, fn func(*ResolvedImageStorage) error) (ok bool, err error)
 
 type AnnouncementService struct {
 	announcementRepo AnnouncementRepository
 	readRepo         AnnouncementReadRepository
 	userRepo         UserRepository
 	userSubRepo      UserSubscriptionRepository
+	// withAnnouncementStorage 为 nil 表示公告图片功能未启用（测试传 nil；生产由 wire
+	// 注入 ImageStorageSettingService.WithAnnouncementStorage 方法值）。
+	withAnnouncementStorage AnnouncementStorageCriticalSection
 }
 
 func NewAnnouncementService(
@@ -23,12 +50,14 @@ func NewAnnouncementService(
 	readRepo AnnouncementReadRepository,
 	userRepo UserRepository,
 	userSubRepo UserSubscriptionRepository,
+	withAnnouncementStorage AnnouncementStorageCriticalSection,
 ) *AnnouncementService {
 	return &AnnouncementService{
-		announcementRepo: announcementRepo,
-		readRepo:         readRepo,
-		userRepo:         userRepo,
-		userSubRepo:      userSubRepo,
+		announcementRepo:        announcementRepo,
+		readRepo:                readRepo,
+		userRepo:                userRepo,
+		userSubRepo:             userSubRepo,
+		withAnnouncementStorage: withAnnouncementStorage,
 	}
 }
 
@@ -213,7 +242,98 @@ func (s *AnnouncementService) Delete(ctx context.Context, id int64) error {
 	if err := s.announcementRepo.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete announcement: %w", err)
 	}
+	// 先删 DB 后删对象（方案 3.4 #1）：对象删除失败只记日志，公告删除仍成功返回。
+	s.DeleteImages(ctx, id)
 	return nil
+}
+
+// UploadImage 把管理员上传的图片存入对象存储，key 绑定公告 ID（方案 3.2(c)）。
+// announcementID 必须已存在且状态为 draft/active（archived 拒绝）；要求直链模式，
+// 返回可直接插入 Markdown 的长期图片 URL。
+func (s *AnnouncementService) UploadImage(ctx context.Context, announcementID int64, contentType string, data []byte) (string, error) {
+	if s.withAnnouncementStorage == nil {
+		return "", ErrAnnouncementImageStorageDisabled
+	}
+
+	// 锁外预检查：公告存在性 + 状态（archived 拒绝）；并发删除/归档窗口由 Save 后复读闭合。
+	a, err := s.announcementRepo.GetByID(ctx, announcementID)
+	if err != nil {
+		return "", err
+	}
+	if a.Status != AnnouncementStatusDraft && a.Status != AnnouncementStatusActive {
+		return "", ErrAnnouncementNotFound
+	}
+
+	var url string
+	ok, err := s.withAnnouncementStorage(ctx, func(st *ResolvedImageStorage) error {
+		if !st.DirectLink {
+			return ErrAnnouncementImageRequiresDirectLink
+		}
+		// 固定顶层命名空间常量（R2），不拼 resolver 字段；key 全服务端生成。
+		key := fmt.Sprintf("%s%d/%s%s", AnnouncementImagesPrefix, announcementID, uuid.NewString(), extensionForContentType(contentType))
+		saved, err := st.Storage.Save(ctx, key, contentType, data)
+		if err != nil {
+			return err
+		}
+
+		// Save 成功后复读（R3-4/R4-4 must_fix）：闭合"预检查与 Save 之间"的并发窗口。
+		latest, err := s.announcementRepo.GetByID(ctx, announcementID)
+		if err != nil {
+			if errors.Is(err, ErrAnnouncementNotFound) {
+				// 公告行已不存在（并发删除窗口）→ 用同一存储绑定自清理前缀（幂等），
+				// 不得为已删除公告返回成功 URL 留孤儿对象。清理失败只记日志。
+				if _, delErr := st.Storage.DeleteByPrefix(ctx, announcementImagesPrefixFor(announcementID)); delErr != nil {
+					logger.L().Warn("announcement_image.self_clean_failed",
+						zap.Int64("announcement_id", announcementID), zap.Error(delErr))
+				}
+				return ErrAnnouncementNotFound
+			}
+			// 复读遇到其他错误：无法确认公告已删除，不清理（误删既有图片比留孤儿对象更严重），原样返回错误。
+			return err
+		}
+		if latest.Status == AnnouncementStatusArchived {
+			// 并发归档窗口 → 仅拒绝，不清理前缀：归档公告既有图片必须保留（方案 3.4 #8）。
+			return ErrAnnouncementNotFound
+		}
+		url = saved
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", ErrAnnouncementImageStorageDisabled
+	}
+	return url, nil
+}
+
+// DeleteImages 按公告 ID 前缀删除其关联图片对象。尽力而为：失败记 WARN 日志，
+// 不阻塞、不返回错误（方案 3.2(c)/(d)）。经 WithAnnouncementStorage 临界区执行；
+// 存储不可用（nil 或 ok=false）时显式 WARN 后返回——不静默吞掉（R2）。
+func (s *AnnouncementService) DeleteImages(ctx context.Context, announcementID int64) {
+	if s.withAnnouncementStorage == nil {
+		logger.L().Warn("announcement_images.storage_disabled_skip_delete",
+			zap.Int64("announcement_id", announcementID))
+		return
+	}
+	ok, err := s.withAnnouncementStorage(ctx, func(st *ResolvedImageStorage) error {
+		_, err := st.Storage.DeleteByPrefix(ctx, announcementImagesPrefixFor(announcementID))
+		return err
+	})
+	if !ok {
+		logger.L().Warn("announcement_images.storage_not_enabled_skip_delete",
+			zap.Int64("announcement_id", announcementID))
+		return
+	}
+	if err != nil {
+		logger.L().Warn("announcement_images.delete_failed",
+			zap.Int64("announcement_id", announcementID), zap.Error(err))
+	}
+}
+
+// announcementImagesPrefixFor 返回指定公告的图片对象 key 前缀（含尾部斜杠）。
+func announcementImagesPrefixFor(announcementID int64) string {
+	return fmt.Sprintf("%s%d/", AnnouncementImagesPrefix, announcementID)
 }
 
 func (s *AnnouncementService) GetByID(ctx context.Context, id int64) (*Announcement, error) {

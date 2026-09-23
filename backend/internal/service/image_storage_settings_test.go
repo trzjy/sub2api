@@ -68,6 +68,14 @@ func (s *recordingStorage) Save(_ context.Context, key, _ string, _ []byte) (str
 	return "https://cdn.example.com/" + key, nil
 }
 
+func (s *recordingStorage) DeleteByPrefix(context.Context, string) (int, error) {
+	return 0, nil
+}
+
+func (s *recordingStorage) HasObjectsByPrefix(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func newImageStorageFixture(t *testing.T, fallback config.ImageStorageConfig) (*ImageStorageSettingService, *stubSettingRepo, *[]config.ImageStorageConfig) {
 	return newImageStorageFixtureWithKey(t, fallback, true)
 }
@@ -123,7 +131,11 @@ func TestImageStorageSettingsToggleTakesEffectWithoutRestart(t *testing.T) {
 	_, enabled = svc.resolve()
 	require.False(t, enabled, "turning it back off must also apply immediately")
 
-	require.Len(t, *built, 1, "the S3 client is built only when the feature is on")
+	// The second build is the announcement-storage guard probe: disabling the
+	// feature is a binding change, so the guard probes the old location through
+	// the factory before allowing the update (recordingStorage reports no
+	// objects, so the change goes through).
+	require.Len(t, *built, 2, "the S3 client is built only when the feature is on, plus one guard probe")
 }
 
 func TestImageStorageSettingsReuseBackupCredentials(t *testing.T) {

@@ -264,6 +264,48 @@ rm -rf /opt/sub2api/build-<上一目标>
 
 ---
 
+## 5.x 公告图片孤儿对象清理（2026-09-23 新增，随公告图片上传功能交付）
+
+> 来源：docs/announcement-image-upload-plan.md §6.2。公告图片以 `announcements/<公告ID>/` 前缀
+> 存于图片存储桶（顶层命名空间，不含图片存储 prefix 设置）。上传后放弃保存、占位草稿保留、
+> 删除时对象删除失败，都会留孤儿对象。本步骤不进应用代码，运维手动/周期执行。
+>
+> **覆盖范围声明（R3-8）**：本流程**只清理公告行已不存在的前缀**（如删除级联失败残留、
+> 占位草稿被删但对象残留）。**存活公告前缀下未被 Markdown 引用的对象**（上传后未保存、
+> 保留的占位草稿中未引用者）本流程无法识别——方案本期不解析公告 content，这些对象只能
+> 随该公告删除时级联回收，或确知无引用后手动清理。此为已记录的剩余风险。
+
+```bash
+# 1. 列出桶内公告图片前缀（对象存储 CLI 以 aws s3 为例，alias/凭证按部署实际）
+#    只保留纯数字 ID（R3-7），统一 LC_ALL=C sort -u 词法排序
+aws s3 ls s3://<图片桶>/announcements/ | awk '{print $2}' | tr -d '/' \
+  | grep -E '^[0-9]+$' | LC_ALL=C sort -u > /tmp/ann-ids.txt
+
+# 2. 空列表短路：桶内没有公告图片前缀时直接结束
+[ -s /tmp/ann-ids.txt ] || { echo "no announcement prefixes; nothing to do"; exit 0; }
+
+# 3. 对照 announcements 表（容器内 psql）
+docker exec sub2api-postgres psql -U sub2api -d sub2api -tAc   "SELECT id FROM announcements WHERE id IN ($(paste -sd, /tmp/ann-ids.txt))" \
+  | grep -E '^[0-9]+$' | LC_ALL=C sort -u > /tmp/ann-live.txt
+
+# 4. 求差集（孤儿 id；两侧同一词法排序，comm 才可靠），dry-run 列出将被删除的前缀
+comm -23 /tmp/ann-ids.txt /tmp/ann-live.txt > /tmp/ann-orphan.txt
+while read id; do echo "would delete: s3://<图片桶>/announcements/$id/"; done < /tmp/ann-orphan.txt
+
+# 5. 确认无误后实删（逐前缀）
+while read id; do aws s3 rm "s3://<图片桶>/announcements/$id/" --recursive; done < /tmp/ann-orphan.txt
+```
+
+- **频率**：建议月度例行，或大批量删除公告后手动执行一次。
+- **权限**：对象存储列举+删除凭证（备份 S3 凭证同源时可直接复用）；数据库只读。
+- **留痕**：dry-run 输出与实删输出保存到 `/home/zjy/.sub2api-acceptance/`（脱敏）。
+- **注意**：换桶/禁用图片存储受配置守卫限制（存在公告图片对象时后台会拒绝），如确需换桶，
+  先用本步骤清空公告图片对象。
+- **部署硬约束（R4-3）**：公告图片守卫互斥与 resolver 缓存为单进程语义，**后端必须单副本部署**
+  （当前生产即单容器）。引入多副本部署前，必须先把 resolver 缓存与守卫升级为跨实例协调。
+
+---
+
 ## 6. 备份与恢复
 
 ### 6.1 数据目录备份（推荐整体打包）

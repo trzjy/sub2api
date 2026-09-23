@@ -73,6 +73,7 @@ func newAnnouncementSortTestRouter(announcementRepo *announcementRepoCapture, us
 		&announcementReadRepoCapture{},
 		userRepo,
 		&announcementUserSubRepoCapture{},
+		nil,
 	)
 	handler := NewAnnouncementHandler(svc)
 	router := gin.New()

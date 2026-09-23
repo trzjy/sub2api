@@ -15,7 +15,7 @@ func TestAnnouncementServiceRejectsOutOfRangeDates(t *testing.T) {
 		for _, field := range []string{"start", "end"} {
 			t.Run(date.String()+field, func(t *testing.T) {
 				repo := &announcementRepoStub{}
-				svc := NewAnnouncementService(repo, nil, nil, nil)
+				svc := NewAnnouncementService(repo, nil, nil, nil, nil)
 				input := &CreateAnnouncementInput{Title: "test", Content: "test"}
 				if field == "start" {
 					input.StartsAt = &date
@@ -47,7 +47,7 @@ func TestAnnouncementServiceAcceptsJSONDateBoundariesAndClear(t *testing.T) {
 	start := time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 	repo := &announcementRepoStub{}
-	svc := NewAnnouncementService(repo, nil, nil, nil)
+	svc := NewAnnouncementService(repo, nil, nil, nil, nil)
 	a, err := svc.Create(context.Background(), &CreateAnnouncementInput{Title: "test", Content: "test", StartsAt: &start, EndsAt: &end})
 	require.NoError(t, err)
 	_, err = json.Marshal(a)
