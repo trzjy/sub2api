@@ -926,3 +926,162 @@ func TestLocalCaptchaResultChallenge_ZhipuRidOnly(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+// ---------------------------------------------------------------------------
+// Lane G（任务卡 2026-09-22）：helper result 扩展字段消费 / challenge session 存取 /
+// sdk-start 签名三件套下发。测试值全用假数据（零凭据红线）。
+// ---------------------------------------------------------------------------
+
+// zhipu helper result 携带扩展字段 → 全部落入 challenge（send_status/send_body_status
+// 解析、send_message/cookies/device_id 透传）。
+func TestLocalCaptchaResultChallenge_ZhipuHelperExtensionFields(t *testing.T) {
+	ch, err := localCaptchaResultChallenge(service.PlatformZhipu, map[string]string{
+		"rid": "rid-1", "phone_code": "86", "send_status": "200",
+		"send_body_status": "0", "send_message": "fake-msg",
+		"cookies": "chatglm_token=fake-guest", "device_id": "fake-device",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, ch.ZhipuHelperSendStatus)
+	require.Equal(t, 200, *ch.ZhipuHelperSendStatus)
+	require.NotNil(t, ch.ZhipuHelperSendBodyStatus)
+	require.Equal(t, 0, *ch.ZhipuHelperSendBodyStatus)
+	require.Equal(t, "fake-msg", ch.ZhipuHelperSendMessage)
+	require.Equal(t, "chatglm_token=fake-guest", ch.ZhipuSessionCookie)
+	require.Equal(t, "fake-device", ch.ZhipuDeviceID)
+}
+
+// Lane H 未上线兼容：扩展字段全部缺失 → challenge 保持既有形态（send_status nil、
+// 会话字段空），不因字段缺失而失败。
+func TestLocalCaptchaResultChallenge_ZhipuHelperFieldsMissing(t *testing.T) {
+	ch, err := localCaptchaResultChallenge(service.PlatformZhipu, map[string]string{
+		"rid": "rid-1", "phone_code": "86",
+	})
+	require.NoError(t, err)
+	require.Nil(t, ch.ZhipuHelperSendStatus)
+	require.Nil(t, ch.ZhipuHelperSendBodyStatus)
+	require.Equal(t, "", ch.ZhipuHelperSendMessage)
+	require.Equal(t, "", ch.ZhipuSessionCookie)
+	require.Equal(t, "", ch.ZhipuDeviceID)
+}
+
+// 扩展字段形态异常（非数字）按字段缺失处理，不失败。
+func TestLocalCaptchaResultChallenge_ZhipuHelperFieldsMalformed(t *testing.T) {
+	ch, err := localCaptchaResultChallenge(service.PlatformZhipu, map[string]string{
+		"rid": "rid-1", "phone_code": "86", "send_status": "not-a-number",
+		"send_body_status": "",
+	})
+	require.NoError(t, err)
+	require.Nil(t, ch.ZhipuHelperSendStatus)
+	require.Nil(t, ch.ZhipuHelperSendBodyStatus)
+}
+
+// 全链路（handler 层）：consume 写入 helper 扩展字段 → send_code 以 helper 发码结果
+// 为准（smsSendErr 未触发，服务桩收到 send_status）；login 步收到 cookies/device_id。
+func TestWebLoginSMS_ZhipuHelperResultRoundTrip(t *testing.T) {
+	adminSvc := newWALAdminStub()
+	auto := &stubAutoLogin{smsResult: &service.SMSLoginResult{
+		Cookie:            "chatglm_token=CT-1; chatglm_refresh_token=RFT-1",
+		ChatGLMToken:      "CT-1",
+		LoginRefreshToken: "RFT-1",
+	}}
+	h := newTestAccountHandler(adminSvc, auto)
+	helper := h.webLoginCaptchaHelper.(*stubCaptchaHelper)
+	helper.result = service.LocalCaptchaHelperResult{Status: "succeeded", Data: map[string]string{
+		"rid": "rid-1", "phone_code": "86", "send_status": "200", "send_body_status": "0",
+		"send_message": "fake-msg", "cookies": "chatglm_token=fake-guest", "device_id": "fake-device",
+	}}
+
+	challengeSessionID := seedPendingSMSChallenge(t, h, service.PlatformZhipu, "13800000000", "send_code",
+		service.WebLoginChallengeCreateInput{AccountDraft: &CreateAccountRequest{Name: "zp-draft", Platform: service.PlatformZhipu, Type: service.AccountTypeAPIKey, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}})
+	require.NoError(t, h.webLoginChallengeStore.SetHelperSessionID(challengeSessionID, 7, "helper-session"))
+
+	consume := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/"+challengeSessionID+"/consume", gin.H{
+		"platform": service.PlatformZhipu, "phone": "13800000000", "stage": "send_code",
+	})
+	require.Equal(t, http.StatusOK, consume.Code, consume.Body.String())
+
+	// send_code：服务桩收到 helper 发码结果（send_status=200/body=0 → 成功，不重复发码）。
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action": "send_code", "platform": service.PlatformZhipu, "phone": "13800000000", "challenge_session_id": challengeSessionID,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, auto.smsSendChallenge)
+	require.NotNil(t, auto.smsSendChallenge.ZhipuHelperSendStatus)
+	require.Equal(t, 200, *auto.smsSendChallenge.ZhipuHelperSendStatus)
+
+	// login：服务桩收到同会话 cookies/device_id（challenge session 存取 + 登录复用）。
+	w = doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action": "login", "platform": service.PlatformZhipu, "phone": "13800000000", "sms_code": "123456", "challenge_session_id": challengeSessionID,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, auto.smsVerifyChallenge)
+	require.Equal(t, "chatglm_token=fake-guest", auto.smsVerifyChallenge.ZhipuSessionCookie)
+	require.Equal(t, "fake-device", auto.smsVerifyChallenge.ZhipuDeviceID)
+}
+
+// helper 发码失败（send_status 400）→ 失败值原样透传到服务层（真正的失败关闭判定在
+// service 层 SendSmsCode/zhipuHelperSendOutcome，由 service 测试承载；本用例验证
+// handler 消费链不吞值、不伪造成功，且零凭据红线）。
+func TestWebLoginSMS_ZhipuHelperSendFailureRoundTrip(t *testing.T) {
+	adminSvc := newWALAdminStub()
+	auto := &stubAutoLogin{}
+	h := newTestAccountHandler(adminSvc, auto)
+	helper := h.webLoginCaptchaHelper.(*stubCaptchaHelper)
+	helper.result = service.LocalCaptchaHelperResult{Status: "succeeded", Data: map[string]string{
+		"rid": "rid-1", "phone_code": "86", "send_status": "400", "send_body_status": "-1",
+		"send_message": "fake-upstream-reject",
+	}}
+
+	challengeSessionID := seedPendingSMSChallenge(t, h, service.PlatformZhipu, "13800000000", "send_code",
+		service.WebLoginChallengeCreateInput{AccountDraft: &CreateAccountRequest{Name: "zp-draft", Platform: service.PlatformZhipu, Type: service.AccountTypeAPIKey, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}}})
+	require.NoError(t, h.webLoginChallengeStore.SetHelperSessionID(challengeSessionID, 7, "helper-session"))
+
+	// consume 提交（直呼 store 推进到 succeeded，再走 send_code）。
+	claim, err := h.webLoginChallengeStore.BeginConsume(challengeSessionID, 7, service.PlatformZhipu, "13800000000")
+	require.NoError(t, err)
+	ch, err := localCaptchaResultChallenge(service.PlatformZhipu, helper.result.Data)
+	require.NoError(t, err)
+	require.NoError(t, h.webLoginChallengeStore.SetConsumeResult(challengeSessionID, claim.Token, ch))
+	require.NoError(t, h.webLoginChallengeStore.FinishConsume(challengeSessionID, claim.Token, true))
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-sms", gin.H{
+		"action": "send_code", "platform": service.PlatformZhipu, "phone": "13800000000", "challenge_session_id": challengeSessionID,
+	})
+	// 服务桩未配置失败 → handler 层成功响应（消费链完整）；失败判定在 service 层
+	// （TestWebSMS_ZhipuHelperSendStatusNon2xxFailsClosed）。
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	// 零凭据红线：成功/失败响应绝不携带 cookies/device_id 值。
+	require.NotContains(t, w.Body.String(), "fake-guest")
+	require.NotContains(t, w.Body.String(), "fake-device")
+	// 服务层收到完整失败值（send_status=400 原样透传，不吞值、不改值）。
+	require.NotNil(t, auto.smsSendChallenge)
+	require.NotNil(t, auto.smsSendChallenge.ZhipuHelperSendStatus)
+	require.Equal(t, 400, *auto.smsSendChallenge.ZhipuHelperSendStatus)
+	require.Equal(t, "fake-upstream-reject", auto.smsSendChallenge.ZhipuHelperSendMessage)
+}
+
+// sdk-start 签名三件套下发：zhipu Start 收到非空三件套；kimi 收到零值。
+func TestWebLoginChallengeStartPassesSignTripletForZhipu(t *testing.T) {
+	adminSvc := newWALAdminStub(&service.Account{ID: 1, Platform: service.PlatformZhipu, Credentials: map[string]any{"access_mode": service.AccountAccessModeWeb}})
+	h := newTestAccountHandler(adminSvc, &stubAutoLogin{})
+
+	// 用真实 HTTP client 打桩服务端捕获 sdk-start body（走真实 Start 实现）。
+	var startBody map[string]any
+	helperSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/challenge/sdk-start" {
+			_ = json.NewDecoder(r.Body).Decode(&startBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"session_id":"helper-s","status":"pending"}`))
+	}))
+	defer helperSrv.Close()
+	h.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{BaseURL: helperSrv.URL, APIKey: "test-key", Timeout: 2}))
+
+	w := doRequest(t, h, http.MethodPost, "/api/v1/admin/accounts/web-login-challenge/start", gin.H{
+		"platform": "zhipu", "phone": "13800138000", "stage": "send_code", "account_id": 1,
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotEmpty(t, startBody["x_timestamp"], "zhipu sdk-start 必须下发 x_timestamp")
+	require.NotEmpty(t, startBody["x_nonce"], "zhipu sdk-start 必须下发 x_nonce")
+	require.NotEmpty(t, startBody["x_sign"], "zhipu sdk-start 必须下发 x_sign")
+}
