@@ -38,10 +38,11 @@ Worker 容器(yiyutu-server)                 本地工作站(zjy@GL502VML)
 
 ## 4. 本地端实现与安装（工作站）
 
-- 程序：`deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py`（aiohttp + Playwright，单槽位人工求解：请求→notify-send critical 弹窗→有头 Chrome（channel=chrome，系统 148）加载 punish 链接→1s 轮询 cookie→命中即回→停留 8s 关闭；日志不落 cookie 值与完整链接）。
-- 配置：`~/.config/xianyu-captcha-helper/config.json`（0600，首次运行自动生成 32 位 secret；`browser_channel: "chrome"`）。
+- 程序：`deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py`（aiohttp + Playwright，单槽位人工求解：请求→notify-send critical 弹窗→有头 Chrome（channel=chrome，系统 148）加载 punish 链接→1s 轮询 cookie→命中后进"进一步验证等待门"→按契约回传→停留数秒关闭；日志不落 cookie 值与完整链接）。
+  - **进一步验证等待门（2026-09-23）**：风控等级上升后，滑块通过时页面可能仍要求手机号登录。命中通过凭证后按页面文案判定（默认标记：手机号登录/手机号登陆/短信验证码/短信登录/请输入手机号/获取验证码/验证手机号；配置键 `further_verify_markers` 可覆盖，`further_verify_wait: false` 可整体停用）：命中→再弹 notify-send 并保持页面等人工完成，完成（标记消失）/人工关页/到达 285s deadline 三者任一即收口，收口时统一最后读一次当前凭证（覆盖收口瞬间的 cookie 轮换），凭证以等待期间最新 x5* 快照回传，绝不在等待后把 ok 降级为 fail；页面内容读取失败（跳转窗口）不视为完成、继续等待。headless 模式不启用。手机号登录页真实文案尚无 DOM 取证，若实际页面用词不在标记表内，改配置即可。
+- 配置：`~/.config/xianyu-captcha-helper/config.json`（0600，首次运行自动生成 32 位 secret；`browser_channel: "chrome"`；既有配置文件无 `further_verify_wait` 键时默认启用等待门）。
 - 服务：`~/.config/systemd/user/xianyu-captcha-helper.service`（DISPLAY=:0）+ `xianyu-captcha-tunnel.service`（`ssh -N -R 127.0.0.1:18089:127.0.0.1:18089 yiyutu-server`，ServerAlive 保活，ExitOnForwardFailure）。
-- 自检：`python3 tools/local_captcha_helper.py --selftest`——headless 验证 cookie 求解链 + kimi SDK 回调 + GLM 同会话发码（mock 后端，成功/失败关闭全分支）+ 签名黄金用例（2026-09-23 PASS，随 Lane H 会话边界收敛更新）。
+- 自检：`python3 tools/local_captcha_helper.py --selftest`——headless 验证 cookie 求解链 + kimi SDK 回调 + GLM 同会话发码（mock 后端，成功/失败关闭全分支）+ 签名黄金用例 + 进一步验证等待门四分支（2026-09-23 PASS，随等待门落地与外审整改更新）。
 
 ## 5. Worker 侧配置（2026-09-16 已由执行会话落库完成）
 

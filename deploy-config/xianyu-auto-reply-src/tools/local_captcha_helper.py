@@ -31,7 +31,9 @@
 
 人工流程：请求到达 → 桌面通知 → 弹出有头 Chromium 加载验证链接 → 人工拖滑块 →
 检测到 x5* cookie（与 orchestrator._has_x5sec 同口径：名称以 x5 开头或含 x5sec）→
-按契约返回 → 浏览器停留数秒供确认后关闭。
+进一步验证等待门（2026-09-23：风控升级后滑块通过时页面可能仍要求手机号登录，
+命中进一步验证文案则通知并保持页面等人工完成，凭证以最新快照回传；无进一步验证
+则维持原停留语义）→ 按契约返回 → 浏览器停留数秒供确认后关闭。
 
 失败语义：超时 / 忙 / 浏览器被关闭 / 页面异常 → 返回失败，Worker 编排自动回退
 本机真实鼠标与 Playwright 引擎，不劣于现状。
@@ -94,6 +96,21 @@ CHALLENGE_PAGE_URL = "http://127.0.0.1:18089/__challenge_page__"
 MAX_WAIT_CONTRACT_A = 285
 MAX_WAIT_CONTRACT_B = 110
 EXPIRED_MARKER = "页面访问出现了问题"
+# 进一步验证判定标记（2026-09-23 用户裁定：风控升级后滑块通过后页面可能仍要求
+# 手机号登录，通过时刻的 x5sec 快照不等于终态）。命中任一文案即视为"还需要进一步
+# 验证"：保持页面打开等人工完成，而不是按 post_success_keep_secs 直接关浏览器。
+# 页面真实文案目前为 context_gap（无 DOM/截图取证），此表按用户描述的"手机号登录"
+# 语义给保守电话特征集；实际页面用词不同时，改配置 further_verify_markers 即可，
+# 不需要改代码。刻意不含"验证码""安全验证"等宽泛词——滑块挑战页自身文案会误命中。
+DEFAULT_FURTHER_VERIFY_MARKERS = (
+    "手机号登录",
+    "手机号登陆",
+    "短信验证码",
+    "短信登录",
+    "请输入手机号",
+    "获取验证码",
+    "验证手机号",
+)
 
 
 def log(msg: str) -> None:
@@ -149,6 +166,7 @@ def load_or_create_config(path: Path) -> Dict[str, Any]:
         "headless": False,
         "notify": True,
         "post_success_keep_secs": 8,
+        "further_verify_wait": True,
         "browser_channel": "",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,14 +226,16 @@ class Solver:
             for low in (str(n).lower() for n in cookies)
         )
 
-    async def _notify(self, account_id: str, deadline: int) -> None:
+    async def _notify(self, account_id: str, deadline: int, message: str = "") -> None:
         if not self.cfg.get("notify", True):
             return
+        if not message:
+            message = f"账号 {account_id or '?'} 需要过滑块，请在弹出的浏览器中完成（限时 {deadline}s）"
         try:
             proc = await asyncio.create_subprocess_exec(
                 "notify-send", "-u", "critical", "-a", "xianyu-captcha-helper",
                 "闲鱼人工验证",
-                f"账号 {account_id or '?'} 需要过滑块，请在弹出的浏览器中完成（限时 {deadline}s）",
+                message,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -241,6 +261,107 @@ class Solver:
         except Exception as exc:
             log(f"人脸桌面通知发送失败（不影响登录链路）：{exc}")
 
+    async def _wait_further_verification(
+        self,
+        page: Any,
+        cookies_fn: Any,
+        account_id: str,
+        markers: tuple,
+        loop_start: float,
+        deadline: int,
+    ) -> Dict[str, str]:
+        """滑块通过后的"进一步验证"等待门（2026-09-23 用户裁定）。
+
+        风控等级上升后，滑块通过时页面可能仍要求进一步验证（如手机号登录）。
+        通过时刻的 x5sec 快照不等于终态：此时直接按 keep_secs 关浏览器，会把
+        还没做完验证的人工页面关掉。本方法在命中通过凭证后被调用：
+
+        - 页面文案命中任一 marker → 桌面通知一次，保持页面打开等人工完成
+        - 人工完成（标记消失）→ 返回等待期间捕获的最新 x5* 凭证快照（登录后
+          凭证可能轮换，以最新为准）
+        - 人工手动关页面 → 视为结束，按已捕获快照返回
+        - 达到求解 deadline → 按已捕获快照返回（通过凭证已到手，绝不因等待
+          把 ok 降级成 fail——最坏只是回传变晚，不劣于旧行为）
+
+        三个终态出口（标记消失/deadline/页面关闭）统一经 _final_snapshot 最后
+        读一次当前凭证，捕获收口瞬间的轮换（外审 R2）；页面内容读取失败（跳转
+        窗口）绝不视为"标记消失"，保留等待状态下一轮再查。
+
+        Args:
+            cookies_fn: 异步 callable，返回 Playwright 原始 cookie 列表
+                （context.cookies() 的协程结果）；门内 await 后按 x5*/bx* 口径过滤。
+
+        Returns:
+            等待期间捕获到的凭证 cookie dict；无新凭证（或无进一步验证、页面
+            提前关闭）时为空 dict，调用方沿用通过时刻的快照。
+        """
+
+        async def _read_fresh() -> Dict[str, str]:
+            """异步读取并过滤当前 cookie 快照；异常向上抛由调用方按既定口径处理。"""
+            return self._x5_cookies(await cookies_fn())
+
+        async def _final_snapshot(reason: str) -> Dict[str, str]:
+            """收口统一出口：最后尽力读一次当前凭证，捕获收口瞬间的轮换。"""
+            nonlocal latest
+            try:
+                fresh = await _read_fresh()
+            except Exception as exc:
+                log(f"等待门收口前读取 cookie 失败（{reason}）account={account_id}：{exc}")
+                return latest
+            if fresh and self._has_pass_signal(fresh):
+                latest = fresh
+            return latest
+
+        latest: Dict[str, str] = {}
+        notified = False
+        while True:
+            elapsed = time.monotonic() - loop_start
+            if elapsed >= deadline:
+                log(f"进一步验证等待达到求解 deadline account={account_id}，按已捕获凭证返回")
+                return await _final_snapshot("deadline")
+            try:
+                if page.is_closed():
+                    log(f"页面在进一步验证等待期间被关闭 account={account_id}")
+                    return await _final_snapshot("页面关闭")
+            except Exception:
+                pass
+            try:
+                content = await page.content()
+            except Exception as exc:
+                # 跳转瞬间 content() 可能抛错：这绝不等于"标记消失"，不能在
+                # 最需要等待的跳转窗口提前收口（外审 R2）——保留等待状态下一轮再查。
+                log(f"等待门读取页面内容失败（跳转窗口，继续等待）account={account_id}：{exc}")
+                await asyncio.sleep(1.0)
+                continue
+            hit = next((m for m in markers if m and m in content), "")
+            if not hit:
+                if notified:
+                    log(f"进一步验证已完成/消失 account={account_id}")
+                return await _final_snapshot("标记消失")
+            if not notified:
+                notified = True
+                remain = max(1, int(deadline - elapsed))
+                log(
+                    f"检测到进一步验证（疑似手机号登录）account={account_id} "
+                    f"marker={hit}，保持页面等待人工完成（剩余 {remain}s）"
+                )
+                await self._notify(
+                    account_id,
+                    remain,
+                    message=(
+                        f"账号 {account_id or '?'} 滑块已通过，但页面仍要求进一步验证"
+                        f"（{hit}），请在浏览器中完成；完成后页面自动关闭（剩余 {remain}s）"
+                    ),
+                )
+            try:
+                fresh = await _read_fresh()
+            except Exception as exc:
+                log(f"进一步验证等待期间读取 cookie 失败 account={account_id}：{exc}")
+                fresh = {}
+            if fresh and self._has_pass_signal(fresh):
+                latest = fresh
+            await asyncio.sleep(1.0)
+
     async def solve(self, url: str, account_id: str, deadline: int) -> tuple[str, Dict[str, str], Optional[bool]]:
         """打开浏览器等待人工过滑块。
 
@@ -258,6 +379,10 @@ class Solver:
             headless = bool(self.cfg.get("headless", False))
             channel = self.cfg.get("browser_channel") or None
             keep_secs = int(self.cfg.get("post_success_keep_secs", 8))
+            further_wait = bool(self.cfg.get("further_verify_wait", True))
+            markers = tuple(
+                str(m) for m in (self.cfg.get("further_verify_markers") or DEFAULT_FURTHER_VERIFY_MARKERS)
+            )
             log(f"开始求解 account={account_id} host={_host_of(url)} deadline={deadline}s headless={headless}")
             await self._notify(account_id, deadline)
             browser = None
@@ -289,6 +414,26 @@ class Solver:
                         log(f"人工验证通过 account={account_id} cookies={sorted(cookies)}（值不落日志）")
                         if keep_secs > 0 and not headless:
                             await asyncio.sleep(keep_secs)  # 停留片刻让人工看到通过结果
+                        # 进一步验证等待门（仅有人工在场时有意义）：风控升级后滑块通过
+                        # 时页面可能仍要求手机号登录，此时等人工完成再取最新凭证回传。
+                        # 等待无凭证轮换时沿用通过时刻快照；deadline 内未完成也不把
+                        # ok 降级为 fail（凭证已到手，最坏只是回传变晚）。
+                        if further_wait and not headless:
+                            try:
+                                held = await self._wait_further_verification(
+                                    page,
+                                    lambda: context.cookies(),
+                                    account_id,
+                                    markers,
+                                    loop_start,
+                                    deadline,
+                                )
+                            except Exception as gate_exc:
+                                # 等待门自身异常绝不把已到手的 ok 降级为 fail
+                                log(f"进一步验证等待门异常（按通过时刻快照返回）account={account_id}：{gate_exc}")
+                                held = {}
+                            if held:
+                                cookies = held
                         return "ok", cookies, None
                     if time.monotonic() - last_content_check >= 2.0:
                         last_content_check = time.monotonic()
@@ -1852,6 +1997,125 @@ async def _glm_mount_browser_selftest(pw: Any) -> bool:
                 pass
 
 
+class _GateStubPage:
+    """进一步验证等待门自检桩：按轮次回放页面内容，可模拟人工关页。"""
+
+    def __init__(self, contents: List[str]):
+        self._contents = list(contents)
+        self.closed = False
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def content(self) -> str:
+        if len(self._contents) > 1:
+            return self._contents.pop(0)
+        return self._contents[0]
+
+
+async def _further_verification_gate_selftest(solver: "Solver") -> bool:
+    """进一步验证等待门自检：标记消失取收口轮换凭证 / 持续标记按 deadline 收口 /
+    人工关页即返回，三条分支全部失败关闭断言。桩为 Playwright 真实形态
+    （async callable 返回 name/value 列表，外审 R2-P1 回归）。"""
+    ok = True
+
+    # 分支 1：标记一轮后消失（人工完成手机号登录）→ 收口前最后读一次 cookie，
+    # 收口瞬间轮换的新 x5sec 必须被捕获（外审 R2-P4 回归）
+    page = _GateStubPage(["请输入手机号 + 短信验证码登录", "闲鱼首页"])
+    snapshots = iter([
+        [{"name": "x5sec", "value": "rotated-1"}, {"name": "bx-pp", "value": "p"}],
+        [{"name": "x5sec", "value": "rotated-2"}, {"name": "bx-pp", "value": "p2"}],
+    ])
+
+    async def cookies_fn_clear() -> list:
+        return next(snapshots)
+
+    latest = await solver._wait_further_verification(
+        page, cookies_fn_clear, "selftest",
+        DEFAULT_FURTHER_VERIFY_MARKERS, time.monotonic(), 20,
+    )
+    if latest.get("x5sec") != "rotated-2":
+        log(f"GATE SELFTEST FAIL：收口瞬间轮换的凭证应被捕获，实际={latest}")
+        ok = False
+
+    # 分支 2：标记始终存在 → 按 deadline 收口并统一最后读一次（捕获收口前
+    # 最后一秒的轮换），不悬挂、不降级
+    page = _GateStubPage(["手机号登录"])
+    snapshots = iter([
+        [{"name": "x5sec", "value": "kept-1"}],
+        [{"name": "x5sec", "value": "kept-1"}],
+        [{"name": "x5sec", "value": "kept-final"}],
+        [{"name": "x5sec", "value": "kept-final"}],
+    ])
+
+    async def cookies_fn_kept() -> list:
+        return next(snapshots)
+
+    latest = await solver._wait_further_verification(
+        page, cookies_fn_kept, "selftest",
+        DEFAULT_FURTHER_VERIFY_MARKERS, time.monotonic(), 2,
+    )
+    if latest.get("x5sec") != "kept-final":
+        log(f"GATE SELFTEST FAIL：deadline 收口应带收口前最后一次读取的凭证，实际={latest}")
+        ok = False
+
+    # 分支 3：等待期间人工关闭页面 → 立即收口并统一最后读一次（页面关了但
+    # context 仍可读时捕获关页前落盘的凭证）
+    page = _GateStubPage(["获取验证码", "获取验证码"])
+    snapshots = iter([
+        [{"name": "x5sec", "value": "closed-1"}],
+        [{"name": "x5sec", "value": "closed-final"}],
+    ])
+
+    async def cookies_fn_close() -> list:
+        page.close()
+        return next(snapshots)
+
+    latest = await solver._wait_further_verification(
+        page, cookies_fn_close, "selftest",
+        DEFAULT_FURTHER_VERIFY_MARKERS, time.monotonic(), 20,
+    )
+    if latest.get("x5sec") != "closed-final":
+        log(f"GATE SELFTEST FAIL：人工关页收口应带最后一次读取的凭证，实际={latest}")
+        ok = False
+
+    # 分支 4：页面内容持续读取失败（跳转窗口）→ 绝不视为"标记消失"提前收口，
+    # 必须坚持等到 deadline 才按统一出口返回（外审 R2-P2 回归）
+    class _BrokenContentPage:
+        def is_closed(self) -> bool:
+            return False
+
+        async def content(self) -> str:
+            raise RuntimeError("Execution context was destroyed (跳转窗口)")
+
+    read_count = {"n": 0}
+
+    async def cookies_fn_broken() -> list:
+        read_count["n"] += 1
+        return [{"name": "x5sec", "value": "broken-final"}]
+
+    gate_start = time.monotonic()
+    latest = await solver._wait_further_verification(
+        _BrokenContentPage(), cookies_fn_broken, "selftest",
+        DEFAULT_FURTHER_VERIFY_MARKERS, gate_start, 2,
+    )
+    waited = time.monotonic() - gate_start
+    if waited < 2.0:
+        log(f"GATE SELFTEST FAIL：content 读失败不得提前收口（实际仅等待 {waited:.1f}s）")
+        ok = False
+    if latest.get("x5sec") != "broken-final" or read_count["n"] < 1:
+        log(f"GATE SELFTEST FAIL：deadline 统一出口应带最后读取的凭证，实际={latest}")
+        ok = False
+
+    if ok:
+        log("GATE SELFTEST PASS：进一步验证等待门四分支（标记消失取收口轮换凭证/"
+            "持续标记 deadline 收口/人工关页即返回/跳转窗口内容读失败不提前收口）全部符合预期")
+    return ok
+
+
 async def _selftest() -> int:
     """无人工自检：headless 打开本地页面（Set-Cookie x5sec=...），验证成功路径全链。"""
     from aiohttp import web as aio_web
@@ -1884,11 +2148,15 @@ async def _selftest() -> int:
         status, cookies, url_expired = await solver.solve(f"http://127.0.0.1:{port}/", "selftest", 20)
         await runner.cleanup()
         if status == "ok" and cookies.get("x5sec") == "selftest-value" and cookies.get("bx-pp") == "pp-value":
+            if not await _further_verification_gate_selftest(solver):
+                log("SELFTEST FAIL：进一步验证等待门用例失败")
+                return 1
             if not await _glm_mount_browser_selftest(solver.pw):
                 log("SELFTEST FAIL：GLM 滑块挂载 JS 轮询用例失败（延迟渲染不被误杀 / 渲染失败关闭）")
                 return 1
             log("SELFTEST PASS：kimi SDK 回调、GLM 同会话发码成功/失败关闭（body 非 0、非 2xx、滑块失败）、"
                 "GLM 挂载 JS 轮询（4s 延迟渲染不被误杀、注入短阈值的渲染失败关闭）、"
+                "进一步验证等待门四分支（标记消失取收口轮换凭证/持续标记 deadline 收口/人工关页取最终快照/内容读失败不提前收口）、"
                 "签名黄金用例、单槽位/绑定/过期及 cookie 求解链全部正常")
             return 0
         log(f"SELFTEST FAIL：status={status} cookie_names={sorted(cookies)} url_expired={url_expired}")

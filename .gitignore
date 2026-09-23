@@ -122,6 +122,8 @@ tests
 !deploy/tests/**
 !deploy-config/xianyu-auto-reply-src/scheduler/tests/
 !deploy-config/xianyu-auto-reply-src/scheduler/tests/**
+!deploy-config/xianyu-auto-reply-src/tests/
+!deploy-config/xianyu-auto-reply-src/tests/**
 CLAUDE.md
 .claude
 scripts

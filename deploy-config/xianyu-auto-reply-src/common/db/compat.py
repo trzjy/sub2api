@@ -2,11 +2,13 @@
 数据库兼容层
 
 将旧框架的同步db_manager接口适配到新框架的异步数据库
-使用独立线程和事件循环来避免异步上下文冲突
+同步调用提交到进程级常驻工作线程上的常驻事件循环执行（见 _ensure_worker_loop），
+避免异步上下文冲突；工作线程数量恒定为 1，不随调用次数增长。
 """
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import time
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -31,27 +33,74 @@ from common.models.system_setting import SystemSetting
 from common.utils.time_utils import get_beijing_now, get_beijing_now_naive
 
 
-# 线程本地存储，用于缓存每个线程的数据库引擎和会话工厂
-_thread_local = threading.local()
+# ---------------------------------------------------------------------------
+# 常驻工作循环（2026-09-23 根因修复）
+#
+# 旧实现：每次 _run_async 新建 线程 + 事件循环 + 引擎（threading.local 缓存对
+# 一次性线程必然 miss，等于每次全新建）。滑块并发高峰时无上限的短命线程叠加
+# browser-task 池与 Playwright 线程，触发系统线程上限：thread.start() 抛
+# "can't start new thread"，经各公开方法的 try/except 吞成一条 error 日志 +
+# False/None，风控 processing 记录永久卡住（2026-09-23 生产事故根因）。
+#
+# 新实现：进程级常驻单工作线程（daemon）+ 常驻事件循环 + 惰性创建一次的专属
+# 引擎/会话工厂。调用方经 run_coroutine_threadsafe 提交并阻塞等待结果：同步
+# 语义、30s×3 次尝试与"绝不向上抛异常"的公开方法契约全部保持不变；线程总量
+# 从无上限收敛为恒定 1，"can't start new thread" 失效模式被整体移除。
+# ---------------------------------------------------------------------------
+_COMPAT_DB_WORKER_THREAD_NAME = "compat-db-worker"
+# 单次尝试的结果等待上限（与旧实现 join(timeout=30) 同值，公开方法语义不变）。
+_CALL_TIMEOUT_SECONDS = 30.0
+# 工作循环专属引擎池容量与并发闸门上限：闸门容量=池总容量，使在库协程数永不
+# 超过连接数（外审 P1：单工作线程只是调度载体，协程在 await 处交错，不等于
+# DB 操作串行；超限调用在闸门排队且不占连接，池耗尽等待被结构性排除）。
+_WORKER_POOL_SIZE = 2
+_WORKER_MAX_OVERFLOW = 3
+_WORKER_DB_CONCURRENCY = _WORKER_POOL_SIZE + _WORKER_MAX_OVERFLOW
+
+_worker_loop: Optional[asyncio.AbstractEventLoop] = None
+_worker_thread: Optional[threading.Thread] = None  # 仅供观测/测试断言
+_worker_lock = threading.Lock()
 
 
-def _get_thread_local_session_maker():
-    """获取当前线程的数据库会话工厂（懒加载）"""
-    if not hasattr(_thread_local, 'session_maker'):
-        settings = get_settings()
-        engine = create_async_engine(
-            settings.async_database_url,
-            echo=False,
-            pool_pre_ping=settings.db_pool_pre_ping,  # 取连接前 ping，剔除失效连接（asyncmy ping 已在 session 层做兼容修补）
-            pool_size=1,   # 兼容层线程为一次性，单协程只需 1 条连接（原 3，避免连接累积）
-            max_overflow=2,  # 仅留少量溢出余量（原 5），降低单引擎最大连接数 8 -> 3
-            pool_timeout=settings.db_pool_timeout,  # 获取连接超时时间
-            pool_recycle=settings.db_pool_recycle,  # 连接回收时间，防止MySQL断开陈旧连接
-            connect_args={"connect_timeout": settings.db_connect_timeout},  # TCP 建连超时，远程库不可达时快速失败
+def _worker_thread_main(loop: asyncio.AbstractEventLoop) -> None:
+    """常驻工作线程主体：循环随进程存活，协程经 run_coroutine_threadsafe 提交。"""
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_forever()
+    finally:
+        # 仅线程异常退出时走到；daemon 线程随进程退出被杀属预期路径，无需收尾。
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
+
+
+def _ensure_worker_loop(failed_loop: Optional[asyncio.AbstractEventLoop] = None) -> asyncio.AbstractEventLoop:
+    """返回常驻工作循环；首次调用或循环已关闭（工作线程异常退出）时重建。
+
+    failed_loop：调用方刚在其上遭遇 "Event loop is closed" 的循环实例。并发
+    恢复时多个调用方可能同时携带同一失败循环进入本函数（外审 R2）：锁内按
+    实例身份比较，仅当全局循环仍是那个失败实例（或已再次关闭/不存在）时才
+    重建，否则直接复用其他调用方已建好的健康循环——恒定单工作线程，不遗留
+    未跟踪的孤儿循环，DB 上下文也不会在两个循环间竞态重建。
+    """
+    global _worker_loop, _worker_thread
+    with _worker_lock:
+        current = _worker_loop
+        if current is not None and not current.is_closed() and current is not failed_loop:
+            return current
+        new_loop = asyncio.new_event_loop()
+        thread = threading.Thread(
+            target=_worker_thread_main,
+            args=(new_loop,),
+            name=_COMPAT_DB_WORKER_THREAD_NAME,
+            daemon=True,
         )
-        _thread_local.engine = engine
-        _thread_local.session_maker = async_sessionmaker(engine, expire_on_commit=False)
-    return _thread_local.session_maker
+        thread.start()
+        _worker_loop = new_loop
+        _worker_thread = thread
+        return new_loop
 
 
 class DBManagerCompat:
@@ -61,83 +110,125 @@ class DBManagerCompat:
     """
 
     def __init__(self):
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # 常驻工作循环专属 DB 上下文：会话工厂 + 引擎 + 并发闸门，惰性创建于
+        # 工作循环协程内。asyncmy 连接绑定创建它的循环，不能跨循环使用，故
+        # 不复用 session.py 主循环的全局引擎；工作循环重建时一并废弃重建。
+        self._worker_session_maker = None
+        self._worker_engine = None
+        self._worker_gate: Optional[asyncio.Semaphore] = None
+        self._worker_context_loop: Optional[asyncio.AbstractEventLoop] = None
 
-    def _get_loop(self) -> asyncio.AbstractEventLoop:
-        """获取事件循环"""
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            if self._loop is None or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-            return self._loop
+    def _ensure_worker_session_maker(self):
+        """获取常驻工作循环专属会话工厂（仅在工作循环协程内调用）。
 
-    async def _run_async_coro(self, coro):
-        """直接运行异步协程（在异步上下文中使用）"""
-        return await coro
+        引擎/闸门与会话工厂同批创建，绑定"创建时的工作循环"：工作循环被重建后，
+        旧引擎的 asyncmy 连接与池原语已随旧循环失效，必须整体弃用并在新循环上
+        惰性重建（外审 P2）。测试可直接预填 self._worker_session_maker 打桩，
+        首次调用时采纳为当前循环的上下文。
 
-    def _run_async(self, async_func: Callable):
-        """在同步代码中运行异步操作
-
-        使用独立线程和新事件循环来避免死锁
-        async_func: 一个接受session_maker参数的异步函数
+        参数口径镜像 session.py 全局引擎（pre_ping/recycle/超时/LIFO 同源
+        settings），池容量固定小值；并发闸门容量=池总容量——单工作线程只是调度
+        载体，协程在 await 处交错执行，并不等于 DB 操作串行（外审 P1），闸门把
+        在库协程数封顶在连接数内，超限调用排队且不占连接。
         """
+        loop = asyncio.get_running_loop()
+        if self._worker_session_maker is not None:
+            if self._worker_context_loop is loop:
+                return self._worker_session_maker
+            if self._worker_context_loop is None:
+                # 外部预填（测试打桩路径）：采纳为当前循环的上下文
+                if self._worker_gate is None:
+                    self._worker_gate = asyncio.Semaphore(_WORKER_DB_CONCURRENCY)
+                self._worker_context_loop = loop
+                return self._worker_session_maker
+        # 首次创建，或工作循环已被替换（旧循环死亡）：旧引擎尽力释放后弃用。
+        old_engine = self._worker_engine
+        self._worker_engine = None
+        self._worker_session_maker = None
+        self._worker_gate = None
+        if old_engine is not None:
+            async def _dispose_old_engine():
+                try:
+                    await old_engine.dispose()
+                except Exception:
+                    pass  # 旧循环已关闭，释放尽力而为；残余 socket 由对端超时回收
+            asyncio.ensure_future(_dispose_old_engine())
+        settings = get_settings()
+        engine = create_async_engine(
+            settings.async_database_url,
+            echo=False,
+            echo_pool=False,
+            pool_pre_ping=settings.db_pool_pre_ping,  # 取连接前 ping，剔除失效连接（asyncmy ping 已在 session 层做兼容修补）
+            pool_size=_WORKER_POOL_SIZE,
+            max_overflow=_WORKER_MAX_OVERFLOW,
+            pool_timeout=settings.db_pool_timeout,  # 获取连接超时时间
+            pool_recycle=settings.db_pool_recycle,  # 连接回收时间，防止MySQL断开陈旧连接
+            pool_use_lifo=settings.db_pool_use_lifo,  # 与 session.py 同口径：优先复用最热连接
+            connect_args={"connect_timeout": settings.db_connect_timeout},  # TCP 建连超时，远程库不可达时快速失败
+        )
+        self._worker_engine = engine
+        self._worker_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+        self._worker_gate = asyncio.Semaphore(_WORKER_DB_CONCURRENCY)
+        self._worker_context_loop = loop
+        return self._worker_session_maker
+
+    def _run_async(self, async_func: Callable, timeout: float = _CALL_TIMEOUT_SECONDS):
+        """在同步代码中运行异步操作（2026-09-23 根因修复后经常驻工作循环执行）
+
+        async_func: 一个接受session_maker参数的异步函数
+        timeout: 单次尝试的结果等待上限（秒），默认与旧实现 join(timeout=30) 同值
+
+        语义与旧实现对齐：失败/超时不向上抛，超时立即返回 None（不重试），
+        异常按 sleep(attempt) 重试共 3 次后返回 None。
+        """
+        async def _run_on_worker():
+            # 会话工厂（含引擎/闸门）必须在工作循环协程内首次创建：asyncmy 连接
+            # 与连接池原语绑定运行中的循环，在调用方线程创建会绑错循环。
+            session_maker = self._ensure_worker_session_maker()
+            # 并发闸门容量=池总容量：在库协程数不超过连接数；排队协程不占连接，
+            # 调用方的 result 超时语义不变（外审 P1）。
+            gate = self._worker_gate
+            if gate is None:  # 防御：_ensure_worker_session_maker 已保证非空
+                gate = asyncio.Semaphore(_WORKER_DB_CONCURRENCY)
+            async with gate:
+                return await async_func(session_maker)
+
         max_attempts = 3
+        failed_loop: Optional[asyncio.AbstractEventLoop] = None
 
         for attempt in range(1, max_attempts + 1):
-            result = [None]
-            exception = [None]
-
-            def run_in_thread():
-                try:
-                    # 创建新的事件循环
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        # 获取线程本地的会话工厂
-                        session_maker = _get_thread_local_session_maker()
-                        # 执行异步函数
-                        result[0] = new_loop.run_until_complete(async_func(session_maker))
-                    finally:
-                        # 主动释放本线程引擎的连接池：本兼容层使用一次性线程，
-                        # threading.local 缓存对新线程必然 miss（每次新建引擎），
-                        # 若不主动 dispose，连接需等 GC 才回收，高并发下易累积、打满 MySQL。
-                        try:
-                            engine = getattr(_thread_local, 'engine', None)
-                            if engine is not None:
-                                new_loop.run_until_complete(engine.dispose())
-                                # 清掉缓存，避免后续误用已释放的引擎
-                                _thread_local.engine = None
-                                if hasattr(_thread_local, 'session_maker'):
-                                    del _thread_local.session_maker
-                        except Exception:
-                            pass
-                        # 清理事件循环
-                        try:
-                            new_loop.run_until_complete(new_loop.shutdown_asyncgens())
-                        except Exception:
-                            pass
-                        new_loop.close()
-                except Exception as e:
-                    exception[0] = e
-
-            thread = threading.Thread(target=run_in_thread, daemon=True)
-            thread.start()
-            thread.join(timeout=30)
-
-            if thread.is_alive():
-                logger.error("异步操作超时")
+            worker_loop: Optional[asyncio.AbstractEventLoop] = None
+            try:
+                worker_loop = _ensure_worker_loop(failed_loop)
+                failed_loop = None
+                future = asyncio.run_coroutine_threadsafe(_run_on_worker(), worker_loop)
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                # 结果等待超时：与旧实现同口径，立即按失败返回 None、不重试。
+                # 协程仍在常驻工作循环上继续执行至终态，连接由常驻池统一管理
+                # （旧实现此处泄漏整个一次性线程+引擎，靠 GC 回收）。
+                logger.error(f"异步操作超时（{timeout}秒）")
                 return None
-
-            if exception[0]:
+            except RuntimeError as exc:
+                if "Event loop is closed" in str(exc) and attempt < max_attempts:
+                    # 工作线程异常退出导致循环已关闭：携带失败循环身份触发锁内
+                    # 比较重建（并发恢复时只建一次，其余调用方复用健康循环）。
+                    logger.warning(f"compat 工作循环已关闭，重建后重试: {exc}")
+                    failed_loop = worker_loop
+                    continue
                 if attempt < max_attempts:
-                    logger.warning(f"执行异步操作失败，第{attempt}次重试前等待 {attempt} 秒: {exception[0]}")
+                    logger.warning(f"执行异步操作失败，第{attempt}次重试前等待 {attempt} 秒: {exc}")
                     time.sleep(attempt)
                     continue
-                logger.error(f"执行异步操作失败: {exception[0]}")
+                logger.error(f"执行异步操作失败: {exc}")
                 return None
-
-            return result[0]
+            except Exception as exc:
+                if attempt < max_attempts:
+                    logger.warning(f"执行异步操作失败，第{attempt}次重试前等待 {attempt} 秒: {exc}")
+                    time.sleep(attempt)
+                    continue
+                logger.error(f"执行异步操作失败: {exc}")
+                return None
 
         return None
 

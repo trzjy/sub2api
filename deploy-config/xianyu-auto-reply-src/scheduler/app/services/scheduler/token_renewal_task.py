@@ -32,6 +32,9 @@ from common.services.captcha.token_response import (
     is_token_captcha_required,
     is_token_expired_response,
 )
+from common.services.risk_control_log_query_service import (
+    terminate_stale_processing_records,
+)
 from common.services.im_token_api import (
     extract_im_access_token,
     request_im_token_with_fallback,
@@ -166,7 +169,12 @@ class TokenRenewalTask:
                 )
 
     async def _load_candidates(self) -> list[TokenRenewalCandidate]:
-        """查询未来 1 小时内到期且无处理中风控日志的账号。"""
+        """查询未来 1 小时内到期且无处理中风控日志的账号。
+
+        查询前先全表扫尾陈旧 processing 记录（与
+        check_account_processing_risk_control_log 同一阈值/口径，外审 P3），
+        避免同一条陈旧记录经本条路径把账号永久排除出定时续期。
+        """
         now = get_beijing_now_naive()
         renewal_cutoff = get_token_renewal_cutoff(now)
         processing_risk_exists = exists(
@@ -177,6 +185,8 @@ class TokenRenewalTask:
         ).correlate(XYAccount)
 
         async with async_session_maker() as session:
+            await terminate_stale_processing_records(session)
+            await session.commit()
             rows = (
                 await session.execute(
                     select(

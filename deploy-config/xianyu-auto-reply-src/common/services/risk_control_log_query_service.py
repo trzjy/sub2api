@@ -10,11 +10,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.db.session import async_session_maker
 from common.models.risk_control_log import XYRiskControlLog
+from common.utils.time_utils import get_beijing_now_naive
+
+# 风控日志 processing 超时兜底阈值（秒）：超过该时长仍未终态视为陈旧记录。
+# 背景：滑块链路在并发线程饱和（Playwright 占用大量线程）时，compat 层
+# update_risk_control_log 可能因 "can't start new thread" 静默失败，processing
+# 记录永久卡住，导致 check_account_processing_risk_control_log 恒判定"处理中"，
+# 账号 Token 刷新/滑块打码被永久短路（2026-09-23 生产事故根因）。
+# 该阈值远大于单次人工打码上限（300s 契约），正常 processing 不会被误伤。
+_STALE_PROCESSING_SECONDS = 3600
 
 
 _ACCOUNT_RISK_CONTROL_LOCKS: dict[str, asyncio.Lock] = {}
@@ -37,6 +48,42 @@ def get_account_risk_control_lock(account_identifier: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _ACCOUNT_RISK_CONTROL_LOCKS[clean_identifier] = lock
     return lock
+
+
+async def terminate_stale_processing_records(
+    session: AsyncSession,
+    *,
+    account_identifier: str | None = None,
+) -> int:
+    """终结停留超过阈值的陈旧 processing 记录，返回终结条数。
+
+    阈值与背景见模块头 _STALE_PROCESSING_SECONDS 注释。account_identifier
+    给定时只终结该账号；为空时全表扫尾——供不按账号过滤的消费方（如定时续期
+    token_renewal_task._load_candidates）在同一会话内先行扫尾，保证陈旧记录
+    无论经哪条查询路径遇到都会被终结，不会把账号永久排除（外审 P3：同一卡死
+    症状存在第二条消费路径）。
+    """
+    stale_cutoff = get_beijing_now_naive() - timedelta(
+        seconds=_STALE_PROCESSING_SECONDS
+    )
+    conditions = [
+        XYRiskControlLog.processing_status == "processing",
+        XYRiskControlLog.created_at < stale_cutoff,
+    ]
+    if account_identifier:
+        conditions.append(XYRiskControlLog.account_identifier == account_identifier)
+    result = await session.execute(
+        update(XYRiskControlLog)
+        .where(*conditions)
+        .values(
+            processing_status="failed",
+            processing_result=(
+                f"超时兜底：processing 停留超过 {_STALE_PROCESSING_SECONDS // 3600} 小时"
+                "未终态，自动终结（2026-09-23 修复）"
+            ),
+        )
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +123,16 @@ async def check_account_processing_risk_control_log(
     for attempt in range(1, attempts + 1):
         try:
             async with async_session_maker() as session:
+                # 超时兜底：先终结本账号超过阈值的陈旧 processing 记录。
+                # 用异步原生 SQL 更新（不经过 compat 层线程池，避免同类线程饱和
+                # 场景下兜底自身也失败），再判定是否存在"有效"处理中任务。
+                # 截断时间按全库同一口径 get_beijing_now_naive() - timedelta
+                # （与 compat 清理风控日志的 cutoff 同源）；updated_at 不显式写，
+                # 由模型 onupdate=func.now() 以服务端时钟落值。
+                await terminate_stale_processing_records(
+                    session, account_identifier=clean_identifier
+                )
+                await session.commit()
                 has_processing = bool(
                     (
                         await session.execute(
