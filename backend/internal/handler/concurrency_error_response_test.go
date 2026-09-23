@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,7 +36,7 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 			wantStatus:  http.StatusTooManyRequests,
 			wantType:    "rate_limit_error",
 			wantCode:    gatewayQueueFullCode,
-			wantMessage: "Too many pending requests, please retry later",
+			wantMessage: infraerrors.GatewayQueueFull,
 		},
 		{
 			name:        "client cancellation is not classified as concurrency limit",
@@ -51,7 +52,7 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 			slotType:    "user",
 			wantStatus:  http.StatusServiceUnavailable,
 			wantType:    "api_error",
-			wantMessage: "Service temporarily unavailable, please retry later",
+			wantMessage: infraerrors.ConcurrencyFallback,
 		},
 		{
 			name:        "redis acquire error is service unavailable",
@@ -59,7 +60,7 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 			slotType:    "user",
 			wantStatus:  http.StatusServiceUnavailable,
 			wantType:    "api_error",
-			wantMessage: "Service temporarily unavailable, please retry later",
+			wantMessage: infraerrors.ConcurrencyFallback,
 		},
 	}
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/websearch"
@@ -31,7 +32,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	isXSearch := c.GetBool("grok_x_search_endpoint")
 	var req grokStandaloneSearchRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
 			"message": err.Error(),
 		}})
@@ -42,7 +43,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		query = strings.TrimSpace(req.Input)
 	}
 	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
 			"message": "query is required",
 		}})
@@ -62,7 +63,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+		c.JSON(http.StatusUnauthorized, gin.H{"type": "error", "error": gin.H{
 			"type":    "authentication_error",
 			"message": "API key required",
 		}})
@@ -70,7 +71,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	}
 
 	if apiKey.Group == nil || apiKey.Group.Platform != "grok" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
 			"message": searchLabel + " is only supported for grok groups",
 		}})
@@ -84,7 +85,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if retryAfter > 0 {
 			c.Header("Retry-After", strconv.Itoa(retryAfter))
 		}
-		c.JSON(status, gin.H{"error": gin.H{"type": code, "message": message}})
+		c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": code, "message": message}})
 		return
 	}
 
@@ -109,14 +110,14 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if msg == "" {
 			msg = "Request blocked by content policy"
 		}
-		c.JSON(status, gin.H{"error": gin.H{"type": code, "message": msg}})
+		c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": code, "message": msg}})
 		return
 	}
 
 	// Use exactly the same scheduling as other requests (SelectAccountWithLoadAwareness handles load, rate limit, sticky, etc.)
 	groupID := apiKey.GroupID
 	if groupID == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
 			"message": "group required",
 		}})
@@ -144,7 +145,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		)
 		if selectErr != nil {
 			if attempt == 0 {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+				c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
 					"type":    "scheduling_error",
 					"message": selectErr.Error(),
 				}})
@@ -154,9 +155,9 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 		if selected == nil || selected.Account == nil {
 			if attempt == 0 {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+				c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
 					"type":    "scheduling_error",
-					"message": "No available accounts",
+					"message": infraerrors.NoAvailableAccounts,
 				}})
 				return
 			}
@@ -196,17 +197,14 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
-		msg := "web search failed"
-		if err != nil {
-			msg = err.Error()
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"type": "web_search_error", "message": msg}})
+		msg := infraerrors.WebSearchFailed
+		c.JSON(http.StatusBadGateway, gin.H{"type": "error", "error": gin.H{"type": "web_search_error", "message": msg}})
 		return
 	}
 	if account == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+		c.JSON(http.StatusServiceUnavailable, gin.H{"type": "error", "error": gin.H{
 			"type":    "scheduling_error",
-			"message": "No available accounts",
+			"message": infraerrors.NoAvailableAccounts,
 		}})
 		return
 	}

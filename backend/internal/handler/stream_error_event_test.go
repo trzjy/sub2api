@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,7 +83,7 @@ func TestOpenAIAdmissionError_SynchronousNonResponsesIncludesGatewayCode(t *test
 	c, w := newGinContextForEndpoint(t, EndpointChatCompletions)
 	h := &OpenAIGatewayHandler{}
 	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error",
-		gatewayQueueFullCode, "Too many pending requests, please retry later", false, false)
+		gatewayQueueFullCode, infraerrors.GatewayQueueFull, false, false)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 	assert.Equal(t, "rate_limit_error", gjson.GetBytes(w.Body.Bytes(), "error.type").String())
@@ -114,7 +115,7 @@ func TestOpenAIAdmissionError_StreamingNonResponsesIncludesGatewayCode(t *testin
 	c, w := newGinContextForEndpoint(t, EndpointChatCompletions)
 	h := &OpenAIGatewayHandler{}
 	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error",
-		gatewayQueueFullCode, "Too many pending requests, please retry later", true, false)
+		gatewayQueueFullCode, infraerrors.GatewayQueueFull, true, false)
 
 	body := w.Body.String()
 	assert.True(t, strings.HasPrefix(body, "event: error\n"))
@@ -182,7 +183,7 @@ func TestOpenAIHandleStreamingAwareError_ResponsesStreamingJSONEscaping(t *testi
 		{"反斜杠", "server_error", `path C:\Users\test\file.txt not found`},
 		{"双引号+反斜杠", "upstream_error", `error parsing "key\value": unexpected token`},
 		{"换行与制表", "server_error", "line1\nline2\ttab"},
-		{"普通", "upstream_error", "Upstream service temporarily unavailable"},
+		{"普通", "upstream_error", infraerrors.UpstreamUnavailable},
 	}
 
 	for _, tc := range cases {
@@ -223,7 +224,7 @@ func TestGatewayAdmissionError_SynchronousIncludesGatewayCode(t *testing.T) {
 	c, w := newGinContextForEndpoint(t, EndpointMessages)
 	h := &GatewayHandler{}
 	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error",
-		gatewayQueueFullCode, "Too many pending requests, please retry later", false)
+		gatewayQueueFullCode, infraerrors.GatewayQueueFull, false)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 	assert.Equal(t, "error", gjson.GetBytes(w.Body.Bytes(), "type").String())
@@ -248,7 +249,7 @@ func TestGatewayAdmissionError_BareResponsesFailedIncludesGatewayCode(t *testing
 	c, w := newGinContextForEndpoint(t, "/responses")
 	h := &GatewayHandler{}
 	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error",
-		gatewayQueueFullCode, "Too many pending requests, please retry later", true)
+		gatewayQueueFullCode, infraerrors.GatewayQueueFull, true)
 
 	_, errObj := parseResponsesFailedSSE(t, w.Body.String())
 	assert.Equal(t, gatewayQueueFullCode, errObj["code"])

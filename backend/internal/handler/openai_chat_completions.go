@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -201,7 +202,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				if lastFailoverErr != nil {
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
-					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
+					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
 				}
 				return
 			}

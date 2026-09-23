@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/cespare/xxhash/v2"
 	"github.com/gin-gonic/gin"
@@ -2110,7 +2111,7 @@ func TestOpenAIStreamingContextWindowResponseFailedBeforeOutputAppliesPassthroug
 	require.Equal(t, "upstream_error", gjson.Get(body, "error.type").String())
 	require.Equal(t, upstreamMessage, gjson.Get(body, "error.message").String())
 	require.NotContains(t, body, "response.failed")
-	require.NotContains(t, body, "Upstream request failed")
+	require.NotContains(t, body, infraerrors.UpstreamRequestFailed)
 	// 命中透传规则也应记录 ops 上游错误事件（对齐 CC/Messages 与 antigravity 先例）。
 	opsVal, opsRecorded := c.Get(OpsUpstreamErrorsKey)
 	require.True(t, opsRecorded, "passthrough hit should record an ops upstream error event")
@@ -2543,7 +2544,7 @@ func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputApplie
 	require.Equal(t, "upstream_error", gjson.Get(body, "error.type").String())
 	require.Equal(t, upstreamMessage, gjson.Get(body, "error.message").String())
 	require.NotContains(t, body, "response.failed")
-	require.NotContains(t, body, "Upstream request failed")
+	require.NotContains(t, body, infraerrors.UpstreamRequestFailed)
 	// 命中透传规则也应记录 ops 上游错误事件（对齐 CC/Messages 与 antigravity 先例）。
 	opsVal, opsRecorded := c.Get(OpsUpstreamErrorsKey)
 	require.True(t, opsRecorded, "passthrough hit should record an ops upstream error event")
@@ -3932,7 +3933,7 @@ func TestHandleErrorResponseCyberPolicyPassthrough(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadRequest, rec.Code, "passthrough upstream 400, not rewrapped 502")
 	require.Contains(t, rec.Body.String(), "cyber_policy", "client sees original cyber body")
-	require.NotContains(t, rec.Body.String(), "Upstream request failed", "must not 502-rewrap")
+	require.NotContains(t, rec.Body.String(), infraerrors.UpstreamRequestFailed, "must not 502-rewrap")
 	mark := GetOpsCyberPolicy(c)
 	require.NotNil(t, mark)
 	require.Equal(t, http.StatusBadRequest, mark.UpstreamStatus)
@@ -3955,12 +3956,12 @@ func TestHandleCompatErrorResponseCyberPolicyEarlyReturn(t *testing.T) {
 	writeError := func(_ *gin.Context, statusCode int, errType, message string) {
 		gotStatus, gotType, gotMsg = statusCode, errType, message
 	}
-	// cyber 命中应早返回(写兼容错误 + 不冷却账号)，而非落到通用 "Upstream request failed"。
+	// cyber 命中应早返回(写兼容错误 + 不冷却账号)，而非落到通用 infraerrors.UpstreamRequestFailed。
 	_, err := svc.handleCompatErrorResponse(resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "a"}, writeError)
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadRequest, gotStatus)
 	require.Equal(t, "invalid_request_error", gotType)
 	require.Contains(t, gotMsg, "flagged for cyber policy")
-	require.NotContains(t, gotMsg, "Upstream request failed")
+	require.NotContains(t, gotMsg, infraerrors.UpstreamRequestFailed)
 	require.NotNil(t, GetOpsCyberPolicy(c))
 }

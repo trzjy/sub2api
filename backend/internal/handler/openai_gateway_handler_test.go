@@ -15,8 +15,9 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -58,7 +59,7 @@ func TestOpenAIHandleStreamingAwareError_JSONEscaping(t *testing.T) {
 		{
 			name:    "普通消息",
 			errType: "upstream_error",
-			message: "Upstream service temporarily unavailable",
+			message: infraerrors.UpstreamUnavailable,
 		},
 	}
 
@@ -298,7 +299,7 @@ func TestOpenAIEnsureForwardErrorResponse_WritesFallbackWhenNotWritten(t *testin
 	errorObj, ok := parsed["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errorObj["type"])
-	assert.Equal(t, "Upstream request failed", errorObj["message"])
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errorObj["message"])
 }
 
 // Writer 已写后 ensureForwardErrorResponse 必须仍然把错误信息以 SSE
@@ -342,7 +343,7 @@ func TestOpenAIEnsureForwardErrorResponse_ResponsesRouteAfterWrittenEmitsRespons
 	assert.Contains(t, body, "event: response.failed\n", "appended a Responses terminal event")
 	assert.Contains(t, body, `"type":"response.failed"`)
 	assert.Contains(t, body, `"code":"upstream_error"`)
-	assert.Contains(t, body, "Upstream request failed")
+	assert.Contains(t, body, infraerrors.UpstreamRequestFailed)
 }
 
 func TestOpenAIEnsureForwardErrorResponse_AfterDeltaAppendsSingleValidResponseFailed(t *testing.T) {
@@ -429,7 +430,7 @@ func TestOpenAIEnsureForwardErrorResponse_ImageJSONKeepaliveWritesSingleJSONFall
 	require.NoError(t, decoder.Decode(&payload))
 	require.ErrorIs(t, decoder.Decode(&payload), io.EOF)
 	require.Equal(t, "upstream_error", gjson.Get(w.Body.String(), "error.type").String())
-	require.Equal(t, "Upstream request failed", gjson.Get(w.Body.String(), "error.message").String())
+	require.Equal(t, infraerrors.UpstreamRequestFailed, gjson.Get(w.Body.String(), "error.message").String())
 }
 
 func TestOpenAIEnsureForwardErrorResponse_ImageJSONKeepalivePreservesCompletedJSON(t *testing.T) {
@@ -548,7 +549,7 @@ func TestOpenAIRecoverResponsesPanic_WritesFallbackResponse(t *testing.T) {
 	errorObj, ok := parsed["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errorObj["type"])
-	assert.Equal(t, "Upstream request failed", errorObj["message"])
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errorObj["message"])
 }
 
 func TestOpenAIRecoverResponsesPanic_NoPanicNoWrite(t *testing.T) {
@@ -640,7 +641,7 @@ func TestOpenAIEnsureResponsesDependencies(t *testing.T) {
 		errorObj, exists := parsed["error"].(map[string]any)
 		require.True(t, exists)
 		assert.Equal(t, "api_error", errorObj["type"])
-		assert.Equal(t, "Service temporarily unavailable", errorObj["message"])
+		assert.Equal(t, infraerrors.ServiceTemporarilyUnavailable, errorObj["message"])
 	})
 
 	t.Run("already_written_response_not_overridden", func(t *testing.T) {
@@ -856,7 +857,7 @@ func TestOpenAIResponses_MissingDependencies_ReturnsServiceUnavailable(t *testin
 	errorObj, ok := parsed["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "api_error", errorObj["type"])
-	assert.Equal(t, "Service temporarily unavailable", errorObj["message"])
+	assert.Equal(t, infraerrors.ServiceTemporarilyUnavailable, errorObj["message"])
 }
 
 func TestOpenAIResponses_SetsClientTransportHTTP(t *testing.T) {
@@ -1759,7 +1760,7 @@ func TestShouldReportOpenAIWSProxyAccountFailure(t *testing.T) {
 	t.Run("upstream policy violation still penalizes account", func(t *testing.T) {
 		err := service.NewOpenAIWSClientCloseError(
 			coderws.StatusPolicyViolation,
-			"upstream websocket authentication failed",
+			"上游渠道认证失败，请联系管理员",
 			errors.New("upstream rejected credentials"),
 		)
 		require.True(t, shouldReportOpenAIWSProxyAccountFailure(err))
@@ -2268,7 +2269,7 @@ func TestOpenAIResponses_APIKeyPassthroughPool5xxRetriesThenExhaustsMaxSwitches(
 	require.Equal(t, []int64{9910, 9910, 9911}, upstream.calls())
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
-	require.Equal(t, "Upstream service temporarily unavailable", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+	require.Equal(t, infraerrors.UpstreamUnavailable, gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
 }
 
 func TestOpenAIResponses_APIKeyPassthroughPoolAuthFailureRetriesThenSwitchesToHealthyAccount(t *testing.T) {
@@ -2454,7 +2455,7 @@ func TestOpenAIResponses_APIKeyPassthroughSSERateLimitUsesConfiguredPoolRetry(t 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.Equal(t, "1", rec.Header().Get("Retry-After"))
 	require.Equal(t, "rate_limit_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
-	require.Equal(t, "Upstream rate limit exceeded, please retry later", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+	require.Equal(t, infraerrors.UpstreamRateLimited, gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
 }
 
 func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T) {

@@ -1,10 +1,21 @@
 import type { OpsErrorDetail } from '@/api/admin/ops'
 
+// 通用包装错误 message 全文匹配表（精确匹配，大小写不敏感）。
+// 英文条目：存量 ops 记录仍为英文，保留。
+// 中文条目：backend/internal/pkg/errors/downstream_messages.go 上游渠道侧常量，
+// 后端下游文案中文化后新数据只可能出现中文，需保持启发式命中。
 const GENERIC_UPSTREAM_MESSAGES = new Set([
   'upstream request failed',
   'upstream request failed after retries',
   'upstream gateway error',
-  'upstream service temporarily unavailable'
+  'upstream service temporarily unavailable',
+  '上游渠道触发限速，请稍后重试',
+  '上游服务过载，请稍后重试',
+  '上游服务暂时不可用，请稍后重试',
+  '上游请求失败，请稍后重试',
+  '上游渠道认证失败，请联系管理员',
+  '上游渠道拒绝访问，请联系管理员',
+  '上游渠道余额不足或计费异常，请联系管理员'
 ])
 
 type ParsedGatewayError = {

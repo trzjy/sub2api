@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -861,11 +862,11 @@ func resolveOpenAIWSFallbackErrorResponse(err error) (statusCode int, errType st
 		case "ws_unsupported":
 			upstreamMessage = "upstream websocket not supported"
 		case "auth_failed":
-			upstreamMessage = "upstream authentication failed"
+			upstreamMessage = infraerrors.UpstreamAuthFailed
 		case "upstream_rate_limited":
-			upstreamMessage = "upstream rate limit exceeded, please retry later"
+			upstreamMessage = infraerrors.UpstreamRateLimited
 		default:
-			upstreamMessage = "Upstream request failed"
+			upstreamMessage = infraerrors.UpstreamRequestFailed
 		}
 	}
 
@@ -889,7 +890,7 @@ func (s *OpenAIGatewayService) writeOpenAIWSFallbackErrorResponse(c *gin.Context
 		return false
 	}
 	if strings.TrimSpace(clientMessage) == "" {
-		clientMessage = "Upstream request failed"
+		clientMessage = infraerrors.UpstreamRequestFailed
 	}
 	if strings.TrimSpace(upstreamMessage) == "" {
 		upstreamMessage = clientMessage

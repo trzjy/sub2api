@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
@@ -1307,7 +1308,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				if completedTurns.Load() > 0 {
 					return NewOpenAIWSClientCloseError(
 						coderws.StatusTryAgainLater,
-						"upstream rate limit exceeded; please reconnect",
+						infraerrors.UpstreamRateLimitedWS,
 						errors.New("later passthrough turn was rate limited before output"),
 					)
 				}
@@ -1432,7 +1433,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			// duplicate the first turn, so later turns end the client session.
 			relayErr = NewOpenAIWSClientCloseError(
 				coderws.StatusGoingAway,
-				"upstream produced no semantic output; please reconnect",
+				infraerrors.UpstreamNoSemanticOutputWS,
 				firstOutputTimeoutErr,
 			)
 		}
@@ -1441,7 +1442,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if errors.As(relayErr, &activeTurnTimeoutErr) {
 		relayErr = NewOpenAIWSClientCloseError(
 			coderws.StatusGoingAway,
-			"upstream websocket read timeout; please reconnect",
+			infraerrors.UpstreamWSReadTimeout,
 			activeTurnTimeoutErr,
 		)
 	}
@@ -1473,17 +1474,17 @@ func openAIWSPassthroughRelayClientClose(exit openaiwsv2.RelayExit, completedTur
 	}
 	var activeTurnTimeoutErr *openAIWSPassthroughActiveTurnTimeoutError
 	if errors.As(exit.Err, &activeTurnTimeoutErr) {
-		return coderws.StatusGoingAway, "upstream websocket read timeout; please reconnect", true
+		return coderws.StatusGoingAway, infraerrors.UpstreamWSReadTimeout, true
 	}
 	var firstOutputTimeoutErr *openAIWSPassthroughFirstOutputTimeoutError
 	if errors.As(exit.Err, &firstOutputTimeoutErr) {
 		if completedTurns > 0 || exit.WroteDownstream {
-			return coderws.StatusGoingAway, "upstream produced no semantic output; please reconnect", true
+			return coderws.StatusGoingAway, infraerrors.UpstreamNoSemanticOutputWS, true
 		}
 		return 0, "", false
 	}
 	if !exit.Graceful && exit.Stage == "read_upstream" {
-		return coderws.StatusInternalError, "upstream websocket proxy failed", true
+		return coderws.StatusInternalError, infraerrors.UpstreamWSProxyFailed, true
 	}
 	return 0, "", false
 }
@@ -1524,28 +1525,28 @@ func (s *OpenAIGatewayService) mapOpenAIWSPassthroughDialError(
 	if errors.Is(err, context.DeadlineExceeded) {
 		return NewOpenAIWSClientCloseError(
 			coderws.StatusTryAgainLater,
-			"upstream websocket connect timeout",
+			infraerrors.UpstreamWSConnectTimeout,
 			wrappedErr,
 		)
 	}
 	if statusCode == http.StatusTooManyRequests {
 		return NewOpenAIWSClientCloseError(
 			coderws.StatusTryAgainLater,
-			"upstream websocket is busy, please retry later",
+			infraerrors.UpstreamRateLimitedWS,
 			wrappedErr,
 		)
 	}
 	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
 		return NewOpenAIWSClientCloseError(
 			coderws.StatusPolicyViolation,
-			"upstream websocket authentication failed",
+			infraerrors.UpstreamAuthFailed,
 			wrappedErr,
 		)
 	}
 	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
 		return NewOpenAIWSClientCloseError(
 			coderws.StatusPolicyViolation,
-			"upstream websocket handshake rejected",
+			infraerrors.UpstreamWSHandshakeRejected,
 			wrappedErr,
 		)
 	}

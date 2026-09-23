@@ -344,9 +344,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Error(err),
 					)
 					message := cls.Message
-					if !cls.ModelNotFound {
-						message = "No available accounts: " + err.Error()
-					}
 					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 					return
 				}
@@ -397,7 +394,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.String("model", reqModel),
 						zap.String("platform", platform),
 					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
 					return
 				}
 				accountWaitCounted := false
@@ -409,7 +406,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Int64("account_id", account.ID),
 						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
+					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
 					return
 				}
 				if err == nil && canWait {
@@ -675,9 +672,6 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Error(err),
 					)
 					message := cls.Message
-					if !cls.ModelNotFound {
-						message = "No available accounts: " + err.Error()
-					}
 					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 					return
 				}
@@ -738,7 +732,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.String("model", reqModel),
 						zap.String("platform", platform),
 					)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", "No available accounts", streamStarted)
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "api_error", pkgerrors.NoAvailableAccounts, streamStarted)
 					return
 				}
 				accountWaitCounted := false
@@ -750,7 +744,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Int64("account_id", account.ID),
 						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
+					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, pkgerrors.GatewayQueueFull, streamStarted)
 					return
 				}
 				if err == nil && canWait {
@@ -1957,17 +1951,17 @@ func (h *GatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, statusCod
 func (h *GatewayHandler) mapUpstreamError(statusCode int) (int, string, string) {
 	switch statusCode {
 	case 401:
-		return http.StatusBadGateway, "upstream_error", "Upstream authentication failed, please contact administrator"
+		return http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamAuthFailed
 	case 403:
-		return http.StatusBadGateway, "upstream_error", "Upstream access forbidden, please contact administrator"
+		return http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamForbidden
 	case 429:
-		return http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit exceeded, please retry later"
+		return http.StatusTooManyRequests, "rate_limit_error", pkgerrors.UpstreamRateLimited
 	case 529:
-		return http.StatusServiceUnavailable, "overloaded_error", "Upstream service overloaded, please retry later"
+		return http.StatusServiceUnavailable, "overloaded_error", pkgerrors.UpstreamOverloaded
 	case 500, 502, 503, 504:
-		return http.StatusBadGateway, "upstream_error", "Upstream service temporarily unavailable"
+		return http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamUnavailable
 	default:
-		return http.StatusBadGateway, "upstream_error", "Upstream request failed"
+		return http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamRequestFailed
 	}
 }
 
@@ -2026,7 +2020,7 @@ func (h *GatewayHandler) ensureForwardErrorResponse(c *gin.Context, streamStarte
 	if c.Writer.Written() {
 		streamStarted = true
 	}
-	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed", streamStarted)
+	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamRequestFailed, streamStarted)
 	return true
 }
 
@@ -2476,7 +2470,7 @@ func billingErrorDetails(err error) (status int, code, message string, retryAfte
 	if errors.Is(err, service.ErrBillingServiceUnavailable) {
 		msg := pkgerrors.Message(err)
 		if msg == "" {
-			msg = "Billing service temporarily unavailable. Please retry later."
+			msg = pkgerrors.BillingServiceUnavailable
 		}
 		return http.StatusServiceUnavailable, "billing_service_error", msg, 0
 	}

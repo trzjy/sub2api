@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -335,7 +336,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatTransportError(c *gin
 	if c.Request.Context().Err() != nil {
 		return s.writeAntigravityCompatError(c, http.StatusBadGateway, "client_disconnected", "Client disconnected before upstream response")
 	}
-	return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries")
+	return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 }
 
 func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
@@ -508,7 +509,7 @@ func (s *AntigravityGatewayService) writeMappedAntigravityCompatError(
 	})
 	c.JSON(mapUpstreamStatusCode(upstreamStatus), gin.H{
 		"error": gin.H{
-			"message": getPassthroughOrDefault(message, "Upstream request failed"),
+			"message": getPassthroughOrDefault(message, infraerrors.UpstreamRequestFailed),
 			"type":    "upstream_error",
 			"param":   nil,
 			"code":    nil,

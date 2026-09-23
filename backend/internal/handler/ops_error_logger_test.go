@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -459,7 +460,7 @@ func TestOpsErrorLoggerMiddleware_CapturesSplitResponsesFailedSSE(t *testing.T) 
 		c.Status(http.StatusOK)
 		_, _ = c.Writer.Write([]byte("event: response."))
 		_, _ = c.Writer.Write([]byte("failed\n"))
-		_, _ = c.Writer.Write([]byte(`data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Too many pending requests"}}}`))
+		_, _ = c.Writer.Write([]byte(`data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"` + infraerrors.GatewayQueueFull + `"}}}`))
 		_, _ = c.Writer.Write([]byte("\n\n"))
 	})
 
@@ -471,7 +472,7 @@ func TestOpsErrorLoggerMiddleware_CapturesSplitResponsesFailedSSE(t *testing.T) 
 	job := <-opsErrorLogQueue
 	require.Equal(t, http.StatusTooManyRequests, job.entry.StatusCode)
 	require.Equal(t, "rate_limit_error", job.entry.ErrorType)
-	require.Contains(t, job.entry.ErrorMessage, "Too many pending requests")
+	require.Contains(t, job.entry.ErrorMessage, infraerrors.GatewayQueueFull)
 }
 
 func TestOpsCaptureWriter_CapturesSplitDataOnlyTerminalMarkers(t *testing.T) {
@@ -681,7 +682,7 @@ func TestLogOpsStreamError_SkipWhenPassthroughSkipMonitoring(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	service.MarkOpsStreamError(c, "upstream_error", "Upstream request failed", http.StatusBadGateway)
+	service.MarkOpsStreamError(c, "upstream_error", infraerrors.UpstreamRequestFailed, http.StatusBadGateway)
 	c.Set(service.OpsSkipPassthroughKey, true)
 
 	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -714,7 +715,7 @@ func TestMarkOpsStreamError_FirstWins(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 
 	service.MarkOpsStreamError(c, "rate_limit_error", "Concurrency limit exceeded for account", http.StatusTooManyRequests)
-	service.MarkOpsStreamError(c, "upstream_error", "Upstream request failed", http.StatusBadGateway)
+	service.MarkOpsStreamError(c, "upstream_error", infraerrors.UpstreamRequestFailed, http.StatusBadGateway)
 
 	se, ok := service.GetOpsStreamError(c)
 	require.True(t, ok)
@@ -840,7 +841,7 @@ func TestClassifyOpsRoutingCapacityMarkerExcludesMaskedSelectionFailureFromSLA(t
 	phase, isBusinessLimited, errorOwner, errorSource := classifyOpsErrorLog(
 		c,
 		"api_error",
-		"Service temporarily unavailable",
+		infraerrors.NoAvailableAccounts,
 		"",
 		http.StatusServiceUnavailable,
 	)
@@ -1138,7 +1139,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		{
 			name:        "gateway subscription invalid cache recheck",
 			errType:     "billing_error",
-			message:     "subscription is invalid or expired",
+			message:     infraerrors.SubscriptionInvalid,
 			code:        "billing_error",
 			status:      http.StatusForbidden,
 			wantErrType: "billing_error",
@@ -1156,7 +1157,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		{
 			name:        "gateway billing cache insufficient balance",
 			errType:     "billing_error",
-			message:     "insufficient balance",
+			message:     infraerrors.InsufficientBalance,
 			code:        "",
 			status:      http.StatusForbidden,
 			wantErrType: "billing_error",
@@ -1183,7 +1184,16 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		{
 			name:        "gateway group RPM limit",
 			errType:     "api_error",
-			message:     "group requests-per-minute limit exceeded",
+			message:     infraerrors.GroupRPMExceeded,
+			code:        "rate_limit_exceeded",
+			status:      http.StatusTooManyRequests,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "gateway user RPM limit",
+			errType:     "api_error",
+			message:     infraerrors.UserRPMExceeded,
 			code:        "rate_limit_exceeded",
 			status:      http.StatusTooManyRequests,
 			wantErrType: "api_error",
@@ -1201,7 +1211,25 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		{
 			name:        "user platform daily quota exhausted",
 			errType:     "api_error",
-			message:     "Daily usage quota exhausted for this platform.",
+			message:     infraerrors.PlatformDailyQuota,
+			code:        "rate_limit_exceeded",
+			status:      http.StatusTooManyRequests,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "user platform weekly quota exhausted",
+			errType:     "api_error",
+			message:     infraerrors.PlatformWeeklyQuota,
+			code:        "rate_limit_exceeded",
+			status:      http.StatusTooManyRequests,
+			wantErrType: "api_error",
+			wantPhase:   "request",
+		},
+		{
+			name:        "user platform monthly quota exhausted",
+			errType:     "api_error",
+			message:     infraerrors.PlatformMonthlyQuota,
 			code:        "rate_limit_exceeded",
 			status:      http.StatusTooManyRequests,
 			wantErrType: "api_error",
@@ -1210,7 +1238,7 @@ func TestClassifyOpsLocalBusinessLimitErrorsExcludedFromSLA(t *testing.T) {
 		{
 			name:        "local pending queue limit",
 			errType:     "rate_limit_error",
-			message:     "Too many pending requests, please retry later",
+			message:     infraerrors.GatewayQueueFull,
 			code:        "",
 			status:      http.StatusTooManyRequests,
 			wantErrType: "rate_limit_error",
@@ -1503,7 +1531,7 @@ func TestClassifyOpsUpstreamAuthTextStillCountsForSLA(t *testing.T) {
 		},
 		{
 			name:    "provider local quota shaped error",
-			message: "Daily usage quota exhausted for this platform.",
+			message: infraerrors.PlatformDailyQuota,
 			code:    "rate_limit_exceeded",
 			status:  http.StatusTooManyRequests,
 		},

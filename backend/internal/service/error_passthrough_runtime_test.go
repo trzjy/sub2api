@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,13 +29,13 @@ func TestApplyErrorPassthroughRule_NoBoundService(t *testing.T) {
 		[]byte(`{"error":{"message":"invalid schema"}}`),
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	)
 
 	assert.False(t, matched)
 	assert.Equal(t, http.StatusBadGateway, status)
 	assert.Equal(t, "upstream_error", errType)
-	assert.Equal(t, "Upstream request failed", errMsg)
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errMsg)
 }
 
 func TestGatewayHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
@@ -60,7 +61,7 @@ func TestGatewayHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errField["message"])
 }
 
 func TestOpenAIHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
@@ -86,7 +87,7 @@ func TestOpenAIHandleErrorResponse_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "upstream_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errField["message"])
 }
 
 func TestOpenAIHandleErrorResponse_ContextWindow502KeepsMessageWithoutFailover(t *testing.T) {
@@ -136,7 +137,7 @@ func TestGeminiWriteGeminiMappedError_NoRuleKeepsDefault(t *testing.T) {
 	errField, ok := payload["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "invalid_request_error", errField["type"])
-	assert.Equal(t, "Upstream request failed", errField["message"])
+	assert.Equal(t, infraerrors.UpstreamRequestFailed, errField["message"])
 }
 
 func TestGatewayHandleErrorResponse_AppliesRuleFor422(t *testing.T) {
@@ -243,7 +244,7 @@ func TestApplyErrorPassthroughRule_SkipMonitoringSetsContextKey(t *testing.T) {
 		[]byte(`{"error":{"message":"prompt is too long"}}`),
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	)
 
 	assert.True(t, matched)
@@ -273,7 +274,7 @@ func TestApplyErrorPassthroughRule_NoSkipMonitoringDoesNotSetContextKey(t *testi
 		[]byte(`{"error":{"message":"prompt is too long"}}`),
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	)
 
 	assert.True(t, matched)

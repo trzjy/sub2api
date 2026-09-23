@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
@@ -611,7 +612,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		MarkResponseCommitted(c)
 		c.JSON(status, gin.H{
@@ -718,23 +719,23 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream authentication failed, please contact administrator"
+		errMsg = infraerrors.UpstreamAuthFailed
 	case 402:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream payment required: insufficient balance or billing issue"
+		errMsg = infraerrors.UpstreamPaymentRequired
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream access forbidden, please contact administrator"
+		errMsg = infraerrors.UpstreamForbidden
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded, please retry later"
+		errMsg = infraerrors.UpstreamRateLimited
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = infraerrors.UpstreamRequestFailed
 	}
 	if isOpenAIContextWindowError(upstreamMsg, body) && upstreamMsg != "" {
 		errMsg = upstreamMsg
@@ -821,7 +822,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	// Apply error passthrough rules
 	if status, errType, errMsg, matched := applyErrorPassthroughRule(
 		c, account.Platform, resp.StatusCode, body,
-		http.StatusBadGateway, "api_error", "Upstream request failed",
+		http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed,
 	); matched {
 		MarkResponseCommitted(c)
 		writeError(c, status, errType, errMsg)

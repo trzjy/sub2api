@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
@@ -87,7 +89,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
+		googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
 		return
 	}
 
@@ -203,7 +205,7 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-		googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts: "+err.Error())
+		googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
 		return
 	}
 
@@ -313,7 +315,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlotWithWait(c, scope, authSubject.UserID, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
-		msg := err.Error()
+		msg := fmt.Sprintf("Concurrency limit exceeded for %s, please retry later", scope.Kind)
 		// 订阅/计量用户撞并发上限时渲染可配文案；account 维度（本路径不涉及）保持英文。
 		if tmpl := h.settingService.GetConcurrencyLimitMessage(c.Request.Context()); strings.TrimSpace(tmpl) != "" {
 			var ce *ConcurrencyError
@@ -463,9 +465,6 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
-					message = "No available Gemini accounts: " + err.Error()
-				}
 				googleError(c, cls.Status, message)
 				return
 			}
@@ -515,7 +514,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
-				googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
+				googleError(c, http.StatusServiceUnavailable, infraerrors.NoAvailableAccounts)
 				return
 			}
 			accountWaitCounted := false
@@ -527,7 +526,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					zap.Int64("account_id", account.ID),
 					zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 				)
-				googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
+				googleError(c, http.StatusTooManyRequests, infraerrors.GatewayQueueFull)
 				return
 			}
 			if err == nil && canWait {
@@ -549,7 +548,17 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				googleError(c, http.StatusTooManyRequests, err.Error())
+				// ConcurrencyError.Error() 是内部英文标识，不得直接写给下游：
+				// 按类型断言取固定中文文案；HTTP 429 与 googleError 输出格式不变。
+				var slotErr *ConcurrencyError
+				switch {
+				case errors.As(err, &slotErr) && slotErr.IsTimeout:
+					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotWaitTimeout)
+				case errors.As(err, &slotErr):
+					googleError(c, http.StatusTooManyRequests, infraerrors.AccountSlotConcurrencyLimit)
+				default:
+					googleError(c, http.StatusTooManyRequests, infraerrors.ConcurrencyFallback)
+				}
 				return
 			}
 			if accountWaitCounted {
@@ -716,7 +725,7 @@ func parseGeminiModelAction(rest string) (model string, action string, err error
 
 func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError) {
 	if failoverErr == nil {
-		googleError(c, http.StatusBadGateway, "Upstream request failed")
+		googleError(c, http.StatusBadGateway, infraerrors.UpstreamRequestFailed)
 		return
 	}
 
@@ -759,17 +768,17 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 func mapGeminiUpstreamError(statusCode int) (int, string) {
 	switch statusCode {
 	case 401:
-		return http.StatusBadGateway, "Upstream authentication failed, please contact administrator"
+		return http.StatusBadGateway, infraerrors.UpstreamAuthFailed
 	case 403:
-		return http.StatusBadGateway, "Upstream access forbidden, please contact administrator"
+		return http.StatusBadGateway, infraerrors.UpstreamForbidden
 	case 429:
-		return http.StatusTooManyRequests, "Upstream rate limit exceeded, please retry later"
+		return http.StatusTooManyRequests, infraerrors.UpstreamRateLimited
 	case 529:
-		return http.StatusServiceUnavailable, "Upstream service overloaded, please retry later"
+		return http.StatusServiceUnavailable, infraerrors.UpstreamOverloaded
 	case 500, 502, 503, 504:
-		return http.StatusBadGateway, "Upstream service temporarily unavailable"
+		return http.StatusBadGateway, infraerrors.UpstreamUnavailable
 	default:
-		return http.StatusBadGateway, "Upstream request failed"
+		return http.StatusBadGateway, infraerrors.UpstreamRequestFailed
 	}
 }
 

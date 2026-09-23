@@ -21,6 +21,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -800,7 +801,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				continue
 			}
 			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+			return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 		}
 
 		// Special-case: signature/thought_signature validation errors are not transient, but may be fixed by
@@ -1365,7 +1366,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				}, nil
 			}
 			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeGoogleError(c, http.StatusBadGateway, "Upstream request failed after retries: "+safeErr)
+			return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.UpstreamRequestFailed)
 		}
 
 		// 错误策略优先：匹配则跳过重试直接处理。
@@ -1865,7 +1866,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		c.JSON(status, gin.H{
 			"type":  "error",
@@ -1916,7 +1917,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "authentication_error"
 		}
 		if errMsg == "" {
-			errMsg = "Upstream authentication failed, please contact administrator"
+			errMsg = infraerrors.UpstreamAuthFailed
 		}
 	case 403:
 		if statusCode == 0 {
@@ -1926,7 +1927,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "permission_error"
 		}
 		if errMsg == "" {
-			errMsg = "Upstream access forbidden, please contact administrator"
+			errMsg = infraerrors.UpstreamForbidden
 		}
 	case 404:
 		if statusCode == 0 {
@@ -1946,7 +1947,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "rate_limit_error"
 		}
 		if errMsg == "" {
-			errMsg = "Upstream rate limit exceeded, please retry later"
+			errMsg = infraerrors.UpstreamRateLimited
 		}
 	case 529:
 		if statusCode == 0 {
@@ -1956,7 +1957,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "overloaded_error"
 		}
 		if errMsg == "" {
-			errMsg = "Upstream service overloaded, please retry later"
+			errMsg = infraerrors.UpstreamOverloaded
 		}
 	case 500, 502, 503, 504:
 		if statusCode == 0 {
@@ -1973,7 +1974,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			}
 		}
 		if errMsg == "" {
-			errMsg = "Upstream service temporarily unavailable"
+			errMsg = infraerrors.UpstreamUnavailable
 		}
 	default:
 		if statusCode == 0 {
@@ -1983,7 +1984,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "upstream_error"
 		}
 		if errMsg == "" {
-			errMsg = "Upstream request failed"
+			errMsg = infraerrors.UpstreamRequestFailed
 		}
 	}
 

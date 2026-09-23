@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -129,7 +130,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		if c.Request.Context().Err() != nil {
 			return nil, s.writeClaudeError(c, http.StatusBadGateway, "client_disconnected", "Client disconnected before upstream response")
 		}
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries")
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 	}
 	resp := result.resp
 	defer func() { _ = resp.Body.Close() }()

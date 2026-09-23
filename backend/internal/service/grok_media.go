@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -1264,7 +1265,7 @@ func (s *OpenAIGatewayService) handleGrokMediaErrorResponse(
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		MarkResponseCommitted(c)
 		writeGrokMediaErrorResponse(c, status, errType, errMsg)

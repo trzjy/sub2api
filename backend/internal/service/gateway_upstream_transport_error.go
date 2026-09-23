@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -20,7 +21,7 @@ const gatewayTransportErrorTempUnschedDuration = 10 * time.Minute
 // the failover error for a transport-level failure. Kept identical to the
 // legacy inline 502 body so the client-visible payload is unchanged if
 // failover is ultimately exhausted.
-var gatewayTransportFailoverBody = []byte(`{"type":"error","error":{"type":"upstream_error","message":"Upstream request failed"}}`)
+var gatewayTransportFailoverBody = []byte(`{"type":"error","error":{"type":"upstream_error","message":"` + infraerrors.UpstreamRequestFailed + `"}}`)
 
 // handleUpstreamTransportError handles a transport-level upstream failure on
 // the Anthropic/Bedrock forward paths (Do/DoWithTLS returned a non-HTTP error:

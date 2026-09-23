@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -22,7 +23,7 @@ const openAITransportErrorTempUnschedDuration = 10 * time.Minute
 // failover error for a transport-level failure. Kept identical to the legacy
 // inline 502 body so the client-visible payload is unchanged if failover is
 // ultimately exhausted.
-var openAITransportFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"Upstream request failed"}}`)
+var openAITransportFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"` + infraerrors.UpstreamRequestFailed + `"}}`)
 
 // upstreamTransportErrorClass describes how to react to a transport-level upstream
 // failure — i.e. the HTTP round-trip never completed (proxy / DNS / TCP / TLS

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 const statusClientClosedRequest = 499
@@ -47,7 +49,7 @@ func concurrencyErrorResponse(err error, slotType string, concurrencyLimitMessag
 	var waitQueueFullErr *WaitQueueFullError
 	if errors.As(err, &waitQueueFullErr) {
 		return http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode,
-			"Too many pending requests, please retry later"
+			infraerrors.GatewayQueueFull
 	}
 
 	var concurrencyErr *ConcurrencyError
@@ -68,5 +70,5 @@ func concurrencyErrorResponse(err error, slotType string, concurrencyLimitMessag
 		return statusClientClosedRequest, "api_error", "", "context canceled"
 	}
 
-	return http.StatusServiceUnavailable, "api_error", "", "Service temporarily unavailable, please retry later"
+	return http.StatusServiceUnavailable, "api_error", "", infraerrors.ConcurrencyFallback
 }

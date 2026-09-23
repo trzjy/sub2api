@@ -58,7 +58,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyRegistrationEnabled:                       "true",
 		SettingKeyEmailVerifyEnabled:                        "false",
 		SettingKeyRegistrationEmailSuffixWhitelist:          "[]",
-		SettingKeyRegistrationEmailSuffixBlacklist:         "[]",
+		SettingKeyRegistrationEmailSuffixBlacklist:          "[]",
 		SettingKeyRegistrationEmailDomainQuotaEnabled:       "false",
 		SettingKeyPromoCodeEnabled:                          "true", // 默认启用优惠码功能
 		SettingKeyLoginAgreementEnabled:                     "false",
@@ -69,7 +69,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyForwardedClientIPHeaders:                  string(forwardedClientIPHeadersJSON),
 		settingKeyForwardedClientIPModeV2:                   "true",
 		SettingKeySiteName:                                  "Sub2API",
-		SettingKeyConcurrencyLimitMessage:                   "",
+		SettingKeyConcurrencyLimitMessage:                   infraerrors.ConcurrencyDefaultTemplate,
 		SettingKeySiteLogo:                                  "",
 		SettingKeyPurchaseSubscriptionEnabled:               "false",
 		SettingKeyPurchaseSubscriptionURL:                   "",

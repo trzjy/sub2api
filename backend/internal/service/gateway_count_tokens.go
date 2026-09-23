@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/tidwall/gjson"
 
@@ -225,12 +226,12 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 		}
 
 		// 返回简化的错误响应
-		errMsg := "Upstream request failed"
+		errMsg := infraerrors.UpstreamRequestFailed
 		switch resp.StatusCode {
 		case 429:
-			errMsg = "Rate limit exceeded"
+			errMsg = infraerrors.UpstreamRateLimited
 		case 529:
-			errMsg = "Service overloaded"
+			errMsg = infraerrors.UpstreamOverloaded
 		}
 		s.countTokensError(c, resp.StatusCode, "upstream_error", errMsg)
 		if upstreamMsg == "" {
@@ -340,12 +341,12 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 			Detail:             upstreamDetail,
 		})
 
-		errMsg := "Upstream request failed"
+		errMsg := infraerrors.UpstreamRequestFailed
 		switch resp.StatusCode {
 		case 429:
-			errMsg = "Rate limit exceeded"
+			errMsg = infraerrors.UpstreamRateLimited
 		case 529:
-			errMsg = "Service overloaded"
+			errMsg = infraerrors.UpstreamOverloaded
 		}
 		s.countTokensError(c, resp.StatusCode, "upstream_error", errMsg)
 		if upstreamMsg == "" {

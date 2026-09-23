@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/tidwall/gjson"
@@ -450,7 +451,7 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		c.JSON(status, gin.H{
 			"type": "error",
@@ -488,27 +489,27 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream authentication failed, please contact administrator"
+		errMsg = infraerrors.UpstreamAuthFailed
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream access forbidden, please contact administrator"
+		errMsg = infraerrors.UpstreamForbidden
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded, please retry later"
+		errMsg = infraerrors.UpstreamRateLimited
 	case 529:
 		statusCode = http.StatusServiceUnavailable
 		errType = "overloaded_error"
-		errMsg = "Upstream service overloaded, please retry later"
+		errMsg = infraerrors.UpstreamOverloaded
 	case 500, 502, 503, 504:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream service temporarily unavailable"
+		errMsg = infraerrors.UpstreamUnavailable
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = infraerrors.UpstreamRequestFailed
 	}
 
 	// 返回自定义错误响应
@@ -615,7 +616,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		respBody,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed after retries",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		c.JSON(status, gin.H{
 			"type": "error",
@@ -640,7 +641,7 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 		"type": "error",
 		"error": gin.H{
 			"type":    "upstream_error",
-			"message": "Upstream request failed after retries",
+			"message": infraerrors.UpstreamRequestFailed,
 		},
 	})
 

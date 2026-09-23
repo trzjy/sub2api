@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -70,7 +71,7 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	return noAccountErrorClassification{
 		Status:  http.StatusTooManyRequests,
 		ErrType: "rate_limit_error",
-		Message: "All available accounts are currently rate-limited. Please retry later.",
+		Message: infraerrors.AllAccountsRateLimited,
 	}
 }
 
@@ -109,7 +110,7 @@ func classifyNoAccountError(
 	fallback := noAccountErrorClassification{
 		Status:  http.StatusServiceUnavailable,
 		ErrType: "api_error",
-		Message: "Service temporarily unavailable",
+		Message: infraerrors.NoAvailableAccounts,
 	}
 
 	routingModel = strings.TrimSpace(routingModel)
@@ -126,7 +127,7 @@ func classifyNoAccountError(
 		return noAccountErrorClassification{
 			Status:        http.StatusNotFound,
 			ErrType:       "model_not_found",
-			Message:       fmt.Sprintf("Model %q is not supported by any configured account in this group", displayModel),
+			Message:       fmt.Sprintf(infraerrors.ModelNotInGroup, displayModel),
 			ModelNotFound: true,
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -89,7 +90,7 @@ func (e *OpenAIImagesUpstreamError) clientErrorType() string {
 
 func (e *OpenAIImagesUpstreamError) clientMessage() string {
 	if e == nil {
-		return "Upstream request failed"
+		return infraerrors.UpstreamRequestFailed
 	}
 	if trimmed := strings.TrimSpace(e.Message); trimmed != "" {
 		return trimmed
@@ -97,7 +98,7 @@ func (e *OpenAIImagesUpstreamError) clientMessage() string {
 	if trimmed := strings.TrimSpace(e.Code); trimmed != "" {
 		return trimmed
 	}
-	return "Upstream request failed"
+	return infraerrors.UpstreamRequestFailed
 }
 
 // IsOpenAIImagesRetryableUpstreamError reports whether an Images error is an
@@ -828,7 +829,7 @@ func openAIImagesUpstreamErrorFromGJSON(errorObj gjson.Result, upstreamRequestID
 	param := strings.TrimSpace(errorObj.Get("param").String())
 	statusCode := openAIImagesSSEErrorStatus(errType, code)
 	if message == "" {
-		message = "Upstream request failed"
+		message = infraerrors.UpstreamRequestFailed
 	}
 	return &OpenAIImagesUpstreamError{
 		StatusCode:        statusCode,
@@ -871,7 +872,7 @@ func openAIImagesUpstreamErrorFromHTTP(statusCode int, header http.Header, body 
 	param := strings.TrimSpace(gjson.GetBytes(body, "error.param").String())
 	message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(body)))
 	if message == "" {
-		message = fmt.Sprintf("Upstream request failed (status %d)", statusCode)
+		message = infraerrors.UpstreamRequestFailed
 	}
 	if errType == "" {
 		errType = openAIImagesErrorTypeForStatus(statusCode)
@@ -940,7 +941,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		upErr := &OpenAIImagesUpstreamError{
 			StatusCode:        status,
@@ -1091,7 +1092,7 @@ func openAIImagesStreamPrefix(parsed *OpenAIImagesRequest) string {
 func buildOpenAIImagesStreamErrorBody(message string) []byte {
 	body := []byte(`{"type":"error","error":{"type":"upstream_error","message":""}}`)
 	if strings.TrimSpace(message) == "" {
-		message = "upstream request failed"
+		message = infraerrors.UpstreamRequestFailed
 	}
 	body, _ = sjson.SetBytes(body, "error.message", message)
 	return body

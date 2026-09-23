@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	coderws "github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
@@ -906,14 +907,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if errors.Is(acquireErr, errOpenAIWSPreferredConnUnavailable) {
 				return nil, NewOpenAIWSClientCloseError(
 					coderws.StatusPolicyViolation,
-					"upstream continuation connection is unavailable; please restart the conversation",
+					infraerrors.UpstreamWSContinuationUnavailable,
 					acquireErr,
 				)
 			}
 			if errors.Is(acquireErr, context.DeadlineExceeded) || errors.Is(acquireErr, errOpenAIWSConnQueueFull) {
 				return nil, NewOpenAIWSClientCloseError(
 					coderws.StatusTryAgainLater,
-					"upstream websocket is busy, please retry later",
+					infraerrors.UpstreamWSConnectTimeout,
 					acquireErr,
 				)
 			}
@@ -1730,7 +1731,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					resetSessionLease(true)
 					return NewOpenAIWSClientCloseError(
 						coderws.StatusPolicyViolation,
-						"upstream continuation connection is unavailable; please restart the conversation",
+						infraerrors.UpstreamWSContinuationUnavailable,
 						pingErr,
 					)
 				}

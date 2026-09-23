@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -62,7 +63,7 @@ func TestClassifyNoAccountError_NilDiagnoser_Falls503(t *testing.T) {
 }
 
 func TestClassifySelectionFailureError_RateLimitedPool(t *testing.T) {
-	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: "Service temporarily unavailable"}
+	fallback := noAccountErrorClassification{Status: http.StatusServiceUnavailable, ErrType: "api_error", Message: infraerrors.NoAvailableAccounts}
 
 	got := classifySelectionFailureError(
 		fmt.Errorf("no available accounts supporting model: gpt-5.6-sol (total=3 eligible=0 model_rate_limited=3)"),
@@ -71,7 +72,7 @@ func TestClassifySelectionFailureError_RateLimitedPool(t *testing.T) {
 
 	require.Equal(t, http.StatusTooManyRequests, got.Status)
 	require.Equal(t, "rate_limit_error", got.ErrType)
-	require.Contains(t, got.Message, "rate-limited")
+	require.Contains(t, got.Message, infraerrors.AllAccountsRateLimited)
 	require.Equal(t, fallback, classifySelectionFailureError(fmt.Errorf("model_rate_limited=0"), fallback))
 	require.Equal(t, fallback, classifySelectionFailureError(fmt.Errorf("no available accounts"), fallback))
 }
@@ -291,7 +292,7 @@ func TestClassifySelectionFailureError_StillUpgradesNonModelNotFoundFallback(t *
 	fallback := noAccountErrorClassification{
 		Status:  http.StatusServiceUnavailable,
 		ErrType: "api_error",
-		Message: "Service temporarily unavailable",
+		Message: infraerrors.NoAvailableAccounts,
 	}
 
 	got := classifySelectionFailureError(

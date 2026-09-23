@@ -25,7 +25,7 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 	}
 	if err != nil {
 		if errors.Is(err, service.ErrNoPinnedCodexModelsAccounts) {
-			writeOpenAIModelsError(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI model discovery accounts")
+			writeOpenAIModelsError(c, http.StatusServiceUnavailable, "upstream_error", infraerrors.NoAvailableAccounts)
 			return
 		}
 		writeOpenAIModelsError(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))

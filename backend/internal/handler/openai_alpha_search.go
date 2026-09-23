@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -155,7 +156,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
 			} else {
-				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 			}
 			return
 		}
@@ -198,7 +199,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		if !errors.As(err, &failoverErr) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestedModel, false, result), false, nil, err)
 			if c.Writer.Size() == writerSizeBeforeForward {
-				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 			}
 			reqLog.Warn("openai_alpha_search.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			return

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -142,7 +143,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 				continue
 			}
 			setOpsUpstreamError(c, 0, safeErr, "")
-			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries: "+safeErr)
+			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 		}
 
 		if matched, rebuilt := s.checkErrorPolicyInLoop(ctx, account, resp, mappedModel); matched {
@@ -842,14 +843,14 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		body,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	); matched {
 		return s.writeChatCompletionsError(c, status, errType, errMsg)
 	}
 
 	statusCode := http.StatusBadGateway
 	errType := "upstream_error"
-	errMsg := "Upstream request failed"
+	errMsg := infraerrors.UpstreamRequestFailed
 	if mapped := mapGeminiErrorBodyToClaudeError(body); mapped != nil {
 		if mapped.Type != "" {
 			errType = mapped.Type
@@ -871,7 +872,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			errType = "invalid_request_error"
 		}
 		// 400 是确定性的请求错误：回传上游 message（已脱敏），客户端据此定位非法字段。
-		if errMsg == "Upstream request failed" {
+		if errMsg == infraerrors.UpstreamRequestFailed {
 			if upstreamMsg != "" {
 				errMsg = upstreamMsg
 			} else {
@@ -883,7 +884,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "not_found_error"
 		}
-		if errMsg == "Upstream request failed" {
+		if errMsg == infraerrors.UpstreamRequestFailed {
 			errMsg = "Resource not found"
 		}
 	case http.StatusTooManyRequests:
@@ -891,20 +892,20 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 		if errType == "upstream_error" {
 			errType = "rate_limit_error"
 		}
-		if errMsg == "Upstream request failed" {
-			errMsg = "Upstream rate limit exceeded, please retry later"
+		if errMsg == infraerrors.UpstreamRequestFailed {
+			errMsg = infraerrors.UpstreamRateLimited
 		}
 	case 529:
 		statusCode = http.StatusServiceUnavailable
 		if errType == "upstream_error" {
 			errType = "overloaded_error"
 		}
-		if errMsg == "Upstream request failed" {
-			errMsg = "Upstream service overloaded, please retry later"
+		if errMsg == infraerrors.UpstreamRequestFailed {
+			errMsg = infraerrors.UpstreamOverloaded
 		}
 	}
 
-	if upstreamMsg != "" && errMsg == "Upstream request failed" {
+	if upstreamMsg != "" && errMsg == infraerrors.UpstreamRequestFailed {
 		errMsg = upstreamMsg
 	}
 	return s.writeChatCompletionsError(c, statusCode, errType, errMsg)

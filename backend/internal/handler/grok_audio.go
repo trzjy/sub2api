@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -114,7 +115,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	}
 	if selection == nil || selection.Account == nil || release == nil || upstream == nil {
 		if !candidateSeen {
-			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
+			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 		} else {
 			h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Grok realtime upstream unavailable")
 		}
@@ -241,7 +242,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
 			} else {
-				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
+				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 			}
 			return
 		}

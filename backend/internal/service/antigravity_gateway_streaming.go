@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -738,23 +739,23 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "authentication_error"
-		errMsg = "Upstream authentication failed"
+		errMsg = infraerrors.UpstreamAuthFailed
 	case 403:
 		statusCode = http.StatusBadGateway
 		errType = "permission_error"
-		errMsg = "Upstream access forbidden"
+		errMsg = infraerrors.UpstreamForbidden
 	case 429:
 		statusCode = http.StatusTooManyRequests
 		errType = "rate_limit_error"
-		errMsg = "Upstream rate limit exceeded"
+		errMsg = infraerrors.UpstreamRateLimited
 	case 529:
 		statusCode = http.StatusServiceUnavailable
 		errType = "overloaded_error"
-		errMsg = "Upstream service overloaded"
+		errMsg = infraerrors.UpstreamOverloaded
 	default:
 		statusCode = http.StatusBadGateway
 		errType = "upstream_error"
-		errMsg = "Upstream request failed"
+		errMsg = infraerrors.UpstreamRequestFailed
 	}
 
 	c.JSON(statusCode, gin.H{

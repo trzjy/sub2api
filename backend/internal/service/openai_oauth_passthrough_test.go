@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -1306,7 +1307,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			responseBody:   `<!DOCTYPE html><title>secret-upstream.example denied the request</title>`,
 			retryAfter:     "17",
 			wantStatus:     http.StatusBadGateway,
-			wantMessage:    "Upstream access denied",
+			wantMessage:    infraerrors.UpstreamForbidden,
 			wantRetryAfter: "17",
 		},
 		{
@@ -1315,7 +1316,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			contentType:  "application/json",
 			responseBody: `{"error":{"message":"invalid secret-upstream.example token","type":"authentication_error","code":"invalid_api_key","param":"api_key"},"rate_limit":{"remaining":0}}`,
 			wantStatus:   http.StatusBadGateway,
-			wantMessage:  "Upstream authentication failed",
+			wantMessage:  infraerrors.UpstreamAuthFailed,
 		},
 		// 瞬时 5xx（500/502/503/504/520-524）对 API-key 账号已改走多账号
 		// failover（见 APIKeyPassthrough_Transient5xxTriggersFailover），此处
@@ -1326,7 +1327,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			contentType:  "text/html; charset=UTF-8",
 			responseBody: `<!DOCTYPE html><title>secret-upstream.example | 530: Origin DNS error</title>`,
 			wantStatus:   530,
-			wantMessage:  "Upstream service temporarily unavailable",
+			wantMessage:  infraerrors.UpstreamUnavailable,
 		},
 		{
 			name:         "structured 5xx",
@@ -1334,7 +1335,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			contentType:  "application/json",
 			responseBody: `{"error":{"message":"secret-upstream.example internal failure"}}`,
 			wantStatus:   http.StatusNotImplemented,
-			wantMessage:  "Upstream service temporarily unavailable",
+			wantMessage:  infraerrors.UpstreamUnavailable,
 		},
 		{
 			name:         "unstructured 4xx",
@@ -1342,7 +1343,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			contentType:  "text/plain",
 			responseBody: `proxy secret-upstream.example rejected the request`,
 			wantStatus:   http.StatusBadRequest,
-			wantMessage:  "Upstream request failed",
+			wantMessage:  infraerrors.UpstreamRequestFailed,
 		},
 		{
 			name:         "malicious valid json 4xx",
@@ -1351,7 +1352,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_RebuildsUpstreamErrors(t *testin
 			responseBody: `{"error":{"message":"secret-upstream.example invalid parameter","type":"invalid_request_error","code":"upstream_secret_code","param":"private_field","internal_token":"sk-upstream-secret"},"rate_limit":{"remaining":0,"reset":"internal-window"},"debug":{"admin":"root"},"redirect":"https://secret-upstream.example/admin"}`,
 			retryAfter:   "not-a-valid-delay",
 			wantStatus:   http.StatusBadRequest,
-			wantMessage:  "Upstream request failed",
+			wantMessage:  infraerrors.UpstreamRequestFailed,
 		},
 	}
 
@@ -1531,7 +1532,7 @@ func TestOpenAIGatewayService_APIKeyPassthrough_CompactErrorAfterKeepaliveIsFail
 	require.Equal(t, "response.failed", events[0][0])
 	require.Equal(t, "failed", gjson.Get(events[0][1], "response.status").String())
 	require.Equal(t, "upstream_error", gjson.Get(events[0][1], "response.error.code").String())
-	require.Equal(t, "Upstream request failed", gjson.Get(events[0][1], "response.error.message").String())
+	require.Equal(t, infraerrors.UpstreamRequestFailed, gjson.Get(events[0][1], "response.error.message").String())
 	require.NotContains(t, rec.Body.String(), "secret-upstream.example")
 }
 

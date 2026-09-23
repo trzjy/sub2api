@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -351,7 +352,7 @@ func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {
 		message = http.StatusText(statusCode)
 	}
 	if message == "" {
-		message = "upstream request failed"
+		message = infraerrors.UpstreamRequestFailed
 	}
 	event := map[string]any{
 		"type":   "error",
@@ -363,7 +364,7 @@ func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {
 	}
 	body, err := json.Marshal(event)
 	if err != nil {
-		return []byte(`{"type":"error","error":{"type":"upstream_error","message":"upstream request failed"}}`)
+		return []byte(`{"type":"error","error":{"type":"upstream_error","message":"` + infraerrors.UpstreamRequestFailed + `"}}`)
 	}
 	return body
 }
@@ -551,7 +552,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 			}
 			safeErr := sanitizeUpstreamErrorMessage(err.Error())
-			clientError := buildOpenAIWSHTTPBridgeErrorEvent(http.StatusBadGateway, "Upstream request failed")
+			clientError := buildOpenAIWSHTTPBridgeErrorEvent(http.StatusBadGateway, infraerrors.UpstreamRequestFailed)
 			if writeErr := writeClientMessage(clientError); writeErr == nil {
 				markOpenAIWSClientVisibleFailure(c, "error", clientError)
 			}

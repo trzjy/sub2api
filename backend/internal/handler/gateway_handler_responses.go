@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -183,9 +184,6 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
-					message = "No available accounts: " + err.Error()
-				}
 				h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
 				return
 			}
@@ -200,7 +198,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				if fs.LastFailoverErr != nil {
 					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 				} else {
-					h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", "All available accounts exhausted")
+					h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", infraerrors.AllAccountsExhausted)
 				}
 				return
 			}
@@ -213,7 +211,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
-				h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
+				h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 				return
 			}
 			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
@@ -373,7 +371,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	if lastErr != nil && lastErr.StatusCode > 0 {
 		statusCode = lastErr.StatusCode
 	}
-	status, code, message := statusCode, "server_error", "All available accounts exhausted"
+	status, code, message := statusCode, "server_error", infraerrors.AllAccountsExhausted
 	if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message = credentialFailoverClientResponse(lastErr)
 	} else if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
@@ -386,7 +384,7 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		status, code, message = http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage()
 	} else if lastErr != nil && statusCode == http.StatusTooManyRequests {
-		status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+		status, code, message = http.StatusTooManyRequests, "rate_limit_error", infraerrors.AllAccountsRateLimited
 	}
 	if streamStarted {
 		// A slot-wait heartbeat commits HTTP 200 before any upstream response.

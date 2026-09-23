@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -2276,8 +2277,8 @@ func isOpsLocalBusinessLimitError(code string, msg string) bool {
 	return strings.Contains(msg, "api key in query parameter is deprecated") ||
 		strings.Contains(msg, "query parameter api_key is deprecated") ||
 		strings.Contains(msg, "no active subscription found for this group") ||
-		strings.Contains(msg, "subscription is invalid or expired") ||
-		strings.Contains(msg, opsErrInsufficientBalance) ||
+		strings.Contains(msg, infraerrors.SubscriptionInvalid) ||
+		strings.Contains(msg, infraerrors.InsufficientBalance) ||
 		strings.Contains(msg, "insufficient account balance") ||
 		strings.Contains(msg, "api key group platform is not gemini") ||
 		strings.Contains(msg, "api key 额度已用完") ||
@@ -2287,9 +2288,15 @@ func isOpsLocalBusinessLimitError(code string, msg string) bool {
 		strings.Contains(msg, "daily usage limit exceeded") ||
 		strings.Contains(msg, "weekly usage limit exceeded") ||
 		strings.Contains(msg, "monthly usage limit exceeded") ||
-		strings.Contains(msg, "usage quota exhausted for this platform") ||
-		strings.Contains(msg, "requests-per-minute limit exceeded") ||
-		strings.Contains(msg, "too many pending requests") ||
+		// 平台配额按周期分化为三条中文文案，不再共享子串，逐条匹配。
+		strings.Contains(msg, infraerrors.PlatformDailyQuota) ||
+		strings.Contains(msg, infraerrors.PlatformWeeklyQuota) ||
+		strings.Contains(msg, infraerrors.PlatformMonthlyQuota) ||
+		// RPM 限流按维度分化为分组/用户两条中文文案。
+		strings.Contains(msg, infraerrors.GroupRPMExceeded) ||
+		strings.Contains(msg, infraerrors.UserRPMExceeded) ||
+		strings.Contains(msg, infraerrors.GatewayQueueFull) ||
+		// account 维度并发超限仍走契约保护的英文默认文案，保留该匹配。
 		strings.Contains(msg, "concurrency limit exceeded") ||
 		strings.Contains(msg, "image generation concurrency limit exceeded") ||
 		strings.Contains(msg, "this group is restricted to claude code clients") ||
@@ -2454,11 +2461,13 @@ func shouldSkipOpsErrorLog(ctx context.Context, ops *service.OpsService, message
 		}
 	}
 
-	// Check if insufficient balance errors should be ignored
+	// Check if insufficient balance errors should be ignored.
+	// 本地余额文案已中文化：消息匹配点改用中文常量；body 匹配保留英文常量
+	// （上游 402 类响应体仍为英文）并追加中文常量（本地错误响应体）。
 	if settings.IgnoreInsufficientBalanceErrors {
-		if strings.Contains(bodyLower, opsErrInsufficientBalance) || strings.Contains(bodyLower, opsErrInsufficientAccountBalance) ||
+		if strings.Contains(bodyLower, opsErrInsufficientBalance) || strings.Contains(bodyLower, infraerrors.InsufficientBalance) || strings.Contains(bodyLower, opsErrInsufficientAccountBalance) ||
 			strings.Contains(bodyLower, opsErrInsufficientQuota) ||
-			strings.Contains(msgLower, opsErrInsufficientBalance) || strings.Contains(msgLower, opsErrInsufficientAccountBalance) {
+			strings.Contains(msgLower, infraerrors.InsufficientBalance) || strings.Contains(msgLower, opsErrInsufficientAccountBalance) {
 			return true
 		}
 	}

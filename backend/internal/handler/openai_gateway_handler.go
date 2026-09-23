@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
@@ -678,7 +679,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			if len(failedAccountIDs) == 0 {
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
-					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available accounts support /responses/compact", streamStarted)
+					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", infraerrors.NoAvailableAccountsCompact, streamStarted)
 					return
 				}
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
@@ -1313,7 +1314,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
-					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
+					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
 				}
 				return
 			}
@@ -1610,7 +1611,7 @@ func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, stre
 	if c == nil || c.Writer == nil || c.Writer.Written() {
 		return false
 	}
-	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
+	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
 	return true
 }
 
@@ -2145,7 +2146,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	}
 	if selection == nil || selection.Account == nil {
 		markOpsRoutingCapacityLimited(c)
-		writeError(http.StatusServiceUnavailable, "api_error", "", "No available accounts")
+		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
 		return nil, openAISlotAcquireFailed
 	}
 
@@ -2175,7 +2176,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 	}
 	if selection.WaitPlan == nil {
 		markOpsRoutingCapacityLimited(c)
-		writeError(http.StatusServiceUnavailable, "api_error", "", "No available accounts")
+		writeError(http.StatusServiceUnavailable, "api_error", "", infraerrors.NoAvailableAccounts)
 		return nil, openAISlotAcquireFailed
 	}
 
@@ -2217,7 +2218,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 			zap.Int64("account_id", account.ID),
 			zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
 		)
-		writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later")
+		writeError(http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, infraerrors.GatewayQueueFull)
 		return nil, openAISlotAcquireFailed
 	}
 
@@ -3149,7 +3150,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				closeOpenAIClientWS(wsConn, closeErr.StatusCode(), closeErr.Reason())
 				return
 			}
-			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, "upstream websocket proxy failed")
+			closeOpenAIClientWS(wsConn, coderws.StatusInternalError, infraerrors.UpstreamWSProxyFailed)
 			return
 		}
 	}
@@ -3210,7 +3211,7 @@ func (h *OpenAIGatewayHandler) ensureResponsesDependencies(c *gin.Context, reqLo
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": gin.H{
 				"type":    "api_error",
-				"message": "Service temporarily unavailable",
+				"message": infraerrors.ServiceTemporarilyUnavailable,
 			},
 		})
 	}
@@ -3494,17 +3495,17 @@ func (h *OpenAIGatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, sta
 func (h *OpenAIGatewayHandler) mapUpstreamError(statusCode int) (int, string, string) {
 	switch statusCode {
 	case 401:
-		return http.StatusBadGateway, "upstream_error", "Upstream authentication failed, please contact administrator"
+		return http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed
 	case 403:
-		return http.StatusBadGateway, "upstream_error", "Upstream access forbidden, please contact administrator"
+		return http.StatusBadGateway, "upstream_error", infraerrors.UpstreamForbidden
 	case 429:
-		return http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit exceeded, please retry later"
+		return http.StatusTooManyRequests, "rate_limit_error", infraerrors.UpstreamRateLimited
 	case 529:
-		return http.StatusServiceUnavailable, "upstream_error", "Upstream service overloaded, please retry later"
+		return http.StatusServiceUnavailable, "upstream_error", infraerrors.UpstreamOverloaded
 	case 500, 502, 503, 504:
-		return http.StatusBadGateway, "upstream_error", "Upstream service temporarily unavailable"
+		return http.StatusBadGateway, "upstream_error", infraerrors.UpstreamUnavailable
 	default:
-		return http.StatusBadGateway, "upstream_error", "Upstream request failed"
+		return http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed
 	}
 }
 
@@ -3551,7 +3552,7 @@ func (h *OpenAIGatewayHandler) handleStreamingAwareErrorWithCode(
 			}
 			payload, err := json.Marshal(gin.H{"error": errorObject})
 			if err != nil {
-				payload = []byte(`{"error":{"type":"upstream_error","message":"Upstream request failed"}}`)
+				payload = []byte(`{"error":{"type":"upstream_error","message":"` + infraerrors.UpstreamRequestFailed + `"}}`)
 			}
 			errorEvent := "event: error\ndata: " + string(payload) + "\n\n"
 			if _, err := fmt.Fprint(c.Writer, errorEvent); err != nil {
@@ -3619,7 +3620,7 @@ func (h *OpenAIGatewayHandler) ensureForwardErrorResponse(c *gin.Context, stream
 	if c.Writer.Written() && !imageKeepalivePaddingOnly {
 		streamStarted = true
 	}
-	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed", streamStarted)
+	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed, streamStarted)
 	return true
 }
 
@@ -3805,7 +3806,7 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 	intendedStatus := http.StatusBadGateway
 	errorType := "upstream_error"
 	errorCode := "upstream_ws_failover_exhausted"
-	message := "upstream websocket proxy failed"
+	message := infraerrors.UpstreamWSProxyFailed
 	closeStatus := coderws.StatusInternalError
 
 	if failoverErr != nil {
@@ -3822,16 +3823,16 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 			case http.StatusTooManyRequests:
 				intendedStatus = http.StatusTooManyRequests
 				errorType = "rate_limit_error"
-				message = "upstream rate limit exceeded, please retry later"
+				message = infraerrors.UpstreamRateLimited
 				closeStatus = coderws.StatusTryAgainLater
 			case 529, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 				intendedStatus = failoverErr.StatusCode
-				message = "upstream service temporarily unavailable"
+				message = infraerrors.UpstreamUnavailable
 				closeStatus = coderws.StatusTryAgainLater
 			case http.StatusUnauthorized, http.StatusForbidden:
 				intendedStatus = failoverErr.StatusCode
 				errorType = "authentication_error"
-				message = "upstream websocket authentication failed"
+				message = infraerrors.UpstreamAuthFailed
 				closeStatus = coderws.StatusPolicyViolation
 			}
 		}

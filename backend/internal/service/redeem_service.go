@@ -21,7 +21,7 @@ var (
 	ErrRedeemCodeExpired  = infraerrors.Conflict("REDEEM_CODE_EXPIRED", "redeem code expired")
 	// ErrRedeemCodeBatchUpdateBlocked 批量修改命中已使用/已发货兑换码时的拦截原因（作废 delivered 除外）。
 	ErrRedeemCodeBatchUpdateBlocked = infraerrors.Conflict("REDEEM_CODE_BATCH_UPDATE_BLOCKED", "选中项包含已使用或已发货的兑换码，不能批量修改状态/有效期/分组")
-	ErrInsufficientBalance          = infraerrors.BadRequest("INSUFFICIENT_BALANCE", "insufficient balance")
+	ErrInsufficientBalance          = infraerrors.BadRequest("INSUFFICIENT_BALANCE", infraerrors.InsufficientBalance)
 	ErrRedeemRateLimited            = infraerrors.TooManyRequests("REDEEM_RATE_LIMITED", "too many failed attempts, please try again later")
 	ErrRedeemCodeLocked             = infraerrors.Conflict("REDEEM_CODE_LOCKED", "redeem code is being processed, please try again")
 )

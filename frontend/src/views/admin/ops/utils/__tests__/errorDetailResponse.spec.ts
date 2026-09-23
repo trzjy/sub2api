@@ -44,6 +44,49 @@ describe('errorDetailResponse', () => {
     expect(resolvePrimaryResponseBody(detail, 'request')).toBe('{"provider_message":"real upstream detail"}')
   })
 
+  it('prefers upstream payload for new Chinese generic gateway wrappers', () => {
+    // backend/internal/pkg/errors/downstream_messages.go 上游渠道侧中文常量。
+    const chineseGenericMessages = [
+      '上游渠道触发限速，请稍后重试',
+      '上游服务过载，请稍后重试',
+      '上游服务暂时不可用，请稍后重试',
+      '上游请求失败，请稍后重试',
+      '上游渠道认证失败，请联系管理员',
+      '上游渠道拒绝访问，请联系管理员',
+      '上游渠道余额不足或计费异常，请联系管理员'
+    ]
+
+    for (const message of chineseGenericMessages) {
+      const detail = makeDetail({
+        error_body: JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'upstream_error',
+            message
+          }
+        }),
+        upstream_error_detail: '{"provider_message":"real upstream detail"}'
+      })
+
+      expect(resolvePrimaryResponseBody(detail, 'request')).toBe('{"provider_message":"real upstream detail"}')
+    }
+  })
+
+  it('keeps error_body for request modal when Chinese body is not a generic wrapper', () => {
+    const detail = makeDetail({
+      error_body: JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'upstream_error',
+          message: '上游账号并发等待超时，请稍后重试'
+        }
+      }),
+      upstream_error_detail: '{"provider_message":"real upstream detail"}'
+    })
+
+    expect(resolvePrimaryResponseBody(detail, 'request')).toBe(detail.error_body)
+  })
+
   it('keeps error_body for request modal when body is not generic wrapper', () => {
     const detail = makeDetail({
       error_body: JSON.stringify({

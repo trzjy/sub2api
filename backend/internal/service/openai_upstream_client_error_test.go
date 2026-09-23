@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/model"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -129,7 +130,7 @@ func TestHandleErrorResponse_Deterministic400IsNotRewrappedAs502(t *testing.T) {
 	require.Equal(t, "input[8].tools[1].tools[2].parameters", gjson.Get(body, "error.param").String(),
 		"param 是客户端定位哪个字段非法的唯一线索")
 	require.Contains(t, gjson.Get(body, "error.message").String(), "Invalid schema for function 'automation_update'")
-	require.NotContains(t, body, "Upstream request failed")
+	require.NotContains(t, body, infraerrors.UpstreamRequestFailed)
 
 	// 确定性请求错误不该换号重试——换任何账号都是同样的结果。
 	var failoverErr *UpstreamFailoverError
@@ -221,18 +222,18 @@ func TestHandleErrorResponse_NonDeterministicStatusesKeepGeneric502(t *testing.T
 	}{
 		// 404/405 可能是上游 base_url 配错（运营方问题），不当成客户端错误暴露。
 		{"not_found", http.StatusNotFound, `{"error":{"message":"Unknown request URL"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream request failed"},
+			http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed},
 		{"unprocessable", http.StatusUnprocessableEntity, `{"error":{"message":"Invalid schema for field messages"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream request failed"},
+			http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed},
 		// 401/402/403 是网关运营方的凭据/账单问题，必须继续对客户端屏蔽上游账号状态。
 		// 403 的自由文本不能升级成 durable access-state typed failover；只有明确结构化 code 才可以。
 		{"unauthorized", http.StatusUnauthorized, `{"error":{"message":"Incorrect API key provided: sk-abc"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream authentication failed, please contact administrator"},
+			http.StatusBadGateway, "upstream_error", infraerrors.UpstreamAuthFailed},
 		{"forbidden", http.StatusForbidden, `{"error":{"message":"Your account is deactivated"}}`,
-			http.StatusBadGateway, "upstream_error", "Upstream access forbidden, please contact administrator"},
+			http.StatusBadGateway, "upstream_error", infraerrors.UpstreamForbidden},
 		// 429 保持独立映射。
 		{"rate_limited", http.StatusTooManyRequests, `{"error":{"message":"Rate limit reached"}}`,
-			http.StatusTooManyRequests, "rate_limit_error", "Upstream rate limit exceeded, please retry later"},
+			http.StatusTooManyRequests, "rate_limit_error", infraerrors.UpstreamRateLimited},
 	}
 
 	for _, tc := range cases {

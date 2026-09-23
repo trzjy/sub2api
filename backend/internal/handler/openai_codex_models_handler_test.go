@@ -98,7 +98,7 @@ func (u *codexModelsFailoverHTTPUpstream) Do(_ *http.Request, _ string, accountI
 			Status:     http.StatusText(status),
 			Header:     make(http.Header),
 			Body: io.NopCloser(strings.NewReader(
-				`{"error":{"message":"No available OpenAI accounts","type":"upstream_error"}}`,
+				`{"error":{"message":"该分组暂无可用账号，请稍后重试","type":"upstream_error"}}`,
 			)),
 		}, nil
 	}

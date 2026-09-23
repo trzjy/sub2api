@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -183,7 +184,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				}
 				message := cls.Message
 				if !cls.ModelNotFound {
-					message = "No available compatible accounts"
+					message = infraerrors.NoAvailableAccounts
 				}
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 				return
@@ -202,7 +203,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			}
 			message := cls.Message
 			if !cls.ModelNotFound {
-				message = "No available compatible accounts"
+				message = infraerrors.NoAvailableAccounts
 			}
 			h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 			return

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -842,17 +843,17 @@ func validOpenAIPassthroughRetryAfter(raw string, now time.Time) bool {
 
 func writeSanitizedOpenAIPassthroughError(c *gin.Context, upstreamStatus int, upstreamHeaders http.Header) {
 	downstreamStatus := upstreamStatus
-	message := "Upstream request failed"
+	message := infraerrors.UpstreamRequestFailed
 	switch upstreamStatus {
 	case http.StatusUnauthorized:
 		downstreamStatus = http.StatusBadGateway
-		message = "Upstream authentication failed"
+		message = infraerrors.UpstreamAuthFailed
 	case http.StatusForbidden:
 		downstreamStatus = http.StatusBadGateway
-		message = "Upstream access denied"
+		message = infraerrors.UpstreamForbidden
 	default:
 		if upstreamStatus >= http.StatusInternalServerError {
-			message = "Upstream service temporarily unavailable"
+			message = infraerrors.UpstreamUnavailable
 		}
 	}
 	writeOpenAIPassthroughErrorEnvelope(c, downstreamStatus, upstreamHeaders, message)
@@ -1526,7 +1527,7 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 		ruleBody,
 		http.StatusBadGateway,
 		"upstream_error",
-		"Upstream request failed",
+		infraerrors.UpstreamRequestFailed,
 	)
 }
 

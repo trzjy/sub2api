@@ -247,7 +247,7 @@ func TestPassthroughLifecycle_LaterTurnPreOutputRateLimitRequestsReconnect(t *te
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)
 	require.Equal(t, coderws.StatusTryAgainLater, websocketCloseErr.Code)
-	require.Equal(t, "upstream rate limit exceeded; please reconnect", websocketCloseErr.Reason)
+	require.Equal(t, "上游渠道触发限速，请重新连接", websocketCloseErr.Reason)
 	require.Len(t, repo.rateLimitCalls, 1)
 	require.WithinDuration(t, time.Unix(resetAt, 0), repo.rateLimitCalls[0], 2*time.Second)
 
@@ -642,13 +642,13 @@ func TestPassthroughLifecycle_ActiveTurnInactivityUsesReadTimeout(t *testing.T) 
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)
 	require.Equal(t, coderws.StatusGoingAway, websocketCloseErr.Code)
-	require.Equal(t, "upstream websocket read timeout; please reconnect", websocketCloseErr.Reason)
+	require.Equal(t, "上游连接读取超时，请重新连接", websocketCloseErr.Reason)
 	select {
 	case err := <-serverErr:
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, err, &closeErr)
 		require.Equal(t, coderws.StatusGoingAway, closeErr.StatusCode())
-		require.Equal(t, "upstream websocket read timeout; please reconnect", closeErr.Reason())
+		require.Equal(t, "上游连接读取超时，请重新连接", closeErr.Reason())
 	case <-time.After(2500 * time.Millisecond):
 		t.Fatal("passthrough active turn remained unbounded after upstream activity stopped")
 	}
@@ -849,7 +849,7 @@ func TestPassthroughLifecycle_ResponseCreatedTimeoutClosesWithoutFailover(t *tes
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)
 	require.Equal(t, coderws.StatusGoingAway, websocketCloseErr.Code)
-	require.Equal(t, "upstream produced no semantic output; please reconnect", websocketCloseErr.Reason)
+	require.Equal(t, "上游未产出有效内容，请重新连接", websocketCloseErr.Reason)
 	select {
 	case err := <-serverErr:
 		var failoverErr *UpstreamFailoverError
@@ -857,7 +857,7 @@ func TestPassthroughLifecycle_ResponseCreatedTimeoutClosesWithoutFailover(t *tes
 		var closeErr *OpenAIWSClientCloseError
 		require.ErrorAs(t, err, &closeErr)
 		require.Equal(t, coderws.StatusGoingAway, closeErr.StatusCode())
-		require.Equal(t, "upstream produced no semantic output; please reconnect", closeErr.Reason())
+		require.Equal(t, "上游未产出有效内容，请重新连接", closeErr.Reason())
 	case <-time.After(2500 * time.Millisecond):
 		t.Fatal("response.created timeout did not close the passthrough connection")
 	}
@@ -890,7 +890,7 @@ func TestPassthroughLifecycle_SecondTurnTimeoutIsNotFailoverSafe(t *testing.T) {
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)
 	require.Equal(t, coderws.StatusGoingAway, websocketCloseErr.Code)
-	require.Equal(t, "upstream produced no semantic output; please reconnect", websocketCloseErr.Reason)
+	require.Equal(t, "上游未产出有效内容，请重新连接", websocketCloseErr.Reason)
 	select {
 	case err := <-serverErr:
 		var failoverErr *UpstreamFailoverError

@@ -10,8 +10,9 @@ import (
 	"sync"
 	"time"
 
-	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -209,7 +210,9 @@ type WaitQueueFullError struct {
 }
 
 func (e *WaitQueueFullError) Error() string {
-	return "Too many pending requests, please retry later"
+	// 内部错误标识文本，与下游可见文案共用同一常量（errors.As 匹配不依赖文本），
+	// 保证全仓不再出现裸英文串。
+	return infraerrors.GatewayQueueFull
 }
 
 // ConcurrencyHelper provides common concurrency slot management for gateway handlers
