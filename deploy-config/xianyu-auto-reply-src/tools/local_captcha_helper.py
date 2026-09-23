@@ -358,13 +358,11 @@ GLM_MOUNT_JS = """
     // 2026-09-21 双重实证（chatglm.cn 线上 smcp.min.js 行为 + 官方 main bundle 集成
     // 代码逆向）：新版 API 为 initSMCaptcha(options, instanceCallback)，实例经第二
     // 个参数回调交付；instance.onSuccess(data)，data 至少含 {rid, pass}。
-    let gotInstance = false;
     try {
       window.initSMCaptcha({
         organization: %ORGANIZATION%, appendTo: '#glm-captcha',
         product: 'embed', width: '100%'
       }, (instance) => {
-        gotInstance = true;
         if (!instance || typeof instance.onSuccess !== 'function') {
           return window.__glmHelperFail('数美组件实例未交付');
         }
@@ -382,13 +380,26 @@ GLM_MOUNT_JS = """
         }
       });
     } catch (e) { return window.__glmHelperFail('数美组件初始化异常: ' + String(e.message).slice(0, 80)); }
-    setTimeout(() => {
-      const slider = document.querySelector('#glm-captcha .shumei_captcha');
-      if (!slider) window.__glmHelperFail('数美组件渲染失败（容器无滑块节点）');
-    }, 3000);
-    setTimeout(() => {
-      if (!gotInstance) window.__glmHelperFail('数美组件实例未交付（回调超时）');
-    }, 6000);
+    // 2026-09-23 Playwright 探针实证（chatglm.cn 真实页 headless 注入同款挂载 JS）：
+    // 官方数美 SDK 渲染滑块节点（#glm-captcha .shumei_captcha）需要 ~3s（t=2s 无
+    // 节点、t=3s 节点出现）。原固定 3s 一次性兜底与渲染赛跑，慢几百毫秒即误杀
+    // （2026-09-23 10:30:32 生产日志实证）；原 6s"实例未交付"兜底同理可能过早，
+    // 已移除——实例交付以 onSuccess 回调为准，渲染等待已覆盖 SDK 加载慢的场景；
+    // 若实例回调始终不交付，由 Python 侧既有挑战 deadline 失败关闭，不新增第二套
+    // 超时。现改为 500ms 轮询：节点出现即清除轮询进入成功路径（等 onSuccess 回调）；
+    // 自 script.onload 起累计 RENDER_TIMEOUT_MS（生产 20s，_run_glm 注入）仍无
+    // 节点才失败关闭。
+    const renderWaitStart = Date.now();
+    const renderPoll = setInterval(() => {
+      if (document.querySelector('#glm-captcha .shumei_captcha')) {
+        clearInterval(renderPoll);
+        return;
+      }
+      if (Date.now() - renderWaitStart >= %RENDER_TIMEOUT_MS%) {
+        clearInterval(renderPoll);
+        window.__glmHelperFail('数美组件渲染失败（容器无滑块节点，等待 ' + Math.round(%RENDER_TIMEOUT_MS% / 1000) + 's）');
+      }
+    }, 500);
   };
   script.onerror = () => window.__glmHelperFail('数美 SDK 加载失败');
   document.head.appendChild(script);
@@ -842,6 +853,9 @@ window.challengeFail('glm_challenge_misrouted_to_local_page');
                 GLM_MOUNT_JS
                 .replace("%SDK_URL%", json.dumps(GLM_CAPTCHA_SDK_URL))
                 .replace("%ORGANIZATION%", json.dumps(GLM_CAPTCHA_ORGANIZATION))
+                # 渲染轮询上限：生产 20s（2026-09-23 探针实证真实渲染 ~3s，20s 留足
+                # 慢网余量；自检渲染失败用例注入更短阈值保持快速）。
+                .replace("%RENDER_TIMEOUT_MS%", "20000")
             )
             mount_state = await page.evaluate(mount_js, "glm-helper-host")
             if not isinstance(mount_state, dict) or not mount_state.get("mounted"):
@@ -1670,6 +1684,174 @@ async def _challenge_selftest(cfg: Dict[str, Any]) -> bool:
     return bool(expired_result and expired_result.get("status") == "context_gap")
 
 
+# GLM_MOUNT_JS 真实浏览器自检用例的 mock 数美 SDK（全部假数据，路由本地下发，
+# 零外网依赖）：initSMCaptcha 在 window.__mockRenderDelayMs 后向 appendTo 容器
+# 渲染 .shumei_captcha 节点（window.__mockRenderNode === false 时永不渲染且不
+# 交付实例，模拟"SDK 加载慢/渲染卡死"）；节点渲染后交付实例并在 300ms 后回调
+# onSuccess({rid, pass:true})——模拟人工拖动通过。
+_GLM_MOCK_SMCP_JS = """
+window.initSMCaptcha = (options, instanceCallback) => {
+  setTimeout(() => {
+    const host = document.querySelector((options && options.appendTo) || '#glm-captcha');
+    if (!host || window.__mockRenderNode === false) return;
+    const node = document.createElement('div');
+    node.className = 'shumei_captcha';
+    host.appendChild(node);
+    instanceCallback({
+      onSuccess: (fn) => { setTimeout(() => fn({ rid: 'fake-browser-rid', pass: true }), 300); },
+      onError: (fn) => { window.__mockOnError = fn; }
+    });
+  }, window.__mockRenderDelayMs || 0);
+};
+"""
+
+
+async def _glm_mount_browser_selftest(pw: Any) -> bool:
+    """GLM_MOUNT_JS 真实浏览器用例（headless + 全本地路由，零外网依赖）。
+
+    - 延迟渲染回归（2026-09-23 探针实证的真实页行为）：mock SDK 在挂载后 ~4s 才
+      渲染滑块节点（真实页 ~3s，取 4s 保证旧固定 3s 兜底必误杀）。断言轮询不再
+      误杀、challengeComplete 收到 rid，且真实 GLM_SEND_SMS_JS 在同页发码成功
+      （mock 后端 status==0；发码请求带签名三件套与 x-device-id 头、rid 原样透传）。
+    - 渲染失败关闭：mock SDK 永不渲染节点，注入短渲染阈值（1500ms）验证按阈值
+      失败关闭（生产阈值为 20s，见 _run_glm 的 %RENDER_TIMEOUT_MS% 替换）。
+    """
+    import base64
+
+    jwt_payload = base64.urlsafe_b64encode(
+        json.dumps({"device_id": "fake-device-id"}).encode()
+    ).decode().rstrip("=")
+    fake_token = "fake-header." + jwt_payload + ".fake-signature"
+    api_hits: List[Dict[str, Any]] = []
+
+    async def _route(route: Any) -> None:
+        url = str(route.request.url).split("?")[0]
+        if url == GLM_CAPTCHA_SDK_URL:
+            await route.fulfill(status=200, content_type="application/javascript",
+                                body=_GLM_MOCK_SMCP_JS)
+            return
+        if url == GLM_ORIGIN + GLM_SEND_SMS_PATH:
+            headers = route.request.headers
+            pic = ""
+            try:
+                pic = str((json.loads(route.request.post_data or "{}") or {}).get("pic_captcha_id", ""))
+            except Exception:
+                pass
+            api_hits.append({
+                "has_sign_headers": bool(headers.get("x-sign")) and bool(headers.get("x-nonce")) and bool(headers.get("x-timestamp")),
+                "has_device_id": bool(headers.get("x-device-id")),
+                "pic_captcha_id": pic,
+            })
+            await route.fulfill(status=200, content_type="application/json",
+                                body=json.dumps({"status": 0, "message": "mock-send-ok", "result": None}))
+            return
+        await route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                            body="<html><body>glm-mount-selftest</body></html>")
+
+    def _mount_js(render_timeout_ms: str) -> str:
+        return (GLM_MOUNT_JS
+                .replace("%SDK_URL%", json.dumps(GLM_CAPTCHA_SDK_URL))
+                .replace("%ORGANIZATION%", json.dumps(GLM_CAPTCHA_ORGANIZATION))
+                .replace("%RENDER_TIMEOUT_MS%", render_timeout_ms))
+
+    browser = None
+    try:
+        browser = await pw.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"])
+
+        # ---- 用例 1：延迟渲染（4s 出节点）不被误杀，取 rid 后同页真实发码成功 ----
+        context = await browser.new_context(locale="zh-CN")
+        await context.add_cookies([{"name": "chatglm_token", "value": fake_token, "url": GLM_ORIGIN + "/"}])
+        await context.route(GLM_ORIGIN + "/**", _route)
+        page = await context.new_page()
+        done: asyncio.Event = asyncio.Event()
+        rid_holder: Dict[str, str] = {}
+        fail_holder: Dict[str, str] = {}
+
+        async def complete(_source: Any, payload: Any) -> None:
+            if isinstance(payload, dict) and isinstance(payload.get("rid"), str):
+                rid_holder["rid"] = payload["rid"]
+            done.set()
+
+        async def fail(_source: Any, reason: Any = None) -> None:
+            fail_holder["reason"] = str(reason or "")[:80]
+            done.set()
+
+        await page.expose_binding("challengeComplete", complete)
+        await page.expose_binding("challengeFail", fail)
+        await page.add_init_script("window.__mockRenderDelayMs = 4000; window.__mockRenderNode = true;")
+        await page.goto(GLM_ORIGIN + "/", wait_until="domcontentloaded", timeout=30_000)
+        state = await page.evaluate(_mount_js("20000"), "glm-helper-host")
+        if not (isinstance(state, dict) and state.get("mounted")):
+            return False
+        try:
+            await asyncio.wait_for(done.wait(), timeout=12)
+        except asyncio.TimeoutError:
+            return False
+        if fail_holder or rid_holder.get("rid") != "fake-browser-rid":
+            return False
+        send = await page.evaluate(GLM_SEND_SMS_JS, {
+            "path": GLM_SEND_SMS_PATH,
+            "body": {"phone": "13900000000", "phone_code": "+86",
+                     "pic_captcha_id": rid_holder["rid"], "tm": "pc", "fr": "default",
+                     "distinct_id": ""},
+            "sign": _zhipu_sign_triplet(),
+        })
+        if not (isinstance(send, dict) and send.get("status") == 200 and send.get("bodyStatus") == 0
+                and send.get("device_id") == "fake-device-id"):
+            return False
+        if len(api_hits) != 1:
+            return False
+        if not api_hits[0]["has_sign_headers"] or not api_hits[0]["has_device_id"]:
+            return False
+        if api_hits[0]["pic_captcha_id"] != "fake-browser-rid":
+            return False
+        await context.close()
+
+        # ---- 用例 2：节点始终不出现 → 按注入阈值（1500ms，生产为 20s）失败关闭 ----
+        context2 = await browser.new_context(locale="zh-CN")
+        await context2.route(GLM_ORIGIN + "/**", _route)
+        page2 = await context2.new_page()
+        done2: asyncio.Event = asyncio.Event()
+        rid2: Dict[str, str] = {}
+        fail2_holder: Dict[str, str] = {}
+
+        async def complete2(_source: Any, payload: Any) -> None:
+            if isinstance(payload, dict) and isinstance(payload.get("rid"), str):
+                rid2["rid"] = payload["rid"]
+            done2.set()
+
+        async def fail2(_source: Any, reason: Any = None) -> None:
+            # 注意：回调函数名 fail2 与结果字典不得同名（函数名会在自身作用域内
+            # 遮蔽外层字典），故字典命名 fail2_holder。
+            fail2_holder["reason"] = str(reason or "")[:80]
+            done2.set()
+
+        await page2.expose_binding("challengeComplete", complete2)
+        await page2.expose_binding("challengeFail", fail2)
+        await page2.add_init_script("window.__mockRenderDelayMs = 200; window.__mockRenderNode = false;")
+        await page2.goto(GLM_ORIGIN + "/", wait_until="domcontentloaded", timeout=30_000)
+        state2 = await page2.evaluate(_mount_js("1500"), "glm-helper-host")
+        if not (isinstance(state2, dict) and state2.get("mounted")):
+            return False
+        try:
+            await asyncio.wait_for(done2.wait(), timeout=8)
+        except asyncio.TimeoutError:
+            return False
+        if rid2 or not fail2_holder.get("reason", "").startswith("数美组件渲染失败"):
+            return False
+        await context2.close()
+        return True
+    except Exception:
+        return False
+    finally:
+        if browser:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+
 async def _selftest() -> int:
     """无人工自检：headless 打开本地页面（Set-Cookie x5sec=...），验证成功路径全链。"""
     from aiohttp import web as aio_web
@@ -1702,7 +1884,11 @@ async def _selftest() -> int:
         status, cookies, url_expired = await solver.solve(f"http://127.0.0.1:{port}/", "selftest", 20)
         await runner.cleanup()
         if status == "ok" and cookies.get("x5sec") == "selftest-value" and cookies.get("bx-pp") == "pp-value":
+            if not await _glm_mount_browser_selftest(solver.pw):
+                log("SELFTEST FAIL：GLM 滑块挂载 JS 轮询用例失败（延迟渲染不被误杀 / 渲染失败关闭）")
+                return 1
             log("SELFTEST PASS：kimi SDK 回调、GLM 同会话发码成功/失败关闭（body 非 0、非 2xx、滑块失败）、"
+                "GLM 挂载 JS 轮询（4s 延迟渲染不被误杀、注入短阈值的渲染失败关闭）、"
                 "签名黄金用例、单槽位/绑定/过期及 cookie 求解链全部正常")
             return 0
         log(f"SELFTEST FAIL：status={status} cookie_names={sorted(cookies)} url_expired={url_expired}")
