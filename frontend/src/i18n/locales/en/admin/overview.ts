@@ -16,6 +16,7 @@ export default {
       todayCost: 'Today Cost',
       totalCost: 'Total Cost',
       newUsersToday: 'New Users Today',
+      activeSubscriptionUsers: 'Active Subscription Users',
       todayTokens: 'Today Tokens',
       totalTokens: 'Total Tokens',
       input: 'Input',

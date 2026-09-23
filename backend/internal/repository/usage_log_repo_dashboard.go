@@ -189,6 +189,24 @@ func (r *usageLogRepository) fillDashboardEntityStats(ctx context.Context, stats
 		return err
 	}
 
+	// 订阅生效用户数：有至少一条生效中用户订阅的账号数（与 service.UserSubscription.IsActive() 同语义）。
+	// 排除软删行：吊销走 deleted_at 而 status 保持 active（RevokeSubscription→Delete），
+	// 不加 deleted_at IS NULL 会把已吊销订阅误计为生效。
+	activeSubscriptionUsersQuery := `
+		SELECT COUNT(DISTINCT user_id)
+		FROM user_subscriptions
+		WHERE status = $1 AND expires_at > $2 AND deleted_at IS NULL
+	`
+	if err := scanSingleRow(
+		ctx,
+		r.sql,
+		activeSubscriptionUsersQuery,
+		[]any{service.SubscriptionStatusActive, now},
+		&stats.ActiveSubscriptionUsers,
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
 

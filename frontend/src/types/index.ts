@@ -1939,6 +1939,7 @@ export interface DashboardStats {
   // 用户统计
   total_users: number
   today_new_users: number // 今日新增用户数
+  active_subscription_users: number // 生效订阅用户数（有至少一条生效订阅的账号）
   active_users: number // 今日有请求的用户数
   hourly_active_users: number // 当前小时活跃用户数（UTC）
   stats_updated_at: string // 统计更新时间（UTC RFC3339）

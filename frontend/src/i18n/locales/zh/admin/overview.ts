@@ -17,6 +17,7 @@ export default {
       todayCost: '今日消费',
       totalCost: '总消费',
       newUsersToday: '今日新增用户',
+      activeSubscriptionUsers: '生效订阅用户',
       actual: '实际',
       standard: '标准',
       accountCost: '成本',

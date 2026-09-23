@@ -8,7 +8,7 @@
 
       <template v-else-if="stats">
         <!-- Row 1: Core Stats -->
-        <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div class="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <!-- Total API Keys -->
           <div class="card p-4">
             <div class="flex items-center gap-3">
@@ -89,6 +89,26 @@
                 </p>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
                   {{ t('common.total') }}: {{ formatNumber(stats.total_users) }}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Subscription Users -->
+          <div class="card p-4">
+            <div class="flex items-center gap-3">
+              <div class="rounded-lg bg-emerald-100 p-2 dark:bg-emerald-900/30">
+                <Icon name="badge" size="md" class="text-emerald-600 dark:text-emerald-400" :stroke-width="2" />
+              </div>
+              <div>
+                <p class="text-xs font-medium text-gray-500 dark:text-gray-400">
+                  {{ t('admin.dashboard.activeSubscriptionUsers') }}
+                </p>
+                <p
+                  class="text-xl font-bold text-emerald-600 dark:text-emerald-400"
+                  data-testid="stat-active-subscription-users"
+                >
+                  {{ formatNumber(stats.active_subscription_users) }}
                 </p>
               </div>
             </div>

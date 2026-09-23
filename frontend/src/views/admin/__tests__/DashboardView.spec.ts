@@ -53,6 +53,7 @@ const formatLocalDate = (date: Date): string => {
 const createDashboardStats = (): DashboardStats => ({
   total_users: 0,
   today_new_users: 0,
+  active_subscription_users: 0,
   active_users: 0,
   hourly_active_users: 0,
   stats_updated_at: '',
@@ -142,5 +143,34 @@ describe('admin DashboardView', () => {
       end_date: formatLocalDate(now),
       granularity: 'hour'
     }))
+  })
+
+  it('renders active subscription users stat card with stats value', async () => {
+    getSnapshotV2.mockResolvedValue({
+      stats: { ...createDashboardStats(), active_subscription_users: 1234 },
+      trend: [],
+      models: []
+    })
+
+    const wrapper = mount(DashboardView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          LoadingSpinner: true,
+          Icon: true,
+          DateRangePicker: true,
+          Select: true,
+          ModelDistributionChart: true,
+          TokenUsageTrend: true,
+          Line: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const card = wrapper.find('[data-testid="stat-active-subscription-users"]')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toBe((1234).toLocaleString())
   })
 })

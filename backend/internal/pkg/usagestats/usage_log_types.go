@@ -28,9 +28,10 @@ func NormalizeModelSource(source string) string {
 // DashboardStats 仪表盘统计
 type DashboardStats struct {
 	// 用户统计
-	TotalUsers    int64 `json:"total_users"`
-	TodayNewUsers int64 `json:"today_new_users"` // 今日新增用户数
-	ActiveUsers   int64 `json:"active_users"`    // 今日有请求的用户数
+	TotalUsers              int64 `json:"total_users"`
+	TodayNewUsers           int64 `json:"today_new_users"`           // 今日新增用户数
+	ActiveUsers             int64 `json:"active_users"`              // 今日有请求的用户数
+	ActiveSubscriptionUsers int64 `json:"active_subscription_users"` // 有生效中用户订阅的账号数
 	// 小时活跃用户数（UTC 当前小时）
 	HourlyActiveUsers int64 `json:"hourly_active_users"`
 
