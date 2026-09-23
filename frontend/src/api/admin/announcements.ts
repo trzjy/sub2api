@@ -54,7 +54,11 @@ export async function deleteAnnouncement(id: number): Promise<{ message: string 
 export async function uploadImage(id: number, file: File): Promise<{ url: string }> {
   const form = new FormData()
   form.append('file', file)
-  const { data } = await apiClient.post<{ url: string }>(`/admin/announcements/${id}/upload-image`, form)
+  // apiClient 实例级默认 Content-Type 为 application/json，必须在此显式覆盖，
+  // 否则后端 ParseMultipartForm 收到 application/json 直接报错（boundary 由 axios/浏览器补齐）。
+  const { data } = await apiClient.post<{ url: string }>(`/admin/announcements/${id}/upload-image`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
   return data
 }
 
