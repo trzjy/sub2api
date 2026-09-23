@@ -344,6 +344,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		if statusCode != http.StatusUnauthorized && s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
 			return true
 		}
+		// 池模式 401 升级处置（codebuddy-shadow-429 方案 §3 T5）：单次 401 仍不罚账号
+		// （认证语义不变），但 5 分钟窗口累计满阈值时边沿触发临时停调，防止上游中转
+		// key 失效后无限重试、永不冷却、永不告警。
+		if statusCode == http.StatusUnauthorized {
+			s.notePool401(ctx, account, time.Now())
+		}
 		slog.Info("pool_mode_error_skipped", "account_id", account.ID, "status_code", statusCode)
 		return false
 	}
@@ -1186,7 +1192,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// 套到影子会把 spark 误耦合到 global 窗口——即便 spark 仍有配额也会被冷却到 global reset,
 	// 单影子场景直接变成无可用账号(外审第8轮 P1)。整段跳过;影子的 codex_* 仅由 account_usage 的
 	// QueryUsage→persistOpenAICodexProbeSnapshot 维护,枯竭由调度守卫处理。
-	if account.IsShadow() {
+	// T2 收窄（codebuddy-shadow-429 方案 §3）：该早退仅为 OpenAI 平台影子（Spark）设计；
+	// CodeBuddy 影子（deepseek/zhipu/kimi/minimax）必须继续落入下方既有 429 冷却链
+	// （CN 反应链未命中 → apply429FallbackRateLimit），否则 429 后零冷却（生产实证：
+	// 影子账号吃 429 后 rate_limited_at / temp_unschedulable_* 全空）。Spark 行为不变
+	// （含 notifyOpenAIAutoReset(parent)）。
+	if account.IsShadow() && account.Platform == PlatformOpenAI {
 		if account.ParentAccountID != nil {
 			notifyOpenAIAutoReset(*account.ParentAccountID)
 		}

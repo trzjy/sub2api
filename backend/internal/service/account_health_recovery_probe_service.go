@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,16 @@ import (
 // probe sweep evaluates. The breaker cooldown is short (minutes), so the active set
 // is small; the cap protects against pathological backlog after a long outage.
 const accountHealthProbeCandidateLimit = 200
+
+// probeRecoverableMarkers 列出可被探测恢复的停调标记词（TempUnschedState.MatchedKeyword）：
+//   - openai_apikey_health_breaker：APIKey 健康熔断 L3 停调（CodeBuddy 影子准入后
+//     同样携带该标记，方案 T1）；
+//   - pool_mode_401_escalation：池模式 401 窗口升级停调（方案 T5，常量单一定义于
+//     pool_401_escalation.go，此处禁止字面量重复）。
+var probeRecoverableMarkers = []string{
+	openAIAPIKeyHealthBreakerReason,
+	PoolMode401EscalationMarker,
+}
 
 // accountHealthProbeRepository is the narrow repository surface the recovery probe
 // needs. It is intentionally a subset of AccountRepository so the real repository
@@ -55,8 +67,6 @@ type AccountHealthRecoveryProbeService struct {
 	settingService      *SettingService
 	tlsFPProfileService *TLSFingerprintProfileService
 
-	marker string
-
 	startMu sync.Mutex
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
@@ -81,7 +91,6 @@ func NewAccountHealthRecoveryProbeService(
 		rateLimit:           rateLimit,
 		settingService:      settingService,
 		tlsFPProfileService: tlsFPProfileService,
-		marker:              openAIAPIKeyHealthBreakerReason,
 	}
 }
 
@@ -187,7 +196,8 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 }
 
 // isHealthBreakerTrip reports whether the account's active temp-unschedulable block
-// was opened by the health breaker and has not yet expired.
+// is probe-recoverable (opened by the health breaker or by the pool-mode 401
+// escalation, 方案 T5 marker 放行) and has not yet expired.
 func (p *AccountHealthRecoveryProbeService) isHealthBreakerTrip(acc *Account, now time.Time) bool {
 	if acc == nil || acc.TempUnschedulableReason == "" {
 		return false
@@ -199,7 +209,12 @@ func (p *AccountHealthRecoveryProbeService) isHealthBreakerTrip(acc *Account, no
 	if !ok || state == nil {
 		return false
 	}
-	return state.MatchedKeyword == p.marker
+	for _, marker := range probeRecoverableMarkers {
+		if state.MatchedKeyword == marker {
+			return true
+		}
+	}
+	return false
 }
 
 // parseHealthBreakerState parses the JSON reason payload written by the breaker.
@@ -249,6 +264,12 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 					zap.Error(clearErr),
 				)
 				return
+			}
+			// 池模式 401 升级停调的探测恢复出口（方案 T5 条目 4，R4-F3）：清停调
+			// 成功后重置该账号的 401 窗口状态机——否则同一 epoch 内再次 401 不再
+			// 跨越边沿，账号失去升级保护。健康熔断 marker 不触碰池窗口。
+			if state.MatchedKeyword == PoolMode401EscalationMarker {
+				resetPool401State(acc.ID)
 			}
 		}
 		logger.L().Info("openai.apikey_health_probe_recovered",
@@ -317,6 +338,11 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 	if p.httpUpstream == nil || p.cfg == nil {
 		return false, errors.New("probe transport not configured")
 	}
+	// T4：CodeBuddy 影子（oauth 型）没有 /models 面——buildOpenAIAPIKeyModelsRequest
+	// 要求 type==apikey，oauth 影子构建失败会降级到期恢复——改派最小流式 chat 探测。
+	if isCodeBuddyShadowAccount(acc) {
+		return p.probeCodeBuddyShadowUpstream(ctx, acc)
+	}
 	validateBaseURL := func(raw string) (string, error) {
 		return cnValidateProbeURL(p.cfg, raw)
 	}
@@ -350,6 +376,295 @@ func (p *AccountHealthRecoveryProbeService) probeUpstream(ctx context.Context, a
 	// Drain to reuse the connection, then treat any non-2xx as an unhealthy probe.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// CodeBuddy 影子流式 chat 探测（方案 T4，R2-F1/R3-F2）
+// ---------------------------------------------------------------------------
+
+// codeBuddyShadowProbeTimeout 单次探测超时，与既有 /models 探测同款（15s）。
+const codeBuddyShadowProbeTimeout = 15 * time.Second
+
+// codeBuddyShadowProbeMaxBodyBytes 探测响应读取上限。max_tokens=1 的最小流远小于该值；
+// 达到上限即视为截断流（缺 data: [DONE]）→ 探测失败（fail-closed）。
+const codeBuddyShadowProbeMaxBodyBytes = 256 << 10
+
+// codeBuddyShadowProbeSystemMessage 是探测请求的 system 消息（PrepareCodeBuddyBody
+// 规则 3b 要求首条消息为 system）；内容保持极短且不含任何框架指纹。
+const codeBuddyShadowProbeSystemMessage = "health probe"
+
+// probeCodeBuddyShadowUpstream 对 CodeBuddy 影子账号发一次最小流式 chat 探测。
+//
+// 协议约束（R2-F1）：上游强制 stream:true（codebuddy_upstream.go 规则 1，非流式直发
+// 会被拒绝导致探测永远失败），故探测请求必须 stream:true 并复用既有本地 SSE 聚合
+// （aggregateOpenAIChatCompletionsSSE）后再判定。端点用 chat completions（站点 SSOT
+// codebuddy_site.go + codeBuddyChatCompletionsPath），明确不复用 testCodeBuddyAccountConnection
+// 的 billing meter 端点（只读配额面，不经过 chat 上游，探不出 chat 链路健康）。
+//
+// 传输栈与转发链同源：token 解析 codeBuddyTestAccessToken 同口径、影子→母账号凭证
+// 透传（resolveCredentialAccount 同语义，走探测窄仓库）、站点 SSOT、UA/代理/TLS 与
+// buildCodeBuddyChatRequest 一致。
+//
+// 成功判定为四条件（R3-F2，缺一即探测失败、保持停调）：HTTP 2xx + 聚合体为有效
+// chat completion（choices 非空、无业务错误信封）+ 原始 SSE 含 data: [DONE] 正常
+// 终止 + 全程无错误帧。构造/凭证类错误返回 error → 调用方降级到期恢复（既有语义）。
+func (p *AccountHealthRecoveryProbeService) probeCodeBuddyShadowUpstream(ctx context.Context, acc *Account) (bool, error) {
+	if p.accountRepo == nil {
+		return false, errors.New("probe account repo not configured")
+	}
+
+	// 影子→母账号凭证解析：母账号的 access_token / site / uid / enterprise_id / domain
+	// 才是出站的真正身份。校验语义与 resolveCredentialAccount 一致（fail-closed）。
+	credAccount := acc
+	if acc.ParentAccountID != nil {
+		parent, err := p.accountRepo.GetByID(ctx, *acc.ParentAccountID)
+		if err != nil {
+			return false, fmt.Errorf("resolve codebuddy shadow parent: %w", err)
+		}
+		if parent == nil || parent.IsShadow() {
+			return false, fmt.Errorf("codebuddy shadow parent %d missing or itself a shadow", *acc.ParentAccountID)
+		}
+		if !(parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey)) {
+			return false, fmt.Errorf("codebuddy shadow parent %d is not a codebuddy OAuth/APIKey account", parent.ID)
+		}
+		credAccount = parent
+	}
+
+	// 模型取影子 extra.shadow_model（转发链权威模型）；缺失则无法构造 chat 探测 → 降级。
+	shadowModel := strings.TrimSpace(acc.GetExtraString(ShadowModelExtraKey))
+	if shadowModel == "" {
+		return false, errors.New("codebuddy shadow has no shadow_model to probe")
+	}
+
+	token := codeBuddyTestAccessToken(credAccount)
+	if token == "" {
+		return false, errors.New("codebuddy credential account is missing access_token credential")
+	}
+
+	// 最小探测体：system-first、极短 prompt、max_tokens=1、stream:true；再过既有
+	// PrepareCodeBuddyBody 归一，保证全部协议规则（强制 stream、tool_choice 归一、
+	// DeepSeek thinking 注入等）与转发链一致。探测体不设 reasoning_effort，
+	// SupportedEfforts 留空（规则 5 对无该字段的请求是 no-op）。
+	probeBody, err := PrepareCodeBuddyBody(codeBuddyShadowProbeBody(shadowModel), CodeBuddyRewriteOptions{
+		Sanitize: p.codeBuddyProbeSanitizeEnabled(),
+		Model:    shadowModel,
+	})
+	if err != nil {
+		return false, fmt.Errorf("prepare codebuddy probe body: %w", err)
+	}
+
+	req, err := buildCodeBuddyShadowProbeRequest(ctx, credAccount, probeBody, token, p.cfg)
+	if err != nil {
+		return false, fmt.Errorf("build codebuddy probe request: %w", err)
+	}
+
+	proxyURL := ""
+	if acc.ProxyID != nil && acc.Proxy != nil {
+		proxyURL = acc.Proxy.URL()
+	}
+	var tlsProfile *tlsfingerprint.Profile
+	if p.tlsFPProfileService != nil {
+		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, codeBuddyShadowProbeTimeout)
+	defer cancel()
+	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
+	if err != nil {
+		// 传输失败与 /models 探测同语义：上游不可达即不健康，保持停调（非降级）。
+		return false, nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, codeBuddyShadowProbeMaxBodyBytes))
+	return evaluateCodeBuddyShadowProbeResponse(resp.StatusCode, raw), nil
+}
+
+// codeBuddyShadowProbeBody 构造最小探测请求体（构造失败返回 nil，由
+// PrepareCodeBuddyBody 的 json.Valid 校验失败关闭）。
+func codeBuddyShadowProbeBody(model string) []byte {
+	encoded, err := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": codeBuddyShadowProbeSystemMessage},
+			{"role": "user", "content": "ping"},
+		},
+		"max_tokens": 1,
+		"stream":     true,
+	})
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// codeBuddyProbeSanitizeEnabled 返回探测出站的 system 指纹脱敏开关，与转发链
+// （OpenAIGatewayService.codeBuddySanitizeEnabled）同默认：开启。
+func (p *AccountHealthRecoveryProbeService) codeBuddyProbeSanitizeEnabled() bool {
+	if p != nil && p.cfg != nil {
+		return p.cfg.Gateway.CodeBuddy.SanitizeEnabled
+	}
+	return true
+}
+
+// buildCodeBuddyShadowProbeRequest 构造 CodeBuddy 影子探测请求，请求形状与转发链
+// buildCodeBuddyChatRequest 同源（§2.4 指纹头：Content-Type/Accept/X-Requested-With/
+// Origin/Referer/UA/Authorization/X-Product + 身份头空值 X-No-*: 1 占位；身份头取自
+// 母账号，影子自身凭证为空；母账号 ApplyHeaderOverrides 最后应用）。
+//
+// 独立成函数的原因：buildCodeBuddyChatRequest 挂在 OpenAIGatewayService 上（探测服务
+// 不依赖该服务），且 CARD-C 文件边界不含 codebuddy_gateway_forward.go，无法无损提取
+// 纯构造。两处形状必须同步演进：改动转发请求形状时须同步此处。
+//
+// 安全红线同源：chat 请求绝不携带 X-Refresh-Token（该头仅用于 refresh 端点）。
+func buildCodeBuddyShadowProbeRequest(ctx context.Context, credAccount *Account, body []byte, token string, cfg *config.Config) (*http.Request, error) {
+	ep := codeBuddyEndpointsFor(credAccount.CodeBuddySite())
+	targetURL := strings.TrimRight(ep.UpstreamBase, "/") + codeBuddyChatCompletionsPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+
+	ua := CodeBuddyClientUA
+	if cfg != nil {
+		if candidate := strings.TrimSpace(cfg.Gateway.CodeBuddy.ChatUserAgent); candidate != "" {
+			ua = candidate
+		}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", ep.OriginReferer)
+	req.Header.Set("Referer", ep.OriginReferer+"/")
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Product", "SaaS")
+
+	uid := credAccount.GetCredential("uid")
+	enterpriseID := credAccount.GetCredential("enterprise_id")
+	domainCred := credAccount.GetCredential("domain")
+	if uid != "" {
+		req.Header.Set("X-User-Id", uid)
+	} else {
+		req.Header.Set("X-No-User-Id", "1")
+	}
+	if enterpriseID != "" {
+		req.Header.Set("X-Enterprise-Id", enterpriseID)
+	} else {
+		req.Header.Set("X-No-Enterprise-Id", "1")
+	}
+	if domainCred != "" {
+		req.Header.Set("X-Domain", domainCred)
+	} else {
+		req.Header.Set("X-No-Domain", "1")
+	}
+
+	credAccount.ApplyHeaderOverrides(req.Header)
+	return req, nil
+}
+
+// evaluateCodeBuddyShadowProbeResponse 实现探测成功四条件（方案 T4，R3-F2）：
+//  1. HTTP 2xx（仅凭状态码判定被 R1-F2 明确禁止）；
+//  2. 聚合结果为有效 chat completion：aggregateOpenAIChatCompletionsSSE 聚合成功
+//     （非 SSE / 无 chunk / 纯错误信封在此返回 false）、choices 非空、无业务错误信封；
+//  3. 原始 SSE 含 data: [DONE] 正常终止帧；
+//  4. 全程无错误帧（event: error 帧 + data 帧业务错误信封，见扫描器注释）。
+//
+// 条件 3/4 必不可少：聚合器见首 chunk 即置位、缺 finish_reason 会合成 stop
+// （openai_chat_completions_sse_aggregate.go），「部分内容+错误帧」与截断流的聚合体
+// 仍可能有非空 choices，仅验聚合体会误清熔断。
+func evaluateCodeBuddyShadowProbeResponse(statusCode int, rawSSE []byte) bool {
+	if statusCode < 200 || statusCode >= 300 {
+		return false
+	}
+	aggregated, ok := aggregateOpenAIChatCompletionsSSE(rawSSE)
+	if !ok {
+		return false
+	}
+	var completion struct {
+		Choices []json.RawMessage `json:"choices"`
+		Code    json.RawMessage   `json:"code"`
+	}
+	if err := json.Unmarshal(aggregated, &completion); err != nil {
+		return false
+	}
+	if len(completion.Choices) == 0 {
+		return false
+	}
+	if codeBuddySSEPayloadCarriesError(completion.Code) {
+		return false
+	}
+	return scanCodeBuddyShadowProbeSSE(rawSSE)
+}
+
+// scanCodeBuddyShadowProbeSSE 扫描原始 SSE：返回是否「正常终止且全程无错误帧」。
+// 终止判定：出现 data: [DONE] 帧。错误帧判定复用 gateway_upstream_response.go
+// processSSEEvent 的 sseStreamErrorEventError 语义（event 名为 error 的帧），并按方案
+// 「无业务错误信封」口径把 data 帧中携带 code!=0 / error 对象的帧一并视为错误帧
+// ——CodeBuddy 业务错误正是以 JSON 信封随 HTTP 200 返回（account_test_service.go
+// evaluateCodeBuddyProbeBody 同款判定口径）。保守方向正确：可疑流判失败只多停一轮
+// 冷却，误判成功才会错清熔断。
+func scanCodeBuddyShadowProbeSSE(raw []byte) bool {
+	sawDone := false
+	for _, rawLine := range strings.Split(string(raw), "\n") {
+		line := strings.TrimSpace(rawLine)
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			if strings.TrimSpace(strings.TrimPrefix(line, "event:")) == "error" {
+				return false
+			}
+		case strings.HasPrefix(line, "data:"):
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				sawDone = true
+				continue
+			}
+			if payload != "" && codeBuddySSEPayloadCarriesError([]byte(payload)) {
+				return false
+			}
+		}
+	}
+	return sawDone
+}
+
+// codeBuddySSEPayloadCarriesError 判定一个 data 帧 JSON 是否为业务错误信封：
+//   - 顶层 error 字段非空（OpenAI 兼容流式错误形状 {"error":{...}}；null 不算）；
+//   - 顶层 code 语义与 codeBuddyProbeEnvelopeCode 同口径：数字 != 0，或字符串非空
+//     且 != "0"。
+//
+// 正常 chat.completion.chunk 不含这两个顶层字段，无误伤面；非 JSON / 非 object
+// payload 一律按非错误处理（交给聚合器与终止帧判定兜底）。
+func codeBuddySSEPayloadCarriesError(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var envelope struct {
+		Code  json.RawMessage `json:"code"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return false
+	}
+	if errorField := bytes.TrimSpace(envelope.Error); len(errorField) > 0 && string(errorField) != "null" {
+		return true
+	}
+	if len(envelope.Code) == 0 {
+		return false
+	}
+	var codeValue any
+	if err := json.Unmarshal(envelope.Code, &codeValue); err != nil {
+		return false
+	}
+	switch value := codeValue.(type) {
+	case float64:
+		return value != 0
+	case string:
+		trimmedCode := strings.TrimSpace(value)
+		return trimmedCode != "" && trimmedCode != "0"
+	}
+	return false
 }
 
 // SetProbeOverride installs a probe function override (tests only).

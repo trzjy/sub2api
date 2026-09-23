@@ -161,6 +161,7 @@ func TestIsOpenAIAPIKeyHealthBreakerAccount(t *testing.T) {
 		s.IncludeGrok = true
 		return s
 	}
+	shadowParent := int64(99)
 
 	cases := []struct {
 		name     string
@@ -177,6 +178,13 @@ func TestIsOpenAIAPIKeyHealthBreakerAccount(t *testing.T) {
 		{"grok excluded by default", healthAccount(domain.PlatformGrok), defaultScope, false},
 		{"grok included when toggled", healthAccount(domain.PlatformGrok), grokEnabled(), true},
 		{"oauth account never covered", &Account{ID: 1, Platform: domain.PlatformOpenAI, Type: AccountTypeOAuth}, defaultScope, false},
+		// T1 (codebuddy-shadow-429-cooldown-recovery plan §3): CodeBuddy OAuth
+		// shadows are admitted alongside API-key accounts.
+		{"codebuddy shadow admitted", &Account{ID: 2, Platform: domain.PlatformDeepseek, Type: AccountTypeOAuth, ParentAccountID: &shadowParent, QuotaDimension: QuotaDimensionCodeBuddy}, defaultScope, true},
+		// Other shadows stay excluded: the Spark shadow semantics (QueryUsage-driven
+		// limits) are untouched, and the platform allowlist still wins for shadows.
+		{"openai spark shadow still excluded", &Account{ID: 3, Platform: domain.PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &shadowParent, QuotaDimension: QuotaDimensionSpark}, defaultScope, false},
+		{"codebuddy shadow on unsupported platform still excluded", &Account{ID: 4, Platform: domain.PlatformAnthropic, Type: AccountTypeOAuth, ParentAccountID: &shadowParent, QuotaDimension: QuotaDimensionCodeBuddy}, defaultScope, false},
 		// Unknown platforms are NOT folded into "openai" by the scope check: an
 		// explicit allowlist rejects them so a non-OpenAI account (anthropic/claude/
 		// bedrock/gemini/typo) can never be swept into the breaker scope.
@@ -389,6 +397,29 @@ func TestThreeTierEscalationBreakerReactions(t *testing.T) {
 	cache.recordResult = OpenAIAPIKeyHealthRecordResult{Count: 3, TrippedTrip: true}
 	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, bad))
 	require.Equal(t, 1, svc.accountRepo.(*healthAccountRepoStub).setTempCalls)
+}
+
+// TestObserveHealthBreakerAdmitsCodeBuddyShadow pins the T1 admission change
+// end-to-end through the observer: a CodeBuddy OAuth shadow's attributable failure
+// reaches the breaker window (and can trip it), while an OpenAI Spark shadow never
+// enters the window at all.
+func TestObserveHealthBreakerAdmitsCodeBuddyShadow(t *testing.T) {
+	ss, _ := newSettingService(t, &OpenAIAPIKeyHealthBreakerSettings{
+		Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5,
+	})
+	cache := &healthCacheStub{recordResult: OpenAIAPIKeyHealthRecordResult{TrippedTrip: true}}
+	svc := newRateLimitWithStubCache(t, cache, ss, nil)
+	rateLimited := &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}
+
+	shadowParent := int64(99)
+	codebuddyShadow := &Account{ID: 112, Platform: domain.PlatformDeepseek, Type: AccountTypeOAuth, ParentAccountID: &shadowParent, QuotaDimension: QuotaDimensionCodeBuddy}
+	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), codebuddyShadow, rateLimited))
+	require.Equal(t, 1, cache.recordCalls)
+	require.Equal(t, 1, svc.accountRepo.(*healthAccountRepoStub).setTempCalls)
+
+	sparkShadow := &Account{ID: 200, Platform: domain.PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &shadowParent, QuotaDimension: QuotaDimensionSpark}
+	require.False(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), sparkShadow, rateLimited))
+	require.Equal(t, 1, cache.recordCalls, "spark shadow must not enter the breaker window")
 }
 
 func TestObserveSuccessDoesNotClearWindow(t *testing.T) {

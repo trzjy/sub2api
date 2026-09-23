@@ -2505,6 +2505,9 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	if s != nil && s.rateLimitService != nil {
 		if success {
 			s.rateLimitService.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), account)
+			// T5（R4-F3）：调度成功 = 池模式账号实际可用，重置 401 升级窗口状态机；
+			// 否则恢复后同一 epoch 内再次 401 不再跨越边沿，账号失去保护。
+			resetPool401State(accountID)
 		} else if len(observedErr) > 0 && observedErr[0] != nil {
 			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, observedErr[0])
 		}

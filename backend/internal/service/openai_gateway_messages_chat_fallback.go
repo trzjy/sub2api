@@ -134,6 +134,12 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 			// 与 /v1/chat/completions 路径一致的 CodeBuddy 错误副作用（余额/会话/模型冷却），
 			// 内部完成分类 + 脱敏 + 回写 resp.Body；响应本身仍以 Anthropic 格式回传。
 			s.applyCodeBuddyErrorSideEffectsFromBody(ctx, account, resp, respBody, upstreamModel)
+			// T3 信号优先（R5-F1）：429 两类限流直接转 failover 信号换号，避免落入下方
+			// 通用 helper 对同一账号二次处置（T2 收窄后 429+6004 会被升级为账号级冷却，
+			// 违背「仅模型冷却」）；信号未认领的一切情形 nil 回退，既有 helper 原样保留。
+			if foErr := s.codeBuddyFailoverSignal(c, account, ClassifyCodeBuddyError(resp.StatusCode, respBody), resp, respBody, upstreamMsg); foErr != nil {
+				return nil, foErr
+			}
 		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr

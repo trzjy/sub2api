@@ -21,6 +21,15 @@ const codeBuddyChatCompletionsPath = "/v2/chat/completions"
 // codeBuddyBalanceCooldownMinutes CodeBuddy 余额耗尽临时停调时长（分钟），对齐 CN 供应商的 2× 检测周期默认。
 const codeBuddyBalanceCooldownMinutes = 20
 
+// codeBuddyModelLimitFailoverReason 标记模型级限流（429+6004）转出的 failover 信号
+// （写入 UpstreamFailoverError.Reason，配合 Scope=Request 供排障与消费方识别）。
+const codeBuddyModelLimitFailoverReason = GatewayFailureReason("codebuddy_model_limit")
+
+// codeBuddyModelLimitFallbackCooldown 是 6004 且模型非空但 reset 时间不可解析时的
+// 模型级冷却兜底窗口（60s，与生产 429 兜底冷却同量级；R6-F1。先例：T5 硬编码常量，
+// 不加设置项）。
+const codeBuddyModelLimitFallbackCooldown = 60 * time.Second
+
 // isCodeBuddyShadowAccount 判定账号是否为按母账号分发的 CodeBuddy 影子：
 // 影子标记（ParentAccountID != nil）+ quota_dimension=codebuddy。这是
 // /v1/chat/completions、/v1/responses、/v1/messages 三条入站路径 codebuddy 影子
@@ -253,8 +262,79 @@ func (s *OpenAIGatewayService) codeBuddySanitizeEnabled() bool {
 	return true
 }
 
-// handleCodeBuddyUpstreamError 对 CodeBuddy 上游错误分类并施加账号健康副作用，
-// 最后把上游错误原样回传给客户端（由 handleErrorResponse 写 gin 上下文）。
+// codeBuddyFailoverSignal 把 CodeBuddy 上游 429 的两类限流（ModelLimit=429+6004、
+// AccountSoftLimit=裸 429/限流文案）转换为 handler failover 循环可识别的
+// *UpstreamFailoverError 信号；chat、/responses、/v1/messages 三入口共用的唯一转换点。
+// 其余 kind 或非 429 状态一律返回 nil，调用方落回各自入口的既有错误处理链（行为与
+// 今天逐字节一致）。
+//
+// 红线：
+//   - 只认 429 状态码（R3-F1）：分类器行 4 会把「5xx+限流文案」也归为
+//     AccountSoftLimit，不加状态门禁会把 5xx 纳入新 failover，超出「仅 CodeBuddy 429」
+//     的批准边界；非 429 的既有通用 failover 行为由调用方 nil 回退保留。
+//   - 不复用 failoverOpenAIUpstreamHTTPError（R1-F1）：该 helper 返回信号前会再调
+//     handleOpenAIAccountUpstreamError 对同一账号二次处置，ModelLimit 的「仅该模型
+//     冷却」会被升级为整账号冷却。账号处置由 applyCodeBuddyErrorSideEffects 唯一
+//     权威完成，信号只转换、不再处置。
+//   - ModelLimit 显式清零 RetryableOnSameAccount/RequestScopedTransient（R5-F2）：
+//     构造器在响应含 overloaded 文案时自动置位两者（requestScopedCapacity），会把
+//     模型级限流降级为同账号先重试（failover 循环的 RetryableOnSameAccount 分支），
+//     与换号语义冲突。
+//
+// Scope 复用既有枚举语义「上游按模型容量降载：不计账号健康」：ModelLimit 信号
+// Scope=Request 使熔断分类器既有 Request 排除行生效——零分类器改动、零新枚举值
+// （R2-F2）；AccountSoftLimit 保持空 Scope，可被熔断分类计数（T1 放行的意义）。
+func (s *OpenAIGatewayService) codeBuddyFailoverSignal(
+	c *gin.Context,
+	account *Account,
+	kind CodeBuddyErrKind,
+	resp *http.Response,
+	respBody []byte,
+	upstreamMsg string,
+) *UpstreamFailoverError {
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	var foErr *UpstreamFailoverError
+	switch kind {
+	case CodeBuddyErrKindModelLimit:
+		foErr = newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, false)
+		foErr.Scope = GatewayFailureScopeRequest
+		foErr.Reason = codeBuddyModelLimitFailoverReason
+		foErr.RetryableOnSameAccount = false
+		foErr.RequestScopedTransient = false
+	case CodeBuddyErrKindAccountSoftLimit:
+		foErr = s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, false, false)
+	default:
+		return nil
+	}
+	upstreamDetail := ""
+	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 2048
+		}
+		upstreamDetail = truncateString(string(respBody), maxBytes)
+	}
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           account.Platform,
+		AccountID:          account.ID,
+		AccountName:        account.Name,
+		UpstreamStatusCode: resp.StatusCode,
+		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		Kind:               "failover",
+		Message:            upstreamMsg,
+		Detail:             upstreamDetail,
+	})
+	return foErr
+}
+
+// handleCodeBuddyUpstreamError 对 CodeBuddy 上游错误分类并施加账号健康副作用。
+// 429 两类限流（ModelLimit/AccountSoftLimit）转换为 failover 信号优先返回，由
+// handler failover 循环换号；其余 kind 维持既有终态处置——把上游错误原样回传给
+// 客户端（由 handleErrorResponse 写 gin 上下文）。
 func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 	ctx context.Context,
 	c *gin.Context,
@@ -277,18 +357,15 @@ func (s *OpenAIGatewayService) handleCodeBuddyUpstreamError(
 	if upstreamMsg == "" {
 		upstreamMsg = fmt.Sprintf("codebuddy upstream returned status %d", resp.StatusCode)
 	}
-	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-		Platform:           account.Platform,
-		AccountID:          account.ID,
-		AccountName:        account.Name,
-		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("trace-id")),
-		Kind:               "http_error",
-		Message:            upstreamMsg,
-	})
 
 	s.applyCodeBuddyErrorSideEffects(ctx, account, resp, respBody, upstreamModel, kind, upstreamMsg)
 
+	// T3 信号优先：命中（仅两类 429）即返回信号换号，ops 的 failover 事件由信号
+	// 自带；未命中落既有 handleErrorResponse 终态（自记一条）——原先进出口处的
+	// 无条件 http_error 追加已删除（R1-F3），每次尝试恰好一条 ops 事件。
+	if foErr := s.codeBuddyFailoverSignal(c, account, kind, resp, respBody, upstreamMsg); foErr != nil {
+		return nil, foErr
+	}
 	return s.handleErrorResponse(ctx, resp, c, account, respBody, upstreamModel)
 }
 
@@ -313,8 +390,13 @@ func (s *OpenAIGatewayService) applyCodeBuddyErrorSideEffects(
 	case CodeBuddyErrKindModelLimit:
 		if until, ok := parseCodeBuddyResetTime(respBody); ok {
 			s.rateLimitService.handleCodeBuddyModelLimit(ctx, account, upstreamModel, until)
+		} else if strings.TrimSpace(upstreamModel) != "" {
+			// R6-F1：模型已知但 reset 时间不可解析——复用模型级冷却函数，until 换为
+			// 兜底窗口（60s）。不得退化 handle429：T2 收窄后该路径会对 CodeBuddy 影子
+			// 产生真实账号级冷却，违背 PR3 task 1.5「模型级限流不得账号级冷却」。
+			s.rateLimitService.handleCodeBuddyModelLimit(ctx, account, upstreamModel, time.Now().Add(codeBuddyModelLimitFallbackCooldown))
 		} else {
-			// 无法解析重置时间时退化为账号级短冷却（不标记 error）。
+			// 缺模型信息无法按模型排除：退化为账号级短冷却（既有已接受语义，R4-F1 钉住不改）。
 			s.rateLimitService.handle429(ctx, account, resp.Header, respBody)
 		}
 	case CodeBuddyErrKindAccountSoftLimit:
@@ -433,7 +515,14 @@ func (s *OpenAIGatewayService) forwardResponsesViaCodeBuddy(
 
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		kind := ClassifyCodeBuddyError(resp.StatusCode, respBody)
 		s.applyCodeBuddyErrorSideEffectsFromBody(ctx, account, resp, respBody, upstreamModel)
+		// T3 信号优先（R4-F2）：429 两类限流直接转 failover 信号换号；信号未认领的
+		// 一切情形（含「5xx+限流文案」被 429 门禁挡下、其余 kind）回退既有通用
+		// helper——本入口非 429 行为与今天逐字节一致（R2-F3）。
+		if foErr := s.codeBuddyFailoverSignal(c, account, kind, resp, respBody, upstreamMsg); foErr != nil {
+			return nil, foErr
+		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
