@@ -488,6 +488,7 @@ export interface SystemSettings {
   site_subtitle: string;
   api_base_url: string;
   contact_info: string;
+  support_qrcode_url: string;
   doc_url: string;
   home_content: string;
   concurrency_limit_message: string;
@@ -837,6 +838,7 @@ export interface UpdateSettingsRequest {
   site_subtitle?: string;
   api_base_url?: string;
   contact_info?: string;
+  support_qrcode_url?: string;
   doc_url?: string;
   home_content?: string;
   concurrency_limit_message?: string;

@@ -307,6 +307,13 @@ export default {
     }
   },
 
+  // Support Float Widget
+  supportWidget: {
+    title: '微信交流群',
+    scanHint: '扫码入群,交流反馈',
+    close: '关闭'
+  },
+
   // Payment System
   payment: {
     title: '充值/订阅',

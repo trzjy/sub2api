@@ -154,6 +154,7 @@ type SystemSettings struct {
 	SiteSubtitle                string           `json:"site_subtitle"`
 	APIBaseURL                  string           `json:"api_base_url"`
 	ContactInfo                 string           `json:"contact_info"`
+	SupportQRCodeURL            string           `json:"support_qrcode_url"`
 	DocURL                      string           `json:"doc_url"`
 	ConcurrencyLimitMessage     string           `json:"concurrency_limit_message"`
 	HomeContent                 string           `json:"home_content"`
@@ -390,6 +391,7 @@ type PublicSettings struct {
 	SiteSubtitle                        string                   `json:"site_subtitle"`
 	APIBaseURL                          string                   `json:"api_base_url"`
 	ContactInfo                         string                   `json:"contact_info"`
+	SupportQRCodeURL                    string                   `json:"support_qrcode_url"`
 	DocURL                              string                   `json:"doc_url"`
 	HomeContent                         string                   `json:"home_content"`
 	CompactHomeEnabled                  bool                     `json:"compact_home_enabled"`

@@ -283,6 +283,13 @@ export default {
     }
   },
 
+  // Support Float Widget
+  supportWidget: {
+    title: 'WeChat Group',
+    scanHint: 'Scan to join our group',
+    close: 'Close'
+  },
+
   // Payment System
   payment: {
     title: 'Recharge / Subscription',

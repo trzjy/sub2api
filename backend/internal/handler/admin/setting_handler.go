@@ -253,6 +253,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ConcurrencyLimitMessage:                                settings.ConcurrencyLimitMessage,
 		APIBaseURL:                                             settings.APIBaseURL,
 		ContactInfo:                                            settings.ContactInfo,
+		SupportQRCodeURL:                                       settings.SupportQRCodeURL,
 		DocURL:                                                 settings.DocURL,
 		HomeContent:                                            settings.HomeContent,
 		CompactHomeEnabled:                                     settings.CompactHomeEnabled,

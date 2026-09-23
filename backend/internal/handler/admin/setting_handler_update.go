@@ -159,6 +159,7 @@ type UpdateSettingsRequest struct {
 	SiteSubtitle                string                `json:"site_subtitle"`
 	APIBaseURL                  string                `json:"api_base_url"`
 	ContactInfo                 string                `json:"contact_info"`
+	SupportQRCodeURL            string                `json:"support_qrcode_url"`
 	DocURL                      string                `json:"doc_url"`
 	ConcurrencyLimitMessage     string                `json:"concurrency_limit_message"`
 	HomeContent                 string                `json:"home_content"`
@@ -1629,6 +1630,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		APIBaseURL:                             req.APIBaseURL,
 		ConcurrencyLimitMessage:                req.ConcurrencyLimitMessage,
 		ContactInfo:                            req.ContactInfo,
+		SupportQRCodeURL:                       req.SupportQRCodeURL,
 		DocURL:                                 req.DocURL,
 		HomeContent:                            req.HomeContent,
 		CompactHomeEnabled:                     req.CompactHomeEnabled,
@@ -2278,6 +2280,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		SiteSubtitle:                                           updatedSettings.SiteSubtitle,
 		APIBaseURL:                                             updatedSettings.APIBaseURL,
 		ContactInfo:                                            updatedSettings.ContactInfo,
+		SupportQRCodeURL:                                       updatedSettings.SupportQRCodeURL,
 		DocURL:                                                 updatedSettings.DocURL,
 		HomeContent:                                            updatedSettings.HomeContent,
 		CompactHomeEnabled:                                     updatedSettings.CompactHomeEnabled,
