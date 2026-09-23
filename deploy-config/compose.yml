@@ -92,6 +92,32 @@ services:
       retries: 5
       start_period: 5s
 
+  # MinIO：公告图片等对象存储（S3 兼容）。 quay.io 拉取（docker.io 在部署主机不可达），
+  # 固定 release tag 不用 latest 漂浮标签（与 xianyu-worker 镜像同一纪律）。
+  # S3 API 仅绑定宿主机 127.0.0.1:9001：应用经 sub2api-network 内网访问 minio:9000，
+  # 公开下载经 nginx /s3/ 反代（见 deploy/nginx-corealgos-site.conf 与 sub2api-ops.md 5.y）。
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: sub2api-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":37001"]
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:9001:9000"
+    volumes:
+      - ../minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # xianyu-auto-reply Worker：内网专用，只加入 xianyu-internal 网络，不映射任何公网端口。
   # 镜像为内部维护的固定 tag（不使用 latest/reviewed 漂浮标签）。
   # 镜像在部署主机直接构建（本机构建的镜像无 registry RepoDigest，@sha256 digest 引用无法解析），

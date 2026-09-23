@@ -306,6 +306,34 @@ while read id; do aws s3 rm "s3://<图片桶>/announcements/$id/" --recursive; d
 
 ---
 
+## 5.y 公告图片 MinIO 对象存储（2026-09-23 新增，随公告图片配置完善交付）
+
+> 公告图片的存储后端为服务器自建 MinIO（2026-09-23 用户裁定，生产无现成 S3 凭证）。
+> 组件：compose 服务 `minio`（quay.io，固定 release tag；docker.io 在部署主机不可达），
+> 数据目录 `/opt/sub2api/minio_data`，桶 `sub2api-media`。
+
+**拓扑**：
+
+- 应用内网：sub2api 容器 → `http://minio:9000`（force_path_style，region us-east-1）
+- 公开下载：`https://corealgos.com/s3/<key>` → nginx（`/etc/nginx/sites-available/duizhang`
+  的 `location ^~ /s3/`）→ `127.0.0.1:9001` 的 `sub2api-media` 桶；桶匿名只读策略**仅限**
+  `announcements/` 前缀（`mc anonymous set download local/sub2api-media/announcements`）
+- 后台配置：管理后台 → 备份与数据管理 → 对象存储，`image_storage_config` 设置项
+  （enabled=true, endpoint=http://minio:9000, bucket=sub2api-media,
+  public_base_url=https://corealgos.com/s3, force_path_style=true）
+
+**运维要点**：
+
+- 凭证：`.env` 的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`（与 POSTGRES_PASSWORD 同等级敏感）。
+  轮换时改 .env → `docker compose up -d minio` → 同步更新后台 `image_storage_config` 的密钥。
+- 备份：`/opt/sub2api/minio_data` 在 §6.1 的整体打包范围内（tar 含公告图片对象）。
+- nginx 配置以服务器 `/etc/nginx/sites-available/duizhang` 为准（仓库无副本），
+  变更需 `nginx -t` 后 reload。
+- 5.x 孤儿清理脚本中 `<图片桶>` = `sub2api-media`，可用 minio 容器内 `mc` 执行：
+  `docker exec sub2api-minio mc ls --recursive local/sub2api-media/announcements/`。
+
+---
+
 ## 6. 备份与恢复
 
 ### 6.1 数据目录备份（推荐整体打包）
@@ -693,6 +721,8 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 
 账号健康熔断针对 **OpenAI 兼容平台的 APIKey 账号**，对窗口内可归因于该账号的上游失败（429/5xx，排除凭证失败、请求级瞬态、同账号可重试、provider 级过载）做分级处理。**默认关闭**。
 
+> **覆盖面（2026-09-23 扩展）**：CodeBuddy 影子账号（oauth 型、`quota_dimension=codebuddy`，随母账号分发的共享号）同样纳入熔断观察——其可归因失败（429/5xx）与 apikey 账号共用同一 L1/L2/L3 窗口与停调路径；OpenAI 平台的 Spark 影子不纳入。此前影子 429 后完全不被观察（零冷却）的缺口已关闭。
+
 ### 14.1 参数含义
 
 | 参数 | 含义 | 边界 / 默认 |
@@ -770,10 +800,13 @@ docker exec -i sub2api-postgres psql -U sub2api -d sub2api -c " \
 
 启用 `probe.enabled=true` 后，处于冷却期的账号会按 `probe.interval_seconds` 定时发送一次**廉价真实转发请求**（优先 `/models` 零消耗端点，否则 1 token 的最小补全），复用既有转发链路与 SSRF 防护：
 
-- 探测成功（2xx）→ 立即 `ClearTempUnschedulable` 提前解除，写 `openai.apikey_health_probe_recovered` 日志；
+- 探测成功 → 立即 `ClearTempUnschedulable` 提前解除，写 `openai.apikey_health_probe_recovered` 日志。成功判定**不再是「2xx 即成功」**：
+  - APIKey 账号：仍走 `/models` 零消耗端点，2xx 即成功；
+  - CodeBuddy 影子账号（oauth 型，无 `/models` 面）：改发一次最小**流式** chat 探测（模型取影子 `extra.shadow_model`、`max_tokens=1`、system-first、`stream:true`——上游拒绝非流式请求），成功须同时满足四条件：HTTP 2xx、聚合结果为有效 chat completion（choices 非空、无业务错误信封）、原始 SSE 出现 `data: [DONE]` 正常终止帧、全程无错误帧（`event: error` 帧或 data 帧业务错误信封均算）。任一不满足即判探测失败；
 - 探测失败 → 维持冷却，并将尝试次数 +1（写回 reason 的 `probe_attempts`）；
 - 尝试次数达到 `probe.max_attempts` → 停止探测，退回「到期自动恢复」；
-- 某平台无安全/廉价探测端点 → 探测降级为「到期恢复」，代码注释与本节已说明，不会刷屏。
+- 某平台无安全/廉价探测端点 → 探测降级为「到期恢复」，代码注释与本节已说明，不会刷屏；
+- 探测选号按停调标记词（`matched_keyword`）白名单认领：`openai_apikey_health_breaker`（熔断 L3 停调）与 `pool_mode_401_escalation`（池模式账号 401 窗口升级停调：5 分钟内累计 6 次上游 401 → 停调 30 分钟，边沿触发幂等）。池 401 停调经探测提前恢复时，会同步重置该账号的 401 窗口计数器——否则恢复后同一窗口内再次 401 不再跨越升级阈值，账号失去保护。
 
 > **开关热生效（运行时无需重启）**：探测循环在进程启动时即常驻，每个 tick（≤ `probe.interval_seconds`，默认 60s）都会重新读取 `probe.enabled`，因此**在管理后台开启/关闭探测无需重启进程**，最长一个探测间隔内即生效。关闭后循环仍在运行但每个 tick 直接跳过、不发起任何探测请求。进程优雅关闭时会调用 `Stop()` 终止该循环，不会泄漏 goroutine。
 
