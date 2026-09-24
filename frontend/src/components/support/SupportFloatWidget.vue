@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 2026-09-24 用户裁定:二维码直接展示(默认展开),不搞点击展开才可见。
 // X 收起为悬浮圆钮,点圆钮再展开;不做点外部/ESC 自动关闭(常驻卡片不应误关)。
+// 2026-09-24 二次裁定:卡片缩小(192/二维码144);记住收起——点过 X 的设备后续
+// 进页面只出圆钮(localStorage),点圆钮展开后恢复默认展示(双向记忆最后选择)。
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -8,17 +10,37 @@ import { useAppStore } from '@/stores/app'
 const appStore = useAppStore()
 const { t } = useI18n()
 
-const open = ref(true)
+const COLLAPSED_KEY = 'support_widget_collapsed'
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === '1'
+  } catch {
+    return false // 存储不可用(隐私模式等)时按未收起处理,回到默认直接展示
+  }
+}
+
+const open = ref(!readCollapsed())
 const imageFailed = ref(false)
 
 function close(): void {
   open.value = false
   imageFailed.value = false
+  try {
+    localStorage.setItem(COLLAPSED_KEY, '1')
+  } catch {
+    // 存储不可用时仅本次生效,下次进页面仍默认展示
+  }
 }
 
 function reopen(): void {
   open.value = true
   imageFailed.value = false
+  try {
+    localStorage.removeItem(COLLAPSED_KEY)
+  } catch {
+    // 同上,忽略存储异常
+  }
 }
 </script>
 
@@ -51,9 +73,9 @@ function reopen(): void {
     <!-- Expanded: card with QR shown directly -->
     <div
       v-else
-      class="w-64 rounded-xl border border-gray-200 bg-white p-4 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+      class="w-48 rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-gray-700 dark:bg-gray-800"
     >
-      <div class="mb-3 flex items-center justify-between">
+      <div class="mb-2 flex items-center justify-between">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
           {{ t('supportWidget.title') }}
         </h3>
@@ -80,17 +102,17 @@ function reopen(): void {
         v-if="!imageFailed"
         :src="appStore.supportQrcodeUrl"
         :alt="t('supportWidget.title')"
-        class="h-48 w-48 rounded border border-gray-200 object-contain dark:border-gray-700"
+        class="h-36 w-36 rounded border border-gray-200 object-contain dark:border-gray-700"
         @error="imageFailed = true"
       />
       <div
         v-else
-        class="flex h-48 w-48 items-center justify-center rounded border border-gray-200 text-xs text-gray-400 dark:border-gray-700 dark:text-gray-500"
+        class="flex h-36 w-36 items-center justify-center rounded border border-gray-200 text-xs text-gray-400 dark:border-gray-700 dark:text-gray-500"
       >
         {{ t('supportWidget.scanHint') }}
       </div>
 
-      <p class="mt-3 text-center text-xs text-gray-500 dark:text-gray-400">
+      <p class="mt-2 text-center text-xs text-gray-500 dark:text-gray-400">
         {{ t('supportWidget.scanHint') }}
       </p>
 
