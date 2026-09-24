@@ -7,7 +7,7 @@
     -->
     <table class="w-full min-w-[1200px] table-fixed border-collapse text-sm tabular-nums">
       <colgroup>
-        <col class="w-[16%]" />
+        <col class="w-[15%]" />
         <col class="w-[10%]" />
         <col class="w-[15%]" />
         <col class="w-[12%]" />
@@ -15,7 +15,7 @@
         <col class="w-[10%]" />
         <col class="w-[8%]" />
         <col class="w-[13%]" />
-        <col class="w-[6%]" />
+        <col class="w-[7%]" />
       </colgroup>
       <thead>
         <tr class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">
@@ -37,7 +37,7 @@
               <span class="ml-1 normal-case font-normal text-gray-400 dark:text-dark-500">{{ t('modelPlaza.table.unitPerMillion') }}</span>
             </div>
           </th>
-          <th rowspan="2" class="border-l border-gray-100 py-2.5 pl-3 pr-5 text-right align-middle dark:border-dark-700/60">
+          <th rowspan="2" class="border-l border-gray-100 py-2.5 px-3 text-right align-middle dark:border-dark-700/60">
             {{ t('payment.planCard.peakRate') }}
           </th>
         </tr>
