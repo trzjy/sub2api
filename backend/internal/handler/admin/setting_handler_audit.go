@@ -455,6 +455,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.CustomEndpoints != after.CustomEndpoints {
 		changed = append(changed, "custom_endpoints")
 	}
+	if before.FooterLinks != after.FooterLinks {
+		changed = append(changed, "footer_links")
+	}
 	if before.EnableFingerprintUnification != after.EnableFingerprintUnification {
 		changed = append(changed, "enable_fingerprint_unification")
 	}

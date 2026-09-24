@@ -171,6 +171,7 @@ type UpdateSettingsRequest struct {
 	TablePageSizeOptions        []int                 `json:"table_page_size_options"`
 	CustomMenuItems             *[]dto.CustomMenuItem `json:"custom_menu_items"`
 	CustomEndpoints             *[]dto.CustomEndpoint `json:"custom_endpoints"`
+	FooterLinks                 *[]dto.FooterLink     `json:"footer_links"`
 
 	// 默认配置
 	DefaultConcurrency                        int                               `json:"default_concurrency"`
@@ -1401,6 +1402,76 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		customEndpointsJSON = string(endpointBytes)
 	}
 
+	// 首页友情链接验证（镜像 custom_menu_items 范式：上限 / name / url / id 自动生成·字符集·数组内唯一性）
+	const (
+		maxFooterLinks       = 20
+		maxFooterLinkNameLen = 50
+		maxFooterLinkURLLen  = 2048
+		maxFooterLinkIDLen   = 32
+	)
+
+	footerLinksJSON := previousSettings.FooterLinks
+	if req.FooterLinks != nil {
+		links := *req.FooterLinks
+		if len(links) > maxFooterLinks {
+			response.BadRequest(c, "Too many footer links (max 20)")
+			return
+		}
+		for i, link := range links {
+			if strings.TrimSpace(link.Name) == "" {
+				response.BadRequest(c, "Footer link name is required")
+				return
+			}
+			if len(link.Name) > maxFooterLinkNameLen {
+				response.BadRequest(c, "Footer link name is too long (max 50 characters)")
+				return
+			}
+			urlTrimmed := strings.TrimSpace(link.URL)
+			if urlTrimmed == "" {
+				response.BadRequest(c, "Footer link URL is required")
+				return
+			}
+			if len(link.URL) > maxFooterLinkURLLen {
+				response.BadRequest(c, "Footer link URL is too long (max 2048 characters)")
+				return
+			}
+			if err := config.ValidateAbsoluteHTTPURL(urlTrimmed); err != nil {
+				response.BadRequest(c, "Footer link URL must be an absolute http(s) URL")
+				return
+			}
+			// Auto-generate ID if missing
+			if strings.TrimSpace(link.ID) == "" {
+				id, err := generateMenuItemID()
+				if err != nil {
+					response.Error(c, http.StatusInternalServerError, "Failed to generate footer link ID")
+					return
+				}
+				links[i].ID = id
+			} else if len(link.ID) > maxFooterLinkIDLen {
+				response.BadRequest(c, "Footer link ID is too long (max 32 characters)")
+				return
+			} else if !menuItemIDPattern.MatchString(link.ID) {
+				response.BadRequest(c, "Footer link ID contains invalid characters (only a-z, A-Z, 0-9, - and _ are allowed)")
+				return
+			}
+		}
+		// ID uniqueness check
+		seen := make(map[string]struct{}, len(links))
+		for _, link := range links {
+			if _, exists := seen[link.ID]; exists {
+				response.BadRequest(c, "Duplicate footer link ID: "+link.ID)
+				return
+			}
+			seen[link.ID] = struct{}{}
+		}
+		linkBytes, err := json.Marshal(links)
+		if err != nil {
+			response.BadRequest(c, "Failed to serialize footer links")
+			return
+		}
+		footerLinksJSON = string(linkBytes)
+	}
+
 	// Ops metrics collector interval validation (seconds).
 	if req.OpsMetricsIntervalSeconds != nil {
 		v := *req.OpsMetricsIntervalSeconds
@@ -1641,6 +1712,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		TablePageSizeOptions:                   req.TablePageSizeOptions,
 		CustomMenuItems:                        customMenuJSON,
 		CustomEndpoints:                        customEndpointsJSON,
+		FooterLinks:                            footerLinksJSON,
 		DefaultConcurrency:                     req.DefaultConcurrency,
 		DefaultBalance:                         req.DefaultBalance,
 		AffiliateRebateRate:                    affiliateRebateRate,
@@ -2291,6 +2363,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		TablePageSizeOptions:                                   updatedSettings.TablePageSizeOptions,
 		CustomMenuItems:                                        dto.ParseCustomMenuItems(updatedSettings.CustomMenuItems),
 		CustomEndpoints:                                        dto.ParseCustomEndpoints(updatedSettings.CustomEndpoints),
+		FooterLinks:                                            dto.ParseFooterLinks(updatedSettings.FooterLinks),
 		DefaultConcurrency:                                     updatedSettings.DefaultConcurrency,
 		DefaultBalance:                                         updatedSettings.DefaultBalance,
 		AffiliateRebateRate:                                    updatedSettings.AffiliateRebateRate,

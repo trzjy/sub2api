@@ -84,6 +84,7 @@ func (h *SettingHandler) GetPublicSettings(c *gin.Context) {
 		TablePageSizeOptions:                settings.TablePageSizeOptions,
 		CustomMenuItems:                     dto.ParseUserVisibleMenuItems(settings.CustomMenuItems),
 		CustomEndpoints:                     dto.ParseCustomEndpoints(settings.CustomEndpoints),
+		FooterLinks:                         dto.ParseFooterLinks(settings.FooterLinks),
 		DingTalkOAuthEnabled:                settings.DingTalkOAuthEnabled,
 		LinuxDoOAuthEnabled:                 settings.LinuxDoOAuthEnabled,
 		WeChatOAuthEnabled:                  settings.WeChatOAuthEnabled,

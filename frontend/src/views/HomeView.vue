@@ -86,7 +86,12 @@
     </main>
 
     <footer class="min-w-0 border-t border-gray-200 px-4 py-5 text-center text-sm text-gray-500 [overflow-wrap:anywhere] sm:px-6 dark:border-dark-800 dark:text-dark-400">
-      &copy; {{ currentYear }} {{ siteName }} · <a href="https://apipingce.top/" target="_blank" rel="noopener noreferrer">AI API中转站评测</a>
+      &copy; {{ currentYear }} {{ siteName }}<template v-if="sortedFooterLinks.length">
+        <span> · </span><template v-for="(link, i) in sortedFooterLinks" :key="link.id"><a
+          :href="link.url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >{{ link.name }}</a><span v-if="i < sortedFooterLinks.length - 1"> · </span></template></template>
     </footer>
   </div>
 
@@ -488,6 +493,17 @@
             GitHub
           </a>
         </div>
+        <div
+          v-if="sortedFooterLinks.length"
+          class="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-sm text-gray-500 dark:text-dark-400 sm:justify-start"
+        >
+          <template v-for="(link, i) in sortedFooterLinks" :key="link.id"><a
+            :href="link.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="transition-colors hover:text-gray-700 dark:hover:text-white"
+          >{{ link.name }}</a><span v-if="i < sortedFooterLinks.length - 1"> · </span></template>
+        </div>
       </div>
     </footer>
   </div>
@@ -547,6 +563,12 @@ const userInitial = computed(() => {
 
 // Current year for footer
 const currentYear = computed(() => new Date().getFullYear())
+
+// Footer links (友情链接) - full contract payload, copied & sorted by sort_order.
+// No filtering/purification/visibility rules: every validated link is rendered.
+const sortedFooterLinks = computed(() =>
+  [...(appStore.footerLinks || [])].sort((a, b) => a.sort_order - b.sort_order),
+)
 
 // Toggle theme
 function toggleTheme() {

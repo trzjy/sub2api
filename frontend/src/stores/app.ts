@@ -5,7 +5,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { Toast, ToastType, PublicSettings } from '@/types'
+import type { Toast, ToastType, PublicSettings, FooterLink } from '@/types'
 import { i18n } from '@/i18n'
 import {
   checkUpdates as checkUpdatesAPI,
@@ -31,6 +31,7 @@ export const useAppStore = defineStore('app', () => {
   const siteVersion = ref<string>('')
   const contactInfo = ref<string>('')
   const supportQrcodeUrl = ref<string>('')
+  const footerLinks = ref<FooterLink[]>([])
   const apiBaseUrl = ref<string>('')
   const docUrl = ref<string>('')
   const cachedPublicSettings = ref<PublicSettings | null>(null)
@@ -300,6 +301,7 @@ export const useAppStore = defineStore('app', () => {
     siteVersion.value = config.version || ''
     contactInfo.value = config.contact_info || ''
     supportQrcodeUrl.value = config.support_qrcode_url || ''
+    footerLinks.value = config.footer_links || []
     apiBaseUrl.value = config.api_base_url || ''
     docUrl.value = config.doc_url || ''
     publicSettingsLoaded.value = true
@@ -356,6 +358,7 @@ export const useAppStore = defineStore('app', () => {
         table_page_size_options: [10, 20, 50, 100],
         custom_menu_items: [],
         custom_endpoints: [],
+        footer_links: [],
         linuxdo_oauth_enabled: false,
         wechat_oauth_enabled: false,
         wechat_oauth_open_enabled: false,
@@ -452,6 +455,7 @@ export const useAppStore = defineStore('app', () => {
     siteVersion,
     contactInfo,
     supportQrcodeUrl,
+    footerLinks,
     apiBaseUrl,
     docUrl,
     cachedPublicSettings,

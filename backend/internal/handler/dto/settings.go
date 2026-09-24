@@ -25,6 +25,15 @@ type CustomEndpoint struct {
 	Description string `json:"description"`
 }
 
+// FooterLink represents an admin-configured homepage friendship/footer link.
+// Mirrors the custom_endpoints/custom_menu_items array-string contract.
+type FooterLink struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	SortOrder int    `json:"sort_order"`
+}
+
 // SystemSettings represents the admin settings API response payload.
 type SystemSettings struct {
 	RegistrationEnabled                 bool                     `json:"registration_enabled"`
@@ -166,6 +175,7 @@ type SystemSettings struct {
 	TablePageSizeOptions        []int            `json:"table_page_size_options"`
 	CustomMenuItems             []CustomMenuItem `json:"custom_menu_items"`
 	CustomEndpoints             []CustomEndpoint `json:"custom_endpoints"`
+	FooterLinks                 []FooterLink     `json:"footer_links"`
 
 	DefaultConcurrency           int                          `json:"default_concurrency"`
 	DefaultBalance               float64                      `json:"default_balance"`
@@ -402,6 +412,7 @@ type PublicSettings struct {
 	TablePageSizeOptions                []int                    `json:"table_page_size_options"`
 	CustomMenuItems                     []CustomMenuItem         `json:"custom_menu_items"`
 	CustomEndpoints                     []CustomEndpoint         `json:"custom_endpoints"`
+	FooterLinks                         []FooterLink             `json:"footer_links"`
 	DingTalkOAuthEnabled                bool                     `json:"dingtalk_oauth_enabled"`
 	LinuxDoOAuthEnabled                 bool                     `json:"linuxdo_oauth_enabled"`
 	WeChatOAuthEnabled                  bool                     `json:"wechat_oauth_enabled"`
@@ -643,6 +654,21 @@ func ParseCustomEndpoints(raw string) []CustomEndpoint {
 	var items []CustomEndpoint
 	if err := json.Unmarshal([]byte(raw), &items); err != nil {
 		return []CustomEndpoint{}
+	}
+	return items
+}
+
+// ParseFooterLinks parses a JSON string into a slice of FooterLink.
+// Returns empty slice on empty/invalid input (mirrors the custom_endpoints/custom_menu_items
+// contract; §1 user ruling: a corrupt value must not take down the whole public settings endpoint).
+func ParseFooterLinks(raw string) []FooterLink {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" {
+		return []FooterLink{}
+	}
+	var items []FooterLink
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return []FooterLink{}
 	}
 	return items
 }

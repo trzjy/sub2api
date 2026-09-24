@@ -41,6 +41,7 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     table_page_size_options: [10, 20, 50, 100],
     custom_menu_items: [],
     custom_endpoints: [],
+    footer_links: [],
     linuxdo_oauth_enabled: false,
     wechat_oauth_enabled: false,
     oidc_oauth_enabled: false,
@@ -423,6 +424,32 @@ describe('useAppStore', () => {
       expect(store.publicSettingsLoaded).toBe(false)
     })
 
+    it('footerLinks 注入路径与 XHR 路径同值', async () => {
+      const footerLinks = [
+        { id: 'example-1', name: 'Example Site', url: 'https://example.com/', sort_order: 1 },
+      ]
+
+      // 注入路径
+      ;(window as any).__APP_CONFIG__ = {
+        site_name: 'TestSite',
+        version: '1.0.0',
+        footer_links: footerLinks,
+      }
+      const store = useAppStore()
+      store.initFromInjectedConfig()
+      const injected = store.footerLinks
+      expect(injected).toEqual(footerLinks)
+
+      // XHR 路径
+      vi.mocked(getPublicSettings).mockResolvedValue(
+        createPublicSettings({ footer_links: footerLinks }),
+      )
+      await store.fetchPublicSettings(true)
+      expect(store.footerLinks).toEqual(footerLinks)
+      // 两条到达路径解析出的 footerLinks 应当完全一致
+      expect(store.footerLinks).toEqual(injected)
+    })
+
     it('clearPublicSettingsCache 清除缓存', () => {
       const windowAny = window as any
       windowAny.__APP_CONFIG__ = { site_name: 'Test' }
@@ -462,6 +489,7 @@ describe('useAppStore', () => {
         table_page_size_options: [20, 100, 1000],
         custom_menu_items: [],
         custom_endpoints: [],
+        footer_links: [],
         linuxdo_oauth_enabled: false,
         backend_mode_enabled: false,
         version: '1.0.0'
