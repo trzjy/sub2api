@@ -744,13 +744,14 @@ func (s *WebPlatformAutoLoginService) CreateGuestPoWHeader(ctx context.Context, 
 	return s.webDeepseekSolveGuestPoW(ctx, guest, targetPath)
 }
 
-// webDeepseekEmailCodeSendRequest 发码请求体（方案 §1.3 取证钉死：shumei_verification
-// 字段必须存在——可为空串——缺失时上游 422 校验错误）。
+// webDeepseekEmailCodeSendRequest 发码请求体。shumei_verification 按 2026-09-23 生产
+// 实测矩阵（方案 §2 取证 4）：省略/null → biz_code=2 人机验证文案；空串/假串 →
+// 上游 422 格式拒绝（不透明错误路径）。服务端无真实风控 token，固定发 nil（null）。
 type webDeepseekEmailCodeSendRequest struct {
 	Email              string `json:"email"`
 	TurnstileToken     string `json:"turnstile_token"`
 	Locale             string `json:"locale"`
-	ShumeiVerification string `json:"shumei_verification"`
+	ShumeiVerification *string `json:"shumei_verification"`
 	HcaptchaToken      string `json:"hcaptcha_token"`
 	DeviceID           string `json:"device_id"`
 	Scenario           string `json:"scenario"`
@@ -794,7 +795,7 @@ func (s *WebPlatformAutoLoginService) SendRegisterEmailCode(ctx context.Context,
 		Email:              email,
 		TurnstileToken:     "",
 		Locale:             locale,
-		ShumeiVerification: "", // 字段必须存在（方案 §2 取证 4），空串可过格式校验
+		ShumeiVerification: nil, // 2026-09-23 实测：空串/假串上游 422；null → biz_code=2 人机验证文案（方案 §2 取证 4）
 		HcaptchaToken:      "",
 		DeviceID:           deviceID,
 		Scenario:           scenario,
