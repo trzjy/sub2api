@@ -1,58 +1,36 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+// 2026-09-24 用户裁定:二维码直接展示(默认展开),不搞点击展开才可见。
+// X 收起为悬浮圆钮,点圆钮再展开;不做点外部/ESC 自动关闭(常驻卡片不应误关)。
+import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 
 const appStore = useAppStore()
 const { t } = useI18n()
 
-const open = ref(false)
+const open = ref(true)
 const imageFailed = ref(false)
-const rootRef = ref<HTMLElement | null>(null)
-
-function toggleOpen(): void {
-  open.value = !open.value
-  imageFailed.value = false
-}
 
 function close(): void {
   open.value = false
+  imageFailed.value = false
 }
 
-function onDocumentClick(event: MouseEvent): void {
-  if (!open.value) return
-  const target = event.target as Node
-  if (rootRef.value && !rootRef.value.contains(target)) {
-    close()
-  }
+function reopen(): void {
+  open.value = true
+  imageFailed.value = false
 }
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    close()
-  }
-}
-
-onMounted(() => {
-  document.addEventListener('click', onDocumentClick)
-  document.addEventListener('keydown', onKeydown)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', onDocumentClick)
-  document.removeEventListener('keydown', onKeydown)
-})
 </script>
 
 <template>
-  <div v-if="appStore.supportQrcodeUrl" ref="rootRef" class="fixed bottom-4 right-4 z-40">
-    <!-- Collapsed: floating round button -->
+  <div v-if="appStore.supportQrcodeUrl" class="fixed bottom-4 right-4 z-40">
+    <!-- Collapsed: floating round button (only after user closes the card) -->
     <button
       v-if="!open"
       type="button"
       class="flex h-12 w-12 items-center justify-center rounded-full bg-primary-600 text-white shadow-lg transition-colors hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:bg-primary-500 dark:hover:bg-primary-600 dark:focus:ring-offset-gray-900"
       :aria-label="t('supportWidget.title')"
-      @click="toggleOpen"
+      @click.stop="reopen"
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
@@ -70,7 +48,7 @@ onUnmounted(() => {
       </svg>
     </button>
 
-    <!-- Expanded: card -->
+    <!-- Expanded: card with QR shown directly -->
     <div
       v-else
       class="w-64 rounded-xl border border-gray-200 bg-white p-4 shadow-xl dark:border-gray-700 dark:bg-gray-800"
