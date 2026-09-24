@@ -3,8 +3,13 @@
     <!-- Preview Box -->
     <div class="flex-shrink-0">
       <div
+        data-testid="image-upload-dropzone"
         class="flex items-center justify-center overflow-hidden rounded-xl border-2 border-dashed border-gray-300 bg-gray-50 dark:border-dark-600 dark:bg-dark-800"
-        :class="[previewSizeClass, { 'border-solid': !!modelValue }]"
+        :class="[previewSizeClass, { 'border-solid': !!modelValue, 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900/20': isDragging }]"
+        @dragenter.prevent="dragDepth++"
+        @dragover.prevent
+        @dragleave.prevent="dragDepth = Math.max(0, dragDepth - 1)"
+        @drop.prevent="onDrop"
       >
         <!-- SVG mode: render inline -->
         <span
@@ -112,19 +117,17 @@ const previewSizeClass = computed(() => props.size === 'sm' ? 'h-14 w-14' : 'h-2
 const innerSizeClass = computed(() => props.size === 'sm' ? 'h-7 w-7' : 'h-12 w-12')
 const placeholderSizeClass = computed(() => props.size === 'sm' ? 'h-5 w-5' : 'h-8 w-8')
 
-function handleUpload(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  error.value = ''
+const dragDepth = ref(0)
+const isDragging = computed(() => dragDepth.value > 0)
 
-  if (!file) return
+function processFile(file: File) {
+  error.value = ''
 
   if (props.maxSize && file.size > props.maxSize) {
     error.value = t('common.fileTooLargeKb', {
       size: (file.size / 1024).toFixed(1),
       max: (props.maxSize / 1024).toFixed(0)
     })
-    input.value = ''
     return
   }
 
@@ -138,7 +141,6 @@ function handleUpload(event: Event) {
   } else {
     if (!file.type.startsWith('image/')) {
       error.value = t('common.selectImageFile')
-      input.value = ''
       return
     }
     reader.onload = (e) => {
@@ -150,6 +152,22 @@ function handleUpload(event: Event) {
   reader.onerror = () => {
     error.value = t('common.fileReadFailed')
   }
+}
+
+function handleUpload(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
   input.value = ''
+
+  if (!file) return
+
+  processFile(file)
+}
+
+function onDrop(e: DragEvent) {
+  dragDepth.value = 0
+  const file = e.dataTransfer?.files?.[0]
+  if (!file) return
+  processFile(file)
 }
 </script>
