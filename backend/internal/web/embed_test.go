@@ -5,6 +5,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -269,6 +270,292 @@ func TestFrontendServer_InjectSettings(t *testing.T) {
 
 		assert.Contains(t, string(result), `window.__APP_CONFIG__={"nested":{"array":[1,2,3]},"special":"<>&"};`)
 	})
+}
+
+func TestInjectFooterLinks(t *testing.T) {
+	baseHTML := []byte(`<html><head><title>Sub2API</title></head><body><div id="app"></div></body></html>`)
+
+	t.Run("injects_links_before_body_close", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[{"id":1,"name":"AI API中转站评测","url":"https://apipingce.top/","sort_order":1}]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.Contains(t, string(result), `<a href="https://apipingce.top/" target="_blank" rel="noopener noreferrer">AI API中转站评测</a>`)
+		assert.Contains(t, string(result), `<nav id="footer-links" hidden>`)
+		assert.True(t, strings.HasSuffix(string(result), "</body></html>"))
+		navIndex := strings.Index(string(result), `<nav id="footer-links"`)
+		bodyIndex := strings.Index(string(result), "</body>")
+		assert.True(t, navIndex < bodyIndex, "nav should be injected before </body>")
+	})
+
+	t.Run("sorts_by_sort_order_ascending", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[
+			{"id":1,"name":"Second","url":"https://example.com/2","sort_order":2},
+			{"id":2,"name":"First","url":"https://example.com/1","sort_order":1},
+			{"id":3,"name":"Third","url":"https://example.com/3","sort_order":3}
+		]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		first := strings.Index(string(result), `>First</a>`)
+		second := strings.Index(string(result), `>Second</a>`)
+		third := strings.Index(string(result), `>Third</a>`)
+		assert.True(t, first < second && second < third, "links should be sorted ascending by sort_order")
+	})
+
+	t.Run("stable_sort_preserves_equal_order", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[
+			{"id":1,"name":"A","url":"https://example.com/a","sort_order":1},
+			{"id":2,"name":"B","url":"https://example.com/b","sort_order":1}
+		]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		a := strings.Index(string(result), `>A</a>`)
+		b := strings.Index(string(result), `>B</a>`)
+		assert.True(t, a < b, "stable sort should preserve input order for equal sort_order")
+	})
+
+	t.Run("escapes_name_and_url", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[{"id":1,"name":"<script>alert(1)</script>","url":"https://example.com/?a=1&b=2","sort_order":1}]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.NotContains(t, string(result), "<script>")
+		assert.Contains(t, string(result), "&lt;script&gt;alert(1)&lt;/script&gt;")
+		assert.Contains(t, string(result), "https://example.com/?a=1&amp;b=2")
+	})
+
+	t.Run("renders_zero_filtered_entries", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[
+			{"id":1,"name":"JS","url":"javascript:alert(1)","sort_order":1},
+			{"id":2,"name":"Frag","url":"https://example.com/#frag","sort_order":2},
+			{"id":3,"name":"  Padded  ","url":"  https://example.com/  ","sort_order":3},
+			{"id":4,"name":"","url":"https://example.com/empty","sort_order":4}
+		]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.Contains(t, string(result), `href="javascript:alert(1)"`)
+		assert.Contains(t, string(result), `href="https://example.com/#frag"`)
+		assert.Contains(t, string(result), `href="  https://example.com/  "`)
+		assert.Contains(t, string(result), `>  Padded  </a>`)
+		// Empty name renders an empty anchor text — still fully rendered.
+		assert.Contains(t, string(result), `<a href="https://example.com/empty" target="_blank" rel="noopener noreferrer"></a>`)
+	})
+
+	t.Run("returns_unchanged_when_footer_links_missing", func(t *testing.T) {
+		settingsJSON := []byte(`{"site_name":"Test"}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.Equal(t, string(baseHTML), string(result))
+	})
+
+	t.Run("returns_unchanged_when_footer_links_empty", func(t *testing.T) {
+		settingsJSON := []byte(`{"footer_links":[]}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.Equal(t, string(baseHTML), string(result))
+	})
+
+	t.Run("returns_unchanged_when_invalid_json", func(t *testing.T) {
+		settingsJSON := []byte(`{invalid json}`)
+
+		result := injectFooterLinks(baseHTML, settingsJSON)
+
+		assert.Equal(t, string(baseHTML), string(result))
+	})
+}
+
+func TestFrontendServer_FooterLinksVariant(t *testing.T) {
+	t.Run("home_variant_includes_footer_links", func(t *testing.T) {
+		provider := &mockSettingsProvider{
+			settings: map[string]any{
+				"footer_links": []map[string]any{
+					{"id": 1, "name": "AI API中转站评测", "url": "https://apipingce.top/", "sort_order": 1},
+				},
+			},
+		}
+
+		server, err := NewFrontendServer(provider)
+		require.NoError(t, err)
+
+		router := gin.New()
+		router.Use(func(c *gin.Context) {
+			c.Set(middleware.CSPNonceKey, "test-nonce")
+			c.Next()
+		})
+		router.Use(server.Middleware())
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		router.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), `id="footer-links"`)
+		assert.Contains(t, w.Body.String(), `<a href="https://apipingce.top/" target="_blank" rel="noopener noreferrer">AI API中转站评测</a>`)
+	})
+
+	t.Run("non_home_routes_exclude_footer_links", func(t *testing.T) {
+		provider := &mockSettingsProvider{
+			settings: map[string]any{
+				"footer_links": []map[string]any{
+					{"id": 1, "name": "AI API中转站评测", "url": "https://apipingce.top/", "sort_order": 1},
+				},
+			},
+		}
+
+		server, err := NewFrontendServer(provider)
+		require.NoError(t, err)
+
+		router := gin.New()
+		router.Use(func(c *gin.Context) {
+			c.Set(middleware.CSPNonceKey, "test-nonce")
+			c.Next()
+		})
+		router.Use(server.Middleware())
+
+		for _, path := range []string{"/dashboard", "/index.html"} {
+			t.Run(path, func(t *testing.T) {
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				router.ServeHTTP(w, req)
+
+				assert.Equal(t, http.StatusOK, w.Code)
+				assert.NotContains(t, w.Body.String(), `id="footer-links"`)
+			})
+		}
+	})
+
+	t.Run("home_excludes_footer_links_when_unconfigured", func(t *testing.T) {
+		provider := &mockSettingsProvider{
+			settings: map[string]string{"test": "value"},
+		}
+
+		server, err := NewFrontendServer(provider)
+		require.NoError(t, err)
+
+		router := gin.New()
+		router.Use(func(c *gin.Context) {
+			c.Set(middleware.CSPNonceKey, "test-nonce")
+			c.Next()
+		})
+		router.Use(server.Middleware())
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		router.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.NotContains(t, w.Body.String(), `id="footer-links"`)
+	})
+}
+
+// midFlightInvalidatingProvider triggers an InvalidateCache call while the
+// settings fetch is in flight, simulating the stale-snapshot race.
+type midFlightInvalidatingProvider struct {
+	settings any
+	server   *FrontendServer
+}
+
+func (m *midFlightInvalidatingProvider) GetPublicSettingsForInjection(ctx context.Context) (any, error) {
+	m.server.InvalidateCache()
+	return m.settings, nil
+}
+
+func TestFrontendServer_MidFlightInvalidation(t *testing.T) {
+	provider := &midFlightInvalidatingProvider{
+		settings: map[string]any{
+			"footer_links": []map[string]any{
+				{"id": 1, "name": "AI API中转站评测", "url": "https://apipingce.top/", "sort_order": 1},
+			},
+		},
+	}
+
+	server, err := NewFrontendServer(provider)
+	require.NoError(t, err)
+	provider.server = server
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(middleware.CSPNonceKey, "test-nonce")
+		c.Next()
+	})
+	router.Use(server.Middleware())
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	router.ServeHTTP(w, req)
+
+	// Request must still be served with the current render.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `id="footer-links"`)
+
+	// The stale snapshot must not have been written back to the cache.
+	assert.Nil(t, server.cache.Get())
+	assert.Nil(t, server.cache.GetHome())
+}
+
+// commitLostThenRepopulatingProvider simulates the full lost-race interleaving:
+// while request A's settings fetch is in flight the cache is invalidated and
+// another request B successfully re-populates it with different settings.
+type commitLostThenRepopulatingProvider struct {
+	aSettings any
+	bSettings map[string]any
+	server    *FrontendServer
+}
+
+func (m *commitLostThenRepopulatingProvider) GetPublicSettingsForInjection(ctx context.Context) (any, error) {
+	// Request B: invalidate, then commit its own (newer) render.
+	m.server.InvalidateCache()
+	bJSON, _ := json.Marshal(m.bSettings)
+	bRendered := m.server.injectSettings(bJSON)
+	bHome := injectFooterLinks(bRendered, bJSON)
+	m.server.cache.SetIfCurrent(bRendered, bHome, bJSON, m.server.cache.Version())
+	// Request A's fetch completes afterwards with its own (now stale-snapshot) settings.
+	return m.aSettings, nil
+}
+
+func TestFrontendServer_CommitLostServesOwnRenderWithoutETag(t *testing.T) {
+	provider := &commitLostThenRepopulatingProvider{
+		aSettings: map[string]any{
+			"footer_links": []map[string]any{
+				{"id": 1, "name": "AI API中转站评测", "url": "https://apipingce.top/", "sort_order": 1},
+			},
+		},
+		bSettings: map[string]any{
+			"site_name":    "B-marker-site",
+			"footer_links": []map[string]any{{"id": 2, "name": "B-marker-link", "url": "https://b.example/", "sort_order": 1}},
+		},
+	}
+
+	server, err := NewFrontendServer(provider)
+	require.NoError(t, err)
+	provider.server = server
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(middleware.CSPNonceKey, "test-nonce")
+		c.Next()
+	})
+	router.Use(server.Middleware())
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	router.ServeHTTP(w, req)
+
+	// Request A must serve its own render, never request B's cache entry.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "https://apipingce.top/")
+	assert.NotContains(t, w.Body.String(), "B-marker-link")
+
+	// A lost the CAS race: no ETag may be attached to its own-render body.
+	assert.Empty(t, w.Header().Get("ETag"))
+
+	// Request B's cache entry remains intact for subsequent requests.
+	assert.NotNil(t, server.cache.GetHome())
 }
 
 func TestFrontendServer_ServeIndexHTML(t *testing.T) {
@@ -819,6 +1106,7 @@ func TestHTMLCache(t *testing.T) {
 	t.Run("new_cache_returns_nil", func(t *testing.T) {
 		cache := NewHTMLCache()
 		assert.Nil(t, cache.Get())
+		assert.Nil(t, cache.GetHome())
 	})
 
 	t.Run("set_and_get", func(t *testing.T) {
@@ -826,13 +1114,20 @@ func TestHTMLCache(t *testing.T) {
 		cache.SetBaseHTML([]byte("<html></html>"))
 
 		html := []byte("<html><body>test</body></html>")
+		homeHTML := []byte("<html><body>home</body></html>")
 		settings := []byte(`{"key":"value"}`)
-		cache.Set(html, settings)
+		assert.True(t, cache.SetIfCurrent(html, homeHTML, settings, cache.Version()))
 
 		result := cache.Get()
 		require.NotNil(t, result)
 		assert.Equal(t, html, result.Content)
 		assert.NotEmpty(t, result.ETag)
+
+		home := cache.GetHome()
+		require.NotNil(t, home)
+		assert.Equal(t, homeHTML, home.Content)
+		assert.NotEmpty(t, home.ETag)
+		assert.True(t, strings.HasSuffix(home.ETag, `-fl"`))
 	})
 
 	t.Run("invalidate_clears_cache", func(t *testing.T) {
@@ -841,13 +1136,15 @@ func TestHTMLCache(t *testing.T) {
 
 		html := []byte("<html><body>test</body></html>")
 		settings := []byte(`{"key":"value"}`)
-		cache.Set(html, settings)
+		assert.True(t, cache.SetIfCurrent(html, html, settings, cache.Version()))
 
 		require.NotNil(t, cache.Get())
+		require.NotNil(t, cache.GetHome())
 
 		cache.Invalidate()
 
 		assert.Nil(t, cache.Get())
+		assert.Nil(t, cache.GetHome())
 	})
 
 	t.Run("etag_changes_with_settings", func(t *testing.T) {
@@ -856,11 +1153,12 @@ func TestHTMLCache(t *testing.T) {
 
 		html := []byte("<html><body>test</body></html>")
 
-		cache.Set(html, []byte(`{"v":1}`))
+		cache.Invalidate()
+		assert.True(t, cache.SetIfCurrent(html, html, []byte(`{"v":1}`), cache.Version()))
 		etag1 := cache.Get().ETag
 
 		cache.Invalidate()
-		cache.Set(html, []byte(`{"v":2}`))
+		assert.True(t, cache.SetIfCurrent(html, html, []byte(`{"v":2}`), cache.Version()))
 		etag2 := cache.Get().ETag
 
 		assert.NotEqual(t, etag1, etag2)
@@ -870,7 +1168,7 @@ func TestHTMLCache(t *testing.T) {
 		cache := NewHTMLCache()
 		cache.SetBaseHTML([]byte("<html></html>"))
 
-		cache.Set([]byte("<html></html>"), []byte(`{}`))
+		assert.True(t, cache.SetIfCurrent([]byte("<html></html>"), []byte("<html></html>"), []byte(`{}`), cache.Version()))
 		result := cache.Get()
 
 		// ETag should be quoted
@@ -878,6 +1176,22 @@ func TestHTMLCache(t *testing.T) {
 		assert.True(t, strings.HasSuffix(result.ETag, `"`))
 		// Should contain dash separator
 		assert.Contains(t, result.ETag[1:len(result.ETag)-1], "-")
+	})
+
+	t.Run("set_if_current_rejects_stale_version", func(t *testing.T) {
+		cache := NewHTMLCache()
+		cache.SetBaseHTML([]byte("<html></html>"))
+
+		html := []byte("<html><body>test</body></html>")
+		v0 := cache.Version()
+		cache.Invalidate() // version now v1
+		assert.False(t, cache.SetIfCurrent(html, html, []byte(`{"key":"value"}`), v0))
+		assert.Nil(t, cache.Get())
+		assert.Nil(t, cache.GetHome())
+
+		assert.True(t, cache.SetIfCurrent(html, html, []byte(`{"key":"value"}`), cache.Version()))
+		assert.NotNil(t, cache.Get())
+		assert.NotNil(t, cache.GetHome())
 	})
 }
 

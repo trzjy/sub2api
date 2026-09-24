@@ -13,6 +13,8 @@ type HTMLCache struct {
 	mu              sync.RWMutex
 	cachedHTML      []byte
 	etag            string
+	homeHTML        []byte // Homepage variant with footer-links injection
+	homeETag        string
 	baseHTMLHash    string // Hash of the original index.html (immutable after build)
 	settingsVersion uint64 // Incremented when settings change
 }
@@ -45,6 +47,8 @@ func (c *HTMLCache) Invalidate() {
 	c.settingsVersion++
 	c.cachedHTML = nil
 	c.etag = ""
+	c.homeHTML = nil
+	c.homeETag = ""
 }
 
 // Get returns the cached HTML or nil if cache is stale
@@ -61,17 +65,50 @@ func (c *HTMLCache) Get() *CachedHTML {
 	}
 }
 
-// Set updates the cache with new rendered HTML
-func (c *HTMLCache) Set(html []byte, settingsJSON []byte) {
+// GetHome returns the cached homepage variant or nil if cache is stale
+func (c *HTMLCache) GetHome() *CachedHTML {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.homeHTML == nil {
+		return nil
+	}
+	return &CachedHTML{
+		Content: c.homeHTML,
+		ETag:    c.homeETag,
+	}
+}
+
+// Version returns the current settings version, captured before fetching
+// settings so a concurrent invalidation can be detected at commit time.
+func (c *HTMLCache) Version() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.settingsVersion
+}
+
+// SetIfCurrent updates the cache with new rendered HTML only if the caller's
+// captured version still matches the current one. If versions differ, nothing
+// is written and false is returned.
+func (c *HTMLCache) SetIfCurrent(html, homeHTML, settingsJSON []byte, wantVersion uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.settingsVersion != wantVersion {
+		return false
+	}
+
 	c.cachedHTML = html
-	c.etag = c.generateETag(settingsJSON)
+	c.etag = c.generateETag(settingsJSON, "")
+	c.homeHTML = homeHTML
+	c.homeETag = c.generateETag(settingsJSON, "-fl")
+	return true
 }
 
-// generateETag creates an ETag from base HTML hash + settings hash
-func (c *HTMLCache) generateETag(settingsJSON []byte) string {
+// generateETag creates an ETag from base HTML hash + settings hash, with an
+// optional variant suffix appended before the closing quote.
+func (c *HTMLCache) generateETag(settingsJSON []byte, variant string) string {
 	settingsHash := sha256.Sum256(settingsJSON)
-	return `"` + c.baseHTMLHash + "-" + hex.EncodeToString(settingsHash[:8]) + `"`
+	return `"` + c.baseHTMLHash + "-" + hex.EncodeToString(settingsHash[:8]) + variant + `"`
 }

@@ -150,6 +150,8 @@ docs/*
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/xianyu-manual-captcha-helper.md
 !docs/platform-other.md
+!docs/footer-links-ssr-injection-plan.md
+!docs/footer-links-plan.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
