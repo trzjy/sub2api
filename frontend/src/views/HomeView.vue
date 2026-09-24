@@ -86,7 +86,7 @@
     </main>
 
     <footer class="min-w-0 border-t border-gray-200 px-4 py-5 text-center text-sm text-gray-500 [overflow-wrap:anywhere] sm:px-6 dark:border-dark-800 dark:text-dark-400">
-      &copy; {{ currentYear }} {{ siteName }}
+      &copy; {{ currentYear }} {{ siteName }} · <a href="https://apipingce.top/" target="_blank" rel="noopener noreferrer">AI API中转站评测</a>
     </footer>
   </div>
 
