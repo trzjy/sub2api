@@ -533,8 +533,10 @@ describe('PlazaModelPricingTable 长上下文阶梯', () => {
     const rows = cacheCell.findAll('.leading-5')
     expect(rows).toHaveLength(2)
     // 写 6.25 × 0.5 / 读 0.5 × 0.5;高档 12.5 × 0.5 / 1 × 0.5
+    // (6.25×0.5=3.125,展示约定固定 2 位小数 → $3.13;计费仍用全精度)
     expect(rows[0].text()).toContain('modelPlaza.table.cacheWriteShort')
-    expect(rows[0].text()).toContain('$3.125')
+    expect(rows[0].text()).toContain('$3.13')
+    expect(rows[0].text()).not.toContain('$3.125')
     expect(rows[0].text()).toContain('$0.25')
     expect(rows[1].text()).toContain('$6.25')
     expect(rows[1].text()).toContain('$0.50')
