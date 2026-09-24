@@ -1,15 +1,21 @@
 <template>
   <div class="plaza-pricing-table overflow-x-auto">
-    <table class="w-full min-w-[1080px] table-fixed border-collapse text-sm tabular-nums">
+    <!--
+      table-fixed + colgroup：col 定义必须与实际列数一致（9 列），否则缺列的列
+      宽由浏览器挤算，配合 whitespace-nowrap 会把内容溢画到相邻列（错位重叠）。
+      宽度按各列最宽内容（含折扣徽章/tier 标签）预留，合计 100%。
+    -->
+    <table class="w-full min-w-[1200px] table-fixed border-collapse text-sm tabular-nums">
       <colgroup>
-        <col class="w-[22%]" />
-        <col class="w-[10%]" />
-        <col class="w-[11%]" />
-        <col class="w-[9%]" />
-        <col class="w-[13%]" />
-        <col class="w-[11%]" />
-        <col class="w-[8%]" />
         <col class="w-[16%]" />
+        <col class="w-[10%]" />
+        <col class="w-[15%]" />
+        <col class="w-[12%]" />
+        <col class="w-[10%]" />
+        <col class="w-[10%]" />
+        <col class="w-[8%]" />
+        <col class="w-[13%]" />
+        <col class="w-[6%]" />
       </colgroup>
       <thead>
         <tr class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400">
