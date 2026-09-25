@@ -163,6 +163,15 @@ const metricDefinitions = computed(() => {
       unit: '%'
     },
     {
+      type: 'disk_usage_percent',
+      group: 'system',
+      label: t('admin.ops.alertRules.metrics.disk'),
+      description: t('admin.ops.alertRules.metricDescriptions.disk'),
+      recommendedOperator: '>',
+      recommendedThreshold: 85,
+      unit: '%'
+    },
+    {
       type: 'concurrency_queue_depth',
       group: 'system',
       label: t('admin.ops.alertRules.metrics.queueDepth'),
