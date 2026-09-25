@@ -159,55 +159,6 @@
             <span class="text-gray-400">·</span>
             {{ t('admin.usageAnalysis.includeLowHint') }}
           </div>
-
-          <!-- Threshold settings (config-driven form, server-side validation) -->
-          <div v-if="showSettings" class="card p-4 sm:p-6">
-            <h4 class="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-              {{ t('admin.usageAnalysis.settings.title') }}
-            </h4>
-            <div v-if="settingsLoading" class="text-xs text-gray-400">
-              {{ t('admin.usageAnalysis.settings.loading') }}…
-            </div>
-            <template v-else>
-              <div class="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
-                <div v-for="group in settingGroups" :key="group.labelKey">
-                  <div class="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400">
-                    {{ t(group.labelKey) }}
-                  </div>
-                  <div class="space-y-2">
-                    <template v-for="field in group.fields" :key="field.key">
-                      <label
-                        v-if="boolSettingKeys.has(field.key)"
-                        class="flex cursor-pointer items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
-                      >
-                        <input
-                          type="checkbox"
-                          class="h-4 w-4"
-                          :checked="settingsForm[field.key] === 'true'"
-                          @change="onBoolSettingChange(field.key, $event)"
-                        />
-                        {{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}
-                      </label>
-                      <div v-else>
-                        <label class="input-label">{{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}</label>
-                        <input v-model.trim="settingsForm[field.key]" type="text" class="input" />
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </div>
-              <div class="mt-4 flex items-center justify-end">
-                <button
-                  type="button"
-                  class="btn btn-primary"
-                  :disabled="settingsSaving || settingsLoading || Object.keys(settingsForm).length === 0"
-                  @click="saveSettings"
-                >
-                  {{ settingsSaving ? t('admin.usageAnalysis.settings.saving') : t('admin.usageAnalysis.settings.save') }}
-                </button>
-              </div>
-            </template>
-          </div>
         </div>
 
         <!-- Table -->
@@ -556,6 +507,58 @@
         <button type="button" class="btn btn-primary" @click="detailVisible = false">
           {{ t('common.close') }}
         </button>
+      </template>
+    </BaseDialog>
+
+    <!-- Threshold settings dialog (config-driven form, server-side validation) -->
+    <BaseDialog
+      :show="showSettings"
+      :title="t('admin.usageAnalysis.settings.title')"
+      width="wide"
+      :close-on-click-outside="true"
+      @close="showSettings = false"
+    >
+      <div v-if="settingsLoading" class="text-xs text-gray-400">
+        {{ t('admin.usageAnalysis.settings.loading') }}…
+      </div>
+      <template v-else>
+        <div class="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div v-for="group in settingGroups" :key="group.labelKey">
+            <div class="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400">
+              {{ t(group.labelKey) }}
+            </div>
+            <div class="space-y-2">
+              <template v-for="field in group.fields" :key="field.key">
+                <label
+                  v-if="boolSettingKeys.has(field.key)"
+                  class="flex cursor-pointer items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                >
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4"
+                    :checked="settingsForm[field.key] === 'true'"
+                    @change="onBoolSettingChange(field.key, $event)"
+                  />
+                  {{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}
+                </label>
+                <div v-else>
+                  <label class="input-label">{{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}</label>
+                  <input v-model.trim="settingsForm[field.key]" type="text" class="input" />
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+        <div class="mt-4 flex items-center justify-end">
+          <button
+            type="button"
+            class="btn btn-primary"
+            :disabled="settingsSaving || settingsLoading || Object.keys(settingsForm).length === 0"
+            @click="saveSettings"
+          >
+            {{ settingsSaving ? t('admin.usageAnalysis.settings.saving') : t('admin.usageAnalysis.settings.save') }}
+          </button>
+        </div>
       </template>
     </BaseDialog>
   </AppLayout>
