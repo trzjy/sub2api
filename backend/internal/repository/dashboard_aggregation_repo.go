@@ -724,7 +724,7 @@ func (r *dashboardAggregationRepository) listUsageLogsPartitions(ctx context.Con
 
 // dropUsageLogsPartitionsOnExecutor 在调用方提供的 executor 上清理过期子分区。
 // exec 为 *sql.Tx 时，每分区的「锁分组汇总态 + 失效分组汇总 + DROP」在同一外部事务内执行
-// （注意 DROP TABLE 在 Postgres 中隐式提交，属分区表固有限制，非保留期协调主路径）；
+// （PostgreSQL 的 DDL 是事务性的，DROP TABLE 随外层事务提交/回滚，不同于 MySQL 的隐式提交）；
 // exec 为 *sql.DB 时退回既有 dropUsageLogsPartitionWithRollupInvalidation（各自独立事务）。
 func (r *dashboardAggregationRepository) dropUsageLogsPartitionsOnExecutor(ctx context.Context, exec sqlExecutor, cutoff time.Time) error {
 	partitions, err := r.listUsageLogsPartitions(ctx, exec, cutoff)
