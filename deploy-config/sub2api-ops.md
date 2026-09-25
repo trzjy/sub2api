@@ -256,7 +256,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://corealgos.com/               # 
 docker logs --tail=50 sub2api 2>&1 | grep -iE "panic|fatal" || echo NO_FATAL
 
 # 6. post-deploy 清理钩子（健康检查通过后立即执行）
-#    镜像 keep-2 实时清 + build cache --max-storage 5GB + >8GB 硬兜底 + build staging 即清
+#    镜像 keep-2 实时清 + build cache --max-used-space 5GB + >8GB 硬兜底 + build staging 即清
 #    ——清理实时化，不等每日 timer（2026-09-26 磁盘守卫整改，见 §12.5）
 rm -rf /opt/sub2api/build-<上一目标>
 /usr/local/sbin/sub2api-clean-releases   # 保留 latest + 当前运行 tag + 1 个最近 tag
@@ -674,9 +674,12 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **/tmp 下 sub2api 备份产物**（`sub2api-db-*.sql` / `sub2api-predeploy-*.sql` / `sub2api-*.tar.gz`）：保留最近 2 个；删除其余（不触碰 newapi 等其他项目备份，见脚本注释）
 - **build staging 目录**（`/opt/sub2api/build-<hash>`）：保留当前运行 tag 目录 + 1 个最近；删除其余
 - **Docker build cache（两级封顶，2026-09-26 磁盘守卫整改）**：
-  1. LRU 裁剪：`docker builder prune -f --max-storage 5GB`（`BUILD_CACHE_MAX_STORAGE`），超出部分按最近使用淘汰，保留近期缓存加速下次构建；
+  1. LRU 裁剪：`docker builder prune -f --max-used-space 5GB`（`BUILD_CACHE_MAX_STORAGE`），超出部分按最近使用淘汰，保留近期缓存加速下次构建；
   2. 硬兜底：实际占用（`docker system df` 读取）超过 `BUILD_CACHE_HARD_CAP`（默认 8GB）时 `docker builder prune -af` 全清，打日志 `build cache hard-cap exceeded (X > 8GB), full prune`；
-  - buildx 需支持 `--max-storage`（Ubuntu 24.04 打包的 0.21.3 不支持会静默降级 `--filter until=`），**2026-09-26 已升级到官方 docker-buildx-plugin**；
+  - buildx 需支持 `--max-used-space`（容量封顶 flag 的实际名称，**不存在 `--max-storage`**；
+    Ubuntu 24.04 打包的 0.21.3 无该 flag，脚本会静默降级 `--filter until=`——且 `|| true`
+    会吞掉 unknown flag 的退出码，清理失效不可见于退出码，必须看日志 note 行），
+    **2026-09-26 已升级到官方 docker-buildx-plugin v0.37.1（服务器 help 实测确认）**；
   - 背景：2026-09-26 磁盘打满事故主凶即 build cache 11.8GB 只进不出（旧降级路径 `until=168h` 永不命中）。
 
 ### 12.3 手动执行
@@ -718,7 +721,7 @@ timer 兜底"：每次部署健康检查通过后，立即执行一次清理，�
 - **谁调用**：§5 升级流程第 6 步（人工/半自动部署流程的固定环节），命令即
   `/usr/local/sbin/sub2api-clean-releases`；systemd timer（§12.1）保留为每日兜底，不变更。
 - **何时**：部署第 5 步健康检查（`/health` 200 + 容器 healthy）通过之后、部署收尾前。
-- **覆盖动作**：镜像 keep-2 实时清、build cache `--max-storage 5GB` LRU 裁剪 + >8GB 硬兜底全清、
+- **覆盖动作**：镜像 keep-2 实时清、build cache `--max-used-space 5GB` LRU 裁剪 + >8GB 硬兜底全清、
   build staging 目录即清、`.env.bak-*` / /tmp 备份产物滚动保留（见 §12.2）。
 - **幂等性**：脚本为纯清理动作，可重复执行无副作用；保留集合（运行镜像、运行 tag 目录）
   每次动态计算，跑多次与跑一次结果一致。不确定时先 `--dry-run`。
