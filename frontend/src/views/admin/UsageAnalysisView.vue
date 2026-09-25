@@ -132,15 +132,21 @@
               {{ t('admin.usageAnalysis.freshness.status') }}…
             </div>
 
-            <button
-              type="button"
-              class="btn btn-secondary ml-auto py-1.5"
-              :disabled="runStatusLoading"
-              @click="fetchRunStatus"
-            >
-              <Icon name="refresh" size="xs" />
-              {{ t('admin.usageAnalysis.freshness.refresh') }}
-            </button>
+            <div class="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                class="btn btn-secondary py-1.5"
+                :disabled="runStatusLoading"
+                @click="fetchRunStatus"
+              >
+                <Icon name="refresh" size="xs" />
+                {{ t('admin.usageAnalysis.freshness.refresh') }}
+              </button>
+              <button type="button" class="btn btn-secondary py-1.5" @click="toggleSettings">
+                <Icon name="cog" size="xs" />
+                {{ t('admin.usageAnalysis.settings.toggle') }}
+              </button>
+            </div>
           </div>
 
           <!-- Entry threshold (consumed from backend, never hard-coded) -->
@@ -152,6 +158,55 @@
             {{ t('admin.usageAnalysis.includeLine', { score: minScore }) }}
             <span class="text-gray-400">·</span>
             {{ t('admin.usageAnalysis.includeLowHint') }}
+          </div>
+
+          <!-- Threshold settings (config-driven form, server-side validation) -->
+          <div v-if="showSettings" class="card p-4 sm:p-6">
+            <h4 class="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
+              {{ t('admin.usageAnalysis.settings.title') }}
+            </h4>
+            <div v-if="settingsLoading" class="text-xs text-gray-400">
+              {{ t('admin.usageAnalysis.settings.loading') }}…
+            </div>
+            <template v-else>
+              <div class="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div v-for="group in settingGroups" :key="group.labelKey">
+                  <div class="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400">
+                    {{ t(group.labelKey) }}
+                  </div>
+                  <div class="space-y-2">
+                    <template v-for="field in group.fields" :key="field.key">
+                      <label
+                        v-if="boolSettingKeys.has(field.key)"
+                        class="flex cursor-pointer items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
+                      >
+                        <input
+                          type="checkbox"
+                          class="h-4 w-4"
+                          :checked="settingsForm[field.key] === 'true'"
+                          @change="onBoolSettingChange(field.key, $event)"
+                        />
+                        {{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}
+                      </label>
+                      <div v-else>
+                        <label class="input-label">{{ t(`admin.usageAnalysis.settings.keys.${field.key}`) }}</label>
+                        <input v-model.trim="settingsForm[field.key]" type="text" class="input" />
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 flex items-center justify-end">
+                <button
+                  type="button"
+                  class="btn btn-primary"
+                  :disabled="settingsSaving || settingsLoading || Object.keys(settingsForm).length === 0"
+                  @click="saveSettings"
+                >
+                  {{ settingsSaving ? t('admin.usageAnalysis.settings.saving') : t('admin.usageAnalysis.settings.save') }}
+                </button>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -555,6 +610,144 @@ const filters = reactive({
 const runStatus = ref<RunStatusResponse | null>(null)
 const runStatusLoading = ref(false)
 
+// ==================== Threshold settings (config-driven form) ====================
+interface SettingField {
+  key: string
+  bool?: boolean
+}
+
+const settingGroups: { labelKey: string; fields: SettingField[] }[] = [
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupGlobal',
+    fields: [
+      { key: 'usage_risk_enabled', bool: true },
+      { key: 'usage_risk_unlimited_groups_only', bool: true },
+      { key: 'usage_risk_min_daily_requests' },
+      { key: 'usage_risk_listing_min_score' },
+      { key: 'usage_risk_retention_days' },
+      { key: 'usage_risk_ua_whitelist' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR1',
+    fields: [
+      { key: 'usage_risk_r1_enabled', bool: true },
+      { key: 'usage_risk_r1_active_hours' },
+      { key: 'usage_risk_r1_consecutive_days' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR2',
+    fields: [
+      { key: 'usage_risk_r2_enabled', bool: true },
+      { key: 'usage_risk_r2_multiple' },
+      { key: 'usage_risk_r2_peer_count' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR3A',
+    fields: [
+      { key: 'usage_risk_r3a_enabled', bool: true },
+      { key: 'usage_risk_r3a_ratio' },
+      { key: 'usage_risk_r3a_minutes' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR3B',
+    fields: [
+      { key: 'usage_risk_r3b_enabled', bool: true },
+      { key: 'usage_risk_r3b_occupancy' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR4',
+    fields: [
+      { key: 'usage_risk_r4_enabled', bool: true },
+      { key: 'usage_risk_r4_distinct_ip' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR5',
+    fields: [
+      { key: 'usage_risk_r5_enabled', bool: true },
+      { key: 'usage_risk_r5_user_count' },
+      { key: 'usage_risk_r5_ip_requests' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR6',
+    fields: [
+      { key: 'usage_risk_r6_enabled', bool: true },
+      { key: 'usage_risk_r6_ua_ratio' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR7',
+    fields: [
+      { key: 'usage_risk_r7_enabled', bool: true },
+      { key: 'usage_risk_r7_cache_ratio' },
+      { key: 'usage_risk_r7_min_input_tokens' }
+    ]
+  },
+  {
+    labelKey: 'admin.usageAnalysis.settings.groupR8',
+    fields: [
+      { key: 'usage_risk_r8_enabled', bool: true },
+      { key: 'usage_risk_r8_key_count' },
+      { key: 'usage_risk_r8_key_ratio' }
+    ]
+  }
+]
+
+const boolSettingKeys = new Set(
+  settingGroups.flatMap((g) => g.fields.filter((f) => f.bool).map((f) => f.key))
+)
+
+const showSettings = ref(false)
+const settingsForm = reactive<Record<string, string>>({})
+const settingsLoading = ref(false)
+const settingsSaving = ref(false)
+
+function onBoolSettingChange(key: string, ev: Event) {
+  settingsForm[key] = (ev.target as HTMLInputElement).checked ? 'true' : 'false'
+}
+
+async function toggleSettings() {
+  showSettings.value = !showSettings.value
+  if (showSettings.value && Object.keys(settingsForm).length === 0) {
+    await fetchSettings()
+  }
+}
+
+async function fetchSettings() {
+  settingsLoading.value = true
+  try {
+    const values = await adminAPI.usageRisk.getUsageRiskSettings()
+    for (const group of settingGroups) {
+      for (const field of group.fields) {
+        settingsForm[field.key] = values[field.key] ?? ''
+      }
+    }
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.usageAnalysis.settings.loadFailed')))
+  } finally {
+    settingsLoading.value = false
+  }
+}
+
+async function saveSettings() {
+  settingsSaving.value = true
+  try {
+    await adminAPI.usageRisk.updateUsageRiskSettings({ ...settingsForm })
+    appStore.showSuccess(t('admin.usageAnalysis.settings.saved'))
+    await fetchSettings()
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.usageAnalysis.settings.saveFailed')))
+  } finally {
+    settingsSaving.value = false
+  }
+}
+
 // ==================== Labels / badges (static keys only) ====================
 const levelLabels: Record<string, string> = {
   low: t('admin.usageAnalysis.level.low'),
@@ -829,11 +1022,11 @@ async function openDetail(id: number) {
 async function changeStatus(id: number, status: UpdateReportStatusPayload) {
   updatingId.value = id
   try {
-    const updated = await adminAPI.usageRisk.updateReportStatus(id, status)
+    await adminAPI.usageRisk.updateReportStatus(id, status)
     const idx = reports.value.findIndex((r) => r.report_id === id)
-    if (idx >= 0) reports.value[idx] = { ...reports.value[idx], ...updated }
+    if (idx >= 0) reports.value[idx] = { ...reports.value[idx], status }
     if (detail.value && detail.value.report_id === id) {
-      detail.value = { ...detail.value, ...updated }
+      detail.value = { ...detail.value, status }
     }
     appStore.showSuccess(statusLabels[status])
   } catch (err: unknown) {

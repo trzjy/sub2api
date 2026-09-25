@@ -138,13 +138,13 @@ export async function getReport(id: number): Promise<ReportDetail> {
 
 /**
  * Transition a report's status (state machine enforced server-side).
- * Returns the updated report.
+ * Returns the new status string echoed by the backend.
  */
 export async function updateReportStatus(
   id: number,
   status: UpdateReportStatusPayload
-): Promise<Report> {
-  const { data } = await apiClient.post<Report>(`/admin/usage-risk/reports/${id}/status`, { status })
+): Promise<string> {
+  const { data } = await apiClient.post<string>(`/admin/usage-risk/reports/${id}/status`, { status })
   return data
 }
 
@@ -156,11 +156,28 @@ export async function getRunStatus(): Promise<RunStatusResponse> {
   return data
 }
 
+/**
+ * Get all usage_risk_* setting keys with effective values (defaults + stored overrides).
+ */
+export async function getUsageRiskSettings(): Promise<Record<string, string>> {
+  const { data } = await apiClient.get<{ settings: Record<string, string> }>('/admin/usage-risk/settings')
+  return data.settings
+}
+
+/**
+ * Persist usage risk settings (partial update; domain validation is server-side).
+ */
+export async function updateUsageRiskSettings(values: Record<string, string>): Promise<void> {
+  await apiClient.put('/admin/usage-risk/settings', values)
+}
+
 export const adminUsageRiskAPI = {
   listReports,
   getReport,
   updateReportStatus,
-  getRunStatus
+  getRunStatus,
+  getUsageRiskSettings,
+  updateUsageRiskSettings
 }
 
 export default adminUsageRiskAPI
