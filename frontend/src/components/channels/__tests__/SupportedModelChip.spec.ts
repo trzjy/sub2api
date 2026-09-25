@@ -48,7 +48,7 @@ describe('SupportedModelChip', () => {
     await wrapper.find('[tabindex="0"]').trigger('mouseenter')
     await nextTick()
 
-    expect(document.body.textContent).toContain('$20 / $75')
+    expect(document.body.textContent).toContain('$20.00 / $75.00')
     wrapper.unmount()
   })
 })

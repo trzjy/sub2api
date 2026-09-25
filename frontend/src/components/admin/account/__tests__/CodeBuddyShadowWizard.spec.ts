@@ -385,15 +385,28 @@ describe('CodeBuddyShadowWizard — N3 站点命名与徽标', () => {
     )
   })
 
-  it('一模型多分组时名字追加分组短名做消歧', async () => {
+  it('一模型多分组聚合为单影子：1 请求、名字无分组后缀、group_ids 含全部分组', async () => {
     const wrapper = mountWizard()
     await syncTable()
     await checkRow('deepseek-v3')
     await setRowGroups(wrapper, 'deepseek-v3', [1, 2])
     await clickEl(q('[data-test="codebuddy-create"]'))
 
-    const names = createCodeBuddyShadow.mock.calls.map((c) => (c[1] as { name: string }).name).sort()
-    expect(names).toEqual(['jossin:cn:deepseek-v3:ds-backup', 'jossin:cn:deepseek-v3:ds-primary'])
+    // 聚合契约：一模型一影 → 单条创建请求，group_ids 携带该模型全部待建分组。
+    expect(createCodeBuddyShadow).toHaveBeenCalledTimes(1)
+    const payload = createCodeBuddyShadow.mock.calls[0]![1] as {
+      name: string
+      model: string
+      group_ids: number[]
+      priority: number
+    }
+    // 一模型一影天然唯一，无消歧场景 → 名字无分组短名后缀。
+    expect(payload).toMatchObject({
+      name: 'jossin:cn:deepseek-v3',
+      model: 'deepseek-v3',
+      group_ids: [1, 2],
+      priority: 50,
+    })
   })
 
   it('影子行站点徽标来自既有影子名；存量命名（无 site 段）不显示徽标并给出提示', async () => {
@@ -463,30 +476,32 @@ describe('CodeBuddyShadowWizard — N4 一模型多分组', () => {
     expect(ids).toEqual([1, 2, 3])
   })
 
-  it('一个模型绑 3 个分组 → 3 个创建请求，各自独立优先级', async () => {
+  it('一个模型绑 3 个分组 → 1 个聚合创建请求，group_ids 含全部分组', async () => {
     const wrapper = mountWizard()
     await syncTable()
     await checkRow('deepseek-v3')
-    const selector = await setRowGroups(wrapper, 'deepseek-v3', [1, 2])
+    // 同一模型勾选 3 个分组（含跨平台分组仅用于凑足 3 个，验证聚合而非平台校验）。
+    const selector = await setRowGroups(wrapper, 'deepseek-v3', [1, 2, 3])
     expect(selector.props('platform')).toBe('deepseek')
-    // 不同模型的行各自维护选择；glm 行绑一个 zhipu 分组
-    await checkRow('glm-4.5')
-    await setRowGroups(wrapper, 'glm-4.5', [3])
     await clickEl(q('[data-test="codebuddy-create"]'))
 
-    expect(createCodeBuddyShadow).toHaveBeenCalledTimes(3)
-    const payloads = createCodeBuddyShadow.mock.calls.map(
-      (c) => c[1] as { model: string; group_ids: number[]; priority: number; platform: string },
-    )
-    expect(payloads.map((p) => `${p.model}:${p.group_ids[0]}`).sort()).toEqual([
-      'deepseek-v3:1',
-      'deepseek-v3:2',
-      'glm-4.5:3',
-    ])
-    expect(payloads.every((p) => p.priority === 50)).toBe(true)
+    // 聚合契约：每选中模型 1 条请求，group_ids 携带该模型全部待建分组。
+    expect(createCodeBuddyShadow).toHaveBeenCalledTimes(1)
+    const payload = createCodeBuddyShadow.mock.calls[0]![1] as {
+      model: string
+      group_ids: number[]
+      priority: number
+      platform: string
+    }
+    expect(payload).toMatchObject({
+      model: 'deepseek-v3',
+      group_ids: [1, 2, 3],
+      priority: 50,
+      platform: 'deepseek',
+    })
   })
 
-  it('已存在的 (模型, 分组) 组合被跳过', async () => {
+  it('已有影子的模型整行跳过（零请求），其余模型正常发', async () => {
     const wrapper = mountWizard({
       shadows: [
         makeShadow({
@@ -498,15 +513,25 @@ describe('CodeBuddyShadowWizard — N4 一模型多分组', () => {
       ],
     })
     await syncTable()
+    // deepseek-v3 已有影子 → 命中 rowHasAnyShadow，整行跳过，不发请求。
     await checkRow('deepseek-v3')
     await setRowGroups(wrapper, 'deepseek-v3', [1, 2])
+    // glm-4.5 无影子 → 正常发。
+    await checkRow('glm-4.5')
+    await setRowGroups(wrapper, 'glm-4.5', [3])
     await clickEl(q('[data-test="codebuddy-create"]'))
 
+    // 聚合契约：已有影子的模型零请求；仅无影子的模型发 1 条。
     expect(createCodeBuddyShadow).toHaveBeenCalledTimes(1)
-    expect(createCodeBuddyShadow.mock.calls[0]![1]).toMatchObject({
-      name: 'jossin:cn:deepseek-v3:ds-backup',
-      group_ids: [2],
-    })
+    const payload = createCodeBuddyShadow.mock.calls[0]![1] as {
+      model: string
+      group_ids: number[]
+    }
+    expect(payload).toMatchObject({ model: 'glm-4.5', group_ids: [3] })
+
+    // 跳过走模型级 skipped 清单，而非失败。
+    expect(q('[data-test="codebuddy-create-skipped-deepseek-v3"]')).toBeTruthy()
+    expect(q('[data-test="codebuddy-create-failed-deepseek-v3"]')).toBeNull()
   })
 
   it('已有影子的模型在未选分组时状态显示「已创建」而非「未创建」', async () => {
@@ -546,9 +571,9 @@ describe('CodeBuddyShadowWizard — N4 一模型多分组', () => {
     expect(q<HTMLButtonElement>('[data-test="codebuddy-create"]')?.disabled).toBe(true)
   })
 
-  it('部分失败按 (模型, 分组) 二元组展示', async () => {
+  it('部分失败按模型展示（data-test 命中模型级失败清单）', async () => {
     createCodeBuddyShadow.mockImplementation(async (_parentId: number, payload: { model: string; group_ids: number[] }) => {
-      if (payload.group_ids[0] === 2) throw new Error('CODEBUDDY_SHADOW_MODEL_EXISTS')
+      if (payload.model === 'deepseek-v3') throw new Error('CODEBUDDY_SHADOW_MODEL_EXISTS')
       return { id: 905, name: payload.model, extra: { shadow_model: payload.model } }
     })
 
@@ -558,11 +583,11 @@ describe('CodeBuddyShadowWizard — N4 一模型多分组', () => {
     await setRowGroups(wrapper, 'deepseek-v3', [1, 2])
     await clickEl(q('[data-test="codebuddy-create"]'))
 
-    expect(document.body.textContent).toContain(
-      'admin.accounts.codeBuddyBatchCreatePartial',
-    )
-    const failed = q('[data-test="codebuddy-create-failed-deepseek-v3-2"]')
+    expect(document.body.textContent).toContain('admin.accounts.codeBuddyBatchCreatePartial')
+    // 聚合契约：失败清单按模型展示，data-test 命中模型级条目（含全部待建分组名 + 错误）。
+    const failed = q('[data-test="codebuddy-create-failed-deepseek-v3"]')
     expect(failed?.textContent).toContain('deepseek-v3')
+    expect(failed?.textContent).toContain('ds-primary')
     expect(failed?.textContent).toContain('ds-backup')
     expect(failed?.textContent).toContain('CODEBUDDY_SHADOW_MODEL_EXISTS')
   })
