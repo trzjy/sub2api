@@ -388,13 +388,16 @@ func ProvideCNProviderBalanceCheckService(
 	accountRepo AccountRepository,
 	balanceService *CNProviderBalanceService,
 	quotaService *CNProviderQuotaService,
+	rateLimitService *RateLimitService,
+	httpUpstream HTTPUpstream,
+	proxyRepo ProxyRepository,
 	cfg *config.Config,
 ) *CNProviderBalanceCheckService {
 	minutes := 10
 	if cfg != nil && cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes > 0 {
 		minutes = cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes
 	}
-	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, cfg, time.Duration(minutes)*time.Minute)
+	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, rateLimitService, httpUpstream, proxyRepo, cfg, time.Duration(minutes)*time.Minute)
 	svc.Start()
 	return svc
 }

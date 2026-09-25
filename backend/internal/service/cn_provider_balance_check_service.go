@@ -1,9 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -25,12 +29,15 @@ const cnQuotaProbeConcurrency = 4
 //     调度阈值评估（cnProviderThresholdCandidates）据此自动停调/恢复。
 //
 // 克隆自 AccountExpiryService 的 Start/Stop/runOnce + ticker 骨架。
-// 余额探测仅覆盖有公开余额端点的 kimi / deepseek；智谱无余额端点，仅靠响应式 429/402。
+// 余额探测：kimi / deepseek 走原生 /user/balance；zhipu / minimax payg 走最小完成请求探测。
 // 额度探测覆盖 kimi / zhipu 的 coding plan 账号（deepseek 无 coding 套餐）。
 type CNProviderBalanceCheckService struct {
 	accountRepo    AccountRepository
 	balanceService *CNProviderBalanceService
 	quotaService   cnQuotaProber
+	rateLimitSvc   *RateLimitService
+	httpUpstream   HTTPUpstream
+	proxyRepo      ProxyRepository
 	cfg            *config.Config
 	interval       time.Duration
 	stopCh         chan struct{}
@@ -40,10 +47,18 @@ type CNProviderBalanceCheckService struct {
 
 // NewCNProviderBalanceCheckService 构造周期余额/额度检测服务。
 // interval <= 0 时 Start() 直接返回（不启动），便于通过配置关闭。
+//
+// rateLimitSvc 供余额不足响应式停调（handleCNProviderInsufficientBalance）与
+// coding plan 调度阈值停调（ApplyAccountSchedulingThreshold）复用；httpUpstream /
+// proxyRepo 与 CNProviderBalanceService / CNProviderQuotaService 共用同一套既有
+// 出客户端机制（不新建），供智谱 / MiniMax payg 最小完成请求探测使用。
 func NewCNProviderBalanceCheckService(
 	accountRepo AccountRepository,
 	balanceService *CNProviderBalanceService,
 	quotaService *CNProviderQuotaService,
+	rateLimitSvc *RateLimitService,
+	httpUpstream HTTPUpstream,
+	proxyRepo ProxyRepository,
 	cfg *config.Config,
 	interval time.Duration,
 ) *CNProviderBalanceCheckService {
@@ -51,6 +66,9 @@ func NewCNProviderBalanceCheckService(
 		accountRepo:    accountRepo,
 		balanceService: balanceService,
 		quotaService:   quotaService,
+		rateLimitSvc:   rateLimitSvc,
+		httpUpstream:   httpUpstream,
+		proxyRepo:      proxyRepo,
 		cfg:            cfg,
 		interval:       interval,
 		stopCh:         make(chan struct{}),
@@ -107,6 +125,10 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	}
 	var quotaTargets []quotaTarget
 	var paygTargets []*Account
+	// probeTargets 收集智谱 / MiniMax 的 payg 账号：无公开余额端点，走最小完成
+	// 请求探测（覆盖 native 余额不可用的中转型 payg 账号）。kimi/deepseek 的 payg
+	// 维持原生 /user/balance 路径（仅在该路径失败时同周期转探测，见 payg 循环）。
+	var probeTargets []*Account
 	collect := func(platform string, accounts []Account) {
 		for i := range accounts {
 			account := &accounts[i]
@@ -126,10 +148,21 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				quotaTargets = append(quotaTargets, quotaTarget{id: account.ID, platform: account.Platform})
 				continue
 			}
-			// payg 余额探测仅 kimi/deepseek（智谱 / MiniMax 无公开余额端点，
-			// payg 账号依赖响应式 402/429 处理）。
-			if platform != PlatformZhipu && platform != PlatformMiniMax && account.Schedulable {
-				paygTargets = append(paygTargets, account)
+			// payg 余额探测：
+			switch platform {
+		case PlatformZhipu, PlatformMiniMax:
+			// 智谱 / MiniMax 无公开余额端点：进最小完成请求探测队列。
+			// Schedulable 是管理端手动开关：停用（false）的账号不进探测；
+			// 临时停调账号 Schedulable 仍为 true、必须继续收集以支持充值后
+			// 探测恢复（与管理端开关语义对齐，两层互不干扰）。
+			if account.Schedulable {
+				probeTargets = append(probeTargets, account)
+			}
+			default:
+				// kimi/deepseek payg：维持原生 /user/balance 路径。
+				if account.Schedulable {
+					paygTargets = append(paygTargets, account)
+				}
 			}
 		}
 	}
@@ -153,9 +186,10 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		}
 	}
 
-	// 预算按工作量放大：4 并发 × 15s/批 + payg 每账号 5s，下限 30s 上限 300s。
+	// 预算按工作量放大：4 并发 × 15s/批 + payg/probe 每账号 5s，下限 30s 上限 300s。
 	batches := (len(quotaTargets) + cnQuotaProbeConcurrency - 1) / cnQuotaProbeConcurrency
-	timeout := 30*time.Second + time.Duration(batches)*15*time.Second + time.Duration(len(paygTargets))*5*time.Second
+	timeout := 30*time.Second + time.Duration(batches)*15*time.Second +
+		time.Duration(len(paygTargets)+len(probeTargets))*5*time.Second
 	if timeout > 300*time.Second {
 		timeout = 300 * time.Second
 	}
@@ -170,7 +204,16 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			paused++
 		case cnBalanceCleared:
 			cleared++
+		case cnBalanceNativeFailed:
+			// kimi/deepseek payg 原生 /user/balance 不可用（中转未实现该端点）：
+			// 同周期转最小完成请求探测，覆盖该人群。
+			s.probeOne(ctx, account)
 		}
+	}
+
+	// 智谱 / MiniMax payg：最小完成请求探测（无公开余额端点）。
+	for _, account := range probeTargets {
+		s.probeOne(ctx, account)
 	}
 
 	if len(quotaTargets) > 0 && s.quotaService != nil {
@@ -202,7 +245,8 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 }
 
 // probeQuota 探测单个 coding plan 账号的滚动窗口用量并落 extra 快照。
-// 不在此处做停调/恢复决策：调度阈值评估读取快照统一判定（含暂停账号的续停）。
+// 落快照后重载账号并应用调度阈值停调（与 codebuddy_quota_check_service.go 先例
+// 一致：失败日志不阻断其他账号）。
 func (s *CNProviderBalanceCheckService) probeQuota(ctx context.Context, accountID int64, platform string) {
 	if s.quotaService == nil {
 		return
@@ -215,6 +259,125 @@ func (s *CNProviderBalanceCheckService) probeQuota(ctx context.Context, accountI
 	if result != nil && !result.Success && result.Error != "" {
 		log.Printf("[CNBalance] quota probe account %d (%s) error: %s", accountID, platform, result.Error)
 	}
+	// 快照已落库：重载账号后应用调度阈值评估（含暂停账号续停/恢复）。
+	if s.rateLimitSvc != nil {
+		fresh, getErr := s.accountRepo.GetByID(ctx, accountID)
+		if getErr != nil {
+			log.Printf("[CNBalance] quota probe reload account %d (%s) failed: %v", accountID, platform, getErr)
+			return
+		}
+		if s.rateLimitSvc.ApplyAccountSchedulingThreshold(ctx, fresh) {
+			log.Printf("[CNBalance] account %d (%s) paused by scheduling threshold", accountID, platform)
+		}
+	}
+}
+
+// probeOne 对无公开余额端点的 payg 账号发起一次最小完成请求（chat/completions），
+// 据此判定余额不足并停调 / 恢复：
+//   - 响应体命中余额不足文案 → 停调 2× 检测周期（含 _balance_low 快照标记）；
+//   - HTTP 2xx 且未命中余额不足 → 仅当本服务写入的余额前缀停调存在时清除（他因不动）；
+//   - 其余（超时/连接失败/401/403/429 无文案/未识别错误体）→ 不停调不清除，下周期重试。
+//
+// 出客户端复用 CNProviderBalanceService / CNProviderQuotaService 同一套机制
+// （httpUpstream + resolveProxyURL + cnValidateProbeURL），不新建客户端。
+func (s *CNProviderBalanceCheckService) probeOne(ctx context.Context, account *Account) {
+	if s == nil || s.httpUpstream == nil || s.rateLimitSvc == nil {
+		log.Printf("[CNBalance] probe account %d (%s) skipped: service not fully configured", account.ID, account.Platform)
+		return
+	}
+	model := resolveWebTestModel(account, "", account.Platform)
+	if model == "" {
+		log.Printf("[CNBalance] probe account %d (%s) skipped: cannot resolve web test model", account.ID, account.Platform)
+		return
+	}
+	apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
+	if apiKey == "" {
+		log.Printf("[CNBalance] probe account %d (%s) skipped: empty api key", account.ID, account.Platform)
+		return
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(account.GetOpenAIBaseURL()), "/")
+	if baseURL == "" {
+		log.Printf("[CNBalance] probe account %d (%s) skipped: empty base url", account.ID, account.Platform)
+		return
+	}
+	rawURL := baseURL + "/chat/completions"
+	targetURL, err := cnValidateProbeURL(s.cfg, rawURL)
+	if err != nil {
+		log.Printf("[CNBalance] probe account %d (%s) url rejected: %v", account.ID, account.Platform, err)
+		return
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":     model,
+		"messages":  []map[string]string{{"role": "user", "content": "hi"}},
+		"max_tokens": 1,
+	})
+	if err != nil {
+		log.Printf("[CNBalance] probe account %d (%s) marshal failed: %v", account.ID, account.Platform, err)
+		return
+	}
+	proxyURL := s.resolveProxyURL(ctx, account)
+	callCtx, cancel := context.WithTimeout(ctx, cnBalanceUpstreamTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[CNBalance] probe account %d (%s) build request failed: %v", account.ID, account.Platform, err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	account.ApplyHeaderOverrides(req.Header)
+
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	if err != nil {
+		log.Printf("[CNBalance] probe account %d (%s) request failed: %v", account.ID, account.Platform, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, cnBalanceMaxBodyBytes))
+
+	if cnProviderResponseIndicatesInsufficientBalance(body) {
+		s.rateLimitSvc.handleCNProviderInsufficientBalance(ctx, account, extractUpstreamErrorMessage(body))
+		log.Printf("[CNBalance] probe account %d (%s) insufficient balance -> paused", account.ID, account.Platform)
+		return
+	}
+	// 有效完成响应（HTTP 2xx）：按原生路径同款语义清除 balance_low 快照标记，
+	// 再清除本服务写入的余额前缀停调；他因不动。
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// F1：清除响应式 402/429 写下的 balance_low 标记（镜像
+		// cn_provider_balance_service.go:277 注释与写法）。UpdateExtra 失败仅
+		// 告警，不阻断后续停调清除（与原生路径 'else result.Persisted' 一致）。
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): false,
+		}); err != nil {
+			log.Printf("[CNBalance] probe account %d (%s) clear balance_low marker failed: %v", account.ID, account.Platform, err)
+		}
+		if account.TempUnschedulableUntil != nil &&
+			strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix) {
+			if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
+				log.Printf("[CNBalance] probe account %d (%s) clear failed: %v", account.ID, account.Platform, err)
+				return
+			}
+			log.Printf("[CNBalance] probe account %d (%s) reactivated (balance recovered)", account.ID, account.Platform)
+		}
+	}
+}
+
+// resolveProxyURL 解析账号探测代理（与 CNProviderBalanceService 同口径）。
+func (s *CNProviderBalanceCheckService) resolveProxyURL(ctx context.Context, account *Account) string {
+	if account == nil || account.ProxyID == nil {
+		return ""
+	}
+	if account.Proxy != nil {
+		return account.Proxy.URL()
+	}
+	if s != nil && s.proxyRepo != nil {
+		if proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && proxy != nil {
+			account.Proxy = proxy
+			return proxy.URL()
+		}
+	}
+	return ""
 }
 
 type cnBalanceCheckOutcome int
@@ -223,14 +386,18 @@ const (
 	cnBalanceNoChange cnBalanceCheckOutcome = iota
 	cnBalancePaused
 	cnBalanceCleared
+	// cnBalanceNativeFailed 表示原生 /user/balance 探测失败（err 或 !Success）：
+	// 调用方据此决定是否转最小完成请求探测（覆盖中转未实现余额端点的 kimi/deepseek）。
+	cnBalanceNativeFailed
 )
 
 // checkOne 探测单账号余额并决定停调/恢复。探测失败时不动现状（避免瞬时网络抖动
-// 误解除或误停调）。
+// 误解除或误停调）。原生余额端点不可用时返回 cnBalanceNativeFailed（不视为健康、
+// 也不停调），供调用方转最小完成请求探测。
 func (s *CNProviderBalanceCheckService) checkOne(ctx context.Context, account *Account, threshold float64) cnBalanceCheckOutcome {
 	result, err := s.balanceService.QueryBalance(ctx, account.ID)
 	if err != nil || result == nil || !result.Success {
-		return cnBalanceNoChange
+		return cnBalanceNativeFailed
 	}
 
 	// 双币种（deepseek CNY+USD）任一币种余额达标即可继续调度；仅当全部低于

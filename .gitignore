@@ -152,6 +152,9 @@ docs/*
 !docs/platform-other.md
 !docs/footer-links-ssr-injection-plan.md
 !docs/footer-links-plan.md
+!docs/account-quota-balance-circuit-break-plan.md
+!docs/account-quota-balance-confirmation-package.md
+!docs/dispatch-qb1-quota-balance.md
 !docs/abnormal-usage-analysis-plan.md
 !docs/legal/
 !docs/legal/*.md

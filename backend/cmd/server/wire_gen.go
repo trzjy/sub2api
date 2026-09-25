@@ -377,7 +377,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	opsScheduledReportService := service.ProvideOpsScheduledReportService(opsService, userService, emailService, redisClient, configConfig)
 	opsIngressRejectAggregator := service.ProvideOpsIngressRejectAggregator(opsRepository, opsService)
 	accountExpiryService := service.ProvideAccountExpiryService(accountRepository)
-	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, configConfig)
+	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig)
 	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
