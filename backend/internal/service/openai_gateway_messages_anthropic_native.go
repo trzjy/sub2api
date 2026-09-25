@@ -397,10 +397,46 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	}
 	inPartialEvent := false
 
+	// 重复 token 循环熔断（docs/repetition-loop-breaker-plan.md）：缓冲期静默
+	// failover + 直通期中止。guard 为 nil 表示阈值配置为 0（检测禁用）。
+	guard := newStreamRepetitionGuard()
+	requestID := resp.Header.Get("x-request-id")
+
+	// writeStreamLine 抽自原逐行写出块，guard 的缓冲 flush 与正常直通共用。
+	writeStreamLine := func(line string) {
+		if !clientDisconnected {
+			restored := string(reverseToolNamesIfPresent(c, []byte(line)))
+			if _, err := io.WriteString(w, restored); err != nil {
+				clientDisconnected = true
+				logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+			} else if _, err := io.WriteString(w, "\n"); err != nil {
+				clientDisconnected = true
+				logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
+			} else if line == "" {
+				// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
+				flusher.Flush()
+				lastDataAt = time.Now()
+				resetKeepaliveTimer()
+				inPartialEvent = false
+			} else {
+				inPartialEvent = true
+			}
+		}
+	}
+	flushGuardBuffer := func() {
+		if guard == nil {
+			return
+		}
+		for _, buffered := range guard.drain() {
+			writeStreamLine(buffered)
+		}
+	}
+
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
+				flushGuardBuffer()
 				if !clientDisconnected {
 					flusher.Flush()
 				}
@@ -411,6 +447,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 			}
 			if ev.err != nil {
+				flushGuardBuffer()
 				if sawTerminalEvent {
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), nil
 				}
@@ -449,30 +486,50 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				}
 			}
 
-			if !clientDisconnected {
-				restored := string(reverseToolNamesIfPresent(c, []byte(line)))
-				if _, err := io.WriteString(w, restored); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-				} else if _, err := io.WriteString(w, "\n"); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-				} else if line == "" {
-					// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
-					flusher.Flush()
-					lastDataAt = time.Now()
-					resetKeepaliveTimer()
-					inPartialEvent = false
-				} else {
-					inPartialEvent = true
+			// 重复循环熔断裁决：缓冲期命中→静默 failover；缓冲满→flush 转直通；
+			// 直通期命中→掐上游并向客户端下发可识别 error 事件。
+			if guard != nil {
+				switch guard.onLine(line) {
+				case repGuardHold:
+					continue
+				case repGuardFailover:
+					message := "upstream repetition loop detected before stream passthrough"
+					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (buffering, failover): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+					s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, repetitionLoopErrorCode, message)
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+						newRepetitionLoopFailoverError()
+				case repGuardAbort:
+					message := "upstream repetition loop detected after stream passthrough started"
+					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (passthrough, abort): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
+					guardErr := fmt.Errorf("%s (error_code=%s)", message, repetitionLoopErrorCode)
+					if !clientDisconnected {
+						sse := buildAnthropicStreamErrorCodeSSE("api_error", repetitionLoopErrorCode, "Upstream output entered a repetition loop; please retry the request")
+						if _, err := io.WriteString(w, sse); err == nil {
+							flusher.Flush()
+						}
+					}
+					s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, repetitionLoopErrorCode, message)
+					s.ObserveOpenAIAccountHealthFailure(ctx, account, guardErr)
+					if resp.Body != nil {
+						_ = resp.Body.Close()
+					}
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime), guardErr
+				case repGuardRelease:
+					flushGuardBuffer()
+					if !clientDisconnected {
+						flusher.Flush()
+					}
 				}
 			}
+
+			writeStreamLine(line)
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
+			flushGuardBuffer()
 			if clientDisconnected {
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 					fmt.Errorf("stream usage incomplete after timeout")
