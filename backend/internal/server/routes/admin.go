@@ -144,8 +144,37 @@ func RegisterAdminRoutes(
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
 
+		// 异常调用分析（防中转商薅羊毛）admin 路由
+		registerUsageRiskRoutes(admin, h)
+
 		// 闲鱼发货控制面
 		registerXianyuAdminRoutes(admin, h)
+	}
+}
+
+// registerUsageRiskRoutes 注册异常调用分析 admin 路由（派发单 U5）。
+// 仅新增以下端点，不增删改任何既有路由：
+//   GET  /admin/usage-risk/reports
+//   GET  /admin/usage-risk/reports/:report_id
+//   POST /admin/usage-risk/reports/:report_id/status
+//   GET  /admin/usage-risk/run-status
+//   GET  /admin/usage-risk/settings
+//   PUT  /admin/usage-risk/settings
+//
+// 守卫 nil：usage_risk_* 服务由 U4b 并行提供，未注入时本组不注册，避免空指针。
+func registerUsageRiskRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.UsageRisk == nil {
+		return
+	}
+	ur := h.Admin.UsageRisk
+	grp := admin.Group("/usage-risk")
+	{
+		grp.GET("/reports", ur.ListReports)
+		grp.GET("/reports/:report_id", ur.GetReport)
+		grp.POST("/reports/:report_id/status", ur.UpdateStatus)
+		grp.GET("/run-status", ur.GetRunStatus)
+		grp.GET("/settings", ur.GetSettings)
+		grp.PUT("/settings", ur.PutSettings)
 	}
 }
 

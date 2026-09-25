@@ -58,11 +58,15 @@ func ProvideAdminHandlers(
 	httpUpstream service.HTTPUpstream,
 	cfg *config.Config,
 	webPlatformAutoLogin *service.WebPlatformAutoLoginService,
+	usageRiskService service.UsageRiskService,
+	settingService *service.SettingService,
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
 	accountHandler.SetAccountBalanceProbeService(accountBalanceProbe)
 	accountHandler.SetCodeBuddyAccountRefresher(codeBuddyOAuthHandler)
+	// 注入异常调用分析服务：dashboard 卡片摘要 + admin 独立路由（派发单 U4b/U5）。
+	dashboardHandler.SetUsageRiskService(usageRiskService)
 	// 注入网页版平台自动登录服务（service 层 provider 构造，与 TokenRefreshService
 	// 共享同一实例；其 Start 由 handler 内 lazy + idempotent 触发）。
 	accountHandler.SetWebPlatformAutoLoginService(webPlatformAutoLogin)
@@ -112,6 +116,7 @@ func ProvideAdminHandlers(
 		AuditLog:               auditLogHandler,
 		Xianyu:                 xianyuHandler,
 		Pricing:                pricingHandler,
+		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
 	}
 }
 
@@ -314,6 +319,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewComplianceHandler,
 	admin.NewAuditLogHandler,
 	admin.NewPricingHandler,
+	admin.NewUsageRiskHandler,
 
 	// AdminHandlers and Handlers constructors
 	ProvideAdminHandlers,

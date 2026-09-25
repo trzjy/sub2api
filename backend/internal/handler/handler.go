@@ -47,6 +47,7 @@ type AdminHandlers struct {
 	Xianyu                 *admin.XianyuAdminHandler
 	Pricing                *admin.PricingHandler
 	PromoIntel             *admin.PromoIntelHandler
+	UsageRisk              *admin.UsageRiskHandler
 }
 
 // Handlers contains all HTTP handlers

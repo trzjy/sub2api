@@ -153,6 +153,10 @@ var auditActionOverrides = map[string]string{
 	"POST /api/v1/admin/antigravity/oauth/auth-url":      service.AuditActionAntigravityOAuthAuthURL,
 	"POST /api/v1/admin/antigravity/oauth/exchange-code": service.AuditActionAntigravityOAuthExchangeCode,
 	"POST /api/v1/admin/antigravity/oauth/refresh-token": service.AuditActionAntigravityOAuthRefreshToken,
+	// 异常调用分析报告状态变更：事件类 admin.usage_risk.status 由 U4b 在 UpdateStatus 事务内
+	// 落账（方案 §5：audit 与状态变更同事务）。此处固定动作名仅为登记事件类；HTTP 审计中间件
+	// 对该路由已通过 handler 内 SkipAudit 跳过，避免与事务内权威审计重复。
+	"POST /api/v1/admin/usage-risk/reports/:report_id/status": "admin.usage_risk.status",
 }
 
 // auditBodyOmittedRoutes 请求体几乎整体由凭证构成的路由（如整块粘贴 auth JSON 的导入接口）。

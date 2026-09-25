@@ -19,7 +19,8 @@ import (
 type DashboardHandler struct {
 	dashboardService   *service.DashboardService
 	aggregationService *service.DashboardAggregationService
-	startTime          time.Time // Server start time for uptime calculation
+	usageRiskService   service.UsageRiskService // 异常调用风险摘要（派发单 U5）；可为 nil（未注入时返回零值）
+	startTime          time.Time               // Server start time for uptime calculation
 }
 
 // NewDashboardHandler creates a new admin dashboard handler
@@ -29,6 +30,11 @@ func NewDashboardHandler(dashboardService *service.DashboardService, aggregation
 		aggregationService: aggregationService,
 		startTime:          time.Now(),
 	}
+}
+
+// SetUsageRiskService 注入异常调用风险服务（保持 NewDashboardHandler 既有签名以兼容既有测试）。
+func (h *DashboardHandler) SetUsageRiskService(svc service.UsageRiskService) {
+	h.usageRiskService = svc
 }
 
 // parseTimeRange parses start_date, end_date query parameters
@@ -134,11 +140,46 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 		"rpm": stats.Rpm,
 		"tpm": stats.Tpm,
 
-		// 预聚合新鲜度
+			// 预聚合新鲜度
 		"hourly_active_users": stats.HourlyActiveUsers,
 		"stats_updated_at":    stats.StatsUpdatedAt,
 		"stats_stale":         stats.StatsStale,
+
+		// 异常调用风险摘要（派发单 U5）：空数据/功能关闭返回零值结构体而非 null；
+		// 分析 job 失败关闭时通过 error 字段呈现明确错误态，不伪造零值掩盖。
+		"risk_summary": h.buildRiskSummary(c),
 	})
+}
+
+// buildRiskSummary 构造 dashboard 风险摘要。service 未注入或返回 nil 时返回零值结构体
+// （ByLevel/Top 初始化为空，避免 JSON null 破坏前端契约）；service 报错时于 error 字段
+// 呈现，不抹平为静默零值。
+func (h *DashboardHandler) buildRiskSummary(c *gin.Context) *service.UsageRiskSummary {
+	zero := func() *service.UsageRiskSummary {
+		return &service.UsageRiskSummary{
+			ByLevel: map[string]int{},
+			Top:     []service.UsageRiskTopUser{},
+		}
+	}
+	if h.usageRiskService == nil {
+		return zero()
+	}
+	summary, err := h.usageRiskService.GetRiskSummary(c.Request.Context())
+	if err != nil {
+		s := zero()
+		s.Error = err.Error()
+		return s
+	}
+	if summary == nil {
+		return zero()
+	}
+	if summary.ByLevel == nil {
+		summary.ByLevel = map[string]int{}
+	}
+	if summary.Top == nil {
+		summary.Top = []service.UsageRiskTopUser{}
+	}
+	return summary
 }
 
 type DashboardAggregationBackfillRequest struct {
