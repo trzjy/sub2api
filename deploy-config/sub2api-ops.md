@@ -663,6 +663,7 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 | systemd timer | `/etc/systemd/system/sub2api-cleanup.timer` | 每日 04:00 触发（与 yiyutu 00:00 错峰） |
 | 源文件（SSOT） | `deploy-config/scripts/sub2api-clean-releases` | 脚本源（部署时 `install -m 0755` 到 `/usr/local/sbin/`） |
 | 源文件（SSOT） | `deploy-config/systemd/sub2api-cleanup.{service,timer}` | systemd unit 源（部署时 `install -m 0644` 到 `/etc/systemd/system/`） |
+| 源文件（SSOT） | `deploy-config/scripts/disk-guard-maintenance.sh` | 磁盘守卫维护窗口脚本（2026-09-26 整改项②：daemon.json log-opts + journald 上限 + docker/容器重建 + .NEXT_IMAGE_TAG 换镜像协议）。部署时 `install -m 0755` 到 `/opt/sub2api/scripts/`；**会重启 docker 与全部容器（约 1 分钟窗口），仅限维护窗口由定时器执行，业务高峰/会话存活期禁跑（DRY_RUN 除外）** |
 
 ### 12.2 清理规则（KEEP_RELEASES=2）
 
