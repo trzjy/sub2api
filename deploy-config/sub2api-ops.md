@@ -255,7 +255,9 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3300/health         # 
 curl -s -o /dev/null -w "%{http_code}\n" https://corealgos.com/               # 200
 docker logs --tail=50 sub2api 2>&1 | grep -iE "panic|fatal" || echo NO_FATAL
 
-# 6. 清理旧链：删除已成功部署的构建暂存 + 清理旧镜像
+# 6. post-deploy 清理钩子（健康检查通过后立即执行）
+#    镜像 keep-2 实时清 + build cache --max-storage 5GB + >8GB 硬兜底 + build staging 即清
+#    ——清理实时化，不等每日 timer（2026-09-26 磁盘守卫整改，见 §12.5）
 rm -rf /opt/sub2api/build-<上一目标>
 /usr/local/sbin/sub2api-clean-releases   # 保留 latest + 当前运行 tag + 1 个最近 tag
 ```
@@ -461,6 +463,46 @@ cp /opt/sub2api/.env.bak-<timestamp> /opt/sub2api/.env
 docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate sub2api
 ```
 
+### 7.10 磁盘打满（2026-09-26 事故 runbook）
+
+> 背景：2026-09-26 凌晨根分区 100% 打满（build cache 11.8GB + 镜像窗口期累积），
+> 全站登录不可用。事后整改见 docs/disk-guard-plan-20260926.md 与 §12.5。
+
+**症状**（可能同时或部分出现）：
+
+- 全站登录不可用（postgres 无法写 postmaster.pid 循环重启）
+- `docker ps` 中 `sub2api-postgres` 状态为 `Restarting` 循环
+- 容器/系统日志出现 `No space left on device`
+- **误导项**：`sub2api` 主容器可能仍显示 `Up (healthy)`（健康检查不落盘时探活可假通过），不要据此排除磁盘问题
+
+**处置**（按序）：
+
+```bash
+# 1. 确认磁盘水位
+df -h /
+
+# 2. 定位大头
+docker system df            # 镜像/容器/卷/build cache 分类占用
+du -xsh /* 2>/dev/null | sort -rh | head -20
+
+# 3. 释放空间（按大头选择；这三个命令对本项目与业务数据安全）
+docker builder prune -af                      # build cache 全清（事故主凶）
+docker image prune -af                        # 悬空+未使用镜像（运行中镜像不受影响）
+journalctl --vacuum-size=200M                 # journald 压到 200M
+
+# 4. 关键：手动重启 postgres —— 磁盘恢复后 postgres 不会自愈，必须手动 restart
+docker restart sub2api-postgres
+
+# 5. 验证恢复
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3300/health   # 200
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps   # 全部 Up (healthy)
+# 再走一遍登录确认（生产登录有 Turnstile，见 §7.6/15 节相关说明）
+```
+
+**归因**：恢复后用 `du -xsh /*` 与 `docker system df` 找出打满根因（本次事故 =
+build cache 11.8GB + 每日清理降级路径 `until=168h` 永不命中 + 镜像窗口期累积），
+对应整改：post-deploy 清理钩子实时化（§12.5）+ build cache 两级封顶（§12.2）。
+
 ---
 
 ## 8. 安全注意事项
@@ -629,6 +671,13 @@ bash deploy/tests/xianyu-deployment-boundary-test.sh
 - **悬空镜像（Repository=`<none>` 且 Tag=`<none>` 在 sub2api / xianyu-auto-reply 命名空间）**：删除；其他项目悬挂镜像严格跳过
 - **悬空卷（dangling=true 且名字以 `sub2api_` / `xianyu_` / `xianyu-worker_` 开头）**：删除；其他项目孤儿卷严格跳过
 - **`.env.bak-*` 文件**（`/opt/sub2api/`）：保留最近 3 个；删除其余
+- **/tmp 下 sub2api 备份产物**（`sub2api-db-*.sql` / `sub2api-predeploy-*.sql` / `sub2api-*.tar.gz`）：保留最近 2 个；删除其余（不触碰 newapi 等其他项目备份，见脚本注释）
+- **build staging 目录**（`/opt/sub2api/build-<hash>`）：保留当前运行 tag 目录 + 1 个最近；删除其余
+- **Docker build cache（两级封顶，2026-09-26 磁盘守卫整改）**：
+  1. LRU 裁剪：`docker builder prune -f --max-storage 5GB`（`BUILD_CACHE_MAX_STORAGE`），超出部分按最近使用淘汰，保留近期缓存加速下次构建；
+  2. 硬兜底：实际占用（`docker system df` 读取）超过 `BUILD_CACHE_HARD_CAP`（默认 8GB）时 `docker builder prune -af` 全清，打日志 `build cache hard-cap exceeded (X > 8GB), full prune`；
+  - buildx 需支持 `--max-storage`（Ubuntu 24.04 打包的 0.21.3 不支持会静默降级 `--filter until=`），**2026-09-26 已升级到官方 docker-buildx-plugin**；
+  - 背景：2026-09-26 磁盘打满事故主凶即 build cache 11.8GB 只进不出（旧降级路径 `until=168h` 永不命中）。
 
 ### 12.3 手动执行
 
@@ -660,6 +709,21 @@ systemctl daemon-reload
 ```
 
 > ⚠️ 该脚本严格遵守命名空间白名单，不会误删同机其他项目（newapi / nginx 等）的镜像或卷。
+
+### 12.5 post-deploy 清理钩子（2026-09-26 新增）
+
+磁盘守卫整改（docs/disk-guard-plan-20260926.md）将清理从"每日定时为主"改为"事件驱动为主、
+timer 兜底"：每次部署健康检查通过后，立即执行一次清理，不等每日 04:00 timer。
+
+- **谁调用**：§5 升级流程第 6 步（人工/半自动部署流程的固定环节），命令即
+  `/usr/local/sbin/sub2api-clean-releases`；systemd timer（§12.1）保留为每日兜底，不变更。
+- **何时**：部署第 5 步健康检查（`/health` 200 + 容器 healthy）通过之后、部署收尾前。
+- **覆盖动作**：镜像 keep-2 实时清、build cache `--max-storage 5GB` LRU 裁剪 + >8GB 硬兜底全清、
+  build staging 目录即清、`.env.bak-*` / /tmp 备份产物滚动保留（见 §12.2）。
+- **幂等性**：脚本为纯清理动作，可重复执行无副作用；保留集合（运行镜像、运行 tag 目录）
+  每次动态计算，跑多次与跑一次结果一致。不确定时先 `--dry-run`。
+- **配置**：阈值均可用环境变量覆盖（`KEEP_RELEASES` / `BUILD_CACHE_MAX_STORAGE` /
+  `BUILD_CACHE_HARD_CAP` / `TMP_BACKUP_KEEP` / `BUILD_DIR_KEEP` 等，见脚本头部注释）。
 
 ---
 

@@ -27,6 +27,9 @@
 #   ENV_BAK_KEEP            .env.bak-* 保留数，默认 3
 #   BUILD_CACHE_MAX_STORAGE Docker 构建缓存保留上限（--max-storage），默认 5GB；超出部分按最近使用裁剪
 #   BUILD_CACHE_UNTIL       buildx 不支持 --max-storage 时的时间降级裁剪阈值（--filter until=），默认 168h
+#   BUILD_CACHE_HARD_CAP    build cache 容量硬兜底阈值，默认 8GB；实际占用超过该值时全量清空
+#                           （docker builder prune -af）。这是 LRU 裁剪失效时的最后防线，防止
+#                           2026-09-26 磁盘打满事故（build cache 11.8GB 只进不出）复发。
 #   TMP_BACKUP_KEEP         /tmp 下 sub2api 备份产物（dump/tar）保留数（按 mtime），默认 2
 #   BUILD_DIR_KEEP          /opt/sub2api/build-<hash> 暂存目录保留数（当前运行 tag 之外），默认 1
 
@@ -48,6 +51,7 @@ WORKER_LEGACY_REPOS="${WORKER_LEGACY_REPOS:-}"
 ENV_BAK_KEEP="${ENV_BAK_KEEP:-3}"
 BUILD_CACHE_MAX_STORAGE="${BUILD_CACHE_MAX_STORAGE:-5GB}"
 BUILD_CACHE_UNTIL="${BUILD_CACHE_UNTIL:-168h}"
+BUILD_CACHE_HARD_CAP="${BUILD_CACHE_HARD_CAP:-8GB}"
 TMP_BACKUP_KEEP="${TMP_BACKUP_KEEP:-2}"
 BUILD_DIR_KEEP="${BUILD_DIR_KEEP:-1}"
 
@@ -334,6 +338,42 @@ else
     echo "note: buildx does not support --max-storage; falling back to --filter until=${BUILD_CACHE_UNTIL}"
     docker builder prune -f --filter "until=${BUILD_CACHE_UNTIL}" 2>&1 || true
   fi
+fi
+
+# ---- 6b. build cache 容量硬兜底 --------------------------------------------
+# 上面 6 的 LRU/时间裁剪在极端情况下可能失效（buildx 异常、裁剪被跳过、每日 timer
+# 窗口期内累积过快，见 2026-09-26 磁盘打满事故：build cache 达 11.8GB 而每日实删 0B）。
+# 此处做独立硬兜底：读取 docker system df 中 build cache 实际占用，超过
+# BUILD_CACHE_HARD_CAP 时全量清空（-a 含未使用缓存，-f 免交互）。数值解析与阈值
+# 比较全部在 awk 内完成（单位换算为字节后整数比较），规避 "11.83GB" 这类
+# 十进制单位字符串的浮点/单位陷阱；docker system df 的 humanize 为 SI 千进制。
+echo "=== docker build cache hard-cap check (> ${BUILD_CACHE_HARD_CAP} -> full prune) ==="
+build_cache_size="$(docker system df --format '{{.Type}} {{.Size}}' 2>/dev/null |
+  awk '$1 == "Build" && $2 == "Cache" {print $3; exit}')"
+if [ -n "$build_cache_size" ]; then
+  hard_cap_verdict="$(printf '%s %s\n' "$build_cache_size" "$BUILD_CACHE_HARD_CAP" | awk '
+    function tobytes(s,    val, unit, m) {
+      val = s; sub(/[a-zA-Z]+$/, "", val); unit = s; sub(/^[0-9.]+/, "", unit);
+      m = 1;
+      if (unit == "kB" || unit == "KB") m = 1e3;
+      else if (unit == "MB") m = 1e6;
+      else if (unit == "GB") m = 1e9;
+      else if (unit == "TB") m = 1e12;
+      return val * m;
+    }
+    { print (tobytes($1) > tobytes($2)) ? "exceed" : "ok" }')"
+  if [ "$hard_cap_verdict" = "exceed" ]; then
+    echo "build cache hard-cap exceeded (${build_cache_size} > ${BUILD_CACHE_HARD_CAP}), full prune"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] would run: docker builder prune -af"
+    else
+      docker builder prune -af 2>&1 || true
+    fi
+  else
+    echo "build cache within hard cap: ${build_cache_size} <= ${BUILD_CACHE_HARD_CAP}"
+  fi
+else
+  echo "warning: could not read build cache usage via docker system df; hard-cap check skipped" >&2
 fi
 
 # ---- 7. /tmp 历史备份产物 --------------------------------------------------
