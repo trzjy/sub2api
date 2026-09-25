@@ -49,6 +49,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskreport"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrollup"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrun"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
@@ -153,6 +156,9 @@ func checkColumn(t, c string) error {
 			tlsfingerprintprofile.Table:         tlsfingerprintprofile.ValidColumn,
 			usagecleanuptask.Table:              usagecleanuptask.ValidColumn,
 			usagelog.Table:                      usagelog.ValidColumn,
+			usageriskreport.Table:               usageriskreport.ValidColumn,
+			usageriskrollup.Table:               usageriskrollup.ValidColumn,
+			usageriskrun.Table:                  usageriskrun.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			userallowedgroup.Table:              userallowedgroup.ValidColumn,
 			userattributedefinition.Table:       userattributedefinition.ValidColumn,

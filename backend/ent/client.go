@@ -52,6 +52,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskreport"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrollup"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrun"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
@@ -142,6 +145,12 @@ type Client struct {
 	UsageCleanupTask *UsageCleanupTaskClient
 	// UsageLog is the client for interacting with the UsageLog builders.
 	UsageLog *UsageLogClient
+	// UsageRiskReport is the client for interacting with the UsageRiskReport builders.
+	UsageRiskReport *UsageRiskReportClient
+	// UsageRiskRollup is the client for interacting with the UsageRiskRollup builders.
+	UsageRiskRollup *UsageRiskRollupClient
+	// UsageRiskRun is the client for interacting with the UsageRiskRun builders.
+	UsageRiskRun *UsageRiskRunClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 	// UserAllowedGroup is the client for interacting with the UserAllowedGroup builders.
@@ -204,6 +213,9 @@ func (c *Client) init() {
 	c.TLSFingerprintProfile = NewTLSFingerprintProfileClient(c.config)
 	c.UsageCleanupTask = NewUsageCleanupTaskClient(c.config)
 	c.UsageLog = NewUsageLogClient(c.config)
+	c.UsageRiskReport = NewUsageRiskReportClient(c.config)
+	c.UsageRiskRollup = NewUsageRiskRollupClient(c.config)
+	c.UsageRiskRun = NewUsageRiskRunClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAllowedGroup = NewUserAllowedGroupClient(c.config)
 	c.UserAttributeDefinition = NewUserAttributeDefinitionClient(c.config)
@@ -340,6 +352,9 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TLSFingerprintProfile:         NewTLSFingerprintProfileClient(cfg),
 		UsageCleanupTask:              NewUsageCleanupTaskClient(cfg),
 		UsageLog:                      NewUsageLogClient(cfg),
+		UsageRiskReport:               NewUsageRiskReportClient(cfg),
+		UsageRiskRollup:               NewUsageRiskRollupClient(cfg),
+		UsageRiskRun:                  NewUsageRiskRunClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAllowedGroup:              NewUserAllowedGroupClient(cfg),
 		UserAttributeDefinition:       NewUserAttributeDefinitionClient(cfg),
@@ -403,6 +418,9 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TLSFingerprintProfile:         NewTLSFingerprintProfileClient(cfg),
 		UsageCleanupTask:              NewUsageCleanupTaskClient(cfg),
 		UsageLog:                      NewUsageLogClient(cfg),
+		UsageRiskReport:               NewUsageRiskReportClient(cfg),
+		UsageRiskRollup:               NewUsageRiskRollupClient(cfg),
+		UsageRiskRun:                  NewUsageRiskRunClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAllowedGroup:              NewUserAllowedGroupClient(cfg),
 		UserAttributeDefinition:       NewUserAttributeDefinitionClient(cfg),
@@ -448,9 +466,10 @@ func (c *Client) Use(hooks ...Hook) {
 		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
 		c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch, c.RedeemCode,
 		c.RedeemCodeGroup, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
+		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport,
+		c.UsageRiskRollup, c.UsageRiskRun, c.User, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription, c.WelfareBalance,
 	} {
 		n.Use(hooks...)
 	}
@@ -469,9 +488,10 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
 		c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch, c.RedeemCode,
 		c.RedeemCodeGroup, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.User,
-		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
+		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport,
+		c.UsageRiskRollup, c.UsageRiskRun, c.User, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription, c.WelfareBalance,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -554,6 +574,12 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UsageCleanupTask.mutate(ctx, m)
 	case *UsageLogMutation:
 		return c.UsageLog.mutate(ctx, m)
+	case *UsageRiskReportMutation:
+		return c.UsageRiskReport.mutate(ctx, m)
+	case *UsageRiskRollupMutation:
+		return c.UsageRiskRollup.mutate(ctx, m)
+	case *UsageRiskRunMutation:
+		return c.UsageRiskRun.mutate(ctx, m)
 	case *UserMutation:
 		return c.User.mutate(ctx, m)
 	case *UserAllowedGroupMutation:
@@ -6431,6 +6457,405 @@ func (c *UsageLogClient) mutate(ctx context.Context, m *UsageLogMutation) (Value
 	}
 }
 
+// UsageRiskReportClient is a client for the UsageRiskReport schema.
+type UsageRiskReportClient struct {
+	config
+}
+
+// NewUsageRiskReportClient returns a client for the UsageRiskReport from the given config.
+func NewUsageRiskReportClient(c config) *UsageRiskReportClient {
+	return &UsageRiskReportClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usageriskreport.Hooks(f(g(h())))`.
+func (c *UsageRiskReportClient) Use(hooks ...Hook) {
+	c.hooks.UsageRiskReport = append(c.hooks.UsageRiskReport, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usageriskreport.Intercept(f(g(h())))`.
+func (c *UsageRiskReportClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageRiskReport = append(c.inters.UsageRiskReport, interceptors...)
+}
+
+// Create returns a builder for creating a UsageRiskReport entity.
+func (c *UsageRiskReportClient) Create() *UsageRiskReportCreate {
+	mutation := newUsageRiskReportMutation(c.config, OpCreate)
+	return &UsageRiskReportCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageRiskReport entities.
+func (c *UsageRiskReportClient) CreateBulk(builders ...*UsageRiskReportCreate) *UsageRiskReportCreateBulk {
+	return &UsageRiskReportCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageRiskReportClient) MapCreateBulk(slice any, setFunc func(*UsageRiskReportCreate, int)) *UsageRiskReportCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageRiskReportCreateBulk{err: fmt.Errorf("calling to UsageRiskReportClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageRiskReportCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageRiskReportCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageRiskReport.
+func (c *UsageRiskReportClient) Update() *UsageRiskReportUpdate {
+	mutation := newUsageRiskReportMutation(c.config, OpUpdate)
+	return &UsageRiskReportUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageRiskReportClient) UpdateOne(_m *UsageRiskReport) *UsageRiskReportUpdateOne {
+	mutation := newUsageRiskReportMutation(c.config, OpUpdateOne, withUsageRiskReport(_m))
+	return &UsageRiskReportUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageRiskReportClient) UpdateOneID(id int64) *UsageRiskReportUpdateOne {
+	mutation := newUsageRiskReportMutation(c.config, OpUpdateOne, withUsageRiskReportID(id))
+	return &UsageRiskReportUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageRiskReport.
+func (c *UsageRiskReportClient) Delete() *UsageRiskReportDelete {
+	mutation := newUsageRiskReportMutation(c.config, OpDelete)
+	return &UsageRiskReportDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageRiskReportClient) DeleteOne(_m *UsageRiskReport) *UsageRiskReportDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageRiskReportClient) DeleteOneID(id int64) *UsageRiskReportDeleteOne {
+	builder := c.Delete().Where(usageriskreport.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageRiskReportDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageRiskReport.
+func (c *UsageRiskReportClient) Query() *UsageRiskReportQuery {
+	return &UsageRiskReportQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageRiskReport},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageRiskReport entity by its id.
+func (c *UsageRiskReportClient) Get(ctx context.Context, id int64) (*UsageRiskReport, error) {
+	return c.Query().Where(usageriskreport.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageRiskReportClient) GetX(ctx context.Context, id int64) *UsageRiskReport {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageRiskReportClient) Hooks() []Hook {
+	return c.hooks.UsageRiskReport
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageRiskReportClient) Interceptors() []Interceptor {
+	return c.inters.UsageRiskReport
+}
+
+func (c *UsageRiskReportClient) mutate(ctx context.Context, m *UsageRiskReportMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageRiskReportCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageRiskReportUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageRiskReportUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageRiskReportDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageRiskReport mutation op: %q", m.Op())
+	}
+}
+
+// UsageRiskRollupClient is a client for the UsageRiskRollup schema.
+type UsageRiskRollupClient struct {
+	config
+}
+
+// NewUsageRiskRollupClient returns a client for the UsageRiskRollup from the given config.
+func NewUsageRiskRollupClient(c config) *UsageRiskRollupClient {
+	return &UsageRiskRollupClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usageriskrollup.Hooks(f(g(h())))`.
+func (c *UsageRiskRollupClient) Use(hooks ...Hook) {
+	c.hooks.UsageRiskRollup = append(c.hooks.UsageRiskRollup, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usageriskrollup.Intercept(f(g(h())))`.
+func (c *UsageRiskRollupClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageRiskRollup = append(c.inters.UsageRiskRollup, interceptors...)
+}
+
+// Create returns a builder for creating a UsageRiskRollup entity.
+func (c *UsageRiskRollupClient) Create() *UsageRiskRollupCreate {
+	mutation := newUsageRiskRollupMutation(c.config, OpCreate)
+	return &UsageRiskRollupCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageRiskRollup entities.
+func (c *UsageRiskRollupClient) CreateBulk(builders ...*UsageRiskRollupCreate) *UsageRiskRollupCreateBulk {
+	return &UsageRiskRollupCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageRiskRollupClient) MapCreateBulk(slice any, setFunc func(*UsageRiskRollupCreate, int)) *UsageRiskRollupCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageRiskRollupCreateBulk{err: fmt.Errorf("calling to UsageRiskRollupClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageRiskRollupCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageRiskRollupCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageRiskRollup.
+func (c *UsageRiskRollupClient) Update() *UsageRiskRollupUpdate {
+	mutation := newUsageRiskRollupMutation(c.config, OpUpdate)
+	return &UsageRiskRollupUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageRiskRollupClient) UpdateOne(_m *UsageRiskRollup) *UsageRiskRollupUpdateOne {
+	mutation := newUsageRiskRollupMutation(c.config, OpUpdateOne, withUsageRiskRollup(_m))
+	return &UsageRiskRollupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageRiskRollupClient) UpdateOneID(id int64) *UsageRiskRollupUpdateOne {
+	mutation := newUsageRiskRollupMutation(c.config, OpUpdateOne, withUsageRiskRollupID(id))
+	return &UsageRiskRollupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageRiskRollup.
+func (c *UsageRiskRollupClient) Delete() *UsageRiskRollupDelete {
+	mutation := newUsageRiskRollupMutation(c.config, OpDelete)
+	return &UsageRiskRollupDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageRiskRollupClient) DeleteOne(_m *UsageRiskRollup) *UsageRiskRollupDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageRiskRollupClient) DeleteOneID(id int64) *UsageRiskRollupDeleteOne {
+	builder := c.Delete().Where(usageriskrollup.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageRiskRollupDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageRiskRollup.
+func (c *UsageRiskRollupClient) Query() *UsageRiskRollupQuery {
+	return &UsageRiskRollupQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageRiskRollup},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageRiskRollup entity by its id.
+func (c *UsageRiskRollupClient) Get(ctx context.Context, id int64) (*UsageRiskRollup, error) {
+	return c.Query().Where(usageriskrollup.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageRiskRollupClient) GetX(ctx context.Context, id int64) *UsageRiskRollup {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageRiskRollupClient) Hooks() []Hook {
+	return c.hooks.UsageRiskRollup
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageRiskRollupClient) Interceptors() []Interceptor {
+	return c.inters.UsageRiskRollup
+}
+
+func (c *UsageRiskRollupClient) mutate(ctx context.Context, m *UsageRiskRollupMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageRiskRollupCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageRiskRollupUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageRiskRollupUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageRiskRollupDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageRiskRollup mutation op: %q", m.Op())
+	}
+}
+
+// UsageRiskRunClient is a client for the UsageRiskRun schema.
+type UsageRiskRunClient struct {
+	config
+}
+
+// NewUsageRiskRunClient returns a client for the UsageRiskRun from the given config.
+func NewUsageRiskRunClient(c config) *UsageRiskRunClient {
+	return &UsageRiskRunClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usageriskrun.Hooks(f(g(h())))`.
+func (c *UsageRiskRunClient) Use(hooks ...Hook) {
+	c.hooks.UsageRiskRun = append(c.hooks.UsageRiskRun, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usageriskrun.Intercept(f(g(h())))`.
+func (c *UsageRiskRunClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageRiskRun = append(c.inters.UsageRiskRun, interceptors...)
+}
+
+// Create returns a builder for creating a UsageRiskRun entity.
+func (c *UsageRiskRunClient) Create() *UsageRiskRunCreate {
+	mutation := newUsageRiskRunMutation(c.config, OpCreate)
+	return &UsageRiskRunCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageRiskRun entities.
+func (c *UsageRiskRunClient) CreateBulk(builders ...*UsageRiskRunCreate) *UsageRiskRunCreateBulk {
+	return &UsageRiskRunCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageRiskRunClient) MapCreateBulk(slice any, setFunc func(*UsageRiskRunCreate, int)) *UsageRiskRunCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageRiskRunCreateBulk{err: fmt.Errorf("calling to UsageRiskRunClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageRiskRunCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageRiskRunCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageRiskRun.
+func (c *UsageRiskRunClient) Update() *UsageRiskRunUpdate {
+	mutation := newUsageRiskRunMutation(c.config, OpUpdate)
+	return &UsageRiskRunUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageRiskRunClient) UpdateOne(_m *UsageRiskRun) *UsageRiskRunUpdateOne {
+	mutation := newUsageRiskRunMutation(c.config, OpUpdateOne, withUsageRiskRun(_m))
+	return &UsageRiskRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageRiskRunClient) UpdateOneID(id int64) *UsageRiskRunUpdateOne {
+	mutation := newUsageRiskRunMutation(c.config, OpUpdateOne, withUsageRiskRunID(id))
+	return &UsageRiskRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageRiskRun.
+func (c *UsageRiskRunClient) Delete() *UsageRiskRunDelete {
+	mutation := newUsageRiskRunMutation(c.config, OpDelete)
+	return &UsageRiskRunDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageRiskRunClient) DeleteOne(_m *UsageRiskRun) *UsageRiskRunDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageRiskRunClient) DeleteOneID(id int64) *UsageRiskRunDeleteOne {
+	builder := c.Delete().Where(usageriskrun.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageRiskRunDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageRiskRun.
+func (c *UsageRiskRunClient) Query() *UsageRiskRunQuery {
+	return &UsageRiskRunQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageRiskRun},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageRiskRun entity by its id.
+func (c *UsageRiskRunClient) Get(ctx context.Context, id int64) (*UsageRiskRun, error) {
+	return c.Query().Where(usageriskrun.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageRiskRunClient) GetX(ctx context.Context, id int64) *UsageRiskRun {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageRiskRunClient) Hooks() []Hook {
+	return c.hooks.UsageRiskRun
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageRiskRunClient) Interceptors() []Interceptor {
+	return c.inters.UsageRiskRun
+}
+
+func (c *UsageRiskRunClient) mutate(ctx context.Context, m *UsageRiskRunMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageRiskRunCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageRiskRunUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageRiskRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageRiskRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageRiskRun mutation op: %q", m.Op())
+	}
+}
+
 // UserClient is a client for the User schema.
 type UserClient struct {
 	config
@@ -7780,9 +8205,10 @@ type (
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
 		PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, RedeemBatch,
 		RedeemCode, RedeemCodeGroup, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription, WelfareBalance []ent.Hook
+		TLSFingerprintProfile, UsageCleanupTask, UsageLog, UsageRiskReport,
+		UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription,
+		WelfareBalance []ent.Hook
 	}
 	inters struct {
 		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
@@ -7793,9 +8219,10 @@ type (
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
 		PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, RedeemBatch,
 		RedeemCode, RedeemCodeGroup, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription, WelfareBalance []ent.Interceptor
+		TLSFingerprintProfile, UsageCleanupTask, UsageLog, UsageRiskReport,
+		UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription,
+		WelfareBalance []ent.Interceptor
 	}
 )
 

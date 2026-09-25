@@ -1946,6 +1946,114 @@ var (
 			},
 		},
 	}
+	// UsageRiskReportsColumns holds the columns for the "usage_risk_reports" table.
+	UsageRiskReportsColumns = []*schema.Column{
+		{Name: "report_id", Type: field.TypeInt64, Increment: true},
+		{Name: "user_id", Type: field.TypeInt64},
+		{Name: "group_id", Type: field.TypeInt64},
+		{Name: "report_date", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "date"}},
+		{Name: "policy_version", Type: field.TypeInt64, Default: 0},
+		{Name: "score", Type: field.TypeInt, Default: 0},
+		{Name: "level", Type: field.TypeString, Size: 20},
+		{Name: "rule_hits", Type: field.TypeJSON, SchemaType: map[string]string{"postgres": "jsonb"}},
+		{Name: "evidence", Type: field.TypeJSON, SchemaType: map[string]string{"postgres": "jsonb"}},
+		{Name: "status", Type: field.TypeString, Size: 20, Default: "open"},
+		{Name: "invalidated_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "status_updated_by", Type: field.TypeInt64, Nullable: true},
+		{Name: "status_updated_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// UsageRiskReportsTable holds the schema information for the "usage_risk_reports" table.
+	UsageRiskReportsTable = &schema.Table{
+		Name:       "usage_risk_reports",
+		Columns:    UsageRiskReportsColumns,
+		PrimaryKey: []*schema.Column{UsageRiskReportsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usageriskreport_user_id_group_id_report_date",
+				Unique:  true,
+				Columns: []*schema.Column{UsageRiskReportsColumns[1], UsageRiskReportsColumns[2], UsageRiskReportsColumns[3]},
+			},
+			{
+				Name:    "usageriskreport_user_id_report_date",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRiskReportsColumns[1], UsageRiskReportsColumns[3]},
+			},
+		},
+	}
+	// UserUsageMetricsRollupColumns holds the columns for the "user_usage_metrics_rollup" table.
+	UserUsageMetricsRollupColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "user_id", Type: field.TypeInt64},
+		{Name: "group_id", Type: field.TypeInt64},
+		{Name: "bucket_hour", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "request_count", Type: field.TypeInt, Default: 0},
+		{Name: "input_tokens_sum", Type: field.TypeInt64, Default: 0},
+		{Name: "output_tokens_sum", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read_tokens_sum", Type: field.TypeInt64, Default: 0},
+		{Name: "cost_usd_sum", Type: field.TypeFloat64, Default: 0, SchemaType: map[string]string{"postgres": "numeric(20,10)"}},
+		{Name: "occupied_ms_sum", Type: field.TypeInt64, Default: 0},
+		{Name: "non_whitelisted_ua_count", Type: field.TypeInt, Default: 0},
+		{Name: "computed_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// UserUsageMetricsRollupTable holds the schema information for the "user_usage_metrics_rollup" table.
+	UserUsageMetricsRollupTable = &schema.Table{
+		Name:       "user_usage_metrics_rollup",
+		Columns:    UserUsageMetricsRollupColumns,
+		PrimaryKey: []*schema.Column{UserUsageMetricsRollupColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usageriskrollup_bucket_hour",
+				Unique:  false,
+				Columns: []*schema.Column{UserUsageMetricsRollupColumns[3]},
+			},
+			{
+				Name:    "usageriskrollup_user_id_group_id_bucket_hour",
+				Unique:  true,
+				Columns: []*schema.Column{UserUsageMetricsRollupColumns[1], UserUsageMetricsRollupColumns[2], UserUsageMetricsRollupColumns[3]},
+			},
+		},
+	}
+	// UsageRiskRunsColumns holds the columns for the "usage_risk_runs" table.
+	UsageRiskRunsColumns = []*schema.Column{
+		{Name: "run_id", Type: field.TypeInt64, Increment: true},
+		{Name: "run_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "window_start", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "window_end", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "candidates_total", Type: field.TypeInt, Default: 0},
+		{Name: "batches_done", Type: field.TypeInt, Default: 0},
+		{Name: "batches_failed", Type: field.TypeInt, Default: 0},
+		{Name: "failed_batches", Type: field.TypeJSON, SchemaType: map[string]string{"postgres": "jsonb"}},
+		{Name: "budget_exhausted", Type: field.TypeBool, Default: false},
+		{Name: "recon_cursor_date", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "date"}},
+		{Name: "recon_batch_offset", Type: field.TypeInt, Nullable: true, Default: 0},
+		{Name: "recon_batches_done", Type: field.TypeInt, Default: 0},
+		{Name: "consecutive_partials", Type: field.TypeInt, Default: 0},
+		{Name: "policy_version", Type: field.TypeInt64, Default: 0},
+		{Name: "r1_reeval_pending", Type: field.TypeBool, Default: false},
+		{Name: "policy_snapshot", Type: field.TypeJSON, SchemaType: map[string]string{"postgres": "jsonb"}},
+		{Name: "history_covered", Type: field.TypeBool, Default: false},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "failure_stage", Type: field.TypeString, Nullable: true, Size: 30},
+		{Name: "status", Type: field.TypeString, Size: 20, Default: "running"},
+	}
+	// UsageRiskRunsTable holds the schema information for the "usage_risk_runs" table.
+	UsageRiskRunsTable = &schema.Table{
+		Name:       "usage_risk_runs",
+		Columns:    UsageRiskRunsColumns,
+		PrimaryKey: []*schema.Column{UsageRiskRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usageriskrun_run_at",
+				Unique:  true,
+				Columns: []*schema.Column{UsageRiskRunsColumns[1]},
+			},
+			{
+				Name:    "usageriskrun_status",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRiskRunsColumns[19]},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -2338,6 +2446,9 @@ var (
 		TLSFingerprintProfilesTable,
 		UsageCleanupTasksTable,
 		UsageLogsTable,
+		UsageRiskReportsTable,
+		UserUsageMetricsRollupTable,
+		UsageRiskRunsTable,
 		UsersTable,
 		UserAllowedGroupsTable,
 		UserAttributeDefinitionsTable,
@@ -2491,6 +2602,15 @@ func init() {
 	UsageLogsTable.ForeignKeys[4].RefTable = UserSubscriptionsTable
 	UsageLogsTable.Annotation = &entsql.Annotation{
 		Table: "usage_logs",
+	}
+	UsageRiskReportsTable.Annotation = &entsql.Annotation{
+		Table: "usage_risk_reports",
+	}
+	UserUsageMetricsRollupTable.Annotation = &entsql.Annotation{
+		Table: "user_usage_metrics_rollup",
+	}
+	UsageRiskRunsTable.Annotation = &entsql.Annotation{
+		Table: "usage_risk_runs",
 	}
 	UsersTable.Annotation = &entsql.Annotation{
 		Table: "users",

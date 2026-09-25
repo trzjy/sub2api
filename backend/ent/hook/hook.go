@@ -453,6 +453,42 @@ func (f UsageLogFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageLogMutation", m)
 }
 
+// The UsageRiskReportFunc type is an adapter to allow the use of ordinary
+// function as UsageRiskReport mutator.
+type UsageRiskReportFunc func(context.Context, *ent.UsageRiskReportMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageRiskReportFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageRiskReportMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRiskReportMutation", m)
+}
+
+// The UsageRiskRollupFunc type is an adapter to allow the use of ordinary
+// function as UsageRiskRollup mutator.
+type UsageRiskRollupFunc func(context.Context, *ent.UsageRiskRollupMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageRiskRollupFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageRiskRollupMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRiskRollupMutation", m)
+}
+
+// The UsageRiskRunFunc type is an adapter to allow the use of ordinary
+// function as UsageRiskRun mutator.
+type UsageRiskRunFunc func(context.Context, *ent.UsageRiskRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageRiskRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageRiskRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRiskRunMutation", m)
+}
+
 // The UserFunc type is an adapter to allow the use of ordinary
 // function as User mutator.
 type UserFunc func(context.Context, *ent.UserMutation) (ent.Value, error)

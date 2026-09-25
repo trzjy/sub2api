@@ -43,6 +43,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskreport"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrollup"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrun"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
@@ -2389,6 +2392,154 @@ func init() {
 	usagelogDescCreatedAt := usagelogFields[46].Descriptor()
 	// usagelog.DefaultCreatedAt holds the default value on creation for the created_at field.
 	usagelog.DefaultCreatedAt = usagelogDescCreatedAt.Default.(func() time.Time)
+	usageriskreportFields := schema.UsageRiskReport{}.Fields()
+	_ = usageriskreportFields
+	// usageriskreportDescPolicyVersion is the schema descriptor for policy_version field.
+	usageriskreportDescPolicyVersion := usageriskreportFields[4].Descriptor()
+	// usageriskreport.DefaultPolicyVersion holds the default value on creation for the policy_version field.
+	usageriskreport.DefaultPolicyVersion = usageriskreportDescPolicyVersion.Default.(int64)
+	// usageriskreportDescScore is the schema descriptor for score field.
+	usageriskreportDescScore := usageriskreportFields[5].Descriptor()
+	// usageriskreport.DefaultScore holds the default value on creation for the score field.
+	usageriskreport.DefaultScore = usageriskreportDescScore.Default.(int)
+	// usageriskreportDescLevel is the schema descriptor for level field.
+	usageriskreportDescLevel := usageriskreportFields[6].Descriptor()
+	// usageriskreport.LevelValidator is a validator for the "level" field. It is called by the builders before save.
+	usageriskreport.LevelValidator = func() func(string) error {
+		validators := usageriskreportDescLevel.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(level string) error {
+			for _, fn := range fns {
+				if err := fn(level); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// usageriskreportDescStatus is the schema descriptor for status field.
+	usageriskreportDescStatus := usageriskreportFields[9].Descriptor()
+	// usageriskreport.DefaultStatus holds the default value on creation for the status field.
+	usageriskreport.DefaultStatus = usageriskreportDescStatus.Default.(string)
+	// usageriskreport.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	usageriskreport.StatusValidator = func() func(string) error {
+		validators := usageriskreportDescStatus.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(status string) error {
+			for _, fn := range fns {
+				if err := fn(status); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	usageriskrollupFields := schema.UsageRiskRollup{}.Fields()
+	_ = usageriskrollupFields
+	// usageriskrollupDescRequestCount is the schema descriptor for request_count field.
+	usageriskrollupDescRequestCount := usageriskrollupFields[4].Descriptor()
+	// usageriskrollup.DefaultRequestCount holds the default value on creation for the request_count field.
+	usageriskrollup.DefaultRequestCount = usageriskrollupDescRequestCount.Default.(int)
+	// usageriskrollupDescInputTokensSum is the schema descriptor for input_tokens_sum field.
+	usageriskrollupDescInputTokensSum := usageriskrollupFields[5].Descriptor()
+	// usageriskrollup.DefaultInputTokensSum holds the default value on creation for the input_tokens_sum field.
+	usageriskrollup.DefaultInputTokensSum = usageriskrollupDescInputTokensSum.Default.(int64)
+	// usageriskrollupDescOutputTokensSum is the schema descriptor for output_tokens_sum field.
+	usageriskrollupDescOutputTokensSum := usageriskrollupFields[6].Descriptor()
+	// usageriskrollup.DefaultOutputTokensSum holds the default value on creation for the output_tokens_sum field.
+	usageriskrollup.DefaultOutputTokensSum = usageriskrollupDescOutputTokensSum.Default.(int64)
+	// usageriskrollupDescCacheReadTokensSum is the schema descriptor for cache_read_tokens_sum field.
+	usageriskrollupDescCacheReadTokensSum := usageriskrollupFields[7].Descriptor()
+	// usageriskrollup.DefaultCacheReadTokensSum holds the default value on creation for the cache_read_tokens_sum field.
+	usageriskrollup.DefaultCacheReadTokensSum = usageriskrollupDescCacheReadTokensSum.Default.(int64)
+	// usageriskrollupDescCostUsdSum is the schema descriptor for cost_usd_sum field.
+	usageriskrollupDescCostUsdSum := usageriskrollupFields[8].Descriptor()
+	// usageriskrollup.DefaultCostUsdSum holds the default value on creation for the cost_usd_sum field.
+	usageriskrollup.DefaultCostUsdSum = usageriskrollupDescCostUsdSum.Default.(float64)
+	// usageriskrollupDescOccupiedMsSum is the schema descriptor for occupied_ms_sum field.
+	usageriskrollupDescOccupiedMsSum := usageriskrollupFields[9].Descriptor()
+	// usageriskrollup.DefaultOccupiedMsSum holds the default value on creation for the occupied_ms_sum field.
+	usageriskrollup.DefaultOccupiedMsSum = usageriskrollupDescOccupiedMsSum.Default.(int64)
+	// usageriskrollupDescNonWhitelistedUaCount is the schema descriptor for non_whitelisted_ua_count field.
+	usageriskrollupDescNonWhitelistedUaCount := usageriskrollupFields[10].Descriptor()
+	// usageriskrollup.DefaultNonWhitelistedUaCount holds the default value on creation for the non_whitelisted_ua_count field.
+	usageriskrollup.DefaultNonWhitelistedUaCount = usageriskrollupDescNonWhitelistedUaCount.Default.(int)
+	// usageriskrollupDescComputedAt is the schema descriptor for computed_at field.
+	usageriskrollupDescComputedAt := usageriskrollupFields[11].Descriptor()
+	// usageriskrollup.DefaultComputedAt holds the default value on creation for the computed_at field.
+	usageriskrollup.DefaultComputedAt = usageriskrollupDescComputedAt.Default.(func() time.Time)
+	usageriskrunFields := schema.UsageRiskRun{}.Fields()
+	_ = usageriskrunFields
+	// usageriskrunDescCandidatesTotal is the schema descriptor for candidates_total field.
+	usageriskrunDescCandidatesTotal := usageriskrunFields[4].Descriptor()
+	// usageriskrun.DefaultCandidatesTotal holds the default value on creation for the candidates_total field.
+	usageriskrun.DefaultCandidatesTotal = usageriskrunDescCandidatesTotal.Default.(int)
+	// usageriskrunDescBatchesDone is the schema descriptor for batches_done field.
+	usageriskrunDescBatchesDone := usageriskrunFields[5].Descriptor()
+	// usageriskrun.DefaultBatchesDone holds the default value on creation for the batches_done field.
+	usageriskrun.DefaultBatchesDone = usageriskrunDescBatchesDone.Default.(int)
+	// usageriskrunDescBatchesFailed is the schema descriptor for batches_failed field.
+	usageriskrunDescBatchesFailed := usageriskrunFields[6].Descriptor()
+	// usageriskrun.DefaultBatchesFailed holds the default value on creation for the batches_failed field.
+	usageriskrun.DefaultBatchesFailed = usageriskrunDescBatchesFailed.Default.(int)
+	// usageriskrunDescBudgetExhausted is the schema descriptor for budget_exhausted field.
+	usageriskrunDescBudgetExhausted := usageriskrunFields[8].Descriptor()
+	// usageriskrun.DefaultBudgetExhausted holds the default value on creation for the budget_exhausted field.
+	usageriskrun.DefaultBudgetExhausted = usageriskrunDescBudgetExhausted.Default.(bool)
+	// usageriskrunDescReconBatchOffset is the schema descriptor for recon_batch_offset field.
+	usageriskrunDescReconBatchOffset := usageriskrunFields[10].Descriptor()
+	// usageriskrun.DefaultReconBatchOffset holds the default value on creation for the recon_batch_offset field.
+	usageriskrun.DefaultReconBatchOffset = usageriskrunDescReconBatchOffset.Default.(int)
+	// usageriskrunDescReconBatchesDone is the schema descriptor for recon_batches_done field.
+	usageriskrunDescReconBatchesDone := usageriskrunFields[11].Descriptor()
+	// usageriskrun.DefaultReconBatchesDone holds the default value on creation for the recon_batches_done field.
+	usageriskrun.DefaultReconBatchesDone = usageriskrunDescReconBatchesDone.Default.(int)
+	// usageriskrunDescConsecutivePartials is the schema descriptor for consecutive_partials field.
+	usageriskrunDescConsecutivePartials := usageriskrunFields[12].Descriptor()
+	// usageriskrun.DefaultConsecutivePartials holds the default value on creation for the consecutive_partials field.
+	usageriskrun.DefaultConsecutivePartials = usageriskrunDescConsecutivePartials.Default.(int)
+	// usageriskrunDescPolicyVersion is the schema descriptor for policy_version field.
+	usageriskrunDescPolicyVersion := usageriskrunFields[13].Descriptor()
+	// usageriskrun.DefaultPolicyVersion holds the default value on creation for the policy_version field.
+	usageriskrun.DefaultPolicyVersion = usageriskrunDescPolicyVersion.Default.(int64)
+	// usageriskrunDescR1ReevalPending is the schema descriptor for r1_reeval_pending field.
+	usageriskrunDescR1ReevalPending := usageriskrunFields[14].Descriptor()
+	// usageriskrun.DefaultR1ReevalPending holds the default value on creation for the r1_reeval_pending field.
+	usageriskrun.DefaultR1ReevalPending = usageriskrunDescR1ReevalPending.Default.(bool)
+	// usageriskrunDescHistoryCovered is the schema descriptor for history_covered field.
+	usageriskrunDescHistoryCovered := usageriskrunFields[16].Descriptor()
+	// usageriskrun.DefaultHistoryCovered holds the default value on creation for the history_covered field.
+	usageriskrun.DefaultHistoryCovered = usageriskrunDescHistoryCovered.Default.(bool)
+	// usageriskrunDescFailureStage is the schema descriptor for failure_stage field.
+	usageriskrunDescFailureStage := usageriskrunFields[18].Descriptor()
+	// usageriskrun.FailureStageValidator is a validator for the "failure_stage" field. It is called by the builders before save.
+	usageriskrun.FailureStageValidator = usageriskrunDescFailureStage.Validators[0].(func(string) error)
+	// usageriskrunDescStatus is the schema descriptor for status field.
+	usageriskrunDescStatus := usageriskrunFields[19].Descriptor()
+	// usageriskrun.DefaultStatus holds the default value on creation for the status field.
+	usageriskrun.DefaultStatus = usageriskrunDescStatus.Default.(string)
+	// usageriskrun.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	usageriskrun.StatusValidator = func() func(string) error {
+		validators := usageriskrunDescStatus.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(status string) error {
+			for _, fn := range fns {
+				if err := fn(status); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
 	userMixin := schema.User{}.Mixin()
 	userMixinHooks1 := userMixin[1].Hooks()
 	user.Hooks[0] = userMixinHooks1[0]

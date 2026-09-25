@@ -117,6 +117,15 @@ type UsageCleanupTask func(*sql.Selector)
 // UsageLog is the predicate function for usagelog builders.
 type UsageLog func(*sql.Selector)
 
+// UsageRiskReport is the predicate function for usageriskreport builders.
+type UsageRiskReport func(*sql.Selector)
+
+// UsageRiskRollup is the predicate function for usageriskrollup builders.
+type UsageRiskRollup func(*sql.Selector)
+
+// UsageRiskRun is the predicate function for usageriskrun builders.
+type UsageRiskRun func(*sql.Selector)
+
 // User is the predicate function for user builders.
 type User func(*sql.Selector)
 

@@ -46,6 +46,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskreport"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrollup"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrun"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
@@ -1110,6 +1113,87 @@ func (f TraverseUsageLog) Traverse(ctx context.Context, q ent.Query) error {
 	return fmt.Errorf("unexpected query type %T. expect *ent.UsageLogQuery", q)
 }
 
+// The UsageRiskReportFunc type is an adapter to allow the use of ordinary function as a Querier.
+type UsageRiskReportFunc func(context.Context, *ent.UsageRiskReportQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f UsageRiskReportFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.UsageRiskReportQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskReportQuery", q)
+}
+
+// The TraverseUsageRiskReport type is an adapter to allow the use of ordinary function as Traverser.
+type TraverseUsageRiskReport func(context.Context, *ent.UsageRiskReportQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraverseUsageRiskReport) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraverseUsageRiskReport) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.UsageRiskReportQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskReportQuery", q)
+}
+
+// The UsageRiskRollupFunc type is an adapter to allow the use of ordinary function as a Querier.
+type UsageRiskRollupFunc func(context.Context, *ent.UsageRiskRollupQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f UsageRiskRollupFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.UsageRiskRollupQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskRollupQuery", q)
+}
+
+// The TraverseUsageRiskRollup type is an adapter to allow the use of ordinary function as Traverser.
+type TraverseUsageRiskRollup func(context.Context, *ent.UsageRiskRollupQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraverseUsageRiskRollup) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraverseUsageRiskRollup) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.UsageRiskRollupQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskRollupQuery", q)
+}
+
+// The UsageRiskRunFunc type is an adapter to allow the use of ordinary function as a Querier.
+type UsageRiskRunFunc func(context.Context, *ent.UsageRiskRunQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f UsageRiskRunFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.UsageRiskRunQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskRunQuery", q)
+}
+
+// The TraverseUsageRiskRun type is an adapter to allow the use of ordinary function as Traverser.
+type TraverseUsageRiskRun func(context.Context, *ent.UsageRiskRunQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraverseUsageRiskRun) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraverseUsageRiskRun) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.UsageRiskRunQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.UsageRiskRunQuery", q)
+}
+
 // The UserFunc type is an adapter to allow the use of ordinary function as a Querier.
 type UserFunc func(context.Context, *ent.UserQuery) (ent.Value, error)
 
@@ -1376,6 +1460,12 @@ func NewQuery(q ent.Query) (Query, error) {
 		return &query[*ent.UsageCleanupTaskQuery, predicate.UsageCleanupTask, usagecleanuptask.OrderOption]{typ: ent.TypeUsageCleanupTask, tq: q}, nil
 	case *ent.UsageLogQuery:
 		return &query[*ent.UsageLogQuery, predicate.UsageLog, usagelog.OrderOption]{typ: ent.TypeUsageLog, tq: q}, nil
+	case *ent.UsageRiskReportQuery:
+		return &query[*ent.UsageRiskReportQuery, predicate.UsageRiskReport, usageriskreport.OrderOption]{typ: ent.TypeUsageRiskReport, tq: q}, nil
+	case *ent.UsageRiskRollupQuery:
+		return &query[*ent.UsageRiskRollupQuery, predicate.UsageRiskRollup, usageriskrollup.OrderOption]{typ: ent.TypeUsageRiskRollup, tq: q}, nil
+	case *ent.UsageRiskRunQuery:
+		return &query[*ent.UsageRiskRunQuery, predicate.UsageRiskRun, usageriskrun.OrderOption]{typ: ent.TypeUsageRiskRun, tq: q}, nil
 	case *ent.UserQuery:
 		return &query[*ent.UserQuery, predicate.User, user.OrderOption]{typ: ent.TypeUser, tq: q}, nil
 	case *ent.UserAllowedGroupQuery:

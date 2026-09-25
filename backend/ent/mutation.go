@@ -50,6 +50,9 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/tlsfingerprintprofile"
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskreport"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrollup"
+	"github.com/Wei-Shaw/sub2api/ent/usageriskrun"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
@@ -106,6 +109,9 @@ const (
 	TypeTLSFingerprintProfile         = "TLSFingerprintProfile"
 	TypeUsageCleanupTask              = "UsageCleanupTask"
 	TypeUsageLog                      = "UsageLog"
+	TypeUsageRiskReport               = "UsageRiskReport"
+	TypeUsageRiskRollup               = "UsageRiskRollup"
+	TypeUsageRiskRun                  = "UsageRiskRun"
 	TypeUser                          = "User"
 	TypeUserAllowedGroup              = "UserAllowedGroup"
 	TypeUserAttributeDefinition       = "UserAttributeDefinition"
@@ -53501,6 +53507,4015 @@ func (m *UsageLogMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown UsageLog edge %s", name)
+}
+
+// UsageRiskReportMutation represents an operation that mutates the UsageRiskReport nodes in the graph.
+type UsageRiskReportMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *int64
+	user_id              *int64
+	adduser_id           *int64
+	group_id             *int64
+	addgroup_id          *int64
+	report_date          *time.Time
+	policy_version       *int64
+	addpolicy_version    *int64
+	score                *int
+	addscore             *int
+	level                *string
+	rule_hits            *jsontext.Value
+	appendrule_hits      jsontext.Value
+	evidence             *jsontext.Value
+	appendevidence       jsontext.Value
+	status               *string
+	invalidated_at       *time.Time
+	status_updated_by    *int64
+	addstatus_updated_by *int64
+	status_updated_at    *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*UsageRiskReport, error)
+	predicates           []predicate.UsageRiskReport
+}
+
+var _ ent.Mutation = (*UsageRiskReportMutation)(nil)
+
+// usageriskreportOption allows management of the mutation configuration using functional options.
+type usageriskreportOption func(*UsageRiskReportMutation)
+
+// newUsageRiskReportMutation creates new mutation for the UsageRiskReport entity.
+func newUsageRiskReportMutation(c config, op Op, opts ...usageriskreportOption) *UsageRiskReportMutation {
+	m := &UsageRiskReportMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUsageRiskReport,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUsageRiskReportID sets the ID field of the mutation.
+func withUsageRiskReportID(id int64) usageriskreportOption {
+	return func(m *UsageRiskReportMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UsageRiskReport
+		)
+		m.oldValue = func(ctx context.Context) (*UsageRiskReport, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UsageRiskReport.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUsageRiskReport sets the old UsageRiskReport of the mutation.
+func withUsageRiskReport(node *UsageRiskReport) usageriskreportOption {
+	return func(m *UsageRiskReportMutation) {
+		m.oldValue = func(context.Context) (*UsageRiskReport, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UsageRiskReportMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UsageRiskReportMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UsageRiskReport entities.
+func (m *UsageRiskReportMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UsageRiskReportMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UsageRiskReportMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UsageRiskReport.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetUserID sets the "user_id" field.
+func (m *UsageRiskReportMutation) SetUserID(i int64) {
+	m.user_id = &i
+	m.adduser_id = nil
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *UsageRiskReportMutation) UserID() (r int64, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldUserID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// AddUserID adds i to the "user_id" field.
+func (m *UsageRiskReportMutation) AddUserID(i int64) {
+	if m.adduser_id != nil {
+		*m.adduser_id += i
+	} else {
+		m.adduser_id = &i
+	}
+}
+
+// AddedUserID returns the value that was added to the "user_id" field in this mutation.
+func (m *UsageRiskReportMutation) AddedUserID() (r int64, exists bool) {
+	v := m.adduser_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *UsageRiskReportMutation) ResetUserID() {
+	m.user_id = nil
+	m.adduser_id = nil
+}
+
+// SetGroupID sets the "group_id" field.
+func (m *UsageRiskReportMutation) SetGroupID(i int64) {
+	m.group_id = &i
+	m.addgroup_id = nil
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *UsageRiskReportMutation) GroupID() (r int64, exists bool) {
+	v := m.group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldGroupID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// AddGroupID adds i to the "group_id" field.
+func (m *UsageRiskReportMutation) AddGroupID(i int64) {
+	if m.addgroup_id != nil {
+		*m.addgroup_id += i
+	} else {
+		m.addgroup_id = &i
+	}
+}
+
+// AddedGroupID returns the value that was added to the "group_id" field in this mutation.
+func (m *UsageRiskReportMutation) AddedGroupID() (r int64, exists bool) {
+	v := m.addgroup_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *UsageRiskReportMutation) ResetGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+}
+
+// SetReportDate sets the "report_date" field.
+func (m *UsageRiskReportMutation) SetReportDate(t time.Time) {
+	m.report_date = &t
+}
+
+// ReportDate returns the value of the "report_date" field in the mutation.
+func (m *UsageRiskReportMutation) ReportDate() (r time.Time, exists bool) {
+	v := m.report_date
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReportDate returns the old "report_date" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldReportDate(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReportDate is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReportDate requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReportDate: %w", err)
+	}
+	return oldValue.ReportDate, nil
+}
+
+// ResetReportDate resets all changes to the "report_date" field.
+func (m *UsageRiskReportMutation) ResetReportDate() {
+	m.report_date = nil
+}
+
+// SetPolicyVersion sets the "policy_version" field.
+func (m *UsageRiskReportMutation) SetPolicyVersion(i int64) {
+	m.policy_version = &i
+	m.addpolicy_version = nil
+}
+
+// PolicyVersion returns the value of the "policy_version" field in the mutation.
+func (m *UsageRiskReportMutation) PolicyVersion() (r int64, exists bool) {
+	v := m.policy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyVersion returns the old "policy_version" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldPolicyVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyVersion: %w", err)
+	}
+	return oldValue.PolicyVersion, nil
+}
+
+// AddPolicyVersion adds i to the "policy_version" field.
+func (m *UsageRiskReportMutation) AddPolicyVersion(i int64) {
+	if m.addpolicy_version != nil {
+		*m.addpolicy_version += i
+	} else {
+		m.addpolicy_version = &i
+	}
+}
+
+// AddedPolicyVersion returns the value that was added to the "policy_version" field in this mutation.
+func (m *UsageRiskReportMutation) AddedPolicyVersion() (r int64, exists bool) {
+	v := m.addpolicy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPolicyVersion resets all changes to the "policy_version" field.
+func (m *UsageRiskReportMutation) ResetPolicyVersion() {
+	m.policy_version = nil
+	m.addpolicy_version = nil
+}
+
+// SetScore sets the "score" field.
+func (m *UsageRiskReportMutation) SetScore(i int) {
+	m.score = &i
+	m.addscore = nil
+}
+
+// Score returns the value of the "score" field in the mutation.
+func (m *UsageRiskReportMutation) Score() (r int, exists bool) {
+	v := m.score
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScore returns the old "score" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldScore(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScore: %w", err)
+	}
+	return oldValue.Score, nil
+}
+
+// AddScore adds i to the "score" field.
+func (m *UsageRiskReportMutation) AddScore(i int) {
+	if m.addscore != nil {
+		*m.addscore += i
+	} else {
+		m.addscore = &i
+	}
+}
+
+// AddedScore returns the value that was added to the "score" field in this mutation.
+func (m *UsageRiskReportMutation) AddedScore() (r int, exists bool) {
+	v := m.addscore
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetScore resets all changes to the "score" field.
+func (m *UsageRiskReportMutation) ResetScore() {
+	m.score = nil
+	m.addscore = nil
+}
+
+// SetLevel sets the "level" field.
+func (m *UsageRiskReportMutation) SetLevel(s string) {
+	m.level = &s
+}
+
+// Level returns the value of the "level" field in the mutation.
+func (m *UsageRiskReportMutation) Level() (r string, exists bool) {
+	v := m.level
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLevel returns the old "level" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldLevel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLevel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLevel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLevel: %w", err)
+	}
+	return oldValue.Level, nil
+}
+
+// ResetLevel resets all changes to the "level" field.
+func (m *UsageRiskReportMutation) ResetLevel() {
+	m.level = nil
+}
+
+// SetRuleHits sets the "rule_hits" field.
+func (m *UsageRiskReportMutation) SetRuleHits(j jsontext.Value) {
+	m.rule_hits = &j
+	m.appendrule_hits = nil
+}
+
+// RuleHits returns the value of the "rule_hits" field in the mutation.
+func (m *UsageRiskReportMutation) RuleHits() (r jsontext.Value, exists bool) {
+	v := m.rule_hits
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuleHits returns the old "rule_hits" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldRuleHits(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuleHits is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuleHits requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuleHits: %w", err)
+	}
+	return oldValue.RuleHits, nil
+}
+
+// AppendRuleHits adds j to the "rule_hits" field.
+func (m *UsageRiskReportMutation) AppendRuleHits(j jsontext.Value) {
+	m.appendrule_hits = append(m.appendrule_hits, j...)
+}
+
+// AppendedRuleHits returns the list of values that were appended to the "rule_hits" field in this mutation.
+func (m *UsageRiskReportMutation) AppendedRuleHits() (jsontext.Value, bool) {
+	if len(m.appendrule_hits) == 0 {
+		return nil, false
+	}
+	return m.appendrule_hits, true
+}
+
+// ResetRuleHits resets all changes to the "rule_hits" field.
+func (m *UsageRiskReportMutation) ResetRuleHits() {
+	m.rule_hits = nil
+	m.appendrule_hits = nil
+}
+
+// SetEvidence sets the "evidence" field.
+func (m *UsageRiskReportMutation) SetEvidence(j jsontext.Value) {
+	m.evidence = &j
+	m.appendevidence = nil
+}
+
+// Evidence returns the value of the "evidence" field in the mutation.
+func (m *UsageRiskReportMutation) Evidence() (r jsontext.Value, exists bool) {
+	v := m.evidence
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEvidence returns the old "evidence" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldEvidence(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEvidence is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEvidence requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEvidence: %w", err)
+	}
+	return oldValue.Evidence, nil
+}
+
+// AppendEvidence adds j to the "evidence" field.
+func (m *UsageRiskReportMutation) AppendEvidence(j jsontext.Value) {
+	m.appendevidence = append(m.appendevidence, j...)
+}
+
+// AppendedEvidence returns the list of values that were appended to the "evidence" field in this mutation.
+func (m *UsageRiskReportMutation) AppendedEvidence() (jsontext.Value, bool) {
+	if len(m.appendevidence) == 0 {
+		return nil, false
+	}
+	return m.appendevidence, true
+}
+
+// ResetEvidence resets all changes to the "evidence" field.
+func (m *UsageRiskReportMutation) ResetEvidence() {
+	m.evidence = nil
+	m.appendevidence = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *UsageRiskReportMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *UsageRiskReportMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *UsageRiskReportMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetInvalidatedAt sets the "invalidated_at" field.
+func (m *UsageRiskReportMutation) SetInvalidatedAt(t time.Time) {
+	m.invalidated_at = &t
+}
+
+// InvalidatedAt returns the value of the "invalidated_at" field in the mutation.
+func (m *UsageRiskReportMutation) InvalidatedAt() (r time.Time, exists bool) {
+	v := m.invalidated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInvalidatedAt returns the old "invalidated_at" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldInvalidatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInvalidatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInvalidatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInvalidatedAt: %w", err)
+	}
+	return oldValue.InvalidatedAt, nil
+}
+
+// ClearInvalidatedAt clears the value of the "invalidated_at" field.
+func (m *UsageRiskReportMutation) ClearInvalidatedAt() {
+	m.invalidated_at = nil
+	m.clearedFields[usageriskreport.FieldInvalidatedAt] = struct{}{}
+}
+
+// InvalidatedAtCleared returns if the "invalidated_at" field was cleared in this mutation.
+func (m *UsageRiskReportMutation) InvalidatedAtCleared() bool {
+	_, ok := m.clearedFields[usageriskreport.FieldInvalidatedAt]
+	return ok
+}
+
+// ResetInvalidatedAt resets all changes to the "invalidated_at" field.
+func (m *UsageRiskReportMutation) ResetInvalidatedAt() {
+	m.invalidated_at = nil
+	delete(m.clearedFields, usageriskreport.FieldInvalidatedAt)
+}
+
+// SetStatusUpdatedBy sets the "status_updated_by" field.
+func (m *UsageRiskReportMutation) SetStatusUpdatedBy(i int64) {
+	m.status_updated_by = &i
+	m.addstatus_updated_by = nil
+}
+
+// StatusUpdatedBy returns the value of the "status_updated_by" field in the mutation.
+func (m *UsageRiskReportMutation) StatusUpdatedBy() (r int64, exists bool) {
+	v := m.status_updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatusUpdatedBy returns the old "status_updated_by" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldStatusUpdatedBy(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatusUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatusUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatusUpdatedBy: %w", err)
+	}
+	return oldValue.StatusUpdatedBy, nil
+}
+
+// AddStatusUpdatedBy adds i to the "status_updated_by" field.
+func (m *UsageRiskReportMutation) AddStatusUpdatedBy(i int64) {
+	if m.addstatus_updated_by != nil {
+		*m.addstatus_updated_by += i
+	} else {
+		m.addstatus_updated_by = &i
+	}
+}
+
+// AddedStatusUpdatedBy returns the value that was added to the "status_updated_by" field in this mutation.
+func (m *UsageRiskReportMutation) AddedStatusUpdatedBy() (r int64, exists bool) {
+	v := m.addstatus_updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearStatusUpdatedBy clears the value of the "status_updated_by" field.
+func (m *UsageRiskReportMutation) ClearStatusUpdatedBy() {
+	m.status_updated_by = nil
+	m.addstatus_updated_by = nil
+	m.clearedFields[usageriskreport.FieldStatusUpdatedBy] = struct{}{}
+}
+
+// StatusUpdatedByCleared returns if the "status_updated_by" field was cleared in this mutation.
+func (m *UsageRiskReportMutation) StatusUpdatedByCleared() bool {
+	_, ok := m.clearedFields[usageriskreport.FieldStatusUpdatedBy]
+	return ok
+}
+
+// ResetStatusUpdatedBy resets all changes to the "status_updated_by" field.
+func (m *UsageRiskReportMutation) ResetStatusUpdatedBy() {
+	m.status_updated_by = nil
+	m.addstatus_updated_by = nil
+	delete(m.clearedFields, usageriskreport.FieldStatusUpdatedBy)
+}
+
+// SetStatusUpdatedAt sets the "status_updated_at" field.
+func (m *UsageRiskReportMutation) SetStatusUpdatedAt(t time.Time) {
+	m.status_updated_at = &t
+}
+
+// StatusUpdatedAt returns the value of the "status_updated_at" field in the mutation.
+func (m *UsageRiskReportMutation) StatusUpdatedAt() (r time.Time, exists bool) {
+	v := m.status_updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatusUpdatedAt returns the old "status_updated_at" field's value of the UsageRiskReport entity.
+// If the UsageRiskReport object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskReportMutation) OldStatusUpdatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatusUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatusUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatusUpdatedAt: %w", err)
+	}
+	return oldValue.StatusUpdatedAt, nil
+}
+
+// ClearStatusUpdatedAt clears the value of the "status_updated_at" field.
+func (m *UsageRiskReportMutation) ClearStatusUpdatedAt() {
+	m.status_updated_at = nil
+	m.clearedFields[usageriskreport.FieldStatusUpdatedAt] = struct{}{}
+}
+
+// StatusUpdatedAtCleared returns if the "status_updated_at" field was cleared in this mutation.
+func (m *UsageRiskReportMutation) StatusUpdatedAtCleared() bool {
+	_, ok := m.clearedFields[usageriskreport.FieldStatusUpdatedAt]
+	return ok
+}
+
+// ResetStatusUpdatedAt resets all changes to the "status_updated_at" field.
+func (m *UsageRiskReportMutation) ResetStatusUpdatedAt() {
+	m.status_updated_at = nil
+	delete(m.clearedFields, usageriskreport.FieldStatusUpdatedAt)
+}
+
+// Where appends a list predicates to the UsageRiskReportMutation builder.
+func (m *UsageRiskReportMutation) Where(ps ...predicate.UsageRiskReport) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UsageRiskReportMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UsageRiskReportMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UsageRiskReport, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UsageRiskReportMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UsageRiskReportMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UsageRiskReport).
+func (m *UsageRiskReportMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UsageRiskReportMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.user_id != nil {
+		fields = append(fields, usageriskreport.FieldUserID)
+	}
+	if m.group_id != nil {
+		fields = append(fields, usageriskreport.FieldGroupID)
+	}
+	if m.report_date != nil {
+		fields = append(fields, usageriskreport.FieldReportDate)
+	}
+	if m.policy_version != nil {
+		fields = append(fields, usageriskreport.FieldPolicyVersion)
+	}
+	if m.score != nil {
+		fields = append(fields, usageriskreport.FieldScore)
+	}
+	if m.level != nil {
+		fields = append(fields, usageriskreport.FieldLevel)
+	}
+	if m.rule_hits != nil {
+		fields = append(fields, usageriskreport.FieldRuleHits)
+	}
+	if m.evidence != nil {
+		fields = append(fields, usageriskreport.FieldEvidence)
+	}
+	if m.status != nil {
+		fields = append(fields, usageriskreport.FieldStatus)
+	}
+	if m.invalidated_at != nil {
+		fields = append(fields, usageriskreport.FieldInvalidatedAt)
+	}
+	if m.status_updated_by != nil {
+		fields = append(fields, usageriskreport.FieldStatusUpdatedBy)
+	}
+	if m.status_updated_at != nil {
+		fields = append(fields, usageriskreport.FieldStatusUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UsageRiskReportMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskreport.FieldUserID:
+		return m.UserID()
+	case usageriskreport.FieldGroupID:
+		return m.GroupID()
+	case usageriskreport.FieldReportDate:
+		return m.ReportDate()
+	case usageriskreport.FieldPolicyVersion:
+		return m.PolicyVersion()
+	case usageriskreport.FieldScore:
+		return m.Score()
+	case usageriskreport.FieldLevel:
+		return m.Level()
+	case usageriskreport.FieldRuleHits:
+		return m.RuleHits()
+	case usageriskreport.FieldEvidence:
+		return m.Evidence()
+	case usageriskreport.FieldStatus:
+		return m.Status()
+	case usageriskreport.FieldInvalidatedAt:
+		return m.InvalidatedAt()
+	case usageriskreport.FieldStatusUpdatedBy:
+		return m.StatusUpdatedBy()
+	case usageriskreport.FieldStatusUpdatedAt:
+		return m.StatusUpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UsageRiskReportMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case usageriskreport.FieldUserID:
+		return m.OldUserID(ctx)
+	case usageriskreport.FieldGroupID:
+		return m.OldGroupID(ctx)
+	case usageriskreport.FieldReportDate:
+		return m.OldReportDate(ctx)
+	case usageriskreport.FieldPolicyVersion:
+		return m.OldPolicyVersion(ctx)
+	case usageriskreport.FieldScore:
+		return m.OldScore(ctx)
+	case usageriskreport.FieldLevel:
+		return m.OldLevel(ctx)
+	case usageriskreport.FieldRuleHits:
+		return m.OldRuleHits(ctx)
+	case usageriskreport.FieldEvidence:
+		return m.OldEvidence(ctx)
+	case usageriskreport.FieldStatus:
+		return m.OldStatus(ctx)
+	case usageriskreport.FieldInvalidatedAt:
+		return m.OldInvalidatedAt(ctx)
+	case usageriskreport.FieldStatusUpdatedBy:
+		return m.OldStatusUpdatedBy(ctx)
+	case usageriskreport.FieldStatusUpdatedAt:
+		return m.OldStatusUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown UsageRiskReport field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskReportMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case usageriskreport.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case usageriskreport.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
+	case usageriskreport.FieldReportDate:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReportDate(v)
+		return nil
+	case usageriskreport.FieldPolicyVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyVersion(v)
+		return nil
+	case usageriskreport.FieldScore:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScore(v)
+		return nil
+	case usageriskreport.FieldLevel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLevel(v)
+		return nil
+	case usageriskreport.FieldRuleHits:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuleHits(v)
+		return nil
+	case usageriskreport.FieldEvidence:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEvidence(v)
+		return nil
+	case usageriskreport.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case usageriskreport.FieldInvalidatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInvalidatedAt(v)
+		return nil
+	case usageriskreport.FieldStatusUpdatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatusUpdatedBy(v)
+		return nil
+	case usageriskreport.FieldStatusUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatusUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskReport field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UsageRiskReportMutation) AddedFields() []string {
+	var fields []string
+	if m.adduser_id != nil {
+		fields = append(fields, usageriskreport.FieldUserID)
+	}
+	if m.addgroup_id != nil {
+		fields = append(fields, usageriskreport.FieldGroupID)
+	}
+	if m.addpolicy_version != nil {
+		fields = append(fields, usageriskreport.FieldPolicyVersion)
+	}
+	if m.addscore != nil {
+		fields = append(fields, usageriskreport.FieldScore)
+	}
+	if m.addstatus_updated_by != nil {
+		fields = append(fields, usageriskreport.FieldStatusUpdatedBy)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UsageRiskReportMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskreport.FieldUserID:
+		return m.AddedUserID()
+	case usageriskreport.FieldGroupID:
+		return m.AddedGroupID()
+	case usageriskreport.FieldPolicyVersion:
+		return m.AddedPolicyVersion()
+	case usageriskreport.FieldScore:
+		return m.AddedScore()
+	case usageriskreport.FieldStatusUpdatedBy:
+		return m.AddedStatusUpdatedBy()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskReportMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case usageriskreport.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUserID(v)
+		return nil
+	case usageriskreport.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGroupID(v)
+		return nil
+	case usageriskreport.FieldPolicyVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPolicyVersion(v)
+		return nil
+	case usageriskreport.FieldScore:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddScore(v)
+		return nil
+	case usageriskreport.FieldStatusUpdatedBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStatusUpdatedBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskReport numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UsageRiskReportMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(usageriskreport.FieldInvalidatedAt) {
+		fields = append(fields, usageriskreport.FieldInvalidatedAt)
+	}
+	if m.FieldCleared(usageriskreport.FieldStatusUpdatedBy) {
+		fields = append(fields, usageriskreport.FieldStatusUpdatedBy)
+	}
+	if m.FieldCleared(usageriskreport.FieldStatusUpdatedAt) {
+		fields = append(fields, usageriskreport.FieldStatusUpdatedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UsageRiskReportMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UsageRiskReportMutation) ClearField(name string) error {
+	switch name {
+	case usageriskreport.FieldInvalidatedAt:
+		m.ClearInvalidatedAt()
+		return nil
+	case usageriskreport.FieldStatusUpdatedBy:
+		m.ClearStatusUpdatedBy()
+		return nil
+	case usageriskreport.FieldStatusUpdatedAt:
+		m.ClearStatusUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskReport nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UsageRiskReportMutation) ResetField(name string) error {
+	switch name {
+	case usageriskreport.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case usageriskreport.FieldGroupID:
+		m.ResetGroupID()
+		return nil
+	case usageriskreport.FieldReportDate:
+		m.ResetReportDate()
+		return nil
+	case usageriskreport.FieldPolicyVersion:
+		m.ResetPolicyVersion()
+		return nil
+	case usageriskreport.FieldScore:
+		m.ResetScore()
+		return nil
+	case usageriskreport.FieldLevel:
+		m.ResetLevel()
+		return nil
+	case usageriskreport.FieldRuleHits:
+		m.ResetRuleHits()
+		return nil
+	case usageriskreport.FieldEvidence:
+		m.ResetEvidence()
+		return nil
+	case usageriskreport.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case usageriskreport.FieldInvalidatedAt:
+		m.ResetInvalidatedAt()
+		return nil
+	case usageriskreport.FieldStatusUpdatedBy:
+		m.ResetStatusUpdatedBy()
+		return nil
+	case usageriskreport.FieldStatusUpdatedAt:
+		m.ResetStatusUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskReport field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UsageRiskReportMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UsageRiskReportMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UsageRiskReportMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UsageRiskReportMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UsageRiskReportMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UsageRiskReportMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UsageRiskReportMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskReport unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UsageRiskReportMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskReport edge %s", name)
+}
+
+// UsageRiskRollupMutation represents an operation that mutates the UsageRiskRollup nodes in the graph.
+type UsageRiskRollupMutation struct {
+	config
+	op                          Op
+	typ                         string
+	id                          *int64
+	user_id                     *int64
+	adduser_id                  *int64
+	group_id                    *int64
+	addgroup_id                 *int64
+	bucket_hour                 *time.Time
+	request_count               *int
+	addrequest_count            *int
+	input_tokens_sum            *int64
+	addinput_tokens_sum         *int64
+	output_tokens_sum           *int64
+	addoutput_tokens_sum        *int64
+	cache_read_tokens_sum       *int64
+	addcache_read_tokens_sum    *int64
+	cost_usd_sum                *float64
+	addcost_usd_sum             *float64
+	occupied_ms_sum             *int64
+	addoccupied_ms_sum          *int64
+	non_whitelisted_ua_count    *int
+	addnon_whitelisted_ua_count *int
+	computed_at                 *time.Time
+	clearedFields               map[string]struct{}
+	done                        bool
+	oldValue                    func(context.Context) (*UsageRiskRollup, error)
+	predicates                  []predicate.UsageRiskRollup
+}
+
+var _ ent.Mutation = (*UsageRiskRollupMutation)(nil)
+
+// usageriskrollupOption allows management of the mutation configuration using functional options.
+type usageriskrollupOption func(*UsageRiskRollupMutation)
+
+// newUsageRiskRollupMutation creates new mutation for the UsageRiskRollup entity.
+func newUsageRiskRollupMutation(c config, op Op, opts ...usageriskrollupOption) *UsageRiskRollupMutation {
+	m := &UsageRiskRollupMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUsageRiskRollup,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUsageRiskRollupID sets the ID field of the mutation.
+func withUsageRiskRollupID(id int64) usageriskrollupOption {
+	return func(m *UsageRiskRollupMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UsageRiskRollup
+		)
+		m.oldValue = func(ctx context.Context) (*UsageRiskRollup, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UsageRiskRollup.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUsageRiskRollup sets the old UsageRiskRollup of the mutation.
+func withUsageRiskRollup(node *UsageRiskRollup) usageriskrollupOption {
+	return func(m *UsageRiskRollupMutation) {
+		m.oldValue = func(context.Context) (*UsageRiskRollup, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UsageRiskRollupMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UsageRiskRollupMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UsageRiskRollup entities.
+func (m *UsageRiskRollupMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UsageRiskRollupMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UsageRiskRollupMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UsageRiskRollup.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetUserID sets the "user_id" field.
+func (m *UsageRiskRollupMutation) SetUserID(i int64) {
+	m.user_id = &i
+	m.adduser_id = nil
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *UsageRiskRollupMutation) UserID() (r int64, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldUserID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// AddUserID adds i to the "user_id" field.
+func (m *UsageRiskRollupMutation) AddUserID(i int64) {
+	if m.adduser_id != nil {
+		*m.adduser_id += i
+	} else {
+		m.adduser_id = &i
+	}
+}
+
+// AddedUserID returns the value that was added to the "user_id" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedUserID() (r int64, exists bool) {
+	v := m.adduser_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *UsageRiskRollupMutation) ResetUserID() {
+	m.user_id = nil
+	m.adduser_id = nil
+}
+
+// SetGroupID sets the "group_id" field.
+func (m *UsageRiskRollupMutation) SetGroupID(i int64) {
+	m.group_id = &i
+	m.addgroup_id = nil
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *UsageRiskRollupMutation) GroupID() (r int64, exists bool) {
+	v := m.group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldGroupID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// AddGroupID adds i to the "group_id" field.
+func (m *UsageRiskRollupMutation) AddGroupID(i int64) {
+	if m.addgroup_id != nil {
+		*m.addgroup_id += i
+	} else {
+		m.addgroup_id = &i
+	}
+}
+
+// AddedGroupID returns the value that was added to the "group_id" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedGroupID() (r int64, exists bool) {
+	v := m.addgroup_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *UsageRiskRollupMutation) ResetGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+}
+
+// SetBucketHour sets the "bucket_hour" field.
+func (m *UsageRiskRollupMutation) SetBucketHour(t time.Time) {
+	m.bucket_hour = &t
+}
+
+// BucketHour returns the value of the "bucket_hour" field in the mutation.
+func (m *UsageRiskRollupMutation) BucketHour() (r time.Time, exists bool) {
+	v := m.bucket_hour
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBucketHour returns the old "bucket_hour" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldBucketHour(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBucketHour is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBucketHour requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBucketHour: %w", err)
+	}
+	return oldValue.BucketHour, nil
+}
+
+// ResetBucketHour resets all changes to the "bucket_hour" field.
+func (m *UsageRiskRollupMutation) ResetBucketHour() {
+	m.bucket_hour = nil
+}
+
+// SetRequestCount sets the "request_count" field.
+func (m *UsageRiskRollupMutation) SetRequestCount(i int) {
+	m.request_count = &i
+	m.addrequest_count = nil
+}
+
+// RequestCount returns the value of the "request_count" field in the mutation.
+func (m *UsageRiskRollupMutation) RequestCount() (r int, exists bool) {
+	v := m.request_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestCount returns the old "request_count" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldRequestCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestCount: %w", err)
+	}
+	return oldValue.RequestCount, nil
+}
+
+// AddRequestCount adds i to the "request_count" field.
+func (m *UsageRiskRollupMutation) AddRequestCount(i int) {
+	if m.addrequest_count != nil {
+		*m.addrequest_count += i
+	} else {
+		m.addrequest_count = &i
+	}
+}
+
+// AddedRequestCount returns the value that was added to the "request_count" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedRequestCount() (r int, exists bool) {
+	v := m.addrequest_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRequestCount resets all changes to the "request_count" field.
+func (m *UsageRiskRollupMutation) ResetRequestCount() {
+	m.request_count = nil
+	m.addrequest_count = nil
+}
+
+// SetInputTokensSum sets the "input_tokens_sum" field.
+func (m *UsageRiskRollupMutation) SetInputTokensSum(i int64) {
+	m.input_tokens_sum = &i
+	m.addinput_tokens_sum = nil
+}
+
+// InputTokensSum returns the value of the "input_tokens_sum" field in the mutation.
+func (m *UsageRiskRollupMutation) InputTokensSum() (r int64, exists bool) {
+	v := m.input_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInputTokensSum returns the old "input_tokens_sum" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldInputTokensSum(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInputTokensSum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInputTokensSum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInputTokensSum: %w", err)
+	}
+	return oldValue.InputTokensSum, nil
+}
+
+// AddInputTokensSum adds i to the "input_tokens_sum" field.
+func (m *UsageRiskRollupMutation) AddInputTokensSum(i int64) {
+	if m.addinput_tokens_sum != nil {
+		*m.addinput_tokens_sum += i
+	} else {
+		m.addinput_tokens_sum = &i
+	}
+}
+
+// AddedInputTokensSum returns the value that was added to the "input_tokens_sum" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedInputTokensSum() (r int64, exists bool) {
+	v := m.addinput_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetInputTokensSum resets all changes to the "input_tokens_sum" field.
+func (m *UsageRiskRollupMutation) ResetInputTokensSum() {
+	m.input_tokens_sum = nil
+	m.addinput_tokens_sum = nil
+}
+
+// SetOutputTokensSum sets the "output_tokens_sum" field.
+func (m *UsageRiskRollupMutation) SetOutputTokensSum(i int64) {
+	m.output_tokens_sum = &i
+	m.addoutput_tokens_sum = nil
+}
+
+// OutputTokensSum returns the value of the "output_tokens_sum" field in the mutation.
+func (m *UsageRiskRollupMutation) OutputTokensSum() (r int64, exists bool) {
+	v := m.output_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputTokensSum returns the old "output_tokens_sum" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldOutputTokensSum(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputTokensSum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputTokensSum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputTokensSum: %w", err)
+	}
+	return oldValue.OutputTokensSum, nil
+}
+
+// AddOutputTokensSum adds i to the "output_tokens_sum" field.
+func (m *UsageRiskRollupMutation) AddOutputTokensSum(i int64) {
+	if m.addoutput_tokens_sum != nil {
+		*m.addoutput_tokens_sum += i
+	} else {
+		m.addoutput_tokens_sum = &i
+	}
+}
+
+// AddedOutputTokensSum returns the value that was added to the "output_tokens_sum" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedOutputTokensSum() (r int64, exists bool) {
+	v := m.addoutput_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOutputTokensSum resets all changes to the "output_tokens_sum" field.
+func (m *UsageRiskRollupMutation) ResetOutputTokensSum() {
+	m.output_tokens_sum = nil
+	m.addoutput_tokens_sum = nil
+}
+
+// SetCacheReadTokensSum sets the "cache_read_tokens_sum" field.
+func (m *UsageRiskRollupMutation) SetCacheReadTokensSum(i int64) {
+	m.cache_read_tokens_sum = &i
+	m.addcache_read_tokens_sum = nil
+}
+
+// CacheReadTokensSum returns the value of the "cache_read_tokens_sum" field in the mutation.
+func (m *UsageRiskRollupMutation) CacheReadTokensSum() (r int64, exists bool) {
+	v := m.cache_read_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCacheReadTokensSum returns the old "cache_read_tokens_sum" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldCacheReadTokensSum(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCacheReadTokensSum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCacheReadTokensSum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCacheReadTokensSum: %w", err)
+	}
+	return oldValue.CacheReadTokensSum, nil
+}
+
+// AddCacheReadTokensSum adds i to the "cache_read_tokens_sum" field.
+func (m *UsageRiskRollupMutation) AddCacheReadTokensSum(i int64) {
+	if m.addcache_read_tokens_sum != nil {
+		*m.addcache_read_tokens_sum += i
+	} else {
+		m.addcache_read_tokens_sum = &i
+	}
+}
+
+// AddedCacheReadTokensSum returns the value that was added to the "cache_read_tokens_sum" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedCacheReadTokensSum() (r int64, exists bool) {
+	v := m.addcache_read_tokens_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCacheReadTokensSum resets all changes to the "cache_read_tokens_sum" field.
+func (m *UsageRiskRollupMutation) ResetCacheReadTokensSum() {
+	m.cache_read_tokens_sum = nil
+	m.addcache_read_tokens_sum = nil
+}
+
+// SetCostUsdSum sets the "cost_usd_sum" field.
+func (m *UsageRiskRollupMutation) SetCostUsdSum(f float64) {
+	m.cost_usd_sum = &f
+	m.addcost_usd_sum = nil
+}
+
+// CostUsdSum returns the value of the "cost_usd_sum" field in the mutation.
+func (m *UsageRiskRollupMutation) CostUsdSum() (r float64, exists bool) {
+	v := m.cost_usd_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCostUsdSum returns the old "cost_usd_sum" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldCostUsdSum(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCostUsdSum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCostUsdSum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCostUsdSum: %w", err)
+	}
+	return oldValue.CostUsdSum, nil
+}
+
+// AddCostUsdSum adds f to the "cost_usd_sum" field.
+func (m *UsageRiskRollupMutation) AddCostUsdSum(f float64) {
+	if m.addcost_usd_sum != nil {
+		*m.addcost_usd_sum += f
+	} else {
+		m.addcost_usd_sum = &f
+	}
+}
+
+// AddedCostUsdSum returns the value that was added to the "cost_usd_sum" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedCostUsdSum() (r float64, exists bool) {
+	v := m.addcost_usd_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCostUsdSum resets all changes to the "cost_usd_sum" field.
+func (m *UsageRiskRollupMutation) ResetCostUsdSum() {
+	m.cost_usd_sum = nil
+	m.addcost_usd_sum = nil
+}
+
+// SetOccupiedMsSum sets the "occupied_ms_sum" field.
+func (m *UsageRiskRollupMutation) SetOccupiedMsSum(i int64) {
+	m.occupied_ms_sum = &i
+	m.addoccupied_ms_sum = nil
+}
+
+// OccupiedMsSum returns the value of the "occupied_ms_sum" field in the mutation.
+func (m *UsageRiskRollupMutation) OccupiedMsSum() (r int64, exists bool) {
+	v := m.occupied_ms_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOccupiedMsSum returns the old "occupied_ms_sum" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldOccupiedMsSum(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOccupiedMsSum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOccupiedMsSum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOccupiedMsSum: %w", err)
+	}
+	return oldValue.OccupiedMsSum, nil
+}
+
+// AddOccupiedMsSum adds i to the "occupied_ms_sum" field.
+func (m *UsageRiskRollupMutation) AddOccupiedMsSum(i int64) {
+	if m.addoccupied_ms_sum != nil {
+		*m.addoccupied_ms_sum += i
+	} else {
+		m.addoccupied_ms_sum = &i
+	}
+}
+
+// AddedOccupiedMsSum returns the value that was added to the "occupied_ms_sum" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedOccupiedMsSum() (r int64, exists bool) {
+	v := m.addoccupied_ms_sum
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOccupiedMsSum resets all changes to the "occupied_ms_sum" field.
+func (m *UsageRiskRollupMutation) ResetOccupiedMsSum() {
+	m.occupied_ms_sum = nil
+	m.addoccupied_ms_sum = nil
+}
+
+// SetNonWhitelistedUaCount sets the "non_whitelisted_ua_count" field.
+func (m *UsageRiskRollupMutation) SetNonWhitelistedUaCount(i int) {
+	m.non_whitelisted_ua_count = &i
+	m.addnon_whitelisted_ua_count = nil
+}
+
+// NonWhitelistedUaCount returns the value of the "non_whitelisted_ua_count" field in the mutation.
+func (m *UsageRiskRollupMutation) NonWhitelistedUaCount() (r int, exists bool) {
+	v := m.non_whitelisted_ua_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNonWhitelistedUaCount returns the old "non_whitelisted_ua_count" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldNonWhitelistedUaCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNonWhitelistedUaCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNonWhitelistedUaCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNonWhitelistedUaCount: %w", err)
+	}
+	return oldValue.NonWhitelistedUaCount, nil
+}
+
+// AddNonWhitelistedUaCount adds i to the "non_whitelisted_ua_count" field.
+func (m *UsageRiskRollupMutation) AddNonWhitelistedUaCount(i int) {
+	if m.addnon_whitelisted_ua_count != nil {
+		*m.addnon_whitelisted_ua_count += i
+	} else {
+		m.addnon_whitelisted_ua_count = &i
+	}
+}
+
+// AddedNonWhitelistedUaCount returns the value that was added to the "non_whitelisted_ua_count" field in this mutation.
+func (m *UsageRiskRollupMutation) AddedNonWhitelistedUaCount() (r int, exists bool) {
+	v := m.addnon_whitelisted_ua_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetNonWhitelistedUaCount resets all changes to the "non_whitelisted_ua_count" field.
+func (m *UsageRiskRollupMutation) ResetNonWhitelistedUaCount() {
+	m.non_whitelisted_ua_count = nil
+	m.addnon_whitelisted_ua_count = nil
+}
+
+// SetComputedAt sets the "computed_at" field.
+func (m *UsageRiskRollupMutation) SetComputedAt(t time.Time) {
+	m.computed_at = &t
+}
+
+// ComputedAt returns the value of the "computed_at" field in the mutation.
+func (m *UsageRiskRollupMutation) ComputedAt() (r time.Time, exists bool) {
+	v := m.computed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldComputedAt returns the old "computed_at" field's value of the UsageRiskRollup entity.
+// If the UsageRiskRollup object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRollupMutation) OldComputedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldComputedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldComputedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldComputedAt: %w", err)
+	}
+	return oldValue.ComputedAt, nil
+}
+
+// ResetComputedAt resets all changes to the "computed_at" field.
+func (m *UsageRiskRollupMutation) ResetComputedAt() {
+	m.computed_at = nil
+}
+
+// Where appends a list predicates to the UsageRiskRollupMutation builder.
+func (m *UsageRiskRollupMutation) Where(ps ...predicate.UsageRiskRollup) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UsageRiskRollupMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UsageRiskRollupMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UsageRiskRollup, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UsageRiskRollupMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UsageRiskRollupMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UsageRiskRollup).
+func (m *UsageRiskRollupMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UsageRiskRollupMutation) Fields() []string {
+	fields := make([]string, 0, 11)
+	if m.user_id != nil {
+		fields = append(fields, usageriskrollup.FieldUserID)
+	}
+	if m.group_id != nil {
+		fields = append(fields, usageriskrollup.FieldGroupID)
+	}
+	if m.bucket_hour != nil {
+		fields = append(fields, usageriskrollup.FieldBucketHour)
+	}
+	if m.request_count != nil {
+		fields = append(fields, usageriskrollup.FieldRequestCount)
+	}
+	if m.input_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldInputTokensSum)
+	}
+	if m.output_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldOutputTokensSum)
+	}
+	if m.cache_read_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldCacheReadTokensSum)
+	}
+	if m.cost_usd_sum != nil {
+		fields = append(fields, usageriskrollup.FieldCostUsdSum)
+	}
+	if m.occupied_ms_sum != nil {
+		fields = append(fields, usageriskrollup.FieldOccupiedMsSum)
+	}
+	if m.non_whitelisted_ua_count != nil {
+		fields = append(fields, usageriskrollup.FieldNonWhitelistedUaCount)
+	}
+	if m.computed_at != nil {
+		fields = append(fields, usageriskrollup.FieldComputedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UsageRiskRollupMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		return m.UserID()
+	case usageriskrollup.FieldGroupID:
+		return m.GroupID()
+	case usageriskrollup.FieldBucketHour:
+		return m.BucketHour()
+	case usageriskrollup.FieldRequestCount:
+		return m.RequestCount()
+	case usageriskrollup.FieldInputTokensSum:
+		return m.InputTokensSum()
+	case usageriskrollup.FieldOutputTokensSum:
+		return m.OutputTokensSum()
+	case usageriskrollup.FieldCacheReadTokensSum:
+		return m.CacheReadTokensSum()
+	case usageriskrollup.FieldCostUsdSum:
+		return m.CostUsdSum()
+	case usageriskrollup.FieldOccupiedMsSum:
+		return m.OccupiedMsSum()
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		return m.NonWhitelistedUaCount()
+	case usageriskrollup.FieldComputedAt:
+		return m.ComputedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UsageRiskRollupMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		return m.OldUserID(ctx)
+	case usageriskrollup.FieldGroupID:
+		return m.OldGroupID(ctx)
+	case usageriskrollup.FieldBucketHour:
+		return m.OldBucketHour(ctx)
+	case usageriskrollup.FieldRequestCount:
+		return m.OldRequestCount(ctx)
+	case usageriskrollup.FieldInputTokensSum:
+		return m.OldInputTokensSum(ctx)
+	case usageriskrollup.FieldOutputTokensSum:
+		return m.OldOutputTokensSum(ctx)
+	case usageriskrollup.FieldCacheReadTokensSum:
+		return m.OldCacheReadTokensSum(ctx)
+	case usageriskrollup.FieldCostUsdSum:
+		return m.OldCostUsdSum(ctx)
+	case usageriskrollup.FieldOccupiedMsSum:
+		return m.OldOccupiedMsSum(ctx)
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		return m.OldNonWhitelistedUaCount(ctx)
+	case usageriskrollup.FieldComputedAt:
+		return m.OldComputedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown UsageRiskRollup field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskRollupMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case usageriskrollup.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
+	case usageriskrollup.FieldBucketHour:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBucketHour(v)
+		return nil
+	case usageriskrollup.FieldRequestCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestCount(v)
+		return nil
+	case usageriskrollup.FieldInputTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInputTokensSum(v)
+		return nil
+	case usageriskrollup.FieldOutputTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputTokensSum(v)
+		return nil
+	case usageriskrollup.FieldCacheReadTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCacheReadTokensSum(v)
+		return nil
+	case usageriskrollup.FieldCostUsdSum:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCostUsdSum(v)
+		return nil
+	case usageriskrollup.FieldOccupiedMsSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOccupiedMsSum(v)
+		return nil
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNonWhitelistedUaCount(v)
+		return nil
+	case usageriskrollup.FieldComputedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetComputedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRollup field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UsageRiskRollupMutation) AddedFields() []string {
+	var fields []string
+	if m.adduser_id != nil {
+		fields = append(fields, usageriskrollup.FieldUserID)
+	}
+	if m.addgroup_id != nil {
+		fields = append(fields, usageriskrollup.FieldGroupID)
+	}
+	if m.addrequest_count != nil {
+		fields = append(fields, usageriskrollup.FieldRequestCount)
+	}
+	if m.addinput_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldInputTokensSum)
+	}
+	if m.addoutput_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldOutputTokensSum)
+	}
+	if m.addcache_read_tokens_sum != nil {
+		fields = append(fields, usageriskrollup.FieldCacheReadTokensSum)
+	}
+	if m.addcost_usd_sum != nil {
+		fields = append(fields, usageriskrollup.FieldCostUsdSum)
+	}
+	if m.addoccupied_ms_sum != nil {
+		fields = append(fields, usageriskrollup.FieldOccupiedMsSum)
+	}
+	if m.addnon_whitelisted_ua_count != nil {
+		fields = append(fields, usageriskrollup.FieldNonWhitelistedUaCount)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UsageRiskRollupMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		return m.AddedUserID()
+	case usageriskrollup.FieldGroupID:
+		return m.AddedGroupID()
+	case usageriskrollup.FieldRequestCount:
+		return m.AddedRequestCount()
+	case usageriskrollup.FieldInputTokensSum:
+		return m.AddedInputTokensSum()
+	case usageriskrollup.FieldOutputTokensSum:
+		return m.AddedOutputTokensSum()
+	case usageriskrollup.FieldCacheReadTokensSum:
+		return m.AddedCacheReadTokensSum()
+	case usageriskrollup.FieldCostUsdSum:
+		return m.AddedCostUsdSum()
+	case usageriskrollup.FieldOccupiedMsSum:
+		return m.AddedOccupiedMsSum()
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		return m.AddedNonWhitelistedUaCount()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskRollupMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUserID(v)
+		return nil
+	case usageriskrollup.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGroupID(v)
+		return nil
+	case usageriskrollup.FieldRequestCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRequestCount(v)
+		return nil
+	case usageriskrollup.FieldInputTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddInputTokensSum(v)
+		return nil
+	case usageriskrollup.FieldOutputTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOutputTokensSum(v)
+		return nil
+	case usageriskrollup.FieldCacheReadTokensSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCacheReadTokensSum(v)
+		return nil
+	case usageriskrollup.FieldCostUsdSum:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCostUsdSum(v)
+		return nil
+	case usageriskrollup.FieldOccupiedMsSum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOccupiedMsSum(v)
+		return nil
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddNonWhitelistedUaCount(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRollup numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UsageRiskRollupMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UsageRiskRollupMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UsageRiskRollupMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown UsageRiskRollup nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UsageRiskRollupMutation) ResetField(name string) error {
+	switch name {
+	case usageriskrollup.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case usageriskrollup.FieldGroupID:
+		m.ResetGroupID()
+		return nil
+	case usageriskrollup.FieldBucketHour:
+		m.ResetBucketHour()
+		return nil
+	case usageriskrollup.FieldRequestCount:
+		m.ResetRequestCount()
+		return nil
+	case usageriskrollup.FieldInputTokensSum:
+		m.ResetInputTokensSum()
+		return nil
+	case usageriskrollup.FieldOutputTokensSum:
+		m.ResetOutputTokensSum()
+		return nil
+	case usageriskrollup.FieldCacheReadTokensSum:
+		m.ResetCacheReadTokensSum()
+		return nil
+	case usageriskrollup.FieldCostUsdSum:
+		m.ResetCostUsdSum()
+		return nil
+	case usageriskrollup.FieldOccupiedMsSum:
+		m.ResetOccupiedMsSum()
+		return nil
+	case usageriskrollup.FieldNonWhitelistedUaCount:
+		m.ResetNonWhitelistedUaCount()
+		return nil
+	case usageriskrollup.FieldComputedAt:
+		m.ResetComputedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRollup field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UsageRiskRollupMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UsageRiskRollupMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UsageRiskRollupMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UsageRiskRollupMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UsageRiskRollupMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UsageRiskRollupMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UsageRiskRollupMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskRollup unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UsageRiskRollupMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskRollup edge %s", name)
+}
+
+// UsageRiskRunMutation represents an operation that mutates the UsageRiskRun nodes in the graph.
+type UsageRiskRunMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *int64
+	run_at                  *time.Time
+	window_start            *time.Time
+	window_end              *time.Time
+	candidates_total        *int
+	addcandidates_total     *int
+	batches_done            *int
+	addbatches_done         *int
+	batches_failed          *int
+	addbatches_failed       *int
+	failed_batches          *jsontext.Value
+	appendfailed_batches    jsontext.Value
+	budget_exhausted        *bool
+	recon_cursor_date       *time.Time
+	recon_batch_offset      *int
+	addrecon_batch_offset   *int
+	recon_batches_done      *int
+	addrecon_batches_done   *int
+	consecutive_partials    *int
+	addconsecutive_partials *int
+	policy_version          *int64
+	addpolicy_version       *int64
+	r1_reeval_pending       *bool
+	policy_snapshot         *jsontext.Value
+	appendpolicy_snapshot   jsontext.Value
+	history_covered         *bool
+	finished_at             *time.Time
+	failure_stage           *string
+	status                  *string
+	clearedFields           map[string]struct{}
+	done                    bool
+	oldValue                func(context.Context) (*UsageRiskRun, error)
+	predicates              []predicate.UsageRiskRun
+}
+
+var _ ent.Mutation = (*UsageRiskRunMutation)(nil)
+
+// usageriskrunOption allows management of the mutation configuration using functional options.
+type usageriskrunOption func(*UsageRiskRunMutation)
+
+// newUsageRiskRunMutation creates new mutation for the UsageRiskRun entity.
+func newUsageRiskRunMutation(c config, op Op, opts ...usageriskrunOption) *UsageRiskRunMutation {
+	m := &UsageRiskRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUsageRiskRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUsageRiskRunID sets the ID field of the mutation.
+func withUsageRiskRunID(id int64) usageriskrunOption {
+	return func(m *UsageRiskRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UsageRiskRun
+		)
+		m.oldValue = func(ctx context.Context) (*UsageRiskRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UsageRiskRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUsageRiskRun sets the old UsageRiskRun of the mutation.
+func withUsageRiskRun(node *UsageRiskRun) usageriskrunOption {
+	return func(m *UsageRiskRunMutation) {
+		m.oldValue = func(context.Context) (*UsageRiskRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UsageRiskRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UsageRiskRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UsageRiskRun entities.
+func (m *UsageRiskRunMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UsageRiskRunMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UsageRiskRunMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UsageRiskRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetRunAt sets the "run_at" field.
+func (m *UsageRiskRunMutation) SetRunAt(t time.Time) {
+	m.run_at = &t
+}
+
+// RunAt returns the value of the "run_at" field in the mutation.
+func (m *UsageRiskRunMutation) RunAt() (r time.Time, exists bool) {
+	v := m.run_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunAt returns the old "run_at" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldRunAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunAt: %w", err)
+	}
+	return oldValue.RunAt, nil
+}
+
+// ResetRunAt resets all changes to the "run_at" field.
+func (m *UsageRiskRunMutation) ResetRunAt() {
+	m.run_at = nil
+}
+
+// SetWindowStart sets the "window_start" field.
+func (m *UsageRiskRunMutation) SetWindowStart(t time.Time) {
+	m.window_start = &t
+}
+
+// WindowStart returns the value of the "window_start" field in the mutation.
+func (m *UsageRiskRunMutation) WindowStart() (r time.Time, exists bool) {
+	v := m.window_start
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowStart returns the old "window_start" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldWindowStart(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowStart is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowStart requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowStart: %w", err)
+	}
+	return oldValue.WindowStart, nil
+}
+
+// ResetWindowStart resets all changes to the "window_start" field.
+func (m *UsageRiskRunMutation) ResetWindowStart() {
+	m.window_start = nil
+}
+
+// SetWindowEnd sets the "window_end" field.
+func (m *UsageRiskRunMutation) SetWindowEnd(t time.Time) {
+	m.window_end = &t
+}
+
+// WindowEnd returns the value of the "window_end" field in the mutation.
+func (m *UsageRiskRunMutation) WindowEnd() (r time.Time, exists bool) {
+	v := m.window_end
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowEnd returns the old "window_end" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldWindowEnd(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowEnd is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowEnd requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowEnd: %w", err)
+	}
+	return oldValue.WindowEnd, nil
+}
+
+// ResetWindowEnd resets all changes to the "window_end" field.
+func (m *UsageRiskRunMutation) ResetWindowEnd() {
+	m.window_end = nil
+}
+
+// SetCandidatesTotal sets the "candidates_total" field.
+func (m *UsageRiskRunMutation) SetCandidatesTotal(i int) {
+	m.candidates_total = &i
+	m.addcandidates_total = nil
+}
+
+// CandidatesTotal returns the value of the "candidates_total" field in the mutation.
+func (m *UsageRiskRunMutation) CandidatesTotal() (r int, exists bool) {
+	v := m.candidates_total
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCandidatesTotal returns the old "candidates_total" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldCandidatesTotal(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCandidatesTotal is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCandidatesTotal requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCandidatesTotal: %w", err)
+	}
+	return oldValue.CandidatesTotal, nil
+}
+
+// AddCandidatesTotal adds i to the "candidates_total" field.
+func (m *UsageRiskRunMutation) AddCandidatesTotal(i int) {
+	if m.addcandidates_total != nil {
+		*m.addcandidates_total += i
+	} else {
+		m.addcandidates_total = &i
+	}
+}
+
+// AddedCandidatesTotal returns the value that was added to the "candidates_total" field in this mutation.
+func (m *UsageRiskRunMutation) AddedCandidatesTotal() (r int, exists bool) {
+	v := m.addcandidates_total
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCandidatesTotal resets all changes to the "candidates_total" field.
+func (m *UsageRiskRunMutation) ResetCandidatesTotal() {
+	m.candidates_total = nil
+	m.addcandidates_total = nil
+}
+
+// SetBatchesDone sets the "batches_done" field.
+func (m *UsageRiskRunMutation) SetBatchesDone(i int) {
+	m.batches_done = &i
+	m.addbatches_done = nil
+}
+
+// BatchesDone returns the value of the "batches_done" field in the mutation.
+func (m *UsageRiskRunMutation) BatchesDone() (r int, exists bool) {
+	v := m.batches_done
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchesDone returns the old "batches_done" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldBatchesDone(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchesDone is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchesDone requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchesDone: %w", err)
+	}
+	return oldValue.BatchesDone, nil
+}
+
+// AddBatchesDone adds i to the "batches_done" field.
+func (m *UsageRiskRunMutation) AddBatchesDone(i int) {
+	if m.addbatches_done != nil {
+		*m.addbatches_done += i
+	} else {
+		m.addbatches_done = &i
+	}
+}
+
+// AddedBatchesDone returns the value that was added to the "batches_done" field in this mutation.
+func (m *UsageRiskRunMutation) AddedBatchesDone() (r int, exists bool) {
+	v := m.addbatches_done
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetBatchesDone resets all changes to the "batches_done" field.
+func (m *UsageRiskRunMutation) ResetBatchesDone() {
+	m.batches_done = nil
+	m.addbatches_done = nil
+}
+
+// SetBatchesFailed sets the "batches_failed" field.
+func (m *UsageRiskRunMutation) SetBatchesFailed(i int) {
+	m.batches_failed = &i
+	m.addbatches_failed = nil
+}
+
+// BatchesFailed returns the value of the "batches_failed" field in the mutation.
+func (m *UsageRiskRunMutation) BatchesFailed() (r int, exists bool) {
+	v := m.batches_failed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBatchesFailed returns the old "batches_failed" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldBatchesFailed(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBatchesFailed is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBatchesFailed requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBatchesFailed: %w", err)
+	}
+	return oldValue.BatchesFailed, nil
+}
+
+// AddBatchesFailed adds i to the "batches_failed" field.
+func (m *UsageRiskRunMutation) AddBatchesFailed(i int) {
+	if m.addbatches_failed != nil {
+		*m.addbatches_failed += i
+	} else {
+		m.addbatches_failed = &i
+	}
+}
+
+// AddedBatchesFailed returns the value that was added to the "batches_failed" field in this mutation.
+func (m *UsageRiskRunMutation) AddedBatchesFailed() (r int, exists bool) {
+	v := m.addbatches_failed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetBatchesFailed resets all changes to the "batches_failed" field.
+func (m *UsageRiskRunMutation) ResetBatchesFailed() {
+	m.batches_failed = nil
+	m.addbatches_failed = nil
+}
+
+// SetFailedBatches sets the "failed_batches" field.
+func (m *UsageRiskRunMutation) SetFailedBatches(j jsontext.Value) {
+	m.failed_batches = &j
+	m.appendfailed_batches = nil
+}
+
+// FailedBatches returns the value of the "failed_batches" field in the mutation.
+func (m *UsageRiskRunMutation) FailedBatches() (r jsontext.Value, exists bool) {
+	v := m.failed_batches
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFailedBatches returns the old "failed_batches" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldFailedBatches(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFailedBatches is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFailedBatches requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFailedBatches: %w", err)
+	}
+	return oldValue.FailedBatches, nil
+}
+
+// AppendFailedBatches adds j to the "failed_batches" field.
+func (m *UsageRiskRunMutation) AppendFailedBatches(j jsontext.Value) {
+	m.appendfailed_batches = append(m.appendfailed_batches, j...)
+}
+
+// AppendedFailedBatches returns the list of values that were appended to the "failed_batches" field in this mutation.
+func (m *UsageRiskRunMutation) AppendedFailedBatches() (jsontext.Value, bool) {
+	if len(m.appendfailed_batches) == 0 {
+		return nil, false
+	}
+	return m.appendfailed_batches, true
+}
+
+// ResetFailedBatches resets all changes to the "failed_batches" field.
+func (m *UsageRiskRunMutation) ResetFailedBatches() {
+	m.failed_batches = nil
+	m.appendfailed_batches = nil
+}
+
+// SetBudgetExhausted sets the "budget_exhausted" field.
+func (m *UsageRiskRunMutation) SetBudgetExhausted(b bool) {
+	m.budget_exhausted = &b
+}
+
+// BudgetExhausted returns the value of the "budget_exhausted" field in the mutation.
+func (m *UsageRiskRunMutation) BudgetExhausted() (r bool, exists bool) {
+	v := m.budget_exhausted
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBudgetExhausted returns the old "budget_exhausted" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldBudgetExhausted(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBudgetExhausted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBudgetExhausted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBudgetExhausted: %w", err)
+	}
+	return oldValue.BudgetExhausted, nil
+}
+
+// ResetBudgetExhausted resets all changes to the "budget_exhausted" field.
+func (m *UsageRiskRunMutation) ResetBudgetExhausted() {
+	m.budget_exhausted = nil
+}
+
+// SetReconCursorDate sets the "recon_cursor_date" field.
+func (m *UsageRiskRunMutation) SetReconCursorDate(t time.Time) {
+	m.recon_cursor_date = &t
+}
+
+// ReconCursorDate returns the value of the "recon_cursor_date" field in the mutation.
+func (m *UsageRiskRunMutation) ReconCursorDate() (r time.Time, exists bool) {
+	v := m.recon_cursor_date
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReconCursorDate returns the old "recon_cursor_date" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldReconCursorDate(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReconCursorDate is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReconCursorDate requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReconCursorDate: %w", err)
+	}
+	return oldValue.ReconCursorDate, nil
+}
+
+// ClearReconCursorDate clears the value of the "recon_cursor_date" field.
+func (m *UsageRiskRunMutation) ClearReconCursorDate() {
+	m.recon_cursor_date = nil
+	m.clearedFields[usageriskrun.FieldReconCursorDate] = struct{}{}
+}
+
+// ReconCursorDateCleared returns if the "recon_cursor_date" field was cleared in this mutation.
+func (m *UsageRiskRunMutation) ReconCursorDateCleared() bool {
+	_, ok := m.clearedFields[usageriskrun.FieldReconCursorDate]
+	return ok
+}
+
+// ResetReconCursorDate resets all changes to the "recon_cursor_date" field.
+func (m *UsageRiskRunMutation) ResetReconCursorDate() {
+	m.recon_cursor_date = nil
+	delete(m.clearedFields, usageriskrun.FieldReconCursorDate)
+}
+
+// SetReconBatchOffset sets the "recon_batch_offset" field.
+func (m *UsageRiskRunMutation) SetReconBatchOffset(i int) {
+	m.recon_batch_offset = &i
+	m.addrecon_batch_offset = nil
+}
+
+// ReconBatchOffset returns the value of the "recon_batch_offset" field in the mutation.
+func (m *UsageRiskRunMutation) ReconBatchOffset() (r int, exists bool) {
+	v := m.recon_batch_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReconBatchOffset returns the old "recon_batch_offset" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldReconBatchOffset(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReconBatchOffset is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReconBatchOffset requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReconBatchOffset: %w", err)
+	}
+	return oldValue.ReconBatchOffset, nil
+}
+
+// AddReconBatchOffset adds i to the "recon_batch_offset" field.
+func (m *UsageRiskRunMutation) AddReconBatchOffset(i int) {
+	if m.addrecon_batch_offset != nil {
+		*m.addrecon_batch_offset += i
+	} else {
+		m.addrecon_batch_offset = &i
+	}
+}
+
+// AddedReconBatchOffset returns the value that was added to the "recon_batch_offset" field in this mutation.
+func (m *UsageRiskRunMutation) AddedReconBatchOffset() (r int, exists bool) {
+	v := m.addrecon_batch_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearReconBatchOffset clears the value of the "recon_batch_offset" field.
+func (m *UsageRiskRunMutation) ClearReconBatchOffset() {
+	m.recon_batch_offset = nil
+	m.addrecon_batch_offset = nil
+	m.clearedFields[usageriskrun.FieldReconBatchOffset] = struct{}{}
+}
+
+// ReconBatchOffsetCleared returns if the "recon_batch_offset" field was cleared in this mutation.
+func (m *UsageRiskRunMutation) ReconBatchOffsetCleared() bool {
+	_, ok := m.clearedFields[usageriskrun.FieldReconBatchOffset]
+	return ok
+}
+
+// ResetReconBatchOffset resets all changes to the "recon_batch_offset" field.
+func (m *UsageRiskRunMutation) ResetReconBatchOffset() {
+	m.recon_batch_offset = nil
+	m.addrecon_batch_offset = nil
+	delete(m.clearedFields, usageriskrun.FieldReconBatchOffset)
+}
+
+// SetReconBatchesDone sets the "recon_batches_done" field.
+func (m *UsageRiskRunMutation) SetReconBatchesDone(i int) {
+	m.recon_batches_done = &i
+	m.addrecon_batches_done = nil
+}
+
+// ReconBatchesDone returns the value of the "recon_batches_done" field in the mutation.
+func (m *UsageRiskRunMutation) ReconBatchesDone() (r int, exists bool) {
+	v := m.recon_batches_done
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReconBatchesDone returns the old "recon_batches_done" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldReconBatchesDone(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReconBatchesDone is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReconBatchesDone requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReconBatchesDone: %w", err)
+	}
+	return oldValue.ReconBatchesDone, nil
+}
+
+// AddReconBatchesDone adds i to the "recon_batches_done" field.
+func (m *UsageRiskRunMutation) AddReconBatchesDone(i int) {
+	if m.addrecon_batches_done != nil {
+		*m.addrecon_batches_done += i
+	} else {
+		m.addrecon_batches_done = &i
+	}
+}
+
+// AddedReconBatchesDone returns the value that was added to the "recon_batches_done" field in this mutation.
+func (m *UsageRiskRunMutation) AddedReconBatchesDone() (r int, exists bool) {
+	v := m.addrecon_batches_done
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetReconBatchesDone resets all changes to the "recon_batches_done" field.
+func (m *UsageRiskRunMutation) ResetReconBatchesDone() {
+	m.recon_batches_done = nil
+	m.addrecon_batches_done = nil
+}
+
+// SetConsecutivePartials sets the "consecutive_partials" field.
+func (m *UsageRiskRunMutation) SetConsecutivePartials(i int) {
+	m.consecutive_partials = &i
+	m.addconsecutive_partials = nil
+}
+
+// ConsecutivePartials returns the value of the "consecutive_partials" field in the mutation.
+func (m *UsageRiskRunMutation) ConsecutivePartials() (r int, exists bool) {
+	v := m.consecutive_partials
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConsecutivePartials returns the old "consecutive_partials" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldConsecutivePartials(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConsecutivePartials is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConsecutivePartials requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConsecutivePartials: %w", err)
+	}
+	return oldValue.ConsecutivePartials, nil
+}
+
+// AddConsecutivePartials adds i to the "consecutive_partials" field.
+func (m *UsageRiskRunMutation) AddConsecutivePartials(i int) {
+	if m.addconsecutive_partials != nil {
+		*m.addconsecutive_partials += i
+	} else {
+		m.addconsecutive_partials = &i
+	}
+}
+
+// AddedConsecutivePartials returns the value that was added to the "consecutive_partials" field in this mutation.
+func (m *UsageRiskRunMutation) AddedConsecutivePartials() (r int, exists bool) {
+	v := m.addconsecutive_partials
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetConsecutivePartials resets all changes to the "consecutive_partials" field.
+func (m *UsageRiskRunMutation) ResetConsecutivePartials() {
+	m.consecutive_partials = nil
+	m.addconsecutive_partials = nil
+}
+
+// SetPolicyVersion sets the "policy_version" field.
+func (m *UsageRiskRunMutation) SetPolicyVersion(i int64) {
+	m.policy_version = &i
+	m.addpolicy_version = nil
+}
+
+// PolicyVersion returns the value of the "policy_version" field in the mutation.
+func (m *UsageRiskRunMutation) PolicyVersion() (r int64, exists bool) {
+	v := m.policy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyVersion returns the old "policy_version" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldPolicyVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyVersion: %w", err)
+	}
+	return oldValue.PolicyVersion, nil
+}
+
+// AddPolicyVersion adds i to the "policy_version" field.
+func (m *UsageRiskRunMutation) AddPolicyVersion(i int64) {
+	if m.addpolicy_version != nil {
+		*m.addpolicy_version += i
+	} else {
+		m.addpolicy_version = &i
+	}
+}
+
+// AddedPolicyVersion returns the value that was added to the "policy_version" field in this mutation.
+func (m *UsageRiskRunMutation) AddedPolicyVersion() (r int64, exists bool) {
+	v := m.addpolicy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPolicyVersion resets all changes to the "policy_version" field.
+func (m *UsageRiskRunMutation) ResetPolicyVersion() {
+	m.policy_version = nil
+	m.addpolicy_version = nil
+}
+
+// SetR1ReevalPending sets the "r1_reeval_pending" field.
+func (m *UsageRiskRunMutation) SetR1ReevalPending(b bool) {
+	m.r1_reeval_pending = &b
+}
+
+// R1ReevalPending returns the value of the "r1_reeval_pending" field in the mutation.
+func (m *UsageRiskRunMutation) R1ReevalPending() (r bool, exists bool) {
+	v := m.r1_reeval_pending
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldR1ReevalPending returns the old "r1_reeval_pending" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldR1ReevalPending(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldR1ReevalPending is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldR1ReevalPending requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldR1ReevalPending: %w", err)
+	}
+	return oldValue.R1ReevalPending, nil
+}
+
+// ResetR1ReevalPending resets all changes to the "r1_reeval_pending" field.
+func (m *UsageRiskRunMutation) ResetR1ReevalPending() {
+	m.r1_reeval_pending = nil
+}
+
+// SetPolicySnapshot sets the "policy_snapshot" field.
+func (m *UsageRiskRunMutation) SetPolicySnapshot(j jsontext.Value) {
+	m.policy_snapshot = &j
+	m.appendpolicy_snapshot = nil
+}
+
+// PolicySnapshot returns the value of the "policy_snapshot" field in the mutation.
+func (m *UsageRiskRunMutation) PolicySnapshot() (r jsontext.Value, exists bool) {
+	v := m.policy_snapshot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicySnapshot returns the old "policy_snapshot" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldPolicySnapshot(ctx context.Context) (v jsontext.Value, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicySnapshot is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicySnapshot requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicySnapshot: %w", err)
+	}
+	return oldValue.PolicySnapshot, nil
+}
+
+// AppendPolicySnapshot adds j to the "policy_snapshot" field.
+func (m *UsageRiskRunMutation) AppendPolicySnapshot(j jsontext.Value) {
+	m.appendpolicy_snapshot = append(m.appendpolicy_snapshot, j...)
+}
+
+// AppendedPolicySnapshot returns the list of values that were appended to the "policy_snapshot" field in this mutation.
+func (m *UsageRiskRunMutation) AppendedPolicySnapshot() (jsontext.Value, bool) {
+	if len(m.appendpolicy_snapshot) == 0 {
+		return nil, false
+	}
+	return m.appendpolicy_snapshot, true
+}
+
+// ResetPolicySnapshot resets all changes to the "policy_snapshot" field.
+func (m *UsageRiskRunMutation) ResetPolicySnapshot() {
+	m.policy_snapshot = nil
+	m.appendpolicy_snapshot = nil
+}
+
+// SetHistoryCovered sets the "history_covered" field.
+func (m *UsageRiskRunMutation) SetHistoryCovered(b bool) {
+	m.history_covered = &b
+}
+
+// HistoryCovered returns the value of the "history_covered" field in the mutation.
+func (m *UsageRiskRunMutation) HistoryCovered() (r bool, exists bool) {
+	v := m.history_covered
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHistoryCovered returns the old "history_covered" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldHistoryCovered(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHistoryCovered is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHistoryCovered requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHistoryCovered: %w", err)
+	}
+	return oldValue.HistoryCovered, nil
+}
+
+// ResetHistoryCovered resets all changes to the "history_covered" field.
+func (m *UsageRiskRunMutation) ResetHistoryCovered() {
+	m.history_covered = nil
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *UsageRiskRunMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *UsageRiskRunMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldFinishedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ClearFinishedAt clears the value of the "finished_at" field.
+func (m *UsageRiskRunMutation) ClearFinishedAt() {
+	m.finished_at = nil
+	m.clearedFields[usageriskrun.FieldFinishedAt] = struct{}{}
+}
+
+// FinishedAtCleared returns if the "finished_at" field was cleared in this mutation.
+func (m *UsageRiskRunMutation) FinishedAtCleared() bool {
+	_, ok := m.clearedFields[usageriskrun.FieldFinishedAt]
+	return ok
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *UsageRiskRunMutation) ResetFinishedAt() {
+	m.finished_at = nil
+	delete(m.clearedFields, usageriskrun.FieldFinishedAt)
+}
+
+// SetFailureStage sets the "failure_stage" field.
+func (m *UsageRiskRunMutation) SetFailureStage(s string) {
+	m.failure_stage = &s
+}
+
+// FailureStage returns the value of the "failure_stage" field in the mutation.
+func (m *UsageRiskRunMutation) FailureStage() (r string, exists bool) {
+	v := m.failure_stage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFailureStage returns the old "failure_stage" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldFailureStage(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFailureStage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFailureStage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFailureStage: %w", err)
+	}
+	return oldValue.FailureStage, nil
+}
+
+// ClearFailureStage clears the value of the "failure_stage" field.
+func (m *UsageRiskRunMutation) ClearFailureStage() {
+	m.failure_stage = nil
+	m.clearedFields[usageriskrun.FieldFailureStage] = struct{}{}
+}
+
+// FailureStageCleared returns if the "failure_stage" field was cleared in this mutation.
+func (m *UsageRiskRunMutation) FailureStageCleared() bool {
+	_, ok := m.clearedFields[usageriskrun.FieldFailureStage]
+	return ok
+}
+
+// ResetFailureStage resets all changes to the "failure_stage" field.
+func (m *UsageRiskRunMutation) ResetFailureStage() {
+	m.failure_stage = nil
+	delete(m.clearedFields, usageriskrun.FieldFailureStage)
+}
+
+// SetStatus sets the "status" field.
+func (m *UsageRiskRunMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *UsageRiskRunMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the UsageRiskRun entity.
+// If the UsageRiskRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageRiskRunMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *UsageRiskRunMutation) ResetStatus() {
+	m.status = nil
+}
+
+// Where appends a list predicates to the UsageRiskRunMutation builder.
+func (m *UsageRiskRunMutation) Where(ps ...predicate.UsageRiskRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UsageRiskRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UsageRiskRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UsageRiskRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UsageRiskRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UsageRiskRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UsageRiskRun).
+func (m *UsageRiskRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UsageRiskRunMutation) Fields() []string {
+	fields := make([]string, 0, 19)
+	if m.run_at != nil {
+		fields = append(fields, usageriskrun.FieldRunAt)
+	}
+	if m.window_start != nil {
+		fields = append(fields, usageriskrun.FieldWindowStart)
+	}
+	if m.window_end != nil {
+		fields = append(fields, usageriskrun.FieldWindowEnd)
+	}
+	if m.candidates_total != nil {
+		fields = append(fields, usageriskrun.FieldCandidatesTotal)
+	}
+	if m.batches_done != nil {
+		fields = append(fields, usageriskrun.FieldBatchesDone)
+	}
+	if m.batches_failed != nil {
+		fields = append(fields, usageriskrun.FieldBatchesFailed)
+	}
+	if m.failed_batches != nil {
+		fields = append(fields, usageriskrun.FieldFailedBatches)
+	}
+	if m.budget_exhausted != nil {
+		fields = append(fields, usageriskrun.FieldBudgetExhausted)
+	}
+	if m.recon_cursor_date != nil {
+		fields = append(fields, usageriskrun.FieldReconCursorDate)
+	}
+	if m.recon_batch_offset != nil {
+		fields = append(fields, usageriskrun.FieldReconBatchOffset)
+	}
+	if m.recon_batches_done != nil {
+		fields = append(fields, usageriskrun.FieldReconBatchesDone)
+	}
+	if m.consecutive_partials != nil {
+		fields = append(fields, usageriskrun.FieldConsecutivePartials)
+	}
+	if m.policy_version != nil {
+		fields = append(fields, usageriskrun.FieldPolicyVersion)
+	}
+	if m.r1_reeval_pending != nil {
+		fields = append(fields, usageriskrun.FieldR1ReevalPending)
+	}
+	if m.policy_snapshot != nil {
+		fields = append(fields, usageriskrun.FieldPolicySnapshot)
+	}
+	if m.history_covered != nil {
+		fields = append(fields, usageriskrun.FieldHistoryCovered)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, usageriskrun.FieldFinishedAt)
+	}
+	if m.failure_stage != nil {
+		fields = append(fields, usageriskrun.FieldFailureStage)
+	}
+	if m.status != nil {
+		fields = append(fields, usageriskrun.FieldStatus)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UsageRiskRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskrun.FieldRunAt:
+		return m.RunAt()
+	case usageriskrun.FieldWindowStart:
+		return m.WindowStart()
+	case usageriskrun.FieldWindowEnd:
+		return m.WindowEnd()
+	case usageriskrun.FieldCandidatesTotal:
+		return m.CandidatesTotal()
+	case usageriskrun.FieldBatchesDone:
+		return m.BatchesDone()
+	case usageriskrun.FieldBatchesFailed:
+		return m.BatchesFailed()
+	case usageriskrun.FieldFailedBatches:
+		return m.FailedBatches()
+	case usageriskrun.FieldBudgetExhausted:
+		return m.BudgetExhausted()
+	case usageriskrun.FieldReconCursorDate:
+		return m.ReconCursorDate()
+	case usageriskrun.FieldReconBatchOffset:
+		return m.ReconBatchOffset()
+	case usageriskrun.FieldReconBatchesDone:
+		return m.ReconBatchesDone()
+	case usageriskrun.FieldConsecutivePartials:
+		return m.ConsecutivePartials()
+	case usageriskrun.FieldPolicyVersion:
+		return m.PolicyVersion()
+	case usageriskrun.FieldR1ReevalPending:
+		return m.R1ReevalPending()
+	case usageriskrun.FieldPolicySnapshot:
+		return m.PolicySnapshot()
+	case usageriskrun.FieldHistoryCovered:
+		return m.HistoryCovered()
+	case usageriskrun.FieldFinishedAt:
+		return m.FinishedAt()
+	case usageriskrun.FieldFailureStage:
+		return m.FailureStage()
+	case usageriskrun.FieldStatus:
+		return m.Status()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UsageRiskRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case usageriskrun.FieldRunAt:
+		return m.OldRunAt(ctx)
+	case usageriskrun.FieldWindowStart:
+		return m.OldWindowStart(ctx)
+	case usageriskrun.FieldWindowEnd:
+		return m.OldWindowEnd(ctx)
+	case usageriskrun.FieldCandidatesTotal:
+		return m.OldCandidatesTotal(ctx)
+	case usageriskrun.FieldBatchesDone:
+		return m.OldBatchesDone(ctx)
+	case usageriskrun.FieldBatchesFailed:
+		return m.OldBatchesFailed(ctx)
+	case usageriskrun.FieldFailedBatches:
+		return m.OldFailedBatches(ctx)
+	case usageriskrun.FieldBudgetExhausted:
+		return m.OldBudgetExhausted(ctx)
+	case usageriskrun.FieldReconCursorDate:
+		return m.OldReconCursorDate(ctx)
+	case usageriskrun.FieldReconBatchOffset:
+		return m.OldReconBatchOffset(ctx)
+	case usageriskrun.FieldReconBatchesDone:
+		return m.OldReconBatchesDone(ctx)
+	case usageriskrun.FieldConsecutivePartials:
+		return m.OldConsecutivePartials(ctx)
+	case usageriskrun.FieldPolicyVersion:
+		return m.OldPolicyVersion(ctx)
+	case usageriskrun.FieldR1ReevalPending:
+		return m.OldR1ReevalPending(ctx)
+	case usageriskrun.FieldPolicySnapshot:
+		return m.OldPolicySnapshot(ctx)
+	case usageriskrun.FieldHistoryCovered:
+		return m.OldHistoryCovered(ctx)
+	case usageriskrun.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case usageriskrun.FieldFailureStage:
+		return m.OldFailureStage(ctx)
+	case usageriskrun.FieldStatus:
+		return m.OldStatus(ctx)
+	}
+	return nil, fmt.Errorf("unknown UsageRiskRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case usageriskrun.FieldRunAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunAt(v)
+		return nil
+	case usageriskrun.FieldWindowStart:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowStart(v)
+		return nil
+	case usageriskrun.FieldWindowEnd:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowEnd(v)
+		return nil
+	case usageriskrun.FieldCandidatesTotal:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCandidatesTotal(v)
+		return nil
+	case usageriskrun.FieldBatchesDone:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchesDone(v)
+		return nil
+	case usageriskrun.FieldBatchesFailed:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBatchesFailed(v)
+		return nil
+	case usageriskrun.FieldFailedBatches:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFailedBatches(v)
+		return nil
+	case usageriskrun.FieldBudgetExhausted:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBudgetExhausted(v)
+		return nil
+	case usageriskrun.FieldReconCursorDate:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReconCursorDate(v)
+		return nil
+	case usageriskrun.FieldReconBatchOffset:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReconBatchOffset(v)
+		return nil
+	case usageriskrun.FieldReconBatchesDone:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReconBatchesDone(v)
+		return nil
+	case usageriskrun.FieldConsecutivePartials:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConsecutivePartials(v)
+		return nil
+	case usageriskrun.FieldPolicyVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyVersion(v)
+		return nil
+	case usageriskrun.FieldR1ReevalPending:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetR1ReevalPending(v)
+		return nil
+	case usageriskrun.FieldPolicySnapshot:
+		v, ok := value.(jsontext.Value)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicySnapshot(v)
+		return nil
+	case usageriskrun.FieldHistoryCovered:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHistoryCovered(v)
+		return nil
+	case usageriskrun.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case usageriskrun.FieldFailureStage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFailureStage(v)
+		return nil
+	case usageriskrun.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UsageRiskRunMutation) AddedFields() []string {
+	var fields []string
+	if m.addcandidates_total != nil {
+		fields = append(fields, usageriskrun.FieldCandidatesTotal)
+	}
+	if m.addbatches_done != nil {
+		fields = append(fields, usageriskrun.FieldBatchesDone)
+	}
+	if m.addbatches_failed != nil {
+		fields = append(fields, usageriskrun.FieldBatchesFailed)
+	}
+	if m.addrecon_batch_offset != nil {
+		fields = append(fields, usageriskrun.FieldReconBatchOffset)
+	}
+	if m.addrecon_batches_done != nil {
+		fields = append(fields, usageriskrun.FieldReconBatchesDone)
+	}
+	if m.addconsecutive_partials != nil {
+		fields = append(fields, usageriskrun.FieldConsecutivePartials)
+	}
+	if m.addpolicy_version != nil {
+		fields = append(fields, usageriskrun.FieldPolicyVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UsageRiskRunMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case usageriskrun.FieldCandidatesTotal:
+		return m.AddedCandidatesTotal()
+	case usageriskrun.FieldBatchesDone:
+		return m.AddedBatchesDone()
+	case usageriskrun.FieldBatchesFailed:
+		return m.AddedBatchesFailed()
+	case usageriskrun.FieldReconBatchOffset:
+		return m.AddedReconBatchOffset()
+	case usageriskrun.FieldReconBatchesDone:
+		return m.AddedReconBatchesDone()
+	case usageriskrun.FieldConsecutivePartials:
+		return m.AddedConsecutivePartials()
+	case usageriskrun.FieldPolicyVersion:
+		return m.AddedPolicyVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageRiskRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case usageriskrun.FieldCandidatesTotal:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCandidatesTotal(v)
+		return nil
+	case usageriskrun.FieldBatchesDone:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBatchesDone(v)
+		return nil
+	case usageriskrun.FieldBatchesFailed:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBatchesFailed(v)
+		return nil
+	case usageriskrun.FieldReconBatchOffset:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReconBatchOffset(v)
+		return nil
+	case usageriskrun.FieldReconBatchesDone:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReconBatchesDone(v)
+		return nil
+	case usageriskrun.FieldConsecutivePartials:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConsecutivePartials(v)
+		return nil
+	case usageriskrun.FieldPolicyVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPolicyVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UsageRiskRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(usageriskrun.FieldReconCursorDate) {
+		fields = append(fields, usageriskrun.FieldReconCursorDate)
+	}
+	if m.FieldCleared(usageriskrun.FieldReconBatchOffset) {
+		fields = append(fields, usageriskrun.FieldReconBatchOffset)
+	}
+	if m.FieldCleared(usageriskrun.FieldFinishedAt) {
+		fields = append(fields, usageriskrun.FieldFinishedAt)
+	}
+	if m.FieldCleared(usageriskrun.FieldFailureStage) {
+		fields = append(fields, usageriskrun.FieldFailureStage)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UsageRiskRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UsageRiskRunMutation) ClearField(name string) error {
+	switch name {
+	case usageriskrun.FieldReconCursorDate:
+		m.ClearReconCursorDate()
+		return nil
+	case usageriskrun.FieldReconBatchOffset:
+		m.ClearReconBatchOffset()
+		return nil
+	case usageriskrun.FieldFinishedAt:
+		m.ClearFinishedAt()
+		return nil
+	case usageriskrun.FieldFailureStage:
+		m.ClearFailureStage()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UsageRiskRunMutation) ResetField(name string) error {
+	switch name {
+	case usageriskrun.FieldRunAt:
+		m.ResetRunAt()
+		return nil
+	case usageriskrun.FieldWindowStart:
+		m.ResetWindowStart()
+		return nil
+	case usageriskrun.FieldWindowEnd:
+		m.ResetWindowEnd()
+		return nil
+	case usageriskrun.FieldCandidatesTotal:
+		m.ResetCandidatesTotal()
+		return nil
+	case usageriskrun.FieldBatchesDone:
+		m.ResetBatchesDone()
+		return nil
+	case usageriskrun.FieldBatchesFailed:
+		m.ResetBatchesFailed()
+		return nil
+	case usageriskrun.FieldFailedBatches:
+		m.ResetFailedBatches()
+		return nil
+	case usageriskrun.FieldBudgetExhausted:
+		m.ResetBudgetExhausted()
+		return nil
+	case usageriskrun.FieldReconCursorDate:
+		m.ResetReconCursorDate()
+		return nil
+	case usageriskrun.FieldReconBatchOffset:
+		m.ResetReconBatchOffset()
+		return nil
+	case usageriskrun.FieldReconBatchesDone:
+		m.ResetReconBatchesDone()
+		return nil
+	case usageriskrun.FieldConsecutivePartials:
+		m.ResetConsecutivePartials()
+		return nil
+	case usageriskrun.FieldPolicyVersion:
+		m.ResetPolicyVersion()
+		return nil
+	case usageriskrun.FieldR1ReevalPending:
+		m.ResetR1ReevalPending()
+		return nil
+	case usageriskrun.FieldPolicySnapshot:
+		m.ResetPolicySnapshot()
+		return nil
+	case usageriskrun.FieldHistoryCovered:
+		m.ResetHistoryCovered()
+		return nil
+	case usageriskrun.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case usageriskrun.FieldFailureStage:
+		m.ResetFailureStage()
+		return nil
+	case usageriskrun.FieldStatus:
+		m.ResetStatus()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageRiskRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UsageRiskRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UsageRiskRunMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UsageRiskRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UsageRiskRunMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UsageRiskRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UsageRiskRunMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UsageRiskRunMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UsageRiskRunMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UsageRiskRun edge %s", name)
 }
 
 // UserMutation represents an operation that mutates the User nodes in the graph.

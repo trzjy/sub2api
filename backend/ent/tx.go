@@ -88,6 +88,12 @@ type Tx struct {
 	UsageCleanupTask *UsageCleanupTaskClient
 	// UsageLog is the client for interacting with the UsageLog builders.
 	UsageLog *UsageLogClient
+	// UsageRiskReport is the client for interacting with the UsageRiskReport builders.
+	UsageRiskReport *UsageRiskReportClient
+	// UsageRiskRollup is the client for interacting with the UsageRiskRollup builders.
+	UsageRiskRollup *UsageRiskRollupClient
+	// UsageRiskRun is the client for interacting with the UsageRiskRun builders.
+	UsageRiskRun *UsageRiskRunClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 	// UserAllowedGroup is the client for interacting with the UserAllowedGroup builders.
@@ -270,6 +276,9 @@ func (tx *Tx) init() {
 	tx.TLSFingerprintProfile = NewTLSFingerprintProfileClient(tx.config)
 	tx.UsageCleanupTask = NewUsageCleanupTaskClient(tx.config)
 	tx.UsageLog = NewUsageLogClient(tx.config)
+	tx.UsageRiskReport = NewUsageRiskReportClient(tx.config)
+	tx.UsageRiskRollup = NewUsageRiskRollupClient(tx.config)
+	tx.UsageRiskRun = NewUsageRiskRunClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAllowedGroup = NewUserAllowedGroupClient(tx.config)
 	tx.UserAttributeDefinition = NewUserAttributeDefinitionClient(tx.config)
