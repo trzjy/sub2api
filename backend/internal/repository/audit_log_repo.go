@@ -122,6 +122,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
 	return err
 }
 
+// InsertTx 在外部事务 tx 上同步写入单条审计（与业务更新同事务落账，方案 §5:91）。
+// 复用 auditLogInsertColumns / auditLogInsertValues / Insert 的同一 INSERT 语句，
+// 仅连接对象由 *sql.DB 换为 *sql.Tx。本方法不提交/回滚事务，由调用方控制。
+func (r *auditLogRepository) InsertTx(ctx context.Context, tx *sql.Tx, log *service.AuditLog) error {
+	if log == nil {
+		return fmt.Errorf("nil audit log")
+	}
+	query := `INSERT INTO audit_logs (` + auditLogInsertColumns + `)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`
+	_, err := tx.ExecContext(ctx, query, auditLogInsertValues(log)...)
+	return err
+}
+
 func buildAuditLogsWhere(filter *service.AuditLogFilter) (string, []any) {
 	clauses := make([]string, 0, 10)
 	args := make([]any, 0, 10)

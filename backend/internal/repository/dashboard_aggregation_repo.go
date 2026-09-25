@@ -230,17 +230,44 @@ func (r *dashboardAggregationRepository) CleanupAggregates(ctx context.Context, 
 	return nil
 }
 
+// CleanupUsageLogs 是既有保留清理入口（截止点计算与行为语义不变）。
+// 删除段走 r.sql（独立的 DB 执行），不在任何外部事务内。
 func (r *dashboardAggregationRepository) CleanupUsageLogs(ctx context.Context, cutoff time.Time) error {
-	isPartitioned, err := r.isUsageLogsPartitioned(ctx)
+	return r.cleanupUsageLogsOnExecutor(ctx, r.sql, cutoff)
+}
+
+// CleanupUsageLogsTx 是 CleanupUsageLogs 的事务参数变体：删除段在调用方传入的
+// *sql.Tx 上执行，使源日志清理能与风险表清理（U3）纳入同一 DB 事务（方案 §6.4/§5）。
+// 截止点计算与既有行为语义不变，仅事务边界被调用方接管。
+func (r *dashboardAggregationRepository) CleanupUsageLogsTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+	return r.cleanupUsageLogsOnExecutor(ctx, tx, cutoff)
+}
+
+// cleanupUsageLogsOnExecutor 是 CleanupUsageLogs / CleanupUsageLogsTx 的统一实现。
+// exec 为 *sql.DB 时退回既有独立执行语义；exec 为 *sql.Tx 时删除段在外部事务内执行，
+// 失败由调用方回滚（保留期协调场景）。截止点计算与既有行为语义不变。
+func (r *dashboardAggregationRepository) cleanupUsageLogsOnExecutor(ctx context.Context, exec sqlExecutor, cutoff time.Time) error {
+	// 事务路径（exec 为 *sql.Tx）的探测/枚举/删除/汇总必须全部在同一事务连接上——
+	// 绕池既破坏「同连接」不变量（探测结果对事务未提交数据不可见虽无影响，但破坏原子性语义），
+	// 又在外借池连接时与事务互锁（MaxOpenConns=1 时事务占住连接后等第二条直至超时死锁）。
+	isPartitioned, err := r.isUsageLogsPartitioned(ctx, exec)
 	if err != nil {
 		return err
 	}
 	if isPartitioned {
-		if err := r.dropUsageLogsPartitions(ctx, cutoff); err != nil {
+		if err := r.dropUsageLogsPartitionsOnExecutor(ctx, exec, cutoff); err != nil {
 			return err
 		}
-	} else if err := r.cleanupUsageLogsBatches(ctx, cutoff); err != nil {
+	} else if err := r.cleanupUsageLogsBatchesOnExecutor(ctx, exec, cutoff); err != nil {
 		return err
+	}
+	// 收尾的分组汇总同步复用同一执行器。事务路径（exec 为 *sql.Tx）直接在同一事务内同步，
+	// 与删除段同连接、同可见性、同原子性（事务内删除未提交时池连接看不到，且汇总状态行锁
+	// 被同事务占用）；同步失败随事务回滚，不得降级为跳过或改走池连接。
+	// 非事务路径（exec 为 *sql.DB 或通用执行器）退回既有独立事务语义
+	// （公共 SyncGroupUsageRollups 自行开启事务），保持既有行为不变（R5-5 已验收）。
+	if _, ok := exec.(*sql.Tx); ok {
+		return r.syncGroupUsageRollupsOnExecutor(ctx, exec, service.GroupUsageTodayStart(r.now()))
 	}
 	return r.SyncGroupUsageRollups(ctx, service.GroupUsageTodayStart(r.now()))
 }
@@ -276,6 +303,70 @@ func (r *dashboardAggregationRepository) cleanupUsageLogsBatches(ctx context.Con
 		affected, err := res.RowsAffected()
 		if err != nil {
 			return err
+		}
+		if affected < usageLogsCleanupBatchSize {
+			return nil
+		}
+	}
+}
+
+// cleanupUsageLogsBatchesOnExecutor 在调用方提供的 executor 上执行源日志分批删除。
+// 当 exec 为 *sql.Tx 时复用 cleanupUsageLogsBatchesInTx（删除段在外部事务内，并就地做
+// 分组用量汇总失效，与既有 DB 路径语义一致）；其余 executor 退回既有 cleanupUsageLogsBatches。
+func (r *dashboardAggregationRepository) cleanupUsageLogsBatchesOnExecutor(ctx context.Context, exec sqlExecutor, cutoff time.Time) error {
+	if tx, ok := exec.(*sql.Tx); ok {
+		return r.cleanupUsageLogsBatchesInTx(ctx, tx, cutoff)
+	}
+	return r.cleanupUsageLogsBatches(ctx, cutoff)
+}
+
+// cleanupUsageLogsBatchesInTx 在外部 *sql.Tx 内分批删除过期 usage_logs，并在每批内
+// 锁定并失效分组用量汇总（与 cleanupUsageLogsBatchWithRollupInvalidation 的语义一致，
+// 但复用调用方的同一事务，保证与风险表清理原子提交/回滚）。
+func (r *dashboardAggregationRepository) cleanupUsageLogsBatchesInTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+	for {
+		if err := lockGroupUsageRollupState(ctx, tx); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `
+			WITH victims AS (
+				SELECT ctid
+				FROM usage_logs
+				WHERE created_at < $1
+				ORDER BY created_at ASC, id ASC
+				LIMIT $2
+			)
+			DELETE FROM usage_logs
+			WHERE ctid IN (SELECT ctid FROM victims)
+			RETURNING created_at
+		`, cutoff.UTC(), usageLogsCleanupBatchSize)
+		if err != nil {
+			return err
+		}
+		var affected int64
+		var earliestDeletedAt time.Time
+		for rows.Next() {
+			var deletedAt time.Time
+			if err := rows.Scan(&deletedAt); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			affected++
+			if earliestDeletedAt.IsZero() || deletedAt.Before(earliestDeletedAt) {
+				earliestDeletedAt = deletedAt
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if affected > 0 {
+			if err := invalidateGroupUsageRollupsAt(ctx, tx, earliestDeletedAt); err != nil {
+				return err
+			}
 		}
 		if affected < usageLogsCleanupBatchSize {
 			return nil
@@ -374,7 +465,7 @@ func (r *dashboardAggregationRepository) CleanupUsageBillingDedup(ctx context.Co
 }
 
 func (r *dashboardAggregationRepository) EnsureUsageLogsPartitions(ctx context.Context, now time.Time) error {
-	isPartitioned, err := r.isUsageLogsPartitioned(ctx)
+	isPartitioned, err := r.isUsageLogsPartitioned(ctx, r.sql)
 	if err != nil || !isPartitioned {
 		return err
 	}
@@ -564,7 +655,9 @@ func (r *dashboardAggregationRepository) upsertDailyAggregates(ctx context.Conte
 	return err
 }
 
-func (r *dashboardAggregationRepository) isUsageLogsPartitioned(ctx context.Context) (bool, error) {
+// isUsageLogsPartitioned 探测 usage_logs 是否分区。exec 由调用方传入：
+// 事务路径必须与删除段同连接（同 *sql.Tx），非事务路径传 r.sql 保持既有语义。
+func (r *dashboardAggregationRepository) isUsageLogsPartitioned(ctx context.Context, exec sqlExecutor) (bool, error) {
 	query := `
 		SELECT EXISTS(
 			SELECT 1
@@ -574,14 +667,22 @@ func (r *dashboardAggregationRepository) isUsageLogsPartitioned(ctx context.Cont
 		)
 	`
 	var partitioned bool
-	if err := scanSingleRow(ctx, r.sql, query, nil, &partitioned); err != nil {
+	if err := scanSingleRow(ctx, exec, query, nil, &partitioned); err != nil {
 		return false, err
 	}
 	return partitioned, nil
 }
 
-func (r *dashboardAggregationRepository) dropUsageLogsPartitions(ctx context.Context, cutoff time.Time) error {
-	rows, err := r.sql.QueryContext(ctx, `
+// usageLogsPartition 描述一个待清理的 usage_logs 子分区。
+type usageLogsPartition struct {
+	name  string
+	month time.Time
+}
+
+// listUsageLogsPartitions 列出所有早于 cutoff 月界的 usage_logs 子分区（只读探测/枚举，
+// 执行器由调用方传入；事务路径必须与删除段同连接）。
+func (r *dashboardAggregationRepository) listUsageLogsPartitions(ctx context.Context, exec sqlExecutor, cutoff time.Time) ([]usageLogsPartition, error) {
+	rows, err := exec.QueryContext(ctx, `
 		SELECT c.relname
 		FROM pg_inherits
 		JOIN pg_class c ON c.oid = pg_inherits.inhrelid
@@ -589,19 +690,15 @@ func (r *dashboardAggregationRepository) dropUsageLogsPartitions(ctx context.Con
 		WHERE p.relname = 'usage_logs'
 	`)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	cutoffMonth := truncateToMonthUTC(cutoff)
-	type usageLogsPartition struct {
-		name  string
-		month time.Time
-	}
 	partitions := make([]usageLogsPartition, 0)
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		if !strings.HasPrefix(name, "usage_logs_") {
 			continue
@@ -617,28 +714,44 @@ func (r *dashboardAggregationRepository) dropUsageLogsPartitions(ctx context.Con
 		}
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
+		return nil, err
 	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-
 	sort.Slice(partitions, func(i, j int) bool {
 		return partitions[i].month.Before(partitions[j].month)
 	})
-	if db, ok := r.sql.(*sql.DB); ok {
+	return partitions, nil
+}
+
+// dropUsageLogsPartitionsOnExecutor 在调用方提供的 executor 上清理过期子分区。
+// exec 为 *sql.Tx 时，每分区的「锁分组汇总态 + 失效分组汇总 + DROP」在同一外部事务内执行
+// （注意 DROP TABLE 在 Postgres 中隐式提交，属分区表固有限制，非保留期协调主路径）；
+// exec 为 *sql.DB 时退回既有 dropUsageLogsPartitionWithRollupInvalidation（各自独立事务）。
+func (r *dashboardAggregationRepository) dropUsageLogsPartitionsOnExecutor(ctx context.Context, exec sqlExecutor, cutoff time.Time) error {
+	partitions, err := r.listUsageLogsPartitions(ctx, exec, cutoff)
+	if err != nil {
+		return err
+	}
+	if tx, ok := exec.(*sql.Tx); ok {
+		for _, partition := range partitions {
+			if err := lockGroupUsageRollupState(ctx, tx); err != nil {
+				return err
+			}
+			if err := invalidateGroupUsageRollupsAt(ctx, tx, partition.month); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", pq.QuoteIdentifier(partition.name))); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if db, ok := exec.(*sql.DB); ok {
 		for _, partition := range partitions {
 			if err := dropUsageLogsPartitionWithRollupInvalidation(ctx, db, partition.name, partition.month); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	for _, partition := range partitions {
-		if _, err := r.sql.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", pq.QuoteIdentifier(partition.name))); err != nil {
-			return err
-		}
 	}
 	return nil
 }

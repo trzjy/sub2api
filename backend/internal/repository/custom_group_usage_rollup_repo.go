@@ -112,6 +112,8 @@ func (r *usageLogRepository) getAllGroupUsageSummaryFromRollups(ctx context.Cont
 }
 
 // SyncGroupUsageRollups 将服务端配置时区今日以前的用量发布为分组日桶。
+// 公共入口签名与既有行为不变：exec 为 *sql.DB 时自行开启独立事务；其余 executor
+// （如事务路径复用的 *sql.Tx）直接委托到 syncGroupUsageRollupsOnExecutor。
 func (r *dashboardAggregationRepository) SyncGroupUsageRollups(ctx context.Context, todayStart time.Time) error {
 	if r == nil || r.sql == nil {
 		return nil
@@ -122,21 +124,25 @@ func (r *dashboardAggregationRepository) SyncGroupUsageRollups(ctx context.Conte
 		if err != nil {
 			return err
 		}
-		txRepo := newDashboardAggregationRepositoryWithSQL(tx)
-		if err := txRepo.syncGroupUsageRollupsInTx(ctx, todayStart); err != nil {
+		if err := r.syncGroupUsageRollupsOnExecutor(ctx, tx, todayStart); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 		return tx.Commit()
 	}
-	return r.syncGroupUsageRollupsInTx(ctx, todayStart)
+	return r.syncGroupUsageRollupsOnExecutor(ctx, r.sql, todayStart)
 }
 
-func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.Context, todayStart time.Time) error {
+// syncGroupUsageRollupsOnExecutor 是 SyncGroupUsageRollups 的 SQL 主体，执行器参数化：
+// exec 为 *sql.Tx 时与调用方事务同连接、同可见性、同原子性（清理保留期场景下复用同一事务，
+// 避免基于未提交删除之外的旧日志同步出错误汇总，也避免汇总状态行锁等待/超时）；
+// exec 为 *sql.DB 时退回独立事务语义。失败由调用方整体回滚，不得降级跳过。
+func (r *dashboardAggregationRepository) syncGroupUsageRollupsOnExecutor(ctx context.Context, exec sqlExecutor, todayStart time.Time) error {
+	todayStart = service.GroupUsageTodayStart(todayStart)
 	var closedBefore string
 	var previousRetainedFrom time.Time
 	var stateTimezoneName string
-	if err := scanSingleRow(ctx, r.sql, `
+	if err := scanSingleRow(ctx, exec, `
 		SELECT closed_before::text, retained_from, timezone_name
 		FROM usage_group_rollup_state
 		WHERE id = 1
@@ -168,7 +174,7 @@ func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.C
 	}
 
 	var earliest sql.NullTime
-	if err := scanSingleRow(ctx, r.sql, "SELECT MIN(created_at) FROM usage_logs", nil, &earliest); err != nil {
+	if err := scanSingleRow(ctx, exec, "SELECT MIN(created_at) FROM usage_logs", nil, &earliest); err != nil {
 		return fmt.Errorf("读取最早用量记录: %w", err)
 	}
 	retainedFrom := todayStart
@@ -189,7 +195,7 @@ func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.C
 		return err
 	}
 
-	if _, err := r.sql.ExecContext(ctx, `
+	if _, err := exec.ExecContext(ctx, `
 		DELETE FROM usage_group_daily_rollups
 		WHERE bucket_date < $1::date
 			OR (bucket_date >= $2::date AND bucket_date < $3::date)
@@ -198,7 +204,7 @@ func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.C
 		return fmt.Errorf("清理分组用量日桶: %w", err)
 	}
 
-	if _, err := r.sql.ExecContext(ctx, `
+	if _, err := exec.ExecContext(ctx, `
 		INSERT INTO usage_group_daily_rollups (bucket_date, group_id, actual_cost, computed_at)
 		SELECT
 			(created_at AT TIME ZONE $3::text)::date AS bucket_date,
@@ -218,7 +224,7 @@ func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.C
 		return fmt.Errorf("重建分组用量日桶: %w", err)
 	}
 
-	if _, err := r.sql.ExecContext(ctx, `
+	if _, err := exec.ExecContext(ctx, `
 		UPDATE usage_group_rollup_state
 		SET closed_before = $1::date,
 			retained_from = $2,
@@ -229,6 +235,12 @@ func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.C
 		return fmt.Errorf("更新分组用量汇总水位: %w", err)
 	}
 	return nil
+}
+
+// syncGroupUsageRollupsInTx 是同步分组用量汇总的既有时事务收尾入口（RecomputeRange 等复用），
+// 委托到执行器参数化实现，保持调用点零改动。
+func (r *dashboardAggregationRepository) syncGroupUsageRollupsInTx(ctx context.Context, todayStart time.Time) error {
+	return r.syncGroupUsageRollupsOnExecutor(ctx, r.sql, todayStart)
 }
 
 func lockGroupUsageRollupState(ctx context.Context, tx *sql.Tx) error {
