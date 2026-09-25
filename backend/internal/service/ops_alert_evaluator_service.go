@@ -455,6 +455,11 @@ func (s *OpsAlertEvaluatorService) computeRuleMetric(
 			return *systemMetrics.MemoryUsagePercent, true
 		}
 		return 0, false
+	case "disk_usage_percent":
+		if systemMetrics != nil && systemMetrics.DiskUsagePercent != nil {
+			return *systemMetrics.DiskUsagePercent, true
+		}
+		return 0, false
 	case "concurrency_queue_depth":
 		if systemMetrics != nil && systemMetrics.ConcurrencyQueueDepth != nil {
 			return float64(*systemMetrics.ConcurrencyQueueDepth), true

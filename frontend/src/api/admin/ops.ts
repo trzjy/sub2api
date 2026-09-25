@@ -253,6 +253,7 @@ export interface OpsSystemMetricsSnapshot {
   memory_used_mb?: number | null
   memory_total_mb?: number | null
   memory_usage_percent?: number | null
+  disk_usage_percent?: number | null
 
   db_ok?: boolean | null
   redis_ok?: boolean | null
@@ -679,6 +680,7 @@ export type MetricType =
   | 'upstream_error_rate'
   | 'cpu_usage_percent'
   | 'memory_usage_percent'
+  | 'disk_usage_percent'
   | 'concurrency_queue_depth'
   | 'group_available_accounts'
   | 'group_available_ratio'

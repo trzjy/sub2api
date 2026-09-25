@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
@@ -341,6 +342,7 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 		MemoryUsedMB:       sys.memoryUsedMB,
 		MemoryTotalMB:      sys.memoryTotalMB,
 		MemoryUsagePercent: sys.memoryUsagePercent,
+		DiskUsagePercent:   sys.diskUsagePercent,
 
 		DBOK:    boolPtr(dbOK),
 		RedisOK: boolPtr(redisOK),
@@ -591,6 +593,7 @@ type opsCollectedSystemStats struct {
 	memoryUsedMB       *int64
 	memoryTotalMB      *int64
 	memoryUsagePercent *float64
+	diskUsagePercent   *float64
 }
 
 func (c *OpsMetricsCollector) collectSystemStats(ctx context.Context) (*opsCollectedSystemStats, error) {
@@ -627,7 +630,35 @@ func (c *OpsMetricsCollector) collectSystemStats(ctx context.Context) (*opsColle
 	}
 	out.memoryUsedMB, out.memoryTotalMB, out.memoryUsagePercent = resolveMemoryStats(cgroupUsed, cgroupTotal, cgroupOK, host)
 
+	// Disk: sample the root partition usage. Inside a container this is the
+	// overlay filesystem backed by the host root partition, which is the same
+	// disk that filled up during the 2026-09-26 incident.
+	out.diskUsagePercent = collectDiskUsagePercent(ctx)
+
 	return out, nil
+}
+
+// collectDiskUsagePercent samples root-partition disk usage via gopsutil.
+// Best-effort: any sampling error yields nil (not persisted).
+func collectDiskUsagePercent(ctx context.Context) *float64 {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	usage, err := disk.UsageWithContext(ctx, "/")
+	if err != nil || usage == nil {
+		return nil
+	}
+	return resolveDiskUsagePercent(usage.Used, usage.Total)
+}
+
+// resolveDiskUsagePercent computes used/total*100 rounded to 1 decimal place.
+// Returns nil when total is unknown (0) to avoid a division by zero.
+func resolveDiskUsagePercent(used, total uint64) *float64 {
+	if total == 0 {
+		return nil
+	}
+	p := roundTo1DP(float64(used) / float64(total) * 100)
+	return &p
 }
 
 // resolveMemoryStats picks a single, self-consistent (used, total, percent)
