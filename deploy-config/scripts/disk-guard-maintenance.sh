@@ -42,7 +42,7 @@ run() {
     log "[dry-run] $*"
   else
     log "+ $*"
-    eval "$@"
+    "$@"
   fi
 }
 
@@ -106,7 +106,7 @@ run systemctl restart systemd-journald
 log "--- step 3: docker restart ---"
 run systemctl restart docker
 if [[ "$DRY_RUN" != "1" ]]; then
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     systemctl is-active --quiet docker && break
     sleep 1
   done
@@ -133,7 +133,7 @@ for row in "${ROWS[@]}"; do
     log "WARN: 项目 $proj 无 environment_file 标签，尝试不带 --env-file（可能缺插值）"
     envopt=""
   fi
-  run "cd '$workdir' && docker compose $envopt -f '$cfgfiles' -p '$proj' up -d --force-recreate"
+  run bash -c "cd '$workdir' && docker compose $envopt -f '$cfgfiles' -p '$proj' up -d --force-recreate"
 done
 
 # =========================================================================
@@ -156,7 +156,7 @@ if [[ -s "$MARKER" ]]; then
       sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=$TAG/" "$ENV_FILE"
       (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate sub2api)
       ok=0
-      for i in $(seq 1 30); do
+      for _ in $(seq 1 30); do
         if curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1; then ok=1; break; fi
         sleep 3
       done
@@ -168,11 +168,15 @@ if [[ -s "$MARKER" ]]; then
         cp "$ENVBAK" "$ENV_FILE"
         (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate sub2api)
         rm -f "$MARKER"
-        for i in $(seq 1 20); do
+        for _ in $(seq 1 20); do
           curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1 && break
           sleep 3
         done
-        curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1 && log "回滚完成，/health 恢复" || log "WARN: 回滚后 /health 仍未通过，需人工介入"
+        if curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1; then
+          log "回滚完成，/health 恢复"
+        else
+          log "WARN: 回滚后 /health 仍未通过，需人工介入"
+        fi
       fi
     fi
   else
@@ -197,7 +201,7 @@ else
   done
   log "== 等待容器 healthy（最长 120s）=="
   hokay=0
-  for i in $(seq 1 24); do
+  for _ in $(seq 1 24); do
     bad=0
     while IFS= read -r line; do
       st="${line##* }"
@@ -206,7 +210,11 @@ else
     if [[ "$bad" -eq 0 ]]; then hokay=1; break; fi
     sleep 5
   done
-  [[ "$hokay" == "1" ]] && log "全部容器 healthy（无 healthcheck 的容器视为通过）" || log "WARN: 120s 内仍有容器未 healthy"
+  if [[ "$hokay" == "1" ]]; then
+    log "全部容器 healthy（无 healthcheck 的容器视为通过）"
+  else
+    log "WARN: 120s 内仍有容器未 healthy"
+  fi
   log "== /health =="
   curl -s "$APP_HEALTH_URL" && echo
   log "== df -h / =="
