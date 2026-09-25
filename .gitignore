@@ -152,6 +152,7 @@ docs/*
 !docs/platform-other.md
 !docs/footer-links-ssr-injection-plan.md
 !docs/footer-links-plan.md
+!docs/abnormal-usage-analysis-plan.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
