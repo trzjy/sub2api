@@ -178,12 +178,13 @@ func TestWebDeepseekRegisterSendCodeSuccess(t *testing.T) {
 	require.Equal(t, 1, up.calls(webDeepseekGuestPoWChallengePath))
 	require.Equal(t, 1, up.calls(WebDeepseekEmailCodeSendPath))
 
-	// 请求体断言：shumei_verification 字段必须存在（空串），scenario/locale/device_id 齐。
+	// 请求体断言：shumei_verification 字段必须存在且为 null（2026-09-23 生产实测：
+	// 空串/假串上游 422，固定发 null），scenario/locale/device_id 齐。
 	sendBody := up.lastBody(WebDeepseekEmailCodeSendPath)
 	var sendParsed map[string]any
 	require.NoError(t, json.Unmarshal([]byte(sendBody), &sendParsed))
 	require.Contains(t, sendParsed, "shumei_verification")
-	require.Equal(t, "", sendParsed["shumei_verification"])
+	require.Nil(t, sendParsed["shumei_verification"])
 	require.Equal(t, "user@example.com", sendParsed["email"])
 	require.Equal(t, "en", sendParsed["locale"])
 	require.Equal(t, "register", sendParsed["scenario"])
