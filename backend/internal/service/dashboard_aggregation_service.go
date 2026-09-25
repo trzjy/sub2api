@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,9 @@ type DashboardAggregationRepository interface {
 	UpdateAggregationWatermark(ctx context.Context, aggregatedAt time.Time) error
 	CleanupAggregates(ctx context.Context, hourlyCutoff, dailyCutoff time.Time) error
 	CleanupUsageLogs(ctx context.Context, cutoff time.Time) error
+	// CleanupUsageLogsTx 是 CleanupUsageLogs 的事务参数变体：删除段在调用方传入的 *sql.Tx
+	// 上执行，使源日志清理能与风险表清理（U3）纳入同一 DB 事务（方案 §6.4/§5）。
+	CleanupUsageLogsTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error
 	CleanupUsageBillingDedup(ctx context.Context, cutoff time.Time) error
 	EnsureUsageLogsPartitions(ctx context.Context, now time.Time) error
 }
@@ -61,6 +65,85 @@ type DashboardAggregationService struct {
 	lockCache  LeaderLockCache
 	db         *sql.DB
 	instanceID string
+
+	// usageRiskRetentionGate 返回风险保留期天数与读取错误（来自 settings）。为 nil 时
+	// 视为未接线（保留现状：跳过风险表清理、源日志独立清理）。非 nil 时：
+	//   - err != nil → 本轮两清全部失败关闭（源日志也不删），下轮幂等重试；
+	//   - err == nil → 风险表清理与源日志在同一事务内清理，无论分析全局开关状态
+	//     （风险数据 TTL 独立于功能开关，保留期绑定校验由 settings/启动重验把关）。
+	// 由 U4 接线点注入（从 SettingService.LoadUsageRiskPolicy 读取）；本单只定义契约，
+	// 不在 service 内直接依赖 SettingService，避免循环依赖。
+	usageRiskRetentionGate func(ctx context.Context) (riskRetentionDays int, err error)
+	// usageRiskRepo 是风险表清理的同一事务入口（U3 CleanupReportAndRollupTx 的 *sql.Tx 适配）。
+	// 为 nil 时源日志清理走独立路径（无风险表清理）。
+	usageRiskRepo usageRiskRetentionCleaner
+	// retentionCoordinator 在唯一 DB 事务内协调「风险表清理 + 源日志清理」。
+	// 生产默认实现 lazy 构造（见 dbRetentionCoordinator）；测试可注入 fake 记录调用序列。
+	retentionCoordinator retentionCoordinator
+}
+
+// usageRiskRetentionCleaner 是风险表保留清理的同一事务入口。
+// 由 repository.usageRiskRepository 经新增适配方法 CleanupReportAndRollupTxDB 实现
+// （service 包无法引用未导出的 repository.sqlExecutor，故以导出的 *sql.Tx 暴露）。
+type usageRiskRetentionCleaner interface {
+	CleanupReportAndRollupTxDB(ctx context.Context, tx *sql.Tx, reportCutoff, rollupCutoff time.Time) (int64, int64, error)
+}
+
+// usageLogsRetentionTxExecutor 是源日志保留清理的事务入口（即 DashboardAggregationRepository）。
+type usageLogsRetentionTxExecutor interface {
+	CleanupUsageLogsTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error
+}
+
+// retentionCoordinator 在唯一 DB 事务内协调风险表清理与源日志清理。
+// 任一失败整体回滚（调用方不推进 lastRetentionCleanup，下轮按年龄截止幂等重试）。
+// 测试可注入 fake 以记录调用序列并模拟回滚。
+type retentionCoordinator interface {
+	RunRetentionCleanup(ctx context.Context, riskEnabled bool, usageCutoff, riskCutoff time.Time) error
+}
+
+// dbRetentionCoordinator 是 retentionCoordinator 的生产实现：在 db 上的同一事务内
+// 先清风险表/rollup（U3），再清源日志（CleanupUsageLogsTx），任一失败整体回滚。
+type dbRetentionCoordinator struct {
+	db           *sql.DB
+	usageRiskRepo usageRiskRetentionCleaner
+	usageLogsRepo usageLogsRetentionTxExecutor
+}
+
+func (c *dbRetentionCoordinator) RunRetentionCleanup(ctx context.Context, riskEnabled bool, usageCutoff, riskCutoff time.Time) error {
+	// riskEnabled 恒为 true（service 仅在功能开启时调用协调器）。
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin retention tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // 已提交则为 no-op；失败/panic 兜底回滚。
+
+	if _, _, err := c.usageRiskRepo.CleanupReportAndRollupTxDB(ctx, tx, riskCutoff, riskCutoff); err != nil {
+		return fmt.Errorf("cleanup usage risk reports/rollup: %w", err)
+	}
+	if err := c.usageLogsRepo.CleanupUsageLogsTx(ctx, tx, usageCutoff); err != nil {
+		return fmt.Errorf("cleanup usage logs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit retention tx: %w", err)
+	}
+	return nil
+}
+
+// SetUsageRiskRetentionGate 注入风险保留期契约（风险保留天数 + 读取错误）。
+// 生产由 U4 job 注册处注入（从 SettingService.LoadUsageRiskPolicy 读取）；不注入则未接线
+// （跳过风险表清理、源日志独立清理）。gate 返回错误时调用方整轮失败关闭。
+func (s *DashboardAggregationService) SetUsageRiskRetentionGate(gate func(ctx context.Context) (riskRetentionDays int, err error)) {
+	s.usageRiskRetentionGate = gate
+}
+
+// SetUsageRiskRetentionCleaner 注入风险表清理的同一事务入口（U3 适配）。
+func (s *DashboardAggregationService) SetUsageRiskRetentionCleaner(c usageRiskRetentionCleaner) {
+	s.usageRiskRepo = c
+}
+
+// SetRetentionCoordinator 注入保留期协调器（主要用于测试 fake 记录调用序列）。
+func (s *DashboardAggregationService) SetRetentionCoordinator(c retentionCoordinator) {
+	s.retentionCoordinator = c
 }
 
 // NewDashboardAggregationService 创建聚合服务。
@@ -365,19 +448,59 @@ func (s *DashboardAggregationService) maybeCleanupRetention(ctx context.Context,
 	usageCutoff := now.AddDate(0, 0, -s.cfg.Retention.UsageLogsDays)
 	dedupCutoff := now.AddDate(0, 0, -s.cfg.Retention.UsageBillingDedupDays)
 
+	// 聚合与去重清理保持独立（既有语义不变），不参与风险表同事务协调。
 	aggErr := s.repo.CleanupAggregates(ctx, hourlyCutoff, dailyCutoff)
 	if aggErr != nil {
 		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] 聚合保留清理失败: %v", aggErr)
-	}
-	usageErr := s.repo.CleanupUsageLogs(ctx, usageCutoff)
-	if usageErr != nil {
-		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] usage_logs 保留清理失败: %v", usageErr)
 	}
 	dedupErr := s.repo.CleanupUsageBillingDedup(ctx, dedupCutoff)
 	if dedupErr != nil {
 		logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] usage_billing_dedup 保留清理失败: %v", dedupErr)
 	}
-	if aggErr == nil && usageErr == nil && dedupErr == nil {
+
+	// 风险表清理与 usage_risk 全局开关解耦：只要策略可读（gate 无错），
+	// 风险报告/rollup 即按风险截止点参与同事务清理，无论分析开关状态
+	// （数据 TTL 独立于功能开关；保留期绑定校验由 settings/启动重验把关）。
+	// gate 未注入（nil）→ 保留现状：跳过风险清理、源日志独立清理。
+	if s.usageRiskRetentionGate == nil {
+		usageErr := s.repo.CleanupUsageLogs(ctx, usageCutoff)
+		if usageErr != nil {
+			logger.LegacyPrintf("service.dashboard_aggregation", "[DashboardAggregation] usage_logs 保留清理失败: %v", usageErr)
+		}
+		if aggErr == nil && usageErr == nil && dedupErr == nil {
+			s.lastRetentionCleanup.Store(now)
+		}
+		return
+	}
+
+	riskRetentionDays, gateErr := s.usageRiskRetentionGate(ctx)
+	if gateErr != nil {
+		// 失败关闭：本轮两清全部跳过（含源日志），结构化日志，下轮幂等重试。
+		// 不得降级为「只清源」或「只清风险」，以免绕过两清同事务唯一权威路径。
+		logger.LegacyPrintf("service.dashboard_aggregation",
+			"[DashboardAggregation] 保留期 gate 读取策略失败，本轮两清全部失败关闭（源日志与风险表均不清理，下轮幂等重试）: %v", gateErr)
+		return
+	}
+
+	// 风险报告/rollup 与源日志在同一 DB 事务内清理：两个截止点各自按配置计算。
+	// 任一失败整体回滚、本轮不推进（下轮按年龄截止幂等重试）。
+	riskCutoff := now.AddDate(0, 0, -riskRetentionDays)
+	if s.retentionCoordinator == nil {
+		if s.db == nil || s.usageRiskRepo == nil {
+			// 事务化能力未注入（U4 接线点未收口）：无法走两清同事务权威路径，
+			// 失败关闭（本轮两清均跳过，含源日志），不得降级为「只清源」。
+			logger.LegacyPrintf("service.dashboard_aggregation",
+				"[DashboardAggregation] 保留期事务化能力未注入，本轮两清失败关闭（源日志与风险表均不清理）")
+			return
+		}
+		s.retentionCoordinator = &dbRetentionCoordinator{db: s.db, usageRiskRepo: s.usageRiskRepo, usageLogsRepo: s.repo}
+	}
+	if err := s.retentionCoordinator.RunRetentionCleanup(ctx, true, usageCutoff, riskCutoff); err != nil {
+		logger.LegacyPrintf("service.dashboard_aggregation",
+			"[DashboardAggregation] 保留期协调清理失败（风险表与源日志均回滚，本轮不推进）: %v", err)
+		return
+	}
+	if aggErr == nil && dedupErr == nil {
 		s.lastRetentionCleanup.Store(now)
 	}
 }

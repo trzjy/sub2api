@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -121,6 +122,10 @@ func (s *dashboardAggregationRepoStub) CleanupAggregates(ctx context.Context, ho
 }
 
 func (s *dashboardAggregationRepoStub) CleanupUsageLogs(ctx context.Context, cutoff time.Time) error {
+	return nil
+}
+
+func (s *dashboardAggregationRepoStub) CleanupUsageLogsTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
 	return nil
 }
 

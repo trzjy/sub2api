@@ -473,9 +473,28 @@ func ProvideGrokTokenProvider(
 }
 
 // ProvideDashboardAggregationService 创建并启动仪表盘聚合服务
-func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config) *DashboardAggregationService {
+//
+// 收口 U4 接线点：注入 usage_risk 保留期协调所需的清理器（同一 DB 事务内清理风险表 + 源日志）
+// 与保留期契约 gate（从 SettingService 读取全局开关 + 风险保留天数）。两者均未注入时，
+// maybeCleanupRetention 退化为仅清理源日志（风险表 reports/rollup 无限累积）。
+func ProvideDashboardAggregationService(repo DashboardAggregationRepository, timingWheel *TimingWheelService, lockCache LeaderLockCache, db *sql.DB, cfg *config.Config, settingService *SettingService, usageRiskCleaner usageRiskRetentionCleaner) *DashboardAggregationService {
 	svc := NewDashboardAggregationService(repo, timingWheel, cfg)
 	svc.SetLeaderLock(lockCache, db)
+	if usageRiskCleaner != nil {
+		svc.SetUsageRiskRetentionCleaner(usageRiskCleaner)
+	}
+	svc.SetUsageRiskRetentionGate(func(ctx context.Context) (int, error) {
+		if settingService == nil {
+			return 0, fmt.Errorf("settingService 未注入，无法读取 usage_risk 保留期策略")
+		}
+		p, err := settingService.LoadUsageRiskPolicy(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("读取 usage_risk 保留期策略失败: %w", err)
+		}
+		// 解耦：不再消费 p.Enabled；只要策略可读即返回风险保留期天数，
+		// 风险 TTL 独立于分析开关（保留期绑定校验由 settings/启动重验把关）。
+		return p.RetentionDays, nil
+	})
 	svc.Start()
 	return svc
 }

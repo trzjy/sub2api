@@ -898,3 +898,64 @@ const (
 	WebLoginCodePoW1          int64 = 40300 // PoW 错误
 	WebLoginCodePoW2          int64 = 40301 // PoW 错误（变体）
 )
+
+// 异常调用分析（防中转商薅羊毛）设置键。
+// 键前缀统一为 usage_risk_*，默认值与方案 docs/abnormal-usage-analysis-plan.md §4 完全一致。
+// 全部为纯配置、无密钥，公开可读写。
+const (
+	// SettingKeyUsageRiskEnabled 全局开关（默认开，纯分析零用户面影响）。
+	SettingKeyUsageRiskEnabled = "usage_risk_enabled"
+	// SettingKeyUsageRiskUnlimitedGroupsOnly 仅分析不限量订阅分组（默认 true）。
+	SettingKeyUsageRiskUnlimitedGroupsOnly = "usage_risk_unlimited_groups_only"
+	// SettingKeyUsageRiskMinDailyRequests 进入分析的资格门槛（分组/用户级，计数 ≥1）。
+	SettingKeyUsageRiskMinDailyRequests = "usage_risk_min_daily_requests"
+
+	// R1 全天候活跃：活跃小时 ≥阈值 且连续活跃天数 ≥阈值。
+	SettingKeyUsageRiskR1ActiveHours    = "usage_risk_r1_active_hours"
+	SettingKeyUsageRiskR1ConsecutiveDays = "usage_risk_r1_consecutive_days"
+	SettingKeyUsageRiskR1Enabled        = "usage_risk_r1_enabled"
+
+	// R2 用量离群：倍数 >阈值 且 peer 群计数 ≥阈值。
+	SettingKeyUsageRiskR2Multiple  = "usage_risk_r2_multiple"
+	SettingKeyUsageRiskR2PeerCount = "usage_risk_r2_peer_count"
+	SettingKeyUsageRiskR2Enabled   = "usage_risk_r2_enabled"
+
+	// R3a RPM 贴线：贴线比 ≥阈值 且命中分钟 ≥阈值。
+	SettingKeyUsageRiskR3ARatio   = "usage_risk_r3a_ratio"
+	SettingKeyUsageRiskR3AMinutes = "usage_risk_r3a_minutes"
+	SettingKeyUsageRiskR3AEnabled = "usage_risk_r3a_enabled"
+
+	// R3b 占用率贴线：占用率 ≥阈值。
+	SettingKeyUsageRiskR3BOccupancy = "usage_risk_r3b_occupancy"
+	SettingKeyUsageRiskR3BEnabled   = "usage_risk_r3b_enabled"
+
+	// R4 IP 离散：distinct IP ≥阈值。
+	SettingKeyUsageRiskR4DistinctIP = "usage_risk_r4_distinct_ip"
+	SettingKeyUsageRiskR4Enabled    = "usage_risk_r4_enabled"
+
+	// R5 同 IP 聚簇：关联用户数 ≥阈值 且该 IP 请求量 ≥阈值。
+	SettingKeyUsageRiskR5UserCount  = "usage_risk_r5_user_count"
+	SettingKeyUsageRiskR5IPRequests = "usage_risk_r5_ip_requests"
+	SettingKeyUsageRiskR5Enabled    = "usage_risk_r5_enabled"
+
+	// R6 客户端指纹：非白名单 UA 占比 ≥阈值。
+	SettingKeyUsageRiskR6UARatio = "usage_risk_r6_ua_ratio"
+	SettingKeyUsageRiskR6Enabled = "usage_risk_r6_enabled"
+
+	// R7 缓存失效：cache 比 ≤阈值 且当日输入 token ≥阈值。
+	SettingKeyUsageRiskR7CacheRatio      = "usage_risk_r7_cache_ratio"
+	SettingKeyUsageRiskR7MinInputTokens = "usage_risk_r7_min_input_tokens"
+	SettingKeyUsageRiskR7Enabled         = "usage_risk_r7_enabled"
+
+	// R8 多 key 均摊：key 数 ≥阈值 且每 key 承载 ≥阈值。
+	SettingKeyUsageRiskR8KeyCount = "usage_risk_r8_key_count"
+	SettingKeyUsageRiskR8KeyRatio = "usage_risk_r8_key_ratio"
+	SettingKeyUsageRiskR8Enabled  = "usage_risk_r8_enabled"
+
+	// SettingKeyUsageRiskUAWhitelist UA 白名单子串表（JSON 数组，默认 []）。
+	SettingKeyUsageRiskUAWhitelist = "usage_risk_ua_whitelist"
+	// SettingKeyUsageRiskListingMinScore 入榜阈值（≥0，默认 40）。
+	SettingKeyUsageRiskListingMinScore = "usage_risk_listing_min_score"
+	// SettingKeyUsageRiskRetentionDays 风险数据保留期（天数 ≥1，默认 90，须 ≤ usage_logs_days）。
+	SettingKeyUsageRiskRetentionDays = "usage_risk_retention_days"
+)

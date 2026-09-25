@@ -98,8 +98,6 @@ func (s reconcilePoolsStub) ListItemPools(context.Context) ([]XianyuItemPool, er
 	return []XianyuItemPool{{ID: s.id, Slug: "pool-test", GroupID: ptrInt64(57), ValidityDays: 1}}, nil
 }
 
-func ptrInt64(v int64) *int64 { return &v }
-
 type reconcileRedeemStub struct {
 	code *RedeemCode
 	err  error

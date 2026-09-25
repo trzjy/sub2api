@@ -85,6 +85,10 @@ func (s *dashboardRepoStub) CleanupUsageLogs(ctx context.Context, cutoff time.Ti
 	return nil
 }
 
+func (s *dashboardRepoStub) CleanupUsageLogsTx(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+	return nil
+}
+
 func (s *dashboardRepoStub) CleanupUsageBillingDedup(ctx context.Context, cutoff time.Time) error {
 	return nil
 }
