@@ -1,0 +1,112 @@
+export default {
+  title: '异常调用风险分析',
+  description: '分析异常调用行为与风险报告',
+  freshness: {
+    title: '数据新鲜度',
+    status: '状态',
+    windowEnd: '数据截止',
+    consecutivePartials: '连续未完整次数',
+    failedBatches: '失败批次数',
+    reconProgress: '重评进度',
+    historyCovered: '历史已覆盖',
+    historyCovering: '历史覆盖中',
+    historyReevalPending: '历史重评中',
+    error: '分析错误',
+    refresh: '刷新'
+  },
+  status: {
+    idle: '空闲',
+    running: '运行中',
+    completed: '已完成',
+    partial: '部分完成',
+    error: '错误'
+  },
+  filters: {
+    date: '日期',
+    level: '级别',
+    user: '用户 ID',
+    group: '分组 ID',
+    rule: '规则',
+    allLevels: '全部级别',
+    includeLow: '含低分留档',
+    search: '查询',
+    reset: '重置'
+  },
+  level: {
+    low: '低',
+    medium: '中',
+    high: '高',
+    critical: '严重'
+  },
+  reportStatus: {
+    open: '待处理',
+    acknowledged: '已确认',
+    dismissed: '已忽略',
+    resolved: '已解决'
+  },
+  columns: {
+    user: '用户',
+    group: '分组',
+    date: '日期',
+    score: '分数',
+    level: '级别',
+    rules: '命中规则',
+    status: '状态',
+    actions: '操作'
+  },
+  includeLine: '入榜线（最低分数）：{score}',
+  includeLowHint: '低分记录默认隐藏，开启以保留留档。',
+  listEmpty: '未找到风险报告',
+  viewDetail: '详情',
+  detail: {
+    title: '风险报告详情',
+    score: '分数',
+    level: '级别',
+    date: '日期',
+    status: '状态',
+    user: '用户',
+    group: '分组',
+    reportId: '报告 ID',
+    invalidatedAt: '已作废时间',
+    policyVersion: '策略版本',
+    rules: '命中规则',
+    rule: '规则',
+    scope: '作用域',
+    ruleDetail: '详情',
+    points: '扣分',
+    noRules: '无命中规则'
+  },
+  evidence: {
+    title: '证据',
+    truncated: '证据已截断（≤256KB）',
+    activeHours: '当日活跃小时数',
+    heatmap: '24 小时活跃热力',
+    ipTop: 'Top IP 地址',
+    ip: 'IP',
+    ipRequests: '请求数',
+    distinctUsers: '去重用户数',
+    uaTop: 'User-Agent 分布',
+    ua: 'User-Agent',
+    uaCount: '次数',
+    keyDistribution: 'Key 用量分布',
+    keyName: 'Key',
+    keyRequests: '请求数',
+    r2Context: 'R2 群分位上下文',
+    peerCount: '同群样本数',
+    filter: '过滤器',
+    algorithm: '算法',
+    p95: 'P95',
+    noData: '暂无证据数据'
+  },
+  actions: {
+    acknowledge: '确认',
+    dismiss: '忽略',
+    resolve: '解决',
+    viewUser: '查看用户',
+    gotoUserManagement: '前往用户管理',
+    updating: '更新中...'
+  },
+  loadFailed: '加载风险报告失败',
+  statusUpdateFailed: '更新报告状态失败',
+  runStatusLoadFailed: '加载分析运行状态失败'
+}

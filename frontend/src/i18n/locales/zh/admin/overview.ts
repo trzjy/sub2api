@@ -78,7 +78,22 @@ export default {
       groupPricingDesc: '设置批量折扣和冻结比例',
       systemSettings: '系统设置',
       configureSystem: '配置系统设置',
-      failedToLoad: '加载仪表盘数据失败'
+      failedToLoad: '加载仪表盘数据失败',
+      riskCard: {
+        title: '异常调用风险',
+        openTotal: '待处理报告',
+        byLevel: '按级别',
+        topTitle: '高风险 Top 5',
+        viewAll: '查看全部',
+        unavailable: '风险数据不可用',
+        errorTitle: '风险分析不可用',
+        user: '用户',
+        score: '分数',
+        rules: '命中规则',
+        levelMedium: '中',
+        levelHigh: '高',
+        levelCritical: '严重'
+      }
     },
 
     backup: {

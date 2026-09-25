@@ -10,6 +10,7 @@ import plugins from './plugins'
 import xianyu from './xianyu'
 import pricing from './pricing'
 import promoIntel from './promoIntel'
+import usageAnalysis from './usageAnalysis'
 
 export default {
   ...overview,
@@ -24,4 +25,5 @@ export default {
   ...xianyu,
   ...pricing,
   ...promoIntel,
+  usageAnalysis
 }

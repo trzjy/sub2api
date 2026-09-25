@@ -115,6 +115,92 @@
           </div>
         </div>
 
+        <!-- Risk summary card -->
+        <div class="card p-4">
+          <div class="mb-3 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.dashboard.riskCard.title') }}
+            </h2>
+            <button
+              type="button"
+              class="text-xs font-medium text-primary-600 transition-colors hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300"
+              @click="router.push('/admin/usage-analysis')"
+            >
+              {{ t('admin.dashboard.riskCard.viewAll') }}
+            </button>
+          </div>
+
+          <template v-if="riskSummary && !riskSummary.error">
+            <div class="flex items-center gap-3">
+              <div class="rounded-lg bg-rose-100 p-2 dark:bg-rose-900/30">
+                <Icon name="shield" size="md" class="text-rose-600 dark:text-rose-400" :stroke-width="2" />
+              </div>
+              <div>
+                <p class="text-xs font-medium text-gray-500 dark:text-gray-400">
+                  {{ t('admin.dashboard.riskCard.openTotal') }}
+                </p>
+                <p class="text-xl font-bold text-gray-900 dark:text-white">
+                  {{ riskSummary.open_total }}
+                </p>
+              </div>
+            </div>
+
+            <div class="mt-3 flex flex-wrap gap-2 text-xs">
+              <span class="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                {{ t('admin.dashboard.riskCard.levelMedium') }}: {{ riskSummary.by_level.medium ?? 0 }}
+              </span>
+              <span class="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2.5 py-0.5 font-semibold text-orange-700 dark:bg-orange-900/30 dark:text-orange-300">
+                {{ t('admin.dashboard.riskCard.levelHigh') }}: {{ riskSummary.by_level.high ?? 0 }}
+              </span>
+              <span class="inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-0.5 font-semibold text-red-700 dark:bg-red-900/30 dark:text-red-300">
+                {{ t('admin.dashboard.riskCard.levelCritical') }}: {{ riskSummary.by_level.critical ?? 0 }}
+              </span>
+            </div>
+
+            <div v-if="riskSummary.top && riskSummary.top.length" class="mt-4">
+              <div class="mb-2 text-xs font-bold uppercase tracking-wider text-gray-400">
+                {{ t('admin.dashboard.riskCard.topTitle') }}
+              </div>
+              <ul class="space-y-1.5">
+                <li
+                  v-for="item in riskSummary.top.slice(0, 5)"
+                  :key="item.user_id"
+                  class="flex cursor-pointer items-center justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2 transition-colors hover:bg-rose-50 dark:bg-dark-800/50 dark:hover:bg-rose-900/20"
+                  @click="router.push('/admin/usage-analysis')"
+                >
+                  <div class="min-w-0">
+                    <div class="truncate text-sm font-medium text-gray-900 dark:text-white">
+                      {{ item.username || ('#' + item.user_id) }}
+                    </div>
+                    <div class="truncate text-xs text-gray-400">
+                      {{ item.top_rules.slice(0, 3).join(', ') || '—' }}
+                    </div>
+                  </div>
+                  <span class="shrink-0 text-sm font-bold text-gray-700 dark:text-gray-200">
+                    {{ item.max_score }}
+                  </span>
+                </li>
+              </ul>
+            </div>
+          </template>
+
+          <div
+            v-else-if="riskSummary?.error"
+            class="flex items-start gap-2 rounded-lg bg-red-50 px-3 py-4 text-sm text-red-700 ring-1 ring-red-200 dark:bg-red-900/20 dark:text-red-300 dark:ring-red-800/40"
+          >
+            <Icon name="exclamationTriangle" size="sm" class="mt-0.5 shrink-0" />
+            <div class="min-w-0">
+              <div class="font-medium">{{ t('admin.dashboard.riskCard.errorTitle') }}</div>
+              <div class="mt-0.5 break-words text-xs">{{ riskSummary.error }}</div>
+            </div>
+          </div>
+
+          <div v-else class="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-4 text-sm text-gray-400 dark:bg-dark-800/50">
+            <Icon name="infoCircle" size="sm" />
+            {{ t('admin.dashboard.riskCard.unavailable') }}
+          </div>
+        </div>
+
         <!-- Row 2: Token Stats -->
         <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <!-- Today Tokens -->
@@ -413,6 +499,7 @@ const router = useRouter()
 const { canUseBatchImage, refreshBatchImageAccess } = useBatchImageAccess()
 const stats = ref<DashboardStats | null>(null)
 const loading = ref(false)
+const riskSummary = computed(() => stats.value?.risk_summary ?? null)
 const chartsLoading = ref(false)
 const userTrendLoading = ref(false)
 const rankingLoading = ref(false)

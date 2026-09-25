@@ -1994,6 +1994,26 @@ export interface DashboardStats {
   // 性能指标
   rpm: number // 近5分钟平均每分钟请求数
   tpm: number // 近5分钟平均每分钟Token数
+
+  // 异常调用风险摘要（可选；后端 Dashboard 快照可能新增该字段）
+  risk_summary?: RiskSummary
+}
+
+// 异常调用风险摘要（与 usageRisk API 契约一致；字段名不可改）
+export interface RiskSummary {
+  open_total: number
+  by_level: { low: number; medium: number; high: number; critical: number }
+  top: Array<{
+    user_id: number
+    username: string
+    max_score: number
+    level: 'low' | 'medium' | 'high' | 'critical'
+    top_rules: string[]
+  }>
+  // Present when GetRiskSummary fails/closed: the reason analysis is unavailable.
+  // When set, the risk card must render an explicit "unavailable" state and must
+  // NOT present the zero-value counts above as "zero risk".
+  error?: string
 }
 
 export interface UsageStatsResponse {

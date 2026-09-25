@@ -78,7 +78,22 @@ export default {
       groupPricingDesc: 'Configure batch discount and hold ratio',
       systemSettings: 'System Settings',
       configureSystem: 'Configure system settings',
-      failedToLoad: 'Failed to load dashboard statistics'
+      failedToLoad: 'Failed to load dashboard statistics',
+      riskCard: {
+        title: 'Abnormal Call Risk',
+        openTotal: 'Open reports',
+        byLevel: 'By level',
+        topTitle: 'Top Risks (Top 5)',
+        viewAll: 'View all',
+        unavailable: 'Risk data unavailable',
+        errorTitle: 'Risk analysis unavailable',
+        user: 'User',
+        score: 'Score',
+        rules: 'Top rules',
+        levelMedium: 'Medium',
+        levelHigh: 'High',
+        levelCritical: 'Critical'
+      }
     },
 
     backup: {

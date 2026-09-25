@@ -1,0 +1,112 @@
+export default {
+  title: 'Usage Risk Analysis',
+  description: 'Analyze abnormal usage calls and risk reports',
+  freshness: {
+    title: 'Data Freshness',
+    status: 'Status',
+    windowEnd: 'Data up to',
+    consecutivePartials: 'Consecutive partials',
+    failedBatches: 'Failed batches',
+    reconProgress: 'Re-evaluation progress',
+    historyCovered: 'History covered',
+    historyCovering: 'Covering history',
+    historyReevalPending: 'History re-evaluating',
+    error: 'Analysis error',
+    refresh: 'Refresh'
+  },
+  status: {
+    idle: 'Idle',
+    running: 'Running',
+    completed: 'Completed',
+    partial: 'Partial',
+    error: 'Error'
+  },
+  filters: {
+    date: 'Date',
+    level: 'Level',
+    user: 'User ID',
+    group: 'Group ID',
+    rule: 'Rule',
+    allLevels: 'All levels',
+    includeLow: 'Include low-score records',
+    search: 'Search',
+    reset: 'Reset'
+  },
+  level: {
+    low: 'Low',
+    medium: 'Medium',
+    high: 'High',
+    critical: 'Critical'
+  },
+  reportStatus: {
+    open: 'Open',
+    acknowledged: 'Acknowledged',
+    dismissed: 'Dismissed',
+    resolved: 'Resolved'
+  },
+  columns: {
+    user: 'User',
+    group: 'Group',
+    date: 'Date',
+    score: 'Score',
+    level: 'Level',
+    rules: 'Rule Hits',
+    status: 'Status',
+    actions: 'Actions'
+  },
+  includeLine: 'Entry threshold (min score): {score}',
+  includeLowHint: 'Low-score records are hidden by default. Enable to keep them.',
+  listEmpty: 'No risk reports found',
+  viewDetail: 'Detail',
+  detail: {
+    title: 'Risk Report Detail',
+    score: 'Score',
+    level: 'Level',
+    date: 'Date',
+    status: 'Status',
+    user: 'User',
+    group: 'Group',
+    reportId: 'Report ID',
+    invalidatedAt: 'Invalidated at',
+    policyVersion: 'Policy version',
+    rules: 'Rule Hits',
+    rule: 'Rule',
+    scope: 'Scope',
+    ruleDetail: 'Detail',
+    points: 'Points',
+    noRules: 'No rule hits'
+  },
+  evidence: {
+    title: 'Evidence',
+    truncated: 'Evidence truncated (≤256KB)',
+    activeHours: 'Active hours (today)',
+    heatmap: '24h activity heatmap',
+    ipTop: 'Top IP addresses',
+    ip: 'IP',
+    ipRequests: 'Requests',
+    distinctUsers: 'Distinct users',
+    uaTop: 'User-Agent distribution',
+    ua: 'User-Agent',
+    uaCount: 'Count',
+    keyDistribution: 'Key usage distribution',
+    keyName: 'Key',
+    keyRequests: 'Requests',
+    r2Context: 'R2 peer percentile context',
+    peerCount: 'Peer count',
+    filter: 'Filter',
+    algorithm: 'Algorithm',
+    p95: 'P95',
+    noData: 'No evidence available'
+  },
+  actions: {
+    acknowledge: 'Acknowledge',
+    dismiss: 'Dismiss',
+    resolve: 'Resolve',
+    viewUser: 'View user',
+    gotoUserManagement: 'Go to user management',
+    updating: 'Updating...'
+  },
+  loadFailed: 'Failed to load risk reports',
+  statusUpdateFailed: 'Failed to update report status',
+  runStatusLoadFailed: 'Failed to load analysis run status'
+}

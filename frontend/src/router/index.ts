@@ -438,6 +438,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/usage-analysis',
+    name: 'AdminUsageAnalysis',
+    component: () => import('@/views/admin/UsageAnalysisView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Usage Risk Analysis',
+      titleKey: 'admin.usageAnalysis.title',
+      descriptionKey: 'admin.usageAnalysis.description'
+    }
+  },
+  {
     path: '/admin/pricing',
     name: 'AdminPricing',
     component: () => import('@/views/admin/PricingView.vue'),

@@ -33,7 +33,7 @@ function installFileReaderMock() {
       this.onload?.({ target: { result: `data:${file.type};base64,bW9jay1kYXRh` } })
     }
 
-    readAsText(file: File) {
+    readAsText(_file: File) {
       this.onload?.({ target: { result: mockTextResult } })
     }
   }

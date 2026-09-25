@@ -40,6 +40,7 @@ import pluginsAPI from './plugins'
 import xianyuAPI from './xianyu'
 import pricingAPI from './pricing'
 import promoIntelAPI from './promoIntel'
+import usageRiskAPI from './usageRisk'
 
 /**
  * Unified admin API object for convenient access
@@ -81,7 +82,8 @@ export const adminAPI = {
   plugins: pluginsAPI,
   xianyu: xianyuAPI,
   pricing: pricingAPI,
-  promoIntel: promoIntelAPI
+  promoIntel: promoIntelAPI,
+  usageRisk: usageRiskAPI
 }
 
 export {
@@ -121,7 +123,8 @@ export {
   pluginsAPI,
   xianyuAPI,
   pricingAPI,
-  promoIntelAPI
+  promoIntelAPI,
+  usageRiskAPI
 }
 export default adminAPI
 
@@ -150,3 +153,16 @@ export type {
   PluginUISession,
   PluginTestResult
 } from './plugins'
+
+export type {
+  RiskLevel,
+  ReportStatus,
+  RuleHit,
+  Report,
+  Evidence,
+  ReportDetail,
+  UsageRiskReportListResponse,
+  RunStatusResponse,
+  UpdateReportStatusPayload,
+  ListReportsParams
+} from './usageRisk'

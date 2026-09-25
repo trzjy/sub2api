@@ -5,7 +5,7 @@ describe('formatScaled', () => {
   it('≥$0.1 固定 2 位小数（历史口径，不剥尾零）', () => {
     expect(formatScaled(3e-6, 1_000_000)).toBe('$3.00')
     expect(formatScaled(0.2, 1)).toBe('$0.20')
-    expect(formatScaled(0.12426470588235294e-6, 1_000_000)).toBe('$0.12')
+    expect(formatScaled(1.2426470588235295e-7, 1_000_000)).toBe('$0.12')
     expect(formatScaled(45, 1)).toBe('$45.00')
     expect(formatScaled(0, 1)).toBe('$0.00')
   })
