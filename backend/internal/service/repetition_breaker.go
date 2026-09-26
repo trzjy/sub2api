@@ -12,7 +12,8 @@ package service
 // handleNativeAnthropicStreamingResponse，即实测命中路径）：
 //   - 缓冲期静默 failover：流开始后先缓冲不转发，缓冲满 N 个 delta 仍无循环
 //     → flush 转直通；缓冲期内命中 → 丢弃缓冲、掐上游、按 UpstreamFailoverError
-//     走既有 maxAccountSwitches 换号重发（客户端无感）。
+//     走既有 upstream-error 换号重发（客户端无感；上限语义见 failover 循环，
+//     OpenAI 家族链已无固定切换上限）。
 //   - 直通期命中 → 掐上游 + 客户端 error 事件（code=upstream_repetition_loop）
 //     + ops_error_logs + 账号健康错误统计（feeds 既有健康熔断）。
 //
@@ -225,7 +226,7 @@ func anthropicStreamDeltaText(data string) string {
 var anthropicStreamDeltaTextFn = anthropicStreamDeltaText
 
 // newRepetitionLoopFailoverError 构造缓冲期循环命中的 failover 错误：
-// 走既有 upstream-error 换号路径（handler 的 maxAccountSwitches 循环）。
+// 走既有 upstream-error 换号路径（handler 的 failover 循环）。
 // SafeToFailoverAfterWrite=true：缓冲期客户端未收到任何语义字节，仅可能
 // 收到网关注入的 keepalive ping 等非语义字节，同流换号重发安全。
 func newRepetitionLoopFailoverError() *UpstreamFailoverError {

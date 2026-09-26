@@ -120,7 +120,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 		if terr != nil {
 			return nil, terr
 		}
-		resp, sendErr = s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
+		resp, sendErr = s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
 	}
 	if sendErr != nil {
 		return nil, sendErr
@@ -151,13 +151,14 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 
 	// 5. Convert response
 	if clientStream {
-		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsAnthropic(c, account, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
-	return s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	return s.bufferChatCompletionsAsAnthropic(c, account, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	originalModel string,
 	billingModel string,
@@ -167,8 +168,15 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
-	ccResp, usage, err := s.readCCUpstreamJSONResponse(c, resp, writeAnthropicError)
+	ccResp, usage, err := s.readCCUpstreamJSONResponse(resp, c, writeAnthropicError)
 	if err != nil {
+		// CN 首包超时：缓冲路径响应头尚未提交，可安全透明切换（冷却+换号，带模型）。
+		// 读取错误未写客户端响应（readCCUpstreamJSONResponse 对内部超时原样返回），
+		// 此处优先映射内部超时为 failover；其余错误已按原 endpoint 契约
+		// （writeAnthropicError 格式）回写，直接上抛即可。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		return nil, err
 	}
 	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, originalModel)
@@ -195,6 +203,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 
 func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	originalModel string,
 	billingModel string,
@@ -208,6 +217,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	anthropicState := apicompat.NewChatCompletionsToAnthropicStreamState(originalModel)
 	clientDisconnected := false
+	outputStarted := false
 
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
@@ -223,6 +233,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 				continue
 			}
 			writeStreamHeaders()
+			outputStarted = true
 			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
 				clientDisconnected = true
 				break
@@ -237,6 +248,11 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	usage := scan.Usage
 
 	if scan.Err != nil {
+		// CN 首包超时（watchdog 转译错误）：响应头未提交（首事件写出前）时透明
+		// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
+		if isOpenAICNFirstByteTimeout(scan.Err) && !outputStarted {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		// Broken upstream read: skip finalization so no synthetic message_stop
 		// masks the truncation, and surface the error to flag usage incomplete
 		// (mirrors forwardResponsesViaRawChatCompletions).

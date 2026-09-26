@@ -439,9 +439,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return nil, fmt.Errorf("build grok retry request: %w", err)
 			}
 		}
-		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err = s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 		if err != nil {
-			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
 		}
 		if account.Platform != PlatformGrok || attempt > 0 || resp.StatusCode != http.StatusBadRequest {
 			break
@@ -623,6 +623,11 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 
 	finalResponse, usage, acc, err := s.readOpenAICompatBufferedTerminal(resp, c, "openai messages buffered", requestID)
 	if err != nil {
+		// CN 清单平台首包超时：buffered 路径在读取完成前未提交响应头，
+		// 可安全触发冷却+换号（内部超时错误 ≠ 客户端取消）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		var readErr *openAICompatBufferedReadError
 		if errors.As(err, &readErr) && readErr != nil {
 			return nil, readErr.cause
@@ -1241,6 +1246,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 		if err := scanner.Err(); err != nil {
 			handleScanErr(err)
+			if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, err, upstreamModel); foErr != nil {
+				return nil, foErr
+			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
 		}
 		if frame, ok := parser.Finish(); ok {
@@ -1314,6 +1322,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 			if ev.err != nil {
 				handleScanErr(ev.err)
+				if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, ev.err, upstreamModel); foErr != nil {
+					return nil, foErr
+				}
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
 			lastDataAt = time.Now()
@@ -1349,6 +1360,13 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				continue
 			}
 			if time.Since(lastDataAt) < keepaliveInterval {
+				continue
+			}
+			// CN watchdog 覆盖的尝试在收到首个上游 body 字节前不得提交 keepalive：
+			// ping 事件写出即提交响应头（Writer.Size 变化），60s 首包超时到期后的
+			// failover 会被抑制、无法透明换号。首字节到达后恢复既有心跳节奏；
+			// 非 CN 路径（body 未被 watchdog 包装）行为不变。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
 				continue
 			}
 			// Send Anthropic-format ping event

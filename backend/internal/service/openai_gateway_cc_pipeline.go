@@ -177,6 +177,9 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 // 账号级 header 覆写，最后经代理发出。传输层失败（DNS/TCP/TLS，无 HTTP 响应）
 // 统一由 handleOpenAIUpstreamTransportError 归一为 failover。
 //
+// upstreamModel 是本次出站的实际 upstream model，贯穿进 CN 首包超时冷却链
+// （闸②整改：空模型键会被 model 瞬态状态拒绝，冷却假闭环）。
+//
 // userAgent 为空时保留默认 UA；Grok 的默认 UA 兜底由调用方解析后传入。
 func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	ctx context.Context,
@@ -188,6 +191,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	bearerToken string,
 	userAgent string,
 	grokCacheIdentity string,
+	upstreamModel string,
 ) (*http.Response, error) {
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, bytes.NewReader(body))
@@ -236,9 +240,9 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
 	}
 	return resp, nil
 }
@@ -332,16 +336,28 @@ func logCCStreamMissingDoneSentinel(logPrefix, requestID string) {
 	)
 }
 
-// readCCUpstreamJSONResponse 读取并解析 CC 非流式 JSON 响应，失败时以调用方
-// 端点格式回写错误；成功时顺带提取 usage。
+// readCCUpstreamJSONResponse 读取并解析 CC 非流式 JSON 响应，成功时顺带提取
+// usage。失败时按原 endpoint 契约回写错误（writeError 为各端点格式写器），
+// 但内部首包超时除外：读取被 watchdog 取消打断时不得写任何客户端响应，原样
+// 返回错误供调用方优先映射为 failover（透明切换）——助手先写 502 会让 failover
+// 因响应已提交而无法重放（闸②整改，第 3 轮终审维持此边界）。
 func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
-	c *gin.Context,
 	resp *http.Response,
+	c *gin.Context,
 	writeError compatErrorWriter,
 ) (*apicompat.ChatCompletionsResponse, OpenAIUsage, error) {
-	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, nil)
 	if err != nil {
-		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
+		// 内部首包超时：响应头未提交，透明切换窗口仍在，写客户端响应会堵死
+		// failover 重放，故交给调用方映射（openAICNFirstByteTimeoutStreamFailover）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, OpenAIUsage{}, err
+		}
+		// 其余读取错误恢复原契约：响应超限走 TooLarge 格式；其余走
+		// "Failed to read upstream response"（原 helper 语义）。
+		if errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
+			openAITooLargeError(c)
+		} else if writeError != nil {
 			writeError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
 		}
 		return nil, OpenAIUsage{}, fmt.Errorf("read upstream body: %w", err)
@@ -349,7 +365,9 @@ func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
 
 	var ccResp apicompat.ChatCompletionsResponse
 	if err := json.Unmarshal(respBody, &ccResp); err != nil {
-		writeError(c, http.StatusBadGateway, "api_error", "Failed to parse upstream response")
+		if writeError != nil {
+			writeError(c, http.StatusBadGateway, "api_error", "Failed to parse upstream response")
+		}
 		return nil, OpenAIUsage{}, fmt.Errorf("parse chat completions response: %w", err)
 	}
 	// 观察上游 CC JSON 回显的 model / service_tier（计费以回显为准）。

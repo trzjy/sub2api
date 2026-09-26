@@ -607,9 +607,9 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstreamNoWatchdog(upstreamReq, proxyURL, account)
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, "")
 	}
 	defer func() { _ = resp.Body.Close() }()
 

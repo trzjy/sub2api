@@ -117,9 +117,9 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true, upstreamModel)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -136,14 +136,15 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, billingModel)
 
 	if clientStream {
-		return s.handleCCStreamingFromNativeAnthropic(resp, c, originalModel, billingModel, upstreamModel, reasoningEffort, startTime, includeUsage)
+		return s.handleCCStreamingFromNativeAnthropic(ctx, account, resp, c, originalModel, billingModel, upstreamModel, reasoningEffort, startTime, includeUsage)
 	}
-	return s.handleCCBufferedFromNativeAnthropic(resp, c, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
+	return s.handleCCBufferedFromNativeAnthropic(account, resp, c, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
 }
 
 // handleCCBufferedFromNativeAnthropic reads Anthropic SSE events, assembles the
 // full response, then converts Anthropic → Responses → Chat Completions.
 func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
+	account *Account,
 	resp *http.Response,
 	c *gin.Context,
 	originalModel string,
@@ -194,6 +195,10 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 				return onIdle()
 			}
 			logReadErr(rerr)
+			// CN 首包超时：buffered 路径响应头尚未提交，可安全透明切换（冷却+换号）。
+			if isOpenAICNFirstByteTimeout(rerr) {
+				return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+			}
 			break
 		}
 		// SSE 规范允许 `event:xxx`（冒号后无空格）：Kimi 等 Anthropic 兼容上游
@@ -208,6 +213,10 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 				return onIdle()
 			}
 			logReadErr(rerr)
+			// CN 首包超时：buffered 路径响应头尚未提交，可安全透明切换（冷却+换号）。
+			if isOpenAICNFirstByteTimeout(rerr) {
+				return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+			}
 			break
 		}
 		payload, ok := extractOpenAISSEDataLine(dataLine)
@@ -296,6 +305,8 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 // handleCCStreamingFromNativeAnthropic reads Anthropic SSE events, converts each
 // to Responses events, then to Chat Completions chunks, and writes them.
 func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
+	ctx context.Context,
+	account *Account,
 	resp *http.Response,
 	c *gin.Context,
 	originalModel string,
@@ -307,14 +318,26 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
-	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	// CN 首包超时整改（闸②第 2 轮 block 1）：首字节前不提交响应头，延迟到
+	// 首个 SSE 事件写出时才提交（惰性 writer），使 CN 路径在首字节前仍处
+	// 可切换窗口——读到内部超时错误时返回 failover 错误供上层换号，而不是
+	// 提交 200 后让客户端拿到成功空流。响应头已提交后才到的超时按既有流
+	// 中断语义处理（发错误事件，不 finalize 冒充成功）。
+	clientOutputStarted := false
+	writeStreamHeaders := func() {
+		if clientOutputStarted {
+			return
+		}
+		clientOutputStarted = true
+		if s.responseHeaderFilter != nil {
+			responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		}
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(http.StatusOK)
 	}
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.WriteHeader(http.StatusOK)
 
 	anthState := apicompat.NewAnthropicEventToResponsesState()
 	anthState.Model = originalModel
@@ -388,6 +411,9 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			return false
 		}
 		out := string(reverseToolNamesIfPresent(c, []byte(sse)))
+		// 首个 SSE 事件写出前才提交响应头（CN 首包超时整改：首字节前不提交，
+		// 保持可切换窗口）。
+		writeStreamHeaders()
 		if _, err := fmt.Fprint(c.Writer, out); err != nil {
 			clientDisconnected = true
 			return false
@@ -436,6 +462,15 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 				return onIdle()
 			}
 			logReadErr(rerr)
+			// CN 首包超时（闸②整改）：首字节前返回既有 failover 错误（切换窗口
+			// 仍在，冷却链携带请求 ctx）；响应头已提交后返回流中断语义错误，不做
+			// 透明切换。
+			if isOpenAICNFirstByteTimeout(rerr) {
+				if !clientOutputStarted {
+					return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+				}
+				return s.abortCCNativeStreamAfterHeaders(c, resultWithUsage, rerr)
+			}
 			break
 		}
 		if _, ok := extractOpenAISSEEventLine(line); !ok {
@@ -449,6 +484,13 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			}
 			// EOF / 读错误：事件行后流终止，进入 finalize。
 			logReadErr(rerr)
+			// CN 首包超时（闸②整改）：同上。
+			if isOpenAICNFirstByteTimeout(rerr) {
+				if !clientOutputStarted {
+					return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+				}
+				return s.abortCCNativeStreamAfterHeaders(c, resultWithUsage, rerr)
+			}
 			break
 		}
 		payload, ok := extractOpenAISSEDataLine(dataLine)
@@ -480,6 +522,8 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	}
 
 	if !clientDisconnected {
+		// 空流正常收尾也要提交响应头（上游未发任何事件即 EOF 时 [DONE] 即首字节）。
+		writeStreamHeaders()
 		fmt.Fprint(c.Writer, "data: [DONE]\n\n") //nolint:errcheck
 		c.Writer.Flush()
 	}

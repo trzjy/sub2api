@@ -487,6 +487,9 @@ type OpenAIGatewayService struct {
 	openaiWSRetryMetrics                openAIWSRetryMetrics
 	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
 	codexSnapshotThrottle               *accountWriteThrottle
+	// cnFirstByteTimeout 是 CN 清单平台出站首包超时阈值；<=0 时用默认 60s。
+	// 仅用于测试注入短值，生产统一走 openAICNFirstByteTimeout。
+	cnFirstByteTimeout time.Duration
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map

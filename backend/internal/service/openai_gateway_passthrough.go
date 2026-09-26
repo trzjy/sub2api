@@ -375,12 +375,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 
 		upstreamStart := time.Now()
-		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err = s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 			// a failover so the handler switches to a healthy account.
-			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
+			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true, actualModel)
 		}
 		if resp.StatusCode >= 400 {
 			// Peek only to identify an invalid task. Restore the body so the existing
@@ -2224,6 +2224,15 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, err)
 			return resultWithUsage(), err
 		}
+		// CN 清单平台账号走 passthrough 时的首包超时：响应头未提交（首个 SSE
+		// 事件写出前）时透明切换（冷却+换号，带模型）；已提交则按既有流中断
+		// 语义处理（不做透明切换）。
+		if isOpenAICNFirstByteTimeout(err) {
+			if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				return resultWithUsage(), s.failoverOpenAICNFirstByteTimeout(ctx, account, mappedModel)
+			}
+			return resultWithUsage(), fmt.Errorf("stream read error: %w", err)
+		}
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 			msg := "OpenAI stream disconnected before completion"
 			if errText := strings.TrimSpace(err.Error()); errText != "" {
@@ -2278,6 +2287,11 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 ) (*openaiNonStreamingResultPassthrough, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		// CN 清单平台账号走 passthrough 时的首包超时：非流式缓冲路径响应头
+		// 尚未提交，可安全透明切换（冷却+换号，带模型）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, mappedModel)
+		}
 		return nil, err
 	}
 	observer := upstreamResponseModelObserverFromContext(c)

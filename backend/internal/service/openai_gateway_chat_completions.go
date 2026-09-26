@@ -392,9 +392,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
 	}
 	defer func() {
 		cancelUpstream()
@@ -541,7 +541,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 
 	finalResponse, usage, acc, err := s.readOpenAICompatBufferedTerminal(resp, c, "openai chat_completions buffered", requestID)
 	if err != nil {
-		return nil, s.newOpenAICompatBufferedReadFailoverError(c, account, resp, requestID, err)
+		return nil, s.newOpenAICompatBufferedReadFailoverError(c, account, resp, requestID, err, upstreamModel)
 	}
 
 	if finalResponse == nil {
@@ -649,7 +649,13 @@ func (s *OpenAIGatewayService) newOpenAICompatBufferedReadFailoverError(
 	resp *http.Response,
 	requestID string,
 	err error,
+	upstreamModel string,
 ) error {
+	// CN 清单平台首包超时：buffered 路径在读取完成前不会提交响应头，可安全
+	// 触发冷却+换号（内部超时错误 ≠ 客户端取消）。
+	if isOpenAICNFirstByteTimeout(err) {
+		return s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+	}
 	var readErr *openAICompatBufferedReadError
 	if !errors.As(err, &readErr) || readErr == nil || errors.Is(readErr.cause, bufio.ErrTooLong) {
 		return err
@@ -1048,6 +1054,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 		}
 		if err := scanner.Err(); err != nil {
 			handleScanErr(err)
+			if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, err, upstreamModel); foErr != nil {
+				return nil, foErr
+			}
 			if clientDisconnected || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
 			}
@@ -1123,6 +1132,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			}
 			if ev.err != nil {
 				handleScanErr(ev.err)
+				if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, ev.err, upstreamModel); foErr != nil {
+					return nil, foErr
+				}
 				if clientDisconnected || errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded) {
 					return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 				}
@@ -1164,6 +1176,13 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				continue
 			}
 			if time.Since(lastDataAt) < keepaliveInterval {
+				continue
+			}
+			// CN watchdog 覆盖的尝试在收到首个上游 body 字节前不得提交 keepalive：
+			// 心跳写出即提交响应头（Writer.Size 变化），60s 首包超时到期后的
+			// failover 会被抑制、无法透明换号。首字节到达后恢复既有心跳节奏；
+			// 非 CN 路径（body 未被 watchdog 包装）行为不变。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
 				continue
 			}
 			// Send SSE comment as keepalive

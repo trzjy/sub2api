@@ -47,7 +47,6 @@ type OpenAIGatewayHandler struct {
 	opsService                 *service.OpsService
 	concurrencyHelper          *ConcurrencyHelper
 	imageLimiter               *imageConcurrencyLimiter
-	maxAccountSwitches         int
 	cfg                        *config.Config
 }
 
@@ -354,12 +353,8 @@ func NewOpenAIGatewayHandler(
 	cfg *config.Config,
 ) *OpenAIGatewayHandler {
 	pingInterval := time.Duration(0)
-	maxAccountSwitches := 3
 	if cfg != nil {
 		pingInterval = time.Duration(cfg.Concurrency.PingInterval) * time.Second
-		if cfg.Gateway.MaxAccountSwitches > 0 {
-			maxAccountSwitches = cfg.Gateway.MaxAccountSwitches
-		}
 	}
 	return &OpenAIGatewayHandler{
 		gatewayService:           gatewayService,
@@ -372,7 +367,6 @@ func NewOpenAIGatewayHandler(
 		opsService:               opsService,
 		concurrencyHelper:        NewConcurrencyHelper(concurrencyService, SSEPingFormatComment, pingInterval),
 		imageLimiter:             &imageConcurrencyLimiter{},
-		maxAccountSwitches:       maxAccountSwitches,
 		cfg:                      cfg,
 	}
 }
@@ -619,7 +613,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	))
 	requireCompact := legacyCompact
 
-	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	firstOutputTimeoutSwitchCount := 0
 	profitVetoCount := 0
@@ -916,10 +909,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					if switchCount >= maxAccountSwitches {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
-						return
-					}
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
@@ -929,7 +918,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
 						zap.Int("switch_count", switchCount),
-						zap.Int("max_switches", maxAccountSwitches),
 					}
 					if account.Proxy != nil {
 						failoverSwitchFields = append(failoverSwitchFields,
@@ -1252,7 +1240,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
-	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
@@ -1476,10 +1463,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					if switchCount >= maxAccountSwitches {
-						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
-						return
-					}
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
@@ -1489,7 +1472,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
 						zap.Int("switch_count", switchCount),
-						zap.Int("max_switches", maxAccountSwitches),
 					)
 					continue
 				}
@@ -2544,7 +2526,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
-	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
@@ -2593,10 +2574,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		if switchCount >= maxAccountSwitches {
-			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
-			return false
-		}
 		switchCount++
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
@@ -2606,7 +2583,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			zap.Int64("account_id", account.ID),
 			zap.Int("upstream_status", failoverErr.StatusCode),
 			zap.Int("switch_count", switchCount),
-			zap.Int("max_switches", maxAccountSwitches),
 		)
 		if ctx.Err() != nil {
 			return false

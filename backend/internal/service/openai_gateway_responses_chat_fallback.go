@@ -108,7 +108,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +123,14 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	}
 
 	if clientStream {
-		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
-	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	return s.bufferChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	originalModel string,
 	customTools map[string]bool,
@@ -143,8 +144,15 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
-	ccResp, usage, err := s.readCCUpstreamJSONResponse(c, resp, writeOpenAIResponsesFallbackError)
+	ccResp, usage, err := s.readCCUpstreamJSONResponse(resp, c, writeOpenAIResponsesFallbackError)
 	if err != nil {
+		// CN 首包超时：缓冲路径响应头尚未提交，可安全透明切换（冷却+换号）。
+		// 读取错误未写客户端响应（readCCUpstreamJSONResponse 对内部超时原样
+		// 返回），此处优先映射内部超时为 failover；其余错误已按原 endpoint
+		// 契约回写（TooLarge/parse/read），直接上抛即可。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		return nil, err
 	}
 	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
@@ -172,6 +180,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 
 func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	originalModel string,
 	customTools map[string]bool,
@@ -227,6 +236,10 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	})
 
 	if scan.Err != nil {
+		// CN 首包超时：响应头未提交（首事件写出前）时透明切换（冷却+换号）。
+		if isOpenAICNFirstByteTimeout(scan.Err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		return &OpenAIForwardResult{
 			RequestID:                   requestID,
 			UpstreamHeaders:             resp.Header,

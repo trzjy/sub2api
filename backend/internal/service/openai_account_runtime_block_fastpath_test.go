@@ -849,3 +849,99 @@ func TestShouldStopOpenAIOAuth429Failover_TracksOneGrokFollowupAttempt(t *testin
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(account, http.StatusTooManyRequests, 0, &state))
 	require.False(t, svc.ShouldStopOpenAIOAuth429Failover(apiKeyAccount, http.StatusTooManyRequests, 2, &state))
 }
+
+// P1a 派发单：fastpath 瞬态冷却与账号调度块门禁对 CN 清单平台开放。
+// CN 平台账号（kimi/deepseek/zhipu/minimax，apikey 与 oauth 均含）在收到
+// 单组 5xx（500/502/503/504/520/521/522/523/524）两次后进入 model 级瞬态冷却。
+// 注意：model 级冷却需 failureStreak>=2（openai_account_model_transient.go），
+// 阈值属禁区不可改，故此处与 OpenAI 既有行为一致地发两次建立 streak。
+func TestOpenAICNFastPath_5xxEntersModelTransientBlock(t *testing.T) {
+	repo := &errorPolicyRepoStub{}
+	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	gateway := &OpenAIGatewayService{rateLimitService: rateLimitService}
+
+	cnPlatforms := []string{PlatformKimi, PlatformDeepseek, PlatformZhipu, PlatformMiniMax}
+	statusCodes := []int{
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+		520, 521, 522, 523, 524,
+	}
+	model := "kimi-k2"
+
+	idx := int64(0)
+	for _, platform := range cnPlatforms {
+		for _, statusCode := range statusCodes {
+			for _, acctType := range []string{AccountTypeAPIKey, AccountTypeOAuth} {
+				idx++
+				account := &Account{ID: idx + 10000, Platform: platform, Type: acctType}
+				for i := 0; i < 2; i++ {
+					shouldDisable := gateway.handleOpenAIAccountUpstreamError(
+						context.Background(), account, statusCode, http.Header{},
+						[]byte(`{"error":{"message":"upstream unavailable"}}`), model,
+					)
+					require.False(t, shouldDisable)
+				}
+				require.True(t, gateway.isOpenAIAccountRequestRuntimeBlocked(account, model),
+					"CN %s/%s 5xx must enter model transient cooldown", platform, acctType)
+				require.Equal(t, 0, repo.tempCalls, "CN 5xx must not create account-level temp-unschedulable")
+			}
+		}
+	}
+}
+
+// CN 账号的 BlockAccountScheduling 写入后，读取侧（isOpenAIAccountRuntimeBlocked
+// 与 peekOpenAIAccountRuntimeBlock，即派发单 point 4 放开的两处）必须可见。
+func TestOpenAICNFastPath_BlockAccountSchedulingVisibleToReaders(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	cnPlatforms := []string{PlatformKimi, PlatformDeepseek, PlatformZhipu, PlatformMiniMax}
+	idx := int64(0)
+	for _, platform := range cnPlatforms {
+		idx++
+		account := &Account{ID: idx + 20000, Platform: platform, Type: AccountTypeAPIKey}
+		until := time.Now().Add(time.Minute)
+		svc.BlockAccountScheduling(account, until, "upstream_disable")
+		require.True(t, svc.isOpenAIAccountRuntimeBlocked(account), "CN %s write must be readable", platform)
+		snapshot := svc.peekOpenAIAccountRuntimeBlock(account)
+		require.True(t, snapshot.blocked, "CN %s peek must report blocked", platform)
+		require.True(t, snapshot.until.After(time.Now()))
+	}
+}
+
+// other 平台与 codebuddy（独立出站链，禁区）不得受本卡影响：
+// 既不会进入调度块，也不会进入 model 级瞬态冷却。
+func TestOpenAICNFastPath_OtherPlatformUnaffected(t *testing.T) {
+	repo := &errorPolicyRepoStub{}
+	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	gateway := &OpenAIGatewayService{rateLimitService: rateLimitService}
+
+	other := &Account{ID: 30001, Platform: PlatformOther, Type: AccountTypeAPIKey}
+	gateway.BlockAccountScheduling(other, time.Now().Add(time.Minute), "upstream_disable")
+	require.False(t, gateway.isOpenAIAccountRuntimeBlocked(other))
+
+	otherModelAcct := &Account{ID: 30002, Platform: PlatformOther, Type: AccountTypeAPIKey}
+	for i := 0; i < 2; i++ {
+		gateway.handleOpenAIAccountUpstreamError(
+			context.Background(), otherModelAcct, http.StatusGatewayTimeout, http.Header{},
+			[]byte(`{"error":{"message":"x"}}`), "whatever",
+		)
+	}
+	require.False(t, gateway.isOpenAIAccountRequestRuntimeBlocked(otherModelAcct, "whatever"))
+
+	codebuddy := &Account{ID: 30003, Platform: PlatformCodeBuddy, Type: AccountTypeAPIKey}
+	gateway.BlockAccountScheduling(codebuddy, time.Now().Add(time.Minute), "upstream_disable")
+	require.False(t, gateway.isOpenAIAccountRuntimeBlocked(codebuddy))
+}
+
+// point 5 fail-open 交互核实的代码证据：CN 账号级块（openaiAccountRuntimeBlockUntil）
+// 若无持久化冷却字段（TempUnschedulableUntil/RateLimitResetAt/OverloadUntil）背书，
+// isOpenAIAccountRequestRuntimeBlocked 会 fail-open 立即清除。CN 5xx 走 HandleUpstreamError
+// default 分支仅 warn、不写持久化字段（ratelimit_service.go:576-579），故 5xx 瞬态冷却
+// 只能落在 model 级内存块，不经账号级 fail-open CAS——链闭合，无需新机制。
+func TestOpenAICNFastPath_AccountBlockFailsOpenWithoutPersistedCooldown(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 40001, Platform: PlatformKimi, Type: AccountTypeAPIKey}
+	svc.BlockAccountScheduling(account, time.Now().Add(10*time.Minute), "manual")
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account), "write side still sees the unbacked block")
+	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "kimi-k2"),
+		"fail-open must clear the account block lacking persisted cooldown backing")
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account), "fail-open cleared the unbacked account block")
+}

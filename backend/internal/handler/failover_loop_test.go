@@ -132,8 +132,7 @@ func newTestFailoverErr(statusCode int, retryable, forceBilling bool) *service.U
 
 func TestNewFailoverState(t *testing.T) {
 	t.Run("初始化字段正确", func(t *testing.T) {
-		fs := NewFailoverState(5, true)
-		require.Equal(t, 5, fs.MaxSwitches)
+		fs := NewFailoverState(true)
 		require.Equal(t, 0, fs.SwitchCount)
 		require.NotNil(t, fs.FailedAccountIDs)
 		require.Empty(t, fs.FailedAccountIDs)
@@ -145,14 +144,78 @@ func TestNewFailoverState(t *testing.T) {
 	})
 
 	t.Run("无绑定会话", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
-		require.Equal(t, 3, fs.MaxSwitches)
+		fs := NewFailoverState(false)
 		require.False(t, fs.hasBoundSession)
 	})
+}
 
-	t.Run("零最大切换次数", func(t *testing.T) {
-		fs := NewFailoverState(0, false)
+// TestFailoverStateCapSemantics 锁定 P3 旧链删除后的两种构造语义：
+// OpenAI 家族链（NewFailoverState）无固定切换上限，账号耗尽由候选集合边界判定；
+// gemini 链（NewFailoverStateCapped）保留旧版固定上限，达上限即耗尽。
+func TestFailoverStateCapSemantics(t *testing.T) {
+	retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+
+	t.Run("NewFailoverStateCapped 达上限即耗尽（gemini 链）", func(t *testing.T) {
+		fs := NewFailoverStateCapped(3, false)
+		mock := &mockTempUnscheduler{}
+		for i := 1; i <= 3; i++ {
+			require.Equal(t, FailoverContinue, fs.HandleFailoverError(
+				context.Background(), mock, int64(i), service.PlatformGemini, 1, retryableErr))
+		}
+		require.Equal(t, FailoverExhausted, fs.HandleFailoverError(
+			context.Background(), mock, 4, service.PlatformGemini, 1, retryableErr))
+	})
+
+	t.Run("NewFailoverState 无固定上限（OpenAI 家族链）", func(t *testing.T) {
+		fs := NewFailoverState(false)
+		mock := &mockTempUnscheduler{}
+		for i := 1; i <= 12; i++ {
+			require.Equal(t, FailoverContinue, fs.HandleFailoverError(
+				context.Background(), mock, int64(i), service.PlatformOpenAI, 1, retryableErr))
+		}
+	})
+}
+
+// TestChatCompletionsGeminiFailoverStateCapped 锁定 ChatCompletions 入口的
+// gemini 分支上限（闸②终审整改 1）：gemini 平台必须构造带固定切换上限的
+// NewFailoverStateCapped（配置 maxAccountSwitchesGemini 生效），其他平台
+// 保持无固定上限的 NewFailoverState。防回归：gemini 分支被改回
+// NewFailoverState(false) 时上限丢失。
+func TestChatCompletionsGeminiFailoverStateCapped(t *testing.T) {
+	t.Run("gemini 平台带上限", func(t *testing.T) {
+		fs := newChatCompletionsFailoverState(service.PlatformGemini, 3)
+		require.Equal(t, 3, fs.MaxSwitches)
+		// 达上限即耗尽（gemini 旧语义）。
+		mock := &mockTempUnscheduler{}
+		retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+		for i := 1; i <= 3; i++ {
+			require.Equal(t, FailoverContinue, fs.HandleFailoverError(
+				context.Background(), mock, int64(i), service.PlatformGemini, 1, retryableErr))
+		}
+		require.Equal(t, FailoverExhausted, fs.HandleFailoverError(
+			context.Background(), mock, 4, service.PlatformGemini, 1, retryableErr))
+	})
+
+	t.Run("gemini 平台按配置值生效", func(t *testing.T) {
+		fs := newChatCompletionsFailoverState(service.PlatformGemini, 1)
+		require.Equal(t, 1, fs.MaxSwitches)
+		mock := &mockTempUnscheduler{}
+		retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+		require.Equal(t, FailoverContinue, fs.HandleFailoverError(
+			context.Background(), mock, int64(1), service.PlatformGemini, 1, retryableErr))
+		require.Equal(t, FailoverExhausted, fs.HandleFailoverError(
+			context.Background(), mock, int64(2), service.PlatformGemini, 1, retryableErr))
+	})
+
+	t.Run("非 gemini 平台无固定上限", func(t *testing.T) {
+		fs := newChatCompletionsFailoverState(service.PlatformOpenAI, 3)
 		require.Equal(t, 0, fs.MaxSwitches)
+		mock := &mockTempUnscheduler{}
+		retryableErr := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+		for i := 1; i <= 12; i++ {
+			require.Equal(t, FailoverContinue, fs.HandleFailoverError(
+				context.Background(), mock, int64(i), service.PlatformOpenAI, 1, retryableErr))
+		}
 	})
 }
 
@@ -216,7 +279,7 @@ func TestSleepWithContext(t *testing.T) {
 func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 	t.Run("显式停止不切换账号且旧错误默认仍切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		stopErr := &service.UpstreamFailoverError{
 			Stage:             service.GatewayFailureStageAccountAuth,
 			Scope:             service.GatewayFailureScopeProvider,
@@ -242,7 +305,7 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := &service.UpstreamFailoverError{
 			Stage:             service.GatewayFailureStageAccountAuth,
 			Scope:             service.GatewayFailureScopeAccount,
@@ -260,7 +323,7 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 
 	t.Run("非重试错误_非Antigravity_直接切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, false, false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -276,7 +339,7 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 	t.Run("非重试错误_Antigravity_第一次切换无延迟", func(t *testing.T) {
 		// switchCount 从 0→1 时，sleepFailoverDelay(ctx, 1) 的延时 = (1-1)*1s = 0
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, false, false)
 
 		start := time.Now()
@@ -291,7 +354,7 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 	t.Run("非重试错误_Antigravity_第二次切换有1秒延迟", func(t *testing.T) {
 		// switchCount 从 1→2 时，sleepFailoverDelay(ctx, 2) 的延时 = (2-1)*1s = 1s
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.SwitchCount = 1 // 模拟已切换一次
 
 		err := newTestFailoverErr(500, false, false)
@@ -305,9 +368,9 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		require.Less(t, elapsed, 3*time.Second)
 	})
 
-	t.Run("连续切换直到耗尽", func(t *testing.T) {
+	t.Run("连续切换在旧上限层不再耗尽_交由候选集合判定", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(2, false)
+		fs := NewFailoverState(false)
 
 		// 第一次切换：0→1
 		err1 := newTestFailoverErr(500, false, false)
@@ -321,11 +384,12 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		require.Equal(t, FailoverContinue, action)
 		require.Equal(t, 2, fs.SwitchCount)
 
-		// 第三次已耗尽：SwitchCount(2) >= MaxSwitches(2)
+		// 第三次：旧链的固定切换上限已删除，此处不再因计数耗尽，
+		// 仍返回 Continue（耗尽交由“所有候选账号均在排除列表”在调用方判定）。
 		err3 := newTestFailoverErr(503, false, false)
 		action = fs.HandleFailoverError(context.Background(), mock, 300, "openai", maxSameAccountRetries, err3)
-		require.Equal(t, FailoverExhausted, action)
-		require.Equal(t, 2, fs.SwitchCount, "耗尽时不应继续递增")
+		require.Equal(t, FailoverContinue, action)
+		require.Equal(t, 3, fs.SwitchCount)
 
 		// 验证失败账号列表
 		require.Len(t, fs.FailedAccountIDs, 3)
@@ -336,17 +400,6 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 		// LastFailoverErr 应为最后一次的错误
 		require.Equal(t, err3, fs.LastFailoverErr)
 	})
-
-	t.Run("MaxSwitches为0时首次即耗尽", func(t *testing.T) {
-		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(0, false)
-		err := newTestFailoverErr(500, false, false)
-
-		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
-		require.Equal(t, FailoverExhausted, action)
-		require.Equal(t, 0, fs.SwitchCount)
-		require.Contains(t, fs.FailedAccountIDs, int64(100))
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +409,7 @@ func TestHandleFailoverError_BasicSwitch(t *testing.T) {
 func TestHandleFailoverError_CacheBilling(t *testing.T) {
 	t.Run("hasBoundSession为true且实际切换时设置ForceCacheBilling", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true) // hasBoundSession=true
+		fs := NewFailoverState(true) // hasBoundSession=true
 		err := newTestFailoverErr(500, false, false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -365,7 +418,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("同账号重试时仅凭hasBoundSession不设置ForceCacheBilling", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true)
+		fs := NewFailoverState(true)
 		err := newTestFailoverErr(400, true, false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -376,7 +429,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("OAuth deadline存在时不按普通计数切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true)
+		fs := NewFailoverState(true)
 		fs.SameAccountRetryCount[100] = maxSameAccountRetries
 		err := newTestFailoverErr(http.StatusTooManyRequests, true, false)
 		err.SameAccountRetryDeadline = time.Now().Add(time.Minute)
@@ -392,7 +445,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("同账号重试耗尽并实际切换时设置ForceCacheBilling", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true)
+		fs := NewFailoverState(true)
 		err := newTestFailoverErr(400, true, false)
 
 		for i := 0; i < maxSameAccountRetries; i++ {
@@ -407,7 +460,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("failoverErr.ForceCacheBilling为true时设置", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, false, true) // ForceCacheBilling=true
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -416,7 +469,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("同账号重试保留显式ForceCacheBilling", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true)
+		fs := NewFailoverState(true)
 		err := newTestFailoverErr(400, true, true)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -427,7 +480,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("两者均为false时不设置", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, false, false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -436,7 +489,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 
 	t.Run("一旦设置不会被后续错误重置", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		// 第一次：ForceCacheBilling=true → 设置
 		err1 := newTestFailoverErr(500, false, true)
@@ -457,7 +510,7 @@ func TestHandleFailoverError_CacheBilling(t *testing.T) {
 func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 	t.Run("第一次重试返回FailoverContinue", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		start := time.Now()
@@ -476,7 +529,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 
 	t.Run("达到最大重试次数前均返回FailoverContinue", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		for i := 1; i <= maxSameAccountRetries; i++ {
@@ -490,7 +543,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 
 	t.Run("超过最大重试次数后触发TempUnschedule并切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		for i := 0; i < maxSameAccountRetries; i++ {
@@ -512,7 +565,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 
 	t.Run("不同账号独立跟踪重试次数", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(5, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		// 账号 100 第一次重试
@@ -529,7 +582,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 
 	t.Run("重试耗尽后再次遇到同账号_直接切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(5, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		// 耗尽账号 100 的重试
@@ -550,7 +603,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 		// 回归测试：Anthropic 等路径此前硬编码同账号重试 3 次，忽略账号
 		// pool_mode_retry_count 配置。此处验证传入 retryLimit=1 时只重试 1 次即切换。
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(5, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(403, true, false)
 		const retryLimit = 1
 
@@ -573,7 +626,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 	t.Run("retryLimit为0时立即切换不重试", func(t *testing.T) {
 		// pool_mode_retry_count=0 表示关闭同账号重试（如 GPT Image 账号）。
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(5, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(403, true, false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", 0, err)
@@ -591,7 +644,7 @@ func TestHandleFailoverError_SameAccountRetry(t *testing.T) {
 func TestHandleFailoverError_TempUnschedule(t *testing.T) {
 	t.Run("非重试错误不调用TempUnschedule", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, false, false) // RetryableOnSameAccount=false
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -600,7 +653,7 @@ func TestHandleFailoverError_TempUnschedule(t *testing.T) {
 
 	t.Run("重试错误耗尽后调用TempUnschedule_传入正确参数", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(502, true, false)
 
 		for i := 0; i < maxSameAccountRetries; i++ {
@@ -623,7 +676,7 @@ func TestHandleFailoverError_TempUnschedule(t *testing.T) {
 func TestHandleFailoverError_ContextCanceled(t *testing.T) {
 	t.Run("同账号重试sleep期间context取消", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(400, true, false)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -644,7 +697,7 @@ func TestHandleFailoverError_ContextCanceled(t *testing.T) {
 
 	t.Run("入口即已取消_不改动任何failover状态", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(520, false, false)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -666,7 +719,7 @@ func TestHandleFailoverError_ContextCanceled(t *testing.T) {
 
 	t.Run("Antigravity延迟期间context取消", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.SwitchCount = 1 // 下一次 switchCount=2 → delay = 1s
 		err := newTestFailoverErr(500, false, false)
 
@@ -689,7 +742,7 @@ func TestHandleFailoverError_ContextCanceled(t *testing.T) {
 func TestHandleFailoverError_FailedAccountIDs(t *testing.T) {
 	t.Run("切换时添加到失败列表", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, newTestFailoverErr(500, false, false))
 		require.Contains(t, fs.FailedAccountIDs, int64(100))
@@ -699,18 +752,19 @@ func TestHandleFailoverError_FailedAccountIDs(t *testing.T) {
 		require.Len(t, fs.FailedAccountIDs, 2)
 	})
 
-	t.Run("耗尽时也添加到失败列表", func(t *testing.T) {
+	t.Run("可重试错误切换时也添加到失败列表", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(0, false)
+		fs := NewFailoverState(false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, newTestFailoverErr(500, false, false))
-		require.Equal(t, FailoverExhausted, action)
+		require.Equal(t, FailoverContinue, action)
 		require.Contains(t, fs.FailedAccountIDs, int64(100))
+		require.Equal(t, 1, fs.SwitchCount)
 	})
 
 	t.Run("同账号重试期间不添加到失败列表", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, newTestFailoverErr(400, true, false))
 		require.Equal(t, FailoverContinue, action)
@@ -719,7 +773,7 @@ func TestHandleFailoverError_FailedAccountIDs(t *testing.T) {
 
 	t.Run("同一账号多次切换不重复添加", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(5, false)
+		fs := NewFailoverState(false)
 
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, newTestFailoverErr(500, false, false))
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, newTestFailoverErr(500, false, false))
@@ -734,7 +788,7 @@ func TestHandleFailoverError_FailedAccountIDs(t *testing.T) {
 func TestHandleFailoverError_LastFailoverErr(t *testing.T) {
 	t.Run("每次调用都更新LastFailoverErr", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		err1 := newTestFailoverErr(500, false, false)
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err1)
@@ -747,7 +801,7 @@ func TestHandleFailoverError_LastFailoverErr(t *testing.T) {
 
 	t.Run("同账号重试时也更新LastFailoverErr", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		err := newTestFailoverErr(400, true, false)
 		fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -762,7 +816,7 @@ func TestHandleFailoverError_LastFailoverErr(t *testing.T) {
 func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 	t.Run("模拟完整failover流程_多账号混合重试与切换", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, true) // hasBoundSession=true
+		fs := NewFailoverState(true) // hasBoundSession=true
 
 		// 1. 账号 100 遇到可重试错误，同账号重试 maxSameAccountRetries 次
 		retryErr := newTestFailoverErr(400, true, false)
@@ -790,12 +844,13 @@ func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 		require.Equal(t, FailoverContinue, action)
 		require.Equal(t, 3, fs.SwitchCount)
 
-		// 5. 账号 400 → 已耗尽 (SwitchCount=3 >= MaxSwitches=3)
+		// 5. 旧链的固定切换上限已删除：账号 400 仍可继续切换（不在此层耗尽），
+		// 耗尽交由“所有候选账号均在排除列表”在调用方判定。
 		action = fs.HandleFailoverError(context.Background(), mock, 400, "openai", maxSameAccountRetries, switchErr)
-		require.Equal(t, FailoverExhausted, action)
+		require.Equal(t, FailoverContinue, action)
+		require.Equal(t, 4, fs.SwitchCount)
 
 		// 最终状态验证
-		require.Equal(t, 3, fs.SwitchCount, "耗尽时不再递增")
 		require.Len(t, fs.FailedAccountIDs, 4, "4个不同账号都在失败列表中")
 		require.True(t, fs.ForceCacheBilling)
 		require.Len(t, mock.calls, 1, "只有账号 100 触发了 TempUnschedule")
@@ -803,7 +858,7 @@ func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 
 	t.Run("模拟Antigravity平台完整流程", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(2, false)
+		fs := NewFailoverState(false)
 
 		err := newTestFailoverErr(500, false, false)
 
@@ -821,17 +876,19 @@ func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 		require.Equal(t, FailoverContinue, action)
 		require.GreaterOrEqual(t, elapsed, 800*time.Millisecond, "第二次切换延迟约 1s")
 
-		// 第三次：耗尽（无延迟，因为在检查延迟之前就返回了）
+		// 第三次：旧链的固定切换上限已删除，此处不再因计数耗尽，
+		// 仍会继续切换并施加递增的 Antigravity 延时（2s）。
 		start = time.Now()
 		action = fs.HandleFailoverError(context.Background(), mock, 300, service.PlatformAntigravity, maxSameAccountRetries, err)
 		elapsed = time.Since(start)
-		require.Equal(t, FailoverExhausted, action)
-		require.Less(t, elapsed, 200*time.Millisecond, "耗尽时不应有延迟")
+		require.Equal(t, FailoverContinue, action)
+		require.GreaterOrEqual(t, elapsed, 1800*time.Millisecond, "第三次切换延迟约 2s")
+		require.Equal(t, 3, fs.SwitchCount)
 	})
 
 	t.Run("ForceCacheBilling通过错误标志设置", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false) // hasBoundSession=false
+		fs := NewFailoverState(false) // hasBoundSession=false
 
 		// 第一次：ForceCacheBilling=false
 		err1 := newTestFailoverErr(500, false, false)
@@ -857,7 +914,7 @@ func TestHandleFailoverError_IntegrationScenario(t *testing.T) {
 func TestHandleFailoverError_EdgeCases(t *testing.T) {
 	t.Run("StatusCode为0的错误也能正常处理", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(0, false, false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
@@ -866,7 +923,7 @@ func TestHandleFailoverError_EdgeCases(t *testing.T) {
 
 	t.Run("AccountID为0也能正常跟踪", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, true, false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, 0, "openai", maxSameAccountRetries, err)
@@ -876,7 +933,7 @@ func TestHandleFailoverError_EdgeCases(t *testing.T) {
 
 	t.Run("负AccountID也能正常跟踪", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		err := newTestFailoverErr(500, true, false)
 
 		action := fs.HandleFailoverError(context.Background(), mock, -1, "openai", maxSameAccountRetries, err)
@@ -886,7 +943,7 @@ func TestHandleFailoverError_EdgeCases(t *testing.T) {
 
 	t.Run("空平台名称不触发Antigravity延迟", func(t *testing.T) {
 		mock := &mockTempUnscheduler{}
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.SwitchCount = 1
 		err := newTestFailoverErr(500, false, false)
 
@@ -905,7 +962,7 @@ func TestHandleFailoverError_EdgeCases(t *testing.T) {
 
 func TestHandleSelectionExhausted(t *testing.T) {
 	t.Run("无LastFailoverErr时返回Exhausted", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		// LastFailoverErr 为 nil
 
 		action := fs.HandleSelectionExhausted(context.Background())
@@ -913,15 +970,15 @@ func TestHandleSelectionExhausted(t *testing.T) {
 	})
 
 	t.Run("非503错误返回Exhausted", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(500, false, false)
 
 		action := fs.HandleSelectionExhausted(context.Background())
 		require.Equal(t, FailoverExhausted, action)
 	})
 
-	t.Run("503且未耗尽_等待后返回Continue并清除失败列表", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
+	t.Run("503错误_选号耗尽直接返回Exhausted_无退避重试", func(t *testing.T) {
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(503, false, false)
 		fs.FailedAccountIDs[100] = struct{}{}
 		fs.SwitchCount = 1
@@ -930,16 +987,17 @@ func TestHandleSelectionExhausted(t *testing.T) {
 		action := fs.HandleSelectionExhausted(context.Background())
 		elapsed := time.Since(start)
 
-		require.Equal(t, FailoverContinue, action)
-		require.Empty(t, fs.FailedAccountIDs, "应清除失败账号列表")
-		require.GreaterOrEqual(t, elapsed, 1500*time.Millisecond, "应等待约 2s")
-		require.Less(t, elapsed, 5*time.Second)
+		// 旧链：单账号 503 退避重试已删除（无替代上限，且“每账号至多尝试一次”）。
+		// 选号耗尽即终止，不再清除失败列表重试用。
+		require.Equal(t, FailoverExhausted, action)
+		require.Less(t, elapsed, 100*time.Millisecond, "不应等待")
+		require.Len(t, fs.FailedAccountIDs, 1, "失败列表保持不变")
 	})
 
-	t.Run("503但SwitchCount已超过MaxSwitches_返回Exhausted", func(t *testing.T) {
-		fs := NewFailoverState(2, false)
+	t.Run("503_旧上限语义下也曾返回Exhausted", func(t *testing.T) {
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(503, false, false)
-		fs.SwitchCount = 3 // > MaxSwitches(2)
+		fs.SwitchCount = 3
 
 		start := time.Now()
 		action := fs.HandleSelectionExhausted(context.Background())
@@ -950,7 +1008,7 @@ func TestHandleSelectionExhausted(t *testing.T) {
 	})
 
 	t.Run("503但context已取消_返回Canceled", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(503, false, false)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -967,7 +1025,7 @@ func TestHandleSelectionExhausted(t *testing.T) {
 	t.Run("context已取消_非503也返回Canceled而非Exhausted", func(t *testing.T) {
 		// #4257 核心场景：客户端断开后选号失败源于 context canceled，
 		// 不应被当成账号耗尽转成 502。
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(520, false, false)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -978,7 +1036,7 @@ func TestHandleSelectionExhausted(t *testing.T) {
 	})
 
 	t.Run("context已取消_无LastFailoverErr也返回Canceled", func(t *testing.T) {
-		fs := NewFailoverState(3, false)
+		fs := NewFailoverState(false)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -987,13 +1045,13 @@ func TestHandleSelectionExhausted(t *testing.T) {
 		require.Equal(t, FailoverCanceled, action)
 	})
 
-	t.Run("503且SwitchCount等于MaxSwitches_仍可重试", func(t *testing.T) {
-		fs := NewFailoverState(2, false)
+	t.Run("503_选号耗尽返回Exhausted_无重试", func(t *testing.T) {
+		fs := NewFailoverState(false)
 		fs.LastFailoverErr = newTestFailoverErr(503, false, false)
-		fs.SwitchCount = 2 // == MaxSwitches，条件是 <=，仍可重试
+		fs.SwitchCount = 2
 
 		action := fs.HandleSelectionExhausted(context.Background())
-		require.Equal(t, FailoverContinue, action)
+		require.Equal(t, FailoverExhausted, action)
 	})
 }
 

@@ -193,10 +193,6 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	if isGrokVideoCreateEndpoint(endpoint) {
 		videoCreateStartedAt = service.GrokVideoPendingCreatedAtNow()
 	}
-	maxAccountSwitches := h.maxAccountSwitches
-	if maxAccountSwitches <= 0 {
-		maxAccountSwitches = 3
-	}
 	routingStart := time.Now()
 	requiredCapability := grokMediaRequiredCapability(endpoint)
 
@@ -290,11 +286,6 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 					zap.String("reason", eligibilityReason),
 					zap.Bool("probe_failed", eligibilityErr != nil),
 				)
-				if switchCount >= maxAccountSwitches {
-					markOpsRoutingCapacityLimited(c)
-					h.errorResponse(c, http.StatusServiceUnavailable, "grok_media_no_eligible_account", "No eligible Grok media accounts")
-					return
-				}
 				switchCount++
 				continue
 			}
@@ -381,24 +372,19 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 						continue
 					}
 				}
-				h.gatewayService.RecordOpenAIAccountSwitch()
-				failedAccountIDs[account.ID] = struct{}{}
-				lastFailoverErr = failoverErr
-				if switchCount >= maxAccountSwitches {
-					h.handleFailoverExhausted(c, failoverErr, false)
-					return
-				}
-				switchCount++
-				if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
-					h.handleFailoverExhausted(c, failoverErr, false)
-					return
-				}
-				reqLog.Warn("grok_media.upstream_failover_switching",
-					zap.Int64("account_id", account.ID),
-					zap.Int("upstream_status", failoverErr.StatusCode),
-					zap.Int("switch_count", switchCount),
-					zap.Int("max_switches", maxAccountSwitches),
-				)
+			h.gatewayService.RecordOpenAIAccountSwitch()
+			failedAccountIDs[account.ID] = struct{}{}
+			lastFailoverErr = failoverErr
+			switchCount++
+			if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+				h.handleFailoverExhausted(c, failoverErr, false)
+				return
+			}
+			reqLog.Warn("grok_media.upstream_failover_switching",
+				zap.Int64("account_id", account.ID),
+				zap.Int("upstream_status", failoverErr.StatusCode),
+				zap.Int("switch_count", switchCount),
+			)
 				continue
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, grokMediaScheduleModel(account, routingModel, nil), false, nil)

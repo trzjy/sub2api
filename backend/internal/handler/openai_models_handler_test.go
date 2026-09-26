@@ -15,7 +15,7 @@ import (
 
 func performOrdinaryPinnedModelsRequest(t *testing.T, codex *OpenAIGatewayHandler, group *service.Group, path, etag string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := &GatewayHandler{openAIGatewayService: codex.gatewayService, maxAccountSwitches: 3}
+	h := &GatewayHandler{openAIGatewayService: codex.gatewayService}
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, path, nil)
@@ -44,7 +44,7 @@ func TestOrdinaryPinnedModelsUsesSelectedAccountsAndFinalETag(t *testing.T) {
 		2: `{"data":[{"id":"special-model","owned_by":"first","created":123},{"id":"gpt-image-1"}]}`,
 		3: `{"data":[{"id":"special-model","owned_by":"second"},{"id":"text-embedding-3-large"}]}`,
 	}}
-	h := newPinnedCodexTestHandler(accounts, upstream, 3)
+	h := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{ID: 91, Platform: service.PlatformOpenAI,
 		CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{2, 3}}}
 	first := performOrdinaryPinnedModelsRequest(t, h, group, "/v1/models", "")
@@ -106,7 +106,7 @@ func TestOrdinaryPinnedModelsFailureAndEmptyPolicies(t *testing.T) {
 				bodies[id] = body
 			}
 			upstream := &codexModelsPinnedHTTPUpstream{bodies: bodies, statuses: tc.statuses}
-			h := newPinnedCodexTestHandler(accounts, upstream, 3)
+			h := newPinnedCodexTestHandler(accounts, upstream)
 			group := &service.Group{ID: 92, Platform: service.PlatformOpenAI,
 				ModelAllowlist:            service.GroupModelAllowlist{Enabled: len(tc.selected) > 0, Models: tc.selected},
 				CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: tc.accountIDs, FallbackToScheduler: tc.fallback}}
@@ -138,7 +138,7 @@ func TestOrdinaryPinnedModelsSkipsPersistentlyUnavailableAccounts(t *testing.T) 
 	accounts[0].OverloadUntil = &overloaded
 	accounts[0].TempUnschedulableUntil = &overloaded
 	upstream := &codexModelsPinnedHTTPUpstream{bodies: map[int64]string{1: `{"data":[{"id":"available"}]}`}}
-	h := newPinnedCodexTestHandler(accounts, upstream, 3)
+	h := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{ID: 93, Platform: service.PlatformOpenAI,
 		CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{1, 2, 3, 4, 99}}}
 	recorder := performOrdinaryPinnedModelsRequest(t, h, group, "/v1/models", "")
@@ -158,7 +158,7 @@ func TestPinnedModelsAllowlistExpandsWildcardsForBothRepresentations(t *testing.
 				body = `{"models":[{"slug":"gpt-5.5","context_window":424242}]}`
 			}
 			upstream := &codexModelsPinnedHTTPUpstream{bodies: map[int64]string{1: body}}
-			h := newPinnedCodexTestHandler(accounts, upstream, 3)
+			h := newPinnedCodexTestHandler(accounts, upstream)
 			group := &service.Group{ID: 95, Platform: service.PlatformOpenAI,
 				ModelAllowlist:            service.GroupModelAllowlist{Enabled: true, Models: []string{"public-b", "public-*"}},
 				CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{1}}}
@@ -193,7 +193,7 @@ func TestPinnedModelsMappingFollowsUpstreamDiscoveryForBothRepresentations(t *te
 				body = `{"models":[{"slug":"gpt-5.5","context_window":424242},{"slug":"unmapped-upstream"}]}`
 			}
 			upstream := &codexModelsPinnedHTTPUpstream{bodies: map[int64]string{2: body}}
-			h := newPinnedCodexTestHandler(accounts, upstream, 3)
+			h := newPinnedCodexTestHandler(accounts, upstream)
 			group := &service.Group{ID: 94, Platform: service.PlatformOpenAI,
 				ModelAllowlist:            service.GroupModelAllowlist{Enabled: true, Models: []string{"custom-concrete", "public-alias", "unselected-alias", "missing-alias"}},
 				CodexModelsManifestConfig: service.GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{2}}}

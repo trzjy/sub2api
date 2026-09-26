@@ -251,7 +251,9 @@ func ApplyPinnedCodexModelsMapping(response *OpenAIModelsResponse, account *Acco
 
 // FetchPinnedOpenAIModelsList includes explicitly enabled scheduler fallback.
 // An authoritative empty catalog is success, including after group filtering.
-func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, group *Group, maxAccountSwitches int, ifNoneMatch string) (*OpenAIModelsResponse, *Account, error) {
+// maxFetchSwitches 是模型发现助手自己的有界换号预算（<=0 时取默认 3），
+// 与已删除的全局 maxAccountSwitches 旧链无关。
+func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, group *Group, maxFetchSwitches int, ifNoneMatch string) (*OpenAIModelsResponse, *Account, error) {
 	fetch := func(ctx context.Context, account *Account) (*OpenAIModelsResponse, error) {
 		response, err := s.FetchOpenAIModelsList(ctx, account)
 		if err != nil {
@@ -262,7 +264,7 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 	}
 	results, err := s.fetchPinnedOpenAIModels(ctx, group, fetch)
 	if err != nil && ctx.Err() == nil && group != nil && group.CodexModelsManifestConfig.FallbackToScheduler {
-		results, err = s.fetchScheduledOpenAIModels(ctx, group, maxAccountSwitches, fetch)
+		results, err = s.fetchScheduledOpenAIModels(ctx, group, maxFetchSwitches, fetch)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -343,13 +345,13 @@ func orderPinnedCodexModelsBySelection(body []byte, allowlist GroupModelAllowlis
 	return json.Marshal(envelope)
 }
 
-func (s *OpenAIGatewayService) fetchScheduledOpenAIModels(ctx context.Context, group *Group, maxSwitches int, fetch func(context.Context, *Account) (*OpenAIModelsResponse, error)) ([]pinnedOpenAIModelsResult, error) {
-	if maxSwitches <= 0 {
-		maxSwitches = 3
+func (s *OpenAIGatewayService) fetchScheduledOpenAIModels(ctx context.Context, group *Group, maxFetchSwitches int, fetch func(context.Context, *Account) (*OpenAIModelsResponse, error)) ([]pinnedOpenAIModelsResult, error) {
+	if maxFetchSwitches <= 0 {
+		maxFetchSwitches = 3
 	}
 	excluded := make(map[int64]struct{})
 	var lastErr error
-	for attempt := 0; attempt <= maxSwitches; attempt++ {
+	for attempt := 0; attempt <= maxFetchSwitches; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

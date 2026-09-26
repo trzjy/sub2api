@@ -100,9 +100,9 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 		return nil, err
 	}
 
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, upstreamReq, proxyURL, account)
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true, upstreamModel)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -222,6 +222,10 @@ func (s *OpenAIGatewayService) handleNativeAnthropicBufferedResponse(
 
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, anthropicTooLargeError)
 	if err != nil {
+		// CN 首包超时：非流式缓冲路径响应头尚未提交，可安全映射 failover（冷却+换号）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+		}
 		return nil, err
 	}
 	observer := upstreamResponseModelObserverFromContext(c)
@@ -314,6 +318,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	usage := &ClaudeUsage{}
 	var firstTokenMs *int
 	clientDisconnected := false
+	clientOutputStarted := false
 	sawTerminalEvent := false
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -412,14 +417,21 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			} else if _, err := io.WriteString(w, "\n"); err != nil {
 				clientDisconnected = true
 				logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
-			} else if line == "" {
-				// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
-				flusher.Flush()
-				lastDataAt = time.Now()
-				resetKeepaliveTimer()
-				inPartialEvent = false
 			} else {
-				inPartialEvent = true
+				// 首个字节写出即提交响应头（Gin Writer 首次 Write 提交）：
+				// 记录 clientOutputStarted 供 body 阶段超时透明切换判定。
+				if line != "" && !clientOutputStarted {
+					clientOutputStarted = true
+				}
+				if line == "" {
+					// 按 SSE 事件边界刷出，减少每行 flush 带来的 syscall 开销。
+					flusher.Flush()
+					lastDataAt = time.Now()
+					resetKeepaliveTimer()
+					inPartialEvent = false
+				} else {
+					inPartialEvent = true
+				}
 			}
 		}
 	}
@@ -458,6 +470,20 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				if errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded) {
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 						fmt.Errorf("stream usage incomplete: %w", ev.err)
+				}
+				// CN 首包超时：响应头未提交（首字节未写出）时透明切换（冷却+换号）；
+				// 已提交则按既有流中断语义处理（不做透明切换）。判定用真实下游
+				// 提交状态（与外层换号门 c.Writer.Written() 同一状态源）：本函数
+				// 为原始行直通，空行分支（writeStreamLine("")）写出的 "\n" 也会
+				// 提交响应头但本地标志不置位——仅看 clientOutputStarted 会与外层
+				// 脱节，导致对已提交响应返回 failover（客户端收到 200 空流）。
+				if isOpenAICNFirstByteTimeout(ev.err) {
+					if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+						return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+							s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+					}
+					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
+						fmt.Errorf("stream read error: %w", ev.err)
 				}
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
@@ -529,6 +555,15 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
+			// 旧 interval timer 不得在首字节前抢先裁决：合法配置
+			// stream_data_interval_timeout=30..59 下，interval tick 早于 60s
+			// watchdog 到期；若在此返回普通 interval timeout，会中断流且不触发
+			// failover/冷却，打穿换号窗口。body 被 CN watchdog 包装且首字节未到达
+			// 时，统一由 60s 边界负责（tick 不裁决）；首字节后既有 interval 语义
+			// 不变。非 CN 路径（body 未被 watchdog 包装）行为不变。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
+				continue
+			}
 			flushGuardBuffer()
 			if clientDisconnected {
 				return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
@@ -551,6 +586,13 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 			}
 			if time.Since(lastDataAt) < keepaliveInterval {
 				resetKeepaliveTimer()
+				continue
+			}
+			// CN watchdog 覆盖的尝试在收到首个上游 body 字节前不得提交 ping：
+			// 心跳写出即提交响应头（Writer.Size 变化），60s 首包超时到期后的
+			// failover 会被抑制、无法透明换号。首字节到达后恢复既有心跳；
+			// 非 CN 路径（body 未被 watchdog 包装）行为不变。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
 				continue
 			}
 			if _, err := fmt.Fprint(w, "event: ping\ndata: {\"type\": \"ping\"}\n\n"); err != nil {

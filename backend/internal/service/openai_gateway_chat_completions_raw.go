@@ -183,7 +183,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if customUA == "" && account.IsGrokOAuth() {
 		customUA = defaultGrokUpstreamUserAgent()
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -393,6 +393,17 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		errors.Is(scanErr, context.Canceled) ||
 		errors.Is(scanErr, context.DeadlineExceeded)
 
+	// CN 首包超时（watchdog 转译错误）：与普通截断区分，显式映射为
+	// failover（冷却+换号，带模型）。响应头未提交时透明切换；已提交时
+	// 按既有流中断语义处理（客户端已收到首字节，不透明切换）。
+	if isOpenAICNFirstByteTimeout(scanErr) {
+		if !clientOutputStarted {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
+		recordOpenAIRawStreamTruncation(c, account, requestID, scanErr, "http_error")
+		return resultWithUsage(), newOpenAIUpstreamStreamReadError(scanErr)
+	}
+
 	// 上游在任何终止信号之前结束：连接被 reset（scanErr != nil）或干净 EOF。
 	// 两者都不能再记成功——此前统一返回 nil error，把上游截断伪装成
 	// `HTTP 200 + usage 0/0`，客户端收到半截回答且 Ops 侧完全无感。
@@ -497,6 +508,10 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		// CN 首包超时：非流式缓冲路径响应头尚未提交，可安全透明切换（冷却+换号）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
 			writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
 		}

@@ -53,7 +53,6 @@ type GatewayHandler struct {
 	securityAuditCoordinator  *securityaudit.Coordinator
 	concurrencyHelper         *ConcurrencyHelper
 	userMsgQueueHelper        *UserMsgQueueHelper
-	maxAccountSwitches        int
 	maxAccountSwitchesGemini  int
 	cfg                       *config.Config
 	settingService            *service.SettingService
@@ -78,13 +77,9 @@ func NewGatewayHandler(
 	settingService *service.SettingService,
 ) *GatewayHandler {
 	pingInterval := time.Duration(0)
-	maxAccountSwitches := 10
 	maxAccountSwitchesGemini := 3
 	if cfg != nil {
 		pingInterval = time.Duration(cfg.Concurrency.PingInterval) * time.Second
-		if cfg.Gateway.MaxAccountSwitches > 0 {
-			maxAccountSwitches = cfg.Gateway.MaxAccountSwitches
-		}
 		if cfg.Gateway.MaxAccountSwitchesGemini > 0 {
 			maxAccountSwitchesGemini = cfg.Gateway.MaxAccountSwitchesGemini
 		}
@@ -110,7 +105,6 @@ func NewGatewayHandler(
 		contentModerationService:  contentModerationService,
 		concurrencyHelper:         NewConcurrencyHelper(concurrencyService, SSEPingFormatClaude, pingInterval),
 		userMsgQueueHelper:        umqHelper,
-		maxAccountSwitches:        maxAccountSwitches,
 		maxAccountSwitchesGemini:  maxAccountSwitchesGemini,
 		cfg:                       cfg,
 		settingService:            settingService,
@@ -319,7 +313,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	hasBoundSession := sessionKey != "" && sessionBoundAccountID > 0
 
 	if platform == service.PlatformGemini {
-		fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
+		fs := NewFailoverStateCapped(h.maxAccountSwitchesGemini, hasBoundSession)
 
 		// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 		// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -639,7 +633,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}()
 
 	for {
-		fs := NewFailoverState(h.maxAccountSwitches, hasBoundSession)
+		fs := NewFailoverState(hasBoundSession)
 		retryWithFallback := false
 
 		for {

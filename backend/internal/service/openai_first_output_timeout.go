@@ -334,6 +334,13 @@ type openAIRequestContextReadCloser struct {
 	err     error
 }
 
+// cnFirstByteTimeoutBody 实现载体接口：把内层（可能含 watchdog body 的）body
+// 交给 cnFirstByteTimeoutBodyOf 识别，使 watchdog 标记穿透本包装层可达
+// （闸②终审整改项 2：Forward 消费链在 watchdog 包装外再套本层时断言不能失效）。
+func (r *openAIRequestContextReadCloser) cnFirstByteTimeoutBody() *openAICNFirstByteTimeoutBody {
+	return cnFirstByteTimeoutBodyOf(r.ReadCloser)
+}
+
 func (r *openAIRequestContextReadCloser) Close() error {
 	r.once.Do(func() {
 		r.cleanup()

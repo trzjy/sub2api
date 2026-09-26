@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,20 +33,17 @@ const (
 const (
 	// maxSameAccountRetries 同账号重试次数默认上限（针对 RetryableOnSameAccount 错误）。
 	// 生产调用方通常传入账号级配置 account.GetPoolModeRetryCount()，该常量仅作兜底/测试默认值。
-	maxSameAccountRetries = 3
+	// 用户裁定（2026-09-26）：同账号重试默认 3→1，账号不行赶紧切下一个。
+	maxSameAccountRetries = 1
 	// sameAccountRetryDelay 同账号重试间隔
 	sameAccountRetryDelay = 500 * time.Millisecond
 	// maxRequestScopedRetryDelay 限制请求级瞬时错误的指数退避上限，避免高重试配置
 	// 将单次请求拖入分钟级等待。
 	maxRequestScopedRetryDelay = 8 * time.Second
-	// singleAccountBackoffDelay 单账号分组 503 退避重试固定延时。
-	// Service 层在 SingleAccountRetry 模式下已做充分原地重试（最多 3 次、总等待 30s），
-	// Handler 层只需短暂间隔后重新进入 Service 层即可。
-	singleAccountBackoffDelay = 2 * time.Second
 	// maxProfitVetoAttempts 单次请求内允许的分组利润门终检否决次数上限。
 	// 利润否决不产生上游请求，因此不会推进 SwitchCount；没有独立上限的话，
 	// 「选号 → 终检否决 → 重选」在候选池与账号快照短暂不一致时可以空转很久。
-	// 取值与 maxAccountSwitches 默认值一致：混合定价的大分组仍有充分重选机会，
+	// 取值与请求级利润否决上限一致：混合定价的大分组仍有充分重选机会，
 	// 同时把整池越线时的无谓选号开销限制在常数级。
 	maxProfitVetoAttempts = 10
 )
@@ -132,39 +128,45 @@ type FailoverState struct {
 	ForceCacheBilling     bool
 	hasBoundSession       bool
 
-	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
-	// 的子集。之所以单独维护：HandleSelectionExhausted 的 503 退避分支会清空
-	// FailedAccountIDs，而利润否决在同一请求内的判定不会改变（下游倍率 D 已在
-	// 请求开始冻结），被清空的账号会被立即重选并再次否决，形成没有任何上游请求、
-	// SwitchCount 也不前进的活锁。清空后必须把它们放回排除集。
-	profitVetoedAccountIDs map[int64]struct{}
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
 }
 
-// NewFailoverState 创建 failover 状态
-func NewFailoverState(maxSwitches int, hasBoundSession bool) *FailoverState {
+// NewFailoverState 创建无固定切换上限的 failover 状态（OpenAI 家族链专用）。
+//
+// 旧链（maxAccountSwitches / MaxAccountSwitches / max_account_switches）已删除：
+// 不再有固定全局切换上限。新语义——每个失败账号在本请求内至多尝试一次（被加入
+// 排除列表后不再回池），候选集合不冻结：请求期间恢复/新增的账号仍可被尝试（需求
+// ①"所有有效账号都要轮询到"）；账号耗尽由动态调度在排除集下返回无候选判定，
+// 而非固定计数上限。
+func NewFailoverState(hasBoundSession bool) *FailoverState {
 	return &FailoverState{
-		MaxSwitches:            maxSwitches,
-		FailedAccountIDs:       make(map[int64]struct{}),
-		SameAccountRetryCount:  make(map[int64]int),
-		hasBoundSession:        hasBoundSession,
-		profitVetoedAccountIDs: make(map[int64]struct{}),
+		FailedAccountIDs:      make(map[int64]struct{}),
+		SameAccountRetryCount: make(map[int64]int),
+		hasBoundSession:       hasBoundSession,
 	}
 }
 
-// RecordProfitVeto 记录一次分组利润门终检否决：把账号加入排除列表（同时登记到
-// 利润否决集，使其不被 503 退避分支清掉）并递增否决计数。
+// NewFailoverStateCapped 创建带固定切换上限的 failover 状态（仅 gemini 链使用）。
+//
+// gemini 链不在 OpenAI 家族的无上限方案范围内，其"默认 3 次、配置
+// max_account_switches_gemini 覆盖"的切换上限语义必须原样保留。MaxSwitches
+// 上限判定（HandleFailoverError 内 SwitchCount >= MaxSwitches 时返回
+// FailoverExhausted）与旧版完全一致；503 退避分支属于已验收删除项，不在此恢复。
+func NewFailoverStateCapped(maxSwitches int, hasBoundSession bool) *FailoverState {
+	fs := NewFailoverState(hasBoundSession)
+	fs.MaxSwitches = maxSwitches
+	return fs
+}
+
+// RecordProfitVeto 记录一次分组利润门终检否决：把账号加入排除列表并递增否决
+// 计数。无退避语义下排除列表在整个请求内只增不减，被否决账号不会重新回池。
 //
 // 返回 FailoverContinue 表示调用方可以继续重选下一个账号；返回 FailoverExhausted
 // 表示本次请求的利润否决次数已达上限，调用方应按「无可用账号」终止，
 // 不得继续 continue。
 func (s *FailoverState) RecordProfitVeto(accountID int64) FailoverAction {
 	s.FailedAccountIDs[accountID] = struct{}{}
-	if s.profitVetoedAccountIDs == nil {
-		s.profitVetoedAccountIDs = make(map[int64]struct{})
-	}
-	s.profitVetoedAccountIDs[accountID] = struct{}{}
 	s.profitVetoCount++
 	if s.profitVetoCount >= maxProfitVetoAttempts {
 		return FailoverExhausted
@@ -174,20 +176,6 @@ func (s *FailoverState) RecordProfitVeto(accountID int64) FailoverAction {
 
 // ProfitVetoCount 返回本次请求累计的利润否决次数（供日志使用）。
 func (s *FailoverState) ProfitVetoCount() int { return s.profitVetoCount }
-
-// allExclusionsAreProfitVetoed 判断排除列表是否已全部由利润门否决贡献。
-// 此时清空 FailedAccountIDs 会被原样恢复，退避重试不会带来任何新候选。
-func (s *FailoverState) allExclusionsAreProfitVetoed() bool {
-	if len(s.profitVetoedAccountIDs) == 0 || len(s.FailedAccountIDs) == 0 {
-		return false
-	}
-	for id := range s.FailedAccountIDs {
-		if _, ok := s.profitVetoedAccountIDs[id]; !ok {
-			return false
-		}
-	}
-	return true
-}
 
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
 // 包含：缓存计费判断、同账号重试、临时封禁、切换计数、Antigravity 延时。
@@ -242,18 +230,21 @@ func (s *FailoverState) HandleFailoverError(
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
 
-	// 检查是否耗尽
-	if s.SwitchCount >= s.MaxSwitches {
+	// OpenAI 家族链（NewFailoverState 构造，MaxSwitches==0）的固定切换上限已删除：
+	// 账号耗尽由"所有候选账号均在排除列表、选号返回无可用账号"自然判定，
+	// 从而支持"账号轮询不限制个数、所有有效账号都轮询到"。
+	// gemini 链经 NewFailoverStateCapped 构造（MaxSwitches>0），保留旧版固定上限
+	// 判定：切换计数达到上限即耗尽，语义与旧版完全一致。
+	if s.MaxSwitches > 0 && s.SwitchCount >= s.MaxSwitches {
 		return FailoverExhausted
 	}
 
-	// 递增切换计数
+	// 递增切换计数（仅用于日志与上游上下文标记，不再作为 OpenAI 家族链的耗尽判据）
 	s.SwitchCount++
 	logger.FromContext(ctx).Warn("gateway.failover_switch_account",
 		zap.Int64("account_id", accountID),
 		zap.Int("upstream_status", failoverErr.StatusCode),
 		zap.Int("switch_count", s.SwitchCount),
-		zap.Int("max_switches", s.MaxSwitches),
 	)
 
 	// Antigravity 平台换号线性递增延时
@@ -281,41 +272,11 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 		return FailoverCanceled
 	}
 
-	if s.LastFailoverErr != nil &&
-		s.LastFailoverErr.StatusCode == http.StatusServiceUnavailable &&
-		s.SwitchCount <= s.MaxSwitches {
-
-		// 排除列表全由利润门否决贡献时，清空后会被原样恢复：退避重试拿不到
-		// 任何新候选，而利润否决不推进 SwitchCount，退避条件将永远成立。
-		// 这里直接判定耗尽，避免每 2s 空转一轮的活锁。
-		if s.allExclusionsAreProfitVetoed() {
-			logger.FromContext(ctx).Warn("gateway.failover_selection_exhausted_by_profit_veto",
-				zap.Int("profit_veto_count", s.profitVetoCount),
-				zap.Int("excluded_accounts", len(s.FailedAccountIDs)),
-			)
-			return FailoverExhausted
-		}
-
-		logger.FromContext(ctx).Warn("gateway.failover_single_account_backoff",
-			zap.Duration("backoff_delay", singleAccountBackoffDelay),
-			zap.Int("switch_count", s.SwitchCount),
-			zap.Int("max_switches", s.MaxSwitches),
-		)
-		if !sleepWithContext(ctx, singleAccountBackoffDelay) {
-			return FailoverCanceled
-		}
-		logger.FromContext(ctx).Warn("gateway.failover_single_account_retry",
-			zap.Int("switch_count", s.SwitchCount),
-			zap.Int("max_switches", s.MaxSwitches),
-		)
-		s.FailedAccountIDs = make(map[int64]struct{})
-		// 利润门否决的账号不参与退避重试的解除：判定依据（冻结的下游倍率）在
-		// 同一请求内不变，放它们回池只会被再次否决。
-		for id := range s.profitVetoedAccountIDs {
-			s.FailedAccountIDs[id] = struct{}{}
-		}
-		return FailoverContinue
-	}
+	// 旧链（maxAccountSwitches 上限 + 单账号 503 退避重试）已删除：
+	// 每个失败账号在本请求内至多尝试一次（已进排除列表），候选集合不冻结；
+	// 选号失败（所有候选均在排除列表）即表示账号耗尽，直接终止。
+	// 利润否决导致的活锁由“排除列表下动态选号无可用候选”自然终止（清空后退避
+	// 重试拿不到任何新候选），无需单独的 503 退避重试分支（禁区禁止新增替代上限）。
 	return FailoverExhausted
 }
 

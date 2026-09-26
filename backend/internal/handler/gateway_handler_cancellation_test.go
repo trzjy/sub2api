@@ -50,7 +50,6 @@ func TestGatewayHandlerPreCancelledCompatibleRequestsDoNotSelectAccount(t *testi
 		gatewayService:      gatewayService,
 		billingCacheService: billingCacheService,
 		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(&fakeConcurrencyCache{}), SSEPingFormatClaude, 0),
-		maxAccountSwitches:  1,
 		cfg:                 cfg,
 	}
 	apiKey := &service.APIKey{

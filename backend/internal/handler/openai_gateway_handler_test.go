@@ -2210,7 +2210,6 @@ func TestOpenAIResponses_APIKeyPassthroughPool5xxRetriesThenExhaustsMaxSwitches(
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Gateway.MaxAccountSwitches = 1
 
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	upstream := &openAIHTTPPassthroughFailoverUpstream{}
@@ -2311,7 +2310,6 @@ func TestOpenAIResponses_APIKeyPassthroughPoolAuthFailureRetriesThenSwitchesToHe
 			cfg := &config.Config{RunMode: config.RunModeSimple}
 			cfg.Default.RateMultiplier = 1
 			cfg.Security.URLAllowlist.Enabled = false
-			cfg.Gateway.MaxAccountSwitches = 1
 
 			accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 			upstream := &openAIHTTPPassthroughAuthFailoverUpstream{statusCode: tt.statusCode}
@@ -2395,7 +2393,6 @@ func TestOpenAIResponses_APIKeyPassthroughSSERateLimitUsesConfiguredPoolRetry(t 
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Gateway.MaxAccountSwitches = 1
 
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	upstream := &openAIHTTPPassthroughSSERateLimitUpstream{}
@@ -2557,7 +2554,6 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
-	cfg.Gateway.MaxAccountSwitches = 3
 
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	rateLimitSvc := service.NewRateLimitService(accountRepo, nil, cfg, nil, nil)
@@ -2600,7 +2596,6 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 		billingCacheService: billingCacheSvc,
 		apiKeyService:       &service.APIKeyService{},
 		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
-		maxAccountSwitches:  3,
 	}
 
 	apiKey := &service.APIKey{
@@ -2765,7 +2760,6 @@ func TestOpenAIResponsesWebSocket_FirstOutputTimeoutWithoutDownstreamReusesClien
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.IngressInterTurnIdleTimeoutSeconds = 3
-	cfg.Gateway.MaxAccountSwitches = 3
 
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	rateLimitSvc := service.NewRateLimitService(accountRepo, nil, cfg, nil, nil)
@@ -2786,7 +2780,6 @@ func TestOpenAIResponsesWebSocket_FirstOutputTimeoutWithoutDownstreamReusesClien
 		billingCacheService: billingCacheSvc,
 		apiKeyService:       &service.APIKeyService{},
 		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, time.Second),
-		maxAccountSwitches:  3,
 	}
 
 	apiKey := &service.APIKey{

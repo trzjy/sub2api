@@ -164,10 +164,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		selectionSessionHash = "gemini:" + selectionSessionHash
 	}
 	// 3. Account selection + failover loop
-	fs := NewFailoverState(h.maxAccountSwitches, false)
-	if groupPlatform == service.PlatformGemini {
-		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
-	}
+	fs := newChatCompletionsFailoverState(groupPlatform, h.maxAccountSwitchesGemini)
 
 	for {
 		if c.Request.Context().Err() != nil {
@@ -362,6 +359,17 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+}
+
+// newChatCompletionsFailoverState 构造 ChatCompletions 入口的 failover 状态：
+// gemini 平台使用带固定切换上限的 NewFailoverStateCapped（默认 3、配置
+// max_account_switches_gemini 覆盖，闸②终审整改恢复上限）；其余平台使用无
+// 固定上限的 NewFailoverState（候选集合边界判定耗尽）。
+func newChatCompletionsFailoverState(groupPlatform string, maxSwitchesGemini int) *FailoverState {
+	if groupPlatform == service.PlatformGemini {
+		return NewFailoverStateCapped(maxSwitchesGemini, false)
+	}
+	return NewFailoverState(false)
 }
 
 // chatCompletionsErrorResponse writes an error in OpenAI Chat Completions format.

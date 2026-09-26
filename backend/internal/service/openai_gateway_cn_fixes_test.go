@@ -93,6 +93,7 @@ func TestResponsesStreamingFromNativeAnthropic_ClientDisconnectDrainsUsage(t *te
 	defer func() { _ = pr.Close() }()
 
 	res, err := svc.handleResponsesStreamingFromNativeAnthropic(
+		context.Background(), &Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey},
 		resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 
 	require.NoError(t, err, "断开排水至上游自然结束应返回 nil error（usage 走成功路径落账）")

@@ -187,7 +187,7 @@ func TestPluginRequestSentErrorDoesNotFailOver(t *testing.T) {
 	account := &Account{ID: 7, Name: "oauth", Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	transportErr := &PluginTransportError{Code: "UPSTREAM_EOF", Message: "eof", RequestSent: true}
 
-	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, transportErr, true)
+	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, transportErr, true, "")
 
 	require.Same(t, transportErr, result)
 	var failover *UpstreamFailoverError
@@ -204,7 +204,7 @@ func TestPluginRPCAmbiguityPreventsReplayAfterMetadataDelivery(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 	account := &Account{ID: 12, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, err, true)
+	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, err, true, "")
 	require.Same(t, err, result)
 }
 
@@ -218,7 +218,7 @@ func TestPluginRPCFailureBeforeStreamCreationAllowsFailover(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
 	account := &Account{ID: 13, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, err, true)
+	result := (&OpenAIGatewayService{}).handleOpenAIUpstreamTransportError(context.Background(), c, account, err, true, "")
 	var failover *UpstreamFailoverError
 	require.ErrorAs(t, result, &failover)
 }

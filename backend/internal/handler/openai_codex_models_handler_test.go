@@ -547,8 +547,11 @@ func TestCodexModelsReturnsLastUpstreamErrorWhenAccountsAreExhausted(t *testing.
 	}
 }
 
-func TestCodexModelsHonorsAccountSwitchLimit(t *testing.T) {
-	handler, upstream, groupID := newCodexModelsFailoverTestHandlerWithAccountCount(http.StatusServiceUnavailable, 4, 2)
+func TestCodexModelsExhaustsCandidateAccounts(t *testing.T) {
+	// 新语义（已删 maxAccountSwitches 固定上限）：请求开始时去重后的候选账号
+	// 集合即为边界，每个账号至多尝试一次，账号耗尽由"所有候选均在排除列表"
+	// 自然判定——4 个候选账号应被全部轮询到。
+	handler, upstream, groupID := newCodexModelsFailoverTestHandlerWithAccountCount(http.StatusServiceUnavailable, 4)
 	upstream.statuses = map[int64]int{
 		1: http.StatusServiceUnavailable,
 		2: http.StatusBadGateway,
@@ -557,22 +560,22 @@ func TestCodexModelsHonorsAccountSwitchLimit(t *testing.T) {
 	}
 	recorder := performCodexModelsRequest(t, handler, groupID)
 
-	if got, want := upstream.calls(), []int64{1, 2, 3}; !equalInt64Slices(got, want) {
+	if got, want := upstream.calls(), []int64{1, 2, 3, 4}; !equalInt64Slices(got, want) {
 		t.Fatalf("upstream account calls: got %v, want %v", got, want)
 	}
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
 	}
-	if body := recorder.Body.String(); !strings.Contains(body, "upstream error 504") {
-		t.Fatalf("body does not preserve the limit-ending upstream error: %s", body)
+	if body := recorder.Body.String(); !strings.Contains(body, "upstream error 500") {
+		t.Fatalf("body does not preserve the last upstream error: %s", body)
 	}
 }
 
 func newCodexModelsFailoverTestHandler(firstStatus int) (*OpenAIGatewayHandler, *codexModelsFailoverHTTPUpstream, int64) {
-	return newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, 2, 3)
+	return newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, 2)
 }
 
-func newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, accountCount, maxSwitches int) (*OpenAIGatewayHandler, *codexModelsFailoverHTTPUpstream, int64) {
+func newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, accountCount int) (*OpenAIGatewayHandler, *codexModelsFailoverHTTPUpstream, int64) {
 	gin.SetMode(gin.TestMode)
 	groupID := int64(42)
 	accounts := make([]service.Account, 0, accountCount)
@@ -600,7 +603,7 @@ func newCodexModelsFailoverTestHandlerWithAccountCount(firstStatus, accountCount
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	return &OpenAIGatewayHandler{gatewayService: gatewayService, maxAccountSwitches: maxSwitches}, upstream, groupID
+	return &OpenAIGatewayHandler{gatewayService: gatewayService}, upstream, groupID
 }
 
 func performCodexModelsRequest(t *testing.T, handler *OpenAIGatewayHandler, groupID int64) *httptest.ResponseRecorder {
@@ -754,7 +757,7 @@ func newPinnedCodexAccount(id int64, status string, schedulable bool, rateLimite
 	return account
 }
 
-func newPinnedCodexTestHandler(accounts []service.Account, upstream *codexModelsPinnedHTTPUpstream, maxSwitches int) *OpenAIGatewayHandler {
+func newPinnedCodexTestHandler(accounts []service.Account, upstream *codexModelsPinnedHTTPUpstream) *OpenAIGatewayHandler {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	gatewayService := service.NewOpenAIGatewayService(
@@ -763,7 +766,7 @@ func newPinnedCodexTestHandler(accounts []service.Account, upstream *codexModels
 		upstream,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 	)
-	return &OpenAIGatewayHandler{gatewayService: gatewayService, maxAccountSwitches: maxSwitches}
+	return &OpenAIGatewayHandler{gatewayService: gatewayService}
 }
 
 func performPinnedCodexModelsRequest(t *testing.T, handler *OpenAIGatewayHandler, group *service.Group, etag string) *httptest.ResponseRecorder {
@@ -783,7 +786,7 @@ func TestCodexModelsPinnedAccountsMergeUnionWithoutScheduler(t *testing.T) {
 		2: `{"models":[{"slug":"model-a"}]}`,
 		3: `{"models":[{"slug":"model-a"},{"slug":"model-c"}]}`,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       77,
 		Platform: service.PlatformOpenAI,
@@ -810,7 +813,7 @@ func TestCodexModelsPinnedAccountsUseRateLimitedAccountAndSkipUnavailable(t *tes
 		2: `{"models":[{"slug":"from-rate-limited"}]}`,
 		5: `{"models":[{"slug":"model-five"}]}`,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       78,
 		Platform: service.PlatformOpenAI,
@@ -835,7 +838,7 @@ func TestCodexModelsPinnedAccountsPartialFailureStillSucceeds(t *testing.T) {
 		bodies:   map[int64]string{2: `{"models":[{"slug":"model-a"}]}`},
 		statuses: map[int64]int{3: http.StatusServiceUnavailable},
 	}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       79,
 		Platform: service.PlatformOpenAI,
@@ -855,7 +858,7 @@ func TestCodexModelsPinnedAccountsAllUnavailableReturns503ByDefault(t *testing.T
 		newPinnedCodexAccount(2, service.StatusActive, false, false),
 	}
 	upstream := &codexModelsPinnedHTTPUpstream{}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       80,
 		Platform: service.PlatformOpenAI,
@@ -879,7 +882,7 @@ func TestCodexModelsPinnedAccountsAllFailedReturnsUpstreamError(t *testing.T) {
 		2: http.StatusServiceUnavailable,
 		3: http.StatusGatewayTimeout,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       81,
 		Platform: service.PlatformOpenAI,
@@ -903,7 +906,7 @@ func TestCodexModelsPinnedAccountsFallbackToScheduler(t *testing.T) {
 	upstream := &codexModelsPinnedHTTPUpstream{bodies: map[int64]string{
 		1: `{"models":[{"slug":"from-scheduler"}]}`,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       82,
 		Platform: service.PlatformOpenAI,
@@ -929,7 +932,7 @@ func TestCodexModelsPinnedAccountsFallbackToSchedulerOnAllFailed(t *testing.T) {
 		bodies:   map[int64]string{1: `{"models":[{"slug":"from-scheduler"}]}`},
 		statuses: map[int64]int{2: http.StatusServiceUnavailable},
 	}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       83,
 		Platform: service.PlatformOpenAI,
@@ -954,7 +957,7 @@ func TestCodexModelsPinnedAccountsStillApplyCustomModelsListFilter(t *testing.T)
 		2: `{"models":[{"slug":"model-a"}]}`,
 		3: `{"models":[{"slug":"model-b"}]}`,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       84,
 		Platform: service.PlatformOpenAI,
@@ -982,7 +985,7 @@ func TestCodexModelsPinnedAccountsETagMatchReturns304(t *testing.T) {
 		2: `{"models":[{"slug":"model-a"}]}`,
 		3: `{"models":[{"slug":"model-c"}]}`,
 	}}
-	handler := newPinnedCodexTestHandler(accounts, upstream, 3)
+	handler := newPinnedCodexTestHandler(accounts, upstream)
 	group := &service.Group{
 		ID:       85,
 		Platform: service.PlatformOpenAI,

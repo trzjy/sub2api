@@ -106,7 +106,11 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 // (failover, or a protocol-correct error once failover is exhausted).
 //
 // passthrough tags the Ops error event for the OpenAI passthrough forward path.
-func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool) error {
+// upstreamModel（必填）是本次出站的实际 canonical/upstream model，用于 CN 首包
+// 超时冷却链的 model 键（空模型键会被 model 瞬态状态拒绝，冷却假闭环——闸②整改）。
+// 无真实 model 可用的调用方传 ""（非 CN 平台/辅助路径不会产生 errOpenAICNFirstByteTimeout，
+// 该分支不会命中）。
+func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool, upstreamModel string) error {
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
 	setOpsUpstreamError(c, 0, safeErr, "")
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -125,6 +129,13 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	// this one — the upstream never had a chance to exhibit a fault.
 	if errors.Is(err, context.Canceled) || (errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 		return err
+	}
+
+	// 网关内部 CN 首包超时（doOpenAIUpstream 在响应头阶段触发的 60s 超时）：
+	// 与客户端取消（context.Canceled）可区分，走既有冷却入口 + failover 映射。
+	// upstreamModel 必须贯穿，否则 model 级瞬态冷却拒绝空键（闸②整改）。
+	if isOpenAICNFirstByteTimeout(err) {
+		return s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
 	}
 
 	// Transport attempt reached the network path; count as Ollama Cloud activity.

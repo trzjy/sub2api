@@ -113,10 +113,6 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
-	maxAccountSwitches := h.maxAccountSwitches
-	if maxAccountSwitches <= 0 {
-		maxAccountSwitches = 3
-	}
 	routingStart := time.Now()
 
 	// 分组利润控制：embeddings 文本入口请求级装门并固定 pricingAt。
@@ -225,20 +221,15 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 					)
 					return
 				}
-				h.gatewayService.RecordOpenAIAccountSwitch()
-				failedAccountIDs[account.ID] = struct{}{}
-				lastFailoverErr = failoverErr
-				if switchCount >= maxAccountSwitches {
-					h.handleFailoverExhausted(c, failoverErr, false)
-					return
-				}
-				switchCount++
-				reqLog.Warn("openai_embeddings.upstream_failover_switching",
-					zap.Int64("account_id", account.ID),
-					zap.Int("upstream_status", failoverErr.StatusCode),
-					zap.Int("switch_count", switchCount),
-					zap.Int("max_switches", maxAccountSwitches),
-				)
+			h.gatewayService.RecordOpenAIAccountSwitch()
+			failedAccountIDs[account.ID] = struct{}{}
+			lastFailoverErr = failoverErr
+			switchCount++
+			reqLog.Warn("openai_embeddings.upstream_failover_switching",
+				zap.Int64("account_id", account.ID),
+				zap.Int("upstream_status", failoverErr.StatusCode),
+				zap.Int("switch_count", switchCount),
+			)
 				continue
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, result), false, nil, err)

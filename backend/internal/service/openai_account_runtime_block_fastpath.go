@@ -90,6 +90,24 @@ func isOpenAIAccount(account *Account) bool {
 	return account != nil && (account.Platform == PlatformOpenAI || account.Platform == PlatformGrok)
 }
 
+// isCNFamilyFastpathAccount reports whether account belongs to an explicitly
+// enumerated CN provider family (kimi/deepseek/zhipu/minimax) eligible for the
+// fastpath transient cooldown and account scheduling-block gate. It deliberately
+// does NOT alter isOpenAIAccount: OpenAI/Grok semantics and their remaining
+// consumer points stay intact (see 禁区). Both apikey and oauth account types are
+// included; PlatformOther and codebuddy are intentionally excluded.
+func isCNFamilyFastpathAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	switch account.Platform {
+	case PlatformKimi, PlatformDeepseek, PlatformZhipu, PlatformMiniMax:
+		return true
+	default:
+		return false
+	}
+}
+
 // handleOpenAIAccountUpstreamError expects canonicalModel to be the model used
 // for scheduling after applying account mapping exactly once.
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, canonicalModel ...string) bool {
@@ -181,7 +199,7 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	// same-account retry budget. Recording the generic account+model transient
 	// cooldown here would block the next approved retry before that budget is used.
 	poolModeRetryable := account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode)
-	if !shouldDisable && account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey &&
+	if !shouldDisable && ((account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey) || isCNFamilyFastpathAccount(account)) &&
 		shouldCooldownOpenAITransientUpstreamError(statusCode, responseBody) && !poolModeRetryable {
 		model := ""
 		if len(canonicalModel) > 0 {
@@ -324,7 +342,7 @@ func openAIOAuth429SameAccountRetryDelay(headers http.Header, deadline time.Time
 }
 
 func (s *OpenAIGatewayService) BlockAccountScheduling(account *Account, until time.Time, reason string) {
-	if s == nil || !isOpenAIAccount(account) {
+	if s == nil || (!isOpenAIAccount(account) && !isCNFamilyFastpathAccount(account)) {
 		return
 	}
 	mu := s.openAIAccountRuntimeBlockLock(account.ID)
@@ -391,7 +409,7 @@ func (s *OpenAIGatewayService) ClearAccountSchedulingBlock(accountID int64) {
 }
 
 func (s *OpenAIGatewayService) isOpenAIAccountRuntimeBlocked(account *Account) bool {
-	if s == nil || !isOpenAIAccount(account) {
+	if s == nil || (!isOpenAIAccount(account) && !isCNFamilyFastpathAccount(account)) {
 		return false
 	}
 	mu := s.openAIAccountRuntimeBlockLock(account.ID)
@@ -500,7 +518,7 @@ type openAIAccountRuntimeBlockSnapshot struct {
 }
 
 func (s *OpenAIGatewayService) peekOpenAIAccountRuntimeBlock(account *Account) openAIAccountRuntimeBlockSnapshot {
-	if s == nil || !isOpenAIAccount(account) {
+	if s == nil || (!isOpenAIAccount(account) && !isCNFamilyFastpathAccount(account)) {
 		return openAIAccountRuntimeBlockSnapshot{}
 	}
 	mu := s.openAIAccountRuntimeBlockLock(account.ID)

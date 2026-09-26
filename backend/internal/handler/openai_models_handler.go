@@ -18,7 +18,7 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 		return
 	}
 	response, account, err := h.openAIGatewayService.FetchPinnedOpenAIModelsList(
-		c.Request.Context(), group, h.maxAccountSwitches, c.GetHeader("If-None-Match"),
+		c.Request.Context(), group, 0, c.GetHeader("If-None-Match"),
 	)
 	if c.Request.Context().Err() != nil {
 		return

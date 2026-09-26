@@ -6,6 +6,7 @@ package service
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -140,7 +141,8 @@ func TestCCStreamingFromNativeAnthropic_HangTimesOut(t *testing.T) {
 
 	resp, pr, pw := newHangingUpstreamResponse()
 	start := time.Now()
-	res, err := svc.handleCCStreamingFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start, true)
+	account := &Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}
+	res, err := svc.handleCCStreamingFromNativeAnthropic(context.Background(), account, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start, true)
 	_ = pw.Close()
 	_ = pr.Close()
 
@@ -165,7 +167,7 @@ func TestCCBufferedFromNativeAnthropic_HangTimesOut(t *testing.T) {
 
 	resp, pr, pw := newHangingUpstreamResponse()
 	start := time.Now()
-	_, err := svc.handleCCBufferedFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start)
+	_, err := svc.handleCCBufferedFromNativeAnthropic(&Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start)
 	_ = pw.Close()
 	_ = pr.Close()
 
@@ -190,7 +192,8 @@ func TestResponsesStreamingFromNativeAnthropic_HangTimesOut(t *testing.T) {
 
 	resp, pr, pw := newHangingUpstreamResponse()
 	start := time.Now()
-	res, err := svc.handleResponsesStreamingFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start, apicompat.ResponsesClientToolMapping{})
+	account := &Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}
+	res, err := svc.handleResponsesStreamingFromNativeAnthropic(context.Background(), account, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, start, apicompat.ResponsesClientToolMapping{})
 	_ = pw.Close()
 	_ = pr.Close()
 
@@ -220,7 +223,7 @@ func TestCCStreamingFromNativeAnthropic_HappyPathStillConverts(t *testing.T) {
 	}()
 	defer func() { _ = pr.Close() }()
 
-	res, err := svc.handleCCStreamingFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now(), true)
+	res, err := svc.handleCCStreamingFromNativeAnthropic(context.Background(), &Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now(), true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -251,7 +254,7 @@ func TestCCBufferedFromNativeAnthropic_HappyPathStillConverts(t *testing.T) {
 	}()
 	defer func() { _ = pr.Close() }()
 
-	res, err := svc.handleCCBufferedFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now())
+	res, err := svc.handleCCBufferedFromNativeAnthropic(&Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,7 +278,7 @@ func TestCCBufferedFromNativeAnthropic_ToolArgumentsAreValidJSON(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(toolAnthropicSSEStream())), Header: http.Header{}}
 
-	_, err := svc.handleCCBufferedFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now())
+	_, err := svc.handleCCBufferedFromNativeAnthropic(&Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -310,7 +313,7 @@ func TestResponsesBufferedFromNativeAnthropic_ToolArgumentsAreValidJSON(t *testi
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(toolAnthropicSSEStream())), Header: http.Header{}}
 
-	_, err := svc.handleResponsesBufferedFromNativeAnthropic(resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
+	_, err := svc.handleResponsesBufferedFromNativeAnthropic(&Account{ID: 1, Platform: PlatformZhipu, Type: AccountTypeAPIKey}, resp, c, "glm-4.7", "glm-4.7", "glm-4.7", nil, time.Now(), apicompat.ResponsesClientToolMapping{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

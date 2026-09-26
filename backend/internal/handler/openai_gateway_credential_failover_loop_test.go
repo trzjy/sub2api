@@ -922,7 +922,6 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 		upstream.failureStatus = map[int64]int{802: http.StatusInternalServerError}
 	}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
-	cfg.Gateway.MaxAccountSwitches = 3
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	gateway := service.NewOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,

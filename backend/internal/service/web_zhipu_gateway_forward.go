@@ -245,10 +245,10 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	resp, err := s.doOpenAIUpstream(ctx, req, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(startTime).Milliseconds())
 	if err != nil {
-		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false, upstreamModel)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -265,9 +265,9 @@ func (s *OpenAIGatewayService) forwardWebZhipu(
 				if reqErr != nil {
 					return nil, reqErr
 				}
-				retryResp, retryErr := s.doOpenAIUpstream(retryReq, proxyURL, account)
+				retryResp, retryErr := s.doOpenAIUpstream(ctx, retryReq, proxyURL, account)
 				if retryErr != nil {
-					return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, retryErr, false)
+					return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, retryErr, false, upstreamModel)
 				}
 				_ = resp.Body.Close()
 				resp = retryResp
@@ -619,7 +619,7 @@ func (s *OpenAIGatewayService) refreshWebZhipuAccessToken(ctx context.Context, a
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	resp, err := s.doOpenAIUpstreamNoWatchdog(req, proxyURL, account)
 	if err != nil {
 		return ""
 	}
@@ -1001,6 +1001,11 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时透明
+		// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
+		if isOpenAICNFirstByteTimeout(err) && !written {
+			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+		}
 		return nil, fmt.Errorf("zhipu web stream read: %w", err)
 	}
 
@@ -1065,6 +1070,10 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 ) (*OpenAIForwardResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		// CN 首包超时：非流式缓冲路径响应头尚未提交，可安全透明切换（冷却+换号，带模型）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+		}
 		return nil, err
 	}
 

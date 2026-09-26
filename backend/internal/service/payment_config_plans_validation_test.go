@@ -131,19 +131,19 @@ func TestValidatePlanPatch_NilOriginalPrice(t *testing.T) {
 
 // --- validatePlanPatch: other fields ---
 
-func ptrStr(s string) *string     { return &s }
-func ptrInt(i int) *int           { return &i }
+func pcValPtrStr(s string) *string     { return &s }
+func pcValPtrInt(i int) *int           { return &i }
 // ptrInt64 is declared in xianyu_reconcile_service_test.go (same package).
 func ptrFloat(f float64) *float64 { return &f }
 
 func TestValidatePlanPatch_EmptyName(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{Name: ptrStr("")})
+	err := validatePlanPatch(UpdatePlanRequest{Name: pcValPtrStr("")})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "plan name")
 }
 
 func TestValidatePlanPatch_ValidName(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{Name: ptrStr("Basic")})
+	err := validatePlanPatch(UpdatePlanRequest{Name: pcValPtrStr("Basic")})
 	require.NoError(t, err)
 }
 
@@ -171,19 +171,19 @@ func TestValidatePlanPatch_ValidPrice(t *testing.T) {
 }
 
 func TestValidatePlanPatch_ZeroValidityDays(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{ValidityDays: ptrInt(0)})
+	err := validatePlanPatch(UpdatePlanRequest{ValidityDays: pcValPtrInt(0)})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validity days")
 }
 
 func TestValidatePlanPatch_EmptyValidityUnit(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{ValidityUnit: ptrStr("")})
+	err := validatePlanPatch(UpdatePlanRequest{ValidityUnit: pcValPtrStr("")})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "validity unit")
 }
 
 func TestValidatePlanPatch_ValidValidityUnit(t *testing.T) {
-	err := validatePlanPatch(UpdatePlanRequest{ValidityUnit: ptrStr("days")})
+	err := validatePlanPatch(UpdatePlanRequest{ValidityUnit: pcValPtrStr("days")})
 	require.NoError(t, err)
 }
 

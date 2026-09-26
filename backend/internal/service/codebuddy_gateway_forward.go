@@ -123,10 +123,10 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		resp, respErr = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, respErr = s.doOpenAIUpstreamNoWatchdog(upstreamReq, proxyURL, account)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(startTime).Milliseconds())
 		if respErr != nil {
-			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, respErr, false)
+			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, respErr, false, "")
 		}
 		if resp.StatusCode < 400 {
 			break
@@ -530,7 +530,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaCodeBuddy(
 	}
 
 	if clientStream {
-		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
 	// CodeBuddy 上游强制 stream:true（§2.5 规则 1），非流式入站时上游返回 SSE 流。
 	// bufferChatCompletionsAsResponses 内部的 readCCUpstreamJSONResponse 假定纯 JSON，
@@ -544,7 +544,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaCodeBuddy(
 	} else {
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
-	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	return s.bufferChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
 
 // sendCodeBuddyChatUpstreamAsCC 把（已是 Chat Completions 形状的）body 经 CodeBuddy
@@ -604,7 +604,7 @@ func (s *OpenAIGatewayService) sendCodeBuddyChatUpstreamAsCC(
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		resp, err = s.doOpenAIUpstreamNoWatchdog(upstreamReq, proxyURL, account)
 		if err != nil {
 			return nil, err
 		}

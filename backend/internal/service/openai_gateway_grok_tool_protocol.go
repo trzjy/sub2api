@@ -107,6 +107,17 @@ func restoreGrokResponsesClientToolPayload(c *gin.Context, payload []byte) ([]by
 type responsesClientToolStreamBody struct {
 	*io.PipeReader
 	source io.Closer
+	// cnWB 捕获构造时的 watchdog body（cnFirstByteTimeoutBodyOf(source)）。
+	// source 链上被 CN watchdog 包装时为非 nil，否则为 nil（非 CN 路径）。
+	// FirstByteSeen 是原子读，goroutine 读取无竞态；捕获时机在源关闭前，
+	// watchdog 标记本身由载体接口穿透获得，不随后续包装层变化。
+	cnWB *openAICNFirstByteTimeoutBody
+}
+
+// cnFirstByteTimeoutBody 实现载体接口：返回构造时捕获的 watchdog body
+// （闸②终审整改项 2），使 Forward 消费链 keepalive 抑制断言可穿透本包装层。
+func (b *responsesClientToolStreamBody) cnFirstByteTimeoutBody() *openAICNFirstByteTimeoutBody {
+	return b.cnWB
 }
 
 func (b *responsesClientToolStreamBody) Close() error {
@@ -124,7 +135,11 @@ func newResponsesClientToolStreamBody(
 	maxLineSize int,
 ) io.ReadCloser {
 	reader, writer := io.Pipe()
-	body := &responsesClientToolStreamBody{PipeReader: reader, source: source}
+	body := &responsesClientToolStreamBody{
+		PipeReader: reader,
+		source:     source,
+		cnWB:       cnFirstByteTimeoutBodyOf(source),
+	}
 	go transformResponsesClientToolStream(source, writer, mapping, maxLineSize)
 	return body
 }

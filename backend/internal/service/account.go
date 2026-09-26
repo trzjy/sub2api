@@ -1102,7 +1102,7 @@ func (a *Account) IsPoolMode() bool {
 }
 
 const (
-	defaultPoolModeRetryCount = 3
+	defaultPoolModeRetryCount = 1
 	maxPoolModeRetryCount     = 10
 )
 

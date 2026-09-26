@@ -448,6 +448,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", scanErr), true
 		}
+		// CN 清单平台账号走通用转发时的首包超时（watchdog 转译错误）：响应头
+		// 未提交（首个 SSE 事件写出前）时透明切换（冷却+换号，带模型）；
+		// 已提交则按既有流中断语义处理（不做透明切换）。
+		if isOpenAICNFirstByteTimeout(scanErr) {
+			if !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+				return resultWithUsage(), s.failoverOpenAICNFirstByteTimeout(ctx, account, mappedModel), true
+			}
+			return resultWithUsage(), fmt.Errorf("stream read error: %w", scanErr), true
+		}
 		if errors.Is(scanErr, bufio.ErrTooLong) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, scanErr)
 			sendErrorEvent("response_too_large")
@@ -892,6 +901,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if time.Since(lastRead) < streamInterval {
 				continue
 			}
+			// 旧 interval timer 不得在首字节前抢先裁决（与 messages native
+			// anthropic 路径同语义）：合法配置 stream_data_interval_timeout
+			// 30..59 下，interval tick 早于 60s watchdog 到期；若在此返回普通
+			// interval timeout，会中断流且不触发 CN failover/冷却，打穿换号
+			// 窗口。body 被 CN watchdog 包装且首字节未到达时，统一由 60s 边界
+			// 负责（tick 不裁决）；首字节后既有 interval 语义不变。非 CN 路径
+			// （body 未被 watchdog 包装）行为不变。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
+				continue
+			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed {
 				_ = resp.Body.Close()
 				return finalizeStream()
@@ -944,6 +963,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				continue
 			}
 			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
+				continue
+			}
+			// CN watchdog 覆盖的尝试在收到首个上游 body 字节前不得提交 keepalive：
+			// 心跳写出即提交响应头（Writer.Size 变化），60s 首包超时到期后的
+			// failover 会被抑制、无法透明换号。首字节到达后恢复既有心跳节奏；
+			// 非 CN 路径（body 未被 watchdog 包装）行为不变。注意 resp.Body 可能
+			// 被 forward.go:1130/:1245 双重包装——载体接口使断言穿透。
+			if wb := cnFirstByteTimeoutBodyOf(resp.Body); wb != nil && !wb.FirstByteSeen() {
 				continue
 			}
 			if stageFirstOutput {
@@ -1567,6 +1594,10 @@ func openAICacheCreationTokensFromUsage(value gjson.Result) int {
 func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		// CN 首包超时：非流式缓冲路径响应头尚未提交，可安全透明切换（冷却+换号）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, mappedModel)
+		}
 		return nil, err
 	}
 	observer := upstreamResponseModelObserverFromContext(c)
