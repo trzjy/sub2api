@@ -225,7 +225,19 @@ var providerKimiChatAdapter = newOpenAICompatibleChatAdapter(providerOpenAIPath)
 var providerZhipuChatAdapter = newOpenAICompatibleChatAdapter(providerZhipuPath)
 
 //nolint:gochecknoglobals // 适配器表是只读静态数据，初始化后不变更。
-var providerDeepseekChatAdapter = newOpenAICompatibleChatAdapter(providerOpenAIPath)
+// deepseek 推理模型（如 deepseek-v4.1-flash）把可见文本放在 reasoning_content
+// 而非 content，监控默认 textPath 取 content 会读到空串，导致 replace 模式把
+// 2xx 响应误判为 failed。这里回退到 reasoning_content 以正确反映渠道连通性。
+var providerDeepseekChatAdapter = func() providerAdapter {
+	a := newOpenAICompatibleChatAdapter(providerOpenAIPath)
+	a.extractText = func(b []byte) string {
+		if c := strings.TrimSpace(gjson.GetBytes(b, "choices.0.message.content").String()); c != "" {
+			return c
+		}
+		return strings.TrimSpace(gjson.GetBytes(b, "choices.0.message.reasoning_content").String())
+	}
+	return a
+}()
 
 //nolint:gochecknoglobals // 适配器表是只读静态数据，初始化后不变更。
 var providerMiniMaxChatAdapter = newOpenAICompatibleChatAdapter(providerOpenAIPath)
