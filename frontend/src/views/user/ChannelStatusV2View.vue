@@ -534,9 +534,7 @@ const tabs = computed(() => {
 })
 const matrixGroupOptions = computed(() => [
   { value: 'platform' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platform') },
-  { value: 'platform_group' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platformGroup') },
   { value: 'platform_model' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platformModel') },
-  { value: 'platform_group_model' as MonitorMatrixGroupBy, label: t('channelMonitorV2.groupBy.platformGroupModel') },
 ])
 const healthModeOptions = computed(() => [
   { value: 'overall' as HealthMode, label: t('channelMonitorV2.healthMode.overall') },
@@ -670,13 +668,11 @@ function parseRange(value: unknown): MonitorRange {
 function parseMatrixGroupBy(value: unknown): MonitorMatrixGroupBy {
   const allowed: MonitorMatrixGroupBy[] = [
     'platform',
-    'platform_group',
     'platform_model',
-    'platform_group_model',
   ]
   return allowed.includes(value as MonitorMatrixGroupBy)
     ? (value as MonitorMatrixGroupBy)
-    : 'platform_group'
+    : 'platform_model'
 }
 function parseTab(value: unknown, allowUsers: boolean): Tab {
   const allowed: Tab[] = allowUsers ? ['models', 'errors', 'users'] : ['models', 'errors']
