@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/channelmonitor"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -876,14 +877,15 @@ func (r *groupRepository) deleteCascade(ctx context.Context, id int64, requireEm
 
 	// Lock the group row to avoid concurrent writes while we cascade.
 	// 这里使用 exec.QueryContext 手动扫描，确保同一事务内加锁并能区分"未找到"与其他错误。
-	rows, err := exec.QueryContext(ctx, "SELECT id, subscription_type FROM groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", id)
+	rows, err := exec.QueryContext(ctx, "SELECT id, name, subscription_type FROM groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", id)
 	if err != nil {
 		return nil, err
 	}
 	var lockedID int64
+	var lockedName string
 	var subscriptionType string
 	if rows.Next() {
-		if err := rows.Scan(&lockedID, &subscriptionType); err != nil {
+		if err := rows.Scan(&lockedID, &lockedName, &subscriptionType); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -956,6 +958,16 @@ func (r *groupRepository) deleteCascade(ctx context.Context, id int64, requireEm
 	}
 
 	// 5. Soft-delete group itself.
+	// 软隐藏该分组名对应的渠道监控探针：避免分组删除后，用户渠道监控卡片仍展示。
+	// 与 groups 软删除风格一致（enabled=false 软隐藏，可逆、保留历史），使用被删分组名精确匹配。
+	if lockedName != "" {
+		if err := txClient.ChannelMonitor.Update().
+			Where(channelmonitor.GroupNameEQ(lockedName)).
+			SetEnabled(false).
+			Exec(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := txClient.Group.Delete().Where(group.IDEQ(id)).Exec(ctx); err != nil {
 		return nil, err
 	}
