@@ -156,6 +156,7 @@ docs/*
 !docs/account-quota-balance-confirmation-package.md
 !docs/dispatch-qb1-quota-balance.md
 !docs/abnormal-usage-analysis-plan.md
+!docs/kimi-upstream-failover-hardening-plan.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
