@@ -512,7 +512,8 @@ func (s *VisionDetectService) logDetectResult(accountID int64, upstreamModel, pr
 }
 
 // writeVisionDetectUsage 记一条平台侧 usage（P2-7）：user_id=0、api_key_id=0 哨兵，
-// 不进任何用户账单/订阅计量。usageLog 未注入时跳过。
+// 由仓库层 prepareUsageLogInsert 归一为 NULL 落库（迁移 261 两列可空），不进任何
+// 用户账单/订阅计量（方案 §6）。usageLog 未注入时跳过。
 func (s *VisionDetectService) writeVisionDetectUsage(ctx context.Context, accountID int64, upstreamModel, protocol, result string, inputTokens, outputTokens int) error {
 	if s == nil || s.usageLog == nil {
 		return nil

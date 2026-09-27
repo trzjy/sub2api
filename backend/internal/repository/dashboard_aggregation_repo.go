@@ -490,6 +490,8 @@ func (r *dashboardAggregationRepository) insertHourlyActiveUsers(ctx context.Con
 			user_id
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at < $2
+			-- 平台侧行（user_id IS NULL，如 Vision 检测）不进活跃用户统计
+			AND user_id IS NOT NULL
 		ON CONFLICT DO NOTHING
 	`
 	_, err := r.sql.ExecContext(ctx, query, start, end, tzName)

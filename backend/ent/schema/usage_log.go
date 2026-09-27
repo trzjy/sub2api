@@ -31,9 +31,11 @@ func (UsageLog) Annotations() []schema.Annotation {
 // Fields 定义使用日志实体的所有字段。
 func (UsageLog) Fields() []ent.Field {
 	return []ent.Field{
-		// 关联字段
-		field.Int64("user_id"),
-		field.Int64("api_key_id"),
+		// 关联字段。user_id / api_key_id 可为 NULL：平台侧行（如 Vision 检测流量，
+		// 方案 §6）不归属任何用户/key，由迁移 261 放开 NOT NULL；本 schema 声明
+		// 与迁移保持一致，仅作文档用途（写入统一走裸 SQL 仓库层）。
+		field.Int64("user_id").Optional(),
+		field.Int64("api_key_id").Optional(),
 		field.Int64("account_id"),
 		field.String("request_id").
 			MaxLen(64).
@@ -195,12 +197,10 @@ func (UsageLog) Edges() []ent.Edge {
 		edge.From("user", User.Type).
 			Ref("usage_logs").
 			Field("user_id").
-			Required().
 			Unique(),
 		edge.From("api_key", APIKey.Type).
 			Ref("usage_logs").
 			Field("api_key_id").
-			Required().
 			Unique(),
 		edge.From("account", Account.Type).
 			Ref("usage_logs").

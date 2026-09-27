@@ -143,3 +143,50 @@ func TestPrepareUsageLogInsert_UpstreamRequestIDArgWiring(t *testing.T) {
 
 	require.Contains(t, usageLogSelectColumns, "upstream_request_id")
 }
+
+// TestPrepareUsageLogInsert_PlatformSideSentinelNormalization 钉死平台侧哨兵
+// （user_id=0 / api_key_id=0，如 Vision 检测流量，方案 §6）的落库语义：
+// 归一为 NULL，而非 0——0 会撞 usage_logs 的 FK 约束（迁移 261 两列可空）。
+func TestPrepareUsageLogInsert_PlatformSideSentinelNormalization(t *testing.T) {
+	t.Run("platform_side_zero_sentinel_becomes_null", func(t *testing.T) {
+		prepared := prepareUsageLogInsert(&service.UsageLog{
+			UserID:    0,
+			APIKeyID:  0,
+			AccountID: 137,
+			RequestID: "platform:vision-detect",
+			Model:     "deepseek-v4.1-flash",
+			CreatedAt: time.Now().UTC(),
+		})
+		require.Len(t, prepared.args, len(usageLogInsertArgTypes))
+
+		userArg, ok := prepared.args[0].(sql.NullInt64)
+		require.True(t, ok, "user_id arg should be sql.NullInt64, got %T", prepared.args[0])
+		require.False(t, userArg.Valid, "platform-side user_id=0 must be NULL")
+
+		keyArg, ok := prepared.args[1].(sql.NullInt64)
+		require.True(t, ok, "api_key_id arg should be sql.NullInt64, got %T", prepared.args[1])
+		require.False(t, keyArg.Valid, "platform-side api_key_id=0 must be NULL")
+
+		require.Equal(t, "bigint", usageLogInsertArgTypes[0])
+		require.Equal(t, "bigint", usageLogInsertArgTypes[1])
+	})
+
+	t.Run("business_rows_keep_real_ids", func(t *testing.T) {
+		prepared := prepareUsageLogInsert(&service.UsageLog{
+			UserID:    42,
+			APIKeyID:  7,
+			AccountID: 3,
+			Model:     "gpt-5",
+			CreatedAt: time.Now().UTC(),
+		})
+		userArg, ok := prepared.args[0].(sql.NullInt64)
+		require.True(t, ok)
+		require.True(t, userArg.Valid)
+		require.Equal(t, int64(42), userArg.Int64)
+
+		keyArg, ok := prepared.args[1].(sql.NullInt64)
+		require.True(t, ok)
+		require.True(t, keyArg.Valid)
+		require.Equal(t, int64(7), keyArg.Int64)
+	})
+}

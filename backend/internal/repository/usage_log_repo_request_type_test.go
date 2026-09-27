@@ -911,8 +911,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 		now := time.Now().UTC()
 		log, err := scanUsageLog(usageLogScannerStub{values: []any{
 			int64(4),
-			int64(13),
-			int64(23),
+			sql.NullInt64{Valid: true, Int64: 13}, // user_id
+			sql.NullInt64{Valid: true, Int64: 23}, // api_key_id
 			int64(33),
 			sql.NullString{Valid: true, String: "req-image-metadata"},
 			"gpt-image-2",
@@ -979,8 +979,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 		now := time.Now().UTC()
 		log, err := scanUsageLog(usageLogScannerStub{values: []any{
 			int64(1),  // id
-			int64(10), // user_id
-			int64(20), // api_key_id
+			sql.NullInt64{Valid: true, Int64: 10}, // user_id
+			sql.NullInt64{Valid: true, Int64: 20}, // api_key_id
 			int64(30), // account_id
 			sql.NullString{Valid: true, String: "req-1"},
 			"gpt-5", // model
@@ -1054,8 +1054,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 		now := time.Now().UTC()
 		log, err := scanUsageLog(usageLogScannerStub{values: []any{
 			int64(2),
-			int64(11),
-			int64(21),
+			sql.NullInt64{Valid: true, Int64: 11}, // user_id
+			sql.NullInt64{Valid: true, Int64: 21}, // api_key_id
 			int64(31),
 			sql.NullString{Valid: true, String: "req-2"},
 			"gpt-5",
@@ -1118,8 +1118,8 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 		now := time.Now().UTC()
 		log, err := scanUsageLog(usageLogScannerStub{values: []any{
 			int64(3),
-			int64(12),
-			int64(22),
+			sql.NullInt64{Valid: true, Int64: 12}, // user_id
+			sql.NullInt64{Valid: true, Int64: 22}, // api_key_id
 			int64(32),
 			sql.NullString{Valid: true, String: "req-3"},
 			"gpt-5.4",

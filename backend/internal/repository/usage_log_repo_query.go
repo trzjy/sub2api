@@ -445,8 +445,10 @@ func (r *usageLogRepository) loadSubscriptions(ctx context.Context, ids []int64)
 func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, error) {
 	var (
 		id                        int64
-		userID                    int64
-		apiKeyID                  int64
+		// userID/apiKeyID 可为 NULL（平台侧行，如 Vision 检测流量，方案 §6），
+		// NULL 表示不归属任何用户/key，扫描归一为 0。
+		userID                    sql.NullInt64
+		apiKeyID                  sql.NullInt64
 		accountID                 int64
 		requestID                 sql.NullString
 		model                     string
@@ -579,8 +581,8 @@ func scanUsageLog(scanner interface{ Scan(...any) error }) (*service.UsageLog, e
 
 	log := &service.UsageLog{
 		ID:                        id,
-		UserID:                    userID,
-		APIKeyID:                  apiKeyID,
+		UserID:                    userID.Int64,
+		APIKeyID:                  apiKeyID.Int64,
 		AccountID:                 accountID,
 		Model:                     model,
 		RequestedModel:            coalesceTrimmedString(requestedModel, model),
@@ -718,6 +720,14 @@ func nullInt64(v *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+// nullInt64FromValue 把业务侧 0 值哨兵（平台侧行，不归属用户/key）归一为 NULL。
+func nullInt64FromValue(v int64) sql.NullInt64 {
+	if v == 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 
 func nullInt(v *int) sql.NullInt64 {

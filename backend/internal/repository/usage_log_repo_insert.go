@@ -1264,6 +1264,11 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 
 	groupID := nullInt64(log.GroupID)
 	subscriptionID := nullInt64(log.SubscriptionID)
+	// user_id=0 / api_key_id=0 是平台侧哨兵（如 Vision 检测流量，方案 §6：不归属
+	// 任何用户/key），落库归一为 NULL——两列 FK 对 NULL 天然放行，0 会撞
+	// usage_logs_user_id_fkey/usage_logs_api_key_id_fkey。
+	userID := nullInt64FromValue(log.UserID)
+	apiKeyID := nullInt64FromValue(log.APIKeyID)
 	duration := nullInt(log.DurationMs)
 	firstToken := nullInt(log.FirstTokenMs)
 	userAgent := nullString(log.UserAgent)
@@ -1305,8 +1310,8 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 		rateMultiplier: rateMultiplier,
 		requestType:    requestType,
 		args: []any{
-			log.UserID,
-			log.APIKeyID,
+			userID,
+			apiKeyID,
 			log.AccountID,
 			requestIDArg,
 			log.Model,
