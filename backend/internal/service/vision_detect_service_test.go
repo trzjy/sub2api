@@ -581,3 +581,37 @@ func TestVisionDetectMissingKeyHasLog(t *testing.T) {
 	require.Equal(t, "detect_failed", entry["result"])
 	require.NotContains(t, buf.String(), "sk-test-secret", "严禁记录 API key")
 }
+
+// TestExtractVisionDetectContentReasoningContentFallback 钉死 deepseek 推理模型
+// 语义（生产实证 + d792507c9 先例）：content 为空但 reasoning_content 有文本时，
+// 提取回退 reasoning_content，不再误判结构无效。
+func TestExtractVisionDetectContentReasoningContentFallback(t *testing.T) {
+	t.Run("empty_content_falls_back_to_reasoning_content", func(t *testing.T) {
+		body := []byte(`{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"The digits in the image are 482913."}}]}`)
+		got := extractVisionDetectContent(body)
+		require.Equal(t, "The digits in the image are 482913.", got)
+
+		valid, content := validateVisionDetect200Response(body)
+		require.True(t, valid)
+		require.Equal(t, "The digits in the image are 482913.", content)
+	})
+
+	t.Run("nonempty_content_takes_precedence", func(t *testing.T) {
+		body := []byte(`{"choices":[{"message":{"content":"482913","reasoning_content":"let me look"}}]}`)
+		got := extractVisionDetectContent(body)
+		require.Equal(t, "482913", got)
+	})
+
+	t.Run("both_empty_still_invalid", func(t *testing.T) {
+		body := []byte(`{"choices":[{"message":{"content":"","reasoning_content":""}}]}`)
+		valid, content := validateVisionDetect200Response(body)
+		require.False(t, valid)
+		require.Equal(t, "", content)
+	})
+
+	t.Run("explicit_error_payload_still_invalid", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"boom"}}`)
+		valid, _ := validateVisionDetect200Response(body)
+		require.False(t, valid)
+	})
+}

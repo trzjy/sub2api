@@ -436,11 +436,15 @@ func validateVisionDetect200Response(body []byte) (bool, string) {
 }
 
 // extractVisionDetectContent 从 chat_completions 响应中提取首个 message content。
+// deepseek 推理模型（如 deepseek-v4.1-flash）可能把可见文本放在 reasoning_content
+// 而 content 为空（生产实证：星思云 200 响应 content=""、reasoning_content 有文本；
+// 与 channel_monitor_checker.go 同根因，d792507c9 先例），content 为空时回退读取。
 func extractVisionDetectContent(body []byte) string {
 	var payload struct {
 		Choices []struct {
 			Message struct {
-				Content any `json:"content"`
+				Content          any    `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 		Error *struct {
@@ -457,7 +461,13 @@ func extractVisionDetectContent(body []byte) string {
 		content := choice.Message.Content
 		switch v := content.(type) {
 		case string:
-			return v
+			if strings.TrimSpace(v) != "" {
+				return v
+			}
+			if rc := strings.TrimSpace(choice.Message.ReasoningContent); rc != "" {
+				return rc
+			}
+			continue
 		case []any:
 			var sb strings.Builder
 			for _, part := range v {
@@ -467,7 +477,13 @@ func extractVisionDetectContent(body []byte) string {
 					}
 				}
 			}
-			return sb.String()
+			if s := sb.String(); strings.TrimSpace(s) != "" {
+				return s
+			}
+			if rc := strings.TrimSpace(choice.Message.ReasoningContent); rc != "" {
+				return rc
+			}
+			continue
 		}
 	}
 	return ""
