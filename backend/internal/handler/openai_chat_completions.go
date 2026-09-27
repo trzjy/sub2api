@@ -104,6 +104,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
+	// 请求含图检测：结果存入 request context，供后续调度按 RequireVision 过滤读取（派发单 C）。
+	service.SetOpenAIHasImageInputHint(c, service.HasOpenAIInputImage(body))
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
@@ -159,7 +161,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 
 	// 分组利润控制：chat completions 文本入口请求级装门并固定 pricingAt。
-	ccPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门，
+	// 视觉分流目标账号不被利润门 veto；不含图请求路径零改动。
+	ccPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(
+		h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body), apiKey.GroupID)
 	c.Request = c.Request.WithContext(ccPricingCtx)
 
 	for {
@@ -167,6 +172,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		reqLog.Debug("openai_chat_completions.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		// 请求含图时要求账号支持视觉：读取请求级含图 hint（缺失视为不含图）。
+		hasImageInput, _ := service.GetOpenAIHasImageInputHint(c)
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
 			apiKey.GroupID,
@@ -179,6 +186,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			false,
 			false,
 			true,
+			hasImageInput,
 			requestPlatform,
 		)
 		if err != nil {

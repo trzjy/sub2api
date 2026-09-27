@@ -2081,6 +2081,147 @@
             {{ t("admin.groups.modelRouting.addRule") }}
           </button>
         </div>
+
+        <!-- 视觉分流配置（仅管理员可见） -->
+        <div class="border-t pt-4">
+          <div class="mb-1.5 flex items-center gap-1">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t("admin.groups.visionRouting.title") }}
+            </label>
+            <div class="group relative inline-flex">
+              <Icon
+                name="questionCircle"
+                size="sm"
+                :stroke-width="2"
+                class="cursor-help text-gray-400 transition-colors hover:text-primary-500 dark:text-gray-500 dark:hover:text-primary-400"
+              />
+              <div
+                class="pointer-events-none absolute bottom-full left-0 z-50 mb-2 w-80 opacity-0 transition-all duration-200 group-hover:pointer-events-auto group-hover:opacity-100"
+              >
+                <div
+                  class="rounded-lg bg-gray-900 p-3 text-white shadow-lg dark:bg-gray-800"
+                >
+                  <p class="text-xs leading-relaxed text-gray-300">
+                    {{ t("admin.groups.visionRouting.tooltip") }}
+                  </p>
+                  <div
+                    class="absolute -bottom-1.5 left-3 h-3 w-3 rotate-45 bg-gray-900 dark:bg-gray-800"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            {{ t("admin.groups.visionRouting.noRulesHint") }}
+          </p>
+          <div class="space-y-3">
+            <div
+              v-for="rule in createVisionRoutingRules"
+              :key="getCreateRuleRenderKey(rule)"
+              class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+            >
+              <div class="flex items-start gap-3">
+                <div class="flex-1 space-y-2">
+                  <div>
+                    <label class="input-label text-xs">{{
+                      t("admin.groups.visionRouting.modelName")
+                    }}</label>
+                    <input
+                      v-model="rule.pattern"
+                      type="text"
+                      class="input text-sm"
+                      :placeholder="
+                        t('admin.groups.visionRouting.modelNamePlaceholder')
+                      "
+                    />
+                  </div>
+                  <div>
+                    <label class="input-label text-xs">{{
+                      t("admin.groups.visionRouting.accounts")
+                    }}</label>
+                    <div
+                      v-if="rule.accounts.length > 0"
+                      class="flex flex-wrap gap-1.5 mb-2"
+                    >
+                      <span
+                        v-for="account in rule.accounts"
+                        :key="account.id"
+                        class="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2.5 py-1 text-xs font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300"
+                      >
+                        {{ account.name }}
+                        <button
+                          type="button"
+                          @click="removeVisionSelectedAccount(rule, account.id)"
+                          class="ml-0.5 text-primary-500 hover:text-primary-700 dark:hover:text-primary-200"
+                        >
+                          <Icon name="x" size="xs" />
+                        </button>
+                      </span>
+                    </div>
+                    <div
+                      v-if="visionGroupAccounts.length === 0"
+                      class="text-xs text-gray-400 mt-1"
+                    >
+                      {{ t("admin.groups.visionRouting.noAccounts") }}
+                    </div>
+                    <div v-else class="relative">
+                      <input
+                        v-model="
+                          visionAccountKeyword[getCreateRuleSearchKey(rule)]
+                        "
+                        type="text"
+                        class="input text-sm"
+                        :placeholder="
+                          t('admin.groups.visionRouting.searchAccountPlaceholder')
+                        "
+                      />
+                      <div
+                        class="mt-1 max-h-40 w-full overflow-auto rounded-lg border bg-white p-1 shadow-lg dark:border-dark-600 dark:bg-dark-800"
+                      >
+                        <label
+                          v-for="acc in filteredVisionAccounts(
+                            getCreateRuleSearchKey(rule),
+                          )"
+                          :key="acc.id"
+                          class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-dark-700"
+                        >
+                          <input
+                            type="checkbox"
+                            :checked="rule.accounts.some((a) => a.id === acc.id)"
+                            @change="toggleVisionAccount(rule, acc)"
+                          />
+                          <span>{{ acc.name }}</span>
+                          <span class="ml-2 text-xs text-gray-400"
+                            >#{{ acc.id }}</span
+                          >
+                        </label>
+                      </div>
+                    </div>
+                    <p class="text-xs text-gray-400 mt-1">
+                      {{ t("admin.groups.visionRouting.accountsHint") }}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  @click="removeCreateVisionRoutingRule(rule)"
+                  class="mt-5 p-1.5 text-gray-400 hover:text-red-500 transition-colors"
+                  :title="t('admin.groups.visionRouting.removeRule')"
+                >
+                  <Icon name="trash" size="sm" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            @click="addCreateVisionRoutingRule"
+            class="mt-3 flex items-center gap-1.5 text-sm text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300"
+          >
+            <Icon name="plus" size="sm" />
+            {{ t("admin.groups.visionRouting.addRule") }}
+          </button>
+        </div>
         </template>
       </form>
 
@@ -3742,6 +3883,147 @@
             {{ t("admin.groups.modelRouting.addRule") }}
           </button>
         </div>
+
+        <!-- 视觉分流配置（仅管理员可见） -->
+        <div class="border-t pt-4">
+          <div class="mb-1.5 flex items-center gap-1">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t("admin.groups.visionRouting.title") }}
+            </label>
+            <div class="group relative inline-flex">
+              <Icon
+                name="questionCircle"
+                size="sm"
+                :stroke-width="2"
+                class="cursor-help text-gray-400 transition-colors hover:text-primary-500 dark:text-gray-500 dark:hover:text-primary-400"
+              />
+              <div
+                class="pointer-events-none absolute bottom-full left-0 z-50 mb-2 w-80 opacity-0 transition-all duration-200 group-hover:pointer-events-auto group-hover:opacity-100"
+              >
+                <div
+                  class="rounded-lg bg-gray-900 p-3 text-white shadow-lg dark:bg-gray-800"
+                >
+                  <p class="text-xs leading-relaxed text-gray-300">
+                    {{ t("admin.groups.visionRouting.tooltip") }}
+                  </p>
+                  <div
+                    class="absolute -bottom-1.5 left-3 h-3 w-3 rotate-45 bg-gray-900 dark:bg-gray-800"
+                  ></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            {{ t("admin.groups.visionRouting.noRulesHint") }}
+          </p>
+          <div class="space-y-3">
+            <div
+              v-for="rule in editVisionRoutingRules"
+              :key="getEditRuleRenderKey(rule)"
+              class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+            >
+              <div class="flex items-start gap-3">
+                <div class="flex-1 space-y-2">
+                  <div>
+                    <label class="input-label text-xs">{{
+                      t("admin.groups.visionRouting.modelName")
+                    }}</label>
+                    <input
+                      v-model="rule.pattern"
+                      type="text"
+                      class="input text-sm"
+                      :placeholder="
+                        t('admin.groups.visionRouting.modelNamePlaceholder')
+                      "
+                    />
+                  </div>
+                  <div>
+                    <label class="input-label text-xs">{{
+                      t("admin.groups.visionRouting.accounts")
+                    }}</label>
+                    <div
+                      v-if="rule.accounts.length > 0"
+                      class="flex flex-wrap gap-1.5 mb-2"
+                    >
+                      <span
+                        v-for="account in rule.accounts"
+                        :key="account.id"
+                        class="inline-flex items-center gap-1 rounded-full bg-primary-100 px-2.5 py-1 text-xs font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300"
+                      >
+                        {{ account.name }}
+                        <button
+                          type="button"
+                          @click="removeVisionSelectedAccount(rule, account.id)"
+                          class="ml-0.5 text-primary-500 hover:text-primary-700 dark:hover:text-primary-200"
+                        >
+                          <Icon name="x" size="xs" />
+                        </button>
+                      </span>
+                    </div>
+                    <div
+                      v-if="visionGroupAccounts.length === 0"
+                      class="text-xs text-gray-400 mt-1"
+                    >
+                      {{ t("admin.groups.visionRouting.noAccounts") }}
+                    </div>
+                    <div v-else class="relative">
+                      <input
+                        v-model="
+                          visionAccountKeyword[getEditRuleSearchKey(rule)]
+                        "
+                        type="text"
+                        class="input text-sm"
+                        :placeholder="
+                          t('admin.groups.visionRouting.searchAccountPlaceholder')
+                        "
+                      />
+                      <div
+                        class="mt-1 max-h-40 w-full overflow-auto rounded-lg border bg-white p-1 shadow-lg dark:border-dark-600 dark:bg-dark-800"
+                      >
+                        <label
+                          v-for="acc in filteredVisionAccounts(
+                            getEditRuleSearchKey(rule),
+                          )"
+                          :key="acc.id"
+                          class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-gray-100 dark:hover:bg-dark-700"
+                        >
+                          <input
+                            type="checkbox"
+                            :checked="rule.accounts.some((a) => a.id === acc.id)"
+                            @change="toggleVisionAccount(rule, acc)"
+                          />
+                          <span>{{ acc.name }}</span>
+                          <span class="ml-2 text-xs text-gray-400"
+                            >#{{ acc.id }}</span
+                          >
+                        </label>
+                      </div>
+                    </div>
+                    <p class="text-xs text-gray-400 mt-1">
+                      {{ t("admin.groups.visionRouting.accountsHint") }}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  @click="removeEditVisionRoutingRule(rule)"
+                  class="mt-5 p-1.5 text-gray-400 hover:text-red-500 transition-colors"
+                  :title="t('admin.groups.visionRouting.removeRule')"
+                >
+                  <Icon name="trash" size="sm" />
+                </button>
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            @click="addEditVisionRoutingRule"
+            class="mt-3 flex items-center gap-1.5 text-sm text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300"
+          >
+            <Icon name="plus" size="sm" />
+            {{ t("admin.groups.visionRouting.addRule") }}
+          </button>
+        </div>
         </template>
       </form>
 
@@ -5046,6 +5328,15 @@ const createModelRoutingRules = ref<ModelRoutingRule[]>([]);
 // 编辑表单的模型路由规则
 const editModelRoutingRules = ref<ModelRoutingRule[]>([]);
 
+// 视觉分流规则（模型名 → 本组账号），与模型路由同形、复用 ModelRoutingRule 结构
+const createVisionRoutingRules = ref<ModelRoutingRule[]>([]);
+const editVisionRoutingRules = ref<ModelRoutingRule[]>([]);
+
+// 视觉分流可选账号（仅限当前分组已有账号）
+const visionGroupAccounts = ref<SimpleAccount[]>([]);
+// 视觉分流账号搜索关键词（按规则 key 隔离，与模型路由搜索互不干扰）
+const visionAccountKeyword = ref<Record<string, string>>({});
+
 // 规则对象稳定 key（避免使用 index 导致状态错位）
 const resolveCreateRuleKey =
   createStableObjectKeyResolver<ModelRoutingRule>("create-rule");
@@ -5224,6 +5515,62 @@ const removeEditRoutingRule = (rule: ModelRoutingRule) => {
   editModelRoutingRules.value.splice(index, 1);
 };
 
+// ============ 视觉分流规则辅助 ============
+const addCreateVisionRoutingRule = () => {
+  createVisionRoutingRules.value.push({ pattern: "", accounts: [] });
+};
+
+const removeCreateVisionRoutingRule = (rule: ModelRoutingRule) => {
+  const index = createVisionRoutingRules.value.indexOf(rule);
+  if (index !== -1) createVisionRoutingRules.value.splice(index, 1);
+};
+
+const addEditVisionRoutingRule = () => {
+  editVisionRoutingRules.value.push({ pattern: "", accounts: [] });
+};
+
+const removeEditVisionRoutingRule = (rule: ModelRoutingRule) => {
+  const index = editVisionRoutingRules.value.indexOf(rule);
+  if (index !== -1) editVisionRoutingRules.value.splice(index, 1);
+};
+
+// 切换某规则下某个账号的选中态（仅限分组账号）
+const toggleVisionAccount = (rule: ModelRoutingRule, account: SimpleAccount) => {
+  if (!rule) return;
+  if (rule.accounts.some((a) => a.id === account.id)) {
+    rule.accounts = rule.accounts.filter((a) => a.id !== account.id);
+  } else {
+    rule.accounts.push(account);
+  }
+};
+
+// 移除已选账号（与 toggle 互补，供标签上的 × 使用）
+const removeVisionSelectedAccount = (rule: ModelRoutingRule, accountId: number) => {
+  if (!rule) return;
+  rule.accounts = rule.accounts.filter((a) => a.id !== accountId);
+};
+
+// 按规则 key 过滤分组账号（本地搜索）
+const filteredVisionAccounts = (searchKey: string): SimpleAccount[] => {
+  const keyword = (visionAccountKeyword.value[searchKey] || "").trim().toLowerCase();
+  if (!keyword) return visionGroupAccounts.value;
+  return visionGroupAccounts.value.filter(
+    (a) => a.name.toLowerCase().includes(keyword) || String(a.id).includes(keyword),
+  );
+};
+
+// 加载分组已有账号（视觉分流仅允许选择本组账号，方案 §3.7 同组约束前端镜像）
+const loadVisionGroupAccounts = async (groupId: number) => {
+  visionGroupAccounts.value = [];
+  if (!groupId) return;
+  try {
+    const res = await adminAPI.accounts.list(1, 500, { group: String(groupId) });
+    visionGroupAccounts.value = res.items.map((a) => ({ id: a.id, name: a.name }));
+  } catch {
+    visionGroupAccounts.value = [];
+  }
+};
+
 const resetModelAllowlistState = (
   state: typeof createModelAllowlistState,
   config?: Parameters<typeof createInitialModelAllowlistState>[0],
@@ -5271,7 +5618,8 @@ const moveEditModelAllowlistItem = (fromIndex: number, toIndex: number) => {
   moveModelAllowlistItem(editModelAllowlistState, fromIndex, toIndex);
 };
 
-// 将 UI 格式的路由规则转换为 API 格式
+// 将 UI 格式的路由规则转换为 API 格式（模型路由：无有效规则时返回 null 表示"不启用/不清空"，
+// 保持既有语义与消费者不变）。
 const convertRoutingRulesToApiFormat = (
   rules: ModelRoutingRule[],
 ): Record<string, number[]> | null => {
@@ -5291,6 +5639,28 @@ const convertRoutingRulesToApiFormat = (
   }
 
   return hasValidRules ? result : null;
+};
+
+// 视觉分流专用转换：空规则时返回空对象 {}（显式空配置）而非 null，
+// 使"删空全部规则后提交"真实清空后端配置（派发单 A）。后端以「字段是否携带」区分
+// 未携带（不触碰）与显式空（清空），因此 vision_routing 必须始终携带 JSON 值。
+const convertVisionRoutingRulesToApiFormat = (
+  rules: ModelRoutingRule[],
+): Record<string, number[]> => {
+  const result: Record<string, number[]> = {};
+
+  for (const rule of rules) {
+    const pattern = rule.pattern.trim();
+    if (!pattern) continue;
+
+    const accountIds = rule.accounts.map((a) => a.id).filter((id) => id > 0);
+
+    if (accountIds.length > 0) {
+      result[pattern] = accountIds;
+    }
+  }
+
+  return result;
 };
 
 // 将 API 格式的路由规则转换为 UI 格式（需要加载账号名称）
@@ -5840,6 +6210,9 @@ const closeCreateModal = () => {
   createReasoningEffortPolicyRef.value?.resetValidation();
   resetModelAllowlistState(createModelAllowlistState);
   createModelRoutingRules.value = [];
+  createVisionRoutingRules.value = [];
+  visionGroupAccounts.value = [];
+  visionAccountKeyword.value = {};
 };
 
 const normalizeOptionalLimit = (
@@ -5945,6 +6318,9 @@ const handleCreateGroup = async () => {
         : {}),
       model_routing: convertRoutingRulesToApiFormat(
         createModelRoutingRules.value,
+      ),
+      vision_routing: convertVisionRoutingRulesToApiFormat(
+        createVisionRoutingRules.value,
       ),
       model_allowlist: buildModelAllowlistConfig(createModelAllowlistState),
       // 创建时固定账号 manifest 固定发送关闭状态（后端创建路径禁止开启）
@@ -6168,6 +6544,11 @@ const handleEdit = async (group: AdminGroup) => {
   editModelRoutingRules.value = await convertApiFormatToRoutingRules(
     group.model_routing,
   );
+  // 加载视觉分流规则 + 本组账号（视觉分流仅限本组账号）
+  editVisionRoutingRules.value = await convertApiFormatToRoutingRules(
+    group.vision_routing,
+  );
+  await loadVisionGroupAccounts(group.id);
   loadModelAllowlistCandidates("edit", group.id, group.platform);
   showEditModal.value = true;
 };
@@ -6184,6 +6565,9 @@ const closeEditModal = () => {
   editForm.reasoning_effort_mappings = [];
   editReasoningEffortPolicyRef.value?.resetValidation();
   editModelRoutingRules.value = [];
+  editVisionRoutingRules.value = [];
+  visionGroupAccounts.value = [];
+  visionAccountKeyword.value = {};
   editForm.copy_accounts_from_group_ids = [];
   editForm.peak_rate_enabled = false;
   editForm.peak_start = "";
@@ -6287,6 +6671,9 @@ const handleUpdateGroup = async () => {
           : editForm.fallback_group_id_on_invalid_request,
       model_routing: convertRoutingRulesToApiFormat(
         editModelRoutingRules.value,
+      ),
+      vision_routing: convertVisionRoutingRulesToApiFormat(
+        editVisionRoutingRules.value,
       ),
       model_allowlist: buildModelAllowlistConfig(editModelAllowlistState),
       // 非 openai 平台提交关闭状态，与后端归一化一致

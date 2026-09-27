@@ -60,6 +60,8 @@ func ProvideAdminHandlers(
 	webPlatformAutoLogin *service.WebPlatformAutoLoginService,
 	usageRiskService service.UsageRiskService,
 	settingService *service.SettingService,
+	visionCapabilityHandler *admin.VisionCapabilityHandler,
+	visionRoutingService *service.VisionRoutingService,
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -70,6 +72,8 @@ func ProvideAdminHandlers(
 	// 注入网页版平台自动登录服务（service 层 provider 构造，与 TokenRefreshService
 	// 共享同一实例；其 Start 由 handler 内 lazy + idempotent 触发）。
 	accountHandler.SetWebPlatformAutoLoginService(webPlatformAutoLogin)
+	// 注入分组视觉分流配置服务，供 group create/update 链路做同组校验。
+	groupHandler.SetVisionRoutingService(visionRoutingService)
 	accountHandler.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{
 		BaseURL: cfg.LocalCaptchaHelper.BaseURL,
 		APIKey:  cfg.LocalCaptchaHelper.APIKey,
@@ -117,6 +121,7 @@ func ProvideAdminHandlers(
 		Xianyu:                 xianyuHandler,
 		Pricing:                pricingHandler,
 		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
+		VisionCapability:       visionCapabilityHandler,
 	}
 }
 
@@ -298,6 +303,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewProxyHandler,
 	admin.NewRedeemHandler,
 	admin.NewPromoHandler,
+	admin.NewVisionCapabilityHandler,
 	ProvideAdminSettingHandler,
 	admin.NewOpsHandler,
 	ProvideSystemHandler,

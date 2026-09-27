@@ -1855,7 +1855,37 @@ export default {
       linkCopied: 'Link Copied',
       needsReauth: 'Re-auth Required',
       rateLimited: 'Rate Limited',
-      usageError: 'Fetch Error'
+      usageError: 'Fetch Error',
+      vision: {
+        detectVision: 'Detect Vision Capability',
+        visionTitle: 'Vision Capability Detection',
+        model: 'Model',
+        modelPlaceholder: 'Enter upstream model name, e.g. deepseek-v4.1-flash',
+        protocol: 'Protocol',
+        protocolChatCompletions: 'chat_completions',
+        runDetect: 'Run Detection',
+        detecting: 'Detecting...',
+        resultTitle: 'Detection Result',
+        resultSupported: 'Vision Supported',
+        resultUnsupported: 'Vision Not Supported',
+        resultDetectFailed: 'Detection Failed',
+        resultManualReview: 'Manual Review Required',
+        supportsVision: 'Supports Vision',
+        manualReviewHint: 'This account returned a policy refusal for this model/protocol (e.g. "cannot read CAPTCHA"), so it cannot be auto-classified. Please review manually.',
+        markSupported: 'Mark as Supported',
+        markUnsupported: 'Mark as Unsupported',
+        overriding: 'Overriding...',
+        overrideSuccess: 'Capability flag updated',
+        batchDetect: 'Batch Detect',
+        batchTitle: 'Batch Vision Capability Detection',
+        accountId: 'Account ID',
+        accountName: 'Account',
+        selectAccountPlaceholder: 'Select account',
+        close: 'Close',
+        noResult: 'No result yet',
+        detectError: 'Detection failed',
+        hint: 'Vision detection sends a random CAPTCHA image using the account’s real key and classifies it by whether the response reads the code exactly.'
+      }
     },
 
     // Scheduled Tests

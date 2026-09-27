@@ -1255,6 +1255,24 @@ export default {
         searchAccountPlaceholder: '搜索账号...',
         accountsHint: '选择此模型模式优先使用的账号'
       },
+      visionRouting: {
+        title: '视觉分流配置',
+        tooltip:
+          '为指定模型配置带图请求的视觉分流目标账号（仅限本组账号）。命中配置后，该模型的带图请求优先路由到所选账号，但目标账号仍需通过视觉能力校验。',
+        modelName: '模型名称',
+        modelNamePlaceholder: '如 deepseek-v4.1-flash',
+        modelNameHint: '带图请求命中该模型名称时，分流到以下目标账号',
+        accounts: '视觉分流目标账号',
+        selectAccounts: '选择账号',
+        noAccounts: '此分组暂无账号，请先为该分组添加账号',
+        loadingAccounts: '加载账号中...',
+        removeRule: '删除规则',
+        addRule: '添加视觉分流规则',
+        noRules: '暂无视觉分流规则',
+        noRulesHint: '添加规则以将特定模型的带图请求分流到指定的本组账号',
+        searchAccountPlaceholder: '搜索账号...',
+        accountsHint: '选择此模型带图请求分流的目标账号（仅限本组账号）'
+      },
       claudeMaxSimulation: {
         title: 'Claude Max 用量模拟',
         tooltip:

@@ -364,6 +364,9 @@ type SystemSettings struct {
 
 	// 允许终端用户在用量页查看自己的失败请求
 	AllowUserViewErrorRequests bool `json:"allow_user_view_error_requests"`
+
+	// 全局视觉路由 kill-switch（指针语义，nil 表示未携带）
+	VisionRoutingEnabled *bool `json:"vision_routing_enabled"`
 }
 
 type DefaultSubscriptionSetting struct {

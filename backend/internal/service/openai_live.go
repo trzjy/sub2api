@@ -161,6 +161,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			false,
 			false,
 			false,
+			false,
 		)
 		if selectErr != nil {
 			if lastErr != nil {

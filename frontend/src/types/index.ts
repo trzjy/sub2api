@@ -641,6 +641,9 @@ export interface AdminGroup extends Group {
   model_routing: Record<string, number[]> | null
   model_routing_enabled: boolean
 
+  // 视觉分流配置（仅管理员可见，内部信息）：模型名 → 本组账号 ID 列表
+  vision_routing: Record<string, number[]> | null
+
   // MCP XML 协议注入（仅 antigravity 平台使用）
   mcp_xml_inject: boolean
 
@@ -846,6 +849,7 @@ export interface CreateGroupRequest {
   messages_dispatch_model_config?: OpenAIMessagesDispatchModelConfig
   model_routing?: Record<string, number[]> | null
   model_routing_enabled?: boolean
+  vision_routing?: Record<string, number[]> | null
   rpm_limit?: number
   concurrency?: number
   max_reasoning_effort?: string
@@ -913,6 +917,7 @@ export interface UpdateGroupRequest {
   messages_dispatch_model_config?: OpenAIMessagesDispatchModelConfig
   model_routing?: Record<string, number[]> | null
   model_routing_enabled?: boolean
+  vision_routing?: Record<string, number[]> | null
   rpm_limit?: number
   concurrency?: number
   max_reasoning_effort?: string

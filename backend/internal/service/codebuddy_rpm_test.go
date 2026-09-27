@@ -182,7 +182,7 @@ func TestSelectAccountWithScheduler_CodeBuddyRPMFiltersHotAccount(t *testing.T) 
 		selection, _, err := newService([]Account{hot, cool}, rpm).SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "", nil,
 			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions,
-			false, false, false, PlatformCodeBuddy,
+			false, false, false, false, PlatformCodeBuddy,
 		)
 		require.NoError(t, err)
 		require.NotNil(t, selection)
@@ -200,7 +200,7 @@ func TestSelectAccountWithScheduler_CodeBuddyRPMFiltersHotAccount(t *testing.T) 
 		selection, _, err := newService([]Account{hot, cool}, rpm).SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "", nil,
 			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions,
-			false, false, false, PlatformCodeBuddy,
+			false, false, false, false, PlatformCodeBuddy,
 		)
 		require.NoError(t, err)
 		require.NotNil(t, selection)

@@ -212,6 +212,66 @@ func (s *SettingService) GetCyberSessionBlockRuntime(ctx context.Context) (bool,
 	return false, time.Hour
 }
 
+// cachedVisionRoutingEnabled 全局视觉路由 kill-switch 进程内缓存（60s TTL）。
+type cachedVisionRoutingEnabled struct {
+	enabled   bool
+	expiresAt int64 // unix nano
+}
+
+const visionRoutingEnabledCacheTTL = 60 * time.Second
+const visionRoutingEnabledErrorTTL = 5 * time.Second
+const visionRoutingEnabledDBTimeout = 5 * time.Second
+
+// IsVisionRoutingEnabled 返回全局视觉路由 kill-switch（vision_routing_enabled）。
+// 默认开启：未配置（ErrSettingNotFound）/空值/非显式 false 一律视为开启，仅显式
+// false 类值（false/0/off/disabled）才关闭。开关定位是回滚手段
+// （docs/capability-routing-plan.md §3.8），非灰度门禁——未配置时功能生效。
+// 进程内 atomic.Value 缓存（60s TTL），设置写入后经 refreshCachedSettings 失效，
+// 实现秒级生效。真实读取错误按既有设置链路语义（同构 cyber_session_block）以短 TTL
+// 缓存默认值（开启），不自创降级。
+func (s *SettingService) IsVisionRoutingEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return true
+	}
+	if cached, ok := s.visionRoutingEnabledCache.Load().(*cachedVisionRoutingEnabled); ok && cached != nil {
+		if time.Now().UnixNano() < cached.expiresAt {
+			return cached.enabled
+		}
+	}
+	result, _, _ := s.visionRoutingEnabledSF.Do("vision_routing_enabled", func() (any, error) {
+		if cached, ok := s.visionRoutingEnabledCache.Load().(*cachedVisionRoutingEnabled); ok && cached != nil {
+			if time.Now().UnixNano() < cached.expiresAt {
+				return cached, nil
+			}
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), visionRoutingEnabledDBTimeout)
+		defer cancel()
+		value, err := s.settingRepo.GetValue(dbCtx, SettingKeyVisionRoutingEnabled)
+		if err != nil && !errors.Is(err, ErrSettingNotFound) {
+			slog.Warn("failed to get vision_routing_enabled setting", "error", err)
+			entry := &cachedVisionRoutingEnabled{
+				enabled:   true, // 错误时回到默认（开启），短 TTL 快速重试
+				expiresAt: time.Now().Add(visionRoutingEnabledErrorTTL).UnixNano(),
+			}
+			s.visionRoutingEnabledCache.Store(entry)
+			return entry, nil
+		}
+		entry := &cachedVisionRoutingEnabled{
+			enabled:   !isFalseSettingValue(value),
+			expiresAt: time.Now().Add(visionRoutingEnabledCacheTTL).UnixNano(),
+		}
+		s.visionRoutingEnabledCache.Store(entry)
+		return entry, nil
+	})
+	if entry, ok := result.(*cachedVisionRoutingEnabled); ok && entry != nil {
+		return entry.enabled
+	}
+	return true
+}
+
 // GetAntigravityUserAgentVersion 返回 Antigravity 上游请求使用的版本号。
 // 后台设置优先；为空、缺失或非法时回退到 ANTIGRAVITY_USER_AGENT_VERSION / 内置默认值。
 func (s *SettingService) GetAntigravityUserAgentVersion(ctx context.Context) string {

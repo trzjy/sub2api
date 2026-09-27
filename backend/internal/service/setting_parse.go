@@ -268,6 +268,9 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse:      "",
 		SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky:         "",
 
+		// 全局视觉路由 kill-switch（默认开启：未配置 = 开启，§3.8）
+		SettingKeyVisionRoutingEnabled: "true",
+
 		SettingKeyAllowUserViewErrorRequests: "false",
 	}
 
@@ -940,6 +943,9 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.OpenAIAdvancedSchedulerWeightUpstreamCost = strings.TrimSpace(settings[SettingKeyOpenAIAdvancedSchedulerWeightUpstreamCost])
 	result.OpenAIAdvancedSchedulerWeightPreviousResponse = strings.TrimSpace(settings[SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse])
 	result.OpenAIAdvancedSchedulerWeightSessionSticky = strings.TrimSpace(settings[SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky])
+	// 全局视觉路由 kill-switch（默认开启：缺失/空/非显式 false 一律视为开启，§3.8）
+	visionRoutingEnabled := !isFalseSettingValue(settings[SettingKeyVisionRoutingEnabled])
+	result.VisionRoutingEnabled = &visionRoutingEnabled
 	result.OpenAIAdvancedSchedulerEffectiveLBTopK = s.openAIAdvancedSchedulerEffectiveLBTopK()
 	effectiveWeights := s.openAIAdvancedSchedulerEffectiveWeights()
 	result.OpenAIAdvancedSchedulerEffectiveWeightPriority = formatOpenAIAdvancedSchedulerFloat(effectiveWeights.Priority)

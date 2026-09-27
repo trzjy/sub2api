@@ -453,6 +453,9 @@ type OpenAIGatewayService struct {
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	// visionRouting 提供带图请求的分组视觉分流目标账号读取
+	// （docs/capability-routing-plan.md §3.7），供调度侧候选池收窄消费。
+	visionRouting         *VisionRoutingService
 	rpmCache              RPMCache // 账号级 RPM 计数（当前用于 CodeBuddy 平台默认 RPM 限流）
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
@@ -524,6 +527,7 @@ func NewOpenAIGatewayService(
 	balanceNotifyService *BalanceNotifyService,
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	visionRouting *VisionRoutingService,
 ) *OpenAIGatewayService {
 	// enforceCodexIdentityHeaders 是 HTTP / 透传 / WS / 探针 等出站路径共用的纯函数收口点，
 	// 拿不到配置，故在此发布进程级开关快照。配置取反义，零值即「强制统一出口开启」。
@@ -562,6 +566,7 @@ func NewOpenAIGatewayService(
 		balanceNotifyService:  balanceNotifyService,
 		settingService:        settingService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
+		visionRouting:         visionRouting,
 		liveAttestation:       liveattestation.NewProvider(),
 		liveAttestationCipher: newLiveAttestationCipher(cfg),
 		responseHeaderFilter:  compileResponseHeaderFilter(cfg),

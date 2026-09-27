@@ -136,6 +136,11 @@ type SettingService struct {
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
 	cyberSessionBlockRuntimeSF    singleflight.Group
 
+	// visionRoutingEnabledCache 是全局视觉路由 kill-switch 的进程内缓存
+	// （*cachedVisionRoutingEnabled）。OpenAI 选号热路径逐请求读取，禁止直接查库。
+	visionRoutingEnabledCache atomic.Value
+	visionRoutingEnabledSF    singleflight.Group
+
 	// panelRateLimitCache 面板 API 限流配置进程内缓存（*cachedPanelRateLimitSettings）。
 	// 面板每个认证请求都会读取，禁止在热路径上直接访问 DB。
 	panelRateLimitCache atomic.Value

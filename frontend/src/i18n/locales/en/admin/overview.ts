@@ -1256,6 +1256,24 @@ export default {
         searchAccountPlaceholder: 'Search accounts...',
         accountsHint: 'Select accounts to prioritize for this model pattern'
       },
+      visionRouting: {
+        title: 'Vision Routing',
+        tooltip:
+          'Configure vision-routing target accounts for image-bearing requests of a given model (group accounts only). When matched, image requests for that model are routed to the selected accounts, which still pass the vision-capability check.',
+        modelName: 'Model Name',
+        modelNamePlaceholder: 'e.g. deepseek-v4.1-flash',
+        modelNameHint: 'When an image-bearing request matches this model name, route it to the target accounts below',
+        accounts: 'Vision Routing Target Accounts',
+        selectAccounts: 'Select accounts',
+        noAccounts: 'No accounts in this group yet; add accounts to the group first',
+        loadingAccounts: 'Loading accounts...',
+        removeRule: 'Remove Rule',
+        addRule: 'Add Vision Routing Rule',
+        noRules: 'No vision routing rules',
+        noRulesHint: 'Add a rule to route image-bearing requests of a model to designated group accounts',
+        searchAccountPlaceholder: 'Search accounts...',
+        accountsHint: 'Select target accounts for this model’s image requests (group accounts only)'
+      },
       claudeMaxSimulation: {
         title: 'Claude Max Usage Simulation',
         tooltip:

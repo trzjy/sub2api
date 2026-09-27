@@ -54,6 +54,8 @@ func ProvideOpenAIGatewayService(
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
 	rpmCache RPMCache,
+	visionRouting *VisionRoutingService,
+	capability *AccountModelCapabilityService,
 ) *OpenAIGatewayService {
 	svc := NewOpenAIGatewayService(
 		accountRepo,
@@ -78,8 +80,15 @@ func ProvideOpenAIGatewayService(
 		balanceNotifyService,
 		settingService,
 		userPlatformQuotaRepo,
+		visionRouting,
 	)
 	svc.rpmCache = rpmCache
+	// 终审 P1-A（派发单 Vision-S1 §3.4）：绑定账号级视觉能力查询，使调度
+	// RequireVision 的 vision_not_supported 排除与读错失败关闭在生产生效，
+	// 不再恒为 unknown 放行（假实现）。
+	if capability != nil {
+		SetOpenAIAccountVisionCapabilityLookup(capability.ModelSupportsVisionInput)
+	}
 	return svc
 }
 
@@ -1272,7 +1281,25 @@ var ProviderSet = wire.NewSet(
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
 	ProvidePromoIntelService,
+
+	// 视觉能力检测 / 分流配置（docs/capability-routing-plan.md §3.5/§3.7；派发单 F3 接线）
+	NewAccountModelCapabilityService,
+	ProvideVisionDetectService,
+	NewVisionRoutingService,
 )
+
+// ProvideVisionDetectService 构造检测服务并接上平台侧 usage 落库（终审 P2-7：
+// 检测流量记 usage_logs 不经 wire setter，须以 provider 表达，避免 wire_gen
+// 再生成时丢失 SetUsageLogRepository 调用）。
+func ProvideVisionDetectService(
+	accountRepo AccountRepository,
+	capability *AccountModelCapabilityService,
+	usageLogRepo UsageLogRepository,
+) *VisionDetectService {
+	svc := NewVisionDetectService(accountRepo, capability)
+	svc.SetUsageLogRepository(usageLogRepo)
+	return svc
+}
 
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
 func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService) *UserPlatformQuotaUsageFlusher {

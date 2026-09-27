@@ -185,6 +185,9 @@ type AdminGroup struct {
 	ModelRouting        map[string][]int64 `json:"model_routing"`
 	ModelRoutingEnabled bool               `json:"model_routing_enabled"`
 
+	// 视觉分流配置（docs/capability-routing-plan.md §3.7），同构 model_routing
+	VisionRouting map[string][]int64 `json:"vision_routing"`
+
 	// MCP XML 协议注入（仅 antigravity 平台使用）
 	MCPXMLInject bool `json:"mcp_xml_inject"`
 

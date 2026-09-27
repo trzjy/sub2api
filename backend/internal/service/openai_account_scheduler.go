@@ -88,7 +88,15 @@ type OpenAIAccountScheduleRequest struct {
 	// RequireCompact is only for legacy /responses/compact capability filtering
 	// and compact_model_mapping; native remote compaction v2 leaves it false.
 	RequireCompact bool
-	ExcludedIDs    map[int64]struct{}
+	// RequireVision 表示请求含图（有图片输入），选号时排除已知不支持视觉的账号
+	// （docs/capability-routing-plan.md §3.4）；未标记的账号按 unknown 放行。
+	RequireVision bool
+	// VisionRoutingTargets 是带图请求命中 groups.vision_routing 配置时的目标账号
+	// ID 集合（docs/capability-routing-plan.md §3.7）。非空时候选池正向收窄为该
+	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
+	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
+	VisionRoutingTargets []int64
+	ExcludedIDs          map[int64]struct{}
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -1810,6 +1818,28 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 	return compatible
 }
 
+// openAIAccountVisionCapabilityLookup 按 (账号, 上游模型, 协议) 查询视觉能力标记。
+// 默认返回 (false, false, nil)=未知，调用方按"未标记账号放行"保守处理
+// （docs/capability-routing-plan.md §3.4）。wiring 装配能力表服务后通过
+// SetOpenAIAccountVisionCapabilityLookup 注入（复用账号维度二级缓存），
+// 未装配时行为退化为 unknown 放行，与方案语义一致。读取失败返回非 nil err，
+// 由调用方失败关闭（合同 §5 禁兜底）。
+var openAIAccountVisionCapabilityLookup = func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+	return false, false, nil
+}
+
+// SetOpenAIAccountVisionCapabilityLookup 注入视觉能力查询实现（测试与 wiring 用）。
+// 注入函数需返回读取错误，读取失败时由调度侧失败关闭。
+func SetOpenAIAccountVisionCapabilityLookup(lookup func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error)) {
+	if lookup == nil {
+		openAIAccountVisionCapabilityLookup = func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+			return false, false, nil
+		}
+		return
+	}
+	openAIAccountVisionCapabilityLookup = lookup
+}
+
 // codeBuddyRPMAllowsCandidate 判断非粘性候选是否通过 CodeBuddy 平台默认 RPM 筛选。
 // 计数取自本次选号预取（ctx 缺失即失败开放）。
 func (s *defaultOpenAIAccountScheduler) codeBuddyRPMAllowsCandidate(ctx context.Context, account *Account) bool {
@@ -1887,6 +1917,34 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}
 	if !accountSupportsOpenAICapabilities(account, req.RequiredCapability, req.RequiredImageCapability) {
 		return false, "capability_mismatch"
+	}
+	// 请求含图时排除已知不支持视觉的账号（docs/capability-routing-plan.md §3.4）。
+	// 上游模型名按请求模型经账号 model_mapping 解析（与 forward 阶段一致），
+	// 协议取 req.RequiredCapability 的字符串值（chat_completions / responses），
+	// 与能力标记表的协议维度对齐。未知（未检测）账号放行，由管理端检测收敛。
+	if req.RequireVision {
+		// §3.7 视觉分流正向收窄：命中 groups.vision_routing 配置时，候选账号必须
+		// 属于目标账号集合（纯收窄）。此处位于 §3.4 能力过滤之前，两者叠加：
+		// 集合之外排除（vision_routing_excluded），集合之内仍执行下面的
+		// vision_not_supported 能力过滤，绝不豁免（方案明文"规则只收窄候选池"）。
+		if len(req.VisionRoutingTargets) > 0 && !visionRoutingTargetContains(req.VisionRoutingTargets, account.ID) {
+			return false, "vision_routing_excluded"
+		}
+		upstreamModel := resolveOpenAIAccountUpstreamModelForRequest(account, req.RequestedModel, req.RequireCompact)
+		protocol := string(req.RequiredCapability)
+		if protocol == "" {
+			// 兜底：未声明协议时按 chat_completions 判定，避免空协议永远查不到记录。
+			protocol = string(OpenAIEndpointCapabilityChatCompletions)
+		}
+		supported, known, err := openAIAccountVisionCapabilityLookup(ctx, account.ID, upstreamModel, protocol)
+		if err != nil {
+			// 能力源读取失败：禁止静默降级为 unknown 放行，失败关闭（合同 §5 禁兜底）。
+			return false, "vision_capability_unavailable"
+		}
+		if known && !supported {
+			return false, "vision_not_supported"
+		}
+		// unknown：放行（保守），等待管理端检测收敛为 known。
 	}
 	// 分组利润控制：不合格账号在候选过滤与抢槽后终检阶段即被排除，
 	// 排序/评分/粘性/熔断只在合格账号之间工作；named reason 进入 filter stats。
@@ -2171,12 +2229,14 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 	requiredTransport OpenAIUpstreamTransport,
 	requireCompact bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
-	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, "", "", requireCompact, PlatformOpenAI, false, true)
+	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, "", "", requireCompact, PlatformOpenAI, false, true, false)
 }
 
 // SelectAccountWithSchedulerForCapability 按能力要求调度账号。
 // previousResponseCanMove 表示首包 input 可自行重建工具续链，previous_response_id 允许跨账号迁移
 // （粘性加权模式下改为加权偏好而非硬粘连）。
+// requireVision 表示请求含图，选号时排除已知不支持视觉的账号
+// （docs/capability-routing-plan.md §3.4）。
 func (s *OpenAIGatewayService) SelectAccountWithSchedulerForCapability(
 	ctx context.Context,
 	groupID *int64,
@@ -2189,13 +2249,14 @@ func (s *OpenAIGatewayService) SelectAccountWithSchedulerForCapability(
 	requireCompact bool,
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
+	requireVision bool,
 	platformOverride ...string,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	platform := PlatformOpenAI
 	if len(platformOverride) > 0 {
 		platform = platformOverride[0]
 	}
-	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, "", requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, "", requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
 }
 
 func (s *OpenAIGatewayService) SelectAccountWithSchedulerForImages(
@@ -2206,13 +2267,13 @@ func (s *OpenAIGatewayService) SelectAccountWithSchedulerForImages(
 	excludedIDs map[int64]struct{},
 	requiredCapability OpenAIImagesCapability,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
-	selection, decision, err := s.selectAccountWithScheduler(ctx, groupID, "", sessionHash, requestedModel, excludedIDs, OpenAIUpstreamTransportHTTPSSE, "", requiredCapability, false, PlatformOpenAI, false, false)
+	selection, decision, err := s.selectAccountWithScheduler(ctx, groupID, "", sessionHash, requestedModel, excludedIDs, OpenAIUpstreamTransportHTTPSSE, "", requiredCapability, false, PlatformOpenAI, false, false, false)
 	if err == nil && selection != nil && selection.Account != nil {
 		return selection, decision, nil
 	}
 	// 如果要求 native 能力（如指定了模型）但没有可用的 APIKey 账号，回退到 basic（OAuth 账号）
 	if requiredCapability == OpenAIImagesCapabilityNative {
-		return s.selectAccountWithScheduler(ctx, groupID, "", sessionHash, requestedModel, excludedIDs, OpenAIUpstreamTransportHTTPSSE, "", OpenAIImagesCapabilityBasic, false, PlatformOpenAI, false, false)
+		return s.selectAccountWithScheduler(ctx, groupID, "", sessionHash, requestedModel, excludedIDs, OpenAIUpstreamTransportHTTPSSE, "", OpenAIImagesCapabilityBasic, false, PlatformOpenAI, false, false, false)
 	}
 	return selection, decision, err
 }
@@ -2238,8 +2299,9 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	platform string,
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
+	requireVision bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
-	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
 	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
 		return selection, decision, err
 	}
@@ -2255,7 +2317,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 		return selection, decision, err
 	}
 	s.logOpenAIProxyStreamQuarantineFailOpen(requestedModel, blocked)
-	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	return s.selectAccountWithSchedulerOnce(withOpenAIProxyStreamQuarantineBypass(ctx), groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
 }
 
 type openAIGroupPrivacyRequirementContextKey struct{}
@@ -2304,6 +2366,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	platform string,
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
+	requireVision bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
@@ -2317,7 +2380,28 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	// §3.8 全局视觉路由 kill-switch（vision_routing_enabled，默认开启）：关闭后
+	// RequireVision 恒为 false，行为回到 v1 现状（普通路由）。单点收口于此，
+	// 同时覆盖 §3.4 能力过滤与 §3.7 候选池收窄：置 false 后
+	// resolveVisionRoutingTargets 零读取、候选过滤不再执行 vision 判定。
+	if requireVision && !s.isVisionRoutingEnabled(ctx) {
+		requireVision = false
+	}
 	decision := OpenAIAccountScheduleDecision{}
+	// §3.7 视觉分流：带图请求命中 groups.vision_routing 时，本次选号先读取一次
+	// 目标账号集合，透传给候选过滤做正向收窄。读取错误失败关闭（合同 §5），
+	// 禁止静默当作未配置——路由不可知时把带图请求发往任意账号会复现静默丢图。
+	visionRoutingTargets, err := s.resolveVisionRoutingTargets(ctx, groupID, requestedModel, requireVision)
+	if err != nil {
+		return nil, decision, err
+	}
+	if len(visionRoutingTargets) > 0 {
+		slog.Info("vision_routed",
+			"group_id", derefGroupID(groupID),
+			"model", requestedModel,
+			"target_account_count", len(visionRoutingTargets),
+		)
+	}
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {
@@ -2342,6 +2426,8 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				RequiredCapability:      requiredCapability,
 				RequiredImageCapability: requiredImageCapability,
 				RequireCompact:          requireCompact,
+				RequireVision:           requireVision,
+				VisionRoutingTargets:    visionRoutingTargets,
 				ExcludedIDs:             excludedIDs,
 				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 			})
@@ -2451,8 +2537,53 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequiredCapability:      requiredCapability,
 		RequiredImageCapability: requiredImageCapability,
 		RequireCompact:          requireCompact,
+		RequireVision:           requireVision,
+		VisionRoutingTargets:    visionRoutingTargets,
 		ExcludedIDs:             excludedIDs,
 	})
+}
+
+// isVisionRoutingEnabled 读取全局视觉路由 kill-switch（vision_routing_enabled，
+// docs/capability-routing-plan.md §3.8）。默认开启：未装配设置服务或未配置时返回
+// true，与「未配置 = 开启」的开关定位一致。读取走 SettingService 的进程内缓存链路。
+// 设置源取构造函数注入的 s.settingService（权威实例）；rateLimitService 上另挂的
+// settingService 非同一注入链，读到错实例会导致配置的 false 被误当默认开启。
+func (s *OpenAIGatewayService) isVisionRoutingEnabled(ctx context.Context) bool {
+	if s == nil || s.settingService == nil {
+		return true
+	}
+	return s.settingService.IsVisionRoutingEnabled(ctx)
+}
+
+// resolveVisionRoutingTargets 在带图请求命中分组视觉分流配置时返回目标账号 ID
+// 集合（docs/capability-routing-plan.md §3.7）。requireVision=false 或 groupID 为空
+// 时零读取、返回 nil。读取错误失败关闭：禁止静默当作未配置（合同 §5），带图请求
+// 在路由不可知时发往任意账号会复现静默丢图。
+//
+// visionRouting 未装配（nil，如部分测试）时按未配置处理返回 nil，保证
+// requireVision 既有行为零回归。
+func (s *OpenAIGatewayService) resolveVisionRoutingTargets(ctx context.Context, groupID *int64, requestedModel string, requireVision bool) ([]int64, error) {
+	if !requireVision || groupID == nil || requestedModel == "" {
+		return nil, nil
+	}
+	if s.visionRouting == nil {
+		return nil, nil
+	}
+	targets, err := s.visionRouting.GetVisionRoutingAccountIDs(ctx, *groupID, requestedModel)
+	if err != nil {
+		return nil, fmt.Errorf("load vision routing targets for group %d model %s: %w", *groupID, requestedModel, err)
+	}
+	return targets, nil
+}
+
+// visionRoutingTargetContains 判断账号是否属于视觉分流目标集合。
+func visionRoutingTargetContains(targets []int64, accountID int64) bool {
+	for _, targetID := range targets {
+		if targetID == accountID {
+			return true
+		}
+	}
+	return false
 }
 
 func accountSupportsOpenAICapabilities(account *Account, requiredCapability OpenAIEndpointCapability, requiredImageCapability OpenAIImagesCapability) bool {

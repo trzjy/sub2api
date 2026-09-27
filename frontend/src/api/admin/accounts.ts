@@ -1168,6 +1168,124 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
   return data
 }
 
+/**
+ * 视觉能力检测结果状态（与后端契约一致）。
+ * - supported: 支持视觉（响应精确读出验证码）
+ * - unsupported: 不支持视觉（200 但读不出验证码）
+ * - detect_failed: 检测失败（key 无效/4xx/超时等传输层错误，不落库）
+ * - manual_review: 需人工裁决（策略性拒答，如"不能识别验证码"）
+ */
+export type VisionCapabilityStatus =
+  | 'supported'
+  | 'unsupported'
+  | 'detect_failed'
+  | 'manual_review'
+
+export interface VisionCapabilityDetectResult {
+  status: VisionCapabilityStatus
+  supports_vision: boolean | null
+}
+
+/** 批量检测入口条目：由调用方表达「这些账号 × 这些模型/协议」。 */
+export interface VisionCapabilityBatchItem {
+  account_id: number
+  model: string
+  protocol: string
+}
+
+/**
+ * 批量检测请求体的 items 元素（后端契约形状：不含 account_id，
+ * 账号集合在 account_ids 中单独给出）。
+ */
+export interface VisionCapabilityBatchDetectItem {
+  model: string
+  protocol: string
+}
+
+/** 批量检测请求体（后端契约：POST /admin/accounts/vision-capability/detect）。 */
+export interface VisionCapabilityBatchRequest {
+  account_ids: number[]
+  items: VisionCapabilityBatchDetectItem[]
+}
+
+export interface VisionCapabilityBatchResult {
+  account_id: number
+  model: string
+  protocol: string
+  status: VisionCapabilityStatus
+  supports_vision: boolean | null
+}
+
+export interface VisionCapabilityBatchResponse {
+  results: VisionCapabilityBatchResult[]
+}
+
+/**
+ * 单账号视觉能力检测：用该账号真实 key 发随机验证码图，按响应精确匹配判定。
+ * 后端路径：POST /api/v1/admin/accounts/:id/vision-capability/detect
+ */
+export async function detectVisionCapability(
+  id: number,
+  model: string,
+  protocol: string,
+): Promise<VisionCapabilityDetectResult> {
+  const { data } = await apiClient.post<VisionCapabilityDetectResult>(
+    `/admin/accounts/${id}/vision-capability/detect`,
+    { model, protocol },
+  )
+  return data
+}
+
+/**
+ * 批量视觉能力检测。
+ * 后端路径：POST /api/v1/admin/accounts/vision-capability/detect
+ *
+ * 请求体为后端契约形状 `{ account_ids: [...], items: [{ model, protocol }] }`：
+ * account_ids 由入参去重提取，items 按 (model, protocol) 去重（后端对
+ * account_ids × items 做笛卡尔积，重复项只产生冗余结果）。响应 results 形状不变。
+ */
+export async function detectVisionCapabilityBatch(
+  payload: VisionCapabilityBatchItem[],
+): Promise<VisionCapabilityBatchResponse> {
+  const accountIDs: number[] = []
+  const seenAccountIDs = new Set<number>()
+  const items: VisionCapabilityBatchDetectItem[] = []
+  const seenItems = new Set<string>()
+  for (const entry of payload) {
+    if (!seenAccountIDs.has(entry.account_id)) {
+      seenAccountIDs.add(entry.account_id)
+      accountIDs.push(entry.account_id)
+    }
+    const itemKey = `${entry.model}\u0000${entry.protocol}`
+    if (!seenItems.has(itemKey)) {
+      seenItems.add(itemKey)
+      items.push({ model: entry.model, protocol: entry.protocol })
+    }
+  }
+  const { data } = await apiClient.post<VisionCapabilityBatchResponse>(
+    '/admin/accounts/vision-capability/detect',
+    { account_ids: accountIDs, items },
+  )
+  return data
+}
+
+/**
+ * 手动覆盖账号视觉能力标记（应对检测误判个案）。
+ * 后端路径：PUT /api/v1/admin/accounts/:id/vision-capability
+ */
+export async function setVisionCapabilityOverride(
+  id: number,
+  model: string,
+  protocol: string,
+  supportsVision: boolean,
+): Promise<VisionCapabilityDetectResult> {
+  const { data } = await apiClient.put<VisionCapabilityDetectResult>(
+    `/admin/accounts/${id}/vision-capability`,
+    { model, protocol, supports_vision: supportsVision },
+  )
+  return data
+}
+
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -1234,7 +1352,10 @@ export const accountsAPI = {
   saveOllamaCloudUsageSession,
   deleteOllamaCloudUsageSession,
   setOllamaCloudUsageAutoRefresh,
-  refreshOllamaCloudUsage
+  refreshOllamaCloudUsage,
+  detectVisionCapability,
+  detectVisionCapabilityBatch,
+  setVisionCapabilityOverride
 }
 
 export default accountsAPI

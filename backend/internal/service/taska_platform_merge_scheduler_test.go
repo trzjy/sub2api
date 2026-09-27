@@ -134,7 +134,7 @@ func TestTaskA_LegacyTwoTierSelectsAPIBeforeWeb(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -150,7 +150,7 @@ func TestTaskA_LegacyTwoTierWebFallbackWhenAPIExhausted(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -170,7 +170,7 @@ func TestTaskA_LegacyB2MessagesOnlyAPI(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		ctx, taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -181,7 +181,7 @@ func TestTaskA_LegacyB2MessagesOnlyAPI(t *testing.T) {
 	_, _, err = svcOnlyWeb.SelectAccountWithSchedulerForCapability(
 		ctx, taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.Error(t, err, "messages must not select a Web-only account")
 }
@@ -192,7 +192,7 @@ func TestTaskA_LegacyFailClosedInvalidAccessMode(t *testing.T) {
 	_, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.Error(t, err, "explicitly invalid access_mode must be fail-closed (unschedulable)")
 }
@@ -213,7 +213,7 @@ func TestTaskA_LegacyStickyNoWeb(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "sess-1", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -245,7 +245,7 @@ func TestTaskA_AdvancedTwoTierSelectsAPIBeforeWeb(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -261,7 +261,7 @@ func TestTaskA_AdvancedTwoTierWebFallbackWhenAPIExhausted(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -279,7 +279,7 @@ func TestTaskA_AdvancedB2MessagesOnlyAPI(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		ctx, taskAPtrInt64(101), "", "", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)
@@ -303,7 +303,7 @@ func TestTaskA_AdvancedStickyNoWeb(t *testing.T) {
 	sel, _, err := svc.SelectAccountWithSchedulerForCapability(
 		context.Background(), taskAPtrInt64(101), "", "sess-adv", "gpt-4o", nil,
 		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-		false, false, false, PlatformOpenAI,
+		false, false, false, false, PlatformOpenAI,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, sel)

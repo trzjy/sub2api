@@ -391,6 +391,8 @@ type UpdateSettingsRequest struct {
 	AuthSourceDingTalkPlatformQuotas map[string]*service.DefaultPlatformQuotaSetting `json:"auth_source_default_dingtalk_platform_quotas"`
 
 	AllowUserViewErrorRequests *bool `json:"allow_user_view_error_requests"`
+
+	VisionRoutingEnabled *bool `json:"vision_routing_enabled"`
 }
 
 // UpdateSettings 更新系统设置
@@ -1739,6 +1741,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 				return *req.AllowUserViewErrorRequests
 			}
 			return previousSettings.AllowUserViewErrorRequests
+		}(),
+		VisionRoutingEnabled: func() *bool {
+			if req.VisionRoutingEnabled != nil {
+				return req.VisionRoutingEnabled
+			}
+			return previousSettings.VisionRoutingEnabled
 		}(),
 		OpsMonitoringEnabled: func() bool {
 			if req.OpsMonitoringEnabled != nil {

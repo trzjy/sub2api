@@ -44,22 +44,45 @@ func (s *adminServiceImpl) ListGroups(ctx context.Context, page, pageSize int, p
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := s.hydrateGroupsVisionRouting(ctx, groups); err != nil {
+		return nil, 0, err
+	}
 	return groups, result.Total, nil
 }
 
 func (s *adminServiceImpl) GetAllGroups(ctx context.Context) ([]Group, error) {
-	return s.groupRepo.ListActive(ctx)
+	groups, err := s.groupRepo.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateGroupsVisionRouting(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetAllGroupsByPlatform(ctx context.Context, platform string) ([]Group, error) {
-	return s.groupRepo.ListActiveByPlatform(ctx, platform)
+	groups, err := s.groupRepo.ListActiveByPlatform(ctx, platform)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateGroupsVisionRouting(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetAllGroupsIncludingInactive(ctx context.Context) ([]Group, error) {
 	// ListWithFilters with empty status = no status filter, so active + disabled groups are returned.
 	// PageSize 10000 is intentionally large; group count is O(dozens) in practice.
 	groups, _, err := s.groupRepo.ListWithFilters(ctx, pagination.PaginationParams{Page: 1, PageSize: 10000}, "", "", "", nil)
-	return groups, err
+	if err != nil {
+		return nil, err
+	}
+	if err := s.hydrateGroupsVisionRouting(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, error) {
@@ -70,7 +93,70 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 	if err := s.validateSimpleModeGroupAccess(group); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateGroupVisionRouting(ctx, group); err != nil {
+		return nil, err
+	}
 	return group, nil
+}
+
+// hydrateGroupVisionRouting 装载单个分组的 vision_routing 配置到 Group.VisionRouting。
+// 读错误失败关闭：水合查询出错时整个读取方法返回错误，禁止静默当 nil（管理端读不到
+// 配置应报错而非显示为空——空显示会诱导管理员误以为无规则）。
+// visionRouting 未注入时视为无配置（空 map），保持既有读链行为不变。
+func (s *adminServiceImpl) hydrateGroupVisionRouting(ctx context.Context, group *Group) error {
+	if group == nil {
+		return nil
+	}
+	if s.visionRouting == nil {
+		group.VisionRouting = map[string][]int64{}
+		return nil
+	}
+	routing, err := s.visionRouting.Get(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("hydrate vision_routing for group %d: %w", group.ID, err)
+	}
+	group.VisionRouting = routing
+	return nil
+}
+
+// hydrateGroupsVisionRouting 批量装载分组列表的 vision_routing 配置（一次批量查询，
+// 禁止 N+1 循环逐组查）。查询不到的组置空 map（DB 默认 `{}` 语义）；读错误失败关闭。
+func (s *adminServiceImpl) hydrateGroupsVisionRouting(ctx context.Context, groups []Group) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	groupIDs := make([]int64, 0, len(groups))
+	for i := range groups {
+		groupIDs = append(groupIDs, groups[i].ID)
+	}
+	routings, err := s.loadGroupVisionRoutingMap(ctx, groupIDs)
+	if err != nil {
+		return err
+	}
+	for i := range groups {
+		if routing, ok := routings[groups[i].ID]; ok {
+			groups[i].VisionRouting = routing
+		} else {
+			groups[i].VisionRouting = map[string][]int64{}
+		}
+	}
+	return nil
+}
+
+// loadGroupVisionRoutingMap 兼容 visionRouting 未注入的读取链：未注入时全部置空 map。
+func (s *adminServiceImpl) loadGroupVisionRoutingMap(ctx context.Context, groupIDs []int64) (map[int64]map[string][]int64, error) {
+	if s.visionRouting == nil {
+		out := make(map[int64]map[string][]int64, len(groupIDs))
+		for _, id := range groupIDs {
+			out[id] = map[string][]int64{}
+		}
+		return out, nil
+	}
+	routings, err := s.visionRouting.GetByGroupIDs(ctx, groupIDs)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate vision_routing for group ids %v: %w", groupIDs, err)
+	}
+	return routings, nil
 }
 
 func (s *adminServiceImpl) validateSimpleModeGroupAccess(group *Group) error {

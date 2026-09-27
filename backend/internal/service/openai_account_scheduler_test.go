@@ -681,6 +681,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabled_Embeddi
 		false,
 		false,
 		true,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
@@ -778,7 +779,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_ResponsesCapabilityExcl
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "gpt-image-2", nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses,
-			false, false, false,
+			false, false, false, false,
 		)
 		require.NoError(t, err)
 		require.NotNil(t, selection)
@@ -791,7 +792,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_ResponsesCapabilityExcl
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "gpt-image-2", nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses,
-			false, false, false,
+			false, false, false, false,
 		)
 		require.Error(t, err)
 		require.Nil(t, selection)
@@ -802,7 +803,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_ResponsesCapabilityExcl
 		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "gpt-5.1", nil,
 			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
-			false, false, true,
+			false, false, true, false,
 		)
 		require.NoError(t, err)
 		require.NotNil(t, selection)
@@ -851,6 +852,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_AlphaSearchAllowsAPIKey
 		false,
 		false,
 		false,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
@@ -895,6 +897,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabled_AllowsG
 		false,
 		false,
 		false,
+		false,
 		PlatformGrok,
 	)
 	require.NoError(t, err)
@@ -934,7 +937,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_GrokMediaCapabilityFilt
 		selection, _, err := newService([]Account{ineligible, eligible}).SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "grok-imagine-video", nil,
 			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityGrokMediaGeneration,
-			false, false, false, PlatformGrok,
+			false, false, false, false, PlatformGrok,
 		)
 
 		require.NoError(t, err)
@@ -947,7 +950,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_GrokMediaCapabilityFilt
 		selection, _, err := newService([]Account{ineligible}).SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "grok-imagine-video", nil,
 			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityGrokMediaGeneration,
-			false, false, false, PlatformGrok,
+			false, false, false, false, PlatformGrok,
 		)
 
 		require.Error(t, err)
@@ -959,7 +962,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_GrokMediaCapabilityFilt
 		selection, _, err := newService([]Account{ineligible}).SelectAccountWithSchedulerForCapability(
 			ctx, &groupID, "", "", "grok-4.3", nil,
 			OpenAIUpstreamTransportHTTPSSE, OpenAIEndpointCapabilityChatCompletions,
-			false, false, false, PlatformGrok,
+			false, false, false, false, PlatformGrok,
 		)
 
 		require.NoError(t, err)
@@ -1319,6 +1322,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedPreviousR
 		false,
 		false,
 		true,
+		false,
 		PlatformOpenAI,
 	)
 	require.NoError(t, err)
@@ -1343,6 +1347,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedPreviousR
 		false,
 		true,
 		true,
+		false,
 		PlatformOpenAI,
 	)
 	require.NoError(t, err)
@@ -1486,6 +1491,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_Enabled_EmbeddingsSkips
 		false,
 		false,
 		true,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
@@ -1561,6 +1567,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_Enabled_EmbeddingsSkips
 		false,
 		false,
 		true,
+		false,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
@@ -2800,6 +2807,79 @@ func TestOpenAIAccountScheduler_SkipsAccountBlockedForRequestedModel(t *testing.
 
 	require.False(t, scheduler.isAccountRequestCompatible(context.Background(), account, OpenAIAccountScheduleRequest{RequestedModel: "gpt-5.5"}))
 	require.True(t, scheduler.isAccountRequestCompatible(context.Background(), account, OpenAIAccountScheduleRequest{RequestedModel: "gpt-5.6-sol"}))
+}
+
+// setTestVisionCapabilityLookup 注入调度器视觉能力查询并注册清理恢复。
+// 注入函数返回读取错误，读取失败时由调度侧失败关闭（合同 §5）。
+func setTestVisionCapabilityLookup(t *testing.T, lookup func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error)) {
+	t.Helper()
+	SetOpenAIAccountVisionCapabilityLookup(lookup)
+	t.Cleanup(func() {
+		SetOpenAIAccountVisionCapabilityLookup(nil)
+	})
+}
+
+// TestOpenAIAccountScheduler_RequireVisionFilter 覆盖 docs/capability-routing-plan.md §3.4：
+// RequireVision=true 排除已知不支持的账号，unknown 放行；RequireVision=false 零回归。
+func TestOpenAIAccountScheduler_RequireVisionFilter(t *testing.T) {
+	ctx := context.Background()
+	account := &Account{ID: 21640, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true}
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{openaiModelTransient: newOpenAIAccountModelTransientState(128)}}
+
+	// 上游模型解析：account 无 model_mapping 时映射到请求模型本身。
+	reqBase := OpenAIAccountScheduleRequest{
+		RequestedModel:   "gpt-5.1",
+		RequiredTransport: OpenAIUpstreamTransportAny,
+		RequiredCapability: OpenAIEndpointCapabilityChatCompletions,
+	}
+
+	t.Run("RequireVision=true and known-unsupported rejects with vision_not_supported", func(t *testing.T) {
+		setTestVisionCapabilityLookup(t, func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+			require.Equal(t, int64(21640), accountID)
+			require.Equal(t, "gpt-5.1", upstreamModel)
+			require.Equal(t, string(OpenAIEndpointCapabilityChatCompletions), protocol)
+			return false, true, nil
+		})
+		req := reqBase
+		req.RequireVision = true
+		compatible, reason := scheduler.isAccountRequestCompatibleReason(ctx, account, req)
+		require.False(t, compatible)
+		require.Equal(t, "vision_not_supported", reason)
+	})
+
+	t.Run("RequireVision=true and known-supported passes", func(t *testing.T) {
+		setTestVisionCapabilityLookup(t, func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+			return true, true, nil
+		})
+		req := reqBase
+		req.RequireVision = true
+		compatible, reason := scheduler.isAccountRequestCompatibleReason(ctx, account, req)
+		require.True(t, compatible)
+		require.Empty(t, reason)
+	})
+
+	t.Run("RequireVision=true and unknown passes conservatively", func(t *testing.T) {
+		setTestVisionCapabilityLookup(t, func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+			return false, false, nil
+		})
+		req := reqBase
+		req.RequireVision = true
+		compatible, reason := scheduler.isAccountRequestCompatibleReason(ctx, account, req)
+		require.True(t, compatible)
+		require.Empty(t, reason)
+	})
+
+	t.Run("RequireVision=false zero regression even when account unsupported", func(t *testing.T) {
+		// 即使查询返回 known&不支持，RequireVision=false 也不该触发 vision 过滤。
+		setTestVisionCapabilityLookup(t, func(ctx context.Context, accountID int64, upstreamModel, protocol string) (supported, known bool, err error) {
+			return false, true, nil
+		})
+		req := reqBase
+		req.RequireVision = false
+		compatible, reason := scheduler.isAccountRequestCompatibleReason(ctx, account, req)
+		require.True(t, compatible)
+		require.Empty(t, reason)
+	})
 }
 
 func TestReportOpenAIAccountScheduleResult_SuccessClearsModelTransientState(t *testing.T) {

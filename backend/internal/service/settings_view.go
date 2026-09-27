@@ -238,6 +238,11 @@ type SystemSettings struct {
 	// Backend 模式：禁用用户注册和自助服务，仅管理员可登录
 	BackendModeEnabled bool
 
+	// 全局视觉路由 kill-switch（docs/capability-routing-plan.md §3.8）：默认开启。
+	// 关闭后 RequireVision 恒为 false，行为回到 v1 现状。
+	// 指针语义：nil 表示请求未携带该字段，写入链路应保留存储值（运维回滚可达）。
+	VisionRoutingEnabled *bool
+
 	// Gateway forwarding behavior
 	OpenAITTFTMode                         string // Responses first_token_ms 统计口径（默认 semantic）
 	EnableFingerprintUnification           bool   // 是否统一 OAuth 账号的指纹头（默认 true）

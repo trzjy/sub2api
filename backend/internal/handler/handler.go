@@ -48,6 +48,7 @@ type AdminHandlers struct {
 	Pricing                *admin.PricingHandler
 	PromoIntel             *admin.PromoIntelHandler
 	UsageRisk              *admin.UsageRiskHandler
+	VisionCapability       *admin.VisionCapabilityHandler
 }
 
 // Handlers contains all HTTP handlers

@@ -566,6 +566,12 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 
 	updates[SettingKeyAllowUserViewErrorRequests] = strconv.FormatBool(settings.AllowUserViewErrorRequests)
 
+	// 全局视觉路由 kill-switch：指针语义，仅当请求显式携带（非 nil）时写入，
+	// 未携带时跳过，保留存储值（运维回滚可达，§3.8）。
+	if settings.VisionRoutingEnabled != nil {
+		updates[SettingKeyVisionRoutingEnabled] = strconv.FormatBool(*settings.VisionRoutingEnabled)
+	}
+
 	return updates, nil
 }
 
@@ -810,6 +816,15 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	// codex_cli_only 加固策略缓存：设置更新后强制下次重载（涉及 4 个键 + JSON 解析，直接置过期）。
 	s.codexRestrictionPolicySF.Forget("codex_restriction_policy")
 	s.codexRestrictionPolicyCache.Store(&cachedCodexRestrictionPolicy{expiresAt: 0})
+	// 视觉路由 kill-switch：只置过期回源，不用 payload 值写回。该开关不在
+	// UpdateSettingsRequest 内（handler 不感知），panel 全量保存携带的零值 false
+	// 不得覆盖存储；下次读取回源 DB 得到真实值，实现秒级生效。
+	s.visionRoutingEnabledSF.Forget("vision_routing_enabled")
+	if cached, _ := s.visionRoutingEnabledCache.Load().(*cachedVisionRoutingEnabled); cached != nil {
+		s.visionRoutingEnabledCache.Store(&cachedVisionRoutingEnabled{enabled: cached.enabled, expiresAt: 0})
+	} else {
+		s.visionRoutingEnabledCache.Store(&cachedVisionRoutingEnabled{expiresAt: 0})
+	}
 	if s.onUpdate != nil {
 		s.onUpdate() // Invalidate cache after settings update
 	}

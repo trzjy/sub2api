@@ -751,6 +751,10 @@ type adminServiceImpl struct {
 	compositeResolver        *CompositeRouteResolver
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
+	// visionRouting 用于 admin 分组读取链水合 groups.vision_routing 配置
+	// （admin_group.go 的 GetGroup/ListGroups/GetAllGroups/GetAllGroupsByPlatform/
+	// GetAllGroupsIncludingInactive），读错失败关闭。
+	visionRouting *VisionRoutingService
 }
 
 // ChannelCacheInvalidator 失效渠道缓存。
@@ -792,6 +796,7 @@ func NewAdminService(
 	compositeRouteRepo CompositeModelRouteRepository,
 	compositeResolver *CompositeRouteResolver,
 	channelCacheInvalidator ChannelCacheInvalidator,
+	visionRouting *VisionRoutingService,
 ) AdminService {
 	return &adminServiceImpl{
 		cfg:                  cfg,
@@ -830,5 +835,6 @@ func NewAdminService(
 		compositeResolver:    compositeResolver,
 
 		channelCacheInvalidator: channelCacheInvalidator,
+		visionRouting:           visionRouting,
 	}
 }

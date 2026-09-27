@@ -752,6 +752,12 @@ const (
 	// SettingKeyBackendModeEnabled Backend 模式：禁用用户注册和自助服务，仅管理员可登录
 	SettingKeyBackendModeEnabled = "backend_mode_enabled"
 
+	// SettingKeyVisionRoutingEnabled 全局视觉路由 kill-switch
+	// （docs/capability-routing-plan.md §3.8）：关闭后 RequireVision 恒为 false，
+	// 行为回到 v1 现状（普通路由）。默认开启：未配置 = 开启（开关定位是回滚手段，
+	// 非灰度门禁）。
+	SettingKeyVisionRoutingEnabled = "vision_routing_enabled"
+
 	// Gateway Forwarding Behavior
 	// SettingKeyOpenAITTFTMode 控制 first_token_ms 的统计口径。
 	SettingKeyOpenAITTFTMode = "openai_ttft_mode"

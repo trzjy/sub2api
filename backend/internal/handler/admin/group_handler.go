@@ -26,6 +26,16 @@ type GroupHandler struct {
 	dashboardService     *service.DashboardService
 	groupCapacityService *service.GroupCapacityService
 	cfg                  *config.Config
+
+	// visionRoutingService 提供分组视觉分流配置的同组校验与落库（docs/capability-routing-plan.md §3.7）。
+	visionRoutingService *service.VisionRoutingService
+}
+
+// SetVisionRoutingService 注入视觉分流配置服务（由 wire 在 ProvideAdminHandlers 中调用）。
+func (h *GroupHandler) SetVisionRoutingService(s *service.VisionRoutingService) {
+	if h != nil {
+		h.visionRoutingService = s
+	}
 }
 
 // GetLiveCapability 返回当前服务端是否具备生成 Live attestation 的运行环境。
@@ -180,6 +190,38 @@ func sanitizeUpdateGroupRequestForSimpleMode(req *UpdateGroupRequest) {
 	*req = UpdateGroupRequest{Name: req.Name, Description: req.Description}
 }
 
+// visionRoutingField 区分请求体中 vision_routing 字段的三种状态（派发单 A），
+// 语义与同文件的 optionalLimitField 一致（以 set 记录字段是否出现）：
+//   - 字段未携带（set=false）→ 不触碰既有配置；
+//   - 字段显式为 null（set=true, value=nil）→ 清空配置；
+//   - 字段显式为空对象 {} 或非空对象（set=true, value=...）→ 覆盖写（空对象即清空）。
+//
+// Go 内置 map 无法区分"缺字段"与"显式 null"（两者都落到 nil），故需本类型。
+type visionRoutingField struct {
+	set   bool
+	value map[string][]int64
+}
+
+func (f *visionRoutingField) UnmarshalJSON(data []byte) error {
+	f.set = true
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		f.value = nil
+		return nil
+	}
+	var routing map[string][]int64
+	if err := json.Unmarshal(trimmed, &routing); err != nil {
+		return err
+	}
+	f.value = routing
+	return nil
+}
+
+// routingAndPresence 返回配置值与字段是否显式携带（用于与 service 层交互）。
+func (f visionRoutingField) routingAndPresence() (map[string][]int64, bool) {
+	return f.value, f.set
+}
+
 // CreateGroupRequest represents create group request
 type CreateGroupRequest struct {
 	Name                      string                        `json:"name" binding:"required"`
@@ -227,7 +269,10 @@ type CreateGroupRequest struct {
 	// 模型路由配置（仅 anthropic 平台使用）
 	ModelRouting        map[string][]int64 `json:"model_routing"`
 	ModelRoutingEnabled bool               `json:"model_routing_enabled"`
-	MCPXMLInject        *bool              `json:"mcp_xml_inject"`
+	// 视觉分流配置（docs/capability-routing-plan.md §3.7），同构 model_routing。
+	// 使用 visionRoutingField 区分"未携带"（不动）与"显式空/{}"（清空）。
+	VisionRouting visionRoutingField `json:"vision_routing"`
+	MCPXMLInject  *bool              `json:"mcp_xml_inject"`
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes []string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
@@ -304,7 +349,10 @@ type UpdateGroupRequest struct {
 	// 模型路由配置（仅 anthropic 平台使用）
 	ModelRouting        map[string][]int64 `json:"model_routing"`
 	ModelRoutingEnabled *bool              `json:"model_routing_enabled"`
-	MCPXMLInject        *bool              `json:"mcp_xml_inject"`
+	// 视觉分流配置（docs/capability-routing-plan.md §3.7），同构 model_routing。
+	// 使用 visionRoutingField 区分"未携带"（不动）与"显式空/{}"（清空）。
+	VisionRouting visionRoutingField `json:"vision_routing"`
+	MCPXMLInject  *bool              `json:"mcp_xml_inject"`
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes *[]string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
@@ -539,6 +587,45 @@ func parsePositiveIDParam(c *gin.Context, name string) (int64, bool) {
 	return id, true
 }
 
+// applyVisionRouting 在分组创建/更新成功后落库 vision_routing。
+// present=false 表示请求未携带该字段（nil，不触碰既有配置）；
+// present=true 表示显式携带（含空 map/空规则集），此时空配置写为空对象即清空
+// （派发单 A：显式清空）。校验已由调用方在分组写之前前置完成（applyVisionRouting
+// 内的 Set 亦会再次执行同一校验，属幂等重复，不构成第二套校验实现）。
+func (h *GroupHandler) applyVisionRouting(c *gin.Context, groupID int64, routing map[string][]int64, present bool) error {
+	if h == nil || h.visionRoutingService == nil || !present {
+		return nil
+	}
+	if err := h.visionRoutingService.Set(c.Request.Context(), groupID, routing); err != nil {
+		response.ErrorFrom(c, err)
+		return err
+	}
+	return nil
+}
+
+// validateVisionRoutingBeforeWrite 在分组 Create/Update 落库前前置校验 vision_routing，
+// 使校验失败时分组及字段零变更（派发单 B：消除部分提交）。present=false（未携带）跳过。
+// Create 场景 newGroup=true 时按配置有效性预校验（新组无既有账号，同组校验留待绑定
+// 账号之后），最终同组校验仍由 applyVisionRouting → Set 在落库后兜底。
+func (h *GroupHandler) validateVisionRoutingBeforeWrite(c *gin.Context, groupID int64, routing map[string][]int64, present, newGroup bool) error {
+	if h == nil || h.visionRoutingService == nil || !present {
+		return nil
+	}
+	if newGroup {
+		// 创建路径尚无 groupID，仅校验配置自身合法性（模型/目标非空、目标 ID 为正）。
+		if err := service.ValidateVisionRoutingShape(routing); err != nil {
+			response.ErrorFrom(c, err)
+			return err
+		}
+		return nil
+	}
+	if err := h.visionRoutingService.Validate(c.Request.Context(), groupID, routing); err != nil {
+		response.ErrorFrom(c, err)
+		return err
+	}
+	return nil
+}
+
 // GetAll handles getting all active groups without pagination.
 // Pass ?include_inactive=true to also include disabled groups (used by the
 // API Key group filter, which needs to surface groups that still have API keys
@@ -665,6 +752,13 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		return
 	}
 
+	vrm, vrPresent := req.VisionRouting.routingAndPresence()
+	// 视觉分流配置：落库前前置校验配置自身合法性（新组无账号，同组校验留待落库后兜底），
+	// 避免非法配置在分组已创建后才被拒绝（派发单 B）。
+	if err := h.validateVisionRoutingBeforeWrite(c, 0, vrm, vrPresent, true); err != nil {
+		return
+	}
+
 	group, err := h.adminService.CreateGroup(c.Request.Context(), &service.CreateGroupInput{
 		Name:                            req.Name,
 		Description:                     req.Description,
@@ -731,6 +825,13 @@ func (h *GroupHandler) Create(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+
+	if err := h.applyVisionRouting(c, group.ID, vrm, vrPresent); err != nil {
+		return
+	}
+	if vrPresent {
+		group.VisionRouting = vrm
 	}
 
 	if h.isSimpleMode() {
@@ -811,6 +912,13 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		sanitizeUpdateGroupRequestForSimpleMode(&req)
 	}
 
+	vrm, vrPresent := req.VisionRouting.routingAndPresence()
+	// Update 已持有 groupID：在分组写之前完成视觉分流全量校验（含同组校验），
+	// 校验失败则分组零变更（派发单 A/B）。
+	if err := h.validateVisionRoutingBeforeWrite(c, groupID, vrm, vrPresent, false); err != nil {
+		return
+	}
+
 	group, err := h.adminService.UpdateGroup(c.Request.Context(), groupID, &service.UpdateGroupInput{
 		Name:                            req.Name,
 		Description:                     req.Description,
@@ -878,6 +986,14 @@ func (h *GroupHandler) Update(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+
+	if err := h.applyVisionRouting(c, groupID, vrm, vrPresent); err != nil {
+		return
+	}
+	// 仅当显式携带时以请求值回显（含显式空/null 的清空结果）；未携带时保持分组读取值。
+	if vrPresent {
+		group.VisionRouting = vrm
 	}
 
 	if h.isSimpleMode() {

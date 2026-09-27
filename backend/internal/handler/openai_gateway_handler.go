@@ -227,6 +227,18 @@ func seedOpenAIForwardImageIntentHint(c *gin.Context, channelMapped bool, imageI
 	service.SetOpenAIImageIntentHint(c, imageIntent)
 }
 
+// withOpenAIProfitSuppressedForImage 请求含图输入时打上利润门范围外标记。
+// 带图请求的视觉分流目标账号不得被利润门 veto（capability-routing-plan §3.6：
+// 图片类请求不进利润门），复用既有 WithOpenAIProfitControlSuppressed 标记机制
+// 全链跳过装门（handler 首装、调度器防御装门、WS turn 重装均尊重该标记），
+// 但仍固定 pricingAt 供计费共用。不含图请求原样返回，利润门行为零变化。
+func (h *OpenAIGatewayHandler) withOpenAIProfitSuppressedForImage(ctx context.Context, body []byte) context.Context {
+	if service.HasOpenAIInputImage(body) {
+		return service.WithOpenAIProfitControlSuppressed(ctx)
+	}
+	return ctx
+}
+
 func newOpenAIModelMappedBodyCache(body []byte, replace openAIModelBodyReplaceFunc) func(bool, string) []byte {
 	replacedBodies := make(map[string][]byte)
 	return func(mapped bool, mappedModel string) []byte {
@@ -543,6 +555,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
+	// 请求含图检测：结果存入 request context，供后续调度按 RequireVision 过滤读取（派发单 C）。
+	service.SetOpenAIHasImageInputHint(c, service.HasOpenAIInputImage(body))
 	var imageReleaseFunc func()
 	if imageIntent {
 		var imageAcquired bool
@@ -634,7 +648,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
 	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
-	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门，
+	// 视觉分流目标账号不被利润门 veto；不含图请求路径零改动。
+	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(
+		h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body), apiKey.GroupID)
 	c.Request = c.Request.WithContext(pricingCtx)
 
 	for {
@@ -646,6 +663,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		// 请求含图时要求账号支持视觉：读取请求级含图 hint（缺失视为不含图）。
+		hasImageInput, _ := service.GetOpenAIHasImageInputHint(c)
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
 			apiKey.GroupID,
@@ -658,6 +677,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requireCompact,
 			false,
 			!imageIntent,
+			hasImageInput,
 			requestPlatform,
 		)
 		if err != nil {
@@ -1252,8 +1272,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// B2 /v1/messages 标记（docs/platform-merge-refactor-plan.md §5.2）：本入口装上
 	// messages dispatch flag，调度候选过滤据此对 Web 接入模式账号永不入选；
 	// chat/completions 与 responses 入口不装此 flag，Web 账号在两级池语义下保持可选。
+	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门。
 	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(
-		service.WithOpenAIMessagesDispatchContext(c.Request.Context()), apiKey.GroupID)
+		service.WithOpenAIMessagesDispatchContext(
+			h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body)), apiKey.GroupID)
 	c.Request = c.Request.WithContext(msgPricingCtx)
 
 	for {
@@ -1265,6 +1287,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			currentRoutingModel = effectiveMappedModel
 		}
 		reqLog.Debug("openai_messages.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		// 请求含图时要求账号支持视觉：读取请求级含图 hint（缺失视为不含图）。
+		hasImageInput, _ := service.GetOpenAIHasImageInputHint(c)
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			c.Request.Context(),
 			apiKey.GroupID,
@@ -1277,6 +1301,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			false,
 			false,
 			true,
+			hasImageInput,
 			requestPlatform,
 		)
 		if err != nil {
@@ -2598,12 +2623,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		requiredCapability = service.OpenAIEndpointCapabilityResponses
 	}
 
+	// 请求含图检测：首帧判定一次写入 request context，供连接内后续选号
+	// （含 failover 重选）按 RequireVision 过滤读取（派发单 C）。
+	service.SetOpenAIHasImageInputHint(c, service.HasOpenAIInputImage(firstMessage))
+
 	// 分组利润控制：WS 桥按连接装配定价上下文并装门（选号与抢槽共用该
 	// ctx）。连接内不重选号，但每个 turn 开始经 BeforeTurn 重新冻结 pricingAt
 	// 并按最新门复核当前账号（准入与计费同源），峰前建连保活不能让后续 turn
 	// 继续按建连时刻的谷价计费。生图意图只影响能力路由与图片计费，不关门。
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
-	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
+	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：按首帧判定含图后先打
+	// suppressed 标记再装门，turn 级重装（WithOpenAITurnPricingContext）尊重该标记。
+	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(
+		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
 	ctx = wsPricingCtx
 
 	for {
@@ -2611,6 +2643,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return
 		}
 		reqLog.Debug("openai.websocket_account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
+		// 请求含图时要求账号支持视觉：读取请求级含图 hint（缺失视为不含图）。
+		hasImageInput, _ := service.GetOpenAIHasImageInputHint(c)
 		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
 			ctx,
 			apiKey.GroupID,
@@ -2623,6 +2657,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			false,
 			previousResponseCanMove,
 			!imageIntent,
+			hasImageInput,
 			requestPlatform,
 		)
 		if err != nil {

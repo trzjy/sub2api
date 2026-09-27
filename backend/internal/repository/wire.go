@@ -32,6 +32,22 @@ func ProvideGitHubReleaseClient(cfg *config.Config) service.GitHubReleaseClient 
 	return NewGitHubReleaseClient(cfg.Update.ProxyURL, cfg.Security.ProxyFallback.AllowDirectOnError)
 }
 
+// ProvideVisionRoutingGroupAccountsReader 将既有的 GroupRepository（已实现
+// GetAccountIDsByGroupIDs）适配为 VisionRoutingService 所需的窄接口
+// VisionRoutingGroupAccountsReader。
+//
+// 设计约束：该适配器必须放在 repository 包，而不能为 service 包里的 ProviderSet
+// 直接 wire.Bind 到 *repository.groupRepository。原因有两点：
+//  1. groupRepository 是未导出类型，跨包无法引用；
+//  2. service 包若导入 repository 会与 repository→service（凭证加密链路）形成
+//      import cycle，导致 wire 类型加载器整体失效（invalid type）。
+//
+// 因此这里用一层轻量适配器，从已有的 service.GroupRepository _provider 推导窄接口，
+// 既避免 cycle，也不改动 service 层语义。
+func ProvideVisionRoutingGroupAccountsReader(r service.GroupRepository) service.VisionRoutingGroupAccountsReader {
+	return r
+}
+
 // ProvidePricingRemoteClient 创建定价数据远程客户端
 // 从配置中读取代理设置，支持国内服务器通过代理访问 GitHub 上的定价数据
 func ProvidePricingRemoteClient(cfg *config.Config) service.PricingRemoteClient {
@@ -72,6 +88,10 @@ var ProviderSet = wire.NewSet(
 	NewCompositeModelRouteRepository,
 	NewAccountRepository,
 	NewAdminAccountRepository,
+	NewAccountModelCapabilityRepository,
+	NewVisionRoutingRepository,
+	NewAccountModelCapabilityCache,
+	ProvideVisionRoutingGroupAccountsReader, // 适配器：service.GroupRepository → VisionRoutingGroupAccountsReader
 	NewScheduledTestPlanRepository,   // 定时测试计划仓储
 	NewScheduledTestResultRepository, // 定时测试结果仓储
 	NewProxyRepository,
