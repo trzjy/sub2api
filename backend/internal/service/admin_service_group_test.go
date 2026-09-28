@@ -1405,7 +1405,9 @@ func TestAdminService_ListGroups_WithSearch(t *testing.T) {
 		groups, total, err := svc.ListGroups(context.Background(), 1, 20, "", "", "alpha", nil, "", "")
 		require.NoError(t, err)
 		require.Equal(t, int64(1), total)
-		require.Equal(t, []Group{{ID: 1, Name: "alpha"}}, groups)
+		// VisionRouting 空 map 为既有读链契约（admin_group.go hydrateGroupVisionRouting，
+		// visionRouting 未注入视为无配置；446b007a2）。
+		require.Equal(t, []Group{{ID: 1, Name: "alpha", VisionRouting: map[string][]int64{}}}, groups)
 
 		require.Equal(t, 1, repo.listWithFiltersCalls)
 		require.Equal(t, pagination.PaginationParams{Page: 1, PageSize: 20}, repo.listWithFiltersParams)
@@ -1442,7 +1444,7 @@ func TestAdminService_ListGroups_WithSearch(t *testing.T) {
 		groups, total, err := svc.ListGroups(context.Background(), 3, 50, PlatformAntigravity, StatusActive, "beta", &isExclusive, "", "")
 		require.NoError(t, err)
 		require.Equal(t, int64(42), total)
-		require.Equal(t, []Group{{ID: 2, Name: "beta"}}, groups)
+		require.Equal(t, []Group{{ID: 2, Name: "beta", VisionRouting: map[string][]int64{}}}, groups)
 
 		require.Equal(t, 1, repo.listWithFiltersCalls)
 		require.Equal(t, pagination.PaginationParams{Page: 3, PageSize: 50}, repo.listWithFiltersParams)
