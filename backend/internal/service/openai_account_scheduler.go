@@ -301,6 +301,176 @@ type defaultOpenAIAccountScheduler struct {
 	metrics                openAIAccountSchedulerMetrics
 	stats                  *openAIAccountRuntimeStats
 	grokFreeQuotaGateCache sync.Map // key: int64(accountID), value: grokFreeQuotaGateCacheEntry
+	// codeBuddyCatalogProvider 提供账号级上游模型目录查询，用于聚合分组逐模型
+	// 闸门（§2.1-1）。默认实现从账号既有 UpstreamModelMetadataSnapshot 读取；
+	// 测试可注入 fake。nil 时回落到默认快照实现。
+	codeBuddyCatalogProvider codeBuddyCatalogProvider
+}
+
+// codeBuddyCatalogProvider 查询单个 codebuddy 账号的实时上游模型目录。
+// 实现必须遵循失败关闭：不可达/超时/空集合/非集合结构一律返回 error，
+// 由闸门计为 upstream_catalog_unavailable，绝不兜底放行（合同 §5）。
+type codeBuddyCatalogProvider interface {
+	UpstreamModelIDs(ctx context.Context, account *Account) ([]string, error)
+}
+
+// codeBuddyCatalogVerdict 是聚合分组逐模型目录闸门的判定结果。
+type codeBuddyCatalogVerdict int
+
+const (
+	// codeBuddyCatalogAllowed 映射后的上游模型在账号目录中，账号可进入候选。
+	codeBuddyCatalogAllowed codeBuddyCatalogVerdict = iota
+	// codeBuddyCatalogModelMissing 映射后的上游模型不在账号目录，本请求不可选。
+	codeBuddyCatalogModelMissing
+	// codeBuddyCatalogUnavailable 目录不可达/超时/空集合/非集合结构，本请求不可选。
+	codeBuddyCatalogUnavailable
+	// codeBuddyCatalogNotProbed 超出本轮查询预算（>4 候选），本轮不探测、不选，非错误态。
+	codeBuddyCatalogNotProbed
+)
+
+const (
+	// codeBuddyCatalogProbeConcurrency 单次选号决策内并发探测上游目录的上限（§2.1-1）。
+	codeBuddyCatalogProbeConcurrency = 4
+	// codeBuddyCatalogProbeTimeout 单次选号决策内目录查询总时限（§2.1-1：≤300ms）。
+	codeBuddyCatalogProbeTimeout = 300 * time.Millisecond
+)
+
+// errCodeBuddyCatalogUnavailable 表示账号级上游模型目录不可用（失败关闭，非兜底）。
+var errCodeBuddyCatalogUnavailable = errors.New("codebuddy upstream catalog unavailable")
+
+// codeBuddySnapshotCatalogProvider 是 codeBuddyCatalogProvider 的默认实现：
+// 直接读取账号既有 UpstreamModelMetadataSnapshot（站点既有目录缓存机制）。
+// 快照为空/不可解析即视为不可用，失败关闭。
+type codeBuddySnapshotCatalogProvider struct{}
+
+func (codeBuddySnapshotCatalogProvider) UpstreamModelIDs(ctx context.Context, account *Account) ([]string, error) {
+	if account == nil {
+		return nil, errCodeBuddyCatalogUnavailable
+	}
+	snapshot := account.GetUpstreamModelMetadataSnapshot()
+	if snapshot == nil || len(snapshot.Models) == 0 {
+		return nil, errCodeBuddyCatalogUnavailable
+	}
+	ids := make([]string, 0, len(snapshot.Models))
+	for id := range snapshot.Models {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// catalogProvider 返回注入的目录提供者，未注入时回落默认快照实现。
+func (s *defaultOpenAIAccountScheduler) catalogProvider() codeBuddyCatalogProvider {
+	if s != nil && s.codeBuddyCatalogProvider != nil {
+		return s.codeBuddyCatalogProvider
+	}
+	return codeBuddySnapshotCatalogProvider{}
+}
+
+// codeBuddyPlatformMismatchAllowed 判断 codebuddy 账号在聚合分组请求下是否能越过
+// platform_mismatch：聚合平台（deepseek/zhipu/kimi/minimax/other/codebuddy）请求下的
+// codebuddy OpenAI 兼容账号可纳入候选（§2.1-2）。非聚合平台（openai/grok 等）不放行。
+func codeBuddyPlatformMismatchAllowed(account *Account, req OpenAIAccountScheduleRequest) bool {
+	if account == nil || account.Platform != PlatformCodeBuddy || !account.IsOpenAICompatible() {
+		return false
+	}
+	return isCodeBuddyAggregatedPlatform(req.Platform)
+}
+
+// codeBuddyAggregatedCatalogGated 判断该账号是否由聚合逐模型目录闸门接管模型校验：
+// 聚合分组请求下的 codebuddy 账号跳过客户端名白名单（IsModelSupported），
+// 改由目录闸门（先 GetMappedModel 映射为上游名再精确比较）判定（§2.1-1）。
+func codeBuddyAggregatedCatalogGated(account *Account, req OpenAIAccountScheduleRequest) bool {
+	return account != nil && account.Platform == PlatformCodeBuddy && isCodeBuddyAggregatedPlatform(req.Platform)
+}
+
+// evaluateCodeBuddyCatalogGate 计算聚合分组请求下 codebuddy 候选账号的目录闸门判定。
+// 仅在 isCodeBuddyAggregatedPlatform(req.Platform) 且 RequestedModel 非空时生效；
+// 其余情况返回 nil（不参与排除）。返回 map[accountID]verdict。
+//
+// 预算（§2.1-1，防热路径放大）：候选 codebuddy 账号按 Priority 降序、并列 ID 升序
+// 确定性排序；固定查询集合 = 前 codeBuddyCatalogProbeConcurrency(4) 个，并发 ≤4、
+// 总时限 ≤300ms、零重试；超出预算的候选显式计 upstream_catalog_not_probed（非静默跳过）。
+//
+// 快照后强制重执行：每次选号都按当前账号目录实时判定（不缓存目录结论），
+// 快照命中不豁免（§2.1-3）。
+func (s *defaultOpenAIAccountScheduler) evaluateCodeBuddyCatalogGate(
+	ctx context.Context,
+	req OpenAIAccountScheduleRequest,
+	accounts []Account,
+) map[int64]codeBuddyCatalogVerdict {
+	if !isCodeBuddyAggregatedPlatform(req.Platform) || req.RequestedModel == "" {
+		return nil
+	}
+	candidates := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		if accounts[i].Platform == PlatformCodeBuddy {
+			candidates = append(candidates, &accounts[i])
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	// 确定性排序：Priority 降序，并列 ID 升序。
+	order := make([]*Account, len(candidates))
+	copy(order, candidates)
+	sort.SliceStable(order, func(i, j int) bool {
+		if order[i].Priority != order[j].Priority {
+			return order[i].Priority > order[j].Priority
+		}
+		return order[i].ID < order[j].ID
+	})
+
+	verdicts := make(map[int64]codeBuddyCatalogVerdict, len(order))
+	provider := s.catalogProvider()
+
+	probeCtx, cancel := context.WithTimeout(ctx, codeBuddyCatalogProbeTimeout)
+	defer cancel()
+
+	sem := make(chan struct{}, codeBuddyCatalogProbeConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for idx, acc := range order {
+		if idx >= codeBuddyCatalogProbeConcurrency {
+			// 超出预算：显式计 not_probed，绝不静默跳过。
+			verdicts[acc.ID] = codeBuddyCatalogNotProbed
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(acc *Account) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			v := s.probeCodeBuddyCatalog(probeCtx, provider, acc, req.RequestedModel)
+			mu.Lock()
+			verdicts[acc.ID] = v
+			mu.Unlock()
+		}(acc)
+	}
+	wg.Wait()
+	return verdicts
+}
+
+// probeCodeBuddyCatalog 探测单个 codebuddy 账号的目录闸门：
+// 先按账号级 GetMappedModel 把客户端请求模型映射为上游名，再以
+// 上游名与账号目录精确比较（§2.1-1 判定顺序：禁止客户端名直比、禁止映射后跳过比较）。
+func (s *defaultOpenAIAccountScheduler) probeCodeBuddyCatalog(
+	ctx context.Context,
+	provider codeBuddyCatalogProvider,
+	account *Account,
+	requestedModel string,
+) codeBuddyCatalogVerdict {
+	upstreamModel := account.GetMappedModel(requestedModel)
+	ids, err := provider.UpstreamModelIDs(ctx, account)
+	if err != nil || len(ids) == 0 {
+		// 目录不可达/超时/空集合/非集合结构 → 不可用，失败关闭，禁兜底。
+		return codeBuddyCatalogUnavailable
+	}
+	for _, id := range ids {
+		if id == upstreamModel {
+			return codeBuddyCatalogAllowed
+		}
+	}
+	return codeBuddyCatalogModelMissing
 }
 
 type openAISelectionProbeBudget struct {
@@ -1454,6 +1624,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	}
 
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
+	// 聚合分组逐模型目录闸门（§2.1-1）：选号前按当前请求模型 + 当前目录实时判定，
+	// 快照命中不豁免。返回 codebuddy 候选账号的 verdict，循环内据此排除。
+	codeBuddyVerdicts := s.evaluateCodeBuddyCatalogGate(ctx, req, accounts)
 	filtered := make([]*Account, 0, len(accounts))
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	for i := range accounts {
@@ -1468,9 +1641,13 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			filterStats.exclude("not_schedulable")
 			continue
 		}
+		// platform_mismatch：聚合分组请求下的 codebuddy OpenAI 兼容账号越过
+		// 平台名校验进入候选（§2.1-2）；其余仍按既有规则排除。
 		if account.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !account.IsOpenAICompatible() {
-			filterStats.exclude("platform_mismatch")
-			continue
+			if !codeBuddyPlatformMismatchAllowed(account, req) {
+				filterStats.exclude("platform_mismatch")
+				continue
+			}
 		}
 		if s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
 			filterStats.exclude("runtime_blocked")
@@ -1486,6 +1663,23 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		if compatible, reason := s.isAccountRequestCompatibleReason(ctx, account, req); !compatible {
 			filterStats.exclude(reason)
 			continue
+		}
+		// 聚合分组逐模型目录闸门（§2.1-1）：codebuddy 候选按 verdict 排除。
+		// 未命中映射后上游模型 → model_not_in_upstream_catalog；
+		// 目录不可达/超时/空集合/非集合结构 → upstream_catalog_unavailable（禁兜底）；
+		// 超出本轮探测预算 → upstream_catalog_not_probed（非静默跳过）。
+		if verdict, ok := codeBuddyVerdicts[account.ID]; ok {
+			switch verdict {
+			case codeBuddyCatalogModelMissing:
+				filterStats.exclude("model_not_in_upstream_catalog")
+				continue
+			case codeBuddyCatalogUnavailable:
+				filterStats.exclude("upstream_catalog_unavailable")
+				continue
+			case codeBuddyCatalogNotProbed:
+				filterStats.exclude("upstream_catalog_not_probed")
+				continue
+			}
 		}
 		// CodeBuddy 平台默认 RPM：非粘性候选仅绿区可选（计数来自本次选号预取）。
 		if !s.codeBuddyRPMAllowsCandidate(ctx, account) {
@@ -1907,7 +2101,10 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}) {
 		return false, "shadow_parent_unhealthy"
 	}
-	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+	// 聚合分组请求下的 codebuddy 账号由逐模型目录闸门接管模型校验
+	// （先 GetMappedModel 映射为上游名再与目录精确比较），跳过客户端名白名单检查，
+	// 避免别名场景被误杀（§2.1-1）。其余账号仍走既有 IsModelSupported。
+	if req.RequestedModel != "" && !codeBuddyAggregatedCatalogGated(account, req) && !account.IsModelSupported(req.RequestedModel) {
 		return false, "model_not_supported"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,41 @@ var (
 	ErrSchedulerGroupLifecycleLeaseBusy = errors.New("scheduler group lifecycle lease busy")
 	ErrSchedulerBucketRebuildBusy       = errors.New("scheduler bucket rebuild busy")
 )
+
+// schedulerSnapshotAggregationVersion 是聚合直绑（§2.1）调度契约的快照版本标签。
+// 聚合规则（候选池纳入 codebuddy 账号 / 聚合分组集合）属调度契约：一旦变更必须 bump
+// 本版本，使所有带 @agg 标签的分桶缓存键自然失效并强制重载（§2.1-3）。
+const schedulerSnapshotAggregationVersion = 1
+
+// isCodeBuddyAggregatedPlatform 报告某平台是否属于国产 OpenAI 兼容聚合分组
+// （deepseek/zhipu/kimi/minimax/other + codebuddy 自身参与 codebuddy 聚合）。
+// 这些分组的请求下，codebuddy 账号作为国产模型账号被纳入候选并按逐模型目录闸门判定。
+func isCodeBuddyAggregatedPlatform(platform string) bool {
+	switch NormalizeOpenAICompatiblePlatform(platform) {
+	case PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformMiniMax, PlatformOther, PlatformCodeBuddy:
+		return true
+	}
+	return false
+}
+
+// schedulerAggregationBucketPlatform 为聚合分组（非 codebuddy 自身）的 bucket 平台键
+// 追加 @agg<version> 标签，使聚合规则变更（version bump）时旧分桶缓存键自然失效。
+// codebuddy 平台自身不追加标签（其候选即原生 codebuddy 账号，无需跨平台 join）。
+func schedulerAggregationBucketPlatform(platform string) string {
+	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
+		return platform + "@agg" + strconv.Itoa(schedulerSnapshotAggregationVersion)
+	}
+	return platform
+}
+
+// schedulerAggregationQueryPlatform 还原被 @agg 标签修饰的 bucket 平台键为真实平台名，
+// 供 loadAccountsFromDB 查询账号仓库时使用（标签只影响缓存键，不改变真实查询平台）。
+func schedulerAggregationQueryPlatform(platform string) string {
+	if i := strings.Index(platform, "@agg"); i >= 0 {
+		return platform[:i]
+	}
+	return platform
+}
 
 const (
 	outboxEventTimeout                    = 2 * time.Minute
@@ -851,12 +887,15 @@ func schedulerCanonicalBuckets(groupID int64) []SchedulerBucket {
 	platforms := schedulerSnapshotPlatforms()
 	buckets := make([]SchedulerBucket, 0, len(platforms)*2+2)
 	for _, platform := range platforms {
+		// 聚合分组（非 codebuddy 自身）的 bucket 平台键追加 @agg 标签，
+		// 使聚合规则变更（version bump）时旧键自然失效（§2.1-3）。
+		bucketPlatform := schedulerAggregationBucketPlatform(platform)
 		buckets = append(buckets,
-			SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeSingle},
-			SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeForced},
+			SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeSingle},
+			SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeForced},
 		)
 		if platform == PlatformAnthropic || platform == PlatformGemini {
-			buckets = append(buckets, SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeMixed})
+			buckets = append(buckets, SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeMixed})
 		}
 	}
 	return buckets
@@ -878,6 +917,9 @@ func (s *SchedulerSnapshotService) bucketsForPlatform(platform string, groupIDs 
 	if platform == "" {
 		return nil
 	}
+	// 聚合分组（非 codebuddy 自身）的 bucket 平台键追加 @agg 标签，
+	// 与读取路径（bucketFor）保持一致的缓存键；seen 去重仍用真实平台名。
+	bucketPlatform := schedulerAggregationBucketPlatform(platform)
 	buckets := make([]SchedulerBucket, 0, len(groupIDs)*3)
 	for _, gid := range groupIDs {
 		// Within a single poll batch, skip (groupID, platform) pairs that were
@@ -891,10 +933,10 @@ func (s *SchedulerSnapshotService) bucketsForPlatform(platform string, groupIDs 
 			}
 			seen[key] = struct{}{}
 		}
-		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: platform, Mode: SchedulerModeSingle})
-		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: platform, Mode: SchedulerModeForced})
+		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeSingle})
+		buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeForced})
 		if platform == PlatformAnthropic || platform == PlatformGemini {
-			buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: platform, Mode: SchedulerModeMixed})
+			buckets = append(buckets, SchedulerBucket{GroupID: gid, Platform: bucketPlatform, Mode: SchedulerModeMixed})
 		}
 	}
 	return buckets
@@ -1470,13 +1512,15 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 	if s.accountRepo == nil {
 		return nil, ErrSchedulerCacheNotReady
 	}
+	// @agg 标签只影响缓存键，查询仓库需还原为真实平台名。
+	queryPlatform := schedulerAggregationQueryPlatform(bucket.Platform)
 	groupID := bucket.GroupID
 	if s.isRunModeSimple() {
 		groupID = 0
 	}
 
 	if useMixed {
-		platforms := []string{bucket.Platform, PlatformAntigravity}
+		platforms := []string{queryPlatform, PlatformAntigravity}
 		var accounts []Account
 		var err error
 		if groupID > 0 {
@@ -1496,16 +1540,56 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 			}
 			filtered = append(filtered, acc)
 		}
-		return filtered, nil
+		return s.withAggregatedCodeBuddy(ctx, bucket, filtered)
 	}
 
+	var accounts []Account
+	var err error
 	if groupID > 0 {
-		return s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, bucket.Platform)
+		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, queryPlatform)
+	} else if s.isRunModeSimple() {
+		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, queryPlatform)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, queryPlatform)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return s.withAggregatedCodeBuddy(ctx, bucket, accounts)
+}
+
+// withAggregatedCodeBuddy 按聚合规则把 codebuddy 账号补入聚合分组的候选超集
+// （§2.1-3：快照只存候选超集，不缓存目录判定）。仅当分桶平台为聚合分组（非 codebuddy 自身）
+// 时，向原生平台账号集合追加同分组可调度 codebuddy 账号。codebuddy 平台自身候选即原生
+// codebuddy 账号，不重复 join。
+func (s *SchedulerSnapshotService) withAggregatedCodeBuddy(ctx context.Context, bucket SchedulerBucket, accounts []Account) ([]Account, error) {
+	queryPlatform := schedulerAggregationQueryPlatform(bucket.Platform)
+	if queryPlatform == PlatformCodeBuddy || !isCodeBuddyAggregatedPlatform(queryPlatform) {
+		return accounts, nil
+	}
+	groupID := bucket.GroupID
 	if s.isRunModeSimple() {
-		return s.accountRepo.ListSchedulableByPlatform(ctx, bucket.Platform)
+		groupID = 0
 	}
-	return s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, bucket.Platform)
+	var extra []Account
+	var err error
+	if groupID > 0 {
+		extra, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, PlatformCodeBuddy)
+	} else if s.isRunModeSimple() {
+		extra, err = s.accountRepo.ListSchedulableByPlatform(ctx, PlatformCodeBuddy)
+	} else {
+		extra, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, PlatformCodeBuddy)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(extra) == 0 {
+		return accounts, nil
+	}
+	merged := make([]Account, 0, len(accounts)+len(extra))
+	merged = append(merged, accounts...)
+	merged = append(merged, extra...)
+	return merged, nil
 }
 
 func (s *SchedulerSnapshotService) loadAccountsForRebuild(
@@ -1535,7 +1619,7 @@ func (s *SchedulerSnapshotService) loadAccountsForRebuild(
 func (s *SchedulerSnapshotService) bucketFor(groupID *int64, platform string, mode string) SchedulerBucket {
 	return SchedulerBucket{
 		GroupID:  s.normalizeGroupID(groupID),
-		Platform: platform,
+		Platform: schedulerAggregationBucketPlatform(platform),
 		Mode:     mode,
 	}
 }
