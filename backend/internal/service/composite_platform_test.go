@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -206,19 +207,44 @@ func TestQuotaPlatformCompositeUsesResolvedOrForceOnly(t *testing.T) {
 	require.Equal(t, PlatformAntigravity, QuotaPlatform(ctx, apiKey))
 }
 
+// TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets 校验 schedulerCanonicalBuckets
+// 返回的规范桶集合覆盖全部候选调度平台。
+//
+// 契约（方案 v15 §2.1-3）：聚合分组（deepseek/zhipu/kimi/minimax/other）的 bucket 平台键
+// 追加 @agg<version> 标签（version = schedulerSnapshotAggregationVersion），使聚合规则变更
+// （version bump）时旧分桶缓存键自然失效；codebuddy 自身与 anthropic/gemini/openai/antigravity/
+// grok 不加标签，维持裸平台名。本测试按此契约断言，不得硬编码 @agg1，版本 bump 时须仍生效。
 func TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets(t *testing.T) {
 	seen := make(map[string]struct{})
 	for _, bucket := range schedulerCanonicalBuckets(99) {
 		seen[bucket.Platform] = struct{}{}
 	}
+
+	// 非聚合平台维持裸名（codebuddy 自身与 anthropic/gemini/openai/antigravity/grok 不加标签）。
+	nonAggPlatforms := []string{
+		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
+	}
+	// 聚合族五平台：裸名 + "@agg" + schedulerSnapshotAggregationVersion（用常量拼，不硬编码版本号）。
+	aggPlatforms := []string{
+		PlatformDeepseek, PlatformZhipu, PlatformKimi, PlatformOther, PlatformMiniMax,
+	}
+	expected := make([]string, 0, len(nonAggPlatforms)+len(aggPlatforms))
+	expected = append(expected, nonAggPlatforms...)
+	for _, p := range aggPlatforms {
+		expected = append(expected, p+"@agg"+strconv.Itoa(schedulerSnapshotAggregationVersion))
+	}
+
 	platforms := make([]string, 0, len(seen))
 	for platform := range seen {
 		platforms = append(platforms, platform)
 	}
-	require.ElementsMatch(t,
-		[]string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformOther, PlatformMiniMax},
-		platforms,
-	)
+	require.ElementsMatch(t, expected, platforms)
+
+	// 防回归：聚合族裸平台名不得出现在任何 bucket（标签缺失即回退到无标签键，违反 §2.1-3）。
+	for _, p := range aggPlatforms {
+		_, ok := seen[p]
+		require.False(t, ok, "聚合族裸平台名 %q 不应出现在 bucket（§2.1-3 契约要求 @agg 标签）", p)
+	}
 }
 
 func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
