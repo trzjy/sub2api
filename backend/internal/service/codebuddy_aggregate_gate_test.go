@@ -388,6 +388,54 @@ func TestCodebuddyAggregateGate_SnapshotBucketKeySyncAndVersionBump(t *testing.T
 	}
 }
 
+// TestEvaluateCodeBuddyCatalogGate_ConcurrentVerdictsWrites 是 D-13 B 项并发回归：
+// 候选数（6）> codeBuddyCatalogProbeConcurrency（4）时，主协程预写 not_probed 与
+// 探测协程在 mu 内写 verdicts 不得构成 concurrent map writes；-race 下本测试
+// 若存在数据竞争会直接失败。同时校验 not_probed 计数 = 候选数 - 探测预算。
+func TestEvaluateCodeBuddyCatalogGate_ConcurrentVerdictsWrites(t *testing.T) {
+	accounts := make([]Account, 0, 6)
+	catalogs := map[int64][]string{}
+	for id := int64(1); id <= 6; id++ {
+		accounts = append(accounts, cbAccount(id, 0, nil))
+		catalogs[id] = []string{"m"}
+	}
+	f := newFakeCatalog(catalogs)
+	s := newCodeBuddyScheduler(f)
+	req := OpenAIAccountScheduleRequest{Platform: PlatformDeepseek, RequestedModel: "m"}
+
+	// 多次重复执行，放大主协程/探测协程写交叠的窗口，配合 -race 使用。
+	for round := 0; round < 50; round++ {
+		verdicts := s.evaluateCodeBuddyCatalogGate(context.Background(), req, accounts)
+		if len(verdicts) != 6 {
+			t.Fatalf("round %d: verdicts 应覆盖全部 6 候选，got %d", round, len(verdicts))
+		}
+		notProbed := 0
+		probed := 0
+		for _, v := range verdicts {
+			switch v {
+			case codeBuddyCatalogNotProbed:
+				notProbed++
+			case codeBuddyCatalogAllowed:
+				probed++
+			default:
+				t.Fatalf("round %d: 出现非预期 verdict %v", round, v)
+			}
+		}
+		if want := len(accounts) - codeBuddyCatalogProbeConcurrency; notProbed != want {
+			t.Fatalf("round %d: not_probed 计数应为 %d，got %d", round, want, notProbed)
+		}
+		if probed != codeBuddyCatalogProbeConcurrency {
+			t.Fatalf("round %d: 探测通过数应为 %d，got %d", round, codeBuddyCatalogProbeConcurrency, probed)
+		}
+	}
+	// 探测集合固定为排序前 4（ID 1,2,3,4），超预算候选绝不发起探测。
+	got := f.probedIDs()
+	want := []int64{1, 2, 3, 4}
+	if strings.Join(idsStr(got), ",") != strings.Join(idsStr(want), ",") {
+		t.Errorf("实际探测集合应固定为前4，got=%v want=%v", got, want)
+	}
+}
+
 func idsStr(ids []int64) []string {
 	out := make([]string, len(ids))
 	for i, id := range ids {
