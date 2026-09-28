@@ -7,7 +7,34 @@
 
 package service
 
-import "context"
+import (
+	"context"
+	"crypto/hmac"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+)
+
+// cockpitImportParseTimeout 解析时限（10 秒）。
+// 取值依据：backup.json ≤ 50MB、ZIP 解压总量 ≤ 60MB，且账户条目 ≤ 200；在单实例 CPU 预算内，
+// 10 秒足以覆盖最坏情况的严格 JSON 解析 + 同键分组。超出即视为异常滥用/卡死，失败关闭返回
+// PREVIEW_PARSE_TIMEOUT，避免长耗时请求占用管理面 worker。父 context 若更早 deadline 则父 deadline 胜出。
+const cockpitImportParseTimeout = 10 * time.Second
+
+// CockpitPreviewResult 是 preview 的响应摘要（零凭证材料：仅计数、slug 与 raw_sha256 摘要）。
+type CockpitPreviewResult struct {
+	RawSHA256      string         `json:"raw_sha256"`
+	ParserVersion  int            `json:"parser_version"`
+	TotalEntries   int            `json:"total_entries"`
+	PendingAccounts map[string]int `json:"pending_accounts"`
+	UnknownAccounts int           `json:"unknown_accounts"`
+	EnabledAccounts map[string]int `json:"enabled_accounts"`
+	DedupedEntries int            `json:"deduped_entries"`
+	InvalidEntries int            `json:"invalid_entries"`
+	InvalidEntryReasons map[string]int `json:"invalid_entry_reasons"`
+	Receipt        string         `json:"receipt"`
+}
 
 // CockpitImportAccountPayload 是一条已构造好的账号终态载荷。
 // 由未来平台映射器产出（B1b 不做 entry→payload 转换，§1.3 门控）。
@@ -32,14 +59,20 @@ type CockpitImportCommitRepository interface {
 	CommitCockpitImport(ctx context.Context, payloads []CockpitImportAccountPayload) (CockpitImportCommitResult, error)
 }
 
-// CockpitImportCommitService 封装 cockpit 导入提交编排（§1.6）。
+// CockpitImportCommitService 封装 cockpit 导入提交编排（§1.6）与 preview/commit 凭证校验（§1.4-1.8，B1c）。
 type CockpitImportCommitService struct {
-	repo CockpitImportCommitRepository
+	repo          CockpitImportCommitRepository
+	receiptSigner *CockpitPreviewReceiptSigner
 }
 
-// NewCockpitImportCommitService 构造提交服务。
+// NewCockpitImportCommitService 构造提交服务（仅 B1b 写入编排；不含 preview 凭证，B1c 之前既有入口）。
 func NewCockpitImportCommitService(repo CockpitImportCommitRepository) *CockpitImportCommitService {
 	return &CockpitImportCommitService{repo: repo}
+}
+
+// NewCockpitImportCommitServiceWithReceipt 构造带 HMAC 凭证签名的提交服务（B1c）。
+func NewCockpitImportCommitServiceWithReceipt(repo CockpitImportCommitRepository, signer *CockpitPreviewReceiptSigner) *CockpitImportCommitService {
+	return &CockpitImportCommitService{repo: repo, receiptSigner: signer}
 }
 
 // Commit 将已构造的账号载荷整批原子提交到仓储。
@@ -51,4 +84,114 @@ func (s *CockpitImportCommitService) Commit(ctx context.Context, payloads []Cock
 		return CockpitImportCommitResult{}, nil
 	}
 	return s.repo.CommitCockpitImport(ctx, payloads)
+}
+
+// PreviewCockpitImport 解析上传字节流并返回计数摘要 + 签名凭证；零副作用（不写库不落盘）。
+// 解析在 cockpitImportParseTimeout 内未完成 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
+func (s *CockpitImportCommitService) PreviewCockpitImport(ctx context.Context, operator string, raw []byte) (*CockpitPreviewResult, error) {
+	if !s.receiptSigner.Configured() {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid, Err: errors.New("preview receipt signer not configured")}
+	}
+	result, err := runCockpitParseWithTimeout(ctx, raw)
+	if err != nil {
+		return nil, err
+	}
+	rawSha := cockpitSHA256Hex(raw)
+	token, err := s.receiptSigner.Issue(operator, rawSha)
+	if err != nil {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid, Err: err}
+	}
+	total := sumCockpitEntries(result)
+	return &CockpitPreviewResult{
+		RawSHA256:           rawSha,
+		ParserVersion:       cockpitImportParserVersion,
+		TotalEntries:        total,
+		PendingAccounts:     result.PendingPlatformAccounts,
+		UnknownAccounts:     result.UnknownPlatformAccounts,
+		EnabledAccounts:     result.EnabledPlatformAccounts,
+		DedupedEntries:      result.DedupedSameEntries,
+		InvalidEntries:      result.InvalidEntries,
+		InvalidEntryReasons: result.InvalidEntryReasons,
+		Receipt:             token,
+	}, nil
+}
+
+// CommitCockpitImport 校验凭证 → 重算 SHA 比对 → 同版本解析 → 调既有 B1b 写入器。
+// 无凭证/无效凭证 → *CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid} 失败关闭；
+// 字节流与凭证内 raw_sha256 不一致 → ErrCockpitPreviewManifestMismatch 失败关闭。
+func (s *CockpitImportCommitService) CommitCockpitImport(ctx context.Context, operator, receipt string, raw []byte) (*CockpitImportCommitResult, error) {
+	if !s.receiptSigner.Configured() {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid, Err: errors.New("preview receipt signer not configured")}
+	}
+	if receipt == "" {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid, Err: errors.New("missing preview receipt")}
+	}
+	verified, err := s.receiptSigner.Verify(receipt, operator)
+	if err != nil {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewReceiptInvalid, Err: err}
+	}
+	// 重算原始字节流 SHA-256 与凭证内比对（不一致视为清单被篡改，失败关闭）。
+	rawSha := cockpitSHA256Hex(raw)
+	if !subtleEqualHex(rawSha, verified.RawSHA256) {
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewManifestMismatch, Err: fmt.Errorf("raw sha256 mismatch")}
+	}
+	// 同版本解析（与 preview 一致；版本变更后凭证已因 Verify 版本校验失败）。
+	if _, err := runCockpitParseWithTimeout(ctx, raw); err != nil {
+		return nil, err
+	}
+	// enabled 为空，当前无 entry 可转载荷；成功路径 created=0，调既有 B1b 写入器。
+	res, err := s.Commit(ctx, []CockpitImportAccountPayload{})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// runCockpitParseWithTimeout 在 cockpitImportParseTimeout 派生子 context（父 deadline 更早则父胜出）下
+// 运行解析；超时 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
+// 解析为 CPU 密集型、不响应取消，故以 goroutine + select 实现时限失败关闭：超时时立即返回，
+// 解析协程在完成后自然退出（结果被丢弃）。
+func runCockpitParseWithTimeout(ctx context.Context, raw []byte) (*CockpitImportResult, error) {
+	parseCtx, cancel := context.WithTimeout(ctx, cockpitImportParseTimeout)
+	defer cancel()
+	type out struct {
+		res *CockpitImportResult
+		err error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		res, perr := ParseCockpitImport(raw)
+		ch <- out{res, perr}
+	}()
+	select {
+	case <-parseCtx.Done():
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewParseTimeout, Err: parseCtx.Err()}
+	case o := <-ch:
+		return o.res, o.err
+	}
+}
+
+// sumCockpitEntries 汇总解析结果的原始条目总数（去重冗余 + 各类计数）。
+func sumCockpitEntries(r *CockpitImportResult) int {
+	if r == nil {
+		return 0
+	}
+	total := r.DedupedSameEntries + r.InvalidEntries + r.UnknownPlatformAccounts
+	for _, n := range r.PendingPlatformAccounts {
+		total += n
+	}
+	for _, n := range r.EnabledPlatformAccounts {
+		total += n
+	}
+	return total
+}
+
+// subtleEqualHex 对两个十六进制摘要做恒定时间比较，避免计时侧信道。
+func subtleEqualHex(a, b string) bool {
+	ab, errA := hex.DecodeString(a)
+	bb, errB := hex.DecodeString(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return hmac.Equal(ab, bb)
 }

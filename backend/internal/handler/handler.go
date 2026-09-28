@@ -49,6 +49,7 @@ type AdminHandlers struct {
 	PromoIntel             *admin.PromoIntelHandler
 	UsageRisk              *admin.UsageRiskHandler
 	VisionCapability       *admin.VisionCapabilityHandler
+	CockpitImport          *admin.CockpitImportHandler
 }
 
 // Handlers contains all HTTP handlers
