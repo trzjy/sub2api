@@ -426,15 +426,21 @@ func (s *defaultOpenAIAccountScheduler) evaluateCodeBuddyCatalogGate(
 	probeCtx, cancel := context.WithTimeout(ctx, codeBuddyCatalogProbeTimeout)
 	defer cancel()
 
+	// 超出预算的候选在启动任何探测协程之前由主协程一次性预写 not_probed
+	// （显式计数，绝不静默跳过）；此后仅探测协程在 mu 保护下写 verdicts，
+	// 避免主协程与探测协程对同一 map 的 concurrent writes（可崩进程）。
+	probeCount := len(order)
+	if probeCount > codeBuddyCatalogProbeConcurrency {
+		probeCount = codeBuddyCatalogProbeConcurrency
+	}
+	for _, acc := range order[probeCount:] {
+		verdicts[acc.ID] = codeBuddyCatalogNotProbed
+	}
+
 	sem := make(chan struct{}, codeBuddyCatalogProbeConcurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	for idx, acc := range order {
-		if idx >= codeBuddyCatalogProbeConcurrency {
-			// 超出预算：显式计 not_probed，绝不静默跳过。
-			verdicts[acc.ID] = codeBuddyCatalogNotProbed
-			continue
-		}
+	for _, acc := range order[:probeCount] {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(acc *Account) {
