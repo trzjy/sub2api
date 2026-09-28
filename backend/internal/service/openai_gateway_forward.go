@@ -19,6 +19,18 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// isCodeBuddyPlatformAccount 按账号平台判定是否为 CodeBuddy（腾讯）原生接入账号，
+// 与影子无关（方案 §2.1-4 / B3a 桥接通用判定）：platform == PlatformCodeBuddy 即走
+// /responses → CC 转换路径。
+//
+// 与 isCodeBuddyShadowAccount（codebuddy_gateway_forward.go）的区别：后者按影子+用量维度
+// 判定（存量 codebuddy 影子 platform 为目标分组平台 deepseek/zhipu 等，不命中本判定）；
+// 本函数按平台判定，覆盖 B2 之后直绑的 platform=codebuddy 账号（非影子）。旧影子专属
+// 判定函数本体保留至 B3c 删除，本函数为 /responses 入站桥接的 SSOT 通用路径。
+func isCodeBuddyPlatformAccount(account *Account) bool {
+	return account != nil && account.Platform == PlatformCodeBuddy
+}
+
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
@@ -166,7 +178,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// Responses→CC 请求转换，经 sendCodeBuddyChatUpstreamAsCC（母账号凭证 + §2.5
 	// 改写 + §2.4 指纹头 + 审核降级重试）出站，再以 CC→Responses 回桥写回客户端，
 	// 与 /v1/messages 路径（先转 CC 再走 codebuddy 上游）保持一致。
-	if isCodeBuddyShadowAccount(account) {
+	// B3a 桥接通用判定（方案 §2.1-4）：/responses → CC 转换按账号平台判定，不再挂在
+	// 影子专属函数上。直绑 codebuddy 账号（platform=codebuddy、非影子）与存量 codebuddy
+	// 影子（platform 为目标分组平台）均经此进入 CC 转换；spark 影子 platform=openai 不命中。
+	if isCodeBuddyPlatformAccount(account) {
 		return s.forwardResponsesViaCodeBuddy(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
