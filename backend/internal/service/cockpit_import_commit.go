@@ -1,9 +1,11 @@
-// cockpit_import_commit.go —— cockpit 导入 service 层提交入口（方案 v15 §1.6，B1b）。
+// cockpit_import_commit.go —— cockpit 导入 service 层提交入口（方案 v16 §1.5/§1.2）。
 //
-// 本文件只定义提交编排契约与薄入口：构造载荷 → 仓储原子写入 → 计数汇总。
-// 平台映射器（entry→payload 转换）因 §1.2 门控为 pending，不在本单（B1c 之外、enabled 为空）。
-// 当前 enabled 平台为空，无 entry 能转成载荷，天然不写入；映射器上线后在本服务内
-// 做 entry→payload 转换再调用仓储，接口边界保持不变。
+// 本文件只定义提交编排契约与薄入口：凭证校验 → 同版本解析 → enabled-零载荷闸 →
+// 构造载荷 → 仓储原子写入 → 计数汇总。平台映射器（entry→payload 转换）因 §1.2 门控
+// 为 pending，不在本单（enabled 为空）。当前 enabled 平台为空，无 entry 能转成载荷，
+// 天然不写入；映射器上线后在本服务内做 entry→payload 转换再调用仓储，接口边界保持不变。
+// 提交边界结构强制（v16 §1.5）：载荷写入仅收敛为私有 commitPayloads，
+// 仅凭证校验通过后的 CommitCockpitImport 可达，无导出旁路。
 
 package service
 
@@ -59,31 +61,56 @@ type CockpitImportCommitRepository interface {
 	CommitCockpitImport(ctx context.Context, payloads []CockpitImportAccountPayload) (CockpitImportCommitResult, error)
 }
 
-// CockpitImportCommitService 封装 cockpit 导入提交编排（§1.6）与 preview/commit 凭证校验（§1.4-1.8，B1c）。
+// ErrCockpitCommitPayloadMissing 提交链装载失败（v16 §1.2）：解析结果存在 enabled 平台
+// 条目而提交链无可用载荷 → 显式失败关闭，禁止静默 created=0（假完成面）。
+const ErrCockpitCommitPayloadMissing = "COMMIT_PAYLOAD_MISSING"
+
+// CockpitImportCommitService 封装 cockpit 导入提交编排（§1.5/§1.6）与 preview/commit
+// 凭证校验（§1.4-1.8）。唯一构造形态带凭证签名器——不存在无凭证旁路形态（v16 §1.5）。
 type CockpitImportCommitService struct {
 	repo          CockpitImportCommitRepository
 	receiptSigner *CockpitPreviewReceiptSigner
 }
 
-// NewCockpitImportCommitService 构造提交服务（仅 B1b 写入编排；不含 preview 凭证，B1c 之前既有入口）。
-func NewCockpitImportCommitService(repo CockpitImportCommitRepository) *CockpitImportCommitService {
-	return &CockpitImportCommitService{repo: repo}
-}
-
-// NewCockpitImportCommitServiceWithReceipt 构造带 HMAC 凭证签名的提交服务（B1c）。
+// NewCockpitImportCommitServiceWithReceipt 构造带 HMAC 凭证签名的提交服务（唯一构造入口）。
 func NewCockpitImportCommitServiceWithReceipt(repo CockpitImportCommitRepository, signer *CockpitPreviewReceiptSigner) *CockpitImportCommitService {
 	return &CockpitImportCommitService{repo: repo, receiptSigner: signer}
 }
 
-// Commit 将已构造的账号载荷整批原子提交到仓储。
-// 映射器上线前由调用方（测试或 B1c 端点）直接注入载荷；
-// 上线后此处会在调用 repo 前完成 entry→payload 转换，接口边界不变。
+// commitPayloads 将已构造的账号载荷整批原子提交到仓储（私有——v16 §1.5 提交边界结构强制：
+// 载荷写入路径不暴露为可绕过凭证校验的导出方法，仅凭证校验通过后的 CommitCockpitImport 可达）。
+// 映射器上线后由 CommitCockpitImport 在调用本方法前完成 entry→payload 转换，接口边界不变。
 // 空载荷直接返回零计数，不触发仓储调用（与 repo 层空值守门一致）。
-func (s *CockpitImportCommitService) Commit(ctx context.Context, payloads []CockpitImportAccountPayload) (CockpitImportCommitResult, error) {
+func (s *CockpitImportCommitService) commitPayloads(ctx context.Context, payloads []CockpitImportAccountPayload) (CockpitImportCommitResult, error) {
 	if len(payloads) == 0 {
 		return CockpitImportCommitResult{}, nil
 	}
 	return s.repo.CommitCockpitImport(ctx, payloads)
+}
+
+// cockpitEnabledAccountsTotal 汇总解析结果中 enabled 平台条目总数。
+func cockpitEnabledAccountsTotal(r *CockpitImportResult) int {
+	if r == nil {
+		return 0
+	}
+	total := 0
+	for _, n := range r.EnabledPlatformAccounts {
+		total += n
+	}
+	return total
+}
+
+// checkCockpitCommitPayloadGate enabled-零载荷失败关闭闸（v16 §1.2，纯函数）：
+// 解析结果存在 enabled 平台条目而提交链无可用载荷 → *CockpitImportError
+// {Code: ErrCockpitCommitPayloadMissing} 失败关闭，禁止静默 created=0。
+func checkCockpitCommitPayloadGate(r *CockpitImportResult, payloads []CockpitImportAccountPayload) error {
+	if cockpitEnabledAccountsTotal(r) > 0 && len(payloads) == 0 {
+		return &CockpitImportError{
+			Code: ErrCockpitCommitPayloadMissing,
+			Err:  fmt.Errorf("enabled platform entries parsed but no payloads available"),
+		}
+	}
+	return nil
 }
 
 // PreviewCockpitImport 解析上传字节流并返回计数摘要 + 签名凭证；零副作用（不写库不落盘）。
@@ -136,38 +163,58 @@ func (s *CockpitImportCommitService) CommitCockpitImport(ctx context.Context, op
 		return nil, &CockpitImportError{Code: ErrCockpitPreviewManifestMismatch, Err: fmt.Errorf("raw sha256 mismatch")}
 	}
 	// 同版本解析（与 preview 一致；版本变更后凭证已因 Verify 版本校验失败）。
-	if _, err := runCockpitParseWithTimeout(ctx, raw); err != nil {
+	result, err := runCockpitParseWithTimeout(ctx, raw)
+	if err != nil {
 		return nil, err
 	}
-	// enabled 为空，当前无 entry 可转载荷；成功路径 created=0，调既有 B1b 写入器。
-	res, err := s.Commit(ctx, []CockpitImportAccountPayload{})
+	// 平台映射器 pending（§1.2 门控）：当前无 entry→payload 转换，可用载荷恒为空；
+	// enabled 表亦为空，闸门天然通过。映射器上线后在此装载载荷，闸门语义不变。
+	var payloads []CockpitImportAccountPayload
+	// enabled-零载荷失败关闭闸（v16 §1.2）：enabled 条目存在而载荷为空 → 显式失败关闭。
+	if err := checkCockpitCommitPayloadGate(result, payloads); err != nil {
+		return nil, err
+	}
+	res, err := s.commitPayloads(ctx, payloads)
 	if err != nil {
 		return nil, err
 	}
 	return &res, nil
 }
 
-// runCockpitParseWithTimeout 在 cockpitImportParseTimeout 派生子 context（父 deadline 更早则父胜出）下
-// 运行解析；超时 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
-// 解析器在 zip 条目/账户条目循环等天然边界响应 parseCtx 取消（v16 §1.5，终止解析并释放输入字节）；
-// goroutine + select 仍保留为时限失败关闭的外层保证：超时时立即返回。
+// cockpitParseOutcome 是解析协程的产出；done 通道用于佐证超时返回后解析协程
+// 在检查点退出（测试观测用，生产路径不消费）。
+type cockpitParseOutcome struct {
+	res *CockpitImportResult
+	err error
+}
+
+// runCockpitParseWithTimeout 在 cockpitImportParseTimeout 时限下解析（父 deadline 更早则父胜出）；
+// 超时 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
 func runCockpitParseWithTimeout(ctx context.Context, raw []byte) (*CockpitImportResult, error) {
-	parseCtx, cancel := context.WithTimeout(ctx, cockpitImportParseTimeout)
-	defer cancel()
-	type out struct {
-		res *CockpitImportResult
-		err error
-	}
-	ch := make(chan out, 1)
+	res, err, _ := runCockpitParseWithLimit(ctx, raw, cockpitImportParseTimeout)
+	return res, err
+}
+
+// runCockpitParseWithLimit 与 runCockpitParseWithTimeout 同语义，时限可注入；
+// 返回的 done 在解析协程退出后必有产出可读（缓冲 1，不阻塞协程）。
+// 超时即终止（v16 §1.5）：select 超时分支返回即触发 cancel，解析器在 zip 条目/账户条目
+// 循环等天然检查点响应 parseCtx 取消而退出并释放输入字节，不留下持有完整上传的失控解析协程；
+// goroutine + select 是时限失败关闭的外层保证（超时不等待协程即返回）。
+func runCockpitParseWithLimit(ctx context.Context, raw []byte, timeout time.Duration) (*CockpitImportResult, error, <-chan cockpitParseOutcome) {
+	parseCtx, cancel := context.WithTimeout(ctx, timeout)
+	ch := make(chan cockpitParseOutcome, 1)
 	go func() {
 		res, perr := ParseCockpitImport(parseCtx, raw)
-		ch <- out{res, perr}
+		ch <- cockpitParseOutcome{res, perr}
+		cancel()
 	}()
 	select {
 	case <-parseCtx.Done():
-		return nil, &CockpitImportError{Code: ErrCockpitPreviewParseTimeout, Err: parseCtx.Err()}
+		cancel()
+		return nil, &CockpitImportError{Code: ErrCockpitPreviewParseTimeout, Err: parseCtx.Err()}, ch
 	case o := <-ch:
-		return o.res, o.err
+		cancel()
+		return o.res, o.err, ch
 	}
 }
 
