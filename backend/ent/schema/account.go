@@ -65,6 +65,13 @@ func (Account) Fields() []ent.Field {
 			MaxLen(50).
 			NotEmpty(),
 
+		// uid: 平台侧账号唯一标识（如 Cockpit 导出的 account id）。
+		// 与 platform 共同构成部分唯一索引 (platform, uid) WHERE uid != ''（迁移 262）。
+		// 空字符串表示未设置，不参与唯一约束；默认值 '' 以保证存量行可安全加列。
+		field.String("uid").
+			Default("").
+			MaxLen(128),
+
 		// type: 认证类型，如 "api_key", "oauth", "cookie" 等
 		// 不同类型决定了 credentials 中存储的数据结构
 		field.String("type").

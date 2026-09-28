@@ -7,6 +7,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	"github.com/Wei-Shaw/sub2api/ent/accountmodelcapability"
 	"github.com/Wei-Shaw/sub2api/ent/announcement"
 	"github.com/Wei-Shaw/sub2api/ent/announcementread"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
@@ -208,8 +209,14 @@ func init() {
 			return nil
 		}
 	}()
+	// accountDescUID is the schema descriptor for uid field.
+	accountDescUID := accountFields[3].Descriptor()
+	// account.DefaultUID holds the default value on creation for the uid field.
+	account.DefaultUID = accountDescUID.Default.(string)
+	// account.UIDValidator is a validator for the "uid" field. It is called by the builders before save.
+	account.UIDValidator = accountDescUID.Validators[0].(func(string) error)
 	// accountDescType is the schema descriptor for type field.
-	accountDescType := accountFields[3].Descriptor()
+	accountDescType := accountFields[4].Descriptor()
 	// account.TypeValidator is a validator for the "type" field. It is called by the builders before save.
 	account.TypeValidator = func() func(string) error {
 		validators := accountDescType.Validators
@@ -227,49 +234,49 @@ func init() {
 		}
 	}()
 	// accountDescCredentials is the schema descriptor for credentials field.
-	accountDescCredentials := accountFields[4].Descriptor()
+	accountDescCredentials := accountFields[5].Descriptor()
 	// account.DefaultCredentials holds the default value on creation for the credentials field.
 	account.DefaultCredentials = accountDescCredentials.Default.(func() map[string]interface{})
 	// accountDescCredentialsMAC is the schema descriptor for credentials_mac field.
-	accountDescCredentialsMAC := accountFields[5].Descriptor()
+	accountDescCredentialsMAC := accountFields[6].Descriptor()
 	// account.CredentialsMACValidator is a validator for the "credentials_mac" field. It is called by the builders before save.
 	account.CredentialsMACValidator = accountDescCredentialsMAC.Validators[0].(func(string) error)
 	// accountDescCredentialsAPIKeyMAC is the schema descriptor for credentials_api_key_mac field.
-	accountDescCredentialsAPIKeyMAC := accountFields[6].Descriptor()
+	accountDescCredentialsAPIKeyMAC := accountFields[7].Descriptor()
 	// account.CredentialsAPIKeyMACValidator is a validator for the "credentials_api_key_mac" field. It is called by the builders before save.
 	account.CredentialsAPIKeyMACValidator = accountDescCredentialsAPIKeyMAC.Validators[0].(func(string) error)
 	// accountDescExtra is the schema descriptor for extra field.
-	accountDescExtra := accountFields[7].Descriptor()
+	accountDescExtra := accountFields[8].Descriptor()
 	// account.DefaultExtra holds the default value on creation for the extra field.
 	account.DefaultExtra = accountDescExtra.Default.(func() map[string]interface{})
 	// accountDescConcurrency is the schema descriptor for concurrency field.
-	accountDescConcurrency := accountFields[10].Descriptor()
+	accountDescConcurrency := accountFields[11].Descriptor()
 	// account.DefaultConcurrency holds the default value on creation for the concurrency field.
 	account.DefaultConcurrency = accountDescConcurrency.Default.(int)
 	// accountDescPriority is the schema descriptor for priority field.
-	accountDescPriority := accountFields[12].Descriptor()
+	accountDescPriority := accountFields[13].Descriptor()
 	// account.DefaultPriority holds the default value on creation for the priority field.
 	account.DefaultPriority = accountDescPriority.Default.(int)
 	// accountDescRateMultiplier is the schema descriptor for rate_multiplier field.
-	accountDescRateMultiplier := accountFields[13].Descriptor()
+	accountDescRateMultiplier := accountFields[14].Descriptor()
 	// account.DefaultRateMultiplier holds the default value on creation for the rate_multiplier field.
 	account.DefaultRateMultiplier = accountDescRateMultiplier.Default.(float64)
 	// accountDescStatus is the schema descriptor for status field.
-	accountDescStatus := accountFields[14].Descriptor()
+	accountDescStatus := accountFields[15].Descriptor()
 	// account.DefaultStatus holds the default value on creation for the status field.
 	account.DefaultStatus = accountDescStatus.Default.(string)
 	// account.StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	account.StatusValidator = accountDescStatus.Validators[0].(func(string) error)
 	// accountDescAutoPauseOnExpired is the schema descriptor for auto_pause_on_expired field.
-	accountDescAutoPauseOnExpired := accountFields[18].Descriptor()
+	accountDescAutoPauseOnExpired := accountFields[19].Descriptor()
 	// account.DefaultAutoPauseOnExpired holds the default value on creation for the auto_pause_on_expired field.
 	account.DefaultAutoPauseOnExpired = accountDescAutoPauseOnExpired.Default.(bool)
 	// accountDescSchedulable is the schema descriptor for schedulable field.
-	accountDescSchedulable := accountFields[19].Descriptor()
+	accountDescSchedulable := accountFields[20].Descriptor()
 	// account.DefaultSchedulable holds the default value on creation for the schedulable field.
 	account.DefaultSchedulable = accountDescSchedulable.Default.(bool)
 	// accountDescSessionWindowStatus is the schema descriptor for session_window_status field.
-	accountDescSessionWindowStatus := accountFields[27].Descriptor()
+	accountDescSessionWindowStatus := accountFields[28].Descriptor()
 	// account.SessionWindowStatusValidator is a validator for the "session_window_status" field. It is called by the builders before save.
 	account.SessionWindowStatusValidator = accountDescSessionWindowStatus.Validators[0].(func(string) error)
 	accountgroupFields := schema.AccountGroup{}.Fields()
@@ -282,6 +289,74 @@ func init() {
 	accountgroupDescCreatedAt := accountgroupFields[3].Descriptor()
 	// accountgroup.DefaultCreatedAt holds the default value on creation for the created_at field.
 	accountgroup.DefaultCreatedAt = accountgroupDescCreatedAt.Default.(func() time.Time)
+	accountmodelcapabilityFields := schema.AccountModelCapability{}.Fields()
+	_ = accountmodelcapabilityFields
+	// accountmodelcapabilityDescUpstreamModel is the schema descriptor for upstream_model field.
+	accountmodelcapabilityDescUpstreamModel := accountmodelcapabilityFields[1].Descriptor()
+	// accountmodelcapability.UpstreamModelValidator is a validator for the "upstream_model" field. It is called by the builders before save.
+	accountmodelcapability.UpstreamModelValidator = func() func(string) error {
+		validators := accountmodelcapabilityDescUpstreamModel.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(upstream_model string) error {
+			for _, fn := range fns {
+				if err := fn(upstream_model); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// accountmodelcapabilityDescProtocol is the schema descriptor for protocol field.
+	accountmodelcapabilityDescProtocol := accountmodelcapabilityFields[2].Descriptor()
+	// accountmodelcapability.ProtocolValidator is a validator for the "protocol" field. It is called by the builders before save.
+	accountmodelcapability.ProtocolValidator = func() func(string) error {
+		validators := accountmodelcapabilityDescProtocol.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(protocol string) error {
+			for _, fn := range fns {
+				if err := fn(protocol); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// accountmodelcapabilityDescSupportsVision is the schema descriptor for supports_vision field.
+	accountmodelcapabilityDescSupportsVision := accountmodelcapabilityFields[3].Descriptor()
+	// accountmodelcapability.DefaultSupportsVision holds the default value on creation for the supports_vision field.
+	accountmodelcapability.DefaultSupportsVision = accountmodelcapabilityDescSupportsVision.Default.(bool)
+	// accountmodelcapabilityDescSource is the schema descriptor for source field.
+	accountmodelcapabilityDescSource := accountmodelcapabilityFields[4].Descriptor()
+	// accountmodelcapability.DefaultSource holds the default value on creation for the source field.
+	accountmodelcapability.DefaultSource = accountmodelcapabilityDescSource.Default.(string)
+	// accountmodelcapability.SourceValidator is a validator for the "source" field. It is called by the builders before save.
+	accountmodelcapability.SourceValidator = func() func(string) error {
+		validators := accountmodelcapabilityDescSource.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(source string) error {
+			for _, fn := range fns {
+				if err := fn(source); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// accountmodelcapabilityDescUpdatedAt is the schema descriptor for updated_at field.
+	accountmodelcapabilityDescUpdatedAt := accountmodelcapabilityFields[6].Descriptor()
+	// accountmodelcapability.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	accountmodelcapability.DefaultUpdatedAt = accountmodelcapabilityDescUpdatedAt.Default.(func() time.Time)
+	// accountmodelcapability.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	accountmodelcapability.UpdateDefaultUpdatedAt = accountmodelcapabilityDescUpdatedAt.UpdateDefault.(func() time.Time)
 	announcementFields := schema.Announcement{}.Fields()
 	_ = announcementFields
 	// announcementDescTitle is the schema descriptor for title field.

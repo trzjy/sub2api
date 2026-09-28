@@ -93,6 +93,20 @@ func (_c *AccountCreate) SetPlatform(v string) *AccountCreate {
 	return _c
 }
 
+// SetUID sets the "uid" field.
+func (_c *AccountCreate) SetUID(v string) *AccountCreate {
+	_c.mutation.SetUID(v)
+	return _c
+}
+
+// SetNillableUID sets the "uid" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableUID(v *string) *AccountCreate {
+	if v != nil {
+		_c.SetUID(*v)
+	}
+	return _c
+}
+
 // SetType sets the "type" field.
 func (_c *AccountCreate) SetType(v string) *AccountCreate {
 	_c.mutation.SetType(v)
@@ -567,6 +581,10 @@ func (_c *AccountCreate) defaults() error {
 		v := account.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.UID(); !ok {
+		v := account.DefaultUID
+		_c.mutation.SetUID(v)
+	}
 	if _, ok := _c.mutation.Credentials(); !ok {
 		if account.DefaultCredentials == nil {
 			return fmt.Errorf("ent: uninitialized account.DefaultCredentials (forgotten import ent/runtime?)")
@@ -634,6 +652,14 @@ func (_c *AccountCreate) check() error {
 	if v, ok := _c.mutation.Platform(); ok {
 		if err := account.PlatformValidator(v); err != nil {
 			return &ValidationError{Name: "platform", err: fmt.Errorf(`ent: validator failed for field "Account.platform": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.UID(); !ok {
+		return &ValidationError{Name: "uid", err: errors.New(`ent: missing required field "Account.uid"`)}
+	}
+	if v, ok := _c.mutation.UID(); ok {
+		if err := account.UIDValidator(v); err != nil {
+			return &ValidationError{Name: "uid", err: fmt.Errorf(`ent: validator failed for field "Account.uid": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.GetType(); !ok {
@@ -746,6 +772,10 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Platform(); ok {
 		_spec.SetField(account.FieldPlatform, field.TypeString, value)
 		_node.Platform = value
+	}
+	if value, ok := _c.mutation.UID(); ok {
+		_spec.SetField(account.FieldUID, field.TypeString, value)
+		_node.UID = value
 	}
 	if value, ok := _c.mutation.GetType(); ok {
 		_spec.SetField(account.FieldType, field.TypeString, value)
@@ -1054,6 +1084,18 @@ func (u *AccountUpsert) SetPlatform(v string) *AccountUpsert {
 // UpdatePlatform sets the "platform" field to the value that was provided on create.
 func (u *AccountUpsert) UpdatePlatform() *AccountUpsert {
 	u.SetExcluded(account.FieldPlatform)
+	return u
+}
+
+// SetUID sets the "uid" field.
+func (u *AccountUpsert) SetUID(v string) *AccountUpsert {
+	u.Set(account.FieldUID, v)
+	return u
+}
+
+// UpdateUID sets the "uid" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateUID() *AccountUpsert {
+	u.SetExcluded(account.FieldUID)
 	return u
 }
 
@@ -1639,6 +1681,20 @@ func (u *AccountUpsertOne) SetPlatform(v string) *AccountUpsertOne {
 func (u *AccountUpsertOne) UpdatePlatform() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.UpdatePlatform()
+	})
+}
+
+// SetUID sets the "uid" field.
+func (u *AccountUpsertOne) SetUID(v string) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetUID(v)
+	})
+}
+
+// UpdateUID sets the "uid" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateUID() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateUID()
 	})
 }
 
@@ -2466,6 +2522,20 @@ func (u *AccountUpsertBulk) SetPlatform(v string) *AccountUpsertBulk {
 func (u *AccountUpsertBulk) UpdatePlatform() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.UpdatePlatform()
+	})
+}
+
+// SetUID sets the "uid" field.
+func (u *AccountUpsertBulk) SetUID(v string) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetUID(v)
+	})
+}
+
+// UpdateUID sets the "uid" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateUID() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateUID()
 	})
 }
 
