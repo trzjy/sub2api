@@ -254,6 +254,14 @@ func (Group) Fields() []ent.Field {
 		field.Bool("require_privacy_set").
 			Default(false).
 			Comment("调度时仅允许 privacy 已成功设置的账号"),
+		// 聚合直绑开关（方案 docs/codebuddy-b2-aggregate-switch-plan.md §1.1）：
+		// true=该聚合族分组候选池并入 codebuddy（现行为）；false=并入关闭（默认），
+		// 该分组任何生产选号路径都看不到 codebuddy 账号。仅聚合族平台
+		//（deepseek/zhipu/kimi/minimax/other/codebuddy）可置 true，否则创建/更新被拒
+		//（400 AGGREGATE_BINDING_NOT_SUPPORTED）。
+		field.Bool("aggregate_codebuddy_enabled").
+			Default(false).
+			Comment("聚合直绑开关：true=聚合族分组候选池并入 codebuddy；false=关闭（默认），该分组不可见 codebuddy 账号"),
 		field.String("default_mapped_model").
 			MaxLen(100).
 			Default("").

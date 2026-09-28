@@ -149,6 +149,9 @@ type Group struct {
 	RequireOAuthOnly  bool `json:"require_oauth_only"`
 	RequirePrivacySet bool `json:"require_privacy_set"`
 
+	// 聚合直绑开关：true=该聚合族分组候选池并入 codebuddy；false=关闭（默认）。
+	AggregateCodeBuddyEnabled bool `json:"aggregate_codebuddy_enabled"`
+
 	// RPMLimit 分组级每分钟请求数上限（0 = 不限制），设置后覆盖用户级 rpm_limit。
 	RPMLimit int `json:"rpm_limit"`
 	// Concurrency 订阅分组各自并发上限（0 = 不限制）；仅订阅类型分组生效，计费模式不看此字段。

@@ -606,8 +606,8 @@ func TestSchedulerFullRebuildSimpleModePreservesRegistryWithoutLifecycleAuthorit
 	require.Empty(t, freshCalls)
 	require.Equal(t, schedulerCanonicalBucketCount()+len(registered), cache.captureAttemptCount())
 	// simple 模式快照层补入链保留（v16 §2.1-3：ungrouped/simple 不经 queryAccountsByGroup）。
-	require.Equal(t, schedulerCanonicalGroupZeroAccountQueryCount()+len(registered), accounts.callCount())
-	require.Equal(t, schedulerCanonicalGroupZeroAccountQueryCount()+len(registered), accounts.groupCallCount(0))
+	require.Equal(t, schedulerCanonicalGroupZeroAccountQueryCountSimpleMode()+len(registered), accounts.callCount())
+	require.Equal(t, schedulerCanonicalGroupZeroAccountQueryCountSimpleMode()+len(registered), accounts.groupCallCount(0))
 	require.Empty(t, cache.retiredBuckets())
 	require.Empty(t, cache.tokens())
 	for _, bucket := range registered {

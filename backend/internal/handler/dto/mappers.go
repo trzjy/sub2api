@@ -223,6 +223,7 @@ func groupFromServiceBase(g *service.Group) Group {
 		AllowLive:                       g.AllowLive,
 		RequireOAuthOnly:                g.RequireOAuthOnly,
 		RequirePrivacySet:               g.RequirePrivacySet,
+		AggregateCodeBuddyEnabled:      g.AggregateCodeBuddyEnabled,
 		RPMLimit:                        g.RPMLimit,
 		Concurrency:                     g.Concurrency,
 		MaxReasoningEffort:              g.MaxReasoningEffort,

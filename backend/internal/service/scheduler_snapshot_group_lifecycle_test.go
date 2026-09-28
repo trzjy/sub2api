@@ -349,7 +349,17 @@ func schedulerCanonicalAccountQueryCount() int {
 // queryAccountsByGroup，快照层 withAggregatedCodeBuddy 是 codebuddy 候选的唯一补入链
 // （v16 §2.1-3），故聚合族平台（deepseek/zhipu/kimi/minimax/other）各 +1。
 // 复用生产契约判定 isCodeBuddyAggregatedPlatform，禁止硬编码聚合族集合或 @agg 字面量。
+// schedulerCanonicalGroupZeroAccountQueryCount 统计标准模式未分组（groupID=0）
+// 桶的账号查询数。标准模式未分组桶失败关闭后不再发起 codebuddy 补入查询
+// （withAggregatedCodeBuddy 未分组分支直接返回，B2 聚合开关批次），组零查询数
+// 回归与分组路径同基数。
 func schedulerCanonicalGroupZeroAccountQueryCount() int {
+	return schedulerCanonicalAccountQueryCount()
+}
+
+// schedulerCanonicalGroupZeroAccountQueryCountSimpleMode 统计 simple 模式未分组
+// 桶的账号查询数：simple 分支保留 codebuddy 补入（每聚合平台一次查询）。
+func schedulerCanonicalGroupZeroAccountQueryCountSimpleMode() int {
 	count := schedulerCanonicalAccountQueryCount()
 	for _, platform := range schedulerSnapshotPlatforms() {
 		if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
@@ -817,7 +827,10 @@ func TestSchedulerGroupLifecycleGroupZeroAndSimpleModeAreNoOps(t *testing.T) {
 }
 
 // aggregatedSupersetAccountRepo 模拟 repo 层 expandPlatformsForAggregatePool 已生效的
-// 分组主查询：聚合族平台（如 deepseek）的分组候选池本就直接含 codebuddy 账号；
+// aggregatedSupersetAccountRepo 模拟聚合分组候选超集：
+// 分组主查询（ListSchedulableByGroupIDAndPlatform(s)）在聚合族平台（如 deepseek）上按
+// enabled 开关决定是否并入 codebuddy 账号——enabled 模拟 groups 行
+// aggregate_codebuddy_enabled 的权威值（B2-B 翻转用例借其切换，无需新建 groupRepo/DB stub）；
 // ungrouped/simple 查询不经过该扩展，原生平台与 codebuddy 各自独立返回。
 type aggregatedSupersetAccountRepo struct {
 	AccountRepository
@@ -825,20 +838,44 @@ type aggregatedSupersetAccountRepo struct {
 	mu            sync.Mutex
 	groupQueries  []string
 	ungroupedCode int
+	enabled       bool
 }
 
-func (r *aggregatedSupersetAccountRepo) ListSchedulableByGroupIDAndPlatform(_ context.Context, _ int64, platform string) ([]Account, error) {
+// setEnabled 切换聚合直绑开关的权威值（模拟 groups 行 aggregate_codebuddy_enabled 翻转）。
+func (r *aggregatedSupersetAccountRepo) setEnabled(enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enabled = enabled
+}
+
+// groupQuery 执行分组主查询，按 enabled 决定是否并入 codebuddy（与 repo 层
+// expandPlatformsForAggregatePool + queryAccountsByGroup 单点读取语义一致）。
+func (r *aggregatedSupersetAccountRepo) groupQuery(platform string) ([]Account, error) {
 	r.mu.Lock()
 	r.groupQueries = append(r.groupQueries, platform)
+	enabled := r.enabled
 	r.mu.Unlock()
-	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
-		// repo 层候选池已并入 codebuddy（方案 §2.1-3 唯一纳入点）。
+	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy && enabled {
+		// 开关开启：repo 层候选池已并入 codebuddy（方案 §2.1-3 唯一纳入点）。
 		return []Account{
 			{ID: 9101, Platform: platform, Status: StatusActive, Schedulable: true},
 			{ID: 9102, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true},
 		}, nil
 	}
-	return []Account{{ID: 9102, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+	// 开关关闭或平台非聚合族：仅原生平台账号，绝不并入 codebuddy。
+	return []Account{{ID: 9101, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableByGroupIDAndPlatform(_ context.Context, _ int64, platform string) ([]Account, error) {
+	return r.groupQuery(platform)
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableByGroupIDAndPlatforms(_ context.Context, _ int64, platforms []string) ([]Account, error) {
+	platform := "mixed"
+	if len(platforms) > 0 {
+		platform = platforms[0]
+	}
+	return r.groupQuery(platform)
 }
 
 func (r *aggregatedSupersetAccountRepo) ListSchedulableUngroupedByPlatform(_ context.Context, platform string) ([]Account, error) {
@@ -846,6 +883,35 @@ func (r *aggregatedSupersetAccountRepo) ListSchedulableUngroupedByPlatform(_ con
 	defer r.mu.Unlock()
 	if platform == PlatformCodeBuddy {
 		r.ungroupedCode++
+		return []Account{{ID: 9202, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+	}
+	return []Account{{ID: 9201, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableByPlatform(_ context.Context, platform string) ([]Account, error) {
+	if platform == PlatformCodeBuddy {
+		return []Account{{ID: 9202, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+	}
+	return []Account{{ID: 9201, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableByPlatforms(_ context.Context, platforms []string) ([]Account, error) {
+	platform := "mixed"
+	if len(platforms) > 0 {
+		platform = platforms[0]
+	}
+	if platform == PlatformCodeBuddy {
+		return []Account{{ID: 9202, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+	}
+	return []Account{{ID: 9201, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableUngroupedByPlatforms(_ context.Context, platforms []string) ([]Account, error) {
+	platform := "mixed"
+	if len(platforms) > 0 {
+		platform = platforms[0]
+	}
+	if platform == PlatformCodeBuddy {
 		return []Account{{ID: 9202, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
 	}
 	return []Account{{ID: 9201, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
@@ -863,12 +929,15 @@ func (r *aggregatedSupersetAccountRepo) ungroupedCodeBuddyQueries() int {
 	return r.ungroupedCode
 }
 
-// 候选超集单链回归（D-13 / v16 §2.1-3）：groupID>0 聚合桶加载后候选集账号 ID 无重复——
-// repo 层已并入 codebuddy 候选，快照层 withAggregatedCodeBuddy 不得再查询再 append；
-// groupID=0（ungrouped）路径不经 queryAccountsByGroup，快照层补入链必须保留。
+// 候选超集单链回归（D-13 / v16 §2.1-3）+ B2-B 未分组失败关闭：
+// groupID>0 聚合桶加载后候选集账号 ID 无重复——repo 层已并入 codebuddy 候选，
+// 快照层 withAggregatedCodeBuddy 不得再查询再 append；
+// 标准模式未分组桶（groupID=0）失败关闭，不补入 codebuddy（无分组即无绑定授权）；
+// simple 模式未分组桶保持既有补入语义（派发单禁区：不为 simple 新增失败关闭/开关语义）。
 func TestSchedulerAggregatedBucketGroupedCandidatesHaveNoDuplicateAccountIDs(t *testing.T) {
 	t.Run("grouped skips snapshot-layer codebuddy merge", func(t *testing.T) {
 		accounts := &aggregatedSupersetAccountRepo{}
+		accounts.setEnabled(true)
 		svc := newGroupLifecycleTestService(nil, accounts, nil, config.RunModeStandard)
 		bucket := SchedulerBucket{GroupID: 90, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
 
@@ -886,7 +955,7 @@ func TestSchedulerAggregatedBucketGroupedCandidatesHaveNoDuplicateAccountIDs(t *
 			"snapshot layer must not re-query codebuddy for grouped buckets")
 	})
 
-	t.Run("ungrouped keeps snapshot-layer codebuddy merge", func(t *testing.T) {
+	t.Run("ungrouped standard mode fails closed (no codebuddy merge)", func(t *testing.T) {
 		accounts := &aggregatedSupersetAccountRepo{}
 		svc := newGroupLifecycleTestService(nil, accounts, nil, config.RunModeStandard)
 		bucket := SchedulerBucket{GroupID: 0, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
@@ -894,13 +963,284 @@ func TestSchedulerAggregatedBucketGroupedCandidatesHaveNoDuplicateAccountIDs(t *
 		loaded, err := svc.loadAccountsFromDB(context.Background(), bucket, false)
 		require.NoError(t, err)
 
-		seenIDs := make(map[int64]struct{}, len(loaded))
-		for _, account := range loaded {
-			_, dup := seenIDs[account.ID]
-			require.False(t, dup, "duplicate account id %d in ungrouped aggregated bucket", account.ID)
-			seenIDs[account.ID] = struct{}{}
-		}
-		require.Len(t, loaded, 2, "ungrouped path must still merge codebuddy candidates at the snapshot layer")
-		require.Equal(t, 1, accounts.ungroupedCodeBuddyQueries())
+		require.Len(t, loaded, 1, "standard-mode ungrouped bucket must fail closed: no codebuddy merge")
+		require.False(t, hasCodeBuddyAccount(loaded), "standard-mode ungrouped bucket must not contain codebuddy")
+		require.Equal(t, 0, accounts.ungroupedCodeBuddyQueries(),
+			"snapshot layer must not query codebuddy for standard-mode ungrouped buckets")
 	})
+
+	t.Run("ungrouped simple mode keeps codebuddy merge", func(t *testing.T) {
+		accounts := &aggregatedSupersetAccountRepo{}
+		svc := newGroupLifecycleTestService(nil, accounts, nil, config.RunModeSimple)
+		bucket := SchedulerBucket{GroupID: 0, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+
+		loaded, err := svc.loadAccountsFromDB(context.Background(), bucket, false)
+		require.NoError(t, err)
+
+		require.Len(t, loaded, 2, "simple-mode ungrouped bucket must still merge codebuddy candidates")
+		require.True(t, hasCodeBuddyAccount(loaded), "simple-mode ungrouped bucket must contain codebuddy")
+	})
+}
+
+// hasCodeBuddyAccount 报告候选集中是否含 codebuddy 平台账号。
+func hasCodeBuddyAccount(accounts []Account) bool {
+	for _, account := range accounts {
+		if account.Platform == PlatformCodeBuddy {
+			return true
+		}
+	}
+	return false
+}
+
+// accountIDPlatforms 返回账号集的 id:platform 快照，用于比较两次重建结果是否逐位一致。
+func accountIDPlatforms(accounts []Account) []string {
+	out := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		out = append(out, fmt.Sprintf("%d:%s", account.ID, account.Platform))
+	}
+	return out
+}
+
+// ============================================================================
+// B2-B 第 2/3 条 + §5 矩阵：聚合直绑开关翻转、收敛、三维状态矩阵补缺
+// ============================================================================
+//
+// 行 2 消费点登记（禁用优先于在途）——随 diff 落盘，外审 F3：
+// 账号状态权威链上"实际发送路径"各消费点，逐一核对是否消费 schedulable 状态：
+//   ① 快照已加载候选 → 选号结果：openai_account_scheduler.go:1646
+//      `if !account.IsSchedulable() { filterStats.exclude("not_schedulable"); continue }`
+//      —— 快照仅存候选超集，每次选号实时重判 IsSchedulable，禁用账号不会被选中。
+//   ② 选号结果/租约（粘性会话）：openai_account_scheduler.go:718
+//      `... || !account.IsSchedulable()` → clearBinding() 立即清除已建立的粘性绑定。
+//      既有用例钉死：TestShouldClearStickySession「schedulable false → want:true（清除）」。
+//   ③ 转发执行前校验：openai_gateway_scheduling.go:400（IsSchedulableForModelWithContext）
+//      / gateway_service.go:562（account.IsSchedulable()）—— 转发前再次否决禁用账号。
+//   ④ 续租：账号调度无独立"在途续租"路径持有已禁用账号；租约串行化仅用于分组生命周期
+//      重建（TryAcquireGroupLifecycleLease，scheduler_snapshot_service.go:766），
+//      不延长已禁用账号的使用窗口——非缺陷，属既有设计边界。
+//   ⑤ 重试换号：重试回退到选号路径（①②③ 同一重判），按"新请求"重新过滤，
+//      不复用已被禁用的已选账号。
+// 结论：5 个消费点中 ①②③⑤ 均实时消费 IsSchedulable（Account.IsSchedulable 以
+// IsActive()&&Schedulable 为真），④ 无独立在途持有路径；未发现"某消费点确实未消费
+// schedulable"的真实缺陷，故不触发 BLOCKED。下列 TestSchedulerGroupAggregateMatrixRow2*
+// 以可运行断言钉死底层不变量。
+
+// TestSchedulerGroupAggregateMatrixRow2DisablePreemptsInflight 钉死行 2 的底层不变量：
+// schedulable=false 的账号 IsSchedulable() 必为 false，使上述 ①②③⑤ 全部消费点正确
+// 排除（禁用优先于在途）。具体 sticky 清除已由 TestShouldClearStickySession 钉死。
+func TestSchedulerGroupAggregateMatrixRow2DisablePreemptsInflight(t *testing.T) {
+	disabled := &Account{ID: 1, Status: StatusActive, Schedulable: false}
+	require.False(t, disabled.IsSchedulable(), "schedulable=false 必须使 IsSchedulable()=false（禁用优先于在途的底层不变量）")
+	inactive := &Account{ID: 2, Status: StatusDisabled, Schedulable: true}
+	require.False(t, inactive.IsSchedulable(), "Status=disabled 必须使 IsSchedulable()=false")
+	healthy := &Account{ID: 3, Status: StatusActive, Schedulable: true}
+	require.True(t, healthy.IsSchedulable(), "active 且 schedulable 的账号必须可调度")
+}
+
+// capturingSnapshotCache 在既有 groupLifecycleTestCache 基建之上捕获每次 SetSnapshot
+// 写入的账号集，供翻转/收敛用例断言"重建结果"等于权威开关值（B2-B 第 2/3 条）。
+type capturingSnapshotCache struct {
+	*groupLifecycleTestCache
+	mu        sync.Mutex
+	snapshots map[string][]Account
+}
+
+func (c *capturingSnapshotCache) SetSnapshot(ctx context.Context, bucket SchedulerBucket, token SchedulerBucketWriteToken, accounts []Account) error {
+	c.mu.Lock()
+	if c.snapshots == nil {
+		c.snapshots = make(map[string][]Account)
+	}
+	c.snapshots[bucket.String()] = append([]Account(nil), accounts...)
+	c.mu.Unlock()
+	return c.groupLifecycleTestCache.SetSnapshot(ctx, bucket, token, accounts)
+}
+
+func (c *capturingSnapshotCache) snapshotFor(bucket SchedulerBucket) []Account {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]Account(nil), c.snapshots[bucket.String()]...)
+}
+
+// B2-B 第 2 条：开关翻转（开→关）后 handleGroupEvent 重建该分组桶，重建结果不含 codebuddy。
+func TestSchedulerGroupAggregateSwitchFlipOnToOff(t *testing.T) {
+	const groupID int64 = 7101
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	accounts.setEnabled(true)
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "switch ON: rebuilt grouped aggregated bucket must contain codebuddy")
+
+	accounts.setEnabled(false)
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "switch OFF after flip: rebuilt grouped aggregated bucket must NOT contain codebuddy")
+}
+
+// B2-B 第 2 条：开关翻转（关→开）反向。
+func TestSchedulerGroupAggregateSwitchFlipOffToOn(t *testing.T) {
+	const groupID int64 = 7102
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	accounts.setEnabled(false)
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "switch OFF: rebuilt grouped aggregated bucket must NOT contain codebuddy")
+
+	accounts.setEnabled(true)
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "switch ON after flip: rebuilt grouped aggregated bucket must contain codebuddy")
+}
+
+// B2-B 第 3 条：翻转收敛。覆盖融合方案 §5 钉死的并发启停必测 + 连续翻转 + 事件延迟/乱序。
+// 断言：每次重建在"执行时刻"实时读权威（accounts.enabled 即 groups 行开关，无缓存旁路），
+// 最终桶状态恒等于最后设置的权威值。
+func TestSchedulerGroupAggregateSwitchConvergence(t *testing.T) {
+	const groupID int64 = 7201
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+	drive := func(enabled bool) {
+		accounts.setEnabled(enabled)
+		// 每次事件独立 seen，模拟不同 outbox 事件独立消费（无 dedup 短路）。
+		require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	}
+
+	t.Run("continuous on->off->on converges to authority", func(t *testing.T) {
+		drive(true)
+		require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "after ON: bucket must contain codebuddy")
+		drive(false)
+		require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "after OFF: bucket must NOT contain codebuddy")
+		drive(true)
+		require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "after ON again: bucket must converge back to codebuddy")
+	})
+
+	t.Run("concurrent off+on converges to last authority", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			accounts.setEnabled(false)
+			_ = svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{}))
+		}()
+		go func() {
+			defer wg.Done()
+			accounts.setEnabled(true)
+			_ = svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{}))
+		}()
+		wg.Wait()
+		// 租约串行化重建；最后权威值设为 ON 再驱动一次以确定态。
+		drive(true)
+		require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "concurrent flip: final authority ON => bucket contains codebuddy")
+		require.Equal(t, []string{"9101:" + PlatformDeepseek, "9102:" + PlatformCodeBuddy}, accountIDPlatforms(cache.snapshotFor(bucket)))
+	})
+
+	t.Run("out-of-order delivery converges to last authority", func(t *testing.T) {
+		// ON 事件先到，OFF 事件最后到达（OFF 为最终权威）。
+		accounts.setEnabled(true)
+		require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+		require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "first ON event: bucket contains codebuddy")
+		accounts.setEnabled(false)
+		require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+		require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "out-of-order last authority OFF => bucket must NOT contain codebuddy")
+	})
+}
+
+// B2-B 第 1.3 条：翻转不影响 codebuddy 自有分组与非聚合分组桶（方案 §1.3 收敛语义附则）。
+func TestSchedulerGroupAggregateSwitchFlipDoesNotAffectOtherBuckets(t *testing.T) {
+	const groupID int64 = 7501
+	accounts := &aggregatedSupersetAccountRepo{}
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	codeBuddyOwn := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformCodeBuddy), Mode: SchedulerModeSingle}
+	openAIBucket := SchedulerBucket{GroupID: groupID, Platform: PlatformOpenAI, Mode: SchedulerModeSingle}
+
+	accounts.setEnabled(true)
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	beforeCodeBuddyOwn := accountIDPlatforms(cache.snapshotFor(codeBuddyOwn))
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(openAIBucket)), "non-aggregate (openai) bucket must not gain codebuddy")
+
+	accounts.setEnabled(false)
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	// codebuddy 自有分组桶内容翻转前后逐位一致（开关不波及）。
+	require.Equal(t, beforeCodeBuddyOwn, accountIDPlatforms(cache.snapshotFor(codeBuddyOwn)),
+		"codebuddy own group bucket must be unaffected by the aggregate switch flip")
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(openAIBucket)), "non-aggregate (openai) bucket still unaffected after flip")
+}
+
+// §5 矩阵行 3：聚合绑定关闭 × 新请求 → 原生路径（不含 codebuddy）。
+func TestSchedulerGroupAggregateMatrixRow3BindingOffNewRequestNativePath(t *testing.T) {
+	const groupID int64 = 7301
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	accounts.setEnabled(false) // 绑定关闭
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	loaded := cache.snapshotFor(bucket)
+	require.NotEmpty(t, loaded, "binding OFF × new request must still populate the grouped bucket via native path")
+	require.False(t, hasCodeBuddyAccount(loaded), "binding OFF × new request must follow native path (no codebuddy)")
+}
+
+// §5 矩阵行 4：聚合绑定关闭 × 已建立请求 → 放行完成、不中途改道。
+// 快照已加载集合（开关开启时构建、含 codebuddy）不因翻转被回收，直到下一次重建。
+func TestSchedulerGroupAggregateMatrixRow4BindingOffEstablishedRequestNotRerouted(t *testing.T) {
+	const groupID int64 = 7401
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	accounts.setEnabled(true) // 开关开启时构建桶（已建立请求，含 codebuddy）
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "established bucket (switch ON) contains codebuddy")
+
+	// 翻转关闭，但"不触发重建"——已建立的快照集合必须保留（不中途改道）。
+	accounts.setEnabled(false)
+	require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)),
+		"flipping OFF without rebuild must NOT reclaim the already-established bucket (no mid-flight reroute)")
+
+	// 直到下一次重建（handleGroupEvent）才反映新开关值。
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)),
+		"next rebuild after flip reflects the new switch value")
+}
+
+// §5 矩阵行 5：重试换号按"新请求"重新过滤。
+// 翻转使分组候选集被重建为最新权威值；重试换号回退到选号路径时，按新请求重新加载候选
+// 超集，不再持有已被关闭的 codebuddy 候选（与 ①②③⑤ 同一重判，无独立缓存旁路）。
+func TestSchedulerGroupAggregateMatrixRow5RetryReselectFiltersFresh(t *testing.T) {
+	const groupID int64 = 7601
+	bucket := SchedulerBucket{GroupID: groupID, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+	accounts := &aggregatedSupersetAccountRepo{}
+	accounts.setEnabled(true)
+	cache := &capturingSnapshotCache{groupLifecycleTestCache: newGroupLifecycleTestCache()}
+	groups := &groupLifecycleTestGroupRepo{group: &Group{ID: groupID, Platform: PlatformDeepseek, Status: StatusActive, Hydrated: true}}
+	svc := newGroupLifecycleTestService(cache, accounts, groups, config.RunModeStandard)
+
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.True(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "precondition: switch ON built a codebuddy-containing bucket")
+
+	// 翻转关闭并重建（模拟在途请求失败、触发换号重试前分组配置已更新）。
+	accounts.setEnabled(false)
+	require.NoError(t, svc.handleGroupEvent(context.Background(), ptrInt64(groupID), make(map[batchSeenKey]struct{})))
+	require.False(t, hasCodeBuddyAccount(cache.snapshotFor(bucket)), "rebuild after flip removed codebuddy from the candidate superset")
+
+	// 重试换号按"新请求"重新加载候选集——必须反映最新权威值（不含 codebuddy），
+	// 不复用翻转前已加载的旧候选。
+	fresh, err := svc.loadAccountsFromDB(context.Background(), bucket, false)
+	require.NoError(t, err)
+	require.False(t, hasCodeBuddyAccount(fresh), "retry reselection must re-filter by the fresh authority (no stale codebuddy)")
 }

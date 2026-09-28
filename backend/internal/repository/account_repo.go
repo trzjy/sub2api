@@ -3317,11 +3317,15 @@ var aggregatePlatformFamily = map[string]struct{}{
 // expandPlatformsForAggregatePool 对聚合族分组，在原有平台集合基础上并入
 // codebuddy 平台，使候选池额外包含可调度 codebuddy 账号；非聚合平台集合逐位
 // 不变。若 codebuddy 已在集合中则不重复并入（codebuddy 自有分组行为不变）。
+// enabled=false 时不并入 codebuddy（聚合直绑开关关闭——方案 §1.2）；
 // 该函数仅扩展"平台集合"，不涉及 schedulable/状态/瞬态过滤，后者由
 // queryAccountsByGroup 既有谓词保证（schedulable=false 的 codebuddy 任何分组都
 // 不可见）。
-func expandPlatformsForAggregatePool(platforms []string) []string {
+func expandPlatformsForAggregatePool(platforms []string, enabled bool) []string {
 	if len(platforms) == 0 {
+		return platforms
+	}
+	if !enabled {
 		return platforms
 	}
 	needCodeBuddy := false
@@ -3343,6 +3347,18 @@ func expandPlatformsForAggregatePool(platforms []string) []string {
 	return out
 }
 
+// intersectsAggregateFamily 判断给定平台集合是否与聚合族相交。
+// 仅当相交时 queryAccountsByGroup 才需要读取 groups 行的 aggregate_codebuddy_enabled
+// 开关；非聚合族平台集合零额外读取、行为逐位不变（方案 §1.2）。
+func intersectsAggregateFamily(platforms []string) bool {
+	for _, p := range platforms {
+		if _, ok := aggregatePlatformFamily[p]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID int64, opts accountGroupQueryOptions) ([]service.Account, error) {
 	q := r.client.AccountGroup.Query().
 		Where(dbaccountgroup.GroupIDEQ(groupID))
@@ -3354,9 +3370,19 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 		preds = append(preds, dbaccount.StatusEQ(opts.status))
 	}
 	if len(opts.platforms) > 0 {
-		// 方案 §2.1-1：聚合族分组（国产 OpenAI 兼容族）的候选池额外纳入
-		// platform=codebuddy 的可调度账号；非聚合分组逐位不变。
-		preds = append(preds, dbaccount.PlatformIn(expandPlatformsForAggregatePool(opts.platforms)...))
+		platforms := opts.platforms
+		// 方案 §1.2：当 platforms 与聚合族相交时，同一查询边界内按 PK 读取 groups 行
+		// 取 aggregate_codebuddy_enabled，据此决定是否并入 codebuddy；非聚合族平台集合
+		// 零额外读取、行为逐位不变。读取失败 → 查询报错失败关闭，不静默取默认。
+		// 未分组（groupID<=0，如标准模式未分组桶）无绑定授权，不补入 codebuddy。
+		if groupID > 0 && intersectsAggregateFamily(opts.platforms) {
+			grp, gerr := r.client.Group.Get(ctx, groupID)
+			if gerr != nil {
+				return nil, fmt.Errorf("queryAccountsByGroup: read aggregate_codebuddy_enabled for group %d: %w", groupID, gerr)
+			}
+			platforms = expandPlatformsForAggregatePool(opts.platforms, grp.AggregateCodebuddyEnabled)
+		}
+		preds = append(preds, dbaccount.PlatformIn(platforms...))
 	}
 	if opts.schedulable {
 		preds = append(preds, dbaccount.SchedulableEQ(true))

@@ -23088,6 +23088,7 @@ type GroupMutation struct {
 	free_openai_fast                        *bool
 	require_oauth_only                      *bool
 	require_privacy_set                     *bool
+	aggregate_codebuddy_enabled             *bool
 	default_mapped_model                    *string
 	messages_dispatch_model_config          *domain.OpenAIMessagesDispatchModelConfig
 	model_allowlist                         *domain.GroupModelAllowlist
@@ -26023,6 +26024,42 @@ func (m *GroupMutation) ResetRequirePrivacySet() {
 	m.require_privacy_set = nil
 }
 
+// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
+func (m *GroupMutation) SetAggregateCodebuddyEnabled(b bool) {
+	m.aggregate_codebuddy_enabled = &b
+}
+
+// AggregateCodebuddyEnabled returns the value of the "aggregate_codebuddy_enabled" field in the mutation.
+func (m *GroupMutation) AggregateCodebuddyEnabled() (r bool, exists bool) {
+	v := m.aggregate_codebuddy_enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAggregateCodebuddyEnabled returns the old "aggregate_codebuddy_enabled" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldAggregateCodebuddyEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAggregateCodebuddyEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAggregateCodebuddyEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAggregateCodebuddyEnabled: %w", err)
+	}
+	return oldValue.AggregateCodebuddyEnabled, nil
+}
+
+// ResetAggregateCodebuddyEnabled resets all changes to the "aggregate_codebuddy_enabled" field.
+func (m *GroupMutation) ResetAggregateCodebuddyEnabled() {
+	m.aggregate_codebuddy_enabled = nil
+}
+
 // SetDefaultMappedModel sets the "default_mapped_model" field.
 func (m *GroupMutation) SetDefaultMappedModel(s string) {
 	m.default_mapped_model = &s
@@ -26962,7 +26999,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 67)
+	fields := make([]string, 0, 68)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -27128,6 +27165,9 @@ func (m *GroupMutation) Fields() []string {
 	if m.require_privacy_set != nil {
 		fields = append(fields, group.FieldRequirePrivacySet)
 	}
+	if m.aggregate_codebuddy_enabled != nil {
+		fields = append(fields, group.FieldAggregateCodebuddyEnabled)
+	}
 	if m.default_mapped_model != nil {
 		fields = append(fields, group.FieldDefaultMappedModel)
 	}
@@ -27282,6 +27322,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.RequireOauthOnly()
 	case group.FieldRequirePrivacySet:
 		return m.RequirePrivacySet()
+	case group.FieldAggregateCodebuddyEnabled:
+		return m.AggregateCodebuddyEnabled()
 	case group.FieldDefaultMappedModel:
 		return m.DefaultMappedModel()
 	case group.FieldMessagesDispatchModelConfig:
@@ -27425,6 +27467,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRequireOauthOnly(ctx)
 	case group.FieldRequirePrivacySet:
 		return m.OldRequirePrivacySet(ctx)
+	case group.FieldAggregateCodebuddyEnabled:
+		return m.OldAggregateCodebuddyEnabled(ctx)
 	case group.FieldDefaultMappedModel:
 		return m.OldDefaultMappedModel(ctx)
 	case group.FieldMessagesDispatchModelConfig:
@@ -27842,6 +27886,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRequirePrivacySet(v)
+		return nil
+	case group.FieldAggregateCodebuddyEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAggregateCodebuddyEnabled(v)
 		return nil
 	case group.FieldDefaultMappedModel:
 		v, ok := value.(string)
@@ -28614,6 +28665,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldRequirePrivacySet:
 		m.ResetRequirePrivacySet()
+		return nil
+	case group.FieldAggregateCodebuddyEnabled:
+		m.ResetAggregateCodebuddyEnabled()
 		return nil
 	case group.FieldDefaultMappedModel:
 		m.ResetDefaultMappedModel()

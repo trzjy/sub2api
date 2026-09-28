@@ -387,6 +387,7 @@ func TestAPIContracts(t *testing.T) {
 						"claude_code_only": false,
 					"concurrency": 0,
 						"allow_messages_dispatch": false,
+						"aggregate_codebuddy_enabled": false,
 						"allow_live": false,
 						"fallback_group_id": null,
 						"fallback_group_id_on_invalid_request": null,

@@ -310,6 +310,11 @@ func RequirePrivacySet(v bool) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldRequirePrivacySet, v))
 }
 
+// AggregateCodebuddyEnabled applies equality check predicate on the "aggregate_codebuddy_enabled" field. It's identical to AggregateCodebuddyEnabledEQ.
+func AggregateCodebuddyEnabled(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldAggregateCodebuddyEnabled, v))
+}
+
 // DefaultMappedModel applies equality check predicate on the "default_mapped_model" field. It's identical to DefaultMappedModelEQ.
 func DefaultMappedModel(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldDefaultMappedModel, v))
@@ -2328,6 +2333,16 @@ func RequirePrivacySetEQ(v bool) predicate.Group {
 // RequirePrivacySetNEQ applies the NEQ predicate on the "require_privacy_set" field.
 func RequirePrivacySetNEQ(v bool) predicate.Group {
 	return predicate.Group(sql.FieldNEQ(FieldRequirePrivacySet, v))
+}
+
+// AggregateCodebuddyEnabledEQ applies the EQ predicate on the "aggregate_codebuddy_enabled" field.
+func AggregateCodebuddyEnabledEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldAggregateCodebuddyEnabled, v))
+}
+
+// AggregateCodebuddyEnabledNEQ applies the NEQ predicate on the "aggregate_codebuddy_enabled" field.
+func AggregateCodebuddyEnabledNEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldAggregateCodebuddyEnabled, v))
 }
 
 // DefaultMappedModelEQ applies the EQ predicate on the "default_mapped_model" field.

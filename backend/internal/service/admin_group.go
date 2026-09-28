@@ -449,6 +449,37 @@ func sanitizeGroupOpenAIFast(group *Group) {
 	}
 }
 
+// aggregateBindingFamily 是聚合直绑（聚合族分组候选池并入 codebuddy）支持的平台集合。
+// 它必须与 repository.aggregatePlatformFamily（account_repo.go）逐字一致：两处都是该集合的
+// 唯一事实源，任何一侧改动须同步另一侧，并由测试钉死（见 admin_group_aggregate_test.go 与
+// account_repo_aggregate_pool_test.go）。产生第二套语义漂移空间是禁止的。
+var aggregateBindingFamily = map[string]struct{}{
+	PlatformDeepseek:  {},
+	PlatformZhipu:     {},
+	PlatformKimi:      {},
+	PlatformMiniMax:   {},
+	PlatformOther:     {},
+	PlatformCodeBuddy: {},
+}
+
+// aggregateBindingSupported 判断平台是否属于聚合直绑族（可置 aggregate_codebuddy_enabled=true）。
+// 平台权威 = 分组自身的 Platform 字段；非聚合族平台置 true 由 CreateGroup/UpdateGroup 拒绝（400）。
+func aggregateBindingSupported(platform string) bool {
+	_, ok := aggregateBindingFamily[platform]
+	return ok
+}
+
+// validateAggregateBinding 是聚合直绑开关的唯一校验收口（创建/更新共用）：
+// 仅聚合族平台（aggregateBindingFamily）可置 enabled=true；非聚合族平台置 true 返回
+// 400 AGGREGATE_BINDING_NOT_SUPPORTED。platform 必须是归一化/合并后的分组权威平台。
+func validateAggregateBinding(platform string, enabled bool) error {
+	if enabled && !aggregateBindingSupported(platform) {
+		return infraerrors.New(http.StatusBadRequest, "AGGREGATE_BINDING_NOT_SUPPORTED",
+			"aggregate_codebuddy_enabled can only be enabled for aggregate-family platforms (deepseek/zhipu/kimi/minimax/other/codebuddy)")
+	}
+	return nil
+}
+
 func normalizeCreateGroupInputForSimpleMode(input *CreateGroupInput) {
 	if input == nil {
 		return
@@ -580,6 +611,11 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		return nil, err
 	}
 
+	// 聚合直绑开关：以归一化后的输入平台为唯一权威；仅聚合族平台可置 true，否则 400。
+	if err := validateAggregateBinding(platform, input.AggregateCodeBuddyEnabled); err != nil {
+		return nil, err
+	}
+
 	// 校验降级分组
 	if input.FallbackGroupID != nil {
 		if err := s.validateFallbackGroup(ctx, 0, *input.FallbackGroupID); err != nil {
@@ -672,6 +708,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		ProfitControlEnabled:            profitControlEnabled,
 		ProfitMinMargin:                 profitMinMargin,
 		ProfitSafetyBuffer:              profitSafetyBuffer,
+		AggregateCodeBuddyEnabled:       input.AggregateCodeBuddyEnabled,
 		ImagePrice1K:                    imagePrice1K,
 		ImagePrice2K:                    imagePrice2K,
 		ImagePrice4K:                    imagePrice4K,
@@ -979,6 +1016,13 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	if err := ValidateProfitControlConfig(group.Platform, group.ProfitControlEnabled, group.ProfitMinMargin, group.ProfitSafetyBuffer); err != nil {
 		return nil, err
 	}
+
+	// 聚合直绑开关：以合并后的分组平台（group.Platform）为唯一权威；仅聚合族平台可置 true，否则 400。
+	if input.AggregateCodeBuddyEnabled != nil {
+		if err := validateAggregateBinding(group.Platform, *input.AggregateCodeBuddyEnabled); err != nil {
+			return nil, err
+		}
+	}
 	if input.ImagePrice1K != nil {
 		group.ImagePrice1K = normalizePrice(input.ImagePrice1K)
 	}
@@ -1125,6 +1169,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			return nil, infraerrors.Newf(http.StatusBadRequest, "INVALID_REASONING_EFFORT_MAPPING", "%v", err)
 		}
 		group.ReasoningEffortMappings = reasoningEffortMappings
+	}
+	if input.AggregateCodeBuddyEnabled != nil {
+		group.AggregateCodeBuddyEnabled = *input.AggregateCodeBuddyEnabled
 	}
 	sanitizeGroupMessagesDispatchFields(group)
 	sanitizeGroupOpenAIFast(group)

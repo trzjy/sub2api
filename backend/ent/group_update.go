@@ -1046,6 +1046,20 @@ func (_u *GroupUpdate) SetNillableRequirePrivacySet(v *bool) *GroupUpdate {
 	return _u
 }
 
+// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
+func (_u *GroupUpdate) SetAggregateCodebuddyEnabled(v bool) *GroupUpdate {
+	_u.mutation.SetAggregateCodebuddyEnabled(v)
+	return _u
+}
+
+// SetNillableAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableAggregateCodebuddyEnabled(v *bool) *GroupUpdate {
+	if v != nil {
+		_u.SetAggregateCodebuddyEnabled(*v)
+	}
+	return _u
+}
+
 // SetDefaultMappedModel sets the "default_mapped_model" field.
 func (_u *GroupUpdate) SetDefaultMappedModel(v string) *GroupUpdate {
 	_u.mutation.SetDefaultMappedModel(v)
@@ -1927,6 +1941,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.RequirePrivacySet(); ok {
 		_spec.SetField(group.FieldRequirePrivacySet, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AggregateCodebuddyEnabled(); ok {
+		_spec.SetField(group.FieldAggregateCodebuddyEnabled, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.DefaultMappedModel(); ok {
 		_spec.SetField(group.FieldDefaultMappedModel, field.TypeString, value)
@@ -3348,6 +3365,20 @@ func (_u *GroupUpdateOne) SetNillableRequirePrivacySet(v *bool) *GroupUpdateOne 
 	return _u
 }
 
+// SetAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field.
+func (_u *GroupUpdateOne) SetAggregateCodebuddyEnabled(v bool) *GroupUpdateOne {
+	_u.mutation.SetAggregateCodebuddyEnabled(v)
+	return _u
+}
+
+// SetNillableAggregateCodebuddyEnabled sets the "aggregate_codebuddy_enabled" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableAggregateCodebuddyEnabled(v *bool) *GroupUpdateOne {
+	if v != nil {
+		_u.SetAggregateCodebuddyEnabled(*v)
+	}
+	return _u
+}
+
 // SetDefaultMappedModel sets the "default_mapped_model" field.
 func (_u *GroupUpdateOne) SetDefaultMappedModel(v string) *GroupUpdateOne {
 	_u.mutation.SetDefaultMappedModel(v)
@@ -4259,6 +4290,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.RequirePrivacySet(); ok {
 		_spec.SetField(group.FieldRequirePrivacySet, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AggregateCodebuddyEnabled(); ok {
+		_spec.SetField(group.FieldAggregateCodebuddyEnabled, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.DefaultMappedModel(); ok {
 		_spec.SetField(group.FieldDefaultMappedModel, field.TypeString, value)

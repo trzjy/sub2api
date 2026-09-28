@@ -1586,9 +1586,13 @@ func (s *SchedulerSnapshotService) withAggregatedCodeBuddy(ctx context.Context, 
 	var extra []Account
 	var err error
 	if s.isRunModeSimple() {
+		// simple 模式无分组概念，绑定无法表达；保持既有补入语义（派发单禁区：
+		// 不为 simple 模式新增失败关闭/开关语义——无权威依据，过度设计）。
 		extra, err = s.accountRepo.ListSchedulableByPlatform(ctx, PlatformCodeBuddy)
 	} else {
-		extra, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, PlatformCodeBuddy)
+		// 标准模式未分组桶（groupID=0）：无分组即无绑定授权，失败关闭，不补入 codebuddy。
+		// 该分支是 withAggregatedCodeBuddy 唯一允许的本卡生产改动（派发单 B2-B 第 1 条）。
+		return accounts, nil
 	}
 	if err != nil {
 		return nil, err
