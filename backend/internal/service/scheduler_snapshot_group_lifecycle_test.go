@@ -328,12 +328,11 @@ func expectedGroupLifecycleBuckets(groupID int64) []SchedulerBucket {
 	return schedulerCanonicalBuckets(groupID)
 }
 
-// schedulerCanonicalAccountQueryCount 返回单活跃分组一次 canonical full rebuild
-// 触发的账号仓库查询数（按 groupID+platform 去重后）。除每平台自身查询与
-// anthropic/gemini 的 mixed 额外查询外，§2.1-3 聚合契约要求聚合族平台
-// （deepseek/zhipu/kimi/minimax/other）在重建其 bucket 时一并查询 codebuddy
-// 候选池（codebuddy 账号作为国产模型候选纳入），故每个聚合族平台额外 +1。
-// 复用生产契约判定 isCodeBuddyAggregatedPlatform，禁止硬编码聚合族集合或 @agg 字面量。
+// schedulerCanonicalAccountQueryCount 返回单活跃分组（groupID>0）一次 canonical full
+// rebuild 触发的账号仓库查询数（按 groupID+platform 去重后）：每平台自身查询 +
+// anthropic/gemini 的 mixed 额外查询。候选超集单链（v16 §2.1-3）：分组主查询已经 repo 层
+// expandPlatformsForAggregatePool 并入 codebuddy 候选，快照层不再补入（D-13 修复重复合并），
+// 故聚合族平台不再有 +1。
 func schedulerCanonicalAccountQueryCount() int {
 	count := 0
 	for _, platform := range schedulerSnapshotPlatforms() {
@@ -341,6 +340,18 @@ func schedulerCanonicalAccountQueryCount() int {
 		if platform == PlatformAnthropic || platform == PlatformGemini {
 			count++
 		}
+	}
+	return count
+}
+
+// schedulerCanonicalGroupZeroAccountQueryCount 返回 group0 canonical rebuild（standard
+// 未分组 / simple 模式）的账号仓库查询数。ungrouped/simple 查询不经过
+// queryAccountsByGroup，快照层 withAggregatedCodeBuddy 是 codebuddy 候选的唯一补入链
+// （v16 §2.1-3），故聚合族平台（deepseek/zhipu/kimi/minimax/other）各 +1。
+// 复用生产契约判定 isCodeBuddyAggregatedPlatform，禁止硬编码聚合族集合或 @agg 字面量。
+func schedulerCanonicalGroupZeroAccountQueryCount() int {
+	count := schedulerCanonicalAccountQueryCount()
+	for _, platform := range schedulerSnapshotPlatforms() {
 		if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
 			count++
 		}
@@ -803,4 +814,93 @@ func TestSchedulerGroupLifecycleGroupZeroAndSimpleModeAreNoOps(t *testing.T) {
 	require.Zero(t, listCalls)
 	require.Zero(t, groups.callCount())
 	require.Zero(t, accounts.callCount())
+}
+
+// aggregatedSupersetAccountRepo 模拟 repo 层 expandPlatformsForAggregatePool 已生效的
+// 分组主查询：聚合族平台（如 deepseek）的分组候选池本就直接含 codebuddy 账号；
+// ungrouped/simple 查询不经过该扩展，原生平台与 codebuddy 各自独立返回。
+type aggregatedSupersetAccountRepo struct {
+	AccountRepository
+
+	mu            sync.Mutex
+	groupQueries  []string
+	ungroupedCode int
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableByGroupIDAndPlatform(_ context.Context, _ int64, platform string) ([]Account, error) {
+	r.mu.Lock()
+	r.groupQueries = append(r.groupQueries, platform)
+	r.mu.Unlock()
+	if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
+		// repo 层候选池已并入 codebuddy（方案 §2.1-3 唯一纳入点）。
+		return []Account{
+			{ID: 9101, Platform: platform, Status: StatusActive, Schedulable: true},
+			{ID: 9102, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true},
+		}, nil
+	}
+	return []Account{{ID: 9102, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) ListSchedulableUngroupedByPlatform(_ context.Context, platform string) ([]Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if platform == PlatformCodeBuddy {
+		r.ungroupedCode++
+		return []Account{{ID: 9202, Platform: PlatformCodeBuddy, Status: StatusActive, Schedulable: true}}, nil
+	}
+	return []Account{{ID: 9201, Platform: platform, Status: StatusActive, Schedulable: true}}, nil
+}
+
+func (r *aggregatedSupersetAccountRepo) groupQueryPlatforms() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.groupQueries...)
+}
+
+func (r *aggregatedSupersetAccountRepo) ungroupedCodeBuddyQueries() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ungroupedCode
+}
+
+// 候选超集单链回归（D-13 / v16 §2.1-3）：groupID>0 聚合桶加载后候选集账号 ID 无重复——
+// repo 层已并入 codebuddy 候选，快照层 withAggregatedCodeBuddy 不得再查询再 append；
+// groupID=0（ungrouped）路径不经 queryAccountsByGroup，快照层补入链必须保留。
+func TestSchedulerAggregatedBucketGroupedCandidatesHaveNoDuplicateAccountIDs(t *testing.T) {
+	t.Run("grouped skips snapshot-layer codebuddy merge", func(t *testing.T) {
+		accounts := &aggregatedSupersetAccountRepo{}
+		svc := newGroupLifecycleTestService(nil, accounts, nil, config.RunModeStandard)
+		bucket := SchedulerBucket{GroupID: 90, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+
+		loaded, err := svc.loadAccountsFromDB(context.Background(), bucket, false)
+		require.NoError(t, err)
+
+		seenIDs := make(map[int64]struct{}, len(loaded))
+		for _, account := range loaded {
+			_, dup := seenIDs[account.ID]
+			require.False(t, dup, "duplicate account id %d in grouped aggregated bucket", account.ID)
+			seenIDs[account.ID] = struct{}{}
+		}
+		require.Len(t, loaded, 2)
+		require.Equal(t, []string{PlatformDeepseek}, accounts.groupQueryPlatforms(),
+			"snapshot layer must not re-query codebuddy for grouped buckets")
+	})
+
+	t.Run("ungrouped keeps snapshot-layer codebuddy merge", func(t *testing.T) {
+		accounts := &aggregatedSupersetAccountRepo{}
+		svc := newGroupLifecycleTestService(nil, accounts, nil, config.RunModeStandard)
+		bucket := SchedulerBucket{GroupID: 0, Platform: schedulerAggregationBucketPlatform(PlatformDeepseek), Mode: SchedulerModeSingle}
+
+		loaded, err := svc.loadAccountsFromDB(context.Background(), bucket, false)
+		require.NoError(t, err)
+
+		seenIDs := make(map[int64]struct{}, len(loaded))
+		for _, account := range loaded {
+			_, dup := seenIDs[account.ID]
+			require.False(t, dup, "duplicate account id %d in ungrouped aggregated bucket", account.ID)
+			seenIDs[account.ID] = struct{}{}
+		}
+		require.Len(t, loaded, 2, "ungrouped path must still merge codebuddy candidates at the snapshot layer")
+		require.Equal(t, 1, accounts.ungroupedCodeBuddyQueries())
+	})
 }
