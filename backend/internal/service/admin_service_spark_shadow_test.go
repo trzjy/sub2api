@@ -1032,11 +1032,16 @@ func TestForceOpenAIPrivacy_SkipsShadow(t *testing.T) {
 	require.Equal(t, "", svc.ForceOpenAIPrivacy(context.Background(), shadow), "影子隐私设置应跳过")
 }
 
-// TestCreateShadowCodeBuddyAutoModelMapping 端到端验证 CreateShadow 对 codebuddy 影子
-// 自动写入 model_mapping（2026-09-22 用户拍板，语义修正）：仅 identity 白名单
-// {shadow_model: shadow_model}，下游只认 shadow_model 一个名字；官方名别名路径废弃。
-// 纯函数单测见 codebuddy_shadow_routing_test.go 的 TestDefaultCodeBuddyShadowModelMapping。
-func TestCreateShadowCodeBuddyAutoModelMapping(t *testing.T) {
+// TestCreateShadowCodeBuddyAutoMappingFrozen 记录 codebuddy 影子新建入口被冻结后的
+// 拒绝语义：CreateShadow 遇 codebuddy 母账号一律在领域边界被拒
+// （CODEBUDDY_SHADOW_CREATION_FROZEN），不论请求的是有官方模型清单的平台
+// （deepseek）还是无清单平台（minimax）。
+//
+// 原用例断言的「CreateShadow 自动写入 identity 白名单 model_mapping」端到端链路
+// 已随冻结不可达（写入点即拒绝点），故其 model_mapping 写入 / ResolveMappedModel /
+// IsModelSupported 断言整体移除；映射语义的纯函数覆盖仍在
+// codebuddy_shadow_routing_test.go 的 TestDefaultCodeBuddyShadowModelMapping。
+func TestCreateShadowCodeBuddyAutoMappingFrozen(t *testing.T) {
 	ctx := context.Background()
 	repo := newSparkShadowRepoStub()
 	svc := &adminServiceImpl{accountRepo: repo}
@@ -1052,39 +1057,25 @@ func TestCreateShadowCodeBuddyAutoModelMapping(t *testing.T) {
 	}
 	require.NoError(t, repo.Create(ctx, parent))
 
-	shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
-		Platform: PlatformDeepseek,
-		Model:    "deepseek-v4.1-flash",
-		GroupIDs: []int64{1},
-	})
-	require.NoError(t, err)
-	require.Equal(t, QuotaDimensionCodeBuddy, shadow.QuotaDimension)
-	require.Empty(t, shadow.Credentials["access_token"], "影子不得持有 auth token")
+	attempts := []struct {
+		name string
+		opts ShadowOptions
+	}{
+		{name: "有官方清单平台", opts: ShadowOptions{Platform: PlatformDeepseek, Model: "deepseek-v4.1-flash", GroupIDs: []int64{1}}},
+		{name: "无官方清单平台", opts: ShadowOptions{Platform: PlatformMiniMax, Model: "minimax-m2", GroupIDs: []int64{1}}},
+	}
+	for _, a := range attempts {
+		shadow, err := svc.CreateShadow(ctx, parent.ID, a.opts)
+		require.Nil(t, shadow, "%s:冻结拒绝不得返回影子账号", a.name)
+		require.Error(t, err, "%s:创建 codebuddy 影子应被冻结拒绝", a.name)
+		require.Equal(t, "CODEBUDDY_SHADOW_CREATION_FROZEN", infraerrors.Reason(err), a.name)
+	}
 
-	mapping, ok := shadow.Credentials["model_mapping"].(map[string]any)
-	require.True(t, ok, "deepseek 影子应自动写入 model_mapping")
-	require.Equal(t, map[string]any{
-		"deepseek-v4.1-flash": "deepseek-v4.1-flash",
-	}, mapping)
-
-	// 出站解析：shadow_model 直呼命中 identity；mapping 即白名单，
-	// 官方名别名 deepseek-chat 不再放行（废弃别名路径）。
-	mapped, matched := shadow.ResolveMappedModel("deepseek-v4.1-flash")
-	require.True(t, matched)
-	require.Equal(t, "deepseek-v4.1-flash", mapped)
-	require.True(t, shadow.IsModelSupported("deepseek-v4.1-flash"))
-	_, matched = shadow.ResolveMappedModel("deepseek-chat")
-	require.False(t, matched, "官方名别名已废弃，mapping 只认 shadow_model")
-	require.False(t, shadow.IsModelSupported("deepseek-chat"), "官方名别名已废弃")
-	require.False(t, shadow.IsModelSupported("glm-5.3-flash"), "mapping 即白名单，未列模型应拒绝")
-
-	// 无官方清单平台（minimax）：语义修正后同样写入 identity 白名单，不再空 mapping 透传。
-	shadow2, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
-		Platform: PlatformMiniMax,
-		Model:    "minimax-m2",
-		GroupIDs: []int64{1},
-	})
-	require.NoError(t, err)
-	require.Equal(t, map[string]any{"minimax-m2": "minimax-m2"},
-		shadow2.Credentials["model_mapping"], "所有 codebuddy 影子统一 identity 白名单")
+	// 拒绝点早于任何写入：repo 内只有母账号，且未发生分组绑定。
+	require.Len(t, repo.accounts, 1, "冻结后不得产生影子账号")
+	for id, acc := range repo.accounts {
+		require.Equal(t, parent.ID, id)
+		require.Nil(t, acc.ParentAccountID, "唯一存在的账号应是母账号本身")
+	}
+	require.Empty(t, repo.groupsOf, "冻结发生在分组绑定之前，BindGroups 不应被调用")
 }
