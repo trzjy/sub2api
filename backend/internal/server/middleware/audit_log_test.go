@@ -348,6 +348,57 @@ func TestOllamaCloudUsageSessionRouteOmitsAuditBody(t *testing.T) {
 	require.NotContains(t, logs[0].RequestBody, "audit-canary")
 }
 
+// Cockpit 备份导入 preview/commit 请求体（multipart 文件或 JSON 整块粘贴）含完整凭证明文，
+// 键级脱敏无法覆盖，B1c 已把两条路由列入 auditBodyOmittedRoutes 整体省略（按方法+FullPath 路由键
+// 匹配，与 Content-Type 无关，JSON 回退体同样整体省略）。补两组断言固化该证据。
+func TestCockpitImportRoutesOmitAuditBody(t *testing.T) {
+	// 1) 表驱动断言两条路由在 auditBodyOmittedRoutes 内。
+	routes := []string{
+		"POST /api/v1/admin/accounts/cockpit-import/preview",
+		"POST /api/v1/admin/accounts/cockpit-import/commit",
+	}
+	for _, route := range routes {
+		_, omitted := auditBodyOmittedRoutes[route]
+		require.Truef(t, omitted, "%s must not persist its credential-bearing body", route)
+	}
+
+	// 2) 全链路：POST JSON 体打 preview 路由（gin engine + AuditLogMiddleware + 假 handler），
+	//    捕获的审计记录 body 为 <credential-bearing body omitted>，哨兵零出现。
+	gin.SetMode(gin.TestMode)
+	repository := &auditCaptureRepository{}
+	auditService := service.NewAuditLogService(repository, nil)
+	auditService.Start()
+
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 77})
+		c.Set(string(ContextKeyUserRole), "admin")
+		c.Next()
+	})
+	router.Use(gin.HandlerFunc(NewAuditLogMiddleware(auditService)))
+	router.POST("/api/v1/admin/accounts/cockpit-import/preview", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	const receiptSentinel = "RECEIPT-SENTINEL"
+	const contentSentinel = "CONTENT-SENTINEL"
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/cockpit-import/preview",
+		bytes.NewBufferString(`{"receipt":"`+receiptSentinel+`","content":"`+contentSentinel+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	auditService.Stop()
+
+	repository.mu.Lock()
+	logs := append([]*service.AuditLog(nil), repository.logs...)
+	repository.mu.Unlock()
+	require.Len(t, logs, 1)
+	require.Equal(t, "<credential-bearing body omitted>", logs[0].RequestBody)
+	require.NotContains(t, logs[0].RequestBody, receiptSentinel)
+	require.NotContains(t, logs[0].RequestBody, contentSentinel)
+}
+
 // TestSetAuditExtra_AllowsCodeBuddySite 钉住 site 进入审计 extra 白名单：
 // CodeBuddy 国际版/国内版操作必须可区分（Phase 2 验收 "审计含 intl 操作"）；
 // 同时确认非白名单键（如凭证）仍被拒绝。
