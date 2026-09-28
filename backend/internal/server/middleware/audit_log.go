@@ -172,6 +172,10 @@ var auditBodyOmittedRoutes = map[string]struct{}{
 	"POST /api/v1/admin/prompt-audit/events/batch-delete":       {},
 	"POST /api/v1/admin/prompt-audit/events/delete-preview":     {},
 	"POST /api/v1/admin/prompt-audit/events/delete-by-filter":   {},
+	// cockpit 备份导入 preview/commit：请求体（multipart 文件 或 JSON content 整块粘贴）
+	// 含完整凭证明文，键级脱敏无法覆盖，整体不入库；响应/审计额外字段亦零凭证（§1.7）。
+	"POST /api/v1/admin/accounts/cockpit-import/preview": {},
+	"POST /api/v1/admin/accounts/cockpit-import/commit":  {},
 }
 
 // NewAuditLogMiddleware 创建审计中间件。

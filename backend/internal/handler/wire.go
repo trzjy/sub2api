@@ -2,7 +2,9 @@ package handler
 
 import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -62,6 +64,7 @@ func ProvideAdminHandlers(
 	settingService *service.SettingService,
 	visionCapabilityHandler *admin.VisionCapabilityHandler,
 	visionRoutingService *service.VisionRoutingService,
+	entClient *dbent.Client,
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -79,7 +82,7 @@ func ProvideAdminHandlers(
 		APIKey:  cfg.LocalCaptchaHelper.APIKey,
 		Timeout: cfg.LocalCaptchaHelper.Timeout,
 	}))
-	return &AdminHandlers{
+	adminHandlers := &AdminHandlers{
 		Dashboard:              dashboardHandler,
 		User:                   userHandler,
 		Group:                  groupHandler,
@@ -123,6 +126,14 @@ func ProvideAdminHandlers(
 		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
 		VisionCapability:       visionCapabilityHandler,
 	}
+
+	// Cockpit 备份导入 preview/commit（B1c）：HMAC 无状态凭证签名器由既有服务端密钥
+	// cfg.JWT.Secret 经 HKDF 派生专用子密钥；提交仓储由 ent 客户端构造。
+	cockpitSigner := service.NewCockpitPreviewReceiptSigner(cfg.JWT.Secret)
+	cockpitCommitRepo := repository.NewCockpitImportCommitRepository(entClient)
+	cockpitCommitSvc := service.NewCockpitImportCommitServiceWithReceipt(cockpitCommitRepo, cockpitSigner)
+	adminHandlers.CockpitImport = admin.NewCockpitImportHandler(cockpitCommitSvc, cockpitSigner)
+	return adminHandlers
 }
 
 func ProvideGatewayHandler(
