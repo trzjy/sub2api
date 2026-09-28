@@ -130,3 +130,62 @@ func TestListAccountShadows_Summary(t *testing.T) {
 	_, err = svc.ListAccountShadows(ctx, 99999)
 	require.Error(t, err, "母账号不存在应报错")
 }
+
+// TestEnforceCodeBuddyShadowFreeze_ParentAccountIDValueComp 覆盖 ParentAccountID
+// 值比较四边界（D-14：非空→非空改指、nil→nil、nil→非nil、非nil→nil）。
+func TestEnforceCodeBuddyShadowFreeze_ParentAccountIDValueComp(t *testing.T) {
+	a := int64(1001)
+	b := int64(2002)
+
+	// helper: 构造一个 codebuddy 影子（Zhipu + codebuddy 维度 + 父账号指针）
+	makeShadow := func(parentPtr *int64) *Account {
+		return &Account{
+			Platform:        PlatformZhipu,
+			ParentAccountID: parentPtr,
+			QuotaDimension:  QuotaDimensionCodeBuddy,
+		}
+	}
+
+	t.Run("nonNilDifferentValues_rejected", func(t *testing.T) {
+		paCopy := a
+		pb := b
+		existing := makeShadow(&paCopy)
+		incoming := makeShadow(&pb)
+		require.ErrorIs(t, enforceCodeBuddyShadowFreeze(existing, incoming), errCodeBuddyShadowCreationFrozen)
+	})
+
+	t.Run("nilToNil_allowed", func(t *testing.T) {
+		// 两方皆 IsShadow=false → existingFrozen=false → 不命中冻结，相等放行。
+		// 注意：ParentAccountID皆nil时 IsShadow=false，isCodeBuddyShadowIdentity 为 false，
+		// 即使同样 nil 值也不会被误拒；此处显式覆盖 nil→nil 值相等边界。
+		existing := &Account{Platform: PlatformZhipu, QuotaDimension: QuotaDimensionCodeBuddy}
+		incoming := &Account{Platform: PlatformZhipu, QuotaDimension: QuotaDimensionCodeBuddy}
+		require.False(t, isCodeBuddyShadowIdentity(existing)) // 两者皆非影子
+		require.NoError(t, enforceCodeBuddyShadowFreeze(existing, incoming))
+	})
+
+	t.Run("nilToNonNil_rejected", func(t *testing.T) {
+		// existing: 非影子（nil 导致 IsShadow=false），incoming: 影子（非nil）
+		// → Convert 转换进入组合路径，固定拒绝（后两边界本就被旧条件拒绝，保持绿）。
+		existingNonShadow := &Account{Platform: PlatformZhipu, QuotaDimension: QuotaDimensionCodeBuddy}
+		paCopy := a
+		incoming := makeShadow(&paCopy)
+		require.ErrorIs(t, enforceCodeBuddyShadowFreeze(existingNonShadow, incoming), errCodeBuddyShadowCreationFrozen)
+	})
+
+	t.Run("nonNilToNil_rejected", func(t *testing.T) {
+		paCopy := a
+		existing := makeShadow(&paCopy)
+		incoming := &Account{Platform: PlatformZhipu, QuotaDimension: QuotaDimensionCodeBuddy}
+		require.ErrorIs(t, enforceCodeBuddyShadowFreeze(existing, incoming), errCodeBuddyShadowCreationFrozen)
+	})
+
+	// 值相等保持放行（存量影子非身份字段更新不应被误伤），与同一 *int64 复用不等价（拷贝值相等）。
+	t.Run("sameValueCopied_allowed", func(t *testing.T) {
+		paA := a
+		paA2 := a
+		existing := makeShadow(&paA)
+		incoming := makeShadow(&paA2)
+		require.NoError(t, enforceCodeBuddyShadowFreeze(existing, incoming))
+	})
+}
