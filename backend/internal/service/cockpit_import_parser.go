@@ -1,6 +1,9 @@
-// cockpit_import_parser.go —— 平台无关 Cockpit 备份导入解析引擎（方案 §1.1–1.4、§1.6）。
+// cockpit_import_parser.go —— 平台无关 Cockpit 备份导入解析引擎（方案 §1.1–1.5、§1.6）。
 //
-// 唯一权威来源：docs/codebuddy-cockpit-fusion-plan.md（v15）。
+// 唯一权威来源：docs/codebuddy-cockpit-fusion-plan.md（v16）。
+// v16 终审整改（D-10a）：单一 JSON 值边界与 decoder 错误统一入 *CockpitImportError（§1.4）；
+// 类型契约钉死——token/uid/domain/enterprise_id 仅接受 JSON 字符串（禁数值强转），expires_at
+// 单独按有限数值解析；domain 非空字符集校验（§1.3）；解析响应 context 取消（§1.5）。
 // 本文件只实现"通用解析器"部分；codebuddy 系字段映射器因 §1.2 取证现状为 pending，不合入（enabled 前不实现）。
 //
 // 设计原则（contract §5）：生产代码零兜底、零 fallback——任何越界/非法输入一律失败关闭（fail close）返回带错误码的
@@ -11,6 +14,7 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,7 +23,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -53,6 +56,7 @@ const (
 	maxAccountEntries        = 200      // 账户条目数 ≤ 200
 	maxTokenBytes            = 8192     // token/refresh_token ≤ 8192，仅 ASCII 可打印 0x21–0x7E
 	maxUIDBytes              = 128      // uid ≤ 128，仅 [0-9a-zA-Z_-]
+	maxDomainBytes           = 253      // domain 非空时 ≤ 253，仅 [0-9a-zA-Z.-]
 )
 
 // CockpitImportError 是带错误码的失败关闭错误。
@@ -133,7 +137,9 @@ type CockpitImportResult struct {
 
 // ParseCockpitImport 解析 Cockpit 备份导入字节流（JSON 单文件或 ZIP 导出包）。
 // 任何越界/非法输入失败关闭并返回 *CockpitImportError；result 始终带回 RawSHA256 供审计。
-func ParseCockpitImport(raw []byte) (*CockpitImportResult, error) {
+// 解析在 zip 条目循环与账户条目循环等天然边界响应 ctx 取消（v16 §1.5）：
+// ctx.Err() 非 nil → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
+func ParseCockpitImport(ctx context.Context, raw []byte) (*CockpitImportResult, error) {
 	result := &CockpitImportResult{
 		RawSHA256:                cockpitSHA256Hex(raw),
 		PendingPlatformAccounts:  map[string]int{},
@@ -146,7 +152,7 @@ func ParseCockpitImport(raw []byte) (*CockpitImportResult, error) {
 	// ② ZIP 流式解压（资源硬上限先于任何解析/内存分配检查）；否则视为 JSON 单文件。
 	var jsonBytes []byte
 	if isCockpitZipBytes(raw) {
-		jb, err := extractCockpitBackupJSON(raw)
+		jb, err := extractCockpitBackupJSON(ctx, raw)
 		if err != nil {
 			return result, err
 		}
@@ -192,7 +198,7 @@ func ParseCockpitImport(raw []byte) (*CockpitImportResult, error) {
 	}
 
 	// ⑤ 逐 slug 三态分类计数 + ⑦ 同文件同键分组（仅 enabled 平台进入写入分组）。
-	enabledEntries, err := classifyAndCountCockpitAccounts(top, result)
+	enabledEntries, err := classifyAndCountCockpitAccounts(ctx, top, result)
 	if err != nil {
 		return result, err
 	}
@@ -212,9 +218,19 @@ func isCockpitZipBytes(b []byte) bool {
 	return len(b) >= 4 && b[0] == 0x50 && b[1] == 0x4B && b[2] == 0x03 && b[3] == 0x04
 }
 
+// cockpitCtxError 在天然循环边界检查 context 取消（v16 §1.5）：
+// 已取消/超时 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout}；否则 nil。
+func cockpitCtxError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return &CockpitImportError{Code: ErrCockpitPreviewParseTimeout, Err: err}
+	}
+	return nil
+}
+
 // extractCockpitBackupJSON 从 ZIP 导出包中提取首个名为 backup.json 的条目内容，
 // 全程流式并在任何解析/内存分配前执行资源硬上限检查（防解压炸弹）。
-func extractCockpitBackupJSON(raw []byte) ([]byte, error) {
+// 逐条目循环边界响应 ctx 取消。
+func extractCockpitBackupJSON(ctx context.Context, raw []byte) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return nil, &CockpitImportError{
@@ -234,6 +250,9 @@ func extractCockpitBackupJSON(raw []byte) ([]byte, error) {
 	var totalUncompressed int64
 
 	for _, f := range zr.File {
+		if err := cockpitCtxError(ctx); err != nil {
+			return nil, err
+		}
 		name := f.Name
 		// 拒绝路径穿越与绝对路径。
 		if strings.Contains(name, "..") || filepath.IsAbs(name) || strings.HasPrefix(name, "/") {
@@ -327,14 +346,40 @@ func extractCockpitBackupJSON(raw []byte) ([]byte, error) {
 
 // strictDecodeCockpitJSON 解析 JSON 并强制：拒绝重复键、嵌套深度 ≤ 32、单字段值 ≤ 64KB。
 // 数值保留为 json.Number（expires_at 单位判定由 §1.3 规则在 B1 阶段钉死，此处不猜测）。
+// 单一 JSON 值边界（v16 §1.4）：首个值解码成功后继续 Decode 并要求返回 io.EOF（允许空白）；
+// 存在任何尾随内容 → ErrCockpitPayloadStructureLimit 失败关闭（拒绝尾随数据注入）。
+// 所有 decoder/语法错误统一映射为 ErrCockpitPayloadStructureLimit，禁止裸返 json.Decoder 原始错误。
 func strictDecodeCockpitJSON(data []byte) (interface{}, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	v, err := strictDecodeCockpitValue(dec, 0)
 	if err != nil {
-		return nil, err
+		return nil, cockpitJSONDecodeError(err)
+	}
+	// 首个值之后仅允许空白；读到任何 token 或非 EOF 错误均为尾随内容/语法错误。
+	if _, err := dec.Token(); err != io.EOF {
+		if err == nil {
+			return nil, &CockpitImportError{
+				Code: ErrCockpitPayloadStructureLimit,
+				Err:  fmt.Errorf("unexpected trailing content after JSON value"),
+			}
+		}
+		return nil, cockpitJSONDecodeError(err)
 	}
 	return v, nil
+}
+
+// cockpitJSONDecodeError 把底层 decoder/语法错误统一映射进 *CockpitImportError 契约
+// （ErrCockpitPayloadStructureLimit）；已携带失败关闭错误码的错误原样透传。
+func cockpitJSONDecodeError(err error) error {
+	var ce *CockpitImportError
+	if errorsAsCockpit(err, &ce) {
+		return err
+	}
+	return &CockpitImportError{
+		Code: ErrCockpitPayloadStructureLimit,
+		Err:  fmt.Errorf("invalid JSON: %w", err),
+	}
 }
 
 func strictDecodeCockpitValue(dec *json.Decoder, depth int) (interface{}, error) {
@@ -501,12 +546,16 @@ func validateCockpitEnvelope(top map[string]interface{}, result *CockpitImportRe
 }
 
 // classifyAndCountCockpitAccounts 逐 slug 三态分类计数；对 enabled 平台的条目执行字段解析并收集归一化候选，供 §1.6 分组。
-func classifyAndCountCockpitAccounts(top map[string]interface{}, result *CockpitImportResult) ([]CockpitNormalizedEntry, error) {
+// 平台循环与账户条目循环边界响应 ctx 取消（v16 §1.5）。
+func classifyAndCountCockpitAccounts(ctx context.Context, top map[string]interface{}, result *CockpitImportResult) ([]CockpitNormalizedEntry, error) {
 	accounts, _ := top["accounts"].(map[string]interface{})
 	platforms, _ := accounts["platforms"].(map[string]interface{})
 
 	var enabledEntries []CockpitNormalizedEntry
 	for slug, pv := range platforms {
+		if err := cockpitCtxError(ctx); err != nil {
+			return nil, err
+		}
 		pm, ok := pv.(map[string]interface{})
 		if !ok {
 			continue
@@ -528,6 +577,9 @@ func classifyAndCountCockpitAccounts(top map[string]interface{}, result *Cockpit
 		case CockpitPlatformEnabled:
 			result.EnabledPlatformAccounts[normSlug] += n
 			for _, item := range ed {
+				if err := cockpitCtxError(ctx); err != nil {
+					return nil, err
+				}
 				obj, ok := item.(map[string]interface{})
 				if !ok {
 					result.InvalidEntries++
@@ -596,10 +648,38 @@ func isValidCockpitUID(s string) bool {
 	return true
 }
 
-// parseCockpitExpiresAtString expires_at：有限数值（单位由 B1 阶段按 fixture 钉死，此处只验有限数值）。
-func parseCockpitExpiresAtString(s string) (float64, bool) {
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+// isValidCockpitDomain domain（v16 §1.3）：空允许（空 domain 占位规则唯一例外）；
+// 非空时（输入值已完成 trim 规范化）长度 ≤ 253、仅含 [0-9a-zA-Z.-]（禁空白/控制字符）。
+func isValidCockpitDomain(s string) bool {
+	if s == "" {
+		return true
+	}
+	if len(s) > maxDomainBytes {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c == '.' || c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// cockpitJSONFiniteNumber 仅接受 JSON 数值类型（json.Number / float64）且必须为有限值；
+// 字符串/布尔/其它类型与 NaN/Inf/不可解析数值 → false（失败关闭，不经字符串路径）。
+func cockpitJSONFiniteNumber(v interface{}) (float64, bool) {
+	var f float64
+	switch t := v.(type) {
+	case json.Number:
+		parsed, err := t.Float64()
+		if err != nil {
+			return 0, false
+		}
+		f = parsed
+	case float64:
+		f = t
+	default:
 		return 0, false
 	}
 	if math.IsNaN(f) || math.IsInf(f, 0) {
@@ -608,24 +688,11 @@ func parseCockpitExpiresAtString(s string) (float64, bool) {
 	return f, true
 }
 
-// cockpitFieldRawString 将 JSON 原始值规整为字符串（兼容 json.Number / float64 / string）。
-func cockpitFieldRawString(v interface{}) (string, bool) {
-	switch t := v.(type) {
-	case string:
-		return t, true
-	case json.Number:
-		return t.String(), true
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64), true
-	default:
-		return "", false
-	}
-}
-
-// resolveCockpitAliasedField 解析同一逻辑字段的多别名（§1.4.4）。
+// resolveCockpitAliasedField 解析同一逻辑字段的多别名（§1.4.4），仅接受 JSON 字符串
+// （v16 §1.3 类型契约：token/uid/domain/enterprise_id 禁止数值→字符串强转）。
 // 多个别名同时出现时规范化后完全一致才接受；不一致 → conflict=true（ALIAS_CONFLICT）；
-// 值存在但非字符串类型 → 视为 conflict（失败关闭，不猜测）。
-func resolveCockpitAliasedField(raw map[string]interface{}, aliases []string) (value string, conflict bool, present bool) {
+// 值存在但非 JSON 字符串类型 → invalid=true（INVALID_ENTRY，失败关闭，不猜测）。
+func resolveCockpitAliasedField(raw map[string]interface{}, aliases []string) (value string, conflict bool, invalid bool, present bool) {
 	var found string
 	var has bool
 	for _, a := range aliases {
@@ -633,19 +700,45 @@ func resolveCockpitAliasedField(raw map[string]interface{}, aliases []string) (v
 		if !ok {
 			continue
 		}
-		s, ok := cockpitFieldRawString(v)
+		s, ok := v.(string)
 		if !ok {
-			return "", true, true
+			return "", false, true, true
 		}
 		ns := normalizeCockpitField(s)
 		if !has {
 			found = ns
 			has = true
 		} else if ns != found {
-			return "", true, true
+			return "", true, false, true
 		}
 	}
-	return found, false, has
+	return found, false, false, has
+}
+
+// resolveCockpitAliasedNumericField 解析 expires_at/expiresAt 别名（§1.4.4），按有限数值解析
+// （v16 §1.3：expires_at 单独按有限数值解析，不经字符串路径）。
+// 多个别名同时出现时数值完全一致才接受，不一致 → conflict=true（ALIAS_CONFLICT）；
+// 值存在但非 JSON 数值或非有限值 → invalid=true（INVALID_ENTRY）。
+func resolveCockpitAliasedNumericField(raw map[string]interface{}, aliases []string) (value float64, conflict bool, invalid bool, present bool) {
+	var found float64
+	var has bool
+	for _, a := range aliases {
+		v, ok := raw[a]
+		if !ok {
+			continue
+		}
+		f, ok := cockpitJSONFiniteNumber(v)
+		if !ok {
+			return 0, false, true, true
+		}
+		if !has {
+			found = f
+			has = true
+		} else if f != found {
+			return 0, true, false, true
+		}
+	}
+	return found, false, false, has
 }
 
 // cockpitEntryResult 是单条账号条目解析结果。
@@ -655,18 +748,21 @@ type cockpitEntryResult struct {
 	Reason  string
 }
 
-// parseCockpitAccountEntry 解析单条账号条目（§1.3 必填/字符集校验 + §1.4.4 别名冲突）。
+// parseCockpitAccountEntry 解析单条账号条目（§1.3 必填/字符集/类型契约校验 + §1.4.4 别名冲突）。
 // platform 为调用方已查表得到的站点平台名。
 func parseCockpitAccountEntry(platform string, raw map[string]interface{}) cockpitEntryResult {
-	accessToken, atConflict, _ := resolveCockpitAliasedField(raw, []string{"access_token", "accessToken"})
-	refreshToken, rtConflict, _ := resolveCockpitAliasedField(raw, []string{"refresh_token", "refreshToken"})
-	uid, uidConflict, uidPresent := resolveCockpitAliasedField(raw, []string{"uid", "account.id"})
-	enterpriseID, entConflict, _ := resolveCockpitAliasedField(raw, []string{"enterprise_id", "enterpriseId"})
-	domain, domConflict, _ := resolveCockpitAliasedField(raw, []string{"domain"})
-	expiresAt, expConflict, expPresent := resolveCockpitAliasedField(raw, []string{"expires_at", "expiresAt"})
+	accessToken, atConflict, atInvalid, _ := resolveCockpitAliasedField(raw, []string{"access_token", "accessToken"})
+	refreshToken, rtConflict, rtInvalid, _ := resolveCockpitAliasedField(raw, []string{"refresh_token", "refreshToken"})
+	uid, uidConflict, uidInvalid, uidPresent := resolveCockpitAliasedField(raw, []string{"uid", "account.id"})
+	enterpriseID, entConflict, entInvalid, _ := resolveCockpitAliasedField(raw, []string{"enterprise_id", "enterpriseId"})
+	domain, domConflict, domInvalid, _ := resolveCockpitAliasedField(raw, []string{"domain"})
+	expiresAt, expConflict, expInvalid, expPresent := resolveCockpitAliasedNumericField(raw, []string{"expires_at", "expiresAt"})
 
 	if atConflict || rtConflict || uidConflict || entConflict || domConflict || expConflict {
 		return cockpitEntryResult{Invalid: true, Reason: ErrCockpitAliasConflict}
+	}
+	if atInvalid || rtInvalid || uidInvalid || entInvalid || domInvalid || expInvalid {
+		return cockpitEntryResult{Invalid: true, Reason: ErrCockpitFieldInvalid}
 	}
 	if !uidPresent || !isValidCockpitUID(uid) {
 		return cockpitEntryResult{Invalid: true, Reason: ErrCockpitFieldInvalid}
@@ -677,15 +773,8 @@ func parseCockpitAccountEntry(platform string, raw map[string]interface{}) cockp
 	if !isValidCockpitToken(refreshToken) {
 		return cockpitEntryResult{Invalid: true, Reason: ErrCockpitFieldInvalid}
 	}
-	var expVal float64
-	var hasExp bool
-	if expPresent {
-		f, ok := parseCockpitExpiresAtString(expiresAt)
-		if !ok {
-			return cockpitEntryResult{Invalid: true, Reason: ErrCockpitFieldInvalid}
-		}
-		expVal = f
-		hasExp = true
+	if !isValidCockpitDomain(domain) {
+		return cockpitEntryResult{Invalid: true, Reason: ErrCockpitFieldInvalid}
 	}
 	return cockpitEntryResult{
 		Entry: CockpitNormalizedEntry{
@@ -693,8 +782,8 @@ func parseCockpitAccountEntry(platform string, raw map[string]interface{}) cockp
 			UID:          uid,
 			AccessToken:  accessToken,
 			RefreshToken: refreshToken,
-			ExpiresAt:    expVal,
-			HasExpiresAt: hasExp,
+			ExpiresAt:    expiresAt,
+			HasExpiresAt: expPresent,
 			Domain:       domain,
 			EnterpriseID: enterpriseID,
 		},

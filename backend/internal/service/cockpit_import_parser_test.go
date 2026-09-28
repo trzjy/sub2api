@@ -8,6 +8,7 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -94,7 +95,7 @@ func TestCockpitImport_RawSHA256Computed(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
 		"grok": {{}, {}, {}},
 	})
-	res, err := ParseCockpitImport(raw)
+	res, err := ParseCockpitImport(context.Background(), raw)
 	require.NoError(t, err)
 	require.Equal(t, "cockpit-tools.data-transfer", res.Schema)
 	require.Equal(t, int64(1), res.Version)
@@ -108,7 +109,7 @@ func TestCockpitImport_PendingSlugCounted(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
 		"grok": {{}, {}, {}},
 	})
-	res, err := ParseCockpitImport(raw)
+	res, err := ParseCockpitImport(context.Background(), raw)
 	require.NoError(t, err)
 	require.Equal(t, 3, res.PendingPlatformAccounts["grok"])
 	require.Contains(t, res.PendingPlatformMessages["grok"], "已识别 3 个账号")
@@ -119,7 +120,7 @@ func TestCockpitImport_UnsupportedSlugCounted(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
 		"cursor": {{}, {}},
 	})
-	res, err := ParseCockpitImport(raw)
+	res, err := ParseCockpitImport(context.Background(), raw)
 	require.NoError(t, err)
 	require.Equal(t, 2, res.UnknownPlatformAccounts)
 	require.Equal(t, 2, res.UnknownPlatformAccountSlug["cursor"])
@@ -129,7 +130,7 @@ func TestCockpitImport_UnknownSlugCounted(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
 		"future_new_platform": {{}, {}, {}, {}, {}},
 	})
-	res, err := ParseCockpitImport(raw)
+	res, err := ParseCockpitImport(context.Background(), raw)
 	require.NoError(t, err)
 	require.Equal(t, 5, res.UnknownPlatformAccounts)
 	require.Equal(t, 5, res.UnknownPlatformAccountSlug["future_new_platform"])
@@ -140,35 +141,35 @@ func TestCockpitImport_UnknownSlugCounted(t *testing.T) {
 
 func TestCockpitImport_SchemaVersion_Zero(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 0, false, false, map[string][]map[string]interface{}{"grok": {}})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitSchemaVersionUnsupported))
 }
 
 func TestCockpitImport_SchemaVersion_Negative(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", -1, false, false, map[string][]map[string]interface{}{"grok": {}})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitSchemaVersionUnsupported))
 }
 
 func TestCockpitImport_SchemaVersion_Missing(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, true, false, map[string][]map[string]interface{}{"grok": {}})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitSchemaVersionUnsupported))
 }
 
 func TestCockpitImport_SchemaVersion_Two(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 2, false, false, map[string][]map[string]interface{}{"grok": {}})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitSchemaVersionUnsupported))
 }
 
 func TestCockpitImport_Schema_Unsupported(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "wrong-schema", 1, false, false, map[string][]map[string]interface{}{"grok": {}})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitSchemaVersionUnsupported))
 }
@@ -177,7 +178,7 @@ func TestCockpitImport_Schema_Unsupported(t *testing.T) {
 
 func TestCockpitImport_PayloadStructureLimit_NestingDepth(t *testing.T) {
 	raw := []byte(nestedJSON(33)) // 嵌套 33 层 > 32
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit))
 }
@@ -185,7 +186,7 @@ func TestCockpitImport_PayloadStructureLimit_NestingDepth(t *testing.T) {
 func TestCockpitImport_PayloadStructureLimit_SingleField(t *testing.T) {
 	big := strings.Repeat("A", 70000) // > 64KB
 	raw := []byte(`{"schema":"cockpit-tools.data-transfer","version":1,"big":"` + big + `"}`)
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit))
 }
@@ -198,7 +199,7 @@ func TestCockpitImport_PayloadStructureLimit_AccountEntryCount(t *testing.T) {
 	raw := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
 		"grok": list,
 	})
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit))
 }
@@ -207,7 +208,7 @@ func TestCockpitImport_PayloadStructureLimit_AccountEntryCount(t *testing.T) {
 
 func TestCockpitImport_DuplicateJSONKey(t *testing.T) {
 	raw := []byte(`{"schema":"cockpit-tools.data-transfer","version":1,"accounts":{"platforms":{"grok":{"account_count":0,"exported_data":[],"exported_data":[]}}}}`)
-	_, err := ParseCockpitImport(raw)
+	_, err := ParseCockpitImport(context.Background(), raw)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitDuplicateJSONKey))
 }
@@ -219,7 +220,7 @@ func TestCockpitImport_ZIP_OK(t *testing.T) {
 		"grok": {{}, {}, {}},
 	})
 	z := buildCockpitZip(t, []zipEntry{{name: "backup.json", content: env}})
-	res, err := ParseCockpitImport(z)
+	res, err := ParseCockpitImport(context.Background(), z)
 	require.NoError(t, err)
 	require.Equal(t, 3, res.PendingPlatformAccounts["grok"])
 	sum := sha256.Sum256(z)
@@ -229,7 +230,7 @@ func TestCockpitImport_ZIP_OK(t *testing.T) {
 func TestCockpitImport_ZIPResourceLimit_PerEntryUncompressed(t *testing.T) {
 	content := bytes.Repeat([]byte{'A'}, 51<<20) // 51MB > 50MB 单条目上限
 	z := buildCockpitZip(t, []zipEntry{{name: "backup.json", content: content}})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -240,7 +241,7 @@ func TestCockpitImport_ZIPResourceLimit_TotalUncompressed(t *testing.T) {
 		{name: "backup.json", content: big},
 		{name: "other.json", content: big},
 	})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -249,7 +250,7 @@ func TestCockpitImport_ZIPBomb_HighAmplification(t *testing.T) {
 	// 10MB 全 'A'，Deflate 后极小 → 放大比远超 100，但单条目 < 50MB（专门命中放大比上限）。
 	content := bytes.Repeat([]byte{'A'}, 10<<20)
 	z := buildCockpitZip(t, []zipEntry{{name: "backup.json", content: content}})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -260,14 +261,14 @@ func TestCockpitImport_ZIPResourceLimit_EntryCount(t *testing.T) {
 		entries = append(entries, zipEntry{name: "f" + string(rune('a'+i%26)) + strconv.Itoa(i), content: []byte("x")})
 	}
 	z := buildCockpitZip(t, entries)
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
 
 func TestCockpitImport_ZIPPathTraversalRejected(t *testing.T) {
 	z := buildCockpitZip(t, []zipEntry{{name: "../evil.json", content: []byte("{}")}})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -277,14 +278,14 @@ func TestCockpitImport_ZIPDuplicateEntryNameRejected(t *testing.T) {
 		{name: "backup.json", content: []byte("{}")},
 		{name: "backup.json", content: []byte("{}")},
 	})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
 
 func TestCockpitImport_ZIPNoBackupJSON(t *testing.T) {
 	z := buildCockpitZip(t, []zipEntry{{name: "readme.txt", content: []byte("hi")}})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -293,7 +294,7 @@ func TestCockpitImport_ZIPSymlinkRejected(t *testing.T) {
 	z := buildCockpitZip(t, []zipEntry{
 		{name: "backup.json", content: []byte("{}"), mode: os.ModeSymlink | 0o755},
 	})
-	_, err := ParseCockpitImport(z)
+	_, err := ParseCockpitImport(context.Background(), z)
 	require.Error(t, err)
 	require.True(t, IsCockpitErrorCode(err, ErrCockpitUnarchiveResourceLimit))
 }
@@ -319,13 +320,25 @@ func TestCockpitImport_NormalizeEquivalenceClasses(t *testing.T) {
 
 	require.Equal(t, "Example.COM", normalizeCockpitField("Example.COM"))
 
-	v, ok := parseCockpitExpiresAtString("1700000000")
+	// domain（v16 §1.3）：空允许；非空 ≤253、仅 [0-9a-zA-Z.-]。
+	require.True(t, isValidCockpitDomain(""))
+	require.True(t, isValidCockpitDomain("example.com"))
+	require.True(t, isValidCockpitDomain("Sub-Domain-0.Example.COM"))
+	require.False(t, isValidCockpitDomain("under_score"))
+	require.False(t, isValidCockpitDomain("bad domain"))
+	require.False(t, isValidCockpitDomain("ctrl\th"))
+	require.False(t, isValidCockpitDomain(strings.Repeat("a", 254)))
+
+	// expires_at（v16 §1.3）：仅 JSON 数值且有限，不经字符串路径。
+	v, ok := cockpitJSONFiniteNumber(json.Number("1700000000"))
 	require.True(t, ok)
 	require.Equal(t, float64(1700000000), v)
-	_, ok = parseCockpitExpiresAtString("not-a-number")
+	_, ok = cockpitJSONFiniteNumber("1700000000")
+	require.False(t, ok, "字符串 expires_at 一律拒绝（不经字符串路径）")
+	_, ok = cockpitJSONFiniteNumber(json.Number("not-a-number"))
 	require.False(t, ok)
-	_, ok = parseCockpitExpiresAtString("NaN")
-	require.False(t, ok)
+	_, ok = cockpitJSONFiniteNumber(json.Number("1e999"))
+	require.False(t, ok, "溢出为 +Inf 的数值拒绝")
 }
 
 // —— ④ 别名冲突（失败关闭，条目不计写入）——
@@ -337,7 +350,7 @@ func TestCockpitImport_AliasConflict(t *testing.T) {
 		"refresh_token": "rt",
 		"uid":           "u1",
 		"domain":        "d",
-		"expires_at":    "1",
+		"expires_at":    json.Number("1"),
 	}
 	res := parseCockpitAccountEntry("codebuddy", raw)
 	require.True(t, res.Invalid)
@@ -353,8 +366,8 @@ func TestCockpitImport_AliasConflict(t *testing.T) {
 		"enterprise_id": "ent_1",
 		"enterpriseId":  "ent_1",
 		"domain":        "example.com",
-		"expires_at":    "1700000000",
-		"expiresAt":     "1700000000",
+		"expires_at":    json.Number("1700000000"),
+		"expiresAt":     json.Number("1700000000"),
 	}
 	resOK := parseCockpitAccountEntry("codebuddy", rawOK)
 	require.False(t, resOK.Invalid, "别名一致应接受")
@@ -372,7 +385,7 @@ func TestCockpitImport_FieldInvalid(t *testing.T) {
 			"access_token":  "at-valid",
 			"refresh_token": "rt-valid",
 			"domain":        "d",
-			"expires_at":    "1",
+			"expires_at":    json.Number("1"),
 		}
 	}
 	m := base()
@@ -429,4 +442,178 @@ func TestCockpitImport_GroupSameKey_MixedGroups(t *testing.T) {
 	require.Equal(t, 2, deduped)
 	require.Equal(t, 2, invalid)
 	require.Equal(t, 2, reasons[ErrCockpitConflictingDuplicateUID])
+}
+
+// —— D-10a 整改 1：单一 JSON 值边界 + decoder 错误统一（v16 §1.4）——
+
+func TestParseCockpitImport_TrailingContentRejected(t *testing.T) {
+	env := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
+		"grok": {{}},
+	})
+	// 尾随第二个 JSON 值 → PAYLOAD_STRUCTURE_LIMIT。
+	_, err := ParseCockpitImport(context.Background(), append(env, ' ', '{', '}'))
+	require.Error(t, err)
+	require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit), "尾随 JSON 值应失败关闭")
+
+	// 尾随垃圾字符 → PAYLOAD_STRUCTURE_LIMIT（语法错误统一映射）。
+	_, err = ParseCockpitImport(context.Background(), append(env, ' ', 'x'))
+	require.Error(t, err)
+	require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit), "尾随垃圾字符应失败关闭")
+}
+
+func TestParseCockpitImport_TrailingWhitespaceOK(t *testing.T) {
+	env := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
+		"grok": {{}},
+	})
+	res, err := ParseCockpitImport(context.Background(), append(env, ' ', '\n', '\t', '\r', ' '))
+	require.NoError(t, err, "尾随 ASCII 空白应允许")
+	require.Equal(t, 1, res.PendingPlatformAccounts["grok"])
+}
+
+func TestParseCockpitImport_SyntaxErrorUnifiedCode(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte(`{`),                 // 截断对象
+		[]byte(`{"a":}`),            // 缺值
+		[]byte(`not-json`),          // 非 JSON
+		[]byte(``),                  // 空输入
+		[]byte(`{"a":1} trailing`),  // 值后尾随
+	} {
+		_, err := ParseCockpitImport(context.Background(), raw)
+		require.Error(t, err, "raw=%q", raw)
+		require.True(t, IsCockpitErrorCode(err, ErrCockpitPayloadStructureLimit), "raw=%q 语法错误应统一映射 PAYLOAD_STRUCTURE_LIMIT", raw)
+		var ce *CockpitImportError
+		require.ErrorAs(t, err, &ce, "raw=%q 必须包进 *CockpitImportError 契约，禁止裸返 decoder 错误", raw)
+	}
+}
+
+// —— D-10a 整改 2：类型契约（v16 §1.3，五字段仅 JSON 字符串，禁数值强转）——
+
+func TestParseCockpitImport_FieldTypeContract(t *testing.T) {
+	valid := func() map[string]interface{} {
+		return map[string]interface{}{
+			"uid":           "u1",
+			"access_token":  "at-valid",
+			"refresh_token": "rt-valid",
+			"expires_at":    json.Number("1700000000"),
+		}
+	}
+	// 数值/布尔 token/uid/domain/enterprise_id → INVALID_ENTRY（禁止强转）。
+	for _, tc := range []struct {
+		key   string
+		value interface{}
+	}{
+		{"access_token", json.Number("123")},
+		{"access_token", float64(123)},
+		{"access_token", true},
+		{"refresh_token", json.Number("456")},
+		{"uid", json.Number("789")},
+		{"uid", false},
+		{"domain", json.Number("1")},
+		{"enterprise_id", json.Number("42")},
+	} {
+		m := valid()
+		m[tc.key] = tc.value
+		res := parseCockpitAccountEntry("codebuddy", m)
+		require.True(t, res.Invalid, "%s=%v 非字符串应失败关闭", tc.key, tc.value)
+		require.Equal(t, ErrCockpitFieldInvalid, res.Reason, "%s=%v 应计 INVALID_ENTRY", tc.key, tc.value)
+	}
+	// expires_at 字符串 → INVALID_ENTRY（不经字符串路径）。
+	m := valid()
+	m["expires_at"] = "1700000000"
+	res := parseCockpitAccountEntry("codebuddy", m)
+	require.True(t, res.Invalid)
+	require.Equal(t, ErrCockpitFieldInvalid, res.Reason)
+
+	// expires_at 别名数值不一致 → ALIAS_CONFLICT；数值一致（1 vs 1.0）→ 接受。
+	m = valid()
+	m["expiresAt"] = json.Number("1700000001")
+	res = parseCockpitAccountEntry("codebuddy", m)
+	require.True(t, res.Invalid)
+	require.Equal(t, ErrCockpitAliasConflict, res.Reason)
+
+	m = valid()
+	m["expiresAt"] = json.Number("1700000000.0")
+	res = parseCockpitAccountEntry("codebuddy", m)
+	require.False(t, res.Invalid, "别名数值完全一致（1 vs 1.0）应接受")
+	require.Equal(t, float64(1700000000), res.Entry.ExpiresAt)
+
+	// expires_at 缺失 → HasExpiresAt=false，合法。
+	m = valid()
+	delete(m, "expires_at")
+	res = parseCockpitAccountEntry("codebuddy", m)
+	require.False(t, res.Invalid)
+	require.False(t, res.Entry.HasExpiresAt)
+}
+
+// —— D-10a 整改 3：domain 校验（v16 §1.3）——
+
+func TestParseCockpitImport_DomainValidation(t *testing.T) {
+	valid := func() map[string]interface{} {
+		return map[string]interface{}{
+			"uid":           "u1",
+			"access_token":  "at-valid",
+			"refresh_token": "rt-valid",
+		}
+	}
+	// 空 domain 允许（占位规则唯一例外）；缺失允许。
+	m := valid()
+	m["domain"] = ""
+	require.False(t, parseCockpitAccountEntry("codebuddy", m).Invalid)
+	m = valid()
+	require.False(t, parseCockpitAccountEntry("codebuddy", m).Invalid)
+
+	// 合法非空 domain。
+	m = valid()
+	m["domain"] = "  Example.COM-1.cn  " // trim 规范化后合法
+	res := parseCockpitAccountEntry("codebuddy", m)
+	require.False(t, res.Invalid)
+	require.Equal(t, "Example.COM-1.cn", res.Entry.Domain, "trim 规范化后原样保留（大小写不归一）")
+
+	// 非法：含空白/控制字符/非法字符/超 253。
+	for _, d := range []string{"bad domain", "ctrl\th", "under_score", "with/slash", strings.Repeat("a", 254)} {
+		m = valid()
+		m["domain"] = d
+		res := parseCockpitAccountEntry("codebuddy", m)
+		require.True(t, res.Invalid, "domain=%q 应失败关闭", d)
+		require.Equal(t, ErrCockpitFieldInvalid, res.Reason)
+	}
+}
+
+// —— D-10a 整改 4：context 取消（v16 §1.5）——
+
+func TestParseCockpitImport_ContextCanceled(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// JSON 形态：账户分类循环边界命中取消。
+	env := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
+		"grok": {{}, {}},
+	})
+	_, err := ParseCockpitImport(canceled, env)
+	require.Error(t, err)
+	require.True(t, IsCockpitErrorCode(err, ErrCockpitPreviewParseTimeout), "JSON 路径取消应返回 PREVIEW_PARSE_TIMEOUT")
+
+	// ZIP 形态：zip 条目循环边界命中取消。
+	z := buildCockpitZip(t, []zipEntry{{name: "backup.json", content: env}})
+	_, err = ParseCockpitImport(canceled, z)
+	require.Error(t, err)
+	require.True(t, IsCockpitErrorCode(err, ErrCockpitPreviewParseTimeout), "ZIP 路径取消应返回 PREVIEW_PARSE_TIMEOUT")
+}
+
+// TestRunCockpitParseWithTimeout 父 ctx 已取消 → PREVIEW_PARSE_TIMEOUT 失败关闭
+// （select 两个分支同码，结果确定）。
+func TestRunCockpitParseWithTimeout(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	env := buildCockpitEnvelope(t, "cockpit-tools.data-transfer", 1, false, false, map[string][]map[string]interface{}{
+		"grok": {{}},
+	})
+	_, err := runCockpitParseWithTimeout(canceled, env)
+	require.Error(t, err)
+	require.True(t, IsCockpitErrorCode(err, ErrCockpitPreviewParseTimeout))
+
+	// 正常 ctx 不受影响，解析成功。
+	res, err := runCockpitParseWithTimeout(context.Background(), env)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.PendingPlatformAccounts["grok"])
 }

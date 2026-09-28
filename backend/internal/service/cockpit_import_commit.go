@@ -149,8 +149,8 @@ func (s *CockpitImportCommitService) CommitCockpitImport(ctx context.Context, op
 
 // runCockpitParseWithTimeout 在 cockpitImportParseTimeout 派生子 context（父 deadline 更早则父胜出）下
 // 运行解析；超时 → *CockpitImportError{Code: ErrCockpitPreviewParseTimeout} 失败关闭。
-// 解析为 CPU 密集型、不响应取消，故以 goroutine + select 实现时限失败关闭：超时时立即返回，
-// 解析协程在完成后自然退出（结果被丢弃）。
+// 解析器在 zip 条目/账户条目循环等天然边界响应 parseCtx 取消（v16 §1.5，终止解析并释放输入字节）；
+// goroutine + select 仍保留为时限失败关闭的外层保证：超时时立即返回。
 func runCockpitParseWithTimeout(ctx context.Context, raw []byte) (*CockpitImportResult, error) {
 	parseCtx, cancel := context.WithTimeout(ctx, cockpitImportParseTimeout)
 	defer cancel()
@@ -160,7 +160,7 @@ func runCockpitParseWithTimeout(ctx context.Context, raw []byte) (*CockpitImport
 	}
 	ch := make(chan out, 1)
 	go func() {
-		res, perr := ParseCockpitImport(raw)
+		res, perr := ParseCockpitImport(parseCtx, raw)
 		ch <- out{res, perr}
 	}()
 	select {
