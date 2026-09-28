@@ -1562,6 +1562,13 @@ func (s *SchedulerSnapshotService) loadAccountsFromDB(ctx context.Context, bucke
 // （§2.1-3：快照只存候选超集，不缓存目录判定）。仅当分桶平台为聚合分组（非 codebuddy 自身）
 // 时，向原生平台账号集合追加同分组可调度 codebuddy 账号。codebuddy 平台自身候选即原生
 // codebuddy 账号，不重复 join。
+//
+// 候选超集单链（v16 §2.1-3）：分组路径（groupID>0）的主查询
+// ListSchedulableByGroupIDAndPlatform(s) 已经 repo 层 expandPlatformsForAggregatePool
+// （account_repo.go，方案钉死的唯一纳入点）自动并入 codebuddy 候选，快照层再补会把同一
+// codebuddy 账号 append 两次，扭曲负载选择并挤占目录探测名额，故分组路径跳过本层补入。
+// 非分组路径（groupID=0 未分组 / simple 模式）不经过 queryAccountsByGroup，快照层补入是
+// 唯一链，必须保留。
 func (s *SchedulerSnapshotService) withAggregatedCodeBuddy(ctx context.Context, bucket SchedulerBucket, accounts []Account) ([]Account, error) {
 	queryPlatform := schedulerAggregationQueryPlatform(bucket.Platform)
 	if queryPlatform == PlatformCodeBuddy || !isCodeBuddyAggregatedPlatform(queryPlatform) {
@@ -1571,11 +1578,14 @@ func (s *SchedulerSnapshotService) withAggregatedCodeBuddy(ctx context.Context, 
 	if s.isRunModeSimple() {
 		groupID = 0
 	}
+	if groupID > 0 {
+		// 候选超集单链（v16 §2.1-3）：分组候选池已在 repo 层纳入 codebuddy，快照层补入即重复。
+		return accounts, nil
+	}
+	// 走到这里 groupID 必为 0（分组路径已在上方按候选超集单链契约短路返回）。
 	var extra []Account
 	var err error
-	if groupID > 0 {
-		extra, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, groupID, PlatformCodeBuddy)
-	} else if s.isRunModeSimple() {
+	if s.isRunModeSimple() {
 		extra, err = s.accountRepo.ListSchedulableByPlatform(ctx, PlatformCodeBuddy)
 	} else {
 		extra, err = s.accountRepo.ListSchedulableUngroupedByPlatform(ctx, PlatformCodeBuddy)
