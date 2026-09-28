@@ -474,6 +474,40 @@ func TestCockpitImportUploadSizeLimit(t *testing.T) {
 	smallZip := buildCockpitZip(t, buildCockpitBackupJSON(sentinel, "zzz-unknown-slug", "valid"))
 	rec = serveMultipartZip(t, r, "/api/v1/admin/accounts/cockpit-import/preview", "", smallZip)
 	require.Equal(t, http.StatusOK, rec.Code)
+
+	// —— JSON 分支：精确 10MB 请求体（receipt 垫至恰好上限）不误伤 → 200 ——
+	base := cockpitJSONBody(string(raw), "")
+	exact := cockpitJSONBody(string(raw), strings.Repeat("p", cockpitImportMaxUploadBytes-len(base)))
+	require.Equal(t, cockpitImportMaxUploadBytes, len(exact))
+	rec = serveJSON(t, r, "/api/v1/admin/accounts/cockpit-import/preview", exact)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// —— JSON 分支：10MB+1 → 400（上限在 body 读取层面生效） ——
+	over1 := cockpitJSONBody(string(raw), strings.Repeat("p", cockpitImportMaxUploadBytes-len(base)+1))
+	require.Equal(t, cockpitImportMaxUploadBytes+1, len(over1))
+	rec = serveJSON(t, r, "/api/v1/admin/accounts/cockpit-import/preview", over1)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), service.ErrCockpitPayloadStructureLimit)
+
+	// —— JSON 分支：合法 JSON 信封 + 大体积尾随 → 400（解码器只读首个 JSON 值，尾部显式消费后拒绝） ——
+	pad := strings.Repeat("p", 6<<20)
+	trailing := cockpitJSONBody(string(raw), "") + pad
+	rec = serveJSON(t, r, "/api/v1/admin/accounts/cockpit-import/preview", trailing)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), service.ErrCockpitPayloadStructureLimit)
+
+	// —— multipart 分支：大体积非文件字段（receipt 11MB，无文件）→ 400（FormFile 触发
+	// ParseMultipartForm 读被限 body 即超限） ——
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	require.NoError(t, mw.WriteField("receipt", strings.Repeat("p", 11<<20)))
+	require.NoError(t, mw.Close())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/cockpit-import/preview", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), service.ErrCockpitPayloadStructureLimit)
 }
 
 // serveJSON 以 JSON 形态发送请求并返回 recorder。
