@@ -84,16 +84,21 @@ func bulkEventPayload(accountIDs []int64, groupIDs []int64) map[string]any {
 	}
 }
 
+// schedulerBucketsForTest 按 §2.1-3 契约构造期望 bucket 集：聚合族平台
+// （deepseek/zhipu/kimi/minimax/other）的 Platform 键追加 @agg<version> 标签，
+// 非聚合平台（anthropic/gemini/openai/antigravity/grok 等）维持裸名。
+// 复用生产契约函数 schedulerAggregationBucketPlatform，禁止硬编码 @agg 字面量。
 func schedulerBucketsForTest(groupIDs []int64, platforms ...string) []SchedulerBucket {
 	buckets := make([]SchedulerBucket, 0, len(groupIDs)*len(platforms)*3)
 	for _, platform := range platforms {
+		bucketPlatform := schedulerAggregationBucketPlatform(platform)
 		for _, groupID := range groupIDs {
 			buckets = append(buckets,
-				SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeSingle},
-				SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeForced},
+				SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeSingle},
+				SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeForced},
 			)
 			if platform == PlatformAnthropic || platform == PlatformGemini {
-				buckets = append(buckets, SchedulerBucket{GroupID: groupID, Platform: platform, Mode: SchedulerModeMixed})
+				buckets = append(buckets, SchedulerBucket{GroupID: groupID, Platform: bucketPlatform, Mode: SchedulerModeMixed})
 			}
 		}
 	}
