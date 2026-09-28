@@ -788,6 +788,12 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err != nil {
 		return nil, err
 	}
+	// B3a 冻结：领域写入边界防御性拒绝进入 codebuddy 影子组合（方案 §3.1-2）。
+	// CreateAccountInput 当前无法设置 ParentAccountID/QuotaDimension，故不可达；
+	// 此处守住"任何写入入口经过领域边界"的不变量，防未来旁路。
+	if err := enforceCodeBuddyShadowFreeze(nil, account); err != nil {
+		return nil, err
+	}
 	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
 	}
@@ -835,6 +841,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	// B3a 冻结：捕捉更新前快照用于身份字段不变性判定（方案 §3.1-2）。
+	// 浅拷贝：仅读 Platform/ParentAccountID/QuotaDimension 等值，更新路径不会重赋值
+	// ParentAccountID（无对应入参），故比较安全。
+	originalAccountForFreeze := *account
 	// 更新路径同样守住 other 不变量（创建校验可被 edit/导入/直写绕过）。
 	if account.Platform == PlatformOther {
 		effectiveType := account.Type
@@ -1158,6 +1168,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 
 	billingSettingsAppliedAtomically := false
+	// B3a 冻结：更新路径在落库前统一拒绝"转换进入 codebuddy 影子组合"与存量影子身份
+	// 字段修改（方案 §3.1-2）。UpdateAccountInput 不含 Platform/ParentAccountID/
+	// QuotaDimension，正常更新不会触发；此处守住领域边界单点封死的不变量。
+	if err := enforceCodeBuddyShadowFreeze(&originalAccountForFreeze, account); err != nil {
+		return nil, err
+	}
 	updater := s.accountBillingRepo
 	if updater == nil {
 		// Unit tests and narrow internal callers may construct adminServiceImpl
@@ -1661,6 +1677,60 @@ func (s *adminServiceImpl) RevertAccountProxyFallback(ctx context.Context, id in
 //
 // 安全不变量：影子账号 Credentials 恒不含 auth token（spark 仅 model_mapping；
 // codebuddy 凭证空=透传，model_mapping 自动写入官方 ID→shadow_model 映射，无清单平台为空）。
+// isCodeBuddyShadowIdentity 报告账号是否为 CodeBuddy 影子：影子（ParentAccountID 非空，
+// 即 IsShadow）且其用量维度或平台为 codebuddy。这是 B3a 冻结所针对的
+// "codebuddy+IsShadow"组合判定（方案 §3.1-2）。
+//
+// 注意数据模型：存量 codebuddy 影子的 platform 是聚合目标分组平台
+// （deepseek/zhipu/kimi/minimax/other），不是 PlatformCodeBuddy；直绑 codebuddy 账号
+// platform=PlatformCodeBuddy 但非影子（无 ParentAccountID），不在冻结范围。两种情形都
+// 计入，确保"新建"与"转换进入"任一构造方式都被拦截。
+func isCodeBuddyShadowIdentity(a *Account) bool {
+	if a == nil || !a.IsShadow() {
+		return false
+	}
+	return a.QuotaDimension == QuotaDimensionCodeBuddy || a.Platform == PlatformCodeBuddy
+}
+
+// errCodeBuddyShadowCreationFrozen 在账号创建/写入的唯一领域边界拦截任何进入
+// "codebuddy+IsShadow"组合的写入（新建或转换），错误码 CODEBUDDY_SHADOW_CREATION_FROZEN
+// （方案 §3.1-2）。存量 codebuddy 影子运行时保留，仅封"新建/转换"路径，其非身份字段
+// 更新照常放行。
+var errCodeBuddyShadowCreationFrozen = infraerrors.New(http.StatusForbidden, "CODEBUDDY_SHADOW_CREATION_FROZEN",
+	"creating or converting a CodeBuddy shadow account is frozen (B3a); existing shadows keep their identity fields immutable")
+
+// enforceCodeBuddyShadowFreeze 是账号领域写入边界的统一拒绝点（方案 §3.1-2）：
+//   - existing 为 nil 表示新建：若写入结果进入 codebuddy 影子组合，拒绝。
+//   - existing 非空表示更新：若更新把非冻结账号"转换"进入该组合（改 platform / 设
+//     IsShadow 等），拒绝；若 existing 已是 codebuddy 影子，其身份字段（platform /
+//     IsShadow / QuotaDimension）不可变，任何修改均拒绝。
+//
+// 单点封死：所有经服务层创建/更新账号的入口（CreateAccount / CreateShadow /
+// UpdateAccount）都调用本函数，未盘点而绕过领域边界的直接 repo 写入亦应被此判定覆盖。
+func enforceCodeBuddyShadowFreeze(existing, incoming *Account) error {
+	incomingFrozen := isCodeBuddyShadowIdentity(incoming)
+	if existing == nil {
+		if incomingFrozen {
+			return errCodeBuddyShadowCreationFrozen
+		}
+		return nil
+	}
+	existingFrozen := isCodeBuddyShadowIdentity(existing)
+	// 转换进入冻结组合（普通账号改 platform / 设 IsShadow 进入 codebuddy 影子）。
+	if incomingFrozen && !existingFrozen {
+		return errCodeBuddyShadowCreationFrozen
+	}
+	// 存量 codebuddy 影子身份字段不可变。
+	if existingFrozen {
+		if incoming.Platform != existing.Platform ||
+			(incoming.ParentAccountID != nil) != (existing.ParentAccountID != nil) ||
+			incoming.QuotaDimension != existing.QuotaDimension {
+			return errCodeBuddyShadowCreationFrozen
+		}
+	}
+	return nil
+}
+
 func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opts ShadowOptions) (*Account, error) {
 	// 1. 加载母账号并校验平台/类型
 	parent, err := s.accountRepo.GetByID(ctx, parentID)
@@ -1679,6 +1749,12 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	if parent.IsCredentialShadow() {
 		return nil, infraerrors.New(http.StatusBadRequest, "SHADOW_PARENT_IS_SHADOW",
 			"shadow parent must be a real account, not another shadow")
+	}
+
+	// B3a 冻结：任何 CodeBuddy 影子新建入口统一拒绝（方案 §3.1-2）。存量 codebuddy
+	// 影子运行时保留，只封"新建/转换"路径；spark 影子（isCodeBuddyParent=false）不受影响。
+	if isCodeBuddyParent {
+		return nil, errCodeBuddyShadowCreationFrozen
 	}
 
 	// 2. 影子维度与目标平台
