@@ -1699,6 +1699,16 @@ func isCodeBuddyShadowIdentity(a *Account) bool {
 var errCodeBuddyShadowCreationFrozen = infraerrors.New(http.StatusForbidden, "CODEBUDDY_SHADOW_CREATION_FROZEN",
 	"creating or converting a CodeBuddy shadow account is frozen (B3a); existing shadows keep their identity fields immutable")
 
+// int64PtrValuesEqual 比较两个 *int64 指针所指值是否相等：两者皆 nil 视为相等，
+// 一 nil 一非 nil 不等，皆非 nil 比较所指值。供冻结边界对 ParentAccountID 做值比较
+// （非空父改指另一个非空父亦视为身份变更）。
+func int64PtrValuesEqual(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 // enforceCodeBuddyShadowFreeze 是账号领域写入边界的统一拒绝点（方案 §3.1-2）：
 //   - existing 为 nil 表示新建：若写入结果进入 codebuddy 影子组合，拒绝。
 //   - existing 非空表示更新：若更新把非冻结账号"转换"进入该组合（改 platform / 设
@@ -1723,7 +1733,7 @@ func enforceCodeBuddyShadowFreeze(existing, incoming *Account) error {
 	// 存量 codebuddy 影子身份字段不可变。
 	if existingFrozen {
 		if incoming.Platform != existing.Platform ||
-			(incoming.ParentAccountID != nil) != (existing.ParentAccountID != nil) ||
+			!int64PtrValuesEqual(incoming.ParentAccountID, existing.ParentAccountID) ||
 			incoming.QuotaDimension != existing.QuotaDimension {
 			return errCodeBuddyShadowCreationFrozen
 		}
