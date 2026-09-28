@@ -102,6 +102,7 @@ var (
 		{Name: "name", Type: field.TypeString, Size: 100},
 		{Name: "notes", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"postgres": "text"}},
 		{Name: "platform", Type: field.TypeString, Size: 50},
+		{Name: "uid", Type: field.TypeString, Size: 128, Default: ""},
 		{Name: "type", Type: field.TypeString, Size: 20},
 		{Name: "credentials", Type: field.TypeJSON, SchemaType: map[string]string{"postgres": "jsonb"}},
 		{Name: "credentials_mac", Type: field.TypeString, Nullable: true, Size: 64},
@@ -138,13 +139,13 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "accounts_proxies_proxy",
-				Columns:    []*schema.Column{AccountsColumns[32]},
+				Columns:    []*schema.Column{AccountsColumns[33]},
 				RefColumns: []*schema.Column{ProxiesColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "accounts_accounts_children",
-				Columns:    []*schema.Column{AccountsColumns[33]},
+				Columns:    []*schema.Column{AccountsColumns[34]},
 				RefColumns: []*schema.Column{AccountsColumns[0]},
 				OnDelete:   schema.Restrict,
 			},
@@ -158,57 +159,57 @@ var (
 			{
 				Name:    "account_type",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[7]},
+				Columns: []*schema.Column{AccountsColumns[8]},
 			},
 			{
 				Name:    "account_status",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[17]},
+				Columns: []*schema.Column{AccountsColumns[18]},
 			},
 			{
 				Name:    "account_proxy_id",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[32]},
+				Columns: []*schema.Column{AccountsColumns[33]},
 			},
 			{
 				Name:    "account_priority",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[15]},
+				Columns: []*schema.Column{AccountsColumns[16]},
 			},
 			{
 				Name:    "account_last_used_at",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[19]},
+				Columns: []*schema.Column{AccountsColumns[20]},
 			},
 			{
 				Name:    "account_schedulable",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[22]},
+				Columns: []*schema.Column{AccountsColumns[23]},
 			},
 			{
 				Name:    "account_rate_limited_at",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[23]},
+				Columns: []*schema.Column{AccountsColumns[24]},
 			},
 			{
 				Name:    "account_rate_limit_reset_at",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[24]},
+				Columns: []*schema.Column{AccountsColumns[25]},
 			},
 			{
 				Name:    "account_overload_until",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[25]},
+				Columns: []*schema.Column{AccountsColumns[26]},
 			},
 			{
 				Name:    "account_platform_priority",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[6], AccountsColumns[15]},
+				Columns: []*schema.Column{AccountsColumns[6], AccountsColumns[16]},
 			},
 			{
 				Name:    "account_priority_status",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[15], AccountsColumns[17]},
+				Columns: []*schema.Column{AccountsColumns[16], AccountsColumns[18]},
 			},
 			{
 				Name:    "account_deleted_at",
@@ -218,7 +219,7 @@ var (
 			{
 				Name:    "account_parent_account_id",
 				Unique:  false,
-				Columns: []*schema.Column{AccountsColumns[33]},
+				Columns: []*schema.Column{AccountsColumns[34]},
 			},
 		},
 	}
@@ -258,6 +259,35 @@ var (
 				Name:    "accountgroup_priority",
 				Unique:  false,
 				Columns: []*schema.Column{AccountGroupsColumns[0]},
+			},
+		},
+	}
+	// AccountModelCapabilitiesColumns holds the columns for the "account_model_capabilities" table.
+	AccountModelCapabilitiesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "account_id", Type: field.TypeInt64},
+		{Name: "upstream_model", Type: field.TypeString, Size: 200},
+		{Name: "protocol", Type: field.TypeString, Size: 50},
+		{Name: "supports_vision", Type: field.TypeBool, Default: false},
+		{Name: "source", Type: field.TypeString, Size: 20, Default: "detect"},
+		{Name: "detected_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// AccountModelCapabilitiesTable holds the schema information for the "account_model_capabilities" table.
+	AccountModelCapabilitiesTable = &schema.Table{
+		Name:       "account_model_capabilities",
+		Columns:    AccountModelCapabilitiesColumns,
+		PrimaryKey: []*schema.Column{AccountModelCapabilitiesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "accountmodelcapability_account_id_upstream_model_protocol",
+				Unique:  true,
+				Columns: []*schema.Column{AccountModelCapabilitiesColumns[1], AccountModelCapabilitiesColumns[2], AccountModelCapabilitiesColumns[3]},
+			},
+			{
+				Name:    "accountmodelcapability_account_id",
+				Unique:  false,
+				Columns: []*schema.Column{AccountModelCapabilitiesColumns[1]},
 			},
 		},
 	}
@@ -1840,10 +1870,10 @@ var (
 		{Name: "video_duration_seconds", Type: field.TypeInt, Nullable: true},
 		{Name: "cache_ttl_overridden", Type: field.TypeBool, Default: false},
 		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
-		{Name: "api_key_id", Type: field.TypeInt64},
+		{Name: "api_key_id", Type: field.TypeInt64, Nullable: true},
 		{Name: "account_id", Type: field.TypeInt64},
 		{Name: "group_id", Type: field.TypeInt64, Nullable: true},
-		{Name: "user_id", Type: field.TypeInt64},
+		{Name: "user_id", Type: field.TypeInt64, Nullable: true},
 		{Name: "subscription_id", Type: field.TypeInt64, Nullable: true},
 	}
 	// UsageLogsTable holds the schema information for the "usage_logs" table.
@@ -1856,7 +1886,7 @@ var (
 				Symbol:     "usage_logs_api_keys_usage_logs",
 				Columns:    []*schema.Column{UsageLogsColumns[43]},
 				RefColumns: []*schema.Column{APIKeysColumns[0]},
-				OnDelete:   schema.NoAction,
+				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "usage_logs_accounts_usage_logs",
@@ -1874,7 +1904,7 @@ var (
 				Symbol:     "usage_logs_users_usage_logs",
 				Columns:    []*schema.Column{UsageLogsColumns[46]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
-				OnDelete:   schema.NoAction,
+				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "usage_logs_user_subscriptions_usage_logs",
@@ -2412,6 +2442,7 @@ var (
 		APIKeysTable,
 		AccountsTable,
 		AccountGroupsTable,
+		AccountModelCapabilitiesTable,
 		AnnouncementsTable,
 		AnnouncementReadsTable,
 		AuthIdentitiesTable,
@@ -2474,6 +2505,9 @@ func init() {
 	AccountGroupsTable.ForeignKeys[1].RefTable = GroupsTable
 	AccountGroupsTable.Annotation = &entsql.Annotation{
 		Table: "account_groups",
+	}
+	AccountModelCapabilitiesTable.Annotation = &entsql.Annotation{
+		Table: "account_model_capabilities",
 	}
 	AnnouncementsTable.Annotation = &entsql.Annotation{
 		Table: "announcements",

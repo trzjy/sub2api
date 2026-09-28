@@ -28,6 +28,8 @@ const (
 	FieldNotes = "notes"
 	// FieldPlatform holds the string denoting the platform field in the database.
 	FieldPlatform = "platform"
+	// FieldUID holds the string denoting the uid field in the database.
+	FieldUID = "uid"
 	// FieldType holds the string denoting the type field in the database.
 	FieldType = "type"
 	// FieldCredentials holds the string denoting the credentials field in the database.
@@ -141,6 +143,7 @@ var Columns = []string{
 	FieldName,
 	FieldNotes,
 	FieldPlatform,
+	FieldUID,
 	FieldType,
 	FieldCredentials,
 	FieldCredentialsMAC,
@@ -204,6 +207,10 @@ var (
 	NameValidator func(string) error
 	// PlatformValidator is a validator for the "platform" field. It is called by the builders before save.
 	PlatformValidator func(string) error
+	// DefaultUID holds the default value on creation for the "uid" field.
+	DefaultUID string
+	// UIDValidator is a validator for the "uid" field. It is called by the builders before save.
+	UIDValidator func(string) error
 	// TypeValidator is a validator for the "type" field. It is called by the builders before save.
 	TypeValidator func(string) error
 	// DefaultCredentials holds the default value on creation for the "credentials" field.
@@ -295,6 +302,11 @@ func ByNotes(opts ...sql.OrderTermOption) OrderOption {
 // ByPlatform orders the results by the platform field.
 func ByPlatform(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPlatform, opts...).ToFunc()
+}
+
+// ByUID orders the results by the uid field.
+func ByUID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUID, opts...).ToFunc()
 }
 
 // ByType orders the results by the type field.

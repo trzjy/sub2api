@@ -17,6 +17,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	"github.com/Wei-Shaw/sub2api/ent/accountmodelcapability"
 	"github.com/Wei-Shaw/sub2api/ent/announcement"
 	"github.com/Wei-Shaw/sub2api/ent/announcementread"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
@@ -77,6 +78,8 @@ type Client struct {
 	Account *AccountClient
 	// AccountGroup is the client for interacting with the AccountGroup builders.
 	AccountGroup *AccountGroupClient
+	// AccountModelCapability is the client for interacting with the AccountModelCapability builders.
+	AccountModelCapability *AccountModelCapabilityClient
 	// Announcement is the client for interacting with the Announcement builders.
 	Announcement *AnnouncementClient
 	// AnnouncementRead is the client for interacting with the AnnouncementRead builders.
@@ -179,6 +182,7 @@ func (c *Client) init() {
 	c.APIKey = NewAPIKeyClient(c.config)
 	c.Account = NewAccountClient(c.config)
 	c.AccountGroup = NewAccountGroupClient(c.config)
+	c.AccountModelCapability = NewAccountModelCapabilityClient(c.config)
 	c.Announcement = NewAnnouncementClient(c.config)
 	c.AnnouncementRead = NewAnnouncementReadClient(c.config)
 	c.AuthIdentity = NewAuthIdentityClient(c.config)
@@ -318,6 +322,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		APIKey:                        NewAPIKeyClient(cfg),
 		Account:                       NewAccountClient(cfg),
 		AccountGroup:                  NewAccountGroupClient(cfg),
+		AccountModelCapability:        NewAccountModelCapabilityClient(cfg),
 		Announcement:                  NewAnnouncementClient(cfg),
 		AnnouncementRead:              NewAnnouncementReadClient(cfg),
 		AuthIdentity:                  NewAuthIdentityClient(cfg),
@@ -384,6 +389,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		APIKey:                        NewAPIKeyClient(cfg),
 		Account:                       NewAccountClient(cfg),
 		AccountGroup:                  NewAccountGroupClient(cfg),
+		AccountModelCapability:        NewAccountModelCapabilityClient(cfg),
 		Announcement:                  NewAnnouncementClient(cfg),
 		AnnouncementRead:              NewAnnouncementReadClient(cfg),
 		AuthIdentity:                  NewAuthIdentityClient(cfg),
@@ -457,19 +463,19 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.APIKey, c.Account, c.AccountGroup, c.Announcement, c.AnnouncementRead,
-		c.AuthIdentity, c.AuthIdentityChannel, c.BatchImageEvent, c.BatchImageItem,
-		c.BatchImageJob, c.ChannelMonitor, c.ChannelMonitorDailyRollup,
-		c.ChannelMonitorHistory, c.ChannelMonitorRequestTemplate,
-		c.CompositeModelRoute, c.ErrorPassthroughRule, c.Group, c.IdempotencyRecord,
-		c.IdentityAdoptionDecision, c.PaymentAuditLog, c.PaymentOrder,
-		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
-		c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch, c.RedeemCode,
-		c.RedeemCodeGroup, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport,
-		c.UsageRiskRollup, c.UsageRiskRun, c.User, c.UserAllowedGroup,
-		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
-		c.UserSubscription, c.WelfareBalance,
+		c.APIKey, c.Account, c.AccountGroup, c.AccountModelCapability, c.Announcement,
+		c.AnnouncementRead, c.AuthIdentity, c.AuthIdentityChannel, c.BatchImageEvent,
+		c.BatchImageItem, c.BatchImageJob, c.ChannelMonitor,
+		c.ChannelMonitorDailyRollup, c.ChannelMonitorHistory,
+		c.ChannelMonitorRequestTemplate, c.CompositeModelRoute, c.ErrorPassthroughRule,
+		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
+		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
+		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch,
+		c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
+		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
+		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
+		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
+		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
 	} {
 		n.Use(hooks...)
 	}
@@ -479,19 +485,19 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.APIKey, c.Account, c.AccountGroup, c.Announcement, c.AnnouncementRead,
-		c.AuthIdentity, c.AuthIdentityChannel, c.BatchImageEvent, c.BatchImageItem,
-		c.BatchImageJob, c.ChannelMonitor, c.ChannelMonitorDailyRollup,
-		c.ChannelMonitorHistory, c.ChannelMonitorRequestTemplate,
-		c.CompositeModelRoute, c.ErrorPassthroughRule, c.Group, c.IdempotencyRecord,
-		c.IdentityAdoptionDecision, c.PaymentAuditLog, c.PaymentOrder,
-		c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode, c.PromoCodeUsage,
-		c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch, c.RedeemCode,
-		c.RedeemCodeGroup, c.SecuritySecret, c.Setting, c.SubscriptionPlan,
-		c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog, c.UsageRiskReport,
-		c.UsageRiskRollup, c.UsageRiskRun, c.User, c.UserAllowedGroup,
-		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
-		c.UserSubscription, c.WelfareBalance,
+		c.APIKey, c.Account, c.AccountGroup, c.AccountModelCapability, c.Announcement,
+		c.AnnouncementRead, c.AuthIdentity, c.AuthIdentityChannel, c.BatchImageEvent,
+		c.BatchImageItem, c.BatchImageJob, c.ChannelMonitor,
+		c.ChannelMonitorDailyRollup, c.ChannelMonitorHistory,
+		c.ChannelMonitorRequestTemplate, c.CompositeModelRoute, c.ErrorPassthroughRule,
+		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
+		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
+		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch,
+		c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
+		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
+		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
+		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
+		c.UserPlatformQuota, c.UserSubscription, c.WelfareBalance,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -506,6 +512,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Account.mutate(ctx, m)
 	case *AccountGroupMutation:
 		return c.AccountGroup.mutate(ctx, m)
+	case *AccountModelCapabilityMutation:
+		return c.AccountModelCapability.mutate(ctx, m)
 	case *AnnouncementMutation:
 		return c.Announcement.mutate(ctx, m)
 	case *AnnouncementReadMutation:
@@ -1126,6 +1134,139 @@ func (c *AccountGroupClient) mutate(ctx context.Context, m *AccountGroupMutation
 		return (&AccountGroupDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AccountGroup mutation op: %q", m.Op())
+	}
+}
+
+// AccountModelCapabilityClient is a client for the AccountModelCapability schema.
+type AccountModelCapabilityClient struct {
+	config
+}
+
+// NewAccountModelCapabilityClient returns a client for the AccountModelCapability from the given config.
+func NewAccountModelCapabilityClient(c config) *AccountModelCapabilityClient {
+	return &AccountModelCapabilityClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `accountmodelcapability.Hooks(f(g(h())))`.
+func (c *AccountModelCapabilityClient) Use(hooks ...Hook) {
+	c.hooks.AccountModelCapability = append(c.hooks.AccountModelCapability, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `accountmodelcapability.Intercept(f(g(h())))`.
+func (c *AccountModelCapabilityClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AccountModelCapability = append(c.inters.AccountModelCapability, interceptors...)
+}
+
+// Create returns a builder for creating a AccountModelCapability entity.
+func (c *AccountModelCapabilityClient) Create() *AccountModelCapabilityCreate {
+	mutation := newAccountModelCapabilityMutation(c.config, OpCreate)
+	return &AccountModelCapabilityCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AccountModelCapability entities.
+func (c *AccountModelCapabilityClient) CreateBulk(builders ...*AccountModelCapabilityCreate) *AccountModelCapabilityCreateBulk {
+	return &AccountModelCapabilityCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AccountModelCapabilityClient) MapCreateBulk(slice any, setFunc func(*AccountModelCapabilityCreate, int)) *AccountModelCapabilityCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AccountModelCapabilityCreateBulk{err: fmt.Errorf("calling to AccountModelCapabilityClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AccountModelCapabilityCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AccountModelCapabilityCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AccountModelCapability.
+func (c *AccountModelCapabilityClient) Update() *AccountModelCapabilityUpdate {
+	mutation := newAccountModelCapabilityMutation(c.config, OpUpdate)
+	return &AccountModelCapabilityUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AccountModelCapabilityClient) UpdateOne(_m *AccountModelCapability) *AccountModelCapabilityUpdateOne {
+	mutation := newAccountModelCapabilityMutation(c.config, OpUpdateOne, withAccountModelCapability(_m))
+	return &AccountModelCapabilityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AccountModelCapabilityClient) UpdateOneID(id int64) *AccountModelCapabilityUpdateOne {
+	mutation := newAccountModelCapabilityMutation(c.config, OpUpdateOne, withAccountModelCapabilityID(id))
+	return &AccountModelCapabilityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AccountModelCapability.
+func (c *AccountModelCapabilityClient) Delete() *AccountModelCapabilityDelete {
+	mutation := newAccountModelCapabilityMutation(c.config, OpDelete)
+	return &AccountModelCapabilityDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AccountModelCapabilityClient) DeleteOne(_m *AccountModelCapability) *AccountModelCapabilityDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AccountModelCapabilityClient) DeleteOneID(id int64) *AccountModelCapabilityDeleteOne {
+	builder := c.Delete().Where(accountmodelcapability.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AccountModelCapabilityDeleteOne{builder}
+}
+
+// Query returns a query builder for AccountModelCapability.
+func (c *AccountModelCapabilityClient) Query() *AccountModelCapabilityQuery {
+	return &AccountModelCapabilityQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAccountModelCapability},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AccountModelCapability entity by its id.
+func (c *AccountModelCapabilityClient) Get(ctx context.Context, id int64) (*AccountModelCapability, error) {
+	return c.Query().Where(accountmodelcapability.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AccountModelCapabilityClient) GetX(ctx context.Context, id int64) *AccountModelCapability {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AccountModelCapabilityClient) Hooks() []Hook {
+	return c.hooks.AccountModelCapability
+}
+
+// Interceptors returns the client interceptors.
+func (c *AccountModelCapabilityClient) Interceptors() []Interceptor {
+	return c.inters.AccountModelCapability
+}
+
+func (c *AccountModelCapabilityClient) mutate(ctx context.Context, m *AccountModelCapabilityMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AccountModelCapabilityCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AccountModelCapabilityUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AccountModelCapabilityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AccountModelCapabilityDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AccountModelCapability mutation op: %q", m.Op())
 	}
 }
 
@@ -8197,32 +8338,32 @@ func (c *WelfareBalanceClient) mutate(ctx context.Context, m *WelfareBalanceMuta
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
-		AuthIdentityChannel, BatchImageEvent, BatchImageItem, BatchImageJob,
-		ChannelMonitor, ChannelMonitorDailyRollup, ChannelMonitorHistory,
-		ChannelMonitorRequestTemplate, CompositeModelRoute, ErrorPassthroughRule,
-		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
-		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, RedeemBatch,
-		RedeemCode, RedeemCodeGroup, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, UsageRiskReport,
-		UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup, UserAttributeDefinition,
-		UserAttributeValue, UserPlatformQuota, UserSubscription,
-		WelfareBalance []ent.Hook
+		APIKey, Account, AccountGroup, AccountModelCapability, Announcement,
+		AnnouncementRead, AuthIdentity, AuthIdentityChannel, BatchImageEvent,
+		BatchImageItem, BatchImageJob, ChannelMonitor, ChannelMonitorDailyRollup,
+		ChannelMonitorHistory, ChannelMonitorRequestTemplate, CompositeModelRoute,
+		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
+		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
+		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy,
+		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
+		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
+		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
+		UserSubscription, WelfareBalance []ent.Hook
 	}
 	inters struct {
-		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
-		AuthIdentityChannel, BatchImageEvent, BatchImageItem, BatchImageJob,
-		ChannelMonitor, ChannelMonitorDailyRollup, ChannelMonitorHistory,
-		ChannelMonitorRequestTemplate, CompositeModelRoute, ErrorPassthroughRule,
-		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
-		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
-		PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, RedeemBatch,
-		RedeemCode, RedeemCodeGroup, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, UsageRiskReport,
-		UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup, UserAttributeDefinition,
-		UserAttributeValue, UserPlatformQuota, UserSubscription,
-		WelfareBalance []ent.Interceptor
+		APIKey, Account, AccountGroup, AccountModelCapability, Announcement,
+		AnnouncementRead, AuthIdentity, AuthIdentityChannel, BatchImageEvent,
+		BatchImageItem, BatchImageJob, ChannelMonitor, ChannelMonitorDailyRollup,
+		ChannelMonitorHistory, ChannelMonitorRequestTemplate, CompositeModelRoute,
+		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
+		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
+		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy,
+		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
+		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
+		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
+		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
+		UserSubscription, WelfareBalance []ent.Interceptor
 	}
 )
 
