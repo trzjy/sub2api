@@ -1,7 +1,12 @@
-// account_repo_cockpit_import.go —— cockpit 导入整文件原子提交仓储（方案 v15 §1.6，B1b）。
+// account_repo_cockpit_import.go —— cockpit 导入整文件原子提交仓储（方案 v16 §1.6，B1b）。
 //
 // 职责：在单一数据库事务内，把一批已构造好的账号终态载荷（platform/uid/credentials/extra）
 // 原子写入 accounts 表，并返回 created / skipped_existing 计数。
+//
+// 并发计数确定性（v16 §1.6 钉死）：自有事务路径在事务起点取
+// pg_advisory_xact_lock（固定键）串行化 cockpit 导入提交——消除先查后写竞态
+// 导致的 created/skipped 误计（ent 批量 upsert 不暴露实际插入行数，先查后写
+// 差值在并发下不可判定；这是唯一最小机制）。DO NOTHING 仍是约束兜底，写入语义不变。
 //
 // 冲突语义（方案 §1.6 钉死，零兜底）：
 //   - 唯一约束由部分唯一索引 accounts_platform_uid_active (platform, uid) WHERE uid != '' 提供；
@@ -33,6 +38,11 @@ type cockpitImportKey struct {
 	platform string
 	uid      string
 }
+
+// cockpitImportAdvisoryLockKey 是 cockpit 导入提交串行化的事务级咨询锁固定键。
+// 取值来源：FNV-1a 64-bit("sub2api/cockpit_import_commit") = 6799643624145489065
+// （确定性派生、常量钉死，与迁移锁 migrationsAdvisoryLockID=694208311321144027 不冲突）。
+const cockpitImportAdvisoryLockKey int64 = 6799643624145489065
 
 type cockpitImportCommitRepository struct {
 	client *dbent.Client
@@ -74,8 +84,21 @@ func (r *cockpitImportCommitRepository) CommitCockpitImport(ctx context.Context,
 	if err == nil {
 		defer func() { _ = tx.Rollback() }()
 		txClient = tx.Client()
+
+		// v16 §1.6 并发计数确定性：自有事务路径在事务起点取
+		// pg_advisory_xact_lock（固定键）串行化 cockpit 导入提交，消除先查后写
+		// 竞态导致的 created/skipped 误计（ent 批量 upsert 不暴露实际插入行数，
+		// 先查后写差值在并发下不可判定）。xact 变体随事务提交/回滚自动释放，无需解锁。
+		// 经事务驱动 ExecContext 执行（tx.config.driver 为 *txDriver，链路
+		// 直达底层 *sql.Tx.ExecContext），保证锁与后续语句同连接同事务。
+		if _, lerr := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", cockpitImportAdvisoryLockKey); lerr != nil {
+			return result, fmt.Errorf("cockpit import acquire advisory lock: %w", lerr)
+		}
 	} else {
 		// 已处于调用方事务中，复用该事务。
+		// 注：此 ErrTxStarted 分支当前无生产调用方（handler 直调本仓储），
+		// 故不加咨询锁——调用方事务的生命周期与隔离边界不归本仓储管辖，
+		// 串行化责任由未来引入该路径的调用方承担（届时须同步评审锁粒度）。
 		txClient = r.client
 	}
 
