@@ -458,3 +458,85 @@ func TestForwardResponsesViaCodeBuddy_ConvertsResponsesToChatCompletions(t *test
 	require.Contains(t, outBody, `"messages"`, "outbound body must be Chat Completions shape")
 	require.Contains(t, outBody, `"stream":true`, "codebuddy upstream forces stream:true")
 }
+
+// TestForwardResponses_CodeBuddyShadowRoutesToCodeBuddyBridge 是 v16 §2.1-4 存量影子
+// 判定回归：codebuddy 影子账号 platform 为目标分组平台（deepseek），旧判定
+// isCodeBuddyPlatformAccount 只认 platform=codebuddy，影子会绕过 /responses→CC 转换
+// 分支，Responses 形状直透上游被 code=11133 拒绝。修复后判定为「通用平台路径 ∪
+// 旧影子判定」，/responses 入站必须进入 forwardResponsesViaCodeBuddy，出站打到
+// CodeBuddy 上游 /v2/chat/completions（而非 chatgpt.com 或 deepseek 原生上游）。
+func TestForwardResponses_CodeBuddyShadowRoutesToCodeBuddyBridge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{
+		"model":"deepseek-v4.1-flash",
+		"stream":false,
+		"instructions":"You are a helpful assistant.",
+		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+
+	ok200 := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{
+			"id":"chatcmpl-shadow-1","object":"chat.completion","model":"deepseek-v4.1-flash",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`)),
+	}
+	upstream := &httpUpstreamRecorder{resp: ok200}
+
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
+		},
+		Gateway: config.GatewayConfig{
+			CodeBuddy: config.GatewayCodeBuddyConfig{SanitizeEnabled: true},
+		},
+	}
+	parent := healthyCodeBuddyGatewayTestAccount(9800, "access-token")
+	svc := &OpenAIGatewayService{
+		cfg:          cfg,
+		httpUpstream: upstream,
+		accountRepo:  &codeBuddyShadowRepoStub{parent: parent},
+	}
+
+	// 存量 codebuddy 影子：platform=deepseek（目标分组平台）+ 影子标记 +
+	// quota_dimension=codebuddy。
+	shadow := &Account{
+		ID:              9801,
+		Name:            "shadow-deepseek",
+		Platform:        PlatformDeepseek,
+		Type:            AccountTypeOAuth,
+		Status:          StatusActive,
+		Schedulable:     true,
+		Concurrency:     1,
+		ParentAccountID: ptrI64(parent.ID),
+		QuotaDimension:  QuotaDimensionCodeBuddy,
+	}
+
+	result, err := svc.Forward(context.Background(), c, shadow, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 分支标记断言：必须命中 forwardResponsesViaCodeBuddy——上游为 CodeBuddy
+	// /v2/chat/completions，而非 chatgpt.com（通用 OpenAI 路径）或 deepseek 原生上游。
+	require.NotNil(t, upstream.lastReq, "must have sent an upstream request")
+	require.Equal(t, "copilot.tencent.com", upstream.lastReq.URL.Host,
+		"codebuddy 影子 /responses 必须桥接到 CodeBuddy 上游")
+	require.Equal(t, codeBuddyChatCompletionsPath, upstream.lastReq.URL.Path)
+
+	// 出站 body 必须已完成 Responses→CC 转换（code=11133 的修复点）。
+	require.Len(t, upstream.bodies, 1, "single upstream request")
+	outBody := string(upstream.bodies[0])
+	require.Contains(t, outBody, `"messages"`, "outbound body must be Chat Completions shape")
+	require.NotContains(t, outBody, `"input"`, "Responses-only field input must not reach upstream")
+	require.Contains(t, outBody, `"stream":true`, "codebuddy upstream forces stream:true")
+
+	// 影子凭证透传母账号（§2.4 指纹头）。
+	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
+}
