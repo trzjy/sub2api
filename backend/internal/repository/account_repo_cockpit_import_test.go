@@ -1,11 +1,15 @@
 package repository
 
 import (
+	"context"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/lib/pq"
@@ -83,4 +87,48 @@ func TestAccountUIDPartialIndexConflictSQL(t *testing.T) {
 	require.Regexp(t, `WHERE "uid" <> \$\d+`, q, "冲突目标必须含部分索引谓词 WHERE uid <> ''")
 	// 参数中应包含空串占位（NEQ 的第二个操作数）。
 	require.Contains(t, args, "")
+}
+
+// TestCockpitImportCommitAcquiresAdvisoryLockFirst 验证 v16 §1.6 并发计数确定性：
+// 自有事务路径在事务起点执行 SELECT pg_advisory_xact_lock($1)（固定键），
+// 且该语句先于存量查询执行。sqlmock 期望默认有序——期望序列本身即顺序断言；
+// 真竞争在单测下不可模拟，故仅钉住"锁语句在事务起点、先于存量查询"的顺序。
+func TestCockpitImportCommitAcquiresAdvisoryLockFirst(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	driver := entsql.OpenDB(dialect.Postgres, db)
+	client := dbent.NewClient(dbent.Driver(driver))
+	t.Cleanup(func() { _ = client.Close() })
+	repo := NewCockpitImportCommitRepository(client)
+
+	payloads := []service.CockpitImportAccountPayload{
+		{Platform: "claude", UID: "lock-order-1", Name: "lock-order-1", AccountType: "oauth",
+			Credentials: map[string]any{"access_token": "a"}, Extra: map[string]any{}},
+	}
+
+	// 事务开始。
+	mock.ExpectBegin()
+	// 锁语句必须在事务起点、任何读写之前执行（含固定键参数）。
+	mock.ExpectExec(regexp.QuoteMeta("SELECT pg_advisory_xact_lock($1)")).
+		WithArgs(cockpitImportAdvisoryLockKey).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// ① 存量查询：无存量。
+	mock.ExpectQuery(`SELECT .+ FROM "accounts"`).
+		WillReturnRows(sqlmock.NewRows([]string{"platform", "uid"}))
+	// ② 整批 INSERT ... ON CONFLICT DO NOTHING RETURNING "id"（ent 走 Query 路径）。
+	mock.ExpectQuery(`INSERT INTO "accounts"`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(1)))
+	// ③ 写后校验查询：键已落库 → created=1。
+	mock.ExpectQuery(`SELECT .+ FROM "accounts"`).
+		WillReturnRows(sqlmock.NewRows([]string{"platform", "uid"}).
+			AddRow("claude", "lock-order-1"))
+	mock.ExpectCommit()
+
+	res, err := repo.CommitCockpitImport(context.Background(), payloads)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Created)
+	require.Equal(t, 0, res.SkippedExisting)
+	require.NoError(t, mock.ExpectationsWereMet(), "锁语句必须在事务起点、先于存量查询执行且恰好一次")
 }
