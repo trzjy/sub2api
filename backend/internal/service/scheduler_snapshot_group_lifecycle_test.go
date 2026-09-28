@@ -328,11 +328,20 @@ func expectedGroupLifecycleBuckets(groupID int64) []SchedulerBucket {
 	return schedulerCanonicalBuckets(groupID)
 }
 
+// schedulerCanonicalAccountQueryCount 返回单活跃分组一次 canonical full rebuild
+// 触发的账号仓库查询数（按 groupID+platform 去重后）。除每平台自身查询与
+// anthropic/gemini 的 mixed 额外查询外，§2.1-3 聚合契约要求聚合族平台
+// （deepseek/zhipu/kimi/minimax/other）在重建其 bucket 时一并查询 codebuddy
+// 候选池（codebuddy 账号作为国产模型候选纳入），故每个聚合族平台额外 +1。
+// 复用生产契约判定 isCodeBuddyAggregatedPlatform，禁止硬编码聚合族集合或 @agg 字面量。
 func schedulerCanonicalAccountQueryCount() int {
 	count := 0
 	for _, platform := range schedulerSnapshotPlatforms() {
 		count++
 		if platform == PlatformAnthropic || platform == PlatformGemini {
+			count++
+		}
+		if isCodeBuddyAggregatedPlatform(platform) && platform != PlatformCodeBuddy {
 			count++
 		}
 	}
