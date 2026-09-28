@@ -3302,6 +3302,47 @@ type accountGroupQueryOptions struct {
 	platforms            []string // 允许的多个平台，空切片表示不进行平台过滤
 }
 
+// aggregatePlatformFamily 是国产 OpenAI 兼容平台族（方案 §2.1-1 唯一事实源）。
+// 分组 platform 属于该族时，候选池额外纳入 platform=codebuddy 的可调度账号。
+// 不在此集合内的平台（openai/anthropic/gemini/grok 等）行为逐位不变。
+var aggregatePlatformFamily = map[string]struct{}{
+	service.PlatformDeepseek: {},
+	service.PlatformZhipu:    {},
+	service.PlatformKimi:     {},
+	service.PlatformMiniMax:  {},
+	service.PlatformOther:    {},
+	service.PlatformCodeBuddy: {},
+}
+
+// expandPlatformsForAggregatePool 对聚合族分组，在原有平台集合基础上并入
+// codebuddy 平台，使候选池额外包含可调度 codebuddy 账号；非聚合平台集合逐位
+// 不变。若 codebuddy 已在集合中则不重复并入（codebuddy 自有分组行为不变）。
+// 该函数仅扩展"平台集合"，不涉及 schedulable/状态/瞬态过滤，后者由
+// queryAccountsByGroup 既有谓词保证（schedulable=false 的 codebuddy 任何分组都
+// 不可见）。
+func expandPlatformsForAggregatePool(platforms []string) []string {
+	if len(platforms) == 0 {
+		return platforms
+	}
+	needCodeBuddy := false
+	hasCodeBuddy := false
+	for _, p := range platforms {
+		if _, ok := aggregatePlatformFamily[p]; ok {
+			needCodeBuddy = true
+		}
+		if p == service.PlatformCodeBuddy {
+			hasCodeBuddy = true
+		}
+	}
+	if !needCodeBuddy || hasCodeBuddy {
+		return platforms
+	}
+	out := make([]string, 0, len(platforms)+1)
+	out = append(out, platforms...)
+	out = append(out, service.PlatformCodeBuddy)
+	return out
+}
+
 func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID int64, opts accountGroupQueryOptions) ([]service.Account, error) {
 	q := r.client.AccountGroup.Query().
 		Where(dbaccountgroup.GroupIDEQ(groupID))
@@ -3313,7 +3354,9 @@ func (r *accountRepository) queryAccountsByGroup(ctx context.Context, groupID in
 		preds = append(preds, dbaccount.StatusEQ(opts.status))
 	}
 	if len(opts.platforms) > 0 {
-		preds = append(preds, dbaccount.PlatformIn(opts.platforms...))
+		// 方案 §2.1-1：聚合族分组（国产 OpenAI 兼容族）的候选池额外纳入
+		// platform=codebuddy 的可调度账号；非聚合分组逐位不变。
+		preds = append(preds, dbaccount.PlatformIn(expandPlatformsForAggregatePool(opts.platforms)...))
 	}
 	if opts.schedulable {
 		preds = append(preds, dbaccount.SchedulableEQ(true))
