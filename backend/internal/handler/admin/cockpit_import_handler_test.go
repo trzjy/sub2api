@@ -439,6 +439,43 @@ func TestCockpitImportSentinelLeakJsonAndZip(t *testing.T) {
 	}
 }
 
+// TestCockpitImportUploadSizeLimit 上传体积硬上限（方案 §1.4 ≤ 10 MB，失败关闭）：
+// 两分支超限 → 400 PAYLOAD_STRUCTURE_LIMIT（响应不含上传内容）；边界内小请求不误伤。
+func TestCockpitImportUploadSizeLimit(t *testing.T) {
+	signer := service.NewCockpitPreviewReceiptSigner(cockpitTestMasterSecret)
+	r, _, _ := newCockpitTestRouter(t, &fakeCockpitCommitRepo{}, signer)
+
+	// —— JSON 分支：超限（receipt 字段垫大体积，请求总长 > 上限）→ 400，响应零内容回显 ——
+	overBody := cockpitJSONBody("{}", strings.Repeat("p", 10<<20+128))
+	require.Greater(t, len(overBody), cockpitImportMaxUploadBytes+1)
+	rec := serveJSON(t, r, "/api/v1/admin/accounts/cockpit-import/preview", overBody)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), service.ErrCockpitPayloadStructureLimit)
+	require.NotContains(t, rec.Body.String(), strings.Repeat("p", 64))
+
+	// —— JSON 分支：上限内（receipt 垫至 ~9MB，content 为合法小备份）不误伤 → 200 ——
+	sentinel := cockpitRandomSentinel(t)
+	raw := buildCockpitBackupJSON(sentinel, "zzz-unknown-slug", "valid")
+	underBody := cockpitJSONBody(string(raw), strings.Repeat("p", 9<<20))
+	require.Less(t, len(underBody), cockpitImportMaxUploadBytes)
+	rec = serveJSON(t, r, "/api/v1/admin/accounts/cockpit-import/preview", underBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, rec.Body.String(), sentinel)
+
+	// —— multipart 分支：>10MB ZIP（随机字节不可压，Deflate 后仍超限）→ 400 ——
+	big := make([]byte, 11<<20)
+	_, err := rand.Read(big)
+	require.NoError(t, err)
+	rec = serveMultipartZip(t, r, "/api/v1/admin/accounts/cockpit-import/preview", "", big)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), service.ErrCockpitPayloadStructureLimit)
+
+	// —— multipart 分支：小 ZIP 不误伤 → 200 ——
+	smallZip := buildCockpitZip(t, buildCockpitBackupJSON(sentinel, "zzz-unknown-slug", "valid"))
+	rec = serveMultipartZip(t, r, "/api/v1/admin/accounts/cockpit-import/preview", "", smallZip)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
 // serveJSON 以 JSON 形态发送请求并返回 recorder。
 func serveJSON(t *testing.T, r *gin.Engine, path, body string) *httptest.ResponseRecorder {
 	t.Helper()

@@ -48,13 +48,14 @@ func RegisterAdminRoutes(
 		registerAccountRoutes(admin, h, stepUpAuth)
 
 		// Cockpit 备份导入 preview/commit（B1c，方案 §1.4-1.8）：复用 admin 边界 + 审计；
-		// preview 额外挂 Heavy 限流（§1.5 取证结论，复用既有 PanelRateLimiter 配置项）。
+		// Heavy 限流属 preview 专属资源边界（方案 §1.5/验收表），commit 走既有 admin 基础限流。
 		// 不新造权限/限流/指标机制；nil 守卫仅防御未注入情形。
 		if h.Admin.CockpitImport != nil {
 			cockpitImport := admin.Group("/accounts/cockpit-import")
-			cockpitImport.Use(panelRateLimiter.Heavy())
-			cockpitImport.POST("/preview", h.Admin.CockpitImport.PreviewCockpitImport)
 			cockpitImport.POST("/commit", h.Admin.CockpitImport.CommitCockpitImport)
+			preview := cockpitImport.Group("")
+			preview.Use(panelRateLimiter.Heavy())
+			preview.POST("/preview", h.Admin.CockpitImport.PreviewCockpitImport)
 		}
 
 		// 公告管理

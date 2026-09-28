@@ -29,6 +29,12 @@ import (
 // preview_rejected_concurrency（对应 §1.5 钉死事件名）。
 const cockpitPreviewConcurrencyLimit = 8
 
+// cockpitImportMaxUploadBytes 是 cockpit 备份导入上传体积硬上限（方案 §1.4 "上传 ≤ 10 MB"）。
+// 读请求体前强制生效（失败关闭）：multipart 分支经 LimitReader、JSON 分支经 MaxBytesReader，
+// 超限一律 400 PAYLOAD_STRUCTURE_LIMIT，且响应不含任何上传内容。与解析器内
+// maxBackupJSONBytes(50MB) 并行：前者封传输字节，后者封解压后结构上限。
+const cockpitImportMaxUploadBytes = 10 << 20
+
 // CockpitImportHandler 暴露 cockpit 备份导入的 preview/commit 端点（B1c）。
 type CockpitImportHandler struct {
 	commitSvc    *service.CockpitImportCommitService
@@ -57,6 +63,8 @@ func cockpitImportOperator(c *gin.Context) (string, bool) {
 
 // readCockpitImportUpload 从请求读取导入原始字节（multipart "file" 或 JSON 体 "content"）。
 // 返回 raw 字节与 receipt（commit 用）。两者均优先 multipart 表单字段，回退 raw JSON 体。
+// 上传体积硬上限（方案 §1.4 ≤ 10 MB）在读取/绑定前强制生效，超限 → *CockpitImportError
+//（Code: ErrCockpitPayloadStructureLimit），由 writeCockpitErr 映射 400，响应不含上传内容。
 // multipart 形态下审计中间件按非 JSON 整段省略请求体，天然规避凭证泄漏（§1.7）。
 func readCockpitImportUpload(c *gin.Context) (raw []byte, receipt string, err error) {
 	if strings.Contains(strings.ToLower(c.ContentType()), "multipart/form-data") {
@@ -69,18 +77,28 @@ func readCockpitImportUpload(c *gin.Context) (raw []byte, receipt string, err er
 			return nil, "", oerr
 		}
 		defer f.Close()
-		data, rerr := io.ReadAll(f)
+		data, rerr := io.ReadAll(io.LimitReader(f, cockpitImportMaxUploadBytes+1))
 		if rerr != nil {
 			return nil, "", rerr
+		}
+		if len(data) > cockpitImportMaxUploadBytes {
+			return nil, "", &service.CockpitImportError{Code: service.ErrCockpitPayloadStructureLimit}
 		}
 		return data, c.PostForm("receipt"), nil
 	}
 	// 回退：JSON 体 {"receipt": "...", "content": "<raw json/zip 文本>"}（content 为原始文本，非 base64）。
+	// bind 前包 MaxBytesReader：超限时 ShouldBindJSON 返回 *http.MaxBytesError → 统一 400
+	// PAYLOAD_STRUCTURE_LIMIT（失败关闭，响应不含上传内容）。
 	var body struct {
 		Receipt string `json:"receipt"`
 		Content string `json:"content"`
 	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, cockpitImportMaxUploadBytes+1)
 	if berr := c.ShouldBindJSON(&body); berr != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(berr, &maxErr) {
+			return nil, "", &service.CockpitImportError{Code: service.ErrCockpitPayloadStructureLimit}
+		}
 		return nil, "", berr
 	}
 	return []byte(body.Content), body.Receipt, nil
