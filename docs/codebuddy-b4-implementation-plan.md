@@ -35,6 +35,15 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R5 消化（2026-09-29，直连 gpt-5.6-sol，block→回修）
+
+外审证据：`~/.codex-companion/b4-plan-review/direct-r5/`。R4 #2 闭合；
+剩 1 项 must_fix **采纳**：当前已接受事件的 SQL 比较状态与 version 写入
+语义未钉死。回修：Card B 补可执行定义——当前事件时间 =
+`GREATEST(COALESCE(packages_updated_at,0), COALESCE(last_attempt_at,0))`
+（零新增字段，优先于外审建议的显式新字段方案，合同 §5）、version 一律
+= attempt_version 成功提交不得另自增、五场景回归补两条交错断言。
+
 ### R4 消化（2026-09-29，直连 gpt-5.6-sol，block→机械回修）
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r4/`。R3 #2/#4/#5 闭合；
@@ -205,15 +214,27 @@ Extra 新键：
 - 文件：`internal/repository/`（新增 `account_extra_conditional.go` + test）、
   quota service 写路径接入（替换 `queryUsageForAccount` 全部写入口）。
 - 内容：快照专用条件更新 repo 方法（§0.2 已证 UpdateExtra 不足；单一新
-  入口）：排序键按 §1 统一排序键定义（R4 回修 #1 收敛）——抓取开始时仅
-  取得并复用 `attempt_version`（DB 分配单调号）；**成功条件更新用
+  入口）：排序键按 §1 统一排序键定义——抓取开始时仅取得并复用
+  `attempt_version`（DB 分配单调号）；**成功条件更新用
   `(success_time, attempt_version)`**（success_time = 该次成功快照完成
-  时刻，持久化于 `packages_updated_at` 并作为比较状态源）；**失败条件
-  更新用 `(attempt_time, attempt_version)`**（持久化于
-  `last_attempt_at`）；同一 DB 字典序条件更新裁决。**字段矩阵（R2 回修
-  #3，逐项钉死）**：
+  时刻，成功事务持久化于 `packages_updated_at`）；**失败条件更新用
+  `(attempt_time, attempt_version)`**（接受时持久化于
+  `last_attempt_at`）；同一 DB 字典序条件更新裁决。
+  - **当前已接受事件比较状态的可执行定义（R5 回修 #1，零新增字段）**：
+    当前事件时间 = `GREATEST(COALESCE(packages_updated_at,0),
+    COALESCE(last_attempt_at,0))`，当前版本 = `codebuddy_credit_version`
+    （其值 = 最近一次被接受事件的 attempt_version）。成立前提（由比较器
+    单调性保证，回归断言）：成功事务同事务更新 packages_updated_at 与
+    last_attempt_at = success_time；被接受的失败写 last_attempt_at =
+    attempt_time > 当前事件时间。NULL 视为时间零值；同时间戳按版本号
+    大者胜（tiebreaker）。
+  - **version 写入语义（R5 回修 #1）**：`codebuddy_credit_version` 一律
+    写入本次抓取开始取得的 `attempt_version`；**成功提交不得另行自增
+    生成新版本**（自增会破坏比较键中 attempt_version 语义）。
+  - **字段矩阵（R2 回修 #3，逐项钉死）**：
   - 成功事务：分包快照 + `packages_updated_at` + `reset_at` + `used_percent`
-    + `last_attempt_at` + version 自增 + 本次解析错误结果；
+    + `last_attempt_at`(=success_time) + version(=attempt_version，不另自增)
+    + 本次解析错误结果；
   - 本次无错误才清除旧错误；
   - 失败事务：同一排序键下仅更新错误/尝试字段（`last_attempt_at` + 错误
     标记 + 失败 version 持久化），**不得**修改 freshness/reset_at/成功快照；
@@ -221,7 +242,9 @@ Extra 新键：
 - **DB-backed 五场景回归 = 完成门禁（不可跳过）**：dockerized postgres
   （本地 docker，`go test -tags integration`），五场景 = 延迟失败/并发
   成功失败/同戳乱序（断言双请求各持不同 version）/失败后成功清错误/
-  先发后至跨版本清除过期错误；补验收：新快照后 reset_at 与阈值候选回归
+  先发后至跨版本清除过期错误；**补交错断言（R5 回修 #1）：失败已接受后
+  较早成功到达（被拒，不回退）与成功已接受后较早失败到达（被拒，不覆盖
+  成功时间），覆盖 GREATEST 比较状态推导的正确性**；补验收：新快照后 reset_at 与阈值候选回归
   断言；命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
   "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
 - 部署顺序：与 Card A 同变更合入；见 Card E 发布闸门。
