@@ -1,4 +1,4 @@
-# CF 524 上游悬挂治理方案 v6（首字节护栏 + 流式心跳保活）
+# CF 524 上游悬挂治理方案 v7（首字节护栏 + 流式心跳保活）
 
 > 状态：确认审（R3）7 项全采纳回修，待派发。2026-09-30 用户裁定：采用方案 A
 > （心跳+护栏+failover，含流式晚到错误统一 SSE error 帧的契约变更授权）。
@@ -76,11 +76,15 @@
   2. `gateway_anthropic_passthrough.go:107`（API-key 直通 DoWithTLS）
   3. `gateway_forward_as_chat_completions.go`（CC→Anthropic 链路）
   4. `gateway_forward_as_responses.go`（/v1/responses 非 OpenAI 平台）
-  5. `openai_gateway_forward.go`（OpenAI 原生既有 headerGuard——G1 迁移共享
-     组件后改调共享实现，语义零变化）
-- **请求级总预算（R3 P1-3 闭合：从请求入口计时）**：预算起点 = 请求到达网关的
-  单调时间（handler 入口既有请求起点，如无则在入口中间件记录），非 forward 层
-  进入时刻——避免认证/排队/限流吃掉墙前余量。进入 forward 层时剩余预算 =
+  5. `openai_gateway_forward.go`（OpenAI 原生既有 headerGuard——G1 仅将其
+     底层定时器原语迁移为共享实现并以适配器包回**既有行为**：既有
+     newOpenAIFirstOutputTimeoutError、openai 超时配置、handler 换号计数
+     全部原样保留；**入口总预算/心跳/新错误构造器一律不进 OpenAI 路径**
+     （R6 P1-1），反向测试钉死）
+- **请求级总预算（仅适用四个新挂点；R3 P1-3 闭合：从请求入口计时）**：
+  **入口单调时钟唯一传播路径（R6 P2-6）**：唯一入口中间件创建请求级单调
+  起点并写入请求上下文，五个挂点一律只消费该值、禁止在 forward 层重新
+  初始化；前置延迟+首帧组合时间轴逐路径验收——避免认证/排队/限流吃掉墙前余量。进入 forward 层时剩余预算 =
   总预算 − 入口已耗时间：
   - **有心跳的流式客户端（heartbeat>0 且 clientStream）**：总预算 = 2×guard +
     10s 写回余量（默认 190s）；
@@ -88,15 +92,24 @@
     保护，预算必须墙内收敛）**：总预算 = guard + 25s（默认 115s < 120s 双墙）；
   每次尝试的 guard 窗口 = min(guard, 剩余预算)，换号不重置。
   前置延迟超 5s 仍须墙内返回（验收用例钉死）。
-  **不可变截止时间（R4 P1-3 闭合）**：绝对截止在入口**计算一次并保持不可变**
-  （单调时钟）；每轮尝试仅从该截止时间取剩余窗口，禁止在循环内重建完整
-  guard 窗口；时间轴用例：入口前置延迟 + 首轮超时 + 换号 + 次轮再超时 →
-  最终响应必须 ≤ 对应总预算。
-  **护栏取消边界仅覆盖响应头等待（R5 P1-1 闭合）**：guard 的 context 取消
-  边界在收到上游响应头那一刻解除（对齐既有 headerGuard 的 stopHeaderWait
-  语义），**响应体读取/流式转发/聚合永不在该 deadline 内**——Go 的 request
-  context 若不解除会连 Body 读取一起取消，截断已成功的响应，违反"首字节后
-  零改动"。定向测试：响应头先到、响应体传输超过预算 → 仍完整送达。
+  **不可变截止时间 + 配置快照（R4 P1-3 + R6 P2-4 闭合）**：请求入口一次
+  捕获 {guard 值, heartbeat delay 值, 绝对截止时间} 为不可变快照传入所有
+  attempt 与心跳 owner——热加载只影响后续请求，同一请求参数恒定；每轮
+  尝试仅从快照截止时间取剩余窗口，禁止循环内重建完整 guard 窗口；跨热
+  加载边界测试钉死；时间轴用例：入口前置延迟 + 首轮超时 + 换号 + 次轮
+  再超时 → 最终响应 ≤ 对应总预算。
+  **护栏 = watchdog，非 context deadline（R6 P1-2 闭合，实现契约）**：
+  Go context deadline 一旦设置不可移除，故护栏实现为"仅等待响应头的可取消
+  watchdog"——attempt 开始时起 watchdog 定时器（窗口=min(guard, 剩余预算)）；
+  响应头在窗口内到达 → 停 watchdog，护栏不产生任何取消；窗口耗尽 →
+  watchdog 取消上游请求 context 并产生 failover 错误；**护栏 context 任何
+  情况下不进入 body 读取路径**（body 读取继承父 context：客户端断开仍即时
+  取消）。定向测试：响应头先到、body 传输超预算 → 完整送达且上游 context
+  未被护栏取消。
+  **响应头 vs guard 超时线性化（R6 P1-3 闭合）**：两事件纳入同一状态机——
+  以不可变截止时间线性化：响应头在 deadline 前到达 → 提交响应；超时事件
+  先被线性化 → 才允许 failover。竞态测试三组：恰好截止点前 / 恰好截止点 /
+  恰好截止点后，各断言唯一胜出者。
 - **请求体可重放契约（R4 P1-2 闭合，零新机制）**：换号重放复用既有物化机制
   ——客户端 body 早已读为 `[]byte`，每 attempt 经既有
   `buildUpstreamRequest`（gateway_upstream_request.go:21，挂点 1 重调用点
@@ -251,6 +264,15 @@
    恢复动作与失败关闭验证，纳入部署证据。
 
 ## 5. 残余风险（如实登记）
+
+- **post-header body hang 未治理（R6 P2-7 登记）**：本方案边界只治理
+  "响应头等待"阶段；响应头已到但响应体/聚合阶段悬挂的请求仍可能超 CF 墙
+  产生 524（既有 499 簇中此类占比未知）。不擅自引入 body 超时（违反已接受
+  的首字节后零改动边界）；生产观测增列"响应头已到但总耗时 ≥120s"的 499
+  计数（区分于 header-wait 簇），若观测显著则另立方案卡。
+- **"header wait 已治理"与"body hang"观测分离**：guard 触发事件仅代表
+  header 等待超时；499 簇统计命令按耗时区间区分两类，验收判据只针对
+  header-wait 簇归零。
 
 - 非流式客户端 CF 墙不可消除：>guard 的真实慢上游被误伤一轮 failover，耗尽后
   客户端收到可重试错误而非 524。误伤率由 90s 阈值与 48h 数据（victim 中位
