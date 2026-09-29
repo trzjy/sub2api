@@ -189,14 +189,14 @@ func (s RequestBudgetSnapshot) AttemptWindow(now time.Time) time.Duration {
 
 type requestBudgetSnapshotKey struct{}
 
-// withRequestBudgetSnapshot 将预算快照写入 context（G2 安装点调用）。
-func withRequestBudgetSnapshot(ctx context.Context, s *RequestBudgetSnapshot) context.Context {
+// WithRequestBudgetSnapshot 将预算快照写入 context（G2 安装点调用）。
+func WithRequestBudgetSnapshot(ctx context.Context, s *RequestBudgetSnapshot) context.Context {
 	return context.WithValue(ctx, requestBudgetSnapshotKey{}, s)
 }
 
-// requestBudgetSnapshotFromContext 从 context 读回预算快照。无快照时返回
+// RequestBudgetSnapshotFromContext 从 context 读回预算快照。无快照时返回
 // (nil, false)——按方案定义不兜底（调用方据此走既有无护栏旧路径）。
-func requestBudgetSnapshotFromContext(ctx context.Context) (*RequestBudgetSnapshot, bool) {
+func RequestBudgetSnapshotFromContext(ctx context.Context) (*RequestBudgetSnapshot, bool) {
 	if ctx == nil {
 		return nil, false
 	}

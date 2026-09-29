@@ -179,18 +179,18 @@ func TestUpstreamFirstByteSnapshotContextHelper(t *testing.T) {
 	require.Equal(t, 190*time.Second, snap.TotalBudget(true))
 
 	// 写入后读回一致。
-	ctx := withRequestBudgetSnapshot(base, snap)
-	got, ok := requestBudgetSnapshotFromContext(ctx)
+	ctx := WithRequestBudgetSnapshot(base, snap)
+	got, ok := RequestBudgetSnapshotFromContext(ctx)
 	require.True(t, ok, "snapshot must be readable after install")
 	require.Equal(t, snap, got, "read-back snapshot must equal installed snapshot")
 	require.Equal(t, snap.GuardSeconds, got.GuardSeconds)
 	require.Equal(t, snap.AbsoluteDeadline, got.AbsoluteDeadline)
 
 	// 无快照时返回 false，不兜底。
-	_, okEmpty := requestBudgetSnapshotFromContext(base)
+	_, okEmpty := RequestBudgetSnapshotFromContext(base)
 	require.False(t, okEmpty, "context without snapshot must report not-ok (no fallback)")
 
 	// nil context 安全。
-	_, okNil := requestBudgetSnapshotFromContext(nil)
+	_, okNil := RequestBudgetSnapshotFromContext(nil)
 	require.False(t, okNil, "nil context must report not-ok")
 }

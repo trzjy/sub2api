@@ -380,8 +380,8 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// G2a 挂点 1：取 G1a 预算快照与 G2b 安装的心跳 owner（请求级，挂点只消费、禁止重建）。
 	// 无快照/无 owner 时按方案定义不兜底，走既有无护栏旧路径。
-	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(ctx)
-	hbOwner, _ := upstreamHeartbeatFromContext(ctx)
+	snapshot, hasSnapshot := RequestBudgetSnapshotFromContext(ctx)
+	hbOwner, _ := UpstreamHeartbeatFromContext(ctx)
 	// heartbeat_delay=0 语义为禁用（方案 D2）：owner 即便存在也不起搏，预算已按
 	// 无心跳流式（guard+25s）墙内收敛，避免 delay=0 被组件解释为"立即启动"。
 	if hasSnapshot && snapshot.HeartbeatDelaySeconds <= 0 {

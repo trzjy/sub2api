@@ -122,7 +122,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	// G1b 挂点 3：接 G1a 首字节护栏。预算快照由 G2 入口中间件写入 context；无快照时
 	// 不安装护栏（按方案定义不兜底，走既有无护栏旧路径）。窗口从不可变截止时间取剩余
 	// （禁止本层重初始化计时，换号不重置）。
-	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(upstreamCtx)
+	snapshot, hasSnapshot := RequestBudgetSnapshotFromContext(upstreamCtx)
 	var guard *upstreamFirstByteGuard
 	if hasSnapshot {
 		window := snapshot.AttemptWindow(time.Now())

@@ -194,7 +194,7 @@ func TestForwardAsChatCompletions_GuardTriggerReturnsUpstreamFailoverError(t *te
 
 	run := func(deadlineOffset time.Duration) *UpstreamFailoverError {
 		snapshot := mkSnapshot(deadlineOffset)
-		ctx := withRequestBudgetSnapshot(context.Background(), snapshot)
+		ctx := WithRequestBudgetSnapshot(context.Background(), snapshot)
 		body := []byte(`{"model":"claude-sonnet-4-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)

@@ -161,9 +161,9 @@ func g2aHeartbeat(base context.Context, w http.ResponseWriter, delay, interval t
 
 // g2aInject 把预算快照与心跳 owner 写入请求 context（模拟 G2b 入口安装点）。
 func g2aInject(base context.Context, snap *RequestBudgetSnapshot, hb *UpstreamHeartbeat) context.Context {
-	ctx := withRequestBudgetSnapshot(base, snap)
+	ctx := WithRequestBudgetSnapshot(base, snap)
 	if hb != nil {
-		ctx = withUpstreamHeartbeat(ctx, hb)
+		ctx = WithUpstreamHeartbeat(ctx, hb)
 	}
 	return ctx
 }

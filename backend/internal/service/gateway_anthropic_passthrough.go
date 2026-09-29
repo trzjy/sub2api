@@ -96,8 +96,8 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	retryStart := time.Now()
 
 	// G2a 挂点 2：取 G1a 预算快照与 G2b 安装的心跳 owner（请求级，挂点只消费、禁止重建）。
-	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(ctx)
-	hbOwner, _ := upstreamHeartbeatFromContext(ctx)
+	snapshot, hasSnapshot := RequestBudgetSnapshotFromContext(ctx)
+	hbOwner, _ := UpstreamHeartbeatFromContext(ctx)
 	// heartbeat_delay=0 语义为禁用（方案 D2）：owner 即便存在也不起搏。
 	if hasSnapshot && snapshot.HeartbeatDelaySeconds <= 0 {
 		hbOwner = nil
