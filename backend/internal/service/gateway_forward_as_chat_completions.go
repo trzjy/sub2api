@@ -119,14 +119,40 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	// 10. Build upstream request
 	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
+	// G1b 挂点 3：接 G1a 首字节护栏。预算快照由 G2 入口中间件写入 context；无快照时
+	// 不安装护栏（按方案定义不兜底，走既有无护栏旧路径）。窗口从不可变截止时间取剩余
+	// （禁止本层重初始化计时，换号不重置）。
+	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(upstreamCtx)
+	var guard *upstreamFirstByteGuard
+	if hasSnapshot {
+		window := snapshot.AttemptWindow(time.Now())
+		guard, upstreamCtx = newUpstreamFirstByteGuard(upstreamCtx, window)
+	}
 	upstreamReq, _, err := s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
 	releaseUpstreamCtx()
 	if err != nil {
+		if guard != nil {
+			guard.Stop()
+		}
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 
 	// 11. Send request
 	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	// 护栏先于响应头超时：窗口耗尽取消 reqCtx（body 未到达），产出
+	// UpstreamFailoverError 交由 handler 既有循环消费（换号或耗尽）。须在通用 transport
+	// 错误处理之前判定，避免把护栏取消误判为传输错误。
+	if guard != nil && guard.TimedOut() {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		guard.Stop()
+		remaining := time.Duration(0)
+		if hasSnapshot {
+			remaining = snapshot.RemainingBudget(time.Now())
+		}
+		return nil, newUpstreamFirstByteTimeoutError(remaining)
+	}
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -134,6 +160,9 @@ func (s *GatewayService) ForwardAsChatCompletions(
 		return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
 			UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
 		})
+	}
+	if guard != nil {
+		guard.Stop()
 	}
 	defer func() { _ = resp.Body.Close() }()
 

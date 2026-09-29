@@ -3,6 +3,8 @@
 package service
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -135,6 +138,90 @@ func TestHandleCCBufferedFromAnthropic_PreservesMessageStartCacheUsageAndReasoni
 	require.Equal(t, 3, result.Usage.CacheCreationInputTokens)
 	require.NotNil(t, result.ReasoningEffort)
 	require.Equal(t, "high", *result.ReasoningEffort)
+}
+
+// G1b 挂点 3：请求体可重放契约。换号重放复用既有 buildUpstreamRequest，每 attempt
+// 从同一 body []byte 重建上游请求，断言换号前后 wireBody 字节完全一致（函数已返回
+// wireBody）。本挂点 build 函数与挂点 1（gateway_forward.go:382/451）同型
+// （GatewayService.buildUpstreamRequest，返回 (*http.Request, []byte, error)）。
+func TestForwardAsChatCompletions_RequestReplayWireBodyConsistent(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	svc := &GatewayService{cfg: &config.Config{}}
+	account := &Account{
+		ID: 1, Name: "cc-replay", Platform: PlatformAnthropic, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{"api_key": "test-key"},
+	}
+	body := []byte(`{"model":"claude-sonnet-4-5","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	req1, wire1, err1 := svc.buildUpstreamRequest(context.Background(), c, account, body, "tok", "apikey", "claude-sonnet-4-5", true, false)
+	require.NoError(t, err1)
+	require.NotNil(t, req1)
+	req2, wire2, err2 := svc.buildUpstreamRequest(context.Background(), c, account, body, "tok", "apikey", "claude-sonnet-4-5", true, false)
+	require.NoError(t, err2)
+	require.NotNil(t, req2)
+
+	require.Equal(t, wire1, wire2, "换号前后 wireBody 必须完全一致（可重放契约）")
+	// 目标 URL 也须一致（同 account + 同 body → 同上游端点）。
+	require.Equal(t, req1.URL.String(), req2.URL.String())
+}
+
+// G1b 挂点 3：上游 Post 接 G1a 护栏。窗口耗尽（header 未到）须产出
+// UpstreamFailoverError 交由 handler 既有循环消费。剩余预算 < 5s → NextAccountStop
+// （耗尽，handler 渲染 SSE error 帧 / 502 JSON）；剩余 ≥ 5s → NextAccountRetry
+// （换号）。护栏取消经请求 context 传播，且不在通用 transport 错误分支误判。
+func TestForwardAsChatCompletions_GuardTriggerReturnsUpstreamFailoverError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := &blockingOpenAIResponseHeaderUpstream{canceled: make(chan struct{})}
+	svc := &GatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+
+	mkSnapshot := func(deadlineOffset time.Duration) *RequestBudgetSnapshot {
+		// 直接构造不可变快照：GuardSeconds 决定单次窗口，AbsoluteDeadline 决定
+		// 剩余预算；forward 层禁止重初始化计时，窗口 = min(guard, 剩余)。
+		return &RequestBudgetSnapshot{
+			GuardSeconds:          1,
+			HeartbeatDelaySeconds: 0,
+			EntryMonotonic:        time.Now(),
+			AbsoluteDeadline:      time.Now().Add(deadlineOffset),
+		}
+	}
+
+	run := func(deadlineOffset time.Duration) *UpstreamFailoverError {
+		snapshot := mkSnapshot(deadlineOffset)
+		ctx := withRequestBudgetSnapshot(context.Background(), snapshot)
+		body := []byte(`{"model":"claude-sonnet-4-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		account := &Account{
+			ID: 1, Name: "cc-test", Platform: PlatformAnthropic, Type: AccountTypeAPIKey,
+			Status: StatusActive, Schedulable: true, Concurrency: 1,
+			Credentials: map[string]any{"api_key": "test-key"},
+		}
+		_, err := svc.ForwardAsChatCompletions(ctx, c, account, body, &ParsedRequest{})
+		require.Error(t, err)
+		var fe *UpstreamFailoverError
+		require.ErrorAs(t, err, &fe)
+		return fe
+	}
+
+	t.Run("budget_high_allows_failover", func(t *testing.T) {
+		fe := run(60 * time.Second)
+		require.True(t, fe.ShouldRetryNextAccount(), "剩余预算 ≥ 5s 必须允许换号")
+		require.Equal(t, http.StatusGatewayTimeout, fe.StatusCode)
+		require.Contains(t, string(fe.ResponseBody), "upstream_first_byte_timeout")
+	})
+	t.Run("budget_low_exhausts", func(t *testing.T) {
+		fe := run(3 * time.Second)
+		require.False(t, fe.ShouldRetryNextAccount(), "剩余预算 < 5s 必须耗尽（无候选）")
+		require.Equal(t, http.StatusGatewayTimeout, fe.StatusCode)
+	})
 }
 
 // Kimi 等 Anthropic 兼容上游返回 SSE 紧凑格式（冒号后无空格），CC 桥此前按

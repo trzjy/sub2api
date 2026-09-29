@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -1096,9 +1097,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-		var headerGuard *openAIFirstOutputHeaderGuard
+		var headerGuard *openAIFirstOutputHeaderGuardAdapter
 		if firstOutputTimeout > 0 {
-			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
+			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuardAdapter(
 				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
 			)
 		}
@@ -1396,6 +1397,52 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		return forwardResult, nil
 	}
+}
+
+// openAIFirstOutputHeaderGuardAdapter 以 G1a 共享首字节护栏 upstreamFirstByteGuard
+// 为底层定时器原语，包回 openAIFirstOutputHeaderGuard 既有行为。OpenAI 原生路径只
+// 迁移底层定时器（行为零变化）：既有的 newOpenAIFirstOutputTimeoutError、OpenAI 超时
+// 配置（s.openAIFirstOutputTimeout）、以及 handler 层换号计数全部原样保留；入口总
+// 预算 / 心跳 / 新错误构造器 newUpstreamFirstByteTimeoutError 一律不进 OpenAI 路径
+// （R6 P1-1 反向测试钉死）。
+type openAIFirstOutputHeaderGuardAdapter struct {
+	guard   *upstreamFirstByteGuard
+	release context.CancelFunc
+	once    sync.Once
+}
+
+// newOpenAIFirstOutputHeaderGuardAdapter 以共享护栏替换旧的 context-cancel 定时器，
+// 返回用于发出上游请求的 reqCtx（窗口耗尽时取消该 ctx 以中断 header 等待）。
+func newOpenAIFirstOutputHeaderGuardAdapter(
+	parentCtx context.Context,
+	release context.CancelFunc,
+	deadline time.Time,
+) (context.Context, *openAIFirstOutputHeaderGuardAdapter) {
+	window := time.Until(deadline)
+	if window <= 0 {
+		window = time.Nanosecond
+	}
+	guard, reqCtx := newUpstreamFirstByteGuard(parentCtx, window)
+	return reqCtx, &openAIFirstOutputHeaderGuardAdapter{guard: guard, release: release}
+}
+
+// stopHeaderWait 在响应头到达后调用；返回 true 表示 header 等待超过 deadline（护栏
+// 已超时，应返回 first-output timeout 错误）。语义对齐旧
+// openAIFirstOutputHeaderGuard.stopHeaderWait：头先到返回 false，超时返回 true。
+func (a *openAIFirstOutputHeaderGuardAdapter) stopHeaderWait() bool {
+	// HeaderArrived 在头先到时 CAS 胜出返回 true（settled，未取消 ctx）；若护栏已
+	// fire（timedOut）则 CAS 失效返回 false，此时即超时。
+	return !a.guard.HeaderArrived()
+}
+
+// close 释放护栏定时器与上游 context 释放函数（releaseUpstreamCtx）。幂等。
+func (a *openAIFirstOutputHeaderGuardAdapter) close() {
+	a.once.Do(func() {
+		a.guard.Stop()
+		if a.release != nil {
+			a.release()
+		}
+	})
 }
 
 func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {

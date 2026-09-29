@@ -285,48 +285,6 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	}
 }
 
-type openAIFirstOutputHeaderGuard struct {
-	cancel  context.CancelFunc
-	release context.CancelFunc
-	timer   *time.Timer
-	fired   chan struct{}
-	once    sync.Once
-}
-
-func newOpenAIFirstOutputHeaderGuard(
-	ctx context.Context,
-	release context.CancelFunc,
-	deadline time.Time,
-) (context.Context, *openAIFirstOutputHeaderGuard) {
-	guardedCtx, cancel := context.WithCancel(ctx)
-	guard := &openAIFirstOutputHeaderGuard{cancel: cancel, release: release, fired: make(chan struct{})}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		remaining = time.Nanosecond
-	}
-	guard.timer = time.AfterFunc(remaining, func() {
-		close(guard.fired)
-		cancel()
-	})
-	return guardedCtx, guard
-}
-
-func (g *openAIFirstOutputHeaderGuard) stopHeaderWait() bool {
-	if g.timer.Stop() {
-		return false
-	}
-	<-g.fired
-	return true
-}
-
-func (g *openAIFirstOutputHeaderGuard) close() {
-	g.once.Do(func() {
-		g.timer.Stop()
-		g.cancel()
-		g.release()
-	})
-}
-
 type openAIRequestContextReadCloser struct {
 	io.ReadCloser
 	cleanup func()
