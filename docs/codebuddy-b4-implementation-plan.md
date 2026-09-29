@@ -29,19 +29,33 @@
 
 ## 0.1 方案审消化记录（闸①，2026-09-29，gpt-5.6-sol，结论 block→回修）
 
-外审证据：`~/.codex-companion/2026-09-29T09-56-09-657Z-review/`
-（首次 09-33 会话断流重连失败关闭无内容，不计证据；本轮重试同路由有效）。
-8 项发现**全部采纳**，回修映射：
+外审证据：R1 `~/.codex-companion/2026-09-29T09-56-09-657Z-review/`（首次
+09-33 断流失败关闭不计）；R2 直连 `~/.codex-companion/b4-plan-review/
+direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol，
+结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
+1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
+
+### R2 消化（2026-09-29）
+
+| # | 发现 | 回修 |
+|---|---|---|
+| 1 | 成功/失败比较器未定义为同一可执行序（"更新时间"vs"attempt_time"；version 取得时机未定义） | §1 新增**统一排序键**：请求级预分配 `(attempt_time, attempt_version)` 贯穿三路径，DB 单一元组裁决，禁止提交/到达时间；Card B 同步 |
+| 2 | Card E 数据迁移在批 1，旧服务运行窗口会再写旧键 → 切换窗口分叉 | Card E 增**发布闸门**：迁移+切换单一发布动作，禁"迁移后旧版本继续运行"窗口；双键冲突失败阻断；五态幂等测试 |
+| 3 | reset_at 语义未保留（阈值消费依赖） | §1 + Card B 字段矩阵钉死：成功事务继续写 reset_at，失败写不得修改；验收补 reset_at/阈值候选回归 |
+| 4 | 旧 `updated_at` 键未纳入清理（并行 freshness 事实源风险） | §1 + Card C 清理清单纳入旧 `codebuddy_credit_updated_at` |
+| 5 | 前端数值精度/合计规则未定义 | Card F 增精度约束：字符串承载 + 十进制安全求和 + 20,8 边界/求和/舍入测试 |
+
+### R1 消化（2026-09-29）
 
 | # | 发现 | 回修 |
 |---|---|---|
 | 1 | 单写者拓扑证明须前置（§4.1 前置阻断项，非收尾） | **已前置**：主会话派发前完成生产拓扑取证（§0.2），多实例则先出锁卡 |
 | 2 | 双写链（Card A 暂留 UpdateExtra + Card B 新路径）违反旧链归零；缺 UpdateExtra 不足证明 | **重构**：Card A 只做纯解析+存储组装（零写路径），Card B 为唯一写路径变更（替换全部快照/错误/used_percent 写入入口+停写旧总量键，A/B 同任务边界合入，不可独立部署）；UpdateExtra 不足证据见 §0.2 |
-| 3 | 失败写缺同一单调比较器 | Card B 明确：失败写与成功写同一字典序比较器（attempt_time, version），失败版本持久化（§1 version 键），真实 DB 并发测试证明旧失败不回退新状态 |
+| 3 | 失败写缺同一单调比较器 | Card B 明确：失败写与成功写同一字典序比较器，失败版本持久化（§1 version 键），真实 DB 并发测试证明旧失败不回退新状态 |
 | 4 | 解析错误 vs 清除错误混淆 | Card B 明确：本次解析的错误结果随成功快照同事务写入；本次无错误才清除旧错误；同一比较器裁决 |
 | 5 | used_percent 参与集合漏 Status=3 排除 | 唯一参与资格谓词（Card A/D 共用）：字段有效 + 非 Status=3；used_percent 与 §4.2 同谓词；耗尽包不稀释分母回归断言 |
 | 6 | 错误键双名兼容 = 红线越界（禁兜底/并行事实源） | Card E 重定义：唯一后端迁移所有者——原子/幂等迁移存量 + 删旧键 + 旧引用 grep 归零验证，然后一次切换全部读写端；**禁止任何双名读取** |
-| 7 | DB 条件更新回归必须为完成门禁 | §4 验收改为：DB-backed 五场景回归 = 不可跳过完成门禁（dockerized postgres，命令+证据位置固定）；环境不可用 = B4 未完成（不是登记待补验） |
+| 7 | DB 条件更新回归必须为完成门禁 | §4 验收改为：DB-backed 五场景回归 = 不可跳过完成门禁（dockerized postgres，命令+证据位置固定）；环境不可用 = B4 未完成 |
 | 8 | (P2) 上线观测缺口 | 采纳：新增快照年龄/无效分包错误计数/条件更新拒绝计数 slog 结构化日志（复用既有日志路径，不建新观测机制）；无既有指标入口的部分登记为残余风险 |
 
 ### 0.2 UpdateExtra 不足证据（合同 §5 新机制前置证明）
@@ -79,13 +93,25 @@ Extra 新键：
 - `codebuddy_credit_packages_updated_at`（唯一 freshness 依据，失败绝不更新）。
 - `codebuddy_credit_last_attempt_at`。
 - `codebuddy_credit_version`（DB 条件更新原子自增的 monotonic 版本）。
+- **统一排序键（R2 回修 #1）**：请求级预分配 `(attempt_time, attempt_version)`
+  元组——`attempt_time` = 请求开始时刻（非提交/到达时间），`attempt_version`
+  = 请求开始时取得（DB 事务内预留或预分配令牌，实现二选一钉死），贯穿成功、
+  解析错误、网络失败三条路径；成功写与失败写由 DB 按**同一元组**字典序裁决；
+  同戳双请求必各持不同 version（集成测试断言）。禁止提交时间/到达时间替代。
 - 错误键改名：`codebuddy_quota_error` → `codebuddy_credit_error`（写读两侧
   + 存量 extra 数据迁移 + 旧键归零）。
 - `codebuddy_credit_used_percent` 保留：唯一写入者 = 分包快照成功提交事务；
   公式 = (Σtotal−Σremaining)/Σtotal×100（参与分包 = 唯一参与资格谓词）；
   Σtotal=0 → 不写入、保留旧值、计入错误标记（失败关闭）。
+- `codebuddy_credit_reset_at` 语义保留（R2 回修 #3）：新条件更新成功事务
+  **继续写 reset_at**（源 = CycleEndTime），阈值消费
+  （`codeBuddyThresholdCandidates`）不感知变更；失败写**不得**修改
+  reset_at/freshness/成功快照。验收补：新快照后 reset_at 与阈值候选回归。
 - 旧键 `codebuddy_credit_total`/`codebuddy_credit_used`：写入链退役；展示
   由分包求和派生（异单位不计入并标注）；清理前逐键 grep 消费方，证据落盘。
+- 旧 `codebuddy_credit_updated_at` 键（R2 回修 #4）：同纳入 Card C 清理
+  清单——grep 全部消费者/写入者，无消费方删除、有消费方登记归属；不得与
+  `codebuddy_credit_packages_updated_at` 构成并行 freshness 事实源。
 
 ## 2. 调度契约（§4.2 照录执行口径）
 
@@ -124,7 +150,7 @@ Extra 新键：
   （§4.2，含裁定配套两用例：Status=3 剔除断言耗尽包 total 不进 D、
   Asia/Shanghai 跨时区边界）。
 
-**Card E — 错误键原子迁移（唯一后端迁移所有者）**
+**Card E — 错误键原子迁移（唯一后端迁移所有者，含发布闸门）**
 - 文件：backend 存量迁移（指定唯一迁移文件+测试）、
   `frontend/src/utils/codebuddyCredit.ts`、`AccountUsageCell` 相关、
   `types/index.ts`、相关 spec。
@@ -132,6 +158,11 @@ Extra 新键：
   `codebuddy_credit_error`（迁移失败即阻断），删除旧键；迁移后旧引用
   grep 归零验证；**然后一次切换全部读写端，禁止任何双名读取/兼容层**
   （红线：无双名共存期）。前端读侧切换与本卡同任务边界完成。
+- **发布闸门（R2 回修 #2）**：迁移 + 切换 = 单一发布动作——旧写入进程
+  停写/隔离后执行事务迁移，再启用只读写新键版本；**禁止"迁移完成后旧
+  版本继续运行"窗口**（旧服务会在迁移后再写旧键 → 状态分叉）。
+  双键冲突策略：**失败阻断**，不静默覆盖；幂等性测试覆盖五态 = 旧键仅
+  有/新键仅有/双键冲突/重复执行/中途失败重试。
 
 ### 批 2（依赖批 1 产物；A+B 同任务边界合入）
 
@@ -139,28 +170,39 @@ Extra 新键：
 - 文件：`internal/repository/`（新增 `account_extra_conditional.go` + test）、
   quota service 写路径接入（替换 `queryUsageForAccount` 全部写入口）。
 - 内容：快照专用条件更新 repo 方法（§0.2 已证 UpdateExtra 不足；单一新
-  入口）：成功写仅当 `(更新时间, version)` 字典序单调通过时原子提交，
-  **同事务写本次解析错误结果（本次无错误才清除旧错误）**、version 原子
-  自增、停写旧 total/used 键；**失败写走同一字典序比较器**
-  （attempt_time, version），失败版本持久化，旧失败请求不得回退新状态。
-  - **DB-backed 五场景回归 = 完成门禁（不可跳过）**：dockerized postgres
-    （本地 docker，`go test -tags integration`），五场景 = 延迟失败/并发
-    成功失败/同戳乱序/失败后成功清错误/先发后至跨版本清除过期错误；
-    命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
-    "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
-- 部署顺序：与 Card A 同变更合入；存量数据迁移（Card E）先行。
+  入口）：排序键按 §1 统一排序键定义（请求级预分配 `(attempt_time,
+  attempt_version)`，三路径同键，DB 单一元组裁决）。**字段矩阵（R2 回修
+  #3，逐项钉死）**：
+  - 成功事务：分包快照 + `packages_updated_at` + `reset_at` + `used_percent`
+    + `last_attempt_at` + version 自增 + 本次解析错误结果；
+  - 本次无错误才清除旧错误；
+  - 失败事务：同一排序键下仅更新错误/尝试字段（`last_attempt_at` + 错误
+    标记 + 失败 version 持久化），**不得**修改 freshness/reset_at/成功快照；
+  - `updated_at` 旧键停止写入（清理由 Card C）。
+- **DB-backed 五场景回归 = 完成门禁（不可跳过）**：dockerized postgres
+  （本地 docker，`go test -tags integration`），五场景 = 延迟失败/并发
+  成功失败/同戳乱序（断言双请求各持不同 version）/失败后成功清错误/
+  先发后至跨版本清除过期错误；补验收：新快照后 reset_at 与阈值候选回归
+  断言；命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
+  "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
+- 部署顺序：与 Card A 同变更合入；见 Card E 发布闸门。
 
 **Card F — 前端分包展示 + 旧总量展示退役**
 - 文件：`utils/codebuddyCredit.ts`（+spec）、`AccountUsageCell.vue`、
   i18n zh/en。
 - 内容：分包卡片渲染（名称/剩余/总量/到期/错误标记/更新时间）、合计=
   Σ 派生（异单位不计入并标注）、旧 total/used 展示退役。
+- **数值精度约束（R2 回修 #5）**：API/类型层用**字符串**承载 NUMERIC(20,8)
+  值（禁 JS number 直接解析）；合计求和用十进制安全方式（字符串逐位或
+  等价 Decimal），显示舍入规则钉死；spec 必测 20,8 边界值、多分包求和、
+  异单位排除、显示舍入。
 
 ### 批 3（收尾，主会话）
 
 **Card C — 旧键清理（grep 消费方证据 + 删除）**：依赖 F；逐键
-`codebuddy_credit_total/used` 及旧 `codebuddy_quota_error` 残留 grep，
-无消费方删除、有消费方登记归属。
+`codebuddy_credit_total/used`、旧 `codebuddy_credit_updated_at`（R2 回修
+#4 纳入）及旧 `codebuddy_quota_error` 残留 grep，无消费方删除、有消费方
+登记归属。
 **运维取证**：~~跨实例单写者证明~~（已前置 §0.3）；三态 domain fixture
 断言核验；凭证脱敏 Bearer 零命中 grep 断言（扩展至全部 B4 证据与日志）；
 **上线观测**（§0.1 #8）：快照年龄/无效分包错误计数/条件更新拒绝计数
@@ -170,11 +212,14 @@ Extra 新键：
 
 脱敏 fixture 落盘✅（探针轮）；规范单位钉死✅；**跨实例单写者证明（已前置
 §0.3，派发前完成）**；三态 domain 请求 fixture；快照 UI 卡片；
-**DB-backed 五场景全序回归 = 完成门禁（不可跳过，环境不可用 = B4 未完成）**；
+**DB-backed 五场景全序回归 = 完成门禁（不可跳过，环境不可用 = B4 未完成；
+含同戳双请求各持不同 version 断言 + 新快照后 reset_at/阈值候选回归）**；
 used_percent 单写者证明+旧键清理后阈值回归；公式方向回归（remaining→0 时
 used_percent→100；耗尽包不稀释分母断言）；k 非法值失败关闭（含热加载）；
-k=0 等价性；错误键原子迁移+旧引用归零；旧总量展示退役+无消费旧键清理
-grep 证据；上线观测（快照年龄/错误计数/条件更新拒绝，slog）。
+k=0 等价性；错误键原子迁移+发布闸门+旧引用归零；旧总量展示退役+旧键
+（total/used/updated_at/quota_error）清理 grep 证据；Card F 精度测试
+（20,8 边界/多包求和/异单位排除/显示舍入）；上线观测（快照年龄/错误计数/
+条件更新拒绝，slog）。
 每卡默认验证 = 定向测试（**必带 `-tags unit`**）+ `go build`/`vue-tsc`；
 收敛后全量一轮（高风险边界：调度/资金口径 → 全量触发）。
 
