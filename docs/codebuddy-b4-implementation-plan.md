@@ -35,6 +35,19 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R3 消化（2026-09-29，直连 gpt-5.6-sol，block→回修）
+
+外审证据：`~/.codex-companion/b4-plan-review/direct-r3/`。R2 之 #2/#3 闭合、
+#5 主体闭合；R3 5 项**全部采纳**，回修映射：
+
+| # | 发现 | 回修 |
+|---|---|---|
+| 1 | 统一排序键违反权威"成功时间优先"（:806-811 实证） | §1 重写：成功路径=成功时间、失败路径=尝试时间，同一 `(event_time, version)` 比较器；版本=DB 分配单调号、每次抓取开始取得、三路径复用，仅同时间戳 tiebreaker |
+| 2 | "唯一参与资格谓词"与 §4.2 时间/新鲜度条件矛盾（两套参与集合） | §1 拆分命名：**基础快照有效性谓词**（字段有效+非 Status=3，用于 used_percent）与**紧迫度参与性谓词**（基础+168h 窗口+24h 新鲜，用于 urgency/D）；Card D 复用基础实现叠加条件 |
+| 3 | 旧 updated_at 非零消费者分支未收敛到唯一 freshness | §1/Card C 钉死：无消费者→停写并删；有消费者→迁移或证明非 freshness 后停写并删；禁"登记归属"后共存 |
+| 4 | 显示舍入规则未给具体值 | Card F 钉死：2 位小数 + ROUND_HALF_UP + 合计/单包同口径 + 舍入 spec 用例 |
+| 5 | Card E 批次表达可能被误执行为迁移先行 | Card E 执行顺序钉死：迁移与切换不得早于 Card B 上线，同一发布闸门 |
+
 ### R2 消化（2026-09-29）
 
 | # | 发现 | 回修 |
@@ -53,7 +66,7 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 | 2 | 双写链（Card A 暂留 UpdateExtra + Card B 新路径）违反旧链归零；缺 UpdateExtra 不足证明 | **重构**：Card A 只做纯解析+存储组装（零写路径），Card B 为唯一写路径变更（替换全部快照/错误/used_percent 写入入口+停写旧总量键，A/B 同任务边界合入，不可独立部署）；UpdateExtra 不足证据见 §0.2 |
 | 3 | 失败写缺同一单调比较器 | Card B 明确：失败写与成功写同一字典序比较器，失败版本持久化（§1 version 键），真实 DB 并发测试证明旧失败不回退新状态 |
 | 4 | 解析错误 vs 清除错误混淆 | Card B 明确：本次解析的错误结果随成功快照同事务写入；本次无错误才清除旧错误；同一比较器裁决 |
-| 5 | used_percent 参与集合漏 Status=3 排除 | 唯一参与资格谓词（Card A/D 共用）：字段有效 + 非 Status=3；used_percent 与 §4.2 同谓词；耗尽包不稀释分母回归断言 |
+| 5 | used_percent 参与集合漏 Status=3 排除 | 基础快照有效性谓词（Card A 实现/D 复用）：字段有效 + 非 Status=3；耗尽包不稀释分母回归断言（R3 起谓词拆分见 §1） |
 | 6 | 错误键双名兼容 = 红线越界（禁兜底/并行事实源） | Card E 重定义：唯一后端迁移所有者——原子/幂等迁移存量 + 删旧键 + 旧引用 grep 归零验证，然后一次切换全部读写端；**禁止任何双名读取** |
 | 7 | DB 条件更新回归必须为完成门禁 | §4 验收改为：DB-backed 五场景回归 = 不可跳过完成门禁（dockerized postgres，命令+证据位置固定）；环境不可用 = B4 未完成 |
 | 8 | (P2) 上线观测缺口 | 采纳：新增快照年龄/无效分包错误计数/条件更新拒绝计数 slog 结构化日志（复用既有日志路径，不建新观测机制）；无既有指标入口的部分登记为残余风险 |
@@ -86,22 +99,28 @@ Extra 新键：
   - 校验失败关闭：unit≠`credits`、负值、remaining>total、**未知 Status**
     → 整包剔除 + 计入 `codebuddy_credit_error`（保留原始值供排查）。
   - `TotalDosage` 禁消费；`ExpiredTime` 不消费。
-- **唯一参与资格谓词（Card A/D 共用，单一实现）**：分包参与求和/调度当且仅当
-  ①字段有效（单位/数值校验通过）②非 Status=3（耗尽/过期）。used_percent 与
-  §4.2 紧迫度同谓词——**Status=3 分包不得进入 used_percent 的分子或分母**
-  （耗尽包 total 稀释分母会反向压低已用比例、破坏阈值语义），回归必测。
+- **两个谓词拆分命名（R3 回修 #2，消除两套"参与集合"歧义）**：
+  - **基础快照有效性谓词**：字段有效（单位/数值校验通过）+ 非 Status=3。
+    使用方 = used_percent 分子分母、快照派生值。**不含**时间窗口/新鲜度。
+  - **紧迫度参与性谓词** = 基础有效性 + `now < expires_at ≤ now+168h`
+    （§2 条件②）+ 快照 ≤24h 新鲜（条件③）。使用方 = §4.2 urgency 与 D。
+  - Card A 实现基础谓词；Card D 复用基础谓词并叠加窗口/新鲜度条件，
+    **不复制第二份基础实现**；回归测试分别引用两个名字。
 - `codebuddy_credit_packages_updated_at`（唯一 freshness 依据，失败绝不更新）。
 - `codebuddy_credit_last_attempt_at`。
 - `codebuddy_credit_version`（DB 条件更新原子自增的 monotonic 版本）。
-- **统一排序键（R2 回修 #1）**：请求级预分配 `(attempt_time, attempt_version)`
-  元组——`attempt_time` = 请求开始时刻（非提交/到达时间），`attempt_version`
-  = 请求开始时取得（DB 事务内预留或预分配令牌，实现二选一钉死），贯穿成功、
-  解析错误、网络失败三条路径；成功写与失败写由 DB 按**同一元组**字典序裁决；
-  同戳双请求必各持不同 version（集成测试断言）。禁止提交时间/到达时间替代。
+- **统一排序键（R3 回修 #1，权威 :806-811 照录）**：**成功时间为主排序键**
+  的全序——成功路径比较时间 = 该次成功快照的**成功时间**（snapshot 完成
+  时刻），失败路径比较时间 = 该次尝试的**尝试时间**；二者用**同一字典序
+  比较器 `(event_time, version)`**，由 DB 条件更新统一裁决；版本号 = **DB
+  分配的单调版本号**（每次抓取开始时取得，成功/失败路径复用同一版本），
+  **仅作同一时间戳下的 tiebreaker（同时间戳按版本号大者胜）**，绝不以版本
+  号新旧否定更晚的成功时间（先发后至的请求按成功时间正常提交）。禁止
+  到达顺序覆盖；禁止"请求开始时刻贯穿三路径"（违反权威成功时间语义）。
 - 错误键改名：`codebuddy_quota_error` → `codebuddy_credit_error`（写读两侧
   + 存量 extra 数据迁移 + 旧键归零）。
 - `codebuddy_credit_used_percent` 保留：唯一写入者 = 分包快照成功提交事务；
-  公式 = (Σtotal−Σremaining)/Σtotal×100（参与分包 = 唯一参与资格谓词）；
+  公式 = (Σtotal−Σremaining)/Σtotal×100（参与分包 = **基础快照有效性谓词**）；
   Σtotal=0 → 不写入、保留旧值、计入错误标记（失败关闭）。
 - `codebuddy_credit_reset_at` 语义保留（R2 回修 #3）：新条件更新成功事务
   **继续写 reset_at**（源 = CycleEndTime），阈值消费
@@ -109,9 +128,11 @@ Extra 新键：
   reset_at/freshness/成功快照。验收补：新快照后 reset_at 与阈值候选回归。
 - 旧键 `codebuddy_credit_total`/`codebuddy_credit_used`：写入链退役；展示
   由分包求和派生（异单位不计入并标注）；清理前逐键 grep 消费方，证据落盘。
-- 旧 `codebuddy_credit_updated_at` 键（R2 回修 #4）：同纳入 Card C 清理
-  清单——grep 全部消费者/写入者，无消费方删除、有消费方登记归属；不得与
-  `codebuddy_credit_packages_updated_at` 构成并行 freshness 事实源。
+- 旧 `codebuddy_credit_updated_at` 键（R3 回修 #3，确定性收敛，权威 :802
+  唯一 freshness）：Card C 清理清单逐键 grep，两条路径二选一、不允许共存——
+  无消费者 → 停止写入并删除；有消费者 → 逐个迁移到
+  `codebuddy_credit_packages_updated_at`（或证明该消费不表示 freshness）后
+  停止写入并删除旧键。**禁止仅"登记归属"后旧键继续带消费者共存**。
 
 ## 2. 调度契约（§4.2 照录执行口径）
 
@@ -132,7 +153,8 @@ Extra 新键：
 - 文件：`internal/service/codebuddy_quota_service.go`（+test 文件；
   testdata 增脱敏精简 fixture）。
 - 内容：解析分包条目（§1 契约）、校验失败关闭、storage 组装、
-  **唯一参与资格谓词**（used_percent 与 §4.2 共用实现）、used_percent 从
+  **基础快照有效性谓词**（used_percent 与 §4.2 共用其实现；紧迫度窗口
+  叠加属 Card D）、used_percent 从
   参与分包推导、Σtotal=0 边界、`setBillingHeaders` 空 domain 改
   `X-No-Authorization: 1`（唯一例外，三态请求 fixture 单测：cn 有 domain /
   intl 有 domain / 空 domain；断言头集合精确形态）。
@@ -143,7 +165,7 @@ Extra 新键：
 **Card D — §4.2 紧迫度加权调度**
 - 文件：`internal/service/gateway_scheduling.go`（+test）、config 定义、
   新 `internal/service/codebuddy_urgency.go`（+test：纯函数可全场景单测；
-  参与资格谓词**复用 Card A 实现**，不复制第二份）。
+  谓词**复用 Card A 基础谓词并叠加窗口/新鲜度条件**，不复制第二份）。
 - 内容：配置项+校验（非法值启动与**热加载**均失败关闭，热加载用例必测）、
   参与集合三条件、urgency/D/norm 公式、排序加权接入（同优先级组内，接入点
   前先盘点该 helper 全部调用点，登记无旁路）、k=0 等价性、钉行为测试全清单
@@ -151,6 +173,9 @@ Extra 新键：
   Asia/Shanghai 跨时区边界）。
 
 **Card E — 错误键原子迁移（唯一后端迁移所有者，含发布闸门）**
+  **执行顺序钉死（R3 回修 #5）**：Card E 可与代码开发并行，但**数据库
+  迁移与读写切换动作不得早于 Card B 新写入口上线**——二者必须同一发布
+  闸门完成；禁止"先迁移、后等 Card B"的窗口形态。
 - 文件：backend 存量迁移（指定唯一迁移文件+测试）、
   `frontend/src/utils/codebuddyCredit.ts`、`AccountUsageCell` 相关、
   `types/index.ts`、相关 spec。
@@ -192,10 +217,12 @@ Extra 新键：
   i18n zh/en。
 - 内容：分包卡片渲染（名称/剩余/总量/到期/错误标记/更新时间）、合计=
   Σ 派生（异单位不计入并标注）、旧 total/used 展示退役。
-- **数值精度约束（R2 回修 #5）**：API/类型层用**字符串**承载 NUMERIC(20,8)
-  值（禁 JS number 直接解析）；合计求和用十进制安全方式（字符串逐位或
-  等价 Decimal），显示舍入规则钉死；spec 必测 20,8 边界值、多分包求和、
-  异单位排除、显示舍入。
+- **数值精度约束（R2 回修 #5 + R3 回修 #4）**：API/类型层用**字符串**承载
+  NUMERIC(20,8) 值（禁 JS number 直接解析）；合计求和用十进制安全方式
+  （字符串逐位或等价 Decimal）。**显示口径钉死**：展示保留 2 位小数、
+ 舍入模式 ROUND_HALF_UP（decimal.js 等价），合计与单包展示同一口径；
+  spec 期望值含 20,8 边界值、多分包求和、异单位排除、舍入用例
+  （如 0.005→0.01、1.005→1.01）。
 
 ### 批 3（收尾，主会话）
 
