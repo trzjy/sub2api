@@ -1,4 +1,4 @@
-# CF 524 上游悬挂治理方案 v5（首字节护栏 + 流式心跳保活）
+# CF 524 上游悬挂治理方案 v6（首字节护栏 + 流式心跳保活）
 
 > 状态：确认审（R3）7 项全采纳回修，待派发。2026-09-30 用户裁定：采用方案 A
 > （心跳+护栏+failover，含流式晚到错误统一 SSE error 帧的契约变更授权）。
@@ -24,6 +24,13 @@
 > openAIForwardMayFailover 等价的例外：**心跳已提交字节（flag 记忆）不算
 > 语义写出**，判定改为 `Size() > heartbeatBaseSize`；gateway_handler.go 与
 > 两个 CC/responses 消费 handler 因此进入 G2 文件边界。
+> v5→v6：确认审 R5 5 项全采纳——①护栏取消边界仅覆盖响应头等待（收到响应头
+> 即解除，body 读取永不在 deadline 内，"首字节后零改动"可兑现）；②心跳已提交
+> ⇒ streamStarted 语义（耗尽/错误分支不落非流式 JSON 进已提交的 SSE 200）；
+> ③heartbeat=0 时流式预算从 2×guard+10s 收紧为墙内 guard+25s（否则禁用心跳
+> 会重开 524 窗口）；④换号交接心跳连续性：请求级 owner，stop-and-wait 后下一
+> attempt 即时恢复并 Flush 首帧（不重等 delay，防交接空窗过 CF 墙）；⑤心跳
+> 计时自请求入口起算，覆盖认证/排队前置期（否则前置期 >~125s 仍 524）。
 > 代码事实更正（R3 P1-2 核实）：换号计数与耗尽机器
 > （openAIFirstOutputFailoverExhausted / maxOpenAIFirstOutputTimeoutSwitches /
 > firstOutputTimeoutSwitchCount）全部位于 internal/handler/openai_gateway_handler.go
@@ -75,15 +82,21 @@
   单调时间（handler 入口既有请求起点，如无则在入口中间件记录），非 forward 层
   进入时刻——避免认证/排队/限流吃掉墙前余量。进入 forward 层时剩余预算 =
   总预算 − 入口已耗时间：
-  - 流式客户端（有心跳，CF 墙被心跳中和）：总预算 = 2×guard + 10s 写回余量
-    （默认 190s）；
-  - 非流式客户端（无心跳，受 CF 墙约束）：总预算 = guard + 25s（默认 115s <
-    120s 双墙）；每次尝试的 guard 窗口 = min(guard, 剩余预算)，换号不重置。
+  - **有心跳的流式客户端（heartbeat>0 且 clientStream）**：总预算 = 2×guard +
+    10s 写回余量（默认 190s）；
+  - **其余客户端（非流式，或 heartbeat=0 的流式——R5 P1-3：禁用心跳时无墙
+    保护，预算必须墙内收敛）**：总预算 = guard + 25s（默认 115s < 120s 双墙）；
+  每次尝试的 guard 窗口 = min(guard, 剩余预算)，换号不重置。
   前置延迟超 5s 仍须墙内返回（验收用例钉死）。
   **不可变截止时间（R4 P1-3 闭合）**：绝对截止在入口**计算一次并保持不可变**
   （单调时钟）；每轮尝试仅从该截止时间取剩余窗口，禁止在循环内重建完整
   guard 窗口；时间轴用例：入口前置延迟 + 首轮超时 + 换号 + 次轮再超时 →
   最终响应必须 ≤ 对应总预算。
+  **护栏取消边界仅覆盖响应头等待（R5 P1-1 闭合）**：guard 的 context 取消
+  边界在收到上游响应头那一刻解除（对齐既有 headerGuard 的 stopHeaderWait
+  语义），**响应体读取/流式转发/聚合永不在该 deadline 内**——Go 的 request
+  context 若不解除会连 Body 读取一起取消，截断已成功的响应，违反"首字节后
+  零改动"。定向测试：响应头先到、响应体传输超过预算 → 仍完整送达。
 - **请求体可重放契约（R4 P1-2 闭合，零新机制）**：换号重放复用既有物化机制
   ——客户端 body 早已读为 `[]byte`，每 attempt 经既有
   `buildUpstreamRequest`（gateway_upstream_request.go:21，挂点 1 重调用点
@@ -102,6 +115,10 @@
   - 剩余预算 < 5s：ShouldRetryNextAccount=false → 既有 FailoverExhausted →
     handleFailoverExhausted(c, err, platform, streamStarted)（stream → SSE
     error 帧；非流式 → JSON 错误）。
+  **streamStarted 语义扩展（R5 P1-2 闭合）**：心跳已提交（SSE 200 已写出）
+  ⇒ 该请求在**所有** failover/耗尽/错误分支一律视为 streamStarted=true——
+  防止耗尽路径把非流式 JSON/原始状态码写进已提交的 SSE 200 造成格式损坏。
+  端到端断言：心跳启动后直接耗尽 → SSE error 帧（非 JSON）。
   **消费方既有机器零改动（除下方心跳例外）**：四挂点错误由既有
   errors.As(UpstreamFailoverError) 循环消费（gateway_handler.go:488/1020、
   gateway_handler_chat_completions.go:286、gateway_handler_responses.go:276；
@@ -125,6 +142,16 @@
   路径（挂点 1-4）；OpenAI 原生路径（挂点 5）明确不创建心跳 writer，
   行为零变化（反向测试钉死）。
 - 触发条件：`clientStream == true` 且上游响应头等待超过 heartbeat_delay。
+  **计时起点 = 请求入口（R5 P2 闭合）**：心跳 owner 在确定 clientStream 后
+  尽早武装（进入账号选择前），delay 从请求入口单调时间起算——否则认证/
+  排队前置期消耗接近 CF 墙时，客户端在首帧写出前已断开，总预算无法挽救。
+  前置延迟 + 首帧发送时间的组合时间轴进验收。
+- **请求级 owner 与换号连续性（R5 P1-4 闭合）**：心跳 owner 挂请求级
+  （不随 attempt 重建）；guard 超时 stop-and-wait 后，**下一 attempt 开始
+  时即时恢复心跳并立刻 Flush 一帧**（不重新等待完整 delay）——否则
+  guard=90/delay=60 组合下交接空窗 ~60s 会在 ~125s 处先撞墙。时间轴用例：
+  heartbeat=60、首轮超时、第二轮继续悬挂 → 交接空窗 < CF 墙（首帧续写
+  间隔 < delay）。
 - 行为：写 SSE 200 响应头 + 周期 `: keep-alive` 注释帧（15s 间隔）；上游
   响应头到达即停。**Flush 契约（R3 P1-1 闭合）**：初始响应头与每个心跳帧
   写入后必须显式 `Flush()`——Go ResponseWriter/中间层会缓冲小写入，不 Flush
@@ -203,7 +230,12 @@
    分支测试钉死；三交叠竞态测试通过；**防线例外两分支（v5）**：心跳已启动
    → guard 超时仍换号；真实语义流已写出 → 仍禁止 failover。
 6. 配置：guard [30,90] 外（含 0）拒绝启动/热加载；heartbeat [0]∪[5,60]。
-7. **生产验收唯一口径（R3 P1-4 闭合：双簇零命中）**：
+7. **R5 四项闭合测试**：①护栏取消边界：响应头先到、body 传输超预算 → 完整
+   送达（不被 deadline 截断）；②心跳已提交 + 直接耗尽 → SSE error 帧（非
+   JSON）；③heartbeat=0 流式双 attempt 超时 → 总耗时 ≤ guard+25s（墙内）；
+   ④换号交接连续性：heartbeat=60、首轮超时、次轮续挂 → 交接空窗 < delay
+   （首帧即时续写），且前置延迟+首帧组合时间轴 ≤ CF 墙。
+8. **生产验收唯一口径（R3 P1-4 闭合：双簇零命中）**：
    上线后 48h 观察窗，`docker logs sub2api | grep` 两事件名 + 应用访问日志
    499 簇统计（与排查同命令），判定条件 = **124.9–125.1s 簇与 119.9–120.1s
    簇的 499 命中数均为 0**（基线：63/48h + 6/48h）且每条 guard 触发事件能用
@@ -214,7 +246,7 @@
    guard 触发发一条 attempt 事件 + 一条终态关联事件（同 request_id）；
    **访问日志必含同一 request_id 为验收前置条件**（缺失即判观测链断裂而非
    "无命中"）；上线验收含一条可控超时请求的端到端日志串联实测。
-8. **回滚兼容（R3 P2-7 闭合）**：部署前用旧镜像 + 新 config.yaml 实测启动
+9. **回滚兼容（R3 P2-7 闭合）**：部署前用旧镜像 + 新 config.yaml 实测启动
    （证明旧二进制容忍新键，viper 未知键行为以实测为准）；回滚步骤含配置
    恢复动作与失败关闭验证，纳入部署证据。
 
