@@ -3,7 +3,7 @@
 > 用途：跨会话接力。批次定义与权威语义见 `codebuddy-cockpit-fusion-plan.md` v16；
 > 本文只记执行状态、证据位置、下一步。更新本文时无需改融合方案正文。
 
-更新：2026-09-29（B2 代码侧闭环，提交 51e841ab8）。
+更新：2026-09-29（B3a 代码侧闭环）。
 
 ## 批次状态总览
 
@@ -11,12 +11,28 @@
 |---|---|---|
 | B1（Cockpit 导出导入） | 🟡 卡在用户侧 | 代码已合入（早期波次）；**mapper 未实现**（§1.2 门控，等真实导出 fixture）；等用户提供 Cockpit 明文导出文件 → 脱敏归档+哈希登记 → mapper 派发 |
 | B2（聚合直绑） | ✅ 代码侧闭环 | 提交 `51e841ab8`；**生产激活=独立切换门槛未执行**（见下） |
-| B3a（入站桥接） | ⬜ 未开始 | B2 → B3a → B3b → B3c 顺序 |
-| B3b（manifest 迁移） | ⬜ 未开始 | 属影子账号身份/状态写入链变更，合并前全量一次 |
+| B3a（影子新建入口封死） | ✅ 代码侧闭环 | 早期已合边界冻结 `7f12c556b` + 桥接 `644de818a`；本次收口删除新建分支与前端向导（终审 approve）；证据 `~/.sub2api-acceptance/sub2api-b3a-freeze-20260929/` |
+| B3b（manifest 迁移） | ⬜ 未开始 | B2 → B3a → B3b → B3c 顺序；前置=遥测基线证明 + **B2 生产激活**；删除前引用清单已起建（02 文档，B3b 结束冻结） |
 | B3c | ⬜ 未开始 | |
 | B4 | ⬜ 未开始 | 依赖 B2（✅），与 B3 并行推进，探针先行 |
 
-## B2 闭环记录（本次）
+## B3a 收口记录（2026-09-29）
+
+- 方案：`docs/codebuddy-b3a-closure-plan.md`（零新增语义，权威=v16 §3.1/§3.2-1/§3.4）。
+- 早期已合入：领域边界冻结 `enforceCodeBuddyShadowFreeze`（`7f12c556b`）、桥接扩展
+  通用平台判定 ∪ 旧影子判定（`644de818a`，v16 s4 终审修正版）。
+- 本次收口（7 卡，全部 codebuddy hy3）：CreateShadow codebuddy 死分支删除（冻结早退
+  保留、spark 分支内联等价）、ShadowOptions/CreateShadowRequest 缩减为 spark 语义、
+  新建链专属函数删除（inferCodeBuddyShadowPlatform/defaultCodeBuddyShadowModelMapping/
+  shadowTargetsModel）、前端向导入口链删除（Wizard 组件+挂载+API+菜单按钮+i18n 43+13 死键）、
+  发布 dist 重建归零验证。
+- 终审：gpt-5.6-sol **approve 无阻断**（`~/.codex-companion/b3a-final-review/`；
+  P2 dist 重建采纳、P3 i18n 逐键取证采纳，7 存活键保留——存量影子展示运行时链）。
+- 验证：`go build` OK；`-tags unit` 定向 209 用例 PASS；前端 vue-tsc/vitest/`pnpm build` 全绿；
+  新建入口归零 grep 零命中（dist gitignore 产物重建后亦零）。
+- B3a 验收判据（v16 §5）：新建入口 grep 归零 ✅；存量影子运行时全在位 ✅。
+
+## B2 闭环记录
 
 - 方案：`docs/codebuddy-b2-aggregate-switch-plan.md`（四轮方案审收敛，gpt-5.6-sol）。
 - 外审证据：`~/.codex-companion/b2-plan-review/`（方案审 r1-r4，终轮 approve）+
