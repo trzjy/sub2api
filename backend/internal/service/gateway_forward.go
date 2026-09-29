@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
@@ -376,23 +377,57 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	var resp *http.Response
 	lastWireBody := body
 	retryStart := time.Now()
+
+	// G2a 挂点 1：取 G1a 预算快照与 G2b 安装的心跳 owner（请求级，挂点只消费、禁止重建）。
+	// 无快照/无 owner 时按方案定义不兜底，走既有无护栏旧路径。
+	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(ctx)
+	hbOwner, _ := upstreamHeartbeatFromContext(ctx)
+	// heartbeat_delay=0 语义为禁用（方案 D2）：owner 即便存在也不起搏，预算已按
+	// 无心跳流式（guard+25s）墙内收敛，避免 delay=0 被组件解释为"立即启动"。
+	if hasSnapshot && snapshot.HeartbeatDelaySeconds <= 0 {
+		hbOwner = nil
+	}
+
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
+		// G2a 挂点 1：接 G1a 首字节护栏。窗口从不可变截止时间取剩余（禁止本层重初始化计时，
+		// 换号不重置）。guard 的 reqCtx 写入请求 context：窗口耗尽取消 reqCtx 中断 header 等待。
+		var guard *upstreamFirstByteGuard
+		if hasSnapshot {
+			window := snapshot.AttemptWindow(time.Now())
+			guard, upstreamCtx = newUpstreamFirstByteGuard(upstreamCtx, window)
+		}
 		upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
 		releaseUpstreamCtx()
 		if err != nil {
+			if guard != nil {
+				guard.Stop()
+			}
+			if hbOwner != nil && reqStream {
+				hbOwner.Stop()
+			}
 			return nil, err
 		}
 		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
 		lastWireBody = wireBody
 
-		// 发送请求
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
-		if err != nil {
+		// 发送请求（统一经护栏 + 心跳生命周期编排）。此处必须用预声明 + "=" 赋值：
+		// resp 是循环外声明的接收变量，若用 ":=" 会在循环块内新建同名局部变量造成
+		// 遮蔽，导致循环结束后 resp 仍为 nil（"empty response"）。
+		var guardTimedOut bool
+		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, tlsProfile, guard, hbOwner, reqStream)
+		if guardTimedOut {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
+			remaining := time.Duration(0)
+			if hasSnapshot {
+				remaining = snapshot.RemainingBudget(time.Now())
+			}
+			return nil, newUpstreamFirstByteTimeoutError(remaining)
+		}
+		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
 				UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
 			})
@@ -893,6 +928,71 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		FirstTokenMs:                  firstTokenMs,
 		ClientDisconnect:              clientDisconnect,
 	}, nil
+}
+
+// cf524ExecuteUpstreamWithGuard 在挂点统一执行"首字节护栏 + 流式心跳生命周期"的上游请求。
+//
+// 调用方须在构建 upstreamReq 时已将 guard 的 reqCtx（若有）写入请求 context：窗口耗尽
+// 时护栏取消 reqCtx 中断 header 等待；guard 为 nil 表示无快照、走旧路径。心跳 owner（hb）
+// 由 G2b 在 handler 安装、请求级持久；本函数只消费：clientStream 为真且 guard 有效时
+// 在发送前 Resume（首次 Start / 换号后重启），响应头到达或 guard 超时后按 D2 状态机
+// stop-and-wait。
+//
+// 返回 timedOut 表示护栏已裁决超时（调用方据 snapshot 构造 newUpstreamFirstByteTimeoutError
+// 交 handler 换号/耗尽）。err 非 nil 且 timedOut=false 表示真实传输错误（护栏未触发）。
+func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
+	upstreamReq *http.Request,
+	proxyURL string,
+	account *Account,
+	tlsProfile *tlsfingerprint.Profile,
+	guard *upstreamFirstByteGuard,
+	hb *UpstreamHeartbeat,
+	clientStream bool,
+) (resp *http.Response, err error, timedOut bool) {
+	// 心跳仅在有护栏（=有预算快照）且客户端流式时起搏：与 G2b 安装契约一致，owner
+	// 与快照同进同退；无快照则无 owner，绝不单独起搏心跳导致无超时保护的悬挂。
+	if hb != nil && clientStream && guard != nil {
+		// Resume 同时覆盖"首次启动"与"换号后重启"两种形态（未启动则等价于 Start）。
+		_ = hb.Resume()
+	}
+	resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+	if guard != nil && guard.TimedOut() {
+		// 状态机优先级②（D2）：guard 终态先于一切 → OnGuardDecided 落闸 + stop-and-wait
+		// 心跳（单一 writer 所有权）后返回 failover 错误，绝不先于心跳停等就换号。
+		if hb != nil {
+			hb.OnGuardDecided()
+			hb.Stop()
+		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, nil, true
+	}
+	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		// 真实传输错误：停表（零取消收尾，释放定时器）+ 心跳 stop-and-wait，
+		// 避免泄漏 keep-alive goroutine；随后交调用方处理。
+		if guard != nil {
+			guard.Stop()
+		}
+		if hb != nil {
+			hb.Stop()
+		}
+		return nil, err, false
+	}
+	// 响应头到达（未超时）：护栏停表零取消；心跳按晚到契约裁决（Rejected/AfterCommit）。
+	// 单一 writer 所有权（D2 硬约束）：进入真实转发/错误通道前必须同步 stop-and-wait，
+	// 等心跳 goroutine 退出后才把 ResponseWriter 交还调用方，避免注释帧与语义流交错。
+	if guard != nil {
+		guard.Stop()
+	}
+	if hb != nil {
+		hb.OnUpstreamHeaderArrived()
+		hb.Stop()
+	}
+	return resp, nil, false
 }
 
 func anthropicSpeedModel(parsed *ParsedRequest, result *ForwardResult) string {

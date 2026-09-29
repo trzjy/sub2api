@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -401,4 +403,92 @@ func TestHandleResponsesStreamingResponse_CompactSSEFormat(t *testing.T) {
 	require.Equal(t, 15, result.Usage.InputTokens)
 	require.Equal(t, 6, result.Usage.OutputTokens)
 	require.Contains(t, rec.Body.String(), `response.completed`)
+}
+
+// —— CF524 G2a 挂点 4（ForwardAsResponses，非 OpenAI 平台） ——
+
+func g2aResponsesBody(model string, stream bool) []byte {
+	return []byte(`{"model":"` + model + `","stream":` + map[bool]string{true: "true", false: "false"}[stream] + `,"input":"hello"}`)
+}
+
+// kimi/deepseek/zhipu 三平台 × 挂点 4 悬挂回放（63-victim 形态）。
+func TestG2AMount4KimiDeepSeekZhipuHangReplay(t *testing.T) {
+	cases := []struct {
+		name     string
+		platform string
+		model    string
+	}{
+		{"kimi", PlatformKimi, "kimi-k3"},
+		{"deepseek", PlatformDeepseek, "deepseek-v4-pro"},
+		{"zhipu", PlatformZhipu, "glm-5.2"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &g2aMockUpstream{}
+			svc := g2aService(upstream)
+			body := g2aResponsesBody(tc.model, true)
+			_, c, obs := g2aGinContext(http.MethodPost, "/v1/responses", body)
+
+			snap := g2aSnapshot(1, 1, 30*time.Second)
+			hb := g2aHeartbeat(context.Background(), obs, 60*time.Millisecond, 40*time.Millisecond)
+			ctx := g2aInject(context.Background(), snap, hb)
+
+			_, err := svc.ForwardAsResponses(ctx, c, g2aAPIKeyAccount(int64(970+i), tc.platform, "g2a-resp-"+tc.name), body, nil)
+
+			var fe *UpstreamFailoverError
+			require.ErrorAs(t, err, &fe)
+			require.Equal(t, http.StatusGatewayTimeout, fe.StatusCode)
+			require.Contains(t, string(fe.ResponseBody), "upstream_first_byte_timeout")
+			require.True(t, fe.ShouldRetryNextAccount(), "剩余预算 ≥5s 必须允许换号")
+			require.True(t, obs.HeaderWritten(), "平台 %s：心跳须先提交 SSE 200", tc.platform)
+			require.Greater(t, obs.heartbeatFrameCount(), 0, "平台 %s：须收到 keep-alive 帧", tc.platform)
+			require.Equal(t, 1, upstream.callCount())
+		})
+	}
+}
+
+// 挂点 4 重放一致性：Responses→Anthropic 转换后的 body 经 buildUpstreamRequest 重建。
+func TestG2AMount4ReplayWireBodyConsistent(t *testing.T) {
+	svc := &GatewayService{cfg: &config.Config{}}
+	account := g2aAnthropicAPIKeyAccount(980)
+	body := g2aResponsesBody("claude-sonnet-5", true)
+
+	var responsesReq apicompat.ResponsesRequest
+	require.NoError(t, json.Unmarshal(body, &responsesReq))
+	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(&responsesReq)
+	require.NoError(t, err)
+	anthropicReq.Stream = true
+	anthropicReq.Model = "claude-sonnet-5"
+	anthropicBody, err := json.Marshal(anthropicReq)
+	require.NoError(t, err)
+	anthropicBody = enforceCacheControlLimit(anthropicBody)
+
+	_, c, _ := g2aGinContext(http.MethodPost, "/v1/responses", nil)
+	req1, wire1, err1 := svc.buildUpstreamRequest(context.Background(), c, account, anthropicBody, "tok", "apikey", "claude-sonnet-5", true, false)
+	require.NoError(t, err1)
+	req2, wire2, err2 := svc.buildUpstreamRequest(context.Background(), c, account, anthropicBody, "tok", "apikey", "claude-sonnet-5", true, false)
+	require.NoError(t, err2)
+
+	require.Equal(t, wire1, wire2, "换号前后 wireBody 必须完全一致（可重放契约）")
+	require.Equal(t, req1.URL.String(), req2.URL.String())
+}
+
+// 挂点 4 健康路径零回归：上游 <delay 正常返回 → 零心跳帧。
+func TestG2AMount4HealthyPathZeroHeartbeat(t *testing.T) {
+	upstream := &g2aMockUpstream{steps: []g2aCall{g2aSuccessFn(g2aAnthropicSSE)}}
+	svc := g2aService(upstream)
+	body := g2aResponsesBody("claude-sonnet-5", true)
+	rec, c, obs := g2aGinContext(http.MethodPost, "/v1/responses", body)
+
+	snap := g2aSnapshot(1, 1, 30*time.Second)
+	hb := g2aHeartbeat(context.Background(), obs, 600*time.Millisecond, 100*time.Millisecond)
+	ctx := g2aInject(context.Background(), snap, hb)
+
+	result, err := svc.ForwardAsResponses(ctx, c, g2aAnthropicAPIKeyAccount(981), body, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, hb.IsCommitted())
+	require.Equal(t, 0, obs.heartbeatFrameCount())
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "response.completed")
 }

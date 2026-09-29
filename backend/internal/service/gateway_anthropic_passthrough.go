@@ -94,11 +94,33 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 
 	var resp *http.Response
 	retryStart := time.Now()
+
+	// G2a 挂点 2：取 G1a 预算快照与 G2b 安装的心跳 owner（请求级，挂点只消费、禁止重建）。
+	snapshot, hasSnapshot := requestBudgetSnapshotFromContext(ctx)
+	hbOwner, _ := upstreamHeartbeatFromContext(ctx)
+	// heartbeat_delay=0 语义为禁用（方案 D2）：owner 即便存在也不起搏。
+	if hasSnapshot && snapshot.HeartbeatDelaySeconds <= 0 {
+		hbOwner = nil
+	}
+
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, input.RequestStream)
+		// G2a 挂点 2：接 G1a 首字节护栏。窗口从不可变截止时间取剩余（禁止本层重初始化计时，
+		// 换号不重置）。guard 的 reqCtx 写入请求 context：窗口耗尽取消 reqCtx 中断 header 等待。
+		var guard *upstreamFirstByteGuard
+		if hasSnapshot {
+			window := snapshot.AttemptWindow(time.Now())
+			guard, upstreamCtx = newUpstreamFirstByteGuard(upstreamCtx, window)
+		}
 		upstreamReq, wireBody, err := s.buildUpstreamRequestAnthropicAPIKeyPassthrough(upstreamCtx, c, account, input.Body, token)
 		releaseUpstreamCtx()
 		if err != nil {
+			if guard != nil {
+				guard.Stop()
+			}
+			if hbOwner != nil && input.RequestStream {
+				hbOwner.Stop()
+			}
 			return nil, err
 		}
 		if input.Parsed != nil && !bytes.Equal(wireBody, input.Body) {
@@ -109,11 +131,21 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 			input.Body = input.Parsed.Body.Bytes()
 		}
 
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
-		if err != nil {
+		// 发送请求（统一经护栏 + 心跳生命周期编排）。必须用预声明 + "=" 赋值：resp 是
+		// 循环外声明的接收变量，":=" 会在循环块内遮蔽它，导致循环后 resp 仍为 nil。
+		var guardTimedOut bool
+		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), guard, hbOwner, input.RequestStream)
+		if guardTimedOut {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
+			remaining := time.Duration(0)
+			if hasSnapshot {
+				remaining = snapshot.RemainingBudget(time.Now())
+			}
+			return nil, newUpstreamFirstByteTimeoutError(remaining)
+		}
+		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
 				UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
 				Passthrough: true,
