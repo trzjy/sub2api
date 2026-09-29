@@ -35,6 +35,16 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R4 消化（2026-09-29，直连 gpt-5.6-sol，block→机械回修）
+
+外审证据：`~/.codex-companion/b4-plan-review/direct-r4/`。R3 #2/#4/#5 闭合；
+R4 2 项均为残留旧表述与新契约的内部矛盾，**全部采纳（机械回修）**：
+
+| # | 发现 | 回修 |
+|---|---|---|
+| 1 | Card B 残留"请求级预分配 (attempt_time, attempt_version) 三路径同键"旧句 | Card B 重写：抓取开始仅取 attempt_version；成功用 `(success_time, attempt_version)`（持久化于 packages_updated_at 作比较状态源）、失败用 `(attempt_time, attempt_version)`（持久化于 last_attempt_at），同一 DB 字典序裁决 |
+| 2 | Card C 残留"有消费方登记归属"旧句（重新打开 R3 #3） | Card C 替换为与 §1 一致收敛门：迁移/证明非 freshness 后停写并删；无法收敛 = 清理与发布验收失败 |
+
 ### R3 消化（2026-09-29，直连 gpt-5.6-sol，block→回修）
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r3/`。R2 之 #2/#3 闭合、
@@ -195,8 +205,12 @@ Extra 新键：
 - 文件：`internal/repository/`（新增 `account_extra_conditional.go` + test）、
   quota service 写路径接入（替换 `queryUsageForAccount` 全部写入口）。
 - 内容：快照专用条件更新 repo 方法（§0.2 已证 UpdateExtra 不足；单一新
-  入口）：排序键按 §1 统一排序键定义（请求级预分配 `(attempt_time,
-  attempt_version)`，三路径同键，DB 单一元组裁决）。**字段矩阵（R2 回修
+  入口）：排序键按 §1 统一排序键定义（R4 回修 #1 收敛）——抓取开始时仅
+  取得并复用 `attempt_version`（DB 分配单调号）；**成功条件更新用
+  `(success_time, attempt_version)`**（success_time = 该次成功快照完成
+  时刻，持久化于 `packages_updated_at` 并作为比较状态源）；**失败条件
+  更新用 `(attempt_time, attempt_version)`**（持久化于
+  `last_attempt_at`）；同一 DB 字典序条件更新裁决。**字段矩阵（R2 回修
   #3，逐项钉死）**：
   - 成功事务：分包快照 + `packages_updated_at` + `reset_at` + `used_percent`
     + `last_attempt_at` + version 自增 + 本次解析错误结果；
@@ -228,8 +242,11 @@ Extra 新键：
 
 **Card C — 旧键清理（grep 消费方证据 + 删除）**：依赖 F；逐键
 `codebuddy_credit_total/used`、旧 `codebuddy_credit_updated_at`（R2 回修
-#4 纳入）及旧 `codebuddy_quota_error` 残留 grep，无消费方删除、有消费方
-登记归属。
+#4 纳入）及旧 `codebuddy_quota_error` 残留 grep；收敛门（R4 回修 #2，与
+§1 一致）：无消费者 → 停止写入并删除；有消费者 → 逐个迁移到
+`codebuddy_credit_packages_updated_at` 或记录可验证的"非 freshness"证明，
+完成迁移/证明后停止旧键写入并删除旧键；**任一消费者无法完成收敛 → 清理
+与发布验收失败，不得以登记归属替代删除**。
 **运维取证**：~~跨实例单写者证明~~（已前置 §0.3）；三态 domain fixture
 断言核验；凭证脱敏 Bearer 零命中 grep 断言（扩展至全部 B4 证据与日志）；
 **上线观测**（§0.1 #8）：快照年龄/无效分包错误计数/条件更新拒绝计数
