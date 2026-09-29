@@ -995,6 +995,20 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
+
+	// UpstreamFirstByteGuardSeconds 通用首字节护栏（CF524 D1）：等待上游响应头
+	// 的最长窗口（秒）。超过该窗口仍未收到响应头即触发 failover/错误响应。
+	// 只接受 [30,90]，无禁用路径（0 与越界一律失败关闭，不回退无护栏旧行为）。
+	// 默认 90：非流式总预算 guard+25s=115s 留足换号+写回余量，且任何合法值
+	// 都在 Cloudflare ~125s 墙内收敛（详见 docs/cf524-upstream-hang-mitigation-plan.md）。
+	UpstreamFirstByteGuardSeconds int `mapstructure:"upstream_first_byte_guard_seconds"`
+	// UpstreamHeartbeatDelaySeconds 流式心跳保活延迟（CF524 D2，秒）：
+	// 客户端为流式且上游响应头等待超过该延迟时，开始周期性写 keep-alive 注释帧，
+	// 防止 Cloudflare 在响应头到达前掐断（524）。
+	// 0=禁用（纯优化可关闭，与护栏的不可禁用区分）；非 0 时只接受 [5,60]。
+	// 且启用时必须 < UpstreamFirstByteGuardSeconds（否则 guard 先触发，心跳永不生效）。
+	// 默认 15。
+	UpstreamHeartbeatDelaySeconds int `mapstructure:"upstream_heartbeat_delay_seconds"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
@@ -1277,6 +1291,25 @@ func (c GatewayCodeBuddyConfig) Validate() error {
 	}
 	if k := c.UrgencyBoostK; k < 0 || k > 1 || k != k {
 		return fmt.Errorf("gateway.codebuddy.urgency_boost_k: must be finite and in [0,1], got %v", k)
+	}
+	return nil
+}
+
+// Validate 校验 CF524 两个配置键（整体校验为热加载唯一提交边界）：
+// 任一非法一律整体返回错误，由调用方（启动/热加载）整体拒绝候选配置、零部分生效。
+//   - UpstreamFirstByteGuardSeconds：只接受 [30,90]，0 与越界均失败关闭，无禁用路径。
+//   - UpstreamHeartbeatDelaySeconds：0=禁用（纯优化可关闭），或只接受 [5,60]。
+//   - 交叉校验：heartbeat 启用（>0）时必须严格小于 guard，否则拒绝启动
+//     （guard 先触发会使非零心跳永不生效，与"0=禁用"语义矛盾）。
+func (g GatewayConfig) Validate() error {
+	if g.UpstreamFirstByteGuardSeconds < 30 || g.UpstreamFirstByteGuardSeconds > 90 {
+		return fmt.Errorf("gateway.upstream_first_byte_guard_seconds must be between 30 and 90 (got %d)", g.UpstreamFirstByteGuardSeconds)
+	}
+	if g.UpstreamHeartbeatDelaySeconds != 0 && (g.UpstreamHeartbeatDelaySeconds < 5 || g.UpstreamHeartbeatDelaySeconds > 60) {
+		return fmt.Errorf("gateway.upstream_heartbeat_delay_seconds must be 0 (disabled) or between 5 and 60 (got %d)", g.UpstreamHeartbeatDelaySeconds)
+	}
+	if g.UpstreamHeartbeatDelaySeconds > 0 && g.UpstreamHeartbeatDelaySeconds >= g.UpstreamFirstByteGuardSeconds {
+		return fmt.Errorf("gateway.upstream_heartbeat_delay_seconds (%d) must be less than upstream_first_byte_guard_seconds (%d) when enabled", g.UpstreamHeartbeatDelaySeconds, g.UpstreamFirstByteGuardSeconds)
 	}
 	return nil
 }
@@ -2553,6 +2586,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_high_effort_first_output_timeout_seconds", 0)
+	// CF524 D1/D2：首字节护栏与流式心跳保活（未配置时默认值生效）。
+	viper.SetDefault("gateway.upstream_first_byte_guard_seconds", 90)
+	viper.SetDefault("gateway.upstream_heartbeat_delay_seconds", 15)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
@@ -2851,6 +2887,11 @@ func setEnvReachableDefaults() {
 func (c *Config) Validate() error {
 	if err := c.Gateway.CodeBuddy.Validate(); err != nil {
 		return fmt.Errorf("gateway.codebuddy: %w", err)
+	}
+	// CF524 D1/D2：首字节护栏与流式心跳保活整体校验（热加载原子性：任一非法则
+	// 整个候选配置被拒绝，两键均维持旧值、零部分生效）。
+	if err := c.Gateway.Validate(); err != nil {
+		return fmt.Errorf("gateway: %w", err)
 	}
 	forwardedClientIPHeaders, err := NormalizeForwardedClientIPHeaders(c.Security.ForwardedClientIPHeaders)
 	if err != nil {
