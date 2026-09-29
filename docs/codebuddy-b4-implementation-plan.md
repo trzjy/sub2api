@@ -35,6 +35,19 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R7 消化（2026-09-29，直连 gpt-5.6-sol，block→回修；首轮仅 reasoning trace 失败关闭，同路由重试有效）
+
+外审证据：`~/.codex-companion/b4-plan-review/direct-r7/`。1 must_fix +
+2 residual + 1 executor_cleanup + 1 suggestion **全部采纳**：
+
+| # | 发现 | 回修 |
+|---|---|---|
+| 1 | 可执行 SQL 未落到 JSONB 存储结构（裸字段名/无类型转换/原子性未钉） | Card B 重写：完整键名 + `(extra->>'key')::timestamptz` / `::bigint` canonical 转换 + '-infinity'/0 哨兵 + tuple 接受条件 + 同一条原子条件 UPDATE（只合并 B4 键、保留其余 extra） |
+| 2 | (residual) 微秒归一化与 attempt_time 采样点未钉死 | 统一 `time.Now().UTC().Truncate(time.Microsecond)` 应用侧截断；attempt_time = 抓取请求开始时刻采样（与 attempt_version 同点） |
+| 3 | (residual) 恢复流程缺写入隔离 | Card E 恢复流程钉死：停写→校验备份→恢复→验证→再启动旧版本 |
+| 4 | (cleanup) §0.1 R5 消化记录残留废弃表达式 | 标注"历史方案已修正，不得执行" |
+| 5 | (suggestion) sequence 创建/权限/调用边界未挂卡 | Card B 补：sequence 由 B 迁移文件创建、repo 抓取开始调用、失败=本次抓取失败关闭（禁应用本地计数器） |
+
 ### R6 消化（2026-09-29，直连 gpt-5.6-sol，block→机械回修）
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r6/`。GREATEST 零新增
@@ -52,10 +65,11 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r5/`。R4 #2 闭合；
 剩 1 项 must_fix **采纳**：当前已接受事件的 SQL 比较状态与 version 写入
-语义未钉死。回修：Card B 补可执行定义——当前事件时间 =
+语义未钉死。回修：Card B 补可执行定义——当前事件时间推导（**历史方案
 `GREATEST(COALESCE(packages_updated_at,0), COALESCE(last_attempt_at,0))`
-（零新增字段，优先于外审建议的显式新字段方案，合同 §5）、version 一律
-= attempt_version 成功提交不得另自增、五场景回归补两条交错断言。
+已被 R6/R7 修正为 timestamptz 哨兵 + JSONB 提取口径，仅作演进留痕，
+不得执行**）、version 一律 = attempt_version 成功提交不得另自增、
+五场景回归补两条交错断言。
 
 ### R4 消化（2026-09-29，直连 gpt-5.6-sol，block→机械回修）
 
@@ -223,10 +237,12 @@ Extra 新键：
   版本继续运行"窗口**（旧服务会在迁移后再写旧键 → 状态分叉）。
   双键冲突策略：**失败阻断**，不静默覆盖；幂等性测试覆盖五态 = 旧键仅
   有/新键仅有/双键冲突/重复执行/中途失败重试。
-  - **恢复边界（R6 residual #5 采纳）**：迁移执行前对受影响账号 extra
-    做快照备份（保留期与清理触发条件在发布单登记）；发布失败 → 备份
-    恢复 + 回滚到旧版本；发布成功后进入前向修复边界（旧键已删，回滚旧
-    版本不再支持——发布单明确声明该不可回滚点）。
+  - **恢复边界（R6 residual #5 + R7 residual 采纳）**：迁移执行前对受
+    影响账号 extra 做快照备份（保留期与清理触发条件在发布单登记）；
+    **发布失败恢复流程 = 停止新旧全部写入 → 校验备份 → 恢复 → 验证键
+    状态 → 再启动旧版本**（恢复期间写入隔离，防止恢复快照覆盖恢复窗口
+    内新键写入）；发布成功后进入前向修复边界（旧键已删，回滚旧版本
+    不再支持——发布单明确声明该不可回滚点）。
 
 ### 批 2（依赖批 1 产物；A+B 同任务边界合入）
 
@@ -240,24 +256,34 @@ Extra 新键：
   时刻，成功事务持久化于 `packages_updated_at`）；**失败条件更新用
   `(attempt_time, attempt_version)`**（接受时持久化于
   `last_attempt_at`）；同一 DB 字典序条件更新裁决。
-  - **当前已接受事件比较状态的可执行定义（R5 回修 #1 + R6 回修 #2，
-    零新增字段）**：时间字段统一 `timestamptz`（UTC）；当前事件时间 =
-    `GREATEST(COALESCE(packages_updated_at, '-infinity'::timestamptz),
-    COALESCE(last_attempt_at, '-infinity'::timestamptz))`；当前版本 =
-    `COALESCE(codebuddy_credit_version, 0)`（合法 `attempt_version` 从
-    sequence 起 ≥1，0 为"尚无事件"哨兵）。**接受条件 = tuple 语义**：
-    `candidate_event_time > current_event_time OR (candidate_event_time
-    = current_event_time AND candidate_version > current_version)`。
-    成立前提（由比较器单调性保证，回归断言）：成功事务同事务更新
+  - **当前已接受事件比较状态的可执行定义（R5/R6/R7 逐轮收敛，零新增
+    字段，JSONB 口径）**：全部键位于 `accounts.extra` JSONB，完整键名 =
+    `codebuddy_credit_packages_updated_at` / `codebuddy_credit_last_attempt_at`
+    / `codebuddy_credit_version`。**读取**（同一 canonical 转换用于候选值
+    与当前值）：时间 = `(extra->>'key')::timestamptz`（NULL/缺失 →
+    `'-infinity'::timestamptz`）；版本 = `COALESCE((extra->>'key')::bigint,
+    0)`（0 = 尚无事件哨兵；合法 attempt_version 从 sequence 起 ≥1）。
+    当前事件时间 = `GREATEST(上述两个时间表达式)`。**接受条件 = tuple
+    语义**：`candidate_event_time > current_event_time OR
+    (candidate_event_time = current_event_time AND candidate_version >
+    current_version)`。**写入原子性**：条件判断、快照/错误字段写入、
+    version 写入位于**同一条原子条件 UPDATE**（`UPDATE ... SET extra =
+    extra || <新键值合并> WHERE <tuple 接受条件>`），只合并 B4 负责的
+    JSONB 键、保留其他 extra 内容（JSONB merge 语义天然保留）。成立
+    前提（由比较器单调性保证，回归断言）：成功事务同事务更新
     packages_updated_at 与 last_attempt_at 均为 success_time；被接受的
     失败满足 `attempt_time >= 当前事件时间`（**相等时须版本更大**，R6
     回修 #3：不写严格 `>`，同时间戳高版本失败可接受、低版本被拒）。
   - **version 写入语义（R5 回修 #1）**：`codebuddy_credit_version` 一律
     写入本次抓取开始取得的 `attempt_version`；**成功提交不得另行自增
     生成新版本**（自增会破坏比较键中 attempt_version 语义）。
-  - **时间来源与精度（R6 residual #4 采纳）**：success_time /
-    attempt_time 由**应用进程生成**（time.Now UTC），存储 `timestamptz`
-    微秒精度；单实例拓扑下无跨实例时钟偏差问题（多实例扩展时另立卡）。
+  - **时间来源与精度（R6 residual #4 + R7 residual 采纳）**：success_time
+    / attempt_time 由**应用进程生成**（`time.Now().UTC().Truncate(
+    time.Microsecond)`，应用侧统一截断后传入 repo，比较值与写入值同一
+    实例——禁驱动侧二次转换差异），存储 `timestamptz` 微秒精度；
+    **attempt_time 采样点 = 抓取请求开始时刻**（与 attempt_version 同点
+    取得，绑定于请求生命周期）；单实例拓扑下无跨实例时钟偏差问题
+    （多实例扩展时另立卡）。
   - **字段矩阵（R2 回修 #3，逐项钉死）**：
   - 成功事务：分包快照 + `packages_updated_at` + `reset_at` + `used_percent`
     + `last_attempt_at`(=success_time) + version(=attempt_version，不另自增)
@@ -276,6 +302,10 @@ Extra 新键：
   '-infinity' 哨兵路径）、同时间戳高版本失败可接受/低版本失败被拒**；补验收：新快照后 reset_at 与阈值候选回归
   断言；命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
   "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
+- **DB sequence 归属（R7 suggestion 采纳）**：`attempt_version` 的
+  sequence 由 Card B 的迁移文件创建（名称与起始值在卡内钉死），repo 层
+  抓取开始时调用取得；**sequence 调用失败 → 本次抓取失败关闭**（不得
+  退化为应用本地计数器）。
 - 部署顺序：与 Card A 同变更合入；见 Card E 发布闸门。
 
 **Card F — 前端分包展示 + 旧总量展示退役**
