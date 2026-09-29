@@ -1,9 +1,16 @@
-# CF 524 上游悬挂治理方案 v2（首字节护栏 + 流式心跳保活）
+# CF 524 上游悬挂治理方案 v3（首字节护栏 + 流式心跳保活）
 
-> 状态：方案审 delta 复核 7 项全采纳回修，待派发。2026-09-30 用户裁定：采用方案 A
+> 状态：确认审（R3）7 项全采纳回修，待派发。2026-09-30 用户裁定：采用方案 A
 > （心跳+护栏+failover，含流式晚到错误统一 SSE error 帧的契约变更授权）。
 > 排查证据：`~/.sub2api-acceptance/sub2api-cf524-diagnosis-20260930/`。
-> v1→v2：方案审 R1 5 项 + delta 复核 7 项全部采纳落地。
+> v1→v2：方案审 R1 5 项 + delta 复核 7 项全采纳。
+> v2→v3：确认审 R3 7 项全采纳（Flush 契约/换号机器所有权/入口计时/120s 簇验收/
+> G2G3 串行化/heartbeat<guard 交叉校验/回滚配置兼容）。
+> 代码事实更正（R3 P1-2 核实）：换号计数与耗尽机器
+> （openAIFirstOutputFailoverExhausted / maxOpenAIFirstOutputTimeoutSwitches /
+> firstOutputTimeoutSwitchCount）全部位于 internal/handler/openai_gateway_handler.go
+> 的 OpenAI 循环内，非 OpenAI 四挂点所在服务层循环没有该机制——本方案为四挂点
+> 新建平台无关错误构造器与换号预算，OpenAI handler 既有机制零改动。
 
 ## 0. 问题定义（证据收敛）
 
@@ -46,16 +53,24 @@
   4. `gateway_forward_as_responses.go`（/v1/responses 非 OpenAI 平台）
   5. `openai_gateway_forward.go`（OpenAI 原生既有 headerGuard——G1 迁移共享
      组件后改调共享实现，语义零变化）
-- **请求级总预算（delta 复核 P1-1/-2 闭合）**：进入 forward 层时设绝对截止：
-  - 流式客户端（有心跳，CF 墙被心跳中和）：绝对截止 = 进入 + 2×guard + 10s
-    写回余量（默认 190s）；
-  - 非流式客户端（无心跳，受 CF 墙约束）：绝对截止 = 进入 + guard + 25s
-    （默认 115s < 120s 双墙）；每次尝试的 guard 窗口 = min(guard, 剩余预算)，
-    换号不重置绝对截止。
-- 生效条件：上游响应头等待超过当次窗口 → failover 错误（复用
-  newOpenAIFirstOutputTimeoutError 模式，SafeToFailoverAfterWrite=true）。
-- 换号上限：沿用 maxOpenAIFirstOutputTimeoutSwitches=1；耗尽后：stream →
-  SSE error 帧；非流式 → 502 JSON。
+- **请求级总预算（R3 P1-3 闭合：从请求入口计时）**：预算起点 = 请求到达网关的
+  单调时间（handler 入口既有请求起点，如无则在入口中间件记录），非 forward 层
+  进入时刻——避免认证/排队/限流吃掉墙前余量。进入 forward 层时剩余预算 =
+  总预算 − 入口已耗时间：
+  - 流式客户端（有心跳，CF 墙被心跳中和）：总预算 = 2×guard + 10s 写回余量
+    （默认 190s）；
+  - 非流式客户端（无心跳，受 CF 墙约束）：总预算 = guard + 25s（默认 115s <
+    120s 双墙）；每次尝试的 guard 窗口 = min(guard, 剩余预算)，换号不重置。
+  前置延迟超 5s 仍须墙内返回（验收用例钉死）。
+- 生效条件：上游响应头等待超过当次窗口 → failover 错误（SafeToFailoverAfterWrite=
+  true）。**错误构造与换号预算（R3 P1-2 闭合）**：新建平台无关构造器
+  `newUpstreamFirstByteTimeoutError`（挂 OpenAIGatewayService 之外的通用服务层，
+  产出 UpstreamFailoverError，语义对齐既有 newOpenAIFirstOutputTimeoutError 但
+  不依赖 OpenAI 命名/条件）；换号预算 = 每请求 1 次（对齐
+  maxOpenAIFirstOutputTimeoutSwitches=1 语义），由各挂点所在服务层循环持有计数；
+  耗尽后：stream → SSE error 帧；非流式 → 502 JSON。OpenAI handler 既有识别/
+  计数/耗尽机器（openai_gateway_handler.go）零改动。
+- 换号上限：每请求 1 次（见上）。
 - **配置键**：`gateway.upstream_first_byte_guard_seconds`，默认 90。
   **Validate() 只接受 [30,90]**（上限 90 = 非流式预算 115s 留足换号+写回
   余量，且任何合法值都在 CF 墙内收敛；0 与越界失败关闭，无旧行为回退）。
@@ -70,7 +85,11 @@
   行为零变化（反向测试钉死）。
 - 触发条件：`clientStream == true` 且上游响应头等待超过 heartbeat_delay。
 - 行为：写 SSE 200 响应头 + 周期 `: keep-alive` 注释帧（15s 间隔）；上游
-  响应头到达即停。
+  响应头到达即停。**Flush 契约（R3 P1-1 闭合）**：初始响应头与每个心跳帧
+  写入后必须显式 `Flush()`——Go ResponseWriter/中间层会缓冲小写入，不 Flush
+  则 CF 收不到帧、心跳失效；组件不支持 Flush 能力时失败关闭（拒绝启用心跳
+  并报错，不静默降级为无心跳）。测试按时间轴观察客户端实际收到初始头与
+  连续心跳帧，不满足即失败。
 - **晚到响应契约（用户已授权）**：心跳启动后，上游晚到 2xx 正常转语义流；
   晚到 4xx/5xx 一律 SSE error 帧（经既有 handleStreamingAwareError(true)
   通道）。验收按晚到 2xx/4xx/5xx 三分支分别测试。
@@ -85,7 +104,10 @@
   （停 tick、等心跳 goroutine 退出后才交接）。竞态测试覆盖：上游响应与
   tick 同至、guard 超时与 tick 同至、客户端断开时心跳退出。
 - 配置键：`gateway.upstream_heartbeat_delay_seconds`，默认 15，0=禁用
-  （纯优化可关闭，与护栏的不可禁用区分），Validate [0]∪[5,60]。
+  （纯优化可关闭，与护栏的不可禁用区分），Validate [0]∪[5,60]，且
+  **交叉校验（R3 P2-6 闭合）：heartbeat_delay > 0 时必须 < guard 值**，
+  否则拒绝启动（guard 先触发会使非零心跳永不生效，与"0=禁用"语义矛盾），
+  配置验收覆盖该组合。
 
 ### D3 明确不做（防过度设计）
 
@@ -99,14 +121,14 @@
 
 | 卡 | 文件 | 内容 | 依赖 |
 |---|---|---|---|
-| G1 | internal/service/{openai_first_output_timeout.go, openai_gateway_forward.go, gateway_forward_as_chat_completions.go} | headerGuard 泛化为共享组件（**旧链归零（合同 §4）：登记旧 openAIFirstOutputHeaderGuard 入口与全部调用点 → 迁移共享实现 → 删除被替代旧类型/构造器 → 仓库级符号残留扫描 + 定向测试证明无残留**）+ 挂点 3 + 请求级总预算（流式 2×guard+10s / 非流式 guard+25s）+ 单测 | 方案 v2 定稿 |
-| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} | 挂点 1/2/4 接护栏 + failover 接线 + 单测（含 claude-sonnet-5 两形态回放用例） | G1 |
-| G3 | internal/service/（心跳 writer 组件）+ 挂点 1-4 接入 | D2 心跳（晚触发 + stop-and-wait 单一 writer 所有权 + 状态机三分支顺序 + 三交叠竞态 + 晚到 2xx/4xx/5xx 三分支 + OpenAI 路径反向测试）+ 单测 | G1 |
-| G4 | internal/config/config.go + config.example.yaml + 生产 config.yaml 变更单 | 两个新键 + Validate（guard [30,90] 失败关闭无禁用路径；heartbeat [0]∪[5,60]）+ 文档注释 | 方案 v2 定稿 |
+| G1 | internal/service/{upstream_first_byte_guard.go(新), openai_gateway_forward.go, gateway_forward_as_chat_completions.go, upstream_first_byte_error.go(新)} | headerGuard 泛化为共享组件（**旧链归零（合同 §4）：登记旧 openAIFirstOutputHeaderGuard 入口与全部调用点 → 迁移共享实现 → 删除被替代旧类型/构造器 → 仓库级符号残留扫描 + 定向测试证明无残留**；OpenAI handler 识别/计数/耗尽机器零改动）+ 平台无关 newUpstreamFirstByteTimeoutError + 每请求 1 次换号预算（挂点循环持有）+ 挂点 3 + 请求入口计时总预算（流式 2×guard+10s / 非流式 guard+25s，前置延迟>5s 用例）+ 单测 | 方案 v3 定稿 |
+| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} | 挂点 1/2/4 接护栏 + 接心跳（G3 组件）+ failover/耗尽接线 + 单测（含 claude-sonnet-5 两形态回放用例、非 OpenAI 路径换号与耗尽分支） | G1 + G3 |
+| G3 | internal/service/upstream_heartbeat.go(新) + 组件单测 | **仅心跳组件交付，不做挂点接入（R3 P2-5 闭合：挂点文件唯一所有者=G2，消除并行写冲突）**：晚触发 + Flush 契约（初始头+每帧 Flush，无 Flush 能力失败关闭）+ stop-and-wait 单一 writer 所有权 + 状态机三分支顺序 + 三交叠竞态 + 晚到 2xx/4xx/5xx 三分支 + 组件级单测 | G1 |
+| G4 | internal/config/config.go + config.example.yaml + 生产 config.yaml 变更单 | 两个新键 + Validate（guard [30,90] 失败关闭无禁用路径；heartbeat [0]∪[5,60]；**交叉校验 heartbeat>0 ⇒ heartbeat<guard**）+ 文档注释 | 方案 v3 定稿 |
 | G5 | docs/ + 验收卡 | 覆盖矩阵（五挂点 × 63-victim 全形态含 anthropic 两形态）+ 生产观测：稳定事件 `gateway_first_byte_guard_triggered` / `gateway_upstream_heartbeat_started`，字段 path/platform/stream/attempt/outcome/elapsed_ms，request_id 可串联 guard→换号→最终结果 | 全部 |
 
-- 并行性：G1/G4 无共享文件 → 立即并行；G2/G3 依赖 G1 组件签名，G1 交付后
-  并行；G5 收尾串行。
+- 串行编排（R3 P2-5）：**G1 ∥ G4 → G3 → G2 → G5**；G2 是挂点 1-4 文件唯一
+  所有者，接护栏与心跳一次完成。
 - 验证白名单（每卡）：`go build` + `go test -tags unit -run <定向>` + `go vet`；
   收敛后算力机 service+handler 包全量一轮（高风险边界 → 全量触发）。
 
@@ -124,11 +146,15 @@
 5. 状态机顺序：guard→换号（心跳 stop-and-wait 先于换号）→耗尽→error 帧，
    分支测试钉死；三交叠竞态测试通过。
 6. 配置：guard [30,90] 外（含 0）拒绝启动/热加载；heartbeat [0]∪[5,60]。
-7. **生产验收唯一口径（delta 复核 P2 闭合，替换 v1 的"slog 存在即完成"）**：
+7. **生产验收唯一口径（R3 P1-4 闭合：双簇零命中）**：
    上线后 48h 观察窗，`docker logs sub2api | grep` 两事件名 + 应用访问日志
-   499 簇统计（与排查同命令），判定条件 = **124.9–125.1s 的 499 簇命中数为 0**
-   （基线：63/48h）且每条 guard 触发事件能用 request_id 串联到换号成功或
-   耗尽的最终结果。生产执行为上线后动作，随部署证据落盘。
+   499 簇统计（与排查同命令），判定条件 = **124.9–125.1s 簇与 119.9–120.1s
+   簇的 499 命中数均为 0**（基线：63/48h + 6/48h）且每条 guard 触发事件能用
+   request_id 串联到换号成功或耗尽的最终结果。生产执行为上线后动作，随部署
+   证据落盘。
+8. **回滚兼容（R3 P2-7 闭合）**：部署前用旧镜像 + 新 config.yaml 实测启动
+   （证明旧二进制容忍新键，viper 未知键行为以实测为准）；回滚步骤含配置
+   恢复动作与失败关闭验证，纳入部署证据。
 
 ## 5. 残余风险（如实登记）
 
