@@ -14,7 +14,7 @@
 | B3a（影子新建入口封死） | ✅ 代码侧闭环 | 早期已合边界冻结 `7f12c556b` + 桥接 `644de818a`；本次收口删除新建分支与前端向导（终审 approve）；证据 `~/.sub2api-acceptance/sub2api-b3a-freeze-20260929/` |
 | B3b（manifest 迁移） | ⬜ 未开始 | B2 → B3a → B3b → B3c 顺序；前置=遥测基线证明 + **B2 生产激活**；删除前引用清单已起建（02 文档，B3b 结束冻结） |
 | B3c | ⬜ 未开始 | |
-| B4 | 🟡 探针完成，待用户裁定一项 | 探针已取证（2026-09-29，cn 站真实账号 HTTP 200，证据 `~/.sub2api-acceptance/sub2api-b4-probe-20260929/`）；§4.1 addendum 已回写（规范单位=credits、数值类型=*Precise→NUMERIC(20,8)、字段映射钉死）；**唯一 pending = expires_at 源字段映射（活跃包 ExpiredTime 恒空串 vs CycleEndTime，报用户裁定）**，裁定前 §4.2 到期判据保持未冻结、解析代码禁写 |
+| B4 | 🟢 探针+裁定闭环，可实现 | 探针已取证（2026-09-29，cn 站真实账号 HTTP 200，证据 `~/.sub2api-acceptance/sub2api-b4-probe-20260929/`）；§4.1 addendum 已回写（规范单位=credits、数值类型=*Precise→NUMERIC(20,8)、字段映射钉死）；**用户裁定 2026-09-29：expires_at = CycleEndTime（Asia/Shanghai 解析，Status=3 剔除）**——§4.2 冻结完全解除，B4 实现可按七步流程开工 |
 
 ## B3a 收口记录（2026-09-29）
 
