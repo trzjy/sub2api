@@ -114,6 +114,9 @@ func NewGatewayHandler(
 // Messages handles Claude API compatible messages endpoint
 // POST /v1/messages
 func (h *GatewayHandler) Messages(c *gin.Context) {
+	// CF524 请求入口单调时间：作为预算快照与心跳计时起点（覆盖认证/排队前置期）。
+	cf524Entry := time.Now()
+
 	// 从context获取apiKey和user（ApiKeyAuth中间件已设置）
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
@@ -232,6 +235,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 获取订阅信息（可能为nil）- 提前获取用于后续检查
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
+
+	// CF524 G2b 入口安装点：认证/鉴权完成后、并发槽位等待与账号选择前，创建请求级
+	// 不可变预算快照（含入口单调时间）并安装请求级心跳 owner；出口必然 Stop。
+	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeat(c, cf524Entry, reqStream)
+	defer cf524StopHeartbeat()
 
 	// 1. 首先获取并发槽位（订阅分组走 group 维度，计量走 user 维度）
 	scope := resolveConcurrencyScope(c, subject, subscription)
@@ -487,8 +495,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if err != nil {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
-					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化
-					if c.Writer.Size() != writerSizeBeforeForward {
+					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化。
+					// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
+					// 心跳已提交时仍允许换号（判定与现状在无心跳时完全一致）。
+					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
 						h.handleFailoverExhausted(c, failoverErr, service.PlatformGemini, true)
 						return
 					}
@@ -1019,8 +1029,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
-					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化
-					if c.Writer.Size() != writerSizeBeforeForward {
+					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化。
+					// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
+					// 心跳已提交时仍允许换号（判定与现状在无心跳时完全一致）。
+					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
 					}
@@ -2016,6 +2028,87 @@ func (h *GatewayHandler) ensureForwardErrorResponse(c *gin.Context, streamStarte
 	}
 	h.handleStreamingAwareError(c, http.StatusBadGateway, "upstream_error", pkgerrors.UpstreamRequestFailed, streamStarted)
 	return true
+}
+
+// cf524GuardConfig 读取 CF524 入口安装点所需配置（guard/heartbeat 秒数）。
+// cfg 缺失时返回 0/0，安装点据此跳过（无快照/无 owner，走既有无护栏旧路径，
+// 与 G2a 挂点"无快照不安装护栏"同型，不兜底）。
+func (h *GatewayHandler) cf524GuardConfig() (guardSeconds, heartbeatSeconds int) {
+	if h == nil || h.cfg == nil {
+		return 0, 0
+	}
+	return h.cfg.Gateway.UpstreamFirstByteGuardSeconds, h.cfg.Gateway.UpstreamHeartbeatDelaySeconds
+}
+
+// cf524InstallUpstreamBudgetAndHeartbeat 是 CF524 G2b 的请求入口安装点（方案 v8.2
+// §2 D1/D2）：在认证/鉴权完成后、并发槽位等待与账号选择前，创建请求级不可变预算
+// 快照并安装请求级心跳 owner。
+//
+// 契约：
+//   - 必须在认证之后调用：认证失败分支不得因本安装产生任何写出（快照/owner 只会
+//     在后续挂点起搏，本函数本身零写出）；
+//   - 配置一次捕获为不可变快照：热加载只影响后续请求；
+//   - 入口单调时间 entry 传入（调用入口处的 time.Now()），池内计时起点覆盖认证/
+//     排队前置期（前置延迟不吃墙前余量）；
+//   - 返回 stopFunc 供请求出口 defer 调用，Stop 心跳 owner 防 goroutine 泄漏；
+//     handler 侧只保证"请求出口必然 Stop"，换号交接的 stop-and-wait 由 G2a 挂点层负责；
+//   - owner 仅在快照存在且 clientStream 时安装（非流式无 SSE writer 可写，安装无意义）；
+//     Flush 能力缺失时向上抛错由组件失败关闭（不静默降级为无心跳）。
+func (h *GatewayHandler) cf524InstallUpstreamBudgetAndHeartbeat(c *gin.Context, entry time.Time, clientStream bool) (stopFunc func()) {
+	if c == nil || c.Request == nil {
+		return func() {}
+	}
+	guardSeconds, heartbeatSeconds := h.cf524GuardConfig()
+	if guardSeconds <= 0 {
+		// 无配置（未接入/测试桩）时不安装：与挂点"无快照不兜底"契约一致。
+		return func() {}
+	}
+	snapshot := service.NewRequestBudgetSnapshot(guardSeconds, heartbeatSeconds, entry, clientStream)
+	ctx := service.WithRequestBudgetSnapshot(c.Request.Context(), snapshot)
+
+	if !clientStream || heartbeatSeconds <= 0 {
+		// 非流式 / 心跳禁用：只装快照（护栏仍生效），不起搏心跳。
+		c.Request = c.Request.WithContext(ctx)
+		return func() {}
+	}
+
+	hb := service.NewUpstreamHeartbeat(ctx, c.Writer, snapshot, time.Now())
+	ctx = service.WithUpstreamHeartbeat(ctx, hb)
+	c.Request = c.Request.WithContext(ctx)
+
+	// 起搏：Start 与后续 Resume 同型，首次安装即开始等待首帧窗口。
+	// Flush 能力缺失时 Start 返回错误、零写出——失败关闭，不静默降级。
+	_ = hb.Start()
+
+	return func() { hb.Stop() }
+}
+
+// heartbeatFailoverGuardStillClean 是"写后禁 failover"防线的 CF524 例外判定（方案
+// v8.2 §2 D2 v5）：心跳注释帧非语义写出，不得把心跳已提交字节误判为"流已写出"。
+//
+// 判定：writerSizeBeforeForward ≤ c.Writer.Size() ≤ heartbeatBaseSize 时仍视为干净
+// （可继续换号），其中 heartbeatBaseSize = writerSizeBeforeForward + owner.CommittedBytes()。
+// 心跳未启动/未提交（CommittedBytes=0，或 owner 不存在）时严格退回现状判定
+// （Size() == writerSizeBeforeForward），不兜底第二条路径。
+//
+// gin.Size() 的 noWritten 哨兵为 -1，首次 Flush 会跳到 0；该 +1 不计入组件按
+// size 差额累计的 CommittedBytes，故 before<0 且确有心跳字节时把基线归一到逻辑 0，
+// 避免心跳基线少 1 字节误判为语义写出。
+func heartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward int) bool {
+	if c == nil || c.Writer == nil {
+		return true
+	}
+	size := c.Writer.Size()
+	hb, _ := service.UpstreamHeartbeatFromContext(c.Request.Context())
+	if hb == nil || hb.CommittedBytes() <= 0 {
+		return size == writerSizeBeforeForward
+	}
+	base := writerSizeBeforeForward
+	if base < 0 {
+		base = 0
+	}
+	base += int(hb.CommittedBytes())
+	return size <= base
 }
 
 // gatewayForwardErrorAlreadyCommunicated reports whether a Forward implementation

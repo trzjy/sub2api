@@ -123,6 +123,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 
+	// CF524 G2b 入口安装点：认证/鉴权完成后、并发槽位等待与账号选择前，创建请求级
+	// 不可变预算快照（入口单调时间 requestStart）并安装请求级心跳 owner；出口必然 Stop。
+	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeat(c, requestStart, reqStream)
+	defer cf524StopHeartbeat()
+
 	scope := resolveConcurrencyScope(c, subject, subscription)
 	userReleaseFunc, err := h.concurrencyHelper.AcquireScopedUserSlotWithWait(c, scope, subject.UserID, reqStream, &streamStarted)
 	if err != nil {
@@ -293,7 +298,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
-				if c.Writer.Size() != writerSizeBeforeForward {
+				// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
+				// 心跳已提交时仍允许换号（无心跳时判定与现状完全一致）。
+				if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
 					h.handleCCFailoverExhausted(c, failoverErr, true)
 					return
 				}
