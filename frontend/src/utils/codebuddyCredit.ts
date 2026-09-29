@@ -91,6 +91,17 @@ function parseDecimalString(value: unknown): Decimal | null {
   }
 }
 
+/**
+ * 后端写入口径：codebuddy_credit_used_percent 为 **JSON 数值**（float8，见
+ * account_extra_conditional.go 的 to_jsonb($5::float8)）。展示仍走十进制安全——
+ * 用 Decimal 构造避免二进制浮点参与格式化；used_percent 是单值展示，不参与分包求和。
+ * 非数值形态视为契约不符（禁兜底为 0）。
+ */
+function parseUsedPercent(value: unknown): Decimal | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return new Decimal(value)
+}
+
 /** 字符串承载的 NUMERIC(20,8) 值求和（十进制安全，禁 float 换算）。 */
 function sumDecimalStrings(values: string[]): Decimal {
   return values.reduce((acc, v) => acc.plus(v), new Decimal(0))
@@ -180,7 +191,7 @@ export function parseCodeBuddyCredit(extra: unknown): CodeBuddyCreditSnapshot | 
     ? sumDecimalStrings(countable.map((p) => p.total)).toString()
     : '0'
 
-  const usedPercentRaw = parseDecimalString(e.codebuddy_credit_used_percent)
+  const usedPercentRaw = parseUsedPercent(e.codebuddy_credit_used_percent)
   const resetAtStr = typeof e.codebuddy_credit_reset_at === 'string' ? e.codebuddy_credit_reset_at : ''
   const updatedAtStr = typeof e.codebuddy_credit_packages_updated_at === 'string' ? e.codebuddy_credit_packages_updated_at : ''
 
@@ -194,7 +205,7 @@ export function parseCodeBuddyCredit(extra: unknown): CodeBuddyCreditSnapshot | 
     totalTotal,
     remainingDisplay,
     totalDisplay,
-    hasExcluded: packages.some((p) => !p.countable) || parseFailure,
+    hasExcluded: packages.some((p) => !p.countable) || parseFailure || usedPercentRaw === null,
     updatedAt: updatedAtStr.trim() !== '' ? updatedAtStr : null,
     usedPercent: usedPercentRaw ? usedPercentRaw.toNumber() : 0,
     resetAt: resetAtStr.trim() !== '' ? resetAtStr : null,

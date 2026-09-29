@@ -123,7 +123,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
           },
         ],
         codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
-        codebuddy_credit_used_percent: '30.05',
+        codebuddy_credit_used_percent: 30.05,
         codebuddy_credit_reset_at: '2026-10-01T00:00:00Z',
       }),
     )
@@ -175,7 +175,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
             status: 0,
           },
         ],
-        codebuddy_credit_used_percent: '66',
+        codebuddy_credit_used_percent: 66,
         codebuddy_credit_error: '上游超时',
       }),
     )
@@ -210,7 +210,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
             status: 0,
           },
         ],
-        codebuddy_credit_used_percent: '40',
+        codebuddy_credit_used_percent: 40,
       }),
     )
     await flushPromises()
@@ -236,7 +236,7 @@ describe('AccountUsageCell — CodeBuddy 母账号配额快照', () => {
               status: 0,
             },
           ],
-          codebuddy_credit_used_percent: '30.05',
+          codebuddy_credit_used_percent: 30.05,
         },
         'deepseek',
       ),

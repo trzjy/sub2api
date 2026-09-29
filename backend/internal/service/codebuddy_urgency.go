@@ -223,20 +223,15 @@ func codeBuddyPackageFromExtraMap(m map[string]any) (CodeBuddyCreditPackage, boo
 }
 
 func decimalFromExtraAny(v any) (decimal.Decimal, bool) {
-	switch t := v.(type) {
-	case string:
-		d, err := decimal.NewFromString(strings.TrimSpace(t))
-		if err != nil {
-			return decimal.Zero, false
-		}
-		return d, true
-	case float64:
-		return decimal.NewFromFloat(t), true
-	case decimal.Decimal:
-		return t, true
-	default:
+	s, ok := v.(string)
+	if !ok {
 		return decimal.Zero, false
 	}
+	d, err := decimal.NewFromString(strings.TrimSpace(s))
+	if err != nil {
+		return decimal.Zero, false
+	}
+	return d, true
 }
 
 // sortCandidatesByUrgencyBoost / sortCandidatesByUrgencyBoostPtr 已在 D-3 轮删除：

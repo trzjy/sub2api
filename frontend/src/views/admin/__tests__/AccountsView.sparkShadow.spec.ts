@@ -427,7 +427,7 @@ describe('admin AccountsView — 账号行展示', () => {
           },
         ],
         codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
-        codebuddy_credit_used_percent: '37',
+        codebuddy_credit_used_percent: 37,
         codebuddy_credit_reset_at: '2026-09-16T00:00:00Z',
       },
     }

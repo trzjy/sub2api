@@ -188,6 +188,28 @@ func TestParseCodeBuddyCreditUsage_RejectsUnexpectedSchema(t *testing.T) {
 	require.False(t, ok)
 }
 
+// TestParseCodeBuddyCreditDecimal_SinglePath 验证 decimal 字符串单一口径：合法字符串
+// 解析并量化到 NUMERIC(20,8)；被 float64 兜底接受过的形态（非字符串 / 非定点
+// 字符串）一律失败关闭，不做 float64/量化降级。
+func TestParseCodeBuddyCreditDecimal_SingleDecimalPath(t *testing.T) {
+	// 合法定点字符串解析成功并按 NUMERIC(20,8) 量化。
+	for _, tc := range []struct{ in, want string }{
+		{"207.49000063", "207.49000063"},
+		{" 500 ", "500"},
+		{"0.123456789", "0.12345679"}, // >8 位小数被截断量化
+	} {
+		d, err := parseCodeBuddyCreditDecimal(tc.in)
+		require.NoError(t, err, "合法字符串 %q 必须解析成功", tc.in)
+		require.Equal(t, tc.want, d.String(), "NUMERIC(20,8) 量化口径 %q", tc.in)
+	}
+
+	// 非法字符串（float64 兜底此前能接住）→ 失败关闭。
+	for _, in := range []string{"", "  ", "not-a-number", "12abc"} {
+		_, err := parseCodeBuddyCreditDecimal(in)
+		require.Error(t, err, "非法字符串 %q 必须失败关闭，不得回退 float64", in)
+	}
+}
+
 // codeBuddyModelsRecorder 构造一个返回动态模型列表 JSON 的 HTTP 桩（每次调用返回全新响应体，
 // 避免响应体被单次读取后耗尽导致复用失败）。
 func codeBuddyModelsRecorder(body string) *httpUpstreamRecorder {

@@ -277,6 +277,45 @@ func TestCodeBuddyUrgencySnapshotFromExtra_DirectTypedSlice(t *testing.T) {
 	require.Equal(t, "typed", snap.Packages[0].ID)
 }
 
+// TestCodeBuddyUrgencySnapshotFromExtra_NonStringDecimalDropped 验证 Extra 反序列化路径
+// 仅接受 string 形态的 remaining/total（与存储契约 MarshalJSON 对称）：float64 形态
+// 的分包条目整条丢弃、不参与 urgency 权重。
+func TestCodeBuddyUrgencySnapshotFromExtra_NonStringDecimalDropped(t *testing.T) {
+	now := urgencyNow()
+	// 单包数组：remaining/total 均 float64（float64 形态无精度保证，契约禁止）。
+	floatPkg := map[string]any{
+		"id":         "float-pkg",
+		"name":       "pkg-float",
+		"unit":       "credits",
+		"remaining":  float64(10),
+		"total":      float64(20),
+		"expires_at": now.Add(1 * time.Hour).UTC().Format(time.RFC3339),
+		"status":     float64(0),
+	}
+	// 同一数组混入合法 string 分包与非法 float64 分包 → 只有 string 分包保留。
+	mixed := map[string]any{
+		codebuddyCreditPackagesKey: []any{
+			codeBuddyPackageExtraMap(t, "3", "5", 0), // string 形态合法
+			floatPkg,                                  // float64 形态必须整条丢弃
+		},
+		codebuddyCreditPackagesUpdatedAtKey: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	snap := CodeBuddyUrgencySnapshotFromExtra(mixed, now)
+	require.Len(t, snap.Packages, 1, "float64 形态分包整条丢弃，仅 string 形态参与")
+	require.Equal(t, "p1", snap.Packages[0].ID)
+	require.Equal(t, "3", snap.Packages[0].Remaining.String())
+	require.Equal(t, "5", snap.Packages[0].Total.String())
+
+	// 全量 float64 → 无参与包 → norm=0（不参与紧迫度），且不 panic。
+	onlyFloat := map[string]any{
+		codebuddyCreditPackagesKey: []any{floatPkg},
+		codebuddyCreditPackagesUpdatedAtKey: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	snap2 := CodeBuddyUrgencySnapshotFromExtra(onlyFloat, now)
+	require.Empty(t, snap2.Packages)
+	require.Equal(t, 0.0, ComputeCodeBuddyUrgency(snap2, now).Norm)
+}
+
 // --- 调度接入测试（buildOpenAIAccountLoadPlan score 乘法路径） ---
 //
 // 策略：直接构造 defaultOpenAIAccountScheduler + OpenAIGatewayService{cfg}，

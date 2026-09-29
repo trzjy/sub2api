@@ -1461,11 +1461,12 @@ export interface AccountUsageInfo {
   needs_reauth?: boolean    // token 失效需重新授权（401）
 
   // CodeBuddy 分包额度快照（后端写入 account.Extra；读取统一走 utils/codebuddyCredit）
-  // 数值字段（remaining/total）以**字符串**承载 NUMERIC(20,8) 口径，禁当 number 解析。
+  // remaining/total 以**字符串**承载 NUMERIC(20,8) 口径，禁当 number 解析；
+  // used_percent 后端写入口径为 **JSON 数值**（float8），前端按 number 消费。
   codebuddy_credit?: {
     packages?: CodeBuddyCreditPackageSnapshot[] | null
     packages_updated_at?: string
-    used_percent?: string
+    used_percent?: number
     reset_at?: string
     error?: string
   } | null

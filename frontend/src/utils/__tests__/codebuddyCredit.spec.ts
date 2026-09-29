@@ -17,7 +17,7 @@ describe('parseCodeBuddyCredit — 分包快照解析', () => {
         { id: 'b', name: '赠送包', unit: 'credits', remaining: '99.25000000', total: '200.00000000', expires_at: '2026-10-15T00:00:00Z', status: 0 },
       ],
       codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
-      codebuddy_credit_used_percent: '20.725',
+      codebuddy_credit_used_percent: 20.725,
       codebuddy_credit_reset_at: '2026-10-01T00:00:00Z',
     })
 
@@ -105,6 +105,78 @@ describe('parseCodeBuddyCredit — 分包快照解析', () => {
     })
     expect(snap!.packages).toHaveLength(0)
     expect(snap!.hasExcluded).toBe(true)
+  })
+
+  describe('codebuddy_credit_used_percent — 后端写入口径为 JSON 数值（float8）', () => {
+    it('数值形态正常解析并十进制安全格式化（禁 float 参与）', () => {
+      const snap = parseCodeBuddyCredit({
+        codebuddy_credit_packages: [
+          { id: 'a', name: 'Pro 月包', unit: 'credits', remaining: '300.50000000', total: '1000.00000000', expires_at: '', status: 0 },
+        ],
+        codebuddy_credit_used_percent: 30.05,
+      })
+      expect(snap!.usedPercent).toBeCloseTo(30.05, 6)
+    })
+
+    it('后端真实快照形态：数值 used_percent + 字符串 remaining/total（端到端契约）', () => {
+      // 镜像 ensureCodebuddyCreditSnapshot 写入口径：packages 内 remaining/total 为字符串，
+      // used_percent 为 to_jsonb(float8) 数值。
+      const snap = parseCodeBuddyCredit({
+        codebuddy_credit_packages: [
+          { id: 'a', name: 'Pro 月包', unit: 'credits', remaining: '630.00000000', total: '1000.00000000', expires_at: '2026-10-01T00:00:00Z', status: 0 },
+        ],
+        codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
+        codebuddy_credit_used_percent: 37,
+        codebuddy_credit_reset_at: '2026-09-16T00:00:00Z',
+      })
+      expect(snap).not.toBeNull()
+      expect(snap!.packages).toHaveLength(1)
+      // 字符串契约保持：packages 内 remaining/total 仍是字符串
+      expect(snap!.packages[0]!.remaining).toBe('630.00000000')
+      expect(snap!.packages[0]!.total).toBe('1000.00000000')
+      expect(snap!.totalRemaining).toBe('630')
+      expect(snap!.remainingDisplay).toBe('630.00')
+      expect(snap!.totalDisplay).toBe('1000.00')
+      // 数值契约：used_percent 按 number 消费
+      expect(snap!.usedPercent).toBe(37)
+      expect(snap!.resetAt).toBe('2026-09-16T00:00:00Z')
+    })
+
+    it('非数值形态视为契约不符（禁兜底为 0）', () => {
+      const snap = parseCodeBuddyCredit({
+        codebuddy_credit_packages: [
+          { id: 'a', name: 'Pro 月包', unit: 'credits', remaining: '300.50000000', total: '1000.00000000', expires_at: '', status: 0 },
+        ],
+        codebuddy_credit_used_percent: '20.725',
+      })
+      // 字符串形态（旧契约）不再被接受；禁静默 0 冒充真实值
+      expect(snap!.usedPercent).toBe(0)
+      // 非法 used_percent → 错误态标记（hasExcluded=true），不静默 0% 展示
+      expect(snap!.hasExcluded).toBe(true)
+    })
+
+    it('used_percent 为 null 视为非法形态，hasExcluded=true 且 usedPercent=0', () => {
+      const snap = parseCodeBuddyCredit({
+        codebuddy_credit_packages: [
+          { id: 'a', name: 'Pro 月包', unit: 'credits', remaining: '300.50000000', total: '1000.00000000', expires_at: '', status: 0 },
+        ],
+        codebuddy_credit_used_percent: null,
+      })
+      expect(snap!.usedPercent).toBe(0)
+      expect(snap!.hasExcluded).toBe(true)
+    })
+
+    it('非法数值（NaN/Infinity/缺字段）不静默转换', () => {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, undefined, null]) {
+        const snap = parseCodeBuddyCredit({
+          codebuddy_credit_packages: [
+            { id: 'a', name: 'Pro 月包', unit: 'credits', remaining: '300.50000000', total: '1000.00000000', expires_at: '', status: 0 },
+          ],
+          codebuddy_credit_used_percent: bad,
+        })
+        expect(snap!.usedPercent).toBe(0)
+      }
+    })
   })
 })
 

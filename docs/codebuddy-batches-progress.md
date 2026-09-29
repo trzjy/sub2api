@@ -14,7 +14,7 @@
 | B3a（影子新建入口封死） | ✅ 代码侧闭环 | 早期已合边界冻结 `7f12c556b` + 桥接 `644de818a`；本次收口删除新建分支与前端向导（终审 approve）；证据 `~/.sub2api-acceptance/sub2api-b3a-freeze-20260929/` |
 | B3b（manifest 迁移） | ⬜ 未开始 | B2 → B3a → B3b → B3c 顺序；前置=遥测基线证明 + **B2 生产激活**；删除前引用清单已起建（02 文档，B3b 结束冻结） |
 | B3c | ⬜ 未开始 | |
-| B4 | 🔵 批1（A/D纯函数/E）已验收提交 `34a12d99a`；批2 三卡并行执行中（D-2 回修接入 / B 写路径 / F 前端） | 闸① approve（R8，8 轮直连外审）；探针证据 `~/.sub2api-acceptance/sub2api-b4-probe-20260929/`；批1 验收回修：删重复 clamp01/死代码 SetUrgencyBoost+validateUrgencyBoost/normalize 静默钳位（禁兜底）、slog 标签对齐新键；Card D 排序接入+全部测试缺失 → D-2 派发补齐；**2026-09-29 用户裁定：全程禁跑全量测试**（Card E 白名单全量条目改定向替代）；264 真实 DB 执行=发布闸门动作待验 |
+| B4 | 🟡 批1+批2已验收提交；终审 must_fix 3 项全采纳并落地（X/Y/Y2）；批3 Card C 清理+上线观测完成；修复 diff 外审复核进行中；剩发布闸门 | 六卡 A/E/D2/D3/B/F 全部验收闭环；**D-2 BLOCKED 实证 gateway_scheduling 不可达 → 方案 §2 接入点回写为 buildOpenAIAccountLoadPlan**；五场景 DB 门禁 7/7（docker postgres，证据 `~/.sub2api-acceptance/sub2api-b4-cardb-20260930/`，脱敏零命中）；**终审（gpt-5.6-sol，2026-09-29）3 must_fix 全采纳**：P1-1 前端 used_percent 数值契约（Y）、P2-2 ParseFloat 兜底删除失败关闭（X）、P2-3 decimalFromExtraAny string-only（X）；Y2 补全 hasExcluded 覆盖非法 used_percent；**算力机全量：unit ALL GREEN；integration 2 失败（TestAggregateBindingSuite/TestCockpitImportCommitIntegrationNameUniqueFailsClose）在 pre-B4 f9a714eca 复现一致 → B1/B2 存量债务，非 B4 回归**；GRANT 分支算力机实证（sub2api 角色在场 + nextval×2 成功）；**批3（主会话）**：Card C 死常量删除（3 个）+ 归零 grep（生产代码 0 引用，余量皆 NotContains/forbidden-pattern 守护）+ 上线观测 slog 两条（parse_errors 计数/conditional_rejected 计数）+ Bearer 脱敏零命中断言（扩展至两个证据目录）；快照年龄观测无既有指标入口 → 按方案 §0.1 #8 登记残余风险；264/265 真实 DB 执行=发布闸门动作待部署时执行 |
 
 ## B3a 收口记录（2026-09-29）
 

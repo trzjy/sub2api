@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,11 +26,10 @@ const (
 	codeBuddyModelsPath       = "/console/enterprises/personal/models"
 
 	// Extra 快照键（CodeBuddyQuotaService 周期写入，调度阈值评估与 UI 消费）。
+	// 旧总量键 codebuddy_credit_total/used/updated_at 已随 §4.1 分包化停写并
+	// 删除（Card C，旧键归零；存量数据由 264 同批不动，UI 不再消费）。
 	codebuddyCreditUsedPercentKey = "codebuddy_credit_used_percent"
 	codebuddyCreditResetAtKey     = "codebuddy_credit_reset_at"
-	codebuddyCreditTotalKey       = "codebuddy_credit_total"
-	codebuddyCreditUsedKey        = "codebuddy_credit_used"
-	codebuddyCreditUpdatedAtKey   = "codebuddy_credit_updated_at"
 	// codebuddyCreditErrorKey 是错误标记键（§4.1 SSOT = codebuddy_credit_error；
 	// 旧名 codebuddy_quota_error 废弃）。存量数据迁移与读写端切换由 Card E 执行，
 	// 本卡只做常量层改名（零新增 DB 调用）。
@@ -216,6 +214,10 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 	// Card A 分包解析（§1 契约，校验失败关闭）：返回分包集合 + 本次解析错误
 	// 条目（保留原始值供排查）。envelope 结构缺失 → 失败关闭。
 	packages, parseErrors, envelopeErr := parseCodeBuddyCreditPackages(body, account.GetCredential("uid"))
+	// 上线观测（§0.1 #8）：无效分包错误计数（结构化 slog，复用既有日志路径）。
+	if len(parseErrors) > 0 {
+		slog.Warn("codebuddy_credit_package_parse_errors", "account_id", account.ID, "count", len(parseErrors))
+	}
 	if envelopeErr {
 		errMsg := "codebuddy quota: 无法从 get-user-resource 响应解析账号容量计数器"
 		result.Error = errMsg
@@ -255,6 +257,9 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 	// RowsAffected=0 = 条件更新被拒绝（排序键不通过）。调用方按失败路径处理，
 	// 不得重试改写比较条件；不产生成功状态变更。
 	if !accepted {
+		// 上线观测（§0.1 #8）：条件更新拒绝计数（结构化 slog）。调度侧调用方
+		// 丢弃 result.Error，此处不落日志则拒绝完全静默。
+		slog.Warn("codebuddy_credit_snapshot_rejected_by_ordering_tuple", "account_id", account.ID, "version", attemptVersion)
 		result.Error = "codebuddy credit snapshot rejected by ordering tuple"
 		return result, nil
 	}
@@ -756,24 +761,18 @@ func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, code
 
 // parseCodeBuddyCreditDecimal 把容量字段解析为 decimal 并按 §4.1 addendum 存储口径
 // 量化到 NUMERIC(20,8)。源字段为整数 + 同名 *Precise 定点字符串变体，解析源 =
-// *Precise。优先用 decimal 解析避免 float64 二次误差；非法值回退到同源量化口径
-// QuantizeUsageBillingAmount（与主计费一致），仍不可解析则失败关闭。
+// *Precise。仅接受 decimal 字符串单一口径（与存储契约 MarshalJSON 对称）；
+// 解析失败失败关闭，不做 float64/量化兜底。
 func parseCodeBuddyCreditDecimal(raw string) (decimal.Decimal, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return decimal.Zero, fmt.Errorf("codebuddy credit: empty amount")
 	}
-	if d, err := decimal.NewFromString(s); err == nil {
-		return d.Round(int32(UsageBillingMonetaryScale)), nil
-	}
-	f, err := strconv.ParseFloat(s, 64)
+	d, err := decimal.NewFromString(s)
 	if err != nil {
-		return decimal.Zero, err
+		return decimal.Zero, fmt.Errorf("codebuddy credit: invalid amount %q: %w", s, err)
 	}
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return decimal.Zero, fmt.Errorf("codebuddy credit: non-finite amount %q", s)
-	}
-	return decimal.NewFromFloat(QuantizeUsageBillingAmount(f)), nil
+	return d.Round(int32(UsageBillingMonetaryScale)), nil
 }
 
 // IsValidCodeBuddyCreditPackage 是**基础快照有效性谓词**（唯一实现，Card D 复用）。
