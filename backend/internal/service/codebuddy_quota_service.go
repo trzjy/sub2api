@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/shopspring/decimal"
 	"github.com/tidwall/gjson"
 )
 
@@ -30,7 +32,19 @@ const (
 	codebuddyCreditTotalKey       = "codebuddy_credit_total"
 	codebuddyCreditUsedKey        = "codebuddy_credit_used"
 	codebuddyCreditUpdatedAtKey   = "codebuddy_credit_updated_at"
-	codebuddyCreditErrorKey       = "codebuddy_quota_error"
+	// codebuddyCreditErrorKey 是错误标记键（§4.1 SSOT = codebuddy_credit_error；
+	// 旧名 codebuddy_quota_error 废弃）。存量数据迁移与读写端切换由 Card E 执行，
+	// 本卡只做常量层改名（零新增 DB 调用）。
+	codebuddyCreditErrorKey = "codebuddy_credit_error"
+	// codebuddyCreditPackagesKey 是 §4.1 分包快照数组键（存储契约）。
+	codebuddyCreditPackagesKey = "codebuddy_credit_packages"
+
+	// codebuddyCreditCanonicalUnit 是 §4.1 addendum（2026-09-29 探针）钉死的规范单位
+	// （cn 站真实账号 11/11 分包唯一值）；异单位分包失败关闭。
+	codebuddyCreditCanonicalUnit = "credits"
+	// Status 合法枚举（§4.1 addendum 实测）：0 = 在用、3 = 耗尽/过期；其余未知值失败关闭。
+	codebuddyCreditPackageStatusActive    = 0
+	codebuddyCreditPackageStatusExhausted = 3
 
 	// 上游不返回积分重置时间时，快照重置锚点默认取「探测时刻 + 24h」，使阈值候选在
 	// 窗口内有效、过期后重新评估（与缺失探针时的 fail-open 一致）。真实抓取后若上游
@@ -417,7 +431,10 @@ func (s *CodeBuddyQuotaService) setBillingHeaders(req *http.Request, account *Ac
 	if domain != "" {
 		req.Header.Set("X-Domain", domain)
 	} else {
-		req.Header.Set("X-No-Domain", "1")
+		// §4.1 唯一具名例外：credentials.domain 为空时，chat/billing 出站不发送
+		// X-Domain，改发占位头 X-No-Authorization: 1（上游实测契约即此头名，
+		// 不按 §0 通用规则推导出 X-No-Domain）。
+		req.Header.Set("X-No-Authorization", "1")
 	}
 }
 
@@ -462,17 +479,7 @@ func parseCodeBuddyCreditUsage(body []byte, uid string) (codeBuddyCreditUsage, b
 		return out, false
 	}
 
-	selected := make([]gjson.Result, 0, len(accounts))
-	if strings.TrimSpace(uid) != "" {
-		for _, acc := range accounts {
-			if codeBuddyAccountMatchesUID(acc, uid) {
-				selected = append(selected, acc)
-			}
-		}
-	}
-	if len(selected) == 0 {
-		selected = accounts
-	}
+	selected := codeBuddySelectResourceAccounts(accounts, uid)
 
 	var totalSize, totalUsed float64
 	var latestReset time.Time
@@ -511,6 +518,238 @@ func parseCodeBuddyCreditUsage(body []byte, uid string) (codeBuddyCreditUsage, b
 		out.HasResetAt = true
 	}
 	return out, true
+}
+
+// codeBuddySelectResourceAccounts 选取本次快照参与聚合的资源账号：优先按 uid 命中，
+// 命不中时退回响应中的全部账号（请求以 X-User-Id=uid 认证，返回的 Accounts[] 本就
+// 属于当前用户）。抽取为共享助手，供新旧两条解析路径复用同一匹配语义。
+func codeBuddySelectResourceAccounts(accounts []gjson.Result, uid string) []gjson.Result {
+	if strings.TrimSpace(uid) == "" {
+		return accounts
+	}
+	selected := make([]gjson.Result, 0, len(accounts))
+	for _, acc := range accounts {
+		if codeBuddyAccountMatchesUID(acc, uid) {
+			selected = append(selected, acc)
+		}
+	}
+	if len(selected) == 0 {
+		return accounts
+	}
+	return selected
+}
+
+// CodeBuddyCreditPackage 是 §4.1 存储契约定义的单条分包快照
+// （Extra 键 codebuddy_credit_packages 数组的元素）。
+//
+// 字段名以权威 §4.1 为准，不得自创：id/name/unit/remaining/total/expires_at/status。
+// remaining/total 用 decimal 承载 NUMERIC(20,8) 口径，序列化为 JSON 字符串以避免
+// float64 在传输/前端解析阶段的精度损失。
+type CodeBuddyCreditPackage struct {
+	ID        string
+	Name      string
+	Unit      string
+	Remaining decimal.Decimal
+	Total     decimal.Decimal
+	ExpiresAt string // UTC RFC3339 字面量
+	Status    int64
+}
+
+func (p CodeBuddyCreditPackage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Unit      string `json:"unit"`
+		Remaining string `json:"remaining"`
+		Total     string `json:"total"`
+		ExpiresAt string `json:"expires_at"`
+		Status    int64  `json:"status"`
+	}{
+		ID:        p.ID,
+		Name:      p.Name,
+		Unit:      p.Unit,
+		Remaining: p.Remaining.String(),
+		Total:     p.Total.String(),
+		ExpiresAt: p.ExpiresAt,
+		Status:    p.Status,
+	})
+}
+
+// codeBuddyCreditPackageError 记录一个被整包剔除的分包（保留原始值供排查）。
+// 错误结构仅用于组装返回，本卡不落库（写路径由 Card B 单点替换）。
+type codeBuddyCreditPackageError struct {
+	ID        string
+	Reason    string
+	RawValues map[string]string
+}
+
+// parseCodeBuddyCreditPackages 按 §4.1 契约解析 get-user-resource 响应中的分包条目。
+//
+// 若 data.Response.Data 结构缺失/Accounts 为空，返回 errorFlag=true 且空集合
+// （调用方据此写错误标记）。uid 非空时先按 uid 选取账号；命不中退回全部账号。
+//
+// 校验失败关闭（禁兜底/钳位）：unit≠credits、负值、remaining>total、未知 Status
+// 一律整包剔除并计入 errorEntries（保留原始值）。TotalDosage/ExpiredTime 不消费。
+func parseCodeBuddyCreditPackages(body []byte, uid string) ([]CodeBuddyCreditPackage, []codeBuddyCreditPackageError, bool) {
+	root := gjson.GetBytes(body, "data.Response.Data")
+	if !root.Exists() {
+		return nil, nil, true
+	}
+	accounts := root.Get("Accounts").Array()
+	if len(accounts) == 0 {
+		return nil, nil, true
+	}
+	selected := codeBuddySelectResourceAccounts(accounts, uid)
+
+	packages := make([]CodeBuddyCreditPackage, 0, len(selected))
+	errEntries := make([]codeBuddyCreditPackageError, 0)
+	for _, acc := range selected {
+		pkg, errEntry, ok := parseCodeBuddyCreditPackage(acc)
+		if !ok {
+			errEntries = append(errEntries, errEntry)
+			continue
+		}
+		packages = append(packages, pkg)
+	}
+	return packages, errEntries, false
+}
+
+// parseCodeBuddyCreditPackage 解析单个分包条目。ok=false 时 errorEntry 记录剔除原因
+// 与原始值（不落库，仅组装）。
+func parseCodeBuddyCreditPackage(acc gjson.Result) (CodeBuddyCreditPackage, codeBuddyCreditPackageError, bool) {
+	id := acc.Get("AccountId").String()
+	name := acc.Get("PackageName").String()
+	unit := acc.Get("CapacityUnit").String()
+	status := acc.Get("Status").Int()
+	rawValues := map[string]string{
+		"unit":      unit,
+		"status":    strconv.FormatInt(status, 10),
+		"remaining": acc.Get("CapacityRemainPrecise").String(),
+		"total":     acc.Get("CapacitySizePrecise").String(),
+	}
+	if status != codebuddyCreditPackageStatusActive && status != codebuddyCreditPackageStatusExhausted {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "unknown_status",
+			RawValues: rawValues,
+		}, false
+	}
+	if unit != codebuddyCreditCanonicalUnit {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "unit_mismatch",
+			RawValues: rawValues,
+		}, false
+	}
+	remaining, err := parseCodeBuddyCreditDecimal(acc.Get("CapacityRemainPrecise").String())
+	if err != nil {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "invalid_remaining",
+			RawValues: rawValues,
+		}, false
+	}
+	total, err := parseCodeBuddyCreditDecimal(acc.Get("CapacitySizePrecise").String())
+	if err != nil {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "invalid_total",
+			RawValues: rawValues,
+		}, false
+	}
+	if remaining.IsNegative() || total.IsNegative() {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "negative_value",
+			RawValues: rawValues,
+		}, false
+	}
+	if remaining.GreaterThan(total) {
+		return CodeBuddyCreditPackage{}, codeBuddyCreditPackageError{
+			ID:        id,
+			Reason:    "remaining_gt_total",
+			RawValues: rawValues,
+		}, false
+	}
+	// expires_at 非法/缺失**不整包剔除**：§1 的失败关闭清单仅含 unit/数值/Status，
+	// 不含到期时间；§4.2 明确"expires_at 缺失/非法的分包不计入（紧迫度参与集合）"，
+	// 即该分包仍进入存储（供展示与 used_percent 求和），仅不参与紧迫度窗口。
+	expiresAt := ""
+	if t, ok := parseCodeBuddyCycleEnd(acc.Get("CycleEndTime").String()); ok {
+		expiresAt = t.UTC().Format(time.RFC3339)
+	}
+	return CodeBuddyCreditPackage{
+		ID:        id,
+		Name:      name,
+		Unit:      unit,
+		Remaining: remaining,
+		Total:     total,
+		ExpiresAt: expiresAt,
+		Status:    status,
+	}, codeBuddyCreditPackageError{}, true
+}
+
+// parseCodeBuddyCreditDecimal 把容量字段解析为 decimal 并按 §4.1 addendum 存储口径
+// 量化到 NUMERIC(20,8)。源字段为整数 + 同名 *Precise 定点字符串变体，解析源 =
+// *Precise。优先用 decimal 解析避免 float64 二次误差；非法值回退到同源量化口径
+// QuantizeUsageBillingAmount（与主计费一致），仍不可解析则失败关闭。
+func parseCodeBuddyCreditDecimal(raw string) (decimal.Decimal, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return decimal.Zero, fmt.Errorf("codebuddy credit: empty amount")
+	}
+	if d, err := decimal.NewFromString(s); err == nil {
+		return d.Round(int32(UsageBillingMonetaryScale)), nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return decimal.Zero, fmt.Errorf("codebuddy credit: non-finite amount %q", s)
+	}
+	return decimal.NewFromFloat(QuantizeUsageBillingAmount(f)), nil
+}
+
+// IsValidCodeBuddyCreditPackage 是**基础快照有效性谓词**（唯一实现，Card D 复用）。
+// 条件 = 字段有效（单位/数值/Status 校验通过）+ 非 Status=3（耗尽/过期）。
+// 不含时间窗口/新鲜度条件（紧迫度参与性谓词由 Card D 在此基础之上叠加）。
+func IsValidCodeBuddyCreditPackage(pkg CodeBuddyCreditPackage) bool {
+	if pkg.Unit != codebuddyCreditCanonicalUnit {
+		return false
+	}
+	// 字段有效：Status 必须为已知枚举；合法枚举仅 0（在用）/3（耗尽/过期），
+	// 故基础谓词只接纳 Status=0——Status=3 与未知值（非法字段）均不参与。
+	if pkg.Status != codebuddyCreditPackageStatusActive {
+		return false
+	}
+	if pkg.Remaining.IsNegative() || pkg.Total.IsNegative() {
+		return false
+	}
+	if pkg.Remaining.GreaterThan(pkg.Total) {
+		return false
+	}
+	return true
+}
+
+// DeriveCodeBuddyCreditUsedPercent 从参与分包（基础快照有效性谓词）推导已用比例。
+// 公式钉死 = (Σtotal−Σremaining)/Σtotal×100。Σtotal=0（无有效分包）→ ok=false，
+// 表示"不写入 + 错误标记"信号（禁静默写 0 伪装满额/空额）。
+func DeriveCodeBuddyCreditUsedPercent(packages []CodeBuddyCreditPackage) (float64, bool) {
+	var sumTotal, sumRemaining decimal.Decimal
+	for _, pkg := range packages {
+		if !IsValidCodeBuddyCreditPackage(pkg) {
+			continue
+		}
+		sumTotal = sumTotal.Add(pkg.Total)
+		sumRemaining = sumRemaining.Add(pkg.Remaining)
+	}
+	if sumTotal.LessThanOrEqual(decimal.Zero) {
+		return 0, false
+	}
+	used := sumTotal.Sub(sumRemaining)
+	res, _ := used.Div(sumTotal).Mul(decimal.NewFromInt(100)).Float64()
+	return res, true
 }
 
 // codeBuddyAccountMatchesUID 判断资源账号对象是否属于给定 uid。真实抓包中响应不含
@@ -577,6 +816,6 @@ func (s *CodeBuddyQuotaService) persistError(ctx context.Context, accountID int6
 	if err := s.accountRepo.UpdateExtra(ctx, accountID, map[string]any{
 		codebuddyCreditErrorKey: errMsg,
 	}); err != nil {
-		slog.Warn("codebuddy_quota_error_persist_failed", "account_id", accountID, "error", err)
+		slog.Warn("codebuddy_credit_error_persist_failed", "account_id", accountID, "error", err)
 	}
 }

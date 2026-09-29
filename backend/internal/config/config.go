@@ -1218,13 +1218,20 @@ type PromoIntelConfig struct {
 //   - QuotaCheckIntervalMinutes: 额度探测周期（分钟，默认 30）。
 //   - DailyCheckinEnabled: 每日签到（白嫖积分，属主动行为）。保守默认关闭。
 //   - StaticModelsIntl: 国际版静态模型 ID 列表（逗号分隔）；非空时跳过上游 models 请求。
+//   - UrgencyBoostEnabled: 到期紧迫度调度加权开关（默认 false）。§4.2：仅作为同分组候选
+//     排序的加权项，不改阈值暂停/429 冷却/并发/RPM 语义，不扩大候选集。
+//   - UrgencyBoostK: 紧迫度加权系数，强制区间 [0,1]（默认 0 = 关闭加权）。
+//     负数/NaN/Inf/超区间值在启动与热加载均**失败关闭**（拒绝加载并报明确配置错误），
+//     无静默钳位/默认值兜底。k=0 时与现行为逐位一致。
 type GatewayCodeBuddyConfig struct {
-	ChatUserAgent             string `mapstructure:"chat_user_agent"`
-	SanitizeEnabled           bool   `mapstructure:"sanitize_enabled"`
-	QuotaCheckEnabled         bool   `mapstructure:"quota_check_enabled"`
-	QuotaCheckIntervalMinutes int    `mapstructure:"quota_check_interval_minutes"`
-	DailyCheckinEnabled       bool   `mapstructure:"daily_checkin_enabled"`
-	StaticModelsIntl          string `mapstructure:"static_models_intl"`
+	ChatUserAgent             string  `mapstructure:"chat_user_agent"`
+	SanitizeEnabled           bool    `mapstructure:"sanitize_enabled"`
+	QuotaCheckEnabled         bool    `mapstructure:"quota_check_enabled"`
+	QuotaCheckIntervalMinutes int     `mapstructure:"quota_check_interval_minutes"`
+	DailyCheckinEnabled       bool    `mapstructure:"daily_checkin_enabled"`
+	StaticModelsIntl          string  `mapstructure:"static_models_intl"`
+	UrgencyBoostEnabled       bool    `mapstructure:"urgency_boost_enabled"`
+	UrgencyBoostK             float64 `mapstructure:"urgency_boost_k"`
 	// DirectOrigin 是"代码层直连源站"覆盖表（按站点 key：cn/intl）。
 	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
 	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
@@ -1250,7 +1257,9 @@ type CodeBuddyDirectOriginConfig struct {
 }
 
 // Validate 校验 CodeBuddy 直连覆盖配置：Enabled=true 必须有合法 IP 与 Host，
-// 否则启动阶段 fail-fast 拒绝启动。
+// 否则启动阶段 fail-fast 拒绝启动。同时校验 §4.2 紧迫度加权配置：
+// urgency_boost_k 必须是有限数值且 ∈ [0,1]（负数/NaN/Inf/超区间 → 失败关闭，
+// 无静默钳位兜底；开关关闭时显式配置非法 k 同样失败）。
 func (c GatewayCodeBuddyConfig) Validate() error {
 	for site, oc := range c.DirectOrigin {
 		if !oc.Enabled {
@@ -1265,6 +1274,9 @@ func (c GatewayCodeBuddyConfig) Validate() error {
 		if strings.TrimSpace(oc.Host) == "" {
 			return fmt.Errorf("gateway.codebuddy.direct_origin.%s.enabled=true requires a non-empty host", site)
 		}
+	}
+	if k := c.UrgencyBoostK; k < 0 || k > 1 || k != k {
+		return fmt.Errorf("gateway.codebuddy.urgency_boost_k: must be finite and in [0,1], got %v", k)
 	}
 	return nil
 }
@@ -2641,6 +2653,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.codebuddy.quota_check_interval_minutes", 30)
 	// 每日签到（白嫖积分，属主动行为）保守默认关闭。
 	viper.SetDefault("gateway.codebuddy.daily_checkin_enabled", false)
+	// §4.2 到期紧迫度加权调度：默认关闭（k=0 与现行为逐位一致）。
+	viper.SetDefault("gateway.codebuddy.urgency_boost_enabled", false)
+	viper.SetDefault("gateway.codebuddy.urgency_boost_k", 0.0)
 	viper.SetDefault("gateway.api_key_balance_probe.interval_minutes", 10)
 	viper.SetDefault("gateway.image_concurrency.enabled", false)
 	viper.SetDefault("gateway.image_concurrency.max_concurrent_requests", 0)
