@@ -35,6 +35,17 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R8 消化（2026-09-29，直连 gpt-5.6-sol，**结论 approve**，闸①通过；首轮 reasoning trace 失败关闭重试有效）
+
+零 must_fix。4 项执行层补强**全部采纳**：
+
+| # | 分类 | 发现 | 回修 |
+|---|---|---|---|
+| 1 | executor_cleanup | Card E/F 前端文件所有权重叠 | 前端文件唯一所有者 = Card F；E 纯后端迁移+发布闸门；错误键前端切换并入 F，与 E 同发布闸门 |
+| 2 | executor_cleanup | Card B SQL 占位符形态 | Card B 附参数化 SQL 样例（jsonb_build_object 键集合/参数类型/RowsAffected=0=拒绝语义） |
+| 3 | suggestions | sequence 名称/权限未落层 | 钉死 seq_codebuddy_credit_attempt_version、起始 1、owner/GRANT 随迁移文件钉死进验收证据 |
+| 4 | residual_risks | 备份一致性验证委托发布单 | Card E 备份 manifest：账号集合/摘要/时间点/恢复后逐项核验，保留至发布验证完成 |
+
 ### R7 消化（2026-09-29，直连 gpt-5.6-sol，block→回修；首轮仅 reasoning trace 失败关闭，同路由重试有效）
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r7/`。1 must_fix +
@@ -225,13 +236,15 @@ Extra 新键：
   **执行顺序钉死（R3 回修 #5）**：Card E 可与代码开发并行，但**数据库
   迁移与读写切换动作不得早于 Card B 新写入口上线**——二者必须同一发布
   闸门完成；禁止"先迁移、后等 Card B"的窗口形态。
-- 文件：backend 存量迁移（指定唯一迁移文件+测试）、
-  `frontend/src/utils/codebuddyCredit.ts`、`AccountUsageCell` 相关、
-  `types/index.ts`、相关 spec。
+- 文件：backend 存量迁移（指定唯一迁移文件+测试）。**前端文件所有权重叠
+  裁定（R8 cleanup 采纳）**：前端错误键读写切换从本卡移出并入 Card F
+  （前端文件唯一所有者 = F，避免双会话改同文件）；E = 纯后端迁移 +
+  发布闸门 + 迁移验收。
 - 内容：**原子/幂等迁移**存量 `codebuddy_quota_error` →
   `codebuddy_credit_error`（迁移失败即阻断），删除旧键；迁移后旧引用
   grep 归零验证；**然后一次切换全部读写端，禁止任何双名读取/兼容层**
-  （红线：无双名共存期）。前端读侧切换与本卡同任务边界完成。
+  （红线：无双名共存期）。前端读侧切换由 Card F 执行（见 R8 权属裁定），
+  F 的切换上线与 E 的后端切换同一发布闸门。
 - **发布闸门（R2 回修 #2）**：迁移 + 切换 = 单一发布动作——旧写入进程
   停写/隔离后执行事务迁移，再启用只读写新键版本；**禁止"迁移完成后旧
   版本继续运行"窗口**（旧服务会在迁移后再写旧键 → 状态分叉）。
@@ -241,8 +254,10 @@ Extra 新键：
     影响账号 extra 做快照备份（保留期与清理触发条件在发布单登记）；
     **发布失败恢复流程 = 停止新旧全部写入 → 校验备份 → 恢复 → 验证键
     状态 → 再启动旧版本**（恢复期间写入隔离，防止恢复快照覆盖恢复窗口
-    内新键写入）；发布成功后进入前向修复边界（旧键已删，回滚旧版本
-    不再支持——发布单明确声明该不可回滚点）。
+    内新键写入）；**备份 manifest（R8 residual 采纳）**：备份登记受影响
+    账号集合/数量或校验摘要/备份时间点，恢复后逐项核验键状态，保留至
+    发布验证完成后按登记条件清理；发布成功后进入前向修复边界（旧键
+    已删，回滚旧版本不再支持——发布单明确声明该不可回滚点）。
 
 ### 批 2（依赖批 1 产物；A+B 同任务边界合入）
 
@@ -302,17 +317,27 @@ Extra 新键：
   '-infinity' 哨兵路径）、同时间戳高版本失败可接受/低版本失败被拒**；补验收：新快照后 reset_at 与阈值候选回归
   断言；命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
   "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
+- **参数化 SQL 样例（R8 cleanup 采纳）**：执行卡附样例钉死构造方式——
+  写入键集合用 `jsonb_build_object(...)`（仅 B4 键）、候选时间/版本参数
+  以 `timestamptz`/`bigint` 传入、`RowsAffected = 0` 即条件更新被拒绝
+  （调用方按失败路径处理，不得重试改写比较条件）；不改变单一条件更新
+  入口。
 - **DB sequence 归属（R7 suggestion 采纳）**：`attempt_version` 的
   sequence 由 Card B 的迁移文件创建（名称与起始值在卡内钉死），repo 层
   抓取开始时调用取得；**sequence 调用失败 → 本次抓取失败关闭**（不得
-  退化为应用本地计数器）。
+  退化为应用本地计数器）。**命名与权限（R8 suggestion 采纳）**：sequence
+  名 `seq_codebuddy_credit_attempt_version`、起始 1（≥1 语义）、owner =
+  应用迁移执行角色，GRANT USAGE 予应用运行角色（名称随部署在迁移文件
+  中钉死并进验收证据）。
 - 部署顺序：与 Card A 同变更合入；见 Card E 发布闸门。
 
 **Card F — 前端分包展示 + 旧总量展示退役**
 - 文件：`utils/codebuddyCredit.ts`（+spec）、`AccountUsageCell.vue`、
   i18n zh/en。
 - 内容：分包卡片渲染（名称/剩余/总量/到期/错误标记/更新时间）、合计=
-  Σ 派生（异单位不计入并标注）、旧 total/used 展示退役。
+  Σ 派生（异单位不计入并标注）、旧 total/used 展示退役、**错误键前端
+  读写切换（R8 cleanup：前端文件唯一所有者，读 `codebuddy_credit_error`
+  废弃 `codebuddy_quota_error`，与 Card E 后端切换同一发布闸门）**。
 - **数值精度约束（R2 回修 #5 + R3 回修 #4）**：API/类型层用**字符串**承载
   NUMERIC(20,8) 值（禁 JS number 直接解析）；合计求和用十进制安全方式
   （字符串逐位或等价 Decimal）。**显示口径钉死**：展示保留 2 位小数、
