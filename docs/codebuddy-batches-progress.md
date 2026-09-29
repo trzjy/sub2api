@@ -59,6 +59,9 @@
 2. DB 集成测试需有 DB 环境：
    `go test -tags integration ./internal/repository/ -run TestAggregateBindingSuite -v`；
    `go test -tags integration ./internal/repository/ -run TestCockpitImportCommitIntegration -v`。
+   **2026-09-30 算力机实证更新**：这两个套件在有 DB 环境（docker postgres）下仍失败，
+   且在 pre-B4 基线 `f9a714eca` 复现一致 → 判定为 B1/B2 时代存量代码/测试债务，
+   非 B4 回归；需独立修复卡处理，不阻塞 B4 代码侧闭环。
 3. 部署侧网关/代理 body 日志审计（§1.7 纵深）待运维。
 4. preview_parse_timeout 解码阶段取消用例补验。
 5. 仓储复用事务分支提交锁（mapper 交付若获得调用方须先补）。
