@@ -35,6 +35,19 @@ direct-r2/`（companion 两轮故障后按用户授权改道直连 gpt-5.6-sol�
 结论 block→回修，5 项发现）。R1 8 项**全部采纳**；R2 5 项（3 must_fix +
 1 executor_cleanup + 1 residual_risks）**全部采纳**，回修映射：
 
+### R6 消化（2026-09-29，直连 gpt-5.6-sol，block→机械回修）
+
+外审证据：`~/.codex-companion/b4-plan-review/direct-r6/`。GREATEST 零新增
+字段方案被判定逻辑成立；3 项 must_fix + 2 项 residual_risks **全部采纳**：
+
+| # | 发现 | 回修 |
+|---|---|---|
+| 1 | §1 "原子自增"与 Card B "写 attempt_version 不得自增"矛盾 | §1 统一：version 仅保存最近被接受事件的 attempt_version；attempt_version 由 DB sequence 抓取开始时取得，提交阶段不得递增 |
+| 2 | COALESCE(...,0) 非法 timestamptz 表达式；首次 NULL version 未定义 | 改 '-infinity'::timestamptz 哨兵 + COALESCE(version,0)（attempt_version 从 ≥1 起）；接受条件写成显式 tuple SQL |
+| 3 | 失败"严格 >"与同时间戳版本仲裁矛盾 | 失败接受条件改 >=（相等须版本更大）；同时间戳高版本失败可接受/低版本被拒列入回归断言 |
+| 4 | (residual) 时钟来源/时区/精度未钉死 | Card B 补：应用进程生成 time.Now UTC、timestamptz 微秒；单实例下无跨实例偏差，多实例另立卡 |
+| 5 | (residual) 迁移前向不可逆缺恢复边界 | Card E 补：迁移前 extra 快照备份+发布失败恢复路径；成功后声明前向修复边界（不可回滚点） |
+
 ### R5 消化（2026-09-29，直连 gpt-5.6-sol，block→回修）
 
 外审证据：`~/.codex-companion/b4-plan-review/direct-r5/`。R4 #2 闭合；
@@ -127,7 +140,10 @@ Extra 新键：
     **不复制第二份基础实现**；回归测试分别引用两个名字。
 - `codebuddy_credit_packages_updated_at`（唯一 freshness 依据，失败绝不更新）。
 - `codebuddy_credit_last_attempt_at`。
-- `codebuddy_credit_version`（DB 条件更新原子自增的 monotonic 版本）。
+- `codebuddy_credit_version`（R6 回修 #1 全文统一）：**仅保存最近一次被
+  接受事件的 `attempt_version`**；`attempt_version` 由 DB sequence（或
+  等价 DB 原子分配机制）在**抓取开始时**取得，成功/失败提交阶段**均不得
+  再次递增**。
 - **统一排序键（R3 回修 #1，权威 :806-811 照录）**：**成功时间为主排序键**
   的全序——成功路径比较时间 = 该次成功快照的**成功时间**（snapshot 完成
   时刻），失败路径比较时间 = 该次尝试的**尝试时间**；二者用**同一字典序
@@ -207,6 +223,10 @@ Extra 新键：
   版本继续运行"窗口**（旧服务会在迁移后再写旧键 → 状态分叉）。
   双键冲突策略：**失败阻断**，不静默覆盖；幂等性测试覆盖五态 = 旧键仅
   有/新键仅有/双键冲突/重复执行/中途失败重试。
+  - **恢复边界（R6 residual #5 采纳）**：迁移执行前对受影响账号 extra
+    做快照备份（保留期与清理触发条件在发布单登记）；发布失败 → 备份
+    恢复 + 回滚到旧版本；发布成功后进入前向修复边界（旧键已删，回滚旧
+    版本不再支持——发布单明确声明该不可回滚点）。
 
 ### 批 2（依赖批 1 产物；A+B 同任务边界合入）
 
@@ -220,17 +240,24 @@ Extra 新键：
   时刻，成功事务持久化于 `packages_updated_at`）；**失败条件更新用
   `(attempt_time, attempt_version)`**（接受时持久化于
   `last_attempt_at`）；同一 DB 字典序条件更新裁决。
-  - **当前已接受事件比较状态的可执行定义（R5 回修 #1，零新增字段）**：
-    当前事件时间 = `GREATEST(COALESCE(packages_updated_at,0),
-    COALESCE(last_attempt_at,0))`，当前版本 = `codebuddy_credit_version`
-    （其值 = 最近一次被接受事件的 attempt_version）。成立前提（由比较器
-    单调性保证，回归断言）：成功事务同事务更新 packages_updated_at 与
-    last_attempt_at = success_time；被接受的失败写 last_attempt_at =
-    attempt_time > 当前事件时间。NULL 视为时间零值；同时间戳按版本号
-    大者胜（tiebreaker）。
+  - **当前已接受事件比较状态的可执行定义（R5 回修 #1 + R6 回修 #2，
+    零新增字段）**：时间字段统一 `timestamptz`（UTC）；当前事件时间 =
+    `GREATEST(COALESCE(packages_updated_at, '-infinity'::timestamptz),
+    COALESCE(last_attempt_at, '-infinity'::timestamptz))`；当前版本 =
+    `COALESCE(codebuddy_credit_version, 0)`（合法 `attempt_version` 从
+    sequence 起 ≥1，0 为"尚无事件"哨兵）。**接受条件 = tuple 语义**：
+    `candidate_event_time > current_event_time OR (candidate_event_time
+    = current_event_time AND candidate_version > current_version)`。
+    成立前提（由比较器单调性保证，回归断言）：成功事务同事务更新
+    packages_updated_at 与 last_attempt_at 均为 success_time；被接受的
+    失败满足 `attempt_time >= 当前事件时间`（**相等时须版本更大**，R6
+    回修 #3：不写严格 `>`，同时间戳高版本失败可接受、低版本被拒）。
   - **version 写入语义（R5 回修 #1）**：`codebuddy_credit_version` 一律
     写入本次抓取开始取得的 `attempt_version`；**成功提交不得另行自增
     生成新版本**（自增会破坏比较键中 attempt_version 语义）。
+  - **时间来源与精度（R6 residual #4 采纳）**：success_time /
+    attempt_time 由**应用进程生成**（time.Now UTC），存储 `timestamptz`
+    微秒精度；单实例拓扑下无跨实例时钟偏差问题（多实例扩展时另立卡）。
   - **字段矩阵（R2 回修 #3，逐项钉死）**：
   - 成功事务：分包快照 + `packages_updated_at` + `reset_at` + `used_percent`
     + `last_attempt_at`(=success_time) + version(=attempt_version，不另自增)
@@ -244,7 +271,9 @@ Extra 新键：
   成功失败/同戳乱序（断言双请求各持不同 version）/失败后成功清错误/
   先发后至跨版本清除过期错误；**补交错断言（R5 回修 #1）：失败已接受后
   较早成功到达（被拒，不回退）与成功已接受后较早失败到达（被拒，不覆盖
-  成功时间），覆盖 GREATEST 比较状态推导的正确性**；补验收：新快照后 reset_at 与阈值候选回归
+  成功时间），覆盖 GREATEST 比较状态推导的正确性**；**补 R6 断言：首次
+  无快照无失败记录时首个成功与首个失败均能写入（NULL version=0 哨兵 +
+  '-infinity' 哨兵路径）、同时间戳高版本失败可接受/低版本失败被拒**；补验收：新快照后 reset_at 与阈值候选回归
   断言；命令与证据位置固定于验收清单；**环境不可用 = B4 未完成**，不得以
   "待补验"登记替代。集成测试并验证 SQL 谓词/事务原子性/隔离行为。
 - 部署顺序：与 Card A 同变更合入；见 Card E 发布闸门。
