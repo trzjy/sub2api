@@ -1,6 +1,7 @@
-# CF 524 上游悬挂治理方案 v8（首字节护栏 + 流式心跳保活）
+# CF 524 上游悬挂治理方案 v8.2（首字节护栏 + 流式心跳保活）
 
-> 状态：确认审（R3）7 项全采纳回修，待派发。2026-09-30 用户裁定：采用方案 A
+> 状态：v8.1/R8——R7 四项闭合确认审仅剩判别器一致性、快照实现所有者
+> 两处 P1 与状态行残留，v8.2 全部修正后进入派发。2026-09-30 用户裁定：采用方案 A
 > （心跳+护栏+failover，含流式晚到错误统一 SSE error 帧的契约变更授权）。
 > 排查证据：`~/.sub2api-acceptance/sub2api-cf524-diagnosis-20260930/`。
 > v1→v2：方案审 R1 5 项 + delta 复核 7 项全采纳。
@@ -146,8 +147,8 @@
   **零部分生效**，当前生效配置保持不变并记录明确拒绝事件；不存在"先应用
   一个键再校验另一个"的半更新状态。热加载三测试：非法 guard、非法
   heartbeat、交叉校验失败，各自断言两键均维持旧值。
-- 不做 transport 层全局/Profile 超时下调；护栏是请求级 context deadline，
-  仅作用于上述五挂点。
+- 不做 transport 层全局/Profile 超时下调；护栏为响应头等待 watchdog，
+  仅作用于上述五挂点（OpenAI 挂点为适配器包回的既有行为）。
 
 ### D2 流式心跳保活（方案 A，授权契约变更）
 
@@ -221,8 +222,8 @@
 
 | 卡 | 文件 | 内容 | 依赖 |
 |---|---|---|---|
-| G1 | internal/service/{upstream_first_byte_guard.go(新), openai_gateway_forward.go, gateway_forward_as_chat_completions.go, upstream_first_byte_error.go(新)} | headerGuard 泛化为共享组件（**旧链归零（合同 §4）：登记旧 openAIFirstOutputHeaderGuard 入口与全部调用点 → 迁移共享实现 → 删除被替代旧类型/构造器 → 仓库级符号残留扫描 + 定向测试证明无残留**；OpenAI handler 识别/计数/耗尽机器零改动）+ 平台无关 newUpstreamFirstByteTimeoutError（**ShouldRetryNextAccount 由剩余预算 <5s 判定，零新计数器（v5）**）+ 请求入口不可变截止时间 + 挂点 3 + 总预算（流式 2×guard+10s / 非流式 guard+25s，前置延迟>5s 用例）+ wireBody 一致性 + 单测 | 方案 v5 定稿 |
-| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} + internal/handler/{gateway_handler.go, gateway_handler_chat_completions.go, gateway_handler_responses.go} | 挂点 1/2/4 接护栏 + 接心跳（G3 组件）+ **三消费 handler 心跳基线防线例外（v5：注释帧非语义，`Size()>max(before,heartbeatBase)`，未启动时判定不变）** + 单测（claude-sonnet-5 两形态回放、换号与预算耗尽分支、防线例外两分支） | G1 + G3 |
+| G1 | internal/service/{upstream_first_byte_guard.go(新), openai_gateway_forward.go, gateway_forward_as_chat_completions.go, upstream_first_byte_error.go(新)} |**含请求级预算快照类型与 context 读写 helper（v8.2：`RequestBudgetSnapshot`{guard, heartbeat delay, 绝对截止, 入口单调起点}——唯一创建入口在 G2 的 handler 层安装点，G1 只交付类型与 helper）** | headerGuard 泛化为共享组件（**旧链归零（合同 §4）：登记旧 openAIFirstOutputHeaderGuard 入口与全部调用点 → 迁移共享实现 → 删除被替代旧类型/构造器 → 仓库级符号残留扫描 + 定向测试证明无残留**；OpenAI handler 识别/计数/耗尽机器零改动）+ 平台无关 newUpstreamFirstByteTimeoutError（**ShouldRetryNextAccount 由剩余预算 <5s 判定，零新计数器（v5）**）+ 请求入口不可变截止时间 + 挂点 3 + 总预算（流式 2×guard+10s / 非流式 guard+25s，前置延迟>5s 用例）+ wireBody 一致性 + 单测 | 方案 v5 定稿 |
+| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} + internal/handler/{gateway_handler.go, gateway_handler_chat_completions.go, gateway_handler_responses.go} | 挂点 1/2/4 接护栏 + 接心跳（G3 组件）+ **三消费 handler 心跳基线防线例外（v5：注释帧非语义，`Size()>max(before,heartbeatBase)`，未启动时判定不变）** + **入口安装点唯一所有者（v8.2）：在三个消费 handler 的认证/鉴权完成后、并发槽位等待与账号选择前，用 G1 快照类型创建请求级预算快照并安装请求级心跳 owner（各一处，唯一顺序；forward/attempt 层禁止重初始化计时）；前置延迟+换号+跨热加载边界测试为交付门槛** + 单测（claude-sonnet-5 两形态回放、换号与预算耗尽分支、防线例外两分支） | G1 + G3 |
 | G3 | internal/service/upstream_heartbeat.go(新) + 组件单测 | **仅心跳组件交付，不做挂点接入（R3 P2-5 闭合：挂点文件唯一所有者=G2，消除并行写冲突）**：晚触发 + Flush 契约（初始头+每帧 Flush，无 Flush 能力失败关闭）+ stop-and-wait 单一 writer 所有权 + 唯一线性化优先级 + 已提交字节基线查询（供 G2 防线例外）+ 组件级单测 | G1 |
 | G4 | internal/config/config.go + config.example.yaml + 生产 config.yaml 变更单 | 两个新键 + Validate（guard [30,90] 失败关闭无禁用路径；heartbeat [0]∪[5,60]；**交叉校验 heartbeat>0 ⇒ heartbeat<guard**；热加载候选整体校验零部分生效）+ 文档注释 | 方案 v5 定稿 |
 | G5 | docs/ + 验收卡 | 覆盖矩阵（五挂点 × 63-victim 全形态含 anthropic 两形态）+ 生产观测：稳定事件 `gateway_first_byte_guard_triggered` / `gateway_upstream_heartbeat_started`，outcome 枚举 + 终态关联 + request_id 端到端串联 | 全部 |
@@ -253,9 +254,10 @@
    ④换号交接连续性：heartbeat=60、首轮超时、次轮续挂 → 交接空窗 < delay
    （首帧即时续写），且前置延迟+首帧组合时间轴 ≤ CF 墙。
 8. **生产验收唯一口径（v8 按 guard 关联口径重写，R7 P1 闭合）**：
-   上线后 48h 观察窗。**判别器**：四挂点在收到上游响应头时发
-   `gateway_response_headers_received` 里程碑事件（含 request_id）——
-   墙簇 499（124.9–125.1s 与 119.9–120.1s）据此分两类：
+   上线后 48h 观察窗。**判别器（零新事件流）**：四挂点收到上游响应头时
+   记录时间戳，经既有请求级完成日志新字段 `upstream_headers_received_ms`
+   （request_id 本在该日志中）——墙簇 499（124.9–125.1s 与 119.9–120.1s）
+   据此分两类：
    - **主验收（必须为零）**：无 `upstream_headers_received_ms` 字段的墙簇
      499（= header-wait 悬挂未被护栏拦截而撞墙；基线 63/48h + 6/48h 全部
      属此类）；
