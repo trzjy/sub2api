@@ -1402,6 +1402,17 @@ export interface GrokBillingSummary {
   failed_windows?: string[]
 }
 
+/** CodeBuddy 分包快照单条（与后端 MarshalJSON 字段逐键对齐；remaining/total 字符串承载 NUMERIC(20,8)）。 */
+export interface CodeBuddyCreditPackageSnapshot {
+  id: string
+  name: string
+  unit: string
+  remaining: string
+  total: string
+  expires_at: string
+  status: number
+}
+
 export interface AccountUsageInfo {
   source?: 'passive' | 'active'
   updated_at: string | null
@@ -1449,13 +1460,13 @@ export interface AccountUsageInfo {
   is_banned?: boolean       // 账号被封（forbidden_type=violation）
   needs_reauth?: boolean    // token 失效需重新授权（401）
 
-  // CodeBuddy 积分额度快照（后端写入 account.Extra，这里提供类型以便组件读取）
+  // CodeBuddy 分包额度快照（后端写入 account.Extra；读取统一走 utils/codebuddyCredit）
+  // 数值字段（remaining/total）以**字符串**承载 NUMERIC(20,8) 口径，禁当 number 解析。
   codebuddy_credit?: {
-    used_percent?: number
-    total?: number
-    used?: number
+    packages?: CodeBuddyCreditPackageSnapshot[] | null
+    packages_updated_at?: string
+    used_percent?: string
     reset_at?: string
-    updated_at?: string
     error?: string
   } | null
 

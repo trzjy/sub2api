@@ -16,11 +16,19 @@ import (
 
 // codeBuddyQuotaRepoStub 是 CodeBuddyQuotaService 测试用 AccountRepository 桩：
 // 在 stubOpenAIAccountRepo（无 build tag 全量桩）之上仅覆盖 QueryUsage/FetchModels 实际调用的几个方法。
+// 同时实现 Card B 的 CodeBuddyConditionalExtraWriter 窄接口，捕获快照/错误条件更新写入。
 type codeBuddyQuotaRepoStub struct {
 	stubOpenAIAccountRepo
-	getByID     *Account
-	updateExtra int
-	lastExtra   map[string]any
+	getByID        *Account
+	updateExtra    int
+	lastExtra      map[string]any
+	nextVer        int64
+	nextVerCalls   int
+	nextVerErr     error
+	snapshotWrites []CodeBuddyCreditSnapshotWrite
+	snapshotErr    error
+	snapshotReject bool
+	errorWrites    []CodeBuddyCreditAttemptErrorWrite
 }
 
 func (r *codeBuddyQuotaRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -40,6 +48,29 @@ func (r *codeBuddyQuotaRepoStub) UpdateExtra(_ context.Context, _ int64, updates
 	r.updateExtra++
 	r.lastExtra = updates
 	return nil
+}
+
+// --- CodeBuddyConditionalExtraWriter 窄接口实现（Card B 唯一条件更新写口） ---
+
+func (r *codeBuddyQuotaRepoStub) NextCodeBuddyCreditAttemptVersion(_ context.Context) (int64, error) {
+	r.nextVerCalls++
+	if r.nextVerErr != nil {
+		return 0, r.nextVerErr
+	}
+	return r.nextVer, nil
+}
+
+func (r *codeBuddyQuotaRepoStub) WriteCodeBuddyCreditSnapshot(_ context.Context, _ int64, write CodeBuddyCreditSnapshotWrite) (bool, error) {
+	r.snapshotWrites = append(r.snapshotWrites, write)
+	if r.snapshotErr != nil {
+		return false, r.snapshotErr
+	}
+	return !r.snapshotReject, nil
+}
+
+func (r *codeBuddyQuotaRepoStub) WriteCodeBuddyCreditAttemptError(_ context.Context, _ int64, write CodeBuddyCreditAttemptErrorWrite) (bool, error) {
+	r.errorWrites = append(r.errorWrites, write)
+	return true, nil
 }
 
 func healthyCodeBuddyQuotaAccount(id int64) *Account {
@@ -62,8 +93,9 @@ func healthyCodeBuddyQuotaAccount(id int64) *Account {
 
 // TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema 用真实抓包结构（脱敏
 // fixture：data.Response.Data.{TotalCount,TotalDosage,Accounts[]}，PascalCase）验证
-// PR-C1 重写后的解析：按账号容量计数器聚合计算已用百分比，重置时间取最晚的
-// CycleEndTime（UTC+8）。旧实现的 data.<camelCase> 扫描在该报文下必然命不中。
+// Card A 分包解析 + Card B 条件更新写路径：两个 Status=0 分包（500/1500）聚合，
+// used_percent=0，最晚 CycleEndTime 为 reset_at；成功事务写分包快照 + 版本号，
+// 且不再走旧 UpdateExtra 写口（updateExtra 必须保持 0）。
 func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	fixture, err := os.ReadFile("testdata/codebuddy_billing_get_user_resource.json")
 	require.NoError(t, err)
@@ -72,7 +104,7 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	// 真实响应不含 OAuth uid（仅有 AccountId/Uin/ResourceId/BindRecords[].BindObjectId），
 	// 解析器按 uid 命不中任何账号时退回响应中的全部账号（该请求以 X-User-Id 认证）。
 	account.Credentials["uid"] = "db237973-4482-49ff-9872-1bab5ab94b16"
-	repo := &codeBuddyQuotaRepoStub{getByID: account}
+	repo := &codeBuddyQuotaRepoStub{getByID: account, nextVer: 7}
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -90,11 +122,18 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	// 最晚 CycleEndTime = 2026-10-13 07:46:09 (UTC+8) → 2026-10-12T23:46:09Z
 	require.Equal(t, "2026-10-12T23:46:09Z", result.ResetAt)
 
-	require.Equal(t, 1, repo.updateExtra, "额度快照应通过 UpdateExtra 落库")
-	require.Equal(t, 0.0, repo.lastExtra[codebuddyCreditUsedPercentKey])
-	require.Equal(t, 2000.0, repo.lastExtra[codebuddyCreditTotalKey])
-	require.Equal(t, 0.0, repo.lastExtra[codebuddyCreditUsedKey])
-	require.Nil(t, repo.lastExtra[codebuddyCreditErrorKey], "成功时应清除错误标记")
+	// Card B 唯一条件更新写口：成功快照通过 WriteCodeBuddyCreditSnapshot 落库。
+	require.Equal(t, 1, repo.nextVerCalls, "抓取开始必须取一次 attempt_version")
+	require.Len(t, repo.snapshotWrites, 1, "成功快照应走条件更新写口")
+	write := repo.snapshotWrites[0]
+	require.Equal(t, int64(7), write.Version, "version 必须 = 抓取开始取得的 attempt_version")
+	require.Len(t, write.Packages, 2, "两个分包都应进入快照")
+	require.Equal(t, 0.0, write.UsedPercent)
+	require.False(t, write.SuccessTime.IsZero(), "成功时刻必须采样")
+	require.Equal(t, "2026-10-12T23:46:09Z", write.ResetAt.UTC().Format(time.RFC3339))
+	require.Empty(t, write.ErrorMsg, "无解析错误时应清旧错误")
+	// 旧 UpdateExtra 写口零调用（写路径全量切换，禁双写口）。
+	require.Equal(t, 0, repo.updateExtra, "快照不得再走旧 UpdateExtra 写口")
 }
 
 // TestParseCodeBuddyCreditUsage_ComputesPercentFromCapacityCounters 验证容量计数器

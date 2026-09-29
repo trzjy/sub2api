@@ -39,6 +39,27 @@ const (
 	// codebuddyCreditPackagesKey 是 §4.1 分包快照数组键（存储契约）。
 	codebuddyCreditPackagesKey = "codebuddy_credit_packages"
 
+	// codebuddyCreditPackagesUpdatedAtKey 是分包快照的唯一 freshness 依据
+	// （§1 / §4.1：codebuddy_credit_packages_updated_at，失败绝不更新）。
+	// 与 codebuddy_urgency.go 同名常量一致，集中定义避免双源。
+	codebuddyCreditPackagesUpdatedAtKey = "codebuddy_credit_packages_updated_at"
+	// codebuddyCreditLastAttemptAtKey 是失败/成功尝试时间键（§1 统一排序键
+	// 失败路径比较时间持久化于此；成功事务同事务写为 success_time）。
+	codebuddyCreditLastAttemptAtKey = "codebuddy_credit_last_attempt_at"
+	// codebuddyCreditVersionKey 是最近一次被接受事件的 attempt_version
+	// （§1 R6 回修 #1：仅保存被接受事件版本，成功/失败提交均不得再自增）。
+	codebuddyCreditVersionKey = "codebuddy_credit_version"
+
+	// 导出别名：供 repository 包条件更新实现引用（单一来源，不自创键名）。
+	// 条件更新 SQL 内只合并 B4 负责的键、保留其余 extra 内容。
+	CodeBuddyCreditPackagesKey          = codebuddyCreditPackagesKey
+	CodeBuddyCreditPackagesUpdatedAtKey = codebuddyCreditPackagesUpdatedAtKey
+	CodeBuddyCreditResetAtKey           = codebuddyCreditResetAtKey
+	CodeBuddyCreditUsedPercentKey       = codebuddyCreditUsedPercentKey
+	CodeBuddyCreditLastAttemptAtKey     = codebuddyCreditLastAttemptAtKey
+	CodeBuddyCreditVersionKey           = codebuddyCreditVersionKey
+	CodeBuddyCreditErrorKey             = codebuddyCreditErrorKey
+
 	// codebuddyCreditCanonicalUnit 是 §4.1 addendum（2026-09-29 探针）钉死的规范单位
 	// （cn 站真实账号 11/11 分包唯一值）；异单位分包失败关闭。
 	codebuddyCreditCanonicalUnit = "credits"
@@ -112,6 +133,10 @@ type CodeBuddyQuotaService struct {
 	httpUpstream HTTPUpstream
 	cfg          *config.Config
 
+	// creditWriter 是 Card B 唯一条件更新写口（accountRepository 实现）。
+	// 通过构造时类型断言注入；nil 时写路径失败关闭（不静默降级为 UpdateExtra）。
+	creditWriter CodeBuddyConditionalExtraWriter
+
 	modelCacheMu sync.Mutex
 	modelCache   map[int64]codeBuddyModelCacheEntry
 }
@@ -134,6 +159,12 @@ func NewCodeBuddyQuotaService(
 		httpUpstream: httpUpstream,
 		cfg:          cfg,
 		modelCache:   make(map[int64]codeBuddyModelCacheEntry),
+	}
+	// Card B：快照写路径必须走条件更新入口（§0.2 UpdateExtra 不足）。
+	// 真实 accountRepository 实现 CodeBuddyConditionalExtraWriter；断言失败
+	// 时 creditWriter 保持 nil，queryUsageForAccount 检测到即失败关闭。
+	if writer, ok := accountRepo.(CodeBuddyConditionalExtraWriter); ok {
+		s.creditWriter = writer
 	}
 	codeBuddyQuotaInstance = s
 	return s
@@ -159,44 +190,78 @@ func (s *CodeBuddyQuotaService) queryUsageForAccount(ctx context.Context, accoun
 		AccountID: account.ID,
 		FetchedAt: time.Now().Unix(),
 	}
+	// Card B：成功/失败写路径必须走唯一条件更新入口。creditWriter 未注入时
+	// 失败关闭（不得静默降级回 UpdateExtra）。
+	if s.creditWriter == nil {
+		result.Error = "codebuddy credit writer not configured"
+		return result, nil
+	}
+	// 抓取开始：attempt_time 采样 + attempt_version 取号（同一采样点）。
+	// attempt_version 由 DB sequence 分配；取号失败 = 本次抓取失败关闭
+	// （禁应用本地计数器）。
+	attemptTime := time.Now().UTC().Truncate(time.Microsecond)
+	attemptVersion, err := s.creditWriter.NextCodeBuddyCreditAttemptVersion(ctx)
+	if err != nil {
+		result.Error = "codebuddy credit attempt version acquisition failed: " + err.Error()
+		return result, nil
+	}
+
 	body, status, err := s.doBillingRequest(ctx, account, http.MethodPost, codeBuddyBillingMeterPath, []byte("{}"))
 	result.StatusCode = status
 	if err != nil {
 		result.Error = err.Error()
-		s.persistError(ctx, account.ID, err.Error())
+		s.persistAttemptError(ctx, account.ID, attemptTime, attemptVersion, err.Error())
 		return result, nil
 	}
-	usage, ok := parseCodeBuddyCreditUsage(body, account.GetCredential("uid"))
-	if !ok {
-		// 报文结构异常：记录错误但不写假百分比（避免误触发阈值停调）。
+	// Card A 分包解析（§1 契约，校验失败关闭）：返回分包集合 + 本次解析错误
+	// 条目（保留原始值供排查）。envelope 结构缺失 → 失败关闭。
+	packages, parseErrors, envelopeErr := parseCodeBuddyCreditPackages(body, account.GetCredential("uid"))
+	if envelopeErr {
 		errMsg := "codebuddy quota: 无法从 get-user-resource 响应解析账号容量计数器"
 		result.Error = errMsg
-		s.persistError(ctx, account.ID, errMsg)
+		s.persistAttemptError(ctx, account.ID, attemptTime, attemptVersion, errMsg)
 		return result, nil
 	}
-	resetAt := usage.ResetAt
-	if !usage.HasResetAt || resetAt.IsZero() {
+	// Σtotal=0（无有效分包可参与基础快照有效性谓词）→ 不写假百分比，失败关闭。
+	usedPercent, usable := DeriveCodeBuddyCreditUsedPercent(packages)
+	if !usable {
+		errMsg := "codebuddy quota: 无有效分包可参与 used_percent 推导（Σtotal=0）"
+		result.Error = errMsg
+		s.persistAttemptError(ctx, account.ID, attemptTime, attemptVersion, errMsg)
+		return result, nil
+	}
+	resetAt := deriveResetAtFromPackages(packages)
+	if resetAt.IsZero() {
 		resetAt = time.Now().Add(codebuddyCreditDefaultResetWindow)
 	}
-	now := time.Now().UTC()
-	updates := map[string]any{
-		codebuddyCreditUsedPercentKey: usage.UsedPercent,
-		codebuddyCreditResetAtKey:     resetAt.UTC().Format(time.RFC3339),
-		codebuddyCreditUpdatedAtKey:   now.Format(time.RFC3339),
-		codebuddyCreditErrorKey:       nil,
-		codebuddyCreditTotalKey:       usage.TotalCredit,
-		codebuddyCreditUsedKey:        usage.UsedCredit,
-	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+	// 成功时刻 = 快照完成时刻（与 version 同实例，应用侧截断微秒）。
+	successTime := time.Now().UTC().Truncate(time.Microsecond)
+	// 本次解析错误结果：无错误(errEntries 为空)才清除旧错误；有错误随成功
+	// 快照同事务写入。
+	errEntriesJSON := marshalCodeBuddyPackageErrors(parseErrors)
+	accepted, err := s.creditWriter.WriteCodeBuddyCreditSnapshot(ctx, account.ID, CodeBuddyCreditSnapshotWrite{
+		SuccessTime: successTime,
+		Version:     attemptVersion,
+		Packages:    packages,
+		UsedPercent: usedPercent,
+		ResetAt:     resetAt,
+		ErrorMsg:    errEntriesJSON,
+	})
+	if err != nil {
 		slog.Warn("codebuddy_quota_snapshot_failed", "account_id", account.ID, "error", err)
 		result.Error = "snapshot write failed: " + err.Error()
 		return result, nil
 	}
+	// RowsAffected=0 = 条件更新被拒绝（排序键不通过）。调用方按失败路径处理，
+	// 不得重试改写比较条件；不产生成功状态变更。
+	if !accepted {
+		result.Error = "codebuddy credit snapshot rejected by ordering tuple"
+		return result, nil
+	}
 	result.Success = true
 	result.Persisted = true
-	result.UsedPercent = usage.UsedPercent
-	result.TotalCredit = usage.TotalCredit
-	result.UsedCredit = usage.UsedCredit
+	result.UsedPercent = usedPercent
+	result.TotalCredit, result.UsedCredit = deriveTotalsFromPackages(packages)
 	result.ResetAt = resetAt.UTC().Format(time.RFC3339)
 	return result, nil
 }
@@ -809,13 +874,131 @@ func parseCodeBuddyCycleEnd(s string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (s *CodeBuddyQuotaService) persistError(ctx context.Context, accountID int64, errMsg string) {
-	if s.accountRepo == nil {
+// persistAttemptError 走失败事务条件更新：仅 last_attempt_at + 错误标记 +
+// version 持久化（不得修改 freshness/reset_at/成功快照）。接受条件 = 同一
+// 字典序 tuple (AttemptTime, Version)；accepted=false（RowsAffected=0）= 被拒，
+// 按失败路径处理（不重试改写比较条件）。creditWriter 为 nil 时无法写失败
+// 记录，仅记日志（此时 process 启动即失败关闭，正常不会到达）。
+func (s *CodeBuddyQuotaService) persistAttemptError(ctx context.Context, accountID int64, attemptTime time.Time, version int64, errMsg string) {
+	if s.creditWriter == nil {
+		slog.Warn("codebuddy_credit_attempt_error_skipped_unconfigured", "account_id", accountID, "error", errMsg)
 		return
 	}
-	if err := s.accountRepo.UpdateExtra(ctx, accountID, map[string]any{
-		codebuddyCreditErrorKey: errMsg,
+	if _, err := s.creditWriter.WriteCodeBuddyCreditAttemptError(ctx, accountID, CodeBuddyCreditAttemptErrorWrite{
+		AttemptTime: attemptTime,
+		Version:     version,
+		ErrorMsg:    errMsg,
 	}); err != nil {
 		slog.Warn("codebuddy_credit_error_persist_failed", "account_id", accountID, "error", err)
 	}
+}
+
+// deriveResetAtFromPackages 从分包快照推导 reset_at（§1：源 = CycleEndTime，
+// 已由 Card A 转 UTC RFC3339 存于 ExpiresAt）。取可解析且最晚的未来值；
+// 全部缺失/非法 → 返回零值（调用方回退默认窗口，与缺失探针 fail-open 一致）。
+func deriveResetAtFromPackages(packages []CodeBuddyCreditPackage) time.Time {
+	var latest time.Time
+	now := time.Now().UTC()
+	for _, pkg := range packages {
+		if pkg.ExpiresAt == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, pkg.ExpiresAt)
+		if err != nil {
+			continue
+		}
+		t = t.UTC()
+		if !t.After(now) {
+			continue
+		}
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	return latest
+}
+
+// deriveTotalsFromPackages 从参与基础快照有效性谓词的分包推导合计
+// （旧 total/used 展示退役后仍为 probe result 提供兼容聚合值；异单位/
+// 无效分包不计入，与 used_percent 分子分母同一集合）。
+func deriveTotalsFromPackages(packages []CodeBuddyCreditPackage) (total, used float64) {
+	for _, pkg := range packages {
+		if !IsValidCodeBuddyCreditPackage(pkg) {
+			continue
+		}
+		total += pkg.Total.InexactFloat64()
+		used += pkg.Total.Sub(pkg.Remaining).InexactFloat64()
+	}
+	return total, used
+}
+
+// marshalCodeBuddyPackageErrors 把本次解析错误条目序列化为错误标记内容
+// （保留原始值供排查）；无错误返回空串（调用方据此清除旧错误）。
+func marshalCodeBuddyPackageErrors(entries []codeBuddyCreditPackageError) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	items := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, map[string]any{
+			"id":     e.ID,
+			"reason": e.Reason,
+			"raw":    e.RawValues,
+		})
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		slog.Warn("codebuddy_credit_package_errors_marshal_failed", "entries", len(entries), "error", err)
+		return ""
+	}
+	return string(b)
+}
+
+// CodeBuddyConditionalExtraWriter 是 CodeBuddy 快照专用条件更新入口（Card B
+// 唯一新写口；§0.2 已证 UpdateExtra 无条件谓词不足，本窄接口不做通用扩展）。
+// 由 accountRepository 实现；CodeBuddyQuotaService 通过构造时类型断言持有。
+// 所有时间值由应用进程生成（time.Now().UTC().Truncate(time.Microsecond)），
+// 比较值与写入值同一实例；RowsAffected=0 即条件更新被拒绝（调用方按失败
+// 路径处理，不得重试改写比较条件）。
+type CodeBuddyConditionalExtraWriter interface {
+	// NextCodeBuddyCreditAttemptVersion 在抓取开始时取得 DB 分配的单调号
+	// （sequence seq_codebuddy_credit_attempt_version）。调用失败 = 本次抓取
+	// 失败关闭（禁应用本地计数器）。
+	NextCodeBuddyCreditAttemptVersion(ctx context.Context) (int64, error)
+	// WriteCodeBuddyCreditSnapshot 提交成功事务：分包快照 + packages_updated_at
+	// + reset_at + used_percent + last_attempt_at(=SuccessTime) + version +
+	// 解析错误结果（ErrorMsg 为空则清除旧错误）。接受条件 = tuple 语义
+	// (event_time, version)，成功路径 event_time = SuccessTime。原子：条件判断、
+	// 写入、version 写入在同一 UPDATE。
+	WriteCodeBuddyCreditSnapshot(ctx context.Context, accountID int64, write CodeBuddyCreditSnapshotWrite) (accepted bool, err error)
+	// WriteCodeBuddyCreditAttemptError 提交失败事务：仅 last_attempt_at +
+	// 错误标记 + version 持久化，不得修改 freshness/reset_at/成功快照。
+	// 接受条件 tuple 语义，失败路径 event_time = AttemptTime。
+	WriteCodeBuddyCreditAttemptError(ctx context.Context, accountID int64, write CodeBuddyCreditAttemptErrorWrite) (accepted bool, err error)
+}
+
+// CodeBuddyCreditSnapshotWrite 是成功事务条件更新写入参数（§1 统一排序键）。
+type CodeBuddyCreditSnapshotWrite struct {
+	// SuccessTime 是该次成功快照完成时刻（应用侧截断微秒）。
+	SuccessTime time.Time
+	// Version 是抓取开始时取得的 attempt_version；成功提交不得另行自增。
+	Version int64
+	// Packages 是 §4.1 分包快照数组（存储契约，decimal 字符串承载）。
+	Packages []CodeBuddyCreditPackage
+	// UsedPercent 从参与分包（基础快照有效性谓词）推导。
+	UsedPercent float64
+	// ResetAt 语义保留（阈值消费依赖）；成功事务继续写。
+	ResetAt time.Time
+	// ErrorMsg 非空 = 本次解析错误结果随快照同事务写入；空 = 清除旧错误。
+	ErrorMsg string
+}
+
+// CodeBuddyCreditAttemptErrorWrite 是失败事务条件更新写入参数。
+type CodeBuddyCreditAttemptErrorWrite struct {
+	// AttemptTime 是本次抓取请求开始时刻（与 attempt_version 同点采样）。
+	AttemptTime time.Time
+	// Version 是抓取开始时取得的 attempt_version；失败提交不得另行自增。
+	Version int64
+	// ErrorMsg 是失败标记内容（写入 codebuddy_credit_error）。
+	ErrorMsg string
 }

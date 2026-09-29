@@ -1176,6 +1176,22 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		}
 	}
 
+	// §4.2 到期紧迫度加权：仅本请求 platform=codebuddy 时生效。快照按候选集一次
+	// 批量读取（每请求一次，不逐候选重复解析）。k=0 / 未启用 / 非 codebuddy 平台
+	// 都不进乘法路径（urgencySnapshots 为 nil）→ score 计算逐位不变。
+	urgencyBoost := codeBuddyUrgencyBoost{}
+	var urgencySnapshots map[int64]codeBuddyUrgencySnapshot
+	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformCodeBuddy {
+		urgencyBoost = s.service.codeBuddyUrgencyBoostForRequest()
+		if urgencyBoost.Enabled && urgencyBoost.K > 0 {
+			accountPtrs := make([]*Account, len(candidates))
+			for i := range candidates {
+				accountPtrs[i] = candidates[i].account
+			}
+			urgencySnapshots = codeBuddyUrgencySnapshotsFor(accountPtrs, now)
+		}
+	}
+
 	for i := range candidates {
 		item := &candidates[i]
 		priorityFactor := 1.0
@@ -1224,6 +1240,11 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			if req.StickyAccountID > 0 && item.account.ID == req.StickyAccountID {
 				item.score += weights.SessionSticky
 			}
+		}
+		// §4.2：codebuddy 平台 + 启用 + K>0 时才走乘法路径。
+		// 乘数恒 ≥1（norm∈[0,1]），无快照/快照陈旧/无参与分包 → norm=0 → 乘 1。
+		if urgencySnapshots != nil {
+			item.score *= ApplyCodeBuddyUrgencyBoost(item.account, urgencySnapshots[item.account.ID], urgencyBoost, now)
 		}
 	}
 	plan.candidates = candidates
@@ -2983,6 +3004,17 @@ func (s *OpenAIGatewayService) openAIWSSchedulerWeightsForRequest(ctx context.Co
 		return weights
 	}
 	return overridden
+}
+
+// codeBuddyUrgencyBoostForRequest 读取当前生效的 §4.2 紧迫度加权配置。
+// 配置值由 internal/config 层校验（启动与热加载同一路径失败关闭），此处直接
+// 透传给纯函数 normalize（未启用/非法按 0 处理，恒等语义，无第二份钳位）。
+func (s *OpenAIGatewayService) codeBuddyUrgencyBoostForRequest() codeBuddyUrgencyBoost {
+	if s == nil || s.cfg == nil {
+		return codeBuddyUrgencyBoost{Enabled: false, K: 0}
+	}
+	cb := s.cfg.Gateway.CodeBuddy
+	return codeBuddyUrgencyBoost{Enabled: cb.UrgencyBoostEnabled, K: cb.UrgencyBoostK}
 }
 
 func applyOpenAIAdvancedSchedulerWeightOverrides(

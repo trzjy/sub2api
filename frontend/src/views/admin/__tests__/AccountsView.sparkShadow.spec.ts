@@ -415,9 +415,19 @@ describe('admin AccountsView — 账号行展示', () => {
       platform: 'codebuddy',
       type: 'oauth',
       extra: {
-        codebuddy_credit_used_percent: 37,
-        codebuddy_credit_used: 370,
-        codebuddy_credit_total: 1000,
+        codebuddy_credit_packages: [
+          {
+            id: 'a',
+            name: 'Pro 月包',
+            unit: 'credits',
+            remaining: '630.00000000',
+            total: '1000.00000000',
+            expires_at: '2026-10-01T00:00:00Z',
+            status: 0,
+          },
+        ],
+        codebuddy_credit_packages_updated_at: '2026-09-29T10:00:00Z',
+        codebuddy_credit_used_percent: '37',
         codebuddy_credit_reset_at: '2026-09-16T00:00:00Z',
       },
     }

@@ -349,8 +349,39 @@
             :resets-at="codebuddyCredit.resetAt"
             color="indigo"
           />
-          <div v-if="codebuddyCredit.summary" class="text-[10px] text-gray-500 dark:text-gray-400">
-            {{ codebuddyCredit.summary }}
+          <!-- 分包卡片：逐包渲染 名称/剩余/总量/到期/错误标记；合计=Σ派生（异单位不计入并标注） -->
+          <div class="space-y-0.5">
+            <div
+              v-for="pkg in codebuddyCredit.packages"
+              :key="pkg.id"
+              class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-600 dark:bg-dark-800 dark:text-gray-300"
+            >
+              <span class="font-medium">{{ pkg.name }}</span>
+              <span>{{ t('admin.accounts.usageWindow.codebuddyPackageRemaining', { value: formatCreditValue(pkg.remaining) }) }}</span>
+              <span>{{ t('admin.accounts.usageWindow.codebuddyPackageTotal', { value: formatCreditValue(pkg.total) }) }}</span>
+              <span v-if="pkg.expires_at" class="text-gray-400 dark:text-gray-500">
+                {{ t('admin.accounts.usageWindow.codebuddyPackageExpiry', { date: formatDateOnly(pkg.expires_at) }) }}
+              </span>
+              <span
+                v-if="pkg.excludedReason"
+                class="rounded bg-amber-100 px-1 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                :title="t('admin.accounts.usageWindow.codebuddyPackageExcludedHint')"
+              >
+                {{ excludedLabel(pkg.excludedReason) }}
+              </span>
+            </div>
+            <!-- 合计行（剩余 / 总量，异单位不计入并标注） -->
+            <div class="flex flex-wrap items-center gap-x-1.5 text-[10px] text-gray-500 dark:text-gray-400">
+              <span class="font-medium">
+                {{ t('admin.accounts.usageWindow.codebuddyPackageTotalRow', { remaining: codebuddyCredit.remainingDisplay, total: codebuddyCredit.totalDisplay }) }}
+              </span>
+              <span v-if="codebuddyCredit.hasExcluded" class="text-amber-600 dark:text-amber-400">
+                {{ t('admin.accounts.usageWindow.codebuddyPackageExcludedNote') }}
+              </span>
+              <span v-if="codebuddyCredit.updatedAt" class="text-gray-400 dark:text-gray-500">
+                {{ t('admin.accounts.usageWindow.codebuddyPackageUpdated', { date: formatDateOnly(codebuddyCredit.updatedAt) }) }}
+              </span>
+            </div>
           </div>
         </template>
         <!-- 探测错误状态 -->
@@ -745,8 +776,8 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
-import { formatCompactNumber } from '@/utils/format'
-import { parseCodeBuddyCredit, parseCodeBuddyCreditError } from '@/utils/codebuddyCredit'
+import { formatCompactNumber, formatDateOnly } from '@/utils/format'
+import { parseCodeBuddyCredit, parseCodeBuddyCreditError, formatCreditValue } from '@/utils/codebuddyCredit'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
@@ -1045,6 +1076,17 @@ const codebuddyCredit = computed(() => parseCodeBuddyCredit(props.account.extra)
 
 // 错误键单独读取：探测失败时保留上次成功快照，仅额外追加错误行（不整块替换）。
 const codebuddyCreditError = computed(() => parseCodeBuddyCreditError(props.account.extra))
+
+// 分包排除原因文案（异单位/状态非在用 → 不计入合计）
+const excludedLabel = (reason: string): string => {
+  if (reason === 'unit_mismatch') {
+    return t('admin.accounts.usageWindow.codebuddyPackageUnitMismatch')
+  }
+  if (reason === 'status_inactive') {
+    return t('admin.accounts.usageWindow.codebuddyPackageInactive')
+  }
+  return t('admin.accounts.usageWindow.codebuddyPackageParseFailed')
+}
 
 // Antigravity 账户类型（从 load_code_assist 响应中提取）
 const antigravityTier = computed(() => {

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -20,9 +19,8 @@ const codebuddyCreditSnapshotFreshness = 24 * time.Hour
 
 // codebuddyCreditPackagesUpdatedAtKey 是分包快照的唯一 freshness 依据
 // （§1 / §4.1：codebuddy_credit_packages_updated_at，失败绝不更新）。
-// Card A 当前只定义了 codebuddyCreditPackagesKey，此处补充 freshness 键常量，
-// 键名以权威 §1 为准（不得自创）。
-const codebuddyCreditPackagesUpdatedAtKey = "codebuddy_credit_packages_updated_at"
+// 常量集中定义于 codebuddy_quota_service.go（Card B 写路径唯一来源），
+// 此处不再重复声明避免同包重名。
 
 // codeBuddyUrgencyBoost 是一次调度决策的紧迫度加权输入。
 // Enabled=false 或 K<=0 时权重计算退化为恒等（与现行为逐位一致）。
@@ -241,75 +239,10 @@ func decimalFromExtraAny(v any) (decimal.Decimal, bool) {
 	}
 }
 
-// sortCandidatesByUrgencyBoost 在**同优先级组内**按紧迫度加权对候选排序。
-// 语义：保持原有 Priority 主导（第一键不变），仅在 priority 相同时用加权项
-// 影响次序。权重大者靠前（更高紧迫度 → 更优先使用即将到期的额度）。
-//
-// 该函数只改变候选顺序，不扩大候选集；k=0 或未启用时排序退化为按原优先级
-// （sort.SliceStable 保序）→ 与现行为逐位一致。
-//
-// now 与 freshness 输入由调用方传入（调度热路径读取 Extra 后一次计算）。
-func sortCandidatesByUrgencyBoost(accounts []accountWithLoad, boost codeBuddyUrgencyBoost, snapshots map[int64]codeBuddyUrgencySnapshot, now time.Time) {
-	boost = boost.normalize()
-	if !boost.Enabled || boost.K <= 0 {
-		return
-	}
-	type weighted struct {
-		item   accountWithLoad
-		weight float64
-	}
-	weightedList := make([]weighted, 0, len(accounts))
-	for _, item := range accounts {
-		snap := snapshots[item.account.ID]
-		w := ApplyCodeBuddyUrgencyBoost(item.account, snap, boost, now)
-		weightedList = append(weightedList, weighted{item: item, weight: w})
-	}
-	sort.SliceStable(weightedList, func(i, j int) bool {
-		a, b := weightedList[i], weightedList[j]
-		if a.item.account.Priority != b.item.account.Priority {
-			return a.item.account.Priority < b.item.account.Priority
-		}
-		if a.weight != b.weight {
-			return a.weight > b.weight
-		}
-		return false
-	})
-	for i := range weightedList {
-		accounts[i] = weightedList[i].item
-	}
-}
-
-// sortCandidatesByUrgencyBoostPtr 是 []*Account 形态的同优先级组内加权排序
-// （供 fallback/legacy 路径使用），语义与 accountWithLoad 版一致。
-func sortCandidatesByUrgencyBoostPtr(accounts []*Account, boost codeBuddyUrgencyBoost, snapshots map[int64]codeBuddyUrgencySnapshot, now time.Time) {
-	boost = boost.normalize()
-	if !boost.Enabled || boost.K <= 0 {
-		return
-	}
-	type weighted struct {
-		item   *Account
-		weight float64
-	}
-	weightedList := make([]weighted, 0, len(accounts))
-	for _, item := range accounts {
-		snap := snapshots[item.ID]
-		w := ApplyCodeBuddyUrgencyBoost(item, snap, boost, now)
-		weightedList = append(weightedList, weighted{item: item, weight: w})
-	}
-	sort.SliceStable(weightedList, func(i, j int) bool {
-		a, b := weightedList[i], weightedList[j]
-		if a.item.Priority != b.item.Priority {
-			return a.item.Priority < b.item.Priority
-		}
-		if a.weight != b.weight {
-			return a.weight > b.weight
-		}
-		return false
-	})
-	for i := range weightedList {
-		accounts[i] = weightedList[i].item
-	}
-}
+// sortCandidatesByUrgencyBoost / sortCandidatesByUrgencyBoostPtr 已在 D-3 轮删除：
+// 旧「排序链」接入点经 D-2 实证对 codebuddy 候选不可达，§4.2 接入改走
+// openai_account_scheduler.go buildOpenAIAccountLoadPlan 的 score 乘法路径，
+// 这两个排序 helper 为永久死代码，配套测试同步清理。
 
 // codeBuddyUrgencySnapshotsFor 从候选账号集合批量读取 §4.2 输入快照。
 // 仅读取 Extra；不会因为单个账号 Extra 异常而失败（失败关闭语义由写入侧保证）。
@@ -324,21 +257,8 @@ func codeBuddyUrgencySnapshotsFor(accounts []*Account, now time.Time) map[int64]
 	return out
 }
 
-// codeBuddyUrgencyBoostFromConfig 读取当前生效的 §4.2 配置。
-// 调用方保证 cfg 已通过 config 层校验（非法值启动/热加载失败关闭）；
-// 此处防御性 normalize（非法值按 0 处理，恒等语义，不放大风险）。
-func codeBuddyUrgencyBoostFromConfig(cfg *configGatewayCodeBuddyView) codeBuddyUrgencyBoost {
-	if cfg == nil {
-		return codeBuddyUrgencyBoost{Enabled: false, K: 0}
-	}
-	return codeBuddyUrgencyBoost{Enabled: cfg.UrgencyBoostEnabled, K: cfg.UrgencyBoostK}
-}
-
-// configGatewayCodeBuddyView 是调度侧读取 CodeBuddy 配置的最小视图，避免对
-// internal/config 的直接依赖层级（与既有 gateway_scheduling.go 的 schedulingConfig
-// 模式一致）。实际读取由 gateway_scheduling.go 的 s.cfg.Gateway.CodeBuddy 提供。
-type configGatewayCodeBuddyView struct {
-	UrgencyBoostEnabled bool
-	UrgencyBoostK       float64
-}
+// codeBuddyUrgencyBoostFromConfig / configGatewayCodeBuddyView 已在 D-3 轮删除：
+// 旧最小视图（gateway_scheduling.go 场景）经 D-2 实证不承载 codebuddy 选号，
+// 配置读取改由 openai_account_scheduler.go 的 OpenAIGatewayService 直接提供
+// （codeBuddyUrgencyBoostForRequest，与既有 schedulingConfig 同模式）。
 

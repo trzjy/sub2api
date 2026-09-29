@@ -15,12 +15,14 @@ import (
 // codeBuddyQuotaCheckRepoStub 是 CodeBuddyQuotaCheckService 测试用 AccountRepository 桩。
 type codeBuddyQuotaCheckRepoStub struct {
 	stubOpenAIAccountRepo
-	listCalls   int
-	listOut     []Account
-	getCalls    int
-	getByID     *Account
-	updateExtra int
-	lastExtra   map[string]any
+	listCalls      int
+	listOut        []Account
+	getCalls       int
+	getByID        *Account
+	updateExtra    int
+	lastExtra      map[string]any
+	nextVer        int64
+	snapshotWrites []CodeBuddyCreditSnapshotWrite
 }
 
 func (r *codeBuddyQuotaCheckRepoStub) ListByPlatform(_ context.Context, _ string) ([]Account, error) {
@@ -40,6 +42,21 @@ func (r *codeBuddyQuotaCheckRepoStub) UpdateExtra(_ context.Context, _ int64, up
 	r.updateExtra++
 	r.lastExtra = updates
 	return nil
+}
+
+// --- CodeBuddyConditionalExtraWriter 窄接口实现（Card B） ---
+
+func (r *codeBuddyQuotaCheckRepoStub) NextCodeBuddyCreditAttemptVersion(_ context.Context) (int64, error) {
+	return r.nextVer, nil
+}
+
+func (r *codeBuddyQuotaCheckRepoStub) WriteCodeBuddyCreditSnapshot(_ context.Context, _ int64, write CodeBuddyCreditSnapshotWrite) (bool, error) {
+	r.snapshotWrites = append(r.snapshotWrites, write)
+	return true, nil
+}
+
+func (r *codeBuddyQuotaCheckRepoStub) WriteCodeBuddyCreditAttemptError(_ context.Context, _ int64, _ CodeBuddyCreditAttemptErrorWrite) (bool, error) {
+	return true, nil
 }
 
 // TestCodeBuddyQuotaCheckService_StartDisabledIsNoOp 验证配置 gate 关闭时 Start() 直接返回，
@@ -72,9 +89,11 @@ func TestCodeBuddyQuotaCheckService_RunOnceProbesAndAppliesThreshold(t *testing.
 		DailyCheckinEnabled: false,
 	}}}
 
-	// 真实计费 schema（data.Response.Data.Accounts[]，PascalCase 容量计数器）。
+	// 真实计费 schema（data.Response.Data.Accounts[]，PascalCase 容量计数器，
+	// *Precise 定点字段，§4.1 分包解析用例）。
 	meterBody := `{"code":0,"data":{"Response":{"Data":{"TotalCount":1,"TotalDosage":100,"Accounts":[
-		{"AccountId":1,"CapacitySize":100,"CapacityUsed":99,"CapacityRemain":1,"CycleEndTime":"2026-10-13 07:46:09"}
+		{"AccountId":1,"PackageName":"p","CapacityUnit":"credits","CapacitySize":100,"CapacityUsed":99,"CapacityRemain":1,
+		 "CapacitySizePrecise":"100","CapacityRemainPrecise":"1","CycleEndTime":"2026-10-13 07:46:09"}
 	]}}}}`
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
@@ -90,6 +109,7 @@ func TestCodeBuddyQuotaCheckService_RunOnceProbesAndAppliesThreshold(t *testing.
 
 	require.Equal(t, 1, repo.listCalls, "runOnce 必须枚举 codebuddy 账号")
 	require.GreaterOrEqual(t, repo.getCalls, 2, "QueryUsage 与 reload 各调一次 GetByID")
-	require.GreaterOrEqual(t, repo.updateExtra, 1, "QueryUsage 必须落额度快照")
-	require.Equal(t, 99.0, repo.lastExtra[codebuddyCreditUsedPercentKey])
+	require.GreaterOrEqual(t, len(repo.snapshotWrites), 1, "QueryUsage 必须经条件更新写口落额度快照")
+	require.Equal(t, 0, repo.updateExtra, "额度快照不得再走旧 UpdateExtra 写口")
+	require.Equal(t, 99.0, repo.snapshotWrites[0].UsedPercent)
 }

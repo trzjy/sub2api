@@ -18,9 +18,18 @@
   §4.1 SSOT 钉 `codebuddy_credit_error`、quota_error 废弃 → **B4 改名迁移**。
 - **阈值消费**：`account_scheduling_threshold_eval.go`
   `codeBuddyThresholdCandidates` 读 used_percent/reset_at（保留，不动语义）。
-- **调度插入点**：`gateway_scheduling.go` 同优先级候选排序
-  （`filterByMinPriority` / `sortCandidatesForFallback` / 
-  `shuffleWithinSortGroups`，:456-479、:741、:780-798）。
+- **调度插入点（D-2 执行轮实证回写 2026-09-30，权威 §4.2"同分组候选排序加权项"语义不变）**：
+  `openai_account_scheduler.go` `buildOpenAIAccountLoadPlan` 打分循环
+  （codebuddy 平台候选唯一真实选号路径；`gateway_scheduling.go` 对
+  codebuddy 候选**不可达**——路由/入口/Handler 三层证据见 D-2 BLOCKED
+  记录：`routes/gateway.go:29-38` codebuddy 必须走 OpenAI 网关，否则出站
+  缺指纹头 403）。接入形态 = 候选 score × `(1 + k × urgency_norm)`
+  （权威公式 weight = base_weight × (1+k×norm)，base_weight=打分 score；
+  k=0/未启用时乘 1 逐位一致，score 计算路径零改动）。
+  ~~旧写法：`gateway_scheduling.go` 同优先级候选排序
+  （`filterByMinPriority` / `sortCandidatesForFallback` /
+  `shuffleWithinSortGroups`，:456-479、:741、:780-798）~~（事实错误，
+  该链路不承载 codebuddy 选号）。
 - **前端**：`utils/codebuddyCredit.ts` + `AccountUsageCell` + `types/index.ts`；
   错误键现读 `codebuddy_quota_error`。
 - **周期任务**：`CodeBuddyQuotaCheckService`（wire.go，默认 30m）。
@@ -223,14 +232,18 @@ Extra 新键：
 - 错误键名常量即用 `codebuddy_credit_error`（§1 契约；写切换由 B 执行）。
 
 **Card D — §4.2 紧迫度加权调度**
-- 文件：`internal/service/gateway_scheduling.go`（+test）、config 定义、
-  新 `internal/service/codebuddy_urgency.go`（+test：纯函数可全场景单测；
-  谓词**复用 Card A 基础谓词并叠加窗口/新鲜度条件**，不复制第二份）。
+- 文件：config 定义、新 `internal/service/codebuddy_urgency.go`（+test：
+  纯函数可全场景单测；谓词**复用 Card A 基础谓词并叠加窗口/新鲜度条件**，
+  不复制第二份）、**接入点 = `openai_account_scheduler.go`
+  `buildOpenAIAccountLoadPlan`（D-2 实证回写，见上文"调度插入点"）**。
 - 内容：配置项+校验（非法值启动与**热加载**均失败关闭，热加载用例必测）、
-  参与集合三条件、urgency/D/norm 公式、排序加权接入（同优先级组内，接入点
-  前先盘点该 helper 全部调用点，登记无旁路）、k=0 等价性、钉行为测试全清单
+  参与集合三条件、urgency/D/norm 公式、排序加权接入（score ×
+  (1+k×urgency_norm)，k=0 乘 1 逐位一致）、k=0 等价性、钉行为测试全清单
   （§4.2，含裁定配套两用例：Status=3 剔除断言耗尽包 total 不进 D、
   Asia/Shanghai 跨时区边界）。
+- **进度注（2026-09-30）**：纯函数+config+全部单测已由 D-2 轮交付
+  （245 用例 PASS）；接入被 D-2 BLOCKED 顶回（原方案接入点不可达），
+  接入+死 helper 清理由 D-3 轮执行。
 
 **Card E — 错误键原子迁移（唯一后端迁移所有者，含发布闸门）**
   **执行顺序钉死（R3 回修 #5）**：Card E 可与代码开发并行，但**数据库

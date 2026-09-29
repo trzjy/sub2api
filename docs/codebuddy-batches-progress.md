@@ -14,7 +14,7 @@
 | B3a（影子新建入口封死） | ✅ 代码侧闭环 | 早期已合边界冻结 `7f12c556b` + 桥接 `644de818a`；本次收口删除新建分支与前端向导（终审 approve）；证据 `~/.sub2api-acceptance/sub2api-b3a-freeze-20260929/` |
 | B3b（manifest 迁移） | ⬜ 未开始 | B2 → B3a → B3b → B3c 顺序；前置=遥测基线证明 + **B2 生产激活**；删除前引用清单已起建（02 文档，B3b 结束冻结） |
 | B3c | ⬜ 未开始 | |
-| B4 | 🔵 闸①通过（R8 approve，8 轮直连外审收敛），批1 A/D/E 三卡已并行派发 codebuddy | 探针已取证（2026-09-29，cn 站真实账号 HTTP 200，证据 `~/.sub2api-acceptance/sub2api-b4-probe-20260929/`）；§4.1 addendum 已回写（规范单位=credits、数值类型=*Precise→NUMERIC(20,8)、字段映射钉死）；**用户裁定 2026-09-29：expires_at = CycleEndTime（Asia/Shanghai 解析，Status=3 剔除）**——§4.2 冻结完全解除，B4 实现可按七步流程开工 |
+| B4 | 🔵 批1（A/D纯函数/E）已验收提交 `34a12d99a`；批2 三卡并行执行中（D-2 回修接入 / B 写路径 / F 前端） | 闸① approve（R8，8 轮直连外审）；探针证据 `~/.sub2api-acceptance/sub2api-b4-probe-20260929/`；批1 验收回修：删重复 clamp01/死代码 SetUrgencyBoost+validateUrgencyBoost/normalize 静默钳位（禁兜底）、slog 标签对齐新键；Card D 排序接入+全部测试缺失 → D-2 派发补齐；**2026-09-29 用户裁定：全程禁跑全量测试**（Card E 白名单全量条目改定向替代）；264 真实 DB 执行=发布闸门动作待验 |
 
 ## B3a 收口记录（2026-09-29）
 
