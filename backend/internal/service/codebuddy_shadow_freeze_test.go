@@ -38,7 +38,6 @@ func (s *codebuddyShadowFreezeRepoStub) GetByID(_ context.Context, id int64) (*A
 func TestCodebuddyShadowFreeze_CreateShadowRejected(t *testing.T) {
 	svc := &adminServiceImpl{accountRepo: &codebuddyShadowFreezeRepoStub{}}
 	_, err := svc.CreateShadow(context.Background(), 1, ShadowOptions{
-		Model:    "glm-4.5",
 		GroupIDs: []int64{11},
 	})
 	require.Error(t, err)

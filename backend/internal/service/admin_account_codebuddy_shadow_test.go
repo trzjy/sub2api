@@ -58,8 +58,6 @@ func TestCreateShadowCodeBuddy_FrozenRejectsBeforeBinding(t *testing.T) {
 
 	shadow, err := svc.CreateShadow(ctx, parent.ID, ShadowOptions{
 		Name:     "cb-parent:cn:glm-4.5",
-		Model:    "glm-4.5",
-		Platform: PlatformZhipu,
 		GroupIDs: []int64{11, 22, 33},
 	})
 	require.Error(t, err)
@@ -84,9 +82,9 @@ func TestCreateShadowCodeBuddy_ModelDedupUnreachableAfterFreeze(t *testing.T) {
 	svc, _, parent := newCodeBuddyShadowTestService(t)
 
 	attempts := []ShadowOptions{
-		{Model: "glm-4.5", GroupIDs: []int64{11}},              // 首次创建
-		{Model: "glm-4.5", GroupIDs: []int64{22}},              // 同模型重复
-		{Model: "deepseek-v3", Platform: PlatformDeepseek, GroupIDs: []int64{22}}, // 不同模型
+		{GroupIDs: []int64{11}}, // 首次创建
+		{GroupIDs: []int64{22}}, // 同模型重复
+		{GroupIDs: []int64{22}}, // 不同模型
 	}
 	for i, opts := range attempts {
 		shadow, err := svc.CreateShadow(ctx, parent.ID, opts)

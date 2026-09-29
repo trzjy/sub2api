@@ -1061,8 +1061,8 @@ func TestCreateShadowCodeBuddyAutoMappingFrozen(t *testing.T) {
 		name string
 		opts ShadowOptions
 	}{
-		{name: "有官方清单平台", opts: ShadowOptions{Platform: PlatformDeepseek, Model: "deepseek-v4.1-flash", GroupIDs: []int64{1}}},
-		{name: "无官方清单平台", opts: ShadowOptions{Platform: PlatformMiniMax, Model: "minimax-m2", GroupIDs: []int64{1}}},
+		{name: "有官方清单平台", opts: ShadowOptions{GroupIDs: []int64{1}}},
+		{name: "无官方清单平台", opts: ShadowOptions{GroupIDs: []int64{1}}},
 	}
 	for _, a := range attempts {
 		shadow, err := svc.CreateShadow(ctx, parent.ID, a.opts)

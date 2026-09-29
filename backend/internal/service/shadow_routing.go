@@ -1,7 +1,5 @@
 package service
 
-import "strings"
-
 // parentHealthyForShadow 报告影子账号的母账号凭据是否可用(影子据此可被调度)。
 //
 // 非影子账号直接返回 true（不受此检查约束）。
@@ -57,55 +55,3 @@ func defaultSparkShadowModelMapping() map[string]any {
 	return mapping
 }
 
-// defaultCodeBuddyShadowModelMapping 返回 codebuddy 影子创建时的默认 model_mapping。
-//
-// 仅 identity 白名单（2026-09-22 用户拍板，废弃官方名别名路径）：站内模型目录以
-// shadow_model（extra[ShadowModelExtraKey]，如 deepseek-v4.1-flash）为唯一名字，
-// 请求名=出站名=目录名。官方名别名（官方 "deepseek-chat" → 上游 shadow_model）
-// 曾造成全局两套模型名并存，计费/用量/目录混乱，故不再生成。
-// mapping 即调度白名单，下游只认 shadow_model 这一个名字。
-//
-// shadow_model 为空/空白时返回 nil，调用方保持空 mapping=原样透传。
-func defaultCodeBuddyShadowModelMapping(shadowModel string) map[string]any {
-	shadowModel = strings.TrimSpace(shadowModel)
-	if shadowModel == "" {
-		return nil
-	}
-	return map[string]any{shadowModel: shadowModel}
-}
-
-// inferCodeBuddyShadowPlatform 根据上游模型名推断 codebuddy 影子应落入的目标分组平台
-// （一母多影：影子 platform=目标分组平台）。规则（方案 §2.2）：
-//   - deepseek-* → deepseek
-//   - glm-*      → zhipu
-//   - kimi-*     → kimi
-//   - minimax-*  → minimax
-//   - 其余        → other
-//
-// openai 不在推断范围内——codebuddy 影子刻意排除 openai（避免与 OpenAI OAuth 语义混淆）。
-// 调用方在推断后仍应显式拒绝 openai/codebuddy 平台（见 CreateShadow）。
-func inferCodeBuddyShadowPlatform(model string) string {
-	m := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case strings.HasPrefix(m, "deepseek"):
-		return PlatformDeepseek
-	case strings.HasPrefix(m, "glm"):
-		return PlatformZhipu
-	case strings.HasPrefix(m, "kimi"):
-		return PlatformKimi
-	case strings.HasPrefix(m, "minimax"):
-		return PlatformMiniMax
-	default:
-		return PlatformOther
-	}
-}
-
-// shadowTargetsModel 报告 codebuddy 影子是否已服务于指定上游模型（用于一母多影去重）。
-// 模型名以 Extra[ShadowModelExtraKey] 记录；未记录（直接 API 调用未传 model）一律视为不匹配，
-// 由调用方的 opts.Model 空值守卫跳过去重。
-func shadowTargetsModel(shadow *Account, model string) bool {
-	if shadow == nil || strings.TrimSpace(model) == "" {
-		return false
-	}
-	return strings.EqualFold(shadow.GetExtraString(ShadowModelExtraKey), model)
-}

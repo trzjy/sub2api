@@ -92,20 +92,6 @@ export function modelMatchesPlatform(modelId: string, platform: string): boolean
 }
 
 /**
- * 根据 CodeBuddy 上游模型名推断影子应落入的目标分组平台（一母多影）。
- * 规则：deepseek-*→deepseek、glm-*→zhipu、kimi-*→kimi、minimax-*→minimax、其余→other。
- * openai 不在推断范围（codebuddy 影子刻意排除 openai）。
- */
-export function inferCodeBuddyShadowPlatform(model: string): string {
-  const m = model.trim().toLowerCase()
-  if (m.startsWith('deepseek')) return 'deepseek'
-  if (m.startsWith('glm')) return 'zhipu'
-  if (m.startsWith('kimi')) return 'kimi'
-  if (m.startsWith('minimax')) return 'minimax'
-  return 'other'
-}
-
-/**
  * CodeBuddy 站点归一：仅 `intl` 视为国际版，其余（缺失、空串、未知值）一律 `cn`。
  * 与后端 codebuddy_site.go 的「无 site 键即 cn」缺省行为一致。
  */

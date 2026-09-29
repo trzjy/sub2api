@@ -1747,12 +1747,16 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	if err != nil {
 		return nil, fmt.Errorf("get parent account: %w", err)
 	}
-	// CodeBuddy 影子支持 OAuth 与 APIKey 两类母账号：两者都持有上游凭证，
-	// 影子通过 resolveCredentialAccount 透传母账号 credentials（access_token 或 api_key）。
-	isCodeBuddyParent := parent.IsCodeBuddy() && (parent.Type == AccountTypeOAuth || parent.Type == AccountTypeAPIKey)
-	if !parent.IsOpenAIOAuth() && !isCodeBuddyParent {
+	// B3a 冻结：任何 CodeBuddy 影子新建入口统一拒绝（方案 §3.1-2）。存量 codebuddy
+	// 影子运行时保留，只封"新建/转换"路径；spark 影子（OpenAI OAuth 母账号）不受影响。
+	if parent.IsCodeBuddy() {
+		return nil, errCodeBuddyShadowCreationFrozen
+	}
+
+	// 母账号必须是 OpenAI OAuth；codebuddy 母账号已被上面的冻结早退拦截。
+	if !parent.IsOpenAIOAuth() {
 		return nil, infraerrors.New(http.StatusBadRequest, "SHADOW_INVALID_PARENT",
-			"shadow requires an OpenAI OAuth or CodeBuddy (OAuth/APIKey) parent account")
+			"shadow requires an OpenAI OAuth parent account")
 	}
 	// G6:母账号本身不能是影子,否则会建出二级影子——resolveCredentialAccount 只解一层,
 	// 会解析到无凭据的一级影子,进入坏调度/上游失败。
@@ -1761,56 +1765,22 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 			"shadow parent must be a real account, not another shadow")
 	}
 
-	// B3a 冻结：任何 CodeBuddy 影子新建入口统一拒绝（方案 §3.1-2）。存量 codebuddy
-	// 影子运行时保留，只封"新建/转换"路径；spark 影子（isCodeBuddyParent=false）不受影响。
-	if isCodeBuddyParent {
-		return nil, errCodeBuddyShadowCreationFrozen
-	}
+	// 2. 影子维度与目标平台（删除 codebuddy 分支后恒为 spark / openai）。
+	quotaDimension := QuotaDimensionSpark
+	shadowPlatform := PlatformOpenAI
 
-	// 2. 影子维度与目标平台
-	var quotaDimension, shadowPlatform string
-	if isCodeBuddyParent {
-		quotaDimension = QuotaDimensionCodeBuddy
-		// codebuddy 影子 platform=目标分组平台（缺省按模型名推断，向导可改）；
-		// 刻意排除 openai/codebuddy 平台，避免与既有 OAuth/上游语义混淆（方案 §2.2）。
-		shadowPlatform = strings.TrimSpace(opts.Platform)
-		if shadowPlatform == "" {
-			shadowPlatform = inferCodeBuddyShadowPlatform(opts.Model)
-		}
-		if shadowPlatform == PlatformOpenAI || shadowPlatform == PlatformCodeBuddy {
-			return nil, infraerrors.New(http.StatusBadRequest, "CODEBUDDY_SHADOW_PLATFORM_INVALID",
-				"codebuddy shadow platform must be a target provider (deepseek/zhipu/kimi/minimax/other), not openai or codebuddy")
-		}
-	} else {
-		quotaDimension = QuotaDimensionSpark
-		shadowPlatform = PlatformOpenAI
-	}
-
-	// 3. 唯一性校验
+	// 3. 唯一性校验（spark：一母一影）
 	shadows, err := s.accountRepo.ListShadowsByParent(ctx, parentID)
 	if err != nil {
 		return nil, fmt.Errorf("check existing shadows: %w", err)
 	}
-	if !isCodeBuddyParent {
-		// spark：一母一影
-		if len(shadows) > 0 {
-			return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
-				"parent account already has a spark shadow account")
-		}
-	} else if opts.Model != "" {
-		// codebuddy：一母多影，但同一上游模型不重复创建（向导按模型勾选）。
-		for _, sh := range shadows {
-			if shadowTargetsModel(sh, opts.Model) {
-				return nil, infraerrors.New(http.StatusConflict, "CODEBUDDY_SHADOW_MODEL_EXISTS",
-					"parent account already has a codebuddy shadow for model "+opts.Model)
-			}
-		}
+	if len(shadows) > 0 {
+		return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
+			"parent account already has a spark shadow account")
 	}
 
 	// 4. 解析分组。
-	// - spark：未指定 GroupIDs 时优先继承母账号分组，再回落 openai-default（与既有语义一致）。
-	// - codebuddy：影子 platform 已变为目标平台，不能继承 codebuddy 母账号的分组，
-	//   必须显式指定目标分组（向导按平台联动过滤后单选）。
+	// 未指定 GroupIDs 时优先继承母账号分组，再回落 openai-default（与既有语义一致）。
 	groupIDs := opts.GroupIDs
 	if len(groupIDs) > 0 {
 		if s.groupRepo != nil {
@@ -1818,7 +1788,7 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 				return nil, err
 			}
 		}
-	} else if !isCodeBuddyParent {
+	} else {
 		if len(parent.GroupIDs) > 0 {
 			groupIDs = append([]int64(nil), parent.GroupIDs...)
 		} else if s.groupRepo != nil {
@@ -1832,28 +1802,17 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 				}
 			}
 		}
-	} else {
-		return nil, infraerrors.New(http.StatusBadRequest, "CODEBUDDY_SHADOW_REQUIRES_GROUP",
-			"codebuddy shadow requires an explicit target group")
 	}
 	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
 	}
 
 	// 5. 构造影子账号（安全不变量：Credentials 恒不含 auth token）。
-	// name 为空时默认：spark→"<母> (Spark)"；codebuddy→"<母>:<model>"（缺模型时 "<母> (CodeBuddy)"）。
-	// 空 name 会在 ent(name NotEmpty)处变裸 500，故必须给默认；并 rune 截断到 ent MaxLen(100)。
+	// 空 name 默认："<母> (Spark)"；空 name 会在 ent(name NotEmpty)处变裸 500，故必须给默认；
+	// 并 rune 截断到 ent MaxLen(100)。
 	name := strings.TrimSpace(opts.Name)
 	if name == "" {
-		if isCodeBuddyParent {
-			if strings.TrimSpace(opts.Model) != "" {
-				name = parent.Name + ":" + opts.Model
-			} else {
-				name = parent.Name + " (CodeBuddy)"
-			}
-		} else {
-			name = parent.Name + " (Spark)"
-		}
+		name = parent.Name + " (Spark)"
 	}
 	if runes := []rune(name); len(runes) > 100 {
 		name = string(runes[:100])
@@ -1870,25 +1829,10 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		priority = parent.Priority
 	}
 
-	var credentials map[string]any
-	if isCodeBuddyParent {
-		// codebuddy 影子凭证空，运行时透传母账号。model_mapping 由向导创建即自动写入
-		// identity 白名单（{shadow_model: shadow_model}，见 defaultCodeBuddyShadowModelMapping）：
-		// 下游只认 shadow_model 一个名字，请求名=出站名=目录名，全局模型名统一。
-		// ShadowOptions 无 mapping 入参字段（2026-09-22 核对），故不存在「入参优先」分支。
-		credentials = map[string]any{}
-		if mapping := defaultCodeBuddyShadowModelMapping(opts.Model); len(mapping) > 0 {
-			credentials["model_mapping"] = mapping
-		}
-	} else {
-		credentials = map[string]any{"model_mapping": defaultSparkShadowModelMapping()}
-	}
+	credentials := map[string]any{"model_mapping": defaultSparkShadowModelMapping()}
 
-	shadowExtra := map[string]any{}
-	if !isCodeBuddyParent {
-		shadowExtra[openAILongContextBillingEnabledKey] = parent.IsOpenAILongContextBillingEnabled()
-	} else if strings.TrimSpace(opts.Model) != "" {
-		shadowExtra[ShadowModelExtraKey] = opts.Model
+	shadowExtra := map[string]any{
+		openAILongContextBillingEnabledKey: parent.IsOpenAILongContextBillingEnabled(),
 	}
 
 	shadow := &Account{
@@ -1910,17 +1854,9 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 	// 唯一约束。复查确认确为"已存在"竞态时返回结构化 409 而非裸 500——外审 A/P1。
 	if err := s.accountRepo.Create(ctx, shadow); err != nil {
 		if existing, qerr := s.accountRepo.ListShadowsByParent(ctx, parentID); qerr == nil {
-			if !isCodeBuddyParent && len(existing) > 0 {
+			if len(existing) > 0 {
 				return nil, infraerrors.New(http.StatusConflict, "SPARK_SHADOW_ALREADY_EXISTS",
 					"parent account already has a spark shadow account")
-			}
-			if isCodeBuddyParent && opts.Model != "" {
-				for _, sh := range existing {
-					if shadowTargetsModel(sh, opts.Model) {
-						return nil, infraerrors.New(http.StatusConflict, "CODEBUDDY_SHADOW_MODEL_EXISTS",
-							"parent account already has a codebuddy shadow for model "+opts.Model)
-					}
-				}
 			}
 		}
 		return nil, fmt.Errorf("create shadow: %w", err)
