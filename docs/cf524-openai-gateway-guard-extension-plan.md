@@ -1,6 +1,8 @@
-# CF524 覆盖扩展方案 v1.0：OpenAIGateway 家族接入首字节护栏 + 流式心跳 + 观测
+# CF524 覆盖扩展方案 v1.1：OpenAIGateway 家族接入首字节护栏 + 流式心跳 + 观测
 
-> 状态：v1.0 待方案审。2026-09-30 用户裁定立项：扩大 CF524 覆盖面至 OpenAIGateway
+> 状态：v1.1——方案审 R1 三项全采纳（compact 互斥改消费真实安装状态/快照闭包矩阵
+> 可执行断言/验收补 502 簇与流量分母），待派发。2026-09-30 用户裁定立项：扩大 CF524
+> 覆盖面至 OpenAIGateway
 > 处理器家族，语义与主方案（docs/cf524-upstream-hang-mitigation-plan.md v8.3，已部署
 > a099982c7）完全同源——D1 首字节护栏（硬边界 fail-closed）+ D2 流式心跳（可选优化，
 > hb=0 合法）+ G5 观测三件套。本方案不引入第二套机制、第二套配置、第二套事件 schema。
@@ -71,12 +73,18 @@ sendCCUpstreamRequest（→doOpenAIUpstream）。**guard 收口在 doOpenAIUpstr
 `cf524InstallUpstreamBudgetAndHeartbeat` 语义；**安装条件与主方案逐字相同**：guardSeconds<=0
 不安装、非流式只装快照、Flush 缺失失败关闭记 warn）。
 
-**compact 互斥（本方案唯一新增判定，必须外审挑战）**：Responses 入口已启动 compact
-keepalive（:454）的请求（`openAICompactClientWantsStream(c)` 且 compact 标记）**不再安装
-心跳 owner**（快照仍装，护栏仍生效）——同一请求同一时刻只允许一个拍频机制写 writer，
-避免双 ticker 数据竞争/字节交错。compact 请求的 keepalive 是已验收机制（#3887），
-不替换、不吸收（旧链归零义务不触发：其职责是 compact unary 等待，与本方案 header-wait
-窗口不重叠）。
+**compact 互斥（本方案唯一新增判定，方案审 R1 P1 修正口径）**：互斥判定**只消费
+compact keepalive 的真实安装状态**，禁止在安装 helper 里重复推导
+`openAICompactClientWantsStream(c)`/compact 标记（重复推导与 :454 启动点条件/顺序
+漂移即双 ticker 或双缺失）。实现：`startOpenAISSEKeepalive` 已把心跳器存入 gin
+context（key `openai_compact_sse_keepalive`，openai_compact_sse_keepalive.go:12）——
+新 helper 从该 key 读安装状态：已启动 → 只装快照不装心跳 owner；未启动 → 正常安装。
+:454 启动点相对安装 helper 的调用顺序在实现时核实并钉死（helper 消费的状态必须
+晚于启动点产生；若顺序相反，以启动点前置为准）。回归测试三态：已安装（不装心跳）、
+未安装（正常装）、边界（compact 标记但 keepalive 因 interval<=0 等 no-op 退出 →
+按未安装处理，状态 key 不存在即事实源）。compact 请求的 keepalive 是已验收机制
+（#3887），不替换、不吸收（旧链归零义务不触发：其职责是 compact unary 等待，与本方案
+header-wait 窗口不重叠）。
 
 ### 3.2 消费点（收口于 doOpenAIUpstream 一处）
 `doOpenAIUpstream` 重命名内层实现，新外层包装（新文件
@@ -116,12 +124,23 @@ watchdog 未 fired 不分类。**两机制不改一行，只定义先后裁决�
 - CC :337、Messages :1455 的裸 `Size() != before` 消费点同批改造；改造前后对无心跳
   请求逐一等价（回归用例钉死）。
 
-### 3.4 观测与验收
+### 3.4 闭包证明、观测与验收
+- **快照闭包矩阵（方案审 R1 P1，可执行断言而非文字结论）**：P1 卡交付定向测试，
+  对 route→handler→forward 全调用点矩阵断言——三入口（ChatCompletions/Responses/
+  Messages）及其全部内部路径（raw/cc/native/passthrough 经 doOpenAIUpstream 的 8+1
+  执行点）请求 context **必有快照**；非目标调用方（embeddings/count_tokens/
+  alpha_search/codebuddy forward/全部既有测试桩）**必无快照**（护栏 no-op 可证）。
+  矩阵即"无快照透传不会静默绕过目标请求"的验收证据。
 - 事件、字段、判别器与主方案完全一致；验收卡沿用
   docs/cf524-acceptance-checklist.md §2 **修正后**命令（正则容忍冒号后空格，
   407fe204c）；新增 OpenAIGateway 家族挂载矩阵章节（3 入口 × 形态）。
-- 生产判收不变：墙簇 499 两簇（124.9-125.1s / 119.9-120.1s）= 0；每条 guard 事件
-  request_id 可追终态。
+- **生产判收（方案审 R1 P2 扩充口径，48h 窗按 request_id/平台维度统计）**：
+  ① 墙簇 499 两簇（124.9-125.1s / 119.9-120.1s）= 0；
+  ② **502@124.9-125.1s 簇 = 0**（现状证据含 502@124.99s 样本，仅看 499 会假阴性）；
+  ③ 流量分母：OpenAIGateway 家族请求总数、guard/heartbeat/headers 事件计数、
+     各 outcome 终态计数同窗并列报告——分母塌缩（流量为 0）不构成判收通过；
+  ④ 全量 499 延迟分布同窗留档（不只看两簇，防新簇漂移）；
+  ⑤ 每条 guard 事件 request_id 可追终态。
 
 ## 4. 踩坑清单（历次外审实证，本方案硬约束——执行/复审逐条对照）
 
@@ -149,7 +168,8 @@ watchdog 未 fired 不分类。**两机制不改一行，只定义先后裁决�
 预计边界（执行派发按文件+测试对，≤5 并行）：
 - P1 service 层：`openai_upstream_guard.go`（新，包装+护栏+心跳消费+观测单点）+
   `openai_plugin_transport.go`（内层改名）+ `upstream_first_byte_guard.go`（如需导出
-  判定共享）——**单卡串行先行**（P2/P3 依赖其符号）；
+  判定共享）+ **快照闭包矩阵测试（§3.4）**——**单卡串行先行**（P2/P3 依赖其符号；
+  闭包矩阵同时是 P2 安装点的验收前提）；
 - P2 三个 handler 安装点+防线统一：`openai_chat_completions.go`、
   `openai_gateway_handler.go`（Responses+Messages 两入口同文件，同卡）、共享判定函数
   落点——P2a（CC）/P2b（gateway_handler 双入口）可并行（无共享文件）；
