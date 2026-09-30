@@ -1,4 +1,4 @@
-# CF 524 上游悬挂治理方案 v8.2（首字节护栏 + 流式心跳保活）
+# CF 524 上游悬挂治理方案 v8.3（首字节护栏 + 流式心跳保活；v8.3=外审P1防线基线增量口径）
 
 > 状态：v8.1/R8——R7 四项闭合确认审仅剩判别器一致性、快照实现所有者
 > 两处 P1 与状态行残留，v8.2 全部修正后进入派发。2026-09-30 用户裁定：采用方案 A
@@ -23,7 +23,8 @@
 > `c.Writer.Size() != writerSizeBeforeForward` 判"已写语义内容禁止 failover"，
 > 心跳 SSE 头+注释帧会改变 Size 使 guard 换号被误判耗尽——需加与
 > openAIForwardMayFailover 等价的例外：**心跳已提交字节（flag 记忆）不算
-> 语义写出**，判定改为 `Size() > heartbeatBaseSize`；gateway_handler.go 与
+> 语义写出**，判定改为**基线增量严格相等**（v8.3，外审 P1 修复后口径，
+> 见 L195 一带）；gateway_handler.go 与
 > 两个 CC/responses 消费 handler 因此进入 G2 文件边界。
 > v5→v6：确认审 R5 5 项全采纳——①护栏取消边界仅覆盖响应头等待（收到响应头
 > 即解除，body 读取永不在 deadline 内，"首字节后零改动"可兑现）；②心跳已提交
@@ -194,9 +195,12 @@
 - **心跳 vs 写后禁 failover 防线（v5 闭合）**：消费循环既有防线
   `c.Writer.Size() != writerSizeBeforeForward → 禁止 failover`（防流拼接腐化）
   会把心跳注释帧误判为语义写出。等价复用 openAIForwardMayFailover 的既有
-  思路：**注释帧非语义**——心跳组件记录已提交字节基线（flag + baseSize），
-  防线判定改为 `Size() > max(writerSizeBeforeForward, heartbeatBaseSize)`；
-  心跳未启动时判定与现状完全一致。三个消费 handler
+  思路：**注释帧非语义**——防线判定为**基线增量严格相等**（v8.3 外审 P1
+  修复口径，取代 v5 的 `Size() > max(before, heartbeatBaseSize)`：后者在
+  心跳帧先于 writerSizeBeforeForward 落盘时会把前置帧重复计入，漏过窗口 =
+  前置心跳字节数）：捕获 `writerSizeBeforeForward` 同点捕获心跳已提交基线
+  `hbCommittedBaseline`，判定 `(Size()-before) == (CommittedBytes()-baseline)`；
+  心跳未启动时退化为既有 `Size() == before`（同一路径，无第二分支）。三个消费 handler
   （gateway_handler.go / gateway_handler_chat_completions.go /
   gateway_handler_responses.go）各改一处判定 + 用例钉死（心跳已启动 →
   guard 超时仍 FailoverContinue 换号；真实语义流已写出 → 仍禁止 failover）。
@@ -223,7 +227,7 @@
 | 卡 | 文件 | 内容 | 依赖 |
 |---|---|---|---|
 | G1 | internal/service/{upstream_first_byte_guard.go(新), openai_gateway_forward.go, gateway_forward_as_chat_completions.go, upstream_first_byte_error.go(新)} |**含请求级预算快照类型与 context 读写 helper（v8.2：`RequestBudgetSnapshot`{guard, heartbeat delay, 绝对截止, 入口单调起点}——唯一创建入口在 G2 的 handler 层安装点，G1 只交付类型与 helper）** | headerGuard 泛化为共享组件（**旧链归零（合同 §4）：登记旧 openAIFirstOutputHeaderGuard 入口与全部调用点 → 迁移共享实现 → 删除被替代旧类型/构造器 → 仓库级符号残留扫描 + 定向测试证明无残留**；OpenAI handler 识别/计数/耗尽机器零改动）+ 平台无关 newUpstreamFirstByteTimeoutError（**ShouldRetryNextAccount 由剩余预算 <5s 判定，零新计数器（v5）**）+ 请求入口不可变截止时间 + 挂点 3 + 总预算（流式 2×guard+10s / 非流式 guard+25s，前置延迟>5s 用例）+ wireBody 一致性 + 单测 | 方案 v5 定稿 |
-| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} + internal/handler/{gateway_handler.go, gateway_handler_chat_completions.go, gateway_handler_responses.go} | 挂点 1/2/4 接护栏 + 接心跳（G3 组件）+ **三消费 handler 心跳基线防线例外（v5：注释帧非语义，`Size()>max(before,heartbeatBase)`，未启动时判定不变）** + **入口安装点唯一所有者（v8.2）：在三个消费 handler 的认证/鉴权完成后、并发槽位等待与账号选择前，用 G1 快照类型创建请求级预算快照并安装请求级心跳 owner（各一处，唯一顺序；forward/attempt 层禁止重初始化计时）；前置延迟+换号+跨热加载边界测试为交付门槛** + 单测（claude-sonnet-5 两形态回放、换号与预算耗尽分支、防线例外两分支） | G1 + G3 |
+| G2 | internal/service/{gateway_forward.go, gateway_anthropic_passthrough.go, gateway_forward_as_responses.go} + internal/handler/{gateway_handler.go, gateway_handler_chat_completions.go, gateway_handler_responses.go} | 挂点 1/2/4 接护栏 + 接心跳（G3 组件）+ **三消费 handler 心跳基线防线例外（v8.3：注释帧非语义，基线增量严格相等 `(Size()-before)==(Committed()-baseline)`，未启动时判定不变）** + **入口安装点唯一所有者（v8.2）：在三个消费 handler 的认证/鉴权完成后、并发槽位等待与账号选择前，用 G1 快照类型创建请求级预算快照并安装请求级心跳 owner（各一处，唯一顺序；forward/attempt 层禁止重初始化计时）；前置延迟+换号+跨热加载边界测试为交付门槛** + 单测（claude-sonnet-5 两形态回放、换号与预算耗尽分支、防线例外两分支） | G1 + G3 |
 | G3 | internal/service/upstream_heartbeat.go(新) + 组件单测 | **仅心跳组件交付，不做挂点接入（R3 P2-5 闭合：挂点文件唯一所有者=G2，消除并行写冲突）**：晚触发 + Flush 契约（初始头+每帧 Flush，无 Flush 能力失败关闭）+ stop-and-wait 单一 writer 所有权 + 唯一线性化优先级 + 已提交字节基线查询（供 G2 防线例外）+ 组件级单测 | G1 |
 | G4 | internal/config/config.go + config.example.yaml + 生产 config.yaml 变更单 | 两个新键 + Validate（guard [30,90] 失败关闭无禁用路径；heartbeat [0]∪[5,60]；**交叉校验 heartbeat>0 ⇒ heartbeat<guard**；热加载候选整体校验零部分生效）+ 文档注释 | 方案 v5 定稿 |
 | G5 | docs/ + 验收卡 | 覆盖矩阵（五挂点 × 63-victim 全形态含 anthropic 两形态）+ 生产观测：稳定事件 `gateway_first_byte_guard_triggered` / `gateway_upstream_heartbeat_started`，outcome 枚举 + 终态关联 + request_id 端到端串联 | 全部 |
