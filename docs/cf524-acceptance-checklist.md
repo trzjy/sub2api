@@ -67,10 +67,12 @@ docker logs sub2api 2>&1 | grep -c 'gateway_first_byte_guard_triggered'
 docker logs sub2api 2>&1 | grep -c 'gateway_upstream_heartbeat_started'
 
 # 墙簇 499 计数（既有访问日志：component=http.access，status_code=499，latency_ms 分簇）
+# 注意：生产日志实际格式为 `"latency_ms": 124907`（冒号后带空格）、`"status_code": 499`，
+# 正则必须容忍空格（2026-09-30 实测修正：无空格版本漏配全部真实撞墙样本，读数为假 0）。
 docker logs sub2api 2>&1 \
   | grep '"http request completed"' \
-  | grep '"status_code":499' \
-  | grep -E '"latency_ms":(12[45][0-9]{3}|119[0-9]{3}|120[0-9]{3}|121[0-9]{3})'
+  | grep '"status_code": *499' \
+  | grep -E '"latency_ms": *(12[45][0-9]{3}|119[0-9]{3}|120[0-9]{3}|121[0-9]{3})'
 ```
 
 ### 2.2 判别器（零新事件流）
