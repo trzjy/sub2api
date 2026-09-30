@@ -13,6 +13,10 @@ OpenAIGateway 家族（kimi/zhipu/deepseek/minimax/codebuddy/other/openai/grok�
 1. **`backend/internal/service/openai_plugin_transport.go`**：`doOpenAIUpstream` 现实现
    改名为 `doOpenAIUpstreamInner`（私有）；新 `doOpenAIUpstream` 外层包装（签名加
    `c *gin.Context` 首参）：
+   > **验收标注（2026-09-30，主会话采纳偏差）**：实际落地未采用字面改名——`doOpenAIUpstream`
+   > 原签名保留，新增同语义包装 `doOpenAIUpstreamWithGuard(c, ...)` 供 8 个执行点调用。
+   > 原因：字面改名会破坏清单外 5 个 web_* 调用点 + 3 个既有测试的编译，与"变更严格限于
+   > 文件清单"硬约束冲突。语义对齐任务 1 全部要求，见报告 §四。
    - 从 `clientCtx` 取 `RequestBudgetSnapshotFromContext` / `UpstreamHeartbeatFromContext`；
      **无快照 → 原样透传内层实现**（零行为变化，这是无兜底契约：不是降级分支，
      是"未安装快照的调用方不在本方案覆盖面"）。

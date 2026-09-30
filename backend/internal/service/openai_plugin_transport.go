@@ -3,6 +3,12 @@ package service
 import (
 	"context"
 	"net/http"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
@@ -65,6 +71,121 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(clientCtx context.Context, reque
 		return resp, err
 	}
 	resp.Body = &openAICNFirstByteTimeoutBody{ReadCloser: resp.Body, w: watchdog}
+	return resp, nil
+}
+
+// doOpenAIUpstreamWithGuard 是 doOpenAIUpstream 的护栏收口包装（CF524 D1 + D2 + G5，
+// 仅 OpenAI OAuth 家族 8 个上游执行点经此出网；handler 安装点属 P2，本卡只交付消费端）。
+//
+// 收口语义严格同源主方案 cf524ExecuteUpstreamWithGuard：
+//   - 无快照 → 原样透传内层 doOpenAIUpstream（零行为变化，这是无兜底契约：未安装快照的
+//     调用方——embeddings/count_tokens/alpha_search/测试桩——不在本方案覆盖面，护栏零介入）。
+//   - 有快照：窗口耗尽前不发送新尝试的硬边界——剩余 < 最小可行窗口(5s) 直接返回
+//     newUpstreamFirstByteTimeoutError（不向上游发请求），交由既有 FailoverExhausted 路径。
+//     否则以 AttemptWindow 构建护栏，护栏 reqCtx 写入上游请求 context：窗口耗尽取消 reqCtx
+//     中断 header 等待；body 读取不在 deadline 内（护栏取消边界仅覆盖响应头等待）。
+//   - 心跳 owner 存在（仅流式安装）时 Resume（失败仅记 warn，零语义影响——心跳是可选
+//     优化，不终止请求）；三分支与主方案逐条对应：护栏超时 → 停表+心跳 stop-and-wait →
+//     返回护栏超时错误；传输错误 → 停表+停拍上抛；响应头到达 → 停表+心跳 OnUpstreamHeaderArrived
+//     +Stop（晚到契约三分支顺序）→ 返回 resp。
+//   - G5 观测单点在本函数内发射（obs.ctx 必须是未包护栏 reqCtx 的原始 clientCtx，否则护栏
+//     超时被误判 client_gone）；tracker 存 gin context（c.Set）。
+//
+// 命名返回值（踩坑清单 #4）：调用方 defer 读 err 安全。CN watchdog 在内层实现内部零改动；
+// 护栏只在自己 fired 时介入（#14）：watchdog 先 fired → 内层返回既有内部超时分类，本层
+// guard.TimedOut()=false 不介入。
+func (s *OpenAIGatewayService) doOpenAIUpstreamWithGuard(c *gin.Context, clientCtx context.Context, request *http.Request, proxyURL string, account *Account) (resp *http.Response, err error) {
+	// G2a 收口 1：从请求 context 取预算快照与心跳 owner（消费端只读，禁止重建）。
+	snapshot, hasSnapshot := RequestBudgetSnapshotFromContext(clientCtx)
+	hb, _ := UpstreamHeartbeatFromContext(clientCtx)
+	// 无快照即原样透传内层实现（未安装快照的调用方零行为变化，无兜底分支）。
+	if !hasSnapshot {
+		return s.doOpenAIUpstream(clientCtx, request, proxyURL, account)
+	}
+	// D1 最小可行窗口：剩余预算 < 5s 视为预算耗尽，不发请求直接返回护栏超时错误，
+	// 交由 handler 既有 FailoverExhausted 路径（ShouldRetryNextAccount()=false）。
+	remaining := snapshot.RemainingBudget(time.Now())
+	if remaining < upstreamFirstByteMinViableWindow {
+		return nil, newUpstreamFirstByteTimeoutError(remaining)
+	}
+	// 以不可变截止时间取剩余窗口构建护栏（换号不重置）；护栏 reqCtx 写入上游请求
+	// context，窗口耗尽取消 reqCtx 中断 header 等待。
+	window := snapshot.AttemptWindow(time.Now())
+	guard, upstreamCtx := newUpstreamFirstByteGuard(clientCtx, window)
+
+	// G5 观测单点载体：ctx 必须是原始 clientCtx（未包护栏 reqCtx），避免护栏取消误判
+	// client_gone；c 用于 tracker 落 gin context 域。stream 以 hb owner 存在作为流式代理
+	// （owner 仅 clientStream 且 hb>0 时安装）。
+	obs := &cf524GuardObservation{
+		c:         c,
+		ctx:       clientCtx,
+		platform:  account.Platform,
+		stream:    hb != nil,
+		attempt:   1,
+		startedAt: time.Now(),
+		snapshot:  snapshot,
+	}
+
+	// D2 心跳 Resume（owner 存在且护栏有效时；流式由 owner 安装契约保证）。失败仅记
+	// warn 日志（path/request_id/account_id），继续既有流程，零语义变化。
+	if hb != nil && guard != nil {
+		if resumeErr := hb.Resume(); resumeErr != nil {
+			requestID, _ := request.Context().Value(ctxkey.RequestID).(string)
+			logger.FromContext(request.Context()).Warn("gateway.cf524_heartbeat_resume_failed",
+				zap.String("path", request.URL.Path),
+				zap.String("request_id", requestID),
+				zap.Int64("account_id", account.ID),
+				zap.Error(resumeErr),
+			)
+		}
+	}
+
+	// 护栏 reqCtx 写入上游请求 context：非 CN 路径 Do(request) 直接继承该 ctx 取消；
+	// CN 路径内层 watchdog 自 request.Context()(=upstreamCtx) 派生 wctx，guard 取消同样
+	// 抵达 Do。clientCtx（原始）仍作为内层 watchdog 的取消裁决信号，不受 guard 取消影响。
+	guardedReq := request.WithContext(upstreamCtx)
+	resp, err = s.doOpenAIUpstream(clientCtx, guardedReq, proxyURL, account)
+
+	// 三分支（对照 gateway_forward.go:990-1035 逐条同型）。
+	if guard != nil && guard.TimedOut() {
+		// 状态机优先级②（D2）：guard 终态先于一切 → 心跳 OnGuardDecided + stop-and-wait
+		// 后返回 failover 错误，绝不先于心跳停等就换号。
+		if hb != nil {
+			hb.OnGuardDecided()
+			hb.Stop()
+		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		obs.noteHeartbeatIfCommitted(hb)
+		obs.observeGuardTriggered()
+		return nil, newUpstreamFirstByteTimeoutError(snapshot.RemainingBudget(time.Now()))
+	}
+	if err != nil {
+		// 真实传输错误：停表（零取消收尾）+ 心跳 stop-and-wait，避免泄漏 goroutine，随后上抛。
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if guard != nil {
+			guard.Stop()
+		}
+		if hb != nil {
+			hb.Stop()
+		}
+		obs.noteHeartbeatIfCommitted(hb)
+		return nil, err
+	}
+	// 响应头到达（未超时）：护栏停表零取消；心跳按晚到契约裁决（Rejected/AfterCommit），
+	// 单一 writer 所有权：交还 writer 前必须 stop-and-wait。
+	if guard != nil {
+		guard.Stop()
+	}
+	if hb != nil {
+		hb.OnUpstreamHeaderArrived()
+		hb.Stop()
+	}
+	obs.noteHeartbeatIfCommitted(hb)
+	obs.markUpstreamHeadersReceived()
 	return resp, nil
 }
 
