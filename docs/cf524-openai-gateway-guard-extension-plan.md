@@ -1,7 +1,7 @@
-# CF524 覆盖扩展方案 v1.1：OpenAIGateway 家族接入首字节护栏 + 流式心跳 + 观测
+# CF524 覆盖扩展方案 v1.2：OpenAIGateway 家族接入首字节护栏 + 流式心跳 + 观测
 
-> 状态：v1.1——方案审 R1 三项全采纳（compact 互斥改消费真实安装状态/快照闭包矩阵
-> 可执行断言/验收补 502 簇与流量分母），待派发。2026-09-30 用户裁定立项：扩大 CF524
+> 状态：v1.2——确认审 R2 P1 采纳：compact 启动点与安装 helper 调用顺序钉死为不变量
+> （v1.2 唯一变更，见 §3.1），待终确认审。2026-09-30 用户裁定立项：扩大 CF524
 > 覆盖面至 OpenAIGateway
 > 处理器家族，语义与主方案（docs/cf524-upstream-hang-mitigation-plan.md v8.3，已部署
 > a099982c7）完全同源——D1 首字节护栏（硬边界 fail-closed）+ D2 流式心跳（可选优化，
@@ -73,18 +73,20 @@ sendCCUpstreamRequest（→doOpenAIUpstream）。**guard 收口在 doOpenAIUpstr
 `cf524InstallUpstreamBudgetAndHeartbeat` 语义；**安装条件与主方案逐字相同**：guardSeconds<=0
 不安装、非流式只装快照、Flush 缺失失败关闭记 warn）。
 
-**compact 互斥（本方案唯一新增判定，方案审 R1 P1 修正口径）**：互斥判定**只消费
-compact keepalive 的真实安装状态**，禁止在安装 helper 里重复推导
-`openAICompactClientWantsStream(c)`/compact 标记（重复推导与 :454 启动点条件/顺序
-漂移即双 ticker 或双缺失）。实现：`startOpenAISSEKeepalive` 已把心跳器存入 gin
-context（key `openai_compact_sse_keepalive`，openai_compact_sse_keepalive.go:12）——
-新 helper 从该 key 读安装状态：已启动 → 只装快照不装心跳 owner；未启动 → 正常安装。
-:454 启动点相对安装 helper 的调用顺序在实现时核实并钉死（helper 消费的状态必须
-晚于启动点产生；若顺序相反，以启动点前置为准）。回归测试三态：已安装（不装心跳）、
-未安装（正常装）、边界（compact 标记但 keepalive 因 interval<=0 等 no-op 退出 →
-按未安装处理，状态 key 不存在即事实源）。compact 请求的 keepalive 是已验收机制
-（#3887），不替换、不吸收（旧链归零义务不触发：其职责是 compact unary 等待，与本方案
-header-wait 窗口不重叠）。
+**compact 互斥（本方案唯一新增判定，方案审 R1 P1 + 确认审 R2 P1 修正口径）**：
+互斥判定**只消费 compact keepalive 的真实安装状态**，禁止在安装 helper 里重复推导
+`openAICompactClientWantsStream(c)`/compact 标记。**调用顺序是钉死的不变量，不是
+实现期分支**（确认审 R2）：Responses 入口中，`service.StartOpenAICompactSSEKeepalive`
+（openai_gateway_handler.go:454）**必须先于**安装 helper 执行——helper 的调用点固定
+放在 :454 之后、选号循环之前（仍在认证后；CC/Messages 链无 compact keepalive，状态
+key 恒不存在 → 正常安装）。不变量：**helper 执行时状态 key 必已写入**（含 no-op 退出
+情形：no-op 不写 key 即事实源为"未安装"）。回归测试必须断言：①调用顺序（ Responses
+链 keepalive start 先于 helper）；②最终同请求至多一个拍频 owner（已安装 → 无心跳
+owner；未安装/no-op → 恰一个心跳 owner）。实现细节：`startOpenAISSEKeepalive` 已把
+心跳器存入 gin context（key `openai_compact_sse_keepalive`，
+openai_compact_sse_keepalive.go:12），helper 从该 key 读。compact 请求的 keepalive
+是已验收机制（#3887），不替换、不吸收（旧链归零义务不触发：其职责是 compact unary
+等待，与本方案 header-wait 窗口不重叠）。
 
 ### 3.2 消费点（收口于 doOpenAIUpstream 一处）
 `doOpenAIUpstream` 重命名内层实现，新外层包装（新文件
