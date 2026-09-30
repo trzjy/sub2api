@@ -1,10 +1,15 @@
-# 派发单 G5：CF524 可观测事件 + 覆盖矩阵验收卡
+# 派发单 G5：CF524 可观测事件 + 覆盖矩阵验收卡（v2）
 
-权威方案：`docs/cf524-upstream-hang-mitigation-plan.md` **v8.2（以仓库最新版为准）**§4 验收。前置：G1-G3 全部交付。
+权威方案：`docs/cf524-upstream-hang-mitigation-plan.md` **v8.2（以仓库最新版为准）**§4 验收。前置：G1-G2b 全部交付（提交 530282244），**以树中实际签名为准**（共享执行器 `cf524ExecuteUpstreamWithGuard`、心跳组件 `UpstreamHeartbeat`、快照 helper、handler 安装点 `cf524InstallUpstreamBudgetAndHeartbeat`）。
+
+## v2 修订（主会话钉死边界）
+1. **埋点范围 = 四个非 OpenAI 挂点**：`gateway_forward.go`、`gateway_anthropic_passthrough.go`、`gateway_forward_as_responses.go`、`gateway_forward_as_chat_completions.go`（事件统一发在共享执行器 `cf524ExecuteUpstreamWithGuard` 及其调用方即可，优先单点埋）。**`openai_gateway_forward.go` 零触碰**——OpenAI 原生路径零变化（既有 `TestOpenAIPathNoSharedFirstByteErrorConstructor` 等反向测试必须保持绿），OpenAI 路径不发任何新事件。
+2. **`upstream_headers_received_ms` 判别器字段**：加在既有请求级完成/访问日志上（`requestLogger` 链，`reqLog` 已含 request_id），时间戳来源 = 挂点收到上游响应头时刻（可经 context helper 或共享执行器返回值传递，选最小 diff）。**禁止新建事件流**（v8.1 收敛）。
+3. 允许改动文件（最小 diff）：四个挂点文件 + 共享执行器所在文件 + 必要的 service context helper + handler 完成日志一行字段 + 新建 `docs/cf524-acceptance-checklist.md` + 对应 `_test.go`。**三消费 handler 的消费机器（failover/exhausted 分支）零改动**（G2b 已交付，只在完成日志处加一个字段）。
 
 ## 硬约束
-- 改动面：挂点 1-5 处各加事件埋点（最小 diff）；新增验收文档 `docs/cf524-acceptance-checklist.md`；禁止 git 写操作；禁止全量测试。
-- 验证白名单：`go build ./...`、`go vet ./internal/service/`、`go test -tags unit -run <定向> ./internal/service/`。
+- 上表允许文件之外零改动；openai 系文件零触碰；禁止 git 写操作；禁止全量测试。
+- 验证白名单：`cd backend && GOFLAGS=-buildvcs=false go build ./...`、`GOFLAGS=-buildvcs=false go vet ./internal/service/ ./internal/handler/`、`GOFLAGS=-buildvcs=false go test -tags unit -count=1 -run <定向> ./internal/service/ ./internal/handler/`（**必须带 -tags unit**）。
 
 ## 任务
 1. **两条稳定事件**（slog，全部挂点统一）：
