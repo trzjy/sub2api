@@ -89,6 +89,9 @@ openai_compact_sse_keepalive.go:12），helper 从该 key 读。compact 请求�
 等待，与本方案 header-wait 窗口不重叠）。
 
 ### 3.2 消费点（收口于 doOpenAIUpstream 一处）
+**c 参数穿透（勘踏补充，机械改动）**：G5 tracker 存 gin context（cf524_observation.go:94
+`c.Set`），观测单点需要 `*gin.Context`；`doOpenAIUpstream` 现签名无 c——8 个调用点
+（1.2 清单）机械加传 c 参（各一行透传，调用方作用域内现成有 c），观测基建零改动。
 `doOpenAIUpstream` 重命名内层实现，新外层包装（新文件
 `service/openai_upstream_guard.go`）按序执行：
 1. 从 ctx 取快照与 hb owner（`RequestBudgetSnapshotFromContext` /
@@ -169,9 +172,11 @@ watchdog 未 fired 不分类。**两机制不改一行，只定义先后裁决�
 
 预计边界（执行派发按文件+测试对，≤5 并行）：
 - P1 service 层：`openai_upstream_guard.go`（新，包装+护栏+心跳消费+观测单点）+
-  `openai_plugin_transport.go`（内层改名）+ `upstream_first_byte_guard.go`（如需导出
-  判定共享）+ **快照闭包矩阵测试（§3.4）**——**单卡串行先行**（P2/P3 依赖其符号；
-  闭包矩阵同时是 P2 安装点的验收前提）；
+  `openai_plugin_transport.go`（内层改名）+ 8 个执行点文件**仅机械 c 参穿透**（§3.2，
+  各一行，不改逻辑）+ `upstream_first_byte_guard.go`（如需导出判定共享）——**单卡
+  串行先行**（P2/P3 依赖其符号）；快照闭包矩阵的目标侧断言随 P2a/P2b 各自入口交付，
+  P1 交付非目标侧断言（embeddings/count_tokens/alpha_search/测试桩必无快照、包装层
+  透传等价）；
 - P2 三个 handler 安装点+防线统一：`openai_chat_completions.go`、
   `openai_gateway_handler.go`（Responses+Messages 两入口同文件，同卡）、共享判定函数
   落点——P2a（CC）/P2b（gateway_handler 双入口）可并行（无共享文件）；
