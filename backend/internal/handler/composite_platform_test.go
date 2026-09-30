@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"errors"
 	"net/http/httptest"
 	"testing"
 
@@ -11,13 +13,42 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// compositeGateAccountRepo 是 handler 门禁测试用的 accountRepo stub，
+// 仅实现 ListSchedulableByGroupID（门禁三级解析的 ownership 层级所依赖）。
+type compositeGateAccountRepo struct {
+	service.AccountRepository
+	accounts []service.Account
+	err      error
+}
+
+func (r *compositeGateAccountRepo) ListSchedulableByGroupID(ctx context.Context, groupID int64) ([]service.Account, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.accounts, nil
+}
+
+// newCompositeGateGatewayService 以最小结构构造 *service.GatewayService：accountRepo
+// stub + ownership 闭包（由 NewGatewayService 自动将 resolver 的 modelOwnershipResolver
+// 接到 svc.resolveCompositeModelOwnership）。resolver 的 repo 传 nil，使显式路由层级
+// 跳过、仅走 ownership 与检测器，与线上「账号 model_mapping 独有模型」场景一致。
+func newCompositeGateGatewayService(t *testing.T, accounts []service.Account, repoErr error) *service.GatewayService {
+	t.Helper()
+	repo := &compositeGateAccountRepo{accounts: accounts, err: repoErr}
+	resolver := service.NewCompositeRouteResolver(nil)
+	return service.NewGatewayService(
+		repo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, resolver, nil, nil,
+	)
+}
+
 func TestCompositeTargetPlatformAllowedResolvesKnownAllowedModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/v1/embeddings", nil)
 	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+	svc := newCompositeGateGatewayService(t, nil, nil)
 
-	require.True(t, compositeTargetPlatformAllowed(c, apiKey, "text-embedding-3-large", service.PlatformOpenAI))
+	require.True(t, compositeTargetPlatformAllowed(c, apiKey, "text-embedding-3-large", svc, service.PlatformOpenAI))
 	platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	require.True(t, ok)
 	require.Equal(t, service.PlatformOpenAI, platform)
@@ -25,6 +56,7 @@ func TestCompositeTargetPlatformAllowedResolvesKnownAllowedModel(t *testing.T) {
 
 func TestOpenAICompatibleTextTargetAllowsCompositeProviders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	svc := newCompositeGateGatewayService(t, nil, nil)
 
 	providers := []struct {
 		model    string
@@ -43,7 +75,7 @@ func TestOpenAICompatibleTextTargetAllowsCompositeProviders(t *testing.T) {
 			c.Request = httptest.NewRequest("POST", path, nil)
 			apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
 
-			require.True(t, openAICompatibleTextTargetAllowed(c, apiKey, provider.model), "path=%s model=%s", path, provider.model)
+			require.True(t, openAICompatibleTextTargetAllowed(c, apiKey, provider.model, svc), "path=%s model=%s", path, provider.model)
 			platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 			require.True(t, ok, "path=%s model=%s", path, provider.model)
 			require.Equal(t, provider.platform, platform, "path=%s model=%s", path, provider.model)
@@ -66,6 +98,7 @@ func TestResponsesWebSocketCompositePlatformGuardKeepsOpenAIAndGrokOnly(t *testi
 
 func TestCompositeTargetPlatformAllowedRejectsWrongOrUnknownModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	svc := newCompositeGateGatewayService(t, nil, nil)
 
 	for _, tc := range []struct {
 		name  string
@@ -79,7 +112,7 @@ func TestCompositeTargetPlatformAllowedRejectsWrongOrUnknownModel(t *testing.T) 
 			c.Request = httptest.NewRequest("POST", "/v1/embeddings", nil)
 			apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
 
-			require.False(t, compositeTargetPlatformAllowed(c, apiKey, tc.model, service.PlatformOpenAI))
+			require.False(t, compositeTargetPlatformAllowed(c, apiKey, tc.model, svc, service.PlatformOpenAI))
 		})
 	}
 }
@@ -89,8 +122,9 @@ func TestCompositeTargetPlatformResolvedRejectsUnknownModel(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+	svc := newCompositeGateGatewayService(t, nil, nil)
 
-	require.False(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick"))
+	require.False(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick", svc))
 	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	require.False(t, ok)
 }
@@ -101,7 +135,84 @@ func TestCompositeTargetPlatformResolvedAllowsConcreteGroupWithoutResolution(t *
 	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformAnthropic}}
 
-	require.True(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick"))
+	require.True(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick", nil))
+}
+
+// ① 账号 model_mapping 独有模型（qwen3.8-flash 形态）：门禁经 ownership 层级放行且盖章平台正确。
+func TestCompositeGateAllowsAccountModelMappingOwnedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	apiKey := &service.APIKey{Group: &service.Group{ID: 7, Platform: service.PlatformComposite}}
+	svc := newCompositeGateGatewayService(t, []service.Account{{
+		ID:       1,
+		Platform: service.PlatformDeepseek,
+		Credentials: map[string]any{"model_mapping": map[string]any{"qwen3.8-flash": "qwen3.8"}},
+	}}, nil)
+
+	require.True(t, compositeTargetPlatformResolved(c, apiKey, "qwen3.8-flash", svc))
+	platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+	require.True(t, ok)
+	require.Equal(t, service.PlatformDeepseek, platform)
+}
+
+// ② 显式路由命中：上游模型经 context 传播，门禁复解析短路一致（不覆盖、不丢失 upstream）。
+func TestCompositeGateExplicitRouteUpstreamModelPropagates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+	// 模拟显式路由已在 context 中盖章（上游模型改写）。
+	c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), service.CompositeRouteDecision{
+		Matched:        true,
+		Source:         service.CompositeRouteSourceExplicit,
+		PublicModel:    "my-alias",
+		TargetPlatform: service.PlatformOpenAI,
+		UpstreamModel:  "gpt-5",
+	}))
+	svc := newCompositeGateGatewayService(t, nil, nil)
+	ensureCompositeTargetPlatform(c, apiKey, "my-alias", svc)
+	upstream, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context())
+	require.True(t, ok)
+	require.Equal(t, "gpt-5", upstream)
+}
+
+// ③a resolver err：账号目录不可用 + 模型不可检测器识别 → 失败关闭。
+func TestCompositeGateFailsClosedOnResolverError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+	svc := newCompositeGateGatewayService(t, nil, errors.New("repo boom"))
+
+	require.False(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick", svc))
+	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+	require.False(t, ok)
+}
+
+// ③b 未命中：空账号 ownership 不命中、检测器不识别 → 失败关闭。
+func TestCompositeGateFailsClosedOnUnmatchedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+	svc := newCompositeGateGatewayService(t, nil, nil)
+
+	require.False(t, compositeTargetPlatformResolved(c, apiKey, "llama-4-maverick", svc))
+	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+	require.False(t, ok)
+}
+
+// ③c gatewayCore == nil：失败关闭，不回退检测器、不 panic。
+func TestCompositeGateFailsClosedOnNilGatewayService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
+
+	require.False(t, compositeTargetPlatformResolved(c, apiKey, "gpt-5", nil))
+	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+	require.False(t, ok)
 }
 
 func TestOpenAIReasoningEffortPolicyForCompositeTarget(t *testing.T) {

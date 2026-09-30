@@ -36,6 +36,7 @@ import (
 // OpenAIGatewayHandler handles OpenAI API gateway requests
 type OpenAIGatewayHandler struct {
 	gatewayService             *service.OpenAIGatewayService
+	coreGatewayService         *service.GatewayService
 	settingService             *service.SettingService
 	billingCacheService        *service.BillingCacheService
 	apiKeyService              *service.APIKeyService
@@ -332,8 +333,8 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	return apiKey.Group.AllowMessagesDispatch
 }
 
-func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, model string) bool {
-	return compositeTargetPlatformAllowed(c, apiKey, model,
+func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) bool {
+	return compositeTargetPlatformAllowed(c, apiKey, model, gatewayCore,
 		service.PlatformOpenAI, service.PlatformGrok,
 		service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax)
 }
@@ -354,6 +355,7 @@ func isResponsesWebSocketCompositePlatform(platform string) bool {
 // NewOpenAIGatewayHandler creates a new OpenAIGatewayHandler
 func NewOpenAIGatewayHandler(
 	gatewayService *service.OpenAIGatewayService,
+	coreGatewayService *service.GatewayService,
 	settingService *service.SettingService,
 	concurrencyService *service.ConcurrencyService,
 	billingCacheService *service.BillingCacheService,
@@ -370,6 +372,7 @@ func NewOpenAIGatewayHandler(
 	}
 	return &OpenAIGatewayHandler{
 		gatewayService:           gatewayService,
+		coreGatewayService:       coreGatewayService,
 		settingService:           settingService,
 		billingCacheService:      billingCacheService,
 		apiKeyService:            apiKeyService,
@@ -468,8 +471,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
-	ensureCompositeTargetPlatform(c, apiKey, reqModel)
-	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
+	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
+	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
@@ -1214,8 +1217,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
-	ensureCompositeTargetPlatform(c, apiKey, reqModel)
-	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
+	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
+	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
@@ -2429,7 +2432,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked))
 		return
 	}
-	ensureCompositeTargetPlatform(c, apiKey, reqModel)
+	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	ctx = c.Request.Context()
 	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
 		platform, ok := service.ResolvedTargetPlatformFromContext(ctx)

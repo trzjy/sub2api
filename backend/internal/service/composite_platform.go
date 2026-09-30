@@ -170,6 +170,13 @@ func hasOpenAISeriesPrefix(model string) bool {
 	return false
 }
 
+// ResolveCompositeRouteDecision 暴露三级解析（显式路由 → 账号 model_mapping 所有权 →
+// 检测器）给 composite 门禁复用，避免门禁比调度层（gateway_scheduling.go 三处调用）
+// 更严而提前 400。内部逻辑完全转发 resolveCompositeRouteDecision，不引入新机制。
+func (s *GatewayService) ResolveCompositeRouteDecision(ctx context.Context, group *Group, model, endpoint string) (CompositeRouteDecision, bool, error) {
+	return s.resolveCompositeRouteDecision(ctx, group, model, endpoint)
+}
+
 func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, group *Group, requestedModel, endpoint string) (CompositeRouteDecision, bool, error) {
 	if group == nil || group.Platform != PlatformComposite {
 		return CompositeRouteDecision{}, false, nil

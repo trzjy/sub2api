@@ -10,23 +10,28 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func ensureCompositeTargetPlatform(c *gin.Context, apiKey *service.APIKey, model string) {
+func ensureCompositeTargetPlatform(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) {
 	if c == nil || c.Request == nil || apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
 		return
 	}
 	if _, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 		return
 	}
-	if platform, ok := service.DetectModelPlatform(model); ok {
-		c.Request = c.Request.WithContext(service.WithResolvedTargetPlatform(c.Request.Context(), platform))
+	if gatewayCore == nil {
+		return
 	}
+	decision, ok, err := gatewayCore.ResolveCompositeRouteDecision(c.Request.Context(), apiKey.Group, model, service.CompositeRouteEndpointAny)
+	if err != nil || !ok {
+		return
+	}
+	c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), decision))
 }
 
-func compositeTargetPlatformAllowed(c *gin.Context, apiKey *service.APIKey, model string, allowed ...string) bool {
+func compositeTargetPlatformAllowed(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService, allowed ...string) bool {
 	if c == nil || c.Request == nil || apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
 		return true
 	}
-	ensureCompositeTargetPlatform(c, apiKey, model)
+	ensureCompositeTargetPlatform(c, apiKey, model, gatewayCore)
 	platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	if !ok {
 		return false
@@ -39,11 +44,11 @@ func compositeTargetPlatformAllowed(c *gin.Context, apiKey *service.APIKey, mode
 	return false
 }
 
-func compositeTargetPlatformResolved(c *gin.Context, apiKey *service.APIKey, model string) bool {
+func compositeTargetPlatformResolved(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) bool {
 	if c == nil || c.Request == nil || apiKey == nil || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
 		return true
 	}
-	ensureCompositeTargetPlatform(c, apiKey, model)
+	ensureCompositeTargetPlatform(c, apiKey, model, gatewayCore)
 	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	return ok
 }

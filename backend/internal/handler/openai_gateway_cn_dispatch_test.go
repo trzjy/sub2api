@@ -33,12 +33,13 @@ func TestAllowOpenAICompatibleMessagesDispatch_CNProvidersExempt(t *testing.T) {
 
 func TestAllowOpenAICompatibleMessagesDispatch_CompositeResolvedTargets(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	gateSvc := newCompositeGateGatewayService(t, nil, nil)
 
 	newCompositeCtx := func(model string, allow bool) (*gin.Context, *service.APIKey) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite, AllowMessagesDispatch: allow}}
-		ensureCompositeTargetPlatform(c, apiKey, model)
+		ensureCompositeTargetPlatform(c, apiKey, model, gateSvc)
 		return c, apiKey
 	}
 
@@ -65,12 +66,13 @@ func TestAllowOpenAICompatibleMessagesDispatch_CompositeResolvedTargets(t *testi
 // 专属）不得注入，模型改写完全交给账号级 model_mapping。
 func TestResolveOpenAIMessagesDispatchMappedModel_CompositeCNTargetsSkipGroupMapping(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	gateSvc := newCompositeGateGatewayService(t, nil, nil)
 
 	for _, model := range []string{"kimi-k2-thinking", "glm-5.2", "deepseek-v3.2", "grok-4.3"} {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
 		apiKey := &service.APIKey{Group: &service.Group{Platform: service.PlatformComposite}}
-		ensureCompositeTargetPlatform(c, apiKey, model)
+		ensureCompositeTargetPlatform(c, apiKey, model, gateSvc)
 
 		require.Empty(t, resolveOpenAIMessagesDispatchMappedModel(c, apiKey, "claude-sonnet-4-5-20250929"), "model=%s", model)
 	}
