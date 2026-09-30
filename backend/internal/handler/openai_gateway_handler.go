@@ -654,6 +654,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body), apiKey.GroupID)
 	c.Request = c.Request.WithContext(pricingCtx)
 
+	// CF524 P2-C（方案 §3.1）：认证后、选号循环前安装首字节护栏 + 流式心跳 owner。
+	// 调用顺序不变量（确认审 R2 P1）：service.StartOpenAICompactSSEKeepalive（:454）
+	// 必须先于本 helper 执行——Responses 链 compact keepalive 已写入状态 key，helper
+	// 消费该 key 决定是否装心跳 owner（compact 互斥，避免同 writer 双拍频，踩坑 #13）；
+	// key 不存在 / no-op 退出时正常安装恰一个心跳 owner（本链必装）。
+	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+	defer stopCF524Guard()
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -777,7 +785,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		forwardStart := time.Now()
 		// 用扣除非语义心跳字节的口径快照：心跳注释不构成语义响应，
 		// 不能因心跳字节变化而放弃 failover 换号（#3887）。
-		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+		// 踩坑 #12 / G5d：OpenAICompactKeepaliveAdjustedWrittenSize 无语义字节时返回
+		// -1（gin noWritten 哨兵同源），与 G5d 归一 0 约定不同源——基线先过
+		// cf524NormalizeWrittenSize(<0→0) 再进入防线比较，使 -1 与 0 在"无语义字节"
+		// 语义上等价、比较结果不变；compact keepalive 字节由该函数扣除、心跳字节由
+		// CommittedBytes 基线增量扣除，两个扣除来源各自独立、不得合并计数（本入口
+		// compact 与心跳互斥，心跳 owner 不会安装，故语义上无需 hbCommittedBaseline）。
+		writerSizeBeforeForward := cf524NormalizeWrittenSize(service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
 		// 跨 passthrough 边界的 failover：从 Kiro 等透传账号切到 Bedrock 等非透传账号前，
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
@@ -1278,6 +1292,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body)), apiKey.GroupID)
 	c.Request = c.Request.WithContext(msgPricingCtx)
 
+	// CF524 P2-C（方案 §3.1）：认证后、选号循环前安装首字节护栏 + 流式心跳 owner。
+	// Messages 链无 compact keepalive（状态 key 恒不存在），helper 正常安装恰一个
+	// 心跳 owner（与 Responses 互斥逻辑一致，本链必装；同请求同时刻仅一个拍频机制）。
+	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+	defer stopCF524Guard()
+
 	for {
 		if failoverClientGone(c) {
 			return
@@ -1365,7 +1385,16 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
+		// 踩坑 #1：hbCommittedBaseline 与 writerSizeBeforeForward 同时点捕获，作为
+		// 心跳已提交字节基线（owner 不存在时取 0）。防线统一见下方 :1455 改用
+		// cf524OpenAIHeartbeatFailoverGuardStillClean（增量严格相等，G5d 归一）。
 		writerSizeBeforeForward := c.Writer.Size()
+		hbCommittedBaseline := func() int {
+			if hb, ok := service.UpstreamHeartbeatFromContext(c.Request.Context()); ok && hb != nil {
+				return int(hb.CommittedBytes())
+			}
+			return 0
+		}()
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1452,7 +1481,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
@@ -3661,9 +3690,12 @@ func openAIForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForwa
 		return false
 	}
 	// 与快照同口径：排除 compact 心跳字节，避免"仅心跳写出"被误判为
-	// 响应已写出（#3887）。
-	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward ||
-		service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
+	// 响应已写出（#3887）。踩坑 #12 / G5d：基线与当前口径均过
+	// cf524NormalizeWrittenSize(<0→0)，-1 与 0 等价、比较结果不变。
+	before := cf524NormalizeWrittenSize(writerSizeBeforeForward)
+	currentCompact := cf524NormalizeWrittenSize(service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
+	currentImages := cf524NormalizeWrittenSize(service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c))
+	if currentCompact == before || currentImages == before {
 		return false
 	}
 
@@ -3687,11 +3719,90 @@ func openAIForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForwa
 	return false
 }
 
+// ───────────────── CF524 P2-C：OpenAIGatewayHandler 家族安装辅助 ─────────────────
+// 背景（派发单硬约束下的最小合规补丁）：P2-A 产物 openai_heartbeat_failover_guard.go
+// 将 cf524InstallUpstreamBudgetAndHeartbeatOpenAI 落到 *GatewayHandler 接收者，但本卡 target
+// openai_gateway_handler.go 的 Responses/Messages 属于 *OpenAIGatewayHandler，二者是并行家族
+// （各自独立实现 Responses/Messages/ChatCompletions），类型不匹配导致无法编译期复用该符号。
+// 禁区禁止改动 P2-A 文件，故在本白名单文件内补一个同接收者、同语义的安装方法，逐字对齐
+// P2-A 的 GatewayHandler 版本与 gateway_handler.go:2070 的 cf524InstallUpstreamBudgetAndHeartbeat：
+// 零新增机制/配置/兜底分支，仅接收者类型差异；compact 互斥、失败关闭、guardSeconds<=0 不安装等
+// 契约完全一致。自由函数 cf524OpenAIHeartbeatFailoverGuardStillClean（包级，P2-A）与常量
+// cf524OpenAICompactKeepaliveKey（包级，P2-A）均直接复用，不重复定义。
+
+// cf524GuardConfig 复刻 gateway_handler.go:2049 的同名方法（*OpenAIGatewayHandler 视角）。
+func (h *OpenAIGatewayHandler) cf524GuardConfig() (guardSeconds, heartbeatSeconds int) {
+	if h == nil || h.cfg == nil {
+		return 0, 0
+	}
+	return h.cfg.Gateway.UpstreamFirstByteGuardSeconds, h.cfg.Gateway.UpstreamHeartbeatDelaySeconds
+}
+
+// cf524InstallUpstreamBudgetAndHeartbeatOpenAI 复刻 P2-A openai_heartbeat_failover_guard.go 的
+// 同名方法（*GatewayHandler 版），接收者改为 *OpenAIGatewayHandler 以匹配本卡 target。语义
+// 与 P2-A 逐字相同：认证后、选号循环前安装预算快照 + 流式心跳 owner；compact 互斥仅消费状态
+// key（不重复推导 compact 标记）；guardSeconds<=0 不安装；非流式只装快照；Flush 缺失失败关闭
+// 记 warn。详见 P2-A 文件顶部注释与方案 §3.1。
+func (h *OpenAIGatewayHandler) cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c *gin.Context, requestStart time.Time, reqStream bool) (stopFunc func()) {
+	if c == nil || c.Request == nil {
+		return func() {}
+	}
+	guardSeconds, heartbeatSeconds := h.cf524GuardConfig()
+	if guardSeconds <= 0 {
+		// 无配置（未接入/测试桩）时不安装：与挂点"无快照不兜底"契约一致。
+		return func() {}
+	}
+	snapshot := service.NewRequestBudgetSnapshot(guardSeconds, heartbeatSeconds, requestStart, reqStream)
+	ctx := service.WithRequestBudgetSnapshot(c.Request.Context(), snapshot)
+
+	// compact 互斥：只消费 compact keepalive 的真实安装状态（不重复推导 compact 标记）。
+	// 已安装 → 本 helper 不再装心跳 owner（快照照装）；key 不存在 / no-op → 正常装一个。
+	if _, compactInstalled := c.Get(cf524OpenAICompactKeepaliveKey); compactInstalled {
+		c.Request = c.Request.WithContext(ctx)
+		return func() {}
+	}
+
+	if !reqStream || heartbeatSeconds <= 0 {
+		// 非流式 / 心跳禁用：只装快照（护栏仍生效），不起搏心跳。
+		c.Request = c.Request.WithContext(ctx)
+		return func() {}
+	}
+
+	hb := service.NewUpstreamHeartbeat(ctx, c.Writer, snapshot, time.Now())
+	ctx = service.WithUpstreamHeartbeat(ctx, hb)
+	c.Request = c.Request.WithContext(ctx)
+
+	// 起搏：Start 与后续 Resume 同型，首次安装即开始等待首帧窗口。
+	// Flush 能力缺失时 Start 返回错误、零写出——失败关闭，不静默降级；错误可见性：
+	// 记 warn 日志后继续既有流程，不终止请求。
+	if err := hb.Start(); err != nil {
+		logHeartbeatStartFailure(c.Request.Context(), c.Request.URL.Path, err)
+	}
+
+	return func() { hb.Stop() }
+}
+
+// cf524NormalizeWrittenSize 实现 G5d 哨兵归一：gin noWritten 哨兵 -1 逻辑尺寸归一为 0。
+// 任何"已写字节"结论在参与算术/相等比较前都必须过本函数，避免 -1 翻转在快照外引发的
+// 不对称比较（踩坑 #2/#3）。-1 与 0 在"无语义字节"语义上等价，归一后比较结果不变。
+func cf524NormalizeWrittenSize(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failoverErr *service.UpstreamFailoverError) bool {
 	if c == nil || c.Writer == nil {
 		return false
 	}
-	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
+	// 踩坑 #12 / G5d：基线（调用方已可能归一）与当前口径均过 cf524NormalizeWrittenSize(<0→0)，
+	// 使 -1 与 0 在"无语义字节"语义上等价、比较结果不变。compact keepalive 字节由
+	// OpenAICompactKeepaliveAdjustedWrittenSize 扣除（Responses 口径），与心跳字节
+	// （CommittedBytes 基线增量）各自独立、不得合并计数。
+	before := cf524NormalizeWrittenSize(writerSizeBeforeForward)
+	current := cf524NormalizeWrittenSize(service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
+	if current == before {
 		return true
 	}
 	return failoverErr != nil && failoverErr.SafeToFailoverAfterWrite

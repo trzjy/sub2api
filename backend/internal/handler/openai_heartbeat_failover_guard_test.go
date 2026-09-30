@@ -110,7 +110,7 @@ func TestCF524P2A_GuardStillClean_BaselineDeltaStrict(t *testing.T) {
 // ───────────────────────── ② helper 安装条件 ─────────────────────────
 
 func TestCF524P2A_Helper_GuardDisabled_NoInstall(t *testing.T) {
-	h := &GatewayHandler{cfg: cf524TestCfg(0, 15)} // guardSeconds<=0
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(0, 15)} // guardSeconds<=0
 	c, _ := newCF524TestContext(t, "/v1/messages")
 
 	stop := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, time.Now(), true)
@@ -124,7 +124,7 @@ func TestCF524P2A_Helper_GuardDisabled_NoInstall(t *testing.T) {
 }
 
 func TestCF524P2A_Helper_NonStreaming_SnapshotOnly(t *testing.T) {
-	h := &GatewayHandler{cfg: cf524TestCfg(30, 15)}
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(30, 15)}
 	c, _ := newCF524TestContext(t, "/v1/messages")
 
 	stop := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, time.Now(), false) // 非流式
@@ -138,7 +138,7 @@ func TestCF524P2A_Helper_NonStreaming_SnapshotOnly(t *testing.T) {
 }
 
 func TestCF524P2A_Helper_Streaming_OneHeartbeatOwner(t *testing.T) {
-	h := &GatewayHandler{cfg: cf524TestCfg(30, 1)}
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(30, 1)}
 	c, _ := newCF524TestContext(t, "/v1/messages")
 
 	stop := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, time.Now(), true)
@@ -154,7 +154,7 @@ func TestCF524P2A_Helper_Streaming_OneHeartbeatOwner(t *testing.T) {
 }
 
 func TestCF524P2A_Helper_CompactKeyInstalled_NoHeartbeatOwner(t *testing.T) {
-	h := &GatewayHandler{cfg: cf524TestCfg(30, 1)}
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(30, 1)}
 	c, _ := newCF524TestContext(t, "/v1/messages")
 	// 模拟 Responses 入口已先于 helper 启动 compact keepalive（事实源 key 已写入）。
 	c.Set(cf524OpenAICompactKeepaliveKey, struct{}{})
@@ -170,7 +170,7 @@ func TestCF524P2A_Helper_CompactKeyInstalled_NoHeartbeatOwner(t *testing.T) {
 }
 
 func TestCF524P2A_Helper_CompactKeyAbsent_OneHeartbeatOwner(t *testing.T) {
-	h := &GatewayHandler{cfg: cf524TestCfg(30, 1)}
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(30, 1)}
 	c, _ := newCF524TestContext(t, "/v1/messages")
 	// key 不存在（no-op 退出 / 非 compact 请求）：正常安装恰一个心跳 owner。
 
@@ -196,7 +196,7 @@ func TestCF524P2A_Helper_FlushMissing_FailClosed(t *testing.T) {
 	// 注入写出失败 writer：hb 起搏写帧失败 → 失败关闭（心跳可选、零降级分支，踩坑 #8）。
 	c.Writer = &cf524P2aFailingWriter{c.Writer}
 
-	h := &GatewayHandler{cfg: cf524TestCfg(30, 1)}
+	h := &OpenAIGatewayHandler{cfg: cf524TestCfg(30, 1)}
 	stop := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, time.Now(), true)
 	require.NotNil(t, stop)
 	require.NotPanics(t, func() { stop() }, "失败关闭不得 panic、不得终止请求（心跳仅为可关闭优化）")

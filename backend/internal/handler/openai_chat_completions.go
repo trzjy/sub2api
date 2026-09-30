@@ -167,6 +167,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		h.withOpenAIProfitSuppressedForImage(c.Request.Context(), body), apiKey.GroupID)
 	c.Request = c.Request.WithContext(ccPricingCtx)
 
+	// CF524 P2-B 入口安装点（方案 §3.1）：认证后、选号循环前安装请求级预算快照 +
+	// 心跳 owner。安装 helper 落在 *OpenAIGatewayHandler（收敛清理：P2-C 统一接收者版本，P2-A 的
+	// *GatewayHandler 版已删）。CC 链无 compact keepalive（状态 key 恒不存在）→ 正常安装，
+	// 无需互斥分支。
+	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+	defer cf524StopHeartbeat()
+
 	for {
 		if failoverClientGone(c) {
 			return
@@ -250,6 +257,14 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
 		writerSizeBeforeForward := c.Writer.Size()
+		// CF524 P2-B 防线统一（§3.3，踩坑 #1）：与 writerSizeBeforeForward 同时点捕获
+		// 心跳已提交字节基线；owner 不存在（非流式/心跳禁用/未装快照）时为 0。CC 链无
+		// compact keepalive，无需额外归一（compact 口径冲突不适用于本链，调用方无需改口径）。
+		hbAtForwardStart, _ := service.UpstreamHeartbeatFromContext(c.Request.Context())
+		hbCommittedBaseline := 0
+		if hbAtForwardStart != nil {
+			hbCommittedBaseline = int(hbAtForwardStart.CommittedBytes())
+		}
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -334,7 +349,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return

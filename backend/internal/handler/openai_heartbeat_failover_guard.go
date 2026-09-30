@@ -21,8 +21,6 @@ package handler
 // 源码（不口头推断）；#8 失败关闭无兜底；#13 同请求同时刻仅一个拍频机制。
 
 import (
-	"time"
-
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -82,55 +80,4 @@ func cf524OpenAIHeartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBefor
 	writtenDelta := size - before
 	heartbeatDelta := committed - hbCommittedBaseline
 	return writtenDelta == heartbeatDelta
-}
-
-// cf524InstallUpstreamBudgetAndHeartbeatOpenAI 是 OpenAI 家族三入口（ChatCompletions /
-// Responses / Messages）在认证后、选号循环前调用的请求入口安装 helper。包装既有
-// cf524InstallUpstreamBudgetAndHeartbeat 的等价语义；安装条件与主方案逐字相同：
-//   - guardSeconds<=0 不安装（未接入/测试桩，与"无快照不兜底"契约一致）；
-//   - 非流式（reqStream==false）/ 心跳禁用（hb<=0）只装快照、不起搏心跳 owner；
-//   - Flush 缺失 → 失败关闭（Start 返回错误、零写出）+ 记 warn，不静默降级为无心跳。
-//
-// compact 互斥（方案 §3.1 唯一新增判定）：只消费 compact keepalive 的"真实安装状态"
-// （gin context key cf524OpenAICompactKeepaliveKey）——已安装 → 本 helper 不再装心跳
-// owner（快照照装），避免同 writer 双拍频数据竞争（踩坑 #13）；key 不存在 / no-op（未
-// 写入 key）→ 正常安装恰一个心跳 owner。禁止在本 helper 重复推导
-// openAICompactClientWantsStream / compact 标记——调用方保证 keepalive start 先于本 helper。
-func (h *GatewayHandler) cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c *gin.Context, requestStart time.Time, reqStream bool) (stopFunc func()) {
-	if c == nil || c.Request == nil {
-		return func() {}
-	}
-	guardSeconds, heartbeatSeconds := h.cf524GuardConfig()
-	if guardSeconds <= 0 {
-		// 无配置（未接入/测试桩）时不安装：与挂点"无快照不兜底"契约一致。
-		return func() {}
-	}
-	snapshot := service.NewRequestBudgetSnapshot(guardSeconds, heartbeatSeconds, requestStart, reqStream)
-	ctx := service.WithRequestBudgetSnapshot(c.Request.Context(), snapshot)
-
-	// compact 互斥：只消费 compact keepalive 的真实安装状态（不重复推导 compact 标记）。
-	// 已安装 → 本 helper 不再装心跳 owner（快照照装）；key 不存在 / no-op → 正常装一个。
-	if _, compactInstalled := c.Get(cf524OpenAICompactKeepaliveKey); compactInstalled {
-		c.Request = c.Request.WithContext(ctx)
-		return func() {}
-	}
-
-	if !reqStream || heartbeatSeconds <= 0 {
-		// 非流式 / 心跳禁用：只装快照（护栏仍生效），不起搏心跳。
-		c.Request = c.Request.WithContext(ctx)
-		return func() {}
-	}
-
-	hb := service.NewUpstreamHeartbeat(ctx, c.Writer, snapshot, time.Now())
-	ctx = service.WithUpstreamHeartbeat(ctx, hb)
-	c.Request = c.Request.WithContext(ctx)
-
-	// 起搏：Start 与后续 Resume 同型，首次安装即开始等待首帧窗口。
-	// Flush 能力缺失时 Start 返回错误、零写出——失败关闭，不静默降级；错误可见性：
-	// 记 warn 日志（含 path/request_id 可关联字段）后继续既有流程，不终止请求。
-	if err := hb.Start(); err != nil {
-		logHeartbeatStartFailure(c.Request.Context(), c.Request.URL.Path, err)
-	}
-
-	return func() { hb.Stop() }
 }
