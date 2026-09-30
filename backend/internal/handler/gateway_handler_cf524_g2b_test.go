@@ -14,11 +14,14 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // cf524TestCfg 返回带合法 guard/heartbeat 的配置（heartbeat 取 1s 便于时间轴断言；
@@ -182,35 +185,35 @@ func TestCF524G2b_HotReloadDoesNotAffectInFlightSnapshot(t *testing.T) {
 	require.Equal(t, snapshot.AbsoluteDeadline, reloaded.AbsoluteDeadline, "不可变截止时间不得随热加载变化")
 }
 
-// TestCF524G2b_HeartbeatFailoverGuardStillClean_Branches 验证防线例外两分支（v5）：
-//   - 心跳已提交（CommittedBytes>0）→ 判定干净，guard 超时后仍可 FailoverContinue 换号；
-//   - 真实语义流已写出（超出心跳基线）→ 判定不干净，禁止 failover（现状防线不回退）；
-//   - 无 owner → 判定与现状完全一致。
+// TestCF524G2b_HeartbeatFailoverGuardStillClean_Branches 验证防线基线增量判定（v8.2
+// 外审修复后）：
+//   - 无 owner → 判定与现状完全一致（size==before 干净，size!=before 禁止）；
+//   - 纯心跳增量（baseline 后心跳再提交 K 字节、零语义写出）→ 干净，允许换号；
+//   - 真实语义流写出（超出心跳增量）→ 不干净，禁止 failover（现状防线不回退）。
 func TestCF524G2b_HeartbeatFailoverGuardStillClean_Branches(t *testing.T) {
 	c, _ := newCF524TestContext(t, "/v1/messages")
 
-	writerSizeBeforeForward := c.Writer.Size()
-
 	// 无 owner：现状判定（size==before 干净，size!=before 禁止）。
-	require.True(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward))
+	require.True(t, heartbeatFailoverGuardStillClean(c, c.Writer.Size(), 0))
 	_, _ = c.Writer.WriteString("semantic-without-heartbeat")
-	require.False(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward),
+	require.False(t, heartbeatFailoverGuardStillClean(c, c.Writer.Size()-len("semantic-without-heartbeat"), 0),
 		"无心跳时真实写出必须仍禁止 failover（现状防线不回退）")
 
-	// 心跳已提交：干净（Size 仅增长心跳注释帧字节）。
-	c2, _ := newCF524TestContext(t, "/v1/messages")
-	before := c2.Writer.Size()
-	snapshot := service.NewRequestBudgetSnapshot(30, 1, time.Now().Add(-2*time.Second), true)
-	hb := service.NewUpstreamHeartbeat(c2.Request.Context(), c2.Writer, snapshot, time.Now())
-	require.NoError(t, hb.Start())
-	commitHeartbeatBytesForTest(t, hb)
-	c2.Request = c2.Request.WithContext(service.WithUpstreamHeartbeat(c2.Request.Context(), hb))
+	// 心跳已提交：捕获 before/baseline 同点（与调用点同型——捕获点 = Forward 前，
+	// 此时前置帧已落盘）。此后零写出 → 增量零相等 → 干净。
+	c3, _ := newCF524TestContext(t, "/v1/messages")
+	hb := startTestHeartbeatAndCommit(t, c3)
 	defer hb.Stop()
-
 	require.Greater(t, hb.CommittedBytes(), int64(0))
-	require.Greater(t, c2.Writer.Size(), before)
-	require.True(t, heartbeatFailoverGuardStillClean(c2, before),
-		"心跳已提交（注释帧）不得被判为语义写出，guard 超时后仍应允许换号")
+	writerSizeBeforeForward := c3.Writer.Size()
+	hbCommittedBaseline := int(hb.CommittedBytes())
+	require.True(t, heartbeatFailoverGuardStillClean(c3, writerSizeBeforeForward, hbCommittedBaseline),
+		"捕获基线后零写出 → 增量零相等 → 干净")
+
+	// 纯心跳增量：baseline 之后再提交 K 字节、零语义写出 → 仍干净（允许换号）。
+	require.NoError(t, hb.Resume())
+	require.True(t, heartbeatFailoverGuardStillClean(c3, writerSizeBeforeForward, hbCommittedBaseline),
+		"baseline 后心跳再提交 K 字节、零语义写出 → 增量恰好相等 → 干净（允许换号）")
 
 	// 防线在心跳已提交场景放行 → 既有 FailoverState 机器应给出 FailoverContinue 换号
 	// （守卫通过后的既有消费路径，零改动验证）。
@@ -220,11 +223,142 @@ func TestCF524G2b_HeartbeatFailoverGuardStillClean_Branches(t *testing.T) {
 		&service.UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout, NextAccountAction: service.NextAccountRetry, SafeToFailoverAfterWrite: true})
 	require.Equal(t, FailoverContinue, action, "心跳已提交且防线干净时，guard 超时必须仍换号（FailoverContinue）")
 
-	// 真实语义流写出：超出心跳基线 → 禁止 failover。
-	_, _ = c2.Writer.WriteString("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
-	require.False(t, heartbeatFailoverGuardStillClean(c2, before),
+	// 真实语义流写出：超出心跳增量 → 禁止 failover。
+	_, _ = c3.Writer.WriteString("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
+	require.False(t, heartbeatFailoverGuardStillClean(c3, writerSizeBeforeForward, hbCommittedBaseline),
 		"真实语义流已写出必须仍禁止 failover")
 }
+
+// startTestHeartbeatAndCommit 构造心跳 owner 并等待 SSE 200 已提交，随后立即续写一帧
+// keep-alive 注释帧（复用既有 commitHeartbeatBytesForTest 的等价手段），使 committedBytes
+// 与 writer 都产生可观测增量（gin.Size() 哨兵 -1 首跳只发生在首次 body 写，SSE 头本身
+// 不计 committedBytes）。
+func startTestHeartbeatAndCommit(t *testing.T, c *gin.Context) *service.UpstreamHeartbeat {
+	t.Helper()
+	snapshot := service.NewRequestBudgetSnapshot(30, 1, time.Now().Add(-2*time.Second), true)
+	hb := service.NewUpstreamHeartbeat(c.Request.Context(), c.Writer, snapshot, time.Now())
+	require.NoError(t, hb.Start())
+	waitHeartbeatCommittedForTest(t, hb)
+	require.NoError(t, hb.Resume(), "Resume 必须立即续写一帧，使 committedBytes 产生可观测增量")
+	c.Request = c.Request.WithContext(service.WithUpstreamHeartbeat(c.Request.Context(), hb))
+	return hb
+}
+
+// TestCF524G2b_HeartbeatGuardPreForwardBytes 钉死本次外审缺陷（前置心跳字节重复计算）：
+// owner 已在捕获点前提交 N 字节（等价 handler 安装点在槽位等待前、捕获点在 Forward 前，
+// 前置帧已落盘）→ 捕获 before/baseline 同点 → Forward 写 M 个纯语义字节（M<N，旧判定
+// `Size() <= before+CommittedBytes()` 会重复计入前置帧而放行）→ 新判定增量严格相等必须
+// 禁止 failover。同时验证"前置心跳 + 后续纯心跳、零语义"场景增量恰好相等仍允许换号。
+func TestCF524G2b_HeartbeatGuardPreForwardBytes(t *testing.T) {
+	c, _ := newCF524TestContext(t, "/v1/messages")
+	hb := startTestHeartbeatAndCommit(t, c)
+	defer hb.Stop()
+
+	// 等价 handler 安装点（槽位等待前）之后、Forward 前的捕获点：此时前置心跳帧已在
+	// writer 上与 owner 记账上同时落盘。
+	require.Greater(t, hb.CommittedBytes(), int64(0), "前置：owner 已提交（SSE 200 + 注释帧）")
+	writerSizeBeforeForward := c.Writer.Size()
+	hbCommittedBaseline := int(hb.CommittedBytes())
+	require.Greater(t, writerSizeBeforeForward, 0)
+	require.Greater(t, hbCommittedBaseline, 0)
+
+	// 捕获后：再提交一帧纯心跳（baseline 之后 K 字节、零语义写出）→ 增量相等，仍干净。
+	require.NoError(t, hb.Resume())
+	require.True(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+		"前置心跳 + 后续纯心跳、零语义 → delta 恰好相等 → 允许换号")
+
+	// 关键断言：写 M 个纯语义字节（M 远小于已提交心跳总计 N），旧判定按
+	// `Size() <= before + CommittedBytes()` 会把前置帧重复计入而放行；新判定增量严格
+	// 相等必须禁止 failover。
+	_, _ = c.Writer.WriteString("event: message_start\n")
+	require.False(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+		"前置心跳字节后写 M 个纯语义字节（M<总提交 N）→ 增量不等 → 必须禁止 failover（本次缺陷钉死）")
+}
+
+// cf524NoFlusherWriter 是不实现 http.Flusher 的裸 http.ResponseWriter，用于注入
+// "缺 Flush 能力"形态（生产 gin writer 恒实现 Flusher，该形态不可达，但组件失败关闭
+// 契约仍须保留可见性）。
+type cf524NoFlusherWriter struct {
+	header http.Header
+	code   int
+	body   *bytes.Buffer
+}
+
+func (w *cf524NoFlusherWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *cf524NoFlusherWriter) Write(b []byte) (int, error) {
+	if w.body == nil {
+		w.body = bytes.NewBuffer(nil)
+	}
+	return w.body.Write(b)
+}
+
+func (w *cf524NoFlusherWriter) WriteHeader(code int) { w.code = code }
+
+// TestCF524G2b_HeartbeatStartFailureWarnsAndContinues 钉死 Start 失败可见性（外审修复第 2
+// 点·部分采纳）：Start 失败（缺 Flusher writer）→ warn 日志落（含 path/request_id 可关联
+// 字段）→ 请求继续（安装点照常返回 stopFunc、零语义变化），零写出零 panic。
+func TestCF524G2b_HeartbeatStartFailureWarnsAndContinues(t *testing.T) {
+	core, observedLogs := observer.New(zap.WarnLevel)
+	requestID := "g5c-start-failure-1"
+	c, rec := newCF524TestContext(t, "/v1/messages")
+	ctx := context.WithValue(c.Request.Context(), ctxkey.RequestID, requestID)
+	c.Request = c.Request.WithContext(logger.IntoContext(ctx, zap.New(core)))
+
+	h := &GatewayHandler{cfg: cf524TestCfg(30, 1)}
+
+	// 缺 Flusher writer：按安装点同型路径构造 owner（组件失败关闭 Start 返回错误），
+	// 再走安装点同型的 warn 记录调用。安装点内部把 c.Writer（gin writer，恒 Flusher）传给
+	// NewUpstreamHeartbeat，故此处用非 gin writer 直接验证失败关闭 + 可见性链路。
+	raw := &cf524NoFlusherWriter{}
+	snapshot := service.NewRequestBudgetSnapshot(30, 1, time.Now().Add(-2*time.Second), true)
+	hb := service.NewUpstreamHeartbeat(c.Request.Context(), raw, snapshot, time.Now())
+	startErr := hb.Start()
+	require.Error(t, startErr, "缺 http.Flusher 必须失败关闭")
+	require.False(t, hb.IsCommitted())
+	require.Equal(t, int64(0), hb.CommittedBytes())
+	require.Nil(t, raw.body, "Start 失败必须零写出")
+	require.Equal(t, 0, raw.code, "Start 失败必须零写出（含响应头）")
+
+	// 安装点同型 warn 记录：日志落 + 携带可关联字段。
+	require.NotPanics(t, func() {
+		logHeartbeatStartFailure(c.Request.Context(), c.Request.URL.Path, startErr)
+	}, "Start 失败不得 panic")
+	entries := observedLogs.FilterMessage("gateway.cf524_heartbeat_start_failed").All()
+	require.Len(t, entries, 1, "Start 失败必须落 warn 日志")
+	fields := map[string]string{}
+	for _, f := range entries[0].Context {
+		switch {
+		case f.Key == "error":
+			if f.Interface != nil {
+				if errVal, ok := f.Interface.(error); ok {
+					fields[f.Key] = errVal.Error()
+				}
+			}
+		default:
+			fields[f.Key] = f.String
+		}
+	}
+	require.Equal(t, "/v1/messages", fields["path"], "warn 日志必须含 path 可关联字段")
+	require.Equal(t, requestID, fields["request_id"], "warn 日志必须含 request_id 可关联字段")
+	require.Contains(t, fields["error"], "http.Flusher")
+
+	// 请求继续：安装点（正常 gin writer 路径）照常返回 stopFunc、零 panic，响应体零写出。
+	// 安装点自身不得新增失败 warn（记录计数器应保持不变：仍只有上面的 1 条）。
+	stop := h.cf524InstallUpstreamBudgetAndHeartbeat(c, time.Now(), true)
+	require.NotNil(t, stop)
+	require.NotPanics(t, func() { stop() })
+	require.Equal(t, 1, observedLogs.FilterMessage("gateway.cf524_heartbeat_start_failed").Len(),
+		"正常 gin writer（恒 Flusher）Start 成功，安装点不得新增失败 warn")
+	require.NotContains(t, rec.Body.String(), "keep-alive", "Start 成功后立即 Stop，不得留下心跳帧")
+}
+
+// 保持既有 CF524 v5 两分支测试兼容：改造原 test 中无 owner 分支即可。其余用例不变。
 
 // TestCF524G2b_HeartbeatCommittedExhaustedEmitsSSEError 验证（v6，零改动验证）：
 // 心跳已提交后直接耗尽，handler 既有 handleFailoverExhausted(streamStarted=true)

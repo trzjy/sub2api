@@ -473,7 +473,14 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
+			// CF524（外审修复）：心跳基线须与 writerSizeBeforeForward 同时点捕获——基线是
+			// before 时刻已提交的心跳字节，Forward 后判定用增量严格相等，前置心跳帧不会
+			// 被重复计入。
 			writerSizeBeforeForward := c.Writer.Size()
+			hbCommittedBaseline := 0
+			if hbOwner, ok := service.UpstreamHeartbeatFromContext(requestCtx); ok && hbOwner != nil {
+				hbCommittedBaseline = int(hbOwner.CommittedBytes())
+			}
 			if account.Platform == service.PlatformAntigravity {
 				result, err = h.antigravityGatewayService.ForwardGemini(
 					requestCtx,
@@ -498,7 +505,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化。
 					// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
 					// 心跳已提交时仍允许换号（判定与现状在无心跳时完全一致）。
-					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
+					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
 						h.handleFailoverExhausted(c, failoverErr, service.PlatformGemini, true)
 						return
 					}
@@ -889,7 +896,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				requestCtx = service.WithForceCacheBilling(requestCtx)
 			}
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
+			// CF524（外审修复）：心跳基线须与 writerSizeBeforeForward 同时点捕获（见 476 行
+			// 同型注释）——判定用增量严格相等，前置心跳帧不会被重复计入。
 			writerSizeBeforeForward := c.Writer.Size()
+			hbCommittedBaseline := 0
+			if hbOwner, ok := service.UpstreamHeartbeatFromContext(requestCtx); ok && hbOwner != nil {
+				hbCommittedBaseline = int(hbOwner.CommittedBytes())
+			}
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
@@ -1032,7 +1045,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化。
 					// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
 					// 心跳已提交时仍允许换号（判定与现状在无心跳时完全一致）。
-					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
+					if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
 					}
@@ -2077,38 +2090,65 @@ func (h *GatewayHandler) cf524InstallUpstreamBudgetAndHeartbeat(c *gin.Context, 
 	c.Request = c.Request.WithContext(ctx)
 
 	// 起搏：Start 与后续 Resume 同型，首次安装即开始等待首帧窗口。
-	// Flush 能力缺失时 Start 返回错误、零写出——失败关闭，不静默降级。
-	_ = hb.Start()
+	// Flush 能力缺失时 Start 返回错误、零写出——失败关闭，不静默降级；错误可见性：
+	// 记 warn 日志（含 path/request_id 可关联字段）后继续既有流程，不终止请求。
+	if err := hb.Start(); err != nil {
+		logHeartbeatStartFailure(c.Request.Context(), c.Request.URL.Path, err)
+	}
 
 	return func() { hb.Stop() }
 }
 
+// logHeartbeatStartFailure 记录心跳 Start 失败的可关联 warn 日志（外审修复：Start/
+// Resume 错误曾静默吞掉）。仅做可见性，不影响语义：心跳是可关闭优化（hb=0 是合法
+// 一等状态），硬边界是 guard（D1），这里不终止请求。
+// gin.ResponseWriter 恒实现 http.Flusher，生产下 flusherOK=false 不可达；本函数独立
+// 暴露以支持定向单测（注入缺 Flusher 的 writer 验证日志路径与零写出零 panic）。
+func logHeartbeatStartFailure(ctx context.Context, path string, err error) {
+	requestID, _ := ctx.Value(ctxkey.RequestID).(string)
+	logger.FromContext(ctx).Warn("gateway.cf524_heartbeat_start_failed",
+		zap.String("path", path),
+		zap.String("request_id", requestID),
+		zap.Error(err),
+	)
+}
+
 // heartbeatFailoverGuardStillClean 是"写后禁 failover"防线的 CF524 例外判定（方案
-// v8.2 §2 D2 v5）：心跳注释帧非语义写出，不得把心跳已提交字节误判为"流已写出"。
+// v8.2 §2 D2 v8.1+ 外审修复）：心跳注释帧非语义写出，不得把心跳已提交字节误判为
+// "流已写出"。
 //
-// 判定：writerSizeBeforeForward ≤ c.Writer.Size() ≤ heartbeatBaseSize 时仍视为干净
-// （可继续换号），其中 heartbeatBaseSize = writerSizeBeforeForward + owner.CommittedBytes()。
-// 心跳未启动/未提交（CommittedBytes=0，或 owner 不存在）时严格退回现状判定
-// （Size() == writerSizeBeforeForward），不兜底第二条路径。
+// 判定采用基线增量**严格相等**：捕获 writerSizeBeforeForward 的同时点捕获心跳已
+// 提交字节基线 hbCommittedBaseline（owner 存在时取 owner.CommittedBytes()，否则 0），
+// 防线判定 `(c.Writer.Size() - writerSizeBeforeForward) == int(owner.CommittedBytes() - hbCommittedBaseline)`。
+// owner 不存在时 delta=0，退化与现状判定 `Size() == writerSizeBeforeForward` 完全一致
+// （同一条路径，无第二分支）。
+//
+// 理由（前置心跳字节重复计算修复）：心跳 owner 安装在 handler 入口（槽位等待前），
+// Forward 前若排队超心跳延迟，SSE 200 + 注释帧已落盘；旧判定
+// `Size() <= before + CommittedBytes()` 把 before 之后、Forward 之前已提交的前置
+// 心跳字节重复计入，漏过窗口 = 前置心跳字节数。改为增量严格相等后，任何语义写出
+// 都会破坏相等 → 禁止 failover（现状防线不回退）。
 //
 // gin.Size() 的 noWritten 哨兵为 -1，首次 Flush 会跳到 0；该 +1 不计入组件按
-// size 差额累计的 CommittedBytes，故 before<0 且确有心跳字节时把基线归一到逻辑 0，
-// 避免心跳基线少 1 字节误判为语义写出。
-func heartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward int) bool {
+// size 差额累计的 CommittedBytes。二者都以"同一 writer 上 size 的差值"计量，故哨兵
+// 影响自动抵消（大小两侧各减一次），无需归一。
+func heartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward, hbCommittedBaseline int) bool {
 	if c == nil || c.Writer == nil {
 		return true
 	}
 	size := c.Writer.Size()
 	hb, _ := service.UpstreamHeartbeatFromContext(c.Request.Context())
-	if hb == nil || hb.CommittedBytes() <= 0 {
+	if hb == nil {
 		return size == writerSizeBeforeForward
 	}
-	base := writerSizeBeforeForward
-	if base < 0 {
-		base = 0
+	committed := int(hb.CommittedBytes())
+	if committed == hbCommittedBaseline {
+		// 自基线以来零心跳提交：退化为既有 size==before 相等判定（同一路径）。
+		return size == writerSizeBeforeForward
 	}
-	base += int(hb.CommittedBytes())
-	return size <= base
+	writtenDelta := size - writerSizeBeforeForward
+	heartbeatDelta := committed - hbCommittedBaseline
+	return writtenDelta == heartbeatDelta
 }
 
 // gatewayForwardErrorAlreadyCommunicated reports whether a Forward implementation

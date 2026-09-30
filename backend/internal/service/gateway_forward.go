@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // 重试相关常量
@@ -973,7 +975,18 @@ func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 	// 与快照同进同退；无快照则无 owner，绝不单独起搏心跳导致无超时保护的悬挂。
 	if hb != nil && clientStream && guard != nil {
 		// Resume 同时覆盖"首次启动"与"换号后重启"两种形态（未启动则等价于 Start）。
-		_ = hb.Resume()
+		// 失败可见性：Resume 错误（缺 http.Flusher）只记 warn 日志（path/request_id 可关联），
+		// 继续既有流程，零语义变化——心跳是可关闭优化（hb=0 是合法一等状态），
+		// 硬边界是 guard，不在此处终止请求。
+		if resumeErr := hb.Resume(); resumeErr != nil {
+			requestID, _ := upstreamReq.Context().Value(ctxkey.RequestID).(string)
+			logger.FromContext(upstreamReq.Context()).Warn("gateway.cf524_heartbeat_resume_failed",
+				zap.String("path", upstreamReq.URL.Path),
+				zap.String("request_id", requestID),
+				zap.Int64("account_id", account.ID),
+				zap.Error(resumeErr),
+			)
+		}
 	}
 	resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
 	if guard != nil && guard.TimedOut() {

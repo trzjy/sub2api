@@ -260,7 +260,13 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
 
 		// 5. Forward request
+		// CF524（外审修复）：心跳基线须与 writerSizeBeforeForward 同时点捕获——判定用
+		// 增量严格相等，前置心跳帧不会被重复计入（与 gateway_handler.go 同型）。
 		writerSizeBeforeForward := c.Writer.Size()
+		hbCommittedBaseline := 0
+		if hbOwner, ok := service.UpstreamHeartbeatFromContext(requestCtx); ok && hbOwner != nil {
+			hbCommittedBaseline = int(hbOwner.CommittedBytes())
+		}
 		forwardBody := body
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
@@ -291,7 +297,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				// Can't failover if streaming content already sent.
 				// CF524（v5）：心跳注释帧非语义写出——防线改用心跳基线例外判定，
 				// 心跳已提交时仍允许换号（无心跳时判定与现状完全一致）。
-				if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward) {
+				if !heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
 					h.handleResponsesFailoverExhausted(c, failoverErr, true)
 					return
 				}
