@@ -58,7 +58,10 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	c *gin.Context,
 	account *Account,
 	input anthropicPassthroughForwardInput,
-) (*ForwardResult, error) {
+) (result *ForwardResult, err error) {
+	// G5 观测（单点埋点）：请求出口补发整条换号链未解析的 guard 终态关联事件（同
+	// request_id）。无 tracker 时为 no-op。
+	defer func() { cf524ResolveGuardOutcome(c, ctx, err) }()
 	token, tokenType, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
@@ -133,8 +136,18 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 
 		// 发送请求（统一经护栏 + 心跳生命周期编排）。必须用预声明 + "=" 赋值：resp 是
 		// 循环外声明的接收变量，":=" 会在循环块内遮蔽它，导致循环后 resp 仍为 nil。
+		// G5 观测：obs 非 nil 时共享执行器为唯一发射点。
+		obs := &cf524GuardObservation{
+			c:         c,
+			ctx:       ctx,
+			platform:  account.Platform,
+			stream:    input.RequestStream,
+			attempt:   attempt,
+			startedAt: time.Now(),
+			snapshot:  snapshot,
+		}
 		var guardTimedOut bool
-		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), guard, hbOwner, input.RequestStream)
+		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), guard, hbOwner, input.RequestStream, obs)
 		if guardTimedOut {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()

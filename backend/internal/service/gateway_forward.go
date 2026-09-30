@@ -95,6 +95,9 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
+	// G5 观测（单点埋点）：请求出口补发整条换号链未解析的 guard 终态关联事件（同
+	// request_id）。无 tracker（未命中四挂点/OpenAI 原生路径）时为 no-op。
+	defer func() { cf524ResolveGuardOutcome(c, ctx, err) }()
 	// Anthropic Fast is requested with speed=fast rather than OpenAI's
 	// service_tier. Attach it at this shared boundary so passthrough, OAuth and
 	// partial-stream results all use the same billing and usage-log path.
@@ -415,8 +418,18 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		// 发送请求（统一经护栏 + 心跳生命周期编排）。此处必须用预声明 + "=" 赋值：
 		// resp 是循环外声明的接收变量，若用 ":=" 会在循环块内新建同名局部变量造成
 		// 遮蔽，导致循环结束后 resp 仍为 nil（"empty response"）。
+		// G5 观测：obs 非 nil 时共享执行器为唯一发射点（attempt 事件/心跳事件/响应头时刻）。
+		obs := &cf524GuardObservation{
+			c:         c,
+			ctx:       ctx, // 原始请求 context（非护栏 reqCtx），避免护栏取消误判 client_gone
+			platform:  account.Platform,
+			stream:    reqStream,
+			attempt:   attempt,
+			startedAt: time.Now(),
+			snapshot:  snapshot,
+		}
 		var guardTimedOut bool
-		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, tlsProfile, guard, hbOwner, reqStream)
+		resp, err, guardTimedOut = s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, tlsProfile, guard, hbOwner, reqStream, obs)
 		if guardTimedOut {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
@@ -940,6 +953,12 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 //
 // 返回 timedOut 表示护栏已裁决超时（调用方据 snapshot 构造 newUpstreamFirstByteTimeoutError
 // 交 handler 换号/耗尽）。err 非 nil 且 timedOut=false 表示真实传输错误（护栏未触发）。
+//
+// G5 观测（单点埋点）：obs 非 nil 时，本函数是四个非 OpenAI 挂点唯一的观测发射点——
+// 护栏超时发 `gateway_first_byte_guard_triggered` attempt 事件、心跳已提交且此前未发
+// 则发 `gateway_upstream_heartbeat_started`、响应头到达则记录判别器时刻
+// `upstream_headers_received_ms`（经既有请求级完成日志输出，零新事件流）。obs 为 nil 时
+// 全部为 no-op（测试/无埋点调用方零影响）。
 func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 	upstreamReq *http.Request,
 	proxyURL string,
@@ -948,6 +967,7 @@ func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 	guard *upstreamFirstByteGuard,
 	hb *UpstreamHeartbeat,
 	clientStream bool,
+	obs *cf524GuardObservation,
 ) (resp *http.Response, err error, timedOut bool) {
 	// 心跳仅在有护栏（=有预算快照）且客户端流式时起搏：与 G2b 安装契约一致，owner
 	// 与快照同进同退；无快照则无 owner，绝不单独起搏心跳导致无超时保护的悬挂。
@@ -966,6 +986,8 @@ func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
+		obs.noteHeartbeatIfCommitted(hb)
+		obs.observeGuardTriggered()
 		return nil, nil, true
 	}
 	if err != nil {
@@ -980,6 +1002,7 @@ func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 		if hb != nil {
 			hb.Stop()
 		}
+		obs.noteHeartbeatIfCommitted(hb)
 		return nil, err, false
 	}
 	// 响应头到达（未超时）：护栏停表零取消；心跳按晚到契约裁决（Rejected/AfterCommit）。
@@ -992,6 +1015,8 @@ func (s *GatewayService) cf524ExecuteUpstreamWithGuard(
 		hb.OnUpstreamHeaderArrived()
 		hb.Stop()
 	}
+	obs.noteHeartbeatIfCommitted(hb)
+	obs.markUpstreamHeadersReceived()
 	return resp, nil, false
 }
 

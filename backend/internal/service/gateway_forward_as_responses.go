@@ -34,7 +34,10 @@ func (s *GatewayService) ForwardAsResponses(
 	account *Account,
 	body []byte,
 	parsed *ParsedRequest,
-) (*ForwardResult, error) {
+) (fwdResult *ForwardResult, fwdErr error) {
+	// G5 观测（单点埋点）：请求出口补发整条换号链未解析的 guard 终态关联事件（同
+	// request_id）。无 tracker 时为 no-op。
+	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngress(body)
@@ -160,7 +163,17 @@ func (s *GatewayService) ForwardAsResponses(
 	}
 
 	// 11. Send request（统一经护栏 + 心跳生命周期编排；clientStream 决定心跳是否起搏）
-	resp, err, guardTimedOut := s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), guard, hbOwner, clientStream)
+	// G5 观测：obs 非 nil 时共享执行器为唯一发射点（attempt 事件/心跳事件/响应头时刻）。
+	obs := &cf524GuardObservation{
+		c:         c,
+		ctx:       ctx,
+		platform:  account.Platform,
+		stream:    clientStream,
+		attempt:   1,
+		startedAt: startTime,
+		snapshot:  snapshot,
+	}
+	resp, err, guardTimedOut := s.cf524ExecuteUpstreamWithGuard(upstreamReq, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account), guard, hbOwner, clientStream, obs)
 	if guardTimedOut {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()

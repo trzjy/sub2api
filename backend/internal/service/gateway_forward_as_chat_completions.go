@@ -32,7 +32,10 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	account *Account,
 	body []byte,
 	parsed *ParsedRequest,
-) (*ForwardResult, error) {
+) (fwdResult *ForwardResult, fwdErr error) {
+	// G5 观测（单点埋点）：请求出口补发整条换号链未解析的 guard 终态关联事件（同
+	// request_id）。无 tracker 时为 no-op。
+	defer func() { cf524ResolveGuardOutcome(c, ctx, fwdErr) }()
 	startTime := time.Now()
 
 	// 1. Parse Chat Completions request
@@ -138,6 +141,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	}
 
 	// 11. Send request
+	attemptStart := time.Now()
 	resp, err := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	// 护栏先于响应头超时：窗口耗尽取消 reqCtx（body 未到达），产出
 	// UpstreamFailoverError 交由 handler 既有循环消费（换号或耗尽）。须在通用 transport
@@ -151,6 +155,9 @@ func (s *GatewayService) ForwardAsChatCompletions(
 		if hasSnapshot {
 			remaining = snapshot.RemainingBudget(time.Now())
 		}
+		// G5 观测（挂点 3 非共享执行器路径）：护栏触发 → attempt 事件（终态关联由
+		// 函数出口 defer 补发）。
+		cf524ObserveGuardTriggered(c, ctx, account.Platform, reqStream, 1, time.Since(attemptStart).Milliseconds(), remaining)
 		return nil, newUpstreamFirstByteTimeoutError(remaining)
 	}
 	if err != nil {
@@ -164,6 +171,8 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	if guard != nil {
 		guard.Stop()
 	}
+	// G5 观测：上游响应头到达（未超时）→ 记录判别器时刻（经既有完成日志字段输出）。
+	MarkUpstreamHeadersReceived(c, time.Now())
 	defer func() { _ = resp.Body.Close() }()
 
 	// 12. Handle error response with failover
