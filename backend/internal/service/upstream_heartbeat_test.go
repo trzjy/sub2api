@@ -372,3 +372,36 @@ func TestUpstreamHeartbeatClientDisconnectExits(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	require.Equal(t, framesAtCancel, w.heartbeatFrameCount())
 }
+
+// TestUpstreamHeartbeatG5d_CommittedBytesExcludesNoWrittenFlip 钉死组件侧 G5d 哨兵归一：
+// gin noWritten(-1) 首写经 WriteHeaderNow 翻转为 0。无 header 先行（跳过 writeSSEHeader、
+// 首帧直接写）时翻转发生在 before/after 快照之内——不归一时 before=-1、after=N →
+// CommittedBytes 记入 N+1（含翻转 +1），与 handler 侧归一口径错位。归一后恒为纯帧字节。
+func TestUpstreamHeartbeatG5d_CommittedBytesExcludesNoWrittenFlip(t *testing.T) {
+	_, w := newHeartbeatTestWriter()
+	require.Equal(t, -1, w.ResponseWriter.Size(), "前置：gin noWritten 哨兵态（无 header 先行）")
+	hb := NewUpstreamHeartbeat(context.Background(), w, hbSnapshot(1), time.Now())
+
+	// 无 header 先行：首帧直接写，首写内部 WriteHeaderNow 把 size 从 -1 翻转为 0。
+	hb.writeFrame()
+	require.EqualValues(t, len(heartbeatSSEFrame), hb.CommittedBytes(),
+		"无 header 先行首帧：CommittedBytes 必须恰为纯帧字节（不含 noWritten 翻转 +1）")
+	require.Equal(t, len(heartbeatSSEFrame), w.ResponseWriter.Size(),
+		"writer size 恰为纯帧字节（翻转后从 0 起算）")
+
+	// 续写第二帧：增量仍严格为纯帧字节。
+	hb.writeFrame()
+	require.EqualValues(t, 2*len(heartbeatSSEFrame), hb.CommittedBytes(),
+		"连续帧累计恒为纯帧字节")
+
+	// 对照组：header 先行路径（writeSSEHeader 的 WriteHeader 不翻转 size；翻转在快照外的
+	// Flush 内发生）本身零帧字节，其后首帧记账仍为纯帧字节。
+	_, w2 := newHeartbeatTestWriter()
+	hb2 := NewUpstreamHeartbeat(context.Background(), w2, hbSnapshot(1), time.Now())
+	hb2.writeSSEHeader()
+	require.EqualValues(t, 0, hb2.CommittedBytes(),
+		"header 先行：WriteHeader 不翻转 size，CommittedBytes 零帧字节")
+	hb2.writeFrame()
+	require.EqualValues(t, len(heartbeatSSEFrame), hb2.CommittedBytes(),
+		"header 先行后首帧：CommittedBytes 仍为纯帧字节")
+}

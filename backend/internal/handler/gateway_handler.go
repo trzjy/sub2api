@@ -2129,24 +2129,37 @@ func logHeartbeatStartFailure(ctx context.Context, path string, err error) {
 // 心跳字节重复计入，漏过窗口 = 前置心跳字节数。改为增量严格相等后，任何语义写出
 // 都会破坏相等 → 禁止 failover（现状防线不回退）。
 //
-// gin.Size() 的 noWritten 哨兵为 -1，首次 Flush 会跳到 0；该 +1 不计入组件按
-// size 差额累计的 CommittedBytes。二者都以"同一 writer 上 size 的差值"计量，故哨兵
-// 影响自动抵消（大小两侧各减一次），无需归一。
+// G5d 哨兵归一：gin.Size() 的 noWritten 哨兵为 -1，首次 Write/WriteString/Flush 经
+// WriteHeaderNow() 把 size 从 -1 翻转为 0 再累加字节。该翻转发生在捕获点
+// writerSizeBeforeForward 之后、组件 before/after 快照之外，不对称来源：handler 侧从
+// -1 起算得到 writtenDelta = N+1，组件侧 CommittedBytes 只含纯帧字节得到
+// heartbeatDelta = N，二者不等 → 纯心跳在零写出捕获场景被误判为语义写出、错误禁止
+// failover（第二轮外审 P1 回归）。故进入判定先把 writerSizeBeforeForward 与实测 size
+// 归一为逻辑尺寸（<0 → 0），所有比较用归一值。无心跳分支 `size == before` 结果与现状
+// 逐一等价（-1==-1 ⟺ 0==0；-1+S==-1 恒假 ⟺ S+0==0 恒假）。
 func heartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward, hbCommittedBaseline int) bool {
 	if c == nil || c.Writer == nil {
 		return true
 	}
-	size := c.Writer.Size()
+	// gin noWritten(-1) 逻辑尺寸归一（注释见上）。
+	normalizeSize := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	size := normalizeSize(c.Writer.Size())
+	before := normalizeSize(writerSizeBeforeForward)
 	hb, _ := service.UpstreamHeartbeatFromContext(c.Request.Context())
 	if hb == nil {
-		return size == writerSizeBeforeForward
+		return size == before
 	}
 	committed := int(hb.CommittedBytes())
 	if committed == hbCommittedBaseline {
 		// 自基线以来零心跳提交：退化为既有 size==before 相等判定（同一路径）。
-		return size == writerSizeBeforeForward
+		return size == before
 	}
-	writtenDelta := size - writerSizeBeforeForward
+	writtenDelta := size - before
 	heartbeatDelta := committed - hbCommittedBaseline
 	return writtenDelta == heartbeatDelta
 }

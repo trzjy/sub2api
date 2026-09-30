@@ -249,9 +249,19 @@ func (h *UpstreamHeartbeat) writeFrame() {
 
 // sizeNow 返回当前 writer 已写 body 字节数（gin.ResponseWriter.Size()）。非 gin
 // writer 时返回 0（该路径仅用于单测构造，生产必为 gin writer）。
+//
+// G5d 哨兵归一：gin noWritten 哨兵为 -1，首次 Write/WriteString/Flush 触发
+// WriteHeaderNow() 把 size 从 -1 翻转为 0。noWritten 翻转发生在 Flush/首写的
+// WriteHeaderNow 内、在调用方 before/after 快照之外，若原样透传 -1 会把 +1 记入
+// CommittedBytes（如无 header 先行首帧 before=-1、after=N → delta=N+1），与 handler
+// 侧归一口径错位。统一按 <0 → 0 归一，保证 CommittedBytes 恒为纯帧字节、与 handler
+// 归一口径对称。
 func (h *UpstreamHeartbeat) sizeNow() int64 {
 	if gw, ok := h.w.(gin.ResponseWriter); ok {
-		return int64(gw.Size())
+		if size := gw.Size(); size > 0 {
+			return int64(size)
+		}
+		return 0
 	}
 	return 0
 }

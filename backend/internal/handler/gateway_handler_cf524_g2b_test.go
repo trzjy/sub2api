@@ -275,6 +275,70 @@ func TestCF524G2b_HeartbeatGuardPreForwardBytes(t *testing.T) {
 		"前置心跳字节后写 M 个纯语义字节（M<总提交 N）→ 增量不等 → 必须禁止 failover（本次缺陷钉死）")
 }
 
+// captureSentinelHeartbeat 复刻 handler 调用点捕获语义，但保持在 gin noWritten(-1)
+// 哨兵态：零写出时捕获 before/baseline，随后启动心跳并提交 SSE 头（Flush 触发 -1→0
+// 翻转）+ N 帧纯心跳字节。返回捕获值与 owner，供 G5d 哨兵回归用例共用。
+func captureSentinelHeartbeat(t *testing.T, c *gin.Context) (int, int, *service.UpstreamHeartbeat) {
+	t.Helper()
+	require.Equal(t, -1, c.Writer.Size(), "前置：捕获点必须处于 gin noWritten 哨兵态（零写出）")
+	snapshot := service.NewRequestBudgetSnapshot(30, 1, time.Now().Add(-2*time.Second), true)
+	hb := service.NewUpstreamHeartbeat(c.Request.Context(), c.Writer, snapshot, time.Now())
+	c.Request = c.Request.WithContext(service.WithUpstreamHeartbeat(c.Request.Context(), hb))
+
+	// 与 handler 调用点同型：捕获时零写出（size=-1、baseline=0）。
+	writerSizeBeforeForward := c.Writer.Size()
+	hbCommittedBaseline := int(hb.CommittedBytes())
+	require.Equal(t, -1, writerSizeBeforeForward)
+	require.Equal(t, 0, hbCommittedBaseline)
+
+	require.NoError(t, hb.Start())
+	waitHeartbeatCommittedForTest(t, hb) // SSE 头提交：Flush 把 size 从 -1 翻转为 0
+	require.NoError(t, hb.Resume(), "捕获后提交 SSE 头 + 一帧纯心跳（零语义写出）")
+	require.Greater(t, int(hb.CommittedBytes()), hbCommittedBaseline)
+	return writerSizeBeforeForward, hbCommittedBaseline, hb
+}
+
+// TestCF524G5d_HeartbeatGuardSentinelZeroWrite_PureHeartbeatClean 钉死第二轮外审 P1 回归
+// （gin noWritten(-1) 哨兵归一）：捕获时零写出（before=-1、baseline=0）、捕获后心跳先
+// 提交 SSE 头（Flush 触发 -1→0 翻转）再提交 N 帧字节、零语义写出 → 归一口径下增量
+// 严格相等 → 必须 clean（允许换号）。修复前 writtenDelta=N+1 ≠ heartbeatDelta=N → 误 veto。
+func TestCF524G5d_HeartbeatGuardSentinelZeroWrite_PureHeartbeatClean(t *testing.T) {
+	c, _ := newCF524TestContext(t, "/v1/messages")
+	writerSizeBeforeForward, hbCommittedBaseline, hb := captureSentinelHeartbeat(t, c)
+	defer hb.Stop()
+
+	require.True(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+		"哨兵态捕获 + 纯心跳提交（含 -1→0 翻转）+ 零语义写出 → 归一后增量相等 → 必须 clean（允许换号）")
+}
+
+// TestCF524G5d_HeartbeatGuardSentinelZeroWrite_SemanticVeto 哨兵归一不得弱化防线：同一
+// 哨兵零写出捕获场景下，除纯心跳外再写 S>0 语义字节 → 增量不等 → 必须 veto。
+func TestCF524G5d_HeartbeatGuardSentinelZeroWrite_SemanticVeto(t *testing.T) {
+	c, _ := newCF524TestContext(t, "/v1/messages")
+	writerSizeBeforeForward, hbCommittedBaseline, hb := captureSentinelHeartbeat(t, c)
+	defer hb.Stop()
+
+	require.True(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+		"前置：纯心跳阶段仍 clean")
+	_, _ = c.Writer.WriteString("event: message_start\n") // S>0 语义写出
+	require.False(t, heartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+		"哨兵态捕获后写语义字节 → 增量不等 → 必须 veto（防线不回退）")
+}
+
+// TestCF524G5d_HeartbeatGuardNoHeartbeatZeroWriteClean 无心跳零写出：before=-1 归一后与
+// size=-1（归一 0）相等 → clean，与现状 `-1==-1` 逐一等价；写语义字节后仍禁止 failover。
+func TestCF524G5d_HeartbeatGuardNoHeartbeatZeroWriteClean(t *testing.T) {
+	c, _ := newCF524TestContext(t, "/v1/messages")
+	before := c.Writer.Size()
+	require.Equal(t, -1, before, "前置：零写出哨兵态")
+	require.True(t, heartbeatFailoverGuardStillClean(c, before, 0),
+		"无心跳零写出：-1 归一后 clean（与现状 -1==-1 等价）")
+
+	_, _ = c.Writer.WriteString("semantic")
+	require.False(t, heartbeatFailoverGuardStillClean(c, before, 0),
+		"无心跳真实写出必须仍禁止 failover（防线不回退）")
+}
+
 // cf524NoFlusherWriter 是不实现 http.Flusher 的裸 http.ResponseWriter，用于注入
 // "缺 Flush 能力"形态（生产 gin writer 恒实现 Flusher，该形态不可达，但组件失败关闭
 // 契约仍须保留可见性）。
