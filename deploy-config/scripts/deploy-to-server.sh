@@ -21,9 +21,9 @@ TAG=$(git rev-parse --short HEAD)
 # 5. 构建带 -w 后缀的部署镜像
 docker build -t "sub2api:${TAG}-w" .
 
-# 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件）
+# 6. 幂等更新同目录 .env 中 SUB2API_IMAGE_TAG（已有原地替换，无则追加；不重建整个文件；compose.yml 的 image 行自带 sub2api: 前缀，故 .env 存裸 tag 不可带前缀）
 ENV_FILE="/opt/sub2api/.env"
-NEW_VAL="SUB2API_IMAGE_TAG=sub2api:${TAG}-w"
+NEW_VAL="SUB2API_IMAGE_TAG=${TAG}-w"
 if grep -q '^SUB2API_IMAGE_TAG=' "$ENV_FILE"; then
   sed -i "s|^SUB2API_IMAGE_TAG=.*|${NEW_VAL}|" "$ENV_FILE"
 else
