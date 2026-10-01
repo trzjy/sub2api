@@ -4,7 +4,8 @@ package handler
 // sanitizeGroupMessagesDispatchFields 对非 openai/composite 平台强制 AllowMessagesDispatch
 // =false，故 CN 分组必须与 grok 一样在闸门处豁免，否则原生 Anthropic 直通
 //（Claude Code 主用例）永远不可达。composite 分组解析到 grok/CN 目标时按
-// 目标平台豁免，解析到 openai 目标仍受其可配置开关控制。
+// 目标平台豁免，解析到 openai 目标仍受其可配置开关控制。Muse 平台方案已批准
+// 下游全协议支持，与 grok/CN"messages 是主要服务形态"同语义，同一 403 陷阱，一并豁免。
 
 import (
 	"net/http/httptest"
@@ -18,7 +19,7 @@ import (
 func TestAllowOpenAICompatibleMessagesDispatch_CNProvidersExempt(t *testing.T) {
 	require.True(t, allowOpenAICompatibleMessagesDispatch(nil, nil), "无 key 保持放行")
 
-	for _, platform := range []string{service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformGrok} {
+	for _, platform := range []string{service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformGrok, service.PlatformMuse} {
 		apiKey := &service.APIKey{Group: &service.Group{Platform: platform, AllowMessagesDispatch: false}}
 		require.True(t, allowOpenAICompatibleMessagesDispatch(nil, apiKey),
 			"%s 分组必须豁免 allow_messages_dispatch 闸门", platform)

@@ -299,13 +299,17 @@ func (a *Account) IsCNProvider() bool {
 // openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
 // 兼容上游，也经 OpenAI 网关转发；CodeBuddy 是腾讯 CLI 的 Chat Completions
 // 兼容上游（forwardCodeBuddy 挂在 OpenAIGatewayService.Forward 的 platform 分支）；
+// muse 是 OpenCode Go 上游 Meta Muse Spark Contributor（非国产供应商），上游为
+// Responses 协议，转发链与 openai responses 账号同轨，故同样走 OpenAI 网关并经
+// 调度器平台精确匹配选中；
 // 网页逆向接入账号（官方平台 + access_mode=web）经 OpenAI 网关由各自适配器
 // （forwardWebZhipu / forwardWebDeepseek / forwardWebKimi）转换为官方网页端协议。
 // 调度器的平台匹配谓词依赖本判定（openai_account_scheduler.go），漏加会导致
 // 网页账号永远无法被选中。
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() ||
-		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || a.IsWebAccessMode())
+		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || a.Platform == PlatformMuse ||
+		a.IsWebAccessMode())
 }
 
 // UsesOpenAIProtocolSharedBaseURL 报告账号是否属于走共享 OpenAI 兼容

@@ -318,15 +318,19 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// 国产供应商分组与 grok 同语义:/v1/messages 就是其主要服务形态(anthropic
 	// 协议账号原生直通 Claude Code),无需 allow_messages_dispatch 开关授权——
 	// 该开关对非 openai/composite 平台恒被 sanitizeGroupMessagesDispatchFields 置 false,
-	// 若不豁免,CN 分组将永远 403。
-	if service.IsCNProvider(apiKey.Group.Platform) || apiKey.Group.Platform == service.PlatformOther {
+	// 若不豁免,CN 分组将永远 403。Muse 平台方案已批准下游全协议支持(/v1/messages、
+	// /v1/chat/completions、/v1/responses),与 grok/CN"messages 是主要服务形态"同语义,
+	// 同一 403 陷阱,故一并豁免。
+	if service.IsCNProvider(apiKey.Group.Platform) || apiKey.Group.Platform == service.PlatformOther ||
+		apiKey.Group.Platform == service.PlatformMuse {
 		return true
 	}
 	// composite 分组解析到 grok/CN 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsCNProvider(platform) || platform == service.PlatformOther) {
+			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
+				platform == service.PlatformOther || platform == service.PlatformMuse) {
 			return true
 		}
 	}
