@@ -58,8 +58,8 @@ else
   printf '%s\n' "$NEW_VAL" >> "$ENV_FILE"
 fi
 
-# 7. 用更新的镜像标签重建 sub2api 服务
-docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+# 7. 用更新的镜像标签重建服务（必须全项目 up -d：本项目含 xianyu-worker 等共享 xianyu-internal 网络的服务，单服务 up 会触发网络重建失败导致服务零容器，见 sub2api-ops.md §7.12）
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 
 # 8. 后置断言（逐条执行，任一失败指名并 exit 1）
 

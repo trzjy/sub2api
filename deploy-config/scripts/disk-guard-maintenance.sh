@@ -147,14 +147,15 @@ if [[ -s "$MARKER" ]]; then
     if [[ "$DRY_RUN" == "1" ]]; then
       log "[dry-run] cp $ENV_FILE $ENV_FILE.bak-$TS"
       log "[dry-run] sed SUB2API_IMAGE_TAG=$TAG into $ENV_FILE"
-      log "[dry-run] docker compose --env-file $ENV_FILE -f /opt/sub2api/deploy-config/compose.yml -p deploy-config up -d --force-recreate sub2api"
+      log "[dry-run] docker compose --env-file $ENV_FILE -f /opt/sub2api/deploy-config/compose.yml -p deploy-config up -d --force-recreate"
       log "[dry-run] health check $APP_HEALTH_URL 最长 90s，失败则回滚（还原 .env 备份 + 旧 tag 重建 + 删标记）"
     else
       ENVBAK="$ENV_FILE.bak-$TS"
       cp "$ENV_FILE" "$ENVBAK"
       log ".env 已备份 -> $ENVBAK"
       sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=$TAG/" "$ENV_FILE"
-      (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate sub2api)
+      # 必须全项目 up -d（不带服务名）：单服务 up 会触发共享网络 xianyu-internal 重建失败导致 sub2api 零容器（见 sub2api-ops.md §7.12）
+      (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate)
       ok=0
       for _ in $(seq 1 30); do
         if curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1; then ok=1; break; fi
@@ -166,7 +167,7 @@ if [[ -s "$MARKER" ]]; then
       else
         log "ROLLBACK: 新镜像 $TAG 90s 健康检查未通过，还原 .env 并用旧镜像重建"
         cp "$ENVBAK" "$ENV_FILE"
-        (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate sub2api)
+        (cd /opt/sub2api/deploy-config && docker compose --env-file "$ENV_FILE" -f compose.yml -p deploy-config up -d --force-recreate)
         rm -f "$MARKER"
         for _ in $(seq 1 20); do
           curl -sf "$APP_HEALTH_URL" >/dev/null 2>&1 && break

@@ -279,7 +279,7 @@ cd /opt/sub2api/build-$TARGET && nohup docker build -t sub2api:$TARGET-w \
 
 # 4. 切换镜像标签并重建容器
 sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=$TARGET-w/" /opt/sub2api/.env
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 
 # 5. 验证
 sleep 18
@@ -526,7 +526,7 @@ ls -1 /opt/sub2api/.env.bak-*
 
 # 手动恢复
 cp /opt/sub2api/.env.bak-<timestamp> /opt/sub2api/.env
-docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d --force-recreate
 ```
 
 ### 7.10 磁盘打满（2026-09-26 事故 runbook）
@@ -581,7 +581,7 @@ docker inspect sub2api --format "{{.State.Status}} {{.State.Health.Status}} {{.R
 
 **成因**：应用启动时按「文件名 + 全文 checksum」比对 `schema_migrations` 记录，**哪怕只改注释一行的字节也会 mismatch**，随后 fail-fast 退出 → compose 无限重启 → 源站无响应 → Cloudflare 回 502。2026-10-01 事故即由提交 `657cd2d16`（自述「注释级、零语义」，实际改了已应用的 257/263/264/265）触发，全站中断 10 分钟。
 
-**止血**：立即把 `.env` 的 `SUB2API_IMAGE_TAG` 切回上一个可用 `<commit>-w` 并 `docker compose ... up -d sub2api`（见 §9 回滚操作），再 `git checkout <基线sha> -- backend/migrations/<文件>` 还原被改动的迁移文件。
+**止血**：立即把 `.env` 的 `SUB2API_IMAGE_TAG` 切回上一个可用 `<commit>-w` 并 `docker compose ... up -d`（不带服务名的全项目重建，见 §9 回滚操作），再 `git checkout <基线sha> -- backend/migrations/<文件>` 还原被改动的迁移文件。
 
 **预防（部署前）**：每个含 `backend/migrations/` 改动的版本，构建镜像之前先跑迁移不可变门禁（§5 步骤 2b；走 `deploy-to-server.sh` 时会在 build 前自动调用）：
 
@@ -591,6 +591,38 @@ echo "EXIT_CODE=$?"     # 0 放行；1 阻断（输出点名被改动的已应�
 ```
 
 库不可用时门禁按 fail-closed 阻断；基线 sha 解析不到则警告放行但会注明「未做迁移差异检查」，此时需人工核对迁移目录。
+
+---
+
+### 7.12 单服务 `up -d sub2api` 触发网络重建 → 服务零容器 / 全站 502（2026-10-02 新增）
+
+**现象**：`up -d sub2api` 后**没有任何 sub2api 容器在跑**（旧容器已 `Exited (0)`，新容器没起），全站 502。日志尾部是完整的优雅关闭序列（`[Cleanup] All cleanup steps completed`），**看不出报错**——因为失败发生在 compose 层，不在应用层。
+
+**直接报错**（重跑 up 才可见）：
+
+```bash
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+# Error response from daemon: container ... is not connected to the network deploy-config_xianyu-internal
+```
+
+**成因**：`sub2api` 与 `xianyu-worker`/`xianyu-worker-mysql`/`xianyu-worker-redis` **同属一个 compose 项目**（`deploy-config`，同一份 `compose.yml`）。当以 `up -d sub2api` **只针对单服务**执行时，compose 的 network reconcile 会尝试重建共享网络 `deploy-config_xianyu-internal`：
+
+1. 若该网络已被 xianyu-worker 端点占用 → 删网络失败（`has active endpoints`）→ abort，新容器不创建；
+2. 反复重试可能导致 sub2api 容器只接上第一个网络（`sub2api-network`）、漏接 `xianyu-internal`，为下次部署埋雷。
+
+**止血（恢复服务）**：用**全项目** `up -d`（不要带服务名），让 compose 一次性协调全部服务与网络：
+
+```bash
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
+# 预期：Network ... Removed → Created；所有容器 Started；sub2api Up (healthy)
+docker inspect sub2api --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+# 必须同时出现 deploy-config_sub2api-network 与 deploy-config_xianyu-internal
+```
+
+> 代价：`xianyu-worker` 三件套会一并重建（约十几秒中断）。它们有持久卷（`/opt/sub2api-data/xianyu_worker_data`）+ `unless-stopped`，会自动恢复，补发货轮询随之上线。
+> 若旧容器残留为 `Exited` 且网络归属错误，可先 `docker rm sub2api` 再执行上面的全项目 up。**数据在 bind mount `/opt/sub2api-data/data`，删容器不丢数据。**
+
+**预防**：在本项目（`deploy-config` 含 worker 等多服务）**发布/回滚时统一使用不带服务名的全项目 `up -d`**，或至少确认命令不会触发网络重建。§5 部署、§9 回滚中的 `up -d sub2api` 若遇到上述报错，一律改用全项目 `up -d`。
 
 ---
 
@@ -615,7 +647,7 @@ docker images sub2api
 
 # 2. 切换回目标标签并重建
 sed -i "s/^SUB2API_IMAGE_TAG=.*/SUB2API_IMAGE_TAG=<上一哈希>-w/" /opt/sub2api/.env
-cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
+cd /opt/sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 
 # 3. 验证
 sleep 15 && curl -s http://127.0.0.1:3300/health && docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps
