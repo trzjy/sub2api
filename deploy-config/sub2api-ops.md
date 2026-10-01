@@ -259,6 +259,17 @@ cd /opt/sub2api && ./deploy-config/scripts/predeploy-migration-guard.sh "$TARGET
 #   1) 还原文件到被应用时的内容：git checkout <基线sha> -- backend/migrations/<文件>
 #   2) 或保留原文件不动，新建更高序号的迁移文件承载本次变更
 
+# 2c. 门禁脚本安装（一次性；脚本源有变更时需重装）
+#     仓库内 deploy-config/scripts/predeploy-migration-guard.sh 是 SSOT。部署脚本
+#     deploy-to-server.sh 在拉取后会把工作树 checkout 到目标 ref，早于门禁引入的旧
+#     ref 里没有这个脚本（实测回滚到旧提交时 exit 127），而回滚是事故止血的标准动作，
+#     故门禁必须安装到不随工作树变化的稳定绝对路径：
+cd /opt/sub2api && install -m 0755 deploy-config/scripts/predeploy-migration-guard.sh /usr/local/sbin/sub2api-migration-guard
+# 调用优先级（deploy-to-server.sh 第 3b 步实现）：
+#   ① /usr/local/sbin/sub2api-migration-guard      —— 安装版，优先
+#   ② deploy-config/scripts/predeploy-migration-guard.sh —— 仓库版，回退
+#   ③ 两者都不可用 → fail-closed 阻断 exit 1，并打印上面的 install 命令
+
 # 3. 服务器端构建镜像（后台运行 + 日志，构建约 5-10 分钟）
 cd /opt/sub2api/build-$TARGET && nohup docker build -t sub2api:$TARGET-w \
   --build-arg GOPROXY=https://goproxy.cn,direct \

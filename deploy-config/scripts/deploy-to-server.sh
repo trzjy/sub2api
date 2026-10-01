@@ -18,7 +18,30 @@ git checkout -f "$REF"
 # 3b. 迁移不可变门禁（构建之前）：阻止「已应用于生产库的迁移文件被改动」进镜像。
 #     命中即 exit 1 中止部署，输出会点名被阻断的迁移文件；语义与破例开关见
 #     deploy-config/scripts/predeploy-migration-guard.sh 头部注释。
-./deploy-config/scripts/predeploy-migration-guard.sh "$REF"
+#
+#     必须优先调用「已安装到 /usr/local/sbin 的稳定绝对路径」：第 3 步已把工作树
+#     checkout 到目标 ref，若该 ref 早于门禁脚本的引入，仓库内脚本会随工作树一起
+#     消失（实测：回滚到旧提交时 exit 127 "No such file or directory"）。而回滚正是
+#     事故止血的标准动作，门禁必须在任何 ref 下都可用，故照 sub2api-clean-releases
+#     的惯例安装到 /usr/local/sbin。两者都缺失时 fail-closed 阻断 —— 门禁缺失即等于
+#     没有保护，与门禁内部「postgres 不可连则阻断」的取向一致。
+GUARD_INSTALLED="/usr/local/sbin/sub2api-migration-guard"
+GUARD_IN_REPO="./deploy-config/scripts/predeploy-migration-guard.sh"
+
+if [ -x "$GUARD_INSTALLED" ]; then
+  "$GUARD_INSTALLED" "$REF"
+elif [ -x "$GUARD_IN_REPO" ]; then
+  "$GUARD_IN_REPO" "$REF"
+else
+  echo "===================================================================="
+  echo "阻断 · 迁移不可变门禁不可用：${GUARD_INSTALLED} 与 ${GUARD_IN_REPO} 均缺失"
+  echo "===================================================================="
+  echo "门禁缺失 = 没有保护，按 fail-closed 中止部署（构建之前）。"
+  echo "一分钟恢复（安装版门禁，与回滚场景兼容）："
+  echo "  cd /opt/sub2api && git fetch origin && git checkout -f origin/main"
+  echo "  install -m 0755 deploy-config/scripts/predeploy-migration-guard.sh ${GUARD_INSTALLED}"
+  exit 1
+fi
 
 # 4. 记录 short SHA
 TAG=$(git rev-parse --short HEAD)
