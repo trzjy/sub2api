@@ -93,6 +93,32 @@ func TestCollectCCStreamAsResponse_UsageWrittenBack(t *testing.T) {
 	require.Equal(t, 0, rec.Body.Len(), "聚合期间零字节写客户端")
 }
 
+// ①b F5：上游仅发一帧显式空串增量 delta.content: ""（从未发非空 content）→
+// content 序列化为 JSON 空字符串 ""（gjson Type==JSON String），非 null。
+func TestCollectCCStreamAsResponse_ExplicitEmptyContentDelta(t *testing.T) {
+	c, rec := newBridgeTestCtx()
+	events := []string{
+		`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m",` +
+			`"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		`[DONE]`,
+	}
+	resp, _, err := (&OpenAIGatewayService{}).collectCCStreamAsResponse(
+		fakeCCStreamResponse(t, events), c, "test")
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 1)
+
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	cv := gjson.GetBytes(body, "choices.0.message.content")
+	require.Equal(t, gjson.String, cv.Type,
+		"显式空串增量必须序列化为 JSON 空字符串（gjson String），非 null")
+	require.Equal(t, `""`, string(resp.Choices[0].Message.Content),
+		"message.content 应为 JSON 空字符串 \"\"")
+	require.Equal(t, 0, rec.Body.Len())
+}
+
 // ② tool_calls 分片按 index 合并（arguments 拼接、name 首片、Index=nil）。
 func TestCollectCCStreamAsResponse_ToolCallsMerged(t *testing.T) {
 	c, rec := newBridgeTestCtx()

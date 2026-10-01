@@ -25,11 +25,12 @@ func (s *OpenAIGatewayService) collectCCStreamAsResponse(
 	// choiceAcc 是按 choice.index 累积一组 content/reasoning/tool_calls/
 	// finish_reason 的累加器（n>1 时每 index 一组）。
 	type choiceAcc struct {
-		content   strings.Builder
-		reasoning strings.Builder
-		finish    string
-		tools     map[int]*aggregatedToolCall
-		toolOrder []int
+		content     strings.Builder
+		contentSeen bool // 是否收到过任何 content 增量（含显式空串 ""）
+		reasoning   strings.Builder
+		finish      string
+		tools       map[int]*aggregatedToolCall
+		toolOrder   []int
 	}
 	accs := map[int]*choiceAcc{}
 	var accOrder []int
@@ -70,6 +71,7 @@ func (s *OpenAIGatewayService) collectCCStreamAsResponse(
 					accOrder = append(accOrder, ch.Index)
 				}
 				if ch.Delta.Content != nil {
+					acc.contentSeen = true
 					acc.content.WriteString(*ch.Delta.Content)
 				}
 				if ch.Delta.ReasoningContent != nil {
@@ -140,10 +142,11 @@ func (s *OpenAIGatewayService) collectCCStreamAsResponse(
 			// envelope 常量：非流式契约，不依赖上游 chunk 回显。
 			Role: "assistant",
 		}
-		// 纯工具调用 choice 从不携带 content 增量：content 组装为 JSON null，
-		// 与原生非流式工具调用响应（message.content: null）一致。收到过任何 content
-		// 增量才 marshal 为 JSON 字符串。
-		if acc.content.Len() == 0 {
+		// 纯工具调用 choice 从不携带 content 增量（contentSeen==false）：
+		// content 组装为 JSON null，与原生非流式工具调用响应
+		// （message.content: null）一致。收到过任何 content 增量（含显式空串
+		// delta.content: ""）都 marshal 为 JSON 字符串，空串增量 → ""（非 null）。
+		if !acc.contentSeen {
 			msg.Content = json.RawMessage("null")
 		} else {
 			contentJSON, err := json.Marshal(acc.content.String())
