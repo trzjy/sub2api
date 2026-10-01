@@ -31,7 +31,7 @@ else
 fi
 
 # 7. 用更新的镜像标签重建 sub2api 服务
-docker compose -f deploy-config/compose.yml up -d sub2api
+docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d sub2api
 
 # 8. 后置断言（逐条执行，任一失败指名并 exit 1）
 
