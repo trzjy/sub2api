@@ -1,8 +1,8 @@
 -- 265_codebuddy_credit_attempt_version_sequence.sql
 --
 -- 独占所有者：B4 Card B（唯一条件更新入口）。方案
--- docs-local/codebuddy-b4-implementation-plan.md §1/§3 Card B；权威
--- docs-local/codebuddy-cockpit-fusion-plan.md §4.1 addendum。
+-- docs/codebuddy-b4-implementation-plan.md §1/§3 Card B；权威
+-- docs/codebuddy-cockpit-fusion-plan.md §4.1 addendum。
 --
 -- 目的：为 CodeBuddy 积分快照的 attempt_version 创建 DB 分配的单调号 sequence。
 -- 应用进程在抓取开始时调用 nextval 取得版本号，成功/失败提交阶段均不得再次递增

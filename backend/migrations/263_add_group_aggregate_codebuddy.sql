@@ -1,5 +1,5 @@
 -- 263_add_group_aggregate_codebuddy.sql
--- 聚合直绑分组开关（方案 docs-local/codebuddy-b2-aggregate-switch-plan.md §1.1）：
+-- 聚合直绑分组开关（方案 docs/codebuddy-b2-aggregate-switch-plan.md §1.1）：
 -- 分组级聚合绑定开关。true=该聚合族分组候选池并入 codebuddy；false=关闭（默认），
 -- 该分组任何生产选号路径都看不到 codebuddy 账号。
 -- 仅聚合族平台（deepseek/zhipu/kimi/minimax/other/codebuddy）可置 true，否则
