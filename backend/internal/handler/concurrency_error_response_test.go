@@ -27,7 +27,7 @@ func TestConcurrencyErrorResponse(t *testing.T) {
 			wantStatus:  http.StatusTooManyRequests,
 			wantType:    "rate_limit_error",
 			wantCode:    gatewayConcurrencyLimitCode,
-			wantMessage: "Concurrency limit exceeded for account, please retry later",
+			wantMessage: infraerrors.AccountSlotConcurrencyLimit,
 		},
 		{
 			name:        "full local wait queue has gateway code",

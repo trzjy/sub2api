@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -315,11 +314,17 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	userReleaseFunc, err := geminiConcurrency.AcquireScopedUserSlotWithWait(c, scope, authSubject.UserID, stream, &streamStarted)
 	if err != nil {
 		reqLog.Warn("gemini.user_slot_acquire_failed", zap.Error(err))
-		msg := fmt.Sprintf("Concurrency limit exceeded for %s, please retry later", scope.Kind)
-		// 订阅/计量用户撞并发上限时渲染可配文案；account 维度（本路径不涉及）保持英文。
+		// 默认中文并发文案：account 维度 → 账号槽并发上限；user/group 渲染 {scope}/{limit} 默认模板。
+		// 已配置可配文案（tmpl）时，user/group 维度套用渲染逻辑，与 renderConcurrencyLimitMessage 收敛。
+		var ce *ConcurrencyError
+		errors.As(err, &ce)
+		slotKind, slotLimit := scope.Kind, 0
+		if ce != nil {
+			slotKind, slotLimit = ce.SlotType, ce.Limit
+		}
+		msg := renderConcurrencyLimitMessage("", slotKind, slotLimit)
 		if tmpl := h.settingService.GetConcurrencyLimitMessage(c.Request.Context()); strings.TrimSpace(tmpl) != "" {
-			var ce *ConcurrencyError
-			if errors.As(err, &ce) && (ce.SlotType == "user" || ce.SlotType == "group") {
+			if ce != nil && (ce.SlotType == "user" || ce.SlotType == "group") {
 				msg = renderConcurrencyLimitMessage(tmpl, ce.SlotType, ce.Limit)
 			}
 		}

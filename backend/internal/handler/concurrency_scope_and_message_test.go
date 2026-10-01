@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -135,18 +136,18 @@ func TestRenderConcurrencyLimitMessage(t *testing.T) {
 		want string
 	}{
 		{
-			name:  "empty template falls back to english byte-for-byte (user)",
+			name:  "empty template falls back to chinese default (user, limit>0)",
 			tmpl:  "",
 			kind:  "user",
 			limit: 5,
-			want:  "Concurrency limit exceeded for user, please retry later",
+			want:  "您的用户并发请求已达上限（5），请降低并发或稍后重试",
 		},
 		{
-			name:  "whitespace-only template falls back to english (group)",
+			name:  "whitespace-only template falls back to chinese no-limit (group)",
 			tmpl:  "   ",
 			kind:  "group",
 			limit: 0,
-			want:  "Concurrency limit exceeded for group, please retry later",
+			want:  "您的并发请求已达上限，请稍后重试",
 		},
 		{
 			name:  "user scope and limit both substituted",
@@ -167,21 +168,21 @@ func TestRenderConcurrencyLimitMessage(t *testing.T) {
 			tmpl:  "自定义{s Limit}",
 			kind:  "account",
 			limit: 5,
-			want:  "Concurrency limit exceeded for account, please retry later",
+			want:  infraerrors.AccountSlotConcurrencyLimit,
 		},
 		{
-			name:  "no limit with {limit} template falls back to english (user), no bare placeholder",
+			name:  "no limit with {limit} template falls back to chinese no-limit (user), no bare placeholder",
 			tmpl:  "上限为{limit}",
 			kind:  "user",
 			limit: 0,
-			want:  "Concurrency limit exceeded for user, please retry later",
+			want:  "您的并发请求已达上限，请稍后重试",
 		},
 		{
-			name:  "no limit with {limit} template falls back to english (group), no bare placeholder",
+			name:  "no limit with {limit} template falls back to chinese no-limit (group), no bare placeholder",
 			tmpl:  "上限为{limit}",
 			kind:  "group",
 			limit: 0,
-			want:  "Concurrency limit exceeded for group, please retry later",
+			want:  "您的并发请求已达上限，请稍后重试",
 		},
 		{
 			name:  "other braces preserved verbatim",

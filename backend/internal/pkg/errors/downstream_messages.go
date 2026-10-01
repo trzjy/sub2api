@@ -53,6 +53,10 @@ const (
 	// {scope} 渲染为「用户/订阅」，{limit} 渲染为触发超限的具体上限数字——
 	// ConcurrencyError 构造链保证 Limit 恒 >0（方案 §2.3 核实链），占位符恒有值。
 	ConcurrencyDefaultTemplate = "您的{scope}并发请求已达上限（{limit}），请降低并发或稍后重试"
+	// ConcurrencyLimitReachedNoLimit 为并发上限触发但上限值拿不到（含不限 0，已核实不可达）
+	// 时的防御性回退文案：不含 {limit} 占位符，避免向用户暴露裸占位符。与 ConcurrencyDefaultTemplate
+	// 同语义锚点（user/group 可配文案缺失场景），仅用于 limit<=0 回退。
+	ConcurrencyLimitReachedNoLimit = "您的并发请求已达上限，请稍后重试"
 
 	// 请求侧/配置边界（调用方用模型名做 Sprintf）。
 	ModelNotInGroup = "模型 %s 不在当前分组支持范围内，请检查模型名称或联系管理员"
