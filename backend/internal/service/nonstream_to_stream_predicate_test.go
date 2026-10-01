@@ -26,11 +26,13 @@ func newNS2SAccount(platform, accountType, baseURL, accessMode string) *Account 
 }
 
 func enabledService() *OpenAIGatewayService {
-	return &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{NonstreamToStreamEnabled: true}}}
+	// 零值 GatewayConfig = 启用（NonstreamToStreamDisabled 零值 false），
+	// 显式省略该字段即落在启用侧；不写 Disabled:false 以免重复语义。
+	return &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{}}}
 }
 
 func disabledService() *OpenAIGatewayService {
-	return &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{NonstreamToStreamEnabled: false}}}
+	return &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{NonstreamToStreamDisabled: true}}}
 }
 
 // TestShouldConvertNonstreamToStream 资格矩阵：覆盖各个平台/账号形态的转换判定。
@@ -54,6 +56,10 @@ func TestShouldConvertNonstreamToStream(t *testing.T) {
 		{"zhipu apikey + 官方coding", newNS2SAccount(PlatformZhipu, AccountTypeAPIKey, DefaultZhipuCodingBaseURL, ""), false},
 		{"minimax apikey + 国内官方", newNS2SAccount(PlatformMiniMax, AccountTypeAPIKey, DefaultMiniMaxBaseURL, ""), false},
 		{"minimax apikey + 国际官方", newNS2SAccount(PlatformMiniMax, AccountTypeAPIKey, "https://api.minimax.io/v1", ""), false},
+
+		// 官方域大小写变体（host 比对前小写化）→ 仍不转换
+		{"deepseek 官方大写直连", newNS2SAccount(PlatformDeepseek, AccountTypeAPIKey, "HTTPS://API.DEEPSEEK.COM/v1", ""), false},
+		{"kimi 官方大小写混合", newNS2SAccount(PlatformKimi, AccountTypeAPIKey, "https://Api.Moonshot.CN/v1", ""), false},
 
 		// other apikey（任意自定义 base_url）= 转换
 		{"other apikey + 自定义中转", newNS2SAccount(PlatformOther, AccountTypeAPIKey, proxyBaseURL, ""), true},

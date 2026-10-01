@@ -1237,12 +1237,13 @@ func rawChatCompletionsTestAccount() *Account {
 
 // nonstreamToStreamTestEnabledSvc 构造开启 NonstreamToStream 转换开关的测试服务
 // （谓词资格：apikey + CN 供应商 + 非官方 base_url 或 platform=other）。
+// Disabled=false 零值即启用，显式赋值仅为防零值歧义。
 func nonstreamToStreamTestEnabledSvc(upstream *httpUpstreamRecorder) *OpenAIGatewayService {
 	svc := &OpenAIGatewayService{
 		cfg:          rawChatCompletionsTestConfig(),
 		httpUpstream: upstream,
 	}
-	svc.cfg.Gateway.NonstreamToStreamEnabled = true
+	svc.cfg.Gateway.NonstreamToStreamDisabled = false
 	return svc
 }
 

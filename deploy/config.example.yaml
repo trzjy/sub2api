@@ -547,9 +547,9 @@ gateway:
   # Official-direct / web-access / OAuth accounts keep original behavior.
   # 将「非官方上游」（池类/第三方中转，生产挂死集中地）的非流式请求在网关内转换为
   # 流式 SSE 回传，规避上游非流式挂死导致的 Cloudflare 524。官方直连/网页接入/OAuth 保持原行为。
-  # Default: true (零值安全：未显式配置即启用)
-  # 默认：true（零值安全，未配置即开启）
-  nonstream_to_stream_enabled: true
+  # Default: false (零值安全：未显式配置即启用；显式 true 才关闭转换)
+  # 默认：false（零值安全，未配置即开启；显式 true = 关闭）
+  nonstream_to_stream_disabled: false
   # Scheduling configuration
   # 调度配置
   scheduling:

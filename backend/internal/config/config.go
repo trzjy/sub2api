@@ -1071,12 +1071,13 @@ type GatewayConfig struct {
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
 	ImageConcurrency ImageConcurrencyConfig `mapstructure:"image_concurrency"`
 
-	// NonstreamToStreamEnabled: 是否将「非官方上游」的非流式 OpenAI 兼容请求
-	// 在网关内转换为流式（分段回传 SSE），以规避上游非流式挂死导致的 Cloudflare 524。
-	// 仅非官方/池类/第三方中转上游参与转换；官方直连、网页接入、OAuth 等保持原行为。
-	// 默认 true：该开关零值安全——未经 viper 加载而手工构造的 Config（测试、工具）
-	// 其零值必须落在「启用」这一侧，否则会静默丢失该保护。
-	NonstreamToStreamEnabled bool `mapstructure:"nonstream_to_stream_enabled"`
+	// NonstreamToStreamDisabled: 是否关闭「非官方上游」的非流式 OpenAI 兼容请求
+	// 在网关内转换为流式（分段回传 SSE）的开关。仅非官方/池类/第三方中转上游参与
+	// 转换；官方直连、网页接入、OAuth 等保持原行为。
+	// 默认 false：该开关零值安全——未经 viper 加载而手工构造的 Config（测试、工具）
+	// 其零值必须落在「启用」这一侧，否则会静默丢失 CF524 保护。
+	// 显式 true = 关闭转换。
+	NonstreamToStreamDisabled bool `mapstructure:"nonstream_to_stream_disabled"`
 
 	// HTTP 上游连接池配置（性能优化：支持高并发场景调优）
 	// MaxIdleConns: 所有主机的最大空闲连接总数
@@ -2600,7 +2601,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
 	viper.SetDefault("gateway.failover_on_400", false)
-	viper.SetDefault("gateway.nonstream_to_stream_enabled", true) // 默认开启：非官方上游非流式请求转流式，规避 CF524 挂死
+	viper.SetDefault("gateway.nonstream_to_stream_disabled", false) // 默认启用：非官方上游非流式请求转流式，规避 CF524 挂死
 	viper.SetDefault("gateway.max_account_switches_gemini", 3)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.disable_codex_identity_enforcement", false)

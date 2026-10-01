@@ -2,11 +2,14 @@ package service
 
 import (
 	"net/url"
+	"strings"
 )
 
 // nonstreamToStreamOfficialCNHosts 是「国产供应商官方直连」判定用的官方 host 集合。
 // 仅由 domain_constants.go 既有默认 base_url 常量（init 时解析取 host）派生，
 // 外加 MiniMax 国际站 api.minimax.io（官方 FAQ 指定国际站推理域名，cn_provider_quota_service.go:710）。
+// 键统一为小写：下方常量字面量的 host 均为小写，isOfficialCNUpstreamBaseURL 比对前也
+// 将 host 小写化（strings.ToLower），两侧同态避免大小写变体漏判。
 // 严禁在此硬编码第二张官方域字面量表：任何新增官方域都必须先落入 domain_constants.go
 // 的默认 base_url 常量，再经本 init 派生。
 var nonstreamToStreamOfficialCNHosts map[string]struct{}
@@ -37,7 +40,7 @@ func init() {
 // shouldConvertNonstreamToStream 报告该账号的非流式上游请求是否转换流式。
 // 仅非官方上游（池类/第三方中转，生产挂死集中地）参与转换；官方直连保持原行为。
 func (s *OpenAIGatewayService) shouldConvertNonstreamToStream(account *Account) bool {
-	if s.cfg == nil || !s.cfg.Gateway.NonstreamToStreamEnabled {
+	if s.cfg == nil || s.cfg.Gateway.NonstreamToStreamDisabled {
 		return false
 	}
 	if account == nil || account.Type != AccountTypeAPIKey {
@@ -79,7 +82,7 @@ func isOfficialCNUpstreamBaseURL(account *Account) bool {
 		// 解析失败按非官方处理：宁可转换（规避挂死）也不误判为官方直连放行。
 		return false
 	}
-	host := u.Hostname()
+	host := strings.ToLower(u.Hostname())
 	if host == "" {
 		return false
 	}

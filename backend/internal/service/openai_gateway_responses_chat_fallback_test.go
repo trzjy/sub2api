@@ -448,10 +448,11 @@ func TestForwardResponses_ChatFallbackRestoresReasoningFromCache(t *testing.T) {
 // n2s-W5：非流式→流式转换接线（方案 §D2 + §D4.3）
 // ============================================================================
 
-// ns2sResponsesEnabledConfig 返回开启非流式→流式转换的测试配置（保留宽松 URL 白名单）。
+// ns2sResponsesEnabledConfig 返回开启非流式→流式转换的测试配置（保留宽松 URL 白名单；
+// Disabled=false 零值即启用）。
 func ns2sResponsesEnabledConfig() *config.Config {
 	cfg := rawChatCompletionsTestConfig()
-	cfg.Gateway.NonstreamToStreamEnabled = true
+	cfg.Gateway.NonstreamToStreamDisabled = false
 	return cfg
 }
 

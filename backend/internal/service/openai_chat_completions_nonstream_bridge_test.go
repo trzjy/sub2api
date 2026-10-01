@@ -3,6 +3,8 @@
 package service
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // fakeCCStreamResponse 用若干 data 帧构造一条假上游 SSE 响应（强制流式 CC）。
@@ -34,6 +37,34 @@ func newBridgeTestCtx() (*gin.Context, *httptest.ResponseRecorder) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	return c, rec
+}
+
+// bridgeErrReader 是一个自定义 io.Reader：依次读出若干字节后返回哨兵错误（非 EOF）。
+// 用于 F4 构造「先有效 SSE 帧、再中段读错误」的可靠故障注入（区别于往 body 里塞
+// 非法 UTF-8 的旧做法——bufio.Scanner 的 ScanLines 并不检查 UTF-8，旧用例实际走
+// 的是「缺 [DONE] 旁路」而非读错误路径）。以 bridge 前缀命名避免与
+// vision_detect_service_test.go 既有 errReader 重名。
+type bridgeErrReader struct {
+	data []byte
+	off  int
+	err  error
+}
+
+func (r *bridgeErrReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.data) {
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	return n, nil
+}
+
+var errMidStreamSentinel = errors.New("sentinel mid-stream read failure")
+
+// sentinelErrorReader 先输出 1 个有效 SSE data 帧，随后返回非 EOF 的哨兵错误。
+func sentinelErrorReader() io.Reader {
+	frame := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n"
+	return &bridgeErrReader{data: []byte(frame), err: errMidStreamSentinel}
 }
 
 // ---- Done when #1 四要点定向用例 ----
@@ -81,6 +112,13 @@ func TestCollectCCStreamAsResponse_ToolCallsMerged(t *testing.T) {
 		fakeCCStreamResponse(t, events), c, "test")
 	require.NoError(t, err)
 	require.Len(t, resp.Choices, 1)
+
+	// F1：纯工具调用 choice 从未收到 content 增量 → content 为 JSON null。
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	require.Equal(t, gjson.Null, gjson.GetBytes(body, "choices.0.message.content").Type,
+		"纯工具调用响应 message.content 应为 JSON null（与原生非流式工具调用一致）")
+
 	msg := resp.Choices[0].Message
 	require.Len(t, msg.ToolCalls, 1)
 	tc := msg.ToolCalls[0]
@@ -139,15 +177,21 @@ func TestCollectCCStreamAsResponse_ReasoningContent(t *testing.T) {
 
 // ---- Done when #2 失败语义用例 ----
 
-// 中段读错误 → 显式失败、零字节写客户端。
+// 中段读错误 → 显式失败、errors.Is 命中哨兵错误、零字节写客户端。
+// F4：改用自定义 Reader（先输出有效 SSE data 帧，再返回非 EOF 的哨兵错误），
+// 确保走的是读错误路径而非「缺 [DONE] 旁路」。
 func TestCollectCCStreamAsResponse_MidStreamReadError(t *testing.T) {
 	c, rec := newBridgeTestCtx()
-	// 注入一个会让 scanner 出错的 body：非法 UTF-8 后跟正常帧；用 io 触发。
-	body := io.NopCloser(strings.NewReader("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n" + string([]byte{0xFF, 0xFE}) + "\n"))
-	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: body}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(sentinelErrorReader()),
+	}
 	_, _, err := (&OpenAIGatewayService{}).collectCCStreamAsResponse(resp, c, "test")
 	require.Error(t, err, "中段读错误应显式失败")
-	require.Equal(t, 0, rec.Body.Len())
+	require.True(t, errors.Is(err, errMidStreamSentinel),
+		"错误应包装哨兵读取错误，errors.Is 命中（而非缺 [DONE] 旁路）")
+	require.Equal(t, 0, rec.Body.Len(), "聚合期间零字节写客户端")
 }
 
 // 畸形帧（"有效帧—畸形帧—有效帧"序列）→ 显式失败、零字节写客户端。
@@ -259,6 +303,8 @@ func TestCollectCCStreamAsResponse_EnvelopeFields(t *testing.T) {
 	require.Equal(t, "chat.completion", resp.Object, "envelope object 常量")
 	require.Len(t, resp.Choices, 1)
 	require.Equal(t, "assistant", resp.Choices[0].Message.Role, "message.role 常量 assistant")
+	// F1：收到过 content 增量的 choice → content 仍为 JSON 字符串。
+	require.Equal(t, `"hello"`, string(resp.Choices[0].Message.Content))
 	require.Equal(t, 0, rec.Body.Len())
 }
 

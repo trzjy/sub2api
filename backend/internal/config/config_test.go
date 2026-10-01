@@ -247,6 +247,25 @@ func TestLoadCF524Defaults(t *testing.T) {
 	require.Equal(t, 15, cfg.Gateway.UpstreamHeartbeatDelaySeconds)
 }
 
+// TestLoadNonstreamToStreamDefaults 校验反转开关的 viper 加载语义（F2）：
+// 未配置键 → 默认启用（Disabled=false）；显式 true → 关闭。
+func TestLoadNonstreamToStreamDefaults(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.Gateway.NonstreamToStreamDisabled,
+		"未配置该键时 viper 默认值应为 false（零值=启用转换）")
+}
+
+func TestLoadNonstreamToStreamExplicitDisabled(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	viper.Set("gateway.nonstream_to_stream_disabled", true)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.Gateway.NonstreamToStreamDisabled,
+		"显式配置 nonstream_to_stream_disabled: true 应关闭转换")
+}
+
 func TestLoadForwardedClientIPHeadersNormalizesAndSnapshots(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	viper.Set("security.forwarded_client_ip_headers", []string{" x-cdn-ip ", "X-CDN-IP", "true-client-ip"})

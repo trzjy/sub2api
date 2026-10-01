@@ -51,7 +51,8 @@ func TestLiveNonstreamToStream(t *testing.T) {
 	require.Equal(t, "https", strings.ToLower(parsed.Scheme),
 		"N2S_LIVE_BASE_URL must use https; refusing to transmit the live api_key over plaintext")
 
-	// 构造开启非流式→流式转换的真实 config(与单测同构,仅做最小必要字段)。
+	// 构造开启非流式→流式转换的真实 config（与单测同构,仅做最小必要字段）。
+	// NonstreamToStreamDisabled 零值 false 即启用：此处省略该字段，依赖零值安全。
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			URLAllowlist: config.URLAllowlistConfig{
@@ -60,7 +61,6 @@ func TestLiveNonstreamToStream(t *testing.T) {
 			},
 		},
 	}
-	cfg.Gateway.NonstreamToStreamEnabled = true
 
 	// platform=other + apikey:命中 shouldConvertNonstreamToStream 的
 	// `account.Platform == PlatformOther` 分支(无官方 CN 端点概念),保证走完整转换路径。

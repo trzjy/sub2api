@@ -498,10 +498,10 @@ func ns2sTestAccount() *Account {
 	return acc
 }
 
-// ns2sEnabledService 构造开启转换的 service（默认键 true；测试显式置 true 防零值歧义）。
+// ns2sEnabledService 构造开启转换的 service（默认键 false；零值即启用，注释零值安全）。
 func ns2sEnabledService() *OpenAIGatewayService {
 	cfg := rawChatCompletionsTestConfig()
-	cfg.Gateway = config.GatewayConfig{NonstreamToStreamEnabled: true}
+	cfg.Gateway = config.GatewayConfig{NonstreamToStreamDisabled: false}
 	return &OpenAIGatewayService{cfg: cfg}
 }
 

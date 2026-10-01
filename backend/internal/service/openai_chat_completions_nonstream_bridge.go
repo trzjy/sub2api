@@ -140,11 +140,18 @@ func (s *OpenAIGatewayService) collectCCStreamAsResponse(
 			// envelope 常量：非流式契约，不依赖上游 chunk 回显。
 			Role: "assistant",
 		}
-		contentJSON, err := json.Marshal(acc.content.String())
-		if err != nil {
-			return nil, OpenAIUsage{}, fmt.Errorf("marshal aggregated content: %w", err)
+		// 纯工具调用 choice 从不携带 content 增量：content 组装为 JSON null，
+		// 与原生非流式工具调用响应（message.content: null）一致。收到过任何 content
+		// 增量才 marshal 为 JSON 字符串。
+		if acc.content.Len() == 0 {
+			msg.Content = json.RawMessage("null")
+		} else {
+			contentJSON, err := json.Marshal(acc.content.String())
+			if err != nil {
+				return nil, OpenAIUsage{}, fmt.Errorf("marshal aggregated content: %w", err)
+			}
+			msg.Content = contentJSON
 		}
-		msg.Content = contentJSON
 		if acc.reasoning.Len() > 0 {
 			msg.ReasoningContent = acc.reasoning.String()
 		}
