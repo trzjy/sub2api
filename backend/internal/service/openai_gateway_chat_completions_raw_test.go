@@ -1256,6 +1256,11 @@ func qualifiedNonstreamToStreamAccount() *Account {
 	return acc
 }
 
+// ns2sProbeKey 是 W10 反向测试注入的探针键：用带固定值的 sentinel context 取代
+// 裸 context.Background()，证明心跳断言读取的是本请求真实传播链上的上游 ctx，
+// 而非无关的 context（P2 回修：原断言读新建的 context.Background()，与请求无关）。
+type ns2sProbeKey struct{}
+
 // 资格账号 + stream:false → 上游收到 stream:true + include_usage；客户端收到
 // 200 CC JSON（object="chat.completion"、role="assistant"、内容=聚合后），
 // ForwardResult.Stream=false，usage 提取正确，无心跳 owner（OpsHeartbeatOwnerKey）。
@@ -1291,7 +1296,10 @@ func TestForwardAsRawChatCompletions_NonstreamToStreamConvertedAggregatesCC(t *t
 	svc := nonstreamToStreamTestEnabledSvc(upstream)
 	account := qualifiedNonstreamToStreamAccount()
 
-	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	// W10 P2 回修：用带探针值的 sentinel ctx 取代裸 context.Background()，
+	// 使下游心跳断言能验证读取的是本请求真实传播链上的上游 ctx。
+	ns2sProbeCtx := context.WithValue(context.Background(), ns2sProbeKey{}, "ns2s-heartbeat-probe")
+	result, err := svc.forwardAsRawChatCompletions(ns2sProbeCtx, c, account, body, "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -1320,8 +1328,12 @@ func TestForwardAsRawChatCompletions_NonstreamToStreamConvertedAggregatesCC(t *t
 
 	// 心跳不变式：转换命中 + 非流式 → 无心跳 owner，且响应体不可能含
 	// `: keep-alive` SSE 帧（安装点仅 clientStream==true 时安装，本卡零改动）。
-	_, ok := UpstreamHeartbeatFromContext(context.Background())
+	// W10 P2 回修：断言必须落在真实请求传播链的上游 ctx 上，并用探针值证明——
+	// 若在此 ctx 人为安装 owner，该用例会红（断言真实有效），而非读无关 context。
+	_, ok := UpstreamHeartbeatFromContext(upstream.lastReq.Context())
 	require.False(t, ok, "converted path must not install a heartbeat owner")
+	require.Equal(t, "ns2s-heartbeat-probe", upstream.lastReq.Context().Value(ns2sProbeKey{}),
+		"断言必须读取本请求真实传播链上的上游 ctx，而非无关 context")
 	require.NotContains(t, rec.Body.String(), ": keep-alive")
 }
 

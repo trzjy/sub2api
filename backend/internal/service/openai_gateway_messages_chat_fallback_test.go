@@ -874,4 +874,8 @@ func TestForwardAnthropicViaRawChatCompletions_ConvertedNonstreamHasNoHeartbeatO
 	require.False(t, stillNoHB, "转换不得凭空安装心跳 owner")
 	require.NotContains(t, rec.Body.String(), "keep-alive", "心跳帧不得进入非流式响应")
 	require.False(t, result.Stream)
+	// W10 P2 回修：对齐 responses 用例最强形态（openai_gateway_responses_chat_fallback_test.go:684），
+	// 追加上游真实请求 ctx 的心跳断言——证明转换路径未在真实传播链上安装 owner。
+	_, upstreamCtxHB := UpstreamHeartbeatFromContext(upstream.lastReq.Context())
+	require.False(t, upstreamCtxHB, "转换路径不得在真实上游请求 ctx 上安装心跳 owner")
 }
