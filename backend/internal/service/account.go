@@ -1384,10 +1384,14 @@ func (a *Account) IsOpenAIApiKey() bool {
 }
 
 // GetOpenAIBaseURL 解析 OpenAI 协议族账号的上游 base_url。
-// 适用 openai 与国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）；grok 走 GetGrokBaseURL，
+// 适用 openai、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与 muse
+// （OpenCode Go / Meta Muse Spark Contributor 上游）。muse 不走
+// UsesOpenAIProtocolSharedBaseURL 共享 base_url（muse-11 已裁定保持排除），
+// 但在本函数内显式放行：credentials.base_url 优先，缺失时回落固定默认
+// DefaultMuseBaseURL（与 kimi/zhipu 平台默认同构）；grok 走 GetGrokBaseURL，
 // 此处对 grok 返回 "" 以保持原有行为。
 func (a *Account) GetOpenAIBaseURL() string {
-	if !a.UsesOpenAIProtocolSharedBaseURL() {
+	if !a.UsesOpenAIProtocolSharedBaseURL() && a.Platform != PlatformMuse {
 		return ""
 	}
 	if a.IsCNProvider() && a.IsAdaptiveAPIProtocol() {
@@ -1427,6 +1431,11 @@ func (a *Account) GetOpenAIBaseURL() string {
 		// other 无内置默认上游：仅返回账号自定义 base_url；为空返回空，由上层
 		// 失败关闭，绝不回落官方 OpenAI 端点。
 		return ""
+	case PlatformMuse:
+		// muse（OpenCode Go 上游）固定默认 base_url；credentials.base_url 优先于
+		// 此处默认值（前序 Type==APIKey 分支已读 credentials.base_url）。与
+		// kimi/zhipu 平台默认同构：凭证优先、固定默认值兜底。
+		return DefaultMuseBaseURL
 	default:
 		return "https://api.openai.com"
 	}
@@ -1855,14 +1864,17 @@ func (a *Account) GetOpenAIApiKey() string {
 }
 
 // GetOpenAIProtocolAPIKey 返回 OpenAI 协议族 APIKey 账号的密钥。
-// 覆盖 openai 原生账号与国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）账号，
-// 供转发鉴权、模型列表同步等协议族共用路径使用。注意 IsOpenAIApiKey 语义上
+// 覆盖 openai 原生账号、国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）账号，
+// 以及 muse（OpenCode Go / Meta Muse Spark Contributor 上游）账号；供转发鉴权、
+// 模型列表同步等协议族共用路径使用。muse 非国产供应商、且非 openai 平台，
+// 故走 IsCNProvider()/PlatformOther 之外的显式分支直读 credentials.api_key
+// （与 muse_models.go 模型目录同步的直读模式对齐）。注意 IsOpenAIApiKey 语义上
 // 仅指 openai 平台账号，调度倍率/WS 能力门控继续以其为准，不受本方法影响。
 func (a *Account) GetOpenAIProtocolAPIKey() string {
 	if a == nil {
 		return ""
 	}
-	if a.IsCNProvider() || a.Platform == PlatformOther {
+	if a.IsCNProvider() || a.Platform == PlatformOther || a.Platform == PlatformMuse {
 		if a.Type != AccountTypeAPIKey {
 			return ""
 		}

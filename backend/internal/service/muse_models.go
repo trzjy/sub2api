@@ -30,6 +30,11 @@ const (
 // museLogger 是 muse 同步的观测日志出口（默认走 slog.Default，测试可指向捕获 handler）。
 var museLogger = slog.Default()
 
+// DefaultMuseBaseURL 是 muse 平台（OpenCode Go / Meta Muse Spark Contributor 上游）
+// 的默认 base_url。与前端 credentialsBuilder.ts 预设一致；credentials.base_url 可覆盖。
+// 单一权威来源：fetchMuseUpstreamCatalog 与 Account.GetOpenAIBaseURL 共用，杜绝第二份拷贝。
+const DefaultMuseBaseURL = "https://opencode.ai/zen/go/v1"
+
 // museManagedModel 记录一个由 muse 同步器建立的干净名→contributor ID 映射。
 type museManagedModel struct {
 	CleanName     string `json:"clean_name"`
@@ -104,7 +109,7 @@ func filterMuseUpstreamModels(rawIDs []string) ([]museManagedModel, []MuseModelF
 }
 
 // fetchMuseUpstreamCatalog 拉取 muse 上游模型目录 GET <base_url>/models（base_url 默认
-// https://opencode.ai/zen/go/v1）。返回原始模型 ID、上游 HTTP 状态码、错误。
+// DefaultMuseBaseURL）。返回原始模型 ID、上游 HTTP 状态码、错误。
 func (s *AccountTestService) fetchMuseUpstreamCatalog(ctx context.Context, account *Account) ([]string, int, error) {
 	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
 	if apiKey == "" {
@@ -115,7 +120,7 @@ func (s *AccountTestService) fetchMuseUpstreamCatalog(ctx context.Context, accou
 	}
 	baseURL := strings.TrimSpace(account.GetCredential("base_url"))
 	if baseURL == "" {
-		baseURL = "https://opencode.ai/zen/go/v1"
+		baseURL = DefaultMuseBaseURL
 	}
 	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
 	if err != nil {
