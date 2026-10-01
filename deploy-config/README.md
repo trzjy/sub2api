@@ -54,7 +54,7 @@ ssh yiyutu-server
 git clone git@github.com:trzjy/sub2api.git /opt/sub2api
 cd /opt/sub2api
 cp deploy-config/.env.example .env   # 填真实凭据
-mkdir -p data postgres_data redis_data
+mkdir -p /opt/sub2api-data/{data,postgres_data,redis_data}
 # 首次镜像：按 sub2api-ops.md 第 5 节在服务器构建 sub2api:<commit>-w
 docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d
 ```

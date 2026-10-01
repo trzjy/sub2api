@@ -101,9 +101,11 @@ git push origin main
 |------|------|
 | `compose.yml` | Docker Compose 定义（sub2api + postgres + redis） |
 | `.env` | 环境配置与凭据（权限 600，勿提交到 Git） |
-| `data/` | sub2api 数据目录（上传文件、本地定价缓存等） |
-| `postgres_data/` | PostgreSQL 数据目录 |
-| `redis_data/` | Redis 持久化目录 |
+| `/opt/sub2api-data/data/` | sub2api 数据目录（上传文件、本地定价缓存等） |
+| `/opt/sub2api-data/postgres_data/` | PostgreSQL 数据目录 |
+| `/opt/sub2api-data/redis_data/` | Redis 持久化目录 |
+
+> **部署唯一合法入口 = `deploy-config/scripts/deploy-to-server.sh`（GitHub 拉取 + 服务器构建），旧手工 rsync/git archive 路径已废弃。**
 
 ### 3.1 关键配置（`.env`）
 
@@ -312,7 +314,7 @@ while read id; do aws s3 rm "s3://<图片桶>/announcements/$id/" --recursive; d
 
 > 公告图片的存储后端为服务器自建 MinIO（2026-09-23 用户裁定，生产无现成 S3 凭证）。
 > 组件：compose 服务 `minio`（quay.io，固定 release tag；docker.io 在部署主机不可达），
-> 数据目录 `/opt/sub2api/minio_data`，桶 `sub2api-media`。
+> 数据目录 `/opt/sub2api-data/minio_data`，桶 `sub2api-media`。
 
 **拓扑**：
 
@@ -328,7 +330,7 @@ while read id; do aws s3 rm "s3://<图片桶>/announcements/$id/" --recursive; d
 
 - 凭证：`.env` 的 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`（与 POSTGRES_PASSWORD 同等级敏感）。
   轮换时改 .env → `docker compose up -d minio` → 同步更新后台 `image_storage_config` 的密钥。
-- 备份：`/opt/sub2api/minio_data` 在 §6.1 的整体打包范围内（tar 含公告图片对象）。
+- 备份：`/opt/sub2api-data/minio_data` 在 §6.1 的整体打包范围内（tar 含公告图片对象）。
 - nginx 配置以服务器 `/etc/nginx/sites-available/duizhang` 为准（仓库无副本），
   变更需 `nginx -t` 后 reload。
 - 5.x 孤儿清理脚本中 `<图片桶>` = `sub2api-media`，可用 minio 容器内 `mc` 执行：
