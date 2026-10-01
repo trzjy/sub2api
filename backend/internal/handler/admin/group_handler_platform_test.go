@@ -19,6 +19,10 @@ import (
 // 2026-09-13 追加 codebuddy:活体验收 F1 实测「前端 GROUP_PLATFORM_OPTIONS 已含
 // codebuddy、DB CHECK(迁移 244)已放开，但后端 oneof 漏加」→ 管理员无法通过 API
 // 创建 codebuddy 分组（HTTP 400），网关无法路由到 codebuddy 账号。此用例钉住修复。
+//
+// 2026-10-02 muse-9:生产实测 muse 账号已建、目录同步正常,但建组被拒——六处 gin
+// binding oneof 白名单漏 muse。此派发单把 muse 加入全部平台校验白名单,下列锚定
+// 钉住 Create/Update/CompositeTarget 的 muse 通过校验。
 func bindGroupPlatformJSON(t *testing.T, target any, body string) error {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -31,7 +35,7 @@ func bindGroupPlatformJSON(t *testing.T, target any, body string) error {
 func TestGroupPlatformBinding_AllowedPlatforms(t *testing.T) {
 	allowed := []string{
 		"anthropic", "openai", "gemini", "antigravity", "grok",
-		"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "composite",
+		"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "composite", "muse",
 	}
 	for _, platform := range allowed {
 		t.Run("create_"+platform, func(t *testing.T) {
@@ -79,7 +83,7 @@ func TestGroupPlatformBinding_RejectsInvalidPlatforms(t *testing.T) {
 // 由 CONCRETE_PLATFORM_OPTIONS 派生（含 codebuddy），迁移 244 亦已放开
 // composite_model_routes.target_platform 的 DB CHECK，后端 oneof 漏加会造成同类契约缺口。
 func TestCompositeRouteTargetPlatform_AllowsCodeBuddyAndCNProviders(t *testing.T) {
-	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "codebuddy"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "muse"} {
 		var req CompositeRouteRequest
 		body := fmt.Sprintf(`{"public_model":"m","target_platform":%q}`, platform)
 		require.NoError(t, bindGroupPlatformJSON(t, &req, body))
