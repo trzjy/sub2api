@@ -5,6 +5,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -440,4 +442,246 @@ func TestForwardResponses_ChatFallbackRestoresReasoningFromCache(t *testing.T) {
 
 	// 明文 summary 的 item 被回写进缓存（自愈）。
 	require.Equal(t, "plain thinking", cache.snapshotSets()["item_plain"])
+}
+
+// ============================================================================
+// n2s-W5：非流式→流式转换接线（方案 §D2 + §D4.3）
+// ============================================================================
+
+// ns2sResponsesEnabledConfig 返回开启非流式→流式转换的测试配置（保留宽松 URL 白名单）。
+func ns2sResponsesEnabledConfig() *config.Config {
+	cfg := rawChatCompletionsTestConfig()
+	cfg.Gateway.NonstreamToStreamEnabled = true
+	return cfg
+}
+
+// ns2sResponsesEligibleAccount 构造资格账号：国产供应商 apikey + 第三方中转 base_url
+// （非官方域），命中 shouldConvertNonstreamToStream。
+func ns2sResponsesEligibleAccount() *Account {
+	account := rawChatCompletionsTestAccount()
+	account.Platform = PlatformDeepseek
+	account.Credentials["base_url"] = "http://upstream.example/v1"
+	return account
+}
+
+// ns2sResponsesStreamBody 构造一条完整可聚合的 CC SSE 流（含 finish_reason / usage / [DONE]）。
+func ns2sResponsesStreamBody(flushDone bool) string {
+	frames := []string{
+		`data: {"id":"chatcmpl_ns2s","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_ns2s","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_ns2s","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"id":"chatcmpl_ns2s","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+	}
+	if flushDone {
+		frames = append(frames, "data: [DONE]")
+	}
+	return strings.Join(frames, "\n") + "\n"
+}
+
+// Done when #1：资格账号 + stream:false → 上游收到 stream=true + include_usage；
+// 客户端收到 200 Responses JSON（既有 CC→Responses 转换语义），usage 传递正确，
+// ForwardResult.Stream=false。
+func TestForwardResponsesViaRawChatCompletions_ConvertsEligibleNonstreamToStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_convert"}},
+		Body:       io.NopCloser(strings.NewReader(ns2sResponsesStreamBody(true))),
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 上游被强制流式 + include_usage。
+	require.Equal(t, "http://upstream.example/v1/chat/completions", upstream.lastReq.URL.String())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "资格账号非流式请求须以上游 stream=true 发出")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
+
+	// 客户端收到 200 Responses 契约 JSON。
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "response", gjson.Get(rec.Body.String(), "object").String())
+	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "output.0.content.0.text").String())
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	require.NotContains(t, rec.Header().Get("Content-Type"), "text/event-stream")
+
+	// usage 传递（计费口径）。
+	require.Equal(t, 5, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+	require.False(t, result.Stream)
+}
+
+// Done when #2（反向）：非资格账号 + stream:false → 既有缓冲分支（原生非流式转发），
+// 上游 stream 标志保持 false。
+func TestForwardResponsesViaRawChatCompletions_NonEligibleAccountKeepsBufferedPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"gpt-5.4","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_ns2s_ineligible"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"chatcmpl_plain","object":"chat.completion","model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"native"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+		)),
+	}}
+	// 非资格账号：PlatformOpenAI（谓词不含），即便开关开启也保持既有缓冲分支。
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, rawChatCompletionsTestAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "非资格账号不得改写上游 stream 标志")
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
+	require.Equal(t, "response", gjson.Get(rec.Body.String(), "object").String())
+	require.Equal(t, "native", gjson.Get(rec.Body.String(), "output.0.content.0.text").String())
+	require.False(t, result.Stream)
+}
+
+// Done when #2（反向）：clientStream=true → 既有流式分支行为不变（资格账号亦不聚合）。
+func TestForwardResponsesViaRawChatCompletions_StreamingKeepsStreamBranch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_stream"}},
+		Body:       io.NopCloser(strings.NewReader(ns2sResponsesStreamBody(true))),
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Stream, "clientStream=true 必须走既有流式分支")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Contains(t, rec.Body.String(), "event: response.output_text.delta")
+	require.Contains(t, rec.Body.String(), "data: [DONE]")
+}
+
+// Done when #3：缺 [DONE] 哨兵 → writeOpenAIResponsesFallbackError 规范错误，零聚合内容。
+func TestForwardResponsesViaRawChatCompletions_MissingDoneSentinelFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_nodone"}},
+		Body:       io.NopCloser(strings.NewReader(ns2sResponsesStreamBody(false))),
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, "api_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.NotContains(t, rec.Body.String(), "response.output_text", "失败关闭不得写出半个聚合响应")
+}
+
+// Done when #3：缺 usage 帧 → writeOpenAIResponsesFallbackError 规范错误、零计费。
+func TestForwardResponsesViaRawChatCompletions_MissingUsageFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	streamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_nousage","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_nousage"}},
+		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, "api_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.NotContains(t, rec.Body.String(), "output_text")
+}
+
+// Done when #3：CN 首包超时 → 既有 failover 分支（无新机制）。
+func TestForwardResponsesViaRawChatCompletions_CNFirstByteTimeoutFailsOver(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_cntimeout"}},
+		Body:       &openAICompatBufferedReadErrorCloser{err: errOpenAICNFirstByteTimeout},
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.Error(t, err)
+	require.Nil(t, result)
+	var fo *UpstreamFailoverError
+	require.True(t, errors.As(err, &fo), "CN 首包超时必须映射为既有 failover 错误")
+	require.Equal(t, http.StatusGatewayTimeout, fo.StatusCode)
+	require.Equal(t, NextAccountRetry, fo.NextAccountAction)
+	require.Empty(t, rec.Body.String(), "failover 透传窗口内不得写客户端响应")
+}
+
+// Done when #4：资格命中 + stream:false → 转发上游的 context 中无心跳 owner
+// （心跳 owner 仅 clientStream==true 时由 handler 安装；转换路径不引入 owner）。
+func TestForwardResponsesViaRawChatCompletions_NoHeartbeatOwnerOnConvertedNonstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello","stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_hb"}},
+		Body:       io.NopCloser(strings.NewReader(ns2sResponsesStreamBody(true))),
+	}}
+	svc := &OpenAIGatewayService{cfg: ns2sResponsesEnabledConfig(), httpUpstream: upstream}
+
+	_, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, ns2sResponsesEligibleAccount(), body)
+	require.NoError(t, err)
+
+	_, ok := UpstreamHeartbeatFromContext(upstream.lastReq.Context())
+	require.False(t, ok, "转换请求（clientStream=false）上游 context 中不得有心跳 owner")
+	_, ok = UpstreamHeartbeatFromContext(c.Request.Context())
+	require.False(t, ok, "请求 context 不得因转换而被安装心跳 owner")
 }

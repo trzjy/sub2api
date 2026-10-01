@@ -71,7 +71,11 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	// 国产模型默认 effort 补充：需要 mappedModel 判定，推迟到 billingModel 算出之后。
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, billingModel)
 	chatReq.Model = upstreamModel
-	if clientStream {
+	// 非流式→流式转换（方案 D2）：非官方池类上游的非流式请求改走健康流式通道，
+	// 上游强制 stream=true + include_usage，规避非流式响应头挂死（CF524 遗留）。
+	converted := !clientStream && s.shouldConvertNonstreamToStream(account)
+	if clientStream || converted {
+		chatReq.Stream = true
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
 	}
 
@@ -108,7 +112,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream || converted, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +129,93 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if clientStream {
 		return s.streamChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
+	if converted {
+		return s.convertedChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	}
 	return s.bufferChatCompletionsAsResponses(c, account, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+}
+
+// convertedChatCompletionsAsResponses 是非流式客户端经非流式→流式转换后的响应
+// 尾段（方案 D4.3）：聚合强制流式上游的 CC SSE 为完整 chat.completion 响应后，
+// 复用与 readCCUpstreamJSONResponse 消费方（bufferChatCompletionsAsResponses）完全
+// 同构的既有 CC→Responses 转换尾段写出，不新建第二条转换实现。
+func (s *OpenAIGatewayService) convertedChatCompletionsAsResponses(
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	originalModel string,
+	customTools map[string]bool,
+	functionTools map[string]bool,
+	toolSearch bool,
+	namespaceTools map[string]apicompat.NamespacedToolName,
+	billingModel string,
+	upstreamModel string,
+	reasoningEffort *string,
+	serviceTier *string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	ccResp, usage, err := s.collectCCStreamAsResponse(resp, c, "openai responses chat fallback")
+	if err != nil {
+		// 聚合期零字节写客户端：CN 首包超时走既有透明 failover 分支
+		//（冷却+换号，带模型）；其余错误按原 endpoint 契约回写规范错误。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
+		writeOpenAIResponsesFallbackError(c, http.StatusBadGateway, "api_error", err.Error())
+		return nil, err
+	}
+	// 上游被强制流式后 Content-Type=text/event-stream，经 WriteFilteredHeaders
+	// 透传会污染非流式响应，forceJSON=true 覆盖回 application/json。
+	return s.writeChatCompletionsAsResponsesResult(c, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
+}
+
+// writeChatCompletionsAsResponsesResult 是 buffer 与 converted 两个非流式分支共用的
+// CC→Responses 转换尾段（方案 D4.3）：同一转换函数（ChatCompletionsResponseToResponses）
+// + 同一写出路径（WriteFilteredHeaders + c.JSON + ForwardResult 组装），不新建第二条
+// 转换实现。forceJSON 仅 converted 分支置 true（覆盖上游透传的 SSE Content-Type）；
+// buffer 分支上游为原生 JSON，置 false 保持行为零变化。
+func (s *OpenAIGatewayService) writeChatCompletionsAsResponsesResult(
+	c *gin.Context,
+	resp *http.Response,
+	ccResp *apicompat.ChatCompletionsResponse,
+	usage OpenAIUsage,
+	originalModel string,
+	customTools map[string]bool,
+	functionTools map[string]bool,
+	toolSearch bool,
+	namespaceTools map[string]apicompat.NamespacedToolName,
+	billingModel string,
+	upstreamModel string,
+	reasoningEffort *string,
+	serviceTier *string,
+	startTime time.Time,
+	forceJSON bool,
+) (*OpenAIForwardResult, error) {
+	requestID := resp.Header.Get("x-request-id")
+	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
+	s.cacheReasoningItemsFromOutput(responsesResp.Output)
+
+	if s.responseHeaderFilter != nil {
+		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	}
+	if forceJSON {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.JSON(http.StatusOK, responsesResp)
+
+	return &OpenAIForwardResult{
+		RequestID:                   requestID,
+		UpstreamHeaders:             resp.Header,
+		Usage:                       usage,
+		Model:                       originalModel,
+		BillingModel:                billingModel,
+		UpstreamModel:               upstreamModel,
+		ReasoningEffort:             reasoningEffort,
+		UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
+		ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+		Stream:                      false,
+		Duration:                    time.Since(startTime),
+	}, nil
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
@@ -143,7 +233,6 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	serviceTier *string,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
-	requestID := resp.Header.Get("x-request-id")
 	ccResp, usage, err := s.readCCUpstreamJSONResponse(resp, c, writeOpenAIResponsesFallbackError)
 	if err != nil {
 		// CN 首包超时：缓冲路径响应头尚未提交，可安全透明切换（冷却+换号）。
@@ -155,27 +244,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 		}
 		return nil, err
 	}
-	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
-	s.cacheReasoningItemsFromOutput(responsesResp.Output)
-
-	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
-	}
-	c.JSON(http.StatusOK, responsesResp)
-
-	return &OpenAIForwardResult{
-		RequestID:                   requestID,
-		UpstreamHeaders:             resp.Header,
-		Usage:                       usage,
-		Model:                       originalModel,
-		BillingModel:                billingModel,
-		UpstreamModel:               upstreamModel,
-		ReasoningEffort:             reasoningEffort,
-		UpstreamResponseServiceTier: observedUpstreamResponseServiceTier(c),
-		ServiceTier:                 resolvedOpenAIUpstreamServiceTier(c, serviceTier),
-		Stream:                      false,
-		Duration:                    time.Since(startTime),
-	}, nil
+	return s.writeChatCompletionsAsResponsesResult(c, resp, ccResp, usage, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
 }
 
 func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(

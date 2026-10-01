@@ -1235,6 +1235,322 @@ func rawChatCompletionsTestAccount() *Account {
 	}
 }
 
+// nonstreamToStreamTestEnabledSvc 构造开启 NonstreamToStream 转换开关的测试服务
+// （谓词资格：apikey + CN 供应商 + 非官方 base_url 或 platform=other）。
+func nonstreamToStreamTestEnabledSvc(upstream *httpUpstreamRecorder) *OpenAIGatewayService {
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+	svc.cfg.Gateway.NonstreamToStreamEnabled = true
+	return svc
+}
+
+// qualifiedNonstreamToStreamAccount 返回一个命中转换谓词的账号：
+// deepseek apikey + 第三方中转 base_url（非官方域，isOfficialCNUpstreamBaseURL=false）。
+func qualifiedNonstreamToStreamAccount() *Account {
+	acc := rawChatCompletionsTestAccount()
+	acc.Platform = PlatformDeepseek
+	acc.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	return acc
+}
+
+// 资格账号 + stream:false → 上游收到 stream:true + include_usage；客户端收到
+// 200 CC JSON（object="chat.completion"、role="assistant"、内容=聚合后），
+// ForwardResult.Stream=false，usage 提取正确，无心跳 owner（OpsHeartbeatOwnerKey）。
+func TestForwardAsRawChatCompletions_NonstreamToStreamConvertedAggregatesCC(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_cvt","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		"",
+		`data: {"id":"chatcmpl_cvt","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_cvt","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":" World"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_cvt","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl_cvt","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":3}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_converted"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := qualifiedNonstreamToStreamAccount()
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 上游收到的必须是强制流式请求：stream=true + include_usage。
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
+
+	// 客户端收到 200 CC JSON，非 SSE。
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.False(t, result.Stream, "转换后的响应必须是非流式 ForwardResult")
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	require.NotContains(t, rec.Body.String(), "data: [DONE]")
+
+	downstream := rec.Body.String()
+	require.Equal(t, "chat.completion", gjson.Get(downstream, "object").String())
+	require.Equal(t, "assistant", gjson.Get(downstream, "choices.0.message.role").String())
+	require.Equal(t, "Hello World", gjson.Get(downstream, "choices.0.message.content").String())
+	require.Equal(t, "stop", gjson.Get(downstream, "choices.0.finish_reason").String())
+
+	// usage 提取正确（含 prompt_tokens_details.cached_tokens）。
+	require.Equal(t, 9, result.Usage.InputTokens)
+	require.Equal(t, 4, result.Usage.OutputTokens)
+	require.Equal(t, 3, result.Usage.CacheReadInputTokens)
+	require.Equal(t, 9, int(gjson.Get(downstream, "usage.prompt_tokens").Int()))
+	require.Equal(t, 4, int(gjson.Get(downstream, "usage.completion_tokens").Int()))
+
+	// 心跳不变式：转换命中 + 非流式 → 无心跳 owner，且响应体不可能含
+	// `: keep-alive` SSE 帧（安装点仅 clientStream==true 时安装，本卡零改动）。
+	_, ok := UpstreamHeartbeatFromContext(context.Background())
+	require.False(t, ok, "converted path must not install a heartbeat owner")
+	require.NotContains(t, rec.Body.String(), ": keep-alive")
+}
+
+// 转换用例专用占位避免误判为已实现（见转换用例主测试）。
+func TestForwardAsRawChatCompletions_NonstreamToStreamConvertedUpstreamModelRewrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// 客户端模型映射后（model_mapping deepseek-v4-flash→alias-upstream）转换场景：
+	// 聚合响应 model 应取自上游 chunk（alias-upstream），而非客户端原始名。
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_alias","object":"chat.completion.chunk","model":"alias-upstream","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		"",
+		`data: {"id":"chatcmpl_alias","object":"chat.completion.chunk","model":"alias-upstream","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl_alias","object":"chat.completion.chunk","model":"alias-upstream","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_alias"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := qualifiedNonstreamToStreamAccount()
+	account.Credentials["model_mapping"] = map[string]any{"deepseek-v4-flash": "alias-upstream"}
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Equal(t, "alias-upstream", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "choices.0.message.content").String())
+	require.Equal(t, "alias-upstream", gjson.Get(rec.Body.String(), "model").String())
+	require.Equal(t, 2, result.Usage.InputTokens)
+}
+
+// 非资格账号（openai apikey，predicate=false）+ stream:false → 既有非流式缓冲分支：
+// 上游请求仍是 stream:false，客户端收到原样 JSON，result.Stream=false。
+func TestForwardAsRawChatCompletions_NonstreamToStreamNotConvertedForIneligible(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_ns2s_ineligible"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"chatcmpl_plain","object":"chat.completion","model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"plain"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := rawChatCompletionsTestAccount() // openai apikey → predicate=false
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "非资格账号不得强制流式")
+	require.False(t, result.Stream)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "plain", gjson.Get(rec.Body.String(), "choices.0.message.content").String())
+	require.NotContains(t, rec.Body.String(), "data: [DONE]")
+	require.Equal(t, 3, result.Usage.InputTokens)
+}
+
+// 资格账号但客户端 stream:true → 既有流式分支（不触发转换），SSE 原样透传。
+func TestForwardAsRawChatCompletions_ClientStreamTrueKeepsStreaming(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_cs","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		"",
+		`data: {"id":"chatcmpl_cs","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"streamed"},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl_cs","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_client_stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := qualifiedNonstreamToStreamAccount()
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.True(t, result.Stream, "clientStream=true 必须保持流式")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Contains(t, rec.Body.String(), "data: [DONE]")
+	require.Equal(t, 4, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+}
+
+// 桥错误（缺 [DONE]）：聚合期零字节写客户端，writeChatCompletionsError 规范错误
+// 回写，调用方拿到非 nil error。
+func TestForwardAsRawChatCompletions_NonstreamToStreamMissingDoneFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_nodone","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"partial"}}]}`,
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_nodone"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := qualifiedNonstreamToStreamAccount()
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	// writeChatCompletionsError 格式：规范化错误 JSON + 502。
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, "api_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.NotEmpty(t, gjson.Get(rec.Body.String(), "error.message").String())
+	require.Contains(t, gjson.Get(rec.Body.String(), "error.message").String(), "[DONE]")
+	// 聚合期间零字节写语义内容（非半截回答/非 SSE 帧），错误回写只含规范错误对象。
+	require.NotContains(t, rec.Body.String(), `"content"`)
+	require.NotContains(t, rec.Body.String(), "data: ")
+}
+
+// 桥错误（缺 usage）：计费完整性守卫，同样规范错误回写。
+func TestForwardAsRawChatCompletions_NonstreamToStreamMissingUsageFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_nousage","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_nousage"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := qualifiedNonstreamToStreamAccount()
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, "api_error", gjson.Get(rec.Body.String(), "error.type").String())
+	require.Contains(t, gjson.Get(rec.Body.String(), "error.message").String(), "usage")
+	require.NotContains(t, rec.Body.String(), `"content"`)
+	require.NotContains(t, rec.Body.String(), "data: ")
+}
+
+// Grok 专属分支不受影响：谓词排除 grok，恒走原路径（非流式缓冲分支，
+// 上游请求 stream:false）。
+func TestForwardAsRawChatCompletions_NonstreamToStreamGrokStaysOriginal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_ns2s_grok"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"resp_grok","object":"chat.completion","model":"grok-4.5","choices":[{"index":0,"message":{"role":"assistant","content":"grok ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`,
+		)),
+	}}
+
+	svc := nonstreamToStreamTestEnabledSvc(upstream)
+	account := rawChatCompletionsTestAccount()
+	account.Platform = PlatformGrok
+	account.Extra = map[string]any{openai_compat.ExtraKeyResponsesSupported: false}
+
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "grok 恒走原路径，不得强制流式")
+	require.False(t, result.Stream)
+	require.Equal(t, "grok ok", gjson.Get(rec.Body.String(), "choices.0.message.content").String())
+	require.NotContains(t, rec.Body.String(), "data: [DONE]")
+	require.Equal(t, 2, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+}
+
 func largeRawChatCompletionsBody() []byte {
 	return []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"` +
 		strings.Repeat("x", openAISilentRefusalMinRequestBodyBytes) +

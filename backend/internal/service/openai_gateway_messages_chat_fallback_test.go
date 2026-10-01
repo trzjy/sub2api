@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -480,4 +482,396 @@ func TestForwardAsAnthropic_ResponsesSupportedAccountStillUsesResponsesEndpoint(
 	require.Empty(t, upstream.lastReq.Header.Get("version"))
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "content.0.text").String())
+}
+
+// ---- W3 派发单：非流式→流式转换（方案 D2+D4.1）messages 入口接线测试 ----
+
+// ns2sTestAccount 构造一个命中转换资格谓词的账号：deepseek apikey + 第三方
+// 中转 base_url（非官方直连）+ ForceChatCompletions 走 raw CC fallback。
+func ns2sTestAccount() *Account {
+	acc := forceChatMessagesFallbackAccount()
+	acc.Platform = PlatformDeepseek
+	acc.Credentials = map[string]any{
+		"api_key":  "sk-test",
+		"base_url": "https://tokenharbor.ai/v1",
+	}
+	return acc
+}
+
+// ns2sEnabledService 构造开启转换的 service（默认键 true；测试显式置 true 防零值歧义）。
+func ns2sEnabledService() *OpenAIGatewayService {
+	cfg := rawChatCompletionsTestConfig()
+	cfg.Gateway = config.GatewayConfig{NonstreamToStreamEnabled: true}
+	return &OpenAIGatewayService{cfg: cfg}
+}
+
+// Done when #1：资格账号 + stream:false 客户端请求 → 上游收到 stream=true +
+// include_usage；客户端 200 anthropic JSON（内容=聚合后），ForwardResult.Stream=false，
+// usage 入 OpenAIForwardResult。
+func TestForwardAnthropicViaRawChatCompletions_NonstreamConvertedToStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-chat","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_ns","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_ns","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_conv"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := ns2sEnabledService()
+	svc.httpUpstream = upstream
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 上游请求：stream=true + include_usage。
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "资格账号非流式客户端请求必须向上游发 stream=true")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool(), "必须携带 include_usage")
+	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"), "强制流式后 Accept 须切 SSE")
+
+	// 客户端：200 anthropic JSON（非流式），Content-Type=application/json。
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	out := rec.Body.String()
+	require.Equal(t, "assistant", gjson.Get(out, "role").String())
+	require.Equal(t, "ok", gjson.Get(out, "content.0.text").String(), "客户端内容=聚合后的完整内容，非 SSE 帧")
+	require.Equal(t, "end_turn", gjson.Get(out, "stop_reason").String())
+
+	// ForwardResult：Stream=false，usage 入账（计费口径）。
+	require.False(t, result.Stream, "非流式客户端 ForwardResult.Stream 必须为 false")
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+}
+
+// Done when #2a：非资格账号（openai apikey / grok apikey / CN 官方直连 apikey）+
+// stream:false → 走既有缓冲分支（上游请求体 stream 缺省/false，无 include_usage，
+// 客户端 200 JSON 不变）。
+func TestForwardAnthropicViaRawChatCompletions_NonEligibleStillBuffered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamJSON := `{"id":"chatcmpl_buf","object":"chat.completion","model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"buffered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`
+
+	cases := []struct {
+		name    string
+		account *Account
+	}{
+		{"openai apikey", func() *Account {
+			acc := rawChatCompletionsTestAccount()
+			acc.Extra = map[string]any{
+				openai_compat.ExtraKeyResponsesMode: string(openai_compat.ResponsesSupportModeForceChatCompletions),
+			}
+			return acc
+		}()},
+		{"grok 直连", func() *Account {
+			// 与既有 grok raw CC 测试同型：openai 平台 apikey + Extra 探针不支持
+			// Responses → 走 raw CC fallback；谓词层面 grok 官方直连即排除（不转换）。
+			acc := rawChatCompletionsTestAccount()
+			acc.Name = "openai-compatible-grok"
+			acc.Extra = map[string]any{openai_compat.ExtraKeyResponsesSupported: false}
+			return acc
+		}()},
+		// 生产实证 #58/#132 同形态：zhipu apikey + 官方域（open.bigmodel.cn）→ 官方直连排除。
+		{"zhipu官方直连", func() *Account {
+			acc := forceChatMessagesFallbackAccount()
+			acc.Platform = PlatformZhipu
+			acc.Credentials = map[string]any{
+				"api_key":  "sk-zhipu",
+				"base_url": DefaultZhipuCodingBaseURL,
+			}
+			return acc
+		}()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"gpt-5.4","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_ns2s_non"}},
+				Body:       io.NopCloser(strings.NewReader(upstreamJSON)),
+			}}
+			svc := ns2sEnabledService()
+			svc.httpUpstream = upstream
+
+			result, err := svc.ForwardAsAnthropic(context.Background(), c, tc.account, body, "", "")
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			// 既有缓冲分支：上游请求体 stream 缺省/false，无 include_usage。
+			require.False(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "非资格账号不得向上游发 stream=true")
+			require.False(t, gjson.GetBytes(upstream.lastBody, "stream_options").Exists(), "非资格账号不得携带 include_usage")
+			require.Equal(t, "application/json", upstream.lastReq.Header.Get("Accept"), "非资格账号保持原生非流式 Accept")
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, "buffered", gjson.Get(rec.Body.String(), "content.0.text").String())
+			require.False(t, result.Stream)
+		})
+	}
+}
+
+// Done when #2a 补充：不进入本 forwarder 的形态（web 接入 / openai OAuth）在
+// 资格谓词层面即被排除（W1 谓词矩阵已钉，此处再钉入口不致误转换）。
+func TestForwardAnthropicViaRawChatCompletions_WebAndOAuthEligibility(t *testing.T) {
+	svc := ns2sEnabledService()
+
+	// web 接入账号：谓词显式排除（IsWebAccessMode 独立判定源）。
+	webAcc := forceChatMessagesFallbackAccount()
+	webAcc.Credentials = map[string]any{
+		"api_key":     "sk-test",
+		"base_url":    "https://tokenharbor.ai/v1",
+		"access_mode": AccountAccessModeWeb,
+	}
+	require.False(t, svc.shouldConvertNonstreamToStream(webAcc), "web 接入账号不得转换")
+
+	// openai OAuth：谓词排除（Type 非 APIKey）。
+	oauthAcc := rawChatCompletionsTestAccount()
+	oauthAcc.Type = AccountTypeOAuth
+	require.False(t, svc.shouldConvertNonstreamToStream(oauthAcc), "openai OAuth 不得转换")
+}
+
+// Done when #2b：clientStream=true → 既有流式分支行为不变（上游 stream=true +
+// include_usage，客户端 SSE，ForwardResult.Stream=true）。
+func TestForwardAnthropicViaRawChatCompletions_ClientStreamUnchanged(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-chat","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_s2","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_s2","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_ns2s_stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := ns2sEnabledService()
+	svc.httpUpstream = upstream
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool())
+
+	out := rec.Body.String()
+	require.Contains(t, out, "event: message_start")
+	require.Contains(t, out, `"text":"hi"`)
+	require.Contains(t, out, "event: message_stop")
+	require.True(t, result.Stream, "clientStream=true 时 ForwardResult.Stream 必须为 true（既有流式分支）")
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+}
+
+// Done when #3a：桥失败（缺 [DONE] / 缺 usage / 零 choice / 畸形帧）→ 客户端收到
+// writeAnthropicError 规范错误（type=error + error.type=api_error + 502），零聚合内容写出。
+func TestForwardAnthropicViaRawChatCompletions_ConvertedBridgeErrors(t *testing.T) {
+	cases := []struct {
+		name     string
+		upstream string
+		wantMsg  string
+	}{
+		{
+			name: "missing DONE sentinel",
+			upstream: strings.Join([]string{
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":"stop"}]}`,
+				"",
+				`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				"",
+			}, "\n"),
+			wantMsg: "[DONE]",
+		},
+		{
+			name: "missing usage frame",
+			upstream: strings.Join([]string{
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":"stop"}]}`,
+				"",
+				"data: [DONE]",
+				"",
+			}, "\n"),
+			wantMsg: "usage",
+		},
+		{
+			name: "zero choice chunks",
+			upstream: strings.Join([]string{
+				`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				"",
+				"data: [DONE]",
+				"",
+			}, "\n"),
+			wantMsg: "without response",
+		},
+		{
+			name: "malformed frame in sequence",
+			upstream: strings.Join([]string{
+				`data: {"id":"c1","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+				"",
+				"data: not-valid-json",
+				"",
+				`data: {"choices":[{"index":0,"delta":{"content":"more"},"finish_reason":"stop"}]}`,
+				"",
+				`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				"",
+				"data: [DONE]",
+				"",
+			}, "\n"),
+			wantMsg: "malformed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			body := []byte(`{"model":"deepseek-chat","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(tc.upstream)),
+			}}
+			svc := ns2sEnabledService()
+			svc.httpUpstream = upstream
+
+			result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), body, "", "")
+			require.Error(t, err, "桥失败必须显式上抛错误")
+			require.Nil(t, result)
+
+			out := rec.Body.String()
+			require.Equal(t, http.StatusBadGateway, rec.Code, "规范错误状态码")
+			require.Equal(t, "error", gjson.Get(out, "type").String(), "writeAnthropicError 信封")
+			require.Equal(t, "api_error", gjson.Get(out, "error.type").String())
+			require.Contains(t, gjson.Get(out, "error.message").String(), tc.wantMsg)
+			require.NotContains(t, out, "partial", "失败关闭：零聚合内容写出")
+			require.NotContains(t, out, "more", "失败关闭：零聚合内容写出")
+			require.False(t, strings.Contains(out, "text/event-stream"), "错误响应不得带 SSE 头")
+		})
+	}
+}
+
+// Done when #3b：CN 首包超时形态（body 读被 watchdog 转译为 errOpenAICNFirstByteTimeout）
+// → 走既有 failover 分支（UpstreamFailoverError 504 + NextAccountRetry），
+// 不回写任何客户端字节。
+func TestForwardAnthropicViaRawChatCompletions_ConvertedCNFirstByteTimeoutFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-chat","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: &openAICNFirstByteTimeoutBody{
+			ReadCloser: io.NopCloser(strings.NewReader("")),
+			w:          cnTimedOutWatchdogForTest(),
+		},
+	}}
+	svc := ns2sEnabledService()
+	svc.httpUpstream = upstream
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), body, "", "")
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr, "CN 首包超时必须走既有透明 failover 分支")
+	require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+	require.Equal(t, NextAccountRetry, failoverErr.NextAccountAction)
+	require.False(t, c.Writer.Written(), "failover 前不得下发任何字节给客户端")
+}
+
+// cnTimedOutWatchdogForTest 构造一个已裁决为内部超时的 watchdog（decided=timedOut），
+// 使 openAICNFirstByteTimeoutBody.Read 在读到零字节+错误时把读中断转译为
+// errOpenAICNFirstByteTimeout（与真实 60s 首包超时形态同型）。
+func cnTimedOutWatchdogForTest() *openAICNFirstByteWatchdog {
+	w := &openAICNFirstByteWatchdog{done: make(chan struct{})}
+	w.decided.Store(watchdogStateTimedOut)
+	return w
+}
+
+// Done when #4（§D5 反向测试）：资格命中 + stream:false 请求 → context 中无心跳
+// owner（心跳帧物理上无法进入非流式响应）。reqStream 口径 = 客户端 stream 标志，
+// 转换发生在 service 层、晚于 handler 安装点，故不改变 owner 安装判定。
+func TestForwardAnthropicViaRawChatCompletions_ConvertedNonstreamHasNoHeartbeatOwner(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-chat","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// 前置：模拟 handler 安装点对客户端 stream 标志的快照（reqStream=false）。
+	snapshot := NewRequestBudgetSnapshot(90, 15, time.Now(), false)
+	ctx := WithRequestBudgetSnapshot(context.Background(), snapshot)
+	_, hasHB := UpstreamHeartbeatFromContext(ctx)
+	require.False(t, hasHB, "reqStream=false 时不得安装心跳 owner（安装点零改动）")
+
+	// 在该无 owner 的 context 上执行转换路径。
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_hb","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+		"",
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := ns2sEnabledService()
+	svc.httpUpstream = upstream
+	c.Request = c.Request.WithContext(ctx)
+
+	result, err := svc.ForwardAsAnthropic(ctx, c, ns2sTestAccount(), body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 转换请求在无心跳 owner 的 context 上完成，响应为纯 JSON、无 SSE 心跳帧。
+	_, stillNoHB := UpstreamHeartbeatFromContext(ctx)
+	require.False(t, stillNoHB, "转换不得凭空安装心跳 owner")
+	require.NotContains(t, rec.Body.String(), "keep-alive", "心跳帧不得进入非流式响应")
+	require.False(t, result.Stream)
 }

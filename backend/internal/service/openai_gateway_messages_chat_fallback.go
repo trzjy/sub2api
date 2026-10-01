@@ -62,8 +62,12 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 	chatReq.Model = upstreamModel
 	chatReq.ReasoningEffort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, chatReq.ReasoningEffort)
-	chatReq.Stream = clientStream
-	if clientStream {
+	// 非流式→流式转换（方案 D2）：非官方池类上游的非流式请求改走健康流式通道，
+	// 上游强制 stream=true + include_usage，规避非流式响应头挂死（CF524 遗留）。
+	// converted 仅用于响应分支选路，reqStream 口径（handler 安装点）零改动。
+	converted := !clientStream && s.shouldConvertNonstreamToStream(account)
+	chatReq.Stream = clientStream || converted
+	if clientStream || converted {
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
 	}
 
@@ -120,7 +124,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 		if terr != nil {
 			return nil, terr
 		}
-		resp, sendErr = s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
+		resp, sendErr = s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream || converted, apiKey, account.GetOpenAIUserAgent(), "", upstreamModel)
 	}
 	if sendErr != nil {
 		return nil, sendErr
@@ -153,7 +157,42 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	if clientStream {
 		return s.streamChatCompletionsAsAnthropic(c, account, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
+	if converted {
+		return s.convertedChatCompletionsAsAnthropic(c, account, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	}
 	return s.bufferChatCompletionsAsAnthropic(c, account, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+}
+
+// convertedChatCompletionsAsAnthropic 是非流式客户端经非流式→流式转换后的响应
+// 尾段（方案 D4.1）：聚合强制流式上游的 CC SSE 为完整 chat.completion 响应后，
+// 复用与 bufferChatCompletionsAsAnthropic 完全同构的既有 CC→Anthropic 转换尾段
+// 写出，不新建第二条转换实现。
+func (s *OpenAIGatewayService) convertedChatCompletionsAsAnthropic(
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	reasoningEffort *string,
+	serviceTier *string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	ccResp, usage, err := s.collectCCStreamAsResponse(resp, c, "openai messages chat fallback")
+	if err != nil {
+		// 聚合期零字节写客户端（响应头未提交）：CN 首包超时走既有透明 failover
+		// 分支（冷却+换号，带模型，与缓冲路径同一分支，无新机制）；其余错误按
+		// 原 endpoint 契约回写 Anthropic 规范错误（writeAnthropicError，与缓冲
+		// 路径同一错误格式）。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
+		writeAnthropicError(c, http.StatusBadGateway, "api_error", err.Error())
+		return nil, err
+	}
+	// 上游被强制流式后 Content-Type=text/event-stream，经 WriteFilteredHeaders
+	// 透传会污染非流式响应，forceJSON=true 覆盖回 application/json。
+	return s.writeChatCompletionsAsAnthropicResult(c, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
@@ -167,7 +206,6 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 	serviceTier *string,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
-	requestID := resp.Header.Get("x-request-id")
 	ccResp, usage, err := s.readCCUpstreamJSONResponse(resp, c, writeAnthropicError)
 	if err != nil {
 		// CN 首包超时：缓冲路径响应头尚未提交，可安全透明切换（冷却+换号，带模型）。
@@ -179,10 +217,35 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 		}
 		return nil, err
 	}
+	return s.writeChatCompletionsAsAnthropicResult(c, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
+}
+
+// writeChatCompletionsAsAnthropicResult 是 buffer 与 converted 两个非流式分支共用的
+// CC→Anthropic 转换尾段（方案 D4.1）：同一转换函数（ChatCompletionsResponseToAnthropic）
+// + 同一写出路径（WriteFilteredHeaders + c.JSON + ForwardResult 组装，Stream:false），
+// 不新建第二条转换实现。forceJSON 仅 converted 分支置 true（覆盖上游透传的 SSE
+// Content-Type）；buffer 分支上游为原生 JSON，置 false 保持行为零变化。
+func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
+	c *gin.Context,
+	resp *http.Response,
+	ccResp *apicompat.ChatCompletionsResponse,
+	usage OpenAIUsage,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	reasoningEffort *string,
+	serviceTier *string,
+	startTime time.Time,
+	forceJSON bool,
+) (*OpenAIForwardResult, error) {
+	requestID := resp.Header.Get("x-request-id")
 	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, originalModel)
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	}
+	if forceJSON {
+		c.Writer.Header().Set("Content-Type", "application/json")
 	}
 	c.JSON(http.StatusOK, anthropicResp)
 

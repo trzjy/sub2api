@@ -260,6 +260,12 @@ type ccStreamScanState struct {
 	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
 	// 把上游截断伪装成正常收尾。
 	Err error
+	// MalformedFrames 记录流式读取期间 JSON 解析失败的 data 帧数量。流式
+	// 消费者对畸形帧的 Warn+continue 是既定容错语义（零改动）；但非流式桥
+	// 若容忍会产出缺字 content/arguments 的 200 假完整响应，故桥据此失败关闭。
+	MalformedFrames int
+	// FirstMalformedErr 记录首个解析错误，供诊断（仅首片，避免大流噪音）。
+	FirstMalformedErr error
 }
 
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
@@ -308,6 +314,10 @@ func (s *OpenAIGatewayService) scanCCStream(
 				zap.Error(err),
 				zap.String("request_id", requestID),
 			)
+			if st.MalformedFrames == 0 {
+				st.FirstMalformedErr = err
+			}
+			st.MalformedFrames++
 			continue
 		}
 		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {

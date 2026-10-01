@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -148,6 +149,20 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 			return nil, fmt.Errorf("enable stream usage: %w", usageErr)
 		}
 	}
+	// 非流式→流式转换（方案 §D2+§D4.2）：非官方池类上游的非流式请求改走健康
+	// 流式通道，body 置 stream=true + 复用 ensureOpenAIChatStreamUsage（与既有
+	// 流式分支同一 include_usage 口径），规避非流式响应头挂死（CF524 遗留）。
+	converted := !clientStream && s.shouldConvertNonstreamToStream(account)
+	if converted {
+		upstreamBody, err = sjson.SetBytes(upstreamBody, "stream", true)
+		if err != nil {
+			return nil, fmt.Errorf("convert nonstream to stream: %w", err)
+		}
+		upstreamBody, err = ensureOpenAIChatStreamUsage(upstreamBody)
+		if err != nil {
+			return nil, fmt.Errorf("enable stream usage: %w", err)
+		}
+	}
 	if account.Platform == PlatformGrok {
 		upstreamBody, err = stripGrokChatPromptCacheKey(upstreamBody)
 		if err != nil {
@@ -171,6 +186,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		zap.String("billing_model", billingModel),
 		zap.String("upstream_model", upstreamModel),
 		zap.Bool("stream", clientStream),
+		zap.Bool("converted", converted),
 	)
 
 	// 5. Build and send upstream request via the shared CC pipeline
@@ -183,7 +199,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if customUA == "" && account.IsGrokOAuth() {
 		customUA = defaultGrokUpstreamUserAgent()
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity, upstreamModel)
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream || converted, token, customUA, grokCacheIdentity, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -234,11 +250,15 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
 	}
 
-	// 8. Forward response
+	// 8. Forward response（三元分支：clientStream → 既有流式；!clientStream &&
+	// converted → 新桥聚合 + 复用 bufferRawChatCompletions 既有尾段契约；else →
+	// 既有非流式缓冲分支原样保留）。
 	var result *OpenAIForwardResult
 	var forwardErr error
 	if clientStream {
 		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
+	} else if converted {
+		result, forwardErr = s.convertedChatCompletionsAsRawCC(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	} else {
 		result, forwardErr = s.bufferRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
@@ -544,6 +564,71 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	}
 	c.Writer.WriteHeader(http.StatusOK)
 	_, _ = c.Writer.Write(respBody)
+
+	return &OpenAIForwardResult{
+		RequestID:                     requestID,
+		UpstreamHeaders:               resp.Header,
+		Usage:                         usage,
+		Model:                         originalModel,
+		BillingModel:                  billingModel,
+		UpstreamModel:                 upstreamModel,
+		UpstreamResponseModel:         observedUpstreamResponseModel(c),
+		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
+		UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
+		ReasoningEffort:               reasoningEffort,
+		ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+		Stream:                        false,
+		Duration:                      time.Since(startTime),
+	}, nil
+}
+
+// convertedChatCompletionsAsRawCC 是非流式客户端经非流式→流式转换后的响应尾段
+// （方案 §D4.2）：聚合强制流式上游的 CC SSE 为完整 chat.completion 响应后，
+// marshal 并复用 bufferRawChatCompletions 的既有尾段契约（observer.ObserveOpenAI /
+// Content-Type / usage 提取 / OpenAIForwardResult{Stream:false}），不新建第二条
+// 写出实现。
+func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
+	c *gin.Context,
+	resp *http.Response,
+	account *Account,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	reasoningEffort *string,
+	serviceTier *string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	requestID := resp.Header.Get("x-request-id")
+
+	ccResp, usage, err := s.collectCCStreamAsResponse(resp, c, "openai chat_completions raw")
+	if err != nil {
+		// 聚合期零字节写客户端：CN 首包超时走既有透明 failover 分支
+		//（冷却+换号，带模型）；其余错误按原 endpoint 契约回写规范错误。
+		if isOpenAICNFirstByteTimeout(err) {
+			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
+		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", err.Error())
+		return nil, err
+	}
+	// 上游被强制流式后 Content-Type=text/event-stream，经 WriteFilteredHeaders
+	// 透传会污染非流式响应，显式强制 JSON（与既有非流式缓冲分支同契约）。
+	ccBytes, err := json.Marshal(ccResp)
+	if err != nil {
+		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Failed to marshal aggregated response")
+		return nil, fmt.Errorf("marshal aggregated chat completions response: %w", err)
+	}
+	observer := upstreamResponseModelObserverFromContext(c)
+	if observer == nil {
+		observer = beginUpstreamResponseModelObservation(c)
+	}
+	observer.ObserveOpenAI(ccBytes, strings.TrimSpace(gjson.GetBytes(ccBytes, "type").String()))
+
+	if s.responseHeaderFilter != nil {
+		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	}
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(http.StatusOK)
+	_, _ = c.Writer.Write(ccBytes)
 
 	return &OpenAIForwardResult{
 		RequestID:                     requestID,
