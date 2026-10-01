@@ -1042,7 +1042,7 @@ func resolveCodexCatalogMetadataModel(
 		claimedPlatforms := make(map[string]struct{})
 		for _, account := range accounts {
 			accountPlatform := strings.TrimSpace(account.Platform)
-			if !isConcreteRequestPlatform(accountPlatform) || !codexExplicitModelMappingClaims(account, modelID) {
+			if !isCompositeOwnableAccountPlatform(accountPlatform) || !codexExplicitModelMappingClaims(account, modelID) {
 				continue
 			}
 			claimedPlatforms[accountPlatform] = struct{}{}
@@ -1197,7 +1197,7 @@ func resolveCodexCompositeModelTarget(
 	claimedPlatforms := make(map[string]struct{})
 	for _, account := range accounts {
 		platform := strings.TrimSpace(account.Platform)
-		if !isConcreteRequestPlatform(platform) || !codexExplicitModelMappingClaims(account, modelID) {
+		if !isCompositeOwnableAccountPlatform(platform) || !codexExplicitModelMappingClaims(account, modelID) {
 			continue
 		}
 		claimedPlatforms[platform] = struct{}{}

@@ -219,6 +219,19 @@ func isConcreteRequestPlatform(platform string) bool {
 	}
 }
 
+// isCompositeOwnableAccountPlatform：composite 归属层与 /v1/models 目录扫描可采信的账号
+// 平台 = isConcreteRequestPlatform ∪ {other}。
+//
+// 窄域语义（方案 composite-other-platform-ownership-plan.md §改动清单）：仅用于"扫描账号
+// 经显式 model_mapping 归属模型"的点；other 无内置模型目录，模型完全来自账号 model_mapping
+// （空映射=无可服务模型，既有外审-3 加固），故仅凭显式映射归属、不进计费/广场/元数据面。
+//
+// 用户裁定（2026-10-01）：还没有平台的模型统一创建到 other 平台，聚合分组（id=94）必须可用。
+// 本谓词严格等于白名单∪{other}，禁止"非空即放行"类实现——未知平台（如 unknownplat）必须 false。
+func isCompositeOwnableAccountPlatform(platform string) bool {
+	return isConcreteRequestPlatform(platform) || platform == PlatformOther
+}
+
 // DefaultWebModelIDs 返回各官方平台网页接入（access_mode=web）的默认模型目录
 // （方案 §3.3 模型映射表）。
 // 空 model_mapping 时，公开 /models 列表与账号默认模型集回落到此表，而非误回落到
