@@ -1766,7 +1766,9 @@ export default {
         passiveSampled: 'Passive',
         activeQuery: 'Query',
         estimatedTotalCost: 'Est. total ${cost}',
-        estimatedTotalCostTooltip: 'Estimated total cost at 100% utilization, based on current window cost and utilization'
+        estimatedTotalCostTooltip: 'Estimated total cost at 100% utilization, based on current window cost and utilization',
+        musePaused: 'Paused',
+        museResumeAt: 'Resumes at {time}'
       },
       openaiQuotaReset: {
         count: 'Credits',

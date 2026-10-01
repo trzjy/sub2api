@@ -542,7 +542,7 @@ export interface PaginationConfig {
 
 // ==================== API Key & Group Types ====================
 
-export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax' | 'codebuddy'
+export type GroupPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'composite' | 'minimax' | 'codebuddy' | 'muse'
 
 export type VideoModelPrices = Record<string, Record<string, number>>
 
@@ -930,7 +930,7 @@ export interface UpdateGroupRequest {
 
 // ==================== Account & Proxy Types ====================
 
-export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax' | 'codebuddy'
+export type AccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigravity' | 'grok' | 'kimi' | 'zhipu' | 'deepseek' | 'other' | 'minimax' | 'codebuddy' | 'muse'
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
@@ -1484,6 +1484,27 @@ export interface AccountUsageInfo {
     fetched_at?: string
     error?: string
   }
+
+  // Muse 三窗口额度（OpenCode Go 上游 Meta Muse Spark Contributor）。
+  // 后端 MuseQuotaFetcher 透传：percent = 已用比例（0-100），paused/unschedulable_until
+  // 由三窗口 status 推导，供调度冷却恢复（muse-2 消费）。
+  muse_usage?: MuseUsageInfo | null
+}
+
+// Muse 单个额度窗口（已固化语义，照后端 MuseWindow）。
+export interface MuseUsageWindow {
+  status: string            // "ok" 表示窗口可用；非 "ok" 表示该窗口已打满/受限
+  percent: number           // 已用比例 0-100
+  resets_at?: string | null // 窗口重置时间（RFC3339），未下发时缺省
+}
+
+// Muse 三窗口额度（照后端 MuseUsageInfo）。
+export interface MuseUsageInfo {
+  rolling?: MuseUsageWindow | null
+  weekly?: MuseUsageWindow | null
+  monthly?: MuseUsageWindow | null
+  paused?: boolean                      // 任一窗口 status != "ok" 且未到期 → 调度暂停
+  unschedulable_until?: string | null   // 所有「已打满且未到期」窗口 resets_at 的最大值
 }
 
 // OpenAI Codex usage snapshot (from response headers)

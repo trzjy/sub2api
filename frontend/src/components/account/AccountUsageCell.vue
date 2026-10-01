@@ -635,8 +635,44 @@
 
     <!-- Non-OAuth/Setup-Token accounts -->
     <div ref="rootRef" v-else>
+      <!-- Muse API Key accounts: three-window usage (OpenCode Go 上游透传) -->
+      <template v-if="account.platform === 'muse'">
+        <div v-if="museUsage" class="space-y-1">
+          <UsageProgressBar
+            v-if="museUsage.rolling"
+            label="R"
+            :utilization="museUsage.rolling.percent"
+            :resets-at="museUsage.rolling.resets_at ?? null"
+            color="indigo"
+          />
+          <UsageProgressBar
+            v-if="museUsage.weekly"
+            label="7d"
+            :utilization="museUsage.weekly.percent"
+            :resets-at="museUsage.weekly.resets_at ?? null"
+            color="emerald"
+          />
+          <UsageProgressBar
+            v-if="museUsage.monthly"
+            label="30d"
+            :utilization="museUsage.monthly.percent"
+            :resets-at="museUsage.monthly.resets_at ?? null"
+            color="purple"
+          />
+          <!-- 暂停态：任一窗口打满且未到期（unschedulable_until 有值）→ 展示暂停徽章与恢复时间 -->
+          <div v-if="museUsage.unschedulable_until" class="mt-0.5 flex flex-wrap items-center gap-1 text-[10px]">
+            <span class="inline-block rounded px-1.5 py-0.5 font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
+              {{ t('admin.accounts.usageWindow.musePaused') }}
+            </span>
+            <span class="text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.usageWindow.museResumeAt', { time: formatDateOnly(museUsage.unschedulable_until) }) }}
+            </span>
+          </div>
+        </div>
+        <div v-else class="text-xs text-gray-400">-</div>
+      </template>
       <!-- Gemini API Key accounts: show quota info -->
-      <AccountQuotaInfo v-if="account.platform === 'gemini'" :account="account" />
+      <AccountQuotaInfo v-else-if="account.platform === 'gemini'" :account="account" />
     <!-- Key/Bedrock accounts: show today stats + optional quota bars -->
     <div v-else class="space-y-1">
       <OllamaCloudUsageCell
@@ -914,6 +950,9 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'codebuddy') {
     return props.account.type === 'oauth'
   }
+  if (props.account.platform === 'muse') {
+    return props.account.type === 'apikey'
+  }
   // 网页接入模式（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
   // 不应触发 getUsage 请求（后端对 web 无用量分支）。
   if (isWebAccessModeAccount.value) {
@@ -1068,6 +1107,9 @@ const aiCreditsDisplay = computed(() => {
   if (total <= 0) return null
   return total.toFixed(0)
 })
+
+// ===== Muse 三窗口额度（后端透传 usageInfo.muse_usage） =====
+const museUsage = computed(() => usageInfo.value?.muse_usage ?? null)
 
 // ===== CodeBuddy 积分额度（后端周期探测写入 account.Extra） =====
 // 解析逻辑抽到 @/utils/codebuddyCredit：影子行的「母账号余额」指示（AccountsView，方案 N6）

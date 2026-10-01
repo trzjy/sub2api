@@ -52,6 +52,8 @@ const (
 	PlatformOther     = domain.PlatformOther
 	PlatformMiniMax   = domain.PlatformMiniMax
 	PlatformComposite = domain.PlatformComposite
+	// PlatformMuse 是 OpenCode Go 上游 Meta Muse Spark Contributor 平台（muse-1 新增）。
+	PlatformMuse = domain.PlatformMuse
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"
@@ -169,6 +171,7 @@ var AllowedSchedulingThresholdPlatforms = []string{
 	PlatformKimi,
 	PlatformZhipu,
 	PlatformMiniMax,
+	PlatformMuse,
 	PlatformCodeBuddy,
 }
 

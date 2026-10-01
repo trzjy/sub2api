@@ -55,6 +55,7 @@ vi.mock('@/composables/useClipboard', () => ({
 }))
 
 import ModelWhitelistSelector from '../ModelWhitelistSelector.vue'
+import { getModelsByPlatform } from '@/composables/useModelWhitelist'
 
 function mountSelector(props: Record<string, unknown> = {}) {
   return mount(ModelWhitelistSelector, {
@@ -84,6 +85,11 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 }
 
 describe('ModelWhitelistSelector', () => {
+  it('exposes muse clean-name models (muse-spark-1.3 / muse-spark-1.2)', () => {
+    const models = getModelsByPlatform('muse')
+    expect(models).toEqual(expect.arrayContaining(['muse-spark-1.3', 'muse-spark-1.2']))
+  })
+
   beforeEach(() => {
     copyToClipboard.mockClear()
     showError.mockReset()

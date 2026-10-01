@@ -219,6 +219,12 @@ const minimaxModels = [
   'abab5.5-chat', 'abab5.5s-chat'
 ]
 
+// Muse
+const museModels = [
+  'muse-spark-1.3',
+  'muse-spark-1.2'
+]
+
 // 百度 文心
 const baiduModels = [
   'ernie-4.0-8k-latest', 'ernie-4.0-8k', 'ernie-4.0-turbo-8k',
@@ -265,6 +271,7 @@ const allModelsList: string[] = [
   ...moonshotModels,
   ...doubaoModels,
   ...minimaxModels,
+  ...museModels,
   ...baiduModels,
   ...sparkModels,
   ...hunyuanModels,
@@ -455,6 +462,7 @@ export function getModelsByPlatform(platform: string): string[] {
     case 'kimi': return moonshotModels
     case 'doubao': return doubaoModels
     case 'minimax': return minimaxModels
+    case 'muse': return museModels
     case 'baidu': return baiduModels
     case 'spark': return sparkModels
     case 'hunyuan': return hunyuanModels

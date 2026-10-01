@@ -33,6 +33,7 @@ var openAICompatibleGatewayPlatforms = map[string]struct{}{
 	service.PlatformZhipu:     {},
 	service.PlatformDeepseek:  {},
 	service.PlatformMiniMax:   {},
+	service.PlatformMuse:      {},
 	service.PlatformCodeBuddy: {},
 	service.PlatformOther:     {},
 }

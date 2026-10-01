@@ -526,6 +526,25 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     })
   })
 
+  it('submits Muse apikey account with default opencode base_url preset', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Muse')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Muse account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-opencode')
+
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('muse')
+    expect(payload?.type).toBe('apikey')
+    // muse 平台 base_url 默认预设为 opencode 网关，用户可改；无 OAuth / 网页接入分支。
+    expect(payload?.credentials?.base_url).toBe('https://opencode.ai/zen/go/v1')
+    expect(payload?.credentials?.api_protocol).toBeUndefined()
+    expect(payload?.credentials?.account_mode).toBeUndefined()
+  })
+
   it('uses the edited adaptive Chat endpoint when previewing upstream models', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')

@@ -130,3 +130,19 @@ describe('PlatformTypeBadge MiniMax', () => {
     expect(wrapper.html()).toContain('bg-rose-100')
   })
 })
+
+describe('PlatformTypeBadge Muse', () => {
+  it('labels Muse API keys as Muse with fuchsia theme, no OAuth branch', () => {
+    const wrapper = mount(PlatformTypeBadge, {
+      props: {
+        platform: 'muse',
+        type: 'apikey',
+      },
+    })
+
+    expect(wrapper.text()).toContain('Muse')
+    expect(wrapper.text()).toContain('Key')
+    expect(wrapper.text()).not.toContain('OAuth')
+    expect(wrapper.html()).toContain('bg-fuchsia-100')
+  })
+})

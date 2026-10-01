@@ -195,6 +195,9 @@ const platformClass = computed(() => {
   if (props.platform === 'minimax') {
     return 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400'
   }
+  if (props.platform === 'muse') {
+    return 'bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-400'
+  }
   if (props.platform === 'other') {
     return 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
   }
@@ -225,6 +228,9 @@ const typeClass = computed(() => {
   }
   if (props.platform === 'minimax') {
     return 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400'
+  }
+  if (props.platform === 'muse') {
+    return 'bg-fuchsia-100 text-fuchsia-600 dark:bg-fuchsia-900/30 dark:text-fuchsia-400'
   }
   if (props.platform === 'other') {
     return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'

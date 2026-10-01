@@ -45,6 +45,7 @@ const (
 	PlatformZhipu       = domain.PlatformZhipu
 	PlatformDeepseek    = domain.PlatformDeepseek
 	PlatformMiniMax     = domain.PlatformMiniMax
+	PlatformMuse        = domain.PlatformMuse
 
 )
 // AllPlatforms 返回所有支持的平台列表。平台归并后（PR-4）网页接入挂在官方平台
@@ -60,6 +61,7 @@ func AllPlatforms() []string {
 		PlatformZhipu,
 		PlatformDeepseek,
 		PlatformMiniMax,
+		PlatformMuse,
 	}
 }
 

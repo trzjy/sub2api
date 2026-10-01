@@ -1251,6 +1251,7 @@ function generateRoutedCodexFiles(
     deepseek: 'DeepSeek',
     minimax: 'MiniMax',
     codebuddy: 'CodeBuddy',
+    muse: 'Muse',
     other: 'Other',
     composite: 'Composite'
   }

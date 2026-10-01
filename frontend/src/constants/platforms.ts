@@ -21,7 +21,8 @@ export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'deepseek', label: 'DeepSeek' },
   { value: 'other', label: 'Other' },
   { value: 'minimax', label: 'MiniMax' },
-  { value: 'codebuddy', label: 'CodeBuddy' }
+  { value: 'codebuddy', label: 'CodeBuddy' },
+  { value: 'muse', label: 'Muse' }
 ] as const satisfies readonly PlatformOption<AccountPlatform>[]
 
 /** Platforms that can own a group. */
@@ -58,6 +59,7 @@ export const PLAZA_PLATFORM_ORDER = [
   'grok',
   'other',
   'composite',
+  'muse',
 ] as const
 
 export function plazaPlatformOrder(platform: string): number {
@@ -82,6 +84,7 @@ const PLATFORM_MODEL_PATTERNS: Record<string, RegExp> = {
   zhipu: /glm|zhipu|chatglm|bigmodel/i,
   deepseek: /deepseek/i,
   minimax: /minimax|abab/i,
+  muse: /muse-spark/i,
 }
 
 /** 判断上游模型 ID 是否属于给定平台的模型族。平台无词根定义（other/未知）时视为匹配。 */

@@ -240,6 +240,18 @@
           >
             Other
           </button>
+          <button
+            type="button"
+            @click="selectMusePlatform"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'muse'
+                ? 'bg-white text-indigo-600 shadow-sm dark:bg-dark-600 dark:text-indigo-400'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            Muse
+          </button>
         </div>
       </div>
 
@@ -4241,6 +4253,8 @@ const apiKeyBaseUrlPlaceholder = computed(() => {
       return apiProtocol.value === 'anthropic'
         ? 'https://example.com/plan/anthropic'
         : 'https://example.com/v1'
+    case 'muse':
+      return 'https://opencode.ai/zen/go/v1'
     default:
       return 'https://api.anthropic.com'
   }
@@ -4261,6 +4275,8 @@ const apiKeyValuePlaceholder = computed(() => {
     case 'deepseek':
       return 'sk-...'
     case 'minimax':
+      return 'sk-...'
+    case 'muse':
       return 'sk-...'
     default:
       return 'sk-ant-...'
@@ -4509,6 +4525,15 @@ function selectOtherPlatform() {
   // other 默认 OpenAI 兼容协议（anthropic 需用户显式切换，避免误把 Anthropic
   // 上游 base_url 当 OpenAI 端点转发）。
   apiProtocol.value = 'chat_completions'
+}
+
+// Muse：国际（非国产）平台，仅有 apikey 一种类型，无 OAuth / setup-token /
+// cookie / 网页接入 / 协议选择器。base_url 预设为 opencode 网关，用户可改。
+function selectMusePlatform() {
+  form.platform = 'muse'
+  form.type = 'apikey'
+  accountCategory.value = 'apikey'
+  apiKeyBaseUrl.value = 'https://opencode.ai/zen/go/v1'
 }
 
 // 网页接入为 CN 平台的账号模式（平台归并 PR-3）：platform 保持官方值，
@@ -5123,7 +5148,9 @@ watch(
             ? 'https://generativelanguage.googleapis.com'
             : newPlatform === 'grok'
               ? 'https://api.x.ai/v1'
-              : 'https://api.anthropic.com'
+              : newPlatform === 'muse'
+                ? 'https://opencode.ai/zen/go/v1'
+                : 'https://api.anthropic.com'
     }
     // Clear model-related settings
     allowedModels.value = []
@@ -6092,7 +6119,9 @@ const handleSubmit = async () => {
           ? 'https://api.x.ai/v1'
           : form.platform === 'other'
             ? ''
-            : 'https://api.anthropic.com'
+            : form.platform === 'muse'
+              ? 'https://opencode.ai/zen/go/v1'
+              : 'https://api.anthropic.com'
 
   // Build credentials with optional model mapping
   const credentials: Record<string, unknown> = {

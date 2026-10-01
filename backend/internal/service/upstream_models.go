@@ -216,6 +216,13 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	// muse 平台走专属目录同步：拉取上游 /models → 过滤（muse-spark + -contributor +
+	// 排除 -free）→ 派生干净名 → 落库系统托管快照 + 自动建立 clean→contributor 映射。
+	// 与现有平台的同步行为完全隔离（仅 PlatformMuse 命中，不触碰 minimax/volcano 等）。
+	if isMuseAccount(account) {
+		return s.syncMuseModelCatalog(ctx, account)
+	}
+
 	// 网页逆向接入（web 接入模式账号，平台归并后 platform 已是官方值）不参与上游
 	// /v1/models 模型同步：web 凭证（Cookie/Token）不是 API key，打上游 API 端点
 	// 既无意义也泄漏凭证形状。失败关闭返回 unsupported，管理端 /models 已按

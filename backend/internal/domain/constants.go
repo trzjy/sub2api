@@ -33,6 +33,7 @@ const (
 	// 兼容端点经 OpenAI 网关转发。无内置 base_url 预设，账号须自填 base_url。
 	PlatformOther     = "other"
 	PlatformMiniMax   = "minimax" // MiniMax (M 系列)
+	PlatformMuse      = "muse"     // Muse (OpenCode Go 上游 Meta Muse Spark Contributor，非国产供应商)
 	PlatformComposite = "composite"
 )
 

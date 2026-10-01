@@ -869,6 +869,14 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 			// 模型（避免把任意请求原样发往第三方上游；外部审查外审-3）。
 			return false
 		}
+		if a.Platform == PlatformMuse {
+			// muse 无内置模型目录：模型完全来自账号 model_mapping（干净名→
+			// contributor ID）。空映射 = 无可服务模型（与 other 同契约，防任意
+			// 模型名被原样发往 OpenCode Go 上游；外审-3 同源）。muse 不走
+			// passthrough（IsOpenAIPassthroughEnabled 仅对 openai 平台开放），
+			// 因此 whitelist 语义严格生效。
+			return false
+		}
 		return true // 无映射 = 允许所有
 	}
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
@@ -1503,6 +1511,14 @@ func (a *Account) GetAPIProtocol() string {
 			return APIProtocolChatCompletions
 		}
 		return APIProtocolChatCompletions
+	}
+	// Muse 平台（OpenCode Go 上游 Meta Muse Spark Contributor）：上游固定
+	// Responses 协议（实测 chat/completions 400 ModelProtocolUnsupported），
+	// 非国产供应商但必须读 responses。与 PlatformOther 同属「独立分支、不读
+	// 国产供应商协议覆盖守卫」的平台——该守卫在下方，本分支必须置于其之前。
+	// 上游协议单一，固定返回 responses，不读 credentials.api_protocol。
+	if a.Platform == PlatformMuse {
+		return APIProtocolResponses
 	}
 	// 协议覆盖仅对国产 OpenAI 兼容供应商开放；openai/gemini 等平台不读该
 	// 凭证字段（本地与上游父版本语义一致，2026-09-09 合并时曾误删此守卫）。

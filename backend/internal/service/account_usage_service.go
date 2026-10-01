@@ -104,6 +104,18 @@ type antigravityUsageCache struct {
 	timestamp time.Time
 }
 
+// museUsageCache 缓存 Muse 额度数据
+type museUsageCache struct {
+	usageInfo *UsageInfo
+	timestamp time.Time
+}
+
+// museFetchState 记录 Muse 拉取观测状态（连续失败 / 最后成功时间），用于新鲜度与告警判据。
+type museFetchState struct {
+	lastSuccess         time.Time
+	consecutiveFailures int
+}
+
 const (
 	apiCacheTTL         = 3 * time.Minute
 	apiErrorCacheTTL    = 1 * time.Minute        // 负缓存 TTL：429 等错误缓存 1 分钟
@@ -120,15 +132,21 @@ type UsageCache struct {
 	apiCache          sync.Map           // accountID -> *apiUsageCache
 	windowStatsCache  sync.Map           // accountID -> *windowStatsCache
 	antigravityCache  sync.Map           // accountID -> *antigravityUsageCache
+	museCache         sync.Map           // accountID -> *museUsageCache
 	apiFlight         singleflight.Group // 防止同一账号的并发请求击穿缓存（Anthropic）
 	antigravityFlight singleflight.Group // 防止同一 Antigravity 账号的并发请求击穿缓存
+	museFlight        singleflight.Group // 防止同一 Muse 账号的并发请求击穿缓存
 	openAIProbeCache  sync.Map           // accountID -> time.Time
 	grokProbeCache    sync.Map           // accountID -> last billing probe attempt
+	museStateMu       sync.Mutex
+	museState         map[int64]*museFetchState
 }
 
 // NewUsageCache 创建 UsageCache 实例
 func NewUsageCache() *UsageCache {
-	return &UsageCache{}
+	return &UsageCache{
+		museState: make(map[int64]*museFetchState),
+	}
 }
 
 // WindowStats 窗口期统计
@@ -248,6 +266,10 @@ type UsageInfo struct {
 	// 受控自定义余额探测结果。普通 API Key 账号可显式配置上游 JSON 余额端点，
 	// 该字段只承载探测返回值，不参与本地余额扣费。
 	BalanceProbe *BalanceProbeResult `json:"balance_probe,omitempty"`
+
+	// Muse 三窗口额度（OpenCode Go 上游 Meta Muse Spark Contributor）。
+	// 含暂停判定与调度冷却恢复时间，由 MuseQuotaFetcher 填充。
+	MuseUsage *MuseUsageInfo `json:"muse_usage,omitempty"`
 }
 
 // ClaudeUsageWindow Anthropic /api/oauth/usage 返回的单个用量窗口
@@ -302,6 +324,7 @@ type AccountUsageService struct {
 	grokQuotaFetcher        *GrokQuotaFetcher
 	grokQuotaService        *GrokQuotaService
 	openAIQuotaService      *OpenAIQuotaService
+	museQuotaFetcher        *MuseQuotaFetcher
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -319,6 +342,7 @@ func NewAccountUsageService(
 	grokQuotaFetcher *GrokQuotaFetcher,
 	grokQuotaService *GrokQuotaService,
 	openAIQuotaService *OpenAIQuotaService,
+	museQuotaFetcher *MuseQuotaFetcher,
 	cache *UsageCache,
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
@@ -332,6 +356,7 @@ func NewAccountUsageService(
 		grokQuotaFetcher:        grokQuotaFetcher,
 		grokQuotaService:        grokQuotaService,
 		openAIQuotaService:      openAIQuotaService,
+		museQuotaFetcher:        museQuotaFetcher,
 		cache:                   cache,
 		identityCache:           identityCache,
 		tlsFPProfileService:     tlsFPProfileService,
@@ -389,6 +414,15 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 
 	if account.Platform == PlatformGrok {
 		usage, err := s.getGrokUsage(ctx, account, forceProbe)
+		if err == nil && usage != nil && usage.Error == "" {
+			s.tryClearRecoverableAccountError(ctx, account)
+		}
+		return usage, err
+	}
+
+	// Muse 平台：使用 MuseQuotaFetcher 获取三窗口额度
+	if account.Platform == PlatformMuse {
+		usage, err := s.getMuseUsage(ctx, account)
 		if err == nil && usage != nil && usage.Error == "" {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
@@ -1101,6 +1135,142 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 		return &UsageInfo{UpdatedAt: &now}, nil
 	}
 	return usage, nil
+}
+
+// museUsageTempUnschedulableReason 是 muse 用量轮询侧暂停（三窗口任一打满）写入
+// accounts.temp_unschedulable_until 的原因标记。仅 muse 用量侧使用，便于与他因
+// 暂停（网关 429 / CN 余额 / grok 等）区分；恢复 = 列到期（调度查询侧天然尊重）。
+const museUsageTempUnschedulableReason = "muse:usage-window-exhausted"
+
+// getMuseUsage 获取 Muse 账户三窗口额度。照 getAntigravityUsage 模式：
+// CanFetch 守卫 / 缓存 / singleflight 防击穿 / 失败关闭（不 fallback）/ 观测连续失败与新鲜度。
+//
+// muse-7 收尾缺口：当暂停判定成立（任一窗口 status != "ok" 且未到期）时，把恢复时间
+// （所有已打满窗口 resetsAt 的最大值）写 accounts.temp_unschedulable_until，到期自动
+// 恢复；只延长不缩短（复用 SetTempUnschedulable 的 `temp_unschedulable_until < $1` 守卫），
+// 不新增主动清除逻辑。未打满（Paused=false）一律不写。
+func (s *AccountUsageService) getMuseUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+	if s.museQuotaFetcher == nil || !s.museQuotaFetcher.CanFetch(account) {
+		now := time.Now()
+		return &UsageInfo{UpdatedAt: &now}, nil
+	}
+
+	// 1. 检查缓存
+	if cached, ok := s.cache.museCache.Load(account.ID); ok {
+		if entry, ok := cached.(*museUsageCache); ok {
+			if time.Since(entry.timestamp) < museUsageCacheTTL(entry.usageInfo) {
+				return entry.usageInfo, nil
+			}
+		}
+	}
+
+	// 2. singleflight 防止并发击穿
+	flightKey := fmt.Sprintf("muse-usage:%d", account.ID)
+	result, flightErr, _ := s.cache.museFlight.Do(flightKey, func() (any, error) {
+		// 再次检查缓存（等待期间可能已被填充）
+		if cached, ok := s.cache.museCache.Load(account.ID); ok {
+			if entry, ok := cached.(*museUsageCache); ok {
+				if time.Since(entry.timestamp) < museUsageCacheTTL(entry.usageInfo) {
+					return entry.usageInfo, nil
+				}
+			}
+		}
+
+		// 独立 context：避免调用方 cancel 波及共享 flight 的其他请求
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), museFetchTimeout)
+		defer fetchCancel()
+
+		proxyURL := s.museQuotaFetcher.GetProxyURL(fetchCtx, account)
+		fetchResult, err := s.museQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
+		if err != nil {
+			degraded := buildMuseDegradedUsage(account, err)
+			s.recordMuseFetchFailure(account.ID)
+			s.cache.museCache.Store(account.ID, &museUsageCache{
+				usageInfo: degraded,
+				timestamp: time.Now(),
+			})
+			return degraded, nil
+		}
+
+		enrichUsageWithAccountError(fetchResult.UsageInfo, account)
+		s.recordMuseFetchSuccess(account.ID)
+
+		// muse-7 暂停落库：暂停判定成立且算得恢复时间时，写 temp_unschedulable_until。
+		// SetTempUnschedulable 自带「只延长不缩短」守卫，他因暂停不被缩短；
+		// 未打满（Paused=false）或不带恢复时间一律不写。
+		if s.accountRepo != nil && fetchResult.UsageInfo.MuseUsage != nil &&
+			fetchResult.UsageInfo.MuseUsage.Paused &&
+			fetchResult.UsageInfo.MuseUsage.UnschedulableUntil != nil {
+			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID,
+				*fetchResult.UsageInfo.MuseUsage.UnschedulableUntil,
+				museUsageTempUnschedulableReason); err != nil {
+				slog.Warn("muse: persist temp_unschedulable failed",
+					"account_id", account.ID, "error", err)
+			}
+		}
+
+		s.cache.museCache.Store(account.ID, &museUsageCache{
+			usageInfo: fetchResult.UsageInfo,
+			timestamp: time.Now(),
+		})
+		return fetchResult.UsageInfo, nil
+	})
+
+	if flightErr != nil {
+		return nil, flightErr
+	}
+	usage, ok := result.(*UsageInfo)
+	if !ok || usage == nil {
+		now := time.Now()
+		return &UsageInfo{UpdatedAt: &now}, nil
+	}
+	return usage, nil
+}
+
+// recordMuseFetchSuccess 记录 Muse 拉取成功：重置连续失败与最后成功时间。
+func (s *AccountUsageService) recordMuseFetchSuccess(accountID int64) {
+	s.cache.museStateMu.Lock()
+	defer s.cache.museStateMu.Unlock()
+	st := s.cache.museState[accountID]
+	if st == nil {
+		st = &museFetchState{}
+		s.cache.museState[accountID] = st
+	}
+	st.lastSuccess = time.Now()
+	st.consecutiveFailures = 0
+}
+
+// recordMuseFetchFailure 记录 Muse 拉取失败：累加连续失败，并按判据告警
+// （连续失败超阈值 / 数据新鲜度过期，均不泄露密钥）。
+func (s *AccountUsageService) recordMuseFetchFailure(accountID int64) {
+	s.cache.museStateMu.Lock()
+	defer s.cache.museStateMu.Unlock()
+	st := s.cache.museState[accountID]
+	if st == nil {
+		st = &museFetchState{}
+		s.cache.museState[accountID] = st
+	}
+	st.consecutiveFailures++
+	now := time.Now()
+
+	slog.Warn("muse quota fetch failed",
+		"account_id", accountID,
+		"consecutive_failures", st.consecutiveFailures)
+
+	if st.consecutiveFailures >= museConsecutiveFailAlertThreshold {
+		slog.Error("muse quota alert: consecutive fetch failures",
+			"account_id", accountID,
+			"consecutive_failures", st.consecutiveFailures)
+	}
+	if !st.lastSuccess.IsZero() {
+		stale := now.Sub(st.lastSuccess)
+		if stale >= museStaleDataThreshold {
+			slog.Error("muse quota alert: data stale",
+				"account_id", accountID,
+				"stale_for", stale.String(),
+				"last_success", st.lastSuccess)
+		}
+	}
 }
 
 func (s *AccountUsageService) getGrokUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {

@@ -558,6 +558,10 @@ func (s *AccountService) TestCredentials(ctx context.Context, id int64) error {
 		// 网页接入账号（官方平台 + access_mode=web）同样无独立探测端点，可用性经
 		// 转发路径验证（探活分派按账号接入模式判定，见 account_test_service）。
 		return nil
+	case PlatformMuse:
+		// Muse (OpenCode Go 上游) API Key 账号：无独立探测端点，凭证可用性经
+		// Responses 转发路径验证（含 x-opencode-session 注入与上游 200 实测）。
+		return nil
 	case PlatformCodeBuddy:
 		// CodeBuddy OAuth 订阅制账号：凭证可用性经 chat 转发路径验证（GET models 探测可选）。
 		return nil
