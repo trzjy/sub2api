@@ -184,3 +184,7 @@ output/
 .workbuddy/
 # 临时探针脚本（排查用，不入库）
 tmp-probe/
+
+# 派发单与外审审查包（工作过程产物，不入库）
+/DISPATCH-*.md
+/REVIEW-PACKET-*.md
