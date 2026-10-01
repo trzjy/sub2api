@@ -15,6 +15,11 @@ cd /opt/sub2api
 git fetch origin
 git checkout -f "$REF"
 
+# 3b. 迁移不可变门禁（构建之前）：阻止「已应用于生产库的迁移文件被改动」进镜像。
+#     命中即 exit 1 中止部署，输出会点名被阻断的迁移文件；语义与破例开关见
+#     deploy-config/scripts/predeploy-migration-guard.sh 头部注释。
+./deploy-config/scripts/predeploy-migration-guard.sh "$REF"
+
 # 4. 记录 short SHA
 TAG=$(git rev-parse --short HEAD)
 

@@ -238,6 +238,27 @@ rm -rf /opt/sub2api/build-$TARGET && mkdir -p /opt/sub2api/build-$TARGET
 git archive origin/main | tar -x -C /opt/sub2api/build-$TARGET
 # （可选）校验暂存确含目标内容：grep -c "特征串" build-$TARGET/backend/...
 
+# 2b. 迁移不可变门禁（构建前必过，2026-10-01 事故后新增）
+#    背景：提交 657cd2d16 自述「注释级、零语义」，实际改了 4 个已在生产库应用的迁移
+#    文件（257/263/264/265）→ 启动 checksum mismatch → fail-fast → 容器 Restarting
+#    → 源站无响应 → Cloudflare 502 全站中断 10 分钟。
+cd /opt/sub2api && ./deploy-config/scripts/predeploy-migration-guard.sh "$TARGET"
+# 也可显式带目标 ref：./deploy-config/scripts/predeploy-migration-guard.sh origin/main
+#
+# 阻断语义（exit 1 = 中止部署，部署脚本 deploy-to-server.sh 已在 build 之前自动调用）：
+#   A（新增迁移文件）                   → 放行
+#   M/D 且该文件 filename 在 schema_migrations 中已存在 → 硬阻断 exit 1，输出点名文件清单
+#   M/D 但库内未应用                    → 警告放行
+#   基线 sha 不可解析（运行的是仓库里没有的旧镜像）→ 警告放行，输出明确说明未做迁移差异检查
+#   postgres 不可连/查询失败            → fail-closed 阻断 exit 1（无法确认是否已应用）
+# 破例开关：ALLOW_APPLIED_MIGRATION_CHANGE=1 可将「已应用迁移被改动」降级为警告放行，
+#   仅用于人类已明确确认要同步重建库内 checksum 的场景，脚本会打出醒目警告。不要用它在
+#   常规部署里蒙混——放行等于预约一次 502。
+#
+# 被阻断后的正确处置（见 backend/migrations/README.md 不可变原则）：
+#   1) 还原文件到被应用时的内容：git checkout <基线sha> -- backend/migrations/<文件>
+#   2) 或保留原文件不动，新建更高序号的迁移文件承载本次变更
+
 # 3. 服务器端构建镜像（后台运行 + 日志，构建约 5-10 分钟）
 cd /opt/sub2api/build-$TARGET && nohup docker build -t sub2api:$TARGET-w \
   --build-arg GOPROXY=https://goproxy.cn,direct \
@@ -536,6 +557,29 @@ docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env ps   # 
 **归因**：恢复后用 `du -xsh /*` 与 `docker system df` 找出打满根因（本次事故 =
 build cache 11.8GB + 每日清理降级路径 `until=168h` 永不命中 + 镜像窗口期累积），
 对应整改：post-deploy 清理钩子实时化（§12.5）+ build cache 两级封顶（§12.2）。
+
+### 7.11 全站 502 / sub2api 容器 Restarting（迁移 checksum mismatch，2026-10-01 新增）
+
+**先看这条**：升级/发版后立刻全站 502、`docker ps` 显示 sub2api 反复 `Restarting`，第一反应不是查 Nginx/Cloudflare，而是看容器日志有没有 `checksum mismatch`：
+
+```bash
+docker logs --tail=200 sub2api 2>&1 | grep -iE "checksum|migration|panic|fatal"
+# 典型：migration 257_usage_risk_analysis.sql checksum mismatch (db=xxx file=yyy)
+docker inspect sub2api --format "{{.State.Status}} {{.State.Health.Status}} {{.RestartCount}}"
+```
+
+**成因**：应用启动时按「文件名 + 全文 checksum」比对 `schema_migrations` 记录，**哪怕只改注释一行的字节也会 mismatch**，随后 fail-fast 退出 → compose 无限重启 → 源站无响应 → Cloudflare 回 502。2026-10-01 事故即由提交 `657cd2d16`（自述「注释级、零语义」，实际改了已应用的 257/263/264/265）触发，全站中断 10 分钟。
+
+**止血**：立即把 `.env` 的 `SUB2API_IMAGE_TAG` 切回上一个可用 `<commit>-w` 并 `docker compose ... up -d sub2api`（见 §9 回滚操作），再 `git checkout <基线sha> -- backend/migrations/<文件>` 还原被改动的迁移文件。
+
+**预防（部署前）**：每个含 `backend/migrations/` 改动的版本，构建镜像之前先跑迁移不可变门禁（§5 步骤 2b；走 `deploy-to-server.sh` 时会在 build 前自动调用）：
+
+```bash
+cd /opt/sub2api && ./deploy-config/scripts/predeploy-migration-guard.sh <目标ref>
+echo "EXIT_CODE=$?"     # 0 放行；1 阻断（输出点名被改动的已应用迁移文件）
+```
+
+库不可用时门禁按 fail-closed 阻断；基线 sha 解析不到则警告放行但会注明「未做迁移差异检查」，此时需人工核对迁移目录。
 
 ---
 
