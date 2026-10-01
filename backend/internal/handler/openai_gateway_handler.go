@@ -326,7 +326,7 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsCNProvider(platform)) {
+			(platform == service.PlatformGrok || service.IsCNProvider(platform) || platform == service.PlatformOther) {
 			return true
 		}
 	}
