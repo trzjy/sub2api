@@ -654,7 +654,7 @@ curl -s http://127.0.0.1:18089/healthz
 - `POST /challenge/{session_id}/result`：body 同样带 `platform/login_session_id/phone`，终态一次性消费。GLM 数美 SDK 回调给出真实 `rid` 即成功（md5 可选：2026-09-22 chatglm.cn 线上取证，官方滑块 `onSuccess` 仅回调 `{rid, pass}`，md5 是落地链接 query 可选参数，正常滑块流不带；helper 对 md5 有则透传、无则空）并附启动时 `phone_code`；Kimi 只返回真实回调 `validate`；重复消费 404。
 - helper 不会 `page.goto` SDK 脚本 URL，而是在有头 Playwright 本地最小页面加载已取证官方 SDK：Kimi `initNECaptcha({captchaId,element,mode:"embed",apiVersion:2})`，GLM `initSMCaptcha({organization,product:"embed"})`。页面必须运行在真实 http 源下（`http://127.0.0.1:18089/__challenge_page__`，由 Playwright 路由拦截注入 HTML，不实际访问该路径）；`about:blank`/`data:` 等不透明源会因浏览器拒绝 `document.cookie` 而使 SDK 初始化失败（易盾 curl 直连正常但页面卡在“正在加载”）。Kimi 成功以 `onVerify(err==null)` 或隐藏输入 `NecaptchaValidate` 轮询兜底捕获 `validate`。GLM 回调字段以运行时日志记录键名（不记值）：2026-09-21/22 两次生产实测均为 `['pass', 'rid']`，无 `md5`（与官方 bundle `onSuccess` 只解构 `{rid, pass}` 一致）；`rid` 缺失或为空才关闭浏览器并失败，禁止把 `token/validate/pass` 当 md5。超时、浏览器关闭、回调缺字段同样关闭浏览器并失败。
 
-详细背景、隧道和安全边界见 `docs/xianyu-manual-captcha-helper.md`。secret、挑战 URL、登录会话值及凭证不写日志或长期落盘；结果仅内存保存，读取后立即删除。
+详细背景、隧道和安全边界见 `docs-local/xianyu-manual-captcha-helper.md`。secret、挑战 URL、登录会话值及凭证不写日志或长期落盘；结果仅内存保存，读取后立即删除。
 
 ### 11.4 验证命令
 

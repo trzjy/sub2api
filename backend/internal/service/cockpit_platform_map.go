@@ -1,6 +1,6 @@
 // cockpit_platform_map.go —— Cockpit Tools 备份导出 slug → 站点平台归属三态表。
 //
-// 唯一权威来源：docs/codebuddy-cockpit-fusion-plan.md §1.2（v15）。
+// 唯一权威来源：docs-local/codebuddy-cockpit-fusion-plan.md §1.2（v15）。
 // 这是导入引擎的平台归属唯一映射源（domain 层常量表）；新增平台只改这张表。
 //
 // 三态：

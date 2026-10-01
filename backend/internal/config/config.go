@@ -1000,7 +1000,7 @@ type GatewayConfig struct {
 	// 的最长窗口（秒）。超过该窗口仍未收到响应头即触发 failover/错误响应。
 	// 只接受 [30,90]，无禁用路径（0 与越界一律失败关闭，不回退无护栏旧行为）。
 	// 默认 90：非流式总预算 guard+25s=115s 留足换号+写回余量，且任何合法值
-	// 都在 Cloudflare ~125s 墙内收敛（详见 docs/cf524-upstream-hang-mitigation-plan.md）。
+	// 都在 Cloudflare ~125s 墙内收敛（详见 docs-local/cf524-upstream-hang-mitigation-plan.md）。
 	UpstreamFirstByteGuardSeconds int `mapstructure:"upstream_first_byte_guard_seconds"`
 	// UpstreamHeartbeatDelaySeconds 流式心跳保活延迟（CF524 D2，秒）：
 	// 客户端为流式且上游响应头等待超过该延迟时，开始周期性写 keep-alive 注释帧，

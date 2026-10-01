@@ -4,7 +4,7 @@
 --   2) usage_risk_reports         —— user+group × 日风险报告（应用时区日界）
 --   3) usage_risk_runs            —— 分析运行覆盖台账
 -- 全部幂等（IF NOT EXISTS / IF NOT EXISTS 索引），不触碰任何已有表。
--- 字段权威来源：docs/abnormal-usage-analysis-plan.md §6.1 / §6.2 / §6.3。
+-- 字段权威来源：docs-local/abnormal-usage-analysis-plan.md §6.1 / §6.2 / §6.3。
 
 -- 1) 小时桶指标聚合表（代理主键 id + 唯一键 (user_id, group_id, bucket_hour)）
 CREATE TABLE IF NOT EXISTS user_usage_metrics_rollup (

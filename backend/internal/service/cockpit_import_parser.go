@@ -1,6 +1,6 @@
 // cockpit_import_parser.go —— 平台无关 Cockpit 备份导入解析引擎（方案 §1.1–1.5、§1.6）。
 //
-// 唯一权威来源：docs/codebuddy-cockpit-fusion-plan.md（v16）。
+// 唯一权威来源：docs-local/codebuddy-cockpit-fusion-plan.md（v16）。
 // v16 终审整改（D-10a）：单一 JSON 值边界与 decoder 错误统一入 *CockpitImportError（§1.4）；
 // 类型契约钉死——token/uid/domain/enterprise_id 仅接受 JSON 字符串（禁数值强转），expires_at
 // 单独按有限数值解析；domain 非空字符集校验（§1.3）；解析响应 context 取消（§1.5）。

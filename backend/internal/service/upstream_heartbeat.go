@@ -4,7 +4,7 @@ package service
 //
 // CF524 D2 流式心跳保活组件（方案 A，单独交付，不做挂点接入；R3 P2-5 闭合）。
 // 本卡只新建本组件与对应 _test.go；挂点 1-4 的接入、owner 安装、防线例外判定
-// 一律归 G2。组件契约严格遵循 docs/cf524-upstream-hang-mitigation-plan.md v8.2 §2 D2。
+// 一律归 G2。组件契约严格遵循 docs-local/cf524-upstream-hang-mitigation-plan.md v8.2 §2 D2。
 //
 // 职责边界（与方案冲突处以报告说明，不自行改语义）：
 //   - 组件负责"停得干净 + 优先级唯一"；三分支顺序编排在 G2。

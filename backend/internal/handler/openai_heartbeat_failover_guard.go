@@ -2,7 +2,7 @@ package handler
 
 // 文件：internal/handler/openai_heartbeat_failover_guard.go
 //
-// CF524 扩展 P2-A（方案 docs/cf524-openai-gateway-guard-extension-plan.md v1.2
+// CF524 扩展 P2-A（方案 docs-local/cf524-openai-gateway-guard-extension-plan.md v1.2
 // §3.1/§3.3）：OpenAI 处理器家族（ChatCompletions / Responses / Messages 三入口）
 // 共享的两个符号，供 P2 后续卡（CC 入口 / gateway_handler 双入口）编译期依赖。
 //

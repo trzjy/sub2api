@@ -1,8 +1,8 @@
 -- 264_migrate_codebuddy_quota_error_to_credit_error.sql
 --
 -- 独占所有者：B4 Card E（唯一后端迁移所有者）。方案
--- docs/codebuddy-b4-implementation-plan.md §1；权威
--- docs/codebuddy-cockpit-fusion-plan.md §4.1。
+-- docs-local/codebuddy-b4-implementation-plan.md §1；权威
+-- docs-local/codebuddy-cockpit-fusion-plan.md §4.1。
 --
 -- 目的：Extra 错误键 SSOT 由旧名 codebuddy_quota_error 改名为 codebuddy_credit_error。
 -- 本迁移把 accounts.extra 中的存量旧键**原子**搬迁到新键，搬迁完成后旧键在库内归零

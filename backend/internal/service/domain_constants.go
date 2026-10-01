@@ -906,7 +906,7 @@ const (
 )
 
 // 异常调用分析（防中转商薅羊毛）设置键。
-// 键前缀统一为 usage_risk_*，默认值与方案 docs/abnormal-usage-analysis-plan.md §4 完全一致。
+// 键前缀统一为 usage_risk_*，默认值与方案 docs-local/abnormal-usage-analysis-plan.md §4 完全一致。
 // 全部为纯配置、无密钥，公开可读写。
 const (
 	// SettingKeyUsageRiskEnabled 全局开关（默认开，纯分析零用户面影响）。
