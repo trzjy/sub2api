@@ -96,6 +96,14 @@ CHALLENGE_PAGE_URL = "http://127.0.0.1:18089/__challenge_page__"
 MAX_WAIT_CONTRACT_A = 285
 MAX_WAIT_CONTRACT_B = 110
 EXPIRED_MARKER = "页面访问出现了问题"
+# 滑块失败判定标记（2026-09-30 生产取证：baxia punish 页拖动失败提示
+# "验证失败，点击滑块重试(error:...)"，error 码为会话级随机参考码）。风控判死的
+# 挑战会话内人工怎么拖都会失败（2026-09-30 生产实证：账号 1088324229 连续 10 个
+# 会话拖满 285s 全失败，紧接的新挑战链接 9 秒即通过），必须重开挑战会话才有通过
+# 机会：同 URL reload 重建采集会话；重开次数用尽仍失败则提前返回 fail，Worker
+# 数秒内即下发全新验证链接。检测读 body.innerText（可见文本）而非 page.content()
+# ——前端 bundle 的 <script> 源码里同样含该文案字面量，content() 必误命中。
+DEFAULT_SLIDER_FAIL_MARKERS = ("验证失败",)
 # 进一步验证判定标记（2026-09-23 用户裁定：风控升级后滑块通过后页面可能仍要求
 # 手机号登录，通过时刻的 x5sec 快照不等于终态）。命中任一文案即视为"还需要进一步
 # 验证"：保持页面打开等人工完成，而不是按 post_success_keep_secs 直接关浏览器。
@@ -167,6 +175,7 @@ def load_or_create_config(path: Path) -> Dict[str, Any]:
         "notify": True,
         "post_success_keep_secs": 8,
         "further_verify_wait": True,
+        "slider_fail_reload": 2,
         "browser_channel": "",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,14 +192,70 @@ class Solver:
         self.cfg = cfg
         self.lock = asyncio.Lock()
         self.pw: Any = None
+        # browser_driver: playwright（默认，原生 Playwright）| patchright（反检测
+        # fork，消除 CDP Runtime.enable 等自动化泄漏）。显式要求的驱动不可用时
+        # 失败关闭抛错，绝不静默回退——回退会把判死会话的根因重新掩盖。
+        self.driver = str(cfg.get("browser_driver") or "playwright").strip().lower()
+        if self.driver not in ("playwright", "patchright"):
+            raise RuntimeError(f"未知 browser_driver: {self.driver}（可选 playwright/patchright）")
 
     async def start(self) -> None:
-        self.pw = await async_playwright().start()
+        if self.driver == "patchright":
+            try:
+                from patchright.async_api import async_playwright as _pa_playwright
+            except ImportError as exc:
+                raise RuntimeError(
+                    "browser_driver=patchright 但 patchright 未安装"
+                    "（pip3 install --user --break-system-packages patchright）"
+                ) from exc
+            self.pw = await _pa_playwright().start()
+        else:
+            self.pw = await async_playwright().start()
 
     async def stop(self) -> None:
         if self.pw:
             await self.pw.stop()
             self.pw = None
+
+    async def _launch_session(self, headless: bool, channel: Optional[str], locale: str) -> tuple:
+        """启动浏览器会话，返回 (browser, context, page)。
+
+        - playwright 驱动：launch + new_context（既有行为，browser 非 None）。
+        - patchright 驱动：launch_persistent_context 持久化 profile（patchright
+          官方口径：普通 BrowserContext 会泄漏自动化信号，最大隐身必须持久上下文
+          + chrome channel + 有头）。profile 持有跨会话的指纹稳定性，cookie 每次
+          求解前清空，避免上一账号的 x5sec/bx* 泄入下一账号的挑战会话。
+        """
+        args = ["--window-size=520,680", "--disable-blink-features=AutomationControlled"]
+        # chromium_sandbox=True：Playwright/Patchright 默认 False 会自动附加
+        # --no-sandbox，Chrome 随即显示"不受支持的命令行标记"警告条（2026-09-30
+        # 生产截图实锤），是真人浏览器不会有的自动化指纹，必须去掉。
+        sandbox = bool(self.cfg.get("browser_sandbox", True))
+        if self.driver == "patchright":
+            profile_dir = str(
+                self.cfg.get("browser_profile_dir")
+                or Path.home() / ".cache" / "xianyu-captcha-helper" / "chrome-profile"
+            )
+            os.makedirs(profile_dir, exist_ok=True)
+            context = await self.pw.chromium.launch_persistent_context(
+                profile_dir,
+                headless=headless,
+                channel=channel,
+                args=args,
+                locale=locale,
+                no_viewport=True,
+                chromium_sandbox=sandbox,
+            )
+            await context.clear_cookies()
+            page = context.pages[0] if context.pages else await context.new_page()
+            return None, context, page
+        browser = await self.pw.chromium.launch(
+            headless=headless, channel=channel, args=args, chromium_sandbox=sandbox
+        )
+        context = await browser.new_context(locale=locale, no_viewport=True)
+        page = await context.new_page()
+        return browser, context, page
+
 
     # Baxia 页面加载时会下发 cookie 可用性探针（如 bx-cookie-test），并非通过凭证。
     # 若误当作通过信号，人工尚未完成就提前返回，Worker 侧也会因缺少 x5sec 判失败。
@@ -383,17 +448,22 @@ class Solver:
             markers = tuple(
                 str(m) for m in (self.cfg.get("further_verify_markers") or DEFAULT_FURTHER_VERIFY_MARKERS)
             )
-            log(f"开始求解 account={account_id} host={_host_of(url)} deadline={deadline}s headless={headless}")
+            fail_markers = tuple(
+                str(m) for m in (self.cfg.get("slider_fail_markers") or DEFAULT_SLIDER_FAIL_MARKERS)
+            )
+            # 挑战会话被判死后的自动重开次数：每次检测到拖动失败提示就 reload 重建
+            # 采集会话；用尽后提前返回 fail，交由 Worker 下发全新验证链接。
+            fail_reload_max = max(0, int(self.cfg.get("slider_fail_reload", 2)))
+            reloads_left = fail_reload_max
+            fail_seen = False
+            log(f"开始求解 account={account_id} host={_host_of(url)} deadline={deadline}s headless={headless} driver={self.driver}")
             await self._notify(account_id, deadline)
             browser = None
+            context = None
             try:
-                browser = await self.pw.chromium.launch(
-                    headless=headless,
-                    channel=channel,
-                    args=["--window-size=520,680", "--disable-blink-features=AutomationControlled"],
+                browser, context, page = await self._launch_session(
+                    headless=headless, channel=channel, locale="zh-CN"
                 )
-                context = await browser.new_context(locale="zh-CN", no_viewport=True)
-                page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 loop_start = time.monotonic()
                 last_content_check = 0.0
@@ -445,6 +515,45 @@ class Solver:
                             if EXPIRED_MARKER in content:
                                 log(f"验证链接已过期 account={account_id}（Worker 应刷新 URL 重试）")
                                 return "fail", {}, True
+                            # 拖动失败提示检测（读可见文本，见 DEFAULT_SLIDER_FAIL_MARKERS 注释）：
+                            # 提示持续显示说明当前挑战会话已拒绝本次拖动；风控判死的会话
+                            # 内重试拖动只会继续失败，自动 reload 重开挑战会话，重开用尽
+                            # 则提前收口让 Worker 换新链接，不让人工对着死会话拖到超时。
+                            try:
+                                visible = await page.evaluate(
+                                    "() => (document.body && document.body.innerText) || ''"
+                                )
+                            except Exception:
+                                visible = ""  # 跳转窗口瞬间 evaluate 可能抛错，下一轮再查
+                            now_fail = any(m and m in visible for m in fail_markers)
+                            if now_fail and not fail_seen:
+                                fail_seen = True
+                                if reloads_left > 0:
+                                    reloads_left -= 1
+                                    remain = max(1, int(deadline - elapsed))
+                                    log(
+                                        f"检测到滑块验证失败提示 account={account_id}，"
+                                        f"自动刷新页面重开挑战（剩余 {reloads_left} 次，"
+                                        f"用尽后提前收口换新链接）"
+                                    )
+                                    await self._notify(
+                                        account_id,
+                                        remain,
+                                        message=(
+                                            f"账号 {account_id or '?'} 滑块验证失败：当前挑战已失效，"
+                                            f"已自动刷新页面，请在新页面上重新拖动"
+                                        ),
+                                    )
+                                    await page.reload(wait_until="domcontentloaded", timeout=30_000)
+                                else:
+                                    log(
+                                        f"滑块验证失败且重开次数已用尽（{fail_reload_max} 次），"
+                                        f"提前结束本次求解，交由 Worker 下发新验证链接 "
+                                        f"account={account_id}"
+                                    )
+                                    return "fail", {}, None
+                            elif not now_fail and fail_seen:
+                                fail_seen = False  # 新会话已加载/提示消失，重新武装检测
                         except Exception:
                             pass  # 页面跳转瞬间 content() 可能抛错，下一轮再查
                     await asyncio.sleep(1.0)
@@ -455,6 +564,11 @@ class Solver:
                 if browser:
                     try:
                         await browser.close()
+                    except Exception:
+                        pass
+                elif context is not None:
+                    try:  # patchright 持久上下文：无独立 browser 句柄，随 context 关闭
+                        await context.close()
                     except Exception:
                         pass
 
@@ -2116,6 +2230,96 @@ async def _further_verification_gate_selftest(solver: "Solver") -> bool:
     return ok
 
 
+async def _slider_fail_reload_selftest(solver: "Solver") -> bool:
+    """滑块失败自动重开用例（2026-09-30 死会话问题回归）。
+
+    mock 页面可见文本始终含"验证失败"（等价于风控判死的挑战会话）：
+    - 断言每次失败提示触发一次 reload（初始加载 + slider_fail_reload 次重开），
+      重开用尽后提前返回 ("fail", {}, None)，而不是拖到 deadline；
+    - 断言 reload 后检测重新武装（本用例页面持续命中标记，靠 fail_seen 复位
+      逻辑保证第二次提示仍触发重开而非一次 reload 后卡死到超时）。
+    """
+    from aiohttp import web as aio_web
+
+    loads = {"count": 0}
+
+    async def dead(_: aio_web.Request) -> aio_web.Response:
+        loads["count"] += 1
+        return aio_web.Response(text="<html><body>验证失败，点击滑块重试</body></html>")
+
+    app = aio_web.Application()
+    app.router.add_get("/dead", dead)
+    runner = aio_web.AppRunner(app)
+    await runner.setup()
+    site = aio_web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    cfg_backup = dict(solver.cfg)
+    try:
+        solver.cfg = dict(cfg_backup, slider_fail_reload=1)
+        status, cookies, url_expired = await solver.solve(
+            f"http://127.0.0.1:{port}/dead", "selftest-fail-reload", 20
+        )
+    finally:
+        solver.cfg = cfg_backup
+        await runner.cleanup()
+    # 初始加载 1 次 + 检测到失败提示 reload 1 次（slider_fail_reload=1 用尽）→
+    # 第二次检测到提示时提前收口，绝不等满 20s deadline。
+    if status != "fail" or cookies or url_expired is not None:
+        log(f"滑块失败重开用例 FAIL：status={status} url_expired={url_expired}")
+        return False
+    if loads["count"] != 2:
+        log(f"滑块失败重开用例 FAIL：页面加载数={loads['count']}（预期 2=初始+1次重开）")
+        return False
+    log("滑块失败重开用例 PASS：失败提示触发 reload 重开挑战，重开用尽提前收口返回 fail")
+    return True
+
+
+async def _patchright_chain_selftest(cfg: Dict[str, Any]) -> bool:
+    """patchright 驱动求解链用例：headless + 本地 Set-Cookie 页面，断言反检测
+    驱动切换后求解链（launch_persistent_context → 清 cookie → goto → 导出
+    x5sec → 回传契约）全链仍通。profile 用一次性临时目录，不碰生产 profile。"""
+    import tempfile
+
+    from aiohttp import web as aio_web
+
+    async def index(_: aio_web.Request) -> aio_web.Response:
+        resp = aio_web.Response(text="<html><body>selftest-patchright</body></html>")
+        resp.set_cookie("x5sec", "patchright-value", path="/")
+        return resp
+
+    app = aio_web.Application()
+    app.router.add_get("/", index)
+    runner = aio_web.AppRunner(app)
+    await runner.setup()
+    site = aio_web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    profile = tempfile.mkdtemp(prefix="xch-selftest-patchright-")
+    solver = Solver(dict(
+        cfg,
+        browser_driver="patchright",
+        # 用系统 chrome channel（与生产一致）；patchright 自带 chromium 未经
+        # patchright install 下载，不能假设存在。
+        browser_channel="chrome",
+        browser_profile_dir=profile,
+    ))
+    try:
+        await solver.start()
+        status, cookies, url_expired = await solver.solve(f"http://127.0.0.1:{port}/", "selftest-patchright", 20)
+        if status == "ok" and cookies.get("x5sec") == "patchright-value" and url_expired is None:
+            log("patchright 求解链用例 PASS：persistent context 启动、cookie 清空与导出、ok 回传全链正常")
+            return True
+        log(f"patchright 求解链用例 FAIL：status={status} cookie_names={sorted(cookies)} url_expired={url_expired}")
+        return False
+    except Exception as exc:
+        log(f"patchright 求解链用例 FAIL（异常）：{type(exc).__name__}: {exc}")
+        return False
+    finally:
+        await solver.stop()
+        await runner.cleanup()
+
+
 async def _selftest() -> int:
     """无人工自检：headless 打开本地页面（Set-Cookie x5sec=...），验证成功路径全链。"""
     from aiohttp import web as aio_web
@@ -2154,9 +2358,16 @@ async def _selftest() -> int:
             if not await _glm_mount_browser_selftest(solver.pw):
                 log("SELFTEST FAIL：GLM 滑块挂载 JS 轮询用例失败（延迟渲染不被误杀 / 渲染失败关闭）")
                 return 1
+            if not await _slider_fail_reload_selftest(solver):
+                log("SELFTEST FAIL：滑块失败自动重开用例失败")
+                return 1
+            if not await _patchright_chain_selftest(cfg):
+                log("SELFTEST FAIL：patchright 反检测驱动求解链用例失败")
+                return 1
             log("SELFTEST PASS：kimi SDK 回调、GLM 同会话发码成功/失败关闭（body 非 0、非 2xx、滑块失败）、"
                 "GLM 挂载 JS 轮询（4s 延迟渲染不被误杀、注入短阈值的渲染失败关闭）、"
                 "进一步验证等待门四分支（标记消失取收口轮换凭证/持续标记 deadline 收口/人工关页取最终快照/内容读失败不提前收口）、"
+                "滑块失败自动重开（失败提示触发 reload、重开用尽提前收口返回 fail）、"
                 "签名黄金用例、单槽位/绑定/过期及 cookie 求解链全部正常")
             return 0
         log(f"SELFTEST FAIL：status={status} cookie_names={sorted(cookies)} url_expired={url_expired}")
