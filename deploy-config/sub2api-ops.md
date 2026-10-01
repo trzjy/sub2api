@@ -369,6 +369,38 @@ cd sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2ap
 | new-api 全量 | `/tmp/new-api-full-backup-20260826-214145.tar.gz`（服务器 + 本地副本） |
 | 旧渠道/旧 one-api 数据 | `/opt/backups/sub2api-migration-olddata/` |
 
+### 6.5 每日自动备份（2026-10-01 落地，方案见 docs/backup-daily-plan.md）
+
+- **脚本**：`/opt/sub2api/deploy-config/scripts/backup-daily.sh`（入仓，服务器经 git 拉取）。
+- **调度**：systemd timer `sub2api-backup.timer`（unit 源文件在 `deploy-config/systemd/`，
+  安装到 `/etc/systemd/system/`），`OnCalendar=*-*-* 03:30:00`，Persistent=true。
+  状态查看：`systemctl list-timers sub2api-backup.timer`、`journalctl -u sub2api-backup.service`。
+- **备份目录**：`/opt/sub2api-backup/backup-YYYYMMDD-HHMMSS/`，每桶含
+  `pg.dump` / `mysql.sql.gz` / `minio/` / `data-config.tar.gz` / `manifest.txt`。
+- **备份对象（四类）**：
+  1. postgres `pg_dump -Fc sub2api`（凭据取自容器环境变量，脚本/宿主机无明文）；
+  2. xianyu MySQL `mysqldump --single-transaction --databases xianyu | gzip`；
+  3. minio 数据目录 rsync 增量镜像（`--delete`，不追加）；
+  4. `data/` 配置子集 tar：config.yaml(+历史 bak)、plugins、pages、catfk、free-watch，
+     排除 `logs/` 与 `model_pricing.json`。redis 全为缓存/锁/事件，不备。
+- **保留策略（恒定 14 桶滚动）**：日备 ×7 + 周备 ×4（周日份）+ 月备 ×3（1 号份），
+  每次备份成功后删除超龄桶，桶数不随时间增长。可用环境变量调小实证：
+  `KEEP_DAILY=2 KEEP_WEEKLY=1 KEEP_MONTHLY=1 bash backup-daily.sh`。
+- **硬闸语义（失败关闭，绝不以旧备份顶替）**：以下任一命中即 stderr 报错 + 非零退出：
+  ① 备份目录总量 >15GB；② 当日 pg dump 环比 +50%（异常膨胀信号）；
+  ③ `pg_restore --list` 或 `gzip -t` 校验失败（dump 不可读 = 当日备份失败，整桶删除）。
+- **恢复方法**：
+  ```bash
+  # postgres（自定义格式，可整库恢复或 -t 选表）
+  docker cp /opt/sub2api-backup/backup-XXXX/pg.dump sub2api-postgres:/tmp/pg.dump
+  docker exec sub2api-postgres sh -c \
+    'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists /tmp/pg.dump'
+  # xianyu MySQL
+  zcat /opt/sub2api-backup/backup-XXXX/mysql.sql.gz | \
+    docker exec -i xianyu-worker-mysql sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD"'
+  # minio / data 配置：rsync 或 tar 反向拷回 /opt/sub2api-data/ 对应目录
+  ```
+
 ---
 
 ## 7. 故障排查

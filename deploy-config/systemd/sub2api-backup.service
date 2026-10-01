@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily sub2api local backup (pg/mysql/minio/data-config)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/sub2api/deploy-config/scripts/backup-daily.sh
+Nice=10
+IOSchedulingClass=idle
