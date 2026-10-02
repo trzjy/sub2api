@@ -185,6 +185,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	// 将渠道映射后的上游模型名下传 ctx，供调度门按映射名判定模型级限流（详见 service.WithChannelMappedModel）。
+	if channelMapping.Mapped && channelMapping.MappedModel != reqModel {
+		c.Request = c.Request.WithContext(service.WithChannelMappedModel(c.Request.Context(), channelMapping.MappedModel))
+	}
 
 	// 设置 max_tokens=1 + haiku 探测请求标识到 context 中
 	// 必须在 SetClaudeCodeClientContext 之前设置，因为 ClaudeCodeValidator 需要读取此标识进行绕过判断

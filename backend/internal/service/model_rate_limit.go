@@ -2,11 +2,28 @@ package service
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
+
+// WithChannelMappedModel 将渠道映射解析出的上游模型名装入 ctx，供调度门
+// （modelRateLimitKeysForRequest）追加为额外判定 key，修复信道映射后模型名与
+// 429 写入 scope 不一致导致的漏判熔断。ctx 无值时行为与现状完全一致。
+// key 使用 ctxkey.ChannelMappedModel 常量（与仓库其他 context key 一致）。
+func WithChannelMappedModel(ctx context.Context, mapped string) context.Context {
+	return context.WithValue(ctx, ctxkey.ChannelMappedModel, mapped)
+}
+
+// ChannelMappedModelFromContext 取出 ctx 中的渠道映射上游模型名（未设置则空字符串）。
+func ChannelMappedModelFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxkey.ChannelMappedModel).(string); ok {
+		return v
+	}
+	return ""
+}
 
 const (
 	modelRateLimitsKey                 = "model_rate_limits"
@@ -89,6 +106,15 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	case PlatformAnthropic:
 		if isAnthropicFableModel(modelKey) && modelKey != anthropicFableRateLimitKey {
 			keys = append(keys, anthropicFableRateLimitKey)
+		}
+	}
+	// 渠道映射后的上游模型名：429 写入与探测恢复链用的就是映射后的 scope，但渠道
+	// 映射发生在选号之后，调度深度无法重新解析。handler 在既有解析点把已解析值装入
+	// ctx 下传（单次解析，避免二次解析与配置刷新之间的并发窗口）。此处追加为额外判定
+	// key，与转发改写消费同一值，保证"调度门判定身份 == 转发实际身份"。
+	if mapped := ChannelMappedModelFromContext(ctx); mapped != "" {
+		if !slices.Contains(keys, mapped) {
+			keys = append(keys, mapped)
 		}
 	}
 	return keys

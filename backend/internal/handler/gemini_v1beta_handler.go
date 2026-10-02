@@ -298,6 +298,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	if channelMapping.Mapped {
 		modelName = channelMapping.MappedModel
 	}
+	// 将渠道映射后的上游模型名下传 ctx，供调度门按映射名判定模型级限流（详见 service.WithChannelMappedModel）。
+	if channelMapping.Mapped && channelMapping.MappedModel != reqModel {
+		c.Request = c.Request.WithContext(service.WithChannelMappedModel(c.Request.Context(), channelMapping.MappedModel))
+	}
 
 	// Get subscription (may be nil)
 	subscription, _ := middleware.GetSubscriptionFromContext(c)

@@ -81,4 +81,10 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// ChannelMappedModel 是 handler 在既有 ResolveChannelMappingAndRestrict 调用点
+	// 把"渠道映射解析出的上游模型名"装入请求 ctx 后，供调度门
+	// （modelRateLimitKeysForRequest）追加为额外判定 key 的常量。
+	// 采用与仓库其他 context key 一致的 ctxkey.Key 常量实现，避免私有的 struct{} key。
+	ChannelMappedModel Key = "ctx_channel_mapped_model"
 )
