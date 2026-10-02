@@ -508,19 +508,21 @@
         <!-- TokenHarbor 免费档：后端 7 天滚动限流只写 model_rate_limits
              （rate_limited_at / rate_limit_reset_at），没有用量百分比。按全站既有
              用量窗口设计展示——每条未过期限流渲染一行 "7d" 进度条（unknownUsage
-             置灰、百分比显示"—"），resets-at 自带恢复时间；模型名+恢复时间进 title。
+             置灰、百分比显示"—"），resets-at 自带恢复倒计时并带 "限流至" 前缀；
+             悬停 title 显示绝对恢复时刻。不显模型名（用户裁定 2026-10-02）。
              不另设倒计时，无数字就用 unknownUsage。CN 余额/配额子单元格对其不适用。 -->
         <template v-if="isTokenHarbor">
           <div
             v-for="entry in tokenHarborActiveRateLimits"
             :key="entry.model"
-            :title="t('admin.accounts.tokenHarbor.rateLimitedTitle', { model: entry.model, time: formatDateTime(entry.reset_at) })"
+            :title="t('admin.accounts.tokenHarbor.rateLimitedUntil', { time: formatDateTime(entry.reset_at) })"
           >
             <UsageProgressBar
               label="7d"
               :utilization="0"
               :unknown-usage="true"
               :resets-at="entry.reset_at"
+              :resets-at-prefix="t('admin.accounts.tokenHarbor.rateLimitedPrefix')"
               color="amber"
             />
           </div>

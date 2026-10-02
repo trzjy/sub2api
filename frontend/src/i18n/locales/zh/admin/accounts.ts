@@ -611,7 +611,8 @@ export default {
         museResumeAt: '恢复于 {time}'
       },
       tokenHarbor: {
-        rateLimitedTitle: '{model} 限流，预计 {time} 恢复'
+        rateLimitedPrefix: '限流至',
+        rateLimitedUntil: '限流至 {time}'
       },
       openaiQuotaReset: {
         count: '次数',

@@ -69,8 +69,9 @@ const tokenHarborStubs = {
   // 真实 UsageProgressBar 依赖 vueuse 计时器，这里 stub 成仅回显 label 的轻量组件，
   // 用 data-test + data-label 断言渲染了哪些限流行。
   UsageProgressBar: {
-    props: ['label', 'utilization', 'unknownUsage', 'resetsAt', 'color'],
-    template: '<div data-test="usage-progress-bar" :data-label="label">{{ label }}</div>'
+    props: ['label', 'utilization', 'unknownUsage', 'resetsAt', 'resetsAtPrefix', 'color'],
+    template:
+      '<div data-test="usage-progress-bar" :data-label="label" :data-prefix="resetsAtPrefix">{{ label }}</div>'
   }
 }
 
@@ -105,16 +106,19 @@ describe('AccountUsageCell TokenHarbor rate-limit rows', () => {
     const bars = wrapper.findAll('[data-test="usage-progress-bar"]')
     expect(bars).toHaveLength(1)
     expect(bars[0].attributes('data-label')).toBe('7d')
+    // 倒计时带 "限流至" 前缀（i18n 插值，mock 下只回显 key），可见行不含模型名
+    expect(bars[0].attributes('data-prefix')).toBe('admin.accounts.tokenHarbor.rateLimitedPrefix')
+    expect(bars[0].text()).not.toContain('deepseek-v4.1-flash:free')
 
     // CN 配额/余额子单元格不应渲染
     expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="cn-balance-cell"]').exists()).toBe(false)
 
-    // title 绑定使用 TokenHarbor 限流文案 key（模型名+恢复时间由 i18n 插值，mock 下只回显 key）
+    // title 绑定使用 "限流至 {time}" 文案 key（不含模型名，i18n 插值 mock 下只回显 key）
     const titleEl = wrapper.find('[title]')
     expect(titleEl.exists()).toBe(true)
-    expect(titleEl.attributes('title')).toBe('admin.accounts.tokenHarbor.rateLimitedTitle')
-    // 限流行数量与 label 正确（模型名仅进 title，可见行只显示窗口标签 "7d"）
+    expect(titleEl.attributes('title')).toBe('admin.accounts.tokenHarbor.rateLimitedUntil')
+    // 限流行数量与 label 正确
     expect(bars[0].text()).toContain('7d')
   })
 

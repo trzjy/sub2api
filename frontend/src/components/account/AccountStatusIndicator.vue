@@ -82,16 +82,16 @@
 
     <!-- Model Status Indicators (普通限流 / 超量请求中) -->
     <div
-      v-if="activeModelStatuses.length > 0"
+      v-if="visibleModelStatuses.length > 0"
       :class="[
-        activeModelStatuses.length <= 4
+        visibleModelStatuses.length <= 4
           ? 'flex flex-col gap-1'
-          : activeModelStatuses.length <= 8
+          : visibleModelStatuses.length <= 8
             ? 'columns-2 gap-x-2'
             : 'columns-3 gap-x-2'
       ]"
     >
-      <div v-for="item in activeModelStatuses" :key="`${item.kind}-${item.model}`" class="group relative mb-1 break-inside-avoid">
+      <div v-for="item in visibleModelStatuses" :key="`${item.kind}-${item.model}`" class="group relative mb-1 break-inside-avoid">
         <!-- 积分已用尽 -->
         <span
           v-if="item.kind === 'credits_exhausted'"
@@ -225,6 +225,14 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
 
   return items
 })
+
+// TokenHarbor：模型限流状态已由用量窗口列承载，状态列不再重复展示模型名徽章
+// （用户裁定 2026-10-02：徽章显式模型名冗余）。仅保留不显模型名的积分耗尽徽章。
+const visibleModelStatuses = computed<AccountModelStatusItem[]>(() =>
+  isTokenHarbor.value
+    ? activeModelStatuses.value.filter((item) => item.kind === 'credits_exhausted')
+    : activeModelStatuses.value
+)
 
 const formatScopeName = (scope: string): string => {
   const aliases: Record<string, string> = {

@@ -1771,7 +1771,8 @@ export default {
         museResumeAt: 'Resumes at {time}'
       },
       tokenHarbor: {
-        rateLimitedTitle: '{model} rate limited, expected recovery at {time}'
+        rateLimitedPrefix: 'Until',
+        rateLimitedUntil: 'Rate limited until {time}'
       },
       openaiQuotaReset: {
         count: 'Credits',

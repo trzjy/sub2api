@@ -55,7 +55,7 @@
 
       <!-- Reset time -->
       <span v-if="shouldShowResetTime" class="shrink-0 text-[10px] text-gray-400">
-        {{ formatResetTime }}
+        {{ resetsAtPrefix ? `${resetsAtPrefix} ` : '' }}{{ formatResetTime }}
       </span>
     </div>
   </div>
@@ -75,6 +75,8 @@ const props = withDefaults(
     /** 用量上游不可得（如火山周/月窗口）：条置灰、百分比显示 “—” 而非假 0。 */
     unknownUsage?: boolean
     resetsAt?: string | null
+    /** 恢复倒计时前缀文案（如 “限流至”）；缺省不显示前缀，既有消费方不受影响。 */
+    resetsAtPrefix?: string
     color: 'indigo' | 'emerald' | 'purple' | 'amber'
     windowStats?: WindowStats | null
     estimatedTotalCost?: number | null

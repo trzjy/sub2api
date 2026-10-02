@@ -223,7 +223,7 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.text()).toContain('admin.accounts.status.creditsExhausted')
   })
 
-  it('TokenHarbor 账号的模型限流徽标去除了徽标内倒计时（已迁移到用量窗口列）', () => {
+  it('TokenHarbor 账号的模型限流徽标整体不渲染（限流状态由用量窗口列承载）', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {
         account: makeAccount({
@@ -249,9 +249,9 @@ describe('AccountStatusIndicator', () => {
       }
     })
 
-    // 模型名仍展示
-    expect(wrapper.text()).toContain('deepseek-v4.1-flash:free')
-    // 徽标内倒计时（mock 返回 '1h'）不应出现
+    // 状态列不再出现模型名徽章（用户裁定：显式模型名冗余，要删除）
+    expect(wrapper.text()).not.toContain('deepseek-v4.1-flash:free')
+    // 徽标内倒计时（mock 返回 '1h'）也不应出现
     expect(wrapper.text()).not.toContain('1h')
   })
 
