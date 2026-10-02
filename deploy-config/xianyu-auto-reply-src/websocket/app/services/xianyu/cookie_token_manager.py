@@ -540,6 +540,69 @@ class CookieTokenManager:
             logger.error(f"【{self.cookie_id}】检查是否需要滑块验证时出错: {self._safe_str(e)}")
             return False
 
+    # ==================== P1 防锤暂停态 ====================
+
+    # 防锤暂停态触发的服务端风控码（子串匹配，仅此二码）。
+    # 语义见方案 P1-a：FAIL_SYS_USER_VALIDATE / RGV587_ERROR（生产原文
+    # RGV587_ERROR::SM::…，以前缀 RGV587_ERROR 覆盖）。匹配惯例沿用
+    # common/services/xianyu_mtop.py _VALIDATE_MARKERS 的子串方式，但收窄为此二码。
+    _RISK_CONTROL_AUTO_PAUSE_MARKERS = ("FAIL_SYS_USER_VALIDATE", "RGV587_ERROR")
+
+    def _is_risk_control_auto_pause_trigger(self, res_json: dict) -> bool:
+        """判断 token 刷新响应是否命中服务端风控，应进入防锤暂停态。
+
+        仅当 res_json["ret"] 列表项以子串命中 FAIL_SYS_USER_VALIDATE 或
+        RGV587_ERROR 时返回 True。普通求解失败（helper fail / 无服务端码的
+        failed_captcha）及 FAIL_SYS_ILLEGAL_ACCESS 锁定均不触发暂停。
+        """
+        ret_value = (res_json or {}).get("ret", []) or []
+        if isinstance(ret_value, str):
+            ret_items = [ret_value]
+        elif isinstance(ret_value, (list, tuple)):
+            ret_items = list(ret_value)
+        else:
+            ret_items = [ret_value]
+        ret_text = " ".join(str(item) for item in ret_items)
+        return any(marker in ret_text for marker in self._RISK_CONTROL_AUTO_PAUSE_MARKERS)
+
+    async def _trigger_risk_control_auto_pause(self, res_json: dict) -> None:
+        """进入防锤暂停态：停用账号 + 记风控日志，随后零请求。
+
+        命中服务端风控码（FAIL_SYS_USER_VALIDATE / RGV587_ERROR）时调用，立即
+        停止一切 token/滑块/同步请求，等待人工经三条恢复入口处理。
+        """
+        try:
+            from common.db.compat import db_manager
+            db_manager.disable_account(self.cookie_id, reason="risk_control_auto_pause")
+            logger.warning(
+                f"【{self.cookie_id}】命中服务端风控，账号已进入防锤暂停态"
+                f"(disable_reason=risk_control_auto_pause)，停止后续请求"
+            )
+            try:
+                ret_value = (res_json or {}).get("ret", []) or []
+                db_manager.add_risk_control_log(
+                    cookie_id=self.cookie_id,
+                    event_type="risk_control_auto_pause",
+                    event_description=(
+                        "触发场景: Token刷新, 命中服务端风控码，账号自动暂停"
+                        f" (ret: {json.dumps(ret_value, ensure_ascii=False)[:200]})"
+                    ),
+                    processing_status="paused",
+                )
+            except Exception as log_e:
+                logger.error(f"【{self.cookie_id}】记录防锤暂停风控日志失败: {self._safe_str(log_e)}")
+        except Exception as pause_e:
+            logger.error(f"【{self.cookie_id}】进入防锤暂停态失败: {self._safe_str(pause_e)}")
+
+        # 无论账号状态落库是否成功，均停止后续请求：清空 token 并标记暂停态。
+        self.current_token = None
+        self.last_token_refresh_status = "risk_control_auto_paused"
+        try:
+            await self._delete_cached_token()
+        except Exception as del_e:
+            logger.error(f"【{self.cookie_id}】清除缓存 token 失败: {self._safe_str(del_e)}")
+        return None
+
 
     # ==================== 滑块验证处理 ====================
 
@@ -1292,6 +1355,10 @@ class CookieTokenManager:
 
             # 检查是否需要滑块验证
             if self.need_captcha_verification(res_json):
+                # P1 防锤暂停态：命中服务端风控码立即进入暂停，停止后续所有请求。
+                if self._is_risk_control_auto_pause_trigger(res_json):
+                    return await self._trigger_risk_control_auto_pause(res_json)
+
                 if local_slider_disabled:
                     self.current_token = None
                     self.last_token_refresh_status = "skipped_local_slider_disabled"

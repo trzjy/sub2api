@@ -42,4 +42,7 @@ func RegisterInternalRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
 	v1.POST("/internal/xianyu/delivery-results", h.XianyuDelivery.DeliveryResult)
 	v1.POST("/internal/xianyu/worker-deliveries", h.XianyuDelivery.EnsureWorkerDeliveryRecord)
 	v1.POST("/internal/xianyu/refund-events", h.XianyuDelivery.RefundEvent)
+	if h.XianguanjiaPush != nil {
+		v1.POST("/webhook/xianguanjia", h.XianguanjiaPush.Push)
+	}
 }

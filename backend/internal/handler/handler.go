@@ -76,6 +76,7 @@ type Handlers struct {
 	AsyncImage       *AsyncImageHandler
 	BatchImage       *BatchImageHandler
 	XianyuDelivery   *XianyuDeliveryHandler
+	XianguanjiaPush  *XianyuXianguanjiaPushHandler
 }
 
 // BuildInfo contains build-time information

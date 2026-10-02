@@ -18,10 +18,13 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/server"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/xianguanjia"
 	"github.com/Wei-Shaw/sub2api/internal/usageriskadapter"
 	"github.com/redis/go-redis/v9"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -370,10 +373,24 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	xianyuDeliveryHandler := handler.NewXianyuDeliveryHandler(xianyuDeliveryService, configConfig)
+	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(handler.XianguanjiaSecretConfig{
+		AppID:     strings.TrimSpace(os.Getenv("XIANGUANAJIA_APP_ID")),
+		AppSecret: strings.TrimSpace(os.Getenv("XIANGUANAJIA_APP_SECRET")),
+		MchID:     strings.TrimSpace(os.Getenv("XIANGUANAJIA_MCH_ID")),
+		MchSecret: strings.TrimSpace(os.Getenv("XIANGUANAJIA_MCH_SECRET")),
+	})
+	xianguanjiaExtStore := xianguanjia.NewExternalCardStore(db)
+	xianguanjiaIdemStore := xianguanjia.NewPushIdempotencyStore(db)
+	xianguanjiaPushHandler := handler.NewXianyuXianguanjiaPushHandler(
+		xianyuDeliveryService,
+		xianguanjiaExtStore,
+		xianguanjiaIdemStore,
+		xianguanjiaSig,
+	)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)
-	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
+	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
 	jwtAuthMiddleware := middleware.NewJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	optionalJWTAuthMiddleware := middleware.NewOptionalJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	adminAuthMiddleware := middleware.NewAdminAuthMiddleware(authService, userService, settingService, auditLogService)

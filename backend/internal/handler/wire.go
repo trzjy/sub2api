@@ -241,6 +241,7 @@ func ProvideHandlers(
 	asyncImageHandler *AsyncImageHandler,
 	batchImageHandler *BatchImageHandler,
 	xianyuDeliveryHandler *XianyuDeliveryHandler,
+	xianguanjiaPushHandler *XianyuXianguanjiaPushHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 	_ *service.OpenAIQuotaAutoResetService,
@@ -268,6 +269,7 @@ func ProvideHandlers(
 		AsyncImage:       asyncImageHandler,
 		BatchImage:       batchImageHandler,
 		XianyuDelivery:   xianyuDeliveryHandler,
+		XianguanjiaPush:  xianguanjiaPushHandler,
 	}
 }
 

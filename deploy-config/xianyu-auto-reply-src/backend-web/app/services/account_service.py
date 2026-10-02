@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from loguru import logger
+
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -364,14 +366,32 @@ class AccountService:
         self.session.add(account)
         await self.session.commit()
 
-    async def update_status(self, account: XYAccount, enabled: bool, disable_reason: str | None = None) -> None:
+    async def update_status(self, account: XYAccount, enabled: bool, disable_reason: str | None = None, *, is_human_resume: bool = False) -> None:
         """更新账号状态
 
         Args:
             account: 账号对象
             enabled: 是否启用
             disable_reason: 禁用原因（仅在禁用时有效，启用时会清空）
+            is_human_resume: 是否人工恢复入口显式传入。启用处于防锤暂停态
+                (disable_reason='risk_control_auto_pause') 的账号时必须为 True，
+                否则中央守卫 A 拒绝启用并抛错，避免绕过人工处理直接复撞风控。
         """
+        # P1 中央守卫 A：自动启用已被防锤暂停的账号必须被拒绝，等待人工处理。
+        if (
+            enabled
+            and (getattr(account, "disable_reason", None) or "") == "risk_control_auto_pause"
+            and not is_human_resume
+        ):
+            account_id = getattr(account, "account_id", "?")
+            logger.warning(
+                f"【{account_id}】拒绝自动启用：账号处于防锤暂停态"
+                f"(disable_reason=risk_control_auto_pause)，需人工处理后恢复"
+            )
+            raise ValueError(
+                f"账号 {account_id} 处于防锤暂停态，禁止自动启用，"
+                "需经人工恢复入口(is_human_resume)清除"
+            )
         account.status = "active" if enabled else "disabled"
         # 启用时清空禁用原因，禁用时设置禁用原因
         account.disable_reason = None if enabled else disable_reason

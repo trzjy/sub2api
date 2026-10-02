@@ -267,8 +267,11 @@ type ResponsesInputItem struct {
 	Role    string          `json:"role,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"` // string or []ResponsesContentPart
 
-	// type=reasoning (multi-turn replay of encrypted reasoning)
-	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// type=reasoning (multi-turn replay of encrypted reasoning).
+	// Strict upstreams require the summary field even when empty, so replay
+	// sites must set it to an empty array (NOT omitempty-dropped): "summary":[].
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	Summary          json.RawMessage `json:"summary,omitempty"` // reasoning only; empty array when no summary
 
 	// type=function_call
 	CallID    string `json:"call_id,omitempty"`

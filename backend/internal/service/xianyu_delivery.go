@@ -291,6 +291,30 @@ func (s *XianyuDeliveryService) RecordDeliveryResult(ctx context.Context, result
 	return s.delivery.RecordDeliveryResult(ctx, result)
 }
 
+// GetDeliveryClaim 转发给状态更新器读取领取记录（只读）。供闲管家推流等只读辅助复用。
+func (s *XianyuDeliveryService) GetDeliveryClaim(ctx context.Context, orderNo string) (*XianyuOrderClaim, error) {
+	if s == nil || s.delivery == nil {
+		return nil, ErrXianyuDeliveryNotConfigured
+	}
+	return s.delivery.GetDeliveryClaim(ctx, orderNo)
+}
+
+// GetClaimAccountID 只读返回某订单领取记录对应的 accountID。取不到返回 error。
+// 不触碰状态机（不改 delivery_status 取值 pending/sent/failed/legacy）。
+func (s *XianyuDeliveryService) GetClaimAccountID(ctx context.Context, orderNo string) (string, error) {
+	if s == nil || s.delivery == nil {
+		return "", ErrXianyuDeliveryNotConfigured
+	}
+	claim, err := s.delivery.GetDeliveryClaim(ctx, orderNo)
+	if err != nil {
+		return "", err
+	}
+	if claim == nil || strings.TrimSpace(claim.AccountID) == "" {
+		return "", fmt.Errorf("xianyu delivery claim account id not found for order %s", orderNo)
+	}
+	return claim.AccountID, nil
+}
+
 // EnsureWorkerDeliveryRecord 幂等创建 Worker 发货记录（订单级）。
 func (s *XianyuDeliveryService) EnsureWorkerDeliveryRecord(ctx context.Context, d XianyuWorkerDelivery) error {
 	if s == nil || s.workerDelivery == nil {

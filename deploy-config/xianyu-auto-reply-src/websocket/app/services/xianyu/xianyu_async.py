@@ -2829,10 +2829,15 @@ class XianyuAsync:
                                 'skipped_risk_control_processing',
                                 'skipped_risk_control_check_failed',
                                 'skipped_startup_cache_lookup_failed',
+                                'failed_captcha',
+                                'failed_captcha_exception',
                             ):
                                 sleep_duration = self.token_manager.cookie_refresh_interval
                             else:
-                                sleep_duration = 5
+                                # 防锤暂停态配套：删除原 5 秒快重试（被替换的旧链，
+                                # 删除是清理义务），失败一律按 Cookie 刷新轮询间隔退避，
+                                # 避免反复撞风控。
+                                sleep_duration = self.token_manager.cookie_refresh_interval
                             await self._interruptible_sleep(sleep_duration)
                             continue
                     else:

@@ -28,6 +28,35 @@ class WebSocketServiceClient:
         self.base_url = settings.websocket_service_url.rstrip('/')
         self.http_client = get_http_client()
 
+    async def _reject_if_risk_control_paused(self, account_id: str) -> dict | None:
+        """P1 中央守卫 B：重读账号最新 DB 状态，若处于防锤暂停态则拒绝启动/重启。
+
+        返回拒绝响应 dict（success=False）；非暂停态返回 None（放行）。
+        入口重读最新 DB 状态（禁缓存/禁复用会话旧对象）。读库失败时 fail-open
+        放行，避免 DB 抖动误阻断正常启动。
+        """
+        try:
+            from common.db.session import async_session_maker
+            from common.models.xy_account import XYAccount
+            from sqlalchemy import select
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(XYAccount.status, XYAccount.disable_reason).where(
+                        XYAccount.account_id == account_id
+                    )
+                )
+                row = result.first()
+        except Exception as e:
+            logger.warning(f"重读账号 {account_id} 状态失败，放行启动: {e}")
+            return None
+        if row is not None and (row.disable_reason or "") == "risk_control_auto_pause":
+            logger.warning(f"账号 {account_id} 处于防锤暂停态，拒绝启动/重启任务，等待人工处理")
+            return {
+                "success": False,
+                "message": "账号处于防锤暂停态(risk_control_auto_pause)，拒绝启动，需人工恢复后生效",
+            }
+        return None
+
     async def start_account(self, account_id: str, cookie_value: str = None, user_id: int = None) -> dict:
         """启动账号任务
 
@@ -39,6 +68,10 @@ class WebSocketServiceClient:
         Returns:
             响应数据
         """
+        # P1 中央守卫 B：重读最新 DB 状态，防锤暂停态账号拒绝启动。
+        guard_result = await self._reject_if_risk_control_paused(account_id)
+        if guard_result is not None:
+            return guard_result
         url = f"{self.base_url}/internal/accounts/{account_id}/start"
         try:
             data = {}
@@ -80,6 +113,10 @@ class WebSocketServiceClient:
         Returns:
             响应数据
         """
+        # P1 中央守卫 B：重读最新 DB 状态，防锤暂停态账号拒绝重启。
+        guard_result = await self._reject_if_risk_control_paused(account_id)
+        if guard_result is not None:
+            return guard_result
         url = f"{self.base_url}/internal/accounts/{account_id}/restart"
         try:
             # 非幂等任务状态变更（清 Token 缓存 + 重启任务）：禁用传输层自动重试。

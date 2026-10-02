@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from loguru import logger
-from sqlalchemy import delete as sql_delete, select
+from sqlalchemy import delete as sql_delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -189,9 +189,20 @@ class ApiCookieRenewTaskService:
         account: XYAccount,
     ) -> None:
         """禁用账号接口续期成功后自动启用，并通知WebSocket服务启动任务。"""
+        # P1 中央守卫 A（调度器侧同构实现）：处于防锤暂停态(risk_control_auto_pause)
+        # 的账号禁止自动启用，必须人工经恢复入口清除暂停态，避免绕过人工处理直接复撞风控。
+        if (account.disable_reason or "") == "risk_control_auto_pause":
+            logger.warning(
+                f"【{self.task_name}】账号 {account.account_id} 处于防锤暂停态"
+                f"(disable_reason=risk_control_auto_pause)，跳过自动启用，保持暂停等待人工处理"
+            )
+            return
         old_status = account.status
-        account.status = "active"
-        account.disable_reason = None
+        await session.execute(
+            update(XYAccount).where(XYAccount.id == account.id).values(
+                status="active", disable_reason=None
+            )
+        )
         await session.commit()
         logger.info(
             f"【{self.task_name}】禁用账号 {account.account_id} 接口续期成功，"

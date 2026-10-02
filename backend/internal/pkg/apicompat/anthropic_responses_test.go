@@ -195,6 +195,11 @@ func TestAnthropicToResponses_ThinkingSignatureBecomesReasoning(t *testing.T) {
 	assert.Equal(t, "enc-rs-1", items[1].EncryptedContent)
 	assert.Equal(t, "assistant", items[2].Role)
 	assert.Equal(t, "function_call", items[3].Type)
+	// 严格上游要求 reasoning 项必带 summary（空数组也不得省略），其他项不得带。
+	wire, err := json.Marshal(items)
+	require.NoError(t, err)
+	assert.Contains(t, string(wire), `"type":"reasoning","encrypted_content":"enc-rs-1","summary":[]`)
+	assert.NotContains(t, string(wire), `"function_call","call_id":"toolu_1","summary"`)
 }
 
 func TestAnthropicToResponses_MaxTokensFloor(t *testing.T) {

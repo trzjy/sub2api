@@ -427,8 +427,11 @@ async def _update_account_status_and_task(
     from app.services.websocket_client import websocket_client
 
     original_disable_reason = account.disable_reason
+    # 人工 UI 开关 = 恢复入口之一：启用暂停态账号时显式传真 is_human_resume，
+    # 让中央守卫 A 放行（清除 risk_control_auto_pause）。
     await account_service.update_status(
-        account, enabled, disable_reason="手动禁用" if not enabled else None
+        account, enabled, disable_reason="手动禁用" if not enabled else None,
+        is_human_resume=True,
     )
 
     if enabled:
@@ -443,7 +446,10 @@ async def _update_account_status_and_task(
         task_message = task_result.get("message")
 
     if not task_success:
-        await account_service.update_status(account, current_enabled, original_disable_reason)
+        # 启动/停止失败回滚到原状态（同样属人工上下文，传真 is_human_resume）。
+        await account_service.update_status(
+            account, current_enabled, original_disable_reason, is_human_resume=True
+        )
         return False, task_message or ("账号任务启动失败" if enabled else "账号任务停止失败")
 
     return True, None
@@ -491,7 +497,14 @@ async def update_account_cookie(
     account = await _get_account_or_404(current_user, account_id, account_service)
     await account_service.update_cookie(account, payload.value)
 
-    # 更新Cookie并重启WebSocket任务（通过HTTP调用WebSocket服务）
+    # 更新Cookie并重启WebSocket任务（通过HTTP调用WebSocket服务）。
+    # P1 中央守卫：暂停态账号只更新 cookie，不重启任务（恢复后生效）。
+    if (account.disable_reason or "") == "risk_control_auto_pause":
+        return ApiResponse(
+            success=True,
+            message="Cookie 已更新；账号处于防锤暂停态，重启将在人工恢复后生效",
+        )
+
     from app.services.websocket_client import websocket_client
     await websocket_client.restart_account(account_id)
 
@@ -1123,19 +1136,34 @@ async def renew_account_login(
                     failed_count += 1
                     continue
 
-                # 续期成功，自动启用账号
-                if account.status != "active":
-                    account.status = "active"
-                    account.disable_reason = None
-                    await session.commit()
+                # 续期成功，自动启用账号（经中央守卫 A：防锤暂停态账号不自动启用，
+                # 保持暂停等待人工处理；其余禁用账号仍自动恢复）。
+                auto_enabled = account.status == "active"
+                if not auto_enabled:
+                    from app.services.account_service import AccountService
+                    from loguru import logger as _renew_logger
+                    try:
+                        await AccountService(session).update_status(account, enabled=True)
+                        auto_enabled = True
+                    except ValueError as enable_err:
+                        _renew_logger.warning(
+                            f"账号 {account.account_id} 续期成功但处于防锤暂停态，"
+                            f"保持暂停等待人工处理: {enable_err}"
+                        )
+                        auto_enabled = False
 
-                # 通知 WebSocket 服务启动/重启账号任务
-                try:
-                    from app.services.websocket_client import websocket_client
-                    await websocket_client.start_account(account.account_id, renew_result.new_cookies_str or cookies_str, account.owner_id)
-                except Exception as ws_e:
-                    from loguru import logger
-                    logger.warning(f"账号 {account.account_id} 续期成功但启动WebSocket任务失败: {ws_e}")
+                # 通知 WebSocket 服务启动/重启账号任务（仅账号已启用时）
+                if auto_enabled:
+                    try:
+                        from app.services.websocket_client import websocket_client
+                        await websocket_client.start_account(
+                            account.account_id,
+                            renew_result.new_cookies_str or cookies_str,
+                            account.owner_id,
+                        )
+                    except Exception as ws_e:
+                        from loguru import logger
+                        logger.warning(f"账号 {account.account_id} 续期成功但启动WebSocket任务失败: {ws_e}")
 
                 if renew_result.updated_cookie_names:
                     results.append({

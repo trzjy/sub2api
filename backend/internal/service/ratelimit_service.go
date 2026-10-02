@@ -393,6 +393,15 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 	}
 
+	// TokenHarbor 免费档 7 天滚动额度用光是档位 entitlement 耗尽（付费 base
+	// model 路由仍可用），必须优先于管理员 429 临时规则与秒级兜底，否则会被
+	// 缩成几秒整号限流（Anthropic 硬窗口优先同理，见上）。
+	if statusCode == http.StatusTooManyRequests && isTokenHarborFreeTierExhausted(responseBody) {
+		if s.handleTokenHarborFreeTierExhaustion(ctx, account, headers, responseBody, firstRequestedModel(requestedModel)) {
+			return false
+		}
+	}
+
 	// 先尝试临时不可调度规则（401除外）
 	// 如果匹配成功，直接返回，不执行后续禁用逻辑
 	if statusCode != 401 {
@@ -559,6 +568,17 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		)
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
+		// 证据留存：403 有原文日志，429 之前没有，导致免费档这类报错只能靠人工
+		// 截图取证。此处固定记录可复现的最小证据（Retry-After 头 + 机读类型码 +
+		// 512 字原文），后续同类问题直接查日志，不再找用户要截图。
+		slog.Info("upstream_429_evidence",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"retry_after", strings.TrimSpace(headers.Get("Retry-After")),
+			"upstream_type", gjson.GetBytes(responseBody, "error.type").String(),
+			"upstream_code", gjson.GetBytes(responseBody, "error.code").String(),
+			"raw_body", truncateForLog(responseBody, 512),
+		)
 		s.handle429(ctx, account, headers, responseBody)
 		shouldDisable = false
 	case 529:
@@ -1649,6 +1669,167 @@ func (s *RateLimitService) persistAnthropicFableWindowLimit(ctx context.Context,
 		"scope", anthropicFableRateLimitKey,
 		"reset_at", limit.resetAt,
 		"reset_in", time.Until(limit.resetAt).Truncate(time.Second))
+	return true
+}
+
+// TokenHarbor 免费档滚动额度用光的 429：上游正文携带 free allowance /
+// rolling 7-day / free_tier 表述（用户生产报错原文 + TokenHarbor FAQ
+// "Free routes stop accepting new requests when the period allowance is
+// exhausted" + /docs/api/rate-limits "429 with a Retry-After header" 实据）。
+// 这是模型档位 entitlement 耗尽，不是账号瞬时忙：
+//   - 整号写秒级限流会把付费直连路由一并误拦（官方：base model IDs remain
+//     paid routes），且恢复倒数只能靠猜（个人滚动周期起点只有上游知道）。
+// 因此只写模型级限流，账号整体保持可调度；无上游时间信号时不伪造恢复倒数，
+// 用有限复探间隔等待上游成功响应证明恢复（同 upstreamModelNotFoundCooldown
+// 对确定性 entitlement 失败的已有处理口径）。
+const tokenHarborFreeTierReasonPrefix = "tokenharbor_free_tier_exhausted"
+
+const tokenHarborFreeTierProbeCooldown = 30 * time.Minute
+
+var tokenHarborPaidModelPattern = regexp.MustCompile(`paid model '([^']+)'`)
+
+// isTokenHarborUpstream 报告账号是否走 TokenHarbor 上游（凭据地址可验证，
+// 不猜平台名：platform 可被误存，只有 base_url 是事实源）。
+func isTokenHarborUpstream(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	base := strings.ToLower(strings.TrimSpace(account.GetBaseURL()))
+	if base == "" {
+		base = strings.ToLower(strings.TrimSpace(account.GetOpenAIBaseURL()))
+	}
+	return strings.Contains(base, "tokenharbor.ai")
+}
+// isTokenHarborFreeTierExhausted 报告上游 429 正文是否为免费档滚动额度用光。
+// 匹配词全部来自实据：用户生产报错全文（You've used this period's free
+// allowance. Your next rolling 7-day period starts on ... / paid model '...' /
+// "type":"free_tier_limit_reached"）与官方文档措辞（free allowance /
+// free-tier allowance / rolling 7-day period / exhausted）。
+// 普通忙碌文案（too many requests 等）不命中。
+func isTokenHarborFreeTierExhausted(responseBody []byte) bool {
+	if len(responseBody) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(responseBody))
+	// 上游机读类型码（生产实测原文），单独即可判定。
+	if strings.Contains(lower, "free_tier_limit_reached") {
+		return true
+	}
+	hasFreeTier := strings.Contains(lower, "free_tier") ||
+		strings.Contains(lower, "free-tier") ||
+		strings.Contains(lower, "free allowance")
+	if !hasFreeTier {
+		return false
+	}
+	return strings.Contains(lower, "allowance") ||
+		strings.Contains(lower, "rolling") ||
+		strings.Contains(lower, "exhausted") ||
+		strings.Contains(lower, "period")
+}
+
+// tokenHarborPeriodStartPattern 匹配正文中的下个周期起点（生产实测原文：
+// Your next rolling 7-day period starts on 7 Oct 2026 at 14:44 UTC）。
+var tokenHarborPeriodStartPattern = regexp.MustCompile(`period starts on (\d{1,2} \w+ \d{4} at \d{1,2}:\d{2} UTC)`)
+
+// parseTokenHarborPeriodStart 解析正文中的下个周期起点（UTC 明示）。
+// 格式不符、过去时间、远超一个月（误解析守卫）均返回 false。
+func parseTokenHarborPeriodStart(responseBody []byte, now time.Time) (time.Time, bool) {
+	m := tokenHarborPeriodStartPattern.FindSubmatch(responseBody)
+	if len(m) != 2 {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{"2 Jan 2006 at 15:04 UTC", "2 January 2006 at 15:04 UTC"} {
+		if t, err := time.Parse(layout, string(m[1])); err == nil {
+			if t.After(now) && t.Before(now.Add(31*24*time.Hour)) {
+				return t, true
+			}
+			return time.Time{}, false
+		}
+	}
+	return time.Time{}, false
+}
+
+// tokenHarborFreeTierResetAt 解析免费档用光 429 携带的精准恢复信号，优先级：
+// 正文周期起点（本错误类的直接恢复时刻）> Retry-After 头（官方 rate-limits
+// 文档明确承诺）> OpenAI 兼容正文重置戳。都没有时返回 false——调用方不得伪造
+// now+7d（周期起点以正文为准，正文缺失即未知）。
+func tokenHarborFreeTierResetAt(headers http.Header, responseBody []byte, now time.Time) (time.Time, bool) {
+	if resetAt, ok := parseTokenHarborPeriodStart(responseBody, now); ok {
+		return resetAt, true
+	}
+	if resetAt := parseRetryAfterResetTime(headers, now); resetAt != nil && resetAt.After(now) {
+		return *resetAt, true
+	}
+	if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
+		if resetAt := time.Unix(*resetUnix, 0); resetAt.After(now) {
+			return resetAt, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// handleTokenHarborFreeTierExhaustion 处理免费档用光：只写模型级限流。
+// 返回 true 表示已处理（调用方不得再落入整号限流/临时停调链）。
+// 非 TokenHarbor 上游返回 false：通用措辞不得跨上游套用，交由既有链处理。
+// 已确认用光但拿不到模型名时返回 true 且不写任何状态：不猜模型，也不让
+// 已识别的档位耗尽扩大为整号限流，本次请求直接换号。
+func (s *RateLimitService) handleTokenHarborFreeTierExhaustion(ctx context.Context, account *Account, headers http.Header, responseBody []byte, requestedModel string) bool {
+	if s == nil || s.accountRepo == nil || account == nil {
+		return false
+	}
+	if !isTokenHarborUpstream(account) {
+		return false
+	}
+	if !isTokenHarborFreeTierExhausted(responseBody) {
+		return false
+	}
+	model := strings.TrimSpace(requestedModel)
+	if model == "" {
+		if m := tokenHarborPaidModelPattern.FindSubmatch(responseBody); len(m) == 2 {
+			model = strings.TrimSpace(string(m[1]))
+		}
+	}
+	if model == "" {
+		slog.Info("tokenharbor_free_tier_model_unknown",
+			"account_id", account.ID,
+			"note", "free-tier exhaustion confirmed but no model name; skip state writes, fail over this attempt")
+		return true
+	}
+	modelKey := modelRateLimitKeyForUpstreamModelNotFound(ctx, account, model)
+	if strings.TrimSpace(modelKey) == "" {
+		return false
+	}
+	now := time.Now()
+	resetAt, precise := tokenHarborFreeTierResetAt(headers, responseBody, now)
+	resetSource := "probe"
+	if precise {
+		resetSource = "upstream_signal"
+	}
+	reason := tokenHarborFreeTierReasonPrefix
+	if precise {
+		reason += ": rolling free allowance exhausted per upstream reset signal; paid base-model routes unaffected"
+	} else {
+		// 无精准信号：复探间隔不是恢复倒数，精确恢复时刻由上游成功响应证明。
+		resetAt = now.Add(tokenHarborFreeTierProbeCooldown)
+		reason += ": rolling free allowance exhausted per upstream, precise reset unknown (see dashboard), re-probe at reset; paid base-model routes unaffected"
+	}
+	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, resetAt, reason); err != nil {
+		slog.Warn("tokenharbor_free_tier_model_rate_limit_set_failed",
+			"account_id", account.ID,
+			"scope", modelKey,
+			"reset_at", resetAt,
+			"error", err)
+		// 已确认为模型档位问题：不扩大为整号限流。
+		return true
+	}
+	slog.Info("tokenharbor_free_tier_model_rate_limited",
+		"account_id", account.ID,
+		"scope", modelKey,
+		"reset_at", resetAt,
+		"precise_reset", precise,
+		"reset_source", resetSource,
+		"upstream_type", gjson.GetBytes(responseBody, "error.type").String(),
+		"reset_in", time.Until(resetAt).Truncate(time.Second))
 	return true
 }
 
