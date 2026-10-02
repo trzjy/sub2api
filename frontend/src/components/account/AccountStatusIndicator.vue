@@ -99,7 +99,7 @@
         >
           <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
           {{ t('admin.accounts.status.creditsExhausted') }}
-          <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+          <span v-if="!isTokenHarbor" class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
         </span>
         <!-- 正在走积分（模型限流但积分可用）-->
         <span
@@ -108,7 +108,7 @@
         >
           <span>⚡</span>
           {{ formatScopeName(item.model) }}
-          <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+          <span v-if="!isTokenHarbor" class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
         </span>
         <!-- 普通模型限流 -->
         <span
@@ -117,7 +117,7 @@
         >
           <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
           {{ formatScopeName(item.model) }}
-          <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+          <span v-if="!isTokenHarbor" class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
         </span>
         <!-- Tooltip -->
         <div
@@ -164,12 +164,17 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
+import { isTokenHarborAccount } from './credentialsBuilder'
 
 const { t } = useI18n()
 
 const props = defineProps<{
   account: Account
 }>()
+
+// TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：模型限流徽标只保留模型名与
+// 限流状态，去掉徽标内的倒计时（恢复时间已迁移到用量窗口列展示）。
+const isTokenHarbor = computed(() => isTokenHarborAccount(props.account))
 
 const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void

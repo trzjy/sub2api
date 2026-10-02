@@ -505,15 +505,38 @@
         @updated="handleOllamaCloudUsageUpdated"
       />
       <div v-else class="space-y-1">
+        <!-- TokenHarbor 免费档：后端 7 天滚动限流只写 model_rate_limits
+             （rate_limited_at / rate_limit_reset_at），没有用量百分比。按全站既有
+             用量窗口设计展示——每条未过期限流渲染一行 "7d" 进度条（unknownUsage
+             置灰、百分比显示"—"），resets-at 自带恢复时间；模型名+恢复时间进 title。
+             不另设倒计时，无数字就用 unknownUsage。CN 余额/配额子单元格对其不适用。 -->
+        <template v-if="isTokenHarbor">
+          <div
+            v-for="entry in tokenHarborActiveRateLimits"
+            :key="entry.model"
+            :title="t('admin.accounts.tokenHarbor.rateLimitedTitle', { model: entry.model, time: formatDateTime(entry.reset_at) })"
+          >
+            <UsageProgressBar
+              label="7d"
+              :utilization="0"
+              :unknown-usage="true"
+              :resets-at="entry.reset_at"
+              color="amber"
+            />
+          </div>
+          <div v-if="!tokenHarborActiveRateLimits.length" class="text-xs text-gray-400">-</div>
+        </template>
         <!-- 子单元格各自按 模式×平台 判定可见；两者都不可见时（智谱 payg 无公开
              余额端点、coding 探测也不适用）才回落到占位符。 -->
-        <div
-          v-if="!cnQuotaCellVisible && !cnBalanceCellVisible"
-          class="text-xs text-gray-400"
-          :title="t('admin.accounts.cnProviders.noBalanceEndpoint')"
-        >-</div>
-        <CNProviderQuotaCell :account="account" />
-        <CNProviderBalanceCell :account="account" />
+        <template v-else>
+          <div
+            v-if="!cnQuotaCellVisible && !cnBalanceCellVisible"
+            class="text-xs text-gray-400"
+            :title="t('admin.accounts.cnProviders.noBalanceEndpoint')"
+          >-</div>
+          <CNProviderQuotaCell :account="account" />
+          <CNProviderBalanceCell :account="account" />
+        </template>
       </div>
     </template>
 
@@ -812,7 +835,7 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
-import { formatCompactNumber, formatDateOnly } from '@/utils/format'
+import { formatCompactNumber, formatDateOnly, formatDateTime } from '@/utils/format'
 import { parseCodeBuddyCredit, parseCodeBuddyCreditError, formatCreditValue } from '@/utils/codebuddyCredit'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
@@ -825,7 +848,8 @@ import {
   cnQuotaCellVisible as cnQuotaCellVisibleFn,
   cnBalanceCellVisible as cnBalanceCellVisibleFn,
   resolveAccountBaseURL,
-  isVolcanoBaseURL
+  isVolcanoBaseURL,
+  isTokenHarborAccount
 } from './credentialsBuilder'
 
 // Module-level cache shared across all AccountUsageCell instances
@@ -975,6 +999,32 @@ const cnQuotaCellVisible = computed(() =>
 const cnBalanceCellVisible = computed(() =>
   cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
 )
+
+// TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：在 CN 分支内以用量窗口列
+// 展示模型限流恢复，不另设倒计时。
+const isTokenHarbor = computed(() => isTokenHarborAccount(props.account))
+
+// 未过期的 TokenHarbor 模型限流条目（reset_at > now）。后端只写 model_rate_limits，
+// 没有用量百分比，故渲染时统一用 unknownUsage 置灰。
+interface TokenHarborRateLimit {
+  model: string
+  reset_at: string
+}
+const tokenHarborActiveRateLimits = computed<TokenHarborRateLimit[]>(() => {
+  if (!isTokenHarbor.value) return []
+  const extra = props.account.extra as Record<string, unknown> | undefined
+  const modelLimits = extra?.model_rate_limits as
+    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    | undefined
+  if (!modelLimits) return []
+  const now = new Date()
+  const items: TokenHarborRateLimit[] = []
+  for (const [model, info] of Object.entries(modelLimits)) {
+    if (new Date(info.rate_limit_reset_at) <= now) continue
+    items.push({ model, reset_at: info.rate_limit_reset_at })
+  }
+  return items
+})
 
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')
 

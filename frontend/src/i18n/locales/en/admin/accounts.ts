@@ -1770,6 +1770,9 @@ export default {
         musePaused: 'Paused',
         museResumeAt: 'Resumes at {time}'
       },
+      tokenHarbor: {
+        rateLimitedTitle: '{model} rate limited, expected recovery at {time}'
+      },
       openaiQuotaReset: {
         count: 'Credits',
         reset: 'Reset',

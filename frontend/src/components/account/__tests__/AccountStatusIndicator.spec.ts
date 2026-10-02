@@ -222,4 +222,67 @@ describe('AccountStatusIndicator', () => {
     // AICredits 积分耗尽状态应显示
     expect(wrapper.text()).toContain('admin.accounts.status.creditsExhausted')
   })
+
+  it('TokenHarbor 账号的模型限流徽标去除了徽标内倒计时（已迁移到用量窗口列）', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 6,
+          name: 'th-1',
+          platform: 'kimi',
+          type: 'apikey',
+          credentials: { base_url: 'https://api.tokenharbor.ai/v1' },
+          extra: {
+            model_rate_limits: {
+              'deepseek-v4.1-flash:free': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z'
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    // 模型名仍展示
+    expect(wrapper.text()).toContain('deepseek-v4.1-flash:free')
+    // 徽标内倒计时（mock 返回 '1h'）不应出现
+    expect(wrapper.text()).not.toContain('1h')
+  })
+
+  it('非 TokenHarbor 账号的模型限流徽标仍展示内联倒计时', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 7,
+          name: 'non-th-1',
+          platform: 'kimi',
+          type: 'apikey',
+          credentials: { base_url: 'https://api.moonshot.cn/v1' },
+          extra: {
+            model_rate_limits: {
+              'claude-sonnet-4-5': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z'
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    // 非 TokenHarbor：徽标内倒计时（mock 返回 '1h'）仍存在
+    expect(wrapper.text()).toContain('CSon45')
+    expect(wrapper.text()).toContain('1h')
+  })
 })

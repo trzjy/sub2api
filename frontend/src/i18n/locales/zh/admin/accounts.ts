@@ -610,6 +610,9 @@ export default {
         musePaused: '已暂停',
         museResumeAt: '恢复于 {time}'
       },
+      tokenHarbor: {
+        rateLimitedTitle: '{model} 限流，预计 {time} 恢复'
+      },
       openaiQuotaReset: {
         count: '次数',
         reset: '重置',

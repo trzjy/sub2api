@@ -557,6 +557,20 @@ export function isVolcanoBaseURL(baseURL: string): boolean {
   return parsed.hostname.toLowerCase() === 'ark.cn-beijing.volces.com'
 }
 
+// ===== TokenHarbor 上游账号判定（单一事实源） =====
+// 后端 isTokenHarborUpstream（backend/internal/service/ratelimit_service.go）以
+// credentials.base_url 含 tokenharbor.ai 判定。前端严格对齐：取账号 base_url 后
+// 小写包含 tokenharbor.ai。TokenHarbor 免费档挂在 CN 平台（kimi/zhipu/deepseek/
+// minimax 等）且 base_url 改写到 tokenharbor.ai，因此必须按 base_url 识别，
+// 与 platform 解耦。所有 TokenHarbor 专属 UI（用量窗口列限流行、状态徽标去倒计时）
+// 一律走本判定，避免各处复制导致漏判。
+export function isTokenHarborAccount(account: {
+  credentials?: Record<string, unknown> | null
+}): boolean {
+  const baseURL = resolveAccountBaseURL(account.credentials)
+  return baseURL.toLowerCase().includes('tokenharbor.ai')
+}
+
 export function cnQuotaProviderPrefix(platform: string, baseURL: string): string {
   if (isVolcanoBaseURL(baseURL)) return 'volcano'
   if (platform === 'kimi') return 'kimi'
