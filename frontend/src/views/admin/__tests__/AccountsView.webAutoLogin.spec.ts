@@ -172,7 +172,8 @@ describe('AccountsView web login status badges', () => {
         webAccount({ id: 1, status: 'active', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
         webAccount({ id: 2, status: 'error', error_message: 'token expired', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
         webAccount({ id: 3, credentials: { access_mode: 'web' }, error_message: null }),
-        webAccount({ id: 4, status: 'active', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true }, error_message: '账号已被封禁' })
+        // 网页登录失败由自动登录同时写入 credentials.login_last_error，封禁态取它判定
+        webAccount({ id: 4, status: 'active', credentials: { access_mode: 'web', login_last_error: '账号已被封禁' }, credentials_status: { has_cookie: true } })
       ],
       total: 4,
       page: 1,
@@ -191,9 +192,33 @@ describe('AccountsView web login status badges', () => {
     expect(badges[3].classes()).toContain('bg-red-100')
   })
 
+  it('shows na with gray badge for a non-web API account carrying a stale error_message', async () => {
+    // error_message 是任意业务错误的持久记录（如上游 403 订阅到期），账号恢复 active
+    // 后不会被清除；非网页接入账号不存在登录态，必须显示 na 而不是「失效」。
+    listAccounts.mockResolvedValue({
+      items: [
+        {
+          ...webAccount({ id: 1, platform: 'zhipu', type: 'apikey', status: 'active', credentials: {} }),
+          error_message: 'infer 订阅到期 上游403 SUBSCRIPTION_NOT_FOUND'
+        }
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badge = wrapper.find('[data-testid="login-status-badge"]')
+    expect(badge.text()).toBe('admin.accounts.loginStatus.na')
+    expect(badge.classes()).toContain('bg-gray-100')
+    expect(badge.classes()).not.toContain('bg-amber-100')
+  })
+
   it('does not surface web login state for a same-platform ordinary API account', async () => {
     // zhipu + apikey、无 access_mode：platform 命中官方平台，但属于普通 API 账号，
-    // 不得显示 web 专属的 unconfigured 登录态。
+    // 不存在登录态，显示 na 而不是 web 专属的 active / unconfigured。
     listAccounts.mockResolvedValue({
       items: [webAccount({ id: 1, platform: 'zhipu', type: 'apikey', status: 'active', credentials: {} })],
       total: 1,
@@ -206,9 +231,9 @@ describe('AccountsView web login status badges', () => {
 
     const badges = wrapper.findAll('[data-testid="login-status-badge"]')
     expect(badges.length).toBe(1)
-    expect(badges[0].text()).toBe('admin.accounts.loginStatus.active')
-    expect(badges[0].classes()).toContain('bg-green-100')
-    expect(badges[0].classes()).not.toContain('bg-gray-100')
+    expect(badges[0].text()).toBe('admin.accounts.loginStatus.na')
+    expect(badges[0].classes()).toContain('bg-gray-100')
+    expect(badges[0].classes()).not.toContain('bg-green-100')
   })
 
   it('keeps active login status for kimi when the list response only carries credentials_status.has_access_token', async () => {

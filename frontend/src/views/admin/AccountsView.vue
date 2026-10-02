@@ -1906,12 +1906,16 @@ const toggleableColumns = computed(() =>
 )
 
 // ── 登录状态徽标（网页接入自动登录辅助）──
-// 数据源：账号 credentials 的 login_last_error / login_last_at（列表 DTO 已透出
-// credentials map，见 types/AccountListItem；若后端未返回该字段则回退既有
-// error_message / status 渲染，绝不伪造状态）。
-// TODO: 待后端在 credentials 中稳定返回 login_last_error / login_last_at 后，
-//       移除 status/error_message 兜底分支。
-export type LoginStatusKind = 'active' | 'failed' | 'banned' | 'unconfigured'
+// 数据源：账号 credentials 的 login_last_error（列表 DTO 已透出 credentials map，
+// 见 types/AccountListItem；login_last_error 不在后端脱敏键清单内，会原样下发）。
+// 该列只表达「网页登录载体是否失效」，只对 access_mode="web" 的账号有意义：
+//   - 非网页接入账号（纯 API Key）不存在登录态，统一显示 na；
+//   - 不得再用 account.error_message 判定登录态——它是任意业务错误的持久记录
+//     （如上游 403 SUBSCRIPTION_NOT_FOUND），且账号恢复 active 后不会被清除，
+//     用它兜底会让有效期内、调度正常的 API 账号误显示「失效」。
+// 真实网页登录失败由 web 自动登录同时写入 ErrorMessage 与 credentials.login_last_error，
+// 因此去掉 error_message 兜底不会漏判登录失效。
+export type LoginStatusKind = 'active' | 'failed' | 'banned' | 'unconfigured' | 'na'
 
 function isBannedErrorMessage(msg: string | null | undefined): boolean {
   if (!msg) return false
@@ -1921,7 +1925,6 @@ function isBannedErrorMessage(msg: string | null | undefined): boolean {
 
 type LoginStatusAccount = {
   status?: string
-  error_message?: string | null
   credentials?: Record<string, unknown> | null
   // 后端 RedactCredentials 产出的 has_<key> 存在性 map（旧后端可能缺省）。
   credentials_status?: Record<string, boolean> | null
@@ -1944,34 +1947,30 @@ function webAccountHasCredential(
   return false
 }
 
-// 列表 DTO 可能透出 credentials.login_last_error；不存在时回退既有 error_message。
+// 只认网页登录流程写入的 credentials.login_last_error，不回退 error_message。
 function extractLoginLastError(account: LoginStatusAccount): string | undefined {
-  const creds = account.credentials
-  const raw = creds?.login_last_error
-  const fromCreds = typeof raw === 'string' && raw.length > 0 ? raw : undefined
-  return fromCreds || (account.error_message ?? undefined) || undefined
+  const raw = account.credentials?.login_last_error
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined
 }
 
 function computeLoginStatus(account: LoginStatusAccount): LoginStatusKind {
-  const loginLastError = extractLoginLastError(account)
-  const hasLoginError = !!loginLastError
   // 平台归并后 web 专属态（unconfigured 等）只属于 access_mode="web" 的账号；
-  // 同平台的普通 API 账号不得因为 platform 命中而显示 web 登录状态。
-  const isWeb = isWebAccessAccount(account)
-
-  if (hasLoginError) {
+  // 同平台的普通 API 账号不存在登录态，直接标记不适用，不再读取任何错误信息。
+  if (!isWebAccessAccount(account)) {
+    return 'na'
+  }
+  const loginLastError = extractLoginLastError(account)
+  if (loginLastError) {
     return isBannedErrorMessage(loginLastError) ? 'banned' : 'failed'
   }
   if (account.status === 'error') {
     return 'failed'
   }
-  if (isWeb) {
-    const hasCredential = webAccountHasCredential(
-      account.platform ?? '',
-      account.credentials_status
-    )
-    if (!hasCredential) return 'unconfigured'
-  }
+  const hasCredential = webAccountHasCredential(
+    account.platform ?? '',
+    account.credentials_status
+  )
+  if (!hasCredential) return 'unconfigured'
   return 'active'
 }
 
@@ -1985,6 +1984,8 @@ function loginStatusLabel(kind: LoginStatusKind): string {
       return t('admin.accounts.loginStatus.banned')
     case 'unconfigured':
       return t('admin.accounts.loginStatus.unconfigured')
+    case 'na':
+      return t('admin.accounts.loginStatus.na')
   }
 }
 
@@ -1992,7 +1993,8 @@ const loginStatusBadgeClassMap: Record<LoginStatusKind, string> = {
   active: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
   failed: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
   banned: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
-  unconfigured: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+  unconfigured: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300',
+  na: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
 }
 
 function loginStatusBadgeClass(kind: LoginStatusKind): string {
@@ -2001,6 +2003,9 @@ function loginStatusBadgeClass(kind: LoginStatusKind): string {
 
 function loginStatusTitle(account: LoginStatusAccount): string {
   const kind = computeLoginStatus(account)
+  if (kind === 'na') {
+    return t('admin.accounts.loginStatus.naTitle')
+  }
   if (kind === 'failed') {
     const detail = extractLoginLastError(account) ?? ''
     return detail

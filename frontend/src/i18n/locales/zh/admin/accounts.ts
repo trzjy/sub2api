@@ -702,6 +702,8 @@ export default {
         bannedTitleWithDetail: '账号已被封禁：{detail}',
         unconfigured: '未配置登录载体',
         unconfiguredTitle: '网页平台账号尚未配置 Cookie / Token 登录载体',
+        na: '不适用',
+        naTitle: '非网页接入账号，不存在登录态',
       },
       bulkEdit: {
         title: '批量编辑账号',

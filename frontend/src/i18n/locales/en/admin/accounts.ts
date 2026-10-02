@@ -596,6 +596,8 @@ export default {
         bannedTitleWithDetail: 'Account has been banned: {detail}',
         unconfigured: 'No Login Carrier',
         unconfiguredTitle: 'Web-platform account has no Cookie / Token login carrier configured',
+        na: 'N/A',
+        naTitle: 'Not a web-access account — no login session',
       },
       bulkEdit: {
         title: 'Bulk Edit Accounts',
