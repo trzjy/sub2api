@@ -136,6 +136,13 @@ func ProvideAdminHandlers(
 		adminHandlers.XianguanjiaConfig = admin.NewXianguanjiaConfigHandler(xgjAdminCfgStore, secretEncryptor, nil)
 	}
 
+	// D4d: 闲管家 admin 卡种管理 + 批量推仓入口。
+	// service 层 kind/pool 实现由并行单元 D4a/D4b 交付；本单元按约定签名定义
+	// admin.XianguanjiaKindService / admin.XianguanjiaPoolPusher 注入接口。
+	// 集成前注入 nil：路由已注册但各端点 fail-closed 返回 503，不打外部接口。
+	// 本段为 D4d 合并标记：冲突时保留此块。
+	adminHandlers.XianguanjiaPool = admin.NewXianguanjiaPoolHandler(nil, nil)
+
 	// Cockpit 备份导入 preview/commit（B1c）：HMAC 无状态凭证签名器由既有服务端密钥
 	// cfg.JWT.Secret 经 HKDF 派生专用子密钥；提交仓储由 ent 客户端构造。
 	cockpitSigner := service.NewCockpitPreviewReceiptSigner(cfg.JWT.Secret)

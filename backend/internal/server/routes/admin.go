@@ -163,6 +163,28 @@ func RegisterAdminRoutes(
 
 		// D3: 闲管家（开放平台 ERP）admin 凭证配置入口
 		registerXianguanjiaConfigRoutes(admin, h)
+
+		// D4d: 闲管家 admin 卡种管理 + 批量推仓入口
+		registerXianguanjiaPoolRoutes(admin, h)
+	}
+}
+
+// registerXianguanjiaPoolRoutes 注册闲管家 admin 卡种/推仓端点（D4d）：
+//
+//	POST /admin/xianguanjia/pool/kind  建卡种（body {name, category_id?}，返回 kind_id）
+//	GET  /admin/xianguanjia/pool/kind  返回当前 kind_id（未设置时 0）
+//	POST /admin/xianguanjia/pool/push  批量推仓（body {kind_id, cards:[{card_no,card_pwd}]}）
+//
+// handler 未接线（如部分部署）时整组不注册，避免空指针。
+func registerXianguanjiaPoolRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.XianguanjiaPool == nil {
+		return
+	}
+	xgj := admin.Group("/xianguanjia")
+	{
+		xgj.POST("/pool/kind", h.Admin.XianguanjiaPool.KindCreate)
+		xgj.GET("/pool/kind", h.Admin.XianguanjiaPool.KindGet)
+		xgj.POST("/pool/push", h.Admin.XianguanjiaPool.PoolPush)
 	}
 }
 

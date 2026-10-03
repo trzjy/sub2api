@@ -36,4 +36,45 @@ export async function healthCheck(): Promise<{ health_status: string }> {
   return data
 }
 
-export default { getConfig, putConfig, healthCheck }
+// D4d: 闲管家 admin 卡种管理 + 批量推仓 API。
+
+export interface XianguanjiaKindCreateInput {
+  name: string
+  /** 可选分类 ID；不传或 0 表示不指定 */
+  category_id?: number
+}
+
+export interface XianguanjiaCardPair {
+  card_no: string
+  card_pwd: string
+}
+
+export interface XianguanjiaPushResult {
+  total: number
+  succeeded: number
+  failed: number
+  failures?: string[]
+}
+
+/** 建卡种，返回新 kind_id */
+export async function createPoolKind(input: XianguanjiaKindCreateInput): Promise<{ kind_id: number }> {
+  const { data } = await apiClient.post<{ kind_id: number }>('/admin/xianguanjia/pool/kind', input)
+  return data
+}
+
+/** 返回当前 kind_id（未设置时为 0） */
+export async function getPoolKind(): Promise<{ kind_id: number }> {
+  const { data } = await apiClient.get<{ kind_id: number }>('/admin/xianguanjia/pool/kind')
+  return data
+}
+
+/** 批量推仓：往指定 kind_id 的卡仓推入卡密 */
+export async function pushPoolCards(kindId: number, cards: XianguanjiaCardPair[]): Promise<XianguanjiaPushResult> {
+  const { data } = await apiClient.post<XianguanjiaPushResult>('/admin/xianguanjia/pool/push', {
+    kind_id: kindId,
+    cards
+  })
+  return data
+}
+
+export default { getConfig, putConfig, healthCheck, createPoolKind, getPoolKind, pushPoolCards }
