@@ -195,6 +195,7 @@ export default {
     xianyuInventory: 'Inventory Pools',
     xianyuDeliveries: 'Deliveries',
     xianyuSettings: 'Settings',
+    xianguanjiaConfig: 'Xianguanjia Config',
     ops: 'Ops',
     promoCodes: 'Promo Codes',
     settings: 'Settings',

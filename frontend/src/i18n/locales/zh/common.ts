@@ -195,6 +195,7 @@ export default {
     xianyuInventory: '库存池',
     xianyuDeliveries: '发货记录',
     xianyuSettings: '设置',
+    xianguanjiaConfig: '闲管家配置',
     ops: '运维监控',
     promoCodes: '优惠码',
     settings: '系统设置',
