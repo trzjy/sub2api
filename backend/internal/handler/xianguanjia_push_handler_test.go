@@ -48,11 +48,11 @@ type fakeDecryptor struct{}
 func (fakeDecryptor) Encrypt(plaintext string) (string, error) { return plaintext, nil }
 func (fakeDecryptor) Decrypt(ciphertext string) (string, error) { return ciphertext, nil }
 
-func newTestPushHandler(voider XianguanjiaRefundVoider, cfg *xianguanjia.Config) (*XianyuXianguanjiaPushHandler, xianguanjia.PushIdempotencyStore) {
+func newTestPushHandler(voider XianguanjiaRefundVoider, cfg *xianguanjia.Config, factory *xianguanjia.ClientFactory) (*XianyuXianguanjiaPushHandler, xianguanjia.PushIdempotencyStore) {
 	reader := xianguanjia.NewConfigStoreMemory(cfg)
 	verifier := NewXianguanjiaSignatureVerifier(reader, fakeDecryptor{})
 	idem := xianguanjia.NewPushIdempotencyStoreMemory()
-	return NewXianyuXianguanjiaPushHandler(voider, idem, verifier), idem
+	return NewXianyuXianguanjiaPushHandler(voider, idem, verifier, factory), idem
 }
 
 func doPush(t *testing.T, h *XianyuXianguanjiaPushHandler, body []byte, ts int64, signValid bool) *httptest.ResponseRecorder {
@@ -110,7 +110,7 @@ func receiptExists(t *testing.T, idem xianguanjia.PushIdempotencyStore, orderNo,
 
 func TestPushValidNormalStatus(t *testing.T) {
 	v := &fakeVoider{}
-	h, idem := newTestPushHandler(v, activeConfig())
+	h, idem := newTestPushHandler(v, activeConfig(), nil)
 	// 普通状态（待发货）：不触发作废，落回执。
 	body := refundPushBody("O1", 12, 0)
 	w := doPush(t, h, body, time.Now().Unix(), true)
@@ -131,7 +131,7 @@ func TestPushValidNormalStatus(t *testing.T) {
 
 func TestPushBadSign(t *testing.T) {
 	v := &fakeVoider{}
-	h, _ := newTestPushHandler(v, activeConfig())
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 0)
 	w := doPush(t, h, body, time.Now().Unix(), false)
 	if w.Code != http.StatusOK {
@@ -148,7 +148,7 @@ func TestPushBadSign(t *testing.T) {
 
 func TestPushExpiredTimestampRejected(t *testing.T) {
 	v := &fakeVoider{}
-	h, _ := newTestPushHandler(v, activeConfig())
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 0)
 	expired := time.Now().Unix() - 400 // 超出 300 秒窗口
 	w := doPush(t, h, body, expired, true)
@@ -160,7 +160,7 @@ func TestPushExpiredTimestampRejected(t *testing.T) {
 
 func TestPushFreshTimestampBoundary(t *testing.T) {
 	v := &fakeVoider{}
-	h, _ := newTestPushHandler(v, activeConfig())
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 0)
 	// 边界内（恰好 300 秒前）应放行。
 	w := doPush(t, h, body, time.Now().Unix()-300, true)
@@ -179,7 +179,7 @@ func TestPushFreshTimestampBoundary(t *testing.T) {
 func TestPushMissingConfigFailClosed(t *testing.T) {
 	v := &fakeVoider{}
 	// nil 配置模拟"无 active 配置"——必须 fail-closed 拒绝。
-	h, _ := newTestPushHandler(v, nil)
+	h, _ := newTestPushHandler(v, nil, nil)
 	body := refundPushBody("O1", 12, 0)
 	w := doPush(t, h, body, time.Now().Unix(), true)
 	result, _ := parseResult(t, w)
@@ -209,7 +209,7 @@ func TestPushBodyInt32Deserialization(t *testing.T) {
 // TestPushVoidSuccessReceiptThenDedup 作废成功 → 回执落库 → 重推去重返回 success。
 func TestPushVoidSuccessReceiptThenDedup(t *testing.T) {
 	v := &fakeVoider{outcome: xianguanjia.VoidDone}
-	h, _ := newTestPushHandler(v, activeConfig())
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 5)
 
 	// 第一次推送：作废成功，落回执。
@@ -235,7 +235,7 @@ func TestPushVoidSuccessReceiptThenDedup(t *testing.T) {
 // 重推会重做作废（外审 F1 资金损失链的闭环验证）。
 func TestPushVoidFailureNoReceiptThenRetryRedoesVoid(t *testing.T) {
 	v := &fakeVoider{err: errors.New("kam list unreachable")}
-	h, idem := newTestPushHandler(v, activeConfig())
+	h, idem := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 5)
 
 	// 第一次推送：作废失败 → fail。
@@ -315,7 +315,7 @@ func TestPushKamListCardNoMatch(t *testing.T) {
 	voider := xianguanjia.NewRefundCardVoidService(factory, voidRepo, nil)
 
 	v := &fakeVoiderDelegate{voider: voider}
-	h, _ := newTestPushHandler(v, activeConfig())
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 12, 5)
 	w := doPush(t, h, body, time.Now().Unix(), true)
 	if result, _ := parseResult(t, w); result != "success" {
@@ -334,7 +334,7 @@ func TestPushKamListCardNoMatch(t *testing.T) {
 // 这里验证响应语义与 outcome 分流正确）。
 func TestPushNoCardSuccessWithAuditTrail(t *testing.T) {
 	v := &fakeVoider{outcome: xianguanjia.VoidNoCard}
-	h, idem := newTestPushHandler(v, activeConfig())
+	h, idem := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 23, 0)
 	w := doPush(t, h, body, time.Now().Unix(), true)
 	if w.Code != http.StatusOK {
@@ -356,7 +356,7 @@ func TestPushNoCardSuccessWithAuditTrail(t *testing.T) {
 // TestPushOrderStatusClosedNoVoid order_status=24（已关闭）→ 不作废仅日志、落回执。
 func TestPushOrderStatusClosedNoVoid(t *testing.T) {
 	v := &fakeVoider{}
-	h, idem := newTestPushHandler(v, activeConfig())
+	h, idem := newTestPushHandler(v, activeConfig(), nil)
 	body := refundPushBody("O1", 24, 0)
 	w := doPush(t, h, body, time.Now().Unix(), true)
 	if w.Code != http.StatusOK {
@@ -371,6 +371,170 @@ func TestPushOrderStatusClosedNoVoid(t *testing.T) {
 	}
 	if !receiptExists(t, idem, "O1", "24", "0") {
 		t.Fatalf("closed order should commit receipt (no retry expected)")
+	}
+}
+
+// ---- D4c 核心场景：12 态待发货 → 异步触发 dummy/send 无物流发货 ----
+
+// dummySendRecorder 记录 dummy/send 出站调用并可配置响应信封（模拟闲管家端）。
+type dummySendRecorder struct {
+	mu       sync.Mutex
+	calls    int
+	orderNos []string
+	sendWays []int32
+	code     int  // 响应信封 code（0=成功，非 0=失败）
+	hits     chan struct{}
+}
+
+// newDummySendServer 启动 mock 闲管家端：校验签名，仅接受 dummy/send 路径，返回 code 信封。
+func newDummySendServer(t *testing.T, rec *dummySendRecorder) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ := io_ReadAll(r)
+		q := r.URL.Query()
+		expected := xianguanjia.Sign(q.Get("appid"), xianguanjia.BodyMd5(rawBody), q.Get("timestamp"), testAppSecret)
+		w.Header().Set("Content-Type", "application/json")
+		if expected != q.Get("sign") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path != "/api/open/trade/logistics/dummy/send" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			OrderNo string `json:"order_no"`
+			SendWay int32  `json:"send_way"`
+		}
+		if err := json.Unmarshal(rawBody, &body); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		rec.mu.Lock()
+		rec.calls++
+		rec.orderNos = append(rec.orderNos, body.OrderNo)
+		rec.sendWays = append(rec.sendWays, body.SendWay)
+		code := rec.code
+		rec.mu.Unlock()
+		select {
+		case rec.hits <- struct{}{}:
+		default:
+		}
+		if code != 0 {
+			_, _ = w.Write([]byte(`{"code":500,"msg":"mock dummy send failure","data":null}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":null}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newDummySendFactory 构造指向 mock 端点的出站客户端工厂（凭证明文，由 fakeDecryptor 还原）。
+func newDummySendFactory(srvURL string) *xianguanjia.ClientFactory {
+	return xianguanjia.NewClientFactory(xianguanjia.NewConfigStoreMemory(&xianguanjia.Config{
+		BaseURL: srvURL, AppID: testAppID, AppSecretEncrypted: testAppSecret, Status: "active",
+	}), fakeDecryptor{}.Decrypt)
+}
+
+func (r *dummySendRecorder) snapshot() (int, []string, []int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, append([]string(nil), r.orderNos...), append([]int32(nil), r.sendWays...)
+}
+
+// TestPushPendingShipmentTriggersAsyncDummySend order_status=12（待发货）→ 立即返回 success，
+// 异步触发 dummy/send 且 send_way=2（发卡密并更新订单状态）。
+func TestPushPendingShipmentTriggersAsyncDummySend(t *testing.T) {
+	rec := &dummySendRecorder{hits: make(chan struct{}, 4)}
+	srv := newDummySendServer(t, rec)
+	factory := newDummySendFactory(srv.URL)
+
+	v := &fakeVoider{}
+	h, idem := newTestPushHandler(v, activeConfig(), factory)
+	body := refundPushBody("SHIP-1", 12, 0)
+	w := doPush(t, h, body, time.Now().Unix(), true)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	result, _ := parseResult(t, w)
+	if result != "success" {
+		t.Fatalf("12 态推送必须返回 success（发货异步不阻塞）, got %q body=%s", result, w.Body.String())
+	}
+	if v.calls != 0 {
+		t.Fatalf("12 态不得触发退款作废, voider calls=%d", v.calls)
+	}
+
+	// 等待异步 goroutine 完成出站调用。
+	select {
+	case <-rec.hits:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout: dummy/send 未被异步调用")
+	}
+
+	calls, orderNos, sendWays := rec.snapshot()
+	if calls != 1 {
+		t.Fatalf("dummy/send 应被调用恰好一次, got %d", calls)
+	}
+	if orderNos[0] != "SHIP-1" {
+		t.Fatalf("dummy/send order_no 不匹配, got %q", orderNos[0])
+	}
+	if sendWays[0] != 2 {
+		t.Fatalf("send_way 应为 2（发卡密并更新订单状态）, got %d", sendWays[0])
+	}
+	if !receiptExists(t, idem, "SHIP-1", "12", "0") {
+		t.Fatalf("12 态发货触发后应落回执")
+	}
+}
+
+// TestPushPendingShipmentDummySendFailureStillSuccess dummy/send 失败（官方返回 code!=0）→
+// 推送仍返回 success：发货失败只记 error 级日志，不做本地重试/兜底（合同 §5）。
+func TestPushPendingShipmentDummySendFailureStillSuccess(t *testing.T) {
+	rec := &dummySendRecorder{code: 500, hits: make(chan struct{}, 4)}
+	srv := newDummySendServer(t, rec)
+	factory := newDummySendFactory(srv.URL)
+
+	v := &fakeVoider{}
+	h, idem := newTestPushHandler(v, activeConfig(), factory)
+	body := refundPushBody("SHIP-FAIL", 12, 0)
+	w := doPush(t, h, body, time.Now().Unix(), true)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	result, _ := parseResult(t, w)
+	if result != "success" {
+		t.Fatalf("发货失败不得影响推送响应（异步不阻塞）, got %q body=%s", result, w.Body.String())
+	}
+
+	// 失败仍被调用一次（无本地重试：调用次数不得 > 1）。
+	select {
+	case <-rec.hits:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout: dummy/send 未被异步调用")
+	}
+	// 稍等片刻，确认没有本地重试/兜底机制。
+	time.Sleep(200 * time.Millisecond)
+	calls, _, _ := rec.snapshot()
+	if calls != 1 {
+		t.Fatalf("禁本地重试/兜底：dummy/send 调用次数应为 1, got %d", calls)
+	}
+	if !receiptExists(t, idem, "SHIP-FAIL", "12", "0") {
+		t.Fatalf("发货失败仍应落回执（success 停止重推）")
+	}
+}
+
+// TestPushPendingShipmentNoFactoryLogsOnly factory 未接线（nil）→ 不得 panic，
+// 推送仍返回 success（缺依赖只记日志）。
+func TestPushPendingShipmentNoFactoryLogsOnly(t *testing.T) {
+	v := &fakeVoider{}
+	h, _ := newTestPushHandler(v, activeConfig(), nil)
+	body := refundPushBody("SHIP-NOFACTORY", 12, 0)
+	w := doPush(t, h, body, time.Now().Unix(), true)
+	result, _ := parseResult(t, w)
+	if result != "success" {
+		t.Fatalf("factory 未接线也应返回 success, got %q body=%s", result, w.Body.String())
 	}
 }
 

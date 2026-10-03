@@ -384,6 +384,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		xianguanjiaVoider,
 		xianguanjiaIdemStore,
 		xianguanjiaSig,
+		xianguanjiaClientFactory,
 	)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)

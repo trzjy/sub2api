@@ -34,6 +34,9 @@ const (
 	xianguanjiaRefundStatusSuccess int32 = 5
 	// xianguanjiaOrderStatusRefunded 订单已退款。
 	xianguanjiaOrderStatusRefunded int32 = 23
+	// xianguanjiaOrderStatusPendingShipment 订单待发货（卖家已付款、未发货）。
+	// 触发异步无物流发货（dummy/send，send_way=2 发卡密并更新订单状态）。
+	xianguanjiaOrderStatusPendingShipment int32 = 12
 	// xianguanjiaOrderStatusClosed 订单已关闭。
 	//
 	// 【业务裁定待定项（D2 保守默认）】order_status=24 是否触发作废官方未规定、
@@ -115,6 +118,9 @@ type XianyuXianguanjiaPushHandler struct {
 	svc      XianguanjiaRefundVoider
 	idem     XianguanjiaIdempotencyStore
 	verifier *XianguanjiaSignatureVerifier
+	// factory 按需构造出站客户端（读 active 配置+解密，凭证不落盘）。
+	// 用于 12 态待发货的异步无物流发货（DummySend）。
+	factory *xianguanjia.ClientFactory
 }
 
 // NewXianyuXianguanjiaPushHandler 构造推送处理器。
@@ -122,8 +128,9 @@ func NewXianyuXianguanjiaPushHandler(
 	svc XianguanjiaRefundVoider,
 	idem XianguanjiaIdempotencyStore,
 	verifier *XianguanjiaSignatureVerifier,
+	factory *xianguanjia.ClientFactory,
 ) *XianyuXianguanjiaPushHandler {
-	return &XianyuXianguanjiaPushHandler{svc: svc, idem: idem, verifier: verifier}
+	return &XianyuXianguanjiaPushHandler{svc: svc, idem: idem, verifier: verifier, factory: factory}
 }
 
 // xianguanjiaPushBody 是闲管家推送的 JSON 结构（官方 OpenAPI schema）。
@@ -210,6 +217,12 @@ func (h *XianyuXianguanjiaPushHandler) Push(c *gin.Context) {
 			slog.Warn("xianguanjia refund void: no matching card for refunded order, recorded for audit",
 				"order_no", orderNo, "refund_status", refundStatus, "order_status", orderStatus)
 		}
+	case req.OrderStatus == xianguanjiaOrderStatusPendingShipment:
+		// 订单待发货：异步触发无物流发货（dummy/send，send_way=2 发卡密并更新订单状态）。
+		// 发货在 goroutine 中用脱离请求的 ctx 执行：DummySend 失败只记 error 级结构化日志
+		// （含 order_no/err），不阻塞/不影响推送响应——推送立即返回 success（官方对方 3 秒
+		// 超时）；发货失败由闲管家订单状态自然重推或人工介入，不做本地重试（合同 §5 禁兜底）。
+		h.triggerDummySendAsync(ctx, orderNo)
 	case req.OrderStatus == xianguanjiaOrderStatusClosed:
 		// 订单已关闭（未付款关闭/超时关闭等）：官方未规定是否作废，业务未裁定，
 		// 保守默认仅记录日志、不作废（见 xianguanjiaOrderStatusClosed 常量注释）。
@@ -230,4 +243,37 @@ func (h *XianyuXianguanjiaPushHandler) Push(c *gin.Context) {
 		return
 	}
 	pushRespond(c, "success", "recorded")
+}
+
+// triggerDummySendAsync 异步触发无物流发货（order_status=12 待发货）。
+// 关键点：
+//   - goroutine + ctx.WithoutCancel(请求 ctx)：发货不随请求结束而取消，且不阻塞推送响应。
+//   - 构造客户端失败（无 active 配置/解密失败）或 DummySend 失败均只记 error 级结构化日志
+//     （含 order_no/err），推送已先行返回 success——官方对方超时 3 秒，发货失败靠闲管家
+//     订单状态自然重推或人工介入，禁本地重试/兜底（合同 §5）。
+//   - 仅在 factory 存在时触发；缺 factory（构造未接线）时记 error 级日志，行为等同失败但
+//     不阻断推送。
+func (h *XianyuXianguanjiaPushHandler) triggerDummySendAsync(reqCtx context.Context, orderNo string) {
+	if h == nil || h.factory == nil {
+		slog.Error("xianguanjia async dummy send skipped: client factory not wired",
+			"order_no", orderNo)
+		return
+	}
+	go func() {
+		// 脱离请求 ctx 的取消信号，避免请求结束（超时）打断发货。
+		ctx := context.WithoutCancel(reqCtx)
+		client, err := h.factory.NewClient(ctx)
+		if err != nil {
+			slog.Error("xianguanjia async dummy send: build client failed",
+				"order_no", orderNo, "err", err)
+			return
+		}
+		if err := client.DummySend(ctx, orderNo, 2); err != nil {
+			slog.Error("xianguanjia async dummy send failed",
+				"order_no", orderNo, "err", err)
+			return
+		}
+		slog.Info("xianguanjia async dummy send succeeded",
+			"order_no", orderNo)
+	}()
 }
