@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"database/sql"
+
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
@@ -68,6 +70,8 @@ func ProvideAdminHandlers(
 	entClient *dbent.Client,
 	xgjAdminCfgStore admin.XianguanjiaConfigStore, // D3: 闲管家 admin 配置存储（252 表写侧）
 	secretEncryptor service.SecretEncryptor, // D3: 凭证加密器（仓库既有 provider）
+	db *sql.DB, // D4i: redeem_codes marker 需要 sql 句柄（与 xianguanjiaVoider 同源）
+	settingRepo service.SettingRepository, // D4i: kind_id settings 存取（wire_gen 已有 settingRepository）
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -136,12 +140,23 @@ func ProvideAdminHandlers(
 		adminHandlers.XianguanjiaConfig = admin.NewXianguanjiaConfigHandler(xgjAdminCfgStore, secretEncryptor, nil)
 	}
 
-	// D4d: 闲管家 admin 卡种管理 + 批量推仓入口。
-	// service 层 kind/pool 实现由并行单元 D4a/D4b 交付；本单元按约定签名定义
-	// admin.XianguanjiaKindService / admin.XianguanjiaPoolPusher 注入接口。
-	// 集成前注入 nil：路由已注册但各端点 fail-closed 返回 503，不打外部接口。
-	// 本段为 D4d 合并标记：冲突时保留此块。
-	adminHandlers.XianguanjiaPool = admin.NewXianguanjiaPoolHandler(nil, nil)
+	// D4i: 闲管家 admin 卡种管理 + 批量推仓入口——接线完成。
+	// kind 服务 = LazyKindService（每次调用经 ClientFactory 现场构造 client，
+	// 委托 D4a KindService；kind_id 存 settings 表，经 SettingsKindIDStore 适配）；
+	// pusher = LazyPoolSyncService（委托 D4b PoolSyncService，marker 复用 D4b
+	// NewPushedCardMarker 的 unused→delivered 原子标记）；admin 签名桥接见
+	// xianguanjia_pool_bridge.go。无 active 配置时端点 fail-closed 返回
+	// ErrNoActiveConfig（不再是无条件 503）。
+	// 本段为 D4i 合并标记：冲突时保留此块。
+	xgjKindStore := xianguanjia.NewSettingsKindIDStore(settingRepo)
+	// factory 的 cfgReader 需含 GetActiveConfig（只读侧），admin.XianguanjiaConfigStore
+	// 是写侧窄接口不含该方法，故按 wire_gen 既有方式从 db 现场构造只读 store。
+	xgjClientFactory := xianguanjia.NewClientFactory(xianguanjia.NewConfigStore(db), secretEncryptor.Decrypt)
+	xgjPushMarker := xianguanjia.NewPushedCardMarker(db)
+	adminHandlers.XianguanjiaPool = admin.NewXianguanjiaPoolHandler(
+		xgjKindServiceFromLazy(xianguanjia.NewLazyKindService(xgjClientFactory, xgjKindStore)),
+		newXgjPoolPushBridge(xianguanjia.NewLazyPoolSyncService(xgjClientFactory, xgjPushMarker)),
+	)
 
 	// Cockpit 备份导入 preview/commit（B1c）：HMAC 无状态凭证签名器由既有服务端密钥
 	// cfg.JWT.Secret 经 HKDF 派生专用子密钥；提交仓储由 ent 客户端构造。
