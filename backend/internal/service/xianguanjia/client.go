@@ -1,10 +1,10 @@
-// Package xianguanjia 封装闲管家（开放平台）对接的客户端、签名、落库与对账骨架。
+// Package xianguanjia 封装闲管家（开放平台 ERP / 进销存方向）对接的客户端、签名、配置只读侧。
 //
-// 安全约束（派发单 C1 强制）：
+// 安全约束（派发单 D1 强制）：
 //   - 本包绝不在初始化或任何方法里向真实网络地址发起请求；真实请求仅由注入的
-//     *http.Client 发起，单测用 httptest / fake RoundTripper 覆盖。
-//   - 商户凭证（app_id/app_secret/mch_id/mch_secret）只作为构造参数传入，绝不写死。
-//   - 除 client.go 顶部 defaultBaseURL 占位常量与注释外，open.goofish.pro 不应出现在任何位置。
+//     *http.Client 发起，单测用 httptest 覆盖。
+//   - 商户凭证（AppKey/AppSecret）只作为构造参数传入，绝不写死。
+//   - 开放平台 ERP 方向不涉及 mch（58 页文档全文 grep mch 零命中），签名只含 AppKey/AppSecret。
 package xianguanjia
 
 import (
@@ -21,27 +21,30 @@ import (
 	"time"
 )
 
-// defaultBaseURL 是闲管家开放平台占位默认地址。
-// 注意：本包绝不在初始化或任何方法里向该地址发起真实请求——真实请求由注入的
-// *http.Client 在单测里用 httptest 覆盖。此常量仅作为构造默认，绝不包含真实商户凭证。
+// defaultBaseURL 是闲管家开放平台默认地址（占位默认，真实请求由注入的 http.Client 在单测覆盖）。
 const defaultBaseURL = "https://open.goofish.pro"
 
+// 官方路径常量（reference/open-platform/*.md，已坐实；非 /api/aftersale/*、/api/kam/list 等伪造路径）。
 const (
-	xianyuExternalCardListPath      = "/api/kam/list"
-	xianyuAftersaleListPath         = "/api/aftersale/list"
-	xianyuAftersaleDetailPath       = "/api/aftersale/detail"
-	xianyuAftersaleAgreeRefundPath  = "/api/aftersale/agree"
-	xianyuAftersaleRejectRefundPath = "/api/aftersale/reject"
+	pathKamList       = "/api/open/order/kam/list"
+	pathRefundAgree   = "/api/open/trade/refund/operate/agree"
+	pathRefundRefused = "/api/open/trade/refund/operate/refused"
+	pathDummySend     = "/api/open/trade/logistics/dummy/send"
 )
 
-// ClientConfig 构造闲管家客户端的配置。商户凭证只能由外部注入（如环境变量），
+// responseEnvelope 是闲管家响应信封：{code,msg,data}，code==0 成功（字段名是 msg，不是 message）。
+type responseEnvelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+// ClientConfig 构造闲管家客户端的配置。凭证只能由外部注入（如解密后的 AppKey/AppSecret），
 // 本包不读取任何环境变量、也不写死真实凭证。
 type ClientConfig struct {
 	BaseURL    string
-	AppID      string
+	AppKey     string
 	AppSecret  string
-	MchID      string
-	MchSecret  string
 	HTTPClient *http.Client
 }
 
@@ -49,10 +52,8 @@ type ClientConfig struct {
 // 客户端本身不持有任何网络状态，初始化时绝不 dial。
 type Client struct {
 	baseURL    string
-	appID      string
+	appKey     string
 	appSecret  string
-	mchID      string
-	mchSecret  string
 	httpClient *http.Client
 }
 
@@ -68,15 +69,13 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	return &Client{
 		baseURL:    base,
-		appID:      cfg.AppID,
+		appKey:     cfg.AppKey,
 		appSecret:  cfg.AppSecret,
-		mchID:      cfg.MchID,
-		mchSecret:  cfg.MchSecret,
 		httpClient: hc,
 	}
 }
 
-// ExternalCard 表示闲管家侧的一张卡密。
+// ExternalCard 表示闲管家订单卡密列表（kam/list）中的一张卡密。
 type ExternalCard struct {
 	OrderNo  string  `json:"order_no"`
 	CardNo   string  `json:"card_no"`
@@ -85,133 +84,31 @@ type ExternalCard struct {
 	SoldType string  `json:"sold_type"`
 }
 
-// AftersaleOrder 表示闲管家侧的售后/退款订单。
-type AftersaleOrder struct {
-	AftersaleID  string  `json:"aftersale_id"`
-	OrderNo      string  `json:"order_no"`
-	Status       string  `json:"status"`
-	RefundAmount float64 `json:"refund_amount"`
-	Reason       string  `json:"reason"`
-}
-
-// ListOrderCards 拉取某订单的外部卡密列表（对应 kam/list）。
-func (c *Client) ListOrderCards(ctx context.Context, orderNo string) ([]ExternalCard, error) {
-	query := url.Values{}
-	query.Set("order_no", orderNo)
-	body, err := c.do(ctx, http.MethodGet, xianyuExternalCardListPath, query, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Code    int `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			Cards []ExternalCard `json:"cards"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("xianguanjia decode list cards: %w", err)
-	}
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("xianguanjia list cards error code %d: %s", resp.Code, resp.Message)
-	}
-	return resp.Data.Cards, nil
-}
-
-// ListAftersaleOrders 分页拉取售后订单列表。since 为零值时不带时间过滤。
-func (c *Client) ListAftersaleOrders(ctx context.Context, since time.Time, limit int) ([]AftersaleOrder, error) {
-	query := url.Values{}
-	if !since.IsZero() {
-		query.Set("start_time", since.Format(time.RFC3339))
-	}
-	if limit > 0 {
-		query.Set("limit", strconv.Itoa(limit))
-	}
-	body, err := c.do(ctx, http.MethodGet, xianyuAftersaleListPath, query, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Code    int `json:"code"`
-		Message string `json:"message"`
-		Data    struct {
-			List []AftersaleOrder `json:"list"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("xianguanjia decode aftersales: %w", err)
-	}
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("xianguanjia list aftersales error code %d: %s", resp.Code, resp.Message)
-	}
-	return resp.Data.List, nil
-}
-
-// GetAftersaleOrder 拉取单个售后订单详情。
-func (c *Client) GetAftersaleOrder(ctx context.Context, aftersaleID string) (*AftersaleOrder, error) {
-	query := url.Values{}
-	query.Set("aftersale_id", aftersaleID)
-	body, err := c.do(ctx, http.MethodGet, xianyuAftersaleDetailPath, query, nil)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Code    int `json:"code"`
-		Message string `json:"message"`
-		Data    AftersaleOrder `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("xianguanjia decode aftersale: %w", err)
-	}
-	if resp.Code != 0 {
-		return nil, fmt.Errorf("xianguanjia get aftersale error code %d: %s", resp.Code, resp.Message)
-	}
-	return &resp.Data, nil
-}
-
-// AgreeRefund 同意退款。
-func (c *Client) AgreeRefund(ctx context.Context, aftersaleID string) error {
-	payload, err := json.Marshal(map[string]string{"aftersale_id": aftersaleID})
-	if err != nil {
-		return fmt.Errorf("xianguanjia marshal agree refund: %w", err)
-	}
-	_, err = c.do(ctx, http.MethodPost, xianyuAftersaleAgreeRefundPath, url.Values{}, payload)
-	return err
-}
-
-// RejectRefund 拒绝退款并附原因。
-func (c *Client) RejectRefund(ctx context.Context, aftersaleID string, reason string) error {
-	payload, err := json.Marshal(map[string]string{"aftersale_id": aftersaleID, "reason": reason})
-	if err != nil {
-		return fmt.Errorf("xianguanjia marshal reject refund: %w", err)
-	}
-	_, err = c.do(ctx, http.MethodPost, xianyuAftersaleRejectRefundPath, url.Values{}, payload)
-	return err
-}
-
-// do 统一构造请求：拼 URL、加公共参数（app_id/mch_id/timestamp/nonce）、计算签名、发请求、
+// do 统一构造请求：POST+JSON、计算 bodyMd5、timestamp、四段签名，拼 query appid/timestamp/sign，
 // 限长读响应体，非 2xx 返回带状态码的错误，否则返回原始响应体由调用方解析。
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body []byte) ([]byte, error) {
-	if query == nil {
-		query = url.Values{}
+func (c *Client) do(ctx context.Context, path string, body []byte) ([]byte, error) {
+	if body == nil {
+		body = []byte("{}")
 	}
-	query.Set("app_id", c.appID)
-	query.Set("mch_id", c.mchID)
-	query.Set("timestamp", strconv.FormatInt(time.Now().Unix(), 10))
-	query.Set("nonce", randString(16))
-	// 计算签名（不含 sign 本身，sign 在签名完成后才加入）。
-	sign := Sign(query, body, c.appSecret, c.mchSecret)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	bodyMd5 := BodyMd5(body)
+	sign := Sign(c.appKey, bodyMd5, ts, c.appSecret)
+
+	query := url.Values{}
+	query.Set("appid", c.appKey)
+	query.Set("timestamp", ts)
 	query.Set("sign", sign)
 
-	fullURL := strings.TrimRight(c.baseURL, "/") + path
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(body))
+	fullURL := strings.TrimRight(c.baseURL, "/") + path + "?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("xianguanjia build request: %w", err)
 	}
-	req.URL.RawQuery = query.Encode()
+	req.Header.Set("Content-Type", "application/json;charset=utf-8")
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("xianguanjia request %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("xianguanjia request %s %s: %w", http.MethodPost, path, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -219,17 +116,34 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return nil, fmt.Errorf("xianguanjia read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("xianguanjia %s %s returned status %d: %s", method, path, resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("xianguanjia %s %s returned status %d: %s", http.MethodPost, path, resp.StatusCode, string(respBody))
 	}
 	return respBody, nil
 }
 
-// randString 生成非加密随机字符串（仅用于 nonce，非密钥）。
+// decodeEnvelope 解析标准信封，code!=0 视为失败并带上 msg。
+func decodeEnvelope(body []byte) (*responseEnvelope, error) {
+	var env responseEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("xianguanjia decode envelope: %w", err)
+	}
+	if env.Code != 0 {
+		return nil, fmt.Errorf("xianguanjia api error code %d: %s", env.Code, env.Msg)
+	}
+	return &env, nil
+}
+
+// marshalBody 用 json.Marshal 输出"压缩 JSON"（无空格），正是签名所需的形态，且原样发送。
+func marshalBody(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+// randString 生成非加密随机字符串（仅用于内部占位盐，非密钥）。
 func randString(n int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		// 退化方案：仅用于 nonce，不涉及任何密钥。
+		// 退化方案：仅用于占位盐，不涉及任何密钥。
 		for i := range b {
 			b[i] = chars[int(time.Now().UnixNano())%len(chars)]
 		}
@@ -239,4 +153,70 @@ func randString(n int) string {
 		b[i] = chars[int(v)%len(chars)]
 	}
 	return string(b)
+}
+
+// ListOrderCards 拉取某订单的外部卡密列表（/api/open/order/kam/list）。
+func (c *Client) ListOrderCards(ctx context.Context, orderNo string) ([]ExternalCard, error) {
+	body, err := marshalBody(map[string]string{"order_no": orderNo})
+	if err != nil {
+		return nil, fmt.Errorf("xianguanjia marshal kam list: %w", err)
+	}
+	raw, err := c.do(ctx, pathKamList, body)
+	if err != nil {
+		return nil, err
+	}
+	env, err := decodeEnvelope(raw)
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Cards []ExternalCard `json:"cards"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, fmt.Errorf("xianguanjia decode kam list data: %w", err)
+	}
+	return data.Cards, nil
+}
+
+// AgreeRefund 同意退款（/api/open/trade/refund/operate/agree）。
+func (c *Client) AgreeRefund(ctx context.Context, orderNo string) error {
+	body, err := marshalBody(map[string]string{"order_no": orderNo})
+	if err != nil {
+		return fmt.Errorf("xianguanjia marshal agree refund: %w", err)
+	}
+	raw, err := c.do(ctx, pathRefundAgree, body)
+	if err != nil {
+		return err
+	}
+	_, err = decodeEnvelope(raw)
+	return err
+}
+
+// RejectRefund 拒绝退款并附原因（/api/open/trade/refund/operate/refused，注意拼写 refused 不是 reject）。
+func (c *Client) RejectRefund(ctx context.Context, orderNo, reason string) error {
+	body, err := marshalBody(map[string]string{"order_no": orderNo, "reason": reason})
+	if err != nil {
+		return fmt.Errorf("xianguanjia marshal reject refund: %w", err)
+	}
+	raw, err := c.do(ctx, pathRefundRefused, body)
+	if err != nil {
+		return err
+	}
+	_, err = decodeEnvelope(raw)
+	return err
+}
+
+// DummySend 无物流发货（/api/open/trade/logistics/dummy/send）。
+// sendWay: 1=仅更新订单状态，2=发卡密并更新订单状态。
+func (c *Client) DummySend(ctx context.Context, orderNo string, sendWay int32) error {
+	body, err := marshalBody(map[string]any{"order_no": orderNo, "send_way": sendWay})
+	if err != nil {
+		return fmt.Errorf("xianguanjia marshal dummy send: %w", err)
+	}
+	raw, err := c.do(ctx, pathDummySend, body)
+	if err != nil {
+		return err
+	}
+	_, err = decodeEnvelope(raw)
+	return err
 }

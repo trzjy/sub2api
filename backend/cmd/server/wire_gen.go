@@ -23,8 +23,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"log"
 	"net/http"
-	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -194,7 +192,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	announcementService := service.ProvideAnnouncementService(announcementRepository, announcementReadRepository, userRepository, userSubscriptionRepository, imageStorageSettingService)
 	announcementHandler := handler.NewAnnouncementHandler(announcementService)
 	channelMonitorRepository := repository.NewChannelMonitorRepository(client, db)
-	channelMonitorService := service.ProvideChannelMonitorService(channelMonitorRepository, secretEncryptor, settingService)
+	channelMonitorService := service.ProvideChannelMonitorService(channelMonitorRepository, secretEncryptor, settingService, accountRepository)
+	// D4：状态新鲜度陈旧告警服务（复用 OpsAlertEvent 载体），回写恢复关闭钩子与渠道评估入口。
+	freshnessAlertService := service.ProvideFreshnessAlertService(opsService, rateLimitService, channelMonitorService)
 	channelMonitorUserHandler := handler.NewChannelMonitorUserHandler(channelMonitorService, settingService)
 	channelMonitorV2Repository := repository.NewChannelMonitorV2Repository(db)
 	channelMonitorV2Service := service.ProvideChannelMonitorV2Service(channelMonitorV2Repository, settingService)
@@ -227,7 +227,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
 	accountTestService := service.ProvideAccountTestService(accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
 	crsSyncService := service.NewCRSSyncService(accountRepository, proxyRepository, oAuthService, openAIOAuthService, geminiOAuthService, configConfig)
-	accountHandler := admin.ProvideAccountHandler(configConfig, adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService)
+	accountHandler := admin.ProvideAccountHandler(configConfig, adminService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, rateLimitService, accountUsageService, accountTestService, concurrencyService, crsSyncService, sessionLimitCache, rpmCache, compositeTokenCacheInvalidator, grokQuotaService, freshnessAlertService)
 	adminAnnouncementHandler := admin.NewAnnouncementHandler(announcementService)
 	dataManagementService := service.NewDataManagementService()
 	dataManagementHandler := admin.NewDataManagementHandler(dataManagementService)
@@ -373,17 +373,11 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	xianyuDeliveryHandler := handler.NewXianyuDeliveryHandler(xianyuDeliveryService, configConfig)
-	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(handler.XianguanjiaSecretConfig{
-		AppID:     strings.TrimSpace(os.Getenv("XIANGUANAJIA_APP_ID")),
-		AppSecret: strings.TrimSpace(os.Getenv("XIANGUANAJIA_APP_SECRET")),
-		MchID:     strings.TrimSpace(os.Getenv("XIANGUANAJIA_MCH_ID")),
-		MchSecret: strings.TrimSpace(os.Getenv("XIANGUANAJIA_MCH_SECRET")),
-	})
-	xianguanjiaExtStore := xianguanjia.NewExternalCardStore(db)
+	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db)
+	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(xianguanjiaCfgStore, secretEncryptor)
 	xianguanjiaIdemStore := xianguanjia.NewPushIdempotencyStore(db)
 	xianguanjiaPushHandler := handler.NewXianyuXianguanjiaPushHandler(
 		xianyuDeliveryService,
-		xianguanjiaExtStore,
 		xianguanjiaIdemStore,
 		xianguanjiaSig,
 	)
@@ -410,7 +404,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
-	accountHealthRecoveryProbeService := service.ProvideAccountHealthRecoveryProbeService(accountRepository, httpUpstream, configConfig, rateLimitService, settingService, tlsFingerprintProfileService)
+	accountHealthRecoveryProbeService := service.ProvideAccountHealthRecoveryProbeService(accountRepository, httpUpstream, configConfig, rateLimitService, settingService, tlsFingerprintProfileService, freshnessAlertService)
 	openAICodexVersionSyncService := service.ProvideOpenAICodexVersionSyncService(settingRepository, settingService, gitHubReleaseClient)
 	proxyExpiryService := service.ProvideProxyExpiryService(proxyRepository)
 	subscriptionExpiryService := service.ProvideSubscriptionExpiryService(userSubscriptionRepository, settingRepository, notificationEmailService, leaderLockCache, db)

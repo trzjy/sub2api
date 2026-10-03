@@ -3,42 +3,34 @@ package xianguanjia
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"net/url"
-	"sort"
-	"strings"
 )
 
-// Sign 计算闲管家请求签名（占位实现，仅与单测自洽）。
+// Sign 计算闲管家（开放平台 ERP 方向）请求/推送签名。
 //
-// 拼接顺序：把除 sign 外的所有参数按 key 升序拼接为 k=v& 形式，并把 body 的 md5 作为伪参数
-// body_md5 加入排序集合，最后追加 appSecret 与 mchSecret，整体再做一次 md5。
+// 官方契约（reference/open-platform/doc-2686716.md:54-68；SDK client.go:85-98）：
 //
-// 重要：此实现为与单测自洽的占位，上线前须按闲管家 README 校正真实参与签名的字段集合与拼接顺序。
-// 本函数不读取任何真实商户凭证——密钥由调用方以参数传入。
-func Sign(params url.Values, body []byte, appSecret, mchSecret string) string {
-	p := url.Values{}
-	for k, v := range params {
-		p[k] = v
-	}
-	p.Set("body_md5", md5hex(body))
-	keys := make([]string, 0, len(p))
-	for k := range p {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(p.Get(k))
-		b.WriteString("&")
-	}
-	b.WriteString(appSecret)
-	b.WriteString(mchSecret)
-	return md5hex([]byte(b.String()))
+//	sign = md5("{appKey},{bodyMd5},{timestamp},{appSecret}")
+//
+// 四段、英文逗号分隔、无 key 排序、无 mch、无 nonce、无 seller_id。
+// appKey 即应用 AppKey（252 表 app_id 下发值），appSecret 即应用 AppSecret（解密后）。
+func Sign(appKey, bodyMd5, timestamp, appSecret string) string {
+	raw := appKey + "," + bodyMd5 + "," + timestamp + "," + appSecret
+	sum := md5.Sum([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
-func md5hex(b []byte) string {
+// BodyMd5 计算请求体 MD5。body 必须是以"压缩 JSON"（无多余空格）原样参与签名与发送的字节。
+// 无 body 时按官方约定返回 md5("{}")（reference/open-platform/doc-2686717.md:19）。
+func BodyMd5(body []byte) string {
+	if len(body) == 0 {
+		body = []byte("{}")
+	}
+	sum := md5.Sum(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// Md5Hex 通用 MD5（十六进制小写）。
+func Md5Hex(b []byte) string {
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
 }
