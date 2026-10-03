@@ -23,6 +23,7 @@ import (
 // 本文件定义业务类错误码，D6c/D6d 共用。信封 code==0 表示成功，非 0 时 msg 承载原因。
 const (
 	SupplyCodeOK                = 0    // 成功
+	SupplyCodeNoConfig          = 1    // 货源未配置（我方内部 fail-closed，非官方表项）
 	SupplyCodeSignError         = 401  // 签名错误（D6b 中间件）
 	SupplyCodeTimestampExpired  = 408  // 时间戳过期（D6b 中间件）
 	SupplyCodeMerchantNotFound  = 1000 // 商户不存在
@@ -63,20 +64,6 @@ var ErrSupplyGoodsNotFound = NewSupplyAPIError(SupplyCodeGoodsNotFound, "商品�
 //     （ERP 方向当初预留、无对应物；货源方向正好有对应物）；
 //   - SupplyAppID / SupplyAppSecretEncrypted 为应用概况（AppKey/AppSecret）凭证，
 //     D6a 以新增列或 settings KV 落地，本单元只读取、不关心存储细节。
-type SupplyConfig struct {
-	// MchID 货源授权商户号（如 900001），可在配置中以整数或字符串承载，此处用字符串。
-	MchID string
-	// MchSecretEncrypted 加密存储的货源授权密钥（mch_secret），读取后由 D6b/D6d 解密使用。
-	MchSecretEncrypted string
-	// SupplyAppID 应用概况 AppKey，即「查询平台信息」应返回的 app_id。
-	// 官方要求返回整数（int64 量级，如 1783283558647493）；此处以字符串承载，
-	// 由 service 解析为 int64 后对外输出。
-	SupplyAppID string
-	// SupplyAppSecretEncrypted 加密存储的应用概况 AppSecret。
-	SupplyAppSecretEncrypted string
-	// Status 配置状态（active / disabled 等）。
-	Status string
-}
 
 // SupplyConfigReader 读取货源方向的 active 配置（只读侧）。D6a 提供 DB 实现。
 // fail-closed 约定：无 active 配置时返回 (nil, nil)，由调用方拒绝服务。

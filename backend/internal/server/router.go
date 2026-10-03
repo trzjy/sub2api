@@ -135,6 +135,8 @@ func registerRoutes(
 	routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, compositeResolver, cfg)
 	routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, auditLog, settingService, panelRateLimiter)
 	routes.RegisterInternalRoutes(v1, h)
+	// D6e: 货源模式（虚拟货源提卡）公开组，套六段验签中间件。
+	routes.RegisterXgjSupplyRoutes(v1, h)
 
 	handler.RegisterPageRoutes(v1, cfg.Pricing.DataDir, gin.HandlerFunc(jwtAuth), gin.HandlerFunc(adminAuth), settingService)
 }

@@ -107,6 +107,75 @@
           </div>
         </div>
       </div>
+
+      <!-- D6e: 货源模式（虚拟货源提卡）区块（追加，不改既有凭证/推仓区块） -->
+      <div class="mt-6 max-w-2xl rounded-lg border border-gray-200 dark:border-dark-700">
+        <div class="flex items-center justify-between border-b border-gray-200 px-5 py-3 dark:border-dark-700">
+          <h2 class="font-semibold">{{ t('admin.xianguanjia.supply.title') }}</h2>
+          <StatusBadge
+            :status="supplyConfig?.configured ? 'active' : 'disabled'"
+            :label="supplyConfig?.configured ? t('admin.xianguanjia.supply.configured') : t('admin.xianguanjia.supply.notConfigured')"
+          />
+        </div>
+        <div class="space-y-4 p-5">
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianguanjia.supply.description') }}</p>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianguanjia.supply.supplyAppId') }}</label>
+            <input
+              v-model="supplyForm.supply_app_id"
+              class="input w-full"
+              autocomplete="off"
+              :placeholder="t('admin.xianguanjia.supply.supplyAppIdPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianguanjia.supply.appSecret') }}</label>
+            <input
+              v-model="supplyForm.app_secret"
+              type="password"
+              class="input w-full"
+              autocomplete="new-password"
+              :placeholder="supplyAppSecretPlaceholder"
+            />
+            <p v-if="supplyConfig?.app_secret_set" class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+              {{ t('admin.xianguanjia.supply.appSecretTail', { tail: supplyConfig.app_secret_tail }) }}
+            </p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianguanjia.supply.appSecretHint') }}</p>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianguanjia.supply.mchId') }}</label>
+            <input
+              v-model="supplyForm.mch_id"
+              class="input w-full"
+              autocomplete="off"
+              :placeholder="t('admin.xianguanjia.supply.mchIdPlaceholder')"
+            />
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianguanjia.supply.mchSecret') }}</label>
+            <input
+              v-model="supplyForm.mch_secret"
+              type="password"
+              class="input w-full"
+              autocomplete="new-password"
+              :placeholder="supplyMchSecretPlaceholder"
+            />
+            <p v-if="supplyConfig?.mch_secret_set" class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+              {{ t('admin.xianguanjia.supply.mchSecretTail', { tail: supplyConfig.mch_secret_tail }) }}
+            </p>
+          </div>
+          <div>
+            <label class="mb-1 block text-sm font-medium">{{ t('admin.xianguanjia.supply.gateway') }}</label>
+            <input :value="supplyConfig?.gateway || ''" class="input w-full bg-gray-100 dark:bg-dark-800" readonly />
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.xianguanjia.supply.gatewayHint') }}</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-primary" :disabled="supplySaving" @click="saveSupply">
+              {{ supplySaving ? t('admin.xianguanjia.supply.saving') : t('admin.xianguanjia.supply.save') }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </AppLayout>
 </template>
@@ -116,7 +185,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
-import type { XianguanjiaConfig, XianguanjiaCardPair, XianguanjiaPushResult } from '@/api/admin/xianguanjia'
+import type { XianguanjiaConfig, XianguanjiaCardPair, XianguanjiaPushResult, XianguanjiaSupplyConfig } from '@/api/admin/xianguanjia'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -204,6 +273,7 @@ function healthLabel(status: string): string {
 onMounted(() => {
   load()
   loadKind()
+  loadSupply()
 })
 
 // D4d: 卡密推仓区块逻辑。
@@ -299,6 +369,64 @@ async function pushCards() {
     appStore.showError(extractApiErrorMessage(err, t('common.error')))
   } finally {
     pushing.value = false
+  }
+}
+
+// D6e: 货源模式（虚拟货源提卡）区块逻辑。
+// 凭证 4 值（supply_app_id/app_secret/mch_id/mch_secret）+ 网关只读展示；
+// 两个 secret 留空表示保留原值，绝不回显明文。
+
+const supplyConfig = ref<XianguanjiaSupplyConfig | null>(null)
+const supplySaving = ref(false)
+const supplyForm = reactive({ supply_app_id: '', app_secret: '', mch_id: '', mch_secret: '' })
+
+const supplyAppSecretPlaceholder = computed(() =>
+  supplyConfig.value?.app_secret_set
+    ? t('admin.xianguanjia.supply.appSecretKeepBlank')
+    : t('admin.xianguanjia.supply.appSecretRequired')
+)
+const supplyMchSecretPlaceholder = computed(() =>
+  supplyConfig.value?.mch_secret_set
+    ? t('admin.xianguanjia.supply.mchSecretKeepBlank')
+    : t('admin.xianguanjia.supply.mchSecretRequired')
+)
+
+async function loadSupply() {
+  try {
+    const cfg = await adminAPI.xianguanjia.getSupplyConfig()
+    supplyConfig.value = cfg
+    supplyForm.supply_app_id = cfg.supply_app_id ?? ''
+    supplyForm.app_secret = ''
+    supplyForm.mch_id = cfg.mch_id ?? ''
+    supplyForm.mch_secret = ''
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  }
+}
+
+async function saveSupply() {
+  if (!supplyForm.supply_app_id.trim()) {
+    appStore.showError(t('admin.xianguanjia.supply.supplyAppIdRequired'))
+    return
+  }
+  if (!supplyForm.mch_id.trim()) {
+    appStore.showError(t('admin.xianguanjia.supply.mchIdRequired'))
+    return
+  }
+  supplySaving.value = true
+  try {
+    await adminAPI.xianguanjia.putSupplyConfig({
+      supply_app_id: supplyForm.supply_app_id.trim(),
+      app_secret: supplyForm.app_secret || undefined,
+      mch_id: supplyForm.mch_id.trim(),
+      mch_secret: supplyForm.mch_secret || undefined
+    })
+    appStore.showSuccess(t('admin.xianguanjia.supply.saved'))
+    await loadSupply()
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t('common.error')))
+  } finally {
+    supplySaving.value = false
   }
 }
 </script>

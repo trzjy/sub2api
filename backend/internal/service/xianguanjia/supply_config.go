@@ -208,3 +208,9 @@ func (s *SupplyConfigStore) loadActiveEncrypted(ctx context.Context) (*activeEnc
 	}
 	return &activeEncrypted{supplyAppSecretEnc: supplySecretEnc, mchSecretEnc: mchSecretEnc}, nil
 }
+
+// GetSupplyConfig 让 *SupplyConfigStore 满足 SupplyConfigReader（D6b 验签/D6c 目录共用）。
+// 明文语义：返回的 secret 已解密。
+func (s *SupplyConfigStore) GetSupplyConfig(ctx context.Context) (*SupplyConfig, error) {
+	return s.Get(ctx)
+}

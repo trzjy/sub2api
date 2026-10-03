@@ -166,6 +166,9 @@ func RegisterAdminRoutes(
 
 		// D4d: 闲管家 admin 卡种管理 + 批量推仓入口
 		registerXianguanjiaPoolRoutes(admin, h)
+
+		// D6e: 闲管家 admin 货源模式凭证配置入口
+		registerXianguanjiaSupplyRoutes(admin, h)
 	}
 }
 
@@ -204,6 +207,23 @@ func registerXianguanjiaConfigRoutes(admin *gin.RouterGroup, h *handler.Handlers
 		xgj.GET("/config", h.Admin.XianguanjiaConfig.Get)
 		xgj.PUT("/config", h.Admin.XianguanjiaConfig.Put)
 		xgj.POST("/health-check", h.Admin.XianguanjiaConfig.HealthCheck)
+	}
+}
+
+// registerXianguanjiaSupplyRoutes 注册闲管家 admin 货源模式凭证配置端点（D6e）：
+//
+//	GET  /admin/xianguanjia/supply-config  脱敏读取（两个 secret 只回末 4 位）
+//	PUT  /admin/xianguanjia/supply-config  保存货源授权凭证（留空保留原值）
+//
+// handler 未接线（如部分部署）时整组不注册，避免空指针。
+func registerXianguanjiaSupplyRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.XianguanjiaSupply == nil {
+		return
+	}
+	xgj := admin.Group("/xianguanjia")
+	{
+		xgj.GET("/supply-config", h.Admin.XianguanjiaSupply.Get)
+		xgj.PUT("/supply-config", h.Admin.XianguanjiaSupply.Put)
 	}
 }
 

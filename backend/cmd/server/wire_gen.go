@@ -338,9 +338,11 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	visionDetectService := service.ProvideVisionDetectService(accountRepository, accountModelCapabilityService, usageLogRepository)
 	visionCapabilityHandler := admin.NewVisionCapabilityHandler(visionDetectService, accountModelCapabilityService)
 	xgjAdminCfgStore := xianguanjia.ProvideConfigStore(db) // D3: 闲管家 admin 配置存储（252 表，含写侧）
+	// D6e: 货源模式凭证存储——D6a 未落地，暂用内存占位；集成时替换为 D6a 的 DB 实现。
+	xgjSupplyStore := xianguanjia.NewSupplyConfigStore(db, secretEncryptor) // D6i: D6a DB 实现
 	// D4i: 闲管家 admin 卡种/推仓 handler 在 handler.ProvideAdminHandlers 内构造
 	// （接线胶水由 D4i 交付：db/settingRepository 直传，factory/marker 在 handler 内组装）。
-	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository)
+	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository, xgjSupplyStore)
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)
 	userMessageQueueService := service.ProvideUserMessageQueueService(userMsgQueueCache, rpmCache, configConfig)
@@ -388,10 +390,14 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		xianguanjiaSig,
 		xianguanjiaClientFactory,
 	)
+	// D6e: 货源模式公开接口 handler（7 端点；D6c/D6d 落地后替换内部业务逻辑）。
+	xianguanjiaSupplyCatalogSvc := xianguanjia.NewSupplyCatalogService(xgjSupplyStore, xianguanjia.NewSupplyGoodsSource(db)) // D6i: D6c 目录服务
+	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc) // D6i: D6c 目录 handler
+	xgjSupplyHandler := handler.NewXgjSupplyHandler(xgjSupplyStore, "")
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)
-	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
+	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, xgjSupplyHandler, xianguanjiaSupplyCatalogHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
 	jwtAuthMiddleware := middleware.NewJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	optionalJWTAuthMiddleware := middleware.NewOptionalJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	adminAuthMiddleware := middleware.NewAdminAuthMiddleware(authService, userService, settingService, auditLogService)

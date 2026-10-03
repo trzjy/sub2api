@@ -18,11 +18,10 @@ const (
 func testSupplyCfg() *SupplyConfig {
 	return &SupplyConfig{
 		MchID:                    "900001",
-		MchSecretEncrypted:       "enc-mch-secret",
+		MchSecret:       "enc-mch-secret",
 		SupplyAppID:              "1783283558647493",
-		SupplyAppSecretEncrypted: "enc-app-secret",
-		Status:                   "active",
-	}
+		SupplyAppSecret: "enc-app-secret",
+			}
 }
 
 func testGoods() []SupplyGoods {

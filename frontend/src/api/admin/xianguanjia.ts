@@ -77,4 +77,46 @@ export async function pushPoolCards(kindId: number, cards: XianguanjiaCardPair[]
   return data
 }
 
-export default { getConfig, putConfig, healthCheck, createPoolKind, getPoolKind, pushPoolCards }
+// D6e: 货源模式（虚拟货源提卡）admin 配置 API。
+// 两个 secret 永不回显明文：GET 只返回是否已设置 + 末 4 位。
+
+export interface XianguanjiaSupplyConfig {
+  configured: boolean
+  supply_app_id: string
+  app_secret_set: boolean
+  app_secret_tail: string
+  mch_id: string
+  mch_secret_set: boolean
+  mch_secret_tail: string
+  gateway: string
+}
+
+export interface XianguanjiaSupplyConfigPutInput {
+  supply_app_id: string
+  /** 留空表示保留已存密钥（仅首次保存必填） */
+  app_secret?: string
+  mch_id: string
+  /** 留空表示保留已存密钥（仅首次保存必填） */
+  mch_secret?: string
+  gateway?: string
+}
+
+export async function getSupplyConfig(): Promise<XianguanjiaSupplyConfig> {
+  const { data } = await apiClient.get<XianguanjiaSupplyConfig>('/admin/xianguanjia/supply-config')
+  return data
+}
+
+export async function putSupplyConfig(input: XianguanjiaSupplyConfigPutInput): Promise<void> {
+  await apiClient.put('/admin/xianguanjia/supply-config', input)
+}
+
+export default {
+  getConfig,
+  putConfig,
+  healthCheck,
+  createPoolKind,
+  getPoolKind,
+  pushPoolCards,
+  getSupplyConfig,
+  putSupplyConfig
+}

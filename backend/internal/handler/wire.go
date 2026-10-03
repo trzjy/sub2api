@@ -72,6 +72,7 @@ func ProvideAdminHandlers(
 	secretEncryptor service.SecretEncryptor, // D3: 凭证加密器（仓库既有 provider）
 	db *sql.DB, // D4i: redeem_codes marker 需要 sql 句柄（与 xianguanjiaVoider 同源）
 	settingRepo service.SettingRepository, // D4i: kind_id settings 存取（wire_gen 已有 settingRepository）
+	xgjSupplyStore *xianguanjia.SupplyConfigStore, // D6i: 货源模式凭证存储（D6a DB 实现，Save/Get）
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -157,6 +158,12 @@ func ProvideAdminHandlers(
 		xgjKindServiceFromLazy(xianguanjia.NewLazyKindService(xgjClientFactory, xgjKindStore)),
 		newXgjPoolPushBridge(xianguanjia.NewLazyPoolSyncService(xgjClientFactory, xgjPushMarker)),
 	)
+
+	// D6e/D6i: 闲管家 admin 货源模式凭证配置入口——D6a DB 实现（supplyStore 参数）。
+	// 本段为 D6e 合并标记：冲突时保留此块。
+	if xgjSupplyStore != nil {
+		adminHandlers.XianguanjiaSupply = admin.NewXianguanjiaSupplyHandler(xgjSupplyStore, "")
+	}
 
 	// Cockpit 备份导入 preview/commit（B1c）：HMAC 无状态凭证签名器由既有服务端密钥
 	// cfg.JWT.Secret 经 HKDF 派生专用子密钥；提交仓储由 ent 客户端构造。
@@ -273,6 +280,8 @@ func ProvideHandlers(
 	batchImageHandler *BatchImageHandler,
 	xianyuDeliveryHandler *XianyuDeliveryHandler,
 	xianguanjiaPushHandler *XianyuXianguanjiaPushHandler,
+	xgjSupplyHandler *XgjSupplyHandler, // D6e: 货源模式公开接口
+	supplyCatalogHandler *XianguanjiaSupplyHandler, // D6i: D6c 货源目录接口
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 	_ *service.OpenAIQuotaAutoResetService,
@@ -301,6 +310,8 @@ func ProvideHandlers(
 		BatchImage:       batchImageHandler,
 		XianyuDelivery:   xianyuDeliveryHandler,
 		XianguanjiaPush:  xianguanjiaPushHandler,
+		XgjSupply:        xgjSupplyHandler,
+		SupplyCatalog:    supplyCatalogHandler,
 	}
 }
 
@@ -309,6 +320,8 @@ var ProviderSet = wire.NewSet(
 	// D3: 闲管家 admin 配置存储（252 表写侧）：导出的 NewConfigStore provider + 接口绑定。
 	xianguanjia.ProvideConfigStore,
 	wire.Bind(new(admin.XianguanjiaConfigStore), new(xianguanjia.ConfigStore)),
+	// D6i: 货源模式凭证存储（D6a DB 实现，需 db 与 secretEncryptor——由 wire_gen 传参）。
+	xianguanjia.NewSupplyConfigStore,
 	// Top-level handlers
 	NewAuthHandler,
 	NewUserHandler,

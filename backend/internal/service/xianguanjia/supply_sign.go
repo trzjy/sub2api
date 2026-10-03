@@ -2,7 +2,6 @@ package xianguanjia
 
 import (
 	"bytes"
-	"context"
 	"crypto/md5"
 	"crypto/subtle"
 	"encoding/hex"
@@ -40,36 +39,10 @@ import (
 //   - SupplyConfigStore.Get 的方法名是 Get，非 GetSupplyConfig；D6a 只需一个
 //     极小适配器或别名方法即可满足 SupplyConfigReader。
 
-// SupplyConfig 是货源方向的凭证（本单元所需四要素 + 网关前缀）。secret 字段为
-// 解密后明文。集成说明见文件头。
-type SupplyConfig struct {
-	SupplyAppID     string // 闲管家下发的应用 AppKey（六段签名首段）
-	SupplyAppSecret string // 解密后的应用 AppSecret
-	MchID           string // 货源授权商户号（我方自造）
-	MchSecret       string // 解密后的货源授权密钥
-	GatewayPath     string // 网关前缀，默认 /api/v1/xgj-supply
-}
-
-// SupplyConfigReader 读取货源方向 active 配置（只读侧）。D6a 交付实现。
-// fail-closed 约定：无 active 配置时返回 (nil, nil) 或 ErrSupplyNoConfig，
-// 中间件据此返回 {code:1,msg:"货源未配置"} 并中止。
-type SupplyConfigReader interface {
-	GetSupplyConfig(ctx context.Context) (*SupplyConfig, error)
-}
-
 // ---- 官方全局错误码（货源接口信封 {code,msg,data}，与 ERP result=success 不同） ----
 //
 // SupplyCodeSignError/SupplyCodeTimestampExpired 与 D6c 的 supply_types.go 同名同值；
 // 集成去重时保留一份即可（若保留 D6c 版本，本处删除即可）。
-
-const (
-	// SupplyCodeSignError 签名错误。
-	SupplyCodeSignError = 401
-	// SupplyCodeTimestampExpired 时间戳已超过有效期。
-	SupplyCodeTimestampExpired = 408
-	// SupplyCodeNoConfig 货源未配置（我方内部 fail-closed，非官方错误码表项）。
-	SupplyCodeNoConfig = 1
-)
 
 // supplyTimestampWindowSec 是货源接口的 timestamp 新鲜度窗口（秒）。
 // 参照 ERP 推送方向 5 分钟（api-93586387.md:36），官方货源文档未坐实数值，
@@ -84,10 +57,6 @@ const supplyMaxBodyBytes = 1 << 20
 
 // ErrSupplySignMismatch 是六段签名比对不通过的哨兵错误（供 errors.Is 判定）。
 var ErrSupplySignMismatch = errors.New("xianguanjia: supply sign mismatch")
-
-// ErrSupplyNoConfig 表示货源凭证未配置。与 D6a 的 ErrSupplyNoConfig 同名同义；
-// 集成去重时保留一份即可（若保留 D6a 版本，本处引用自动指向它）。
-var ErrSupplyNoConfig = errors.New("xianguanjia: no supply config")
 
 // SupplySign 按官方六段公式计算货源被调接口签名。
 //
