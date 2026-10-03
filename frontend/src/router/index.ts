@@ -681,6 +681,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/xianguanjia/config',
+    name: 'AdminXianguanjiaConfig',
+    component: () => import('@/views/admin/xianguanjia/XianguanjiaConfigView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Xianguanjia Config',
+      titleKey: 'admin.xianguanjia.title',
+      descriptionKey: 'admin.xianguanjia.description'
+    }
+  },
+  {
     path: '/admin/promo-codes',
     name: 'AdminPromoCodes',
     component: () => import('@/views/admin/PromoCodesView.vue'),

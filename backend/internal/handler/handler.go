@@ -50,6 +50,7 @@ type AdminHandlers struct {
 	UsageRisk              *admin.UsageRiskHandler
 	VisionCapability       *admin.VisionCapabilityHandler
 	CockpitImport          *admin.CockpitImportHandler
+	XianguanjiaConfig      *admin.XianguanjiaConfigHandler // D3: 闲管家 admin 凭证配置入口
 }
 
 // Handlers contains all HTTP handlers

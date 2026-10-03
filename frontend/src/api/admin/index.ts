@@ -38,6 +38,7 @@ import adminComplianceAPI from './compliance'
 import auditAPI from './audit'
 import pluginsAPI from './plugins'
 import xianyuAPI from './xianyu'
+import xianguanjiaAPI from './xianguanjia'
 import pricingAPI from './pricing'
 import promoIntelAPI from './promoIntel'
 import usageRiskAPI from './usageRisk'
@@ -81,6 +82,7 @@ export const adminAPI = {
   audit: auditAPI,
   plugins: pluginsAPI,
   xianyu: xianyuAPI,
+  xianguanjia: xianguanjiaAPI,
   pricing: pricingAPI,
   promoIntel: promoIntelAPI,
   usageRisk: usageRiskAPI
@@ -122,6 +124,7 @@ export {
   auditAPI,
   pluginsAPI,
   xianyuAPI,
+  xianguanjiaAPI,
   pricingAPI,
   promoIntelAPI,
   usageRiskAPI

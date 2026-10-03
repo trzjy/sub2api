@@ -1,12 +1,13 @@
 package handler
 
 import (
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/xianguanjia"
 
 	"github.com/google/wire"
 )
@@ -65,6 +66,8 @@ func ProvideAdminHandlers(
 	visionCapabilityHandler *admin.VisionCapabilityHandler,
 	visionRoutingService *service.VisionRoutingService,
 	entClient *dbent.Client,
+	xgjAdminCfgStore admin.XianguanjiaConfigStore, // D3: 闲管家 admin 配置存储（252 表写侧）
+	secretEncryptor service.SecretEncryptor, // D3: 凭证加密器（仓库既有 provider）
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -125,6 +128,12 @@ func ProvideAdminHandlers(
 		Pricing:                pricingHandler,
 		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
 		VisionCapability:       visionCapabilityHandler,
+	}
+	// D3: 闲管家 admin 凭证配置入口——与 D1 的推送验签共享同一份 ConfigStore（252 表）
+	// 与 secretEncryptor；探活客户端为 nil 时 handler 内部用默认 http.Client。
+	// 本段为 D3 合并标记：冲突时保留此块。
+	if xgjAdminCfgStore != nil {
+		adminHandlers.XianguanjiaConfig = admin.NewXianguanjiaConfigHandler(xgjAdminCfgStore, secretEncryptor, nil)
 	}
 
 	// Cockpit 备份导入 preview/commit（B1c）：HMAC 无状态凭证签名器由既有服务端密钥
@@ -275,6 +284,9 @@ func ProvideHandlers(
 
 // ProviderSet is the Wire provider set for all handlers
 var ProviderSet = wire.NewSet(
+	// D3: 闲管家 admin 配置存储（252 表写侧）：导出的 NewConfigStore provider + 接口绑定。
+	xianguanjia.ProvideConfigStore,
+	wire.Bind(new(admin.XianguanjiaConfigStore), new(xianguanjia.ConfigStore)),
 	// Top-level handlers
 	NewAuthHandler,
 	NewUserHandler,

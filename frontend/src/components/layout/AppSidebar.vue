@@ -809,6 +809,7 @@ const adminNavItems = computed((): NavItem[] => {
         { path: '/admin/xianyu/inventory', label: t('nav.xianyuInventory'), icon: FolderIcon },
         { path: '/admin/xianyu/deliveries', label: t('nav.xianyuDeliveries'), icon: OrderIcon },
         { path: '/admin/xianyu/settings', label: t('nav.xianyuSettings'), icon: CogIcon },
+        { path: '/admin/xianguanjia/config', label: t('nav.xianguanjiaConfig'), icon: CogIcon },
       ],
     },
     { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, hideInSimpleMode: true },
