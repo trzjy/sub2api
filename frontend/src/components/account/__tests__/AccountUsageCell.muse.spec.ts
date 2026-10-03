@@ -63,6 +63,28 @@ const usageBarStub = {
   template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}|{{ color }}</div>'
 }
 
+// deepseek 用例需要把 CN 分支子单元格 stub 掉，才能断言「是否进入 CN 分支」
+const cnQuotaStub = { template: '<div data-test="cn-quota" />' }
+const cnBalanceStub = { template: '<div data-test="cn-balance" />' }
+
+// 统一 stub 集：三窗口进度条 + muse 专用 + CN 分支占位
+const deepseekStubs = {
+  UsageProgressBar: usageBarStub,
+  AccountQuotaInfo: true,
+  CNProviderQuotaCell: cnQuotaStub,
+  CNProviderBalanceCell: cnBalanceStub
+}
+
+// 构造一个携带 opencode_zen usage_probe 的 deepseek apikey 账号
+function makeDeepseekAccount(overrides: Partial<Account>): Account {
+  return makeAccount({
+    platform: 'deepseek',
+    type: 'apikey',
+    credentials: { usage_probe: 'opencode_zen' },
+    ...overrides
+  } as Partial<Account>)
+}
+
 describe('AccountUsageCell muse 分支', () => {
   beforeEach(() => {
     getUsage.mockReset()
@@ -206,5 +228,141 @@ describe('AccountUsageCell muse 分支', () => {
 
     expect(wrapper.findAll('.usage-bar').length).toBe(0)
     expect(wrapper.text()).not.toContain('admin.accounts.usageWindow.musePaused')
+  })
+})
+
+// ZB-T3b：deepseek apikey opt-in（usage_probe=opencode_zen）完全镜像 muse 用量通路。
+// 验证三项：showUsageWindows=false（路由进 v-else 三窗口）、shouldFetchUsage=true
+// （触发批量抓取）、usage 返回 muse_usage 后渲染三窗口。
+describe('AccountUsageCell deepseek opt-in 镜像 muse', () => {
+  beforeEach(() => {
+    getUsage.mockReset()
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation(() => ({
+        matches: true,
+        media: '(min-width: 768px)',
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn()
+      }))
+    })
+  })
+
+  it('① opt-in deepseek：showUsageWindows=false、shouldFetchUsage=true、muse_usage 渲染三窗口', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeDeepseekAccount({ id: 7101 }),
+        requestBatchedUsage,
+        batchedUsage: {
+          muse_usage: {
+            rolling: { status: 'ok', percent: 12, resets_at: '2026-04-01T00:00:00Z' },
+            weekly: { status: 'ok', percent: 34, resets_at: '2026-04-07T00:00:00Z' },
+            monthly: { status: 'ok', percent: 56, resets_at: '2026-04-30T00:00:00Z' },
+            paused: false,
+            unschedulable_until: null
+          }
+        }
+      },
+      global: { stubs: deepseekStubs }
+    })
+
+    await flushPromises()
+
+    // shouldFetchUsage=true → 触发批量抓取（请求前判定，依赖 credentials.usage_probe）
+    expect(requestBatchedUsage).toHaveBeenCalled()
+    // showUsageWindows=false → 不进入 CN 分支（与 muse 一样走 v-else 三窗口）
+    expect(wrapper.find('[data-test="cn-quota"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-balance"]').exists()).toBe(false)
+    // muse_usage 透传 → 三窗口进度条渲染
+    const bars = wrapper.findAll('.usage-bar').map((b) => b.text())
+    expect(bars).toContain('R|12|2026-04-01T00:00:00Z|indigo')
+    expect(bars).toContain('7d|34|2026-04-07T00:00:00Z|emerald')
+    expect(bars).toContain('30d|56|2026-04-30T00:00:00Z|purple')
+  })
+
+  it('①（续）opt-in deepseek 抓取前 museUsage 为 null：显示占位符 "-"，不渲染进度条', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeDeepseekAccount({ id: 7102 }),
+        requestBatchedUsage,
+        // 批量抓取尚未返回（与 muse 抓取前一致）
+        batchedUsage: {}
+      },
+      global: { stubs: deepseekStubs }
+    })
+
+    await flushPromises()
+
+    expect(requestBatchedUsage).toHaveBeenCalled()
+    expect(wrapper.findAll('.usage-bar').length).toBe(0)
+    // 内层 v-if="museUsage" 不动：museUsage 为 null 时回落占位符
+    expect(wrapper.text()).toContain('-')
+  })
+
+  it('② 未 opt-in deepseek apikey：showUsageWindows=true（走 CN 分支）、shouldFetchUsage=false、无三窗口（零变化锚定）', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      // 不携带 usage_probe → 保持基线行为
+      props: {
+        account: makeAccount({
+          id: 7201,
+          platform: 'deepseek',
+          type: 'apikey'
+        }),
+        requestBatchedUsage
+      },
+      global: { stubs: deepseekStubs }
+    })
+
+    await flushPromises()
+
+    // shouldFetchUsage=false → 不触发批量抓取
+    expect(requestBatchedUsage).not.toHaveBeenCalled()
+    // showUsageWindows=true → 进入 CN 分支（CNProviderQuotaCell 渲染，零变化锚定）
+    expect(wrapper.find('[data-test="cn-quota"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="cn-balance"]').exists()).toBe(true)
+    // 不渲染三窗口
+    expect(wrapper.findAll('.usage-bar').length).toBe(0)
+  })
+
+  it('③ muse apikey 行为不变：即便 credentials.usage_probe 存在，仍走 muse 三窗口（回归护栏）', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 7301,
+          platform: 'muse',
+          type: 'apikey',
+          // 即便带 usage_probe，muse 不应被新分支影响
+          credentials: { usage_probe: 'opencode_zen' }
+        }),
+        requestBatchedUsage,
+        batchedUsage: {
+          muse_usage: {
+            rolling: { status: 'ok', percent: 7, resets_at: null },
+            weekly: null,
+            monthly: null,
+            paused: false,
+            unschedulable_until: null
+          }
+        }
+      },
+      global: { stubs: deepseekStubs }
+    })
+
+    await flushPromises()
+
+    // muse apikey shouldFetchUsage 保持 true
+    expect(requestBatchedUsage).toHaveBeenCalled()
+    // muse 仍路由到三窗口，而非 CN 分支
+    expect(wrapper.find('[data-test="cn-quota"]').exists()).toBe(false)
+    const bars = wrapper.findAll('.usage-bar').map((b) => b.text())
+    expect(bars).toContain('R|7||indigo')
   })
 })

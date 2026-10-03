@@ -807,6 +807,9 @@ const accountSupportsBatchUsage = (account: Account) => {
   if (account.platform === 'openai') return account.type === 'oauth'
   if (account.platform === 'grok') return account.type === 'oauth'
   if (account.platform === 'muse') return account.type === 'apikey'
+  // deepseek apikey opt-in（usage_probe=opencode_zen）：纳入批量用量抓取，镜像 muse。
+  // 未 opt-in 的 deepseek 不命中（保持基线行为）。判定一律用凭证 usage_probe（请求前可得）。
+  if (account.platform === 'deepseek' && account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen') return true
   return false
 }
 
