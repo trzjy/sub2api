@@ -76,12 +76,13 @@ func NewClient(cfg ClientConfig) *Client {
 }
 
 // ExternalCard 表示闲管家订单卡密列表（kam/list）中的一张卡密。
+// sold_type 官方为 int32 枚举（11 自动发货 / 12 手动发货 / 21 手动提卡 / 22 手动标识已售），
+// 出处：reference/open-platform/api-97142794.md:98-118。
 type ExternalCard struct {
-	OrderNo  string  `json:"order_no"`
 	CardNo   string  `json:"card_no"`
 	CardPwd  string  `json:"card_pwd"`
 	Cost     float64 `json:"cost"`
-	SoldType string  `json:"sold_type"`
+	SoldType int32   `json:"sold_type"`
 }
 
 // do 统一构造请求：POST+JSON、计算 bodyMd5、timestamp、四段签名，拼 query appid/timestamp/sign，
@@ -155,6 +156,39 @@ func randString(n int) string {
 	return string(b)
 }
 
+// ClientFactory 按需构造出站客户端：每次调用读取 active 配置（252 表）并解密
+// AppSecret 后构造新 Client。凭证不落盘、不缓存，配置变更即时生效。
+// 构造失败（无 active 配置 / 解密失败 / 凭证为空）返回 error，调用方 fail-closed。
+type ClientFactory struct {
+	cfgReader ConfigReader
+	decrypt   func(ciphertext string) (string, error)
+}
+
+// NewClientFactory 构造客户端工厂。decrypt 传入 SecretEncryptor.Decrypt。
+func NewClientFactory(cfgReader ConfigReader, decrypt func(ciphertext string) (string, error)) *ClientFactory {
+	return &ClientFactory{cfgReader: cfgReader, decrypt: decrypt}
+}
+
+// NewClientForOrder 构造用于出站查询的客户端（kam/list 等）。
+func (f *ClientFactory) NewClient(ctx context.Context) (*Client, error) {
+	if f == nil || f.cfgReader == nil || f.decrypt == nil {
+		return nil, ErrNoActiveConfig
+	}
+	cfg, err := f.cfgReader.GetActiveConfig(ctx)
+	if err != nil || cfg == nil {
+		return nil, ErrNoActiveConfig
+	}
+	secret, err := f.decrypt(cfg.AppSecretEncrypted)
+	if err != nil || secret == "" || cfg.AppID == "" {
+		return nil, fmt.Errorf("xianguanjia decrypt app secret: %w", ErrNoActiveConfig)
+	}
+	return NewClient(ClientConfig{
+		BaseURL:   cfg.BaseURL,
+		AppKey:    cfg.AppID,
+		AppSecret: secret,
+	}), nil
+}
+
 // ListOrderCards 拉取某订单的外部卡密列表（/api/open/order/kam/list）。
 func (c *Client) ListOrderCards(ctx context.Context, orderNo string) ([]ExternalCard, error) {
 	body, err := marshalBody(map[string]string{"order_no": orderNo})
@@ -169,13 +203,15 @@ func (c *Client) ListOrderCards(ctx context.Context, orderNo string) ([]External
 	if err != nil {
 		return nil, err
 	}
+	// 官方契约：data.list[]（reference/open-platform/api-97142794.md:54-77,77-128），
+	// 不是 data.cards。
 	var data struct {
-		Cards []ExternalCard `json:"cards"`
+		List []ExternalCard `json:"list"`
 	}
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		return nil, fmt.Errorf("xianguanjia decode kam list data: %w", err)
 	}
-	return data.Cards, nil
+	return data.List, nil
 }
 
 // AgreeRefund 同意退款（/api/open/trade/refund/operate/agree）。

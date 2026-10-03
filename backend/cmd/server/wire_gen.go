@@ -376,8 +376,13 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db)
 	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(xianguanjiaCfgStore, secretEncryptor)
 	xianguanjiaIdemStore := xianguanjia.NewPushIdempotencyStore(db)
+	// D2 资金闭环：kam/list 出站工厂（动态读 252 配置+解密）+ 按 card_no 精准作废仓库
+	// + 既有 claim 追回锚点（used 码防双扣）。
+	xianguanjiaClientFactory := xianguanjia.NewClientFactory(xianguanjiaCfgStore, secretEncryptor.Decrypt)
+	xianguanjiaCodeVoidRepo := xianguanjia.NewCodeCardVoidRepository(db)
+	xianguanjiaVoider := xianguanjia.NewRefundCardVoidService(xianguanjiaClientFactory, xianguanjiaCodeVoidRepo, xianyuDeliveryService)
 	xianguanjiaPushHandler := handler.NewXianyuXianguanjiaPushHandler(
-		xianyuDeliveryService,
+		xianguanjiaVoider,
 		xianguanjiaIdemStore,
 		xianguanjiaSig,
 	)

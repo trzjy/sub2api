@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,6 +27,21 @@ const timestampFreshnessWindowSec = 300
 
 // timestampMaxFutureSkewSec 允许的最大时钟前移（防双方时钟轻微不一致误杀合法请求）。
 const timestampMaxFutureSkewSec = 5
+
+// 官方推送状态枚举（reference/open-platform/api-93586387.md:209-279）。
+const (
+	// xianguanjiaRefundStatusSuccess 退款成功（卖家同意或超时自动退款）。
+	xianguanjiaRefundStatusSuccess int32 = 5
+	// xianguanjiaOrderStatusRefunded 订单已退款。
+	xianguanjiaOrderStatusRefunded int32 = 23
+	// xianguanjiaOrderStatusClosed 订单已关闭。
+	//
+	// 【业务裁定待定项（D2 保守默认）】order_status=24 是否触发作废官方未规定、
+	// 用户未裁定。当前保守默认：仅记录日志、落回执（响应 success 停止重试）、
+	// **不作废任何卡**。若后续裁定 24 也作废，在此增加分支调用
+	// RefundCardVoider 即可（作废动作自身幂等，重复推送无害）。
+	xianguanjiaOrderStatusClosed int32 = 24
+)
 
 // XianguanjiaSignatureVerifier 校验闲管家推送请求签名（入站）。
 //
@@ -81,15 +95,19 @@ func (v *XianguanjiaSignatureVerifier) Verify(ctx context.Context, params url.Va
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) == 1
 }
 
-// XianguanjiaRefundVoider 作废流依赖的只读/作废接口。*service.XianyuDeliveryService 已实现这两个方法。
+// XianguanjiaRefundVoider 退款作废执行器。*xianguanjia.RefundCardVoidService 实现。
+// 语义契约：error != nil = 临时性失败（须 fail+不落回执让闲管家重试）；
+// error == nil 时按 xianguanjia.VoidOutcome 分流（VoidNoCard = 查无卡，留痕+success）。
 type XianguanjiaRefundVoider interface {
-	GetClaimAccountID(ctx context.Context, orderNo string) (string, error)
-	ProcessRefundEvent(ctx context.Context, orderNo, accountID, status string) (string, error)
+	VoidRefundedCards(ctx context.Context, orderNo string) (xianguanjia.VoidOutcome, error)
 }
 
-// XianguanjiaIdempotencyStore 推送幂等去重接口。xianguanjia.PushIdempotencyStore 实现它。
+// XianguanjiaIdempotencyStore 推送幂等回执存储。
+// 语义（D2 资金安全核心）：回执只在处理成功后落库（CommitReceipt），
+// 失败不落回执 → 闲管家重推时 HasReceipt=false → 重做作废。
 type XianguanjiaIdempotencyStore interface {
-	Record(ctx context.Context, orderNo, refundStatus, orderStatus, modifyTime string) (bool, error)
+	CommitReceipt(ctx context.Context, orderNo, refundStatus, orderStatus, modifyTime string) (bool, error)
+	HasReceipt(ctx context.Context, orderNo, refundStatus, orderStatus, modifyTime string) (bool, error)
 }
 
 // XianyuXianguanjiaPushHandler 闲管家推送 webhook 处理器。
@@ -111,22 +129,29 @@ func NewXianyuXianguanjiaPushHandler(
 // xianguanjiaPushBody 是闲管家推送的 JSON 结构（官方 OpenAPI schema）。
 // 注意：order_status/refund_status/modify_time 均为 int32（数字，不是字符串）；body 无 cards 字段。
 type xianguanjiaPushBody struct {
-	SellerID    int64  `json:"seller_id"`
-	UserName    string `json:"user_name"`
-	OrderNo     string `json:"order_no"`
-	OrderType   int32  `json:"order_type"`
-	OrderStatus int32  `json:"order_status"`
-	RefundStatus int32 `json:"refund_status"`
-	ModifyTime  int32  `json:"modify_time"`
-	ProductID   int64  `json:"product_id"`
-	ItemID      int64  `json:"item_id"`
+	SellerID     int64  `json:"seller_id"`
+	UserName     string `json:"user_name"`
+	OrderNo      string `json:"order_no"`
+	OrderType    int32  `json:"order_type"`
+	OrderStatus  int32  `json:"order_status"`
+	RefundStatus int32  `json:"refund_status"`
+	ModifyTime   int32  `json:"modify_time"`
+	ProductID    int64  `json:"product_id"`
+	ItemID       int64  `json:"item_id"`
 }
 
-// Push 处理闲管家推送（POST /api/v1/webhook/xianguanjia，真实注册点见 routes/common.go:46）。
+// pushRespond 统一输出官方推送响应体（result 必填：success/fail；msg 必填）。
+// HTTP 始终 200：官方以 result 字段判定成败（api-93586387.md:280-330）。
+func pushRespond(c *gin.Context, result, msg string) {
+	c.JSON(http.StatusOK, gin.H{"result": result, "msg": msg})
+}
+
+// Push 处理闲管家推送（POST /api/v1/webhook/xianguanjia）。
 //
-// 流程：校验签名+timestamp → 解析 body → 幂等去重 → 退款/关闭状态触发作废流。
-// 成功统一返回 JSON {"result":"success","msg":"..."}；验签/timestamp 失败返回 {"result":"fail","msg":"..."}。
-// 重逻辑（作废）不在此同步阻塞——对方超时 3 秒且最多重试 3 次，接收要快。
+// 流程：验签+timestamp → 解析 body → 查幂等回执（有则去重）→ 状态分流处理 →
+// 处理成功才落回执。失败返回 result=fail（不落回执），官方契约「失败最多重试
+// 3 次」驱动重推，重推时因无回执会重新执行作废——外审 F1 资金损失链的闭环修复。
+// 对方超时 3 秒；作废链路含出站调用，超时由 http.Client 控制，推送 goroutine 快速返回。
 func (h *XianyuXianguanjiaPushHandler) Push(c *gin.Context) {
 	ctx := c.Request.Context()
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, xianguanjiaMaxBodyBytes))
@@ -136,58 +161,73 @@ func (h *XianyuXianguanjiaPushHandler) Push(c *gin.Context) {
 	}
 	params := c.Request.URL.Query()
 	if h.verifier == nil || !h.verifier.Verify(ctx, params, body) {
-		// 验签/timestamp 失败：返回官方约定的失败体（result=fail），让闲管家按重试策略处理。
-		c.JSON(http.StatusOK, gin.H{"result": "fail", "msg": "签名失败或时间戳过期"})
+		// 验签/timestamp 失败：官方约定失败体。不落任何回执。
+		pushRespond(c, "fail", "签名失败或时间戳过期")
 		return
 	}
 	var req xianguanjiaPushBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		c.JSON(http.StatusOK, gin.H{"result": "fail", "msg": "invalid body: " + err.Error()})
+		pushRespond(c, "fail", "invalid body: "+err.Error())
 		return
 	}
 	orderNo := strings.TrimSpace(req.OrderNo)
 	if orderNo == "" {
-		c.JSON(http.StatusOK, gin.H{"result": "fail", "msg": "order_no is required"})
+		pushRespond(c, "fail", "order_no is required")
 		return
 	}
+	refundStatus := strconv.Itoa(int(req.RefundStatus))
+	orderStatus := strconv.Itoa(int(req.OrderStatus))
+	modifyTime := strconv.Itoa(int(req.ModifyTime))
 
-	// 幂等去重：首次返回 true 继续；重复返回 false 直接返回 success 让闲管家停止重试。
-	ok, err := h.idem.Record(ctx, orderNo,
-		strconv.Itoa(int(req.RefundStatus)),
-		strconv.Itoa(int(req.OrderStatus)),
-		strconv.Itoa(int(req.ModifyTime)))
+	// 幂等去重（只查不写）：已有回执 = 该组合此前已处理成功，直接 success 停止重试。
+	dup, err := h.idem.HasReceipt(ctx, orderNo, refundStatus, orderStatus, modifyTime)
 	if err != nil {
-		slog.Error("xianguanjia push record receipt failed", "order_no", orderNo, "err", err)
-		c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "recorded"})
-		return
-	}
-	if !ok {
-		c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "duplicate"})
+		// 查重失败：无法判断是否处理过。作废动作自身幂等（expired 条件更新 /
+		// claim refund_handled_at 锚点），重做无害；按「未处理」继续走完流程，
+		// 成功后落回执（CommitReceipt 对已存在回执返回 false，同样 success）。
+		slog.Error("xianguanjia push idempotency check failed, proceeding idempotently",
+			"order_no", orderNo, "err", err)
+	} else if dup {
+		pushRespond(c, "success", "duplicate")
 		return
 	}
 
-	// 状态映射：退款成功(refund_status=5)或订单已退款(order_status=23)触发作废流。
-	// 注：order_status=24(已关闭)是否也作废属业务决策，不在契约内（BLOCKED 顶回项），本批不触发。
-	if req.RefundStatus == 5 || req.OrderStatus == 23 {
-		accountID, err := h.svc.GetClaimAccountID(ctx, orderNo)
-		if err != nil {
-			if errors.Is(err, service.ErrXianyuDeliveryClaimNotFound) || accountID == "" {
-				c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "recorded"})
-				return
-			}
-			// 查领取记录失败：返回 success 停止重试，错误留痕（Worker 可重报）。
-			slog.Error("xianguanjia push get claim account failed", "order_no", orderNo, "err", err)
-			c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "recorded"})
+	// 状态分流。
+	switch {
+	case req.RefundStatus == xianguanjiaRefundStatusSuccess || req.OrderStatus == xianguanjiaOrderStatusRefunded:
+		// 退款成功：按 kam/list 实际所发卡精准作废。
+		outcome, verr := h.svc.VoidRefundedCards(ctx, orderNo)
+		if verr != nil {
+			// 临时性失败（kam/list 出站失败 / DB 失败 / 追回失败）：
+			// fail + 不落回执 → 闲管家重试 → 重推重做。这是 F1 闭环点。
+			slog.Error("xianguanjia refund void failed, will retry via push",
+				"order_no", orderNo, "err", verr)
+			pushRespond(c, "fail", "作废处理失败，请重试")
 			return
 		}
-		// 作废失败同样返回 success 停止重试，错误留痕（Worker 可重报）。
-		if _, err := h.svc.ProcessRefundEvent(ctx, orderNo, accountID, "refunded"); err != nil {
-			slog.Error("xianguanjia push process refund failed", "order_no", orderNo, "err", err)
+		if outcome == xianguanjia.VoidNoCard {
+			// 查无此卡：重试无意义，success 停止重试；VoidRefundedCards 内已留痕（warn）。
+			slog.Warn("xianguanjia refund void: no matching card for refunded order, recorded for audit",
+				"order_no", orderNo, "refund_status", refundStatus, "order_status", orderStatus)
 		}
-		c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "recorded"})
-		return
+	case req.OrderStatus == xianguanjiaOrderStatusClosed:
+		// 订单已关闭（未付款关闭/超时关闭等）：官方未规定是否作废，业务未裁定，
+		// 保守默认仅记录日志、不作废（见 xianguanjiaOrderStatusClosed 常量注释）。
+		slog.Info("xianguanjia push: order closed, no void action (policy: observe only)",
+			"order_no", orderNo)
+	default:
+		// 其余状态（付款/发货中等）：仅落回执记录。
 	}
 
-	// 其余状态：仅落库记录（已在上面完成）。
-	c.JSON(http.StatusOK, gin.H{"result": "success", "msg": "recorded"})
+	// 处理成功，落回执（幂等提交：并发重复时他人已提交，返回 false 同样视为成功）。
+	if _, err := h.idem.CommitReceipt(ctx, orderNo, refundStatus, orderStatus, modifyTime); err != nil {
+		// 回执落库失败：业务动作已成功但去重锚点缺失。若这是重推场景（回执已存在），
+		// CommitReceipt 不会报错；报错说明真失败 → fail 让闲管家重推，重推会重做
+		// 作废（幂等无害），并再次尝试落回执。
+		slog.Error("xianguanjia push commit receipt failed, will retry via push",
+			"order_no", orderNo, "err", err)
+		pushRespond(c, "fail", "回执记录失败，请重试")
+		return
+	}
+	pushRespond(c, "success", "recorded")
 }

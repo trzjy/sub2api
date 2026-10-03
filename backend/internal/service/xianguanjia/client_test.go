@@ -50,7 +50,8 @@ func newFakeClient(t *testing.T) (*Client, *httptest.Server) {
 		}
 		switch r.URL.Path {
 		case pathKamList:
-			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"cards":[{"card_no":"C1","card_pwd":"P1","cost":9.9,"sold_type":"1"}]}}`))
+			// 官方契约：data.list[]，sold_type 为 int32 枚举（api-97142794.md:54-128）。
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"list":[{"card_no":"C1","card_pwd":"P1","cost":9.9,"sold_type":11}]}}`))
 		case pathRefundAgree:
 			_, _ = w.Write([]byte(`{"code":0,"msg":"ok"}`))
 		case pathRefundRefused:
@@ -80,7 +81,7 @@ func TestListOrderCards(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("expected 1 card, got %d", len(cards))
 	}
-	if cards[0].CardNo != "C1" || cards[0].CardPwd != "P1" || cards[0].SoldType != "1" {
+	if cards[0].CardNo != "C1" || cards[0].CardPwd != "P1" || cards[0].SoldType != 11 {
 		t.Fatalf("card fields mismatch: %+v", cards[0])
 	}
 	if cards[0].Cost != 9.9 {

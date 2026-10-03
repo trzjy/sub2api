@@ -62,17 +62,29 @@ func TestExternalCardStoreMemoryRoundTrip(t *testing.T) {
 func TestPushIdempotencyStoreMemory(t *testing.T) {
 	store := NewPushIdempotencyStoreMemory()
 	ctx := context.Background()
-	ok, err := store.Record(ctx, "O1", "5", "23", "t1")
-	if err != nil || !ok {
-		t.Fatalf("first Record expected (true, nil), got (%v, %v)", ok, err)
+	// 初始无回执。
+	exists, err := store.HasReceipt(ctx, "O1", "5", "23", "t1")
+	if err != nil || exists {
+		t.Fatalf("initial HasReceipt expected (false, nil), got (%v, %v)", exists, err)
 	}
-	ok, err = store.Record(ctx, "O1", "5", "23", "t1")
+	// 处理成功后落回执：首次返回 true。
+	ok, err := store.CommitReceipt(ctx, "O1", "5", "23", "t1")
+	if err != nil || !ok {
+		t.Fatalf("first CommitReceipt expected (true, nil), got (%v, %v)", ok, err)
+	}
+	// 回执已存在。
+	exists, err = store.HasReceipt(ctx, "O1", "5", "23", "t1")
+	if err != nil || !exists {
+		t.Fatalf("HasReceipt after commit expected (true, nil), got (%v, %v)", exists, err)
+	}
+	// 并发重复提交：返回 false（他人已提交，按幂等成功消费）。
+	ok, err = store.CommitReceipt(ctx, "O1", "5", "23", "t1")
 	if err != nil || ok {
-		t.Fatalf("second Record expected (false, nil), got (%v, %v)", ok, err)
+		t.Fatalf("second CommitReceipt expected (false, nil), got (%v, %v)", ok, err)
 	}
-	// 不同 modify_time 视为不同事件。
-	ok, err = store.Record(ctx, "O1", "5", "23", "t2")
-	if err != nil || !ok {
-		t.Fatalf("third Record (new modify_time) expected (true, nil), got (%v, %v)", ok, err)
+	// 不同 modify_time 视为不同事件（无回执，需处理）。
+	exists, err = store.HasReceipt(ctx, "O1", "5", "23", "t2")
+	if err != nil || exists {
+		t.Fatalf("HasReceipt (new modify_time) expected (false, nil), got (%v, %v)", exists, err)
 	}
 }
