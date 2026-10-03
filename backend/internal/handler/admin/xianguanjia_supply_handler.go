@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -62,7 +63,7 @@ func (h *XianguanjiaSupplyHandler) Get(c *gin.Context) {
 		return
 	}
 	cfg, err := h.store.Get(c.Request.Context())
-	if err != nil {
+	if err != nil && !errors.Is(err, xianguanjia.ErrSupplyNoConfig) {
 		response.Error(c, http.StatusInternalServerError, "read xianguanjia supply config failed")
 		return
 	}
@@ -129,7 +130,7 @@ func (h *XianguanjiaSupplyHandler) Put(c *gin.Context) {
 	}
 
 	existing, err := h.store.Get(c.Request.Context())
-	if err != nil {
+	if err != nil && !errors.Is(err, xianguanjia.ErrSupplyNoConfig) {
 		response.Error(c, http.StatusInternalServerError, "read xianguanjia supply config failed")
 		return
 	}
