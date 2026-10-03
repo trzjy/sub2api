@@ -1,4 +1,4 @@
--- 268_xianguanjia_supply_orders.sql
+-- 269_xianguanjia_supply_orders.sql
 -- 闲管家「虚拟货源」方向的货源订单表（D6d 卡密订单接口）。
 --
 -- 背景（总单 /root/dispatch-D6.md / 派发单 D6D）：

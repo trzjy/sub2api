@@ -11,7 +11,7 @@ import (
 // manager_order_no 唯一（幂等锚点）、card_nos jsonb、status/refunded_at 齐备，
 // 且 down 脚本成对存在（仓库 .down.sql 惯例）。
 func TestMigration268SupplyOrders(t *testing.T) {
-	content, err := FS.ReadFile("268_xianguanjia_supply_orders.sql")
+	content, err := FS.ReadFile("269_xianguanjia_supply_orders.sql")
 	require.NoError(t, err)
 	sql := string(content)
 
@@ -23,7 +23,7 @@ func TestMigration268SupplyOrders(t *testing.T) {
 	require.Contains(t, sql, "refunded_at      TIMESTAMPTZ NULL")
 	require.Contains(t, sql, "created_at       TIMESTAMPTZ NOT NULL")
 
-	down, err := FS.ReadFile("268_xianguanjia_supply_orders.down.sql")
+	down, err := FS.ReadFile("269_xianguanjia_supply_orders.down.sql")
 	require.NoError(t, err, "268 须成对提供 down 迁移")
 	require.Contains(t, strings.ToUpper(string(down)), "DROP TABLE IF EXISTS XIANGUANJIA_SUPPLY_ORDERS")
 }

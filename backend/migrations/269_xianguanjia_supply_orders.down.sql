@@ -1,4 +1,4 @@
--- 268_xianguanjia_supply_orders.down.sql
+-- 269_xianguanjia_supply_orders.down.sql
 -- 268 号迁移（货源订单表）的 down 脚本：仅做结构回滚。
 --
 -- ⚠️ 结构回滚丢弃 xianguanjia_supply_orders 全部行（含已发卡号映射），
