@@ -421,6 +421,18 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.testCodeBuddyAccountConnection(c, account, credentialAccount, modelID)
 	}
 
+	// muse 平台（OpenCode Go / Meta Muse Spark Contributor 上游）使用 Responses 协议，
+	// 与 openai responses 账号同轨。此前无此分支会落入下方 claude 兜底，对上游发
+	// Anthropic 形态请求 → 403 "Request not allowed"，且失败路径 SetError 会把账号
+	// 误标 status=error/schedulable=false（生产账号已实证）。这里直接路由到
+	// testOpenAIAccountConnection 走 Responses 探活（base_url 取 GetOpenAIBaseURL 的
+	// muse 分支、鉴权取 Bearer credentials.api_key，二者均已支持 muse）。
+	// 不改动 testOpenAIAccountConnection 本体；其内部无 IsOpenAI() 类平台守卫拦截 muse，
+	// 协议判定走 ShouldUseResponsesAPI(Extra)（未探测账号默认 Responses），无需桥接。
+	if credentialAccount.Platform == PlatformMuse {
+		return s.testOpenAIAccountConnection(c, credentialAccount, modelID, prompt, normalizeAccountTestMode(mode))
+	}
+
 	return s.testClaudeAccountConnection(c, account, modelID)
 }
 
