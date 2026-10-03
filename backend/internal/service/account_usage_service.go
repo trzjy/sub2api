@@ -420,8 +420,10 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 		return usage, err
 	}
 
-	// Muse 平台：使用 MuseQuotaFetcher 获取三窗口额度
-	if account.Platform == PlatformMuse {
+	// Muse 平台，或凭证级 opt-in 的 deepseek 等账号（base_url 指向 opencode.ai/zen/go 网关）：
+	// 使用 MuseQuotaFetcher 获取三窗口额度。opt-in 由 credentials.usage_probe=opencode_zen 控制，
+	// 其余账号行为零变化。
+	if account.Platform == PlatformMuse || account.GetCredential("usage_probe") == "opencode_zen" {
 		usage, err := s.getMuseUsage(ctx, account)
 		if err == nil && usage != nil && usage.Error == "" {
 			s.tryClearRecoverableAccountError(ctx, account)

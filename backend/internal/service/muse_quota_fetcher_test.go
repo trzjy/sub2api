@@ -133,6 +133,38 @@ func TestMuseQuotaFetcher_CanFetch(t *testing.T) {
 	}
 }
 
+// TestMuseQuotaFetcher_CanFetch_OptInZenProbe 锚定 ZB-T1b：凭证级 opt-in
+// （usage_probe == "opencode_zen"）放开 CanFetch 守卫，与 PlatformMuse 同条件。
+// 仅覆盖 CanFetch 逻辑本身；既有三锚点（antigravity=false / muse 无 api_key=false /
+// muse 有 api_key=true）在本用例之上零改动、不回归。
+func TestMuseQuotaFetcher_CanFetch_OptInZenProbe(t *testing.T) {
+	f := NewMuseQuotaFetcher(nil, nil)
+
+	// ① deepseek 平台 + usage_probe=opencode_zen + api_key → 放行
+	if !f.CanFetch(&Account{
+		Platform:    PlatformDeepseek,
+		Credentials: map[string]any{"usage_probe": "opencode_zen", "api_key": "x"},
+	}) {
+		t.Fatal("deepseek opt-in (usage_probe=opencode_zen) with api_key must fetch")
+	}
+
+	// ② deepseek 平台 + 未 opt-in（无 usage_probe）→ 不放行
+	if f.CanFetch(&Account{
+		Platform:    PlatformDeepseek,
+		Credentials: map[string]any{"api_key": "x"},
+	}) {
+		t.Fatal("deepseek non opt-in must not fetch")
+	}
+
+	// ③ deepseek 平台 + opt-in 但无 api_key → 不放行（api_key 非空要求保留）
+	if f.CanFetch(&Account{
+		Platform:    PlatformDeepseek,
+		Credentials: map[string]any{"usage_probe": "opencode_zen"},
+	}) {
+		t.Fatal("deepseek opt-in without api_key must not fetch")
+	}
+}
+
 // TestMuseQuotaFetcher_FetchQuota_Success 锚定三窗口映射、暂停与 max(resetsAt) 恢复。
 func TestMuseQuotaFetcher_FetchQuota_Success(t *testing.T) {
 	body := `{"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-10-02T13:00:00Z"},"weekly":{"status":"ok","percent":10,"resetsAt":"2026-10-03T00:00:00Z"},"monthly":{"status":"full","percent":100,"resetsAt":"2026-11-01T00:00:00Z"}}}`

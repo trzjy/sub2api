@@ -77,9 +77,14 @@ func NewMuseQuotaFetcher(proxyRepo ProxyRepository, cfg *config.Config) *MuseQuo
 	return &MuseQuotaFetcher{proxyRepo: proxyRepo, cfg: cfg}
 }
 
-// CanFetch 仅 muse 平台且已配置 api_key 的账号可拉取。
+// CanFetch muse 平台账号，或凭证级 opt-in（usage_probe == "opencode_zen"）且已配置
+// api_key 的账号可拉取。api_key 非空要求对所有放行路径一致保留。
+//
+// 凭证级 opt-in：deepseek 等平台账号带 usage_probe=opencode_zen 时，复用 muse 三窗口
+// 拉取链路（对标 opencode.ai/zen/go 网关），而非仅限 PlatformMuse。
 func (f *MuseQuotaFetcher) CanFetch(account *Account) bool {
-	if account == nil || account.Platform != PlatformMuse {
+	if account == nil ||
+		(account.Platform != PlatformMuse && account.GetCredential("usage_probe") != "opencode_zen") {
 		return false
 	}
 	return account.GetCredential("api_key") != ""
