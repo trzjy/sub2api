@@ -160,6 +160,28 @@ func RegisterAdminRoutes(
 
 		// 闲鱼发货控制面
 		registerXianyuAdminRoutes(admin, h)
+
+		// D3: 闲管家（开放平台 ERP）admin 凭证配置入口
+		registerXianguanjiaConfigRoutes(admin, h)
+	}
+}
+
+// registerXianguanjiaConfigRoutes 注册闲管家 admin 配置端点（D3）：
+//
+//	GET  /admin/xianguanjia/config        脱敏读取（secret 只回末 4 位）
+//	PUT  /admin/xianguanjia/config        保存（app_secret 加密落库，status 置 active）
+//	POST /admin/xianguanjia/health-check  官方签名探活，更新 health_status/last_checked_at
+//
+// handler 未接线（如部分部署）时整组不注册，避免空指针。
+func registerXianguanjiaConfigRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h == nil || h.Admin == nil || h.Admin.XianguanjiaConfig == nil {
+		return
+	}
+	xgj := admin.Group("/xianguanjia")
+	{
+		xgj.GET("/config", h.Admin.XianguanjiaConfig.Get)
+		xgj.PUT("/config", h.Admin.XianguanjiaConfig.Put)
+		xgj.POST("/health-check", h.Admin.XianguanjiaConfig.HealthCheck)
 	}
 }
 
