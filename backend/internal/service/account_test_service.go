@@ -1541,6 +1541,12 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if !isOAuth {
 		applyOpenAICodexProbeHeaders(req.Header)
 	}
+	// muse 平台测试探活与正式转发链同口径（openai_muse_session.go
+	// applyMuseSessionHeader 语义）；测试路径无客户端会话头，直接生成 UUID。
+	if credentialAccount.Platform == PlatformMuse {
+		req.Header.Set("x-opencode-session", uuid.NewString())
+		req.Header.Set("User-Agent", museRelayUserAgent)
+	}
 	if credentialAccount.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount)
 		if authErr != nil {
@@ -2781,6 +2787,13 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+authToken)
+
+	// muse 平台走 chat-completions 直转路径（已探测且确认不支持 Responses）时，
+	// 与 Responses 路径、正式转发链同口径注入会话头（applyMuseSessionHeader 语义）。
+	if account.Platform == PlatformMuse {
+		req.Header.Set("x-opencode-session", uuid.NewString())
+		req.Header.Set("User-Agent", museRelayUserAgent)
+	}
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)

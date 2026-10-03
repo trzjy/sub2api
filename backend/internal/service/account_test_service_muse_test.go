@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,8 +82,15 @@ func TestAccountTestService_MuseRoutesToResponsesProbe(t *testing.T) {
 
 	// 鉴权：Bearer credentials.api_key（muse 走 GetOpenAIProtocolAPIKey 直读 api_key）。
 	require.Equal(t, "Bearer muse-sk", req.Header.Get("Authorization"))
-	// 协议标头与 OpenAI Responses 探活一致。
-	requireOpenAICodexProbeHeaders(t, req.Header)
+	// 协议标头与 OpenAI Responses 探活一致：codex 探针头其余字段保留（OpenAI-Beta /
+	// Originator / Version / X-Codex-Window-ID），但 UA 被 muse 注入覆写为网关中继身份
+	// （ZB-T2F：x-opencode-session + museRelayUserAgent）。
+	require.Equal(t, "responses=experimental", req.Header.Get("OpenAI-Beta"))
+	require.NotEmpty(t, req.Header.Get("Originator"))
+	require.NotEmpty(t, req.Header.Get("Version"))
+	require.NotEmpty(t, req.Header.Get("X-Codex-Window-ID"))
+	require.Equal(t, museRelayUserAgent, req.Header.Get("User-Agent"))
+	require.NotEmpty(t, req.Header.Get("x-opencode-session"))
 
 	// 显式锚定：未落入 claude 兜底 —— claude 兜底用 x-api-key 而非 Bearer。
 	require.Empty(t, req.Header.Get("x-api-key"))
@@ -168,4 +176,73 @@ func TestAccountTestService_MuseFailureStillSetsError(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, account.ID, repo.setErrorID)
 	require.Contains(t, repo.setErrorMsg, "Authentication failed (401)")
+}
+
+// ④ ZB-T2F 核心验收：muse apikey 账号（base_url 指向 httptest 上游）走 Responses 探活时，
+// 上游实际收到 x-opencode-session（UUID 格式）与 User-Agent: sub2api-relay/1.0 —— 与正式
+// 转发链 applyMuseSessionHeader 同口径，消灭生产实测的 400 MissingSessionID。
+func TestAccountTestService_MuseResponsesProbeInjectsSessionHeader(t *testing.T) {
+	account := &Account{
+		ID:          168,
+		Platform:    PlatformMuse,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "muse-sk",
+			"base_url": "https://muse.example.com/v1",
+		},
+	}
+	svc, _, upstream, ctx, _ := newMuseTestSetup(t, account)
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = completedResponsesBody()
+	upstream.responses = []*http.Response{resp}
+
+	err := svc.TestAccountConnection(ctx, account.ID, "muse-model", "", "")
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+	req := upstream.requests[0]
+
+	// 会话头为合法 UUID（测试路径无客户端会话头，直接生成）。
+	sessionID := req.Header.Get("x-opencode-session")
+	require.NotEmpty(t, sessionID)
+	_, err = uuid.Parse(sessionID)
+	require.NoError(t, err, "x-opencode-session 必须是 UUID 格式，实际: %q", sessionID)
+
+	// 网关中继身份 UA 与正式转发链一致。
+	require.Equal(t, museRelayUserAgent, req.Header.Get("User-Agent"))
+}
+
+// ④（续，零改动保证）非 muse 平台（deepseek apikey，已配置走 Responses 协议）走同一
+// testOpenAIAccountConnection 的 Responses 探活路径，上游不得收到 muse 的会话头与中继 UA。
+// 注入被 PlatformMuse 守卫严格隔离，对其他平台零影响。
+func TestAccountTestService_NonMuseResponsesProbeOmitsSessionHeader(t *testing.T) {
+	account := &Account{
+		ID:          169,
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":      "ds-sk",
+			"base_url":     "https://deepseek.example.com/v1",
+			"api_protocol": "responses",
+		},
+	}
+	svc, _, upstream, ctx, _ := newMuseTestSetup(t, account)
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = completedResponsesBody()
+	upstream.responses = []*http.Response{resp}
+
+	err := svc.TestAccountConnection(ctx, account.ID, "deepseek-chat", "", "")
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+	req := upstream.requests[0]
+
+	// 非 muse 平台不得携带 muse 会话头。
+	require.Empty(t, req.Header.Get("x-opencode-session"))
+	// 非 muse 平台的 UA 不得是 muse 中继身份（此处为 codex 探针 UA，与 muse UA 不同）。
+	require.NotEqual(t, museRelayUserAgent, req.Header.Get("User-Agent"))
 }
