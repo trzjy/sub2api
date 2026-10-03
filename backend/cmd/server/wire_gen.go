@@ -338,6 +338,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	visionDetectService := service.ProvideVisionDetectService(accountRepository, accountModelCapabilityService, usageLogRepository)
 	visionCapabilityHandler := admin.NewVisionCapabilityHandler(visionDetectService, accountModelCapabilityService)
 	xgjAdminCfgStore := xianguanjia.ProvideConfigStore(db) // D3: 闲管家 admin 配置存储（252 表，含写侧）
+	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db) // D1: 推送验签/出站 client 读侧（同一 252 表）
 	// D6e: 货源模式凭证存储——D6a 未落地，暂用内存占位；集成时替换为 D6a 的 DB 实现。
 	xgjSupplyStore := xianguanjia.NewSupplyConfigStore(db, secretEncryptor) // D6i: D6a DB 实现
 	// D4i: 闲管家 admin 卡种/推仓 handler 在 handler.ProvideAdminHandlers 内构造
@@ -376,7 +377,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageCleanupService := service.ProvideBatchImageCleanupService(batchImageRepository, accountRepository, configConfig)
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	xianyuDeliveryHandler := handler.NewXianyuDeliveryHandler(xianyuDeliveryService, configConfig)
-	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db)
 	xianguanjiaSig := handler.NewXianguanjiaSignatureVerifier(xianguanjiaCfgStore, secretEncryptor)
 	xianguanjiaIdemStore := xianguanjia.NewPushIdempotencyStore(db)
 	// D2 资金闭环：kam/list 出站工厂（动态读 252 配置+解密）+ 按 card_no 精准作废仓库
