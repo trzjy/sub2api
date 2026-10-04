@@ -215,15 +215,13 @@ func TestSupplySignMiddlewareBadSign401(t *testing.T) {
 	assertSupplyEnvelope(t, w, SupplyCodeSignError, "签名错误")
 }
 
-// TestSupplySignMiddlewareTamperedQuery401 covers app_id/mch_id/body 篡改均 401。
+// TestSupplySignMiddlewareTamperedQuery401 covers mch_id/body 篡改均 401。
+// 注意：自 D6E-02R5 起，验签 app_id 位取库内 cfg.SupplyAppID，query 不再提供
+// app_id，故「篡改 query app_id」已无意义（验签不读 query app_id），该子例移除。
 func TestSupplySignMiddlewareTamperedQuery401(t *testing.T) {
 	body := []byte(supplyTestVectorBody)
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	r := newSignRouter(&fakeSupplyConfigReader{cfg: testSupplyConfig()})
-
-	badAppID := buildSignedQuery(t, body, ts)
-	badAppID.Set("app_id", "1")
-	assertSupplyEnvelope(t, doSigned(t, r, body, badAppID), SupplyCodeSignError, "签名错误")
 
 	badMchID := buildSignedQuery(t, body, ts)
 	badMchID.Set("mch_id", "1")
@@ -231,6 +229,53 @@ func TestSupplySignMiddlewareTamperedQuery401(t *testing.T) {
 
 	// body 与签名所用 body 不一致 → 401。
 	assertSupplyEnvelope(t, doSigned(t, r, []byte(`{"x":1}`), buildSignedQuery(t, body, ts)), SupplyCodeSignError, "签名错误")
+}
+
+// buildSignedQueryNoAppID 构造合法 query，仅带 mch_id/timestamp/sign（不含 app_id），
+// 复现 2026-10-04 生产取证：闲管家 go-resty 客户端实际不在 query 传 app_id。
+func buildSignedQueryNoAppID(t *testing.T, body []byte, ts string) url.Values {
+	t.Helper()
+	bodyMd5 := BodyMd5(body)
+	sign := SupplySign(supplyTestAppID, supplyTestAppSecret, bodyMd5, ts, supplyTestMchID, supplyTestMchSecret)
+	q := url.Values{}
+	q.Set("timestamp", ts)
+	q.Set("mch_id", supplyTestMchID)
+	q.Set("sign", sign)
+	return q
+}
+
+// TestSupplySignMiddlewareQueryNoAppIDPasses 复现生产取证：query 不含 app_id 也验签通过。
+// cfg.SupplyAppID 与签名所用 app_id 一致时，验签 app_id 位取库内值，放行。
+func TestSupplySignMiddlewareQueryNoAppIDPasses(t *testing.T) {
+	body := []byte(supplyTestVectorBody)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	r := newSignRouter(&fakeSupplyConfigReader{cfg: testSupplyConfig()})
+	w := doSigned(t, r, body, buildSignedQueryNoAppID(t, body, ts))
+	if w.Code != http.StatusOK {
+		t.Fatalf("query without app_id should pass, status=%d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Code != 0 {
+		t.Fatalf("query without app_id expected code=0, got %d body=%s", got.Code, w.Body.String())
+	}
+}
+
+// TestSupplySignMiddlewareAppIDMismatch401 cfg.SupplyAppID 与签名所用 app_id 不一致
+// → 401 签名错误（fail-closed，验证取参来源由 query 改为库内后不放宽）。
+func TestSupplySignMiddlewareAppIDMismatch401(t *testing.T) {
+	body := []byte(supplyTestVectorBody)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	cfg := testSupplyConfig()
+	cfg.SupplyAppID = "wrong-app-id" // 与签名所用 supplyTestAppID 不一致
+	r := newSignRouter(&fakeSupplyConfigReader{cfg: cfg})
+	// query 中的 app_id 被完全忽略（带与不带、值是否一致均不影响），验签 app_id 位一律取 cfg.SupplyAppID。
+	w := doSigned(t, r, body, buildSignedQuery(t, body, ts))
+	assertSupplyEnvelope(t, w, SupplyCodeSignError, "签名错误")
 }
 
 // TestSupplySignMiddlewareExpiredTimestamp408 超窗（过去 301s）→ code=408。

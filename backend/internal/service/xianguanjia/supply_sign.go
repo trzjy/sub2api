@@ -18,7 +18,8 @@ import (
 // D6b: 货源提卡方向（闲管家 → 我方）被调接口的六段签名验签中间件。
 //
 // 与 ERP 出站/推送方向（sign.go 的四段签名、handler.XianguanjiaSignatureVerifier）
-// 相反：货源方向我方是被调方，闲管家在 query 带 app_id/timestamp/mch_id/sign，
+// 相反：货源方向我方是被调方，闲管家在 query 带 mch_id/timestamp/sign（**三参**；
+// app_id 不随 query 传输，只作为签名输入六段之一），
 // body 为压缩 JSON，我方用**六段**公式重算并比对后放行。
 //
 // 官方契约（总单 /root/dispatch-D6.md「官方契约要点」；doc-4985015.md 已坐实）：
@@ -26,7 +27,10 @@ import (
 //	bodyMd5 = md5(raw body)          // 无 body 用 md5("{}")
 //	sign    = md5("{app_id},{app_secret},{bodyMd5},{timestamp},{mch_id},{mch_secret}")
 //
-// query 四参：app_id（闲管家下发 AppKey）/ timestamp / mch_id（我方货源商户号）/ sign。
+// query 三参（mch_id/timestamp/sign；app_id 不随 query 传输，只参与签名——
+// 2026-10-04 生产 nginx 取证，闲管家 go-resty 客户端实测，与官方文档 query 四参
+// 表述不符，以行为为准）：app_id 位验签时取库内已配置的 cfg.SupplyAppID
+// （双方共知的管家应用 ID，与签名输入同源），库内 app_id 配错即 401 fail-closed。
 // 两个密钥：app_secret（管家下发）与 mch_secret（我方自造），由 SupplyConfigReader
 // 提供（D6a 的 SupplyConfigStore 交付实现）。
 //
@@ -115,7 +119,8 @@ func supplyRespond(c *gin.Context, code int, msg string) {
 //
 // 流程（顺序即 fail-closed 边界）：
 //  1. 读 raw body（限长）后**还原** c.Request.Body，供后续 handler 正常读取；
-//  2. 提取 query app_id/timestamp/mch_id/sign，校验 timestamp 在 300s 窗口内，
+//  2. 提取 query mch_id/timestamp/sign（app_id 不随 query 传输，验签取自库内
+//     cfg.SupplyAppID），校验 timestamp 在 300s 窗口内，
 //     超窗 → {code:408,msg:"时间戳已超过有效期"} 中止；
 //  3. 读货源配置，无配置/读取失败 → {code:1,msg:"货源未配置"} 中止；
 //  4. 六段重算比对，不符 → {code:401,msg:"签名错误"} 中止；
@@ -158,10 +163,12 @@ func SupplySignMiddleware(cfgReader SupplyConfigReader) gin.HandlerFunc {
 			return
 		}
 
-		// 4. 六段重算比对（query app_id 与 mch_id 参与重算，任一不符都会失配）。
+		// 4. 六段重算比对（app_id 位取库内 cfg.SupplyAppID，与签名输入同源；
+		//    query 中的 app_id 被完全忽略、不参与验签。库内 SupplyAppID 与
+		//    签名所用 app_id 不一致 → 恒失配 401 fail-closed。mch_id 仍来自 query）。
 		if err := VerifySupplySign(
 			rawBody,
-			c.Query("app_id"), tsStr, c.Query("mch_id"), c.Query("sign"),
+			cfg.SupplyAppID, tsStr, c.Query("mch_id"), c.Query("sign"),
 			cfg.SupplyAppSecret, cfg.MchSecret,
 		); err != nil {
 			supplyRespond(c, SupplyCodeSignError, "签名错误")
