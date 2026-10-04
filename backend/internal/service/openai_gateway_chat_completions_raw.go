@@ -368,6 +368,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
 		line = stripEmptyChatToolCallIdentityFromSSELine(line)
 
+		// 掩码账号身份回写：observer 已看到原始上游回显（计费/观察链不变），
+		// 此处只把客户端可见行的回显模型改写回客户端请求名。
+		if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
+			line = s.replaceModelInSSELine(line, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+		}
+
 		writeLine(line)
 		if line == "" {
 			if !clientDisconnected && clientOutputStarted {
@@ -476,6 +482,16 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	return resultWithUsage(), nil
 }
 
+// rawChatCompletionsMaskGate 判定是否需要对 raw 路径写出点的响应体做掩码账号
+// 身份回写：把上游回显模型改写回客户端请求名。
+//
+// 仅当账号开启 mask_upstream_identity、且存在可区分的上下游模型名（非空且不同）
+// 时触发。闸门刻意保持最小：观察/计费链（observer.ObserveOpenAI）看到的仍是
+// 原始上游回显，此处只改客户端可见的写出行；非掩码账号字节行为零变化。
+func rawChatCompletionsMaskGate(account *Account, originalModel, upstreamModel string) bool {
+	return IsIdentityMaskedAccount(account) && originalModel != "" && upstreamModel != "" && originalModel != upstreamModel
+}
+
 // ensureOpenAIChatStreamUsage 确保 raw Chat Completions 流式请求会让上游返回 usage。
 // usage 也会继续向下游透传，支持级联代理和下游计费系统。
 func ensureOpenAIChatStreamUsage(body []byte) ([]byte, error) {
@@ -554,6 +570,12 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	}
 	respBody = applyOllamaCloudRawChatCompletionsResponse(account, respBody)
 
+	// 掩码账号身份回写：observer 已看到原始上游回显（计费/观察链不变），
+	// 此处只把客户端可见响应体的回显模型改写回客户端请求名。
+	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
+		respBody = s.replaceModelInResponseBody(respBody, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+	}
+
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
@@ -622,6 +644,12 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 		observer = beginUpstreamResponseModelObservation(c)
 	}
 	observer.ObserveOpenAI(ccBytes, strings.TrimSpace(gjson.GetBytes(ccBytes, "type").String()))
+
+	// 掩码账号身份回写：observer 已看到原始聚合回显（计费/观察链不变），
+	// 此处只把客户端可见聚合体的回显模型改写回客户端请求名。
+	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
+		ccBytes = s.replaceModelInResponseBody(ccBytes, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
