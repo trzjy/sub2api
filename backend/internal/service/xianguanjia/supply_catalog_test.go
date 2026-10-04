@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,9 +28,9 @@ func testSupplyCfg() *SupplyConfig {
 
 func testGoods() []SupplyGoods {
 	return []SupplyGoods{
-		{GoodsNo: "11", GoodsName: "月卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 2990, Stock: 5, Status: SupplyGoodsStatusOnSale, UpdateTime: 1700000000},
-		{GoodsNo: "12", GoodsName: "周卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 990, Stock: 0, Status: SupplyGoodsStatusOffSale, UpdateTime: 1700000001},
-		{GoodsNo: "13", GoodsName: "年卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 19900, Stock: 3, Status: SupplyGoodsStatusOnSale, UpdateTime: 1700000002},
+		{GoodsNo: "11", GoodsName: "月卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 2990, Stock: 99999, Status: SupplyGoodsStatusOnSale, UpdateTime: 1700000000},
+		{GoodsNo: "12", GoodsName: "周卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 990, Stock: 99999, Status: SupplyGoodsStatusOffSale, UpdateTime: 1700000001},
+		{GoodsNo: "13", GoodsName: "年卡套餐", GoodsType: SupplyGoodsTypeKami, Price: 19900, Stock: 99999, Status: SupplyGoodsStatusOnSale, UpdateTime: 1700000002},
 	}
 }
 
@@ -296,7 +298,7 @@ func TestSupplyGoodsSourceDBGetGoodsFound(t *testing.T) {
 	}
 	defer db.Close()
 	rows := sqlmock.NewRows([]string{"id", "name", "status", "price", "stock", "updated_at"}).
-		AddRow(int64(11), "月卡套餐", "active", 29.9, 5, time.Unix(1700000000, 0).UTC())
+		AddRow(int64(11), "月卡套餐", "active", 29.9, 99999, time.Unix(1700000000, 0).UTC())
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT`) + `\s+g\.id`).
 		WithArgs(int64(11)).
 		WillReturnRows(rows)
@@ -315,8 +317,8 @@ func TestSupplyGoodsSourceDBGetGoodsFound(t *testing.T) {
 	if g.GoodsType != SupplyGoodsTypeKami {
 		t.Fatalf("GoodsType = %d, want %d", g.GoodsType, SupplyGoodsTypeKami)
 	}
-	if g.Stock != 5 {
-		t.Fatalf("Stock = %d, want 5", g.Stock)
+	if g.Stock != 99999 {
+		t.Fatalf("Stock = %d, want 99999 (无限生成固定库存)", g.Stock)
 	}
 	// DB 元值 29.9 → 分 2990。
 	if g.Price != 2990 {
@@ -380,7 +382,7 @@ func TestSupplyGoodsSourceDBListGoods(t *testing.T) {
 	mock.ExpectQuery(`FROM "groups" g WHERE`).
 		WithArgs("%月%", 2, 0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "price", "stock", "updated_at"}).
-			AddRow(int64(11), "月卡套餐", "active", 29.9, 5, time.Unix(1700000000, 0).UTC()))
+			AddRow(int64(11), "月卡套餐", "active", 29.9, 99999, time.Unix(1700000000, 0).UTC()))
 
 	src := NewSupplyGoodsSource(db)
 	list, total, err := src.ListGoods(context.Background(), "月", 0, 2)
@@ -389,6 +391,9 @@ func TestSupplyGoodsSourceDBListGoods(t *testing.T) {
 	}
 	if total != 1 || len(list) != 1 || list[0].GoodsNo != "11" {
 		t.Fatalf("unexpected list: total=%d list=%+v", total, list)
+	}
+	if list[0].Stock != 99999 {
+		t.Fatalf("Stock = %d, want 99999", list[0].Stock)
 	}
 	// 验证元→分换算。
 	if list[0].Price != 2990 {
@@ -413,7 +418,85 @@ func TestSupplyGoodsSourceDBListGoodsNumericKeyword(t *testing.T) {
 	mock.ExpectQuery(`FROM "groups" g WHERE`).
 		WithArgs("%11%", "11", 10, 0).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "price", "stock", "updated_at"}).
-			AddRow(int64(11), "月卡套餐", "active", 29.9, 5, time.Unix(1700000000, 0).UTC()))
+			AddRow(int64(11), "月卡套餐", "active", 29.9, 99999, time.Unix(1700000000, 0).UTC()))
+
+	src := NewSupplyGoodsSource(db)
+	list, total, err := src.ListGoods(context.Background(), "11", 0, 10)
+	if err != nil {
+		t.Fatalf("ListGoods err = %v", err)
+	}
+	if total != 1 || len(list) != 1 || list[0].GoodsNo != "11" {
+		t.Fatalf("unexpected list: total=%d list=%+v", total, list)
+	}
+	if list[0].Stock != 99999 {
+		t.Fatalf("Stock = %d, want 99999", list[0].Stock)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// noRedeemCodesMatcher 断言商品目录实际发出的 SQL 不含 redeem_codes 引用。
+// 覆盖两点：stock 列已改为常量 99999（不再 COUNT redeem_codes）；
+// 成员过滤仅保留 EXISTS subscription_plans（不再 OR EXISTS redeem_codes）。
+type noRedeemCodesMatcher struct{}
+
+func (noRedeemCodesMatcher) Match(expected, actual string) error {
+	if strings.Contains(strings.ToLower(actual), "redeem_codes") {
+		return fmt.Errorf("商品目录 SQL 不应引用 redeem_codes，实际: %s", actual)
+	}
+	return nil
+}
+
+// TestSupplyGoodsSourceDBListGoodsNoRedeemCodes 验证：关键字无关查询下，目录 SQL 仅以
+// 套餐 EXISTS 过滤，且 stock 为常量，绝不触及 redeem_codes（纯卡密无套餐分组不出列表）。
+func TestSupplyGoodsSourceDBListGoodsNoRedeemCodes(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(noRedeemCodesMatcher{}))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	// 关键字无关：仅套餐分组进入目录（含 0 张卡密的分组也应正常出现）。
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM \(`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`FROM "groups" g WHERE`).
+		WithArgs(2, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "price", "stock", "updated_at"}).
+			AddRow(int64(11), "月卡套餐", "active", 29.9, 99999, time.Unix(1700000000, 0).UTC()))
+
+	src := NewSupplyGoodsSource(db)
+	list, total, err := src.ListGoods(context.Background(), "", 0, 2)
+	if err != nil {
+		t.Fatalf("ListGoods err = %v", err)
+	}
+	if total != 1 || len(list) != 1 || list[0].GoodsNo != "11" {
+		t.Fatalf("unexpected list: total=%d list=%+v", total, list)
+	}
+	if list[0].Stock != 99999 {
+		t.Fatalf("Stock = %d, want 99999", list[0].Stock)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestSupplyGoodsSourceDBListGoodsKeywordNoRedeemCodes 验证：商品编码精准命中查询下，
+// SQL 同样不含 redeem_codes（关键字语义不变，仅叠加 OR g.id 精准条件）。
+func TestSupplyGoodsSourceDBListGoodsKeywordNoRedeemCodes(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(noRedeemCodesMatcher{}))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM \(`).
+		WithArgs("%11%", "11").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`FROM "groups" g WHERE`).
+		WithArgs("%11%", "11", 10, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "status", "price", "stock", "updated_at"}).
+			AddRow(int64(11), "月卡套餐", "active", 29.9, 99999, time.Unix(1700000000, 0).UTC()))
 
 	src := NewSupplyGoodsSource(db)
 	list, total, err := src.ListGoods(context.Background(), "11", 0, 10)

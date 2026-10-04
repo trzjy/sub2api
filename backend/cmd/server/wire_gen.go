@@ -343,7 +343,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	visionDetectService := service.ProvideVisionDetectService(accountRepository, accountModelCapabilityService, usageLogRepository)
 	visionCapabilityHandler := admin.NewVisionCapabilityHandler(visionDetectService, accountModelCapabilityService)
 	xgjAdminCfgStore := xianguanjia.ProvideConfigStore(db) // D3: 闲管家 admin 配置存储（252 表，含写侧）
-	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db) // D1: 推送验签/出站 client 读侧（同一 252 表）
+	xianguanjiaCfgStore := xianguanjia.NewConfigStore(db)  // D1: 推送验签/出站 client 读侧（同一 252 表）
 	// D6e: 货源模式凭证存储——D6a 未落地，暂用内存占位；集成时替换为 D6a 的 DB 实现。
 	xgjSupplyStore := xianguanjia.NewSupplyConfigStore(db, secretEncryptor) // D6i: D6a DB 实现
 	// D4i: 闲管家 admin 卡种/推仓 handler 在 handler.ProvideAdminHandlers 内构造
@@ -397,10 +397,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	)
 	// D6e: 货源模式公开接口 handler（7 端点；D6c/D6d 落地后替换内部业务逻辑）。
 	xianguanjiaSupplyCatalogSvc := xianguanjia.NewSupplyCatalogService(xgjSupplyStore, xianguanjia.NewSupplyGoodsSource(db)) // D6i: D6c 目录服务
-	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc) // D6i: D6c 目录 handler
+	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc)                      // D6i: D6c 目录 handler
 	xgjSupplyHandler := handler.NewXgjSupplyHandler(xgjSupplyStore, "")
 	xianguanjiaSupplyOrderSvc := xianguanjia.NewSupplyOrderService(
-		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil) // D6d: 卡密订单（02b 后 goods 为金额来源）
+		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardGenerator(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil) // D6F-A: 现场生成卡密（无限库存）
 	xianguanjiaSupplyOrderHandler := handler.NewXianguanjiaSupplyOrderHandler(xianguanjiaSupplyOrderSvc)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)

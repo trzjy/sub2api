@@ -3,7 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -362,6 +364,54 @@ func psComputeValidityDays(days int, unit string) int {
 	default:
 		return days
 	}
+}
+
+// PSComputeValidityDays 是 psComputeValidityDays 的导出包装，供货源下单现场生成兑换码时
+// 复用同一套「周×7 / 月×30 / 原值」换算逻辑，避免第二份换算实现（D6F-A）。
+func PSComputeValidityDays(days int, unit string) int {
+	return psComputeValidityDays(days, unit)
+}
+
+// queryRowContext 是「能执行参数化单行查询」的最小接口。*sql.DB 与 *sql.Tx 均天然
+// 满足（都拥有 QueryRowContext(context.Context, string, ...any) *sql.Row），借此把
+// 套餐有效期查询体抽为单一实现，使 DB 版与 Tx 版共用同一段 SQL/换算逻辑（D6F-R 修复#1）。
+type queryRowContext interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// psResolveGroupValidityDays 是套餐有效期解析的共享实现。经 q（*sql.DB 或 *sql.Tx）查询
+// 该分组下排序最靠前的套餐（subscription_plans WHERE group_id=? ORDER BY sort_order, id
+// LIMIT 1）的 validity_days/validity_unit，再经 PSComputeValidityDays 换算。无套餐分组 →
+// 内部错误（fail-closed，货源下单须绑定真实套餐）。此为唯一 SQL/换算来源，禁止第二份。
+func psResolveGroupValidityDays(ctx context.Context, q queryRowContext, groupID int64) (int, error) {
+	var days int
+	var unit string
+	err := q.QueryRowContext(ctx, `
+		SELECT validity_days, validity_unit
+		FROM subscription_plans
+		WHERE group_id = $1
+		ORDER BY sort_order, id
+		LIMIT 1`, groupID).Scan(&days, &unit)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("xianguanjia supply: no subscription plan for group %d", groupID)
+		}
+		return 0, fmt.Errorf("xianguanjia supply query subscription plan for group %d: %w", groupID, err)
+	}
+	return PSComputeValidityDays(days, unit), nil
+}
+
+// PSResolveGroupValidityDays 返回套餐分组兑换码的有效天数（DB 版入口）。逻辑完全委托
+// psResolveGroupValidityDays 共享体；签名与既有调用方（非事务场景）保持不变。
+func PSResolveGroupValidityDays(ctx context.Context, db *sql.DB, groupID int64) (int, error) {
+	return psResolveGroupValidityDays(ctx, db, groupID)
+}
+
+// PSResolveGroupValidityDaysTx 是 PSResolveGroupValidityDays 的事务版入口：同一共享体，
+// 但查询经 *sql.Tx 执行，使套餐读取与 redeem_codes 插入共享同一事务快照（D6F-R 修复#1）。
+// *sql.Tx 满足 queryRowContext 接口，无需第二份 SQL/换算逻辑。
+func PSResolveGroupValidityDaysTx(ctx context.Context, tx *sql.Tx, groupID int64) (int, error) {
+	return psResolveGroupValidityDays(ctx, tx, groupID)
 }
 
 func psStartOfDayUTC(t time.Time) time.Time {

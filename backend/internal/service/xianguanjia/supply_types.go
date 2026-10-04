@@ -21,17 +21,16 @@ import (
 // 出处：总单「错误码」段（doc-7646489）。签名类错误（401/408）由 D6b 验签中间件负责；
 // 本文件定义业务类错误码，D6c/D6d 共用。信封 code==0 表示成功，非 0 时 msg 承载原因。
 const (
-	SupplyCodeOK                = 0    // 成功
-	SupplyCodeNoConfig          = 1    // 货源未配置（我方内部 fail-closed，非官方表项）
-	SupplyCodeSignError         = 401  // 签名错误（D6b 中间件）
-	SupplyCodeTimestampExpired  = 408  // 时间戳过期（D6b 中间件）
-	SupplyCodeMerchantNotFound  = 1000 // 商户不存在
-	SupplyCodeGoodsNotFound     = 1100 // 商品不存在
-	SupplyCodeGoodsUnavailable  = 1101 // 商品不可用
-	SupplyCodeStockInsufficient = 1102 // 库存不足
-	SupplyCodeOrderNotFound     = 1200 // 订单不存在
-	SupplyCodeOrderDuplicated   = 1203 // 订单号已存在
-	SupplyCodeOrderTimeout      = 1209 // 下单超时
+	SupplyCodeOK               = 0    // 成功
+	SupplyCodeNoConfig         = 1    // 货源未配置（我方内部 fail-closed，非官方表项）
+	SupplyCodeSignError        = 401  // 签名错误（D6b 中间件）
+	SupplyCodeTimestampExpired = 408  // 时间戳过期（D6b 中间件）
+	SupplyCodeMerchantNotFound = 1000 // 商户不存在
+	SupplyCodeGoodsNotFound    = 1100 // 商品不存在
+	SupplyCodeGoodsUnavailable = 1101 // 商品不可用
+	SupplyCodeOrderNotFound    = 1200 // 订单不存在
+	SupplyCodeOrderDuplicated  = 1203 // 订单号已存在
+	SupplyCodeOrderTimeout     = 1209 // 下单超时
 )
 
 // SupplyAPIError 是货源被调接口的业务错误：Code 为官方错误码，Msg 为对外提示。

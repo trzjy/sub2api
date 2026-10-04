@@ -13,21 +13,21 @@ import (
 
 // 商品目录被调接口（D6c）：查询平台信息 / 查询商户信息 / 查询商品列表 / 查询商品详情。
 //
-// 数据源映射（本仓库无独立「商品」表，商品由卡密池分组聚合，详见证据 d6c.md）：
+// 数据源映射（本仓库无独立「商品」表，商品由分组聚合，详见证据 d6c.md）：
 //
-//	groups.id ──(1:N)──> redeem_codes.group_id       （订阅卡密库存）
 //	groups.id ──(0/1)──> subscription_plans.group_id （分组售价，price_cny）
 //
 //   - goods_no     = groups.id 的十进制字符串
 //   - goods_type   = 商品类型，我方货源全为卡密，恒为 2
 //   - goods_name   = groups.name
 //   - price        = 该分组在售套餐价 subscription_plans.price_cny 换算为「分」（无则 0）
-//   - stock        = 组内 redeem_codes(type='subscription' AND status='unused') 计数
+//   - stock        = 无限生成库存固定 99999（用户裁定无限库存；官方 stock 为 int32，
+//     99999 为官方文档示例值，库存告警按裁定作废）
 //   - status       = 1 在架（分组 active 且未软删）/ 2 下架（官方枚举）
 //   - update_time  = groups.updated_at 的 Unix 秒
 //
-// 池（xianyu_item_pools）以 (group_id, validity_days) 归属卡密；同一分组可有多个有效期
-// 池，本单元按「分组」聚合为一个商品（与总单 D6c 描述一致）。
+// 本单元按「分组」聚合为一个商品（与总单 D6c 描述一致）。成员过滤仅纳入有在售订阅套餐
+// 的分组，单纯卡密（无套餐分组）不进入目录。
 
 // SupplyMerchantBalance 是「查询商户信息」固定返回的余额（自研系统无真实商户账户）。
 // 官方要求 balance 为大于 0 的整数。出处：总单「官方返回要求」。
@@ -168,25 +168,20 @@ const supplyGoodsSelect = `
 			WHERE sp.group_id = g.id
 			ORDER BY sp.sort_order, sp.id LIMIT 1
 		), 0),
-		(
-			SELECT COUNT(*) FROM redeem_codes r
-			WHERE r.group_id = g.id AND r.type = 'subscription' AND r.status = 'unused'
-		),
+		99999,
 		g.updated_at
 	FROM "groups" g
 	WHERE g.deleted_at IS NULL`
 
-// ListGoods 列出分组聚合商品。仅纳入与货源相关的分组：存在在售订阅套餐或有订阅卡密库存。
+// ListGoods 列出分组聚合商品。成员过滤仅纳入有在售订阅套餐的分组（EXISTS subscription_plans）；
+// 单纯卡密（无套餐分组）不进入目录。
 func (r *supplyGoodsSourceDB) ListGoods(ctx context.Context, keyword string, offset, limit int) ([]SupplyGoods, int, error) {
 	if r == nil || r.db == nil {
 		return nil, 0, fmt.Errorf("xianguanjia supply goods source unavailable")
 	}
 	args := []any{}
 	filter := `
-		AND (
-			EXISTS (SELECT 1 FROM subscription_plans sp WHERE sp.group_id = g.id)
-			OR EXISTS (SELECT 1 FROM redeem_codes rc WHERE rc.group_id = g.id AND rc.type = 'subscription')
-		)`
+		AND EXISTS (SELECT 1 FROM subscription_plans sp WHERE sp.group_id = g.id)`
 	if keyword != "" {
 		kw := strings.TrimSpace(keyword)
 		args = append(args, "%"+kw+"%")

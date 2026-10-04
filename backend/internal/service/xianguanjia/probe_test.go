@@ -91,4 +91,3 @@ func TestConfigStoreUpsertUnavailable(t *testing.T) {
 		t.Fatal("want error for nil store")
 	}
 }
-
