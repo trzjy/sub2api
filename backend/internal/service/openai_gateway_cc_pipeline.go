@@ -88,6 +88,9 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 	upstreamMsg string,
 	upstreamModel string,
 ) *UpstreamFailoverError {
+	if c != nil {
+		c.Set(MaskedAccountFailoverKey, account != nil && IsIdentityMaskedAccount(account))
+	}
 	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody)
 	tempUnscheduled := false
 	if c != nil && account != nil && account.Platform != PlatformGrok && !shouldFailover && !IsResponseCommitted(c) && s.rateLimitService != nil {
@@ -172,6 +175,57 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 	return apiKey, targetURL, nil
 }
 
+// injectAccountIdentitySystemMessage 实现账号级内容身份注入（QK-S3 单落点）。
+// 闸门 = 账号 extra 键 identity_prompt（string）非空这一单条件；该 extra 键由运维
+// 导入流程仅对掩码账号写入，账号作用域由键的写入方闭环。本单不依赖任何其他卡的新
+// 文件，无跨卡编译依赖。
+//
+// 语义：
+//   - 账号为 nil、Extra 为 nil、键缺失或非 string、prompt 空/全空白 → 原样返回 body；
+//   - body 非 JSON、缺 messages 字段、messages 非数组 → 原样返回 body（不注入）；
+//   - 非空 → 在 messages 数组首位插入 {"role":"system","content":<prompt>}，
+//     不覆盖、不改写客户端已有的 system（纯前缀追加），其余字段以原始字节保留。
+//
+// 仅此 helper 一处实现，禁止在其他文件或本文件重复定义第二份逻辑。
+func (s *OpenAIGatewayService) injectAccountIdentitySystemMessage(account *Account, body []byte) []byte {
+	if account == nil || account.Extra == nil {
+		return body
+	}
+	prompt, ok := account.Extra["identity_prompt"].(string)
+	if !ok || strings.TrimSpace(prompt) == "" {
+		return body
+	}
+	// 以 map[string]json.RawMessage 解析，使除 messages 外的字段以原始字节原样保留，
+	// 仅重建 messages 数组，避免对未知字段做二次序列化引入格式漂移。
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	msgsRaw, ok := raw["messages"]
+	if !ok {
+		return body
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &messages); err != nil {
+		return body
+	}
+	sysMsg, err := json.Marshal(map[string]any{"role": "system", "content": prompt})
+	if err != nil {
+		return body
+	}
+	messages = append([]json.RawMessage{sysMsg}, messages...)
+	newMsgs, err := json.Marshal(messages)
+	if err != nil {
+		return body
+	}
+	raw["messages"] = newMsgs
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // sendCCUpstreamRequest 构建并发送 CC 上游请求：分离的上游 context、OpenAI HTTP
 // profile、标准头（含流式 Accept 切换）、客户端 header 白名单透传、自定义 UA 与
 // 账号级 header 覆写，最后经代理发出。传输层失败（DNS/TCP/TLS，无 HTTP 响应）
@@ -193,6 +247,11 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	grokCacheIdentity string,
 	upstreamModel string,
 ) (*http.Response, error) {
+	// 账号级内容身份注入（QK-S3）：仅由账号 extra 单键 identity_prompt 驱动。
+	// 非空时在出站 body 的 messages 数组首位插入一条 system 消息；空/未配置、
+	// messages 缺失或非数组时原样返回 body，绝不覆盖或改写客户端已有 system。
+	body = s.injectAccountIdentitySystemMessage(account, body)
+
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	releaseUpstreamCtx()

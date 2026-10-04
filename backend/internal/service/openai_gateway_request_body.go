@@ -694,9 +694,17 @@ func appendOpenAIResponsesRequestPathSuffix(baseURL, suffix string) string {
 	return trimmedBase + trimmedSuffix
 }
 
-func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string) []byte {
+// replaceModelInResponseBody rewrites the upstream model echoed in a JSON
+// response body back to the client-requested model. The optional aliases extend
+// the set of upstream names treated as matching fromModel. When no aliases are
+// supplied the behavior is the legacy exact match against fromModel only, so the
+// existing platform semantics (non-masked accounts) are unchanged. Matching is
+// restricted to the top-level "model" field; a missing field or a value outside
+// the candidate set is passed through untouched.
+func (s *OpenAIGatewayService) replaceModelInResponseBody(body []byte, fromModel, toModel string, aliases ...string) []byte {
+	cands := modelRewriteCandidates(fromModel, aliases)
 	// 使用 gjson/sjson 精确替换 model 字段，避免全量 JSON 反序列化
-	if m := gjson.GetBytes(body, "model"); m.Exists() && m.Str == fromModel {
+	if m := gjson.GetBytes(body, "model"); m.Exists() && modelInCandidates(m.Str, cands) {
 		newBody, err := sjson.SetBytes(body, "model", toModel)
 		if err != nil {
 			return body

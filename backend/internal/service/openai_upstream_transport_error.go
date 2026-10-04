@@ -111,6 +111,9 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 // 无真实 model 可用的调用方传 ""（非 CN 平台/辅助路径不会产生 errOpenAICNFirstByteTimeout，
 // 该分支不会命中）。
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool, upstreamModel string) error {
+	if c != nil {
+		c.Set(MaskedAccountFailoverKey, account != nil && IsIdentityMaskedAccount(account))
+	}
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
 	setOpsUpstreamError(c, 0, safeErr, "")
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{

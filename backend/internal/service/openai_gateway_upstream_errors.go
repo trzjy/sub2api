@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -511,6 +512,155 @@ func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, re
 	return s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, responseBody)
 }
 
+// --- QK-S2: masked-account upstream identity scrubbing for client errors ---
+//
+// TH free / masked-identity accounts (extra.mask_upstream_identity=true, decided
+// by IsIdentityMaskedAccount) must never leak the upstream model name or the
+// tokenharbor platform trace to the client. The helpers below scrub client-
+// visible error text for such accounts. Non-masked accounts (including genuine
+// kimi accounts) are a hard zero-impact boundary: every helper is a no-op for
+// them and returns the input unchanged.
+//
+// This is the client-visible scrubbing layer that complements the model-name
+// rewrite (QK-S1, account_identity_mask.go) which already rewrites echoed model
+// names in successful responses. Error bodies are scrubbed here, at every error
+// write point, because failure responses are not covered by the success-path
+// rewrite.
+
+const (
+	maskedUpstreamModelPlaceholder = "the requested model"
+	maskedTokenHarborPlaceholder   = "the upstream service"
+
+	// MaskedAccountFailoverKey is the gin.Context key under which the service
+	// stashes whether the account that produced the current failover error is a
+	// masked-identity account. handleFailoverExhausted reads it to decide whether
+	// to mask the final client error. This closes the QK-S2 source-binding on the
+	// handler side without touching the UpstreamFailoverError struct or any of
+	// its construction points.
+	MaskedAccountFailoverKey = "openai_gateway_masked_account_failover"
+)
+
+// maskedAccountUpstreamModelIdentifiers returns the upstream model name strings
+// that must be scrubbed from client-visible error text for a masked-identity
+// account. These are the values of the account's model mappings (and their
+// suffix-stripped aliases), since those values are the upstream model names the
+// client must not learn about.
+func maskedAccountUpstreamModelIdentifiers(account *Account) []string {
+	if account == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var ids []string
+	add := func(m string) {
+		for _, variant := range IdentityRewriteAliases(m) {
+			variant = strings.TrimSpace(variant)
+			if variant == "" {
+				continue
+			}
+			if _, ok := seen[variant]; ok {
+				continue
+			}
+			seen[variant] = struct{}{}
+			ids = append(ids, variant)
+		}
+	}
+	if mp := account.GetModelMapping(); mp != nil {
+		for _, v := range mp {
+			add(v)
+		}
+	}
+	if cmp := account.GetCompactModelMapping(); cmp != nil {
+		for _, v := range cmp {
+			add(v)
+		}
+	}
+	// QK-S2R2 P2: sort identifiers by length descending so that longer (more
+	// specific) identifiers are replaced before shorter overlapping ones (e.g.
+	// "qwen3.8-flash" before "qwen"). Equal-length identifiers keep their
+	// insertion order (stable) so the replacement sequence is deterministic.
+	// Without this, a short identifier replaced first fragments a longer one
+	// into an unmatched residue that survives scrubbing and leaks.
+	sort.SliceStable(ids, func(i, j int) bool {
+		return len(ids[i]) > len(ids[j])
+	})
+	return ids
+}
+
+func replaceAllIgnoreCase(s, old, repl string) string {
+	if old == "" {
+		return s
+	}
+	var b strings.Builder
+	lower := strings.ToLower(s)
+	oldLower := strings.ToLower(old)
+	for {
+		idx := strings.Index(lower, oldLower)
+		if idx < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:idx])
+		b.WriteString(repl)
+		s = s[idx+len(old):]
+		lower = lower[idx+len(oldLower):]
+	}
+	return b.String()
+}
+
+// upstreamIdentityLeaks reports whether client-visible text still contains an
+// upstream model identifier or the tokenharbor trace for a masked account.
+func upstreamIdentityLeaks(account *Account, msg string) bool {
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "tokenharbor") {
+		return true
+	}
+	for _, id := range maskedAccountUpstreamModelIdentifiers(account) {
+		if strings.Contains(lower, strings.ToLower(id)) {
+			return true
+		}
+	}
+	return false
+}
+
+// MaskUpstreamErrorMessageForClient returns the client-safe version of an
+// upstream error message for a masked-identity account. Non-masked accounts get
+// the message unchanged (zero-impact no-op). Masked accounts get upstream model
+// identifiers and the tokenharbor trace scrubbed to generic placeholders. If the
+// text cannot be safely scrubbed (an identifier or trace survives replacement),
+// it fails closed to an empty string so the caller can substitute a fixed
+// platform-standard message.
+func MaskUpstreamErrorMessageForClient(account *Account, upstreamMsg string) string {
+	if account == nil || !IsIdentityMaskedAccount(account) {
+		return upstreamMsg
+	}
+	msg := strings.TrimSpace(upstreamMsg)
+	if msg == "" {
+		return ""
+	}
+	scrubbed := msg
+	for _, id := range maskedAccountUpstreamModelIdentifiers(account) {
+		scrubbed = replaceAllIgnoreCase(scrubbed, id, maskedUpstreamModelPlaceholder)
+	}
+	scrubbed = replaceAllIgnoreCase(scrubbed, "tokenharbor", maskedTokenHarborPlaceholder)
+	if upstreamIdentityLeaks(account, scrubbed) {
+		return ""
+	}
+	return scrubbed
+}
+
+// ClientSafeUpstreamErrorMessage returns the client-safe error message for the
+// account, falling back to fallback when the masked-account message cannot be
+// safely normalized. Non-masked accounts always get upstreamMsg unchanged.
+func ClientSafeUpstreamErrorMessage(account *Account, upstreamMsg, fallback string) string {
+	if account == nil || !IsIdentityMaskedAccount(account) {
+		return upstreamMsg
+	}
+	if m := MaskUpstreamErrorMessageForClient(account, upstreamMsg); m != "" {
+		return m
+	}
+	return fallback
+}
+
 func (s *OpenAIGatewayService) handleErrorResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -560,6 +710,13 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+	// QK-S2: client-safe variant of the upstream message. No-op for non-masked
+	// accounts (including genuine kimi accounts) — byte-for-byte unchanged.
+	// Also stash the masked-identity flag for the failover final-write closure;
+	// set per-attempt so it always reflects the account that produced this error.
+	masked := IsIdentityMaskedAccount(account)
+	c.Set(MaskedAccountFailoverKey, masked)
+	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
 	upstreamDetail := ""
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
@@ -605,6 +762,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		)
 	}
 
+	// Apply error passthrough rules
 	if status, errType, errMsg, matched := applyErrorPassthroughRule(
 		c,
 		PlatformOpenAI,
@@ -614,20 +772,32 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		"upstream_error",
 		infraerrors.UpstreamRequestFailed,
 	); matched {
-		MarkResponseCommitted(c)
-		c.JSON(status, gin.H{
-			"error": gin.H{
-				"type":    errType,
-				"message": errMsg,
-			},
-		})
-		if upstreamMsg == "" {
-			upstreamMsg = errMsg
+		// QK-S2: a masked account must not receive an upstream-derived message.
+		// Scrub it; if it cannot be safely normalized, skip the passthrough and
+		// fall through to the fixed platform-standard handling below.
+		if account != nil && IsIdentityMaskedAccount(account) {
+			if safe := MaskUpstreamErrorMessageForClient(account, errMsg); safe != "" {
+				errMsg = safe
+			} else {
+				matched = false
+			}
 		}
-		if upstreamMsg == "" {
-			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+		if matched {
+			MarkResponseCommitted(c)
+			c.JSON(status, gin.H{
+				"error": gin.H{
+					"type":    errType,
+					"message": errMsg,
+				},
+			})
+			if upstreamMsg == "" {
+				upstreamMsg = errMsg
+			}
+			if upstreamMsg == "" {
+				return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 		}
-		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes
@@ -704,7 +874,22 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	// 回真实状态码 + invalid_request_error + 真实 message；/v1/images 还额外透传
 	// code/param。原生 Responses 是唯一漏掉的一条。
 	if isOpenAIDeterministicClientError(resp.StatusCode) {
-		writeOpenAIUpstreamClientError(c, resp.StatusCode, body, upstreamMsg)
+		if account != nil && IsIdentityMaskedAccount(account) {
+			// QK-S2: never echo upstream body fields (error.type/code/param may
+			// carry the upstream model identity); write a generic client error.
+			msg := clientMsg
+			if msg == "" {
+				msg = infraerrors.UpstreamRequestFailed
+			}
+			c.JSON(resp.StatusCode, gin.H{
+				"error": gin.H{
+					"type":    "invalid_request_error",
+					"message": msg,
+				},
+			})
+		} else {
+			writeOpenAIUpstreamClientError(c, resp.StatusCode, body, upstreamMsg)
+		}
 		if upstreamMsg == "" {
 			return nil, fmt.Errorf("upstream error: %d", resp.StatusCode)
 		}
@@ -737,8 +922,8 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		errType = "upstream_error"
 		errMsg = infraerrors.UpstreamRequestFailed
 	}
-	if isOpenAIContextWindowError(upstreamMsg, body) && upstreamMsg != "" {
-		errMsg = upstreamMsg
+	if isOpenAIContextWindowError(upstreamMsg, body) && clientMsg != "" {
+		errMsg = clientMsg
 	}
 
 	c.JSON(statusCode, gin.H{
@@ -808,6 +993,10 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		upstreamMsg = fmt.Sprintf("Upstream error: %d", resp.StatusCode)
 	}
 	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+	// QK-S2: client-safe variant. No-op for non-masked accounts. Stash the
+	// masked-identity flag for the failover final-write closure (per-attempt).
+	c.Set(MaskedAccountFailoverKey, IsIdentityMaskedAccount(account))
+	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
 
 	upstreamDetail := ""
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
@@ -824,15 +1013,26 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		c, account.Platform, resp.StatusCode, body,
 		http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed,
 	); matched {
-		MarkResponseCommitted(c)
-		writeError(c, status, errType, errMsg)
-		if upstreamMsg == "" {
-			upstreamMsg = errMsg
+		// QK-S2: scrub the passthrough message for masked accounts; if it cannot
+		// be safely normalized, skip the passthrough and fall through.
+		if account != nil && IsIdentityMaskedAccount(account) {
+			if safe := MaskUpstreamErrorMessageForClient(account, errMsg); safe != "" {
+				errMsg = safe
+			} else {
+				matched = false
+			}
 		}
-		if upstreamMsg == "" {
-			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+		if matched {
+			MarkResponseCommitted(c)
+			writeError(c, status, errType, errMsg)
+			if upstreamMsg == "" {
+				upstreamMsg = errMsg
+			}
+			if upstreamMsg == "" {
+				return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 		}
-		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes — if the account does not handle this status,
@@ -905,6 +1105,6 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		errType = "api_error"
 	}
 
-	writeError(c, resp.StatusCode, errType, upstreamMsg)
+	writeError(c, resp.StatusCode, errType, clientMsg)
 	return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 }

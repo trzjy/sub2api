@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -337,6 +338,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 
 	needModelReplace := originalModel != mappedModel
+	// 掩码账号判定按当前尝试的账号取（failover 换号不沿用上次尝试的标志）。
+	maskedAccount := account != nil && IsIdentityMaskedAccount(account)
+	// QK-S2: stash the masked-identity flag for the failover final-write
+	// closure; set per-attempt so it reflects the account that produced the
+	// current error.
+	c.Set(MaskedAccountFailoverKey, maskedAccount)
 	streamOutputAccumulator := apicompat.NewBufferedResponseAccumulator()
 	streamDoneItems := newResponsesStreamOutputItems()
 	streamImageOutputs := make([]json.RawMessage, 0, 1)
@@ -378,7 +385,18 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		if codexFailureTerminal && sawBareError && !sawResponseFailed && !clientDisconnected {
 			applyAttemptResponseHeaders()
-			if _, err := writePendingString(buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
+			// QK-S2: for a masked account, never echo the upstream error payload
+			// or its message; emit a client-safe failed event instead.
+			finalizeFailedMessage := failedMessage
+			finalizeFailedSource := bareErrorPayload
+			if maskedAccount {
+				finalizeFailedMessage = MaskUpstreamErrorMessageForClient(account, failedMessage)
+				if finalizeFailedMessage == "" {
+					finalizeFailedMessage = infraerrors.UpstreamRequestFailed
+				}
+				finalizeFailedSource = nil
+			}
+			if _, err := writePendingString(buildOpenAIResponseFailedSSE(responseID, originalModel, finalizeFailedSource, finalizeFailedMessage)); err != nil {
 				handlePendingWriteError(err)
 			} else {
 				failureDelivered = true
@@ -593,24 +611,52 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 					if !cyberHit && !sawBareError {
 						if status, errType, errMsg, matched := applyOpenAIStreamFailedErrorPassthroughRule(c, account.Platform, dataBytes, failedMessage); matched {
-							sawFailedEvent = true
-							// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
-							// antigravity 先例），否则透传命中的 failed 在监控中不可见。
-							s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID, "http_error", dataBytes, failedMessage)
-							MarkResponseCommitted(c)
-							c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-							c.JSON(status, gin.H{
-								"error": gin.H{
-									"type":    errType,
-									"message": errMsg,
-								},
-							})
-							streamEarlyErr = fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
+							// QK-S2: scrub the passthrough message for masked accounts; if
+							// it cannot be safely normalized, skip the passthrough so the
+							// stream falls back to the generic failure below.
+							if maskedAccount {
+								if safe := MaskUpstreamErrorMessageForClient(account, errMsg); safe != "" {
+									errMsg = safe
+								} else {
+									matched = false
+								}
+							}
+							if matched {
+								sawFailedEvent = true
+								// 命中透传规则也要记录 ops 上游错误事件（对齐 CC/Messages 与
+								// antigravity 先例），否则透传命中的 failed 在监控中不可见。
+								s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID, "http_error", dataBytes, failedMessage)
+								MarkResponseCommitted(c)
+								c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+								c.JSON(status, gin.H{
+									"error": gin.H{
+										"type":    errType,
+										"message": errMsg,
+									},
+								})
+						streamEarlyErr = fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
 							return
 						}
 					}
 				}
-				forceFlushFailedEvent = true
+			}
+			// QK-S2R2 P1-1: for a masked account, scrub the error message embedded
+			// in the event payload (error.message / response.error.message) for
+			// events that fall through to the generic write path — i.e. not
+			// matched by the passthrough rule above and not the codex bare-error
+			// path already rebuilt in finalizeStream. This closes the leak where
+			// unmatched streamed failed/error frames reached the client with the
+			// raw upstream model identifier intact. suppressCurrentEvent guards
+			// the codex bare-error path (handled in finalizeStream) so the message
+			// is never rewritten twice.
+			if maskedAccount && !suppressCurrentEvent {
+				if scrubbed := maskStreamingFailedErrorMessageForClient(account, dataBytes); scrubbed != nil {
+					dataBytes = scrubbed
+					data = string(scrubbed)
+					line = "data: " + data
+				}
+			}
+			forceFlushFailedEvent = true
 				sawFailedEvent = true
 				terminalFailurePending = !codexFailureTerminal || eventType == "response.failed"
 			}
@@ -673,8 +719,27 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			// Replace model in response if needed.
 			// Fast path: most events do not contain model field values.
-			if needModelReplace && mappedModel != "" && strings.Contains(line, mappedModel) {
-				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
+			// 掩码账号：别名出现而 mappedModel 未出现不得跳过替换（先判掩码再选
+			// 守卫串）；非掩码路径 fast-path 语义保持不变（仅 mappedModel 精确匹配）。
+			if needModelReplace && mappedModel != "" {
+				doRewrite := false
+				if maskedAccount {
+					stripped := ""
+					if idx := strings.LastIndex(mappedModel, ":"); idx > 0 {
+						stripped = mappedModel[:idx]
+					}
+					doRewrite = strings.Contains(line, mappedModel) ||
+						(stripped != "" && strings.Contains(line, stripped))
+				} else {
+					doRewrite = strings.Contains(line, mappedModel)
+				}
+				if doRewrite {
+					if maskedAccount {
+						line = s.replaceModelInSSELine(line, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
+					} else {
+						line = s.replaceModelInSSELine(line, mappedModel, originalModel)
+					}
+				}
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
 			startsVisibleOutput := openAIStreamDataStartsVisibleOutput(data, eventType)
@@ -1096,7 +1161,51 @@ func effectiveOpenAISSEEventType(payload []byte, eventType string) string {
 	return strings.TrimSpace(eventType)
 }
 
-func (s *OpenAIGatewayService) replaceModelInSSELine(line, fromModel, toModel string) string {
+// modelRewriteCandidates builds the set of upstream model names that should map
+// to toModel. It always contains fromModel, plus any distinct aliases supplied
+// via the variadic argument. When no aliases are supplied the set degenerates to
+// [fromModel], preserving the legacy exact-match semantics for non-masked
+// accounts. Empty strings are ignored.
+func modelRewriteCandidates(fromModel string, aliases []string) []string {
+	seen := make(map[string]struct{}, 1+len(aliases))
+	cands := make([]string, 0, 1+len(aliases))
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			cands = append(cands, v)
+		}
+	}
+	add(fromModel)
+	for _, a := range aliases {
+		add(a)
+	}
+	return cands
+}
+
+// modelInCandidates reports whether v equals one of the candidate model names.
+func modelInCandidates(v string, cands []string) bool {
+	for _, c := range cands {
+		if v == c {
+			return true
+		}
+	}
+	return false
+}
+
+// replaceModelInSSELine rewrites the upstream model echoed in a single SSE data
+// line back to the client-requested model. The optional aliases extend the set
+// of upstream names that are treated as matching fromModel. When no aliases are
+// supplied the behavior is the legacy exact match against fromModel only, so the
+// existing platform semantics (non-masked accounts) are byte-for-byte unchanged.
+//
+// Matching is restricted to the top-level "model" and nested "response.model"
+// fields (gjson equality guards preserved). A field that is missing or whose
+// value is not in the candidate set is passed through untouched — no speculative
+// rewriting. Model names appearing inside content text are never touched.
+func (s *OpenAIGatewayService) replaceModelInSSELine(line, fromModel, toModel string, aliases ...string) string {
 	data, ok := extractOpenAISSEDataLine(line)
 	if !ok {
 		return line
@@ -1105,8 +1214,10 @@ func (s *OpenAIGatewayService) replaceModelInSSELine(line, fromModel, toModel st
 		return line
 	}
 
+	cands := modelRewriteCandidates(fromModel, aliases)
+
 	// 使用 gjson 精确检查 model 字段，避免全量 JSON 反序列化
-	if m := gjson.Get(data, "model"); m.Exists() && m.Str == fromModel {
+	if m := gjson.Get(data, "model"); m.Exists() && modelInCandidates(m.Str, cands) {
 		newData, err := sjson.Set(data, "model", toModel)
 		if err != nil {
 			return line
@@ -1115,7 +1226,7 @@ func (s *OpenAIGatewayService) replaceModelInSSELine(line, fromModel, toModel st
 	}
 
 	// 检查嵌套的 response.model 字段
-	if m := gjson.Get(data, "response.model"); m.Exists() && m.Str == fromModel {
+	if m := gjson.Get(data, "response.model"); m.Exists() && modelInCandidates(m.Str, cands) {
 		newData, err := sjson.Set(data, "response.model", toModel)
 		if err != nil {
 			return line
@@ -1651,7 +1762,13 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 
 	// Replace model in response if needed
 	if originalModel != mappedModel {
-		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+		// 掩码账号按别名集回写（含去后缀别名），非掩码账号保持既有的
+		// fromModel 精确匹配语义零变化。
+		if IsIdentityMaskedAccount(account) {
+			body = s.replaceModelInResponseBody(body, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
+		} else {
+			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+		}
 	}
 	body, err = restoreGrokResponsesClientToolPayload(c, body)
 	if err != nil {
@@ -1721,6 +1838,15 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if msg == "" {
 			msg = "Upstream compact response failed"
 		}
+		// QK-S2: scrub the client-visible terminal failure message for masked
+		// accounts so no upstream model identity or tokenharbor trace leaks.
+		if account != nil && IsIdentityMaskedAccount(account) {
+			if safe := MaskUpstreamErrorMessageForClient(account, msg); safe != "" {
+				msg = safe
+			} else {
+				msg = infraerrors.UpstreamRequestFailed
+			}
+		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr
 		}
@@ -1749,7 +1875,12 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
 		body = finalResponse
 		if originalModel != mappedModel {
-			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
+			if IsIdentityMaskedAccount(account) {
+				body = s.replaceModelInResponseBody(body, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
+			} else {
+				body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+			}
 		}
 		// Correct tool calls in final response
 		body = s.correctToolCallsInResponseBody(body)
@@ -1769,7 +1900,12 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		body = restoredBody
 	} else {
 		if originalModel != mappedModel {
-			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
+			// 掩码账号按别名集回写，非掩码账号仅精确匹配。
+			if IsIdentityMaskedAccount(account) {
+				bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel, IdentityRewriteAliases(mappedModel)...)
+			} else {
+				bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
+			}
 		}
 		body = []byte(bodyText)
 	}
@@ -1936,6 +2072,45 @@ func sanitizeOpenAIResponseFailedEventForClient(payload []byte, eventType string
 		updated = next
 	}
 	return updated, !bytes.Equal(updated, payload)
+}
+
+// maskStreamingFailedErrorMessageForClient rewrites the client-visible error
+// message carried by a streamed failed/error event payload for a masked-identity
+// account. It mirrors MaskUpstreamErrorMessageForClient but operates in place on
+// the SSE JSON, scrubbing error.message and/or response.error.message, and
+// failing closed to the platform-standard message (infraerrors.UpstreamRequestFailed)
+// when the text cannot be safely scrubbed. The caller must only invoke this for
+// events that reach the generic write path — i.e. not matched by the passthrough
+// rule (which scrubs before emitting) and not the codex bare-error path (which is
+// rebuilt with a scrubbed message in finalizeStream) — so the message is never
+// rewritten twice. Returns nil when no rewrite was performed (non-masked account,
+// invalid JSON, or no error message field present).
+func maskStreamingFailedErrorMessageForClient(account *Account, payload []byte) []byte {
+	if account == nil || !IsIdentityMaskedAccount(account) || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return nil
+	}
+	updated := payload
+	changed := false
+	for _, path := range []string{"error.message", "response.error.message"} {
+		if !gjson.GetBytes(updated, path).Exists() {
+			continue
+		}
+		rawMsg := gjson.GetBytes(updated, path).String()
+		safe := MaskUpstreamErrorMessageForClient(account, rawMsg)
+		if safe == "" {
+			safe = infraerrors.UpstreamRequestFailed
+		}
+		next, err := sjson.SetBytes(updated, path, safe)
+		if err != nil {
+			return nil
+		}
+		updated = next
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return updated
 }
 
 func (s *OpenAIGatewayService) writeOpenAINonStreamingProtocolError(resp *http.Response, c *gin.Context, message string) error {
@@ -2382,13 +2557,15 @@ func (s *OpenAIGatewayService) parseSSEUsageFromBody(body string) *OpenAIUsage {
 	return usage
 }
 
-func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel string) string {
+// replaceModelInSSEBody rewrites every SSE data line in a raw SSE body. See
+// replaceModelInSSELine for the alias semantics; aliases are forwarded verbatim.
+func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel string, aliases ...string) string {
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		if _, ok := extractOpenAISSEDataLine(line); !ok {
 			continue
 		}
-		lines[i] = s.replaceModelInSSELine(line, fromModel, toModel)
+		lines[i] = s.replaceModelInSSELine(line, fromModel, toModel, aliases...)
 	}
 	return strings.Join(lines, "\n")
 }

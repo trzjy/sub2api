@@ -3417,6 +3417,12 @@ func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error,
 }
 
 func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
+	// QK-S2 source-binding: the masked-identity flag is stashed on the gin
+	// Context by the service for the account that produced the current failover
+	// error (handleErrorResponse / handleCompatErrorResponse / streaming). This
+	// keeps the UpstreamFailoverError struct and its 36 construction points
+	// untouched.
+	masked := c.GetBool(service.MaskedAccountFailoverKey)
 	if failoverErr == nil {
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
 		return
@@ -3456,7 +3462,11 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
-	if statusCode == http.StatusBadRequest && service.IsOpenAICompatibleModelNotFound400(responseBody) && !streamStarted {
+	// QK-S2: a masked account must not receive an upstream-derived message. Skip
+	// the body-derived branches (model-not-found-400 passthrough and the
+	// errorPassthrough MatchRule) and fall through to the fixed platform-standard
+	// mapUpstreamError text.
+	if !masked && statusCode == http.StatusBadRequest && service.IsOpenAICompatibleModelNotFound400(responseBody) && !streamStarted {
 		upstreamMsg := service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody))
 		service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 		service.WriteOpenAIUpstreamClientError(c, statusCode, responseBody, upstreamMsg)
@@ -3469,7 +3479,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 
 	// 先检查透传规则
-	if h.errorPassthroughService != nil && len(responseBody) > 0 {
+	if !masked && h.errorPassthroughService != nil && len(responseBody) > 0 {
 		if rule := h.errorPassthroughService.MatchRule("openai", statusCode, responseBody); rule != nil {
 			// 确定响应状态码
 			respCode := statusCode
