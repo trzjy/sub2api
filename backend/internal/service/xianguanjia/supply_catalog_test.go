@@ -17,10 +17,10 @@ const testSupplyAppID int64 = 1783283558647493
 
 func testSupplyCfg() *SupplyConfig {
 	return &SupplyConfig{
-		MchID:             "900001",
-		MchSecret:         "enc-mch-secret",
-		SupplyAppID:       "1783283558647493",
-		SupplyAppSecret:   "enc-app-secret",
+		MchID:           "900001",
+		MchSecret:       "enc-mch-secret",
+		SupplyAppID:     "1783283558647493",
+		SupplyAppSecret: "enc-app-secret",
 	}
 }
 

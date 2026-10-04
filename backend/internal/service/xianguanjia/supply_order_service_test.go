@@ -2,9 +2,11 @@ package xianguanjia
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +29,25 @@ func (m *testMemGoodsSource) GetGoods(ctx context.Context, goodsNo string) (*Sup
 		return g, nil
 	}
 	return nil, nil
+}
+
+// OffSale 模拟商品下架（status=2），用于 #1 幂等回读前置回归。
+func (m *testMemGoodsSource) OffSale(goodsNo string) {
+	if g, ok := m.byNo[goodsNo]; ok {
+		g.Status = SupplyGoodsStatusOffSale
+	}
+}
+
+// ChangePrice 模拟改价，用于 #1/#2 金额快照回归。
+func (m *testMemGoodsSource) ChangePrice(goodsNo string, price int64) {
+	if g, ok := m.byNo[goodsNo]; ok {
+		g.Price = price
+	}
+}
+
+// Delete 模拟商品删除（查单/退款不应再读商品源），用于 #2 回归。
+func (m *testMemGoodsSource) Delete(goodsNo string) {
+	delete(m.byNo, goodsNo)
 }
 
 // newTestGoodsSource 返回 goods_no="42"、单价 price 分、状态 status 的内存货源。
@@ -350,4 +371,221 @@ func TestSupplyOrderConcurrentSameOrderNoOnce(t *testing.T) {
 		require.Equal(t, first, results[i].CardItems, "并发调用须返回同一批卡")
 	}
 	require.NotNil(t, first, "至少应有一个并发调用成功")
+}
+
+// TestSupplyOrderCreateOrderIdempotentAfterGoodsChange 回归 #1：商品下架/改价/更小
+// max_amount 后同订单号重试，必须命中幂等回读前置、返回原订单原卡（完全不读商品源）。
+func TestSupplyOrderCreateOrderIdempotentAfterGoodsChange(t *testing.T) {
+	ctx := context.Background()
+	goods := newTestGoodsSource(990, 1)
+	svc, _, pool := newTestSupplyOrderService(
+		[]string{"card-1", "card-2", "card-3"}, nil, goods)
+
+	first, err := svc.CreateOrder(ctx, "MO-RETRY", "42", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, first.CardItems, 2)
+	deliveredAfterFirst := pool.CountByStatus("delivered")
+
+	// 模拟商品下架 + 改价 + 更小 max_amount，重试应绕过商品/金额校验直接返回原订单。
+	goods.OffSale("42")
+	goods.ChangePrice("42", 1)
+
+	// maxAmount=1 远小于快照金额 1980：旧逻辑会返回 1202；新逻辑（幂等前置）应跳过校验。
+	second, err := svc.CreateOrder(ctx, "MO-RETRY", "42", 2, 1)
+	require.NoError(t, err, "幂等回读前置：命中既有订单应直接返回，绕过商品/金额校验")
+	require.Equal(t, first.CardItems, second.CardItems, "重试必须返回同一批卡")
+	require.Equal(t, first.OrderAmount, second.OrderAmount, "金额须为下单快照，不受改价影响")
+	require.Equal(t, first.GoodsName, second.GoodsName, "商品名须为快照")
+	require.Equal(t, deliveredAfterFirst, pool.CountByStatus("delivered"), "重试不得二次取卡")
+	require.Equal(t, 2, pool.CountByStatus("delivered"))
+
+	// 商品删除场景下重试同样返回原订单原卡（绝不读商品源）。
+	goods.Delete("42")
+	deleted, err := svc.CreateOrder(ctx, "MO-RETRY", "42", 2, 0)
+	require.NoError(t, err)
+	require.Equal(t, first.CardItems, deleted.CardItems, "商品删除后重试仍须返回原卡")
+	require.Equal(t, first.OrderAmount, deleted.OrderAmount)
+}
+
+// TestSupplyOrderGetOrderAmountIsSnapshot 回归 #2：下单后改价/删商品，查单金额须为
+// 下单快照，不随商品源漂移（viewExisting 只读订单行快照，零 goods 源调用）。
+func TestSupplyOrderGetOrderAmountIsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	goods := newTestGoodsSource(990, 1)
+	svc, _, _ := newTestSupplyOrderService([]string{"card-1", "card-2"}, nil, goods)
+
+	created, err := svc.CreateOrder(ctx, "MO-SNAP", "42", 2, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(990*2), created.OrderAmount)
+
+	// 改价 + 删除商品：查单金额/商品名须仍为下单快照。
+	goods.ChangePrice("42", 1)
+	goods.Delete("42")
+
+	got, err := svc.GetOrder(ctx, "MO-SNAP", "")
+	require.NoError(t, err)
+	require.Equal(t, int64(990*2), got.OrderAmount, "查单金额须为下单快照，不漂移")
+	require.Equal(t, "测试商品", got.GoodsName, "查单商品名须为快照")
+}
+
+// failMarkStore 是注入用的测试 store：可令 MarkRefundedTx 失败，验证退款原子化回滚。
+type failMarkStore struct {
+	*supplyOrderStoreMem
+	failMark bool
+}
+
+func (s *failMarkStore) MarkRefundedTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, at time.Time) (bool, error) {
+	if s.failMark {
+		return false, errors.New("injected mark failure")
+	}
+	return s.supplyOrderStoreMem.MarkRefundedTx(ctx, tx, managerOrderNo, at)
+}
+
+// TestSupplyOrderRefundRollbackOnMarkFailure 回归 #3：作废成功但置态失败时，整体回滚
+// （卡保持 delivered、订单保持原态）；修复后重试 → agree 且卡已作废、金额=快照。
+func TestSupplyOrderRefundRollbackOnMarkFailure(t *testing.T) {
+	ctx := context.Background()
+	pool := NewSupplyCardPoolMemory([]string{"card-1", "card-2"}, nil)
+	baseStore := NewSupplyOrderStoreMemory()
+	store := &failMarkStore{supplyOrderStoreMem: baseStore}
+	svc := NewSupplyOrderService(store, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+
+	_, err := svc.CreateOrder(ctx, "MO-RB", "42", 2, 0)
+	require.NoError(t, err)
+	require.Equal(t, 2, pool.CountByStatus("delivered"))
+
+	// 注入：作废成功但置态失败 → 整体回滚。
+	store.failMark = true
+	_, agree, err := svc.RefundNotify(ctx, "MO-RB")
+	require.Error(t, err, "置态失败应返回错误，交由闲管家重试")
+	require.False(t, agree)
+	require.Equal(t, 2, pool.CountByStatus("delivered"), "回滚后卡须保持 delivered，不得为 expired")
+	require.Equal(t, 0, pool.CountByStatus("expired"))
+	row, err := store.GetByManagerOrderNo(ctx, "MO-RB")
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态")
+
+	// 修复 store 再试 → agree 且卡已作废、金额=快照。
+	store.failMark = false
+	refunded, agree, err := svc.RefundNotify(ctx, "MO-RB")
+	require.NoError(t, err)
+	require.True(t, agree)
+	require.Equal(t, 2, pool.CountByStatus("expired"), "重试后卡须作废")
+	require.Equal(t, int64(990*2), refunded.OrderAmount, "退款金额须为快照")
+}
+
+// TestSupplyOrderRefundIdempotentAlreadyRefunded 回归 #3：已退款订单重复退款须幂等
+// agree，且不再二次作废、refund_amount 取快照。
+func TestSupplyOrderRefundIdempotentAlreadyRefunded(t *testing.T) {
+	ctx := context.Background()
+	svc, _, pool := newTestSupplyOrderService([]string{"card-1", "card-2"}, nil, newTestGoodsSource(990, 1))
+
+	_, err := svc.CreateOrder(ctx, "MO-IDEM", "42", 2, 0)
+	require.NoError(t, err)
+
+	first, agree, err := svc.RefundNotify(ctx, "MO-IDEM")
+	require.NoError(t, err)
+	require.True(t, agree)
+	require.Equal(t, int64(990*2), first.OrderAmount)
+
+	// 重复退款：已退款 → 幂等 agree，不再作废（expired 计数不变），refund_amount=快照。
+	again, agree2, err := svc.RefundNotify(ctx, "MO-IDEM")
+	require.NoError(t, err)
+	require.True(t, agree2)
+	require.Equal(t, 2, pool.CountByStatus("expired"), "重复退款不得二次作废")
+	require.Equal(t, int64(990*2), again.OrderAmount, "幂等退款金额须为快照")
+}
+
+// TestSupplyOrderRefundNotifyRefuseWhenPartialCardsUsed 验证修 1（P1）：多卡订单部分卡
+// 已用/已过期时，voided(1..n-1) != len(cardNos) → 整体回滚 + refuse，不得按全额 agree。
+func TestSupplyOrderRefundNotifyRefuseWhenPartialCardsUsed(t *testing.T) {
+	ctx := context.Background()
+	svc, store, pool := newTestSupplyOrderService([]string{"card-1", "card-2", "card-3"}, nil, newTestGoodsSource(990, 1))
+
+	_, err := svc.CreateOrder(ctx, "MO-PARTIAL", "42", 3, 0)
+	require.NoError(t, err)
+	require.Equal(t, 3, pool.CountByStatus("delivered"))
+
+	// 预置 1 卡已用（used）：本轮仅能作废 2 张，不得按全额 agree 置退款。
+	pool.SetCardStatusForTest("card-1", "used")
+
+	refunded, agree, err := svc.RefundNotify(ctx, "MO-PARTIAL")
+	require.NoError(t, err)
+	require.False(t, agree, "部分卡已用：不得按全额 agree → refuse")
+	require.NotNil(t, refunded)
+	require.Equal(t, 20, refunded.OrderStatus, "refuse 对外仍归一为 20（成功态）")
+
+	// 已用卡保持 used；其余卡整体回滚为 delivered（无 expired 残留）。
+	require.Equal(t, "used", pool.StatusOf("card-1"), "已用卡须保持 used")
+	require.Equal(t, "delivered", pool.StatusOf("card-2"), "未用卡须回滚为 delivered")
+	require.Equal(t, "delivered", pool.StatusOf("card-3"), "未用卡须回滚为 delivered")
+	require.Equal(t, 0, pool.CountByStatus("expired"), "部分作废须整体回滚，无 expired 残留")
+
+	// 订单非退款态。
+	row, err := store.GetByManagerOrderNo(ctx, "MO-PARTIAL")
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态（非退款）")
+
+	// 再次下单同订单号幂等不受影响（订单未被污染，仍返回原单原卡）。
+	retry, err := svc.CreateOrder(ctx, "MO-PARTIAL", "42", 3, 0)
+	require.NoError(t, err, "退款 refuse 不得破坏订单，重下单须幂等返回原单")
+	require.Len(t, retry.CardItems, 3, "幂等重发须返回同一批卡")
+}
+
+// TestSupplyOrderRefundUndoVoidOnlyRestoresThisRound 验证修 3（P3）：UndoVoidTx 仅复位
+// 本轮 VoidCardsForOrderTx 实际作废集合，不得误复活本轮之前已 expired 的卡。
+//
+// 场景：本订单卡 card-1 在本轮退款前已 expired（如上一轮部分作废留下的），其余卡正常。
+// 本轮退款因部分卡已用/过期（voided=2 != 3）走 refuse 分支并整体回滚：UndoVoidTx 须只
+// 把本轮已作废的 card-2/card-3 复位 delivered，card-1（本轮前已 expired，不在本集合内）
+// 与无关过期卡 card-x 须保持 expired，不得误复活。
+func TestSupplyOrderRefundUndoVoidOnlyRestoresThisRound(t *testing.T) {
+	ctx := context.Background()
+	pool := NewSupplyCardPoolMemory([]string{"card-1", "card-2", "card-3", "card-x"}, nil)
+	baseStore := NewSupplyOrderStoreMemory()
+	store := &failMarkStore{supplyOrderStoreMem: baseStore}
+	svc := NewSupplyOrderService(store, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+
+	// 先下单：取卡 card-1/card-2/card-3（全部 delivered）。
+	_, err := svc.CreateOrder(ctx, "MO-UNDO", "42", 3, 0)
+	require.NoError(t, err)
+	require.Equal(t, 3, pool.CountByStatus("delivered"), "下单后本订单 3 卡为 delivered")
+
+	// 与本订单无关的过期卡（不在本订单 cardNos 中），回滚后须保持 expired。
+	pool.SetCardStatusForTest("card-x", "expired")
+	// 本订单的一张卡在本轮退款前已被作废（如上一轮部分作废留下的 expired），
+	// 本轮回滚时不得误复活它。
+	pool.SetCardStatusForTest("card-1", "expired")
+	require.Equal(t, 2, pool.CountByStatus("delivered"), "card-1 预置 expired 后仅 2 张 delivered")
+
+	// 本轮退款：card-2/card-3 正常作废（voided=2），但 card-1 已 expired 使
+	// voided(2) != len(3) → refuse 分支整体回滚（UndoVoidTx 复位本轮集合）。
+	_, agree, err := svc.RefundNotify(ctx, "MO-UNDO")
+	require.NoError(t, err, "部分卡已用/过期走 refuse，不返回错误")
+	require.False(t, agree, "部分作废须 refuse")
+	// 本轮实际作废的卡（card-2/card-3）复位 delivered。
+	require.Equal(t, "delivered", pool.StatusOf("card-2"))
+	require.Equal(t, "delivered", pool.StatusOf("card-3"))
+	// 本轮之前已 expired 的本订单卡（card-1）须保持 expired，不得被 UndoVoidTx 误复活。
+	require.Equal(t, "expired", pool.StatusOf("card-1"), "本轮前已 expired 的本订单卡不得被误复活")
+	// 无关 expired 卡仍 expired。
+	require.Equal(t, "expired", pool.StatusOf("card-x"), "无关过期卡不得被误复活")
+	require.Equal(t, 2, pool.CountByStatus("expired"), "仅 card-1/card-x 为 expired")
+	// 订单非退款态。
+	row, err := store.GetByManagerOrderNo(ctx, "MO-UNDO")
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态（非退款）")
+
+	// 修复（card-1 复位 delivered 后再整体退款）→ agree，本轮卡全作废。
+	pool.SetCardStatusForTest("card-1", "delivered")
+	_, agree, err = svc.RefundNotify(ctx, "MO-UNDO")
+	require.NoError(t, err)
+	require.True(t, agree)
+	require.Equal(t, "expired", pool.StatusOf("card-1"))
+	require.Equal(t, "expired", pool.StatusOf("card-2"))
+	require.Equal(t, "expired", pool.StatusOf("card-3"))
+	require.Equal(t, "expired", pool.StatusOf("card-x"), "无关过期卡仍不受影响")
 }

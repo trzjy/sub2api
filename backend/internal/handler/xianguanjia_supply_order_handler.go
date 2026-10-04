@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service/xianguanjia"
 	"github.com/gin-gonic/gin"
@@ -83,15 +82,15 @@ func supplyOrderRespondErr(c *gin.Context, err error, fallbackCode int) {
 // 删除旧兼容键 manager_order_no/order_sn/quantity/num：官方强校验单一命名，
 // 旧链归零。max_amount（分，可选）：0 表示不校验。
 type createSupplyOrderBody struct {
-	OrderNo    string `json:"order_no"`
-	GoodsNo    string `json:"goods_no"`
-	BuyQuantity int   `json:"buy_quantity"`
-	NotifyURL  string `json:"notify_url"`
-	BizOrderNo string `json:"biz_order_no"`
-	MaxAmount  int64  `json:"max_amount"`
-	ProductID  int64  `json:"product_id"`
-	ProductSKU int64  `json:"product_sku"`
-	ItemID     int64  `json:"item_id"`
+	OrderNo     string `json:"order_no"`
+	GoodsNo     string `json:"goods_no"`
+	BuyQuantity int    `json:"buy_quantity"`
+	NotifyURL   string `json:"notify_url"`
+	BizOrderNo  string `json:"biz_order_no"`
+	MaxAmount   int64  `json:"max_amount"`
+	ProductID   int64  `json:"product_id"`
+	ProductSKU  int64  `json:"product_sku"`
+	ItemID      int64  `json:"item_id"`
 }
 
 // supplyOrderQueryBody 查单 / 退款申请请求体（官方字段名）。
@@ -105,15 +104,15 @@ type supplyOrderQueryBody struct {
 // supplyOrderRefundBody 退款申请请求体：查单字段 + 官方退款字段（宽松解析，
 // 多余键忽略）。仅使用 order_no/out_order_no/apply_time；其余键按官方名保留解析。
 type supplyOrderRefundBody struct {
-	OrderType        int    `json:"order_type"`
-	OrderNo          string `json:"order_no"`
-	OutOrderNo       string `json:"out_order_no"`
-	BizOrderNo       string `json:"biz_order_no"`
-	RefundType       int    `json:"refund_type"`
-	RefundAmount     int64  `json:"refund_amount"`
-	RefundReason     string `json:"refund_reason"`
-	RefundScene      string `json:"refund_scene"`
-	ApplyTime        int64  `json:"apply_time"`
+	OrderType         int    `json:"order_type"`
+	OrderNo           string `json:"order_no"`
+	OutOrderNo        string `json:"out_order_no"`
+	BizOrderNo        string `json:"biz_order_no"`
+	RefundType        int    `json:"refund_type"`
+	RefundAmount      int64  `json:"refund_amount"`
+	RefundReason      string `json:"refund_reason"`
+	RefundScene       string `json:"refund_scene"`
+	ApplyTime         int64  `json:"apply_time"`
 	RefundCallbackURL string `json:"refund_callback_url"`
 }
 
@@ -194,9 +193,9 @@ func (h *XianguanjiaSupplyOrderHandler) GetOrder(c *gin.Context) {
 
 // RefundNotify 处理「订单退款申请」（POST，官方 /goofish/order/refund/apply 语义）。
 //
-// 同步撤单：可撤（本次实际作废张数 > 0，或订单已是退款态幂等重复）→ 同意，
+// 同步撤单：订单已是退款态（幂等重复）或本次全量作废成功 → 同意，
 // 返回 200 信封 {result:"agree", refund_data:{apply_time, refund_status:20,
-// refund_amount, refund_time}}；不可撤（卡已使用/已过期、无法撤单）→ 拒绝，
+// refund_amount, refund_time}}；零或部分作废（卡已使用/已过期、无法整单撤回）→ 拒绝，
 // 返回 {result:"refuse", remark:"卡密已使用或已过期，无法撤单"}。
 func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 	if h == nil || h.svc == nil {
@@ -225,14 +224,16 @@ func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 		return
 	}
 	if agree {
-		// 可撤单：同意 + 退款数据（refund_status=20 成功；refund_amount=订单金额）。
+		// 可撤单：同意 + 退款数据（refund_status=20 成功；refund_amount=订单快照金额）。
+		// refund_time 取订单终态时刻 order.EndTime（退款态=refunded_at，幂等重复时
+		// 仍是原退款时刻，而非本次请求时刻），由 service 决策后 handler 组装信封。
 		supplyOrderRespondOK(c, gin.H{
 			"result": "agree",
 			"refund_data": gin.H{
 				"apply_time":    body.ApplyTime,
 				"refund_status": 20,
 				"refund_amount": order.OrderAmount,
-				"refund_time":   time.Now().Unix(),
+				"refund_time":   order.EndTime,
 			},
 		})
 		return

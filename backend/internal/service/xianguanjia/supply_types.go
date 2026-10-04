@@ -89,9 +89,9 @@ type SupplyGoods struct {
 	GoodsNo    string `json:"goods_no"`
 	GoodsType  int    `json:"goods_type"`
 	GoodsName  string `json:"goods_name"`
-	Price      int64  `json:"price"`      // 分
+	Price      int64  `json:"price"` // 分
 	Stock      int    `json:"stock"`
-	Status     int    `json:"status"`     // 1=在架 2=下架（官方枚举）
+	Status     int    `json:"status"`      // 1=在架 2=下架（官方枚举）
 	UpdateTime int64  `json:"update_time"` // 秒
 }
 
@@ -123,7 +123,7 @@ type SupplyPlatformFeatures struct {
 // SupplyPlatformInfo 是「查询平台信息」的返回体。
 // app_id 必须为当前对接的应用概况 AppKey（整数），官方原话见总单「官方返回要求」。
 type SupplyPlatformInfo struct {
-	AppID    int64                 `json:"app_id"`
+	AppID    int64                  `json:"app_id"`
 	Features SupplyPlatformFeatures `json:"features"`
 }
 

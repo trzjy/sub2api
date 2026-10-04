@@ -89,6 +89,10 @@ type SupplyOrder struct {
 // ---- 存储 DTO ----
 
 // supplyOrderRow 是 xianguanjia_supply_orders 的一行（服务内部使用）。
+//
+// 金额快照三列（goods_name/unit_price/order_amount）由 D6E-02R #2 引入：下单时
+// 与取卡同事务落库，之后查单/退款一律取快照，杜绝「按当前商品实时重建金额」导致的
+// 历史订单金额漂移与退款 refund_amount=0 仍成功（外审依据）。
 type supplyOrderRow struct {
 	ID             int64
 	ManagerOrderNo string
@@ -98,6 +102,9 @@ type supplyOrderRow struct {
 	CardNos        []string
 	CreatedAt      time.Time
 	RefundedAt     *time.Time
+	GoodsName      string // 金额快照：下单时商品名（TEXT）
+	UnitPrice      int64  // 金额快照：单价（分）
+	OrderAmount    int64  // 金额快照：订单金额（分）= unit_price × quantity
 }
 
 // supplyOrderToView 把存储行转为对外视图。
@@ -155,6 +162,14 @@ type SupplyCardPool interface {
 	// VoidCardsForOrder 作废某订单已发的卡：把命中卡 delivered/unused → expired，
 	// 返回「本次实际由非 expired 转为 expired」的张数（幂等：已 expired 不计数）。
 	VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error)
+
+	// VoidCardsForOrderTx 事务内作废（D6E-02R #3 退款原子化）：与 MarkRefundedTx
+	// 同属一个 *sql.Tx，整体提交/回滚。内存实现直接改状态，回滚由 UndoVoidTx 补偿。
+	VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error)
+	// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废（内存实现把 expired 复位为
+	// delivered），用于「作废成功但置态失败」时整体回滚，使卡保持 delivered。
+	// DB 实现随事务回滚自动丢弃，返回 nil（no-op）。
+	UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error
 }
 
 // ---- 订单仓储 ----
@@ -164,7 +179,7 @@ type SupplyCardPool interface {
 // 幂等核心：InsertCreating 依赖 manager_order_no UNIQUE 约束；
 // 冲突返回 ErrSupplyOrderDup，调用方回滚取卡并回读已存在订单。
 type SupplyOrderStore interface {
-	// InsertCreating 在事务内插入占位订单行（status=10 creating）。
+	// InsertCreating 在事务内插入占位订单行（status=10 creating），并写入金额快照。
 	// manager_order_no 已存在时返回 ErrSupplyOrderDup。
 	InsertCreating(ctx context.Context, tx *sql.Tx, row supplyOrderPlanned) (int64, error)
 	// GetByManagerOrderNo 按管家订单号读取订单行；不存在返回 (nil, nil)。
@@ -181,15 +196,24 @@ type SupplyOrderStore interface {
 	RollbackTx(ctx context.Context, tx *sql.Tx) error
 	// SetCardsAndStatusTx 事务内写入卡的映射与最终状态（创建成功时 status=20）。
 	SetCardsAndStatusTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, cardNos []string, status int) error
+
+	// GetByManagerOrderNoTx 事务内（FOR UPDATE 行锁）按管家订单号读取订单行；
+	// 用于退款原子化，串行化并发退款（D6E-02R #3）。内存实现退化为克隆。
+	GetByManagerOrderNoTx(ctx context.Context, tx *sql.Tx, managerOrderNo string) (*supplyOrderRow, error)
+	// MarkRefundedTx 事务内幂等置退款态并写 refunded_at；返回是否本次变更（D6E-02R #3）。
+	MarkRefundedTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, at time.Time) (bool, error)
 }
 
-// supplyOrderPlanned 是插入订单行的计划载荷。
+// supplyOrderPlanned 是插入订单行的计划载荷（含金额快照，D6E-02R #2）。
 type supplyOrderPlanned struct {
 	ManagerOrderNo string
 	GoodsNo        string
 	Quantity       int
 	CardNos        []string
 	Status         int
+	GoodsName      string // 金额快照：下单时商品名
+	UnitPrice      int64  // 金额快照：单价（分）
+	OrderAmount    int64  // 金额快照：订单金额（分）
 }
 
 // ErrSupplyOrderDup 是订单号已存在的内部哨兵错误（幂等冲突信号，非对外错误码）。
@@ -220,8 +244,9 @@ type SupplyOrderService struct {
 // NewSupplyOrderService 构造订单服务。store/pool/goods 必填（fail-closed）；
 // pwdResolve 可为 nil（则 card_pwd 一律默认官方合规映射）。
 //
-// goods 为金额来源：CreateOrder 经其取商品单价（分）并做可用性校验；查单/退款
-// 回读亦经其聚合 order_amount / goods_name（订单行不冗余存储单价，无迁移）。
+// goods 仅在 CreateOrder 未命中幂等回读时用于取商品单价（分）与可用性校验；
+// 查单/退款一律读订单行金额快照（goods_name/unit_price/order_amount），不再回源
+// 商品（D6E-02R #2），杜绝历史订单金额漂移与退款 refund_amount=0 仍成功。
 func NewSupplyOrderService(store SupplyOrderStore, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver) *SupplyOrderService {
 	return &SupplyOrderService{store: store, pool: pool, goods: goods, pwdResolve: pwdResolve}
 }
@@ -234,9 +259,11 @@ func NewSupplyOrderService(store SupplyOrderStore, pool SupplyCardPool, goods Su
 // max_amount（分，可选）：>0 且 OrderAmount > max_amount → 1202（下单金额低于成本价），
 // 且此校验先于取卡，不得发卡。0 表示不校验（官方未传时不校验）。
 //
-// 幂等（资金红线）：先按 manager_order_no 回读；命中已有订单直接返回原结果，
-// 绝不再取卡。未命中则取卡 + 写订单行（同一 DB 事务）；若并发下唯一键冲突，
-// 回滚本次取卡并回读先到者的订单，返回同一批卡。
+// 幂等（资金红线）：先按 manager_order_no 回读（步骤 0）；命中已有订单直接返回
+// 原订单快照视图，完全不读商品源（即便商品下架/改价/更小 max_amount，重试也返回
+// 原订单原卡，D6E-02R #1）。未命中则商品校验 → max_amount 校验（均未取卡）→ 取卡
+// ＋ 写订单行（含金额快照，同一 DB 事务）；若并发下唯一键冲突，回滚本次取卡并
+// 回读先到者的订单，返回同一批卡。
 //
 // 返回错误：库存不足/商品不存在/商品不可用/金额超额 → *SupplyAPIError；参数非法
 // → 普通 error；其它为内部错误（handler 归一为 1209 下单超时）。
@@ -253,6 +280,15 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 		return nil, fmt.Errorf("xianguanjia supply create order: buy_quantity must be > 0")
 	}
 
+	// 0) 幂等前置回读（最高优先级，资金红线）：已有订单直接返回原订单快照视图，
+	//    完全不读商品源——即便商品已下架/改价/更小 max_amount，重试也返回原订单原卡
+	//    （D6E-02R #1）。未命中才进入下面的商品校验与取卡。
+	if existing, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo); err != nil {
+		return nil, fmt.Errorf("xianguanjia supply create order lookup: %w", err)
+	} else if existing != nil {
+		return s.viewExisting(ctx, existing)
+	}
+
 	// 1) 取商品（金额来源 + 可用性校验）：不存在→1100、下架→1101。
 	goods, gerr := s.getGoodsOrFail(ctx, goodsNo)
 	if gerr != nil {
@@ -266,14 +302,7 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 		return nil, NewSupplyAPIError(SupplyCodeOrderAmountBelowCost, "下单金额低于成本价")
 	}
 
-	// 3) 幂等前置回读：已有订单直接返回原结果（不重发卡）。
-	if existing, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo); err != nil {
-		return nil, fmt.Errorf("xianguanjia supply create order lookup: %w", err)
-	} else if existing != nil {
-		return s.viewExisting(ctx, existing)
-	}
-
-	// 4) 取卡（原子）：不足即 1102，不写订单行。
+	// 3) 取卡（原子）：不足即 1102，不写订单行。
 	cards, err := s.pool.ClaimCardsForOrder(ctx, goodsNo, buyQuantity)
 	if err != nil {
 		return nil, fmt.Errorf("xianguanjia supply claim cards: %w", err)
@@ -284,7 +313,7 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 		return nil, ErrSupplyStockInsufficient
 	}
 
-	// 5) 写订单行（唯一键仲裁幂等）。
+	// 4) 写订单行（唯一键仲裁幂等），金额快照与取卡同事务落库（D6E-02R #2）。
 	cardNos := make([]string, 0, len(cards))
 	for _, c := range cards {
 		cardNos = append(cardNos, c.CardNo)
@@ -301,6 +330,9 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 		Quantity:       buyQuantity,
 		CardNos:        cardNos,
 		Status:         supplyOrderStatusCreating,
+		GoodsName:      goods.GoodsName,
+		UnitPrice:      goods.Price,
+		OrderAmount:    orderAmount,
 	})
 	if err != nil {
 		_ = s.store.RollbackTx(ctx, tx)
@@ -384,13 +416,17 @@ func (s *SupplyOrderService) GetOrder(ctx context.Context, orderNo, outOrderNo s
 	return s.viewExisting(ctx, row)
 }
 
-// RefundNotify 处理退款通知：订单置退款态 + 作废对应卡（delivered→expired，
-// 复用 D2 语义），仅作废本订单已发的卡（由 card_nos 精确定位）。
+// RefundNotify 处理退款通知：单事务原子化「作废卡 + 置退款态」（D6E-02R #3）。
 //
-// 同步撤单判定（返回 agree bool，供 handler 决定 result=agree/refuse）：
-//   - 本次实际作废张数 > 0 → 可撤（agree），置退款态；
-//   - 订单已是退款态（重复通知，幂等）→ 仍 agree；
-//   - 否则卡已使用/已过期、无法撤单 → refuse（agree=false，不置退款态）。
+// 状态转换判定：已退款幂等 agree；未退款仅全量作废（voided==卡数）agree，
+// 零或部分作废（卡已用/已过期）均整体回滚 refuse：
+//  1. 订单已退款 → 幂等 agree（refund_data 用快照金额 + refunded_at，不再作废）；
+//  2. 未退款：事务内作废卡；voided != 卡数（零或部分）→ 回滚 + refuse；
+//  3. 全量作废 → 同事务 MarkRefunded → 提交 → agree。
+//     任何一步失败 → 整体回滚（卡保持 delivered、订单保持原态，重试可完整再来）。
+//
+// 并发语义：GetByManagerOrderNoTx 以 FOR UPDATE 行锁串行化；后到请求要么读到已退款
+// （agree 幂等返回），要么参与同一行锁串行化，不得出现「读到旧状态 → 误 refuse/重复作废」。
 //
 // 订单不存在 → ErrSupplyOrderNotFound（code=1200，handler 归一）。
 func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, bool, error) {
@@ -401,44 +437,83 @@ func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo st
 	if managerOrderNo == "" {
 		return nil, false, fmt.Errorf("xianguanjia supply refund notify: manager_order_no is required")
 	}
-	row, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo)
+
+	tx, err := s.store.BeginTx(ctx)
 	if err != nil {
+		return nil, false, fmt.Errorf("xianguanjia supply refund begin tx: %w", err)
+	}
+	// 行锁读取：串行化并发退款，保证后到者读到一致状态。
+	row, err := s.store.GetByManagerOrderNoTx(ctx, tx, managerOrderNo)
+	if err != nil {
+		_ = s.store.RollbackTx(ctx, tx)
 		return nil, false, fmt.Errorf("xianguanjia supply refund notify lookup: %w", err)
 	}
 	if row == nil {
+		_ = s.store.RollbackTx(ctx, tx)
 		return nil, false, ErrSupplyOrderNotFound
 	}
 
-	// 先作废卡再置退款态：作废失败（DB/临时故障）不置退款态，交给闲管家重试
-	// （与 D2 「处理成功才落回执」一致）。作废本身幂等：已 expired 不计数、不报错。
-	voided, err := s.pool.VoidCardsForOrder(ctx, row.CardNos)
+	// 1) 已退款：幂等 agree，refund_data 用快照金额 + refunded_at，不再作废。
+	if row.Status == supplyOrderStatusRefunded {
+		_ = s.store.RollbackTx(ctx, tx)
+		order, verr := s.viewExisting(ctx, row)
+		if verr != nil {
+			return nil, false, verr
+		}
+		return order, true, nil
+	}
+
+	// 2) 事务内作废卡。
+	voided, err := s.pool.VoidCardsForOrderTx(ctx, tx, row.CardNos)
 	if err != nil {
+		_ = s.store.RollbackTx(ctx, tx)
 		return nil, false, fmt.Errorf("xianguanjia supply refund void cards for order %s: %w", managerOrderNo, err)
 	}
-	// 同步撤单判定：本次作废张数 > 0 或订单已是退款态（幂等重复通知）→ 可撤；
-	// 否则卡已使用/已过期、无法撤单 → refuse。
-	agree := voided > 0 || row.Status == supplyOrderStatusRefunded
-	if agree {
-		if _, err := s.store.MarkRefunded(ctx, managerOrderNo, time.Now()); err != nil {
-			return nil, false, fmt.Errorf("xianguanjia supply refund mark order %s: %w", managerOrderNo, err)
+	// 未整体作废（voided==0 或 1..n-1 部分卡已用/已过期）→ 整体回滚 + refuse：
+	// 不得按全额 agree 置退款（部分已用卡保持有效，资金损失）。
+	if voided != len(row.CardNos) {
+		// 回滚本轮已作废的卡（仅本集合，见 SupplyCardPoolMemory.lastVoided 与 UndoVoidTx）。
+		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
+		_ = s.store.RollbackTx(ctx, tx)
+		order, verr := s.viewExisting(ctx, row)
+		if verr != nil {
+			return nil, false, verr
 		}
-		row.Status = supplyOrderStatusRefunded
-		now := time.Now()
-		if row.RefundedAt == nil {
-			row.RefundedAt = &now
-		}
+		return order, false, nil
 	}
-	slog.Info("xianguanjia supply order refund evaluated",
-		"manager_order_no", managerOrderNo, "cards", len(row.CardNos), "voided", voided, "agree", agree)
+
+	// 3) 同事务置退款态；置态失败 → 撤回作废（卡复位 delivered）+ 整体回滚。
+	// 置态前只取一次 now，同一值既传 MarkRefundedTx（持久化 refunded_at）又赋给
+	// 本地 row.RefundedAt（首次 agree 的 refund_time），保证二者单源同值。
+	now := time.Now()
+	if _, err := s.store.MarkRefundedTx(ctx, tx, managerOrderNo, now); err != nil {
+		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
+		_ = s.store.RollbackTx(ctx, tx)
+		return nil, false, fmt.Errorf("xianguanjia supply refund mark order %s: %w", managerOrderNo, err)
+	}
+	if err := s.store.CommitTx(ctx, tx); err != nil {
+		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
+		_ = s.store.RollbackTx(ctx, tx)
+		return nil, false, fmt.Errorf("xianguanjia supply refund commit %s: %w", managerOrderNo, err)
+	}
+
+	// 本地 row 置退款态以便视图计算 end_time（refunded_at），复用上面同源 now。
+	row.Status = supplyOrderStatusRefunded
+	if row.RefundedAt == nil {
+		row.RefundedAt = &now
+	}
+	slog.Info("xianguanjia supply order refund committed",
+		"manager_order_no", managerOrderNo, "cards", len(row.CardNos), "voided", voided, "agree", true)
 
 	order, err := s.viewExisting(ctx, row)
 	if err != nil {
 		return nil, false, err
 	}
-	return order, agree, nil
+	return order, true, nil
 }
 
-// viewExisting 把存储行转为对外视图并回读卡密与金额/商品名。
+// viewExisting 把存储行转为对外视图：金额/商品名一律取订单行快照（D6E-02R #2），
+// 绝不读商品源（goods 源读取失败不再可能被吞，杜绝金额漂移）。
 func (s *SupplyOrderService) viewExisting(ctx context.Context, row *supplyOrderRow) (*SupplyOrder, error) {
 	items, err := s.buildCardItems(ctx, row.CardNos)
 	if err != nil {
@@ -446,16 +521,7 @@ func (s *SupplyOrderService) viewExisting(ctx context.Context, row *supplyOrderR
 			"manager_order_no", row.ManagerOrderNo, "err", err)
 		items = emptyCardItems(row.CardNos)
 	}
-	// 回读时补金额/商品名：订单行不冗余存储单价，按 goods_no 实时聚合（无迁移）。
-	var orderAmount int64
-	var goodsName string
-	if s.goods != nil && row.GoodsNo != "" {
-		if g, gerr := s.goods.GetGoods(ctx, row.GoodsNo); gerr == nil && g != nil {
-			orderAmount = g.Price * int64(row.Quantity)
-			goodsName = g.GoodsName
-		}
-	}
-	return supplyOrderToView(row, items, orderAmount, goodsName), nil
+	return supplyOrderToView(row, items, row.OrderAmount, row.GoodsName), nil
 }
 
 // getGoodsOrFail 取商品并做可用性校验：不存在→1100、下架(status=2)→1101。
@@ -573,10 +639,11 @@ func (s *supplyOrderStoreDB) InsertCreating(ctx context.Context, tx *sql.Tx, row
 	var id int64
 	err := execQueryRow(ctx, tx, s.db, `
 		INSERT INTO xianguanjia_supply_orders
-			(manager_order_no, goods_no, quantity, status, card_nos)
-		VALUES ($1, $2, $3, $4, $5)
+			(manager_order_no, goods_no, quantity, status, card_nos, goods_name, unit_price, order_amount)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`,
-		row.ManagerOrderNo, row.GoodsNo, row.Quantity, row.Status, encodeCardNos(row.CardNos)).Scan(&id)
+		row.ManagerOrderNo, row.GoodsNo, row.Quantity, row.Status, encodeCardNos(row.CardNos),
+		row.GoodsName, row.UnitPrice, row.OrderAmount).Scan(&id)
 	if err != nil {
 		if supplyIsUniqueViolation(err) {
 			return 0, ErrSupplyOrderDup
@@ -605,6 +672,13 @@ func (s *supplyOrderStoreDB) GetByManagerOrderNo(ctx context.Context, managerOrd
 	return scanSupplyOrder(s.db.QueryRowContext(ctx, supplyOrderSelectSQL, managerOrderNo))
 }
 
+func (s *supplyOrderStoreDB) GetByManagerOrderNoTx(ctx context.Context, tx *sql.Tx, managerOrderNo string) (*supplyOrderRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("xianguanjia supply order store unavailable")
+	}
+	return scanSupplyOrder(execQueryRow(ctx, tx, s.db, supplyOrderSelectForUpdateSQL, managerOrderNo))
+}
+
 func (s *supplyOrderStoreDB) GetByID(ctx context.Context, id int64) (*supplyOrderRow, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("xianguanjia supply order store unavailable")
@@ -613,10 +687,14 @@ func (s *supplyOrderStoreDB) GetByID(ctx context.Context, id int64) (*supplyOrde
 }
 
 func (s *supplyOrderStoreDB) MarkRefunded(ctx context.Context, managerOrderNo string, at time.Time) (bool, error) {
+	return s.MarkRefundedTx(ctx, nil, managerOrderNo, at)
+}
+
+func (s *supplyOrderStoreDB) MarkRefundedTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, at time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, fmt.Errorf("xianguanjia supply order store unavailable")
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := execNonQuery(ctx, tx, s.db, `
 		UPDATE xianguanjia_supply_orders
 		SET status = $1, refunded_at = COALESCE(refunded_at, $2)
 		WHERE manager_order_no = $3 AND status <> $1`,
@@ -629,11 +707,15 @@ func (s *supplyOrderStoreDB) MarkRefunded(ctx context.Context, managerOrderNo st
 }
 
 const supplyOrderSelectSQL = `
-	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at
+	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at, goods_name, unit_price, order_amount
 	FROM xianguanjia_supply_orders WHERE manager_order_no = $1`
 
+const supplyOrderSelectForUpdateSQL = `
+	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at, goods_name, unit_price, order_amount
+	FROM xianguanjia_supply_orders WHERE manager_order_no = $1 FOR UPDATE`
+
 const supplyOrderSelectByIDSQL = `
-	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at
+	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at, goods_name, unit_price, order_amount
 	FROM xianguanjia_supply_orders WHERE id = $1`
 
 func scanSupplyOrder(row *sql.Row) (*supplyOrderRow, error) {
@@ -641,7 +723,7 @@ func scanSupplyOrder(row *sql.Row) (*supplyOrderRow, error) {
 	var cardNosRaw []byte
 	var refunded sql.NullTime
 	if err := row.Scan(&r.ID, &r.ManagerOrderNo, &r.GoodsNo, &r.Quantity, &r.Status,
-		&cardNosRaw, &r.CreatedAt, &refunded); err != nil {
+		&cardNosRaw, &r.CreatedAt, &refunded, &r.GoodsName, &r.UnitPrice, &r.OrderAmount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -790,12 +872,18 @@ func (p *supplyCardPoolDB) ReleaseClaimedCards(ctx context.Context, cardNos []st
 // 复用 D2 语义（CodeCardVoidRepository.VoidCodesByCardNos 同样只处理
 // delivered/unused，不动 used/expired）。返回本次实际作废张数。
 func (p *supplyCardPoolDB) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
+	return p.VoidCardsForOrderTx(ctx, nil, cardNos)
+}
+
+// VoidCardsForOrderTx 事务内作废（D6E-02R #3）：与订单置态同属一个 *sql.Tx，
+// 整体提交/回滚。复用 D2 语义，返回本次实际作废张数。
+func (p *supplyCardPoolDB) VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error) {
 	if p == nil || p.db == nil {
 		return 0, fmt.Errorf("xianguanjia supply card pool unavailable")
 	}
 	total := 0
 	for _, no := range cardNos {
-		res, err := p.db.ExecContext(ctx, `
+		res, err := execNonQuery(ctx, tx, p.db, `
 			UPDATE redeem_codes SET status = 'expired'
 			WHERE code = $1 AND status IN ('delivered', 'unused')`, no)
 		if err != nil {
@@ -806,6 +894,12 @@ func (p *supplyCardPoolDB) VoidCardsForOrder(ctx context.Context, cardNos []stri
 		}
 	}
 	return total, nil
+}
+
+// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废。DB 实现随事务回滚自动丢弃，
+// 此处为 no-op（D6E-02R #3 退款原子化回滚）。
+func (p *supplyCardPoolDB) UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error {
+	return nil
 }
 
 // parseGoodsGroupID 把 goods_no 解析为分组 ID（D6c 映射 goods_no=分组ID 的十进制串）。
@@ -859,6 +953,9 @@ func (s *supplyOrderStoreMem) InsertCreating(ctx context.Context, tx *sql.Tx, ro
 		Status:         row.Status,
 		CardNos:        append([]string(nil), row.CardNos...),
 		CreatedAt:      time.Now(),
+		GoodsName:      row.GoodsName,
+		UnitPrice:      row.UnitPrice,
+		OrderAmount:    row.OrderAmount,
 	}
 	s.rows[row.ManagerOrderNo] = r
 	return r.ID, nil
@@ -888,6 +985,11 @@ func (s *supplyOrderStoreMem) GetByManagerOrderNo(ctx context.Context, managerOr
 	return cloneSupplyOrderRow(s.rows[managerOrderNo]), nil
 }
 
+// GetByManagerOrderNoTx 内存实现：退化为克隆（无真实行锁；并发仲裁由单测覆盖路径保证）。
+func (s *supplyOrderStoreMem) GetByManagerOrderNoTx(ctx context.Context, tx *sql.Tx, managerOrderNo string) (*supplyOrderRow, error) {
+	return s.GetByManagerOrderNo(ctx, managerOrderNo)
+}
+
 func (s *supplyOrderStoreMem) GetByID(ctx context.Context, id int64) (*supplyOrderRow, error) {
 	if s == nil {
 		return nil, fmt.Errorf("xianguanjia supply order store unavailable")
@@ -903,6 +1005,10 @@ func (s *supplyOrderStoreMem) GetByID(ctx context.Context, id int64) (*supplyOrd
 }
 
 func (s *supplyOrderStoreMem) MarkRefunded(ctx context.Context, managerOrderNo string, at time.Time) (bool, error) {
+	return s.MarkRefundedTx(ctx, nil, managerOrderNo, at)
+}
+
+func (s *supplyOrderStoreMem) MarkRefundedTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, at time.Time) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("xianguanjia supply order store unavailable")
 	}
@@ -940,6 +1046,10 @@ type SupplyCardPoolMemory struct {
 	mu    sync.Mutex
 	cards map[string]string // card_no -> status
 	pwds  map[string]string // card_no -> card_pwd
+	// lastVoided 记录上次 VoidCardsForOrderTx 实际作废（delivered/unused → expired）的卡集合。
+	// 仅内存替身单测试场景用，供 UndoVoidTx 精确回滚：只复位本集合，避免误复活本轮之前
+	// 已 expired 的卡（偏离 DB 事务回滚语义）。DB 实现随事务回滚自动丢弃，无需此字段。
+	lastVoided []string
 }
 
 // NewSupplyCardPoolMemory 返回内存版卡密池。cardNos 全部初始化为 unused；
@@ -1020,20 +1130,46 @@ func (p *SupplyCardPoolMemory) ReleaseClaimedCards(ctx context.Context, cardNos 
 }
 
 func (p *SupplyCardPoolMemory) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
+	return p.VoidCardsForOrderTx(ctx, nil, cardNos)
+}
+
+// VoidCardsForOrderTx 内存实现：与 DB 语义一致（tx 为 nil，无真实事务）。
+// 记录本次实际作废集合到 lastVoided，供 UndoVoidTx 精确回滚（仅复位本集合）。
+func (p *SupplyCardPoolMemory) VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error) {
 	if p == nil {
 		return 0, fmt.Errorf("xianguanjia supply card pool unavailable")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := 0
+	p.lastVoided = p.lastVoided[:0]
 	for _, no := range cardNos {
 		switch p.cards[no] {
 		case "delivered", "unused":
 			p.cards[no] = "expired"
 			n++
+			p.lastVoided = append(p.lastVoided, no)
 		}
 	}
 	return n, nil
+}
+
+// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废（内存：expired → delivered），
+// 用于「作废成功但置态失败」时整体回滚，使卡保持 delivered（D6E-02R #3）。
+// 仅复位 lastVoided（本轮实际作废集合），不再遍历 cardNos 全量恢复，避免误复活
+// 本轮之前已 expired 的卡（差于 DB 事务回滚语义）。DB 实现随事务回滚自动丢弃为 no-op。
+func (p *SupplyCardPoolMemory) UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error {
+	if p == nil {
+		return fmt.Errorf("xianguanjia supply card pool unavailable")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, no := range p.lastVoided {
+		if p.cards[no] == "expired" {
+			p.cards[no] = "delivered"
+		}
+	}
+	return nil
 }
 
 func sortedCardNos(m map[string]string) []string {
