@@ -426,6 +426,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
 	accountHealthRecoveryProbeService := service.ProvideAccountHealthRecoveryProbeService(accountRepository, httpUpstream, configConfig, rateLimitService, settingService, tlsFingerprintProfileService, freshnessAlertService, channelMonitorService)
+	maskedIdentityProbeService := service.ProvideMaskedIdentityProbeService(configConfig, settingService, apiKeyRepository, accountRepository, opsService, emailService)
 	openAICodexVersionSyncService := service.ProvideOpenAICodexVersionSyncService(settingRepository, settingService, gitHubReleaseClient)
 	proxyExpiryService := service.ProvideProxyExpiryService(proxyRepository)
 	subscriptionExpiryService := service.ProvideSubscriptionExpiryService(userSubscriptionRepository, settingRepository, notificationEmailService, leaderLockCache, db)
@@ -439,7 +440,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
-	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
+	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, maskedIdentityProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -496,6 +497,7 @@ func provideCleanup(
 	codeBuddyQuotaCheck *service.CodeBuddyQuotaCheckService,
 	apiKeyBalanceProbeCheck *service.AccountBalanceProbeCheckService,
 	accountHealthRecoveryProbe *service.AccountHealthRecoveryProbeService,
+	maskedIdentityProbe *service.MaskedIdentityProbeService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
 	subscriptionExpiry *service.SubscriptionExpiryService,
@@ -709,6 +711,12 @@ func provideCleanup(
 			{"AccountHealthRecoveryProbe", func() error {
 				if accountHealthRecoveryProbe != nil {
 					accountHealthRecoveryProbe.Stop()
+				}
+				return nil
+			}},
+			{"MaskedIdentityProbe", func() error {
+				if maskedIdentityProbe != nil {
+					maskedIdentityProbe.Stop()
 				}
 				return nil
 			}},

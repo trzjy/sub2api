@@ -669,6 +669,23 @@ func ProvideAccountHealthRecoveryProbeService(
 	return svc
 }
 
+// ProvideMaskedIdentityProbeService 构造并启动「掩码身份泄漏持续探针 job」（方案 §7.5 #1）：
+// 定时经本站网关 loopback 发三入口真实请求，断言响应不含上游身份痕迹，阳性走既有
+// ops_alert 闭环（严重级事件 + 邮件 + 恢复关闭）。开关默认关闭，循环每轮重读开关，
+// 故管理端开关变更在一个间隔内生效，无需重启。
+func ProvideMaskedIdentityProbeService(
+	cfg *config.Config,
+	settingService *SettingService,
+	apiKeyRepo APIKeyRepository,
+	accountRepo AccountRepository,
+	opsService *OpsService,
+	emailService *EmailService,
+) *MaskedIdentityProbeService {
+	svc := NewMaskedIdentityProbeService(cfg, settingService, apiKeyRepo, accountRepo, opsService, emailService)
+	svc.Start(context.Background())
+	return svc
+}
+
 // ProvideFreshnessAlertService 构造状态新鲜度陈旧告警服务（D4 工作项 3）。
 // 复用既有 OpsAlertEvent 载体（不新增通知链路）；账号侧读面与冻结上界经 RateLimitService
 // 取得（后者由探测调度器注入），渠道档位经 ChannelMonitorService.DeriveChannelStatus 推导。
@@ -1195,6 +1212,7 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuExposureService,
 	ProvideServerBaseURL,
 	ProvideAccountHealthRecoveryProbeService,
+	ProvideMaskedIdentityProbeService,
 	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,
 	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),

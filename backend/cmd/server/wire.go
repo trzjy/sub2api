@@ -103,6 +103,7 @@ func provideCleanup(
 	codeBuddyQuotaCheck *service.CodeBuddyQuotaCheckService,
 	apiKeyBalanceProbeCheck *service.AccountBalanceProbeCheckService,
 	accountHealthRecoveryProbe *service.AccountHealthRecoveryProbeService,
+	maskedIdentityProbe *service.MaskedIdentityProbeService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
 	subscriptionExpiry *service.SubscriptionExpiryService,
@@ -317,6 +318,12 @@ func provideCleanup(
 			{"AccountHealthRecoveryProbe", func() error {
 				if accountHealthRecoveryProbe != nil {
 					accountHealthRecoveryProbe.Stop()
+				}
+				return nil
+			}},
+			{"MaskedIdentityProbe", func() error {
+				if maskedIdentityProbe != nil {
+					maskedIdentityProbe.Stop()
 				}
 				return nil
 			}},
