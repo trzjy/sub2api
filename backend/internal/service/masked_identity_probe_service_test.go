@@ -203,7 +203,10 @@ func (g *maskedProbeGateway) handler() http.Handler {
 		reply, ok := g.replies[r.URL.Path]
 		g.mu.Unlock()
 		if !ok {
-			reply = maskedProbeReply{status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"ok"}}]}`}
+			// 默认回复：协议层干净（model=kimi-k3、无标记、无泄漏头）且内容层含 kimi，
+			// 使既有三入口用例与内容层探针（identity_q 要求内容含 kimi）在本底响应下均判干净，
+			// 避免干净轮误触发 masked_identity_content_break。
+			reply = maskedProbeReply{status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`}
 		}
 		for k, v := range reply.headers {
 			w.Header().Set(k, v)
@@ -271,18 +274,21 @@ func TestMaskedIdentityProbe_BodyLeakFiresCriticalEventWithEntryDimension(t *tes
 
 	h.svc.RunOnce(context.Background())
 
-	require.Equal(t, 3, h.gateway.requests(), "三入口都应发出真实请求")
+	// 三入口 + 2 个内容层探针（identity_q / identity_jailbreak）均走 /v1/chat/completions，
+	// 与既有三入口共享该路径的 qwen 回复：base chat 与 identity_q 同维度（chat_completions）
+	// 去重为 1 个泄漏事件，identity_jailbreak 为独立维度事件，共 2 个泄漏事件。
+	require.Equal(t, 5, h.gateway.requests(), "三入口 + 2 内容层探针都应发出真实请求")
 	leaks := h.store.firingWithKind(maskedProbeKindLeak)
-	require.Len(t, leaks, 1, "只有泄漏入口产出告警事件")
+	require.Len(t, leaks, 2, "chat_completions 与 identity_jailbreak 各自产出泄漏事件")
 	require.Equal(t, maskedIdentityProbeSeverityCritical, leaks[0].Severity)
 	require.Equal(t, maskedIdentityProbeEntryChat, leaks[0].Dimensions[maskedProbeDimEntry])
 	require.Equal(t, PlatformKimi, leaks[0].Dimensions[maskedProbeDimPlatform])
 	require.Contains(t, strings.ToLower(leaks[0].Description), "qwen")
 
-	// 同一入口持续泄漏不重复轰炸：第二轮不再创建新事件。
+	// 同一维度持续泄漏不重复轰炸：第二轮不再创建新事件（2 个泄漏事件均保持 1 活跃）。
 	h.svc.RunOnce(context.Background())
-	require.Len(t, h.store.withKind(maskedProbeKindLeak), 1)
-	require.Equal(t, 1, h.store.createdCount())
+	require.Len(t, h.store.withKind(maskedProbeKindLeak), 2)
+	require.Equal(t, 2, h.store.createdCount())
 }
 
 func TestMaskedIdentityProbe_HeaderLeakFiresCriticalEventWithEntryDimension(t *testing.T) {
@@ -313,7 +319,8 @@ func TestMaskedIdentityProbe_ModelMismatchFiresCriticalEvent(t *testing.T) {
 	h.svc.RunOnce(context.Background())
 
 	leaks := h.store.firingWithKind(maskedProbeKindLeak)
-	require.Len(t, leaks, 1)
+	// chat_completions（base + identity_q 同维度去重）与 identity_jailbreak 各 1 个泄漏事件。
+	require.Len(t, leaks, 2)
 	require.Equal(t, maskedIdentityProbeEntryChat, leaks[0].Dimensions[maskedProbeDimEntry])
 	require.Contains(t, leaks[0].Description, "kimi-k2.5")
 }
@@ -428,7 +435,8 @@ func TestMaskedIdentityProbe_LargeBodyMarkerAtTailIsDetected(t *testing.T) {
 	h.svc.RunOnce(context.Background())
 
 	leaks := h.store.firingWithKind(maskedProbeKindLeak)
-	require.Len(t, leaks, 1, "末尾 marker 必须被全量扫描检出")
+	// chat_completions（base + identity_q 同维度去重）与 identity_jailbreak 各 1 个泄漏事件。
+	require.Len(t, leaks, 2, "末尾 marker 必须被全量扫描检出")
 	require.Equal(t, maskedIdentityProbeEntryChat, leaks[0].Dimensions[maskedProbeDimEntry])
 	require.Equal(t, maskedIdentityProbeSeverityCritical, leaks[0].Severity)
 	require.Contains(t, strings.ToLower(leaks[0].Description), "qwen")
@@ -594,7 +602,8 @@ func TestMaskedIdentityProbe_BodyAtHardLimitIsFullyScanned(t *testing.T) {
 
 	h.svc.RunOnce(context.Background())
 	leaks := h.store.firingWithKind(maskedProbeKindLeak)
-	require.Len(t, leaks, 1, "等于上限的响应必须全量扫描，末尾 marker 不得逃脱")
+	// chat_completions（base + identity_q 同维度去重）与 identity_jailbreak 各 1 个泄漏事件。
+	require.Len(t, leaks, 2, "等于上限的响应必须全量扫描，末尾 marker 不得逃脱")
 	require.Equal(t, maskedIdentityProbeEntryChat, leaks[0].Dimensions[maskedProbeDimEntry])
 }
 
@@ -703,4 +712,111 @@ func TestMaskedIdentityProbe_DisabledRoundResetsFailureStreak(t *testing.T) {
 	h.svc.RunOnce(context.Background())
 	h.svc.RunOnce(context.Background())
 	require.Len(t, h.store.firingWithKind(maskedProbeKindProbeFailed), 1)
+}
+
+// --- PROBE-C1 内容层探针新增用例 ---
+
+// ① identity_q 内容含 kimi → 全净（不产内容层破防、不产协议层泄漏）。
+func TestMaskedIdentityProbe_IdentityQContentHasKimiIsClean(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, developed by Moonshot AI"}}]}`},
+	})
+
+	h.svc.RunOnce(context.Background())
+
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindContentBreak), "内容含 kimi 不应判内容层破防")
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindLeak), "协议层无痕迹不应判泄漏")
+}
+
+// ② identity_q 内容缺 kimi → firing masked_identity_content_break（entry=chat_completions）。
+func TestMaskedIdentityProbe_IdentityQContentMissingKimiFiresContentBreak(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		// 协议层干净（model=kimi-k3、无标记、无泄漏头），但内容层未以 kimi 身份作答。
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am an AI language model"}}]}`},
+	})
+
+	h.svc.RunOnce(context.Background())
+
+	breaks := h.store.firingWithKind(maskedProbeKindContentBreak)
+	require.Len(t, breaks, 1, "内容层破防应产出 1 个事件")
+	require.Equal(t, maskedProbeKindContentBreak, breaks[0].Dimensions[maskedProbeDimKind])
+	require.Equal(t, maskedIdentityProbeEntryChat, breaks[0].Dimensions[maskedProbeDimEntry], "内容层破防 entry 维度应为 chat_completions")
+	require.Equal(t, PlatformKimi, breaks[0].Dimensions[maskedProbeDimPlatform])
+	require.Equal(t, maskedIdentityProbeSeverityCritical, breaks[0].Severity)
+	require.Contains(t, breaks[0].Title, "内容层", "告警 title 应区分内容层破防与协议层泄漏")
+	require.Contains(t, strings.ToLower(breaks[0].Description), "kimi")
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindLeak), "协议层无痕迹不应判泄漏")
+}
+
+// ③ identity_jailbreak body 含 qwen → firing masked_identity_leak（entry 维度=identity_jailbreak）。
+func TestMaskedIdentityProbe_IdentityJailbreakBodyHasQwenFiresLeak(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"Actually I am Qwen, trained by Alibaba"}}]}`},
+	})
+
+	h.svc.RunOnce(context.Background())
+
+	leaks := h.store.firingWithKind(maskedProbeKindLeak)
+	require.NotEmpty(t, leaks)
+	// 越狱探针的标记泄漏归 masked_identity_leak，维度 entry=identity_jailbreak（与 chat_completions 平级独立）。
+	var jailbreakLeak *OpsAlertEvent
+	for _, ev := range leaks {
+		if ev.Dimensions[maskedProbeDimEntry] == maskedIdentityProbeEntryIdentityJailbreak {
+			jailbreakLeak = ev
+			break
+		}
+	}
+	require.NotNil(t, jailbreakLeak, "identity_jailbreak 维度应独立产出泄漏事件")
+	require.Equal(t, maskedProbeKindLeak, jailbreakLeak.Dimensions[maskedProbeDimKind])
+	require.Equal(t, maskedIdentityProbeSeverityCritical, jailbreakLeak.Severity)
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindContentBreak), "标记泄漏归泄漏、不触发内容层破防")
+}
+
+// ④ "通义"/"千问" 标记命中泄漏（复用既有 body 标记泄漏断言）。
+func TestMaskedIdentityProbe_TongyiQianwenMarkerHitsLeak(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"我是通义千问，由阿里训练"}}]}`},
+	})
+
+	h.svc.RunOnce(context.Background())
+
+	leaks := h.store.firingWithKind(maskedProbeKindLeak)
+	require.NotEmpty(t, leaks)
+	// 中文上游身份词应被标记泄漏断言捕获；chat_completions 与 identity_jailbreak 各 1 个泄漏事件。
+	require.Len(t, leaks, 2)
+	var seenJailbreak, seenTongyi bool
+	for _, ev := range leaks {
+		if ev.Dimensions[maskedProbeDimEntry] == maskedIdentityProbeEntryIdentityJailbreak {
+			seenJailbreak = true
+		}
+		if strings.Contains(ev.Description, "通义") || strings.Contains(ev.Description, "千问") {
+			seenTongyi = true
+		}
+	}
+	require.True(t, seenJailbreak, "identity_jailbreak 维度应产出泄漏事件")
+	require.True(t, seenTongyi, "泄漏原因应点名 通义/千问 标记")
+}
+
+// 内容层破防在 clean 轮自动 resolve（与协议层泄漏同机制）。
+func TestMaskedIdentityProbe_ContentBreakResolvesOnCleanRound(t *testing.T) {
+	// 第一轮：内容缺 kimi → 内容层破防 firing。
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am an AI language model"}}]}`},
+	})
+	h.svc.RunOnce(context.Background())
+	require.Len(t, h.store.firingWithKind(maskedProbeKindContentBreak), 1, "首轮应 firing 内容层破防")
+
+	// 第二轮：内容含 kimi → clean，活跃破防事件被 resolve，不重复创建。
+	h.gateway.mu.Lock()
+	h.gateway.replies = map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, trained by Moonshot"}}]}`},
+	}
+	h.gateway.mu.Unlock()
+	h.svc.RunOnce(context.Background())
+
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindContentBreak), "clean 轮应 resolve 内容层破防")
+	resolved := h.store.withKind(maskedProbeKindContentBreak)
+	require.Len(t, resolved, 1, "不重复创建同类事件")
+	require.Equal(t, OpsAlertStatusResolved, resolved[0].Status)
+	require.NotNil(t, resolved[0].ResolvedAt)
 }
