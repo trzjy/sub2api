@@ -13,8 +13,8 @@ import (
 
 // 以下密钥均为单测占位，绝非真实商户凭证。
 const (
-	fakeAppKey     = "fake-app-key"
-	fakeAppSecret  = "fake-app-secret"
+	fakeAppKey    = "fake-app-key"
+	fakeAppSecret = "fake-app-secret"
 )
 
 // independentMd5 用最直白的方式重算四段逗号 md5，作为 Sign 的"独立向量"对照。

@@ -41,11 +41,15 @@ func newTestSupplyGoodsSource() *testSupplyGoodsSource {
 }
 
 // newTestSupplyOrderHandler 构造基于内存实现的订单 handler 与路由。
+// D6F-A：下单现场生成卡密，卡池初始为空，生成器按需插入 delivered 卡。
 func newTestSupplyOrderHandler(cardNos []string, goods xianguanjia.SupplyGoodsSource) (*gin.Engine, *xianguanjia.SupplyOrderService, *xianguanjia.SupplyCardPoolMemory) {
 	gin.SetMode(gin.TestMode)
 	store := xianguanjia.NewSupplyOrderStoreMemory()
 	pool := xianguanjia.NewSupplyCardPoolMemory(cardNos, nil)
-	svc := xianguanjia.NewSupplyOrderService(store, pool, goods, xianguanjia.NewSupplyCardPwdResolverMemory(pool))
+	gen := xianguanjia.NewSupplyCardGeneratorMemory(pool, func(groupID int64) (int, error) { return 30, nil })
+	// 接线：内存生成器接进 store 事务生命周期（CommitTx 落盘前落库、RollbackTx 丢弃缓冲）。
+	store.WireCardGeneratorLifecycle(gen)
+	svc := xianguanjia.NewSupplyOrderService(store, gen, pool, goods, xianguanjia.NewSupplyCardPwdResolverMemory(pool))
 	h := NewXianguanjiaSupplyOrderHandler(svc)
 	r := gin.New()
 	r.POST("/create", h.CreateOrder)
@@ -149,14 +153,6 @@ func TestSupplyOrderHandlerCreateAndDuplicate(t *testing.T) {
 	require.Equal(t, data.CardItems, data2.CardItems)
 }
 
-func TestSupplyOrderHandlerInsufficientStock(t *testing.T) {
-	r, _, _ := newTestSupplyOrderHandler([]string{"card-1"}, newTestSupplyGoodsSource())
-	env := doSupplyOrderRequest(t, r, "/create", map[string]any{
-		"order_no": "MO-H2", "goods_no": "42", "buy_quantity": 5,
-	})
-	require.Equal(t, xianguanjia.SupplyCodeStockInsufficient, env.Code, "库存不足须返回 1102")
-}
-
 func TestSupplyOrderHandlerGetOrder(t *testing.T) {
 	r, _, _ := newTestSupplyOrderHandler([]string{"card-1", "card-2"}, newTestSupplyGoodsSource())
 	require.Equal(t, xianguanjia.SupplyCodeOK, doSupplyOrderRequest(t, r, "/create", map[string]any{
@@ -246,14 +242,19 @@ func TestSupplyOrderHandlerRefundAgree(t *testing.T) {
 
 // TestSupplyOrderHandlerRefundRefuse 验证退款申请 refuse 分支响应 JSON 形状。
 func TestSupplyOrderHandlerRefundRefuse(t *testing.T) {
-	r, _, pool := newTestSupplyOrderHandler([]string{"card-1", "card-2"}, newTestSupplyGoodsSource())
-	require.Equal(t, xianguanjia.SupplyCodeOK, doSupplyOrderRequest(t, r, "/create", map[string]any{
+	r, _, pool := newTestSupplyOrderHandler(nil, newTestSupplyGoodsSource())
+	create := doSupplyOrderRequest(t, r, "/create", map[string]any{
 		"order_no": "MO-H4R", "goods_no": "42", "buy_quantity": 2,
-	}).Code)
+	})
+	require.Equal(t, xianguanjia.SupplyCodeOK, create.Code)
+	var cd supplyOrderTestData
+	require.NoError(t, json.Unmarshal(create.Data, &cd))
+	require.Len(t, cd.CardItems, 2)
 
-	// 模拟卡已使用/已过期 → 本次作废 0 张 → refuse。
-	pool.SetCardStatusForTest("card-1", "expired")
-	pool.SetCardStatusForTest("card-2", "expired")
+	// 把本次生成的两张卡置为 expired → 退款作废 0 张 → refuse。
+	for _, it := range cd.CardItems {
+		pool.SetCardStatusForTest(it.CardPwd, "expired")
+	}
 
 	env := doSupplyOrderRequest(t, r, "/refund", map[string]any{"order_no": "MO-H4R", "apply_time": 1700000000})
 	require.Equal(t, xianguanjia.SupplyCodeOK, env.Code)

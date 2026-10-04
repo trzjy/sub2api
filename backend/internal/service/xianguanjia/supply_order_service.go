@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
 
@@ -50,9 +52,6 @@ const (
 
 // ErrSupplyOrderNotFound 是「订单不存在」的哨兵错误（code=1200）。
 var ErrSupplyOrderNotFound = NewSupplyAPIError(SupplyCodeOrderNotFound, "订单不存在")
-
-// ErrSupplyStockInsufficient 是「库存不足」的哨兵错误（code=1102）。
-var ErrSupplyStockInsufficient = NewSupplyAPIError(SupplyCodeStockInsufficient, "库存不足")
 
 // ---- 对外 DTO ----
 
@@ -141,24 +140,25 @@ func supplyOrderStatusToOfficial(internal int) int {
 	return internal
 }
 
-// ---- 卡密池取卡仓储 ----
+// ---- 现场生成卡密仓储（D6F-A：下单现场生成兑换码，废弃池取卡） ----
 
-// SupplyPoolCard 是取自卡密池的一张卡（card_no=redeem_codes.code，card_pwd 由池内填充）。
-type SupplyPoolCard struct {
-	CardNo  string
-	CardPwd string
+// SupplyCardGenerator 在订单同一 DB 事务内现场生成并插入兑换码（D6F-A：无限库存）。
+//
+// 生成器复用父包 service.GenerateRandomRedeemCode 生成码、service.PSResolveGroupValidityDays
+// 换算有效期，保证「code 生成」与「validity 换算」均为父包单一实现，xianguanjia 仅作编排。
+// 唯一约束冲突（码碰撞）由实现内部重试（每张上限 3 次）吸收，仍失败则报错。
+type SupplyCardGenerator interface {
+	// GenerateCardsTx 在给定事务内为 groupID 生成 quantity 张兑换码并插入
+	// redeem_codes（type='subscription'、status='delivered'、group_id、validity_days、
+	// notes=note），返回生成的码列表。任何失败（含无套餐分组 validity 解析失败）
+	// 均返回 error，由调用方整体回滚事务。
+	GenerateCardsTx(ctx context.Context, tx *sql.Tx, groupID int64, quantity int, note string) ([]string, error)
 }
 
-// SupplyCardPool 卡密池取卡/作废仓储（D6d 生产实现基于 redeem_codes）。
+// SupplyCardPool 卡密作废仓储（D6F-A：取卡链归零，仅保留退款作废）。
 //
 // 接口化以便单测与 handler 解耦；DB 实现复用既有 redeem_codes 状态机语义。
 type SupplyCardPool interface {
-	// ClaimCardsForOrder 原子取卡：从池中取 quantity 张 unused 卡并标记为
-	// delivered（渠道=闲管家），返回实际取到的卡（少于 quantity 即不足）。
-	// 语义对应 `UPDATE redeem_codes SET status='delivered' WHERE status='unused'
-	// AND ... LIMIT n RETURNING code`，单事务内完成，防并发双发。
-	ClaimCardsForOrder(ctx context.Context, goodsNo string, quantity int) ([]SupplyPoolCard, error)
-
 	// VoidCardsForOrder 作废某订单已发的卡：把命中卡 delivered/unused → expired，
 	// 返回「本次实际由非 expired 转为 expired」的张数（幂等：已 expired 不计数）。
 	VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error)
@@ -236,39 +236,41 @@ type CardPwdResolver interface {
 // SupplyOrderService 货源卡密订单服务（创建/查单/退款）。
 type SupplyOrderService struct {
 	store      SupplyOrderStore
+	gen        SupplyCardGenerator
 	pool       SupplyCardPool
 	goods      SupplyGoodsSource
 	pwdResolve CardPwdResolver
 }
 
-// NewSupplyOrderService 构造订单服务。store/pool/goods 必填（fail-closed）；
+// NewSupplyOrderService 构造订单服务。store/gen/pool/goods 必填（fail-closed）；
 // pwdResolve 可为 nil（则 card_pwd 一律默认官方合规映射）。
 //
 // goods 仅在 CreateOrder 未命中幂等回读时用于取商品单价（分）与可用性校验；
 // 查单/退款一律读订单行金额快照（goods_name/unit_price/order_amount），不再回源
 // 商品（D6E-02R #2），杜绝历史订单金额漂移与退款 refund_amount=0 仍成功。
-func NewSupplyOrderService(store SupplyOrderStore, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver) *SupplyOrderService {
-	return &SupplyOrderService{store: store, pool: pool, goods: goods, pwdResolve: pwdResolve}
+func NewSupplyOrderService(store SupplyOrderStore, gen SupplyCardGenerator, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver) *SupplyOrderService {
+	return &SupplyOrderService{store: store, gen: gen, pool: pool, goods: goods, pwdResolve: pwdResolve}
 }
 
-// CreateOrder 创建卡密订单：幂等取卡并同步返回 card_items。
+// CreateOrder 创建卡密订单：幂等现场生成兑换码并同步返回 card_items。
 //
 // 金额来源：经 goods.GetGoods 取商品单价（分），OrderAmount = Price × buy_quantity。
-// 商品不存在 → 1100；商品不可用（status=2）→ 1101；库存不足 → 1102。
+// 商品不存在 → 1100；商品不可用（status=2）→ 1101。
 //
 // max_amount（分，可选）：>0 且 OrderAmount > max_amount → 1202（下单金额低于成本价），
-// 且此校验先于取卡，不得发卡。0 表示不校验（官方未传时不校验）。
+// 且此校验先于生成，不得发卡。0 表示不校验（官方未传时不校验）。
 //
 // 幂等（资金红线）：先按 manager_order_no 回读（步骤 0）；命中已有订单直接返回
 // 原订单快照视图，完全不读商品源（即便商品下架/改价/更小 max_amount，重试也返回
-// 原订单原卡，D6E-02R #1）。未命中则商品校验 → max_amount 校验（均未取卡）→ 取卡
-// ＋ 写订单行（含金额快照，同一 DB 事务）；若并发下唯一键冲突，回滚本次取卡并
-// 回读先到者的订单，返回同一批卡。
+// 原订单原卡，D6E-02R #1）。未命中则商品校验 → max_amount 校验（均未生成）→
+// 单事务（BeginTx → InsertCreating → GenerateCardsTx → SetCardsAndStatusTx → Commit）
+// 现场生成兑换码并落库；若并发唯一键冲突，回滚生成（卡随事务丢弃）→ 回读先到者的
+// 订单，返回同一批卡（不重发）。生成失败/任何失败路径 → 整体回滚，无放回逻辑。
 //
-// 返回错误：库存不足/商品不存在/商品不可用/金额超额 → *SupplyAPIError；参数非法
-// → 普通 error；其它为内部错误（handler 归一为 1209 下单超时）。
+// 返回错误：商品不存在/商品不可用/金额超额 → *SupplyAPIError；参数非法 → 普通 error；
+// 其它为内部错误（handler 归一为 1209 下单超时）。
 func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, buyQuantity int, maxAmount int64) (*SupplyOrder, error) {
-	if s == nil || s.store == nil || s.pool == nil {
+	if s == nil || s.store == nil || s.gen == nil || s.pool == nil {
 		return nil, fmt.Errorf("xianguanjia supply order service unavailable")
 	}
 	managerOrderNo = strings.TrimSpace(managerOrderNo)
@@ -282,7 +284,7 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 
 	// 0) 幂等前置回读（最高优先级，资金红线）：已有订单直接返回原订单快照视图，
 	//    完全不读商品源——即便商品已下架/改价/更小 max_amount，重试也返回原订单原卡
-	//    （D6E-02R #1）。未命中才进入下面的商品校验与取卡。
+	//    （D6E-02R #1）。未命中才进入下面的商品校验与生成。
 	if existing, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo); err != nil {
 		return nil, fmt.Errorf("xianguanjia supply create order lookup: %w", err)
 	} else if existing != nil {
@@ -296,39 +298,30 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 	}
 	orderAmount := goods.Price * int64(buyQuantity)
 
-	// 2) max_amount 校验（先于取卡）：官方未传（maxAmount=0）不校验；
-	//    传入且下单金额 > max_amount → 1202，且不得取卡。
+	// 2) max_amount 校验（先于生成）：官方未传（maxAmount=0）不校验；
+	//    传入且下单金额 > max_amount → 1202，且不得生成卡。
 	if maxAmount > 0 && orderAmount > maxAmount {
 		return nil, NewSupplyAPIError(SupplyCodeOrderAmountBelowCost, "下单金额低于成本价")
 	}
 
-	// 3) 取卡（原子）：不足即 1102，不写订单行。
-	cards, err := s.pool.ClaimCardsForOrder(ctx, goodsNo, buyQuantity)
-	if err != nil {
-		return nil, fmt.Errorf("xianguanjia supply claim cards: %w", err)
+	// 3) 单事务：BeginTx → InsertCreating → GenerateCardsTx → SetCardsAndStatusTx → Commit。
+	//    goods_no 即分组 ID（D6c 映射 goods_no=分组ID 的十进制串）；解析失败视为参数错误。
+	groupID, hasGroup := parseGoodsGroupID(goodsNo)
+	if !hasGroup {
+		return nil, fmt.Errorf("xianguanjia supply create order: goods_no %q is not a valid group id", goodsNo)
 	}
-	if len(cards) < buyQuantity {
-		// 取到不足：放回已取卡（best-effort），返回 1102。
-		s.releaseClaimed(ctx, cards)
-		return nil, ErrSupplyStockInsufficient
-	}
-
-	// 4) 写订单行（唯一键仲裁幂等），金额快照与取卡同事务落库（D6E-02R #2）。
-	cardNos := make([]string, 0, len(cards))
-	for _, c := range cards {
-		cardNos = append(cardNos, c.CardNo)
-	}
+	note := fmt.Sprintf("xianguanjia supply order %s", managerOrderNo)
 
 	tx, err := s.store.BeginTx(ctx)
 	if err != nil {
-		s.releaseClaimed(ctx, cards)
 		return nil, fmt.Errorf("xianguanjia supply create order begin tx: %w", err)
 	}
+	// 占位订单行（status=10 creating），金额快照与生成卡同事务落库（D6E-02R #2）。
 	id, err := s.store.InsertCreating(ctx, tx, supplyOrderPlanned{
 		ManagerOrderNo: managerOrderNo,
 		GoodsNo:        goodsNo,
 		Quantity:       buyQuantity,
-		CardNos:        cardNos,
+		CardNos:        nil,
 		Status:         supplyOrderStatusCreating,
 		GoodsName:      goods.GoodsName,
 		UnitPrice:      goods.Price,
@@ -336,23 +329,28 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 	})
 	if err != nil {
 		_ = s.store.RollbackTx(ctx, tx)
-		s.releaseClaimed(ctx, cards)
 		if errors.Is(err, ErrSupplyOrderDup) {
-			// 并发/重发：先到者已发卡，回读并返回同一批卡（不重发）。
+			// 并发/重发：先到者已落库，回读并返回同一批卡（不重发）。
 			if existing, gerr := s.store.GetByManagerOrderNo(ctx, managerOrderNo); gerr == nil && existing != nil {
 				return s.viewExisting(ctx, existing)
 			}
 		}
 		return nil, fmt.Errorf("xianguanjia supply create order insert: %w", err)
 	}
+
+	// 现场生成卡密（事务内插入 redeem_codes）；任何失败 → 回滚（生成卡随事务丢弃）。
+	cardNos, err := s.gen.GenerateCardsTx(ctx, tx, groupID, buyQuantity, note)
+	if err != nil {
+		_ = s.store.RollbackTx(ctx, tx)
+		return nil, fmt.Errorf("xianguanjia supply create order generate cards: %w", err)
+	}
+
 	if err := s.store.SetCardsAndStatusTx(ctx, tx, managerOrderNo, cardNos, supplyOrderStatusSuccess); err != nil {
 		_ = s.store.RollbackTx(ctx, tx)
-		s.releaseClaimed(ctx, cards)
 		return nil, fmt.Errorf("xianguanjia supply create order finalize: %w", err)
 	}
 	if err := s.store.CommitTx(ctx, tx); err != nil {
 		_ = s.store.RollbackTx(ctx, tx)
-		s.releaseClaimed(ctx, cards)
 		return nil, fmt.Errorf("xianguanjia supply create order commit: %w", err)
 	}
 
@@ -430,7 +428,7 @@ func (s *SupplyOrderService) GetOrder(ctx context.Context, orderNo, outOrderNo s
 //
 // 订单不存在 → ErrSupplyOrderNotFound（code=1200，handler 归一）。
 func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, bool, error) {
-	if s == nil || s.store == nil || s.pool == nil {
+	if s == nil || s.store == nil || s.gen == nil || s.pool == nil {
 		return nil, false, fmt.Errorf("xianguanjia supply order service unavailable")
 	}
 	managerOrderNo = strings.TrimSpace(managerOrderNo)
@@ -567,30 +565,8 @@ func (s *SupplyOrderService) buildCardItems(ctx context.Context, cardNos []strin
 	return items, nil
 }
 
-// releaseClaimed 尽力把已取但未成功下单的卡放回池（unused）。放回失败仅留痕：
-// 订单未落库，卡泄漏风险由运维对账兜底（宁可不发，绝不重复发）。
-func (s *SupplyOrderService) releaseClaimed(ctx context.Context, cards []SupplyPoolCard) {
-	if len(cards) == 0 {
-		return
-	}
-	nos := make([]string, 0, len(cards))
-	for _, c := range cards {
-		nos = append(nos, c.CardNo)
-	}
-	if rel, ok := s.pool.(SupplyCardReleaser); ok {
-		if err := rel.ReleaseClaimedCards(ctx, nos); err != nil {
-			slog.Error("xianguanjia supply order: release claimed cards failed",
-				"cards", len(nos), "err", err)
-		}
-	}
-}
-
-// SupplyCardReleaser 是可选能力：把误取（未成功下单）的卡放回 unused。
-// 生产 DB 实现满足；内存测试实现亦满足。不满足时 releaseClaimed 静默跳过。
-type SupplyCardReleaser interface {
-	ReleaseClaimedCards(ctx context.Context, cardNos []string) error
-}
-
+// emptyCardItems 把卡号列表映射为官方合规默认 card_items（card_no 留空、
+// card_pwd 承载兑换码）。
 func emptyCardItems(cardNos []string) []SupplyOrderCardItem {
 	items := make([]SupplyOrderCardItem, 0, len(cardNos))
 	for _, no := range cardNos {
@@ -789,83 +765,69 @@ type supplyCardPoolDB struct {
 	db *sql.DB
 }
 
-// NewSupplyCardPool 返回基于 PostgreSQL 的卡密池取卡/作废仓储。
+// NewSupplyCardPool 返回基于 PostgreSQL 的卡密作废仓储（D6F-A：仅退款作废，取卡链归零）。
 func NewSupplyCardPool(db *sql.DB) *supplyCardPoolDB {
 	return &supplyCardPoolDB{db: db}
 }
 
-// ClaimCardsForOrder 原子取卡：单条 UPDATE ... WHERE code IN (子查询 LIMIT n)
-// RETURNING code，把 n 张 unused 卡置为 delivered 并返回卡号。
+// ---- 现场生成卡密仓储：DB 实现（D6F-A） ----
+
+type supplyCardGeneratorDB struct {
+	db *sql.DB
+}
+
+// NewSupplyCardGenerator 返回基于 PostgreSQL 的现场生成卡密仓储。
+func NewSupplyCardGenerator(db *sql.DB) *supplyCardGeneratorDB {
+	return &supplyCardGeneratorDB{db: db}
+}
+
+// GenerateCardsTx 在事务内为 groupID 现场生成 quantity 张订阅兑换码并插入 redeem_codes。
 //
-// 语义（对应派发单「UPDATE ... WHERE status='unused' LIMIT n 语义的原子取卡」）：
-//
-//	UPDATE redeem_codes SET status='delivered'
-//	WHERE id IN (
-//	    SELECT id FROM redeem_codes
-//	    WHERE status='unused' [AND group_id=$goodsNo]
-//	    ORDER BY id FOR UPDATE SKIP LOCKED LIMIT n
-//	) RETURNING code;
-//
-// FOR UPDATE SKIP LOCKED 保证并发下单互不阻塞、不会取到同一张卡；
-// group_id 过滤在 goodsNo 可解析为数字时启用（D6c 映射 goods_no=分组ID），
-// 解析失败则不按分组过滤（兼容商品维度非分组的场景）。
-func (p *supplyCardPoolDB) ClaimCardsForOrder(ctx context.Context, goodsNo string, quantity int) ([]SupplyPoolCard, error) {
-	if p == nil || p.db == nil {
-		return nil, fmt.Errorf("xianguanjia supply card pool unavailable")
+// 字段：code（父包 service.GenerateRandomRedeemCode 单一实现）、type='subscription'、
+// status='delivered'、group_id、validity_days（父包 service.PSResolveGroupValidityDays 单一
+// 换算，无套餐分组→fail-closed 错误）、notes=note、value=0。其余列取 schema 默认值。
+// 唯一约束冲突（码碰撞）重试生成（每张上限 3 次），仍失败则整体报错由调用方回滚。
+func (g *supplyCardGeneratorDB) GenerateCardsTx(ctx context.Context, tx *sql.Tx, groupID int64, quantity int, note string) ([]string, error) {
+	if g == nil || g.db == nil {
+		return nil, fmt.Errorf("xianguanjia supply card generator unavailable")
 	}
 	if quantity <= 0 {
 		return nil, nil
 	}
-	groupID, hasGroup := parseGoodsGroupID(goodsNo)
-
-	query := `
-		UPDATE redeem_codes SET status = 'delivered'
-		WHERE id IN (
-			SELECT id FROM redeem_codes
-			WHERE status = 'unused'
-	`
-	args := []any{}
-	if hasGroup {
-		query += ` AND group_id = $1`
-		args = append(args, groupID)
-	}
-	query += ` ORDER BY id FOR UPDATE SKIP LOCKED LIMIT $` + fmt.Sprintf("%d", len(args)+1)
-	args = append(args, quantity)
-	query += ` ) RETURNING code`
-
-	rows, err := p.db.QueryContext(ctx, query, args...)
+	// 经 tx 解析有效期，使套餐读取与 redeem_codes 插入共享同一事务快照（D6F-R 修复#1）。
+	validityDays, err := service.PSResolveGroupValidityDaysTx(ctx, tx, groupID)
 	if err != nil {
-		return nil, fmt.Errorf("xianguanjia claim cards: %w", err)
+		return nil, err // fail-closed：无套餐分组等
 	}
-	defer rows.Close()
-	var cards []SupplyPoolCard
-	for rows.Next() {
-		var code string
-		if err := rows.Scan(&code); err != nil {
-			return nil, fmt.Errorf("xianguanjia scan claimed card: %w", err)
+	codes := make([]string, 0, quantity)
+	for i := 0; i < quantity; i++ {
+		var lastErr error
+		inserted := false
+		for attempt := 0; attempt < 3; attempt++ {
+			code, cerr := service.GenerateRandomRedeemCode()
+			if cerr != nil {
+				return nil, fmt.Errorf("xianguanjia generate redeem code: %w", cerr)
+			}
+			_, ierr := execNonQuery(ctx, tx, g.db, `
+				INSERT INTO redeem_codes (code, type, status, group_id, validity_days, notes, value)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				code, domain.RedeemTypeSubscription, domain.StatusDelivered, groupID, validityDays, note, 0)
+			if ierr != nil {
+				if supplyIsUniqueViolation(ierr) {
+					lastErr = ierr
+					continue // 码碰撞：换码重试
+				}
+				return nil, fmt.Errorf("xianguanjia insert generated card: %w", ierr)
+			}
+			codes = append(codes, code)
+			inserted = true
+			break
 		}
-		cards = append(cards, SupplyPoolCard{CardNo: code})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("xianguanjia iterate claimed cards: %w", err)
-	}
-	return cards, nil
-}
-
-// ReleaseClaimedCards 把误取（未成功下单）的卡从 delivered 放回 unused。
-// 仅放回原为 delivered 且从未被兑换的卡；used/expired 不动（防损）。
-func (p *supplyCardPoolDB) ReleaseClaimedCards(ctx context.Context, cardNos []string) error {
-	if p == nil || p.db == nil {
-		return fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	for _, no := range cardNos {
-		if _, err := p.db.ExecContext(ctx, `
-			UPDATE redeem_codes SET status = 'unused'
-			WHERE code = $1 AND status = 'delivered'`, no); err != nil {
-			return fmt.Errorf("xianguanjia release claimed card: %w", err)
+		if !inserted {
+			return nil, fmt.Errorf("xianguanjia supply generate card: uniqueness retry exhausted after 3 attempts: %w", lastErr)
 		}
 	}
-	return nil
+	return codes, nil
 }
 
 // VoidCardsForOrder 作废某订单已发的卡：delivered/unused → expired。
@@ -924,16 +886,77 @@ type supplyOrderStoreMem struct {
 	mu     sync.Mutex
 	rows   map[string]*supplyOrderRow
 	nextID int64
+	// pending 是 BeginTx→CommitTx 之间的事务缓冲：按事务句柄（*sql.Tx 哨兵）隔离，
+	// InsertCreating/SetCardsAndStatusTx 写入 pending[tx]，CommitTx 落盘、RollbackTx
+	// 仅丢弃 pending[tx]（即本事务自己的缓冲），从而忠实模拟 DB「每事务独立、回滚
+	// 仅影响自身」的原子性。内存实现 tx 为各自独立的 &sql.Tx{} 哨兵，天然作为 map key。
+	pending map[*sql.Tx]*supplyOrderRow
+
+	// commitHook/rollbackHook 是事务生命周期钩子（仅包内测试可设，不改构造函数签名，
+	// D6F-R 修复#2）：CommitTx 在落盘前调 commitHook（非 nil 时），返回 error → 本事务
+	// 落盘中止、pending 缓冲按回滚处理并透传错误（模拟 DB 提交失败）；RollbackTx 调
+	// rollbackHook（非 nil 时，错误忽略仅继续回滚）。生产 DB 实现无此钩子，纯内存替身用。
+	commitHook   func(tx *sql.Tx) error
+	rollbackHook func(tx *sql.Tx) error
 }
 
 // NewSupplyOrderStoreMemory 返回内存版订单仓储。
 func NewSupplyOrderStoreMemory() *supplyOrderStoreMem {
-	return &supplyOrderStoreMem{rows: make(map[string]*supplyOrderRow)}
+	return &supplyOrderStoreMem{
+		rows:    make(map[string]*supplyOrderRow),
+		pending: make(map[*sql.Tx]*supplyOrderRow),
+	}
 }
 
-func (s *supplyOrderStoreMem) BeginTx(ctx context.Context) (*sql.Tx, error)     { return nil, nil }
-func (s *supplyOrderStoreMem) CommitTx(ctx context.Context, tx *sql.Tx) error   { return nil }
-func (s *supplyOrderStoreMem) RollbackTx(ctx context.Context, tx *sql.Tx) error { return nil }
+// WireCardGeneratorLifecycle 把内存生成器接进本 store 的事务生命周期：
+// CommitTx 落盘前调 gen.CommitGenerated（错误则本事务落盘中止并透传），
+// RollbackTx 时调 gen.RollbackGenerated 丢弃生成缓冲。gen 需提供
+// CommitGenerated(*sql.Tx) error 与 RollbackGenerated(*sql.Tx) error。
+func (s *supplyOrderStoreMem) WireCardGeneratorLifecycle(gen interface {
+	CommitGenerated(tx *sql.Tx) error
+	RollbackGenerated(tx *sql.Tx) error
+}) {
+	s.commitHook = gen.CommitGenerated
+	s.rollbackHook = gen.RollbackGenerated
+}
+
+// BeginTx 内存实现：返回一个独立的 &sql.Tx{} 哨兵作为本事务句柄（仅作 pending map 的 key，
+// 不被解引用），从而在内存中隔离各并发调用的事务缓冲，等价于 DB 的独立事务。
+func (s *supplyOrderStoreMem) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &sql.Tx{}, nil
+}
+func (s *supplyOrderStoreMem) CommitTx(ctx context.Context, tx *sql.Tx) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 落盘前调 commitHook（如生成器提交其 pending 缓冲到已生成集合与卡池）。
+	// 返回 error → 本事务落盘中止、pending 缓冲按回滚处理（不落盘）并透传错误，
+	// 模拟 DB 提交失败：订单不落盘、生成卡按回滚丢弃（D6F-R 修复#2）。
+	if s.commitHook != nil {
+		if err := s.commitHook(tx); err != nil {
+			delete(s.pending, tx)
+			return err
+		}
+	}
+	if p, ok := s.pending[tx]; ok {
+		s.rows[p.ManagerOrderNo] = p
+		delete(s.pending, tx)
+	}
+	return nil
+}
+func (s *supplyOrderStoreMem) RollbackTx(ctx context.Context, tx *sql.Tx) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 回滚钩子（如生成器丢弃其 pending 缓冲）。错误忽略，仅继续回滚（D6F-R 修复#2）。
+	if s.rollbackHook != nil {
+		_ = s.rollbackHook(tx)
+	}
+	// 仅丢弃本事务自己的 pending：并发下失败方的回滚不会误清获胜方尚未提交的缓冲，
+	// 保证「先到者发卡」语义（DB 中两事务各自独立，无此问题）。
+	delete(s.pending, tx)
+	return nil
+}
 
 func (s *supplyOrderStoreMem) InsertCreating(ctx context.Context, tx *sql.Tx, row supplyOrderPlanned) (int64, error) {
 	if s == nil {
@@ -943,6 +966,13 @@ func (s *supplyOrderStoreMem) InsertCreating(ctx context.Context, tx *sql.Tx, ro
 	defer s.mu.Unlock()
 	if _, ok := s.rows[row.ManagerOrderNo]; ok {
 		return 0, ErrSupplyOrderDup
+	}
+	// 同一 manager_order_no 已有在途事务（pending）也判为并发 dup（幂等仲裁）：
+	// 后到者即使尚未提交，也不得再插入，从而把生成卡密的机会收口给先到事务。
+	for _, p := range s.pending {
+		if p.ManagerOrderNo == row.ManagerOrderNo {
+			return 0, ErrSupplyOrderDup
+		}
 	}
 	s.nextID++
 	r := &supplyOrderRow{
@@ -957,7 +987,8 @@ func (s *supplyOrderStoreMem) InsertCreating(ctx context.Context, tx *sql.Tx, ro
 		UnitPrice:      row.UnitPrice,
 		OrderAmount:    row.OrderAmount,
 	}
-	s.rows[row.ManagerOrderNo] = r
+	// 写入本事务 pending 缓冲（CommitTx 才落盘），模拟事务未提交前对并发读者不可见。
+	s.pending[tx] = r
 	return r.ID, nil
 }
 
@@ -967,6 +998,12 @@ func (s *supplyOrderStoreMem) SetCardsAndStatusTx(ctx context.Context, tx *sql.T
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 写本事务 pending 缓冲（创建流程）；否则直接写已提交行（退款置态复用此接口）。
+	if p, ok := s.pending[tx]; ok {
+		p.CardNos = append([]string(nil), cardNos...)
+		p.Status = status
+		return nil
+	}
 	r, ok := s.rows[managerOrderNo]
 	if !ok {
 		return fmt.Errorf("xianguanjia supply order %s not found", managerOrderNo)
@@ -1096,39 +1133,6 @@ func (p *SupplyCardPoolMemory) SetCardStatusForTest(cardNo, status string) {
 	}
 }
 
-func (p *SupplyCardPoolMemory) ClaimCardsForOrder(ctx context.Context, goodsNo string, quantity int) ([]SupplyPoolCard, error) {
-	if p == nil {
-		return nil, fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]SupplyPoolCard, 0, quantity)
-	for _, no := range sortedCardNos(p.cards) {
-		if len(out) >= quantity {
-			break
-		}
-		if p.cards[no] == "unused" {
-			p.cards[no] = "delivered"
-			out = append(out, SupplyPoolCard{CardNo: no, CardPwd: p.pwds[no]})
-		}
-	}
-	return out, nil
-}
-
-func (p *SupplyCardPoolMemory) ReleaseClaimedCards(ctx context.Context, cardNos []string) error {
-	if p == nil {
-		return fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, no := range cardNos {
-		if p.cards[no] == "delivered" {
-			p.cards[no] = "unused"
-		}
-	}
-	return nil
-}
-
 func (p *SupplyCardPoolMemory) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
 	return p.VoidCardsForOrderTx(ctx, nil, cardNos)
 }
@@ -1172,17 +1176,121 @@ func (p *SupplyCardPoolMemory) UndoVoidTx(ctx context.Context, tx *sql.Tx, cardN
 	return nil
 }
 
-func sortedCardNos(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// ---- 现场生成卡密仓储：内存实现（单测用，含字段记录便于断言） ----
+
+// generatedCardRecord 是内存生成器成功生成的单张卡记录（用于测试断言落库字段）。
+type generatedCardRecord struct {
+	Code         string
+	Type         string
+	Status       string
+	GroupID      int64
+	ValidityDays int
+	Note         string
+}
+
+// supplyCardGeneratorMem 内存生成器：复用父包 service.GenerateRandomRedeemCode 生成码，
+// validity_days 由注入 resolver 提供（测试可模拟无套餐 fail-closed）；遵守外层事务生命周期
+// （D6F-R 修复#2）：GenerateCardsTx 只把记录暂存 pending[tx]，不在本方法内直接落库
+// g.generated 与 pool.cards；待调用方事务提交（CommitTx 触发 commitHook → CommitGenerated）
+// 时才落库，事务回滚（rollbackHook → RollbackGenerated）时丢弃，从而与 DB 实现的事务语义一致。
+type supplyCardGeneratorMem struct {
+	mu       sync.Mutex
+	pool     *SupplyCardPoolMemory
+	resolver func(groupID int64) (int, error)
+	// generated 记录截至当前已「提交」的卡（仅 CommitGenerated 写入）；GeneratedCards()
+	// 只反映已提交卡，未提交/已回滚的 pending 不计入（模拟事务未提交不可见）。
+	generated []generatedCardRecord
+	// pending 是 GenerateCardsTx 的事务缓冲：按事务句柄 *sql.Tx 隔离。GenerateCardsTx
+	// 只写 pending[tx]；CommitGenerated 落库并删除该键，RollbackGenerated 仅删除该键。
+	pending map[*sql.Tx][]generatedCardRecord
+	// failGen 注入：生成第一张后整体失败（测试「生成失败整体回滚」）。
+	failGen bool
+}
+
+// NewSupplyCardGeneratorMemory 返回内存版现场生成器。resolver 解析分组有效天数，
+// 返回 error 即模拟「无套餐分组」fail-closed。pool 可为 nil（仅测试字段断言时）。
+func NewSupplyCardGeneratorMemory(pool *SupplyCardPoolMemory, resolver func(groupID int64) (int, error)) *supplyCardGeneratorMem {
+	return &supplyCardGeneratorMem{pool: pool, resolver: resolver, pending: make(map[*sql.Tx][]generatedCardRecord)}
+}
+
+// GenerateCardsTx 内存实现：生成码并暂存 pending[tx]（不落库、不碰 pool.cards），
+// 全部成功才返回码列表；任一失败（含无套餐 resolver 失败）整体报错且不落库，由调用方
+// 回滚丢弃 pending（模拟事务回滚）。落库动作统一收口到 CommitGenerated（D6F-R 修复#2）。
+func (g *supplyCardGeneratorMem) GenerateCardsTx(ctx context.Context, tx *sql.Tx, groupID int64, quantity int, note string) ([]string, error) {
+	if g == nil {
+		return nil, fmt.Errorf("xianguanjia supply card generator unavailable")
 	}
-	// 简单插入排序，稳定且无需额外依赖（卡量小）。
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
+	if quantity <= 0 {
+		return nil, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	validityDays, err := g.resolver(groupID)
+	if err != nil {
+		return nil, err // 无套餐分组 → fail-closed
+	}
+	codes := make([]string, 0, quantity)
+	pending := make([]generatedCardRecord, 0, quantity)
+	for i := 0; i < quantity; i++ {
+		code, cerr := service.GenerateRandomRedeemCode()
+		if cerr != nil {
+			return nil, fmt.Errorf("xianguanjia generate redeem code: %w", cerr)
+		}
+		rec := generatedCardRecord{
+			Code:         code,
+			Type:         domain.RedeemTypeSubscription,
+			Status:       domain.StatusDelivered,
+			GroupID:      groupID,
+			ValidityDays: validityDays,
+			Note:         note,
+		}
+		pending = append(pending, rec)
+		codes = append(codes, code)
+		if g.failGen {
+			return nil, errors.New("injected generate failure")
 		}
 	}
+	// 暂存 pending[tx]：不在此处落库，交由 CommitGenerated（事务提交）落库（D6F-R 修复#2）。
+	g.pending[tx] = append(g.pending[tx], pending...)
+	return codes, nil
+}
+
+// CommitGenerated 在事务提交时落库：把 pending[tx] 追加进 g.generated 并逐条写入
+// pool.cards（status 取记录值），随后删除该 tx 键。对未知 tx 键幂等 no-op（D6F-R 修复#2）。
+func (g *supplyCardGeneratorMem) CommitGenerated(tx *sql.Tx) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	pending, ok := g.pending[tx]
+	if !ok {
+		return nil // 幂等 no-op：未知 tx 键
+	}
+	g.generated = append(g.generated, pending...)
+	for _, r := range pending {
+		if g.pool != nil {
+			g.pool.mu.Lock()
+			g.pool.cards[r.Code] = r.Status
+			g.pool.mu.Unlock()
+		}
+	}
+	delete(g.pending, tx)
+	return nil
+}
+
+// RollbackGenerated 在事务回滚时丢弃 pending[tx]，不落库。对未知 tx 键幂等 no-op
+// （D6F-R 修复#2）。
+func (g *supplyCardGeneratorMem) RollbackGenerated(tx *sql.Tx) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.pending, tx) // 幂等 no-op：未知 tx 键
+	return nil
+}
+
+// GeneratedCards 返回截至当前已成功生成的卡记录快照（测试断言落库字段用）。
+func (g *supplyCardGeneratorMem) GeneratedCards() []generatedCardRecord {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]generatedCardRecord, len(g.generated))
+	copy(out, g.generated)
 	return out
 }
 
