@@ -81,6 +81,7 @@ type Handlers struct {
 	XianyuDelivery   *XianyuDeliveryHandler
 	XianguanjiaPush  *XianyuXianguanjiaPushHandler
 	XgjSupply        *XgjSupplyHandler // D6e: 货源模式公开接口（/api/v1/xgj-supply）
+	XgjSupplyOrder   *XianguanjiaSupplyOrderHandler // D6d: 卡密订单真实链路
 	SupplyCatalog    *XianguanjiaSupplyHandler // D6c: 货源目录接口（平台/商户/商品）
 }
 

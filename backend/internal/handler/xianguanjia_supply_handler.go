@@ -91,7 +91,7 @@ func (h *XianguanjiaSupplyHandler) PlatformInfo(c *gin.Context) {
 }
 
 // MerchantInfo 查询商户信息（POST /api/v1/xgj-supply/merchant/info）。
-// 无请求体；返回 mch_id 与 balance（> 0 的整数）。
+// 无请求体；官方 data 仅返回 balance（> 0 的整数）。
 func (h *XianguanjiaSupplyHandler) MerchantInfo(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyFail(c, http.StatusInternalServerError, "supply service unavailable")
@@ -115,7 +115,7 @@ type supplyListGoodsBody struct {
 }
 
 // ListGoods 查询商品列表（POST /api/v1/xgj-supply/goods/list）。
-// 入参 keyword/goods_type/page_no/page_size；返回 {list,total,page_no,page_size}。
+// 入参 keyword/goods_type/page_no/page_size；返回 {list,count}。
 func (h *XianguanjiaSupplyHandler) ListGoods(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyFail(c, http.StatusInternalServerError, "supply service unavailable")
@@ -142,13 +142,16 @@ func (h *XianguanjiaSupplyHandler) ListGoods(c *gin.Context) {
 	supplyOK(c, res)
 }
 
-// supplyGoodsDetailBody 是「查询商品详情」的请求体。
+// supplyGoodsDetailBody 是「查询商品详情」的请求体（官方路径 /goods/detail）。
+// goods_type 为官方查询参数：我方货源全为卡密（2），非卡密按商品不存在返回 1100。
 type supplyGoodsDetailBody struct {
-	GoodsNo string `json:"goods_no"`
+	GoodsNo   string `json:"goods_no"`
+	GoodsType int    `json:"goods_type"`
 }
 
 // GoodsDetail 查询商品详情（POST /api/v1/xgj-supply/goods/detail）。
-// 入参 goods_no；不存在返回 code=1100。
+// 入参 goods_no / goods_type；goods_type 非 0 且非 2 视为商品不存在返回 code=1100；
+// goods_no 不存在返回 code=1100。
 func (h *XianguanjiaSupplyHandler) GoodsDetail(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyFail(c, http.StatusInternalServerError, "supply service unavailable")
@@ -156,6 +159,11 @@ func (h *XianguanjiaSupplyHandler) GoodsDetail(c *gin.Context) {
 	}
 	var body supplyGoodsDetailBody
 	if !decodeSupplyBody(c, &body) {
+		return
+	}
+	// 官方查询参数 goods_type：我方全为卡密(2)，其余类型无对应商品。
+	if body.GoodsType != 0 && body.GoodsType != xianguanjia.SupplyGoodsTypeKami {
+		supplyFail(c, xianguanjia.SupplyCodeGoodsNotFound, "商品不存在")
 		return
 	}
 	g, err := h.svc.GoodsDetail(c.Request.Context(), body.GoodsNo)

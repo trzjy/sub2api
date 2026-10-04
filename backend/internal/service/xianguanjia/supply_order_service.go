@@ -30,7 +30,7 @@ import (
 // 退款通知把该订单的卡 delivered→expired（复用 CodeCardVoidRepository，
 // 只作废 delivered/unused，不误伤 used/expired）。
 
-// 货源订单状态（内部存储用；对外 order_status 见 SupplyOrderStatusSuccess）。
+// 货源订单状态（内部存储用；对外 order_status 见 supplyOrderStatusSuccess）。
 const (
 	// supplyOrderStatusCreating 内部占位态：仅存在于「创建订单」写入事务的
 	// 极短窗口（取卡→写行的同一事务内）；事务提交后即为 Success。不回读为成功。
@@ -38,7 +38,14 @@ const (
 	// supplyOrderStatusSuccess 官方 order_status=20：卡密订单创建成功。
 	supplyOrderStatusSuccess = 20
 	// supplyOrderStatusRefunded 已退款：退款通知到达后置位，同时作废卡。
+	// 对外订单枚举无退款态，须归一为 20（见 supplyOrderStatusToOfficial）。
 	supplyOrderStatusRefunded = 30
+)
+
+// 下单业务错误码（官方 schema，D6E-02c 新增；不使用 supply_types.go 既有项）。
+const (
+	SupplyCodeOrderParamError      = 1201 // 下单参数错误（替换原 1209 误用）
+	SupplyCodeOrderAmountBelowCost = 1202 // 下单金额低于成本价（max_amount 超额）
 )
 
 // ErrSupplyOrderNotFound 是「订单不存在」的哨兵错误（code=1200）。
@@ -55,21 +62,28 @@ type SupplyOrderCardItem struct {
 	CardPwd string `json:"card_pwd"`
 }
 
-// SupplyOrder 是货源订单视图（查单/创建共用）。
+// SupplyOrder 是货源订单视图（查单/创建共用），字段严格对齐官方 schema
+// （data additionalProperties:false，不得多返回字段）。
 //
-// OrderStatus 对外为官方整数：20=成功，30=已退款（退款态再查单可见：
-// handler 据本字段把 order_status 归一为 30，并在 card_items 上标记已作废）。
-// CardItems 为下单时同步返回、或查单时回读的卡密；退款后仍回读原卡密，
-// 但 Refunded=true，调用方不得再次发货。
+// 官方订单枚举无「退款态」：内部 30（已退款）对外归一为 20（成功）——退款事实
+// 由 /goofish/order/refund/apply 承载（方案 §3 决策 4）。
+//
+// 金额 OrderAmount 单位为分（int64），= 商品单价(分) × 购买数量。
+// 卡密 card_items：官方注释「无卡号或无法区分卡号/密码的，用 card_pwd 字段返回」，
+// 故我方映射为 card_no=""、card_pwd=兑换码（redeem code 本身）；CardPwdResolver
+// 提供时覆盖 card_pwd 取值（官方出处：创建卡密订单接口 data.card_items 注释）。
+// EndTime 仅终态（成功/退款）返回：成功=下单时刻 order_time，退款=作废时刻。
 type SupplyOrder struct {
-	ManagerOrderNo string                `json:"manager_order_no"`
-	GoodsNo        string                `json:"goods_no"`
-	Quantity       int                   `json:"quantity"`
-	OrderStatus    int                   `json:"order_status"`
-	CardItems      []SupplyOrderCardItem `json:"card_items"`
-	Refunded       bool                  `json:"refunded"`
-	CreatedAt      time.Time             `json:"created_at"`
-	RefundedAt     *time.Time            `json:"refunded_at,omitempty"`
+	OrderNo     string                `json:"order_no"`     // 管家订单号
+	OutOrderNo  string                `json:"out_order_no"` // 我方订单 id 十进制串
+	OrderStatus int                   `json:"order_status"` // 10/20/30 官方枚举
+	OrderAmount int64                 `json:"order_amount"` // 分
+	GoodsName   string                `json:"goods_name"`
+	BuyQuantity int                   `json:"buy_quantity"`
+	OrderTime   int64                 `json:"order_time"` // created_at 秒
+	EndTime     int64                 `json:"end_time"`   // 终态完成时刻秒
+	CardItems   []SupplyOrderCardItem `json:"card_items"`
+	Remark      string                `json:"remark,omitempty"`
 }
 
 // ---- 存储 DTO ----
@@ -87,21 +101,37 @@ type supplyOrderRow struct {
 }
 
 // supplyOrderToView 把存储行转为对外视图。
-func supplyOrderToView(row *supplyOrderRow, items []SupplyOrderCardItem) *SupplyOrder {
+func supplyOrderToView(row *supplyOrderRow, items []SupplyOrderCardItem, orderAmount int64, goodsName string) *SupplyOrder {
 	if row == nil {
 		return nil
 	}
 	out := &SupplyOrder{
-		ManagerOrderNo: row.ManagerOrderNo,
-		GoodsNo:        row.GoodsNo,
-		Quantity:       row.Quantity,
-		OrderStatus:    row.Status,
-		CardItems:      items,
-		Refunded:       row.Status == supplyOrderStatusRefunded,
-		CreatedAt:      row.CreatedAt,
-		RefundedAt:     row.RefundedAt,
+		OrderNo:     row.ManagerOrderNo,
+		OutOrderNo:  strconv.FormatInt(row.ID, 10),
+		OrderStatus: supplyOrderStatusToOfficial(row.Status),
+		OrderAmount: orderAmount,
+		GoodsName:   goodsName,
+		BuyQuantity: row.Quantity,
+		OrderTime:   row.CreatedAt.Unix(),
+		CardItems:   items,
+	}
+	// 终态补 end_time（成功=下单时刻；退款=作废时刻）。
+	if row.Status == supplyOrderStatusRefunded && row.RefundedAt != nil {
+		out.EndTime = row.RefundedAt.Unix()
+	} else {
+		out.EndTime = row.CreatedAt.Unix()
 	}
 	return out
+}
+
+// supplyOrderStatusToOfficial 把内部存储态归一为官方订单枚举。
+// 内部 30（已退款）对外为 20（成功）：官方订单枚举无退款态，退款事实由
+// refund/apply 承载（方案 §3 决策 4）。
+func supplyOrderStatusToOfficial(internal int) int {
+	if internal == supplyOrderStatusRefunded {
+		return supplyOrderStatusSuccess
+	}
+	return internal
 }
 
 // ---- 卡密池取卡仓储 ----
@@ -139,6 +169,8 @@ type SupplyOrderStore interface {
 	InsertCreating(ctx context.Context, tx *sql.Tx, row supplyOrderPlanned) (int64, error)
 	// GetByManagerOrderNo 按管家订单号读取订单行；不存在返回 (nil, nil)。
 	GetByManagerOrderNo(ctx context.Context, managerOrderNo string) (*supplyOrderRow, error)
+	// GetByID 按主键 id 读取订单行（out_order_no 查单）；不存在返回 (nil, nil)。
+	GetByID(ctx context.Context, id int64) (*supplyOrderRow, error)
 	// MarkRefunded 幂等地把订单置为退款态并写 refunded_at；返回是否本次变更。
 	MarkRefunded(ctx context.Context, managerOrderNo string, at time.Time) (bool, error)
 
@@ -165,11 +197,15 @@ var ErrSupplyOrderDup = errors.New("xianguanjia supply order duplicated")
 
 // ---- 服务 ----
 
-// CardPwdResolver 解析池卡的 card_pwd（D6d 联调校正点：redeem_codes 无独立
-// 卡密列，生产默认以空串下发；集成方可注入实现从外部映射补齐）。
-// 返回空串表示无卡密（合法，单卡号商品）。
+// CardPwdResolver 解析/覆盖 card_items 的 card_pwd（D6d 联调校正点）。
+//
+// 官方合规默认映射：card_no="" 且 card_pwd=兑换码（redeem code 本身，见
+// 创建卡密订单接口 data.card_items 注释「无卡号或无法区分卡号/密码的，用
+// card_pwd 字段返回」）。本接口提供时「覆盖」默认映射：对解析命中的卡号返回
+// 的 card_pwd 优先于默认兑换码；未命中或空串则退化为默认映射。pwdResolve 为
+// nil 时一律走默认官方合规映射。
 type CardPwdResolver interface {
-	// ResolveCardPwd 批量解析 card_no → card_pwd；未命中 key 视为空串。
+	// ResolveCardPwd 批量解析 card_no → card_pwd；未命中 key 视为空串（即不覆盖）。
 	ResolveCardPwd(ctx context.Context, cardNos []string) (map[string]string, error)
 }
 
@@ -177,24 +213,34 @@ type CardPwdResolver interface {
 type SupplyOrderService struct {
 	store      SupplyOrderStore
 	pool       SupplyCardPool
+	goods      SupplyGoodsSource
 	pwdResolve CardPwdResolver
 }
 
-// NewSupplyOrderService 构造订单服务。store/pool 必填（fail-closed）；
-// pwdResolve 可为 nil（则 card_pwd 一律空串）。
-func NewSupplyOrderService(store SupplyOrderStore, pool SupplyCardPool, pwdResolve CardPwdResolver) *SupplyOrderService {
-	return &SupplyOrderService{store: store, pool: pool, pwdResolve: pwdResolve}
+// NewSupplyOrderService 构造订单服务。store/pool/goods 必填（fail-closed）；
+// pwdResolve 可为 nil（则 card_pwd 一律默认官方合规映射）。
+//
+// goods 为金额来源：CreateOrder 经其取商品单价（分）并做可用性校验；查单/退款
+// 回读亦经其聚合 order_amount / goods_name（订单行不冗余存储单价，无迁移）。
+func NewSupplyOrderService(store SupplyOrderStore, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver) *SupplyOrderService {
+	return &SupplyOrderService{store: store, pool: pool, goods: goods, pwdResolve: pwdResolve}
 }
 
 // CreateOrder 创建卡密订单：幂等取卡并同步返回 card_items。
+//
+// 金额来源：经 goods.GetGoods 取商品单价（分），OrderAmount = Price × buy_quantity。
+// 商品不存在 → 1100；商品不可用（status=2）→ 1101；库存不足 → 1102。
+//
+// max_amount（分，可选）：>0 且 OrderAmount > max_amount → 1202（下单金额低于成本价），
+// 且此校验先于取卡，不得发卡。0 表示不校验（官方未传时不校验）。
 //
 // 幂等（资金红线）：先按 manager_order_no 回读；命中已有订单直接返回原结果，
 // 绝不再取卡。未命中则取卡 + 写订单行（同一 DB 事务）；若并发下唯一键冲突，
 // 回滚本次取卡并回读先到者的订单，返回同一批卡。
 //
-// 返回错误：库存不足 → *SupplyAPIError(code=1102)；参数非法 → 普通 error；
-// 其它为内部错误（handler 归一为 1209 下单超时）。
-func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, quantity int) (*SupplyOrder, error) {
+// 返回错误：库存不足/商品不存在/商品不可用/金额超额 → *SupplyAPIError；参数非法
+// → 普通 error；其它为内部错误（handler 归一为 1209 下单超时）。
+func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, buyQuantity int, maxAmount int64) (*SupplyOrder, error) {
 	if s == nil || s.store == nil || s.pool == nil {
 		return nil, fmt.Errorf("xianguanjia supply order service unavailable")
 	}
@@ -203,29 +249,42 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 	if managerOrderNo == "" {
 		return nil, fmt.Errorf("xianguanjia supply create order: manager_order_no is required")
 	}
-	if quantity <= 0 {
-		return nil, fmt.Errorf("xianguanjia supply create order: quantity must be > 0")
+	if buyQuantity <= 0 {
+		return nil, fmt.Errorf("xianguanjia supply create order: buy_quantity must be > 0")
 	}
 
-	// 1) 幂等前置回读：已有订单直接返回原结果（不重发卡）。
+	// 1) 取商品（金额来源 + 可用性校验）：不存在→1100、下架→1101。
+	goods, gerr := s.getGoodsOrFail(ctx, goodsNo)
+	if gerr != nil {
+		return nil, gerr
+	}
+	orderAmount := goods.Price * int64(buyQuantity)
+
+	// 2) max_amount 校验（先于取卡）：官方未传（maxAmount=0）不校验；
+	//    传入且下单金额 > max_amount → 1202，且不得取卡。
+	if maxAmount > 0 && orderAmount > maxAmount {
+		return nil, NewSupplyAPIError(SupplyCodeOrderAmountBelowCost, "下单金额低于成本价")
+	}
+
+	// 3) 幂等前置回读：已有订单直接返回原结果（不重发卡）。
 	if existing, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo); err != nil {
 		return nil, fmt.Errorf("xianguanjia supply create order lookup: %w", err)
 	} else if existing != nil {
 		return s.viewExisting(ctx, existing)
 	}
 
-	// 2) 取卡（原子）：不足即 1102，不写订单行。
-	cards, err := s.pool.ClaimCardsForOrder(ctx, goodsNo, quantity)
+	// 4) 取卡（原子）：不足即 1102，不写订单行。
+	cards, err := s.pool.ClaimCardsForOrder(ctx, goodsNo, buyQuantity)
 	if err != nil {
 		return nil, fmt.Errorf("xianguanjia supply claim cards: %w", err)
 	}
-	if len(cards) < quantity {
+	if len(cards) < buyQuantity {
 		// 取到不足：放回已取卡（best-effort），返回 1102。
 		s.releaseClaimed(ctx, cards)
 		return nil, ErrSupplyStockInsufficient
 	}
 
-	// 3) 写订单行（唯一键仲裁幂等）。
+	// 5) 写订单行（唯一键仲裁幂等）。
 	cardNos := make([]string, 0, len(cards))
 	for _, c := range cards {
 		cardNos = append(cardNos, c.CardNo)
@@ -236,13 +295,14 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 		s.releaseClaimed(ctx, cards)
 		return nil, fmt.Errorf("xianguanjia supply create order begin tx: %w", err)
 	}
-	if _, err := s.store.InsertCreating(ctx, tx, supplyOrderPlanned{
+	id, err := s.store.InsertCreating(ctx, tx, supplyOrderPlanned{
 		ManagerOrderNo: managerOrderNo,
 		GoodsNo:        goodsNo,
-		Quantity:       quantity,
+		Quantity:       buyQuantity,
 		CardNos:        cardNos,
 		Status:         supplyOrderStatusCreating,
-	}); err != nil {
+	})
+	if err != nil {
 		_ = s.store.RollbackTx(ctx, tx)
 		s.releaseClaimed(ctx, cards)
 		if errors.Is(err, ErrSupplyOrderDup) {
@@ -272,29 +332,49 @@ func (s *SupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, go
 			"manager_order_no", managerOrderNo, "err", err)
 		items = emptyCardItems(cardNos)
 	}
+	now := time.Now()
 	slog.Info("xianguanjia supply order created",
 		"manager_order_no", managerOrderNo, "goods_no", goodsNo, "cards", len(cardNos))
 	return &SupplyOrder{
-		ManagerOrderNo: managerOrderNo,
-		GoodsNo:        goodsNo,
-		Quantity:       quantity,
-		OrderStatus:    supplyOrderStatusSuccess,
-		CardItems:      items,
-		CreatedAt:      time.Now(),
+		OrderNo:     managerOrderNo,
+		OutOrderNo:  strconv.FormatInt(id, 10),
+		OrderStatus: supplyOrderStatusSuccess,
+		OrderAmount: orderAmount,
+		GoodsName:   goods.GoodsName,
+		BuyQuantity: buyQuantity,
+		OrderTime:   now.Unix(),
+		EndTime:     now.Unix(),
+		CardItems:   items,
 	}, nil
 }
 
-// GetOrder 查询订单详情（幂等查询）：返回状态 + 卡密。
-// 订单不存在 → ErrSupplyOrderNotFound（code=1200）。
-func (s *SupplyOrderService) GetOrder(ctx context.Context, managerOrderNo string) (*SupplyOrder, error) {
+// GetOrder 查询订单详情（幂等查询）：order_no 优先；order_no 为空时按 out_order_no
+// （我方订单 id 十进制串）查单。订单不存在 → ErrSupplyOrderNotFound（code=1200）。
+func (s *SupplyOrderService) GetOrder(ctx context.Context, orderNo, outOrderNo string) (*SupplyOrder, error) {
 	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("xianguanjia supply order service unavailable")
 	}
-	managerOrderNo = strings.TrimSpace(managerOrderNo)
-	if managerOrderNo == "" {
-		return nil, fmt.Errorf("xianguanjia supply get order: manager_order_no is required")
+	orderNo = strings.TrimSpace(orderNo)
+	if orderNo == "" {
+		// order_no 为空时按 out_order_no（我方订单 id 十进制串）查单。
+		outOrderNo = strings.TrimSpace(outOrderNo)
+		if outOrderNo == "" {
+			return nil, fmt.Errorf("xianguanjia supply get order: order_no or out_order_no is required")
+		}
+		id, err := strconv.ParseInt(outOrderNo, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("xianguanjia supply get order: invalid out_order_no %q", outOrderNo)
+		}
+		row, err := s.store.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("xianguanjia supply get order by id: %w", err)
+		}
+		if row == nil {
+			return nil, ErrSupplyOrderNotFound
+		}
+		return s.viewExisting(ctx, row)
 	}
-	row, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo)
+	row, err := s.store.GetByManagerOrderNo(ctx, orderNo)
 	if err != nil {
 		return nil, fmt.Errorf("xianguanjia supply get order: %w", err)
 	}
@@ -307,43 +387,58 @@ func (s *SupplyOrderService) GetOrder(ctx context.Context, managerOrderNo string
 // RefundNotify 处理退款通知：订单置退款态 + 作废对应卡（delivered→expired，
 // 复用 D2 语义），仅作废本订单已发的卡（由 card_nos 精确定位）。
 //
-// 幂等：订单已是退款态时重复通知不报错（MarkRefunded 幂等；作废动作自身幂等）。
+// 同步撤单判定（返回 agree bool，供 handler 决定 result=agree/refuse）：
+//   - 本次实际作废张数 > 0 → 可撤（agree），置退款态；
+//   - 订单已是退款态（重复通知，幂等）→ 仍 agree；
+//   - 否则卡已使用/已过期、无法撤单 → refuse（agree=false，不置退款态）。
+//
 // 订单不存在 → ErrSupplyOrderNotFound（code=1200，handler 归一）。
-func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, error) {
+func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, bool, error) {
 	if s == nil || s.store == nil || s.pool == nil {
-		return nil, fmt.Errorf("xianguanjia supply order service unavailable")
+		return nil, false, fmt.Errorf("xianguanjia supply order service unavailable")
 	}
 	managerOrderNo = strings.TrimSpace(managerOrderNo)
 	if managerOrderNo == "" {
-		return nil, fmt.Errorf("xianguanjia supply refund notify: manager_order_no is required")
+		return nil, false, fmt.Errorf("xianguanjia supply refund notify: manager_order_no is required")
 	}
 	row, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo)
 	if err != nil {
-		return nil, fmt.Errorf("xianguanjia supply refund notify lookup: %w", err)
+		return nil, false, fmt.Errorf("xianguanjia supply refund notify lookup: %w", err)
 	}
 	if row == nil {
-		return nil, ErrSupplyOrderNotFound
+		return nil, false, ErrSupplyOrderNotFound
 	}
 
 	// 先作废卡再置退款态：作废失败（DB/临时故障）不置退款态，交给闲管家重试
 	// （与 D2 「处理成功才落回执」一致）。作废本身幂等：已 expired 不计数、不报错。
 	voided, err := s.pool.VoidCardsForOrder(ctx, row.CardNos)
 	if err != nil {
-		return nil, fmt.Errorf("xianguanjia supply refund void cards for order %s: %w", managerOrderNo, err)
+		return nil, false, fmt.Errorf("xianguanjia supply refund void cards for order %s: %w", managerOrderNo, err)
 	}
-	if _, err := s.store.MarkRefunded(ctx, managerOrderNo, time.Now()); err != nil {
-		return nil, fmt.Errorf("xianguanjia supply refund mark order %s: %w", managerOrderNo, err)
+	// 同步撤单判定：本次作废张数 > 0 或订单已是退款态（幂等重复通知）→ 可撤；
+	// 否则卡已使用/已过期、无法撤单 → refuse。
+	agree := voided > 0 || row.Status == supplyOrderStatusRefunded
+	if agree {
+		if _, err := s.store.MarkRefunded(ctx, managerOrderNo, time.Now()); err != nil {
+			return nil, false, fmt.Errorf("xianguanjia supply refund mark order %s: %w", managerOrderNo, err)
+		}
+		row.Status = supplyOrderStatusRefunded
+		now := time.Now()
+		if row.RefundedAt == nil {
+			row.RefundedAt = &now
+		}
 	}
-	slog.Info("xianguanjia supply order refunded",
-		"manager_order_no", managerOrderNo, "cards", len(row.CardNos), "voided", voided)
+	slog.Info("xianguanjia supply order refund evaluated",
+		"manager_order_no", managerOrderNo, "cards", len(row.CardNos), "voided", voided, "agree", agree)
 
-	row.Status = supplyOrderStatusRefunded
-	now := time.Now()
-	row.RefundedAt = &now
-	return s.viewExisting(ctx, row)
+	order, err := s.viewExisting(ctx, row)
+	if err != nil {
+		return nil, false, err
+	}
+	return order, agree, nil
 }
 
-// viewExisting 把存储行转为对外视图并回读卡密。
+// viewExisting 把存储行转为对外视图并回读卡密与金额/商品名。
 func (s *SupplyOrderService) viewExisting(ctx context.Context, row *supplyOrderRow) (*SupplyOrder, error) {
 	items, err := s.buildCardItems(ctx, row.CardNos)
 	if err != nil {
@@ -351,10 +446,40 @@ func (s *SupplyOrderService) viewExisting(ctx context.Context, row *supplyOrderR
 			"manager_order_no", row.ManagerOrderNo, "err", err)
 		items = emptyCardItems(row.CardNos)
 	}
-	return supplyOrderToView(row, items), nil
+	// 回读时补金额/商品名：订单行不冗余存储单价，按 goods_no 实时聚合（无迁移）。
+	var orderAmount int64
+	var goodsName string
+	if s.goods != nil && row.GoodsNo != "" {
+		if g, gerr := s.goods.GetGoods(ctx, row.GoodsNo); gerr == nil && g != nil {
+			orderAmount = g.Price * int64(row.Quantity)
+			goodsName = g.GoodsName
+		}
+	}
+	return supplyOrderToView(row, items, orderAmount, goodsName), nil
+}
+
+// getGoodsOrFail 取商品并做可用性校验：不存在→1100、下架(status=2)→1101。
+func (s *SupplyOrderService) getGoodsOrFail(ctx context.Context, goodsNo string) (*SupplyGoods, error) {
+	if s == nil || s.goods == nil {
+		return nil, fmt.Errorf("xianguanjia supply goods source unavailable")
+	}
+	g, err := s.goods.GetGoods(ctx, goodsNo)
+	if err != nil {
+		return nil, fmt.Errorf("xianguanjia supply get goods %s: %w", goodsNo, err)
+	}
+	if g == nil {
+		return nil, ErrSupplyGoodsNotFound
+	}
+	if g.Status == SupplyGoodsStatusOffSale {
+		return nil, NewSupplyAPIError(SupplyCodeGoodsUnavailable, "商品不可用")
+	}
+	return g, nil
 }
 
 // buildCardItems 组装 card_items（card_no + card_pwd）。
+//
+// 官方合规默认映射：card_no=""、card_pwd=兑换码（redeem code 本身）。
+// CardPwdResolver 提供时覆盖 card_pwd 取值（命中非空才覆盖，否则退化为默认映射）。
 func (s *SupplyOrderService) buildCardItems(ctx context.Context, cardNos []string) ([]SupplyOrderCardItem, error) {
 	pwds := map[string]string{}
 	if s.pwdResolve != nil && len(cardNos) > 0 {
@@ -366,7 +491,12 @@ func (s *SupplyOrderService) buildCardItems(ctx context.Context, cardNos []strin
 	}
 	items := make([]SupplyOrderCardItem, 0, len(cardNos))
 	for _, no := range cardNos {
-		items = append(items, SupplyOrderCardItem{CardNo: no, CardPwd: pwds[no]})
+		// 默认 card_pwd = 兑换码（redeem code 本身）；resolver 命中非空则覆盖。
+		pwd := no
+		if v, ok := pwds[no]; ok && v != "" {
+			pwd = v
+		}
+		items = append(items, SupplyOrderCardItem{CardNo: "", CardPwd: pwd})
 	}
 	return items, nil
 }
@@ -398,7 +528,8 @@ type SupplyCardReleaser interface {
 func emptyCardItems(cardNos []string) []SupplyOrderCardItem {
 	items := make([]SupplyOrderCardItem, 0, len(cardNos))
 	for _, no := range cardNos {
-		items = append(items, SupplyOrderCardItem{CardNo: no})
+		// 默认官方合规映射：card_no 留空，card_pwd 承载兑换码。
+		items = append(items, SupplyOrderCardItem{CardNo: "", CardPwd: no})
 	}
 	return items
 }
@@ -474,6 +605,13 @@ func (s *supplyOrderStoreDB) GetByManagerOrderNo(ctx context.Context, managerOrd
 	return scanSupplyOrder(s.db.QueryRowContext(ctx, supplyOrderSelectSQL, managerOrderNo))
 }
 
+func (s *supplyOrderStoreDB) GetByID(ctx context.Context, id int64) (*supplyOrderRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("xianguanjia supply order store unavailable")
+	}
+	return scanSupplyOrder(s.db.QueryRowContext(ctx, supplyOrderSelectByIDSQL, id))
+}
+
 func (s *supplyOrderStoreDB) MarkRefunded(ctx context.Context, managerOrderNo string, at time.Time) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, fmt.Errorf("xianguanjia supply order store unavailable")
@@ -493,6 +631,10 @@ func (s *supplyOrderStoreDB) MarkRefunded(ctx context.Context, managerOrderNo st
 const supplyOrderSelectSQL = `
 	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at
 	FROM xianguanjia_supply_orders WHERE manager_order_no = $1`
+
+const supplyOrderSelectByIDSQL = `
+	SELECT id, manager_order_no, goods_no, quantity, status, card_nos, created_at, refunded_at
+	FROM xianguanjia_supply_orders WHERE id = $1`
 
 func scanSupplyOrder(row *sql.Row) (*supplyOrderRow, error) {
 	var r supplyOrderRow
@@ -746,6 +888,20 @@ func (s *supplyOrderStoreMem) GetByManagerOrderNo(ctx context.Context, managerOr
 	return cloneSupplyOrderRow(s.rows[managerOrderNo]), nil
 }
 
+func (s *supplyOrderStoreMem) GetByID(ctx context.Context, id int64) (*supplyOrderRow, error) {
+	if s == nil {
+		return nil, fmt.Errorf("xianguanjia supply order store unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.rows {
+		if r.ID == id {
+			return cloneSupplyOrderRow(r), nil
+		}
+	}
+	return nil, nil
+}
+
 func (s *supplyOrderStoreMem) MarkRefunded(ctx context.Context, managerOrderNo string, at time.Time) (bool, error) {
 	if s == nil {
 		return false, fmt.Errorf("xianguanjia supply order store unavailable")
@@ -778,9 +934,9 @@ func cloneSupplyOrderRow(r *supplyOrderRow) *supplyOrderRow {
 	return &out
 }
 
-// supplyCardPoolMem 内存卡密池：模拟 redeem_codes 的 unused/delivered/expired 状态机。
+// SupplyCardPoolMemory 内存卡密池：模拟 redeem_codes 的 unused/delivered/expired 状态机。
 // cards: card_no -> 状态。互斥锁保证并发取卡不重发。
-type supplyCardPoolMem struct {
+type SupplyCardPoolMemory struct {
 	mu    sync.Mutex
 	cards map[string]string // card_no -> status
 	pwds  map[string]string // card_no -> card_pwd
@@ -788,7 +944,7 @@ type supplyCardPoolMem struct {
 
 // NewSupplyCardPoolMemory 返回内存版卡密池。cardNos 全部初始化为 unused；
 // cardPwds 可为 nil（card_pwd 空串）。
-func NewSupplyCardPoolMemory(cardNos []string, cardPwds map[string]string) *supplyCardPoolMem {
+func NewSupplyCardPoolMemory(cardNos []string, cardPwds map[string]string) *SupplyCardPoolMemory {
 	cards := make(map[string]string, len(cardNos))
 	for _, no := range cardNos {
 		cards[no] = "unused"
@@ -797,18 +953,18 @@ func NewSupplyCardPoolMemory(cardNos []string, cardPwds map[string]string) *supp
 	for k, v := range cardPwds {
 		pwds[k] = v
 	}
-	return &supplyCardPoolMem{cards: cards, pwds: pwds}
+	return &SupplyCardPoolMemory{cards: cards, pwds: pwds}
 }
 
 // StatusOf 返回内存池中某卡状态（测试断言用）。
-func (p *supplyCardPoolMem) StatusOf(cardNo string) string {
+func (p *SupplyCardPoolMemory) StatusOf(cardNo string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cards[cardNo]
 }
 
 // CountByStatus 统计内存池中某状态的卡数（测试断言用）。
-func (p *supplyCardPoolMem) CountByStatus(status string) int {
+func (p *SupplyCardPoolMemory) CountByStatus(status string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := 0
@@ -820,7 +976,17 @@ func (p *supplyCardPoolMem) CountByStatus(status string) int {
 	return n
 }
 
-func (p *supplyCardPoolMem) ClaimCardsForOrder(ctx context.Context, goodsNo string, quantity int) ([]SupplyPoolCard, error) {
+// SetCardStatusForTest 直接置某卡状态（仅供单测模拟「已使用/已过期」场景，
+// 以触发退款 refuse 分支；生产代码不得调用）。
+func (p *SupplyCardPoolMemory) SetCardStatusForTest(cardNo, status string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.cards[cardNo]; ok {
+		p.cards[cardNo] = status
+	}
+}
+
+func (p *SupplyCardPoolMemory) ClaimCardsForOrder(ctx context.Context, goodsNo string, quantity int) ([]SupplyPoolCard, error) {
 	if p == nil {
 		return nil, fmt.Errorf("xianguanjia supply card pool unavailable")
 	}
@@ -839,7 +1005,7 @@ func (p *supplyCardPoolMem) ClaimCardsForOrder(ctx context.Context, goodsNo stri
 	return out, nil
 }
 
-func (p *supplyCardPoolMem) ReleaseClaimedCards(ctx context.Context, cardNos []string) error {
+func (p *SupplyCardPoolMemory) ReleaseClaimedCards(ctx context.Context, cardNos []string) error {
 	if p == nil {
 		return fmt.Errorf("xianguanjia supply card pool unavailable")
 	}
@@ -853,7 +1019,7 @@ func (p *supplyCardPoolMem) ReleaseClaimedCards(ctx context.Context, cardNos []s
 	return nil
 }
 
-func (p *supplyCardPoolMem) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
+func (p *SupplyCardPoolMemory) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
 	if p == nil {
 		return 0, fmt.Errorf("xianguanjia supply card pool unavailable")
 	}
@@ -886,11 +1052,11 @@ func sortedCardNos(m map[string]string) []string {
 
 // supplyCardPwdResolverMem 基于内存池解析 card_pwd（测试用）。
 type supplyCardPwdResolverMem struct {
-	pool *supplyCardPoolMem
+	pool *SupplyCardPoolMemory
 }
 
 // NewSupplyCardPwdResolverMemory 返回内存版 card_pwd 解析器。
-func NewSupplyCardPwdResolverMemory(pool *supplyCardPoolMem) *supplyCardPwdResolverMem {
+func NewSupplyCardPwdResolverMemory(pool *SupplyCardPoolMemory) *supplyCardPwdResolverMem {
 	return &supplyCardPwdResolverMem{pool: pool}
 }
 
@@ -909,4 +1075,4 @@ func (r *supplyCardPwdResolverMem) ResolveCardPwd(ctx context.Context, cardNos [
 
 // ensure CardPwdResolver 的 DB 兑现说明：
 // 生产环境如需真实 card_pwd，集成者在 D6e 接线时提供 CardPwdResolver 实现
-// （当前 redeem_codes 无独立卡密列）；默认 nil 时 card_pwd 为空串（联调校正点）。
+// （当前 redeem_codes 无独立卡密列）；默认 nil 时 card_pwd 为兑换码（联调校正点）。

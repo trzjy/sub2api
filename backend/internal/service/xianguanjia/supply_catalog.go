@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // 商品目录被调接口（D6c）：查询平台信息 / 查询商户信息 / 查询商品列表 / 查询商品详情。
@@ -17,10 +19,12 @@ import (
 //	groups.id ──(0/1)──> subscription_plans.group_id （分组售价，price_cny）
 //
 //   - goods_no     = groups.id 的十进制字符串
+//   - goods_type   = 商品类型，我方货源全为卡密，恒为 2
 //   - goods_name   = groups.name
-//   - price        = 该分组在售套餐价 subscription_plans.price_cny（无则 0）
+//   - price        = 该分组在售套餐价 subscription_plans.price_cny 换算为「分」（无则 0）
 //   - stock        = 组内 redeem_codes(type='subscription' AND status='unused') 计数
-//   - goods_status = 1 可用（分组未软删）/ 0 不可用
+//   - status       = 1 在架（分组 active 且未软删）/ 2 下架（官方枚举）
+//   - update_time  = groups.updated_at 的 Unix 秒
 //
 // 池（xianyu_item_pools）以 (group_id, validity_days) 归属卡密；同一分组可有多个有效期
 // 池，本单元按「分组」聚合为一个商品（与总单 D6c 描述一致）。
@@ -28,6 +32,15 @@ import (
 // SupplyMerchantBalance 是「查询商户信息」固定返回的余额（自研系统无真实商户账户）。
 // 官方要求 balance 为大于 0 的整数。出处：总单「官方返回要求」。
 const SupplyMerchantBalance int64 = 999999
+
+// supplyPlatformFeatures 是「查询平台信息」固定返回的 features 能力开关。
+// 出处：方案 §3 决策 2（支持同步撤单退款；商品订阅通知未实现如实声明 false；
+// loss_purchase 按官方可选语义处理故 true）。
+var supplyPlatformFeatures = SupplyPlatformFeatures{
+	IsSupportOrderRefund:  true,
+	IsSupportGoodsNotify:  false,
+	IsSupportLossPurchase: true,
+}
 
 // SupplyCatalogService 编排四个目录类被调接口。
 type SupplyCatalogService struct {
@@ -58,10 +71,11 @@ func (s *SupplyCatalogService) PlatformInfo(ctx context.Context) (*SupplyPlatfor
 	if err != nil {
 		return nil, err
 	}
-	return &SupplyPlatformInfo{AppID: appID}, nil
+	return &SupplyPlatformInfo{AppID: appID, Features: supplyPlatformFeatures}, nil
 }
 
-// MerchantInfo 查询商户信息：返回货源授权商户号与固定余额（> 0 的整数）。
+// MerchantInfo 查询商户信息：返回固定余额（> 0 的整数）。
+// 官方 schema：data 仅含 balance，不再返回 mch_id。
 func (s *SupplyCatalogService) MerchantInfo(ctx context.Context) (*SupplyMerchantInfo, error) {
 	if s == nil || s.cfg == nil {
 		return nil, fmt.Errorf("xianguanjia supply catalog: config reader unavailable")
@@ -73,15 +87,16 @@ func (s *SupplyCatalogService) MerchantInfo(ctx context.Context) (*SupplyMerchan
 	if cfg == nil {
 		return nil, ErrNoActiveConfig
 	}
-	mchID, err := parseSupplyInt64(cfg.MchID, "mch_id")
-	if err != nil {
-		return nil, err
+	// 官方约束：balance 必须为大于 0 的整数。
+	if SupplyMerchantBalance <= 0 {
+		return nil, fmt.Errorf("xianguanjia supply merchant balance must be > 0")
 	}
-	return &SupplyMerchantInfo{MchID: mchID, Balance: SupplyMerchantBalance}, nil
+	return &SupplyMerchantInfo{Balance: SupplyMerchantBalance}, nil
 }
 
-// ListGoods 查询商品列表（分页）。keyword 对商品名模糊匹配；goods_type 仅支持卡密(2)，
-// 其它类型按空结果返回（本系统只供货卡密）。page_no/page_size 越界归一到安全范围。
+// ListGoods 查询商品列表（分页）。keyword 同时支持商品名模糊与商品编码精准；
+// goods_type 仅支持卡密(2)，其它类型按空结果返回（本系统只供货卡密）。
+// page_no/page_size 越界归一到安全范围（官方 page_size 上限 100）。
 func (s *SupplyCatalogService) ListGoods(ctx context.Context, req ListGoodsRequest) (*ListGoodsResult, error) {
 	if s == nil || s.goods == nil {
 		return nil, fmt.Errorf("xianguanjia supply catalog: goods source unavailable")
@@ -89,7 +104,7 @@ func (s *SupplyCatalogService) ListGoods(ctx context.Context, req ListGoodsReque
 	pageNo, pageSize := req.normalize()
 	// 非卡密类型：本系统无对应商品，返回空列表（code==0，不报错）。
 	if req.GoodsType != 0 && req.GoodsType != SupplyGoodsTypeKami {
-		return &ListGoodsResult{List: []SupplyGoods{}, Total: 0, PageNo: pageNo, PageSize: pageSize}, nil
+		return &ListGoodsResult{List: []SupplyGoods{}, Count: 0}, nil
 	}
 	offset := (pageNo - 1) * pageSize
 	list, total, err := s.goods.ListGoods(ctx, strings.TrimSpace(req.Keyword), offset, pageSize)
@@ -99,7 +114,7 @@ func (s *SupplyCatalogService) ListGoods(ctx context.Context, req ListGoodsReque
 	if list == nil {
 		list = []SupplyGoods{}
 	}
-	return &ListGoodsResult{List: list, Total: total, PageNo: pageNo, PageSize: pageSize}, nil
+	return &ListGoodsResult{List: list, Count: total}, nil
 }
 
 // GoodsDetail 查询商品详情。货物不存在时返回 ErrSupplyGoodsNotFound（code=1100），
@@ -156,7 +171,8 @@ const supplyGoodsSelect = `
 		(
 			SELECT COUNT(*) FROM redeem_codes r
 			WHERE r.group_id = g.id AND r.type = 'subscription' AND r.status = 'unused'
-		)
+		),
+		g.updated_at
 	FROM "groups" g
 	WHERE g.deleted_at IS NULL`
 
@@ -172,8 +188,16 @@ func (r *supplyGoodsSourceDB) ListGoods(ctx context.Context, keyword string, off
 			OR EXISTS (SELECT 1 FROM redeem_codes rc WHERE rc.group_id = g.id AND rc.type = 'subscription')
 		)`
 	if keyword != "" {
-		args = append(args, "%"+keyword+"%")
-		filter += fmt.Sprintf(" AND g.name ILIKE $%d", len(args))
+		kw := strings.TrimSpace(keyword)
+		args = append(args, "%"+kw+"%")
+		nameCond := fmt.Sprintf("g.name ILIKE $%d", len(args))
+		// 商品编码（goods_no = groups.id 十进制串）精准命中：kw 为数字时叠加 OR。
+		if _, err := strconv.ParseInt(kw, 10, 64); err == nil {
+			args = append(args, kw)
+			filter += fmt.Sprintf(" AND (%s OR g.id = $%d)", nameCond, len(args))
+		} else {
+			filter += fmt.Sprintf(" AND %s", nameCond)
+		}
 	}
 
 	var total int
@@ -233,30 +257,33 @@ type rowScanner interface {
 
 func scanSupplyGoods(row rowScanner) (*SupplyGoods, error) {
 	var (
-		id     int64
-		name   string
-		status string
-		price  float64
-		stock  int
+		id        int64
+		name      string
+		status    string
+		price     float64
+		stock     int
+		updatedAt time.Time
 	)
-	if err := row.Scan(&id, &name, &status, &price, &stock); err != nil {
+	if err := row.Scan(&id, &name, &status, &price, &stock, &updatedAt); err != nil {
 		return nil, err
 	}
 	return &SupplyGoods{
-		GoodsNo:     strconv.FormatInt(id, 10),
-		GoodsName:   name,
-		Price:       price,
-		Stock:       stock,
-		GoodsStatus: supplyGoodsStatusFromGroupStatus(status),
+		GoodsNo:    strconv.FormatInt(id, 10),
+		GoodsType:  SupplyGoodsTypeKami,
+		GoodsName:  name,
+		Price:      int64(math.Round(price * 100)), // DB 元 → 分
+		Stock:      stock,
+		Status:     supplyGoodsStatusFromGroupStatus(status),
+		UpdateTime: updatedAt.Unix(),
 	}, nil
 }
 
-// supplyGoodsStatusFromGroupStatus 把分组状态映射为对外商品状态整数。
+// supplyGoodsStatusFromGroupStatus 把分组状态映射为对外商品状态整数（1=在架 2=下架）。
 func supplyGoodsStatusFromGroupStatus(status string) int {
 	if status == "active" {
-		return SupplyGoodsStatusAvailable
+		return SupplyGoodsStatusOnSale
 	}
-	return SupplyGoodsStatusUnavailable
+	return SupplyGoodsStatusOffSale
 }
 
 // ---- 内存数据源（单测 / handler 测试用） ----
@@ -276,10 +303,22 @@ func (s *supplyGoodsSourceMem) ListGoods(ctx context.Context, keyword string, of
 	if s == nil {
 		return nil, 0, fmt.Errorf("xianguanjia supply goods source unavailable")
 	}
+	kw := strings.TrimSpace(keyword)
 	matched := make([]SupplyGoods, 0, len(s.goods))
 	for _, g := range s.goods {
-		if keyword == "" || strings.Contains(g.GoodsName, keyword) {
+		if kw == "" {
 			matched = append(matched, g)
+			continue
+		}
+		if strings.Contains(g.GoodsName, kw) {
+			matched = append(matched, g)
+			continue
+		}
+		// 商品编码精准命中：kw 为数字且等于 goods_no。
+		if _, err := strconv.ParseInt(kw, 10, 64); err == nil {
+			if g.GoodsNo == kw {
+				matched = append(matched, g)
+			}
 		}
 	}
 	total := len(matched)

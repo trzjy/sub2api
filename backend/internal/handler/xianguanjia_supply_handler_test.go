@@ -40,6 +40,10 @@ func (f *fakeSupplyCatalogService) ListGoods(ctx context.Context, req xianguanji
 	if pageSize < 1 {
 		pageSize = 20
 	}
+	// 透传归一化分页（与 service 行为一致：page_size 上限 100）。
+	if pageSize > 100 {
+		pageSize = 100
+	}
 	all := f.goods
 	start := (pageNo - 1) * pageSize
 	if start > len(all) {
@@ -50,10 +54,8 @@ func (f *fakeSupplyCatalogService) ListGoods(ctx context.Context, req xianguanji
 		end = len(all)
 	}
 	return &xianguanjia.ListGoodsResult{
-		List:     all[start:end],
-		Total:    len(all),
-		PageNo:   pageNo,
-		PageSize: pageSize,
+		List:  all[start:end],
+		Count: len(all),
 	}, nil
 }
 
@@ -102,13 +104,20 @@ func decodeSupplyEnvelope(t *testing.T, w *httptest.ResponseRecorder) (int, map[
 
 func testSupplyGoodsFixture() []xianguanjia.SupplyGoods {
 	return []xianguanjia.SupplyGoods{
-		{GoodsNo: "11", GoodsName: "月卡套餐", Price: 29.9, Stock: 5, GoodsStatus: 1},
-		{GoodsNo: "12", GoodsName: "周卡套餐", Price: 9.9, Stock: 0, GoodsStatus: 0},
+		{GoodsNo: "11", GoodsName: "月卡套餐", GoodsType: xianguanjia.SupplyGoodsTypeKami, Price: 2990, Stock: 5, Status: xianguanjia.SupplyGoodsStatusOnSale, UpdateTime: 1700000000},
+		{GoodsNo: "12", GoodsName: "周卡套餐", GoodsType: xianguanjia.SupplyGoodsTypeKami, Price: 990, Stock: 0, Status: xianguanjia.SupplyGoodsStatusOffSale, UpdateTime: 1700000001},
 	}
 }
 
 func TestHandlerSupplyPlatformInfo(t *testing.T) {
-	h := newSupplyTestHandler(&fakeSupplyCatalogService{platform: &xianguanjia.SupplyPlatformInfo{AppID: 1783283558647493}})
+	h := newSupplyTestHandler(&fakeSupplyCatalogService{platform: &xianguanjia.SupplyPlatformInfo{
+		AppID: 1783283558647493,
+		Features: xianguanjia.SupplyPlatformFeatures{
+			IsSupportOrderRefund:  true,
+			IsSupportGoodsNotify:  false,
+			IsSupportLossPurchase: true,
+		},
+	}})
 	w := doSupply(t, h.PlatformInfo, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -125,10 +134,24 @@ func TestHandlerSupplyPlatformInfo(t *testing.T) {
 	if int64(appID) != 1783283558647493 {
 		t.Fatalf("app_id = %v, want 1783283558647493", appID)
 	}
+	// features 三值断言。
+	feat, ok := data["features"].(map[string]any)
+	if !ok {
+		t.Fatalf("features type = %T, want object", data["features"])
+	}
+	if v, _ := feat["is_support_order_refund"].(bool); !v {
+		t.Fatalf("is_support_order_refund = %v, want true", v)
+	}
+	if v, _ := feat["is_support_goods_notify"].(bool); v {
+		t.Fatalf("is_support_goods_notify = %v, want false", v)
+	}
+	if v, _ := feat["is_support_loss_purchase"].(bool); !v {
+		t.Fatalf("is_support_loss_purchase = %v, want true", v)
+	}
 }
 
 func TestHandlerSupplyMerchantInfoBalanceIsInteger(t *testing.T) {
-	h := newSupplyTestHandler(&fakeSupplyCatalogService{merchant: &xianguanjia.SupplyMerchantInfo{MchID: 900001, Balance: 999999}})
+	h := newSupplyTestHandler(&fakeSupplyCatalogService{merchant: &xianguanjia.SupplyMerchantInfo{Balance: 999999}})
 	w := doSupply(t, h.MerchantInfo, nil)
 	code, data := decodeSupplyEnvelope(t, w)
 	if code != 0 {
@@ -141,6 +164,10 @@ func TestHandlerSupplyMerchantInfoBalanceIsInteger(t *testing.T) {
 	}
 	if balance <= 0 {
 		t.Fatalf("balance = %v, want > 0", balance)
+	}
+	// 契约：data 不得含 mch_id 键。
+	if _, present := data["mch_id"]; present {
+		t.Fatalf("merchant info JSON 不应含 mch_id 键: %s", w.Body.String())
 	}
 }
 
@@ -156,8 +183,8 @@ func TestHandlerSupplyListGoodsNormal(t *testing.T) {
 	if !ok || len(list) != 2 {
 		t.Fatalf("list = %v, want 2 items", data["list"])
 	}
-	if total, _ := data["total"].(float64); int(total) != 2 {
-		t.Fatalf("total = %v, want 2", data["total"])
+	if count, _ := data["count"].(float64); int(count) != 2 {
+		t.Fatalf("count = %v, want 2", data["count"])
 	}
 }
 
@@ -182,9 +209,6 @@ func TestHandlerSupplyListGoodsPagination(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
-	if pn, _ := data["page_no"].(float64); int(pn) != 2 {
-		t.Fatalf("page_no echo = %v, want 2", data["page_no"])
-	}
 	list, _ := data["list"].([]any)
 	if len(list) != 1 {
 		t.Fatalf("page2 len = %d, want 1", len(list))
@@ -193,7 +217,7 @@ func TestHandlerSupplyListGoodsPagination(t *testing.T) {
 
 func TestHandlerSupplyGoodsDetailFound(t *testing.T) {
 	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: testSupplyGoodsFixture()})
-	body, _ := json.Marshal(map[string]any{"goods_no": "11"})
+	body, _ := json.Marshal(map[string]any{"goods_no": "11", "goods_type": 2})
 	w := doSupply(t, h.GoodsDetail, body)
 	code, data := decodeSupplyEnvelope(t, w)
 	if code != 0 {
@@ -202,15 +226,27 @@ func TestHandlerSupplyGoodsDetailFound(t *testing.T) {
 	if data["goods_no"] != "11" {
 		t.Fatalf("goods_no = %v, want 11", data["goods_no"])
 	}
-	// 类型纪律：stock 必须是 number。
+	// 类型纪律：stock / price / update_time 必须是 number。
 	if _, ok := data["stock"].(float64); !ok {
 		t.Fatalf("stock type = %T, want number", data["stock"])
+	}
+	if price, ok := data["price"].(float64); !ok || int64(price) != 2990 {
+		t.Fatalf("price = %v, want 2990 (分)", data["price"])
+	}
+	if gt, ok := data["goods_type"].(float64); !ok || int(gt) != xianguanjia.SupplyGoodsTypeKami {
+		t.Fatalf("goods_type = %v, want %d", data["goods_type"], xianguanjia.SupplyGoodsTypeKami)
+	}
+	if st, ok := data["status"].(float64); !ok || int(st) != xianguanjia.SupplyGoodsStatusOnSale {
+		t.Fatalf("status = %v, want %d", data["status"], xianguanjia.SupplyGoodsStatusOnSale)
+	}
+	if ut, ok := data["update_time"].(float64); !ok || int64(ut) != 1700000000 {
+		t.Fatalf("update_time = %v, want 1700000000", data["update_time"])
 	}
 }
 
 func TestHandlerSupplyGoodsDetailNotFound(t *testing.T) {
 	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: testSupplyGoodsFixture()})
-	body, _ := json.Marshal(map[string]any{"goods_no": "9999"})
+	body, _ := json.Marshal(map[string]any{"goods_no": "9999", "goods_type": 2})
 	w := doSupply(t, h.GoodsDetail, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (envelope carries error)", w.Code)
@@ -221,12 +257,87 @@ func TestHandlerSupplyGoodsDetailNotFound(t *testing.T) {
 	}
 }
 
+// TestHandlerSupplyGoodsDetailTypeOneNotFound goods_type=1（非卡密）→ 1100 商品不存在。
+func TestHandlerSupplyGoodsDetailTypeOneNotFound(t *testing.T) {
+	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: testSupplyGoodsFixture()})
+	body, _ := json.Marshal(map[string]any{"goods_no": "11", "goods_type": 1})
+	w := doSupply(t, h.GoodsDetail, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (envelope carries error)", w.Code)
+	}
+	code, _ := decodeSupplyEnvelope(t, w)
+	if code != xianguanjia.SupplyCodeGoodsNotFound {
+		t.Fatalf("code = %d, want %d (goods_type 非卡密视为不存在)", code, xianguanjia.SupplyCodeGoodsNotFound)
+	}
+}
+
 func TestHandlerSupplyGoodsDetailInvalidBody(t *testing.T) {
 	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: testSupplyGoodsFixture()})
 	w := doSupply(t, h.GoodsDetail, []byte("{not json"))
 	code, _ := decodeSupplyEnvelope(t, w)
 	if code != http.StatusBadRequest {
 		t.Fatalf("code = %d, want %d", code, http.StatusBadRequest)
+	}
+}
+
+// TestHandlerSupplyListGoodsShapeOnlyListCount 精确断言列表响应 JSON 形状：
+// 信封仅 code/msg/data 三键，data 仅 list/count 两键，且无 total/page_no/page_size。
+func TestHandlerSupplyListGoodsShapeOnlyListCount(t *testing.T) {
+	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: testSupplyGoodsFixture()})
+	body, _ := json.Marshal(map[string]any{"goods_type": 2})
+	w := doSupply(t, h.ListGoods, body)
+
+	var env map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, w.Body.String())
+	}
+	if len(env) != 3 {
+		t.Fatalf("envelope keys = %d, want 3 (code/msg/data), body=%s", len(env), w.Body.String())
+	}
+	for _, k := range []string{"code", "msg", "data"} {
+		if _, ok := env[k]; !ok {
+			t.Fatalf("envelope missing key %q", k)
+		}
+	}
+	data, ok := env["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data type = %T, want object", env["data"])
+	}
+	if len(data) != 2 {
+		t.Fatalf("data keys = %d, want 2 (list/count), body=%s", len(data), w.Body.String())
+	}
+	for _, k := range []string{"list", "count"} {
+		if _, ok := data[k]; !ok {
+			t.Fatalf("data missing key %q", k)
+		}
+	}
+	for _, extra := range []string{"total", "page_no", "page_size"} {
+		if _, ok := data[extra]; ok {
+			t.Fatalf("data 不应含额外键 %q: %s", extra, w.Body.String())
+		}
+	}
+}
+
+// TestHandlerSupplyListGoodsEmptyListIsArray 验证空列表序列化为 []（而非 null）。
+func TestHandlerSupplyListGoodsEmptyListIsArray(t *testing.T) {
+	h := newSupplyTestHandler(&fakeSupplyCatalogService{goods: nil})
+	body, _ := json.Marshal(map[string]any{})
+	w := doSupply(t, h.ListGoods, body)
+
+	var env struct {
+		Data struct {
+			List  []any `json:"list"`
+			Count int   `json:"count"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v, body=%s", err, w.Body.String())
+	}
+	if env.Data.List == nil {
+		t.Fatalf("list 应为 [] 而非 null: %s", w.Body.String())
+	}
+	if env.Data.Count != 0 {
+		t.Fatalf("count = %d, want 0", env.Data.Count)
 	}
 }
 

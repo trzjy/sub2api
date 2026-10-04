@@ -281,6 +281,7 @@ func ProvideHandlers(
 	xianyuDeliveryHandler *XianyuDeliveryHandler,
 	xianguanjiaPushHandler *XianyuXianguanjiaPushHandler,
 	xgjSupplyHandler *XgjSupplyHandler, // D6e: 货源模式公开接口
+	xgjSupplyOrderHandler *XianguanjiaSupplyOrderHandler, // D6d: 卡密订单真实链路
 	supplyCatalogHandler *XianguanjiaSupplyHandler, // D6i: D6c 货源目录接口
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
@@ -311,6 +312,7 @@ func ProvideHandlers(
 		XianyuDelivery:   xianyuDeliveryHandler,
 		XianguanjiaPush:  xianguanjiaPushHandler,
 		XgjSupply:        xgjSupplyHandler,
+		XgjSupplyOrder:   xgjSupplyOrderHandler,
 		SupplyCatalog:    supplyCatalogHandler,
 	}
 }
@@ -322,6 +324,8 @@ var ProviderSet = wire.NewSet(
 	wire.Bind(new(admin.XianguanjiaConfigStore), new(xianguanjia.ConfigStore)),
 	// D6i: 货源模式凭证存储（D6a DB 实现，需 db 与 secretEncryptor——由 wire_gen 传参）。
 	xianguanjia.NewSupplyConfigStore,
+	// D6d: 卡密订单真实链路（store/pool 由 wire_gen 以 db 现场构造，resolver 归 02c）。
+	NewXianguanjiaSupplyOrderHandler,
 	// Top-level handlers
 	NewAuthHandler,
 	NewUserHandler,

@@ -9,13 +9,12 @@ import (
 // 本文件是 D6「虚拟货源（被调接口）」方向的共享类型定义，由 D6c 建立，
 // D6a（凭证读写）/ D6b（验签中间件）/ D6d（创建订单）复用。
 //
-// 契约权威：总单 /root/dispatch-D6.md 与 virtual-supply 文档（doc-7646489 接入教程、
-// doc-4985015 接口规范）。字段名以 doc-4985015 schema 为准；当前 worktree 无该文档，
-// 按官方语义 + 常见 snake_case 命名实现，字段名不确定性统一记入证据文件 d6c.md
-// 的「联调校正清单」。
+// 契约权威：鲜管家供应链开放平台官方接口（Apifox shared-cf4d53fd，接口
+// api-205398642 / api-208575910 / api-205405059 / api-205405060）。字段名与类型
+// 严格对齐官方 schema（data 对象 additionalProperties:false，不得多返回字段）。
 //
 // 类型纪律（官方原话「否则会对接失败，整数就是整数」）：对外返回的 app_id / balance /
-// stock / goods_status 一律为整数类型，不得用字符串承载数字。
+// stock / status / price(分) / update_time(秒) 一律为整数类型，不得用字符串承载数字。
 
 // ---- 官方业务错误码 ----
 //
@@ -76,32 +75,36 @@ type SupplyConfigReader interface {
 // SupplyGoods 是「池聚合」出的商品视图。
 //
 // 映射关系（详见证据 d6c.md）：
-//   - GoodsNo   = 分组 ID（groups.id）的十进制字符串；
-//   - GoodsName = 分组名（groups.name）；
-//   - Price     = 分组售价（subscription_plans.price_cny，取该分组在售套餐价；无则 0）；
-//   - Stock     = 组内未使用卡密数（redeem_codes WHERE group_id=? AND type='subscription'
+//   - GoodsNo     = 分组 ID（groups.id）的十进制字符串；
+//   - GoodsType   = 商品类型，我方货源全为卡密，恒为 2；
+//   - GoodsName   = 分组名（groups.name）；
+//   - Price       = 分组售价（subscription_plans.price_cny）换算为「分」的整数；
+//   - Stock       = 组内未使用卡密数（redeem_codes WHERE group_id=? AND type='subscription'
 //     AND status='unused'）；
-//   - GoodsStatus = 商品状态：1=可用（分组 active 且未软删），0=不可用。
+//   - Status      = 商品状态：1=在架（分组 active 且未软删），2=下架；
+//   - UpdateTime  = 分组更新时间（groups.updated_at）的 Unix 秒。
 //
-// JSON tag 为对外 snake_case 字段名，官方 schema 未坐实的字段见联调校正清单。
+// JSON tag 严格对齐官方 schema（additionalProperties:false，不得多返回字段）。
 type SupplyGoods struct {
-	GoodsNo     string  `json:"goods_no"`
-	GoodsName   string  `json:"goods_name"`
-	Price       float64 `json:"price"`
-	Stock       int     `json:"stock"`
-	GoodsStatus int     `json:"goods_status"`
+	GoodsNo    string `json:"goods_no"`
+	GoodsType  int    `json:"goods_type"`
+	GoodsName  string `json:"goods_name"`
+	Price      int64  `json:"price"`      // 分
+	Stock      int    `json:"stock"`
+	Status     int    `json:"status"`     // 1=在架 2=下架（官方枚举）
+	UpdateTime int64  `json:"update_time"` // 秒
 }
 
-// 商品状态枚举（对外整数）。
+// 商品状态枚举（对外整数，官方 schema 1=在架 2=下架）。
 const (
-	SupplyGoodsStatusUnavailable = 0 // 不可用（分组停用/删除）
-	SupplyGoodsStatusAvailable   = 1 // 可用（在售）
+	SupplyGoodsStatusOnSale  = 1 // 在架（分组 active 且未软删）
+	SupplyGoodsStatusOffSale = 2 // 下架（分组停用/软删）
 )
 
 // SupplyGoodsSource 是「池 → 商品」聚合数据源。DB 实现从 groups/subscription_plans/
 // redeem_codes 聚合；内存实现供单测与 handler 测试使用。
 type SupplyGoodsSource interface {
-	// ListGoods 按 keyword（对 goods_name 模糊匹配，空串不过滤）返回商品与总数。
+	// ListGoods 按 keyword 返回商品与总数。keyword 同时支持商品名称模糊与商品编码精准。
 	// offset/limit 由实现完成分页；limit<=0 表示不限。
 	ListGoods(ctx context.Context, keyword string, offset, limit int) ([]SupplyGoods, int, error)
 	// GetGoods 按 goods_no 查询单个商品；不存在返回 (nil, nil)，由 service 归一为 1100。
@@ -110,16 +113,23 @@ type SupplyGoodsSource interface {
 
 // ---- 平台 / 商户信息 DTO ----
 
+// SupplyPlatformFeatures 是平台信息中的能力开关（官方 data.features）。
+type SupplyPlatformFeatures struct {
+	IsSupportOrderRefund  bool `json:"is_support_order_refund"`
+	IsSupportGoodsNotify  bool `json:"is_support_goods_notify"`
+	IsSupportLossPurchase bool `json:"is_support_loss_purchase"`
+}
+
 // SupplyPlatformInfo 是「查询平台信息」的返回体。
 // app_id 必须为当前对接的应用概况 AppKey（整数），官方原话见总单「官方返回要求」。
 type SupplyPlatformInfo struct {
-	AppID int64 `json:"app_id"`
+	AppID    int64                 `json:"app_id"`
+	Features SupplyPlatformFeatures `json:"features"`
 }
 
 // SupplyMerchantInfo 是「查询商户信息」的返回体。
-// balance 必须为大于 0 的整数；自研系统固定返回即可（默认 999999）。
+// 官方 schema：data 仅含 balance（> 0 的整数）。自研系统固定返回即可（默认 999999）。
 type SupplyMerchantInfo struct {
-	MchID   int64 `json:"mch_id"`
 	Balance int64 `json:"balance"`
 }
 
@@ -137,18 +147,17 @@ type ListGoodsRequest struct {
 }
 
 // ListGoodsResult 是「查询商品列表」的返回体。
+// 官方 schema：data 仅含 {list, count}（count 即总数，并入原 total 语义）。
 type ListGoodsResult struct {
-	List     []SupplyGoods `json:"list"`
-	Total    int           `json:"total"`
-	PageNo   int           `json:"page_no"`
-	PageSize int           `json:"page_size"`
+	List  []SupplyGoods `json:"list"`
+	Count int           `json:"count"`
 }
 
-// 分页边界（防御性默认，官方未坐实时按常见值）。
+// 分页边界（防御性默认）。官方 page_size 上限为 100。
 const (
 	supplyDefaultPageNo   = 1
 	supplyDefaultPageSize = 20
-	supplyMaxPageSize     = 200
+	supplyMaxPageSize     = 100
 )
 
 // normalize 归一化分页入参：page_no<1 → 1；page_size<1 → 默认；超过上限则截断。

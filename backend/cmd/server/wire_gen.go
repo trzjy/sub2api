@@ -399,10 +399,13 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianguanjiaSupplyCatalogSvc := xianguanjia.NewSupplyCatalogService(xgjSupplyStore, xianguanjia.NewSupplyGoodsSource(db)) // D6i: D6c 目录服务
 	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc) // D6i: D6c 目录 handler
 	xgjSupplyHandler := handler.NewXgjSupplyHandler(xgjSupplyStore, "")
+	xianguanjiaSupplyOrderSvc := xianguanjia.NewSupplyOrderService(
+		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil) // D6d: 卡密订单（02b 后 goods 为金额来源）
+	xianguanjiaSupplyOrderHandler := handler.NewXianguanjiaSupplyOrderHandler(xianguanjiaSupplyOrderSvc)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)
-	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, xgjSupplyHandler, xianguanjiaSupplyCatalogHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
+	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, xianyuDeliveryHandler, xianguanjiaPushHandler, xgjSupplyHandler, xianguanjiaSupplyOrderHandler, xianguanjiaSupplyCatalogHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
 	jwtAuthMiddleware := middleware.NewJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	optionalJWTAuthMiddleware := middleware.NewOptionalJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	adminAuthMiddleware := middleware.NewAdminAuthMiddleware(authService, userService, settingService, auditLogService)

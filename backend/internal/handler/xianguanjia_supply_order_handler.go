@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service/xianguanjia"
 	"github.com/gin-gonic/gin"
@@ -18,19 +19,24 @@ import (
 // 路由注册归 D6e；本文件只提供 handler 方法。响应统一官方信封 {code,msg,data}，
 // HTTP 状态固定 200（官方以信封 code 判定成败）。
 //
-// 官方错误码：1102 库存不足 / 1200 订单不存在 / 1203 订单号已存在 /
-// 1209 下单超时。本实现中：
-//   - 库存不足 → 1102；
+// 官方错误码：1100 商品不存在 / 1101 商品不可用 / 1102 库存不足 / 1200 订单不存在 /
+// 1201 下单参数错误 / 1202 下单金额低于成本价 / 1203 订单号已存在 / 1209 下单超时。
+// 本实现中：
+//   - 商品不存在 → 1100；商品不可用 → 1101；库存不足 → 1102；max_amount 超额 → 1202；
 //   - 查单/退款订单不存在 → 1200；
+//   - 下单必填参数缺失（order_no/goods_no/buy_quantity）→ 1201；
 //   - 幂等重发不返回 1203，而是同步返回既有 card_items（资金红线：不重发卡）；
 //   - 其余内部/参数错误在创建接口归一为 1209（下单超时，可重试语义）。
 
 // XianguanjiaSupplyOrderService 是 handler 依赖的订单服务窄接口。
 // *xianguanjia.SupplyOrderService 隐式满足。
 type XianguanjiaSupplyOrderService interface {
-	CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, quantity int) (*xianguanjia.SupplyOrder, error)
-	GetOrder(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, error)
-	RefundNotify(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, error)
+	// CreateOrder 创建卡密订单（maxAmount 分：0=不校验）。
+	CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, buyQuantity int, maxAmount int64) (*xianguanjia.SupplyOrder, error)
+	// GetOrder 查单：order_no 优先；为空时按 out_order_no（我方订单 id）查。
+	GetOrder(ctx context.Context, orderNo, outOrderNo string) (*xianguanjia.SupplyOrder, error)
+	// RefundNotify 退款通知：返回 (订单视图, 是否可撤单 agree)。
+	RefundNotify(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, bool, error)
 }
 
 // XianguanjiaSupplyOrderHandler 卡密订单处理器。
@@ -72,50 +78,43 @@ func supplyOrderRespondErr(c *gin.Context, err error, fallbackCode int) {
 	c.JSON(http.StatusOK, supplyOrderEnvelope{Code: fallbackCode, Msg: "internal error"})
 }
 
-// createSupplyOrderBody 创建卡密订单请求体。
+// createSupplyOrderBody 创建卡密订单请求体（官方字段名，严格单一命名）。
 //
-// 官方字段名以 doc-4985015 schema 为准；本仓无该文档，按语义 + 常见命名实现，
-// 并对管家订单号做别名兼容（order_no / manager_order_no / order_sn）。
+// 删除旧兼容键 manager_order_no/order_sn/quantity/num：官方强校验单一命名，
+// 旧链归零。max_amount（分，可选）：0 表示不校验。
 type createSupplyOrderBody struct {
-	OrderNo        string `json:"order_no"`
-	ManagerOrderNo string `json:"manager_order_no"`
-	OrderSn        string `json:"order_sn"`
-	GoodsNo        string `json:"goods_no"`
-	Quantity       int    `json:"quantity"`
-	Num            int    `json:"num"`
-	NotifyURL      string `json:"notify_url"`
+	OrderNo    string `json:"order_no"`
+	GoodsNo    string `json:"goods_no"`
+	BuyQuantity int   `json:"buy_quantity"`
+	NotifyURL  string `json:"notify_url"`
+	BizOrderNo string `json:"biz_order_no"`
+	MaxAmount  int64  `json:"max_amount"`
+	ProductID  int64  `json:"product_id"`
+	ProductSKU int64  `json:"product_sku"`
+	ItemID     int64  `json:"item_id"`
 }
 
-func (b createSupplyOrderBody) managerOrderNo() string {
-	for _, v := range []string{b.OrderNo, b.ManagerOrderNo, b.OrderSn} {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
+// supplyOrderQueryBody 查单 / 退款申请请求体（官方字段名）。
+// 查单：order_no 优先，out_order_no 兜底。退款申请在此基础上宽松解析退款字段。
+type supplyOrderQueryBody struct {
+	OrderType  int    `json:"order_type"`
+	OrderNo    string `json:"order_no"`
+	OutOrderNo string `json:"out_order_no"`
 }
 
-func (b createSupplyOrderBody) quantity() int {
-	if b.Quantity > 0 {
-		return b.Quantity
-	}
-	return b.Num
-}
-
-// supplyOrderOrderNoBody 查单/退款请求体（只取管家订单号）。
-type supplyOrderOrderNoBody struct {
-	OrderNo        string `json:"order_no"`
-	ManagerOrderNo string `json:"manager_order_no"`
-	OrderSn        string `json:"order_sn"`
-}
-
-func (b supplyOrderOrderNoBody) managerOrderNo() string {
-	for _, v := range []string{b.OrderNo, b.ManagerOrderNo, b.OrderSn} {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
+// supplyOrderRefundBody 退款申请请求体：查单字段 + 官方退款字段（宽松解析，
+// 多余键忽略）。仅使用 order_no/out_order_no/apply_time；其余键按官方名保留解析。
+type supplyOrderRefundBody struct {
+	OrderType        int    `json:"order_type"`
+	OrderNo          string `json:"order_no"`
+	OutOrderNo       string `json:"out_order_no"`
+	BizOrderNo       string `json:"biz_order_no"`
+	RefundType       int    `json:"refund_type"`
+	RefundAmount     int64  `json:"refund_amount"`
+	RefundReason     string `json:"refund_reason"`
+	RefundScene      string `json:"refund_scene"`
+	ApplyTime        int64  `json:"apply_time"`
+	RefundCallbackURL string `json:"refund_callback_url"`
 }
 
 // readSupplyOrderBody 读取并解析 JSON body（限长）。
@@ -131,7 +130,7 @@ func readSupplyOrderBody(c *gin.Context, dst any) error {
 }
 
 // CreateOrder 处理「创建卡密订单」（POST）。
-// 成功同步返回 order_status=20 + card_items[]{card_no,card_pwd}；
+// 成功同步返回官方订单视图（order_status=20 + card_items[]{card_no:"",card_pwd:兑换码}）；
 // 幂等重发返回同一批 card_items（不重发卡）。
 func (h *XianguanjiaSupplyOrderHandler) CreateOrder(c *gin.Context) {
 	if h == nil || h.svc == nil {
@@ -143,18 +142,18 @@ func (h *XianguanjiaSupplyOrderHandler) CreateOrder(c *gin.Context) {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderTimeout)
 		return
 	}
-	orderNo := body.managerOrderNo()
+	orderNo := strings.TrimSpace(body.OrderNo)
 	goodsNo := strings.TrimSpace(body.GoodsNo)
-	quantity := body.quantity()
-	if orderNo == "" || quantity <= 0 {
-		// 参数非法：创建接口按 1209（下单超时）语义返回，提示可重试修正。
+	buyQuantity := body.BuyQuantity
+	// 必填校验：order_no/goods_no 非空、buy_quantity>0；缺 → 1201（替换原 1209 误用）。
+	if orderNo == "" || goodsNo == "" || buyQuantity <= 0 {
 		c.JSON(http.StatusOK, supplyOrderEnvelope{
-			Code: xianguanjia.SupplyCodeOrderTimeout,
-			Msg:  "order_no and quantity are required",
+			Code: xianguanjia.SupplyCodeOrderParamError,
+			Msg:  "order_no, goods_no and buy_quantity are required",
 		})
 		return
 	}
-	order, err := h.svc.CreateOrder(c.Request.Context(), orderNo, goodsNo, quantity)
+	order, err := h.svc.CreateOrder(c.Request.Context(), orderNo, goodsNo, buyQuantity, body.MaxAmount)
 	if err != nil {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderTimeout)
 		return
@@ -162,30 +161,30 @@ func (h *XianguanjiaSupplyOrderHandler) CreateOrder(c *gin.Context) {
 	supplyOrderRespondOK(c, order)
 }
 
-// GetOrder 处理「查询订单详情」（GET/POST，管家订单号可来自 query 或 body）。
+// GetOrder 处理「查询订单详情」（POST，order_no 优先、out_order_no 兜底）。
 func (h *XianguanjiaSupplyOrderHandler) GetOrder(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyOrderRespondErr(c, errors.New("supply order service unavailable"), xianguanjia.SupplyCodeOrderNotFound)
 		return
 	}
 	orderNo := strings.TrimSpace(c.Query("order_no"))
+	var body supplyOrderQueryBody
 	if orderNo == "" {
-		orderNo = strings.TrimSpace(c.Query("manager_order_no"))
+		_ = readSupplyOrderBody(c, &body)
+		orderNo = strings.TrimSpace(body.OrderNo)
 	}
+	outOrderNo := ""
 	if orderNo == "" {
-		var body supplyOrderOrderNoBody
-		if err := readSupplyOrderBody(c, &body); err == nil {
-			orderNo = body.managerOrderNo()
-		}
+		outOrderNo = strings.TrimSpace(body.OutOrderNo)
 	}
-	if orderNo == "" {
+	if orderNo == "" && outOrderNo == "" {
 		c.JSON(http.StatusOK, supplyOrderEnvelope{
 			Code: xianguanjia.SupplyCodeOrderNotFound,
-			Msg:  "order_no is required",
+			Msg:  "order_no or out_order_no is required",
 		})
 		return
 	}
-	order, err := h.svc.GetOrder(c.Request.Context(), orderNo)
+	order, err := h.svc.GetOrder(c.Request.Context(), orderNo, outOrderNo)
 	if err != nil {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderNotFound)
 		return
@@ -193,19 +192,23 @@ func (h *XianguanjiaSupplyOrderHandler) GetOrder(c *gin.Context) {
 	supplyOrderRespondOK(c, order)
 }
 
-// RefundNotify 处理「订单退款通知」（POST）：订单置退款态并作废对应卡。
-// 成功返回 result=success（官方退款通知以成功/失败语义消费）。
+// RefundNotify 处理「订单退款申请」（POST，官方 /goofish/order/refund/apply 语义）。
+//
+// 同步撤单：可撤（本次实际作废张数 > 0，或订单已是退款态幂等重复）→ 同意，
+// 返回 200 信封 {result:"agree", refund_data:{apply_time, refund_status:20,
+// refund_amount, refund_time}}；不可撤（卡已使用/已过期、无法撤单）→ 拒绝，
+// 返回 {result:"refuse", remark:"卡密已使用或已过期，无法撤单"}。
 func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyOrderRespondErr(c, errors.New("supply order service unavailable"), xianguanjia.SupplyCodeOrderTimeout)
 		return
 	}
-	var body supplyOrderOrderNoBody
+	var body supplyOrderRefundBody
 	if err := readSupplyOrderBody(c, &body); err != nil {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderTimeout)
 		return
 	}
-	orderNo := body.managerOrderNo()
+	orderNo := strings.TrimSpace(body.OrderNo)
 	if orderNo == "" {
 		orderNo = strings.TrimSpace(c.Query("order_no"))
 	}
@@ -216,14 +219,27 @@ func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 		})
 		return
 	}
-	order, err := h.svc.RefundNotify(c.Request.Context(), orderNo)
+	order, agree, err := h.svc.RefundNotify(c.Request.Context(), orderNo)
 	if err != nil {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderTimeout)
 		return
 	}
-	// 官方退款通知成功语义：code=0 且 data.result=success。
+	if agree {
+		// 可撤单：同意 + 退款数据（refund_status=20 成功；refund_amount=订单金额）。
+		supplyOrderRespondOK(c, gin.H{
+			"result": "agree",
+			"refund_data": gin.H{
+				"apply_time":    body.ApplyTime,
+				"refund_status": 20,
+				"refund_amount": order.OrderAmount,
+				"refund_time":   time.Now().Unix(),
+			},
+		})
+		return
+	}
+	// 不可撤（卡已使用/已过期）：拒绝 + 原因。data 仅含 result/remark。
 	supplyOrderRespondOK(c, gin.H{
-		"result":       "success",
-		"order_status": order.OrderStatus,
+		"result": "refuse",
+		"remark": "卡密已使用或已过期，无法撤单",
 	})
 }
