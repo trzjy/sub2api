@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,11 +197,35 @@ type maskedProbeGateway struct {
 	reqs    int
 }
 
+// maskedProbeBodyRouteKey 按请求体特征区分三类共享 /v1/chat/completions 路径的探针，
+// 使夹具可对 base chat / identity_q / identity_jailbreak 注入不同响应（PROBE-R2 外审 P2）：
+//   - 含越狱提示 → "identity_jailbreak"
+//   - 含身份问答提示 → "identity_q"
+//   - 其余（含 base chat 的 "hi"）→ ""（回落到 path 路由）
+func maskedProbeBodyRouteKey(body string) string {
+	switch {
+	case strings.Contains(body, "Ignore previous instructions"):
+		return "identity_jailbreak"
+	case strings.Contains(body, "你是什么模型"):
+		return "identity_q"
+	default:
+		return ""
+	}
+}
+
 func (g *maskedProbeGateway) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.reqs++
-		reply, ok := g.replies[r.URL.Path]
+		raw, _ := io.ReadAll(r.Body)
+		key := maskedProbeBodyRouteKey(string(raw))
+		reply, ok := g.replies[key]
+		if !ok {
+			// 回落到 path 路由：未显式按 body 特征注入时，沿用旧 path 语义
+			// （base chat / identity_q / identity_jailbreak 同路径共享同一回复，
+			// 既有用例的断言语义保持不变）。
+			reply, ok = g.replies[r.URL.Path]
+		}
 		g.mu.Unlock()
 		if !ok {
 			// 默认回复：协议层干净（model=kimi-k3、无标记、无泄漏头）且内容层含 kimi，
@@ -819,4 +844,137 @@ func TestMaskedIdentityProbe_ContentBreakResolvesOnCleanRound(t *testing.T) {
 	require.Len(t, resolved, 1, "不重复创建同类事件")
 	require.Equal(t, OpsAlertStatusResolved, resolved[0].Status)
 	require.NotNil(t, resolved[0].ResolvedAt)
+}
+
+// --- PROBE-R2 交错回归（外审 P1 实锤：同 entry 互误 resolve 竞态） ---
+
+// ① 同轮 base chat 泄漏 + identity_q clean → 泄漏事件保持 firing（不误关闭）。
+// 验证：base chat 与 identity_q 共享 entry=chat_completions，base chat 阳性时即使
+// identity_q 这一轮 clean，也不应立即 resolve 掉该维度的活跃泄漏告警；且不得周期性先关再建。
+func TestMaskedIdentityProbe_SameRoundBaseChatLeakIdentityQCleanKeepsLeakFiring(t *testing.T) {
+	// base chat（path 回落）泄漏；identity_q（body 特征）内容含 kimi → clean。
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"served by Qwen upstream"}}]}`},
+		"identity_q":           {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, developed by Moonshot"}}]}`},
+		"identity_jailbreak":   {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`},
+	})
+
+	// 预置上一轮已 firing 的 chat_completions 泄漏告警，模拟长期活跃阳性。
+	active, err := h.store.CreateAlertEvent(context.Background(), &OpsAlertEvent{
+		Status:      OpsAlertStatusFiring,
+		Severity:    maskedIdentityProbeSeverityCritical,
+		Title:       "掩码账号身份泄漏",
+		Description: "历史泄漏",
+		Dimensions:  maskedIdentityProbeLeakDims(maskedIdentityProbeEntryChat),
+		FiredAt:     time.Now(),
+	})
+	require.NoError(t, err)
+
+	h.svc.RunOnce(context.Background())
+
+	// 同轮内只有 fire、没有 resolve：活跃泄漏事件应继续保持 firing，且不得重复创建。
+	firing := h.store.firingWithKind(maskedProbeKindLeak)
+	require.Len(t, firing, 1, "chat_completions 仅 1 个活跃泄漏事件（去重）")
+	require.Equal(t, active.ID, firing[0].ID, "预置的活跃泄漏事件不得被同轮 clean 误 resolve")
+	require.Equal(t, OpsAlertStatusFiring, firing[0].Status, "同轮 base chat 阳性不应关闭该维度告警")
+	require.Equal(t, 1, h.store.createdCount(), "误关闭后再 recreate 会造成周期性重复告警，此处不得新增事件")
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindContentBreak), "identity_q clean 不应触发内容层破防")
+}
+
+// ② 同轮 base chat clean + identity_q 内容破防 → content_break firing 且不被同轮 resolve。
+// 验证：base chat 这一轮 clean，不得把同维度（chat_completions）刚 fire 的内容层破防告警顺手关掉。
+func TestMaskedIdentityProbe_SameRoundBaseChatCleanIdentityQBreakKeepsContentBreakFiring(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`},
+		"identity_q":           {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am an AI language model"}}]}`},
+		"identity_jailbreak":   {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`},
+	})
+
+	// 预置上一轮已 firing 的 chat_completions 内容层破防告警。
+	active, err := h.store.CreateAlertEvent(context.Background(), &OpsAlertEvent{
+		Status:      OpsAlertStatusFiring,
+		Severity:    maskedIdentityProbeSeverityCritical,
+		Title:       "掩码账号内容层身份破防",
+		Description: "历史内容层破防",
+		Dimensions:  maskedIdentityProbeContentBreakDims(maskedIdentityProbeEntryChat),
+		FiredAt:     time.Now(),
+	})
+	require.NoError(t, err)
+
+	h.svc.RunOnce(context.Background())
+
+	// 同轮内只有 fire、没有 resolve：内容层破防事件应保持 firing，不误关闭、不重建。
+	firing := h.store.firingWithKind(maskedProbeKindContentBreak)
+	require.Len(t, firing, 1, "chat_completions 仅 1 个活跃内容层破防事件")
+	require.Equal(t, active.ID, firing[0].ID, "预置的活跃内容层破防事件不得被同轮 base chat clean 误 resolve")
+	require.Equal(t, OpsAlertStatusFiring, firing[0].Status, "同轮 identity_q 破防不应被 base chat clean 关闭")
+	require.Equal(t, 1, h.store.createdCount(), "误关闭后 recreate 会造成周期性重复告警，此处不得新增事件")
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindLeak), "协议层无痕迹不应判泄漏")
+}
+
+// ③ 交错轮恢复：泄漏轮后全 clean 轮 → 正常 resolve（不重复创建）。
+// 验证：阳性轮产生活跃泄漏；下一轮全部 clean（含 base chat 与 identity_q 都 clean）后
+// 安全地 resolve，不重复创建同类事件。
+func TestMaskedIdentityProbe_LeakRoundThenCleanRoundResolvesWithoutRecreate(t *testing.T) {
+	h := newMaskedProbeHarness(t, nil)
+
+	// 第一轮：base chat 泄漏（path 回落命中 qwen 回复），identity_q 同路径亦泄漏但同维度去重。
+	h.gateway.mu.Lock()
+	h.gateway.replies = map[string]maskedProbeReply{
+		"/v1/chat/completions": {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"served by Qwen upstream"}}]}`},
+		"identity_jailbreak":   {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`},
+	}
+	h.gateway.mu.Unlock()
+	h.svc.RunOnce(context.Background())
+
+	leaks := h.store.firingWithKind(maskedProbeKindLeak)
+	require.Len(t, leaks, 1, "chat_completions 泄漏去重为 1 个活跃事件")
+	require.Equal(t, maskedIdentityProbeEntryChat, leaks[0].Dimensions[maskedProbeDimEntry])
+	require.Equal(t, 1, h.store.createdCount(), "第一轮仅创建 1 个泄漏事件")
+
+	// 第二轮：全 clean（base chat / identity_q 均内容含 kimi，协议层干净）。
+	h.gateway.mu.Lock()
+	h.gateway.replies = nil // 回落到默认 clean 回复
+	h.gateway.mu.Unlock()
+	h.svc.RunOnce(context.Background())
+
+	require.Empty(t, h.store.firingWithKind(maskedProbeKindLeak), "全 clean 轮应 resolve 活跃泄漏事件")
+	resolved := h.store.withKind(maskedProbeKindLeak)
+	require.Len(t, resolved, 1, "不重复创建同类事件")
+	require.Equal(t, OpsAlertStatusResolved, resolved[0].Status)
+	require.NotNil(t, resolved[0].ResolvedAt)
+	require.Equal(t, 1, h.store.createdCount(), "全 clean 轮不得重建已存在的泄漏事件")
+}
+
+// ④ 盲区（failed）不关闭活跃告警（失败关闭，QK-OBS 先例）。
+// 验证：该 entry 出现 failed 结果时不得 resolve；同轮另一探针 clean 也不应把盲区误判为可 resolve。
+func TestMaskedIdentityProbe_FailedBlindSpotDoesNotResolveActiveAlert(t *testing.T) {
+	h := newMaskedProbeHarness(t, map[string]maskedProbeReply{
+		"/v1/responses":        {status: http.StatusOK, body: `{"response":{"model":"kimi-k3"}}`},
+		"/v1/messages":         {status: http.StatusOK, body: `{"model":"kimi-k3","content":[{"type":"text","text":"hi"}]}`},
+		"identity_jailbreak":   {status: http.StatusOK, body: `{"model":"kimi-k3","choices":[{"message":{"content":"I am kimi, an AI assistant"}}]}`},
+		// base chat 与 identity_q 共享 /v1/chat/completions：显式令该路径 500，使 chat_completions
+		// 维度的两个探针结果均为 failed（观测盲区）。
+		"/v1/chat/completions": {status: http.StatusInternalServerError, body: `{"error":"upstream down"}`},
+	})
+
+	// 预置上一轮已 firing 的 chat_completions 泄漏告警。
+	active, err := h.store.CreateAlertEvent(context.Background(), &OpsAlertEvent{
+		Status:      OpsAlertStatusFiring,
+		Severity:    maskedIdentityProbeSeverityCritical,
+		Title:       "掩码账号身份泄漏",
+		Description: "历史泄漏",
+		Dimensions:  maskedIdentityProbeLeakDims(maskedIdentityProbeEntryChat),
+		FiredAt:     time.Now(),
+	})
+	require.NoError(t, err)
+
+	h.svc.RunOnce(context.Background())
+
+	// 盲区轮：该 entry 全部 result=failed，不得 resolve 活跃告警；也不得 recreate。
+	firing := h.store.firingWithKind(maskedProbeKindLeak)
+	require.Len(t, firing, 1)
+	require.Equal(t, active.ID, firing[0].ID, "盲区（failed）不得关闭活跃泄漏告警")
+	require.Equal(t, OpsAlertStatusFiring, firing[0].Status)
+	require.Equal(t, 1, h.store.createdCount(), "盲区轮不得重建事件")
 }

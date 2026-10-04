@@ -509,7 +509,7 @@ func (p *MaskedIdentityProbeService) RunOnce(ctx context.Context) {
 		return
 	}
 
-	// (b)(c) 三入口独立探测、独立断言、独立报告。
+	// (b)(c) 三入口独立探测、独立断言；第一遍只探测收集结果，不动告警。
 	entries := maskedIdentityProbeEntries()
 	results := make([]maskedIdentityProbeResult, 0, len(entries))
 	allFailed := true
@@ -519,20 +519,16 @@ func (p *MaskedIdentityProbeService) RunOnce(ctx context.Context) {
 		if result.outcome != maskedProbeOutcomeFailed {
 			allFailed = false
 		}
-		switch result.outcome {
-		case maskedProbeOutcomeLeak:
-			// (d) 泄漏阳性：严重级告警事件 + 既有邮件流，入口维度写进 dims。
-			p.fireLeak(ctx, result)
-		case maskedProbeOutcomeContentBreak:
-			// (d') 内容层破防阳性（PROBE-C1）：严重级告警事件，与协议层泄漏平级独立去重。
-			p.fireContentBreak(ctx, result)
-		case maskedProbeOutcomeClean:
-			// 恢复：同维度活跃事件原子关闭（同类事件只保留一个，不重复轰炸）。
-			// 内容层与协议层独立，clean 轮同时 resolve 两类事件。
-			p.resolveLeak(ctx, result.entry)
-			p.resolveContentBreak(ctx, result.entry)
-		}
 	}
+
+	// (d) 第二遍按 entry 聚合同步告警：修复同 entry 不同探针互误 resolve 的竞态
+	// （PROBE-R2，外审 P1）。base chat 与 identity_q 共享 entry=chat_completions，
+	// 同轮内一个 clean 结果若即时 resolve，会误关另一探针刚 fire 的同维度告警，或造成
+	// 反向的周期性先关再建。改为先全量探测收口、再按 entry 聚合：任一 result 为
+	// leak/contentBreak 即 fire（一轮至多一次），仅该 entry 全部 result 均为 clean
+	// （无 leak、无 contentBreak、无 failed）才 resolveLeak + resolveContentBreak——
+	// failed=观测盲区，盲区不关闭告警（失败关闭，QK-OBS 已裁定先例）。
+	p.syncProbeAlerts(ctx, results)
 
 	// (c) 连续 ≥3 轮全入口失败 → 「探针失败」警告级告警（盲区可见），成功后自动 resolve。
 	streak := p.advanceFailureStreak(allFailed)
@@ -545,6 +541,64 @@ func (p *MaskedIdentityProbeService) RunOnce(ctx context.Context) {
 	}
 
 	p.writeSystemLog("completed", results, probeKeyID)
+}
+
+// syncProbeAlerts 第二遍按 entry 聚合本轮各探针结果并同步告警状态（PROBE-R2）。
+//
+// 背景（外审 P1 实锤）：identity_q 与 base chat 共享 entry=chat_completions，原 RunOnce
+// 逐条 fire/resolve，同轮内一个 clean 结果会误关另一探针刚 fire 的同维度告警；反向则旧事件
+// 先关再建、周期性重复告警。改为先全量探测收口、按 entry 聚合：
+//   - 该 entry 任一 result=leak → fireLeak（去重机制照旧，一轮至多一次）；
+//   - 任一 result=contentBreak → fireContentBreak（同上）；
+//   - 仅该 entry 全部 result 均为 clean（无 leak、无 contentBreak、无 failed）才
+//     resolveLeak + resolveContentBreak——failed=盲区，盲区不关闭告警（失败关闭，QK-OBS 先例）。
+//
+// mixed 情形（同 entry 一 leak 一 clean）：只 fire 不 resolve；全 clean 才 resolve。
+func (p *MaskedIdentityProbeService) syncProbeAlerts(ctx context.Context, results []maskedIdentityProbeResult) {
+	if p == nil || p.alerts == nil {
+		return
+	}
+	byEntry := make(map[string][]maskedIdentityProbeResult)
+	// 保持 entries 在 results 中的出现顺序，使 fire 顺序确定（与改造前逐条迭代一致，
+	// 避免依赖 map 迭代顺序导致告警创建顺序漂移）。
+	orderedEntries := make([]string, 0, len(results))
+	for _, r := range results {
+		if _, seen := byEntry[r.entry]; !seen {
+			orderedEntries = append(orderedEntries, r.entry)
+		}
+		byEntry[r.entry] = append(byEntry[r.entry], r)
+	}
+	for _, entry := range orderedEntries {
+		rs := byEntry[entry]
+		var hasLeak, hasContentBreak, hasFailed bool
+		var leakReason, breakReason string
+		for _, r := range rs {
+			switch r.outcome {
+			case maskedProbeOutcomeLeak:
+				hasLeak = true
+				if leakReason == "" {
+					leakReason = r.reason
+				}
+			case maskedProbeOutcomeContentBreak:
+				hasContentBreak = true
+				if breakReason == "" {
+					breakReason = r.reason
+				}
+			case maskedProbeOutcomeFailed:
+				hasFailed = true
+			}
+		}
+		if hasLeak {
+			p.fireLeak(ctx, maskedIdentityProbeResult{entry: entry, outcome: maskedProbeOutcomeLeak, reason: leakReason})
+		}
+		if hasContentBreak {
+			p.fireContentBreak(ctx, maskedIdentityProbeResult{entry: entry, outcome: maskedProbeOutcomeContentBreak, reason: breakReason})
+		}
+		if !hasLeak && !hasContentBreak && !hasFailed {
+			p.resolveLeak(ctx, entry)
+			p.resolveContentBreak(ctx, entry)
+		}
+	}
 }
 
 // probeGatewayBaseURL 推导本站网关 loopback base URL（HTTP 监听地址：cfg.Server.Host/Port）。
