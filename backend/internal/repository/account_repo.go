@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -50,6 +51,16 @@ type accountRepository struct {
 	// Used to proactively sync account snapshot to cache when status changes,
 	// ensuring sticky sessions can promptly detect unavailable accounts.
 	schedulerCache service.SchedulerCache
+
+	// modelRateLimitWriteMu / modelRateLimitWriteLocks 是 per-account 模型级限流写锁
+	// （E38 下沉）。业务 SET（SetModelRateLimit / SetModelRateLimitWithPreciseReset 经
+	// commitModelRateLimitSet）与探测族写入口（ApplyModelRateLimitObservation 经
+	// WithModelRateLimitAccountLock）共享该锁，保证「读 meta → 裁决 → 提交」整区间串行，
+	// 防并发交错读同一 revision 后后写者覆盖较新条目与 meta。惰性 map 模式，与原 service 层
+	// 原 service 层 per-account 写锁同款；锁不可重入，仅存在于 commitModelRateLimitSet 与
+	// WithModelRateLimitAccountLock 两个外层边界（CommitModelRateLimitObservation 本身不加锁）。
+	modelRateLimitWriteMu    sync.Mutex
+	modelRateLimitWriteLocks map[int64]*sync.Mutex
 }
 
 var schedulerNeutralExtraKeyPrefixes = []string{
@@ -2351,12 +2362,101 @@ func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int
 	return true, nil
 }
 
+// SetModelRateLimit 经共享收敛写 helper commitModelRateLimitSet 提交模型级限流初始 SET：
+// 经 commitModelRateLimitSet 在 per-account 写锁下参与 `(事件时间, tie_breaker)` 事件裁决，单语句
+// 原子提交条目+meta（与探测链写入口共用同一裁决基线与提交模式，E37 收敛）。不再经 writeModelRateLimit
+// 直写 model_rate_limits 桶（绕过 meta 的旧双路径已移除）。不写 precise_reset 键（默认无精确恢复
+// 信号），12 处调用方条目载荷与现状逐键一致（rate_limited_at/rate_limit_reset_at/reason，
+// 无 precise_reset）。签名不变，调用方零改动。per-account 写锁已下沉到仓库层（E38）。
 func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error {
+	var rsn string
+	if len(reason) > 0 {
+		rsn = reason[0]
+	}
+	return r.commitModelRateLimitSet(ctx, id, scope, resetAt, rsn, nil)
+}
+
+// SetModelRateLimitWithPreciseReset 与 SetModelRateLimit 同构（同一条 jsonb_set 写入），
+// 额外持久化精确恢复信号标记 precise_reset：true = 上游给出了可解析的恢复时刻
+// （rate_limit_reset_at 是真实信号，前端可显示倒计时）；false = 无上游时间信号
+// （D5 哨兵分支，rate_limit_reset_at 只是"持续受限"占位值，恢复时刻未知，须由主动
+// 复探确认）。该标记是唯一判别依据，前端不得用 reset_at 距今时长等启发式推断。
+//
+// 该路径是模型级限流的初始 SET（业务链 429 首次写限流）。按 E8 #4，初始 SET 也
+// 必须参与 `(事件时间, tie_breaker)` 事件裁决：经 commitModelRateLimitSet 在 per-account 写锁保护下
+// 先读 meta、按事件裁决语义比较（严格更旧整体 no-op），再经 CommitModelRateLimitObservation
+// 单语句原子提交条目+meta（last_event_at=写入时刻、revision 按现行 rev+1 规则）。per-account 写锁已
+// 下沉到仓库层（E38），写锁只存在于 commitModelRateLimitSet 与 WithModelRateLimitAccountLock 两处。
+// 不新增第二条提交路径，与探测链写入口共享同一裁决基线与提交模式。
+func (r *accountRepository) SetModelRateLimitWithPreciseReset(ctx context.Context, id int64, scope string, resetAt time.Time, preciseReset bool, reason string) error {
+	return r.commitModelRateLimitSet(ctx, id, scope, resetAt, reason, map[string]any{"precise_reset": preciseReset})
+}
+
+// commitModelRateLimitSet 是 SetModelRateLimit 与 SetModelRateLimitWithPreciseReset 共享的
+// 收敛写 helper：把「读 meta -> 严格更旧整体 no-op -> 单语句原子提交条目+meta」的事件裁决逻辑
+// 收敛到唯一实现（E37 收敛，消除绕过 meta 的第二条直写路径）。extra 为附加键（precise_reset
+// 等，可 nil），在 modelRateLimitPayload 构造条目后并入。行为与原 E8 #4 收敛路径完全一致。
+// modelRateLimitWriteLock 返回指定账号的 per-account 模型级限流写锁（惰性 map 模式，
+// 与原 service 层 per-account 写锁同款）。全局 modelRateLimitWriteMu 仅保护 map 的
+// 读写，per-account 锁本体用于串行化该账号的「读 meta → 裁决 → 提交」区间。
+func (r *accountRepository) modelRateLimitWriteLock(accountID int64) *sync.Mutex {
+	r.modelRateLimitWriteMu.Lock()
+	// 惰性初始化：手写构造的测试桩可能未走 newAccountRepositoryWithSQL，锁表为 nil 时先建表，
+	// 保证任何写路径都不会因 nil map 写入而 panic。
+	if r.modelRateLimitWriteLocks == nil {
+		r.modelRateLimitWriteLocks = make(map[int64]*sync.Mutex)
+	}
+	l, ok := r.modelRateLimitWriteLocks[accountID]
+	if !ok {
+		l = &sync.Mutex{}
+		r.modelRateLimitWriteLocks[accountID] = l
+	}
+	r.modelRateLimitWriteMu.Unlock()
+	return l
+}
+
+// WithModelRateLimitAccountLock 是 per-account 模型级限流写锁的窄面：fn 在持锁期间执行，
+// 用于包裹 service 层多步读改写（ApplyModelRateLimitObservation 全区间）。真仓库实现=持锁
+// 执行 fn；测试替身桩直接执行 fn（E30/E33 惯例）。锁不可重入——CommitModelRateLimitObservation
+// 本身绝不在内部加锁，锁只存在于此边界与 commitModelRateLimitSet 两个外层边界。
+func (r *accountRepository) WithModelRateLimitAccountLock(ctx context.Context, accountID int64, fn func(ctx context.Context) error) error {
+	lock := r.modelRateLimitWriteLock(accountID)
+	lock.Lock()
+	defer lock.Unlock()
+	return fn(ctx)
+}
+
+func (r *accountRepository) commitModelRateLimitSet(ctx context.Context, id int64, scope string, resetAt time.Time, reason string, extra map[string]any) error {
 	if scope == "" {
 		return nil
 	}
+	// per-account 写锁下沉（E38）：读 meta → 严格更旧整体 no-op → 单语句原子提交条目+meta
+	// 的整个区间持锁，防并发交错读同一 revision 后后写者覆盖较新条目与 meta。锁只在此外层边界
+	// 与 WithModelRateLimitAccountLock（探测族写入口）存在，CommitModelRateLimitObservation 内部不再加锁。
+	return r.WithModelRateLimitAccountLock(ctx, id, func(ctx context.Context) error {
+		// 与写入口同款裁决：仅当本次 SET 严格不旧于既有 meta 事件才应用；否则整体 no-op
+		// （防延迟的旧 SET 覆盖较新的探测/业务状态，事件裁决基线对全部状态写入者共享）。
+		lastEventAt, rev, has, err := r.GetModelRateLimitMeta(ctx, id, scope)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if has && now.Before(lastEventAt) {
+			return nil
+		}
+		payload := modelRateLimitPayload(resetAt, reason)
+		for k, v := range extra {
+			payload[k] = v
+		}
+		return r.CommitModelRateLimitObservation(ctx, id, scope, payload, false, now, rev+1)
+	})
+}
+
+// modelRateLimitPayload 构造模型级限流条目的写入载荷（rate_limited_at 取当前时刻，
+// rate_limit_reset_at 取调用方给定的恢复时刻；reason 为空则不写该键）。
+func modelRateLimitPayload(resetAt time.Time, reason ...string) map[string]any {
 	now := time.Now().UTC()
-	payload := map[string]string{
+	payload := map[string]any{
 		"rate_limited_at":     now.Format(time.RFC3339),
 		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
 	}
@@ -2365,43 +2465,7 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 			payload["reason"] = value
 		}
 	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	client := clientFromContext(ctx, r.client)
-	result, err := client.ExecContext(
-		ctx,
-		`UPDATE accounts SET 
-			extra = jsonb_set(
-				jsonb_set(COALESCE(extra, '{}'::jsonb), '{model_rate_limits}'::text[], COALESCE(extra->'model_rate_limits', '{}'::jsonb), true),
-				ARRAY['model_rate_limits', $1]::text[],
-				$2::jsonb,
-				true
-			),
-			updated_at = NOW()
-		WHERE id = $3 AND deleted_at IS NULL`,
-		scope,
-		raw,
-		id,
-	)
-	if err != nil {
-		return err
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return service.ErrAccountNotFound
-	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue model rate limit failed: account=%d err=%v", id, err)
-	}
-	r.syncSchedulerAccountSnapshot(ctx, id)
-	return nil
+	return payload
 }
 
 func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
@@ -2630,6 +2694,336 @@ func (r *accountRepository) ClearModelRateLimits(ctx context.Context, id int64) 
 	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
 }
+
+// modelRateLimitsMetaKey 是 extra 下独立于 model_rate_limits 的写入事件元数据桶：
+// 记录每个 scope 的最后一次权威写入事件时间与单调递增 revision，用于探测链写入入口
+// 的事件时间原子应用与同刻精度碰撞的 tie-breaker（即使 model_rate_limits[scope] 被
+// 成功探测清除，元数据仍保留，旧事件不得覆盖新状态）。
+const modelRateLimitsMetaKey = "model_rate_limits_meta"
+
+// modelRateLimitsKey 是 accounts.extra 下模型级限流桶的 jsonb 键名（与 service 包同名
+// 常量同义；repository 包内独立定义以免跨包耦合）。
+const modelRateLimitsKey = "model_rate_limits"
+
+// tokenHarborProbeCandidateLimit 与 accountHealthProbeCandidateLimit 同量级，限制
+// TokenHarbor 免费档候选账号的粗筛上限。
+const tokenHarborProbeCandidateLimit = 200
+
+// tokenHarborProbeScanBatchSize 是候选粗筛 keyset 分页的单批读取大小。批大小独立于
+// 返回上限（limit）：候选池可能包含大量含 model_rate_limits 但并非 TokenHarbor 免费档
+// 的账号，必须在 Go 侧逐批过滤后继续向后扫描，不能只取前 limit 个候选键就截断。
+const tokenHarborProbeScanBatchSize = 200
+
+// ListTokenHarborModelRateLimitedAccounts 粗筛当前 active 且 extra 含 model_rate_limits
+// 的账号（候选源 R3）。由于 extra 是嵌套 jsonb（model_rate_limits -> scope ->
+// {rate_limit_reset_at, reason}），没有可靠跨 PG 版本的 jsonb 前缀/时间扫描，精确的
+// 「reason 前缀 tokenharbor_free_tier_exhausted 且 reset_at 在未来（或 precise_reset）」
+// 过滤在 Go 侧完成，且**复用探测服务的权威判定**（service.ActiveTokenHarborFreeTierScopes，
+// 同源复用 service 包权威常量与到期语叉，repository 不复制任何判定语义）。
+//
+// E12 #1：旧实现用单次 `... WHERE extra ? $1 LIMIT $2` 只取前 limit 个含
+// model_rate_limits 的账号，若这前 limit 个都不是 TokenHarbor 免费档合格候选，则其后
+// 账号的合格候选被永久遗漏。改为 keyset 分页扫描（`... AND id > $last ORDER BY id
+// LIMIT 批大小`，稳定排序），逐批在 Go 侧过滤，直到收集满 limit 个合格候选或扫描耗尽。
+// 每个返回的账号仍由探测服务在内存中再次扫描其 extra 得到具体的 scope 列表。
+func (r *accountRepository) ListTokenHarborModelRateLimitedAccounts(ctx context.Context, now time.Time, limit int) ([]*service.Account, error) {
+	if limit <= 0 {
+		limit = tokenHarborProbeCandidateLimit
+	}
+	out := make([]*service.Account, 0, limit)
+	lastID := int64(0)
+	for len(out) < limit {
+		rows, err := r.sql.QueryContext(ctx, `
+			SELECT id FROM accounts
+			WHERE status = 'active'
+				AND deleted_at IS NULL
+				AND extra ? $1
+				AND id > $2
+			ORDER BY id
+			LIMIT $3
+		`, modelRateLimitsKey, lastID, tokenHarborProbeScanBatchSize)
+		if err != nil {
+			return nil, err
+		}
+		batchIDs := make([]int64, 0, tokenHarborProbeScanBatchSize)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			batchIDs = append(batchIDs, id)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if len(batchIDs) == 0 {
+			// keyset 游标已到末尾：扫描耗尽。
+			break
+		}
+		lastID = batchIDs[len(batchIDs)-1]
+
+		accounts, err := r.client.Account.Query().
+			Where(dbaccount.IDIn(batchIDs...), dbaccount.DeletedAtIsNil()).
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+		mapped, err := r.accountsToService(ctx, accounts)
+		if err != nil {
+			return nil, err
+		}
+		for i := range mapped {
+			acc := &mapped[i]
+			// 复用探测服务的权威判定：非 TokenHarbor 免费档合格候选跳过，继续扫下一批。
+			if len(service.ActiveTokenHarborFreeTierScopes(acc.Extra, now)) == 0 {
+				continue
+			}
+			out = append(out, acc)
+			if len(out) >= limit {
+				break
+			}
+		}
+		if len(batchIDs) < tokenHarborProbeScanBatchSize {
+			// 本批不足批大小说明已到末尾：扫描耗尽。
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// GetModelRateLimitEntry 读取 extra->'model_rate_limits'->scope 的单个限流条目
+// （整个嵌套对象），不存在时返回 (nil, nil)。
+func (r *accountRepository) GetModelRateLimitEntry(ctx context.Context, id int64, scope string) (map[string]any, error) {
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT extra->'model_rate_limits'->$1
+		FROM accounts WHERE id = $2 AND deleted_at IS NULL
+	`, scope, id)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	var raw []byte
+	if err := rows.Scan(&raw); err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
+// CommitModelRateLimitObservation 在同一数据库写入（单条 UPDATE 语句）内提交
+// model_rate_limits[scope] 条目（clear=true 时清除该 scope）与
+// model_rate_limits_meta[scope] 元数据（last_event_at/revision）：
+//   - 单语句内两处 jsonb_set 对同一行生效，任一环节失败则整条语句失败、两者均不变，
+//     消除「状态条目已变而裁决基线仍旧值」的中间态（E1 原子性）；
+//   - meta 与状态条目保持分桶，clear 成功清除条目时 meta 仍保留（事件裁决基线不丢）。
+//
+// 调用方负责在进程内 per-account 锁下完成读-改-写，保证事件时间原子应用。
+func (r *accountRepository) CommitModelRateLimitObservation(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64) error {
+	var raw []byte = []byte("{}")
+	var err error
+	if !clear {
+		raw, err = json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+	}
+	meta := map[string]any{
+		// RFC3339Nano（与 E2 迁移记录同口径）：裁决比较用的是带纳秒的 EventTime，meta
+		// 秒级写入会让同秒内的旧事件被误判为新。纳秒无损写入/读取后裁决基线不再丢失精度。
+		"last_event_at": lastEventAt.UTC().Format(time.RFC3339Nano),
+		"revision":      revision,
+	}
+	metaRaw, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	// commitObservation 把「单条 UPDATE（状态条目+meta）+ RowsAffected 校验 + outbox 写入」
+	// 收进同一事务边界：事务内（恢复路径的既有 txCtx）直接复用该事务；非事务路径下由
+	// WithObservationTx 新开 r.client.Tx 后同样参与——任一步失败整体回滚（状态+meta+outbox
+	// 同生共死），不再「先独立提交状态、再写 outbox 失败却已持久化」。
+	commitObservation := func(txCtx context.Context) error {
+		client := clientFromContext(txCtx, r.client)
+		// 一次 UPDATE：状态条目（clear=true 时从 model_rate_limits 桶删除 scope，否则写入
+		// entry）与 model_rate_limits_meta[scope] 元数据在同一语句内对同一行提交，
+		// 保证原子性（任一环节失败整条失败，两者均不变）。
+		result, err := client.ExecContext(txCtx, `
+			UPDATE accounts SET
+				extra = jsonb_set(
+					jsonb_set(
+						COALESCE(extra, '{}'::jsonb),
+						ARRAY['model_rate_limits'],
+						CASE WHEN $3::boolean
+							THEN COALESCE(extra->'model_rate_limits', '{}'::jsonb) - $1
+							ELSE jsonb_set(COALESCE(extra->'model_rate_limits', '{}'::jsonb), ARRAY[$1]::text[], $4::jsonb, true)
+						END,
+						true
+					),
+					ARRAY['model_rate_limits_meta'],
+					jsonb_set(COALESCE(extra->'model_rate_limits_meta', '{}'::jsonb), ARRAY[$1]::text[], $5::jsonb, true),
+					true
+				),
+				updated_at = NOW()
+			WHERE id = $2 AND deleted_at IS NULL
+		`, scope, id, clear, raw, metaRaw)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return service.ErrAccountNotFound
+		}
+		// outbox 写入经事务感知执行器：事务内（恢复路径 / 本次新开事务）参与同一 ent 事务，
+		// 随 UPDATE 一并提交；失败时整体回滚（状态+meta 一并撤销）并返回错误——不再「状态已
+		// 提交却无事件」。错误明确返回，沿调用链传播到写入口，保持可观测。
+		if err := enqueueSchedulerOutbox(txCtx, txAwareSQLExecutor(txCtx, r.sql, r.client), service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if dbent.TxFromContext(ctx) != nil {
+		// 事务内路径（恢复链 WithObservationTx 调用方）：UPDATE + outbox 已在既有事务内，
+		// 随告警关闭失败整体回滚（状态不提交、事件丢弃）。快照同步不在提交前做（事务内读不到
+		// 未提交状态，预览会拿到旧快照），由 WithObservationTx 成功返回处经导出窄面
+		// SyncSchedulerAccountSnapshot 补做。
+		return commitObservation(ctx)
+	}
+
+	// 非事务路径：复用 WithObservationTx ——ctx 无事务时新开 r.client.Tx，将 UPDATE（状态+meta）、
+	// RowsAffected 校验、outbox 写入收进同一事务。任一环节失败整体回滚（同生共死），不再前一写
+	// 独立提交（旧路径：UPDATE 先 autocommit，outbox 再走裸连接，outbox 失败已持久化却返回错误）。
+	if err := r.WithObservationTx(ctx, commitObservation); err != nil {
+		return err
+	}
+	// 快照同步仅在事务提交成功后（且仅非事务路径）执行：不预览未提交状态——提交前同步会读到
+	// 旧快照，导致权威状态与缓存分裂。提交后的同步由 ctx（无事务）正常读取已提交行。
+	// 同步失败仅可观测（E47）：业务结果已确认提交，不得被重新分类为提交失败（与
+	// ratelimit_service.go 提交后同步约定同口径）；错误经结构化日志暴露，不 return。
+	if err := r.SyncSchedulerAccountSnapshot(ctx, id); err != nil {
+		logger.LegacyPrintf("repository.account", "[Scheduler] sync account snapshot after commit failed: id=%d err=%v", id, err)
+	}
+	return nil
+}
+
+// SyncSchedulerAccountSnapshot 暴露快照同步的薄导出，供两处补做（事务内不预览未提交状态，
+// 故不在提交前同步）：
+//   - 写入口恢复路径：在 WithObservationTx 成功返回后补做；
+//   - CommitModelRateLimitObservation 非事务路径：在 WithObservationTx 提交成功后补做。
+//
+// 同步失败返回明确错误以便上报告警：状态已提交，返回错误不影响原子性，但必须可观测（不静默吞掉）。
+// 单一实现，薄包既有 syncSchedulerAccountSnapshot 的读取/写入，仅补返回错误。
+func (r *accountRepository) SyncSchedulerAccountSnapshot(ctx context.Context, accountID int64) error {
+	if r == nil || accountID <= 0 {
+		return nil
+	}
+	account, err := r.GetByID(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if r.schedulerCache == nil {
+		return nil
+	}
+	if err := r.schedulerCache.SetAccount(ctx, account); err != nil {
+		return err
+	}
+	return nil
+}
+
+// WithObservationTx 在写入口恢复路径内开启（或参与已有）ent 事务，将状态提交与同维告警关闭
+// 收进同一事务：fn 内任一错误都整体回滚（状态不提交、告警不变）。若 ctx 已携带事务则直接参与，
+// 否则开启新事务并在 fn 返回 nil 时提交。沿 MigrateSettingAtomically / RollbackSettingAtomically
+// 的 TxFromContext 窄面惯例（E20 #2）。
+func (r *accountRepository) WithObservationTx(ctx context.Context, fn func(txCtx context.Context) error) error {
+	if r == nil || r.client == nil {
+		return fmt.Errorf("nil account repository client")
+	}
+	if dbent.TxFromContext(ctx) != nil {
+		return fn(ctx)
+	}
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	txCtx := dbent.NewTxContext(ctx, tx)
+	if err := fn(txCtx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetModelRateLimitMeta 读取 extra->'model_rate_limits_meta'->scope 的写入事件元数据
+// （{last_event_at, revision}），不存在时 ok=false。
+func (r *accountRepository) GetModelRateLimitMeta(ctx context.Context, id int64, scope string) (lastEventAt time.Time, revision int64, ok bool, err error) {
+	rows, qerr := r.sql.QueryContext(ctx, `
+		SELECT extra->'model_rate_limits_meta'->$1
+		FROM accounts WHERE id = $2 AND deleted_at IS NULL
+	`, scope, id)
+	if qerr != nil {
+		return time.Time{}, 0, false, qerr
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if rerr := rows.Err(); rerr != nil {
+			return time.Time{}, 0, false, rerr
+		}
+		return time.Time{}, 0, false, nil
+	}
+	var raw []byte
+	if serr := rows.Scan(&raw); serr != nil {
+		return time.Time{}, 0, false, serr
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return time.Time{}, 0, false, nil
+	}
+	var meta struct {
+		LastEventAt string `json:"last_event_at"`
+		Revision    int64  `json:"revision"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return time.Time{}, 0, false, err
+	}
+	if meta.LastEventAt == "" {
+		return time.Time{}, 0, false, nil
+	}
+	// 解析兼容 Nano：历史秒级（RFC3339）与当前纳秒级（RFC3339Nano）均能无损还原。
+	t, perr := time.Parse(time.RFC3339Nano, meta.LastEventAt)
+	if perr != nil {
+		// E12 #4：meta 损坏（last_event_at 非法）不得静默当作"无 meta"——否则调用方
+		// 会以 rev=0 为基线把旧事件当作新事件应用（重置 revision），覆盖较新的权威状态。
+		// 返回明确错误，调用方（ApplyModelRateLimitObservation /
+		// SetModelRateLimitWithPreciseReset 的裁决读取）沿错误中止本次读改写。
+		// 空 meta / "null" / 空 last_event_at 的"正常不存在"路径在上方保持不变。
+		return time.Time{}, 0, false, fmt.Errorf("parse model_rate_limits_meta.last_event_at %q: %w", meta.LastEventAt, perr)
+	}
+	return t, meta.Revision, true, nil
+}
+
+// SetModelRateLimitMeta 已移除：其独立写入是 E1 原子性缺陷的根源（状态条目与 meta
+// 分两次数据库写）。meta 写入现已并入 CommitModelRateLimitObservation 的单条 UPDATE。
+// 既有双桶设计保留（状态条目与 meta 分桶；CommitModelRateLimitObservation 在 clear=true
+// 时仅删 model_rate_limits[scope] 条目而保留 model_rate_limits_meta[scope] 裁决基线），
+// 全部状态写入者（SetModelRateLimit / SetModelRateLimitWithPreciseReset / 探测链写入口）
+// 均经同一收敛写链提交，提交路径合并且原子化（E37 收敛）。
 
 func (r *accountRepository) UpdateSessionWindow(ctx context.Context, id int64, start, end *time.Time, status string) error {
 	builder := r.client.Account.Update().

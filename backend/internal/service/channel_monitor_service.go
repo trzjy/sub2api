@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -25,6 +26,8 @@ type ChannelMonitorRepository interface {
 	Update(ctx context.Context, m *ChannelMonitor) error
 	Delete(ctx context.Context, id int64) error
 	List(ctx context.Context, params ChannelMonitorListParams) ([]*ChannelMonitor, int64, error)
+	// ListByAccountID 返回关联指定 account_id 的全部监控（E39：账号恢复后按账号列 monitor）。
+	ListByAccountID(ctx context.Context, accountID int64) ([]*ChannelMonitor, error)
 	FindByDuplicateOperationID(ctx context.Context, operationID string) (*ChannelMonitor, error)
 
 	// 调度器辅助
@@ -68,6 +71,146 @@ type channelMonitorRuntimeReader interface {
 	GetChannelMonitorRuntime(ctx context.Context) ChannelMonitorRuntime
 }
 
+// ChannelAccountAnomalySource 账号侧异常事实来源（D2 域实现，本单不实现）。
+// DeriveChannelStatus 只消费其返回，不实现 D2 的账号级异常探测/恢复逻辑。
+// 当调用方未注入（nil）时，渠道推导不考虑账号侧持久事实——该集成缺口登记于 D3-evidence.md。
+type ChannelAccountAnomalySource interface {
+	// ListActiveAnomalies 返回当前对该渠道（monitorID）生效的账号侧持久事实。
+	// 读取失败（仓储瞬时故障）返回 error，调用方须失败关闭（跳过本轮状态/告警变更），
+	// 不得把读取失败当作「无异常」——否则停调账号在 DB 故障期会被推导为 operational。
+	ListActiveAnomalies(ctx context.Context, monitorID int64) ([]AccountSideAnomaly, error)
+}
+
+// ---------- 渠道维陈旧收敛窄面（E39） ----------
+
+// ChannelFreshnessRefresher 是账号恢复后触发渠道维陈旧收敛的窄面（E39）。
+// 由 ChannelMonitorService.RefreshChannelFreshnessForAccount 实现，供各生产恢复链
+// 注入调用；恢复链只触发、不关心收敛内部细节（不回滚、不阻断恢复结论）。
+type ChannelFreshnessRefresher interface {
+	RefreshChannelFreshnessForAccount(ctx context.Context, accountID int64) error
+}
+
+// ChannelFreshnessEvaluator 是渠道维陈旧评估的窄面（E39）。
+// 由 *FreshnessAlertService 实现；ChannelMonitorService 经此触发收敛，便于单测替换。
+// 不新增第二套评估/推导逻辑——严格复用 EvaluateChannelFreshness 既有语义。
+type ChannelFreshnessEvaluator interface {
+	EvaluateChannelFreshness(ctx context.Context, channelID int64) error
+}
+
+// ---------- 账号侧异常事实来源：D2 域实现（D3b 接线，只接线不改 D2 语义） ----------
+
+// channelAccountAnomalySource 是 ChannelAccountAnomalySource 的 D2 域实现。
+// 经渠道/账号 repo 读取账号侧持久事实（停调 / 熔断 / 模型级限流），供 DeriveChannelStatus
+// 推导渠道档位。本实现只读取、不写入，严格不改动 D2 语义与 DeriveChannelStatus 纯函数。
+type channelAccountAnomalySource struct {
+	monitorRepo ChannelMonitorRepository
+	accountRepo AccountRepository
+}
+
+// NewChannelAccountAnomalySource 构造账号侧异常事实来源（D3b 接线；只接线，不改 D2 语义）。
+func NewChannelAccountAnomalySource(monitorRepo ChannelMonitorRepository, accountRepo AccountRepository) ChannelAccountAnomalySource {
+	return &channelAccountAnomalySource{monitorRepo: monitorRepo, accountRepo: accountRepo}
+}
+
+func (s *channelAccountAnomalySource) ListActiveAnomalies(ctx context.Context, monitorID int64) ([]AccountSideAnomaly, error) {
+	if s == nil || s.monitorRepo == nil || s.accountRepo == nil {
+		return nil, nil
+	}
+	m, err := s.monitorRepo.GetByID(ctx, monitorID)
+	if err != nil {
+		// 监控不存在（并发删除）→ 无账号侧持久事实；其余（DB 瞬时故障）失败关闭。
+		if errors.Is(err, ErrChannelMonitorNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load channel monitor for account anomalies: %w", err)
+	}
+	if m == nil || m.AccountID == nil {
+		// 未关联账号 → 无账号侧持久事实。
+		return nil, nil
+	}
+	a, err := s.accountRepo.GetByID(ctx, *m.AccountID)
+	if err != nil {
+		// 账号不存在（已删除）→ 无账号侧持久事实；其余读取错误失败关闭。
+		if errors.Is(err, ErrAccountNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load account for channel anomalies: %w", err)
+	}
+	if a == nil {
+		return nil, nil
+	}
+	return accountSideAnomalies(a, time.Now()), nil
+}
+
+// accountSideAnomalies 把账号当前状态映射为渠道推导所需的持久事实（复用 D2 语义）。
+//   - temp_unschedulable / circuit_breaker（账号级停调）→ degraded（聚合，不夸大为 failed/error）
+//   - model_rate_limited（模型级限流，免费档 429 同口径）→ no-op（不降渠道状态，只进 D2 的账号侧 SSOT）
+func accountSideAnomalies(a *Account, now time.Time) []AccountSideAnomaly {
+	if a == nil {
+		return nil
+	}
+	var out []AccountSideAnomaly
+	if a.TempUnschedulableUntil != nil && a.TempUnschedulableUntil.After(now) {
+		kind := "temp_unschedulable"
+		if isAccountCircuitBreakerTrip(a) {
+			kind = "circuit_breaker"
+		}
+		out = append(out, AccountSideAnomaly{Kind: kind, Active: true})
+	}
+	if accountHasActiveModelRateLimit(a, now) {
+		out = append(out, AccountSideAnomaly{Kind: "model_rate_limited", Active: true})
+	}
+	return out
+}
+
+// isAccountCircuitBreakerTrip 复用 D2 健康熔断判定（方案 T1/T5 marker 放行）：
+// 当前仍处停调且原因可解析为可恢复熔断标记 → 归 circuit_breaker；空原因或非标记 → temp_unschedulable。
+func isAccountCircuitBreakerTrip(a *Account) bool {
+	if a.TempUnschedulableReason == "" {
+		return false
+	}
+	state, ok := parseHealthBreakerState(a.TempUnschedulableReason)
+	if !ok || state == nil {
+		return false
+	}
+	for _, marker := range probeRecoverableMarkers {
+		if state.MatchedKeyword == marker {
+			return true
+		}
+	}
+	return false
+}
+
+// accountHasActiveModelRateLimit 复用 D2 模型级限流判定：Extra.model_rate_limits 中
+// 存在 rate_limit_reset_at 在将来的条目 → 模型级限流仍生效（no-op on channel）。
+func accountHasActiveModelRateLimit(a *Account, now time.Time) bool {
+	if a == nil || a.Extra == nil {
+		return false
+	}
+	limits, ok := a.Extra[modelRateLimitsKey].(map[string]any)
+	if !ok || len(limits) == 0 {
+		return false
+	}
+	for _, raw := range limits {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		resetAtRaw, ok := entry["rate_limit_reset_at"].(string)
+		if !ok || strings.TrimSpace(resetAtRaw) == "" {
+			continue
+		}
+		resetAt, err := time.Parse(time.RFC3339, resetAtRaw)
+		if err != nil {
+			continue
+		}
+		if resetAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
 // ChannelMonitorService 渠道监控管理服务。
 type ChannelMonitorService struct {
 	repo      ChannelMonitorRepository
@@ -82,6 +225,14 @@ type ChannelMonitorService struct {
 	// 之后构造，构造参数注入会破坏既有依赖顺序）。nil 时 fail-closed：
 	// 配额模式的检测产出「未配置」错误快照，Create/Update 关联账号直接报错。
 	quotaFetcher *ChannelMonitorQuotaFetcher
+	// accountAnomalySource 由调用方注入（D2 域实现），提供账号侧持久事实。
+	// nil 时渠道推导不消费账号侧异常（缺口登记于 D3-evidence.md）。
+	accountAnomalySource ChannelAccountAnomalySource
+	// freshnessAlerts 是 D4 陈旧告警服务（可选注入）。渠道维陈旧评估随既有检测周期进行：
+	// 只对 ChannelAlertEligible（degraded/failed/error）渠道生效，operational / 仅无数据
+	// 渠道不建告警（零流量渠道无永久告警），聚合状态回升时原子关闭。
+	// 字段类型为窄接口 ChannelFreshnessEvaluator（E39），便于单测替换。
+	freshnessAlerts ChannelFreshnessEvaluator
 }
 
 const maxChannelMonitorNameRunes = 100
@@ -595,6 +746,33 @@ func (s *ChannelMonitorService) ListHistory(ctx context.Context, id int64, model
 
 // ---------- 业务 ----------
 
+// RefreshChannelFreshnessForAccount 账号恢复后触发关联渠道维陈旧收敛（E39）。
+// 按账号列出关联 monitor，逐个调用既有 EvaluateChannelFreshness；不新增第二套评估/推导逻辑。
+// 无关联 monitor 或 freshnessAlerts 未注入 → no-op nil（现有口径）。收敛失败仅 slog.Warn
+// （与 RunCheck 同款"失败只记日志"），不返回错误、不阻断调用方——恢复结论由恢复链先行提交，
+// 与此方法无关（不回滚、不阻断，与 E34 提交后分类同理）。
+func (s *ChannelMonitorService) RefreshChannelFreshnessForAccount(ctx context.Context, accountID int64) error {
+	if s == nil || s.freshnessAlerts == nil || accountID <= 0 {
+		return nil
+	}
+	monitors, err := s.repo.ListByAccountID(ctx, accountID)
+	if err != nil {
+		slog.Warn("channel_monitor: refresh freshness list monitors failed",
+			"account_id", accountID, "error", err)
+		return nil
+	}
+	if len(monitors) == 0 {
+		return nil
+	}
+	for _, m := range monitors {
+		if ferr := s.freshnessAlerts.EvaluateChannelFreshness(ctx, m.ID); ferr != nil {
+			slog.Warn("channel_monitor: refresh freshness evaluate failed",
+				"account_id", accountID, "monitor_id", m.ID, "error", ferr)
+		}
+	}
+	return nil
+}
+
 // RunCheck 同步触发对一个监控的检测：并发跑 primary + extra 模型，
 // 写历史记录并更新 last_checked_at。返回每个模型的检测结果。
 // 仅当 channel_monitor_enabled=true 且 channel_monitor_mode=v1 时真正探测；
@@ -630,6 +808,13 @@ func (s *ChannelMonitorService) RunCheck(ctx context.Context, id int64) ([]*Chec
 		results = s.runChecksConcurrent(ctx, m)
 	}
 	s.persistCheckResults(ctx, m, results)
+	// D4：本次检测结果落库后评估渠道维陈旧（只读推导 + 告警同步），失败只记日志。
+	if s.freshnessAlerts != nil {
+		if ferr := s.freshnessAlerts.EvaluateChannelFreshness(ctx, id); ferr != nil {
+			slog.Warn("channel_monitor: freshness alert evaluate failed",
+				"monitor_id", id, "error", ferr)
+		}
+	}
 	return results, nil
 }
 
@@ -669,9 +854,19 @@ func attachQuotaSnapshot(results []*CheckResult, snapshot *domain.MonitorQuotaSn
 
 // persistCheckResults 写入本次检测的历史记录并更新 last_checked_at。
 // 任一写库失败都只记日志，不影响调用方拿到 results（与 MVP 期望一致：宁可漏记历史也要先返回结果）。
+//
+// 无数据结果（CheckResult.NoData=true，如 replace 模式 2xx 空文本）**不写权威观测行**：
+// channel_monitor_histories 是 per-model latest 的唯一来源（ListLatestPerModel 用
+// DISTINCT ON (model) ORDER BY checked_at DESC 派生）——落库即成为该模型当前行并以
+// failed 进入渠道推导。故此处跳过该行，使 latest 不含无数据行、推导自然 no-op
+// （不推进观测时间、不降档），无需新增 schema 列即闭合 NoData 读路径。
+// 探测尝试时间仍由下方 MarkChecked 记录（last_checked_at），不丢尝试事实。
 func (s *ChannelMonitorService) persistCheckResults(ctx context.Context, m *ChannelMonitor, results []*CheckResult) {
 	rows := make([]*ChannelMonitorHistoryRow, 0, len(results))
 	for _, r := range results {
+		if r.NoData {
+			continue
+		}
 		rows = append(rows, &ChannelMonitorHistoryRow{
 			MonitorID:     m.ID,
 			Model:         r.Model,
@@ -743,6 +938,24 @@ func (s *ChannelMonitorService) SetQuotaFetcher(fetcher *ChannelMonitorQuotaFetc
 	s.quotaFetcher = fetcher
 }
 
+// SetAccountAnomalySource 注入账号侧异常事实来源（D2 域实现，本单不实现）。
+// 未注入时 DeriveChannelStatus 不考虑账号侧持久事实。
+func (s *ChannelMonitorService) SetAccountAnomalySource(src ChannelAccountAnomalySource) {
+	if s == nil {
+		return
+	}
+	s.accountAnomalySource = src
+}
+
+// SetFreshnessAlertService 注入 D4 陈旧告警服务（可选）。注入后渠道维陈旧评估在每次检测
+// 落库后执行；未注入时不做评估。
+func (s *ChannelMonitorService) SetFreshnessAlertService(svc *FreshnessAlertService) {
+	if s == nil {
+		return
+	}
+	s.freshnessAlerts = svc
+}
+
 // ListEnabledMonitors 返回所有 enabled=true 的监控（解密后），供 runner 启动时建立任务表。
 func (s *ChannelMonitorService) ListEnabledMonitors(ctx context.Context) ([]*ChannelMonitor, error) {
 	all, err := s.repo.ListEnabled(ctx)
@@ -753,6 +966,53 @@ func (s *ChannelMonitorService) ListEnabledMonitors(ctx context.Context) ([]*Cha
 		s.decryptInPlace(m)
 	}
 	return all, nil
+}
+
+// DeriveChannelStatus 以「计算即读」方式从 per-model latest 推导渠道状态（D3）。
+//
+// 集成说明（最小改动、无 schema 变更）：
+//   - per-model latest 经 repo 读取，调用纯函数 DeriveChannelStatus 计算渠道状态；
+//     本方法是聚合器读取路径上的「计算即读」入口，不新增任何写路径、不新增探测链。
+//   - 账号侧持久事实经注入的 ChannelAccountAnomalySource 获取（D2 域）。
+//     未注入时 input.AccountSideAnomalies 为空。
+//   - NoData 读路径已闭合（E3 #4）：无数据结果不写权威观测行（见 persistCheckResults），
+//     故 latest 中不含无数据行，ChannelObservation.NoData 恒为 false 且推导自然 no-op
+//     （不推进观测时间、不降档）——无需新增 schema 列即贯通运行期无数据判别。
+func (s *ChannelMonitorService) DeriveChannelStatus(ctx context.Context, monitorID int64) (ChannelStatusDerivation, error) {
+	latest, err := s.repo.ListLatestPerModel(ctx, monitorID)
+	if err != nil {
+		return ChannelStatusDerivation{}, fmt.Errorf("list latest per model: %w", err)
+	}
+	return s.deriveChannelStatusFromLatest(ctx, monitorID, latest)
+}
+
+// deriveChannelStatusFromLatest 从已加载的 per-model latest 切片推导渠道级档位
+// （避免批量聚合路径重复查询 repo）。输入为 per-model latest 观测 + 注入的账号侧持久事实；
+// 输出最坏档位（error > failed > degraded > operational）与权威观测时间。
+// NoData 读路径已闭合（见 DeriveChannelStatus / persistCheckResults）：
+// 无数据结果不落权威行，latest 中无无数据行。
+//
+// 失败关闭（#8）：账号侧事实来源读取失败时返回 error，调用方跳过本轮状态/告警变更，
+// 不得把「读取失败」降级为「无异常」。
+func (s *ChannelMonitorService) deriveChannelStatusFromLatest(ctx context.Context, monitorID int64, latest []*ChannelMonitorLatest) (ChannelStatusDerivation, error) {
+	input := ChannelDerivationInput{
+		ConfigBaseline: channelFreshnessBaselineDefault,
+		Now:            time.Now(),
+	}
+	for _, l := range latest {
+		input.Observations = append(input.Observations, ChannelObservation{
+			Status:     l.Status,
+			ObservedAt: l.CheckedAt,
+		})
+	}
+	if s.accountAnomalySource != nil {
+		anomalies, err := s.accountAnomalySource.ListActiveAnomalies(ctx, monitorID)
+		if err != nil {
+			return ChannelStatusDerivation{}, fmt.Errorf("list account side anomalies: %w", err)
+		}
+		input.AccountSideAnomalies = anomalies
+	}
+	return DeriveChannelStatus(input), nil
 }
 
 // cleanupOldHistory 删除 monitorHistoryRetentionDays 天之前的明细历史记录。

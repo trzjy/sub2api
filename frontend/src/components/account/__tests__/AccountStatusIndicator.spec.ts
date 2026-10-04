@@ -285,4 +285,72 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.text()).toContain('CSon45')
     expect(wrapper.text()).toContain('1h')
   })
+
+  // E44：tokenharbor 免费档条目（reason 以 tokenharbor_free_tier_exhausted 开头）的
+  // 无信号哨兵（precise_reset === false）即使已过期仍保留在 activeModelStatuses（与后端
+  // ActiveTokenHarborFreeTierScopes 权威语义逐位对齐，D5 锁定）。用非 tokenharbor 账号挂载
+  // 以便徽标不被 visibleModelStatuses 过滤，从而断言该条目确实未到期剔除。
+  it('tokenharbor 哨兵（precise_reset=false）过期 → 仍在 activeModelStatuses', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 8,
+          name: 'th-sentinel-1',
+          platform: 'antigravity',
+          type: 'oauth',
+          credentials: { base_url: 'https://api.moonshot.cn/v1' },
+          extra: {
+            model_rate_limits: {
+              'claude-sonnet-4-5': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                // 已过期，但 tokenharbor 无信号哨兵不得被到期剔除
+                rate_limit_reset_at: '2020-03-15T00:00:00Z',
+                reason: 'tokenharbor_free_tier_exhausted:x',
+                precise_reset: false
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    // 条目未被剔除：模型短别名徽标仍存在
+    expect(wrapper.text()).toContain('CSon45')
+  })
+
+  // E44 平行：非 tokenharbor 条目（reason 无该前缀）过期 → 仍按标准行为剔除（不回归）。
+  it('非 tokenharbor 条目过期 → 不在 activeModelStatuses（标准到期剔除不变）', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 9,
+          name: 'non-th-expired-1',
+          platform: 'antigravity',
+          type: 'oauth',
+          credentials: { base_url: 'https://api.moonshot.cn/v1' },
+          extra: {
+            model_rate_limits: {
+              'claude-sonnet-4-5': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2020-03-15T00:00:00Z'
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    // 条目被到期剔除：模型短别名徽标不应出现
+    expect(wrapper.text()).not.toContain('CSon45')
+  })
 })

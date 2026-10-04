@@ -204,6 +204,21 @@ func (r *channelMonitorRepository) List(ctx context.Context, params service.Chan
 	return out, int64(total), nil
 }
 
+// ListByAccountID 返回关联指定 account_id 的全部监控（E39：账号恢复后按账号列 monitor）。
+func (r *channelMonitorRepository) ListByAccountID(ctx context.Context, accountID int64) ([]*service.ChannelMonitor, error) {
+	rows, err := r.client.ChannelMonitor.Query().
+		Where(channelmonitor.AccountIDEQ(accountID)).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list monitors by account: %w", err)
+	}
+	out := make([]*service.ChannelMonitor, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, entToServiceMonitor(row))
+	}
+	return out, nil
+}
+
 // ---------- 调度器辅助 ----------
 
 func (r *channelMonitorRepository) ListEnabled(ctx context.Context) ([]*service.ChannelMonitor, error) {

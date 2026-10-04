@@ -403,12 +403,15 @@ func ProvideCNProviderBalanceCheckService(
 	httpUpstream HTTPUpstream,
 	proxyRepo ProxyRepository,
 	cfg *config.Config,
+	monitorService *ChannelMonitorService,
 ) *CNProviderBalanceCheckService {
 	minutes := 10
 	if cfg != nil && cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes > 0 {
 		minutes = cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes
 	}
 	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, rateLimitService, httpUpstream, proxyRepo, cfg, time.Duration(minutes)*time.Minute)
+	// E39：账号余额恢复成功后触发关联渠道维陈旧收敛（窄面注入，最佳努力）。
+	svc.SetChannelFreshnessRefresher(monitorService)
 	svc.Start()
 	return svc
 }
@@ -652,9 +655,41 @@ func ProvideAccountHealthRecoveryProbeService(
 	rateLimitService *RateLimitService,
 	settingService *SettingService,
 	tlsFPProfileService *TLSFingerprintProfileService,
+	freshnessAlerts *FreshnessAlertService,
+	monitorService *ChannelMonitorService,
 ) *AccountHealthRecoveryProbeService {
 	svc := NewAccountHealthRecoveryProbeService(accountRepo, httpUpstream, cfg, rateLimitService, settingService, tlsFPProfileService)
+	// D4 双向接线：探测调度器是账号侧冻结上界的唯一来源（阈值公式读它），也是陈旧评估的
+	// 触发方（候选集合即当前异常候选）。
+	rateLimitService.SetFreshnessBoundsProvider(svc)
+	svc.SetFreshnessAlertService(freshnessAlerts)
+	// E39：账号恢复成功后触发关联渠道维陈旧收敛（窄面注入，最佳努力）。
+	svc.SetChannelFreshnessRefresher(monitorService)
 	svc.Start(context.Background())
+	return svc
+}
+
+// ProvideFreshnessAlertService 构造状态新鲜度陈旧告警服务（D4 工作项 3）。
+// 复用既有 OpsAlertEvent 载体（不新增通知链路）；账号侧读面与冻结上界经 RateLimitService
+// 取得（后者由探测调度器注入），渠道档位经 ChannelMonitorService.DeriveChannelStatus 推导。
+// 回写接线：恢复关闭钩子挂到唯一状态写入口，渠道评估挂到既有检测周期——两者均为只接线。
+func ProvideFreshnessAlertService(
+	opsService *OpsService,
+	rateLimitService *RateLimitService,
+	monitorService *ChannelMonitorService,
+) *FreshnessAlertService {
+	svc := NewFreshnessAlertService(opsService, rateLimitService, rateLimitService, monitorService)
+	// 恢复关闭钩子（D4）：写入入口恢复迁移同一状态变更内关闭对应维度 firing 告警。旧链
+	// （FreshnessAlertService 的恢复关闭方法）已归零——此处注入适配闭包，用既有导出 helper
+	// 组 dims，直接调用 OpsService 不受监控开关门禁约束的恢复关闭窄面
+	// ResolveFreshnessAlertOnRecovery（监控关闭时恢复事务不因功能开关回滚，方案 v20:235）。
+	rateLimitService.SetFreshnessAlertResolver(func(ctx context.Context, accountID int64, scope string, accountLevel bool) error {
+		if accountLevel {
+			return opsService.ResolveFreshnessAlertOnRecovery(ctx, FreshnessAccountLevelDims(accountID))
+		}
+		return opsService.ResolveFreshnessAlertOnRecovery(ctx, FreshnessAccountModelDims(accountID, scope))
+	})
+	monitorService.SetFreshnessAlertService(svc)
 	return svc
 }
 
@@ -936,7 +971,7 @@ func ProvideOpsIngressRejectAggregator(opsRepo OpsRepository, opsService *OpsSer
 }
 
 // ProvideSettingService wires SettingService with group reader and proxy repo.
-func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) *SettingService {
+func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupRepository, proxyRepo ProxyRepository, cfg *config.Config) (*SettingService, error) {
 	svc := NewSettingService(settingRepo, cfg)
 	svc.SetDefaultSubscriptionGroupReader(groupRepo)
 	svc.SetProxyRepository(proxyRepo)
@@ -952,13 +987,16 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	if err := svc.MigrateGrokDefaultTextModel(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: migrate Grok default text model failed: %v", err)
 	}
+	if err := svc.MigrateOpenAIAPIKeyHealthBreakerProbeEnabled(context.Background()); err != nil {
+		return nil, fmt.Errorf("provide setting service: %w", err)
+	}
 	antigravity.SetUserAgentVersionResolver(svc.GetAntigravityUserAgentVersion)
 	// enforceCodexIdentityHeaders 是所有 Codex 出站路径共用的纯函数收口点，拿不到 ctx，
 	// 故注入无参解析器；解析器内部自带 60s TTL 缓存，热路径不触库。
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
 	})
-	return svc
+	return svc, nil
 }
 
 // ProvideBillingCacheService wires BillingCacheService with its RPM dependencies.
@@ -1374,13 +1412,18 @@ func ProvidePaymentOrderExpiryService(paymentSvc *PaymentService, lockCache Lead
 // ProvideChannelMonitorService 创建渠道监控服务（CRUD + RunCheck + 用户视图聚合）。
 // 加密器复用 wire 中已注入的 SecretEncryptor（AES-256-GCM）。
 // settingService gates RunCheck via channel_monitor_enabled + channel_monitor_mode.
+//
+// D3b 接线：经 SetAccountAnomalySource 注入 D2 账号异常源（停调 / 模型级限流持久事实），
+// 使 DeriveChannelStatus 在运行时真正由账号侧持久事实推导渠道档位（只接线，不改 D2 语义）。
 func ProvideChannelMonitorService(
 	repo ChannelMonitorRepository,
 	encryptor SecretEncryptor,
 	settingService *SettingService,
+	accountRepo AccountRepository,
 ) *ChannelMonitorService {
 	svc := NewChannelMonitorService(repo, encryptor)
 	svc.SetRuntimeReader(settingService)
+	svc.SetAccountAnomalySource(NewChannelAccountAnomalySource(repo, accountRepo))
 	return svc
 }
 

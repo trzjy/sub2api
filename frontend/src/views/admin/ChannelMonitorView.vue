@@ -96,6 +96,11 @@
             <span class="text-sm text-gray-900 dark:text-gray-100">{{ formatLatency(row.primary_latency_ms) }}</span>
           </template>
 
+          <!-- 渠道级档位（后端推导产出）+ 权威观测时间；无数据按空态横线呈现 -->
+          <template #cell-channel_status="{ row }">
+            <ChannelFreshnessBadge :status="row.channel_status" :observed-at="row.channel_observed_at" />
+          </template>
+
           <template #cell-enabled="{ row }">
             <Toggle :modelValue="row.enabled" @update:modelValue="toggleEnabled(row)" />
           </template>
@@ -190,6 +195,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Icon from '@/components/icons/Icon.vue'
 import Toggle from '@/components/common/Toggle.vue'
+import ChannelFreshnessBadge from '@/components/common/ChannelFreshnessBadge.vue'
 import MonitorFiltersBar from '@/components/admin/monitor/MonitorFiltersBar.vue'
 import MonitorFormDialog from '@/components/admin/monitor/MonitorFormDialog.vue'
 import MonitorTemplateManagerDialog from '@/components/admin/monitor/MonitorTemplateManagerDialog.vue'
@@ -240,6 +246,7 @@ const columns = computed<Column[]>(() => [
   { key: 'primary_model', label: t('admin.channelMonitor.columns.primaryModel'), sortable: false },
   { key: 'availability_7d', label: t('admin.channelMonitor.columns.availability7d'), sortable: false },
   { key: 'latency', label: t('admin.channelMonitor.columns.latency'), sortable: false },
+  { key: 'channel_status', label: t('admin.channelMonitor.columns.channelStatus'), sortable: false },
   { key: 'enabled', label: t('admin.channelMonitor.columns.enabled'), sortable: false },
   { key: 'actions', label: t('admin.channelMonitor.columns.actions'), sortable: false },
 ])

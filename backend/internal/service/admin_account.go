@@ -1638,6 +1638,14 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 	if err := s.accountRepo.ClearTempUnschedulable(ctx, id); err != nil {
 		return nil, err
 	}
+	// E39：账号恢复成功后触发关联渠道维陈旧收敛（最佳努力，失败只记日志，不回滚/不阻断
+	// 恢复结论；恢复链提交在先，与本调用无关）。
+	if s.channelFreshness != nil {
+		if ferr := s.channelFreshness.RefreshChannelFreshnessForAccount(ctx, id); ferr != nil {
+			slog.Warn("admin: clear account error channel freshness refresh failed",
+				"account_id", id, "error", ferr)
+		}
+	}
 	if s.runtimeBlocker != nil {
 		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
 	}

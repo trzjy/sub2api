@@ -35,12 +35,16 @@
           </span>
         </div>
       </div>
-      <span
-        class="px-2.5 py-1 rounded-full text-xs font-semibold flex-shrink-0"
-        :class="statusBadgeClass(item.primary_status)"
-      >
-        {{ statusLabel(item.primary_status) }}
-      </span>
+      <div class="flex flex-col items-end gap-1 flex-shrink-0">
+        <span
+          class="px-2.5 py-1 rounded-full text-xs font-semibold flex-shrink-0"
+          :class="statusBadgeClass(item.primary_status)"
+        >
+          {{ statusLabel(item.primary_status) }}
+        </span>
+        <!-- 渠道级档位（后端推导产出）+ 权威观测时间；无数据显示横线空态 -->
+        <ChannelFreshnessBadge :status="item.channel_status" :observed-at="item.channel_observed_at" />
+      </div>
     </div>
 
     <!-- Metrics -->
@@ -90,6 +94,7 @@ import MonitorMetricPair from './MonitorMetricPair.vue'
 import MonitorAvailabilityRow from './MonitorAvailabilityRow.vue'
 import MonitorTimeline from './MonitorTimeline.vue'
 import MonitorQuotaView from '@/components/common/MonitorQuotaView.vue'
+import ChannelFreshnessBadge from '@/components/common/ChannelFreshnessBadge.vue'
 
 // 图标配色与 utils/platformColors.ts 的平台色对齐（新 4 家）。
 const PROVIDER_TINT: Record<string, string> = {

@@ -560,6 +560,31 @@ func (r *probeRateLimitRepo) ClearTempUnschedulable(_ context.Context, _ int64) 
 }
 func (r *probeRateLimitRepo) ClearModelRateLimits(_ context.Context, _ int64) error { return nil }
 
+// 以下窄面实现使探测恢复成功路径走真实「观测写入→原子提交→告警关闭→快照同步」链
+// （E30 #2/#4 失败关闭整改后，未实现窄面的仓库不再静默 no-op）。实现为内存成功桩，
+// 不落盘、不 panic（嵌入的 AccountRepository 为 nil，本桩不触达其方法）。
+func (r *probeRateLimitRepo) GetModelRateLimitEntry(_ context.Context, _ int64, _ string) (map[string]any, error) {
+	return nil, nil
+}
+func (r *probeRateLimitRepo) GetModelRateLimitMeta(_ context.Context, _ int64, _ string) (time.Time, int64, bool, error) {
+	return time.Time{}, 0, false, nil
+}
+func (r *probeRateLimitRepo) CommitModelRateLimitObservation(_ context.Context, _ int64, _ string, _ map[string]any, _ bool, _ time.Time, _ int64) error {
+	return nil
+}
+func (r *probeRateLimitRepo) WithObservationTx(ctx context.Context, fn func(txCtx context.Context) error) error {
+	return fn(ctx)
+}
+func (r *probeRateLimitRepo) SyncSchedulerAccountSnapshot(_ context.Context, _ int64) error {
+	return nil
+}
+
+// WithModelRateLimitAccountLock 实现 modelRateLimitObservationRepository 的写锁窄面（E38 下沉）：
+// 测试替身直接执行 fn（E30/E33 惯例），不重复加锁。真实仓库由 accountRepository 持锁。
+func (r *probeRateLimitRepo) WithModelRateLimitAccountLock(_ context.Context, _ int64, fn func(ctx context.Context) error) error {
+	return fn(context.Background())
+}
+
 // parkedBreakerAccount builds an account blocked by the health breaker, whose
 // cooldown has not yet expired.
 func parkedBreakerAccount(id int64, probeAttempts int) *Account {

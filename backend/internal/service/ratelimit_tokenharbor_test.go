@@ -20,6 +20,9 @@ type tokenHarborRateLimitCall struct {
 	scope     string
 	resetAt   time.Time
 	reason    string
+	// precise 为持久化到条目的 precise_reset 标记；nil 表示该次写入未携带该标记
+	// （既有 SetModelRateLimit 路径）。
+	precise *bool
 }
 
 type tokenHarborAccountRepoStub struct {
@@ -44,6 +47,15 @@ func (r *tokenHarborAccountRepoStub) SetModelRateLimit(_ context.Context, id int
 	if len(reason) > 0 {
 		call.reason = reason[0]
 	}
+	r.modelRateLimitCalls = append(r.modelRateLimitCalls, call)
+	return nil
+}
+
+// SetModelRateLimitWithPreciseReset 是精确恢复信号标记的持久化写入口（D4c）。
+func (r *tokenHarborAccountRepoStub) SetModelRateLimitWithPreciseReset(_ context.Context, id int64, scope string, resetAt time.Time, preciseReset bool, reason string) error {
+	call := tokenHarborRateLimitCall{accountID: id, scope: scope, resetAt: resetAt, reason: reason}
+	precise := preciseReset
+	call.precise = &precise
 	r.modelRateLimitCalls = append(r.modelRateLimitCalls, call)
 	return nil
 }
@@ -163,7 +175,8 @@ func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierWithoutSignalPr
 	svc := &RateLimitService{accountRepo: repo}
 	account := tokenHarborDeepSeekAccount()
 
-	// 仅类型码、无时间信号：不伪造倒数，复探间隔等上游成功证明恢复。
+	// 仅类型码、无时间信号：不伪造倒数，被动 30 分钟复探的恢复语义已摘除（D5），
+	// 恢复时刻未知，仅由主动复探（D2）经最小推理请求成功确认后清除。
 	handled := svc.HandleUpstreamError(
 		context.Background(),
 		account,
@@ -179,7 +192,11 @@ func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierWithoutSignalPr
 	require.Len(t, repo.modelRateLimitCalls, 1)
 	call := repo.modelRateLimitCalls[0]
 	require.Contains(t, call.reason, "precise reset unknown")
-	require.WithinDuration(t, time.Now().Add(tokenHarborFreeTierProbeCooldown), call.resetAt, 5*time.Second)
+	// 被动链不得产生 30 分钟被动恢复倒数：占位 reset_at 取远端哨兵值（远未来），
+	// 不再写 now+30min，模型持续受限直至主动复探清除。
+	require.NotContains(t, call.reason, "re-probe at reset")
+	require.Greater(t, call.resetAt.Sub(time.Now()), 300*24*time.Hour,
+		"无信号分支不得写 30 分钟被动恢复倒数，reset_at 应为持续受限的远端占位值")
 }
 
 func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierExtractsPaidModel(t *testing.T) {

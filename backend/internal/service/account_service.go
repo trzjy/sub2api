@@ -108,6 +108,10 @@ type AccountRepository interface {
 	// temp-unschedulable block whose expiry is still in the future, ordered by
 	// soonest expiry first. Used by the health-breaker recovery probe sweep.
 	ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
+	// ListTokenHarborModelRateLimitedAccounts 是 TokenHarbor 免费档模型级限流候选源
+	// （work item 1）。声明补全以打通 internal/service 编译；具体实现见
+	// repository/account_repo.go，调用点见 wire.go。
+	ListTokenHarborModelRateLimitedAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
 	// SetTempUnschedulableReason rewrites the block reason for an account that is
 	// still within its temp-unschedulable window (no-op if the block expired or
 	// was cleared). Used to record probe-attempt bookkeeping without re-parking.

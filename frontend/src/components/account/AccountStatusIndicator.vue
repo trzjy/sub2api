@@ -192,24 +192,39 @@ type AccountModelStatusItem = {
   reset_at: string
 }
 
+// tokenharbor 免费档条目 reason 前缀（与后端 tokenHarborFreeTierReasonPrefix 逐字一致）。
+const tokenHarborFreeTierReasonPrefix = 'tokenharbor_free_tier_exhausted'
+
 // Computed: active model statuses (普通模型限流 + 积分耗尽 + 走积分中)
 const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const extra = props.account.extra as Record<string, unknown> | undefined
   const modelLimits = extra?.model_rate_limits as
-    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; reason?: string; precise_reset?: boolean }>
     | undefined
   const now = new Date()
   const items: AccountModelStatusItem[] = []
 
   if (!modelLimits) return items
 
-  // 检查 AICredits key 是否生效（积分是否耗尽）
+  // 检查 AICredits key 是否生效（积分是否耗尽）。AICredits 为非 tokenharbor 条目，
+  // 按标准到期语义判定（与下方非 tokenharbor 分支一致），本单不改。
   const aiCreditsEntry = modelLimits['AICredits']
   const hasActiveAICredits = aiCreditsEntry && new Date(aiCreditsEntry.rate_limit_reset_at) > now
   const allowOverages = !!(extra?.allow_overages)
 
   for (const [model, info] of Object.entries(modelLimits)) {
-    if (new Date(info.rate_limit_reset_at) <= now) continue
+    // 统一到期剔除规则（与后端 ActiveTokenHarborFreeTierScopes 权威判定逐位对齐，D5 锁定）：
+    //   tokenharbor 免费档条目（reason 以 tokenharbor_free_tier_exhausted 开头）→ 仅
+    //     precise_reset === true 且到期才剔除；precise_reset === false 或字段缺失一律不吃
+    //     到期剔除（持续受限占位，须主动复探清除）。
+    //   非 tokenharbor 条目（reason 无该前缀）→ 到期照常剔除，行为不变。
+    const isTokenHarborEntry =
+      typeof info.reason === 'string' && info.reason.startsWith(tokenHarborFreeTierReasonPrefix)
+    if (isTokenHarborEntry) {
+      if (info.precise_reset === true && new Date(info.rate_limit_reset_at) <= now) continue
+    } else if (new Date(info.rate_limit_reset_at) <= now) {
+      continue
+    }
 
     if (model === 'AICredits') {
       // AICredits key → 积分已用尽

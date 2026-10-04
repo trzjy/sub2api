@@ -43,6 +43,16 @@ type CNProviderBalanceCheckService struct {
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
+	// channelFreshness 是 E39 渠道维陈旧收敛窄面（可选注入）。账号余额恢复成功后触发
+	// 关联渠道陈旧收敛；未注入时不收敛。
+	channelFreshness ChannelFreshnessRefresher
+}
+
+// SetChannelFreshnessRefresher 注入 E39 渠道维陈旧收敛窄面（可选）。未注入时不收敛。
+func (s *CNProviderBalanceCheckService) SetChannelFreshnessRefresher(r ChannelFreshnessRefresher) {
+	if s != nil {
+		s.channelFreshness = r
+	}
 }
 
 // NewCNProviderBalanceCheckService 构造周期余额/额度检测服务。
@@ -358,6 +368,12 @@ func (s *CNProviderBalanceCheckService) probeOne(ctx context.Context, account *A
 				log.Printf("[CNBalance] probe account %d (%s) clear failed: %v", account.ID, account.Platform, err)
 				return
 			}
+			// E39：余额恢复后触发关联渠道维陈旧收敛（最佳努力，不回滚/不阻断恢复结论）。
+			if s.channelFreshness != nil {
+				if ferr := s.channelFreshness.RefreshChannelFreshnessForAccount(ctx, account.ID); ferr != nil {
+					log.Printf("[CNBalance] probe account %d (%s) channel freshness refresh failed: %v", account.ID, account.Platform, ferr)
+				}
+			}
 			log.Printf("[CNBalance] probe account %d (%s) reactivated (balance recovered)", account.ID, account.Platform)
 		}
 	}
@@ -423,6 +439,12 @@ func (s *CNProviderBalanceCheckService) checkOne(ctx context.Context, account *A
 		if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
 			log.Printf("[CNBalance] clear account %d failed: %v", account.ID, err)
 			return cnBalanceNoChange
+		}
+		// E39：余额恢复后触发关联渠道维陈旧收敛（最佳努力，不回滚/不阻断恢复结论）。
+		if s.channelFreshness != nil {
+			if ferr := s.channelFreshness.RefreshChannelFreshnessForAccount(ctx, account.ID); ferr != nil {
+				log.Printf("[CNBalance] account %d channel freshness refresh failed: %v", account.ID, ferr)
+			}
 		}
 		log.Printf("[CNBalance] reactivated account %d (%s): balance=%.4g %s", account.ID, account.Platform, result.Balance, result.Currency)
 		return cnBalanceCleared

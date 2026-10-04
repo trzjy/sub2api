@@ -102,6 +102,13 @@ export interface ChannelMonitor {
   account_id: number | null
   /** 主模型最近一次配额快照（配额模式；无历史时为 null） */
   latest_quota?: MonitorQuotaSnapshot | null
+  /**
+   * 渠道级档位（后端经推导产出，非 per-model 直读）。空字符串/缺省 = 无数据，
+   * 展示层按空态（横线）呈现，不得显示为失败。
+   */
+  channel_status?: string
+  /** 渠道级权威观测时间；无数据时为空（展示层显示横线，不显示为失败）。 */
+  channel_observed_at?: string
 }
 
 export interface ExtraModelStatus {

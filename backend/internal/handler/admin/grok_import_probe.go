@@ -211,6 +211,7 @@ func ProvideAccountHandler(
 	rpmCache service.RPMCache,
 	tokenCacheInvalidator service.TokenCacheInvalidator,
 	grokQuotaService *service.GrokQuotaService,
+	freshnessAlertService *service.FreshnessAlertService,
 ) *AccountHandler {
 	handler := NewAccountHandler(
 		adminService,
@@ -230,5 +231,7 @@ func ProvideAccountHandler(
 	)
 	handler.grokImportProber = grokQuotaService
 	handler.cfg = cfg
+	// D4：管理端账号两维（账号+模型 / 账号级）新鲜度透传需要的告警状态查询面。
+	handler.SetFreshnessAlertService(freshnessAlertService)
 	return handler
 }

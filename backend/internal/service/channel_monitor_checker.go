@@ -91,7 +91,10 @@ func runCheckForModel(ctx context.Context, provider, endpoint, apiKey, model str
 	// 响应文本为空则降级为 failed（视为上游回了 200 但没实际内容）。
 	if mode == MonitorBodyOverrideModeReplace {
 		if strings.TrimSpace(respText) == "" {
+			// 无数据产物（2xx 但无有效文本）：保留四值枚举为 failed，
+			// 同时标记 NoData，使渠道侧推导能在合并前将其识别为 no-op 而非真实 failed。
 			res.Status = MonitorStatusFailed
+			res.NoData = true
 			res.Message = truncateMessage("replace-mode: upstream returned 2xx with empty text")
 			return res
 		}

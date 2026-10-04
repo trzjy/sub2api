@@ -92,4 +92,10 @@ type OpsAlertEventFilter struct {
 	// Dimensions filters (best-effort).
 	Platform string
 	GroupID  *int64
+
+	// DimensionExact 按完整维度键值做 JSONB 文本精确匹配（dimensions->>'k' = v）。
+	// 用于按维度唯一查询活跃陈旧告警（GetActiveFreshnessAlert），禁止以固定上限
+	// 兜底内存过滤代替存在性判定。值转文本：数值按 JSON 数字文本（int64/float64），
+	// 其余按字符串。
+	DimensionExact map[string]any
 }

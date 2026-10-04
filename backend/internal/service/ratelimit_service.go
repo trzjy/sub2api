@@ -38,6 +38,19 @@ type RateLimitService struct {
 	// OpenAI Team 联动熔断的进程内去重：teamID → 去重窗口截止时间
 	openaiTeamLinkedMu     sync.Mutex
 	openaiTeamLinkedRecent map[string]time.Time
+
+	// D2：探测链写入入口的 per-account 串行锁已下沉到仓库层（E38）：由 accountRepository 的
+	// modelRateLimitWriteLocks 经 WithModelRateLimitAccountLock 与 commitModelRateLimitSet 持有。
+	// 探测族写入口（ApplyModelRateLimitObservation）与业务 SET（SetModelRateLimit /
+	// SetModelRateLimitWithPreciseReset）经同一仓库锁互斥，确保同账号不同 model-key 的
+	// read-modify-write 不互相覆盖（D：并发写合并）。service 层不再保留该锁。
+
+	// D4：账号侧冻结上界来源（由探测调度器注入），用于管理端/阈值计算展示有效阈值。
+	freshnessBoundsProvider AccountFreshnessUpperBoundProvider
+	// D4：陈旧告警关闭钩子。在「恢复」的同一原子状态变更内（仓库层 per-account 写锁持有期间，
+	// ApplyModelRateLimitObservation 经 WithModelRateLimitAccountLock 包裹）关闭对应维度的陈旧告警
+	// ——关闭挂在写入口恢复路径内，不靠轮询收敛。
+	freshnessAlertResolver func(ctx context.Context, accountID int64, scope string, accountLevel bool) error
 }
 
 type AccountRuntimeBlocker interface {
@@ -136,6 +149,55 @@ func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocke
 // alerts. Optional; when nil, L2 warnings are logged only.
 func (s *RateLimitService) SetOpsRepository(opsRepo OpsRepository) {
 	s.opsRepo = opsRepo
+}
+
+// SetFreshnessBoundsProvider 注入账号侧冻结上界来源（D4，由探测调度器提供）。
+func (s *RateLimitService) SetFreshnessBoundsProvider(p AccountFreshnessUpperBoundProvider) {
+	s.freshnessBoundsProvider = p
+}
+
+// SetFreshnessAlertResolver 注入陈旧告警关闭钩子（D4）。fn 在写入口恢复迁移的同一 ent 事务
+// 内（仍持有该账号写锁）被调用，用于关闭对应维度的陈旧告警；fn 返回错误时随事务整体回滚
+// （状态不提交、告警不变）并沿写入口传播（E20 #2，真原子语义）。
+func (s *RateLimitService) SetFreshnessAlertResolver(fn func(ctx context.Context, accountID int64, scope string, accountLevel bool) error) {
+	s.freshnessAlertResolver = fn
+}
+
+// resolveFreshnessAlertOnRecovery 在恢复写入的同一原子状态变更（ent 事务）内关闭对应维度告警。
+// 失败不再吞错：错误沿写入口传播，由事务整体回滚（状态不提交、告警不变）。E20 #2。
+func (s *RateLimitService) resolveFreshnessAlertOnRecovery(ctx context.Context, accountID int64, scope string, accountLevel bool) error {
+	if s == nil || s.freshnessAlertResolver == nil {
+		return nil
+	}
+	return s.freshnessAlertResolver(ctx, accountID, scope, accountLevel)
+}
+
+// AccountFreshnessUpperBound 返回某 (account, modelKey) 的有效上界（D4 三维阈值公式的
+// 账号侧输入）；未注入来源时返回 0（调用方以 0 走基线）。
+func (s *RateLimitService) AccountFreshnessUpperBound(accountID int64, modelKey string) time.Duration {
+	if s == nil || s.freshnessBoundsProvider == nil {
+		return 0
+	}
+	return s.freshnessBoundsProvider.AccountFreshnessUpperBound(accountID, modelKey)
+}
+
+// AccountFreshnessThreshold 返回某 (account, scope) 的有效阈值（D4 三维阈值公式）：
+// max(对应维度基线, 该候选冻结上界)。scope == tokenHarbor_account_level_probe 走账号级基线，
+// 其余走账号+模型基线。未注入上界来源时退化为对应维度基线。
+//
+// 入参 scope 是维度标识（可能为账号级占位 scope），但冻结上界的查询键必须是调度器
+// 冻结时使用的 modelKey：账号级候选用空 modelKey 冻结（freezeCandidateBound(accID, "", total)），
+// 故此处必须把特殊 scope 归一到空串再查上界；否则 provider 查不到该键返回 0，账号级
+// 阈值退化为纯基线，与管理端展示、告警评估（EvaluateAccountLevelFreshness 已传 ""）
+// 的取值不一致。模型级 scope 与 modelKey 同值，归一为空操作、行为不变。
+func (s *RateLimitService) AccountFreshnessThreshold(accountID int64, scope string) time.Duration {
+	baseline := accountModelFreshnessBaseline
+	boundKey := scope
+	if scope == tokenHarborAccountLevelProbeScope {
+		baseline = accountLevelFreshnessBaseline
+		boundKey = ""
+	}
+	return EffectiveFreshnessThreshold(baseline, s.AccountFreshnessUpperBound(accountID, boundKey))
 }
 
 func (s *RateLimitService) IsOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx context.Context) bool {
@@ -1684,7 +1746,12 @@ func (s *RateLimitService) persistAnthropicFableWindowLimit(ctx context.Context,
 // 对确定性 entitlement 失败的已有处理口径）。
 const tokenHarborFreeTierReasonPrefix = "tokenharbor_free_tier_exhausted"
 
-const tokenHarborFreeTierProbeCooldown = 30 * time.Minute
+// tokenHarborFreeTierNoSignalResetAt 是「无上游精准恢复信号」时写入的限流占位
+// reset_at（D5：被动 30 分钟复探的恢复语义已摘除，不保留为常驻 fallback）。
+// 它不是恢复倒数——恢复时刻未知，仅由主动复探（D2）经最小推理请求成功确认后清除。
+// 占位取远端哨兵值，目的有二：① 调度器按 reset_at 在未来判定账号持续受限（不伪造恢复）；
+// ② 仍可被 D2 候选筛选（要求 reset_at 在未来）纳入主动复探。它不构成任何被动恢复。
+const tokenHarborFreeTierNoSignalResetAt = 365 * 24 * time.Hour
 
 var tokenHarborPaidModelPattern = regexp.MustCompile(`paid model '([^']+)'`)
 
@@ -1768,6 +1835,34 @@ func tokenHarborFreeTierResetAt(headers http.Header, responseBody []byte, now ti
 	return time.Time{}, false
 }
 
+// modelRateLimitPreciseResetRepository 是精确恢复信号标记（precise_reset）持久化所需的
+// 窄仓库面。与 modelRateLimitObservationRepository 同理：刻意不并入宽泛的
+// AccountRepository 接口，以免既有测试桩在编译期被迫实现。
+type modelRateLimitPreciseResetRepository interface {
+	SetModelRateLimitWithPreciseReset(ctx context.Context, id int64, scope string, resetAt time.Time, preciseReset bool, reason string) error
+}
+
+// setModelRateLimitWithPreciseReset 写入模型级限流并持久化 precise_reset 标记。
+// 真实仓库恒实现该窄接口（*accountRepository）。不实现的仓库（仅测试替身）是装配缺陷，
+// 明确失败关闭（E26/E9b 同款）——不允许退回旧 SetModelRateLimit 入口：回退会跳过
+// precise_reset 持久化与初始 SET 的 meta 事件裁决，悄悄降低语义正确性。
+//
+// E8 #4：真实实现路径经仓库层 commitModelRateLimitSet 在 per-account 写锁保护下完成
+// 「读 meta → 事件裁决 → 单语句写（条目+meta）」——初始 SET 与其他写入口共享同一
+// `(事件时间, tie_breaker)` 裁决基线与提交模式（经 CommitModelRateLimitObservation 原子写，
+// 不新增第二条提交路径）。per-account 写锁已下沉到仓库层（E38），由 commitModelRateLimitSet
+// 全程持有，service 层不再重复加锁；锁语义与 ApplyModelRateLimitObservation 同款
+// （同账号不同 model-key 的读改写串行化，防跨键互相覆盖），且与探测族写入口经同一仓库锁互斥。
+func (s *RateLimitService) setModelRateLimitWithPreciseReset(ctx context.Context, id int64, scope string, resetAt time.Time, preciseReset bool, reason string) error {
+	repo, ok := s.accountRepo.(modelRateLimitPreciseResetRepository)
+	if !ok {
+		return fmt.Errorf("model rate limit precise reset: account repository does not implement precise reset narrow interface")
+	}
+	// per-account 写锁已下沉到仓库层：委托 repo（经 commitModelRateLimitSet 全程持锁）即自动获得
+	// 与探测族写入口的互斥，service 层无需再持锁。
+	return repo.SetModelRateLimitWithPreciseReset(ctx, id, scope, resetAt, preciseReset, reason)
+}
+
 // handleTokenHarborFreeTierExhaustion 处理免费档用光：只写模型级限流。
 // 返回 true 表示已处理（调用方不得再落入整号限流/临时停调链）。
 // 非 TokenHarbor 上游返回 false：通用措辞不得跨上游套用，交由既有链处理。
@@ -1809,11 +1904,18 @@ func (s *RateLimitService) handleTokenHarborFreeTierExhaustion(ctx context.Conte
 	if precise {
 		reason += ": rolling free allowance exhausted per upstream reset signal; paid base-model routes unaffected"
 	} else {
-		// 无精准信号：复探间隔不是恢复倒数，精确恢复时刻由上游成功响应证明。
-		resetAt = now.Add(tokenHarborFreeTierProbeCooldown)
-		reason += ": rolling free allowance exhausted per upstream, precise reset unknown (see dashboard), re-probe at reset; paid base-model routes unaffected"
+		// 无上游精准恢复信号（D5）：被动 30 分钟复探的恢复语义已摘除，不再写
+		// now+30min 的被动恢复倒数（旧「断路器失灵时最后防线 / re-probe at reset」类
+		// 兜底表述作废）。恢复时刻未知，仅由主动复探（D2）经目标模型最小推理请求成功
+		// 确认后清除。占位 reset_at 取远端哨兵值，保证受限状态持续至主动复探清除，且仍
+		// 可被 D2 候选筛选纳入主动复探；此处不构成任何被动恢复。
+		resetAt = now.Add(tokenHarborFreeTierNoSignalResetAt)
+		reason += ": rolling free allowance exhausted per upstream, precise reset unknown (see dashboard); recovery confirmed only by active re-probe"
 	}
-	if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, modelKey, resetAt, reason); err != nil {
+	// precise_reset 与 reset_at 一并持久化：true = 上游给了可解析的恢复时刻（前端可
+	// 显示倒计时）；false = D5 无信号哨兵分支（reset_at 只是"持续受限"占位值，恢复
+	// 时刻未知，前端显示"等待主动复探"，不显示倒计时）。该标记是唯一判别依据。
+	if err := s.setModelRateLimitWithPreciseReset(ctx, account.ID, modelKey, resetAt, precise, reason); err != nil {
 		slog.Warn("tokenharbor_free_tier_model_rate_limit_set_failed",
 			"account_id", account.ID,
 			"scope", modelKey,
@@ -3068,4 +3170,219 @@ func (s *RateLimitService) triggerStreamTimeoutError(ctx context.Context, accoun
 
 	slog.Warn("stream_timeout_account_error", "account_id", account.ID, "model", model)
 	return true
+}
+
+// ===========================================================================
+// D2：探测链统一状态写入入口（ApplyModelRateLimitObservation）
+// ===========================================================================
+
+// modelRateLimitObservationRepository 是写入入口所需的窄仓库面（D）。刻意不并入
+// 宽泛的 AccountRepository 接口，以免既有测试桩（嵌入 nil AccountRepository 的 mock）
+// 在编译期被迫实现、运行时空接口 panic。仅真实的 *accountRepository 满足它。
+type modelRateLimitObservationRepository interface {
+	GetModelRateLimitEntry(ctx context.Context, id int64, scope string) (map[string]any, error)
+	GetModelRateLimitMeta(ctx context.Context, id int64, scope string) (lastEventAt time.Time, revision int64, ok bool, err error)
+	// CommitModelRateLimitObservation 在同一数据库写入（单语句/单事务）内提交状态条目
+	// （clear=true 时清除该 scope，否则写入 entry）与 meta（last_event_at/revision）。
+	// 任一部分失败两者都不变（E1 原子性）。
+	CommitModelRateLimitObservation(ctx context.Context, id int64, scope string, entry map[string]any, clear bool, lastEventAt time.Time, revision int64) error
+	// WithModelRateLimitAccountLock 暴露 per-account 模型级限流写锁窄面（E38 下沉）：fn 在
+	// 持锁期间执行，用于包裹多步读改写。锁已在仓库层实现，service 层不再重复持锁；锁不可重入，
+	// CommitModelRateLimitObservation 本身绝不在此加锁。
+	WithModelRateLimitAccountLock(ctx context.Context, accountID int64, fn func(ctx context.Context) error) error
+}
+
+// observationTxRepository 是写入口恢复路径所需的窄事务面（E20 #2）：将状态提交与同维告警
+// 关闭收进同一 ent 事务。刻意不并入宽泛的 AccountRepository，仅暴露事务编排能力。
+type observationTxRepository interface {
+	// WithObservationTx 在恢复路径内开启（或参与已有）ent 事务：fn 内任一错误整体回滚。
+	WithObservationTx(ctx context.Context, fn func(txCtx context.Context) error) error
+}
+
+// schedulerSnapshotSyncRepository 是写入口恢复路径提交后补做快照同步的窄面（E30 #1）：
+// 事务内不预览未提交状态，故快照同步须等 WithObservationTx 成功返回后再做。刻意不并入
+// 宽泛的 AccountRepository，仅真实 *accountRepository 满足。
+type schedulerSnapshotSyncRepository interface {
+	SyncSchedulerAccountSnapshot(ctx context.Context, accountID int64) error
+}
+
+// ModelRateLimitObservation 是探测链写入入口的入参（D）。EventTime 为权威事件时刻
+// （完成时刻）；TieBreaker 为同刻精度碰撞的确定性比较键（0 表示由入口按记录 revision
+// 递增分配）；AccountLevel 标记账号级维度（F，无模型键，与模型级互不掩盖）。
+type ModelRateLimitObservation struct {
+	EventTime    time.Time
+	Outcome      ProbeOutcome
+	ResetAt      time.Time
+	Reason       string
+	TieBreaker   int64
+	AccountLevel bool
+}
+
+func (s *RateLimitService) observationRepo() modelRateLimitObservationRepository {
+	if s == nil || s.accountRepo == nil {
+		return nil
+	}
+	repo, ok := s.accountRepo.(modelRateLimitObservationRepository)
+	if !ok {
+		return nil
+	}
+	return repo
+}
+
+// ApplyModelRateLimitObservation 是唯一的状态事实写入入口（D）：
+//   - 事件时间原子应用：严格更旧的事件整体 no-op（防旧探测成功清除新业务 429）；
+//   - 同刻精度碰撞按 (event_time, tie_breaker) 确定性比较，与锁序/DB 序/重放序无关；
+//   - 入站分类：Success→幂等清除该 scope（账号级 Success 只置 observed_at，不清除）；
+//     FreeTier429→保留既有 reset_at/reason，仅置 observed_at（确认仍受限，不扩展）；
+//     其余（5xx/超时/传输/其他 429/401/403/非免费档 429）→ 仅置 attempted_at，
+//     不改状态、不动 observed_at、不扩展限流。
+func (s *RateLimitService) ApplyModelRateLimitObservation(ctx context.Context, accountID int64, scope string, obs ModelRateLimitObservation) error {
+	repo := s.observationRepo()
+	if repo == nil {
+		// 仓库未实现观测窄面：明确失败关闭，而非静默 no-op（E26/E9b 同款）。探测成功路径
+		// 若照常清冻结/清状态但观测根本没写，会把读取/接线故障误判为健康——必须上抛错误。
+		return fmt.Errorf("model rate limit observation: observation repository does not implement model rate limit observation narrow interface")
+	}
+	// per-account 写锁下沉（E38）：整个「读 meta → 裁决 → commit」区间在仓库层锁内串行，
+	// 与业务 SET（commitModelRateLimitSet）互斥，防并发交错读同 revision 后后写者覆盖较新状态。
+	// 锁不可重入：CommitModelRateLimitObservation 内部不加锁，锁只存在于此处与 commitModelRateLimitSet。
+	return repo.WithModelRateLimitAccountLock(ctx, accountID, func(ctx context.Context) error {
+		lastEventAt, rev, has, err := repo.GetModelRateLimitMeta(ctx, accountID, scope)
+		if err != nil {
+			return err
+		}
+	// 严格更旧 → 整体 no-op。
+	if has && obs.EventTime.Before(lastEventAt) {
+		return nil
+	}
+	// tie_breaker 比较键固定 (事件时间, tie_breaker)：调用方未给（0）时由入口分配
+	// 单调递增入口顺序号 = rev+1，保证同刻碰撞确定性裁决、且与锁序/DB序/重放序无关。
+	// 注意：默认 0 不可直接当作字面 0 参与比较，否则会恒判更旧而错误 no-op 正常新观测。
+	effectiveTB := obs.TieBreaker
+	if effectiveTB == 0 {
+		effectiveTB = rev + 1
+	}
+	if has && obs.EventTime.Equal(lastEventAt) && effectiveTB <= rev {
+		return nil
+	}
+	newRev := effectiveTB
+
+	switch obs.Outcome {
+	case ProbeOutcomeSuccess:
+		if obs.AccountLevel {
+			// 账号级成功：只记录 observed_at（无模型级条目可清除）。
+			entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
+			if err != nil {
+				return err
+			}
+			if entry == nil {
+				entry = map[string]any{}
+			}
+			entry[entryObservedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
+			// 账号级成功不存在模型级条目可清除，故 clear=false，仅写回条目并同时提交 meta。
+			// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
+			if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
+				return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, entry, false, obs.EventTime, newRev)
+			}); err != nil {
+				return err
+			}
+		} else {
+			// 模型级成功：幂等清除该 scope（条目清除与 meta 推进同一次提交，原子）。
+			// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
+			if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
+				return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, nil, true, obs.EventTime, newRev)
+			}); err != nil {
+				return err
+			}
+		}
+	case ProbeOutcomeFreeTier429:
+		entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			entry = map[string]any{}
+		}
+		// 确认仍受限：保留既有 reset_at/reason（不扩展），仅置 observed_at。
+		// 条目整体读-改-写，故 precise_reset（精确恢复信号标记）一并保留，不被清除。
+		if existing, ok := entry["rate_limit_reset_at"].(string); ok && strings.TrimSpace(existing) != "" {
+			// 保留既有
+		} else if !obs.ResetAt.IsZero() {
+			entry["rate_limit_reset_at"] = obs.ResetAt.UTC().Format(time.RFC3339Nano)
+		}
+		if existing, ok := entry["reason"].(string); ok && strings.TrimSpace(existing) != "" {
+			// 保留既有
+		} else if strings.TrimSpace(obs.Reason) != "" {
+			entry["reason"] = obs.Reason
+		}
+		entry[entryObservedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
+		if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
+			return werr
+		}
+	case ProbeOutcomeUnclassified:
+		entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			entry = map[string]any{}
+		}
+		entry[entryAttemptedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
+		if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
+			return werr
+		}
+	}
+	return nil
+	})
+}
+
+// commitRecoveryAtomically 将「状态提交」与「同维告警关闭」收进同一 ent 事务（E20 #2）。
+// 沿 E9/E17 的 TxFromContext 窄面惯例：仓库须支持事务编排（observationTxRepository，
+// 由 accountRepository 暴露）方能走原子恢复。缺该窄面是明确错误（E9b 同款失败关闭），
+// 不进行任何写入——兜底退化会掩盖真实错误（如 wire 构造了未实现窄面的仓库时静默回到
+// 非原子行为）。commit 与 resolve 任一失败整体回滚（状态不提交、告警不变）。
+func (s *RateLimitService) commitRecoveryAtomically(ctx context.Context, accountID int64, scope string, accountLevel bool, commit func(txCtx context.Context) error) error {
+	txRepo, ok := s.accountRepo.(observationTxRepository)
+	if !ok {
+		return fmt.Errorf("model rate limit recovery: observation repository does not support atomic recovery transaction")
+	}
+	// 窄面能力断言前移到事务之前：缺失时事务尚未开启、commit 闭包未执行、无任何状态写入，
+	// 此时明确失败关闭（E9b 同款口径）是合法的——调用方可安全拿到 error 关闭。若把该能力
+	// 缺失误放到提交之后，则会与「提交后同步失败」混淆；而实际上此处是仓库装配错误，应在
+	// 任何写入之前判定。
+	syncRepo, ok := s.accountRepo.(schedulerSnapshotSyncRepository)
+	if !ok {
+		return fmt.Errorf("model rate limit recovery: account repository does not implement scheduler snapshot sync narrow interface")
+	}
+	if err := txRepo.WithObservationTx(ctx, func(txCtx context.Context) error {
+		if err := commit(txCtx); err != nil {
+			return err
+		}
+		return s.resolveFreshnessAlertOnRecovery(txCtx, accountID, scope, accountLevel)
+	}); err != nil {
+		return err
+	}
+	// 事务已确认提交、恢复已成功。提交后快照同步失败不得 return error：调用方
+	// (probeOneTokenHarbor) 会把 error 当作「观测提交失败」，进而把实际已恢复成功的条目
+	// 改写为 Unclassified——冻结上界不清除、R2 失败计数错增、调度缓存与权威状态分裂。因此
+	// 快照同步错误在此仅可观测，不得改变探测结论（调用方必须走成功路径：清冻结上界、计成功）。
+	if err := syncRepo.SyncSchedulerAccountSnapshot(ctx, accountID); err != nil {
+		slog.Warn("model_rate_limit_recovery_snapshot_sync_failed",
+			"account_id", accountID,
+			"scope", scope,
+			"error", err,
+		)
+	}
+	return nil
+}
+
+// GetModelRateLimitObservation 读取某 scope 的写入条目（供 stale 告警/观测，F）。
+func (s *RateLimitService) GetModelRateLimitObservation(ctx context.Context, accountID int64, scope string) (map[string]any, error) {
+	repo := s.observationRepo()
+	if repo == nil {
+		// 仓库未实现观测窄面：明确失败关闭，而非返回「无观测健康态」（E26/E9b 同款）。
+		// 读取故障不得被误判为健康。
+		return nil, fmt.Errorf("model rate limit observation: observation repository does not implement model rate limit observation narrow interface")
+	}
+	return repo.GetModelRateLimitEntry(ctx, accountID, scope)
 }

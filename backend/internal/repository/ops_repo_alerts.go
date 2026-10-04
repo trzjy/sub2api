@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -357,7 +358,10 @@ FROM ops_alert_events
 ORDER BY fired_at DESC, id DESC
 LIMIT ` + limitArg
 
-	rows, err := r.db.QueryContext(ctx, q, args...)
+	// 事务感知：若 ctx 携带 ent 事务，则在同事务内查询（写入口恢复路径的告警关闭
+	// 与状态提交收进同一事务，E20 #2）；否则回退到裸 *sql.DB。
+	exec := txAwareSQLExecutor(ctx, r.db, nil)
+	rows, err := exec.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -608,7 +612,10 @@ SET status = $2,
     resolved_at = $3
 WHERE id = $1`
 
-	_, err := r.db.ExecContext(ctx, q, eventID, strings.TrimSpace(status), opsNullTime(resolvedAt))
+	// 事务感知：若 ctx 携带 ent 事务，则在同事务内更新（写入口恢复路径的告警关闭
+	// 与状态提交收进同一事务，E20 #2）；否则回退到裸 *sql.DB。
+	exec := txAwareSQLExecutor(ctx, r.db, nil)
+	_, err := exec.ExecContext(ctx, q, eventID, strings.TrimSpace(status), opsNullTime(resolvedAt))
 	return err
 }
 
@@ -834,8 +841,47 @@ func buildOpsAlertEventsWhere(filter *service.OpsAlertEventFilter) (string, []an
 		args = append(args, fmt.Sprintf("%d", *filter.GroupID))
 		clauses = append(clauses, "(dimensions->>'group_id') = $"+itoa(len(args)))
 	}
+	// DimensionExact: 按完整维度键值做 JSONB 文本精确匹配。值统一转为 JSON 数字文本
+	// （int64/float64 均按 strconv 无指数格式）或字符串原文，与写入端 json.Marshal
+	// 的维度值在 JSONB ->'>>' 文本形式下一致。
+	for k, v := range filter.DimensionExact {
+		args = append(args, dimValueToText(v))
+		clauses = append(clauses, "(dimensions->>"+quoteJSONKey(k)+") = $"+itoa(len(args)))
+	}
 
 	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// quoteJSONKey 为 JSONB 对象键生成带引号的文本标识符（仅白名单字符，防注入）。
+func quoteJSONKey(k string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range k {
+		if r == '\'' {
+			b.WriteString("''")
+			continue
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
+
+// dimValueToText 把维度过滤值转为 JSONB ->> 文本比较值：数值按 JSON 数字文本
+// （strconv.FormatFloat 'f' -1 与 json.Marshal 的整数/小数输出一致），其余按字符串原文。
+func dimValueToText(v any) string {
+	switch n := v.(type) {
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case int:
+		return strconv.Itoa(n)
+	case float64:
+		return strconv.FormatFloat(n, 'f', -1, 64)
+	case string:
+		return n
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func opsNullJSONMap(v map[string]any) (any, error) {

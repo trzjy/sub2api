@@ -515,16 +515,33 @@
           <div
             v-for="entry in tokenHarborActiveRateLimits"
             :key="entry.model"
-            :title="t('admin.accounts.tokenHarbor.rateLimitedUntil', { time: formatDateTime(entry.reset_at) })"
+            :title="
+              entry.precise_reset !== true
+                ? t('admin.accounts.tokenHarbor.awaitingProbe')
+                : t('admin.accounts.tokenHarbor.rateLimitedUntil', { time: formatDateTime(entry.reset_at) })
+            "
           >
             <UsageProgressBar
               label="7d"
               :utilization="0"
               :unknown-usage="true"
-              :resets-at="entry.reset_at"
-              :resets-at-prefix="t('admin.accounts.tokenHarbor.rateLimitedPrefix')"
+              :resets-at="entry.precise_reset !== true ? null : entry.reset_at"
+              :resets-at-prefix="
+                entry.precise_reset !== true ? '' : t('admin.accounts.tokenHarbor.rateLimitedPrefix')
+              "
               color="amber"
             />
+            <!-- 无上游恢复信号（precise_reset === false 或字段缺失，二者 D5 锁定同义）：
+                 reset_at 只是"持续受限"哨兵占位值，恢复时刻未知，只显示"等待主动复探"，
+                 不显示倒计时、不加"限流至"前缀。判别只看该标记，不用 reset_at 距今时长
+                 等启发式（后端把缺失按 false 处理，前端一致）。 -->
+            <div
+              v-if="entry.precise_reset !== true"
+              class="text-[10px] text-gray-400"
+              data-test="tokenharbor-awaiting-probe"
+            >
+              {{ t('admin.accounts.tokenHarbor.awaitingProbe') }}
+            </div>
           </div>
           <div v-if="!tokenHarborActiveRateLimits.length" class="text-xs text-gray-400">-</div>
         </template>
@@ -1035,19 +1052,30 @@ const isTokenHarbor = computed(() => isTokenHarborAccount(props.account))
 interface TokenHarborRateLimit {
   model: string
   reset_at: string
+  // precise_reset 是后端持久化的"精确恢复信号"标记（唯一判别依据，D5 锁定）：
+  //   true        → reset_at 是上游给出的真实恢复时刻，显示倒计时；
+  //   false / 缺失 → 无上游时间信号（缺失仅存在于 D4c 之前的存量旧行，后端对 tokenharbor
+  //                 免费档 true/false 均显式写该字段），reset_at 只是"持续受限"哨兵占位值，
+  //                 恢复时刻未知，显示"等待主动复探"、不显示倒计时。后端把缺失按 false 处理，
+  //                 前端须与之一致（缺省与 false 同为无信号语义，不得引入 reset_at 时长启发式）。
+  precise_reset?: boolean
 }
 const tokenHarborActiveRateLimits = computed<TokenHarborRateLimit[]>(() => {
   if (!isTokenHarbor.value) return []
   const extra = props.account.extra as Record<string, unknown> | undefined
   const modelLimits = extra?.model_rate_limits as
-    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
+    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; precise_reset?: boolean }>
     | undefined
   if (!modelLimits) return []
   const now = new Date()
   const items: TokenHarborRateLimit[] = []
   for (const [model, info] of Object.entries(modelLimits)) {
-    if (new Date(info.rate_limit_reset_at) <= now) continue
-    items.push({ model, reset_at: info.rate_limit_reset_at })
+    // 该路径整体 isTokenHarbor 门控，条目均为 tokenharbor 免费档。无信号（precise_reset
+    // === false 或字段缺失，二者 D5 锁定同义）→ 不吃到期剔除：reset_at 仅为"持续受限"占位
+    // 值，恢复时刻未知，须经主动复探确认，继续渲染"等待主动复探"。仅 precise_reset ===
+    // true 且到期才剔除（标准行为，与后端 ActiveTokenHarborFreeTierScopes 权威语义逐位对齐）。
+    if (info.precise_reset === true && new Date(info.rate_limit_reset_at) <= now) continue
+    items.push({ model, reset_at: info.rate_limit_reset_at, precise_reset: info.precise_reset })
   }
   return items
 })

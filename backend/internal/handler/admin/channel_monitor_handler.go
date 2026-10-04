@@ -107,6 +107,10 @@ type channelMonitorResponse struct {
 	PrimaryLatencyMs    *int                                 `json:"primary_latency_ms"`
 	Availability7d      float64                              `json:"availability_7d"`
 	ExtraModelsStatus   []dto.ChannelMonitorExtraModelStatus `json:"extra_models_status"`
+	// ChannelStatus 渠道级档位（经推导产出，非 per-model 直读）。
+	ChannelStatus string `json:"channel_status"`
+	// ChannelObservedAt 渠道级权威观测时间；无数据时为""。
+	ChannelObservedAt string `json:"channel_observed_at,omitempty"`
 	// 请求自定义快照：前端编辑 / 展示「高级设置」用
 	TemplateID       *int64            `json:"template_id"`
 	ExtraHeaders     map[string]string `json:"extra_headers"`
@@ -295,6 +299,10 @@ func buildListItemResponse(m *service.ChannelMonitor, summary service.MonitorSta
 	resp.PrimaryLatencyMs = summary.PrimaryLatencyMs
 	resp.Availability7d = summary.Availability7d
 	resp.LatestQuota = summary.LatestQuota
+	resp.ChannelStatus = summary.ChannelStatus
+	if !summary.ChannelObservedAt.IsZero() {
+		resp.ChannelObservedAt = summary.ChannelObservedAt.UTC().Format(time.RFC3339)
+	}
 	resp.ExtraModelsStatus = make([]dto.ChannelMonitorExtraModelStatus, 0, len(summary.ExtraModels))
 	for _, e := range summary.ExtraModels {
 		resp.ExtraModelsStatus = append(resp.ExtraModelsStatus, dto.ChannelMonitorExtraModelStatus{
@@ -317,7 +325,20 @@ func (h *ChannelMonitorHandler) Get(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, channelMonitorToResponse(m))
+	resp := channelMonitorToResponse(m)
+	// D4：补齐渠道级档位与权威观测时间（List 已填，Get 此前漏填）。
+	// #11：推导失败（repo/账号侧事实读取错误）沿既有 response.ErrorFrom 返回明确错误，
+	// 不再以 Success 返回不含渠道状态的不完整响应。
+	derived, derr := h.monitorService.DeriveChannelStatus(c.Request.Context(), id)
+	if derr != nil {
+		response.ErrorFrom(c, derr)
+		return
+	}
+	resp.ChannelStatus = derived.Status
+	if !derived.ObservedAt.IsZero() {
+		resp.ChannelObservedAt = derived.ObservedAt.UTC().Format(time.RFC3339)
+	}
+	response.Success(c, resp)
 }
 
 // Create POST /api/v1/admin/channel-monitors

@@ -456,6 +456,42 @@ export async function getTempUnschedulableStatus(id: number): Promise<TempUnsche
 }
 
 /**
+ * 账号状态新鲜度观测（三维：账号+模型 / 账号级）。
+ * 展示状态由后端 `display_state` 唯一决定，前端不另立判定逻辑。
+ */
+export interface AccountFreshnessObservation {
+  scope: string
+  /** "account_model" | "account_level" */
+  dimension: string
+  observed_at?: string
+  attempted_at?: string
+  reset_at?: string
+  reason?: string
+  effective_threshold_seconds: number
+  stale: boolean
+  active_alert: boolean
+  /** "observed" | "stale" | "waiting_probe" */
+  display_state: string
+}
+
+export interface AccountFreshnessResponse {
+  account_id: number
+  observations: AccountFreshnessObservation[]
+}
+
+/**
+ * Get account status freshness observations
+ * @param id - Account ID
+ * @returns 三维观测时间戳 / 有效阈值 / 陈旧与告警状态
+ */
+export async function getFreshness(id: number): Promise<AccountFreshnessResponse> {
+  const { data } = await apiClient.get<AccountFreshnessResponse>(
+    `/admin/accounts/${id}/freshness`
+  )
+  return data
+}
+
+/**
  * Reset temporary unschedulable status
  * @param id - Account ID
  * @returns Success confirmation
@@ -1276,6 +1312,7 @@ export const accountsAPI = {
   recoverState,
   resetAccountQuota,
   getTempUnschedulableStatus,
+  getFreshness,
   resetTempUnschedulable,
   setSchedulable,
   getAvailableModels,

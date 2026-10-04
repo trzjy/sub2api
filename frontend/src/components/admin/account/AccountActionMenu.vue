@@ -23,6 +23,10 @@
               <Icon name="chart" size="sm" class="text-indigo-500" />
               {{ t('admin.accounts.viewStats') }}
             </button>
+            <button @click="$emit('freshness', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-dark-700">
+              <Icon name="badge" size="sm" class="text-cyan-500" />
+              {{ t('admin.accounts.freshness.menuItem') }}
+            </button>
             <button @click="$emit('schedule', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-dark-700">
               <Icon name="clock" size="sm" class="text-orange-500" />
               {{ t('admin.scheduledTests.schedule') }}
@@ -74,7 +78,7 @@ import { Icon } from '@/components/icons'
 import type { Account } from '@/types'
 
 const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null }>()
-const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'detect-vision'])
+const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'detect-vision', 'freshness'])
 const { t } = useI18n()
 const menuRef = ref<HTMLElement | null>(null)
 const { width: viewportWidth, height: viewportHeight } = useWindowSize()
@@ -113,16 +117,31 @@ const canDuplicate = computed(() => {
   if (!props.account || props.account.parent_account_id != null) return false
   return ['apikey', 'upstream', 'bedrock', 'service_account'].includes(props.account.type)
 })
+// tokenharbor 免费档条目 reason 前缀（与后端 tokenHarborFreeTierReasonPrefix 逐字一致）。
+const tokenHarborFreeTierReasonPrefix = 'tokenharbor_free_tier_exhausted'
+
 const isRateLimited = computed(() => {
   if (props.account?.rate_limit_reset_at && new Date(props.account.rate_limit_reset_at) > new Date()) {
     return true
   }
   const modelLimits = (props.account?.extra as Record<string, unknown> | undefined)?.model_rate_limits as
-    | Record<string, { rate_limit_reset_at: string }>
+    | Record<string, { rate_limit_reset_at: string; reason?: string; precise_reset?: boolean }>
     | undefined
   if (modelLimits) {
     const now = new Date()
-    return Object.values(modelLimits).some(info => new Date(info.rate_limit_reset_at) > now)
+    // 统一判定（与后端 ActiveTokenHarborFreeTierScopes 权威语义逐位对齐，D5 锁定）：
+    //   非 tokenharbor 条目（reason 无 tokenharbor_free_tier_exhausted 前缀）→ 到期照常
+    //     恢复（reset_at <= now 即不再算限流），行为不变。
+    //   tokenharbor 免费档条目 → 仅 precise_reset === true 且到期才算"已恢复"（非限流）；
+    //     precise_reset === false 或字段缺失一律持续算限流（持续受限占位，须主动复探清除）。
+    return Object.values(modelLimits).some(info => {
+      const isTokenHarborEntry =
+        typeof info.reason === 'string' && info.reason.startsWith(tokenHarborFreeTierReasonPrefix)
+      if (isTokenHarborEntry) {
+        return !(info.precise_reset === true && new Date(info.rate_limit_reset_at) <= now)
+      }
+      return new Date(info.rate_limit_reset_at) > now
+    })
   }
   return false
 })

@@ -542,6 +542,7 @@ export default {
         primaryModel: '主模型',
         availability7d: '7 天可用率',
         latency: '延迟 (ms)',
+        channelStatus: '渠道状态',
         enabled: '启用',
         actions: '操作'
       },

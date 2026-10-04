@@ -150,3 +150,113 @@ describe('AccountActionMenu viewport positioning', () => {
     expect(wrapper.emitted('close')).toHaveLength(2)
   })
 })
+
+// E44：isRateLimited 与后端 ActiveTokenHarborFreeTierScopes 权威语义逐位对齐（D5 锁定）。
+// tokenharbor 免费档无信号哨兵（precise_reset=false）即使已过期仍算限流；非 tokenharbor
+// 条目过期则恢复。通过 recover-state 按钮（hasRecoverableState 受 isRateLimited 驱动）断言。
+describe('AccountActionMenu isRateLimited tokenharbor semantics', () => {
+  beforeEach(() => {
+    setViewport(1024, 768)
+    vi.stubGlobal('ResizeObserver', class {
+      observe = vi.fn()
+      disconnect = vi.fn()
+      unobserve = vi.fn()
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('tokenharbor 哨兵（precise_reset=false）过期 → isRateLimited 仍 true（recover-state 出现）', async () => {
+    const thAccount = {
+      ...account,
+      id: 11,
+      platform: 'kimi',
+      type: 'apikey',
+      status: 'active',
+      rate_limit_reset_at: null,
+      extra: {
+        model_rate_limits: {
+          'deepseek-v4.1-flash:free': {
+            rate_limited_at: '2026-03-15T00:00:00Z',
+            rate_limit_reset_at: '2020-03-15T00:00:00Z', // 已过期
+            reason: 'tokenharbor_free_tier_exhausted:x',
+            precise_reset: false // 无信号哨兵
+          }
+        }
+      }
+    } as unknown as Account
+
+    const wrapper = mount(AccountActionMenu, {
+      props: { show: true, account: thAccount, anchorRect: new DOMRect(950, 720, 32, 24) },
+      global: { stubs: { Icon: true } }
+    })
+    await flushPromises()
+
+    const recover = Array.from(getMenu().querySelectorAll('button'))
+      .find(button => button.textContent?.includes('admin.accounts.recoverState'))
+    expect(recover).toBeTruthy()
+    expect(wrapper.emitted('recover-state')).toBeUndefined()
+  })
+
+  it('tokenharbor 条目 precise_reset=true 且已过期 → isRateLimited 为 false（recover-state 不出现）', async () => {
+    const thAccount = {
+      ...account,
+      id: 12,
+      platform: 'kimi',
+      type: 'apikey',
+      status: 'active',
+      rate_limit_reset_at: null,
+      extra: {
+        model_rate_limits: {
+          'deepseek-v4.1-flash:free': {
+            rate_limited_at: '2026-03-15T00:00:00Z',
+            rate_limit_reset_at: '2020-03-15T00:00:00Z', // 已过期
+            reason: 'tokenharbor_free_tier_exhausted:x',
+            precise_reset: true // 权威恢复标记
+          }
+        }
+      }
+    } as unknown as Account
+
+    const wrapper = mount(AccountActionMenu, {
+      props: { show: true, account: thAccount, anchorRect: new DOMRect(950, 720, 32, 24) },
+      global: { stubs: { Icon: true } }
+    })
+    await flushPromises()
+
+    const recover = Array.from(getMenu().querySelectorAll('button'))
+      .find(button => button.textContent?.includes('admin.accounts.recoverState'))
+    expect(recover).toBeFalsy()
+  })
+
+  it('非 tokenharbor 条目过期 → isRateLimited 为 false（recover-state 不出现，不回归）', async () => {
+    const nonThAccount = {
+      ...account,
+      id: 13,
+      platform: 'kimi',
+      type: 'apikey',
+      status: 'active',
+      rate_limit_reset_at: null,
+      extra: {
+        model_rate_limits: {
+          'claude-sonnet-4-5': {
+            rate_limited_at: '2026-03-15T00:00:00Z',
+            rate_limit_reset_at: '2020-03-15T00:00:00Z' // 已过期
+          }
+        }
+      }
+    } as unknown as Account
+
+    const wrapper = mount(AccountActionMenu, {
+      props: { show: true, account: nonThAccount, anchorRect: new DOMRect(950, 720, 32, 24) },
+      global: { stubs: { Icon: true } }
+    })
+    await flushPromises()
+
+    const recover = Array.from(getMenu().querySelectorAll('button'))
+      .find(button => button.textContent?.includes('admin.accounts.recoverState'))
+    expect(recover).toBeFalsy()
+  })
+})

@@ -140,6 +140,10 @@ type CheckResult struct {
 	PingLatencyMs *int
 	Message       string
 	CheckedAt     time.Time
+	// NoData 标记本次结果为「无数据」产物（如 replace 模式 2xx 但响应文本为空）。
+	// 渠道侧推导消费该标志在四值有损合并之前区分「无数据 no-op」与「真实 failed」，
+	// 不改变 Status 四值枚举（符合方案运行期无数据判别 B）。
+	NoData bool
 	// Quota 配额模式附带快照（quota 模式唯一数据；quota_probe 挂在主模型行）。
 	Quota *domain.MonitorQuotaSnapshot
 }
@@ -160,6 +164,12 @@ type UserMonitorView struct {
 	// LatestQuota 主模型最近一次配额快照；channel_monitor_show_quota=false
 	// 时由 handler 服务端剥离。
 	LatestQuota *domain.MonitorQuotaSnapshot
+	// ChannelStatus 渠道级档位（经 DeriveChannelStatus 推导，非 per-model 直读）。
+	// 与 PrimaryStatus 语义区分：PrimaryStatus 是主模型 per-model 状态，ChannelStatus 是
+	// 渠道最坏档位聚合（error > failed > degraded > operational）+ 账号侧持久事实。
+	ChannelStatus string
+	// ChannelObservedAt 渠道级权威观测时间（仅由可分类信号推进；无数据/no-op 不刷新）。
+	ChannelObservedAt time.Time
 }
 
 // UserMonitorTimelinePoint 用户视图 timeline 单点数据（去除 message 以减小响应体）。
@@ -184,6 +194,10 @@ type UserMonitorDetail struct {
 	Provider  string
 	GroupName string
 	Models    []ModelDetail
+	// ChannelStatus 渠道级档位（经 DeriveChannelStatus 推导）。
+	ChannelStatus string
+	// ChannelObservedAt 渠道级权威观测时间。
+	ChannelObservedAt time.Time
 }
 
 // ModelDetail 单个模型的可用率/延迟统计。
@@ -250,4 +264,8 @@ type MonitorStatusSummary struct {
 	Availability7d   float64 // 0-100，无历史时为 0
 	ExtraModels      []ExtraModelStatus
 	LatestQuota      *domain.MonitorQuotaSnapshot // 主模型最近配额快照（配额模式）
+	// ChannelStatus 渠道级档位（经 DeriveChannelStatus 推导，非 per-model 直读）。
+	ChannelStatus string
+	// ChannelObservedAt 渠道级权威观测时间（仅由可分类信号推进）。
+	ChannelObservedAt time.Time
 }

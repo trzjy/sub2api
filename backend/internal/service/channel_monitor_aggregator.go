@@ -38,12 +38,27 @@ func (s *ChannelMonitorService) BatchMonitorStatusSummary(
 	}
 
 	for _, id := range ids {
-		out[id] = buildStatusSummary(
-			indexLatestByModel(latestMap[id]),
+		latestRows := latestMap[id]
+		summary := buildStatusSummary(
+			indexLatestByModel(latestRows),
 			indexAvailabilityByModel(availMap[id]),
 			primaryByID[id],
 			extrasByID[id],
 		)
+		// 渠道级档位经 DeriveChannelStatus 推导（输入 per-model latest + 注入的账号侧持久事实）。
+		// per-model 明细行保留 raw l.Status；此处只替换渠道级档位与观测时间。
+		// 失败关闭（#8）：账号侧事实读取失败时跳过本轮渠道状态变更（保持零值=空状态），
+		// 不静默沿用旧值/默认 operational，仅记日志。
+		derived, derr := s.deriveChannelStatusFromLatest(ctx, id, latestRows)
+		if derr != nil {
+			slog.Warn("channel_monitor: derive channel status failed, skip this round",
+				"monitor_id", id, "error", derr)
+			out[id] = summary
+			continue
+		}
+		summary.ChannelStatus = derived.Status
+		summary.ChannelObservedAt = derived.ObservedAt
+		out[id] = summary
 	}
 	return out
 }
@@ -148,12 +163,22 @@ func (s *ChannelMonitorService) GetUserDetail(ctx context.Context, id int64) (*U
 	}
 
 	models := mergeModelDetails(m, latest, availMap)
+	// 渠道级档位经 DeriveChannelStatus 推导（per-model 明细行仍用 raw l.Status）。
+	// 失败关闭（#8）：账号侧事实读取失败时跳过本轮渠道状态变更（保持空状态），仅记日志。
+	derived, derr := s.deriveChannelStatusFromLatest(ctx, id, latest)
+	if derr != nil {
+		slog.Warn("channel_monitor: derive channel status failed, skip this round",
+			"monitor_id", id, "error", derr)
+		derived = ChannelStatusDerivation{}
+	}
 	return &UserMonitorDetail{
-		ID:        m.ID,
-		Name:      m.Name,
-		Provider:  m.Provider,
-		GroupName: m.GroupName,
-		Models:    models,
+		ID:                m.ID,
+		Name:              m.Name,
+		Provider:          m.Provider,
+		GroupName:         m.GroupName,
+		Models:            models,
+		ChannelStatus:     derived.Status,
+		ChannelObservedAt: derived.ObservedAt,
 	}, nil
 }
 
@@ -231,16 +256,18 @@ func buildUserViewFromSummary(
 	timelineEntries []*ChannelMonitorHistoryEntry,
 ) *UserMonitorView {
 	view := &UserMonitorView{
-		ID:               m.ID,
-		Name:             m.Name,
-		Provider:         m.Provider,
-		GroupName:        m.GroupName,
-		PrimaryModel:     m.PrimaryModel,
-		PrimaryStatus:    summary.PrimaryStatus,
-		PrimaryLatencyMs: summary.PrimaryLatencyMs,
-		Availability7d:   summary.Availability7d,
-		ExtraModels:      summary.ExtraModels,
-		Timeline:         buildTimelinePoints(timelineEntries),
+		ID:                m.ID,
+		Name:              m.Name,
+		Provider:          m.Provider,
+		GroupName:         m.GroupName,
+		PrimaryModel:      m.PrimaryModel,
+		PrimaryStatus:     summary.PrimaryStatus,
+		PrimaryLatencyMs:  summary.PrimaryLatencyMs,
+		Availability7d:    summary.Availability7d,
+		ExtraModels:       summary.ExtraModels,
+		Timeline:          buildTimelinePoints(timelineEntries),
+		ChannelStatus:     summary.ChannelStatus,
+		ChannelObservedAt: summary.ChannelObservedAt,
 	}
 	if primaryLatest != nil {
 		view.PrimaryPingLatencyMs = primaryLatest.PingLatencyMs

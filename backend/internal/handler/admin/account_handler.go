@@ -74,6 +74,10 @@ type AccountHandler struct {
 	webPlatformAutoLogin   webPlatformAutoLoginService
 	webLoginChallengeStore *service.WebLoginChallengeSessionStore
 	webLoginCaptchaHelper  service.LocalCaptchaHelper
+
+	// freshnessAlertService 是 D4 状态新鲜度陈旧告警服务（可选注入）；管理端透传账号两维
+	// 观测/阈值/告警状态时使用。未注入时告警状态字段缺省为 false。
+	freshnessAlertService *service.FreshnessAlertService
 }
 
 // codeBuddyAccountRefresher 是管理端账号「刷新」动作所需的 CodeBuddy 能力，
@@ -109,6 +113,11 @@ func (h *AccountHandler) SetWebPlatformAutoLoginService(s *service.WebPlatformAu
 // SetWebLoginCaptchaHelper 注入本地人工挑战 helper；未注入时保持 context_gap 失败关闭。
 func (h *AccountHandler) SetWebLoginCaptchaHelper(helper service.LocalCaptchaHelper) {
 	h.webLoginCaptchaHelper = helper
+}
+
+// SetFreshnessAlertService 注入 D4 状态新鲜度陈旧告警服务（可选；管理端账号观测透传用）。
+func (h *AccountHandler) SetFreshnessAlertService(svc *service.FreshnessAlertService) {
+	h.freshnessAlertService = svc
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
@@ -2898,7 +2907,113 @@ func (h *AccountHandler) ClearRateLimit(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
-// ResetQuota handles resetting account quota usage
+// accountFreshnessObservation 是单条账号限流观测的管理端透传视图（D4 工作项 3 / 验收 6）：
+// 三维（账号+模型 / 账号级）的观测时间戳、有效阈值、陈旧状态、告警状态。
+type accountFreshnessObservation struct {
+	Scope                     string  `json:"scope"`
+	Dimension                 string  `json:"dimension"` // "account_model" | "account_level"
+	ObservedAt                string  `json:"observed_at,omitempty"`
+	AttemptedAt               string  `json:"attempted_at,omitempty"`
+	ResetAt                   string  `json:"reset_at,omitempty"`
+	Reason                    string  `json:"reason,omitempty"`
+	EffectiveThresholdSeconds float64 `json:"effective_threshold_seconds"`
+	Stale                     bool    `json:"stale"`
+	ActiveAlert               bool    `json:"active_alert"`
+	// DisplayState 展示语义：observed（已观测）/ stale（陈旧）/ waiting_probe（无信号占位，
+	// 等待主动复探，不得显示为正常倒计时）。
+	DisplayState string `json:"display_state"`
+}
+
+// GetAccountFreshness GET /api/v1/admin/accounts/:id/freshness
+// 透传某账号的账号+模型 / 账号级限流观测：观测时间戳、有效阈值、陈旧状态、告警状态。
+// 维度枚举自账号 extra->model_rate_limits（含 tokenharbor_account_level_probe 账号级 scope）。
+func (h *AccountHandler) GetAccountFreshness(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	limits, _ := account.Extra[service.ModelRateLimitsKey].(map[string]any)
+	out := make([]accountFreshnessObservation, 0, len(limits))
+	for scope := range limits {
+		obs, err := h.buildFreshnessObservation(c.Request.Context(), accountID, scope)
+		if err != nil {
+			// 任一 scope 读取失败即整体失败关闭：不得把 DB/存储故障序列化为
+			// waiting_probe/stale=false 的正常空态，导致管理员无法区分
+			// 「无观测」与「不可读取」。
+			response.ErrorFrom(c, err)
+			return
+		}
+		out = append(out, obs)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Scope < out[j].Scope })
+	response.Success(c, gin.H{
+		"account_id":   accountID,
+		"observations": out,
+	})
+}
+
+// buildFreshnessObservation 构造单条账号观测透传视图（D4）。
+// 展示语义与陈旧判定收在 service.BuildAccountFreshnessView（同一计算结果），本方法只做
+// 告警状态查询与序列化，避免管理端另立一套判定。
+// 返回 error：观测条目读取失败（DB/存储故障）或同维度告警查询失败时整体失败关闭，
+// 调用方以明确错误响应结束请求，不得把读取故障当作「无观测 / 无告警」正常空态
+// ——管理员必须能区分「无数据」与「不可读取」（E11 观测读取 / E15 告警读取）。
+// （threshold 为三维唯一公式的纯计算、无错误路径，见 ratelimit_service.go。）
+func (h *AccountHandler) buildFreshnessObservation(ctx context.Context, accountID int64, scope string) (accountFreshnessObservation, error) {
+	// threshold 为三维唯一公式的纯计算（账号侧冻结上界已由探测调度器冻结并注入），
+	// 不涉及存储读取、无错误路径；观测条目读取失败时整体失败关闭。
+	threshold := h.rateLimitService.AccountFreshnessThreshold(accountID, scope)
+	entry, err := h.rateLimitService.GetModelRateLimitObservation(ctx, accountID, scope)
+	if err != nil {
+		return accountFreshnessObservation{}, err
+	}
+
+	// 告警状态：同维度查询活跃 firing 告警（与陈旧评估使用同一维度键）。
+	// 告警读取失败（Ops/DB 故障）沿本方法 error 返回路径传播——调用方整体失败关闭，
+	// 不得把「告警不可读取」序列化为 active_alert=false 的正常无告警态。
+	// 与「未注入告警服务」（freshnessAlertService == nil）的合法构造语义区分：
+	// nil 服务是「无告警服务」的部署形态，读取故障才是「有服务但读不到」，两者语义不同。
+	activeAlert := false
+	if h.freshnessAlertService != nil {
+		dims := service.FreshnessAccountModelDims(accountID, scope)
+		if scope == service.TokenHarborAccountLevelScope {
+			dims = service.FreshnessAccountLevelDims(accountID)
+		}
+		ev, e := h.freshnessAlertService.GetActiveFreshnessAlert(ctx, dims)
+		if e != nil {
+			return accountFreshnessObservation{}, fmt.Errorf("read active freshness alert: %w", e)
+		}
+		if ev != nil {
+			activeAlert = true
+		}
+	}
+
+	v, err := service.BuildAccountFreshnessView(entry, scope, threshold, time.Now(), activeAlert)
+	if err != nil {
+		// 权威数据损坏（observed_at 存在但格式非法）：不得降级序列化为 observed/健康，
+		// 沿本方法既有 error 路径失败关闭（E16，与告警评估 accountObservedAt 同口径）。
+		return accountFreshnessObservation{}, fmt.Errorf("build freshness view: %w", err)
+	}
+	return accountFreshnessObservation{
+		Scope:                     v.Scope,
+		Dimension:                 v.Dimension,
+		ObservedAt:                v.ObservedAt,
+		AttemptedAt:               v.AttemptedAt,
+		ResetAt:                   v.ResetAt,
+		Reason:                    v.Reason,
+		EffectiveThresholdSeconds: v.EffectiveThreshold.Seconds(),
+		Stale:                     v.Stale,
+		ActiveAlert:               v.ActiveAlert,
+		DisplayState:              v.DisplayState,
+	}, nil
+}
+
 // POST /api/v1/admin/accounts/:id/reset-quota
 func (h *AccountHandler) ResetQuota(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)

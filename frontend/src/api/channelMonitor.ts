@@ -38,6 +38,10 @@ export interface UserMonitorView {
    * 服务端才会下发（关闭时服务端已剥离，前端 flag 仅作纵深防御）。
    */
   latest_quota?: MonitorQuotaSnapshot | null
+  /** 渠道级档位（后端经推导产出）；空 = 无数据，展示层按空态呈现。 */
+  channel_status?: string
+  /** 渠道级权威观测时间；无数据时为空（展示层显示横线，不显示为失败）。 */
+  channel_observed_at?: string
 }
 
 export interface UserMonitorListResponse {

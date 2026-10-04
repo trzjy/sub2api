@@ -66,6 +66,10 @@ type channelMonitorUserListItem struct {
 	// LatestQuota 主模型最近配额快照；channel_monitor_show_quota=false 时
 	// 由 userMonitorViewToItem 的调用方传入 false 剥离（服务端脱敏，非仅前端隐藏）。
 	LatestQuota *domain.MonitorQuotaSnapshot `json:"latest_quota,omitempty"`
+	// ChannelStatus 渠道级档位（经推导产出，非 per-model 直读）。
+	ChannelStatus string `json:"channel_status"`
+	// ChannelObservedAt 渠道级权威观测时间；无数据时为""。
+	ChannelObservedAt string `json:"channel_observed_at,omitempty"`
 }
 
 // channelMonitorUserTimelinePoint 主模型最近一次检测的 timeline 点。
@@ -83,6 +87,10 @@ type channelMonitorUserDetailResponse struct {
 	Provider  string                        `json:"provider"`
 	GroupName string                        `json:"group_name"`
 	Models    []channelMonitorUserModelStat `json:"models"`
+	// ChannelStatus 渠道级档位（经推导产出）。
+	ChannelStatus string `json:"channel_status"`
+	// ChannelObservedAt 渠道级权威观测时间；无数据时为""。
+	ChannelObservedAt string `json:"channel_observed_at,omitempty"`
 }
 
 type channelMonitorUserModelStat struct {
@@ -125,6 +133,10 @@ func userMonitorViewToItem(v *service.UserMonitorView, includeQuota bool) channe
 		Availability7d:       v.Availability7d,
 		ExtraModels:          extras,
 		Timeline:             timeline,
+		ChannelStatus:        v.ChannelStatus,
+	}
+	if !v.ChannelObservedAt.IsZero() {
+		item.ChannelObservedAt = v.ChannelObservedAt.UTC().Format(time.RFC3339)
 	}
 	if includeQuota {
 		item.LatestQuota = v.LatestQuota
@@ -145,13 +157,18 @@ func userMonitorDetailToResponse(d *service.UserMonitorDetail) *channelMonitorUs
 			AvgLatency7dMs:  m.AvgLatency7dMs,
 		})
 	}
-	return &channelMonitorUserDetailResponse{
+	resp := &channelMonitorUserDetailResponse{
 		ID:        d.ID,
 		Name:      d.Name,
 		Provider:  d.Provider,
 		GroupName: d.GroupName,
 		Models:    models,
+		ChannelStatus: d.ChannelStatus,
 	}
+	if !d.ChannelObservedAt.IsZero() {
+		resp.ChannelObservedAt = d.ChannelObservedAt.UTC().Format(time.RFC3339)
+	}
+	return resp
 }
 
 // --- Handlers ---

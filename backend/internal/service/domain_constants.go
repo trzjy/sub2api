@@ -678,6 +678,12 @@ const (
 	// SettingKeyOpenAIAPIKeyHealthBreakerSettings stores the opt-in OpenAI pool API-key breaker config.
 	SettingKeyOpenAIAPIKeyHealthBreakerSettings = "openai_apikey_health_breaker_settings"
 
+	// SettingKeyOpenAIAPIKeyHealthBreakerProbeMigration is the bookkeeping key written by
+	// MigrateOpenAIAPIKeyHealthBreakerProbeEnabled. Its value records the pre-image of the
+	// health-breaker settings (or "" when the setting did not exist) plus the setting's
+	// updated_at at migration time, which the CAS rollback uses as its audit fact.
+	SettingKeyOpenAIAPIKeyHealthBreakerProbeMigration = "openai_apikey_health_breaker_settings_probe_migration"
+
 	// =========================
 	// Stream Timeout Handling
 	// =========================

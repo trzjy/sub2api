@@ -562,6 +562,27 @@ export default {
           unavailableDesc: '服务不可用 - 暂停 30 分钟'
         }
       },
+      // 状态新鲜度（三维观测时间戳 / 阈值 / 告警状态；waiting_probe = 等待主动复探）
+      freshness: {
+        title: '状态新鲜度',
+        menuItem: '查看状态新鲜度',
+        noObservations: '该账号暂无状态新鲜度观测记录。',
+        dimension: '维度',
+        dimensionAccountModel: '账号 + 模型',
+        dimensionAccountLevel: '账号级',
+        scope: '范围',
+        observedAt: '观测时间',
+        attemptedAt: '尝试时间',
+        threshold: '有效阈值',
+        thresholdMinutes: '{minutes} 分钟',
+        state: '状态',
+        observed: '已观测',
+        stale: '陈旧',
+        waitingProbe: '等待主动复探',
+        alert: '告警',
+        alertActive: '告警中',
+        loadFailed: '加载状态新鲜度失败'
+      },
       usageWindow: {
         statsTitle: '5小时窗口用量统计',
         statsTitleDaily: '每日用量统计',
@@ -612,7 +633,8 @@ export default {
       },
       tokenHarbor: {
         rateLimitedPrefix: '限流至',
-        rateLimitedUntil: '限流至 {time}'
+        rateLimitedUntil: '限流至 {time}',
+        awaitingProbe: '等待主动复探'
       },
       openaiQuotaReset: {
         count: '次数',

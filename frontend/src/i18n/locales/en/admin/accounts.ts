@@ -515,6 +515,28 @@ export default {
           unavailableDesc: 'Unavailable - pause 30 minutes'
         }
       },
+      // Status freshness (3-dimension observation timestamps / threshold / alert state;
+      // waiting_probe = awaiting active re-probe)
+      freshness: {
+        title: 'Status Freshness',
+        menuItem: 'View Status Freshness',
+        noObservations: 'No status freshness observations for this account.',
+        dimension: 'Dimension',
+        dimensionAccountModel: 'Account + Model',
+        dimensionAccountLevel: 'Account Level',
+        scope: 'Scope',
+        observedAt: 'Observed At',
+        attemptedAt: 'Attempted At',
+        threshold: 'Effective Threshold',
+        thresholdMinutes: '{minutes} min',
+        state: 'State',
+        observed: 'Observed',
+        stale: 'Stale',
+        waitingProbe: 'Awaiting Active Re-probe',
+        alert: 'Alert',
+        alertActive: 'Firing',
+        loadFailed: 'Failed to load status freshness'
+      },
       clearRateLimit: 'Clear Rate Limit',
       resetQuota: 'Reset Quota',
       quotaLimit: 'Quota Limit',
@@ -1774,7 +1796,8 @@ export default {
       },
       tokenHarbor: {
         rateLimitedPrefix: 'Until',
-        rateLimitedUntil: 'Rate limited until {time}'
+        rateLimitedUntil: 'Rate limited until {time}',
+        awaitingProbe: 'Awaiting active re-probe'
       },
       openaiQuotaReset: {
         count: 'Credits',

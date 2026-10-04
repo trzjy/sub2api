@@ -73,6 +73,12 @@ func (s *accountRepoStub) Delete(ctx context.Context, id int64) error {
 	return s.deleteErr
 }
 
+// ListTokenHarborModelRateLimitedAccounts 是 D2 候选源接口的桩（补齐 AccountRepository
+// 新增方法；本测试不关心 TokenHarbor 主动复探，不应被调用）。
+func (s *accountRepoStub) ListTokenHarborModelRateLimitedAccounts(context.Context, time.Time, int) ([]*Account, error) {
+	panic("unexpected ListTokenHarborModelRateLimitedAccounts call")
+}
+
 // 以下是接口要求实现但本测试不关心的方法
 
 func (s *accountRepoStub) List(ctx context.Context, params pagination.PaginationParams) ([]Account, *pagination.PaginationResult, error) {

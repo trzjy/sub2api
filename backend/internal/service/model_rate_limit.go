@@ -192,6 +192,66 @@ func antigravityModelRateLimitKeys(model string) []string {
 	return keys
 }
 
+// ActiveTokenHarborFreeTierScopes 是 TokenHarbor 免费档模型级限流候选判定的**权威导出
+// 入口**：reason 前缀 tokenharbor_free_tier_exhausted（复用同包权威常量
+// tokenHarborFreeTierReasonPrefix，不复制任何字面量/时间语义），供 repository 的候选
+// 粗筛（account_repo.ListTokenHarborModelRateLimitedAccounts）在 Go 侧过滤时复用，
+// 避免把 tokenharbor 判定语义复制进 repository 包。
+//
+// 与探测链内部判定 AccountHealthRecoveryProbeService.activeTokenHarborFreeTierScopes
+// 同源同义（同一批常量、同一到期语叉），并由 service 层定向测试
+// TestE12ActiveTokenHarborFreeTierScopes_MatchesProbePredicate 锁定"逐位等价"，防止漂移；
+// 后续若允许改动探测服务文件，应让探测链方法委托本函数以收敛为单一实现。
+//
+// E42 无信号哨兵不吃到期剔除（precise_reset 标记为唯一判别依据，D5 锁定）：
+//   - precise_reset=false（无精准恢复信号哨兵）：reset_at 仅为"持续受限"占位值（如固定
+//     now+365d），恢复时刻未知，须由主动复探成功触发清除；按 reset_at 到期剔除会令账号
+//     持续未恢复超过占位期限后被候选筛选永久排除、前端不再展示，主动复探无法再触发。故
+//     跳过到期剔除，持续受限直至复探写入口清除。
+//   - precise_reset=true（上游权威可恢复标记）：reset_at 是真实恢复时刻，到期照常剔除
+//     （标准行为，与前端展示语义一致）。
+//
+// 未到期的条目（含 D5 哨兵条目 precise_reset=false + 远期 reset_at）本就纳入，不受影响。
+// 注：E7 #6 曾对 precise=true 也跳过到期剔除；E42 校正为仅无信号哨兵（precise=false）
+// 不吃到期剔除，precise=true 恢复为标准到期剔除，以与前端展示平行路径保持一致。
+func ActiveTokenHarborFreeTierScopes(extra map[string]any, now time.Time) []string {
+	if extra == nil {
+		return nil
+	}
+	limits, ok := extra[modelRateLimitsKey].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(limits))
+	for scope, raw := range limits {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		reason, _ := entry["reason"].(string)
+		if !strings.HasPrefix(reason, tokenHarborFreeTierReasonPrefix) {
+			continue
+		}
+		resetAtRaw, _ := entry["rate_limit_reset_at"].(string)
+		if resetAtRaw == "" {
+			continue
+		}
+		resetAt, perr := time.Parse(time.RFC3339, resetAtRaw)
+		if perr != nil {
+			continue
+		}
+		// 无信号哨兵（precise_reset=false）不吃到期剔除（E42，D5 锁定）：reset_at 仅为
+		// "持续受限"占位值，恢复时刻未知，须经主动复探确认；仅 precise_reset=true 的权威
+		// 恢复标记按 reset_at 到期照常剔除，precise_reset=false（含缺省）一律持续受限。
+		precise, _ := entry["precise_reset"].(bool)
+		if precise && !resetAt.After(now) {
+			continue
+		}
+		out = append(out, scope)
+	}
+	return out
+}
+
 func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 	if a == nil || a.Extra == nil || scope == "" {
 		return nil

@@ -750,6 +750,9 @@ type adminServiceImpl struct {
 	compositeResolver        *CompositeRouteResolver
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
+	// channelFreshness 是 E39 渠道维陈旧收敛窄面（可选注入）。账号恢复成功后触发关联
+	// 渠道陈旧收敛；未注入时不收敛。
+	channelFreshness ChannelFreshnessRefresher
 	// visionRouting 用于 admin 分组读取链水合 groups.vision_routing 配置
 	// （admin_group.go 的 GetGroup/ListGroups/GetAllGroups/GetAllGroupsByPlatform/
 	// GetAllGroupsIncludingInactive），读错失败关闭。
@@ -796,6 +799,7 @@ func NewAdminService(
 	compositeResolver *CompositeRouteResolver,
 	channelCacheInvalidator ChannelCacheInvalidator,
 	visionRouting *VisionRoutingService,
+	channelFreshness ChannelFreshnessRefresher,
 ) AdminService {
 	return &adminServiceImpl{
 		cfg:                  cfg,
@@ -835,5 +839,6 @@ func NewAdminService(
 
 		channelCacheInvalidator: channelCacheInvalidator,
 		visionRouting:           visionRouting,
+		channelFreshness:        channelFreshness,
 	}
 }

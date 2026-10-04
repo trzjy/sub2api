@@ -152,6 +152,12 @@ func (r *fakeAccountRepo) ResetQuotaUsedAndClearRateLimitCooldown(ctx context.Co
 	return nil
 }
 func (r *fakeAccountRepo) RevertProxyFallback(ctx context.Context, accountID int64) error { return nil }
+// ListTokenHarborModelRateLimitedAccounts 是 D2 在 AccountRepository 接口新增的候选源方法
+// 的 no-op 桩（补齐接口，本测试不涉该候选源）。
+func (r *fakeAccountRepo) ListTokenHarborModelRateLimitedAccounts(context.Context, time.Time, int) ([]*service.Account, error) {
+	return nil, nil
+}
+
 func (r *fakeAccountRepo) ListShadowsByParent(ctx context.Context, parentID int64) ([]*service.Account, error) {
 	return nil, nil
 }

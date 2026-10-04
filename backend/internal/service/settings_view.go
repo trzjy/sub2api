@@ -652,7 +652,7 @@ func DefaultOpenAIAPIKeyHealthBreakerSettings() *OpenAIAPIKeyHealthBreakerSettin
 		WatchRatio:       0.4,
 		WarningRatio:     0.7,
 		Probe: &OpenAIAPIKeyHealthBreakerProbeSettings{
-			Enabled:         false,
+			Enabled:         true,
 			IntervalSeconds: 60,
 			MaxAttempts:     10,
 		},
