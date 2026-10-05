@@ -69,39 +69,6 @@ func setupIntegrationHarness() error {
 		return fmt.Errorf("open db: %w", err)
 	}
 
-	// 引导缺失基表 xianyu_xianguanjia_config（仅存在于 integration 测试域）：
-	// 1) 仓库迁移链缺 252（backend/migrations/252_xianyu_xianguanjia.sql 曾被历史
-	//    revert d216b55ba 删除，生产表仍在）。本引导使 scratch 库可走完 268+ 迁移
-	//    链（268 会对该表追加 supply_app_id / supply_app_secret_encrypted 两列，
-	//    故此处不预置这两列）。252 是否恢复入链属用户裁定事项，不在本卡范围。
-	// 2) 引导 DDL 须与生产表保持一致（生产已验证）。若后续恢复 252 迁移文件入链，
-	//    本引导应删除；当前 CREATE TABLE IF NOT EXISTS 幂等，恢复前共存亦无害。
-	// 3) 268 迁移会在其后追加 supply_app_id / supply_app_secret_encrypted 两列，
-	//    故此处不预置这两列，避免与 268 迁移冲突。
-	if _, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS xianyu_xianguanjia_config (
-    id                   BIGSERIAL PRIMARY KEY,
-    base_url             VARCHAR(255)  NOT NULL DEFAULT 'https://open.goofish.pro',
-    app_id               VARCHAR(120)  NOT NULL DEFAULT '',
-    app_secret_encrypted TEXT          NOT NULL DEFAULT '',
-    mch_id               VARCHAR(120)  NOT NULL DEFAULT '',
-    mch_secret_encrypted TEXT          NOT NULL DEFAULT '',
-    push_url             VARCHAR(512)  NOT NULL DEFAULT '',
-    status               VARCHAR(16)   NOT NULL DEFAULT 'disabled',
-    health_status        VARCHAR(16)   NOT NULL DEFAULT 'unknown',
-    last_checked_at      TIMESTAMPTZ,
-    created_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW()
-)`); err != nil {
-		return fmt.Errorf("bootstrap xianyu_xianguanjia_config: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-CREATE UNIQUE INDEX IF NOT EXISTS uq_xianyu_xianguanjia_config_active
-    ON xianyu_xianguanjia_config (status)
-    WHERE status = 'active'`); err != nil {
-		return fmt.Errorf("bootstrap xianyu_xianguanjia_config index: %w", err)
-	}
-
 	if err := repository.ApplyMigrations(ctx, db); err != nil {
 		return fmt.Errorf("migrations: %w", err)
 	}
