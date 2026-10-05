@@ -145,6 +145,7 @@ var xgjSupplyOfficialRoutes = []struct {
 	{"/goofish/order/purchase/create", "XianguanjiaSupplyOrderHandler).CreateOrder"},
 	{"/goofish/order/detail", "XianguanjiaSupplyOrderHandler).GetOrder"},
 	{"/goofish/order/refund/apply", "XianguanjiaSupplyOrderHandler).RefundNotify"},
+	{"/goofish/order/refund/notify", "XianguanjiaSupplyOrderHandler).RefundResultNotify"},
 }
 
 // TestXgjSupplyRoute_OfficialRouteTable 断言路由表与官方契约逐条一致：
@@ -166,7 +167,7 @@ func TestXgjSupplyRoute_OfficialRouteTable(t *testing.T) {
 		registered[route.Path][route.Method] = route.Handler
 	}
 
-	// 7 条官方路径 × 2 个斜杠变体，全部仅 POST。
+	// 8 条官方路径 × 2 个斜杠变体，全部仅 POST。
 	for _, rc := range xgjSupplyOfficialRoutes {
 		for _, suffix := range []string{"", "/"} {
 			path := "/api/v1/xgj-supply" + rc.path + suffix
@@ -179,8 +180,8 @@ func TestXgjSupplyRoute_OfficialRouteTable(t *testing.T) {
 		}
 	}
 
-	// 除官方 14 条外，组内不得有其他注册（旧路径归零）。
-	require.Len(t, registered, len(xgjSupplyOfficialRoutes)*2, "路由总数应恰为 14（7 路径 × 2 变体）")
+	// 除官方 16 条外，组内不得有其他注册（旧路径归零）。
+	require.Len(t, registered, len(xgjSupplyOfficialRoutes)*2, "路由总数应恰为 16（8 路径 × 2 变体）")
 
 	// 旧 kebab-case 路径逐一确认 404。路径字面量拆成两段拼接，避免 routes 目录
 	// grep 旧路径时命中本测试（登记表零残留由 OfficialRouteTable 同时保证）。

@@ -13,10 +13,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// D6d：闲管家「虚拟货源」卡密订单接口的 gin handler（三个）。
+// D6d：闲管家「虚拟货源」卡密订单接口的 gin handler（含退款 apply 与退款 notify 双接口）。
 //
-// 路由注册归 D6e；本文件只提供 handler 方法。响应统一官方信封 {code,msg,data}，
-// HTTP 状态固定 200（官方以信封 code 判定成败）。
+// 路由注册归 D6e；本文件只提供 handler 方法。
+//
+// 双接口信封不同、不可混用：
+//   - RefundNotify（apply 接口，/goofish/order/refund/apply）：官方信封 {code,msg,data}，
+//     恒 agree，HTTP 固定 200；
+//   - RefundResultNotify（notify 接口，/goofish/order/refund/notify）：独立两字段信封
+//     {"result":"success"/"fail","msg":...}（官方 Apifox api-413329202），HTTP 固定 200。
+// 二者走同一服务层 svc.RefundNotify（幂等退款处置），但对外契约严格区分，禁止交叉回传信封。
 //
 // 官方错误码：1100 商品不存在 / 1101 商品不可用 / 1200 订单不存在 /
 // 1201 下单参数错误 / 1202 下单金额低于成本价 / 1203 订单号已存在 / 1209 下单超时。
@@ -114,6 +120,30 @@ type supplyOrderRefundBody struct {
 	RefundScene       string `json:"refund_scene"`
 	ApplyTime         int64  `json:"apply_time"`
 	RefundCallbackURL string `json:"refund_callback_url"`
+}
+
+// supplyOrderRefundNotifyBody 退款结果通知请求体（官方 /goofish/order/refund/notify
+// 字段名，严格逐字对齐官方，宽松解析，多余键忽略）。与 supplyOrderRefundBody 类似仅
+// 解析、不参与处置判定；本通知字段 refund_amount/refund_scene/refund_time/out_order_no/
+// biz_order_no 仅入 slog 留痕，不参与服务层处置（见 RefundResultNotify）。
+type supplyOrderRefundNotifyBody struct {
+	OrderNo      string `json:"order_no"`
+	OrderType    int    `json:"order_type"`
+	OutOrderNo   string `json:"out_order_no"`
+	BizOrderNo   string `json:"biz_order_no"`
+	RefundType   int    `json:"refund_type"`
+	RefundAmount int64  `json:"refund_amount"`
+	RefundReason string `json:"refund_reason"`
+	RefundScene  string `json:"refund_scene"`
+	RefundTime   int64  `json:"refund_time"`
+}
+
+// supplyOrderRefundNotifyEnvelope 退款通知响应信封：严格两字段
+// {"result":"success"/"fail","msg":...}（官方 Apifox api-413329202）。
+// 与 apply 接口的 {code,msg,data} 信封不同，不可混用（禁 map 多带键）。
+type supplyOrderRefundNotifyEnvelope struct {
+	Result string `json:"result"`
+	Msg    string `json:"msg"`
 }
 
 // readSupplyOrderBody 读取并解析 JSON body（限长）。
@@ -237,4 +267,53 @@ func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 			"refund_time":   order.EndTime,
 		},
 	})
+}
+
+// RefundResultNotify 处理「订单退款通知」（POST，官方 /goofish/order/refund/notify 语义）。
+//
+// 与 RefundNotify（apply 接口）是双接口，信封不同、不可混用：本接口用独立两字段信封
+// {"result":"success"/"fail","msg":...}（官方 Apifox api-413329202），HTTP 恒 200。
+// 服务层零改动，复用既有 svc.RefundNotify 幂等退款处置（已退款则幂等回放同一订单视图）。
+//
+// 处置判定只看 order_no：其余请求侧字段（refund_amount/refund_scene/refund_time/
+// out_order_no/biz_order_no）仅成功路径入 slog Info 留痕，不参与处置。响应恒精确两字段，
+// 内部错误不回显细节（slog.Error 留痕）。
+func (h *XianguanjiaSupplyOrderHandler) RefundResultNotify(c *gin.Context) {
+	if h == nil || h.svc == nil {
+		c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "fail", Msg: "系统异常"})
+		return
+	}
+	var body supplyOrderRefundNotifyBody
+	if err := readSupplyOrderBody(c, &body); err != nil {
+		slog.Error("xianguanjia supply order refund/notify body parse failed",
+			"path", c.FullPath(), "err", err)
+		c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "fail", Msg: "系统异常"})
+		return
+	}
+	orderNo := strings.TrimSpace(body.OrderNo)
+	if orderNo == "" {
+		c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "fail", Msg: "order_no is required"})
+		return
+	}
+	order, err := h.svc.RefundNotify(c.Request.Context(), orderNo)
+	_ = order // 成功通知不回显订单视图，仅以 order_no 入 slog（见下方 Info）
+	if err != nil {
+		if errors.Is(err, xianguanjia.ErrSupplyOrderNotFound) {
+			c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "fail", Msg: "order not found"})
+			return
+		}
+		slog.Error("xianguanjia supply order refund/notify internal error",
+			"path", c.FullPath(), "order_no", orderNo, "err", err)
+		c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "fail", Msg: "系统异常"})
+		return
+	}
+	// 成功（含已退款幂等回放）：slog Info 留痕（请求侧字段不进响应体、不参与处置判定）。
+	slog.Info("xianguanjia supply order refund/notify received",
+		"order_no", orderNo,
+		"out_order_no", body.OutOrderNo,
+		"biz_order_no", body.BizOrderNo,
+		"refund_amount", body.RefundAmount,
+		"refund_scene", body.RefundScene,
+		"refund_time", body.RefundTime)
+	c.JSON(http.StatusOK, supplyOrderRefundNotifyEnvelope{Result: "success", Msg: "接收成功"})
 }

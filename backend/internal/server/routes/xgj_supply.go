@@ -39,4 +39,5 @@ func RegisterXgjSupplyRoutes(v1 *gin.RouterGroup, h *handler.Handlers) {
 	register("/goofish/order/purchase/create", h.XgjSupplyOrder.CreateOrder)
 	register("/goofish/order/detail", h.XgjSupplyOrder.GetOrder)
 	register("/goofish/order/refund/apply", h.XgjSupplyOrder.RefundNotify)
+	register("/goofish/order/refund/notify", h.XgjSupplyOrder.RefundResultNotify)
 }

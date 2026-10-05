@@ -301,3 +301,120 @@ func TestSupplyOrderHandlerMissingBuyQuantity(t *testing.T) {
 	env3 := doSupplyOrderRequest(t, r, "/create", map[string]any{"order_no": "MO-H5", "buy_quantity": 1})
 	require.Equal(t, xianguanjia.SupplyCodeOrderParamError, env3.Code, "缺 goods_no 须返回 1201")
 }
+
+// --- 退款通知（/goofish/order/refund/notify）接口测试：独立两字段信封，与 apply 不混用 ---
+
+// supplyOrderRefundNotifyTestEnvelope 是 notify 接口的响应信封（严格两字段）。
+type supplyOrderRefundNotifyTestEnvelope struct {
+	Result string `json:"result"`
+	Msg    string `json:"msg"`
+}
+
+// newRefundNotifyHandlerWithFake 用给定服务构造仅含 /refund/notify 路由的 gin 引擎。
+func newRefundNotifyHandlerWithFake(svc XianguanjiaSupplyOrderService) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	h := NewXianguanjiaSupplyOrderHandler(svc)
+	r := gin.New()
+	r.POST("/refund/notify", h.RefundResultNotify)
+	return r
+}
+
+// doRefundNotifyRequest 发 notify 请求并断言：HTTP 恒 200、响应精确两字段
+// {"result","msg"}（无多余键）。
+func doRefundNotifyRequest(t *testing.T, r *gin.Engine, body any) supplyOrderRefundNotifyTestEnvelope {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		buf.Write(raw)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/refund/notify", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "退款通知固定 HTTP 200, body=%s", w.Body.String())
+	assertTopLevelKeys(t, json.RawMessage(w.Body.Bytes()), "result", "msg")
+	var env supplyOrderRefundNotifyTestEnvelope
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+	return env
+}
+
+// TestSupplyOrderHandlerRefundNotifySuccess 验证成功 → 200 + 严格
+// {"result":"success","msg":"接收成功"}（恰好 2 键）。
+func TestSupplyOrderHandlerRefundNotifySuccess(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundOrder: &xianguanjia.SupplyOrder{OrderAmount: 990}}
+	r := newRefundNotifyHandlerWithFake(svc)
+
+	env := doRefundNotifyRequest(t, r, map[string]any{
+		"order_no": "MO-N1", "order_type": 1, "out_order_no": "OO1",
+		"biz_order_no": "BO1", "refund_type": 2, "refund_amount": 990,
+		"refund_reason": "r", "refund_scene": "s", "refund_time": 1700000000,
+	})
+	require.Equal(t, "success", env.Result)
+	require.Equal(t, "接收成功", env.Msg)
+}
+
+// TestSupplyOrderHandlerRefundNotifyIdempotentReplay 验证已退款幂等回放 → 同 success 信封。
+func TestSupplyOrderHandlerRefundNotifyIdempotentReplay(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundOrder: &xianguanjia.SupplyOrder{OrderAmount: 990 * 3, EndTime: 1700000999}}
+	r := newRefundNotifyHandlerWithFake(svc)
+
+	env := doRefundNotifyRequest(t, r, map[string]any{"order_no": "MO-N2"})
+	require.Equal(t, "success", env.Result)
+	require.Equal(t, "接收成功", env.Msg)
+}
+
+// TestSupplyOrderHandlerRefundNotifyMissingOrderNo 验证缺 order_no → fail + 指定 msg。
+func TestSupplyOrderHandlerRefundNotifyMissingOrderNo(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundOrder: &xianguanjia.SupplyOrder{}}
+	r := newRefundNotifyHandlerWithFake(svc)
+
+	env := doRefundNotifyRequest(t, r, map[string]any{"out_order_no": "OO3"})
+	require.Equal(t, "fail", env.Result)
+	require.Equal(t, "order_no is required", env.Msg)
+}
+
+// TestSupplyOrderHandlerRefundNotifyOrderNotFound 验证 svc 返回 ErrSupplyOrderNotFound
+// → fail + "order not found"。
+func TestSupplyOrderHandlerRefundNotifyOrderNotFound(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundErr: xianguanjia.ErrSupplyOrderNotFound}
+	r := newRefundNotifyHandlerWithFake(svc)
+
+	env := doRefundNotifyRequest(t, r, map[string]any{"order_no": "MO-N4"})
+	require.Equal(t, "fail", env.Result)
+	require.Equal(t, "order not found", env.Msg)
+}
+
+// TestSupplyOrderHandlerRefundNotifyOtherError 验证 svc 返回其他错误 → fail + "系统异常"，
+// 且响应体不得含内部错误细节串（精确两字段）。
+func TestSupplyOrderHandlerRefundNotifyOtherError(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundErr: errors.New("refund atomically failed")}
+	r := newRefundNotifyHandlerWithFake(svc)
+
+	var buf bytes.Buffer
+	raw, err := json.Marshal(map[string]any{"order_no": "MO-N5"})
+	require.NoError(t, err)
+	buf.Write(raw)
+	req := httptest.NewRequest(http.MethodPost, "/refund/notify", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "退款通知固定 HTTP 200")
+	require.Contains(t, w.Body.String(), `"result":"fail"`)
+	require.Contains(t, w.Body.String(), `"msg":"系统异常"`)
+	assertTopLevelKeys(t, json.RawMessage(w.Body.Bytes()), "result", "msg")
+	require.NotContains(t, w.Body.String(), "atomically failed", "错误细节不得回显")
+}
+
+// TestSupplyOrderHandlerRefundNotifyNilService 验证 svc 未接线 → fail + "系统异常"。
+func TestSupplyOrderHandlerRefundNotifyNilService(t *testing.T) {
+	h := &XianguanjiaSupplyOrderHandler{} // svc 为 nil
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/refund/notify", h.RefundResultNotify)
+
+	env := doRefundNotifyRequest(t, r, map[string]any{"order_no": "MO-N6"})
+	require.Equal(t, "fail", env.Result)
+	require.Equal(t, "系统异常", env.Msg)
+}
