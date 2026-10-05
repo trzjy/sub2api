@@ -34,8 +34,8 @@ type XianguanjiaSupplyOrderService interface {
 	CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, buyQuantity int, maxAmount int64) (*xianguanjia.SupplyOrder, error)
 	// GetOrder 查单：order_no 优先；为空时按 out_order_no（我方订单 id）查。
 	GetOrder(ctx context.Context, orderNo, outOrderNo string) (*xianguanjia.SupplyOrder, error)
-	// RefundNotify 退款通知：返回 (订单视图, 是否可撤单 agree)。
-	RefundNotify(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, bool, error)
+	// RefundNotify 退款通知：返回 (订单视图, 错误)。bool 已随 refuse 分支删除并收敛（D6G）。
+	RefundNotify(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, error)
 }
 
 // XianguanjiaSupplyOrderHandler 卡密订单处理器。
@@ -193,10 +193,13 @@ func (h *XianguanjiaSupplyOrderHandler) GetOrder(c *gin.Context) {
 
 // RefundNotify 处理「订单退款申请」（POST，官方 /goofish/order/refund/apply 语义）。
 //
-// 同步撤单：订单已是退款态（幂等重复）或本次全量作废成功 → 同意，
-// 返回 200 信封 {result:"agree", refund_data:{apply_time, refund_status:20,
-// refund_amount, refund_time}}；零或部分作废（卡已使用/已过期、无法整单撤回）→ 拒绝，
-// 返回 {result:"refuse", remark:"卡密已使用或已过期，无法撤单"}。
+// 恒 agree：service 已统一「允许兑换后退款 + 一律 agree」语义（refuse 分支已删除，D6G），
+// handler 仅组装信封：{result:"agree", refund_data:{apply_time, refund_status:20,
+// refund_amount, refund_time}}。错误路径走既有 1209 归一（supplyOrderRespondErr）。
+//
+// refund_time 唯一权威来源 = 订单行的 refunded_at 列：退款态下 order.EndTime 承载的
+// 即该列值（首次退款由事务写入并随返回行带出、幂等回放读同一列），视图层 EndTime 仅是
+// 同一值的承载，handler 不独立决定时间来源（方案 R3 #1）。
 func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 	if h == nil || h.svc == nil {
 		supplyOrderRespondErr(c, errors.New("supply order service unavailable"), xianguanjia.SupplyCodeOrderTimeout)
@@ -218,29 +221,20 @@ func (h *XianguanjiaSupplyOrderHandler) RefundNotify(c *gin.Context) {
 		})
 		return
 	}
-	order, agree, err := h.svc.RefundNotify(c.Request.Context(), orderNo)
+	order, err := h.svc.RefundNotify(c.Request.Context(), orderNo)
 	if err != nil {
 		supplyOrderRespondErr(c, err, xianguanjia.SupplyCodeOrderTimeout)
 		return
 	}
-	if agree {
-		// 可撤单：同意 + 退款数据（refund_status=20 成功；refund_amount=订单快照金额）。
-		// refund_time 取订单终态时刻 order.EndTime（退款态=refunded_at，幂等重复时
-		// 仍是原退款时刻，而非本次请求时刻），由 service 决策后 handler 组装信封。
-		supplyOrderRespondOK(c, gin.H{
-			"result": "agree",
-			"refund_data": gin.H{
-				"apply_time":    body.ApplyTime,
-				"refund_status": 20,
-				"refund_amount": order.OrderAmount,
-				"refund_time":   order.EndTime,
-			},
-		})
-		return
-	}
-	// 不可撤（卡已使用/已过期）：拒绝 + 原因。data 仅含 result/remark。
+	// 恒 agree 信封（refuse 分支已删除）：refund_amount=订单快照金额，
+	// refund_time=order.EndTime（即订单行 refunded_at 列，视图层唯一承载，R3 #1）。
 	supplyOrderRespondOK(c, gin.H{
-		"result": "refuse",
-		"remark": "卡密已使用或已过期，无法撤单",
+		"result": "agree",
+		"refund_data": gin.H{
+			"apply_time":    body.ApplyTime,
+			"refund_status": 20,
+			"refund_amount": order.OrderAmount,
+			"refund_time":   order.EndTime,
+		},
 	})
 }

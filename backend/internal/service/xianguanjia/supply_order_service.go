@@ -155,22 +155,13 @@ type SupplyCardGenerator interface {
 	GenerateCardsTx(ctx context.Context, tx *sql.Tx, groupID int64, quantity int, note string) ([]string, error)
 }
 
-// SupplyCardPool 卡密作废仓储（D6F-A：取卡链归零，仅保留退款作废）。
+// SupplyCardPool 卡密池接口（D6G 旧链归零：退款作废/回滚方法已随旧 refund 链删除）。
 //
-// 接口化以便单测与 handler 解耦；DB 实现复用既有 redeem_codes 状态机语义。
-type SupplyCardPool interface {
-	// VoidCardsForOrder 作废某订单已发的卡：把命中卡 delivered/unused → expired，
-	// 返回「本次实际由非 expired 转为 expired」的张数（幂等：已 expired 不计数）。
-	VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error)
-
-	// VoidCardsForOrderTx 事务内作废（D6E-02R #3 退款原子化）：与 MarkRefundedTx
-	// 同属一个 *sql.Tx，整体提交/回滚。内存实现直接改状态，回滚由 UndoVoidTx 补偿。
-	VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error)
-	// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废（内存实现把 expired 复位为
-	// delivered），用于「作废成功但置态失败」时整体回滚，使卡保持 delivered。
-	// DB 实现随事务回滚自动丢弃，返回 nil（no-op）。
-	UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error
-}
+// 历史说明：D6F-A 取卡链归零后本接口仅保留退款作废方法；D6G 把退款处置迁入
+// SupplyRefundStore（ent 事务内逐码作废/追回），旧退款作废/回滚方法的生产唯一消费方即
+// 旧 refund 链本身，已整体删除。
+// 当前接口保留以承接后续可能的卡密池能力；构造参数 pool 仍按既有接线保留。
+type SupplyCardPool interface{}
 
 // ---- 订单仓储 ----
 
@@ -240,16 +231,23 @@ type SupplyOrderService struct {
 	pool       SupplyCardPool
 	goods      SupplyGoodsSource
 	pwdResolve CardPwdResolver
+	// refunds 是 ent 事务退款仓库（D6G：逐码作废/追回，单事务原子）。fail-closed：
+	// nil → RefundNotify 报错，退款不会被处理、订单与码零变化。
+	refunds SupplyRefundStore
+	// clawback 是追回后缓存失效依赖（R4 #1，与闲鱼链同款 best-effort）。fail-closed：
+	// nil → RefundNotify 报错，因 agree 语义依赖「追回 + 失效」链完整。
+	clawback service.XianyuRedeemClawback
 }
 
 // NewSupplyOrderService 构造订单服务。store/gen/pool/goods 必填（fail-closed）；
-// pwdResolve 可为 nil（则 card_pwd 一律默认官方合规映射）。
+// pwdResolve 可为 nil（则 card_pwd 一律默认官方合规映射）；refunds/clawback 由 D6G
+// 退款追回链路注入（fail-closed，nil → RefundNotify 报错）。
 //
 // goods 仅在 CreateOrder 未命中幂等回读时用于取商品单价（分）与可用性校验；
 // 查单/退款一律读订单行金额快照（goods_name/unit_price/order_amount），不再回源
 // 商品（D6E-02R #2），杜绝历史订单金额漂移与退款 refund_amount=0 仍成功。
-func NewSupplyOrderService(store SupplyOrderStore, gen SupplyCardGenerator, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver) *SupplyOrderService {
-	return &SupplyOrderService{store: store, gen: gen, pool: pool, goods: goods, pwdResolve: pwdResolve}
+func NewSupplyOrderService(store SupplyOrderStore, gen SupplyCardGenerator, pool SupplyCardPool, goods SupplyGoodsSource, pwdResolve CardPwdResolver, refunds SupplyRefundStore, clawback service.XianyuRedeemClawback) *SupplyOrderService {
+	return &SupplyOrderService{store: store, gen: gen, pool: pool, goods: goods, pwdResolve: pwdResolve, refunds: refunds, clawback: clawback}
 }
 
 // CreateOrder 创建卡密订单：幂等现场生成兑换码并同步返回 card_items。
@@ -414,100 +412,68 @@ func (s *SupplyOrderService) GetOrder(ctx context.Context, orderNo, outOrderNo s
 	return s.viewExisting(ctx, row)
 }
 
-// RefundNotify 处理退款通知：单事务原子化「作废卡 + 置退款态」（D6E-02R #3）。
+// RefundNotify 处理退款通知（D6G：允许兑换后退款，作废 + 追回 + 一律 agree）。
 //
-// 状态转换判定：已退款幂等 agree；未退款仅全量作废（voided==卡数）agree，
-// 零或部分作废（卡已用/已过期）均整体回滚 refuse：
-//  1. 订单已退款 → 幂等 agree（refund_data 用快照金额 + refunded_at，不再作废）；
-//  2. 未退款：事务内作废卡；voided != 卡数（零或部分）→ 回滚 + refuse；
-//  3. 全量作废 → 同事务 MarkRefunded → 提交 → agree。
-//     任何一步失败 → 整体回滚（卡保持 delivered、订单保持原态，重试可完整再来）。
+// 语义（方案 §3）：买家已兑换后再退款是允许的；退款通知到达时，未兑换的码作废、
+// 已兑换的码追回权益（扣订阅天数/取消订阅），随后一律 agree 并置订单退款态。旧的
+// 「有已用码即整体 refuse」分支已删除（D6G）。
 //
-// 并发语义：GetByManagerOrderNoTx 以 FOR UPDATE 行锁串行化；后到请求要么读到已退款
-// （agree 幂等返回），要么参与同一行锁串行化，不得出现「读到旧状态 → 误 refuse/重复作废」。
+// 步骤：
+//  1. 入口依赖校验（R5 #1，先于一切）：s.refunds == nil || s.clawback == nil → 直接
+//     返回 error；不开事务、不读订单、退款仓库零调用。这是失败关闭，保证 agree 语义
+//     依赖的「追回 + 失效」链完整。
+//  2. 幂等预检（不开事务，读现有 store）：订单已退款 → viewExisting 回放原快照 agree；
+//     订单不存在 → ErrSupplyOrderNotFound（1200）；后续步骤零写入。
+//  3. 未退款 → s.refunds.ProcessRefundAtomically（ent 单事务内逐码分支处置 + 置退款态）；
+//     事务成功返回后逐个 s.clawback.InvalidateAfterClawback(ctx, code) 处理 record.Clawed
+//     （R4 #1，提交后 best-effort 失效用户订阅/鉴权缓存）；再 viewExisting 构建视图返回 agree。
+//  4. 任何一步失败 → 整体回滚（订单与码零残留，闲管家重试可完整再来），返回 error。
+//
+// 并发语义（R6 #1）：ProcessRefundAtomically 内部以订单行 FOR UPDATE 串行化；后到请求若
+// 在行锁内发现已退款，返回原订单行 + 空 Clawed（零写入），service 据此回放原快照 agree，
+// 绝不落错误信封。
 //
 // 订单不存在 → ErrSupplyOrderNotFound（code=1200，handler 归一）。
-func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, bool, error) {
+func (s *SupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*SupplyOrder, error) {
+	// 1) 入口依赖校验（R5 #1，先于一切：不开事务、不读订单、退款仓库零调用）。
 	if s == nil || s.store == nil || s.gen == nil || s.pool == nil {
-		return nil, false, fmt.Errorf("xianguanjia supply order service unavailable")
+		return nil, fmt.Errorf("xianguanjia supply order service unavailable")
+	}
+	if s.refunds == nil || s.clawback == nil {
+		return nil, fmt.Errorf("xianguanjia supply refund dependencies unavailable (refunds=%v, clawback=%v)", s.refunds == nil, s.clawback == nil)
 	}
 	managerOrderNo = strings.TrimSpace(managerOrderNo)
 	if managerOrderNo == "" {
-		return nil, false, fmt.Errorf("xianguanjia supply refund notify: manager_order_no is required")
+		return nil, fmt.Errorf("xianguanjia supply refund notify: manager_order_no is required")
 	}
 
-	tx, err := s.store.BeginTx(ctx)
+	// 2) 幂等预检（不开事务，读现有 store）：已退款 → 回放原快照 agree。
+	row, err := s.store.GetByManagerOrderNo(ctx, managerOrderNo)
 	if err != nil {
-		return nil, false, fmt.Errorf("xianguanjia supply refund begin tx: %w", err)
-	}
-	// 行锁读取：串行化并发退款，保证后到者读到一致状态。
-	row, err := s.store.GetByManagerOrderNoTx(ctx, tx, managerOrderNo)
-	if err != nil {
-		_ = s.store.RollbackTx(ctx, tx)
-		return nil, false, fmt.Errorf("xianguanjia supply refund notify lookup: %w", err)
+		return nil, fmt.Errorf("xianguanjia supply refund notify lookup: %w", err)
 	}
 	if row == nil {
-		_ = s.store.RollbackTx(ctx, tx)
-		return nil, false, ErrSupplyOrderNotFound
+		return nil, ErrSupplyOrderNotFound
 	}
-
-	// 1) 已退款：幂等 agree，refund_data 用快照金额 + refunded_at，不再作废。
 	if row.Status == supplyOrderStatusRefunded {
-		_ = s.store.RollbackTx(ctx, tx)
-		order, verr := s.viewExisting(ctx, row)
-		if verr != nil {
-			return nil, false, verr
-		}
-		return order, true, nil
+		return s.viewExisting(ctx, row)
 	}
 
-	// 2) 事务内作废卡。
-	voided, err := s.pool.VoidCardsForOrderTx(ctx, tx, row.CardNos)
+	// 3) 未退款 → ent 单事务原子处置（逐码作废/追回 + 置退款态）。
+	record, err := s.refunds.ProcessRefundAtomically(ctx, managerOrderNo)
 	if err != nil {
-		_ = s.store.RollbackTx(ctx, tx)
-		return nil, false, fmt.Errorf("xianguanjia supply refund void cards for order %s: %w", managerOrderNo, err)
-	}
-	// 未整体作废（voided==0 或 1..n-1 部分卡已用/已过期）→ 整体回滚 + refuse：
-	// 不得按全额 agree 置退款（部分已用卡保持有效，资金损失）。
-	if voided != len(row.CardNos) {
-		// 回滚本轮已作废的卡（仅本集合，见 SupplyCardPoolMemory.lastVoided 与 UndoVoidTx）。
-		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
-		_ = s.store.RollbackTx(ctx, tx)
-		order, verr := s.viewExisting(ctx, row)
-		if verr != nil {
-			return nil, false, verr
-		}
-		return order, false, nil
+		return nil, fmt.Errorf("xianguanjia supply refund process: %w", err)
 	}
 
-	// 3) 同事务置退款态；置态失败 → 撤回作废（卡复位 delivered）+ 整体回滚。
-	// 置态前只取一次 now，同一值既传 MarkRefundedTx（持久化 refunded_at）又赋给
-	// 本地 row.RefundedAt（首次 agree 的 refund_time），保证二者单源同值。
-	now := time.Now()
-	if _, err := s.store.MarkRefundedTx(ctx, tx, managerOrderNo, now); err != nil {
-		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
-		_ = s.store.RollbackTx(ctx, tx)
-		return nil, false, fmt.Errorf("xianguanjia supply refund mark order %s: %w", managerOrderNo, err)
-	}
-	if err := s.store.CommitTx(ctx, tx); err != nil {
-		_ = s.pool.UndoVoidTx(ctx, tx, row.CardNos)
-		_ = s.store.RollbackTx(ctx, tx)
-		return nil, false, fmt.Errorf("xianguanjia supply refund commit %s: %w", managerOrderNo, err)
+	// 提交后逐个失效 clawed 码缓存（R4 #1，best-effort，与闲鱼链同款）。
+	for _, code := range record.Clawed {
+		s.clawback.InvalidateAfterClawback(ctx, code)
 	}
 
-	// 本地 row 置退款态以便视图计算 end_time（refunded_at），复用上面同源 now。
-	row.Status = supplyOrderStatusRefunded
-	if row.RefundedAt == nil {
-		row.RefundedAt = &now
-	}
 	slog.Info("xianguanjia supply order refund committed",
-		"manager_order_no", managerOrderNo, "cards", len(row.CardNos), "voided", voided, "agree", true)
+		"manager_order_no", managerOrderNo, "cards", len(record.Row.CardNos), "clawed", len(record.Clawed))
 
-	order, err := s.viewExisting(ctx, row)
-	if err != nil {
-		return nil, false, err
-	}
-	return order, true, nil
+	return s.viewExisting(ctx, record.Row)
 }
 
 // viewExisting 把存储行转为对外视图：金额/商品名一律取订单行快照（D6E-02R #2），
@@ -765,7 +731,8 @@ type supplyCardPoolDB struct {
 	db *sql.DB
 }
 
-// NewSupplyCardPool 返回基于 PostgreSQL 的卡密作废仓储（D6F-A：仅退款作废，取卡链归零）。
+// NewSupplyCardPool 返回基于 PostgreSQL 的卡密池仓储（D6G 旧链归零后仅作为接口承接，
+// 退款作废/追回已迁入 SupplyRefundStore）。保留构造以兼容既有接线（wire_gen）。
 func NewSupplyCardPool(db *sql.DB) *supplyCardPoolDB {
 	return &supplyCardPoolDB{db: db}
 }
@@ -828,40 +795,6 @@ func (g *supplyCardGeneratorDB) GenerateCardsTx(ctx context.Context, tx *sql.Tx,
 		}
 	}
 	return codes, nil
-}
-
-// VoidCardsForOrder 作废某订单已发的卡：delivered/unused → expired。
-// 复用 D2 语义（CodeCardVoidRepository.VoidCodesByCardNos 同样只处理
-// delivered/unused，不动 used/expired）。返回本次实际作废张数。
-func (p *supplyCardPoolDB) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
-	return p.VoidCardsForOrderTx(ctx, nil, cardNos)
-}
-
-// VoidCardsForOrderTx 事务内作废（D6E-02R #3）：与订单置态同属一个 *sql.Tx，
-// 整体提交/回滚。复用 D2 语义，返回本次实际作废张数。
-func (p *supplyCardPoolDB) VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error) {
-	if p == nil || p.db == nil {
-		return 0, fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	total := 0
-	for _, no := range cardNos {
-		res, err := execNonQuery(ctx, tx, p.db, `
-			UPDATE redeem_codes SET status = 'expired'
-			WHERE code = $1 AND status IN ('delivered', 'unused')`, no)
-		if err != nil {
-			return total, fmt.Errorf("xianguanjia void card for order: %w", err)
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			total += int(n)
-		}
-	}
-	return total, nil
-}
-
-// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废。DB 实现随事务回滚自动丢弃，
-// 此处为 no-op（D6E-02R #3 退款原子化回滚）。
-func (p *supplyCardPoolDB) UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error {
-	return nil
 }
 
 // parseGoodsGroupID 把 goods_no 解析为分组 ID（D6c 映射 goods_no=分组ID 的十进制串）。
@@ -1079,14 +1012,13 @@ func cloneSupplyOrderRow(r *supplyOrderRow) *supplyOrderRow {
 
 // SupplyCardPoolMemory 内存卡密池：模拟 redeem_codes 的 unused/delivered/expired 状态机。
 // cards: card_no -> 状态。互斥锁保证并发取卡不重发。
+//
+// D6G 旧链归零：旧退款作废/回滚方法随旧 refund 链删除；
+// 本内存替身仅保留状态机模拟（StatusOf/CountByStatus/SetCardStatusForTest），供单测断言。
 type SupplyCardPoolMemory struct {
 	mu    sync.Mutex
 	cards map[string]string // card_no -> status
 	pwds  map[string]string // card_no -> card_pwd
-	// lastVoided 记录上次 VoidCardsForOrderTx 实际作废（delivered/unused → expired）的卡集合。
-	// 仅内存替身单测试场景用，供 UndoVoidTx 精确回滚：只复位本集合，避免误复活本轮之前
-	// 已 expired 的卡（偏离 DB 事务回滚语义）。DB 实现随事务回滚自动丢弃，无需此字段。
-	lastVoided []string
 }
 
 // NewSupplyCardPoolMemory 返回内存版卡密池。cardNos 全部初始化为 unused；
@@ -1131,49 +1063,6 @@ func (p *SupplyCardPoolMemory) SetCardStatusForTest(cardNo, status string) {
 	if _, ok := p.cards[cardNo]; ok {
 		p.cards[cardNo] = status
 	}
-}
-
-func (p *SupplyCardPoolMemory) VoidCardsForOrder(ctx context.Context, cardNos []string) (int, error) {
-	return p.VoidCardsForOrderTx(ctx, nil, cardNos)
-}
-
-// VoidCardsForOrderTx 内存实现：与 DB 语义一致（tx 为 nil，无真实事务）。
-// 记录本次实际作废集合到 lastVoided，供 UndoVoidTx 精确回滚（仅复位本集合）。
-func (p *SupplyCardPoolMemory) VoidCardsForOrderTx(ctx context.Context, tx *sql.Tx, cardNos []string) (int, error) {
-	if p == nil {
-		return 0, fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := 0
-	p.lastVoided = p.lastVoided[:0]
-	for _, no := range cardNos {
-		switch p.cards[no] {
-		case "delivered", "unused":
-			p.cards[no] = "expired"
-			n++
-			p.lastVoided = append(p.lastVoided, no)
-		}
-	}
-	return n, nil
-}
-
-// UndoVoidTx 撤回本次 VoidCardsForOrderTx 的作废（内存：expired → delivered），
-// 用于「作废成功但置态失败」时整体回滚，使卡保持 delivered（D6E-02R #3）。
-// 仅复位 lastVoided（本轮实际作废集合），不再遍历 cardNos 全量恢复，避免误复活
-// 本轮之前已 expired 的卡（差于 DB 事务回滚语义）。DB 实现随事务回滚自动丢弃为 no-op。
-func (p *SupplyCardPoolMemory) UndoVoidTx(ctx context.Context, tx *sql.Tx, cardNos []string) error {
-	if p == nil {
-		return fmt.Errorf("xianguanjia supply card pool unavailable")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, no := range p.lastVoided {
-		if p.cards[no] == "expired" {
-			p.cards[no] = "delivered"
-		}
-	}
-	return nil
 }
 
 // ---- 现场生成卡密仓储：内存实现（单测用，含字段记录便于断言） ----

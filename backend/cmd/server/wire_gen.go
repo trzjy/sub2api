@@ -400,7 +400,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianguanjiaSupplyCatalogHandler := handler.NewXianguanjiaSupplyHandler(xianguanjiaSupplyCatalogSvc)                      // D6i: D6c 目录 handler
 	xgjSupplyHandler := handler.NewXgjSupplyHandler(xgjSupplyStore, "")
 	xianguanjiaSupplyOrderSvc := xianguanjia.NewSupplyOrderService(
-		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardGenerator(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil) // D6F-A: 现场生成卡密（无限库存）
+		xianguanjia.NewSupplyOrderStore(db), xianguanjia.NewSupplyCardGenerator(db), xianguanjia.NewSupplyCardPool(db), xianguanjia.NewSupplyGoodsSource(db), nil,
+		xianguanjia.NewSupplyRefundStore(client, redeemService), // D6G: 退款追回（ent 单事务）
+		redeemService) // D6G: 提交后缓存失效（同一 redeemService 实例）
 	xianguanjiaSupplyOrderHandler := handler.NewXianguanjiaSupplyOrderHandler(xianguanjiaSupplyOrderSvc)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)

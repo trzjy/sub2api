@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -49,7 +50,7 @@ func newTestSupplyOrderHandler(cardNos []string, goods xianguanjia.SupplyGoodsSo
 	gen := xianguanjia.NewSupplyCardGeneratorMemory(pool, func(groupID int64) (int, error) { return 30, nil })
 	// 接线：内存生成器接进 store 事务生命周期（CommitTx 落盘前落库、RollbackTx 丢弃缓冲）。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := xianguanjia.NewSupplyOrderService(store, gen, pool, goods, xianguanjia.NewSupplyCardPwdResolverMemory(pool))
+	svc := xianguanjia.NewSupplyOrderService(store, gen, pool, goods, xianguanjia.NewSupplyCardPwdResolverMemory(pool), nil, nil)
 	h := NewXianguanjiaSupplyOrderHandler(svc)
 	r := gin.New()
 	r.POST("/create", h.CreateOrder)
@@ -211,12 +212,47 @@ func TestSupplyOrderHandlerOrderNoPriorToOutOrderNo(t *testing.T) {
 	require.Equal(t, d1.OutOrderNo, got.OutOrderNo)
 }
 
-// TestSupplyOrderHandlerRefundAgree 验证退款申请 agree 分支响应 JSON 形状。
+// fakeSupplyOrderService 实现 handler 侧 XianguanjiaSupplyOrderService 窄接口，
+// 用于驱动退款信封/错误映射测试，与真实 service 解耦——退款行为（作废/追回/幂等）
+// 覆盖已移交 xianguanjia 包单测 + integration 门禁（新退款路径走 ent 客户端，
+// handler 测试无法以真实 service 驱动；D6G-B 派发单 §3）。
+type fakeSupplyOrderService struct {
+	refundOrder *xianguanjia.SupplyOrder
+	refundErr   error
+}
+
+func (f *fakeSupplyOrderService) CreateOrder(ctx context.Context, managerOrderNo, goodsNo string, buyQuantity int, maxAmount int64) (*xianguanjia.SupplyOrder, error) {
+	return nil, errors.New("fake: CreateOrder unused in refund envelope tests")
+}
+
+func (f *fakeSupplyOrderService) GetOrder(ctx context.Context, orderNo, outOrderNo string) (*xianguanjia.SupplyOrder, error) {
+	return nil, errors.New("fake: GetOrder unused in refund envelope tests")
+}
+
+func (f *fakeSupplyOrderService) RefundNotify(ctx context.Context, managerOrderNo string) (*xianguanjia.SupplyOrder, error) {
+	if f.refundErr != nil {
+		return nil, f.refundErr
+	}
+	return f.refundOrder, nil
+}
+
+// newRefundHandlerWithFake 用给定服务构造仅含 /refund 路由的 gin 引擎。
+func newRefundHandlerWithFake(svc XianguanjiaSupplyOrderService) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	h := NewXianguanjiaSupplyOrderHandler(svc)
+	r := gin.New()
+	r.POST("/refund", h.RefundNotify)
+	return r
+}
+
+// TestSupplyOrderHandlerRefundAgree 验证退款申请恒 agree 信封全字段（D6G：refuse 分支已删）。
+// refund_time 取订单行 refunded_at 列（视图层 EndTime 承载，handler 不独立决定时间来源，R3 #1）。
 func TestSupplyOrderHandlerRefundAgree(t *testing.T) {
-	r, _, _ := newTestSupplyOrderHandler([]string{"card-1", "card-2"}, newTestSupplyGoodsSource())
-	require.Equal(t, xianguanjia.SupplyCodeOK, doSupplyOrderRequest(t, r, "/create", map[string]any{
-		"order_no": "MO-H4", "goods_no": "42", "buy_quantity": 2,
-	}).Code)
+	svc := &fakeSupplyOrderService{refundOrder: &xianguanjia.SupplyOrder{
+		OrderAmount: 990 * 2,
+		EndTime:     1700000999,
+	}}
+	r := newRefundHandlerWithFake(svc)
 
 	env := doSupplyOrderRequest(t, r, "/refund", map[string]any{"order_no": "MO-H4", "apply_time": 1700000000})
 	require.Equal(t, xianguanjia.SupplyCodeOK, env.Code)
@@ -228,43 +264,28 @@ func TestSupplyOrderHandlerRefundAgree(t *testing.T) {
 	require.Equal(t, int64(1700000000), data.RefundData.ApplyTime)
 	require.Equal(t, 20, data.RefundData.RefundStatus)
 	require.Equal(t, int64(990*2), data.RefundData.RefundAmount)
-	require.NotZero(t, data.RefundData.RefundTime)
+	require.Equal(t, int64(1700000999), data.RefundData.RefundTime, "refund_time 须等于订单行 refunded_at（EndTime 承载）")
 	// data 顶层仅允许 result/refund_data（agree 不带 remark）。
 	assertTopLevelKeys(t, env.Data, "result", "refund_data")
-
-	// 退款后再查单：对外订单态归一 20。
-	envGet := doSupplyOrderRequest(t, r, "/get", map[string]any{"order_no": "MO-H4"})
-	require.Equal(t, xianguanjia.SupplyCodeOK, envGet.Code)
-	var got supplyOrderTestData
-	require.NoError(t, json.Unmarshal(envGet.Data, &got))
-	require.Equal(t, 20, got.OrderStatus)
 }
 
-// TestSupplyOrderHandlerRefundRefuse 验证退款申请 refuse 分支响应 JSON 形状。
-func TestSupplyOrderHandlerRefundRefuse(t *testing.T) {
-	r, _, pool := newTestSupplyOrderHandler(nil, newTestSupplyGoodsSource())
-	create := doSupplyOrderRequest(t, r, "/create", map[string]any{
-		"order_no": "MO-H4R", "goods_no": "42", "buy_quantity": 2,
-	})
-	require.Equal(t, xianguanjia.SupplyCodeOK, create.Code)
-	var cd supplyOrderTestData
-	require.NoError(t, json.Unmarshal(create.Data, &cd))
-	require.Len(t, cd.CardItems, 2)
+// TestSupplyOrderHandlerRefundError 验证 RefundNotify 注入错误 → 1209 归一信封（R8），
+// 响应中不得出现 "agree"（错误路径不容许误发同意信封）。
+func TestSupplyOrderHandlerRefundError(t *testing.T) {
+	svc := &fakeSupplyOrderService{refundErr: errors.New("refund atomically failed")}
+	r := newRefundHandlerWithFake(svc)
 
-	// 把本次生成的两张卡置为 expired → 退款作废 0 张 → refuse。
-	for _, it := range cd.CardItems {
-		pool.SetCardStatusForTest(it.CardPwd, "expired")
-	}
-
-	env := doSupplyOrderRequest(t, r, "/refund", map[string]any{"order_no": "MO-H4R", "apply_time": 1700000000})
-	require.Equal(t, xianguanjia.SupplyCodeOK, env.Code)
-	var data supplyOrderTestData
-	require.NoError(t, json.Unmarshal(env.Data, &data))
-	require.Equal(t, "refuse", data.Result)
-	require.Equal(t, "卡密已使用或已过期，无法撤单", data.Remark)
-	require.Nil(t, data.RefundData, "refuse 不应带 refund_data")
-	// data 顶层仅允许 result/remark（refuse 不带 refund_data）。
-	assertTopLevelKeys(t, env.Data, "result", "remark")
+	var buf bytes.Buffer
+	raw, err := json.Marshal(map[string]any{"order_no": "MO-ERR", "apply_time": 1700000000})
+	require.NoError(t, err)
+	buf.Write(raw)
+	req := httptest.NewRequest(http.MethodPost, "/refund", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "官方信封固定 HTTP 200")
+	require.Contains(t, w.Body.String(), `"code":1209`, "注入错误须归一为 1209")
+	require.NotContains(t, w.Body.String(), "agree", "错误信封不得出现 agree（R8 建议）")
 }
 
 // TestSupplyOrderHandlerMissingBuyQuantity 验证缺 buy_quantity → 1201。

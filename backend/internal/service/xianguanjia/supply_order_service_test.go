@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,7 +81,7 @@ func newTestSupplyOrderServiceWithResolver(cardNos []string, pwds map[string]str
 	gen := NewSupplyCardGeneratorMemory(pool, resolver)
 	// 接线：事务提交/回滚驱动生成器落库/丢弃，忠实模拟 DB 事务语义（单一惯用法）。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, goods, NewSupplyCardPwdResolverMemory(pool))
+	svc := NewSupplyOrderService(store, gen, pool, goods, NewSupplyCardPwdResolverMemory(pool), nil, nil)
 	return svc, store, gen, pool
 }
 
@@ -244,71 +245,18 @@ func TestSupplyOrderGetOrderByOutOrderNo(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSupplyOrderRefundNotifyVoidsCardsAndIdempotent(t *testing.T) {
-	ctx := context.Background()
-	svc, _, gen, pool := newTestSupplyOrderService([]string{"card-1", "card-2", "card-3"}, nil, newTestGoodsSource(990, 1))
-
-	created, err := svc.CreateOrder(ctx, "MO-1005", "42", 2, 0)
-	require.NoError(t, err)
-	require.Equal(t, 2, pool.CountByStatus("delivered"))
-	require.Len(t, gen.GeneratedCards(), 2)
-
-	// 第一次退款：可撤（voided>0）→ agree；对外订单态归一 20（非内部 30）。
-	refunded, agree, err := svc.RefundNotify(ctx, "MO-1005")
-	require.NoError(t, err)
-	require.True(t, agree)
-	require.Equal(t, 20, refunded.OrderStatus, "内部退款态 30 对外须归一为 20")
-	require.Equal(t, int64(990*2), refunded.OrderAmount)
-	require.Equal(t, 0, pool.CountByStatus("delivered"), "退款后卡不得再为 delivered")
-	require.Equal(t, 2, pool.CountByStatus("expired"), "退款须把生成卡 delivered→expired")
-	for _, it := range created.CardItems {
-		require.Equal(t, "expired", pool.StatusOf(it.CardPwd), "生成卡应已作废")
-	}
-
-	// 退款后再查单：可见对外 20 与已作废卡。
-	got, err := svc.GetOrder(ctx, "MO-1005", "")
-	require.NoError(t, err)
-	require.Equal(t, 20, got.OrderStatus)
-	require.Len(t, got.CardItems, 2)
-
-	// 重复退款通知：幂等，仍 agree（已退款态），不改变已作废状态。
-	again, agree2, err := svc.RefundNotify(ctx, "MO-1005")
-	require.NoError(t, err)
-	require.True(t, agree2, "重复退款通知须幂等 agree")
-	require.Equal(t, 20, again.OrderStatus)
-	require.Equal(t, 2, pool.CountByStatus("expired"))
-}
-
-func TestSupplyOrderRefundNotifyRefuseWhenCardsUsed(t *testing.T) {
-	ctx := context.Background()
-	svc, _, _, pool := newTestSupplyOrderService([]string{"card-1", "card-2"}, nil, newTestGoodsSource(990, 1))
-
-	created, err := svc.CreateOrder(ctx, "MO-1005R", "42", 2, 0)
-	require.NoError(t, err)
-
-	// 模拟生成卡已使用/已过期：直接置池卡为 expired，使本次作废 0 张且未退款 → refuse。
-	require.Len(t, created.CardItems, 2)
-	pool.SetCardStatusForTest(created.CardItems[0].CardPwd, "expired")
-	pool.SetCardStatusForTest(created.CardItems[1].CardPwd, "expired")
-
-	refunded, agree, err := svc.RefundNotify(ctx, "MO-1005R")
-	require.NoError(t, err)
-	require.False(t, agree, "卡已使用/已过期无法撤单 → refuse")
-	require.NotNil(t, refunded)
-	// refuse 不置退款态：对外仍 20（成功态，卡已被用）。
-	require.Equal(t, 20, refunded.OrderStatus)
-
-	// 查单回读仍非退款态（未置 refunded）。
-	got, err := svc.GetOrder(ctx, "MO-1005R", "")
-	require.NoError(t, err)
-	require.Equal(t, 20, got.OrderStatus)
-}
+// ---- D6G：RefundNotify 单测（fake SupplyRefundStore + fake XianyuRedeemClawback 驱动）----
+//
+// 旧 refund 链（作废/回滚/拒绝）相关用例已随 D6G 删除；以下用例覆盖新语义：
+// 幂等 agree 回放 / 订单不存在 ErrSupplyOrderNotFound / 处置成功 agree + 视图金额快照 /
+// clawed 码触发 InvalidateAfterClawback / fail-closed（refunds=nil 或 clawback=nil）。
 
 func TestSupplyOrderRefundNotifyUnknownOrder(t *testing.T) {
 	ctx := context.Background()
-	svc, _, _, _ := newTestSupplyOrderService([]string{"card-1"}, nil, newTestGoodsSource(990, 1))
+	// 依赖齐备（fail-closed 不触发），才能走到「订单不存在」路径。
+	svc, _, _, _ := newTestSupplyOrderServiceWithRefund(&fakeSupplyRefundStore{}, &fakeSupplyClawback{}, []string{"card-1"})
 
-	_, _, err := svc.RefundNotify(ctx, "MO-NOPE")
+	_, err := svc.RefundNotify(ctx, "MO-NOPE")
 	require.Error(t, err)
 	var apiErr *SupplyAPIError
 	require.True(t, errors.As(err, &apiErr))
@@ -334,7 +282,7 @@ func TestSupplyOrderCardPwdDefaultMapping(t *testing.T) {
 	gen := NewSupplyCardGeneratorMemory(pool, defaultValidityResolver)
 	// 接线事务生命周期钩子（单一惯用法）。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(500, 1), nil) // pwdResolve=nil
+	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(500, 1), nil, nil, nil) // pwdResolve=nil
 
 	order, err := svc.CreateOrder(ctx, "MO-PWD", "42", 2, 0)
 	require.NoError(t, err)
@@ -457,175 +405,162 @@ func TestSupplyOrderGetOrderAmountIsSnapshot(t *testing.T) {
 	require.Equal(t, "测试商品", got.GoodsName, "查单商品名须为快照")
 }
 
-// failMarkStore 是注入用的测试 store：可令 MarkRefundedTx 失败，验证退款原子化回滚。
-type failMarkStore struct {
-	*supplyOrderStoreMem
-	failMark bool
+// ---- D6G RefundNotify 单测：fake SupplyRefundStore + fake XianyuRedeemClawback 驱动 ----
+//
+// 覆盖新语义：幂等 agree 回放 / 订单不存在 ErrSupplyOrderNotFound / 处置成功 agree +
+// 视图金额快照 / clawed 码触发 InvalidateAfterClawback / fail-closed（refunds=nil 或
+// clawback=nil → 返回 error 且退款仓库零调用，R5 #1）。
+
+// fakeSupplyRefundStore 是注入用的 fake SupplyRefundStore：按注入的 record/err 返回，
+// 记录 ProcessRefundAtomically 调用次数，用于断言「已退款预检命中不进事务」与 fail-closed。
+type fakeSupplyRefundStore struct {
+	calls  int
+	record *SupplyRefundRecord
+	err    error
 }
 
-func (s *failMarkStore) MarkRefundedTx(ctx context.Context, tx *sql.Tx, managerOrderNo string, at time.Time) (bool, error) {
-	if s.failMark {
-		return false, errors.New("injected mark failure")
+func (f *fakeSupplyRefundStore) ProcessRefundAtomically(ctx context.Context, managerOrderNo string) (*SupplyRefundRecord, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
 	}
-	return s.supplyOrderStoreMem.MarkRefundedTx(ctx, tx, managerOrderNo, at)
+	return f.record, nil
 }
 
-// TestSupplyOrderRefundRollbackOnMarkFailure 回归 #3：作废成功但置态失败时，整体回滚
-// （卡保持 delivered、订单保持原态）；修复后重试 → agree 且卡已作废、金额=快照。
-func TestSupplyOrderRefundRollbackOnMarkFailure(t *testing.T) {
-	ctx := context.Background()
-	pool := NewSupplyCardPoolMemory(nil, nil)
-	baseStore := NewSupplyOrderStoreMemory()
-	store := &failMarkStore{supplyOrderStoreMem: baseStore}
+// fakeSupplyClawback 是注入用的 fake XianyuRedeemClawback：记录 InvalidateAfterClawback
+// 调用次数，ClawbackXianyuRedeemCodeTx 直接成功。
+type fakeSupplyClawback struct {
+	clawbackCalls    int
+	invalidateCalls  int
+	clawbackErr      error
+}
+
+func (c *fakeSupplyClawback) ClawbackXianyuRedeemCodeTx(ctx context.Context, code *service.RedeemCode) (string, error) {
+	c.clawbackCalls++
+	return "追回订阅 30 天", c.clawbackErr
+}
+
+func (c *fakeSupplyClawback) InvalidateAfterClawback(ctx context.Context, code *service.RedeemCode) {
+	c.invalidateCalls++
+}
+
+// newTestSupplyOrderServiceWithRefund 构造注入了 fake refund store / clawback 的订单服务。
+func newTestSupplyOrderServiceWithRefund(refunds SupplyRefundStore, clawback service.XianyuRedeemClawback, cardNos []string) (*SupplyOrderService, *supplyOrderStoreMem, *supplyCardGeneratorMem, *SupplyCardPoolMemory) {
+	store := NewSupplyOrderStoreMemory()
+	pool := NewSupplyCardPoolMemory(cardNos, nil)
 	gen := NewSupplyCardGeneratorMemory(pool, defaultValidityResolver)
-	// 接线事务生命周期钩子（单一惯用法）。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
-
-	_, err := svc.CreateOrder(ctx, "MO-RB", "42", 2, 0)
-	require.NoError(t, err)
-	require.Equal(t, 2, pool.CountByStatus("delivered"))
-
-	// 注入：作废成功但置态失败 → 整体回滚。
-	store.failMark = true
-	_, agree, err := svc.RefundNotify(ctx, "MO-RB")
-	require.Error(t, err, "置态失败应返回错误，交由闲管家重试")
-	require.False(t, agree)
-	require.Equal(t, 2, pool.CountByStatus("delivered"), "回滚后卡须保持 delivered，不得为 expired")
-	require.Equal(t, 0, pool.CountByStatus("expired"))
-	row, err := store.GetByManagerOrderNo(ctx, "MO-RB")
-	require.NoError(t, err)
-	require.NotNil(t, row)
-	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态")
-
-	// 修复 store 再试 → agree 且卡已作废、金额=快照。
-	store.failMark = false
-	refunded, agree, err := svc.RefundNotify(ctx, "MO-RB")
-	require.NoError(t, err)
-	require.True(t, agree)
-	require.Equal(t, 2, pool.CountByStatus("expired"), "重试后卡须作废")
-	require.Equal(t, int64(990*2), refunded.OrderAmount, "退款金额须为快照")
+	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool), refunds, clawback)
+	return svc, store, gen, pool
 }
 
-// TestSupplyOrderRefundIdempotentAlreadyRefunded 回归 #3：已退款订单重复退款须幂等
-// agree，且不再二次作废、refund_amount 取快照。
+// 构造一枚已处置（退款态）的订单行，供 fake refund store 回放视图。
+func refundedRow(managerOrderNo string, quantity int, cardNos []string, orderAmount int64) *supplyOrderRow {
+	now := time.Now()
+	return &supplyOrderRow{
+		ID:             1,
+		ManagerOrderNo: managerOrderNo,
+		GoodsNo:        "42",
+		Quantity:       quantity,
+		Status:         supplyOrderStatusRefunded,
+		CardNos:        cardNos,
+		CreatedAt:      now,
+		RefundedAt:     &now,
+		GoodsName:      "测试商品",
+		UnitPrice:      990,
+		OrderAmount:    orderAmount,
+	}
+}
+
+// TestSupplyOrderRefundIdempotentAlreadyRefunded 验证：订单已退款 → 幂等预检命中，
+// 直接 viewExisting 回放原快照 agree，ProcessRefundAtomically 不被调用（R6 #1 路径）。
 func TestSupplyOrderRefundIdempotentAlreadyRefunded(t *testing.T) {
 	ctx := context.Background()
-	svc, _, _, pool := newTestSupplyOrderService([]string{"card-1", "card-2"}, nil, newTestGoodsSource(990, 1))
+	fakeStore := &fakeSupplyRefundStore{}
+	svc, store, _, _ := newTestSupplyOrderServiceWithRefund(fakeStore, &fakeSupplyClawback{}, nil)
 
 	_, err := svc.CreateOrder(ctx, "MO-IDEM", "42", 2, 0)
 	require.NoError(t, err)
-
-	first, agree, err := svc.RefundNotify(ctx, "MO-IDEM")
+	// 置已退款态（模拟此前已退款）。
+	_, err = store.MarkRefunded(ctx, "MO-IDEM", time.Now())
 	require.NoError(t, err)
-	require.True(t, agree)
-	require.Equal(t, int64(990*2), first.OrderAmount)
 
-	// 重复退款：已退款 → 幂等 agree，不再作废（expired 计数不变），refund_amount=快照。
-	again, agree2, err := svc.RefundNotify(ctx, "MO-IDEM")
+	order, err := svc.RefundNotify(ctx, "MO-IDEM")
 	require.NoError(t, err)
-	require.True(t, agree2)
-	require.Equal(t, 2, pool.CountByStatus("expired"), "重复退款不得二次作废")
-	require.Equal(t, int64(990*2), again.OrderAmount, "幂等退款金额须为快照")
+	require.Equal(t, 20, order.OrderStatus, "内部退款态 30 对外须归一为 20")
+	require.Equal(t, int64(990*2), order.OrderAmount, "幂等回放金额须为快照")
+	require.Equal(t, 0, fakeStore.calls, "已退款预检命中：ProcessRefundAtomically 不应被调用")
 }
 
-// TestSupplyOrderRefundNotifyRefuseWhenPartialCardsUsed 验证修 1（P1）：多卡订单部分卡
-// 已用/已过期时，voided(1..n-1) != len(cardNos) → 整体回滚 + refuse，不得按全额 agree。
-func TestSupplyOrderRefundNotifyRefuseWhenPartialCardsUsed(t *testing.T) {
+// TestSupplyOrderRefundDisposeSuccessAgree 验证：未退款 → 进入 ProcessRefundAtomically，
+// 事务成功返回后 viewExisting 构建 agree 视图，金额取快照，退款仓库被调用一次。
+func TestSupplyOrderRefundDisposeSuccessAgree(t *testing.T) {
 	ctx := context.Background()
-	svc, store, _, pool := newTestSupplyOrderService([]string{"card-1", "card-2", "card-3"}, nil, newTestGoodsSource(990, 1))
+	fakeStore := &fakeSupplyRefundStore{
+		record: &SupplyRefundRecord{Row: refundedRow("MO-OK", 2, []string{"CODE-A", "CODE-B"}, 1980)},
+	}
+	svc, _, _, _ := newTestSupplyOrderServiceWithRefund(fakeStore, &fakeSupplyClawback{}, nil)
 
-	created, err := svc.CreateOrder(ctx, "MO-PARTIAL", "42", 3, 0)
+	// 该订单须存在于 store 且非退款态（预检通过，进入处置）。
+	_, err := svc.CreateOrder(ctx, "MO-OK", "42", 2, 0)
 	require.NoError(t, err)
-	require.Equal(t, 3, pool.CountByStatus("delivered"))
 
-	// 预置 1 张生成卡已用（used）：本轮仅能作废 2 张，不得按全额 agree 置退款。
-	require.Len(t, created.CardItems, 3)
-	pool.SetCardStatusForTest(created.CardItems[0].CardPwd, "used")
-
-	refunded, agree, err := svc.RefundNotify(ctx, "MO-PARTIAL")
+	order, err := svc.RefundNotify(ctx, "MO-OK")
 	require.NoError(t, err)
-	require.False(t, agree, "部分卡已用：不得按全额 agree → refuse")
-	require.NotNil(t, refunded)
-	require.Equal(t, 20, refunded.OrderStatus, "refuse 对外仍归一为 20（成功态）")
-
-	// 已用卡保持 used；其余卡整体回滚为 delivered（无 expired 残留）。
-	require.Equal(t, "used", pool.StatusOf(created.CardItems[0].CardPwd), "已用卡须保持 used")
-	require.Equal(t, "delivered", pool.StatusOf(created.CardItems[1].CardPwd), "未用卡须回滚为 delivered")
-	require.Equal(t, "delivered", pool.StatusOf(created.CardItems[2].CardPwd), "未用卡须回滚为 delivered")
-	require.Equal(t, 0, pool.CountByStatus("expired"), "部分作废须整体回滚，无 expired 残留")
-
-	// 订单非退款态。
-	row, err := store.GetByManagerOrderNo(ctx, "MO-PARTIAL")
-	require.NoError(t, err)
-	require.NotNil(t, row)
-	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态（非退款）")
-
-	// 再次下单同订单号幂等不受影响（订单未被污染，仍返回原单原卡）。
-	retry, err := svc.CreateOrder(ctx, "MO-PARTIAL", "42", 3, 0)
-	require.NoError(t, err, "退款 refuse 不得破坏订单，重下单须幂等返回原单")
-	require.Len(t, retry.CardItems, 3, "幂等重发须返回同一批卡")
+	require.Equal(t, 20, order.OrderStatus)
+	require.Equal(t, int64(1980), order.OrderAmount, "处置成功视图金额须为快照")
+	require.Len(t, order.CardItems, 2, "视图卡项须与处置后订单行 CardNos 一致")
+	require.Equal(t, 1, fakeStore.calls, "未退款须进入 ProcessRefundAtomically 一次")
 }
 
-// TestSupplyOrderRefundUndoVoidOnlyRestoresThisRound 验证修 3（P3）：UndoVoidTx 仅复位
-// 本轮 VoidCardsForOrderTx 实际作废集合，不得误复活本轮之前已 expired 的卡。
-//
-// 场景：本订单卡 card-1 在本轮退款前已 expired（如上一轮部分作废留下的），其余卡正常。
-// 本轮退款因部分卡已用/过期（voided=2 != 3）走 refuse 分支并整体回滚：UndoVoidTx 须只
-// 把本轮已作废的 card-2/card-3 复位 delivered，card-1（本轮前已 expired，不在本集合内）
-// 与无关过期卡 card-x 须保持 expired，不得误复活。
-func TestSupplyOrderRefundUndoVoidOnlyRestoresThisRound(t *testing.T) {
+// TestSupplyOrderRefundClawedInvalidate 验证：处置后含 clawed 码 → 事务提交成功后逐个
+// 调用 InvalidateAfterClawback（R4 #1）。
+func TestSupplyOrderRefundClawedInvalidate(t *testing.T) {
 	ctx := context.Background()
-	pool := NewSupplyCardPoolMemory([]string{"card-x"}, nil) // 预置无关卡，用于验证 UndoVoidTx 不误复活
-	baseStore := NewSupplyOrderStoreMemory()
-	store := &failMarkStore{supplyOrderStoreMem: baseStore}
-	gen := NewSupplyCardGeneratorMemory(pool, defaultValidityResolver)
-	// 接线事务生命周期钩子（单一惯用法）。
-	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+	usedBy := int64(7)
+	groupID := int64(42)
+	clawback := &fakeSupplyClawback{}
+	fakeStore := &fakeSupplyRefundStore{
+		record: &SupplyRefundRecord{
+			Row: refundedRow("MO-CLAW", 1, []string{"CODE-C"}, 990),
+			Clawed: []*service.RedeemCode{{
+				ID: 1, Code: "CODE-C", Type: service.RedeemTypeSubscription,
+				Status: service.StatusUsed, ValidityDays: 30,
+				UsedBy: &usedBy, GroupID: &groupID,
+			}},
+		},
+	}
+	svc, _, _, _ := newTestSupplyOrderServiceWithRefund(fakeStore, clawback, nil)
 
-	// 先下单：生成 3 张卡（全部 delivered）。
-	created, err := svc.CreateOrder(ctx, "MO-UNDO", "42", 3, 0)
+	_, err := svc.CreateOrder(ctx, "MO-CLAW", "42", 1, 0)
 	require.NoError(t, err)
-	require.Equal(t, 3, pool.CountByStatus("delivered"), "下单后本订单 3 卡为 delivered")
-	require.Len(t, created.CardItems, 3)
-	codes := []string{created.CardItems[0].CardPwd, created.CardItems[1].CardPwd, created.CardItems[2].CardPwd}
 
-	// 与本订单无关的过期卡（不在本订单 cardNos 中），回滚后须保持 expired。
-	pool.SetCardStatusForTest("card-x", "expired")
-	// 本订单的一张卡在本轮退款前已被作废（如上一轮部分作废留下的 expired），
-	// 本轮回滚时不得误复活它。
-	pool.SetCardStatusForTest(codes[0], "expired")
-	require.Equal(t, 2, pool.CountByStatus("delivered"), "card-1 预置 expired 后仅 2 张 delivered")
-
-	// 本轮退款：codes[1]/codes[2] 正常作废（voided=2），但 codes[0] 已 expired 使
-	// voided(2) != len(3) → refuse 分支整体回滚（UndoVoidTx 复位本轮集合）。
-	_, agree, err := svc.RefundNotify(ctx, "MO-UNDO")
-	require.NoError(t, err, "部分卡已用/过期走 refuse，不返回错误")
-	require.False(t, agree, "部分作废须 refuse")
-	// 本轮实际作废的卡（codes[1]/codes[2]）复位 delivered。
-	require.Equal(t, "delivered", pool.StatusOf(codes[1]))
-	require.Equal(t, "delivered", pool.StatusOf(codes[2]))
-	// 本轮之前已 expired 的本订单卡（codes[0]）须保持 expired，不得被 UndoVoidTx 误复活。
-	require.Equal(t, "expired", pool.StatusOf(codes[0]), "本轮前已 expired 的本订单卡不得被误复活")
-	// 无关过期卡仍 expired。
-	require.Equal(t, "expired", pool.StatusOf("card-x"), "无关过期卡不得被误复活")
-	require.Equal(t, 2, pool.CountByStatus("expired"), "仅 card-1/card-x 为 expired")
-	// 订单非退款态。
-	row, err := store.GetByManagerOrderNo(ctx, "MO-UNDO")
+	_, err = svc.RefundNotify(ctx, "MO-CLAW")
 	require.NoError(t, err)
-	require.NotNil(t, row)
-	require.NotEqual(t, supplyOrderStatusRefunded, row.Status, "订单须保持原态（非退款）")
+	require.Equal(t, 1, fakeStore.calls)
+	require.Equal(t, 1, clawback.invalidateCalls, "clawed 码须触发 InvalidateAfterClawback")
+}
 
-	// 修复（codes[0] 复位 delivered 后再整体退款）→ agree，本轮卡全作废。
-	pool.SetCardStatusForTest(codes[0], "delivered")
-	_, agree, err = svc.RefundNotify(ctx, "MO-UNDO")
-	require.NoError(t, err)
-	require.True(t, agree)
-	require.Equal(t, "expired", pool.StatusOf(codes[0]))
-	require.Equal(t, "expired", pool.StatusOf(codes[1]))
-	require.Equal(t, "expired", pool.StatusOf(codes[2]))
-	require.Equal(t, "expired", pool.StatusOf("card-x"), "无关过期卡仍不受影响")
+// TestSupplyOrderRefundFailClosedNilDeps 验证 R5 #1 失败关闭：refunds=nil 或 clawback=nil
+// → 直接返回 error，退款仓库零调用、订单与码零变化。
+func TestSupplyOrderRefundFailClosedNilDeps(t *testing.T) {
+	ctx := context.Background()
+	fakeStore := &fakeSupplyRefundStore{}
+	clawback := &fakeSupplyClawback{}
+
+	// refunds=nil
+	svc1, _, _, _ := newTestSupplyOrderServiceWithRefund(fakeStore, clawback, nil)
+	svc1.refunds = nil
+	_, err := svc1.RefundNotify(ctx, "MO-FC1")
+	require.Error(t, err, "refunds=nil 须直接报错")
+	require.Equal(t, 0, fakeStore.calls, "refunds=nil 时 ProcessRefundAtomically 不得被调用")
+
+	// clawback=nil
+	svc2, _, _, _ := newTestSupplyOrderServiceWithRefund(fakeStore, clawback, nil)
+	svc2.clawback = nil
+	_, err = svc2.RefundNotify(ctx, "MO-FC2")
+	require.Error(t, err, "clawback=nil 须直接报错")
+	require.Equal(t, 0, fakeStore.calls, "clawback=nil 时 ProcessRefundAtomically 不得被调用")
 }
 
 // TestSupplyOrderGenerateCardsFields 断言现场生成卡的落库字段：
@@ -700,7 +635,7 @@ func TestSupplyOrderCreateOrderDupConflictSameCards(t *testing.T) {
 	// 接线事务生命周期钩子（单一惯用法）。本用例 InsertCreating 命中 dup，生成与
 	// 提交均不发生，钩子仅为保持与正常路径一致的事务语义接线。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool), nil, nil)
 
 	order, err := svc.CreateOrder(ctx, "MO-DUP", "42", 2, 0)
 	require.NoError(t, err, "Dup 冲突须回读先到订单而非报错")
@@ -767,7 +702,7 @@ func TestSupplyOrderCreateOrderSetCardsFailureRollback(t *testing.T) {
 	gen := NewSupplyCardGeneratorMemory(pool, defaultValidityResolver)
 	// 接线事务生命周期钩子（单一惯用法）：回滚时丢弃生成器 pending。
 	store.WireCardGeneratorLifecycle(gen)
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool), nil, nil)
 
 	_, err := svc.CreateOrder(ctx, "MO-SETFAIL", "42", 2, 0)
 	require.Error(t, err, "SetCardsAndStatusTx 失败须返回错误")
@@ -803,7 +738,7 @@ func TestSupplyOrderCreateOrderCommitFailureRollback(t *testing.T) {
 	// gen.CommitGenerated 不被调用，生成器 pending 仅由 rollbackHook 清理。
 	// 经 adapter 收口到 WireCardGeneratorLifecycle（RollbackGenerated 继承生成器本体）。
 	store.WireCardGeneratorLifecycle(&commitFailGenAdapter{supplyCardGeneratorMem: gen})
-	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool))
+	svc := NewSupplyOrderService(store, gen, pool, newTestGoodsSource(990, 1), NewSupplyCardPwdResolverMemory(pool), nil, nil)
 
 	_, err := svc.CreateOrder(ctx, "MO-COMMITFAIL", "42", 2, 0)
 	require.Error(t, err, "CommitTx 失败须返回错误")
