@@ -139,6 +139,7 @@ func provideCleanup(
 	xianyuExposure *service.XianyuExposureService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	quotaLifecycle *service.CNQuotaLifecycleService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -440,6 +441,12 @@ func provideCleanup(
 			{"OllamaCloudUsageService", func() error {
 				if ollamaCloudUsage != nil {
 					ollamaCloudUsage.Stop()
+				}
+				return nil
+			}},
+			{"CNQuotaLifecycleService", func() error {
+				if quotaLifecycle != nil {
+					quotaLifecycle.Stop()
 				}
 				return nil
 			}},

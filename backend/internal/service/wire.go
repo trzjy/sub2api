@@ -391,10 +391,77 @@ func ProvideCNProviderBalanceService(
 	return NewCNProviderBalanceService(accountRepo, proxyRepo, httpUpstream, cfg)
 }
 
+// cnQuotaAlertStoreAdapter 把 OpsService 适配为 CNQuotaLifecycleService 的
+// QuotaAlertStore 窄面（方法集直接满足接口，不新增载体）。
+type cnQuotaAlertStoreAdapter struct {
+	ops *OpsService
+}
+
+func (a cnQuotaAlertStoreAdapter) CreateAlertEvent(ctx context.Context, event *OpsAlertEvent) (*OpsAlertEvent, error) {
+	return a.ops.CreateAlertEvent(ctx, event)
+}
+
+func (a cnQuotaAlertStoreAdapter) GetActiveQuotaAlert(ctx context.Context, dims map[string]any) (*OpsAlertEvent, error) {
+	return a.ops.GetActiveQuotaAlert(ctx, dims)
+}
+
+func (a cnQuotaAlertStoreAdapter) ResolveQuotaAlertOnRecovery(ctx context.Context, dims map[string]any) error {
+	return a.ops.ResolveQuotaAlertOnRecovery(ctx, dims)
+}
+
+// cnQuotaSnapshotRefresherAdapter 把 CNProviderQuotaService 适配为恢复后快照刷新
+// 窄面（QuotaSnapshotRefresher）：QueryUsageForAccount 内部按 base_url 分发 TH
+// （Pass/用量 CSV）/ Kira（dashboard 用量）/ kimi/zhipu/volcano coding plan 各链，
+// 快照落库逻辑复用各分支既有实现，此处只做转发。
+type cnQuotaSnapshotRefresherAdapter struct {
+	quotaService *CNProviderQuotaService
+}
+
+func (a cnQuotaSnapshotRefresherAdapter) RefreshCNQuotaSnapshot(ctx context.Context, account *Account) error {
+	_, err := a.quotaService.QueryUsageForAccount(ctx, account)
+	return err
+}
+
+// ProvideCNQuotaLifecycleService 构造并启动 TH/Kira 额度耗尽状态机（方案
+// th-kira-quota-lifecycle §4.1，派发单 D-QL-006 收口装配）：
+//   - 告警走 OpsService（QuotaAlertStore 窄面，复用 OpsAlertEvent 载体）；
+//   - 快照刷新接 D-QL-004 导出的 Kira/TH 快照探测链（可选，恢复闭环时刷新）；
+//   - Start() 启动 5 分钟恢复确认 ticker（照 account_expiry_service 装配模式）；
+//   - 回注 rateLimitService.SetCNQuotaLifecycle 完成响应式 402/429 入口接线。
+//     不能作为 RateLimitService 构造参数注入：OpsService 依赖 GatewayService →
+//     RateLimitService，构造参数会成环，照 ProvideFreshnessAlertService 回注先例。
+//   - 清理挂 provideCleanup（cleanupQuotaLifecycle），照 CNProviderBalanceCheckService 同款。
+func ProvideCNQuotaLifecycleService(
+	accountRepo AccountRepository,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	opsService *OpsService,
+	quotaService *CNProviderQuotaService,
+	rateLimitService *RateLimitService,
+) *CNQuotaLifecycleService {
+	var alerts QuotaAlertStore
+	if opsService != nil {
+		alerts = cnQuotaAlertStoreAdapter{ops: opsService}
+	}
+	svc := NewCNQuotaLifecycleService(accountRepo, httpUpstream, cfg, alerts)
+	if quotaService != nil {
+		svc.SetQuotaSnapshotRefresher(cnQuotaSnapshotRefresherAdapter{quotaService: quotaService})
+	}
+	// D-QL-002 响应式入口接线：注入后 402/429 停调语义全量移交状态机；
+	// 未注入（测试直构）时入口只落 cn_balance_low 信号标记并告警。
+	if rateLimitService != nil {
+		rateLimitService.SetCNQuotaLifecycle(svc)
+	}
+	svc.Start()
+	return svc
+}
+
 // ProvideCNProviderBalanceCheckService 构造并启动周期余额/额度检测任务。
 // payg 账号探余额（低余额停调）；coding plan 账号探 5h/weekly 滚动窗口
 // （落 extra 快照供调度阈值评估自动停调）。
 // 间隔取自 gateway.cn_providers.balance_check_interval_minutes；<=0 或关闭时不启动。
+// quotaLifecycle 为 TH/Kira 耗尽状态机交接窄面（D-QL-006 装配注入）：周期探测刷新
+// 快照后，耗尽信号经 SetQuotaLifecycleHandover 上交状态机确认探针/停调/告警。
 func ProvideCNProviderBalanceCheckService(
 	accountRepo AccountRepository,
 	balanceService *CNProviderBalanceService,
@@ -404,6 +471,7 @@ func ProvideCNProviderBalanceCheckService(
 	proxyRepo ProxyRepository,
 	cfg *config.Config,
 	monitorService *ChannelMonitorService,
+	quotaLifecycle *CNQuotaLifecycleService,
 ) *CNProviderBalanceCheckService {
 	minutes := 10
 	if cfg != nil && cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes > 0 {
@@ -412,6 +480,9 @@ func ProvideCNProviderBalanceCheckService(
 	svc := NewCNProviderBalanceCheckService(accountRepo, balanceService, quotaService, rateLimitService, httpUpstream, proxyRepo, cfg, time.Duration(minutes)*time.Minute)
 	// E39：账号余额恢复成功后触发关联渠道维陈旧收敛（窄面注入，最佳努力）。
 	svc.SetChannelFreshnessRefresher(monitorService)
+	// 方案 §4.2：周期探测的 Kira/TH 耗尽信号交接额度耗尽状态机（未注入时仅刷新快照，
+	// 信号由响应式 402/429 入口兜底）。
+	svc.SetQuotaLifecycleHandover(quotaLifecycle)
 	svc.Start()
 	return svc
 }
@@ -1257,6 +1328,7 @@ var ProviderSet = wire.NewSet(
 	ProvideGrokQuotaService,
 	ProvideCNProviderQuotaService,
 	ProvideCNProviderBalanceService,
+	ProvideCNQuotaLifecycleService,
 	ProvideCNProviderBalanceCheckService,
 	ProvideCodeBuddyQuotaService,
 	ProvideCodeBuddyQuotaCheckService,

@@ -423,7 +423,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	opsScheduledReportService := service.ProvideOpsScheduledReportService(opsService, userService, emailService, redisClient, configConfig)
 	opsIngressRejectAggregator := service.ProvideOpsIngressRejectAggregator(opsRepository, opsService)
 	accountExpiryService := service.ProvideAccountExpiryService(accountRepository)
-	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig, channelMonitorService)
+	// D-QL-006 收口装配：TH/Kira 额度耗尽状态机（5 分钟恢复确认 ticker + 告警 +
+	// 快照刷新），并回注响应式 402/429 入口（rateLimitService.SetCNQuotaLifecycle）。
+	cnQuotaLifecycleService := service.ProvideCNQuotaLifecycleService(accountRepository, httpUpstream, configConfig, opsService, cnProviderQuotaService, rateLimitService)
+	cnProviderBalanceCheckService := service.ProvideCNProviderBalanceCheckService(accountRepository, cnProviderBalanceService, cnProviderQuotaService, rateLimitService, httpUpstream, proxyRepository, configConfig, channelMonitorService, cnQuotaLifecycleService)
 	codeBuddyQuotaService := service.ProvideCodeBuddyQuotaService(accountRepository, proxyRepository, httpUpstream, configConfig)
 	codeBuddyQuotaCheckService := service.ProvideCodeBuddyQuotaCheckService(accountRepository, codeBuddyQuotaService, rateLimitService, configConfig)
 	accountBalanceProbeCheckService := service.ProvideAccountBalanceProbeCheckService(accountRepository, accountBalanceProbeService, leaderLockCache, db, configConfig)
@@ -442,7 +445,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
-	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, maskedIdentityProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager)
+	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, maskedIdentityProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -535,6 +538,7 @@ func provideCleanup(
 	xianyuExposure *service.XianyuExposureService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	quotaLifecycle *service.CNQuotaLifecycleService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -835,6 +839,12 @@ func provideCleanup(
 			{"OllamaCloudUsageService", func() error {
 				if ollamaCloudUsage != nil {
 					ollamaCloudUsage.Stop()
+				}
+				return nil
+			}},
+			{"CNQuotaLifecycleService", func() error {
+				if quotaLifecycle != nil {
+					quotaLifecycle.Stop()
 				}
 				return nil
 			}},
