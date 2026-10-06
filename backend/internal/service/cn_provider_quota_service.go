@@ -87,6 +87,12 @@ func isVolcanoBaseURL(baseURL string) bool {
 // Kimi 结构的 0% 周用量且缺失 5h/月档。凭据 base_url 才是火山订阅号的唯一事实源，
 // 故先用 GetBaseURL()（= ark.cn-beijing.volces.com）强制识别为火山。
 func resolveCNQuotaProvider(account *Account) string {
+	// Kira（kiraai.vn）优先：这类账号 platform 常被存为 kimi/deepseek/zhipu，
+	// base_url 才是上游事实源（详见 cn_provider_kira.go），不能按 platform /
+	// 官方域名分发。
+	if accountIsKiraBaseURL(account) {
+		return providerKira
+	}
 	if isVolcanoBaseURL(account.GetBaseURL()) {
 		return providerVolcano
 	}
@@ -99,7 +105,7 @@ func resolveCNQuotaProvider(account *Account) string {
 
 // CNQuotaTier 表示一个滚动用量窗口档位（5h / weekly）。
 type CNQuotaTier struct {
-	Window      string  `json:"window"`             // "5h" | "weekly"
+	Window      string  `json:"window"`             // "5h" | "weekly" | "monthly" | "daily"
 	UsedPercent float64 `json:"used_percent"`       // 已用百分比（0-100+，不做裁剪）
 	ResetAt     string  `json:"reset_at,omitempty"` // RFC3339，空表示无重置时间
 	// UsedPercentUnknown 标记 used_percent 上游不可得（如火山周窗口：限流响应头仅含
@@ -120,6 +126,37 @@ func (t CNQuotaTier) MarshalJSON() ([]byte, error) {
 	}{alias: alias(t)})
 }
 
+// CNUsageWindowTotals 单窗口聚合计数（th_usage_snapshot.windows 键名对齐 §4.3：
+// requests/tokens_in/tokens_out，浮点只做计数，无金额运算，L6）。
+type CNUsageWindowTotals struct {
+	Requests  float64 `json:"requests"`
+	TokensIn  float64 `json:"tokens_in"`
+	TokensOut float64 `json:"tokens_out"`
+}
+
+// CNProviderSnapshotOutput 管理端探测结果 DTO 的快照读取输出（§4.3 契约键名
+// 对齐：pass_name/renews_at/windows/used_tokens/limit_tokens 等，供前端一次
+// 拉取；显示互斥由前端按 L5 处理）。按账号类型只填对应键组：
+// TH 有 Pass → pass_* + windows；Kira → window/used_*/limit_*/reset_at。
+type CNProviderSnapshotOutput struct {
+	// th_pass_snapshot 组。
+	HasPass             *bool  `json:"has_pass,omitempty"`
+	PassName            string `json:"pass_name,omitempty"`
+	RenewsAt            string `json:"renews_at,omitempty"` // RFC3339
+	SpendAfterAllowance *bool  `json:"spend_after_allowance,omitempty"`
+	AutoReloadEnabled   *bool  `json:"auto_reload_enabled,omitempty"`
+	// th_usage_snapshot 组（windows 三键 today/7d/30d 齐全）。
+	Windows map[string]CNUsageWindowTotals `json:"windows,omitempty"`
+	// kira_usage_snapshot 组。
+	Window      string   `json:"window,omitempty"`
+	UsedPercent *float64 `json:"used_percent,omitempty"`
+	UsedTokens  *float64 `json:"used_tokens,omitempty"`
+	LimitTokens *float64 `json:"limit_tokens,omitempty"`
+	ResetAt     string   `json:"reset_at,omitempty"` // RFC3339
+	// 快照抓取时间（RFC3339）。
+	FetchedAt string `json:"fetched_at,omitempty"`
+}
+
 // CNProviderQuotaProbeResult 是 Coding Plan 额度探测的返回结构（管理端 + UI 消费）。
 type CNProviderQuotaProbeResult struct {
 	Provider        string        `json:"provider"`
@@ -128,10 +165,13 @@ type CNProviderQuotaProbeResult struct {
 	CredentialValid bool          `json:"credential_valid"` // false = 401/403 鉴权失败
 	Tiers           []CNQuotaTier `json:"tiers,omitempty"`
 	PlanLevel       string        `json:"plan_level,omitempty"` // 智谱套餐等级
-	StatusCode      int           `json:"status_code,omitempty"`
-	FetchedAt       int64         `json:"fetched_at"`
-	Persisted       bool          `json:"persisted"`
-	Error           string        `json:"error,omitempty"`
+	// Snapshot 快照读取输出（§4.3 契约键名，TH/Kira 分支填充；失败关闭路径
+	// 不落快照也不产出，保持 nil）。
+	Snapshot   *CNProviderSnapshotOutput `json:"snapshot,omitempty"`
+	StatusCode int                       `json:"status_code,omitempty"`
+	FetchedAt  int64                     `json:"fetched_at"`
+	Persisted  bool                      `json:"persisted"`
+	Error      string                    `json:"error,omitempty"`
 }
 
 // CNProviderQuotaService 探测 Kimi / Zhipu Coding Plan 的滚动窗口用量。
@@ -141,6 +181,8 @@ type CNProviderQuotaService struct {
 	httpUpstream HTTPUpstream
 	cfg          *config.Config
 	flight       singleflight.Group
+	// thPassService TH（tokenharbor.ai）Pass/用量快照探测链（quota 入口 TH 分支）。
+	thPassService *TokenHarborPassService
 }
 
 // NewCNProviderQuotaService 构造 Coding Plan 额度探测服务。
@@ -155,32 +197,54 @@ func NewCNProviderQuotaService(
 		proxyRepo:    proxyRepo,
 		httpUpstream: httpUpstream,
 		cfg:          cfg,
+		// F1：TH 探测链与 CN 探测链共用同一套出客户端/代理/凭据仓库，
+		// 进程内自装配（无需外部注入）。
+		thPassService: NewTokenHarborPassService(accountRepo, proxyRepo, httpUpstream),
+	}
+}
+
+// SetTokenHarborPassService 注入 TH Pass/用量探测服务（测试替换假站点用）。
+func (s *CNProviderQuotaService) SetTokenHarborPassService(th *TokenHarborPassService) {
+	if s != nil {
+		s.thPassService = th
 	}
 }
 
 // QueryUsage 探测指定账号的 Coding Plan 滚动窗口用量并落 Extra 快照。
-// 同一账号的并发探测会被 singleflight 合并。
+// 同一账号的并发探测会被 singleflight 合并。TH（tokenharbor.ai）账号在此处
+// 先行识别（platform=openai，不适用 coding plan 校验，F1 生产入口）。
 func (s *CNProviderQuotaService) QueryUsage(ctx context.Context, accountID int64) (*CNProviderQuotaProbeResult, error) {
-	account, err := s.loadCodingPlanAccount(ctx, accountID)
+	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
-		return nil, err
+		return nil, infraerrors.Newf(http.StatusNotFound, "CN_QUOTA_ACCOUNT_NOT_FOUND", "account not found: %v", err)
 	}
 	return s.QueryUsageForAccount(ctx, account)
 }
 
 // QueryUsageForAccount 探测已加载账号（配额监控 fetcher 复用，避免二次 GetByID）。
 // singleflight key 与 QueryUsage 相同，按账号 ID 与 admin 侧并发探测合并。
+// TH（tokenharbor.ai）账号不适用 CN coding plan 校验，先于校验分发进 TH
+// Pass/用量快照分支（F1：管理端手动查询按钮的 TH 生产入口）。
 func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
 	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "CN_QUOTA_NOT_CONFIGURED", "cn provider quota service is not configured")
 	}
-	if err := validateCodingPlanAccount(account); err != nil {
-		return nil, err
+	thBranch := accountIsTokenHarborBaseURL(account)
+	if thBranch && s.thPassService == nil {
+		return nil, infraerrors.New(http.StatusNotImplemented, "CN_QUOTA_TH_NOT_CONFIGURED", "tokenharbor pass service is not configured")
+	}
+	if !thBranch {
+		if err := validateCodingPlanAccount(account); err != nil {
+			return nil, err
+		}
 	}
 	key := "cn_quota:" + strconv.FormatInt(account.ID, 10)
 	resultCh := s.flight.DoChan(key, func() (any, error) {
-		probeCtx, cancel := context.WithTimeout(context.Background(), cnQuotaUpstreamTimeout+5*time.Second)
+		probeCtx, cancel := context.WithTimeout(context.Background(), cnQuotaUpstreamTimeout*3)
 		defer cancel()
+		if thBranch {
+			return s.queryTokenHarborUsageForAccount(probeCtx, account)
+		}
 		return s.queryUsageForAccount(probeCtx, account)
 	})
 	select {
@@ -201,8 +265,12 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
 	provider := resolveCNQuotaProvider(account)
-	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano {
-		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano coding plan account")
+	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano && provider != providerKira {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano/kira coding plan account")
+	}
+	// Kira 分支在 platform/provider 解析之前按 base_url 分发进来（dashboard JWT 链）。
+	if provider == providerKira {
+		return s.QueryKiraUsageForAccount(ctx, account)
 	}
 
 	baseURL := account.GetOpenAIBaseURL()
@@ -400,15 +468,83 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	return result, nil
 }
 
-func (s *CNProviderQuotaService) loadCodingPlanAccount(ctx context.Context, accountID int64) (*Account, error) {
-	account, err := s.accountRepo.GetByID(ctx, accountID)
+// accountIsTokenHarborBaseURL 按账号凭据判定是否 TokenHarbor 上游（OpenAI 协议
+// base_url 优先，凭据原始 base_url 补充；与 Kira 的 accountIsKiraBaseURL 同构）。
+func accountIsTokenHarborBaseURL(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	return isTokenHarborBaseURL(account.GetOpenAIBaseURL()) || isTokenHarborBaseURL(account.GetBaseURL())
+}
+
+// queryTokenHarborUsageForAccount 是 CNProviderQuotaService 的 TH 分支（F1 生产
+// 入口：管理端 quota/balance 探测的手动查询按钮链路）。探测 Pass 订阅窗口 +
+// usage CSV 窗口聚合，双快照落 extra（th_pass_snapshot / th_usage_snapshot）
+// 并输出 DTO 快照读取输出。任一环节失败 → 失败关闭：明确错误、不落对应快照
+// （pass 与 usage 快照相互独立，各自只在自身成功时落库）。
+func (s *CNProviderQuotaService) queryTokenHarborUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
+	now := time.Now().UTC()
+	result := &CNProviderQuotaProbeResult{
+		Provider:  TokenHarborPassProviderName,
+		Source:    "th_dashboard",
+		FetchedAt: now.Unix(),
+	}
+	passSnapshot, err := s.thPassService.Probe(ctx, account)
 	if err != nil {
-		return nil, infraerrors.Newf(http.StatusNotFound, "CN_QUOTA_ACCOUNT_NOT_FOUND", "account not found: %v", err)
+		result.Error = err.Error()
+		return result, nil
 	}
-	if err := validateCodingPlanAccount(account); err != nil {
-		return nil, err
+	persisted := true
+	if err := s.thPassService.PersistSnapshot(ctx, account.ID, passSnapshot); err != nil {
+		slog.Warn("th_pass_persist_failed", "account_id", account.ID, "error", err)
+		persisted = false
 	}
-	return account, nil
+	usageSnapshot, err := s.thPassService.ProbeUsageSnapshot(ctx, account)
+	if err != nil {
+		// usage CSV 传输/解析失败=失败关闭：不落 th_usage_snapshot，明确错误。
+		result.Error = err.Error()
+		result.Persisted = persisted
+		return result, nil
+	}
+	if err := s.thPassService.PersistUsageSnapshot(ctx, account.ID, usageSnapshot); err != nil {
+		slog.Warn("th_usage_persist_failed", "account_id", account.ID, "error", err)
+		persisted = false
+	}
+
+	result.Success = true
+	result.CredentialValid = true
+	result.Persisted = persisted
+	result.Snapshot = cnTokenHarborSnapshotOutput(passSnapshot, usageSnapshot)
+	return result, nil
+}
+
+// cnTokenHarborSnapshotOutput 把 TH 双快照折算成 §4.3 键名对齐的 DTO 输出。
+func cnTokenHarborSnapshotOutput(passSnapshot TokenHarborPassSnapshot, usageSnapshot TokenHarborUsageSnapshot) *CNProviderSnapshotOutput {
+	out := &CNProviderSnapshotOutput{
+		PassName:  passSnapshot.PassName,
+		FetchedAt: passSnapshot.FetchedAt.UTC().Format(time.RFC3339),
+	}
+	hasPass := passSnapshot.HasPass
+	out.HasPass = &hasPass
+	out.SpendAfterAllowance = &passSnapshot.SpendAfterAllowance
+	out.AutoReloadEnabled = &passSnapshot.AutoReloadEnabled
+	if passSnapshot.RenewsAt != nil {
+		out.RenewsAt = passSnapshot.RenewsAt.UTC().Format(time.RFC3339)
+	}
+	if len(usageSnapshot.Windows) > 0 {
+		out.Windows = make(map[string]CNUsageWindowTotals, len(usageSnapshot.Windows))
+		for name, window := range usageSnapshot.Windows {
+			out.Windows[name] = CNUsageWindowTotals{
+				Requests:  window.Requests,
+				TokensIn:  window.TokensIn,
+				TokensOut: window.TokensOut,
+			}
+		}
+		if usageSnapshot.FetchedAt.After(passSnapshot.FetchedAt) {
+			out.FetchedAt = usageSnapshot.FetchedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	return out
 }
 
 // validateCodingPlanAccount 加载后的非 DB 校验（ForAccount 入口同样复用，
@@ -421,9 +557,10 @@ func validateCodingPlanAccount(account *Account) error {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_INVALID_PLATFORM", "account is not a CN provider account")
 	}
 	// 火山订阅号账号（platform=deepseek，base_url=ark.cn-beijing.volces.com）保存为
-	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；其余 CN 供应商
-	// 仍仅限 coding。
-	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
+	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；Kira（kiraai.vn）
+	// 账号无论 payg/coding 都有 dashboard 用量端点（cn_provider_kira.go），同样放行；
+	// 其余 CN 供应商仍仅限 coding。
+	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) && !accountIsKiraBaseURL(account) {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a coding plan account")
 	}
 	return nil

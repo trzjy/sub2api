@@ -25,12 +25,17 @@ import (
 type fakeCNQuotaProber struct {
 	mu     sync.Mutex
 	probed []int64
+	// result 可选注入：非 nil 时返回该结果（Kira 耗尽交状态机用例构造耗尽快照）。
+	result *CNProviderQuotaProbeResult
 }
 
 func (f *fakeCNQuotaProber) QueryUsage(ctx context.Context, accountID int64) (*CNProviderQuotaProbeResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.probed = append(f.probed, accountID)
+	if f.result != nil {
+		return f.result, nil
+	}
 	return &CNProviderQuotaProbeResult{Success: true, Persisted: true}, nil
 }
 
@@ -277,6 +282,14 @@ func (r *cnProbeRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	return r.account, nil
 }
 
+// ListByPlatform runOnce 收集用（本测试只断言 Kira 分支行为，返回空集即可）。
+func (r *cnProbeRepo) ListByPlatform(_ context.Context, _ string) ([]Account, error) {
+	if r.account != nil {
+		return []Account{*r.account}, nil
+	}
+	return nil, nil
+}
+
 func (r *cnProbeRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
 	if v, ok := updates[cnExtraKey(r.account.Platform, cnBalanceExtraSuffixLow)]; ok {
 		if b, ok := v.(bool); ok {
@@ -300,8 +313,10 @@ func (r *cnProbeRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
 	return nil
 }
 
-// R18-F2：探测 200 + 余额文案 → 停调，且断言实际进入余额分支（四断言）。
-func TestCNProviderBalanceCheckProbeOne_InsufficientBalancePauses(t *testing.T) {
+// R18-F2 → D-QL-002 语义迁移：探测 200 + 余额文案 → 写 _balance_low 响应式信号
+// 标记；停调语义移交额度耗尽状态机（确认探针 → 官方恢复时间），响应式入口不再
+// 做 2×interval 滚动停调。zhipu 不在状态机管辖内 → 本路径不停调。
+func TestCNProviderBalanceCheckProbeOne_InsufficientBalanceMarksAndDelegates(t *testing.T) {
 	account := &Account{
 		ID: 71, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{"api_key": "sk-zhipu"},
@@ -318,16 +333,12 @@ func TestCNProviderBalanceCheckProbeOne_InsufficientBalancePauses(t *testing.T) 
 
 	svc.probeOne(context.Background(), account)
 
-	// 1) 命中余额不足 → 停调。
-	require.Equal(t, 1, repo.pauseCount, "insufficient balance response must pause")
-	// 2) 写入 _balance_low 快照标记。
+	// 1) 命中余额不足 → 写入 _balance_low 快照标记（响应式信号键保留，方案 §7）。
 	require.True(t, repo.balanceLow, "must mark balance_low snapshot")
-	// 3) reason 前缀为 cn_balance_low，且不是配额窗口 reason。
-	require.True(t, strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix))
+	// 2) 滚动冷却已退役：响应式入口自身不停调（停调到期时间=状态机给定值）。
+	require.Equal(t, 0, repo.pauseCount, "reactive entry must not park; parking belongs to the quota lifecycle state machine")
+	require.Nil(t, account.TempUnschedulableUntil)
 	require.False(t, IsAccountSchedulingThresholdReason(account.TempUnschedulableReason))
-	// 4) 期限 ≈ 2× 检测周期（默认 10min → 20min）。
-	require.NotNil(t, account.TempUnschedulableUntil)
-	require.WithinDuration(t, time.Now().Add(20*time.Minute), *account.TempUnschedulableUntil, 2*time.Minute)
 }
 
 // 探测 429（无余额文案）/ 401 / 超时 → 不停调不清除。
@@ -359,7 +370,7 @@ func TestCNProviderBalanceCheckProbeOne_NoPauseOnNonBalance(t *testing.T) {
 	}
 }
 
-// 先停调（余额前缀 reason）→ 探测 200 健康 → 前缀精确清除。
+// 余额前缀停调（滚动冷却退役后的存量/他入口写入）→ 健康 200 探测精确清除 + F1 翻标记。
 func TestCNProviderBalanceCheckProbeOne_PauseThenClearPrefix(t *testing.T) {
 	account := &Account{
 		ID: 73, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
@@ -369,13 +380,15 @@ func TestCNProviderBalanceCheckProbeOne_PauseThenClearPrefix(t *testing.T) {
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	svc := &CNProviderBalanceCheckService{accountRepo: repo, rateLimitSvc: rl, httpUpstream: &cnProbeCaptureUpstream{}, cfg: &config.Config{}}
 
-	// 第一次：余额不足 → 停调。
-	svc.httpUpstream = &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"error":{"message":"insufficient balance"}}`}
-	svc.probeOne(context.Background(), account)
-	require.Equal(t, 1, repo.pauseCount)
-	require.True(t, strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix))
+	// 预置一笔余额前缀停调（历史存量形态）+ balance_low 标记。
+	require.NoError(t, repo.SetTempUnschedulable(
+		context.Background(), account.ID, time.Now().Add(time.Hour), cnBalanceLowReason("余额 0 VND 低于阈值 0.00"),
+	))
+	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{
+		cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): true,
+	}))
 
-	// 第二次：健康 200（无余额文案）→ 精确清除余额前缀。
+	// 健康 200（无余额文案）→ 精确清除余额前缀停调。
 	svc.httpUpstream = &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"choices":[{"message":{"content":"hi"}}]}`}
 	svc.probeOne(context.Background(), account)
 	require.True(t, repo.cleared, "healthy probe must clear balance_low prefix")
@@ -475,7 +488,7 @@ func TestCNProviderBalanceCheckRunOnce_NativeFailProbesKimiDeepseek(t *testing.T
 
 	repo := &cnProbeRunOnceRepo{
 		byPlatform: map[string][]Account{
-			PlatformKimi:    {kimiPayg, kimiCoding},
+			PlatformKimi:     {kimiPayg, kimiCoding},
 			PlatformDeepseek: {deepseekPayg},
 		},
 		byID: map[int64]*Account{301: &kimiPayg, 302: &deepseekPayg, 303: &kimiCoding},
@@ -487,12 +500,12 @@ func TestCNProviderBalanceCheckRunOnce_NativeFailProbesKimiDeepseek(t *testing.T
 	probeUpstream := &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"choices":[{"message":{"content":"hi"}}]}`}
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:  repo,
+		accountRepo:    repo,
 		balanceService: balanceSvc,
-		quotaService: prober,
-		rateLimitSvc: rl,
-		httpUpstream: probeUpstream,
-		cfg:          &config.Config{},
+		quotaService:   prober,
+		rateLimitSvc:   rl,
+		httpUpstream:   probeUpstream,
+		cfg:            &config.Config{},
 	}
 	svc.runOnce()
 	require.ElementsMatch(t, []int64{301, 302}, probeUpstream.probedIDs)
@@ -513,15 +526,216 @@ func TestCNProviderBalanceCheckRunOnce_NativeSuccessNoProbe(t *testing.T) {
 	probeUpstream := &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"choices":[{"message":{"content":"hi"}}]}`}
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:  repo,
+		accountRepo:    repo,
 		balanceService: balanceSvc,
-		quotaService: prober,
-		rateLimitSvc: rl,
-		httpUpstream: probeUpstream,
-		cfg:          &config.Config{},
+		quotaService:   prober,
+		rateLimitSvc:   rl,
+		httpUpstream:   probeUpstream,
+		cfg:            &config.Config{},
 	}
 	svc.runOnce()
 	require.Empty(t, probeUpstream.probedIDs, "native-success payg must not be probed")
+}
+
+// ---- 外审 F5：Kira 判定先于 IsCodingPlan() 短路 ----
+
+// quotaService==nil 的 fallback 收集：zhipu 平台下 coding 模式的 Kira 账号必须
+// 被收集进 Kira 快照刷新链（余额探测请求发出即证明被收集）；非 Kira 的 coding
+// 账号维持跳过（无任何上游请求）。
+func TestCNProviderBalanceCheckRunOnce_FallbackCollectsKiraCodingAccount(t *testing.T) {
+	kiraCoding := Account{ID: 601, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode":  "coding",
+			"base_url":      "https://kiraai.vn/api/v1",
+			"kira_jwt":      "stale-jwt",
+			"kira_email":    "user@example.com",
+			"kira_password": "pw-secret",
+		}}
+	zhipuCoding := Account{ID: 602, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{"account_mode": "coding"}}
+	repo := &cnRunOnceExtraRepo{byPlatform: map[string][]Account{
+		PlatformZhipu: {kiraCoding, zhipuCoding},
+	}}
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			return http.StatusOK, kiraUsageSummaryFixture
+		}
+		return http.StatusNotFound, `{}`
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+	require.NotPanics(t, func() { svc.runOnce() })
+	// Kira coding 账号被收集：余额探测（dashboard JWT 链）请求已发出。
+	require.Len(t, upstream.requests, 1, "Kira coding 账号必须被 fallback 收集进快照刷新链")
+	require.Equal(t, "/api/user/usage", upstream.requests[0].URL.Path)
+}
+
+// Kira 账号周期链：快照刷新（quota + balance 双探）+ 耗尽信号交状态机；
+// 不再做独立周期停调/清除（打摆源退役）。未耗尽/状态机未注入时不交。
+func TestCNProviderBalanceCheckRunOnce_KiraSnapshotRefreshHandsOverToLifecycle(t *testing.T) {
+	kiraAccount := Account{ID: 611, Platform: PlatformKimi, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode":  AccountModePayG,
+			"base_url":      "https://kiraai.vn/api/v1",
+			"kira_jwt":      "stale-jwt",
+			"kira_email":    "user@example.com",
+			"kira_password": "pw-secret",
+		}}
+	repo := &cnProbeRunOnceRepo{
+		byPlatform: map[string][]Account{PlatformKimi: {kiraAccount}},
+		byID:       map[int64]*Account{611: &kiraAccount},
+	}
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			return http.StatusOK, kiraUsageSummaryFixture
+		}
+		return http.StatusNotFound, `{}`
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+	handover := &fakeQuotaLifecycleHandover{}
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+	svc.SetQuotaLifecycleHandover(handover)
+
+	// 快照未产出（quotaService 缺位）→ 不交状态机。
+	svc.runOnce()
+	require.Empty(t, handover.calls)
+	require.Len(t, upstream.requests, 1, "余额快照刷新必须发生（VND）")
+
+	// 耗尽快照 → 交状态机一次。
+	prober := &fakeCNQuotaProber{result: exhaustedKiraQuotaResult()}
+	svc.quotaService = prober
+	svc.runOnce()
+	require.Equal(t, []int64{611}, prober.probed, "Kira 账号必须进额度探测（kira_usage_snapshot 刷新）")
+	require.Equal(t, []int64{611}, handover.calls, "免费池耗尽信号必须交状态机")
+
+	// 未耗尽快照 → 不交。
+	prober.result = recoveredKiraQuotaResult()
+	svc.runOnce()
+	require.Equal(t, []int64{611}, handover.calls, "未耗尽不得交状态机")
+}
+
+// Kira/TH 分支不做独立周期停调/清除：即使快照刷新失败/成功，也不触发
+// SetTempUnschedulable / ClearTempUnschedulable（打摆源退役）。
+func TestCNProviderBalanceCheckRunOnce_KiraNoIndependentPauseOrClear(t *testing.T) {
+	kiraAccount := Account{ID: 612, Platform: PlatformKimi, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode":  AccountModePayG,
+			"base_url":      "https://kiraai.vn/api/v1",
+			"kira_jwt":      "stale-jwt",
+			"kira_email":    "user@example.com",
+			"kira_password": "pw-secret",
+		}}
+	repo := &cnProbeRepo{account: &kiraAccount}
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		return http.StatusInternalServerError, `{"error":"boom"}`
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+	svc.runOnce()
+	require.Equal(t, 0, repo.pauseCount, "Kira 分支不得做独立周期停调")
+	require.False(t, repo.cleared, "Kira 分支不得做独立周期清除（恢复交状态机 sweep）")
+}
+
+// TH 账号周期链：快照刷新（pass + usage CSV 双落库），不做任何停调/清除。
+func TestCNProviderBalanceCheckRunOnce_TokenHarborSnapshotRefresh(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.mu.Unlock()
+	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+
+	thAccount := tokenHarborTestAccount(621)
+	thAccount.Platform = PlatformOpenAI
+	thAccount.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	repo := &cnRunOnceExtraRepo{
+		byPlatform: map[string][]Account{PlatformOpenAI: {*thAccount}},
+		byID:       map[int64]*Account{621: thAccount},
+	}
+	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
+	thSvc.baseURL = fakeTH.server.URL
+
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: &config.Config{}}
+	svc.SetTokenHarborPassService(thSvc)
+	svc.runOnce()
+
+	loginPosts, billingHits := fakeTH.stats()
+	require.Equal(t, 1, loginPosts)
+	require.Equal(t, 1, billingHits, "TH 账号必须被周期链收集并刷新 pass 快照")
+	require.Equal(t, 1, fakeTH.usageCSVHits, "TH 账号必须被周期链收集并刷新 usage 快照")
+	require.Len(t, repo.extraWrites, 2, "th_pass_snapshot + th_usage_snapshot 双落库")
+	keys := map[string]bool{}
+	for _, w := range repo.extraWrites {
+		for k := range w {
+			keys[k] = true
+		}
+	}
+	require.True(t, keys[TokenHarborPassSnapshotExtraKey])
+	require.True(t, keys[TokenHarborUsageSnapshotExtraKey])
+}
+
+// exhaustedKiraQuotaResult 构造免费池耗尽的 Kira 用量快照结果（used>=limit）。
+func exhaustedKiraQuotaResult() *CNProviderQuotaProbeResult {
+	used, limit := 6_000_000.0, 6_000_000.0
+	return &CNProviderQuotaProbeResult{
+		Success: true,
+		Snapshot: &CNProviderSnapshotOutput{
+			Window: "daily", UsedTokens: &used, LimitTokens: &limit,
+		},
+	}
+}
+
+// recoveredKiraQuotaResult 构造未耗尽的 Kira 用量快照结果（used<limit）。
+func recoveredKiraQuotaResult() *CNProviderQuotaProbeResult {
+	used, limit := 1_000_000.0, 6_000_000.0
+	return &CNProviderQuotaProbeResult{
+		Success: true,
+		Snapshot: &CNProviderSnapshotOutput{
+			Window: "daily", UsedTokens: &used, LimitTokens: &limit,
+		},
+	}
+}
+
+// fakeQuotaLifecycleHandover 记录 OnUpstreamQuotaExhausted 交接的测试替身。
+type fakeQuotaLifecycleHandover struct {
+	calls []int64
+}
+
+func (f *fakeQuotaLifecycleHandover) OnUpstreamQuotaExhausted(_ context.Context, account *Account, _ string) error {
+	f.calls = append(f.calls, account.ID)
+	return nil
+}
+
+// cnRunOnceExtraRepo 支持 ListByPlatform + GetByID + UpdateExtra 记录（TH 刷新用）。
+type cnRunOnceExtraRepo struct {
+	AccountRepository
+	byPlatform  map[string][]Account
+	byID        map[int64]*Account
+	extraWrites []map[string]any
+}
+
+func (r *cnRunOnceExtraRepo) ListByPlatform(_ context.Context, platform string) ([]Account, error) {
+	return r.byPlatform[platform], nil
+}
+
+func (r *cnRunOnceExtraRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	return r.byID[id], nil
+}
+
+func (r *cnRunOnceExtraRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
+	r.extraWrites = append(r.extraWrites, updates)
+	return nil
 }
 
 // cnProbeRunOnceRepo 支持 ListByPlatform + GetByID，供 runOnce 集成测试。
@@ -552,7 +766,7 @@ func TestCNProviderBalanceCheckProbeQuota_ReloadsAndNoPauseWithoutThreshold(t *t
 	repo := &cnProbeRepo{account: account}
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil) // 无 settingService → 阈值评估不触发
 	svc := &CNProviderBalanceCheckService{
-		accountRepo: repo,
+		accountRepo:  repo,
 		quotaService: &fakeCNQuotaProber{},
 		rateLimitSvc: rl,
 		cfg:          &config.Config{},
@@ -569,8 +783,8 @@ func TestCNProviderBalanceCheckProbeQuota_ThresholdBreachPausesAndRecovers(t *te
 		ID: 402, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{"account_mode": "coding"},
 		Extra: map[string]any{
-			cnExtraKey(PlatformZhipu, cnExtraSuffix5hUsed):   100,
-			cnExtraKey(PlatformZhipu, cnExtraSuffix5hReset):  resetAt.Format(time.RFC3339),
+			cnExtraKey(PlatformZhipu, cnExtraSuffix5hUsed):  100,
+			cnExtraKey(PlatformZhipu, cnExtraSuffix5hReset): resetAt.Format(time.RFC3339),
 		},
 	}
 	repo := &cnProbeRepo{account: account}
@@ -586,7 +800,7 @@ func TestCNProviderBalanceCheckProbeQuota_ThresholdBreachPausesAndRecovers(t *te
 	rl.SetSettingService(NewSettingService(settingRepo, &config.Config{}))
 
 	svc := &CNProviderBalanceCheckService{
-		accountRepo: repo,
+		accountRepo:  repo,
 		quotaService: &fakeCNQuotaProber{},
 		rateLimitSvc: rl,
 		cfg:          &config.Config{},

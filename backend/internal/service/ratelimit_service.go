@@ -32,6 +32,9 @@ type RateLimitService struct {
 	tokenCacheInvalidator TokenCacheInvalidator
 	runtimeBlocker        AccountRuntimeBlocker
 	opsRepo               OpsRepository
+	// cnQuotaLifecycle 额度耗尽状态机响应式入口（D-QL-002，可选依赖；
+	// CN 402/429 响应式信号经此移交停调语义，见 ratelimit_cn_providers.go）。
+	cnQuotaLifecycle      CNQuotaLifecycleEntry
 	usageCacheMu          sync.RWMutex
 	usageCache            map[int64]*geminiUsageCacheEntry
 
