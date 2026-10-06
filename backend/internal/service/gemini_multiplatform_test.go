@@ -26,12 +26,6 @@ func (m *mockAccountRepoForGemini) ListTempUnschedulableAccounts(_ context.Conte
 	return nil, nil
 }
 
-// ListTokenHarborModelRateLimitedAccounts 是 D2 候选源接口的 no-op 桩（补齐
-// AccountRepository 新增方法；本文件用例不涉及 TokenHarbor 主动复探，恒无候选）。
-func (m *mockAccountRepoForGemini) ListTokenHarborModelRateLimitedAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
-	return nil, nil
-}
-
 // SetTempUnschedulableReason 是健康探测接口的 no-op 桩（与 ListTempUnschedulableAccounts 成对补齐）。
 func (m *mockAccountRepoForGemini) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
 	return nil

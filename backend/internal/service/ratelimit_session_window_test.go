@@ -60,12 +60,6 @@ func (m *sessionWindowMockRepo) ClearTempUnschedulable(_ context.Context, _ int6
 func (m *sessionWindowMockRepo) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
 	return nil, nil
 }
-// ListTokenHarborModelRateLimitedAccounts 是 D2 在 AccountRepository 接口新增的方法；
-// 本 mock 仅用于解除因 D2 进行中改动导致 service 测试包无法编译的阻断（rate-limit session
-// 窗口测试不调用此方法）。该桩待 D2 收敛其与真实候选源实现后删除。
-func (m *sessionWindowMockRepo) ListTokenHarborModelRateLimitedAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
-	return nil, nil
-}
 func (m *sessionWindowMockRepo) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
 	return nil
 }
