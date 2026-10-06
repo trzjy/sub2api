@@ -5,7 +5,6 @@ package service
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -121,140 +120,55 @@ func TestParseTokenHarborPeriodStart(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierUsesModelScope(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
+func TestTokenHarborFreeTierResetAt_PrefersBodyPeriodStart(t *testing.T) {
+	now := time.Now()
+	headers := http.Header{"Retry-After": []string{"120"}}
 
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(tokenHarborFreeExhaustedBodyAt(time.Now().Add(48 * time.Hour))),
-		"deepseek-v4.1-flash:free",
-	)
+	// 正文周期起点优先于 Retry-After 头（L4 恢复时间来源优先级）。
+	resetAt, ok := tokenHarborFreeTierResetAt(headers, []byte(tokenHarborFreeExhaustedBodyAt(now.Add(48*time.Hour))), now)
+	require.True(t, ok)
+	require.WithinDuration(t, now.Add(48*time.Hour).Truncate(time.Minute), resetAt, time.Minute)
 
-	require.False(t, handled, "账号不得被停调：付费直连路由仍可用")
-	require.Zero(t, repo.rateLimitedCalls, "不得写整号限流")
-	require.Zero(t, repo.tempCalls, "不得写临时停调")
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	call := repo.modelRateLimitCalls[0]
-	require.Equal(t, account.ID, call.accountID)
-	require.Equal(t, "deepseek-v4.1-flash:free", call.scope)
-	require.True(t, strings.HasPrefix(call.reason, tokenHarborFreeTierReasonPrefix))
-	require.NotContains(t, call.reason, "precise reset unknown")
-	require.WithinDuration(t, time.Now().Add(48*time.Hour).Truncate(time.Minute), call.resetAt, 2*time.Minute)
+	// 正文缺失时回退 Retry-After 头。
+	resetAt, ok = tokenHarborFreeTierResetAt(headers, []byte(`{"error":{"type":"free_tier_limit_reached"}}`), now)
+	require.True(t, ok)
+	require.WithinDuration(t, now.Add(120*time.Second), resetAt, 5*time.Second)
+
+	// 均无信号时不得伪造恢复倒数。
+	_, ok = tokenHarborFreeTierResetAt(http.Header{}, []byte(`{"error":{"type":"free_tier_limit_reached"}}`), now)
+	require.False(t, ok)
 }
 
-func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierHonorsRetryAfter(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
+// D-QL-003A 回归守卫：响应式免费层耗尽处理链已删除。TH 账号收到免费层耗尽类
+// 响应（402/429）不得再触发响应式停调——不写整号限流、不写临时停调、不写模型级
+// 限流；额度处置统一移交 CN 额度生命周期状态机（cn_quota_lifecycle_service.go
+// 的确认探针链）。
+func TestRateLimitService_HandleUpstreamError_TokenHarborQuotaExhaustedNoReactivePark(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "402_free_tier_exhausted", statusCode: http.StatusPaymentRequired},
+		{name: "429_free_tier_exhausted", statusCode: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &tokenHarborAccountRepoStub{}
+			svc := &RateLimitService{accountRepo: repo}
+			account := tokenHarborDeepSeekAccount()
 
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{"Retry-After": []string{"120"}},
-		[]byte(`{"error":{"message":"free-tier allowance exhausted for this rolling period","type":"free_tier_limit_reached"}}`),
-		"deepseek-v4.1-flash:free",
-	)
+			_ = svc.HandleUpstreamError(
+				context.Background(),
+				account,
+				tc.statusCode,
+				http.Header{},
+				[]byte(tokenHarborFreeExhaustedBody),
+				"deepseek-v4.1-flash:free",
+			)
 
-	require.False(t, handled)
-	require.Zero(t, repo.rateLimitedCalls)
-	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	call := repo.modelRateLimitCalls[0]
-	require.NotContains(t, call.reason, "precise reset unknown")
-	require.WithinDuration(t, time.Now().Add(120*time.Second), call.resetAt, 5*time.Second)
-}
-
-func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierWithoutSignalProbes(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
-
-	// 仅类型码、无时间信号：不伪造倒数，被动 30 分钟复探的恢复语义已摘除（D5），
-	// 恢复时刻未知，仅由主动复探（D2）经最小推理请求成功确认后清除。
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(`{"error":{"type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`),
-		"deepseek-v4.1-flash:free",
-	)
-
-	require.False(t, handled)
-	require.Zero(t, repo.rateLimitedCalls)
-	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	call := repo.modelRateLimitCalls[0]
-	require.Contains(t, call.reason, "precise reset unknown")
-	// 被动链不得产生 30 分钟被动恢复倒数：占位 reset_at 取远端哨兵值（远未来），
-	// 不再写 now+30min，模型持续受限直至主动复探清除。
-	require.NotContains(t, call.reason, "re-probe at reset")
-	require.Greater(t, call.resetAt.Sub(time.Now()), 300*24*time.Hour,
-		"无信号分支不得写 30 分钟被动恢复倒数，reset_at 应为持续受限的远端占位值")
-}
-
-func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierExtractsPaidModel(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
-
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(tokenHarborFreeExhaustedBody),
-	)
-
-	require.False(t, handled)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "deepseek-v4.1-flash", repo.modelRateLimitCalls[0].scope)
-}
-
-func TestRateLimitService_HandleUpstreamError_TokenHarborFreeTierWithoutModelSkipsAllWrites(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
-
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(`{"error":{"message":"free-tier allowance exhausted for this rolling period","type":"free_tier_limit"}}`),
-	)
-
-	// 无模型名不猜，也不扩大为整号限流：零写入，本次换号。
-	require.False(t, handled)
-	require.Empty(t, repo.modelRateLimitCalls)
-	require.Zero(t, repo.rateLimitedCalls)
-	require.Zero(t, repo.tempCalls)
-}
-
-func TestRateLimitService_HandleUpstreamError_NonTokenHarborUpstreamFallsThrough(t *testing.T) {
-	repo := &tokenHarborAccountRepoStub{}
-	svc := &RateLimitService{accountRepo: repo}
-	account := tokenHarborDeepSeekAccount()
-	account.Credentials = map[string]any{
-		"base_url": "https://api.deepseek.com/v1",
+			// 响应式停调链已退役：零停调、零限流写入。
+			require.Zero(t, repo.tempCalls, "不得写临时停调（响应式链已删除）")
+			require.Zero(t, repo.rateLimitedCalls, "不得写整号限流（响应式链已删除）")
+			require.Empty(t, repo.modelRateLimitCalls, "不得写模型级限流（响应式链已删除）")
+		})
 	}
-
-	handled := svc.HandleUpstreamError(
-		context.Background(),
-		account,
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(tokenHarborFreeExhaustedBody),
-		"deepseek-chat",
-	)
-
-	// 非 TokenHarbor 上游不得套用：不写模型级，走既有链。
-	require.False(t, handled)
-	require.Empty(t, repo.modelRateLimitCalls)
 }
