@@ -1,0 +1,324 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
+)
+
+const openAIAPIKeyHealthBreakerReason = "openai_apikey_health_breaker"
+
+// Health breaker tier identifiers recorded into TempUnschedState.Tier.
+const (
+	HealthBreakerTierWatch   = 1
+	HealthBreakerTierWarning = 2
+	HealthBreakerTierTrip    = 3
+)
+
+// healthBreakerSupportedPlatforms is the explicit allowlist of platforms the breaker
+// is designed to observe. It deliberately does NOT fold unknown platforms into
+// "openai" the way NormalizeOpenAICompatiblePlatform does: a non-OpenAI account
+// (anthropic / claude / bedrock / gemini / empty / typo) must never be swept into
+// the breaker scope, even if a future refactor starts invoking the observers on a
+// shared failure path. grok is handled separately via IncludeGrok.
+var healthBreakerSupportedPlatforms = map[string]struct{}{
+	PlatformOpenAI:   {},
+	PlatformDeepseek: {},
+	PlatformKimi:     {},
+	PlatformZhipu:    {},
+	PlatformMiniMax:  {},
+	PlatformOther:    {},
+}
+
+// isOpenAIAPIKeyHealthBreakerAccount reports whether the breaker may attribute
+// failures to this account. Coverage:
+//   - API-key accounts qualify, plus CodeBuddy shadow accounts (OAuth shadows
+//     with quota_dimension=codebuddy); all other OAuth / PAT / Bedrock accounts
+//     are still excluded, so e.g. OpenAI Spark shadow semantics are untouched.
+//   - Platform must be an explicitly supported OpenAI-compatible platform (see
+//     healthBreakerSupportedPlatforms) AND be listed in settings.ScopePlatforms
+//     (default: openai/deepseek/kimi/zhipu/minimax/other). Unknown platforms are
+//     rejected by the allowlist and can never match.
+//   - grok is excluded unless settings.IncludeGrok is set.
+//   - The legacy pool_mode restriction is intentionally removed: the breaker now
+//     covers all API-key accounts on the supported OpenAI-compatible platforms.
+func isOpenAIAPIKeyHealthBreakerAccount(account *Account, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
+	if account == nil {
+		return false
+	}
+	// Admit CodeBuddy shadows alongside API-key accounts (plan §3 T1 of
+	// codebuddy-shadow-429-cooldown-recovery): their 429 failures previously
+	// escaped both cooldown and breaker visibility entirely. Reuse the package
+	// SSOT predicate isCodeBuddyShadowAccount (codebuddy_gateway_forward.go) —
+	// do not duplicate it. Dependency: only after T3 lands do CodeBuddy failures
+	// carry the UpstreamFailoverError wrapper that classifyOpenAIAPIKeyHealthFailure
+	// can count; the two ship in the same release. All later gates (platform
+	// allowlist, ScopePlatforms, IncludeGrok) apply unchanged — a CodeBuddy
+	// shadow on platform=deepseek is already inside the default scope.
+	if account.Type != AccountTypeAPIKey && !isCodeBuddyShadowAccount(account) {
+		return false
+	}
+	if settings == nil {
+		return false
+	}
+	platform := strings.ToLower(account.Platform)
+	if platform == PlatformGrok {
+		return settings.IncludeGrok
+	}
+	if _, ok := healthBreakerSupportedPlatforms[platform]; !ok {
+		return false
+	}
+	for _, p := range settings.ScopePlatforms {
+		if strings.ToLower(p) == platform {
+			return true
+		}
+	}
+	return false
+}
+
+// computeHealthBreakerThresholds derives the L1 (watch) and L2 (warning) trigger
+// counts from FailureThreshold and the configured ratios. They are guaranteed to
+// satisfy 1 <= watch < warning < trip, so the three tiers never collapse onto a
+// single boundary (degenerate trip<3 inputs are clamped by the Lua side too).
+func (s *OpenAIAPIKeyHealthBreakerSettings) computeHealthBreakerThresholds() (watch, warning, trip int) {
+	trip = s.FailureThreshold
+	if trip < 1 {
+		trip = 1
+	}
+	watch = int(math.Floor(float64(trip) * s.WatchRatio))
+	warning = int(math.Floor(float64(trip) * s.WarningRatio))
+	if watch < 1 {
+		watch = 1
+	}
+	if warning < 1 {
+		warning = 1
+	}
+	if warning >= trip {
+		warning = trip - 1
+	}
+	if warning < 1 {
+		warning = 1
+	}
+	if watch >= warning {
+		watch = warning - 1
+	}
+	if watch < 1 {
+		watch = 1
+	}
+	return watch, warning, trip
+}
+
+func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return 0, nil, false
+	}
+
+	var failoverErr *UpstreamFailoverError
+	if errors.As(err, &failoverErr) {
+		// These failures already have dedicated recovery/state handling or are not
+		// attributable to the selected account.
+		if failoverErr.IsCredentialFailure() ||
+			failoverErr.RequestScopedTransient ||
+			failoverErr.RetryableOnSameAccount ||
+			failoverErr.Scope == GatewayFailureScopeRequest ||
+			failoverErr.Scope == GatewayFailureScopeProvider {
+			return failoverErr.StatusCode, failoverErr.ResponseBody, false
+		}
+		if failoverErr.StatusCode == http.StatusTooManyRequests || failoverErr.StatusCode >= http.StatusInternalServerError {
+			return failoverErr.StatusCode, failoverErr.ResponseBody, true
+		}
+		return failoverErr.StatusCode, failoverErr.ResponseBody, false
+	}
+
+	var imageErr *OpenAIImagesUpstreamError
+	if errors.As(err, &imageErr) {
+		if imageErr.StatusCode == http.StatusTooManyRequests || imageErr.StatusCode >= http.StatusInternalServerError {
+			return imageErr.StatusCode, []byte(strings.TrimSpace(imageErr.Message)), true
+		}
+	}
+	return 0, nil, false
+}
+
+// ObserveOpenAIAPIKeyHealthFailure records an upstream failure against the account's
+// rolling health window and applies the three-tier circuit breaker:
+//
+//   - L1 watch:   count >= watch threshold    -> structured log only (no scheduling impact)
+//   - L2 warning: count >= warning threshold  -> structured log + ops alert
+//   - L3 trip:    count >= failure threshold  -> SetTempUnschedulable + cooldown (existing behavior)
+//
+// Tier transitions are debounced in Redis: each tier escalates at most once per
+// window, and the tier only ever rises within a window. A nil/disabled settings,
+// an out-of-scope account, or an ineligible error makes this a no-op, identical to
+// the prior behavior when the breaker was disabled.
+func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context, account *Account, upstreamErr error) bool {
+	if s == nil || s.openAIAPIKeyHealth == nil || s.settingService == nil || s.accountRepo == nil || account == nil {
+		return false
+	}
+	settings, err := s.settingService.GetOpenAIAPIKeyHealthBreakerSettings(ctx)
+	if err != nil {
+		logger.L().Warn("openai.apikey_health_breaker_settings_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		return false
+	}
+	if settings == nil || !settings.Enabled {
+		return false
+	}
+	if !isOpenAIAPIKeyHealthBreakerAccount(account, settings) {
+		return false
+	}
+
+	statusCode, responseBody, eligible := classifyOpenAIAPIKeyHealthFailure(upstreamErr)
+	if !eligible {
+		return false
+	}
+
+	watchThreshold, warningThreshold, tripThreshold := settings.computeHealthBreakerThresholds()
+	result, err := s.openAIAPIKeyHealth.RecordOpenAIAPIKeyHealthFailure(ctx, account.ID, settings.WindowMinutes, watchThreshold, warningThreshold, tripThreshold)
+	if err != nil {
+		logger.L().Warn("openai.apikey_health_breaker_record_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		return false
+	}
+
+	// L1 watch: informational log only, does not touch scheduling.
+	if result.TrippedWatch {
+		logger.L().Info("openai.apikey_health_watch",
+			zap.Int64("account_id", account.ID),
+			zap.Int64("failure_count", result.Count),
+			zap.Int("watch_threshold", watchThreshold),
+			zap.Int("window_minutes", settings.WindowMinutes),
+			zap.Int("upstream_status", statusCode),
+		)
+	}
+
+	// L2 warning: log + a queryable ops alert. Skipped when this same record also
+	// trips (the trip is the terminal, more severe action).
+	if result.TrippedWarning && !result.TrippedTrip {
+		logger.L().Warn("openai.apikey_health_warning",
+			zap.Int64("account_id", account.ID),
+			zap.Int64("failure_count", result.Count),
+			zap.Int("warning_threshold", warningThreshold),
+			zap.Int("window_minutes", settings.WindowMinutes),
+			zap.Int("upstream_status", statusCode),
+		)
+		s.recordHealthWarningAlert(ctx, account, statusCode, result.Count, warningThreshold, settings.WindowMinutes)
+	}
+
+	// L3 trip: open the circuit (existing behavior preserved).
+	if result.TrippedTrip {
+		return s.tripAccountForHealth(ctx, account, statusCode, responseBody, result.Count, settings)
+	}
+	return false
+}
+
+// healthBreakerTripCooldown429 caps the L3 trip cooldown for 429 trips. An RPM
+// limit (e.g. "requests-per-minute limit exceeded") resets within a minute, so
+// parking the account for the full 5xx-oriented CooldownMinutes idles it several
+// minutes past recovery; the recovery probe still shortens any overshoot further.
+const healthBreakerTripCooldown429 = time.Minute
+
+// tripAccountForHealth applies the L3 trip: persist temp-unschedulable, block
+// scheduling in-process, and keep the cache in sync. It mirrors the pre-tiering
+// behavior exactly for the trip path, except that 429 trips use the short
+// healthBreakerTripCooldown429 cooldown instead of the configured minutes.
+func (s *RateLimitService) tripAccountForHealth(ctx context.Context, account *Account, statusCode int, responseBody []byte, count int64, settings *OpenAIAPIKeyHealthBreakerSettings) bool {
+	now := time.Now()
+	cooldown := time.Duration(settings.CooldownMinutes) * time.Minute
+	if statusCode == http.StatusTooManyRequests && cooldown > healthBreakerTripCooldown429 {
+		cooldown = healthBreakerTripCooldown429
+	}
+	until := now.Add(cooldown)
+	state := &TempUnschedState{
+		UntilUnix:            until.Unix(),
+		TriggeredAtUnix:      now.Unix(),
+		StatusCode:           statusCode,
+		MatchedKeyword:       openAIAPIKeyHealthBreakerReason,
+		RuleIndex:            -1,
+		ErrorMessage:         truncateTempUnschedMessage(responseBody, tempUnschedMessageMaxBytes),
+		TriggerCount:         count,
+		TriggerThreshold:     settings.FailureThreshold,
+		TriggerWindowMinutes: settings.WindowMinutes,
+		Tier:                 HealthBreakerTierTrip,
+	}
+	reasonBytes, _ := json.Marshal(state)
+	reason := string(reasonBytes)
+	if reason == "" {
+		reason = fmt.Sprintf("%s: %d failures in %d minute(s)", openAIAPIKeyHealthBreakerReason, count, settings.WindowMinutes)
+	}
+
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := s.accountRepo.SetTempUnschedulable(persistCtx, account.ID, until, reason); err != nil {
+		logger.L().Warn("openai.apikey_health_breaker_persist_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		return false
+	}
+
+	if account.TempUnschedulableUntil == nil || account.TempUnschedulableUntil.Before(until) {
+		account.TempUnschedulableUntil = &until
+		account.TempUnschedulableReason = reason
+	}
+	s.notifyAccountSchedulingBlocked(account, until, openAIAPIKeyHealthBreakerReason)
+	if s.tempUnschedCache != nil {
+		if err := s.tempUnschedCache.SetTempUnsched(persistCtx, account.ID, state); err != nil {
+			logger.L().Warn("openai.apikey_health_breaker_cache_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+		}
+	}
+	logger.L().Warn("openai.apikey_health_breaker_tripped",
+		zap.Int64("account_id", account.ID),
+		zap.Int64("failure_count", count),
+		zap.Int("failure_threshold", settings.FailureThreshold),
+		zap.Int("window_minutes", settings.WindowMinutes),
+		zap.Duration("cooldown", cooldown),
+		zap.Int("upstream_status", statusCode),
+		zap.Time("until", until),
+	)
+	return true
+}
+
+// recordHealthWarningAlert writes a queryable ops alert event for the L2 warning so
+// the warning is not only a log line. It is best-effort: a missing ops repository or
+// a monitoring-disabled backend does not fail the breaker.
+func (s *RateLimitService) recordHealthWarningAlert(ctx context.Context, account *Account, statusCode int, count int64, warningThreshold, windowMinutes int) {
+	if s == nil || s.opsRepo == nil {
+		return
+	}
+	metric := float64(count)
+	threshold := float64(warningThreshold)
+	event := &OpsAlertEvent{
+		Severity:       "P1",
+		Status:         OpsAlertStatusFiring,
+		Title:          "账号健康熔断预警 (L2 warning)",
+		Description:    fmt.Sprintf("account %d reached the health-breaker warning tier: %d failures within %d min (warning threshold %d)", account.ID, count, windowMinutes, warningThreshold),
+		MetricValue:    &metric,
+		ThresholdValue: &threshold,
+		Dimensions:     map[string]any{"account_id": account.ID, "platform": account.Platform, "reason": openAIAPIKeyHealthBreakerReason},
+		FiredAt:        time.Now(),
+	}
+	if _, err := s.opsRepo.CreateAlertEvent(ctx, event); err != nil {
+		logger.L().Warn("openai.apikey_health_warning_alert_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+	}
+}
+
+// ObserveOpenAIAPIKeyHealthSuccess is intentionally a no-op.
+//
+// The rolling health window and the tier state both carry their own TTL
+// (window_minutes) and decay by time on their own, so a healthy account's counts
+// expire naturally without an explicit reset. The L3 trip path already persists the
+// full block state via SetTempUnschedulable, so there is nothing left to clear here
+// either.
+//
+// Clearing on every successful request was removed because it both (a) defeats the
+// breaker for exactly the flaky-chronic-failure channels it exists to catch — each
+// success would reset the count so the threshold is never reached — and (b) added a
+// Redis write to the hot path for every in-scope account's successful request, which
+// the original design explicitly forbade ("must not add a Redis round trip to the
+// hot path").
+func (s *RateLimitService) ObserveOpenAIAPIKeyHealthSuccess(ctx context.Context, account *Account) {
+	// Intentionally a no-op; see comment above.
+}

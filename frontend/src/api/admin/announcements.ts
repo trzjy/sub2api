@@ -1,0 +1,98 @@
+/**
+ * Admin Announcements API endpoints
+ */
+
+import { apiClient } from '../client'
+import type {
+  Announcement,
+  AnnouncementUserReadStatus,
+  BasePaginationResponse,
+  CreateAnnouncementRequest,
+  UpdateAnnouncementRequest
+} from '@/types'
+
+export async function list(
+  page: number = 1,
+  pageSize: number = 20,
+  filters?: {
+    status?: string
+    search?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  },
+  options?: {
+    signal?: AbortSignal
+  }
+): Promise<BasePaginationResponse<Announcement>> {
+  const { data } = await apiClient.get<BasePaginationResponse<Announcement>>('/admin/announcements', {
+    params: { page, page_size: pageSize, ...filters },
+    signal: options?.signal
+  })
+  return data
+}
+
+export async function getById(id: number): Promise<Announcement> {
+  const { data } = await apiClient.get<Announcement>(`/admin/announcements/${id}`)
+  return data
+}
+
+export async function create(request: CreateAnnouncementRequest): Promise<Announcement> {
+  const { data } = await apiClient.post<Announcement>('/admin/announcements', request)
+  return data
+}
+
+export async function update(id: number, request: UpdateAnnouncementRequest): Promise<Announcement> {
+  const { data } = await apiClient.put<Announcement>(`/admin/announcements/${id}`, request)
+  return data
+}
+
+export async function deleteAnnouncement(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/announcements/${id}`)
+  return data
+}
+
+export async function uploadImage(id: number, file: File): Promise<{ url: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  // apiClient 实例级默认 Content-Type 为 application/json，必须在此显式覆盖，
+  // 否则后端 ParseMultipartForm 收到 application/json 直接报错（boundary 由 axios/浏览器补齐）。
+  const { data } = await apiClient.post<{ url: string }>(`/admin/announcements/${id}/upload-image`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export async function getReadStatus(
+  id: number,
+  page: number = 1,
+  pageSize: number = 20,
+  filters?: {
+    search?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  },
+  options?: {
+    signal?: AbortSignal
+  }
+): Promise<BasePaginationResponse<AnnouncementUserReadStatus>> {
+  const { data } = await apiClient.get<BasePaginationResponse<AnnouncementUserReadStatus>>(
+    `/admin/announcements/${id}/read-status`,
+    {
+      params: { page, page_size: pageSize, ...filters },
+      signal: options?.signal
+    }
+  )
+  return data
+}
+
+const announcementsAPI = {
+  list,
+  getById,
+  create,
+  update,
+  delete: deleteAnnouncement,
+  uploadImage,
+  getReadStatus
+}
+
+export default announcementsAPI

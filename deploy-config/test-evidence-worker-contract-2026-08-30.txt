@@ -1,0 +1,43 @@
+闲鱼自动发货 Worker 契约测试 —— 复现证据
+================================================
+日期：2026-08-30
+主机：本机（zjy）Linux
+Python：3.12.3
+复现方式：干净 venv（python3 -m venv）→ 仅安装 backend-web/requirements-test.txt → 运行
+命令：
+  python3 -m venv /tmp/xianyu-clean-venv
+  /tmp/xianyu-clean-venv/bin/pip install -r deploy-config/xianyu-auto-reply-src/backend-web/requirements-test.txt
+  cd deploy-config/xianyu-auto-reply-src
+  PYTHONPATH=backend-web:. /tmp/xianyu-clean-venv/bin/python -m pytest backend-web/tests -p asyncio -v
+
+注：requirements-test.txt 已补齐 import 链缺失的生产依赖（asyncmy/pymysql/requests/playwright/patchright 等），
+    使"仅按该文件安装即可复现"成立；未修改任何生产代码语义。
+
+结果（完整输出）：
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /tmp/xianyu-clean-venv/bin/python
+cachedir: .pytest_cache
+rootdir: /mnt/data/sub2api/deploy-config/xianyu-auto-reply-src/backend-web
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 12 items
+
+backend-web/tests/test_internal_api.py::test_service_or_user_accepts_internal_token PASSED [  8%]
+backend-web/tests/test_internal_api.py::test_service_or_user_rejects_invalid_token PASSED [ 16%]
+backend-web/tests/test_internal_api.py::test_service_or_user_returns_none_for_non_admin PASSED [ 25%]
+backend-web/tests/test_internal_api.py::test_internal_api_routes_registered PASSED [ 33%]
+backend-web/tests/test_internal_api.py::test_jwt_qr_status_rejects_unknown_and_non_owner PASSED [ 41%]
+backend-web/tests/test_internal_api.py::test_internal_api_prefix_mounted_under_v1 PASSED [ 50%]
+backend-web/tests/test_internal_api.py::test_qr_status_enforces_session_owner PASSED [ 58%]
+backend-web/tests/test_internal_api.py::test_delivery_result_client_contract PASSED [ 66%]
+backend-web/tests/test_internal_api.py::test_delivery_result_client_unconfigured_skips PASSED [ 75%]
+backend-web/tests/test_internal_api.py::test_internal_send_message_missing_send_status_falls_back_unknown PASSED [ 83%]
+backend-web/tests/test_internal_api.py::test_internal_send_message_rejects_unknown_send_status PASSED [ 91%]
+backend-web/tests/test_internal_api.py::test_delivery_receipt_confirmed_only_on_explicit_success PASSED [100%]
+
+=============================== warnings summary ===============================
+  passlib/utils/__init__.py:854: DeprecationWarning: 'crypt' is deprecated (Python 3.13)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 12 passed, 1 warning in 6.49s =========================

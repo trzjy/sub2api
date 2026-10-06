@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily sub2api local backup (pg/mysql/minio/data-config)
+
+[Timer]
+# 每日 03:30，避开整点；与 sub2api-cleanup(04:00) 错峰
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

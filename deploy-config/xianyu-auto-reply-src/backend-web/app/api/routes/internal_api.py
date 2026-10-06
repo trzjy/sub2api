@@ -1,0 +1,1004 @@
+"""
+主程序内网服务路由（internal API）
+
+供 Sub2API 主程序以 X-Worker-Token（= SUB2API_INTERNAL_TOKEN）调用。
+所有端点复用现有 AccountService / ItemService / qr_login_manager，
+不复制第二套账号、商品或登录存储。
+
+注意：
+- 本模块使用独立前缀 /api/v1/internal/...，仅限内网可达，避免与既有 /api/v1/... 路由冲突。
+- 服务令牌是「高权限全局系统令牌」：绑定到现有管理员用户（owner 语义沿袭管理员全局
+  作用域），唯一受信调用方是主程序。因此本路由不提供多租户隔离——这是明确的权威语义，
+  不属于"跨租户越权"缺陷。对普通 JWT 用户回退到各自 owner 隔离仍有效。
+- 账号/商品操作仍逐路由校验目标资源归属（管理员全局 = 显式授权）。
+"""
+from __future__ import annotations
+
+import math
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+
+from app.api import deps
+from app.core.config import get_settings
+from common.schemas.common import ApiResponse
+from common.services.receipt_outcome import ReceiptOutcome, send_status_from_receipt
+from common.utils.auth_scope import resolve_owner_scope
+
+router = APIRouter(prefix="/internal", tags=["主程序内网服务"])
+
+settings = get_settings()
+
+# 闲鱼 Worker 写入时间戳所用时区（Asia/Shanghai / UTC+8，无夏令时）。
+# 续期日志 created_at 为无时区北京时间，归一为此时区后比较，避免 24h 级新鲜度判断偏差约 8 小时。
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _as_utc(dt: Optional[datetime], assume_shanghai: bool) -> Optional[datetime]:
+    """将可能为 naive 的 datetime 归一为 UTC 感知时间。
+
+    assume_shanghai=True 时 naive 视为北京时间（续期日志写入约定）；
+    assume_shanghai=False 时 naive 视为 UTC（账号 last_login_at 写入约定）。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=SHANGHAI_TZ if assume_shanghai else timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _latest_renew_results(
+    session, account_ids: List[str], login_times: Dict[str, Optional[datetime]]
+) -> Dict[str, Dict[str, Any]]:
+    """查询每个账号「当前登录会话内」最近一次接口续期结果（来自定时续期日志表）。
+
+    主程序据此推导 Cookie 健康度（valid/invalid/expiring），是 Cookie 状态的真实数据源。
+
+    - 仅采纳 created_at 晚于该账号最近一次登录时间的续期行：QR 重新登录后，旧会话的失败行
+      不会被误报为当前状态（fail-open：无续期行时主程序按 unknown 处理，而非误判 invalid）。
+    - 同一时刻出现并列记录时按 id 决胜（取最大 id），保证确定性，避免成功/失败并列导致状态错乱。
+    - 查询失败时返回空投影（fail-open）：续期明细缺失只影响健康度精度，绝不能阻断账号同步。
+    """
+    import logging
+
+    from sqlalchemy import select
+
+    from common.models.scheduled_api_cookie_renew_log import ScheduledApiCookieRenewLog
+
+    if not account_ids:
+        return {}
+    try:
+        rows = (
+            await session.execute(
+                select(ScheduledApiCookieRenewLog).where(
+                    ScheduledApiCookieRenewLog.account_id.in_(account_ids)
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 - 投影增强字段失败不应拖垮账号同步
+        logging.getLogger(__name__).warning(
+            "查询续期日志投影失败，本次 /cookies/details 不携带 last_renew_* 字段", exc_info=True
+        )
+        return {}
+
+    best: Dict[str, ScheduledApiCookieRenewLog] = {}
+    for row in rows:
+        login_at = _as_utc(login_times.get(row.account_id), assume_shanghai=False)
+        renew_at = _as_utc(row.created_at, assume_shanghai=True)
+        # 登录前（或登录当刻）的续期行属上一会话，忽略；无登录时间信息时保守保留。
+        if login_at is not None and renew_at is not None and not renew_at > login_at:
+            continue
+        cur = best.get(row.account_id)
+        if cur is None:
+            best[row.account_id] = row
+            continue
+        cur_at = _as_utc(cur.created_at, assume_shanghai=True)
+        # 先比 created_at，再比 id，保证并列时确定性取最新一条。
+        if (renew_at, row.id) > (cur_at, cur.id):
+            best[row.account_id] = row
+    out: Dict[str, Dict[str, Any]] = {}
+    for account_id, row in best.items():
+        out[account_id] = {
+            "status": row.status,
+            "error_message": row.error_message or "",
+            "created_at": row.created_at,
+        }
+    return out
+
+
+def _account_display_nickname(account) -> str:
+    """账号昵称兜底链：display_name → Cookie tracknick 解码 → account_id。
+
+    Worker 登录流程不总是回填 display_name；闲鱼登录态 Cookie 自带
+    URL 编码的 tracknick，可作为可读昵称兜底。
+    """
+    if account.display_name:
+        return account.display_name
+    try:
+        for part in (account.cookie or "").split(";"):
+            part = part.strip()
+            if part.startswith("tracknick="):
+                from urllib.parse import unquote
+
+                nick = unquote(part.split("=", 1)[1].strip())
+                if nick:
+                    return nick
+    except Exception:
+        pass
+    return account.account_id
+
+
+@router.get("/cookies/details")
+async def internal_list_cookie_details(
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """账号投影列表（主程序账号同步用）：管理员可见全部账号。"""
+    from app.services.account_service import AccountService
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    accounts = await AccountService(session).list_accounts(owner_id)
+    renew_latest = await _latest_renew_results(
+        session,
+        [a.account_id for a in accounts],
+        {a.account_id: a.last_login_at for a in accounts},
+    )
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data=[
+            {
+                "account_id": account.account_id,
+                "nickname": _account_display_nickname(account),
+                "enabled": account.status not in {"inactive", "disabled", "suspended", "deleted", "logged_out"},
+                "status": account.status,
+                "remark": account.remark or "",
+                "disable_reason": account.disable_reason or "",
+                "last_login_at": account.last_login_at.isoformat() if account.last_login_at else None,
+                "last_refresh_at": account.last_refresh_at.isoformat() if account.last_refresh_at else None,
+                "last_renew_status": (renew_latest.get(account.account_id) or {}).get("status", ""),
+                "last_renew_at": (
+                    renew_latest[account.account_id]["created_at"].isoformat()
+                    if account.account_id in renew_latest
+                    else None
+                ),
+                "last_renew_error": (renew_latest.get(account.account_id) or {}).get("error_message", ""),
+            }
+            for account in accounts
+        ],
+    )
+
+
+@router.put("/cookies/{account_id}/status")
+async def internal_update_account_status(
+    account_id: str,
+    payload: dict,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """账号启停（真实编排：更新 XYAccount 状态并启停 WebSocket 任务）。"""
+    from app.services.account_service import AccountService
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    account_service = AccountService(session)
+    account = await account_service.get_account_for_user(owner_id, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    enabled = bool(payload.get("enabled", True))
+    from app.api.routes.cookies import _update_account_status_and_task
+
+    success, error_message = await _update_account_status_and_task(
+        account, enabled, account_service
+    )
+    if not success:
+        return ApiResponse(
+            success=False,
+            message=error_message or ("账号启动失败" if enabled else "账号停止失败"),
+        )
+    return ApiResponse(success=True, message="账号状态已更新", data={"account_id": account_id, "enabled": enabled})
+
+
+@router.post("/cookies/renew-login")
+async def internal_renew_account_login(
+    payload: dict,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """Cookie 续期（复用既有 /api/v1/cookies/renew-login 的实现语义）。"""
+    from app.api.routes.cookies import renew_account_login
+
+    account_ids = payload.get("account_ids") or []
+    if not isinstance(account_ids, list) or not account_ids:
+        return ApiResponse(success=False, message="请选择至少一个账号")
+    return await renew_account_login(account_ids=account_ids, current_user=service_user)
+
+
+@router.post("/cookies/{account_id}/clear-credentials")
+async def internal_clear_account_credentials(
+    account_id: str,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """退出/清除凭证：停止 WebSocket 任务并删除 Worker 侧账号（含 Cookie）。
+
+    主程序侧账号投影保留（关联商品/订单仍可追溯），仅标记为 disabled。
+    """
+    from app.services.account_service import AccountService
+    from app.services.websocket_client import websocket_client
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    account_service = AccountService(session)
+    account = await account_service.get_account_for_user(owner_id, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    stop_result = await websocket_client.stop_account(account_id)
+    if not isinstance(stop_result, dict) or not stop_result.get("success"):
+        msg = (
+            stop_result.get("message", "停止账号任务失败")
+            if isinstance(stop_result, dict)
+            else "停止账号任务失败"
+        )
+        raise HTTPException(status_code=502, detail=f"停止账号任务失败，未清除凭证: {msg}")
+    await account_service.delete_account(account)
+    return ApiResponse(success=True, message="账号凭证已清除", data={"account_id": account_id})
+
+
+@router.get("/items/cookie/{cookie_id}")
+async def internal_list_items_by_cookie(
+    cookie_id: str,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """商品投影列表（按账号），主程序商品同步用。"""
+    from app.services.account_service import AccountService
+    from app.services.item_service import ItemService
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    account_service = AccountService(session)
+    account = await account_service.get_account_for_user(owner_id, cookie_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    items = await ItemService(session).list_items(owner_id, cookie_id)
+    return ApiResponse(success=True, message="查询成功", data=items or [])
+
+
+@router.get("/cards")
+async def internal_list_cards(
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """卡券列表（主程序发货模板管理用）。
+
+    返回卡券基础字段与关联商品 ID 列表；不含 api_config 等敏感配置。
+    """
+    from sqlalchemy import select
+
+    from common.models.card import Card
+    from common.models.card_item_relation import CardItemRelation
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    card_stmt = select(Card).order_by(Card.id)
+    if owner_id is not None:
+        card_stmt = card_stmt.where(Card.user_id == owner_id)
+    cards = (await session.execute(card_stmt)).scalars().all()
+    rel_stmt = select(CardItemRelation.card_id, CardItemRelation.item_id)
+    if owner_id is not None:
+        rel_stmt = rel_stmt.where(CardItemRelation.user_id == owner_id)
+    relations = ((await session.execute(rel_stmt))).all()
+    item_ids_by_card: Dict[int, List[str]] = {}
+    for card_id, item_id in relations:
+        item_ids_by_card.setdefault(card_id, []).append(item_id)
+    data = [
+        {
+            "id": card.id,
+            "name": card.name,
+            "type": card.type,
+            "description": card.description or "",
+            "enabled": bool(card.enabled),
+            "item_ids": item_ids_by_card.get(card.id, []),
+        }
+        for card in cards
+    ]
+    return ApiResponse(success=True, message="查询成功", data=data)
+
+
+@router.put("/cards/{card_id}/description")
+async def internal_update_card_description(
+    card_id: int,
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """更新卡券发货模板（description，即买家收到的消息格式）。"""
+    from sqlalchemy import select
+
+    from common.models.card import Card
+    from common.utils.auth_scope import resolve_owner_scope
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    description = str((body or {}).get("description") or "").strip()[:2000]
+    card_stmt = select(Card).where(Card.id == card_id)
+    if owner_id is not None:
+        card_stmt = card_stmt.where(Card.user_id == owner_id)
+    card = ((await session.execute(card_stmt))).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="卡券不存在")
+    card.description = description or None
+    await session.commit()
+    return ApiResponse(
+        success=True,
+        message="发货模板已更新",
+        data={"id": card.id, "description": card.description or ""},
+    )
+
+
+@router.get("/delivery-template")
+async def internal_get_delivery_template(
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """全局发货模板（买家收到的发货消息，对所有卡券统一生效，不逐卡券）。"""
+    from sqlalchemy import select
+
+    from common.models.system_setting import SystemSetting
+    from common.services.delivery_template import DELIVERY_TEMPLATE_SETTING_KEY
+
+    stmt = select(SystemSetting.value).where(SystemSetting.key == DELIVERY_TEMPLATE_SETTING_KEY)
+    value = (await session.execute(stmt)).scalar_one_or_none()
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data={"template": (value or "") if isinstance(value, str) else ""},
+    )
+
+
+@router.put("/delivery-template")
+async def internal_update_delivery_template(
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """更新全局发货模板（买家收到的发货消息格式）。"""
+    from sqlalchemy import select
+
+    from common.models.system_setting import SystemSetting
+    from common.services.delivery_template import (
+        DELIVERY_TEMPLATE_MAX_LENGTH,
+        DELIVERY_TEMPLATE_SETTING_KEY,
+    )
+
+    template = str((body or {}).get("template") or "").strip()[:DELIVERY_TEMPLATE_MAX_LENGTH]
+    existing = (
+        (await session.execute(
+            select(SystemSetting).where(SystemSetting.key == DELIVERY_TEMPLATE_SETTING_KEY)
+        ))
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(SystemSetting(key=DELIVERY_TEMPLATE_SETTING_KEY, value=template))
+    else:
+        existing.value = template
+    await session.commit()
+    return ApiResponse(
+        success=True,
+        message="发货模板已更新",
+        data={"template": template},
+    )
+
+
+@router.put("/cards/item/{item_id}")
+async def internal_sync_item_card(
+    item_id: str,
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序统一绑定入口：把商品的卡券关联覆盖为指定发货卡券（幂等）。
+
+    body.card_id 为空/<=0 表示清空该商品的卡券关联（主程序侧解绑时调用）。
+    发货卡券本身仍由 Worker 后台配置，本路由只同步"商品→卡券"关系。
+    """
+    from app.services.card_service import CardService
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    card_id = int((body or {}).get("card_id") or 0)
+    relations: List[Dict[str, Any]] = []
+    if card_id <= 0:
+        # 清空时同步清理 legacy item_id 字段：关系表清空后 matcher 会回退到
+        # xy_cards.item_id 匹配，不清会让已解绑商品继续命中老卡券。
+        from sqlalchemy import text
+
+        await session.execute(
+            text("UPDATE xy_cards SET item_id = NULL WHERE item_id = :item_id"),
+            {"item_id": item_id},
+        )
+        await session.commit()
+    if card_id > 0:
+        from sqlalchemy import select
+
+        from common.models.card import Card
+
+        card_stmt = select(Card).where(Card.id == card_id)
+        if owner_id is not None:
+            card_stmt = card_stmt.where(Card.user_id == owner_id)
+        card = ((await session.execute(card_stmt))).scalar_one_or_none()
+        if not card:
+            raise HTTPException(status_code=404, detail="卡券不存在")
+        relations = [{"card_id": card_id, "source": "own", "dock_record_id": None}]
+
+    result = await CardService(session).update_item_card_relations(
+        item_id=item_id,
+        user_id=service_user.id,
+        card_relations=relations,
+    )
+    return ApiResponse(
+        success=True,
+        message=f"商品卡券关联已同步（新增 {result['added']}，移除 {result['removed']}）",
+        data=result,
+    )
+
+
+@router.post("/cards/provision")
+async def internal_provision_pool_card(
+    body: Dict[str, Any] = Body(...),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序建池时自动创建该池专属的 API 发货卡券（幂等：同名 api 卡券已存在则直接返回）。
+
+    url/token/动态参数全部取自 Worker 自身环境（SUB2API_INTERNAL_BASE_URL /
+    SUB2API_INTERNAL_TOKEN），主程序无需下发任何地址或凭据。
+    """
+    import json
+
+    from app.services.card_service import CardService
+    from common.models.card import Card
+    from sqlalchemy import select
+
+    name = str((body or {}).get("name") or "").strip()[:200]
+    if not name:
+        raise HTTPException(status_code=400, detail="card name is required")
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    existing_stmt = select(Card).where(Card.type == "api", Card.name == name)
+    if owner_id is not None:
+        existing_stmt = existing_stmt.where(Card.user_id == owner_id)
+    existing = ((await session.execute(existing_stmt))).scalars().first()
+    if existing:
+        return ApiResponse(success=True, message="已存在同名发货卡券", data={"card_id": existing.id})
+
+    base_url = (settings.sub2api_internal_base_url or "").rstrip("/")
+    token = (settings.sub2api_internal_token or "").strip()
+    if not base_url or not token:
+        raise HTTPException(
+            status_code=409,
+            detail="SUB2API_INTERNAL_BASE_URL/SUB2API_INTERNAL_TOKEN 未配置，无法自动创建发货卡券",
+        )
+    api_config = {
+        "url": f"{base_url}/api/v1/internal/xianyu/redeem-codes/claim",
+        "method": "POST",
+        "timeout": 10,
+        "headers": {"X-Internal-Token": token},
+        "params": {
+            "order_id": "{order_id}",
+            "item_id": "{item_id}",
+            "buyer_id": "{buyer_id}",
+            "cookie_id": "{cookie_id}",
+            "spec_name": "{spec_name}",
+            "spec_value": "{spec_value}",
+            "chat_id": "{chat_id}",
+            "order_quantity": "{order_quantity}",
+        },
+        "response_field": "data.content",
+    }
+    card = Card(
+        user_id=service_user.id,
+        name=name,
+        type="api",
+        enabled=True,
+        api_config=json.dumps(api_config, ensure_ascii=False),
+        description="主程序库存池自动创建",
+    )
+    session.add(card)
+    await session.commit()
+    await session.refresh(card)
+    return ApiResponse(success=True, message="发货卡券已创建", data={"card_id": card.id})
+
+
+@router.delete("/cards/{card_id}")
+async def internal_delete_pool_card(
+    card_id: int,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """主程序删池时清理该池的自动发货卡券（幂等：不存在视为成功）。"""
+    from app.services.card_service import CardService
+
+    await CardService(session).delete_card(card_id, service_user.id)
+    return ApiResponse(success=True, message="发货卡券已清理", data={"deleted": True})
+
+
+@router.post("/qr-login/generate")
+async def internal_generate_qr_code(
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """生成扫码登录二维码，返回 session_id 与二维码地址。"""
+    from app.services.qr_login import qr_login_manager
+
+    result = await qr_login_manager.generate_qr_code()
+    session_id = result.get("session_id")
+    if result.get("success") and session_id:
+        # 会话所有者映射到服务身份对应的管理员用户
+        from app.api.routes.qr_login import SESSION_OWNER
+
+        SESSION_OWNER[session_id] = service_user.id
+        return ApiResponse(
+            success=True,
+            message="二维码生成成功",
+            data={
+                "session_id": session_id,
+                "qr_code_url": result.get("qr_code_url"),
+                "status": "waiting",
+            },
+        )
+    return ApiResponse(success=False, message=result.get("message", "生成二维码失败"))
+
+
+@router.get("/qr-login/status/{session_id}")
+async def internal_get_qr_status(
+    session_id: str,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """查询扫码会话状态（等待/已扫/成功/过期/失败，及可恢复 pending）。
+
+    仅在会话所有者 / 已处理结果（含 owner 记录，支持响应丢失后的幂等重试）下放行；
+    扫码成功后与既有 JWT 路由共用账号落库/WebSocket 启动处理链；
+    响应做白名单投影，绝不返回 cookies/unb 等敏感字段。
+    """
+    from app.api.routes.qr_login import (
+        PROCESSED_SESSIONS,
+        SESSION_OWNER,
+        _after_completion_response,
+        _cleanup_session,
+        process_qr_login_success,
+        resolve_session_owner,
+    )
+    from app.services.qr_login import qr_login_manager
+
+    # 统一授权边界（与 JWT 路由共用）：已处理结果(owner_id)/会话 owner 任一匹配，
+    # 缺失或不匹配一律 403；不依赖已被清理的 SESSION_OWNER 单独判定。
+    owner_id = resolve_session_owner(session_id, service_user.id)
+
+    status_info = qr_login_manager.get_session_status(session_id) or {}
+    status = status_info.get("status")
+
+    if status == "success":
+        result = await process_qr_login_success(
+            session_id, owner_id=owner_id, db=session
+        )
+        final_status = result.get("status") or "success"
+        if final_status == "already_processed":
+            return _after_completion_response("success", result, status_info, session_id)
+        # 非终态（waiting / pending）保持返回给前端继续轮询；失败/成功进入终态展示。
+        if final_status in {"waiting", "pending"}:
+            return ApiResponse(
+                success=True,
+                message=result.get("message") or "扫码登录处理中",
+                data={
+                    "status": "waiting" if final_status == "waiting" else "scanned",
+                    "session_id": session_id,
+                    "message": result.get("message"),
+                    "account_id": result.get("account_id"),
+                },
+            )
+        return ApiResponse(
+            success=True,
+            message=result.get("message") or ("扫码登录失败" if final_status == "failed" else "扫码登录成功"),
+            data={
+                "status": final_status if final_status != "already_processed" else "success",
+                "session_id": session_id,
+                "account_id": result.get("account_id"),
+                "is_new_account": result.get("is_new_account", False),
+                "message": result.get("message"),
+            },
+        )
+
+    # 清理过期或取消的会话（与既有 JWT 路由语义一致）
+    if status in {"expired", "cancelled", "not_found"}:
+        _cleanup_session(session_id)
+        PROCESSED_SESSIONS.pop(session_id, None)
+
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data={
+            "status": status_info.get("status"),
+            "session_id": session_id,
+            "message": status_info.get("message"),
+            "verification_url": status_info.get("verification_url"),
+            "face_qr_url": status_info.get("face_qr_url"),
+        },
+    )
+
+
+@router.post("/messages/send")
+async def internal_send_message(
+    payload: dict,
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """发送消息（补发原码用）：经 backend 转发到 WebSocket 服务的 send-message，
+    携带 wait_result 以等待平台最终发送回执，避免把"已提交"误判为"已送达"。
+
+    发送前校验目标账号归属，防止跨租户越权（普通前端用户不得操作他人账号）。
+    """
+    from app.services.account_service import AccountService
+    from app.services.websocket_client import websocket_client
+    from common.utils.auth_scope import resolve_owner_scope
+
+    account_id = str(payload.get("account_id") or "").strip()
+    chat_id = str(payload.get("chat_id") or "").strip()
+    message = str(payload.get("message") or "").strip()
+    # 收件人买家 ID：必须由调用方（主程序补发原码）传入真实 buyer_id，
+    # 否则下游 actualReceivers 会被拼成 "None@goofish" 致收件人错乱。
+    buyer_id = str(payload.get("buyer_id") or "").strip()
+    if not account_id or not chat_id or not message or not buyer_id:
+        return ApiResponse(
+            success=False,
+            message="account_id, chat_id, message, buyer_id 均不能为空",
+        )
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    try:
+        account = await AccountService(session).get_account_for_user(owner_id, account_id)
+    except Exception as exc:  # noqa: BLE001
+        # 边界前异常（DB 超时/连接失败等）：确定未向 WebSocket 发出请求，统一 receipt=DDF。
+        return ApiResponse(
+            success=False,
+            message=f"账号查询失败: {exc}",
+            data={"receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE, "dispatched": False},
+        )
+    if not account:
+        # 机器可判定的"确定未向 WebSocket 发出发送请求"，供主程序补发回滚 failed。
+        return ApiResponse(
+            success=False,
+            message="账号不存在或无权操作",
+            data={"receipt": ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE, "dispatched": False},
+        )
+
+    wait_result = bool(payload.get("wait_result", True))
+    # wait_timeout 必须 clamp 到 [1, 30]，并拒绝 NaN/Inf/非法值，避免下游 coroutine 长期悬挂。
+    try:
+        raw_timeout = float(payload.get("wait_timeout", 10.0) or 10.0)
+    except (TypeError, ValueError):
+        raw_timeout = 10.0
+    if not math.isfinite(raw_timeout):
+        raw_timeout = 10.0
+    wait_timeout = min(max(raw_timeout, 1.0), 30.0)
+
+    # 透传补发尝试代次（attempt）与订单号（order_no），供发送回执关联与并发隔离。
+    attempt = 0
+    try:
+        attempt = int(payload.get("attempt") or 0)
+    except (TypeError, ValueError):
+        attempt = 0
+    order_no = str(payload.get("order_no") or "").strip()
+    result = await websocket_client.send_message(
+        account_id=account_id,
+        chat_id=chat_id,
+        content=message,
+        wait_result=wait_result,
+        wait_timeout=wait_timeout,
+        attempt=attempt,
+        order_no=order_no,
+        buyer_id=buyer_id,
+    )
+    downstream = (result or {}).get("data") or {}
+    # 统一按 receipt 归一化（缺失/未知回退 UNKNOWN_PENDING，绝不把无回执提升为成功）；
+    # 同时派生 send_status / dispatched 兼容字段供下游/旧客户端回退。
+    try:
+        receipt = ReceiptOutcome(downstream.get("receipt") or "")
+    except ValueError:
+        receipt = ReceiptOutcome.UNKNOWN_PENDING
+    # 兼容旧 Worker：仅旧 dispatched=false 信号（无 receipt）显式视为确定未 dispatch。
+    if receipt == ReceiptOutcome.UNKNOWN_PENDING and downstream.get("dispatched") is False:
+        receipt = ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE
+    if not result or not result.get("success"):
+        payload = {
+            "receipt": receipt,
+            "send_status": "failed" if receipt != ReceiptOutcome.UNKNOWN_PENDING else "unknown",
+        }
+        if receipt == ReceiptOutcome.DISPATCHED_DEFINITE_FAILURE:
+            payload["dispatched"] = False
+        return ApiResponse(
+            success=False,
+            message=(result or {}).get("message") or "消息发送失败",
+            data=payload,
+        )
+    return ApiResponse(
+        success=True,
+        message="消息发送成功",
+        data={
+            "receipt": receipt,
+            "send_status": send_status_from_receipt(receipt),
+            "send_fail_reason": downstream.get("send_fail_reason"),
+        },
+    )
+
+
+@router.get("/orders/auto-deliveries")
+async def internal_list_auto_deliveries(
+    since: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    session = Depends(deps.get_db_session),
+    service_user = Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """自动发货订单增量列表（主程序发货对账任务用）。
+
+    仅返回 delivery_method='auto' 且 updated_at >= since 的订单，含发货内容，
+    供主程序与 xianyu_order_claims / xianyu_worker_deliveries 做三方对账。
+    since 为 ISO8601（可带时区），缺省取 24 小时前；订单时间戳列为北京时间 naive，
+    比较前统一归一，返回时标注 +08:00。
+    """
+    from sqlalchemy import select
+
+    from common.models.xy_order import XYOrder
+
+    owner_id, _ = resolve_owner_scope(service_user)
+
+    since_dt: Optional[datetime] = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since 必须是 ISO8601 时间")
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
+    else:
+        since_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+    # 订单时间戳为北京时间 naive（get_beijing_now_naive 写入约定），比较前归一到同一基准。
+    since_naive = since_dt.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+
+    stmt = (
+        select(XYOrder)
+        .where(XYOrder.delivery_method == "auto")
+        .where(XYOrder.updated_at >= since_naive)
+        .order_by(XYOrder.updated_at.asc(), XYOrder.id.asc())
+        .limit(limit)
+    )
+    if owner_id is not None:
+        stmt = stmt.where(XYOrder.owner_id == owner_id)
+    orders = (await session.execute(stmt)).scalars().all()
+
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        naive = dt if dt.tzinfo is None else dt.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+        return naive.replace(tzinfo=SHANGHAI_TZ).isoformat()
+
+    data = [
+        {
+            "order_no": o.order_no,
+            "status": o.status,
+            "account_id": o.account_id or "",
+            "item_id": o.item_id or "",
+            "buyer_id": o.buyer_id or "",
+            "chat_id": o.chat_id or "",
+            "quantity": int(o.quantity or 1),
+            "amount": str(o.amount) if o.amount is not None else None,
+            "delivery_content": o.delivery_content or "",
+            "delivery_fail_reason": o.delivery_fail_reason or "",
+            "created_at": _iso(o.created_at),
+            "updated_at": _iso(o.updated_at),
+        }
+        for o in orders
+    ]
+    return ApiResponse(success=True, message="查询成功", data={"orders": data})
+
+
+# ==================== 曝光分析支持（即席搜索 / 商品详情） ====================
+
+
+async def _pick_search_account(session, service_user, account_id: Optional[str]):
+    """选取搜索用账号：指定 account_id 或自动取一个有 cookie 的 active 账号。"""
+    from sqlalchemy import select
+
+    from common.models.xy_account import XYAccount
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    stmt = select(XYAccount).where(XYAccount.status == "active")
+    if owner_id is not None:
+        stmt = stmt.where(XYAccount.owner_id == owner_id)
+    if account_id:
+        stmt = stmt.where(XYAccount.account_id == account_id)
+    stmt = stmt.order_by(XYAccount.last_login_at.is_(None), XYAccount.last_login_at.desc())
+    accounts = (await session.execute(stmt)).scalars().all()
+    for acc in accounts:
+        if acc.cookie:
+            return acc
+    return None
+
+
+_WANT_RE = None
+
+
+def _slim_search_item(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把 mtop 搜索返回的原始 resultList 项精简为曝光分析所需字段。
+
+    字段路径以 2026-09 实测为准：title/价格在 data.item.main.exContent 下，
+    想要数在 exContent.fishTags.r3.tagList 的 "N人想要" 标签。
+    """
+    import re
+
+    global _WANT_RE
+    if _WANT_RE is None:
+        _WANT_RE = re.compile(r"(\d+)\s*人想要")
+
+    main = ((raw.get("data") or {}).get("item") or {}).get("main") or {}
+    ex = main.get("exContent") or {}
+    title = str(ex.get("title") or "").strip()
+    if not title:
+        return None
+
+    detail_params = ex.get("detailParams") or {}
+    price = ""
+    sold_price = detail_params.get("soldPrice")
+    if isinstance(sold_price, list):
+        price = "".join(
+            str(seg.get("text", "")) for seg in sold_price if isinstance(seg, dict)
+        )
+    if not price:
+        price = str(raw.get("oriPrice") or detail_params.get("soldPrice") or "")
+
+    want_count = 0
+    tags = ((ex.get("fishTags") or {}).get("r3") or {}).get("tagList") or []
+    for tag in tags:
+        content = str((tag.get("data") or {}).get("content") or "")
+        m = _WANT_RE.match(content)
+        if m:
+            want_count = int(m.group(1))
+            break
+
+    item_id = str(
+        detail_params.get("itemId")
+        or raw.get("itemId")
+        or ((raw.get("data") or {}).get("item") or {}).get("itemId")
+        or ""
+    )
+    return {
+        "item_id": item_id,
+        "title": title,
+        "price": price,
+        "want_count": want_count,
+        "area": str(ex.get("area") or ""),
+    }
+
+
+@router.post("/search-once")
+async def internal_search_once(
+    payload: Dict[str, Any] = Body(...),
+    session=Depends(deps.get_db_session),
+    service_user=Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """即席关键词搜索（轻量 mtop 通道，免建采集任务），主程序曝光分析用。
+
+    入参：{keyword, account_id?, rows_per_page?}
+    返回精简后的商品列表（item_id/title/price/want_count/area）。
+    风控或账号失效时 success=False 并透传 error / punish_url，调用方据此降级。
+    """
+    from common.services.xianyu_search_client import XianyuSearchClient
+
+    keyword = str(payload.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    try:
+        rows = int(payload.get("rows_per_page") or 30)
+    except (TypeError, ValueError):
+        rows = 30
+    rows = max(1, min(rows, 50))
+
+    account = await _pick_search_account(session, service_user, payload.get("account_id"))
+    if account is None:
+        return ApiResponse(success=False, message="无可用账号（需 active 且有 cookie）", data=None)
+
+    client = XianyuSearchClient(
+        cookie_id=account.account_id,
+        cookies_str=account.cookie,
+        owner_id=account.owner_id,
+    )
+    result = await client.search(keyword=keyword, rows_per_page=rows)
+    if not result.get("success"):
+        return ApiResponse(
+            success=False,
+            message=result.get("error") or "搜索失败",
+            data={
+                "account_invalid": bool(result.get("account_invalid")),
+                "punish_url": result.get("punish_url") or "",
+            },
+        )
+
+    items = []
+    for raw in result.get("items") or []:
+        slim = _slim_search_item(raw)
+        if slim is not None:
+            items.append(slim)
+    return ApiResponse(
+        success=True,
+        message="搜索成功",
+        data={
+            "keyword": keyword,
+            "account_id": account.account_id,
+            "has_next_page": bool(result.get("has_next_page")),
+            "items": items,
+        },
+    )
+
+
+@router.get("/items/{account_id}/{item_id}/detail")
+async def internal_get_item_detail(
+    account_id: str,
+    item_id: str,
+    session=Depends(deps.get_db_session),
+    service_user=Depends(deps.get_service_or_user),
+) -> ApiResponse:
+    """拉取商品详情（含描述正文），主程序建立商品事实档案用。
+
+    返回 detail 关键子集：desc/title/soldPrice + 账号状态标志。
+    """
+    from sqlalchemy import select
+
+    from common.models.xy_account import XYAccount
+    from common.services.xianyu_detail_client import XianyuItemDetailClient
+
+    owner_id, _ = resolve_owner_scope(service_user)
+    stmt = select(XYAccount).where(XYAccount.account_id == account_id)
+    if owner_id is not None:
+        stmt = stmt.where(XYAccount.owner_id == owner_id)
+    account = (await session.execute(stmt)).scalars().first()
+    if account is None or not account.cookie:
+        raise HTTPException(status_code=404, detail="账号不存在或无 cookie")
+
+    client = XianyuItemDetailClient(
+        cookie_id=account.account_id,
+        cookies_str=account.cookie,
+        owner_id=account.owner_id,
+    )
+    result = await client.get_detail(item_id)
+    if not result.get("success"):
+        return ApiResponse(
+            success=False,
+            message=result.get("error") or "详情获取失败",
+            data={
+                "account_invalid": bool(result.get("account_invalid")),
+                "item_invalid": bool(result.get("item_invalid")),
+            },
+        )
+
+    detail = result.get("detail") or {}
+    item_do = detail.get("itemDO") or {}
+    desc = (
+        item_do.get("desc")
+        or detail.get("desc")
+        or item_do.get("description")
+        or detail.get("description")
+        or ""
+    )
+    return ApiResponse(
+        success=True,
+        message="查询成功",
+        data={
+            "item_id": str(item_id),
+            "title": str(item_do.get("title") or detail.get("title") or ""),
+            "desc": str(desc),
+            "sold_price": str(item_do.get("soldPrice") or detail.get("soldPrice") or ""),
+            "seller_nick": result.get("seller_nick") or "",
+        },
+    )

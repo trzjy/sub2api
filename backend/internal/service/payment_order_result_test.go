@@ -1,0 +1,612 @@
+package service
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/payment"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/shopspring/decimal"
+)
+
+func TestShouldUseAlipayMobilePrecreate(t *testing.T) {
+	t.Parallel()
+
+	enabled := &PaymentConfig{AlipayMobilePrecreateDeepLink: true}
+	officialAlipay := &payment.InstanceSelection{ProviderKey: payment.TypeAlipay}
+
+	tests := []struct {
+		name string
+		req  CreateOrderRequest
+		cfg  *PaymentConfig
+		sel  *payment.InstanceSelection
+		want bool
+	}{
+		{name: "mobile official alipay with switch", req: CreateOrderRequest{IsMobile: true}, cfg: enabled, sel: officialAlipay, want: true},
+		{name: "desktop remains unchanged", req: CreateOrderRequest{IsMobile: false}, cfg: enabled, sel: officialAlipay, want: false},
+		{name: "switch disabled keeps wap", req: CreateOrderRequest{IsMobile: true}, cfg: &PaymentConfig{}, sel: officialAlipay, want: false},
+		{name: "other provider remains unchanged", req: CreateOrderRequest{IsMobile: true}, cfg: enabled, sel: &payment.InstanceSelection{ProviderKey: payment.TypeEasyPay}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldUseAlipayMobilePrecreate(tt.req, tt.cfg, tt.sel); got != tt.want {
+				t.Fatalf("shouldUseAlipayMobilePrecreate() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsOfficialAlipayProviderInstance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		instance *dbent.PaymentProviderInstance
+		want     bool
+	}{
+		{name: "nil instance", instance: nil, want: false},
+		{name: "official alipay", instance: &dbent.PaymentProviderInstance{ProviderKey: payment.TypeAlipay}, want: true},
+		{name: "normalized official alipay", instance: &dbent.PaymentProviderInstance{ProviderKey: " ALIPAY "}, want: true},
+		{name: "easypay alipay route", instance: &dbent.PaymentProviderInstance{ProviderKey: payment.TypeEasyPay}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isOfficialAlipayProviderInstance(tt.instance); got != tt.want {
+				t.Fatalf("isOfficialAlipayProviderInstance() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildCreateOrderResponseDefaultsToOrderCreated(t *testing.T) {
+	t.Parallel()
+
+	expiresAt := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	resp := buildCreateOrderResponse(
+		&dbent.PaymentOrder{
+			ID:         42,
+			Amount:     12.34,
+			FeeRate:    0.03,
+			ExpiresAt:  expiresAt,
+			OutTradeNo: "sub2_42",
+		},
+		CreateOrderRequest{PaymentType: payment.TypeWxpay},
+		12.71,
+		&payment.InstanceSelection{PaymentMode: "qrcode"},
+		&payment.CreatePaymentResponse{
+			TradeNo: "sub2_42",
+			QRCode:  "weixin://wxpay/bizpayurl?pr=test",
+		},
+		payment.CreatePaymentResultOrderCreated,
+	)
+
+	if resp.ResultType != payment.CreatePaymentResultOrderCreated {
+		t.Fatalf("result type = %q, want %q", resp.ResultType, payment.CreatePaymentResultOrderCreated)
+	}
+	if resp.OutTradeNo != "sub2_42" {
+		t.Fatalf("out_trade_no = %q, want %q", resp.OutTradeNo, "sub2_42")
+	}
+	if resp.QRCode != "weixin://wxpay/bizpayurl?pr=test" {
+		t.Fatalf("qr_code = %q, want %q", resp.QRCode, "weixin://wxpay/bizpayurl?pr=test")
+	}
+	if resp.JSAPI != nil || resp.JSAPIPayload != nil {
+		t.Fatal("order_created response should not include jsapi payload")
+	}
+	if !resp.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("expires_at = %v, want %v", resp.ExpiresAt, expiresAt)
+	}
+}
+
+func TestBuildCreateOrderResponseCopiesJSAPIPayload(t *testing.T) {
+	t.Parallel()
+
+	jsapiPayload := &payment.WechatJSAPIPayload{
+		AppID:     "wx123",
+		TimeStamp: "1712345678",
+		NonceStr:  "nonce-123",
+		Package:   "prepay_id=wx123",
+		SignType:  "RSA",
+		PaySign:   "signed-payload",
+	}
+	resp := buildCreateOrderResponse(
+		&dbent.PaymentOrder{
+			ID:         88,
+			Amount:     66.88,
+			FeeRate:    0.01,
+			ExpiresAt:  time.Date(2026, 4, 16, 13, 0, 0, 0, time.UTC),
+			OutTradeNo: "sub2_88",
+		},
+		CreateOrderRequest{PaymentType: payment.TypeWxpay},
+		67.55,
+		&payment.InstanceSelection{PaymentMode: "popup"},
+		&payment.CreatePaymentResponse{
+			TradeNo:    "sub2_88",
+			ResultType: payment.CreatePaymentResultJSAPIReady,
+			JSAPI:      jsapiPayload,
+		},
+		payment.CreatePaymentResultJSAPIReady,
+	)
+
+	if resp.ResultType != payment.CreatePaymentResultJSAPIReady {
+		t.Fatalf("result type = %q, want %q", resp.ResultType, payment.CreatePaymentResultJSAPIReady)
+	}
+	if resp.JSAPI == nil || resp.JSAPIPayload == nil {
+		t.Fatal("expected jsapi payload aliases to be populated")
+	}
+	if resp.JSAPI != jsapiPayload || resp.JSAPIPayload != jsapiPayload {
+		t.Fatal("expected jsapi aliases to preserve the original pointer")
+	}
+}
+
+func TestSanitizeCreatePaymentResponseDetailsRemovesNULBytes(t *testing.T) {
+	t.Parallel()
+
+	resp := &payment.CreatePaymentResponse{
+		TradeNo:      "trade\x00-no",
+		PayURL:       "https://pay.example.com/\x00checkout",
+		QRCode:       "wxp://payment-token\x00",
+		ClientSecret: "secret\x00unchanged",
+	}
+
+	sanitizeCreatePaymentResponseDetails(resp)
+
+	if strings.ContainsRune(resp.TradeNo, 0) {
+		t.Fatalf("trade_no still contains NUL: %q", resp.TradeNo)
+	}
+	if strings.ContainsRune(resp.PayURL, 0) {
+		t.Fatalf("pay_url still contains NUL: %q", resp.PayURL)
+	}
+	if strings.ContainsRune(resp.QRCode, 0) {
+		t.Fatalf("qr_code still contains NUL: %q", resp.QRCode)
+	}
+	if resp.TradeNo != "trade-no" {
+		t.Fatalf("trade_no = %q, want trade-no", resp.TradeNo)
+	}
+	if resp.PayURL != "https://pay.example.com/checkout" {
+		t.Fatalf("pay_url = %q, want sanitized URL", resp.PayURL)
+	}
+	if resp.QRCode != "wxp://payment-token" {
+		t.Fatalf("qr_code = %q, want sanitized QR code", resp.QRCode)
+	}
+	if resp.ClientSecret != "secret\x00unchanged" {
+		t.Fatalf("client_secret = %q, should not be touched by payment detail sanitization", resp.ClientSecret)
+	}
+}
+
+func TestValidateSelectedCreateOrderAmountCurrencyRejectsFractionalZeroDecimal(t *testing.T) {
+	t.Parallel()
+
+	err := validateSelectedCreateOrderAmountCurrency("100.50", &payment.InstanceSelection{
+		ProviderKey: payment.TypeStripe,
+		Config:      map[string]string{"currency": "JPY"},
+	})
+	if err == nil {
+		t.Fatal("expected fractional JPY amount to fail")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "INVALID_AMOUNT" {
+		t.Fatalf("reason = %q, want INVALID_AMOUNT", appErr.Reason)
+	}
+}
+
+func TestCalculateCreateOrderPayAmountUsesCurrencyPrecision(t *testing.T) {
+	t.Parallel()
+
+	amountStr, amount, err := calculateCreateOrderPayAmount(100, 2.5, "JPY")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "103" || amount != 103 {
+		t.Fatalf("JPY pay amount = (%q, %v), want (103, 103)", amountStr, amount)
+	}
+
+	amountStr, amount, err = calculateCreateOrderPayAmount(12.345, 1, "KWD")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "12.469" || amount != 12.469 {
+		t.Fatalf("KWD pay amount = (%q, %v), want (12.469, 12.469)", amountStr, amount)
+	}
+}
+
+// FX 单测辅助：构造汇率表（1 USD = X <币种>）。
+func mustFXRates(t *testing.T, raw string) payment.FXRates {
+	t.Helper()
+	rates, err := payment.ParseFXRates(raw)
+	if err != nil {
+		t.Fatalf("parse fx rates %q: %v", raw, err)
+	}
+	return rates
+}
+
+func TestCalculateCreateOrderPayAmountForSubscriptionConvertsUSDPriceViaFX(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "CNY", payment.OrderTypeSubscription, fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "71.43" || amount != 71.43 {
+		t.Fatalf("subscription CNY pay amount = (%q, %v), want (71.43, 71.43)", amountStr, amount)
+	}
+}
+
+func TestCalculateCreateOrderPayAmountForSubscriptionAppliesFeeAfterCNYConversion(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 2.5, "CNY", payment.OrderTypeSubscription, fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "73.22" || amount != 73.22 {
+		t.Fatalf("subscription CNY pay amount with fee = (%q, %v), want (73.22, 73.22)", amountStr, amount)
+	}
+}
+
+// plan.price 一律 USD：USD 渠道 FromUSD 走隐含汇率 1.0，price 直付。
+func TestCalculateCreateOrderPayAmountForSubscriptionKeepsUSDPrice(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "USD", payment.OrderTypeSubscription, fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "9.99" || amount != 9.99 {
+		t.Fatalf("subscription USD pay amount = (%q, %v), want (9.99, 9.99)", amountStr, amount)
+	}
+}
+
+// 行为变更（记录在案）：非 CNY 非 USD 渠道（如 Stripe HKD）订阅收款从 price 直付
+// 改为按汇率 FromUSD 换算（原 HK$1 套餐实收 HK$1 属 bug，现按 1 USD = 7.80 HKD 收 HK$7.78）。
+func TestCalculateCreateOrderPayAmountForSubscriptionConvertsNonCNYNonUSDViaFX(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15, "HKD": 7.8}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(1, 0, "HKD", payment.OrderTypeSubscription, fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "7.80" || amount != 7.8 {
+		t.Fatalf("subscription HKD pay amount = (%q, %v), want (7.80, 7.8)", amountStr, amount)
+	}
+}
+
+// 订阅换算遇缺币种汇率时失败关闭（FX_RATE_MISSING），不得静默按 1:1 兜底。
+func TestCalculateCreateOrderPayAmountForSubscriptionFailsClosedOnMissingFXRate(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	_, _, err := calculateCreateOrderPayAmountForOrderType(9.99, 0, "HKD", payment.OrderTypeSubscription, fx)
+	if err == nil {
+		t.Fatal("expected missing FX rate error")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "FX_RATE_MISSING" {
+		t.Fatalf("reason = %q, want FX_RATE_MISSING", appErr.Reason)
+	}
+}
+
+// 汇率只作用于订阅订单，余额充值订单不受影响。
+func TestCalculateCreateOrderPayAmountForBalanceIgnoresFX(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	amountStr, amount, err := calculateCreateOrderPayAmountForOrderType(50, 0, "CNY", payment.OrderTypeBalance, fx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if amountStr != "50.00" || amount != 50 {
+		t.Fatalf("balance CNY pay amount = (%q, %v), want (50.00, 50)", amountStr, amount)
+	}
+}
+
+// 到账公式：credited = ToUSD(实付, 币种).Round(2)，充值多少折合多少，不再乘加价系数。
+// CNY ¥100、FX=7.15 → $13.99。
+func TestCreditedBalanceFXParity(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+
+	payDecimal := decimal.NewFromFloat(100)
+	usd, err := fx.ToUSD(payDecimal, "CNY")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := usd.Round(2).InexactFloat64()
+	if got != 13.99 {
+		t.Fatalf("credited balance = %v, want 13.99", got)
+	}
+
+	// USD 渠道：$10 → $10。
+	payDecimal = decimal.NewFromFloat(10)
+	usd, err = fx.ToUSD(payDecimal, "USD")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got = usd.Round(2).InexactFloat64()
+	if got != 10 {
+		t.Fatalf("credited balance USD = %v, want 10", got)
+	}
+}
+
+// 换算遇缺币种汇率时报错（FX_RATE_MISSING），不得按 1:1 兜底入账。
+func TestCreditedBalanceFailsClosedOnMissingFXRate(t *testing.T) {
+	t.Parallel()
+
+	fx := mustFXRates(t, `{"CNY": 7.15}`)
+	payDecimal := decimal.NewFromFloat(100)
+	_, err := fx.ToUSD(payDecimal, "HKD")
+	if err == nil {
+		t.Fatal("expected missing FX rate error")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "FX_RATE_MISSING" {
+		t.Fatalf("reason = %q, want FX_RATE_MISSING", appErr.Reason)
+	}
+}
+
+func TestCalculateCreateOrderPayAmountRejectsFractionalZeroDecimal(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := calculateCreateOrderPayAmount(100.5, 0, "JPY")
+	if err == nil {
+		t.Fatal("expected fractional JPY amount to fail")
+	}
+	if appErr := infraerrors.FromError(err); appErr.Reason != "INVALID_AMOUNT" {
+		t.Fatalf("reason = %q, want INVALID_AMOUNT", appErr.Reason)
+	}
+}
+
+func TestComputeValidityDaysSupportsSingularAndPluralUnits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		days int
+		unit string
+		want int
+	}{
+		{name: "days", days: 1, unit: "days", want: 1},
+		{name: "week", days: 1, unit: "week", want: 7},
+		{name: "weeks", days: 2, unit: "weeks", want: 14},
+		{name: "month", days: 1, unit: "month", want: 30},
+		{name: "months", days: 1, unit: "months", want: 30},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := psComputeValidityDays(tt.days, tt.unit); got != tt.want {
+				t.Fatalf("psComputeValidityDays(%d, %q) = %d, want %d", tt.days, tt.unit, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildPaymentSubjectAppliesAffixToSubscriptionPlanProductName(t *testing.T) {
+	t.Parallel()
+
+	svc := &PaymentService{}
+	cfg := &PaymentConfig{
+		ProductNamePrefix: "PRE",
+		ProductNameSuffix: "SUF",
+	}
+	plan := &dbent.SubscriptionPlan{
+		Name:        "Pro Monthly",
+		ProductName: "Claude Pro",
+	}
+
+	got := svc.buildPaymentSubject(plan, 0, cfg, nil)
+	if got != "PRE Claude Pro SUF" {
+		t.Fatalf("buildPaymentSubject() = %q, want %q", got, "PRE Claude Pro SUF")
+	}
+}
+
+func TestBuildPaymentSubjectAppliesAffixToSubscriptionPlanDefaultName(t *testing.T) {
+	t.Parallel()
+
+	svc := &PaymentService{}
+	cfg := &PaymentConfig{
+		ProductNamePrefix: "PRE",
+		ProductNameSuffix: "SUF",
+	}
+	plan := &dbent.SubscriptionPlan{Name: "Team Monthly"}
+
+	got := svc.buildPaymentSubject(plan, 0, cfg, nil)
+	if got != "PRE Sub2API Subscription Team Monthly SUF" {
+		t.Fatalf("buildPaymentSubject() = %q, want %q", got, "PRE Sub2API Subscription Team Monthly SUF")
+	}
+}
+
+func TestMaybeBuildWeChatOAuthRequiredResponse(t *testing.T) {
+	t.Setenv("PAYMENT_RESUME_SIGNING_KEY", "0123456789abcdef0123456789abcdef")
+
+	svc := newWeChatPaymentOAuthTestService(map[string]string{
+		SettingKeyWeChatConnectEnabled:             "true",
+		SettingKeyWeChatConnectAppID:               "wx123456",
+		SettingKeyWeChatConnectAppSecret:           "wechat-secret",
+		SettingKeyWeChatConnectMode:                "mp",
+		SettingKeyWeChatConnectScopes:              "snsapi_base",
+		SettingKeyWeChatConnectRedirectURL:         "https://api.example.com/api/v1/auth/oauth/wechat/callback",
+		SettingKeyWeChatConnectFrontendRedirectURL: "/auth/wechat/callback",
+	})
+
+	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		Amount:          12.5,
+		PaymentType:     payment.TypeWxpay,
+		IsWeChatBrowser: true,
+		SrcURL:          "https://merchant.example/payment?from=wechat",
+		OrderType:       payment.OrderTypeBalance,
+	}, 12.5, 12.88, 0.03)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected oauth_required response, got nil")
+	}
+	if resp.ResultType != payment.CreatePaymentResultOAuthRequired {
+		t.Fatalf("result type = %q, want %q", resp.ResultType, payment.CreatePaymentResultOAuthRequired)
+	}
+	if resp.OAuth == nil {
+		t.Fatal("expected oauth payload, got nil")
+	}
+	if resp.OAuth.AppID != "wx123456" {
+		t.Fatalf("appid = %q, want %q", resp.OAuth.AppID, "wx123456")
+	}
+	if resp.OAuth.Scope != "snsapi_base" {
+		t.Fatalf("scope = %q, want %q", resp.OAuth.Scope, "snsapi_base")
+	}
+	if resp.OAuth.RedirectURL != "/auth/wechat/payment/callback" {
+		t.Fatalf("redirect_url = %q, want %q", resp.OAuth.RedirectURL, "/auth/wechat/payment/callback")
+	}
+	if resp.OAuth.AuthorizeURL != "/api/v1/auth/oauth/wechat/payment/start?amount=12.5&order_type=balance&payment_type=wxpay&redirect=%2Fpurchase%3Ffrom%3Dwechat&scope=snsapi_base" {
+		t.Fatalf("authorize_url = %q", resp.OAuth.AuthorizeURL)
+	}
+}
+
+func TestMaybeBuildWeChatOAuthRequiredResponseRequiresMPConfigInWeChat(t *testing.T) {
+	t.Parallel()
+
+	svc := newWeChatPaymentOAuthTestService(nil)
+
+	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		Amount:          12.5,
+		PaymentType:     payment.TypeWxpay,
+		IsWeChatBrowser: true,
+		SrcURL:          "https://merchant.example/payment?from=wechat",
+		OrderType:       payment.OrderTypeBalance,
+	}, 12.5, 12.88, 0.03)
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	appErr := infraerrors.FromError(err)
+	if appErr.Reason != "WECHAT_PAYMENT_MP_NOT_CONFIGURED" {
+		t.Fatalf("reason = %q, want %q", appErr.Reason, "WECHAT_PAYMENT_MP_NOT_CONFIGURED")
+	}
+}
+
+func TestMaybeBuildWeChatOAuthRequiredResponseRequiresResumeSigningKey(t *testing.T) {
+	t.Parallel()
+
+	svc := &PaymentService{
+		configService: &PaymentConfigService{
+			settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+				SettingKeyWeChatConnectEnabled:             "true",
+				SettingKeyWeChatConnectAppID:               "wx123456",
+				SettingKeyWeChatConnectAppSecret:           "wechat-secret",
+				SettingKeyWeChatConnectMode:                "mp",
+				SettingKeyWeChatConnectScopes:              "snsapi_base",
+				SettingKeyWeChatConnectRedirectURL:         "https://api.example.com/api/v1/auth/oauth/wechat/callback",
+				SettingKeyWeChatConnectFrontendRedirectURL: "/auth/wechat/callback",
+			}},
+			// Intentionally missing payment resume signing key.
+			encryptionKey: nil,
+		},
+	}
+
+	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		Amount:          12.5,
+		PaymentType:     payment.TypeWxpay,
+		IsWeChatBrowser: true,
+		SrcURL:          "https://merchant.example/payment?from=wechat",
+		OrderType:       payment.OrderTypeBalance,
+	}, 12.5, 12.88, 0.03)
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	appErr := infraerrors.FromError(err)
+	if appErr.Reason != "PAYMENT_RESUME_NOT_CONFIGURED" {
+		t.Fatalf("reason = %q, want %q", appErr.Reason, "PAYMENT_RESUME_NOT_CONFIGURED")
+	}
+}
+
+func TestMaybeBuildWeChatOAuthRequiredResponseFallsBackToConfiguredLegacySigningKey(t *testing.T) {
+	svc := &PaymentService{
+		configService: &PaymentConfigService{
+			settingRepo: &paymentConfigSettingRepoStub{values: map[string]string{
+				SettingKeyWeChatConnectEnabled:             "true",
+				SettingKeyWeChatConnectAppID:               "wx123456",
+				SettingKeyWeChatConnectAppSecret:           "wechat-secret",
+				SettingKeyWeChatConnectMode:                "mp",
+				SettingKeyWeChatConnectScopes:              "snsapi_base",
+				SettingKeyWeChatConnectRedirectURL:         "https://api.example.com/api/v1/auth/oauth/wechat/callback",
+				SettingKeyWeChatConnectFrontendRedirectURL: "/auth/wechat/callback",
+			}},
+			// Legacy stable signing key remains available for no-config upgrade compatibility.
+			encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
+		},
+	}
+
+	resp, err := svc.maybeBuildWeChatOAuthRequiredResponse(context.Background(), CreateOrderRequest{
+		Amount:          12.5,
+		PaymentType:     payment.TypeWxpay,
+		IsWeChatBrowser: true,
+		SrcURL:          "https://merchant.example/payment?from=wechat",
+		OrderType:       payment.OrderTypeBalance,
+	}, 12.5, 12.88, 0.03)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected oauth-required response, got nil")
+	}
+	if resp.ResultType != payment.CreatePaymentResultOAuthRequired {
+		t.Fatalf("result type = %q, want %q", resp.ResultType, payment.CreatePaymentResultOAuthRequired)
+	}
+	if resp.OAuth == nil || strings.TrimSpace(resp.OAuth.AuthorizeURL) == "" {
+		t.Fatalf("expected oauth redirect payload, got %+v", resp.OAuth)
+	}
+}
+
+func TestMaybeBuildWeChatOAuthRequiredResponseForSelectionSkipsEasyPayProvider(t *testing.T) {
+	svc := newWeChatPaymentOAuthTestService(map[string]string{
+		SettingKeyWeChatConnectEnabled:             "true",
+		SettingKeyWeChatConnectAppID:               "wx123456",
+		SettingKeyWeChatConnectAppSecret:           "wechat-secret",
+		SettingKeyWeChatConnectMode:                "mp",
+		SettingKeyWeChatConnectScopes:              "snsapi_base",
+		SettingKeyWeChatConnectRedirectURL:         "https://api.example.com/api/v1/auth/oauth/wechat/callback",
+		SettingKeyWeChatConnectFrontendRedirectURL: "/auth/wechat/callback",
+	})
+
+	resp, err := svc.maybeBuildWeChatOAuthRequiredResponseForSelection(context.Background(), CreateOrderRequest{
+		Amount:          12.5,
+		PaymentType:     payment.TypeWxpay,
+		IsWeChatBrowser: true,
+		OrderType:       payment.OrderTypeBalance,
+	}, 12.5, 12.88, 0.03, &payment.InstanceSelection{
+		ProviderKey: payment.TypeEasyPay,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("expected nil response, got %+v", resp)
+	}
+}
+
+func newWeChatPaymentOAuthTestService(values map[string]string) *PaymentService {
+	return &PaymentService{
+		configService: &PaymentConfigService{
+			settingRepo:   &paymentConfigSettingRepoStub{values: values},
+			encryptionKey: []byte("0123456789abcdef0123456789abcdef"),
+		},
+	}
+}

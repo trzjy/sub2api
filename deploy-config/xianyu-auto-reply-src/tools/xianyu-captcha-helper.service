@@ -1,0 +1,12 @@
+[Unit]
+Description=Xianyu manual captcha helper (local solver for worker remote-slider protocol)
+After=network-online.target
+
+[Service]
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/python3 /mnt/data/sub2api/deploy-config/xianyu-auto-reply-src/tools/local_captcha_helper.py --config %h/.config/xianyu-captcha-helper/config.json
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

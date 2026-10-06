@@ -1,0 +1,217 @@
+services:
+  sub2api:
+    image: sub2api:${SUB2API_IMAGE_TAG:-weishaw/sub2api:latest}
+    container_name: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${SERVER_PORT:-3300}:8080"
+    volumes:
+      - /opt/sub2api-data/data:/app/data
+    env_file:
+      - ../.env
+    environment:
+      AUTO_SETUP: "true"
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8080"
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: ${POSTGRES_USER:-sub2api}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_DBNAME: ${POSTGRES_DB:-sub2api}
+      DATABASE_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_USERNAME: ""
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_ENABLE_TLS: "false"
+      TZ: ${TZ:-Asia/Shanghai}
+      JWT_SECRET: ${JWT_SECRET}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      LOCAL_CAPTCHA_HELPER_BASE_URL: ${LOCAL_CAPTCHA_HELPER_BASE_URL:-}
+      LOCAL_CAPTCHA_HELPER_API_KEY: ${LOCAL_CAPTCHA_HELPER_API_KEY:-}
+      LOCAL_CAPTCHA_HELPER_TIMEOUT_SECONDS: ${LOCAL_CAPTCHA_HELPER_TIMEOUT_SECONDS:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - sub2api-network
+      - xianyu-internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: sub2api-postgres
+    restart: unless-stopped
+    volumes:
+      - /opt/sub2api-data/postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sub2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-sub2api}
+      PGDATA: /var/lib/postgresql/data
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: sub2api-redis
+    restart: unless-stopped
+    command: ["redis-server"]
+    volumes:
+      - /opt/sub2api-data/redis_data:/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # MinIO：公告图片等对象存储（S3 兼容）。 quay.io 拉取（docker.io 在部署主机不可达），
+  # 固定 release tag 不用 latest 漂浮标签（与 xianyu-worker 镜像同一纪律）。
+  # S3 API 仅绑定宿主机 127.0.0.1:9001：应用经 sub2api-network 内网访问 minio:9000，
+  # 公开下载经 nginx /s3/ 反代（见 deploy/nginx-corealgos-site.conf 与 sub2api-ops.md 5.y）。
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: sub2api-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":37001"]
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:9001:9000"
+    volumes:
+      - /opt/sub2api-data/minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # xianyu-auto-reply Worker：内网专用，只加入 xianyu-internal 网络，不映射任何公网端口。
+  # 镜像为内部维护的固定 tag（不使用 latest/reviewed 漂浮标签）。
+  # 镜像在部署主机直接构建（本机构建的镜像无 registry RepoDigest，@sha256 digest 引用无法解析），
+  # 部署后通过 docker inspect 校验运行容器镜像 ID 与构建产物一致（见 sub2api-ops.md）。
+  # Worker 审查源码与 Dockerfile 位于 deploy-config/xianyu-auto-reply-src/。
+  xianyu-worker:
+    image: xianyu-auto-reply:${XIANYU_WORKER_IMAGE_TAG:?set XIANYU_WORKER_IMAGE_TAG to the reviewed worker image tag}
+    container_name: xianyu-worker
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # 不映射任何宿主机端口：Worker 前端/后端/WebSocket 全部内网。
+    volumes:
+      - /opt/sub2api-data/xianyu_worker_data:/app/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      HOST: "0.0.0.0"
+      # Worker 回传主程序的内网地址与双向认证 token：部署时固定注入。
+      SUB2API_INTERNAL_BASE_URL: "http://sub2api:8080"
+      SUB2API_INTERNAL_TOKEN: ${XIANYU_INTERNAL_TOKEN}
+      MYSQL_HOST: xianyu-worker-mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${XIANYU_WORKER_MYSQL_USER:-xianyu}
+      MYSQL_PASSWORD: ${XIANYU_WORKER_MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${XIANYU_WORKER_MYSQL_DB:-xianyu}
+      REDIS_HOST: xianyu-worker-redis
+      REDIS_PORT: "6379"
+      # SQL 日志回显开关：生产关闭（SQLAlchemy 钩子每条 SQL 回显是巨大日志噪声）
+      SQL_ECHO: "false"
+      # 定时商品同步的全量轮间隔（秒）：低频完整翻页触发下架清理；0/负数=禁用。
+      # 缺省 86400（每天一次）；需调整时在 .env 设 XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS。
+      FETCH_ITEMS_FULL_SYNC_INTERVAL_SECONDS: ${XIANYU_WORKER_FULL_SYNC_INTERVAL_SECONDS:-86400}
+    depends_on:
+      xianyu-worker-mysql:
+        condition: service_healthy
+      xianyu-worker-redis:
+        condition: service_healthy
+    networks:
+      xianyu-internal:
+        aliases:
+          - xianyu-worker-backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8089/health', timeout=5)); data=d.get('data',{}); assert d.get('success') and data.get('database') == 'connected'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  xianyu-worker-mysql:
+    image: mysql:8.0
+    container_name: xianyu-worker-mysql
+    restart: unless-stopped
+    # 宿主机端口绑定为空：仅内网。
+    volumes:
+      - /opt/sub2api-data/xianyu_worker_mysql:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${XIANYU_WORKER_MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: ${XIANYU_WORKER_MYSQL_USER:-xianyu}
+      MYSQL_PASSWORD: ${XIANYU_WORKER_MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${XIANYU_WORKER_MYSQL_DB:-xianyu}
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      xianyu-internal: null
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${XIANYU_WORKER_MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  xianyu-worker-redis:
+    image: redis:7-alpine
+    container_name: xianyu-worker-redis
+    restart: unless-stopped
+    command: ["redis-server"]
+    volumes:
+      - /opt/sub2api-data/xianyu_worker_redis:/data
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      xianyu-internal: null
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+networks:
+  sub2api-network:
+    driver: bridge
+  xianyu-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+          gateway: 172.18.0.1

@@ -1,0 +1,509 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/tidwall/gjson"
+	"golang.org/x/sync/singleflight"
+)
+
+// 国产供应商 payg（按量付费）账号余额探测服务。
+//
+// 仅覆盖有公开余额端点的供应商：
+//   - Kimi/Moonshot：GET https://api.moonshot.cn/v1/users/me/balance (Bearer) → data.available_balance
+//   - DeepSeek：     GET https://api.deepseek.com/user/balance (Bearer) → balance_infos[].total_balance + is_available
+//
+// 智谱（zhipu）无公开余额端点（OpenAPI 规格验证），仅靠响应式 429/402（见
+// ratelimit_cn_providers.go）。解析逻辑对齐 cc-switch services/balance.rs::query_deepseek。
+const (
+	cnBalanceUpstreamTimeout = 15 * time.Second
+	cnBalanceMaxBodyBytes    = 256 * 1024
+
+	// Extra 余额快照键后缀（加 provider 前缀）。
+	cnBalanceExtraSuffixBalance   = "balance"
+	cnBalanceExtraSuffixCurrency  = "balance_currency"
+	cnBalanceExtraSuffixAvailable = "balance_available" // deepseek is_available 健康标记
+	cnBalanceExtraSuffixUpdated   = "balance_updated_at"
+	cnBalanceExtraSuffixBalances  = "balances" // 多币种明细（deepseek USD+CNY）
+	// 同程序中转账号（余额探测地址被账号覆盖）：上游为订阅制不限量时置 true，
+	// 周期检测据此跳过阈值停调；plan_name 存上游分组名供展示。
+	cnBalanceExtraSuffixUnlimited = "balance_unlimited"
+	cnBalanceExtraSuffixPlanName  = "balance_plan_name"
+	// 上游订阅/额度的到期时间（RFC3339 原文透传，前端格式化展示）。
+	cnBalanceExtraSuffixExpiresAt = "balance_expires_at"
+	// 订阅用量（同程序中转 /v1/usage 的 subscription.daily/monthly_usage_usd），
+	// 订阅制账号没有余额数字，用量是唯一可展示的数值。
+	cnBalanceExtraSuffixDailyUsed   = "balance_daily_used"
+	cnBalanceExtraSuffixMonthlyUsed = "balance_monthly_used"
+)
+
+// CNProviderBalanceEntry 是单一币种的余额明细。
+type CNProviderBalanceEntry struct {
+	Currency string  `json:"currency"`
+	Balance  float64 `json:"balance"`
+}
+
+// CNProviderBalanceResult 是余额探测的返回结构（管理端 + UI 消费）。
+type CNProviderBalanceResult struct {
+	Provider string `json:"provider"`
+	Success  bool   `json:"success"`
+	// Balance/Currency 为主币种（balance_infos 首条，兼容单币种消费方）；
+	// 完整明细见 Balances（deepseek 双币种账号含 CNY + USD 两条）。
+	Balance   float64                  `json:"balance"`
+	Currency  string                   `json:"currency,omitempty"`
+	Balances  []CNProviderBalanceEntry `json:"balances,omitempty"`
+	Available bool                     `json:"available"` // 健康标记（deepseek is_available；kimi 无此概念恒 true）
+	// Unlimited 标记上游为订阅制不限量（同程序中转 /v1/usage 返回 remaining<0）：
+	// 无数字余额可比，周期检测必须跳过阈值停调；展示用 PlanName（上游分组名）。
+	Unlimited bool   `json:"unlimited,omitempty"`
+	PlanName  string `json:"plan_name,omitempty"`
+	// ExpiresAt 为上游订阅/额度的到期时间（RFC3339，原文透传；无则空）。
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// DailyUsage/MonthlyUsage 为订阅制账号的当日/当月用量（USD）；订阅没有
+	// 余额数字，用量是唯一可展示的数值。非订阅账号为 nil。
+	DailyUsage   *float64 `json:"daily_usage,omitempty"`
+	MonthlyUsage *float64 `json:"monthly_usage,omitempty"`
+	StatusCode   int      `json:"status_code,omitempty"`
+	FetchedAt    int64    `json:"fetched_at"`
+	Persisted    bool     `json:"persisted"`
+	Error        string   `json:"error,omitempty"`
+}
+
+// CNProviderBalanceService 探测 Kimi / DeepSeek payg 账号的账户余额。
+type CNProviderBalanceService struct {
+	accountRepo  AccountRepository
+	proxyRepo    ProxyRepository
+	httpUpstream HTTPUpstream
+	cfg          *config.Config
+	flight       singleflight.Group
+}
+
+// NewCNProviderBalanceService 构造余额探测服务。
+func NewCNProviderBalanceService(
+	accountRepo AccountRepository,
+	proxyRepo ProxyRepository,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+) *CNProviderBalanceService {
+	return &CNProviderBalanceService{
+		accountRepo:  accountRepo,
+		proxyRepo:    proxyRepo,
+		httpUpstream: httpUpstream,
+		cfg:          cfg,
+	}
+}
+
+// QueryBalance 探测指定 payg 账号的余额并落 Extra 快照。
+func (s *CNProviderBalanceService) QueryBalance(ctx context.Context, accountID int64) (*CNProviderBalanceResult, error) {
+	account, err := s.loadPayGAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return s.QueryBalanceForAccount(ctx, account)
+}
+
+// QueryBalanceForAccount 探测已加载账号（配额监控 fetcher / 周期余额检测复用，
+// 避免二次 GetByID）。singleflight key 与 QueryBalance 相同，按账号 ID 合并。
+func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
+		return nil, infraerrors.New(http.StatusInternalServerError, "CN_BALANCE_NOT_CONFIGURED", "cn provider balance service is not configured")
+	}
+	if err := validatePayGAccount(account); err != nil {
+		return nil, err
+	}
+	key := "cn_balance:" + strconv.FormatInt(account.ID, 10)
+	resultCh := s.flight.DoChan(key, func() (any, error) {
+		probeCtx, cancel := context.WithTimeout(context.Background(), cnBalanceUpstreamTimeout+5*time.Second)
+		defer cancel()
+		return s.queryBalanceForAccount(probeCtx, account)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case flightResult := <-resultCh:
+		if flightResult.Err != nil {
+			return nil, flightResult.Err
+		}
+		result, ok := flightResult.Val.(*CNProviderBalanceResult)
+		if !ok || result == nil {
+			return nil, infraerrors.New(http.StatusInternalServerError, "CN_BALANCE_PROBE_RESULT_INVALID", "invalid cn provider balance probe result")
+		}
+		cloned := *result
+		return &cloned, nil
+	}
+}
+
+func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+	provider := account.Platform
+	if provider != PlatformKimi && provider != PlatformDeepseek {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_ENDPOINT", "account provider has no balance endpoint")
+	}
+
+	apiKey := strings.TrimSpace(account.GetCNAPIKey())
+	if apiKey == "" {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_APIKEY", "account api_key is empty")
+	}
+
+	// 同程序中转账号：官方余额端点对中转 key 无效（如 deepseek anthropic 协议
+	// 账号会命中 api.deepseek.com 导致 401），改走账号上配置的余额探测地址
+	//（credentials.balance_probe，通常为上游 /v1/usage）。地址留空时按
+	// base_url + /v1/usage 推导——但官方域名账号（base_url 即官方地址）不适用，
+	// 否则官方 kimi/deepseek 账号会被错推到不存在的 /v1/usage。
+	if probeCfg := account.BalanceProbeConfig(); probeCfg.Enabled {
+		overrideURL := strings.TrimSpace(probeCfg.URL)
+		if overrideURL == "" {
+			if base := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/"); base != "" && !cnIsOfficialBalanceHost(account.Platform, base) {
+				overrideURL = base + "/v1/usage"
+			}
+		}
+		if overrideURL != "" {
+			return s.queryRelayBalance(ctx, account, apiKey, BalanceProbeConfig{
+				Enabled:    true,
+				URL:        overrideURL,
+				BearerAuth: probeCfg.BearerAuth,
+			})
+		}
+	}
+
+	targetURL := cnBalanceURL(account)
+	// 探测发起前过出站 URL 安全策略（与网关转发/Grok 探测同一套校验）：
+	// DeepSeek 端点由账号 base_url 衍生，不得把 API key 发往策略外主机。
+	validatedURL, err := cnValidateProbeURL(s.cfg, targetURL)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
+	}
+	targetURL = validatedURL
+	proxyURL := s.resolveProxyURL(ctx, account)
+	callCtx, cancel := context.WithTimeout(ctx, cnBalanceUpstreamTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_BALANCE_REQUEST_BUILD_FAILED", "build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+	account.ApplyHeaderOverrides(req.Header)
+
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "CN_BALANCE_REQUEST_FAILED", "upstream request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, cnBalanceMaxBodyBytes))
+
+	now := time.Now().UTC()
+	result := &CNProviderBalanceResult{
+		Provider:   provider,
+		FetchedAt:  now.Unix(),
+		StatusCode: resp.StatusCode,
+		Available:  true,
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		result.Error = fmt.Sprintf("Authentication failed (HTTP %d)", resp.StatusCode)
+		return result, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Error = fmt.Sprintf("API error (HTTP %d): %s", resp.StatusCode, truncate(strings.TrimSpace(string(bodyBytes)), 240))
+		return result, nil
+	}
+
+	var entries []CNProviderBalanceEntry
+	available := true
+	switch provider {
+	case PlatformKimi:
+		// Moonshot：code==0 成功；data.available_balance（number），单币种 CNY。
+		balance, _ := cnParseF64(gjson.GetBytes(bodyBytes, "data.available_balance").Value())
+		entries = append(entries, CNProviderBalanceEntry{Currency: "CNY", Balance: balance})
+	case PlatformDeepseek:
+		// is_available 缺省视为 true（健康）；显式存在时取其值。
+		if v := gjson.GetBytes(bodyBytes, "is_available"); v.Exists() {
+			available = v.Bool()
+		}
+		// balance_infos 逐条解析：双币种账号同时返回 CNY + USD（数组顺序即
+		// 主次序，首条为主币种）。
+		balanceInfos := gjson.GetBytes(bodyBytes, "balance_infos")
+		if !balanceInfos.Exists() || !balanceInfos.IsArray() {
+			result.Error = "Invalid balance response: missing balance_infos"
+			return result, nil
+		}
+		balanceInfos.ForEach(func(_, info gjson.Result) bool {
+			currency := strings.ToUpper(strings.TrimSpace(info.Get("currency").String()))
+			totalBalance := info.Get("total_balance")
+			balance, ok := cnParseF64(totalBalance.Value())
+			if !totalBalance.Exists() || !ok {
+				return true
+			}
+			if currency == "" {
+				currency = "CNY"
+			}
+			entries = append(entries, CNProviderBalanceEntry{Currency: currency, Balance: balance})
+			return true
+		})
+		if len(entries) == 0 {
+			result.Error = "Invalid balance response: no valid balance entries"
+			return result, nil
+		}
+	}
+	result.Balances = entries
+	result.Balance = entries[0].Balance
+	result.Currency = entries[0].Currency
+	result.Available = available
+	result.Success = true
+
+	balanceUpdates := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		balanceUpdates = append(balanceUpdates, map[string]any{
+			"currency": entry.Currency,
+			"balance":  entry.Balance,
+		})
+	}
+	updates := map[string]any{
+		cnExtraKey(provider, cnBalanceExtraSuffixBalance):   result.Balance,
+		cnExtraKey(provider, cnBalanceExtraSuffixCurrency):  result.Currency,
+		cnExtraKey(provider, cnBalanceExtraSuffixAvailable): available,
+		cnExtraKey(provider, cnBalanceExtraSuffixUpdated):   now.Format(time.RFC3339),
+		cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
+		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
+		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+	}
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+		slog.Warn("cn_balance_persist_failed", "account_id", account.ID, "provider", provider, "error", err)
+	} else {
+		result.Persisted = true
+	}
+	return result, nil
+}
+
+// queryRelayBalance 探测挂在国产平台下、但实际走第三方中转（同 sub2api 程序）
+// 的账号余额：请求账号上配置的余额探测地址，按 sub2api /v1/usage 返回解析。
+//
+//   - 数字余额（remaining / quota.remaining / balance ≥ 0）：正常落快照，参与阈值停调；
+//   - 订阅制不限量（remaining < 0）：置 Unlimited，周期检测跳过阈值停调，展示上游分组名；
+//   - 覆盖地址同样经过出站 URL 安全策略校验（cnValidateProbeURL），不绕过 allowlist。
+func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, account *Account, apiKey string, probeCfg BalanceProbeConfig) (*CNProviderBalanceResult, error) {
+	provider := account.Platform
+	targetURL, err := cnValidateProbeURL(s.cfg, probeCfg.URL)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
+	}
+	proxyURL := s.resolveProxyURL(ctx, account)
+	callCtx, cancel := context.WithTimeout(ctx, cnBalanceUpstreamTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusInternalServerError, "CN_BALANCE_REQUEST_BUILD_FAILED", "build request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if probeCfg.BearerAuth {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	} else {
+		req.Header.Set("Authorization", apiKey)
+	}
+	account.ApplyHeaderOverrides(req.Header)
+
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusBadGateway, "CN_BALANCE_REQUEST_FAILED", "upstream request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, cnBalanceMaxBodyBytes))
+
+	now := time.Now().UTC()
+	result := &CNProviderBalanceResult{
+		Provider:   provider,
+		FetchedAt:  now.Unix(),
+		StatusCode: resp.StatusCode,
+		Available:  true,
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		result.Error = fmt.Sprintf("Authentication failed (HTTP %d)", resp.StatusCode)
+		return result, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Error = fmt.Sprintf("API error (HTTP %d): %s", resp.StatusCode, truncate(strings.TrimSpace(string(bodyBytes)), 240))
+		return result, nil
+	}
+
+	remaining := firstJSONNumber(bodyBytes, "remaining", "quota.remaining", "balance")
+	if remaining == nil {
+		// 上游订阅到期后 /v1/usage 不再返回 remaining/subscription（订阅信息
+		// 未注入 context）。此时保留上次快照（含到期时间，前端标红展示），
+		// 仅报告可识别的原因，不覆盖历史余额快照。
+		if plan := strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String()); plan != "" {
+			result.Error = fmt.Sprintf("Upstream subscription %q expired or unavailable (missing remaining)", plan)
+			return result, nil
+		}
+		result.Error = "Invalid balance response: missing remaining"
+		return result, nil
+	}
+	unit := strings.ToUpper(strings.TrimSpace(gjson.GetBytes(bodyBytes, "unit").String()))
+	if unit == "" {
+		unit = "USD"
+	}
+	available := true
+	if v := gjson.GetBytes(bodyBytes, "is_active"); v.Exists() {
+		available = v.Bool()
+	} else if v := gjson.GetBytes(bodyBytes, "isValid"); v.Exists() {
+		available = v.Bool()
+	}
+	result.Available = available
+	result.Currency = unit
+	result.PlanName = strings.TrimSpace(gjson.GetBytes(bodyBytes, "planName").String())
+	// 订阅用量（订阅制账号没有余额数字，用量是唯一可展示的数值）。
+	if v := gjson.GetBytes(bodyBytes, "subscription.daily_usage_usd"); v.Exists() {
+		if f, parseErr := strconv.ParseFloat(v.String(), 64); parseErr == nil {
+			result.DailyUsage = &f
+		}
+	}
+	if v := gjson.GetBytes(bodyBytes, "subscription.monthly_usage_usd"); v.Exists() {
+		if f, parseErr := strconv.ParseFloat(v.String(), 64); parseErr == nil {
+			result.MonthlyUsage = &f
+		}
+	}
+	// 订阅有效期：订阅模式在 subscription.expires_at，限额模式在顶层 expires_at。
+	// 只透传可解析的 RFC3339，坏值静默丢弃（不影响余额主链路）。
+	if raw := strings.TrimSpace(gjson.GetBytes(bodyBytes, "subscription.expires_at").String()); raw != "" {
+		if _, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+			result.ExpiresAt = raw
+		}
+	} else if raw := strings.TrimSpace(gjson.GetBytes(bodyBytes, "expires_at").String()); raw != "" {
+		if _, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+			result.ExpiresAt = raw
+		}
+	}
+	if *remaining < 0 {
+		result.Unlimited = true
+	} else {
+		result.Balance = *remaining
+		result.Balances = []CNProviderBalanceEntry{{Currency: unit, Balance: *remaining}}
+	}
+	result.Success = true
+
+	var balanceUpdates []any
+	for _, entry := range result.Balances {
+		balanceUpdates = append(balanceUpdates, map[string]any{
+			"currency": entry.Currency,
+			"balance":  entry.Balance,
+		})
+	}
+	updates := map[string]any{
+		cnExtraKey(provider, cnBalanceExtraSuffixBalance):   result.Balance,
+		cnExtraKey(provider, cnBalanceExtraSuffixCurrency):  result.Currency,
+		cnExtraKey(provider, cnBalanceExtraSuffixAvailable): available,
+		cnExtraKey(provider, cnBalanceExtraSuffixUpdated):   now.Format(time.RFC3339),
+		cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
+		cnExtraKey(provider, cnBalanceExtraSuffixUnlimited): result.Unlimited,
+		cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
+		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
+		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+	}
+	// 订阅有效期仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值），
+	// 避免上游不再返回 expires_at 时用空串覆盖有效快照。
+	if result.ExpiresAt != "" {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixExpiresAt)] = result.ExpiresAt
+	}
+	// 订阅用量仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值）。
+	if result.DailyUsage != nil {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixDailyUsed)] = *result.DailyUsage
+	}
+	if result.MonthlyUsage != nil {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixMonthlyUsed)] = *result.MonthlyUsage
+	}
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+		slog.Warn("cn_balance_persist_failed", "account_id", account.ID, "provider", provider, "error", err)
+	} else {
+		result.Persisted = true
+	}
+	return result, nil
+}
+
+// cnIsOfficialBalanceHost 判定 base_url 是否指向厂商官方域名（官方账号的余额
+// 探测必须走官方端点，不能被 /v1/usage 默认推导劫持）。
+func cnIsOfficialBalanceHost(platform, baseURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	switch platform {
+	case PlatformKimi:
+		return host == "api.moonshot.cn"
+	case PlatformDeepseek:
+		return host == "api.deepseek.com"
+	default:
+		return false
+	}
+}
+
+// loadPayGAccount 加载 payg 模式的国产供应商账号（余额仅对 payg 有意义；coding 走额度）。
+func (s *CNProviderBalanceService) loadPayGAccount(ctx context.Context, accountID int64) (*Account, error) {
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusNotFound, "CN_BALANCE_ACCOUNT_NOT_FOUND", "account not found: %v", err)
+	}
+	if err := validatePayGAccount(account); err != nil {
+		return nil, err
+	}
+	return account, nil
+}
+
+// validatePayGAccount 加载后的非 DB 校验（ForAccount 入口同样复用，
+// 保证直传 account 也不绕过平台/模式检查）。
+func validatePayGAccount(account *Account) error {
+	if account == nil {
+		return infraerrors.New(http.StatusNotFound, "CN_BALANCE_ACCOUNT_NOT_FOUND", "account not found")
+	}
+	if !account.IsCNProvider() {
+		return infraerrors.New(http.StatusBadRequest, "CN_BALANCE_INVALID_PLATFORM", "account is not a CN provider account")
+	}
+	// coding 账号走额度探测，余额端点不适用。
+	if account.IsCodingPlan() {
+		return infraerrors.New(http.StatusBadRequest, "CN_BALANCE_CODING_PLAN", "coding plan account has no balance endpoint; use quota probe")
+	}
+	return nil
+}
+
+func (s *CNProviderBalanceService) resolveProxyURL(ctx context.Context, account *Account) string {
+	if account == nil || account.ProxyID == nil {
+		return ""
+	}
+	if account.Proxy != nil {
+		return account.Proxy.URL()
+	}
+	if s != nil && s.proxyRepo != nil {
+		if proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && proxy != nil {
+			account.Proxy = proxy
+			return proxy.URL()
+		}
+	}
+	return ""
+}
+
+// cnBalanceURL 解析账号的余额端点。
+//
+//   - Kimi：固定 https://api.moonshot.cn/v1/users/me/balance（与 base_url 无关，Moonshot 仅此一处）
+//   - DeepSeek：基于 base_url 拼接 /user/balance（支持自定义域名）
+func cnBalanceURL(account *Account) string {
+	switch account.Platform {
+	case PlatformKimi:
+		return "https://api.moonshot.cn/v1/users/me/balance"
+	case PlatformDeepseek:
+		// Anthropic 协议账号的凭证 base_url 指向 /anthropic 端点，余额探测需回退
+		// 到 OpenAI 格式 base（协议感知）再拼接 /user/balance。
+		return strings.TrimRight(account.GetOpenAIFormatBaseURL(), "/") + "/user/balance"
+	default:
+		return ""
+	}
+}

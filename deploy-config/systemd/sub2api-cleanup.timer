@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily sub2api release cleanup
+
+[Timer]
+# 与 yiyutu-release-cleanup (00:00) 错峰
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

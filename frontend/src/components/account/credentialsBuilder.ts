@@ -1,0 +1,690 @@
+export function applyInterceptWarmup(
+  credentials: Record<string, unknown>,
+  enabled: boolean,
+  mode: 'create' | 'edit'
+): void {
+  if (enabled) {
+    credentials.intercept_warmup_requests = true
+  } else if (mode === 'edit') {
+    delete credentials.intercept_warmup_requests
+  }
+}
+
+export const ANTIGRAVITY_PROJECT_ID_CREDENTIAL_KEY = 'antigravity_project_id'
+
+export function applyAntigravityProjectID(
+  credentials: Record<string, unknown>,
+  projectId: string,
+  mode: 'create' | 'edit'
+): void {
+  const trimmed = projectId.trim()
+  if (trimmed) {
+    credentials[ANTIGRAVITY_PROJECT_ID_CREDENTIAL_KEY] = trimmed
+  } else if (mode === 'edit') {
+    delete credentials[ANTIGRAVITY_PROJECT_ID_CREDENTIAL_KEY]
+  }
+}
+
+// ===== 网页接入模式（kimi / zhipu / deepseek + access_mode=web）=====
+// 平台归并（PR-3）后 web-* 不再是独立平台：官方网页端登录态转发下沉为账号级
+// credentials["access_mode"]="web"。登录态凭证由自动登录取得并随建号写入：
+// DeepSeek = 密码登录（cookie + login_email + login_password，供失效后自动续期）；
+// Zhipu / Kimi = 短信码登录（后端取得 cookie / access_token + login_refresh_token）。
+// 手工粘贴 Cookie / Kimi Token JSON 入口已随单入口登录整改归零（点七）。字段口径与后端
+// validateWebAccountCredential / SanitizeStoredCredentials（web 模式保留 cookie）保持一致。
+
+export const WEB_PROVIDER_PLATFORMS = ['kimi', 'zhipu', 'deepseek'] as const
+export type WebProviderPlatform = (typeof WEB_PROVIDER_PLATFORMS)[number]
+
+export function isWebProviderPlatform(platform: string): platform is WebProviderPlatform {
+  return (WEB_PROVIDER_PLATFORMS as readonly string[]).includes(platform)
+}
+
+/**
+ * 单一事实源：账号是否为"网页接入"账号。
+ * 平台归并（PR-3）后 web 接入不再等价于"平台是 kimi/zhipu/deepseek"——普通 API
+ * 账号可与 web 账号同平台共存，必须再校验 credentials.access_mode === "web"。
+ * 登录状态徽标、批量 Web 操作/导出等所有 web 专属 UI 一律走本判定，避免各处
+ * 各写一遍导致漏判。
+ */
+export function isWebAccessAccount(account: {
+  platform?: string
+  credentials?: Record<string, unknown> | null
+}): boolean {
+  return (
+    !!account.platform &&
+    isWebProviderPlatform(account.platform) &&
+    account.credentials?.access_mode === 'web'
+  )
+}
+
+// ===== 上游倍率自动探测（upstream billing probe）平台资格 =====
+// 与后端 IsUpstreamBillingProbeIdentity（backend/internal/service/upstream_billing_probe.go）
+// 保持同一白名单：仅这些平台的 apikey 账号持有可对上游 /v1/sub2api/billing 探测的
+// 静态密钥。web-* 网页平台、other、codebuddy 不在名单内：其创建/编辑请求不得携带
+// upstream_billing_probe_enabled=true，否则后端按契约 fail-closed 返回 400
+// UPSTREAM_BILLING_PROBE_ACCOUNT_INVALID。修改名单时必须与后端同步。
+export const UPSTREAM_BILLING_PROBE_PLATFORMS = [
+  'openai',
+  'anthropic',
+  'gemini',
+  'antigravity',
+  'grok',
+  'kimi',
+  'zhipu',
+  'deepseek',
+  'minimax',
+] as const
+
+export function isUpstreamBillingProbeEligible(platform: string, type: string): boolean {
+  return type === 'apikey' && (UPSTREAM_BILLING_PROBE_PLATFORMS as readonly string[]).includes(platform)
+}
+
+/** DeepSeek / 智谱网页端用整串 Cookie 认证；Kimi 网页端用 access_token（短信登录后端自动取得）。 */
+export function webProviderUsesCookie(platform: WebProviderPlatform): boolean {
+  return platform === 'deepseek' || platform === 'zhipu'
+}
+
+// 官方网页端密码登录仅 deepseek 支持；zhipu（微信扫码/短信码）与 kimi（短信码/App 扫码）
+// 官方均不提供密码登录，账号密码自动登录入口只对 deepseek 开放。
+export function webPlatformSupportsPasswordLogin(platform: WebProviderPlatform): boolean {
+  return platform === 'deepseek'
+}
+
+export type WebCredentialError = 'webCookieRequired' | 'webKimiAccessTokenRequired'
+
+export interface WebCredentialBuildInput {
+  /** DeepSeek / Zhipu：整串 Cookie 原文 */
+  cookie: string
+  /** 可选官方域名覆盖；空串不写入 */
+  baseUrl: string
+  /** DeepSeek 自动续期：登录邮箱（非空才写入 login_email） */
+  loginEmail?: string
+  /** DeepSeek 自动续期：登录密码（非空才写入 login_password） */
+  loginPassword?: string
+  /** zhipu / kimi 短信登录：手机号（非空才写入 login_phone） */
+  loginPhone?: string
+}
+
+export type WebCredentialBuildResult =
+  | { credentials: Record<string, unknown>; error?: undefined }
+  | { credentials?: undefined; error: WebCredentialError }
+
+/**
+ * 校验并构建网页接入模式凭证。Cookie 平台（deepseek/zhipu）仅要求非空 Cookie；
+ * Kimi 仅支持短信登录创建（后端自动取得 access_token），无手工凭证输入。
+ */
+export function buildWebProviderCredentials(
+  platform: string,
+  input: WebCredentialBuildInput
+): WebCredentialBuildResult {
+  if (!isWebProviderPlatform(platform)) {
+    return { error: 'webCookieRequired' }
+  }
+  const credentials: Record<string, unknown> = {
+    // 平台归并：网页接入模式唯一适配器判定源（与后端 accessModeFromCredentials 一致）。
+    access_mode: 'web',
+  }
+  if (webProviderUsesCookie(platform)) {
+    const cookie = input.cookie.trim()
+    if (!cookie) {
+      return { error: 'webCookieRequired' }
+    }
+    credentials.cookie = cookie
+  } else {
+    // Kimi：无手工凭证输入（点七归零，短信登录由后端自动取得 access_token）。
+    // 手动创建路径不可达即失败关闭，不产生半成品账号。
+    return { error: 'webKimiAccessTokenRequired' }
+  }
+  const baseUrl = input.baseUrl.trim()
+  if (baseUrl) {
+    credentials.base_url = baseUrl
+  }
+  // 自动续期登录凭证（deepseek 密码登录；zhipu/kimi 短信登录）：可选字段非空才写入，
+  // 键名与后端 CredKeyLoginEmail / CredKeyLoginPassword / CredKeyLoginPhone 保持一致。
+  const loginEmail = input.loginEmail?.trim()
+  if (loginEmail) {
+    credentials.login_email = loginEmail
+  }
+  const loginPassword = input.loginPassword?.trim()
+  if (loginPassword) {
+    credentials.login_password = loginPassword
+  }
+  const loginPhone = input.loginPhone?.trim()
+  if (loginPhone) {
+    credentials.login_phone = loginPhone
+  }
+  return { credentials }
+}
+
+// ========== 请求头覆写（API-key 平台 + grok 的 api_key/oauth 账号） ==========
+
+export const HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY = 'header_override_enabled'
+export const HEADER_OVERRIDES_CREDENTIAL_KEY = 'header_overrides'
+
+export interface HeaderOverrideRow {
+  name: string
+  value: string
+}
+
+/** 请求头覆写资格（与后端 IsHeaderOverrideEligible 保持一致） */
+export function isHeaderOverrideCapable(platform: string, type: string): boolean {
+  if (
+    platform === 'anthropic' ||
+    platform === 'openai' ||
+    platform === 'kimi' ||
+    platform === 'zhipu' ||
+    platform === 'deepseek' ||
+    platform === 'minimax'
+  ) {
+    return type === 'apikey'
+  }
+  if (platform === 'grok') {
+    return type === 'apikey' || type === 'oauth'
+  }
+  return false
+}
+
+/** 禁止覆写的请求头（与后端 headerOverrideBlockedNames 保持一致） */
+const HEADER_OVERRIDE_BLOCKED_NAMES = new Set([
+  'host',
+  'content-length',
+  'content-type',
+  'transfer-encoding',
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'upgrade',
+  'authorization',
+  'x-api-key',
+  'x-goog-api-key',
+  'cookie',
+  'accept-encoding',
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-extensions',
+  'sec-websocket-protocol',
+  'sec-websocket-accept',
+  'session_id',
+  'conversation_id',
+  'x-codex-turn-state',
+  'x-codex-turn-metadata',
+  'chatgpt-account-id',
+  'x-claude-code-session-id',
+  'x-client-request-id',
+  'x-grok-conv-id'
+])
+
+/** RFC 7230 token：合法的 HTTP header 名称字符集 */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+function isValidHeaderOverrideName(name: string): boolean {
+  return HEADER_NAME_PATTERN.test(name)
+}
+
+/** 与后端 maxHeaderOverride* 常量保持一致 */
+const HEADER_OVERRIDE_MAX_ENTRIES = 64
+const HEADER_OVERRIDE_MAX_NAME_LENGTH = 200
+const HEADER_OVERRIDE_MAX_VALUE_LENGTH = 8192
+
+/** header value 不允许包含控制字符（与后端 httpguts.ValidHeaderFieldValue 对齐） */
+// eslint-disable-next-line no-control-regex
+const HEADER_VALUE_INVALID_PATTERN = /[\x00-\x08\x0a-\x1f\x7f]/
+
+/** 长度限制按 UTF-8 字节计（与后端 Go len() 对齐，避免多字节值前端放行后端 400） */
+const HEADER_TEXT_ENCODER = new TextEncoder()
+function utf8ByteLength(value: string): number {
+  return HEADER_TEXT_ENCODER.encode(value).length
+}
+
+/**
+ * 校验请求头覆写行，返回首个错误的 i18n key（无错误返回 null）。
+ * 名称为空但值非空 → invalidName；名称非法 → invalidName；
+ * 禁止覆写 → blockedName；大小写不敏感重名 → duplicateName；
+ * 值含控制字符或超长 → invalidValue；条目过多 → tooManyEntries。
+ */
+export function validateHeaderOverrideRows(
+  rows: HeaderOverrideRow[]
+): 'invalidName' | 'blockedName' | 'duplicateName' | 'invalidValue' | 'tooManyEntries' | null {
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const name = row.name.trim()
+    const value = row.value.trim()
+    if (!name) {
+      if (value) return 'invalidName'
+      continue
+    }
+    if (!isValidHeaderOverrideName(name) || name.length > HEADER_OVERRIDE_MAX_NAME_LENGTH) {
+      return 'invalidName'
+    }
+    const lower = name.toLowerCase()
+    if (HEADER_OVERRIDE_BLOCKED_NAMES.has(lower)) return 'blockedName'
+    if (seen.has(lower)) return 'duplicateName'
+    if (
+      HEADER_VALUE_INVALID_PATTERN.test(value) ||
+      utf8ByteLength(value) > HEADER_OVERRIDE_MAX_VALUE_LENGTH
+    ) {
+      return 'invalidValue'
+    }
+    seen.add(lower)
+  }
+  if (seen.size > HEADER_OVERRIDE_MAX_ENTRIES) return 'tooManyEntries'
+  return null
+}
+
+/** 行数组 → credentials 存储对象（名称小写化，丢弃空行） */
+export function buildHeaderOverridesObject(rows: HeaderOverrideRow[]): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const row of rows) {
+    const name = row.name.trim().toLowerCase()
+    if (!name) continue
+    result[name] = row.value.trim()
+  }
+  return result
+}
+
+/** credentials 存储对象 → 行数组（按名称排序保证稳定展示） */
+export function splitHeaderOverridesObject(record: unknown): HeaderOverrideRow[] {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return []
+  return Object.entries(record as Record<string, unknown>)
+    .filter(([, value]) => typeof value === 'string')
+    .map(([name, value]) => ({ name, value: value as string }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * 解析粘贴的 JSON 文本为请求头覆写行。
+ * 仅接受扁平 JSON 对象；值允许 string/number/boolean（统一转字符串），
+ * 其余类型或非对象输入返回 null 表示格式非法。键为空白的条目直接丢弃。
+ */
+export function parseHeaderOverridesJson(text: string): HeaderOverrideRow[] | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const rows: HeaderOverrideRow[] = []
+  for (const [rawName, rawValue] of Object.entries(parsed as Record<string, unknown>)) {
+    const name = rawName.trim()
+    if (!name) continue
+    if (
+      typeof rawValue !== 'string' &&
+      typeof rawValue !== 'number' &&
+      typeof rawValue !== 'boolean'
+    ) {
+      return null
+    }
+    rows.push({ name, value: String(rawValue).trim() })
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** 请求头覆写行 → 便于迁移/备份的 JSON 文本（跳过名称为空的占位行） */
+export function serializeHeaderOverrideRows(rows: HeaderOverrideRow[]): string {
+  const record: Record<string, string> = {}
+  for (const row of rows) {
+    const name = row.name.trim()
+    if (!name) continue
+    record[name] = row.value.trim()
+  }
+  return JSON.stringify(record, null, 2)
+}
+
+// ========== Grok 自定义转发地址（base_url 仅改写转发端点，凭证生命周期不受影响） ==========
+
+/** OAuth 账号建号/刷新默认写入的 CLI 网关 host——只有它视同"未定制"。 */
+const GROK_DEFAULT_GATEWAY_HOST = 'cli-chat-proxy.grok.com'
+
+/**
+ * 判断 Grok 账号存储的 base_url 是否为主动指定的上游端点。
+ * 运营方可在官方 API / 区域 API / 第三方转发地址之间手动切换（应对单端点
+ * 不可用），这些值都必须回显（开关开启 + 显示地址）。仅默认 CLI 网关
+ * （建号/刷新自动写入）、空值与无法解析的值视为"未定制"（与后端
+ * GetGrokBaseURL 的回落语义对齐），用于 OAuth 账号编辑时决定开关初始状态。
+ */
+export function isCustomGrokBaseUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return false
+  }
+  return parsed.hostname.toLowerCase() !== GROK_DEFAULT_GATEWAY_HOST
+}
+
+export interface GrokBaseUrlPreset {
+  /** i18n 子键：admin.accounts.grokCustomBaseUrl.presets.<labelKey> */
+  labelKey?: 'cli' | 'official'
+  /** 字面标签（如区域标识 us-east-1），专有名词不参与 i18n */
+  label?: string
+  url: string
+}
+
+/**
+ * Grok 快捷端点（仅供快速填充，输入框仍可自由填写任意转发地址）。
+ * 官方端点偶发不可用时，运营方靠这组预设在端点间手动切换。
+ */
+export const GROK_BASE_URL_PRESETS: GrokBaseUrlPreset[] = [
+  { labelKey: 'cli', url: 'https://cli-chat-proxy.grok.com/v1' },
+  { labelKey: 'official', url: 'https://api.x.ai/v1' },
+  { label: 'us-east-1', url: 'https://us-east-1.api.x.ai/v1' },
+  { label: 'us-west-2', url: 'https://us-west-2.api.x.ai/v1' },
+  { label: 'eu-west-1', url: 'https://eu-west-1.api.x.ai/v1' }
+]
+
+// ========== 国产供应商（Kimi / Zhipu / DeepSeek）base_url 预设 ==========
+// 与后端 service/domain_constants.go 的默认 base url 保持一致。
+// 账号类型（payg 按量付费 / coding 编程套餐）决定额度监控方式；
+// API 协议（chat_completions / anthropic / responses）决定转发端点与格式，
+// 两者正交。同协议请求零转换直通，跨协议组合才走转换链。
+
+export type CnAccountMode = 'payg' | 'coding'
+export type CnProviderPlatform = 'kimi' | 'zhipu' | 'deepseek' | 'minimax'
+
+/** deepseek / kimi / minimax 支持原生 responses；adaptive 会按入站协议选择原生端点。 */
+export type CnApiProtocol = 'adaptive' | 'chat_completions' | 'anthropic' | 'responses'
+export type CnNativeApiProtocol = Exclude<CnApiProtocol, 'adaptive'>
+
+export function isCNProviderPlatform(platform: string): platform is CnProviderPlatform {
+  return platform === 'kimi' || platform === 'zhipu' || platform === 'deepseek' || platform === 'minimax'
+}
+
+/** DeepSeek、Kimi 与 MiniMax 提供原生 Responses 端点。 */
+export function cnSupportsNativeResponses(platform: string): boolean {
+  return platform === 'deepseek' || platform === 'kimi' || platform === 'minimax'
+}
+
+export interface CnBaseUrlPreset {
+  mode: CnAccountMode
+  protocol: CnApiProtocol
+  /** 专有名词，不参与 i18n */
+  label: string
+  url: string
+}
+
+/** 各供应商按账号类型 × API 协议分档的快捷端点（点击快速填充，输入框仍可自由填写）。 */
+export const CN_BASE_URL_PRESETS: Record<CnProviderPlatform, CnBaseUrlPreset[]> = {
+  kimi: [
+    { mode: 'payg', protocol: 'chat_completions', label: 'Moonshot', url: 'https://api.moonshot.cn/v1' },
+    { mode: 'payg', protocol: 'anthropic', label: 'Moonshot Anthropic', url: 'https://api.moonshot.cn/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'Moonshot Responses', url: 'https://api.moonshot.cn/v1' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'Kimi For Coding', url: 'https://api.kimi.com/coding/v1' },
+    { mode: 'coding', protocol: 'anthropic', label: 'Kimi Coding Anthropic', url: 'https://api.kimi.com/coding' },
+    { mode: 'coding', protocol: 'responses', label: 'Kimi Coding Responses', url: 'https://api.kimi.com/coding/v1' }
+  ],
+  zhipu: [
+    { mode: 'payg', protocol: 'chat_completions', label: 'GLM PaaS', url: 'https://open.bigmodel.cn/api/paas/v4' },
+    { mode: 'payg', protocol: 'anthropic', label: 'GLM Anthropic', url: 'https://open.bigmodel.cn/api/anthropic' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'GLM Coding', url: 'https://open.bigmodel.cn/api/coding/paas/v4' },
+    { mode: 'coding', protocol: 'anthropic', label: 'GLM Coding Anthropic', url: 'https://open.bigmodel.cn/api/anthropic' }
+  ],
+  deepseek: [
+    { mode: 'payg', protocol: 'chat_completions', label: 'DeepSeek', url: 'https://api.deepseek.com' },
+    { mode: 'payg', protocol: 'anthropic', label: 'DeepSeek Anthropic', url: 'https://api.deepseek.com/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'DeepSeek Responses', url: 'https://api.deepseek.com' },
+    // 火山方舟订阅号挂靠 deepseek 平台（方案B：识别只按 base_url，账号仍存为 deepseek 平台）。
+    { mode: 'payg', protocol: 'chat_completions', label: '火山方舟 Agent Plan', url: 'https://ark.cn-beijing.volces.com/api/plan' },
+    { mode: 'coding', protocol: 'chat_completions', label: '火山方舟 Coding Plan', url: 'https://ark.cn-beijing.volces.com/api/coding' }
+  ],
+  minimax: [
+    { mode: 'payg', protocol: 'chat_completions', label: 'MiniMax CN', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'payg', protocol: 'anthropic', label: 'MiniMax CN Anthropic', url: 'https://api.minimaxi.com/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'MiniMax CN Responses', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'payg', protocol: 'chat_completions', label: 'MiniMax Intl', url: 'https://api.minimax.io/v1' },
+    { mode: 'payg', protocol: 'anthropic', label: 'MiniMax Intl Anthropic', url: 'https://api.minimax.io/anthropic' },
+    { mode: 'payg', protocol: 'responses', label: 'MiniMax Intl Responses', url: 'https://api.minimax.io/v1' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'MiniMax Coding CN', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'coding', protocol: 'anthropic', label: 'MiniMax Coding CN Anthropic', url: 'https://api.minimaxi.com/anthropic' },
+    { mode: 'coding', protocol: 'responses', label: 'MiniMax Coding CN Responses', url: 'https://api.minimaxi.com/v1' },
+    { mode: 'coding', protocol: 'chat_completions', label: 'MiniMax Coding Intl', url: 'https://api.minimax.io/v1' },
+    { mode: 'coding', protocol: 'anthropic', label: 'MiniMax Coding Intl Anthropic', url: 'https://api.minimax.io/anthropic' },
+    { mode: 'coding', protocol: 'responses', label: 'MiniMax Coding Intl Responses', url: 'https://api.minimax.io/v1' }
+  ]
+}
+
+/** 返回指定供应商 + 账号类型 + API 协议的默认 base url。 */
+export function defaultCNBaseUrl(
+  platform: string,
+  mode: CnAccountMode,
+  protocol: CnApiProtocol = 'chat_completions'
+): string {
+  if (protocol === 'anthropic') {
+    switch (platform) {
+      case 'kimi':
+        return mode === 'coding' ? 'https://api.kimi.com/coding' : 'https://api.moonshot.cn/anthropic'
+      case 'zhipu':
+        return 'https://open.bigmodel.cn/api/anthropic'
+      case 'deepseek':
+        return 'https://api.deepseek.com/anthropic'
+      case 'minimax':
+        return 'https://api.minimaxi.com/anthropic'
+      default:
+        return ''
+    }
+  }
+  // responses：Kimi / DeepSeek / MiniMax 的 base 与 chat_completions 相同（端点路径差异由后端处理）。
+  switch (platform) {
+    case 'kimi':
+      return mode === 'coding' ? 'https://api.kimi.com/coding/v1' : 'https://api.moonshot.cn/v1'
+    case 'zhipu':
+      return mode === 'coding'
+        ? 'https://open.bigmodel.cn/api/coding/paas/v4'
+        : 'https://open.bigmodel.cn/api/paas/v4'
+    case 'deepseek':
+      return 'https://api.deepseek.com'
+    case 'minimax':
+      return 'https://api.minimaxi.com/v1'
+    default:
+      return ''
+  }
+}
+
+/** 返回自适应模式下需要配置的原生协议及其默认端点。 */
+export function defaultCNAdaptiveBaseUrls(
+  platform: CnProviderPlatform,
+  mode: CnAccountMode
+): Record<CnNativeApiProtocol, string> {
+  return {
+    chat_completions: defaultCNBaseUrl(platform, mode, 'chat_completions'),
+    anthropic: defaultCNBaseUrl(platform, mode, 'anthropic'),
+    responses: cnSupportsNativeResponses(platform) ? defaultCNBaseUrl(platform, mode, 'responses') : ''
+  }
+}
+
+// ===== 国产供应商用量单元格可见性（单一事实源） =====
+// CNProviderQuotaCell / CNProviderBalanceCell 与 AccountUsageCell 的占位符判定
+// 共用，避免多处复制条件后一处改另一处漏改。
+
+// 国内 Coding Plan 供应商的 extra 快照键前缀（与后端 cnQuotaExtraUpdates /
+// GetCodingPlanProvider 对齐：kimi/zhipu/minimax 平台即供应商，直接采用；火山方舟订阅号
+// 由 base_url 命中 ark.cn-beijing.volces.com 判定映射到 backend 的 providerVolcano，
+// 与账号 platform 解耦——火山订阅号仍存为 deepseek 平台，但识别只认 base_url）。
+// 与后端 Account.GetOpenAIBaseURL 的解析优先级保持一致：CN 账号仅在
+// api_protocol === "adaptive" 时优先取 api_base_urls.chat_completions，否则取
+// credentials.base_url。后端（account.go.GetOpenAIBaseURL）只对 adaptive CN 账号
+// 读 api_base_urls，非 adaptive 一律走 base_url；前端若无条件优先 api_base_urls，
+// 会对非 adaptive 火山账号识别出与后端不一致的 base_url（把 api_base_urls 当火山
+// 但后端按 base_url 判定非火山），导致前端显示配额单元格、后端探测却拒绝。
+export function resolveAccountBaseURL(credentials: Record<string, unknown> | undefined | null): string {
+  if (!credentials || typeof credentials !== 'object') return ''
+  const isAdaptive = credentials.api_protocol === 'adaptive'
+  if (isAdaptive) {
+    const apiBaseURLs = credentials.api_base_urls
+    if (apiBaseURLs && typeof apiBaseURLs === 'object' && !Array.isArray(apiBaseURLs)) {
+      const cc = (apiBaseURLs as Record<string, unknown>).chat_completions
+      if (typeof cc === 'string' && cc.trim()) return cc.trim()
+    }
+  }
+  const b = credentials.base_url
+  return typeof b === 'string' ? b : ''
+}
+
+export function cnQuotaCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
+  if (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') {
+    return accountMode === 'coding'
+  }
+  // 火山方舟订阅号：按 base_url 识别，与 platform 解耦（账号仍存为 deepseek 平台），
+  // 与接入模式无关（火山订阅号保存为 payg）。仅火山放行非 coding，不改
+  // Kimi / 智谱 / MiniMax / 普通 DeepSeek 的模式语义。
+  if (isVolcanoBaseURL(baseURL)) return true
+  return false
+}
+
+// 仅火山方舟订阅号（Agent Plan /api/plan 与 Coding Plan /api/coding 共用
+// ark.cn-beijing.volces.com 域名），与接入模式无关。
+// 用 URL 主机名精确判定，与后端 cn_provider_quota_service.isVolcanoBaseURL 对齐：
+// 避免字符串 Contains 把带相似子串的主机（如 evil-ark.cn-beijing.volces.com、
+// https://evil.example/?next=ark.cn-beijing.volces.com）误判为火山订阅号，造成
+// 可见性/配额探测/AK-SK 录入前后端不一致。
+export function isVolcanoBaseURL(baseURL: string): boolean {
+  const raw = (baseURL || '').trim()
+  if (!raw) return false
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  return parsed.hostname.toLowerCase() === 'ark.cn-beijing.volces.com'
+}
+
+// ===== TokenHarbor 上游账号判定（单一事实源） =====
+// 后端 isTokenHarborUpstream（backend/internal/service/ratelimit_service.go）以
+// credentials.base_url 含 tokenharbor.ai 判定。前端严格对齐：取账号 base_url 后
+// 小写包含 tokenharbor.ai。TokenHarbor 免费档挂在 CN 平台（kimi/zhipu/deepseek/
+// minimax 等）且 base_url 改写到 tokenharbor.ai，因此必须按 base_url 识别，
+// 与 platform 解耦。所有 TokenHarbor 专属 UI（用量窗口列限流行、状态徽标去倒计时）
+// 一律走本判定，避免各处复制导致漏判。
+export function isTokenHarborAccount(account: {
+  credentials?: Record<string, unknown> | null
+}): boolean {
+  const baseURL = resolveAccountBaseURL(account.credentials)
+  return baseURL.toLowerCase().includes('tokenharbor.ai')
+}
+
+export function cnQuotaProviderPrefix(platform: string, baseURL: string): string {
+  if (isVolcanoBaseURL(baseURL)) return 'volcano'
+  if (platform === 'kimi') return 'kimi'
+  if (platform === 'zhipu') return 'zhipu'
+  if (platform === 'minimax') return 'minimax'
+  return ''
+}
+
+export function cnBalanceCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
+  // 火山订阅号按余额走 payg 探测会打到错误的 API Key；订阅套餐没有可查余额，
+  // 余额单元格保持隐藏，避免与火山配额单元格双重渲染。
+  if (isVolcanoBaseURL(baseURL)) return false
+  return (platform === 'kimi' || platform === 'deepseek') && accountMode !== 'coding'
+}
+
+/**
+ * 将请求头覆写写入 credentials。
+ * create 模式：关闭时不写入任何字段；edit 模式：关闭时删除字段（全量替换语义）。
+ */
+export function applyHeaderOverride(
+  credentials: Record<string, unknown>,
+  enabled: boolean,
+  rows: HeaderOverrideRow[],
+  mode: 'create' | 'edit'
+): void {
+  if (enabled) {
+    credentials[HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY] = true
+    credentials[HEADER_OVERRIDES_CREDENTIAL_KEY] = buildHeaderOverridesObject(rows)
+  } else if (mode === 'edit') {
+    delete credentials[HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY]
+    delete credentials[HEADER_OVERRIDES_CREDENTIAL_KEY]
+  }
+}
+
+// ===== OpenAI plan_type (ChatGPT 订阅档位) 手动覆盖 =====
+
+export interface PlanTypeOption {
+  value: string
+  label: string
+  // 兼容 common/Select.vue 的 SelectOption(含索引签名)
+  [key: string]: unknown
+}
+
+/**
+ * plan_type 值的友好显示标签，镜像 PlatformTypeBadge 的映射
+ * （canonical 值 chatgptpro 显示为 Pro，team 显示为 Team）。未知值原样返回。
+ */
+export function planTypeDisplayLabel(value: string): string {
+  switch (value.trim().toLowerCase()) {
+    case 'plus':
+      return 'Plus'
+    case 'pro':
+    case 'chatgptpro':
+      return 'Pro'
+    case 'free':
+      return 'Free'
+    case 'team':
+      return 'Team'
+    default:
+      return value
+  }
+}
+
+/**
+ * 从凭据里读取 plan_type，仅接受字符串（脏数据 42/true 等一律视为空，
+ * 避免被当作合法自定义项保留）。
+ */
+export function readPlanType(credentials: Record<string, unknown> | undefined | null): string {
+  const v = credentials?.plan_type
+  return typeof v === 'string' ? v : ''
+}
+
+/**
+ * 构建 plan_type 下拉选项：清空 + Plus/Pro/Free 预设。
+ * 若当前值是某预设的别名（如 chatgptpro↔Pro），用当前的 canonical 值占据该
+ * 标签位（保留 canonical，显示友好标签，避免重复项）；若是完全预设外的值
+ * （如 team 或异常值），追加为一项，避免编辑时下拉丢失原值。
+ */
+export function buildPlanTypeOptions(current: string, clearLabel: string): PlanTypeOption[] {
+  const cur = (current || '').trim()
+  const curLabel = cur ? planTypeDisplayLabel(cur) : ''
+  const presets: PlanTypeOption[] = [
+    { value: 'plus', label: 'Plus' },
+    { value: 'pro', label: 'Pro' },
+    { value: 'free', label: 'Free' }
+  ]
+  const opts: PlanTypeOption[] = [{ value: '', label: clearLabel }]
+  for (const p of presets) {
+    if (cur && p.value !== cur.toLowerCase() && p.label === curLabel) {
+      // 当前值是该预设的别名：用 canonical 当前值占位，标签仍显示友好名
+      opts.push({ value: cur, label: p.label })
+    } else {
+      opts.push(p)
+    }
+  }
+  if (cur && !opts.some(o => o.value.toLowerCase() === cur.toLowerCase())) {
+    opts.push({ value: cur, label: planTypeDisplayLabel(cur) })
+  }
+  return opts
+}
+
+/**
+ * 把手动选择的 plan_type 写入凭据：非空则设置，空则删除该键（清空/自动识别）。
+ * 直接修改传入对象并返回。
+ */
+export function applyPlanType(
+  credentials: Record<string, unknown>,
+  planType: string
+): Record<string, unknown> {
+  const pt = (planType || '').trim()
+  if (pt) {
+    credentials.plan_type = pt
+  } else {
+    delete credentials.plan_type
+  }
+  return credentials
+}

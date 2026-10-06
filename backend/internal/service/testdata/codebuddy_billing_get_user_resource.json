@@ -1,0 +1,160 @@
+{
+  "code": 0,
+  "msg": "OK",
+  "requestId": "redacted-request-id",
+  "data": {
+    "Response": {
+      "Data": {
+        "TotalCount": 2,
+        "TotalDosage": 2000,
+        "Accounts": [
+          {
+            "AccountId": 100000001,
+            "Uin": "000000000000",
+            "AppId": 1486851897,
+            "DealName": "redacted-deal-1",
+            "CapacityType": 4,
+            "CapacityUnit": "credits",
+            "CreateTime": 1789256769000,
+            "CycleStartTime": "2026-09-01 00:00:00",
+            "CycleEndTime": "2026-09-30 23:59:59",
+            "DeductionStartTime": 1789256769000,
+            "DeductionEndTime": 2049579968000,
+            "FeeType": 1,
+            "Region": "ap-others",
+            "Zone": "ap-others-4",
+            "OriginUnit": "credits",
+            "PackageCode": "TCACA_code_008_cfWoLwvjU4",
+            "PackageName": "CodeBuddy个人体验版",
+            "PackageType": "1",
+            "PkgSourceType": 0,
+            "ProductCode": "p_tcaca",
+            "ProductName": "腾讯云代码助手",
+            "SubProductCode": "sp_tcaca_codebuddy_ide",
+            "SubProductName": "腾讯云代码助手 (IDE)",
+            "CapacityRemain": 500,
+            "CapacityUsed": 0,
+            "CapacitySize": 500,
+            "CycleCapacityRemain": 500,
+            "CycleCapacitySize": 500,
+            "RemainCycles": 0,
+            "TotalCycles": 1,
+            "ResourceCycleId": 0,
+            "ResourceId": "codebuddy-test-resource-1",
+            "ResourceType": "2",
+            "Status": 0,
+            "Threshold": 0,
+            "SupportAutoRenew": 0,
+            "SupportManualRenew": 0,
+            "AutoRenewFlag": 0,
+            "ExpiredTime": "",
+            "DeductionProperties": [],
+            "AutoRenewTimeUnit": "",
+            "AutoRenewTimeSpan": 0,
+            "RegionId": 47,
+            "ZoneId": 470004,
+            "CapacitySizePrecise": "500",
+            "CapacityRemainPrecise": "500",
+            "CapacityUsedPrecise": "0",
+            "CycleCapacitySizePrecise": "500",
+            "CycleCapacityRemainPrecise": "500",
+            "CycleCapacityUsedPrecise": "0",
+            "AccountAttributes": [
+              {
+                "Key": "payerType",
+                "Value": "0",
+                "Type": 5
+              },
+              {
+                "Key": "payerUin",
+                "Value": "000000000000",
+                "Type": 5
+              }
+            ],
+            "BindRecords": [
+              {
+                "BindObjectId": "acc-test-bind-1",
+                "StartTime": "2026-09-13 07:46:09",
+                "EndTime": "9999-99-99 99:99:99",
+                "Properties": []
+              }
+            ]
+          },
+          {
+            "AccountId": 100000002,
+            "Uin": "000000000000",
+            "AppId": 1486851897,
+            "DealName": "redacted-deal-2",
+            "CapacityType": 1,
+            "CapacityUnit": "credits",
+            "CreateTime": 1789256770000,
+            "CycleStartTime": "2026-09-13 07:46:10",
+            "CycleEndTime": "2026-10-13 07:46:09",
+            "DeductionStartTime": 1789256770000,
+            "DeductionEndTime": 1791848769000,
+            "FeeType": 1,
+            "Region": "ap-others",
+            "Zone": "ap-others-4",
+            "OriginUnit": "credits",
+            "PackageCode": "TCACA_code_007_nzdH5h4Nl0",
+            "PackageName": "CodeBuddy个人版国内运营裂变包",
+            "PackageType": "1",
+            "PkgSourceType": 0,
+            "ProductCode": "p_tcaca",
+            "ProductName": "腾讯云代码助手",
+            "SubProductCode": "sp_tcaca_codebuddyide_bonus_pack",
+            "SubProductName": "腾讯云代码助手 (IDE) - 赠送包",
+            "CapacityRemain": 1500,
+            "CapacityUsed": 0,
+            "CapacitySize": 1500,
+            "CycleCapacityRemain": 1500,
+            "CycleCapacitySize": 1500,
+            "RemainCycles": 0,
+            "TotalCycles": 1,
+            "ResourceCycleId": 0,
+            "ResourceId": "codebuddy-test-resource-2",
+            "ResourceType": "2",
+            "Status": 0,
+            "Threshold": 0,
+            "SupportAutoRenew": 0,
+            "SupportManualRenew": 0,
+            "AutoRenewFlag": 0,
+            "ExpiredTime": "",
+            "DeductionProperties": [],
+            "AutoRenewTimeUnit": "",
+            "AutoRenewTimeSpan": 0,
+            "RegionId": 47,
+            "ZoneId": 470004,
+            "CapacitySizePrecise": "1500",
+            "CapacityRemainPrecise": "1500",
+            "CapacityUsedPrecise": "0",
+            "CycleCapacitySizePrecise": "1500",
+            "CycleCapacityRemainPrecise": "1500",
+            "CycleCapacityUsedPrecise": "0",
+            "AccountAttributes": [
+              {
+                "Key": "payerType",
+                "Value": "0",
+                "Type": 5
+              },
+              {
+                "Key": "payerUin",
+                "Value": "000000000000",
+                "Type": 5
+              }
+            ],
+            "BindRecords": [
+              {
+                "BindObjectId": "acc-test-bind-1",
+                "StartTime": "2026-09-13 07:46:10",
+                "EndTime": "2026-10-13 07:46:09",
+                "Properties": []
+              }
+            ]
+          }
+        ]
+      },
+      "RequestId": "redacted-request-id"
+    }
+  }
+}

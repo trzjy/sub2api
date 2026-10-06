@@ -1,0 +1,811 @@
+package repository
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/service"
+)
+
+// xianyuControlRepository 实现 service.XianyuControlRepository。
+// 使用原生 SQL，因为控制面表不在 ent schema 中，且需要部分唯一索引约束。
+type xianyuControlRepository struct {
+	db *sql.DB
+}
+
+// NewXianyuControlRepository 创建控制面仓库。
+func NewXianyuControlRepository(db *sql.DB) service.XianyuControlRepository {
+	return &xianyuControlRepository{db: db}
+}
+
+const xianyuWorkerConfigColumns = `id, base_url, api_token_encrypted, status, health_status, last_checked_at, created_at, updated_at`
+
+func scanWorkerConfig(row interface{ Scan(...any) error }) (*service.XianyuWorkerConfig, error) {
+	var c service.XianyuWorkerConfig
+	var lastChecked sql.NullTime
+	if err := row.Scan(&c.ID, &c.BaseURL, &c.APITokenEncrypted, &c.Status, &c.HealthStatus, &lastChecked, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if lastChecked.Valid {
+		c.LastCheckedAt = &lastChecked.Time
+	}
+	return &c, nil
+}
+
+func (r *xianyuControlRepository) ListWorkerConfigs(ctx context.Context) ([]service.XianyuWorkerConfig, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuWorkerConfigColumns+` FROM xianyu_worker_configs ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu worker configs: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuWorkerConfig, 0)
+	for rows.Next() {
+		c, err := scanWorkerConfig(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) CreateWorkerConfig(ctx context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+	if cfg.Status == "" {
+		cfg.Status = service.XianyuWorkerStatusDisabled
+	}
+	if cfg.HealthStatus == "" {
+		cfg.HealthStatus = service.XianyuWorkerHealthUnknown
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_worker_configs (base_url, api_token_encrypted, status, health_status)
+		VALUES ($1, $2, $3, $4)
+		RETURNING `+xianyuWorkerConfigColumns,
+		cfg.BaseURL, cfg.APITokenEncrypted, cfg.Status, cfg.HealthStatus)
+	created, err := scanWorkerConfig(row)
+	if err != nil {
+		return nil, fmt.Errorf("create xianyu worker config: %w", err)
+	}
+	return created, nil
+}
+
+func (r *xianyuControlRepository) UpdateWorkerConfig(ctx context.Context, cfg service.XianyuWorkerConfig) (*service.XianyuWorkerConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_worker_configs
+		SET base_url = $2, api_token_encrypted = $3, status = $4, health_status = $5,
+		    last_checked_at = $6, updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuWorkerConfigColumns,
+		cfg.ID, cfg.BaseURL, cfg.APITokenEncrypted, cfg.Status, cfg.HealthStatus, nullableTime(cfg.LastCheckedAt))
+	updated, err := scanWorkerConfig(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuWorkerConfigNotFound
+		}
+		return nil, fmt.Errorf("update xianyu worker config: %w", err)
+	}
+	return updated, nil
+}
+
+func (r *xianyuControlRepository) GetActiveWorkerConfig(ctx context.Context) (*service.XianyuWorkerConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT `+xianyuWorkerConfigColumns+`
+		FROM xianyu_worker_configs
+		WHERE status = $1
+		ORDER BY id LIMIT 1`, service.XianyuWorkerStatusActive)
+	cfg, err := scanWorkerConfig(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuWorkerConfigNotFound
+		}
+		return nil, fmt.Errorf("get active xianyu worker config: %w", err)
+	}
+	return cfg, nil
+}
+
+func (r *xianyuControlRepository) GetWorkerConfigByID(ctx context.Context, id int64) (*service.XianyuWorkerConfig, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT `+xianyuWorkerConfigColumns+`
+		FROM xianyu_worker_configs
+		WHERE id = $1`, id)
+	cfg, err := scanWorkerConfig(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuWorkerConfigNotFound
+		}
+		return nil, fmt.Errorf("get xianyu worker config by id: %w", err)
+	}
+	return cfg, nil
+}
+
+const xianyuAccountColumns = `id, worker_config_id, account_id, nickname, remark, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at, created_at, updated_at`
+
+func scanAccount(row interface{ Scan(...any) error }) (*service.XianyuAccount, error) {
+	var a service.XianyuAccount
+	var lastLogin, lastSeen sql.NullTime
+	if err := row.Scan(&a.ID, &a.WorkerConfigID, &a.AccountID, &a.Nickname, &a.Remark, &a.Status, &a.CookieStatus, &a.CookieDetail, &a.TaskStatus, &lastLogin, &lastSeen, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if lastLogin.Valid {
+		a.LastLoginAt = &lastLogin.Time
+	}
+	if lastSeen.Valid {
+		a.LastSeenAt = &lastSeen.Time
+	}
+	return &a, nil
+}
+
+func (r *xianyuControlRepository) ListAccounts(ctx context.Context, workerConfigID int64) ([]service.XianyuAccount, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuAccountColumns+` FROM xianyu_accounts WHERE worker_config_id = $1 ORDER BY id`, workerConfigID)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu accounts: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuAccount, 0)
+	for rows.Next() {
+		a, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) GetAccountByWorkerAndAccountID(ctx context.Context, workerConfigID int64, accountID string) (*service.XianyuAccount, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuAccountColumns+` FROM xianyu_accounts WHERE worker_config_id = $1 AND account_id = $2`, workerConfigID, accountID)
+	a, err := scanAccount(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuAccountNotFound
+		}
+		return nil, fmt.Errorf("get xianyu account: %w", err)
+	}
+	return a, nil
+}
+
+func (r *xianyuControlRepository) UpsertAccount(ctx context.Context, account service.XianyuAccount) (*service.XianyuAccount, error) {
+	if account.Status == "" {
+		account.Status = service.XianyuAccountStatusDisabled
+	}
+	if account.CookieStatus == "" {
+		account.CookieStatus = service.XianyuCookieStatusUnknown
+	}
+	if account.TaskStatus == "" {
+		account.TaskStatus = service.XianyuTaskStatusUnknown
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_accounts
+			(worker_config_id, account_id, nickname, status, cookie_status, cookie_detail, task_status, last_login_at, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (worker_config_id, account_id) DO UPDATE SET
+			nickname = EXCLUDED.nickname,
+			status = EXCLUDED.status,
+			cookie_status = EXCLUDED.cookie_status,
+			cookie_detail = EXCLUDED.cookie_detail,
+			task_status = EXCLUDED.task_status,
+			last_login_at = COALESCE(EXCLUDED.last_login_at, xianyu_accounts.last_login_at),
+			last_seen_at = COALESCE(EXCLUDED.last_seen_at, xianyu_accounts.last_seen_at),
+			updated_at = NOW()
+		RETURNING `+xianyuAccountColumns,
+		account.WorkerConfigID, account.AccountID, account.Nickname, account.Status, account.CookieStatus, account.CookieDetail, account.TaskStatus,
+		nullableTime(account.LastLoginAt), nullableTime(account.LastSeenAt))
+	saved, err := scanAccount(row)
+	if err != nil {
+		return nil, fmt.Errorf("upsert xianyu account: %w", err)
+	}
+	return saved, nil
+}
+
+func (r *xianyuControlRepository) UpdateAccount(ctx context.Context, account service.XianyuAccount) (*service.XianyuAccount, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_accounts
+		SET nickname = $2, status = $3, cookie_status = $4, cookie_detail = $5,
+		    task_status = $6, last_login_at = $7, last_seen_at = $8, updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuAccountColumns,
+		account.ID, account.Nickname, account.Status, account.CookieStatus, account.CookieDetail, account.TaskStatus,
+		nullableTime(account.LastLoginAt), nullableTime(account.LastSeenAt))
+	saved, err := scanAccount(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuAccountNotFound
+		}
+		return nil, fmt.Errorf("update xianyu account: %w", err)
+	}
+	return saved, nil
+}
+
+const xianyuItemPoolColumns = `id, name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days, worker_card_id, created_at, updated_at`
+
+func scanItemPool(row interface{ Scan(...any) error }) (*service.XianyuItemPool, error) {
+	var p service.XianyuItemPool
+	var validityDays *int // validity_days 可空（旧池未配置规格时为 NULL）
+	if err := row.Scan(&p.ID, &p.Name, &p.Slug, &p.Description, &p.LowStockThreshold, &p.Status,
+		&p.CodeType, &p.GroupID, &validityDays, &p.WorkerCardID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if validityDays != nil {
+		p.ValidityDays = *validityDays
+	}
+	return &p, nil
+}
+
+func (r *xianyuControlRepository) ListItemPools(ctx context.Context) ([]service.XianyuItemPool, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuItemPoolColumns+` FROM xianyu_item_pools ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu item pools: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuItemPool, 0)
+	for rows.Next() {
+		p, err := scanItemPool(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) GetItemPoolBySlug(ctx context.Context, slug string) (*service.XianyuItemPool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuItemPoolColumns+` FROM xianyu_item_pools WHERE slug = $1`, slug)
+	p, err := scanItemPool(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuItemPoolNotFound
+		}
+		return nil, fmt.Errorf("get xianyu item pool: %w", err)
+	}
+	return p, nil
+}
+
+func (r *xianyuControlRepository) GetItemPoolByID(ctx context.Context, id int64) (*service.XianyuItemPool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuItemPoolColumns+` FROM xianyu_item_pools WHERE id = $1`, id)
+	p, err := scanItemPool(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuItemPoolNotFound
+		}
+		return nil, fmt.Errorf("get xianyu item pool by id: %w", err)
+	}
+	return p, nil
+}
+
+func (r *xianyuControlRepository) CreateItemPool(ctx context.Context, pool service.XianyuItemPool) (*service.XianyuItemPool, error) {
+	if pool.Status == "" {
+		pool.Status = service.XianyuItemPoolStatusActive
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_item_pools (name, slug, description, low_stock_threshold, status, code_type, group_id, validity_days, worker_card_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING `+xianyuItemPoolColumns,
+		pool.Name, pool.Slug, pool.Description, pool.LowStockThreshold, pool.Status,
+		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays, nullableInt64(pool.WorkerCardID))
+	created, err := scanItemPool(row)
+	if err != nil {
+		return nil, fmt.Errorf("create xianyu item pool: %w", err)
+	}
+	return created, nil
+}
+
+func (r *xianyuControlRepository) UpdateItemPool(ctx context.Context, pool service.XianyuItemPool) (*service.XianyuItemPool, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_item_pools
+		SET name = $2, description = $3, low_stock_threshold = $4, status = $5,
+		    code_type = $6, group_id = $7, validity_days = $8,
+		    worker_card_id = COALESCE($9, worker_card_id), updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuItemPoolColumns,
+		pool.ID, pool.Name, pool.Description, pool.LowStockThreshold, pool.Status,
+		pool.CodeType, nullableInt64(pool.GroupID), pool.ValidityDays, nullableInt64(pool.WorkerCardID))
+	updated, err := scanItemPool(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuItemPoolNotFound
+		}
+		return nil, fmt.Errorf("update xianyu item pool: %w", err)
+	}
+	return updated, nil
+}
+
+// UpdatePoolWorkerCardID 记录池对应的 Worker 自动发货卡券 ID（cardID=nil 清除）。
+func (r *xianyuControlRepository) UpdatePoolWorkerCardID(ctx context.Context, poolID int64, cardID *int64) error {
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE xianyu_item_pools SET worker_card_id = $2, updated_at = NOW() WHERE id = $1`,
+		poolID, nullableInt64(cardID))
+	if err != nil {
+		return fmt.Errorf("update pool worker card id: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	return nil
+}
+
+// DeleteItemPool 删除库存池（下架清理）。三层守卫逐层给出可执行提示：
+// 仍有绑定商品 → 先解绑；仍有未使用库存码 → 先在兑换码页删除；
+// 仍有绑定规则指向该池 → 先删除规则。发货记录的 pool_id 为松散引用，删除后保留历史。
+// UpdateAccountRemark 更新账号运营备注（主程序侧管理，Worker 投影不覆盖）。
+func (r *xianyuControlRepository) UpdateAccountRemark(ctx context.Context, accountPK int64, remark string) error {
+	result, err := r.db.ExecContext(ctx, `UPDATE xianyu_accounts SET remark = $2, updated_at = NOW() WHERE id = $1`, accountPK, remark)
+	if err != nil {
+		return fmt.Errorf("update xianyu account remark: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu account remark update: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuAccountNotFound
+	}
+	return nil
+}
+
+func (r *xianyuControlRepository) DeleteItemPool(ctx context.Context, poolID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin xianyu item pool delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var groupID sql.NullInt64
+	var validityDays int
+	// 统一口径：删除闸按 (group_id, validity_days, type='subscription') 统计未使用库存，不依赖 notes 标记。
+	err = tx.QueryRowContext(ctx, `SELECT group_id, validity_days FROM xianyu_item_pools WHERE id = $1`, poolID).Scan(&groupID, &validityDays)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("select xianyu item pool: %w", err)
+	}
+
+	var boundProducts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM xianyu_products WHERE pool_id = $1 AND binding_status = 'mapped'`, poolID).Scan(&boundProducts); err != nil {
+		return fmt.Errorf("count bound xianyu products: %w", err)
+	}
+	if boundProducts > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_IN_USE", fmt.Sprintf("仍有 %d 个商品绑定该池，请先解绑后再删除", boundProducts))
+	}
+
+	var unusedCodes int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM redeem_codes
+		WHERE status = 'unused' AND type = 'subscription'
+		  AND group_id = $1 AND validity_days = $2`,
+		groupID, validityDays).Scan(&unusedCodes); err != nil {
+		return fmt.Errorf("count unused xianyu codes: %w", err)
+	}
+	if unusedCodes > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_HAS_STOCK", fmt.Sprintf("池内还有 %d 个未使用库存码，请先在兑换码页删除后再删除库存池", unusedCodes))
+	}
+
+	var referencingRules int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM xianyu_binding_rules WHERE pool_id = $1`, poolID).Scan(&referencingRules); err != nil {
+		return fmt.Errorf("count xianyu binding rules: %w", err)
+	}
+	if referencingRules > 0 {
+		return infraerrors.Conflict("XIANYU_ITEM_POOL_HAS_RULES", fmt.Sprintf("有 %d 条绑定规则指向该池，请先删除规则后再删除库存池", referencingRules))
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM xianyu_item_pools WHERE id = $1`, poolID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu item pool: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu item pool delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuItemPoolNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit xianyu item pool delete: %w", err)
+	}
+	return nil
+}
+
+const xianyuProductColumns = `id, account_pk, account_id, item_id, title, spec_name, spec_value, pool_id, binding_status, binding_source, status, last_seen_at, created_at, updated_at`
+
+func scanProduct(row interface{ Scan(...any) error }) (*service.XianyuProduct, error) {
+	var p service.XianyuProduct
+	var poolID sql.NullInt64
+	var lastSeen sql.NullTime
+	if err := row.Scan(&p.ID, &p.AccountPK, &p.AccountID, &p.ItemID, &p.Title, &p.SpecName, &p.SpecValue, &poolID, &p.BindingStatus, &p.BindingSource, &p.Status, &lastSeen, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if poolID.Valid {
+		p.PoolID = &poolID.Int64
+	}
+	if lastSeen.Valid {
+		p.LastSeenAt = &lastSeen.Time
+	}
+	return &p, nil
+}
+
+func (r *xianyuControlRepository) ListProducts(ctx context.Context) ([]service.XianyuProduct, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuProductColumns+` FROM xianyu_products ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu products: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuProduct, 0)
+	for rows.Next() {
+		p, err := scanProduct(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) ListProductsByAccount(ctx context.Context, accountPK int64) ([]service.XianyuProduct, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuProductColumns+` FROM xianyu_products WHERE account_pk = $1 ORDER BY id`, accountPK)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu products by account: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuProduct, 0)
+	for rows.Next() {
+		p, err := scanProduct(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) GetProductByID(ctx context.Context, productID int64) (*service.XianyuProduct, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuProductColumns+`
+		FROM xianyu_products
+		WHERE id = $1`, productID)
+	p, err := scanProduct(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuProductNotFound
+		}
+		return nil, fmt.Errorf("get xianyu product by id: %w", err)
+	}
+	return p, nil
+}
+
+func (r *xianyuControlRepository) GetProductByIdentity(ctx context.Context, accountPK int64, itemID, specName, specValue string) (*service.XianyuProduct, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT `+xianyuProductColumns+`
+		FROM xianyu_products
+		WHERE account_pk = $1 AND item_id = $2 AND spec_name = $3 AND spec_value = $4`,
+		accountPK, itemID, specName, specValue)
+	p, err := scanProduct(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuProductNotFound
+		}
+		return nil, fmt.Errorf("get xianyu product by identity: %w", err)
+	}
+	return p, nil
+}
+
+func (r *xianyuControlRepository) UpsertProduct(ctx context.Context, product service.XianyuProduct) (*service.XianyuProduct, error) {
+	if product.BindingStatus == "" {
+		product.BindingStatus = service.XianyuBindingStatusUnmapped
+	}
+	if product.BindingSource == "" {
+		product.BindingSource = service.XianyuBindingSourceAutoNew
+	}
+	if product.Status == "" {
+		product.Status = service.XianyuProductStatusActive
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_products
+			(account_pk, account_id, item_id, title, spec_name, spec_value, pool_id, binding_status, binding_source, status, last_seen_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (account_pk, item_id, spec_name, spec_value) DO UPDATE SET
+			account_id = EXCLUDED.account_id,
+			title = EXCLUDED.title,
+			spec_name = EXCLUDED.spec_name,
+			spec_value = EXCLUDED.spec_value,
+			last_seen_at = EXCLUDED.last_seen_at,
+			updated_at = NOW()
+		RETURNING `+xianyuProductColumns,
+		product.AccountPK, product.AccountID, product.ItemID, product.Title, product.SpecName, product.SpecValue,
+		nullableInt64(product.PoolID), product.BindingStatus, product.BindingSource, product.Status, nullableTime(product.LastSeenAt))
+	saved, err := scanProduct(row)
+	if err != nil {
+		return nil, fmt.Errorf("upsert xianyu product: %w", err)
+	}
+	return saved, nil
+}
+
+func (r *xianyuControlRepository) UpdateProduct(ctx context.Context, product service.XianyuProduct) (*service.XianyuProduct, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_products
+		SET title = $2, pool_id = $3, binding_status = $4, binding_source = $5, status = $6, updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuProductColumns,
+		product.ID, product.Title, nullableInt64(product.PoolID), product.BindingStatus, product.BindingSource, product.Status)
+	updated, err := scanProduct(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuProductNotFound
+		}
+		return nil, fmt.Errorf("update xianyu product: %w", err)
+	}
+	return updated, nil
+}
+
+// DeleteProduct 删除商品行（下架/售罄清理）。发货记录与商品是外键引用，
+// 删除前将历史发货记录的 product_id 置空以保留完整订单历史。
+func (r *xianyuControlRepository) DeleteProduct(ctx context.Context, productID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin xianyu product delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE xianyu_order_claims SET product_id = NULL WHERE product_id = $1`, productID); err != nil {
+		return fmt.Errorf("detach xianyu order claims: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM xianyu_products WHERE id = $1`, productID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu product: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu product delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuProductNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit xianyu product delete: %w", err)
+	}
+	return nil
+}
+
+func (r *xianyuControlRepository) UpdateProductBinding(ctx context.Context, productID int64, bindingStatus, bindingSource string, poolID *int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE xianyu_products
+		SET pool_id = $2, binding_status = $3, binding_source = $4, updated_at = NOW()
+		WHERE id = $1`,
+		productID, nullableInt64(poolID), bindingStatus, bindingSource)
+	if err != nil {
+		return fmt.Errorf("update xianyu product binding: %w", err)
+	}
+	return nil
+}
+
+const xianyuBindingRuleColumns = `id, priority, account_pk, match_type, keyword, pool_id, status, created_at, updated_at`
+
+func scanBindingRule(row interface{ Scan(...any) error }) (*service.XianyuBindingRule, error) {
+	var rl service.XianyuBindingRule
+	if err := row.Scan(&rl.ID, &rl.Priority, &rl.AccountPK, &rl.MatchType, &rl.Keyword, &rl.PoolID, &rl.Status, &rl.CreatedAt, &rl.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &rl, nil
+}
+
+func (r *xianyuControlRepository) ListBindingRules(ctx context.Context) ([]service.XianyuBindingRule, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+xianyuBindingRuleColumns+` FROM xianyu_binding_rules ORDER BY priority, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list xianyu binding rules: %w", err)
+	}
+	defer rows.Close()
+	out := make([]service.XianyuBindingRule, 0)
+	for rows.Next() {
+		rl, err := scanBindingRule(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rl)
+	}
+	return out, rows.Err()
+}
+
+func (r *xianyuControlRepository) CreateBindingRule(ctx context.Context, rule service.XianyuBindingRule) (*service.XianyuBindingRule, error) {
+	if rule.Status == "" {
+		rule.Status = "active"
+	}
+	if rule.MatchType == "" {
+		rule.MatchType = service.XianyuBindingRuleKeyword
+	}
+	row := r.db.QueryRowContext(ctx, `
+		INSERT INTO xianyu_binding_rules (priority, account_pk, match_type, keyword, pool_id, status)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+xianyuBindingRuleColumns,
+		rule.Priority, rule.AccountPK, rule.MatchType, rule.Keyword, rule.PoolID, rule.Status)
+	created, err := scanBindingRule(row)
+	if err != nil {
+		return nil, fmt.Errorf("create xianyu binding rule: %w", err)
+	}
+	return created, nil
+}
+
+func (r *xianyuControlRepository) UpdateBindingRule(ctx context.Context, rule service.XianyuBindingRule) (*service.XianyuBindingRule, error) {
+	row := r.db.QueryRowContext(ctx, `
+		UPDATE xianyu_binding_rules
+		SET priority = $2, account_pk = $3, match_type = $4, keyword = $5, pool_id = $6, status = $7, updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+xianyuBindingRuleColumns,
+		rule.ID, rule.Priority, rule.AccountPK, rule.MatchType, rule.Keyword, rule.PoolID, rule.Status)
+	updated, err := scanBindingRule(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrXianyuBindingRuleNotFound
+		}
+		return nil, fmt.Errorf("update xianyu binding rule: %w", err)
+	}
+	return updated, nil
+}
+
+// DeleteBindingRule 删除绑定规则。
+func (r *xianyuControlRepository) DeleteBindingRule(ctx context.Context, ruleID int64) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM xianyu_binding_rules WHERE id = $1`, ruleID)
+	if err != nil {
+		return fmt.Errorf("delete xianyu binding rule: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check xianyu binding rule delete: %w", err)
+	} else if affected == 0 {
+		return service.ErrXianyuBindingRuleNotFound
+	}
+	return nil
+}
+
+func nullableTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
+}
+
+func nullableInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// PoolStockCounts 返回池库存码的剩余/累计已发货/已兑换/禁用数量。
+// 统一口径：池库存身份 = (group_id, validity_days, type='subscription')，直接按这三个字段统计，
+// 不再依赖 redeem_codes.notes 标记。入参为池 slug，先解析出统一口径所需的 group_id + validity_days。
+// delivered 是历史发货事实数（与发货记录页同口径），取自 xianyu_order_claims 中
+// delivery_status='sent' 的订单，不会因买家兑换而减少，也不包含 pending/failed 及发货后被退款的订单。
+func (r *xianyuControlRepository) PoolStockCounts(ctx context.Context, poolSlug string) (remaining, delivered, used, disabled int, err error) {
+	pool, perr := r.GetItemPoolBySlug(ctx, poolSlug)
+	if perr != nil {
+		return 0, 0, 0, 0, fmt.Errorf("pool stock resolve pool: %w", perr)
+	}
+	groupID := int64(0)
+	if pool.GroupID != nil {
+		groupID = *pool.GroupID
+	}
+	// 剩余/已兑换/禁用：按规格 + 订阅类型统计，纳入分组内未打标记的码。
+	err = r.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE status = 'unused'),
+			COUNT(*) FILTER (WHERE status = 'used'),
+			COUNT(*) FILTER (WHERE status = 'disabled')
+		FROM redeem_codes
+		WHERE group_id = $1 AND validity_days = $2 AND type = 'subscription'`,
+		groupID, pool.ValidityDays).
+		Scan(&remaining, &used, &disabled)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("pool stock counts: %w", err)
+	}
+	// 累计已发货：同规格订阅码且已被 Worker 实际送达（delivery_status='sent'）。
+	err = r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM xianyu_order_claims c
+		JOIN redeem_codes r ON r.id = c.redeem_code_id
+		WHERE r.group_id = $1 AND r.validity_days = $2 AND r.type = 'subscription'
+		  AND c.delivery_status = 'sent'`,
+		groupID, pool.ValidityDays).
+		Scan(&delivered)
+	if err != nil {
+		return 0, 0, 0, 0, fmt.Errorf("pool delivered count: %w", err)
+	}
+	return remaining, delivered, used, disabled, nil
+}
+
+// GroupSubscriptionType 返回分组的订阅类型；分组不存在返回空串。
+func (r *xianyuControlRepository) GroupSubscriptionType(ctx context.Context, groupID int64) (string, error) {
+	var subscriptionType string
+	err := r.db.QueryRowContext(ctx, `SELECT subscription_type FROM "groups" WHERE id = $1`, groupID).Scan(&subscriptionType)
+	if err != nil {
+		return "", err
+	}
+	return subscriptionType, nil
+}
+
+// InsertPoolStock 向池内批量写入真实可兑换的订阅码。
+// 统一口径：生成即纳管，码按自身 group_id/validity_days 归属池中，不再打 notes 标记
+// （notes 列 NOT NULL，此处写空串，真实归属由 group_id + validity_days 决定）。
+func (r *xianyuControlRepository) InsertPoolStock(ctx context.Context, poolSlug string, groupID int64, validityDays int, expiresAt *time.Time, codes []string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pool stock tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO redeem_codes (code, type, value, status, notes, expires_at, group_id, validity_days)
+		VALUES ($1, 'subscription', 0, 'unused', $2, $3, $4, $5)`)
+	if err != nil {
+		return fmt.Errorf("prepare pool stock insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, code := range codes {
+		if _, err := stmt.ExecContext(ctx, code, "", nullableTime(expiresAt), nullableInt64(&groupID), validityDays); err != nil {
+			return fmt.Errorf("insert pool stock code: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit pool stock: %w", err)
+	}
+	return nil
+}
+
+// DeliveryStats 返回 since 之后 sent/failed 的发货记录数。
+func (r *xianyuControlRepository) DeliveryStats(ctx context.Context, since time.Time) (sent, failed int, err error) {
+	err = r.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE delivery_status = 'sent' AND created_at >= $1),
+			COUNT(*) FILTER (WHERE delivery_status = 'failed' AND created_at >= $1)
+		FROM xianyu_order_claims`, since).Scan(&sent, &failed)
+	if err != nil {
+		return 0, 0, fmt.Errorf("delivery stats: %w", err)
+	}
+	return sent, failed, nil
+}
+
+// PendingDeliveryCount 返回待处理发货数量。
+func (r *xianyuControlRepository) PendingDeliveryCount(ctx context.Context) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM xianyu_order_claims WHERE delivery_status = 'pending'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("pending delivery count: %w", err)
+	}
+	return n, nil
+}
+
+// normalizeXianyuSpecKey 对规格键值做 TrimSpace，空串统一为空字符串。
+func normalizeXianyuSpecKey(v string) string {
+	return strings.TrimSpace(v)
+}
+
+// ==================== 曝光助手：商品事实档案 ====================
+
+// NewXianyuExposureFactsRepository 创建曝光事实档案仓库（与控制面仓库共用 db 句柄）。
+func NewXianyuExposureFactsRepository(db *sql.DB) service.XianyuExposureFactsStore {
+	return &xianyuControlRepository{db: db}
+}
+
+// GetProductFacts 读取商品事实档案（未建立时返回空字符串）。
+func (r *xianyuControlRepository) GetProductFacts(ctx context.Context, productID int64) (string, error) {
+	var facts sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT exposure_facts FROM xianyu_products WHERE id = $1`, productID).Scan(&facts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", service.ErrXianyuProductNotFound
+		}
+		return "", fmt.Errorf("get xianyu product facts: %w", err)
+	}
+	return facts.String, nil
+}
+
+// UpdateProductFacts 写入商品事实档案。
+func (r *xianyuControlRepository) UpdateProductFacts(ctx context.Context, productID int64, facts string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE xianyu_products
+		SET exposure_facts = $2, exposure_facts_updated_at = NOW()
+		WHERE id = $1`, productID, facts)
+	if err != nil {
+		return fmt.Errorf("update xianyu product facts: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return service.ErrXianyuProductNotFound
+	}
+	return nil
+}

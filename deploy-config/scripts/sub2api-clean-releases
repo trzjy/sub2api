@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# sub2api-clean-releases: 清理 sub2api / xianyu-auto-reply 老旧 Docker 镜像与残留。
+#
+# 设计参照同机 /usr/local/sbin/yiyutu-clean-releases：
+#   - shell + set -euo pipefail
+#   - 保留计数由环境变量 KEEP_RELEASES 控制
+#   - 输出 kept/removed 汇总
+#
+# 与 yiyutu 的差异：
+#   - 清理对象是 Docker 镜像（不是文件目录）
+#   - 保留语义按"当前运行镜像 + 最新 N 个 tag"而非 mtime
+#   - 支持 dry-run：仅打印预期动作，不实际删除
+#
+# 调用：
+#   sub2api-clean-releases                # 实跑
+#   sub2api-clean-releases --dry-run      # dry-run，输出预期删除清单
+#
+# 配置（环境变量，可被 systemd unit 覆盖）：
+#   KEEP_RELEASES           每个项目保留 tag 数（含当前运行），默认 2
+#   DEPLOY_DIR              部署根目录，默认 /opt/sub2api
+#   ENV_FILE                sub2api .env 路径，默认 $DEPLOY_DIR/.env
+#   SUB2API_IMAGE           sub2api 镜像名（当前部署主仓库），默认 sub2api
+#   SUB2API_LEGACY_REPOS    历史远程别名仓库（带 registry 前缀），默认 weishaw/sub2api ghcr.io/trzjy/sub2api；
+#                           purge 模式清理：仅保留被运行容器引用的镜像，其余全部删除，避免历史大镜像堆积
+#   WORKER_IMAGE            Worker 镜像名，默认 xianyu-auto-reply
+#   WORKER_LEGACY_REPOS     Worker 历史远程别名仓库，默认空
+#   ENV_BAK_KEEP            .env.bak-* 保留数，默认 3
+#   BUILD_CACHE_MAX_STORAGE Docker 构建缓存保留上限（--max-used-space），默认 5GB；超出部分按最近使用裁剪
+#   BUILD_CACHE_UNTIL       buildx 不支持 --max-used-space 时的时间降级裁剪阈值（--filter until=），默认 168h
+#   BUILD_CACHE_HARD_CAP    build cache 容量硬兜底阈值，默认 8GB；实际占用超过该值时全量清空
+#                           （docker builder prune -af）。这是 LRU 裁剪失效时的最后防线，防止
+#                           2026-09-26 磁盘打满事故（build cache 11.8GB 只进不出）复发。
+#   TMP_BACKUP_KEEP         /tmp 下 sub2api 备份产物（dump/tar）保留数（按 mtime），默认 2
+#   BUILD_DIR_KEEP          /opt/sub2api/build-<hash> 暂存目录保留数（当前运行 tag 之外），默认 1
+
+set -euo pipefail
+
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+  echo "[dry-run] no destructive action will be performed"
+fi
+
+KEEP_RELEASES="${KEEP_RELEASES:-2}"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/sub2api}"
+ENV_FILE="${ENV_FILE:-$DEPLOY_DIR/.env}"
+SUB2API_IMAGE="${SUB2API_IMAGE:-sub2api}"
+SUB2API_LEGACY_REPOS="${SUB2API_LEGACY_REPOS:-weishaw/sub2api ghcr.io/trzjy/sub2api}"
+WORKER_IMAGE="${WORKER_IMAGE:-xianyu-auto-reply}"
+WORKER_LEGACY_REPOS="${WORKER_LEGACY_REPOS:-}"
+ENV_BAK_KEEP="${ENV_BAK_KEEP:-3}"
+BUILD_CACHE_MAX_STORAGE="${BUILD_CACHE_MAX_STORAGE:-5GB}"
+BUILD_CACHE_UNTIL="${BUILD_CACHE_UNTIL:-168h}"
+BUILD_CACHE_HARD_CAP="${BUILD_CACHE_HARD_CAP:-8GB}"
+TMP_BACKUP_KEEP="${TMP_BACKUP_KEEP:-2}"
+BUILD_DIR_KEEP="${BUILD_DIR_KEEP:-1}"
+
+if [ "$KEEP_RELEASES" -lt 2 ]; then
+  echo "KEEP_RELEASES must be at least 2 (current=$KEEP_RELEASES)" >&2
+  exit 1
+fi
+
+removed=0
+kept=0
+
+# ---- helper: 真实删除 vs dry-run 提示 --------------------------------------
+remove_image() {
+  local image_ref="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove image: $image_ref"
+    removed=$((removed + 1))
+    return
+  fi
+  if docker rmi "$image_ref" >/dev/null 2>&1; then
+    echo "removed image: $image_ref"
+    removed=$((removed + 1))
+  else
+    echo "skip (in use or missing): $image_ref" >&2
+  fi
+}
+
+remove_volume() {
+  local vol="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove volume: $vol"
+    removed=$((removed + 1))
+    return
+  fi
+  if docker volume rm "$vol" >/dev/null 2>&1; then
+    echo "removed volume: $vol"
+    removed=$((removed + 1))
+  else
+    echo "skip (in use or missing): $vol" >&2
+  fi
+}
+
+remove_file() {
+  local f="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove file: $f"
+    removed=$((removed + 1))
+    return
+  fi
+  if rm -f -- "$f"; then
+    echo "removed file: $f"
+    removed=$((removed + 1))
+  fi
+}
+
+remove_dir() {
+  local d="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] would remove dir: $d"
+    removed=$((removed + 1))
+    return
+  fi
+  if rm -rf -- "$d"; then
+    echo "removed dir: $d"
+    removed=$((removed + 1))
+  fi
+}
+
+# ---- 通用：清理某仓库镜像（按保护策略） ----------------------------------
+# 用法: clean_repo <repo> <mode>
+#   mode=recent : 保护 latest + 当前运行 sub2api 容器引用 + 最近 KEEP_RELEASES 个 tag；其余删除
+#   mode=purge  : 仅保护"被当前运行容器引用的镜像 ID"，其余（历史遗留）全部删除
+#
+# 说明: 运行容器可能引用带 registry 前缀的镜像；用镜像 ID 跨仓库匹配保护，避免误删在用镜像。
+#       历史远程别名仓库（如 weishaw/sub2api）当前部署已改用本地 <commit>-w 标签，不再被任何
+#       运行容器引用，purge 模式可将其彻底清理，防止磁盘被历史大镜像持续堆积。
+clean_repo() {
+  local repo="$1" mode="$2"
+  echo "=== images: $repo ($mode) ==="
+  local running_ref running_id
+  running_ref="$(docker inspect sub2api --format '{{.Config.Image}}' 2>/dev/null || true)"
+  # 镜像 ID 归一化为 12 位短 ID，与 `docker images {{.ID}}` 输出对齐，确保 in-use 保护比较一致
+  local running_full
+  running_full="$(docker inspect sub2api --format '{{.Image}}' 2>/dev/null || true)"
+  running_id="${running_full#sha256:}"
+  running_id="${running_id:0:12}"
+  if [ -z "$running_ref" ]; then
+    echo "warning: sub2api container not running; legacy purge may remove a needed image" >&2
+  fi
+
+  local rows=()
+  mapfile -t rows < <(
+    docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}" "$repo" 2>/dev/null |
+      grep -v "<none>" |
+      # 必须按创建时间（第 3 列）排序；按镜像 ID 排序是随机的，会误删回滚镜像
+      sort -t $'\t' -k3,3 -r
+  )
+  local seen=0
+  for row in "${rows[@]:-}"; do
+    [ -z "$row" ] && continue
+    IFS=$'\t' read -r ref id _created <<< "$row"
+    # 跨仓库保护：运行容器正在使用的镜像 ID 永远保留
+    if [ -n "$running_id" ] && [ "$id" = "$running_id" ]; then
+      echo "keeping protected (in-use): $ref"
+      kept=$((kept + 1)); seen=$((seen + 1)); continue
+    fi
+    if [ "$mode" = "recent" ]; then
+      if [ "$ref" = "$repo:latest" ] || [ "$ref" = "$running_ref" ]; then
+        echo "keeping protected: $ref"
+        kept=$((kept + 1)); seen=$((seen + 1)); continue
+      fi
+      if [ "$seen" -lt "$KEEP_RELEASES" ]; then
+        echo "keeping recent: $ref"
+        kept=$((kept + 1)); seen=$((seen + 1)); continue
+      fi
+    fi
+    remove_image "$ref"
+  done
+}
+
+# ---- 1. sub2api 镜像（当前部署主仓库 + 历史远程别名仓库） -----------------
+# 主仓库用 recent 模式（保护 latest + 运行引用 + 最近 KEEP_RELEASES 个）；
+# 历史远程别名仓库（SUB2API_LEGACY_REPOS）用 purge 模式，仅保护被运行容器引用的
+# 镜像，其余（当前部署已改用本地 <commit>-w 标签）全部清理，避免历史大镜像堆积。
+echo "=== sub2api images ==="
+clean_repo "$SUB2API_IMAGE" recent
+for legacy_repo in $SUB2API_LEGACY_REPOS; do
+  [ -z "$legacy_repo" ] && continue
+  clean_repo "$legacy_repo" purge
+done
+
+# ---- 2. xianyu-auto-reply 镜像 --------------------------------------------
+# 保留集合：当前 .env 中 XIANYU_WORKER_IMAGE_TAG + 它前 1 个最近 tag（KEEP_RELEASES-1）
+echo "=== xianyu-auto-reply images ==="
+
+worker_tag=""
+if [ -f "$ENV_FILE" ]; then
+  worker_tag="$(grep -E '^XIANYU_WORKER_IMAGE_TAG=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+fi
+if [ -z "$worker_tag" ]; then
+  echo "warning: XIANYU_WORKER_IMAGE_TAG not found in $ENV_FILE, will keep only currently running xianyu-worker image" >&2
+fi
+
+running_worker_ref="$(docker inspect xianyu-worker --format '{{.Config.Image}}' 2>/dev/null || true)"
+if [ -z "$running_worker_ref" ]; then
+  echo "warning: xianyu-worker container not running" >&2
+fi
+
+mapfile -t worker_tags < <(
+  docker images --format "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" "$WORKER_IMAGE" |
+    grep -v "<none>" |
+    # 制表符分隔后第 2 列为完整时间戳，按创建时间排序（精确到秒）
+    sort -t $'\t' -k2,2 -r
+)
+
+worker_protect_set="$(mktemp)"
+trap 'rm -f "$worker_protect_set"' EXIT
+{
+  if [ -n "$worker_tag" ]; then echo "$WORKER_IMAGE:$worker_tag"; fi
+  if [ -n "$running_worker_ref" ]; then echo "$running_worker_ref"; fi
+} | sort -u > "$worker_protect_set"
+
+# 期望保留总数 = KEEP_RELEASES
+seen=0
+while IFS=$'\t' read -r ref _created; do
+  if grep -qxF "$ref" "$worker_protect_set"; then
+    echo "keeping protected: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  if [ "$seen" -lt "$KEEP_RELEASES" ]; then
+    echo "keeping recent: $ref"
+    kept=$((kept + 1))
+    seen=$((seen + 1))
+    continue
+  fi
+  remove_image "$ref"
+done < <(printf "%s\n" "${worker_tags[@]}")
+
+# 历史远程别名仓库（默认空）：purge 模式，仅保护被运行容器引用的镜像，其余全部删除
+for legacy_repo in $WORKER_LEGACY_REPOS; do
+  [ -z "$legacy_repo" ] && continue
+  clean_repo "$legacy_repo" purge
+done
+
+# ---- 3. 悬空镜像：仅清理 sub2api / xianyu-auto-reply 命名空间的 ----
+# 策略：枚举 Repository 为 sub2api 或 xianyu-auto-reply 且 Tag=<none> 的悬挂镜像。
+# 跳过任何其他 Repository 的镜像（包括完全 <none>:<none> 的孤儿层，那是 docker engine
+# 共享层，被多个项目复用，必须交给 docker image prune 或人工处理）。
+echo "=== dangling images (sub2api/xianyu-auto-reply namespace only) ==="
+mapfile -t dangling_images < <(docker images --format "{{.ID}}\t{{.Repository}}:{{.Tag}}" || true)
+whitelisted_imgs=()
+if [ "${#dangling_images[@]}" -gt 0 ] && [ -n "${dangling_images[0]:-}" ]; then
+  for line in "${dangling_images[@]}"; do
+    img_id="${line%%$'\t'*}"
+    img_ref="${line#*$'\t'}"
+    img_tag="${img_ref##*:}"
+    img_repo="${img_ref%:*}"
+    if [ "$img_tag" = "<none>" ] && { [ "$img_repo" = "$SUB2API_IMAGE" ] || [ "$img_repo" = "$WORKER_IMAGE" ]; }; then
+      whitelisted_imgs+=("$img_id")
+    fi
+  done
+fi
+if [ "${#whitelisted_imgs[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  for img_id in "${whitelisted_imgs[@]}"; do
+    remove_image "$img_id"
+  done
+fi
+
+# ---- 4. 悬空卷 ------------------------------------------------------------
+# 严格白名单：只清理属于本部署栈的孤儿卷（命名以 sub2api_ / xianyu_ / xianyu-worker_ 开头），
+# 严禁误删其他项目（newapi / nginx / tmp-* 等）的孤儿卷。
+echo "=== dangling volumes (whitelist: sub2api_/xianyu_*) ==="
+mapfile -t dangling_vols < <(docker volume ls -f "dangling=true" --format "{{.Name}}" || true)
+whitelisted_vols=()
+if [ "${#dangling_vols[@]}" -gt 0 ] && [ -n "${dangling_vols[0]:-}" ]; then
+  for vol in "${dangling_vols[@]}"; do
+    case "$vol" in
+      sub2api_*|xianyu_*|xianyu-worker_*)
+        whitelisted_vols+=("$vol")
+        ;;
+      *)
+        echo "skip non-owned volume: $vol"
+        ;;
+    esac
+  done
+fi
+if [ "${#whitelisted_vols[@]}" -eq 0 ]; then
+  echo "(none in whitelist)"
+else
+  for vol in "${whitelisted_vols[@]}"; do
+    remove_volume "$vol"
+  done
+fi
+
+# ---- 5. .env 备份文件 ------------------------------------------------------
+echo "=== .env backup files ==="
+if [ -d "$DEPLOY_DIR" ]; then
+  mapfile -t env_baks < <(
+    find "$DEPLOY_DIR" -maxdepth 1 -type f -name '.env.bak-*' -printf '%T@ %p\n' |
+      sort -rn |
+      cut -d' ' -f2-
+  )
+  if [ "${#env_baks[@]}" -eq 0 ]; then
+    echo "(none)"
+  else
+    b_seen=0
+    for f in "${env_baks[@]}"; do
+      if [ "$b_seen" -lt "$ENV_BAK_KEEP" ]; then
+        echo "keeping recent: $f"
+        kept=$((kept + 1))
+        b_seen=$((b_seen + 1))
+      else
+        remove_file "$f"
+      fi
+    done
+  fi
+else
+  echo "skip: $DEPLOY_DIR not found"
+fi
+
+# ---- 6. Docker 构建缓存 ----------------------------------------------------
+# 策略：将未使用构建缓存裁剪到 BUILD_CACHE_MAX_STORAGE 以内（超出部分按最近使用淘汰）。
+# 构建缓存由本机所有 Docker 项目共享（sub2api / xianyu / newapi 等），只裁剪"未使用"缓存，
+# 不触碰任何运行中容器或镜像；保留上限内的近期缓存以避免每次构建都从零重来。
+#
+# buildx 兼容：容量封顶 flag 的实际名称是 --max-used-space（buildx 0.37.1 实测，
+# 不存在 --max-storage；早期误写该名会导致 "unknown flag" 且 || true 吞掉退出码后
+# 清理静默失效，见事故 gp-3 2026-09-22 与 2026-09-26 磁盘打满整改）。按能力探测降级：
+#   1) buildx 支持 --max-used-space → 按容量上限裁剪（完整语义）；
+#   2) 否则回退 --filter until=（旧 buildx 支持）：按时间裁剪更早缓存，尽量贴近
+#      "保留近期缓存避免从零构建"的原意图，而不是全量 prune（那会让每次构建都从零重来）。
+echo "=== docker build cache (prune unused, keep <= ${BUILD_CACHE_MAX_STORAGE}) ==="
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] would run: docker builder prune -f --max-used-space ${BUILD_CACHE_MAX_STORAGE} (fallback: --filter until=${BUILD_CACHE_UNTIL})"
+  docker system df 2>/dev/null | grep -i "build cache" || true
+else
+  if docker builder prune --help 2>&1 | grep -q -- --max-used-space; then
+    docker builder prune -f --max-used-space "$BUILD_CACHE_MAX_STORAGE" 2>&1 || true
+  else
+    echo "note: buildx does not support --max-used-space; falling back to --filter until=${BUILD_CACHE_UNTIL}"
+    docker builder prune -f --filter "until=${BUILD_CACHE_UNTIL}" 2>&1 || true
+  fi
+fi
+
+# ---- 6b. build cache 容量硬兜底 --------------------------------------------
+# 上面 6 的 LRU/时间裁剪在极端情况下可能失效（buildx 异常、裁剪被跳过、每日 timer
+# 窗口期内累积过快，见 2026-09-26 磁盘打满事故：build cache 达 11.8GB 而每日实删 0B）。
+# 此处做独立硬兜底：读取 docker system df 中 build cache 实际占用，超过
+# BUILD_CACHE_HARD_CAP 时全量清空（-a 含未使用缓存，-f 免交互）。数值解析与阈值
+# 比较全部在 awk 内完成（单位换算为字节后整数比较），规避 "11.83GB" 这类
+# 十进制单位字符串的浮点/单位陷阱；docker system df 的 humanize 为 SI 千进制。
+echo "=== docker build cache hard-cap check (> ${BUILD_CACHE_HARD_CAP} -> full prune) ==="
+build_cache_size="$(docker system df --format '{{.Type}} {{.Size}}' 2>/dev/null |
+  awk '$1 == "Build" && $2 == "Cache" {print $3; exit}')"
+if [ -n "$build_cache_size" ]; then
+  hard_cap_verdict="$(printf '%s %s\n' "$build_cache_size" "$BUILD_CACHE_HARD_CAP" | awk '
+    function tobytes(s,    val, unit, m) {
+      val = s; sub(/[a-zA-Z]+$/, "", val); unit = s; sub(/^[0-9.]+/, "", unit);
+      m = 1;
+      if (unit == "kB" || unit == "KB") m = 1e3;
+      else if (unit == "MB") m = 1e6;
+      else if (unit == "GB") m = 1e9;
+      else if (unit == "TB") m = 1e12;
+      return val * m;
+    }
+    { print (tobytes($1) > tobytes($2)) ? "exceed" : "ok" }')"
+  if [ "$hard_cap_verdict" = "exceed" ]; then
+    echo "build cache hard-cap exceeded (${build_cache_size} > ${BUILD_CACHE_HARD_CAP}), full prune"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] would run: docker builder prune -af"
+    else
+      docker builder prune -af 2>&1 || true
+    fi
+  else
+    echo "build cache within hard cap: ${build_cache_size} <= ${BUILD_CACHE_HARD_CAP}"
+  fi
+else
+  echo "warning: could not read build cache usage via docker system df; hard-cap check skipped" >&2
+fi
+
+# ---- 7. /tmp 历史备份产物 --------------------------------------------------
+# 严格白名单：只清理 sub2api 自己产生的 DB dump / 部署 tar（sub2api-db-*.sql /
+# sub2api-predeploy-*.sql / sub2api-*.tar.gz），按 mtime 保留最近 TMP_BACKUP_KEEP 个。
+# 不触碰其他项目的备份，例如 /tmp/new-api-full-backup-*.tar.gz（运维文档 §6.4 标注勿删）。
+echo "=== /tmp sub2api backup artifacts (keep ${TMP_BACKUP_KEEP}) ==="
+mapfile -t tmp_baks < <(
+  find /tmp -maxdepth 1 -type f \
+    \( -name 'sub2api-db-*.sql' -o -name 'sub2api-predeploy-*.sql' -o -name 'sub2api-*.tar.gz' \) \
+    -printf '%T@ %p\n' 2>/dev/null |
+    sort -rn |
+    cut -d' ' -f2-
+)
+if [ "${#tmp_baks[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  t_seen=0
+  for f in "${tmp_baks[@]}"; do
+    if [ "$t_seen" -lt "$TMP_BACKUP_KEEP" ]; then
+      echo "keeping recent: $f"
+      kept=$((kept + 1))
+      t_seen=$((t_seen + 1))
+    else
+      remove_file "$f"
+    fi
+  done
+fi
+
+# ---- 8. 构建暂存目录（/opt/sub2api/build-<hash>） --------------------------
+# 部署流程（运维文档 §5）会在 DEPLOY_DIR 下生成 build-<短哈希> 暂存目录，随版本天然累积。
+# 保留当前 .env 运行 tag 对应的目录 + 最近 BUILD_DIR_KEEP 个，其余删除。为防误删，仅处理
+# 形如 build-<7~40 位十六进制> 的目录，非法名一律跳过。
+echo "=== build staging dirs (keep running + ${BUILD_DIR_KEEP}) ==="
+running_tag=""
+if [ -f "$ENV_FILE" ]; then
+  running_tag="$(grep -E '^SUB2API_IMAGE_TAG=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+  running_tag="${running_tag%-w}"
+fi
+mapfile -t build_dirs < <(
+  find "$DEPLOY_DIR" -maxdepth 1 -type d -name 'build-*' -printf '%T@ %p\n' 2>/dev/null |
+    sort -rn |
+    cut -d' ' -f2-
+)
+if [ "${#build_dirs[@]}" -eq 0 ]; then
+  echo "(none)"
+else
+  d_seen=0
+  for d in "${build_dirs[@]}"; do
+    base="$(basename "$d")"
+    suffix="${base#build-}"
+    if ! printf '%s' "$suffix" | grep -qE '^[0-9a-f]{7,40}$'; then
+      echo "skip non-hash build dir: $d"
+      continue
+    fi
+    if [ -n "$running_tag" ] && [ "$suffix" = "$running_tag" ]; then
+      echo "keeping protected (running): $d"
+      kept=$((kept + 1))
+      continue
+    fi
+    if [ "$d_seen" -lt "$BUILD_DIR_KEEP" ]; then
+      echo "keeping recent: $d"
+      kept=$((kept + 1))
+      d_seen=$((d_seen + 1))
+      continue
+    fi
+    remove_dir "$d"
+  done
+fi
+
+# ---- 汇总 -----------------------------------------------------------------
+echo "cleanup complete: kept=$kept removed=$removed dry_run=$DRY_RUN deploy_dir=$DEPLOY_DIR"

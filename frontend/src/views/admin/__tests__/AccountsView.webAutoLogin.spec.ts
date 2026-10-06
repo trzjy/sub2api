@@ -1,0 +1,365 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { defineComponent } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+
+// AccountsView 通过 useRoute() 注入读取 URL query，挂载时必须提供 router，
+// 否则 Vue 会报 injection "Symbol(route location)" not found。
+function createTestRouter(): Router {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: { template: '<div />' } }]
+  })
+}
+
+const {
+  listAccounts,
+  listWithEtag,
+  getById,
+  getBatchTodayStats,
+  getUpstreamBillingProbeSettings,
+  getAllProxies,
+  getAllGroups,
+  showError,
+  showSuccess,
+  showWarning,
+  showInfo
+} = vi.hoisted(() => ({
+  listAccounts: vi.fn(),
+  listWithEtag: vi.fn(),
+  getById: vi.fn(),
+  getBatchTodayStats: vi.fn(),
+  getUpstreamBillingProbeSettings: vi.fn(),
+  getAllProxies: vi.fn(),
+  getAllGroups: vi.fn(),
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
+  showWarning: vi.fn(),
+  showInfo: vi.fn()
+}))
+
+vi.mock('@/api/admin', () => ({
+  adminAPI: {
+    accounts: {
+      list: listAccounts,
+      getById,
+      listWithEtag,
+      getBatchTodayStats,
+      getUpstreamBillingProbeSettings,
+      delete: vi.fn(),
+      batchClearError: vi.fn(),
+      batchRefresh: vi.fn(),
+      toggleSchedulable: vi.fn()
+    },
+    proxies: { getAll: getAllProxies },
+    groups: { getAll: getAllGroups }
+  }
+}))
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => ({ showError, showSuccess, showWarning, showInfo })
+}))
+vi.mock('@/stores/auth', () => ({
+  useAuthStore: () => ({ token: 'test-token', isSimpleMode: false })
+}))
+vi.mock('vue-i18n', async () => {
+  const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
+  return { ...actual, useI18n: () => ({ t: (key: string) => key }) }
+})
+
+const DataTableStub = defineComponent({
+  props: { data: { type: Array, default: () => [] } },
+  template: `
+    <div>
+      <div v-for="row in data" :key="row.id">
+        <slot name="cell-loginStatus" :row="row" />
+        <slot name="cell-status" :row="row" />
+      </div>
+    </div>
+  `
+})
+
+function mountView() {
+  const router = createTestRouter()
+  return mount(AccountsView, {
+    attachTo: document.body,
+    global: {
+      plugins: [router],
+      stubs: {
+        AppLayout: { template: '<div><slot /></div>' },
+        TablePageLayout: { template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>' },
+        DataTable: DataTableStub,
+        AccountTableActions: { template: '<div><slot name="after" /></div>' },
+        AccountTableFilters: true,
+        AccountBulkActionsBar: true,
+        Pagination: true,
+        ConfirmDialog: true,
+        AccountActionMenu: true,
+        ImportDataModal: true,
+        ReAuthAccountModal: true,
+        AccountTestModal: true,
+        AccountStatsModal: true,
+        ScheduledTestsPanel: true,
+        SyncFromCrsModal: true,
+        TempUnschedStatusModal: true,
+        ErrorPassthroughRulesModal: true,
+        TLSFingerprintProfilesModal: true,
+        CreateAccountModal: true,
+        EditAccountModal: true,
+        BulkEditAccountModal: true,
+        PlatformTypeBadge: true,
+        AccountCapacityCell: true,
+        AccountStatusIndicator: true,
+        AccountTodayStatsCell: true,
+        AccountGroupsCell: true,
+        AccountUsageCell: true,
+        UpstreamBillingRateCell: true,
+        HelpTooltip: true,
+        Icon: true,
+        Teleport: true
+      }
+    }
+  })
+}
+
+import AccountsView from '../AccountsView.vue'
+
+const webAccount = (over: Record<string, unknown> = {}) => ({
+  id: 1,
+  name: 'web-acct',
+  platform: 'deepseek',
+  type: 'apikey',
+  status: 'active',
+  schedulable: true,
+  concurrency: 2,
+  priority: 1,
+  group_ids: [7],
+  extra: {},
+  // 平台归并后 web 账号必须带 credentials.access_mode="web" 才被判定为网页接入。
+  credentials: { access_mode: 'web', cookie: 'ck=1' },
+  ...over
+})
+
+beforeEach(() => {
+  localStorage.clear()
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
+  listAccounts.mockReset().mockResolvedValue({ items: [webAccount()], total: 1, page: 1, page_size: 20, pages: 1 })
+  listWithEtag.mockReset().mockResolvedValue({ notModified: true, etag: 'etag', data: null })
+  getById.mockReset().mockResolvedValue(webAccount())
+  getBatchTodayStats.mockReset().mockResolvedValue({ stats: {} })
+  getUpstreamBillingProbeSettings.mockReset().mockResolvedValue({ enabled: true })
+  getAllProxies.mockReset().mockResolvedValue([])
+  getAllGroups.mockReset().mockResolvedValue([{ id: 7, name: 'g', platform: 'deepseek' }])
+  showError.mockReset()
+  showSuccess.mockReset()
+  showWarning.mockReset()
+  showInfo.mockReset()
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+async function flush() {
+  await flushPromises()
+  await flushPromises()
+  await flushPromises()
+}
+
+describe('AccountsView web login status badges', () => {
+  it('renders a login-status badge for each account', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({ id: 1, status: 'active', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
+        webAccount({ id: 2, status: 'error', error_message: 'token expired', credentials: { access_mode: 'web' }, credentials_status: { has_cookie: true } }),
+        webAccount({ id: 3, credentials: { access_mode: 'web' }, error_message: null }),
+        // 网页登录失败由自动登录同时写入 credentials.login_last_error，封禁态取它判定
+        webAccount({ id: 4, status: 'active', credentials: { access_mode: 'web', login_last_error: '账号已被封禁' }, credentials_status: { has_cookie: true } })
+      ],
+      total: 4,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(4)
+    // active -> green, failed -> amber, unconfigured web -> gray, banned -> red
+    expect(badges[0].classes()).toContain('bg-green-100')
+    expect(badges[1].classes()).toContain('bg-amber-100')
+    expect(badges[2].classes()).toContain('bg-gray-100')
+    expect(badges[3].classes()).toContain('bg-red-100')
+  })
+
+  it('shows na with gray badge for a non-web API account carrying a stale error_message', async () => {
+    // error_message 是任意业务错误的持久记录（如上游 403 订阅到期），账号恢复 active
+    // 后不会被清除；非网页接入账号不存在登录态，必须显示 na 而不是「失效」。
+    listAccounts.mockResolvedValue({
+      items: [
+        {
+          ...webAccount({ id: 1, platform: 'zhipu', type: 'apikey', status: 'active', credentials: {} }),
+          error_message: 'infer 订阅到期 上游403 SUBSCRIPTION_NOT_FOUND'
+        }
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badge = wrapper.find('[data-testid="login-status-badge"]')
+    expect(badge.text()).toBe('admin.accounts.loginStatus.na')
+    expect(badge.classes()).toContain('bg-gray-100')
+    expect(badge.classes()).not.toContain('bg-amber-100')
+  })
+
+  it('does not surface web login state for a same-platform ordinary API account', async () => {
+    // zhipu + apikey、无 access_mode：platform 命中官方平台，但属于普通 API 账号，
+    // 不存在登录态，显示 na 而不是 web 专属的 active / unconfigured。
+    listAccounts.mockResolvedValue({
+      items: [webAccount({ id: 1, platform: 'zhipu', type: 'apikey', status: 'active', credentials: {} })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(1)
+    expect(badges[0].text()).toBe('admin.accounts.loginStatus.na')
+    expect(badges[0].classes()).toContain('bg-gray-100')
+    expect(badges[0].classes()).not.toContain('bg-green-100')
+  })
+
+  it('keeps active login status for kimi when the list response only carries credentials_status.has_access_token', async () => {
+    // 后端列表接口 RedactCredentials 移除 access_token 明文，仅保留 has_access_token；
+    // 已保存凭证的 kimi web 账号必须仍显示 active 而不是 unconfigured。
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_access_token: true }
+        })
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badge = wrapper.find('[data-testid="login-status-badge"]')
+    expect(badge.text()).toBe('admin.accounts.loginStatus.active')
+    expect(badge.classes()).toContain('bg-green-100')
+  })
+
+  it('keeps active login status for zhipu/deepseek when the list response only carries credentials_status.has_cookie', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'zhipu',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_cookie: true }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_cookie: true }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.active')
+      expect(badge.classes()).toContain('bg-green-100')
+    }
+  })
+
+  it('does not fall back to plaintext credentials fields when credentials_status is absent', async () => {
+    // 明文兜底已删除：即使 credentials 里仍有 cookie/access_token 明文，只要
+    // credentials_status 缺省就视为无登录态（unconfigured）。
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web', access_token: 'tok' }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web', cookie: 'ck=1' }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.unconfigured')
+      expect(badge.classes()).toContain('bg-gray-100')
+    }
+  })
+
+  it('shows unconfigured only when the web account truly has no credential', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        webAccount({
+          id: 1,
+          platform: 'kimi',
+          status: 'active',
+          credentials: { access_mode: 'web' },
+          credentials_status: { has_access_token: false }
+        }),
+        webAccount({
+          id: 2,
+          platform: 'deepseek',
+          status: 'active',
+          credentials: { access_mode: 'web' }
+        })
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+    const wrapper = mountView()
+    await flush()
+
+    const badges = wrapper.findAll('[data-testid="login-status-badge"]')
+    expect(badges.length).toBe(2)
+    for (const badge of badges) {
+      expect(badge.text()).toBe('admin.accounts.loginStatus.unconfigured')
+      expect(badge.classes()).toContain('bg-gray-100')
+    }
+  })
+})

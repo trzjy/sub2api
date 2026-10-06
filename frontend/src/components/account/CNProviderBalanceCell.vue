@@ -1,0 +1,267 @@
+<template>
+  <div v-if="visible" class="space-y-1">
+    <!-- Balance value row: static display (snapshot or probe result) -->
+    <div class="flex flex-wrap items-center gap-1.5">
+      <span
+        data-test="cn-provider-balance-value"
+        :class="['text-[10px] font-medium leading-4', platformTextClass(account.platform)]"
+        :title="t('admin.accounts.cnProviders.balanceProbeTooltip')"
+      >
+        {{ balanceLabel }}
+      </span>
+
+      <!-- 订阅有效期（同程序中转 /v1/usage 探测透传的上游 expires_at） -->
+      <span
+        v-if="expiresLabel"
+        data-test="cn-provider-balance-expires"
+        class="text-[10px] leading-4"
+        :class="expiresSoon ? 'font-medium text-red-600 dark:text-red-400' : 'text-gray-400 dark:text-gray-500'"
+        :title="expiresTitle"
+      >
+        {{ expiresLabel }}
+      </span>
+
+      <!-- 订阅用量（订阅制账号没有余额数字，月用量是唯一可展示的数值） -->
+      <span
+        v-if="monthlyUsageLabel"
+        data-test="cn-provider-balance-monthly-usage"
+        class="text-[10px] leading-4 text-gray-400 dark:text-gray-500"
+      >
+        {{ monthlyUsageLabel }}
+      </span>
+
+      <!-- Low balance badge (reactive 402/429 marker or probe-detected) -->
+      <span
+        v-if="balanceLow"
+        class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
+      >
+        {{ t('admin.accounts.cnProviders.balanceLow') }}
+      </span>
+    </div>
+
+    <!-- Explicit refresh action (aligned with the OpenAI "Query" / Grok "Probe"
+         buttons): the old chip doubled as the data display and a hidden click
+         target, which users could not discover. The verb label makes the
+         affordance explicit. -->
+    <div class="flex flex-wrap items-center gap-1.5">
+      <button
+        type="button"
+        data-test="cn-provider-balance-probe"
+        class="inline-flex items-center gap-0.5 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-medium leading-4 text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+        :disabled="loading"
+        :title="t('admin.accounts.cnProviders.balanceProbeTooltip')"
+        @click="handleProbe"
+      >
+        <svg
+          class="h-2.5 w-2.5"
+          :class="{ 'animate-spin': loading }"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+          />
+        </svg>
+        {{ t('admin.accounts.cnProviders.probe') }}
+      </button>
+    </div>
+
+    <div v-if="error" class="truncate text-[10px] text-red-600 dark:text-red-400" :title="error">
+      {{ truncatedError }}
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { adminAPI } from '@/api/admin'
+import type { CNProviderBalanceEntry, CNProviderBalanceResult } from '@/api/admin/cnProviders'
+import type { Account } from '@/types'
+import { platformTextClass } from '@/utils/platformColors'
+import { cnBalanceCellVisible, resolveAccountBaseURL } from './credentialsBuilder'
+
+const props = defineProps<{
+  account: Account
+}>()
+
+const { t } = useI18n()
+
+const readMode = (): string => {
+  const mode = props.account.credentials?.account_mode
+  return typeof mode === 'string' ? mode : ''
+}
+
+// 仅 kimi / deepseek payg 账号有公开余额端点（智谱 payg 无）；火山订阅号按 base_url
+// 识别并隐藏余额单元格（订阅套餐无公开余额端点，避免与配额单元格双重渲染）。
+const visible = computed(() =>
+  cnBalanceCellVisible(props.account.platform, readMode(), resolveAccountBaseURL(props.account.credentials))
+)
+
+const loading = ref(false)
+const error = ref<string | null>(null)
+const data = ref<CNProviderBalanceResult | null>(null)
+
+const extraKey = (suffix: string) => `${props.account.platform}_${suffix}`
+
+// 落库快照（后端周期探测/响应式写入 account.Extra）。
+const snapshotBalance = computed(() => {
+  const v = props.account.extra?.[extraKey('balance')]
+  return typeof v === 'number' ? v : null
+})
+const snapshotCurrency = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_currency')]
+  return typeof v === 'string' ? v : ''
+})
+// 多币种快照（后端写 <platform>_balances：[{currency, balance}]，deepseek CNY+USD）。
+const snapshotBalances = computed<CNProviderBalanceEntry[]>(() => {
+  const v = props.account.extra?.[extraKey('balances')]
+  if (!Array.isArray(v)) return []
+  return v.flatMap((item): CNProviderBalanceEntry[] => {
+    if (!item || typeof item !== 'object') return []
+    const { currency, balance } = item as Record<string, unknown>
+    if (typeof currency !== 'string' || typeof balance !== 'number') return []
+    return [{ currency, balance }]
+  })
+})
+const balanceLow = computed(() => props.account.extra?.[extraKey('balance_low')] === true)
+
+// 同程序中转的订阅制不限量：后端探测到 remaining<0 时置 unlimited 快照，
+// 这类账号没有可比的数字余额，展示上游分组名而非「¥ -1」。
+const snapshotUnlimited = computed(() => props.account.extra?.[extraKey('balance_unlimited')] === true)
+const snapshotPlanName = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_plan_name')]
+  return typeof v === 'string' ? v.trim() : ''
+})
+const unlimited = computed(() => (data.value?.success ? data.value.unlimited === true : snapshotUnlimited.value))
+const planName = computed(() => {
+  if (data.value?.success && data.value.plan_name) return data.value.plan_name
+  return snapshotPlanName.value
+})
+
+// 订阅有效期：后端探测透传上游 subscription.expires_at（RFC3339 快照），
+// 在余额同行以小字展示，临近到期（≤3 天）或已到期时标红。
+const snapshotExpiresAt = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_expires_at')]
+  return typeof v === 'string' ? v.trim() : ''
+})
+const expiresAt = computed(() => {
+  const raw = data.value?.success && data.value.expires_at ? data.value.expires_at : snapshotExpiresAt.value
+  if (!raw) return null
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? null : d
+})
+const expiresLabel = computed(() => {
+  if (!expiresAt.value) return ''
+  const d = expiresAt.value
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return t('admin.accounts.cnProviders.expiresAt', { date: `${mm}-${dd}` })
+})
+const expiresSoon = computed(() => {
+  if (!expiresAt.value) return false
+  return expiresAt.value.getTime() - Date.now() <= 3 * 24 * 60 * 60 * 1000
+})
+const expiresTitle = computed(() => expiresAt.value?.toLocaleString() ?? '')
+
+// 订阅月用量：探测结果优先，其次落库快照（<platform>_balance_monthly_used）。
+const snapshotMonthlyUsage = computed(() => {
+  const v = props.account.extra?.[extraKey('balance_monthly_used')]
+  return typeof v === 'number' ? v : null
+})
+const monthlyUsage = computed(() => {
+  if (data.value?.success) {
+    return typeof data.value.monthly_usage === 'number' ? data.value.monthly_usage : null
+  }
+  return snapshotMonthlyUsage.value
+})
+const monthlyUsageLabel = computed(() => {
+  if (monthlyUsage.value == null) return ''
+  const amount = monthlyUsage.value >= 100 ? monthlyUsage.value.toFixed(0) : monthlyUsage.value.toFixed(2)
+  return t('admin.accounts.cnProviders.monthlyUsage', { amount })
+})
+
+// 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
+const currentEntries = computed<CNProviderBalanceEntry[]>(() => {
+  if (data.value && data.value.success) {
+    if (data.value.balances && data.value.balances.length > 0) return data.value.balances
+    return [{ currency: data.value.currency || '', balance: data.value.balance }]
+  }
+  if (snapshotBalances.value.length > 0) return snapshotBalances.value
+  if (snapshotBalance.value != null) {
+    return [{ currency: snapshotCurrency.value, balance: snapshotBalance.value }]
+  }
+  return []
+})
+
+const formatEntry = (entry: CNProviderBalanceEntry): string => {
+  const fixed = entry.balance >= 100 ? entry.balance.toFixed(0) : entry.balance.toFixed(2)
+  return `${entry.currency || '¥'} ${fixed}`
+}
+
+const balanceLabel = computed(() => {
+  if (unlimited.value) {
+    return planName.value
+      ? t('admin.accounts.cnProviders.unlimitedWithPlan', { plan: planName.value })
+      : t('admin.accounts.cnProviders.unlimited')
+  }
+  if (currentEntries.value.length === 0) {
+    // 修复:此前误引 admin.accounts.grokBalance(实际嵌套在 usageWindow 下),
+    // 未命中时渲染原始 key。CN 供应商使用自己的占位键。
+    return t('admin.accounts.cnProviders.balance')
+  }
+  return currentEntries.value.map(formatEntry).join(' · ')
+})
+
+const extractErrorMessage = (e: unknown): string => {
+  const err = e as {
+    message?: string
+    reason?: string
+    response?: { data?: { message?: string; error?: string } }
+  }
+  return (
+    err?.message ||
+    err?.reason ||
+    err?.response?.data?.message ||
+    err?.response?.data?.error ||
+    t('common.error')
+  )
+}
+
+const truncatedError = computed(() => {
+  if (!error.value) return ''
+  return error.value.length > 80 ? `${error.value.slice(0, 80)}...` : error.value
+})
+
+const handleProbe = async () => {
+  if (loading.value) return
+  loading.value = true
+  error.value = null
+  try {
+    const result = await adminAPI.cnProviders.queryBalance(props.account.id)
+    // 失败时保留快照展示（仅显示错误行），成功才覆盖。
+    if (result.success) {
+      data.value = result
+    } else {
+      error.value = result.error || t('common.error')
+    }
+  } catch (e) {
+    error.value = extractErrorMessage(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+watch(
+  () => props.account.id,
+  () => {
+    data.value = null
+    error.value = null
+    loading.value = false
+  }
+)
+</script>
