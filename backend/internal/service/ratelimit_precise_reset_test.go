@@ -4,7 +4,6 @@ package service
 
 import (
 	"context"
-	"net/http"
 	"testing"
 	"time"
 
@@ -12,48 +11,9 @@ import (
 )
 
 // D4c 定向测试：precise_reset 标记（精确恢复信号）的持久化与保留。
-//   - SET 路径：有上游精准恢复信号 → true；D5 无信号哨兵分支 → false；
+//   - SET 路径的 precise_reset 持久化用例随响应式免费层耗尽处理链删除（D-QL-003A）；
 //   - 探测链写入口更新（429 / 不可分类 / 账号级成功）保留既有标记不被清除；
 //   - 模型级成功走恢复迁移（整条清除），该路径下不存在"标记被清除"问题。
-
-func TestPreciseResetPersistedOnTokenHarborSet(t *testing.T) {
-	// 有上游精准恢复信号：正文给出下一滚动周期起点 → precise_reset=true。
-	repoSignal := &tokenHarborAccountRepoStub{}
-	svcSignal := &RateLimitService{accountRepo: repoSignal}
-	svcSignal.HandleUpstreamError(
-		context.Background(),
-		tokenHarborDeepSeekAccount(),
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(tokenHarborFreeExhaustedBodyAt(time.Now().Add(48*time.Hour))),
-		"deepseek-v4.1-flash:free",
-	)
-	require.Len(t, repoSignal.modelRateLimitCalls, 1)
-	callSignal := repoSignal.modelRateLimitCalls[0]
-	require.Equal(t, "deepseek-v4.1-flash:free", callSignal.scope)
-	require.NotNil(t, callSignal.precise, "有精准恢复信号的 SET 必须持久化 precise_reset")
-	require.True(t, *callSignal.precise, "上游给出可解析恢复时刻 → precise_reset=true")
-
-	// D5 无信号哨兵分支：仅类型码、无时间信号 → precise_reset=false（恢复时刻未知，
-	// 由主动复探确认；前端不得按哨兵 reset_at 显示倒计时）。
-	repoNoSignal := &tokenHarborAccountRepoStub{}
-	svcNoSignal := &RateLimitService{accountRepo: repoNoSignal}
-	svcNoSignal.HandleUpstreamError(
-		context.Background(),
-		tokenHarborDeepSeekAccount(),
-		http.StatusTooManyRequests,
-		http.Header{},
-		[]byte(`{"error":{"type":"free_tier_limit_reached","code":"free_tier_limit_reached"}}`),
-		"deepseek-v4.1-flash:free",
-	)
-	require.Len(t, repoNoSignal.modelRateLimitCalls, 1)
-	callNoSignal := repoNoSignal.modelRateLimitCalls[0]
-	require.Contains(t, callNoSignal.reason, "precise reset unknown")
-	require.NotNil(t, callNoSignal.precise, "无信号分支同样必须持久化 precise_reset=false")
-	require.False(t, *callNoSignal.precise, "无上游时间信号 → precise_reset=false")
-	// 哨兵 reset_at 仍在（持续受限），只是不得被当作恢复时刻展示。
-	require.Greater(t, callNoSignal.resetAt.Sub(time.Now()), 300*24*time.Hour)
-}
 
 func TestPreciseResetPreservedByProbeChainUpdates(t *testing.T) {
 	repo := newD2ProbeObsRepo()

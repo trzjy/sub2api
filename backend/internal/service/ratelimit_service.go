@@ -458,15 +458,6 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 	}
 
-	// TokenHarbor 免费档 7 天滚动额度用光是档位 entitlement 耗尽（付费 base
-	// model 路由仍可用），必须优先于管理员 429 临时规则与秒级兜底，否则会被
-	// 缩成几秒整号限流（Anthropic 硬窗口优先同理，见上）。
-	if statusCode == http.StatusTooManyRequests && isTokenHarborFreeTierExhausted(responseBody) {
-		if s.handleTokenHarborFreeTierExhaustion(ctx, account, headers, responseBody, firstRequestedModel(requestedModel)) {
-			return false
-		}
-	}
-
 	// 先尝试临时不可调度规则（401除外）
 	// 如果匹配成功，直接返回，不执行后续禁用逻辑
 	if statusCode != 401 {
@@ -1737,26 +1728,11 @@ func (s *RateLimitService) persistAnthropicFableWindowLimit(ctx context.Context,
 	return true
 }
 
-// TokenHarbor 免费档滚动额度用光的 429：上游正文携带 free allowance /
-// rolling 7-day / free_tier 表述（用户生产报错原文 + TokenHarbor FAQ
-// "Free routes stop accepting new requests when the period allowance is
-// exhausted" + /docs/api/rate-limits "429 with a Retry-After header" 实据）。
-// 这是模型档位 entitlement 耗尽，不是账号瞬时忙：
-//   - 整号写秒级限流会把付费直连路由一并误拦（官方：base model IDs remain
-//     paid routes），且恢复倒数只能靠猜（个人滚动周期起点只有上游知道）。
-// 因此只写模型级限流，账号整体保持可调度；无上游时间信号时不伪造恢复倒数，
-// 用有限复探间隔等待上游成功响应证明恢复（同 upstreamModelNotFoundCooldown
-// 对确定性 entitlement 失败的已有处理口径）。
+// tokenHarborFreeTierReasonPrefix 是 TokenHarbor 免费档模型级限流 reason 的权威前缀。
+// 响应式免费层耗尽处理链已退役（D-QL-003A），该前缀仅由探测链与模型级候选判定消费：
+//   - model_rate_limit.go ActiveTokenHarborFreeTierScopes（repository 候选粗筛复用）；
+//   - account_health_recovery_probe_service.go tokenHarborFreeTierProbeMarker（探测写入）。
 const tokenHarborFreeTierReasonPrefix = "tokenharbor_free_tier_exhausted"
-
-// tokenHarborFreeTierNoSignalResetAt 是「无上游精准恢复信号」时写入的限流占位
-// reset_at（D5：被动 30 分钟复探的恢复语义已摘除，不保留为常驻 fallback）。
-// 它不是恢复倒数——恢复时刻未知，仅由主动复探（D2）经最小推理请求成功确认后清除。
-// 占位取远端哨兵值，目的有二：① 调度器按 reset_at 在未来判定账号持续受限（不伪造恢复）；
-// ② 仍可被 D2 候选筛选（要求 reset_at 在未来）纳入主动复探。它不构成任何被动恢复。
-const tokenHarborFreeTierNoSignalResetAt = 365 * 24 * time.Hour
-
-var tokenHarborPaidModelPattern = regexp.MustCompile(`paid model '([^']+)'`)
 
 // isTokenHarborUpstream 报告账号是否走 TokenHarbor 上游（凭据地址可验证，
 // 不猜平台名：platform 可被误存，只有 base_url 是事实源）。
@@ -1864,78 +1840,6 @@ func (s *RateLimitService) setModelRateLimitWithPreciseReset(ctx context.Context
 	// per-account 写锁已下沉到仓库层：委托 repo（经 commitModelRateLimitSet 全程持锁）即自动获得
 	// 与探测族写入口的互斥，service 层无需再持锁。
 	return repo.SetModelRateLimitWithPreciseReset(ctx, id, scope, resetAt, preciseReset, reason)
-}
-
-// handleTokenHarborFreeTierExhaustion 处理免费档用光：只写模型级限流。
-// 返回 true 表示已处理（调用方不得再落入整号限流/临时停调链）。
-// 非 TokenHarbor 上游返回 false：通用措辞不得跨上游套用，交由既有链处理。
-// 已确认用光但拿不到模型名时返回 true 且不写任何状态：不猜模型，也不让
-// 已识别的档位耗尽扩大为整号限流，本次请求直接换号。
-func (s *RateLimitService) handleTokenHarborFreeTierExhaustion(ctx context.Context, account *Account, headers http.Header, responseBody []byte, requestedModel string) bool {
-	if s == nil || s.accountRepo == nil || account == nil {
-		return false
-	}
-	if !isTokenHarborUpstream(account) {
-		return false
-	}
-	if !isTokenHarborFreeTierExhausted(responseBody) {
-		return false
-	}
-	model := strings.TrimSpace(requestedModel)
-	if model == "" {
-		if m := tokenHarborPaidModelPattern.FindSubmatch(responseBody); len(m) == 2 {
-			model = strings.TrimSpace(string(m[1]))
-		}
-	}
-	if model == "" {
-		slog.Info("tokenharbor_free_tier_model_unknown",
-			"account_id", account.ID,
-			"note", "free-tier exhaustion confirmed but no model name; skip state writes, fail over this attempt")
-		return true
-	}
-	modelKey := modelRateLimitKeyForUpstreamModelNotFound(ctx, account, model)
-	if strings.TrimSpace(modelKey) == "" {
-		return false
-	}
-	now := time.Now()
-	resetAt, precise := tokenHarborFreeTierResetAt(headers, responseBody, now)
-	resetSource := "probe"
-	if precise {
-		resetSource = "upstream_signal"
-	}
-	reason := tokenHarborFreeTierReasonPrefix
-	if precise {
-		reason += ": rolling free allowance exhausted per upstream reset signal; paid base-model routes unaffected"
-	} else {
-		// 无上游精准恢复信号（D5）：被动 30 分钟复探的恢复语义已摘除，不再写
-		// now+30min 的被动恢复倒数（旧「断路器失灵时最后防线 / re-probe at reset」类
-		// 兜底表述作废）。恢复时刻未知，仅由主动复探（D2）经目标模型最小推理请求成功
-		// 确认后清除。占位 reset_at 取远端哨兵值，保证受限状态持续至主动复探清除，且仍
-		// 可被 D2 候选筛选纳入主动复探；此处不构成任何被动恢复。
-		resetAt = now.Add(tokenHarborFreeTierNoSignalResetAt)
-		reason += ": rolling free allowance exhausted per upstream, precise reset unknown (see dashboard); recovery confirmed only by active re-probe"
-	}
-	// precise_reset 与 reset_at 一并持久化：true = 上游给了可解析的恢复时刻（前端可
-	// 显示倒计时）；false = D5 无信号哨兵分支（reset_at 只是"持续受限"占位值，恢复
-	// 时刻未知，前端显示"等待主动复探"，不显示倒计时）。该标记是唯一判别依据。
-	if err := s.setModelRateLimitWithPreciseReset(ctx, account.ID, modelKey, resetAt, precise, reason); err != nil {
-		slog.Warn("tokenharbor_free_tier_model_rate_limit_set_failed",
-			"account_id", account.ID,
-			"scope", modelKey,
-			"reset_at", resetAt,
-			"error", err)
-		// 已确认为模型档位问题：不扩大为整号限流。
-		return true
-	}
-	slog.Info("tokenharbor_free_tier_model_rate_limited",
-		"account_id", account.ID,
-		"scope", modelKey,
-		"reset_at", resetAt,
-		"precise_reset", precise,
-		"reset_source", resetSource,
-		"upstream_type", gjson.GetBytes(responseBody, "error.type").String(),
-		"reset_in", time.Until(resetAt).Truncate(time.Second))
-	return true
 }
 
 // calculateAnthropic429ResetTime parses Anthropic's per-window rate-limit headers
