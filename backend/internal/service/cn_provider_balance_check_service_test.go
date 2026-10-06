@@ -300,8 +300,10 @@ func (r *cnProbeRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
 	return nil
 }
 
-// R18-F2：探测 200 + 余额文案 → 停调，且断言实际进入余额分支（四断言）。
-func TestCNProviderBalanceCheckProbeOne_InsufficientBalancePauses(t *testing.T) {
+// R18-F2 → D-QL-002 语义迁移：探测 200 + 余额文案 → 写 _balance_low 响应式信号
+// 标记；停调语义移交额度耗尽状态机（确认探针 → 官方恢复时间），响应式入口不再
+// 做 2×interval 滚动停调。zhipu 不在状态机管辖内 → 本路径不停调。
+func TestCNProviderBalanceCheckProbeOne_InsufficientBalanceMarksAndDelegates(t *testing.T) {
 	account := &Account{
 		ID: 71, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{"api_key": "sk-zhipu"},
@@ -318,16 +320,12 @@ func TestCNProviderBalanceCheckProbeOne_InsufficientBalancePauses(t *testing.T) 
 
 	svc.probeOne(context.Background(), account)
 
-	// 1) 命中余额不足 → 停调。
-	require.Equal(t, 1, repo.pauseCount, "insufficient balance response must pause")
-	// 2) 写入 _balance_low 快照标记。
+	// 1) 命中余额不足 → 写入 _balance_low 快照标记（响应式信号键保留，方案 §7）。
 	require.True(t, repo.balanceLow, "must mark balance_low snapshot")
-	// 3) reason 前缀为 cn_balance_low，且不是配额窗口 reason。
-	require.True(t, strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix))
+	// 2) 滚动冷却已退役：响应式入口自身不停调（停调到期时间=状态机给定值）。
+	require.Equal(t, 0, repo.pauseCount, "reactive entry must not park; parking belongs to the quota lifecycle state machine")
+	require.Nil(t, account.TempUnschedulableUntil)
 	require.False(t, IsAccountSchedulingThresholdReason(account.TempUnschedulableReason))
-	// 4) 期限 ≈ 2× 检测周期（默认 10min → 20min）。
-	require.NotNil(t, account.TempUnschedulableUntil)
-	require.WithinDuration(t, time.Now().Add(20*time.Minute), *account.TempUnschedulableUntil, 2*time.Minute)
 }
 
 // 探测 429（无余额文案）/ 401 / 超时 → 不停调不清除。
@@ -359,7 +357,7 @@ func TestCNProviderBalanceCheckProbeOne_NoPauseOnNonBalance(t *testing.T) {
 	}
 }
 
-// 先停调（余额前缀 reason）→ 探测 200 健康 → 前缀精确清除。
+// 余额前缀停调（滚动冷却退役后的存量/他入口写入）→ 健康 200 探测精确清除 + F1 翻标记。
 func TestCNProviderBalanceCheckProbeOne_PauseThenClearPrefix(t *testing.T) {
 	account := &Account{
 		ID: 73, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
@@ -369,13 +367,15 @@ func TestCNProviderBalanceCheckProbeOne_PauseThenClearPrefix(t *testing.T) {
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	svc := &CNProviderBalanceCheckService{accountRepo: repo, rateLimitSvc: rl, httpUpstream: &cnProbeCaptureUpstream{}, cfg: &config.Config{}}
 
-	// 第一次：余额不足 → 停调。
-	svc.httpUpstream = &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"error":{"message":"insufficient balance"}}`}
-	svc.probeOne(context.Background(), account)
-	require.Equal(t, 1, repo.pauseCount)
-	require.True(t, strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix))
+	// 预置一笔余额前缀停调（历史存量形态）+ balance_low 标记。
+	require.NoError(t, repo.SetTempUnschedulable(
+		context.Background(), account.ID, time.Now().Add(time.Hour), cnBalanceLowReason("余额 0 VND 低于阈值 0.00"),
+	))
+	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{
+		cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): true,
+	}))
 
-	// 第二次：健康 200（无余额文案）→ 精确清除余额前缀。
+	// 健康 200（无余额文案）→ 精确清除余额前缀停调。
 	svc.httpUpstream = &cnProbeCaptureUpstream{statusCode: http.StatusOK, body: `{"choices":[{"message":{"content":"hi"}}]}`}
 	svc.probeOne(context.Background(), account)
 	require.True(t, repo.cleared, "healthy probe must clear balance_low prefix")
