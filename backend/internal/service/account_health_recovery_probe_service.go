@@ -42,9 +42,6 @@ type accountHealthProbeRepository interface {
 	GetByID(ctx context.Context, id int64) (*Account, error)
 	ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
 	SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error
-	// ListTokenHarborModelRateLimitedAccounts 是 TokenHarbor 免费档模型级限流候选源
-	// （R3）：返回 active 且 extra 含 model_rate_limits 的账号，精确过滤在探测服务内完成。
-	ListTokenHarborModelRateLimitedAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
 }
 
 // AccountHealthRecoveryProbeService implements the optional Phase C probe-based

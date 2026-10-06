@@ -194,9 +194,8 @@ func antigravityModelRateLimitKeys(model string) []string {
 
 // ActiveTokenHarborFreeTierScopes 是 TokenHarbor 免费档模型级限流候选判定的**权威导出
 // 入口**：reason 前缀 tokenharbor_free_tier_exhausted（复用同包权威常量
-// tokenHarborFreeTierReasonPrefix，不复制任何字面量/时间语义），供 repository 的候选
-// 粗筛（account_repo.ListTokenHarborModelRateLimitedAccounts）在 Go 侧过滤时复用，
-// 避免把 tokenharbor 判定语义复制进 repository 包。
+// tokenHarborFreeTierReasonPrefix，不复制任何字面量/时间语义），供 Go 侧候选判定复用，
+// 避免把 tokenharbor 判定语义复制进调用方包。
 //
 // 与探测链内部判定 AccountHealthRecoveryProbeService.activeTokenHarborFreeTierScopes
 // 同源同义（同一批常量、同一到期语叉），并由 service 层定向测试
