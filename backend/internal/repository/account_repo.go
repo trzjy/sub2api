@@ -2707,25 +2707,32 @@ const modelRateLimitsKey = "model_rate_limits"
 
 // tokenHarborProbeCandidateLimit 与 accountHealthProbeCandidateLimit 同量级，限制
 // TokenHarbor 免费档候选账号的粗筛上限。
+//
+// 退役说明（D-QL-003B）：本方法曾是 TokenHarbor 免费层模型级探针的专属候选读路径，
+// 会按 service.ActiveTokenHarborFreeTierScopes 对 reason 前缀
+// tokenharbor_free_tier_exhausted 做 Go 侧过滤；该探针链退役后过滤分支已删，本方法
+// 仅保留「active + 含 model_rate_limits」的 keyset 分页粗筛，scope 级判定由调用方完成。
 const tokenHarborProbeCandidateLimit = 200
 
 // tokenHarborProbeScanBatchSize 是候选粗筛 keyset 分页的单批读取大小。批大小独立于
-// 返回上限（limit）：候选池可能包含大量含 model_rate_limits 但并非 TokenHarbor 免费档
-// 的账号，必须在 Go 侧逐批过滤后继续向后扫描，不能只取前 limit 个候选键就截断。
+// 返回上限（limit）：候选池可能包含大量含 model_rate_limits 的账号，必须逐批向后扫描
+// 后再由调用方过滤，不能只取前 limit 个候选键就截断。
 const tokenHarborProbeScanBatchSize = 200
 
 // ListTokenHarborModelRateLimitedAccounts 粗筛当前 active 且 extra 含 model_rate_limits
 // 的账号（候选源 R3）。由于 extra 是嵌套 jsonb（model_rate_limits -> scope ->
-// {rate_limit_reset_at, reason}），没有可靠跨 PG 版本的 jsonb 前缀/时间扫描，精确的
-// 「reason 前缀 tokenharbor_free_tier_exhausted 且 reset_at 在未来（或 precise_reset）」
-// 过滤在 Go 侧完成，且**复用探测服务的权威判定**（service.ActiveTokenHarborFreeTierScopes，
-// 同源复用 service 包权威常量与到期语叉，repository 不复制任何判定语义）。
+// {rate_limit_reset_at, reason}），没有可靠跨 PG 版本的 jsonb 前缀/时间扫描，scope 级
+// 的资格判定由调用方（探测服务）在内存中完成。
+//
+// 退役说明（D-QL-003B）：本方法原为 TokenHarbor 免费层探针专属读路径，曾在 Go 侧按
+// service.ActiveTokenHarborFreeTierScopes 过滤「reason 前缀 tokenharbor_free_tier_exhausted
+// 且 reset_at 在未来（或 precise_reset）」的 scope；该免费层探针链退役后过滤分支已删，
+// 判定语义统一收敛到调用方。keyset 分页扫描行为保留不变。
 //
 // E12 #1：旧实现用单次 `... WHERE extra ? $1 LIMIT $2` 只取前 limit 个含
-// model_rate_limits 的账号，若这前 limit 个都不是 TokenHarbor 免费档合格候选，则其后
-// 账号的合格候选被永久遗漏。改为 keyset 分页扫描（`... AND id > $last ORDER BY id
-// LIMIT 批大小`，稳定排序），逐批在 Go 侧过滤，直到收集满 limit 个合格候选或扫描耗尽。
-// 每个返回的账号仍由探测服务在内存中再次扫描其 extra 得到具体的 scope 列表。
+// model_rate_limits 的账号，靠后账号会被遗漏。keyset 分页扫描（`... AND id > $last
+// ORDER BY id LIMIT 批大小`，稳定排序）逐批返回，直到收集满 limit 个候选或扫描耗尽。
+// 每个返回的账号仍由探测服务在内存中扫描其 extra 得到具体的 scope 列表。
 func (r *accountRepository) ListTokenHarborModelRateLimitedAccounts(ctx context.Context, now time.Time, limit int) ([]*service.Account, error) {
 	if limit <= 0 {
 		limit = tokenHarborProbeCandidateLimit
@@ -2774,12 +2781,7 @@ func (r *accountRepository) ListTokenHarborModelRateLimitedAccounts(ctx context.
 			return nil, err
 		}
 		for i := range mapped {
-			acc := &mapped[i]
-			// 复用探测服务的权威判定：非 TokenHarbor 免费档合格候选跳过，继续扫下一批。
-			if len(service.ActiveTokenHarborFreeTierScopes(acc.Extra, now)) == 0 {
-				continue
-			}
-			out = append(out, acc)
+			out = append(out, &mapped[i])
 			if len(out) >= limit {
 				break
 			}
