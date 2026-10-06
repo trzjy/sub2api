@@ -87,6 +87,12 @@ func isVolcanoBaseURL(baseURL string) bool {
 // Kimi 结构的 0% 周用量且缺失 5h/月档。凭据 base_url 才是火山订阅号的唯一事实源，
 // 故先用 GetBaseURL()（= ark.cn-beijing.volces.com）强制识别为火山。
 func resolveCNQuotaProvider(account *Account) string {
+	// Kira（kiraai.vn）优先：这类账号 platform 常被存为 kimi/deepseek/zhipu，
+	// base_url 才是上游事实源（详见 cn_provider_kira.go），不能按 platform /
+	// 官方域名分发。
+	if accountIsKiraBaseURL(account) {
+		return providerKira
+	}
 	if isVolcanoBaseURL(account.GetBaseURL()) {
 		return providerVolcano
 	}
@@ -99,7 +105,7 @@ func resolveCNQuotaProvider(account *Account) string {
 
 // CNQuotaTier 表示一个滚动用量窗口档位（5h / weekly）。
 type CNQuotaTier struct {
-	Window      string  `json:"window"`             // "5h" | "weekly"
+	Window      string  `json:"window"`             // "5h" | "weekly" | "monthly" | "daily"
 	UsedPercent float64 `json:"used_percent"`       // 已用百分比（0-100+，不做裁剪）
 	ResetAt     string  `json:"reset_at,omitempty"` // RFC3339，空表示无重置时间
 	// UsedPercentUnknown 标记 used_percent 上游不可得（如火山周窗口：限流响应头仅含
@@ -201,8 +207,12 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
 	provider := resolveCNQuotaProvider(account)
-	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano {
-		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano coding plan account")
+	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano && provider != providerKira {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano/kira coding plan account")
+	}
+	// Kira 分支在 platform/provider 解析之前按 base_url 分发进来（dashboard JWT 链）。
+	if provider == providerKira {
+		return s.queryKiraUsageForAccount(ctx, account)
 	}
 
 	baseURL := account.GetOpenAIBaseURL()
@@ -421,9 +431,10 @@ func validateCodingPlanAccount(account *Account) error {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_INVALID_PLATFORM", "account is not a CN provider account")
 	}
 	// 火山订阅号账号（platform=deepseek，base_url=ark.cn-beijing.volces.com）保存为
-	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；其余 CN 供应商
-	// 仍仅限 coding。
-	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) {
+	// payg 时同样具备可探测的 Coding/Agent Plan 额度，放行非 coding；Kira（kiraai.vn）
+	// 账号无论 payg/coding 都有 dashboard 用量端点（cn_provider_kira.go），同样放行；
+	// 其余 CN 供应商仍仅限 coding。
+	if !account.IsCodingPlan() && !isVolcanoBaseURL(account.GetOpenAIBaseURL()) && !accountIsKiraBaseURL(account) {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a coding plan account")
 	}
 	return nil

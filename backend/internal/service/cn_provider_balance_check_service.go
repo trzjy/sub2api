@@ -158,6 +158,16 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				quotaTargets = append(quotaTargets, quotaTarget{id: account.ID, platform: account.Platform})
 				continue
 			}
+			// Kira（kiraai.vn）账号：platform 可能挂在 kimi/deepseek/zhipu 下，但余额
+			// 探测统一走 CNProviderBalanceService 的 Kira 分支（dashboard JWT → VND，
+			// VND>0 自动清除 cn_balance_low 停调），既不走原生 /user/balance（会被按
+			// platform 错打到 moonshot/deepseek），也不走最小完成请求探测（白耗上游 token）。
+			if accountIsKiraBaseURL(account) {
+				if account.Schedulable {
+					paygTargets = append(paygTargets, account)
+				}
+				continue
+			}
 			// payg 余额探测：
 			switch platform {
 		case PlatformZhipu, PlatformMiniMax:
@@ -193,6 +203,31 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				continue
 			}
 			collect(platform, accounts)
+		}
+	} else {
+		// quotaService 未配置时智谱 / MiniMax 平台账号不参与收集（上方循环被 gate），
+		// 但挂在 zhipu 平台下的 Kira 账号余额检测不受该 gate 影响，单独补收
+		// （kimi/deepseek 平台的 Kira 账号已由上方 platforms() 循环经 collect 的
+		// Kira 分支收集，不会重复）。
+		for _, platform := range []string{PlatformZhipu, PlatformMiniMax} {
+			accounts, err := s.accountRepo.ListByPlatform(context.Background(), platform)
+			if err != nil {
+				log.Printf("[CNBalance] list %s accounts failed: %v", platform, err)
+				continue
+			}
+			for i := range accounts {
+				account := &accounts[i]
+				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
+					continue
+				}
+				// quotaService 缺位时 coding 账号无从探测额度，也不进余额链（无余额端点）。
+				if account.IsCodingPlan() || !accountIsKiraBaseURL(account) {
+					continue
+				}
+				if account.Schedulable {
+					paygTargets = append(paygTargets, account)
+				}
+			}
 		}
 	}
 

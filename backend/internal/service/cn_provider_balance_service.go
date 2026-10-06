@@ -144,6 +144,13 @@ func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, a
 }
 
 func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+	// Kira（kiraai.vn）优先：这类账号 platform 可能是 kimi/deepseek/zhipu，但余额
+	// 探测统一走 kiraai.vn dashboard JWT 链（cn_provider_kira.go），不能按 platform
+	// 错打到 moonshot/deepseek 官方余额端点。
+	if accountIsKiraBaseURL(account) {
+		return s.queryKiraBalance(ctx, account)
+	}
+
 	provider := account.Platform
 	if provider != PlatformKimi && provider != PlatformDeepseek {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_ENDPOINT", "account provider has no balance endpoint")
