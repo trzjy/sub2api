@@ -11,10 +11,27 @@ import (
 //
 // 与 openai/anthropic 不同：
 //   - 余额不足是「可恢复」状态（充值/检测恢复后自动重新调度），不能走 handleAuthError
-//     永久置 status=error。这里改为 SetTempUnschedulable，由 CN 余额检测周期任务
-//     （cn_provider_balance_check_service.go）在余额恢复后 ClearTempUnschedulable。
+//     永久置 status=error。停调语义已移交额度耗尽状态机（CNQuotaLifecycleService，
+//     方案 th-kira-quota-lifecycle §4.2，派发单 D-QL-002）：确认探针属实则停调至
+//     官方恢复时间，探测不确定则失败关闭。旧的 2×BalanceCheckIntervalMinutes
+//     滚动冷却已退役。
 //   - Coding Plan 滚动窗口耗尽（429）的冷却终点应是真实的窗口重置时间（已由
 //     CNProviderQuotaService 落入 account.Extra 快照），而非默认的秒级兜底。
+
+// CNQuotaLifecycleEntry 额度耗尽状态机的响应式入口窄面（接口以
+// cn_quota_lifecycle_service.go 的 CNQuotaLifecycleService.OnUpstreamQuotaExhausted
+// 为准；抽象成窄面便于测试注入假实现）。生产由 app 装配层注入。
+type CNQuotaLifecycleEntry interface {
+	OnUpstreamQuotaExhausted(ctx context.Context, account *Account, upstreamMsg string) error
+}
+
+// SetCNQuotaLifecycle 注入额度耗尽状态机（可选依赖）。未注入时 402/429 响应式
+// 入口只写信号标记、不停调（滚动冷却已退役，无兜底回退）。
+func (s *RateLimitService) SetCNQuotaLifecycle(lc CNQuotaLifecycleEntry) {
+	if s != nil {
+		s.cnQuotaLifecycle = lc
+	}
+}
 
 // cnBalanceExtraSuffixLow 标记账号响应过「余额不足」，供余额检测任务区分
 // 「确属余额不足」与「尚未探测」。
@@ -53,6 +70,9 @@ func (s *RateLimitService) handleCNProviderConcurrencyLimit403(
 }
 
 // cnBalanceLowReason 构造余额不足临时停调的 reason（带稳定前缀）。
+// 周期余额检测任务据此识别「是我们停调的」并在余额恢复后安全清除——不会误清
+// 其他子系统（阈值/限流/401）写入的临时停调。响应式 402 入口已不再用它写停调
+// （停调语义移交额度耗尽状态机），周期检测任务自身的阈值停调仍使用本前缀。
 func cnBalanceLowReason(upstreamMsg string) string {
 	if upstreamMsg = strings.TrimSpace(upstreamMsg); upstreamMsg != "" {
 		return cnBalanceLowReasonPrefix + ": " + upstreamMsg
@@ -74,50 +94,42 @@ func cnProviderResponseIndicatesInsufficientBalance(body []byte) bool {
 		strings.Contains(s, "no enough balance")
 }
 
-// handleCNProviderInsufficientBalance 把余额不足标记为可恢复的临时停调：
-// 写入 balance_low 快照 + SetTempUnschedulable 一个余额检测周期，
-// 由周期任务在余额恢复后清除。返回前已通知调度阻塞。
+// handleCNProviderInsufficientBalance 是 402 余额不足信号的响应式入口：
+//   - 保留 402 信号识别语义与 cn_balance_low 标记写入（方案 §7：标记保留为响应式
+//     信号键，供余额检测任务区分「确属余额不足」与「尚未探测」）；
+//   - 停调语义移交额度耗尽状态机 OnUpstreamQuotaExhausted：确认探针属实则停调至
+//     官方恢复时间（temp_unschedulable 到期=状态机给定值），探测不确定则失败关闭。
+//     旧 2×BalanceCheckIntervalMinutes 滚动冷却已删除（方案 §4.2/§7）。
+//   - 非 TH/Kira 账号不在状态机管辖内（OnUpstreamQuotaExhausted 内部 no-op），
+//     本入口不再做任何停调。
 func (s *RateLimitService) handleCNProviderInsufficientBalance(
 	ctx context.Context,
 	account *Account,
 	upstreamMsg string,
 ) {
-	msg := cnBalanceLowReason(upstreamMsg)
-
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): true,
 	}); err != nil {
 		slog.Warn("cn_balance_low_mark_failed", "account_id", account.ID, "error", err)
 	}
 
-	until := time.Now().Add(s.cnBalanceCooldownDuration())
-	s.notifyAccountSchedulingBlocked(account, until, "cn_insufficient_balance")
-	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, msg); err != nil {
-		slog.Warn("cn_balance_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
+	if s.cnQuotaLifecycle == nil {
+		slog.Warn("cn_quota_lifecycle_not_wired",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"msg", "quota lifecycle not injected; rolling cooldown retired, no park applied",
+		)
 		return
 	}
-	slog.Info("cn_provider_insufficient_balance",
-		"account_id", account.ID,
-		"platform", account.Platform,
-		"until", until.UTC(),
-	)
-}
-
-// cnBalanceCooldownDuration 返回余额不足临时停调的持续时长（= 2× 余额检测周期，
-// 默认 20 分钟）。周期任务会在余额恢复后提前清除，故此处只需保证冷却覆盖到下一次
-// 周期检测即可。
-func (s *RateLimitService) cnBalanceCooldownDuration() time.Duration {
-	minutes := 10
-	if s != nil && s.cfg != nil {
-		if cfgMin := s.cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes; cfgMin > 0 {
-			minutes = cfgMin
-		}
+	if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhausted(ctx, account, upstreamMsg); err != nil {
+		// 停调失败（如仓库层错误）不回退滚动冷却：下轮真实流量会再次携带 402 信号
+		// 进入状态机重试；余额检测周期任务也可再次触发本入口。
+		slog.Warn("cn_quota_lifecycle_entry_failed",
+			"account_id", account.ID,
+			"platform", account.Platform,
+			"error", err,
+		)
 	}
-	cooldown := time.Duration(minutes) * time.Minute * 2
-	if cooldown < time.Minute {
-		cooldown = 10 * time.Minute
-	}
-	return cooldown
 }
 
 // cnProviderQuotaSnapshotReset 读取 Coding Plan 账号快照中最早一个仍在未来的窗口
@@ -261,12 +273,34 @@ func (s *RateLimitService) applyCNProviderReactive429(
 	if !account.IsCNProvider() {
 		return false
 	}
-	// 1) 余额不足文案：可恢复临时停调（含智谱 payg 这类无余额端点的场景）。
+	// 1) 余额不足文案：可恢复停调，语义移交额度耗尽状态机（含智谱 payg 这类
+	// 无余额端点的场景；状态机不管辖的账号只落信号标记，不再滚动停调）。
 	if cnProviderResponseIndicatesInsufficientBalance(responseBody) {
 		s.handleCNProviderInsufficientBalance(ctx, account, extractUpstreamErrorMessage(responseBody))
 		return true
 	}
-	// 2) 额度判定直接读官方用量快照（与前端「用量窗口」同一数据源），不看响应
+	// 2) TH/Kira 账号：429 归一为额度耗尽（L2 统一口径，账号级），同口径接入
+	// 额度耗尽状态机——确认探针属实则停调至官方恢复时间，不确定则失败关闭。
+	// 判定与状态机同源（base_url 是唯一事实源），不能用 platform。
+	if cnQuotaLifecycleProviderOf(account) != "" {
+		if s.cnQuotaLifecycle == nil {
+			slog.Warn("cn_quota_lifecycle_not_wired",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"msg", "reactive 429 for lifecycle-managed account dropped; lifecycle not injected",
+			)
+			return true
+		}
+		if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhausted(ctx, account, extractUpstreamErrorMessage(responseBody)); err != nil {
+			slog.Warn("cn_quota_lifecycle_entry_failed",
+				"account_id", account.ID,
+				"platform", account.Platform,
+				"error", err,
+			)
+		}
+		return true
+	}
+	// 3) 额度判定直接读官方用量快照（与前端「用量窗口」同一数据源），不看响应
 	// 文案——文案措辞不可靠（火山把瞬时过载也写成 429），官方用量百分比才是权威：
 	//    - 任一窗口触顶（≥99%）→ 窗口耗尽，冷却到该窗口重置点
 	//    - 否则（余量充足或快照缺失）→ 固定 61 秒短冷却（中转上游按分钟重置，
