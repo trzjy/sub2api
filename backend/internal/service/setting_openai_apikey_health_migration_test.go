@@ -378,22 +378,8 @@ func TestProbeEnabledForCandidate(t *testing.T) {
 		}, ProbeCandidateCircuitBreaker))
 	})
 
-	t.Run("token harbor model gated only by Probe.Enabled", func(t *testing.T) {
-		// 顶层关但 Probe 开 → 仍启用（验证解耦）
-		require.True(t, ProbeEnabledForCandidate(&OpenAIAPIKeyHealthBreakerSettings{
-			Enabled: false,
-			Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: true},
-		}, ProbeCandidateTokenHarborModel))
-		// Probe 关 → false
-		require.False(t, ProbeEnabledForCandidate(&OpenAIAPIKeyHealthBreakerSettings{
-			Enabled: true,
-			Probe:   &OpenAIAPIKeyHealthBreakerProbeSettings{Enabled: false},
-		}, ProbeCandidateTokenHarborModel))
-	})
-
-	t.Run("nil probe → disabled for both classes", func(t *testing.T) {
+	t.Run("nil probe → disabled", func(t *testing.T) {
 		require.False(t, ProbeEnabledForCandidate(&OpenAIAPIKeyHealthBreakerSettings{Enabled: true}, ProbeCandidateCircuitBreaker))
-		require.False(t, ProbeEnabledForCandidate(&OpenAIAPIKeyHealthBreakerSettings{Enabled: true}, ProbeCandidateTokenHarborModel))
 		require.False(t, ProbeEnabledForCandidate(nil, ProbeCandidateCircuitBreaker))
 	})
 }

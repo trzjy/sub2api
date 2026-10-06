@@ -12,43 +12,32 @@ import (
 
 const openAIAPIKeyHealthBreakerSettingsCacheTTL = 30 * time.Second
 
-// ProbeCandidateCategory distinguishes the two classes of recovery-probe candidates.
+// ProbeCandidateCategory distinguishes the classes of recovery-probe candidates.
 // Decoupling the probe's enable gate from the circuit-breaker master switch
-// (account-channel-status-freshness-plan v20, 工作项 1) requires that the gate be
-// evaluated differently per candidate class:
+// requires that the gate be evaluated per candidate class:
 //   - Circuit-breaker candidates keep the historical two-switch short-circuit
 //     (settings.Enabled && settings.Probe.Enabled).
-//   - TokenHarbor model-level candidates are gated only by settings.Probe.Enabled
-//     (new default true), so enabling the probe no longer forces the breaker master
-//     switch on (that was an unrelated semantic change we must avoid).
+//
+// 原 TokenHarbor 模型级候选类已随
+// th-kira-quota-lifecycle 方案 §7 旧链退役删除。
 type ProbeCandidateCategory int
 
-const (
-	// ProbeCandidateCircuitBreaker is a cooldowned API-key account candidate.
-	ProbeCandidateCircuitBreaker ProbeCandidateCategory = iota
-	// ProbeCandidateTokenHarborModel is a TokenHarbor model-level candidate.
-	ProbeCandidateTokenHarborModel
-)
+// ProbeCandidateCircuitBreaker is a cooldowned API-key account candidate.
+const ProbeCandidateCircuitBreaker ProbeCandidateCategory = iota
 
 // ProbeEnabledForCandidate returns whether the recovery probe is enabled for a
 // given candidate class. It never mutates settings and is the single source of
 // truth for the per-class enable gate:
 //   - CircuitBreaker: settings.Enabled && settings.Probe != nil && settings.Probe.Enabled
 //     (identical short-circuit semantics to the legacy probeEnabled helper).
-//   - TokenHarborModel: settings.Probe != nil && settings.Probe.Enabled
-//     (ignores the breaker master switch).
 func ProbeEnabledForCandidate(settings *OpenAIAPIKeyHealthBreakerSettings, category ProbeCandidateCategory) bool {
 	if settings == nil || settings.Probe == nil {
 		return false
 	}
-	switch category {
-	case ProbeCandidateTokenHarborModel:
-		return settings.Probe.Enabled
-	case ProbeCandidateCircuitBreaker:
-		return settings.Enabled && settings.Probe.Enabled
-	default:
+	if category == ProbeCandidateCircuitBreaker {
 		return settings.Enabled && settings.Probe.Enabled
 	}
+	return settings.Enabled && settings.Probe.Enabled
 }
 
 type cachedOpenAIAPIKeyHealthBreakerSettings struct {
