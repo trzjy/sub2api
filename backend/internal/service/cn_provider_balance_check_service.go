@@ -20,13 +20,23 @@ type cnQuotaProber interface {
 	QueryUsage(ctx context.Context, accountID int64) (*CNProviderQuotaProbeResult, error)
 }
 
+// cnQuotaLifecycleHandover TH/Kira 额度耗尽的交接窄面（§4.1/§4.2）：周期探测
+// 只刷新快照并上交耗尽信号，停调/告警/恢复全部由状态机负责。*CNQuotaLifecycleService
+// 实现该接口。
+type cnQuotaLifecycleHandover interface {
+	OnUpstreamQuotaExhausted(ctx context.Context, account *Account, upstreamMsg string) error
+}
+
 // cnQuotaProbeConcurrency 周期任务并发探测额度账号的并发度。
 const cnQuotaProbeConcurrency = 4
 
 // CNProviderBalanceCheckService 周期性探测国产供应商账号：
 //   - payg（按量付费）：余额低于阈值则临时停调，恢复则清除（仅清除本服务写入的停调）；
 //   - coding plan：调用 CNProviderQuotaService 探测 5h/weekly 滚动窗口并落 extra 快照，
-//     调度阈值评估（cnProviderThresholdCandidates）据此自动停调/恢复。
+//     调度阈值评估（cnProviderThresholdCandidates）据此自动停调/恢复；
+//   - Kira（kiraai.vn）/ TH（tokenharbor.ai）：只刷新快照（§4.3）+ 耗尽信号交
+//     额度耗尽状态机（cn_quota_lifecycle_service.go），不做独立周期停调/清除
+//     （2×interval 滚动打摆源退役，方案 §4.2/§7）。
 //
 // 克隆自 AccountExpiryService 的 Start/Stop/runOnce + ticker 骨架。
 // 余额探测：kimi / deepseek 走原生 /user/balance；zhipu / minimax payg 走最小完成请求探测。
@@ -46,6 +56,13 @@ type CNProviderBalanceCheckService struct {
 	// channelFreshness 是 E39 渠道维陈旧收敛窄面（可选注入）。账号余额恢复成功后触发
 	// 关联渠道陈旧收敛；未注入时不收敛。
 	channelFreshness ChannelFreshnessRefresher
+	// thPassService TH Pass/用量快照探测链（TH 快照刷新用，懒装配/可注入）。
+	thPassService *TokenHarborPassService
+	// quotaLifecycle TH/Kira 额度耗尽状态机交接窄面（可选注入；未注入时仅
+	// 刷新快照，耗尽信号丢失由状态机响应式入口兜底，见下方 TODO）。
+	// TODO(wire, 方案 §4.2)：wire.go 装配时调用 SetQuotaLifecycleHandover 注入
+	// CNQuotaLifecycleService，周期探测的耗尽确认/停调/告警即全量交给状态机。
+	quotaLifecycle cnQuotaLifecycleHandover
 }
 
 // SetChannelFreshnessRefresher 注入 E39 渠道维陈旧收敛窄面（可选）。未注入时不收敛。
@@ -53,6 +70,34 @@ func (s *CNProviderBalanceCheckService) SetChannelFreshnessRefresher(r ChannelFr
 	if s != nil {
 		s.channelFreshness = r
 	}
+}
+
+// SetQuotaLifecycleHandover 注入 TH/Kira 额度耗尽状态机交接窄面（可选，接线点：
+// wire.go 装配时注入 *CNQuotaLifecycleService，见方案 §4.2）。未注入时周期探测
+// 只刷新快照，耗尽信号由响应式入口兜底。
+func (s *CNProviderBalanceCheckService) SetQuotaLifecycleHandover(h cnQuotaLifecycleHandover) {
+	if s != nil {
+		s.quotaLifecycle = h
+	}
+}
+
+// SetTokenHarborPassService 注入 TH Pass/用量快照探测服务（测试替换假站点用；
+// 未注入时按需用本服务既有依赖懒装配）。
+func (s *CNProviderBalanceCheckService) SetTokenHarborPassService(th *TokenHarborPassService) {
+	if s != nil {
+		s.thPassService = th
+	}
+}
+
+// tokenHarborPass 返回 TH 快照探测链（懒装配：TH 账号刷新需要时才构造）。
+func (s *CNProviderBalanceCheckService) tokenHarborPass() *TokenHarborPassService {
+	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
+		return nil
+	}
+	if s.thPassService == nil {
+		s.thPassService = NewTokenHarborPassService(s.accountRepo, s.proxyRepo, s.httpUpstream)
+	}
+	return s.thPassService
 }
 
 // NewCNProviderBalanceCheckService 构造周期余额/额度检测服务。
@@ -139,6 +184,13 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// 请求探测（覆盖 native 余额不可用的中转型 payg 账号）。kimi/deepseek 的 payg
 	// 维持原生 /user/balance 路径（仅在该路径失败时同周期转探测，见 payg 循环）。
 	var probeTargets []*Account
+	// kiraTargets 收集 Kira（kiraai.vn）账号（外审 F5：判定先于 IsCodingPlan()
+	// 短路，coding 模式的 Kira 账号同样进 Kira 快照刷新链）：只刷新快照
+	//（kira_usage_snapshot + VND 余额）+ 耗尽信号交状态机，不做独立周期停调。
+	var kiraTargets []*Account
+	// thTargets 收集 TH（tokenharbor.ai）账号：只刷新快照（th_pass_snapshot +
+	// th_usage_snapshot），不做任何周期停调/清除（TH 停调交状态机，§4.2）。
+	var thTargets []*Account
 	collect := func(platform string, accounts []Account) {
 		for i := range accounts {
 			account := &accounts[i]
@@ -152,32 +204,32 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			if IsOllamaCloudUsageAccount(account) {
 				continue
 			}
+			// Kira（kiraai.vn）账号（F5：先于 IsCodingPlan() 短路——coding 模式的
+			// Kira 账号 platform 可能挂在 kimi/deepseek/zhipu 下，但探测统一走
+			// Kira 快照刷新链（dashboard JWT），既不走原生 /user/balance（会被按
+			// platform 错打到 moonshot/deepseek），也不走 coding 阈值停调/最小完成
+			// 请求探测（白耗上游 token）。快照刷新不要求 Schedulable——已被状态机
+			// 停调的账号也需要新鲜快照决定恢复。
+			if accountIsKiraBaseURL(account) {
+				kiraTargets = append(kiraTargets, account)
+				continue
+			}
 			// coding 账号：探测滚动窗口并落快照（不要求 Schedulable——已被
 			// 阈值停调的账号也需要新鲜快照决定是否续停）。
 			if account.IsCodingPlan() {
 				quotaTargets = append(quotaTargets, quotaTarget{id: account.ID, platform: account.Platform})
 				continue
 			}
-			// Kira（kiraai.vn）账号：platform 可能挂在 kimi/deepseek/zhipu 下，但余额
-			// 探测统一走 CNProviderBalanceService 的 Kira 分支（dashboard JWT → VND，
-			// VND>0 自动清除 cn_balance_low 停调），既不走原生 /user/balance（会被按
-			// platform 错打到 moonshot/deepseek），也不走最小完成请求探测（白耗上游 token）。
-			if accountIsKiraBaseURL(account) {
-				if account.Schedulable {
-					paygTargets = append(paygTargets, account)
-				}
-				continue
-			}
 			// payg 余额探测：
 			switch platform {
-		case PlatformZhipu, PlatformMiniMax:
-			// 智谱 / MiniMax 无公开余额端点：进最小完成请求探测队列。
-			// Schedulable 是管理端手动开关：停用（false）的账号不进探测；
-			// 临时停调账号 Schedulable 仍为 true、必须继续收集以支持充值后
-			// 探测恢复（与管理端开关语义对齐，两层互不干扰）。
-			if account.Schedulable {
-				probeTargets = append(probeTargets, account)
-			}
+			case PlatformZhipu, PlatformMiniMax:
+				// 智谱 / MiniMax 无公开余额端点：进最小完成请求探测队列。
+				// Schedulable 是管理端手动开关：停用（false）的账号不进探测；
+				// 临时停调账号 Schedulable 仍为 true、必须继续收集以支持充值后
+				// 探测恢复（与管理端开关语义对齐，两层互不干扰）。
+				if account.Schedulable {
+					probeTargets = append(probeTargets, account)
+				}
 			default:
 				// kimi/deepseek payg：维持原生 /user/balance 路径。
 				if account.Schedulable {
@@ -206,9 +258,9 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		}
 	} else {
 		// quotaService 未配置时智谱 / MiniMax 平台账号不参与收集（上方循环被 gate），
-		// 但挂在 zhipu 平台下的 Kira 账号余额检测不受该 gate 影响，单独补收
-		// （kimi/deepseek 平台的 Kira 账号已由上方 platforms() 循环经 collect 的
-		// Kira 分支收集，不会重复）。
+		// 但挂在 zhipu/minimax 平台下的 Kira 账号快照刷新不受该 gate 影响，单独补收
+		//（外审 F5：coding 模式的 Kira 账号同样收集——Kira 判定先于 IsCodingPlan()，
+		// 非 Kira 的 coding 账号在 quotaService 缺位时维持跳过）。
 		for _, platform := range []string{PlatformZhipu, PlatformMiniMax} {
 			accounts, err := s.accountRepo.ListByPlatform(context.Background(), platform)
 			if err != nil {
@@ -220,21 +272,37 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
 					continue
 				}
-				// quotaService 缺位时 coding 账号无从探测额度，也不进余额链（无余额端点）。
-				if account.IsCodingPlan() || !accountIsKiraBaseURL(account) {
-					continue
-				}
-				if account.Schedulable {
-					paygTargets = append(paygTargets, account)
+				if accountIsKiraBaseURL(account) {
+					kiraTargets = append(kiraTargets, account)
 				}
 			}
 		}
 	}
 
-	// 预算按工作量放大：4 并发 × 15s/批 + payg/probe 每账号 5s，下限 30s 上限 300s。
+	// TH（tokenharbor.ai）账号快照刷新（F1：周期链的 TH 快照刷新分支）：这类账号
+	// platform 是 openai，按 base_url 识别；只刷新 th_pass_snapshot/th_usage_snapshot，
+	// 不做任何周期停调/清除（TH 停调交状态机响应式入口，§4.2）。
+	if s.tokenHarborPass() != nil {
+		accounts, err := s.accountRepo.ListByPlatform(context.Background(), PlatformOpenAI)
+		if err != nil {
+			log.Printf("[CNBalance] list %s accounts failed: %v", PlatformOpenAI, err)
+		} else {
+			for i := range accounts {
+				account := &accounts[i]
+				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
+					continue
+				}
+				if accountIsTokenHarborBaseURL(account) {
+					thTargets = append(thTargets, account)
+				}
+			}
+		}
+	}
+
+	// 预算按工作量放大：4 并发 × 15s/批 + payg/probe/快照刷新每账号 5s，下限 30s 上限 300s。
 	batches := (len(quotaTargets) + cnQuotaProbeConcurrency - 1) / cnQuotaProbeConcurrency
 	timeout := 30*time.Second + time.Duration(batches)*15*time.Second +
-		time.Duration(len(paygTargets)+len(probeTargets))*5*time.Second
+		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets))*5*time.Second
 	if timeout > 300*time.Second {
 		timeout = 300 * time.Second
 	}
@@ -259,6 +327,14 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// 智谱 / MiniMax payg：最小完成请求探测（无公开余额端点）。
 	for _, account := range probeTargets {
 		s.probeOne(ctx, account)
+	}
+
+	// Kira / TH：快照刷新 + 耗尽信号交状态机（打摆源退役，不做独立周期停调/清除）。
+	for _, account := range kiraTargets {
+		s.refreshKiraAccount(ctx, account)
+	}
+	for _, account := range thTargets {
+		s.refreshTokenHarborAccount(ctx, account)
 	}
 
 	if len(quotaTargets) > 0 && s.quotaService != nil {
@@ -352,8 +428,8 @@ func (s *CNProviderBalanceCheckService) probeOne(ctx context.Context, account *A
 		return
 	}
 	payload, err := json.Marshal(map[string]any{
-		"model":     model,
-		"messages":  []map[string]string{{"role": "user", "content": "hi"}},
+		"model":      model,
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
 		"max_tokens": 1,
 	})
 	if err != nil {
@@ -411,6 +487,77 @@ func (s *CNProviderBalanceCheckService) probeOne(ctx context.Context, account *A
 			}
 			log.Printf("[CNBalance] probe account %d (%s) reactivated (balance recovered)", account.ID, account.Platform)
 		}
+	}
+}
+
+// refreshKiraAccount Kira 账号周期链（§4.2/§7 打摆源退役）：只刷新快照
+// （kira_usage_snapshot 经额度探测 + VND 余额经余额探测）+ 免费池耗尽信号交
+// 状态机确认探针；不做本服务的 2×interval 滚动停调/清除。探测失败（网络/鉴权/
+// 解析）按失败关闭处理：本轮不上交耗尽信号、不动现状态，下周期重试。
+func (s *CNProviderBalanceCheckService) refreshKiraAccount(ctx context.Context, account *Account) {
+	exhausted := false
+	if s.quotaService != nil {
+		result, err := s.quotaService.QueryUsage(ctx, account.ID)
+		switch {
+		case err != nil:
+			log.Printf("[CNBalance] kira usage snapshot account %d (%s) failed: %v", account.ID, account.Platform, err)
+		case result != nil && !result.Success && result.Error != "":
+			log.Printf("[CNBalance] kira usage snapshot account %d (%s) error: %s", account.ID, account.Platform, result.Error)
+		case result != nil:
+			exhausted = cnKiraResultExhausted(result)
+		}
+	}
+	if s.balanceService != nil {
+		if _, err := s.balanceService.QueryBalanceForAccount(ctx, account); err != nil {
+			log.Printf("[CNBalance] kira balance snapshot account %d (%s) failed: %v", account.ID, account.Platform, err)
+		}
+	}
+	// 耗尽信号交状态机（确认探针/停调至每日重置时刻/告警由状态机负责）。
+	// TODO(wire, 方案 §4.2)：quotaLifecycle 未注入时信号由响应式 402/429 入口兜底。
+	if exhausted && s.quotaLifecycle != nil {
+		if err := s.quotaLifecycle.OnUpstreamQuotaExhausted(ctx, account, "kira daily free pool exhausted (periodic snapshot refresh)"); err != nil {
+			log.Printf("[CNBalance] kira lifecycle handover account %d failed: %v", account.ID, err)
+		}
+	}
+}
+
+// cnKiraResultExhausted 由 Kira 用量探测结果判定免费池是否耗尽
+// （used_tokens >= limit_tokens 且 limit>0；分母缺失/快照未产出视为不耗尽——
+// 失败关闭语义，不把数据不明当耗尽）。
+func cnKiraResultExhausted(result *CNProviderQuotaProbeResult) bool {
+	if result == nil || result.Snapshot == nil ||
+		result.Snapshot.UsedTokens == nil || result.Snapshot.LimitTokens == nil {
+		return false
+	}
+	limit := *result.Snapshot.LimitTokens
+	if limit <= 0 {
+		return false
+	}
+	return *result.Snapshot.UsedTokens >= limit
+}
+
+// refreshTokenHarborAccount TH 账号周期链：只刷新 th_pass_snapshot +
+// th_usage_snapshot（快照刷新不要求 Schedulable——已停调账号也需要新鲜快照），
+// 不做任何周期停调/清除（TH 耗尽由响应式 402/429 交状态机，§4.2）。
+func (s *CNProviderBalanceCheckService) refreshTokenHarborAccount(ctx context.Context, account *Account) {
+	th := s.tokenHarborPass()
+	if th == nil {
+		return
+	}
+	passSnapshot, err := th.Probe(ctx, account)
+	if err != nil {
+		log.Printf("[CNBalance] th pass snapshot account %d failed: %v", account.ID, err)
+	} else if err := th.PersistSnapshot(ctx, account.ID, passSnapshot); err != nil {
+		log.Printf("[CNBalance] th pass snapshot persist account %d failed: %v", account.ID, err)
+	}
+	usageSnapshot, err := th.ProbeUsageSnapshot(ctx, account)
+	if err != nil {
+		// 失败关闭：本轮不落 th_usage_snapshot，不动现状态，下周期重试。
+		log.Printf("[CNBalance] th usage snapshot account %d failed: %v", account.ID, err)
+		return
+	}
+	if err := th.PersistUsageSnapshot(ctx, account.ID, usageSnapshot); err != nil {
+		log.Printf("[CNBalance] th usage snapshot persist account %d failed: %v", account.ID, err)
 	}
 }
 

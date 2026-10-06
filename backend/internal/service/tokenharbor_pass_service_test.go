@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +51,10 @@ type tokenHarborFakeTH struct {
 	seenNextAction    string
 	lastBillingCookie string
 	loginBodies       []string
+	// usage CSV（th_usage_snapshot 探测用）：body 为空 = 默认空表头；status 非 0 = 覆盖状态码。
+	usageCSVHits   int
+	usageCSVBody   string
+	usageCSVStatus int
 }
 
 func newTokenHarborFakeTH(t *testing.T, billing401Once bool) *tokenHarborFakeTH {
@@ -60,6 +66,7 @@ func newTokenHarborFakeTH(t *testing.T, billing401Once bool) *tokenHarborFakeTH 
 		_, _ = w.Write([]byte(testTHLoginChunk))
 	})
 	mux.HandleFunc("/dashboard/billing", fake.handleBilling)
+	mux.HandleFunc("/api/usage/export.csv", fake.handleUsageCSV)
 	fake.mux = mux
 	fake.server = httptest.NewServer(mux)
 	t.Cleanup(fake.server.Close)
@@ -111,6 +118,22 @@ func (f *tokenHarborFakeTH) handleBilling(w http.ResponseWriter, r *http.Request
 	_, _ = w.Write([]byte(page))
 }
 
+func (f *tokenHarborFakeTH) handleUsageCSV(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.usageCSVHits++
+	if r.Header.Get("Cookie") == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if f.usageCSVStatus != 0 {
+		w.WriteHeader(f.usageCSVStatus)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv")
+	_, _ = w.Write([]byte(f.usageCSVBody))
+}
+
 func (f *tokenHarborFakeTH) stats() (loginPosts, billingHits int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -154,7 +177,18 @@ func (u *tokenHarborFakeUpstream) requests() int {
 
 type tokenHarborRepoStub struct {
 	AccountRepository
-	updates map[int64]map[string]any
+	account *Account
+	// updates 保留每账号最后一次 UpdateExtra（旧用例语义）；
+	// allWrites 记录全部写入（TH 双快照落库断言用）。
+	updates   map[int64]map[string]any
+	allWrites []map[string]any
+}
+
+func (r *tokenHarborRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
+	if r.account != nil {
+		return r.account, nil
+	}
+	return &Account{ID: id}, nil
 }
 
 func (r *tokenHarborRepoStub) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
@@ -162,6 +196,7 @@ func (r *tokenHarborRepoStub) UpdateExtra(_ context.Context, id int64, updates m
 		r.updates = map[int64]map[string]any{}
 	}
 	r.updates[id] = updates
+	r.allWrites = append(r.allWrites, updates)
 	return nil
 }
 
@@ -358,4 +393,209 @@ func TestTokenHarborPassPersistAndReadSnapshotExtra(t *testing.T) {
 
 	_, ok = TokenHarborPassSnapshotFromExtra(&Account{Extra: map[string]any{}})
 	require.False(t, ok)
+}
+
+// ---- th_usage_snapshot（§4.3）：CSV 窗口聚合 + 失败关闭 + 契约 ----
+
+// 固定 now 的窗口切分：
+//
+//	todayStart = 2026-10-06T00:00:00Z；start7d = 2026-09-29T12:00:00Z；start30d = 2026-09-06T12:00:00Z
+//	r1（11:00Z）→ today+7d+30d；r2（10-05T23:00Z，昨日）→ 7d+30d；
+//	r3（09-28T13:00Z，7d 界外 1h）→ 仅 30d；r4（09-01）→ 30d 界外，不计入任何窗口。
+const testTHUsageCSV = `timestamp,model,input_tokens,output_tokens,status,cost
+2026-10-06T11:00:00Z,glm-5.3-flash,100,10,200,0
+2026-10-05T23:00:00Z,glm-5.3-flash,200,20,200,0
+2026-09-28T13:00:00Z,qwen3.8-flash,400,40,200,0
+2026-09-01T00:00:00Z,qwen3.8-flash,8000,800,200,0
+`
+
+func TestParseTokenHarborUsageCSV_WindowAggregation(t *testing.T) {
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+
+	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV, now)
+
+	require.NoError(t, err)
+	// §4.3 契约：windows 三键齐全，跨窗边界各归其位。
+	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(snapshot.Windows))
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 1, TokensIn: 100, TokensOut: 10}, snapshot.Windows["today"])
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 2, TokensIn: 300, TokensOut: 30}, snapshot.Windows["7d"])
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 3, TokensIn: 700, TokensOut: 70}, snapshot.Windows["30d"])
+	require.Equal(t, now, snapshot.FetchedAt)
+}
+
+func TestParseTokenHarborUsageCSV_FailClosed(t *testing.T) {
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ""},
+		{"missing time column", "model,input_tokens,output_tokens\nm,1,2\n"},
+		{"missing tokens_in column", "timestamp,model,output_tokens\n2026-10-06T11:00:00Z,m,2\n"},
+		{"bad timestamp", "timestamp,input_tokens,output_tokens\nnot-a-time,1,2\n"},
+		{"future timestamp", "timestamp,input_tokens,output_tokens\n2026-10-06T12:00:01Z,1,2\n"},
+		{"bad token count", "timestamp,input_tokens,output_tokens\n2026-10-06T11:00:00Z,abc,2\n"},
+		{"negative token count", "timestamp,input_tokens,output_tokens\n2026-10-06T11:00:00Z,-1,2\n"},
+		{"empty timestamp cell", "timestamp,input_tokens,output_tokens\n,1,2\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseTokenHarborUsageCSV(tc.body, now)
+			require.Error(t, err, "解析失败必须失败关闭返回明确错误")
+		})
+	}
+}
+
+// §4.3 契约逐键断言：windows 下三窗口各含 requests/tokens_in/tokens_out，顶层 fetched_at。
+func TestTokenHarborUsageSnapshotJSONContract(t *testing.T) {
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV, now)
+	require.NoError(t, err)
+
+	encoded, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &raw))
+	require.Equal(t, []string{"fetched_at", "windows"}, sortedStringKeys(raw))
+	windows := raw["windows"].(map[string]any)
+	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(windows))
+	for _, name := range []string{"today", "7d", "30d"} {
+		keys := sortedStringKeys(windows[name].(map[string]any))
+		require.Equal(t, []string{"requests", "tokens_in", "tokens_out"}, keys, "窗口 %s 键名必须与 §4.3 契约一致", name)
+	}
+}
+
+func sortedStringKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// ProbeUsageSnapshot 端到端：登录链 → 登录态 GET /api/usage/export.csv → 聚合；
+// 会话缓存复用（第二次调用不重登）；UA/浏览器语义由 do() 统一带上。
+func TestTokenHarborPassProbeUsageSnapshot(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+	svc := NewTokenHarborPassService(repo, nil, upstream)
+	svc.baseURL = fakeTH.server.URL
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.mu.Unlock()
+
+	snapshot, err := svc.ProbeUsageSnapshot(context.Background(), tokenHarborTestAccount(11))
+
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeTH.loginPosts, "首次探测必须走一次登录链")
+	require.Equal(t, 1, fakeTH.usageCSVHits)
+	require.InDelta(t, 1, snapshot.Windows["today"].Requests, 0.001)
+	require.InDelta(t, 100, snapshot.Windows["today"].TokensIn, 0.001)
+	require.InDelta(t, 3, snapshot.Windows["30d"].Requests, 0.001)
+
+	// 第二次：会话缓存命中 → 不重登（usage 快照节流：Extra 未落库所以仍拉 CSV）。
+	_, err = svc.ProbeUsageSnapshot(context.Background(), tokenHarborTestAccount(11))
+	require.NoError(t, err)
+	require.Equal(t, 1, fakeTH.loginPosts, "会话必须复用，不得重登")
+	require.Equal(t, 2, fakeTH.usageCSVHits)
+}
+
+// ---- 外审 F1：生产入口 → Probe → 快照落库 → DTO 输出 集成验证 ----
+
+// thProductionAccount 构造 platform=openai + base_url=tokenharbor.ai 的账号（线上 207 形态）。
+func thProductionAccount(id int64) *Account {
+	account := tokenHarborTestAccount(id)
+	account.Platform = PlatformOpenAI
+	account.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	return account
+}
+
+// TestTokenHarborQuotaProductionEntryIntegration 从生产唯一入口
+// （CNProviderQuotaService.QueryUsage——管理端手动查询按钮链路）发起：TH 分支
+// → Probe/ProbeUsageSnapshot → th_pass_snapshot/th_usage_snapshot 落库 →
+// DTO 快照输出（§4.3）。httptest 假站点，全链路无真实外呼。
+func TestTokenHarborQuotaProductionEntryIntegration(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+	quotaSvc := NewCNProviderQuotaService(repo, nil, upstream, nil)
+	thSvc := NewTokenHarborPassService(repo, nil, upstream)
+	thSvc.baseURL = fakeTH.server.URL
+	quotaSvc.SetTokenHarborPassService(thSvc)
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.mu.Unlock()
+	account := thProductionAccount(21)
+	repo.account = account
+
+	result, err := quotaSvc.QueryUsage(context.Background(), 21)
+
+	// 生产入口 → Probe：登录链 + billing + CSV 全部发生。
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, TokenHarborPassProviderName, result.Provider)
+	loginPosts, billingHits := fakeTH.stats()
+	require.Equal(t, 1, loginPosts)
+	require.Equal(t, 1, billingHits)
+	require.Equal(t, 1, fakeTH.usageCSVHits)
+	// 快照落库：th_pass_snapshot 与 th_usage_snapshot 双键写入。
+	require.Len(t, repo.allWrites, 2)
+	persistedKeys := map[string]bool{}
+	for _, w := range repo.allWrites {
+		for k := range w {
+			persistedKeys[k] = true
+		}
+	}
+	require.True(t, persistedKeys[TokenHarborPassSnapshotExtraKey], "th_pass_snapshot 必须落库")
+	require.True(t, persistedKeys[TokenHarborUsageSnapshotExtraKey], "th_usage_snapshot 必须落库")
+	// DTO 快照输出（§4.3 键名对齐）。
+	require.NotNil(t, result.Snapshot)
+	require.NotNil(t, result.Snapshot.HasPass)
+	require.True(t, *result.Snapshot.HasPass)
+	require.Equal(t, "Agent Pass", result.Snapshot.PassName)
+	require.NotEmpty(t, result.Snapshot.RenewsAt, "renews_at 必须输出（RFC3339）")
+	_, err = time.Parse(time.RFC3339, result.Snapshot.RenewsAt)
+	require.NoError(t, err)
+	require.Len(t, result.Snapshot.Windows, 3)
+	require.InDelta(t, 1, result.Snapshot.Windows["today"].Requests, 0.001)
+	require.InDelta(t, 3, result.Snapshot.Windows["30d"].Requests, 0.001)
+
+	// 从 Extra 读回快照（管理端面板无探测读取路径）。
+	stored := &Account{Extra: repo.updates[21]}
+	passSnap, ok := TokenHarborPassSnapshotFromExtra(stored)
+	require.True(t, ok)
+	require.True(t, passSnap.HasPass)
+	usageSnap, ok := TokenHarborUsageSnapshotFromExtra(stored)
+	require.True(t, ok)
+	require.Len(t, usageSnap.Windows, 3)
+}
+
+// 集成失败关闭：usage CSV 解析失败 → 明确错误、th_usage_snapshot 不落库
+// （pass 快照独立成功落库），DTO 快照输出不产出。
+func TestTokenHarborQuotaProductionEntryIntegration_FailClosedOnBadCSV(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+	quotaSvc := NewCNProviderQuotaService(repo, nil, upstream, nil)
+	thSvc := NewTokenHarborPassService(repo, nil, upstream)
+	thSvc.baseURL = fakeTH.server.URL
+	quotaSvc.SetTokenHarborPassService(thSvc)
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = "timestamp,input_tokens,output_tokens\nnot-a-time,1,2\n"
+	fakeTH.mu.Unlock()
+	account := thProductionAccount(22)
+	repo.account = account
+
+	result, err := quotaSvc.QueryUsage(context.Background(), 22)
+
+	require.NoError(t, err)
+	require.False(t, result.Success, "usage CSV 解析失败必须失败关闭")
+	require.Contains(t, result.Error, "timestamp")
+	require.Nil(t, result.Snapshot, "失败关闭路径不产出快照输出")
+	// 只有 th_pass_snapshot 落库；th_usage_snapshot 不落。
+	require.Len(t, repo.allWrites, 1)
+	require.Contains(t, repo.allWrites[0], TokenHarborPassSnapshotExtraKey)
 }

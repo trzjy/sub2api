@@ -22,12 +22,14 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,9 @@ import (
 const (
 	// TokenHarborPassSnapshotExtraKey 账号 Extra 中存放订阅快照的键。
 	TokenHarborPassSnapshotExtraKey = "th_pass_snapshot"
+	// TokenHarborUsageSnapshotExtraKey 账号 Extra 中存放用量窗口快照的键
+	//（th_usage_snapshot，§4.3 契约）。
+	TokenHarborUsageSnapshotExtraKey = "th_usage_snapshot"
 	// TokenHarborPassProviderName 快照 provider 字段的固定取值。
 	TokenHarborPassProviderName = "tokenharbor_pass"
 
@@ -57,6 +62,20 @@ type TokenHarborPassSnapshot struct {
 	SpendAfterAllowance bool       `json:"spend_after_allowance"`
 	AutoReloadEnabled   bool       `json:"auto_reload_enabled"`
 	FetchedAt           time.Time  `json:"fetched_at"`
+}
+
+// TokenHarborUsageWindowTotals 单窗口聚合（§4.3 th_usage_snapshot.windows
+// 键名照抄：requests/tokens_in/tokens_out）。浮点只做计数，无金额运算（L6）。
+type TokenHarborUsageWindowTotals struct {
+	Requests  float64 `json:"requests"`
+	TokensIn  float64 `json:"tokens_in"`
+	TokensOut float64 `json:"tokens_out"`
+}
+
+// TokenHarborUsageSnapshot 用量窗口快照（§4.3 契约：windows 三键齐全 today/7d/30d）。
+type TokenHarborUsageSnapshot struct {
+	Windows   map[string]TokenHarborUsageWindowTotals `json:"windows"`
+	FetchedAt time.Time                               `json:"fetched_at"`
 }
 
 type tokenHarborSession struct {
@@ -143,14 +162,9 @@ func (s *TokenHarborPassService) Probe(ctx context.Context, account *Account) (T
 		return *snapshot, nil
 	}
 
-	cookie, ok := s.cachedSession(account.ID)
-	if !ok {
-		var err error
-		cookie, err = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
-		if err != nil {
-			return TokenHarborPassSnapshot{}, err
-		}
-		s.storeSession(account.ID, cookie)
+	cookie, err := s.ensureSession(ctx, account.ID, proxyURL, email, password)
+	if err != nil {
+		return TokenHarborPassSnapshot{}, err
 	}
 
 	resp, err := s.fetchBillingPage(ctx, account.ID, proxyURL, cookie)
@@ -203,6 +217,95 @@ func TokenHarborPassSnapshotFromExtra(account *Account) (*TokenHarborPassSnapsho
 	return &snapshot, true
 }
 
+// PersistUsageSnapshot 把用量窗口快照写进账号 Extra（键 th_usage_snapshot），
+// 由调用方触发，与 PersistSnapshot 同一落库口径。
+func (s *TokenHarborPassService) PersistUsageSnapshot(ctx context.Context, accountID int64, snapshot TokenHarborUsageSnapshot) error {
+	if s == nil || s.accountRepo == nil {
+		return fmt.Errorf("tokenharbor pass service is not configured")
+	}
+	return s.accountRepo.UpdateExtra(ctx, accountID, map[string]any{TokenHarborUsageSnapshotExtraKey: snapshot})
+}
+
+// TokenHarborUsageSnapshotFromExtra 从账号 Extra 读回用量窗口快照。
+func TokenHarborUsageSnapshotFromExtra(account *Account) (*TokenHarborUsageSnapshot, bool) {
+	if account == nil || account.Extra == nil {
+		return nil, false
+	}
+	raw, ok := account.Extra[TokenHarborUsageSnapshotExtraKey]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var snapshot TokenHarborUsageSnapshot
+	if err := json.Unmarshal(encoded, &snapshot); err != nil {
+		return nil, false
+	}
+	return &snapshot, true
+}
+
+// ProbeUsageSnapshot 登录态 GET /api/usage/export.csv（session 复用 pass 服务的
+// 登录链；出站带浏览器 UA、走账号绑定代理，与 Probe 同一套纪律），按
+// today/7d/30d 窗聚合官方逐笔行的 requests/tokens_in/tokens_out（浮点只做计数，
+// 无金额运算，L6）。距上次成功探测不到 10 分钟时直接返回 Extra 既有快照——
+// 防止 UI 连点触发 TH 风控。解析失败=失败关闭返回明确错误，不落快照。
+func (s *TokenHarborPassService) ProbeUsageSnapshot(ctx context.Context, account *Account) (TokenHarborUsageSnapshot, error) {
+	if s == nil || s.upstream == nil {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor pass service is not configured")
+	}
+	if account == nil {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage probe requires an account")
+	}
+	if !tokenHarborProbeEnabled(account) {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage probe is not enabled for account %d", account.ID)
+	}
+	email := strings.TrimSpace(account.GetCredential("th_email"))
+	password := account.GetCredential("th_password")
+	if email == "" || password == "" {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("account %d is missing tokenharbor credentials (th_email/th_password)", account.ID)
+	}
+	proxyURL := s.resolveProxyURL(ctx, account)
+	if proxyURL == "" {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("account %d has no bound proxy; tokenharbor usage probe refuses direct access (TH datacenter-IP risk control)", account.ID)
+	}
+
+	if snapshot, ok := TokenHarborUsageSnapshotFromExtra(account); ok && s.now().Sub(snapshot.FetchedAt) < tokenHarborProbeMinInterval {
+		return *snapshot, nil
+	}
+
+	cookie, err := s.ensureSession(ctx, account.ID, proxyURL, email, password)
+	if err != nil {
+		return TokenHarborUsageSnapshot{}, err
+	}
+
+	resp, err := s.fetchUsageCSV(ctx, account.ID, proxyURL, cookie)
+	if err == nil && tokenHarborSessionRejected(resp) {
+		// 会话失效：清缓存重登一次；再失败按明确错误上报，不兜底。
+		s.invalidateSession(account.ID)
+		cookie, err = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
+		if err != nil {
+			return TokenHarborUsageSnapshot{}, err
+		}
+		s.storeSession(account.ID, cookie)
+		resp, err = s.fetchUsageCSV(ctx, account.ID, proxyURL, cookie)
+	}
+	if err != nil {
+		return TokenHarborUsageSnapshot{}, err
+	}
+	if resp.status != http.StatusOK {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage export returned status %d for account %d", resp.status, account.ID)
+	}
+	return parseTokenHarborUsageCSV(resp.body, s.now().UTC())
+}
+
+func (s *TokenHarborPassService) fetchUsageCSV(ctx context.Context, accountID int64, proxyURL, cookie string) (*tokenHarborHTTPResponse, error) {
+	return s.do(ctx, accountID, proxyURL, cookie, http.MethodGet, s.baseURL+"/api/usage/export.csv", nil, "", map[string]string{
+		"Accept": "text/csv,application/json;q=0.9,*/*;q=0.8",
+	})
+}
+
 // tokenHarborProbeEnabled 读 th_probe_enabled 非密标记（bool，语义同
 // IsTempUnschedulableEnabled 的凭据布尔读取）。
 func tokenHarborProbeEnabled(account *Account) bool {
@@ -245,6 +348,20 @@ func (s *TokenHarborPassService) cachedSession(accountID int64) (string, bool) {
 		return "", false
 	}
 	return session.cookie, true
+}
+
+// ensureSession 返回可用会话 cookie：缓存命中直接复用，否则走完整登录链
+// （pass 探测与 usage CSV 探测共用同一登录链，§4.3）。
+func (s *TokenHarborPassService) ensureSession(ctx context.Context, accountID int64, proxyURL, email, password string) (string, error) {
+	if cookie, ok := s.cachedSession(accountID); ok {
+		return cookie, nil
+	}
+	cookie, err := s.loginToTokenHarbor(ctx, accountID, proxyURL, email, password)
+	if err != nil {
+		return "", err
+	}
+	s.storeSession(accountID, cookie)
+	return cookie, nil
 }
 
 func (s *TokenHarborPassService) storeSession(accountID int64, cookie string) {
@@ -533,4 +650,147 @@ func parseTokenHarborPassPage(text string, fetchedAt time.Time) (TokenHarborPass
 func tokenHarborBoolMatch(text string, re *regexp.Regexp) bool {
 	match := re.FindStringSubmatch(text)
 	return match != nil && match[1] == "true"
+}
+
+// tokenHarborUsageColumnAliases usage/export.csv 的表头驱动列匹配别名集
+// （列名大小写不敏感、trim 后精确等于任一别名）。官方逐笔行：时间/模型/
+// tokens 输入输出/缓存/状态/钱包 Cost——只取时间与 tokens 两列计数，
+// 不碰金额列（L6：无 $、无剩余估算）。别名集按实测形态收窄，未命中即失败关闭。
+var tokenHarborUsageColumnAliases = map[string][]string{
+	"time":       {"timestamp", "time", "created_at", "date"},
+	"tokens_in":  {"tokens_in", "input_tokens", "prompt_tokens"},
+	"tokens_out": {"tokens_out", "output_tokens", "completion_tokens"},
+}
+
+// parseTokenHarborUsageCSV 解析 usage/export.csv 并按窗口聚合（§4.3 契约：
+// windows 三键 today/7d/30d 齐全）。
+//
+// 窗口口径（推导规则，与面板一致）：
+//   - today：UTC 当日零点起的日历窗口；
+//   - 7d / 30d：滚动 [now-7d/30d, now]；
+//   - 一行计入窗口当且仅当 窗口起点 ≤ 行时间 ≤ now；早于 30d 的行不计入任何窗口。
+//
+// 失败关闭（外审 F3 同口径）：必需列缺失、行时间无法解析/超前于 now、
+// tokens 数值无法解析或为负数 → 返回明确错误，调用方不得落快照。
+func parseTokenHarborUsageCSV(body string, now time.Time) (TokenHarborUsageSnapshot, error) {
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage csv parse failed: %w", err)
+	}
+	if len(records) == 0 {
+		return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage csv is empty")
+	}
+	header := make([]string, len(records[0]))
+	for i, name := range records[0] {
+		header[i] = strings.ToLower(strings.TrimSpace(name))
+	}
+	column := make(map[string]int, len(tokenHarborUsageColumnAliases))
+	for key, aliases := range tokenHarborUsageColumnAliases {
+		for i, name := range header {
+			if name == "" {
+				continue
+			}
+			for _, alias := range aliases {
+				if name == alias {
+					column[key] = i
+					break
+				}
+			}
+			if _, ok := column[key]; ok {
+				break
+			}
+		}
+		if _, ok := column[key]; !ok {
+			return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage csv has no %q column (header %q)", key, strings.Join(header, ","))
+		}
+	}
+
+	now = now.UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	start7d := now.Add(-7 * 24 * time.Hour)
+	start30d := now.Add(-30 * 24 * time.Hour)
+	windows := map[string]TokenHarborUsageWindowTotals{
+		"today": {},
+		"7d":    {},
+		"30d":   {},
+	}
+	add := func(w *TokenHarborUsageWindowTotals, tokensIn, tokensOut float64) {
+		w.Requests++
+		w.TokensIn += tokensIn
+		w.TokensOut += tokensOut
+	}
+	for _, row := range records[1:] {
+		if len(row) < len(header) {
+			// csv.Reader 默认按表头列数严格校验，走到这里说明首行就是宽行；
+			// 直接失败关闭。
+			return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage csv row width %d mismatches header %d", len(row), len(header))
+		}
+		if strings.TrimSpace(strings.Join(row, "")) == "" {
+			continue
+		}
+		ts, err := parseTokenHarborUsageTime(row[column["time"]])
+		if err != nil {
+			return TokenHarborUsageSnapshot{}, err
+		}
+		if ts.After(now) {
+			return TokenHarborUsageSnapshot{}, fmt.Errorf("tokenharbor usage csv row timestamp %q is in the future", row[column["time"]])
+		}
+		tokensIn, err := parseTokenHarborUsageCount(row[column["tokens_in"]])
+		if err != nil {
+			return TokenHarborUsageSnapshot{}, err
+		}
+		tokensOut, err := parseTokenHarborUsageCount(row[column["tokens_out"]])
+		if err != nil {
+			return TokenHarborUsageSnapshot{}, err
+		}
+		if !ts.Before(todayStart) {
+			w := windows["today"]
+			add(&w, tokensIn, tokensOut)
+			windows["today"] = w
+		}
+		if !ts.Before(start7d) {
+			w := windows["7d"]
+			add(&w, tokensIn, tokensOut)
+			windows["7d"] = w
+		}
+		if !ts.Before(start30d) {
+			w := windows["30d"]
+			add(&w, tokensIn, tokensOut)
+			windows["30d"] = w
+		}
+	}
+	return TokenHarborUsageSnapshot{Windows: windows, FetchedAt: now}, nil
+}
+
+// parseTokenHarborUsageTime 解析逐笔行时间：RFC3339 优先，兼容
+// "2006-01-02 15:04:05"（按 UTC 解读——CSV 导出无时区标注时官方为 UTC 计数）。
+func parseTokenHarborUsageTime(raw string) (time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, fmt.Errorf("tokenharbor usage csv row has empty timestamp")
+	}
+	if ts, err := time.Parse(time.RFC3339, value); err == nil {
+		return ts.UTC(), nil
+	}
+	if ts, err := time.ParseInLocation("2006-01-02 15:04:05", value, time.UTC); err == nil {
+		return ts, nil
+	}
+	return time.Time{}, fmt.Errorf("tokenharbor usage csv row timestamp %q is not RFC3339 or UTC datetime", value)
+}
+
+// parseTokenHarborUsageCount 解析计数列（tokens 只做计数）：无法解析或负数即
+// 失败关闭（与外审 F3 的范围校验口径一致）。
+func parseTokenHarborUsageCount(raw string) (float64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, fmt.Errorf("tokenharbor usage csv row has empty token count")
+	}
+	count, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("tokenharbor usage csv token count %q is not a number", value)
+	}
+	if count < 0 {
+		return 0, fmt.Errorf("tokenharbor usage csv token count %q is negative", value)
+	}
+	return count, nil
 }
