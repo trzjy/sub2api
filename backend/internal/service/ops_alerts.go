@@ -163,6 +163,48 @@ func (s *OpsService) getActiveFreshnessAlertUnchecked(ctx context.Context, dims 
 	return nil, nil
 }
 
+// --- 额度耗尽告警窄面（QuotaAlertStore 生产实现，方案 th-kira-quota-lifecycle §4.1）---
+// 复用 OpsAlertEvent 载体，kind=quota_exhausted（维度由 CNQuotaLifecycleService 构造），
+// 与 FreshnessAlertStore 同款查/关模式，不新增通知链路。
+
+// GetActiveQuotaAlert 按维度返回当前 firing 的额度耗尽告警（无则 nil）。查询逻辑
+// 与陈旧告警同源（ListAlertEvents + DimensionExact）；管理端语义受监控开关门禁
+// （与 GetActiveFreshnessAlert 同口径），恢复关闭走未门禁窄面 ResolveQuotaAlertOnRecovery。
+func (s *OpsService) GetActiveQuotaAlert(ctx context.Context, dims map[string]any) (*OpsAlertEvent, error) {
+	if err := s.RequireMonitoringEnabled(ctx); err != nil {
+		return nil, err
+	}
+	if s.opsRepo == nil {
+		return nil, infraerrors.ServiceUnavailable("OPS_REPO_UNAVAILABLE", "Ops repository not available")
+	}
+	if len(dims) == 0 {
+		return nil, infraerrors.BadRequest("INVALID_DIMS", "empty dimensions")
+	}
+	return s.getActiveFreshnessAlertUnchecked(ctx, dims)
+}
+
+// ResolveQuotaAlertOnRecovery 不受监控开关门禁约束的恢复关闭窄面（与
+// ResolveFreshnessAlertOnRecovery 同模式，QuotaAlertStore 契约）：状态机恢复闭环在
+// 清停调的同一状态变更内关闭对应维度 firing 告警，监控开关关闭时不得回滚恢复事务。
+// 无活动告警幂等 no-op；内部查询/关闭复用陈旧告警未门禁 helper，不出现两份同源正文。
+func (s *OpsService) ResolveQuotaAlertOnRecovery(ctx context.Context, dims map[string]any) error {
+	if s.opsRepo == nil {
+		return infraerrors.ServiceUnavailable("OPS_REPO_UNAVAILABLE", "Ops repository not available")
+	}
+	if len(dims) == 0 {
+		return infraerrors.BadRequest("INVALID_DIMS", "empty dimensions")
+	}
+	active, err := s.getActiveFreshnessAlertUnchecked(ctx, dims)
+	if err != nil {
+		return err
+	}
+	if active == nil {
+		return nil
+	}
+	resolvedAt := time.Now()
+	return s.updateAlertEventStatusResolvedUnchecked(ctx, active.ID, OpsAlertStatusResolved, &resolvedAt)
+}
+
 // ListActiveFreshnessAlerts 列出当前 firing 的账号+模型维新鲜度告警（孤儿清扫使用，E45/E46）。
 // 与 getActiveFreshnessAlertUnchecked 同款查询模式（直接走 s.opsRepo.ListAlertEvents，不受监控开关
 // 门禁约束，firing 告警存在与否与监控开关无关，关闭孤儿维度不应因开关回滚，与恢复关闭窄面同口径）；

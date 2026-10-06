@@ -107,6 +107,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // xianyuExposure
 		nil, // promptAudit
 		nil, // pluginManager
+		nil, // quotaLifecycle
 	)
 
 	require.NotPanics(t, func() {
