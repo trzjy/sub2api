@@ -6,12 +6,24 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
+
+// sortedMapKeys map 键名排序（快照 JSON 契约逐键断言用）。
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 // ---- stubs ----
 
@@ -111,13 +123,20 @@ func TestIsKiraBaseURL(t *testing.T) {
 	}{
 		{"official v1", "https://kiraai.vn/api/v1", true},
 		{"case insensitive", "https://KIRAAI.VN/api/v1", true},
-		{"mixed case host", "https://Www.KiraAi.Vn/api/v1", true},
+		{"mixed case host", "https://KiraAI.Vn/api/v1", true},
+		{"www subdomain not exact", "https://www.kiraai.vn/api/v1", false},
 		{"empty", "", false},
 		{"kimi official", "https://api.kimi.com/coding", false},
 		{"deepseek official", "https://api.deepseek.com", false},
 		{"moonshot", "https://api.moonshot.cn/v1", false},
 		{"volcano", "https://ark.cn-beijing.volces.com/api/v3", false},
-		{"similar substring different host", "https://kiraai.vn.evil.example.com/api/v1", true},
+		{"similar substring different host", "https://kiraai.vn.evil.example.com/api/v1", false},
+		// 外审 F2 补充：子串出现在非主机位置也须精确匹配 host 判定。
+		{"suffix host not equal", "https://api.kiraai.vn.evil.example.com/api/v1", false},
+		{"subdomain not equal", "https://evil.kiraai.vn.attacker.io/api/v1", false},
+		{"bare host", "https://kiraai.vn", true},
+		{"port suffix", "https://kiraai.vn:8443/api/v1", true},
+		{"user info trick", "https://kiraai.vn@evil.example.com/api/v1", false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,6 +169,30 @@ func TestParseKiraUsageTier_FallsBackToBasePlusCheckin(t *testing.T) {
 func TestParseKiraUsageTier_MissingSummary(t *testing.T) {
 	_, _, _, ok := parseKiraUsageTier([]byte(`{"error":"unauthorized"}`))
 	require.False(t, ok)
+}
+
+// 外审 F3：tokensUsedToday / 限额字段缺失、null、解析失败、负数 → 失败关闭。
+func TestParseKiraUsageTier_FailClosedOnMissingOrInvalidFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing tokensUsedToday", `{"summary":{"baseFreeLimit":100,"checkinBonus":0}}`},
+		{"null tokensUsedToday", `{"summary":{"tokensUsedToday":null,"baseFreeLimit":100,"checkinBonus":0}}`},
+		{"string tokensUsedToday", `{"summary":{"tokensUsedToday":"12abc","baseFreeLimit":100,"checkinBonus":0}}`},
+		{"negative tokensUsedToday", `{"summary":{"tokensUsedToday":-1,"baseFreeLimit":100,"checkinBonus":0}}`},
+		{"missing limit fields", `{"summary":{"tokensUsedToday":10}}`},
+		{"null limit fields", `{"summary":{"tokensUsedToday":10,"baseFreeLimit":null,"checkinBonus":null}}`},
+		{"negative baseFreeLimit", `{"summary":{"tokensUsedToday":10,"baseFreeLimit":-5,"checkinBonus":0}}`},
+		{"negative checkinBonus", `{"summary":{"tokensUsedToday":10,"baseFreeLimit":100,"checkinBonus":-1}}`},
+		{"zero freeDailyLimit and missing fallback", `{"summary":{"tokensUsedToday":10,"freeDailyLimit":0}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, ok := parseKiraUsageTier([]byte(tc.body))
+			require.False(t, ok, "字段缺失/无效必须失败关闭（ok=false）")
+		})
+	}
 }
 
 // TestFetchKiraUsageWithReauth_401LoginRetry 走真实 httptest：缓存 JWT 401 →
@@ -254,13 +297,28 @@ func TestCNProviderQuotaService_KiraDispatch(t *testing.T) {
 	require.Len(t, upstream.requests, 1)
 	require.Equal(t, "/api/user/usage", upstream.requests[0].URL.Path)
 	require.Equal(t, "kiraai.vn", upstream.requests[0].URL.Hostname())
-	// 快照落 kira_usage_snapshot 单键。
+	// 快照落 kira_usage_snapshot 单键，§4.3 契约键名逐键断言。
 	require.Len(t, repo.extraWrites, 1)
 	snapshot, hasSnapshot := repo.extraWrites[0][kiraUsageSnapshotExtraKey]
 	require.True(t, hasSnapshot, "必须写 kira_usage_snapshot 快照键")
 	snapshotMap, ok := snapshot.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "daily", snapshotMap["window"])
+	require.Equal(t, []string{"fetched_at", "limit_tokens", "reset_at", "used_percent", "used_tokens", "window"}, sortedMapKeys(snapshotMap),
+		"kira_usage_snapshot 键必须与方案 §4.3 契约逐键一致")
+	// reset_at：上游无字段，由"当日窗口"语义推导（越南时区每日零点），RFC3339。
+	_, err = time.Parse(time.RFC3339, snapshotMap["reset_at"].(string))
+	require.NoError(t, err, "reset_at 必须是可解析的 RFC3339")
+	require.Equal(t, kiraNextDailyReset(time.Now().UTC()).UTC().Format(time.RFC3339), snapshotMap["reset_at"])
+	// DTO 快照读取输出（§4.3 键名对齐）。
+	require.NotNil(t, result.Snapshot)
+	require.Equal(t, "daily", result.Snapshot.Window)
+	require.NotNil(t, result.Snapshot.UsedTokens)
+	require.InDelta(t, 36527264, *result.Snapshot.UsedTokens, 0.001)
+	require.NotNil(t, result.Snapshot.LimitTokens)
+	require.InDelta(t, 6000000, *result.Snapshot.LimitTokens, 0.001)
+	require.NotEmpty(t, result.Snapshot.ResetAt)
+	require.NotEmpty(t, result.Snapshot.FetchedAt)
 }
 
 // TestCNProviderQuotaService_Kira401TriggersReloginAndFails 端到端：401 → 重登 →
@@ -288,8 +346,12 @@ func TestCNProviderQuotaService_Kira401TriggersReloginAndFails(t *testing.T) {
 	require.Contains(t, result.Error, "kira 鉴权失败")
 	require.Contains(t, result.Error, "403")
 	require.Empty(t, repo.extraWrites, "鉴权失败不得落快照")
-	// 重登发生了（登录请求发出）且新 JWT 已回写。
-	require.Contains(t, upstream.bodies, `{"usernameOrEmail":"user@example.com","password":"pw-secret"}`)
+	// 重登发生了（登录请求发出，凭据正确）且新 JWT 已回写。
+	var loginPayload map[string]string
+	require.Len(t, upstream.bodies, 3)
+	require.NoError(t, json.Unmarshal([]byte(upstream.bodies[1]), &loginPayload))
+	require.Equal(t, "user@example.com", loginPayload["usernameOrEmail"])
+	require.Equal(t, "pw-secret", loginPayload["password"])
 	require.Len(t, repo.credWrites, 1)
 }
 
@@ -320,12 +382,103 @@ func TestCNProviderBalanceService_KiraBalance(t *testing.T) {
 	// 请求没打到 moonshot。
 	require.Equal(t, "/api/user/usage", upstream.requests[0].URL.Path)
 	require.Equal(t, "kiraai.vn", upstream.requests[0].URL.Hostname())
-	// 快照按 platform 前缀落 extra，且清除 balance_low 标记。
-	require.Len(t, repo.extraWrites, 1)
-	updates := repo.extraWrites[0]
-	require.Equal(t, 0.0, updates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixBalance)])
-	require.Equal(t, "VND", updates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixCurrency)])
-	require.Equal(t, false, updates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixLow)])
+	// 快照按 platform 前缀落 extra（usage 快照 + 余额快照两次写入）。
+	// 外审 F4：vnd=0 保留既有 balance_low 标记不动（不写 false）。
+	require.Len(t, repo.extraWrites, 2)
+	balanceUpdates := kiraBalanceWrite(repo)
+	require.NotNil(t, balanceUpdates)
+	require.Equal(t, 0.0, balanceUpdates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixBalance)])
+	require.Equal(t, "VND", balanceUpdates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixCurrency)])
+	require.NotContains(t, balanceUpdates, cnExtraKey(PlatformKimi, cnBalanceExtraSuffixLow),
+		"vnd=0 必须保留既有 balance_low 标记（单向清除，不得写 false 打摆）")
+}
+
+// kiraBalanceWrite 取余额快照写入（含 balance 前缀键的那次 UpdateExtra）。
+func kiraBalanceWrite(repo *kiraRepo) map[string]any {
+	for _, w := range repo.extraWrites {
+		if _, ok := w[cnExtraKey(repo.account.Platform, cnBalanceExtraSuffixBalance)]; ok {
+			return w
+		}
+	}
+	return nil
+}
+
+// 外审 F4（vnd>0 态）：钱包有余额 → 探测成功写 balance_low=false 清除标记。
+func TestCNProviderBalanceService_KiraPositiveVNDClearsLowMarker(t *testing.T) {
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			return http.StatusOK, `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"freeDailyLimit":200,"checkinBonus":0,"vndBalance":58000}}`
+		}
+		return http.StatusNotFound, `{}`
+	}}
+	account := newKiraTestAccount(PlatformKimi)
+	repo := &kiraRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalanceForAccount(context.Background(), account)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.InDelta(t, 58000, result.Balance, 0.0001)
+	require.Equal(t, "VND", result.Currency)
+	require.False(t, result.Unlimited, "VND>0 必须参与阈值停调/清除语义")
+	balanceUpdates := kiraBalanceWrite(repo)
+	require.NotNil(t, balanceUpdates)
+	require.Equal(t, false, balanceUpdates[cnExtraKey(PlatformKimi, cnBalanceExtraSuffixLow)],
+		"vnd>0 必须清除既有 balance_low 标记")
+}
+
+// 外审 F3（balance 链）：vndBalance 缺失/null/负数 → 失败关闭：明确错误、
+// Success=false、不落任何快照、不清 balance_low 标记。
+func TestCNProviderBalanceService_KiraFailClosedOnInvalidVNDBalance(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing vndBalance", `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"checkinBonus":0}}`},
+		{"null vndBalance", `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"checkinBonus":0,"vndBalance":null}}`},
+		{"string vndBalance", `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"checkinBonus":0,"vndBalance":"12abc"}}`},
+		{"negative vndBalance", `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"checkinBonus":0,"vndBalance":-1}}`},
+		{"missing summary", `{"error":"unauthorized"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+				if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+					return http.StatusOK, tc.body
+				}
+				return http.StatusNotFound, `{}`
+			}}
+			account := newKiraTestAccount(PlatformKimi)
+			repo := &kiraRepo{account: account}
+			svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+			result, err := svc.QueryBalanceForAccount(context.Background(), account)
+			require.NoError(t, err)
+			require.False(t, result.Success)
+			require.NotEmpty(t, result.Error)
+			require.Empty(t, repo.extraWrites, "失败关闭不得落任何快照（含 balance_low 标记）")
+		})
+	}
+}
+
+// 外审 F3（usage 链端到端）：字段无效 → 明确错误、不落快照。
+func TestCNProviderQuotaService_KiraFailClosedOnInvalidUsageFields(t *testing.T) {
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			return http.StatusOK, `{"summary":{"tokensUsedToday":null,"baseFreeLimit":100,"checkinBonus":0}}`
+		}
+		return http.StatusNotFound, `{}`
+	}}
+	account := newKiraTestAccount(PlatformKimi)
+	repo := &kiraRepo{account: account}
+	svc := NewCNProviderQuotaService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryUsageForAccount(context.Background(), account)
+	require.NoError(t, err)
+	require.False(t, result.Success)
+	require.NotEmpty(t, result.Error)
+	require.Nil(t, result.Snapshot, "失败关闭路径不产出快照输出")
+	require.Empty(t, repo.extraWrites, "失败关闭不得落任何快照")
 }
 
 // TestCNProviderBalanceService_KiraPositiveVNDBalance vnd>0 参与阈值语义（非 Unlimited）。

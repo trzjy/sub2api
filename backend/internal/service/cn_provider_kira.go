@@ -48,13 +48,23 @@ const (
 	// balance_probe_snapshot 模式），供管理端展示消费。
 	kiraUsageSnapshotExtraKey = "kira_usage_snapshot"
 
+	// kiraUsageWindowDaily kira_usage_snapshot.window 的唯一取值（§4.3 契约：Kira
+	// 免费池每日重置，单窗口）。
+	kiraUsageWindowDaily = "daily"
+
 	kiraMaxBodyBytes = 256 * 1024
 )
 
-// isKiraBaseURL 报告 base_url 是否指向 kiraai.vn 上游（大小写不敏感包含判定）。
-// 这 3 行账号的 platform 是 kimi/deepseek/zhipu，base_url 是唯一事实源。
+// isKiraBaseURL 报告 base_url 是否指向 kiraai.vn 上游（外审 F2：精确主机名
+// 匹配——url.Parse 后 hostname 大小写不敏感精确等于 kiraai.vn，废除子串包含，
+// 防 kiraai.vn.evil.example.com 类钓鱼主机误判）。这 3 行账号的 platform 是
+// kimi/deepseek/zhipu，base_url 是唯一事实源。
 func isKiraBaseURL(baseURL string) bool {
-	return strings.Contains(strings.ToLower(strings.TrimSpace(baseURL)), "kiraai.vn")
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Hostname(), "kiraai.vn")
 }
 
 // accountIsKiraBaseURL 按账号凭据判定是否 Kira 上游：OpenAI 协议 base_url 优先，
@@ -209,31 +219,46 @@ func fetchKiraUsageWithReauth(
 
 // parseKiraUsageTier 解析 /api/user/usage 的 summary 为一条"每日"窗口：
 // used = tokensUsedToday；limit = freeDailyLimit>0 ? freeDailyLimit : baseFreeLimit+checkinBonus。
-// reset_at 上游未提供可靠口径（站点按越南时区刷新、无响应字段），置空不编时间。
-// 返回 (tier, used, limit, ok)；summary 缺失时 ok=false。
+// 返回 (tier, used, limit, ok)；外审 F3：tokensUsedToday / 限额字段缺失、null、
+// 解析失败或为负数一律 ok=false（失败关闭，调用方不得落任何快照/清标记）。
+// reset_at 上游无响应字段，由"当日窗口"语义推导（越南时区每日零点重置，
+// kiraNextDailyReset）；tier.ResetAt 为空表示由调用方按推导规则补齐。
 func parseKiraUsageTier(body []byte) (CNQuotaTier, float64, float64, bool) {
 	summary := gjson.GetBytes(body, "summary")
 	if !summary.Exists() {
 		return CNQuotaTier{}, 0, 0, false
 	}
-	used, _ := cnParseF64(summary.Get("tokensUsedToday").Value())
+	usedRaw := summary.Get("tokensUsedToday")
+	used, hasUsed := cnParseF64(usedRaw.Value())
+	// null/缺失/非数值：gjson 对 null 的 Value() 是 nil → cnParseF64 返回 false。
+	if !hasUsed || used < 0 {
+		return CNQuotaTier{}, 0, 0, false
+	}
 	dailyLimit, hasDailyLimit := cnParseF64(summary.Get("freeDailyLimit").Value())
 	if !hasDailyLimit || dailyLimit <= 0 {
-		baseLimit, _ := cnParseF64(summary.Get("baseFreeLimit").Value())
-		bonus, _ := cnParseF64(summary.Get("checkinBonus").Value())
+		baseLimit, hasBase := cnParseF64(summary.Get("baseFreeLimit").Value())
+		bonus, hasBonus := cnParseF64(summary.Get("checkinBonus").Value())
+		if !hasBase || !hasBonus || baseLimit < 0 || bonus < 0 {
+			// 限额字段缺失/null/解析失败/负数：无官方分母，失败关闭（F3）。
+			return CNQuotaTier{}, 0, 0, false
+		}
 		dailyLimit = baseLimit + bonus
+	}
+	if dailyLimit <= 0 {
+		return CNQuotaTier{}, 0, 0, false
 	}
 	var pct float64
 	if dailyLimit > 0 {
 		pct = used / dailyLimit * 100
 	}
-	return CNQuotaTier{Window: "daily", UsedPercent: pct}, used, dailyLimit, true
+	return CNQuotaTier{Window: kiraUsageWindowDaily, UsedPercent: pct}, used, dailyLimit, true
 }
 
-// queryKiraUsageForAccount 是 CNProviderQuotaService 的 Kira 分支（在 platform/
+// QueryKiraUsageForAccount 是 CNProviderQuotaService 的 Kira 分支（在 platform/
 // provider 解析之前按 base_url 分发进来）。探测 dashboard 用量并落
-// kira_usage_snapshot 快照。
-func (s *CNProviderQuotaService) queryKiraUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
+// kira_usage_snapshot 快照。导出（本单接线点清单）：供状态机确认探针/
+// QuotaSnapshotRefresher 复用（只导出，不改语义）。
+func (s *CNProviderQuotaService) QueryKiraUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
 	usageURL, loginURL, err := kiraProbeURLs(s.cfg, account)
 	if err != nil {
 		return nil, infraerrors.New(http.StatusForbidden, "CN_QUOTA_URL_REJECTED", err.Error())
@@ -272,22 +297,38 @@ func (s *CNProviderQuotaService) queryKiraUsageForAccount(ctx context.Context, a
 	}
 	tier, usedTokens, limitTokens, ok := parseKiraUsageTier(body)
 	if !ok {
-		result.Error = "Invalid kira usage response: missing summary"
+		// 外审 F3：字段缺失/null/解析失败/负数 → 失败关闭，明确错误，
+		// 不落任何快照、不清 balance_low 标记。
+		result.Error = "Invalid kira usage response: summary tokensUsedToday/limit fields missing, invalid or negative"
 		return result, nil
 	}
+	// reset_at 推导规则：上游无重置字段，站点免费池按越南时区每日零点重置，
+	// 由"当日窗口"语义推导下一次重置时刻（kiraNextDailyReset），RFC3339 输出。
+	resetAt := kiraNextDailyReset(now)
+	tier.ResetAt = resetAt.UTC().Format(time.RFC3339)
 	result.Tiers = []CNQuotaTier{tier}
 	result.Success = true
 	result.CredentialValid = true
 
-	// 快照照 balance_probe_snapshot 单键 JSON 模式落 extra，供管理端/前端消费。
+	// 快照照 balance_probe_snapshot 单键 JSON 模式落 extra，供管理端/前端消费
+	//（§4.3 契约键名照抄：window/used_percent/used_tokens/limit_tokens/reset_at/fetched_at）。
 	snapshot := map[string]any{
 		"window":       tier.Window,
 		"used_percent": tier.UsedPercent,
 		"used_tokens":  usedTokens,
 		"limit_tokens": limitTokens,
-		// 上游未提供可靠重置口径（越南时区、无响应字段）：置空不编时间。
-		"reset_at":   "",
+		// 上游无响应字段：由当日窗口语义推导（越南时区每日零点），RFC3339。
+		"reset_at":   tier.ResetAt,
 		"fetched_at": now.Format(time.RFC3339),
+	}
+	// DTO 快照读取输出（§4.3 键名对齐，供前端一次拉取）。
+	result.Snapshot = &CNProviderSnapshotOutput{
+		Window:      tier.Window,
+		UsedPercent: &tier.UsedPercent,
+		UsedTokens:  &usedTokens,
+		LimitTokens: &limitTokens,
+		ResetAt:     tier.ResetAt,
+		FetchedAt:   now.Format(time.RFC3339),
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		kiraUsageSnapshotExtraKey: snapshot,
@@ -299,9 +340,10 @@ func (s *CNProviderQuotaService) queryKiraUsageForAccount(ctx context.Context, a
 	return result, nil
 }
 
-// queryKiraBalance 是 CNProviderBalanceService 的 Kira 分支。复用 usage 端点
-// （summary.vndBalance 即钱包 VND 余额），currency=VND。
-func (s *CNProviderBalanceService) queryKiraBalance(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+// QueryKiraBalance 是 CNProviderBalanceService 的 Kira 分支。复用 usage 端点
+// （summary.vndBalance 即钱包 VND 余额），currency=VND。导出（本单接线点清单）：
+// 供周期检测/状态机侧复用（只导出，不改语义）。
+func (s *CNProviderBalanceService) QueryKiraBalance(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
 	usageURL, loginURL, err := kiraProbeURLs(s.cfg, account)
 	if err != nil {
 		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
@@ -342,14 +384,47 @@ func (s *CNProviderBalanceService) queryKiraBalance(ctx context.Context, account
 		result.Error = "Invalid kira balance response: missing summary"
 		return result, nil
 	}
-	vnd, _ := cnParseF64(summary.Get("vndBalance").Value())
+	// 外审 F3：vndBalance 缺失/null/解析失败或为负数 → 失败关闭：明确错误、
+	// Success=false、不落任何快照、不清 balance_low 标记。
+	vnd, hasVnd := cnParseF64(summary.Get("vndBalance").Value())
+	if !hasVnd || vnd < 0 {
+		result.Error = "Invalid kira balance response: summary.vndBalance missing, invalid or negative"
+		return result, nil
+	}
+	// 同源顺带解析当日用量（usage 端点同一响应），仅供 DTO 快照读取输出；
+	// 解析失败不影响余额主链路（余额快照照常落库）。
+	var snapshotOut *CNProviderSnapshotOutput
+	if tier, usedTokens, limitTokens, ok := parseKiraUsageTier(body); ok {
+		resetAt := kiraNextDailyReset(now)
+		tier.ResetAt = resetAt.UTC().Format(time.RFC3339)
+		snapshotOut = &CNProviderSnapshotOutput{
+			Window:      tier.Window,
+			UsedPercent: &tier.UsedPercent,
+			UsedTokens:  &usedTokens,
+			LimitTokens: &limitTokens,
+			ResetAt:     tier.ResetAt,
+			FetchedAt:   now.Format(time.RFC3339),
+		}
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			kiraUsageSnapshotExtraKey: map[string]any{
+				"window":       tier.Window,
+				"used_percent": tier.UsedPercent,
+				"used_tokens":  usedTokens,
+				"limit_tokens": limitTokens,
+				"reset_at":     tier.ResetAt,
+				"fetched_at":   now.Format(time.RFC3339),
+			},
+		}); err != nil {
+			slog.Warn("kira_usage_persist_failed", "account_id", account.ID, "error", err)
+		}
+	}
 	result.Balance = vnd
 	result.Currency = "VND"
 	result.Balances = []CNProviderBalanceEntry{{Currency: "VND", Balance: vnd}}
 	result.Success = true
+	result.Snapshot = snapshotOut
 	// vndBalance <= 0 是免费/token 包账号的合法稳态（实测账号 vnd=0 仍正常跑免费额度）：
-	// 置 Unlimited 让周期检测跳过 VND 阈值停调，仅保留"VND>0 自动清除停调"的单向语义；
-	// vnd > 0 时正常参与阈值比较（低于阈值照常停调，恢复后照常清除）。
+	// 置 Unlimited 让周期检测跳过 VND 阈值停调；vnd > 0 时正常参与阈值比较。
 	result.Unlimited = vnd <= 0
 
 	updates := map[string]any{
@@ -361,8 +436,13 @@ func (s *CNProviderBalanceService) queryKiraBalance(ctx context.Context, account
 			map[string]any{"currency": "VND", "balance": vnd},
 		},
 		cnExtraKey(account.Platform, cnBalanceExtraSuffixUnlimited): result.Unlimited,
-		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
-		cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): false,
+	}
+	// 外审 F4：低余额标记单向清除——仅在 vnd>0 时写 balance_low=false（探测
+	// 证实钱包有余额，响应式 402/429 写下的 balance_low 标记可以解除）；
+	// vnd=0 时保留既有标记不动（vnd=0 本身就是钱包耗尽信号，写 false 会与
+	// 响应式信号互相打摆）。
+	if vnd > 0 {
+		updates[cnExtraKey(account.Platform, cnBalanceExtraSuffixLow)] = false
 	}
 	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
 		slog.Warn("kira_balance_persist_failed", "account_id", account.ID, "error", err)

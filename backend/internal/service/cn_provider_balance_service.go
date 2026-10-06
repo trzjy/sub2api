@@ -73,10 +73,13 @@ type CNProviderBalanceResult struct {
 	// 余额数字，用量是唯一可展示的数值。非订阅账号为 nil。
 	DailyUsage   *float64 `json:"daily_usage,omitempty"`
 	MonthlyUsage *float64 `json:"monthly_usage,omitempty"`
-	StatusCode   int      `json:"status_code,omitempty"`
-	FetchedAt    int64    `json:"fetched_at"`
-	Persisted    bool     `json:"persisted"`
-	Error        string   `json:"error,omitempty"`
+	// Snapshot 快照读取输出（§4.3 契约键名；Kira/TH 分支填充，供前端一次
+	// 拉取。失败关闭路径不落快照也不产出，保持 nil）。
+	Snapshot   *CNProviderSnapshotOutput `json:"snapshot,omitempty"`
+	StatusCode int                       `json:"status_code,omitempty"`
+	FetchedAt  int64                     `json:"fetched_at"`
+	Persisted  bool                      `json:"persisted"`
+	Error      string                    `json:"error,omitempty"`
 }
 
 // CNProviderBalanceService 探测 Kimi / DeepSeek payg 账号的账户余额。
@@ -86,6 +89,8 @@ type CNProviderBalanceService struct {
 	httpUpstream HTTPUpstream
 	cfg          *config.Config
 	flight       singleflight.Group
+	// thPassService TH（tokenharbor.ai）Pass/用量快照探测链（balance 入口 TH 分支）。
+	thPassService *TokenHarborPassService
 }
 
 // NewCNProviderBalanceService 构造余额探测服务。
@@ -100,31 +105,53 @@ func NewCNProviderBalanceService(
 		proxyRepo:    proxyRepo,
 		httpUpstream: httpUpstream,
 		cfg:          cfg,
+		// F1：TH 探测链与 CN 余额链共用同一套出客户端/代理/凭据仓库。
+		thPassService: NewTokenHarborPassService(accountRepo, proxyRepo, httpUpstream),
+	}
+}
+
+// SetTokenHarborPassService 注入 TH Pass/用量探测服务（测试替换假站点用）。
+func (s *CNProviderBalanceService) SetTokenHarborPassService(th *TokenHarborPassService) {
+	if s != nil {
+		s.thPassService = th
 	}
 }
 
 // QueryBalance 探测指定 payg 账号的余额并落 Extra 快照。
+// TH（tokenharbor.ai）账号在此处先行识别（platform 非 CN 供应商，不适用
+// payg 校验，F1 生产入口）。
 func (s *CNProviderBalanceService) QueryBalance(ctx context.Context, accountID int64) (*CNProviderBalanceResult, error) {
-	account, err := s.loadPayGAccount(ctx, accountID)
+	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
-		return nil, err
+		return nil, infraerrors.Newf(http.StatusNotFound, "CN_BALANCE_ACCOUNT_NOT_FOUND", "account not found: %v", err)
 	}
 	return s.QueryBalanceForAccount(ctx, account)
 }
 
 // QueryBalanceForAccount 探测已加载账号（配额监控 fetcher / 周期余额检测复用，
 // 避免二次 GetByID）。singleflight key 与 QueryBalance 相同，按账号 ID 合并。
+// TH（tokenharbor.ai）账号不适用 payg 校验，先于校验分发进 TH 快照分支
+// （F1：管理端 balance 探测手动查询按钮的 TH 生产入口）。
 func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
 	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "CN_BALANCE_NOT_CONFIGURED", "cn provider balance service is not configured")
 	}
-	if err := validatePayGAccount(account); err != nil {
-		return nil, err
+	thBranch := accountIsTokenHarborBaseURL(account)
+	if thBranch && s.thPassService == nil {
+		return nil, infraerrors.New(http.StatusNotImplemented, "CN_BALANCE_TH_NOT_CONFIGURED", "tokenharbor pass service is not configured")
+	}
+	if !thBranch {
+		if err := validatePayGAccount(account); err != nil {
+			return nil, err
+		}
 	}
 	key := "cn_balance:" + strconv.FormatInt(account.ID, 10)
 	resultCh := s.flight.DoChan(key, func() (any, error) {
-		probeCtx, cancel := context.WithTimeout(context.Background(), cnBalanceUpstreamTimeout+5*time.Second)
+		probeCtx, cancel := context.WithTimeout(context.Background(), cnBalanceUpstreamTimeout*3)
 		defer cancel()
+		if thBranch {
+			return s.queryTokenHarborBalanceForAccount(probeCtx, account)
+		}
 		return s.queryBalanceForAccount(probeCtx, account)
 	})
 	select {
@@ -148,7 +175,7 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	// 探测统一走 kiraai.vn dashboard JWT 链（cn_provider_kira.go），不能按 platform
 	// 错打到 moonshot/deepseek 官方余额端点。
 	if accountIsKiraBaseURL(account) {
-		return s.queryKiraBalance(ctx, account)
+		return s.QueryKiraBalance(ctx, account)
 	}
 
 	provider := account.Platform
@@ -289,6 +316,44 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	} else {
 		result.Persisted = true
 	}
+	return result, nil
+}
+
+// queryTokenHarborBalanceForAccount 是 CNProviderBalanceService 的 TH 分支
+// （F1 生产入口：管理端 balance 探测手动查询按钮链路）。TH 无数字余额概念，
+// 本分支只做 Pass/用量快照刷新并输出 §4.3 快照读取输出；无余额数字，
+// Balance/Currency 保持零值，Available=true（快照健康即可用）。
+func (s *CNProviderBalanceService) queryTokenHarborBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+	now := time.Now().UTC()
+	result := &CNProviderBalanceResult{
+		Provider:  TokenHarborPassProviderName,
+		FetchedAt: now.Unix(),
+		Available: true,
+	}
+	passSnapshot, err := s.thPassService.Probe(ctx, account)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	persisted := true
+	if err := s.thPassService.PersistSnapshot(ctx, account.ID, passSnapshot); err != nil {
+		slog.Warn("th_pass_persist_failed", "account_id", account.ID, "error", err)
+		persisted = false
+	}
+	usageSnapshot, err := s.thPassService.ProbeUsageSnapshot(ctx, account)
+	if err != nil {
+		// usage CSV 传输/解析失败=失败关闭：不落 th_usage_snapshot，明确错误。
+		result.Error = err.Error()
+		result.Persisted = persisted
+		return result, nil
+	}
+	if err := s.thPassService.PersistUsageSnapshot(ctx, account.ID, usageSnapshot); err != nil {
+		slog.Warn("th_usage_persist_failed", "account_id", account.ID, "error", err)
+		persisted = false
+	}
+	result.Success = true
+	result.Persisted = persisted
+	result.Snapshot = cnTokenHarborSnapshotOutput(passSnapshot, usageSnapshot)
 	return result, nil
 }
 
@@ -454,18 +519,6 @@ func cnIsOfficialBalanceHost(platform, baseURL string) bool {
 	}
 }
 
-// loadPayGAccount 加载 payg 模式的国产供应商账号（余额仅对 payg 有意义；coding 走额度）。
-func (s *CNProviderBalanceService) loadPayGAccount(ctx context.Context, accountID int64) (*Account, error) {
-	account, err := s.accountRepo.GetByID(ctx, accountID)
-	if err != nil {
-		return nil, infraerrors.Newf(http.StatusNotFound, "CN_BALANCE_ACCOUNT_NOT_FOUND", "account not found: %v", err)
-	}
-	if err := validatePayGAccount(account); err != nil {
-		return nil, err
-	}
-	return account, nil
-}
-
 // validatePayGAccount 加载后的非 DB 校验（ForAccount 入口同样复用，
 // 保证直传 account 也不绕过平台/模式检查）。
 func validatePayGAccount(account *Account) error {
@@ -475,8 +528,10 @@ func validatePayGAccount(account *Account) error {
 	if !account.IsCNProvider() {
 		return infraerrors.New(http.StatusBadRequest, "CN_BALANCE_INVALID_PLATFORM", "account is not a CN provider account")
 	}
-	// coding 账号走额度探测，余额端点不适用。
-	if account.IsCodingPlan() {
+	// coding 账号走额度探测，余额端点不适用——Kira 例外（外审 F5）：Kira 账号
+	// 无论 coding/payg 都有 dashboard JWT 余额/用量端点（cn_provider_kira.go），
+	// 否则 coding 模式的 Kira 账号会被余额链拒之门外，快照无人刷新。
+	if account.IsCodingPlan() && !accountIsKiraBaseURL(account) {
 		return infraerrors.New(http.StatusBadRequest, "CN_BALANCE_CODING_PLAN", "coding plan account has no balance endpoint; use quota probe")
 	}
 	return nil
