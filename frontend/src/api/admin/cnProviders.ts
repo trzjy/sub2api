@@ -5,13 +5,71 @@
 
 import { apiClient } from '../client'
 
-/** 滚动用量窗口档（5 小时 / 每周 / 每月），对齐后端 service.CNQuotaTier。 */
+/** 滚动用量窗口档（5 小时 / 每周 / 每月 / 每日），对齐后端 service.CNQuotaTier。 */
 export interface CNQuotaTier {
-  window: '5h' | 'weekly' | 'monthly'
+  window: '5h' | 'weekly' | 'monthly' | 'daily'
   // used_percent 为 null 表示上游不可得（如火山周窗口：限流头仅含 5h，周额度无可靠来源），
   // 前端渲染为“—/未知”而非假 0。
   used_percent: number | null
   reset_at?: string
+}
+
+/**
+ * TokenHarbor 订阅快照（账号 extra 键 `th_pass_snapshot`，方案 §4.3 契约，
+ * 字段名与后端 service.TokenHarborPassSnapshot 逐字段对齐，前端按此冻结键名消费）。
+ */
+export interface THPassSnapshot {
+  provider?: string
+  has_pass: boolean
+  /** Pass 档位名（如 “Agent Pass”）；缺失时上游页面未渲染出该字段。 */
+  pass_name?: string
+  /** 订阅周期重置时刻（RFC3339）；Pass 额度即按此周期计。 */
+  renews_at?: string
+  /** 官方账单页 spendAfterAllowance（false = Pass 额度是硬上限）。 */
+  spend_after_allowance?: boolean
+  auto_reload_enabled?: boolean
+  /** 快照抓取时刻（RFC3339）。 */
+  fetched_at?: string
+}
+
+/** TokenHarbor 官方 CSV 聚合的单窗口用量计数（请求数 + 输入/输出 tokens）。 */
+export interface THUsageWindowStats {
+  requests: number
+  tokens_in: number
+  tokens_out: number
+}
+
+/**
+ * TokenHarbor 用量快照（账号 extra 键 `th_usage_snapshot`，方案 §4.3 契约：
+ * 官方 /api/usage/export.csv 按今天 / 7D / 30D 窗口聚合，三键齐全）。
+ * TH 官方无分母字段，只显示已用计数（L6：不做剩余估算）。
+ */
+export interface THUsageSnapshot {
+  windows: {
+    today: THUsageWindowStats
+    '7d': THUsageWindowStats
+    '30d': THUsageWindowStats
+  }
+  /** 快照聚合时刻（RFC3339）。 */
+  fetched_at?: string
+}
+
+/**
+ * Kira（kiraai.vn）用量快照（账号 extra 键 `kira_usage_snapshot`，方案 §4.3 契约，
+ * 字段名与后端 queryKiraUsageForAccount 落库 snapshot 逐字段对齐）。
+ */
+export interface KiraUsageSnapshot {
+  /** 固定 'daily'：Kira 免费池每日重置（站点按越南时区）。 */
+  window: 'daily'
+  used_percent?: number | null
+  /** 当日已用 tokens。 */
+  used_tokens?: number
+  /** 当日免费上限 tokens（官方分母）。 */
+  limit_tokens?: number
+  /** 每日重置时刻（RFC3339）；上游未给出时为空串，前端不伪造倒计时。 */
+  reset_at?: string
+  /** 快照抓取时刻（RFC3339）。 */
+  fetched_at?: string
 }
 
 /** Coding Plan 额度探测结果（kimi / zhipu），对齐后端 CNProviderQuotaProbeResult。 */

@@ -505,45 +505,13 @@
         @updated="handleOllamaCloudUsageUpdated"
       />
       <div v-else class="space-y-1">
-        <!-- TokenHarbor 免费档：后端 7 天滚动限流只写 model_rate_limits
-             （rate_limited_at / rate_limit_reset_at），没有用量百分比。按全站既有
-             用量窗口设计展示——每条未过期限流渲染一行 "7d" 进度条（unknownUsage
-             置灰、百分比显示"—"），resets-at 自带恢复倒计时并带 "限流至" 前缀；
-             悬停 title 显示绝对恢复时刻。不显模型名（用户裁定 2026-10-02）。
-             不另设倒计时，无数字就用 unknownUsage。CN 余额/配额子单元格对其不适用。 -->
-        <template v-if="isTokenHarbor">
-          <div
-            v-for="entry in tokenHarborActiveRateLimits"
-            :key="entry.model"
-            :title="
-              entry.precise_reset !== true
-                ? t('admin.accounts.tokenHarbor.awaitingProbe')
-                : t('admin.accounts.tokenHarbor.rateLimitedUntil', { time: formatDateTime(entry.reset_at) })
-            "
-          >
-            <UsageProgressBar
-              label="7d"
-              :utilization="0"
-              :unknown-usage="true"
-              :resets-at="entry.precise_reset !== true ? null : entry.reset_at"
-              :resets-at-prefix="
-                entry.precise_reset !== true ? '' : t('admin.accounts.tokenHarbor.rateLimitedPrefix')
-              "
-              color="amber"
-            />
-            <!-- 无上游恢复信号（precise_reset === false 或字段缺失，二者 D5 锁定同义）：
-                 reset_at 只是"持续受限"哨兵占位值，恢复时刻未知，只显示"等待主动复探"，
-                 不显示倒计时、不加"限流至"前缀。判别只看该标记，不用 reset_at 距今时长
-                 等启发式（后端把缺失按 false 处理，前端一致）。 -->
-            <div
-              v-if="entry.precise_reset !== true"
-              class="text-[10px] text-gray-400"
-              data-test="tokenharbor-awaiting-probe"
-            >
-              {{ t('admin.accounts.tokenHarbor.awaitingProbe') }}
-            </div>
-          </div>
-          <div v-if="!tokenHarborActiveRateLimits.length" class="text-xs text-gray-400">-</div>
+        <!-- TH / Kira 账号（base_url 是唯一事实源）：用量显示走 L5 互斥组件——
+             TH 有 Pass 快照只渲染订阅用量窗口（Pass 档位/到期倒计时/today·7d·30d
+             切换/状态），TH 无 Pass 只渲染 7 天滚动已用计数，Kira 只渲染当日免费
+             进度条 + reset_at 倒计时 + VND 余额。三条路径在组件内 v-if/v-else
+             互斥，不混算（方案 §4.3 / D-QL-005）。 -->
+        <template v-if="isTokenHarbor || isKiraAccount">
+          <CNQuotaUsageCell :account="account" />
         </template>
         <!-- 子单元格各自按 模式×平台 判定可见；两者都不可见时（智谱 payg 无公开
              余额端点、coding 探测也不适用）才回落到占位符。 -->
@@ -857,7 +825,7 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
-import { formatCompactNumber, formatDateOnly, formatDateTime } from '@/utils/format'
+import { formatCompactNumber, formatDateOnly } from '@/utils/format'
 import { parseCodeBuddyCredit, parseCodeBuddyCreditError, formatCreditValue } from '@/utils/codebuddyCredit'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
@@ -865,6 +833,7 @@ import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
+import CNQuotaUsageCell from './CNQuotaUsageCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
 import {
   cnQuotaCellVisible as cnQuotaCellVisibleFn,
@@ -1043,42 +1012,13 @@ const cnBalanceCellVisible = computed(() =>
   cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
 )
 
-// TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：在 CN 分支内以用量窗口列
-// 展示模型限流恢复，不另设倒计时。
+// TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：用量窗口列走 L5 互斥组件
+// CNQuotaUsageCell（有 Pass→订阅窗口；无 Pass→7 天滚动已用）。
 const isTokenHarbor = computed(() => isTokenHarborAccount(props.account))
 
-// 未过期的 TokenHarbor 模型限流条目（reset_at > now）。后端只写 model_rate_limits，
-// 没有用量百分比，故渲染时统一用 unknownUsage 置灰。
-interface TokenHarborRateLimit {
-  model: string
-  reset_at: string
-  // precise_reset 是后端持久化的"精确恢复信号"标记（唯一判别依据，D5 锁定）：
-  //   true        → reset_at 是上游给出的真实恢复时刻，显示倒计时；
-  //   false / 缺失 → 无上游时间信号（缺失仅存在于 D4c 之前的存量旧行，后端对 tokenharbor
-  //                 免费档 true/false 均显式写该字段），reset_at 只是"持续受限"哨兵占位值，
-  //                 恢复时刻未知，显示"等待主动复探"、不显示倒计时。后端把缺失按 false 处理，
-  //                 前端须与之一致（缺省与 false 同为无信号语义，不得引入 reset_at 时长启发式）。
-  precise_reset?: boolean
-}
-const tokenHarborActiveRateLimits = computed<TokenHarborRateLimit[]>(() => {
-  if (!isTokenHarbor.value) return []
-  const extra = props.account.extra as Record<string, unknown> | undefined
-  const modelLimits = extra?.model_rate_limits as
-    | Record<string, { rate_limited_at: string; rate_limit_reset_at: string; precise_reset?: boolean }>
-    | undefined
-  if (!modelLimits) return []
-  const now = new Date()
-  const items: TokenHarborRateLimit[] = []
-  for (const [model, info] of Object.entries(modelLimits)) {
-    // 该路径整体 isTokenHarbor 门控，条目均为 tokenharbor 免费档。无信号（precise_reset
-    // === false 或字段缺失，二者 D5 锁定同义）→ 不吃到期剔除：reset_at 仅为"持续受限"占位
-    // 值，恢复时刻未知，须经主动复探确认，继续渲染"等待主动复探"。仅 precise_reset ===
-    // true 且到期才剔除（标准行为，与后端 ActiveTokenHarborFreeTierScopes 权威语义逐位对齐）。
-    if (info.precise_reset === true && new Date(info.rate_limit_reset_at) <= now) continue
-    items.push({ model, reset_at: info.rate_limit_reset_at, precise_reset: info.precise_reset })
-  }
-  return items
-})
+// Kira（kiraai.vn）上游账号：platform 常被存为 kimi/deepseek/zhipu，base_url 是
+// 唯一事实源（与后端 isKiraBaseURL 同口径，大小写不敏感包含）。同样走互斥组件。
+const isKiraAccount = computed(() => accountBaseURL.value.toLowerCase().includes('kiraai.vn'))
 
 const isBatchManaged = computed(() => typeof props.requestBatchedUsage === 'function')
 
