@@ -188,7 +188,7 @@ func (s *FreshnessAlertService) GetActiveFreshnessAlert(ctx context.Context, dim
 //
 // 背景（E45，渠道与账号状态新鲜度终审第十一轮 P1 must_fix）：E42 后 precise_reset=true 条目到期
 // 被 ActiveTokenHarborFreeTierScopes 从探测候选剔除；该条目此前可能已因 observed_at 陈旧创建 firing
-// 新鲜度告警，而 runTokenHarborProbePhase 只对仍在候选列表中的 scope 评估、repo 过滤器对 0 active
+// 新鲜度告警，而（已退役的）D2 探测第二相只对仍在候选列表中的 scope 评估、repo 过滤器对 0 active
 // scope 账号直接跳过——过期条目的 (account,scope) 维度再无评估/关闭路径，告警永久 firing。恢复关闭
 // （ResolveFreshnessAlertOnRecovery）只挂探测成功路径，条目过期不探测、不关闭。
 //

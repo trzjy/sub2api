@@ -78,25 +78,14 @@ type AccountHealthRecoveryProbeService struct {
 	// probeOverride, when set, replaces the real upstream probe (used by tests).
 	probeOverride func(ctx context.Context, account *Account) (ok bool, err error)
 
-	// ---- D2：TokenHarbor 免费档探测链 ----
-	// nowFunc 可注入时钟（确定性测试用），默认 time.Now。
-	nowFunc func() time.Time
-	// startTime 是进程启动时刻，用于冷启动 60s 保守门禁（E）。
-	startTime time.Time
-	// budget 进程内 per-account 滚动预算管理器（B）。
-	budget *probeBudgetManager
-	// frozenBounds 保存每个 (account,scope) 进入调度时冻结的候选总数（C，上限公式）。
+	// frozenMu / frozenBounds 保存每个 (account,scope) 进入调度时冻结的候选总数
+	//（C，上限公式）。冻结值经 RateLimitService.freshnessBoundsProvider 供三维新鲜度
+	// 阈值公式消费（account_freshness_threshold.go / account_freshness_alert.go），
+	// 写入语义归 freshness 链所有，不随 D2 探针相位退役（方案 th-kira-quota-lifecycle §7）。
 	frozenMu     sync.Mutex
 	frozenBounds map[string]int
 
-	// obsStatsMu / obsStats 是 R2 触发观测的 per-account 只读计数面（D4 工作项 3）：
-	// 探测发送数、预算拒绝数、结果分类计数（成功/免费档429/其他）。仅埋点计数，不改限流语义。
-	obsStatsMu sync.Mutex
-	obsStats   map[int64]*probeObservationStats
-	// probeTokenHarborOverride 替换真实的 TokenHarbor 模型级探测（测试用）。
-	probeTokenHarborOverride func(ctx context.Context, account *Account, modelKey string) (ProbeOutcome, error)
-	// freshnessAlerts 是 D4 陈旧告警服务（可选注入）。探测链是唯一探测链，账号两维的陈旧
-	// 评估随候选派发一起进行——候选集合即「当前异常候选」，健康账号不在其中（R3）。
+	// freshnessAlerts 是 D4 陈旧告警服务（可选注入）。
 	freshnessAlerts *FreshnessAlertService
 	// channelFreshness 是 E39 渠道维陈旧收敛窄面（可选注入）。账号恢复成功后触发关联
 	// 渠道陈旧收敛；未注入时不收敛。
@@ -126,7 +115,6 @@ func NewAccountHealthRecoveryProbeService(
 	settingService *SettingService,
 	tlsFPProfileService *TLSFingerprintProfileService,
 ) *AccountHealthRecoveryProbeService {
-	now := time.Now
 	return &AccountHealthRecoveryProbeService{
 		accountRepo:         accountRepo,
 		httpUpstream:        httpUpstream,
@@ -134,36 +122,7 @@ func NewAccountHealthRecoveryProbeService(
 		rateLimit:           rateLimit,
 		settingService:      settingService,
 		tlsFPProfileService: tlsFPProfileService,
-		nowFunc:             now,
-		startTime:           now(),
-		budget:             newProbeBudgetManager(now),
-		frozenBounds:       make(map[string]int),
-		obsStats:           make(map[int64]*probeObservationStats),
-	}
-}
-
-// SetProbeClock 注入确定性时钟（测试用），同时更新预算管理器。
-func (p *AccountHealthRecoveryProbeService) SetProbeClock(nowFunc func() time.Time) {
-	if p == nil || nowFunc == nil {
-		return
-	}
-	p.nowFunc = nowFunc
-	if p.budget != nil {
-		p.budget.nowFunc = nowFunc
-	}
-}
-
-// SetProbeStartTime 覆盖进程启动时刻（测试用冷启动门禁）。
-func (p *AccountHealthRecoveryProbeService) SetProbeStartTime(t time.Time) {
-	if p != nil {
-		p.startTime = t
-	}
-}
-
-// SetTokenHarborProbeOverride 安装 TokenHarbor 模型级探测覆盖（测试用）。
-func (p *AccountHealthRecoveryProbeService) SetTokenHarborProbeOverride(fn func(ctx context.Context, account *Account, modelKey string) (ProbeOutcome, error)) {
-	if p != nil {
-		p.probeTokenHarborOverride = fn
+		frozenBounds:        make(map[string]int),
 	}
 }
 
@@ -230,19 +189,19 @@ func (p *AccountHealthRecoveryProbeService) Stop() {
 
 // RunOnce performs a single probe sweep over the currently cooldowned accounts.
 //
-// 按候选类拆分使能门禁（方案工作项 1）：账号级（temp-unschedulable/熔断）相位维持
-// 双开关 ProbeEnabledForCandidate(ProbeCandidateCircuitBreaker)；TokenHarbor 免费档
-// 模型级相位只要求 settings.Probe.Enabled（ProbeEnabledForCandidate(
-// ProbeCandidateTokenHarborModel)，默认 true，管理端可关）——不再被 settings.Enabled
-// 双开关短路，使默认配置下 TokenHarbor 相位仍执行。settings 读取失败维持现状
-// err != nil → return。
+// 旧「按候选类拆分使能门禁」中 TokenHarbor 免费档模型级相位（D2）已随
+// th-kira-quota-lifecycle 方案 §7 旧链退役：该相位以裸模型名 ping 上游烧毁订阅额度，
+// 其语义由 cn_quota_lifecycle_service.go 的额度耗尽状态机确认探针收编（429 分类
+// isTokenHarborFreeTierExhausted 归状态机所有）。剩余唯一相位为账号级
+// （temp-unschedulable/熔断）探测，维持双开关 ProbeEnabledForCandidate(
+// ProbeCandidateCircuitBreaker) 门禁。settings 读取失败维持现状 err != nil → return。
 func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 	// settingService 为 nil 时与 p == nil / accountRepo == nil 同款失败关闭：重构使能门禁时
 	// 移除了旧 probeEnabled 对 nil settingService 的保护，此处必须显式短路，否则下一行
 	// 解引用 nil 会 panic（第三轮终审 #7 回归）。
 	//
 	// 其余依赖字段核查：httpUpstream/cfg/rateLimit/tlsFPProfileService/freshnessAlerts/
-	// accountRepo 均已在各自解引用点做 nil 保护；nowFunc/budget/frozenBounds 由
+	// accountRepo 均已在各自解引用点做 nil 保护；frozenBounds 由
 	// NewAccountHealthRecoveryProbeService 构造时初始化，生产构造点唯一（ProvideAccount...
 	// 经构造器），既有测试引用处亦均显式赋值，故不再重复加守卫。
 	if p == nil || p.accountRepo == nil || p.settingService == nil {
@@ -257,31 +216,24 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 		maxAttempts = 1
 	}
 
-	now := p.nowFunc()
+	now := time.Now()
 
 	// 账号级（temp-unschedulable/熔断）相位：维持双开关门禁。
-	var accountLevelAccountIDs map[int64]struct{}
+	// 方案 §7 旧链退役后相位列表仅此一项；D2 TokenHarbor 模型级相位已删除，
+	// 未来新增相位须在此追加独立分支并保持各自使能门禁（显式空处理：无相位时
+	// 循环体不执行、孤儿告警清扫照常进行，见下方 freshnessAlerts 分支）。
 	if ProbeEnabledForCandidate(settings, ProbeCandidateCircuitBreaker) {
 		candidates, lerr := p.accountRepo.ListTempUnschedulableAccounts(ctx, now, accountHealthProbeCandidateLimit)
 		if lerr != nil {
 			logger.L().Warn("openai.apikey_health_probe_list_failed", zap.Error(lerr))
 			return
 		}
-		accountLevelAccountIDs = make(map[int64]struct{}, len(candidates))
 		for _, acc := range candidates {
 			if !p.isHealthBreakerTrip(acc, now) {
 				continue
 			}
-			accountLevelAccountIDs[acc.ID] = struct{}{}
 			p.probeAccount(ctx, acc, maxAttempts)
 		}
-	}
-
-	// D2 第二相：TokenHarbor 免费档模型级候选，复用同一预算/分发管线（R3）。
-	// 仅要求 settings.Probe.Enabled（默认 true），不被 settings.Enabled 短路；
-	// 账号级候选集合（若双开关启用）一并传入以复用预算/冻结口径。
-	if ProbeEnabledForCandidate(settings, ProbeCandidateTokenHarborModel) {
-		p.runTokenHarborProbePhase(ctx, accountLevelAccountIDs)
 	}
 
 	// E45：孤儿告警清扫（候选过期转非活动的账号+模型维）。以 firing 新鲜度告警为界反向核对
@@ -817,12 +769,14 @@ func (p *AccountHealthRecoveryProbeService) SetProbeOverride(fn func(ctx context
 }
 
 // ===========================================================================
-// D2：TokenHarbor 免费档探测链（唯一探测链，R4 红线——禁止第二链）
+// 探测观测状态面（D2 探针相位已退役，方案 th-kira-quota-lifecycle §7）。
+// 以下符号被禁区文件消费，不随相位退役：
+//   - tokenHarborAccountLevelProbeScope / entryObservedAtKey / entryAttemptedAtKey /
+//     ProbeOutcome：ratelimit_service.go 写入口与 account_freshness_*.go 告警/视图链；
+//   - probeBudgetPerMinute / probeStartupCooldown / probeRoundPeriod /
+//     probeRequestHardTimeout / ComputeProbeUpperBound：三维新鲜度阈值公式；
+//   - 冻结上界族（freezeCandidateBound 等）：freshness 阈值输入，写入语义归 freshness 链。
 // ===========================================================================
-
-// tokenHarborFreeTierProbeMarker 复用权威 reason 前缀，使模型级候选源与业务写入
-// 共享同一前缀（A：「Marker into the authoritative recoverable-marker set」）。
-const tokenHarborFreeTierProbeMarker = tokenHarborFreeTierReasonPrefix
 
 // tokenHarborAccountLevelProbeScope 是账号级（无模型键）维度在 model_rate_limits
 // 桶中的占位 scope，与模型级 scope 互不掩盖（F：两个维度不得互相刷新）。
@@ -834,16 +788,15 @@ const (
 	entryAttemptedAtKey = "attempted_at"
 )
 
-// D2 预算/上限公式常量（C/E，单一事实源）。
+// 上限公式常量（C/E，单一事实源）。probeBudgetWindow / probeBudgetManager 等预算
+// 执行体随 D2 相位退役；probeBudgetPerMinute 仍为上限公式的分母输入。
 const (
-	probeBudgetWindow      = 60 * time.Second
-	probeBudgetPerMinute   = 60
-	probeStartupCooldown   = 60 * time.Second
-	probeRoundPeriod       = 60 * time.Second
+	probeStartupCooldown    = 60 * time.Second
+	probeRoundPeriod        = 60 * time.Second
 	probeRequestHardTimeout = 15 * time.Second
 )
 
-// ProbeOutcome 是探测链对单次上游响应的分类（D）。
+// ProbeOutcome 是探测观测写入口对单次上游响应的分类（D）。
 type ProbeOutcome int
 
 const (
@@ -854,122 +807,6 @@ const (
 	// ProbeOutcomeUnclassified 5xx/超时/传输错误/其他 429/401/403/非免费档 429 → 仅置 attempted_at。
 	ProbeOutcomeUnclassified
 )
-
-// probeBudgetManager 进程内 per-account 滚动 60s 预算管理器（B）：
-//   - 同一账号的所有候选（模型级 + 账号级）共享同一窗口，总出站探测 ≤60/min；
-//   - 在途去重：模型级按 (account,model)，账号级按 (account) 各自独立；
-//   - 无整轮完成门禁：仍占在途位的候选不阻塞其他候选的后续分派。
-type probeBudgetManager struct {
-	mu      sync.Mutex
-	nowFunc func() time.Time
-	window  time.Duration
-	perMin  int
-	accounts map[int64]*accountProbeBudget
-}
-
-type accountProbeBudget struct {
-	sends           []time.Time
-	inflightModel   map[string]bool
-	inflightAccount bool
-	cursor          int
-}
-
-func newProbeBudgetManager(nowFunc func() time.Time) *probeBudgetManager {
-	return &probeBudgetManager{
-		nowFunc:  nowFunc,
-		window:   probeBudgetWindow,
-		perMin:   probeBudgetPerMinute,
-		accounts: make(map[int64]*accountProbeBudget),
-	}
-}
-
-func (m *probeBudgetManager) get(accountID int64) *accountProbeBudget {
-	b, ok := m.accounts[accountID]
-	if !ok {
-		b = &accountProbeBudget{inflightModel: make(map[string]bool)}
-		m.accounts[accountID] = b
-	}
-	return b
-}
-
-func (b *accountProbeBudget) prune(now time.Time, window time.Duration) {
-	cutoff := now.Add(-window)
-	i := 0
-	for ; i < len(b.sends); i++ {
-		if b.sends[i].After(cutoff) {
-			break
-		}
-	}
-	if i > 0 {
-		b.sends = b.sends[i:]
-	}
-}
-
-// TryAcquire 尝试为一次出站探测预留预算。modelKey=="" 表示账号级候选。
-// 返回是否获准（在途去重命中或窗口已满则返回 false）。
-func (m *probeBudgetManager) TryAcquire(accountID int64, modelKey string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.nowFunc()
-	b := m.get(accountID)
-	b.prune(now, m.window)
-	accountLevel := modelKey == ""
-	if accountLevel {
-		if b.inflightAccount {
-			return false
-		}
-	} else {
-		if b.inflightModel[modelKey] {
-			return false
-		}
-	}
-	if len(b.sends) >= m.perMin {
-		return false
-	}
-	b.sends = append(b.sends, now)
-	if accountLevel {
-		b.inflightAccount = true
-	} else {
-		b.inflightModel[modelKey] = true
-	}
-	return true
-}
-
-// Release 释放某候选的在途位（无论成功、失败还是超时），使其不阻塞后续分派。
-func (m *probeBudgetManager) Release(accountID int64, modelKey string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	b := m.get(accountID)
-	if modelKey == "" {
-		b.inflightAccount = false
-	} else {
-		delete(b.inflightModel, modelKey)
-	}
-}
-
-// tokenHarborProbeResult 是单次 TokenHarbor 探测的分类结果。
-type tokenHarborProbeResult struct {
-	Outcome ProbeOutcome
-	ResetAt time.Time
-	Reason  string
-}
-
-type tokenHarborCandidate struct {
-	modelKey    string
-	accountLevel bool
-	// probedThisScan 标记该账号级候选已在本 RunOnce 第一相被 probeAccount 探测过
-	//（#1：避免第二相 dispatchAccountTokenHarbor 重复发上游请求 + 重复写观测）。
-	probedThisScan bool
-}
-
-// coldStartNotComplete 报告是否仍处于冷启动保守门禁内（E）：重启后前 60s 内
-// TokenHarbor 主动探测 failed-closed，不发送任何探测。这是显式可告警状态，非静默分支。
-func (p *AccountHealthRecoveryProbeService) coldStartNotComplete() bool {
-	if p == nil {
-		return false
-	}
-	return p.nowFunc().Before(p.startTime.Add(probeStartupCooldown))
-}
 
 // ComputeProbeUpperBound 是上限公式的单一事实源（C）。两口径统一于此：
 //   - 普通场景（候选总数 ≤60 且窗口无先前占用）：无额外预算等待项（0 分钟），仅
@@ -987,6 +824,8 @@ func ComputeProbeUpperBound(candidateTotal int, roundPeriod, hardTimeout, startu
 	}
 	return time.Duration(budgetMinutes)*time.Minute + roundPeriod + hardTimeout + startupCooldown
 }
+
+const probeBudgetPerMinute = 60
 
 func accountIDKey(accountID int64, modelKey string) string {
 	return strconv.FormatInt(accountID, 10) + ":" + modelKey
@@ -1046,366 +885,6 @@ func (p *AccountHealthRecoveryProbeService) AccountFreshnessUpperBound(accountID
 	return ComputeProbeUpperBound(total, probeRoundPeriod, probeRequestHardTimeout, probeStartupCooldown)
 }
 
-// probeObservationStats 是 R2 触发观测的 per-account 计数（D4 工作项 3，只读面）。
-type probeObservationStats struct {
-	Sends        int64
-	BudgetRejects int64
-	Success      int64
-	FreeTier429  int64
-	Unclassified int64
-}
-
-// ProbeObservationStats 是 GetProbeObservationStats 的对外只读视图。
-type ProbeObservationStats struct {
-	AccountID    int64
-	Sends        int64
-	BudgetRejects int64
-	Success      int64
-	FreeTier429  int64
-	Unclassified int64
-}
-
-// obsStatsForLocked 取（必要时惰性创建）某账号的 R2 计数条目；调用方须持有 obsStatsMu。
-// 惰性建表使以结构体字面量构造的服务（既有测试夹具）也能安全埋点。
-func (p *AccountHealthRecoveryProbeService) obsStatsForLocked(accountID int64) *probeObservationStats {
-	if p.obsStats == nil {
-		p.obsStats = make(map[int64]*probeObservationStats)
-	}
-	s := p.obsStats[accountID]
-	if s == nil {
-		s = &probeObservationStats{}
-		p.obsStats[accountID] = s
-	}
-	return s
-}
-
-// recordProbeSend 累计某账号一次实际发出的探测（TryAcquire 成功后）。
-func (p *AccountHealthRecoveryProbeService) recordProbeSend(accountID int64) {
-	if p == nil {
-		return
-	}
-	p.obsStatsMu.Lock()
-	defer p.obsStatsMu.Unlock()
-	s := p.obsStatsForLocked(accountID)
-	s.Sends++
-}
-
-// recordProbeBudgetReject 累计某账号一次被预算拒绝的探测派发。
-func (p *AccountHealthRecoveryProbeService) recordProbeBudgetReject(accountID int64) {
-	if p == nil {
-		return
-	}
-	p.obsStatsMu.Lock()
-	defer p.obsStatsMu.Unlock()
-	s := p.obsStatsForLocked(accountID)
-	s.BudgetRejects++
-}
-
-// recordProbeOutcome 累计某账号一次探测的结果分类计数。
-func (p *AccountHealthRecoveryProbeService) recordProbeOutcome(accountID int64, outcome ProbeOutcome) {
-	if p == nil {
-		return
-	}
-	p.obsStatsMu.Lock()
-	defer p.obsStatsMu.Unlock()
-	s := p.obsStatsForLocked(accountID)
-	switch outcome {
-	case ProbeOutcomeSuccess:
-		s.Success++
-	case ProbeOutcomeFreeTier429:
-		s.FreeTier429++
-	default:
-		s.Unclassified++
-	}
-}
-
-// GetProbeObservationStats 返回某账号的 R2 触发观测计数（只读查询面，D4 工作项 3）。
-// 未观测过的账号返回 (零值, false)。仅埋点计数，不改限流语义。
-func (p *AccountHealthRecoveryProbeService) GetProbeObservationStats(accountID int64) (ProbeObservationStats, bool) {
-	out := ProbeObservationStats{AccountID: accountID}
-	if p == nil {
-		return out, false
-	}
-	p.obsStatsMu.Lock()
-	defer p.obsStatsMu.Unlock()
-	s, ok := p.obsStats[accountID]
-	if !ok {
-		return out, false
-	}
-	out.Sends = s.Sends
-	out.BudgetRejects = s.BudgetRejects
-	out.Success = s.Success
-	out.FreeTier429 = s.FreeTier429
-	out.Unclassified = s.Unclassified
-	return out, true
-}
-
-// runTokenHarborProbePhase 第二相：列出 TokenHarbor 免费档模型级候选，按账号分组，
-// 与账号级候选共享预算并冻结上限后公平旋转并发分派（A/C）。冷启动门禁内直接返回（E）。
-func (p *AccountHealthRecoveryProbeService) runTokenHarborProbePhase(ctx context.Context, accountLevelAccountIDs map[int64]struct{}) {
-	if p == nil || p.accountRepo == nil {
-		return
-	}
-	if p.coldStartNotComplete() {
-		return
-	}
-	now := p.nowFunc()
-	accounts, err := p.accountRepo.ListTokenHarborModelRateLimitedAccounts(ctx, now, accountHealthProbeCandidateLimit)
-	if err != nil {
-		logger.L().Warn("openai.tokenharbor_probe_list_failed", zap.Error(err))
-		return
-	}
-	type grouped struct {
-		account *Account
-		scopes  []string
-	}
-	byAccount := make(map[int64]*grouped)
-	order := make([]int64, 0, len(accounts))
-	for _, acc := range accounts {
-		scopes := p.activeTokenHarborFreeTierScopes(acc, now)
-		if len(scopes) == 0 {
-			continue
-		}
-		if _, ok := byAccount[acc.ID]; !ok {
-			byAccount[acc.ID] = &grouped{account: acc}
-			order = append(order, acc.ID)
-		}
-		byAccount[acc.ID].scopes = append(byAccount[acc.ID].scopes, scopes...)
-	}
-	for _, accountID := range order {
-		g := byAccount[accountID]
-		_, hasAccountLevel := accountLevelAccountIDs[accountID]
-		p.dispatchAccountTokenHarbor(ctx, g.account, g.scopes, hasAccountLevel)
-	}
-}
-
-// dispatchAccountTokenHarbor 对单个账号的模型级 + 账号级候选做公平旋转分派：
-// 候选总数 = 模型级 scope 数 + (账号级 ? 1 : 0)，冻结每个候选的阈值；
-// 本回合按游标顺序获取预算，命中的候选并发分派（并发数=本回合获预算数），
-// 占用在途位的候选超时/完成即释放，不阻塞其他候选。
-func (p *AccountHealthRecoveryProbeService) dispatchAccountTokenHarbor(ctx context.Context, acc *Account, scopes []string, hasAccountLevel bool) {
-	candidateTotal := len(scopes)
-	if hasAccountLevel {
-		candidateTotal++
-	}
-	if candidateTotal <= 0 {
-		return
-	}
-	b := p.budget.get(acc.ID)
-	start := b.cursor % candidateTotal
-
-	cands := make([]tokenHarborCandidate, 0, candidateTotal)
-	for _, s := range scopes {
-		cands = append(cands, tokenHarborCandidate{modelKey: s})
-	}
-	if hasAccountLevel {
-		// #1：该账号级候选已在本 RunOnce 第一相被 probeAccount 探测过（runProbe +
-		// recordAccountLevelObservation 各一次），此处仅占位复用预算/冻结口径，不再
-		// 发上游请求、不再写观测、不消耗预算。
-		cands = append(cands, tokenHarborCandidate{modelKey: "", accountLevel: true, probedThisScan: true})
-	}
-
-	var wg sync.WaitGroup
-	// E7 #5：候选进入本调度快照即冻结候选总数（TryAcquire 判定之前），预算拒绝/在途
-	// 去重不影响冻结值——否则被拒绝的候选下轮首获准时按更小总数冻结，阈值被错误缩短。
-	// 冻结会随预算滑动窗滑出后对后一轮重新进入的候选按当时候选总数再冻结（不做覆盖）。
-	for i := 0; i < len(cands); i++ {
-		c := cands[(start+i)%len(cands)]
-		p.freezeCandidateBound(acc.ID, c.modelKey, candidateTotal)
-		// #1：本相已探测过的账号级候选跳过预算获取与上游分派（不消耗预算、不再发请求、
-		// 不再写观测），但仍留在 cands 中供下方 evaluateAccountFreshness 对其评估陈旧
-		//（幂等，保持 D4「本轮派发落地后再评估」语义）。冻结上界仍按含账号级的候选总数
-		// 冻结（阈值公平性不变）。
-		if c.probedThisScan {
-			continue
-		}
-		if !p.budget.TryAcquire(acc.ID, c.modelKey) {
-			p.recordProbeBudgetReject(acc.ID) // R2：预算拒绝计数
-			continue
-		}
-		b.cursor = (b.cursor + 1) % (candidateTotal + 1)
-		wg.Add(1)
-		go func(c tokenHarborCandidate) {
-			defer wg.Done()
-			defer p.budget.Release(acc.ID, c.modelKey)
-			p.probeOneTokenHarbor(ctx, acc, c)
-		}(c)
-	}
-	wg.Wait()
-
-	// D4：本轮派发（含写入口状态迁移）全部落地后再评估陈旧——避免「先建告警、同轮恢复又关」
-	// 的抖动。候选集合即当前异常候选；观测已刷新的候选不陈旧，未获权威观测的候选按阈值告警。
-	p.evaluateAccountFreshness(ctx, acc.ID, cands)
-}
-
-// evaluateAccountFreshness 对本账号的当前异常候选逐个评估陈旧状态（账号+模型 / 账号级两维）。
-// 只做评估与告警同步，不影响预算与派发语义；错误只记日志。
-func (p *AccountHealthRecoveryProbeService) evaluateAccountFreshness(ctx context.Context, accountID int64, cands []tokenHarborCandidate) {
-	if p == nil || p.freshnessAlerts == nil {
-		return
-	}
-	for _, c := range cands {
-		var err error
-		if c.accountLevel {
-			err = p.freshnessAlerts.EvaluateAccountLevelFreshness(ctx, accountID)
-		} else {
-			err = p.freshnessAlerts.EvaluateAccountModelFreshness(ctx, accountID, c.modelKey)
-		}
-		if err != nil {
-			logger.L().Warn("freshness_alert_evaluate_failed",
-				zap.Int64("account_id", accountID),
-				zap.String("model", c.modelKey),
-				zap.Bool("account_level", c.accountLevel),
-				zap.Error(err))
-		}
-	}
-}
-
-// probeOneTokenHarbor 执行单个候选的探测并将分类结果写入统一状态入口。
-func (p *AccountHealthRecoveryProbeService) probeOneTokenHarbor(ctx context.Context, acc *Account, c tokenHarborCandidate) {
-	res, probeErr := p.runTokenHarborProbe(ctx, acc, c.modelKey)
-	// E7 #1：探测错误不得默认成功。runTokenHarborProbe 返回错误时其零值结果
-	// （ProbeOutcomeSuccess=iota=0）会被误判成功，触发 clearCandidateBound 与写入口
-	// 清除真实限流——一切非明确成功（含错误路径）统一回退 ProbeOutcomeUnclassified
-	// （仅置 attempted_at），失败关闭。
-	if probeErr != nil {
-		logger.L().Warn("openai.tokenharbor_probe_degraded",
-			zap.Int64("account_id", acc.ID),
-			zap.String("model", c.modelKey),
-			zap.Error(probeErr),
-		)
-		res = tokenHarborProbeResult{Outcome: ProbeOutcomeUnclassified}
-	}
-	p.recordProbeSend(acc.ID) // R2：实际发出计数
-	// E19：先写权威观测（唯一状态入口），提交成功（返回 nil）才清除冻结上界。提交失败
-	// 沿既有探测错误路径处理（E7 同口径）：按失败尝试计（不计成功）、不清状态与冻结上界
-	// ——否则限流条目仍受限而冻结上界被错误清除（阈值被错误缩短）。
-	if p.rateLimit != nil {
-		scope := c.modelKey
-		if c.accountLevel {
-			scope = tokenHarborAccountLevelProbeScope
-		}
-		if err := p.rateLimit.ApplyModelRateLimitObservation(ctx, acc.ID, scope, ModelRateLimitObservation{
-			EventTime:    p.nowFunc(),
-			Outcome:      res.Outcome,
-			ResetAt:      res.ResetAt,
-			Reason:       res.Reason,
-			AccountLevel: c.accountLevel,
-		}); err != nil {
-			logger.L().Warn("openai.tokenharbor_probe_commit_failed",
-				zap.Int64("account_id", acc.ID),
-				zap.String("model", c.modelKey),
-				zap.Error(err))
-			res.Outcome = ProbeOutcomeUnclassified
-		}
-	}
-	p.recordProbeOutcome(acc.ID, res.Outcome) // R2：结果分类计数（提交失败按失败尝试计）
-	// 恢复成功：清除该候选的冻结上界，使冻结值生命周期绑定当前异常候选周期——下一次
-	// 进入调度时按当时候选总数重新冻结，不复用上一轮（可能已过期）的候选总数。
-	// E7 #1：只有确认 2xx（ProbeOutcomeSuccess）且提交成功才允许清状态与冻结上界。
-	if res.Outcome == ProbeOutcomeSuccess {
-		p.clearCandidateBound(acc.ID, c.modelKey)
-	}
-}
-
-// runTokenHarborProbe 派发单次探测：优先用注入覆盖（测试），否则走真实上游分类。
-func (p *AccountHealthRecoveryProbeService) runTokenHarborProbe(ctx context.Context, acc *Account, modelKey string) (tokenHarborProbeResult, error) {
-	if p.probeTokenHarborOverride != nil {
-		outcome, err := p.probeTokenHarborOverride(ctx, acc, modelKey)
-		return tokenHarborProbeResult{Outcome: outcome}, err
-	}
-	if modelKey == "" {
-		// 账号级：用既有 /models 等价探测判断账号健康。
-		ok, err := p.probeUpstream(ctx, acc)
-		if err != nil {
-			return tokenHarborProbeResult{Outcome: ProbeOutcomeUnclassified}, err
-		}
-		if ok {
-			return tokenHarborProbeResult{Outcome: ProbeOutcomeSuccess}, nil
-		}
-		return tokenHarborProbeResult{Outcome: ProbeOutcomeUnclassified}, nil
-	}
-	return p.probeTokenHarborModelUpstream(ctx, acc, modelKey)
-}
-
-// probeTokenHarborModelUpstream 向目标模型发最小 chat 完成请求并分类响应。
-// 传输错误/5xx/超时/非免费档 429/401/403 → Unclassified（仅 attempted_at）；
-// 2xx → Success（幂等清除）；免费档 429 → FreeTier429（确认仍受限）。
-func (p *AccountHealthRecoveryProbeService) probeTokenHarborModelUpstream(ctx context.Context, acc *Account, modelKey string) (tokenHarborProbeResult, error) {
-	if p.httpUpstream == nil || p.cfg == nil {
-		return tokenHarborProbeResult{}, errors.New("probe transport not configured")
-	}
-	apiKey := strings.TrimSpace(acc.GetOpenAIProtocolAPIKey())
-	if apiKey == "" {
-		return tokenHarborProbeResult{}, errors.New("no api key for model probe")
-	}
-	baseURL := acc.GetOpenAIFormatBaseURL()
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = "https://api.openai.com"
-	}
-	normalized, err := cnValidateProbeURL(p.cfg, baseURL)
-	if err != nil {
-		return tokenHarborProbeResult{}, fmt.Errorf("validate base url: %w", err)
-	}
-	body, err := json.Marshal(map[string]any{
-		"model":    modelKey,
-		"messages": []map[string]string{{"role": "user", "content": "ping"}},
-		"max_tokens": 1,
-		"stream":  false,
-	})
-	if err != nil {
-		return tokenHarborProbeResult{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(normalized, "/")+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return tokenHarborProbeResult{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	acc.ApplyHeaderOverrides(req.Header)
-
-	proxyURL := ""
-	if acc.ProxyID != nil && acc.Proxy != nil {
-		proxyURL = acc.Proxy.URL()
-	}
-	var tlsProfile *tlsfingerprint.Profile
-	if p.tlsFPProfileService != nil {
-		tlsProfile = p.tlsFPProfileService.ResolveTLSProfile(acc)
-	}
-	callCtx, cancel := context.WithTimeout(ctx, probeRequestHardTimeout)
-	defer cancel()
-	resp, err := p.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, acc.ID, acc.Concurrency, tlsProfile)
-	if err != nil {
-		// 传输错误：unclassified（保守保留限流）。
-		return tokenHarborProbeResult{Outcome: ProbeOutcomeUnclassified}, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return tokenHarborProbeResult{Outcome: ProbeOutcomeSuccess}, nil
-	}
-	if resp.StatusCode == http.StatusTooManyRequests && isTokenHarborFreeTierExhausted(raw) {
-		return tokenHarborProbeResult{Outcome: ProbeOutcomeFreeTier429}, nil
-	}
-	return tokenHarborProbeResult{Outcome: ProbeOutcomeUnclassified}, nil
-}
-
-// activeTokenHarborFreeTierScopes 扫描账号 extra 返回当前 active 的免费档模型级限流
-// scope 列表（reason 前缀 tokenharbor_free_tier_exhausted）。
-//
-// 薄委托 ActiveTokenHarborFreeTierScopes（E12 边界收敛）：判定语义全部收敛到
-// model_rate_limit.go 的权威导出入口，本方法保留调用点签名，语义零变化。等价性由
-// TestE12ActiveTokenHarborFreeTierScopes_MatchesProbePredicate 锁定防回归。
-//
-// E7 #6 到期语义分叉（precise_reset 标记为唯一判别依据）见委托实现注释，不再在
-// 本文件复制/维护第二份正文。
-func (p *AccountHealthRecoveryProbeService) activeTokenHarborFreeTierScopes(acc *Account, now time.Time) []string {
-	if acc == nil {
-		return nil
-	}
-	return ActiveTokenHarborFreeTierScopes(acc.Extra, now)
-}
-
 // recordAccountLevelObservation 记录账号级候选的观察/尝试时间（F，两维度共用入口）。
 // 成功→observed_at；失败/降级/传输错误→attempted_at；绝不清除任何模型级状态。
 // 返回 ApplyModelRateLimitObservation 的提交错误（#2：透传以便调用点按提交失败做失败关闭）；
@@ -1420,7 +899,7 @@ func (p *AccountHealthRecoveryProbeService) recordAccountLevelObservation(ctx co
 		outcome = ProbeOutcomeSuccess
 	}
 	err := p.rateLimit.ApplyModelRateLimitObservation(ctx, accountID, tokenHarborAccountLevelProbeScope, ModelRateLimitObservation{
-		EventTime:    p.nowFunc(),
+		EventTime:    time.Now(),
 		Outcome:      outcome,
 		AccountLevel: true,
 	})
