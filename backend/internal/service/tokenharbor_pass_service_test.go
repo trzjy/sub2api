@@ -195,7 +195,13 @@ func (r *tokenHarborRepoStub) UpdateExtra(_ context.Context, id int64, updates m
 	if r.updates == nil {
 		r.updates = map[int64]map[string]any{}
 	}
-	r.updates[id] = updates
+	// 与生产 UpdateExtra 的 JSONB 合并语义对齐：按账号合并键，不整替。
+	if r.updates[id] == nil {
+		r.updates[id] = map[string]any{}
+	}
+	for k, v := range updates {
+		r.updates[id][k] = v
+	}
 	r.allWrites = append(r.allWrites, updates)
 	return nil
 }
@@ -212,6 +218,8 @@ func tokenHarborTestAccount(id int64) *Account {
 	proxyID := int64(7)
 	return &Account{
 		ID:      id,
+		Type:    AccountTypeAPIKey,
+		Status:  StatusActive,
 		ProxyID: &proxyID,
 		Proxy:   &Proxy{ID: proxyID, Protocol: "socks5", Host: "127.0.0.1", Port: 7890},
 		Credentials: map[string]any{
