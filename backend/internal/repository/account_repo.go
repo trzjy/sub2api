@@ -30,6 +30,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/lib/pq"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -3157,6 +3158,79 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	return nil
 }
 
+// TokenHarbor 会话持久化 extra 键名（字面值契约，与 internal/service 侧定义逐字一致）。
+const (
+	tokenHarborSessionCookieExtraKey  = "th_session_cookie"
+	tokenHarborSessionLoginAtExtraKey = "th_session_login_at"
+)
+
+// StoreTokenHarborSession 持久化 TH dashboard 会话（enc:v1 加密落 extra，
+// 原子合并——UpdateExtra 本身是 COALESCE||$1 jsonb 合并，无读改写竞争）。
+func (r *accountRepository) StoreTokenHarborSession(ctx context.Context, id int64, cookie string, loginAt time.Time) error {
+	encrypted, err := encryptCredentialsValue(cookie)
+	if err != nil {
+		return fmt.Errorf("encrypt tokenharbor session cookie: %w", err)
+	}
+	return r.UpdateExtra(ctx, id, map[string]any{
+		tokenHarborSessionCookieExtraKey:  encrypted,
+		tokenHarborSessionLoginAtExtraKey: loginAt.Unix(),
+	})
+}
+
+// LoadTokenHarborSession 读取持久化会话；无会话（账号不存在/键缺失/JSON null）
+// 返回 ("", zero, nil)。密文解密失败按错误上抛（fail loud），不把密文当明文放行。
+func (r *accountRepository) LoadTokenHarborSession(ctx context.Context, id int64) (cookie string, loginAt time.Time, err error) {
+	if r.sql == nil {
+		return "", time.Time{}, errors.New("account repository SQL executor not configured")
+	}
+	rows, err := r.sql.QueryContext(ctx,
+		"SELECT extra->>'"+tokenHarborSessionCookieExtraKey+"', extra->>'"+tokenHarborSessionLoginAtExtraKey+
+			"' FROM accounts WHERE id = $1 AND deleted_at IS NULL", id)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if scanErr := rows.Err(); scanErr != nil {
+			return "", time.Time{}, scanErr
+		}
+		return "", time.Time{}, nil
+	}
+	var rawCookie, rawLoginAt sql.NullString
+	if err := rows.Scan(&rawCookie, &rawLoginAt); err != nil {
+		return "", time.Time{}, err
+	}
+	if !rawCookie.Valid || rawCookie.String == "" {
+		return "", time.Time{}, nil
+	}
+	cookie = rawCookie.String
+	if credcrypt.IsEncrypted(cookie) {
+		plain, decErr := credcrypt.Decrypt(cookie)
+		if decErr != nil {
+			return "", time.Time{}, fmt.Errorf("decrypt tokenharbor session cookie: %w", decErr)
+		}
+		cookie = plain
+	}
+	if rawLoginAt.Valid && rawLoginAt.String != "" {
+		unix, parseErr := strconv.ParseInt(rawLoginAt.String, 10, 64)
+		if parseErr != nil {
+			return "", time.Time{}, fmt.Errorf("parse tokenharbor session login_at %q: %w", rawLoginAt.String, parseErr)
+		}
+		loginAt = time.Unix(unix, 0)
+	}
+	return cookie, loginAt, nil
+}
+
+// ClearTokenHarborSession 置 null 两键（th_session_cookie/th_session_login_at）。
+// UpdateExtra 的 updates map 值为 nil 时 JSONB 合并后是 JSON null——读取方把
+// null/缺失/过期统一视为无会话。
+func (r *accountRepository) ClearTokenHarborSession(ctx context.Context, id int64) error {
+	return r.UpdateExtra(ctx, id, map[string]any{
+		tokenHarborSessionCookieExtraKey:  nil,
+		tokenHarborSessionLoginAtExtraKey: nil,
+	})
+}
+
 // ListDueBalanceProbeAccounts returns enabled, active API-key accounts whose
 // persisted probe snapshot is stale or absent. SQL filtering avoids hydrating
 // the full account pool each runner tick; stale accounts progress in bounded
@@ -3660,11 +3734,11 @@ type accountGroupQueryOptions struct {
 // 分组 platform 属于该族时，候选池额外纳入 platform=codebuddy 的可调度账号。
 // 不在此集合内的平台（openai/anthropic/gemini/grok 等）行为逐位不变。
 var aggregatePlatformFamily = map[string]struct{}{
-	service.PlatformDeepseek: {},
-	service.PlatformZhipu:    {},
-	service.PlatformKimi:     {},
-	service.PlatformMiniMax:  {},
-	service.PlatformOther:    {},
+	service.PlatformDeepseek:  {},
+	service.PlatformZhipu:     {},
+	service.PlatformKimi:      {},
+	service.PlatformMiniMax:   {},
+	service.PlatformOther:     {},
 	service.PlatformCodeBuddy: {},
 }
 

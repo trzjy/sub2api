@@ -96,7 +96,12 @@ type OpenAIAccountScheduleRequest struct {
 	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
 	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
 	VisionRoutingTargets []int64
-	ExcludedIDs          map[int64]struct{}
+	// KimiTierPool 是 kimi 分层路由（派发单 B2，docs-local/model-source-tier-routing-plan.md
+	// §2）的分档候选约束："masked" 仅 qwen 伪装线池（extra.mask_upstream_identity=true），
+	// "upstream" 仅非伪装池（星思）。空值不约束——非 kimi 平台请求零行为变化。
+	// 由 selectAccountWithSchedulerOnce 按请求 ctx 中的分档状态装门。
+	KimiTierPool string
+	ExcludedIDs  map[int64]struct{}
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -2170,6 +2175,23 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 		}
 		// unknown：放行（保守），等待管理端检测收敛为 known。
 	}
+	// B2 kimi 分层路由候选约束：小档仅 qwen 伪装线池（extra.mask_upstream_identity=true），
+	// 大档仅非伪装池（星思）；空值不约束（非 kimi 请求零行为变化）。换号不出档——
+	// 同档内换号走既有熔断/重试，跨档只发生在 selectAccountWithScheduler 的
+	// qwen 整池无可用重试（仅小档、告警）。
+	if req.KimiTierPool != "" {
+		masked := IsIdentityMaskedAccount(account)
+		switch req.KimiTierPool {
+		case kimiTierPoolMasked:
+			if !masked {
+				return false, "kimi_tier_pool_excluded"
+			}
+		case kimiTierPoolUpstream:
+			if masked {
+				return false, "kimi_tier_pool_excluded"
+			}
+		}
+	}
 	// 分组利润控制：不合格账号在候选过滤与抢槽后终检阶段即被排除，
 	// 排序/评分/粘性/熔断只在合格账号之间工作；named reason 进入 filter stats。
 	if vetoed, reason := openAIProfitControlVetoReason(ctx, account); vetoed {
@@ -2443,6 +2465,74 @@ func resetOpenAIAdvancedSchedulerSettingCacheForTest() {
 	openAIAdvancedSchedulerSettingSF = singleflight.Group{}
 }
 
+// KimiTierClass 是 kimi 分层路由（派发单 B2）的分档结果：估算 input ≤ 阈值判小
+// （small → qwen 伪装线池），> 阈值判大（big → 星思池）。
+type KimiTierClass string
+
+const (
+	KimiTierSmall KimiTierClass = "small"
+	KimiTierBig   KimiTierClass = "big"
+)
+
+// KimiTierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
+// 恰好等于阈值判小）。input-only 口径与阈值均为 2026-10-07 用户裁定
+// （docs-local/model-source-tier-routing-plan.md §2）。
+const KimiTierRoutingInputThreshold = 1000
+
+// KimiTierClassForEstimate 按估算 input 值分档；=阈值判小。
+func KimiTierClassForEstimate(estimatedInputTokens int) KimiTierClass {
+	if estimatedInputTokens <= KimiTierRoutingInputThreshold {
+		return KimiTierSmall
+	}
+	return KimiTierBig
+}
+
+// kimi 分档候选池取值（OpenAIAccountScheduleRequest.KimiTierPool）。
+const (
+	kimiTierPoolMasked   = "masked"   // qwen 伪装线池（extra.mask_upstream_identity=true）
+	kimiTierPoolUpstream = "upstream" // 非伪装池（星思）
+)
+
+type kimiTierRoutingContextKey struct{}
+
+// kimiTierRoutingState 是请求级分档状态。crossPool 仅在 qwen 伪装线整池无可用后
+// 由跨档重试置位（仅 small 允许跨档；big 永不进伪装线）。
+type kimiTierRoutingState struct {
+	class     KimiTierClass
+	crossPool bool
+}
+
+// WithKimiTierRouting 把 kimi 分层路由的分档结果装入请求 ctx；handler 在选号前、
+// 估算判定后调用。空 class 不装门。
+func WithKimiTierRouting(ctx context.Context, class KimiTierClass) context.Context {
+	if ctx == nil || class == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, kimiTierRoutingContextKey{}, kimiTierRoutingState{class: class})
+}
+
+// kimiTierPoolFromContext 解析请求 ctx 中的分档状态为候选池约束；未装门返回 ""。
+func kimiTierPoolFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	st, ok := ctx.Value(kimiTierRoutingContextKey{}).(kimiTierRoutingState)
+	if !ok {
+		return ""
+	}
+	switch st.class {
+	case KimiTierSmall:
+		if st.crossPool {
+			return kimiTierPoolUpstream
+		}
+		return kimiTierPoolMasked
+	case KimiTierBig:
+		return kimiTierPoolUpstream
+	default:
+		return ""
+	}
+}
+
 func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 	ctx context.Context,
 	groupID *int64,
@@ -2526,6 +2616,24 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	requireVision bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
 	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
+	// B2 kimi 分层路由跨档：小档请求在 qwen 伪装线整池无可用时，按既有熔断语义跨档
+	// 走星思池一次并告警；反向（大档落伪装线）不允许。双侧均无可用时 err 原样返回，
+	// 沿 noAvailableOpenAISelectionError 路径 fail-closed——不隐式转 infer-kimi，
+	// 无第三回退源。跨档故障态优先于 session 粘性（方案 §2 职责隔离）。
+	if err != nil && NormalizeOpenAICompatiblePlatform(platform) == PlatformKimi &&
+		(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) {
+		if st, ok := ctx.Value(kimiTierRoutingContextKey{}).(kimiTierRoutingState); ok && st.class == KimiTierSmall && !st.crossPool {
+			slog.Warn("kimi_tier_cross_pool_failover",
+				"model", requestedModel,
+				"from_pool", kimiTierPoolMasked,
+				"to_pool", kimiTierPoolUpstream,
+				"reason", "qwen_pool_exhausted",
+			)
+			st.crossPool = true
+			ctx = context.WithValue(ctx, kimiTierRoutingContextKey{}, st)
+			selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
+		}
+	}
 	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
 		return selection, decision, err
 	}
@@ -2604,6 +2712,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	// B2 kimi 分层路由：仅 kimi 平台请求消费请求 ctx 中的分档状态（其他平台零读取、
+	// 零行为变化）；装门后的候选池约束透传进本请求全部选号路径（粘性/负载均衡/failover
+	// 重入共用同一 req）。
+	kimiTierPool := ""
+	if platform == PlatformKimi {
+		kimiTierPool = kimiTierPoolFromContext(ctx)
+	}
 	// §3.8 全局视觉路由 kill-switch（vision_routing_enabled，默认开启）：关闭后
 	// RequireVision 恒为 false，行为回到 v1 现状（普通路由）。单点收口于此，
 	// 同时覆盖 §3.4 能力过滤与 §3.7 候选池收窄：置 false 后
@@ -2652,6 +2767,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				RequireCompact:          requireCompact,
 				RequireVision:           requireVision,
 				VisionRoutingTargets:    visionRoutingTargets,
+				KimiTierPool:            kimiTierPool,
 				ExcludedIDs:             excludedIDs,
 				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 			})
@@ -2763,6 +2879,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequireCompact:          requireCompact,
 		RequireVision:           requireVision,
 		VisionRoutingTargets:    visionRoutingTargets,
+		KimiTierPool:            kimiTierPool,
 		ExcludedIDs:             excludedIDs,
 	})
 }

@@ -244,6 +244,11 @@ func (r *freshNilObsRepo) WithModelRateLimitAccountLock(ctx context.Context, _ i
 	return fn(ctx)
 }
 
+// DeleteModelRateLimitsMetaKeys 为 dth-04 接口扩展的 no-op 桩（机械跟改，主会话补）。
+func (r *freshNilObsRepo) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
+	return 0, nil
+}
+
 // TestAccountHandler_GetAccountFreshness_InvalidObservedAtFailsClosed 定向测试（E16 验收）：
 // observed_at 存在但格式非法（权威数据损坏）时，管理端必须失败关闭返回 500，
 // **不得**降级序列化为 waiting_probe/observed 正常态——损坏不得显示为健康。

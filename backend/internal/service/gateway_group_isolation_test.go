@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
@@ -154,6 +155,16 @@ func (m *groupAwareMockAccountRepo) ListSchedulableByGroupIDAndPlatforms(ctx con
 		}
 	}
 	return result, nil
+}
+
+func (m *groupAwareMockAccountRepo) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (m *groupAwareMockAccountRepo) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (m *groupAwareMockAccountRepo) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
 }
 
 // accountBelongsToGroup 检查账号是否属于指定分组

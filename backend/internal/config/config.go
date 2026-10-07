@@ -1203,10 +1203,19 @@ type GatewayGrokConfig struct {
 //   - balance_check_enabled: 是否启用周期余额检测（默认 true）
 //   - balance_threshold: 余额低于此值（账户货币单位，默认 0.5）触发临时停调
 //   - balance_check_interval_minutes: 余额检测周期（分钟，默认 10）
+//   - th_probe_interval_minutes: TH（tokenharbor.ai）快照刷新探测间隔（分钟，默认 60）
+//   - kira_probe_interval_minutes: Kira（kiraai.vn）快照刷新探测间隔（分钟，默认 60）
 type GatewayCNProvidersConfig struct {
-	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
+	BalanceCheckEnabled         bool `mapstructure:"balance_check_enabled"`
 	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
-	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
+	BalanceCheckIntervalMinutes int `mapstructure:"balance_check_interval_minutes"`
+	// ThProbeIntervalMinutes TH 收集期年龄门间隔：th_usage_snapshot.fetched_at
+	// 距今小于该值则跳过本轮 TH 快照刷新（与 A 卡 th_probe_backoff_until 退避门
+	// 共控，默认 60 分钟）。
+	ThProbeIntervalMinutes int `mapstructure:"th_probe_interval_minutes"`
+	// KiraProbeIntervalMinutes Kira 收集期年龄门间隔：kira_usage_snapshot.fetched_at
+	// 距今小于该值则跳过本轮 Kira 快照刷新（Kira 无退避门，方案锁定项 4，默认 60 分钟）。
+	KiraProbeIntervalMinutes int `mapstructure:"kira_probe_interval_minutes"`
 }
 
 // PromoIntelConfig 优惠情报（厂商优惠/公告每日轮询 + LLM 结构化整理）。
@@ -2690,6 +2699,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.cn_providers.balance_check_enabled", true)
 	viper.SetDefault("gateway.cn_providers.balance_threshold", 0.5)
 	viper.SetDefault("gateway.cn_providers.balance_check_interval_minutes", 10)
+	viper.SetDefault("gateway.cn_providers.th_probe_interval_minutes", 60)
+	viper.SetDefault("gateway.cn_providers.kira_probe_interval_minutes", 60)
 	// CodeBuddy（腾讯）原生接入：UA 指纹默认对齐官方 CLI；system 指纹脱敏默认开启。
 	viper.SetDefault("gateway.codebuddy.chat_user_agent", "CLI/2.63.2 CodeBuddy/2.63.2")
 	viper.SetDefault("gateway.codebuddy.sanitize_enabled", true)

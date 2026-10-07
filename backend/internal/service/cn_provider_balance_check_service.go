@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,7 @@ func (s *CNProviderBalanceCheckService) Stop() {
 }
 
 func (s *CNProviderBalanceCheckService) runOnce() {
+	now := time.Now()
 	// 收集 coding 探测目标（kimi/deepseek + 智谱）与 payg 检查队列。
 	// coding 探测统一在收集完成后按 4 并发执行：单账号探测 15-20s，串行 ×
 	// 多账号会耗尽整体预算（120s 上限），排在后面的账号快照会饥饿，
@@ -211,7 +213,11 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			// 请求探测（白耗上游 token）。快照刷新不要求 Schedulable——已被状态机
 			// 停调的账号也需要新鲜快照决定恢复。
 			if accountIsKiraBaseURL(account) {
-				kiraTargets = append(kiraTargets, account)
+				// 收集期年龄门（Kira 单门）：kira_usage_snapshot 够新鲜则跳过本轮
+				// 快照刷新；缺失/解析失败 = 不过新，收集。
+				if !s.shouldSkipKiraCollect(now, account) {
+					kiraTargets = append(kiraTargets, account)
+				}
 				continue
 			}
 			// coding 账号：探测滚动窗口并落快照（不要求 Schedulable——已被
@@ -272,7 +278,7 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
 					continue
 				}
-				if accountIsKiraBaseURL(account) {
+				if accountIsKiraBaseURL(account) && !s.shouldSkipKiraCollect(now, account) {
 					kiraTargets = append(kiraTargets, account)
 				}
 			}
@@ -292,7 +298,7 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
 					continue
 				}
-				if accountIsTokenHarborBaseURL(account) {
+				if accountIsTokenHarborBaseURL(account) && !s.shouldSkipTokenHarborCollect(now, account) {
 					thTargets = append(thTargets, account)
 				}
 			}
@@ -363,6 +369,116 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	if paused > 0 || cleared > 0 {
 		log.Printf("[CNBalance] paused=%d cleared=%d (threshold=%.2f)", paused, cleared, threshold)
 	}
+}
+
+// thProbeBackoffUntilExtraKey A 卡契约键名：TH 探测退避截止（unix 秒，存于账号
+// Extra）。与 tokenharbor_pass_service.go / 额度耗尽状态机 A 卡字面值严格一致
+//（B 卡与 A 卡经此 extra 键名对接）。null/缺失/过期 = 未退避。
+const thProbeBackoffUntilExtraKey = "th_probe_backoff_until"
+
+// shouldSkipTokenHarborCollect 判定 TH 账号是否跳过本轮收集（周期链收集期门控，
+// 仅作用于 append 进 thTargets 之前）：
+//   - 年龄门：th_usage_snapshot.fetched_at 距今 < th_probe_interval_minutes → 跳过
+//     （快照缺失/解析失败 = 不过新，收集；pass/usage 同轮成对刷新，一门控两）；
+//   - 退避门：extra th_probe_backoff_until 存在且 > now → 跳过（null/缺失/过期 = 收集）。
+//
+// 两门任一命中即跳过。配置间隔为 0（未配置）时年龄门不生效（向后兼容全收集，
+// 既有 test 用零值 config）。
+func (s *CNProviderBalanceCheckService) shouldSkipTokenHarborCollect(now time.Time, account *Account) bool {
+	interval := time.Duration(s.cfg.Gateway.CNProviders.ThProbeIntervalMinutes) * time.Minute
+	if interval > 0 {
+		if snap, ok := TokenHarborUsageSnapshotFromExtra(account); ok && !snap.FetchedAt.IsZero() {
+			if now.Sub(snap.FetchedAt) < interval {
+				return true
+			}
+		}
+	}
+	if until, ok := thProbeBackoffUntilFromExtra(account); ok && until.After(now) {
+		return true
+	}
+	return false
+}
+
+// thProbeBackoffUntilFromExtra 从账号 Extra 读 TH 探测退避截止（unix 秒）。
+// 返回 (零值, false) 的情形：键缺失、nil、非数值、<=0（视为过期/未退避）。
+func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool) {
+	if account == nil || account.Extra == nil {
+		return time.Time{}, false
+	}
+	raw, ok := account.Extra[thProbeBackoffUntilExtraKey]
+	if !ok || raw == nil {
+		return time.Time{}, false
+	}
+	var sec int64
+	switch v := raw.(type) {
+	case int64:
+		sec = v
+	case float64:
+		sec = int64(v)
+	case json.Number:
+		sec, _ = v.Int64()
+	case string:
+		sec, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	default:
+		return time.Time{}, false
+	}
+	if sec <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
+}
+
+// shouldSkipKiraCollect 判定 Kira 账号是否跳过本轮收集（周期链收集期门控，仅作用
+// 于 append 进 kiraTargets 之前）。Kira 仅年龄门（方案锁定项 4：Kira 不加退避）：
+// kira_usage_snapshot.fetched_at 距今 < kira_probe_interval_minutes → 跳过；
+// 快照缺失/解析失败 = 不过新，收集。配置间隔为 0（未配置）时门不生效（向后兼容）。
+func (s *CNProviderBalanceCheckService) shouldSkipKiraCollect(now time.Time, account *Account) bool {
+	interval := time.Duration(s.cfg.Gateway.CNProviders.KiraProbeIntervalMinutes) * time.Minute
+	if interval <= 0 {
+		return false
+	}
+	fetchedAt := kiraUsageSnapshotFetchedAt(account)
+	if fetchedAt.IsZero() {
+		return false
+	}
+	return now.Sub(fetchedAt) < interval
+}
+
+// kiraUsageSnapshotFetchedAt 从账号 Extra 读 kira_usage_snapshot.fetched_at
+//（RFC3339 字符串）。缺失/类型不符/解析失败返回零值（调用方据此视为"不过新"）。
+func kiraUsageSnapshotFetchedAt(account *Account) time.Time {
+	if account == nil || account.Extra == nil {
+		return time.Time{}
+	}
+	raw, ok := account.Extra[kiraUsageSnapshotExtraKey]
+	if !ok || raw == nil {
+		return time.Time{}
+	}
+	var fetchedStr string
+	switch v := raw.(type) {
+	case map[string]any:
+		if s, ok := v["fetched_at"].(string); ok {
+			fetchedStr = s
+		}
+	case string:
+		// 整段 JSON 字符串形态（极少见）：解析结构取 fetched_at。
+		var snap struct {
+			FetchedAt string `json:"fetched_at"`
+		}
+		if json.Unmarshal([]byte(v), &snap) == nil {
+			fetchedStr = snap.FetchedAt
+		}
+	default:
+		return time.Time{}
+	}
+	if fetchedStr == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, fetchedStr)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // probeQuota 探测单个 coding plan 账号的滚动窗口用量并落 extra 快照。
