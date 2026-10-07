@@ -2075,6 +2075,15 @@ func (s *stubAccountRepo) UpdateSessionWindowEnd(ctx context.Context, id int64, 
 func (s *stubAccountRepo) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	return errors.New("not implemented")
 }
+func (s *stubAccountRepo) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (s *stubAccountRepo) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (s *stubAccountRepo) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
 
 func (s *stubAccountRepo) IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error {
 	return errors.New("not implemented")

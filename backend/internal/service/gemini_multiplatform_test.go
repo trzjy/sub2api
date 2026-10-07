@@ -197,6 +197,15 @@ func (m *mockAccountRepoForGemini) UpdateSessionWindowEnd(ctx context.Context, i
 func (m *mockAccountRepoForGemini) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	return nil
 }
+func (m *mockAccountRepoForGemini) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (m *mockAccountRepoForGemini) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (m *mockAccountRepoForGemini) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
 func (m *mockAccountRepoForGemini) BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
 	return 0, nil
 }

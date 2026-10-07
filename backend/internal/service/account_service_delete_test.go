@@ -213,6 +213,16 @@ func (s *accountRepoStub) UpdateExtra(ctx context.Context, id int64, updates map
 	panic("unexpected UpdateExtra call")
 }
 
+func (s *accountRepoStub) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	panic("unexpected StoreTokenHarborSession call")
+}
+func (s *accountRepoStub) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (s *accountRepoStub) ClearTokenHarborSession(context.Context, int64) error {
+	panic("unexpected ClearTokenHarborSession call")
+}
+
 func (s *accountRepoStub) BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
 	panic("unexpected BulkUpdate call")
 }

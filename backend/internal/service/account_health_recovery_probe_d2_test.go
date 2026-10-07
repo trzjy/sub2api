@@ -214,6 +214,16 @@ func (r *d2ProbeObsRepo) ClearTempUnschedulable(_ context.Context, _ int64) erro
 	return nil
 }
 
+func (r *d2ProbeObsRepo) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (r *d2ProbeObsRepo) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (r *d2ProbeObsRepo) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
+
 func (r *d2ProbeObsRepo) metaFor(id int64, scope string) (d2ObsMeta, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -234,6 +234,15 @@ func (m *mockAccountRepoForPlatform) UpdateSessionWindowEnd(ctx context.Context,
 func (m *mockAccountRepoForPlatform) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	return nil
 }
+func (m *mockAccountRepoForPlatform) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (m *mockAccountRepoForPlatform) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (m *mockAccountRepoForPlatform) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
 func (m *mockAccountRepoForPlatform) BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error) {
 	return 0, nil
 }

@@ -28,9 +28,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
 const (
@@ -39,6 +42,14 @@ const (
 	// TokenHarborPassProviderName 快照 provider 字段的固定取值。
 	TokenHarborPassProviderName = "tokenharbor_pass"
 
+	// TH 会话持久化 extra 键名（字面值契约，与 internal/repository 侧定义逐字一致）。
+	TokenHarborSessionCookieExtraKey  = "th_session_cookie"
+	TokenHarborSessionLoginAtExtraKey = "th_session_login_at"
+	// TH 风控退避 extra 键名（字面值契约；周期链门禁读取由 B 卡实现）。
+	TokenHarborProbeBackoffUntilExtraKey  = "th_probe_backoff_until"
+	TokenHarborProbeBackoffLevelExtraKey  = "th_probe_backoff_level"
+	TokenHarborProbeBackoffReasonExtraKey = "th_probe_backoff_reason"
+
 	tokenHarborBaseURL          = "https://tokenharbor.ai"
 	tokenHarborSessionTTL       = 6 * time.Hour
 	tokenHarborProbeMinInterval = 10 * time.Minute
@@ -46,6 +57,13 @@ const (
 	tokenHarborBoundary         = "-thbound"
 	tokenHarborBrowserUA        = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
 		"(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+	// 风控退避：until = now + 30min×2^level，level 0 起、上限 3（即最长 4h）。
+	tokenHarborProbeBackoffBaseInterval = 30 * time.Minute
+	tokenHarborProbeBackoffMaxLevel     = 3
+	tokenHarborProbeBackoffReasonMaxLen = 200
+	// tokenHarborLoginRejectedMarker 退避触发判据（Probe 返回错误串包含该子串）。
+	tokenHarborLoginRejectedMarker = "tokenharbor login rejected"
 )
 
 // TokenHarborPassSnapshot 订阅窗口探测快照（字段名冻结，前端按此消费）。
@@ -62,6 +80,13 @@ type TokenHarborPassSnapshot struct {
 type tokenHarborSession struct {
 	cookie  string
 	loginAt time.Time
+}
+
+// tokenHarborProbeBackoff 单账号风控退避状态（内存副本；权威落 extra 三键）。
+type tokenHarborProbeBackoff struct {
+	level  int
+	until  time.Time
+	reason string
 }
 
 type tokenHarborHTTPResponse struct {
@@ -82,6 +107,8 @@ type TokenHarborPassService struct {
 
 	mu       sync.Mutex
 	sessions map[int64]tokenHarborSession
+	// backoffs 退避状态内存副本，全部转移在 s.mu 临界区内（最后完成者为准）。
+	backoffs map[int64]tokenHarborProbeBackoff
 }
 
 func NewTokenHarborPassService(accountRepo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream) *TokenHarborPassService {
@@ -92,6 +119,7 @@ func NewTokenHarborPassService(accountRepo AccountRepository, proxyRepo ProxyRep
 		now:         time.Now,
 		baseURL:     tokenHarborBaseURL,
 		sessions:    map[int64]tokenHarborSession{},
+		backoffs:    map[int64]tokenHarborProbeBackoff{},
 	}
 }
 
@@ -143,25 +171,31 @@ func (s *TokenHarborPassService) Probe(ctx context.Context, account *Account) (T
 		return *snapshot, nil
 	}
 
-	cookie, ok := s.cachedSession(account.ID)
-	if !ok {
-		var err error
-		cookie, err = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
-		if err != nil {
-			return TokenHarborPassSnapshot{}, err
-		}
-		s.storeSession(account.ID, cookie)
+	snapshot, err := s.probeBilling(ctx, account, proxyURL, email, password)
+	if err != nil {
+		s.noteTokenHarborProbeFailure(ctx, account, err)
+		return TokenHarborPassSnapshot{}, err
+	}
+	s.noteTokenHarborProbeSuccess(ctx, account)
+	return snapshot, nil
+}
+
+// probeBilling 走会话获取 + billing 页解析的完整探测路径（不含节流快照捷径）。
+func (s *TokenHarborPassService) probeBilling(ctx context.Context, account *Account, proxyURL, email, password string) (TokenHarborPassSnapshot, error) {
+	cookie, err := s.ensureSession(ctx, account.ID, proxyURL, email, password)
+	if err != nil {
+		return TokenHarborPassSnapshot{}, err
 	}
 
 	resp, err := s.fetchBillingPage(ctx, account.ID, proxyURL, cookie)
 	if err == nil && tokenHarborSessionRejected(resp) {
-		// 会话失效：清缓存重登一次；再失败按明确错误上报，不兜底。
-		s.invalidateSession(account.ID)
+		// 会话失效：双清（内存+extra）后重登一次；再失败按明确错误上报，不兜底。
+		s.invalidateSession(ctx, account.ID)
 		cookie, err = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
 		if err != nil {
 			return TokenHarborPassSnapshot{}, err
 		}
-		s.storeSession(account.ID, cookie)
+		s.storeSession(ctx, account.ID, cookie)
 		resp, err = s.fetchBillingPage(ctx, account.ID, proxyURL, cookie)
 	}
 	if err != nil {
@@ -247,16 +281,180 @@ func (s *TokenHarborPassService) cachedSession(accountID int64) (string, bool) {
 	return session.cookie, true
 }
 
-func (s *TokenHarborPassService) storeSession(accountID int64, cookie string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[accountID] = tokenHarborSession{cookie: cookie, loginAt: s.now()}
+// ensureSession 三级读取（既有 6h TTL 不变）：内存缓存 → 持久化会话（extra）
+// → 现场登录。持久化命中时回填内存缓存；落库读取失败只 WARN，按无会话处理。
+func (s *TokenHarborPassService) ensureSession(ctx context.Context, accountID int64, proxyURL, email, password string) (string, error) {
+	if cookie, ok := s.cachedSession(accountID); ok {
+		return cookie, nil
+	}
+	if s.accountRepo != nil {
+		cookie, loginAt, err := s.accountRepo.LoadTokenHarborSession(ctx, accountID)
+		switch {
+		case err != nil:
+			logger.LegacyPrintf("service.tokenharbor_pass", "[TokenHarbor] load persisted session failed (WARN only): account=%d err=%v", accountID, err)
+		case cookie != "" && !loginAt.IsZero() && s.now().Sub(loginAt) < tokenHarborSessionTTL:
+			s.mu.Lock()
+			s.sessions[accountID] = tokenHarborSession{cookie: cookie, loginAt: loginAt}
+			s.mu.Unlock()
+			return cookie, nil
+		}
+	}
+	cookie, err := s.loginToTokenHarbor(ctx, accountID, proxyURL, email, password)
+	if err != nil {
+		return "", err
+	}
+	s.storeSession(ctx, accountID, cookie)
+	return cookie, nil
 }
 
-func (s *TokenHarborPassService) invalidateSession(accountID int64) {
+// storeSession 写内存缓存，并在同一 s.mu 临界区内同步持久化。落库失败只 log
+// WARN，不返回错误——业务语义是快照获取，缓存副写入失败可见即可。
+func (s *TokenHarborPassService) storeSession(ctx context.Context, accountID int64, cookie string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	loginAt := s.now()
+	s.sessions[accountID] = tokenHarborSession{cookie: cookie, loginAt: loginAt}
+	if s.accountRepo != nil {
+		if err := s.accountRepo.StoreTokenHarborSession(ctx, accountID, cookie, loginAt); err != nil {
+			logger.LegacyPrintf("service.tokenharbor_pass", "[TokenHarbor] persist session failed (WARN only): account=%d err=%v", accountID, err)
+		}
+	}
+}
+
+// invalidateSession 会话失效双清：内存缓存 + extra 两键（落库失败同样只 WARN）。
+func (s *TokenHarborPassService) invalidateSession(ctx context.Context, accountID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, accountID)
+	if s.accountRepo != nil {
+		if err := s.accountRepo.ClearTokenHarborSession(ctx, accountID); err != nil {
+			logger.LegacyPrintf("service.tokenharbor_pass", "[TokenHarbor] clear persisted session failed (WARN only): account=%d err=%v", accountID, err)
+		}
+	}
+}
+
+// noteTokenHarborProbeFailure 风控退避触发（方案 §2.4）：Probe 返回错误且错误
+// 串含 "tokenharbor login rejected" 时，在 s.mu 临界区内完成状态转移——
+// level = 已有则 +1（上限 3）、无则 0；until = now + 30min×2^level；
+// reason = err.Error() 截断 200 字符。三键经 UpdateExtra 原子写（单次调用），
+// 落库失败只 WARN。
+func (s *TokenHarborPassService) noteTokenHarborProbeFailure(ctx context.Context, account *Account, probeErr error) {
+	if account == nil || probeErr == nil || !strings.Contains(probeErr.Error(), tokenHarborLoginRejectedMarker) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	level := 0
+	if current, ok := s.backoffs[account.ID]; ok {
+		level = current.level + 1
+	} else if current, ok := tokenHarborProbeBackoffFromExtra(account, s.now()); ok {
+		// 重启恢复：内存无记录时以 extra 三键为"已有"基准继续升级。
+		level = current.level + 1
+	}
+	if level > tokenHarborProbeBackoffMaxLevel {
+		level = tokenHarborProbeBackoffMaxLevel
+	}
+	until := s.now().Add(tokenHarborProbeBackoffBaseInterval << level)
+	reason := truncateTokenHarborBackoffReason(probeErr.Error())
+	s.backoffs[account.ID] = tokenHarborProbeBackoff{level: level, until: until, reason: reason}
+	logger.LegacyPrintf("service.tokenharbor_pass",
+		"[TokenHarbor] probe backoff triggered: account=%d level=%d until=%s err=%s",
+		account.ID, level, until.UTC().Format(time.RFC3339), reason)
+	if s.accountRepo != nil {
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			TokenHarborProbeBackoffUntilExtraKey:  until.Unix(),
+			TokenHarborProbeBackoffLevelExtraKey:  level,
+			TokenHarborProbeBackoffReasonExtraKey: reason,
+		}); err != nil {
+			logger.LegacyPrintf("service.tokenharbor_pass",
+				"[TokenHarbor] persist probe backoff failed (WARN only): account=%d err=%v", account.ID, err)
+		}
+	}
+}
+
+// noteTokenHarborProbeSuccess 探测成功清除退避（s.mu 临界区内）：三键置 null
+// 一次；仅在已有退避时写（内存有记录，或 extra until>now），避免每轮空写。
+// 落库失败只 WARN。
+func (s *TokenHarborPassService) noteTokenHarborProbeSuccess(ctx context.Context, account *Account) {
+	if account == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, memoryBackoff := s.backoffs[account.ID]
+	_, extraBackoff := tokenHarborProbeBackoffFromExtra(account, s.now())
+	if !memoryBackoff && !extraBackoff {
+		return
+	}
+	delete(s.backoffs, account.ID)
+	if s.accountRepo != nil {
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			TokenHarborProbeBackoffUntilExtraKey:  nil,
+			TokenHarborProbeBackoffLevelExtraKey:  nil,
+			TokenHarborProbeBackoffReasonExtraKey: nil,
+		}); err != nil {
+			logger.LegacyPrintf("service.tokenharbor_pass",
+				"[TokenHarbor] clear probe backoff failed (WARN only): account=%d err=%v", account.ID, err)
+		}
+	}
+}
+
+// tokenHarborProbeBackoffFromExtra 从账号 Extra 读回生效中的退避（until > now
+// 才算"已有"；缺失/null/过期/形态不符统一视为无退避）。
+func tokenHarborProbeBackoffFromExtra(account *Account, now time.Time) (tokenHarborProbeBackoff, bool) {
+	if account == nil || account.Extra == nil {
+		return tokenHarborProbeBackoff{}, false
+	}
+	untilUnix, ok := tokenHarborExtraInt64(account.Extra[TokenHarborProbeBackoffUntilExtraKey])
+	if !ok || untilUnix <= now.Unix() {
+		return tokenHarborProbeBackoff{}, false
+	}
+	backoff := tokenHarborProbeBackoff{until: time.Unix(untilUnix, 0)}
+	if level, ok := tokenHarborExtraInt64(account.Extra[TokenHarborProbeBackoffLevelExtraKey]); ok {
+		backoff.level = int(level)
+	}
+	if reason, ok := account.Extra[TokenHarborProbeBackoffReasonExtraKey].(string); ok {
+		backoff.reason = reason
+	}
+	return backoff, true
+}
+
+// tokenHarborExtraInt64 兼容 JSON 反解的 float64 与驱动直出的整型/文本形态。
+func tokenHarborExtraInt64(raw any) (int64, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return int64(value), true
+	case float32:
+		return int64(value), true
+	case int:
+		return int64(value), true
+	case int64:
+		return value, true
+	case json.Number:
+		if parsed, err := value.Int64(); err == nil {
+			return parsed, true
+		}
+		return 0, false
+	case string:
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+			return parsed, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+// truncateTokenHarborBackoffReason 按字符截断 200（按 rune 计，不切断 UTF-8
+// 序列，避免 jsonb 写入报编码错误）。
+func truncateTokenHarborBackoffReason(reason string) string {
+	runes := []rune(reason)
+	if len(runes) <= tokenHarborProbeBackoffReasonMaxLen {
+		return reason
+	}
+	return string(runes[:tokenHarborProbeBackoffReasonMaxLen])
 }
 
 // do 经共享上游（带账号代理）发一次请求。一律禁用重定向：登录的 303 成功判据
