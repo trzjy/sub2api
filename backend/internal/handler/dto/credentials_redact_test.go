@@ -90,6 +90,21 @@ func TestRedactCredentials_DoesNotMutateInput(t *testing.T) {
 	require.Equal(t, "x", in["base_url"])
 }
 
+// D-TH-01：RedactCredentials 应剥离 TH/Kira 探测秘密键并标记 has_* 状态。
+func TestRedactCredentials_THKiraSensitiveKeys(t *testing.T) {
+	in := map[string]any{
+		"th_password": "th-pw-secret",
+		"kira_jwt":    "kira-jwt-secret",
+		"base_url":    "https://api.example.com",
+	}
+	out, status := RedactCredentials(in)
+	require.NotContains(t, out, "th_password", "th_password 应被脱敏剥离")
+	require.NotContains(t, out, "kira_jwt", "kira_jwt 应被脱敏剥离")
+	require.Equal(t, "https://api.example.com", out["base_url"])
+	require.True(t, status["has_th_password"], "th_password 存在应标记 has_th_password")
+	require.True(t, status["has_kira_jwt"], "kira_jwt 存在应标记 has_kira_jwt")
+}
+
 func TestRedactCredentials_AllKnownSensitiveKeys(t *testing.T) {
 	keys := []string{
 		"access_token", "refresh_token", "id_token",

@@ -128,6 +128,37 @@ func TestMergePreservingSensitiveCreds_ExtraPreserveKeysOverwritesWhenIncomingPr
 	require.Equal(t, "pw-new", out["login_password"])
 }
 
+// D-TH-01：TH/Kira 探测凭据键入清单后，IsSensitiveCredentialKey 与 Merge 保留语义回归。
+func TestIsSensitiveCredentialKey_THKiraKeys(t *testing.T) {
+	// 新入清单的探测秘密键
+	require.True(t, IsSensitiveCredentialKey("th_password"))
+	require.True(t, IsSensitiveCredentialKey("kira_jwt"))
+	require.True(t, IsSensitiveCredentialKey("kira_password"))
+}
+
+// 锁死身份键不入清单的判断：th_email / kira_email 是邮箱（身份标识非秘密），不应脱敏/加密/保留。
+func TestIsSensitiveCredentialKey_THKiraIdentityKeysExcluded(t *testing.T) {
+	require.False(t, IsSensitiveCredentialKey("th_email"))
+	require.False(t, IsSensitiveCredentialKey("kira_email"))
+}
+
+// 全对象 PUT 编辑账号时 incoming 未携带 th_password，应保留 existing 中的探测秘密。
+func TestMergePreservingSensitiveCreds_THKiraPasswordPreserved(t *testing.T) {
+	existing := map[string]any{
+		"th_password": "th-pw-old",
+		"kira_jwt":    "kira-jwt-old",
+		"base_url":    "https://old.example.com",
+	}
+	incoming := map[string]any{
+		"base_url": "https://new.example.com",
+		// 没带 th_password / kira_jwt —— 应保留
+	}
+	out := MergePreservingSensitiveCreds(existing, incoming)
+	require.Equal(t, "th-pw-old", out["th_password"], "incoming 没传 th_password，应保留 existing")
+	require.Equal(t, "kira-jwt-old", out["kira_jwt"], "incoming 没传 kira_jwt，应保留 existing")
+	require.Equal(t, "https://new.example.com", out["base_url"], "非敏感键由 incoming 决定")
+}
+
 func TestMergePreservingSensitiveCreds_LoginSecretsIncludedByDefault(t *testing.T) {
 	existing := map[string]any{"login_email": "u@x.com"}
 	incoming := map[string]any{"cookie": "ck"}
