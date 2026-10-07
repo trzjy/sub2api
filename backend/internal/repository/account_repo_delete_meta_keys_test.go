@@ -84,6 +84,38 @@ func TestStaleExtraRepoDeleteMetaKeys_ExecutesAtomicKeyDelete(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// D-QL-009 F1：meta 桶为 JSONB 字面量 null / 非对象时，SQL 必须为 jsonb_typeof
+// 归一形态（CASE WHEN ... = 'object' + COALESCE 收口 '{}'::jsonb），否则生产 PG16
+// 上 `'{"model_rate_limits_meta":null}'::jsonb->'model_rate_limits_meta' - keys`
+// 对 scalar 执行 jsonb `-` 删除报 "cannot delete from scalar"，批量清理在该账号中止。
+func TestStaleExtraRepoDeleteMetaKeys_SQLNormalizesJSONBNullBucket(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	driver := entsql.OpenDB(dialect.Postgres, db)
+	client := dbent.NewClient(dbent.Driver(driver))
+	t.Cleanup(func() { _ = client.Close() })
+	repo := newAccountRepositoryWithSQL(client, db, nil)
+
+	// SQL 形态断言：value 表达式必须先 jsonb_typeof 判定对象、CASE 未命中落
+	// COALESCE 空对象收口，再执行 `-` 数组按键删除；参数仍按 text[] 绑定。
+	// （sqlmock 默认 QueryMatcherRegexp：期望值按正则对实际 SQL 匹配。）
+	mock.ExpectExec(`COALESCE\(\s*CASE WHEN jsonb_typeof\(extra->'model_rate_limits_meta'\) = 'object'\s*THEN extra->'model_rate_limits_meta' END,\s*'\{\}'::jsonb\s*\) - \$1::text\[\]`).
+		WithArgs(
+			keysArrayMatcher{want: "{tokenharbor_free_tier_glm-5.3-flash}"},
+			int64(209),
+		).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	affected, err := repo.DeleteModelRateLimitsMetaKeys(context.Background(), 209, []string{
+		"tokenharbor_free_tier_glm-5.3-flash",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestStaleExtraRepoDeleteMetaKeys_ZeroRowsReturnsNotFound(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
