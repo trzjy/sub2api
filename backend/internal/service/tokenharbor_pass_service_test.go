@@ -437,6 +437,36 @@ func TestParseTokenHarborUsageCSV_WindowAggregation(t *testing.T) {
 	require.Equal(t, now, snapshot.FetchedAt)
 }
 
+// TestParseTokenHarborUsageCSV_NewOfficialHeader D-TH-02：新官方表头
+// `timestamp (iso utc),...,tokens in,tokens out,...`（空格分隔、带括号）必须命中
+// 三组新追加别名并解析成功，窗口归属与 testTHUsageCSV 同口径。旧表头用例不受影响
+// （向后兼容，别名不删）。
+func TestParseTokenHarborUsageCSV_NewOfficialHeader(t *testing.T) {
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	todayStart := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
+
+	body := fmt.Sprintf(`timestamp (iso utc),source,api key,model,status,error code,tokens in,tokens out,output visible tokens,output thinking tokens,cache layer,cache read tokens,cache savings usd,cost usd
+%s,,k1,glm-5.3-flash,200,,100,10,,,,,,
+%s,,k2,qwen3.8-flash,200,,200,20,,,,,,
+%s,,k3,glm-5.3-flash,200,,400,40,,,,,,
+%s,,k4,qwen3.8-flash,200,,8000,800,,,,,,
+`,
+		todayStart.Format(time.RFC3339),                                   // today 窗口
+		todayStart.Add(-1*time.Hour).Format(time.RFC3339),                 // 昨日 23:00，today+7d+30d
+		todayStart.Add(-8*24*time.Hour+13*time.Hour).Format(time.RFC3339), // 8 天前 13:00，仅 30d
+		todayStart.Add(-35*24*time.Hour).Format(time.RFC3339),             // 35 天前，30d 窗外
+	)
+
+	snapshot, err := parseTokenHarborUsageCSV(body, now)
+
+	require.NoError(t, err, "新官方表头必须命中别名并解析成功（D-TH-02）")
+	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(snapshot.Windows))
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 1, TokensIn: 100, TokensOut: 10}, snapshot.Windows["today"])
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 2, TokensIn: 300, TokensOut: 30}, snapshot.Windows["7d"])
+	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 3, TokensIn: 700, TokensOut: 70}, snapshot.Windows["30d"])
+	require.Equal(t, now, snapshot.FetchedAt)
+}
+
 func TestParseTokenHarborUsageCSV_FailClosed(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	cases := []struct {

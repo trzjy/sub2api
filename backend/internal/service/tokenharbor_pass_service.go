@@ -657,9 +657,9 @@ func tokenHarborBoolMatch(text string, re *regexp.Regexp) bool {
 // tokens 输入输出/缓存/状态/钱包 Cost——只取时间与 tokens 两列计数，
 // 不碰金额列（L6：无 $、无剩余估算）。别名集按实测形态收窄，未命中即失败关闭。
 var tokenHarborUsageColumnAliases = map[string][]string{
-	"time":       {"timestamp", "time", "created_at", "date"},
-	"tokens_in":  {"tokens_in", "input_tokens", "prompt_tokens"},
-	"tokens_out": {"tokens_out", "output_tokens", "completion_tokens"},
+	"time":       {"timestamp", "time", "created_at", "date", "timestamp (iso utc)"},
+	"tokens_in":  {"tokens_in", "input_tokens", "prompt_tokens", "tokens in"},
+	"tokens_out": {"tokens_out", "output_tokens", "completion_tokens", "tokens out"},
 }
 
 // parseTokenHarborUsageCSV 解析 usage/export.csv 并按窗口聚合（§4.3 契约：
