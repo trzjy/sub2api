@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -490,7 +491,62 @@ func TestParseTokenHarborUsageCSV_FailClosed(t *testing.T) {
 	}
 }
 
-// §4.3 契约逐键断言：windows 下三窗口各含 requests/tokens_in/tokens_out，顶层 fetched_at。
+// TestParseTokenHarborUsageCSV_EmptyTokenCountRows D-TH-03：新官方 CSV 含
+// `error code` 列，status 为错误行的 tokens in/out 为**空串**（上游"该请求失败
+// 无 token 计数"的确定性表达，非数据损坏）。空串应如实解析为 0：请求计数 +1、
+// tokens 计 0，解析成功不失败关闭；非数字、负数仍失败关闭。
+func TestParseTokenHarborUsageCSV_EmptyTokenCountRows(t *testing.T) {
+	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	todayStart := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
+
+	// 新官方 14 列表头（含 error code 列）。用 strings.Join 构造数据行以杜绝
+	// 逗号计数错位导致的 field 数不符。
+	header := []string{
+		"timestamp (iso utc)", "source", "api key", "model", "status", "error code",
+		"tokens in", "tokens out", "output visible tokens", "output thinking tokens",
+		"cache layer", "cache read tokens", "cache savings usd", "cost usd",
+	}
+	// 构造一行：ts / status / tokens_in / tokens_out 之后其余列均为空。
+	row := func(ts, status, tokensIn, tokensOut string) string {
+		r := make([]string, len(header))
+		r[0] = ts
+		r[4] = status
+		r[6] = tokensIn
+		r[7] = tokensOut
+		return strings.Join(r, ",")
+	}
+	body := func(lines ...string) string {
+		return strings.Join(append([]string{strings.Join(header, ",")}, lines...), "\n") + "\n"
+	}
+
+	t.Run("error row with empty token counts parses as 0", func(t *testing.T) {
+		// 错误行：status=429、tokens in/out 为空串 → 如实解析为 requests +1、tokens 0。
+		b := body(row(todayStart.Format(time.RFC3339), "429", "", ""))
+
+		snapshot, err := parseTokenHarborUsageCSV(b, now)
+
+		require.NoError(t, err, "错误行空 token 列必须按官方语义解析为 0，不失败关闭（D-TH-03）")
+		require.Equal(t, TokenHarborUsageWindowTotals{Requests: 1, TokensIn: 0, TokensOut: 0}, snapshot.Windows["today"],
+			"错误行：请求计数 +1、tokens 计 0")
+	})
+
+	t.Run("non-numeric token count still fails closed", func(t *testing.T) {
+		b := body(row(todayStart.Format(time.RFC3339), "200", "abc", "10"))
+
+		_, err := parseTokenHarborUsageCSV(b, now)
+
+		require.Error(t, err, "tokens in 为非数字仍须失败关闭")
+	})
+
+	t.Run("negative token count still fails closed", func(t *testing.T) {
+		b := body(row(todayStart.Format(time.RFC3339), "200", "-1", "10"))
+
+		_, err := parseTokenHarborUsageCSV(b, now)
+
+		require.Error(t, err, "tokens in 为负仍须失败关闭")
+	})
+}
+
 func TestTokenHarborUsageSnapshotJSONContract(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV(now), now)
