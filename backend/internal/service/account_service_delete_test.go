@@ -299,3 +299,9 @@ func (r *accountRepoStub) ListTempUnschedulableAccounts(_ context.Context, _ tim
 func (r *accountRepoStub) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
 	return nil
 }
+
+// DeleteModelRateLimitsMetaKeys 是 D-QL-007 F2 新增仓库方法的 no-op 桩
+//（AccountRepository 近期新增方法，本测试桩无需行为）。
+func (r *accountRepoStub) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
+	return 0, nil
+}

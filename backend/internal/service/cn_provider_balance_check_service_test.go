@@ -652,7 +652,7 @@ func TestCNProviderBalanceCheckRunOnce_KiraNoIndependentPauseOrClear(t *testing.
 func TestCNProviderBalanceCheckRunOnce_TokenHarborSnapshotRefresh(t *testing.T) {
 	fakeTH := newTokenHarborFakeTH(t, false)
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
 	fakeTH.mu.Unlock()
 	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
 

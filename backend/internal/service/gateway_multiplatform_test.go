@@ -38,6 +38,12 @@ func (m *mockAccountRepoForPlatform) SetTempUnschedulableReason(_ context.Contex
 	return nil
 }
 
+// DeleteModelRateLimitsMetaKeys 是 D-QL-007 F2 新增仓库方法的 no-op 桩
+//（补齐 AccountRepository 接口编译断言所需，本 mock 不触达清理路径）。
+func (m *mockAccountRepoForPlatform) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockAccountRepoForPlatform) GetByID(ctx context.Context, id int64) (*Account, error) {
 	m.getByIDCalls++
 	if acc, ok := m.accountsByID[id]; ok {

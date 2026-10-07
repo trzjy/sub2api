@@ -63,6 +63,9 @@ func (m *sessionWindowMockRepo) ListTempUnschedulableAccounts(_ context.Context,
 func (m *sessionWindowMockRepo) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
 	return nil
 }
+func (m *sessionWindowMockRepo) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
+	return 0, nil
+}
 
 // --- Unused interface methods (panic on unexpected call) ---
 
