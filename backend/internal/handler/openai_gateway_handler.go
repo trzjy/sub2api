@@ -674,6 +674,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer stopCF524Guard()
 
+	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolResponses, body)
+	if err != nil {
+		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
+		return
+	}
+	c.Request = c.Request.WithContext(kimiCtx)
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -1313,6 +1322,19 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	// 心跳 owner（与 Responses 互斥逻辑一致，本链必装；同请求同时刻仅一个拍频机制）。
 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer stopCF524Guard()
+
+	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+	kimiModel := routingModel
+	if preferredMappedModel != "" {
+		kimiModel = preferredMappedModel
+	}
+	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, kimiModel, service.KimiTierProtocolMessages, body)
+	if err != nil {
+		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
+		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed", streamStarted)
+		return
+	}
+	c.Request = c.Request.WithContext(kimiCtx)
 
 	for {
 		if failoverClientGone(c) {
@@ -2686,6 +2708,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(
 		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
 	ctx = wsPricingCtx
+
+	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+	kimiCtx, err := applyKimiTierRouting(c, ctx, reqLog, requestPlatform, wsForwardModel, service.KimiTierProtocolResponses, firstMessage)
+	if err != nil {
+		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "kimi tier estimate failed")
+		return
+	}
+	ctx = kimiCtx
 
 	for {
 		if ctx.Err() != nil {
@@ -4473,4 +4504,42 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 		}
 	}
 	return closeStatus, closeReason
+}
+
+// applyKimiTierRouting 是派发单 B2 的 kimi 分层路由接入点：在选号前对 kimi 平台请求用
+// 既有本地估算链（service.EstimateKimiTierInputTokens，复用 estimateOpenAIInputTokens
+// 同一 SSOT——纯本地、不发上游请求）估算 input token，按
+// docs-local/model-source-tier-routing-plan.md §2 分档装门（small → qwen 伪装线池 /
+// big → 星思池，=阈值判小），并输出一行结构化日志（request_id + 估算 input + 分档
+// small/big）作为验证窗载体。
+//
+// 非 kimi 平台请求直接返回原 baseCtx，零行为变化；估算失败（解析/转换/非标）返回错误，
+// 由调用方 fail-closed（禁止默认大档、禁止隐式转 infer-kimi）。调用方须把返回的 ctx
+// 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover 重入与跨档重试）共用
+// 同一分档门。
+func applyKimiTierRouting(
+	c *gin.Context,
+	baseCtx context.Context,
+	reqLog *zap.Logger,
+	requestPlatform string,
+	model string,
+	protocol service.KimiTierRequestProtocol,
+	body []byte,
+) (context.Context, error) {
+	if service.NormalizeOpenAICompatiblePlatform(requestPlatform) != service.PlatformKimi {
+		return baseCtx, nil
+	}
+	estimated, err := service.EstimateKimiTierInputTokens(model, protocol, body)
+	if err != nil {
+		return nil, fmt.Errorf("kimi tier input estimate failed: %w", err)
+	}
+	class := service.KimiTierClassForEstimate(estimated)
+	ctx := service.WithKimiTierRouting(baseCtx, class)
+	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
+	reqLog.Info("kimi_tier_routing_decision",
+		zap.String("request_id", requestID),
+		zap.Int("estimated_input_tokens", estimated),
+		zap.String("tier", string(class)),
+	)
+	return ctx, nil
 }

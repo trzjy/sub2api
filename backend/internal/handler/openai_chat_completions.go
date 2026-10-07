@@ -174,6 +174,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer cf524StopHeartbeat()
 
+	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolChatCompletions, body)
+	if err != nil {
+		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
+		return
+	}
+	c.Request = c.Request.WithContext(kimiCtx)
+
 	for {
 		if failoverClientGone(c) {
 			return
