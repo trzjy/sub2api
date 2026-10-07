@@ -16,6 +16,8 @@ var SensitiveCredentialKeys = []string{
 	// 云服务凭据
 	"aws_secret_access_key", "aws_session_token",
 	"service_account_json", "service_account", "private_key",
+	// TH/Kira 配额探测后台凭据（2026-10 补：特性新增时漏同步，两条安全链回归）
+	"th_password", "kira_jwt", "kira_password",
 }
 
 var sensitiveCredentialKeySet = func() map[string]struct{} {
