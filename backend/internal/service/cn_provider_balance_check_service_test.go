@@ -651,8 +651,11 @@ func TestCNProviderBalanceCheckRunOnce_KiraNoIndependentPauseOrClear(t *testing.
 // TH 账号周期链：快照刷新（pass + usage CSV 双落库），不做任何停调/清除。
 func TestCNProviderBalanceCheckRunOnce_TokenHarborSnapshotRefresh(t *testing.T) {
 	fakeTH := newTokenHarborFakeTH(t, false)
+	// D-QL-009 F2：同锚注入（tokenharbor_pass_service.go now 字段，既有注入面），
+	// 夹具与快照窗口取时同一次锚点，消除跨 UTC 00:00 竞态。
+	now := time.Now().UTC()
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
 	fakeTH.mu.Unlock()
 	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
 
@@ -665,6 +668,7 @@ func TestCNProviderBalanceCheckRunOnce_TokenHarborSnapshotRefresh(t *testing.T) 
 	}
 	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
 	thSvc.baseURL = fakeTH.server.URL
+	thSvc.now = func() time.Time { return now }
 
 	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: &config.Config{}}
 	svc.SetTokenHarborPassService(thSvc)

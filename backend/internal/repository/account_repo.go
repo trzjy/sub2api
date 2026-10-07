@@ -2712,6 +2712,10 @@ const modelRateLimitsMetaKey = "model_rate_limits_meta"
 // 覆盖窗口。
 //
 //   - 单条 UPDATE + RowsAffected 校验（0 行 = 账号不存在 → ErrAccountNotFound）；
+//   - meta 桶为 JSONB 字面量 null / 非对象（数组、标量）/ 缺失时按空对象处理
+//     （jsonb_typeof 归一，D-QL-009 F1）：'{}'::jsonb - keys 仍为空对象回写，
+//     不会因对 scalar 执行 jsonb `-` 删除而报 "cannot delete from scalar"
+//     中止批量清理；
 //   - updated_at = NOW() 与既有写路径同口径；
 //   - 返回值：keys 为空时不执行 SQL、直接返回 (0, nil)（调用方 no-op 语义）。
 func (r *accountRepository) DeleteModelRateLimitsMetaKeys(ctx context.Context, id int64, keys []string) (int64, error) {
@@ -2724,7 +2728,11 @@ func (r *accountRepository) DeleteModelRateLimitsMetaKeys(ctx context.Context, i
 			extra = jsonb_set(
 				COALESCE(extra, '{}'::jsonb),
 				ARRAY['model_rate_limits_meta'],
-				COALESCE(extra->'model_rate_limits_meta', '{}'::jsonb) - $1::text[],
+				COALESCE(
+					CASE WHEN jsonb_typeof(extra->'model_rate_limits_meta') = 'object'
+					     THEN extra->'model_rate_limits_meta' END,
+					'{}'::jsonb
+				) - $1::text[],
 				true
 			),
 			updated_at = NOW()

@@ -496,8 +496,14 @@ func TestTokenHarborPassProbeUsageSnapshot(t *testing.T) {
 	repo := &tokenHarborRepoStub{}
 	svc := NewTokenHarborPassService(repo, nil, upstream)
 	svc.baseURL = fakeTH.server.URL
+	// D-QL-009 F2：服务存在时钟注入面（now func() time.Time，tokenharbor_pass_service.go
+	// 构造默认 time.Now，ProbeUsageSnapshot 链路经 s.now() 取时）——注入固定锚点，
+	// 夹具与窗口断言同一次取时，消除夹具 testTHUsageCSV(time.Now()) 与服务内部
+	// time.Now() 两次独立取时跨 UTC 00:00 的 today 窗竞态。
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
 	fakeTH.mu.Unlock()
 
 	snapshot, err := svc.ProbeUsageSnapshot(context.Background(), tokenHarborTestAccount(11))
@@ -538,8 +544,12 @@ func TestTokenHarborQuotaProductionEntryIntegration(t *testing.T) {
 	thSvc := NewTokenHarborPassService(repo, nil, upstream)
 	thSvc.baseURL = fakeTH.server.URL
 	quotaSvc.SetTokenHarborPassService(thSvc)
+	// D-QL-009 F2：同锚注入（注释详见 TestTokenHarborPassProbeUsageSnapshot）——
+	// QueryUsage → ProbeUsageSnapshot 链路的窗口取时全部经 thSvc.now()。
+	now := time.Now().UTC()
+	thSvc.now = func() time.Time { return now }
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
 	fakeTH.mu.Unlock()
 	account := thProductionAccount(21)
 	repo.account = account
