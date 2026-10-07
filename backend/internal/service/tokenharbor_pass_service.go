@@ -778,12 +778,16 @@ func parseTokenHarborUsageTime(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("tokenharbor usage csv row timestamp %q is not RFC3339 or UTC datetime", value)
 }
 
-// parseTokenHarborUsageCount 解析计数列（tokens 只做计数）：无法解析或负数即
-// 失败关闭（与外审 F3 的范围校验口径一致）。
+// parseTokenHarborUsageCount 解析计数列（tokens 只做计数）。
+//
+// 空串按官方 CSV 语义计 0（D-TH-03）：新表头错误行的 tokens in/out 为空是上游
+// "该请求失败无 token 计数"的确定性表达，列存在且值为空非数据损坏，应如实解析
+// （请求计数 +1、tokens 计 0），不失败关闭。非数字、负数仍失败关闭（与外审 F3
+// 范围校验口径一致）。
 func parseTokenHarborUsageCount(raw string) (float64, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return 0, fmt.Errorf("tokenharbor usage csv row has empty token count")
+		return 0, nil
 	}
 	count, err := strconv.ParseFloat(value, 64)
 	if err != nil {
