@@ -120,6 +120,11 @@ type AccountRepository interface {
 	// 用于 active poll 拿到新 ResetsAt 后回写，避免覆盖请求路径上记录的 status。
 	UpdateSessionWindowEnd(ctx context.Context, id int64, end time.Time) error
 	UpdateExtra(ctx context.Context, id int64, updates map[string]any) error
+	// DeleteModelRateLimitsMetaKeys 按 keys 从 extra.model_rate_limits_meta 桶内
+	// 原子删除命中键（jsonb_set + `-` 数组删除，单条 UPDATE）。只重写 meta 桶
+	// 本身，不覆盖桶内未命中键与桶外其他 extra 顶层键（不覆盖并发写入者）。
+	// 返回 RowsAffected（0 行 = 账号不存在 → ErrAccountNotFound）。
+	DeleteModelRateLimitsMetaKeys(ctx context.Context, id int64, keys []string) (int64, error)
 	BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error)
 	// IncrementQuotaUsed 原子递增 API Key 账号的配额用量（总/日/周）
 	IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error
