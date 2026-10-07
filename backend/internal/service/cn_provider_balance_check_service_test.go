@@ -861,3 +861,30 @@ func (r *cnProbeSettingsRepo) Delete(_ context.Context, key string) error {
 	delete(r.data, key)
 	return nil
 }
+
+// ---- D-TH-04：TH 会话缓存双实例合并（共享单实例注入） ----
+
+// 探测链与周期链共用同一 TH 探测实例：quota 服务构造时自建的 thPassService
+// 经 THPassService() 访问器取出、经 wire 注入 balance 服务后，balance 服务
+// tokenHarborPass() 应指向同一指针（同一 6h 会话缓存，登录次数减半）。
+// 同时锁死未注入时 tokenHarborPass() 懒装配回退（非 nil）不回归。
+func TestTokenHarborSharedInstance(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+
+	// 1) quota 服务构造时自建 TH 探测链，访问器返回非 nil。
+	q := NewCNProviderQuotaService(repo, nil, upstream, nil)
+	require.NotNil(t, q.THPassService(), "quota 服务 THPassService() 必须返回自建实例")
+
+	// 2) 注入 balance 服务后，tokenHarborPass() 与 quota 实例指针相等（证明共享）。
+	q.THPassService().baseURL = fakeTH.server.URL
+	s := NewCNProviderBalanceCheckService(repo, nil, q, nil, upstream, nil, &config.Config{}, 0)
+	s.SetTokenHarborPassService(q.THPassService())
+	require.Same(t, q.THPassService(), s.tokenHarborPass(),
+		"周期链与探测链必须共用同一 TH 实例（同一会话缓存）")
+
+	// 3) 未注入时 tokenHarborPass() 懒装配仍返回非 nil（锁死既有回退行为）。
+	lazy := NewCNProviderBalanceCheckService(repo, nil, nil, nil, upstream, nil, &config.Config{}, 0)
+	require.NotNil(t, lazy.tokenHarborPass(), "未注入时懒装配必须返回非 nil 实例")
+}

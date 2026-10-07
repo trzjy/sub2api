@@ -210,6 +210,15 @@ func (s *CNProviderQuotaService) SetTokenHarborPassService(th *TokenHarborPassSe
 	}
 }
 
+// THPassService 返回本服务持有的 TH 探测链实例（供装配层注入其他消费方，
+// 使两条消费链共用同一会话缓存；2026-10 D-TH-04）。
+func (s *CNProviderQuotaService) THPassService() *TokenHarborPassService {
+	if s == nil {
+		return nil
+	}
+	return s.thPassService
+}
+
 // QueryUsage 探测指定账号的 Coding Plan 滚动窗口用量并落 Extra 快照。
 // 同一账号的并发探测会被 singleflight 合并。TH（tokenharbor.ai）账号在此处
 // 先行识别（platform=openai，不适用 coding plan 校验，F1 生产入口）。

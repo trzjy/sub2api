@@ -483,6 +483,9 @@ func ProvideCNProviderBalanceCheckService(
 	// 方案 §4.2：周期探测的 Kira/TH 耗尽信号交接额度耗尽状态机（未注入时仅刷新快照，
 	// 信号由响应式 402/429 入口兜底）。
 	svc.SetQuotaLifecycleHandover(quotaLifecycle)
+	// D-TH-04：周期链与手动探针链共用同一 TH 探测实例（同一 6h 会话缓存，
+	// 登录次数减半；懒装配分支因已注入不再触发）。
+	svc.SetTokenHarborPassService(quotaService.THPassService())
 	svc.Start()
 	return svc
 }
