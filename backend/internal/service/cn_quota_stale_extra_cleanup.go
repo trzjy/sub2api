@@ -30,17 +30,18 @@ const (
 
 // CleanStaleTokenHarborFreeTierExtra 幂等清理账号 extra.model_rate_limits_meta 内
 // 以 tokenharbor_free_tier 为前缀的陈旧探测记录键（保留 tokenharbor_account_level_probe
-// 等其他键），UpdateExtra 回写。
+// 等其他键），删除走仓库层 DeleteModelRateLimitsMetaKeys 的 jsonb 原子按键删除
+// （D-QL-007 F2）。
 //
 // 语义：
-//   - 只删前缀命中键，绝不动 meta 桶内其他键，绝不动 extra 其他顶层键；
-//   - 空/清理后为空的 meta 桶显式写空 map（显式化「已清理」而非缺失；
-//     nil 会让 jsonb 合并语义视作"未更新"）；
-//   - 无 meta / 无命中键 → 本账号 no-op（不写库），天然幂等：二次执行零写入；
+//   - 只删前缀命中键，绝不动 meta 桶内其他键，绝不动 extra 其他顶层键（jsonb `-`
+//     数组删除只重写 meta 桶本身，不覆盖并发写入者对同桶其他 scope 键的写入）；
+//   - 空 meta / 无命中键 → 本账号 no-op（不写库），天然幂等：二次执行零写入；
 //   - 清理不可逆、走生产数据：每账号先快照原 extra 到日志（脱敏，只记键名结构
 //     与命中键计数，不落任何值内容）再删；
-//   - 单账号失败（读/写/账号不存在）中止返回 error，已清理账号保持清理结果
-//     （重跑即幂等续跑），返回值为本次实际写入的账号数。
+//   - 单账号失败（读/删/账号不存在）中止返回 error，已清理账号保持清理结果
+//     （重跑即幂等续跑），返回值为本次实际写入的账号数（删除 UPDATE RowsAffected>0
+//     计数，与既有"实际写入账号数"口径一致）。
 func CleanStaleTokenHarborFreeTierExtra(ctx context.Context, repo AccountRepository, accountIDs []int64) (int, error) {
 	cleaned := 0
 	for _, accountID := range accountIDs {
@@ -82,19 +83,17 @@ func CleanStaleTokenHarborFreeTierExtra(ctx context.Context, repo AccountReposit
 			slog.Int("stale_key_count", len(staleKeys)),
 		)
 
-		cleanedMeta := make(map[string]any, len(metaRaw)-len(staleKeys))
-		for key, value := range metaRaw {
-			if strings.HasPrefix(key, staleTokenHarborFreeTierPrefix) {
-				continue
-			}
-			cleanedMeta[key] = value
-		}
-		if err := repo.UpdateExtra(ctx, accountID, map[string]any{
-			modelRateLimitsMetaExtraKey: cleanedMeta,
-		}); err != nil {
+		// 删除走仓库层 jsonb 原子按键删除：单条 UPDATE 只重写 meta 桶内的命中键，
+		// 不覆盖并发写入者（CommitModelRateLimitObservation 经 jsonb_set 按 scope
+		// 键写同一桶）对桶内其他键的写入。清理后为空的 meta 桶由 SQL 侧显式写
+		// 空对象（COALESCE 保证），显式化「已清理」而非缺失。
+		affected, err := repo.DeleteModelRateLimitsMetaKeys(ctx, accountID, staleKeys)
+		if err != nil {
 			return cleaned, err
 		}
-		cleaned++
+		if affected > 0 {
+			cleaned++
+		}
 	}
 	return cleaned, nil
 }

@@ -229,6 +229,15 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			if !p.isHealthBreakerTrip(acc, now) {
 				continue
 			}
+			// 冻结账号级候选总数（freshness 链既有机制，D-QL-007 F1 恢复：删除 D2
+			// 相位时该写入者被一并删除，但 EvaluateAccountLevelFreshness 仍经
+			// AccountFreshnessUpperBound(accountID, "") 读 frozenBounds——缺写入者则
+			// 账号级上界恒 0、阈值退化为基线）。候选总数=1：账号级相位每账号每轮
+			// 至多一个候选，与预算管理器删除后的现状语义一致；旧 D2 按 scope 数+
+			// 账号级计数冻结的公平旋转口径已随相位退役。冻结值生命周期由
+			// clearCandidateBound（probeAccount 恢复路径 :365）负责清除，"首冻结
+			// 不覆盖"语义保持。
+			p.freezeCandidateBound(acc.ID, "", 1)
 			p.probeAccount(ctx, acc, maxAttempts)
 		}
 	}

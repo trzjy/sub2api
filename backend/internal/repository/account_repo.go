@@ -2701,6 +2701,48 @@ func (r *accountRepository) ClearModelRateLimits(ctx context.Context, id int64) 
 // 成功探测清除，元数据仍保留，旧事件不得覆盖新状态）。
 const modelRateLimitsMetaKey = "model_rate_limits_meta"
 
+// DeleteModelRateLimitsMetaKeys 按 keys 从 extra.model_rate_limits_meta 桶内原子删除
+// 命中键（D-QL-007 F2：清理函数改为仓库层 jsonb 原子按键删除）。
+//
+// SQL 形态与 CommitModelRateLimitObservation 的既有 jsonb_set 同构：单条 UPDATE 内
+// `extra->'model_rate_limits_meta' - $keys::text[]`（jsonb `-` 数组删除）只重写
+// model_rate_limits_meta 子对象本身，桶外其他 extra 顶层键与桶内未命中键均不受影响，
+// 不覆盖并发写入者（如 CommitModelRateLimitObservation 经 jsonb_set 对同一桶按 scope
+// 键的写入）——消除旧「读整桶→内存删键→UpdateExtra 整桶回写」对同一桶其他键的
+// 覆盖窗口。
+//
+//   - 单条 UPDATE + RowsAffected 校验（0 行 = 账号不存在 → ErrAccountNotFound）；
+//   - updated_at = NOW() 与既有写路径同口径；
+//   - 返回值：keys 为空时不执行 SQL、直接返回 (0, nil)（调用方 no-op 语义）。
+func (r *accountRepository) DeleteModelRateLimitsMetaKeys(ctx context.Context, id int64, keys []string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	client := clientFromContext(ctx, r.client)
+	result, err := client.ExecContext(ctx, `
+		UPDATE accounts SET
+			extra = jsonb_set(
+				COALESCE(extra, '{}'::jsonb),
+				ARRAY['model_rate_limits_meta'],
+				COALESCE(extra->'model_rate_limits_meta', '{}'::jsonb) - $1::text[],
+				true
+			),
+			updated_at = NOW()
+		WHERE id = $2 AND deleted_at IS NULL
+	`, pq.StringArray(keys), id)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		return 0, service.ErrAccountNotFound
+	}
+	return affected, nil
+}
+
 // modelRateLimitsKey 是 accounts.extra 下模型级限流桶的 jsonb 键名（与 service 包同名
 // 常量同义；repository 包内独立定义以免跨包耦合）。
 const modelRateLimitsKey = "model_rate_limits"
