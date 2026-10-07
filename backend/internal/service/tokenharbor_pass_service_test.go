@@ -405,22 +405,28 @@ func TestTokenHarborPassPersistAndReadSnapshotExtra(t *testing.T) {
 
 // ---- th_usage_snapshot（§4.3）：CSV 窗口聚合 + 失败关闭 + 契约 ----
 
-// 固定 now 的窗口切分：
-//
-//	todayStart = 2026-10-06T00:00:00Z；start7d = 2026-09-29T12:00:00Z；start30d = 2026-09-06T12:00:00Z
-//	r1（11:00Z）→ today+7d+30d；r2（10-05T23:00Z，昨日）→ 7d+30d；
-//	r3（09-28T13:00Z，7d 界外 1h）→ 仅 30d；r4（09-01）→ 30d 界外，不计入任何窗口。
-const testTHUsageCSV = `timestamp,model,input_tokens,output_tokens,status,cost
-2026-10-06T11:00:00Z,glm-5.3-flash,100,10,200,0
-2026-10-05T23:00:00Z,glm-5.3-flash,200,20,200,0
-2026-09-28T13:00:00Z,qwen3.8-flash,400,40,200,0
-2026-09-01T00:00:00Z,qwen3.8-flash,8000,800,200,0
-`
+// testTHUsageCSV 构造按 now 锚定的 usage CSV：四行分别落 today / 7d-only /
+// 30d-only（7d 窗外）/ 30d 窗外，窗口归属与 tokenharbor.ai 线上形态对齐。
+// 相对锚定避免日期翻转炸弹（原 const 硬编码 2026-10-06，次日起 today 窗口落空）。
+func testTHUsageCSV(now time.Time) string {
+	todayStart := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	return fmt.Sprintf(`timestamp,model,input_tokens,output_tokens,status,cost
+%s,glm-5.3-flash,100,10,200,0
+%s,glm-5.3-flash,200,20,200,0
+%s,qwen3.8-flash,400,40,200,0
+%s,qwen3.8-flash,8000,800,200,0
+`,
+		todayStart.Format(time.RFC3339),                                   // today 窗口
+		todayStart.Add(-1*time.Hour).Format(time.RFC3339),                 // 昨日 23:00，today+7d+30d
+		todayStart.Add(-8*24*time.Hour+13*time.Hour).Format(time.RFC3339), // 8 天前 13:00，仅 30d
+		todayStart.Add(-35*24*time.Hour).Format(time.RFC3339),             // 35 天前，30d 窗外
+	)
+}
 
 func TestParseTokenHarborUsageCSV_WindowAggregation(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 
-	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV, now)
+	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV(now), now)
 
 	require.NoError(t, err)
 	// §4.3 契约：windows 三键齐全，跨窗边界各归其位。
@@ -457,7 +463,7 @@ func TestParseTokenHarborUsageCSV_FailClosed(t *testing.T) {
 // §4.3 契约逐键断言：windows 下三窗口各含 requests/tokens_in/tokens_out，顶层 fetched_at。
 func TestTokenHarborUsageSnapshotJSONContract(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
-	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV, now)
+	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV(now), now)
 	require.NoError(t, err)
 
 	encoded, err := json.Marshal(snapshot)
@@ -491,7 +497,7 @@ func TestTokenHarborPassProbeUsageSnapshot(t *testing.T) {
 	svc := NewTokenHarborPassService(repo, nil, upstream)
 	svc.baseURL = fakeTH.server.URL
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
 	fakeTH.mu.Unlock()
 
 	snapshot, err := svc.ProbeUsageSnapshot(context.Background(), tokenHarborTestAccount(11))
@@ -533,7 +539,7 @@ func TestTokenHarborQuotaProductionEntryIntegration(t *testing.T) {
 	thSvc.baseURL = fakeTH.server.URL
 	quotaSvc.SetTokenHarborPassService(thSvc)
 	fakeTH.mu.Lock()
-	fakeTH.usageCSVBody = testTHUsageCSV
+	fakeTH.usageCSVBody = testTHUsageCSV(time.Now())
 	fakeTH.mu.Unlock()
 	account := thProductionAccount(21)
 	repo.account = account
