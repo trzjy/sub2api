@@ -30,6 +30,10 @@ type fakeAccountRepo struct {
 	account *service.Account
 }
 
+// DeleteModelRateLimitsMetaKeys 为 dth-04 接口扩展的 no-op 桩（机械跟改，主会话补）。
+func (r *fakeAccountRepo) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
+	return 0, nil
+}
 func (r *fakeAccountRepo) Create(ctx context.Context, account *service.Account) error {
 	return nil
 }
