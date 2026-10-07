@@ -473,7 +473,10 @@ func TestRunOnce_EmptyPhaseExplicitHandling(t *testing.T) {
 
 // settings 正常且双开关开启：仅熔断相位执行（D2 相位已退役，不再有第二相）。
 func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
-	now := time.Unix(110000, 0)
+	// RunOnce 内部使用真实时钟（nowFunc 注入面已随 D2 相位退役删除），候选的
+	// temp-unschedulable 窗口必须以真实时钟构造未来时刻，否则候选被
+	// isHealthBreakerTrip 的未过期检查过滤、探测不执行。
+	now := time.Now()
 
 	breakerUntil := now.Add(time.Hour)
 	breakerAcc := &Account{
