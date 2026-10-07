@@ -301,6 +301,34 @@ func TestStaleExtraCleanupEmptyListAndMissingAccount(t *testing.T) {
 	require.ErrorIs(t, err, ErrAccountNotFound)
 }
 
+// D-QL-009 F1：meta 桶为 JSONB 字面量 null 的账号不得中止批量清理——
+// null 桶（ent 反序列化为 nil）不命中前缀判定 → 该账号 no-op 跳过，
+// 同批次正常账号照常清理，不返回 error。与 repo 层 jsonb_typeof 归一
+// SQL（TestStaleExtraRepoDeleteMetaKeys_SQLNormalizesJSONBNullBucket）配套锁死。
+func TestStaleExtraCleanupJSONBNullMetaBucketDoesNotAbortBatch(t *testing.T) {
+	nullBucket := newStaleExtraAccount(307, map[string]any{
+		"model_rate_limits_meta": nil, // JSONB null
+	})
+	normal := newStaleExtraAccount(308, map[string]any{
+		"model_rate_limits_meta": map[string]any{
+			"tokenharbor_free_tier_glm-5.3-flash": map[string]any{"revision": int64(1)},
+		},
+	})
+	repo := newStaleExtraCleanupRepo(nullBucket, normal)
+
+	n, err := CleanStaleTokenHarborFreeTierExtra(context.Background(), repo, []int64{307, 308})
+	require.NoError(t, err, "null 桶账号不得中止批量清理")
+	require.Equal(t, 1, n, "只有正常账号计入清理数")
+	require.Zero(t, repo.deleteCount(307), "null 桶账号必须 no-op 零写入")
+	require.Equal(t, 1, repo.deleteCount(308))
+	// null 桶原样保留（不回写空对象也不改写为其他形态）。
+	require.Nil(t, nullBucket.Extra["model_rate_limits_meta"])
+	// 正常账号命中键被删、桶显式保留。
+	meta, ok := normal.Extra["model_rate_limits_meta"].(map[string]any)
+	require.True(t, ok)
+	require.Empty(t, meta)
+}
+
 // 单账号删除失败：错误上抛、已清理账号的结果保持（幂等重跑续跑语义）。
 func TestStaleExtraCleanupWriteErrorPropagates(t *testing.T) {
 	account := newStaleExtraAccount(207, map[string]any{
