@@ -742,6 +742,19 @@ func (r *cnRunOnceExtraRepo) UpdateExtra(_ context.Context, _ int64, updates map
 	return nil
 }
 
+// D-TH-05A 新增仓库方法的 no-op 桩（补齐 AccountRepository 接口编译/运行断言所需）。
+func (r *cnRunOnceExtraRepo) StoreTokenHarborSession(_ context.Context, _ int64, _ string, _ time.Time) error {
+	return nil
+}
+
+func (r *cnRunOnceExtraRepo) LoadTokenHarborSession(_ context.Context, _ int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+
+func (r *cnRunOnceExtraRepo) ClearTokenHarborSession(_ context.Context, _ int64) error {
+	return nil
+}
+
 // cnProbeRunOnceRepo 支持 ListByPlatform + GetByID，供 runOnce 集成测试。
 type cnProbeRunOnceRepo struct {
 	AccountRepository
@@ -758,6 +771,19 @@ func (r *cnProbeRunOnceRepo) GetByID(_ context.Context, id int64) (*Account, err
 }
 
 func (r *cnProbeRunOnceRepo) UpdateExtra(_ context.Context, _ int64, _ map[string]any) error {
+	return nil
+}
+
+// D-TH-05A 新增仓库方法的 no-op 桩（补齐 AccountRepository 接口编译/运行断言所需）。
+func (r *cnProbeRunOnceRepo) StoreTokenHarborSession(_ context.Context, _ int64, _ string, _ time.Time) error {
+	return nil
+}
+
+func (r *cnProbeRunOnceRepo) LoadTokenHarborSession(_ context.Context, _ int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+
+func (r *cnProbeRunOnceRepo) ClearTokenHarborSession(_ context.Context, _ int64) error {
 	return nil
 }
 

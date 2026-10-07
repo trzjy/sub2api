@@ -142,6 +142,17 @@ func (r *fakeAccountRepo) UpdateSessionWindowEnd(ctx context.Context, id int64, 
 func (r *fakeAccountRepo) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	return nil
 }
+// TH 会话持久化三方法（D-TH-05A 在 AccountRepository 接口新增）的 no-op 桩，
+// 补齐接口，本测试不涉该路径。
+func (r *fakeAccountRepo) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (r *fakeAccountRepo) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (r *fakeAccountRepo) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
 func (r *fakeAccountRepo) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
 	return 0, nil
 }

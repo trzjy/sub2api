@@ -125,6 +125,13 @@ type AccountRepository interface {
 	// 本身，不覆盖桶内未命中键与桶外其他 extra 顶层键（不覆盖并发写入者）。
 	// 返回 RowsAffected（0 行 = 账号不存在 → ErrAccountNotFound）。
 	DeleteModelRateLimitsMetaKeys(ctx context.Context, id int64, keys []string) (int64, error)
+	// StoreTokenHarborSession 持久化 TH dashboard 会话（enc:v1 加密落 extra，
+	// 原子合并——UpdateExtra 本身是 COALESCE||$1 jsonb 合并，无读改写竞争）。
+	StoreTokenHarborSession(ctx context.Context, id int64, cookie string, loginAt time.Time) error
+	// LoadTokenHarborSession 读取持久化会话；无会话返回 ("", zero, nil)。
+	LoadTokenHarborSession(ctx context.Context, id int64) (cookie string, loginAt time.Time, err error)
+	// ClearTokenHarborSession 置 null 两键（th_session_cookie/th_session_login_at）。
+	ClearTokenHarborSession(ctx context.Context, id int64) error
 	BulkUpdate(ctx context.Context, ids []int64, updates AccountBulkUpdate) (int64, error)
 	// IncrementQuotaUsed 原子递增 API Key 账号的配额用量（总/日/周）
 	IncrementQuotaUsed(ctx context.Context, id int64, amount float64) error

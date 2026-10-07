@@ -121,6 +121,15 @@ func (r *longContextBillingRepoStub) UpdateExtra(_ context.Context, _ int64, _ m
 	r.updateExtraCalls++
 	return nil
 }
+func (r *longContextBillingRepoStub) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {
+	return nil
+}
+func (r *longContextBillingRepoStub) LoadTokenHarborSession(context.Context, int64) (string, time.Time, error) {
+	return "", time.Time{}, nil
+}
+func (r *longContextBillingRepoStub) ClearTokenHarborSession(context.Context, int64) error {
+	return nil
+}
 
 func (r *longContextBillingRepoStub) BulkUpdate(_ context.Context, _ []int64, _ AccountBulkUpdate) (int64, error) {
 	r.bulkUpdateCalls++
