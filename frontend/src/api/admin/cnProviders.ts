@@ -25,6 +25,14 @@ export interface THPassSnapshot {
   pass_name?: string
   /** 订阅周期重置时刻（RFC3339）；Pass 额度即按此周期计。 */
   renews_at?: string
+  /** 官方 7 天周期重置时刻（RFC3339）；徽标与 7 天窗口倒计时据此展示（D-QLM-008）。 */
+  reset_at?: string
+  /** 官方计费周期天数（如 7）；窗口切换与重置文案依据。 */
+  window_days?: number
+  /** 官方 Pass 津贴已用百分比（0-100，截断展示）；津贴进度条数据源。 */
+  plan_used_pct?: number
+  /** 官方 Pass 津贴是否耗尽（硬上限 exhausted 状态）。 */
+  plan_exhausted?: boolean
   /** 官方账单页 spendAfterAllowance（false = Pass 额度是硬上限）。 */
   spend_after_allowance?: boolean
   auto_reload_enabled?: boolean
@@ -48,8 +56,11 @@ export interface THUsageSnapshot {
   windows: {
     today: THUsageWindowStats
     '7d': THUsageWindowStats
-    '30d': THUsageWindowStats
   }
+  /** 免费津贴已用百分比（0-100）；D-QLM-008 契约预留，组件未渲染则不新增条。 */
+  used_pct?: number
+  /** 免费津贴是否耗尽。 */
+  exhausted?: boolean
   /** 快照聚合时刻（RFC3339）。 */
   fetched_at?: string
 }

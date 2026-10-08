@@ -28,7 +28,8 @@ vi.mock('vue-i18n', async () => {
 })
 
 // TH 订阅账号（账号 207 同型）：platform 挂 kimi，base_url 指向 tokenharbor.ai，
-// extra 含 th_pass_snapshot（has_pass=true）+ th_usage_snapshot（today/7d/30d 三键齐全）。
+// extra 含 th_pass_snapshot（has_pass=true，含 renews_at 续期 + reset_at 周期重置 +
+// plan_used_pct / plan_exhausted 官方津贴）+ th_usage_snapshot（today/7d 两键，无 30d）。
 const thPassAccount = {
   id: 207,
   platform: 'kimi',
@@ -39,21 +40,23 @@ const thPassAccount = {
       has_pass: true,
       pass_name: 'Agent Pass',
       renews_at: new Date(Date.now() + 29 * 24 * 60 * 60 * 1000).toISOString(),
+      reset_at: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(),
+      plan_used_pct: 62,
+      plan_exhausted: false,
       spend_after_allowance: false,
       fetched_at: new Date().toISOString()
     },
     th_usage_snapshot: {
       windows: {
         today: { requests: 10, tokens_in: 100, tokens_out: 200 },
-        '7d': { requests: 120, tokens_in: 1000, tokens_out: 2000 },
-        '30d': { requests: 1200, tokens_in: 10000, tokens_out: 20000 }
+        '7d': { requests: 120, tokens_in: 1000, tokens_out: 2000 }
       },
       fetched_at: new Date().toISOString()
     }
   }
 } as unknown as Account
 
-// TH 免费账号（无订阅）：只渲染 7 天滚动已用计数。
+// TH 免费账号（无订阅）：只渲染 7 天滚动已用计数（窗口仅 today/7d）。
 const thFreeAccount = {
   id: 187,
   platform: 'kimi',
@@ -63,8 +66,7 @@ const thFreeAccount = {
     th_usage_snapshot: {
       windows: {
         today: { requests: 1, tokens_in: 1, tokens_out: 1 },
-        '7d': { requests: 14, tokens_in: 700, tokens_out: 700 },
-        '30d': { requests: 14, tokens_in: 700, tokens_out: 700 }
+        '7d': { requests: 14, tokens_in: 700, tokens_out: 700 }
       },
       fetched_at: new Date().toISOString()
     }
@@ -107,9 +109,9 @@ describe('CNQuotaUsageCell', () => {
 
     // Pass 档位名直接来自快照
     expect(wrapper.get('[data-test="cn-quota-pass-name"]').text()).toBe('Agent Pass')
-    // renews_at 倒计时（29 天后 → “Xd Yh” 形态由 formatCountdown 产出）
+    // 徽标数据源已从 renews_at 切到 reset_at（7 天周期重置）
     expect(wrapper.get('[data-test="cn-quota-pass-renews"]').text()).toContain(
-      'admin.accounts.cnProviders.passRenewsAt'
+      'admin.accounts.cnProviders.passResetsAt'
     )
     // 状态默认正常
     expect(wrapper.get('[data-test="cn-quota-status"]').text()).toBe(
@@ -118,10 +120,14 @@ describe('CNQuotaUsageCell', () => {
     // 默认今日窗口：requests=10
     const stats = wrapper.get('[data-test="cn-quota-window-stats"]').text()
     expect(stats).toContain('"requests":"10"')
+    // 官方 Pass 津贴进度条（plan_used_pct=62）渲染
+    const planBar = wrapper.find('[data-test="cn-quota-pass-plan-bar"]')
+    expect(planBar.exists()).toBe(true)
+    expect(planBar.findComponent(UsageProgressBar).props('utilization')).toBe(62)
   })
 
-  // today/7d/30d 切换渲染对应聚合。
-  it('switches today/7d/30d window aggregates on toggle', async () => {
+  // today/7d/renew 切换：today/7d 渲染官方 CSV 聚合，renew 档显示续期倒计时。
+  it('switches today/7d/renew window: aggregates + renewal countdown', async () => {
     const wrapper = mount(CNQuotaUsageCell, { props: { account: thPassAccount } })
 
     const toggles = wrapper.findAll('[data-test="cn-quota-window-toggle"]')
@@ -129,17 +135,43 @@ describe('CNQuotaUsageCell', () => {
     expect(toggles.map((b) => b.text())).toEqual([
       'admin.accounts.cnProviders.windowToday',
       'admin.accounts.cnProviders.window7d',
-      'admin.accounts.cnProviders.window30d'
+      'admin.accounts.cnProviders.windowRenew'
     ])
 
+    // 7 天档：聚合计数 + reset_at 周期重置倒计时（passResetsAt 文案）
     await toggles[1].trigger('click')
-    expect(wrapper.get('[data-test="cn-quota-window-stats"]').text()).toContain('"requests":"120"')
+    const stats7d = wrapper.get('[data-test="cn-quota-window-stats"]').text()
+    expect(stats7d).toContain('"requests":"120"')
+    expect(stats7d).toContain('admin.accounts.cnProviders.passResetsAt')
 
+    // renew 档：订阅续期倒计时（passRenewsAt，同源同值）
     await toggles[2].trigger('click')
-    expect(wrapper.get('[data-test="cn-quota-window-stats"]').text()).toContain('"requests":"1.2K"')
+    expect(wrapper.get('[data-test="cn-quota-window-stats"]').text()).toContain(
+      'admin.accounts.cnProviders.passRenewsAt'
+    )
 
     await toggles[0].trigger('click')
     expect(wrapper.get('[data-test="cn-quota-window-stats"]').text()).toContain('"requests":"10"')
+  })
+
+  // 官方 plan_exhausted 触发"已耗尽"状态样式（沿用既有 exhausted 红色徽标）。
+  it('shows exhausted status when plan_exhausted is true', () => {
+    const exhaustedPlan = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: {
+          ...thPassAccount.extra.th_pass_snapshot,
+          plan_exhausted: true
+        }
+      }
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: exhaustedPlan } })
+
+    expect(wrapper.get('[data-test="cn-quota-status"]').text()).toBe(
+      'admin.accounts.cnProviders.statusExhausted'
+    )
+    expect(wrapper.get('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(true)
   })
 
   // 状态机 exhausted：状态徽标翻红并显示恢复时间（cn_quota_lifecycle.recovery_at）。

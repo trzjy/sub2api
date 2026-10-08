@@ -10,7 +10,7 @@
          Kira → 只渲染免费用量窗口（当日已用/上限 + reset_at 倒计时 + VND 余额）。
          三条路径 v-if/v-else 互斥，不混算（L1）。不做 $ 换算/剩余估算/重置卡（L6）。 -->
 
-    <!-- TH 订阅链：Pass 档位 + 到期倒计时 + 本期已用（today/7d/30d 切换）+ 状态 -->
+    <!-- TH 订阅链：Pass 档位 + 周期重置倒计时 + 本期已用（today/7d/renew 切换）+ 状态 -->
     <div v-if="showPassWindow" data-test="cn-quota-pass-window" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1.5">
         <span
@@ -20,12 +20,12 @@
           {{ passName }}
         </span>
         <span
-          v-if="renewsAt"
+          v-if="resetAt"
           data-test="cn-quota-pass-renews"
           class="text-[10px] text-gray-400 dark:text-gray-500"
-          :title="renewsAtFull"
+          :title="resetAtFull"
         >
-          {{ renewsLabel }}
+          {{ resetAtLabel }}
         </span>
         <span
           data-test="cn-quota-status"
@@ -48,7 +48,8 @@
         </span>
       </div>
 
-      <!-- 本期已用窗口切换（today/7d/30d），官方 CSV 聚合计数，无分母（L6） -->
+      <!-- 本期已用窗口切换（today/7d/renew），官方 CSV 聚合计数，无分母（L6）；
+           renew 档为订阅续期倒计时（renews_at），不再显示本地 30 天聚合 -->
       <div class="flex flex-wrap items-center gap-1">
         <button
           v-for="w in WINDOWS"
@@ -72,6 +73,16 @@
           {{ activeWindowStatsLabel }}
         </span>
       </div>
+
+      <!-- 官方 Pass 津贴进度条（plan_used_pct，0-100 截断；plan_exhausted 沿用已耗尽样式） -->
+      <UsageProgressBar
+        v-if="passPlanBarVisible"
+        data-test="cn-quota-pass-plan-bar"
+        :label="t('admin.accounts.cnProviders.planLabel')"
+        :utilization="planUsedPct ?? 0"
+        :unknown-usage="planUsedPct == null"
+        color="indigo"
+      />
     </div>
 
     <!-- TH 免费链：7 天滚动计数，只显示已用（无官方分母，L6/L7） -->
@@ -230,6 +241,7 @@ const parseTime = (raw: string | undefined): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+// 订阅续期倒计时（renews_at）：第三档胶囊（renew）显示，与 Pass 卡到期徽标同源同值。
 const renewsAt = computed(() => parseTime(passSnapshot.value?.renews_at))
 const renewsLabel = computed(() => {
   if (!renewsAt.value) return ''
@@ -237,9 +249,31 @@ const renewsLabel = computed(() => {
   const time = countdown || renewsAt.value.toLocaleString()
   return t('admin.accounts.cnProviders.passRenewsAt', { time })
 })
-const renewsAtFull = computed(() => renewsAt.value?.toLocaleString() ?? '')
 
-const exhausted = computed(() => lifecycle.value?.state === 'exhausted')
+// 官方 7 天周期重置（reset_at）：Pass 徽标 + 7 天窗口倒计时数据源（D-QLM-008）。
+const resetAt = computed(() => parseTime(passSnapshot.value?.reset_at))
+const resetAtLabel = computed(() => {
+  if (!resetAt.value) return ''
+  const countdown = formatCountdown(resetAt.value)
+  const time = countdown || resetAt.value.toLocaleString()
+  return t('admin.accounts.cnProviders.passResetsAt', { time })
+})
+const resetAtFull = computed(() => resetAt.value?.toLocaleString() ?? '')
+
+// 官方 Pass 津贴进度条：plan_used_pct（0-100 截断由 UsageProgressBar 负责），
+// 仅在订阅窗口且（有百分比值 或 官方标记 plan_exhausted）时展示。
+const planUsedPct = computed<number | null>(() => {
+  const v = passSnapshot.value?.plan_used_pct
+  return typeof v === 'number' ? v : null
+})
+const passPlanBarVisible = computed(
+  () => showPassWindow.value && (planUsedPct.value != null || passSnapshot.value?.plan_exhausted === true)
+)
+
+// 已耗尽状态：生命周期状态机 exhausted 或 官方 plan_exhausted（津贴硬上限）任一触发。
+const exhausted = computed(
+  () => lifecycle.value?.state === 'exhausted' || passSnapshot.value?.plan_exhausted === true
+)
 const recoveryAt = computed(() => parseTime(lifecycle.value?.recovery_at))
 const recoveryLabel = computed(() => {
   if (!recoveryAt.value) return ''
@@ -249,15 +283,15 @@ const recoveryLabel = computed(() => {
 })
 const recoveryAtFull = computed(() => recoveryAt.value?.toLocaleString() ?? '')
 
-// 本期已用窗口切换（today/7d/30d）。
-const WINDOWS = ['today', '7d', '30d'] as const
+// 本期已用窗口切换（today/7d/renew）。renew 档显示订阅续期倒计时，不再有本地聚合。
+const WINDOWS = ['today', '7d', 'renew'] as const
 type UsageWindow = (typeof WINDOWS)[number]
 const activeWindow = ref<UsageWindow>('today')
 
 const windowToggleLabel = (w: UsageWindow): string => {
   if (w === 'today') return t('admin.accounts.cnProviders.windowToday')
   if (w === '7d') return t('admin.accounts.cnProviders.window7d')
-  return t('admin.accounts.cnProviders.window30d')
+  return t('admin.accounts.cnProviders.windowRenew')
 }
 
 const activeWindowStats = computed<THUsageWindowStats | null>(() => {
@@ -268,15 +302,24 @@ const activeWindowStats = computed<THUsageWindowStats | null>(() => {
 })
 
 const activeWindowStatsLabel = computed(() => {
+  // 第三档：订阅续期倒计时（renews_at），与 Pass 卡到期徽标同源同值。
+  if (activeWindow.value === 'renew') {
+    return renewsLabel.value
+  }
   const stats = activeWindowStats.value
   const requests = typeof stats?.requests === 'number' ? stats.requests : 0
   const tokensIn = typeof stats?.tokens_in === 'number' ? stats.tokens_in : 0
   const tokensOut = typeof stats?.tokens_out === 'number' ? stats.tokens_out : 0
   const tokens = tokensIn + tokensOut
-  return t('admin.accounts.cnProviders.windowStats', {
+  const base = t('admin.accounts.cnProviders.windowStats', {
     requests: formatCompactNumber(requests, { allowBillions: false }),
     tokens: formatCompactNumber(tokens)
   })
+  // 7 天档：在计数旁追加 reset_at 周期重置倒计时。
+  if (activeWindow.value === '7d' && resetAtLabel.value) {
+    return `${base} · ${resetAtLabel.value}`
+  }
+  return base
 })
 
 // ===== TH 免费链（无 Pass）：7 天滚动计数，只显示已用 =====
