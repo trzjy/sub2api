@@ -686,13 +686,14 @@ func (s *CNQuotaLifecycleService) resolveRecoveryTime(account *Account, upstream
 // struct 字段（D-QLM-006 冻结字段）。反序列化失败按既有 unknown 路径失败关闭，
 // 不新增兜底分支。
 
-// convergeTHStockRecovery 存量收敛（D-QLM-007 §2）：TH 账号周期快照刷新观察到
-// plan_exhausted=true 且 reset_at 有效时，把额度状态机里的 recovery_at 收敛到
-// 最新 reset_at，覆盖历史上按 renewsAt 写入的旧值（含线上存量）。仅在已有
-// lifecycle 状态（recovery_at 已知）时改写；无状态/未知则不编造。reset_at 过期
-// 或缺失且仍 plan_exhausted → 不收敛（交由 L3/L4 的 unknown 兜底循环处理）。
-// 调用方（快照刷新链 / 响应式确认路径）负责在刷新后触发；本方法幂等且只改
-// cn_quota_lifecycle 窄面。
+// convergeTHStockRecovery 存量收敛（D-QLM-007 §2，守卫补强 D-QLM-012）：TH 账号
+// 周期快照刷新观察到 plan_exhausted=true 且 reset_at 有效时，把额度状态机里的
+// recovery_at 收敛到最新 reset_at，覆盖历史上按 renewsAt 写入的旧值（含线上存量）。
+// 守卫三件：① recovery_at 来源为 upstream 不动（L4 上游响应 > 快照）；② cur 已
+// 等于/晚于 reset_at 不回退（reset_at 随窗口单调递增，晚于只可能是并发旧快照后写）；
+// ③ reset_at 过期/缺失时不收敛，且会清掉残留的未来 recovery_at（非 upstream 来源，
+// 不清会让 sweep 挂死到旧到期点）登记 unknown 落回 5 分钟兜底循环。仅在已有
+// lifecycle 状态时动作；无状态/未知不编造。本方法幂等且只改 cn_quota_lifecycle 窄面。
 func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, account *Account) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -706,7 +707,22 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 		return
 	}
 	if snap.ResetAt == nil || !snap.ResetAt.After(s.now()) {
-		return // 过期/缺失 → 不收敛（unknown 兜底循环负责）
+		// reset_at 过期/缺失：不收敛到过期值。但若 lifecycle 里还挂着未来的
+		// recovery_at（旧口径 renewsAt 存量 / 并发竞态残留），该残留会让 probeDue
+		// 挂死到旧到期点、sweep 永不跑，L3/L4 的 unknown 兜底循环不可达——清掉
+		// 登记未知，落回 5 分钟确认循环（D-QLM-012 §1；upstream 来源不在清理面，
+		// L4 上游值最权威，交由其自身到期推进）。残留为空或已过期时维持现状
+		// return（无残留可清，unknown 循环本就按期推进）。
+		if st, ok := cnQuotaLifecycleStateFromExtra(account.Extra); ok && st.RecoveryAt != "" &&
+			st.RecoverySource != cnQuotaRecoverySourceUpstream {
+			if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil && cur.After(s.now()) {
+				st.RecoveryAt = ""
+				st.RecoverySource = cnQuotaRecoverySourceUnknown
+				st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
+				s.persistLifecycleState(ctx, account.ID, st)
+			}
+		}
+		return
 	}
 	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
 	if !ok || st.RecoveryAt == "" {
@@ -717,9 +733,15 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 	if st.RecoverySource == cnQuotaRecoverySourceUpstream {
 		return
 	}
-	// 已有 recovery_at：与最新 reset_at 相同则无需改写。
-	if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil && cur.Equal(*snap.ResetAt) {
-		return
+	// 已有 recovery_at：与最新 reset_at 相同则无需改写。cur 晚于 reset_at 时也不
+	// 回退：官方 reset_at 随窗口单调递增，cur 更晚只可能是并发双入口（确认路径 /
+	// 刷新链）下持旧快照的后写者，回退会把 recovery_at 拖回旧到期点（D-QLM-012
+	// §2）。renewsAt 存量（≈28 天）与本窗 reset_at（7 天窗口）实际不会重合，向下
+	// 收敛的存量形态因此只剩 cur 早于 reset_at 一种，由下一分支正常收敛。
+	if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil {
+		if cur.Equal(*snap.ResetAt) || cur.After(*snap.ResetAt) {
+			return
+		}
 	}
 	st.RecoveryAt = cnQuotaRFC3339OrEmpty(*snap.ResetAt, true)
 	st.RecoverySource = cnQuotaRecoverySourceSnapshot
