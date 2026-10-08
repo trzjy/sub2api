@@ -1217,6 +1217,14 @@ func TestQuotaLifecycleSweepThirdFormRecoveryClosure(t *testing.T) {
 	// --- 推进到 t0+6d+ε 第二次 sweep：recovery_at 到期 → probeDue → recovered 闭环 ---
 	clock = resetAt.Add(time.Minute)
 	probe.setOutcome(quotaProbeRecovered)
+	// 断言加固（D-QLM-020，R7）：第二次 sweep 前显式锁定入口唯一——
+	// recovery_at（已收敛到 reset_at）不再未来 → probeDue=true；同时 recovery_at
+	// 与 reset_at 相同，cur 不再晚于 reset_at，第三形态矛盾已消解 →
+	// sweepTHResidualRecoveryDue=false。该跳 sweep 只能由 probeDue 入口触发。
+	require.True(t, st.probeDue(clock, quotaLifecycleSweepInterval),
+		"expired converged recovery_at must make probeDue true")
+	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, clock),
+		"third-form contradiction is resolved; the sweep must be entered via probeDue only")
 	require.NoError(t, svc.RunRecoverySweep(context.Background()))
 	require.Equal(t, 2, probe.calls, "expired converged recovery_at must trigger the closure probe")
 	// 闭环一：清停调。
@@ -1292,9 +1300,19 @@ func TestQuotaLifecycleSweepThirdFormStillExhaustedReParksAndKeepsLoop(t *testin
 	require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
 
 	// 推进一个节距第三次 sweep：unknown 兜底循环不丢，probe.calls 继续递增。
+	secondParkUntil, ok := repo.parkedUntil(207)
+	require.True(t, ok)
 	clock = clock.Add(quotaLifecycleSweepInterval)
 	require.NoError(t, svc.RunRecoverySweep(context.Background()))
 	require.Equal(t, 3, probe.calls, "unknown re-park must keep the confirmation loop alive")
+	// 断言加固（D-QLM-020，R7）：第三次 sweep 后停调落点 = 第三次时钟 + 远期占位
+	//（≠ 第二次的 parkedUntil）——证明循环对 unknown 真实重算延长续停，而非保留
+	// 旧停调记录。
+	until, ok = repo.parkedUntil(207)
+	require.True(t, ok)
+	require.Equal(t, clock.Add(quotaLifecycleUnknownRecoveryPlaceholder), until,
+		"third sweep must recompute the park to now+placeholder, not keep the old record")
+	require.NotEqual(t, secondParkUntil, until)
 	// 停调保持（再次续停），告警仍 firing。
 	_, ok = repo.parkedUntil(207)
 	require.True(t, ok)
