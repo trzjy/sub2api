@@ -83,11 +83,13 @@ type TokenHarborPassSnapshot struct {
 	// 官方 API 逐字一致，冻结不可改：reset_at 为 Pass 津贴窗口重置时间；
 	// window_days 为 plan.window_days；plan_used_pct / plan_exhausted 为 Pass
 	// 津贴进度；used_pct / exhausted 为免费津贴进度。
+	// plan_used_pct / used_pct 不带 omitempty（D-QLM-022）：0 是官方合法值，
+	// 存储序列化不得吞键（与 DTO 层 D-QLM-011 同口径）。
 	ResetAt       *time.Time `json:"reset_at,omitempty"`
 	WindowDays    int        `json:"window_days,omitempty"`
-	PlanUsedPct   float64    `json:"plan_used_pct,omitempty"`
+	PlanUsedPct   float64    `json:"plan_used_pct"`
 	PlanExhausted bool       `json:"plan_exhausted"`
-	UsedPct       float64    `json:"used_pct,omitempty"`
+	UsedPct       float64    `json:"used_pct"`
 	Exhausted     bool       `json:"exhausted"`
 }
 

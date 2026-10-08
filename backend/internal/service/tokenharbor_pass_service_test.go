@@ -687,6 +687,37 @@ func TestTokenHarborUsageSnapshotJSONContract(t *testing.T) {
 	}
 }
 
+// D-QLM-022：plan_used_pct / used_pct 为 0 时（窗口刚重置、req_used 小）是官方
+// 合法值，omitempty 不得吞键——否则 PersistSnapshot 落 extra 整键丢失，前端津贴行隐藏。
+func TestTokenHarborPassSnapshotZeroPctStored(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	snap := TokenHarborPassSnapshot{
+		Provider:      "tokenharbor",
+		HasPass:       true,
+		FetchedAt:     now,
+		ResetAt:       &now,
+		WindowDays:    30,
+		PlanUsedPct:   0,
+		PlanExhausted: false,
+		UsedPct:       0,
+		Exhausted:     false,
+	}
+
+	encoded, err := json.Marshal(snap)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &raw))
+
+	// 0 值不得被 omitempty 吞掉：键必须存在且值为数值 0。
+	planVal, ok := raw["plan_used_pct"]
+	require.True(t, ok, "plan_used_pct 键必须存在（0 是合法值，不得省略），编码结果：%s", string(encoded))
+	require.EqualValues(t, 0, planVal, "plan_used_pct 应为 0")
+
+	usedVal, ok := raw["used_pct"]
+	require.True(t, ok, "used_pct 键必须存在（0 是合法值，不得省略），编码结果：%s", string(encoded))
+	require.EqualValues(t, 0, usedVal, "used_pct 应为 0")
+}
+
 func sortedStringKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
