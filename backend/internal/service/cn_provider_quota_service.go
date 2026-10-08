@@ -147,11 +147,13 @@ type CNProviderSnapshotOutput struct {
 	AutoReloadEnabled   *bool  `json:"auto_reload_enabled,omitempty"`
 	// th free-tier 组（D-QLM-006，GET /api/me/free-tier 官方口径透传）：
 	// reset_at 复用下方 Kira 的 reset_at 键（RFC3339，同 RenewsAt 序列化口径）；
-	// window_days / plan_used_pct / plan_exhausted / used_pct / exhausted 五个键。
+	// window_days / plan_used_pct / plan_exhausted / used_pct / exhausted 键组。
+	// plan_used_pct / used_pct 不带 omitempty（D-QLM-011）：0% 是官方合法值，
+	// 必须序列化输出与"无快照数据"（整组缺失）区分，前端进度条才能渲染 0%。
 	WindowDays    int     `json:"window_days,omitempty"`
-	PlanUsedPct   float64 `json:"plan_used_pct,omitempty"`
+	PlanUsedPct   float64 `json:"plan_used_pct"`
 	PlanExhausted bool    `json:"plan_exhausted"`
-	UsedPct       float64 `json:"used_pct,omitempty"`
+	UsedPct       float64 `json:"used_pct"`
 	Exhausted     bool    `json:"exhausted"`
 	// th_usage_snapshot 组（windows today/7d 两键）。
 	Windows map[string]CNUsageWindowTotals `json:"windows,omitempty"`
