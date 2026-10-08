@@ -174,6 +174,56 @@ describe('CNQuotaUsageCell', () => {
     expect(wrapper.get('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(true)
   })
 
+  // 官方津贴 0%：plan_used_pct=0 是有效值（非缺失），渲染 0% 进度条而非 '—'。
+  it('renders 0% (not an em dash) when plan_used_pct is 0', () => {
+    const zeroPlan = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: {
+          ...thPassAccount.extra.th_pass_snapshot,
+          plan_used_pct: 0
+        }
+      }
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: zeroPlan } })
+
+    const planBar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]')
+    const bar = planBar.findComponent(UsageProgressBar)
+    expect(bar.props('utilization')).toBe(0)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(planBar.text()).toContain('0%')
+    expect(planBar.text()).not.toContain('—')
+  })
+
+  // 快照缺失 plan_used_pct：plan_exhausted=true 触发进度条渲染，走 unknown 路径显示 '—'，
+  // 不得假显 0%（plan_used_pct 缺失时 unknownUsage=true 由组件推导）。
+  it('renders an em dash for the plan bar when plan_used_pct is absent', () => {
+    const base = thPassAccount.extra.th_pass_snapshot
+    const missingPct = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: {
+          has_pass: true,
+          pass_name: base.pass_name,
+          renews_at: base.renews_at,
+          reset_at: base.reset_at,
+          plan_exhausted: true,
+          spend_after_allowance: base.spend_after_allowance,
+          fetched_at: base.fetched_at
+        }
+      }
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: missingPct } })
+
+    const planBar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]')
+    const bar = planBar.findComponent(UsageProgressBar)
+    expect(bar.props('unknownUsage')).toBe(true)
+    expect(planBar.text()).toContain('—')
+    expect(planBar.text()).not.toContain('%')
+  })
+
   // 状态机 exhausted：状态徽标翻红并显示恢复时间（cn_quota_lifecycle.recovery_at）。
   it('shows exhausted status with recovery time from cn_quota_lifecycle', () => {
     const exhausted = {
