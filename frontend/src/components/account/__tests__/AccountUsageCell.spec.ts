@@ -1639,4 +1639,38 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).not.toContain('7d S')
     expect(wrapper.text()).not.toContain('7d F')
   })
+
+  // D-QL-005 L5 互斥路由：TH 账号（base_url 含 tokenharbor.ai 是唯一事实源）在
+  // AccountUsageCell 层走 CNQuotaUsageCell，不得再渲染 CN 配额/余额子单元格。
+  it('TokenHarbor 账号渲染 CNQuotaUsageCell，且不渲染 CN 配额/余额子单元格', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9100,
+          platform: 'kimi',
+          type: 'apikey',
+          credentials: { account_mode: 'coding', base_url: 'https://api.tokenharbor.ai/v1' },
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          ...cnUsageCellStubs,
+          CNQuotaUsageCell: {
+            props: ['account'],
+            template: '<div data-test="cn-quota-usage-cell" />'
+          },
+          UsageProgressBar: true,
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-quota-usage-cell"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-balance-cell"]').exists()).toBe(false)
+    expect(getUsage).not.toHaveBeenCalled()
+  })
 })
