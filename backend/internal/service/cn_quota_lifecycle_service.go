@@ -485,18 +485,21 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 }
 
 // sweepTHResidualRecoveryDue TH 残留矛盾读侧判定（D-QLM-016，D-QLM-018 补第三
-// 形态）：lifecycle 里挂着未来的 recovery_at（旧口径 renewsAt 存量），但快照侧
-// 已观察到 plan_exhausted=true，且 reset_at 呈三形态矛盾之一——缺失、已过期、
-// 停调时刻晚于官方 reset_at（停调到期点不是 reset_at 口径；生产实证 2026-10-08：
-// 9 个存量账号 recovery_at 挂 renewsAt 旧口径、刷新链新快照 reset_at 仍在未来）。
-// 快照与恢复时间自相矛盾，视为 probe 到期进入确认循环（unknown 路径可达）。仅在
-// sweep 读路径判定，无写入，竞态类整体消失。来源按显式允许清单判定：只认
-// snapshot——旧 renewsAt 存量写入时来源即 snapshot（confirmExhausted/
-// sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；upstream（L4 最
-// 权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发（fail-closed，
-// 不扩语义）；plan_exhausted=false 不触发（保守，不扩语义）；快照缺失不触发
-//（无矛盾证据）。account 为 sweepCandidates 取到的 repo 新鲜副本，无检查-写入
-// 窗口。
+// 形态，D-QLM-021 第三形态去掉 pe=true 前提）：lifecycle 里挂着未来的
+// recovery_at（旧口径 renewsAt 存量），且 reset_at 呈三形态矛盾之一——缺失、
+// 已过期、停调时刻晚于官方 reset_at（停调到期点不是 reset_at 口径；生产实证
+// 2026-10-08：9 个存量账号 recovery_at 挂 renewsAt 旧口径、刷新链新快照
+// reset_at 仍在未来）。快照与恢复时间自相矛盾，视为 probe 到期进入确认循环
+//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。来源按
+// 显式允许清单判定：只认 snapshot——旧 renewsAt 存量写入时来源即 snapshot
+//（confirmExhausted/sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；
+// upstream（L4 最权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发
+//（fail-closed，不扩语义）。第一/二形态（reset_at 缺失/过期，语义=「仍耗尽无
+// 恢复时刻」）保持 plan_exhausted=true 前提：pe=false 不触发（无矛盾证据，保守
+// 不扩语义）；第三形态（停调晚于官方 reset_at）以时间矛盾独立触发，pe 值不作
+// 前提（生产实证 2026-10-08 第二轮：4 账号官方已恢复 pe=false 但停调挂旧口径
+// 11-06，探针 recovered 即清停调）；快照缺失不触发（无矛盾证据）。account 为
+// sweepCandidates 取到的 repo 新鲜副本，无检查-写入窗口。
 func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, st *cnQuotaLifecycleState, now time.Time) bool {
 	if s == nil || account == nil || st == nil {
 		return false
@@ -512,7 +515,13 @@ func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, s
 		return false
 	}
 	snap, ok := TokenHarborPassSnapshotFromExtra(account)
-	return ok && snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now) || cur.After(*snap.ResetAt))
+	// pe=true 触发第一/二形态（reset_at 缺失/过期）；pe=false 不触发的是第一/二
+	// 形态（无矛盾证据）；第三形态（停调晚于官方 reset_at，无论官方 reset_at 在
+	// 未来还是已过期——过期时矛盾更直接）以时间矛盾独立触发
+	//（生产实证 2026-10-08 第二轮：4 账号官方已恢复 pe=false 但停调挂旧口径
+	// 11-06，探针 recovered 即清停调）。
+	return ok && (snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now)) ||
+		(snap.ResetAt != nil && cur.After(*snap.ResetAt)))
 }
 
 // parkedUntil 从持久化恢复时间近似还原当前停调到期点（用于「仍耗尽」续停的
