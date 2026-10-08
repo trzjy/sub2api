@@ -18,7 +18,9 @@ package service
 //	      └─ 不确定 → 失败关闭 + 保持停调 + 告警保持 firing
 //
 // 两条链的差异只有恢复时间来源（L1/L7）：
-//   - TH 订阅链：extra th_pass_snapshot.renews_at（面板快照）
+//   - TH 订阅链：extra th_pass_snapshot.renews_at 只是订阅续期日（≈28 天），与
+//     额度周期无关，不参与恢复判定；真实额度周期 = free-tier reset_at（7 天窗口，
+//     重置时刻在 /api/me/free-tier，见 resolveRecoveryTime）。
 //   - TH 免费链：7 天滚动无精确时刻 → 恢复时间未知，靠 5 分钟确认循环兜底
 //   - Kira 免费链：每日重置（站点按越南时区，由当日窗口推导）
 //   - 上游响应内重置时间永远优先（L4）
@@ -307,6 +309,9 @@ func (s *CNQuotaLifecycleService) confirmExhausted(ctx context.Context, account 
 		LastProbeOutcome: cnQuotaLifecycleProbeExhausted,
 		UpdatedAt:        now.UTC().Format(time.RFC3339),
 	})
+	// 存量收敛（D-QLM-007 §2）：把既有 recovery_at（可能按旧 renewsAt 口径写入）
+	// 收敛到最新 reset_at；幂等，正常路径下 recovery_at 已为 reset_at 时 no-op。
+	s.convergeTHStockRecovery(ctx, account)
 	// 已知恢复时间时持久候选发现（ListTempUnschedulableAccounts + extra 状态键）
 	// 覆盖本账号，无需进程内跟踪；未知恢复时间同样停调、同样持久可见。
 	s.untrack(account.ID)
@@ -650,8 +655,9 @@ func (s *CNQuotaLifecycleService) resolveAccountProxyURL(account *Account) strin
 // --- 恢复时间解析（L4） ---
 
 // resolveRecoveryTime 按优先级解析官方恢复时间（L4：上游响应内重置时间 > 面板
-// 快照（TH renewsAt / Kira 每日重置时刻）> 兜底周期确认探针）。返回 (时间, 来源,
-// 是否有官方值)；无官方值时 known=false，由调用方登记未知并走 5 分钟确认循环。
+// 快照（TH free-tier reset_at / Kira 每日重置时刻）> 兜底周期确认探针）。返回
+// (时间, 来源, 是否有官方值)；无官方值时 known=false，由调用方登记未知并走
+// 5 分钟确认循环。注意：TH 的 renews_at 是订阅续期日，与额度周期无关，不采用。
 func (s *CNQuotaLifecycleService) resolveRecoveryTime(account *Account, upstreamMsg string, now time.Time) (time.Time, string, bool) {
 	// 1) 上游响应内重置时间（最高优先级）。
 	if t := cnQuotaUpstreamMsgResetTime(upstreamMsg, now); t != nil {
@@ -662,12 +668,111 @@ func (s *CNQuotaLifecycleService) resolveRecoveryTime(account *Account, upstream
 		// Kira 免费池每日重置（站点按越南时区），上游无响应字段，由当日窗口推导。
 		return kiraNextDailyReset(now), cnQuotaRecoverySourceSnapshot, true
 	}
-	if snap, ok := TokenHarborPassSnapshotFromExtra(account); ok && snap.RenewsAt != nil && snap.RenewsAt.After(now) {
-		// TH 订阅链：Pass 周期 renewsAt。免费链（7 天滚动）无精确时刻 → 落 unknown。
-		return *snap.RenewsAt, cnQuotaRecoverySourceSnapshot, true
+	// TH 真实额度周期 = free-tier reset_at（7 天窗口，重置时刻在 /api/me/free-tier
+	// 的 reset_at，见 thPassSnapshotResetAt）；renews_at 是订阅续期日（≈28 天，与
+	// 额度无关）不参与恢复判定。reset_at 在未来时返回它；过期或缺失 → 落 unknown
+	//（免费链 7 天滚动无精确时刻，靠 5 分钟确认循环兜底）。
+	if resetAt, ok := thPassSnapshotResetAt(account); ok && resetAt.After(now) {
+		return resetAt, cnQuotaRecoverySourceSnapshot, true
 	}
 	// 3) 兜底：恢复时间未知，5 分钟确认循环推进。
 	return time.Time{}, cnQuotaRecoverySourceUnknown, false
+}
+
+// --- TH 免费档快照读取（D-QLM-007 消费 D-QLM-006 契约字段）---
+//
+// 以下两个读取器直接读账号 extra 的 th_pass_snapshot 子映射里的 reset_at /
+// plan_exhausted。D-QLM-006 在 TokenHarborPassSnapshot 上新增冻结字段
+// reset_at / plan_exhausted（与本卡同源写入 th_pass_snapshot），但 006 未合入
+// 前本卡不修改该禁区文件，直接读底层 extra 子映射——不新增第二套恢复时间存储，
+// 待 006 合入后此处可平替为 snap.ResetAt / snap.PlanExhausted（行为不变）。
+
+// thPassSnapshotResetAt 从 extra 的 th_pass_snapshot 读 free-tier 重置时刻
+// reset_at（RFC3339）。返回 (零值, false) 的情形：键缺失、非 map、字段缺失/
+// 类型不符/解析失败。
+func thPassSnapshotResetAt(account *Account) (time.Time, bool) {
+	if account == nil || account.Extra == nil {
+		return time.Time{}, false
+	}
+	raw, ok := account.Extra[TokenHarborPassSnapshotExtraKey]
+	if !ok || raw == nil {
+		return time.Time{}, false
+	}
+	sub, ok := raw.(map[string]any)
+	if !ok {
+		return time.Time{}, false
+	}
+	s, ok := sub["reset_at"].(string)
+	if !ok || s == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// thPassSnapshotPlanExhausted 从 extra 的 th_pass_snapshot 读 plan_exhausted
+//（免费档是否已耗尽）。缺失/类型不符视为 false（不编造耗尽）。
+func thPassSnapshotPlanExhausted(account *Account) bool {
+	if account == nil || account.Extra == nil {
+		return false
+	}
+	raw, ok := account.Extra[TokenHarborPassSnapshotExtraKey]
+	if !ok || raw == nil {
+		return false
+	}
+	sub, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	b, ok := sub["plan_exhausted"].(bool)
+	if !ok {
+		return false
+	}
+	return b
+}
+
+// convergeTHStockRecovery 存量收敛（D-QLM-007 §2）：TH 账号周期快照刷新观察到
+// plan_exhausted=true 且 reset_at 有效时，把额度状态机里的 recovery_at 收敛到
+// 最新 reset_at，覆盖历史上按 renewsAt 写入的旧值（含线上存量）。仅在已有
+// lifecycle 状态（recovery_at 已知）时改写；无状态/未知则不编造。reset_at 过期
+// 或缺失且仍 plan_exhausted → 不收敛（交由 L3/L4 的 unknown 兜底循环处理）。
+// 调用方（快照刷新链 / 响应式确认路径）负责在刷新后触发；本方法幂等且只改
+// cn_quota_lifecycle 窄面。
+func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, account *Account) {
+	if s == nil || s.accountRepo == nil || account == nil {
+		return
+	}
+	if cnQuotaLifecycleProviderOf(account) != cnQuotaLifecycleProviderTokenHarbor {
+		return
+	}
+	// 仅在免费档确已耗尽且缓存了有效重置时刻时收敛。
+	if !thPassSnapshotPlanExhausted(account) {
+		return
+	}
+	resetAt, ok := thPassSnapshotResetAt(account)
+	if !ok || !resetAt.After(s.now()) {
+		return // 过期/缺失 → 不收敛（unknown 兜底循环负责）
+	}
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	if !ok || st.RecoveryAt == "" {
+		return // 无既有 recovery_at 不编造（首次耗尽由确认路径写入）
+	}
+	// 上游响应内重置时间（L4 最高优先级）已登记的 recovery_at 不回退到 snapshot
+	// 口径：上游 > reset_at，避免覆盖更权威的官方值。
+	if st.RecoverySource == cnQuotaRecoverySourceUpstream {
+		return
+	}
+	// 已有 recovery_at：与最新 reset_at 相同则无需改写。
+	if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil && cur.Equal(resetAt) {
+		return
+	}
+	st.RecoveryAt = cnQuotaRFC3339OrEmpty(resetAt, true)
+	st.RecoverySource = cnQuotaRecoverySourceSnapshot
+	st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
+	s.persistLifecycleState(ctx, account.ID, st)
 }
 
 // cnQuotaUpstreamMsgResetTime 从上游响应文案中提取未来的 RFC3339 重置时间；

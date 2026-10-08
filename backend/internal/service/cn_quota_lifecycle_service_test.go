@@ -43,10 +43,12 @@ func newQuotaLifecycleTHAccount(id int64) *Account {
 		},
 		Extra: map[string]any{
 			TokenHarborPassSnapshotExtraKey: map[string]any{
-				"has_pass":   true,
-				"pass_name":  "Agent Pass",
-				"renews_at":  quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
-				"fetched_at": quotaLifecycleBase.Format(time.RFC3339),
+				"has_pass":       true,
+				"pass_name":      "Agent Pass",
+				"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339), // 订阅续期日（≈28 天），不参与恢复判定
+				"reset_at":       quotaLifecycleBase.Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339),  // free-tier 真实额度周期重置时刻
+				"plan_exhausted": true,
+				"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
 			},
 		},
 	}
@@ -267,7 +269,7 @@ func newQuotaLifecycleTestService(repo *quotaLifecycleFakeRepo, alerts *fakeQuot
 
 // ---------- 入口：确认耗尽 ----------
 
-// 确认探针属实 → 停调至官方恢复时间（TH renews_at）+ fire 告警 + 状态落库。
+// 确认探针属实 → 停调至官方恢复时间（TH free-tier reset_at，非订阅续期日 renews_at）+ fire 告警 + 状态落库。
 func TestQuotaLifecycleOnUpstreamConfirmedParksToOfficialRecoveryAndFiresAlert(t *testing.T) {
 	account := newQuotaLifecycleTHAccount(207)
 	repo := newQuotaLifecycleFakeRepo(account)
@@ -280,22 +282,22 @@ func TestQuotaLifecycleOnUpstreamConfirmedParksToOfficialRecoveryAndFiresAlert(t
 
 	// 1) 确认探针恰好一次。
 	require.Equal(t, 1, probe.calls)
-	// 2) 停调到期 = 官方恢复时间（th_pass_snapshot.renews_at），非滚动冷却。
+	// 2) 停调到期 = 官方恢复时间（th_pass_snapshot.reset_at，非订阅续期日 renews_at），非滚动冷却。
 	until, ok := repo.parkedUntil(207)
 	require.True(t, ok, "confirmed exhaustion must park the account")
-	renewsAt, _ := time.Parse(time.RFC3339, quotaLifecycleBase.Add(30*24*time.Hour).UTC().Format(time.RFC3339))
-	require.Equal(t, renewsAt, until)
+	resetAt, _ := time.Parse(time.RFC3339, quotaLifecycleBase.Add(7*24*time.Hour).UTC().Format(time.RFC3339))
+	require.Equal(t, resetAt, until)
 	require.True(t, strings.HasPrefix(repo.parkedReason(207), cnQuotaExhaustedReasonPrefix))
 	// 3) 告警 fire（kind=quota_exhausted，账号级维度）且恰好一条。
 	fired := alerts.firingEvents(quotaAlertDimsFor(207))
 	require.Len(t, fired, 1)
 	require.Equal(t, OpsAlertStatusFiring, fired[0].Status)
 	require.Equal(t, quotaAlertSeverity, fired[0].Severity)
-	// 4) 状态落库：exhausted + recovery_at=renews_at + 来源 snapshot。
+	// 4) 状态落库：exhausted + recovery_at=reset_at（非 renews_at）+ 来源 snapshot。
 	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
 	require.True(t, ok)
 	require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
-	require.Equal(t, renewsAt.UTC().Format(time.RFC3339), st.RecoveryAt)
+	require.Equal(t, resetAt.UTC().Format(time.RFC3339), st.RecoveryAt)
 	require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
 	require.Equal(t, cnQuotaLifecycleProbeExhausted, st.LastProbeOutcome)
 }
@@ -481,7 +483,7 @@ func TestQuotaLifecycleRecoveryTimeSourcePriority(t *testing.T) {
 		require.Equal(t, cnQuotaRecoverySourceUpstream, st.RecoverySource)
 	})
 
-	t.Run("TH snapshot renews_at when no upstream time", func(t *testing.T) {
+	t.Run("TH snapshot reset_at when no upstream time", func(t *testing.T) {
 		account := newQuotaLifecycleTHAccount(207)
 		repo := newQuotaLifecycleFakeRepo(account)
 		alerts := &fakeQuotaAlertStore{}
@@ -492,15 +494,15 @@ func TestQuotaLifecycleRecoveryTimeSourcePriority(t *testing.T) {
 
 		until, ok := repo.parkedUntil(207)
 		require.True(t, ok)
-		want, _ := time.Parse(time.RFC3339, quotaLifecycleBase.Add(30*24*time.Hour).UTC().Format(time.RFC3339))
+		want, _ := time.Parse(time.RFC3339, quotaLifecycleBase.Add(7*24*time.Hour).UTC().Format(time.RFC3339))
 		require.Equal(t, want, until)
 		st, _ := cnQuotaLifecycleStateFromExtra(account.Extra)
 		require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
 	})
 
-	t.Run("TH free chain without renews_at registers unknown and uses far-future placeholder", func(t *testing.T) {
+	t.Run("TH without reset_at registers unknown and uses far-future placeholder", func(t *testing.T) {
 		account := newQuotaLifecycleTHAccount(207)
-		delete(account.Extra, TokenHarborPassSnapshotExtraKey) // 无订阅快照（免费链 7 天滚动无精确时刻）
+		delete(account.Extra, TokenHarborPassSnapshotExtraKey) // 无 th_pass_snapshot（无 reset_at → 免费链 7 天滚动无精确时刻）
 		repo := newQuotaLifecycleFakeRepo(account)
 		alerts := &fakeQuotaAlertStore{}
 		probe := &quotaProbeController{outcome: quotaProbeExhausted}
@@ -550,6 +552,124 @@ func TestQuotaLifecycleRecoveryTimeSourcePriority(t *testing.T) {
 		st, _ := cnQuotaLifecycleStateFromExtra(account.Extra)
 		require.Equal(t, cnQuotaRecoverySourceUpstream, st.RecoverySource)
 	})
+}
+
+// ---------- TH 恢复来源 = free-tier reset_at（D-QLM-007 §1）----------
+
+// TH 快照 reset_at 含未来值 → recovery_at=reset_at、source=snapshot（不采用 renews_at）。
+func TestQuotaLifecycleTHResetAtFutureParksToResetAt(t *testing.T) {
+	account := newQuotaLifecycleTHAccount(207)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), account, "Your Pass allowance for this period is used"))
+
+	until, ok := repo.parkedUntil(207)
+	require.True(t, ok)
+	want, _ := time.Parse(time.RFC3339, quotaLifecycleBase.Add(7*24*time.Hour).UTC().Format(time.RFC3339))
+	require.Equal(t, want, until, "TH recovery must use free-tier reset_at, not subscription renews_at")
+	st, _ := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.Equal(t, want.UTC().Format(time.RFC3339), st.RecoveryAt)
+	require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
+}
+
+// TH 快照 reset_at 已过期且 plan_exhausted=true → 登记 unknown，走 5 分钟兜底循环。
+func TestQuotaLifecycleTHResetAtExpiredFallsToUnknown(t *testing.T) {
+	account := newQuotaLifecycleTHAccount(207)
+	expired := quotaLifecycleBase.Add(-time.Hour)
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"pass_name":      "Agent Pass",
+		"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		"reset_at":       expired.UTC().Format(time.RFC3339),
+		"plan_exhausted": true,
+		"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), account, "Your Pass allowance for this period is used"))
+
+	until, ok := repo.parkedUntil(207)
+	require.True(t, ok)
+	require.Equal(t, quotaLifecycleBase.Add(quotaLifecycleUnknownRecoveryPlaceholder), until,
+		"expired reset_at with plan_exhausted must fall to the unknown far-future placeholder")
+	st, _ := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.Equal(t, "", st.RecoveryAt, "expired reset_at must register unknown recovery time")
+	require.Equal(t, cnQuotaRecoverySourceUnknown, st.RecoverySource)
+}
+
+// ---------- TH 存量收敛（D-QLM-007 §2）----------
+
+// 存量收敛：账号 extra 已存 renewsAt 口径的 recovery_at，刷新后快照带
+// plan_exhausted=true + 新 reset_at，则 recovery_at 被改写为 reset_at（覆盖旧值）。
+func TestQuotaLifecycleTHStockRecoveryConvergesRenewsAtToResetAt(t *testing.T) {
+	account := newQuotaLifecycleTHAccount(207)
+	// 模拟线上存量：历史按 renewsAt 写入的 recovery_at（≈28 天）。
+	oldRenewsAt := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+	account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":             cnQuotaLifecycleStateExhausted,
+		"recovery_at":       oldRenewsAt.UTC().Format(time.RFC3339),
+		"recovery_source":   cnQuotaRecoverySourceSnapshot,
+		"last_probe_at":     quotaLifecycleBase.Format(time.RFC3339),
+		"last_probe_outcome": cnQuotaLifecycleProbeExhausted,
+		"updated_at":        quotaLifecycleBase.Format(time.RFC3339),
+	}
+	// 刷新后快照带 plan_exhausted=true + 新 reset_at（7 天窗口，比 renewsAt 早）。
+	newResetAt := quotaLifecycleBase.Add(7 * 24 * time.Hour)
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"pass_name":      "Agent Pass",
+		"renews_at":      oldRenewsAt.UTC().Format(time.RFC3339),
+		"reset_at":       newResetAt.UTC().Format(time.RFC3339),
+		"plan_exhausted": true,
+		"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	svc.convergeTHStockRecovery(context.Background(), account)
+
+	// 既存的 renewsAt 口径 recovery_at 必须被收敛到最新 reset_at。
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.NotEqual(t, oldRenewsAt.UTC().Format(time.RFC3339), st.RecoveryAt,
+		"stale renewsAt-based recovery_at must be overwritten")
+	require.Equal(t, newResetAt.UTC().Format(time.RFC3339), st.RecoveryAt,
+		"recovery_at must converge from old renewsAt to the latest reset_at")
+	require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
+}
+
+// 存量收敛边界：plan_exhausted=true 但 reset_at 已过期 → 不收敛（维持未知兜底，
+// 不把过期 reset_at 写回 recovery_at）。
+func TestQuotaLifecycleTHStockRecoverySkipsExpiredResetAt(t *testing.T) {
+	account := newQuotaLifecycleTHAccount(207)
+	oldRenewsAt := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+	account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":       cnQuotaLifecycleStateExhausted,
+		"recovery_at": oldRenewsAt.UTC().Format(time.RFC3339),
+		"updated_at":  quotaLifecycleBase.Format(time.RFC3339),
+	}
+	expired := quotaLifecycleBase.Add(-time.Hour)
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"reset_at":       expired.UTC().Format(time.RFC3339),
+		"plan_exhausted": true,
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	svc.convergeTHStockRecovery(context.Background(), account)
+
+	// 过期 reset_at：不收敛，既有 recovery_at 保持不变（交由 unknown 兜底循环）。
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.Equal(t, oldRenewsAt.UTC().Format(time.RFC3339), st.RecoveryAt,
+		"expired reset_at must not be written back as recovery_at")
 }
 
 // ---------- 5 分钟循环节距 ----------

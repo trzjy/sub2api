@@ -28,7 +28,8 @@ import (
 
 // ProvideCNQuotaLifecycleService 装配 → rateLimitService.SetCNQuotaLifecycle 已注入：
 // 402 入口端到端（真实状态机 + 真实 OpsService 告警面 + fake 上游 402 确认耗尽）：
-// 停调到期 = th_pass_snapshot.renews_at，告警经 OpsService 窄面可查（kind=quota_exhausted）。
+// 停调到期 = th_pass_snapshot.reset_at（free-tier 真实额度周期；renews_at 是订阅续期日
+// 不参与恢复判定，D-QLM-007），告警经 OpsService 窄面可查（kind=quota_exhausted）。
 func TestWireCNQuotaLifecycleInjectsReactiveEntryEndToEnd(t *testing.T) {
 	account := newQuotaLifecycleTHAccount(207)
 	repo := newQuotaLifecycleFakeRepo(account)
@@ -51,11 +52,11 @@ func TestWireCNQuotaLifecycleInjectsReactiveEntryEndToEnd(t *testing.T) {
 
 	// 确认探针（对上游 max_tokens=1 ping，上游 402）→ 确认耗尽。
 	require.Equal(t, 1, upstream.tlsCalls, "confirmation probe must hit the upstream once")
-	// 停调到期 = 官方恢复时间（renews_at），非滚动冷却。
-	want := quotaLifecycleBase.Add(30 * 24 * time.Hour)
+	// 停调到期 = 官方恢复时间（free-tier reset_at，非订阅续期日 renews_at），非滚动冷却。
+	want := quotaLifecycleBase.Add(7 * 24 * time.Hour)
 	until, parked := repo.parkedUntil(207)
 	require.True(t, parked, "confirmed exhaustion must park via the wired state machine")
-	require.True(t, want.Equal(until), "park until must equal renews_at %s, got %s", want, until)
+	require.True(t, want.Equal(until), "park until must equal reset_at %s, got %s", want, until)
 	// cn_balance_low 响应式信号标记保留。
 	require.Equal(t, true, account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixLow)])
 	// 告警经 OpsService 生产实现 fire（GetActiveQuotaAlert 窄面可查）。
