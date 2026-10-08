@@ -143,7 +143,7 @@ func TestDeepSeekResponsesForwardRestoresClientToolsStreaming(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assertOpenAIClientToolsLowered(t, upstream.lastBody)
-	require.Equal(t, "/responses", upstream.lastReq.URL.Path)
+	require.Equal(t, "/v1/responses", upstream.lastReq.URL.Path)
 	output := recorder.Body.String()
 	require.Contains(t, output, `"type":"custom_tool_call"`)
 	require.Contains(t, output, `"type":"response.custom_tool_call_input.done"`)
@@ -184,7 +184,8 @@ func TestDeepSeekAdaptiveResponsesForwardRestoresClientToolsNonStreaming(t *test
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assertOpenAIClientToolsLowered(t, upstream.lastBody)
-	require.Equal(t, "/responses", upstream.lastReq.URL.Path)
+	// 中转 base 按 D-QLM-027 语义走 /v1/responses。
+	require.Equal(t, "/v1/responses", upstream.lastReq.URL.Path)
 	require.Equal(t, "custom_tool_call", gjson.Get(recorder.Body.String(), "output.0.type").String())
 	require.Equal(t, "pwd", gjson.Get(recorder.Body.String(), "output.0.input").String())
 	require.Equal(t, "custom_tool_call", gjson.Get(recorder.Body.String(), "output.1.type").String())
@@ -219,7 +220,7 @@ func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "custom", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
-	require.Equal(t, "/responses/compact", upstream.lastReq.URL.Path)
+	require.Equal(t, "/v1/responses/compact", upstream.lastReq.URL.Path)
 }
 
 func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {

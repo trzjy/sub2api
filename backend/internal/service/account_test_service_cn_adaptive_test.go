@@ -118,7 +118,8 @@ func TestAccountTestService_AdaptiveDeepSeekAlsoTestsResponsesEndpoint(t *testin
 
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 3)
-	require.Equal(t, "http://responses.example/responses", upstream.requests[2].URL.String())
+	// 中转 base 按 D-QLM-027 语义走 /v1/responses。
+	require.Equal(t, "http://responses.example/v1/responses", upstream.requests[2].URL.String())
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.requests[2].Context()))
 	require.Equal(t, "Bearer sk-adaptive-test", upstream.requests[2].Header.Get("Authorization"))
 	require.True(t, gjson.GetBytes(upstream.bodies[2], "stream").Bool())

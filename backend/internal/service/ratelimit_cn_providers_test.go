@@ -203,8 +203,9 @@ func TestHandleCNProviderInsufficientBalanceParksToOfficialRecoveryTime(t *testi
 
 	// 确认探针恰好一次。
 	require.Equal(t, 1, probe.calls)
-	// 停调到期 = th_pass_snapshot.renews_at（官方恢复时间），非滚动冷却。
-	want := quotaLifecycleBase.Add(30 * 24 * time.Hour)
+	// 停调到期 = th_pass_snapshot.reset_at（free-tier 真实额度周期重置时刻，
+	// 即官方恢复时间；renews_at 是订阅续期日，不参与恢复判定），非滚动冷却。
+	want := quotaLifecycleBase.Add(7 * 24 * time.Hour)
 	until, parked := repo.parkedUntil(207)
 	require.True(t, parked, "confirmed exhaustion must park the account")
 	require.True(t, want.Equal(until), "park until must equal official recovery time %s, got %s", want, until)

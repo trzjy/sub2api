@@ -109,7 +109,7 @@ func TestAdaptiveProtocolRoutesResponsesShapedChatToNativeResponses(t *testing.T
 
 	_, err := svc.ForwardAsChatCompletions(context.Background(), adaptiveProtocolTestContext("/v1/chat/completions", body), account, body, "", "")
 	require.Error(t, err)
-	require.Equal(t, "http://responses.example/responses", upstream.lastReq.URL.String())
+	require.Equal(t, "http://responses.example/v1/responses", upstream.lastReq.URL.String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "input").Exists())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "messages").Exists())
 }
@@ -216,7 +216,7 @@ func TestAdaptiveProtocolRoutesDeepSeekResponsesToNativeResponses(t *testing.T) 
 
 	_, err := svc.Forward(context.Background(), adaptiveProtocolTestContext("/v1/responses", body), account, body)
 	require.Error(t, err)
-	require.Equal(t, "http://responses.example/responses", upstream.lastReq.URL.String())
+	require.Equal(t, "http://responses.example/v1/responses", upstream.lastReq.URL.String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "store").Bool())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "previous_response_id").Exists())
 	require.Equal(t, int64(32), gjson.GetBytes(upstream.lastBody, "max_output_tokens").Int())
@@ -260,7 +260,8 @@ func TestFixedCNResponsesProtocolOverridesStaleChatMode(t *testing.T) {
 			err := tc.forward(svc, adaptiveProtocolTestContext(tc.path, tc.body), account, tc.body)
 
 			require.Error(t, err)
-			require.Equal(t, "http://responses.example/responses", upstream.lastReq.URL.String())
+			// 中转 base（非官方 api.deepseek.com）按 D-QLM-027 语义走 /v1/responses。
+			require.Equal(t, "http://responses.example/v1/responses", upstream.lastReq.URL.String())
 		})
 	}
 }
