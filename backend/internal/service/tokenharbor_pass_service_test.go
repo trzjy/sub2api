@@ -39,6 +39,12 @@ const (
 		`</form></body></html>`
 	testTHLoginChunk = `globalThis.createServerReference("` + testTHNextAction +
 		`", callServer, findSourceMapURL, "signIn");`
+	// 官方 /api/me/free-tier 完整响应样例（D-QLM-006 冻结键名）：reset_at 微秒+
+	// 时区时间戳，plan.window_days=7，plan_used_pct=100，plan_exhausted=true，
+	// used_pct=12.5，exhausted=false。
+	testTHFreeTierJSON = `{"reset_at":"2026-10-12T16:06:10.343487+00:00",` +
+		`"plan":{"window_days":7},"plan_used_pct":100,"plan_exhausted":true,` +
+		`"used_pct":12.5,"exhausted":false}`
 )
 
 type tokenHarborFakeTH struct {
@@ -59,6 +65,10 @@ type tokenHarborFakeTH struct {
 	usageCSVHits   int
 	usageCSVBody   string
 	usageCSVStatus int
+	// free-tier（D-QLM-006）：body 为空 = 默认官方样例 JSON；status 非 0 = 覆盖状态码。
+	freeTierHits   int
+	freeTierBody   string
+	freeTierStatus int
 }
 
 func newTokenHarborFakeTH(t *testing.T, billing401Once bool) *tokenHarborFakeTH {
@@ -71,6 +81,7 @@ func newTokenHarborFakeTH(t *testing.T, billing401Once bool) *tokenHarborFakeTH 
 	})
 	mux.HandleFunc("/dashboard/billing", fake.handleBilling)
 	mux.HandleFunc("/api/usage/export.csv", fake.handleUsageCSV)
+	mux.HandleFunc("/api/me/free-tier", fake.handleFreeTier)
 	fake.mux = mux
 	fake.server = httptest.NewServer(mux)
 	t.Cleanup(fake.server.Close)
@@ -141,6 +152,38 @@ func (f *tokenHarborFakeTH) handleUsageCSV(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	_, _ = w.Write([]byte(f.usageCSVBody))
+}
+
+func (f *tokenHarborFakeTH) handleFreeTier(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.freeTierHits++
+	if r.Header.Get("Cookie") == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if f.freeTierStatus != 0 {
+		w.WriteHeader(f.freeTierStatus)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	body := f.freeTierBody
+	if body == "" {
+		body = testTHFreeTierJSON
+	}
+	_, _ = w.Write([]byte(body))
+}
+
+func (f *tokenHarborFakeTH) setFreeTierStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.freeTierStatus = status
+}
+
+func (f *tokenHarborFakeTH) setFreeTierBody(body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.freeTierBody = body
 }
 
 func (f *tokenHarborFakeTH) stats() (loginPosts, billingHits int) {
@@ -489,21 +532,19 @@ func TestTokenHarborPassPersistAndReadSnapshotExtra(t *testing.T) {
 
 // ---- th_usage_snapshot（§4.3）：CSV 窗口聚合 + 失败关闭 + 契约 ----
 
-// testTHUsageCSV 构造按 now 锚定的 usage CSV：四行分别落 today / 7d-only /
-// 30d-only（7d 窗外）/ 30d 窗外，窗口归属与 tokenharbor.ai 线上形态对齐。
-// 相对锚定避免日期翻转炸弹（原 const 硬编码 2026-10-06，次日起 today 窗口落空）。
+// testTHUsageCSV 构造按 now 锚定的 usage CSV：三行分别落 today / 7d-only /
+// 7d 窗外，窗口归属与 tokenharbor.ai 线上形态对齐。D-QLM-006 起 windows 只留
+// today/7d 两键（30d 本地聚合删除）。相对锚定避免日期翻转炸弹。
 func testTHUsageCSV(now time.Time) string {
 	todayStart := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
 	return fmt.Sprintf(`timestamp,model,input_tokens,output_tokens,status,cost
 %s,glm-5.3-flash,100,10,200,0
 %s,glm-5.3-flash,200,20,200,0
 %s,qwen3.8-flash,400,40,200,0
-%s,qwen3.8-flash,8000,800,200,0
 `,
 		todayStart.Format(time.RFC3339),                                   // today 窗口
-		todayStart.Add(-1*time.Hour).Format(time.RFC3339),                 // 昨日 23:00，today+7d+30d
-		todayStart.Add(-8*24*time.Hour+13*time.Hour).Format(time.RFC3339), // 8 天前 13:00，仅 30d
-		todayStart.Add(-35*24*time.Hour).Format(time.RFC3339),             // 35 天前，30d 窗外
+		todayStart.Add(-1*time.Hour).Format(time.RFC3339),                 // 昨日 23:00，today+7d
+		todayStart.Add(-8*24*time.Hour+13*time.Hour).Format(time.RFC3339), // 8 天前 13:00，7d 窗外
 	)
 }
 
@@ -513,11 +554,10 @@ func TestParseTokenHarborUsageCSV_WindowAggregation(t *testing.T) {
 	snapshot, err := parseTokenHarborUsageCSV(testTHUsageCSV(now), now)
 
 	require.NoError(t, err)
-	// §4.3 契约：windows 三键齐全，跨窗边界各归其位。
-	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(snapshot.Windows))
+	// §4.3 契约：windows today/7d 两键，跨窗边界各归其位。
+	require.Equal(t, []string{"7d", "today"}, sortedStringKeys(snapshot.Windows))
 	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 1, TokensIn: 100, TokensOut: 10}, snapshot.Windows["today"])
 	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 2, TokensIn: 300, TokensOut: 30}, snapshot.Windows["7d"])
-	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 3, TokensIn: 700, TokensOut: 70}, snapshot.Windows["30d"])
 	require.Equal(t, now, snapshot.FetchedAt)
 }
 
@@ -544,10 +584,9 @@ func TestParseTokenHarborUsageCSV_NewOfficialHeader(t *testing.T) {
 	snapshot, err := parseTokenHarborUsageCSV(body, now)
 
 	require.NoError(t, err, "新官方表头必须命中别名并解析成功（D-TH-02）")
-	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(snapshot.Windows))
+	require.Equal(t, []string{"7d", "today"}, sortedStringKeys(snapshot.Windows))
 	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 1, TokensIn: 100, TokensOut: 10}, snapshot.Windows["today"])
 	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 2, TokensIn: 300, TokensOut: 30}, snapshot.Windows["7d"])
-	require.Equal(t, TokenHarborUsageWindowTotals{Requests: 3, TokensIn: 700, TokensOut: 70}, snapshot.Windows["30d"])
 	require.Equal(t, now, snapshot.FetchedAt)
 }
 
@@ -641,8 +680,8 @@ func TestTokenHarborUsageSnapshotJSONContract(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &raw))
 	require.Equal(t, []string{"fetched_at", "windows"}, sortedStringKeys(raw))
 	windows := raw["windows"].(map[string]any)
-	require.Equal(t, []string{"30d", "7d", "today"}, sortedStringKeys(windows))
-	for _, name := range []string{"today", "7d", "30d"} {
+	require.Equal(t, []string{"7d", "today"}, sortedStringKeys(windows))
+	for _, name := range []string{"today", "7d"} {
 		keys := sortedStringKeys(windows[name].(map[string]any))
 		require.Equal(t, []string{"requests", "tokens_in", "tokens_out"}, keys, "窗口 %s 键名必须与 §4.3 契约一致", name)
 	}
@@ -682,7 +721,7 @@ func TestTokenHarborPassProbeUsageSnapshot(t *testing.T) {
 	require.Equal(t, 1, fakeTH.usageCSVHits)
 	require.InDelta(t, 1, snapshot.Windows["today"].Requests, 0.001)
 	require.InDelta(t, 100, snapshot.Windows["today"].TokensIn, 0.001)
-	require.InDelta(t, 3, snapshot.Windows["30d"].Requests, 0.001)
+	require.InDelta(t, 2, snapshot.Windows["7d"].Requests, 0.001)
 
 	// 第二次：会话缓存命中 → 不重登（usage 快照节流：Extra 未落库所以仍拉 CSV）。
 	_, err = svc.ProbeUsageSnapshot(context.Background(), tokenHarborTestAccount(11))
@@ -752,18 +791,31 @@ func TestTokenHarborQuotaProductionEntryIntegration(t *testing.T) {
 	require.NotEmpty(t, result.Snapshot.RenewsAt, "renews_at 必须输出（RFC3339）")
 	_, err = time.Parse(time.RFC3339, result.Snapshot.RenewsAt)
 	require.NoError(t, err)
-	require.Len(t, result.Snapshot.Windows, 3)
+	// D-QLM-006：free-tier 字段组随快照透传。
+	require.NotEmpty(t, result.Snapshot.ResetAt, "free-tier reset_at 必须输出（RFC3339）")
+	require.Equal(t, "2026-10-12T16:06:10Z", result.Snapshot.ResetAt, "reset_at 微秒时间戳截断为 RFC3339 秒级 Z")
+	_, err = time.Parse(time.RFC3339, result.Snapshot.ResetAt)
+	require.NoError(t, err)
+	require.Equal(t, 7, result.Snapshot.WindowDays)
+	require.InDelta(t, 100, result.Snapshot.PlanUsedPct, 0.001)
+	require.True(t, result.Snapshot.PlanExhausted)
+	require.InDelta(t, 12.5, result.Snapshot.UsedPct, 0.001)
+	require.False(t, result.Snapshot.Exhausted)
+	require.Len(t, result.Snapshot.Windows, 2)
 	require.InDelta(t, 1, result.Snapshot.Windows["today"].Requests, 0.001)
-	require.InDelta(t, 3, result.Snapshot.Windows["30d"].Requests, 0.001)
 
 	// 从 Extra 读回快照（管理端面板无探测读取路径）。
 	stored := &Account{Extra: repo.updates[21]}
 	passSnap, ok := TokenHarborPassSnapshotFromExtra(stored)
 	require.True(t, ok)
 	require.True(t, passSnap.HasPass)
+	require.NotNil(t, passSnap.ResetAt)
+	require.Equal(t, 7, passSnap.WindowDays)
+	require.InDelta(t, 100, passSnap.PlanUsedPct, 0.001)
+	require.True(t, passSnap.PlanExhausted)
 	usageSnap, ok := TokenHarborUsageSnapshotFromExtra(stored)
 	require.True(t, ok)
-	require.Len(t, usageSnap.Windows, 3)
+	require.Len(t, usageSnap.Windows, 2)
 }
 
 // 集成失败关闭：usage CSV 解析失败 → 明确错误、th_usage_snapshot 不落库
@@ -791,6 +843,95 @@ func TestTokenHarborQuotaProductionEntryIntegration_FailClosedOnBadCSV(t *testin
 	// 只有 th_pass_snapshot 落库；th_usage_snapshot 不落。
 	require.Len(t, repo.allWrites, 1)
 	require.Contains(t, repo.allWrites[0], TokenHarborPassSnapshotExtraKey)
+}
+
+// ============================================================================
+// D-QLM-006：free-tier 官方字段接入（GET /api/me/free-tier）
+// ============================================================================
+
+// 官方样例 JSON（含微秒+时区时间戳）解析出 reset_at=2026-10-12T16:06:10Z、
+// plan_used_pct=100、plan_exhausted=true、window_days=7。
+func TestParseTokenHarborFreeTier_OfficialSample(t *testing.T) {
+	fields, err := parseTokenHarborFreeTier(testTHFreeTierJSON)
+	require.NoError(t, err)
+	require.NotNil(t, fields.ResetAt)
+	require.Equal(t, "2026-10-12T16:06:10Z", fields.ResetAt.UTC().Format(time.RFC3339),
+		"reset_at 微秒+时区时间戳解析为正确瞬间，RFC3339 截断为 2026-10-12T16:06:10Z")
+	require.Equal(t, 7, fields.WindowDays)
+	require.InDelta(t, 100, fields.PlanUsedPct, 0.001)
+	require.True(t, fields.PlanExhausted)
+	require.InDelta(t, 12.5, fields.UsedPct, 0.001)
+	require.False(t, fields.Exhausted)
+}
+
+// reset_at 缺失不报错（omitempty，按官方形态允许为空）。
+func TestParseTokenHarborFreeTier_EmptyResetAt(t *testing.T) {
+	body := `{"plan":{"window_days":7},"plan_used_pct":0,"plan_exhausted":false,"used_pct":0,"exhausted":false}`
+	fields, err := parseTokenHarborFreeTier(body)
+	require.NoError(t, err)
+	require.Nil(t, fields.ResetAt)
+	require.Equal(t, 7, fields.WindowDays)
+}
+
+// 坏 JSON → 失败关闭。
+func TestParseTokenHarborFreeTier_BadJSONFailsClosed(t *testing.T) {
+	_, err := parseTokenHarborFreeTier("not-json")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "free-tier")
+}
+
+// D-QLM-006 失败语义：free-tier 拉取 500 → 整个 Probe 失败关闭（明确错误、不落
+// 半截快照），与 CSV 链同口径；Probe 自身不落 Extra，allWrites 必为空。
+func TestTokenHarborPassProbeFreeTierFailClosed_500(t *testing.T) {
+	repo := &tokenHarborRepoStub{}
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	svc := NewTokenHarborPassService(repo, nil, upstream)
+	svc.baseURL = fakeTH.server.URL
+	fakeTH.setFreeTierStatus(http.StatusInternalServerError)
+
+	_, err := svc.Probe(context.Background(), tokenHarborTestAccount(31))
+	require.Error(t, err, "free-tier 500 必须失败关闭")
+	require.Contains(t, err.Error(), "free-tier")
+	require.Empty(t, repo.allWrites, "Probe 失败不得落任何 Extra 快照")
+}
+
+// D-QLM-006 失败语义：free-tier 返回坏 JSON → 整个 Probe 失败关闭。
+func TestTokenHarborPassProbeFreeTierFailClosed_BadJSON(t *testing.T) {
+	repo := &tokenHarborRepoStub{}
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	svc := NewTokenHarborPassService(repo, nil, upstream)
+	svc.baseURL = fakeTH.server.URL
+	fakeTH.setFreeTierBody("not-json")
+
+	_, err := svc.Probe(context.Background(), tokenHarborTestAccount(32))
+	require.Error(t, err, "free-tier 坏 JSON 必须失败关闭")
+	require.Contains(t, err.Error(), "free-tier")
+	require.Empty(t, repo.allWrites, "Probe 失败不得落任何 Extra 快照")
+}
+
+// D-QLM-006 集成失败关闭：free-tier 500 → 生产入口 QueryUsage 返回失败、不产出
+// 快照输出、th_pass_snapshot 不落库（明确错误，不落半截快照）。
+func TestTokenHarborQuotaProductionEntryIntegration_FailClosedOnFreeTier500(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+	quotaSvc := NewCNProviderQuotaService(repo, nil, upstream, nil)
+	thSvc := NewTokenHarborPassService(repo, nil, upstream)
+	thSvc.baseURL = fakeTH.server.URL
+	quotaSvc.SetTokenHarborPassService(thSvc)
+	fakeTH.setFreeTierStatus(http.StatusInternalServerError)
+	account := thProductionAccount(33)
+	repo.account = account
+
+	result, err := quotaSvc.QueryUsage(context.Background(), 33)
+
+	require.NoError(t, err)
+	require.False(t, result.Success, "free-tier 500 必须失败关闭")
+	require.Contains(t, result.Error, "free-tier")
+	require.Nil(t, result.Snapshot, "失败关闭路径不产出快照输出")
+	require.Empty(t, repo.allWrites, "free-tier 失败不得落 th_pass_snapshot")
 }
 
 // ============================================================================

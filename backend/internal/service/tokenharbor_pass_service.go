@@ -79,6 +79,16 @@ type TokenHarborPassSnapshot struct {
 	SpendAfterAllowance bool       `json:"spend_after_allowance"`
 	AutoReloadEnabled   bool       `json:"auto_reload_enabled"`
 	FetchedAt           time.Time  `json:"fetched_at"`
+	// 以下字段来自登录态 GET /api/me/free-tier 官方口径（D-QLM-006），键名与
+	// 官方 API 逐字一致，冻结不可改：reset_at 为 Pass 津贴窗口重置时间；
+	// window_days 为 plan.window_days；plan_used_pct / plan_exhausted 为 Pass
+	// 津贴进度；used_pct / exhausted 为免费津贴进度。
+	ResetAt       *time.Time `json:"reset_at,omitempty"`
+	WindowDays    int        `json:"window_days,omitempty"`
+	PlanUsedPct   float64    `json:"plan_used_pct,omitempty"`
+	PlanExhausted bool       `json:"plan_exhausted"`
+	UsedPct       float64    `json:"used_pct,omitempty"`
+	Exhausted     bool       `json:"exhausted"`
 }
 
 // TokenHarborUsageWindowTotals 单窗口聚合（§4.3 th_usage_snapshot.windows
@@ -89,7 +99,7 @@ type TokenHarborUsageWindowTotals struct {
 	TokensOut float64 `json:"tokens_out"`
 }
 
-// TokenHarborUsageSnapshot 用量窗口快照（§4.3 契约：windows 三键齐全 today/7d/30d）。
+// TokenHarborUsageSnapshot 用量窗口快照（§4.3 契约：windows today/7d 两键）。
 type TokenHarborUsageSnapshot struct {
 	Windows   map[string]TokenHarborUsageWindowTotals `json:"windows"`
 	FetchedAt time.Time                               `json:"fetched_at"`
@@ -100,7 +110,7 @@ type tokenHarborSession struct {
 	loginAt time.Time
 }
 
-// tokenHarborProbeBackoff 单账号风控退避状态（内存副本；权威落 extra 三键）。
+// tokenHarborProbeBackoff 单账号风控退避状态（内存副本；权威落 extra 的 until/level/reason 三个键）。
 type tokenHarborProbeBackoff struct {
 	level  int
 	until  time.Time
@@ -223,7 +233,49 @@ func (s *TokenHarborPassService) probeBilling(ctx context.Context, account *Acco
 		return TokenHarborPassSnapshot{}, fmt.Errorf("tokenharbor billing page returned status %d for account %d", resp.status, account.ID)
 	}
 
-	return parseTokenHarborPassPage(resp.body, s.now().UTC())
+	snapshot, err := parseTokenHarborPassPage(resp.body, s.now().UTC())
+	if err != nil {
+		return TokenHarborPassSnapshot{}, err
+	}
+
+	// D-QLM-006：登录态再拉官方 /api/me/free-tier，填入快照 free-tier 字段组。
+	// 失败语义与 CSV 链同口径：拉取或解析失败 = 整个 Probe 失败关闭（明确错误，
+	// 不落半截快照、不用旧值兜底）。
+	ftResp, ferr := s.fetchFreeTier(ctx, account.ID, proxyURL, cookie)
+	if ferr == nil && tokenHarborSessionRejected(ftResp) {
+		s.invalidateSession(ctx, account.ID)
+		cookie, ferr = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
+		if ferr != nil {
+			return TokenHarborPassSnapshot{}, ferr
+		}
+		s.storeSession(ctx, account.ID, cookie)
+		ftResp, ferr = s.fetchFreeTier(ctx, account.ID, proxyURL, cookie)
+	}
+	if ferr != nil {
+		return TokenHarborPassSnapshot{}, ferr
+	}
+	if ftResp.status != http.StatusOK {
+		return TokenHarborPassSnapshot{}, fmt.Errorf("tokenharbor free-tier endpoint returned status %d for account %d", ftResp.status, account.ID)
+	}
+	ft, ferr := parseTokenHarborFreeTier(ftResp.body)
+	if ferr != nil {
+		return TokenHarborPassSnapshot{}, ferr
+	}
+	snapshot.ResetAt = ft.ResetAt
+	snapshot.WindowDays = ft.WindowDays
+	snapshot.PlanUsedPct = ft.PlanUsedPct
+	snapshot.PlanExhausted = ft.PlanExhausted
+	snapshot.UsedPct = ft.UsedPct
+	snapshot.Exhausted = ft.Exhausted
+	return snapshot, nil
+}
+
+// fetchFreeTier 登录态 GET /api/me/free-tier（官方 free-tier 口径），用现有 do
+// 帮助函数 + 会话 cookie，Accept: application/json。
+func (s *TokenHarborPassService) fetchFreeTier(ctx context.Context, accountID int64, proxyURL, cookie string) (*tokenHarborHTTPResponse, error) {
+	return s.do(ctx, accountID, proxyURL, cookie, http.MethodGet, s.baseURL+"/api/me/free-tier", nil, "", map[string]string{
+		"Accept": "application/json",
+	})
 }
 
 // PersistSnapshot 把快照写进账号 Extra（键 th_pass_snapshot），由调用方触发，
@@ -286,7 +338,7 @@ func TokenHarborUsageSnapshotFromExtra(account *Account) (*TokenHarborUsageSnaps
 
 // ProbeUsageSnapshot 登录态 GET /api/usage/export.csv（session 复用 pass 服务的
 // 登录链；出站带浏览器 UA、走账号绑定代理，与 Probe 同一套纪律），按
-// today/7d/30d 窗聚合官方逐笔行的 requests/tokens_in/tokens_out（浮点只做计数，
+// today/7d 窗聚合官方逐笔行的 requests/tokens_in/tokens_out（浮点只做计数，
 // 无金额运算，L6）。距上次成功探测不到 10 分钟时直接返回 Extra 既有快照——
 // 防止 UI 连点触发 TH 风控。解析失败=失败关闭返回明确错误，不落快照。
 func (s *TokenHarborPassService) ProbeUsageSnapshot(ctx context.Context, account *Account) (TokenHarborUsageSnapshot, error) {
@@ -443,7 +495,7 @@ func (s *TokenHarborPassService) invalidateSession(ctx context.Context, accountI
 // noteTokenHarborProbeFailure 风控退避触发（方案 §2.4）：Probe 返回错误且错误
 // 串含 "tokenharbor login rejected" 时，在 s.mu 临界区内完成状态转移——
 // level = 已有则 +1（上限 3）、无则 0；until = now + 30min×2^level；
-// reason = err.Error() 截断 200 字符。三键经 UpdateExtra 原子写（单次调用），
+// reason = err.Error() 截断 200 字符。这三个退避键经 UpdateExtra 原子写（单次调用），
 // 落库失败只 WARN。
 func (s *TokenHarborPassService) noteTokenHarborProbeFailure(ctx context.Context, account *Account, probeErr error) {
 	if account == nil || probeErr == nil || !strings.Contains(probeErr.Error(), tokenHarborLoginRejectedMarker) {
@@ -455,7 +507,7 @@ func (s *TokenHarborPassService) noteTokenHarborProbeFailure(ctx context.Context
 	if current, ok := s.backoffs[account.ID]; ok {
 		level = current.level + 1
 	} else if current, ok := tokenHarborProbeBackoffFromExtra(account, s.now()); ok {
-		// 重启恢复：内存无记录时以 extra 三键为"已有"基准继续升级。
+		// 重启恢复：内存无记录时以 extra 三个退避键为"已有"基准继续升级。
 		level = current.level + 1
 	}
 	if level > tokenHarborProbeBackoffMaxLevel {
@@ -479,7 +531,7 @@ func (s *TokenHarborPassService) noteTokenHarborProbeFailure(ctx context.Context
 	}
 }
 
-// noteTokenHarborProbeSuccess 探测成功清除退避（s.mu 临界区内）：三键置 null
+// noteTokenHarborProbeSuccess 探测成功清除退避（s.mu 临界区内）：三个退避键置 null
 // 一次；仅在已有退避时写（内存有记录，或 extra until>now），避免每轮空写。
 // 落库失败只 WARN。
 func (s *TokenHarborPassService) noteTokenHarborProbeSuccess(ctx context.Context, account *Account) {
@@ -835,6 +887,59 @@ func parseTokenHarborPassPage(text string, fetchedAt time.Time) (TokenHarborPass
 	return snapshot, nil
 }
 
+// tokenHarborFreeTierResponse 是官方 /api/me/free-tier 完整响应的最小解析结构
+// （字段名与官方 API 逐字一致，冻结；D-QLM-006）。顶层 reset_at / plan_used_pct /
+// plan_exhausted / used_pct / exhausted，嵌套 plan.window_days。
+type tokenHarborFreeTierResponse struct {
+	ResetAt        string `json:"reset_at"`
+	Plan           struct {
+		WindowDays int `json:"window_days"`
+	} `json:"plan"`
+	PlanUsedPct   float64 `json:"plan_used_pct"`
+	PlanExhausted bool    `json:"plan_exhausted"`
+	UsedPct       float64 `json:"used_pct"`
+	Exhausted     bool    `json:"exhausted"`
+}
+
+// tokenHarborFreeTierFields 是 free-tier 解析结果中转结构，供 probeBilling 填回
+// 主快照的 free-tier 字段组。
+type tokenHarborFreeTierFields struct {
+	ResetAt       *time.Time
+	WindowDays    int
+	PlanUsedPct   float64
+	PlanExhausted bool
+	UsedPct       float64
+	Exhausted     bool
+}
+
+// parseTokenHarborFreeTier 解析官方 /api/me/free-tier JSON（encoding/json）。
+// reset_at 为微秒+时区时间戳（样例 2026-10-12T16:06:10.343487+00:00），time.RFC3339
+// 可直接解析。任一必需字段缺失/解析失败 = 失败关闭返回明确错误（与 CSV 链同口径），
+// 禁止兜底假值。
+func parseTokenHarborFreeTier(body string) (tokenHarborFreeTierFields, error) {
+	var resp tokenHarborFreeTierResponse
+	dec := json.NewDecoder(strings.NewReader(body))
+	if err := dec.Decode(&resp); err != nil {
+		return tokenHarborFreeTierFields{}, fmt.Errorf("tokenharbor free-tier response is not valid JSON: %w", err)
+	}
+	fields := tokenHarborFreeTierFields{
+		WindowDays:    resp.Plan.WindowDays,
+		PlanUsedPct:   resp.PlanUsedPct,
+		PlanExhausted: resp.PlanExhausted,
+		UsedPct:       resp.UsedPct,
+		Exhausted:     resp.Exhausted,
+	}
+	if strings.TrimSpace(resp.ResetAt) != "" {
+		resetAt, err := time.Parse(time.RFC3339, strings.TrimSpace(resp.ResetAt))
+		if err != nil {
+			return tokenHarborFreeTierFields{}, fmt.Errorf("tokenharbor free-tier reset_at %q is not RFC3339: %w", resp.ResetAt, err)
+		}
+		rt := resetAt.UTC()
+		fields.ResetAt = &rt
+	}
+	return fields, nil
+}
+
 func tokenHarborBoolMatch(text string, re *regexp.Regexp) bool {
 	match := re.FindStringSubmatch(text)
 	return match != nil && match[1] == "true"
@@ -851,12 +956,12 @@ var tokenHarborUsageColumnAliases = map[string][]string{
 }
 
 // parseTokenHarborUsageCSV 解析 usage/export.csv 并按窗口聚合（§4.3 契约：
-// windows 三键 today/7d/30d 齐全）。
+// windows today/7d 两键）。
 //
 // 窗口口径（推导规则，与面板一致）：
 //   - today：UTC 当日零点起的日历窗口；
-//   - 7d / 30d：滚动 [now-7d/30d, now]；
-//   - 一行计入窗口当且仅当 窗口起点 ≤ 行时间 ≤ now；早于 30d 的行不计入任何窗口。
+//   - 7d：滚动 [now-7d, now]；
+//   - 一行计入窗口当且仅当 窗口起点 ≤ 行时间 ≤ now；早于 7d 的行不计入任何窗口。
 //
 // 失败关闭（外审 F3 同口径）：必需列缺失、行时间无法解析/超前于 now、
 // tokens 数值无法解析或为负数 → 返回明确错误，调用方不得落快照。
@@ -896,11 +1001,9 @@ func parseTokenHarborUsageCSV(body string, now time.Time) (TokenHarborUsageSnaps
 	now = now.UTC()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	start7d := now.Add(-7 * 24 * time.Hour)
-	start30d := now.Add(-30 * 24 * time.Hour)
 	windows := map[string]TokenHarborUsageWindowTotals{
 		"today": {},
 		"7d":    {},
-		"30d":   {},
 	}
 	add := func(w *TokenHarborUsageWindowTotals, tokensIn, tokensOut float64) {
 		w.Requests++
@@ -940,11 +1043,6 @@ func parseTokenHarborUsageCSV(body string, now time.Time) (TokenHarborUsageSnaps
 			w := windows["7d"]
 			add(&w, tokensIn, tokensOut)
 			windows["7d"] = w
-		}
-		if !ts.Before(start30d) {
-			w := windows["30d"]
-			add(&w, tokensIn, tokensOut)
-			windows["30d"] = w
 		}
 	}
 	return TokenHarborUsageSnapshot{Windows: windows, FetchedAt: now}, nil

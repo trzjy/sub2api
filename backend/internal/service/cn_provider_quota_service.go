@@ -137,7 +137,7 @@ type CNUsageWindowTotals struct {
 // CNProviderSnapshotOutput 管理端探测结果 DTO 的快照读取输出（§4.3 契约键名
 // 对齐：pass_name/renews_at/windows/used_tokens/limit_tokens 等，供前端一次
 // 拉取；显示互斥由前端按 L5 处理）。按账号类型只填对应键组：
-// TH 有 Pass → pass_* + windows；Kira → window/used_*/limit_*/reset_at。
+// TH 有 Pass → pass_* + windows + free-tier 组；Kira → window/used_*/limit_*/reset_at。
 type CNProviderSnapshotOutput struct {
 	// th_pass_snapshot 组。
 	HasPass             *bool  `json:"has_pass,omitempty"`
@@ -145,7 +145,15 @@ type CNProviderSnapshotOutput struct {
 	RenewsAt            string `json:"renews_at,omitempty"` // RFC3339
 	SpendAfterAllowance *bool  `json:"spend_after_allowance,omitempty"`
 	AutoReloadEnabled   *bool  `json:"auto_reload_enabled,omitempty"`
-	// th_usage_snapshot 组（windows 三键 today/7d/30d 齐全）。
+	// th free-tier 组（D-QLM-006，GET /api/me/free-tier 官方口径透传）：
+	// reset_at 复用下方 Kira 的 reset_at 键（RFC3339，同 RenewsAt 序列化口径）；
+	// window_days / plan_used_pct / plan_exhausted / used_pct / exhausted 五个键。
+	WindowDays    int     `json:"window_days,omitempty"`
+	PlanUsedPct   float64 `json:"plan_used_pct,omitempty"`
+	PlanExhausted bool    `json:"plan_exhausted"`
+	UsedPct       float64 `json:"used_pct,omitempty"`
+	Exhausted     bool    `json:"exhausted"`
+	// th_usage_snapshot 组（windows today/7d 两键）。
 	Windows map[string]CNUsageWindowTotals `json:"windows,omitempty"`
 	// kira_usage_snapshot 组。
 	Window      string   `json:"window,omitempty"`
@@ -540,6 +548,16 @@ func cnTokenHarborSnapshotOutput(passSnapshot TokenHarborPassSnapshot, usageSnap
 	if passSnapshot.RenewsAt != nil {
 		out.RenewsAt = passSnapshot.RenewsAt.UTC().Format(time.RFC3339)
 	}
+	// D-QLM-006：free-tier 字段组透传（reset_at 复用 Kira 的 reset_at 键，
+	// 同 RenewsAt 序列化口径 RFC3339）。
+	if passSnapshot.ResetAt != nil {
+		out.ResetAt = passSnapshot.ResetAt.UTC().Format(time.RFC3339)
+	}
+	out.WindowDays = passSnapshot.WindowDays
+	out.PlanUsedPct = passSnapshot.PlanUsedPct
+	out.PlanExhausted = passSnapshot.PlanExhausted
+	out.UsedPct = passSnapshot.UsedPct
+	out.Exhausted = passSnapshot.Exhausted
 	if len(usageSnapshot.Windows) > 0 {
 		out.Windows = make(map[string]CNUsageWindowTotals, len(usageSnapshot.Windows))
 		for name, window := range usageSnapshot.Windows {
