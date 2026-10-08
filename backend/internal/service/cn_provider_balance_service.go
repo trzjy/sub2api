@@ -410,6 +410,58 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 
 	remaining := firstJSONNumber(bodyBytes, "remaining", "quota.remaining", "balance")
 	if remaining == nil {
+		// one-api/New API 系中转 token 配额形状（2026-10-08 星思云站
+		// xing.xinxinyuntu.top 生产实测）：{"code":bool,"data":{"unlimited_quota":bool,
+		// "total_available":num,"name":str,"object":"token_usage"}}。仅当 remaining
+		// 键族全缺时回退进入；普通 /v1/usage 响应无 data.unlimited_quota 键，不误伤既有形状。
+		if gjson.GetBytes(bodyBytes, "data.unlimited_quota").Exists() {
+			dataName := gjson.GetBytes(bodyBytes, "data.name").String()
+			if gjson.GetBytes(bodyBytes, "data.unlimited_quota").Bool() {
+				// 订阅制不限量：无数字余额，与既有 Unlimited 分支同口径（余额明细不落）。
+				result.Unlimited = true
+				result.PlanName = dataName
+				result.Success = true
+			} else {
+				totalAvailable := gjson.GetBytes(bodyBytes, "data.total_available")
+				if !totalAvailable.Exists() {
+					result.Error = "Invalid balance response: one-api shape missing total_available"
+					return result, nil
+				}
+				bal, ok := cnParseF64(totalAvailable.Value())
+				if !ok {
+					result.Error = "Invalid balance response: one-api shape missing total_available"
+					return result, nil
+				}
+				result.Balance = bal
+				result.Balances = []CNProviderBalanceEntry{{Currency: "USD", Balance: bal}}
+				result.PlanName = dataName
+				result.Success = true
+			}
+			var balanceUpdates []any
+			for _, entry := range result.Balances {
+				balanceUpdates = append(balanceUpdates, map[string]any{
+					"currency": entry.Currency,
+					"balance":  entry.Balance,
+				})
+			}
+			updates := map[string]any{
+				cnExtraKey(provider, cnBalanceExtraSuffixBalance):   result.Balance,
+				cnExtraKey(provider, cnBalanceExtraSuffixCurrency):  result.Currency,
+				cnExtraKey(provider, cnBalanceExtraSuffixAvailable): result.Available,
+				cnExtraKey(provider, cnBalanceExtraSuffixUpdated):   now.Format(time.RFC3339),
+				cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
+				cnExtraKey(provider, cnBalanceExtraSuffixUnlimited): result.Unlimited,
+				cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
+				// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
+				cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+			}
+			if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+				slog.Warn("cn_balance_persist_failed", "account_id", account.ID, "provider", provider, "error", err)
+			} else {
+				result.Persisted = true
+			}
+			return result, nil
+		}
 		// 上游订阅到期后 /v1/usage 不再返回 remaining/subscription（订阅信息
 		// 未注入 context）。此时保留上次快照（含到期时间，前端标红展示），
 		// 仅报告可识别的原因，不覆盖历史余额快照。

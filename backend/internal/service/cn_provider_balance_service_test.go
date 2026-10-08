@@ -415,3 +415,58 @@ func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(
 	require.Contains(t, result.Error, "expired")
 	require.Empty(t, repo.extraWrites, "expired subscription must not overwrite last good snapshot")
 }
+
+// one-api/New API 系中转 token 配额形状（2026-10-08 星思云站生产实测）：
+// data.unlimited_quota=true 视为订阅制不限量，无数字余额，Unlimited 落库、
+// PlanName 落令牌名，余额明细不落（与既有 Unlimited 分支同口径）。
+func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedToken(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled":     true,
+		"url":         "https://inferaiapi.example.com/api/usage/token",
+		"bearer_auth": true,
+	})}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"code":true,"data":{"unlimited_quota":true,"total_available":1,"total_used":0,"expires_at":0,"name":"长期 代理春风","object":"token_usage"}}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.True(t, result.Unlimited)
+	require.Equal(t, "长期 代理春风", result.PlanName)
+	require.Empty(t, result.Balances)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, true, repo.extraWrites[0]["deepseek_balance_unlimited"])
+	require.Equal(t, "长期 代理春风", repo.extraWrites[0]["deepseek_balance_plan_name"])
+}
+
+// one-api token 配额形状：data.unlimited_quota=false 时按数字配额落余额，
+// total_available 正常落库，unlimited=false。
+func TestCNProviderBalanceService_RelayOverrideOneApiQuotaToken(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled":     true,
+		"url":         "https://inferaiapi.example.com/api/usage/token",
+		"bearer_auth": true,
+	})}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"code":true,"data":{"unlimited_quota":false,"total_available":42.5,"total_used":0,"name":"代理春风","object":"token_usage"}}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.False(t, result.Unlimited)
+	require.Equal(t, 42.5, result.Balance)
+	require.Len(t, result.Balances, 1)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, false, repo.extraWrites[0]["deepseek_balance_unlimited"])
+	require.Equal(t, "代理春风", repo.extraWrites[0]["deepseek_balance_plan_name"])
+}
