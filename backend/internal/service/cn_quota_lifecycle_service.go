@@ -484,16 +484,19 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 	}
 }
 
-// sweepTHResidualRecoveryDue TH 残留矛盾读侧判定（D-QLM-016）：lifecycle 里挂着
-// 未来的 recovery_at（旧口径 renewsAt 存量），但快照侧已观察到 plan_exhausted=true
-// 且 reset_at 为空/已过期——快照与恢复时间自相矛盾，视为 probe 到期进入确认循环
-//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。来源按
-// 显式允许清单判定：只认 snapshot——旧 renewsAt 存量写入时来源即 snapshot
-//（confirmExhausted/sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；
-// upstream（L4 最权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发
-//（fail-closed，不扩语义）；plan_exhausted=false 不触发（保守，不扩语义）；快照
-// 缺失不触发（无矛盾证据）。account 为 sweepCandidates 取到的 repo 新鲜副本，
-// 无检查-写入窗口。
+// sweepTHResidualRecoveryDue TH 残留矛盾读侧判定（D-QLM-016，D-QLM-018 补第三
+// 形态）：lifecycle 里挂着未来的 recovery_at（旧口径 renewsAt 存量），但快照侧
+// 已观察到 plan_exhausted=true，且 reset_at 呈三形态矛盾之一——缺失、已过期、
+// 停调时刻晚于官方 reset_at（停调到期点不是 reset_at 口径；生产实证 2026-10-08：
+// 9 个存量账号 recovery_at 挂 renewsAt 旧口径、刷新链新快照 reset_at 仍在未来）。
+// 快照与恢复时间自相矛盾，视为 probe 到期进入确认循环（unknown 路径可达）。仅在
+// sweep 读路径判定，无写入，竞态类整体消失。来源按显式允许清单判定：只认
+// snapshot——旧 renewsAt 存量写入时来源即 snapshot（confirmExhausted/
+// sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；upstream（L4 最
+// 权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发（fail-closed，
+// 不扩语义）；plan_exhausted=false 不触发（保守，不扩语义）；快照缺失不触发
+//（无矛盾证据）。account 为 sweepCandidates 取到的 repo 新鲜副本，无检查-写入
+// 窗口。
 func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, st *cnQuotaLifecycleState, now time.Time) bool {
 	if s == nil || account == nil || st == nil {
 		return false
@@ -509,7 +512,7 @@ func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, s
 		return false
 	}
 	snap, ok := TokenHarborPassSnapshotFromExtra(account)
-	return ok && snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now))
+	return ok && snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now) || cur.After(*snap.ResetAt))
 }
 
 // parkedUntil 从持久化恢复时间近似还原当前停调到期点（用于「仍耗尽」续停的
@@ -752,8 +755,9 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 	// 已有 recovery_at：与最新 reset_at 相同则无需改写。cur 晚于 reset_at 时也不
 	// 回退：官方 reset_at 随窗口单调递增，cur 更晚只可能是并发双入口（确认路径 /
 	// 刷新链）下持旧快照的后写者，回退会把 recovery_at 拖回旧到期点（D-QLM-012
-	// §2）。renewsAt 存量（≈28 天）与本窗 reset_at（7 天窗口）实际不会重合，向下
-	// 收敛的存量形态因此只剩 cur 早于 reset_at 一种，由下一分支正常收敛。
+	// §2）。cur 晚于 reset_at 的 renewsAt 存量形态不在此收敛（不回退守卫保留），
+	// 由 sweep 读侧 sweepTHResidualRecoveryDue 第三形态（停调晚于官方 reset_at）
+	// 推进确认探针收敛（D-QLM-018）。
 	if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil {
 		if cur.Equal(*snap.ResetAt) || cur.After(*snap.ResetAt) {
 			return
