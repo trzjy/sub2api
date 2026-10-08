@@ -10,6 +10,15 @@
         {{ balanceLabel }}
       </span>
 
+      <!-- 不限量账号剩余次数：只读落库快照数字（one-api total_available 为次数，无货币前缀） -->
+      <span
+        v-if="remainingCount != null"
+        data-test="cn-provider-balance-remaining"
+        class="text-[10px] leading-4 text-gray-400 dark:text-gray-500"
+      >
+        {{ t('admin.accounts.cnProviders.remainingCount', { count: remainingCountLabel }) }}
+      </span>
+
       <!-- 订阅有效期（同程序中转 /v1/usage 探测透传的上游 expires_at） -->
       <span
         v-if="expiresLabel"
@@ -141,6 +150,16 @@ const unlimited = computed(() => (data.value?.success ? data.value.unlimited ===
 const planName = computed(() => {
   if (data.value?.success && data.value.plan_name) return data.value.plan_name
   return snapshotPlanName.value
+})
+
+// 不限量账号的剩余次数徽标：仅在 unlimited 且落库快照 balance 为数字时展示。
+// 只读快照、不读探测响应（探测在浏览器内发生在快照写入后，统一走快照避免双源口径）。
+const remainingCount = computed(() =>
+  unlimited.value && snapshotBalance.value != null ? snapshotBalance.value : null
+)
+const remainingCountLabel = computed(() => {
+  if (remainingCount.value == null) return ''
+  return remainingCount.value >= 100 ? remainingCount.value.toFixed(0) : remainingCount.value.toFixed(2)
 })
 
 // 订阅有效期：后端探测透传上游 subscription.expires_at（RFC3339 快照），

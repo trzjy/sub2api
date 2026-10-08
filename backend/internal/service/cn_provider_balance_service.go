@@ -417,10 +417,18 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		if gjson.GetBytes(bodyBytes, "data.unlimited_quota").Exists() {
 			dataName := gjson.GetBytes(bodyBytes, "data.name").String()
 			if gjson.GetBytes(bodyBytes, "data.unlimited_quota").Bool() {
-				// 订阅制不限量：无数字余额，与既有 Unlimited 分支同口径（余额明细不落）。
+				// 订阅制不限量：Unlimited 徽标口径不变。total_available=剩余次数
+				// （token 配额数），落快照供前端『剩余 N』展示；缺失或非数字不阻断
+				// unlimited 成功路径（次数属附加信息），静默跳过保持 Unlimited=true。
 				result.Unlimited = true
 				result.PlanName = dataName
 				result.Success = true
+				if ta := gjson.GetBytes(bodyBytes, "data.total_available"); ta.Exists() {
+					if bal, ok := cnParseF64(ta.Value()); ok {
+						result.Balance = bal
+						result.Balances = []CNProviderBalanceEntry{{Currency: "USD", Balance: bal}}
+					}
+				}
 			} else {
 				totalAvailable := gjson.GetBytes(bodyBytes, "data.total_available")
 				if !totalAvailable.Exists() {
@@ -444,6 +452,8 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 					"balance":  entry.Balance,
 				})
 			}
+			// 共享落库块：result.Balance/result.Balances 已含 total_available
+			// 数字快照（unlimited 有次数时），缺失则保持 Unlimited=true 且数字为空。
 			updates := map[string]any{
 				cnExtraKey(provider, cnBalanceExtraSuffixBalance):   result.Balance,
 				cnExtraKey(provider, cnBalanceExtraSuffixCurrency):  result.Currency,

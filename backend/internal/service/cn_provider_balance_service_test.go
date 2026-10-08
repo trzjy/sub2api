@@ -215,10 +215,10 @@ func TestCNProviderBalanceService_RelayOverrideUnlimitedSubscription(t *testing.
 // 非法时间串静默丢弃，不影响余额主链路。
 func TestCNProviderBalanceService_RelayOverrideParsesExpiresAt(t *testing.T) {
 	tests := []struct {
-		name             string
-		body             string
-		want             string
-		wantSnapshotKey  bool // 是否期望快照中包含 deepseek_balance_expires_at 键
+		name            string
+		body            string
+		want            string
+		wantSnapshotKey bool // 是否期望快照中包含 deepseek_balance_expires_at 键
 	}{
 		{
 			name:            "subscription expires_at",
@@ -417,8 +417,8 @@ func TestCNProviderBalanceService_RelayOverrideExpiredSubscriptionKeepsSnapshot(
 }
 
 // one-api/New API 系中转 token 配额形状（2026-10-08 星思云站生产实测）：
-// data.unlimited_quota=true 视为订阅制不限量，无数字余额，Unlimited 落库、
-// PlanName 落令牌名，余额明细不落（与既有 Unlimited 分支同口径）。
+// data.unlimited_quota=true 视为订阅制不限量，Unlimited 落库、PlanName 落令牌名，
+// 同时 total_available=剩余次数（1）落数字快照供前端『剩余 N』展示。
 func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedToken(t *testing.T) {
 	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
 		"enabled":     true,
@@ -438,6 +438,37 @@ func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedToken(t *testing.T
 	require.True(t, result.Success)
 	require.True(t, result.Unlimited)
 	require.Equal(t, "长期 代理春风", result.PlanName)
+	require.Equal(t, 1.0, result.Balance)
+	require.Len(t, result.Balances, 1)
+	require.Equal(t, 1.0, result.Balances[0].Balance)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, true, repo.extraWrites[0]["deepseek_balance_unlimited"])
+	require.Equal(t, "长期 代理春风", repo.extraWrites[0]["deepseek_balance_plan_name"])
+	require.Equal(t, 1.0, repo.extraWrites[0]["deepseek_balance"])
+}
+
+// one-api 形状 unlimited_quota=true 但缺 total_available：unlimited 成功路径
+// 不受次数缺失影响，Balance 保持 0，不落错误（次数是附加信息）。
+func TestCNProviderBalanceService_RelayOverrideOneApiUnlimitedNoTotalAvailable(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled":     true,
+		"url":         "https://inferaiapi.example.com/api/usage/token",
+		"bearer_auth": true,
+	})}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"code":true,"data":{"unlimited_quota":true,"total_used":0,"expires_at":0,"name":"长期 代理春风","object":"token_usage"}}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.True(t, result.Unlimited)
+	require.Equal(t, "长期 代理春风", result.PlanName)
+	require.Equal(t, 0.0, result.Balance)
 	require.Empty(t, result.Balances)
 	require.Len(t, repo.extraWrites, 1)
 	require.Equal(t, true, repo.extraWrites[0]["deepseek_balance_unlimited"])

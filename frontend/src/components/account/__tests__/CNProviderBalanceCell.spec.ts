@@ -15,7 +15,12 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
-    t: (key: string) => key
+    t: (key: string, named?: Record<string, unknown>) => {
+      if (key === 'admin.accounts.cnProviders.remainingCount' && named) {
+        return `剩余 ${named.count}`
+      }
+      return key
+    }
   })
 }))
 
@@ -72,5 +77,36 @@ describe('CNProviderBalanceCell', () => {
 
     expect(wrapper.text()).toContain('CNY 12.50')
     expect(wrapper.text()).toContain('HTTP 401')
+  })
+
+  it('shows remaining count next to the unlimited plan badge from snapshot', () => {
+    const unlimitedAccount = {
+      ...account,
+      extra: {
+        kimi_balance_unlimited: true,
+        kimi_balance: 1,
+        kimi_balance_plan_name: 'Plan A'
+      }
+    } as Account
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: unlimitedAccount } })
+
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.unlimitedWithPlan')
+    const remaining = wrapper.get('[data-test="cn-provider-balance-remaining"]')
+    expect(remaining.text()).toContain('剩余 1')
+  })
+
+  it('does not render remaining count when unlimited but no numeric snapshot', () => {
+    const unlimitedNoBalance = {
+      ...account,
+      extra: {
+        kimi_balance_unlimited: true,
+        kimi_balance_plan_name: 'Plan A'
+      }
+    } as Account
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: unlimitedNoBalance } })
+
+    expect(wrapper.find('[data-test="cn-provider-balance-remaining"]').exists()).toBe(false)
   })
 })

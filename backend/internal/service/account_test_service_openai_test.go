@@ -704,3 +704,81 @@ func TestAccountTestService_OpenAIChatCompletionsPathRejectsNonJSONStream(t *tes
 	require.Contains(t, recorder.Body.String(), "/v1/chat/completions")
 	require.NotContains(t, recorder.Body.String(), `"success":true`)
 }
+
+func TestAccountTestService_ResponsesIncompleteWithContentSucceeds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, recorder := newTestContext()
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = io.NopCloser(strings.NewReader(strings.Join([]string{
+		`data: {"type":"response.output_text.delta","delta":"hello world"}`,
+		"",
+		`data: {"type":"response.incomplete"}`,
+		"",
+	}, "\n")))
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          96,
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":      "sk-test",
+			"base_url":     "https://relay.example.com/v1",
+			"api_protocol": APIProtocolResponses,
+		},
+		Extra: map[string]any{
+			openai_compat.ExtraKeyResponsesSupported: true,
+		},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
+	require.NoError(t, err)
+	body := recorder.Body.String()
+	require.Contains(t, body, "hello world")
+	require.Contains(t, body, "test_complete")
+	require.Contains(t, body, `"success":true`)
+	require.NotContains(t, body, "error")
+}
+
+func TestAccountTestService_ResponsesIncompleteNoContentFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, recorder := newTestContext()
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = io.NopCloser(strings.NewReader(strings.Join([]string{
+		`data: {"type":"response.incomplete"}`,
+		"",
+	}, "\n")))
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          97,
+		Platform:    PlatformDeepseek,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":      "sk-test",
+			"base_url":     "https://relay.example.com/v1",
+			"api_protocol": APIProtocolResponses,
+		},
+		Extra: map[string]any{
+			openai_compat.ExtraKeyResponsesSupported: true,
+		},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
+	require.Error(t, err)
+	body := recorder.Body.String()
+	require.Contains(t, body, "Stream ended before response.completed (incomplete, no content)")
+	require.NotContains(t, body, "test_complete")
+}

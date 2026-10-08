@@ -251,6 +251,7 @@ export default {
         balanceLow: 'Insufficient balance',
         unlimited: 'Subscription · Unlimited',
         unlimitedWithPlan: '{plan} · Unlimited',
+        remainingCount: '{count} remaining',
         expiresAt: 'until {date}',
         monthlyUsage: 'monthly ${amount}',
         noBalanceEndpoint: 'This platform has no balance query endpoint',

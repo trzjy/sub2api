@@ -3596,6 +3596,7 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader) error {
 	reader := bufio.NewReader(body)
 	seenCompleted := false
+	seenContent := false
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -3636,7 +3637,17 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			// OpenAI Responses API uses "delta" field for text content
 			if delta, ok := data["delta"].(string); ok && delta != "" {
 				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
+				seenContent = true
 			}
+		case "response.incomplete":
+			// Upstream may end a reasoning-model stream with response.incomplete
+			// (e.g. max_output_tokens budget exhausted) instead of response.completed.
+			if seenContent {
+				s.sendEvent(c, TestEvent{Type: "status", Text: "上游以 incomplete 结束（token 预算耗尽），连接验证通过"})
+				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+				return nil
+			}
+			return s.sendErrorAndEnd(c, "Stream ended before response.completed (incomplete, no content)")
 		case "response.completed", "response.done":
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil

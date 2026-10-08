@@ -455,6 +455,7 @@ export default {
         balanceLow: '余额不足',
         unlimited: '订阅 · 不限量',
         unlimitedWithPlan: '{plan} · 不限量',
+        remainingCount: '剩余 {count}',
         expiresAt: '至 {date}',
         monthlyUsage: '月用 ${amount}',
         noBalanceEndpoint: '该平台暂无余额查询接口',
