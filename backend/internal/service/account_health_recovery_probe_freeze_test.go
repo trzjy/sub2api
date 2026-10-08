@@ -68,6 +68,10 @@ func TestHealthRecoveryProbeRecoveryClearsFrozenFreshnessUpperBound(t *testing.T
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮仅回写连续成功计数，
+	// 冻结上界保持；次轮清除停调并 clearCandidateBound。
+	p.RunOnce(context.Background())
+	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
 	p.RunOnce(context.Background())
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "恢复路径应清除 temp-unschedulable")

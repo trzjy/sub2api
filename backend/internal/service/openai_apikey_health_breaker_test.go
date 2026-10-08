@@ -616,7 +616,9 @@ func newProbeService(t *testing.T, probeEnabled bool, maxAttempts int, rl *RateL
 	return p
 }
 
-func TestProbeRecoverySuccessClearsEarly(t *testing.T) {
+// 恢复判定新语义（探针恢复判定修复 §2.2）：单次（首轮）成功只把 consecutive_successes
+// 置 1 并保持 parked，连续第二轮成功才清除停调。故「成功清除」场景须连跑两轮 RunOnce。
+func TestProbeRecoverySuccessClearsAfterTwoConsecutiveRounds(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	repo := &probeRepoMock{
@@ -626,10 +628,15 @@ func TestProbeRecoverySuccessClearsEarly(t *testing.T) {
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
+	// 首轮 success：仅回写连续成功计数，不清除。
+	p.RunOnce(context.Background())
+	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
+
+	// 次轮 success：达成连续两轮，清除停调（仍早于停调到期）。
 	p.RunOnce(context.Background())
 
 	require.Equal(t, 1, rlRepo.clearTempCalls) // recovered early
-	require.Zero(t, repo.setReasonCall)        // no attempt bump on success
+	require.Equal(t, 1, repo.setReasonCall)    // 首轮回写 consecutive_successes=1；清除轮不再写
 }
 
 func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
@@ -704,6 +711,9 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 	}))
 
 	// Same service instance, no restart: the next tick now performs the sweep.
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮只回写连续成功计数，
+	// 故开关生效后需再跑一轮才到达清除。
+	p.RunOnce(context.Background())
 	p.RunOnce(context.Background())
 	require.Equal(t, 1, rlRepo.clearTempCalls, "enabling the probe must take effect on the running loop")
 }

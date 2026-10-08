@@ -149,11 +149,16 @@ func TestCodeBuddyShadowProbeDispatchesMinimalStreamChat(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, codeBuddyProbeValidSSE)
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮仅回写
+	// consecutive_successes=1 并保持 parked，次轮才走清除路径。请求形状断言取
+	// 最后一次探测请求（两轮请求形态一致）。
+	p.RunOnce(context.Background())
+	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
 	p.RunOnce(context.Background())
 
-	// 探测成功 → 既有 ClearTempUnschedulable 恢复路径，无 attempt 记账。
+	// 连续两轮探测成功 → 既有 ClearTempUnschedulable 恢复路径，无 attempt 记账。
 	require.Equal(t, 1, rlRepo.clearTempCalls)
-	require.Zero(t, repo.setReasonCall)
+	require.Equal(t, 1, repo.setReasonCall, "首轮回写 consecutive_successes=1；清除轮不再写")
 
 	// httptest 上游校验请求形状。
 	rec := upstream.lastRecord(t)
@@ -287,6 +292,9 @@ func TestProbeAPIKeyAccountKeepsModelsProbePath(t *testing.T) {
 	upstream := newCodeBuddyProbeUpstreamStub(t, http.StatusOK, "{\"object\":\"list\",\"data\":[]}")
 	p := newProbeServiceWithUpstream(t, upstream, rl, repo)
 
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2），语义不变指「成功仍会恢复、
+	// 且仍走 /models 探测」，只是需两轮确认。
+	p.RunOnce(context.Background())
 	p.RunOnce(context.Background())
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "apikey 账号 2xx /models 探测成功语义不变")
@@ -330,6 +338,8 @@ func TestProbePool401MarkerRecoveryResetsPoolWindowState(t *testing.T) {
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
+	// marker 放行 + 连续两轮 success（探针恢复判定修复 §2.2）→ 清除。
+	p.RunOnce(context.Background())
 	p.RunOnce(context.Background())
 
 	// marker 放行：探测成功 → ClearTempUnschedulable 生效。
@@ -400,6 +410,8 @@ func TestProbeHealthBreakerMarkerKeepsPoolWindowStateUntouched(t *testing.T) {
 
 	pool401Windows.record(accID, time.Now())
 
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2），marker 分派语义不变。
+	p.RunOnce(context.Background())
 	p.RunOnce(context.Background())
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "健康熔断 marker 恢复行为不变")

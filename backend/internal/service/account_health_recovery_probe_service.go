@@ -345,6 +345,23 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 				zap.Error(obsErr))
 			return
 		}
+		// 连续两轮成功才清除（方案 §2.2）：恢复判据与判停判据等价化，消除单发
+		// 轻请求秒撤的假阳性。首轮 success 仅将连续成功计数置 1 并 best-effort
+		// 回写 reason（不触发清除/池401重置/渠道收敛），次轮（>=1）才走既有清除路径。
+		// 计数已在入口处由 parseHealthBreakerState 解析于 state。
+		if state.ConsecutiveSuccesses < 1 {
+			updated, wErr := p.writeProbeConsecutiveSuccesses(ctx, acc.ID, 1)
+			if wErr == nil && updated != "" {
+				// 同步回当前进程内的账号对象，使后续同进程重放（测试/单实例下一轮
+				// 重读）能读到最新计数；生产路径下轮由 DB 回读，此处写回为无害冗余。
+				acc.TempUnschedulableReason = updated
+			}
+			logger.L().Info("openai.apikey_health_probe_first_success",
+				zap.Int64("account_id", acc.ID),
+				zap.Int("attempt", attempts),
+			)
+			return
+		}
 		if p.rateLimit != nil {
 			if clearErr := p.rateLimit.ClearTempUnschedulable(ctx, acc.ID); clearErr != nil {
 				logger.L().Warn("openai.apikey_health_probe_clear_failed",
@@ -403,6 +420,9 @@ func (p *AccountHealthRecoveryProbeService) bumpProbeAttempts(ctx context.Contex
 		return
 	}
 	state.ProbeAttempts = attempts
+	// 失败/降级回写 reason 时一并重置连续成功计数（方案 §2.2：任一失败 outcome
+	// 将计数归零，保持 parked，后续需再连续两轮 success 才清除）。
+	state.ConsecutiveSuccesses = 0
 	updated, mErr := json.Marshal(state)
 	if mErr != nil {
 		return
@@ -411,6 +431,37 @@ func (p *AccountHealthRecoveryProbeService) bumpProbeAttempts(ctx context.Contex
 		logger.L().Debug("openai.apikey_health_probe_attempt_update_failed",
 			zap.Int64("account_id", accountID), zap.Error(err))
 	}
+}
+
+// writeProbeConsecutiveSuccesses 将连续成功计数 best-effort 写回 reason JSON
+//（方案 §2.2 首轮 success 路径）。复用既有 SetTempUnschedulableReason 写入口与
+// parseHealthBreakerState 解析，不引入新存储机制；写失败仅 Debug 日志不阻断
+//（与 bumpProbeAttempts 同口径）。成功时返回更新后的 reason 字符串，调用方可据此
+// 同步进程内账号对象。
+func (p *AccountHealthRecoveryProbeService) writeProbeConsecutiveSuccesses(ctx context.Context, accountID int64, count int) (string, error) {
+	if p.accountRepo == nil {
+		return "", errors.New("probe account repo not configured")
+	}
+	acc, err := p.accountRepo.GetByID(ctx, accountID)
+	if err != nil || acc == nil {
+		return "", err
+	}
+	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
+	if !ok || state == nil {
+		return "", errors.New("invalid health breaker state")
+	}
+	state.ConsecutiveSuccesses = count
+	updated, mErr := json.Marshal(state)
+	if mErr != nil {
+		return "", mErr
+	}
+	reason := string(updated)
+	if err := p.accountRepo.SetTempUnschedulableReason(ctx, accountID, reason); err != nil {
+		logger.L().Debug("openai.apikey_health_probe_consecutive_write_failed",
+			zap.Int64("account_id", accountID), zap.Error(err))
+		return "", err
+	}
+	return reason, nil
 }
 
 // runProbe executes the upstream probe, preferring a real request but allowing an
@@ -799,7 +850,7 @@ const (
 const (
 	probeStartupCooldown    = 60 * time.Second
 	probeRoundPeriod        = 60 * time.Second
-	probeRequestHardTimeout = 15 * time.Second
+	probeRequestHardTimeout = 30 * time.Second
 )
 
 // ProbeOutcome 是探测观测写入口对单次上游响应的分类（D）。

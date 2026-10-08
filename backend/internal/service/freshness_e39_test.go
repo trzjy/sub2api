@@ -109,6 +109,11 @@ func TestRecoveryProbe_ChannelFreshnessOnRecover(t *testing.T) {
 	refresher := &e39ChannelFreshnessRefresher{}
 	p.SetChannelFreshnessRefresher(refresher)
 
+	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮仅回写连续成功计数，
+	// 次轮才走清除路径；渠道收敛挂在清除轮，故整段恰触发 1 次。
+	p.probeAccount(context.Background(), shadow, 10)
+	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
+	require.Empty(t, refresher.calls, "首轮未清除，不得触发渠道收敛")
 	p.probeAccount(context.Background(), shadow, 10)
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "E39：探测恢复必须清停调")
@@ -130,6 +135,9 @@ func TestRecoveryProbe_ChannelFreshnessFailureKeepsRecovery(t *testing.T) {
 	refresher := &e39ChannelFreshnessRefresher{err: errors.New("freshness boom")}
 	p.SetChannelFreshnessRefresher(refresher)
 
+	// 需连续两轮 success 才达清除（探针恢复判定修复 §2.2）：首轮置计数、次轮清除，
+	// 清除轮的渠道收敛返回错误不得回滚恢复结论。
+	p.probeAccount(context.Background(), shadow, 10)
 	p.probeAccount(context.Background(), shadow, 10)
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "E39：收敛失败不得改写恢复成功结论")

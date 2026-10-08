@@ -13,9 +13,11 @@ import (
 // 账号+模型 / 账号级 / 渠道 三者对相同的（基线, 上界）输入给出相同结果，不各算各的。
 func TestFreshnessThreshold_ThreeDimSameFormula(t *testing.T) {
 	baseline := 120 * time.Second
-	// 上界来自冻结候选总数 = 130 -> ceil(130/60)=3 分钟 + 60 + 15 + 60 = 315s。
+	// 上界来自冻结候选总数 = 130 -> ceil(130/60)=3 分钟 + 60 + 30 + 60 = 330s
+	//（硬超时取 probeRequestHardTimeout=30s：探针恢复修复后由 15s 提升，上界公式跟随）。
+	wantUB := 3*time.Minute + probeRoundPeriod + probeRequestHardTimeout + probeStartupCooldown
 	ub := AccountSideUpperBound(130, probeRoundPeriod, probeRequestHardTimeout, probeStartupCooldown)
-	require.Equal(t, 315*time.Second, ub)
+	require.Equal(t, wantUB, ub)
 
 	// 三维分别调用各自的封装，结果都必须等于 EffectiveFreshnessThreshold(baseline, ub)。
 	want := EffectiveFreshnessThreshold(baseline, ub)
@@ -43,16 +45,17 @@ func TestFreshnessThreshold_AccountModelVsAccountLevelSharedFormula(t *testing.T
 // TestFreshnessThreshold_CandidateOver120NoPermanentAlert 候选数 > 120 场景：
 // 阈值随候选总数放大，合法等待窗口内的观测不被误报为陈旧（不产生永久告警）。
 func TestFreshnessThreshold_CandidateOver120NoPermanentAlert(t *testing.T) {
-	// ceil(121/60) = 3 分钟 + 60 + 15 + 60 = 315s。
+	// ceil(121/60) = 3 分钟 + 60 + 30 + 60 = 330s。
+	wantUB := 3*time.Minute + probeRoundPeriod + probeRequestHardTimeout + probeStartupCooldown
 	th := AccountLevelFreshnessThreshold(121)
-	require.Equal(t, 315*time.Second, th)
+	require.Equal(t, wantUB, th)
 
 	now := time.Now()
 	// 候选在阈值内（差 1s）合法等待 -> 不陈旧。
-	within := now.Add(-314 * time.Second)
+	within := now.Add(-(th - time.Second))
 	require.False(t, now.Sub(within) > th, "候选在阈值内合法等待不应报陈旧")
 	// 超过阈值 -> 陈旧（可被告警，但这是真实陈旧而非误报）。
-	beyond := now.Add(-316 * time.Second)
+	beyond := now.Add(-(th + time.Second))
 	require.True(t, now.Sub(beyond) > th)
 }
 
@@ -60,12 +63,13 @@ func TestFreshnessThreshold_CandidateOver120NoPermanentAlert(t *testing.T) {
 // 尾（与模型级候选共用同一冻结窗口），合法等待数分钟不误告警。
 func TestFreshnessThreshold_AccountLevelTailOfMixedQueueNoFalseAlert(t *testing.T) {
 	// 混合候选总数 = 130（含模型级 + 1 账号级），账号级冻结值 = 130。
+	wantUB := 3*time.Minute + probeRoundPeriod + probeRequestHardTimeout + probeStartupCooldown
 	th := AccountLevelFreshnessThreshold(130)
-	require.Equal(t, 315*time.Second, th)
+	require.Equal(t, wantUB, th)
 
 	now := time.Now()
 	// 账号级候选在冻结窗口内（差 1s）的观测 -> 不陈旧。
-	within := now.Add(-314 * time.Second)
+	within := now.Add(-(th - time.Second))
 	require.False(t, now.Sub(within) > th)
 }
 
@@ -106,16 +110,17 @@ func TestAccountFreshnessThreshold_AccountLevelScopeNormalizedToEmptyBoundKey(t 
 	rl := &RateLimitService{}
 	rl.SetFreshnessBoundsProvider(probe)
 
+	wantUB := 3*time.Minute + probeRoundPeriod + probeRequestHardTimeout + probeStartupCooldown
 	got := rl.AccountFreshnessThreshold(1, tokenHarborAccountLevelProbeScope)
-	require.Equal(t, 315*time.Second, got,
+	require.Equal(t, wantUB, got,
 		"账号级 scope 必须归一到空键查冻结上界，返回冻结参与的阈值（非纯基线）")
 	require.NotEqual(t, accountLevelFreshnessBaseline, got, "不得退化为纯基线")
 
 	// 直接钉住 provider 收到的查询键为空串（归一契约）。
-	rec := &recordingBounds{ub: 315 * time.Second}
+	rec := &recordingBounds{ub: wantUB}
 	rl2 := &RateLimitService{}
 	rl2.SetFreshnessBoundsProvider(rec)
-	require.Equal(t, 315*time.Second, rl2.AccountFreshnessThreshold(1, tokenHarborAccountLevelProbeScope))
+	require.Equal(t, wantUB, rl2.AccountFreshnessThreshold(1, tokenHarborAccountLevelProbeScope))
 	require.Equal(t, "", rec.key, "账号级 scope 必须归一到空串传给 provider")
 }
 
@@ -127,13 +132,14 @@ func TestAccountFreshnessThreshold_ModelScopeUnchanged(t *testing.T) {
 	rl := &RateLimitService{}
 	rl.SetFreshnessBoundsProvider(probe)
 
-	require.Equal(t, 315*time.Second, rl.AccountFreshnessThreshold(2, "gpt-4"),
+	wantUB := 3*time.Minute + probeRoundPeriod + probeRequestHardTimeout + probeStartupCooldown
+	require.Equal(t, wantUB, rl.AccountFreshnessThreshold(2, "gpt-4"),
 		"模型级 scope 行为不变：按 scope 原值查冻结上界")
 
-	rec := &recordingBounds{ub: 315 * time.Second}
+	rec := &recordingBounds{ub: wantUB}
 	rl2 := &RateLimitService{}
 	rl2.SetFreshnessBoundsProvider(rec)
-	require.Equal(t, 315*time.Second, rl2.AccountFreshnessThreshold(2, "gpt-4"))
+	require.Equal(t, wantUB, rl2.AccountFreshnessThreshold(2, "gpt-4"))
 	require.Equal(t, "gpt-4", rec.key, "模型级 scope 原样传 provider")
 
 	// 未冻结的模型级 scope：空集合 → 基线（不退化为零值）。

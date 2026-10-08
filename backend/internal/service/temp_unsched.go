@@ -21,6 +21,9 @@ type TempUnschedState struct {
 	Tier int `json:"tier,omitempty"`
 	// ProbeAttempts counts probe-based recovery attempts made while blocked.
 	ProbeAttempts int `json:"probe_attempts,omitempty"`
+	// ConsecutiveSuccesses 探针恢复链的连续成功轮次计数（探针 service 专属读写，
+	// 首轮 success 置 1，第二轮 success 执行恢复并随停调清除消失；失败重置为 0）。
+	ConsecutiveSuccesses int `json:"consecutive_successes,omitempty"`
 }
 
 // TempUnschedCache 临时不可调度缓存接口
