@@ -864,13 +864,27 @@ func TestParseTokenHarborFreeTier_OfficialSample(t *testing.T) {
 	require.False(t, fields.Exhausted)
 }
 
-// reset_at 缺失不报错（omitempty，按官方形态允许为空）。
+// reset_at 缺失 = 结构漂移，失败关闭（D-QLM-013：官方端点恒返回 reset_at；
+// `{}` 这类结构不完整响应不得解码成功落全零快照覆盖 Extra 旧值）。
+// TestParseTokenHarborFreeTier_EmptyResetAt 原断言"缺 reset_at 放行"，与本卡
+// 新语义冲突，按 D-QLM-013 翻转为失败关闭断言。
 func TestParseTokenHarborFreeTier_EmptyResetAt(t *testing.T) {
-	body := `{"plan":{"window_days":7},"plan_used_pct":0,"plan_exhausted":false,"used_pct":0,"exhausted":false}`
-	fields, err := parseTokenHarborFreeTier(body)
-	require.NoError(t, err)
-	require.Nil(t, fields.ResetAt)
-	require.Equal(t, 7, fields.WindowDays)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing reset_at with other fields", `{"plan":{"window_days":7},"plan_used_pct":0,"plan_exhausted":false,"used_pct":0,"exhausted":false}`},
+		{"empty object", `{}`},
+		{"only plan_used_pct", `{"plan_used_pct":50}`},
+		{"blank reset_at", `{"reset_at":"  ","plan":{"window_days":7}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseTokenHarborFreeTier(tc.body)
+			require.Error(t, err, "缺 reset_at 必须失败关闭返回明确错误（D-QLM-013）")
+			require.Contains(t, err.Error(), "missing reset_at")
+		})
+	}
 }
 
 // 坏 JSON → 失败关闭。
@@ -908,6 +922,23 @@ func TestTokenHarborPassProbeFreeTierFailClosed_BadJSON(t *testing.T) {
 	_, err := svc.Probe(context.Background(), tokenHarborTestAccount(32))
 	require.Error(t, err, "free-tier 坏 JSON 必须失败关闭")
 	require.Contains(t, err.Error(), "free-tier")
+	require.Empty(t, repo.allWrites, "Probe 失败不得落任何 Extra 快照")
+}
+
+// D-QLM-013 失败语义：free-tier 返回结构不完整响应（缺 reset_at，如 `{}`）→
+// 整个 Probe 失败关闭（明确错误、不落快照），不落 plan_exhausted=false 的全零
+// 快照覆盖 Extra 旧值。
+func TestTokenHarborPassProbeFreeTierFailClosed_MissingResetAt(t *testing.T) {
+	repo := &tokenHarborRepoStub{}
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	svc := NewTokenHarborPassService(repo, nil, upstream)
+	svc.baseURL = fakeTH.server.URL
+	fakeTH.setFreeTierBody(`{}`)
+
+	_, err := svc.Probe(context.Background(), tokenHarborTestAccount(34))
+	require.Error(t, err, "free-tier 缺 reset_at 必须失败关闭（D-QLM-013）")
+	require.Contains(t, err.Error(), "missing reset_at")
 	require.Empty(t, repo.allWrites, "Probe 失败不得落任何 Extra 快照")
 }
 

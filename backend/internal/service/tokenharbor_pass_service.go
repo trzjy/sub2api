@@ -914,8 +914,8 @@ type tokenHarborFreeTierFields struct {
 
 // parseTokenHarborFreeTier 解析官方 /api/me/free-tier JSON（encoding/json）。
 // reset_at 为微秒+时区时间戳（样例 2026-10-12T16:06:10.343487+00:00），time.RFC3339
-// 可直接解析。任一必需字段缺失/解析失败 = 失败关闭返回明确错误（与 CSV 链同口径），
-// 禁止兜底假值。
+// 可直接解析。reset_at 必填（官方端点恒返回，缺失即结构漂移，D-QLM-013 失败关闭）；
+// 其余必需字段解析失败同样失败关闭返回明确错误（与 CSV 链同口径），禁止兜底假值。
 func parseTokenHarborFreeTier(body string) (tokenHarborFreeTierFields, error) {
 	var resp tokenHarborFreeTierResponse
 	dec := json.NewDecoder(strings.NewReader(body))
@@ -929,14 +929,18 @@ func parseTokenHarborFreeTier(body string) (tokenHarborFreeTierFields, error) {
 		UsedPct:       resp.UsedPct,
 		Exhausted:     resp.Exhausted,
 	}
-	if strings.TrimSpace(resp.ResetAt) != "" {
-		resetAt, err := time.Parse(time.RFC3339, strings.TrimSpace(resp.ResetAt))
-		if err != nil {
-			return tokenHarborFreeTierFields{}, fmt.Errorf("tokenharbor free-tier reset_at %q is not RFC3339: %w", resp.ResetAt, err)
-		}
-		rt := resetAt.UTC()
-		fields.ResetAt = &rt
+	// D-QLM-013：官方端点恒返回 reset_at，缺失即结构漂移——失败关闭返回明确
+	// 错误（Probe 整体失败、不落快照），避免 plan_exhausted=false 的全零快照
+	// 覆盖 Extra 里可能更好的旧快照。
+	if strings.TrimSpace(resp.ResetAt) == "" {
+		return tokenHarborFreeTierFields{}, fmt.Errorf("tokenharbor free-tier response missing reset_at")
 	}
+	resetAt, err := time.Parse(time.RFC3339, strings.TrimSpace(resp.ResetAt))
+	if err != nil {
+		return tokenHarborFreeTierFields{}, fmt.Errorf("tokenharbor free-tier reset_at %q is not RFC3339: %w", resp.ResetAt, err)
+	}
+	rt := resetAt.UTC()
+	fields.ResetAt = &rt
 	return fields, nil
 }
 
