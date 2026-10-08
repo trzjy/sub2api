@@ -1,7 +1,12 @@
 package service
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"log"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -183,4 +188,160 @@ func TestCNBalanceCheckRunOnce_KiraAgeGateFiltersCollect(t *testing.T) {
 	// 仅 staleKira 进 kiraTargets → 仅 1 次 dashboard 用量刷新请求。
 	require.Len(t, upstream.requests, 1, "Kira 年龄门必须过滤掉 freshKira，仅 staleKira 刷新")
 	require.Equal(t, "/api/user/usage", upstream.requests[0].URL.Path)
+}
+
+// ---- D-TH-05B 补充：TH 收集循环竞态收口（方案 §9.1，2026-10-08 用户裁定） ----
+
+// thCollectRaceRepo 在 cnRunOnceExtraRepo 之上覆盖 GetByID，使其可模拟库内最新态
+// 与读失败（不修改既有 fake 定义，仅在 gates 测试文件内增补覆盖方法）。
+type thCollectRaceRepo struct {
+	*cnRunOnceExtraRepo
+	getByIDErr error
+}
+
+func (r *thCollectRaceRepo) GetByID(_ context.Context, id int64) (*Account, error) {
+	if r.getByIDErr != nil {
+		return nil, r.getByIDErr
+	}
+	return r.cnRunOnceExtraRepo.GetByID(context.Background(), id)
+}
+
+// thCollectRaceSetup 构造单 TH 账号 runOnce 竞态收口测试环境。
+//   - platformAccount：ListByPlatform 返回的快照加载态（进 thTargets 判定用）；
+//   - freshAccount：GetByID 返回的库内最新态（探测前复核用）；nil 时复用 platformAccount；
+//   - getByIDErr：模拟 GetByID 失败。
+//
+// 返回 fake TH 及其 usage CSV 命中数（探测指示器）。
+func thCollectRaceSetup(t *testing.T, platformAccount, freshAccount *Account, getByIDErr error) *tokenHarborFakeTH {
+	t.Helper()
+	fakeTH := newTokenHarborFakeTH(t, false)
+	now := time.Now().UTC()
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
+	fakeTH.mu.Unlock()
+	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+
+	id := platformAccount.ID
+	if platformAccount.Platform == "" {
+		platformAccount.Platform = PlatformOpenAI
+	}
+	platformAccount.Status = StatusActive
+	if platformAccount.Credentials == nil {
+		platformAccount.Credentials = map[string]any{}
+	}
+	platformAccount.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+
+	inner := &cnRunOnceExtraRepo{
+		byPlatform: map[string][]Account{PlatformOpenAI: {*platformAccount}},
+		byID:       map[int64]*Account{},
+	}
+	if freshAccount != nil {
+		inner.byID[id] = freshAccount
+	} else {
+		inner.byID[id] = platformAccount
+	}
+	repo := &thCollectRaceRepo{cnRunOnceExtraRepo: inner, getByIDErr: getByIDErr}
+
+	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
+	thSvc.baseURL = fakeTH.server.URL
+	thSvc.now = func() time.Time { return now }
+
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: thKiraGateConfig()}
+	svc.SetTokenHarborPassService(thSvc)
+	svc.runOnce()
+	return fakeTH
+}
+
+// a) 快照无退避但库内最新有未过期退避 → 探测前复核门命中 → 不探测。
+func TestCNBalanceCheckRunOnce_THCollectRaceBackoffInDB(t *testing.T) {
+	now := time.Now().UTC()
+	platform := tokenHarborTestAccount(901) // 快照加载态：无退避、无快照
+	platform.Extra = map[string]any{}
+	fresh := tokenHarborTestAccount(901) // 库内最新态：未过期退避
+	fresh.Extra = map[string]any{
+		thProbeBackoffUntilExtraKey: float64(now.Add(10 * time.Minute).Unix()),
+	}
+
+	fakeTH := thCollectRaceSetup(t, platform, fresh, nil)
+	require.Equal(t, 0, fakeTH.usageCSVHits, "库内最新有未过期退避，竞态复核必须跳过探测（usage 命中=0）")
+}
+
+// b) GetByID 报错 → 失败关闭，跳过本轮该账号（下周期自愈）。
+func TestCNBalanceCheckRunOnce_THCollectRaceGetByIDError(t *testing.T) {
+	platform := tokenHarborTestAccount(902)
+	platform.Extra = map[string]any{}
+
+	fakeTH := thCollectRaceSetup(t, platform, nil, errors.New("simulated db error"))
+	require.Equal(t, 0, fakeTH.usageCSVHits, "GetByID 报错必须跳过本轮探测（usage 命中=0）")
+}
+
+// c) 库内干净（无退避无快照）→ 正常探测。
+func TestCNBalanceCheckRunOnce_THCollectRaceClean(t *testing.T) {
+	platform := tokenHarborTestAccount(903)
+	platform.Extra = map[string]any{}
+
+	fakeTH := thCollectRaceSetup(t, platform, nil, nil)
+	require.Equal(t, 1, fakeTH.usageCSVHits, "库内干净必须正常探测（usage 命中=1）")
+}
+
+// d) 复核命中年龄门（库内最新快照足够新鲜）→ 不探测。
+func TestCNBalanceCheckRunOnce_THCollectRaceAgeGate(t *testing.T) {
+	now := time.Now().UTC()
+	platform := tokenHarborTestAccount(904) // 快照加载态：无快照（build 门放行）
+	platform.Extra = map[string]any{}
+	fresh := tokenHarborTestAccount(904) // 库内最新态：5 分钟前快照（年龄门命中）
+	fresh.Extra = map[string]any{
+		TokenHarborUsageSnapshotExtraKey: TokenHarborUsageSnapshot{FetchedAt: now.Add(-5 * time.Minute)},
+	}
+
+	fakeTH := thCollectRaceSetup(t, platform, fresh, nil)
+	require.Equal(t, 0, fakeTH.usageCSVHits, "复核命中年龄门必须跳过探测（usage 命中=0）")
+}
+
+// ---- D-TH-05B 补充：损坏退避键三态语义（方案 §9.2，2026-10-08 用户裁定） ----
+
+// e)~j) 三态：损坏跳过 / 缺失-null-过期收集 / 合法未过期跳过。
+func TestCNBalanceCheckTHBackoffGateCorrupted(t *testing.T) {
+	now := time.Now().UTC()
+	svc := &CNProviderBalanceCheckService{cfg: thKiraGateConfig()}
+
+	// e) until="abc" → 损坏 → 跳过。
+	e := &Account{ID: 1, Extra: map[string]any{thProbeBackoffUntilExtraKey: "abc"}}
+	// f) until=-5 → 损坏 → 跳过。
+	f := &Account{ID: 2, Extra: map[string]any{thProbeBackoffUntilExtraKey: float64(-5)}}
+	// g) until=null → 未退避 → 收集。
+	g := &Account{ID: 3, Extra: map[string]any{thProbeBackoffUntilExtraKey: nil}}
+	// h) 键缺失 → 未退避 → 收集。
+	h := &Account{ID: 4, Extra: map[string]any{}}
+	// i) 合法过期值 → 收集。
+	iAcct := &Account{ID: 5, Extra: map[string]any{thProbeBackoffUntilExtraKey: float64(now.Add(-10 * time.Minute).Unix())}}
+	// j) 合法未过期值 → 跳过。
+	jAcct := &Account{ID: 6, Extra: map[string]any{thProbeBackoffUntilExtraKey: float64(now.Add(10 * time.Minute).Unix())}}
+
+	require.True(t, svc.shouldSkipTokenHarborCollect(now, e), "e) 损坏(abc) 必须跳过")
+	require.True(t, svc.shouldSkipTokenHarborCollect(now, f), "f) 损坏(-5) 必须跳过")
+	require.False(t, svc.shouldSkipTokenHarborCollect(now, g), "g) null 必须收集")
+	require.False(t, svc.shouldSkipTokenHarborCollect(now, h), "h) 缺失必须收集")
+	require.False(t, svc.shouldSkipTokenHarborCollect(now, iAcct), "i) 过期必须收集")
+	require.True(t, svc.shouldSkipTokenHarborCollect(now, jAcct), "j) 未过期必须跳过")
+
+	// 底层三态：损坏态 corrupted=true；缺失/null corrupted=false 且 ok=false。
+	_, _, eCorrupt := thProbeBackoffUntilFromExtra(e)
+	require.True(t, eCorrupt, "e) 底层应识别为损坏态")
+	_, _, fCorrupt := thProbeBackoffUntilFromExtra(f)
+	require.True(t, fCorrupt, "f) 底层应识别为损坏态")
+	_, gOk, gCorrupt := thProbeBackoffUntilFromExtra(g)
+	require.False(t, gOk)
+	require.False(t, gCorrupt, "g) null 非损坏态")
+	_, hOk, hCorrupt := thProbeBackoffUntilFromExtra(h)
+	require.False(t, hOk)
+	require.False(t, hCorrupt, "h) 缺失非损坏态")
+
+	// 损坏态必须产出单行 WARN 告警（含账号 id 与键形态，不打印完整原始值）。
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	svc.shouldSkipTokenHarborCollect(now, e)
+	require.Contains(t, buf.String(), "th collect backoff key corrupted", "损坏态必须发出告警单行")
+	require.Contains(t, buf.String(), "account=1", "告警须含账号 id")
 }

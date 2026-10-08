@@ -340,7 +340,17 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		s.refreshKiraAccount(ctx, account)
 	}
 	for _, account := range thTargets {
-		s.refreshTokenHarborAccount(ctx, account)
+		// 竞态收口（方案 §9.1，2026-10-08 用户裁定）：快照加载到探测之间响应式路径
+		// 可能已写入退避，探测前以库内最新态复核收集门。
+		fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+		if err != nil {
+			log.Printf("[CNBalance] th collect re-check account=%d failed, skip this round: %v", account.ID, err)
+			continue
+		}
+		if s.shouldSkipTokenHarborCollect(now, fresh) {
+			continue
+		}
+		s.refreshTokenHarborAccount(ctx, fresh)
 	}
 
 	if len(quotaTargets) > 0 && s.quotaService != nil {
@@ -393,23 +403,36 @@ func (s *CNProviderBalanceCheckService) shouldSkipTokenHarborCollect(now time.Ti
 			}
 		}
 	}
-	if until, ok := thProbeBackoffUntilFromExtra(account); ok && until.After(now) {
+	if until, ok, corrupted := thProbeBackoffUntilFromExtra(account); corrupted {
+		// 损坏态（方案 §9.2，2026-10-08 用户裁定）：键存在且非 null，但不可解析为整数
+		// 或解析值 <= 0。跳过该账号本轮收集并告警；含账号 id 与键原始值形态
+		//（不打印完整原始值防日志注入超长）。
+		if raw, present := account.Extra[thProbeBackoffUntilExtraKey]; present && raw != nil {
+			log.Printf("[CNBalance] th collect backoff key corrupted account=%d key=%s: raw type %T is not a positive integer, skip this round", account.ID, thProbeBackoffUntilExtraKey, raw)
+		}
+		return true
+	} else if ok && until.After(now) {
 		return true
 	}
 	return false
 }
 
 // thProbeBackoffUntilFromExtra 从账号 Extra 读 TH 探测退避截止（unix 秒）。
-// 返回 (零值, false) 的情形：键缺失、nil、非数值、<=0（视为过期/未退避）。
-func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool) {
+// 三态返回（方案 §9.2，2026-10-08 用户裁定）：
+//   - (截止时间, true, false)：合法整数 > 0（> now 跳过 / 过期收集由调用方判定）；
+//   - (零值, false, false)：键缺失 / nil（清除路径写 nil）= 未退避，收集；
+//   - (零值, false, true)：损坏态——键存在且值非 null，但不可解析为整数或
+//     解析值 <= 0，调用方应跳过该账号本轮收集并发告警（非未退避收集）。
+func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool, bool) {
 	if account == nil || account.Extra == nil {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	raw, ok := account.Extra[thProbeBackoffUntilExtraKey]
 	if !ok || raw == nil {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	var sec int64
+	parsed := true
 	switch v := raw.(type) {
 	case int64:
 		sec = v
@@ -420,12 +443,13 @@ func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool) {
 	case string:
 		sec, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 	default:
-		return time.Time{}, false
+		parsed = false
 	}
-	if sec <= 0 {
-		return time.Time{}, false
+	if !parsed || sec <= 0 {
+		// 键存在且非 null，但不可解析为整数或解析值 <= 0 → 损坏态。
+		return time.Time{}, false, true
 	}
-	return time.Unix(sec, 0), true
+	return time.Unix(sec, 0), true, false
 }
 
 // shouldSkipKiraCollect 判定 Kira 账号是否跳过本轮收集（周期链收集期门控，仅作用
