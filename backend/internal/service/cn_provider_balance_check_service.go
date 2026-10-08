@@ -26,6 +26,11 @@ type cnQuotaProber interface {
 // 实现该接口。
 type cnQuotaLifecycleHandover interface {
 	OnUpstreamQuotaExhausted(ctx context.Context, account *Account, upstreamMsg string) error
+	// convergeTHStockRecovery TH 账号周期快照刷新后的存量收敛（D-QLM-009 §8.1）：
+	// 把既有 recovery_at（可能按旧 renewsAt 口径写入）收敛到最新 reset_at；
+	// 幂等且只改 cn_quota_lifecycle 窄面。方法本体在 cn_quota_lifecycle_service.go
+	//（007 成品），本接口仅窄面接线。未注入时调用方跳过（既有行为零变化）。
+	convergeTHStockRecovery(ctx context.Context, account *Account)
 }
 
 // cnQuotaProbeConcurrency 周期任务并发探测额度账号的并发度。
@@ -701,6 +706,19 @@ func (s *CNProviderBalanceCheckService) refreshTokenHarborAccount(ctx context.Co
 		log.Printf("[CNBalance] th pass snapshot account %d failed: %v", account.ID, err)
 	} else if err := th.PersistSnapshot(ctx, account.ID, passSnapshot); err != nil {
 		log.Printf("[CNBalance] th pass snapshot persist account %d failed: %v", account.ID, err)
+	} else {
+		// D-QLM-009 §8.1 存量收敛接线：pass 快照落库后，把内存账号 Extra 同步为
+		// 本轮最新快照，使 converge 基于刷新后的 reset_at/plan_exhausted 收敛
+		//（否则 converge 读到的仍是上一周期落库值，本轮新 reset_at 不生效）。
+		// 未注入 lifecycle 时跳过（既有行为零变化）；converge 幂等且只改窄面，
+		// 方法本身不返回错误，不加新日志层（禁区纪律）。
+		if account.Extra == nil {
+			account.Extra = map[string]any{}
+		}
+		account.Extra[TokenHarborPassSnapshotExtraKey] = passSnapshot
+		if s.quotaLifecycle != nil {
+			s.quotaLifecycle.convergeTHStockRecovery(ctx, account)
+		}
 	}
 	usageSnapshot, err := th.ProbeUsageSnapshot(ctx, account)
 	if err != nil {

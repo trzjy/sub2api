@@ -727,6 +727,79 @@ func TestCNProviderBalanceCheckRunOnce_TokenHarborSnapshotRefresh(t *testing.T) 
 	require.True(t, keys[TokenHarborUsageSnapshotExtraKey])
 }
 
+// D-QLM-009 §8.1：TH 账号周期快照刷新（pass 快照持久化成功）后，存量收敛
+// convergeTHStockRecovery 恰被调用一次；双落库不受影响。
+func TestCNProviderBalanceCheckRunOnce_TokenHarborConvergeCalledOnceOnSnapshotRefresh(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	now := time.Now().UTC()
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
+	fakeTH.mu.Unlock()
+	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+
+	thAccount := tokenHarborTestAccount(621)
+	thAccount.Platform = PlatformOpenAI
+	thAccount.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	repo := &cnRunOnceExtraRepo{
+		byPlatform: map[string][]Account{PlatformOpenAI: {*thAccount}},
+		byID:       map[int64]*Account{621: thAccount},
+	}
+	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
+	thSvc.baseURL = fakeTH.server.URL
+	thSvc.now = func() time.Time { return now }
+
+	lifecycle := &fakeQuotaLifecycleHandover{}
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: &config.Config{}}
+	svc.SetTokenHarborPassService(thSvc)
+	svc.SetQuotaLifecycleHandover(lifecycle)
+	svc.runOnce()
+
+	require.Equal(t, []int64{621}, lifecycle.convergeCalls, "TH 快照刷新持久化成功后 converge 必须恰被调用一次")
+	require.Equal(t, 1, fakeTH.usageCSVHits, "TH 快照刷新仍发生（usage 落库）")
+	require.Len(t, repo.extraWrites, 2, "th_pass_snapshot + th_usage_snapshot 双落库不受影响")
+	keys := map[string]bool{}
+	for _, w := range repo.extraWrites {
+		for k := range w {
+			keys[k] = true
+		}
+	}
+	require.True(t, keys[TokenHarborPassSnapshotExtraKey])
+	require.True(t, keys[TokenHarborUsageSnapshotExtraKey])
+}
+
+// D-QLM-009 §8.1：未注入 lifecycle（quotaLifecycle 为 nil）时，TH 快照刷新路径
+// 行为与基线完全一致（双落库 + 双探测），不触发收敛、不报错、不 panic。
+func TestCNProviderBalanceCheckRunOnce_TokenHarborNoLifecycleUnchanged(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	now := time.Now().UTC()
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
+	fakeTH.mu.Unlock()
+	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+
+	thAccount := tokenHarborTestAccount(621)
+	thAccount.Platform = PlatformOpenAI
+	thAccount.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	repo := &cnRunOnceExtraRepo{
+		byPlatform: map[string][]Account{PlatformOpenAI: {*thAccount}},
+		byID:       map[int64]*Account{621: thAccount},
+	}
+	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
+	thSvc.baseURL = fakeTH.server.URL
+	thSvc.now = func() time.Time { return now }
+
+	// 不注入 lifecycle：quotaLifecycle 保持 nil。
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: &config.Config{}}
+	svc.SetTokenHarborPassService(thSvc)
+	require.NotPanics(t, func() { svc.runOnce() }, "未注入 lifecycle 时刷新路径不得 panic")
+
+	loginPosts, billingHits := fakeTH.stats()
+	require.Equal(t, 1, loginPosts, "未注入 lifecycle 时登录探测仍发生")
+	require.Equal(t, 1, billingHits, "未注入 lifecycle 时 TH 快照刷新仍发生")
+	require.Equal(t, 1, fakeTH.usageCSVHits, "未注入 lifecycle 时 usage 快照刷新仍发生")
+	require.Len(t, repo.extraWrites, 2, "未注入 lifecycle 时双落库不受影响（基线行为零变化）")
+}
+
 // exhaustedKiraQuotaResult 构造免费池耗尽的 Kira 用量快照结果（used>=limit）。
 func exhaustedKiraQuotaResult() *CNProviderQuotaProbeResult {
 	used, limit := 6_000_000.0, 6_000_000.0
@@ -751,12 +824,18 @@ func recoveredKiraQuotaResult() *CNProviderQuotaProbeResult {
 
 // fakeQuotaLifecycleHandover 记录 OnUpstreamQuotaExhausted 交接的测试替身。
 type fakeQuotaLifecycleHandover struct {
-	calls []int64
+	calls         []int64
+	convergeCalls []int64
 }
 
 func (f *fakeQuotaLifecycleHandover) OnUpstreamQuotaExhausted(_ context.Context, account *Account, _ string) error {
 	f.calls = append(f.calls, account.ID)
 	return nil
+}
+
+// convergeTHStockRecovery 记录周期链存量收敛调用（D-QLM-009 §8.1 接线点）。
+func (f *fakeQuotaLifecycleHandover) convergeTHStockRecovery(_ context.Context, account *Account) {
+	f.convergeCalls = append(f.convergeCalls, account.ID)
 }
 
 // cnRunOnceExtraRepo 支持 ListByPlatform + GetByID + UpdateExtra 记录（TH 刷新用）。
