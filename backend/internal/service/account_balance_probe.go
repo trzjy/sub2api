@@ -57,7 +57,12 @@ func (a *Account) BalanceProbeConfig() BalanceProbeConfig {
 func (config BalanceProbeConfig) normalizedURL(account *Account) (string, error) {
 	url := strings.TrimSpace(config.URL)
 	if url == "" {
-		url = strings.TrimRight(account.GetCredential("base_url"), "/") + "/v1/usage"
+		baseURL := strings.TrimRight(account.GetCredential("base_url"), "/")
+		if strings.HasSuffix(baseURL, "/v1") {
+			url = baseURL + "/usage"
+		} else {
+			url = baseURL + "/v1/usage"
+		}
 	}
 	if !strings.HasPrefix(url, "https://") {
 		return "", fmt.Errorf("balance probe URL must use https")

@@ -48,6 +48,49 @@ func TestBalanceProbeConfigDefaultsToUsageEndpoint(t *testing.T) {
 	require.Equal(t, "https://example.test/v1/usage", url)
 }
 
+func TestBalanceProbeNormalizedURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		config  BalanceProbeConfig
+		want    string
+	}{
+		{
+			name:    "base_url without /v1",
+			baseURL: "https://api.example.com",
+			config:  BalanceProbeConfig{},
+			want:    "https://api.example.com/v1/usage",
+		},
+		{
+			name:    "base_url ends with /v1",
+			baseURL: "https://api.example.com/v1",
+			config:  BalanceProbeConfig{},
+			want:    "https://api.example.com/v1/usage",
+		},
+		{
+			name:    "base_url ends with /v1/ trailing slash",
+			baseURL: "https://api.example.com/v1/",
+			config:  BalanceProbeConfig{},
+			want:    "https://api.example.com/v1/usage",
+		},
+		{
+			name:    "explicit url config used as-is",
+			baseURL: "https://api.example.com",
+			config:  BalanceProbeConfig{URL: " https://explicit.test/custom/path "},
+			want:    "https://explicit.test/custom/path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &Account{Credentials: map[string]any{"base_url": tt.baseURL}}
+			url, err := tt.config.normalizedURL(account)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, url)
+		})
+	}
+}
+
 func TestFirstJSONNumberPriority(t *testing.T) {
 	body := []byte(`{"balance":3,"quota":{"remaining":2},"remaining":1}`)
 	require.NotNil(t, firstJSONNumber(body, "remaining", "quota.remaining", "balance"))
