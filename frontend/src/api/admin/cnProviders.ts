@@ -23,7 +23,7 @@ export interface THPassSnapshot {
   has_pass: boolean
   /** Pass 档位名（如 “Agent Pass”）；缺失时上游页面未渲染出该字段。 */
   pass_name?: string
-  /** 订阅周期重置时刻（RFC3339）；Pass 额度即按此周期计。 */
+  /** 订阅续期日（≈28 天，订阅链；额度周期见 reset_at）。 */
   renews_at?: string
   /** 官方 7 天周期重置时刻（RFC3339）；徽标与 7 天窗口倒计时据此展示（D-QLM-008）。 */
   reset_at?: string
