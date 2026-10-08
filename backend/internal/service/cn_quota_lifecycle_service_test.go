@@ -704,6 +704,13 @@ func TestQuotaLifecycleTHStockRecoveryClearsResidualFutureRecoveryOnExpiredReset
 	require.Equal(t, "", st.RecoveryAt, "residual future recovery_at must be cleared when reset_at is expired")
 	require.Equal(t, cnQuotaRecoverySourceUnknown, st.RecoverySource, "cleared residual must register unknown source")
 	require.NotEqual(t, oldRenewsAt.UTC().Format(time.RFC3339), st.RecoveryAt)
+	// D-QLM-015 b（落库证据）：fake repo 收到的写入内容与内存状态一致。
+	persisted, ok := cnQuotaLifecycleStateFromExtra(repo.accounts[207].Extra)
+	require.True(t, ok, "cleanup must persist the cleared state to the repo")
+	require.Equal(t, st.RecoveryAt, persisted.RecoveryAt)
+	require.Equal(t, st.RecoverySource, persisted.RecoverySource)
+	require.Equal(t, st.UpdatedAt, persisted.UpdatedAt)
+	require.Equal(t, cnQuotaLifecycleStateExhausted, persisted.State)
 }
 
 // 存量收敛守卫（D-QLM-012 §2 单调）：cur recovery_at 已晚于快照 reset_at →
@@ -733,6 +740,57 @@ func TestQuotaLifecycleTHStockRecoveryNeverRollsBackLaterRecovery(t *testing.T) 
 	require.True(t, ok)
 	require.Equal(t, curRecoveryAt.UTC().Format(time.RFC3339), st.RecoveryAt,
 		"later recovery_at must never be rolled back to an older snapshot reset_at")
+}
+
+// 存量收敛守卫（D-QLM-015 重读重验）：调用方传入的 account 内存副本残留未来
+// snapshot recovery_at（reset_at 已过期，按旧副本看满足清理条件），但 repo 中
+// 最新状态已被并发入口改写为 upstream 来源 → 清理必须跳过，repo 状态原样
+//（防并发清掉 upstream 值）。
+func TestQuotaLifecycleTHStockRecoveryCleanupSkipsWhenLatestIsUpstream(t *testing.T) {
+	staleCopy := newQuotaLifecycleTHAccount(207)
+	// 旧副本：残留未来 snapshot recovery_at（旧口径 renewsAt 存量形态）+ 过期 reset_at。
+	residual := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+	staleCopy.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":       cnQuotaLifecycleStateExhausted,
+		"recovery_at": residual.UTC().Format(time.RFC3339),
+		"updated_at":  quotaLifecycleBase.Format(time.RFC3339),
+	}
+	staleCopy.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"reset_at":       quotaLifecycleBase.Add(-time.Hour).UTC().Format(time.RFC3339),
+		"plan_exhausted": true,
+	}
+	repo := newQuotaLifecycleFakeRepo(staleCopy)
+
+	// repo 最新状态：并发入口（确认路径）已写入更晚的 upstream recovery_at，
+	// 快照也刷新为有效值。staleCopy 与 repo 内是同一指针（fake 语义），故先克隆
+	// 一份独立账号进 repo，再把 staleCopy 当作调用方传入的过期副本。
+	latest := *staleCopy
+	latest.Extra = map[string]any{
+		cnQuotaLifecycleExtraKey: map[string]any{
+			"state":       cnQuotaLifecycleStateExhausted,
+			"recovery_at": quotaLifecycleBase.Add(10 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"recovery_source": cnQuotaRecoverySourceUpstream,
+			"updated_at":  quotaLifecycleBase.Format(time.RFC3339),
+		},
+		TokenHarborPassSnapshotExtraKey: map[string]any{
+			"has_pass":       true,
+			"reset_at":       quotaLifecycleBase.Add(10 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"plan_exhausted": true,
+		},
+	}
+	repo.accounts[207] = &latest
+
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+	svc.convergeTHStockRecovery(context.Background(), staleCopy)
+
+	// repo 状态原样：upstream recovery_at 不被旧副本的清理分支抹掉。
+	st, ok := cnQuotaLifecycleStateFromExtra(latest.Extra)
+	require.True(t, ok)
+	require.Equal(t, cnQuotaRecoverySourceUpstream, st.RecoverySource,
+		"cleanup must not clobber the upstream recovery written by a concurrent entry")
+	require.Equal(t, (quotaLifecycleBase.Add(10 * 24 * time.Hour)).UTC().Format(time.RFC3339), st.RecoveryAt,
+		"latest repo recovery_at must remain untouched")
 }
 
 // ---------- 5 分钟循环节距 ----------

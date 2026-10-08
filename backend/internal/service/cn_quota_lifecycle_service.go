@@ -713,14 +713,25 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 		// 登记未知，落回 5 分钟确认循环（D-QLM-012 §1；upstream 来源不在清理面，
 		// L4 上游值最权威，交由其自身到期推进）。残留为空或已过期时维持现状
 		// return（无残留可清，unknown 循环本就按期推进）。
-		if st, ok := cnQuotaLifecycleStateFromExtra(account.Extra); ok && st.RecoveryAt != "" &&
-			st.RecoverySource != cnQuotaRecoverySourceUpstream {
-			if cur, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil && cur.After(s.now()) {
-				st.RecoveryAt = ""
-				st.RecoverySource = cnQuotaRecoverySourceUnknown
-				st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
-				s.persistLifecycleState(ctx, account.ID, st)
-			}
+		//
+		// D-QLM-015：调用方传入的 account 是内存副本，双入口（确认路径/快照刷新
+		// 链）并发时，读-写之间另一入口可能已写入更晚的 upstream/snapshot
+		// recovery_at——直接按旧副本清理会把它抹掉。因此 persist 前经 GetByID
+		// 重读最新账号，在新鲜副本上重验全部守卫；重读失败/账号不存在静默跳过
+		// （不清除不确定状态，与失败关闭方向一致）。不引入 CAS/版本号，残余毫秒
+		// 级窗口与文件内所有 persistLifecycleState 调用点的 last-write-wins 语义一致。
+		latest, err := s.accountRepo.GetByID(ctx, account.ID)
+		if err != nil || latest == nil {
+			fmt.Printf("[CNQuotaLifecycle] account=%d residual-recovery cleanup skipped: latest account unavailable: %v\n",
+				account.ID, err)
+			return
+		}
+		if s.thResidualFutureRecovery(latest) {
+			st, _ := cnQuotaLifecycleStateFromExtra(latest.Extra)
+			st.RecoveryAt = ""
+			st.RecoverySource = cnQuotaRecoverySourceUnknown
+			st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
+			s.persistLifecycleState(ctx, latest.ID, st)
 		}
 		return
 	}
@@ -747,6 +758,19 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 	st.RecoverySource = cnQuotaRecoverySourceSnapshot
 	st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
 	s.persistLifecycleState(ctx, account.ID, st)
+}
+
+// thResidualFutureRecovery 报告账号 lifecycle 状态是否存在「会挂死 sweep 的未来
+// recovery_at 残留」（D-QLM-012 §1 / D-QLM-015 重验共用判定）：残留非空、来源非
+// upstream（L4 上游值不在清理面）、可解析且在未来。守卫段收拢于此，供 converge
+// 清理分支对 repo 最新副本重验，避免复制第二份判定。
+func (s *CNQuotaLifecycleService) thResidualFutureRecovery(account *Account) bool {
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	if !ok || st.RecoveryAt == "" || st.RecoverySource == cnQuotaRecoverySourceUpstream {
+		return false
+	}
+	cur, err := time.Parse(time.RFC3339, st.RecoveryAt)
+	return err == nil && cur.After(s.now())
 }
 
 // cnQuotaUpstreamMsgResetTime 从上游响应文案中提取未来的 RFC3339 重置时间；
