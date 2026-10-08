@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -422,7 +423,8 @@ func (s *CNProviderBalanceCheckService) shouldSkipTokenHarborCollect(now time.Ti
 //   - (截止时间, true, false)：合法整数 > 0（> now 跳过 / 过期收集由调用方判定）；
 //   - (零值, false, false)：键缺失 / nil（清除路径写 nil）= 未退避，收集；
 //   - (零值, false, true)：损坏态——键存在且值非 null，但不可解析为整数或
-//     解析值 <= 0，调用方应跳过该账号本轮收集并发告警（非未退避收集）。
+//     解析值 <= 0（含 int64 范围溢出等 ErrRange 情形），调用方应跳过该账号
+//     本轮收集并发告警（非未退避收集）。
 func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool, bool) {
 	if account == nil || account.Extra == nil {
 		return time.Time{}, false, false
@@ -437,11 +439,23 @@ func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool, bool) {
 	case int64:
 		sec = v
 	case float64:
-		sec = int64(v)
+		// NaN 与 ±Inf/越界值不可表示为 int64：显式判损坏，不依赖平台相关的
+		// float→int 转换结果（Go spec 对越界转换未定义行为）。
+		if math.IsNaN(v) || v >= math.MaxInt64 || v < math.MinInt64 {
+			parsed = false
+		} else {
+			sec = int64(v)
+		}
 	case json.Number:
-		sec, _ = v.Int64()
+		var err error
+		if sec, err = v.Int64(); err != nil {
+			parsed = false
+		}
 	case string:
-		sec, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		var err error
+		if sec, err = strconv.ParseInt(strings.TrimSpace(v), 10, 64); err != nil {
+			parsed = false
+		}
 	default:
 		parsed = false
 	}

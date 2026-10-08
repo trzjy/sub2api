@@ -3,10 +3,11 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
-	"os"
 	"testing"
 	"time"
 
@@ -338,10 +339,156 @@ func TestCNBalanceCheckTHBackoffGateCorrupted(t *testing.T) {
 	require.False(t, hCorrupt, "h) 缺失非损坏态")
 
 	// 损坏态必须产出单行 WARN 告警（含账号 id 与键形态，不打印完整原始值）。
+	orig := log.Writer()
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
+	defer log.SetOutput(orig)
 	svc.shouldSkipTokenHarborCollect(now, e)
 	require.Contains(t, buf.String(), "th collect backoff key corrupted", "损坏态必须发出告警单行")
 	require.Contains(t, buf.String(), "account=1", "告警须含账号 id")
+}
+
+// TestThProbeBackoffUntilFromExtra_Boundary 表格驱动覆盖 thProbeBackoffUntilFromExtra
+// 的三态解析边界（生产实现见 thProbeBackoffUntilFromExtra
+// （cn_provider_balance_check_service.go））。
+// 三态语义：键缺失/null → (zero,false,false)；可解析且 >0 → ok；键存在非 null 但
+// 不可解析或 ≤0 → corrupted。
+func TestThProbeBackoffUntilFromExtra_Boundary(t *testing.T) {
+	const key = thProbeBackoffUntilExtraKey
+	tests := []struct {
+		name        string
+		input       any
+		wantOK      bool
+		wantUntil   time.Time
+		wantCorrupt bool
+	}{
+		{
+			// TrimSpace 生效：空白 string 去空白后可解析。
+			name:        "string with whitespace",
+			input:       " 123 ",
+			wantOK:      true,
+			wantUntil:   time.Unix(123, 0),
+			wantCorrupt: false,
+		},
+		{
+			// ParseInt 失败（ErrSyntax/ErrRange 均含）→ parsed=false → corrupted。
+			name:        "string overflow int64",
+			input:       "99999999999999999999",
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			name:        "string negative",
+			input:       "-5",
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// float64 截断语义，与既有 float64 路径一致：1.5 → 1。
+			name:        "float64 truncate",
+			input:       float64(1.5),
+			wantOK:      true,
+			wantUntil:   time.Unix(1, 0),
+			wantCorrupt: false,
+		},
+		{
+			// json.Number 非法 → Int64() 失败 → parsed=false → corrupted。
+			name:        "json.Number illegal",
+			input:       json.Number("abc"),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			name:        "json.Number legal",
+			input:       json.Number("456"),
+			wantOK:      true,
+			wantUntil:   time.Unix(456, 0),
+			wantCorrupt: false,
+		},
+		{
+			// json.Number 越界 → Int64() 返回 ErrRange → parsed=false → corrupted。
+			name:        "json.Number overflow int64",
+			input:       json.Number("99999999999999999999"),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// 不支持类型走 default 分支 → parsed=false → corrupted。
+			name:        "unsupported bool",
+			input:       true,
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// +Inf 由显式判定覆盖，全平台一致：越界不可表示为 int64 → corrupted。
+			name:        "float64 +Inf",
+			input:       math.Inf(1),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// NaN 必须 IsNaN 显式判（比较恒 false）；显式判定，全平台一致 → corrupted。
+			name:        "float64 NaN",
+			input:       math.NaN(),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// 大正数越界 int64：v >= MaxInt64 → 显式判定 corrupted，全平台一致。
+			name:        "float64 overflow",
+			input:       float64(1e30),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// -Inf 由 v < MinInt64 覆盖：显式判定 corrupted，全平台一致。
+			name:        "float64 -Inf",
+			input:       math.Inf(-1),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// guard 放行的最大可表示 float64：9223372036854774784 = 2^63-1024，
+			// 小于 MaxInt64(2^63-1)，转换结果在 int64 域内 → ok。
+			name:        "float64 max in-range (2^63-1024)",
+			input:       float64(9223372036854774784),
+			wantOK:      true,
+			wantUntil:   time.Unix(9223372036854774784, 0),
+			wantCorrupt: false,
+		},
+		{
+			// float64 中不存在 1<<63-1 独立值，该字面量即 2^63，越出 int64
+			// 转换域 → v >= MaxInt64 判损坏。
+			name:        "float64 2^63 (out of range)",
+			input:       float64(9223372036854775808),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// guard 放行（恰在域内）但 sec=MinInt64 < 0，由既有 sec<=0 判损坏——
+			// 负时间戳不是合法退避截止。
+			name:        "float64 -2^63 (truncates negative)",
+			input:       float64(-9223372036854775808),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+		{
+			// 截断语义（非四舍五入、非解析失败）：0.5 → 0 → sec<=0 → corrupted。
+			name:        "float64 0.5 truncates to zero",
+			input:       float64(0.5),
+			wantOK:      false,
+			wantCorrupt: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := &Account{ID: 1, Extra: map[string]any{key: tc.input}}
+			gotUntil, gotOK, gotCorrupt := thProbeBackoffUntilFromExtra(acc)
+			require.Equal(t, tc.wantOK, gotOK, "ok 不符")
+			require.Equal(t, tc.wantCorrupt, gotCorrupt, "corrupted 不符")
+			if tc.wantOK {
+				require.Equal(t, tc.wantUntil, gotUntil, "until 不符")
+			}
+		})
+	}
 }
