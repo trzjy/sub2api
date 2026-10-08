@@ -368,7 +368,7 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 			s.untrack(account.ID)
 			continue
 		}
-		if !state.probeDue(now, quotaLifecycleSweepInterval) {
+		if !state.probeDue(now, quotaLifecycleSweepInterval) && !s.sweepTHResidualRecoveryDue(account, state, now) {
 			continue
 		}
 		if err := s.sweepProbeAccount(ctx, account, state, now); err != nil && firstErr == nil {
@@ -482,6 +482,31 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 		fmt.Printf("[CNQuotaLifecycle] account=%d recovery probe uncertain (fail-closed, keep parked), err=%v\n", account.ID, perr)
 		return nil
 	}
+}
+
+// sweepTHResidualRecoveryDue TH 残留矛盾读侧判定（D-QLM-016）：lifecycle 里挂着
+// 未来的 recovery_at（旧口径 renewsAt 存量），但快照侧已观察到 plan_exhausted=true
+// 且 reset_at 为空/已过期——快照与恢复时间自相矛盾，视为 probe 到期进入确认循环
+//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。upstream
+// 来源（L4 最权威，交由其自身到期推进）与 plan_exhausted=false 不触发（保守，
+// 不扩语义）；快照缺失不触发（无矛盾证据）。account 为 sweepCandidates 取到的
+// repo 新鲜副本，无检查-写入窗口。
+func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, st *cnQuotaLifecycleState, now time.Time) bool {
+	if s == nil || account == nil || st == nil {
+		return false
+	}
+	if cnQuotaLifecycleProviderOf(account) != cnQuotaLifecycleProviderTokenHarbor {
+		return false
+	}
+	if st.RecoveryAt == "" || st.RecoverySource == cnQuotaRecoverySourceUpstream {
+		return false
+	}
+	cur, err := time.Parse(time.RFC3339, st.RecoveryAt)
+	if err != nil || !cur.After(now) {
+		return false
+	}
+	snap, ok := TokenHarborPassSnapshotFromExtra(account)
+	return ok && snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now))
 }
 
 // parkedUntil 从持久化恢复时间近似还原当前停调到期点（用于「仍耗尽」续停的
@@ -691,9 +716,10 @@ func (s *CNQuotaLifecycleService) resolveRecoveryTime(account *Account, upstream
 // recovery_at 收敛到最新 reset_at，覆盖历史上按 renewsAt 写入的旧值（含线上存量）。
 // 守卫三件：① recovery_at 来源为 upstream 不动（L4 上游响应 > 快照）；② cur 已
 // 等于/晚于 reset_at 不回退（reset_at 随窗口单调递增，晚于只可能是并发旧快照后写）；
-// ③ reset_at 过期/缺失时不收敛，且会清掉残留的未来 recovery_at（非 upstream 来源，
-// 不清会让 sweep 挂死到旧到期点）登记 unknown 落回 5 分钟兜底循环。仅在已有
-// lifecycle 状态时动作；无状态/未知不编造。本方法幂等且只改 cn_quota_lifecycle 窄面。
+// ③ reset_at 过期/缺失时不收敛、零写入（D-QLM-016：写侧清理的检查-写入窗口在无
+// CAS 前提下不可闭合，残留的未来 recovery_at 由 RunRecoverySweep 读侧矛盾判定
+// 推进，见 sweepTHResidualRecoveryDue）。仅在已有 lifecycle 状态时动作；无状态/
+// 未知不编造。本方法幂等且只改 cn_quota_lifecycle 窄面。
 func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, account *Account) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
@@ -707,32 +733,8 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 		return
 	}
 	if snap.ResetAt == nil || !snap.ResetAt.After(s.now()) {
-		// reset_at 过期/缺失：不收敛到过期值。但若 lifecycle 里还挂着未来的
-		// recovery_at（旧口径 renewsAt 存量 / 并发竞态残留），该残留会让 probeDue
-		// 挂死到旧到期点、sweep 永不跑，L3/L4 的 unknown 兜底循环不可达——清掉
-		// 登记未知，落回 5 分钟确认循环（D-QLM-012 §1；upstream 来源不在清理面，
-		// L4 上游值最权威，交由其自身到期推进）。残留为空或已过期时维持现状
-		// return（无残留可清，unknown 循环本就按期推进）。
-		//
-		// D-QLM-015：调用方传入的 account 是内存副本，双入口（确认路径/快照刷新
-		// 链）并发时，读-写之间另一入口可能已写入更晚的 upstream/snapshot
-		// recovery_at——直接按旧副本清理会把它抹掉。因此 persist 前经 GetByID
-		// 重读最新账号，在新鲜副本上重验全部守卫；重读失败/账号不存在静默跳过
-		// （不清除不确定状态，与失败关闭方向一致）。不引入 CAS/版本号，残余毫秒
-		// 级窗口与文件内所有 persistLifecycleState 调用点的 last-write-wins 语义一致。
-		latest, err := s.accountRepo.GetByID(ctx, account.ID)
-		if err != nil || latest == nil {
-			fmt.Printf("[CNQuotaLifecycle] account=%d residual-recovery cleanup skipped: latest account unavailable: %v\n",
-				account.ID, err)
-			return
-		}
-		if s.thResidualFutureRecovery(latest) {
-			st, _ := cnQuotaLifecycleStateFromExtra(latest.Extra)
-			st.RecoveryAt = ""
-			st.RecoverySource = cnQuotaRecoverySourceUnknown
-			st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
-			s.persistLifecycleState(ctx, latest.ID, st)
-		}
+		// reset_at 过期/缺失：不收敛到过期值，零写入（回归 007 原样 plain
+		// return）。残留的未来 recovery_at 由 sweep 读侧判定推进确认循环。
 		return
 	}
 	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
@@ -758,19 +760,6 @@ func (s *CNQuotaLifecycleService) convergeTHStockRecovery(ctx context.Context, a
 	st.RecoverySource = cnQuotaRecoverySourceSnapshot
 	st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
 	s.persistLifecycleState(ctx, account.ID, st)
-}
-
-// thResidualFutureRecovery 报告账号 lifecycle 状态是否存在「会挂死 sweep 的未来
-// recovery_at 残留」（D-QLM-012 §1 / D-QLM-015 重验共用判定）：残留非空、来源非
-// upstream（L4 上游值不在清理面）、可解析且在未来。守卫段收拢于此，供 converge
-// 清理分支对 repo 最新副本重验，避免复制第二份判定。
-func (s *CNQuotaLifecycleService) thResidualFutureRecovery(account *Account) bool {
-	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
-	if !ok || st.RecoveryAt == "" || st.RecoverySource == cnQuotaRecoverySourceUpstream {
-		return false
-	}
-	cur, err := time.Parse(time.RFC3339, st.RecoveryAt)
-	return err == nil && cur.After(s.now())
 }
 
 // cnQuotaUpstreamMsgResetTime 从上游响应文案中提取未来的 RFC3339 重置时间；

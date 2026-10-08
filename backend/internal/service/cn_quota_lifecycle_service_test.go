@@ -675,10 +675,10 @@ func TestQuotaLifecycleTHStockRecoverySkipsExpiredResetAt(t *testing.T) {
 		"expired reset_at must not be written back as recovery_at")
 }
 
-// 存量收敛守卫（D-QLM-012 §1）：reset_at 已过期/缺失但 lifecycle 仍挂着未来的
-// recovery_at（旧口径 renewsAt 存量）→ 残留会让 probeDue 挂死到旧到期点、sweep
-// 永不跑；converge 必须清空残留登记 unknown，落回 5 分钟确认循环。
-func TestQuotaLifecycleTHStockRecoveryClearsResidualFutureRecoveryOnExpiredResetAt(t *testing.T) {
+// 存量收敛回归（D-QLM-016 d）：reset_at 已过期/缺失但 lifecycle 残留未来的
+// recovery_at → converge 对 repo 零写入（写侧清理已删除，残留由 sweep 读侧判定
+// 推进，见 TestQuotaLifecycleSweepProbesTHResidualMismatch...）。
+func TestQuotaLifecycleTHStockRecoveryExpiredResetAtWritesNothing(t *testing.T) {
 	account := newQuotaLifecycleTHAccount(207)
 	// 残留：旧口径 renewsAt（≈28 天后，在未来）。
 	oldRenewsAt := quotaLifecycleBase.Add(28 * 24 * time.Hour)
@@ -699,18 +699,13 @@ func TestQuotaLifecycleTHStockRecoveryClearsResidualFutureRecoveryOnExpiredReset
 
 	svc.convergeTHStockRecovery(context.Background(), account)
 
+	// 零写入回归断言：残留 recovery_at 原样保留、repo 与内存一致、无 unknown 改写。
 	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
 	require.True(t, ok)
-	require.Equal(t, "", st.RecoveryAt, "residual future recovery_at must be cleared when reset_at is expired")
-	require.Equal(t, cnQuotaRecoverySourceUnknown, st.RecoverySource, "cleared residual must register unknown source")
-	require.NotEqual(t, oldRenewsAt.UTC().Format(time.RFC3339), st.RecoveryAt)
-	// D-QLM-015 b（落库证据）：fake repo 收到的写入内容与内存状态一致。
-	persisted, ok := cnQuotaLifecycleStateFromExtra(repo.accounts[207].Extra)
-	require.True(t, ok, "cleanup must persist the cleared state to the repo")
-	require.Equal(t, st.RecoveryAt, persisted.RecoveryAt)
-	require.Equal(t, st.RecoverySource, persisted.RecoverySource)
-	require.Equal(t, st.UpdatedAt, persisted.UpdatedAt)
-	require.Equal(t, cnQuotaLifecycleStateExhausted, persisted.State)
+	require.Equal(t, oldRenewsAt.UTC().Format(time.RFC3339), st.RecoveryAt,
+		"converge must not clear the residual recovery_at (zero-write on expired reset_at)")
+	require.Equal(t, oldRenewsAt.UTC().Format(time.RFC3339), repo.accounts[207].Extra[cnQuotaLifecycleExtraKey].(map[string]any)["recovery_at"],
+		"converge must write nothing to the repo on expired reset_at")
 }
 
 // 存量收敛守卫（D-QLM-012 §2 单调）：cur recovery_at 已晚于快照 reset_at →
@@ -740,57 +735,6 @@ func TestQuotaLifecycleTHStockRecoveryNeverRollsBackLaterRecovery(t *testing.T) 
 	require.True(t, ok)
 	require.Equal(t, curRecoveryAt.UTC().Format(time.RFC3339), st.RecoveryAt,
 		"later recovery_at must never be rolled back to an older snapshot reset_at")
-}
-
-// 存量收敛守卫（D-QLM-015 重读重验）：调用方传入的 account 内存副本残留未来
-// snapshot recovery_at（reset_at 已过期，按旧副本看满足清理条件），但 repo 中
-// 最新状态已被并发入口改写为 upstream 来源 → 清理必须跳过，repo 状态原样
-//（防并发清掉 upstream 值）。
-func TestQuotaLifecycleTHStockRecoveryCleanupSkipsWhenLatestIsUpstream(t *testing.T) {
-	staleCopy := newQuotaLifecycleTHAccount(207)
-	// 旧副本：残留未来 snapshot recovery_at（旧口径 renewsAt 存量形态）+ 过期 reset_at。
-	residual := quotaLifecycleBase.Add(28 * 24 * time.Hour)
-	staleCopy.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
-		"state":       cnQuotaLifecycleStateExhausted,
-		"recovery_at": residual.UTC().Format(time.RFC3339),
-		"updated_at":  quotaLifecycleBase.Format(time.RFC3339),
-	}
-	staleCopy.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
-		"has_pass":       true,
-		"reset_at":       quotaLifecycleBase.Add(-time.Hour).UTC().Format(time.RFC3339),
-		"plan_exhausted": true,
-	}
-	repo := newQuotaLifecycleFakeRepo(staleCopy)
-
-	// repo 最新状态：并发入口（确认路径）已写入更晚的 upstream recovery_at，
-	// 快照也刷新为有效值。staleCopy 与 repo 内是同一指针（fake 语义），故先克隆
-	// 一份独立账号进 repo，再把 staleCopy 当作调用方传入的过期副本。
-	latest := *staleCopy
-	latest.Extra = map[string]any{
-		cnQuotaLifecycleExtraKey: map[string]any{
-			"state":       cnQuotaLifecycleStateExhausted,
-			"recovery_at": quotaLifecycleBase.Add(10 * 24 * time.Hour).UTC().Format(time.RFC3339),
-			"recovery_source": cnQuotaRecoverySourceUpstream,
-			"updated_at":  quotaLifecycleBase.Format(time.RFC3339),
-		},
-		TokenHarborPassSnapshotExtraKey: map[string]any{
-			"has_pass":       true,
-			"reset_at":       quotaLifecycleBase.Add(10 * 24 * time.Hour).UTC().Format(time.RFC3339),
-			"plan_exhausted": true,
-		},
-	}
-	repo.accounts[207] = &latest
-
-	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
-	svc.convergeTHStockRecovery(context.Background(), staleCopy)
-
-	// repo 状态原样：upstream recovery_at 不被旧副本的清理分支抹掉。
-	st, ok := cnQuotaLifecycleStateFromExtra(latest.Extra)
-	require.True(t, ok)
-	require.Equal(t, cnQuotaRecoverySourceUpstream, st.RecoverySource,
-		"cleanup must not clobber the upstream recovery written by a concurrent entry")
-	require.Equal(t, (quotaLifecycleBase.Add(10 * 24 * time.Hour)).UTC().Format(time.RFC3339), st.RecoveryAt,
-		"latest repo recovery_at must remain untouched")
 }
 
 // ---------- 5 分钟循环节距 ----------
@@ -840,6 +784,77 @@ func TestQuotaLifecycleSweepUnknownRecoveryLoopCadence(t *testing.T) {
 
 		require.NoError(t, svc.RunRecoverySweep(context.Background()))
 		require.Zero(t, probe.calls, "must not probe before the official recovery time")
+		require.Zero(t, repo.clearCalls)
+	})
+}
+
+// sweep 读侧矛盾判定三向断言（D-QLM-016 a/b/c）：lifecycle 残留未来 recovery_at
+//（旧口径 renewsAt 存量）且快照侧 plan_exhausted=true、reset_at 已过期 → 快照与
+// 恢复时间自相矛盾，probeDue=false 仍被 sweep 选中探针（unknown 确认循环可达）；
+// 来源 upstream（L4 最权威）或 plan_exhausted=false（无矛盾证据）不触发。
+func TestQuotaLifecycleSweepProbesTHResidualMismatch(t *testing.T) {
+	// newResidualAccount 构造「残留未来 recovery_at + 过期 reset_at」的停调 TH 账号。
+	newResidualAccount := func(id int64, source string, planExhausted bool) *Account {
+		account := newQuotaLifecycleTHAccount(id)
+		account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+			"state":           cnQuotaLifecycleStateExhausted,
+			"recovery_at":     quotaLifecycleBase.Add(28 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"recovery_source": source,
+			"last_probe_at":   quotaLifecycleBase.Add(-time.Minute).UTC().Format(time.RFC3339),
+		}
+		account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+			"has_pass":       true,
+			"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"reset_at":       quotaLifecycleBase.Add(-time.Hour).UTC().Format(time.RFC3339),
+			"plan_exhausted": planExhausted,
+			"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+		}
+		return account
+	}
+	park := func(repo *quotaLifecycleFakeRepo) {
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207,
+			quotaLifecycleBase.Add(28*24*time.Hour), cnQuotaExhaustedReasonPrefix))
+	}
+
+	t.Run("residual future recovery with expired reset_at is probed", func(t *testing.T) {
+		account := newResidualAccount(207, cnQuotaRecoverySourceSnapshot, true)
+		repo := newQuotaLifecycleFakeRepo(account)
+		park(repo)
+		probe := &quotaProbeController{outcome: quotaProbeRecovered}
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, probe)
+
+		// 前置：残留形态下 probeDue 确为 false，选中只能来自读侧矛盾判定。
+		st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+		require.True(t, ok)
+		require.False(t, st.probeDue(quotaLifecycleBase, quotaLifecycleSweepInterval),
+			"probeDue must be false while residual recovery_at is in the future")
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Equal(t, 1, probe.calls, "snapshot/lifecycle contradiction must reach the confirmation probe")
+		require.Equal(t, 1, repo.clearCalls, "recovered probe closes the loop by clearing the park")
+	})
+
+	t.Run("upstream source is not triggered", func(t *testing.T) {
+		account := newResidualAccount(207, cnQuotaRecoverySourceUpstream, true)
+		repo := newQuotaLifecycleFakeRepo(account)
+		park(repo)
+		probe := &quotaProbeController{outcome: quotaProbeRecovered}
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, probe)
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Zero(t, probe.calls, "upstream-sourced recovery_at must keep its own deadline semantics")
+		require.Zero(t, repo.clearCalls)
+	})
+
+	t.Run("plan_exhausted false is not triggered", func(t *testing.T) {
+		account := newResidualAccount(207, cnQuotaRecoverySourceSnapshot, false)
+		repo := newQuotaLifecycleFakeRepo(account)
+		park(repo)
+		probe := &quotaProbeController{outcome: quotaProbeRecovered}
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, probe)
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Zero(t, probe.calls, "no contradiction evidence without plan_exhausted=true")
 		require.Zero(t, repo.clearCalls)
 	})
 }
