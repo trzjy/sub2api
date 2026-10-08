@@ -226,6 +226,16 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 				}
 				continue
 			}
+			// TH（tokenharbor.ai）账号（同 Kira F5 先例：platform 可能挂在 kimi/deepseek
+			// 下，快照刷新统一走 TH 链，不走 kimi/deepseek payg 语义探测——TH 余额恒 0，
+			// payg 探测既无意义又会在原生失败时转 probeOne 白耗 Pass token）。快照刷新
+			// 不要求 Schedulable；年龄门/退避门与 openai 专项分支同口径。
+			if accountIsTokenHarborBaseURL(account) {
+				if !s.shouldSkipTokenHarborCollect(now, account) {
+					thTargets = append(thTargets, account)
+				}
+				continue
+			}
 			// coding 账号：探测滚动窗口并落快照（不要求 Schedulable——已被
 			// 阈值停调的账号也需要新鲜快照决定是否续停）。
 			if account.IsCodingPlan() {
@@ -294,6 +304,9 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// TH（tokenharbor.ai）账号快照刷新（F1：周期链的 TH 快照刷新分支）：这类账号
 	// platform 是 openai，按 base_url 识别；只刷新 th_pass_snapshot/th_usage_snapshot，
 	// 不做任何周期停调/清除（TH 停调交状态机响应式入口，§4.2）。
+	// openai 平台不在 platforms()/zhipu/minimax 收集范围内，本分支是 openai 平台 TH 号
+	// 唯一入口，与 collect 闭包内 TH base_url 判定（覆盖 kimi/deepseek 平台 TH 号）平台
+	// 不重叠（collect 仅遍历 kimi/deepseek，本分支仅遍历 openai）。
 	if s.tokenHarborPass() != nil {
 		accounts, err := s.accountRepo.ListByPlatform(context.Background(), PlatformOpenAI)
 		if err != nil {
