@@ -501,3 +501,249 @@ func TestCNProviderBalanceService_RelayOverrideOneApiQuotaToken(t *testing.T) {
 	require.Equal(t, false, repo.extraWrites[0]["deepseek_balance_unlimited"])
 	require.Equal(t, "代理春风", repo.extraWrites[0]["deepseek_balance_plan_name"])
 }
+
+// cnBalanceRouteUpstream 按 URL 路径分发响应的桩（账户级探测一次查询打两个端点）。
+type cnBalanceRouteUpstream struct {
+	routes   map[string]cnBalanceResponseUpstream
+	lastURLs []string
+	lastAuth string
+}
+
+func (u *cnBalanceRouteUpstream) Do(
+	req *http.Request,
+	_ string,
+	_ int64,
+	_ int,
+) (*http.Response, error) {
+	u.lastURLs = append(u.lastURLs, req.URL.String())
+	u.lastAuth = req.Header.Get("Authorization")
+	route, ok := u.routes[req.URL.Path]
+	if !ok {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Invalid URL"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	}
+	return route.Do(req, "", 0, 0)
+}
+
+func (u *cnBalanceRouteUpstream) DoWithTLS(
+	req *http.Request,
+	proxyURL string,
+	accountID int64,
+	accountConcurrency int,
+	_ *tlsfingerprint.Profile,
+) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func newRelaySubscriptionProbeAccount(probe map[string]any) *Account {
+	account := newRelayBalanceProbeAccount(map[string]any{
+		"enabled": true,
+		"url":     "https://inferaiapi.example.com/api/usage/token",
+	})
+	// 访问令牌存顶层敏感键（balance_probe 内不嵌令牌）。
+	account.Credentials[BalanceProbeAccessTokenKey] = "at-test"
+	account.Credentials[BalanceProbeConfigCredentialKey] = probe
+	return account
+}
+
+const cnRelaySubscriptionBody = `{"success":true,"data":{"all_subscriptions":[{"subscription":{"id":1000004135,"user_id":41,"plan_id":4,"amount_total":250000000,"amount_used":157730000,"status":"active","source":"legacy","end_time":253402214400},"legacy_package_id":35,"legacy_countpack":true,"model_pools":null}],"billing_preference":"subscription_first"}}`
+
+// 账户级次数包探测（New API 系）：access_token 分支打 /api/subscription/self +
+// /api/user/self，剩余次数 = (total-used)/count_unit，PlanName 取上游分组，
+// 快照覆盖令牌级残留展示键（expires_at 清空、daily/monthly_used 归零）。
+func TestCNProviderBalanceService_RelaySubscriptionCountPack(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+		"/api/subscription/self": {statusCode: http.StatusOK, body: cnRelaySubscriptionBody},
+		"/api/user/self":         {statusCode: http.StatusOK, body: `{"success":true,"data":{"id":41,"group":"开发者 Pro · 代理组","quota":1}}`},
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.True(t, result.Unlimited)
+	require.Equal(t, "开发者 Pro · 代理组", result.PlanName)
+	require.Equal(t, 18454.0, result.Balance)
+	require.Len(t, result.Balances, 1)
+	require.Equal(t, 18454.0, result.Balances[0].Balance)
+	// 两个端点同源派生、Bearer 访问令牌鉴权。
+	require.Equal(t, []string{
+		"https://inferaiapi.example.com/api/subscription/self",
+		"https://inferaiapi.example.com/api/user/self",
+	}, upstream.lastURLs)
+	require.Equal(t, "Bearer at-test", upstream.lastAuth)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, 18454.0, repo.extraWrites[0]["deepseek_balance"])
+	require.Equal(t, true, repo.extraWrites[0]["deepseek_balance_unlimited"])
+	require.Equal(t, "开发者 Pro · 代理组", repo.extraWrites[0]["deepseek_balance_plan_name"])
+	require.Equal(t, "", repo.extraWrites[0]["deepseek_balance_expires_at"])
+	require.Equal(t, float64(0), repo.extraWrites[0]["deepseek_balance_monthly_used"])
+	require.Equal(t, float64(0), repo.extraWrites[0]["deepseek_balance_daily_used"])
+}
+
+// 配置了 access_token 但缺 count_unit：失败关闭（配置错误），不打上游、不落快照。
+func TestCNProviderBalanceService_RelaySubscriptionMissingCountUnit(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled": true,
+		"url":     "https://inferaiapi.example.com/api/usage/token",
+	})}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "count_unit")
+	require.Empty(t, upstream.lastURLs)
+	require.Empty(t, repo.extraWrites)
+}
+
+// 无 active 订阅：失败关闭，不落快照、不继续打 user/self。
+func TestCNProviderBalanceService_RelaySubscriptionNoActive(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+		"/api/subscription/self": {statusCode: http.StatusOK, body: `{"success":true,"data":{"all_subscriptions":[{"subscription":{"status":"expired","amount_total":1,"amount_used":1}}]}}`},
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Contains(t, result.Error, "no active subscription")
+	require.Len(t, upstream.lastURLs, 1)
+	require.Empty(t, repo.extraWrites)
+}
+
+// user/self 失败：整体失败关闭（PlanName 是快照必产出），不落快照。
+func TestCNProviderBalanceService_RelaySubscriptionUserSelfFailure(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+		"/api/subscription/self": {statusCode: http.StatusOK, body: cnRelaySubscriptionBody},
+		"/api/user/self":         {statusCode: http.StatusUnauthorized, body: `{"error":{"message":"unauthorized"}}`},
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Contains(t, result.Error, "user/self")
+	require.Empty(t, repo.extraWrites)
+}
+
+// 外审 must_fix 回归①：配置了 count_unit 但缺访问令牌 —— 对称校验失败关闭，
+// 不得落入旧令牌级路径把残留值写入快照。
+func TestCNProviderBalanceService_RelaySubscriptionCountUnitWithoutToken(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"code":true,"data":{"unlimited_quota":true,"total_available":1,"name":"长期 代理春风"}}`,
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "configured together")
+	require.Empty(t, repo.extraWrites, "must not persist token-level residual via legacy path")
+}
+
+// 外审第 2 轮 must_fix 回归③：count_unit 键存在但无效（0 或非数值）且未配置
+// 访问令牌 —— 不得绕过对称校验落入旧令牌级路径，失败关闭。
+func TestCNProviderBalanceService_RelaySubscriptionInvalidCountUnit(t *testing.T) {
+	for name, unit := range map[string]any{"zero": float64(0), "negative": float64(-1), "non_numeric": "5000"} {
+		t.Run(name, func(t *testing.T) {
+			repo := &cnBalanceProbeRepo{account: newRelayBalanceProbeAccount(map[string]any{
+				"enabled":    true,
+				"url":        "https://inferaiapi.example.com/api/usage/token",
+				"count_unit": unit,
+			})}
+			upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+				statusCode: http.StatusOK,
+				body:       `{"code":true,"data":{"unlimited_quota":true,"total_available":1,"name":"长期 代理春风"}}`,
+			}}
+			svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+			_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "configured together")
+			require.Empty(t, upstream.lastURL, "must not fall through to legacy token-level probe")
+			require.Empty(t, repo.extraWrites)
+		})
+	}
+}
+
+// 外审第 3 轮 must_fix 回归④：账户 header overrides 含 authorization 时不得
+// 顶替账户级探测专用 Bearer 凭据（balance_probe_access_token 唯一鉴权）。
+func TestCNProviderBalanceService_RelaySubscriptionTokenSurvivesHeaderOverride(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	repo.account.Credentials["header_override_enabled"] = true
+	repo.account.Credentials["header_overrides"] = map[string]any{
+		"authorization": "Bearer rogue-override",
+	}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+		"/api/subscription/self": {statusCode: http.StatusOK, body: cnRelaySubscriptionBody},
+		"/api/user/self":         {statusCode: http.StatusOK, body: `{"success":true,"data":{"id":41,"group":"开发者 Pro · 代理组","quota":1}}`},
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "Bearer at-test", upstream.lastAuth, "probe must use balance_probe_access_token, not header override")
+}
+
+// 外审 must_fix 回归②：user/self 失败时 StatusCode 反映实际失败请求。
+func TestCNProviderBalanceService_RelaySubscriptionUserSelfStatusCode(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newRelaySubscriptionProbeAccount(map[string]any{
+		"enabled":    true,
+		"url":        "https://inferaiapi.example.com/api/usage/token",
+		"count_unit": float64(5000),
+	})}
+	upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+		"/api/subscription/self": {statusCode: http.StatusOK, body: cnRelaySubscriptionBody},
+		"/api/user/self":         {statusCode: http.StatusUnauthorized, body: `{"error":{"message":"unauthorized"}}`},
+	}}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Equal(t, http.StatusUnauthorized, result.StatusCode)
+	require.Contains(t, result.Error, "user/self")
+	require.Empty(t, repo.extraWrites)
+}

@@ -15,14 +15,30 @@ import (
 
 const (
 	BalanceProbeConfigCredentialKey = "balance_probe"
-	balanceProbeTimeout             = 10 * time.Second
-	balanceProbeMaxBodyBytes        = 256 * 1024
+	// BalanceProbeAccessTokenKey 是账户级余额探测（New API 系次数包）的站点
+	// 系统访问令牌，顶层敏感键：加密落库 + API 脱敏 + PUT 合并回补。
+	BalanceProbeAccessTokenKey = "balance_probe_access_token"
+	balanceProbeTimeout        = 10 * time.Second
+	balanceProbeMaxBodyBytes   = 256 * 1024
 )
 
 type BalanceProbeConfig struct {
 	Enabled    bool   `json:"enabled"`
 	URL        string `json:"url"`
 	BearerAuth bool   `json:"bearer_auth"`
+	// AccessToken 非空时改走账户级探测（New API 系 /api/subscription/self +
+	// /api/user/self，Bearer 访问令牌鉴权）：令牌级 /api/usage/token 对
+	// unlimited key 只返回残留值，账户共享的次数包余额只有账户级端点有。
+	// 存储在顶层敏感键 credentials.balance_probe_access_token（静态加密/脱敏/
+	// 合并回补走 SensitiveCredentialKeys 既有链），json:"-" 保证 DTO 永不回显。
+	AccessToken string `json:"-"`
+	// CountUnit 为次数包换算单位（上游内部配额 / 每次调用扣减配额，如
+	// 星思云站 5000=1 次）。AccessToken 分支必填，缺失失败关闭。
+	CountUnit float64 `json:"count_unit,omitempty"`
+	// countUnitSet 记录 balance_probe.count_unit 键是否显式存在（含值为
+	// 0/负/非数值的无效配置）：存在即视为账户级探测意图，无效值不允许
+	// 静默回落到旧令牌级路径，派发层据此失败关闭。
+	countUnitSet bool
 }
 
 type BalanceProbeResult struct {
@@ -51,6 +67,14 @@ func (a *Account) BalanceProbeConfig() BalanceProbeConfig {
 	if value, ok := raw["bearer_auth"].(bool); ok {
 		config.BearerAuth = value
 	}
+	if _, ok := raw["count_unit"]; ok {
+		config.countUnitSet = true
+	}
+	if value, ok := raw["count_unit"].(float64); ok {
+		config.CountUnit = value
+	}
+	// 访问令牌存顶层敏感键（与 th_password/kira_jwt 同型），不在 balance_probe 对象内。
+	config.AccessToken = strings.TrimSpace(a.GetCredential(BalanceProbeAccessTokenKey))
 	return config
 }
 

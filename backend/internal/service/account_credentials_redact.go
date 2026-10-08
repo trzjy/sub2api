@@ -18,6 +18,8 @@ var SensitiveCredentialKeys = []string{
 	"service_account_json", "service_account", "private_key",
 	// TH/Kira 配额探测后台凭据（2026-10 补：特性新增时漏同步，两条安全链回归）
 	"th_password", "kira_jwt", "kira_password",
+	// CN 中转账户级余额探测的站点系统访问令牌（New API 系次数包查询）
+	BalanceProbeAccessTokenKey,
 }
 
 var sensitiveCredentialKeySet = func() map[string]struct{} {

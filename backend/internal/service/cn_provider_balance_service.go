@@ -202,9 +202,12 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 		}
 		if overrideURL != "" {
 			return s.queryRelayBalance(ctx, account, apiKey, BalanceProbeConfig{
-				Enabled:    true,
-				URL:        overrideURL,
-				BearerAuth: probeCfg.BearerAuth,
+				Enabled:      true,
+				URL:          overrideURL,
+				BearerAuth:   probeCfg.BearerAuth,
+				AccessToken:  probeCfg.AccessToken,
+				CountUnit:    probeCfg.CountUnit,
+				countUnitSet: probeCfg.countUnitSet,
 			})
 		}
 	}
@@ -365,6 +368,19 @@ func (s *CNProviderBalanceService) queryTokenHarborBalanceForAccount(ctx context
 //   - 覆盖地址同样经过出站 URL 安全策略校验（cnValidateProbeURL），不绕过 allowlist。
 func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, account *Account, apiKey string, probeCfg BalanceProbeConfig) (*CNProviderBalanceResult, error) {
 	provider := account.Platform
+	// 账户级探测分支（New API 系次数包）：配置了 access_token 时令牌级端点
+	// 不可用（unlimited key 的 total_available 是残留值），改走
+	// /api/subscription/self + /api/user/self。失败关闭，不回退令牌级探测。
+	// access_token 与 count_unit 对称校验：配置了其一而缺另一时不落入旧
+	// 令牌级路径（残留值会伪装成真数写入快照），直接配置错误失败关闭。
+	// count_unit 键显式存在但无效（0/负/非数值）同样视为账户级探测意图，
+	// 失败关闭，不静默回落令牌级探测。
+	if probeCfg.AccessToken != "" || probeCfg.CountUnit > 0 || probeCfg.countUnitSet {
+		if probeCfg.AccessToken == "" || probeCfg.CountUnit <= 0 {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_INVALID_CONFIG", "balance probe access_token and count_unit must be configured together")
+		}
+		return s.queryRelaySubscriptionBalance(ctx, account, provider, probeCfg)
+	}
 	targetURL, err := cnValidateProbeURL(s.cfg, probeCfg.URL)
 	if err != nil {
 		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
@@ -561,6 +577,182 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		result.Persisted = true
 	}
 	return result, nil
+}
+
+// queryRelaySubscriptionBalance 是中转账号的账户级探测分支（New API 系次数包，
+// 2026-10-09 星思云站 xing.xinxinyuntu.top 生产实测）：令牌级 /api/usage/token
+// 对 unlimited key 只返回残留值（total_available=1），账户共享的次数包余额只在
+// 账户级端点。Bearer 访问令牌鉴权（实测 Bearer/裸 token 均收，无鉴权 401）。
+//
+//   - /api/subscription/self → data.all_subscriptions[] 取首个 status=active，
+//     剩余次数 = (amount_total - amount_used) / count_unit（换算单位账号配置，
+//     星思云站实测 5000 配额单位 = 1 次，与站点弹窗读数逐次吻合）；
+//   - /api/user/self → data.group 作 PlanName（站点分组名，如「开发者 Pro · 代理组」）；
+//   - 快照同时清零令牌级残留展示键：expires_at 置空（次数包无到期概念，上游
+//     end_time 恒 9999 年）、daily/monthly_used 置 0（消费全部走次数包，USD
+//     钱包用量恒 0）——UpdateExtra 合并语义删不掉键，只能显式覆盖旧值。
+//
+// 任一请求失败或响应形状不符均失败关闭，不回退令牌级探测（残留值会伪装成真数）。
+func (s *CNProviderBalanceService) queryRelaySubscriptionBalance(ctx context.Context, account *Account, provider string, probeCfg BalanceProbeConfig) (*CNProviderBalanceResult, error) {
+	if probeCfg.CountUnit <= 0 {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_INVALID_CONFIG", "balance probe count_unit must be > 0 when access_token is set")
+	}
+	origin, err := cnProbeURLOrigin(probeCfg.URL)
+	if err != nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_INVALID_CONFIG", err.Error())
+	}
+
+	now := time.Now().UTC()
+	result := &CNProviderBalanceResult{
+		Provider:  provider,
+		FetchedAt: now.Unix(),
+		Available: true,
+		Unlimited: true,
+		Currency:  "USD",
+	}
+
+	subURL, err := cnValidateProbeURL(s.cfg, origin+"/api/subscription/self")
+	if err != nil {
+		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
+	}
+	bodyBytes, statusCode, err := s.cnRelayAccountGet(ctx, account, subURL, probeCfg.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	result.StatusCode = statusCode
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		result.Error = fmt.Sprintf("Authentication failed (HTTP %d)", statusCode)
+		return result, nil
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		result.Error = fmt.Sprintf("API error (HTTP %d): %s", statusCode, truncate(strings.TrimSpace(string(bodyBytes)), 240))
+		return result, nil
+	}
+
+	remaining, err := cnParseActiveCountPack(bodyBytes, probeCfg.CountUnit)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	result.Balance = remaining
+	result.Balances = []CNProviderBalanceEntry{{Currency: "USD", Balance: remaining}}
+
+	selfURL, err := cnValidateProbeURL(s.cfg, origin+"/api/user/self")
+	if err != nil {
+		return nil, infraerrors.New(http.StatusForbidden, "CN_BALANCE_URL_REJECTED", err.Error())
+	}
+	selfBytes, selfStatus, err := s.cnRelayAccountGet(ctx, account, selfURL, probeCfg.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+	// 先更新结果状态码再判定：user/self 失败时 StatusCode 必须反映实际失败
+	// 请求，不得保留 subscription 请求的 200 与 Error/Success=false 矛盾。
+	result.StatusCode = selfStatus
+	if selfStatus < 200 || selfStatus >= 300 {
+		result.Error = fmt.Sprintf("API error (HTTP %d) on user/self: %s", selfStatus, truncate(strings.TrimSpace(string(selfBytes)), 240))
+		return result, nil
+	}
+	group := strings.TrimSpace(gjson.GetBytes(selfBytes, "data.group").String())
+	if group == "" {
+		result.Error = "Invalid user/self response: missing data.group"
+		return result, nil
+	}
+	result.PlanName = group
+	result.Success = true
+
+	balanceUpdates := make([]any, 0, len(result.Balances))
+	for _, entry := range result.Balances {
+		balanceUpdates = append(balanceUpdates, map[string]any{
+			"currency": entry.Currency,
+			"balance":  entry.Balance,
+		})
+	}
+	updates := map[string]any{
+		cnExtraKey(provider, cnBalanceExtraSuffixBalance):   result.Balance,
+		cnExtraKey(provider, cnBalanceExtraSuffixCurrency):  result.Currency,
+		cnExtraKey(provider, cnBalanceExtraSuffixAvailable): result.Available,
+		cnExtraKey(provider, cnBalanceExtraSuffixUpdated):   now.Format(time.RFC3339),
+		cnExtraKey(provider, cnBalanceExtraSuffixBalances):  balanceUpdates,
+		cnExtraKey(provider, cnBalanceExtraSuffixUnlimited): result.Unlimited,
+		cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
+		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
+		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+		// 令牌级残留展示键清零（见函数注释），显式覆盖合并语义下的旧值。
+		cnExtraKey(provider, cnBalanceExtraSuffixExpiresAt):   "",
+		cnExtraKey(provider, cnBalanceExtraSuffixDailyUsed):   float64(0),
+		cnExtraKey(provider, cnBalanceExtraSuffixMonthlyUsed): float64(0),
+	}
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+		slog.Warn("cn_balance_persist_failed", "account_id", account.ID, "provider", provider, "error", err)
+	} else {
+		result.Persisted = true
+	}
+	return result, nil
+}
+
+// cnRelayAccountGet 发起账户级探测 GET（Bearer 访问令牌），返回响应体与状态码。
+// 传输失败包成 CN_BALANCE_REQUEST_FAILED，与令牌级分支同口径。
+func (s *CNProviderBalanceService) cnRelayAccountGet(ctx context.Context, account *Account, targetURL, accessToken string) ([]byte, int, error) {
+	proxyURL := s.resolveProxyURL(ctx, account)
+	callCtx, cancel := context.WithTimeout(ctx, cnBalanceUpstreamTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, 0, infraerrors.Newf(http.StatusInternalServerError, "CN_BALANCE_REQUEST_BUILD_FAILED", "build request: %v", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	// 通用请求头覆盖先行，探测专用 Bearer 凭据后置锁定：账户级分支只允许
+	// 使用 balance_probe_access_token，header overrides 不得顶替该鉴权。
+	account.ApplyHeaderOverrides(req.Header)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, maxInt(account.Concurrency, 1))
+	if err != nil {
+		return nil, 0, infraerrors.Newf(http.StatusBadGateway, "CN_BALANCE_REQUEST_FAILED", "upstream request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, cnBalanceMaxBodyBytes))
+	return bodyBytes, resp.StatusCode, nil
+}
+
+// cnParseActiveCountPack 从 /api/subscription/self 响应取首个 active 订阅，
+// 剩余次数 = (amount_total - amount_used) / countUnit。形状不符失败关闭。
+func cnParseActiveCountPack(bodyBytes []byte, countUnit float64) (float64, error) {
+	subs := gjson.GetBytes(bodyBytes, "data.all_subscriptions")
+	if !subs.Exists() || !subs.IsArray() {
+		return 0, fmt.Errorf("Invalid subscription response: missing data.all_subscriptions")
+	}
+	var active gjson.Result
+	found := false
+	subs.ForEach(func(_, sub gjson.Result) bool {
+		if strings.EqualFold(strings.TrimSpace(sub.Get("subscription.status").String()), "active") {
+			active = sub
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		return 0, fmt.Errorf("Invalid subscription response: no active subscription")
+	}
+	total, okTotal := cnParseF64(active.Get("subscription.amount_total").Value())
+	used, okUsed := cnParseF64(active.Get("subscription.amount_used").Value())
+	if !okTotal || !okUsed {
+		return 0, fmt.Errorf("Invalid subscription response: missing amount_total/amount_used")
+	}
+	return (total - used) / countUnit, nil
+}
+
+// cnProbeURLOrigin 从探测地址取 https 源（scheme://host），账户级端点挂同一源下。
+func cnProbeURLOrigin(probeURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(probeURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("balance probe URL is invalid: %q", probeURL)
+	}
+	if parsed.Scheme != "https" {
+		return "", fmt.Errorf("balance probe URL must use https")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 // cnIsOfficialBalanceHost 判定 base_url 是否指向厂商官方域名（官方账号的余额

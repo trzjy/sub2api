@@ -165,3 +165,22 @@ func TestMergePreservingSensitiveCreds_LoginSecretsIncludedByDefault(t *testing.
 	out := MergePreservingSensitiveCreds(existing, incoming)
 	require.Equal(t, "u@x.com", out["login_email"], "login_email 纳入全局敏感清单后默认保留")
 }
+
+// balance_probe_access_token（CN 中转账户级余额探测的站点系统访问令牌）入敏感
+// 清单：merge 回补 + RedactCredentials 脱敏 + 静态加密三条链共用该清单，本用例
+// 钉住键位在清单内，防后续清单重构时漏带。
+func TestBalanceProbeAccessToken_SensitiveKeyChains(t *testing.T) {
+	require.True(t, IsSensitiveCredentialKey(BalanceProbeAccessTokenKey))
+
+	existing := map[string]any{
+		BalanceProbeAccessTokenKey: "at-old",
+		"balance_probe":            map[string]any{"enabled": true, "url": "https://x.example.com/api/usage/token"},
+	}
+	incoming := map[string]any{
+		"balance_probe": map[string]any{"enabled": true, "url": "https://x.example.com/api/usage/token", "count_unit": float64(5000)},
+		// 没带 balance_probe_access_token —— 应保留（部分 PUT 不清令牌）
+	}
+	out := MergePreservingSensitiveCreds(existing, incoming)
+	require.Equal(t, "at-old", out[BalanceProbeAccessTokenKey], "incoming 没传访问令牌，应保留 existing")
+	require.Equal(t, float64(5000), out["balance_probe"].(map[string]any)["count_unit"], "非敏感键由 incoming 决定")
+}
