@@ -353,4 +353,70 @@ describe('AccountStatusIndicator', () => {
     // 条目被到期剔除：模型短别名徽标不应出现
     expect(wrapper.text()).not.toContain('CSon45')
   })
+
+  // D-FE-001 用例 1：账号级健康探测占位条目（仅 attempted_at，无 rate_limited_at /
+  // rate_limit_reset_at / reason，后端 display_state=waiting_probe 语义）不是限流，
+  // 不得渲染成"限流至"徽章（此前 new Date(undefined) 恒 false 导致永久常驻）。
+  it('探测占位条目（仅 attempted_at，无 reset_at/reason）→ 不渲染模型限流徽章', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 10,
+          name: 'probe-placeholder-1',
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {
+            model_rate_limits: {
+              tokenharbor_account_level_probe: {
+                rate_limited_at: undefined as unknown as string,
+                rate_limit_reset_at: undefined as unknown as string,
+                attempted_at: '2099-03-15T00:00:00Z'
+              } as never
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    // 不渲染任何模型限流徽章：占位条目名与"限流至" tooltip 文案都不出现
+    expect(wrapper.text()).not.toContain('tokenharbor_account_level_probe')
+    expect(wrapper.text()).not.toContain('admin.accounts.status.modelRateLimitedUntil')
+  })
+
+  // D-FE-001 用例 2：真实限流条目（有 rate_limited_at + 未来 rate_limit_reset_at、
+  // 无 reason）→ 徽章照常渲染（回归保护）。
+  it('真实限流条目（无 reason，reset 在未来）→ 徽章照常渲染', () => {
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          id: 11,
+          name: 'real-rate-limit-1',
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {
+            model_rate_limits: {
+              'claude-sonnet-4-5': {
+                rate_limited_at: '2026-03-15T00:00:00Z',
+                rate_limit_reset_at: '2099-03-15T00:00:00Z'
+              }
+            }
+          }
+        })
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    expect(wrapper.text()).toContain('CSon45')
+    // tooltip 文案在 hover 才可见，但 wrapper.text() 包含模板静态渲染内容；
+    // 徽章本体（模型名）出现即证明条目未被剔除。
+  })
 })

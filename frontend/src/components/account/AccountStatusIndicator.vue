@@ -222,8 +222,11 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
       typeof info.reason === 'string' && info.reason.startsWith(tokenHarborFreeTierReasonPrefix)
     if (isTokenHarborEntry) {
       if (info.precise_reset === true && new Date(info.rate_limit_reset_at) <= now) continue
-    } else if (new Date(info.rate_limit_reset_at) <= now) {
-      continue
+    } else {
+      const reset = new Date(info.rate_limit_reset_at)
+      // 无 rate_limit_reset_at 或日期非法 = 探测观测占位条目（仅 attempted_at/observed_at，
+      // 后端 display_state=waiting_probe 语义），不是限流，不渲染徽章。
+      if (Number.isNaN(reset.getTime()) || reset <= now) continue
     }
 
     if (model === 'AICredits') {
