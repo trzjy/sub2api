@@ -487,10 +487,13 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 // sweepTHResidualRecoveryDue TH 残留矛盾读侧判定（D-QLM-016）：lifecycle 里挂着
 // 未来的 recovery_at（旧口径 renewsAt 存量），但快照侧已观察到 plan_exhausted=true
 // 且 reset_at 为空/已过期——快照与恢复时间自相矛盾，视为 probe 到期进入确认循环
-//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。upstream
-// 来源（L4 最权威，交由其自身到期推进）与 plan_exhausted=false 不触发（保守，
-// 不扩语义）；快照缺失不触发（无矛盾证据）。account 为 sweepCandidates 取到的
-// repo 新鲜副本，无检查-写入窗口。
+//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。来源按
+// 显式允许清单判定：只认 snapshot——旧 renewsAt 存量写入时来源即 snapshot
+//（confirmExhausted/sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；
+// upstream（L4 最权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发
+//（fail-closed，不扩语义）；plan_exhausted=false 不触发（保守，不扩语义）；快照
+// 缺失不触发（无矛盾证据）。account 为 sweepCandidates 取到的 repo 新鲜副本，
+// 无检查-写入窗口。
 func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, st *cnQuotaLifecycleState, now time.Time) bool {
 	if s == nil || account == nil || st == nil {
 		return false
@@ -498,7 +501,7 @@ func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, s
 	if cnQuotaLifecycleProviderOf(account) != cnQuotaLifecycleProviderTokenHarbor {
 		return false
 	}
-	if st.RecoveryAt == "" || st.RecoverySource == cnQuotaRecoverySourceUpstream {
+	if st.RecoveryAt == "" || st.RecoverySource != cnQuotaRecoverySourceSnapshot {
 		return false
 	}
 	cur, err := time.Parse(time.RFC3339, st.RecoveryAt)

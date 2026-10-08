@@ -788,10 +788,13 @@ func TestQuotaLifecycleSweepUnknownRecoveryLoopCadence(t *testing.T) {
 	})
 }
 
-// sweep 读侧矛盾判定三向断言（D-QLM-016 a/b/c）：lifecycle 残留未来 recovery_at
-//（旧口径 renewsAt 存量）且快照侧 plan_exhausted=true、reset_at 已过期 → 快照与
-// 恢复时间自相矛盾，probeDue=false 仍被 sweep 选中探针（unknown 确认循环可达）；
-// 来源 upstream（L4 最权威）或 plan_exhausted=false（无矛盾证据）不触发。
+// sweep 读侧矛盾判定四向断言（D-QLM-016 a/b/c + D-QLM-017 来源允许清单收窄）：
+// lifecycle 残留未来 recovery_at（旧口径 renewsAt 存量）且快照侧
+// plan_exhausted=true、reset_at 已过期 → 快照与恢复时间自相矛盾，probeDue=false
+// 仍被 sweep 选中探针（unknown 确认循环可达）；来源按显式允许清单只认 snapshot
+//（旧 renewsAt 存量唯一来源）——upstream（L4 最权威）与未知来源（如 "mystery"，
+// 覆盖任意未知/未来新增 RecoverySource）不触发；plan_exhausted=false（无矛盾
+// 证据）不触发。
 func TestQuotaLifecycleSweepProbesTHResidualMismatch(t *testing.T) {
 	// newResidualAccount 构造「残留未来 recovery_at + 过期 reset_at」的停调 TH 账号。
 	newResidualAccount := func(id int64, source string, planExhausted bool) *Account {
@@ -846,6 +849,20 @@ func TestQuotaLifecycleSweepProbesTHResidualMismatch(t *testing.T) {
 		require.Zero(t, repo.clearCalls)
 	})
 
+	t.Run("unknown source is not triggered", func(t *testing.T) {
+		// D-QLM-017：来源允许清单收窄为显式 snapshot 后，任意未知/未来新增
+		// RecoverySource 一律不触发残留判定（fail-closed）。
+		account := newResidualAccount(207, "mystery", true)
+		repo := newQuotaLifecycleFakeRepo(account)
+		park(repo)
+		probe := &quotaProbeController{outcome: quotaProbeRecovered}
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, probe)
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Zero(t, probe.calls, "unknown-sourced recovery_at must not trigger the residual mismatch gate")
+		require.Zero(t, repo.clearCalls)
+	})
+
 	t.Run("plan_exhausted false is not triggered", func(t *testing.T) {
 		account := newResidualAccount(207, cnQuotaRecoverySourceSnapshot, false)
 		repo := newQuotaLifecycleFakeRepo(account)
@@ -855,6 +872,122 @@ func TestQuotaLifecycleSweepProbesTHResidualMismatch(t *testing.T) {
 
 		require.NoError(t, svc.RunRecoverySweep(context.Background()))
 		require.Zero(t, probe.calls, "no contradiction evidence without plan_exhausted=true")
+		require.Zero(t, repo.clearCalls)
+	})
+}
+
+// ---------- 读侧残留命中后的定向断言（D-QLM-017 §2 a/b）----------
+
+// 读侧矛盾判定命中后的两条定向断言（D-QLM-017，不改生产代码）：
+// a. 探针仍耗尽 → 按 resolveRecoveryTime 解析值重停（temp_unschedulable 更新）
+//    且 lifecycle 写入可达的下一次确认时间；
+// b. 探针返回错误 → 失败关闭：保持原停调不变、告警保持 firing、确认循环不丢
+//    （读侧矛盾证据仍在，下一轮 sweep 再次探针）。生产 sweepProbeAccount 不确定
+//    分支按既有契约返回 nil（错误仅告警日志，见 TestQuotaLifecycleSweepProbeFailureNeverRecovers
+//    的 NoError 断言），故此处断言失败关闭不变量而非函数错误返回。
+func TestQuotaLifecycleSweepResidualHitStillExhaustedAndProbeError(t *testing.T) {
+	// newResidualTHAccount 构造「读侧矛盾」残留形态的停调 TH 账号：lifecycle 挂着
+	// 未来的 residualRecoveryAt（来源 snapshot，旧口径存量），快照侧
+	// plan_exhausted=true 且 reset_at 已过期。
+	newResidualTHAccount := func(id int64, residualRecoveryAt time.Time) *Account {
+		account := newQuotaLifecycleTHAccount(id)
+		account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+			"state":           cnQuotaLifecycleStateExhausted,
+			"recovery_at":     residualRecoveryAt.UTC().Format(time.RFC3339),
+			"recovery_source": cnQuotaRecoverySourceSnapshot,
+			"last_probe_at":   quotaLifecycleBase.Add(-time.Minute).UTC().Format(time.RFC3339),
+		}
+		account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+			"has_pass":       true,
+			"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"reset_at":       quotaLifecycleBase.Add(-time.Hour).UTC().Format(time.RFC3339),
+			"plan_exhausted": true,
+			"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+		}
+		return account
+	}
+	precreateFiringAlert := func(t *testing.T, alerts *fakeQuotaAlertStore) {
+		t.Helper()
+		_, err := alerts.CreateAlertEvent(context.Background(), &OpsAlertEvent{
+			Status: OpsAlertStatusFiring, Severity: quotaAlertSeverity, Dimensions: quotaAlertDimsFor(207), FiredAt: quotaLifecycleBase.Add(-time.Hour),
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("still exhausted re-parks to resolved placeholder and keeps next confirmation reachable", func(t *testing.T) {
+		// 残留取 +2d（≈28 天存量已部分流逝，仍在未来）：远期占位（+7d）晚于残留
+		// 停调点，「仍耗尽」续停分支才会实际改写 temp_unschedulable。
+		residual := quotaLifecycleBase.Add(2 * 24 * time.Hour)
+		account := newResidualTHAccount(207, residual)
+		repo := newQuotaLifecycleFakeRepo(account)
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, residual, cnQuotaExhaustedReasonPrefix))
+		alerts := &fakeQuotaAlertStore{}
+		precreateFiringAlert(t, alerts)
+		probe := &quotaProbeController{outcome: quotaProbeExhausted}
+		svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+		// 前置：probeDue=false，探针选中只能来自读侧矛盾判定。
+		st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+		require.True(t, ok)
+		require.False(t, st.probeDue(quotaLifecycleBase, quotaLifecycleSweepInterval))
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Equal(t, 1, probe.calls)
+
+		// a1) temp_unschedulable 按 resolveRecoveryTime 解析值重停：读侧命中场景
+		// reset_at 已过期 → 解析落 unknown → 远期占位（base+7d）。
+		until, ok := repo.parkedUntil(207)
+		require.True(t, ok, "still-exhausted after residual hit must re-park")
+		require.Equal(t, quotaLifecycleBase.Add(quotaLifecycleUnknownRecoveryPlaceholder), until)
+		// a2) lifecycle 登记 unknown（recovery_at 空），下一次确认时间可达：
+		// 节距内不重探，+5min 兜底循环按期推进。
+		st, ok = cnQuotaLifecycleStateFromExtra(account.Extra)
+		require.True(t, ok)
+		require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+		require.Equal(t, "", st.RecoveryAt, "unknown resolution must register empty recovery_at")
+		require.Equal(t, cnQuotaRecoverySourceUnknown, st.RecoverySource)
+		require.Equal(t, cnQuotaLifecycleProbeExhausted, st.LastProbeOutcome)
+		require.False(t, st.probeDue(quotaLifecycleBase, quotaLifecycleSweepInterval))
+		require.True(t, st.probeDue(quotaLifecycleBase.Add(quotaLifecycleSweepInterval), quotaLifecycleSweepInterval),
+			"lifecycle must carry a reachable next confirmation time (5-minute cadence)")
+		// 告警保持 firing。
+		require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
+		require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
+	})
+
+	t.Run("probe error fail-closed keeps park, alert and confirmation loop", func(t *testing.T) {
+		// 经典残留形态（≈28 天存量，仍在未来）。
+		residual := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+		account := newResidualTHAccount(207, residual)
+		repo := newQuotaLifecycleFakeRepo(account)
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, residual, cnQuotaExhaustedReasonPrefix))
+		alerts := &fakeQuotaAlertStore{}
+		precreateFiringAlert(t, alerts)
+		probe := &quotaProbeController{outcome: quotaProbeUncertain, err: errors.New("probe transport down")}
+		svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Equal(t, 1, probe.calls)
+
+		// b1) 失败关闭：保持原停调不变（不清除、不缩短、不延长）。
+		require.Zero(t, repo.clearCalls)
+		until, ok := repo.parkedUntil(207)
+		require.True(t, ok)
+		require.Equal(t, residual, until)
+		// b2) 告警保持 firing。
+		require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
+		require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
+		// b3) 状态仅登记 uncertain，残留 recovery_at/source 原样保留。
+		st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+		require.True(t, ok)
+		require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+		require.Equal(t, residual.UTC().Format(time.RFC3339), st.RecoveryAt)
+		require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
+		require.Equal(t, cnQuotaLifecycleProbeUncertain, st.LastProbeOutcome)
+		// b4) 确认循环不丢：矛盾证据（未来 recovery_at + 过期 reset_at）未被失败
+		// 关闭抹掉，下一轮 sweep 仍命中读侧判定、再次探针。
+		require.NoError(t, svc.RunRecoverySweep(context.Background()))
+		require.Equal(t, 2, probe.calls, "fail-closed must not lose the confirmation loop")
 		require.Zero(t, repo.clearCalls)
 	})
 }
