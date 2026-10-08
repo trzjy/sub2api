@@ -1201,7 +1201,8 @@ type GatewayGrokConfig struct {
 //
 // 仅作用于 payg（按量付费）账号（kimi/deepseek 有公开余额端点；zhipu 无，仅靠响应式 429/402）。
 //   - balance_check_enabled: 是否启用周期余额检测（默认 true）
-//   - balance_threshold: 余额低于此值（账户货币单位，默认 0.5）触发临时停调
+//   - balance_threshold: 余额低于此值（账户货币单位，默认 0.5）仅用于渠道监控余额低告警展示，
+//     不再触发账号停调（2026-10-08 用户裁定清除阈值停调机制）
 //   - balance_check_interval_minutes: 余额检测周期（分钟，默认 10）
 //   - th_probe_interval_minutes: TH（tokenharbor.ai）快照刷新探测间隔（分钟，默认 60）
 //   - kira_probe_interval_minutes: Kira（kiraai.vn）快照刷新探测间隔（分钟，默认 60）

@@ -206,9 +206,10 @@ func TestCNProviderBalanceCheckUnlimitedSubscriptionNeverPaused(t *testing.T) {
 	require.Equal(t, cnBalanceNoChange, outcome)
 }
 
-// 对照：同地址返回有限数字余额且低于阈值时仍正常停调。
-func TestCNProviderBalanceCheckRelayLowBalancePaused(t *testing.T) {
-	repo := &cnBalancePauseRepo{account: &Account{
+// 断言①（2026-10-08 用户裁定）：余额 0（低于阈值）探测成功 → 不写任何
+// TempUnschedulable，不再因「余额低于阈值」停调。
+func TestCNProviderBalanceCheckLowBalanceNoLongerPaused(t *testing.T) {
+	repo := &cnProbeRepo{account: &Account{
 		ID: 56, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
 		Credentials: map[string]any{
 			"account_mode": AccountModePayG,
@@ -232,8 +233,45 @@ func TestCNProviderBalanceCheckRelayLowBalancePaused(t *testing.T) {
 
 	outcome := svc.checkOne(context.Background(), repo.account, 1.0)
 
-	require.Equal(t, cnBalancePaused, outcome)
-	require.True(t, repo.pauseCalled)
+	require.Equal(t, cnBalanceNoChange, outcome)
+	require.Equal(t, 0, repo.pauseCount, "余额低于阈值不得再触发停调")
+	require.Nil(t, repo.account.TempUnschedulableUntil)
+}
+
+// 断言②（存量清零语义）：账号已有 cn_balance_low 前缀停调、余额仍为 0（低于阈值），
+// 探测成功后停调必须被无条件清除（不以余额健康为前提）。
+func TestCNProviderBalanceCheckLowBalanceExistingPauseClearedOnProbeSuccess(t *testing.T) {
+	until := time.Now().Add(time.Hour)
+	repo := &cnProbeRepo{account: &Account{
+		ID: 57, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+		Credentials: map[string]any{
+			"account_mode": AccountModePayG,
+			"api_key":      "sk-test",
+			"base_url":     "https://inferaiapi.example.com",
+			"api_protocol": "anthropic",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://inferaiapi.example.com/v1/usage", "bearer_auth": true,
+			},
+		},
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: cnBalanceLowReasonPrefix + "余额 0.00 USD 低于阈值 1.00",
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":0.01,"unit":"USD","isValid":true}`, // 余额仍低于阈值
+	}, nil)
+	svc := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: balanceSvc,
+		cfg:            &config.Config{},
+	}
+
+	outcome := svc.checkOne(context.Background(), repo.account, 1.0)
+
+	require.Equal(t, cnBalanceCleared, outcome)
+	require.True(t, repo.cleared, "存量 cn_balance_low 停调必须被清除")
+	require.Equal(t, 0, repo.pauseCount, "清除后不得重新写入停调")
+	require.Nil(t, repo.account.TempUnschedulableUntil)
 }
 
 // ---- QB-1：CN 供应商余额周期探测扩展 + coding 快照阈值停调接线 ----
@@ -382,7 +420,7 @@ func TestCNProviderBalanceCheckProbeOne_PauseThenClearPrefix(t *testing.T) {
 
 	// 预置一笔余额前缀停调（历史存量形态）+ balance_low 标记。
 	require.NoError(t, repo.SetTempUnschedulable(
-		context.Background(), account.ID, time.Now().Add(time.Hour), cnBalanceLowReason("余额 0 VND 低于阈值 0.00"),
+		context.Background(), account.ID, time.Now().Add(time.Hour), cnBalanceLowReasonPrefix+"余额 0 VND 低于阈值 0.00",
 	))
 	require.NoError(t, repo.UpdateExtra(context.Background(), account.ID, map[string]any{
 		cnExtraKey(account.Platform, cnBalanceExtraSuffixLow): true,

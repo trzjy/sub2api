@@ -37,9 +37,9 @@ func (s *RateLimitService) SetCNQuotaLifecycle(lc CNQuotaLifecycleEntry) {
 // 「确属余额不足」与「尚未探测」。
 const cnBalanceExtraSuffixLow = "balance_low"
 
-// cnBalanceLowReasonPrefix 是余额不足临时停调 reason 的稳定前缀。
-// 周期余额检测任务据此识别「是我们停调的」并在余额恢复后安全清除——不会误清
-// 其他子系统（阈值/限流/401）写入的临时停调。
+// cnBalanceLowReasonPrefix 是历史余额不足临时停调 reason 的稳定前缀。
+// 前缀保留仅供存量停调识别清除与 402 响应式语义；2026-10-08 用户裁定清除阈值停调
+// 后，本服务不再新写入以该前缀开头的停调（仅用于识别并清除既有残留）。
 const cnBalanceLowReasonPrefix = "cn_balance_low"
 
 const kimiConcurrentRequestLimitMessage = "You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again."
@@ -67,17 +67,6 @@ func (s *RateLimitService) handleCNProviderConcurrencyLimit403(
 		"platform", account.Platform,
 		"until", until.UTC(),
 	)
-}
-
-// cnBalanceLowReason 构造余额不足临时停调的 reason（带稳定前缀）。
-// 周期余额检测任务据此识别「是我们停调的」并在余额恢复后安全清除——不会误清
-// 其他子系统（阈值/限流/401）写入的临时停调。响应式 402 入口已不再用它写停调
-// （停调语义移交额度耗尽状态机），周期检测任务自身的阈值停调仍使用本前缀。
-func cnBalanceLowReason(upstreamMsg string) string {
-	if upstreamMsg = strings.TrimSpace(upstreamMsg); upstreamMsg != "" {
-		return cnBalanceLowReasonPrefix + ": " + upstreamMsg
-	}
-	return cnBalanceLowReasonPrefix + ": 余额不足，账号临时停调"
 }
 
 // cnProviderResponseIndicatesInsufficientBalance 通过响应体文案识别余额不足

@@ -275,16 +275,6 @@ func TestCNProviderResponseIndicatesInsufficientBalance(t *testing.T) {
 	}
 }
 
-// TestCNBalanceLowReason 验证稳定前缀（供周期检测任务识别并清除）。
-func TestCNBalanceLowReason(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, "cn_balance_low: upstream said x",
-		cnBalanceLowReason("upstream said x"))
-	require.Equal(t, "cn_balance_low: 余额不足，账号临时停调",
-		cnBalanceLowReason("   "))
-	require.True(t, len(cnBalanceLowReason("")) > len(cnBalanceLowReasonPrefix))
-}
-
 // TestZhipuQuotaHost 按域名路由智谱额度端点主机（bigmodel.cn / z.ai / 默认国内站）。
 func TestZhipuQuotaHost(t *testing.T) {
 	t.Parallel()

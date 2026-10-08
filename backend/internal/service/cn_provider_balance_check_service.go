@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"math"
@@ -33,7 +32,8 @@ type cnQuotaLifecycleHandover interface {
 const cnQuotaProbeConcurrency = 4
 
 // CNProviderBalanceCheckService 周期性探测国产供应商账号：
-//   - payg（按量付费）：余额低于阈值则临时停调，恢复则清除（仅清除本服务写入的停调）；
+//   - payg（按量付费）：探测余额刷新快照；不再因「余额低于阈值」停调（2026-10-08 用户裁定）。
+//     历史遗留的 cn_balance_low 前缀停调在探测成功时无条件清除（存量清零），不以余额健康为前提；
 //   - coding plan：调用 CNProviderQuotaService 探测 5h/weekly 滚动窗口并落 extra 快照，
 //     调度阈值评估（cnProviderThresholdCandidates）据此自动停调/恢复；
 //   - Kira（kiraai.vn）/ TH（tokenharbor.ai）：只刷新快照（§4.3）+ 耗尽信号交
@@ -142,7 +142,7 @@ func (s *CNProviderBalanceCheckService) Start() {
 	if s.interval <= 0 {
 		return
 	}
-	log.Printf("[CNBalance] started (interval=%s threshold=%.2f)", s.interval, s.cfg.Gateway.CNProviders.BalanceThreshold)
+	log.Printf("[CNBalance] started (interval=%s balance_threshold=%.2f alert-only)", s.interval, s.cfg.Gateway.CNProviders.BalanceThreshold)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -317,11 +317,9 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	defer cancel()
 
 	threshold := s.cfg.Gateway.CNProviders.BalanceThreshold
-	paused, cleared := 0, 0
+	cleared := 0
 	for _, account := range paygTargets {
 		switch s.checkOne(ctx, account, threshold) {
-		case cnBalancePaused:
-			paused++
 		case cnBalanceCleared:
 			cleared++
 		case cnBalanceNativeFailed:
@@ -377,8 +375,8 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		log.Printf("[CNBalance] rate-limit reconcile cleared=%d", clearedLimits)
 	}
 
-	if paused > 0 || cleared > 0 {
-		log.Printf("[CNBalance] paused=%d cleared=%d (threshold=%.2f)", paused, cleared, threshold)
+	if cleared > 0 {
+		log.Printf("[CNBalance] cleared=%d (balance_threshold=%.2f alert-only)", cleared, threshold)
 	}
 }
 
@@ -736,7 +734,6 @@ type cnBalanceCheckOutcome int
 
 const (
 	cnBalanceNoChange cnBalanceCheckOutcome = iota
-	cnBalancePaused
 	cnBalanceCleared
 	// cnBalanceNativeFailed 表示原生 /user/balance 探测失败（err 或 !Success）：
 	// 调用方据此决定是否转最小完成请求探测（覆盖中转未实现余额端点的 kimi/deepseek）。
@@ -746,31 +743,19 @@ const (
 // checkOne 探测单账号余额并决定停调/恢复。探测失败时不动现状（避免瞬时网络抖动
 // 误解除或误停调）。原生余额端点不可用时返回 cnBalanceNativeFailed（不视为健康、
 // 也不停调），供调用方转最小完成请求探测。
+//
+// 余额低于阈值不再触发停调（2026-10-08 用户裁定：「账户余额低于 $0.5 就停」的设计
+// 彻底清除）。探测成功后无条件清除本服务历史写入的 cn_balance_low 前缀停调（存量
+// 清零）——机制已删，任何残留标记都必须清除，不再以余额健康为前提。清除后仍走
+// E39 渠道维陈旧收敛 + reactivated 日志。探测失败（NativeFailed）不动现状保留。
 func (s *CNProviderBalanceCheckService) checkOne(ctx context.Context, account *Account, threshold float64) cnBalanceCheckOutcome {
 	result, err := s.balanceService.QueryBalance(ctx, account.ID)
 	if err != nil || result == nil || !result.Success {
 		return cnBalanceNativeFailed
 	}
 
-	// 双币种（deepseek CNY+USD）任一币种余额达标即可继续调度；仅当全部低于
-	// 阈值（或不可用）才停调。同程序中转的订阅制不限量（Unlimited）无数字余额
-	// 可比，永不因阈值停调（否则 remaining=-1 的订阅 key 会被误停）。
-	low := !result.Available || (!result.Unlimited && allCNBalancesBelowThreshold(result, threshold))
-	if low {
-		// 已被（任何来源）停调时不覆盖其 reason。
-		if !account.IsSchedulable() {
-			return cnBalanceNoChange
-		}
-		reason := cnBalanceLowReason(fmt.Sprintf("余额 %.4g %s 低于阈值 %.2f", result.Balance, result.Currency, threshold))
-		if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, time.Now().Add(s.cooldown()), reason); err != nil {
-			log.Printf("[CNBalance] pause account %d failed: %v", account.ID, err)
-			return cnBalanceNoChange
-		}
-		log.Printf("[CNBalance] paused account %d (%s): balance=%.4g %s", account.ID, account.Platform, result.Balance, result.Currency)
-		return cnBalancePaused
-	}
-
-	// 余额健康：仅清除「本服务写入」的临时停调（reason 前缀匹配），不触碰其他子系统。
+	// 存量清零（旧链归零的运行时路径）：本服务历史写入的 cn_balance_low 前缀停调
+	// 在探测成功后无条件清除，不以余额健康为前提（机制已删，残留必须清零）。
 	if account.TempUnschedulableUntil != nil && strings.HasPrefix(account.TempUnschedulableReason, cnBalanceLowReasonPrefix) {
 		if err := s.accountRepo.ClearTempUnschedulable(ctx, account.ID); err != nil {
 			log.Printf("[CNBalance] clear account %d failed: %v", account.ID, err)
@@ -804,19 +789,4 @@ func allCNBalancesBelowThreshold(result *CNProviderBalanceResult, threshold floa
 		}
 	}
 	return true
-}
-
-// cooldown 返回临时停调持续时长（= 2× 检测周期），与响应式 402/429 路径一致。
-func (s *CNProviderBalanceCheckService) cooldown() time.Duration {
-	minutes := 10
-	if s.cfg != nil {
-		if cfgMin := s.cfg.Gateway.CNProviders.BalanceCheckIntervalMinutes; cfgMin > 0 {
-			minutes = cfgMin
-		}
-	}
-	cooldown := time.Duration(minutes) * time.Minute * 2
-	if cooldown < time.Minute {
-		cooldown = 10 * time.Minute
-	}
-	return cooldown
 }

@@ -182,7 +182,8 @@ func TestFreshness_AdminClearAccountError_FreshnessFailureKeepsRecovery(t *testi
 	require.Equal(t, []int64{31}, refresher.calls)
 }
 
-// 国产余额周期检测 checkOne 出口（cn_provider_balance_check_service.go:423 一带）：余额健康恢复后触发收敛。
+// 国产余额周期检测 checkOne 出口：探测成功后无条件清除本服务历史写入的 cn_balance_low
+// 前缀停调（存量清零，不以余额健康为前提），清除后触发收敛。
 func TestBalanceCheck_CheckOne_BalanceRecoveredTriggersChannelFreshness(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	account := &Account{
@@ -222,7 +223,7 @@ func TestBalanceCheck_CheckOne_BalanceRecoveredTriggersChannelFreshness(t *testi
 	require.Equal(t, []int64{80}, refresher.calls, "E39：恢复成功后触发渠道收敛")
 }
 
-// 国产余额周期检测 checkOne 出口：收敛失败不得改写恢复成功结论。
+// 国产余额周期检测 checkOne 出口：收敛失败不得改写清除成功结论（存量清零路径）。
 func TestBalanceCheck_CheckOne_FreshnessFailureKeepsRecovery(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	account := &Account{
