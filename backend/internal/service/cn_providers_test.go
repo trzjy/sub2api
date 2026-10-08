@@ -274,7 +274,6 @@ func TestCNProviderResponseIndicatesInsufficientBalance(t *testing.T) {
 		require.False(t, cnProviderResponseIndicatesInsufficientBalance([]byte(body)), body)
 	}
 }
-
 // TestZhipuQuotaHost 按域名路由智谱额度端点主机（bigmodel.cn / z.ai / 默认国内站）。
 func TestZhipuQuotaHost(t *testing.T) {
 	t.Parallel()
@@ -884,7 +883,13 @@ func TestBuildUpstreamModelsRequest_AnthropicProtocol(t *testing.T) {
 func TestBuildOpenAIResponsesURLForPlatform(t *testing.T) {
 	t.Parallel()
 	require.Equal(t, "https://api.deepseek.com/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://api.deepseek.com"))
-	require.Equal(t, "https://relay.example.com/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://relay.example.com"))
+	require.Equal(t, "https://relay.example.com/v1/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://relay.example.com"))
+	// 官方主机大小写混合 → 无 /v1 的 /responses
+	require.Equal(t, "https://API.DeepSeek.com/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://API.DeepSeek.com"))
+	// 生产实测中转主机 → /v1/responses（New API 中转 /responses 200 空流）
+	require.Equal(t, "https://xing.xinxinyuntu.top/v1/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://xing.xinxinyuntu.top"))
+	// 解析失败输入按非官方处理 → /v1/responses
+	require.Equal(t, "://bad url/v1/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "://bad url"))
 	require.Equal(t, "https://relay.example.com/v1/responses", buildOpenAIResponsesURLForPlatform(PlatformDeepseek, "https://relay.example.com/v1"))
 	require.Equal(t, "https://api.openai.com/v1/responses", buildOpenAIResponsesURLForPlatform(PlatformOpenAI, "https://api.openai.com"))
 	require.Equal(t, "https://open.bigmodel.cn/api/paas/v4/responses", buildOpenAIResponsesURLForPlatform(PlatformZhipu, "https://open.bigmodel.cn/api/paas/v4"))

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
@@ -50,13 +51,31 @@ func buildOpenAIResponsesURL(base string) string {
 }
 
 // buildOpenAIResponsesURLForPlatform 组装 Responses 端点（平台感知）。
-// DeepSeek 官方 Responses 端点为 /responses（无 /v1 前缀，适配 Codex）；
-// 其余平台维持 /v1/responses。
+// DeepSeek 平台按 base 主机分流：
+//   - 官方主机 api.deepseek.com（大小写不敏感）→ /responses（无 /v1，适配 Codex）；
+//   - 其他任何 base（中转/自建）→ /v1/responses。
+//
+// 注：官方主机走无 /v1 端点；中转走 /v1/responses
+// （2026-10-09 星思云站生产实测：New API 中转 /responses 200 空流）。
 func buildOpenAIResponsesURLForPlatform(platform string, base string) string {
 	if platform == PlatformDeepseek {
-		return buildOpenAIEndpointURL(base, "/responses")
+		if isDeepSeekOfficialHost(base) {
+			return buildOpenAIEndpointURL(base, "/responses")
+		}
+		return buildOpenAIResponsesURL(base)
 	}
 	return buildOpenAIResponsesURL(base)
+}
+
+// isDeepSeekOfficialHost 判定 base 的主机是否为 DeepSeek 官方主机
+// api.deepseek.com（大小写不敏感）。解析失败按非官方处理，
+// 交由调用方走 /v1/responses。
+func isDeepSeekOfficialHost(base string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "api.deepseek.com")
 }
 
 func shouldPreserveOpenAIResponsesNoneReasoningEffort(account *Account) bool {
