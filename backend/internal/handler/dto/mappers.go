@@ -223,7 +223,7 @@ func groupFromServiceBase(g *service.Group) Group {
 		AllowLive:                       g.AllowLive,
 		RequireOAuthOnly:                g.RequireOAuthOnly,
 		RequirePrivacySet:               g.RequirePrivacySet,
-		AggregateCodeBuddyEnabled:      g.AggregateCodeBuddyEnabled,
+		AggregateCodeBuddyEnabled:       g.AggregateCodeBuddyEnabled,
 		RPMLimit:                        g.RPMLimit,
 		Concurrency:                     g.Concurrency,
 		MaxReasoningEffort:              g.MaxReasoningEffort,
@@ -287,6 +287,12 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		ParentAccountID:         a.ParentAccountID,
 		QuotaDimension:          a.QuotaDimension,
 	}
+
+	// 规范化额度维度 + 余额不足标记（方案 §3.4 / C5）：由 service 层同一 resolver 输出，
+	// 本层只做形态投影，不重新解释原始 extra 键。AccountFromService 委托本函数，故一处填充。
+	now := time.Now()
+	out.QuotaDimensions = accountQuotaDimensionsFromService(a, now)
+	out.BalanceLow = accountBalanceLowFromExtra(a)
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
 	if a.IsAnthropicOAuthOrSetupToken() {
@@ -433,6 +439,76 @@ func redactAccountManagedExtra(extra map[string]any) map[string]any {
 		}
 	}
 	return redacted
+}
+
+// accountQuotaBalanceLowExtraSuffix 是余额不足标记键的后缀（键名 = platform + "_" +
+// 本后缀，构造同 service 包 cnExtraKey）。来源 service.cnBalanceExtraSuffixLow
+// （internal/service/ratelimit_cn_providers.go），该常量在 service 包未导出且本单禁止
+// 改动 service 包，故此处以最小只读字面量镜像；service 包无导出常量可复用，无法编译期绑定。
+const accountQuotaBalanceLowExtraSuffix = "balance_low"
+
+// accountQuotaDimensionsFromService 把 service.ResolveAccountQuotaDimensions 的同一
+// resolver 输出投影为 DTO 条目（方案 §3.4 / C5）：全 scope 原样序列化，枚举转小写字符串，
+// observed_at 转 RFC3339（零值省略）。无快照 / 空列表 → nil（由 omitempty 省略字段）。
+func accountQuotaDimensionsFromService(account *service.Account, now time.Time) []AccountQuotaDimension {
+	dims := service.ResolveAccountQuotaDimensions(account, now)
+	if len(dims) == 0 {
+		return nil
+	}
+	out := make([]AccountQuotaDimension, 0, len(dims))
+	for _, d := range dims {
+		projected := AccountQuotaDimension{
+			Kind:     string(d.Kind),
+			Scope:    string(d.Scope),
+			Target:   d.Target,
+			Status:   accountQuotaDimensionStatusString(d.Status),
+			Servable: accountQuotaDimensionServableString(d.Servable),
+			Source:   d.Source,
+		}
+		if !d.ObservedAt.IsZero() {
+			projected.ObservedAt = d.ObservedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, projected)
+	}
+	return out
+}
+
+// accountQuotaDimensionStatusString 把小写化 QuotaDimensionStatus 枚举投影为 DTO 字符串。
+func accountQuotaDimensionStatusString(status service.QuotaDimensionStatus) string {
+	switch status {
+	case service.QuotaDimensionRemaining:
+		return "remaining"
+	case service.QuotaDimensionExhausted:
+		return "exhausted"
+	default:
+		return "unknown"
+	}
+}
+
+// accountQuotaDimensionServableString 把小写化 QuotaServableState 枚举投影为 DTO 字符串。
+func accountQuotaDimensionServableString(servable service.QuotaServableState) string {
+	switch servable {
+	case service.QuotaServableYes:
+		return "yes"
+	case service.QuotaServableNo:
+		return "no"
+	default:
+		return "unknown"
+	}
+}
+
+// accountBalanceLowFromExtra 报告账号 extra 是否带 {platform}_balance_low 余额不足标记
+// （方案 §3.4「balance_low 出口」，服务端解释，前端零 extra 解释）。非 bool 或缺失 = 无标记。
+func accountBalanceLowFromExtra(account *service.Account) bool {
+	if account == nil || account.Platform == "" {
+		return false
+	}
+	raw, ok := account.Extra[account.Platform+"_"+accountQuotaBalanceLowExtraSuffix]
+	if !ok {
+		return false
+	}
+	marked, ok := raw.(bool)
+	return ok && marked
 }
 
 func AccountFromService(a *service.Account) *Account {

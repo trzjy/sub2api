@@ -331,6 +331,27 @@ type Account struct {
 
 	GroupIDs []int64  `json:"group_ids,omitempty"`
 	Groups   []*Group `json:"groups,omitempty"`
+
+	// QuotaDimensions 规范化额度维度（方案 §3.4 / C5）：由 service 层同一 resolver
+	// （service.ResolveAccountQuotaDimensions）输出的逐条投影，全 scope 原样序列化，
+	// 前端不再自行解释原始 extra 键。账号无任何额度快照 → 省略字段（omitempty）。
+	QuotaDimensions []AccountQuotaDimension `json:"quota_dimensions,omitempty"`
+	// BalanceLow 服务端解释的余额不足标记（方案 §3.4「balance_low 出口」，非维度模型
+	// 成员）：账号 extra 中 {platform}_balance_low 标记键为真。false/缺省 = 无标记。
+	BalanceLow bool `json:"balance_low,omitempty"`
+}
+
+// AccountQuotaDimension 是 service.QuotaDimension 的 DTO 投影（方案 §3.4）。枚举以小写
+// 字符串序列化（kind/scope/status/servable）；observed_at 为 RFC3339 字符串，来源无有效
+// 采集时间时省略。backend 不在此层重新解释 extra，枚举映射仅在 dto 层做形态转换。
+type AccountQuotaDimension struct {
+	Kind       string `json:"kind"`
+	Scope      string `json:"scope"`
+	Target     string `json:"target"`
+	Status     string `json:"status"`
+	Servable   string `json:"servable"`
+	Source     string `json:"source"`
+	ObservedAt string `json:"observed_at,omitempty"`
 }
 
 // AccountListItem is the compact representation returned by the admin account
