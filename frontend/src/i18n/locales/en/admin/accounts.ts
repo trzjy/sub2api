@@ -279,6 +279,12 @@ export default {
         kiraDailyLabel: 'Daily free',
         kiraUsedLimit: '{used} / {limit} tokens',
         kiraVndBalance: 'VND balance {balance}',
+        // 规范化维度（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源 = quota_dimensions
+        dimensionKindFree: 'Free',
+        dimensionKindPaid: 'Paid',
+        dimensionKindSubscription: 'Subscription',
+        dimensionStatusRemaining: 'Remaining',
+        dimensionStatusUnknown: 'Unknown',
       },
       types: {
         oauth: 'OAuth',

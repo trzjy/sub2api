@@ -57,15 +57,21 @@ describe('CNProviderBalanceCell', () => {
     expect(queryBalance).toHaveBeenCalledWith(account.id)
   })
 
-  it('shows the low-balance badge from the snapshot marker', () => {
-    const lowAccount = {
+  it('does NOT render the low-balance badge when only the extra marker is set (single source of truth)', () => {
+    const extraOnlyAccount = {
       ...account,
       extra: { kimi_balance: 0.4, kimi_balance_low: true }
     } as Account
 
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: lowAccount } })
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: extraOnlyAccount } })
 
-    expect(wrapper.text()).toContain('admin.accounts.cnProviders.balanceLow')
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.balanceLow')
+  })
+
+  it('does NOT render the low-balance badge when the DTO field is absent', () => {
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.balanceLow')
   })
 
   it('keeps the snapshot balance visible when a query fails', async () => {
@@ -108,5 +114,40 @@ describe('CNProviderBalanceCell', () => {
     const wrapper = mount(CNProviderBalanceCell, { props: { account: unlimitedNoBalance } })
 
     expect(wrapper.find('[data-test="cn-provider-balance-remaining"]').exists()).toBe(false)
+  })
+
+  // ===== 方案 §3.4 / R5-F3：balance_low 出口 + Kira paid 结构化行 =====
+
+  // balance_low 出口：顶层 DTO 字段（逐字锁定）true → 渲染余额不足徽标；
+  // 既有余额金额取数路径不变。
+  it('shows the low-balance badge from the top-level DTO balance_low field', () => {
+    const dtoLowAccount = {
+      ...account,
+      balance_low: true
+    } as Account
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: dtoLowAccount } })
+
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.balanceLow')
+    // 既有余额金额展示不变
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
+
+  // Kira paid 结构化行：source=kira_vnd_balance 维度驱动余额行状态徽标；
+  // 既有余额金额（currentEntries）取数路径不变。
+  it('adds a status badge to the balance row for a Kira paid dimension', () => {
+    const kiraPaidAccount = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: kiraPaidAccount } })
+
+    expect(wrapper.find('[data-test="cn-provider-balance-kira-status"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+    // 既有余额金额展示不变
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
   })
 })

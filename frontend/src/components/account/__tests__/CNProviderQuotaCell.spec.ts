@@ -282,4 +282,27 @@ describe('CNProviderQuotaCell', () => {
     // 5h 档用量仍正常
     expect(wrapper.text()).toContain('13%')
   })
+
+  // ===== 方案 §3.4 / R5-F3：quota_dimensions 状态对齐 =====
+
+  // account 级 exhausted 维度 → 耗尽徽标；既有 used_percent 取数路径不变（5h/周档仍从快照渲染）。
+  it('shows the exhausted dimension badge aligned with quota_dimensions without altering the used_percent path', async () => {
+    const exhaustedDimAccount = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'zhipu_free', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: exhaustedDimAccount } })
+    await flushPromises()
+
+    // 耗尽维度徽标
+    expect(wrapper.get('[data-test="cn-provider-quota-exhausted"]').text()).toBe(
+      'admin.accounts.cnProviders.statusExhausted'
+    )
+    // 既有 used_percent 取数路径不变：5h(0%) / 周(27%) 仍从快照渲染
+    expect(wrapper.findAll('[data-test="cn-provider-quota-tier"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('27%')
+  })
 })

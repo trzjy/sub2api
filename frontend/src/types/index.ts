@@ -1167,6 +1167,18 @@ export interface OllamaCloudUsageSettings {
   debounce_minutes: number
 }
 
+// 服务端 DTO 规范化维度列表（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源，
+// 前端不再自行解释原始 extra 键来判定维度存在/状态。可缺省，两态兼容。
+export interface QuotaDimensionItem {
+  kind: 'free' | 'paid' | 'subscription'
+  scope: 'account' | 'model'
+  target: string
+  status: 'unknown' | 'remaining' | 'exhausted'
+  servable: 'unknown' | 'yes' | 'no'
+  source: string
+  observed_at: string
+}
+
 export interface Account {
   id: number
   name: string
@@ -1313,6 +1325,12 @@ export interface Account {
   // 影子账号关系（spark 维度影子）
   parent_account_id?: number | null
   quota_dimension?: string
+
+  // 规范化额度维度列表（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源。
+  // 可缺省，两态兼容；前端从本字段读取维度存在/状态，不再自行解释原始 extra 键。
+  quota_dimensions?: QuotaDimensionItem[]
+  // 余额不足出口（与服务端 DTO 逐字锁定的顶层字段，两态兼容）。
+  balance_low?: boolean
   // 影子账号回填的母账号信息（仅影子非空）
   parent_email?: string
   parent_plan_type?: string

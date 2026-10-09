@@ -337,4 +337,84 @@ describe('CNQuotaUsageCell', () => {
     expect(wrapper.find('[data-test="cn-quota-usage"]').exists()).toBe(false)
     expect(queryQuota).not.toHaveBeenCalled()
   })
+
+  // ===== 方案 §3.4 / R5-F3：quota_dimensions 驱动维度渲染 =====
+
+  // 渲染账号实际拥有的全部 account 级维度（含既有窗口分支未覆盖的 paid/subscription），
+  // 维度存在/状态以 quota_dimensions 为唯一事实源；exhausted/remaining/unknown 三态徽标。
+  it('renders every account-scope dimension from quota_dimensions with status badges', () => {
+    const dimAccount = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_free', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_wallet', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: dimAccount } })
+
+    expect(wrapper.find('[data-test="cn-quota-dimensions"]').exists()).toBe(true)
+    const dims = wrapper.findAll('[data-test="cn-quota-dimension"]')
+    expect(dims).toHaveLength(3)
+    const text = wrapper.text()
+    // 全部 kind 渲染
+    expect(text).toContain('admin.accounts.cnProviders.dimensionKindPaid')
+    expect(text).toContain('admin.accounts.cnProviders.dimensionKindFree')
+    expect(text).toContain('admin.accounts.cnProviders.dimensionKindSubscription')
+    // 三态徽标
+    expect(text).toContain('admin.accounts.cnProviders.statusExhausted')
+    expect(text).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
+    expect(text).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+  })
+
+  // 无 quota_dimensions 时不渲染维度面板（两态兼容，缺省为空）。
+  it('does not render the dimension panel when quota_dimensions is absent', () => {
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: kiraAccount } })
+    expect(wrapper.find('[data-test="cn-quota-dimensions"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-quota-model-exhausted"]').exists()).toBe(false)
+  })
+
+  // TH 模型级 free-tier 耗尽逐模型展示：仅 scope=model 且 status=exhausted 的条目
+  // 渲染为逐模型行（模型 ID + 耗尽徽标）；remaining 模型不展示。
+  it('shows per-model rows for exhausted model-scope free-tier dimensions', () => {
+    const modelExhausted = {
+      ...thPassAccount,
+      quota_dimensions: [
+        { kind: 'free', scope: 'model', target: 'gpt-4o', status: 'exhausted', servable: 'no', source: 'th_model_free', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'free', scope: 'model', target: 'claude-3-5-sonnet', status: 'exhausted', servable: 'no', source: 'th_model_free', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'free', scope: 'model', target: 'gpt-4o-mini', status: 'remaining', servable: 'yes', source: 'th_model_free', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: modelExhausted } })
+
+    expect(wrapper.find('[data-test="cn-quota-model-exhausted"]').exists()).toBe(true)
+    // 仅 exhausted 模型逐行展示（remaining 模型不出现）
+    const rows = wrapper.findAll('[data-test="cn-quota-model-row"]')
+    expect(rows).toHaveLength(2)
+    const ids = wrapper.findAll('[data-test="cn-quota-model-id"]').map((el) => el.text())
+    expect(ids).toEqual(['gpt-4o', 'claude-3-5-sonnet'])
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+    expect(wrapper.text()).not.toContain('gpt-4o-mini')
+  })
+
+  // Kira paid 结构化行：source=kira_vnd_balance 维度驱动 VND 行状态徽标；金额取数路径不变。
+  it('upgrades the Kira VND line into a structured row with a status badge', () => {
+    const kiraPaid = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: kiraPaid } })
+
+    const vnd = wrapper.get('[data-test="cn-quota-kira-vnd"]')
+    // 状态徽标（remaining）
+    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(true)
+    expect(vnd.text()).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
+    // 既有 VND 金额展示保留（取数路径不变）
+    expect(vnd.text()).toContain('"balance":"38406"')
+  })
 })

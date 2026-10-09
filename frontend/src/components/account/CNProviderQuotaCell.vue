@@ -4,6 +4,16 @@
     data-test="cn-provider-quota"
     class="min-w-[220px] space-y-1"
   >
+    <!-- 规范化维度状态对齐（方案 §3.4 / R5-F3）：account 级 exhausted 维度 → 耗尽徽标；
+         既有 used_percent 取数路径不变。 -->
+    <span
+      v-if="exhaustedAccountDimension"
+      data-test="cn-provider-quota-exhausted"
+      class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
+    >
+      {{ t('admin.accounts.cnProviders.statusExhausted') }}
+    </span>
+
     <!-- Tier rows: 5h + weekly utilization bars (snapshot renders on mount).
          复用账号页 UsageProgressBar：同阈值配色、同倒计时格式。 -->
     <div v-if="data?.success && data.tiers?.length" class="space-y-1">
@@ -72,7 +82,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderQuotaProbeResult } from '@/api/admin/cnProviders'
-import type { Account } from '@/types'
+import type { Account, QuotaDimensionItem } from '@/types'
 import { cnQuotaCellVisible, cnQuotaProviderPrefix, resolveAccountBaseURL, isVolcanoBaseURL } from './credentialsBuilder'
 import UsageProgressBar from './UsageProgressBar.vue'
 
@@ -101,6 +111,12 @@ const readBaseURL = (): string => {
 const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platform, readBaseURL()))
 
 const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))
+
+// 规范化维度状态对齐（方案 §3.4 / R5-F3）：account 级 exhausted 维度 → 耗尽徽标；
+// 既有 used_percent 取数路径不变。
+const exhaustedAccountDimension = computed<QuotaDimensionItem | undefined>(() =>
+  (props.account.quota_dimensions ?? []).find((d) => d.scope === 'account' && d.status === 'exhausted')
+)
 
 const loading = ref(false)
 const error = ref<string | null>(null)

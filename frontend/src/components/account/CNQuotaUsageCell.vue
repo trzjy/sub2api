@@ -115,9 +115,66 @@
       <div
         v-if="vndBalance != null"
         data-test="cn-quota-kira-vnd"
-        class="text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
+        class="flex flex-wrap items-center gap-1 text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
       >
+        <!-- Kira paid 维度（source=kira_vnd_balance）驱动的状态徽标；金额取数路径不变。 -->
+        <span
+          v-if="kiraPaidDimension"
+          data-test="cn-quota-kira-vnd-status"
+          :class="dimensionStatusClass(kiraPaidDimension.status)"
+        >
+          {{ dimensionStatusLabel(kiraPaidDimension.status) }}
+        </span>
         {{ t('admin.accounts.cnProviders.kiraVndBalance', { balance: formatVnd(vndBalance) }) }}
+      </div>
+    </div>
+
+    <!-- 规范化维度面板（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源 =
+         quota_dimensions。前端不再用 extra 键自行判定维度存在/状态；渲染账号实际
+         拥有的全部 account 级维度（含 coding plan monthly 窗口、TH 钱包 paid、
+         Kira paid 等既有窗口分支未覆盖者）。 -->
+    <div v-if="accountDimensions.length" data-test="cn-quota-dimensions" class="space-y-1">
+      <div
+        v-for="(dim, i) in accountDimensions"
+        :key="`${dim.source}:${dim.target}:${i}`"
+        data-test="cn-quota-dimension"
+        class="flex flex-wrap items-center gap-1"
+      >
+        <span
+          data-test="cn-quota-dimension-kind"
+          class="rounded bg-gray-100 px-1 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-800 dark:text-gray-300"
+        >
+          {{ dimensionKindLabel(dim) }}
+        </span>
+        <span
+          data-test="cn-quota-dimension-status"
+          :class="dimensionStatusClass(dim.status)"
+        >
+          {{ dimensionStatusLabel(dim.status) }}
+        </span>
+      </div>
+    </div>
+
+    <!-- TH 模型级 free-tier 耗尽逐模型展示：scope=model 且 status=exhausted。 -->
+    <div v-if="exhaustedModelDimensions.length" data-test="cn-quota-model-exhausted" class="space-y-1">
+      <div
+        v-for="(dim, i) in exhaustedModelDimensions"
+        :key="`${dim.target}:${i}`"
+        data-test="cn-quota-model-row"
+        class="flex flex-wrap items-center gap-1"
+      >
+        <span
+          data-test="cn-quota-model-id"
+          class="rounded bg-gray-100 px-1 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-800 dark:text-gray-300"
+        >
+          {{ dim.target }}
+        </span>
+        <span
+          data-test="cn-quota-model-status"
+          class="inline-flex items-center rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300"
+        >
+          {{ t('admin.accounts.cnProviders.statusExhausted') }}
+        </span>
       </div>
     </div>
 
@@ -170,7 +227,7 @@ import type {
   THUsageSnapshot,
   THUsageWindowStats
 } from '@/api/admin/cnProviders'
-import type { Account } from '@/types'
+import type { Account, QuotaDimensionItem } from '@/types'
 import { formatCompactNumber, formatCountdown } from '@/utils/format'
 import { resolveAccountBaseURL } from './credentialsBuilder'
 import UsageProgressBar from './UsageProgressBar.vue'
@@ -194,6 +251,47 @@ const baseHasKira = (account: Account): boolean =>
 const isTokenHarbor = computed(() => baseHasTokenHarbor(props.account))
 const isKira = computed(() => baseHasKira(props.account))
 const visible = computed(() => isTokenHarbor.value || isKira.value)
+
+// ===== 规范化维度（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源 = quota_dimensions =====
+// 不再用 extra 原始键自行判定维度存在/状态；渲染账号实际拥有的全部 account 级维度，
+// 以及 TH 模型级 free-tier 耗尽（scope=model, status=exhausted）逐模型展示。
+const quotaDimensions = computed<QuotaDimensionItem[]>(() => props.account.quota_dimensions ?? [])
+
+// 全部 account 级维度：含 coding plan monthly 窗口、TH 钱包 paid、Kira paid 等
+// 既有窗口分支未覆盖者，统一由本列表驱动渲染。
+const accountDimensions = computed(() => quotaDimensions.value.filter((d) => d.scope === 'account'))
+
+// TH 模型级 free-tier 耗尽：逐模型展示（模型 ID + 耗尽徽标）。
+const exhaustedModelDimensions = computed(() =>
+  quotaDimensions.value.filter((d) => d.scope === 'model' && d.status === 'exhausted')
+)
+
+// Kira 付费余额结构化行：source=kira_vnd_balance 维度（paid）驱动，既有 VND 金额取数路径不变。
+const kiraPaidDimension = computed(() =>
+  quotaDimensions.value.find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
+)
+
+const dimensionKindLabel = (dim: QuotaDimensionItem): string => {
+  if (dim.kind === 'free') return t('admin.accounts.cnProviders.dimensionKindFree')
+  if (dim.kind === 'subscription') return t('admin.accounts.cnProviders.dimensionKindSubscription')
+  return t('admin.accounts.cnProviders.dimensionKindPaid')
+}
+
+const dimensionStatusLabel = (status: QuotaDimensionItem['status']): string => {
+  if (status === 'exhausted') return t('admin.accounts.cnProviders.statusExhausted')
+  if (status === 'remaining') return t('admin.accounts.cnProviders.dimensionStatusRemaining')
+  return t('admin.accounts.cnProviders.dimensionStatusUnknown')
+}
+
+const dimensionStatusClass = (status: QuotaDimensionItem['status']): string[] => {
+  if (status === 'exhausted') {
+    return ['inline-flex', 'items-center', 'rounded', 'bg-red-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-red-700', 'dark:bg-red-900/30', 'dark:text-red-300']
+  }
+  if (status === 'remaining') {
+    return ['inline-flex', 'items-center', 'rounded', 'bg-emerald-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-emerald-700', 'dark:bg-emerald-900/30', 'dark:text-emerald-300']
+  }
+  return ['inline-flex', 'items-center', 'rounded', 'bg-gray-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-gray-500', 'dark:bg-dark-800', 'dark:text-gray-400']
+}
 
 // ===== extra 快照解析（照 TokenHarborPassSnapshotFromExtra 的 JSON 兼容口径）=====
 

@@ -7,6 +7,14 @@
         :class="['text-[10px] font-medium leading-4', platformTextClass(account.platform)]"
         :title="t('admin.accounts.cnProviders.balanceProbeTooltip')"
       >
+        <!-- Kira paid 维度（source=kira_vnd_balance）状态徽标；既有余额金额展示不变。 -->
+        <span
+          v-if="kiraPaidDimension"
+          data-test="cn-provider-balance-kira-status"
+          :class="dimensionStatusClass(kiraPaidDimension.status)"
+        >
+          {{ dimensionStatusLabel(kiraPaidDimension.status) }}
+        </span>
         {{ balanceLabel }}
       </span>
 
@@ -90,7 +98,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { CNProviderBalanceEntry, CNProviderBalanceResult } from '@/api/admin/cnProviders'
-import type { Account } from '@/types'
+import type { Account, QuotaDimensionItem } from '@/types'
 import { platformTextClass } from '@/utils/platformColors'
 import { cnBalanceCellVisible, resolveAccountBaseURL } from './credentialsBuilder'
 
@@ -137,7 +145,32 @@ const snapshotBalances = computed<CNProviderBalanceEntry[]>(() => {
     return [{ currency, balance }]
   })
 })
-const balanceLow = computed(() => props.account.extra?.[extraKey('balance_low')] === true)
+// 余额不足出口：单一事实源为后端 DTO 顶层字段 balance_low（方案 §3.4 / R5-F3 逐字锁定，
+// 由 C5 后端卡 dto 层 accountBalanceLowFromExtra 同源产出）。
+// 旧链归零：移除前端 extra 直读兜底（<platform>_balance_low），仅消费 DTO 字段。
+const balanceLow = computed(() => props.account.balance_low === true)
+
+// Kira 付费余额结构化行：source=kira_vnd_balance 维度（paid）驱动状态徽标；
+// 既有余额金额取数（currentEntries / balanceLabel）路径不变。
+const kiraPaidDimension = computed<QuotaDimensionItem | undefined>(() =>
+  (props.account.quota_dimensions ?? []).find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
+)
+
+const dimensionStatusLabel = (status: QuotaDimensionItem['status']): string => {
+  if (status === 'exhausted') return t('admin.accounts.cnProviders.statusExhausted')
+  if (status === 'remaining') return t('admin.accounts.cnProviders.dimensionStatusRemaining')
+  return t('admin.accounts.cnProviders.dimensionStatusUnknown')
+}
+
+const dimensionStatusClass = (status: QuotaDimensionItem['status']): string[] => {
+  if (status === 'exhausted') {
+    return ['inline-flex', 'items-center', 'rounded', 'bg-red-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-red-700', 'dark:bg-red-900/30', 'dark:text-red-300']
+  }
+  if (status === 'remaining') {
+    return ['inline-flex', 'items-center', 'rounded', 'bg-emerald-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-emerald-700', 'dark:bg-emerald-900/30', 'dark:text-emerald-300']
+  }
+  return ['inline-flex', 'items-center', 'rounded', 'bg-gray-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-gray-500', 'dark:bg-dark-800', 'dark:text-gray-400']
+}
 
 // 同程序中转的订阅制不限量：后端探测到 remaining<0 时置 unlimited 快照，
 // 这类账号没有可比的数字余额，展示上游分组名而非「¥ -1」。
