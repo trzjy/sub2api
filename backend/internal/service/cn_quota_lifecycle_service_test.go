@@ -136,6 +136,29 @@ func (r *quotaLifecycleFakeRepo) ClearTempUnschedulable(_ context.Context, id in
 	return nil
 }
 
+// ShortenTempUnschedulableIfOwned 实现 F4 受控缩短原语（派发单 C1-a-r3）：单条条件
+// 缩短，镜像生产 SQL 的四条硬约束——① until>newUntil 且 reason 以 ownedReasonPrefix
+// 前缀开头才缩短；② 非前缀拥有不动；③ newUntil>=现有 until 时 no-op（不延长）；
+// ④ 不改 reason、不清除其他字段。返回是否实际缩短。
+func (r *quotaLifecycleFakeRepo) ShortenTempUnschedulableIfOwned(_ context.Context, id int64, newUntil time.Time, ownedReasonPrefix string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.parked[id]
+	if !ok {
+		return false, nil
+	}
+	if !rec.until.After(newUntil) || !strings.HasPrefix(rec.reason, ownedReasonPrefix) {
+		return false, nil
+	}
+	r.parked[id] = quotaParkedRecord{until: newUntil, reason: rec.reason}
+	if a, ok := r.accounts[id]; ok {
+		u := newUntil
+		a.TempUnschedulableUntil = &u
+		// 约束 ④：reason 不变。
+	}
+	return true, nil
+}
+
 func (r *quotaLifecycleFakeRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1117,12 +1140,12 @@ func TestQuotaLifecycleSweepThirdFormConvergesViaProbe(t *testing.T) {
 	lcUntil := st.parkedUntil()
 	require.NotNil(t, lcUntil)
 	require.Equal(t, resetAt.UTC().Format(time.RFC3339), lcUntil.UTC().Format(time.RFC3339))
-	// temp_unschedulable 保持停调（仍耗尽）：cur(+28d) > resetAt(+6d)，续停
-	// 「只延长」判定不触发，原到期点保留；+6d probeDue 到期后确认循环收尾
-	//（恢复清停调 / 仍耗尽续停），停调长于官方恢复点是安全侧。
+	// F4 受控缩短（派发单 C1-a-r3）：仍耗尽且 lifecycle 拥有该 until，账号级 until
+	// (+28d) 晚于官方 reset_at(+6d) → 缩短原语把 until 收敛到 reset_at（过度暂停收敛，
+	// 替代旧「只延长不缩短」的过度停调安全侧）。
 	until, ok := repo.parkedUntil(207)
 	require.True(t, ok, "probe-exhausted must keep the account parked")
-	require.Equal(t, quotaLifecycleBase.Add(28*24*time.Hour), until)
+	require.Equal(t, resetAt, until, "F4 shorten must converge the over-parked until to the official reset_at")
 	// 告警保持 firing（仍耗尽）。
 	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
 	require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
@@ -1229,37 +1252,31 @@ func TestQuotaLifecycleSweepThirdFormRecoveryClosure(t *testing.T) {
 	require.Equal(t, resetAt.UTC().Format(time.RFC3339), st.RecoveryAt,
 		"first probe must converge recovery_at to the official reset_at")
 	require.Equal(t, cnQuotaRecoverySourceSnapshot, st.RecoverySource)
-	// 停调只延长不缩短：cur(+28d) > reset_at(+6d)，原到期点保留。
+	// F4 受控缩短（派发单 C1-a-r3）：t0 探针仍耗尽且 lifecycle 拥有该 until，账号级
+	// until(+28d) 晚于官方 reset_at(+6d) → 缩短原语把 until 收敛到 reset_at（而非
+	// 只延长不缩短）。
 	until, ok := repo.parkedUntil(207)
 	require.True(t, ok)
-	require.Equal(t, residual, until)
+	require.Equal(t, resetAt, until, "F4 shorten must converge the over-parked until to the official reset_at")
 	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
 
-	// --- 推进到 t0+6d+ε 第二次 sweep：recovery_at 到期 → probeDue → recovered 闭环 ---
-	clock = resetAt.Add(time.Minute)
-	probe.setOutcome(quotaProbeRecovered)
-	// 断言加固（D-QLM-020，R7）：第二次 sweep 前显式锁定入口唯一——
-	// recovery_at（已收敛到 reset_at）不再未来 → probeDue=true；同时 recovery_at
-	// 与 reset_at 相同，cur 不再晚于 reset_at，第三形态矛盾已消解 →
-	// sweepTHResidualRecoveryDue=false。该跳 sweep 只能由 probeDue 入口触发。
-	require.True(t, st.probeDue(clock, quotaLifecycleSweepInterval),
-		"expired converged recovery_at must make probeDue true")
+	// --- F4 受控缩短后的闭环（派发单 C1-a-r3）---
+	// t0 把过度停调 until(+28d) 收敛到官方 reset_at(+6d) 后，账号在 reset_at 自然
+	// 到期——矛盾由缩短消解，不再产生探针、不再过度续停（旧「recovered 探针清停调」
+	// 闭环节被缩短替代；recovered 清除闭环由 TestQuotaLifecycleSweepThirdForm
+	// PlanExhaustedFalseRecoveryClosure 覆盖）。
+	clock = resetAt.Add(time.Minute) // reset_at 到期后
+	// 矛盾门已消解：账号级 until(=reset_at) 不再晚于 reset_at。
 	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, clock),
-		"third-form contradiction is resolved; the sweep must be entered via probeDue only")
+		"F4 shorten at t0 already resolved the time contradiction; the gate must no longer trip")
 	require.NoError(t, svc.RunRecoverySweep(context.Background()))
-	require.Equal(t, 2, probe.calls, "expired converged recovery_at must trigger the closure probe")
-	// 闭环一：清停调。
-	require.Equal(t, 1, repo.clearCalls, "recovered probe must clear the temp-unschedulable park")
-	_, parked := repo.parkedUntil(207)
-	require.False(t, parked, "closure must remove the park record")
-	// 闭环二：告警 resolve。
-	require.Empty(t, alerts.firingEvents(quotaAlertDimsFor(207)))
-	require.Len(t, alerts.resolvedEvents(quotaAlertDimsFor(207)), 1)
-	// 闭环三：recovered 墓碑。
-	st, ok = cnQuotaLifecycleStateFromExtra(account.Extra)
-	require.True(t, ok)
-	require.Equal(t, cnQuotaLifecycleStateRecovered, st.State)
-	require.Equal(t, cnQuotaLifecycleProbeRecovered, st.LastProbeOutcome)
+	// 缩短后的 until 已到期 → 账号退出停调候选，不再产生探针（无过度续停、无 spurious probe）。
+	require.Equal(t, 1, probe.calls, "F4 shorten resolved the over-park; no further probe after reset_at")
+	require.NotNil(t, account.TempUnschedulableUntil, "park record still present")
+	require.False(t, account.TempUnschedulableUntil.After(clock),
+		"shortened until must have naturally expired at reset_at (F4 resolves the over-park)")
+	// 告警仍 firing（上游仍耗尽，仅停调窗口到期；后续探针确认恢复由既有 recovered 路径负责）。
+	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
 }
 
 // 端到端闭环（D-QLM-021）：第三形态去掉 pe 前提后的生产实证第二轮形态——快照
@@ -1350,51 +1367,34 @@ func TestQuotaLifecycleSweepThirdFormStillExhaustedReParksAndKeepsLoop(t *testin
 	clock := quotaLifecycleBase
 	svc.SetQuotaLifecycleClock(func() time.Time { return clock })
 
-	// t0 第一次 sweep：收敛 recovery_at 到 reset_at。
+	// t0 第一次 sweep：矛盾第三形态 + 仍耗尽 → F4 受控缩短（派发单 C1-a-r3）把过度
+	// 停调 until(+28d) 收敛到官方 reset_at(+6d)；recovery_at 同步收敛到 reset_at。
 	require.NoError(t, svc.RunRecoverySweep(context.Background()))
 	require.Equal(t, 1, probe.calls)
 	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
 	require.True(t, ok)
 	require.Equal(t, resetAt.UTC().Format(time.RFC3339), st.RecoveryAt)
-
-	// 推进到 t0+6d+ε 第二次 sweep：仍耗尽，快照 reset_at 已过期 → unknown 远期占位续停。
-	clock = resetAt.Add(time.Minute)
-	require.NoError(t, svc.RunRecoverySweep(context.Background()))
-	require.Equal(t, 2, probe.calls, "expired converged recovery_at must be re-probed")
-	// 续停落点：远期占位 = now+7d（reset_at 已过期，不再写新 reset_at）。
 	until, ok := repo.parkedUntil(207)
-	require.True(t, ok, "still-exhausted at an expired reset_at must re-park to the far-future placeholder")
-	require.Equal(t, clock.Add(quotaLifecycleUnknownRecoveryPlaceholder), until)
-	// lifecycle：recovery_at 登记空（unknown）+ source=unknown。
-	st, ok = cnQuotaLifecycleStateFromExtra(account.Extra)
-	require.True(t, ok)
-	require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
-	require.Equal(t, "", st.RecoveryAt, "expired reset_at must register unknown recovery time")
-	require.Equal(t, cnQuotaRecoverySourceUnknown, st.RecoverySource)
-	require.Equal(t, cnQuotaLifecycleProbeExhausted, st.LastProbeOutcome)
-	// 告警保持 firing。
-	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
-	require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
+	require.True(t, ok, "F4 shorten must leave the park record")
+	require.Equal(t, resetAt, until, "F4 shorten must converge the over-parked until to the official reset_at")
 
-	// 推进一个节距第三次 sweep：unknown 兜底循环不丢，probe.calls 继续递增。
-	secondParkUntil, ok := repo.parkedUntil(207)
-	require.True(t, ok)
-	clock = clock.Add(quotaLifecycleSweepInterval)
+	// 缩短后矛盾消解：账号级 until(=reset_at) 不再晚于 reset_at，矛盾门关闭。
+	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, quotaLifecycleBase),
+		"F4 shorten collapsed until to reset_at; the time contradiction must be resolved")
+
+	// F4 缩短的闭环（派发单 C1-a-r3）：缩短后的 until 在 reset_at 自然到期，账号退出
+	// 停调候选，不再产生探针（无过度续停、无 spurious probe）；矛盾门亦不再成立；
+	// 告警保持 firing（上游仍耗尽，仅停调窗口到期）。
+	clock = resetAt.Add(time.Minute) // reset_at 到期后
 	require.NoError(t, svc.RunRecoverySweep(context.Background()))
-	require.Equal(t, 3, probe.calls, "unknown re-park must keep the confirmation loop alive")
-	// 断言加固（D-QLM-020，R7）：第三次 sweep 后停调落点 = 第三次时钟 + 远期占位
-	//（≠ 第二次的 parkedUntil）——证明循环对 unknown 真实重算延长续停，而非保留
-	// 旧停调记录。
-	until, ok = repo.parkedUntil(207)
-	require.True(t, ok)
-	require.Equal(t, clock.Add(quotaLifecycleUnknownRecoveryPlaceholder), until,
-		"third sweep must recompute the park to now+placeholder, not keep the old record")
-	require.NotEqual(t, secondParkUntil, until)
-	// 停调保持（再次续停），告警仍 firing。
-	_, ok = repo.parkedUntil(207)
-	require.True(t, ok)
+	require.Equal(t, 1, probe.calls, "expired shortened until must drop out of parked candidates (no spurious probe)")
+	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, clock),
+		"F4 shortened until no longer exceeds reset_at; contradiction gate must be false")
+	require.NotNil(t, account.TempUnschedulableUntil, "park record still present")
+	require.False(t, account.TempUnschedulableUntil.After(clock),
+		"shortened until must have naturally expired at reset_at (F4 resolves the over-park)")
+	// 告警保持 firing（上游仍耗尽、未恢复；仅停调窗口自然到期）。
 	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
-	require.Empty(t, alerts.resolvedEvents(quotaAlertDimsFor(207)))
 }
 
 // ---------- 非管辖账号 ----------
@@ -1529,13 +1529,50 @@ func TestQuotaLifecycleKiraProbeClassification(t *testing.T) {
 	account := newQuotaLifecycleKiraAccount(208)
 	cfg := &config.Config{}
 
-	t.Run("free pool headroom means recovered", func(t *testing.T) {
+	t.Run("free pool headroom + fresh VND>0 means recovered", func(t *testing.T) {
+		// 余额三态契约：account.Extra 写入新鲜 VND 付费余额 >0（付费池未耗尽）。
+		// 免费池有余量 + 付费池新鲜未耗尽 → 确属恢复（Recovered）。
+		account := newQuotaLifecycleKiraAccount(208)
+		account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)] = 5000.0
+		account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated)] = quotaLifecycleBase.UTC().Format(time.RFC3339)
 		upstream := &quotaCaptureUpstream{statusCode: http.StatusOK,
 			body: `{"summary":{"tokensUsedToday":1000,"freeDailyLimit":6000000,"vndBalance":0}}`}
 		svc := NewCNQuotaLifecycleService(newQuotaLifecycleFakeRepo(account), upstream, cfg, nil)
+		svc.SetQuotaLifecycleClock(func() time.Time { return quotaLifecycleBase })
 		outcome, err := svc.probeKiraExhaustion(context.Background(), account)
 		require.NoError(t, err)
 		require.Equal(t, quotaProbeRecovered, outcome)
+	})
+
+	t.Run("free pool headroom but VND unknown means uncertain (no fresh evidence)", func(t *testing.T) {
+		// F1/D1：免费池有余量但 VND 余额无新鲜证据（Extra 缺键/过期）→ 不得结论
+		// Recovered（fail-closed）。避免 VND=0 被误判为已恢复而永不停调。
+		account := newQuotaLifecycleKiraAccount(208)
+		// 不写入 VND 余额键 → ResolveKiraVNDBalanceState 为 unknown。
+		upstream := &quotaCaptureUpstream{statusCode: http.StatusOK,
+			body: `{"summary":{"tokensUsedToday":1000,"freeDailyLimit":6000000,"vndBalance":0}}`}
+		svc := NewCNQuotaLifecycleService(newQuotaLifecycleFakeRepo(account), upstream, cfg, nil)
+		svc.SetQuotaLifecycleClock(func() time.Time { return quotaLifecycleBase })
+		outcome, err := svc.probeKiraExhaustion(context.Background(), account)
+		require.Error(t, err)
+		require.Equal(t, quotaProbeUncertain, outcome,
+			"free pool headroom with unknown VND must not conclude Recovered")
+	})
+
+	t.Run("free pool headroom but fresh VND=0 means exhausted (D1 fix)", func(t *testing.T) {
+		// D1：免费池有余量但付费 VND 余额新鲜=0 → 付费池耗尽，应 Exhausted，
+		// 不得 Recovered（旧逻辑免费池余量即 Recovered 导致 VND=0 永不 park）。
+		account := newQuotaLifecycleKiraAccount(208)
+		account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)] = 0.0
+		account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated)] = quotaLifecycleBase.UTC().Format(time.RFC3339)
+		upstream := &quotaCaptureUpstream{statusCode: http.StatusOK,
+			body: `{"summary":{"tokensUsedToday":1000,"freeDailyLimit":6000000,"vndBalance":0}}`}
+		svc := NewCNQuotaLifecycleService(newQuotaLifecycleFakeRepo(account), upstream, cfg, nil)
+		svc.SetQuotaLifecycleClock(func() time.Time { return quotaLifecycleBase })
+		outcome, err := svc.probeKiraExhaustion(context.Background(), account)
+		require.NoError(t, err)
+		require.Equal(t, quotaProbeExhausted, outcome,
+			"fresh VND=0 with free-pool headroom must exhaust (D1 fix)")
 	})
 
 	t.Run("free pool exhausted confirms exhausted", func(t *testing.T) {
@@ -1559,5 +1596,437 @@ func TestQuotaLifecycleKiraProbeClassification(t *testing.T) {
 		svc := NewCNQuotaLifecycleService(newQuotaLifecycleFakeRepo(account), upstream, cfg, nil)
 		outcome, _ := svc.probeKiraExhaustion(context.Background(), account)
 		require.Equal(t, quotaProbeUncertain, outcome)
+	})
+}
+
+// ---------- F2 结构化作用域矩阵 + 402 账号级权威冻结 ----------
+
+func TestClassifyQuotaExhaustionScopeMatrix(t *testing.T) {
+	kira := newQuotaLifecycleKiraAccount(208)
+	nonKira := newQuotaLifecycleTHAccount(207) // TH 非 Kira
+
+	t.Run("kira 402 = account (authoritative freeze)", func(t *testing.T) {
+		require.Equal(t, QuotaScopeAccount, ClassifyQuotaExhaustionScope(kira, 402, quotaLifecycleBase))
+	})
+	t.Run("non-Kira 402 = model (probe-confirm)", func(t *testing.T) {
+		require.Equal(t, QuotaScopeModel, ClassifyQuotaExhaustionScope(nonKira, 402, quotaLifecycleBase))
+	})
+	t.Run("429 = model (no account-wide freeze)", func(t *testing.T) {
+		require.Equal(t, QuotaScopeModel, ClassifyQuotaExhaustionScope(kira, 429, quotaLifecycleBase))
+		require.Equal(t, QuotaScopeModel, ClassifyQuotaExhaustionScope(nonKira, 429, quotaLifecycleBase))
+	})
+	t.Run("kira 502/504 only account when fresh VND<=0, else unknown", func(t *testing.T) {
+		recent := quotaLifecycleBase.Add(-time.Minute)
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 0.0
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = recent.UTC().Format(time.RFC3339)
+		require.Equal(t, QuotaScopeAccount, ClassifyQuotaExhaustionScope(kira, 502, quotaLifecycleBase),
+			"kira 502/504 with fresh VND=0 warrants account freeze")
+		// 清除 VND 键 → unknown（不得把通用 5xx 泛化为账号冻结）。
+		delete(kira.Extra, cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance))
+		delete(kira.Extra, cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated))
+		require.Equal(t, QuotaScopeUnknown, ClassifyQuotaExhaustionScope(kira, 504, quotaLifecycleBase))
+	})
+	t.Run("non-Kira 502/504 = unknown", func(t *testing.T) {
+		require.Equal(t, QuotaScopeUnknown, ClassifyQuotaExhaustionScope(nonKira, 502, quotaLifecycleBase))
+	})
+}
+
+func TestQuotaLifecycleKira402AuthoritativeFreeze(t *testing.T) {
+	// F2：Kira 账号 402 → 账号级权威冻结（三态裁决表三行全冻结），reason 标记
+	// [402-account-authoritative]，并持久化 probe_due_at（§3.3 R19-F4）。
+	account := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), account,
+		"Insufficient VND wallet balance (0 VND remaining)"))
+
+	until, parked := repo.parkedUntil(208)
+	require.True(t, parked, "kira 402 must freeze the account")
+	require.Contains(t, repo.parkedReason(208), cnQuotaExhaustedReason402Account,
+		"402 authoritative freeze must be tagged")
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+	require.NotEmpty(t, st.ProbeDueAt, "402 authoritative freeze must persist probe_due_at")
+	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(208)), 1)
+	_ = until
+}
+
+func TestQuotaLifecycleNonKira402ModelScopeNoFreezeOnUncertain(t *testing.T) {
+	// F2 控制组：非 Kira 平台 402 经结构化信号判定为 model 作用域（探针确认语义），
+	// 探针不确定 → 失败关闭，不整号冻结。
+	account := newQuotaLifecycleTHAccount(207)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeUncertain, err: errors.New("transport down")}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), account,
+		"Your Pass allowance for this period is used"))
+
+	_, parked := repo.parkedUntil(207)
+	require.False(t, parked, "non-Kira 402 with uncertain probe must not freeze the account")
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.Equal(t, cnQuotaLifecycleStateUncertain, st.State)
+}
+
+func TestQuotaLifecycleUnknownScopeNoConversion(t *testing.T) {
+	// F2：scope=unknown 不做整号转换（不冻结、不改账号级状态）。
+	account := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	signal := QuotaExhaustionSignal{Status: 502, Scope: QuotaScopeUnknown, Platform: account.Platform, Msg: "upstream 502"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), account, "upstream 502", signal))
+
+	_, parked := repo.parkedUntil(208)
+	require.False(t, parked, "unknown scope must not cause whole-account conversion")
+	require.Zero(t, probe.calls, "unknown scope must not trigger the confirmation probe")
+}
+
+func TestQuotaLifecycleSweepStillExhaustedDoesNotTouchNonLifecycleUntil(t *testing.T) {
+	// F4 受控缩短：账号级 until 由他因（非 lifecycle 域）拥有时，仍耗尽分支不得
+	// 改写/缩短——保持只延长不缩短安全侧，他因暂停不受 lifecycle 影响。
+	account := newQuotaLifecycleKiraAccount(208)
+	externalUntil := quotaLifecycleBase.Add(3 * 24 * time.Hour)
+	account.TempUnschedulableUntil = &externalUntil
+	account.TempUnschedulableReason = "muse:usage-window-exhausted" // 他因 reason
+	account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":           cnQuotaLifecycleStateExhausted,
+		"recovery_at":     quotaLifecycleBase.Add(-time.Hour).UTC().Format(time.RFC3339),
+		"recovery_source": cnQuotaRecoverySourceSnapshot,
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	require.NoError(t, repo.SetTempUnschedulable(context.Background(), 208, externalUntil, "muse:usage-window-exhausted"))
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+	svc.track(208) // 来自不确定循环跟踪
+
+	require.NoError(t, svc.RunRecoverySweep(context.Background()))
+
+	// lifecycle 不得触碰他因 until：仍耗尽分支跳过 re-park/缩短。
+	until, ok := repo.parkedUntil(208)
+	require.True(t, ok)
+	require.Equal(t, externalUntil, until, "lifecycle must not touch a non-lifecycle-owned until")
+}
+
+// ---------- C1-a-r3：F4 受控缩短路径 ----------
+
+// TestQuotaLifecycleF4ShortenEndToEnd F4 端到端（派发单 C1-a-r3 / 方案 §4 F4）：
+// 存量形态 until=renews_at（旧口径，+28d，晚于官方 reset_at）+ 快照 reset_at(+6d)
+// → 读侧矛盾判定 → 探针 still-exhausted → until 被缩短至 reset_at（断言落库值）。
+func TestQuotaLifecycleF4ShortenEndToEnd(t *testing.T) {
+	resetAt := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+	residual := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+	account := newQuotaLifecycleTHAccount(207)
+	account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":           cnQuotaLifecycleStateExhausted,
+		"recovery_at":     residual.UTC().Format(time.RFC3339), // renewsAt 旧口径存量，晚于 reset_at
+		"recovery_source": cnQuotaRecoverySourceSnapshot,
+		"last_probe_at":   quotaLifecycleBase.Add(-time.Minute).UTC().Format(time.RFC3339),
+	}
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		"reset_at":       resetAt.UTC().Format(time.RFC3339), // 官方 reset_at（矛盾落点）
+		"plan_exhausted": true,
+		"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, residual, cnQuotaExhaustedReasonPrefix))
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	// 前置：读侧矛盾成立（账号级 until 晚于 reset_at），且由 lifecycle 拥有。
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.False(t, st.probeDue(quotaLifecycleBase, quotaLifecycleSweepInterval))
+	require.True(t, svc.sweepTHResidualRecoveryDue(account, st, quotaLifecycleBase),
+		"account-level until later than reset_at must trip the contradiction gate")
+
+	require.NoError(t, svc.RunRecoverySweep(context.Background()))
+	require.Equal(t, 1, probe.calls, "contradiction must reach the confirmation probe")
+
+	// F4 缩短：until 收敛到 reset_at（落库值）。
+	until, ok := repo.parkedUntil(207)
+	require.True(t, ok)
+	require.Equal(t, resetAt, until, "F4 shorten must collapse the over-parked until to the official reset_at")
+	// 约束 ④：reason 不变。
+	require.Equal(t, cnQuotaExhaustedReasonPrefix, repo.parkedReason(207))
+	// 缩短后矛盾消解：账号级 until 不再晚于 reset_at。
+	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, quotaLifecycleBase),
+		"after F4 shorten the contradiction must be resolved")
+	require.Len(t, alerts.firingEvents(quotaAlertDimsFor(207)), 1)
+}
+
+// TestQuotaLifecycleF4ShortenNegativeNonOwned F4 负例（派发单 C1-a-r3）：同样矛盾
+//（账号级 until 晚于 reset_at）但 reason 非 lifecycle 拥有 → until 不变。
+func TestQuotaLifecycleF4ShortenNegativeNonOwned(t *testing.T) {
+	resetAt := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+	residual := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+	account := newQuotaLifecycleTHAccount(207)
+	externalReason := "muse:usage-window-exhausted" // 他因 reason
+	account.TempUnschedulableUntil = &residual
+	account.TempUnschedulableReason = externalReason
+	account.Extra[cnQuotaLifecycleExtraKey] = map[string]any{
+		"state":           cnQuotaLifecycleStateExhausted,
+		"recovery_at":     residual.UTC().Format(time.RFC3339),
+		"recovery_source": cnQuotaRecoverySourceSnapshot,
+		"last_probe_at":   quotaLifecycleBase.Add(-time.Minute).UTC().Format(time.RFC3339),
+	}
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":       true,
+		"renews_at":      quotaLifecycleBase.Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339),
+		"reset_at":       resetAt.UTC().Format(time.RFC3339),
+		"plan_exhausted": true,
+		"fetched_at":     quotaLifecycleBase.Format(time.RFC3339),
+	}
+	repo := newQuotaLifecycleFakeRepo(account)
+	require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, residual, externalReason))
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	// 读侧矛盾门（sweepTHResidualRecoveryDue）因 reason 非 lifecycle 拥有而关闭：
+	// lifecycle 不接管他因暂停。
+	st, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.True(t, ok)
+	require.False(t, svc.sweepTHResidualRecoveryDue(account, st, quotaLifecycleBase),
+		"non-lifecycle-owned contradiction must not trip the lifecycle contradiction gate")
+
+	// 即便经其它候选路径进入 sweep（此处借 probeDue：recovery_at 已过期），仍耗尽分支
+	// 也不得改写/缩短他因 until。
+	account.TempUnschedulableReason = externalReason
+	svc.track(207)
+	require.NoError(t, svc.RunRecoverySweep(context.Background()))
+	until, ok := repo.parkedUntil(207)
+	require.True(t, ok)
+	require.Equal(t, residual, until, "F4 negative: non-lifecycle-owned until must stay unchanged")
+	require.Equal(t, externalReason, repo.parkedReason(207), "F4 negative: reason must stay unchanged")
+}
+
+// TestQuotaLifecycleShortenTempUnschedulableIfOwnedContract 原语四条硬约束（派发单
+// C1-a-r3）：缩短生效 / 非拥有不动 / newUntil>=现状 no-op / reason 与其他字段不变。
+// 经 fake 接口替身真实执行（生产 SQL 等价约束见 repo 层 SQL 形态测试）。
+func TestQuotaLifecycleShortenTempUnschedulableIfOwnedContract(t *testing.T) {
+	t.Run("shorten applies when owned and until>newUntil", func(t *testing.T) {
+		account := newQuotaLifecycleTHAccount(207)
+		repo := newQuotaLifecycleFakeRepo(account)
+		old := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+		newU := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, old, cnQuotaExhaustedReasonPrefix))
+
+		applied, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 207, newU, cnQuotaExhaustedReasonPrefix)
+		require.NoError(t, err)
+		require.True(t, applied, "owned over-parked until must be shortened")
+		until, ok := repo.parkedUntil(207)
+		require.True(t, ok)
+		require.Equal(t, newU, until)
+	})
+
+	t.Run("non-owned reason is untouched", func(t *testing.T) {
+		account := newQuotaLifecycleTHAccount(207)
+		repo := newQuotaLifecycleFakeRepo(account)
+		old := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+		newU := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, old, "muse:usage-window-exhausted"))
+
+		applied, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 207, newU, cnQuotaExhaustedReasonPrefix)
+		require.NoError(t, err)
+		require.False(t, applied, "non-owned reason must not be shortened")
+		until, ok := repo.parkedUntil(207)
+		require.True(t, ok)
+		require.Equal(t, old, until)
+	})
+
+	t.Run("newUntil>=current is a no-op and never extends", func(t *testing.T) {
+		account := newQuotaLifecycleTHAccount(207)
+		repo := newQuotaLifecycleFakeRepo(account)
+		old := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+		// newUntil 等于现状：no-op（不得延长）；newUntil 晚于现状同样 no-op。
+		for _, newU := range []time.Time{old, old.Add(24 * time.Hour)} {
+			require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, old, cnQuotaExhaustedReasonPrefix))
+			applied, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 207, newU, cnQuotaExhaustedReasonPrefix)
+			require.NoError(t, err)
+			require.False(t, applied, "newUntil>=current must be a no-op (never extend)")
+			until, ok := repo.parkedUntil(207)
+			require.True(t, ok)
+			require.Equal(t, old, until, "no-op must leave the until unchanged")
+		}
+	})
+
+	t.Run("reason and other fields are preserved", func(t *testing.T) {
+		account := newQuotaLifecycleTHAccount(207)
+		repo := newQuotaLifecycleFakeRepo(account)
+		old := quotaLifecycleBase.Add(28 * 24 * time.Hour)
+		newU := quotaLifecycleBase.Add(6 * 24 * time.Hour)
+		reason := cnQuotaExhaustedReasonPrefix + "：停调至官方恢复时间 2099-01-01T00:00:00Z（来源 snapshot）"
+		require.NoError(t, repo.SetTempUnschedulable(context.Background(), 207, old, reason))
+
+		applied, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 207, newU, cnQuotaExhaustedReasonPrefix)
+		require.NoError(t, err)
+		require.True(t, applied)
+		require.Equal(t, reason, repo.parkedReason(207), "shorten must not alter the reason")
+	})
+}
+
+// ---------- C1-a-r2 整改：补齐三组缺口测试（测试-only，仅新增函数） ----------
+
+// 组 1：probe_due_at 迁移表四态（方案 §3.3 R19-F4）。
+// 覆盖 resolveProbeDueAt + probeDue 的语义边界：
+//   - 余额 fresh>0 → 立即 due（now）；
+//   - 余额 unknown / fresh≤0（Kira）→ kiraNextDailyReset（每日重置兜底）；
+//   - TH 账号冻结且有未来 reset_at → 返回该 reset_at；
+//   - probeDue：probe_due_at 在未来→false、已过→true；为空回退 RecoveryAt（回归保护）。
+func TestProbeDueMigrationTableFourStates(t *testing.T) {
+	now := quotaLifecycleBase
+	svc := newQuotaLifecycleTestService(newQuotaLifecycleFakeRepo(), &fakeQuotaAlertStore{}, &quotaProbeController{})
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: PlatformOther}
+
+	// 态 A：冻结时余额 fresh>0 → 立即 due（返回 now）。
+	t.Run("fresh_positive_returns_now", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		recent := now.Add(-30 * time.Second) // 基点前 1 分钟内，新鲜
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = recent.UTC().Format(time.RFC3339)
+		got := svc.resolveProbeDueAt(kira, signal, now)
+		require.Equal(t, now, got, "fresh VND>0 must return now (immediate due)")
+	})
+
+	// 态 B：冻结时余额 unknown（缺键）→ Kira 每日重置兜底。
+	t.Run("unknown_balance_returns_kira_daily_reset", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		got := svc.resolveProbeDueAt(kira, signal, now)
+		require.Equal(t, kiraNextDailyReset(now), got, "unknown Kira balance must fall back to daily reset")
+	})
+
+	// 态 C：冻结时余额 fresh≤0（Kira）→ Kira 每日重置兜底。
+	t.Run("fresh_zero_returns_kira_daily_reset", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		recent := now.Add(-30 * time.Second)
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 0.0
+		kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = recent.UTC().Format(time.RFC3339)
+		got := svc.resolveProbeDueAt(kira, signal, now)
+		require.Equal(t, kiraNextDailyReset(now), got, "fresh VND=0 must fall back to daily reset")
+	})
+
+	// 态 D：TH 账号冻结 → 有未来 reset_at 时返回该 reset_at。
+	t.Run("th_future_reset_at_returns_reset_at", func(t *testing.T) {
+		th := newQuotaLifecycleTHAccount(207) // 快照 reset_at = 基点后 7 天（未来）
+		got := svc.resolveProbeDueAt(th, signal, now)
+		want, _ := time.Parse(time.RFC3339, now.Add(7*24*time.Hour).UTC().Format(time.RFC3339))
+		require.Equal(t, want, got, "TH future reset_at must be returned as probe_due_at")
+	})
+
+	// probeDue 行为：优先 probe_due_at 资格字段；空则回退 RecoveryAt（回归保护）。
+	t.Run("probe_due_at_future_is_not_due", func(t *testing.T) {
+		st := &cnQuotaLifecycleState{ProbeDueAt: now.Add(time.Hour).UTC().Format(time.RFC3339)}
+		require.False(t, st.probeDue(now, quotaLifecycleSweepInterval), "future probe_due_at must not be due")
+	})
+	t.Run("probe_due_at_past_is_due", func(t *testing.T) {
+		st := &cnQuotaLifecycleState{ProbeDueAt: now.Add(-time.Hour).UTC().Format(time.RFC3339)}
+		require.True(t, st.probeDue(now, quotaLifecycleSweepInterval), "past probe_due_at must be due")
+	})
+	t.Run("empty_probe_due_at_falls_back_to_recovery_at_future", func(t *testing.T) {
+		st := &cnQuotaLifecycleState{RecoveryAt: now.Add(time.Hour).UTC().Format(time.RFC3339)}
+		require.False(t, st.probeDue(now, quotaLifecycleSweepInterval), "empty probe_due_at must fall back to recovery_at")
+	})
+	t.Run("empty_probe_due_at_falls_back_to_recovery_at_past", func(t *testing.T) {
+		st := &cnQuotaLifecycleState{RecoveryAt: now.Add(-time.Hour).UTC().Format(time.RFC3339)}
+		require.True(t, st.probeDue(now, quotaLifecycleSweepInterval), "empty probe_due_at must fall back to recovery_at")
+	})
+}
+
+// 组 2：重启不丢（持久化往返）。402 权威冻结落库后，经
+// cnQuotaLifecycleStateFromExtra 读回，断言 state=exhausted + probe_due_at 非空且可解析
+// + last_probe_outcome 保留（模拟进程重启后从 extra 重建状态）。
+func TestAuthoritativeFreezePersistRoundTrip(t *testing.T) {
+	th := newQuotaLifecycleTHAccount(207)
+	repo := newQuotaLifecycleFakeRepo(th)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: th.Platform, Msg: "402"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), th, "Pass allowance used", signal))
+
+	// 落库断言。
+	_, parked := repo.parkedUntil(207)
+	require.True(t, parked, "402 authoritative freeze must park")
+	require.Contains(t, repo.parkedReason(207), cnQuotaExhaustedReason402Account, "must be tagged [402-account-authoritative]")
+
+	// 模拟进程重启：从 extra 重新解析状态。
+	st, ok := cnQuotaLifecycleStateFromExtra(th.Extra)
+	require.True(t, ok, "state must be persisted in extra")
+	require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+	require.NotEmpty(t, st.ProbeDueAt, "probe_due_at must survive restart")
+	parsed, err := time.Parse(time.RFC3339, st.ProbeDueAt)
+	require.NoError(t, err, "probe_due_at must be RFC3339 parseable")
+	require.False(t, parsed.IsZero())
+	require.Equal(t, cnQuotaLifecycleProbeExhausted, st.LastProbeOutcome, "last_probe_outcome must survive restart")
+}
+
+// 组 3：Kira 402×三态裁决表三行（方案 §3.2）。三行都冻结并带
+// [402-account-authoritative] 标记，余额三态只影响 probe_due 时机。
+func TestKira402ThreeStateRuling(t *testing.T) {
+	balanceKey := func(a *Account) string { return cnExtraKey(a.Platform, cnBalanceExtraSuffixBalance) }
+	updatedKey := func(a *Account) string { return cnExtraKey(a.Platform, cnBalanceExtraSuffixUpdated) }
+	recent := func() time.Time { return quotaLifecycleBase.Add(-30 * time.Second) } // 基点前 1 分钟内，新鲜
+
+	// 行 1：Kira 402 + fresh VND≤0 → park + 标记。
+	t.Run("fresh_vnd_le_zero_parked_and_tagged", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		kira.Extra[balanceKey(kira)] = 0.0
+		kira.Extra[updatedKey(kira)] = recent().UTC().Format(time.RFC3339)
+		repo := newQuotaLifecycleFakeRepo(kira)
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+		require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), kira, "Insufficient VND (0 remaining)"))
+		_, parked := repo.parkedUntil(208)
+		require.True(t, parked)
+		require.Contains(t, repo.parkedReason(208), cnQuotaExhaustedReason402Account)
+		st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+		require.True(t, ok)
+		require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+	})
+
+	// 行 2：Kira 402 + fresh VND>0 → 仍 park + 标记（上游即时权威，余额展示可能滞后）。
+	t.Run("fresh_vnd_positive_still_parked_and_tagged", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		kira.Extra[balanceKey(kira)] = 1000.0
+		kira.Extra[updatedKey(kira)] = recent().UTC().Format(time.RFC3339)
+		repo := newQuotaLifecycleFakeRepo(kira)
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+		require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), kira, "Insufficient VND (account-level 402)"))
+		_, parked := repo.parkedUntil(208)
+		require.True(t, parked, "fresh VND>0 must still freeze on 402 authoritative")
+		require.Contains(t, repo.parkedReason(208), cnQuotaExhaustedReason402Account)
+		st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+		require.True(t, ok)
+		require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+		require.Equal(t, quotaLifecycleBase.UTC().Format(time.RFC3339), st.ProbeDueAt, "fresh VND>0 → immediate due (now)")
+	})
+
+	// 行 3：Kira 402 + unknown → 仍 park + 标记（402 单独即账号级到达证据）。
+	t.Run("unknown_balance_still_parked_and_tagged", func(t *testing.T) {
+		kira := newQuotaLifecycleKiraAccount(208)
+		// 不设置任何 VND 余额键 → unknown。
+		repo := newQuotaLifecycleFakeRepo(kira)
+		svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+		require.NoError(t, svc.OnUpstreamQuotaExhausted(context.Background(), kira, "402 account-level"))
+		_, parked := repo.parkedUntil(208)
+		require.True(t, parked, "unknown balance must still freeze on 402 authoritative")
+		require.Contains(t, repo.parkedReason(208), cnQuotaExhaustedReason402Account)
+		st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+		require.True(t, ok)
+		require.Equal(t, cnQuotaLifecycleStateExhausted, st.State)
+		require.Equal(t, kiraNextDailyReset(quotaLifecycleBase).UTC().Format(time.RFC3339), st.ProbeDueAt, "unknown → daily reset due")
 	})
 }

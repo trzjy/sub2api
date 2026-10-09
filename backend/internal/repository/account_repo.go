@@ -2511,6 +2511,45 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 	return nil
 }
 
+// ShortenTempUnschedulableIfOwned F4 受控缩短原语（派发单 C1-a-r3 / 方案 §4 F4
+// R12-F1 消化）：单条条件 UPDATE，无读-改-写两段式。仅当
+// temp_unschedulable_until > newUntil 且该 until 的 reason 以 ownedReasonPrefix
+// 前缀开头（lifecycle 域拥有）时，把 until 缩短至 newUntil；返回是否实际缩短。
+//
+// 硬约束：
+//   - 非前缀拥有的 reason 一律不动（负例）；
+//   - newUntil >= 现有 until 时 no-op（不得延长——延长仍走 SetTempUnschedulable
+//     的 GREATEST 守卫：temp_unschedulable_until IS NULL OR < $1）；
+//   - 不改 reason 字段、不清除其他字段。
+//
+// LIKE 前缀条件用 ownedReasonPrefix||'%' 表达，禁止把 reason 全表拉到内存过滤。
+func (r *accountRepository) ShortenTempUnschedulableIfOwned(ctx context.Context, accountID int64, newUntil time.Time, ownedReasonPrefix string) (bool, error) {
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET temp_unschedulable_until = $1,
+			updated_at = NOW()
+		WHERE id = $2
+			AND deleted_at IS NULL
+			AND temp_unschedulable_until > $1
+			AND temp_unschedulable_reason LIKE $3 || '%'
+	`, newUntil, accountID, ownedReasonPrefix)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected <= 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue shorten temp unschedulable failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
 func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 	ctx context.Context,
 	id int64,

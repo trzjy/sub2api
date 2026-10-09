@@ -26,6 +26,58 @@ func TestAccountRepository_SetTempUnschedulable_NoRowsAffectedDoesNotWriteOutbox
 	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
 }
 
+func TestAccountRepository_ShortenTempUnschedulableIfOwned_SQLShapeAndOutbox(t *testing.T) {
+	// F4 受控缩短原语（派发单 C1-a-r3 / 方案 §4 F4 R12-F1 消化）的落库形态。
+	// 单条条件 UPDATE，无读-改-写两段式：仅当 until > newUntil 且 reason 以
+	// ownedReasonPrefix 前缀开头时把 until 缩短至 newUntil。
+	const prefix = "cn quota exhausted:"
+	newUntil := time.Now().Add(5 * time.Minute)
+
+	t.Run("no rows affected does not write outbox", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+		shortened, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 42, newUntil, prefix)
+
+		require.NoError(t, err)
+		require.False(t, shortened, "无匹配行时必须返回 false（no-op）")
+		require.Len(t, exec.execQueries, 1, "no-op 不应触发 outbox")
+		normalized := normalizeSQLWhitespace(exec.execQueries[0])
+		require.Contains(t, normalized, "UPDATE accounts")
+		require.Contains(t, normalized, "temp_unschedulable_until > $1",
+			"必须仅在现有 until 严格大于 newUntil 时缩短（禁止延长）")
+		require.Contains(t, normalized, "temp_unschedulable_reason LIKE $3 || '%'",
+			"必须用前缀 LIKE 守卫归属，避免把 reason 拉到内存过滤")
+		require.Contains(t, normalized, "temp_unschedulable_until = $1",
+			"缩短仅改写 until 字段")
+		require.NotContains(t, normalized, "temp_unschedulable_reason =",
+			"缩短原语不得改写 reason 字段")
+		require.Contains(t, normalized, "deleted_at IS NULL")
+		require.Len(t, exec.execArgs[0], 3)
+		require.Equal(t, newUntil, exec.execArgs[0][0])
+		require.Equal(t, int64(42), exec.execArgs[0][1])
+		require.Equal(t, prefix, exec.execArgs[0][2])
+		require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+	})
+
+	t.Run("shorten applied writes outbox", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+		shortened, err := repo.ShortenTempUnschedulableIfOwned(context.Background(), 42, newUntil, prefix)
+
+		require.NoError(t, err)
+		require.True(t, shortened, "命中条件时必须返回 true（已缩短）")
+		require.Len(t, exec.execQueries, 2,
+			"缩短命中后必须触发 scheduler_outbox 传播")
+		normalizedUpdate := normalizeSQLWhitespace(exec.execQueries[0])
+		require.Contains(t, normalizedUpdate, "UPDATE accounts")
+		require.Contains(t, normalizedUpdate, "temp_unschedulable_until > $1")
+		require.Contains(t, normalizedUpdate, "temp_unschedulable_reason LIKE $3 || '%'")
+		require.Contains(t, normalizeSQLWhitespace(exec.execQueries[1]), "INSERT INTO scheduler_outbox")
+	})
+}
+
 func TestAccountRepository_ResetQuotaUsedAndClearRateLimitCooldown_NoRowsAffectedReturnsNotFoundWithoutOutbox(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)

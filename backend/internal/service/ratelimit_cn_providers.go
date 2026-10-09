@@ -19,10 +19,17 @@ import (
 //     CNProviderQuotaService 落入 account.Extra 快照），而非默认的秒级兜底。
 
 // CNQuotaLifecycleEntry 额度耗尽状态机的响应式入口窄面（接口以
-// cn_quota_lifecycle_service.go 的 CNQuotaLifecycleService.OnUpstreamQuotaExhausted
-// 为准；抽象成窄面便于测试注入假实现）。生产由 app 装配层注入。
+// cn_quota_lifecycle_service.go 的 CNQuotaLifecycleService 为准；抽象成窄面便于测试
+// 注入假实现）。生产由 app 装配层注入。
+//
+// 结构化信号透传（方案 §4 F2）：OnUpstreamQuotaExhaustedScoped 携带 {status, scope,
+// platform} 结构化信号，使状态机按作用域矩阵执行（kira+402=account 权威冻结、其他=
+// model/path 探针确认、unknown=不整号转换）。OnUpstreamQuotaExhausted 保留为兼容签名
+//（派生默认作用域后转交 Scoped），供周期快照交接窄面（cn_provider_balance_check_
+// service.go 的 cnQuotaLifecycleHandover）等仅持有自由文本的调用方使用。
 type CNQuotaLifecycleEntry interface {
 	OnUpstreamQuotaExhausted(ctx context.Context, account *Account, upstreamMsg string) error
+	OnUpstreamQuotaExhaustedScoped(ctx context.Context, account *Account, upstreamMsg string, signal QuotaExhaustionSignal) error
 }
 
 // SetCNQuotaLifecycle 注入额度耗尽状态机（可选依赖）。未注入时 402/429 响应式
@@ -110,7 +117,16 @@ func (s *RateLimitService) handleCNProviderInsufficientBalance(
 		)
 		return
 	}
-	if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhausted(ctx, account, upstreamMsg); err != nil {
+	// 结构化信号透传（方案 §4 F2 作用域矩阵）：402 余额不足信号经
+	// ClassifyQuotaExhaustionScope 判定作用域后透传 Scoped 入口——kira+402=account
+	// 权威冻结，非 Kira 402=model/path 探针确认；禁止从自由报文文本猜测作用域。
+	signal := QuotaExhaustionSignal{
+		Status:   402,
+		Scope:    ClassifyQuotaExhaustionScope(account, 402, time.Now()),
+		Platform: account.Platform,
+		Msg:      upstreamMsg,
+	}
+	if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhaustedScoped(ctx, account, upstreamMsg, signal); err != nil {
 		// 停调失败（如仓库层错误）不回退滚动冷却：下轮真实流量会再次携带 402 信号
 		// 进入状态机重试；余额检测周期任务也可再次触发本入口。
 		slog.Warn("cn_quota_lifecycle_entry_failed",
@@ -280,7 +296,16 @@ func (s *RateLimitService) applyCNProviderReactive429(
 			)
 			return true
 		}
-		if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhausted(ctx, account, extractUpstreamErrorMessage(responseBody)); err != nil {
+		// 结构化信号透传（方案 §4 F2 作用域矩阵）：429 归一为额度耗尽，探针确认语义
+		//（含 Kira 429 也走 model/path，不触发账号级权威冻结）；unknown=不整号转换。
+		sigMsg := extractUpstreamErrorMessage(responseBody)
+		signal := QuotaExhaustionSignal{
+			Status:   429,
+			Scope:    ClassifyQuotaExhaustionScope(account, 429, time.Now()),
+			Platform: account.Platform,
+			Msg:      sigMsg,
+		}
+		if err := s.cnQuotaLifecycle.OnUpstreamQuotaExhaustedScoped(ctx, account, sigMsg, signal); err != nil {
 			slog.Warn("cn_quota_lifecycle_entry_failed",
 				"account_id", account.ID,
 				"platform", account.Platform,

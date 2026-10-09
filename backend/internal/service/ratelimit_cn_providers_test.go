@@ -125,9 +125,10 @@ func cnVolcanoTestAccount(id int64, resetAt time.Time) Account {
 
 // fakeCNQuotaLifecycle 响应式入口窄面的假实现（断言「确认探针/状态机入口被调用」）。
 type fakeCNQuotaLifecycle struct {
-	mu        sync.Mutex
-	calls     []fakeLifecycleCall
-	returnErr error
+	mu         sync.Mutex
+	calls      []fakeLifecycleCall
+	lastSignal QuotaExhaustionSignal
+	returnErr  error
 }
 
 type fakeLifecycleCall struct {
@@ -136,9 +137,19 @@ type fakeLifecycleCall struct {
 }
 
 func (f *fakeCNQuotaLifecycle) OnUpstreamQuotaExhausted(_ context.Context, account *Account, upstreamMsg string) error {
+	return f.OnUpstreamQuotaExhaustedScoped(context.Background(), account, upstreamMsg, QuotaExhaustionSignal{Msg: upstreamMsg})
+}
+
+// OnUpstreamQuotaExhaustedScoped 实现 CNQuotaLifecycleEntry 扩展窄面（方案 §4 F2）：
+// 记录结构化信号交接（含 status/scope），供断言「入口已透传结构化信号」。
+func (f *fakeCNQuotaLifecycle) OnUpstreamQuotaExhaustedScoped(_ context.Context, account *Account, upstreamMsg string, signal QuotaExhaustionSignal) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fakeLifecycleCall{accountID: account.ID, upstreamMsg: upstreamMsg})
+	f.calls = append(f.calls, fakeLifecycleCall{
+		accountID:   account.ID,
+		upstreamMsg: upstreamMsg,
+	})
+	f.lastSignal = signal
 	return f.returnErr
 }
 

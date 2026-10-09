@@ -85,6 +85,12 @@ const (
 
 	cnQuotaLifecycleProviderKira        = "kira"
 	cnQuotaLifecycleProviderTokenHarbor = "tokenharbor"
+
+	// cnQuotaExhaustedReason402Account 是 402 权威冻结 reason 的标记后缀：标识该
+	// 停调由账号级 402 权威冻结产生（方案 §3.2 / §3.3 R19-F4）。该标记用于：
+	//   - 恢复门控：余额观察 fresh>0 不得直接恢复 402 权威冻结（防振荡，R17-F1/R18-F1）；
+	//   - F4 受控缩短：仅 lifecycle 域内（本标记前缀）拥有的 until 允许被缩短。
+	cnQuotaExhaustedReason402Account = "402-account-authoritative"
 )
 
 // QuotaAlertStore 额度耗尽告警持久化抽象（照 FreshnessAlertStore 模式，生产由
@@ -113,21 +119,88 @@ const (
 	quotaProbeRecovered                          // 上游已恢复（2xx / 免费池余量>0）
 )
 
+// QuotaExhaustionScope 上游额度耗尽信号的结构化作用域（方案 §4 F2 / R4-F2/R5-F2/
+// R6-F1/R10-F3；C1 结构化信号透传闭包）。禁止从自由报文文本猜测作用域。
+type QuotaExhaustionScope string
+
+const (
+	// QuotaScopeAccount 账号级耗尽（上游以 402 拒绝 = 账号当前无可服务维度，如 Kira）。
+	QuotaScopeAccount QuotaExhaustionScope = "account"
+	// QuotaScopeModel 模型级耗尽（如 TH free-tier 模型级、非 Kira 平台 402）。
+	QuotaScopeModel QuotaExhaustionScope = "model"
+	// QuotaScopePath 路径级耗尽。
+	QuotaScopePath QuotaExhaustionScope = "path"
+	// QuotaScopeUnknown 作用域不清：不泛化、不做整号转换（维持维度级/响应式语义）。
+	QuotaScopeUnknown QuotaExhaustionScope = "unknown"
+)
+
+// QuotaExhaustionSignal 上游额度耗尽信号的结构化载体（方案 §4 F2）。
+//
+// 字段：
+//   - Status：上游 HTTP 状态码（402/429/502/504...），结构化可得，不得靠文本猜测。
+//   - Scope：作用域（account/model/path/unknown），由 ClassifyQuotaExhaustionScope 判定。
+//   - Platform：账号归属平台（同程序标识），用于三态解析来源绑定。
+//   - Msg：既有自由文本 upstreamMsg，照传兼容（不用于作用域判定）。
+type QuotaExhaustionSignal struct {
+	Status   int
+	Scope    QuotaExhaustionScope
+	Platform string
+	Msg      string
+}
+
+// ClassifyQuotaExhaustionScope 结构化作用域判定矩阵（方案 §4 F2）：
+//   - kira + 402 = account（到达证据；Kira 实测 VND=0 时含免费池请求在内全拒）。
+//   - 非 Kira 平台 402 = model/path（按已确认维度上下文，不得泛化账号冻结）。
+//   - kira + 502/504 = 仅当新鲜 VND≤0 三态佐证成立（ResolveKiraVNDBalanceState）
+//     才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
+//   - 429 / 其他 = model/path（429 不触发账号级权威冻结）；判不清 = unknown。
+// 禁止从自由报文文本猜测作用域。
+func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) QuotaExhaustionScope {
+	switch status {
+	case 402:
+		if accountIsKiraBaseURL(account) {
+			return QuotaScopeAccount // kira+402=account（到达证据）
+		}
+		return QuotaScopeModel // 非 Kira 平台 402 = model/path
+	case 502, 504:
+		if accountIsKiraBaseURL(account) {
+			// kira+502/504：仅当新鲜 VND≤0 三态佐证成立才 account，否则 unknown。
+			if ResolveKiraVNDBalanceState(account, now).IsExhausted() {
+				return QuotaScopeAccount
+			}
+			return QuotaScopeUnknown
+		}
+		return QuotaScopeUnknown
+	case 429:
+		return QuotaScopeModel // 429 不触发账号级权威冻结
+	default:
+		return QuotaScopeUnknown
+	}
+}
+
 // cnQuotaLifecycleState extra 持久化的状态机状态记录。
 type cnQuotaLifecycleState struct {
 	State            string `json:"state"`
 	RecoveryAt       string `json:"recovery_at,omitempty"`       // 空 = 恢复时间未知
 	RecoverySource   string `json:"recovery_source,omitempty"`   // upstream / snapshot / unknown
+	ProbeDueAt       string `json:"probe_due_at,omitempty"`      // 恢复探针资格到期（§3.3 R19-F4 迁移表；持久化，重启不丢）
 	LastProbeAt      string `json:"last_probe_at,omitempty"`     // RFC3339
 	LastProbeOutcome string `json:"last_probe_outcome,omitempty"` // exhausted / uncertain / recovered
 	UpdatedAt        string `json:"updated_at"`
 }
 
-// probeDue 报告本账号是否到期需要确认探针：恢复时间已知且已到 → 探；
-// 恢复时间未知（或 recovery_at 损坏）→ 按 5 分钟节距兜底循环（L3/L4）。
+// probeDue 报告本账号是否到期需要确认探针：优先看持久化的 probe_due_at 资格字段
+// （§3.3 R19-F4 迁移表；未知/损坏按 5 分钟兜底循环）；其次看恢复时间（已知且已到 →
+// 探；未知或损坏 → 按 5 分钟节距兜底，L3/L4）。
 func (st *cnQuotaLifecycleState) probeDue(now time.Time, interval time.Duration) bool {
 	if st == nil {
 		return false
+	}
+	if st.ProbeDueAt != "" {
+		if t, err := time.Parse(time.RFC3339, st.ProbeDueAt); err == nil {
+			return !t.After(now)
+		}
+		// probe_due_at 损坏按未知处理，落入 5 分钟兜底循环。
 	}
 	if st.RecoveryAt != "" {
 		if t, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil {
@@ -257,11 +330,34 @@ func (s *CNQuotaLifecycleService) sweepOnce() {
 
 // --- 响应式入口（D-QL-002 接线） ---
 
-// OnUpstreamQuotaExhausted 处理上游 402/429 额度耗尽信号：先做一次确认探针，
-// 属实则停调至官方恢复时间并 fire 告警；探测不确定则失败关闭（不动现状态）、
-// fire 告警并进入 5 分钟确认循环；探针成功视为瞬时信号，保持现状。
-// 非 TH/Kira 账号不在本状态机管辖内，直接返回 nil。
+// OnUpstreamQuotaExhausted 处理上游 402/429 额度耗尽信号（既有兼容签名，派生默认
+// 作用域后转交结构化入口 OnUpstreamQuotaExhaustedScoped）。非 TH/Kira 账号不在本
+// 状态机管辖内，直接返回 nil。
+//
+// 默认作用域派生：Kira 账号 → account（kira+402 到达证据），其余 → model/path
+// （探针确认语义，既有行为）。结构化信号应由响应式入口（ratelimit_cn_providers.go）
+// 经 ClassifyQuotaExhaustionScope 显式生成并通过 Scoped 入口透传。
 func (s *CNQuotaLifecycleService) OnUpstreamQuotaExhausted(ctx context.Context, account *Account, upstreamMsg string) error {
+	scope := QuotaScopeModel
+	if accountIsKiraBaseURL(account) {
+		scope = QuotaScopeAccount
+	}
+	signal := QuotaExhaustionSignal{Status: 0, Scope: scope, Platform: account.Platform, Msg: upstreamMsg}
+	return s.OnUpstreamQuotaExhaustedScoped(ctx, account, upstreamMsg, signal)
+}
+
+// OnUpstreamQuotaExhaustedScoped 结构化作用域信号入口（方案 §4 F2 / §3.2 / §3.3
+// R19-F4）：消费结构化 {status, scope, platform} 信号，按 Kira 402×三态裁决表执行。
+//
+// 裁决：
+//   - scope=unknown → 不做整号转换（不冻结、不改账号级状态，维持维度级/响应式语义）。
+//   - scope=account（如 kira+402 到达证据）→ 402 权威冻结：独立成立冻结（三态裁决表
+//     三行全冻结），余额三态只管辖恢复时机（probe_due_at 迁移表）；不占用 403 链的
+//     http_403_recovery 键（本卡不实现）。
+//   - scope=model/path → 维持既有探针确认语义（TH 等非 Kira 平台既有行为）：仅当确认
+//     探针 Exhausted 才冻结，Recovered/Uncertain 维持现状（失败关闭/瞬时信号）。
+//   - 不变式（§3.1）：unknown 永不单独导致冻结或跳过。
+func (s *CNQuotaLifecycleService) OnUpstreamQuotaExhaustedScoped(ctx context.Context, account *Account, upstreamMsg string, signal QuotaExhaustionSignal) error {
 	if s == nil || s.accountRepo == nil {
 		return errors.New("cn quota lifecycle service is not configured")
 	}
@@ -272,7 +368,17 @@ func (s *CNQuotaLifecycleService) OnUpstreamQuotaExhausted(ctx context.Context, 
 		return nil
 	}
 	now := s.now()
+	// unknown 作用域：不做整号转换（不冻结、不改账号级状态）。
+	if signal.Scope == QuotaScopeUnknown {
+		fmt.Printf("[CNQuotaLifecycle] account=%d quota-exhausted signal scope=unknown, no whole-account conversion\n", account.ID)
+		return nil
+	}
 	outcome, perr := s.runConfirmationProbe(ctx, account)
+	if signal.Scope == QuotaScopeAccount {
+		// 402 权威冻结（三态裁决表三行全冻结，独立于确认探针结果）。
+		return s.confirmExhaustedAuthoritative(ctx, account, upstreamMsg, signal, now, outcome, perr)
+	}
+	// model/path：既有探针确认语义。
 	switch outcome {
 	case quotaProbeRecovered:
 		// 确认探针成功：瞬时信号（上游当前可用），不停调不告警，保持现状。
@@ -319,6 +425,78 @@ func (s *CNQuotaLifecycleService) confirmExhausted(ctx context.Context, account 
 	fmt.Printf("[CNQuotaLifecycle] account=%d quota exhausted confirmed, parked until=%s source=%s\n",
 		account.ID, until.UTC().Format(time.RFC3339), source)
 	return nil
+}
+
+// confirmExhaustedAuthoritative 402 权威冻结（方案 §3.2 / §3.3 R19-F4）：账号级 402
+// 独立成立冻结——三态裁决表三行（fresh≤0 / fresh>0 / unknown）全冻结，余额三态只管辖
+// 恢复时机。除既有 exhausted 落库外，额外：
+//  1) reason 标记账号级 402 来源（cnQuotaExhaustedReason402Account 后缀），与维度耗尽
+//     冻结区分；该标记是 F4 受控缩短的归属依据，也是恢复门控的识别依据。
+//  2) 持久化 probe_due_at 资格字段（重启不丢），按 §3.3 R19-F4 迁移表取值：
+//     fresh>0 → 立即 due（下一轮 sweep 探测——余额事实变化提示可能充值）；
+//     unknown / 仍耗尽 → 账号每日 reset_at 兜底 due（Kira 每日重置 / TH free-tier
+//     重置）；该字段仅由 lifecycle 域内写，sweep 候选条件覆盖（账号已 park，天然在
+//     ListTempUnschedulableAccounts 候选内，C0 ② 结论，无需扩展查询）。
+// 不占用 403 链的 http_403_recovery 键（本卡根本不实现）。
+func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Context, account *Account, upstreamMsg string, signal QuotaExhaustionSignal, now time.Time, outcome quotaProbeOutcome, probeErr error) error {
+	recoveryAt, source, known := s.resolveRecoveryTime(account, upstreamMsg, now)
+	until := recoveryAt
+	if !known || !until.After(now) {
+		until = now.Add(quotaLifecycleUnknownRecoveryPlaceholder)
+		source = cnQuotaRecoverySourceUnknown
+		known = false
+	}
+	reason := cnQuotaExhaustedReason(upstreamMsg, known, recoveryAt, source) + " [" + cnQuotaExhaustedReason402Account + "]"
+	if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); err != nil {
+		return fmt.Errorf("cn quota lifecycle park account %d: %w", account.ID, err)
+	}
+	// probe_due_at 迁移表（§3.3 R19-F4）：以余额三态管辖恢复探针节奏。
+	probeDueAt := s.resolveProbeDueAt(account, signal, now)
+	s.persistLifecycleState(ctx, account.ID, &cnQuotaLifecycleState{
+		State:            cnQuotaLifecycleStateExhausted,
+		RecoveryAt:       cnQuotaRFC3339OrEmpty(recoveryAt, known),
+		RecoverySource:   source,
+		ProbeDueAt:       cnQuotaRFC3339OrEmpty(probeDueAt, true),
+		LastProbeAt:      now.UTC().Format(time.RFC3339),
+		LastProbeOutcome: probeOutcomeName(outcome),
+		UpdatedAt:        now.UTC().Format(time.RFC3339),
+	})
+	s.convergeTHStockRecovery(ctx, account)
+	s.untrack(account.ID)
+	s.ensureQuotaAlertFiring(ctx, account, upstreamMsg, reason)
+	fmt.Printf("[CNQuotaLifecycle] account=%d 402-account-authoritative freeze, parked until=%s source=%s probe_due=%s\n",
+		account.ID, until.UTC().Format(time.RFC3339), source, cnQuotaRFC3339OrEmpty(probeDueAt, true))
+	return nil
+}
+
+// resolveProbeDueAt 按 §3.3 R19-F4 迁移表计算恢复探针资格到期：
+//   - 余额 fresh>0 → 立即 due（now，下一轮 sweep 即探测——充值提示）；
+//   - 余额 unknown / fresh≤0（仍耗尽）→ 账号每日 reset_at 兜底 due（Kira 每日重置
+//     / TH free-tier 重置），避免对未充值账号无限周期探测。
+func (s *CNQuotaLifecycleService) resolveProbeDueAt(account *Account, signal QuotaExhaustionSignal, now time.Time) time.Time {
+	if vnd := ResolveKiraVNDBalanceState(account, now); vnd.IsFresh() && vnd.Value > 0 {
+		return now // fresh>0 → 立即 due
+	}
+	// unknown / 仍耗尽：每日 reset_at 兜底。
+	if accountIsKiraBaseURL(account) {
+		return kiraNextDailyReset(now)
+	}
+	if snap, ok := TokenHarborPassSnapshotFromExtra(account); ok && snap.ResetAt != nil && snap.ResetAt.After(now) {
+		return *snap.ResetAt
+	}
+	return now // 兜底：本轮即探（无权威重置点则由既有 5 分钟循环推进）
+}
+
+// probeOutcomeName 把 quotaProbeOutcome 映射为可持久化文本。
+func probeOutcomeName(outcome quotaProbeOutcome) string {
+	switch outcome {
+	case quotaProbeExhausted:
+		return cnQuotaLifecycleProbeExhausted
+	case quotaProbeRecovered:
+		return cnQuotaLifecycleProbeRecovered
+	default:
+		return cnQuotaLifecycleProbeUncertain
+	}
 }
 
 // enterUncertain 探测不确定（网络/5xx/鉴权/解析失败）：失败关闭——不动现状态
@@ -448,11 +626,30 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 			source = cnQuotaRecoverySourceUnknown
 			known = false
 		}
-		until := state.parkedUntil()
-		if until == nil || until.Before(now) || recoveryAt.After(*until) {
-			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, recoveryAt,
-				cnQuotaExhaustedReason("", known, recoveryAt, source)); err != nil {
-				return fmt.Errorf("cn quota lifecycle re-park account %d: %w", account.ID, err)
+		// 受控缩短前提（方案 F4）：仅 lifecycle 域内 reason 拥有的 until 允许被本状态机
+		// 续停/改写；他因暂停（余额阈值、muse 用量等）的 until 不动。空 reason 表示当前
+		// 无外因暂停（本账号由生命周期状态机接管/续停），lifecycle 可建立/维持暂停。
+		// 探测资格 floor（st.RecoveryAt）始终按 resolveRecoveryTime 收敛至 reset_at。
+		if account.TempUnschedulableReason == "" || isLifecycleOwnedReason(account.TempUnschedulableReason) {
+			until := state.parkedUntil()
+			// F4 受控缩短（派发单 C1-a-r3 / 方案 §4 F4）：lifecycle 拥有该 until 且
+			// 账号级 until 晚于官方 reset_at（矛盾第三形态）时，缩短（而非延长）至
+			// reset_at，使过度暂停收敛；非 lifecycle 拥有的 until 与「until<=reset_at
+			// 已收敛」两种情形走下方只延长/新建 re-park 守卫。
+			if isLifecycleOwnedReason(account.TempUnschedulableReason) &&
+				account.TempUnschedulableUntil != nil &&
+				account.TempUnschedulableUntil.After(recoveryAt) {
+				if sh, ok := s.accountRepo.(tempUnschedulableShortener); ok {
+					if _, err := sh.ShortenTempUnschedulableIfOwned(ctx, account.ID, recoveryAt,
+						cnQuotaExhaustedReasonPrefix); err != nil {
+						return fmt.Errorf("cn quota lifecycle shorten account %d: %w", account.ID, err)
+					}
+				}
+			} else if until == nil || until.Before(now) || recoveryAt.After(*until) {
+				if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, recoveryAt,
+					cnQuotaExhaustedReason("", known, recoveryAt, source)); err != nil {
+					return fmt.Errorf("cn quota lifecycle re-park account %d: %w", account.ID, err)
+				}
 			}
 		}
 		s.persistLifecycleState(ctx, account.ID, &cnQuotaLifecycleState{
@@ -507,21 +704,52 @@ func (s *CNQuotaLifecycleService) sweepTHResidualRecoveryDue(account *Account, s
 	if cnQuotaLifecycleProviderOf(account) != cnQuotaLifecycleProviderTokenHarbor {
 		return false
 	}
-	if st.RecoveryAt == "" || st.RecoverySource != cnQuotaRecoverySourceSnapshot {
+	if st.RecoverySource != cnQuotaRecoverySourceSnapshot {
 		return false
 	}
-	cur, err := time.Parse(time.RFC3339, st.RecoveryAt)
-	if err != nil || !cur.After(now) {
+	// F4 受控缩短前提（派发单 C1-a-r3）：仅 lifecycle 域拥有的 until 才纳入矛盾判定
+	//（缩短/续停）；他因（余额阈值、muse 用量窗口等）暂停的 until 不被 lifecycle
+	// 动，保持既有负例语义不变（矛盾门直接返回 false，不触发探针/缩短）。
+	if !isLifecycleOwnedReason(account.TempUnschedulableReason) {
+		return false
+	}
+	// 读侧矛盾判定改比较账号级 temp_unschedulable_until vs 快照 reset_at（方案 F4）：
+	// 账号级 until 是调度实际执行的暂停到期点（source of truth），替代 lifecycle
+	// 内部 recovery_at 的镜像——两者在 confirmExhausted 写入时同源，但账号级 until
+	// 是权威暂停判定；若二者因任何时序偏差，应以账号级为准，避免 stale 镜像误判。
+	if account.TempUnschedulableUntil == nil || !account.TempUnschedulableUntil.After(now) {
 		return false
 	}
 	snap, ok := TokenHarborPassSnapshotFromExtra(account)
-	// pe=true 触发第一/二形态（reset_at 缺失/过期）；pe=false 不触发的是第一/二
-	// 形态（无矛盾证据）；第三形态（停调晚于官方 reset_at，无论官方 reset_at 在
-	// 未来还是已过期——过期时矛盾更直接）以时间矛盾独立触发
-	//（生产实证 2026-10-08 第二轮：4 账号官方已恢复 pe=false 但停调挂旧口径
-	// 11-06，探针 recovered 即清停调）。
-	return ok && (snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now)) ||
-		(snap.ResetAt != nil && cur.After(*snap.ResetAt)))
+	// 快照缺失：无矛盾证据，保守不扩语义（fail-closed）。
+	if !ok {
+		return false
+	}
+	// 三形态矛盾：
+	//   - 第一/二形态（pe=true，reset_at 缺失/已过期）：仍耗尽但无未来恢复点；
+	//   - 第三形态（账号级 until 晚于官方 reset_at，无论官方 reset_at 在未来还是
+	//     已过期——过期时矛盾更直接）：过度暂停（旧 renewsAt 口径存量），以时间
+	//     矛盾独立触发（pe 值不作前提，生产实证 2026-10-08 第二轮：4 账号官方已
+	//     恢复 pe=false 但停调挂旧口径 11-06，探针 recovered 即清停调）。
+	return snap.PlanExhausted && (snap.ResetAt == nil || !snap.ResetAt.After(now)) ||
+		(snap.ResetAt != nil && account.TempUnschedulableUntil.After(*snap.ResetAt))
+}
+
+// isLifecycleOwnedReason 判定账号级 temp_unschedulable_reason 是否由本生命周期状态机
+// 域拥有（方案 F4 受控缩短前提）：仅 lifecycle 写入的 reason（前缀
+// cnQuotaExhaustedReasonPrefix，含 402 权威冻结后缀变体）允许被 lifecycle 改写/续停/
+// 缩短；他因（余额阈值、muse 用量窗口等）暂停的 until 不被 lifecycle 动。
+func isLifecycleOwnedReason(reason string) bool {
+	return strings.HasPrefix(reason, cnQuotaExhaustedReasonPrefix)
+}
+
+// tempUnschedulableShortener 是 F4 受控缩短存储原语的窄面（方案 §4 F4 / 派发单
+// C1-a-r3）。不扩大 AccountRepository 通用接口（避免波及其它消费方桩），由本服务
+// 在调用点经 accountRepo 类型断言消费；生产 accountRepository 与测试 fake 均实现之。
+type tempUnschedulableShortener interface {
+	// ShortenTempUnschedulableIfOwned 当且仅当 until>newUntil 且 reason 以
+	// ownedReasonPrefix 前缀开头时，把 until 缩短至 newUntil；返回是否实际缩短。
+	ShortenTempUnschedulableIfOwned(ctx context.Context, accountID int64, newUntil time.Time, ownedReasonPrefix string) (bool, error)
 }
 
 // parkedUntil 从持久化恢复时间近似还原当前停调到期点（用于「仍耗尽」续停的
@@ -593,10 +821,25 @@ func (s *CNQuotaLifecycleService) probeKiraExhaustion(ctx context.Context, accou
 	if limit <= 0 {
 		return quotaProbeUncertain, errors.New("kira usage probe: no daily limit denominator")
 	}
-	if used < limit {
-		return quotaProbeRecovered, nil
+	// F1（方案 §4 F1 R5-F1）：消费余额三态契约——只有成功取得且新鲜（fresh）的付费
+	// VND 余额 ≤0 才产生 Exhausted 结论；stale/missing/error = unknown，unknown 不
+	// 产生任何耗尽结论（不冻结、不写入 exhausted 标记）。修复 D1：VND=0 且免费窗口
+	// 有余量时，现状会凭 free 窗口 used<limit 反证 Recovered → 永不 park。
+	vnd := ResolveKiraVNDBalanceState(account, s.now())
+	if used >= limit {
+		// 免费池确认耗尽 → Exhausted（维度耗尽冻结，余额观察可直接恢复）。
+		return quotaProbeExhausted, nil
 	}
-	return quotaProbeExhausted, nil
+	// 免费池有余量：仅当付费 VND 新鲜且 ≤0 才判 Exhausted（D1 修复）；VND unknown
+	//（无新鲜证据）不得凭免费窗口反证恢复 → 失败关闭（Uncertain），既防误放行也防
+	// 误停；VND fresh>0 时免费池有余量 ⇒ 可服务 ⇒ Recovered。
+	if vnd.IsExhausted() {
+		return quotaProbeExhausted, nil
+	}
+	if vnd.IsUnknown() {
+		return quotaProbeUncertain, errors.New("kira usage probe: free pool has headroom but VND balance unknown (no fresh evidence)")
+	}
+	return quotaProbeRecovered, nil
 }
 
 // probeTokenHarborExhaustion TH 确认探针（§4.4，请求形状收编自
@@ -877,6 +1120,7 @@ func (s *CNQuotaLifecycleService) persistLifecycleState(ctx context.Context, acc
 		"state":              st.State,
 		"recovery_at":        st.RecoveryAt,
 		"recovery_source":    st.RecoverySource,
+		"probe_due_at":       st.ProbeDueAt,
 		"last_probe_at":      st.LastProbeAt,
 		"last_probe_outcome": st.LastProbeOutcome,
 		"updated_at":         st.UpdatedAt,
