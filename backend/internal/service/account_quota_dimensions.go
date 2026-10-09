@@ -18,8 +18,11 @@ package service
 //     任一他源时间替代（防 A 源陈旧与 B 源新鲜混合生成错误 confirmed）。
 //   - servable=false 只能由新鲜明确证据产生（Kira：新鲜 VND≤0）；数据缺失/过期
 //     永不产生 servable=false（只产生 unknown）。
-//   - 模型级免费档（model_rate_limits / tokenharbor_free_tier_exhausted）不进本
-//     解析：既有 model_rate_limits 门继续管，模型级维度不参与整号放行/跳过判定。
+//   - 模型级免费档（model_rate_limits / tokenharbor_free_tier_exhausted）经方案 §2.1
+//     纠偏（C3-r2）纳入解析：仅产出 scope=model 投影，经权威导出
+//     ActiveTokenHarborFreeTierScopes 判定"命中前缀且未到期"的条目；前缀/到期语义一律
+//     经该权威导出，本文件零字面复制（方案 §2.2 只消费不复制）。模型级维度不参与 F6
+//     调度门整号放行/跳过判定（门只消费 scope=account）。
 //   - 无任何额度快照的账号族（Anthropic OAuth/纯 API key/Bedrock 等）⇒ 空列表；
 //     不做探测、不造默认值。
 //
@@ -43,7 +46,8 @@ type QuotaDimensionScope string
 const (
 	// QuotaDimensionScopeAccount 账号级维度：F6 调度门唯一消费的作用域。
 	QuotaDimensionScopeAccount QuotaDimensionScope = "account"
-	// QuotaDimensionScopeModel 模型级维度：归既有 model_rate_limits 语义，不进本门。
+	// QuotaDimensionScopeModel 模型级维度：C3-r2 经权威导出产出作投影，归既有
+	// model_rate_limits 语义，不进 F6 调度门（门只消费 scope=account）。
 	QuotaDimensionScopeModel QuotaDimensionScope = "model"
 	// QuotaDimensionScopePath 路径级维度：归既有语义，不进本门。
 	QuotaDimensionScopePath QuotaDimensionScope = "path"
@@ -91,7 +95,7 @@ const (
 // servable 三态，reset_at 非 F6 判定输入故未纳入）。
 type QuotaDimension struct {
 	Kind QuotaDimensionKind
-	// Scope 作用域；本卡解析产出全为 account 级（模型级维度不进本解析）。
+	// Scope 作用域；account 级维度由 F6 门消费，model 级维度（C3-r2）仅作投影、不进本门。
 	Scope  QuotaDimensionScope
 	Target string
 	// Status confirmed 状态；QuotaDimensionUnknown 表示存在但数值不可知。
@@ -204,6 +208,24 @@ func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaD
 			Status:   QuotaDimensionUnknown,
 			Servable: QuotaServableUnknown,
 			Source:   TokenHarborUsageSnapshotExtraKey,
+		})
+	}
+	// 模型级免费档投影（方案 §2.1 纠偏，C3-r2）：经权威导出
+	// ActiveTokenHarborFreeTierScopes 判定"命中 tokenharbor_free_tier_exhausted 前缀且未
+	// 到期"的 model_rate_limits 条目，每条产出一个 scope=model 维度。前缀/到期语义一律经
+	// 该权威导出，本文件不复制任何字面量与到期规则（方案 §2.2 只消费不复制）。scope=model
+	// 维度不进 F6 调度门（EvaluateAccountQuotaDimensionGate 已按 scope 过滤）。
+	for _, scope := range ActiveTokenHarborFreeTierScopes(account.Extra, now) {
+		dims = append(dims, QuotaDimension{
+			Kind:     QuotaDimensionKindFree,
+			Scope:    QuotaDimensionScopeModel,
+			Target:   scope,
+			Status:   QuotaDimensionExhausted,
+			Servable: QuotaServableUnknown,
+			Source:   modelRateLimitsKey,
+			// 权威导出仅返回 scope 字符串、未暴露条目时间戳，故 ObservedAt 取零值
+			// （方案 §2.1：如权威导出无时间语义则零值）。
+			ObservedAt: time.Time{},
 		})
 	}
 	return dims

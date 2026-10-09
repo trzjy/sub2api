@@ -83,6 +83,28 @@ func qdFindDim(dims []QuotaDimension, kind QuotaDimensionKind, source string) *Q
 	return nil
 }
 
+// qdFindModelDim 按 scope=model 且 target=模型ID 查找模型级投影维度。
+func qdFindModelDim(dims []QuotaDimension, target string) *QuotaDimension {
+	for i := range dims {
+		if dims[i].Scope == QuotaDimensionScopeModel && dims[i].Target == target {
+			return &dims[i]
+		}
+	}
+	return nil
+}
+
+// qdTHModelLimitEntry 构造一条 model_rate_limits 条目（reason 复用同包权威前缀
+// tokenHarborFreeTierReasonPrefix，不复制字面量）；resetAt 与 precise 控制是否命中
+// ActiveTokenHarborFreeTierScopes 的未到期判定。
+func qdTHModelLimitEntry(resetAt time.Time, precise bool) map[string]any {
+	return map[string]any{
+		"rate_limited_at":     resetAt.Add(-1 * time.Hour).UTC().Format(time.RFC3339),
+		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
+		"reason":              tokenHarborFreeTierReasonPrefix + "_exhausted",
+		"precise_reset":       precise,
+	}
+}
+
 // ---- §3.1 八组合 ----
 
 func TestQuotaDimensionGateEightCombinations(t *testing.T) {
@@ -385,5 +407,117 @@ func TestQuotaDimensionGateC6TokenHarborWalletThreeStates(t *testing.T) {
 		require.NotNil(t, paid)
 		require.Equal(t, QuotaDimensionUnknown, paid.Status)
 		require.Equal(t, QuotaDimensionGateSkip, EvaluateAccountQuotaDimensionGate(dims))
+	})
+}
+
+// ---- C3-r2：模型级投影 + 门隔离序列化（方案 §2.1 硬要求） ----
+
+// TestQuotaDimensionModelScopeProjection 锁定解析函数产出 scope=model 投影的契约。
+func TestQuotaDimensionModelScopeProjection(t *testing.T) {
+	const modelID = "glm-test"
+
+	t.Run("命中条目产出（target=模型ID、status=exhausted）", func(t *testing.T) {
+		account := qdTokenHarborAccount()
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(time.Hour), true), // 未到期 → 命中
+		}
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		md := qdFindModelDim(dims, modelID)
+		require.NotNil(t, md, "命中前缀且未到期的条目应产出模型级维度")
+		require.Equal(t, QuotaDimensionScopeModel, md.Scope)
+		require.Equal(t, QuotaDimensionKindFree, md.Kind)
+		require.Equal(t, modelID, md.Target)
+		require.Equal(t, QuotaDimensionExhausted, md.Status, "模型级免费档命中即 exhausted（confirmed）")
+		require.Equal(t, QuotaServableUnknown, md.Servable)
+		require.Equal(t, modelRateLimitsKey, md.Source, "Source=model_rate_limits 键名")
+		require.True(t, md.ObservedAt.IsZero(), "权威导出未暴露时间戳 ⇒ 零值")
+	})
+
+	t.Run("到期条目不产出", func(t *testing.T) {
+		account := qdTokenHarborAccount()
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(-time.Hour), true), // 已到期 → 剔除
+		}
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		require.Nil(t, qdFindModelDim(dims, modelID), "到期条目不产出任何维度")
+	})
+
+	t.Run("无命中条目 → 零模型级投影", func(t *testing.T) {
+		account := qdTokenHarborAccount()
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(time.Hour), true),
+		}
+		// 前缀不符 → ActiveTokenHarborFreeTierScopes 不返回该 scope。
+		entry := account.Extra[modelRateLimitsKey].(map[string]any)[modelID].(map[string]any)
+		entry["reason"] = "some_other_reason"
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		require.Nil(t, qdFindModelDim(dims, modelID))
+	})
+
+	t.Run("非 TH 账号不产出", func(t *testing.T) {
+		account := qdKiraAccount() // 非 TH 账号
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(time.Hour), true),
+		}
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		require.Nil(t, qdFindModelDim(dims, modelID), "非 TH 账号零模型级投影")
+	})
+
+	t.Run("TH 账号无 model_rate_limits → 零模型级投影（现状行为）", func(t *testing.T) {
+		dims := ResolveAccountQuotaDimensions(qdTokenHarborAccount(), qdBase)
+		for i := range dims {
+			require.NotEqual(t, QuotaDimensionScopeModel, dims[i].Scope)
+		}
+	})
+}
+
+// TestQuotaDimensionGateModelScopeIsolationSerialization 锁定"含 exhausted 模型级维度的
+// 账号 → 门判定仍由账号级维度单独决定"（方案 §2.1 隔离序列化硬要求）。
+func TestQuotaDimensionGateModelScopeIsolationSerialization(t *testing.T) {
+	const modelID = "glm-test"
+
+	t.Run("账号级全 unknown + 模型级 exhausted -> 放行", func(t *testing.T) {
+		account := qdTokenHarborAccount()
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(time.Hour), true), // 模型级 exhausted
+		}
+		// 账号级快照过期 ⇒ 免费维度 unknown（无 confirmed）。
+		account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+			"has_pass":              false,
+			"spend_after_allowance": false,
+			"fetched_at":            qdStaleRFC3339(qdBase),
+		}
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		require.NotNil(t, qdFindModelDim(dims, modelID), "模型级 exhausted 维度应存在")
+		require.Equal(t, QuotaDimensionGateAllow, EvaluateAccountQuotaDimensionGate(dims),
+			"账号级全 unknown ⇒ 放行，模型级 exhausted 不改变结果")
+	})
+
+	t.Run("账号级 remaining + 模型级 exhausted -> 放行", func(t *testing.T) {
+		account := qdTokenHarborAccount()
+		account.Extra[modelRateLimitsKey] = map[string]any{
+			modelID: qdTHModelLimitEntry(qdBase.Add(time.Hour), true), // 模型级 exhausted
+		}
+		// 账号级免费维度新鲜且有剩余（exhausted=false）。
+		account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+			"has_pass":              false,
+			"exhausted":             false,
+			"spend_after_allowance": false,
+			"fetched_at":            qdBase.Format(time.RFC3339),
+		}
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		require.NotNil(t, qdFindModelDim(dims, modelID))
+		require.Equal(t, QuotaDimensionGateAllow, EvaluateAccountQuotaDimensionGate(dims),
+			"账号级有剩余 ⇒ 放行，模型级 exhausted 不干扰")
+	})
+
+	t.Run("账号级 exhausted + 模型级 remaining -> 跳过（模型级 remaining 不救账号级）", func(t *testing.T) {
+		// 解析函数只产出模型级 exhausted 投影，故模型级 remaining 以构造维度呈现隔离语义。
+		dims := []QuotaDimension{
+			{Scope: QuotaDimensionScopeAccount, Status: QuotaDimensionExhausted},
+			{Scope: QuotaDimensionScopeModel, Target: modelID, Kind: QuotaDimensionKindFree, Status: QuotaDimensionRemaining},
+		}
+		require.Equal(t, QuotaDimensionGateSkip, EvaluateAccountQuotaDimensionGate(dims),
+			"账号级 exhausted 单独决定跳过；模型级 remaining 不救账号级")
 	})
 }
