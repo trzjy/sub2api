@@ -87,6 +87,93 @@ const postgresParameterBatchSize = 50000
 const codexFingerprintSeedCanonicalPattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 const codexFingerprintNilSeed = "00000000-0000-0000-0000-000000000000"
 
+// ---- F3 403 content-policy 恢复链 extra 键族（方案 §3.3 / R7-F3 / R15-F2 / R17-F3） ----
+//
+// HTTP403RecoveryExtraKey 是 F3 403 恢复链独占的状态 SSOT，经原子 UPDATE 写入/清理：
+// 恢复 sweep、401/402/429 转交、CAS 清理、重启续探全部只消费该键。JSON 形态：
+//
+//	{
+//	  "until":          "<RFC3339>",    // 官方恢复时间；无 until 冷却轮 = now + 既有 403 冷却常量
+//	  "generation":     <int64>,        // 每次状态写入分配的持久单调代际令牌（不可复用）
+//	  "reason":         "<string>",     // F3 状态原因（含 no-until 冷却轮标记）
+//	  "owner":          "f3_lifecycle", // 链所有者，CAS 条件之一
+//	  "state_revision": <int64>         // 写入时账号级 sched_state_revision 快照，CAS 条件之三
+//	}
+//
+// state_revision 与全局 extra.sched_state_revision 在同一写入语句内同点出生（同一 +1 表达式），
+// 故恒等；条件清理/转交以「键内 state_revision = 当前全局 sched_state_revision」为第三条 CAS
+// 条件（R18-F2）：任何他链替换账号 error/调度阻断状态都会使全局 revision 自增，从而令该条件
+// 失配、CAS 零写入——防止恢复探针清掉他链刚写入的状态。
+//
+// 字面值契约：internal/service 侧（C1-b②）按 tokenharbor 会话键先例逐字镜像；
+// 生产代码不跨包 import（service 依赖 repository 会形成循环，见 domain_constants 先例）。
+const (
+	// HTTP403RecoveryExtraKey 是 F3 恢复链独占的状态键名。
+	HTTP403RecoveryExtraKey = "http_403_recovery"
+	// HTTP403GenerationCounterExtraKey 是独立持久代际计数键：**不随** http_403_recovery
+	// 删除而删除（R17-F3）。2xx 恢复与 401/402/429 转交只删恢复记录、不删计数器，防止
+	// "清理后重新初始化" 造成代际复用。
+	HTTP403GenerationCounterExtraKey = "http_403_gen_counter"
+	// HTTP403RecoveryOwnerF3 是 F3 链固定所有者标识，CAS 条件之一。
+	HTTP403RecoveryOwnerF3 = "f3_lifecycle"
+	// HTTP403RecoveryTempUnschedulableReasonPrefix 是 F3 写入 temp_unschedulable 时给
+	// reason 加的所有权标记前缀（R15-F2 选择：reason 内带 F3 标记，与
+	// ShortenTempUnschedulableIfOwned 的 reason 前缀所有权判据同型）。CAS 清理/转交仅在该
+	// 前缀命中时清除 temp_unschedulable_until，非 F3 拥有的 until 不动。
+	HTTP403RecoveryTempUnschedulableReasonPrefix = "http_403_recovery_f3: "
+	// SchedStateRevisionExtraKey 是账号调度状态 revision 计数键（R19-F2）：全部会替换账号
+	// error/调度阻断状态的持久层写入原语在单语句内自增，供跨链并发检测；语义与 per-F3 的
+	// generation 不等同（revision = 账号级全局、generation = F3 链代际），不得合并。
+	SchedStateRevisionExtraKey = "sched_state_revision"
+)
+
+// schedStateRevisionNextValueExpr 返回「读取旧行 extra 的 sched_state_revision 并 +1」的
+// jsonb 值表达式（未落地）。供需要在**同一语句多处**写入同一新 revision 的场景复用（F3
+// 恢复键内 state_revision 记录 + 全局 sched_state_revision 同点出生）：UPDATE 的 SET 表达式
+// 统一以旧行取值，故两处重复该表达式得到同一新值。
+func schedStateRevisionNextValueExpr() string {
+	return "to_jsonb(COALESCE((extra->>'" + SchedStateRevisionExtraKey + "')::bigint, 0) + 1)"
+}
+
+// schedStateRevisionIncrementExpr 返回在单条 UPDATE 内自增 sched_state_revision 的
+// jsonb 表达式（引用 extra 列，使 revision 与其余字段写入同一语句原子生效）。
+func schedStateRevisionIncrementExpr() string {
+	path := "'{" + SchedStateRevisionExtraKey + "}'"
+	return "jsonb_set(COALESCE(extra, '{}'::jsonb), " + path + ", " +
+		schedStateRevisionNextValueExpr() + ", true)"
+}
+
+// http403GenerationCounterIncrementExpr 返回在单条 UPDATE 内自增持久代际计数键的 jsonb
+// 表达式；调用方以 RETURNING 读取自增后的新值（禁止读-改-写两步，R17-F3/R19-F1）。
+func http403GenerationCounterIncrementExpr() string {
+	path := "'{" + HTTP403GenerationCounterExtraKey + "}'"
+	return "jsonb_set(COALESCE(extra, '{}'::jsonb), " + path +
+		", to_jsonb(COALESCE((extra->>'" + HTTP403GenerationCounterExtraKey + "')::bigint, 0) + 1), true)"
+}
+
+// http403RemoveRecoveryWithRevisionExpr 返回「删除 http_403_recovery 键 + 自增
+// sched_state_revision」的合并 extra 表达式（单语句原子）。仅移除 F3 拥有的恢复键，
+// 不触碰独立代际计数键（R17-F3）。
+func http403RemoveRecoveryWithRevisionExpr() string {
+	return "jsonb_set((COALESCE(extra, '{}'::jsonb) - '" + HTTP403RecoveryExtraKey + "'), '{" +
+		SchedStateRevisionExtraKey + "}', " + schedStateRevisionNextValueExpr() + ", true)"
+}
+
+// http403MarkRecoveryWithRevisionExpr 返回 F3 首次写入的合并 extra 表达式（单语句原子）：
+// 合并恢复键负载 + 在恢复键内写入 state_revision 记录 + 自增全局 sched_state_revision。
+// payloadPlaceholder 为携带 {until,generation,reason,owner} 的 jsonb 参数占位符（如 "$5"）。
+//
+// 键内 state_revision 与全局 sched_state_revision 复用**同一 +1 表达式**：UPDATE 的 SET
+// 表达式统一以旧行取值，故二者在同一语句内同点出生、值恒等——正是 CAS 条件之三
+// （键内 state_revision = 当前全局 sched_state_revision）的比较前提（R18-F2/R19-F2）。
+func http403MarkRecoveryWithRevisionExpr(payloadPlaceholder string) string {
+	recoveryRevisionPath := "'{" + HTTP403RecoveryExtraKey + "," + SchedStateRevisionExtraKey + "}'"
+	globalPath := "'{" + SchedStateRevisionExtraKey + "}'"
+	next := schedStateRevisionNextValueExpr()
+	return "jsonb_set(jsonb_set(COALESCE(extra, '{}'::jsonb) || " + payloadPlaceholder + "::jsonb, " +
+		recoveryRevisionPath + ", " + next + ", true), " + globalPath + ", " + next + ", true)"
+}
+
 func codexFingerprintSeedValidSQL(extraExpr string) string {
 	value := "(" + extraExpr + " ->> 'codex_fingerprint_seed')"
 	return "(" + value + " ~ '" + codexFingerprintSeedCanonicalPattern + "' AND " + value + " <> '" + codexFingerprintNilSeed + "')"
@@ -1450,14 +1537,30 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 }
 
 func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg string) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetStatus(service.StatusError).
-		SetErrorMessage(errorMsg).
-		SetSchedulable(false).
-		Save(ctx)
+	// 单条原生 SQL（原为 ent Update）：除保持既有字段效果（status=error、
+	// error_message、schedulable=false、updated_at）外，同语句内自增
+	// sched_state_revision（R19-F2，全部会替换账号 error/调度阻断状态的持久层写入
+	// 原语统一维护）。WHERE 仅按 id（与既有 ent Update().Where(IDEQ(id)) 语义一致，
+	// 不额外引入 deleted_at 过滤），0 行时返回 ErrAccountNotFound（对齐 ent 的
+	// NotFoundError 语义）。
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $1,
+			error_message = $2,
+			schedulable = FALSE,
+			extra = `+schedStateRevisionIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $3
+	`, service.StatusError, errorMsg, id)
 	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue set error failed: account=%d err=%v", id, err)
@@ -1854,11 +1957,19 @@ func (r *accountRepository) syncSchedulerAccountSnapshots(ctx context.Context, a
 }
 
 func (r *accountRepository) ClearError(ctx context.Context, id int64) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetStatus(service.StatusActive).
-		SetErrorMessage("").
-		Save(ctx)
+	// 单条原生 SQL（原为 ent Update）：字段效果与既有 ent Update 逐列等价（status=active、
+	// error_message=''、updated_at=NOW()），并同语句内自增 sched_state_revision（R19-F2：
+	// ClearError 会替换账号 error/调度阻断状态，属"全部写入点"）。WHERE 仅按 id（与既有
+	// ent Update().Where(IDEQ(id)) 语义一致，不额外引入 deleted_at 过滤）；0 行不返回错误，
+	// 保持既有 ent Update 语义（不返回 NotFound）。
+	_, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $1,
+			error_message = '',
+			extra = `+schedStateRevisionIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $2
+	`, service.StatusActive, id)
 	if err != nil {
 		return err
 	}
@@ -2489,6 +2600,7 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 		UPDATE accounts
 		SET temp_unschedulable_until = $1,
 			temp_unschedulable_reason = $2,
+			extra = `+schedStateRevisionIncrementExpr()+`,
 			updated_at = NOW()
 		WHERE id = $3
 			AND deleted_at IS NULL
@@ -2605,6 +2717,7 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 		UPDATE accounts
 		SET temp_unschedulable_until = NULL,
 			temp_unschedulable_reason = NULL,
+			extra = `+schedStateRevisionIncrementExpr()+`,
 			updated_at = NOW()
 		WHERE id = $1
 			AND deleted_at IS NULL
@@ -2665,6 +2778,276 @@ func (r *accountRepository) ListTempUnschedulableAccounts(ctx context.Context, n
 	out := make([]*service.Account, 0, len(mapped))
 	for i := range mapped {
 		out = append(out, &mapped[i])
+	}
+	return out, nil
+}
+
+// ============================================================================
+// F3 403 content-policy 恢复链存储层原语（派发单 C1-b① / 方案 §3.3）。
+// 全部定义在 accountRepository 具体类型上（不加入 AccountRepository 大接口，承
+// C1-a-r3 ShortenTempUnschedulableIfOwned 先例），服务侧经窄面接口 + 类型断言消费
+// （C1-b②）。均为单语句/单事务原子边界，禁止读-改-写两步。
+// ============================================================================
+
+// AllocHTTP403Generation 原子分配 F3 代际令牌：单语句 `UPDATE ... RETURNING` 自增独立
+// 持久计数键 http_403_gen_counter 并返回新值（R17-F3/R19-F1，禁止读-改-写）。计数键独立
+// 于 http_403_recovery：2xx 恢复与转交清理只删恢复记录、不删计数器，防代际复用。
+func (r *accountRepository) AllocHTTP403Generation(ctx context.Context, accountID int64) (int64, error) {
+	if r.sql == nil {
+		return 0, errors.New("account repository SQL executor is not configured")
+	}
+	var generation int64
+	err := scanSingleRow(ctx, r.sql, `
+		UPDATE accounts
+		SET extra = `+http403GenerationCounterIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+		RETURNING (extra->>'`+HTTP403GenerationCounterExtraKey+`')::bigint
+	`, []any{accountID}, &generation)
+	if err != nil {
+		return 0, err
+	}
+	return generation, nil
+}
+
+// Mark403PausedWithRecovery 原子完成 F3 首次写入（R15-F1）：在**单条** UPDATE 内复刻 403
+// 三振升级链 SetError 的全部字段效果（status=error、error_message=errorMsg、
+// schedulable=false、updated_at），可选写 temp_unschedulable_until（含 F3 所有权标记
+// reason 前缀，R15-F2），并合并 http_403_recovery 状态键 + 自增 sched_state_revision。
+// 禁止"先冻结后补键"的两步写（防进程在部分写入后崩溃形成"已冻结但无 sweep 候选"）。
+//
+// 字段效果与 SetError 逐列一致（status / error_message / schedulable）；tempUnschedulable
+// 为 nil 时不触碰既有 temp_unschedulable_until（COALESCE 保留旧值）。
+func (r *accountRepository) Mark403PausedWithRecovery(
+	ctx context.Context,
+	accountID int64,
+	until time.Time,
+	generation int64,
+	reason string,
+	errorMsg string,
+	tempUnschedulable *time.Time,
+) error {
+	if r.sql == nil {
+		return errors.New("account repository SQL executor is not configured")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"until":      until.UTC().Format(time.RFC3339),
+		"generation": generation,
+		"reason":     reason,
+		"owner":      HTTP403RecoveryOwnerF3,
+	})
+	if err != nil {
+		return err
+	}
+	var tempUntil any
+	var tempUntilReason any
+	if tempUnschedulable != nil {
+		tempUntil = tempUnschedulable.UTC()
+		tempUntilReason = HTTP403RecoveryTempUnschedulableReasonPrefix + reason
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $1,
+			error_message = $2,
+			schedulable = FALSE,
+			temp_unschedulable_until = COALESCE($3, temp_unschedulable_until),
+			temp_unschedulable_reason = COALESCE($4, temp_unschedulable_reason),
+			extra = `+http403MarkRecoveryWithRevisionExpr("$5")+`,
+			updated_at = NOW()
+		WHERE id = $6
+			AND deleted_at IS NULL
+	`, service.StatusError, errorMsg, tempUntil, tempUntilReason, string(payload), accountID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue 403 paused recovery failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return nil
+}
+
+// ClearHTTP403RecoveryIfOwned CAS 条件清理（方案 §3.3 条件清理，R1-F4/R2-F3/R6-F2/R12-F1/R18-F2）：
+// 仅当 http_403_recovery.generation 与传入值匹配**且** owner=F3**且** 键内 state_revision 与当前
+// 全局 sched_state_revision 相等时，单条 UPDATE 内：删除 http_403_recovery 键、清除 error 元数据、
+// 恢复调度（复刻既有 ClearError/SetSchedulable(true) 字段效果：status=active、error_message=''、
+// schedulable=TRUE），并**按所有权标记条件**清除 F3 拥有的 temp_unschedulable_until（reason 前缀
+// 命中才清，R15-F2；非 F3 拥有的 until 不动），同语句自增 sched_state_revision。失配（任一条件
+// 不满足）→ 返回 false 且零写入。第三条 revision 条件使任何他链状态替换（其写入点自增全局
+// revision）令本次 CAS 失配，防止恢复探针清掉他链刚写入的 error/调度阻断状态。
+func (r *accountRepository) ClearHTTP403RecoveryIfOwned(ctx context.Context, accountID int64, generation int64) (bool, error) {
+	if r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $3,
+			error_message = '',
+			schedulable = TRUE,
+			temp_unschedulable_until = CASE
+				WHEN temp_unschedulable_reason LIKE $4 || '%' THEN NULL
+				ELSE temp_unschedulable_until END,
+			temp_unschedulable_reason = CASE
+				WHEN temp_unschedulable_reason LIKE $4 || '%' THEN NULL
+				ELSE temp_unschedulable_reason END,
+			extra = `+http403RemoveRecoveryWithRevisionExpr()+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'generation' = $2
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'owner' = $5
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'state_revision' = extra->>'`+SchedStateRevisionExtraKey+`'
+	`, accountID, strconv.FormatInt(generation, 10), service.StatusActive,
+		HTTP403RecoveryTempUnschedulableReasonPrefix, HTTP403RecoveryOwnerF3)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected <= 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear 403 recovery failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
+// HTTP403TransitionTarget 描述 F3 403 恢复链向其他链（401/402/429）原子转交时要写入的
+// 新暂停状态效果。签名由本卡自定（派发单 C1-b① item 5）。字段语义：
+//   - Status / ErrorMessage / Schedulable：无条件写入（新链暂停状态）；
+//   - TempUnschedulableUntil / TempUnschedulableReason：非 nil 时写入；为 nil 时若当前
+//     until 为 F3 拥有（reason 前缀命中）则清除，否则保留（R15-F2 所有权感知）。
+type HTTP403TransitionTarget struct {
+	Status                  string
+	ErrorMessage            string
+	Schedulable             bool
+	TempUnschedulableUntil  *time.Time
+	TempUnschedulableReason *string
+}
+
+// TransitionHTTP403RecoveryTo 原子转交（R7-F3）：同一单条 UPDATE 内写入新链暂停状态效果 +
+// 移除 http_403_recovery 元数据（旧 403 状态不得残留阻塞后续恢复）+ 自增 sched_state_revision；
+// CAS 条件与 ClearHTTP403RecoveryIfOwned 相同（generation + owner=F3 + 键内 state_revision =
+// 当前全局 sched_state_revision，R18-F2），失配返回 false 且零写入。
+func (r *accountRepository) TransitionHTTP403RecoveryTo(ctx context.Context, accountID int64, generation int64, target HTTP403TransitionTarget) (bool, error) {
+	if r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET status = $3,
+			error_message = $4,
+			schedulable = $5,
+			temp_unschedulable_until = CASE
+				WHEN $6::timestamptz IS NOT NULL THEN $6::timestamptz
+				WHEN temp_unschedulable_reason LIKE $9 || '%' THEN NULL
+				ELSE temp_unschedulable_until END,
+			temp_unschedulable_reason = CASE
+				WHEN $7::text IS NOT NULL THEN $7::text
+				WHEN temp_unschedulable_reason LIKE $9 || '%' THEN NULL
+				ELSE temp_unschedulable_reason END,
+			extra = `+http403RemoveRecoveryWithRevisionExpr()+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'generation' = $2
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'owner' = $8
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'state_revision' = extra->>'`+SchedStateRevisionExtraKey+`'
+	`, accountID, strconv.FormatInt(generation, 10), target.Status, target.ErrorMessage,
+		target.Schedulable, target.TempUnschedulableUntil, target.TempUnschedulableReason,
+		HTTP403RecoveryOwnerF3, HTTP403RecoveryTempUnschedulableReasonPrefix)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected <= 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue transition 403 recovery failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
+// ListHTTP403RecoveryDueAccounts F3 候选查询（方案 §4 F3 行 / R7-F2）：返回
+// http_403_recovery 非空且 until <= now 且未删除的账号，按 until 升序，limit 默认 200
+// （对齐 ListTempUnschedulableAccounts 惯例）。**不受 schedulable / HasError / 快照新鲜度
+// 过滤影响**——持有 F3 持久化状态的账号必须被 sweep 候选覆盖（D4 证据基线）。映射复用
+// accountsToService，返回值顺序与 SQL 的 until 升序一致。
+func (r *accountRepository) ListHTTP403RecoveryDueAccounts(ctx context.Context, now time.Time, limit int) ([]*service.Account, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if r.sql == nil {
+		return nil, errors.New("account repository SQL executor is not configured")
+	}
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT id
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND jsonb_typeof(extra->'`+HTTP403RecoveryExtraKey+`') = 'object'
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'until' IS NOT NULL
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'until' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$'
+			AND (extra->'`+HTTP403RecoveryExtraKey+`'->>'until')::timestamptz <= $1
+		ORDER BY (extra->'`+HTTP403RecoveryExtraKey+`'->>'until')::timestamptz ASC, id ASC
+		LIMIT $2
+	`, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []*service.Account{}, nil
+	}
+
+	entities, err := r.client.Account.Query().
+		Where(dbaccount.IDIn(ids...)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mapped, err := r.accountsToService(ctx, entities)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]service.Account, len(mapped))
+	for _, account := range mapped {
+		byID[account.ID] = account
+	}
+	out := make([]*service.Account, 0, len(ids))
+	for _, id := range ids {
+		if account, ok := byID[id]; ok {
+			acc := account
+			out = append(out, &acc)
+		}
 	}
 	return out, nil
 }
@@ -3063,10 +3446,17 @@ func (r *accountRepository) UpdateSessionWindowEnd(ctx context.Context, id int64
 }
 
 func (r *accountRepository) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetSchedulable(schedulable).
-		Save(ctx)
+	// 单条原生 SQL（原为 ent Update）：字段效果逐列等价（schedulable=$1、updated_at=NOW()），
+	// 并同语句内自增 sched_state_revision（R19-F2：SetSchedulable 会替换账号调度阻断状态，
+	// 属"全部写入点"）。WHERE 仅按 id（与既有 ent Update().Where(IDEQ(id)) 语义一致）；
+	// 0 行不返回错误，保持既有 ent Update 语义（不返回 NotFound）。
+	_, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET schedulable = $1,
+			extra = `+schedStateRevisionIncrementExpr()+`,
+			updated_at = NOW()
+		WHERE id = $2
+	`, schedulable, id)
 	if err != nil {
 		return err
 	}
