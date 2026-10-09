@@ -28,7 +28,7 @@ func TestAccountHandler_FreshnessPassthroughNoSignal(t *testing.T) {
 	// 空 repo：唯一状态写入口读面返回空条目（等价于无权威观测）。
 	rl := service.NewRateLimitService(&freshNilObsRepo{}, nil, nil, nil, nil)
 	// 注入冻结上界来源（> 基线）以验证管理端阈值与三维唯一公式同一计算结果。
-	rl.SetFreshnessBoundsProvider(stubFreshnessBounds{ub: 315 * time.Second})
+	rl.SetFreshnessBoundsProvider(stubFreshnessBounds{ub: 330 * time.Second})
 	h := &AccountHandler{rateLimitService: rl}
 
 	o, err := h.buildFreshnessObservation(context.Background(), 42, "gpt-4")
@@ -47,7 +47,7 @@ func TestAccountHandler_FreshnessPassthroughNoSignal(t *testing.T) {
 // 透传 dimension=account_level，阈值走账号级口径（与账号+模型同源公式）。
 func TestAccountHandler_FreshnessPassthroughAccountLevelDimension(t *testing.T) {
 	rl := service.NewRateLimitService(&freshNilObsRepo{}, nil, nil, nil, nil)
-	rl.SetFreshnessBoundsProvider(stubFreshnessBounds{ub: 315 * time.Second})
+	rl.SetFreshnessBoundsProvider(stubFreshnessBounds{ub: 330 * time.Second})
 	h := &AccountHandler{rateLimitService: rl}
 
 	o, err := h.buildFreshnessObservation(context.Background(), 42, service.TokenHarborAccountLevelScope)
