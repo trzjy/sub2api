@@ -202,7 +202,17 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	collect := func(platform string, accounts []Account) {
 		for i := range accounts {
 			account := &accounts[i]
-			if !account.IsActive() {
+			// F5 快照收集豁免（派发单 C4 / R19-F5 范围限定）：额度生命周期归属的
+			// 账号不因 status != active 被 :205 排除。按 C0 定位结论，F1 冻结
+			//（SetTempUnschedulable）不翻 status，现状已被收集（下方平台分支不查
+			// Schedulable/TempUnschedulableUntil），无需改码；唯一需要豁免的是
+			// F3 暂停类（status=error + schedulable=false，持 http_403_recovery
+			// 恢复记录）——豁免后继续按平台分支收集，由既有平台采集器刷新快照，
+			// 为 F3 恢复探针与三态余额提供新鲜数据。
+			//
+			// 硬限定：豁免仅覆盖 F3 键持有者一类。401 / breaker / transport /
+			// 手工停调等不持 F3 键的 error 账号照旧在此跳过，不放宽。
+			if !account.IsActive() && !accountHoldsHTTP403Recovery(account) {
 				continue
 			}
 			// 挂在国产平台下、base_url 指向官方 ollama.com 的账号由 Ollama Cloud
@@ -398,9 +408,27 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	}
 }
 
+// accountHoldsHTTP403Recovery 判定账号是否持有 F3 403 content-policy 恢复记录
+// （派发单 C4 / R19-F5）：即处于额度生命周期归属的 F3 暂停状态。
+//
+// 读侧复用同包 http403_recovery.go 的 http403RecoveryFromExtra（勿改该助手）——
+// 它要求 http_403_recovery 键存在、可解析且 until 非空才返回 ok。语义等价且更严格
+// 于"持有键"：键缺失/损坏（无法解析）一律返回 false、不豁免，维持既有 :205 排除，
+// 符合 R19-F5 豁免范围硬限定（失败关闭，不放宽到非 F3 账号）。
+//
+// 该判定只用于 runOnce 收集闸门豁免；不改变任何平台分支（TH/Kira/coding plan/
+// payg）既有语义。
+func accountHoldsHTTP403Recovery(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	_, ok := http403RecoveryFromExtra(account.Extra)
+	return ok
+}
+
 // thProbeBackoffUntilExtraKey A 卡契约键名：TH 探测退避截止（unix 秒，存于账号
 // Extra）。与 tokenharbor_pass_service.go / 额度耗尽状态机 A 卡字面值严格一致
-//（B 卡与 A 卡经此 extra 键名对接）。null/缺失/过期 = 未退避。
+// （B 卡与 A 卡经此 extra 键名对接）。null/缺失/过期 = 未退避。
 const thProbeBackoffUntilExtraKey = "th_probe_backoff_until"
 
 // shouldSkipTokenHarborCollect 判定 TH 账号是否跳过本轮收集（周期链收集期门控，
@@ -499,7 +527,7 @@ func (s *CNProviderBalanceCheckService) shouldSkipKiraCollect(now time.Time, acc
 }
 
 // kiraUsageSnapshotFetchedAt 从账号 Extra 读 kira_usage_snapshot.fetched_at
-//（RFC3339 字符串）。缺失/类型不符/解析失败返回零值（调用方据此视为"不过新"）。
+// （RFC3339 字符串）。缺失/类型不符/解析失败返回零值（调用方据此视为"不过新"）。
 func kiraUsageSnapshotFetchedAt(account *Account) time.Time {
 	if account == nil || account.Extra == nil {
 		return time.Time{}
