@@ -34,9 +34,9 @@ type RateLimitService struct {
 	opsRepo               OpsRepository
 	// cnQuotaLifecycle 额度耗尽状态机响应式入口（D-QL-002，可选依赖；
 	// CN 402/429 响应式信号经此移交停调语义，见 ratelimit_cn_providers.go）。
-	cnQuotaLifecycle      CNQuotaLifecycleEntry
-	usageCacheMu          sync.RWMutex
-	usageCache            map[int64]*geminiUsageCacheEntry
+	cnQuotaLifecycle CNQuotaLifecycleEntry
+	usageCacheMu     sync.RWMutex
+	usageCache       map[int64]*geminiUsageCacheEntry
 
 	// OpenAI Team 联动熔断的进程内去重：teamID → 去重窗口截止时间
 	openaiTeamLinkedMu     sync.Mutex
@@ -132,6 +132,17 @@ func (s *RateLimitService) SetOpenAIAPIKeyHealthCache(cache OpenAIAPIKeyHealthCa
 // SetOpenAI403CounterCache 设置 OpenAI 403 连续失败计数器（可选依赖）
 func (s *RateLimitService) SetOpenAI403CounterCache(cache OpenAI403CounterCache) {
 	s.openAI403CounterCache = cache
+}
+
+// OpenAI403CounterCache 只读暴露已注入的 403 连续失败计数缓存（供 wire 装配
+// ProvideCNQuotaLifecycleService 将其回注额度耗尽状态机，使 2xx 恢复能清零三振计数；
+// 方案 §3.3「2xx → 清 error 恢复并清零三振计数」在生产闭环生效）。未注入返回 nil
+// （调用方据此跳过清零，不影响恢复闭环）。
+func (s *RateLimitService) OpenAI403CounterCache() OpenAI403CounterCache {
+	if s == nil {
+		return nil
+	}
+	return s.openAI403CounterCache
 }
 
 // SetSettingService 设置系统设置服务（可选依赖）
@@ -1170,7 +1181,18 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 
 	if count >= openAI403DisableThreshold {
 		msg = fmt.Sprintf("%s | consecutive_403=%d/%d", msg, count, openAI403DisableThreshold)
-		s.handleAuthError(ctx, account, msg)
+
+		// F3 写点（派发单 C1-b② 4 / 方案 §3.3）：三振达阈值即进入 F3 403 恢复链接管，
+		// 由 cn_quota_lifecycle sweep 独家拥有恢复探测（不再走 handleAuthError 永久禁用）。
+		// repo 不支持 F3 窄面 → 能力降级回退 handleAuthError + Warn（不吞错）。
+		if f3Repo, ok := s.accountRepo.(http403RecoveryRepo); ok {
+			s.writeF3ThreeStrikeEntry(ctx, account, msg, upstreamMsg, responseBody, f3Repo)
+		} else {
+			slog.Warn("openai_403_f3_repo_unsupported",
+				"account_id", account.ID,
+				"reason", "accountRepo does not implement http403RecoveryRepo; falling back to handleAuthError (capability degradation)")
+			s.handleAuthError(ctx, account, msg)
+		}
 		return true
 	}
 
@@ -1191,6 +1213,43 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		"threshold", openAI403DisableThreshold,
 	)
 	return true
+}
+
+// writeF3ThreeStrikeEntry 三振达阈值时进入 F3 403 恢复链（派发单 C1-b② 4 / 方案 §3.3）：
+// 解析上游 403 报文的 paused-until——成功 → AllocHTTP403Generation + Mark403PausedWithRecovery
+// （until=解析值、tempUnschedulable=nil，恢复探测权独交 lifecycle sweep）；失败 → 同原语 +
+// until=now+10min 冷却循环（无 until 也须保持 ops 可见，入冷却轮，下轮 sweep 续探）。解析
+// 成功/失败均发 §7.1 事件。repo 原语失败 → 回退 handleAuthError（能力降级，不吞错）。
+func (s *RateLimitService) writeF3ThreeStrikeEntry(ctx context.Context, account *Account, msg, upstreamMsg string, responseBody []byte, f3Repo http403RecoveryRepo) {
+	generation, err := f3Repo.AllocHTTP403Generation(ctx, account.ID)
+	if err != nil {
+		slog.Warn("openai_403_f3_alloc_failed", "account_id", account.ID, "error", err)
+		s.handleAuthError(ctx, account, msg)
+		return
+	}
+	until, ok := ParseHTTP403PausedUntil(upstreamMsg, responseBody)
+	reason := "http_403_recovery three-strike entry"
+	if ok {
+		slog.Info(eventCNQuota403PausedUntilParsed,
+			"account_id", account.ID, "generation", generation, "until", until.UTC().Format(time.RFC3339))
+	} else {
+		until = time.Now().Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		reason = "http_403_recovery three-strike no-until cooldown"
+		slog.Info(eventCNQuota403PausedUntilParseFailed,
+			"account_id", account.ID, "generation", generation, "until", until.UTC().Format(time.RFC3339),
+			"reason", "403 at three-strike threshold had no parseable paused-until; entered cooldown loop")
+	}
+	// Mark403PausedWithRecovery 复刻 SetError 字段效果 + 合并 F3 恢复键（tempUnschedulable=nil，
+	// 由 lifecycle sweep 独家拥有恢复探测）。
+	if err := f3Repo.Mark403PausedWithRecovery(ctx, account.ID, until, generation, reason, msg, nil); err != nil {
+		slog.Warn("openai_403_f3_mark_failed", "account_id", account.ID, "error", err)
+		s.handleAuthError(ctx, account, msg)
+		return
+	}
+	if !ok {
+		// 无 until：冷却循环保持 ops 可见（sweep 续探；失败关闭不绕道既有错误链）。
+		s.notifyAccountSchedulingBlocked(account, until, "openai_403_f3_cooldown")
+	}
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误
@@ -1746,6 +1805,7 @@ func isTokenHarborUpstream(account *Account) bool {
 	}
 	return strings.Contains(base, "tokenharbor.ai")
 }
+
 // isTokenHarborFreeTierExhausted 报告上游 429 正文是否为免费档滚动额度用光。
 // 匹配词全部来自实据：用户生产报错全文（You've used this period's free
 // allowance. Your next rolling 7-day period starts on ... / paid model '...' /
@@ -3158,26 +3218,51 @@ func (s *RateLimitService) ApplyModelRateLimitObservation(ctx context.Context, a
 		if err != nil {
 			return err
 		}
-	// 严格更旧 → 整体 no-op。
-	if has && obs.EventTime.Before(lastEventAt) {
-		return nil
-	}
-	// tie_breaker 比较键固定 (事件时间, tie_breaker)：调用方未给（0）时由入口分配
-	// 单调递增入口顺序号 = rev+1，保证同刻碰撞确定性裁决、且与锁序/DB序/重放序无关。
-	// 注意：默认 0 不可直接当作字面 0 参与比较，否则会恒判更旧而错误 no-op 正常新观测。
-	effectiveTB := obs.TieBreaker
-	if effectiveTB == 0 {
-		effectiveTB = rev + 1
-	}
-	if has && obs.EventTime.Equal(lastEventAt) && effectiveTB <= rev {
-		return nil
-	}
-	newRev := effectiveTB
+		// 严格更旧 → 整体 no-op。
+		if has && obs.EventTime.Before(lastEventAt) {
+			return nil
+		}
+		// tie_breaker 比较键固定 (事件时间, tie_breaker)：调用方未给（0）时由入口分配
+		// 单调递增入口顺序号 = rev+1，保证同刻碰撞确定性裁决、且与锁序/DB序/重放序无关。
+		// 注意：默认 0 不可直接当作字面 0 参与比较，否则会恒判更旧而错误 no-op 正常新观测。
+		effectiveTB := obs.TieBreaker
+		if effectiveTB == 0 {
+			effectiveTB = rev + 1
+		}
+		if has && obs.EventTime.Equal(lastEventAt) && effectiveTB <= rev {
+			return nil
+		}
+		newRev := effectiveTB
 
-	switch obs.Outcome {
-	case ProbeOutcomeSuccess:
-		if obs.AccountLevel {
-			// 账号级成功：只记录 observed_at（无模型级条目可清除）。
+		switch obs.Outcome {
+		case ProbeOutcomeSuccess:
+			if obs.AccountLevel {
+				// 账号级成功：只记录 observed_at（无模型级条目可清除）。
+				entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
+				if err != nil {
+					return err
+				}
+				if entry == nil {
+					entry = map[string]any{}
+				}
+				entry[entryObservedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
+				// 账号级成功不存在模型级条目可清除，故 clear=false，仅写回条目并同时提交 meta。
+				// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
+				if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
+					return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, entry, false, obs.EventTime, newRev)
+				}); err != nil {
+					return err
+				}
+			} else {
+				// 模型级成功：幂等清除该 scope（条目清除与 meta 推进同一次提交，原子）。
+				// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
+				if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
+					return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, nil, true, obs.EventTime, newRev)
+				}); err != nil {
+					return err
+				}
+			}
+		case ProbeOutcomeFreeTier429:
 			entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
 			if err != nil {
 				return err
@@ -3185,61 +3270,36 @@ func (s *RateLimitService) ApplyModelRateLimitObservation(ctx context.Context, a
 			if entry == nil {
 				entry = map[string]any{}
 			}
+			// 确认仍受限：保留既有 reset_at/reason（不扩展），仅置 observed_at。
+			// 条目整体读-改-写，故 precise_reset（精确恢复信号标记）一并保留，不被清除。
+			if existing, ok := entry["rate_limit_reset_at"].(string); ok && strings.TrimSpace(existing) != "" {
+				// 保留既有
+			} else if !obs.ResetAt.IsZero() {
+				entry["rate_limit_reset_at"] = obs.ResetAt.UTC().Format(time.RFC3339Nano)
+			}
+			if existing, ok := entry["reason"].(string); ok && strings.TrimSpace(existing) != "" {
+				// 保留既有
+			} else if strings.TrimSpace(obs.Reason) != "" {
+				entry["reason"] = obs.Reason
+			}
 			entry[entryObservedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
-			// 账号级成功不存在模型级条目可清除，故 clear=false，仅写回条目并同时提交 meta。
-			// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
-			if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
-				return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, entry, false, obs.EventTime, newRev)
-			}); err != nil {
+			if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
+				return werr
+			}
+		case ProbeOutcomeUnclassified:
+			entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
+			if err != nil {
 				return err
 			}
-		} else {
-			// 模型级成功：幂等清除该 scope（条目清除与 meta 推进同一次提交，原子）。
-			// 与同维告警关闭收进同一 ent 事务（E20 #2）：任一步失败整体回滚。
-			if err := s.commitRecoveryAtomically(ctx, accountID, scope, obs.AccountLevel, func(txCtx context.Context) error {
-				return repo.CommitModelRateLimitObservation(txCtx, accountID, scope, nil, true, obs.EventTime, newRev)
-			}); err != nil {
-				return err
+			if entry == nil {
+				entry = map[string]any{}
+			}
+			entry[entryAttemptedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
+			if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
+				return werr
 			}
 		}
-	case ProbeOutcomeFreeTier429:
-		entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
-		if err != nil {
-			return err
-		}
-		if entry == nil {
-			entry = map[string]any{}
-		}
-		// 确认仍受限：保留既有 reset_at/reason（不扩展），仅置 observed_at。
-		// 条目整体读-改-写，故 precise_reset（精确恢复信号标记）一并保留，不被清除。
-		if existing, ok := entry["rate_limit_reset_at"].(string); ok && strings.TrimSpace(existing) != "" {
-			// 保留既有
-		} else if !obs.ResetAt.IsZero() {
-			entry["rate_limit_reset_at"] = obs.ResetAt.UTC().Format(time.RFC3339Nano)
-		}
-		if existing, ok := entry["reason"].(string); ok && strings.TrimSpace(existing) != "" {
-			// 保留既有
-		} else if strings.TrimSpace(obs.Reason) != "" {
-			entry["reason"] = obs.Reason
-		}
-		entry[entryObservedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
-		if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
-			return werr
-		}
-	case ProbeOutcomeUnclassified:
-		entry, err := repo.GetModelRateLimitEntry(ctx, accountID, scope)
-		if err != nil {
-			return err
-		}
-		if entry == nil {
-			entry = map[string]any{}
-		}
-		entry[entryAttemptedAtKey] = obs.EventTime.UTC().Format(time.RFC3339Nano)
-		if werr := repo.CommitModelRateLimitObservation(ctx, accountID, scope, entry, false, obs.EventTime, newRev); werr != nil {
-			return werr
-		}
-	}
-	return nil
+		return nil
 	})
 }
 

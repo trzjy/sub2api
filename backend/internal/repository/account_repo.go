@@ -2878,7 +2878,7 @@ func (r *accountRepository) Mark403PausedWithRecovery(
 // ClearHTTP403RecoveryIfOwned CAS 条件清理（方案 §3.3 条件清理，R1-F4/R2-F3/R6-F2/R12-F1/R18-F2）：
 // 仅当 http_403_recovery.generation 与传入值匹配**且** owner=F3**且** 键内 state_revision 与当前
 // 全局 sched_state_revision 相等时，单条 UPDATE 内：删除 http_403_recovery 键、清除 error 元数据、
-// 恢复调度（复刻既有 ClearError/SetSchedulable(true) 字段效果：status=active、error_message=''、
+// 恢复调度（复刻既有 ClearError/SetSchedulable(true) 字段效果：status=active、error_message=”、
 // schedulable=TRUE），并**按所有权标记条件**清除 F3 拥有的 temp_unschedulable_until（reason 前缀
 // 命中才清，R15-F2；非 F3 拥有的 until 不动），同语句自增 sched_state_revision。失配（任一条件
 // 不满足）→ 返回 false 且零写入。第三条 revision 条件使任何他链状态替换（其写入点自增全局
@@ -2924,24 +2924,22 @@ func (r *accountRepository) ClearHTTP403RecoveryIfOwned(ctx context.Context, acc
 	return true, nil
 }
 
-// HTTP403TransitionTarget 描述 F3 403 恢复链向其他链（401/402/429）原子转交时要写入的
-// 新暂停状态效果。签名由本卡自定（派发单 C1-b① item 5）。字段语义：
-//   - Status / ErrorMessage / Schedulable：无条件写入（新链暂停状态）；
-//   - TempUnschedulableUntil / TempUnschedulableReason：非 nil 时写入；为 nil 时若当前
-//     until 为 F3 拥有（reason 前缀命中）则清除，否则保留（R15-F2 所有权感知）。
-type HTTP403TransitionTarget struct {
-	Status                  string
-	ErrorMessage            string
-	Schedulable             bool
-	TempUnschedulableUntil  *time.Time
-	TempUnschedulableReason *string
-}
+// HTTP403TransitionTarget 已迁移至 service 包（service.HTTP403TransitionTarget）：类型归属
+// service 可避免 service 反向 import repository 形成依赖环（repository 已 import service）。
+// 字段语义与 CAS 行为不变（见 service.HTTP403TransitionTarget 文档）。
 
 // TransitionHTTP403RecoveryTo 原子转交（R7-F3）：同一单条 UPDATE 内写入新链暂停状态效果 +
 // 移除 http_403_recovery 元数据（旧 403 状态不得残留阻塞后续恢复）+ 自增 sched_state_revision；
 // CAS 条件与 ClearHTTP403RecoveryIfOwned 相同（generation + owner=F3 + 键内 state_revision =
-// 当前全局 sched_state_revision，R18-F2），失配返回 false 且零写入。
-func (r *accountRepository) TransitionHTTP403RecoveryTo(ctx context.Context, accountID int64, generation int64, target HTTP403TransitionTarget) (bool, error) {
+// 当前全局 sched_state_revision，R18-F2），失配返回 false 且零写入。target 类型为
+// service.HTTP403TransitionTarget（已从本包迁出，避免 import 环）。
+//
+// 字段写入与 target 语义严格对应（C1-b②-r2）：status/error_message 直写
+// （error_message = $4 无条件赋值，故 target.ErrorMessage 为 "" 即清空 error_message 列，
+// 旧 403 残留文本被擦除，不写转交文本进 error 字段）；schedulable 直写；temp_unschedulable_until/
+// reason 仅当 target 对应指针非 nil 时写入，否则若该 until 的 reason 以 F3 所有权前缀开头则
+// 清除（R15-F2 所有权感知），否则保留原值。
+func (r *accountRepository) TransitionHTTP403RecoveryTo(ctx context.Context, accountID int64, generation int64, target service.HTTP403TransitionTarget) (bool, error) {
 	if r.sql == nil {
 		return false, errors.New("account repository SQL executor is not configured")
 	}
@@ -3008,6 +3006,151 @@ func (r *accountRepository) ListHTTP403RecoveryDueAccounts(ctx context.Context, 
 		ORDER BY (extra->'`+HTTP403RecoveryExtraKey+`'->>'until')::timestamptz ASC, id ASC
 		LIMIT $2
 	`, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []*service.Account{}, nil
+	}
+
+	entities, err := r.client.Account.Query().
+		Where(dbaccount.IDIn(ids...)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mapped, err := r.accountsToService(ctx, entities)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]service.Account, len(mapped))
+	for _, account := range mapped {
+		byID[account.ID] = account
+	}
+	out := make([]*service.Account, 0, len(ids))
+	for _, id := range ids {
+		if account, ok := byID[id]; ok {
+			acc := account
+			out = append(out, &acc)
+		}
+	}
+	return out, nil
+}
+
+// UpdateHTTP403RecoveryUntil 同键改 until/reason（CAS 三条件同 ①：generation + owner=F3
+// + 键内 state_revision = 当前全局 sched_state_revision）。命中则改写键内 until/reason 并
+// 同步键内 state_revision 与全局自增同点出生（承 ① r2 表达式助手先例）；失配零写入，
+// 返回 false。用于「仍 403 带 until 续等」与「仍 403 无 until 冷却轮」（派发单 C1-b② 1d）。
+func (r *accountRepository) UpdateHTTP403RecoveryUntil(ctx context.Context, accountID int64, generation int64, newUntil time.Time, reason string) (bool, error) {
+	if r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	newUntilUTC := newUntil.UTC()
+	// 同键改写 until/reason（保留 generation/owner），并将键内 state_revision 与全局
+	// sched_state_revision 同点自增 +1（复用 ① r2 表达式助手先例）。表达式纯 Go 拼接构建，
+	// 避免 SQL 字面量中混入 Go 连接符（否则会被解析为多字符 rune 字面量）。
+	recoveryPath := "'{" + HTTP403RecoveryExtraKey + "}'"
+	globalPath := "'{" + SchedStateRevisionExtraKey + "}'"
+	newRecoveryKeyValueExpr := "jsonb_set(jsonb_set(jsonb_set(COALESCE(extra->'" + HTTP403RecoveryExtraKey +
+		"', '{}'::jsonb), '{until}', to_jsonb($3::text), true), '{reason}', to_jsonb($4::text), true), " +
+		"'{state_revision}', " + schedStateRevisionNextValueExpr() + ", true)"
+	newExtraExpr := "jsonb_set(jsonb_set(COALESCE(extra, '{}'::jsonb), " + recoveryPath + ", " +
+		newRecoveryKeyValueExpr + ", true), " + globalPath + ", " + schedStateRevisionNextValueExpr() + ", true)"
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET extra = `+newExtraExpr+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'generation' = $2
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'owner' = $5
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'state_revision' = extra->>'`+SchedStateRevisionExtraKey+`'
+	`, accountID, strconv.FormatInt(generation, 10), newUntilUTC.Format(time.RFC3339), reason, HTTP403RecoveryOwnerF3)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected <= 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue update 403 recovery until failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
+// RemoveHTTP403RecoveryRecord stale 清理（R17-F2 / 派发单 C1-b② 1b）：单条件 UPDATE 仅当
+// 键存在且 generation 匹配时删除 http_403_recovery 键（**只删键，不动 status / error_message
+// / schedulable / temp_unschedulable**——调用时机 = 已核验易主，状态归他链管），同语句内
+// 自增 sched_state_revision；失配（键不存在或 generation 不匹配）零写入，返回 false。
+func (r *accountRepository) RemoveHTTP403RecoveryRecord(ctx context.Context, accountID int64, generation int64) (bool, error) {
+	if r.sql == nil {
+		return false, errors.New("account repository SQL executor is not configured")
+	}
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET extra = `+http403RemoveRecoveryWithRevisionExpr()+`,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND extra->'`+HTTP403RecoveryExtraKey+`'->>'generation' = $2
+	`, accountID, strconv.FormatInt(generation, 10))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected <= 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue remove 403 recovery record failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
+// ListLegacyHTTP403ErrorAccounts 存量候选（R8-F1 / 派发单 C1-b② 3c）：status='error' 且
+// error_message 以 'Access forbidden (403):' 起、且 extra->'http_403_recovery' 为空、且
+// deleted_at 为空的账号，按 updated_at 升序，limit 默认 200。映射复用 accountsToService。
+// 候选查询排除已持有 http_403_recovery 键的账号（幂等；写入后离开候选集）。
+func (r *accountRepository) ListLegacyHTTP403ErrorAccounts(ctx context.Context, limit int) ([]*service.Account, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if r.sql == nil {
+		return nil, errors.New("account repository SQL executor is not configured")
+	}
+	const prefix = "Access forbidden (403):"
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT id
+		FROM accounts
+		WHERE deleted_at IS NULL
+			AND status = 'error'
+			AND error_message LIKE $1
+			AND extra->'`+HTTP403RecoveryExtraKey+`' IS NULL
+		ORDER BY updated_at ASC, id ASC
+		LIMIT $2
+	`, prefix+"%", limit)
 	if err != nil {
 		return nil, err
 	}

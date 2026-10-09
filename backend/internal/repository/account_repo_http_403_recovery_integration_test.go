@@ -185,7 +185,7 @@ func TestHTTP403TransitionRemovesMetadataRealSemantics(t *testing.T) {
 		"http_403_recovery": {"until": %q, "generation": 21, "reason": "paused", "owner": "f3_lifecycle", "state_revision": 21}
 	}`, time.Now().Add(time.Minute).Format(time.RFC3339)))
 
-	applied, err := repo.TransitionHTTP403RecoveryTo(ctx, id, 21, HTTP403TransitionTarget{
+	applied, err := repo.TransitionHTTP403RecoveryTo(ctx, id, 21, service.HTTP403TransitionTarget{
 		Status:       service.StatusError,
 		ErrorMessage: "handed off to 429 chain",
 		Schedulable:  false,
@@ -253,7 +253,7 @@ func TestHTTP403CASStaleRevisionRealSemantics(t *testing.T) {
 	require.Equal(t, "breaker wrote its own error", errMsg, "他链刚写入的 error 不得被恢复探针清掉")
 
 	// Transition 同样失配：新链状态不得覆盖、旧 403 键不得移除。
-	applied, err = repo.TransitionHTTP403RecoveryTo(ctx, id, 7, HTTP403TransitionTarget{
+	applied, err = repo.TransitionHTTP403RecoveryTo(ctx, id, 7, service.HTTP403TransitionTarget{
 		Status:       service.StatusError,
 		ErrorMessage: "handoff should not apply",
 		Schedulable:  false,
@@ -265,4 +265,114 @@ func TestHTTP403CASStaleRevisionRealSemantics(t *testing.T) {
 	`, []any{id}, &hasRecovery, &errMsg))
 	require.True(t, hasRecovery, "转交失配不得移除恢复键")
 	require.Equal(t, "breaker wrote its own error", errMsg, "转交失配不得覆盖他链状态")
+}
+
+// TestHTTP403UpdateUntilRealSemantics 覆盖同键改 until/reason 真实语义（派发单 C1-b② 1d）：
+// CAS 三条件命中 → until/reason 被改写、键内 state_revision 与全局 sched_state_revision 同点
+// 自增；generation/owner 仍匹配但 revision 失配 → 零写入返回 false（保留他链状态）。
+func TestHTTP403UpdateUntilRealSemantics(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+	now := time.Date(2026, time.October, 9, 12, 0, 0, 0, time.UTC)
+
+	id := insertHTTP403AccountWithRecovery(t, tx, "f3-update", fmt.Sprintf(`{
+		"http_403_recovery": {"until": %q, "generation": 1, "reason": "paused", "owner": "f3_lifecycle", "state_revision": 1},
+		"sched_state_revision": 1
+	}`, now.Add(-time.Minute).Format(time.RFC3339)))
+
+	newUntil := now.Add(2 * time.Hour)
+	applied, err := repo.UpdateHTTP403RecoveryUntil(ctx, id, 1, newUntil, "refreshed until")
+	require.NoError(t, err)
+	require.True(t, applied, "三条件命中 → 返回 true")
+
+	var until, reason, globalRev, keyRev int64
+	require.NoError(t, scanSingleRow(ctx, tx, `
+		SELECT (extra->'http_403_recovery'->>'until')::bigint AS u,
+		       (extra->'http_403_recovery'->>'state_revision')::bigint AS kr,
+		       (extra->>'sched_state_revision')::bigint AS gr
+		FROM accounts WHERE id = $1
+	`, []any{id}, &until, &keyRev, &globalRev))
+	_ = reason
+	require.Equal(t, int64(2), keyRev, "更新后键内 state_revision 自增")
+	require.Equal(t, int64(2), globalRev, "更新后全局 revision 同点自增")
+
+	// generation/owner 匹配但 revision 失配（他链已推进全局 revision）→ 零写入。
+	_, err = tx.ExecContext(ctx, `UPDATE accounts SET extra = jsonb_set(extra, '{sched_state_revision}', to_jsonb(99)) WHERE id = $1`, id)
+	require.NoError(t, err)
+	applied, err = repo.UpdateHTTP403RecoveryUntil(ctx, id, 1, now.Add(3*time.Hour), "should not apply")
+	require.NoError(t, err)
+	require.False(t, applied, "revision 失配 → 零写入返回 false")
+}
+
+// TestHTTP403RemoveRecordRealSemantics 覆盖 stale 清理真实语义（派发单 C1-b② 1b）：generation
+// 匹配 → 仅删 http_403_recovery 键 + 自增全局 revision，不动 status/error；generation 失配 →
+// 零写入（他链状态保留）。
+func TestHTTP403RemoveRecordRealSemantics(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+
+	id := insertHTTP403AccountWithRecovery(t, tx, "f3-remove", fmt.Sprintf(`{
+		"http_403_recovery": {"until": %q, "generation": 5, "reason": "cooldown", "owner": "f3_lifecycle", "state_revision": 1},
+		"sched_state_revision": 1
+	}`, time.Now().Add(time.Hour).Format(time.RFC3339)))
+	require.NoError(t, repo.SetError(ctx, id, "other chain owns this now"))
+
+	removed, err := repo.RemoveHTTP403RecoveryRecord(ctx, id, 5)
+	require.NoError(t, err)
+	require.True(t, removed, "generation 命中 → 返回 true")
+
+	var hasRecovery bool
+	var errMsg string
+	require.NoError(t, scanSingleRow(ctx, tx, `
+		SELECT extra ? 'http_403_recovery', error_message FROM accounts WHERE id = $1
+	`, []any{id}, &hasRecovery, &errMsg))
+	require.False(t, hasRecovery, "stale 清理必须移除 F3 键")
+	require.Equal(t, "other chain owns this now", errMsg, "stale 清理不得触碰他链 error")
+
+	// generation 失配 → 零写入（他链状态保留）。
+	_ = insertHTTP403AccountWithRecovery(t, tx, "f3-remove-mismatch", fmt.Sprintf(`{
+		"http_403_recovery": {"until": %q, "generation": 6, "reason": "cooldown", "owner": "f3_lifecycle", "state_revision": 1},
+		"sched_state_revision": 1
+	}`, time.Now().Add(time.Hour).Format(time.RFC3339)))
+	removed, err = repo.RemoveHTTP403RecoveryRecord(ctx, id, 999)
+	require.NoError(t, err)
+	require.False(t, removed, "generation 失配 → 零写入返回 false")
+}
+
+// TestHTTP403LegacyInitRealSemantics 覆盖存量收编真实语义（派发单 C1-b② 3c / R8-F1）：
+// status='error' 且 error_message 以 'Access forbidden (403):' 起、无 F3 键的账号被候选命中；
+// 已持 F3 键的账号排除（幂等）；存量收编后写入 F3 键并离候选集。
+func TestHTTP403LegacyInitRealSemantics(t *testing.T) {
+	ctx := context.Background()
+	tx := testEntTx(t)
+	repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+
+	legacyID := insertHTTP403AccountWithRecovery(t, tx, "f3-legacy", `{"status_dummy": 1}`)
+	// 改写为 legacy 403 error（无 F3 键）。
+	_, err := tx.ExecContext(ctx, `
+		UPDATE accounts SET status = 'error', error_message = 'Access forbidden (403): region blocked'
+		WHERE id = $1
+	`, legacyID)
+	require.NoError(t, err)
+	// 已持 F3 键的账号（应被排除）。
+	_ = insertHTTP403AccountWithRecovery(t, tx, "f3-legacy-has-key", fmt.Sprintf(`{
+		"http_403_recovery": {"until": %q, "generation": 1, "reason": "paused", "owner": "f3_lifecycle", "state_revision": 1},
+		"sched_state_revision": 1
+	}`, time.Now().Add(time.Hour).Format(time.RFC3339)))
+
+	legacy, err := repo.ListLegacyHTTP403ErrorAccounts(ctx, 200)
+	require.NoError(t, err)
+	require.Len(t, legacy, 1, "仅 legacy 无键账号命中")
+	require.Equal(t, legacyID, legacy[0].ID)
+
+	// 收编：Alloc + Mark 写入 F3 键。
+	gen, err := repo.AllocHTTP403Generation(ctx, legacyID)
+	require.NoError(t, err)
+	require.NoError(t, repo.Mark403PausedWithRecovery(ctx, legacyID, time.Now().Add(time.Hour), gen, "legacy init", legacy[0].ErrorMessage, nil))
+
+	legacy, err = repo.ListLegacyHTTP403ErrorAccounts(ctx, 200)
+	require.NoError(t, err)
+	require.Len(t, legacy, 0, "收编后离开候选集（幂等）")
 }

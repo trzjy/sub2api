@@ -202,7 +202,7 @@ func TestAccountRepository_ClearHTTP403RecoveryIfOwned_CAS(t *testing.T) {
 // TestAccountRepository_TransitionHTTP403RecoveryTo_Atomic 覆盖转交：移除 403 元数据 +
 // 新状态写入同语句形态 + CAS 失配零写入。
 func TestAccountRepository_TransitionHTTP403RecoveryTo_Atomic(t *testing.T) {
-	target := HTTP403TransitionTarget{Status: service.StatusError, ErrorMessage: "handed off 401", Schedulable: false}
+	target := service.HTTP403TransitionTarget{Status: service.StatusError, ErrorMessage: "handed off 401", Schedulable: false}
 
 	t.Run("applied removes recovery metadata and writes target state", func(t *testing.T) {
 		exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
@@ -365,11 +365,126 @@ func TestAccountRepository_HTTP403CAS_StaleRevisionNullifies(t *testing.T) {
 		repo := newAccountRepositoryWithSQL(nil, exec, nil)
 
 		applied, err := repo.TransitionHTTP403RecoveryTo(context.Background(), 42, 7,
-			HTTP403TransitionTarget{Status: service.StatusError, ErrorMessage: "x", Schedulable: false})
+			service.HTTP403TransitionTarget{Status: service.StatusError, ErrorMessage: "x", Schedulable: false})
 
 		require.NoError(t, err)
 		require.False(t, applied, "revision 失配 → 零写入返回 false")
 		require.Len(t, exec.execQueries, 1, "失配不触发 outbox")
 		require.Contains(t, normalizeSQLWhitespace(exec.execQueries[0]), revisionCondition)
 	})
+}
+
+// TestAccountRepository_UpdateHTTP403RecoveryUntil_CAS 覆盖同键改 until/reason（派发单
+// C1-b② 1d）：CAS 三条件形态（generation + owner=F3 + 键内 state_revision=全局）、键内
+// state_revision 与全局 sched_state_revision 同点自增、仅改写 until/reason 不重建 generation/owner。
+func TestAccountRepository_UpdateHTTP403RecoveryUntil_CAS(t *testing.T) {
+	t.Run("matched rewrites until and bumps revision atomically", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+		until := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+		applied, err := repo.UpdateHTTP403RecoveryUntil(context.Background(), 42, 7, until, "refreshed until")
+
+		require.NoError(t, err)
+		require.True(t, applied, "三条件命中 → 返回 true")
+		require.Len(t, exec.execQueries, 2, "命中后追加 scheduler_outbox")
+		normalized := normalizeSQLWhitespace(exec.execQueries[0])
+		require.Contains(t, normalized, "UPDATE accounts")
+		// 同键改写 until/reason（jsonb_set(..., '{until}', to_jsonb($3::text), true)）。
+		require.Contains(t, normalized, "'{until}'")
+		require.Contains(t, normalized, "to_jsonb($3::text)")
+		require.Contains(t, normalized, "'{reason}'")
+		require.Contains(t, normalized, "to_jsonb($4::text)")
+		// 键内 state_revision 与全局 sched_state_revision 复用同一 +1 表达式（同点出生）。
+		require.Contains(t, normalized, "'{state_revision}'")
+		require.Contains(t, normalized, "COALESCE((extra->>'"+SchedStateRevisionExtraKey+"')::bigint, 0) + 1")
+		// CAS 三条件。
+		require.Contains(t, normalized, "extra->'"+HTTP403RecoveryExtraKey+"'->>'generation' = $2")
+		require.Contains(t, normalized, "extra->'"+HTTP403RecoveryExtraKey+"'->>'owner' = $5")
+		require.Contains(t, normalized, "extra->'"+HTTP403RecoveryExtraKey+"'->>'state_revision' = extra->>'"+SchedStateRevisionExtraKey+"'")
+		require.Contains(t, normalized, "deleted_at IS NULL")
+		require.Len(t, exec.execArgs[0], 5)
+		require.Equal(t, int64(42), exec.execArgs[0][0])
+		require.Equal(t, "7", exec.execArgs[0][1])
+		require.Equal(t, until.Format(time.RFC3339), exec.execArgs[0][2])
+		require.Equal(t, "refreshed until", exec.execArgs[0][3])
+		require.Equal(t, HTTP403RecoveryOwnerF3, exec.execArgs[0][4])
+	})
+
+	t.Run("mismatch writes nothing", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+		applied, err := repo.UpdateHTTP403RecoveryUntil(context.Background(), 42, 7, time.Now(), "r")
+
+		require.NoError(t, err)
+		require.False(t, applied, "三条件失配 → 零写入返回 false")
+		require.Len(t, exec.execQueries, 1, "失配不触发 outbox")
+	})
+}
+
+// TestAccountRepository_RemoveHTTP403RecoveryRecord_Stale 覆盖 stale 清理（派发单 C1-b② 1b）：
+// 单条件（仅 generation 匹配）删除 http_403_recovery 键 + 自增 sched_state_revision，
+// 不触碰 status/error/temp_unschedulable（不动他链状态）。
+func TestAccountRepository_RemoveHTTP403RecoveryRecord_Stale(t *testing.T) {
+	t.Run("generation match removes key and bumps revision", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+		removed, err := repo.RemoveHTTP403RecoveryRecord(context.Background(), 42, 7)
+
+		require.NoError(t, err)
+		require.True(t, removed, "generation 命中 → 返回 true")
+		require.Len(t, exec.execQueries, 2, "命中后追加 scheduler_outbox")
+		normalized := normalizeSQLWhitespace(exec.execQueries[0])
+		require.Contains(t, normalized, "UPDATE accounts")
+		// 仅删键（extra - 'http_403_recovery'）+ 自增 sched_state_revision。
+		require.Contains(t, normalized, " - '"+HTTP403RecoveryExtraKey+"'")
+		require.Contains(t, normalized, SchedStateRevisionExtraKey)
+		// 删除条件仅 generation 匹配（无 owner/state_revision 约束——stale 已核验易主）。
+		require.Contains(t, normalized, "extra->'"+HTTP403RecoveryExtraKey+"'->>'generation' = $2")
+		require.Contains(t, normalized, "deleted_at IS NULL")
+		require.NotContains(t, normalized, "owner = $", "stale 清理不得含 owner 约束")
+		require.NotContains(t, normalized, "state_revision = extra->>'", "stale 清理不得含 state_revision 约束")
+		require.Len(t, exec.execArgs[0], 2)
+		require.Equal(t, int64(42), exec.execArgs[0][0])
+		require.Equal(t, "7", exec.execArgs[0][1])
+	})
+
+	t.Run("generation mismatch writes nothing", func(t *testing.T) {
+		exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+		repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+		removed, err := repo.RemoveHTTP403RecoveryRecord(context.Background(), 42, 7)
+
+		require.NoError(t, err)
+		require.False(t, removed, "generation 失配 → 零写入返回 false")
+		require.Len(t, exec.execQueries, 1, "失配不触发 outbox")
+	})
+}
+
+// TestAccountRepository_ListLegacyHTTP403ErrorAccounts_SQLShape 覆盖存量候选查询（派发单
+// C1-b② 3c / R8-F1）：status='error' + error_message LIKE 'Access forbidden (403):%' +
+// extra->'http_403_recovery' IS NULL + 按 updated_at 升序；候选排除已持 F3 键账号（幂等）。
+// id 查询返回空集即短路、不触 ent client（本层仅 SQL 形态断言）。
+func TestAccountRepository_ListLegacyHTTP403ErrorAccounts_SQLShape(t *testing.T) {
+	repo, captured, args, mock := captureRepoForQuery(t)
+	mock.ExpectQuery("SELECT id FROM accounts").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	legacy, err := repo.ListLegacyHTTP403ErrorAccounts(context.Background(), 50)
+
+	require.NoError(t, err)
+	require.Len(t, legacy, 0, "空集不走 ent client、直接返回空切片")
+	require.NoError(t, mock.ExpectationsWereMet())
+	normalized := normalizeSQLWhitespace(*captured)
+	require.Contains(t, normalized, "SELECT id FROM accounts")
+	require.Contains(t, normalized, "status = 'error'")
+	require.Contains(t, normalized, "error_message LIKE $1")
+	require.Contains(t, normalized, "extra->'"+HTTP403RecoveryExtraKey+"' IS NULL")
+	require.Contains(t, normalized, "ORDER BY updated_at ASC")
+	require.Contains(t, normalized, "LIMIT $2")
+	require.Len(t, *args, 2)
+	require.Equal(t, "Access forbidden (403):%", (*args)[0])
+	require.Equal(t, 50, (*args)[1])
 }

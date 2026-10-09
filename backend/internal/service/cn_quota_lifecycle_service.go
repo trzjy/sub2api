@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -76,12 +77,12 @@ const (
 	cnQuotaRecoverySourceUnknown  = "unknown"
 
 	// 状态机状态取值。
-	cnQuotaLifecycleStateExhausted  = "exhausted"
-	cnQuotaLifecycleStateUncertain  = "uncertain"
-	cnQuotaLifecycleStateRecovered  = "recovered"
-	cnQuotaLifecycleProbeExhausted  = "exhausted"
-	cnQuotaLifecycleProbeUncertain  = "uncertain"
-	cnQuotaLifecycleProbeRecovered  = "recovered"
+	cnQuotaLifecycleStateExhausted = "exhausted"
+	cnQuotaLifecycleStateUncertain = "uncertain"
+	cnQuotaLifecycleStateRecovered = "recovered"
+	cnQuotaLifecycleProbeExhausted = "exhausted"
+	cnQuotaLifecycleProbeUncertain = "uncertain"
+	cnQuotaLifecycleProbeRecovered = "recovered"
 
 	cnQuotaLifecycleProviderKira        = "kira"
 	cnQuotaLifecycleProviderTokenHarbor = "tokenharbor"
@@ -154,6 +155,7 @@ type QuotaExhaustionSignal struct {
 //   - kira + 502/504 = 仅当新鲜 VND≤0 三态佐证成立（ResolveKiraVNDBalanceState）
 //     才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
 //   - 429 / 其他 = model/path（429 不触发账号级权威冻结）；判不清 = unknown。
+//
 // 禁止从自由报文文本猜测作用域。
 func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) QuotaExhaustionScope {
 	switch status {
@@ -181,10 +183,10 @@ func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) Q
 // cnQuotaLifecycleState extra 持久化的状态机状态记录。
 type cnQuotaLifecycleState struct {
 	State            string `json:"state"`
-	RecoveryAt       string `json:"recovery_at,omitempty"`       // 空 = 恢复时间未知
-	RecoverySource   string `json:"recovery_source,omitempty"`   // upstream / snapshot / unknown
-	ProbeDueAt       string `json:"probe_due_at,omitempty"`      // 恢复探针资格到期（§3.3 R19-F4 迁移表；持久化，重启不丢）
-	LastProbeAt      string `json:"last_probe_at,omitempty"`     // RFC3339
+	RecoveryAt       string `json:"recovery_at,omitempty"`        // 空 = 恢复时间未知
+	RecoverySource   string `json:"recovery_source,omitempty"`    // upstream / snapshot / unknown
+	ProbeDueAt       string `json:"probe_due_at,omitempty"`       // 恢复探针资格到期（§3.3 R19-F4 迁移表；持久化，重启不丢）
+	LastProbeAt      string `json:"last_probe_at,omitempty"`      // RFC3339
 	LastProbeOutcome string `json:"last_probe_outcome,omitempty"` // exhausted / uncertain / recovered
 	UpdatedAt        string `json:"updated_at"`
 }
@@ -231,10 +233,21 @@ type CNQuotaLifecycleService struct {
 	// probeOverride 替换真实确认探针（测试用）。nil 时走真实上游探测。
 	probeOverride func(ctx context.Context, account *Account) (quotaProbeOutcome, error)
 
-	mu      sync.Mutex
-	stopCh  chan struct{}
+	// f3Repo 是 F3 403 恢复链存储原语窄面（对 accountRepo 一次性类型断言，承
+	// tempUnschedulableShortener 同构）：nil 表示 repo 不支持 F3，F3 分支静默跳过
+	// （能力缺失降级，非错误吞没）。全部 F3 原语经此消费，不扩大 AccountRepository 大接口。
+	f3Repo http403RecoveryRepo
+	// http403Counter 可选注入：2xx 恢复时清零三振计数的窄面依赖。nil 时跳过清零。
+	http403Counter OpenAI403CounterCache
+	// f3ProbeOverride 替换真实恢复探针（测试用）；nil 时走真实上游探测（复用
+	// httpUpstream.DoWithTLS + resolveAccountProxyURL，禁止新造探针基建）。回传响应体
+	// 供仍 403 分支从 body 解析 paused-until。
+	f3ProbeOverride func(ctx context.Context, account *Account) (f3ProbeResponseClass, int, []byte, error)
+
+	mu       sync.Mutex
+	stopCh   chan struct{}
 	stopOnce sync.Once
-	wg      sync.WaitGroup
+	wg       sync.WaitGroup
 	// tracked 不确定路径（未停调账号）的 5 分钟循环候选集（进程内）；已停调账号
 	// 由 ListTempUnschedulableAccounts + extra 状态键做跨重启的持久候选发现。
 	tracked map[int64]struct{}
@@ -247,6 +260,12 @@ func NewCNQuotaLifecycleService(
 	cfg *config.Config,
 	alerts QuotaAlertStore,
 ) *CNQuotaLifecycleService {
+	// F3 窄面一次性断言（承 tempUnschedulableShortener 同构）：断言失败静默降级，
+	// F3 分支在 sweep 中按 s.f3Repo == nil 跳过并 Warn 一次，不阻断既有 lifecycle 链。
+	f3Repo, ok := accountRepo.(http403RecoveryRepo)
+	if !ok {
+		f3CapabilityWarn(accountRepo, "NewCNQuotaLifecycleService")
+	}
 	return &CNQuotaLifecycleService{
 		accountRepo:  accountRepo,
 		httpUpstream: httpUpstream,
@@ -255,6 +274,7 @@ func NewCNQuotaLifecycleService(
 		nowFunc:      time.Now,
 		stopCh:       make(chan struct{}),
 		tracked:      make(map[int64]struct{}),
+		f3Repo:       f3Repo,
 	}
 }
 
@@ -284,6 +304,21 @@ func (s *CNQuotaLifecycleService) SetQuotaLifecycleClock(nowFunc func() time.Tim
 func (s *CNQuotaLifecycleService) SetQuotaProbeOverride(fn func(ctx context.Context, account *Account) (quotaProbeOutcome, error)) {
 	if s != nil {
 		s.probeOverride = fn
+	}
+}
+
+// SetQuota403CounterCache 注入三振计数清除窄面依赖（可选）。2xx 恢复时清零三振计数；
+// 未注入（nil）时跳过清零（不影响恢复闭环）。
+func (s *CNQuotaLifecycleService) SetQuota403CounterCache(cache OpenAI403CounterCache) {
+	if s != nil {
+		s.http403Counter = cache
+	}
+}
+
+// SetQuotaF3ProbeOverride 注入 F3 恢复探针覆盖（测试用）。nil 走真实上游探测。
+func (s *CNQuotaLifecycleService) SetQuotaF3ProbeOverride(fn func(ctx context.Context, account *Account) (f3ProbeResponseClass, int, []byte, error)) {
+	if s != nil && fn != nil {
+		s.f3ProbeOverride = fn
 	}
 }
 
@@ -430,13 +465,14 @@ func (s *CNQuotaLifecycleService) confirmExhausted(ctx context.Context, account 
 // confirmExhaustedAuthoritative 402 权威冻结（方案 §3.2 / §3.3 R19-F4）：账号级 402
 // 独立成立冻结——三态裁决表三行（fresh≤0 / fresh>0 / unknown）全冻结，余额三态只管辖
 // 恢复时机。除既有 exhausted 落库外，额外：
-//  1) reason 标记账号级 402 来源（cnQuotaExhaustedReason402Account 后缀），与维度耗尽
+//  1. reason 标记账号级 402 来源（cnQuotaExhaustedReason402Account 后缀），与维度耗尽
 //     冻结区分；该标记是 F4 受控缩短的归属依据，也是恢复门控的识别依据。
-//  2) 持久化 probe_due_at 资格字段（重启不丢），按 §3.3 R19-F4 迁移表取值：
+//  2. 持久化 probe_due_at 资格字段（重启不丢），按 §3.3 R19-F4 迁移表取值：
 //     fresh>0 → 立即 due（下一轮 sweep 探测——余额事实变化提示可能充值）；
 //     unknown / 仍耗尽 → 账号每日 reset_at 兜底 due（Kira 每日重置 / TH free-tier
 //     重置）；该字段仅由 lifecycle 域内写，sweep 候选条件覆盖（账号已 park，天然在
 //     ListTempUnschedulableAccounts 候选内，C0 ② 结论，无需扩展查询）。
+//
 // 不占用 403 链的 http_403_recovery 键（本卡根本不实现）。
 func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Context, account *Account, upstreamMsg string, signal QuotaExhaustionSignal, now time.Time, outcome quotaProbeOutcome, probeErr error) error {
 	recoveryAt, source, known := s.resolveRecoveryTime(account, upstreamMsg, now)
@@ -537,6 +573,16 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 		if account == nil || ctx.Err() != nil {
 			continue
 		}
+		// F3 恢复链候选：独立处理分支，不受 cnQuotaLifecycleProviderOf 过滤影响，
+		// 不与 lifecycle 状态机混用（F3 键与 cnQuota_lifecycle 状态键互斥消费）。
+		if rec, ok := http403RecoveryFromExtra(account.Extra); ok {
+			if s.f3Repo != nil {
+				if err := s.sweepF3RecoveryAccount(ctx, account, rec, now); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			continue
+		}
 		if cnQuotaLifecycleProviderOf(account) == "" {
 			continue
 		}
@@ -550,6 +596,13 @@ func (s *CNQuotaLifecycleService) RunRecoverySweep(ctx context.Context) error {
 			continue
 		}
 		if err := s.sweepProbeAccount(ctx, account, state, now); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	// 存量初始化（R8-F1）：一次性、幂等的存量 403 error 解析收编（每轮都跑该查询，
+	// 查不到即空转；候选查询排除已持有 http_403_recovery 键的账号，天然幂等）。
+	if s.f3Repo != nil {
+		if err := s.runLegacyHTTP403Init(ctx, now); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -575,6 +628,27 @@ func (s *CNQuotaLifecycleService) sweepCandidates(ctx context.Context, now time.
 		}
 		seen[account.ID] = struct{}{}
 		out = append(out, account)
+	}
+	// 第三类候选：F3 恢复链（持有 http_403_recovery 且 until<=now）。不受 schedulable
+	// / HasError / 快照新鲜度过滤影响（D4 证据基线：冻结/error 账号会被既有链跳过）。
+	// F3 键与 cnQuota_lifecycle 状态键互斥消费，故不加 lifecycle 状态过滤。
+	if s.f3Repo != nil {
+		due, derr := s.f3Repo.ListHTTP403RecoveryDueAccounts(ctx, now, 200)
+		if derr != nil {
+			// 候选查询失败不阻断既有 lifecycle 候选（Warn 暴露，下轮重试）。
+			fmt.Printf("[CNQuotaLifecycle] F3 recovery due list failed: %v\n", derr)
+		} else {
+			for _, account := range due {
+				if account == nil {
+					continue
+				}
+				if _, ok := seen[account.ID]; ok {
+					continue
+				}
+				seen[account.ID] = struct{}{}
+				out = append(out, account)
+			}
+		}
 	}
 	for _, id := range s.trackedIDs() {
 		if _, ok := seen[id]; ok {
@@ -687,11 +761,11 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 // 已过期、停调时刻晚于官方 reset_at（停调到期点不是 reset_at 口径；生产实证
 // 2026-10-08：9 个存量账号 recovery_at 挂 renewsAt 旧口径、刷新链新快照
 // reset_at 仍在未来）。快照与恢复时间自相矛盾，视为 probe 到期进入确认循环
-//（unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。来源按
+// （unknown 路径可达）。仅在 sweep 读路径判定，无写入，竞态类整体消失。来源按
 // 显式允许清单判定：只认 snapshot——旧 renewsAt 存量写入时来源即 snapshot
-//（confirmExhausted/sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；
+// （confirmExhausted/sweepProbeAccount/convergeTHStockRecovery 三个写入点口径）；
 // upstream（L4 最权威，交由其自身到期推进）与其他任何未知/未来新增来源不触发
-//（fail-closed，不扩语义）。第一/二形态（reset_at 缺失/过期，语义=「仍耗尽无
+// （fail-closed，不扩语义）。第一/二形态（reset_at 缺失/过期，语义=「仍耗尽无
 // 恢复时刻」）保持 plan_exhausted=true 前提：pe=false 不触发（无矛盾证据，保守
 // 不扩语义）；第三形态（停调晚于官方 reset_at）以时间矛盾独立触发，pe 值不作
 // 前提（生产实证 2026-10-08 第二轮：4 账号官方已恢复 pe=false 但停调挂旧口径
@@ -760,6 +834,327 @@ func (st *cnQuotaLifecycleState) parkedUntil() *time.Time {
 	}
 	if t, err := time.Parse(time.RFC3339, st.RecoveryAt); err == nil {
 		return &t
+	}
+	return nil
+}
+
+// --- F3 403 content-policy 恢复链（派发单 C1-b② / 方案 §3.3） ---
+
+// f3FastRetryMax / f3FastRetryBackoff 是瞬时传输错误/5xx 受控快速重探参数（派发单
+// 1d「瞬时传输错误/5xx → 受控快速重探，有上限，建议 2 次、短退避秒级」）：最多 2 次
+// 快速重探、每次 2 秒退避。达上限后不终止自动恢复（R2-F4）——until 仍是权威恢复时间，
+// 账号保持「恢复到期待确认」状态，由既有 lifecycle 周期 sweep 在后续每轮继续到期探测。
+const (
+	f3FastRetryMax     = 2
+	f3FastRetryBackoff = 2 * time.Second
+)
+
+// sweepF3RecoveryAccount 对单个 F3 候选执行恢复探测并按 §3.3 逐条分派（派发单 1b/1c/1d）。
+func (s *CNQuotaLifecycleService) sweepF3RecoveryAccount(ctx context.Context, account *Account, rec *http403RecoveryRecord, now time.Time) error {
+	if s.f3Repo == nil {
+		return nil
+	}
+	// stale 核验（R17-F2）：键内 state_revision 与全局 sched_state_revision 失配 = 已易主
+	// → 原子清除 F3 键（只删键，不动 status/error/temp_unschedulable，状态归他链管），本轮不探测。
+	if rec.StateRevision != http403GlobalStateRevision(account.Extra) {
+		if _, err := s.f3Repo.RemoveHTTP403RecoveryRecord(ctx, account.ID, rec.Generation); err != nil {
+			return err
+		}
+		slog.Warn("cn_quota_403_recovery_stale_removed",
+			"account_id", account.ID, "generation", rec.Generation,
+			"reason", "owner changed; F3 key removed atomically, state owned by other chain")
+		return nil
+	}
+
+	slog.Info(eventCNQuota403RecoveryProbeStarted,
+		"account_id", account.ID, "generation", rec.Generation, "until", rec.Until)
+
+	res := s.runHTTP403RecoveryProbe(ctx, account)
+
+	// 受控快速重探（瞬时传输错误/5xx）：秒级退避、上限 f3FastRetryMax 次。
+	if res.Class == f3ProbeTransient {
+		exhausted := true
+		for i := 0; i < f3FastRetryMax; i++ {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			time.Sleep(f3FastRetryBackoff)
+			res = s.runHTTP403RecoveryProbe(ctx, account)
+			if res.Class != f3ProbeTransient {
+				exhausted = false
+				break
+			}
+		}
+		if exhausted {
+			// 达上限：保留 F3 记录（until 不变 = 权威恢复时间仍有效），转既有 sweep 周期
+			// 继续探测（非终止）。下轮 sweep 仍会把本账号纳入候选。
+			slog.Info(eventCNQuota403RecoveryFastRetryExhausted,
+				"account_id", account.ID, "generation", rec.Generation, "until", rec.Until)
+			slog.Info(eventCNQuota403RecoveryProbeResult,
+				"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+				"response_class", f3EventResponseClassFastRetryExhausted, "result", "kept_for_sweep")
+			return nil
+		}
+	}
+
+	s.dispatchF3ProbeResult(ctx, account, rec, res, now)
+	return nil
+}
+
+// dispatchF3ProbeResult 按恢复探针响应类别分派（派发单 1d / §3.3）。
+func (s *CNQuotaLifecycleService) dispatchF3ProbeResult(ctx context.Context, account *Account, rec *http403RecoveryRecord, res f3ProbeResult, now time.Time) {
+	switch res.Class {
+	case f3ProbeRecovered2xx:
+		// 2xx → CAS 清 error + 恢复调度 + 清 F3 拥有 until（ClearHTTP403RecoveryIfOwned 同语句）。
+		cleared, err := s.f3Repo.ClearHTTP403RecoveryIfOwned(ctx, account.ID, rec.Generation)
+		if err != nil {
+			slog.Warn("cn_quota_403_recovery_clear_failed", "account_id", account.ID, "error", err)
+			return
+		}
+		if cleared {
+			// 清零三振计数（经注入的窄面计数器清除依赖；未注入则跳过）。
+			if s.http403Counter != nil {
+				if rerr := s.http403Counter.ResetOpenAI403Count(ctx, account.ID); rerr != nil {
+					slog.Warn("cn_quota_403_recovery_counter_reset_failed", "account_id", account.ID, "error", rerr)
+				}
+			}
+			s.resolveQuotaAlert(ctx, account.ID)
+			slog.Info(eventCNQuota403RecoveryProbeResult,
+				"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+				"response_class", f3EventResponseClassRecovered2xx, "result", "recovered")
+		} else {
+			// CAS 失配（在途新状态写入 / 他链已夺权）→ 丢弃本次结果（R11-F3 ①）。
+			slog.Info(eventCNQuota403RecoveryCASConflict,
+				"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+				"reason", "in-flight state write (generation/owner/revision mismatch) discarded")
+		}
+	case f3ProbeStill403:
+		s.handleF3Still403(ctx, account, rec, res, now)
+	case f3ProbeAuth401, f3ProbeQuota402, f3ProbeRate429:
+		s.handleF3Handoff(ctx, account, rec, res, now)
+	default:
+		// 未列举响应（R18-F3）：失败关闭——保持冻结、不清 error、保留下轮 sweep 探测资格、
+		// ensureQuotaAlertFiring 告警；不做无界重试、不绕道既有错误链。
+		s.ensureQuotaAlertFiring(ctx, account, rec.Reason, "http_403_recovery unclassified probe response (fail-closed, kept for next sweep)")
+		slog.Info(eventCNQuota403RecoveryProbeResult,
+			"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+			"response_class", string(res.Class), "result", "fail_closed_kept")
+	}
+}
+
+// handleF3Still403 仍 403：带新 until → 解析落库续等；无 until → 冷却循环（同键重写
+// until = now + 既有 403 冷却常量，reason 标记 no-until 冷却轮）。
+func (s *CNQuotaLifecycleService) handleF3Still403(ctx context.Context, account *Account, rec *http403RecoveryRecord, res f3ProbeResult, now time.Time) {
+	newUntil, ok := ParseHTTP403PausedUntil("", res.Body)
+	reason := "http_403_recovery until refreshed"
+	if !ok {
+		newUntil = now.Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		reason = "http_403_recovery no-until cooldown round"
+	}
+	if _, err := s.f3Repo.UpdateHTTP403RecoveryUntil(ctx, account.ID, rec.Generation, newUntil, reason); err != nil {
+		slog.Warn("cn_quota_403_recovery_update_until_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	result := "continue_wait"
+	if !ok {
+		result = "no_until_cooldown_round"
+	}
+	slog.Info(eventCNQuota403RecoveryProbeResult,
+		"account_id", account.ID, "generation", rec.Generation,
+		"until", newUntil.UTC().Format(time.RFC3339),
+		"response_class", f3EventResponseClassStill403Cooldown, "result", result)
+}
+
+// handleF3Handoff 401/402/429 转交：同一单条 UPDATE 内移除 F3 元数据 + 写入新链状态
+// （旧 403 状态不得残留阻塞后续恢复，R7-F3）。402 额外转交既有额度响应式链
+// （OnUpstreamQuotaExhaustedScoped 既有路径，仅 CN 平台生效；非 CN 平台 no-op）。
+func (s *CNQuotaLifecycleService) handleF3Handoff(ctx context.Context, account *Account, rec *http403RecoveryRecord, res f3ProbeResult, now time.Time) {
+	var handoffTarget string
+	var target HTTP403TransitionTarget
+	switch res.Class {
+	case f3ProbeAuth401:
+		handoffTarget = "401"
+		// 401 → 认证失败链：SetError 等价（error_message = 探针错误文本）。该链的停止
+		// 语义本就是 status=error，维持现状正确，不改（R11-F3 验收基线）。
+		target = HTTP403TransitionTarget{
+			Status:       StatusError,
+			ErrorMessage: f3HandoffErrorText(res, "401 authentication failed"),
+			Schedulable:  false,
+		}
+	case f3ProbeQuota402:
+		handoffTarget = "402"
+		// 402 → 转交既有额度响应式链（下文 OnUpstreamQuotaExhaustedScoped）；本步复刻
+		// 既有额度链 park 终态 = status active + temp park（生产实证：exhausted 号
+		// status=active + cn_quota_exhausted reason），故 Status=active、ErrorMessage 置空
+		// （清旧 403 残留、不写转交文本进 error 字段；ops 可见性由 §7.1 probe_result 的
+		// handoff_target 字段承担）。新增过渡 park：TempUnschedulableUntil = now + 冷却、
+		// reason 标记 402 转交；CN 号随后由 OnUpstreamQuotaExhaustedScoped 按自身语义
+		// 接管 park（仅延长守卫），非 CN 号 / 额度链调用失败时该 park 保证冷却后自然回归
+		// 调度而非无 until 僵死（机制 = 既有 SetTempUnschedulable 语义，无新机制）。
+		until := now.Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		reason := "http_403_recovery handed off to 402 quota chain"
+		target = HTTP403TransitionTarget{
+			Status:                  StatusActive,
+			ErrorMessage:            "",
+			Schedulable:             false,
+			TempUnschedulableUntil:  &until,
+			TempUnschedulableReason: &reason,
+		}
+	case f3ProbeRate429:
+		handoffTarget = "429"
+		// 429 → 复刻既有限流停调效果（SetTempUnschedulable 既有语义）：账号本为 active，
+		// 故 Status=active、ErrorMessage 置空（清旧 403 残留、不写转交文本进 error 字段；
+		// ops 可见性由 §7.1 probe_result 的 handoff_target 字段承担）。temp park 保持现状值
+		// （F3 拥有的 temp_unschedulable_until，CAS 清理/转交据此同语句清除旧 F3 拥有的
+		// until）。转交写 error 后 until 过期残留「error 信息 + 可调度」不一致态（生产
+		// tier-b5 实证为缺陷态），故 Status/error 一律复刻 active 语义。
+		until := now.Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		reason := "http_403_recovery handed off to 429 rate-limit chain"
+		target = HTTP403TransitionTarget{
+			Status:                  StatusActive,
+			ErrorMessage:            "",
+			Schedulable:             false,
+			TempUnschedulableUntil:  &until,
+			TempUnschedulableReason: &reason,
+		}
+	}
+	applied, err := s.f3Repo.TransitionHTTP403RecoveryTo(ctx, account.ID, rec.Generation, target)
+	if err != nil {
+		slog.Warn("cn_quota_403_recovery_transition_failed", "account_id", account.ID, "handoff_target", handoffTarget, "error", err)
+		return
+	}
+	if !applied {
+		// CAS 失配（在途新状态写入 / 他链已夺权）→ 丢弃本次转交结果。
+		slog.Info(eventCNQuota403RecoveryCASConflict,
+			"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+			"handoff_target", handoffTarget, "reason", "in-flight state write (generation/owner/revision mismatch) discarded")
+		return
+	}
+	// 402 转交既有额度响应式链（OnUpstreamQuotaExhaustedScoped 既有路径）；非 CN 平台 no-op。
+	if res.Class == f3ProbeQuota402 && cnQuotaLifecycleProviderOf(account) != "" {
+		signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: account.Platform, Msg: target.ErrorMessage}
+		if herr := s.OnUpstreamQuotaExhaustedScoped(ctx, account, target.ErrorMessage, signal); herr != nil {
+			slog.Warn("cn_quota_403_recovery_402_handoff_chain_failed", "account_id", account.ID, "error", herr)
+		}
+	}
+	slog.Info(eventCNQuota403RecoveryProbeResult,
+		"account_id", account.ID, "generation", rec.Generation, "until", rec.Until,
+		"response_class", f3EventResponseClassHandedOff401402429, "handoff_target", handoffTarget, "result", "handed_off")
+}
+
+// f3HandoffErrorText 构造转交错误文本（含探针状态码，便于 ops 排查）。
+func f3HandoffErrorText(res f3ProbeResult, prefix string) string {
+	return fmt.Sprintf("Access forbidden (403) recovery probe -> %s (status %d)", prefix, res.Status)
+}
+
+// runHTTP403RecoveryProbe 派发单次 F3 恢复探针：优先用注入覆盖（测试），否则复用既有
+// 探测基建（同一轻请求路径/客户端/代理/鉴权，禁止新造探针基建）——经 httpUpstream.DoWithTLS
+// + resolveAccountProxyURL 对账号 openai-format 基址发 max_tokens=1 轻请求，派生响应类别
+// 与状态码/响应体（仍 403 时需从响应体解析 paused until）。返回传输错误统一归类为瞬时重探。
+func (s *CNQuotaLifecycleService) runHTTP403RecoveryProbe(ctx context.Context, account *Account) f3ProbeResult {
+	if s.f3ProbeOverride != nil {
+		cls, status, body, err := s.f3ProbeOverride(ctx, account)
+		return f3ProbeResult{Class: cls, Status: status, Body: body, Err: err}
+	}
+	if s.httpUpstream == nil || s.cfg == nil {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: errF3NoProbeTransport}
+	}
+	apiKey := strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
+	if apiKey == "" {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: errors.New("f3 recovery probe: no api key")}
+	}
+	modelKey := cnQuotaLifecycleProbeModel(account)
+	if modelKey == "" {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: errors.New("f3 recovery probe: no probe model")}
+	}
+	baseURL := account.GetOpenAIFormatBaseURL()
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = "https://api.openai.com"
+	}
+	normalized, err := cnValidateProbeURL(s.cfg, baseURL)
+	if err != nil {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: fmt.Errorf("f3 recovery probe validate url: %w", err)}
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":      modelKey,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"max_tokens": 1,
+		"stream":     false,
+	})
+	if err != nil {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: err}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(normalized, "/")+"/chat/completions", strings.NewReader(string(body)))
+	if err != nil {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	account.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := s.resolveAccountProxyURL(account)
+	callCtx, cancel := context.WithTimeout(ctx, probeRequestHardTimeout)
+	defer cancel()
+	resp, err := s.httpUpstream.DoWithTLS(req.WithContext(callCtx), proxyURL, account.ID, account.Concurrency, nil)
+	if err != nil {
+		return f3ProbeResult{Class: f3ProbeTransient, Err: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	return f3ProbeResult{Class: classifyF3ProbeStatus(resp.StatusCode), Status: resp.StatusCode, Body: raw}
+}
+
+// runLegacyHTTP403Init 存量初始化（R8-F1）：每轮 sweep 跑该查询（查不到即空转，成本一次
+// 索引扫描，无需进程内开关）；幂等 = 候选查询排除已持有 http_403_recovery 键的账号。
+func (s *CNQuotaLifecycleService) runLegacyHTTP403Init(ctx context.Context, now time.Time) error {
+	if s.f3Repo == nil {
+		return nil
+	}
+	legacy, err := s.f3Repo.ListLegacyHTTP403ErrorAccounts(ctx, 200)
+	if err != nil {
+		return err
+	}
+	for _, acc := range legacy {
+		if acc == nil {
+			continue
+		}
+		if err := s.initLegacyHTTP403Recovery(ctx, acc, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// initLegacyHTTP403Recovery 收编单条存量 403 error：解析现存 error_message 的 paused until，
+// 成功 → AllocHTTP403Generation + Mark403PausedWithRecovery（until=解析值）；无法解析 →
+// 同原语 + until = now + 10min 冷却循环 + parse_failed 事件 + 告警。解析成功/失败均发事件。
+func (s *CNQuotaLifecycleService) initLegacyHTTP403Recovery(ctx context.Context, account *Account, now time.Time) error {
+	if s.f3Repo == nil {
+		return nil
+	}
+	generation, err := s.f3Repo.AllocHTTP403Generation(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	until, ok := ParseHTTP403PausedUntil(account.ErrorMessage, nil)
+	reason := "http_403_recovery legacy init"
+	if ok {
+		slog.Info(eventCNQuota403PausedUntilParsed,
+			"account_id", account.ID, "generation", generation, "until", until.UTC().Format(time.RFC3339))
+	} else {
+		until = now.Add(time.Duration(openAI403CooldownMinutesDefault) * time.Minute)
+		reason = "http_403_recovery legacy init no-until cooldown"
+		slog.Info(eventCNQuota403PausedUntilParseFailed,
+			"account_id", account.ID, "generation", generation, "until", until.UTC().Format(time.RFC3339),
+			"reason", "legacy 403 error_message had no parseable paused-until; entered cooldown loop")
+	}
+	// Mark403PausedWithRecovery 复刻 SetError 字段效果 + 合并 F3 恢复键（字段效果与现状一致）。
+	if err := s.f3Repo.Mark403PausedWithRecovery(ctx, account.ID, until, generation, reason, account.ErrorMessage, nil); err != nil {
+		return err
+	}
+	if !ok {
+		// 无法解析：冷却循环 + 告警（保持 ops 可见性）。
+		s.ensureQuotaAlertFiring(ctx, account, account.ErrorMessage, "legacy 403 without parseable paused-until (cooldown loop)")
 	}
 	return nil
 }

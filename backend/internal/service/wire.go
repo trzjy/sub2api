@@ -450,6 +450,14 @@ func ProvideCNQuotaLifecycleService(
 	// D-QL-002 响应式入口接线：注入后 402/429 停调语义全量移交状态机；
 	// 未注入（测试直构）时入口只落 cn_balance_low 信号标记并告警。
 	if rateLimitService != nil {
+		// 三振计数注入（方案 §3.3：2xx 恢复清 error 并清零三振计数）：把
+		// RateLimitService 持有的 openAI403CounterCache 回注 lifecycle（生产中先前
+		// 漏装配导致 http403Counter 恒 nil、2xx 恢复不清零三振计数）。未装配 cache
+		// 时跳过（nil 安全，不影响恢复闭环）。选最小改动：复用 RateLimitService 只读
+		// 访问器 OpenAI403CounterCache()，不加新 Provide 入参（避免 wire 图重建）。
+		if c := rateLimitService.OpenAI403CounterCache(); c != nil {
+			svc.SetQuota403CounterCache(c)
+		}
 		rateLimitService.SetCNQuotaLifecycle(svc)
 	}
 	svc.Start()

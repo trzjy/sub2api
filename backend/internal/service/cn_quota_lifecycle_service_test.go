@@ -15,6 +15,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -79,12 +80,20 @@ type quotaLifecycleFakeRepo struct {
 	accounts   map[int64]*Account
 	parked     map[int64]quotaParkedRecord
 	clearCalls int
+	// F3 恢复链内存态（单测用，镜像生产 SQL 语义）。
+	f3Records    map[int64]*http403RecoveryRecord
+	f3GenCounter map[int64]int64
+	f3GlobalRev  map[int64]int64
+	f3ClearCalls int
 }
 
 func newQuotaLifecycleFakeRepo(accounts ...*Account) *quotaLifecycleFakeRepo {
 	r := &quotaLifecycleFakeRepo{
-		accounts: make(map[int64]*Account),
-		parked:   make(map[int64]quotaParkedRecord),
+		accounts:     make(map[int64]*Account),
+		parked:       make(map[int64]quotaParkedRecord),
+		f3Records:    make(map[int64]*http403RecoveryRecord),
+		f3GenCounter: make(map[int64]int64),
+		f3GlobalRev:  make(map[int64]int64),
 	}
 	for _, a := range accounts {
 		r.accounts[a.ID] = a
@@ -183,6 +192,228 @@ func (r *quotaLifecycleFakeRepo) parkedUntil(id int64) (time.Time, bool) {
 func (r *quotaLifecycleFakeRepo) parkedReason(id int64) string {
 	return r.parked[id].reason
 }
+
+// ---- http403RecoveryRepo 窄面实现（单测内存态，镜像生产 SQL 的 CAS 三条件语义） ----
+
+func (r *quotaLifecycleFakeRepo) AllocHTTP403Generation(_ context.Context, accountID int64) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.f3GenCounter[accountID]++
+	return r.f3GenCounter[accountID], nil
+}
+
+func (r *quotaLifecycleFakeRepo) Mark403PausedWithRecovery(_ context.Context, accountID int64, until time.Time, generation int64, reason string, errorMsg string, tempUnschedulable *time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.accounts[accountID]
+	if !ok {
+		return errors.New("account not found")
+	}
+	a.Status = StatusError
+	a.ErrorMessage = errorMsg
+	a.Schedulable = false
+	if tempUnschedulable != nil {
+		u := *tempUnschedulable
+		a.TempUnschedulableUntil = &u
+		a.TempUnschedulableReason = http403RecoveryTempUnschedulableReasonPrefix + reason
+	}
+	r.f3GlobalRev[accountID]++
+	r.f3Records[accountID] = &http403RecoveryRecord{
+		Until:         until.UTC().Format(time.RFC3339),
+		Generation:    generation,
+		Reason:        reason,
+		Owner:         http403RecoveryOwnerF3,
+		StateRevision: r.f3GlobalRev[accountID],
+	}
+	if a.Extra == nil {
+		a.Extra = map[string]any{}
+	}
+	a.Extra[http403RecoveryExtraKey] = map[string]any{
+		"until":          until.UTC().Format(time.RFC3339),
+		"generation":     generation,
+		"reason":         reason,
+		"owner":          http403RecoveryOwnerF3,
+		"state_revision": r.f3GlobalRev[accountID],
+	}
+	a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	return nil
+}
+
+func (r *quotaLifecycleFakeRepo) ClearHTTP403RecoveryIfOwned(_ context.Context, accountID int64, generation int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.f3Records[accountID]
+	if !ok {
+		return false, nil
+	}
+	global := r.f3GlobalRev[accountID]
+	if rec.Generation != generation || rec.Owner != http403RecoveryOwnerF3 || rec.StateRevision != global {
+		return false, nil
+	}
+	delete(r.f3Records, accountID)
+	r.f3GlobalRev[accountID]++
+	r.f3ClearCalls++
+	if a := r.accounts[accountID]; a != nil {
+		a.Status = StatusActive
+		a.ErrorMessage = ""
+		a.Schedulable = true
+		delete(a.Extra, http403RecoveryExtraKey)
+		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	}
+	return true, nil
+}
+
+func (r *quotaLifecycleFakeRepo) TransitionHTTP403RecoveryTo(_ context.Context, accountID int64, generation int64, target HTTP403TransitionTarget) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.f3Records[accountID]
+	if !ok {
+		return false, nil
+	}
+	global := r.f3GlobalRev[accountID]
+	if rec.Generation != generation || rec.Owner != http403RecoveryOwnerF3 || rec.StateRevision != global {
+		return false, nil
+	}
+	delete(r.f3Records, accountID)
+	r.f3GlobalRev[accountID]++
+	if a := r.accounts[accountID]; a != nil {
+		a.Status = target.Status
+		a.ErrorMessage = target.ErrorMessage
+		a.Schedulable = target.Schedulable
+		if target.TempUnschedulableUntil != nil {
+			u := *target.TempUnschedulableUntil
+			a.TempUnschedulableUntil = &u
+		} else if strings.HasPrefix(a.TempUnschedulableReason, http403RecoveryTempUnschedulableReasonPrefix) {
+			a.TempUnschedulableUntil = nil
+		}
+		if target.TempUnschedulableReason != nil {
+			a.TempUnschedulableReason = *target.TempUnschedulableReason
+		} else if strings.HasPrefix(a.TempUnschedulableReason, http403RecoveryTempUnschedulableReasonPrefix) {
+			a.TempUnschedulableReason = ""
+		}
+		delete(a.Extra, http403RecoveryExtraKey)
+		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	}
+	return true, nil
+}
+
+func (r *quotaLifecycleFakeRepo) ListHTTP403RecoveryDueAccounts(_ context.Context, now time.Time, limit int) ([]*Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		limit = 200
+	}
+	type due struct {
+		id   int64
+		until time.Time
+	}
+	var ds []due
+	for id, rec := range r.f3Records {
+		t, err := time.Parse(time.RFC3339, rec.Until)
+		if err != nil {
+			continue
+		}
+		if !t.After(now) {
+			ds = append(ds, due{id: id, until: t})
+		}
+	}
+	sort.Slice(ds, func(i, j int) bool {
+		if ds[i].until.Equal(ds[j].until) {
+			return ds[i].id < ds[j].id
+		}
+		return ds[i].until.Before(ds[j].until)
+	})
+	var out []*Account
+	for _, d := range ds {
+		if a, ok := r.accounts[d.id]; ok {
+			out = append(out, a)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (r *quotaLifecycleFakeRepo) UpdateHTTP403RecoveryUntil(_ context.Context, accountID int64, generation int64, newUntil time.Time, reason string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.f3Records[accountID]
+	if !ok {
+		return false, nil
+	}
+	global := r.f3GlobalRev[accountID]
+	if rec.Generation != generation || rec.Owner != http403RecoveryOwnerF3 || rec.StateRevision != global {
+		return false, nil
+	}
+	r.f3GlobalRev[accountID]++
+	rec.Until = newUntil.UTC().Format(time.RFC3339)
+	rec.Reason = reason
+	rec.StateRevision = r.f3GlobalRev[accountID]
+	if a := r.accounts[accountID]; a != nil {
+		if a.Extra == nil {
+			a.Extra = map[string]any{}
+		}
+		a.Extra[http403RecoveryExtraKey] = map[string]any{
+			"until":          rec.Until,
+			"generation":     rec.Generation,
+			"reason":         rec.Reason,
+			"owner":          rec.Owner,
+			"state_revision": rec.StateRevision,
+		}
+		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	}
+	return true, nil
+}
+
+func (r *quotaLifecycleFakeRepo) RemoveHTTP403RecoveryRecord(_ context.Context, accountID int64, generation int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.f3Records[accountID]
+	if !ok || rec.Generation != generation {
+		return false, nil
+	}
+	delete(r.f3Records, accountID)
+	r.f3GlobalRev[accountID]++
+	if a := r.accounts[accountID]; a != nil {
+		if a.Extra == nil {
+			a.Extra = map[string]any{}
+		}
+		delete(a.Extra, http403RecoveryExtraKey)
+		a.Extra[schedStateRevisionExtraKey] = r.f3GlobalRev[accountID]
+	}
+	return true, nil
+}
+
+func (r *quotaLifecycleFakeRepo) ListLegacyHTTP403ErrorAccounts(_ context.Context, limit int) ([]*Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		limit = 200
+	}
+	const prefix = "Access forbidden (403):"
+	var ids []int64
+	for id, a := range r.accounts {
+		if a.Status == StatusError && strings.HasPrefix(a.ErrorMessage, prefix) {
+			if _, has := r.f3Records[id]; has {
+				continue
+			}
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var out []*Account
+	for _, id := range ids {
+		if a, ok := r.accounts[id]; ok {
+			out = append(out, a)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 
 type fakeQuotaAlertStore struct {
 	mu     sync.Mutex
