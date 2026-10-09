@@ -438,8 +438,14 @@ type AccountListItem struct {
 	QuotaNotifyTotalEnabled    *bool    `json:"quota_notify_total_enabled,omitempty"`
 	QuotaNotifyTotalThreshold  *float64 `json:"quota_notify_total_threshold,omitempty"`
 
-	ParentAccountID             *int64 `json:"parent_account_id,omitempty"`
-	QuotaDimension              string `json:"quota_dimension,omitempty"`
+	ParentAccountID *int64 `json:"parent_account_id,omitempty"`
+	QuotaDimension  string `json:"quota_dimension,omitempty"`
+
+	// QuotaDimensions 规范化额度维度（与完整 Account DTO 同字段同语义，方案 §3.4 / C5）。
+	// 完整 DTO 由 service 层同一 resolver 填充，lite 投影沿用该结果做形态对齐，不重新计算。
+	QuotaDimensions []AccountQuotaDimension `json:"quota_dimensions,omitempty"`
+	// BalanceLow 服务端解释的余额不足标记（与完整 Account DTO 同字段同语义）。false/缺省省略。
+	BalanceLow                  bool   `json:"balance_low,omitempty"`
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`
 	ParentPrivacyMode           string `json:"parent_privacy_mode,omitempty"`
