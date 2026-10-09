@@ -54,6 +54,15 @@ const (
 	TokenHarborProbeBackoffLevelExtraKey  = "th_probe_backoff_level"
 	TokenHarborProbeBackoffReasonExtraKey = "th_probe_backoff_reason"
 
+	// TH 钱包余额 SSOT 键组（C6）：与 cn_provider_balance_service.go 的
+	// cnBalanceExtraSuffix* 同款语义，前缀 th_ 对齐本服务其余 extra 键（th_pass_snapshot
+	// 等）。th_balance 为余额值、th_balance_updated_at 为观测时间戳（RFC3339）；
+	// th_wallet_snapshot 为钱包快照结构体（value/locked_bonus/observed_at/error），
+	// 供前端一次拉取与失败态表达。
+	TokenHarborWalletBalanceExtraKey          = "th_balance"
+	TokenHarborWalletBalanceUpdatedAtExtraKey = "th_balance_updated_at"
+	TokenHarborWalletSnapshotExtraKey         = "th_wallet_snapshot"
+
 	tokenHarborBaseURL          = "https://tokenharbor.ai"
 	tokenHarborSessionTTL       = 6 * time.Hour
 	tokenHarborProbeMinInterval = 10 * time.Minute
@@ -105,6 +114,26 @@ type TokenHarborUsageWindowTotals struct {
 type TokenHarborUsageSnapshot struct {
 	Windows   map[string]TokenHarborUsageWindowTotals `json:"windows"`
 	FetchedAt time.Time                               `json:"fetched_at"`
+}
+
+// TokenHarborWalletSnapshot TH 钱包余额快照（C6：登录态 /dashboard/billing RSC
+// 页 hero 组件 balance 采集）。字段名冻结，前端按此消费。
+//
+// 三态语义（与 tokenharbor.ai 线上形态对齐，沿用本文件快照结构体注释风格）：
+//   - Provider 固定取 TokenHarborPassProviderName；
+//   - Value 为 hero 组件余额（float64，0 是当前 Pass 订阅号未充值的合法稳态，
+//     充值后变正）；
+//   - LockedBonus 为锁定赠金（hero lockedBonus），成功时如实落，不参与耗尽判定
+//     （判定语义归 C1/C3，本卡只负责把取得成功的值如实落键）；
+//   - ObservedAt 为观测时刻（UTC）；
+//   - Error 为失败关闭时的明确错误文案（成功路径恒空；本卡失败关闭直接返回 Go
+//     错误、不落任何键，Error 字段预留供快照级失败表达，与 SSOT 余额键组解耦）。
+type TokenHarborWalletSnapshot struct {
+	Provider    string    `json:"provider"`
+	Value       float64   `json:"value"`
+	LockedBonus float64   `json:"locked_bonus"`
+	ObservedAt  time.Time `json:"observed_at"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type tokenHarborSession struct {
@@ -172,6 +201,15 @@ var (
 	tokenHarborScriptSrcRe    = regexp.MustCompile(`src="(/_next/static/[^"]+\.js[^"]*)"`)
 	// 客户端 server action 注册形态：createServerReference("<40位hex>", ..., "<name>")。
 	tokenHarborServerRefRe = regexp.MustCompile(`createServerReference\)?\("([0-9a-f]{40,})"[^)]*?"(\w+)"\)`)
+
+	// C6 钱包余额解析：hero 组件 \"balance\":<n> 为权威余额；顶栏组件
+	// \"initialBalance\":<n> 交叉校验；lockedBonus 一并解析（如实落键）。
+	// \\? 兼容 RSC 转义形态 \"balance\":0 与普通 JSON 形态 "balance":0；数值兼容
+	// 负值/小数（充值后变正）。balance 不会误匹配 balance_source（其后跟 _ 而非
+	// 引号）也不会误匹配 initialBalance（首字母大小写 b/B 不同，正则大小写敏感）。
+	tokenHarborWalletBalanceRe        = regexp.MustCompile(`balance\\?"\s*:\s*(-?\d+(?:\.\d+)?)`)
+	tokenHarborWalletInitialBalanceRe = regexp.MustCompile(`initialBalance\\?"\s*:\s*(-?\d+(?:\.\d+)?)`)
+	tokenHarborWalletLockedBonusRe    = regexp.MustCompile(`lockedBonus\\?"\s*:\s*(-?\d+(?:\.\d+)?)`)
 )
 
 // Probe 登录 TH 并解析订阅窗口，返回结构化快照。距上次成功探测不到 10 分钟时
@@ -336,6 +374,145 @@ func TokenHarborUsageSnapshotFromExtra(account *Account) (*TokenHarborUsageSnaps
 		return nil, false
 	}
 	return &snapshot, true
+}
+
+// TokenHarborWalletSnapshotFromExtra 从账号 Extra 读回钱包余额快照（JSON 兼容任意存法）。
+func TokenHarborWalletSnapshotFromExtra(account *Account) (*TokenHarborWalletSnapshot, bool) {
+	if account == nil || account.Extra == nil {
+		return nil, false
+	}
+	raw, ok := account.Extra[TokenHarborWalletSnapshotExtraKey]
+	if !ok || raw == nil {
+		return nil, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	var snapshot TokenHarborWalletSnapshot
+	if err := json.Unmarshal(encoded, &snapshot); err != nil {
+		return nil, false
+	}
+	return &snapshot, true
+}
+
+// ProbeWalletBalance 登录态采集 TH 钱包余额（C6）：复用既有会话缓存+登录链，
+// 登录态 GET /dashboard/billing，正则解析 hero 组件 balance / lockedBonus，并以
+// 顶栏 initialBalance 交叉校验。
+//
+// 失败关闭纪律（与订阅链同口径）：hero balance 缺失、顶栏 initialBalance 缺失
+// （页面形态变化）、或两者都解析成功但不一致 → 返回明确错误，不落任何 SSOT 键与
+// 快照（调用方按 unknown 处理，判定语义归 C1）。解析成功 → 返回快照，由调用方经
+// PersistWalletSnapshot 落库（th_balance / th_balance_updated_at + th_wallet_snapshot）。
+//
+// 接线说明（消费方归 C4 卡，本卡不改动 cn_provider_balance_check_service.go）：
+// 周期链 refreshTokenHarborAccount（仅刷新快照、不做停调）在刷新 th_pass_snapshot /
+// th_usage_snapshot 的同时，调用本方法并 PersistWalletSnapshot，使双额度统一机制
+// （SSOT th_balance / th_balance_updated_at）获得 TH 钱包余额来源；失败关闭时该账号
+// 的 th_balance 保持旧值或缺失（unknown），由 C1 阈值判定按未知处理。
+func (s *TokenHarborPassService) ProbeWalletBalance(ctx context.Context, account *Account) (TokenHarborWalletSnapshot, error) {
+	if s == nil || s.upstream == nil {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor pass service is not configured")
+	}
+	if account == nil {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor wallet probe requires an account")
+	}
+	if !tokenHarborProbeEnabled(account) {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor wallet probe is not enabled for account %d", account.ID)
+	}
+	email := strings.TrimSpace(account.GetCredential("th_email"))
+	password := account.GetCredential("th_password")
+	if email == "" || password == "" {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("account %d is missing tokenharbor credentials (th_email/th_password)", account.ID)
+	}
+	proxyURL := s.resolveProxyURL(ctx, account)
+	if proxyURL == "" {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("account %d has no bound proxy; tokenharbor wallet probe refuses direct access (TH datacenter-IP risk control)", account.ID)
+	}
+
+	cookie, err := s.ensureSession(ctx, account.ID, proxyURL, email, password)
+	if err != nil {
+		return TokenHarborWalletSnapshot{}, err
+	}
+
+	resp, err := s.fetchBillingPage(ctx, account.ID, proxyURL, cookie)
+	if err == nil && tokenHarborSessionRejected(resp) {
+		// 会话失效：双清（内存+extra）后重登一次；再失败按明确错误上报，不兜底。
+		s.invalidateSession(ctx, account.ID)
+		cookie, err = s.loginToTokenHarbor(ctx, account.ID, proxyURL, email, password)
+		if err != nil {
+			return TokenHarborWalletSnapshot{}, err
+		}
+		s.storeSession(ctx, account.ID, cookie)
+		resp, err = s.fetchBillingPage(ctx, account.ID, proxyURL, cookie)
+	}
+	if err != nil {
+		return TokenHarborWalletSnapshot{}, err
+	}
+	if resp.status != http.StatusOK {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor billing page returned status %d for account %d", resp.status, account.ID)
+	}
+
+	return parseTokenHarborWalletPage(resp.body, s.now().UTC())
+}
+
+// PersistWalletSnapshot 把钱包余额快照写进账号 Extra：SSOT 余额键组
+// （th_balance 值 + th_balance_updated_at 时间戳，与 cn_provider_balance_service.go
+// 同款语义）连同 th_wallet_snapshot 结构体，单次 UpdateExtra 原子合并落库（与
+// PersistSnapshot 同口径）。失败关闭路径不得调用本方法。
+func (s *TokenHarborPassService) PersistWalletSnapshot(ctx context.Context, accountID int64, snapshot TokenHarborWalletSnapshot) error {
+	if s == nil || s.accountRepo == nil {
+		return fmt.Errorf("tokenharbor pass service is not configured")
+	}
+	updates := map[string]any{
+		TokenHarborWalletBalanceExtraKey:          snapshot.Value,
+		TokenHarborWalletBalanceUpdatedAtExtraKey: snapshot.ObservedAt.UTC().Format(time.RFC3339),
+		TokenHarborWalletSnapshotExtraKey:         snapshot,
+	}
+	return s.accountRepo.UpdateExtra(ctx, accountID, updates)
+}
+
+// parseTokenHarborWalletPage 从 /dashboard/billing 页面文本解析钱包余额（C6）。
+// hero 组件 \"balance\":<n> 为权威余额；顶栏组件 \"initialBalance\":<n> 交叉校验；
+// lockedBonus 一并解析（如实落键，不参与耗尽判定）。
+//
+// 失败关闭纪律（与订阅链同口径）：hero balance 缺失、顶栏 initialBalance 缺失
+// （页面形态变化）、或两者都解析成功但不一致 → 返回明确错误，不落任何键。
+func parseTokenHarborWalletPage(text string, observedAt time.Time) (TokenHarborWalletSnapshot, error) {
+	balance, ok := tokenHarborWalletFloat(text, tokenHarborWalletBalanceRe)
+	if !ok {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor billing page has no hero balance field (page len=%d)", len(text))
+	}
+	initial, ok := tokenHarborWalletFloat(text, tokenHarborWalletInitialBalanceRe)
+	if !ok {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor billing page has no topbar initialBalance field (page shape changed?)")
+	}
+	if balance != initial {
+		return TokenHarborWalletSnapshot{}, fmt.Errorf("tokenharbor wallet balance mismatch: hero balance=%v topbar initialBalance=%v", balance, initial)
+	}
+	snapshot := TokenHarborWalletSnapshot{
+		Provider:   TokenHarborPassProviderName,
+		Value:      balance,
+		ObservedAt: observedAt,
+	}
+	if locked, ok := tokenHarborWalletFloat(text, tokenHarborWalletLockedBonusRe); ok {
+		snapshot.LockedBonus = locked
+	}
+	return snapshot, nil
+}
+
+// tokenHarborWalletFloat 从文本按正则取首个数值匹配并解析为 float64；缺失或不可
+// 解析均返回 (0,false)，交由调用方按失败关闭处理。
+func tokenHarborWalletFloat(text string, re *regexp.Regexp) (float64, bool) {
+	match := re.FindStringSubmatch(text)
+	if match == nil {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 // ProbeUsageSnapshot 登录态 GET /api/usage/export.csv（session 复用 pass 服务的

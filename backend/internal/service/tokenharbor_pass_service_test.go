@@ -45,6 +45,17 @@ const (
 	testTHFreeTierJSON = `{"reset_at":"2026-10-12T16:06:10.343487+00:00",` +
 		`"plan":{"window_days":7},"plan_used_pct":100,"plan_exhausted":true,` +
 		`"used_pct":12.5,"exhausted":false}`
+
+	// C6 钱包余额采集 fixture：登录态 /dashboard/billing 脱敏 RSC 片段。顶栏组件
+	// 含 userId + initialBalance，hero 组件含 balance + lockedBonus；RSC 转义形态
+	// \"balance\": 必须按页面原文匹配（与订阅链 hasPass 同款转义纪律）。
+	// 0 值（Pass 订阅号未充值稳态）与正值各一组。
+	testTHWalletBillingRSCZero = `1:{\"userId\":\"usr_desensitized_id\",\"initialBalance\":0}` +
+		`2:{\"balance\":0,\"lockedBonus\":0,\"balance_source\":\"paid\"}`
+	testTHWalletBillingRSCPositive = `1:{\"userId\":\"usr_desensitized_id\",\"initialBalance\":123.45}` +
+		`2:{\"balance\":123.45,\"lockedBonus\":10.5,\"balance_source\":\"paid\"}`
+	// 非 RSC 的纯 HTML 页（如形态变化/错误页），无任何 balance 字段。
+	testTHWalletBillingHTML = `<!doctype html><html><body><h1>Dashboard</h1><p>billing not rendered</p></body></html>`
 )
 
 type tokenHarborFakeTH struct {
@@ -65,6 +76,8 @@ type tokenHarborFakeTH struct {
 	usageCSVHits   int
 	usageCSVBody   string
 	usageCSVStatus int
+	// billing 状态码覆盖（C6 钱包采集失败关闭用例）：非 0 = 直接回该状态码。
+	billingStatus int
 	// free-tier（D-QLM-006）：body 为空 = 默认官方样例 JSON；status 非 0 = 覆盖状态码。
 	freeTierHits   int
 	freeTierBody   string
@@ -130,6 +143,10 @@ func (f *tokenHarborFakeTH) handleBilling(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	if f.billingStatus != 0 {
+		w.WriteHeader(f.billingStatus)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html")
 	page := f.billingPage
 	if page == "" {
@@ -184,6 +201,13 @@ func (f *tokenHarborFakeTH) setFreeTierBody(body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.freeTierBody = body
+}
+
+// setBillingStatus 覆盖 /dashboard/billing 响应状态码（C6 钱包采集 404 失败关闭用例）。
+func (f *tokenHarborFakeTH) setBillingStatus(status int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.billingStatus = status
 }
 
 func (f *tokenHarborFakeTH) stats() (loginPosts, billingHits int) {
@@ -1260,4 +1284,163 @@ func TestTokenHarborBackoffReasonTruncatedTo200(t *testing.T) {
 
 	short := "tokenharbor login rejected: Invalid login credentials"
 	require.Equal(t, short, truncateTokenHarborBackoffReason(short))
+}
+
+// ============================================================================
+// C6：TH 钱包余额采集（登录态 /dashboard/billing RSC 页解析）
+// ============================================================================
+
+// 解析成功：0 值 fixture（Pass 订阅号未充值稳态），Value/LockedBonus 均 0。
+func TestParseTokenHarborWalletPage_ZeroValue(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot, err := parseTokenHarborWalletPage(testTHWalletBillingRSCZero, now)
+	require.NoError(t, err)
+	require.Equal(t, TokenHarborPassProviderName, snapshot.Provider)
+	require.Equal(t, 0.0, snapshot.Value, "0 是未充值账号的合法稳态，不得失败关闭")
+	require.Equal(t, 0.0, snapshot.LockedBonus)
+	require.Equal(t, now, snapshot.ObservedAt)
+	require.Empty(t, snapshot.Error)
+}
+
+// 解析成功：正值 fixture，Value/LockedBonus 如实落。
+func TestParseTokenHarborWalletPage_PositiveValue(t *testing.T) {
+	now := time.Now().UTC()
+	snapshot, err := parseTokenHarborWalletPage(testTHWalletBillingRSCPositive, now)
+	require.NoError(t, err)
+	require.InDelta(t, 123.45, snapshot.Value, 0.001, "hero balance 必须如实解析为正值")
+	require.InDelta(t, 10.5, snapshot.LockedBonus, 0.001, "lockedBonus 必须如实解析")
+	require.Equal(t, now, snapshot.ObservedAt)
+}
+
+// 失败关闭（解析层）：无 balance 字段 / 无 initialBalance 字段（页面形态变化）/
+// 顶栏与 hero 不一致 / 纯 HTML 非 RSC → 一律返回明确错误，不落任何键。
+func TestParseTokenHarborWalletPage_FailClosed(t *testing.T) {
+	now := time.Now().UTC()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"no balance field (only hasPass page)", testTHBillingRSC},
+		{"no initialBalance field (hero only)", `2:{\"balance\":5,\"lockedBonus\":0}`},
+		{"balance vs initialBalance mismatch", `1:{\"userId\":\"x\",\"initialBalance\":1}` + `2:{\"balance\":2,\"lockedBonus\":0}`},
+		{"plain HTML, not RSC", testTHWalletBillingHTML},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseTokenHarborWalletPage(tc.body, now)
+			require.Error(t, err, "解析失败/页面形态变化/不一致必须失败关闭返回明确错误")
+		})
+	}
+}
+
+// 端到端成功：登录链 → 登录态 GET /dashboard/billing → 解析 → 落 SSOT 键组
+// （th_balance / th_balance_updated_at）+ 钱包快照（th_wallet_snapshot）。
+func TestTokenHarborProbeWalletBalance_SuccessAndPersist(t *testing.T) {
+	fakeTH := newTokenHarborFakeTH(t, false)
+	upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+	repo := &tokenHarborRepoStub{}
+	svc := NewTokenHarborPassService(repo, nil, upstream)
+	svc.baseURL = fakeTH.server.URL
+	fakeTH.mu.Lock()
+	fakeTH.billingPage = testTHWalletBillingRSCPositive
+	fakeTH.mu.Unlock()
+	account := tokenHarborTestAccount(41)
+	ctx := context.Background()
+
+	snapshot, err := svc.ProbeWalletBalance(ctx, account)
+	require.NoError(t, err)
+	require.InDelta(t, 123.45, snapshot.Value, 0.001)
+	require.InDelta(t, 10.5, snapshot.LockedBonus, 0.001)
+	require.False(t, snapshot.ObservedAt.IsZero())
+
+	require.NoError(t, svc.PersistWalletSnapshot(ctx, account.ID, snapshot))
+	require.Contains(t, repo.updates, int64(41))
+	last := repo.lastUpdate(41)
+	require.Equal(t, TokenHarborWalletBalanceExtraKey, "th_balance")
+	require.Equal(t, 123.45, last[TokenHarborWalletBalanceExtraKey])
+	require.NotEmpty(t, last[TokenHarborWalletBalanceUpdatedAtExtraKey], "th_balance_updated_at 必须落时间戳")
+	require.Contains(t, last, TokenHarborWalletSnapshotExtraKey)
+
+	// 读回快照结构体。
+	stored := &Account{Extra: repo.updates[41]}
+	roundTripped, ok := TokenHarborWalletSnapshotFromExtra(stored)
+	require.True(t, ok)
+	require.InDelta(t, 123.45, roundTripped.Value, 0.001)
+	require.InDelta(t, 10.5, roundTripped.LockedBonus, 0.001)
+	require.Equal(t, snapshot.ObservedAt.UTC().Format(time.RFC3339), roundTripped.ObservedAt.UTC().Format(time.RFC3339))
+
+	require.Equal(t, 1, fakeTH.loginPosts, "首次探测必须走一次登录链")
+	require.Equal(t, 1, fakeTH.billingHits)
+}
+
+// 失败关闭（端到端）：billing 404 / 纯 HTML 非 RSC / 顶栏与 hero 不一致 → 返回
+// 明确错误且不得落任何 SSOT 键与快照（repo.allWrites 必须为空）。
+func TestTokenHarborProbeWalletBalance_FailClosed(t *testing.T) {
+	t.Run("billing 404", func(t *testing.T) {
+		fakeTH := newTokenHarborFakeTH(t, false)
+		upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+		repo := &tokenHarborRepoStub{}
+		svc := NewTokenHarborPassService(repo, nil, upstream)
+		svc.baseURL = fakeTH.server.URL
+		fakeTH.setBillingStatus(http.StatusNotFound)
+
+		_, err := svc.ProbeWalletBalance(context.Background(), tokenHarborTestAccount(42))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "status 404")
+		require.Empty(t, repo.allWrites, "失败关闭不得落任何 Extra 键")
+	})
+
+	t.Run("plain HTML not RSC", func(t *testing.T) {
+		fakeTH := newTokenHarborFakeTH(t, false)
+		upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+		repo := &tokenHarborRepoStub{}
+		svc := NewTokenHarborPassService(repo, nil, upstream)
+		svc.baseURL = fakeTH.server.URL
+		fakeTH.mu.Lock()
+		fakeTH.billingPage = testTHWalletBillingHTML
+		fakeTH.mu.Unlock()
+
+		_, err := svc.ProbeWalletBalance(context.Background(), tokenHarborTestAccount(43))
+		require.Error(t, err)
+		require.Empty(t, repo.allWrites, "失败关闭不得落任何 Extra 键")
+	})
+
+	t.Run("balance vs initialBalance mismatch", func(t *testing.T) {
+		fakeTH := newTokenHarborFakeTH(t, false)
+		upstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+		repo := &tokenHarborRepoStub{}
+		svc := NewTokenHarborPassService(repo, nil, upstream)
+		svc.baseURL = fakeTH.server.URL
+		fakeTH.mu.Lock()
+		fakeTH.billingPage = `1:{\"userId\":\"x\",\"initialBalance\":1}` + `2:{\"balance\":2,\"lockedBonus\":0}`
+		fakeTH.mu.Unlock()
+
+		_, err := svc.ProbeWalletBalance(context.Background(), tokenHarborTestAccount(44))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "mismatch")
+		require.Empty(t, repo.allWrites, "不一致失败关闭不得落任何 Extra 键")
+	})
+}
+
+// 会话复用：已有未过期会话不重复登录（沿用文件内既有会话测试模式）。
+func TestTokenHarborProbeWalletBalance_SessionReuseNoRelogin(t *testing.T) {
+	svc, fakeTH, _ := newTokenHarborTestService(t, false)
+	fakeTH.mu.Lock()
+	fakeTH.billingPage = testTHWalletBillingRSCZero
+	fakeTH.mu.Unlock()
+	account := tokenHarborTestAccount(45)
+	ctx := context.Background()
+
+	_, err := svc.ProbeWalletBalance(ctx, account)
+	require.NoError(t, err)
+	loginPosts, billingHits := fakeTH.stats()
+	require.Equal(t, 1, loginPosts, "首次探测必须登录一次")
+	require.Equal(t, 1, billingHits)
+
+	_, err = svc.ProbeWalletBalance(ctx, account)
+	require.NoError(t, err)
+	loginPosts, billingHits = fakeTH.stats()
+	require.Equal(t, 1, loginPosts, "已有未过期会话必须复用，不得重复登录")
+	require.Equal(t, 2, billingHits, "复用时仍会重新拉 billing 页")
+	require.Contains(t, fakeTH.lastBillingCookie, "sess-1", "billing 必须使用首次登录的会话 cookie")
 }
