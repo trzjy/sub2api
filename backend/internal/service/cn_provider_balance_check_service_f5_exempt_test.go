@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -170,4 +171,100 @@ func TestAccountHoldsHTTP403Recovery(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	require.True(t, accountHoldsHTTP403Recovery(&Account{Extra: f5HTTP403RecoveryExtra(until)}),
 		"合法 F3 恢复记录（键存在 + until 非空）必须豁免")
+}
+
+// ---- 派发单 C4-r2 / R19-F5：同文件其余 IsActive 收集闸门的 F3 豁免收口 ----
+//
+// C4 仅覆盖 :205（collect 闭包）收集闸门；本文件的另两处同类闸门（:304
+// quotaService==nil fallback 收集循环、:317 openai 平台 TH 专项分支）此前仍按
+// !IsActive() 排除 F3 暂停的 TH/Kira 账号，F5「冻结/error 不停刷」对该子集未闭合。
+// 两用例分别锁定这两处闸门：F3 键持有者被收集、无键 error 账号仍排除（不过宽）。
+
+// f5OpenAIThCollectEnv 构造单 openai 平台 TH 账号的 runOnce 环境（:317 openai 专项
+// 收集闸门覆盖用；与 f5THCollectEnv 同基建，仅 platform 换成 openai）。
+func f5OpenAIThCollectEnv(t *testing.T, id int64, status string, schedulable bool, extra map[string]any) (*tokenHarborFakeTH, *CNProviderBalanceCheckService) {
+	t.Helper()
+	fakeTH := newTokenHarborFakeTH(t, false)
+	now := time.Now().UTC()
+	fakeTH.mu.Lock()
+	fakeTH.usageCSVBody = testTHUsageCSV(now)
+	fakeTH.mu.Unlock()
+	thUpstream := &tokenHarborFakeUpstream{server: fakeTH.server}
+
+	acc := tokenHarborTestAccount(id)
+	acc.Platform = PlatformOpenAI
+	acc.Status = status
+	acc.Schedulable = schedulable
+	acc.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	if extra != nil {
+		acc.Extra = extra
+	} else {
+		acc.Extra = map[string]any{}
+	}
+
+	repo := &cnRunOnceExtraRepo{
+		byPlatform: map[string][]Account{PlatformOpenAI: {*acc}},
+		byID:       map[int64]*Account{id: acc},
+	}
+	thSvc := NewTokenHarborPassService(repo, nil, thUpstream)
+	thSvc.baseURL = fakeTH.server.URL
+	thSvc.now = func() time.Time { return now }
+
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, httpUpstream: thUpstream, cfg: &config.Config{}}
+	svc.SetTokenHarborPassService(thSvc)
+	return fakeTH, svc
+}
+
+// 用例 1（:317 openai 平台 TH 专项闸门）：F3 键持有者被收集（快照刷新命中）；
+// 无键 error 账号仍被排除（豁免不得过宽）。两方向各用独立环境，避免聚合命中数
+// 无法区分"哪一个账号被收集"。
+func TestCNBalanceCheckF5Exempt_OpenAIThGateF3CollectedNonF3Excluded(t *testing.T) {
+	// 正例：openai 平台 TH 号 status=error 但持 F3 恢复记录 → 豁免 :317 → 刷新快照。
+	fakeF3, svcF3 := f5OpenAIThCollectEnv(t, 885, StatusError, false,
+		f5HTTP403RecoveryExtra(time.Now().Add(time.Hour)))
+	svcF3.runOnce()
+	require.Equal(t, 1, fakeF3.usageCSVHits,
+		"持 F3 恢复记录的 openai 平台 error TH 账号必须豁免 :317 闸门并被收集（快照刷新）")
+
+	// 负例：无 F3 键的 error TH 号 → 仍被 :317 排除（不刷新）。
+	fakePlain, svcPlain := f5OpenAIThCollectEnv(t, 886, StatusError, false, map[string]any{})
+	svcPlain.runOnce()
+	require.Equal(t, 0, fakePlain.usageCSVHits,
+		"无 F3 键的 openai 平台 error TH 账号必须仍被 :317 排除，豁免不得过宽")
+}
+
+// 用例 2（:304 quotaService==nil fallback 收集循环）：F3 键持有者被收集
+// （dashboard 余额探测请求发出即证明收集）；无键 error 账号仍排除（无请求）。
+// 用可区分 JWT 断言被收集者确为 F3 账号。
+func TestCNBalanceCheckF5Exempt_FallbackKiraGateF3CollectedNonF3Excluded(t *testing.T) {
+	buildKira := func(id int64, jwt string, extra map[string]any) Account {
+		return Account{ID: id, Platform: PlatformZhipu, Type: AccountTypeAPIKey, Status: StatusError, Schedulable: false,
+			Credentials: map[string]any{
+				"account_mode":  AccountModePayG,
+				"base_url":      "https://kiraai.vn/api/v1",
+				"kira_jwt":      jwt,
+				"kira_email":    "user@example.com",
+				"kira_password": "pw-secret",
+			},
+			Extra: extra}
+	}
+	f3Kira := buildKira(887, "f3-jwt", f5HTTP403RecoveryExtra(time.Now().Add(time.Hour)))
+	plainKira := buildKira(888, "plain-jwt", map[string]any{})
+
+	repo := &cnRunOnceExtraRepo{byPlatform: map[string][]Account{PlatformZhipu: {f3Kira, plainKira}}}
+	upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			return http.StatusOK, kiraUsageSummaryFixture
+		}
+		return http.StatusNotFound, `{}`
+	}}
+	balanceSvc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+	// quotaService 缺位 → zhipu/minimax 平台走 :304 fallback 补收分支。
+	svc := &CNProviderBalanceCheckService{accountRepo: repo, balanceService: balanceSvc, cfg: &config.Config{}}
+	svc.runOnce()
+
+	require.Len(t, upstream.requests, 1,
+		"仅 F3 键持有者必须被 fallback 收集，无键 error 账号仍排除")
+	require.Equal(t, "Bearer f3-jwt", upstream.requests[0].Header.Get("Authorization"),
+		"被收集的必须是持 F3 恢复记录的账号")
 }

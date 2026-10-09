@@ -301,7 +301,9 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			}
 			for i := range accounts {
 				account := &accounts[i]
-				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
+				// R19-F5 豁免（派发单 C4-r2）：F3 暂停账号不因 status!=active 被此闸门排除
+				//（与 :205 同一豁免类）。
+				if !account.IsActive() && !accountHoldsHTTP403Recovery(account) || IsOllamaCloudUsageAccount(account) {
 					continue
 				}
 				if accountIsKiraBaseURL(account) && !s.shouldSkipKiraCollect(now, account) {
@@ -324,7 +326,9 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		} else {
 			for i := range accounts {
 				account := &accounts[i]
-				if !account.IsActive() || IsOllamaCloudUsageAccount(account) {
+				// R19-F5 豁免（派发单 C4-r2）：F3 暂停账号不因 status!=active 被此闸门排除
+				//（与 :205 同一豁免类）。
+				if !account.IsActive() && !accountHoldsHTTP403Recovery(account) || IsOllamaCloudUsageAccount(account) {
 					continue
 				}
 				if accountIsTokenHarborBaseURL(account) && !s.shouldSkipTokenHarborCollect(now, account) {
