@@ -1310,11 +1310,23 @@ func (s *GatewayService) withWindowCostPrefetch(ctx context.Context, accounts []
 
 // isAccountSchedulableForQuota 检查账号是否在配额限制内
 // 适用于配置了 quota_limit 的 apikey 和 bedrock 类型账号
+//
+// F6 扩展（方案 §3.1）：保留既有 apikey/bedrock 配额分支（语义不变），在其放行
+// 侧追加账号级额度维度门。无额度快照账号维度列表为空 → 放行，逐字节等同现状
+// （Anthropic OAuth/纯 API key/Bedrock 等）。
 func (s *GatewayService) isAccountSchedulableForQuota(account *Account) bool {
-	if !account.IsAPIKeyOrBedrock() {
-		return true
+	if account.IsAPIKeyOrBedrock() && account.IsQuotaExceeded() {
+		return false
 	}
-	return !account.IsQuotaExceeded()
+	return s.isAccountSchedulableForQuotaDimensions(account)
+}
+
+// isAccountSchedulableForQuotaDimensions F6 调度前置维度门（方案 §3.1）。
+//
+// 只消费 scope=account 的账号额度维度；纯读快照，门内零网络请求、零探针。
+// 解析函数见 account_quota_dimensions.go（account_quota_dimensions 解析 + 判定表）。
+func (s *GatewayService) isAccountSchedulableForQuotaDimensions(account *Account) bool {
+	return EvaluateAccountQuotaDimensionGate(ResolveAccountQuotaDimensions(account, time.Now())) == QuotaDimensionGateAllow
 }
 
 // isAccountSchedulableForWindowCost 检查账号是否可根据窗口费用进行调度
