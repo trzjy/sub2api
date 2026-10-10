@@ -167,10 +167,20 @@ func http403RemoveRecoveryWithRevisionExpr() string {
 // 表达式统一以旧行取值，故二者在同一语句内同点出生、值恒等——正是 CAS 条件之三
 // （键内 state_revision = 当前全局 sched_state_revision）的比较前提（R18-F2/R19-F2）。
 func http403MarkRecoveryWithRevisionExpr(payloadPlaceholder string) string {
+	recoveryPath := "'{" + HTTP403RecoveryExtraKey + "}'"
 	recoveryRevisionPath := "'{" + HTTP403RecoveryExtraKey + "," + SchedStateRevisionExtraKey + "}'"
 	globalPath := "'{" + SchedStateRevisionExtraKey + "}'"
 	next := schedStateRevisionNextValueExpr()
-	return "jsonb_set(jsonb_set(COALESCE(extra, '{}'::jsonb) || " + payloadPlaceholder + "::jsonb, " +
+	// 负载必须合并进 http_403_recovery **嵌套键**，不可直接与 extra 顶层拼接。
+	//
+	// 事故先例（2026-10-10 生产）：曾写作 `COALESCE(extra,'{}') || payload::jsonb`。
+	// jsonb `||` 是顶层合并，会把 {until,generation,reason,owner} 平铺到 extra 顶层，
+	// 而下游 ListHTTP403RecoveryDueAccounts 读的是 extra->'http_403_recovery'->>'until'
+	// ——写入与读取键路径不一致，候选查询恒 NULL、命中 0，F3 sweep 从不探测，
+	// 403 账号永久停在 error 态（表现为「F3 已部署但恢复链完全不工作」）。
+	// 此处改用 jsonb_set 显式定位嵌套路径，保证读写键路径同构。
+	return "jsonb_set(jsonb_set(jsonb_set(COALESCE(extra, '{}'::jsonb), " +
+		recoveryPath + ", COALESCE(extra->'" + HTTP403RecoveryExtraKey + "', '{}'::jsonb) || " + payloadPlaceholder + "::jsonb, true), " +
 		recoveryRevisionPath + ", " + next + ", true), " + globalPath + ", " + next + ", true)"
 }
 

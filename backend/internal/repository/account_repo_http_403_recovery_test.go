@@ -488,3 +488,44 @@ func TestAccountRepository_ListLegacyHTTP403ErrorAccounts_SQLShape(t *testing.T)
 	require.Equal(t, "Access forbidden (403):%", (*args)[0])
 	require.Equal(t, 50, (*args)[1])
 }
+
+// TestAccountRepository_F3RecoveryKeyPathReadWriteSymmetry 钉死 F3 恢复键的读写路径同构
+// （2026-10-10 生产事故回归门禁）。
+//
+// 事故形态：写入侧曾把负载用 jsonb `||` 与 extra **顶层**合并，而读取侧候选查询读的是
+// extra->'http_403_recovery'->>'until'。键路径不一致 → 候选查询恒 NULL、命中 0 条 →
+// sweep 从不探测 → 403 账号永久停在 error 态，且 legacy init 因「排除已持键者」排不掉它
+// 而每轮重复初始化（代际计数疯涨）。整个过程无任何报错，静默失效。
+//
+// 本用例不校验美观性，只钉死「写入落点 == 读取落点」这一点，任一侧漂移即红。
+func TestAccountRepository_F3RecoveryKeyPathReadWriteSymmetry(t *testing.T) {
+	t.Run("write side merges payload into nested recovery key", func(t *testing.T) {
+		writeExpr := normalizeSQLWhitespace(http403MarkRecoveryWithRevisionExpr("$5"))
+
+		require.Contains(t, writeExpr, "jsonb_set(",
+			"负载须经 jsonb_set 定位写入，不可裸拼")
+		require.Contains(t, writeExpr, "'{"+HTTP403RecoveryExtraKey+"}'",
+			"jsonb_set 路径必须指向 http_403_recovery 嵌套键")
+		require.Contains(t, writeExpr, "extra->'"+HTTP403RecoveryExtraKey+"'",
+			"须与键内既有内容合并（保留 state_revision 等）")
+		// 负向断言须精确命中「顶层合并」形态：COALESCE(extra, '{}') || payload。
+		// 注意嵌套合并的正确写法 COALESCE(extra->'http_403_recovery', '{}') || payload
+		// 同样含 "'{}'::jsonb) ||"，用宽松子串会误伤正确实现——故此处以 `extra,` 逗号锚定。
+		require.NotContains(t, writeExpr, "COALESCE(extra, '{}'::jsonb) ||",
+			"禁止顶层合并：payload 平铺到 extra 顶层会让读取侧恒 NULL（生产事故形态）")
+	})
+
+	t.Run("read side queries the same nested path", func(t *testing.T) {
+		repo, captured, _, mock := captureRepoForQuery(t)
+		mock.ExpectQuery("SELECT id FROM accounts").
+			WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+		_, err := repo.ListHTTP403RecoveryDueAccounts(context.Background(), time.Now(), 10)
+
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+		readSQL := normalizeSQLWhitespace(*captured)
+		require.Contains(t, readSQL, "extra->'"+HTTP403RecoveryExtraKey+"'->>'until'",
+			"读取路径须与写入落点同构，否则候选查询命中 0")
+	})
+}
