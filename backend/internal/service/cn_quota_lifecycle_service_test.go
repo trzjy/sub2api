@@ -3230,3 +3230,112 @@ func TestConcurrent402FreezeGenerationSerializesWithinInstance(t *testing.T) {
 	require.True(t, parked, "并发冻结期间保持停调")
 	require.Equal(t, 0, repo.clearCalls)
 }
+
+// ---------- 终审 R2：冻结写入的持久化严格性 + 锁内最新余额（confirmExhaustedAuthoritative） ----------
+
+// kiraAccountWithFreshVND 返回「repository 内已落库 fresh>0 余额」的 Kira 账号夹具
+// （R2 两条用例的共同起点：冻结当刻 fresh>0 ⇒ immediate due + 当场消费登记）。
+func kiraAccountWithFreshVND(id int64, now time.Time) *Account {
+	a := newQuotaLifecycleKiraAccount(id)
+	a.Extra[cnExtraKey(a.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	a.Extra[cnExtraKey(a.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+	return a
+}
+
+func kira402AccountSignal(a *Account, msg string) QuotaExhaustionSignal {
+	return QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: a.Platform, Msg: msg}
+}
+
+// TestKira402FreezeImmediateConsumePersistFailureFailsClosed R2-#1：冻结当刻 fresh>0
+// （含 immediate 消费登记）的冻结写入走 strict 持久化——UpdateExtra 失败 ⇒ 冻结入口
+// 返回错误、无假消费、落库态不含 consumed=true。
+func TestKira402FreezeImmediateConsumePersistFailureFailsClosed(t *testing.T) {
+	now := quotaLifecycleBase
+	ctx := context.Background()
+
+	kira := kiraAccountWithFreshVND(208, now)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	require.Error(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", kira402AccountSignal(kira, "402")),
+		"含 immediate 消费登记的冻结落库失败必须上抛（冻结入口不得假成功）")
+
+	// 无假消费：落库态不含 consumed=true（本次写入整体未落库）。
+	persisted, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	if ok {
+		require.False(t, persisted.ImmediateDueConsumed,
+			"落库失败时不得留下 consumed=true 的假成功（否则重启后同一边沿重复消费）")
+	}
+	require.Equal(t, 0, repo.probeDueWriteTotal(), "落库失败 ⇒ 零 probe_due 写入")
+	repo.setUpdateExtraErr(nil)
+}
+
+// TestKira402FreezeImmediateConsumePersistRetryConsumesOnce R2-#1 续：解除失败注入后
+// 重试同一冻结（下一轮响应式 402 重入）成功，且 immediate 消费恰一次。
+func TestKira402FreezeImmediateConsumePersistRetryConsumesOnce(t *testing.T) {
+	now := quotaLifecycleBase
+	immediate := now.UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	kira := kiraAccountWithFreshVND(208, now)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	// 1) 首次冻结：UpdateExtra 注入失败 ⇒ 失败关闭（零写入）。
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	require.Error(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", kira402AccountSignal(kira, "402")))
+	require.Equal(t, 0, repo.probeDueWriteTotal())
+
+	// 2) 解除注入后重试：成功冻结，immediate due + consumed 落库恰一次。
+	repo.setUpdateExtraErr(nil)
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402 again", kira402AccountSignal(kira, "402 again")))
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, immediate, st.ProbeDueAt)
+	require.True(t, st.ImmediateDueConsumed)
+	require.Equal(t, 1, repo.probeDueWriteCount(immediate), "immediate 消费恰一次（失败轮次未计数）")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "重试成功轮次账号保持冻结")
+	require.Equal(t, 0, repo.clearCalls)
+}
+
+// TestKira402FreezeImmediateDueUsesLatestPersistedBalance R2-#2：交错顺序下冻结必须
+// 基于锁内最新持久对象计算 immediate due——余额先落库 → fresh 回调因未冻结 no-op →
+// 以旧账号对象进入冻结 ⇒ 仍从 repository 最新余额得到 immediate due 且消费一次。
+func TestKira402FreezeImmediateDueUsesLatestPersistedBalance(t *testing.T) {
+	now := quotaLifecycleBase
+	immediate := now.UTC().Format(time.RFC3339)
+	daily := kiraNextDailyReset(now).UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	kira := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	// 冻结入口持有的旧账号快照（余额落库前）：独立 Extra，不含 VND 余额键。
+	stale := *kira
+	stale.Extra = map[string]any{}
+
+	// 1) 余额先落库（repository 最新对象 fresh>0）。
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+
+	// 2) fresh 回调因未冻结 no-op（守门 1：非 402 冻结账号零写入）。
+	require.NoError(t, svc.OnKiraFreshBalanceObserved(ctx, kira))
+	_, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.False(t, ok, "未冻结 ⇒ fresh 回调零写入")
+	require.Equal(t, 0, repo.probeDueWriteTotal())
+
+	// 3) 以旧账号对象进入 402 权威冻结：仍须从 repository 最新余额得到 immediate due。
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, &stale, "402", kira402AccountSignal(&stale, "402")))
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, immediate, st.ProbeDueAt,
+		"旧账号快照不得把本应 immediate 的冻结写成每日 due（got daily=%s）", daily)
+	require.True(t, st.ImmediateDueConsumed, "冻结当刻 fresh>0 ⇒ 当场登记已消费")
+	require.Equal(t, 1, repo.probeDueWriteCount(immediate), "immediate 消费恰一次")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "交错顺序下账号必须被冻结")
+	require.Equal(t, 0, repo.clearCalls)
+}

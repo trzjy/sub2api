@@ -529,11 +529,13 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 	// 本次 402 权威冻结写入开启新冻结代际（freeze_generation），代际内 fresh>0 的
 	// immediate due 至多消费一次——冻结即 fresh>0 时当场登记已消费（due=now），
 	// 后续同值重观察不再提前；fresh≤0 → due = 账号每日 reset_at。
-	probeDueAt, immediateConsumed := s.resolveFreezeTimeProbeDue(account, now)
-	// 新冻结代际的 generation+1 计算纳入 dueMu 保护范围（检查单 #3 c）：单实例内
-	// 并发 402 冻结不再各自从旧 generation 计算（读-改-写在同一互斥域内完成，且
-	// 代际序号从最新持久状态取，避免用陈旧的内存 extra 覆盖并发者已写入的代际）。
-	// 多实例 CAS（跨进程并发递增丢失更新）仍是 Phase 2 残余，本卡不建存储层 CAS。
+	//
+	// probe_due / consumed / generation 三者的读-改-写统一在 dueMu 互斥域内完成，
+	// 且全部基于锁内 GetByID 的最新持久账号对象（检查单 #3 c + R2-#2）：
+	//   - generation 不再各自从旧 generation 算出重复值（单实例内单调递增，多实例
+	//     CAS 仍是 Phase 2 残余，本卡不建存储层 CAS）；
+	//   - 余额解析不再用锁外传入的旧账号快照：杜绝「余额先落库 → fresh 回调因未
+	//     冻结 no-op → 冻结入口持旧余额」的交错把本应 immediate 的冻结写成每日 due。
 	s.dueMu.Lock()
 	defer s.dueMu.Unlock()
 	latest := account
@@ -546,7 +548,8 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 	if prev, ok := cnQuotaLifecycleStateFromExtra(latest.Extra); ok && prev != nil && prev.FreezeGeneration > 0 {
 		generation = prev.FreezeGeneration + 1
 	}
-	s.persistLifecycleState(ctx, account.ID, &cnQuotaLifecycleState{
+	probeDueAt, immediateConsumed := s.resolveFreezeTimeProbeDue(latest, now)
+	freezeState := &cnQuotaLifecycleState{
 		State:                cnQuotaLifecycleStateExhausted,
 		RecoveryAt:           cnQuotaRFC3339OrEmpty(recoveryAt, known),
 		RecoverySource:       source,
@@ -557,7 +560,18 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 		FreezeSource:         cnQuotaFreezeSource402Account,
 		FreezeGeneration:     generation,
 		ImmediateDueConsumed: immediateConsumed,
-	})
+	}
+	if immediateConsumed {
+		// 含 immediate 消费登记的冻结写入走 strict 持久化并上抛失败（R2-#1）：
+		// UpdateExtra 失败 ⇒ 本次冻结迁移不成立（失败关闭，下轮 sweep/响应式
+		// 重试），不得出现「内存 consumed=true 但落库失败」的假成功——否则重启后
+		// 同一边沿可重复消费。不含消费登记的普通冻结写入保持既有吞错路径。
+		if err := s.persistLifecycleStateStrict(ctx, account.ID, freezeState); err != nil {
+			return fmt.Errorf("cn quota lifecycle persist 402 authoritative freeze for account %d: %w", account.ID, err)
+		}
+	} else {
+		s.persistLifecycleState(ctx, account.ID, freezeState)
+	}
 	s.convergeTHStockRecovery(ctx, account)
 	s.untrack(account.ID)
 	s.ensureQuotaAlertFiring(ctx, account, upstreamMsg, reason)
