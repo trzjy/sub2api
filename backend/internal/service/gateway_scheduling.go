@@ -477,6 +477,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 				})
 				shuffleWithinSortGroups(routingAvailable)
+				// 免费优先分区（方案 §3.5）：Layer 1 模型路由候选消费同一分区原语。
+				partitionFreeRemainingFirstWithLoad(routingAvailable)
 
 				// 4. 尝试获取槽位
 				for _, item := range routingAvailable {
@@ -1730,6 +1732,126 @@ func selectByLRU(accounts []accountWithLoad, preferOAuth bool) *accountWithLoad 
 	return &accounts[selectedIdx]
 }
 
+// partitionFreeRemainingFirst 是「调用免费优先」的稳定分区原语（方案 §3.5）。
+//
+// 输入 = 已完成既有排序（shuffle/lastUsed/OAuth）的基准序列。按（优先级，CN 平台）
+// 二元组收集该平台在基准序列中的固定槽位集合；槽位内做 stable partition：持有
+// confirmed free-remaining（scope=account）维度的账号在前，其余（exhausted/unknown/
+// 无维度）在后，桶内保持基准序列相对序；写回相同槽位。非 CN 账号、其他优先级的
+// 槽位与账号一律不动（CN free 账号不占用其他平台/优先级槽位）。
+//
+// 判定口径与 §3.1 门一致（同数据源 ResolveAccountQuotaDimensions）：只认 confirmed
+// remaining 且未被明确证伪（servable≠false）的 free 维度；unknown/exhausted 不算。
+// 无维度快照的账号（含快照重建路径 Extra 被裁剪的账号）维度为空 ⇒ 进后桶但不被
+// 判定为 free ⇒ 整点 fail-open（放行、无偏好）。
+//
+// 分区保持桶内相对序，故既有 shuffle 在分区之前的基准排序内执行时，shuffle 后的
+// free 分桶仍成立（方案 §3.5 第 3 条）。
+func partitionFreeRemainingFirst(accounts []*Account) {
+	if len(accounts) < 2 {
+		return
+	}
+	now := time.Now()
+	type slotKey struct {
+		priority int
+		platform string
+	}
+	slots := make(map[slotKey][]int)
+	keys := make([]slotKey, 0, 4)
+	for i, acc := range accounts {
+		if !isCNQuotaAccountFamily(acc) {
+			continue
+		}
+		key := slotKey{priority: acc.Priority, platform: acc.Platform}
+		if _, ok := slots[key]; !ok {
+			keys = append(keys, key)
+		}
+		slots[key] = append(slots[key], i)
+	}
+	for _, key := range keys {
+		idxs := slots[key]
+		if len(idxs) < 2 {
+			continue
+		}
+		free := make([]*Account, 0, len(idxs))
+		rest := make([]*Account, 0, len(idxs))
+		for _, idx := range idxs {
+			if hasConfirmedFreeAccountRemaining(accounts[idx], now) {
+				free = append(free, accounts[idx])
+			} else {
+				rest = append(rest, accounts[idx])
+			}
+		}
+		if len(free) == 0 || len(rest) == 0 {
+			continue // 全 free 或全非 free：分区恒等，保持基准序列
+		}
+		w := 0
+		for _, acc := range free {
+			accounts[idxs[w]] = acc
+			w++
+		}
+		for _, acc := range rest {
+			accounts[idxs[w]] = acc
+			w++
+		}
+	}
+}
+
+// partitionFreeRemainingFirstWithLoad 是 partitionFreeRemainingFirst 在
+// accountWithLoad 候选序列上的适配：抽出基准账号序列交给同一分区原语，再把
+// (账号, 负载信息) 对按分区结果写回相同槽位（负载信息与账号严格同槽移动）。
+func partitionFreeRemainingFirstWithLoad(items []accountWithLoad) {
+	if len(items) < 2 {
+		return
+	}
+	accounts := make([]*Account, len(items))
+	for i := range items {
+		accounts[i] = items[i].account
+	}
+	original := append([]accountWithLoad(nil), items...)
+	partitionFreeRemainingFirst(accounts)
+	index := make(map[*Account]int, len(original))
+	for i := range original {
+		index[original[i].account] = i
+	}
+	for i := range items {
+		items[i] = original[index[accounts[i]]]
+	}
+}
+
+// hasConfirmedFreeAccountRemaining 报告账号是否持有 confirmed remaining 的
+// scope=account free 维度（§3.1 门同口径：remaining 且 servable≠false）。
+// unknown / exhausted / 无维度一律不算。
+func hasConfirmedFreeAccountRemaining(account *Account, now time.Time) bool {
+	for _, dim := range ResolveAccountQuotaDimensions(account, now) {
+		if dim.Scope != QuotaDimensionScopeAccount || dim.Kind != QuotaDimensionKindFree {
+			continue
+		}
+		if dim.HasRemaining() && !dim.ServableFalsified() {
+			return true
+		}
+	}
+	return false
+}
+
+// isCNQuotaAccountFamily 报告账号是否属于 CN 额度账号族：国产 OpenAI 兼容供应商
+// （kimi/zhipu/deepseek/minimax）、Kira / TokenHarbor 上游、Coding Plan 供应商。
+// 只有这些账号族的 Extra 可能承载 scope=account 的 free 维度；其余账号族维度列表
+// 恒为空 ⇒ 不进槽位、不参与分区（其槽位与相对序均不动）。
+func isCNQuotaAccountFamily(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	if account.IsCNProvider() {
+		return true
+	}
+	if accountIsTokenHarborBaseURL(account) {
+		return true
+	}
+	// resolveCNQuotaProvider 覆盖 Kira（base_url 事实源）与火山/Coding Plan 供应商。
+	return resolveCNQuotaProvider(account) != ""
+}
+
 func sortAccountsByPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
 	sort.SliceStable(accounts, func(i, j int) bool {
 		a, b := accounts[i], accounts[j]
@@ -1751,6 +1873,9 @@ func sortAccountsByPriorityAndLastUsed(accounts []*Account, preferOAuth bool) {
 		}
 	})
 	shuffleWithinPriorityAndLastUsed(accounts, preferOAuth)
+	// 免费优先分区必须在既有 shuffle 之后：分区只做桶内稳定重排，shuffle 后的
+	// free 分桶仍然成立（方案 §3.5 第 3 条）。
+	partitionFreeRemainingFirst(accounts)
 }
 
 // shuffleWithinSortGroups 对排序后的 accountWithLoad 切片，按 (Priority, LoadRate, LastUsedAt) 分组后组内随机打乱。
@@ -1857,8 +1982,10 @@ func (s *GatewayService) sortCandidatesForFallback(accounts []*Account, preferOA
 		// 先按优先级排序，然后在同优先级内随机打乱
 		sortAccountsByPriorityOnly(accounts, preferOAuth)
 		shuffleWithinPriority(accounts)
+		// 分区在 shuffle 之后，保持桶内相对序。
+		partitionFreeRemainingFirst(accounts)
 	} else {
-		// 默认按最后使用时间排序
+		// 默认按最后使用时间排序（分区在同函数末端的 shuffle 之后完成）
 		sortAccountsByPriorityAndLastUsed(accounts, preferOAuth)
 	}
 }

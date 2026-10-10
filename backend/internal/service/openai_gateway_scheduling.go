@@ -1284,6 +1284,8 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		}
 		return s.isBetterAccount(a, b)
 	})
+	// 免费优先分区（方案 §3.5）：legacy 主选序列消费同一分区原语。
+	partitionFreeRemainingFirst(eligible)
 	return eligible[0], compactBlocked, filterStats
 }
 
@@ -1579,6 +1581,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(available[i].account, available[j].account) < 0
 			})
 		}
+		// 免费优先分区（方案 §3.5）：在所有既有排序之后消费分区原语。
+		partitionFreeRemainingFirstWithLoad(available)
 
 		selectionOrder := make([]accountWithLoad, 0, len(available))
 		if requireCompact {
@@ -1635,6 +1639,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(ordered[i], ordered[j]) < 0
 			})
 		}
+		// 免费优先分区（方案 §3.5）：负载批量失败回退序列消费同一分区原语。
+		partitionFreeRemainingFirst(ordered)
 		if requireCompact {
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
@@ -1685,6 +1691,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return rateOrder.compare(candidates[i], candidates[j]) < 0
 		})
 	}
+	// 免费优先分区（方案 §3.5）：兜底排队序列消费同一分区原语。
+	partitionFreeRemainingFirst(candidates)
 	if requireCompact {
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}

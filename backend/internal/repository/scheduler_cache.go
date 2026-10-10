@@ -954,7 +954,13 @@ func filterSchedulerCredentials(credentials map[string]any) map[string]any {
 	if len(credentials) == 0 {
 		return nil
 	}
-	keys := []string{"model_mapping", "compact_model_mapping", "api_key", "project_id", "oauth_type", "plan_type"}
+	// base_url 是上游 URL（非机密），且是 Kira/TH/火山分支的唯一事实源：
+	// ResolveAccountQuotaDimensions 靠 accountIsKiraBaseURL / accountIsTokenHarborBaseURL
+	// 与 resolveCNQuotaProvider（火山按凭据 base_url 强制识别）读 Credentials.base_url
+	// 选分支。裁掉它 ⇒ 投影账号一律走 coding-plan 默认分支 ⇒ kira_usage_snapshot /
+	// th_pass_snapshot 无人消费 ⇒ 免费维度在主路径为空。
+	// api_key / session / cookie / token 类敏感字段继续过滤（见对应负例测试）。
+	keys := []string{"model_mapping", "compact_model_mapping", "api_key", "project_id", "oauth_type", "plan_type", "base_url"}
 	filtered := make(map[string]any)
 	for _, key := range keys {
 		if value, ok := credentials[key]; ok && value != nil {
@@ -1024,6 +1030,97 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",
+		// CN 额度快照键族（G2-R2）：候选过滤(ListSchedulableAccounts)读的是本投影，
+		// 而 ResolveAccountQuotaDimensions 只消费 Extra 上的这些键输出账号级额度维度
+		// （§2.2 数据源映射）。裁掉它们 ⇒ 维度列表为空 ⇒ §3.1 F6 门与 §3.5 免费优先
+		// 在负载感知主路径 fail-open（观察 #1）。均为标量/小快照，无会话态敏感数据。
+		//
+		// Kira（kiraai.vn）：免费池快照 + 探测冷却。
+		"kira_usage_snapshot",
+		"kira_probe_cooldown_until",
+		// 平台前缀式 {platform}_balance* 余额键族（cnExtraKey(platform, suffix)，
+		// suffix 见 cnBalanceExtraSuffix*）。Kira 付费 VND 三态与 relay/payg 付费
+		// 维度都读 account.Platform 前缀，故按 CN 供应商平台枚举逐前缀列出。
+		"kimi_balance",
+		"kimi_balance_updated_at",
+		"kimi_balance_available",
+		"kimi_balance_unlimited",
+		"kimi_balance_currency",
+		"kimi_balance_low",
+		"kimi_balances",
+		"deepseek_balance",
+		"deepseek_balance_updated_at",
+		"deepseek_balance_available",
+		"deepseek_balance_unlimited",
+		"deepseek_balance_currency",
+		"deepseek_balance_low",
+		"deepseek_balances",
+		"zhipu_balance",
+		"zhipu_balance_updated_at",
+		"zhipu_balance_available",
+		"zhipu_balance_unlimited",
+		"zhipu_balance_currency",
+		"zhipu_balance_low",
+		"zhipu_balances",
+		"minimax_balance",
+		"minimax_balance_updated_at",
+		"minimax_balance_available",
+		"minimax_balance_unlimited",
+		"minimax_balance_currency",
+		"minimax_balance_low",
+		"minimax_balances",
+		// CN 供应商 Coding Plan 滚动窗口用量键族（G2-R3）：由 cnQuotaExtraUpdates
+		// 按 provider 前缀落键（{provider}_5h_*/weekly_*/monthly_*/usage_updated_at，
+		// 后缀语义见 service.cnExtraSuffix*）。候选过滤(ListSchedulableAccounts)读的是
+		// 本投影，而 resolveCodingPlanQuotaDimensions 只消费 Extra 上的这些键产出
+		// 5h/weekly/monthly 免费维度。裁掉它们 ⇒ 该三个维度缺失 ⇒ F6 门与免费优先
+		// 对 coding-plan 账号 fail-open。provider 枚举 = G2-R2 同一 CN 供应商清单
+		// （kimi/deepseek/zhipu/minimax）+ 火山（volcano，cnQuotaExtraUpdates 的实际
+		// 落键 provider，且只能靠凭据 base_url 判定）。均为标量/时间戳，无会话态数据。
+		"kimi_5h_used_percent",
+		"kimi_5h_reset_at",
+		"kimi_weekly_used_percent",
+		"kimi_weekly_reset_at",
+		"kimi_monthly_used_percent",
+		"kimi_monthly_reset_at",
+		"kimi_usage_updated_at",
+		"deepseek_5h_used_percent",
+		"deepseek_5h_reset_at",
+		"deepseek_weekly_used_percent",
+		"deepseek_weekly_reset_at",
+		"deepseek_monthly_used_percent",
+		"deepseek_monthly_reset_at",
+		"deepseek_usage_updated_at",
+		"zhipu_5h_used_percent",
+		"zhipu_5h_reset_at",
+		"zhipu_weekly_used_percent",
+		"zhipu_weekly_reset_at",
+		"zhipu_monthly_used_percent",
+		"zhipu_monthly_reset_at",
+		"zhipu_usage_updated_at",
+		"minimax_5h_used_percent",
+		"minimax_5h_reset_at",
+		"minimax_weekly_used_percent",
+		"minimax_weekly_reset_at",
+		"minimax_monthly_used_percent",
+		"minimax_monthly_reset_at",
+		"minimax_usage_updated_at",
+		"volcano_5h_used_percent",
+		"volcano_5h_reset_at",
+		"volcano_weekly_used_percent",
+		"volcano_weekly_reset_at",
+		"volcano_monthly_used_percent",
+		"volcano_monthly_reset_at",
+		"volcano_usage_updated_at",
+		// TH（tokenharbor.ai）：Pass/用量快照 + 钱包余额三态 + 风控退避。
+		service.TokenHarborPassSnapshotExtraKey,
+		service.TokenHarborUsageSnapshotExtraKey,
+		service.TokenHarborWalletBalanceExtraKey,
+		service.TokenHarborWalletBalanceUpdatedAtExtraKey,
+		"th_balance_low",
+		service.TokenHarborProbeBackoffUntilExtraKey,
+		// CN 额度耗尽状态机状态（7 个标量字段，F6 门/调度消费）。
+		"cn_quota_lifecycle",
 	}
 	filtered := make(map[string]any)
 	for _, key := range keys {

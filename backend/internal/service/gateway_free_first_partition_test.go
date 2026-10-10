@@ -1,0 +1,339 @@
+//go:build unit
+
+package service
+
+// 调用免费优先排序（方案 §3.5）单元测试：同平台 CN 子序列稳定分区。
+//
+// 覆盖：
+//   - 同平台 CN 子序列 free 在前、桶内相对序稳定；
+//   - 混合平台交错序列（Kira(non-free), Anthropic, Kira(free)）：两 Kira 槽位内交换，
+//     Anthropic 槽位不动；
+//   - 跨优先级互不影响，非 CN 账号位置与相对序均不变；
+//   - unknown / exhausted / servable=false 均不算 free-remaining；
+//   - 缺 Extra（无维度快照）入口 fail-open：无偏好、逐位不变；
+//   - sticky 命中 free/non-free 两类账号均不重排；
+//   - 各排序入口（fallback 兜底排序 / legacy 主选 / accountWithLoad 适配）消费同一分区原语。
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+// ---- 夹具 ----
+
+func ffRecentRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
+
+func ffStaleRFC3339() string {
+	return time.Now().Add(-(cnQuotaBalanceFreshnessThresholdMinutes + 5) * time.Minute).UTC().Format(time.RFC3339)
+}
+
+// ffKiraAccount 构造 Kira（kiraai.vn）上游账号。platform 传 PlatformKimi 走国产
+// 供应商枚举，传 PlatformOther 走 base_url 事实源（两种都属 CN 额度账号族）。
+func ffKiraAccount(id int64, platform string, priority int) *Account {
+	return &Account{
+		ID:          id,
+		Platform:    platform,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    priority,
+		Credentials: map[string]any{"api_key": "kira-test", "base_url": "https://kiraai.vn/api/v1"},
+		Extra:       map[string]any{},
+	}
+}
+
+// ffKiraFreeRemaining 新鲜且有剩余（used_percent<100）的免费池快照。
+func ffKiraFreeRemaining(account *Account) *Account {
+	account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
+		"used_percent": 10.0,
+		"fetched_at":   ffRecentRFC3339(),
+	}
+	return account
+}
+
+// ffKiraFreeExhausted 新鲜且已耗尽（used_percent>=100）。
+func ffKiraFreeExhausted(account *Account) *Account {
+	account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
+		"used_percent": 100.0,
+		"fetched_at":   ffRecentRFC3339(),
+	}
+	return account
+}
+
+// ffKiraFreeUnknown 快照过期 ⇒ 免费维度存在但 unknown（不是 remaining）。
+func ffKiraFreeUnknown(account *Account) *Account {
+	account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
+		"used_percent": 10.0,
+		"fetched_at":   ffStaleRFC3339(),
+	}
+	return account
+}
+
+// ffKiraFreeServableFalse 免费池有余量，但新鲜 VND<=0 ⇒ servable=false：
+// 按 §3.1 同口径，该维度不算「confirmed free-remaining」。
+func ffKiraFreeServableFalse(account *Account) *Account {
+	account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
+		"used_percent": 10.0,
+		"fetched_at":   ffRecentRFC3339(),
+	}
+	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)] = 0.0
+	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated)] = ffRecentRFC3339()
+	return account
+}
+
+// ffNonCNAccount 非 CN 账号族（维度列表恒为空）：分区不得触碰其槽位。
+func ffNonCNAccount(id int64, platform string, priority int) *Account {
+	return &Account{
+		ID:          id,
+		Platform:    platform,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    priority,
+		Extra:       map[string]any{},
+	}
+}
+
+func ffIDs(accounts []*Account) []int64 {
+	out := make([]int64, 0, len(accounts))
+	for _, acc := range accounts {
+		out = append(out, acc.ID)
+	}
+	return out
+}
+
+// ---- 纯分区原语 ----
+
+func TestPartitionFreeRemainingFirst_SameCNPlatformFreeFirstAndStable(t *testing.T) {
+	// 基准序列：non-free, free, non-free, free（同平台 kimi、同优先级）
+	accounts := []*Account{
+		ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0)),
+		ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0)),
+		ffKiraFreeExhausted(ffKiraAccount(3, PlatformKimi, 0)),
+		ffKiraFreeRemaining(ffKiraAccount(4, PlatformKimi, 0)),
+	}
+
+	partitionFreeRemainingFirst(accounts)
+
+	// free 桶 [2,4] 在前，rest 桶 [1,3] 在后，桶内基准相对序不变。
+	require.Equal(t, []int64{2, 4, 1, 3}, ffIDs(accounts))
+}
+
+func TestPartitionFreeRemainingFirst_MixedPlatformInterleavedKeepsNonCNSlots(t *testing.T) {
+	// Kira(non-free), Anthropic, Kira(free) —— 交错序列
+	kiraNonFree := ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0))
+	anthropic := ffNonCNAccount(2, PlatformAnthropic, 0)
+	kiraFree := ffKiraFreeRemaining(ffKiraAccount(3, PlatformKimi, 0))
+	accounts := []*Account{kiraNonFree, anthropic, kiraFree}
+
+	partitionFreeRemainingFirst(accounts)
+
+	// 两个 Kira 槽位（索引 0 与 2）内交换；Anthropic 槽位（索引 1）与账号不动。
+	require.Equal(t, []int64{3, 2, 1}, ffIDs(accounts))
+	require.Same(t, anthropic, accounts[1], "非 CN 账号不得被移出其槽位")
+}
+
+func TestPartitionFreeRemainingFirst_KiraOnNonCNPlatformEnum(t *testing.T) {
+	// Kira 账号 platform 常存为 other（非国产供应商枚举），仍须按 base_url 判定进槽。
+	accounts := []*Account{
+		ffKiraFreeExhausted(ffKiraAccount(1, PlatformOther, 0)),
+		ffKiraFreeRemaining(ffKiraAccount(2, PlatformOther, 0)),
+	}
+	partitionFreeRemainingFirst(accounts)
+	require.Equal(t, []int64{2, 1}, ffIDs(accounts))
+}
+
+func TestPartitionFreeRemainingFirst_CrossPriorityIndependent(t *testing.T) {
+	accounts := []*Account{
+		ffNonCNAccount(5, PlatformOpenAI, 0), // 非 CN，优先级 0
+		ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0)),
+		ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0)),
+		ffNonCNAccount(6, PlatformAnthropic, 1), // 非 CN，优先级 1
+		ffKiraFreeExhausted(ffKiraAccount(3, PlatformKimi, 1)),
+		ffKiraFreeRemaining(ffKiraAccount(4, PlatformKimi, 1)),
+	}
+
+	partitionFreeRemainingFirst(accounts)
+
+	// 各优先级独立分区；非 CN 账号（5/6）位置与相对序均不变。
+	require.Equal(t, []int64{5, 2, 1, 6, 4, 3}, ffIDs(accounts))
+}
+
+func TestPartitionFreeRemainingFirst_UnknownExhaustedServableFalseNotFree(t *testing.T) {
+	accounts := []*Account{
+		ffKiraFreeUnknown(ffKiraAccount(1, PlatformKimi, 0)),
+		ffKiraFreeExhausted(ffKiraAccount(2, PlatformKimi, 0)),
+		ffKiraFreeServableFalse(ffKiraAccount(3, PlatformKimi, 0)),
+		ffKiraFreeRemaining(ffKiraAccount(4, PlatformKimi, 0)),
+	}
+
+	partitionFreeRemainingFirst(accounts)
+
+	// 只有 confirmed remaining 且未被证伪的 4 号进 free 桶，其余按基准相对序留在后桶。
+	require.Equal(t, []int64{4, 1, 2, 3}, ffIDs(accounts))
+}
+
+func TestPartitionFreeRemainingFirst_MissingExtraFailOpen(t *testing.T) {
+	t.Run("extra nil", func(t *testing.T) {
+		accounts := []*Account{
+			ffKiraAccount(1, PlatformKimi, 0),
+			ffKiraAccount(2, PlatformKimi, 0),
+			ffKiraAccount(3, PlatformKimi, 0),
+		}
+		accounts[0].Extra = nil
+		accounts[1].Extra = nil
+		accounts[2].Extra = nil
+		partitionFreeRemainingFirst(accounts)
+		require.Equal(t, []int64{1, 2, 3}, ffIDs(accounts), "缺 Extra ⇒ 维度为空 ⇒ 无偏好")
+	})
+
+	t.Run("extra 无 CN 额度键（快照裁剪形态）", func(t *testing.T) {
+		accounts := []*Account{
+			ffKiraAccount(1, PlatformKimi, 0),
+			ffKiraAccount(2, PlatformKimi, 0),
+		}
+		accounts[0].Extra = map[string]any{"codex_5h_used_percent": 50.0}
+		accounts[1].Extra = map[string]any{"codex_5h_used_percent": 50.0}
+		partitionFreeRemainingFirst(accounts)
+		require.Equal(t, []int64{1, 2}, ffIDs(accounts))
+	})
+
+	t.Run("序列长度不足与空输入", func(t *testing.T) {
+		single := []*Account{ffKiraFreeRemaining(ffKiraAccount(1, PlatformKimi, 0))}
+		partitionFreeRemainingFirst(single)
+		require.Equal(t, []int64{1}, ffIDs(single))
+		partitionFreeRemainingFirst(nil) // 不得 panic
+	})
+}
+
+func TestPartitionFreeRemainingFirstWithLoadKeepsLoadPairing(t *testing.T) {
+	free := ffKiraFreeRemaining(ffKiraAccount(1, PlatformKimi, 0))
+	nonFree := ffKiraFreeExhausted(ffKiraAccount(2, PlatformKimi, 0))
+	other := ffNonCNAccount(3, PlatformAnthropic, 0)
+	items := []accountWithLoad{
+		{account: nonFree, loadInfo: &AccountLoadInfo{AccountID: nonFree.ID, LoadRate: 10}},
+		{account: other, loadInfo: &AccountLoadInfo{AccountID: other.ID, LoadRate: 20}},
+		{account: free, loadInfo: &AccountLoadInfo{AccountID: free.ID, LoadRate: 30}},
+	}
+
+	partitionFreeRemainingFirstWithLoad(items)
+
+	require.Equal(t, []int64{1, 3, 2}, []int64{items[0].account.ID, items[1].account.ID, items[2].account.ID})
+	// 负载信息必须与账号严格同槽移动（不得串槽）。
+	require.Equal(t, 30, items[0].loadInfo.LoadRate)
+	require.Equal(t, 20, items[1].loadInfo.LoadRate)
+	require.Equal(t, 10, items[2].loadInfo.LoadRate)
+}
+
+// ---- 排序入口消费 ----
+
+func TestFreeFirstSortCandidatesForFallbackRandomAndLastUsedModes(t *testing.T) {
+	newAccounts := func() []*Account {
+		return []*Account{
+			ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0)),
+			ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0)),
+		}
+	}
+	svc := &GatewayService{}
+
+	// mode=random：sortAccountsByPriorityOnly + shuffleWithinPriority 之后分区
+	random := newAccounts()
+	svc.sortCandidatesForFallback(random, false, "random")
+	require.Equal(t, []int64{2, 1}, ffIDs(random), "random 模式下 shuffle 之后 free 仍在前")
+
+	// mode=last_used（默认）：sortAccountsByPriorityAndLastUsed 末端分区
+	lastUsed := newAccounts()
+	svc.sortCandidatesForFallback(lastUsed, false, "last_used")
+	require.Equal(t, []int64{2, 1}, ffIDs(lastUsed))
+
+	// 同组（Priority+LastUsedAt）内 shuffle 多次后，free 分桶仍成立
+	for i := 0; i < 50; i++ {
+		accounts := newAccounts()
+		svc.sortCandidatesForFallback(accounts, false, "random")
+		require.Equal(t, []int64{2, 1}, ffIDs(accounts), "shuffle 后的分区必须稳定")
+	}
+}
+
+func TestFreeFirstSortAccountsByPriorityAndLastUsedLegacyOrder(t *testing.T) {
+	// 三者同优先级且 LastUsedAt 同为 nil ⇒ 同组内 shuffle 会打散绝对位置，
+	// 断言只能取「CN 子序列内 free 在 servable=false 之前」这一不变式。
+	for i := 0; i < 50; i++ {
+		accounts := []*Account{
+			ffKiraFreeServableFalse(ffKiraAccount(1, PlatformKimi, 0)),
+			ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0)),
+			ffNonCNAccount(3, PlatformAnthropic, 0),
+		}
+		sortAccountsByPriorityAndLastUsed(accounts, false)
+		ids := ffIDs(accounts)
+		indexOf := func(id int64) int {
+			for i, got := range ids {
+				if got == id {
+					return i
+				}
+			}
+			t.Fatalf("account %d missing from %v", id, ids)
+			return -1
+		}
+		require.Less(t, indexOf(2), indexOf(1), "free 必须排在 servable=false 之前: %v", ids)
+	}
+}
+
+func TestFreeFirstSelectBestAccountPrefersCNFreeCandidate(t *testing.T) {
+	nonFree := ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0))
+	free := ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0))
+	svc := &OpenAIGatewayService{
+		accountRepo: stubOpenAIAccountRepo{accounts: []Account{*nonFree, *free}},
+	}
+
+	// 基准排序（优先级相同、LastUsedAt 相同）下 1 号原本在前；分区后 free 优先。
+	selected, _, _ := svc.selectBestAccount(context.Background(), nil, PlatformKimi,
+		[]Account{*nonFree, *free}, "", nil, false, "", false)
+	require.NotNil(t, selected)
+	require.Equal(t, free.ID, selected.ID)
+}
+
+func TestFreeFirstStickyHitNotReorderedForFreeAndNonFree(t *testing.T) {
+	nonFree := ffKiraFreeExhausted(ffKiraAccount(1, PlatformKimi, 0))
+	free := ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0))
+	repo := stubOpenAIAccountRepo{accounts: []Account{*nonFree, *free}}
+
+	// 粘性绑定按服务派生的会话缓存键落键（openAISessionCacheKey）。
+	stickySvc := func(boundAccountID int64) *OpenAIGatewayService {
+		cache := &stubGatewayCache{sessionBindings: map[string]int64{}}
+		svc := &OpenAIGatewayService{accountRepo: repo, cache: cache}
+		cache.sessionBindings[svc.openAISessionCacheKey("sess")] = boundAccountID
+		return svc
+	}
+
+	t.Run("sticky 命中 non-free 账号不被重排", func(t *testing.T) {
+		svc := stickySvc(nonFree.ID)
+		selected, err := svc.selectAccountForModelWithExclusions(context.Background(), nil,
+			PlatformKimi, "sess", "", nil, false, 0, "", false)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		require.Equal(t, nonFree.ID, selected.ID, "sticky 命中优先于本排序，不得被 free 账号挤掉")
+	})
+
+	t.Run("sticky 命中 free 账号保持原样", func(t *testing.T) {
+		svc := stickySvc(free.ID)
+		selected, err := svc.selectAccountForModelWithExclusions(context.Background(), nil,
+			PlatformKimi, "sess", "", nil, false, 0, "", false)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		require.Equal(t, free.ID, selected.ID)
+	})
+
+	t.Run("非 sticky 路径仍走免费优先分区", func(t *testing.T) {
+		svc := &OpenAIGatewayService{accountRepo: repo}
+		selected, err := svc.selectAccountForModelWithExclusions(context.Background(), nil,
+			PlatformKimi, "", "", nil, false, 0, "", false)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		require.Equal(t, free.ID, selected.ID)
+	})
+}
