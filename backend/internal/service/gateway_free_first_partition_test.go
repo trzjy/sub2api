@@ -9,7 +9,7 @@ package service
 //   - 混合平台交错序列（Kira(non-free), Anthropic, Kira(free)）：两 Kira 槽位内交换，
 //     Anthropic 槽位不动；
 //   - 跨优先级互不影响，非 CN 账号位置与相对序均不变；
-//   - unknown / exhausted / servable=false 均不算 free-remaining；
+//   - unknown / exhausted / 仅付费有余（免费档已耗尽）均不算 free-remaining；
 //   - 缺 Extra（无维度快照）入口 fail-open：无偏好、逐位不变；
 //   - sticky 命中 free/non-free 两类账号均不重排；
 //   - 各排序入口（fallback 兜底排序 / legacy 主选 / accountWithLoad 适配）消费同一分区原语。
@@ -73,15 +73,31 @@ func ffKiraFreeUnknown(account *Account) *Account {
 	return account
 }
 
-// ffKiraFreeServableFalse 免费池有余量，但新鲜 VND<=0 ⇒ servable=false：
-// 按 §3.1 同口径，该维度不算「confirmed free-remaining」。
-func ffKiraFreeServableFalse(account *Account) *Account {
-	account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
-		"used_percent": 10.0,
-		"fetched_at":   ffRecentRFC3339(),
+// ffTHPaidRemainingFreeExhausted kimi 平台 TH（tokenharbor.ai）号：付费维度
+// confirmed remaining（spend_after_allowance=true + 钱包新鲜 >0），但免费维度
+// confirmed exhausted（官方 free-tier 口径 exhausted=true、快照新鲜）。
+//
+// 新语义出处（用户 2026-10-10 §0.2 再裁定，见 account_quota_dimensions.go 文件头
+// 与 resolveKiraQuotaDimensions 注释）：解析侧已删除「新鲜 VND≤0 ⇒ 免费维度
+// servable=false」联动——ServableNo 常量与门内 ServableFalsified 分支保留，但当前
+// 无生产者（维度解析一律 ServableUnknown）。故「servable=false ⇒ 不算 free-remaining」
+// 这条旧测试前提在新语义下不可构造：VND≤0 的可服务证伪改由 Kira 确认探针 9 格判定表
+// （evaluateKiraConfirmGrid）与响应式 402 权威冻结承担。
+//
+// 本夹具改以付费有余 + 免费档耗尽表达同一不变式的现存活形态：免费优先分区只认
+// free 维度本身 confirmed remaining（hasConfirmedFreeAccountRemaining），付费
+// 维度有余量不得把账号顶进 free 桶。
+func ffTHPaidRemainingFreeExhausted(account *Account) *Account {
+	account.Credentials["base_url"] = "https://tokenharbor.ai/v1"
+	account.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+		"has_pass":              true,
+		"spend_after_allowance": true,
+		"exhausted":             true, // 官方口径：免费档已耗尽
+		"plan_exhausted":        false,
+		"fetched_at":            ffRecentRFC3339(),
 	}
-	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)] = 0.0
-	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated)] = ffRecentRFC3339()
+	account.Extra[TokenHarborWalletBalanceExtraKey] = 12.5
+	account.Extra[TokenHarborWalletBalanceUpdatedAtExtraKey] = ffRecentRFC3339()
 	return account
 }
 
@@ -164,17 +180,19 @@ func TestPartitionFreeRemainingFirst_CrossPriorityIndependent(t *testing.T) {
 	require.Equal(t, []int64{5, 2, 1, 6, 4, 3}, ffIDs(accounts))
 }
 
-func TestPartitionFreeRemainingFirst_UnknownExhaustedServableFalseNotFree(t *testing.T) {
+func TestPartitionFreeRemainingFirst_UnknownExhaustedPaidRemainingNotFree(t *testing.T) {
 	accounts := []*Account{
 		ffKiraFreeUnknown(ffKiraAccount(1, PlatformKimi, 0)),
 		ffKiraFreeExhausted(ffKiraAccount(2, PlatformKimi, 0)),
-		ffKiraFreeServableFalse(ffKiraAccount(3, PlatformKimi, 0)),
+		ffTHPaidRemainingFreeExhausted(ffKiraAccount(3, PlatformKimi, 0)),
 		ffKiraFreeRemaining(ffKiraAccount(4, PlatformKimi, 0)),
 	}
 
 	partitionFreeRemainingFirst(accounts)
 
-	// 只有 confirmed remaining 且未被证伪的 4 号进 free 桶，其余按基准相对序留在后桶。
+	// 只有 free 维度 confirmed remaining 的 4 号进 free 桶，其余按基准相对序留在后桶。
+	// 3 号付费维度有余量（spend_after_allowance + 钱包新鲜 >0），但免费档已耗尽 ⇒
+	// 不进 free 桶（§0.2 新语义：付费余量不参与 free-remaining 判定）。
 	require.Equal(t, []int64{4, 1, 2, 3}, ffIDs(accounts))
 }
 
@@ -261,10 +279,14 @@ func TestFreeFirstSortCandidatesForFallbackRandomAndLastUsedModes(t *testing.T) 
 
 func TestFreeFirstSortAccountsByPriorityAndLastUsedLegacyOrder(t *testing.T) {
 	// 三者同优先级且 LastUsedAt 同为 nil ⇒ 同组内 shuffle 会打散绝对位置，
-	// 断言只能取「CN 子序列内 free 在 servable=false 之前」这一不变式。
+	// 断言只能取「CN 子序列内 free 在 non-free 之前」这一不变式。
+	//
+	// 1 号取 TH 付费有余 + 免费档耗尽账号（旧夹具为「VND=0 ⇒ servable=false」账号，
+	// 该前提已随用户 2026-10-10 §0.2 再裁定作废：解析侧不再产出 servable=false，
+	// 该账号在新语义下本身就是 free-remaining，无法作为 non-free 对照）。
 	for i := 0; i < 50; i++ {
 		accounts := []*Account{
-			ffKiraFreeServableFalse(ffKiraAccount(1, PlatformKimi, 0)),
+			ffTHPaidRemainingFreeExhausted(ffKiraAccount(1, PlatformKimi, 0)),
 			ffKiraFreeRemaining(ffKiraAccount(2, PlatformKimi, 0)),
 			ffNonCNAccount(3, PlatformAnthropic, 0),
 		}
@@ -279,7 +301,7 @@ func TestFreeFirstSortAccountsByPriorityAndLastUsedLegacyOrder(t *testing.T) {
 			t.Fatalf("account %d missing from %v", id, ids)
 			return -1
 		}
-		require.Less(t, indexOf(2), indexOf(1), "free 必须排在 servable=false 之前: %v", ids)
+		require.Less(t, indexOf(2), indexOf(1), "free 必须排在 non-free 之前: %v", ids)
 	}
 }
 

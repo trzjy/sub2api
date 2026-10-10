@@ -192,16 +192,31 @@ func TestCNProviderBalanceCheckKiraCooldownManualProbeIgnores(t *testing.T) {
 
 // 测试 7（负例/豁免）：lifecycle due 确认探针（probeKiraExhaustion，sweep 调用）
 // 即便冷却键未过期也必须执行探测——不得消费冷却键。
+//
+// 夹具前提（对齐 G1/G1-R2 新语义）：确认探针结论由 9 格判定表给出
+// （evaluateKiraConfirmGrid，cn_quota_lifecycle_service.go 注释表），VND 三态是
+// 判定轴之一——VND unknown（缺键/过期）一律 Uncertain，且探针会返回
+// "grid concluded uncertain" 错误（不是被冷却键拦截，是判定表既定的无权威证据
+// 结论）。故本夹具必须补齐新鲜 VND>0 付费快照（真实 Kira 号在余额采集成功侧
+// 恒有此键），使探针按「VND fresh>0 ⇒ Recovered」格收敛；否则
+// require.NoError 会被判定表的 Uncertain 结论带偏，掩盖"探针是否执行"这一
+// 真正的断言目标。
 func TestCNProviderBalanceCheckKiraCooldownLifecycleConfirmationProbeIgnores(t *testing.T) {
 	now := time.Now().UTC()
 	account := kiraCooldownTestAccount(932)
-	account.Extra = map[string]any{kiraProbeCooldownUntilExtraKey: float64(now.Add(10 * time.Minute).Unix())}
+	account.Extra = map[string]any{
+		kiraProbeCooldownUntilExtraKey: float64(now.Add(10 * time.Minute).Unix()),
+		// 新鲜 VND>0：9 格表的 Recovered 依据（付费池可服务 ⇒ 账号可服务）。
+		cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance): 1.0,
+		cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated): now.Format(time.RFC3339),
+	}
 	repo := &cnRunOnceExtraRepo{}
 	upstream := kiraOKUpstream()
 	// lifecycle due 确认探针走 fetchKiraUsageWithReauth，不读冷却键。
 	lc := &CNQuotaLifecycleService{accountRepo: repo, httpUpstream: upstream, cfg: &config.Config{}}
-	_, err := lc.probeKiraExhaustion(context.Background(), account)
+	outcome, err := lc.probeKiraExhaustion(context.Background(), account)
 	require.NoError(t, err)
+	require.Equal(t, quotaProbeRecovered, outcome, "新鲜 VND>0 ⇒ 判定表 Recovered（证明探针确实跑完查表）")
 	require.NotEmpty(t, upstream.requests, "lifecycle 确认探针不得被冷却键拦截（仍执行探测，证明豁免）")
 }
 
