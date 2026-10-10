@@ -155,7 +155,10 @@ func TestQuotaDimensionGateEightCombinations(t *testing.T) {
 		require.Equal(t, QuotaDimensionGateSkip, EvaluateAccountQuotaDimensionGate(dims))
 	})
 
-	t.Run("kira free remaining + fresh VND<=0 -> skip (P1)", func(t *testing.T) {
+	// ServableNo 联动删除负例（用户 2026-10-10 §0.2 再裁定）：新鲜 VND≤0 不再把免费
+	// 维度置 servable=false ⇒ 「免费 remaining + 付费 exhausted」经门**放行**
+	// （该组合的冻结判据改由响应式 402 链与 Kira 确认探针 9 格判定表承担）。
+	t.Run("kira free remaining + fresh VND<=0 -> allow (ServableNo linkage removed)", func(t *testing.T) {
 		account := qdKiraAccount()
 		account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
 			"used_percent": 10.0,
@@ -168,8 +171,14 @@ func TestQuotaDimensionGateEightCombinations(t *testing.T) {
 		free := qdFindDim(dims, QuotaDimensionKindFree, kiraUsageSnapshotExtraKey)
 		require.NotNil(t, free)
 		require.True(t, free.HasRemaining(), "免费池有余量")
-		require.True(t, free.ServableFalsified(), "新鲜 VND<=0 ⇒ 免费维度 servable=false")
-		require.Equal(t, QuotaDimensionGateSkip, EvaluateAccountQuotaDimensionGate(dims))
+		require.Equal(t, QuotaServableUnknown, free.Servable,
+			"新鲜 VND<=0 不得再置 servable=false（联动已删除）")
+		require.False(t, free.ServableFalsified(), "解析侧已无 servable=false 生产者")
+		paid := qdFindDim(dims, QuotaDimensionKindPaid, quotaDimensionSourceKiraVND)
+		require.NotNil(t, paid)
+		require.True(t, paid.IsExhausted(), "付费维度仍如实为 exhausted（paid 事实不变）")
+		require.Equal(t, QuotaDimensionGateAllow, EvaluateAccountQuotaDimensionGate(dims),
+			"免费 remaining + 付费 exhausted ⇒ 放行（§3.1 门）")
 	})
 
 	t.Run("kira free valid + VND missing -> allow", func(t *testing.T) {
@@ -227,7 +236,7 @@ func TestQuotaDimensionPerSourceAgeGate(t *testing.T) {
 		require.False(t, free.Confirmed())
 	})
 
-	t.Run("kira usage stale + fresh zero VND -> free unknown, servable falsified by fresh VND", func(t *testing.T) {
+	t.Run("kira usage stale + fresh zero VND -> free unknown, servable not falsified", func(t *testing.T) {
 		account := qdKiraAccount()
 		account.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
 			"used_percent": 10.0,
@@ -238,8 +247,9 @@ func TestQuotaDimensionPerSourceAgeGate(t *testing.T) {
 		dims := ResolveAccountQuotaDimensions(account, qdBase)
 		free := qdFindDim(dims, QuotaDimensionKindFree, kiraUsageSnapshotExtraKey)
 		require.NotNil(t, free)
-		// VND 新鲜 ≤0 仍使免费维度 servable=false（付费耗尽是事实，与 A 源陈旧无冲突）。
-		require.True(t, free.ServableFalsified())
+		// ServableNo 联动已删除：新鲜 VND≤0 也不再证伪免费维度（§0.2 再裁定）。
+		require.Equal(t, QuotaServableUnknown, free.Servable)
+		require.False(t, free.ServableFalsified())
 		require.False(t, free.Confirmed(), "A 来源陈旧 ⇒ 免费维度无 confirmed，不得单独致跳过")
 	})
 
@@ -407,6 +417,109 @@ func TestQuotaDimensionGateC6TokenHarborWalletThreeStates(t *testing.T) {
 		require.NotNil(t, paid)
 		require.Equal(t, QuotaDimensionUnknown, paid.Status)
 		require.Equal(t, QuotaDimensionGateSkip, EvaluateAccountQuotaDimensionGate(dims))
+	})
+}
+
+// ---- th_usage_snapshot 用量维度删除 + 门数学中性（用户 2026-10-10 §0.2 再裁定） ----
+
+// TestQuotaDimensionUsageDimensionRemoved 锁定 th_usage_snapshot 不再产出 free 维度
+// （用量计数无额度分母 ⇒ 恒 unknown，纯展示噪声）。
+func TestQuotaDimensionUsageDimensionRemoved(t *testing.T) {
+	newTH := func() *Account {
+		account := qdTokenHarborAccount()
+		account.Extra[TokenHarborUsageSnapshotExtraKey] = map[string]any{
+			"fetched_at": qdBase.Format(time.RFC3339),
+			"windows": []any{map[string]any{
+				"requests":   12.0,
+				"tokens_in":  1000.0,
+				"tokens_out": 200.0,
+			}},
+		}
+		return account
+	}
+
+	t.Run("usage 快照存在 ⇒ 零 usage 维度产出", func(t *testing.T) {
+		account := newTH()
+		dims := ResolveAccountQuotaDimensions(account, qdBase)
+		for i := range dims {
+			require.NotEqual(t, TokenHarborUsageSnapshotExtraKey, dims[i].Source,
+				"th_usage_snapshot 不得再产出任何维度（无分母 ⇒ 恒 unknown ⇒ 噪声）")
+		}
+		require.Nil(t, qdFindDim(dims, QuotaDimensionKindFree, TokenHarborUsageSnapshotExtraKey))
+	})
+
+	t.Run("删除对门判定中性：有/无该维度逐账号等价", func(t *testing.T) {
+		// 门数学中性证明：usage 维度恒为 unknown，而 §3.1 判定表只对 confirmed 计数
+		// （unknown 既不加 confirmed 也不加 usableRemaining），故把该维度「加回」后
+		// 判定结果必须逐账号完全等价。
+		usageDim := QuotaDimension{
+			Kind:     QuotaDimensionKindFree,
+			Scope:    QuotaDimensionScopeAccount,
+			Status:   QuotaDimensionUnknown,
+			Servable: QuotaServableUnknown,
+			Source:   TokenHarborUsageSnapshotExtraKey,
+		}
+		cases := []struct {
+			name string
+			acct func() *Account
+		}{
+			{"TH：用量快照存在（免费档未耗尽）", func() *Account {
+				a := newTH()
+				a.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+					"has_pass": false, "exhausted": false, "spend_after_allowance": false,
+					"fetched_at": qdBase.Format(time.RFC3339),
+				}
+				return a
+			}},
+			{"TH：用量快照存在 + 免费档耗尽（付费维度 remaining）", func() *Account {
+				a := newTH()
+				a.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+					"has_pass": false, "exhausted": true, "spend_after_allowance": true,
+					"fetched_at": qdBase.Format(time.RFC3339),
+				}
+				a.Extra[TokenHarborWalletBalanceExtraKey] = 50.0
+				a.Extra[TokenHarborWalletBalanceUpdatedAtExtraKey] = qdRecentRFC3339(qdBase)
+				return a
+			}},
+			{"TH：用量快照存在 + 全维度 unknown（快照过期）", func() *Account {
+				a := newTH()
+				a.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+					"has_pass": false, "exhausted": true, "spend_after_allowance": true,
+					"fetched_at": qdStaleRFC3339(qdBase),
+				}
+				a.Extra[TokenHarborWalletBalanceExtraKey] = 50.0
+				a.Extra[TokenHarborWalletBalanceUpdatedAtExtraKey] = qdStaleRFC3339(qdBase)
+				return a
+			}},
+			{"TH：用量快照存在 + 付费维度 fresh-zero", func() *Account {
+				a := newTH()
+				a.Extra[TokenHarborPassSnapshotExtraKey] = map[string]any{
+					"has_pass": false, "exhausted": true, "spend_after_allowance": true,
+					"fetched_at": qdBase.Format(time.RFC3339),
+				}
+				a.Extra[TokenHarborWalletBalanceExtraKey] = 0.0
+				a.Extra[TokenHarborWalletBalanceUpdatedAtExtraKey] = qdRecentRFC3339(qdBase)
+				return a
+			}},
+			{"Kira：用量维度不属于 Kira（控制组）", func() *Account {
+				a := qdKiraAccount()
+				a.Extra[kiraUsageSnapshotExtraKey] = map[string]any{
+					"used_percent": 100.0, "fetched_at": qdBase.Format(time.RFC3339),
+				}
+				a.Extra[TokenHarborUsageSnapshotExtraKey] = map[string]any{"fetched_at": qdBase.Format(time.RFC3339)}
+				return a
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				account := tc.acct()
+				without := EvaluateAccountQuotaDimensionGate(ResolveAccountQuotaDimensions(account, qdBase))
+				with := EvaluateAccountQuotaDimensionGate(
+					append(ResolveAccountQuotaDimensions(account, qdBase), usageDim))
+				require.Equal(t, without, with,
+					"删除必须是门数学中性的：加回 usage 维度后判定结果必须等价")
+			})
+		}
 	})
 }
 

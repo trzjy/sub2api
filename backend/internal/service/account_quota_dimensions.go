@@ -16,8 +16,12 @@ package service
 //   - 逐来源年龄门（R3-F1/R14）：每个维度绑定其来源自身的采集时间与年龄门，
 //     逐来源判新鲜；过期来源只对该来源的维度降 unknown，禁止账号级单一时间或
 //     任一他源时间替代（防 A 源陈旧与 B 源新鲜混合生成错误 confirmed）。
-//   - servable=false 只能由新鲜明确证据产生（Kira：新鲜 VND≤0）；数据缺失/过期
-//     永不产生 servable=false（只产生 unknown）。
+//   - servable=false 只能由新鲜明确证据产生；数据缺失/过期永不产生 servable=false
+//     （只产生 unknown）。**用户 2026-10-10 §0.2 再裁定**：删除「新鲜 VND≤0 ⇒ 免费
+//     维度 servable=false」联动——ServableNo 常量与判定机制保留（门内
+//     ServableFalsified 分支不变），但当前无生产者（维度解析一律 ServableUnknown）。
+//     VND≤0 的可服务证伪改由 Kira 确认探针 9 格判定表（cn_quota_lifecycle_service.go
+//     evaluateKiraConfirmGrid）与响应式 402 权威冻结承担，不在发送前门内重复判定。
 //   - 模型级免费档（model_rate_limits / tokenharbor_free_tier_exhausted）经方案 §2.1
 //     纠偏（C3-r2）纳入解析：仅产出 scope=model 投影，经权威导出
 //     ActiveTokenHarborFreeTierScopes 判定"命中前缀且未到期"的条目；前缀/到期语义一律
@@ -152,8 +156,12 @@ func ResolveAccountQuotaDimensions(account *Account, now time.Time) []QuotaDimen
 //   - subscription：th_pass_snapshot.has_pass=true 时存在，状态由 plan_exhausted 决定；
 //   - free：th_pass_snapshot 官方 free-tier 口径（exhausted）；
 //   - paid：存在性由能力字段 spend_after_allowance=true 决定（R2-F5），状态经
-//     ResolveTHWalletBalanceState（C6 钱包 SSOT 键族 th_balance/_updated_at）三态；
-//   - 用量维度（th_usage_snapshot.windows）：原始计数无额度分母，存在即 unknown。
+//     ResolveTHWalletBalanceState（C6 钱包 SSOT 键族 th_balance/_updated_at）三态。
+//   - 用量维度（th_usage_snapshot.windows）已删除（用户 2026-10-10 §0.2 再裁定）：
+//     原始计数无额度分母，恒为 unknown，是纯展示噪声；删除必须是「门数学中性」的
+//     ——unknown 维度在 §3.1 判定表中既不加 confirmed 也不加 usableRemaining，
+//     故有/无该维度对 EvaluateAccountQuotaDimensionGate 的逐账号判定完全等价
+//     （见 TestQuotaDimensionUsageDimensionRemoved 的门中性子用例）。
 func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaDimension {
 	var dims []QuotaDimension
 	snap, ok := TokenHarborPassSnapshotFromExtra(account)
@@ -199,17 +207,6 @@ func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaD
 			})
 		}
 	}
-	// 用量维度：th_usage_snapshot 原始计数（requests/tokens_in/tokens_out）无额度
-	// 分母，无法产生 confirmed 状态——存在即 unknown（不参与跳过侧）。
-	if _, ok := TokenHarborUsageSnapshotFromExtra(account); ok {
-		dims = append(dims, QuotaDimension{
-			Kind:     QuotaDimensionKindFree,
-			Scope:    QuotaDimensionScopeAccount,
-			Status:   QuotaDimensionUnknown,
-			Servable: QuotaServableUnknown,
-			Source:   TokenHarborUsageSnapshotExtraKey,
-		})
-	}
 	// 模型级免费档投影（方案 §2.1 纠偏，C3-r2）：经权威导出
 	// ActiveTokenHarborFreeTierScopes 判定"命中 tokenharbor_free_tier_exhausted 前缀且未
 	// 到期"的 model_rate_limits 条目，每条产出一个 scope=model 维度。前缀/到期语义一律经
@@ -232,9 +229,9 @@ func resolveTokenHarborQuotaDimensions(account *Account, now time.Time) []QuotaD
 }
 
 // resolveKiraQuotaDimensions 解析 Kira（kiraai.vn）账号的维度：
-//   - free：kira_usage_snapshot（每日免费池）；servable 语义（P1）：新鲜 VND≤0 ⇒
-//     免费维度 servable=false（免费有余量+付费耗尽不得放行）；VND 缺失/过期 ⇒ servable
-//     unknown（未证伪）→ 按"confirmed remaining + servable unknown"放行，响应式链兜底；
+//   - free：kira_usage_snapshot（每日免费池）；**servable 恒 unknown**（用户 2026-10-10
+//     §0.2 再裁定：删除新鲜 VND≤0 ⇒ servable=false 联动，解析侧不再对「免费有余量+
+//     付费耗尽」做发送前证伪，该组合交由响应式 402 链与 Kira 确认探针 9 格判定表处理）；
 //   - paid：Kira VND 余额，经 ResolveKiraVNDBalanceState 三态；存在性 = Kira 上游
 //     能力恒为真（键缺失/过期 → 存在 + unknown）。
 func resolveKiraQuotaDimensions(account *Account, now time.Time) []QuotaDimension {
@@ -253,10 +250,7 @@ func resolveKiraQuotaDimensions(account *Account, now time.Time) []QuotaDimensio
 			Source:     kiraUsageSnapshotExtraKey,
 			ObservedAt: snap.fetchedAt,
 		}
-		// Kira servable：仅新鲜 VND≤0 产生 servable=false（新鲜明确证据）。
-		if vnd.IsExhausted() {
-			free.Servable = QuotaServableNo
-		}
+		// 无 servable 生产者（§0.2 再裁定）：免费维度恒 ServableUnknown。
 		dims = append(dims, free)
 	}
 	dims = append(dims, QuotaDimension{
