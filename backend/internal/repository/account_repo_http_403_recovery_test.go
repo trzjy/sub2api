@@ -81,10 +81,14 @@ func TestAccountRepository_Mark403PausedWithRecovery_AtomicFieldEffects(t *testi
 		require.Contains(t, normalized, SchedStateRevisionExtraKey)
 		// R18-F2：恢复键内 state_revision 记录与全局 sched_state_revision 复用同一 +1 表达式，
 		// 在同一语句内同点出生、值恒等（CAS 条件之三的比较前提）。
-		require.Contains(t, normalized, "'{"+HTTP403RecoveryExtraKey+","+SchedStateRevisionExtraKey+"}'",
-			"恢复键内须写入 state_revision 记录（嵌套路径）")
+		require.Contains(t, normalized, "'{"+HTTP403RecoveryExtraKey+","+http403RecoveryInnerRevisionKey+"}'",
+			"恢复键内须写入 state_revision 记录（嵌套路径，内层键名须与读取侧字面一致）")
 		require.Contains(t, normalized, "COALESCE((extra->>'"+SchedStateRevisionExtraKey+"')::bigint, 0) + 1",
 			"键内记录与全局自增共用同一表达式，保证同点出生")
+		// 负向断言：Mark 语句内层路径不得回退到错名 '{http_403_recovery,sched_state_revision}'，
+		// 否则 CAS 三条件之三恒失配（2026-10-10 第二次事故形态）。
+		require.NotContains(t, normalized, "'{"+HTTP403RecoveryExtraKey+","+SchedStateRevisionExtraKey+"}'",
+			"内层 revision 键名必须为 state_revision，不得误用全局键 sched_state_revision")
 		// 可选 temp_unschedulable 使用 COALESCE 保留旧值语义。
 		require.Contains(t, normalized, "temp_unschedulable_until = COALESCE($3, temp_unschedulable_until)")
 		require.Contains(t, normalized, "temp_unschedulable_reason = COALESCE($4, temp_unschedulable_reason)")

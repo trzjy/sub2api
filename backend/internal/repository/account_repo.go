@@ -125,6 +125,13 @@ const (
 	// error/调度阻断状态的持久层写入原语在单语句内自增，供跨链并发检测；语义与 per-F3 的
 	// generation 不等同（revision = 账号级全局、generation = F3 链代际），不得合并。
 	SchedStateRevisionExtraKey = "sched_state_revision"
+	// http403RecoveryInnerRevisionKey 是 F3 恢复键**内层**记录键名（state_revision）。
+	// 注意与全局键 SchedStateRevisionExtraKey（sched_state_revision）区分：二者**值同点出生、键名不同**。
+	// 内层键名必须与全部 CAS 读取侧（:2917/:2975/:3090）、UpdateHTTP403RecoveryUntil 写入
+	// （:3079 字面 '{state_revision}'）、service 内存结构 http403RecoveryRecord 的 json tag
+	// （internal/service/http403_recovery.go:129）逐字一致，否则首次 Mark 后 CAS 三条件之三
+	// 恒失配，Clear/Transition/Update 零写入（见 2026-10-10 第二次事故注记）。
+	http403RecoveryInnerRevisionKey = "state_revision"
 )
 
 // schedStateRevisionNextValueExpr 返回「读取旧行 extra 的 sched_state_revision 并 +1」的
@@ -166,9 +173,24 @@ func http403RemoveRecoveryWithRevisionExpr() string {
 // 键内 state_revision 与全局 sched_state_revision 复用**同一 +1 表达式**：UPDATE 的 SET
 // 表达式统一以旧行取值，故二者在同一语句内同点出生、值恒等——正是 CAS 条件之三
 // （键内 state_revision = 当前全局 sched_state_revision）的比较前提（R18-F2/R19-F2）。
+//
+// 读写键路径同构约束（关键）：恢复键内层 revision 键名须与 CAS 读取侧逐字一致。
+//   - 读取侧路径：extra->'http_403_recovery'->>'state_revision'（:2917/:2975/:3090，字面
+//     state_revision）
+//   - 本写入侧路径：'{http_403_recovery,state_revision}'（内层键名取
+//     http403RecoveryInnerRevisionKey = "state_revision"，**非** SchedStateRevisionExtraKey）
+//   - 全局键 sched_state_revision 语义不变（顶层平铺、读取侧 extra->>'sched_state_revision'）。
+//
+// 2026-10-10 两次生产事故注记：
+//  1. 顶层平铺事故（已修）：写入曾用 jsonb `||` 把负载平铺到 extra 顶层，与读取侧
+//     extra->'http_403_recovery'->>'until' 路径错位，候选查询恒 NULL、命中 0、sweep 不工作。
+//  2. 内层键名错位事故（本单修复）：recoveryRevisionPath 曾误用 SchedStateRevisionExtraKey
+//     （sched_state_revision），写成 '{http_403_recovery,sched_state_revision}'；而读取侧一律
+//     为字面 state_revision。首次 Mark 后 CAS 三条件之三恒失配，Clear/Transition/Update 零写入，
+//     403 账号「找到清不掉」。内层记录键名必须用 http403RecoveryInnerRevisionKey，严禁回退。
 func http403MarkRecoveryWithRevisionExpr(payloadPlaceholder string) string {
 	recoveryPath := "'{" + HTTP403RecoveryExtraKey + "}'"
-	recoveryRevisionPath := "'{" + HTTP403RecoveryExtraKey + "," + SchedStateRevisionExtraKey + "}'"
+	recoveryRevisionPath := "'{" + HTTP403RecoveryExtraKey + "," + http403RecoveryInnerRevisionKey + "}'"
 	globalPath := "'{" + SchedStateRevisionExtraKey + "}'"
 	next := schedStateRevisionNextValueExpr()
 	// 负载必须合并进 http_403_recovery **嵌套键**，不可直接与 extra 顶层拼接。
