@@ -285,6 +285,14 @@ export default {
         dimensionKindSubscription: 'Subscription',
         dimensionStatusRemaining: 'Remaining',
         dimensionStatusUnknown: 'Unknown',
+        // 陈旧标注（方案 §3.4 三分支最终口径 / 派发单 F1-R2）：
+        // 数值存在 + observed_at 有效 → {time} ago；
+        // 数值存在 + observed_at 缺失/零值/无效 → 固定「Stale data · probe time unknown」。
+        staleAgo: '{time} ago',
+        staleTimeUnknown: 'Stale data · probe time unknown',
+        staleMinutes: '{minutes} minutes',
+        staleHours: '{hours} hours',
+        staleDays: '{days} days',
       },
       types: {
         oauth: 'OAuth',

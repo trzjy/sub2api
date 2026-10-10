@@ -53,6 +53,16 @@
         {{ displayPercent }}
       </span>
 
+      <!-- Stale annotation (方案 §3.4 v24)：unknown 但数值存在时，灰度进度条旁附
+           observed_at 相对时间陈旧标注；与 unknownUsage 的「—」路径互斥。 -->
+      <span
+        v-if="staleNote"
+        data-test="cn-quota-stale-note"
+        class="shrink-0 text-[10px] font-normal text-gray-400 dark:text-gray-500"
+      >
+        {{ staleNote }}
+      </span>
+
       <!-- Reset time -->
       <span v-if="shouldShowResetTime" class="shrink-0 text-[10px] text-gray-400">
         {{ resetsAtPrefix ? `${resetsAtPrefix} ` : '' }}{{ formatResetTime }}
@@ -74,6 +84,11 @@ const props = withDefaults(
     utilization: number // Percentage (0-100+)
     /** 用量上游不可得（如火山周/月窗口）：条置灰、百分比显示 “—” 而非假 0。 */
     unknownUsage?: boolean
+    /** 已探测但维度 status=unknown（探针间隔内、数值存在）：条降灰 + 仍显示真实百分比
+        （区别于 unknownUsage 的「—」路径）；陈旧标注由 staleNote 传入。 */
+    stale?: boolean
+    /** 陈旧标注文案（observed_at 相对时间），stale 场景下随行内渲染。 */
+    staleNote?: string | null
     resetsAt?: string | null
     /** 恢复倒计时前缀文案（如 “限流至”）；缺省不显示前缀，既有消费方不受影响。 */
     resetsAtPrefix?: string
@@ -134,6 +149,8 @@ const labelSizeClass = computed(() =>
 
 // Progress bar color based on utilization
 const barClass = computed(() => {
+  // stale：已探测但 status=unknown → 灰度（降不透明度），仍显示真实百分比
+  if (props.stale) return 'bg-gray-400/70 dark:bg-gray-500/70'
   if (props.unknownUsage) return 'bg-gray-300 dark:bg-gray-600'
   if (props.remainingCapacity) {
     if (props.utilization <= 20) {
@@ -154,6 +171,8 @@ const barClass = computed(() => {
 
 // Text color based on utilization
 const textClass = computed(() => {
+  // stale：灰度文字（与 unknownUsage 的隐藏数字路径区分，stale 仍显示真实百分比）
+  if (props.stale) return 'text-gray-500 dark:text-gray-400'
   if (props.remainingCapacity) {
     if (props.utilization <= 20) {
       return 'text-red-600 dark:text-red-400'

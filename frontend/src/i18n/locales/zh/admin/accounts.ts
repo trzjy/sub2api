@@ -488,6 +488,14 @@ export default {
         dimensionKindSubscription: '订阅',
         dimensionStatusRemaining: '剩余',
         dimensionStatusUnknown: '未知',
+        // 陈旧标注（方案 §3.4 三分支最终口径 / 派发单 F1-R2）：
+        // 数值存在 + observed_at 有效 → 约 {time}前；
+        // 数值存在 + observed_at 缺失/零值/无效 → 固定「采集时间未知」。
+        staleAgo: '约 {time}前',
+        staleTimeUnknown: '陈旧数据 · 采集时间未知',
+        staleMinutes: '{minutes} 分钟',
+        staleHours: '{hours} 小时',
+        staleDays: '{days} 天',
       },
       types: {
         oauth: 'OAuth',

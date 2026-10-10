@@ -358,7 +358,7 @@ describe('CNQuotaUsageCell', () => {
       quota_dimensions: [
         { kind: 'paid', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' },
         { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_free', observed_at: '2026-10-09T02:00:00Z' },
-        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_wallet', observed_at: '2026-10-09T02:00:00Z' }
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_wallet', observed_at: null }
       ]
     } as unknown as Account
 
@@ -409,8 +409,9 @@ describe('CNQuotaUsageCell', () => {
     expect(wrapper.text()).not.toContain('gpt-4o-mini')
   })
 
-  // Kira paid 结构化行：source=kira_vnd_balance 维度驱动 VND 行状态徽标；金额取数路径不变。
-  it('upgrades the Kira VND line into a structured row with a status badge', () => {
+  // Kira paid 行（方案 §3.4 v24）：窗口内孤立 VND 状态徽标已删除（单轨口径，付费行
+  // 不是状态出口）；金额取数路径不变；paid 维度状态唯一出口 = 规范化维度面板。
+  it('upgrades the Kira VND line without an inline status badge (status moves to the dimension panel)', () => {
     const kiraPaid = {
       ...kiraAccount,
       quota_dimensions: [
@@ -421,17 +422,21 @@ describe('CNQuotaUsageCell', () => {
     const wrapper = mount(CNQuotaUsageCell, { props: { account: kiraPaid } })
 
     const vnd = wrapper.get('[data-test="cn-quota-kira-vnd"]')
-    // 状态徽标（remaining）
-    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(true)
-    expect(vnd.text()).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
+    // 孤立 VND 状态徽标已删除（负例）
+    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(false)
     // 既有 VND 金额展示保留（取数路径不变）
     expect(vnd.text()).toContain('"balance":"38406"')
+    // paid 维度状态唯一出口 = 规范化维度面板（remaining）
+    expect(wrapper.find('[data-test="cn-quota-dimensions"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
   })
 
   // ===== 单轨展示不变式回归（派发单 UNIFY-QUOTA-UI-20261010 / §3.4）=====
 
-  // ① 负例锁死：订阅维度 unknown + 旧快照有 plan_used_pct → 进度条/旧数值不渲染。
-  it('① hides the plan bar when the subscription dimension is unknown (no stale percentage)', () => {
+  // ===== 派发单 F1 / 方案 §3.4 v24：单轨展示不变式（灰度进度条 + 陈旧标注）=====
+
+  // a) 维度 unknown + 数值存在 → 渲染进度条（灰度）+ 陈旧标注，不渲染 unknown 徽标
+  it('a) renders a gray stale plan bar (no unknown badge) when the subscription dimension is unknown but a value exists', () => {
     const unknownSub = {
       ...thPassAccount,
       quota_dimensions: [
@@ -439,14 +444,24 @@ describe('CNQuotaUsageCell', () => {
       ]
     } as unknown as Account
     const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownSub } })
-    // 旧快照 plan_used_pct=62 存在，但维度 unknown → 进度条不渲染（不出现旧数值）
-    expect(wrapper.find('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('62%')
+    // 数值存在（plan_used_pct=62）→ 进度条渲染（灰度）
+    const planBar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]')
+    expect(planBar.exists()).toBe(true)
+    const bar = planBar.findComponent(UsageProgressBar)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(planBar.text()).toContain('62%')
+    // 陈旧标注（observed_at 相对时间）
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleAgo')
+    // 不渲染 unknown 徽标（已探测、数值存在 → 维度面板不再显示「未知」）
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
   })
 
-  // ① Kira 免费维度 unknown + 旧快照有 used_percent → 进度条/已用上限不渲染。
-  it('① hides the Kira free bar and used/limit when the free dimension is unknown', () => {
+  // a) Kira 免费维度 unknown + 数值存在 → 灰度进度条 + 陈旧标注 + 不渲染 unknown 徽标
+  it('a) renders a gray stale Kira free bar (no unknown badge) when the free dimension is unknown but a value exists', () => {
     const unknownFree = {
       ...kiraAccount,
       quota_dimensions: [
@@ -454,28 +469,211 @@ describe('CNQuotaUsageCell', () => {
       ]
     } as unknown as Account
     const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownFree } })
-    expect(wrapper.find('[data-test="cn-quota-kira-bar"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="cn-quota-kira-used-limit"]').exists()).toBe(false)
-    // 旧快照 used_percent=30 / used_tokens=1000 / limit_tokens=6000000 不应出现
-    expect(wrapper.text()).not.toContain('30%')
-    expect(wrapper.text()).not.toContain('"used":1000')
-    expect(wrapper.text()).not.toContain('"limit":6000000')
+    const bar = wrapper.findComponent(UsageProgressBar)
+    expect(bar.exists()).toBe(true)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(wrapper.text()).toContain('30%')
+    // 陈旧标注
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleAgo')
+    // 不渲染 unknown 徽标
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
   })
 
-  // ① Kira 付费维度 unknown → 仅渲染状态徽标、隐藏金额数字（防同屏旧数值）。
-  it('① hides the Kira VND amount when the paid dimension is unknown, keeping only the badge', () => {
-    const unknownPaid = {
-      ...kiraAccount,
+  // f) 第三分支（方案 §3.4 最终口径 / 派发单 F1-R2）：数值存在 + observed_at 缺失/零值/无效
+  // → 灰度进度条 + 固定「采集时间未知」文案，不渲染「未知」徽标（区别于从未探测的 b) 分支）。
+  it('f) renders a gray bar with a fixed "probe time unknown" note when value exists but observed_at is missing', () => {
+    const subNoObserved = {
+      ...thPassAccount,
       quota_dimensions: [
-        { kind: 'paid', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_pass_snapshot', observed_at: null }
       ]
     } as unknown as Account
-    const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownPaid } })
-    // 状态徽标仍渲染（unknown）
-    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(true)
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: subNoObserved } })
+    // 数值存在（plan_used_pct=62）→ 进度条渲染（灰度）
+    const planBar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]')
+    expect(planBar.exists()).toBe(true)
+    const bar = planBar.findComponent(UsageProgressBar)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(planBar.text()).toContain('62%')
+    // 第三分支：陈旧标注固定「采集时间未知」（非相对时间）
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleTimeUnknown')
+    expect(note.text()).not.toContain('admin.accounts.cnProviders.staleAgo')
+    // 关键区分：observed_at 缺失但数值存在 → 不渲染「未知」徽标（仅从未探测的 b) 才渲染）
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+  })
+
+  // f) Kira 免费维度同样锁死第三分支：数值存在 + observed_at 缺失 → 灰度条 + 「采集时间未知」
+  it('f) renders a gray Kira free bar with a fixed "probe time unknown" note when value exists but observed_at is missing', () => {
+    const freeNoObserved = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_usage_snapshot', observed_at: null }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: freeNoObserved } })
+    const bar = wrapper.findComponent(UsageProgressBar)
+    expect(bar.exists()).toBe(true)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(wrapper.text()).toContain('30%')
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleTimeUnknown')
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+  })
+
+  // f) observed_at 为零值/无效串同样走第三分支固定文案（与缺失同口径）
+  it('f) treats an invalid observed_at as "probe time unknown" when value exists', () => {
+    const subBadObserved = {
+      ...thPassAccount,
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_pass_snapshot', observed_at: 'not-a-date' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: subBadObserved } })
+    const bar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]').findComponent(UsageProgressBar)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleTimeUnknown')
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+  })
+
+  // b) 维度 unknown + 数值不存在（从未探测）→ 渲染「未知」徽标、不渲染进度条
+  it('b) shows the unknown badge and hides the bar when never probed (no value)', () => {
+    const neverProbed = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: { ...thPassAccount.extra.th_pass_snapshot, plan_used_pct: undefined }
+      },
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_pass_snapshot', observed_at: null }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: neverProbed } })
+    // 无数值 → 进度条不渲染
+    expect(wrapper.find('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(false)
+    // 从未探测（observed_at=null）→ 维度面板渲染「未知」徽标
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
-    // 金额数字隐藏（旧快照 kimi_balance=38406 不出现）
-    expect(wrapper.text()).not.toContain('"balance":"38406"')
+  })
+
+  // b) Kira 免费维度 unknown + 数值不存在（从未探测）→ 渲染「未知」徽标、不渲染进度条
+  it('b) shows the unknown badge and hides the Kira free bar when never probed (no value)', () => {
+    const neverProbedKira = {
+      ...kiraAccount,
+      extra: {
+        ...kiraAccount.extra,
+        kira_usage_snapshot: {
+          ...kiraAccount.extra.kira_usage_snapshot,
+          used_percent: undefined,
+          used_tokens: undefined,
+          limit_tokens: undefined
+        }
+      },
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_usage_snapshot', observed_at: null }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: neverProbedKira } })
+    expect(wrapper.find('[data-test="cn-quota-kira-bar"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+  })
+
+  // c) Kira 窗口内孤立 VND 状态徽标（cn-quota-kira-vnd-status）已删除（负例断言）
+  it('c) the isolated Kira VND status badge is removed (negative assertion)', () => {
+    const kiraWithPaid = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: kiraWithPaid } })
+    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(false)
+    // VND 金额仍展示（取数路径不变）
+    expect(wrapper.get('[data-test="cn-quota-kira-vnd"]').text()).toContain('"balance":"38406"')
+  })
+
+  // c) 无 paid 维度的 Kira 账号同样不存在孤立 VND 状态徽标
+  it('c) the isolated Kira VND status badge is absent even without a paid dimension', () => {
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: kiraAccount } })
+    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(false)
+  })
+
+  // d) status=remaining/exhausted → 绿/红条 + 状态徽标 + 数值（既有行为回归）
+  it('d) renders a green/red bar plus the status badge and value for remaining/exhausted', () => {
+    // remaining（Kira free, 30% → 绿条）
+    const remainingFree = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_usage_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const rWrap = mount(CNQuotaUsageCell, { props: { account: remainingFree } })
+    const rBar = rWrap.findComponent(UsageProgressBar)
+    expect(rBar.props('stale')).toBe(false)
+    expect(rBar.props('unknownUsage')).toBe(false)
+    expect(rBar.props('utilization')).toBe(30)
+    expect(rBar.text()).toContain('30%')
+    expect(rWrap.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(true)
+    expect(rWrap.text()).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
+
+    // exhausted（TH 订阅, 95% → 红条）
+    const exhaustedSub = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: { ...thPassAccount.extra.th_pass_snapshot, plan_used_pct: 95 }
+      },
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const eWrap = mount(CNQuotaUsageCell, { props: { account: exhaustedSub } })
+    const eBar = eWrap.get('[data-test="cn-quota-pass-plan-bar"]').findComponent(UsageProgressBar)
+    expect(eBar.props('stale')).toBe(false)
+    expect(eBar.props('unknownUsage')).toBe(false)
+    expect(eBar.props('utilization')).toBe(95)
+    expect(eBar.text()).toContain('95%')
+    expect(eWrap.find('[data-test="cn-quota-dimension-status"]').exists()).toBe(true)
+    expect(eWrap.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+  })
+
+  // e) TH 订阅 plan_used_pct=81 + unknown → 灰条显示 81% + 陈旧标注
+  it('e) shows 81% on a gray stale bar for TH subscription plan_used_pct=81 with unknown status', () => {
+    const sub81 = {
+      ...thPassAccount,
+      extra: {
+        ...thPassAccount.extra,
+        th_pass_snapshot: { ...thPassAccount.extra.th_pass_snapshot, plan_used_pct: 81 }
+      },
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: sub81 } })
+    const bar = wrapper.get('[data-test="cn-quota-pass-plan-bar"]').findComponent(UsageProgressBar)
+    expect(bar.props('stale')).toBe(true)
+    expect(bar.props('unknownUsage')).toBe(false)
+    expect(bar.props('utilization')).toBe(81)
+    expect(bar.text()).toContain('81%')
+    const note = wrapper.find('[data-test="cn-quota-stale-note"]')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('admin.accounts.cnProviders.staleAgo')
+    // 数值存在 → 不渲染 unknown 徽标
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
   })
 
   // ② 维度 remaining → 数值渲染。
