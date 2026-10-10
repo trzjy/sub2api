@@ -27,17 +27,10 @@
         >
           {{ resetAtLabel }}
         </span>
-        <span
-          data-test="cn-quota-status"
-          :class="[
-            'inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium',
-            exhausted
-              ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-              : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-          ]"
-        >
-          {{ exhausted ? t('admin.accounts.cnProviders.statusExhausted') : t('admin.accounts.cnProviders.statusNormal') }}
-        </span>
+        <!-- 单轨收敛（方案 §3.4 / 派发单 UNIFY-QUOTA-UI-20261010）：删除 Pass 窗口头部
+             的重复状态徽标（旧 lifecycle/plan_exhausted 派生）；订阅/免费状态的唯一出口 =
+             下方规范化维度面板（cn-quota-dimensions）的对应维度行。恢复倒计时改由订阅维度
+             status==='exhausted' 驱动（recovery_at 取值路径不变，仍读 cn_quota_lifecycle）。 -->
         <span
           v-if="exhausted && recoveryAt"
           data-test="cn-quota-recovery"
@@ -97,7 +90,12 @@
 
     <!-- Kira 免费链：当日已用/上限进度条 + reset_at 倒计时 + VND 余额 -->
     <div v-else data-test="cn-quota-kira-window" class="space-y-1">
+      <!-- 单轨口径（方案 §3.4）：免费进度条 + 已用/上限数值的可见性 = 免费维度
+           （quota_dimensions source=kira_usage_snapshot）status !== 'unknown'。
+           status=unknown → 不渲染旧快照百分比/金额（防同屏旧数值）；维度缺失（旧 DTO）→
+           降级按既有快照渲染。planUsedPct 等数值来源不变，仅加维度状态门。 -->
       <UsageProgressBar
+        v-if="kiraFreeVisible"
         data-test="cn-quota-kira-bar"
         :label="t('admin.accounts.cnProviders.kiraDailyLabel')"
         :utilization="kiraUtilization"
@@ -106,7 +104,7 @@
         color="emerald"
       />
       <div
-        v-if="kiraUsedTokens != null && kiraLimitTokens != null"
+        v-if="kiraFreeVisible && kiraUsedTokens != null && kiraLimitTokens != null"
         data-test="cn-quota-kira-used-limit"
         class="text-[10px] leading-4 text-gray-500 dark:text-gray-400"
       >
@@ -117,7 +115,9 @@
         data-test="cn-quota-kira-vnd"
         class="flex flex-wrap items-center gap-1 text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
       >
-        <!-- Kira paid 维度（source=kira_vnd_balance）驱动的状态徽标；金额取数路径不变。 -->
+        <!-- Kira paid 维度（source=kira_vnd_balance）驱动的状态徽标；金额取数路径不变。
+             单轨口径：status=unknown → 仅渲染状态徽标、隐藏金额数字；
+             remaining/exhausted → 徽标 + 金额同显。维度缺失（旧 DTO）→ 降级显示金额。 -->
         <span
           v-if="kiraPaidDimension"
           data-test="cn-quota-kira-vnd-status"
@@ -125,7 +125,7 @@
         >
           {{ dimensionStatusLabel(kiraPaidDimension.status) }}
         </span>
-        {{ t('admin.accounts.cnProviders.kiraVndBalance', { balance: formatVnd(vndBalance) }) }}
+        <span v-if="kiraVndAmountVisible">{{ t('admin.accounts.cnProviders.kiraVndBalance', { balance: formatVnd(vndBalance) }) }}</span>
       </div>
     </div>
 
@@ -271,6 +271,37 @@ const kiraPaidDimension = computed(() =>
   quotaDimensions.value.find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
 )
 
+// TH 订阅维度（source=th_pass_snapshot, kind=subscription, scope=account）：本组件订阅链
+// 唯一定义的状态出口事实源（方案 §3.4 单轨不变式）。其 status 驱动订阅进度条可见性与
+// 恢复倒计时；旧的 lifecycle/plan_exhausted 派生状态已删除，改由本维度统一出口。
+const thSubscriptionDimension = computed<QuotaDimensionItem | undefined>(() =>
+  quotaDimensions.value.find(
+    (d) => d.source === 'th_pass_snapshot' && d.kind === 'subscription' && d.scope === 'account'
+  )
+)
+
+// Kira 免费维度（source=kira_usage_snapshot, kind=free）：驱动当日进度条 + 已用/上限数值
+// 的可见性。status=unknown → 不渲染旧快照百分比/金额（防同屏旧数值）。
+const kiraFreeDimension = computed<QuotaDimensionItem | undefined>(() =>
+  quotaDimensions.value.find((d) => d.source === 'kira_usage_snapshot' && d.kind === 'free')
+)
+
+// 单轨可见性门：免费维度存在且 status=unknown → 隐藏免费进度条/数值；维度缺失（旧 DTO）→
+// 降级按既有快照渲染（不造状态）。
+const kiraFreeVisible = computed(() => {
+  const dim = kiraFreeDimension.value
+  if (!dim) return true
+  return dim.status !== 'unknown'
+})
+
+// Kira VND 金额可见性：付费维度（kira_vnd_balance）status=unknown → 隐藏金额、仅保留状态徽标；
+// 维度缺失（旧 DTO）→ 降级显示金额。
+const kiraVndAmountVisible = computed(() => {
+  const dim = kiraPaidDimension.value
+  if (!dim) return true
+  return dim.status !== 'unknown'
+})
+
 const dimensionKindLabel = (dim: QuotaDimensionItem): string => {
   if (dim.kind === 'free') return t('admin.accounts.cnProviders.dimensionKindFree')
   if (dim.kind === 'subscription') return t('admin.accounts.cnProviders.dimensionKindSubscription')
@@ -358,20 +389,29 @@ const resetAtLabel = computed(() => {
 })
 const resetAtFull = computed(() => resetAt.value?.toLocaleString() ?? '')
 
-// 官方 Pass 津贴进度条：plan_used_pct（0-100 截断由 UsageProgressBar 负责），
-// 仅在订阅窗口且（有百分比值 或 官方标记 plan_exhausted）时展示。
+// 官方 Pass 津贴进度条：plan_used_pct 仍作为 bar 数值来源（注释标注维度 source）。
+// 单轨口径（方案 §3.4）：可见性 = 订阅维度（quota_dimensions source=th_pass_snapshot
+// kind=subscription）status ∈ {remaining, exhausted}。status=unknown → 不渲染进度条及其
+// 伴随数值；维度缺失（旧 DTO）→ 降级按既有 plan_used_pct / plan_exhausted 渲染。
 const planUsedPct = computed<number | null>(() => {
   const v = passSnapshot.value?.plan_used_pct
   return typeof v === 'number' ? v : null
 })
-const passPlanBarVisible = computed(
-  () => showPassWindow.value && (planUsedPct.value != null || passSnapshot.value?.plan_exhausted === true)
-)
+const passPlanBarVisible = computed(() => {
+  if (!showPassWindow.value) return false
+  const dim = thSubscriptionDimension.value
+  if (!dim) return planUsedPct.value != null || passSnapshot.value?.plan_exhausted === true
+  return dim.status !== 'unknown'
+})
 
-// 已耗尽状态：生命周期状态机 exhausted 或 官方 plan_exhausted（津贴硬上限）任一触发。
-const exhausted = computed(
-  () => lifecycle.value?.state === 'exhausted' || passSnapshot.value?.plan_exhausted === true
-)
+// 已耗尽状态（驱动恢复倒计时）：订阅维度（quota_dimensions source=th_pass_snapshot
+// kind=subscription）status==='exhausted'。维度缺失（旧 DTO）→ 降级按既有 lifecycle
+// state / plan_exhausted 渲染。recovery_at 取值路径不变（仍读 cn_quota_lifecycle）。
+const exhausted = computed(() => {
+  const dim = thSubscriptionDimension.value
+  if (dim) return dim.status === 'exhausted'
+  return lifecycle.value?.state === 'exhausted' || passSnapshot.value?.plan_exhausted === true
+})
 const recoveryAt = computed(() => parseTime(lifecycle.value?.recovery_at))
 const recoveryLabel = computed(() => {
   if (!recoveryAt.value) return ''

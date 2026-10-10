@@ -150,4 +150,71 @@ describe('CNProviderBalanceCell', () => {
     // 既有余额金额展示不变
     expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
   })
+
+  // ===== 单轨展示不变式回归（派发单 UNIFY-QUOTA-UI-20261010 / §3.4）=====
+
+  // ① 负例锁死：Kira 付费维度 unknown + 旧快照有余额 → 仅渲染状态徽标、金额数字隐藏。
+  it('① hides the balance amount when the Kira paid dimension is unknown', () => {
+    const unknownKiraPaid = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: unknownKiraPaid } })
+    // 状态徽标（unknown）仍渲染
+    expect(wrapper.find('[data-test="cn-provider-balance-kira-status"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+    // 金额数字隐藏（旧快照 kimi_balance=12.5 不出现）
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).not.toContain('CNY 12.50')
+  })
+
+  // ① relay 族付费维度 unknown（source={platform}_balance）→ 仅徽标、金额隐藏（降级兼容之外的维度覆盖情形）。
+  it('① hides the balance amount when the relay paid dimension is unknown', () => {
+    const relayAccount = {
+      id: 7,
+      platform: 'deepseek',
+      type: 'apikey',
+      credentials: { account_mode: 'payg' },
+      extra: { deepseek_balance: 8.8, deepseek_balance_currency: 'USD' },
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'deepseek_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: relayAccount } })
+    expect(wrapper.find('[data-test="cn-provider-balance-kira-status"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).not.toContain('USD 8.80')
+  })
+
+  // ② 维度 remaining → 金额渲染（既有余额金额取数路径不变）。
+  it('② renders the balance amount when the paid dimension is remaining', () => {
+    const remainingKiraPaid = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: remainingKiraPaid } })
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
+
+  // ③ 付费维度 exhausted → 状态唯一出口渲染、无第二个重复徽标（本 cell 仅一个状态徽标）。
+  it('③ exposes paid status only via the single status badge (no duplicate)', () => {
+    const exhaustedKiraPaid = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderBalanceCell, { props: { account: exhaustedKiraPaid } })
+    expect(wrapper.findAll('[data-test="cn-provider-balance-kira-status"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+  })
+
+  // ④ quota_dimensions 缺失（旧 DTO 兼容）→ 降级为现状渲染：金额照旧展示，不报错、不造状态。
+  it('④ degrades to legacy balance rendering when quota_dimensions is absent', () => {
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
 })

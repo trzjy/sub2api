@@ -290,18 +290,79 @@ describe('CNProviderQuotaCell', () => {
     const exhaustedDimAccount = {
       ...account,
       quota_dimensions: [
-        { kind: 'free', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'zhipu_free', observed_at: '2026-10-09T02:00:00Z' }
+        // 真实 coding plan 免费维度 source = zhipu_usage_updated_at；exhausted 为 account 级。
+        { kind: 'free', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' }
       ]
     } as Account
 
     const wrapper = mount(CNProviderQuotaCell, { props: { account: exhaustedDimAccount } })
     await flushPromises()
 
-    // 耗尽维度徽标
+    // 耗尽维度徽标（本 cell 唯一 exhausted 出口）
     expect(wrapper.get('[data-test="cn-provider-quota-exhausted"]').text()).toBe(
       'admin.accounts.cnProviders.statusExhausted'
     )
     // 既有 used_percent 取数路径不变：5h(0%) / 周(27%) 仍从快照渲染
+    expect(wrapper.findAll('[data-test="cn-provider-quota-tier"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('27%')
+  })
+
+  // ===== 单轨展示不变式回归（派发单 UNIFY-QUOTA-UI-20261010 / §3.4）=====
+
+  // ① 负例锁死：某档对应 coding plan 维度 unknown + 旧快照有 used_percent → 该档进度条不渲染，
+  // 其余 confirmed 档仍渲染（不出现旧数值）。后端未填 target，按 [5h, weekly, monthly] 顺序映射。
+  it('① hides only the tier whose coding-plan dimension is unknown', async () => {
+    const unknownWeekly = {
+      ...account,
+      quota_dimensions: [
+        // 顺序 [5h, weekly, monthly]；weekly(下标 1) 维度 unknown → weekly 档不渲染
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'free', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: unknownWeekly } })
+    await flushPromises()
+
+    // 5h 档（remaining）→ 渲染；weekly 档（unknown）→ 不渲染
+    expect(wrapper.findAll('[data-test="cn-provider-quota-tier"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain('0%') // 5h(0%) 仍渲染
+    expect(wrapper.text()).not.toContain('27%') // weekly 旧数值不出现
+  })
+
+  // ② 维度 remaining → 数值渲染（三档全部 remaining，全部可见）。
+  it('② renders all tiers when their coding-plan dimensions are remaining', async () => {
+    const allRemaining = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' },
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: allRemaining } })
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="cn-provider-quota-tier"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('27%')
+  })
+
+  // ③ exhausted 维度 → 状态唯一出口渲染、无第二个重复徽标（本 cell 仅 cn-provider-quota-exhausted 一个出口）。
+  it('③ exposes exhausted status only via the single exhausted badge (no duplicate)', async () => {
+    const exhaustedDimAccount = {
+      ...account,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'zhipu_usage_updated_at', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as Account
+    const wrapper = mount(CNProviderQuotaCell, { props: { account: exhaustedDimAccount } })
+    await flushPromises()
+    // 唯一 exhausted 出口
+    expect(wrapper.findAll('[data-test="cn-provider-quota-exhausted"]')).toHaveLength(1)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+  })
+
+  // ④ quota_dimensions 缺失（旧 DTO 兼容）→ 降级按既有快照渲染所有档，不报错、不造状态。
+  it('④ degrades to legacy tier rendering when quota_dimensions is absent', async () => {
+    const wrapper = mount(CNProviderQuotaCell, { props: { account } })
+    await flushPromises()
     expect(wrapper.findAll('[data-test="cn-provider-quota-tier"]')).toHaveLength(2)
     expect(wrapper.text()).toContain('27%')
   })

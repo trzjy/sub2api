@@ -113,10 +113,9 @@ describe('CNQuotaUsageCell', () => {
     expect(wrapper.get('[data-test="cn-quota-pass-renews"]').text()).toContain(
       'admin.accounts.cnProviders.passResetsAt'
     )
-    // 状态默认正常
-    expect(wrapper.get('[data-test="cn-quota-status"]').text()).toBe(
-      'admin.accounts.cnProviders.statusNormal'
-    )
+    // 单轨收敛：Pass 窗口头部的重复状态徽标（旧 lifecycle/plan_exhausted 派生）已删除，
+    // 订阅/免费状态的唯一出口 = 下方维度面板（cn-quota-dimensions）的对应维度行。
+    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
     // 默认今日窗口：requests=10
     const stats = wrapper.get('[data-test="cn-quota-window-stats"]').text()
     expect(stats).toContain('"requests":"10"')
@@ -154,8 +153,9 @@ describe('CNQuotaUsageCell', () => {
     expect(wrapper.get('[data-test="cn-quota-window-stats"]').text()).toContain('"requests":"10"')
   })
 
-  // 官方 plan_exhausted 触发"已耗尽"状态样式（沿用既有 exhausted 红色徽标）。
-  it('shows exhausted status when plan_exhausted is true', () => {
+  // 单轨口径（方案 §3.4）：订阅维度 status=exhausted → 进度条仍渲染（status ≠ unknown），
+  // 但"已耗尽"状态唯一出口 = 维度面板行（旧 cn-quota-status 徽标已删除）。
+  it('renders the plan bar for an exhausted subscription dimension with status shown only in the panel', () => {
     const exhaustedPlan = {
       ...thPassAccount,
       extra: {
@@ -164,14 +164,20 @@ describe('CNQuotaUsageCell', () => {
           ...thPassAccount.extra.th_pass_snapshot,
           plan_exhausted: true
         }
-      }
+      },
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
     } as unknown as Account
     const wrapper = mount(CNQuotaUsageCell, { props: { account: exhaustedPlan } })
 
-    expect(wrapper.get('[data-test="cn-quota-status"]').text()).toBe(
-      'admin.accounts.cnProviders.statusExhausted'
-    )
+    // 旧窗口头部状态徽标已删除（单轨收敛）
+    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
+    // 进度条仍渲染：订阅维度 status=exhausted（≠ unknown）
     expect(wrapper.get('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(true)
+    // "已耗尽"状态唯一出口 = 维度面板
+    expect(wrapper.get('[data-test="cn-quota-dimensions"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.statusExhausted')
   })
 
   // 官方津贴 0%：plan_used_pct=0 是有效值（非缺失），渲染 0% 进度条而非 '—'。
@@ -224,8 +230,9 @@ describe('CNQuotaUsageCell', () => {
     expect(planBar.text()).not.toContain('%')
   })
 
-  // 状态机 exhausted：状态徽标翻红并显示恢复时间（cn_quota_lifecycle.recovery_at）。
-  it('shows exhausted status with recovery time from cn_quota_lifecycle', () => {
+  // 单轨口径（方案 §3.4）：恢复倒计时由订阅维度 status==='exhausted' 驱动，recovery_at
+  // 取值路径不变（仍读 cn_quota_lifecycle）；旧窗口头部 cn-quota-status 已删除。
+  it('shows the recovery countdown driven by the subscription dimension exhausted status', () => {
     const exhausted = {
       ...thPassAccount,
       extra: {
@@ -234,13 +241,16 @@ describe('CNQuotaUsageCell', () => {
           state: 'exhausted',
           recovery_at: new Date(Date.now() + 90 * 60 * 1000).toISOString()
         }
-      }
+      },
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
     } as unknown as Account
     const wrapper = mount(CNQuotaUsageCell, { props: { account: exhausted } })
 
-    expect(wrapper.get('[data-test="cn-quota-status"]').text()).toBe(
-      'admin.accounts.cnProviders.statusExhausted'
-    )
+    // 旧窗口头部状态徽标已删除（单轨收敛）
+    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
+    // 恢复倒计时由订阅维度 exhausted 驱动，recovery_at 仍读 cn_quota_lifecycle
     expect(wrapper.get('[data-test="cn-quota-recovery"]').text()).toContain(
       'admin.accounts.cnProviders.recoverAt'
     )
@@ -416,5 +426,98 @@ describe('CNQuotaUsageCell', () => {
     expect(vnd.text()).toContain('admin.accounts.cnProviders.dimensionStatusRemaining')
     // 既有 VND 金额展示保留（取数路径不变）
     expect(vnd.text()).toContain('"balance":"38406"')
+  })
+
+  // ===== 单轨展示不变式回归（派发单 UNIFY-QUOTA-UI-20261010 / §3.4）=====
+
+  // ① 负例锁死：订阅维度 unknown + 旧快照有 plan_used_pct → 进度条/旧数值不渲染。
+  it('① hides the plan bar when the subscription dimension is unknown (no stale percentage)', () => {
+    const unknownSub = {
+      ...thPassAccount,
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownSub } })
+    // 旧快照 plan_used_pct=62 存在，但维度 unknown → 进度条不渲染（不出现旧数值）
+    expect(wrapper.find('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('62%')
+  })
+
+  // ① Kira 免费维度 unknown + 旧快照有 used_percent → 进度条/已用上限不渲染。
+  it('① hides the Kira free bar and used/limit when the free dimension is unknown', () => {
+    const unknownFree = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_usage_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownFree } })
+    expect(wrapper.find('[data-test="cn-quota-kira-bar"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cn-quota-kira-used-limit"]').exists()).toBe(false)
+    // 旧快照 used_percent=30 / used_tokens=1000 / limit_tokens=6000000 不应出现
+    expect(wrapper.text()).not.toContain('30%')
+    expect(wrapper.text()).not.toContain('"used":1000')
+    expect(wrapper.text()).not.toContain('"limit":6000000')
+  })
+
+  // ① Kira 付费维度 unknown → 仅渲染状态徽标、隐藏金额数字（防同屏旧数值）。
+  it('① hides the Kira VND amount when the paid dimension is unknown, keeping only the badge', () => {
+    const unknownPaid = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'paid', scope: 'account', target: '', status: 'unknown', servable: 'unknown', source: 'kira_vnd_balance', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: unknownPaid } })
+    // 状态徽标仍渲染（unknown）
+    expect(wrapper.find('[data-test="cn-quota-kira-vnd-status"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('admin.accounts.cnProviders.dimensionStatusUnknown')
+    // 金额数字隐藏（旧快照 kimi_balance=38406 不出现）
+    expect(wrapper.text()).not.toContain('"balance":"38406"')
+  })
+
+  // ② 维度 remaining → 数值渲染。
+  it('② renders the Kira free bar when the free dimension is remaining', () => {
+    const remainingFree = {
+      ...kiraAccount,
+      quota_dimensions: [
+        { kind: 'free', scope: 'account', target: '', status: 'remaining', servable: 'yes', source: 'kira_usage_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: remainingFree } })
+    const bar = wrapper.findComponent(UsageProgressBar)
+    expect(bar.exists()).toBe(true)
+    expect(bar.props('utilization')).toBe(30)
+    expect(wrapper.get('[data-test="cn-quota-kira-used-limit"]').exists()).toBe(true)
+  })
+
+  // ③ 订阅维度 exhausted → 状态唯一出口在维度面板，无第二个重复徽标（cn-quota-status 已删）。
+  it('③ exposes subscription exhausted status only via the dimension panel (no duplicate badge)', () => {
+    const exhaustedSub = {
+      ...thPassAccount,
+      quota_dimensions: [
+        { kind: 'subscription', scope: 'account', target: '', status: 'exhausted', servable: 'no', source: 'th_pass_snapshot', observed_at: '2026-10-09T02:00:00Z' }
+      ]
+    } as unknown as Account
+    const wrapper = mount(CNQuotaUsageCell, { props: { account: exhaustedSub } })
+    // 旧窗口头部重复徽标已删除
+    expect(wrapper.find('[data-test="cn-quota-status"]').exists()).toBe(false)
+    // 唯一出口 = 维度面板（kind=subscription + status=exhausted）
+    const panel = wrapper.get('[data-test="cn-quota-dimensions"]')
+    expect(panel.text()).toContain('admin.accounts.cnProviders.dimensionKindSubscription')
+    expect(panel.text()).toContain('admin.accounts.cnProviders.statusExhausted')
+  })
+
+  // ④ quota_dimensions 缺失（旧 DTO 兼容）→ 降级为现状渲染：进度条/金额照旧渲染，不报错、不造状态。
+  it('④ degrades to legacy rendering when quota_dimensions is absent', () => {
+    const thWrap = mount(CNQuotaUsageCell, { props: { account: thPassAccount } })
+    expect(thWrap.get('[data-test="cn-quota-pass-plan-bar"]').exists()).toBe(true)
+    expect(thWrap.find('[data-test="cn-quota-status"]').exists()).toBe(false)
+
+    const kiraWrap = mount(CNQuotaUsageCell, { props: { account: kiraAccount } })
+    expect(kiraWrap.findComponent(UsageProgressBar).exists()).toBe(true)
+    expect(kiraWrap.get('[data-test="cn-quota-kira-vnd"]').text()).toContain('"balance":"38406"')
   })
 })

@@ -15,18 +15,25 @@
     </span>
 
     <!-- Tier rows: 5h + weekly utilization bars (snapshot renders on mount).
-         复用账号页 UsageProgressBar：同阈值配色、同倒计时格式。 -->
+         复用账号页 UsageProgressBar：同阈值配色、同倒计时格式。
+         单轨口径（方案 §3.4 / 派发单 UNIFY-QUOTA-UI-20261010）：每档进度条可见性 =
+         对应 coding plan 免费维度（quota_dimensions source={provider}_usage_updated_at,
+         kind=free, scope=account）status !== 'unknown'。后端未填 target，按 resolver 稳定
+         顺序 [5h, weekly, monthly] 做位置映射（单一事实源仍为 quota_dimensions.status，
+         组件内不自行比对 fetched_at）。status=unknown 档不渲染旧百分比；维度缺失（旧 DTO）
+         → 降级按既有快照渲染。挂载时 snapshotIsStale 自动探测，刷新后维度转 confirmed 恢复。 -->
     <div v-if="data?.success && data.tiers?.length" class="space-y-1">
-      <UsageProgressBar
-        v-for="tier in data.tiers"
-        :key="tier.window"
-        data-test="cn-provider-quota-tier"
-        :label="windowLabel(tier.window)"
-        :color="tier.window === 'weekly' ? 'emerald' : 'indigo'"
-        :utilization="tier.used_percent ?? 0"
-        :unknown-usage="tier.used_percent == null"
-        :resets-at="tier.reset_at"
-      />
+      <template v-for="tier in data.tiers" :key="tier.window">
+        <UsageProgressBar
+          v-if="tierVisible(tier.window)"
+          data-test="cn-provider-quota-tier"
+          :label="windowLabel(tier.window)"
+          :color="tier.window === 'weekly' ? 'emerald' : 'indigo'"
+          :utilization="tier.used_percent ?? 0"
+          :unknown-usage="tier.used_percent == null"
+          :resets-at="tier.reset_at"
+        />
+      </template>
     </div>
 
     <!-- Explicit refresh action (aligned with the OpenAI "Query" / Grok "Probe"
@@ -113,10 +120,33 @@ const providerPrefix = computed(() => cnQuotaProviderPrefix(props.account.platfo
 const visible = computed(() => cnQuotaCellVisible(props.account.platform, readMode(), readBaseURL()))
 
 // 规范化维度状态对齐（方案 §3.4 / R5-F3）：account 级 exhausted 维度 → 耗尽徽标；
-// 既有 used_percent 取数路径不变。
+// 本 cell 唯一 exhausted 出口，既有 used_percent 取数路径不变。
 const exhaustedAccountDimension = computed<QuotaDimensionItem | undefined>(() =>
   (props.account.quota_dimensions ?? []).find((d) => d.scope === 'account' && d.status === 'exhausted')
 )
+
+// 单轨口径（派发单 UNIFY-QUOTA-UI-20261010）：coding plan 滚动窗口维度（source =
+// {provider}_usage_updated_at, kind=free, scope=account）。后端为 5h/weekly/monthly 三档
+// 共用同一 source 且未填 target，故按 resolver 稳定追加顺序 [5h, weekly, monthly] 做位置映射。
+// 单一事实源 = quota_dimensions.status，组件内不得再比对 fetched_at 自行判新鲜。
+const codingPlanFreeDimensions = computed<QuotaDimensionItem[]>(() =>
+  (props.account.quota_dimensions ?? []).filter(
+    (d) => d.kind === 'free' && d.scope === 'account' && d.source === `${providerPrefix.value}_usage_updated_at`
+  )
+)
+
+const TIER_WINDOW_ORDER = ['5h', 'weekly', 'monthly'] as const
+type TierWindow = (typeof TIER_WINDOW_ORDER)[number]
+
+// 每档进度条可见性：对应窗口维度存在且 status !== 'unknown' → 渲染；维度缺失（旧 DTO）→
+// 降级按既有快照渲染（不造状态、不报错）。
+const tierVisible = (window: string): boolean => {
+  const idx = TIER_WINDOW_ORDER.indexOf(window as TierWindow)
+  if (idx < 0) return true
+  const dim = codingPlanFreeDimensions.value[idx]
+  if (!dim) return true
+  return dim.status !== 'unknown'
+}
 
 const loading = ref(false)
 const error = ref<string | null>(null)

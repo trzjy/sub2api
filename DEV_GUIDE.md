@@ -16,6 +16,17 @@
 
 新增任何金额展示必须走 `frontend/src/utils/money.ts`（`formatMoney` / `formatAccountMoney` / `currencySymbol`），**禁止在组件里硬编码 `$` / `¥` 符号**。账本类金额（余额/成本/限额/面值/返利）显式 USD（`formatAccountMoney`），收款类金额（实付/手续费/统计）随订单/渠道携带的币种（`formatMoney`），禁止猜测币种。全局汇率配置见 `docs/PAYMENT.md` 的「Currency & FX」章节（记账货币 USD、FX_RATES、充值加价系数、订阅 USD 定价）。
 
+## 一.6、额度/状态展示单轨规约（前端，2026-10-10 用户裁定）
+
+账号额度与状态的**存在性、新鲜度、状态判定只有一个事实源**：后端 `quota_dimensions`（`service.ResolveAccountQuotaDimensions` → DTO 投影）。原始 `extra` 快照键**只允许提供同一维度的数值、计数、倒计时**，禁止再独立决定可见性、派生第二个状态标记或追加同义状态面板。硬性约束（违反即打回）：
+
+1. **单轨可见性**：进度条/百分比/金额的渲染必须以其对应维度 `status ∈ {remaining, exhausted}` 为前提；`status=unknown`（快照缺失或超过新鲜度门）时只渲染「未知」状态出口，**禁止同时展示旧快照数值**。
+2. **单一状态出口**：同一维度只允许一个状态渲染点（维度面板行或唯一徽标）；禁止同一维度在头部徽标、面板行、余额徽标等多处重复表达。
+3. **数值跟随状态**：数值/计数/倒计时必须与状态同一来源快照，不得出现「进度条用旧值、状态用新值」的分轨；组件注释须标注所消费的维度 `source`。
+4. **新增展示必须配映射与回归**：任何新额度/状态 UI 必须给出「维度 → 唯一状态出口 → 唯一渲染点」映射，并在 spec 中覆盖 fresh/stale/missing/exhausted 四态断言（含「unknown 不得出现旧数值」负例）。
+
+规约出处：`docs-local/dual-quota-unified-mechanism-plan.md` §3.4「单轨展示不变式」（SSOT）。
+
 ## 二、本地环境配置
 
 ### PostgreSQL 16 (Windows 服务)

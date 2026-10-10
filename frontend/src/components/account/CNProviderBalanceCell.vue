@@ -7,15 +7,19 @@
         :class="['text-[10px] font-medium leading-4', platformTextClass(account.platform)]"
         :title="t('admin.accounts.cnProviders.balanceProbeTooltip')"
       >
-        <!-- Kira paid 维度（source=kira_vnd_balance）状态徽标；既有余额金额展示不变。 -->
+        <!-- 付费维度状态徽标：Kira = kira_vnd_balance；relay 族 = resolver relay paid 维度
+             source={platform}_balance。既有余额金额展示不变。 -->
         <span
-          v-if="kiraPaidDimension"
+          v-if="paidDimension"
           data-test="cn-provider-balance-kira-status"
-          :class="dimensionStatusClass(kiraPaidDimension.status)"
+          :class="dimensionStatusClass(paidDimension.status)"
         >
-          {{ dimensionStatusLabel(kiraPaidDimension.status) }}
+          {{ dimensionStatusLabel(paidDimension.status) }}
         </span>
-        {{ balanceLabel }}
+        <!-- 单轨口径（方案 §3.4 / 派发单 UNIFY-QUOTA-UI-20261010）：付费维度存在且
+             status==='unknown' → 隐藏金额数字、仅保留状态徽标（防同屏旧数值）；
+             无维度覆盖（维度列表无匹配项）→ 保持现状渲染（降级兼容，不造状态）。 -->
+        <span v-if="balanceAmountVisible">{{ balanceLabel }}</span>
       </span>
 
       <!-- 不限量账号剩余次数：只读落库快照数字（one-api total_available 为次数，无货币前缀） -->
@@ -150,11 +154,23 @@ const snapshotBalances = computed<CNProviderBalanceEntry[]>(() => {
 // 旧链归零：移除前端 extra 直读兜底（<platform>_balance_low），仅消费 DTO 字段。
 const balanceLow = computed(() => props.account.balance_low === true)
 
-// Kira 付费余额结构化行：source=kira_vnd_balance 维度（paid）驱动状态徽标；
-// 既有余额金额取数（currentEntries / balanceLabel）路径不变。
-const kiraPaidDimension = computed<QuotaDimensionItem | undefined>(() =>
-  (props.account.quota_dimensions ?? []).find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
-)
+// 付费余额维度：Kira = source=kira_vnd_balance 维度（paid）；relay 族 = resolver relay paid
+// 维度 source={platform}_balance（执行时核对字面量）。既存 kira_vnd_balance 优先；否则匹配本
+// 平台余额维度。既有余额金额取数（currentEntries / balanceLabel）路径不变。
+const paidDimension = computed<QuotaDimensionItem | undefined>(() => {
+  const dims = props.account.quota_dimensions ?? []
+  const kira = dims.find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
+  if (kira) return kira
+  return dims.find((d) => d.kind === 'paid' && d.source === `${props.account.platform}_balance`)
+})
+
+// 余额金额可见性：付费维度存在且 status==='unknown' → 隐藏金额、仅保留状态徽标；
+// 维度缺失（旧 DTO / 无维度覆盖的平台）→ 降级显示金额（不造状态）。
+const balanceAmountVisible = computed(() => {
+  const dim = paidDimension.value
+  if (!dim) return true
+  return dim.status !== 'unknown'
+})
 
 const dimensionStatusLabel = (status: QuotaDimensionItem['status']): string => {
   if (status === 'exhausted') return t('admin.accounts.cnProviders.statusExhausted')
