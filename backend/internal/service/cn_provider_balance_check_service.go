@@ -435,6 +435,17 @@ func accountHoldsHTTP403Recovery(account *Account) bool {
 // （B 卡与 A 卡经此 extra 键名对接）。null/缺失/过期 = 未退避。
 const thProbeBackoffUntilExtraKey = "th_probe_backoff_until"
 
+// kiraProbeCooldownUntilExtraKey F7（2026-10-10 用户裁定）Kira 探针失败冷却截止
+// 键（unix 秒，存于账号 Extra）。与 TH th_probe_backoff_until 同型，经 UpdateExtra
+// 原子合并写入。语义：Kira 快照采集或余额采集任一失败 → 写 now + kira_probe_interval
+// _minutes（与成功间隔同值），阻断失败账号每 tick 热重试烧额度。
+//
+// 豁免硬边界：本键的唯一消费者 = 周期收集入口 shouldSkipKiraCollect 的调用方；
+// lifecycle due 确认探针、F3 恢复探针（sweepF3RecoveryAccount 链）、手动探针
+//（管理端查询）一律不得消费此键；probe_due_at 不被此键覆盖或后移；不新增 ticker；
+// TH 既有退避机制（th_probe_backoff_until）不动。
+const kiraProbeCooldownUntilExtraKey = "kira_probe_cooldown_until"
+
 // shouldSkipTokenHarborCollect 判定 TH 账号是否跳过本轮收集（周期链收集期门控，
 // 仅作用于 append 进 thTargets 之前）：
 //   - 年龄门：th_usage_snapshot.fetched_at 距今 < th_probe_interval_minutes → 跳过
@@ -515,10 +526,21 @@ func thProbeBackoffUntilFromExtra(account *Account) (time.Time, bool, bool) {
 }
 
 // shouldSkipKiraCollect 判定 Kira 账号是否跳过本轮收集（周期链收集期门控，仅作用
-// 于 append 进 kiraTargets 之前）。Kira 仅年龄门（方案锁定项 4：Kira 不加退避）：
-// kira_usage_snapshot.fetched_at 距今 < kira_probe_interval_minutes → 跳过；
-// 快照缺失/解析失败 = 不过新，收集。配置间隔为 0（未配置）时门不生效（向后兼容）。
+// 于 append 进 kiraTargets 之前）。F7（2026-10-10 用户裁定）在既有年龄门之前追加
+// 冷却门：
+//   - 冷却门：kira_probe_cooldown_until 存在且 > now（未过期，由任一探测失败写入）
+//     → 跳过本轮周期收集，阻断失败账号每 tick 热重试烧额度；
+//   - 年龄门：kira_usage_snapshot.fetched_at 距今 < kira_probe_interval_minutes → 跳过；
+//     快照缺失/解析失败 = 不过新，收集。配置间隔为 0（未配置）时门不生效（向后兼容）。
+//
+// 冷却到期照走既有年龄门（不强制特权尝试）。冷却键的唯一消费者即本收集入口，
+// lifecycle 确认探针 / F3 恢复探针 / 手动探针均不读此键（豁免硬边界）。
 func (s *CNProviderBalanceCheckService) shouldSkipKiraCollect(now time.Time, account *Account) bool {
+	// F7 冷却门：任一探测失败写入的冷却截止未过期 → 跳过本轮周期收集。
+	if until, ok := kiraProbeCooldownUntilFromExtra(account); ok && until.After(now) {
+		return true
+	}
+	// Kira 仅年龄门（方案锁定项 4：Kira 不加退避）。
 	interval := time.Duration(s.cfg.Gateway.CNProviders.KiraProbeIntervalMinutes) * time.Minute
 	if interval <= 0 {
 		return false
@@ -528,6 +550,46 @@ func (s *CNProviderBalanceCheckService) shouldSkipKiraCollect(now time.Time, acc
 		return false
 	}
 	return now.Sub(fetchedAt) < interval
+}
+
+// kiraProbeCooldownUntilFromExtra 从账号 Extra 读 Kira 探测失败冷却截止（unix 秒）。
+// 两态返回：
+//   - (截止时间, true)：键存在且可解析为正整数 > 0 且未过期由调用方判定（本函数只负责
+//     解析与"值合法"）；缺失 / nil / 不可解析 / ≤0 → (零值, false)（失败关闭：视为无冷却，
+//     收集，与 TH 退避键损坏态不同——Kira 冷却由本服务自写，损坏按无冷却处理不阻断收集）。
+func kiraProbeCooldownUntilFromExtra(account *Account) (time.Time, bool) {
+	if account == nil || account.Extra == nil {
+		return time.Time{}, false
+	}
+	raw, ok := account.Extra[kiraProbeCooldownUntilExtraKey]
+	if !ok || raw == nil {
+		return time.Time{}, false
+	}
+	var sec int64
+	switch v := raw.(type) {
+	case int64:
+		sec = v
+	case float64:
+		sec = int64(v)
+	case json.Number:
+		i, err := v.Int64()
+		if err != nil {
+			return time.Time{}, false
+		}
+		sec = i
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return time.Time{}, false
+		}
+		sec = i
+	default:
+		return time.Time{}, false
+	}
+	if sec <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
 }
 
 // kiraUsageSnapshotFetchedAt 从账号 Extra 读 kira_usage_snapshot.fetched_at
@@ -696,22 +758,50 @@ func (s *CNProviderBalanceCheckService) probeOne(ctx context.Context, account *A
 // （kira_usage_snapshot 经额度探测 + VND 余额经余额探测）+ 免费池耗尽信号交
 // 状态机确认探针；不做本服务的 2×interval 滚动停调/清除。探测失败（网络/鉴权/
 // 解析）按失败关闭处理：本轮不上交耗尽信号、不动现状态，下周期重试。
+//
+// F7（2026-10-10 用户裁定）：Kira 快照采集或余额采集任一失败 → 写冷却截止
+//（now + kira_probe_interval_minutes，与成功间隔同值），阻断失败账号每 tick 热重试
+// 烧额度。部分成功（一侧采集失败、一侧成功）时，成功侧快照已在各自探测链照常落库
+//（失败关闭之外仍提交），冷却仅作用于整组周期收集入口（shouldSkipKiraCollect），
+// 不对 lifecycle 确认 / F3 恢复 / 手动探针生效（豁免硬边界）。成功不写冷却键
+//（遗留过期键自然过期，不额外空写）。
 func (s *CNProviderBalanceCheckService) refreshKiraAccount(ctx context.Context, account *Account) {
+	now := time.Now()
 	exhausted := false
+	usageFailed := false
 	if s.quotaService != nil {
 		result, err := s.quotaService.QueryUsage(ctx, account.ID)
 		switch {
 		case err != nil:
+			usageFailed = true
 			log.Printf("[CNBalance] kira usage snapshot account %d (%s) failed: %v", account.ID, account.Platform, err)
 		case result != nil && !result.Success && result.Error != "":
+			usageFailed = true
 			log.Printf("[CNBalance] kira usage snapshot account %d (%s) error: %s", account.ID, account.Platform, result.Error)
 		case result != nil:
 			exhausted = cnKiraResultExhausted(result)
 		}
 	}
+	balanceFailed := false
 	if s.balanceService != nil {
-		if _, err := s.balanceService.QueryBalanceForAccount(ctx, account); err != nil {
-			log.Printf("[CNBalance] kira balance snapshot account %d (%s) failed: %v", account.ID, account.Platform, err)
+		res, berr := s.balanceService.QueryBalanceForAccount(ctx, account)
+		if berr != nil {
+			balanceFailed = true
+			log.Printf("[CNBalance] kira balance snapshot account %d (%s) failed: %v", account.ID, account.Platform, berr)
+		} else if res != nil && !res.Success {
+			balanceFailed = true
+			log.Printf("[CNBalance] kira balance snapshot account %d (%s) error: %s", account.ID, account.Platform, res.Error)
+		}
+	}
+	// F7：任一采集失败 → 写冷却截止（与成功间隔同值），阻断失败账号每 tick 热重试。
+	// kira_probe_interval_minutes <= 0（未配置）时特征关闭：不写冷却键，向后兼容全收集。
+	// interval>0 但 accountRepo 缺失时仅告警，不阻断既有采集语义。
+	if (usageFailed || balanceFailed) && s.cfg.Gateway.CNProviders.KiraProbeIntervalMinutes > 0 && s.accountRepo != nil {
+		cooldownUntil := now.Add(time.Duration(s.cfg.Gateway.CNProviders.KiraProbeIntervalMinutes) * time.Minute)
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
+			kiraProbeCooldownUntilExtraKey: cooldownUntil.Unix(),
+		}); err != nil {
+			log.Printf("[CNBalance] kira probe cooldown account %d failed to persist: %v", account.ID, err)
 		}
 	}
 	// 耗尽信号交状态机（确认探针/停调至每日重置时刻/告警由状态机负责）。
