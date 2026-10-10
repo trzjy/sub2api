@@ -31,6 +31,11 @@ type cnQuotaLifecycleHandover interface {
 	// 幂等且只改 cn_quota_lifecycle 窄面。方法本体在 cn_quota_lifecycle_service.go
 	//（007 成品），本接口仅窄面接线。未注入时调用方跳过（既有行为零变化）。
 	convergeTHStockRecovery(ctx context.Context, account *Account)
+	// OnKiraFreshBalanceObserved Kira 付费 VND 余额采集侧的 immediate due 边沿
+	//（检查单 #1）：周期链采到 fresh>0 并落库后，由 lifecycle 权威路径条件推进
+	// 402 冻结账号的 probe_due。非 402 冻结 / 非 fresh>0 一律零写入 no-op。
+	// 方法本体在 cn_quota_lifecycle_service.go，本接口仅窄面接线（不引入反向环依赖）。
+	OnKiraFreshBalanceObserved(ctx context.Context, account *Account) error
 }
 
 // cnQuotaProbeConcurrency 周期任务并发探测额度账号的并发度。
@@ -783,6 +788,7 @@ func (s *CNProviderBalanceCheckService) refreshKiraAccount(ctx context.Context, 
 		}
 	}
 	balanceFailed := false
+	balancePersisted := false
 	if s.balanceService != nil {
 		res, berr := s.balanceService.QueryBalanceForAccount(ctx, account)
 		if berr != nil {
@@ -791,6 +797,8 @@ func (s *CNProviderBalanceCheckService) refreshKiraAccount(ctx context.Context, 
 		} else if res != nil && !res.Success {
 			balanceFailed = true
 			log.Printf("[CNBalance] kira balance snapshot account %d (%s) error: %s", account.ID, account.Platform, res.Error)
+		} else if res != nil && res.Persisted {
+			balancePersisted = true
 		}
 	}
 	// F7：任一采集失败 → 写冷却截止（与成功间隔同值），阻断失败账号每 tick 热重试。
@@ -802,6 +810,14 @@ func (s *CNProviderBalanceCheckService) refreshKiraAccount(ctx context.Context, 
 			kiraProbeCooldownUntilExtraKey: cooldownUntil.Unix(),
 		}); err != nil {
 			log.Printf("[CNBalance] kira probe cooldown account %d failed to persist: %v", account.ID, err)
+		}
+	}
+	// fresh>0 边沿（检查单 #1）：付费 VND 余额采集成功落库后立即交 lifecycle 权威
+	// 路径条件推进 402 冻结账号的 probe_due（下一次 sweep 即可探）。推进失败仅日志：
+	// lifecycle 侧按失败关闭处理（本次不视为已消费），下周期重试推进。
+	if balancePersisted && s.quotaLifecycle != nil {
+		if err := s.quotaLifecycle.OnKiraFreshBalanceObserved(ctx, account); err != nil {
+			log.Printf("[CNBalance] kira lifecycle fresh-balance edge account %d failed (fail-closed, retry next cycle): %v", account.ID, err)
 		}
 	}
 	// 耗尽信号交状态机（确认探针/停调至每日重置时刻/告警由状态机负责）。

@@ -1581,8 +1581,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(available[i].account, available[j].account) < 0
 			})
 		}
-		// 免费优先分区（方案 §3.5）：在所有既有排序之后消费分区原语。
-		partitionFreeRemainingFirstWithLoad(available)
 
 		selectionOrder := make([]accountWithLoad, 0, len(available))
 		if requireCompact {
@@ -1602,6 +1600,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else {
 			selectionOrder = append(selectionOrder, available...)
 		}
+		// 免费优先分区是**最终**排序步骤（检查单 #2 / 方案 §3.5）：先走完既有排序
+		//（含 requireCompact 的 tier 重排），再消费同一分区原语——compact 重排不得
+		// 推翻免费优先（compact 账号集中时 free 账号仍整体在前）。
+		partitionFreeRemainingFirstWithLoad(selectionOrder)
 
 		for _, item := range selectionOrder {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
@@ -1639,11 +1641,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(ordered[i], ordered[j]) < 0
 			})
 		}
-		// 免费优先分区（方案 §3.5）：负载批量失败回退序列消费同一分区原语。
-		partitionFreeRemainingFirst(ordered)
+		// 免费优先分区（方案 §3.5）：负载批量失败回退序列消费同一分区原语，且分区是
+		// 最终排序步骤（检查单 #2）——先排完 compact tier，后分区，compact 不得推翻
+		// 免费优先。
 		if requireCompact {
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
+		partitionFreeRemainingFirst(ordered)
 		for _, acc := range ordered {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
@@ -1691,11 +1695,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return rateOrder.compare(candidates[i], candidates[j]) < 0
 		})
 	}
-	// 免费优先分区（方案 §3.5）：兜底排队序列消费同一分区原语。
-	partitionFreeRemainingFirst(candidates)
+	// 免费优先分区（方案 §3.5）：兜底排队序列消费同一分区原语，且分区是最终排序步骤
+	//（检查单 #2）——先排完 compact tier，后分区，compact 不得推翻免费优先。
 	if requireCompact {
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
+	partitionFreeRemainingFirst(candidates)
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {

@@ -16,9 +16,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -357,5 +359,148 @@ func TestFreeFirstStickyHitNotReorderedForFreeAndNonFree(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, selected)
 		require.Equal(t, free.ID, selected.ID)
+	})
+}
+
+// ---- 检查单 #2：compact 重排不得推翻免费优先（三处排序入口统一为「分区是最终排序步骤」）----
+//
+// 背景（终审 #2）：openai_gateway_scheduling.go 三处排序原先先分区后 prioritizeOpenAI
+// CompactAccounts / tier 重排，compact 能把非 free 的 compact 账号顶到 free 账号之前。
+// 修复后：三路径统一「先既有排序（含 compact），后 partitionFreeRemainingFirst(WithLoad)」。
+//
+// 夹具构造口径：账号 platform 取 openai（IsOpenAI() 成立，compact tier 可判定），
+// base_url 指向 kiraai.vn（CN 额度账号族，参与免费优先分区）。
+
+// ffKiraOpenAICompactAccount Kira 上游 + openai 平台账号：既进 CN 免费优先分区槽位，
+// 又能走 compact tier 判定。compact 传 nil ⇒ tier=1（未探测）；true ⇒ tier=2（已知支持）；
+// false ⇒ tier=0（明确不支持，requireCompact 时会被过滤出候选）。
+func ffKiraOpenAICompactAccount(id int64, compact *bool) *Account {
+	account := &Account{
+		ID:          id,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    0,
+		Credentials: map[string]any{"api_key": "kira-test", "base_url": "https://kiraai.vn/api/v1"},
+		Extra:       map[string]any{},
+	}
+	if compact != nil {
+		account.Extra["openai_compact_supported"] = *compact
+	}
+	return account
+}
+
+// ffCompactFreeFixture 两个同优先级候选：
+//   - free（id=1）：免费池有余 ⇒ free 桶；compact tier=1（未知）；
+//   - compactNonFree（id=2）：免费池已耗尽 ⇒ rest 桶；compact tier=2（已知支持）。
+//
+// requireCompact=true 时（修复前）compact 重排会把 compactNonFree 顶到最前。
+func ffCompactFreeFixture() (free, compactNonFree *Account) {
+	free = ffKiraFreeRemaining(ffKiraOpenAICompactAccount(1, nil))
+	compactNonFree = ffKiraFreeExhausted(ffKiraOpenAICompactAccount(2, compactSupportedTrue()))
+	return free, compactNonFree
+}
+
+// compactSupportedTrue 返回 openai_compact_supported=true 指针（tier=2）。
+func compactSupportedTrue() *bool { v := true; return &v }
+
+// ffNewCompactLoadAwareService 构造走负载感知路径（LoadBatchEnabled + 并发服务）的
+// OpenAIGatewayService：三条排序路径都可由并发缓存注入切换。
+func ffNewCompactLoadAwareService(cache schedulerTestConcurrencyCache, accounts ...*Account) *OpenAIGatewayService {
+	list := make([]Account, 0, len(accounts))
+	for _, acc := range accounts {
+		list = append(list, *acc)
+	}
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = true
+	return &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: list},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                cfg,
+		concurrencyService: NewConcurrencyService(cache),
+	}
+}
+
+func ffSelectLoadAware(t *testing.T, cache schedulerTestConcurrencyCache, requireCompact bool, accounts ...*Account) (*AccountSelectionResult, error) {
+	t.Helper()
+	svc := ffNewCompactLoadAwareService(cache, accounts...)
+	groupID := int64(94001)
+	return svc.selectAccountWithLoadAwareness(context.Background(), &groupID, PlatformOpenAI, "", "",
+		nil, requireCompact, "", false)
+}
+
+// TestFreeFirstPartitionIsFinalStepLoadMapPath Layer 2 tryAcquireFromLoadMap 路径
+// （opengw:1579 区段）：requireCompact=true 时 compact 重排之后仍必须执行免费优先分区
+// ⇒ free 账号整体在 compact 账号之前（不可被 compact 推翻）。
+func TestFreeFirstPartitionIsFinalStepLoadMapPath(t *testing.T) {
+	free, compactNonFree := ffCompactFreeFixture()
+
+	t.Run("requireCompact=true keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, schedulerTestConcurrencyCache{}, true, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID,
+			"requireCompact 的 tier 重排不得推翻免费优先（分区是最终排序步骤）")
+	})
+
+	t.Run("requireCompact=false regression keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, schedulerTestConcurrencyCache{}, false, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID, "非 compact 路径回归既有免费优先")
+	})
+}
+
+// TestFreeFirstPartitionIsFinalStepLoadBatchFailurePath 负载批量失败回退路径
+// （opengw:1635 区段）：同样先 compact 后排分区，free 在前。
+func TestFreeFirstPartitionIsFinalStepLoadBatchFailurePath(t *testing.T) {
+	free, compactNonFree := ffCompactFreeFixture()
+	cache := schedulerTestConcurrencyCache{loadBatchErr: errors.New("load batch unavailable")}
+
+	t.Run("requireCompact=true keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, cache, true, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID,
+			"负载批量失败回退序列：分区必须在 compact 之后（最终排序步骤）")
+	})
+
+	t.Run("requireCompact=false regression keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, cache, false, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID)
+	})
+}
+
+// TestFreeFirstPartitionIsFinalStepFallbackWaitPath Layer 3 兜底排队路径
+// （opengw:1685 区段）：抢槽全失败后按最终序返回 WaitPlan，free 在前。
+func TestFreeFirstPartitionIsFinalStepFallbackWaitPath(t *testing.T) {
+	free, compactNonFree := ffCompactFreeFixture()
+	// 两个账号都抢不到槽 ⇒ 落到 Layer 3 兜底排队（返回 WaitPlan 而非 402/无账号）。
+	cache := schedulerTestConcurrencyCache{acquireResults: map[int64]bool{free.ID: false, compactNonFree.ID: false}}
+
+	t.Run("requireCompact=true keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, cache, true, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID,
+			"兜底排队序列：分区必须是最终排序步骤（compact 不得把非 free 账号顶到队首）")
+		require.NotNil(t, selection.WaitPlan, "兜底路径必须返回 WaitPlan")
+	})
+
+	t.Run("requireCompact=false regression keeps free first", func(t *testing.T) {
+		selection, err := ffSelectLoadAware(t, cache, false, free, compactNonFree)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, free.ID, selection.Account.ID)
 	})
 }

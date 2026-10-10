@@ -823,9 +823,12 @@ func recoveredKiraQuotaResult() *CNProviderQuotaProbeResult {
 }
 
 // fakeQuotaLifecycleHandover 记录 OnUpstreamQuotaExhausted 交接的测试替身。
+// 同时记录 fresh>0 余额边沿的调用（检查单 #1 接线点）。
 type fakeQuotaLifecycleHandover struct {
-	calls         []int64
-	convergeCalls []int64
+	calls            []int64
+	convergeCalls    []int64
+	freshBalanceCall []int64
+	freshBalanceErr  error
 }
 
 func (f *fakeQuotaLifecycleHandover) OnUpstreamQuotaExhausted(_ context.Context, account *Account, _ string) error {
@@ -836,6 +839,12 @@ func (f *fakeQuotaLifecycleHandover) OnUpstreamQuotaExhausted(_ context.Context,
 // convergeTHStockRecovery 记录周期链存量收敛调用（D-QLM-009 §8.1 接线点）。
 func (f *fakeQuotaLifecycleHandover) convergeTHStockRecovery(_ context.Context, account *Account) {
 	f.convergeCalls = append(f.convergeCalls, account.ID)
+}
+
+// OnKiraFreshBalanceObserved 记录余额采集侧的 fresh>0 边沿调用（检查单 #1 接线点）。
+func (f *fakeQuotaLifecycleHandover) OnKiraFreshBalanceObserved(_ context.Context, account *Account) error {
+	f.freshBalanceCall = append(f.freshBalanceCall, account.ID)
+	return f.freshBalanceErr
 }
 
 // cnRunOnceExtraRepo 支持 ListByPlatform + GetByID + UpdateExtra 记录（TH 刷新用）。
