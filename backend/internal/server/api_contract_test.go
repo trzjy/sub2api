@@ -1006,7 +1006,7 @@ func TestAPIContracts(t *testing.T) {
 						"enabled": false,
 						"failure_threshold": 10,
 						"include_grok": false,
-						"probe": {"enabled": false, "interval_seconds": 60, "max_attempts": 10},
+						"probe": {"enabled": true, "interval_seconds": 60, "max_attempts": 10},
 						"scope_platforms": ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
 						"warning_ratio": 0.7,
 						"watch_ratio": 0.4,
@@ -1337,7 +1337,7 @@ func TestAPIContracts(t *testing.T) {
 						"enabled": false,
 						"failure_threshold": 10,
 						"include_grok": false,
-						"probe": {"enabled": false, "interval_seconds": 60, "max_attempts": 10},
+						"probe": {"enabled": true, "interval_seconds": 60, "max_attempts": 10},
 						"scope_platforms": ["openai", "deepseek", "kimi", "zhipu", "minimax", "other"],
 						"warning_ratio": 0.7,
 						"watch_ratio": 0.4,
@@ -2062,6 +2062,11 @@ func (s *stubAccountRepo) ClearAntigravityQuotaScopes(ctx context.Context, id in
 
 func (s *stubAccountRepo) ClearModelRateLimits(ctx context.Context, id int64) error {
 	return errors.New("not implemented")
+}
+
+// DeleteModelRateLimitsMetaKeys 是接口满足桩（no-op），参考 service 包同型先例。
+func (s *stubAccountRepo) DeleteModelRateLimitsMetaKeys(ctx context.Context, id int64, keys []string) (int64, error) {
+	return 0, nil
 }
 
 func (s *stubAccountRepo) UpdateSessionWindow(ctx context.Context, id int64, start, end *time.Time, status string) error {

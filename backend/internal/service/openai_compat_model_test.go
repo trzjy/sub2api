@@ -869,6 +869,77 @@ func TestForwardAsAnthropic_ReplaysFullToolHistoryWhenPreviousResponseUnavailabl
 	require.Equal(t, "second", gjson.GetBytes(upstream.bodies[1], "input.4.content.0.text").String())
 }
 
+func TestForwardAsAnthropic_ReplaysFullToolHistoryWhenContinuationUnavailable(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	upstream := &httpUpstreamRecorder{}
+	svc := &OpenAIGatewayService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          1,
+		Name:        "openai-apikey",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":  "sk-test",
+			"base_url": "https://api.openai.com/v1",
+		},
+	}
+
+	svc.bindOpenAICompatSessionResponseID(context.Background(), nil, account, "stable-cache-key", "resp_gone")
+	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"inspect files"},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"first"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"found"},{"type":"text","text":"second"}]}],"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"stream":false}`)
+	upstream.responses = []*http.Response{
+		{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_continuation_unavailable"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"continuation_unavailable","message":"The previous response is unavailable for continuation.","type":"invalid_request_error"}}`)),
+		},
+		openAICompatSSECompletedResponse("resp_replayed_full", "gpt-5.3-codex"),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "stable-cache-key", "gpt-5.3-codex")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "resp_replayed_full", result.ResponseID)
+	require.Len(t, upstream.requests, 2)
+	require.Equal(t, "resp_gone", gjson.GetBytes(upstream.bodies[0], "previous_response_id").String())
+	require.False(t, gjson.GetBytes(upstream.bodies[1], "previous_response_id").Exists())
+	// 第二次必须是完整 Anthropic 历史重放：developer guard + user + function_call
+	// + function_call_output + 追加 user 文本，不得只发最后一轮。
+	require.Equal(t, int64(5), gjson.GetBytes(upstream.bodies[1], "input.#").Int())
+	require.Equal(t, "developer", gjson.GetBytes(upstream.bodies[1], "input.0.role").String())
+	require.Contains(t, gjson.GetBytes(upstream.bodies[1], "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
+	require.Equal(t, "inspect files", gjson.GetBytes(upstream.bodies[1], "input.1.content.0.text").String())
+	require.Equal(t, "function_call", gjson.GetBytes(upstream.bodies[1], "input.2.type").String())
+	require.Equal(t, "call_1", gjson.GetBytes(upstream.bodies[1], "input.2.call_id").String())
+	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.bodies[1], "input.3.type").String())
+	require.Equal(t, "call_1", gjson.GetBytes(upstream.bodies[1], "input.3.call_id").String())
+	require.Equal(t, "found", gjson.GetBytes(upstream.bodies[1], "input.3.output").String())
+	require.Equal(t, "second", gjson.GetBytes(upstream.bodies[1], "input.4.content.0.text").String())
+}
+
+func TestOpenAICompatContinuationUnavailableRecognition(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"error":{"code":"continuation_unavailable","message":"The previous response is unavailable for continuation.","type":"invalid_request_error"}}`)
+	require.True(t, isOpenAICompatPreviousResponseNotFound(http.StatusBadRequest, "", body))
+	require.True(t, isOpenAICompatPreviousResponseNotFound(http.StatusBadRequest, "The previous response is unavailable for continuation.", nil))
+	require.True(t, isOpenAICompatPreviousResponseNotFound(http.StatusNotFound, "continuation_unavailable", nil))
+	require.False(t, isOpenAICompatPreviousResponseNotFound(http.StatusForbidden, "", body))
+	require.False(t, isOpenAICompatPreviousResponseNotFound(http.StatusBadRequest, "the continuation window is closed", nil))
+	// continuation_unavailable 表示上一个 response 已不可用（而非该 provider 不支持
+	// 续传），必须走“清理 response id 后重放”而非永久禁用 continuation。
+	require.False(t, isOpenAICompatPreviousResponseUnsupported(http.StatusBadRequest, "", body))
+}
+
 func TestOpenAICompatPreviousResponseUnavailableRecognitionIsStrict(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"error":{"message":"previous_response_id is not available for this user","type":"invalid_request_error"}}`)
