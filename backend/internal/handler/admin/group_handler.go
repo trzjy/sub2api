@@ -27,7 +27,7 @@ type GroupHandler struct {
 	groupCapacityService *service.GroupCapacityService
 	cfg                  *config.Config
 
-	// visionRoutingService 提供分组视觉分流配置的同组校验与落库（docs/capability-routing-plan.md §3.7）。
+	// visionRoutingService 提供分组视觉分流配置的同组校验与落库（docs-local/capability-routing-plan.md §3.7）。
 	visionRoutingService *service.VisionRoutingService
 }
 
@@ -269,7 +269,7 @@ type CreateGroupRequest struct {
 	// 模型路由配置（仅 anthropic 平台使用）
 	ModelRouting        map[string][]int64 `json:"model_routing"`
 	ModelRoutingEnabled bool               `json:"model_routing_enabled"`
-	// 视觉分流配置（docs/capability-routing-plan.md §3.7），同构 model_routing。
+	// 视觉分流配置（docs-local/capability-routing-plan.md §3.7），同构 model_routing。
 	// 使用 visionRoutingField 区分"未携带"（不动）与"显式空/{}"（清空）。
 	VisionRouting visionRoutingField `json:"vision_routing"`
 	MCPXMLInject  *bool              `json:"mcp_xml_inject"`
@@ -351,7 +351,7 @@ type UpdateGroupRequest struct {
 	// 模型路由配置（仅 anthropic 平台使用）
 	ModelRouting        map[string][]int64 `json:"model_routing"`
 	ModelRoutingEnabled *bool              `json:"model_routing_enabled"`
-	// 视觉分流配置（docs/capability-routing-plan.md §3.7），同构 model_routing。
+	// 视觉分流配置（docs-local/capability-routing-plan.md §3.7），同构 model_routing。
 	// 使用 visionRoutingField 区分"未携带"（不动）与"显式空/{}"（清空）。
 	VisionRouting visionRoutingField `json:"vision_routing"`
 	MCPXMLInject  *bool              `json:"mcp_xml_inject"`

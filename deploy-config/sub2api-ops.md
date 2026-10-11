@@ -302,7 +302,7 @@ rm -rf /opt/sub2api/build-<上一目标>
 
 ## 5.x 公告图片孤儿对象清理（2026-09-23 新增，随公告图片上传功能交付）
 
-> 来源：docs/announcement-image-upload-plan.md §6.2。公告图片以 `announcements/<公告ID>/` 前缀
+> 来源：docs-local/announcement-image-upload-plan.md §6.2。公告图片以 `announcements/<公告ID>/` 前缀
 > 存于图片存储桶（顶层命名空间，不含图片存储 prefix 设置）。上传后放弃保存、占位草稿保留、
 > 删除时对象删除失败，都会留孤儿对象。本步骤不进应用代码，运维手动/周期执行。
 >
@@ -401,7 +401,7 @@ cd sub2api && docker compose -f deploy-config/compose.yml --env-file /opt/sub2ap
 | new-api 全量 | `/tmp/new-api-full-backup-20260826-214145.tar.gz`（服务器 + 本地副本） |
 | 旧渠道/旧 one-api 数据 | `/opt/backups/sub2api-migration-olddata/` |
 
-### 6.5 每日自动备份（2026-10-01 落地，方案见 docs/backup-daily-plan.md）
+### 6.5 每日自动备份（2026-10-01 落地，方案见 docs-local/backup-daily-plan.md）
 
 - **脚本**：`/opt/sub2api/deploy-config/scripts/backup-daily.sh`（入仓，服务器经 git 拉取）。
 - **调度**：systemd timer `sub2api-backup.timer`（unit 源文件在 `deploy-config/systemd/`，
@@ -532,7 +532,7 @@ docker compose -f deploy-config/compose.yml --env-file /opt/sub2api/.env up -d -
 ### 7.10 磁盘打满（2026-09-26 事故 runbook）
 
 > 背景：2026-09-26 凌晨根分区 100% 打满（build cache 11.8GB + 镜像窗口期累积），
-> 全站登录不可用。事后整改见 docs/disk-guard-plan-20260926.md 与 §12.5。
+> 全站登录不可用。事后整改见 docs-local/disk-guard-plan-20260926.md 与 §12.5。
 
 **症状**（可能同时或部分出现）：
 
@@ -837,7 +837,7 @@ systemctl daemon-reload
 
 ### 12.5 post-deploy 清理钩子（2026-09-26 新增）
 
-磁盘守卫整改（docs/disk-guard-plan-20260926.md）将清理从"每日定时为主"改为"事件驱动为主、
+磁盘守卫整改（docs-local/disk-guard-plan-20260926.md）将清理从"每日定时为主"改为"事件驱动为主、
 timer 兜底"：每次部署健康检查通过后，立即执行一次清理，不等每日 04:00 timer。
 
 - **谁调用**：§5 升级流程第 6 步（人工/半自动部署流程的固定环节），命令即

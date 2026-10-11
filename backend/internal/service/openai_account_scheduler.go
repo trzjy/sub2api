@@ -89,10 +89,10 @@ type OpenAIAccountScheduleRequest struct {
 	// and compact_model_mapping; native remote compaction v2 leaves it false.
 	RequireCompact bool
 	// RequireVision 表示请求含图（有图片输入），选号时排除已知不支持视觉的账号
-	// （docs/capability-routing-plan.md §3.4）；未标记的账号按 unknown 放行。
+	// （docs-local/capability-routing-plan.md §3.4）；未标记的账号按 unknown 放行。
 	RequireVision bool
 	// VisionRoutingTargets 是带图请求命中 groups.vision_routing 配置时的目标账号
-	// ID 集合（docs/capability-routing-plan.md §3.7）。非空时候选池正向收窄为该
+	// ID 集合（docs-local/capability-routing-plan.md §3.7）。非空时候选池正向收窄为该
 	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
 	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
 	VisionRoutingTargets []int64
@@ -2046,7 +2046,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 
 // openAIAccountVisionCapabilityLookup 按 (账号, 上游模型, 协议) 查询视觉能力标记。
 // 默认返回 (false, false, nil)=未知，调用方按"未标记账号放行"保守处理
-// （docs/capability-routing-plan.md §3.4）。wiring 装配能力表服务后通过
+// （docs-local/capability-routing-plan.md §3.4）。wiring 装配能力表服务后通过
 // SetOpenAIAccountVisionCapabilityLookup 注入（复用账号维度二级缓存），
 // 未装配时行为退化为 unknown 放行，与方案语义一致。读取失败返回非 nil err，
 // 由调用方失败关闭（合同 §5 禁兜底）。
@@ -2147,7 +2147,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if !accountSupportsOpenAICapabilities(account, req.RequiredCapability, req.RequiredImageCapability) {
 		return false, "capability_mismatch"
 	}
-	// 请求含图时排除已知不支持视觉的账号（docs/capability-routing-plan.md §3.4）。
+	// 请求含图时排除已知不支持视觉的账号（docs-local/capability-routing-plan.md §3.4）。
 	// 上游模型名按请求模型经账号 model_mapping 解析（与 forward 阶段一致），
 	// 协议取 req.RequiredCapability 的字符串值（chat_completions / responses），
 	// 与能力标记表的协议维度对齐。未知（未检测）账号放行，由管理端检测收敛。
@@ -2550,7 +2550,7 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 // previousResponseCanMove 表示首包 input 可自行重建工具续链，previous_response_id 允许跨账号迁移
 // （粘性加权模式下改为加权偏好而非硬粘连）。
 // requireVision 表示请求含图，选号时排除已知不支持视觉的账号
-// （docs/capability-routing-plan.md §3.4）。
+// （docs-local/capability-routing-plan.md §3.4）。
 func (s *OpenAIGatewayService) SelectAccountWithSchedulerForCapability(
 	ctx context.Context,
 	groupID *int64,
@@ -2885,7 +2885,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 }
 
 // isVisionRoutingEnabled 读取全局视觉路由 kill-switch（vision_routing_enabled，
-// docs/capability-routing-plan.md §3.8）。默认开启：未装配设置服务或未配置时返回
+// docs-local/capability-routing-plan.md §3.8）。默认开启：未装配设置服务或未配置时返回
 // true，与「未配置 = 开启」的开关定位一致。读取走 SettingService 的进程内缓存链路。
 // 设置源取构造函数注入的 s.settingService（权威实例）；rateLimitService 上另挂的
 // settingService 非同一注入链，读到错实例会导致配置的 false 被误当默认开启。
@@ -2897,7 +2897,7 @@ func (s *OpenAIGatewayService) isVisionRoutingEnabled(ctx context.Context) bool 
 }
 
 // resolveVisionRoutingTargets 在带图请求命中分组视觉分流配置时返回目标账号 ID
-// 集合（docs/capability-routing-plan.md §3.7）。requireVision=false 或 groupID 为空
+// 集合（docs-local/capability-routing-plan.md §3.7）。requireVision=false 或 groupID 为空
 // 时零读取、返回 nil。读取错误失败关闭：禁止静默当作未配置（合同 §5），带图请求
 // 在路由不可知时发往任意账号会复现静默丢图。
 //

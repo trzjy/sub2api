@@ -402,7 +402,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	}
 	inPartialEvent := false
 
-	// 重复 token 循环熔断（docs/repetition-loop-breaker-plan.md）：缓冲期静默
+	// 重复 token 循环熔断（docs-local/repetition-loop-breaker-plan.md）：缓冲期静默
 	// failover + 直通期中止。guard 为 nil 表示阈值配置为 0（检测禁用）。
 	guard := newStreamRepetitionGuard()
 	requestID := resp.Header.Get("x-request-id")

@@ -1,5 +1,5 @@
 -- 253_currency_unification.sql
--- 货币计费与展示统一整改（docs/currency-billing-unification-plan.md §4）。
+-- 货币计费与展示统一整改（docs-local/currency-billing-unification-plan.md §4）。
 --
 -- 设计决定（SSOT 摘要）：
 --   D1 记账货币 = USD（余额/用量/兑换/限额/定价不变）。

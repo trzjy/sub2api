@@ -615,7 +615,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/batch-clear-error", h.Admin.Account.BatchClearError)
 		accounts.POST("/batch-refresh", h.Admin.Account.BatchRefresh)
 
-		// 视觉能力检测 / 覆盖（docs/capability-routing-plan.md §3.5/§3.8）
+		// 视觉能力检测 / 覆盖（docs-local/capability-routing-plan.md §3.5/§3.8）
 		accounts.POST("/:id/vision-capability/detect", h.Admin.VisionCapability.Detect)
 		accounts.POST("/vision-capability/detect", h.Admin.VisionCapability.DetectBatch)
 		accounts.PUT("/:id/vision-capability", h.Admin.VisionCapability.Override)

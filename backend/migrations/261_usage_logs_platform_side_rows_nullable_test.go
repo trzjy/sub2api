@@ -9,7 +9,7 @@ import (
 
 // TestUsageLogsPlatformSideRowsNullableMigration 校验 261 号迁移放开
 // usage_logs.user_id / api_key_id 的 NOT NULL（平台侧检测行两列为 NULL，
-// 方案 docs/capability-routing-plan.md §6）。FK 必须保留不动（PostgreSQL
+// 方案 docs-local/capability-routing-plan.md §6）。FK 必须保留不动（PostgreSQL
 // 对 NULL 天然放行，无需重建约束），否则会丢失业务行的引用完整性。
 func TestUsageLogsPlatformSideRowsNullableMigration(t *testing.T) {
 	content, err := FS.ReadFile("261_usage_logs_platform_side_rows_nullable.sql")

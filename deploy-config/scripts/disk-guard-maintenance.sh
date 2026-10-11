@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # disk-guard-maintenance.sh — sub2api 磁盘守卫维护窗口
-# 方案 SSOT: docs/disk-guard-plan-20260926.md（整改项②）
+# 方案 SSOT: docs-local/disk-guard-plan-20260926.md（整改项②）
 #
 # 职责（顺序执行）:
 #   1. /etc/docker/daemon.json 注入 log-driver=json-file + log-opts(max-size=50m,max-file=5)（合并式，不覆盖其他键）

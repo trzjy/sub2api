@@ -791,7 +791,7 @@ func partitionOpenAIAccessModePools(accounts []*Account) (apiPool []*Account, we
 
 // openAIAccessModeExcludeReason returns a non-empty filter reason when the account must be
 // judged unschedulable because its access_mode is explicitly invalid. Per
-// docs/platform-merge-refactor-plan.md §5.1 rule 2, an explicit illegal access_mode value
+// docs-local/platform-merge-refactor-plan.md §5.1 rule 2, an explicit illegal access_mode value
 // is fail-closed: ResolveAccessMode returns an error and the account is excluded from all
 // scheduling pools (neither API nor Web).
 func openAIAccessModeExcludeReason(account *Account) string {

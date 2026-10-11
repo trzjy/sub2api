@@ -10,7 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-// 平台归并重构 PR-2（docs/platform-merge-refactor-plan.md §5.8）：
+// 平台归并重构 PR-2（docs-local/platform-merge-refactor-plan.md §5.8）：
 // web-* 旧平台账号迁移的应用层 reconciler 写路径。三字段
 // （platform / credentials["access_mode"] / extra["migrated_from_platform"]）
 // 与 MAC、scheduler outbox 必须由本文件的 repository 层专用事务方法原子更新

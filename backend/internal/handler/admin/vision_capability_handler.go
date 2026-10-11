@@ -11,7 +11,7 @@ import (
 
 // VisionCapabilityHandler 把 D 单落地的视觉能力检测 / 覆盖服务接到 admin API。
 //
-// 三端点（API 契约见 docs/capability-routing-plan.md §3.5/§3.8，主会话已裁定字段名）：
+// 三端点（API 契约见 docs-local/capability-routing-plan.md §3.5/§3.8，主会话已裁定字段名）：
 //   - POST /api/admin/accounts/:id/vision-capability/detect   单账号检测
 //   - POST /api/admin/accounts/vision-capability/detect        批量检测
 //   - PUT  /api/admin/accounts/:id/vision-capability           人工覆盖（source=manual）

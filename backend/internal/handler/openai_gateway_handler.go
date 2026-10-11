@@ -1308,7 +1308,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	effectiveMappedModel := preferredMappedModel
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
-	// B2 /v1/messages 标记（docs/platform-merge-refactor-plan.md §5.2）：本入口装上
+	// B2 /v1/messages 标记（docs-local/platform-merge-refactor-plan.md §5.2）：本入口装上
 	// messages dispatch flag，调度候选过滤据此对 Web 接入模式账号永不入选；
 	// chat/completions 与 responses 入口不装此 flag，Web 账号在两级池语义下保持可选。
 	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门。

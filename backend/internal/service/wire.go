@@ -1424,7 +1424,7 @@ var ProviderSet = wire.NewSet(
 	ProvideUserPlatformQuotaUsageFlusher,
 	ProvidePromoIntelService,
 
-	// 视觉能力检测 / 分流配置（docs/capability-routing-plan.md §3.5/§3.7；派发单 F3 接线）
+	// 视觉能力检测 / 分流配置（docs-local/capability-routing-plan.md §3.5/§3.7；派发单 F3 接线）
 	NewAccountModelCapabilityService,
 	ProvideVisionDetectService,
 	NewVisionRoutingService,

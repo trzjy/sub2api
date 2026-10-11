@@ -1,5 +1,5 @@
 -- Migration: 259_account_model_capabilities
--- 图片能力分流方案（docs/capability-routing-plan.md §3.3）能力标记表。
+-- 图片能力分流方案（docs-local/capability-routing-plan.md §3.3）能力标记表。
 --
 -- 能力是 (账号, 上游模型, 协议) 三元组属性：同一账号不同模型、同一模型不同协议
 -- 的能力不同（已实测：infer 在 chat_completions 下不解析图片、返回 200+正常文本，

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// 平台归并重构 PR-2（docs/platform-merge-refactor-plan.md §5.8）：
+// 平台归并重构 PR-2（docs-local/platform-merge-refactor-plan.md §5.8）：
 // web-* 旧平台账号迁移的应用层一次性 reconciler。
 //
 // 本文件只做编排（列账号 → 逐账号调用 repository 层专用事务方法 → 失败关闭）；

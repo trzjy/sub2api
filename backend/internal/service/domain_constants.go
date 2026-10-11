@@ -105,7 +105,7 @@ const (
 )
 
 // 官方平台网页接入（zhipu / deepseek / kimi）的默认上游 base_url
-// （docs/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
+// （docs-local/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
 // credentials.base_url 覆盖（Account.GetWebBaseURL）。
 const (
 	DefaultWebDeepseekBaseURL = "https://chat.deepseek.com"
@@ -762,7 +762,7 @@ const (
 	SettingKeyBackendModeEnabled = "backend_mode_enabled"
 
 	// SettingKeyVisionRoutingEnabled 全局视觉路由 kill-switch
-	// （docs/capability-routing-plan.md §3.8）：关闭后 RequireVision 恒为 false，
+	// （docs-local/capability-routing-plan.md §3.8）：关闭后 RequireVision 恒为 false，
 	// 行为回到 v1 现状（普通路由）。默认开启：未配置 = 开启（开关定位是回滚手段，
 	// 非灰度门禁）。
 	SettingKeyVisionRoutingEnabled = "vision_routing_enabled"

@@ -454,7 +454,7 @@ type OpenAIGatewayService struct {
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
 	// visionRouting 提供带图请求的分组视觉分流目标账号读取
-	// （docs/capability-routing-plan.md §3.7），供调度侧候选池收窄消费。
+	// （docs-local/capability-routing-plan.md §3.7），供调度侧候选池收窄消费。
 	visionRouting         *VisionRoutingService
 	rpmCache              RPMCache // 账号级 RPM 计数（当前用于 CodeBuddy 平台默认 RPM 限流）
 	liveAttestation       liveattestation.Provider

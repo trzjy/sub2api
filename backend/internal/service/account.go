@@ -1460,7 +1460,7 @@ func (a *Account) IsCodingPlan() bool {
 }
 
 // GetAccessMode 返回账号的接入模式（api / web），与 GetAccountMode 同构，取值规则
-// （docs/platform-merge-refactor-plan.md §5.1；PR-4 已移除形状推断——PR-2 reconciler
+// （docs-local/platform-merge-refactor-plan.md §5.1；PR-4 已移除形状推断——PR-2 reconciler
 // 已把存量 web 账号的 access_mode 显式化，不再按凭证形状读取）：
 //  1) 显式合法值：credentials["access_mode"] 为 "api"/"web" 时直接使用；
 //  2) 显式非法值：返回空串（与非法 account_mode 一致）——但调度与转发路径必须走
@@ -1485,7 +1485,7 @@ func (a *Account) GetAccessMode() string {
 
 // ResolveAccessMode 在 GetAccessMode 基础上对「显式非法值」失败关闭：返回错误并附
 // 账号 ID，调度与转发必须据此把账号判为不可选/拒绝转发，不得推断、不得默认 "api"
-// （docs/platform-merge-refactor-plan.md §5.1 规则 2）。
+// （docs-local/platform-merge-refactor-plan.md §5.1 规则 2）。
 func (a *Account) ResolveAccessMode() (string, error) {
 	mode := a.GetAccessMode()
 	if mode == "" {

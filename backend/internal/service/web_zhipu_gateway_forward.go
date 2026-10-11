@@ -23,7 +23,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// zhipu web 网页逆向适配器（方案 W3，docs/web-reverse-embedded-login-plan.md §4.2）。
+// zhipu web 网页逆向适配器（方案 W3，docs-local/web-reverse-embedded-login-plan.md §4.2）。
 //
 // 协议状态声明（权威来源：官网登录态抓包实测，2026-09-17）：
 //   - 已实测：对话端点 POST /chatglm/backend-api/assistant/stream（SSE）；请求体以

@@ -225,7 +225,7 @@ const visionRoutingEnabledDBTimeout = 5 * time.Second
 // IsVisionRoutingEnabled 返回全局视觉路由 kill-switch（vision_routing_enabled）。
 // 默认开启：未配置（ErrSettingNotFound）/空值/非显式 false 一律视为开启，仅显式
 // false 类值（false/0/off/disabled）才关闭。开关定位是回滚手段
-// （docs/capability-routing-plan.md §3.8），非灰度门禁——未配置时功能生效。
+// （docs-local/capability-routing-plan.md §3.8），非灰度门禁——未配置时功能生效。
 // 进程内 atomic.Value 缓存（60s TTL），设置写入后经 refreshCachedSettings 失效，
 // 实现秒级生效。真实读取错误按既有设置链路语义（同构 cyber_session_block）以短 TTL
 // 缓存默认值（开启），不自创降级。

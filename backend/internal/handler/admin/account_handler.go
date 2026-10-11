@@ -1378,7 +1378,7 @@ type PreviewFromCRSRequest struct {
 }
 
 // ValidateWebCredentialsRequest represents the request body for pre-create web
-// platform credential validation (W5，docs/web-reverse-embedded-login-plan.md §2.1)。
+// platform credential validation (W5，docs-local/web-reverse-embedded-login-plan.md §2.1)。
 type ValidateWebCredentialsRequest struct {
 	Platform    string         `json:"platform" binding:"required"`
 	Credentials map[string]any `json:"credentials" binding:"required"`

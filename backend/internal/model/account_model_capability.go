@@ -5,7 +5,7 @@ import "time"
 
 // AccountModelCapability 是 (账号, 上游模型, 协议) 三元组上的上游能力标记。
 //
-// 方案来源：docs/capability-routing-plan.md §3.3。同一账号在不同模型、同一模型在
+// 方案来源：docs-local/capability-routing-plan.md §3.3。同一账号在不同模型、同一模型在
 // 不同协议下的能力不同（例如 infer 在 chat_completions 下不解析图片，返回 200+正常
 // 文本，网关拿不到错误信号），因此能力标记必须细化到三元组并独立表存储。
 type AccountModelCapability struct {

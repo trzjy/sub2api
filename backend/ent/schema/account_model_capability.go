@@ -13,7 +13,7 @@ import (
 
 // AccountModelCapability 是 (账号, 上游模型, 协议) 三元组上的上游能力标记。
 //
-// 背景（docs/capability-routing-plan.md §3.3）：同一账号在不同模型、同一模型在不同
+// 背景（docs-local/capability-routing-plan.md §3.3）：同一账号在不同模型、同一模型在不同
 // 协议下的能力并不相同（例如 infer 在 chat_completions 下不解析图片，返回 200+正常文本，
 // 网关拿不到错误信号）。因此能力不能只记在账号级，必须细化到 (账号, 模型, 协议)。
 //

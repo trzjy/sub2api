@@ -38,7 +38,7 @@ const (
 )
 
 // IsWebLoginPlatform 报告 platform 是否为支持网页登录的官方平台（kimi/zhipu/deepseek）。
-// 平台归并重构（docs/platform-merge-refactor-plan.md §5.5 / PR-4）：网页接入不再是
+// 平台归并重构（docs-local/platform-merge-refactor-plan.md §5.5 / PR-4）：网页接入不再是
 // 独立平台（web-* 已退役），而是官方平台账号级 credentials["access_mode"]="web"；
 // 「是否支持网页登录」由官方平台集合判定（取代旧平台值判定）。
 func IsWebLoginPlatform(platform string) bool {
@@ -58,7 +58,7 @@ const (
 )
 
 // Account access mode constants 区分同一官方平台账号的「官方 API」与「网页逆向」
-// 两种接入方式（平台归并重构，docs/platform-merge-refactor-plan.md §5.1）。
+// 两种接入方式（平台归并重构，docs-local/platform-merge-refactor-plan.md §5.1）。
 // 存储于 credentials["access_mode"]，与 account_mode（payg/coding）正交、互不调用。
 // 归并后网页逆向独立平台退役，网页/API 区分由本字段唯一承载。
 const (

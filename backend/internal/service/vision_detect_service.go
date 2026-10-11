@@ -16,7 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/model"
 )
 
-// 检测结果四态（docs/capability-routing-plan.md §3.5）。
+// 检测结果四态（docs-local/capability-routing-plan.md §3.5）。
 const (
 	// VisionDetectFailed 传输/HTTP 层失败（key 无效/4xx/超时/网络错），不落库。
 	VisionDetectFailed = "detect_failed"
@@ -48,7 +48,7 @@ type visionDetectHTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// VisionDetectService 手动一键检测（docs/capability-routing-plan.md §3.5）。
+// VisionDetectService 手动一键检测（docs-local/capability-routing-plan.md §3.5）。
 //
 // 流程：用账号真实 key 发随机验证码图到指定模型 → 四态分类（detect_failed 不落库 /
 // supported 落 true / unsupported 落 false / manual_review 不落 false）→ 命中

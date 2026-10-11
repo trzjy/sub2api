@@ -1,5 +1,5 @@
 -- 260_add_group_vision_routing.sql
--- 图片能力分流方案（docs/capability-routing-plan.md §3.7）：
+-- 图片能力分流方案（docs-local/capability-routing-plan.md §3.7）：
 -- 分组模型路由配置增加"视觉分流目标账号列表"（vision_target_account_ids）。
 --
 -- 采用平行字段 VisionRouting（与现有 ModelRouting 同构、互不影响）：

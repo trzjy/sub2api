@@ -10,7 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 )
 
-// 凭证存量迁移（docs/security-ban-prevention-plan.md A3-E3）：
+// 凭证存量迁移（docs-local/security-ban-prevention-plan.md A3-E3）：
 // 把 accounts.credentials 中明文形态的敏感子键批量加密（enc:v1: 前缀），
 // 并为所有行回填 credentials_mac / credentials_api_key_mac 指纹列（迁移 246
 // 增加）。任务幂等：已加密且指纹一致的行跳过，可安全重跑。

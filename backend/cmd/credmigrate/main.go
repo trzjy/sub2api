@@ -1,4 +1,4 @@
-// credmigrate 执行凭证存量迁移（docs/security-ban-prevention-plan.md A3-E3）：
+// credmigrate 执行凭证存量迁移（docs-local/security-ban-prevention-plan.md A3-E3）：
 // 把 accounts.credentials 中明文形态的敏感子键批量加密为 enc:v1: 密文，
 // 并为全部账号回填 credentials_mac / credentials_api_key_mac 指纹列。
 //

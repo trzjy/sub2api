@@ -13,7 +13,7 @@ import (
 
 // visionRoutingRepository 以原生 SQL 读写 groups.vision_routing 列。
 //
-// 选型原因：vision_routing 是新增平行字段（docs/capability-routing-plan.md §3.7），
+// 选型原因：vision_routing 是新增平行字段（docs-local/capability-routing-plan.md §3.7），
 // 未纳入 ent 代码生成（避免重跑 generate 触碰 ent/ 生成文件，与派发单 B 对
 // account_model_capabilities 的处理一致）。列由迁移 260 添加，这里直接以原生 SQL
 // 读写 JSONB。

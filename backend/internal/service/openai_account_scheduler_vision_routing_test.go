@@ -36,7 +36,7 @@ func (r *fakeVisionRoutingRepository) Set(context.Context, int64, map[string][]i
 }
 
 // newVisionRoutingTestService 装配一个启用高级调度器的 OpenAIGatewayService，
-// 带注入的视觉分流服务与账号候选池（docs/capability-routing-plan.md §3.7）。
+// 带注入的视觉分流服务与账号候选池（docs-local/capability-routing-plan.md §3.7）。
 func newVisionRoutingTestService(accounts []Account, repo *fakeVisionRoutingRepository) *OpenAIGatewayService {
 	cfg := newSchedulerTestSubscriptionPriorityConfig()
 	cfg.Gateway.Scheduling.LoadBatchEnabled = false

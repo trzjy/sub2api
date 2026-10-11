@@ -20,8 +20,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// kimi web 网页逆向适配器（方案 W2，docs/web-reverse-embedded-login-plan.md §4.3、
-// docs/web-reverse-analysis-plan.md §1.3/§3.3/§3.4）。
+// kimi web 网页逆向适配器（方案 W2，docs-local/web-reverse-embedded-login-plan.md §4.3、
+// docs-local/web-reverse-analysis-plan.md §1.3/§3.3/§3.4）。
 //
 // 协议状态声明（权威来源：登录态实测 10-kimi-logged-in-probe.md，2026-09-18）：
 //   - 已实测（10 §3/§4/§2）：对话端点 POST /apiv2/kimi.chat.v1.ChatService/Chat 走

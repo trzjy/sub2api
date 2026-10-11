@@ -1,6 +1,6 @@
 // Package credcrypt 提供账号凭证的静态加密（AES-256-GCM）。
 //
-// 设计定案（docs/security-ban-prevention-plan.md A3-E1）：
+// 设计定案（docs-local/security-ban-prevention-plan.md A3-E1）：
 //   - 密钥纯环境变量管理，不接 KMS，不预留 KeyProvider 抽象。
 //   - CRED_ENCRYPTION_KEY：主密钥（写），32 字节 base64（openssl rand -base64 32）。
 //   - CRED_ENCRYPTION_KEY_OLD：旧密钥（只读解密用，支持轮换），可选。

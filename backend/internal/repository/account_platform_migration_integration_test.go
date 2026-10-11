@@ -27,7 +27,7 @@ const (
 	retiredWebKimi     = "kimi-web"
 )
 
-// 平台归并 PR-2（docs/platform-merge-refactor-plan.md §5.8）：迁移 reconciler
+// 平台归并 PR-2（docs-local/platform-merge-refactor-plan.md §5.8）：迁移 reconciler
 // 事务路径的 DB 集成验证——单事务原子性（platform / credentials["access_mode"] /
 // extra["migrated_from_platform"] / MAC / scheduler outbox）、幂等、down 精确逆推、
 // FOR NO KEY UPDATE 并发互斥。

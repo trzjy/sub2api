@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// GetAccessMode 语义钉住（docs/platform-merge-refactor-plan.md §5.1；PR-4 已移除
+// GetAccessMode 语义钉住（docs-local/platform-merge-refactor-plan.md §5.1；PR-4 已移除
 // 形状推断）：显式合法 / 显式非法失败关闭 / 缺失默认 api。
 func TestGetAccessModeFourStates(t *testing.T) {
 	tests := []struct {

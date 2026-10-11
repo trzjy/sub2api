@@ -9,7 +9,7 @@ import (
 
 // webBaseURLSuffixes 是每个支持网页登录的官方平台（kimi/zhipu/deepseek）允许的
 // 官方域名后缀。credentials.base_url 只允许指向这些官方域名，杜绝 SSRF / 凭证外送
-// （docs/web-login-proxy-security-fix-plan.md 阶段 B #6）。平台归并后（PR-4）网页
+// （docs-local/web-login-proxy-security-fix-plan.md 阶段 B #6）。平台归并后（PR-4）网页
 // 接入挂在官方平台账号级 access_mode=web 上，键即官方平台值本身。
 var webBaseURLSuffixes = map[string][]string{
 	PlatformDeepseek: {"deepseek.com"},
@@ -98,7 +98,7 @@ func ValidateWebBaseURL(platform, raw string) (string, error) {
 }
 
 // GetWebBaseURL 解析网页接入账号（官方平台 + access_mode=web）的上游
-// base_url（docs/web-reverse-embedded-login-plan.md §3.3）：credentials.base_url
+// base_url（docs-local/web-reverse-embedded-login-plan.md §3.3）：credentials.base_url
 // 覆盖优先，否则回落平台默认官方域名。非网页平台或为空返回 ""（上层失败关闭）。
 //
 // 安全约束（阶段 B #6）：base_url 覆盖值经 ValidateWebBaseURL 校验，非法

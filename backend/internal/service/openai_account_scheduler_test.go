@@ -2819,7 +2819,7 @@ func setTestVisionCapabilityLookup(t *testing.T, lookup func(ctx context.Context
 	})
 }
 
-// TestOpenAIAccountScheduler_RequireVisionFilter 覆盖 docs/capability-routing-plan.md §3.4：
+// TestOpenAIAccountScheduler_RequireVisionFilter 覆盖 docs-local/capability-routing-plan.md §3.4：
 // RequireVision=true 排除已知不支持的账号，unknown 放行；RequireVision=false 零回归。
 func TestOpenAIAccountScheduler_RequireVisionFilter(t *testing.T) {
 	ctx := context.Background()

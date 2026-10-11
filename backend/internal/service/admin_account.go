@@ -597,7 +597,7 @@ func hasWebLoginShapeCredential(platform string, credentials map[string]any) boo
 // credentials["access_mode"]="web"，平台归并后唯一形态）：
 // 仅接受 apikey 类型（静态登录态凭证）；DeepSeek/Zhipu 须提供非空整串 Cookie，
 // Kimi 须提供非空 access_token（refresh_token/user_id 可选）；base_url 为可选的
-// 官方域名覆盖。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
+// 官方域名覆盖。字段口径见 docs-local/web-reverse-embedded-login-plan.md §3.2。
 // 仅做准入校验，不含任何上游请求逻辑（适配器见 W2-W4）。
 // access_mode 非法显式值（非 api/web/空）在此拒绝持久化。
 func validateWebAccountCredential(platform, accountType string, credentials map[string]any) error {

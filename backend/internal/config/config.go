@@ -1268,7 +1268,7 @@ type GatewayCodeBuddyConfig struct {
 	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
 	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
 	// 的 DNS。默认全关；启用需 IP+Host 齐全，否则启动失败（fail-fast）。
-	// 详见 docs/codebuddy-direct-origin-plan.md。
+	// 详见 docs-local/codebuddy-direct-origin-plan.md。
 	DirectOrigin map[string]CodeBuddyDirectOriginConfig `mapstructure:"direct_origin"`
 }
 
