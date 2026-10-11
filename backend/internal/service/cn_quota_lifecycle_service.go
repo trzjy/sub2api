@@ -162,23 +162,39 @@ type QuotaExhaustionSignal struct {
 }
 
 // ClassifyQuotaExhaustionScope 结构化作用域判定矩阵（方案 §4 F2）：
-//   - kira + 402 = account（到达证据；Kira 实测 VND=0 时含免费池请求在内全拒）。
+//   - kira + 402 + 全 kira- 映射 = model（免费池专号：落模型级探针确认停调，不再整号冻结）。
+//   - kira + 402 + 非全 kira- 映射/空映射 = account（到达证据，维持整号冻结语义）。
 //   - 非 Kira 平台 402 = model/path（按已确认维度上下文，不得泛化账号冻结）。
-//   - kira + 502/504 = 仅当新鲜 VND≤0 三态佐证成立（ResolveKiraVNDBalanceState）
-//     才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
+//   - kira + 502/504 + 全 kira- 映射 = unknown（不整号转换）。
+//   - kira + 502/504 + 其他映射 = 仅当新鲜 VND≤0 三态佐证成立
+//     （ResolveKiraVNDBalanceState）才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
 //   - 429 / 其他 = model/path（429 不触发账号级权威冻结）；判不清 = unknown。
+//
+// 2026-10-11 双向实测：付费模型 VND=0 全拒（qwen3.8-flash 402）；免费池模型 VND=0
+// 正常服务（kira-3.5-flash 2xx；官方条款免费额度限 kira- 前缀）。全 kira-* 映射账号的
+// 402/502/504 不再整号冻结：402 落模型级探针确认停调，502/504 落 unknown（不整号转换）。
 //
 // 禁止从自由报文文本猜测作用域。
 func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) QuotaExhaustionScope {
 	switch status {
 	case 402:
 		if accountIsKiraBaseURL(account) {
+			// kira+402：仅当显式模型映射全部为 kira- 前缀（免费池专号）时落模型级
+			// 探针确认停调，不再整号冻结；否则维持整号冻结语义（到达证据）。
+			if kiraMappingFreePoolOnly(account) {
+				return QuotaScopeModel
+			}
 			return QuotaScopeAccount // kira+402=account（到达证据）
 		}
 		return QuotaScopeModel // 非 Kira 平台 402 = model/path
 	case 502, 504:
 		if accountIsKiraBaseURL(account) {
-			// kira+502/504：仅当新鲜 VND≤0 三态佐证成立才 account，否则 unknown。
+			// kira+502/504：仅当显式模型映射全部为 kira- 前缀（免费池专号）时落
+			// unknown（不整号转换）；否则维持现状——仅当新鲜 VND≤0 三态佐证成立
+			// 才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
+			if kiraMappingFreePoolOnly(account) {
+				return QuotaScopeUnknown
+			}
 			if ResolveKiraVNDBalanceState(account, now).IsExhausted() {
 				return QuotaScopeAccount
 			}
@@ -190,6 +206,25 @@ func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) Q
 	default:
 		return QuotaScopeUnknown
 	}
+}
+
+// kiraMappingFreePoolOnly 判定 Kira 账号的显式模型映射非空且全部 value 均为
+// kira- 前缀（仅描述显式 mapping 集合，不推断账号全部有效可达模型）。
+// 空映射 = false（fail-safe，维持现状整号冻结语义）。
+func kiraMappingFreePoolOnly(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	mapping := account.GetModelMapping()
+	if len(mapping) == 0 {
+		return false
+	}
+	for _, v := range mapping {
+		if !strings.HasPrefix(v, "kira-") {
+			return false
+		}
+	}
+	return true
 }
 
 // cnQuotaLifecycleState extra 持久化的状态机状态记录。

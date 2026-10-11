@@ -978,3 +978,56 @@ func TestMaskedIdentityProbe_FailedBlindSpotDoesNotResolveActiveAlert(t *testing
 	require.Equal(t, OpsAlertStatusFiring, firing[0].Status)
 	require.Equal(t, 1, h.store.createdCount(), "盲区轮不得重建事件")
 }
+
+// --- KA-2：Kira 系词边界泄漏标记（B 项） ---
+
+// 构造一个协议/元数据层均干净、仅携带目标词的 body（model 正确，无旧 markers），
+// 使 Kira 系边界匹配成为唯一的泄漏判定路径，隔离验证 (?i)\bkira(?:ai)?\b。
+func kiraMarkerBody(content string) []byte {
+	return []byte(`{"model":"kimi-k3","choices":[{"message":{"content":"` + content + `"}}]}`)
+}
+
+// Kira（首字母大写）命中词边界 → 泄漏阳性。
+func TestMaskedIdentityProbe_KiraMarkerHitsLeak(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("This response is from Kira."))
+	require.Equal(t, maskedProbeOutcomeLeak, finding.outcome)
+	require.Contains(t, strings.ToLower(finding.reason), "kira")
+}
+
+// kira（全小写）命中词边界 → 泄漏阳性。
+func TestMaskedIdentityProbe_kiraLowerMarkerHitsLeak(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("served by the kira model upstream."))
+	require.Equal(t, maskedProbeOutcomeLeak, finding.outcome)
+	require.Contains(t, strings.ToLower(finding.reason), "kira")
+}
+
+// KiraAI（Kira + AI 衔接）命中词边界 → 泄漏阳性。
+func TestMaskedIdentityProbe_KiraAIMarkerHitsLeak(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("powered by KiraAI inference engine."))
+	require.Equal(t, maskedProbeOutcomeLeak, finding.outcome)
+	require.Contains(t, strings.ToLower(finding.reason), "kira")
+}
+
+// Akira（包含式非目标词，kira 前无词边界）不得命中 → 阴性（clean）。
+func TestMaskedIdentityProbe_AkiraIsNegative(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("I am Akira, nice to meet you."))
+	require.Equal(t, maskedProbeOutcomeClean, finding.outcome, "Akira 不应命中 kira 词边界")
+}
+
+// AkiraAI（包含式非目标词，kira 前无词边界）不得命中 → 阴性（clean）。
+func TestMaskedIdentityProbe_AkiraAIIsNegative(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("I am AkiraAI, an assistant."))
+	require.Equal(t, maskedProbeOutcomeClean, finding.outcome, "AkiraAI 不应命中 kira 词边界")
+}
+
+// 正常 kimi 身份回答（不含 kira 词边界、不含旧 markers）→ 阴性（clean）。
+func TestMaskedIdentityProbe_NormalKimiReplyIsNegative(t *testing.T) {
+	finding := assertMaskedIdentityProbeResponse(maskedIdentityProbeEntryChat, http.Header{},
+		kiraMarkerBody("我是 Kimi，由 Moonshot AI（月之暗面）开发"))
+	require.Equal(t, maskedProbeOutcomeClean, finding.outcome, "正常 kimi 身份回答不应被 Kira 标记判阳性")
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,6 +153,11 @@ var (
 	// maskedIdentityProbeLeakServerHeader 上游面 Server 头取值（大小写不敏感）。
 	maskedIdentityProbeLeakServerHeader = "Vercel"
 )
+
+// maskedIdentityProbeKiraMarkerRe 是 Kira 免费池货源（2026-10-11）新增的独立边界匹配：
+// 词边界匹配 Kira / kira / KiraAI，排除 Akira 等包含式非目标词。该正则编译一次（包级
+// var），与上方全局子串 markers 并行接入泄漏归阳逻辑；旧 markers 的全局子串语义保持不变。
+var maskedIdentityProbeKiraMarkerRe = regexp.MustCompile(`(?i)\bkira(?:ai)?\b`)
 
 // 告警维度键与维度值（同维度唯一活跃事件：同一 kind（+entry）只保留一个 firing 事件）。
 const (
@@ -783,6 +789,16 @@ func assertMaskedIdentityProbeResponse(entryKey string, header http.Header, body
 				outcome: maskedProbeOutcomeLeak,
 				reason:  "response body carries upstream identity marker " + strconv.Quote(marker),
 			}
+		}
+	}
+	// Kira 系边界匹配（Kira 免费池货源，2026-10-11 新增）：独立词边界正则，命中即泄漏阳性；
+	// 与上方全局子串 markers 并行接入、互不干扰，旧 markers 的全局子串语义保持不变。
+	// (?i)\bkira(?:ai)?\b 词边界匹配 Kira / kira / KiraAI，排除 Akira 等包含式非目标词。
+	if maskedIdentityProbeKiraMarkerRe.Match(body) {
+		return maskedIdentityProbeResult{
+			entry:   entryKey,
+			outcome: maskedProbeOutcomeLeak,
+			reason:  "response body carries upstream identity marker \"kira\" (Kira/KiraAI)",
 		}
 	}
 	for _, name := range maskedIdentityProbeLeakHeaders {
