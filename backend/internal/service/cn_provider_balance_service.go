@@ -45,6 +45,22 @@ const (
 	// 订阅制账号没有余额数字，用量是唯一可展示的数值。
 	cnBalanceExtraSuffixDailyUsed   = "balance_daily_used"
 	cnBalanceExtraSuffixMonthlyUsed = "balance_monthly_used"
+	// 余额种类与次卡额度（前后端契约：前端消费 data.value.kind/quota_limit/
+	// quota_used 与 extra[<platform>_balance_kind]）。
+	cnBalanceExtraSuffixKind       = "balance_kind"
+	cnBalanceExtraSuffixQuotaLimit = "balance_quota_limit"
+	cnBalanceExtraSuffixQuotaUsed  = "balance_quota_used"
+)
+
+// 余额种类（CNProviderBalanceResult.Kind / extra <platform>_balance_kind）取值。
+//
+//   - subscription：订阅制不限量（/v1/usage remaining<0），无数字余额，展示用量/到期；
+//   - count_pack：次卡（次数包），Balance/QuotaLimit/QuotaUsed 的单位是「次」；
+//   - balance：数字余额（钱包/额度），Currency 为真实币种。
+const (
+	CNBalanceKindSubscription = "subscription"
+	CNBalanceKindCountPack    = "count_pack"
+	CNBalanceKindBalance      = "balance"
 )
 
 // CNProviderBalanceEntry 是单一币种的余额明细。
@@ -73,6 +89,16 @@ type CNProviderBalanceResult struct {
 	// 余额数字，用量是唯一可展示的数值。非订阅账号为 nil。
 	DailyUsage   *float64 `json:"daily_usage,omitempty"`
 	MonthlyUsage *float64 `json:"monthly_usage,omitempty"`
+	// Kind 余额种类（CNBalanceKindSubscription / CNBalanceKindCountPack /
+	// CNBalanceKindBalance），前端据此切换展示口径（订阅/次卡/金额）。
+	//
+	// 次卡（count_pack）：Balance / QuotaLimit / QuotaUsed 的单位是「次」，不是金额。
+	// 上游 unit 在次卡下误标 USD 不可信（czc.zh.kg 生产实证：quota.used=295 与
+	// usage.today.requests=295 逐位相等，即计数而非美元），故次卡分支 Currency 置
+	// 空串、Balances 置空，避免前端把「次」渲染成金额。
+	Kind       string  `json:"kind,omitempty"`
+	QuotaLimit float64 `json:"quota_limit,omitempty"`
+	QuotaUsed  float64 `json:"quota_used,omitempty"`
 	// Snapshot 快照读取输出（§4.3 契约键名；Kira/TH 分支填充，供前端一次
 	// 拉取。失败关闭路径不落快照也不产出，保持 nil）。
 	Snapshot   *CNProviderSnapshotOutput `json:"snapshot,omitempty"`
@@ -243,6 +269,12 @@ func RelayProbeTargetURL(account *Account) (string, bool) {
 	// 不适用，否则官方账号会被错推到不存在的 /v1/usage。
 	base := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/")
 	if base != "" && !cnIsOfficialBalanceHost(account.Platform, base) {
+		// base_url 常以 /v1 结尾（如 https://czc.zh.kg/v1）：必须先判后缀再拼，
+		// 否则拼成 /v1/v1/usage → 上游 404 → 该站余额快照从不落库。口径与
+		// BalanceProbeConfig.normalizedURL（account_balance_probe.go）一致。
+		if strings.HasSuffix(base, "/v1") {
+			return base + "/usage", true
+		}
 		return base + "/v1/usage", true
 	}
 	return "", false
@@ -488,6 +520,7 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 				// unlimited 成功路径（次数属附加信息），静默跳过保持 Unlimited=true。
 				result.Unlimited = true
 				result.PlanName = dataName
+				result.Kind = CNBalanceKindSubscription
 				result.Success = true
 				if ta := gjson.GetBytes(bodyBytes, "data.total_available"); ta.Exists() {
 					if bal, ok := cnParseF64(ta.Value()); ok {
@@ -509,6 +542,9 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 				result.Balance = bal
 				result.Balances = []CNProviderBalanceEntry{{Currency: "USD", Balance: bal}}
 				result.PlanName = dataName
+				// 该分支 total_available 本就是次数（令牌配额数），标为次卡；
+				// Currency/Balances 维持现状（USD），不动已上线的 137/138 展示。
+				result.Kind = CNBalanceKindCountPack
 				result.Success = true
 			}
 			var balanceUpdates []any
@@ -583,9 +619,33 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 			result.ExpiresAt = raw
 		}
 	}
-	if *remaining < 0 {
+	// 三态分派（/v1/usage 的 mode）：订阅制不限量 / 次卡（次数包）/ 数字余额。
+	//
+	// 订阅制的判定只看 remaining<0：mode=unrestricted 同时还覆盖「钱包余额」形状
+	// （unrestricted + 正数 remaining 是真实钱包金额，见 gateway_handler.go
+	// usageUnrestricted 钱包分支），该形状必须留在 balance 分支，否则会吞掉可展示
+	// 的钱包数字（既有用例 TestCNProviderBalanceService_RelayOverrideUsesConfiguredURL）。
+	mode := strings.TrimSpace(gjson.GetBytes(bodyBytes, "mode").String())
+	switch {
+	case *remaining < 0:
+		result.Kind = CNBalanceKindSubscription
 		result.Unlimited = true
-	} else {
+	case mode == "quota_limited":
+		// 次卡：单位是「次」。上游 unit 在次卡下误标 USD 不可信（quota.used 与
+		// usage.today.requests 逐位相等），故 Currency 置空、Balances 置空，
+		// 只保留次数口径的 Balance/QuotaLimit/QuotaUsed。
+		result.Kind = CNBalanceKindCountPack
+		if lim, ok := cnParseF64(gjson.GetBytes(bodyBytes, "quota.limit").Value()); ok && lim > 0 {
+			result.QuotaLimit = lim
+			if used, ok2 := cnParseF64(gjson.GetBytes(bodyBytes, "quota.used").Value()); ok2 {
+				result.QuotaUsed = used
+			}
+		}
+		result.Balance = *remaining
+		result.Balances = nil
+		result.Currency = ""
+	default:
+		result.Kind = CNBalanceKindBalance
 		result.Balance = *remaining
 		result.Balances = []CNProviderBalanceEntry{{Currency: unit, Balance: *remaining}}
 	}
@@ -608,6 +668,13 @@ func (s *CNProviderBalanceService) queryRelayBalance(ctx context.Context, accoun
 		cnExtraKey(provider, cnBalanceExtraSuffixPlanName):  result.PlanName,
 		// 余额探测成功即清除响应式 402/429 写下的 balance_low 标记。
 		cnExtraKey(provider, cnBalanceExtraSuffixLow): false,
+		// 余额种类恒写（balance 也写）：前端按 kind 切换订阅/次卡/金额展示口径。
+		cnExtraKey(provider, cnBalanceExtraSuffixKind): result.Kind,
+	}
+	// 次卡额度仅次卡写：UpdateExtra 是合并语义，非次卡不写以避免清掉旧值。
+	if result.Kind == CNBalanceKindCountPack {
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixQuotaLimit)] = result.QuotaLimit
+		updates[cnExtraKey(provider, cnBalanceExtraSuffixQuotaUsed)] = result.QuotaUsed
 	}
 	// 订阅有效期仅在解析到时更新（UpdateExtra 是合并语义，缺省键保留旧值），
 	// 避免上游不再返回 expires_at 时用空串覆盖有效快照。

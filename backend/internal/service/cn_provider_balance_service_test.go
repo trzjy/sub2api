@@ -977,3 +977,164 @@ func TestCNProviderBalanceService_RelayProbeAuthBranches(t *testing.T) {
 		require.Len(t, repo.extraWrites, 1, "账户级分支无 api_key 仍成功落快照")
 	})
 }
+
+// ---- 前后端契约：data.value.kind / quota_limit / quota_used + extra[<platform>_balance_kind] ----
+
+// newKimiRelayProbeAccount 构造 kimi 平台的中转余额探测账号（czc.zh.kg 站，
+// base_url 带 /v1 后缀），快照键前缀为 kimi_。
+func newKimiRelayProbeAccount(probe map[string]any) *Account {
+	return newBalanceProbePlatformAccount(PlatformKimi, map[string]any{
+		"base_url":                      "https://czc.zh.kg/v1",
+		BalanceProbeConfigCredentialKey: probe,
+	})
+}
+
+// mode=unrestricted + remaining<0：订阅制不限量，Kind=subscription、Unlimited=true，
+// 快照恒写 kimi_balance_kind（非次卡不写 quota_limit/quota_used）。
+func TestQueryRelayBalanceModeUnrestrictedIsSubscription(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newKimiRelayProbeAccount(map[string]any{
+		"enabled": true, "url": "https://czc.zh.kg/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"unrestricted","remaining":-1,"unit":"USD","isValid":true,"planName":"订阅不限量kimi-k3","subscription":{"expires_at":"2026-10-12T19:40:06+08:00","monthly_usage_usd":120.05}}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, CNBalanceKindSubscription, result.Kind)
+	require.True(t, result.Unlimited)
+	require.NotEmpty(t, result.PlanName)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, CNBalanceKindSubscription, repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixKind)])
+	require.Equal(t, CNBalanceKindSubscription, repo.extraWrites[0]["kimi_balance_kind"])
+	_, hasQuotaLimit := repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixQuotaLimit)]
+	_, hasQuotaUsed := repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixQuotaUsed)]
+	require.False(t, hasQuotaLimit, "非次卡不得写 quota_limit（合并语义下会留旧值）")
+	require.False(t, hasQuotaUsed, "非次卡不得写 quota_used（合并语义下会留旧值）")
+}
+
+// mode=quota_limited：次卡（次数包）。单位是「次」，上游 unit 误标 USD 不可信
+// （quota.used=295 与 usage.today.requests=295 逐位相等），故 Currency 置空、
+// Balances 置空，只保留次数口径的 Balance/QuotaLimit/QuotaUsed。
+func TestQueryRelayBalanceModeQuotaLimitedIsCountPack(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newKimiRelayProbeAccount(map[string]any{
+		"enabled": true, "url": "https://czc.zh.kg/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"mode":"quota_limited","remaining":705,"unit":"USD","isValid":true,"quota":{"limit":1000,"used":295,"remaining":705,"unit":"USD"},"expires_at":"2026-10-12T19:33:00+08:00"}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, CNBalanceKindCountPack, result.Kind)
+	require.Equal(t, 705.0, result.Balance)
+	require.Equal(t, 1000.0, result.QuotaLimit)
+	require.Equal(t, 295.0, result.QuotaUsed)
+	require.Equal(t, "", result.Currency, "次卡单位不是金额，上游 unit=USD 不可信")
+	require.Empty(t, result.Balances)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, CNBalanceKindCountPack, repo.extraWrites[0]["kimi_balance_kind"])
+	require.Equal(t, 1000.0, repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixQuotaLimit)])
+	require.Equal(t, 295.0, repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixQuotaUsed)])
+}
+
+// 无 mode 键（旧 /v1/usage 形状）回退数字余额口径：Kind=balance、Currency 保留
+// 上游 unit，快照写 kimi_balance_kind=balance 且不带次卡额度键。
+func TestQueryRelayBalanceNoModeFallsBackToBalance(t *testing.T) {
+	repo := &cnBalanceProbeRepo{account: newKimiRelayProbeAccount(map[string]any{
+		"enabled": true, "url": "https://czc.zh.kg/v1/usage", "bearer_auth": true,
+	})}
+	upstream := &cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":5.5,"unit":"USD","isValid":true}`,
+	}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, CNBalanceKindBalance, result.Kind)
+	require.Equal(t, 5.5, result.Balance)
+	require.Equal(t, "USD", result.Currency)
+	require.Len(t, result.Balances, 1)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, CNBalanceKindBalance, repo.extraWrites[0]["kimi_balance_kind"])
+	_, hasQuotaLimit := repo.extraWrites[0][cnExtraKey(PlatformKimi, cnBalanceExtraSuffixQuotaLimit)]
+	require.False(t, hasQuotaLimit, "balance 种类不写次卡额度键")
+}
+
+// C3 回归：base_url 带 /v1 后缀时不得拼成 /v1/v1/usage（该 404 导致 czc.zh.kg
+// 的 kimi_balance* 快照从未落库）。两种输入都必须得到 .../v1/usage。
+func TestRelayProbeTargetURLDedupV1(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{"base_url with /v1 suffix", "https://czc.zh.kg/v1", "https://czc.zh.kg/v1/usage"},
+		{"base_url without /v1 suffix", "https://czc.zh.kg", "https://czc.zh.kg/v1/usage"},
+		{"base_url with trailing slash", "https://czc.zh.kg/", "https://czc.zh.kg/v1/usage"},
+		{"base_url with /v1 and trailing slash", "https://czc.zh.kg/v1/", "https://czc.zh.kg/v1/usage"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := newBalanceProbePlatformAccount(PlatformKimi, map[string]any{
+				"base_url": tt.baseURL,
+				BalanceProbeConfigCredentialKey: map[string]any{
+					"enabled": true, "url": "", "bearer_auth": true,
+				},
+			})
+
+			got, ok := RelayProbeTargetURL(account)
+
+			require.True(t, ok)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// zhipu 平台 relay 资格：balance_probe.enabled + 显式 URL → RelayProbeTargetURL
+// 选路成功（不再落到 CN_BALANCE_NO_ENDPOINT），且探测成功落 zhipu_ 前缀快照。
+func TestRelayProbeTargetURLZhipuExplicitURLEligible(t *testing.T) {
+	account := newBalanceProbePlatformAccount(PlatformZhipu, map[string]any{
+		"base_url": "https://czc.zh.kg/v1",
+		BalanceProbeConfigCredentialKey: map[string]any{
+			"enabled": true, "url": "https://czc.zh.kg/v1/usage", "bearer_auth": true,
+		},
+	})
+
+	probeURL, ok := RelayProbeTargetURL(account)
+
+	require.True(t, ok, "zhipu + enabled + 显式 URL 必须选路成功")
+	require.Equal(t, "https://czc.zh.kg/v1/usage", probeURL)
+
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":9.5,"unit":"USD","isValid":true}`,
+	}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err, "zhipu relay 账号不得再报 CN_BALANCE_NO_ENDPOINT")
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "https://czc.zh.kg/v1/usage", upstream.lastURL)
+	require.Equal(t, 9.5, result.Balance)
+	require.Equal(t, CNBalanceKindBalance, result.Kind)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, CNBalanceKindBalance, repo.extraWrites[0]["zhipu_balance_kind"])
+}
