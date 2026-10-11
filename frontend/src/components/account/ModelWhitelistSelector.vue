@@ -161,6 +161,7 @@ const { t } = useI18n()
 
 const props = defineProps<{
   modelValue: string[]
+  modelMappings?: { from: string; to: string }[]
   platform?: string
   platforms?: string[]
   accountId?: number
@@ -203,6 +204,37 @@ const normalizedPlatforms = computed(() => {
   )
 })
 
+// w43 conflict-resolution fusion tests (second wave, B10 — frontend semantic_conflict)
+// 四方裁决（base/ours/upstream/result），merge-plan §5 rule 1（我方有重写的符号 → 我方语义为准，
+// 上游同块内正交修复显式吸收，禁止整段保留静默丢弃）：
+// 1) KEEP OURS — 平台集合仍用本文件内的静态 Set，不用上游 `supportsUpstreamModelSync`。
+//    理由：上游实现依赖 `@/constants/platformCatalog`（platformCatalog.ts + .builtin.json），
+//    这两个上游新增文件在本卡工作树中不存在，且 wave2 无任何卡认领（已核 cards/ 与
+//    perfile/*/manifest.json 均无 platformCatalog 条目）。直接引用会立即编译断（import 解析失败），
+//    属跨卡依赖，不在本卡"只动派发单文件清单"范围内。
+// 2) ABSORB UPSTREAM（正交修复，显式并入我方 Set）— 补 `opencode_go` / `command_code` / `cline`。
+//    依据：上游 supportsUpstreamModelSync = `!!spec.multi_protocol || 固定五元`
+//    （anthropic/openai/gemini/antigravity/grok）；上游 platformCatalog.builtin.json 中
+//    multi_protocol=true 的平台为 kimi/zhipu/deepseek/minimax/opencode_go/command_code/cline。
+//    我方原 Set 已含 kimi/zhipu/deepseek/minimax，故差集恰为 opencode_go/command_code/cline → 补齐后
+//    与上游语义等价（上游明确不支持的 `typesafe` 与未登记平台仍不在集合内，行为一致）。
+// 3) KEEP OURS — `other` 保留。后端 account.go UsesOpenAIProtocolSharedBaseURL 分支固定按
+//    OpenAI 兼容协议探测 GET {base_url}/models，上游清单无 `other` 平台（会被判不支持），
+//    删除即回归我方 other 平台在线拉取能力。
+// 4) KEEP OURS — 火山方舟（isVolcanoPlanAccount / syncVolcanoPlan）、运行时同步模型登记表
+//    （registerSyncedModels）、filterUpstreamModelsByPlatform 平台过滤、
+//    volcano_model_sync_partial 告警、extractApiErrorMessage 错误文案提取：均为我方新增能力，
+//    上游无对应实现，整段保留。
+// 5) ABSORB UPSTREAM — `modelMappings?: { from, to }[]` prop 与 addCustom 的映射冲突拦截
+//    （admin.accounts.modelMappingConflict）：上游新功能，与我方 addCustom 的 modelExists 去重
+//    正交，按上游顺序保留"先查已存在、再查映射冲突"。
+// 6) ABSORB UPSTREAM — syncUpstreamModels 入口守卫补 `|| !canSyncUpstream.value`：
+//    上游新增的防御，避免按钮被脚本直接触发时对不支持的平台发起请求。
+// 7) KEEP OURS — availableOptions 在无平台时返回 `[...allModels]` 拷贝：我方需 push 运行时
+//    同步模型，直接返回 allModels 会污染全局模型库；上游无该登记能力。
+// 交叉依赖登记：platformCatalog.ts / platformCatalog.builtin.json 入树后（权威表第 5 条
+// "upstream 新符号直接引用"的适用范围目前仅限 Go 侧 domain/platforms.go），本文件可将 Set
+// 替换为 supportsUpstreamModelSync 并删除此注释中的第 1/2 条。
 const upstreamSyncPlatforms = new Set([
   'anthropic',
   'openai',
@@ -213,6 +245,11 @@ const upstreamSyncPlatforms = new Set([
   'zhipu',
   'deepseek',
   'minimax',
+  // 上游 multi_protocol 供应商（opencode_go / command_code / cline）同样支持 /models 拉取，
+  // 与后端 buildUpstreamModelsRequest 的 supportsUpstreamModelSync 判定对齐后补入。
+  'opencode_go',
+  'command_code',
+  'cline',
   // other 平台在后端固定按 OpenAI 兼容协议探测 GET {base_url}/models（见
   // upstream_models.go UsesOpenAIProtocolSharedBaseURL 分支），同样支持在线拉取。
   'other'
@@ -327,6 +364,15 @@ const addCustom = () => {
     appStore.showInfo(t('admin.accounts.modelExists'))
     return
   }
+  // w43 吸收上游：自定义模型名若已在 Model Mapping 中被映射到另一个目标，先拦下并提示，
+  // 避免白名单与映射表指向同一 from 造成两处语义打架。恒等映射（to === from）不算冲突。
+  const conflict = props.modelMappings?.find(
+    mapping => mapping.from.trim() === model && mapping.to.trim() && mapping.to.trim() !== model
+  )
+  if (conflict) {
+    appStore.showInfo(t('admin.accounts.modelMappingConflict', { from: model, to: conflict.to.trim() }))
+    return
+  }
   emit('update:modelValue', [...props.modelValue, model])
   customModel.value = ''
 }
@@ -348,7 +394,9 @@ const fillRelated = () => {
 }
 
 const syncUpstreamModels = async () => {
-  if (isSyncingUpstream.value) return
+  // w43 吸收上游：除重入守卫外补 canSyncUpstream 守卫，避免按钮被脚本直接触发时
+  // 对不支持在线拉取的平台发起请求。
+  if (isSyncingUpstream.value || !canSyncUpstream.value) return
   if (!props.accountId && !props.syncCredentials) return
 
   // 火山订阅号走专用流程：preview 拿分类与差异 → 确认 → apply 落库（非 append-only）。

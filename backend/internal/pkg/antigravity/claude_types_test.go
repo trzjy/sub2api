@@ -1,6 +1,9 @@
 package antigravity
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDefaultModels_ContainsNewAndLegacyImageModels(t *testing.T) {
 	t.Parallel()
@@ -26,11 +29,41 @@ func TestDefaultModels_ContainsNewAndLegacyImageModels(t *testing.T) {
 		"gemini-3.6-flash-low",
 		"gemini-3.6-flash-medium",
 		"gemini-3.6-flash-tiered",
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
 	}
 
 	for _, id := range requiredIDs {
 		if _, ok := byID[id]; !ok {
 			t.Fatalf("expected model %q to be exposed in DefaultModels", id)
 		}
+	}
+}
+
+func TestClaudeContentItem_ThinkingAlwaysHasSignature(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(ClaudeContentItem{Type: "thinking", Thinking: "plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), `{"thinking":"plan","signature":"","type":"thinking"}`; got != want {
+		t.Fatalf("thinking block = %s, want %s", got, want)
+	}
+
+	data, err = json.Marshal(ClaudeContentItem{Type: "text", Text: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), `{"type":"text","text":"hi"}`; got != want {
+		t.Fatalf("text block = %s, want %s", got, want)
 	}
 }

@@ -1,6 +1,116 @@
+/**
+ * w45 conflict-resolution notes (second wave, B10 — frontend spec / semantic_conflict + same_contract)
+ *
+ * [现状取证] 本文件与 b0-ours 逐字节相同（git hash-object = 77a1baec33515f2dfa62e229487280119627c5de
+ *   = git rev-parse b0-ours:frontend/src/components/account/__tests__/EditAccountModal.spec.ts），
+ *   即自动合并没有把任何上游改动落进来。上游相对 base 的 5 处改动全是纯新增（diff base->upstream
+ *   的删除行数 = 0），我方相对 base 也只多了第 3 行的 flushPromises 与 8 个用例块。三方 git merge-file
+ *   只有 1 个文本冲突（就是第 3 行那个 import），机械合并后 2080 行。
+ *
+ * [总裁决] keep OURS 全文；上游 5 处新增一律 take UPSTREAM（暂缓，跨卡依赖）—— 逐条证据见下。
+ *   缺席哨兵：同目录 EditAccountModalFusion.spec.ts（依赖落地即转红 = 设计中的报警）。
+ *
+ * [机械合并实验证据] 2026-10-11 本卡实测，两个探针文件跑完即删，未留下任何越界改动：
+ *   变体 A = ours + 上游 5 处全量：vitest 在 collect 阶段直接断
+ *     (Failed to resolve import "@/constants/platformCatalog") -> Tests: no tests，
+ *     我方原有 65 例全部陪葬。所以上游块不是"加进去跑不过几条"，而是"加进去整文件报废"。
+ *   变体 B = 变体 A 再剥掉 platformCatalog 的 import 及其唯一消费者 describe（generic form）：
+ *     69 例 -> 3 failed / 66 passed，失败的恰好是下面 ③ ④b ⑥ 三块。
+ *   基线（本卡交付态 = ours 原文）：65 passed / 0 failed，零回归。
+ *
+ * [逐处裁决]
+ * (1) 未纳入：上游的 platformCatalog import（位置 = 第 3 行之后）。
+ *   证据：工作树 frontend/src/constants/ 只有 account.ts / channel.ts / channelMonitor.ts /
+ *   platforms.ts（+__tests__），没有 platformCatalog.ts 与 platformCatalog.builtin.json —— 两者
+ *   只存在于 b0-upstream ref（blob 16bc44e2 / 1d7ec501）。全仓 grep "platformCatalog" 在 src/ 下
+ *   只命中注释（w42/w43/w62 的同类"该模块缺席"登记）。权威表第 5 条"upstream 新符号已随自动合并
+ *   入树"在本机整体不成立，故直接引用 = 整文件 collect 断（变体 A 实测）。
+ * (2) 未纳入：ModelWhitelistSelectorStub 的 props 增列 modelMappings: { type: Array, default: () => [] }
+ *   （位置 = 第 70 行那个 defineComponent 的 props 首位）。该改动本身惰性，只服务 (3) 的 props 断言，
+ *   与 (3) 捆绑暂缓，避免落地半个契约。
+ *   半边已收敛：真组件 ModelWhitelistSelector.vue 的 modelMappings?: { from, to }[] prop 已由 w43
+ *   入树（工作树 line 164），缺的只是父组件传参，见 (3)。
+ * (3) 未纳入：用例 'passes existing non-identity mappings to the whitelist selector and preserves
+ *   them on save'（位置 = 现第 333 行 it('sets expiry presets ...') 之前）。
+ *   变体 B 实测失败：expected [] to deeply equal [ { from: 'gpt-latest', to: 'deepseek-chat' } ]。
+ *   根因在生产 EditAccountModal.vue 不给 selector 传 :model-mappings（工作树 grep -c
+ *   "model-mappings" = 0，b0-upstream = 4）-> 属 w42 范围，本卡不越界改生产文件。
+ * (4) 未纳入：上游 OpenCode 两块（位置 = 现第 448 行 it('preserves adaptive Kimi Responses
+ *   endpoint on submit') 之前）。
+ *   (4a) 'preserves OpenCode Zen account type and endpoints on submit'：变体 B 实测【通过】，
+ *     但仍暂缓 —— 它把 account.platform 写成 'opencode_go'，而我方把该供应商归并为 'muse'
+ *     （同仓先例：components/user/monitor/__tests__/ProviderIcon.spec.ts:30-39、
+ *     utils/__tests__/platformColors.spec.ts:15/31/57、components/keys/UseKeyModal.vue:1263）。
+ *     工作树生产无 opencode_go 分支，它跑的是"未知平台默认路径"，绿色偶然、断的不是我方产品面；
+ *     且与 (4b) 同源成对，拆开落地只会让后来者困惑。
+ *   (4b) 'treats a legacy OpenCode account without account_mode as GO'：变体 B 实测失败
+ *     (expected { api_key: 'sk-opencode', ...(3) } to match object { account_mode: 'go', ...(2) })
+ *     —— 缺上游"legacy 无 account_mode 归一化为 go"的生产实现（w42）。
+ * (5) 未纳入：describe 'providers using the generic form'（2 例：'preserves stored endpoints and
+ *   rules on submit' / 'offers the provider modes and keeps customised endpoints when switching
+ *   mode'；位置 = (4) 之后、'preserves adaptive Kimi ...' 之前）。双重依赖：(1) 的 setPlatformCatalog
+ *   家族 + 生产 data-testid="edit-generic-account-mode"（工作树命中 0，b0-upstream 命中 1）。
+ *   五块里唯一拿不到运行证据的一块（变体 A 断在 import，变体 B 已按依赖剥除），收敛时需重跑确认。
+ *   其 fixture 的 acme_router 还额外要求 AccountPlatform 是开放联合，见下表。
+ * (6) 未纳入：用例 'preserves Seedance when exactly two endpoint capabilities are selected'
+ *   （位置 = 现第 1483 行 it('keeps at least one OpenAI APIKey endpoint capability selected') 之前）。
+ *   变体 B 实测失败：Unable to get [data-testid="openai-endpoint-capability-seedance"]。
+ *   双重依赖：types 的 OpenAIEndpointCapability 加 'seedance'（w62）+ 生产
+ *   openAIEndpointCapabilityOptions / normalizeOpenAIEndpointCapabilities 的 allowed 表加 seedance
+ *   （工作树 line 3819-3831 只有 chat_completions / embeddings；b0-upstream grep "seedance" 命中 4）
+ *   （w42）。
+ *
+ * [same_contract 字段级融合表] 本 spec 消费的契约，双方相对 base 的逐字段结果。契约文件
+ *   frontend/src/types/index.ts 归 w62，本卡只消费不改动。
+ *   - AccountPlatform（我方 types line 933）
+ *       base : 'anthropic'|'openai'|'gemini'|'antigravity'|'grok'|'kimi'|'zhipu'|'deepseek'|'minimax'
+ *       我方  : base + 'other' + 'codebuddy' + 'muse'（闭联合 12 项）
+ *       上游  : 拆成 KnownAccountPlatform（base + 'opencode_go'|'typesafe'|'command_code'|'cline'，
+ *               13 项）| (string & {})（开放联合，任意字符串）
+ *       双方都改 -> 真冲突，按批规则默认我方（w62 卡片注记同为"双方重定义平台类型 AccountPlatform，
+ *       取值集互斥"）。
+ *       对本 spec 的影响：(4)(5) 的 platform = 'opencode_go' / 'acme_router' 在我方类型下无归属；
+ *       之所以没编译错，只因为 buildAccount() 以 as any 收尾（本文件 line 166）—— 能跑 != 有语义。
+ *   - GroupPlatform（我方 types line 545）：我方 = 闭联合（含 other/codebuddy/muse），上游 =
+ *       AccountPlatform | 'composite'。双方都改 -> 默认我方。本 spec 不消费该类型，仅登记给 w62
+ *       交叉参考。
+ *   - OpenAIEndpointCapability（我方 types line 1555）
+ *       base = 我方 = 'chat_completions' | 'embeddings'（我方逐字节未动）
+ *       上游 = 追加 'seedance'
+ *       -> 非双方冲突，是上游单方新增，按批规则"对应上游新功能的键取上游"-> take UPSTREAM
+ *          （owner w62）。本卡不在 types 落地；(6) 的 spec 暂缓是它的下游连带。
+ *   - credentials.model_mapping / account_mode / api_protocol / base_url / api_base_urls /
+ *     protocol_rules：三方都落在 Account.credentials?: Record<string, unknown> 之下，types 从未
+ *     声明这些子键 -> 无字段级契约冲突；(3)(4)(5) 对这些键的断言差全在生产实现（w42），不在 types。
+ *   - 上游单方新增且本 spec 零消费：Account.opencode_go_usage、extra.codex_credits_snapshot、
+ *     extra.codex_referral_snapshot、SiteConfig.subscription_enabled / payment_balance_disabled、
+ *     AnnouncementItem.hide_open_button —— 仅登记给 w62，本卡无动作。
+ *
+ * [收敛单元 / owner]
+ *   (a) frontend/src/constants/platformCatalog.ts + platformCatalog.builtin.json 入树 ——
+ *       wave2 无卡认领（grep 卡片目录零命中），需 B11 或新开卡；解锁 (1)(2)（间接）(5)。
+ *   (b) frontend/src/components/account/EditAccountModal.vue —— w42；解锁 (3)(4b)(5)(6)。
+ *       差异移交：w42 的 manifest 登记 blob 4a52bcb8226b16d8e2531132592c42c81201f2e9，而工作树
+ *       实测 blob 435d3d846ec5d5bf5b9224d02ae579133886f86f（== b0-ours），且文件内无任何 w42
+ *       注记 —— w42 的交付未在工作树落地（或被还原）。本卡对 (b) 的依赖判定一律以工作树现状为准。
+ *   (c) frontend/src/types/index.ts —— w62；解锁 (6) 的类型侧与 (4)(5) 的平台取值侧。工作树实测
+ *       blob c98b534edacd1754d0a6cca50fcdd0afda7e9776 == b0-ours，同样尚未落地。
+ *   (d) frontend/src/components/account/ModelWhitelistSelector.vue —— w43，已收敛（prop 在树）。
+ *   (a)(b)(c) 齐备后，把 (1)-(6) 按上述位置原样补回（上游原文：git --no-optional-locks show
+ *   b0-upstream:frontend/src/components/account/__tests__/EditAccountModal.spec.ts），并同步删除
+ *   EditAccountModalFusion.spec.ts 里对应的哨兵 —— 它在依赖落地时必然失败，就是设计好的报警。
+ *
+ * [验证锚点]
+ *   npx vitest run src/components/account/__tests__/EditAccountModal.spec.ts -> 65 passed（零回归）
+ *   npx vitest run src/components/account/__tests__/EditAccountModalFusion.spec.ts -> 全绿（当前缺席态）
+ *   npx vue-tsc --noEmit -> 本卡两文件零错误（全项目基线 5 处均在 views/user/KeysView.vue）
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
+// w45 (1)：上游此处新增 platformCatalog 的 import（BUILTIN_PLATFORM_CATALOG /
+//   resetPlatformCatalog / setPlatformCatalog）。该模块只存在于 b0-upstream ref，工作树没有 ->
+//   引入即整文件 collect 断（机械合并变体 A 实测）。暂缓，证据见顶部 notes 块 (1)。
 
 const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
@@ -70,6 +180,8 @@ const BaseDialogStub = defineComponent({
 const ModelWhitelistSelectorStub = defineComponent({
   name: 'ModelWhitelistSelector',
   props: {
+    // w45 (2)：上游此处新增 modelMappings: { type: Array, default: () => [] }。惰性改动，
+    //   只服务 (3) 的 props 断言，与 (3) 捆绑暂缓（见顶部 notes）。
     modelValue: {
       type: Array,
       default: () => []
@@ -330,6 +442,9 @@ describe('EditAccountModal', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  // w45 (3)：上游此处新增用例 'passes existing non-identity mappings to the whitelist selector
+  //   and preserves them on save'。依赖 w42 生产向 selector 传 :model-mappings，机械合并变体 B
+  //   实测失败（expected [] to deeply equal [{ from: 'gpt-latest', to: 'deepseek-chat' }]）-> 暂缓。
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2028-02-29T12:34:00'))
@@ -445,6 +560,10 @@ describe('EditAccountModal', () => {
     })
   })
 
+  // w45 (4)(5)：上游此处新增 OpenCode Zen / legacy-GO 两块，以及紧随其后的
+  //   'providers using the generic form' describe（2 例）。依赖顶部 notes (1) 的 platformCatalog
+  //   与 w42 的生产实现（opencode_go 分支、account_mode 归一化、edit-generic-account-mode 控件）
+  //   -> 暂缓。(4a) 在变体 B 里偶然跑绿，仍按 (4a) 的理由与 (4b) 捆绑暂缓。
   it('preserves adaptive Kimi Responses endpoint on submit', async () => {
     const account = buildAccount()
     account.platform = 'kimi'
@@ -1480,6 +1599,10 @@ describe('EditAccountModal', () => {
 	  expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.auto_pause_7d_disabled).toBeUndefined()
 	})
 
+  // w45 (6)：上游此处新增用例 'preserves Seedance when exactly two endpoint capabilities are
+  //   selected'。依赖 w62 types 的 OpenAIEndpointCapability 加 'seedance' 与 w42 生产选项表，
+  //   机械合并变体 B 实测失败（Unable to get [data-testid="openai-endpoint-capability-seedance"]）
+  //   -> 暂缓。
   it('keeps at least one OpenAI APIKey endpoint capability selected', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

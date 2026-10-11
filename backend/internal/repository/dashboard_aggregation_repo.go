@@ -258,7 +258,12 @@ func (r *dashboardAggregationRepository) cleanupUsageLogsOnExecutor(ctx context.
 		if err := r.dropUsageLogsPartitionsOnExecutor(ctx, exec, cutoff); err != nil {
 			return err
 		}
-	} else if err := r.cleanupUsageLogsBatchesOnExecutor(ctx, exec, cutoff); err != nil {
+	}
+	// Remove the expired part of the boundary partition as well, so a retention
+	// window measured in days does not silently round up to a whole month.
+	// （上游正交修复 f2669c8cf6：分区路径此前仅 DROP 整月分区，边界分区内未过期
+	// 月界之前的历史行不会被清理；改为无条件执行分批删除以清边界分区过期行。）
+	if err := r.cleanupUsageLogsBatchesOnExecutor(ctx, exec, cutoff); err != nil {
 		return err
 	}
 	// 收尾的分组汇总同步复用同一执行器。事务路径（exec 为 *sql.Tx）直接在同一事务内同步，
@@ -288,14 +293,14 @@ func (r *dashboardAggregationRepository) cleanupUsageLogsBatches(ctx context.Con
 
 		res, err := r.sql.ExecContext(ctx, `
 			WITH victims AS (
-				SELECT ctid
+				SELECT tableoid, ctid
 				FROM usage_logs
 				WHERE created_at < $1
 				ORDER BY created_at ASC, id ASC
 				LIMIT $2
 			)
 			DELETE FROM usage_logs
-			WHERE ctid IN (SELECT ctid FROM victims)
+			WHERE (tableoid, ctid) IN (SELECT tableoid, ctid FROM victims)
 		`, cutoff.UTC(), usageLogsCleanupBatchSize)
 		if err != nil {
 			return err
@@ -330,14 +335,14 @@ func (r *dashboardAggregationRepository) cleanupUsageLogsBatchesInTx(ctx context
 		}
 		rows, err := tx.QueryContext(ctx, `
 			WITH victims AS (
-				SELECT ctid
+				SELECT tableoid, ctid
 				FROM usage_logs
 				WHERE created_at < $1
 				ORDER BY created_at ASC, id ASC
 				LIMIT $2
 			)
 			DELETE FROM usage_logs
-			WHERE ctid IN (SELECT ctid FROM victims)
+			WHERE (tableoid, ctid) IN (SELECT tableoid, ctid FROM victims)
 			RETURNING created_at
 		`, cutoff.UTC(), usageLogsCleanupBatchSize)
 		if err != nil {
@@ -389,14 +394,14 @@ func cleanupUsageLogsBatchWithRollupInvalidation(ctx context.Context, db *sql.DB
 	}
 	rows, err := tx.QueryContext(ctx, `
 		WITH victims AS (
-			SELECT ctid
+			SELECT tableoid, ctid
 			FROM usage_logs
 			WHERE created_at < $1
 			ORDER BY created_at ASC, id ASC
 			LIMIT $2
 		)
 		DELETE FROM usage_logs
-		WHERE ctid IN (SELECT ctid FROM victims)
+		WHERE (tableoid, ctid) IN (SELECT tableoid, ctid FROM victims)
 		RETURNING created_at
 	`, cutoff.UTC(), usageLogsCleanupBatchSize)
 	if err != nil {

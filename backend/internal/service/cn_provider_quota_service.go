@@ -182,9 +182,14 @@ type CNProviderQuotaProbeResult struct {
 	FetchedAt  int64                     `json:"fetched_at"`
 	Persisted  bool                      `json:"persisted"`
 	Error      string                    `json:"error,omitempty"`
+
+	// Balance 为同一次探测得到的余额（Command Code 积分与窗口同源），其余供应商为空。
+	Balance *CNProviderBalanceResult `json:"balance,omitempty"`
 }
 
-// CNProviderQuotaService 探测 Kimi / Zhipu Coding Plan 的滚动窗口用量。
+// CNProviderQuotaService 探测 Kimi / Zhipu / MiniMax / 火山方舟 / Kira Coding Plan、
+// OpenCode Go、Command Code 与 Cline（ClinePass）的滚动窗口用量，以及 TH
+// （tokenharbor.ai）Pass/用量快照。
 type CNProviderQuotaService struct {
 	accountRepo  AccountRepository
 	proxyRepo    ProxyRepository
@@ -284,8 +289,16 @@ func (s *CNProviderQuotaService) QueryUsageForAccount(ctx context.Context, accou
 
 func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, account *Account) (*CNProviderQuotaProbeResult, error) {
 	provider := resolveCNQuotaProvider(account)
-	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano && provider != providerKira {
-		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano/kira coding plan account")
+	// 上游新增平台：Command Code 与 Cline 由独立探测链处理（command_code_usage.go /
+	// cline_usage.go），在通用 provider 白名单校验前按 provider 归属先分发。
+	if provider == PlatformCommandCode {
+		return s.queryCommandCodeUsage(ctx, account)
+	}
+	if provider == PlatformCline {
+		return s.queryClineUsage(ctx, account)
+	}
+	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != providerVolcano && provider != providerKira && provider != PlatformOpenCodeGo {
+		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax/volcano/kira/opencode go coding plan account")
 	}
 	// Kira 分支在 platform/provider 解析之前按 base_url 分发进来（dashboard JWT 链）。
 	if provider == providerKira {
@@ -307,6 +320,13 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
 		}
 		targetURL = kimiQuotaURL(baseURL)
+		authHeader = "Bearer " + apiKey
+	case PlatformOpenCodeGo:
+		apiKey := strings.TrimSpace(account.GetCNAPIKey())
+		if apiKey == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NO_APIKEY", "account api_key is empty")
+		}
+		targetURL = openCodeGoQuotaURL(baseURL)
 		authHeader = "Bearer " + apiKey
 	case PlatformZhipu:
 		apiKey := strings.TrimSpace(account.GetCNAPIKey())
@@ -459,6 +479,9 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	switch provider {
 	case PlatformKimi:
 		tiers = parseKimiUsageTiers(bodyBytes)
+	case PlatformOpenCodeGo:
+		tiers = parseOpenCodeGoUsageTiers(bodyBytes)
+		result.PlanLevel = "OpenCode Go"
 	case PlatformZhipu:
 		tiers = parseZhipuTokenTiers(gjson.GetBytes(bodyBytes, "data"))
 		result.PlanLevel = strings.TrimSpace(gjson.GetBytes(bodyBytes, "data.level").String())
@@ -581,6 +604,27 @@ func cnTokenHarborSnapshotOutput(passSnapshot TokenHarborPassSnapshot, usageSnap
 func validateCodingPlanAccount(account *Account) error {
 	if account == nil {
 		return infraerrors.New(http.StatusNotFound, "CN_QUOTA_ACCOUNT_NOT_FOUND", "account not found")
+	}
+	// 上游新增平台放行/拒绝：OpenCode Go 订阅（IsOpenCodeGoPlan）有订阅额度窗口；
+	// Command Code / Cline 仅在官方主机 + API Key 账号可查用量；OpenCode Zen
+	// （IsOpenCodeGo，按量付费）无订阅额度窗口，拒绝。
+	if account.IsOpenCodeGoPlan() {
+		return nil
+	}
+	if account.IsCommandCode() {
+		if !account.commandCodeUsageSupported() {
+			return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "command code usage is only available for api key accounts on the official host")
+		}
+		return nil
+	}
+	if account.IsCline() {
+		if !account.clineAccountAPISupported() {
+			return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "cline usage is only available for api key accounts on the official host")
+		}
+		return nil
+	}
+	if account.IsOpenCodeGo() {
+		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "opencode zen accounts have no subscription quota window")
 	}
 	if !account.IsCNProvider() {
 		return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_INVALID_PLATFORM", "account is not a CN provider account")
@@ -1243,6 +1287,51 @@ func cnQuotaExtraUpdates(provider string, tiers []CNQuotaTier, now time.Time) ma
 		updates[cnExtraKey(provider, cnExtraSuffixMonthlyReset)] = nil
 	}
 	return updates
+}
+
+// parseOpenCodeGoUsageTiers 解析 OpenCode Go GET /usage 响应。
+//
+// 结构对齐 cc-switch extractor：
+//
+//	{ "usage": { "rolling": {percent, resetsAt}, "weekly": {...}, "monthly": {...} } }
+//
+// percent 为已用百分比（0-100）；rolling 映射为 5h 窗口。
+func parseOpenCodeGoUsageTiers(body []byte) []CNQuotaTier {
+	usage := gjson.GetBytes(body, "usage")
+	if !usage.Exists() {
+		return nil
+	}
+	var tiers []CNQuotaTier
+	for _, item := range []struct {
+		key    string
+		window string
+	}{
+		{key: "rolling", window: "5h"},
+		{key: "weekly", window: "weekly"},
+		{key: "monthly", window: "monthly"},
+	} {
+		node := usage.Get(item.key)
+		if !node.Exists() {
+			continue
+		}
+		percentNode := node.Get("percent")
+		if !percentNode.Exists() {
+			continue
+		}
+		used, ok := cnParseF64(percentNode.Value())
+		if !ok {
+			continue
+		}
+		if used < 0 {
+			used = 0
+		}
+		tiers = append(tiers, CNQuotaTier{
+			Window:      item.window,
+			UsedPercent: used,
+			ResetAt:     cnNormalizeResetTime(node.Get("resetsAt").Value()),
+		})
+	}
+	return tiers
 }
 
 // cnParseF64 把 JSON 数值或字符串解析为 float64（兼容 "100" 与 100）。

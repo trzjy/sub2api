@@ -61,7 +61,7 @@
           v-if="modelValue"
           type="button"
           class="btn btn-secondary btn-sm text-red-600 hover:text-red-700 dark:text-red-400"
-          @click="$emit('update:modelValue', '')"
+          @click="removeImage"
         >
           <Icon name="trash" size="sm" class="mr-1.5" :stroke-width="2" />
           {{ resolvedRemoveLabel }}
@@ -74,10 +74,38 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeSvg } from '@/utils/sanitize'
+
+// w47 conflict-resolution fusion tests (second wave, B10 — semantic_conflict)
+// 四方裁决（base / ours / upstream / result），依据 merge-plan §5 rule 1：我方重写了
+// handleUpload 的函数结构 → 以我方结构为准，上游落在同一函数体内的正交修复必须显式吸收，
+// 禁止整段保留我方版本造成上游修复静默丢弃。
+// 1) KEEP OURS — handleUpload 拆为 processFile(file) + handleUpload(event) + onDrop(e)；
+//    拖拽区（dragenter / dragover / dragleave / drop + dragDepth 计数 + isDragging 高亮）
+//    与 data-testid="image-upload-dropzone" 全部保留：我方新增能力，上游无对应实现。
+// 2) ABSORB UPSTREAM — 唯一文本冲突点（git merge-file --diff3 复算，见 w2-w47.log (c)）：
+//    上游在 error.value = '' 之后插入 reader?.abort()，取消上一次未完成的读取，避免旧
+//    result 回调覆盖新选择的值。该 abort 已并入 processFile 首段（error.value = '' 之后），
+//    于是 input change 与 drop 两个入口共用同一守卫 —— 语义与上游等价且覆盖面更大。
+//    冲突块 ||||||| base 侧的锚点行 "if (!file) return" 未回收：我方已把空文件判定上移到
+//    handleUpload / onDrop 两个调用侧（各自 if (!file) return 后再调 processFile），
+//    在 processFile 内重复判定属死代码。
+// 3) ABSORB UPSTREAM — 模块级 let reader: FileReader | null = null 取代函数内
+//    const reader = new FileReader()，并配 onBeforeUnmount(() => reader?.abort())：
+//    上游修复的“组件卸载后 FileReader 回调仍触发 emit”的泄漏，与我方拖拽改造正交，整段吸收。
+// 4) ABSORB UPSTREAM — 移除按钮 @click="$emit('update:modelValue', '')" 改为
+//    @click="removeImage"，removeImage 内先 reader?.abort() 再 emit：上游新功能
+//    （清除时在途读取不得回写），保留上游实现。
+// 5) KEEP OURS — maxSize / 非 image 类型两条错误分支不再各自 input.value = ''：我方把重置
+//    上提到 handleUpload 入口统一做一次（先取 file 引用再清空，读取不受影响）。
+// 无损性核验：result 相对 upstream 仅删 8 行，全为我方对 :class 绑定与 handleUpload
+//    函数头的正当替换；相对 ours 仅删 3 行，全为上游对 @click / vue import / new FileReader()
+//    的正当替换。双方新增无一丢失。
+// 测试交付：配套的 __tests__/ImageUpload.spec.ts（我方独有文件，上游无该 spec）同步为
+//    MockFileReader 补 abort，并对上述 2) 3) 4) 三个上游吸收点加融合断言。
 
 const { t } = useI18n()
 
@@ -104,6 +132,15 @@ const emit = defineEmits<{
 
 const error = ref('')
 
+let reader: FileReader | null = null
+
+onBeforeUnmount(() => reader?.abort())
+
+function removeImage() {
+  reader?.abort()
+  emit('update:modelValue', '')
+}
+
 const resolvedUploadLabel = computed(() => props.uploadLabel || t('common.upload'))
 const resolvedRemoveLabel = computed(() => props.removeLabel || t('common.remove'))
 
@@ -122,6 +159,7 @@ const isDragging = computed(() => dragDepth.value > 0)
 
 function processFile(file: File) {
   error.value = ''
+  reader?.abort()
 
   if (props.maxSize && file.size > props.maxSize) {
     error.value = t('common.fileTooLargeKb', {
@@ -131,7 +169,7 @@ function processFile(file: File) {
     return
   }
 
-  const reader = new FileReader()
+  reader = new FileReader()
   if (props.mode === 'svg') {
     reader.onload = (e) => {
       const text = e.target?.result as string

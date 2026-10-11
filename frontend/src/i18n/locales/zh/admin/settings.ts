@@ -1,3 +1,71 @@
+// w60 conflict-resolution fusion notes (second wave, B10 — funds_or_state / semantic_conflict)
+// 取证 ref：b0-base 98d8691 / b0-ours 8bf13d6 / b0-upstream f2669c8（v0.2.15）。
+// 方法：git --no-optional-locks show <ref>:<path> 后展平叶子键做三方对比。
+// 统计：base 1190 / ours 1240 / upstream 1247 叶子键；ours-only 56，upstream-only 63
+// （其中 6 个是我方主动删除的 base 键，见 (1)），同键异值 7（2 个真冲突 + 5 个上游单方修订）。
+//
+// (1) keep OURS —— 本卡核心裁决（派发单冲突注记 + 权威表第 7 条 funds 保留我方值）。
+//     我方把「充值倍率 + 订阅 USD→CNY 汇率」两个字段替换为「全局汇率表 fx_rates」：
+//       删（base/上游有、我方无）：payment.balanceRechargeMultiplier / balanceRechargeMultiplierHint /
+//         balanceRechargePreview / subscriptionUsdToCnyRate / subscriptionUsdToCnyRateHint /
+//         subscriptionUsdToCnyRateDisabled
+//       增（我方独有）：payment.fxRatesTitle / fxRatesHint / fxRatesCnyRequired / fxRatesMissingChannel /
+//         fxRatesAdd / fxRatesCurrency / fxRatesRate / fxRatesRemove / fxRatesRemoveConfirm
+//     上游 v0.2.15 仍保留被删的 6 个键（其 SettingsView 消费它们）。不补回的证据：工作树
+//     views/admin/SettingsView.vue 的 blob 等于 b0-ours（w66 交付形态），消费的是 fxRates*
+//     （8389-8500 行）与 payment_fx_rates 载荷（12050 行）；全前端对 balanceRechargeMultiplier /
+//     subscriptionUsdToCnyRate 的静态引用数 = 0。补回来只会得到无人消费的死文案，并在 i18n 层
+//     重新激活两套汇率语义。
+//
+// (2) keep OURS —— 同键异值的真冲突（前端批规则：i18n 同 key 值冲突默认我方）：
+//     payment.rechargeFeePreview
+//       base/上游「预览：充值 100 元，手续费 {fee} 元」；我方「预览：充值 100 {currency}，手续费 {fee} {currency}」
+//     payment.field_paymentCurrencyHint
+//       base/上游无尾句；我方追加「所选币种必须已配置全局汇率（见上方"全局汇率表"）」
+//
+// (3) keep OURS —— 上游单方文案修订，但其语义绑定本树不存在的上游实现（同 w28/w14/w54 先例）：
+//     defaults.defaultPlatformQuotasHint                     上游改写措辞（纯润色，无行为差异）
+//     payment.validationEasyPayCustomMethodUpstreamTypeInvalid
+//                                                            上游加「点号」；我方 components/payment/
+//                                                            PaymentProviderDialog.vue:762 的正则是
+//                                                            ^[a-z0-9_-]+$（不含点号）→ 取上游文案会使
+//                                                            UI 与实际校验行为矛盾
+//     openaiFastPolicy.description                           上游追加「全部 tier 值仅含显式传入 tier」，
+//                                                            与其新键 tierMissing 成对
+//     openaiExperimentalScheduler.oauthRatePriorityDescription / oauthRateWeightedDescription
+//                                                            上游改成「参考倍率、留空回落账号倍率」新语义；
+//                                                            本树 views/admin/__tests__/SettingsView.spec.ts
+//                                                            204-205、247 行的 fixture 仍是我方措辞，后端亦为我方语义
+//
+// (4) take UPSTREAM（暂缓，跨卡依赖）—— 上游 29 个真正新增的键，对应上游新功能，本树零消费者：
+//     （原 payment.rechargeBonus.* 28 键不再列入：该上游「充值优惠阶梯」按用户 2026-10-11 裁定属
+//       未采纳新功能，已连同前端 utils/组件与后端实现整组剔除，永不回补；明细见
+//       /root/b0-out/excise-bonus.notes.md）
+//     features.siteBillingMode.*                             9 键（上游 SettingsView + utils/siteBillingMode）
+//     features.riskControl.riskControlUserAllowlist(+Hint)   2 键
+//     opencodeGoUsage.*                                     11 键（上游 OpenCode Go 用量刷新面板）
+//     gatewayForwarding.claudeCodeClientVersion(+Hint) / claudeCodeVersionAutoSync(+Hint) /
+//       claudeCodeVersionSyncedValue                          5 键
+//     customMenu.hideOpenButton                               1 键
+//     openaiFastPolicy.tierMissing                            1 键
+//     openaiExperimentalScheduler.oauthRateInvalid            1 键
+//     为什么不在本卡单方补入：i18n 键缺失不像 Go 符号那样 undefined，但本文件与 locales/en/admin/
+//     settings.ts（w57 卡）受 i18n/__tests__/localeKeyCompleteness.spec.ts 的「中英叶子键集必须完全
+//     一致」断言约束；而 B0 取证表明上游独有新增路径在本工作树入树数 = 0，这些键的消费方要等 B11
+//     真正 git merge 才存在。只补中文一侧会让该断言立刻转红（12:16 的一次尝试正是这样挂的，见 (5)）。
+//     收敛动作（B11 或与 w57 联合）：上游视图入树时把上述 57 键一次性补进 zh 与 en 两侧，并保持
+//     插值占位符集合中英一致（merge-plan §9）。报警哨兵见 i18n/__tests__/settingsLocaleFusion.spec.ts
+//     —— 这些键出现时它必然失败，那是设计中的提醒而非回归。
+//
+// (5) 撤销先前尝试留下的缺陷：2026-10-11 12:16 的工作树版本曾被插入 siteBillingMode 块，其中
+//     hints.rechargeOnly 含 U+FFFD 替换字符（「已有订阅<U+FFFD><U+FFFD><U+FFFD>计费」，上游原文为
+//     「已有订阅的计费」）。该块按 (4) 整体暂缓，乱码随之消除；将来补回时必须逐字节取上游原文。
+//
+// (6) funds 数值登记（权威表第 7 条要求）：本文件只有文案、无数值。文案内的数值线索——我方
+//     fxRatesHint 声明「1 USD = X <币种>、USD 隐含 1.0 不写入、CNY 必填」；上游被删键
+//     subscriptionUsdToCnyRateHint 的示例值 7.15。真实汇率默认值 7.15 落在前端 SettingsView.vue:12938
+//     （fxRatesTable 的 CNY 初值）与后端 fx_rates 配置，均不在本卡范围。
+
 export default {
     settings: {
       title: '系统设置',

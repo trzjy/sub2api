@@ -270,11 +270,15 @@ import {
   selectCodexConfigReasoningEffort
 } from '@/utils/codexCatalogConfig'
 
+// w48 conflict-resolution fusion tests (second wave, B10 — same_contract)
 interface Props {
   show: boolean
   apiKey: string
   baseUrl: string
   platform: GroupPlatform | null
+  // take UPSTREAM: Claude Code-only groups collapse the client tab strip to a single
+  // Claude tab. Orthogonal to our labels/platform work (see NOTES block at end of file).
+  claudeCodeOnly?: boolean
   allowMessagesDispatch?: boolean
 }
 
@@ -331,7 +335,10 @@ const codexManifestContext = computed(() => {
 })
 
 // Reset tabs when platform changes
+// take UPSTREAM: claudeCodeOnly also participates in the reset trigger, otherwise
+// flipping the prop at runtime leaves a stale tab selected on a collapsed tab strip.
 const defaultClientTab = computed(() => {
+  if (props.claudeCodeOnly) return 'claude'
   switch (props.platform) {
     case 'openai':
       return 'codex'
@@ -346,7 +353,7 @@ const defaultClientTab = computed(() => {
   }
 })
 
-watch(() => props.platform, () => {
+watch(() => [props.platform, props.claudeCodeOnly], () => {
   activeTab.value = 'unix'
   activeClientTab.value = defaultClientTab.value
   codexAuthMode.value = 'legacy'
@@ -436,6 +443,11 @@ const SparkleIcon = {
 
 const clientTabs = computed((): TabConfig[] => {
   if (!props.platform) return []
+  // take UPSTREAM: Claude Code-only groups expose exactly one tab. Guarded ahead of the
+  // platform switch so it also wins over our codebuddy/muse/other platforms.
+  if (props.claudeCodeOnly) {
+    return [{ id: 'claude', label: t('keys.useKeyModal.cliTabs.claudeCode'), icon: TerminalIcon }]
+  }
   switch (props.platform) {
     case 'openai': {
       const tabs: TabConfig[] = [
@@ -736,12 +748,18 @@ const currentFiles = computed((): FileConfig[] => {
   switch (props.platform) {
     case 'openai':
       if (activeClientTab.value === 'claude') {
-        return generateAnthropicFiles(baseUrl, apiKey)
+        // take UPSTREAM: Anthropic clients append /v1/messages themselves, so they must
+        // receive the bare root rather than the /v1 API base (merge-plan §5 rule 1 —
+        // orthogonal upstream fix, absorbed).
+        return generateAnthropicFiles(baseRoot, apiKey)
       }
       if (activeClientTab.value === 'codex-ws') {
-        return generateOpenAIWsFiles(baseUrl, apiKey)
+        // take UPSTREAM: Codex appends the path directly and does not add /v1 itself,
+        // so the WS variant needs the same normalization as the non-WS one.
+        return generateOpenAIWsFiles(apiBase, apiKey)
       }
-      return generateOpenAIFiles(baseUrl, apiKey)
+      // take UPSTREAM: Codex appends /responses directly and does not add /v1.
+      return generateOpenAIFiles(apiBase, apiKey)
     case 'gemini':
       if (activeClientTab.value === 'codex') {
         return generateRoutedCodexFiles(apiBase, apiKey, 'gemini')
@@ -1240,6 +1258,12 @@ function generateRoutedCodexFiles(
   }
   const preferredModel = preferredModels[platform] || ''
   const model = selectCodexCatalogModel(preferredModel)
+  // keep OURS (权威表第 4 条): codebuddy/muse/other are our platform set and the
+  // signature authority table pins the account-platform value set to ours.
+  // take UPSTREAM: nothing here — upstream adds opencode_go/typesafe/command_code/cline,
+  // but none of those exist in our GroupPlatform (types/index.ts is w62's file and the
+  // [COMPILE]-flagged mutual-exclusion conflict is still open). Adding them would break
+  // `Record<GroupPlatform, string>`. Registered as a w48 cross-card dependency instead.
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -1378,6 +1402,45 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
         xhigh: {}
       }
     },
+    // take UPSTREAM: GPT-6.1 Sol / GPT-6 Sol catalog entries (new upstream catalog models).
+    // Pure data additions in a plain object literal — no new imports or platform values,
+    // so they are self-contained. Note gpt-6.1-sol intentionally omits the 'none' variant
+    // while gpt-6-sol includes it; both match upstream verbatim.
+    'gpt-6.1-sol': {
+      name: 'GPT-6.1 Sol',
+      limit: {
+        context: 1050000,
+        output: 128000
+      },
+      options: {
+        store: false
+      },
+      variants: {
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {},
+        max: {}
+      }
+    },
+    'gpt-6-sol': {
+      name: 'GPT-6 Sol',
+      limit: {
+        context: 1050000,
+        output: 128000
+      },
+      options: {
+        store: false
+      },
+      variants: {
+        none: {},
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {},
+        max: {}
+      }
+    },
     'gpt-5.6': {
       name: 'GPT-5.6 (Sol)',
       limit: {
@@ -1422,6 +1485,25 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
         store: false
       },
       variants: {
+        low: {},
+        medium: {},
+        high: {},
+        xhigh: {},
+        max: {}
+      }
+    },
+    // take UPSTREAM: GPT-6 Luna catalog entry (new upstream catalog model).
+    'gpt-6-luna': {
+      name: 'GPT-6 Luna',
+      limit: {
+        context: 1050000,
+        output: 128000
+      },
+      options: {
+        store: false
+      },
+      variants: {
+        none: {},
         low: {},
         medium: {},
         high: {},
@@ -1860,6 +1942,37 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
     provider[platform].models = geminiModels
   } else if (platform === 'anthropic') {
     provider[platform].npm = '@ai-sdk/anthropic'
+    // take UPSTREAM: Claude 5.5 model catalog for the Anthropic provider. Previously this
+    // branch set only `npm`, so the provider shipped with no model list. Self-contained
+    // data; does not reuse claudeModels (that one stays bound to Antigravity).
+    provider[platform].models = {
+      'claude-opus-5-5': {
+        name: 'Claude Opus 5.5',
+        limit: { context: 1000000, output: 128000 },
+        modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+        options: { thinking: { type: 'adaptive' }, effort: 'medium' },
+        variants: {
+          low: { effort: 'low' },
+          medium: { effort: 'medium' },
+          high: { effort: 'high' },
+          xhigh: { effort: 'xhigh' },
+          max: { effort: 'max' }
+        }
+      },
+      'claude-sonnet-5-5': {
+        name: 'Claude Sonnet 5.5',
+        limit: { context: 1000000, output: 128000 },
+        modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+        options: { thinking: { type: 'adaptive' }, effort: 'high' },
+        variants: {
+          low: { effort: 'low' },
+          medium: { effort: 'medium' },
+          high: { effort: 'high' },
+          xhigh: { effort: 'xhigh' },
+          max: { effort: 'max' }
+        }
+      }
+    }
   } else if (platform === 'antigravity-claude') {
     provider[platform].npm = '@ai-sdk/anthropic'
     provider[platform].name = 'Antigravity (Claude)'
@@ -1919,4 +2032,57 @@ const copyContent = async (content: string, index: number) => {
     }, 2000)
   }
 }
+
+/*
+ * w48 conflict-resolution fusion tests (second wave, B10 — same_contract)
+ *
+ * Card file: frontend/src/components/keys/UseKeyModal.vue
+ * Ours  = b0-ours (1922 lines), Upstream = b0-upstream (2085 lines), Base = b0-base (1919).
+ * Both sides touched this file; the auto-merge kept OURS wholesale, so every upstream
+ * hunk below had to be re-adjudicated by hand (merge-plan §5 rule 1: no silent
+ * whole-block retention).
+ *
+ * --- ADOPTED (take UPSTREAM) ---------------------------------------------------
+ * 1. `claudeCodeOnly?: boolean` prop + defaultClientTab early return + tab-strip
+ *    collapse in `clientTabs` + platform/claudeCodeOnly reset watch.
+ *    Self-contained: reuses the pre-existing i18n key
+ *    `keys.useKeyModal.cliTabs.claudeCode`, which exists in BOTH en/dashboard.ts and
+ *    zh/dashboard.ts, so no locale edit is needed (and locales belong to w58/w61).
+ *    Orthogonal to our labels/platform work.
+ * 2. OpenAI base-URL normalization (merge-plan §5 rule 1, orthogonal upstream fix):
+ *    `generateAnthropicFiles(baseRoot)` — Anthropic clients append /v1/messages
+ *    themselves; `generateOpenAIFiles(apiBase)` / `generateOpenAIWsFiles(apiBase)` —
+ *    Codex appends /responses directly and never adds /v1. baseRoot/apiBase already
+ *    existed at the call site, so this is a pure correction of which one is passed.
+ * 3. Codex catalog models `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna` and the Anthropic
+ *    provider's `claude-opus-5-5` / `claude-sonnet-5-5` entries. Plain data literals;
+ *    the Anthropic branch previously set only `npm` and shipped no model list.
+ *
+ * --- KEPT (keep OURS) ----------------------------------------------------------
+ * 4. `labels` map: our `codebuddy` / `muse` / `other` entries (权威表第 4 条 pins the
+ *    account-platform value set to ours). Upstream's opencode_go / typesafe /
+ *    command_code / cline keys are NOT adopted — none of those four exist in our
+ *    `GroupPlatform`, and the map is typed `Record<GroupPlatform, string>`, so adding
+ *    them would fail vue-tsc. Same for upstream's `preferredModels.opencode_go`.
+ *
+ * --- NOT ADOPTED — cross-card dependencies (reported, not worked around) ---------
+ * 5. Codex remote-vs-local model catalog mode (`codexModelCatalogMode`,
+ *    `codexModelCatalogOversized`, `codexLocalCatalogToml`, the
+ *    `data-testid="codex-model-catalog-mode"` select, and the `model_catalog_url` /
+ *    `api_key_model_discovery` TOML rewrites). This is the single largest upstream
+ *    feature in this file but it is NOT self-contained: it imports
+ *    `buildCodexModelCatalogUrl` and reads `result.responseBytes`, and the in-tree
+ *    frontend/src/api/codex.ts (which is OURS, and which NO card claims) exports only
+ *    `buildCodexModelsManifestUrl` with a `{content, modelCount}` result. It also needs
+ *    four new i18n keys under `codexModelCatalog.*` that do not exist in either locale
+ *    (w58 owns en/dashboard.ts, w61 owns zh/dashboard.ts). Adopting it here would break
+ *    the build and violate "only touch the dispatched file list". BLOCKED pending an
+ *    owner for api/codex.ts + the locale keys.
+ * 6. `typesafe` / SystemOne platform (`generateSystemOneCurl`, the `typesafe` client
+ *    tab, description/note cases). Blocked on the same w62 `GroupPlatform` mutual
+ *    exclusion flagged [COMPILE] on types/index.ts, plus absent
+ *    `keys.useKeyModal.typesafe.*` and `cliTabs.systemOne` locale keys.
+ *    i18n rule: had these keys existed, they are upstream-new-feature keys and would
+ *    take upstream; they do not exist, so nothing to merge.
+ */
 </script>

@@ -1,3 +1,121 @@
+// ==========================================================================
+// w59 conflict-resolution fusion notes (second wave, B10 -- funds_or_state /
+// semantic_conflict)
+//
+// 本文件 = zh 侧。同模块 en 侧由 w56 认领（en/admin/accounts.ts，同键
+// windowMonthly 我方 "Monthly window" / 上游 "30d"）。两侧裁决必须收敛到同一
+// 结论，因为 src/i18n/__tests__/localeKeyCompleteness.spec.ts 断言中英叶子键集
+// 完全一致（单侧增删键必挂）。取证基线 = b0-base / b0-ours / b0-upstream 三 ref。
+//
+// 0. 工作树现状 = b0-ours + cnProviders 内 5 个 stale* 键（F1-R2 陈旧标注，
+//    先前已交付）。上游对本文件的 hunk 并未灌入 —— 所以下面每一条"取我方"都是
+//    预防性现状锁（防 B11 原样灌回），不是回退已灌入的改动。
+//    三方叶子键分类实测：A 同键异值真冲突 0 / A2 双方各自新增同键 1 /
+//    B 上游单方修订 5 / C 上游独有新增 112 / D 上游单方删除 1 /
+//    E 我方独有新增 246 / OURS-only-rev 5。
+//
+// 1. 核心冲突 accounts.cnProviders.windowMonthly —— keep OURS "每月窗口"
+//    （上游 "月"）。该键在 b0-base 不存在，属 A2（双方各自新增同键），仍按前端批
+//    规则"i18n 同 key 值冲突默认我方（对应上游新功能的键取上游）"处理，理由是它
+//    不是上游新功能的键：
+//    - 唯一消费方是我方 src/components/account/CNProviderQuotaCell.vue:242 的
+//      window === "monthly" 分支 —— 我方滚动额度窗口扩展；
+//    - 上游的 "月" 服务于它自己的 opencodeGo 短标签体系（同族 window5h "5h" /
+//      windowWeekly "7d"），而整套 opencodeGo 在本文件属 C 类缺席键；
+//    - 我方同族是成套描述性形态（window5h "5 小时窗口" / windowWeekly "每周窗口"
+//      / probeTooltip "…5 小时 / 每周 / 每月滚动窗口用量"），单取一个短标签会打破
+//      一致性并让 probeTooltip 与标签互相矛盾。
+//    权威表第 7 条（funds 数值保留我方值）在本文件不适用 —— 本文件全部是标签/
+//    提示文案，无价格、倍率、汇率、冷却时长类数值键（A 类真冲突实测 0 条）。
+//
+// 2. OURS-only-rev（我方改了值、上游保持 base）—— keep OURS，共 5 条：
+//    cnProviders.window5h "5 小时窗口"(base/up "5h")、
+//    cnProviders.windowWeekly "每周窗口"(base/up "7d")、
+//    cnProviders.probeTooltip 我方加了"每月"(base/up 无)、
+//    accounts.syncUpstreamModelsSuccess 我方"平台相关共 {total} 个"(base/up
+//    "上游共 {total} 个")、accounts.syncUpstreamModelsMetadataIncomplete 我方
+//    "能力元数据不完整，能力信息未更新"(base/up "未能更新任何能力元数据")。
+//    后两条描述的是我方 syncUpstreamModels 实现（我方错误分支更细），取上游会
+//    与实际提示路径不符；两侧插值占位符集合一致，无 parity 风险。
+//
+// 3. B 类上游单方修订（base == 我方值，只有上游改了）—— 全部 keep OURS。
+//    按 w60 判据不机械取上游，逐条查"上游新语义描述的行为是否有生产者"：
+//    - openaiQuotaReset.countTooltipLoad / countTooltipRefresh：上游加了"和点数
+//      余额"。取证：前端 src/components/account/OpenAIQuotaResetCell.vue 里
+//      points/Points 命中数 = 0；后端 backend/internal 里 codex_points /
+//      CodexPoints / PointsBalance 命中数 = 0。上游点数特性整体缺席（配套的 6 个
+//      openaiQuotaReset.points* 键属 C 类）→ 取上游等于让 UI 说谎。
+//    - openai.wsModeDesc：上游改写为"…未开启时统一使用上下文池"。取证：树内既有
+//      src/i18n/__tests__/wsModeLocaleDesc.spec.ts:9,11 断言该值 toContain
+//      "http_bridge"，上游新文案不含该词 → 取上游直接挂既有断言。
+//    - openai.wsModePassthroughHint：上游改写为"网关为每个客户端会话单独建立上游
+//      WS 连接，不使用连接池。"。语义与我方"passthrough 模式不使用 WS 连接池。"
+//      一致，但上游这一族是 2 改写 + 2 新增(wsModeCtxPoolHint /
+//      wsModeHttpBridgeHint，树内零消费方，属 C 类) + 1 删除(wsModeConcurrency-
+//      Hint，我方生产者仍需要，见第 5 条)的成套改动。拆开单取一条会造出"半套上游
+//      语义 + 半套我方语义"→ 整族 keep OURS，上游三条详化文案作为整组替换项移交
+//      B11（要取就四条一起取，并同时改 src/utils/openaiWsMode.ts 的返回键）。
+//    - accounts.customErrorCodesWarning：上游把"其他错误将返回 500"改写为"未选中
+//      的错误仍可能触发重试或切换账号…并非统一返回 500"。取证：我方
+//      backend/internal/service/ratelimit_service.go:371-406 确有 ErrorPolicySkipped
+//      （自定义错误码开启但未命中 → 跳过账号处理），上游方向大概率更准确；但该
+//      结论取决于网关各路径的最终错误透传，超出本卡取证范围，且该键无测试绑定、
+//      无生产者依赖 → keep OURS（维持现行对外承诺），并把"是否整句换上游"登记为
+//      移交 B11 的终裁项。
+//
+//    消费方消费的是键名而非文案值，故上述 5 条取我方不会引发编译或类型问题；
+//    代价仅是文案未吸收上游改进，已在第 3 条逐条写明双方值供 B11 复核。
+//
+// 4. C 类上游独有新增 112 键 —— 本卡不补入（单侧补入必挂 parity 断言）。
+//    分组键数：opencodeGo 38 / claudeResetCredits 34 / openaiReferral 23 /
+//    openaiQuotaReset.points* 6 / priorityQuick 4 / platforms(opencode_go,
+//    typesafe) 2 / openai(wsModeCtxPoolHint, wsModeHttpBridgeHint) 2 /
+//    accounts 直属叶(moreFilters, moreFiltersActive, modelMappingConflict) 3。
+//    批规则里"对应上游新功能的键取上游"对这些键成立，但落地单元是 B11（届时
+//    zh/en 由同一 owner 同时补入），不是本单侧卡。两个例外要单独说明：
+//    - accounts.modelMappingConflict 的消费方 src/components/account/
+//      ModelWhitelistSelector.vue 已在树里，它是 localeKeyCompleteness 当前
+//      "contains every statically referenced production key" 那条既有基线失败的
+//      6 个缺失键之一（zh/en 双侧同缺）。本卡仍不补 —— 补一侧只把一条失败换成
+//      另一条（parity）。归属：该消费组件所在卡或 B11。
+//    - platforms.opencode_go / platforms.typesafe：我方
+//      src/constants/__tests__/platforms.spec.ts:140-141 明确断言平台枚举
+//      not.toContain 这两个值（w63 登记的互斥终裁：我方树不承认这两个平台，
+//      ProviderIcon 走首字母回退）。补入这两个标签等于替终裁提前表态 → 绝不补。
+//
+// 5. D 类上游单方删除 1 键 —— accounts.openai.wsModeConcurrencyHint。
+//    keep OURS。取证：src/utils/openaiWsMode.ts:49,53 的
+//    resolveOpenAIWSModeConcurrencyHintKey 仍把它作为 ctx_pool 路径的返回键，
+//    src/utils/__tests__/openaiWsMode.spec.ts:64,67 断言该键名。上游删它是配合
+//    自己的 wsModeCtxPoolHint 改名。B11 若原样灌入上游删除，该键在生产文案里
+//    消失 → 由哨兵 spec 的"反删除现状锁"报警。
+//
+// 6. E 类我方独有新增 —— b0-ours 口径 246 条，工作树口径 251 条（多出的 5 条正是
+//    stale* 键），全部原样保留。其中 accounts.cnProviders 子集 40 条（accessKey* /
+//    secretKey* / volcanoAkSk* / unlimited* / remainingCount / expiresAt /
+//    monthlyUsage / resetSoon / passWindow / passRenewsAt / passResetsAt /
+//    statusNormal / statusExhausted / recoverAt / windowToday / window7d /
+//    windowRenew / windowResetAt / planLabel / windowStats / freeRolling7d /
+//    kiraDailyLabel / kiraUsedLimit / kiraVndBalance / dimensionKind* /
+//    dimensionStatus* / accountMode.web / accountMode.webDesc / stale*）。
+//    实测更正：这 40 条**不是上游删除项** —— 上游对 cnProviders 下 b0-base 已有键
+//    的删除数为 0（D 类全文件只有 wsModeConcurrencyHint 一条）。它们是"我方新增、
+//    上游从未有过"的键，消费方是我方 CNProviderQuotaCell.vue 与 quota_dimensions
+//    规范化路径。git merge 不会删它们，但 notes 登记在此以防被误判成"上游已废弃"
+//    而在人工复核时被顺手清掉。
+//
+// 配套测试：src/i18n/__tests__/accountsWindowResolution.spec.ts
+//   (a) window 家族我方值 + 上游短标签 not.toBe 锁
+//   (b) B 类 5 键 keep-ours 锁（含 wsModeDesc 的 http_bridge 锚点）
+//   (c) D 类 wsModeConcurrencyHint 反删除锁
+//   (d) C 类 112 键双侧同时缺席哨兵（modelMappingConflict 走 parity 不变式而非
+//       缺席断言，理由见第 4 条）+ 全 112 键 zh/en parity 不变式
+//   收敛单元：(a)-(d) 的 owner = B11（唯一 merge-index owner）；第 3 条
+//   customErrorCodesWarning 的终裁 owner = 主会话/B11；第 4 条 modelMapping-
+//   Conflict 的补入 owner = ModelWhitelistSelector 所在卡。报警方式：B11 灌入
+//   上游任一键，(d) 必然转红；灌入上游对 B 类任一键的改写，(b) 必然转红。
+// ==========================================================================
+
 export default {
     accounts: {
       title: '账号管理',

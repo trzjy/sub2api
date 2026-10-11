@@ -325,12 +325,90 @@ export async function validateWebCredentials(
 }
 
 /**
+ * w33 conflict-resolution fusion (second wave, B10 — semantic_conflict / same_contract)
+ *
+ * Conflict: `refreshCredentials` return-type contract.
+ *   OURS (b0-ours):      `refreshCredentials(): Promise<Account>` — flat Account, no metadata.
+ *   UPSTREAM (b0-upstream): introduced `RefreshCredentialsResult` as a discriminated union
+ *     `{ account, message, warning } | { account }` and changed the return type to
+ *     `Promise<RefreshCredentialsResult>` (account NESTED under `.account`).
+ *
+ * Fusion (field-level, same_contract) — KEEP OURS wire shape, surface UPSTREAM metadata:
+ *   - Shape: DO NOT take upstream's nested `.account` union. Our backend
+ *     `account_handler.go:Refresh` (POST /admin/accounts/:id/refresh) returns the full
+ *     Account directly on success and `{ message, warning }` (no nested `.account`) on
+ *     partial `missing_project_id_temporary`. Adopting upstream's nested shape would
+ *     break our call sites and mismatch the wire.
+ *   - `warning?: string` — TAKE UPSTREAM metadata field (emitted by our backend on
+ *     partial refresh).
+ *   - `message?: string` — TAKE UPSTREAM metadata field (emitted by our backend on
+ *     partial refresh).
+ *   - `refreshCredentials` return type: `Promise<Account>` (ours) →
+ *     `Promise<RefreshCredentialsResult>` so the optional metadata is surfaced while
+ *     remaining assignable to `Account` for existing consumers (e.g. `patchAccountInList`).
+ *   - Request wire type: upstream used `post<Account | RefreshCredentialsResult>`; since
+ *     `RefreshCredentialsResult extends Account`, this collapses to `post<RefreshCredentialsResult>`
+ *     (ours used `post<Account>`). Fused value `post<RefreshCredentialsResult>` — equivalent.
+ *
+ * Consumer compatibility (both sides of the merge keep working):
+ *   OURS  AccountsView.vue:handleRefresh -> `patchAccountInList(updated)` needs the result
+ *         to BE an Account -> satisfied by `extends Account`.
+ *   UPSTREAM's own consumer used `patchAccountInList(result.account)`; that file is NOT ours
+ *   to change (AccountsView.vue is another card), and our backend never emits `.account`,
+ *   so the nested accessor would yield undefined here. Flat shape is the only wire-correct call.
+ *
+ * Non-conflicting upstream deltas on this file — ALL kept OUT (measured 2026-10-11, zero
+ * pre-injection in the work tree; upstream's dependency symbols do not exist in this tree,
+ * so absorbing any of them would make the file fail to compile):
+ *   - `import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'`
+ *     -> `src/types/openaiReferrals.ts` absent (upstream-only file).
+ *   - `OpenCodeGoUsageSettings` / `OpenCodeGoUsageState` imports from `@/types` -> zero hits in `src/types/`.
+ *   - `refreshOpenAIReferrals`, `sendOpenAIReferralInvite` -> no producer, no consumer.
+ *   - `getOpenCodeGoUsageSettings` / `updateOpenCodeGoUsageSettings` / `getOpenCodeGoUsage`
+ *     / `setOpenCodeGoUsageAutoRefresh` / `refreshOpenCodeGoUsage` + their 5 `accountsAPI`
+ *     entries -> same (upstream-only backend routes).
+ *   - `max_context_window?: number` (syncUpstreamModels model info) -> absent in tree.
+ *   - `credits?: OpenAICredits | null` + `export interface OpenAICredits` -> absent in tree.
+ *   - `credits_cache_persisted?: boolean` on `OpenAIQuotaRefreshResult` -> absent in tree.
+ *   Verdict for every item above: keep OURS, deferred to the wave that lands the upstream
+ *   producer files (B11 git merge). Nothing in this list is a funds/numeric value, so the
+ *   "retain our numbers" rule is not exercised here.
+ *
+ * Guard placement: the flat-vs-nested contract CANNOT be asserted by a type-level sentinel
+ * in the co-located spec — tsconfig.json excludes the __tests__ dirs and *.spec.ts files
+ * from `vue-tsc`, and vitest strips types unchecked (both measured). The executable guard is
+ * the comment-stripped source scan in `src/api/__tests__/admin.accounts.refreshCredentials.spec.ts`.
+ *
+ * Refs: b0-ours vs b0-upstream diff; backend contract `account_handler.go:1798`.
+ */
+
+/**
+ * Result of refreshing account credentials.
+ *
+ * Backend contract (POST /admin/accounts/:id/refresh):
+ * - success: a full Account object
+ * - partial refresh (e.g. `missing_project_id_temporary`): `{ message, warning }`
+ *   without the account payload
+ *
+ * Extending `Account` keeps existing call sites that consume an
+ * `Account` (e.g. `patchAccountInList`) type-compatible, while the optional
+ * fields surface the upstream warning/message metadata. Values are returned
+ * verbatim — no re-wrapping.
+ */
+export interface RefreshCredentialsResult extends Account {
+  /** Present when the refresh partially succeeded (e.g. `missing_project_id_temporary`) */
+  warning?: string
+  /** Human-readable detail accompanying `warning` */
+  message?: string
+}
+
+/**
  * Refresh account credentials
  * @param id - Account ID
- * @returns Updated account
+ * @returns Updated account (may carry `warning`/`message` on partial refresh)
  */
-export async function refreshCredentials(id: number): Promise<Account> {
-  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`)
+export async function refreshCredentials(id: number): Promise<RefreshCredentialsResult> {
+  const { data } = await apiClient.post<RefreshCredentialsResult>(`/admin/accounts/${id}/refresh`)
   return data
 }
 

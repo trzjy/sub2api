@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	SettingPaymentEnabled      = "payment_enabled"
-	SettingMinRechargeAmount   = "MIN_RECHARGE_AMOUNT"
-	SettingMaxRechargeAmount   = "MAX_RECHARGE_AMOUNT"
-	SettingDailyRechargeLimit  = "DAILY_RECHARGE_LIMIT"
-	SettingOrderTimeoutMinutes = "ORDER_TIMEOUT_MINUTES"
-	SettingMaxPendingOrders    = "MAX_PENDING_ORDERS"
-	SettingEnabledPaymentTypes = "ENABLED_PAYMENT_TYPES"
-	SettingLoadBalanceStrategy = "LOAD_BALANCE_STRATEGY"
-	SettingBalancePayDisabled  = "BALANCE_PAYMENT_DISABLED"
-	SettingFXRates             = "FX_RATES"
-	SettingRechargeFeeRate     = "RECHARGE_FEE_RATE"
+	SettingPaymentEnabled                = "payment_enabled"
+	SettingMinRechargeAmount             = "MIN_RECHARGE_AMOUNT"
+	SettingMaxRechargeAmount             = "MAX_RECHARGE_AMOUNT"
+	SettingDailyRechargeLimit            = "DAILY_RECHARGE_LIMIT"
+	SettingOrderTimeoutMinutes           = "ORDER_TIMEOUT_MINUTES"
+	SettingMaxPendingOrders              = "MAX_PENDING_ORDERS"
+	SettingEnabledPaymentTypes           = "ENABLED_PAYMENT_TYPES"
+	SettingLoadBalanceStrategy           = "LOAD_BALANCE_STRATEGY"
+	SettingBalancePayDisabled            = "BALANCE_PAYMENT_DISABLED"
+	SettingFXRates                       = "FX_RATES"
+	SettingRechargeFeeRate               = "RECHARGE_FEE_RATE"
 	SettingProductNamePrefix             = "PRODUCT_NAME_PREFIX"
 	SettingProductNameSuffix             = "PRODUCT_NAME_SUFFIX"
 	SettingHelpImageURL                  = "PAYMENT_HELP_IMAGE_URL"
@@ -48,22 +48,22 @@ const (
 
 // PaymentConfig holds the payment system configuration.
 type PaymentConfig struct {
-	Enabled                   bool     `json:"enabled"`
-	MinAmount                 float64  `json:"min_amount"`
-	MaxAmount                 float64  `json:"max_amount"`
-	DailyLimit                float64  `json:"daily_limit"`
-	OrderTimeoutMin           int      `json:"order_timeout_minutes"`
-	MaxPendingOrders          int      `json:"max_pending_orders"`
-	EnabledTypes              []string `json:"enabled_payment_types"`
-	BalanceDisabled           bool     `json:"balance_disabled"`
-	FXRates                   payment.FXRates `json:"fx_rates"`
-	RechargeFeeRate           float64  `json:"recharge_fee_rate"`
-	LoadBalanceStrategy      string  `json:"load_balance_strategy"`
-	ProductNamePrefix        string  `json:"product_name_prefix"`
-	ProductNameSuffix        string  `json:"product_name_suffix"`
-	HelpImageURL             string  `json:"help_image_url"`
-	HelpText                 string  `json:"help_text"`
-	StripePublishableKey     string  `json:"stripe_publishable_key,omitempty"`
+	Enabled              bool            `json:"enabled"`
+	MinAmount            float64         `json:"min_amount"`
+	MaxAmount            float64         `json:"max_amount"`
+	DailyLimit           float64         `json:"daily_limit"`
+	OrderTimeoutMin      int             `json:"order_timeout_minutes"`
+	MaxPendingOrders     int             `json:"max_pending_orders"`
+	EnabledTypes         []string        `json:"enabled_payment_types"`
+	BalanceDisabled      bool            `json:"balance_disabled"`
+	FXRates              payment.FXRates `json:"fx_rates"`
+	RechargeFeeRate      float64         `json:"recharge_fee_rate"`
+	LoadBalanceStrategy  string          `json:"load_balance_strategy"`
+	ProductNamePrefix    string          `json:"product_name_prefix"`
+	ProductNameSuffix    string          `json:"product_name_suffix"`
+	HelpImageURL         string          `json:"help_image_url"`
+	HelpText             string          `json:"help_text"`
+	StripePublishableKey string          `json:"stripe_publishable_key,omitempty"`
 
 	// Cancel rate limit settings
 	CancelRateLimitEnabled bool   `json:"cancel_rate_limit_enabled"`
@@ -80,21 +80,21 @@ type PaymentConfig struct {
 
 // UpdatePaymentConfigRequest contains fields to update payment configuration.
 type UpdatePaymentConfigRequest struct {
-	Enabled                   *bool    `json:"enabled"`
-	MinAmount                 *float64 `json:"min_amount"`
-	MaxAmount                 *float64 `json:"max_amount"`
-	DailyLimit                *float64 `json:"daily_limit"`
-	OrderTimeoutMin           *int     `json:"order_timeout_minutes"`
-	MaxPendingOrders          *int     `json:"max_pending_orders"`
-	EnabledTypes              []string  `json:"enabled_payment_types"`
-	BalanceDisabled           *bool     `json:"balance_disabled"`
-	FXRates                   map[string]float64 `json:"fx_rates"`
-	RechargeFeeRate           *float64  `json:"recharge_fee_rate"`
-	LoadBalanceStrategy       *string  `json:"load_balance_strategy"`
-	ProductNamePrefix         *string  `json:"product_name_prefix"`
-	ProductNameSuffix         *string  `json:"product_name_suffix"`
-	HelpImageURL              *string  `json:"help_image_url"`
-	HelpText                  *string  `json:"help_text"`
+	Enabled             *bool              `json:"enabled"`
+	MinAmount           *float64           `json:"min_amount"`
+	MaxAmount           *float64           `json:"max_amount"`
+	DailyLimit          *float64           `json:"daily_limit"`
+	OrderTimeoutMin     *int               `json:"order_timeout_minutes"`
+	MaxPendingOrders    *int               `json:"max_pending_orders"`
+	EnabledTypes        []string           `json:"enabled_payment_types"`
+	BalanceDisabled     *bool              `json:"balance_disabled"`
+	FXRates             map[string]float64 `json:"fx_rates"`
+	RechargeFeeRate     *float64           `json:"recharge_fee_rate"`
+	LoadBalanceStrategy *string            `json:"load_balance_strategy"`
+	ProductNamePrefix   *string            `json:"product_name_prefix"`
+	ProductNameSuffix   *string            `json:"product_name_suffix"`
+	HelpImageURL        *string            `json:"help_image_url"`
+	HelpText            *string            `json:"help_text"`
 
 	// Cancel rate limit settings
 	CancelRateLimitEnabled *bool   `json:"cancel_rate_limit_enabled"`
@@ -158,20 +158,20 @@ type UpdateProviderInstanceRequest struct {
 	AllowUserRefund *bool             `json:"allow_user_refund"`
 }
 type CreatePlanRequest struct {
-	GroupID         int64    `json:"group_id"`
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	Price           float64  `json:"price"`
-	OriginalPrice   *float64 `json:"original_price"`
-	PriceCNY        float64  `json:"price_cny"`
+	GroupID          int64    `json:"group_id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	Price            float64  `json:"price"`
+	OriginalPrice    *float64 `json:"original_price"`
+	PriceCNY         float64  `json:"price_cny"`
 	OriginalPriceCNY *float64 `json:"original_price_cny"`
-	Currency        string   `json:"currency"`
-	ValidityDays    int      `json:"validity_days"`
-	ValidityUnit    string   `json:"validity_unit"`
-	Features        string   `json:"features"`
-	ProductName     string   `json:"product_name"`
-	ForSale         bool     `json:"for_sale"`
-	SortOrder       int      `json:"sort_order"`
+	Currency         string   `json:"currency"`
+	ValidityDays     int      `json:"validity_days"`
+	ValidityUnit     string   `json:"validity_unit"`
+	Features         string   `json:"features"`
+	ProductName      string   `json:"product_name"`
+	ForSale          bool     `json:"for_sale"`
+	SortOrder        int      `json:"sort_order"`
 }
 
 type UpdatePlanRequest struct {
@@ -239,19 +239,19 @@ func (s *PaymentConfigService) GetPaymentConfig(ctx context.Context) (*PaymentCo
 
 func (s *PaymentConfigService) parsePaymentConfig(vals map[string]string) *PaymentConfig {
 	cfg := &PaymentConfig{
-		Enabled:                   vals[SettingPaymentEnabled] == "true",
-		MinAmount:                 pcParseFloat(vals[SettingMinRechargeAmount], 1),
-		MaxAmount:                 pcParseFloat(vals[SettingMaxRechargeAmount], 0),
-		DailyLimit:                pcParseFloat(vals[SettingDailyRechargeLimit], 0),
-		OrderTimeoutMin:           pcParseInt(vals[SettingOrderTimeoutMinutes], defaultOrderTimeoutMin),
-		MaxPendingOrders:          pcParseInt(vals[SettingMaxPendingOrders], defaultMaxPendingOrders),
-		BalanceDisabled:           vals[SettingBalancePayDisabled] == "true",
-		RechargeFeeRate:           pcParseFloat(vals[SettingRechargeFeeRate], 0),
-		LoadBalanceStrategy:       vals[SettingLoadBalanceStrategy],
-		ProductNamePrefix:         vals[SettingProductNamePrefix],
-		ProductNameSuffix:         vals[SettingProductNameSuffix],
-		HelpImageURL:              vals[SettingHelpImageURL],
-		HelpText:                  vals[SettingHelpText],
+		Enabled:             vals[SettingPaymentEnabled] == "true",
+		MinAmount:           pcParseFloat(vals[SettingMinRechargeAmount], 1),
+		MaxAmount:           pcParseFloat(vals[SettingMaxRechargeAmount], 0),
+		DailyLimit:          pcParseFloat(vals[SettingDailyRechargeLimit], 0),
+		OrderTimeoutMin:     pcParseInt(vals[SettingOrderTimeoutMinutes], defaultOrderTimeoutMin),
+		MaxPendingOrders:    pcParseInt(vals[SettingMaxPendingOrders], defaultMaxPendingOrders),
+		BalanceDisabled:     vals[SettingBalancePayDisabled] == "true",
+		RechargeFeeRate:     pcParseFloat(vals[SettingRechargeFeeRate], 0),
+		LoadBalanceStrategy: vals[SettingLoadBalanceStrategy],
+		ProductNamePrefix:   vals[SettingProductNamePrefix],
+		ProductNameSuffix:   vals[SettingProductNameSuffix],
+		HelpImageURL:        vals[SettingHelpImageURL],
+		HelpText:            vals[SettingHelpText],
 
 		CancelRateLimitEnabled: vals[SettingCancelRateLimitOn] == "true",
 		CancelRateLimitMax:     pcParseInt(vals[SettingCancelRateLimitMax], 10),

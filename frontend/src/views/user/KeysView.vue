@@ -466,11 +466,14 @@
         </div>
 
         <div>
-          <label class="input-label">{{ t('keys.groupLabel') }}</label>
+          <label class="input-label" for="key-form-group">{{ t('keys.groupLabel') }}</label>
           <Select
+            id="key-form-group"
+            :aria-label="t('keys.groupLabel')"
             v-model="formData.group_id"
             :options="groupOptions"
             :placeholder="t('keys.selectGroup')"
+            :empty-text="t('common.noGroupsAvailable')"
             :searchable="true"
             :search-placeholder="t('keys.searchGroup')"
             data-tour="key-form-group"
@@ -997,6 +1000,7 @@
       :api-key="selectedKey?.key || ''"
       :base-url="publicSettings?.api_base_url || ''"
       :platform="selectedKey?.group?.platform || null"
+      :claude-code-only="selectedKey?.group?.claude_code_only || false"
       :allow-messages-dispatch="selectedKey?.group?.allow_messages_dispatch || false"
       @close="closeUseKeyModal"
     />
@@ -1122,6 +1126,80 @@
 </template>
 
 <script setup lang="ts">
+/*
+ * w69 conflict-resolution fusion notes (second wave, B10 — funds_or_state)
+ *
+ * Card file: frontend/src/views/user/KeysView.vue
+ * Ours = b0-ours, Upstream = b0-upstream, Base = b0-base. Both sides touched this
+ * file. The auto-merge PRE-APPLIED every upstream hunk wholesale (the working tree
+ * opened red: the spec could not even resolve the upstream-only import), so each
+ * hunk is re-adjudicated by hand here per merge-plan section 5.
+ *
+ * Funds-or-state ground rule (authority table item 7): our money FORMAT and VALUES
+ * stay ours. Upstream money rewrites are rejected. Upstream-only features whose
+ * backing symbols never landed in our tree are reverted, never half-adopted.
+ *
+ * --- KEEP OURS (our-side increments, retained verbatim by the merge) -----------
+ * K1. Money formatting: every usage / quota / rate-limit readout uses
+ *     formatAccountMoney(...) and every money input prefix uses
+ *     currencySymbol(ACCOUNT_CURRENCY) instead of the base hardcoded dollar + toFixed
+ *     literals. Upstream rewrote the SAME readouts to a hardcoded 4-decimal USD
+ *     string; rejected outright (the multi-currency ledger is our SSOT).
+ * K2. Model-plaza discount display: groupDiscount(...) + plazaGroups + the
+ *     getModelPlaza() onMounted loader, plus the GroupBadge hide-rate and the
+ *     GroupOptionItem discount-label / hide-rate-pill props. Purely our feature;
+ *     upstream never touched these lines.
+ *
+ * --- ADOPT UPSTREAM (self-contained; backing symbols already in our tree) ------
+ * A1. resetQuotaUsed server-sync (upstream hunk near base line 1823). Our side never
+ *     rewrote this symbol (it equals base), and keysAPI.update already returns the
+ *     full ApiKey, so upstream's "read quota_used AND status back from the response"
+ *     replaces our optimistic quota_used = 0. This is a funds_or_state TRUE conflict
+ *     resolved in upstream's favour: the optimistic zero desyncs the row whenever the
+ *     server also flips status to quota_exhausted. Locked by the runtime case
+ *     "resetQuotaUsed syncs quota_used and status from the server response".
+ * A2. Group column becomes sortable (upstream hunk near base line 1179). The backend
+ *     apiKeyListOrder group branch is an upstream-only insertion at api_key_repo.go
+ *     line 655, disjoint from our edits at lines 92 / 273 / 1077 / 1088, so it rides
+ *     in via the automatic merge. Worst case the backend default falls back to
+ *     ordering by id; it never errors.
+ * A3. UseKeyModal claude-code-only binding (upstream hunk near base line 994). The
+ *     claudeCodeOnly prop was already adopted by card w48 and Group.claude_code_only
+ *     is in our types, so this call-site wiring is self-contained and taken.
+ * A4. Group Select accessibility delta only (upstream hunk near base line 464): the
+ *     label for-attribute, the Select id / aria-label, and empty-text. Select.emptyText
+ *     is an existing prop and common.noGroupsAvailable exists in BOTH zh and en
+ *     locales, so this slice is taken while the SAME hunk provider-split half is
+ *     dropped (see R1).
+ * A5. cc-switch usage-script URL normalisation (upstream hunk near base line 1887),
+ *     INLINED. Upstream lifted the literal into CC_SWITCH_USAGE_SCRIPT and, in doing
+ *     so, fixed the URL build to strip a trailing slash and a pre-existing /v1
+ *     before appending /v1/usage. The exported constant is absent from our in-tree
+ *     ccswitchImport.ts (that file is ours, unclaimed, upstream version never landed),
+ *     so only the corrected literal is kept, inline at the call site.
+ *
+ * --- REVERT (upstream-only features; backing symbols never landed in our tree) --
+ * R1. Create-form provider split (fieldset + createProvider + formGroupOptions +
+ *     selectCreateProvider + the watch that re-defaults it). Depends on
+ *     frontend/src/utils/keyGroupProviders.ts (upstream-new, not in tree) and the
+ *     i18n keys keys.providerLabel / keys.providers.<provider> /
+ *     keys.providerHints.<provider>, none of which exist in our locales.
+ * R2. Bulk-edit selection: the toolbar, the DataTable selectable wiring, the
+ *     BulkEditKeysModal mount, and the whole selectedIds / handleSelectionChange /
+ *     handleBulkUpdated state machine plus its clears in onFilterChange /
+ *     handlePageChange / handlePageSizeChange / handleSort and the reload-time prune
+ *     in loadApiKeys. Depends on frontend/src/components/keys/BulkEditKeysModal.vue
+ *     (upstream-new, not in tree) and the keys.bulkEdit.* i18n subtree (absent).
+ * R3. The vue watch import and the PlatformIcon / platformBadgeLightClass /
+ *     KEY_GROUP_PROVIDER / CC_SWITCH_USAGE_SCRIPT imports. Every consumer is
+ *     reverted above, so keeping any of them trips tsconfig noUnusedLocals. The
+ *     money/format imports we DO keep (ACCOUNT_CURRENCY, currencySymbol,
+ *     formatAccountMoney) are untouched.
+ *
+ * Sentinel: the upstream-only symbols in R1-R3 must NOT reappear in the comment-
+ * stripped source. A runtime + source-scan guard lives in
+ * frontend/src/views/user/__tests__/KeysView.spec.ts (describe "w69").
+ */
 	import { ref, reactive, computed, onMounted, onUnmounted, type ComponentPublicInstance } from 'vue'
 	import { useI18n } from 'vue-i18n'
 	import { useAppStore } from '@/stores/app'
@@ -1186,7 +1264,7 @@ const allColumns = computed<Column[]>(() => [
   { key: 'name', label: t('common.name'), sortable: true },
   { key: 'id', label: t('keys.id'), sortable: true },
   { key: 'key', label: t('keys.apiKey'), sortable: false },
-  { key: 'group', label: t('keys.group'), sortable: false },
+  { key: 'group', label: t('keys.group'), sortable: true },
   { key: 'current_concurrency', label: t('keys.currentConcurrency'), sortable: true },
   { key: 'usage', label: t('keys.usage'), sortable: false },
   { key: 'rate_limit', label: t('keys.rateLimitColumn'), sortable: false },
@@ -1866,14 +1944,18 @@ const setExpirationDays = (days: number) => {
 
 // Reset quota used for an API key
 const resetQuotaUsed = async () => {
-  if (!selectedKey.value) return
+  const key = selectedKey.value
+  if (!key) return
   showResetQuotaDialog.value = false
   try {
-    await keysAPI.update(selectedKey.value.id, { reset_quota: true })
+    const updatedKey = await keysAPI.update(key.id, { reset_quota: true })
     appStore.showSuccess(t('keys.quotaResetSuccess'))
-    // Update local state
-    if (selectedKey.value) {
-      selectedKey.value.quota_used = 0
+    key.quota_used = updatedKey.quota_used
+    if (key.status !== updatedKey.status) {
+      key.status = updatedKey.status
+      if (selectedKey.value?.id === key.id) {
+        formData.value.status = updatedKey.status === 'active' ? 'active' : 'inactive'
+      }
     }
   } catch (error: any) {
     const errorMsg = error.response?.data?.detail || t('keys.failedToResetQuota')
@@ -1930,9 +2012,16 @@ const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
   const baseUrl = publicSettings.value?.api_base_url || window.location.origin
   const platform = row.group?.platform || 'anthropic'
 
+  // w69 fusion (take UPSTREAM semantics, inline): upstream lifted this into
+  // CC_SWITCH_USAGE_SCRIPT in @/utils/ccswitchImport.ts and, in doing so, fixed the
+  // URL assembly to strip a trailing slash and a pre-existing /v1 before appending
+  // /v1/usage. The exported constant does NOT exist in our in-tree ccswitchImport.ts
+  // (that file is ours, unclaimed by any card, and upstream's version never landed),
+  // so the corrected script is inlined here rather than imported. See the w69 notes
+  // block at the top of this file.
   const usageScript = `({
     request: {
-      url: "{{baseUrl}}/v1/usage",
+      url: "{{baseUrl}}".replace(/\\/+$/, "").replace(/\\/v1$/, "") + "/v1/usage",
       method: "GET",
       headers: { "Authorization": "Bearer {{apiKey}}" }
     },

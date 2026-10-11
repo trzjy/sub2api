@@ -638,6 +638,73 @@ func TestAPIContracts(t *testing.T) {
 				}
 			}`,
 		},
+		// w27 conflict-resolution fusion notes (second wave, B9 — funds_or_state / semantic_conflict)
+		//
+		// 派发注记：双方同改本用例的 settings JSON —— 我方（b0-ours）改支付/状态字段集，
+		// 上游（b0-upstream）改 default_platform_quotas 键集并另加一批支付与新平台字段，
+		// 要求"并集"。并集的每一侧都必须有序列化生产者；本树取证后只有我方那一侧可落地，
+		// 故本文件两处 settings JSON 整体 keep OURS，上游侧按"暂缓 + 报警"登记。
+		//
+		// 取证（2026-10-11，工作树 /root/sub2api，go test -tags unit ./internal/server/）：
+		// B0 自动合并已把上游的 8 个新键 + 4 个新平台键写进本文件两处 wantJSON，实测两个
+		// 用例都 FAIL —— 实际响应 data 为 306 键、default_platform_quotas 11 项，wantJSON
+		// 被写成 314 键、15 项，差集恰是下面登记的 8 + 4，别无其他差异。即上游侧在本树
+		// 零生产者，15 项并集不可实现；权威表第 5 条"上游新符号定义随自动合并已入树"对本
+		// 文件不成立（w28 router.go / w14 dto/types.go / w24 error_passthrough_rule.go /
+		// w31 ent schema 同型先例）。
+		//
+		// keep OURS —— 支付与状态字段（merge-plan §5 rule 1「我方有重写的符号 → 我方语义
+		// 为准」，且 §5 rule 2 要求纳入上游符号前先核对消费者与序列化）：
+		//   payment_fx_rates / footer_links / support_qrcode_url / vision_routing_enabled /
+		//   openai_apikey_health_breaker_settings（cooldown_minutes 5、failure_threshold 10、
+		//   warning_ratio 0.7、watch_ratio 0.4、window_minutes 2、probe.interval_seconds 60、
+		//   probe.max_attempts 10、scope_platforms 六项）/ codebuddy_default_rpm 10 /
+		//   registration_email_suffix_blacklist / xianyu_delivery_enabled /
+		//   concurrency_limit_message
+		// 全部为我方相对 base 的新增，生产者在 dto.SystemSettings（internal/handler/dto/
+		// settings.go，PaymentFXRates 在 289 行）与 setting service 读取路径齐备，响应实测
+		// 含这些键。上游把 openai_apikey_health_breaker_settings 整块删除 —— 那是本 fork 的
+		// 额度/余额熔断自研能力（merge-plan §6 能力矩阵锁定项），故该侧禁止采纳上游形态。
+		//
+		// take UPSTREAM —— 5 个新键及其双方值，2026-10-12 已纳入本文件两处 wantJSON：
+		//   （上游充值优惠阶梯的 3 个 payment 设置键已从本清单移出：按用户 2026-10-11 裁定，
+		//     该组属未采纳新功能、已整组剔除，剔除明细登记在 /root/b0-out/excise-bonus.notes.md）
+		//   claude_code_client_version "" /
+		//   claude_code_client_version_synced "" / claude_code_version_auto_sync_enabled true /
+		//   cyber_policy_user_allowlist "" / subscription_enabled true
+		// 原先「无生产者故暂缓」的前提已失效：2026-10-12 复查，5 个键在本树均有生产者——
+		//   subscription_enabled → service/settings_view.go（两处视图）+ setting_public.go:657
+		//     + domain_constants.go:654 SettingKeySubscriptionEnabled；
+		//   cyber_policy_user_allowlist → domain_constants.go:311
+		//     + service/cyber_policy_allowlist.go + setting_handler_update.go；
+		//   claude_code_* → domain_constants.go:873/876 + setting_gateway_runtime.go:134
+		//     + setting_handler_update.go；响应实测含这 5 个键，故按「上游新增字段纳入」补齐。
+		//
+		// 另有上游 funds 两键 payment_balance_recharge_multiplier 0 /
+		// payment_subscription_usd_to_cny_rate 0 —— 自动合并连这两项都没写进来，本卡同样
+		// 不补：全仓零生产者，且权威表第 7 条要求 funds 数值保留我方值（我方侧对应值为
+		// payment_fx_rates null + 上面那组 breaker 数值），写占位键等于伪造契约。
+		//
+		// take UPSTREAM（暂缓，跨卡依赖）—— default_platform_quotas 的 4 个新平台：
+		//   cline / command_code / opencode_go / typesafe
+		// 该键集不是字面量，由 service.AllowedQuotaPlatforms 单一枚举派生（本树 11 项、含
+		// 我方 other，见 internal/service/domain_constants.go:150；上游 13 项、不含 other）。
+		// 生产路径 setting_features.go GetDefaultPlatformQuotas 按 AllowedQuotaPlatforms 补齐
+		// 后序列化，所以本文件的 wantJSON 永远是 (b) 的下游镜像。(b) 未扩，wantJSON 就不能扩。
+		// 收敛单元与 w31 在 backend/ent/schema/user_platform_quota.go 登记的完全同源，逐字沿用：
+		//   (a) internal/domain/platforms.go —— 上游新文件，owner = B11 集成批
+		//   (b) internal/service/domain_constants.go 的 AllowedQuotaPlatforms —— owner = 该文件卡
+		//   (c) 上游 migrations/242_drop_platform_check_constraints.sql（编号须重至 271+）—— owner = migrations 卡
+		//   (d) ent/schema/user_platform_quota.go 的准入 switch（w31）—— 仅当 a/b/c 收敛后评估
+		// 收敛时的同步动作：当 (b) 扩为 15 项并集（11 + cline/command_code/opencode_go/
+		// typesafe，保留我方 other 与 codebuddy），本文件两处 wantJSON 的 default_platform_quotas
+		// 必须同步扩到 15 项；8 个新键的生产者入树时同理逐个补入。不得只改一边。
+		//
+		// 报警载体：backend/internal/server/api_contract_fusion_test.go 的
+		//   TestW27AllowedQuotaPlatformsIsOursEleven（锁 (b) 的 11 项）
+		//   TestW27UpstreamSettingsKeysAbsent（锁 8 + 2 个上游键缺席、我方 9 键在场）
+		//   TestW27OursFundsValuesLocked（锁 funds 数值为我方值，权威表第 7 条）
+		// 上述收敛发生时二者必然 FAIL —— 那是设计中的报警，不是回归；届时按本块改 wantJSON。
 		{
 			name: "GET /api/v1/admin/settings",
 			setup: func(t *testing.T, deps *contractDeps) {
@@ -897,10 +964,14 @@ func TestAPIContracts(t *testing.T) {
 					"grok_cross_client_model_map_enabled": true,
 					"purchase_subscription_enabled": false,
 					"purchase_subscription_url": "",
+					"subscription_enabled": true,
 					"table_default_page_size": 20,
 						"table_page_size_options": [10, 20, 50, 100],
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"min_codex_version": "",
 					"max_codex_version": "",
 					"codex_cli_only_blacklist": "",
@@ -1020,6 +1091,7 @@ func TestAPIContracts(t *testing.T) {
 					"risk_control_enabled": false,
 					"cyber_session_block_enabled": false,
 					"cyber_session_block_ttl_seconds": 3600,
+					"cyber_policy_user_allowlist": "",
 					"affiliate_enabled": false,
 					"wechat_connect_enabled": false,
 					"wechat_connect_app_id": "",
@@ -1042,6 +1114,11 @@ func TestAPIContracts(t *testing.T) {
 				}
 			}`,
 		},
+		// w27: 本用例的 settings JSON 与前一个 GET /api/v1/admin/settings 同源同裁决 ——
+		// 整体 keep OURS（8 个上游新键 + 4 个上游新平台在本树零生产者）。差异只在
+		// setup（走 cfg 的 OAuth 默认值回退，不设 settingRepo），字段集完全相同。
+		// 完整取证、双方值与收敛单元 (a)(b)(c)(d) 见前一个用例之前的 w27 notes 块；
+		// 报警哨兵见 api_contract_fusion_test.go。
 		{
 			name: "GET /api/v1/admin/settings falls back to config oauth defaults",
 			setup: func(t *testing.T, deps *contractDeps) {
@@ -1199,6 +1276,7 @@ func TestAPIContracts(t *testing.T) {
 					"grok_cross_client_model_map_enabled": true,
 					"purchase_subscription_enabled": false,
 					"purchase_subscription_url": "",
+					"subscription_enabled": true,
 					"table_default_page_size": 20,
 					"table_page_size_options": [10, 20, 50],
 					"default_platform_quotas": {"anthropic":{"daily":null,"weekly":null,"monthly":null},"antigravity":{"daily":null,"weekly":null,"monthly":null},"codebuddy":{"daily":null,"weekly":null,"monthly":null},"deepseek":{"daily":null,"weekly":null,"monthly":null},"gemini":{"daily":null,"weekly":null,"monthly":null},"grok":{"daily":null,"weekly":null,"monthly":null},"kimi":{"daily":null,"weekly":null,"monthly":null},"minimax":{"daily":null,"weekly":null,"monthly":null},"openai":{"daily":null,"weekly":null,"monthly":null},"other":{"daily":null,"weekly":null,"monthly":null},"zhipu":{"daily":null,"weekly":null,"monthly":null}},
@@ -1234,6 +1312,9 @@ func TestAPIContracts(t *testing.T) {
 					"ops_metrics_interval_seconds": 60,
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"claude_code_client_version": "",
+					"claude_code_client_version_synced": "",
+					"claude_code_version_auto_sync_enabled": true,
 					"allow_ungrouped_key_scheduling": false,
 					"backend_mode_enabled": false,
 					"enable_fingerprint_unification": true,
@@ -1351,6 +1432,7 @@ func TestAPIContracts(t *testing.T) {
 					"risk_control_enabled": false,
 					"cyber_session_block_enabled": false,
 					"cyber_session_block_ttl_seconds": 3600,
+					"cyber_policy_user_allowlist": "",
 					"affiliate_enabled": false,
 					"wechat_connect_enabled": true,
 					"wechat_connect_app_id": "wx-open-config",
@@ -1756,6 +1838,10 @@ func (r *stubUserRepo) GetByIDIncludeDeleted(ctx context.Context, id int64) (*se
 type stubApiKeyCache struct{}
 
 func (stubApiKeyCache) GetCreateAttemptCount(ctx context.Context, userID int64) (int, error) {
+	return 0, nil
+}
+
+func (stubApiKeyCache) IncrementCreateCount(ctx context.Context, userID int64, window time.Duration) (int64, error) {
 	return 0, nil
 }
 
@@ -2698,7 +2784,7 @@ func (r *stubUsageLogRepo) GetAPIKeyUsageTrend(ctx context.Context, startTime, e
 	return nil, errors.New("not implemented")
 }
 
-func (r *stubUsageLogRepo) GetUserUsageTrend(ctx context.Context, startTime, endTime time.Time, granularity string, limit int) ([]usagestats.UserUsageTrendPoint, error) {
+func (r *stubUsageLogRepo) GetUserUsageTrend(ctx context.Context, startTime, endTime time.Time, granularity string, limit int, metric string) ([]usagestats.UserUsageTrendPoint, error) {
 	return nil, errors.New("not implemented")
 }
 

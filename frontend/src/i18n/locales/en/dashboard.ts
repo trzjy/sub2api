@@ -1,3 +1,108 @@
+// w58 conflict-resolution fusion notes (second wave, B10 — funds_or_state / semantic_conflict)
+// en 侧 dashboard 模块的逐类裁决。中英成对硬约束：zh/dashboard.ts 由 w61 认领（notes 在其文件顶部），
+// 本模块的任何增删键都必须 en + zh 双侧同时发生，否则 localeKeyCompleteness 的
+// "keeps English and Chinese locale schemas identical" 断言必挂。
+// 三方基准：b0-base / b0-ours / b0-upstream。叶子键数 base 848 / ours 857 / upstream 885 / 工作树 859。
+// 分类口径：E = 我方纯新增（base 无）、C = 上游纯新增（base 无）、D = 上游删除（base 有）、
+// A = 双方同改 base 值、A2 = 仅上游改 base 值、B = 仅我方改 base 值。
+// 实测 A = 0、B = 0 —— 本模块**没有**同 key 异值真冲突，批规则"i18n 同 key 值冲突默认我方"
+// 在本文件没有作用对象；所有裁决都落在存在性冲突（E / C / D）与单方改值（A2）上。
+// 灌入状态判别（w59 的两种开工形态）：**部分灌入** —— 上游 39 个新键里只有 (2) 的 2 个 redeem 键被
+// 自动合并带进工作树（树值逐字等于 b0-upstream），其余 37 个新键以及 (3)(4) 的上游改动**一个都没进来**。
+// 因此 (3)(4)(5) 的每一条 keep-ours 断言都是**预防性现状锁**（防 B11 原样灌回），不是回退已发生的合并。
+//
+// (1) E 类 9 键 —— 我方纯新增，全部保留：
+//     dashboard.welfareBalance / dashboard.welfareExpiresAt / modelPlaza.table.group /
+//     modelPlaza.table.discountHint / redeem.codeUsed / redeem.codeExpired / redeem.codeNotFound /
+//     redeem.codeLocked / redeem.codeRateLimited。
+//     措辞校正（供 B11 复核，勿按 D 类处理）：zh 侧 w61 notes 的 (1) 与 (3) 把 welfare 两键和
+//     discountHint 描述成"b0-upstream 删除了 base 的这两个键"，实测不成立 —— 这三键在 b0-base 里
+//     根本不存在，上游相对 base 的删除集只有 (3) 的两个 maxReasoningMultiplier 键。正确归类是
+//     E 类"我方新增、上游从未有过"。裁决不变（两侧都保留），但按 D 类读会凭空造出一个
+//     "上游已删"的历史包袱，诱使 B11 去复核并不存在的删除理由。
+//
+// (2) redeem 段无损并集 —— 本文件唯一已吸收的上游增量：
+//     base 原有 codeRedeemSuccess / failedToRedeem / subscriptionRefreshFailed / pleaseEnterCode
+//     共 4 键；我方在其上新增 5 个错误分支键，上游新增 2 个加载/刷新失败键
+//     redeem.historyLoadFailed / redeem.userRefreshFailed（上游兑换记录新功能的文案）。
+//     两侧在 base 之上互不重叠 → 取无损并集，7 键全保留：我方 5 键 default 我方，
+//     上游 2 键按批规则"对应上游新功能的键取上游"。已实测树值逐字等于各方来源值。
+//     zh 侧同一并集由 w61 的 dashboardLocaleFusion.spec.ts 锁定，本卡不重复其断言。
+//
+// (3) D 类 2 键 —— 上游改名，必须拒绝（反删除 + 反改名双锁）：
+//     modelPlaza.table.maxReasoningMultiplierBadge 与 modelPlaza.table.maxReasoningMultiplierHint
+//     在 b0-upstream 里被删，替代品是 modelPlaza.table.reasoningMultiplierBadge / reasoningMultiplierHint
+//     （插值集从 {multiplier} 扩成 {effort} + {multiplier}，语义从"max 档倍率"改成"任意档倍率"）。
+//     取证：本树唯一消费者是 src/components/modelPlaza/PlazaModelPricingTable.vue 的第 98 与 100 行，
+//     两处只传 multiplier 一个插值（数据源 m.pricing.max_reasoning_effort_multiplier），全文件零
+//     effort 实参；上游两个替代键在本树零生产者。接受改名 = 生产代码引用两个不存在的键 + 缺 {effort}。
+//     按权威表第 7 条"funds 数值保留我方值 + notes 登记双方值"，此处登记双方文案与占位符差异，
+//     结论 keep OURS。若终裁要采纳上游语义，收敛单元是"该 .vue 的两处实参 + 双侧 locale 四键同改"，
+//     owner 是 PlazaModelPricingTable.vue 的功能卡，不是本卡。
+//
+// (4) A2 类 5 键 —— 上游单方改值，文案绑定上游未实现的实现，keep OURS：
+//     keys.useKeyModal.deepseek.codexConfigTomlHint / keys.useKeyModal.minimax.codexConfigTomlHint /
+//     keys.useKeyModal.composite.codexConfigTomlHint / keys.useKeyModal.routedCodex.configTomlHint /
+//     keys.useKeyModal.codexModelCatalog.description。
+//     上游这 5 条新文案描述的是"remote vs local 模型目录双模式"（配套 (5) 里那 4 个
+//     codexModelCatalog 新键 mode / remote / local / oversized）。取证：本树
+//     src/components/keys/UseKeyModal.vue 的目录区段只有单一"下载 catalog"路径，无模式切换变量，
+//     上游双模式实现整组缺席（w48 已在本文件登记为 NOT ADOPTED 第 5 项，并点名"w58 owns
+//     en/dashboard.ts, w61 owns zh/dashboard.ts"）。取上游文案等于让 UI 声明本树不存在的能力。
+//     这 5 条与 (5) 的 codexModelCatalog 四键是一个收敛单元，必须一起换，不许半吸收。
+//
+// (5) C 类 37 键 —— 上游纯新增，本卡不补（暂缓，跨卡依赖）。分组键数：
+//     keys.bulkEdit 13 / keys.providerLabel 1 / keys.providers 4 / keys.providerHints 4 /
+//     keys.useKeyModal.cliTabs.systemOne 1 / keys.useKeyModal.typesafe 2 /
+//     keys.useKeyModal.codexModelCatalog 4 / usage 2 / monitorCommon 2 / availableChannels.pricing 2 /
+//     modelPlaza.table 2 = 37。
+//     按"有无生产消费者"拆两组，两组都不单方补入：
+//     (5a) 5 键曾在本树有生产消费者 —— keys.bulkEdit.title / selectedCount / selectKey /
+//          clearSelection 与 keys.providerLabel，消费者 src/views/user/KeysView.vue（属 w69 派发单）。
+//          开工时该文件的上游 bulkEdit hunk 已被自动合并灌入（b0-ours 引用数 0，灌入态 5 处），
+//          这 5 键正是 localeKeyCompleteness 既有失败 6 键里的 5 键（第 6 键
+//          admin.accounts.modelMappingConflict 属 admin 模块，不在本文件）。
+//          **2026-10-11 16:26 w69 已把该 hunk 回退**（当时的 blob 1ed621ec，代码层引用数归 0），
+//          实测 localeKeyCompleteness 的缺失键集随之从 6 键自愈到 1 键。该 hunk 本身也不自洽：
+//          它引用 @/utils/keyGroupProviders，而该模块在本树不存在（全仓唯一引用者就是那个 .vue），
+//          vue-tsc 报 TS2307，补键救不了它 —— 所以本卡不补、也不能靠补键让它绿。
+//          blob 时效声明：w69 在 16:33 之后仍在继续编辑该文件（本卡 16:46 复测已是 c5001799），
+//          所以这里不钉具体 blob 值；(5a) 的守卫是**代码层引用扫描**（剥注释后 not-to-contain），
+//          w69 注记里出现的裸键名不会误触发，M12 变异（往该 .vue 的 script 注入一个 hunk 键调用）
+//          实测恰好转红 1 条。
+//          终态：37 键当前**全部零消费者**。(5a) 只保留一个**回退现状锁**：若 w69 或 B11 重新采纳
+//          该 hunk，spec 的 notes (5a) 断言转红，正确动作是"双侧同时补这 5 键"（走 (i)）或
+//          "维持回退"（走 (ii)），二选一由 KeysView.vue 的 owner 定，本卡不代决。
+//     (5b) 32 键在本树零消费者 → 标准暂缓。其中 codexModelCatalog 4 + typesafe 2 + cliTabs.systemOne 1
+//          共 7 键的 owner 是 w48（UseKeyModal.vue，已显式 BLOCKED），providers / providerHints /
+//          bulkEdit 其余 8 键的 owner 是 w69，usage.outputTps 2 / monitorCommon 2 /
+//          availableChannels.pricing 2 的 owner 是 monitor / model-plaza 功能卡。
+//     报警锚点：spec 的上游独键缺席哨兵（37 项，en + zh 双侧）+ en 叶子键总数锁 859 + 分组求和簿记。
+//
+// (6) 注释块安全形态：localeKeyCompleteness 的 collectStaticSourceKeys 用 glob 扫源码提取翻译键，
+//     它只排除 the __tests__ 目录和 spec/test 结尾的文件 —— locale 源文件本体在扫描范围内。
+//     所以本块只写裸点分键名，绝不写带引号串的翻译调用形态（t 括号、$t 括号、i18n 点 t 括号三种），
+//     也不写 keypath / titleKey / descriptionKey 加引号串的引用形态，否则 (5) 的暂缓键会被当成
+//     生产引用，"单侧暂缓"立刻升级成双侧红灯。spec 有一条幻影引用自检断言守这条（期望集为空）。
+//     另：本块刻意用行注释而非块注释，规避 glob 里的星号斜杠序列提前闭合注释（w33 自踩过）。
+//
+// (7) 变异电池（15 轮，沙箱 /tmp/w58mut 跑批，真树字节未动）—— 证明上述每条锁都非空洞：
+//     M1 灌 1 个上游独键 → 3 红（缺席哨兵 + 总数锁 + 跨语言键集）；M2 采纳替代品双键 → 4 红；
+//     M3/M4 采纳上游 A2 文案 → 各 1 红；M5 删我方 E 类键 → 7 红（跨 w61 的 3 条也报警）；
+//     M6 删已吸收上游键 → 6 红；M8 削弱 presentPaths helper → 3 红；M9 往注释注入调用形态
+//     → 1 红（幻影引用自检）；M10 往注释注入**裸键名** → 全绿（反向对照，证明 (6) 的安全形态
+//     不被自己的 notes 喂饱）；M11/M12 改两个消费者 .vue → 各 1 红；M13 篡改 37 键清单 → 1 红
+//     （簿记非空洞）；M14 灌 CJK → 1 红；M15 灌一个**未登记**的新键 → 2 红（只有总数锁 +
+//     跨语言键集报警，缺席哨兵清单覆盖不到 —— 这就是总数锁存在的理由）。
+//     **M7 是这轮唯一先 GREEN 后修掉的盲区**：只改 zh 侧已吸收上游键的文案（占位符不变）时，
+//     w61 的 spec 只对该键做"存在且非空"、本卡 spec 只做键集/占位符 parity，两侧都不比字面值 →
+//     26 例全绿。修法是在**本卡 spec** 里加一条跨卡只读锁（REDEEM_ZH_ABSORBED_VALUES 钉 zh 两个
+//     已吸收键的逐字上游值），不改 w61 的字节。加完后 M7 转红 1 条。
+//
+// 非本卡 scope 但不改动、仅登记观察：本文件与 zh 侧的四态叶子键集差异数全为 0
+// （base / ours / upstream / tree 四个版本下 en 与 zh 的键集完全同构），所以 en 卡可直接复用
+// zh 卡的裁决口径，反之亦然；两侧 notes 若措辞不一致会让 B11 读到矛盾记录，(1) 的校正即为此而写。
+
 export default {
   dashboard: {
     title: 'Dashboard',
@@ -763,6 +868,8 @@ export default {
     codeNotFound: 'Code not found. Please check and try again.',
     codeLocked: 'This code is being processed. Please try again later.',
     codeRateLimited: 'Too many failed attempts. Please try again later.',
+    historyLoadFailed: 'Failed to load activity. Please try again.',
+    userRefreshFailed: 'Redeemed successfully, but failed to refresh account information.',
     subscriptionRefreshFailed: 'Redeemed successfully, but failed to refresh subscription status.',
     pleaseEnterCode: 'Please enter a redeem code'
   },

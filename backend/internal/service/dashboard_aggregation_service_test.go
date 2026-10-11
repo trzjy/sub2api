@@ -12,23 +12,26 @@ import (
 )
 
 type dashboardAggregationRepoTestStub struct {
-	aggregateCalls       int
-	recomputeCalls       int
-	cleanupUsageCalls    int
-	cleanupUsageTxCalls  int
-	cleanupDedupCalls    int
-	ensurePartitionCalls int
-	lastStart            time.Time
-	lastEnd              time.Time
-	watermark            time.Time
-	aggregateErr         error
-	cleanupAggregatesErr error
-	cleanupUsageErr      error
-	cleanupUsageTxErr    error
-	cleanupDedupErr      error
-	ensurePartitionErr   error
-	aggregateCtx         context.Context
-	events               *[]string
+	aggregateCalls        int
+	recomputeCalls        int
+	cleanupUsageCalls     int
+	cleanupUsageTxCalls   int
+	cleanupUsageCutoff    time.Time
+	cleanupDedupCalls     int
+	cleanupDedupCutoff    time.Time
+	cleanupAggregateCalls int
+	ensurePartitionCalls  int
+	lastStart             time.Time
+	lastEnd               time.Time
+	watermark             time.Time
+	aggregateErr          error
+	cleanupAggregatesErr  error
+	cleanupUsageErr       error
+	cleanupUsageTxErr     error
+	cleanupDedupErr       error
+	ensurePartitionErr    error
+	aggregateCtx          context.Context
+	events                *[]string
 }
 
 type dashboardAggregationRollupRepoTestStub struct {
@@ -74,11 +77,13 @@ func (s *dashboardAggregationRepoTestStub) UpdateAggregationWatermark(ctx contex
 }
 
 func (s *dashboardAggregationRepoTestStub) CleanupAggregates(ctx context.Context, hourlyCutoff, dailyCutoff time.Time) error {
+	s.cleanupAggregateCalls++
 	return s.cleanupAggregatesErr
 }
 
 func (s *dashboardAggregationRepoTestStub) CleanupUsageLogs(ctx context.Context, cutoff time.Time) error {
 	s.cleanupUsageCalls++
+	s.cleanupUsageCutoff = cutoff
 	return s.cleanupUsageErr
 }
 
@@ -89,6 +94,7 @@ func (s *dashboardAggregationRepoTestStub) CleanupUsageLogsTx(ctx context.Contex
 
 func (s *dashboardAggregationRepoTestStub) CleanupUsageBillingDedup(ctx context.Context, cutoff time.Time) error {
 	s.cleanupDedupCalls++
+	s.cleanupDedupCutoff = cutoff
 	return s.cleanupDedupErr
 }
 
@@ -222,6 +228,7 @@ func TestDashboardAggregationService_CleanupRetentionFailure_DoesNotRecord(t *te
 	svc := &DashboardAggregationService{
 		repo: repo,
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 1,
 				HourlyDays:    1,
@@ -242,6 +249,7 @@ func TestDashboardAggregationService_CleanupDedupFailure_DoesNotRecord(t *testin
 	svc := &DashboardAggregationService{
 		repo: repo,
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 1,
 				HourlyDays:    1,
@@ -389,6 +397,7 @@ func TestDashboardAggregationService_RetentionCoordinator_SameTxUsageFailureRoll
 			return 10, nil
 		},
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 90,
 				HourlyDays:    1,
@@ -424,6 +433,7 @@ func TestDashboardAggregationService_RetentionCoordinator_DistinctCutoffs(t *tes
 			return 10, nil
 		},
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 90,
 				HourlyDays:    1,
@@ -517,6 +527,7 @@ func TestDashboardAggregationService_RetentionCoordinator_GateNilDisabled(t *tes
 		retentionCoordinator: fake,
 		// usageRiskRetentionGate 未注入
 		cfg: config.DashboardAggregationConfig{
+			Enabled: true,
 			Retention: config.DashboardAggregationRetentionConfig{
 				UsageLogsDays: 90,
 				HourlyDays:    1,
@@ -554,7 +565,7 @@ func TestDashboardAggregationService_RetentionCoordinator_IdempotentRetry(t *tes
 	require.Len(t, fake.usageRows, 0)
 
 	// 新植入「未过期」行：不应被同 cutoff 删除。
-	fake.riskRows[3] = now.AddDate(0, 0, -5) // 晚于 riskCutoff
+	fake.riskRows[3] = now.AddDate(0, 0, -5)  // 晚于 riskCutoff
 	fake.usageRows[3] = now.AddDate(0, 0, -5) // 晚于 usageCutoff
 	require.NoError(t, fake.RunRetentionCleanup(context.Background(), true, usageCutoff, riskCutoff))
 	require.Len(t, fake.riskRows, 1)

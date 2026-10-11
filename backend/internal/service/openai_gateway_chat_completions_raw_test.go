@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -455,6 +456,9 @@ func TestForwardAsRawChatCompletions_NormalizesGLMReasoningEffortForUpstream(t *
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "max", gjson.GetBytes(upstream.lastBody, "reasoning_effort").String())
+	require.NotNil(t, result.ReasoningEffort)
+	require.Equal(t, "max", *result.ReasoningEffort)
+	require.Equal(t, 3.0, reasoningEffortBillingMultiplier(*result.ReasoningEffort, map[string]float64{"xhigh": 2, "max": 3}))
 }
 
 func TestForwardAsRawChatCompletions_SilentRefusalTriggersFailover(t *testing.T) {
@@ -1568,4 +1572,49 @@ func largeRawChatCompletionsBody() []byte {
 	return []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"` +
 		strings.Repeat("x", openAISilentRefusalMinRequestBodyBytes) +
 		`"}],"stream":true}`)
+}
+
+// 我方别名守卫（qk-S1）+ 掩码门：raw 路径只在「账号开启 mask_upstream_identity 且
+// 上游回显名落在候选集（发送名 + IdentityRewriteAliases 别名）内」时把回显模型改写回
+// 客户端请求名；异构拼写（大小写变体）与未登记别名一律原样透传，不把上游真实模型
+// 谎报成请求名。用例据此保留两类覆盖：命中候选名 → 回写 public；未命中 → 透传。
+func TestForwardAsRawChatCompletions_RestoresMappedResponseModelOnlyForCandidateNames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const mappedUpstream = "ZHIPU/GLM-5.3"
+	for _, stream := range []bool{false, true} {
+		for _, mapped := range []bool{false, true} {
+			for _, returned := range []string{mappedUpstream, "zhipu/glm-5.3", "glm-5.3-alias"} {
+				t.Run(fmt.Sprintf("stream=%v/mapped=%v/%s", stream, mapped, returned), func(t *testing.T) {
+					body := []byte(fmt.Sprintf(`{"model":"public","messages":[{"role":"user","content":"hello"}],"stream":%v}`, stream))
+					payload := `{"id":"chatcmpl_1","model":"` + returned + `","choices":[{"index":0,"delta":{"content":"keep alias"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+					upstreamBody, contentType := payload, "application/json"
+					if stream {
+						upstreamBody = "data: " + payload + "\n\ndata: [DONE]\n\n"
+						contentType = "text/event-stream"
+					}
+					upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(upstreamBody))}}
+					svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+					account := rawChatCompletionsTestAccount()
+					expectedModel, expectedUpstream := returned, "public"
+					if mapped {
+						account.Credentials["model_mapping"] = map[string]any{"public": mappedUpstream}
+						// 身份回写只服务掩码账号（rawChatCompletionsMaskGate）。
+						account.Extra = map[string]any{"mask_upstream_identity": true}
+						expectedUpstream = mappedUpstream
+						if returned == mappedUpstream {
+							expectedModel = "public"
+						}
+					}
+					rec := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(rec)
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+					result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+					require.NoError(t, err)
+					require.Equal(t, expectedUpstream, gjson.GetBytes(upstream.lastBody, "model").String())
+					require.Contains(t, rec.Body.String(), strings.Replace(payload, `"model":"`+returned+`"`, `"model":"`+expectedModel+`"`, 1))
+					require.Equal(t, returned, result.UpstreamResponseModel)
+				})
+			}
+		}
+	}
 }

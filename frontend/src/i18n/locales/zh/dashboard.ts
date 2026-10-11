@@ -1,3 +1,19 @@
+// w61 conflict-resolution fusion notes (second wave, B10 — funds_or_state / semantic_conflict)
+// dashboard.ts 模块里 funds_or_state 语义冲突的逐字段裁决（中英成对硬约束，见 [[sub2api 冲突卡的前端测试约定]]）。
+// 三方基准：b0-base / b0-ours / b0-upstream。自动合并产物已是“无损并集”，文件正文无需改动，仅登记裁决理由。
+// 同 key 值冲突默认我方；对应上游新功能的键取上游（localeKeyCompleteness 中英叶子键集一致，单侧补键必红）。
+// (1) dashboard.welfareBalance / dashboard.welfareExpiresAt：b0-ours 在 base 之上新增（福利余额是我方功能），
+//     b0-upstream 删除了 base 的这两个键。存在性冲突 → 默认我方，保留。zh/en 两侧都保留。
+// (2) redeem 段（funds_or_state 真冲突）：base 原有 codeRedeemSuccess/failedToRedeem/subscriptionRefreshFailed/
+//     pleaseEnterCode 共 4 键；我方新增 5 个错误键 codeUsed/codeExpired/codeNotFound/codeLocked/codeRateLimited，
+//     upstream 新增 2 个键 historyLoadFailed/userRefreshFailed（上游新功能“加载/刷新失败”文案）。
+//     两侧在 base 之上互不重叠地各加一组键 → 取无损并集：7 个键全部保留（我方 5 个 default 我方，上游 2 个取上游）。
+//     zh/en 两侧各 7 键，叶子键集与占位符集一致。
+// (3) modelPlaza.table.discountHint：b0-ours 在 base 之上新增（实付价÷官方参考价口径），b0-upstream 删除了该键。
+//     存在性冲突 → 默认我方，保留。zh/en 两侧都保留。
+// 非 funds_or_state 的上游新增键（bulkEdit / providerLabel / outputTps / videoPrice / opencode_go / monthly /
+// reasoningMultiplier* 等）不在本卡 scope，由对应功能卡（keys / monitor / model-plaza）认领，本卡不触碰、不补。
+
 export default {
   dashboard: {
     title: '仪表盘',
@@ -767,6 +783,8 @@ export default {
     codeNotFound: '兑换码不存在，请检查后重试。',
     codeLocked: '该兑换码正在处理中，请稍后重试。',
     codeRateLimited: '失败次数过多，请稍后再试。',
+    historyLoadFailed: '加载兑换记录失败，请重试。',
+    userRefreshFailed: '兑换成功，但账户信息刷新失败。',
     subscriptionRefreshFailed: '兑换成功，但订阅状态刷新失败。',
     pleaseEnterCode: '请输入兑换码'
   },

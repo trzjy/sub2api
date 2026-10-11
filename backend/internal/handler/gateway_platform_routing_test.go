@@ -36,7 +36,8 @@ func TestCompositeAvailableModelsIncludesMuseMapping(t *testing.T) {
 		},
 	}
 	h := newGatewayModelsHandlerForTest(repo)
-	models := h.compositeAvailableModels(context.Background(), &groupID)
+	// 与 /v1/models 聚合入口同口径：不按接入点过滤，且含 systemone 托管目录。
+	models := h.compositeAvailableModels(context.Background(), &groupID, "", true)
 	require.Contains(t, models, "muse-spark-1.3",
 		"composite 聚合应暴露 muse 账号 model_mapping 键（切片须覆盖 muse）")
 }
@@ -46,7 +47,7 @@ func TestCompositeAvailableModelsIncludesMuseMapping(t *testing.T) {
 func TestOpenAICompatibleTextTargetAllowedAdmitsMusePlatform(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	apiKey := &service.APIKey{Group: &service.Group{
-		ID:      95,
+		ID:       95,
 		Platform: service.PlatformComposite,
 	}}
 	ctx := service.WithCompositeRouteDecision(context.Background(), service.CompositeRouteDecision{

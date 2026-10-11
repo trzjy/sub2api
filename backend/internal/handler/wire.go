@@ -73,11 +73,15 @@ func ProvideAdminHandlers(
 	db *sql.DB, // D4i: redeem_codes marker 需要 sql 句柄（与 xianguanjiaVoider 同源）
 	settingRepo service.SettingRepository, // D4i: kind_id settings 存取（wire_gen 已有 settingRepository）
 	xgjSupplyStore *xianguanjia.SupplyConfigStore, // D6i: 货源模式凭证存储（D6a DB 实现，Save/Get）
+	opencodeGoUsage *service.OpenCodeGoUsageService, // 上游 v0.2.15 新增（正交吸收）
+	claudeResetCredits *service.ClaudeResetCreditService, // 上游 v0.2.15 新增（正交吸收）
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
 	accountHandler.SetAccountBalanceProbeService(accountBalanceProbe)
 	accountHandler.SetCodeBuddyAccountRefresher(codeBuddyOAuthHandler)
+	accountHandler.SetOpenCodeGoUsageService(opencodeGoUsage)      // 上游 v0.2.15 新增（正交吸收）
+	accountHandler.SetClaudeResetCreditService(claudeResetCredits) // 上游 v0.2.15 新增（正交吸收）
 	// 注入异常调用分析服务：dashboard 卡片摘要 + admin 独立路由（派发单 U4b/U5）。
 	dashboardHandler.SetUsageRiskService(usageRiskService)
 	// 注入网页版平台自动登录服务（service 层 provider 构造，与 TokenRefreshService
@@ -214,10 +218,12 @@ func ProvideOpenAIGatewayHandler(
 	grokQuotaService *service.GrokQuotaService,
 	cfg *config.Config,
 	coordinator *securityaudit.Coordinator,
+	compositeResolver *service.CompositeRouteResolver,
 ) *OpenAIGatewayHandler {
 	gatewayService.SetPluginManager(pluginManager)
 	h := NewOpenAIGatewayHandler(gatewayService, coreGatewayService, settingService, concurrencyService, billingCacheService, apiKeyService,
 		usageRecordWorkerPool, errorPassthroughService, contentModerationService, opsService, cfg)
+	h.compositeResolver = compositeResolver
 	h.securityAuditCoordinator = coordinator
 	h.grokMediaEligibilityProber = grokQuotaService
 	return h

@@ -35,8 +35,13 @@ type RateLimitService struct {
 	// cnQuotaLifecycle 额度耗尽状态机响应式入口（D-QL-002，可选依赖；
 	// CN 402/429 响应式信号经此移交停调语义，见 ratelimit_cn_providers.go）。
 	cnQuotaLifecycle CNQuotaLifecycleEntry
-	usageCacheMu     sync.RWMutex
-	usageCache       map[int64]*geminiUsageCacheEntry
+	// ollamaCloudUsageProbe is the optional Ollama Cloud usage probe scheduler
+	// injected via SetOllamaCloudUsageProbeScheduler. See
+	// ratelimit_service_ollama_429.go for how real-Ollama 429s schedule an async
+	// probe to learn the true usage-window reset.
+	ollamaCloudUsageProbe ollamaCloudUsageProbeScheduler
+	usageCacheMu          sync.RWMutex
+	usageCache            map[int64]*geminiUsageCacheEntry
 
 	// OpenAI Team 联动熔断的进程内去重：teamID → 去重窗口截止时间
 	openaiTeamLinkedMu     sync.Mutex
@@ -483,6 +488,28 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		upstreamMsg = truncateForLog([]byte(upstreamMsg), 512)
 	}
 
+	// Command Code 用量超限按文案区分、与状态码无关（见 ratelimit_command_code.go）；
+	// 未识别的错误（含普通频率限制）继续走下面的默认逻辑。
+	if account.IsCommandCode() && (statusCode == http.StatusPaymentRequired ||
+		statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests) {
+		if handled, disable := s.handleCommandCodeUsageError(ctx, account, statusCode, responseBody, upstreamMsg); handled {
+			return disable
+		}
+	}
+	// Cline 积分、花费上限与 ClinePass 超限按结构化错误区分，只冷却对应的钱包。
+	// 400 是请求错误，不能因回显的模型名或请求内容触发钱包冷却。
+	if account.IsCline() && (statusCode == http.StatusPaymentRequired ||
+		statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests) {
+		if s.handleClineError(ctx, account, statusCode, responseBody, upstreamMsg) {
+			return false
+		}
+		// 402 只会是积分不足：冷却没写进去也不能落到下面的 402 默认分支——那里永久置
+		// status=error，而周期探测只覆盖激活账号，充值后无法自动恢复。
+		if statusCode == http.StatusPaymentRequired {
+			return false
+		}
+	}
+
 	switch statusCode {
 	case 400:
 		// "organization has been disabled" → 永久禁用
@@ -599,10 +626,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			shouldDisable = true
 		}
 	case 402:
-		// 国产供应商：余额不足是可恢复状态（充值/检测恢复后由周期任务自动解除），
-		// 不能走 handleAuthError 永久置 status=error。改为可恢复的临时停调。
-		// web 接入模式账号无 API 余额概念，排除在 CN 冷却链之外（方案 §6）。
-		if isCNCoolingEligible(account) {
+		// 国产供应商 / OpenCode Zen / Command Code：余额（积分）不足是可恢复状态
+		// （充值/检测恢复后由周期任务自动解除），不能走 handleAuthError 永久置
+		// status=error。改为可恢复的临时停调。
+		// web 接入模式账号无 API 余额概念，排除在 CN 冷却链之外（方案 §6）——CN 侧
+		// 用 isCNCoolingEligible，上游新增的 OpenCode Zen / Command Code 分支照常纳入。
+		if isCNCoolingEligible(account) || account.IsOpenCodeZen() || account.IsCommandCode() {
 			s.handleCNProviderInsufficientBalance(ctx, account, upstreamMsg)
 			shouldDisable = true
 			break
@@ -1095,10 +1124,21 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 		s.handleCNProviderConcurrencyLimit403(ctx, account)
 		return true
 	}
+	// Kimi 等 CN 供应商把 Coding Plan 配额窗口耗尽打成 403
+	// （error.type=access_terminated_error），这是窗口到期后自动恢复的限流
+	// 信号而非封禁：按 429 口径冷却到真实窗口重置点，避免落入下方通用 403
+	// 升级计数后被永久 SetError。
+	if isCNProviderQuotaExhausted403(account, responseBody, upstreamMsg) {
+		s.handleCNProviderQuotaExhausted403(ctx, account, upstreamMsg)
+		return true
+	}
 	// 国产供应商与 openai 同口径:HTML 403(CDN/代理拦截页)不构成账号失效证据,
 	// 且 403 在 failover 状态集里会被逐账号重放——直接 SetError 会让一个坏请求/
 	// 一层坏代理连环永久禁用整组账号。走 HTML 豁免 + N 次累计 + 临时冷却。
-	if account.Platform == PlatformOpenAI || isCNCoolingEligible(account) {
+	// 平台集 = openai + 上游多协议 API Key 供应商（国产厂商 + OpenCode/Command
+	// Code/Cline，IsMultiProtocolAPIKey ⊇ IsCNProvider，见 c02 account.go 裁决）；
+	// web 接入模式账号仍排除在 CN 冷却链之外（方案 §6 红线），故多协议分支加 web 守卫。
+	if account.Platform == PlatformOpenAI || (account.IsMultiProtocolAPIKey() && !account.IsWebAccessMode()) {
 		return s.handleOpenAI403(ctx, account, upstreamMsg, responseBody)
 	}
 	// CodeBuddy 原生路径（platform=codebuddy 直连账号，非影子）：403 + code=11140 /
@@ -1143,6 +1183,15 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		slog.Warn(
 			"openai_403_html_body_skips_account_penalty",
 			"account_id", account.ID,
+			"upstream_message", upstreamMsg,
+		)
+		return false
+	}
+	if isCloudflareBotBlockResponse(responseBody) {
+		slog.Warn(
+			"openai_403_cloudflare_bot_block_skips_account_penalty",
+			"account_id", account.ID,
+			"platform", account.Platform,
 			"upstream_message", upstreamMsg,
 		)
 		return false
@@ -1252,6 +1301,14 @@ func (s *RateLimitService) writeF3ThreeStrikeEntry(ctx context.Context, account 
 	}
 }
 
+// isCloudflareBotBlockResponse reports Cloudflare's WAF bot-signature response
+// (error code 1010). The upstream never reached the account API, so this is a
+// request/edge-level failure and must not consume the account 403 strike budget.
+func isCloudflareBotBlockResponse(body []byte) bool {
+	normalized := strings.ToLower(strings.TrimSpace(string(body)))
+	return strings.Contains(normalized, "error code: 1010")
+}
+
 // handleAntigravity403 处理 Antigravity 平台的 403 错误
 // validation（需要验证）→ 永久 SetError（需人工去 Google 验证后恢复）
 // violation（违规封号）→ 永久 SetError（需人工处理）
@@ -1338,10 +1395,20 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 		}
 		return
 	}
+	// 真实 Ollama Cloud 用量账号（credentials base_url 指向 ollama.com）的 429 由
+	// ollama.com 的用量窗口驱动。其响应头不得被当作 OpenAI codex / Anthropic /
+	// CN 限流来解析，故在国产供应商分支之前单独处理：先设置永不缩短的临时冷却，
+	// 再调度异步 probe 学习真实重置点（详见 ratelimit_service_ollama_429.go）。
+	if account != nil && IsOllamaCloudUsageAccount(account) {
+		s.handleOllamaCloudUsage429(ctx, account, headers)
+		return
+	}
 	// 国产供应商（kimi/zhipu/deepseek）的 429 走专用可恢复路径：余额不足 → 临时停调，
 	// Coding Plan 窗口耗尽 → 冷却到快照重置点。未命中则继续默认 429 逻辑。
 	// web 接入模式账号无 API 额度窗口，排除在 CN 429 冷却链之外（方案 §6）。
-	if isCNCoolingEligible(account) {
+	// OpenCode Go（上游新增聚合平台）429 同口径走响应式入口，见
+	// ratelimit_cn_providers.go（调用签名保持我方 3 参：(ctx, account, responseBody)）。
+	if isCNCoolingEligible(account) || account.IsOpenCodeGo() {
 		if s.applyCNProviderReactive429(ctx, account, responseBody) {
 			return
 		}
@@ -2732,6 +2799,7 @@ func parseOpenAIImageTryAgainCooldown(body []byte) time.Duration {
 
 const upstreamModelNotFoundCooldown = 30 * time.Minute
 const upstreamModelNotFoundReason = "upstream_404_model_not_found"
+const upstreamModelNotFound401Reason = "upstream_401_model_not_found"
 const upstreamCodexPlanGatedModelCooldown = 30 * time.Minute
 const upstreamCodexPlanGatedModelReason = "upstream_400_codex_plan_gated_model"
 const tempUnschedBodyMaxBytes = 64 << 10
@@ -2757,6 +2825,8 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	switch {
 	case isUpstreamModelNotFoundError(statusCode, responseBody):
 		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
+	case statusCode == http.StatusUnauthorized && account.Type == AccountTypeAPIKey && account.IsOpenAICompatible() && isOpenAICompatibleModelNotFoundBody(responseBody):
+		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFound401Reason
 	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
 		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
 	default:

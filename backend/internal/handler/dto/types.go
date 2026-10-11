@@ -212,6 +212,67 @@ type AdminGroup struct {
 	SortOrder int `json:"sort_order"`
 }
 
+// w14 conflict-resolution fusion (second wave, B9 — funds_or_state)
+//
+// 分叉取证（blob：base 7c952af6 / ours ac76ba62 / upstream 73c02a7a）：
+// base→ours = 43 增 2 删，六处自研新增：Group.AggregateCodeBuddyEnabled、
+// Group.Concurrency、AdminGroup.VisionRouting、Account.BalanceProbe、
+// Account.QuotaDimensions + AccountQuotaDimension 类型 + Account.BalanceLow、
+// AccountListItem.QuotaDimensions/BalanceLow、RedeemCode.BatchID/GroupGrants。
+// base→upstream = 仅 2 行：给 Account 与 AccountListItem 各追加一个
+// OpenCodeGoUsage *service.OpenCodeGoUsageState（json 键 opencode_go_usage,omitempty），
+// 位置均紧贴 OllamaCloudUsage。Account 侧与我方 BalanceProbe 同一插入点（文本冲突），
+// AccountListItem 侧双方在不同 hunk（Git 可自动合并）。
+// 双方在本文件均无 funds 数值（价格/倍率/汇率/冷却时长）改动，故权威表第 7 条
+// 无「双方值」可登记，本卡不适用。
+//
+// keep OURS —— 上述我方六处新增全部原样保留（merge-plan §5 rule 1：我方有重写的符号
+// 以我方语义为准；§6 自研能力矩阵的「管理后台配额单轨展示」「额度/余额熔断」
+// 「聚合平台路由」「视觉分流」四条依赖它们）。任一条被静默丢弃都会直接下线对应业务
+// 链路，且前端/仓库侧无补偿路径。
+//
+// take UPSTREAM（暂缓，跨卡依赖）—— Account/AccountListItem 的 OpenCodeGoUsage 字段：
+// 1. 类型定义缺席：service.OpenCodeGoUsageState 只定义在上游独有文件
+// backend/internal/service/opencode_go_usage.go:123。取证结果：该文件所在的整个
+// opencode_go 子系统在本工作树一个都不在 —— service/opencode_go.go、
+// service/opencode_go_usage.go、repository/account_repo_opencode_go_usage.go、
+// handler/admin/account_opencode_go_usage.go、migrations/238_opencode_go_platform.sql、
+// frontend/src/components/account/OpenCodeGoUsageCell.vue 均不存在；对
+// b0-base→b0-upstream 的上游独有新增路径抽样 400 条，入树数 = 0。
+// 即权威表第 5 条「定义随自动合并已入树」的前提在本机不成立：main HEAD 损坏
+// （57a080bc 缺对象），方案登记的隔离 worktree（~/sub2api-workflow/merge-v0.2.15、
+// /home/zjy/sub2api-workflow/b0-analysis）均 prunable 不存在，上游独有内容要到
+// B11 真正执行 git merge 时才入树。
+// 2. 单方面加本字段只会把编译错变成断言失败，并不会让最终树变绿：上游对该字段的消费点
+// 全在本卡文件清单之外 —— dto/mappers.go:244-247 与 :258（AccountFromServiceShallow
+// 赋值）、:426-427（redactAccountManagedExtra 屏蔽两个 OpenCodeGo extra 键）、:468
+// （lite 投影）。而 mappers.go 的 owner 是 w12 卡、已按 keep-ours 交付（工作树 blob
+// 45a816f5 == b0-ours，无任何 OpenCodeGo 接线）。上游独有测试
+// dto/account_list_item_opencode_usage_test.go 断言 require.NotNil(item.OpenCodeGoUsage)，
+// 缺 mapper 接线时该断言必失败。
+// 3. 现场纪律第 4 条 + 方案 §4「每路径恰一个 owner」：本卡无权改 mappers.go / service 包，
+// 也无权替 B11 决定是否整体吸收 opencode_go 子系统（含迁移 238 与前端单元格）。
+// 4. 并行波次构建面：本包目前处于可干净编译状态（go build ./internal/handler/... exit 0）。
+// 只加本字段会让 dto 及其全部下游（handler、handler/admin、server/routes）立刻
+// undefined: service.OpenCodeGoUsageState —— 与同批 w28 对 routes.RegisterPaymentRoutes
+// 末位 redisClient 实参「调用点/定义侧不同卡」的处理同理，故不在本卡单方面落地。
+//
+// 收敛单元（必须一次集成，缺一不可）：
+// (a) 上游 opencode_go 子系统入树（B11 git merge 自动带入，含 service/repo/admin
+// handler/migration 238/前端组件）；
+// (b) dto/mappers.go 三处接线 + redactAccountManagedExtra 两个 extra 键
+// （owner = w12 卡，需 B11 复核后重开）；
+// (c) 本文件 Account（建议紧随 OllamaCloudUsage 之后、与上游同序）与 AccountListItem
+// 各加 OpenCodeGoUsage *service.OpenCodeGoUsageState（json:"opencode_go_usage,omitempty"）
+// （owner = 本卡 w14，届时同步更新 types_fusion_test.go 的缺席哨兵断言）；
+// (d) 上游测试 dto/account_list_item_opencode_usage_test.go（75 张卡无人认领，
+// 需 B11 派发或随 (a) 自动入树后一并验证）。
+// 验证锚点：go build ./internal/handler/dto/ 通过，且
+// go test ./internal/handler/dto/ -run 'OpenCodeGo|QuotaDimensions|AccountDTO' 全绿。
+// 反向保护：types_fusion_test.go 的 TestAccountDTO_UpstreamOpenCodeGoUsageAbsent 是
+// 本字段的哨兵，(c) 落地时该测试必然失败 —— 这是设计中的报警，届时按上游形态更新该
+// 断言即可，不得为了让它变绿而回退 (a)(b)。
+
 type Account struct {
 	ID       int64   `json:"id"`
 	Name     string  `json:"name"`
@@ -224,6 +285,7 @@ type Account struct {
 	CredentialsStatus       map[string]bool                `json:"credentials_status,omitempty"`
 	Extra                   map[string]any                 `json:"extra"`
 	OllamaCloudUsage        *service.OllamaCloudUsageState `json:"ollama_cloud_usage,omitempty"`
+	OpenCodeGoUsage         *service.OpenCodeGoUsageState  `json:"opencode_go_usage,omitempty"`
 	BalanceProbe            *service.BalanceProbeConfig    `json:"balance_probe,omitempty"`
 	ProxyID                 *int64                         `json:"proxy_id"`
 	ProxyFallbackOriginID   *int64                         `json:"proxy_fallback_origin_id"`
@@ -354,6 +416,10 @@ type AccountQuotaDimension struct {
 	ObservedAt string `json:"observed_at,omitempty"`
 }
 
+// w14：上游在本结构体的 OllamaCloudUsage 之后同样追加了 OpenCodeGoUsage
+// （opencode_go_usage），裁决为「暂缓，跨卡依赖」，完整理由与收敛单元见本文件
+// type Account 上方的 w14 注释块。
+//
 // AccountListItem is the compact representation returned by the admin account
 // list when the lite query parameter is enabled. It contains the fields used
 // by the account table and runtime indicators, but intentionally omits the
@@ -370,6 +436,7 @@ type AccountListItem struct {
 	CredentialsStatus map[string]bool                `json:"credentials_status,omitempty"`
 	Extra             map[string]any                 `json:"extra,omitempty"`
 	OllamaCloudUsage  *service.OllamaCloudUsageState `json:"ollama_cloud_usage,omitempty"`
+	OpenCodeGoUsage   *service.OpenCodeGoUsageState  `json:"opencode_go_usage,omitempty"`
 
 	ProxyID                 *int64     `json:"proxy_id"`
 	ProxyFallbackOriginID   *int64     `json:"proxy_fallback_origin_id"`

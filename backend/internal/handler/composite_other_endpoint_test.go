@@ -87,7 +87,8 @@ func TestCompositeAvailableModelsIncludesOtherMappingExcludesUnknown(t *testing.
 	}
 	h := newGatewayModelsHandlerForTest(repo)
 
-	models := h.compositeAvailableModels(context.Background(), &groupID)
+	// 与 /v1/models 聚合入口同口径：不按接入点过滤，且含 systemone 托管目录。
+	models := h.compositeAvailableModels(context.Background(), &groupID, "", true)
 
 	require.Contains(t, models, "qwen3.8-flash",
 		"接入点6：/v1/models 应含 other 账号 model_mapping 键")

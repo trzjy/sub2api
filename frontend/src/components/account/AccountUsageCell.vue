@@ -842,6 +842,110 @@ import {
   isVolcanoBaseURL,
   isTokenHarborAccount
 } from './credentialsBuilder'
+// w37 conflict-resolution fusion (second wave, B10 — funds_or_state / semantic_conflict)
+// 冲突注记：[COMPILE] 我方可见性函数改三参，上游改单参 account，同一 computed 互斥（见 U8）。
+//
+// 开工判别：本文件工作树 = b0-ours 的代码状态（三参可见性、四平台+isVolcanoAccount 分支、W6 web
+//   分支等一律在位），仅在 base/ours 之上追加了本 w37 notes 注释块（故工作树 blob 非 b0-ours 字节
+//   相同，而代码层与 b0-ours 一致）；上游相对 base 的 11 个 hunk 一个都没灌进代码层 —— 属"零灌入"
+//   形态，所以下面每条 keep OURS 都是**预防性
+//   现状锁**（防 B11 原样灌回），不是"回退已被机械合并带入的改动"。
+// 三方取证：git merge-file -p --diff3（ours/base/upstream）得 6 个冲突块，依次落在 CN 分支入口、
+//   非 CN 分支的 OpenCode/web 同位、兜底短横线 v-if、import 段、showUsageWindows、可见性 computed。
+//   上游另有 4 处改动位于非冲突区（U1 主体、U3、U6 的 Claude import 行、U9），机械合并会把它们
+//   直接带进来 —— 本树未发生（零灌入），但 B11 跑真 merge 时会，故逐条判"吸收/回退"如下。
+// 缺席取证（本树 grep 命中数，六项全 0）：isMultiProtocolApiKeyPlatform / getProviderProfile /
+//   getProviderMode / cnUsageCellAccountMode / OFFICIAL_ACCOUNT_API_PLATFORMS /
+//   officialAccountAPISupported；缺席字段 Account.opencode_go_usage（types 目录 0 命中）；
+//   缺席文件 ClaudeResetCreditsCell.vue 与 OpenCodeGoUsageCell.vue（b0-base、b0-ours 皆无该路径，
+//   工作树亦无）。CNUsageCellAccount 在本树的 3 处命中全是我方注释与断言文本（w38 的 notes 块
+//   与其 spec 的缺席哨兵），不是类型定义。
+// 整组暂缓的依据（变体 A 实测，非推测）：ours + 上游全量（git merge-file -p --theirs，零残留
+//   冲突标记）在 vitest collect 阶段即断 —— Failed to resolve import "./ClaudeResetCreditsCell.vue"
+//   （该形态的 import 段第 830 行）。整文件报废会把我方现有 62 例一并拖死（AccountUsageCell.spec.ts
+//   47 + AccountUsageCell.muse.spec.ts 9 + AccountUsageCell.codebuddy.spec.ts 6），故按前端批规则
+//   整组暂缓，不允许只挑能跑的部分落地。
+// 后果分层（变体 B 实测）：只落 U2/U5/U7/U8 而不引上游新文件时，模块 import 照样成功
+//   （vite 不因"缺失具名导出"而断），失败发生在**运行期** render —— isMultiProtocolApiKeyPlatform
+//   为 undefined → TypeError；U8 的单参调用打到三参实现上，baseURL 落默认值 '' → 火山订阅号
+//   配额单元格静默消失（错渲染，不报错）；U5 只挂 vue-tsc 的类型层。三种失败层次不同，
+//   不能一概写成"会让整文件解析失败"。
+//
+// 逐组裁决（U1-U11 编号对应上游相对 base 的 11 个 hunk）：
+// U1) TAKE UPSTREAM（暂缓，跨卡依赖）— Anthropic OAuth 段把「passive 采样标签 + 主动查询按钮」
+//     收进常驻的 ClaudeResetCreditsCell 的 pre-actions 具名槽（顺带把按钮 text-[9px] 提到
+//     text-[10px] 并加 disabled 光标/透明度类），意图是"用量仍在加载时发起的重置信用查询
+//     不因 DOM 重建而丢"。依赖缺席文件 ClaudeResetCreditsCell.vue 及其 redeemed 事件 /
+//     pre-actions 槽契约。我方该区未改（该 hunk 在非冲突区）→ 收敛时由 B11 原样取上游形态。
+// U2) KEEP OURS — CN 分支入口条件保持我方的"四平台或式 + isVolcanoAccount"；上游换成
+//     isMultiProtocolApiKeyPlatform(account.platform)（依赖缺席符号）。我方多出的 isVolcanoAccount
+//     按 base_url 识别火山方舟订阅号（与 platform 解耦，账号仍存为 deepseek），上游的纯平台
+//     函数式判定拿不到这个维度。
+// U3) TAKE UPSTREAM（暂缓）— CN 分支内 OllamaCloudUsageCell 之后插入 OpenCodeGoUsageCell 的
+//     v-else-if 分支（含上游"同源双份探测/白名单拒绝"那段抑制说明注释）。依赖缺席文件
+//     OpenCodeGoUsageCell.vue + 缺席字段 Account.opencode_go_usage。
+// U4) TAKE UPSTREAM（暂缓）— 非 CN 的 v-else 分支内对称位置的同款 OpenCodeGoUsageCell。
+//     该处与我方 W6 网页逆向分支撞在同一位置（冲突块 2），我方整块（web 专用 today stats
+//     展示 + 骨架屏 + 7 处 !isWebProviderAccount 守卫 + 1 处 v-if 正向使用）必须保留，
+//     上游块暂缓。注意上游该分支的注释自称"v-else-if 只是结构性互斥保证，不改变实际渲染结果"
+//     —— 该声称只在上游自己的平台集合下成立，与我方 web 分支并存时不成立，收敛时要复核。
+// U5) TAKE UPSTREAM（暂缓）— 兜底短横线 v-if 追加 !account.opencode_go_usage?.eligible。
+//     它只依赖缺席字段（类型层），但是 U3/U4 的配套抑制项：单独落地会得到"OpenCode 账号
+//     既不渲染单元格、也没有占位符"的空档 → 与 U3/U4 同组收敛。我方该行另有
+//     !isWebProviderAccount 前缀（W6 语义），保留。
+// U6) KEEP OURS（import 段）— 我方块含 resolveAccountBaseURL / isVolcanoBaseURL /
+//     isTokenHarborAccount 与 CNQuotaUsageCell（TH/Kira 线），上游块含 isMultiProtocolApiKeyPlatform
+//     与两个上游新组件。收敛时取两侧并集：上游三项随 U1/U3/U4 补入，我方五项一字不动。
+// U7) KEEP OURS — showUsageWindows 内我方三条前置分支全保留：web 账号 return true（W6）、
+//     deepseek apikey + 凭证 usage_probe=opencode_zen return false（镜像 muse，判定用请求前
+//     可得的凭证字段，禁用请求后才存在的 muse_usage 以免循环依赖）、CN 四平台 + isVolcanoAccount
+//     return true。上游把第三条换成 isMultiProtocolApiKeyPlatform，随 U2 同组收敛。
+// U8) KEEP OURS —【派发单点名的 COMPILE 冲突】两个可见性 computed 保持我方三参形态
+//     （platform, accountMode, baseURL 三实参齐传），并保留配套的 cnAccountMode 与
+//     accountBaseURL 两个中间 computed（上游把三者整组删掉换成 account 单参）。
+//     依据：函数**定义**在 credentialsBuilder.ts，属 w41 卡 —— 本卡只改调用/消费，不改方法体。
+//     该定义文件的工作树现状 = b0-ours 的三参签名（第三参 baseURL 带 '' 默认值），w41 manifest
+//     登记的 blob 1d29d8af14c66ef64b6444ba7d4d56670713ae5e 在本地对象库缺失（git cat-file 报
+//     could not get object info），故按"基准缺失则以 b0-ours + 工作树现状双取证"的对齐纪律取三参。
+//     上游单参版还额外依赖四项缺席符号（见上面的缺席取证段）。本裁决与兄弟卡 w38 收敛一致 ——
+//     CNProviderBalanceCell.vue 的 w38 notes 同样 keep OURS 三参、take UPSTREAM 单参（暂缓）。
+//     后果分层见开头段：定义侧若仍是三参而本文件被改成单参调用，是"错渲染不报错"，比编译失败
+//     更难发现，这正是本条现状锁要挡的。
+// U9) TAKE UPSTREAM（暂缓）— handleOpenCodeGoUsageUpdated（emit account-updated 带
+//     opencode_go_usage 快照）。依赖缺席字段，随 U3/U4/U5 同组。
+// U10) KEEP OURS — 我方 cnAccountMode 保留（上游随 U8 删除它），它是三参调用的第二个实参来源。
+// U11) funds 数值登记 — 本文件不含价格/倍率/汇率/冷却时长常量；唯一数值口径是用量缓存 TTL
+//     USAGE_CACHE_TTL，三方值相同（5 分钟，base:668 / ours:848 / upstream:702），按权威表第 7 条
+//     登记为"无冲突"。
+//
+// 附带发现（我方既有缺陷，非本卡冲突，本卡不修）：W6 的 web 专用块（template v-if 判 isWebProviderAccount
+//     的那一块，含 7 处 !isWebProviderAccount 守卫）在当前我方代码里**不可达** —— showUsageWindows
+//     对 web 账号早返回 true，把它路由进根 v-if 子树（该子树的分支链最终落到"Other accounts: no usage
+//     window"），而 web 专用块位于根 v-else 子树（Non-OAuth/Setup-Token 段）内，两棵子树互斥。
+//     取证：mount access_mode=web 的 apikey 账号（platform 分别为 other / anthropic）只渲染一个短横线
+//     div，三枚徽章一枚都不出现；同平台去掉 access_mode 则 A/U 双徽章齐现。两条已钉成 A4 行为用例。
+//     与上游的关系：U4 的 OpenCodeGoUsageCell 恰好也插在同一棵根 v-else 子树里（OllamaCloudUsageCell
+//     之后），落地后同样不可达 —— 上游那句"v-else-if 只是结构性互斥保证，不改变实际渲染结果"在这个
+//     意义上反而成立，但理由与上游写的（host 互斥）不是同一个，收敛时要复核而不是照抄。
+//     不修的理由：改动 showUsageWindows 的 web 早返回、或把 web 块搬进根 v-if 子树，都会改变 W6 的
+//     对外可见行为，超出"解冲突"范围且属我方 W6 卡的语义；本卡只登记 + 用现状锁防止 B11 误以为
+//     该块有覆盖。
+//
+// 收敛单元与 owner：
+//   (a) 上游独有文件 ClaudeResetCreditsCell.vue / OpenCodeGoUsageCell.vue —— 无任何 wave2 卡认领
+//       （cards 目录全量 grep 0 命中），owner = B11 merge index，由 git merge 自然带入。
+//   (b) credentialsBuilder.ts 的 isMultiProtocolApiKeyPlatform 与单参可见性函数 —— owner = w41。
+//       若定义侧终局取上游单参，则调用侧必须同时改写，跨卡联动清单：w37 本文件、
+//       w38 CNProviderBalanceCell.vue、w39 CNProviderQuotaCell.vue（三处一起动，动一处即错）。
+//   (c) types 的 Account.opencode_go_usage 字段 —— 无 wave2 卡认领 types 入口（w45 notes 已登记
+//       该字段为"上游单方新增且本 spec 零消费"）→ owner = B11。
+//   (d) i18n —— 本卡零上游新键：上游 48 个静态键全是我方 65 个键的子集（comm -23 为空），
+//       我方独有 17 键（codebuddy 额度/套餐 14 键 + muse 2 键 + balanceProbe 等）不受影响，
+//       无 locale 联动。
+// 验证锚点：新增 __tests__/AccountUsageCell.fusion.spec.ts —— 缺席哨兵组在 (a)(b)(c) 任一落地后
+//   必然失败（设计中的报警），届时的动作是按上面 U1-U9 把上游形态补回本文件并删掉对应哨兵，
+//   而不是把断言反过来写。行为组（火山三参可见性、TH/Kira 互斥、deepseek opencode_zen 路由）
+//   是 U7/U8 的现状锁；变体 A / 变体 B 两份 fixture 已用于变异验证，证明它们非空洞。
 
 // Module-level cache shared across all AccountUsageCell instances
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()

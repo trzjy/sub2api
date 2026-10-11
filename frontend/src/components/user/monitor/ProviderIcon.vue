@@ -35,6 +35,14 @@ interface IconData {
 // Provider SVG paths extracted from src/components/common/ModelIcon.vue (which
 // in turn pulls from @lobehub/icons Mono.js). Keep in sync if upstream changes.
 // SVG uses fill="currentColor" so the wrapper controls the icon tint.
+// w53 conflict-resolution fusion (second wave, B10 — frontend ProviderIcon PROVIDER_ICONS 并集/平台规范化)
+//   - keep OURS `muse`：我方平台常量（跨文件签名权威表第 4 条 other/codebuddy/muse/web）把该供应商命名为
+//     muse，其 SVG mark 与 minimax 同款（OpenCode Go 上游 Meta Muse Spark Contributor）。工作树 Provider 联合
+//     类型(channelMonitor.ts)已含 muse，Record<Provider, IconData> 编译通过。
+//   - take UPSTREAM（规范化，非独立键）：上游把同名供应商命名为 opencode_go 并新增 SVG 路径；本仓平台判定
+//     分支统一用 muse，故 opencode_go 不另立图标键，统一走 muse，未命中时回退首字母（见 __tests__/ProviderIcon.spec.ts）。
+//   - 不将 opencode_go 写入 Record<Provider, IconData>：Provider 联合类型(本仓)未含 opencode_go，写入会触发
+//     vue-tsc 过量属性报错；且语义上 opencode_go == muse，已并入 muse 键（收敛单元见 account 平台判定卡）。
 const PROVIDER_ICONS: Record<Provider, IconData> = {
   openai: {
     paths: [

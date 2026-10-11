@@ -1,3 +1,104 @@
+// ==========================================================================
+// w56 conflict-resolution fusion notes (second wave, B10 -- funds_or_state /
+// semantic_conflict)
+//
+// 本文件 = en 侧。同模块 zh 侧由 w59 认领（zh/admin/accounts.ts，同键
+// accounts.cnProviders.windowMonthly：我方 "Monthly window" / 上游 "30d"，
+// zh 侧对应 "每月窗口" / "月"）。两侧裁决必须收敛到同一结论，因为
+// src/i18n/__tests__/localeKeyCompleteness.spec.ts 断言中英叶子键集完全一致
+// （单侧增删键必挂）。执行契约在 src/i18n/__tests__/accountsLocaleEnFusion.spec.ts，
+// 编号 (0)-(8) 与本块一一对应。取证基线 = b0-base / b0-ours / b0-upstream 三 ref。
+//
+// (0) 灌入形态 = 零灌入（w59 型，不是 w51 型）。三方叶子键数实测：
+//     base 1353 / b0-ours 1600 / b0-upstream 1465 / 工作树 1605。工作树相对
+//     b0-ours 的净增量只有 5 个键（accounts.cnProviders.staleAgo / staleTimeUnknown /
+//     staleMinutes / staleHours / staleDays，来自 F1-R2 陈旧标注的先前交付，
+//     三个 ref 里都不存在）+ 本注释块，值改动 0、删除 0。上游 112 个独键 /
+//     7 处单方修订 / 1 处删除**一个都没进工作树**（C_leaked=0、B_leaked=0、
+//     D 键仍在）。所以下面每一条"取我方"都是**预防性现状锁**（防 B11 原样灌回），
+//     不是回退已灌入的改动。
+//
+// (1) 核心冲突 accounts.cnProviders.windowMonthly（A2 类：双方各自新增同键，
+//     b0-base 无此键，en 侧我方 "Monthly window" / 上游 "30d"）—— keep OURS。
+//     按前端批规则"i18n 同 key 值冲突默认我方（对应上游新功能的键取上游）"，
+//     而它不是上游新功能的键：
+//     - 唯一消费方是我方扩展的滚动额度窗口分支 src/components/account/
+//       CNProviderQuotaCell.vue:242（window 取 monthly 时），该三档窗口
+//       [5h, weekly, monthly] 由我方 TIER_WINDOW_ORDER 引入；
+//     - 上游的 "30d" 只是沿用 b0-base 的短标签口径（上游 window5h/windowWeekly
+//       与 base 逐字相同 = "5h"/"7d"，是**我方**把它们改成了描述性形态）；
+//     - 我方同族成套为 window5h "5-hour window" / windowWeekly "Weekly window" /
+//       probeTooltip 含 monthly 一档，"Monthly window" 与之一致；取 "30d" 会
+//       拆散这套描述性家族，且与"月度滚动窗口"的实际语义不符。
+//     en/zh 成对：zh 侧 w59 已锁 "每月窗口"，其 accountsWindowResolution.spec.ts:76
+//     直接断言本 en 侧的值，取上游必挂该卡。
+//
+// (2) 窗口族里"我方单方修订"的三键（upstream == base，无冲突，plain merge 保我方）：
+//     accounts.cnProviders.window5h（"5h" -> "5-hour window"）、windowWeekly
+//     （"7d" -> "Weekly window"）、probeTooltip（追加 monthly 一档）。与 (1) 一起
+//     构成同一个描述性家族，锁在一起防止 B11 只回灌一半。
+//
+// (3) B 类 = 上游单方修订（我方值仍等于 base）共 7 键，全部 keep OURS：
+//     a. accounts.openaiQuotaReset.countTooltipLoad / countTooltipRefresh：
+//        上游追加 "and points balance"。points 功能在本树零生产者 ——
+//        OpenAIQuotaResetCell.vue 内 points/Points 命中数 0，backend 内
+//        codex_points/CodexPoints 命中数 0，上游自己的 6 个 points* 键属 (4)
+//        的 C 类缺席。取上游文案等于让 UI 承诺一个查不到的余额。
+//     b. accounts.openaiQuotaReset.count（"Credits" -> 上游 "Resets"）与
+//        accounts.openaiQuotaReset.resetTooltipNeedQuery（"Click Credits first"
+//        -> 上游 "Click Resets first"）：**en 侧独有的 2 个 B 类键**，zh 侧上游
+//        对这两个键未改（zh B 类只有 5 键）。上游这次改名只为把它新增的 points
+//        标签与 reset credits 区分开；points 缺席时 "Credits" 在本树无歧义。
+//        两键是**耦合对**：resetTooltipNeedQuery 的字面值内嵌 count 的标签词，
+//        单边灌入任一侧都会让提示指向一个不存在的标签 —— 融合契约里用
+//        "needQuery 包含 count 标签" 这条配对不变量守，B11 要改必须两键同改。
+//     c. accounts.openai.wsModeDesc / wsModePassthroughHint：上游改写属它自己
+//        的 wsMode 四件套（2 改写 + 2 新键 wsModeCtxPoolHint/wsModeHttpBridgeHint
+//        + 1 删除 wsModeConcurrencyHint），整套按 (4)/(5) 作为单元处理，只取
+//        改写会留下半上游的组。wsModeDesc 我方措辞另被
+//        src/i18n/__tests__/wsModeLocaleDesc.spec.ts 锁（http_bridge /
+//        mode_router_v2_enabled 字样）。
+//     d. accounts.customErrorCodesWarning：上游改写成一大段网关语义说明，
+//        属"描述更细但不依赖缺席实现"的那类，按批规则默认我方；是否吸收留给
+//        B11 作为独立文案决策（收敛单元 (d)），本卡不擅自取。
+//
+// (4) C 类 = 上游独有键 112 个，**不在单侧补入**（补一侧必挂 parity 断言）。
+//     按命名空间分组实测：accounts.opencodeGo 38 + accounts.claudeResetCredits 34
+//     + accounts.openaiReferral 23 + accounts.priorityQuick 4 = 99，加
+//     accounts.openaiQuotaReset 下 6 个 points* 键，再加 7 个散叶
+//     （accounts.moreFilters / moreFiltersActive / accounts.openai.wsModeCtxPoolHint /
+//     wsModeHttpBridgeHint / accounts.platforms.opencode_go / typesafe /
+//     accounts.modelMappingConflict）= 112（与 w59 的 99+12+1 同一口径）。
+//     其中 accounts.platforms.opencode_go / typesafe 与我方平台枚举互斥 ——
+//     src/constants/__tests__/platforms.spec.ts:140-141 断言枚举**不含**这两个值，
+//     补标签等于预判那张互斥终裁。accounts.modelMappingConflict 是唯一"上游独键
+//     但消费方已在我树里"的（src/components/account/ModelWhitelistSelector.vue:373），
+//     它是 localeKeyCompleteness 当前唯一那条双侧同缺的既有失败，只受"两侧对称"
+//     不变量约束，**不给缺席断言**（那会把缺陷锁死）。
+//
+// (5) D 类 = 上游删除而我方仍生产者用的键，全文件唯一：
+//     accounts.openai.wsModeConcurrencyHint。src/utils/openaiWsMode.ts:49,53 的
+//     返回类型/返回值仍指向它，src/utils/__tests__/openaiWsMode.spec.ts:64,67 断言它。
+//     必须拒绝上游删除（反删除现状锁），否则运行期拿到裸键名。
+//
+// (6) E 类 = 我方新增而上游从未有的键，模块级 246 个，其中 cnProviders 下 35 个
+//     （33 个标量 + accountMode.web / accountMode.webDesc 一对）。实测上游对
+//     "base 里存在的 cnProviders 键"的删除数 = 0，所以 plain merge 会保留它们；
+//     这里登记是为了防止人工评审把它们当废弃文案清掉。加上 (0) 里那 5 个 stale*
+//     先前交付键，cnProviders 叶子数 base 36 / ours 72 / upstream 37 / 工作树 77。
+//
+// (7) 交给 B11 的收敛单元：(a) 窗口族三键 + windowMonthly 一起保持我方；
+//     (b) 7 个 B 类键保持我方（其中 b 组两键必须同动）；(c) wsModeConcurrencyHint
+//     拒绝删除；(d) 112 个 C 类键必须 en/zh **同时**入树（含 points* 6 键要连
+//     OpenAIQuotaResetCell.vue 的 points 生产者一起），入树后 (3)(4) 的哨兵必然
+//     转红 = 设计中的报警，正确动作是按本块逐组改判，不是删断言。
+//
+// (8) 本注释块的书写纪律：localeKeyCompleteness.spec.ts 的静态键扫描器覆盖
+//     locale 源文件本体，只排除 the __tests__ dirs 与 spec 文件。所以本块只写
+//     裸点分键名，绝不写出真实的翻译调用形态或 keypath 之类的键引用形态，
+//     否则 (4) 里暂缓的上游缺席键会被当成生产引用而变成红灯。该纪律由融合
+//     契约里的"幻影引用自检"断言守。
+// ==========================================================================
 export default {
     accounts: {
       title: 'Account Management',

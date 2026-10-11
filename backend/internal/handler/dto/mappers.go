@@ -249,6 +249,10 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	if balanceProbeConfig.Enabled {
 		balanceProbe = &balanceProbeConfig
 	}
+	var openCodeGoUsage *service.OpenCodeGoUsageState
+	if state := service.OpenCodeGoUsageStateFromAccount(a); state.Eligible {
+		openCodeGoUsage = state
+	}
 	out := &Account{
 		ID:                      a.ID,
 		Name:                    a.Name,
@@ -260,6 +264,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		Extra:                   extra,
 		OllamaCloudUsage:        ollamaCloudUsage,
 		BalanceProbe:            balanceProbe,
+		OpenCodeGoUsage:         openCodeGoUsage,
 		ProxyID:                 a.ProxyID,
 		ProxyFallbackOriginID:   a.ProxyFallbackOriginID,
 		ProxyFallbackOriginName: a.ProxyFallbackOriginName,
@@ -432,7 +437,9 @@ func redactAccountManagedExtra(extra map[string]any) map[string]any {
 		switch key {
 		case service.OllamaCloudUsageSessionExtraKey,
 			service.OllamaCloudUsageAutoRefreshExtraKey,
-			service.OllamaCloudUsageSnapshotExtraKey:
+			service.OllamaCloudUsageSnapshotExtraKey,
+			service.OpenCodeGoUsageAutoRefreshExtraKey,
+			service.OpenCodeGoUsageSnapshotExtraKey:
 			continue
 		default:
 			redacted[key] = value
@@ -447,9 +454,21 @@ func redactAccountManagedExtra(extra map[string]any) map[string]any {
 // 改动 service 包，故此处以最小只读字面量镜像；service 包无导出常量可复用，无法编译期绑定。
 const accountQuotaBalanceLowExtraSuffix = "balance_low"
 
+// Kira 维度来源键的只读字面量镜像（同 accountQuotaBalanceLowExtraSuffix 约定）：
+// service 包 kiraUsageSnapshotExtraKey / quotaDimensionSourceKiraVND 均未导出，本单禁止
+// 改动 service 包，故按线上键名原文镜像；键名由 dto 与 admin 两侧集成测试共同锁定。
+const (
+	accountQuotaKiraUsageSnapshotSource = "kira_usage_snapshot"
+	accountQuotaKiraVNDSource           = "kira_vnd_balance"
+)
+
 // accountQuotaDimensionsFromService 把 service.ResolveAccountQuotaDimensions 的同一
 // resolver 输出投影为 DTO 条目（方案 §3.4 / C5）：全 scope 原样序列化，枚举转小写字符串，
 // observed_at 转 RFC3339（零值省略）。无快照 / 空列表 → nil（由 omitempty 省略字段）。
+//
+// 出口侧恢复我方 line7-v24 免费优先语义（kira→no）：Kira 免费池 confirmed 有剩余而
+// VND 付费维度 confirmed 耗尽 ⇒ 免费维度投影 servable=no（见
+// accountQuotaKiraFreeNotServable）。仅作用于本投影，不改 service 解析侧与 F6 调度门口径。
 func accountQuotaDimensionsFromService(account *service.Account, now time.Time) []AccountQuotaDimension {
 	dims := service.ResolveAccountQuotaDimensions(account, now)
 	if len(dims) == 0 {
@@ -457,12 +476,16 @@ func accountQuotaDimensionsFromService(account *service.Account, now time.Time) 
 	}
 	out := make([]AccountQuotaDimension, 0, len(dims))
 	for _, d := range dims {
+		servable := d.Servable
+		if accountQuotaKiraFreeNotServable(d, dims) {
+			servable = service.QuotaServableNo
+		}
 		projected := AccountQuotaDimension{
 			Kind:     string(d.Kind),
 			Scope:    string(d.Scope),
 			Target:   d.Target,
 			Status:   accountQuotaDimensionStatusString(d.Status),
-			Servable: accountQuotaDimensionServableString(d.Servable),
+			Servable: accountQuotaDimensionServableString(servable),
 			Source:   d.Source,
 		}
 		if !d.ObservedAt.IsZero() {
@@ -495,6 +518,35 @@ func accountQuotaDimensionServableString(servable service.QuotaServableState) st
 	default:
 		return "unknown"
 	}
+}
+
+// accountQuotaKiraFreeNotServable 我方 line7-v24 免费优先语义（kira→no）的出口判定：
+// Kira（kiraai.vn）免费池维度 confirmed 有剩余（新鲜快照 used_percent<100），但同账号的
+// VND 付费维度 confirmed 已耗尽（新鲜 VND≤0）⇒ 免费维度 servable=no。
+//
+// 只在 DTO 投影层判定，两个原因：
+//   - 用户 2026-10-10 §0.2 再裁定删除的是「发送前门内用新鲜 VND≤0 证伪免费维度」的联动
+//     （VND≤0 的冻结改由 Kira 确认探针 9 格判定表与响应式 402 链承担），F6 门口径不得回补；
+//   - service 解析侧 ResolveAccountQuotaDimensions 已被上游定型（恒 ServableUnknown），
+//     其上还有 model 级投影等正交改动，改动会牵动 service 包既有判定。
+//
+// 故恢复点选在被冲掉的出口语义所在处：DTO 维度投影。
+func accountQuotaKiraFreeNotServable(dim service.QuotaDimension, dims []service.QuotaDimension) bool {
+	if dim.Kind != service.QuotaDimensionKindFree ||
+		dim.Scope != service.QuotaDimensionScopeAccount ||
+		dim.Source != accountQuotaKiraUsageSnapshotSource ||
+		dim.Status != service.QuotaDimensionRemaining {
+		return false
+	}
+	for i := range dims {
+		if dims[i].Kind != service.QuotaDimensionKindPaid ||
+			dims[i].Source != accountQuotaKiraVNDSource ||
+			dims[i].Status != service.QuotaDimensionExhausted {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // accountBalanceLowFromExtra 报告账号 extra 是否带 {platform}_balance_low 余额不足标记
@@ -543,8 +595,8 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 	return &AccountListItem{
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
-		OllamaCloudUsage: a.OllamaCloudUsage,
-		ProxyID:          a.ProxyID, ProxyFallbackOriginID: a.ProxyFallbackOriginID, ProxyFallbackOriginName: a.ProxyFallbackOriginName,
+		OllamaCloudUsage: a.OllamaCloudUsage, OpenCodeGoUsage: a.OpenCodeGoUsage,
+		ProxyID: a.ProxyID, ProxyFallbackOriginID: a.ProxyFallbackOriginID, ProxyFallbackOriginName: a.ProxyFallbackOriginName,
 		Concurrency: a.Concurrency, LoadFactor: a.LoadFactor, Priority: a.Priority, RateMultiplier: a.RateMultiplier,
 		Status: a.Status, ErrorMessage: a.ErrorMessage, LastUsedAt: a.LastUsedAt, ExpiresAt: a.ExpiresAt,
 		AutoPauseOnExpired: a.AutoPauseOnExpired, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,

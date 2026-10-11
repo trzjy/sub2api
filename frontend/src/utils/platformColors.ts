@@ -2,7 +2,12 @@
  * Centralized platform color definitions.
  *
  * All components that need platform-specific styling should import from here
- * instead of defining their own color mappings.
+ * instead of defining their own color mappings. Unknown platforms fall back to the
+ * neutral *_DEFAULT styles. The palette is the union of the upstream registrations
+ * (opencode_go / typesafe / command_code / cline) and the fork-owned platforms
+ * (other / codebuddy / muse); conflicting platform keys keep ours (none today).
+ * Labels stay a static switch so that platforms absent from the backend catalog
+ * (`other`) still render a human name.
  */
 
 export type Platform =
@@ -16,6 +21,10 @@ export type Platform =
   | 'deepseek'
   | 'other'
   | 'minimax'
+  | 'opencode_go'
+  | 'typesafe'
+  | 'command_code'
+  | 'cline'
   | 'composite'
   | 'codebuddy'
   | 'muse'
@@ -31,6 +40,10 @@ const BADGE: Record<Platform, string> = {
   zhipu: 'bg-indigo-500/10 text-indigo-600 border-indigo-500/30 dark:text-indigo-400',
   deepseek: 'bg-teal-500/10 text-teal-600 border-teal-500/30 dark:text-teal-400',
   minimax: 'bg-rose-500/10 text-rose-600 border-rose-500/30 dark:text-rose-400',
+  opencode_go: 'bg-amber-500/10 text-amber-700 border-amber-500/30 dark:text-amber-300',
+  typesafe: 'bg-sky-500/10 text-sky-700 border-sky-500/30 dark:text-sky-300',
+  command_code: 'bg-neutral-500/10 text-neutral-700 border-neutral-500/30 dark:text-neutral-300',
+  cline: 'bg-violet-500/10 text-violet-600 border-violet-500/30 dark:text-violet-400',
   composite: 'bg-cyan-500/10 text-cyan-700 border-cyan-500/30 dark:text-cyan-300',
   other: 'bg-slate-500/10 text-slate-600 border-slate-500/30 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 border-sky-500/30 dark:text-sky-400',
@@ -49,6 +62,10 @@ const BADGE_LIGHT: Record<Platform, string> = {
   zhipu: 'bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300',
   deepseek: 'bg-teal-500/10 text-teal-600 dark:bg-teal-500/10 dark:text-teal-300',
   minimax: 'bg-rose-500/10 text-rose-600 dark:bg-rose-500/10 dark:text-rose-300',
+  opencode_go: 'bg-amber-500/10 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
+  typesafe: 'bg-sky-500/10 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300',
+  command_code: 'bg-neutral-500/10 text-neutral-700 dark:bg-neutral-500/10 dark:text-neutral-300',
+  cline: 'bg-violet-500/10 text-violet-600 dark:bg-violet-500/10 dark:text-violet-300',
   composite: 'bg-cyan-500/10 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300',
   other: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/10 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 dark:bg-sky-500/10 dark:text-sky-300',
@@ -66,6 +83,10 @@ const BORDER: Record<Platform, string> = {
   zhipu: 'border-indigo-500/20 dark:border-indigo-500/20',
   deepseek: 'border-teal-500/20 dark:border-teal-500/20',
   minimax: 'border-rose-500/20 dark:border-rose-500/20',
+  opencode_go: 'border-amber-500/20 dark:border-amber-500/20',
+  typesafe: 'border-sky-500/20 dark:border-sky-500/20',
+  command_code: 'border-neutral-500/20 dark:border-neutral-500/20',
+  cline: 'border-violet-500/20 dark:border-violet-500/20',
   composite: 'border-cyan-500/20 dark:border-cyan-500/20',
   other: 'border-slate-500/20 dark:border-slate-500/20',
   codebuddy: 'border-sky-500/20 dark:border-sky-500/20',
@@ -84,6 +105,10 @@ const BORDER_STRONG: Record<Platform, string> = {
   zhipu: 'border-indigo-500/35 dark:border-indigo-500/30',
   deepseek: 'border-teal-500/35 dark:border-teal-500/30',
   minimax: 'border-rose-500/35 dark:border-rose-500/30',
+  opencode_go: 'border-amber-500/35 dark:border-amber-500/30',
+  typesafe: 'border-sky-500/35 dark:border-sky-500/30',
+  command_code: 'border-neutral-500/35 dark:border-neutral-500/30',
+  cline: 'border-violet-500/35 dark:border-violet-500/30',
   composite: 'border-cyan-500/35 dark:border-cyan-500/30',
   other: 'border-slate-500/35 dark:border-slate-500/30',
   codebuddy: 'border-sky-500/35 dark:border-sky-500/30',
@@ -103,6 +128,10 @@ const ACCENT: Record<Platform, string> = {
   zhipu: '#6366f1', // indigo-500
   deepseek: '#14b8a6', // teal-500
   minimax: '#f43f5e', // rose-500
+  opencode_go: '#f59e0b', // amber-500
+  typesafe: '#0ea5e9', // sky-500
+  command_code: '#737373', // neutral-500
+  cline: '#8b5cf6', // violet-500（Cline 品牌紫 #9F58FA）
   composite: '#06b6d4', // cyan-500
   other: '#64748b', // slate-500
   codebuddy: '#0ea5e9', // sky-500
@@ -121,6 +150,10 @@ const ACCENT_BAR: Record<Platform, string> = {
   zhipu: 'bg-gradient-to-r from-indigo-400 to-indigo-500',
   deepseek: 'bg-gradient-to-r from-teal-400 to-teal-500',
   minimax: 'bg-gradient-to-r from-rose-400 to-rose-500',
+  opencode_go: 'bg-gradient-to-r from-amber-400 to-amber-500',
+  typesafe: 'bg-gradient-to-r from-sky-400 to-sky-500',
+  command_code: 'bg-gradient-to-r from-neutral-400 to-neutral-500',
+  cline: 'bg-gradient-to-r from-violet-400 to-violet-500',
   composite: 'bg-gradient-to-r from-slate-500 to-cyan-500',
   other: 'bg-gradient-to-r from-slate-500 to-slate-600',
   codebuddy: 'bg-gradient-to-r from-sky-400 to-sky-500',
@@ -139,6 +172,10 @@ const TEXT: Record<Platform, string> = {
   zhipu: 'text-indigo-600 dark:text-indigo-400',
   deepseek: 'text-teal-600 dark:text-teal-400',
   minimax: 'text-rose-600 dark:text-rose-400',
+  opencode_go: 'text-amber-700 dark:text-amber-300',
+  typesafe: 'text-sky-700 dark:text-sky-300',
+  command_code: 'text-neutral-700 dark:text-neutral-300',
+  cline: 'text-violet-600 dark:text-violet-400',
   composite: 'text-cyan-700 dark:text-cyan-300',
   other: 'text-slate-600 dark:text-slate-300',
   codebuddy: 'text-sky-600 dark:text-sky-400',
@@ -157,6 +194,10 @@ const ICON: Record<Platform, string> = {
   zhipu: 'text-indigo-500 dark:text-indigo-400',
   deepseek: 'text-teal-500 dark:text-teal-400',
   minimax: 'text-rose-500 dark:text-rose-400',
+  opencode_go: 'text-amber-500 dark:text-amber-300',
+  typesafe: 'text-sky-500 dark:text-sky-300',
+  command_code: 'text-neutral-500 dark:text-neutral-300',
+  cline: 'text-violet-500 dark:text-violet-400',
   composite: 'text-cyan-600 dark:text-cyan-300',
   other: 'text-slate-500 dark:text-slate-300',
   codebuddy: 'text-sky-500 dark:text-sky-400',
@@ -175,6 +216,10 @@ const BUTTON: Record<Platform, string> = {
   zhipu: 'bg-indigo-500 text-white hover:bg-indigo-600 active:bg-indigo-700 dark:bg-indigo-500/80 dark:hover:bg-indigo-500',
   deepseek: 'bg-teal-500 text-white hover:bg-teal-600 active:bg-teal-700 dark:bg-teal-500/80 dark:hover:bg-teal-500',
   minimax: 'bg-rose-500 text-white hover:bg-rose-600 active:bg-rose-700 dark:bg-rose-500/80 dark:hover:bg-rose-500',
+  opencode_go: 'bg-amber-500 text-white hover:bg-amber-600 active:bg-amber-700 dark:bg-amber-500/80 dark:hover:bg-amber-500',
+  typesafe: 'bg-sky-600 text-white hover:bg-sky-700 active:bg-sky-800 dark:bg-sky-600/80 dark:hover:bg-sky-600',
+  command_code: 'bg-neutral-500 text-white hover:bg-neutral-600 active:bg-neutral-700 dark:bg-neutral-500/80 dark:hover:bg-neutral-500',
+  cline: 'bg-violet-500 text-white hover:bg-violet-600 active:bg-violet-700 dark:bg-violet-500/80 dark:hover:bg-violet-500',
   composite: 'bg-cyan-700 text-white hover:bg-cyan-800 active:bg-cyan-900 dark:bg-cyan-600 dark:hover:bg-cyan-500',
   other: 'bg-slate-600 text-white hover:bg-slate-700 active:bg-slate-800 dark:bg-slate-600/80 dark:hover:bg-slate-600',
   codebuddy: 'bg-sky-500 text-white hover:bg-sky-600 active:bg-sky-700 dark:bg-sky-500/80 dark:hover:bg-sky-500',
@@ -193,6 +238,10 @@ const DISCOUNT: Record<Platform, string> = {
   zhipu: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300',
   deepseek: 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
   minimax: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+  opencode_go: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  typesafe: 'bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-300',
+  command_code: 'bg-neutral-100 text-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-300',
+  cline: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300',
   composite: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300',
   other: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
   codebuddy: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
@@ -211,6 +260,10 @@ const GRADIENT: Record<Platform, string> = {
   zhipu: 'from-indigo-500 to-indigo-600',
   deepseek: 'from-teal-500 to-teal-600',
   minimax: 'from-rose-500 to-rose-600',
+  opencode_go: 'from-amber-500 to-amber-600',
+  typesafe: 'from-sky-500 to-sky-600',
+  command_code: 'from-neutral-500 to-neutral-600',
+  cline: 'from-violet-500 to-violet-600',
   composite: 'from-slate-600 to-cyan-600',
   other: 'from-slate-600 to-slate-700',
   codebuddy: 'from-sky-500 to-sky-600',
@@ -229,6 +282,10 @@ const GRADIENT_TEXT: Record<Platform, string> = {
   zhipu: 'text-indigo-100',
   deepseek: 'text-teal-100',
   minimax: 'text-rose-100',
+  opencode_go: 'text-amber-100',
+  typesafe: 'text-sky-100',
+  command_code: 'text-neutral-100',
+  cline: 'text-violet-100',
   composite: 'text-cyan-100',
   other: 'text-slate-100',
   codebuddy: 'text-sky-100',
@@ -246,6 +303,10 @@ const GRADIENT_SUBTEXT: Record<Platform, string> = {
   zhipu: 'text-indigo-200',
   deepseek: 'text-teal-200',
   minimax: 'text-rose-200',
+  opencode_go: 'text-amber-200',
+  typesafe: 'text-sky-200',
+  command_code: 'text-neutral-200',
+  cline: 'text-violet-200',
   composite: 'text-cyan-200',
   other: 'text-slate-200',
   codebuddy: 'text-sky-200',
@@ -265,9 +326,13 @@ function isPlatform(p: string): p is Platform {
     p === 'kimi' ||
     p === 'zhipu' ||
     p === 'deepseek' ||
-    p === 'other' ||
     p === 'minimax' ||
+    p === 'opencode_go' ||
+    p === 'typesafe' ||
+    p === 'command_code' ||
+    p === 'cline' ||
     p === 'composite' ||
+    p === 'other' ||
     p === 'codebuddy' ||
     p === 'muse'
   )
@@ -338,6 +403,11 @@ export function platformGradientSubtextClass(p: string): string {
   return isPlatform(p) ? GRADIENT_SUBTEXT[p] : GRADIENT_SUBTEXT_DEFAULT
 }
 
+/** 平台展示名：来自平台清单（后端 domain/platforms.go），新登记的平台同样适用。 */
+/**
+ * 平台展示名。保持显式 switch（而非读取平台清单）：`other` 不在后端平台清单里，
+ * 清单派生会让它退回裸 id；此处同时覆盖 upstream 新登记平台与我方自研平台。
+ */
 export function platformLabel(p: string): string {
   switch (p) {
     case 'anthropic': return 'Anthropic'
@@ -350,6 +420,10 @@ export function platformLabel(p: string): string {
     case 'deepseek': return 'DeepSeek'
     case 'other': return 'Other'
     case 'minimax': return 'MiniMax'
+    case 'opencode_go': return 'OpenCode'
+    case 'typesafe': return 'TypeSafe / Jev'
+    case 'command_code': return 'Command Code'
+    case 'cline': return 'Cline'
     case 'composite': return 'Composite'
     case 'codebuddy': return 'CodeBuddy'
     case 'muse': return 'Muse'

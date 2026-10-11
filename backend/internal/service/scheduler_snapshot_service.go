@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
@@ -644,10 +645,13 @@ func (s *SchedulerSnapshotService) handleBulkAccountEvent(ctx context.Context, p
 			continue
 		}
 		accountGroupIDs := s.normalizeGroupIDs(account.GroupIDs)
-		switch account.Platform {
-		case PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOther:
+		switch {
+		// 具体平台（domain 清单 SSOT）+ 我方自研 other 平台：other 非具体平台
+		// （未登记进 domain.platformList），但按 platform-other.md §3.8 须纳入调度
+		// 快照全生命周期，故在此显式并入增量重建路径（保留我方语义）。
+		case account.Platform != PlatformAntigravity && (isConcreteRequestPlatform(account.Platform) || account.Platform == PlatformOther):
 			addPlatformGroups(account.Platform, accountGroupIDs)
-		case PlatformAntigravity:
+		case account.Platform == PlatformAntigravity:
 			// 批量更新可能刚关闭 mixed_scheduling，仍需清理两个兼容平台的旧快照。
 			addPlatformGroups(PlatformAntigravity, accountGroupIDs)
 			addPlatformGroups(PlatformAnthropic, accountGroupIDs)
@@ -860,8 +864,15 @@ func (s *SchedulerSnapshotService) rebuildByAccount(ctx context.Context, account
 	return s.rebuildBuckets(ctx, buckets, reason)
 }
 
-func schedulerSnapshotPlatforms() [10]string {
-	return [10]string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOther}
+// schedulerSnapshotPlatforms 返回需要维护调度快照的全部平台：上游 domain 平台清单
+// （具体平台 SSOT，按平台回退顺序）显式追加我方自研 other 平台。other 不是具体平台
+// （未登记进 domain.platformList），但按 platform-other.md §3.8 须纳入调度快照全生命
+// 周期（平台集合 / canonical bucket / 批量重建 / reopen·retire），故在此追加为末位，
+// 与原显式清单顺序（other 居末）一致。先取回派生切片再追加，避免直接 append 到调用
+// 结果上；该切片由 domain.CompositePrecedencePlatformIDs 每次调用新分配，无别名共享风险。
+func schedulerSnapshotPlatforms() []string {
+	platforms := domain.CompositePrecedencePlatformIDs()
+	return append(platforms, PlatformOther)
 }
 
 // 生命周期辅助函数有意排除 group0；full rebuild 构造 group0 canonical 集时必须显式调用 canonical helper。

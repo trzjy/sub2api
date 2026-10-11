@@ -4496,6 +4496,18 @@ const cnAccentIconClass = computed(() => {
       return 'bg-primary-500 text-white'
   }
 })
+// w40 conflict-resolution fusion notes (second wave, B10 — frontend semantic_conflict)
+// 冲突区：selectCNPlatform、两个 watch（accountMode / apiProtocol）、协议选项块。
+// 三方状态：工作树本文件 == b0-ours（自动合并整文件取我方），上游在同区重写为
+// opencode_go / typesafe 多协议模型、删除 other 平台独立协议块、watch(apiProtocol) 缩成单参、
+// cnProtocolOptions 改用 [...cnAdaptiveProtocolOptions] 展开。
+// 裁决：keep OURS（引用跨文件签名权威表第 4 条——账号平台判定保留我方平台分支
+// other/codebuddy/muse/web，上游 IsMultiProtocolAPIKeyProvider 分支在 account.go / platforms 层
+// 追加，不在本 CN 平台选择 UI 重写）。收敛单元：(a) selectCNPlatform 我方（含网页接入模式 +
+// deepseek 锁 payg）(b) 两个 watch 我方双参 (c) cnProtocolOptions 我方显式 + 条件 responses
+// (d) otherProtocolOptions 与模板 other 独立协议块保留；owner 均为 w40。
+// 对应融合用例：__tests__/CreateAccountModal.fusion.spec.ts（含变异验证，去掉 responses push 即红）。
+
 // 切换国产供应商平台：强制 apikey 类型，deepseek 无 coding 套餐故锁定 payg，
 // 协议回落 adaptive，并把 base url 重置为该平台默认端点。
 function selectCNPlatform(platform: CnProviderPlatform) {

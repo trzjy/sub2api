@@ -92,9 +92,18 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 	return upstreamTransportErrorClass{}
 }
 
+// isClientCanceledTransportError reports whether a transport-level failure was
+// caused by the client disconnecting: the request context itself is canceled
+// and the round-trip aborted with context.Canceled. Such a failure says nothing
+// about the upstream, so it is not recorded as an Ops upstream error event.
+func isClientCanceledTransportError(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) && ctx != nil && errors.Is(ctx.Err(), context.Canceled)
+}
+
 // handleOpenAIUpstreamTransportError handles a transport-level upstream failure
 // (Do/DoWithTLS returned a non-HTTP error: proxy/DNS/TCP/TLS). It:
-//  1. records the failure in Ops error logs (status 0, kind=request_error);
+//  1. records the failure in Ops error logs (status 0, kind=request_error),
+//     except when the client disconnected (see isClientCanceledTransportError);
 //  2. for durable faults (expired/rejected proxy creds, dead proxy, DNS/routing)
 //     temporarily unschedules the account (DB + in-memory) and logs a stable
 //     warn event that alert rules can key on;
@@ -113,6 +122,12 @@ func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool, upstreamModel string) error {
 	if c != nil {
 		c.Set(MaskedAccountFailoverKey, account != nil && IsIdentityMaskedAccount(account))
+	}
+	// Client disconnected before the upstream could exhibit a fault: the request
+	// context itself is canceled, so do not record an Ops upstream error event.
+	// (Ours stashes the masked-failover flag above, before this guard.)
+	if isClientCanceledTransportError(ctx, err) {
+		return err
 	}
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
 	setOpsUpstreamError(c, 0, safeErr, "")
@@ -141,9 +156,10 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		return s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
 	}
 
-	// Transport attempt reached the network path; count as Ollama Cloud activity.
+	// Transport attempt reached the network path; count as Ollama Cloud / OpenCode Go activity.
 	if s != nil {
 		scheduleOllamaCloudUsageActivity(s.deferredService, account)
+		scheduleOpenCodeGoUsageActivity(s.deferredService, account)
 	}
 
 	// 插件已把请求交给上游时，自动切换账号可能造成重复扣费或重复执行。

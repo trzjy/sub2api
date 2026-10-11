@@ -40,6 +40,13 @@ func (UserPlatformQuota) Fields() []ent.Field {
 			Validate(func(s string) error {
 				// 注意：平台列表的单一权威源为 service.AllowedQuotaPlatforms；
 				// 此处为 ent 构建期约束，需与 service.AllowedQuotaPlatforms 保持同步。
+				//
+				// 刻意保留显式 switch 而不用 domain.IsConcretePlatform：平台清单
+				// （domain/platforms.go）不含 "other"，换成注册表校验会让 other 在配额写入
+				// 链路变得不可达，从而改变 ours 现状。相对注册表，此处多 other、缺上游新增的
+				// opencode_go / typesafe / command_code / cline；其中 muse 是 fork 侧既有漂移
+				// （此校验通过，但不在 service.AllowedQuotaPlatforms）。上游合并裁定要求逐
+				// 消费者复刻 ours 行为，故保持现状。
 			switch s {
 			case "anthropic", "openai", "gemini", "antigravity", "grok",
 				"kimi", "zhipu", "deepseek", "minimax", "codebuddy", "other", "muse":

@@ -148,6 +148,7 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
+!docs/codex-credits.md
 !docs/xianyu-manual-captcha-helper.md
 !docs/platform-other.md
 !docs/footer-links-ssr-injection-plan.md
@@ -161,6 +162,8 @@ docs/*
 !docs/screenshots/
 docs/screenshots/*
 !docs/screenshots/mobile-account-actions-menu.png
+!docs/screenshots/codex-referral-dialog.png
+!docs/screenshots/codex-referral-success.png
 .serena/
 .codex/
 /.codebuddy/
@@ -169,6 +172,7 @@ frontend/coverage/
 aicodex
 output/
 .codegraph/
+issues/
 
 # Vitest / Vite cache at repo root
 .vite/
@@ -188,3 +192,68 @@ tmp-probe/
 # 派发单与外审审查包（工作过程产物，不入库）
 /DISPATCH-*.md
 /REVIEW-PACKET-*.md
+
+# w74 conflict-resolution fusion notes (second wave, B1b — CI/CD)
+# 裁决基线: b0-base=98d86915 / b0-ours=8bf13d6d / b0-upstream=f2669c8c
+# 规则: 双方规则并集（双方各自新增的 ignore/!un-ignore 全部保留，无一方条目被丢弃），
+#       回引 merge-plan §5 rule 1（我方有重写则我方语义为准）+ rule 2（上游新增条目纳入前核对消费者）。
+#
+# keep OURS（本卡裁决保留，语义正交于上游，逐条理由）:
+#   1. `.env`（第 4 行，与第 53 行"环境配置"段重复）— 我方新增。虽与既有 `.env` 规则语义重复，
+#      但属我方显式声明，删除即丢失我方意图；重复规则幂等无副作用，故保留。
+#   2. `!deploy-config/xianyu-auto-reply-src/{scheduler/,}tests/` + `!deploy-config/scripts/`
+#      — 我方新增的白名单回捞。"其他"段第 120 行 `tests` 与第 129 行 `scripts` 是无锚点模式
+#      （匹配任意层级同名文件/目录），会误吞我方 deploy-config 下的测试与脚本；这四条
+#      `!` 例外是修正该误吞的最小必要集，与上游无关。
+#   3. `!docs/{xianyu-manual-captcha-helper,platform-other,footer-links-ssr-injection-plan,
+#      footer-links-plan,gpt-price-fx-alignment-plan,gpt-price-fx-alignment.sql,
+#      abnormal-usage-analysis-plan,kimi-upstream-failover-hardening-plan}.md` — 我方自研
+#      方案文档白名单，全部对应我方独有能力（闲管家/聚合路由/汇率对齐/异常分析/kimi 故障转移），
+#      上游无同名文件，不构成重复。
+#   4. `/.codebuddy/`、`/.omc/`、`/.omx/`、`.hypothesis/`、`/.zcode/`、`.workbuddy/`、
+#      `tmp-probe/`、`/DISPATCH-*.md`、`/REVIEW-PACKET-*.md` — 我方本机工具/审查流程产物。
+#      全部为"新增忽略"，只会让文件不被跟踪，不影响构建/发布/测试，且能防止把密钥
+#      （.env 同理）与本机缓存误提交。
+#
+# take UPSTREAM（本卡裁决吸收，逐条理由）:
+#   5. `!docs/codex-credits.md` — 上游新增白名单。核对: b0-upstream 树中无该文件
+#      （git cat-file -e b0-upstream:docs/codex-credits.md → NO），工作树亦无，属上游
+#      预置的未落地白名单条目。保留为无害的 `!` 例外：若该文档日后由他卡带入，
+#      规则已就位不会二次误吞；当前无消费者、无副作用（merge-plan §5 rule 2 消费者核对：
+#      无脚本/CI 引用 docs/codex-credits.md，grep 全仓无命中）。
+#   6. `!docs/screenshots/codex-referral-dialog.png` / `!docs/screenshots/codex-referral-success.png`
+#      — 同上，b0-upstream 与工作树均无这两个二进制文件；上游 docs/screenshots/ 实存
+#      reasoning-effort-pricing.png 仍被 `docs/screenshots/*` 忽略，与上游一致，未改动。
+#      保留两条 `!` 例外以对齐上游意图，无当前消费者。
+#   7. `issues/` — 上游新增忽略项。核对: b0-base/b0-ours/b0-upstream 三方树顶层均无
+#      `issues/` 目录，且全仓无对该目录的引用（构建/CI/Makefile 无命中），是纯防御性
+#      忽略（issue 导出目录不应入库）。并入无风险。
+#
+# 四方核对结论（.gitignore 无 funds/签名/常量耦合，不触及权威表 1-7 任一条）:
+#   base→ours +14 行，base→upstream +4 行，交集为空、语义正交 → 并集即 base+18 行，
+#   无需 BLOCKED。工作树改动后与 b0-ours 的差异仅为第 5/6/7 条共 4 行。
+#
+# CI/CD 硬门禁核对（只读审计，release.yml/Makefile 归 w73/w75 卡所有，本卡不改）:
+#   - triggers: release.yml 仅 `push.tags: v*` + `workflow_dispatch`；backend-ci.yml /
+#     security-scan.yml 为 `push` + `pull_request`（+ weekly cron），claude 助手为
+#     issue_comment / pull_request_target。全仓 grep `branches:` 无命中 → 无任何工作流
+#     绑定分支触发器，**main 更新本身不触发发布或部署**（门禁通过）。
+#   - 远端副作用: 全仓 grep 无 ssh/scp/rsync/render/vercel/netlify/fly 部署步；
+#     release.yml 的写操作（contents/packages write、DockerHub/GHCR 登录、Telegram 通知、
+#     VERSION 回写）全部在 tag 或手动 dispatch 之后，不随 main 更新发生。
+#   - permissions/secrets/environment: release.yml 顶层 contents:write + packages:write
+#     （发布必需，与 base 一致未被扩大）；secrets 仅 DOCKERHUB_*/TELEGRAM_*/GITHUB_TOKEN；
+#     无 `environment:` 引用，无新增 environment 门禁。fork 侧 cla.yml 以
+#     `github.repository == 'Wei-Shaw/sub2api'` 硬判定，上游仓库外自动 no-op，
+#     **fork 构建行为保留**。
+#   - artifact: 无新增/删除；发布目标仍为 GHCR + DockerHub（+可选 GitHub Release），
+#     与 base/ours 一致。
+#   - 阻塞项移交: release.yml 双方均新增 go 编译缓存步（我方 cache@v4 vs 上游
+#     cache/restore@v6 + save@v6），且上游整体改为 prepare/build-binaries/release 三 job
+#     矩阵化 + dry_run 输入 —— 属"新增自动发布/权限结构调整"，归 w73 卡裁决，本卡不越界。
+#   - 附带发现（不在本卡文件清单，仅登记）: 上游 backend-ci.yml / security-scan.yml /
+#     release.yml 的 Go 版本断言为 go1.27.2，而 b0-ours 的 backend/go.mod 为 go 1.27.0；
+#     同理 w75 卡的 Makefile critical-vitest 列表若照搬上游，会引用当前树中不存在的
+#     spec（keys.bulkUpdate / OpenAIReferralCell×2 / credentialsBuilder.platformCatalog /
+#     OpenCodeGoProtocolRulesEditor / BulkEditKeysModal / PricingEntryCard.modelDefaultPrice
+#     共 7 个），导致 `make test-frontend-critical` 直接失败。两者均登记交由对应卡裁决。

@@ -31,9 +31,20 @@ const (
 	PlatformCodeBuddy = "codebuddy" // CodeBuddy (腾讯代码助手 / copilot.tencent.com，OAuth 订阅制)
 	// PlatformOther 通用 OpenAI 兼容自定义上游：任意第三方 Chat Completions
 	// 兼容端点经 OpenAI 网关转发。无内置 base_url 预设，账号须自填 base_url。
-	PlatformOther     = "other"
-	PlatformMiniMax   = "minimax" // MiniMax (M 系列)
-	PlatformMuse      = "muse"     // Muse (OpenCode Go 上游 Meta Muse Spark Contributor，非国产供应商)
+	PlatformOther   = "other"
+	PlatformMiniMax = "minimax" // MiniMax (M 系列)
+	PlatformMuse    = "muse"    // Muse (OpenCode Go 上游 Meta Muse Spark Contributor，非国产供应商)
+	// PlatformTypeSafe 是 TypeSafe AI System One（Jev），走 Anthropic 网关族。
+	PlatformTypeSafe = "typesafe"
+	// PlatformOpenCodeGo 是 OpenCode 平台（账号类型 Zen 按量 / Go 订阅）。
+	// 值保持 opencode_go 以兼容已落库的账号、分组、配额与 Composite 路由。
+	PlatformOpenCodeGo = "opencode_go"
+	// PlatformCommandCode 是 Command Code Provider API（多模型聚合，积分计费，
+	// 订阅套餐另有 5 小时 / 每周滚动窗口）。
+	PlatformCommandCode = "command_code"
+	// PlatformCline 是 Cline API（多模型聚合，OpenAI 兼容 Chat Completions；按量积分计费，
+	// 另有 ClinePass 订阅）。
+	PlatformCline     = "cline"
 	PlatformComposite = "composite"
 )
 
@@ -55,6 +66,8 @@ func IsWebLoginPlatform(platform string) bool {
 const (
 	AccountModePayG   = "payg"   // 按量付费：消耗余额，做余额检测冷却
 	AccountModeCoding = "coding" // Coding Plan：滚动用量窗口冷却（5h / weekly）
+	AccountModeZen    = "zen"    // OpenCode Zen：按量付费，https://opencode.ai/zen/v1
+	AccountModeGo     = "go"     // OpenCode Go：订阅额度窗口，https://opencode.ai/zen/go/v1
 )
 
 // Account access mode constants 区分同一官方平台账号的「官方 API」与「网页逆向」
@@ -175,6 +188,18 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.6-flash-low":    "gemini-3.6-flash-low",
 	"gemini-3.6-flash-medium": "gemini-3.6-flash-medium",
 	"gemini-3.6-flash-tiered": "gemini-3.6-flash-tiered",
+	// Gemini 3.7 Flash tiered models
+	"gemini-3.7-flash":        "gemini-3.7-flash",
+	"gemini-3.7-flash-high":   "gemini-3.7-flash-high",
+	"gemini-3.7-flash-low":    "gemini-3.7-flash-low",
+	"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
+	"gemini-3.7-flash-tiered": "gemini-3.7-flash-tiered",
+	// Gemini 3.8 Flash tiered models
+	"gemini-3.8-flash":        "gemini-3.8-flash",
+	"gemini-3.8-flash-high":   "gemini-3.8-flash-high",
+	"gemini-3.8-flash-low":    "gemini-3.8-flash-low",
+	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
+	"gemini-3.8-flash-tiered": "gemini-3.8-flash-tiered",
 	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
 	"gemini-3-pro-image":         "gemini-3.1-flash-image",
 	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",
@@ -202,6 +227,8 @@ var DefaultBedrockModelMapping = map[string]string{
 	"claude-opus-4-1":          "us.anthropic.claude-opus-4-1-20250805-v1:0",
 	"claude-opus-4-20250514":   "us.anthropic.claude-opus-4-20250514-v1:0",
 	// Claude Sonnet
+	// Sonnet 5.5 is available on bedrock-runtime through Global inference only.
+	"claude-sonnet-5-5":          "global.anthropic.claude-sonnet-5-5",
 	"claude-sonnet-5":            "us.anthropic.claude-sonnet-5-v1",
 	"claude-sonnet-4-6-thinking": "us.anthropic.claude-sonnet-4-6",
 	"claude-sonnet-4-6":          "us.anthropic.claude-sonnet-4-6",

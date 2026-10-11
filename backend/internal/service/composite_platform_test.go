@@ -181,6 +181,8 @@ func TestDetectModelPlatform(t *testing.T) {
 		{name: "minimax prefix", model: "minimax/MiniMax-M2.5", platform: PlatformMiniMax, ok: true},
 		{name: "abab legacy", model: "abab6.5-chat", platform: PlatformMiniMax, ok: true},
 		{name: "abab7 legacy", model: "abab7-chat-preview", platform: PlatformMiniMax, ok: true},
+		{name: "jev", model: "jev-latest", platform: PlatformTypeSafe, ok: true},
+		{name: "typesafe prefix", model: "typesafe/jev-latest", platform: PlatformTypeSafe, ok: true},
 		{name: "abab unrelated namespace", model: "abab-other", ok: false},
 		{name: "unknown k3 alias", model: "k3-preview", ok: false},
 		{name: "unknown", model: "llama-4-maverick", ok: false},
@@ -221,8 +223,15 @@ func TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets(t *testing.T) {
 	}
 
 	// 非聚合平台维持裸名（codebuddy 自身与 anthropic/gemini/openai/antigravity/grok 不加标签）。
+	//
+	// 合并上游 v0.2.15 后候选调度平台经 domain SSOT（domain.CompositePrecedencePlatformIDs）
+	// 派生并追加我方 other（见 scheduler_snapshot_service.go）：上游新增
+	// opencode_go/typesafe/command_code/cline 与我方自研 codebuddy/muse 均为裸名桶键，
+	// 须一并纳入期望集合（消费者核对见本卡 notes「跨批依赖」）。
 	nonAggPlatforms := []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
+		PlatformOpenCodeGo, PlatformTypeSafe, PlatformCommandCode, PlatformCline,
+		PlatformCodeBuddy, PlatformMuse,
 	}
 	// 聚合族五平台：裸名 + "@agg" + schedulerSnapshotAggregationVersion（用常量拼，不硬编码版本号）。
 	aggPlatforms := []string{
@@ -248,7 +257,7 @@ func TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets(t *testing.T) {
 }
 
 func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
-	for _, platform := range []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax} {
+	for _, platform := range []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformTypeSafe, PlatformCommandCode, PlatformCline} {
 		require.True(t, isConcreteRequestPlatform(platform))
 		require.True(t, canCopyAccountsFromGroupPlatform(PlatformComposite, platform))
 	}

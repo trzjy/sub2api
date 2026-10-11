@@ -112,6 +112,20 @@ const props = defineProps<{
 
 const { t } = useI18n()
 
+// w38 conflict-resolution fusion (second wave, B10 — funds_or_state / semantic_conflict)
+// 冲突注记：[COMPILE] 上游删 readMode 并改单参 cnBalanceCellVisible(props.account)，我方三参仍用 readMode。
+// keep OURS: readMode() + 三参 cnBalanceCellVisible(props.account.platform, readMode(), resolveAccountBaseURL(props.account.credentials))。
+//   - 消费方 ./credentialsBuilder.cnBalanceCellVisible 在工作树为我方 3 参签名
+//     (frontend/src/components/account/credentialsBuilder.ts，已核对 = b0-ours，单参上游版未入树)；
+//     若改上游单参调用会编译失败（缺 1/2 实参）。
+//   - @/types Account 仍含 balance_low (index.ts:1333) 与 quota_dimensions (index.ts:1331)，
+//     我方 DTO balance_low 出口可编译；上游 extra[<platform>_balance_low] 直读口径已按方案 §3.4 / R5-F3 归零。
+// take UPSTREAM (暂缓，跨卡依赖): 上游删 readMode、cnBalanceCellVisible 改单参 (account: CNUsageCellAccount)。
+//   该单参版依赖上游 credentialsBuilder.ts 单参实现(未入树) + 上游 Account.balance_low 字段移除(未入树)，
+//   当前二者皆缺席 => 不能单方面落地半边契约。收敛单元 B11(merge index owner)。
+// 报警哨兵: __tests__/CNProviderBalanceCell.spec.ts 扫描 cnBalanceCellVisible.toString() 含 accountMode/baseURL；
+//   上游单参版入树时本哨兵必然 FAIL = 设计中的报警。
+
 const readMode = (): string => {
   const mode = props.account.credentials?.account_mode
   return typeof mode === 'string' ? mode : ''

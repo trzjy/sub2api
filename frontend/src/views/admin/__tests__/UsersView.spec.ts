@@ -4,14 +4,83 @@ import { flushPromises, mount } from '@vue/test-utils'
 import type { AdminUser } from '@/types'
 import UsersView from '../UsersView.vue'
 
+// w68 conflict-resolution fusion (second wave, B10 — same_contract)
+//
+// Classification: `same_contract`. Both sides edited the SAME mock/api contract
+// surface in this file (the `@/api/admin` mock block, the `AdminUser` factory and
+// the `vue-i18n` `t` mock), so the fusion is recorded field by field below
+// (card rule: DTO/types/api fields both sides touched → field-level fusion list).
+//
+// base = 98d86915be, ours = b0-ours, upstream = b0-upstream.
+//
+// ── mocked api contract: `adminAPI.users.*` ────────────────────────────────────
+// field/symbol   base        ours              upstream          → result
+// list           listUsers   listUsers +        listUsers +      KEEP BOTH
+//                           has_active_sub-   bulk-delete/toggle  (disjoint asserts)
+//                           scription asserts
+// toggleStatus   vi.fn()     == base (no       hoisted          TAKE UPSTREAM
+//                           rewrite)           `toggleStatus`
+// delete         vi.fn()     == base (no       hoisted          TAKE UPSTREAM
+//                           rewrite)           `deleteUser`
+//   Rationale: our side never rewrote these two symbols (it still matched base),
+//   so upstream's orthogonal change — hoisting them so the new bulk-delete /
+//   in-place-toggle tests can assert on them — is absorbed rather than dropped
+//   (merge-plan §5 rule 1/2). `toggleStatus(id, status)` keeps the `'active' |
+//   'disabled'` union, matching `src/api/admin/users.ts`.
+// showError /    vi.fn()     == base (no       hoisted          TAKE UPSTREAM
+// showSuccess                 rewrite)
+// groups.getAll / dashboard.getBatchUsersUsage / userAttributes.*
+//                == base     == base           == base           KEEP BASE
+//                          (untouched by both sides)
+//
+// ── DTO: `AdminUser` (createAdminUser factory) ────────────────────────────────
+// Fields consumed by our tests (balance_notify_*, allowed_groups, last_active_at,
+// last_used_at, created_at, updated_at, notes, email, role, status, balance,
+// concurrency, current_concurrency, id, username) and by upstream's tests
+// (`status`, `current_concurrency`) all already exist in the base factory with
+// identical types and values → NO field-level change, DTO factory is kept as-is.
+// Upstream additionally feeds `current_concurrency: undefined` through
+// `toggleStatus` to assert the row keeps its locally-held concurrency; that is an
+// argument value, not a DTO change.
+//
+// ── i18n: `useI18n().t` mock signature ─────────────────────────────────────────
+// base   = (key) => key
+// ours   = == base (never rewrote it)
+// upstream = (key, params?) => params?.count === undefined ? key : `${key}:${count}`
+// → TAKE UPSTREAM. Card rule: same key value conflicts default to ours, EXCEPT keys
+// belonging to a new upstream feature — `count` interpolation exists solely to feed
+// upstream's `admin.users.bulkDelete.{confirm,success,failed}` messages, so the
+// upstream signature is taken. Our tests pass no `count`, and the new signature is
+// backward-compatible for them (`key` is returned unchanged when `count` is absent).
+//
+// ── localStorage keys touched ───────────────────────────────────────────────────
+// ours    = `user-visible-filters`, `user-filter-values` (subscription filter)
+// upstream = `admin-users-usage-sort` (usage sort) → disjoint, KEEP BOTH.
+//
+// i18n locale values: no `admin.users.bulkDelete.*` value conflict exists here —
+// this spec never edits locale message files, and the production-side
+// `src/views/admin/UsersView.vue` + `src/i18n/locales/*` belong to other cards.
+//
+// Net: the auto-merge of this file is a lossless union (verified: `diff upstream`
+// has zero removals, and the only 5 ours-lines absent from the result are exactly
+// upstream's hoisting replacements). No test was weakened or dropped by w68.
+
 const {
   listUsers,
+  toggleStatus,
+  deleteUser,
+  showError,
+  showSuccess,
   getAllGroups,
   getBatchUsersUsage,
   listEnabledDefinitions,
   getBatchUserAttributes
 } = vi.hoisted(() => ({
   listUsers: vi.fn(),
+  toggleStatus: vi.fn(),
+  deleteUser: vi.fn(),
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
   getAllGroups: vi.fn(),
   getBatchUsersUsage: vi.fn(),
   listEnabledDefinitions: vi.fn(),
@@ -22,8 +91,8 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     users: {
       list: listUsers,
-      toggleStatus: vi.fn(),
-      delete: vi.fn()
+      toggleStatus,
+      delete: deleteUser
     },
     groups: {
       getAll: getAllGroups
@@ -40,8 +109,8 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn()
+    showError,
+    showSuccess
   })
 }))
 
@@ -50,7 +119,8 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string, params?: { count?: number }) =>
+        params?.count === undefined ? key : `${key}:${params.count}`
     })
   }
 })
@@ -83,6 +153,7 @@ const DataTableStub = {
     <div>
       <div data-test="columns">{{ columns.map(col => col.key).join(',') }}</div>
       <div data-test="row-order">{{ data.map(row => row.email).join(',') }}</div>
+      <div data-test="row-state">{{ data.map(row => [row.id, row.status, row.current_concurrency].join(':')).join(',') }}</div>
       <div data-test="selected-keys">{{ (selectedKeys || []).join(',') }}</div>
       <button data-test="sort-last-used" @click="$emit('sort', 'last_used_at', 'desc')">sort</button>
       <button
@@ -98,6 +169,7 @@ const DataTableStub = {
       </template>
       <div v-for="row in data" :key="row.id">
         <slot name="cell-last_used_at" :value="row.last_used_at" :row="row" />
+        <div :data-test="'actions-' + row.id"><slot name="cell-actions" :row="row" /></div>
       </div>
     </div>
   `
@@ -149,12 +221,63 @@ const mountUsersView = () => mount(UsersView, {
   }
 })
 
+const mountBulkDeleteView = () => mount(UsersView, {
+  global: {
+    stubs: {
+      AppLayout: { template: '<div><slot /></div>' },
+      TablePageLayout: {
+        template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
+      },
+      DataTable: DataTableStub,
+      Pagination: PaginationStub,
+      ConfirmDialog: {
+        props: ['show', 'message'],
+        emits: ['confirm', 'cancel'],
+        template: `<div v-if="show" data-test="delete-dialog">
+          <span>{{ message }}</span>
+          <button data-test="confirm-delete" @click="$emit('confirm')">confirm</button>
+          <button data-test="cancel-delete" @click="$emit('cancel')">cancel</button>
+        </div>`
+      },
+      EmptyState: true,
+      GroupBadge: true,
+      Select: true,
+      UserAttributesConfigModal: true,
+      UserConcurrencyCell: true,
+      UserCreateModal: true,
+      UserEditModal: true,
+      BulkEditUserModal: true,
+      UserPlatformQuotaModal: true,
+      UserApiKeysModal: true,
+      UserAllowedGroupsModal: true,
+      UserBalanceModal: true,
+      UserBalanceHistoryModal: true,
+      GroupReplaceModal: true,
+      Icon: true,
+      Teleport: true
+    }
+  }
+})
+
+const getToggleStatusButton = (wrapper: ReturnType<typeof mountBulkDeleteView>, id: number) => {
+  const button = wrapper
+    .get(`[data-test="actions-${id}"]`)
+    .findAll('button')
+    .find((candidate) => /admin\.users\.(disable|enable)$/.test(candidate.text()))
+  if (!button) throw new Error(`toggle status button not found for user ${id}`)
+  return button
+}
+
 describe('admin UsersView', () => {
   beforeEach(() => {
     vi.useRealTimers()
     localStorage.clear()
 
     listUsers.mockReset()
+    toggleStatus.mockReset()
+    deleteUser.mockReset()
+    showError.mockReset()
+    showSuccess.mockReset()
     getAllGroups.mockReset()
     getBatchUsersUsage.mockReset()
     listEnabledDefinitions.mockReset()
@@ -175,6 +298,147 @@ describe('admin UsersView', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('cancels bulk deletion without deleting or clearing selected users', async () => {
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="bulk-delete-users"]').exists()).toBe(false)
+    await wrapper.get('[data-test="select-42"]').trigger('click')
+    await wrapper.get('[data-test="bulk-delete-users"]').trigger('click')
+    expect(wrapper.get('[data-test="delete-dialog"]').text()).toContain('admin.users.bulkDelete.confirm:1')
+    expect(deleteUser).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-test="cancel-delete"]').trigger('click')
+    expect(wrapper.find('[data-test="delete-dialog"]').exists()).toBe(false)
+    expect(deleteUser).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-test="selected-keys"]').text()).toBe('42')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { failedIds: [], remaining: '', deleted: 2 },
+    { failedIds: [43], remaining: '43', deleted: 1 },
+    { failedIds: [42, 43], remaining: '42,43', deleted: 0 }
+  ])('deletes across pages and retains failures: $remaining', async ({ failedIds, remaining, deleted }) => {
+    listUsers.mockImplementation(async (page: number) => ({
+      items: [createAdminUser({ id: page === 2 ? 43 : 42 })],
+      total: 2, page, page_size: 20, pages: 2
+    }))
+    deleteUser.mockImplementation(async (id: number) => {
+      if (failedIds.includes(id)) throw new Error('Cannot delete user')
+    })
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+    await wrapper.get('[data-test="select-42"]').trigger('click')
+    await wrapper.get('[data-test="next-page"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="select-43"]').trigger('click')
+    await wrapper.get('[data-test="bulk-delete-users"]').trigger('click')
+    expect(deleteUser).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-test="confirm-delete"]').trigger('click')
+    await flushPromises()
+
+    expect(deleteUser.mock.calls).toEqual([[42], [43]])
+    expect(wrapper.get('[data-test="selected-keys"]').text()).toBe(remaining)
+    expect(wrapper.find('[data-test="delete-dialog"]').exists()).toBe(false)
+    if (deleted) {
+      expect(showSuccess).toHaveBeenCalledWith(`admin.users.bulkDelete.success:${deleted}`)
+      expect(listUsers.mock.lastCall?.[0]).toBe(1)
+    } else {
+      expect(showSuccess).not.toHaveBeenCalled()
+    }
+    if (failedIds.length) expect(showError).toHaveBeenCalledWith(`admin.users.bulkDelete.failed:${failedIds.length}`)
+    else expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('deletes the confirmed selection while preserving users selected during deletion', async () => {
+    listUsers.mockResolvedValue({
+      items: [createAdminUser({ id: 42 }), createAdminUser({ id: 43 })],
+      total: 2, page: 1, page_size: 20, pages: 1
+    })
+    let finishDelete!: () => void
+    deleteUser.mockImplementation(() => new Promise<void>(resolve => { finishDelete = resolve }))
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+    await wrapper.get('[data-test="select-42"]').trigger('click')
+    await wrapper.get('[data-test="bulk-delete-users"]').trigger('click')
+    await wrapper.get('[data-test="confirm-delete"]').trigger('click')
+    expect(wrapper.get('[data-test="bulk-delete-users"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-test="select-43"]').trigger('click')
+    finishDelete()
+    await flushPromises()
+
+    expect(deleteUser.mock.calls).toEqual([[42]])
+    expect(wrapper.get('[data-test="selected-keys"]').text()).toBe('43')
+    wrapper.unmount()
+  })
+
+  it('updates only the toggled row in place without reloading the list', async () => {
+    listUsers.mockResolvedValue({
+      items: [createAdminUser({ id: 42, current_concurrency: 3 }), createAdminUser({ id: 43 })],
+      total: 2, page: 1, page_size: 20, pages: 1
+    })
+    toggleStatus.mockResolvedValue(
+      createAdminUser({ id: 42, status: 'disabled', current_concurrency: undefined })
+    )
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+    expect(wrapper.get('[data-test="row-state"]').text()).toBe('42:active:3,43:active:0')
+
+    await getToggleStatusButton(wrapper, 42).trigger('click')
+    await flushPromises()
+
+    expect(toggleStatus.mock.calls).toEqual([[42, 'disabled']])
+    expect(listUsers).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="row-state"]').text()).toBe('42:disabled:3,43:active:0')
+    expect(getToggleStatusButton(wrapper, 42).text()).toBe('admin.users.enable')
+    expect(showSuccess).toHaveBeenCalledWith('admin.users.userDisabled')
+    wrapper.unmount()
+  })
+
+  it('keeps the row untouched when toggling status fails', async () => {
+    toggleStatus.mockRejectedValue(new Error('boom'))
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+
+    await getToggleStatusButton(wrapper, 42).trigger('click')
+    await flushPromises()
+
+    expect(listUsers).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="row-state"]').text()).toBe('42:active:0')
+    expect(showError).toHaveBeenCalledWith('admin.users.failedToToggle')
+    expect(showSuccess).not.toHaveBeenCalled()
+    errorSpy.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('reloads the list when a list request is in flight as the toggle resolves', async () => {
+    let finishToggle!: (user: AdminUser) => void
+    toggleStatus.mockImplementation(() => new Promise<AdminUser>(resolve => { finishToggle = resolve }))
+    const wrapper = mountBulkDeleteView()
+    await flushPromises()
+
+    await getToggleStatusButton(wrapper, 42).trigger('click')
+    listUsers.mockImplementationOnce(() => new Promise(() => {}))
+    await wrapper.get('[data-test="sort-last-used"]').trigger('click')
+    await flushPromises()
+    expect(listUsers).toHaveBeenCalledTimes(2)
+
+    listUsers.mockResolvedValue({
+      items: [createAdminUser({ status: 'disabled' })],
+      total: 1, page: 1, page_size: 20, pages: 1
+    })
+    finishToggle(createAdminUser({ status: 'disabled' }))
+    await flushPromises()
+
+    expect(listUsers).toHaveBeenCalledTimes(3)
+    expect(wrapper.get('[data-test="row-state"]').text()).toBe('42:disabled:0')
+    wrapper.unmount()
   })
 
   it('shows active, used, and created activity columns in order and requests last_used_at sort', async () => {

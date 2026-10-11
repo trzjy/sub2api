@@ -183,6 +183,34 @@ func TestCNQuotaExtraUpdates(t *testing.T) {
 	require.Equal(t, now.Format(time.RFC3339), updates["kimi_usage_updated_at"])
 }
 
+func TestParseOpenCodeGoUsageTiers(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"usage": {
+			"rolling": {"percent": 12.5, "resetsAt": "2026-09-07T12:00:00Z"},
+			"weekly": {"percent": 40, "resetsAt": "2026-09-10T00:00:00Z"},
+			"monthly": {"percent": 22.2, "resetsAt": "2026-10-01T00:00:00Z"}
+		}
+	}`)
+	tiers := parseOpenCodeGoUsageTiers(body)
+	require.Len(t, tiers, 3)
+	require.Equal(t, "5h", tiers[0].Window)
+	require.Equal(t, 12.5, tiers[0].UsedPercent)
+	require.Equal(t, "2026-09-07T12:00:00Z", tiers[0].ResetAt)
+	require.Equal(t, "weekly", tiers[1].Window)
+	require.Equal(t, 40.0, tiers[1].UsedPercent)
+	require.Equal(t, "monthly", tiers[2].Window)
+	require.InDelta(t, 22.2, tiers[2].UsedPercent, 0.001)
+
+	updates := cnQuotaExtraUpdates(PlatformOpenCodeGo, tiers, time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))
+	require.Equal(t, 12.5, updates["opencode_go_5h_used_percent"])
+	require.Equal(t, 40.0, updates["opencode_go_weekly_used_percent"])
+	require.Equal(t, 22.2, updates["opencode_go_monthly_used_percent"])
+	require.Equal(t, "2026-10-01T00:00:00Z", updates["opencode_go_monthly_reset_at"])
+
+	require.Empty(t, parseOpenCodeGoUsageTiers([]byte(`{"ok":true}`)))
+}
+
 // 外审 must_fix #2：上游 reset 从有效变为空时，必须清除 DB 中旧 reset 值，
 // 否则前端继续显示过期倒计时、429 冷却仍按旧时间停调。
 func TestCNQuotaExtraUpdates_ClearsStaleResetWhenResetEmpty(t *testing.T) {
@@ -274,6 +302,7 @@ func TestCNProviderResponseIndicatesInsufficientBalance(t *testing.T) {
 		require.False(t, cnProviderResponseIndicatesInsufficientBalance([]byte(body)), body)
 	}
 }
+
 // TestZhipuQuotaHost 按域名路由智谱额度端点主机（bigmodel.cn / z.ai / 默认国内站）。
 func TestZhipuQuotaHost(t *testing.T) {
 	t.Parallel()
@@ -584,6 +613,7 @@ func TestNormalizeOpenAICompatiblePlatform_SchedulerExactMatch(t *testing.T) {
 	require.Equal(t, PlatformKimi, NormalizeOpenAICompatiblePlatform(PlatformKimi))
 	require.Equal(t, PlatformZhipu, NormalizeOpenAICompatiblePlatform(PlatformZhipu))
 	require.Equal(t, PlatformDeepseek, NormalizeOpenAICompatiblePlatform(PlatformDeepseek))
+	require.Equal(t, PlatformOpenCodeGo, NormalizeOpenAICompatiblePlatform(PlatformOpenCodeGo))
 	// 其他平台（含空、anthropic、未知）一律归一为 openai。
 	require.Equal(t, PlatformOpenAI, NormalizeOpenAICompatiblePlatform(""))
 	require.Equal(t, PlatformOpenAI, NormalizeOpenAICompatiblePlatform(PlatformAnthropic))
@@ -618,6 +648,14 @@ func TestGetOpenAIProtocolAPIKey_CNProviders(t *testing.T) {
 		Credentials: map[string]any{"api_key": "sk-openai"},
 	}
 	require.Equal(t, "sk-openai", openai.GetOpenAIProtocolAPIKey())
+
+	openCodeGo := &Account{
+		Platform:    PlatformOpenCodeGo,
+		Type:        AccountTypeAPIKey,
+		Credentials: map[string]any{"api_key": "sk-opencode-go"},
+	}
+	require.Equal(t, "sk-opencode-go", openCodeGo.GetOpenAIProtocolAPIKey())
+	require.False(t, openCodeGo.IsOpenAIApiKey())
 }
 
 // TestBuildUpstreamModelsRequest_CNProviders 验证“同步上游支持的模型”对国产供应商可用：
@@ -639,6 +677,8 @@ func TestBuildUpstreamModelsRequest_CNProviders(t *testing.T) {
 		{"deepseek", PlatformDeepseek, "", "https://api.deepseek.com/v1/models"},
 		{"minimax default", PlatformMiniMax, "", "https://api.minimaxi.com/v1/models"},
 		{"minimax coding", PlatformMiniMax, AccountModeCoding, "https://api.minimaxi.com/v1/models"},
+		{"opencode go", PlatformOpenCodeGo, AccountModeGo, "https://opencode.ai/zen/go/v1/models"},
+		{"opencode zen", PlatformOpenCodeGo, AccountModeZen, "https://opencode.ai/zen/v1/models"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -683,6 +723,8 @@ func TestGetAPIProtocol(t *testing.T) {
 	require.Equal(t, APIProtocolChatCompletions, mk(PlatformZhipu, APIProtocolResponses).GetAPIProtocol(), "zhipu 无 responses 端点")
 	require.Equal(t, APIProtocolChatCompletions, mk(PlatformKimi, "bogus").GetAPIProtocol(), "非法值回退默认")
 	require.Equal(t, APIProtocolChatCompletions, (&Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}).GetAPIProtocol(), "openai 恒为默认（本次仅 other 开放协议覆盖）")
+	require.Equal(t, APIProtocolAdaptive, mk(PlatformOpenCodeGo, "").GetAPIProtocol(), "opencode go 默认 adaptive")
+	require.Equal(t, APIProtocolResponses, mk(PlatformOpenCodeGo, APIProtocolResponses).GetAPIProtocol())
 
 	// other 双协议：anthropic / chat_completions 生效；responses / adaptive 不支持（
 	// 无原生 responses 端点、无厂商默认端点），缺失/非法回退 chat_completions。
@@ -731,6 +773,7 @@ func TestSupportsNativeCNResponses(t *testing.T) {
 	require.True(t, (&Account{Platform: PlatformKimi}).SupportsNativeCNResponses())
 	require.True(t, (&Account{Platform: PlatformKimi, Credentials: map[string]any{"account_mode": AccountModeCoding}}).SupportsNativeCNResponses())
 	require.True(t, (&Account{Platform: PlatformMiniMax}).SupportsNativeCNResponses())
+	require.True(t, (&Account{Platform: PlatformOpenCodeGo}).SupportsNativeCNResponses())
 	require.False(t, (&Account{Platform: PlatformZhipu}).SupportsNativeCNResponses())
 	require.False(t, (&Account{Platform: PlatformOpenAI}).SupportsNativeCNResponses())
 }
@@ -748,11 +791,14 @@ func TestAdaptiveProtocolBaseURLs(t *testing.T) {
 	}{
 		{"kimi payg", PlatformKimi, AccountModePayG, DefaultKimiPayGBaseURL, DefaultKimiPayGAnthropicBaseURL, DefaultKimiPayGBaseURL},
 		{"kimi coding", PlatformKimi, AccountModeCoding, DefaultKimiCodingBaseURL, DefaultKimiCodingAnthropicBaseURL, DefaultKimiCodingBaseURL},
-		{"zhipu payg", PlatformZhipu, AccountModePayG, DefaultZhipuPayGBaseURL, DefaultZhipuAnthropicBaseURL, DefaultZhipuPayGBaseURL},
-		{"zhipu coding", PlatformZhipu, AccountModeCoding, DefaultZhipuCodingBaseURL, DefaultZhipuAnthropicBaseURL, DefaultZhipuCodingBaseURL},
+		// 智谱没有原生 Responses 端点：profile 不登记 responses 条目，默认基址为空。
+		{"zhipu payg", PlatformZhipu, AccountModePayG, DefaultZhipuPayGBaseURL, DefaultZhipuAnthropicBaseURL, ""},
+		{"zhipu coding", PlatformZhipu, AccountModeCoding, DefaultZhipuCodingBaseURL, DefaultZhipuAnthropicBaseURL, ""},
 		{"deepseek", PlatformDeepseek, AccountModePayG, DefaultDeepseekBaseURL, DefaultDeepseekAnthropicBaseURL, DefaultDeepseekBaseURL},
 		{"minimax payg", PlatformMiniMax, AccountModePayG, DefaultMiniMaxBaseURL, DefaultMiniMaxAnthropicBaseURL, DefaultMiniMaxBaseURL},
 		{"minimax coding", PlatformMiniMax, AccountModeCoding, DefaultMiniMaxBaseURL, DefaultMiniMaxAnthropicBaseURL, DefaultMiniMaxBaseURL},
+		{"opencode go", PlatformOpenCodeGo, AccountModeGo, DefaultOpenCodeGoBaseURL, DefaultOpenCodeGoAnthropicBaseURL, DefaultOpenCodeGoBaseURL},
+		{"opencode zen", PlatformOpenCodeGo, AccountModeZen, DefaultOpenCodeZenBaseURL, DefaultOpenCodeZenAnthropicBaseURL, DefaultOpenCodeZenBaseURL},
 	}
 
 	for _, tc := range cases {
@@ -919,6 +965,16 @@ func TestNormalizeDeepSeekResponsesRequestBody(t *testing.T) {
 	adaptiveNormalized := normalizeDeepSeekResponsesRequestBody(deepseekAdaptive, body)
 	require.False(t, gjson.GetBytes(adaptiveNormalized, "store").Bool())
 	require.False(t, gjson.GetBytes(adaptiveNormalized, "previous_response_id").Exists())
+
+	mediaBody := []byte(`{"model":"deepseek-v4.1-flash","store":true,"input":[{"type":"function_call","call_id":"call_image","name":"view_image","arguments":"{}"},{"type":"function_call_output","call_id":"call_image","output":[{"type":"input_image","image_url":"data:image/png;base64,AQID"}]}]}`)
+	mediaNormalized := normalizeDeepSeekResponsesRequestBody(deepseekResponses, mediaBody)
+	require.False(t, gjson.GetBytes(mediaNormalized, "store").Bool())
+	require.Equal(t, gjson.String, gjson.GetBytes(mediaNormalized, "input.1.output").Type)
+	require.NotContains(t, gjson.GetBytes(mediaNormalized, "input.1.output").String(), "data:image/png")
+	require.Equal(t, "message", gjson.GetBytes(mediaNormalized, "input.2.type").String())
+	require.Equal(t, "user", gjson.GetBytes(mediaNormalized, "input.2.role").String())
+	require.Equal(t, "input_image", gjson.GetBytes(mediaNormalized, "input.2.content.1.type").String())
+	require.Equal(t, "data:image/png;base64,AQID", gjson.GetBytes(mediaNormalized, "input.2.content.1.image_url").String())
 
 	// 非 responses 协议（deepseek CC 账号）原样返回
 	deepseekCC := &Account{Platform: PlatformDeepseek, Type: AccountTypeAPIKey}

@@ -6,7 +6,10 @@ import {
   filterUpstreamModelsByPlatform,
   modelMatchesPlatform,
 } from '@/constants/platforms'
+import { platformLabel } from '@/utils/platformColors'
 
+// ours 现状：含 other / codebuddy / muse（muse 是自研平台，虽然不在
+// service.AllowedQuotaPlatforms 里，但在选择器清单中，属已知漂移，此处锁定现状）。
 const concretePlatforms = [
   'anthropic',
   'openai',
@@ -18,7 +21,8 @@ const concretePlatforms = [
   'deepseek',
   'other',
   'minimax',
-  'codebuddy'
+  'codebuddy',
+  'muse'
 ]
 
 describe('platform option catalogs', () => {
@@ -37,6 +41,29 @@ describe('platform option catalogs', () => {
     expect(COMPOSITE_TARGET_PLATFORM_OPTIONS.map((option) => option.value)).toEqual(
       concretePlatforms.filter((p) => p !== 'other')
     )
+  })
+})
+
+describe('platform display labels', () => {
+  it('labels every concrete option with its option label', () => {
+    for (const option of CONCRETE_PLATFORM_OPTIONS) {
+      expect(platformLabel(option.value)).toBe(option.label)
+    }
+  })
+
+  it('keeps other, codebuddy and muse readable instead of falling back to the raw id', () => {
+    expect(platformLabel('other')).toBe('Other')
+    expect(platformLabel('codebuddy')).toBe('CodeBuddy')
+    expect(platformLabel('muse')).toBe('Muse')
+    expect(platformLabel('composite')).toBe('Composite')
+    expect(platformLabel('')).toBe('API')
+  })
+
+  it('covers upstream-registered platforms even though they are absent from the selector list', () => {
+    expect(platformLabel('opencode_go')).toBe('OpenCode')
+    expect(platformLabel('typesafe')).toBe('TypeSafe / Jev')
+    expect(platformLabel('command_code')).toBe('Command Code')
+    expect(platformLabel('cline')).toBe('Cline')
   })
 })
 

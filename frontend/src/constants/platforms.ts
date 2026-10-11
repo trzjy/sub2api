@@ -9,6 +9,21 @@ export interface PlatformOption<T extends string = string> {
  * Concrete upstream platforms supported by accounts and request routing.
  * Keep platform selectors derived from this catalog so newly added providers
  * do not silently disappear from list filters.
+ *
+ * 上游 v0.2.15 把这里改成由后端平台清单（platformCatalog / listPlatforms）反应式派生，
+ * 本次合并**不采纳**该结构，维持静态显式清单，理由：
+ *
+ *   1. `other` 不是「具体平台」、不进后端平台清单（见 backend/internal/domain/platforms.go
+ *      的说明），清单派生会把它从选择器里抹掉，违反「ours 允许 other 的消费点在 result
+ *      必须继续允许」的裁定；
+ *   2. 本文件的自研导出（COMPOSITE_TARGET_PLATFORM_OPTIONS、plazaPlatformOrder、
+ *      modelMatchesPlatform / filterUpstreamModelsByPlatform、CodeBuddy 影子账号命名）
+ *      依赖静态只读数组与其字面量类型；
+ *   3. 平台集合保持 ours 现状（12 项，含 codebuddy / muse / other）。
+ *
+ * 上游新登记的平台（opencode_go / typesafe / command_code / cline）已纳入
+ * utils/platformColors.ts 的色板与展示名（并集），但不在本选择器清单内——这是一项
+ * 待下游批次确认的取舍（需同步 frontend/src/types 的 AccountPlatform 字面量联合）。
  */
 export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
