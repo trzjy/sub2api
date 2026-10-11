@@ -6,4 +6,4 @@
 -- 故本文件不写入任何可执行 SQL，仅保留说明。
 -- 如需回滚到带标记状态，应做业务级补偿：把目标码重新打回其 (group_id, validity_days) 对应池的
 -- slug 标记（notes = 'xianyu_pool=<slug>'），而非依赖自动迁移。
--- 参考方案文档：docs-local/inventory-pool-unified-spec-counting-plan.md 第 4 节（数据迁移 / down 注释）。
+-- 参考方案文档：docs/inventory-pool-unified-spec-counting-plan.md 第 4 节（数据迁移 / down 注释）。

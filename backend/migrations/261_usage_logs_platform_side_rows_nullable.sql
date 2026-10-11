@@ -1,5 +1,5 @@
 -- 261_usage_logs_platform_side_rows_nullable.sql
--- Vision 检测（方案 docs-local/capability-routing-plan.md §6）按 SSOT 口径在 usage_logs
+-- Vision 检测（方案 docs/capability-routing-plan.md §6）按 SSOT 口径在 usage_logs
 -- 记录平台侧检测流量：user_id / api_key_id 为 NULL（不归属任何用户 / key，
 -- 不进入用户账单）。原实现写入 0 哨兵，与生产 NOT NULL + FK 约束冲突导致
 -- 检测 API 500（usage_logs_user_id_fkey）。
