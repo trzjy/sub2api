@@ -60,16 +60,6 @@
       </span>
     </div>
 
-    <!-- 次卡进度条（kind==='count_pack' 且有分母）：已用/总量按百分比展示。
-         耗尽态不另造红色分支——由上方既有 balanceLow 徽标承担。 -->
-    <UsageProgressBar
-      v-if="kind === 'count_pack' && quotaLimit > 0"
-      data-test="cn-count-pack-bar"
-      :label="t('admin.accounts.cnProviders.countPack')"
-      :utilization="countPackUsedPercent"
-      :color="countPackBarColor"
-    />
-
     <!-- Explicit refresh action (aligned with the OpenAI "Query" / Grok "Probe"
          buttons): the old chip doubled as the data display and a hidden click
          target, which users could not discover. The verb label makes the
@@ -115,7 +105,6 @@ import type { CNProviderBalanceEntry, CNProviderBalanceResult } from '@/api/admi
 import type { Account, QuotaDimensionItem } from '@/types'
 import { platformTextClass } from '@/utils/platformColors'
 import { cnBalanceCellVisible, resolveAccountBaseURL } from './credentialsBuilder'
-import UsageProgressBar from './UsageProgressBar.vue'
 
 const props = defineProps<{
   account: Account
@@ -128,10 +117,8 @@ const readMode = (): string => {
   return typeof mode === 'string' ? mode : ''
 }
 
-// 仅 kimi / deepseek payg 账号有公开余额端点；zhipu / minimax 官方无余额端点，但挂在
-// 这两个平台下的中转型账号（credentials.balance_probe.enabled）有 /v1/usage，按配置放行。
-// 火山订阅号按 base_url 识别并隐藏余额单元格（订阅套餐无公开余额端点，避免与配额单元格
-// 双重渲染）。
+// 仅 kimi / deepseek payg 账号有公开余额端点（智谱 payg 无）；火山订阅号按 base_url
+// 识别并隐藏余额单元格（订阅套餐无公开余额端点，避免与配额单元格双重渲染）。
 // capable 由后端投影字段 account.balance_probe_capable 传入（方案乙 / BAL-GATE-D5）：
 // 即后端选路事实源 RelayProbeTargetURL 的有效探测能力（enabled 且 URL 可解析/可推导），
 // 非 credentials.balance_probe.enabled 配置开关。配错账号（enabled 但无可解析 URL
@@ -143,8 +130,7 @@ const visible = computed(() => {
     props.account.platform,
     readMode(),
     resolveAccountBaseURL(creds),
-    capable,
-    props.account.balance_probe?.enabled === true
+    capable
   )
 })
 
@@ -226,42 +212,6 @@ const planName = computed(() => {
   return snapshotPlanName.value
 })
 
-// 计费形态三态（后端契约逐字锁定）：探测结果优先，其次落库快照（<platform>_balance_kind），
-// 两者皆缺（旧快照 / 官方原生路径未升级）按 'balance' 回落。
-//   subscription = 订阅不限量（无数字余额，展示分组名）
-//   count_pack   = 次卡（balance 字段装的是剩余「次数」，不是金额）
-//   balance      = 金额余额
-const BALANCE_KINDS = ['subscription', 'count_pack', 'balance'] as const
-type BalanceKind = (typeof BALANCE_KINDS)[number]
-const snapshotKind = computed<BalanceKind | null>(() => {
-  const v = props.account.extra?.[extraKey('balance_kind')]
-  if (typeof v !== 'string') return null
-  return (BALANCE_KINDS as readonly string[]).includes(v) ? (v as BalanceKind) : null
-})
-const kind = computed<BalanceKind>(() => {
-  if (data.value?.success && data.value.kind) return data.value.kind
-  return snapshotKind.value ?? 'balance'
-})
-
-// 次卡分母 / 分子（单位：次）。后端仅次卡形态写 <platform>_balance_quota_limit /
-// _quota_used，非次卡可能缺省——按 0 处理（进度条随之不渲染）。
-const snapshotQuotaLimit = computed(() => {
-  const v = props.account.extra?.[extraKey('balance_quota_limit')]
-  return typeof v === 'number' ? v : null
-})
-const snapshotQuotaUsed = computed(() => {
-  const v = props.account.extra?.[extraKey('balance_quota_used')]
-  return typeof v === 'number' ? v : null
-})
-const quotaLimit = computed(() => {
-  if (data.value?.success && typeof data.value.quota_limit === 'number') return data.value.quota_limit
-  return snapshotQuotaLimit.value ?? 0
-})
-const quotaUsed = computed(() => {
-  if (data.value?.success && typeof data.value.quota_used === 'number') return data.value.quota_used
-  return snapshotQuotaUsed.value ?? 0
-})
-
 // 不限量账号的剩余次数徽标：仅在 unlimited 且落库快照 balance 为数字时展示。
 // 只读快照、不读探测响应（探测在浏览器内发生在快照写入后，统一走快照避免双源口径）。
 const remainingCount = computed(() =>
@@ -314,32 +264,8 @@ const monthlyUsageLabel = computed(() => {
   return t('admin.accounts.cnProviders.monthlyUsage', { amount })
 })
 
-// 余额数值：探测结果优先，其次落库快照（与 currentEntries 同源取数，只是不分币种）。
-// 次卡形态下它是「剩余次数」，金额形态下是「金额」——量纲由 kind 决定。
-const balanceValue = computed(() =>
-  data.value && data.value.success ? data.value.balance : (snapshotBalance.value ?? 0)
-)
-
-// 次数格式化：次卡量纲为「次」，整数化展示（次数不应有小数）。刻意不用
-// toLocaleString —— 千分位分隔符随浏览器 locale 漂移，同一账号在不同运营方
-// 机器上显示不一致，且断言无法固定。缺省 0（非真实读数）同样显示 "0"。
-const countText = (n: number): string => String(Math.round(n))
-
-// 次卡已用百分比（0-100 截断）；分母缺省（非次卡 / 上游未给）时为 0，进度条随之隐藏。
-const countPackUsedPercent = computed(() =>
-  quotaLimit.value > 0 ? Math.min(100, Math.max(0, (quotaUsed.value / quotaLimit.value) * 100)) : 0
-)
-// 次卡条颜色：剩余 >20% 用 emerald，否则 amber。不新造红色分支——耗尽态由既有
-// balanceLow 徽标承担（避免同屏两个红色出口）。
-const countPackBarColor = computed<'emerald' | 'amber'>(() =>
-  countPackUsedPercent.value < 80 ? 'emerald' : 'amber'
-)
-
 // 优先用探测结果，其次落库快照。多币种返回全部明细，否则主币种单条。
-// 次卡形态直接返回空：上游 unit 在次卡下也误标 "USD"（不可信），落回金额路径会被
-// formatEntry 加上币种前缀，把「剩余 705 次」渲染成 "USD 705.00"。
 const currentEntries = computed<CNProviderBalanceEntry[]>(() => {
-  if (kind.value === 'count_pack') return []
   if (data.value && data.value.success) {
     if (data.value.balances && data.value.balances.length > 0) return data.value.balances
     return [{ currency: data.value.currency || '', balance: data.value.balance }]
@@ -357,21 +283,10 @@ const formatEntry = (entry: CNProviderBalanceEntry): string => {
 }
 
 const balanceLabel = computed(() => {
-  // 顺序固定：subscription → count_pack → 金额。
-  // subscription 兼容既有 unlimited 布尔（旧快照无 kind 时仍走这条路径）。
-  if (kind.value === 'subscription' || unlimited.value) {
+  if (unlimited.value) {
     return planName.value
       ? t('admin.accounts.cnProviders.unlimitedWithPlan', { plan: planName.value })
       : t('admin.accounts.cnProviders.unlimited')
-  }
-  if (kind.value === 'count_pack') {
-    // 有分母展示「剩余/总量」，无分母只展示剩余次数（上游 quota 缺省的旧快照）。
-    return quotaLimit.value > 0
-      ? t('admin.accounts.cnProviders.countPackRemaining', {
-          remaining: countText(balanceValue.value),
-          limit: countText(quotaLimit.value)
-        })
-      : t('admin.accounts.cnProviders.countPackNoLimit', { count: countText(balanceValue.value) })
   }
   if (currentEntries.value.length === 0) {
     // 修复:此前误引 admin.accounts.grokBalance(实际嵌套在 usageWindow 下),

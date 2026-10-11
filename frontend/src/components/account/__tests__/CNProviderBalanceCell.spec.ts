@@ -13,33 +13,16 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
-// 分量 mock：保留 createI18n 等真实导出（UsageProgressBar → @/utils/format → @/i18n
-// 在模块初始化时会调用 createI18n），只覆写 useI18n 的 t。
-vi.mock('vue-i18n', async () => {
-  const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
-  return {
-    ...actual,
-    useI18n: () => ({
-      t: (key: string, named?: Record<string, unknown>) => {
-        if (key === 'admin.accounts.cnProviders.remainingCount' && named) {
-          return `剩余 ${named.count}`
-        }
-        // 三态文案需要真实插值，断言才能锁住「剩余次数/分母」的取数与量纲。
-        if (key === 'admin.accounts.cnProviders.unlimitedWithPlan' && named) {
-          return `${named.plan} · 不限量`
-        }
-        if (key === 'admin.accounts.cnProviders.countPackRemaining' && named) {
-          return `次卡 ${named.remaining}/${named.limit}`
-        }
-        if (key === 'admin.accounts.cnProviders.countPackNoLimit' && named) {
-          return `次卡 剩余 ${named.count}`
-        }
-        if (key === 'admin.accounts.cnProviders.countPack') return '次卡'
-        return key
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({
+    t: (key: string, named?: Record<string, unknown>) => {
+      if (key === 'admin.accounts.cnProviders.remainingCount' && named) {
+        return `剩余 ${named.count}`
       }
-    })
-  }
-})
+      return key
+    }
+  })
+}))
 
 const account = {
   id: 7,
@@ -374,179 +357,5 @@ describe('CNProviderBalanceCell', () => {
 
     const wrapper = mount(CNProviderBalanceCell, { props: { account: openaiMisconfigured } })
     expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(false)
-  })
-
-  // ===== 计费形态三态（subscription / count_pack / balance），契约见 cnProviders.ts =====
-
-  // 生产实例：七号云站（platform=kimi）上游 remaining:-1 + mode:unrestricted。
-  it('subscription: 展示分组名 · 不限量，且不渲染次卡进度条', () => {
-    const subAccount = {
-      id: 7,
-      platform: 'kimi',
-      type: 'apikey',
-      credentials: { account_mode: 'payg' },
-      extra: {
-        kimi_balance_unlimited: true,
-        kimi_balance_kind: 'subscription',
-        kimi_balance_plan_name: '订阅不限量kimi-k3'
-      }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: subAccount } })
-
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain(
-      '订阅不限量kimi-k3 · 不限量'
-    )
-    expect(wrapper.find('[data-test="cn-count-pack-bar"]').exists()).toBe(false)
-  })
-
-  // 生产实例：goaichat 站次卡（quota 1000/295/705）。上游 unit 误标 "USD"，
-  // 次卡路径必须完全绕开带币种前缀的金额格式化。
-  it('count_pack: 展示「剩余/总量」次数并渲染进度条，且不带任何币种前缀', () => {
-    const packAccount = {
-      id: 7,
-      platform: 'kimi',
-      type: 'apikey',
-      credentials: { account_mode: 'payg' },
-      extra: {
-        kimi_balance: 705,
-        kimi_balance_kind: 'count_pack',
-        kimi_balance_quota_limit: 1000,
-        kimi_balance_quota_used: 295,
-        kimi_balance_currency: ''
-      }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: packAccount } })
-
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('次卡 705/1000')
-    const bar = wrapper.get('[data-test="cn-count-pack-bar"]')
-    // utilization = 295/1000 → 填充宽度 29.5%
-    const width = /width:\s*([\d.]+)%/.exec(bar.html())
-    expect(width).not.toBeNull()
-    expect(parseFloat(width![1])).toBeCloseTo(29.5, 5)
-    // 剩余 70.5% > 20% → emerald 标签（耗尽态由 balanceLow 徽标承担，不新造红色分支）
-    expect(bar.html()).toContain('bg-emerald-100')
-    // 关键不变式：次卡数字不得被当成美元金额
-    expect(wrapper.text()).not.toContain('USD')
-    expect(wrapper.text()).not.toContain('¥')
-  })
-
-  // 旧快照缺 quota 分母：只展示剩余次数，进度条随之隐藏（不造假分母）。
-  it('count_pack without quota_limit: 只展示剩余次数，不渲染进度条', () => {
-    const noDenomAccount = {
-      id: 7,
-      platform: 'kimi',
-      type: 'apikey',
-      credentials: { account_mode: 'payg' },
-      extra: { kimi_balance: 705, kimi_balance_kind: 'count_pack' }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: noDenomAccount } })
-
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('次卡 剩余 705')
-    expect(wrapper.find('[data-test="cn-count-pack-bar"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('USD')
-  })
-
-  // 次卡已用 ≥80% → amber（仍不新造红色分支）。
-  it('count_pack near exhaustion: 进度条转 amber 而非红色', () => {
-    const nearlyUsedAccount = {
-      id: 7,
-      platform: 'kimi',
-      type: 'apikey',
-      credentials: { account_mode: 'payg' },
-      extra: {
-        kimi_balance: 50,
-        kimi_balance_kind: 'count_pack',
-        kimi_balance_quota_limit: 1000,
-        kimi_balance_quota_used: 950
-      }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: nearlyUsedAccount } })
-    const bar = wrapper.get('[data-test="cn-count-pack-bar"]')
-    expect(bar.html()).toContain('bg-amber-100')
-    expect(bar.html()).not.toContain('bg-red-')
-  })
-
-  // 回归：kind 缺省（旧快照 / 官方原生路径未升级）按 balance 处理，金额展示与币种前缀不变。
-  it('balance (legacy default): kind 缺省仍按金额渲染 CNY 12.50，无进度条', () => {
-    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
-
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
-    expect(wrapper.find('[data-test="cn-count-pack-bar"]').exists()).toBe(false)
-  })
-
-  // 显式 kind:'balance' 与缺省同义。
-  it('balance: 显式 kind=balance 走金额路径', () => {
-    const explicitBalanceAccount = {
-      ...account,
-      extra: { kimi_balance: 12.5, kimi_balance_currency: 'CNY', kimi_balance_kind: 'balance' }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: explicitBalanceAccount } })
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
-  })
-
-  // 脏快照值（非三态之一）必须被拒绝并回落 balance，不得穿透成 undefined 分支。
-  it('rejects an unknown snapshot kind and falls back to balance', () => {
-    const dirtyAccount = {
-      ...account,
-      extra: { kimi_balance: 12.5, kimi_balance_currency: 'CNY', kimi_balance_kind: 'whatever' }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: dirtyAccount } })
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
-    expect(wrapper.find('[data-test="cn-count-pack-bar"]').exists()).toBe(false)
-  })
-
-  // 探测响应优先于落库快照（双源合并口径与 unlimited/planName 一致）。
-  it('probe result overrides the snapshot for kind and quota fields', async () => {
-    queryBalance.mockResolvedValue({
-      success: true,
-      balance: 705,
-      currency: '',
-      balances: [],
-      available: true,
-      kind: 'count_pack',
-      quota_limit: 1000,
-      quota_used: 295,
-      provider: 'kimi',
-      fetched_at: 1,
-      persisted: true
-    })
-    // 快照仍是旧的金额形态，探测回来后必须按次卡展示。
-    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
-    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('次卡 705/1000')
-    expect(wrapper.text()).not.toContain('CNY 12.50')
-    expect(wrapper.find('[data-test="cn-count-pack-bar"]').exists()).toBe(true)
-  })
-
-  // zhipu / minimax 中转型账号（配了 balance_probe）放行后，次卡文案按平台前缀读快照。
-  it('zhipu relay account with balance_probe renders count pack from zhipu_ prefixed keys', () => {
-    const zhipuRelayAccount = {
-      id: 7,
-      platform: 'zhipu',
-      type: 'apikey',
-      credentials: {
-        account_mode: 'payg',
-        base_url: 'https://goaichat.example.com/v1',
-        balance_probe: { enabled: true, url: 'https://goaichat.example.com/v1/usage' }
-      },
-      extra: {
-        zhipu_balance: 705,
-        zhipu_balance_kind: 'count_pack',
-        zhipu_balance_quota_limit: 1000,
-        zhipu_balance_quota_used: 295
-      }
-    } as Account
-
-    const wrapper = mount(CNProviderBalanceCell, { props: { account: zhipuRelayAccount } })
-    expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(true)
-    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('次卡 705/1000')
   })
 })
