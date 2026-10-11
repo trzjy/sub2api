@@ -16,7 +16,6 @@ export type Provider =
   | 'deepseek'
   | 'minimax'
   | 'muse'
-  | 'opencode_go'
 export type MonitorStatus = 'operational' | 'degraded' | 'failed' | 'error'
 export type BodyOverrideMode = 'off' | 'merge' | 'replace'
 export type APIMode = 'chat_completions' | 'responses'
@@ -138,7 +137,7 @@ export interface CreateParams {
   name: string
   provider: Provider
   api_mode?: APIMode
-  /** 探活模式必填（可含路径前缀的 HTTPS base URL）；quota 模式可留空 */
+  /** 探活模式必填（base origin）；quota 模式可留空 */
   endpoint: string
   /** 探活模式必填；quota 模式可留空 */
   api_key: string
