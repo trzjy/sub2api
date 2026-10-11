@@ -132,27 +132,75 @@ func (s *CNProviderBalanceService) QueryBalance(ctx context.Context, accountID i
 // 避免二次 GetByID）。singleflight key 与 QueryBalance 相同，按账号 ID 合并。
 // TH（tokenharbor.ai）账号不适用 payg 校验，先于校验分发进 TH 快照分支
 // （F1：管理端 balance 探测手动查询按钮的 TH 生产入口）。
+// QueryBalanceForAccount 探测已加载账号（配额监控 fetcher / 周期余额检测复用，
+// 避免二次 GetByID）。singleflight key 与 QueryBalance 相同，按账号 ID 合并。
+//
+// 四级路由优先级（BAL-GATE-D1 §3.2 A1）：
+//  ① TH（tokenharbor.ai）专用路径优先：免 payg 校验（F1 生产入口）；
+//  ② Kira（kiraai.vn）上游：保留 payg 校验（语义不变），校验后走 Kira 分支；
+//  ③ 中转 relay：唯一选路入口 RelayProbeTargetURL，跳过 payg 校验，apiKey 读取
+//     改 account.GetCredential("api_key")（GetCNAPIKey 对非 CN 平台恒空不可用）；
+//  ④ 其余：完整 payg 校验 → 官方端点路径（kimi/deepseek 官方余额端点）。
+// TH/Kira 命中后不经 RelayProbeTargetURL 过滤（助手本体已对二者返回 false）。
 func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
 	if s == nil || s.accountRepo == nil || s.httpUpstream == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "CN_BALANCE_NOT_CONFIGURED", "cn provider balance service is not configured")
 	}
-	thBranch := accountIsTokenHarborBaseURL(account)
-	if thBranch && s.thPassService == nil {
-		return nil, infraerrors.New(http.StatusNotImplemented, "CN_BALANCE_TH_NOT_CONFIGURED", "tokenharbor pass service is not configured")
+	// ① TH（tokenharbor.ai）专用路径优先：免 payg 校验；未配置 → CN_BALANCE_TH_NOT_CONFIGURED。
+	if accountIsTokenHarborBaseURL(account) {
+		if s.thPassService == nil {
+			return nil, infraerrors.New(http.StatusNotImplemented, "CN_BALANCE_TH_NOT_CONFIGURED", "tokenharbor pass service is not configured")
+		}
+		return s.runCNBalanceProbe(ctx, account.ID, func(probeCtx context.Context) (any, error) {
+			return s.queryTokenHarborBalanceForAccount(probeCtx, account)
+		})
 	}
-	if !thBranch {
+	// ② Kira（kiraai.vn）上游：保留 payg 校验（validatePayGAccount 对 Kira 生效，
+	// 语义不变；非 CN platform 命中 Kira URL 仍 CN_BALANCE_INVALID_PLATFORM 且零出站）。
+	if accountIsKiraBaseURL(account) {
 		if err := validatePayGAccount(account); err != nil {
 			return nil, err
 		}
+		return s.runCNBalanceProbe(ctx, account.ID, func(probeCtx context.Context) (any, error) {
+			return s.QueryKiraBalance(probeCtx, account)
+		})
 	}
-	key := "cn_balance:" + strconv.FormatInt(account.ID, 10)
+	// ③ 中转 relay 选路：唯一入口 RelayProbeTargetURL，跳过 payg 校验。apiKey 读取改
+	// account.GetCredential("api_key")（GetCNAPIKey 对非 CN 平台恒空故不可用）。
+	if probeURL, ok := RelayProbeTargetURL(account); ok {
+		apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+		probeCfg := account.BalanceProbeConfig()
+		// 空 key 校验只挂在需要 key 的令牌级路径（账户级分支不要求 api_key）。
+		if probeCfg.AccessToken == "" && probeCfg.CountUnit <= 0 && !probeCfg.countUnitSet {
+			if apiKey == "" {
+				return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_APIKEY", "account api_key is empty")
+			}
+		}
+		// 选路结果覆盖 probeCfg.URL（含 base_url + /v1/usage 推导情形），
+		// 与旧 queryBalanceForAccount relay 分支的 overrideURL 语义一致。
+		probeCfg.URL = probeURL
+		return s.runCNBalanceProbe(ctx, account.ID, func(probeCtx context.Context) (any, error) {
+			return s.queryRelayBalance(probeCtx, account, apiKey, probeCfg)
+		})
+	}
+	// ④ 其余：完整 payg 校验 → 官方端点路径（queryBalanceForAccount 仅含
+	// kimi/deepseek 官方端点，Kira/relay 分支已上提为 ②③）。
+	if err := validatePayGAccount(account); err != nil {
+		return nil, err
+	}
+	return s.runCNBalanceProbe(ctx, account.ID, func(probeCtx context.Context) (any, error) {
+		return s.queryBalanceForAccount(probeCtx, account)
+	})
+}
+
+// runCNBalanceProbe 用 singleflight 合并同一账号的并发余额探测，复用既有
+// "cn_balance:<id>" key 与超时/克隆语义（与重构前一致）。
+func (s *CNProviderBalanceService) runCNBalanceProbe(ctx context.Context, accountID int64, fn func(probeCtx context.Context) (any, error)) (*CNProviderBalanceResult, error) {
+	key := "cn_balance:" + strconv.FormatInt(accountID, 10)
 	resultCh := s.flight.DoChan(key, func() (any, error) {
 		probeCtx, cancel := context.WithTimeout(context.Background(), cnBalanceUpstreamTimeout*3)
 		defer cancel()
-		if thBranch {
-			return s.queryTokenHarborBalanceForAccount(probeCtx, account)
-		}
-		return s.queryBalanceForAccount(probeCtx, account)
+		return fn(probeCtx)
 	})
 	select {
 	case <-ctx.Done():
@@ -170,14 +218,40 @@ func (s *CNProviderBalanceService) QueryBalanceForAccount(ctx context.Context, a
 	}
 }
 
-func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
-	// Kira（kiraai.vn）优先：这类账号 platform 可能是 kimi/deepseek/zhipu，但余额
-	// 探测统一走 kiraai.vn dashboard JWT 链（cn_provider_kira.go），不能按 platform
-	// 错打到 moonshot/deepseek 官方余额端点。
-	if accountIsKiraBaseURL(account) {
-		return s.QueryKiraBalance(ctx, account)
+// RelayProbeTargetURL 是中转 relay 余额探测的唯一选路事实源（BAL-GATE-D1 §3.2 A2）。
+//
+// 返回的 bool 仅表示"已选中 relay 目标"，不含 allowlist 通过语义——allowlist 校验
+// 仍由 queryRelayBalance 内既有 cnValidateProbeURL 执行。TH/Kira 专用路径优先，
+// 内嵌于助手本体，不经调用方过滤（调用方已先行分发到 ①②）。
+func RelayProbeTargetURL(account *Account) (string, bool) {
+	if account == nil {
+		return "", false
 	}
+	// 专用路径优先：TH / Kira 账号不经本助手选路。
+	if accountIsTokenHarborBaseURL(account) || accountIsKiraBaseURL(account) {
+		return "", false
+	}
+	probeCfg := account.BalanceProbeConfig()
+	if !probeCfg.Enabled {
+		return "", false
+	}
+	// 显式 URL 直接选中（BalanceProbeConfig 已 TrimSpace）。
+	if probeCfg.URL != "" {
+		return probeCfg.URL, true
+	}
+	// 否则按 base_url + /v1/usage 推导——官方域名账号（base_url 即官方地址）
+	// 不适用，否则官方账号会被错推到不存在的 /v1/usage。
+	base := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/")
+	if base != "" && !cnIsOfficialBalanceHost(account.Platform, base) {
+		return base + "/v1/usage", true
+	}
+	return "", false
+}
 
+func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, account *Account) (*CNProviderBalanceResult, error) {
+	// 仅含 kimi/deepseek 官方余额端点路径（BAL-GATE-D1 §3.2 A1 ④）：
+	// Kira 分支上提为 QueryBalanceForAccount ②，relay 选路唯一入口上提为 ③，
+	// 均不经此函数。platform gate 与 api_key 校验错误码保持与重构前一致。
 	provider := account.Platform
 	if provider != PlatformKimi && provider != PlatformDeepseek {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_ENDPOINT", "account provider has no balance endpoint")
@@ -186,30 +260,6 @@ func (s *CNProviderBalanceService) queryBalanceForAccount(ctx context.Context, a
 	apiKey := strings.TrimSpace(account.GetCNAPIKey())
 	if apiKey == "" {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_BALANCE_NO_APIKEY", "account api_key is empty")
-	}
-
-	// 同程序中转账号：官方余额端点对中转 key 无效（如 deepseek anthropic 协议
-	// 账号会命中 api.deepseek.com 导致 401），改走账号上配置的余额探测地址
-	//（credentials.balance_probe，通常为上游 /v1/usage）。地址留空时按
-	// base_url + /v1/usage 推导——但官方域名账号（base_url 即官方地址）不适用，
-	// 否则官方 kimi/deepseek 账号会被错推到不存在的 /v1/usage。
-	if probeCfg := account.BalanceProbeConfig(); probeCfg.Enabled {
-		overrideURL := strings.TrimSpace(probeCfg.URL)
-		if overrideURL == "" {
-			if base := strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/"); base != "" && !cnIsOfficialBalanceHost(account.Platform, base) {
-				overrideURL = base + "/v1/usage"
-			}
-		}
-		if overrideURL != "" {
-			return s.queryRelayBalance(ctx, account, apiKey, BalanceProbeConfig{
-				Enabled:      true,
-				URL:          overrideURL,
-				BearerAuth:   probeCfg.BearerAuth,
-				AccessToken:  probeCfg.AccessToken,
-				CountUnit:    probeCfg.CountUnit,
-				countUnitSet: probeCfg.countUnitSet,
-			})
-		}
 	}
 
 	targetURL := cnBalanceURL(account)

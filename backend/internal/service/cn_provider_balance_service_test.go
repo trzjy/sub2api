@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
@@ -746,4 +747,233 @@ func TestCNProviderBalanceService_RelaySubscriptionUserSelfStatusCode(t *testing
 	require.Equal(t, http.StatusUnauthorized, result.StatusCode)
 	require.Contains(t, result.Error, "user/self")
 	require.Empty(t, repo.extraWrites)
+}
+
+// ---- BAL-GATE-D1 §3.2 选路合同测试 ----
+
+// newBalanceProbePlatformAccount 构造带余额探测配置（可选）的通用账号，
+// api_key 默认 sk-test（非空），平台/凭据由调用方定制。
+func newBalanceProbePlatformAccount(platform string, creds map[string]any) *Account {
+	base := map[string]any{
+		"account_mode": AccountModePayG,
+		"api_key":      "sk-test",
+	}
+	for k, v := range creds {
+		base[k] = v
+	}
+	return &Account{
+		ID:         201,
+		Platform:   platform,
+		Type:       AccountTypeAPIKey,
+		Status:     StatusActive,
+		Credentials: base,
+	}
+}
+
+// A2 选路：openai 平台 + probe enabled + 显式 URL → 探测成功并写 openai_balance 前缀快照键。
+// openai 非 CN 平台，验证 RelayProbeTargetURL 对 Kira/TH 之外的账号选路，且
+// apiKey 经 GetCredential("api_key")（GetCNAPIKey 对非 CN 恒空不可用）。
+func TestCNProviderBalanceService_RelayProbeExplicitURLSucceeds(t *testing.T) {
+	account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
+		BalanceProbeConfigCredentialKey: map[string]any{
+			"enabled": true, "url": "https://relay.example.com/v1/usage", "bearer_auth": true,
+		},
+	})
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":12.5,"unit":"USD","isValid":true,"planName":"OpenAI订阅"}`,
+	}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "https://relay.example.com/v1/usage", upstream.lastURL)
+	require.Equal(t, 12.5, result.Balance)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, 12.5, repo.extraWrites[0][cnExtraKey(PlatformOpenAI, cnBalanceExtraSuffixBalance)])
+}
+
+// A2 选路：zhipu 平台 + probe enabled（留空 URL，按 base_url 推导）→ 同 openai 行为。
+// 验证推导分支只对非官方 base_url 生效（zhipu 无官方余额端点，cnIsOfficialBalanceHost 恒 false）。
+func TestCNProviderBalanceService_RelayProbeDerivesURLFromBaseURL(t *testing.T) {
+	account := newBalanceProbePlatformAccount(PlatformZhipu, map[string]any{
+		"base_url": "https://zhipu-relay.example.com",
+		BalanceProbeConfigCredentialKey: map[string]any{
+			"enabled": true, "url": "", "bearer_auth": true,
+		},
+	})
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{
+		statusCode: http.StatusOK,
+		body:       `{"remaining":5.0,"unit":"USD"}`,
+	}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "https://zhipu-relay.example.com/v1/usage", upstream.lastURL)
+	require.Equal(t, 5.0, result.Balance)
+	require.Len(t, repo.extraWrites, 1)
+	require.Equal(t, 5.0, repo.extraWrites[0][cnExtraKey(PlatformZhipu, cnBalanceExtraSuffixBalance)])
+}
+
+// 无 probe 且非 kimi/deepseek → 既有错误码 CN_BALANCE_NO_ENDPOINT、零出站。
+func TestCNProviderBalanceService_RelayProbeDisabledNonEndpointPlatform(t *testing.T) {
+	account := newBalanceProbePlatformAccount(PlatformZhipu, map[string]any{})
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{}`}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CN_BALANCE_NO_ENDPOINT")
+	require.Empty(t, upstream.lastURL, "无 probe 非端点平台必须零出站")
+}
+
+// coding 模式 + probe enabled + 官方 base_url → relay 不可选路，落到
+// validatePayGAccount 的 CN_BALANCE_CODING_PLAN（零出站）。
+func TestCNProviderBalanceService_RelayProbeCodingOfficialBaseURLEmitsCodingPlan(t *testing.T) {
+	account := newBalanceProbePlatformAccount(PlatformKimi, map[string]any{
+		"account_mode": AccountModeCoding,
+		"base_url":     "https://api.moonshot.cn",
+		BalanceProbeConfigCredentialKey: map[string]any{"enabled": true, "url": ""},
+	})
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{}`}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CN_BALANCE_CODING_PLAN")
+	require.Empty(t, upstream.lastURL, "官方 base_url 不可选路 → 零出站")
+}
+
+// A1 ② Kira 回归：
+//  (1) 合法 Kira coding 账号探测成功（coding 模式不阻断 Kira 分支）；
+//  (2) 非 CN platform（other）命中 Kira URL → 原错误码 CN_BALANCE_INVALID_PLATFORM 且零出站。
+func TestCNProviderBalanceService_KiraProbeRegression(t *testing.T) {
+	t.Run("kira coding account succeeds", func(t *testing.T) {
+		upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+			if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+				return http.StatusOK, kiraUsageSummaryFixture
+			}
+			return http.StatusNotFound, `{}`
+		}}
+		account := newKiraTestAccount(PlatformKimi)
+		account.Credentials["account_mode"] = AccountModeCoding
+		repo := &kiraRepo{account: account}
+		svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+		result, err := svc.QueryBalanceForAccount(context.Background(), account)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, result.Success)
+		require.Equal(t, "kiraai.vn", upstream.requests[0].URL.Hostname())
+		require.Len(t, repo.extraWrites, 2)
+	})
+	t.Run("non cn platform with kira url rejected zero outbound", func(t *testing.T) {
+		upstream := &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+			return http.StatusNotFound, `{}`
+		}}
+		account := &Account{
+			ID:       78,
+			Platform: PlatformOther,
+			Type:     AccountTypeAPIKey,
+			Status:   StatusActive,
+			Credentials: map[string]any{
+				"account_mode": AccountModePayG,
+				"api_key":      "sk-other",
+				"base_url":     "https://kiraai.vn/api/v1",
+			},
+		}
+		repo := &kiraRepo{account: account}
+		svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+		_, err := svc.QueryBalanceForAccount(context.Background(), account)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "CN_BALANCE_INVALID_PLATFORM")
+		require.Empty(t, upstream.requests, "非 CN platform 命中 Kira URL 必须零出站")
+	})
+}
+
+// A2 + 出站策略：allowlist 开启时，other 平台 + probe enabled + URL 可解析但不在
+// allowlist → CN_BALANCE_URL_REJECTED、HTTP 出站零次、不回落官方端点、不写快照。
+func TestCNProviderBalanceService_RelayProbeAllowlistRejected(t *testing.T) {
+	cfg := &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{
+		Enabled:       true,
+		UpstreamHosts: []string{"api.deepseek.com"},
+	}}}
+	account := newBalanceProbePlatformAccount(PlatformOther, map[string]any{
+		"api_key": "sk-other",
+		BalanceProbeConfigCredentialKey: map[string]any{
+			"enabled": true, "url": "https://relay.example.com/v1/usage", "bearer_auth": true,
+		},
+	})
+	upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{}`}}
+	repo := &cnBalanceProbeRepo{account: account}
+	svc := NewCNProviderBalanceService(repo, nil, upstream, cfg)
+
+	_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CN_BALANCE_URL_REJECTED")
+	require.Empty(t, upstream.lastURL, "allowlist 拒绝必须零出站")
+	require.Empty(t, repo.extraWrites, "allowlist 拒绝不写快照、不回落官方端点")
+}
+
+// A3 鉴权分支：
+//  (1) 令牌级 BearerAuth 缺 api_key → CN_BALANCE_NO_APIKEY 零出站；
+//  (2) 账户级 access_token+count_unit 无 api_key 仍成功（账户级分支不要求 api_key）。
+func TestCNProviderBalanceService_RelayProbeAuthBranches(t *testing.T) {
+	t.Run("token level missing api_key rejected zero outbound", func(t *testing.T) {
+		account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
+			"api_key": "",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://relay.example.com/v1/usage", "bearer_auth": true,
+			},
+		})
+		upstream := &cnBalanceCaptureUpstream{cnBalanceResponseUpstream: cnBalanceResponseUpstream{statusCode: http.StatusOK, body: `{}`}}
+		repo := &cnBalanceProbeRepo{account: account}
+		svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+		_, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "CN_BALANCE_NO_APIKEY")
+		require.Empty(t, upstream.lastURL, "令牌级缺 key 必须零出站")
+	})
+	t.Run("account level access token without api_key succeeds", func(t *testing.T) {
+		account := newBalanceProbePlatformAccount(PlatformOpenAI, map[string]any{
+			"api_key":                 "",
+			BalanceProbeAccessTokenKey: "at-test",
+			BalanceProbeConfigCredentialKey: map[string]any{
+				"enabled": true, "url": "https://relay.example.com/api/usage/token", "count_unit": float64(5000),
+			},
+		})
+		upstream := &cnBalanceRouteUpstream{routes: map[string]cnBalanceResponseUpstream{
+			"/api/subscription/self": {statusCode: http.StatusOK, body: cnRelaySubscriptionBody},
+			"/api/user/self":         {statusCode: http.StatusOK, body: `{"success":true,"data":{"id":41,"group":"开发者 Pro · 代理组","quota":1}}`},
+		}}
+		repo := &cnBalanceProbeRepo{account: account}
+		svc := NewCNProviderBalanceService(repo, nil, upstream, nil)
+
+		result, err := svc.QueryBalance(context.Background(), repo.account.ID)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.True(t, result.Success)
+		require.Equal(t, 18454.0, result.Balance)
+		require.Len(t, repo.extraWrites, 1, "账户级分支无 api_key 仍成功落快照")
+	})
 }

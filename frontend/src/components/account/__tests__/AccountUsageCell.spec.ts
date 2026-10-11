@@ -11,6 +11,10 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       getUsage
+    },
+    cnProviders: {
+      queryQuota: vi.fn().mockResolvedValue({ success: true, tiers: [] }),
+      queryBalance: vi.fn().mockResolvedValue({ success: true })
     }
   }
 }))
@@ -1672,5 +1676,273 @@ describe('AccountUsageCell', () => {
     expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="cn-balance-cell"]').exists()).toBe(false)
     expect(getUsage).not.toHaveBeenCalled()
+  })
+
+  // ===== 派发单 BAL-GATE-D3 C1/C2：余额单元格可见性能力门控（DOM 契约）=====
+
+  // Done when #2：zhipu + quota(coding) + probe 组合下 quota 单元格与余额单元格
+  // 各渲染恰好一次（free/paid 双维并存，不是重复渲染）；因两者之一可见，:520 兜底占位符不渲染。
+  it('zhipu coding + balance_probe_capable → quota & balance cells render once, no fallback placeholder', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9101,
+          platform: 'zhipu',
+          type: 'apikey',
+          balance_probe_capable: true,
+          credentials: {
+            account_mode: 'coding',
+            base_url: 'https://zhipu-probe.example.com/v1/usage',
+            balance_probe: { enabled: true, url: 'https://zhipu-probe.example.com/v1/usage' }
+          }
+        })
+      },
+      global: {
+        stubs: { ...cnUsageCellStubs, UsageProgressBar: true, AccountQuotaInfo: true }
+      }
+    })
+
+    await flushPromises()
+
+    // quota 单元格（zhipu coding 恒可见）+ 余额单元格（probe 启用）各恰好一次
+    expect(wrapper.findAll('[data-test="cn-quota-cell"]')).toHaveLength(1)
+    expect(wrapper.findAll('[data-test="cn-balance-cell"]')).toHaveLength(1)
+    // 两者之一可见 → 兜底占位符不渲染
+    expect(wrapper.find('div[title="admin.accounts.cnProviders.noBalanceEndpoint"]').exists()).toBe(false)
+  })
+
+  // Done when #2：zhipu payg 无探测 → quota 与余额均不可见 → :520 兜底占位符渲染（旧行为不变）。
+  it('zhipu payg + no balance_probe → fallback placeholder renders (both quota & balance hidden)', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9102,
+          platform: 'zhipu',
+          type: 'apikey',
+          credentials: { account_mode: 'payg' }
+        })
+      },
+      global: {
+        stubs: { ...cnUsageCellStubs, UsageProgressBar: true, AccountQuotaInfo: true }
+      }
+    })
+
+    await flushPromises()
+
+    // 智谱 payg 无公开余额端点、无探测 → quota 与余额均不可见
+    expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(true) // stub 始终挂载，仅作占位
+    expect(wrapper.find('[data-test="cn-balance-cell"]').exists()).toBe(true) // stub 始终挂载
+    // 因两者均不可见 → 兜底占位符渲染（:520 逻辑不变）
+    expect(wrapper.find('div[title="admin.accounts.cnProviders.noBalanceEndpoint"]').exists()).toBe(true)
+  })
+
+  // Done when #3（经由 CN 块内嵌）：openai 不在 CN 平台集合，CN 块整体不渲染——
+  // 此处锁死火山订阅号 + probe 时余额单元格在 CN 块内可见，证明 probe 优先于火山排除。
+  it('volcano deepseek + balance_probe_capable → balance cell visible inside CN block (capable overrides volcano)', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9103,
+          platform: 'deepseek',
+          type: 'apikey',
+          balance_probe_capable: true,
+          credentials: {
+            account_mode: 'payg',
+            base_url: 'https://ark.cn-beijing.volces.com/api/plan',
+            balance_probe: { enabled: true, url: 'https://ark.cn-beijing.volces.com/api/plan/v1/usage' }
+          }
+        })
+      },
+      global: {
+        stubs: { ...cnUsageCellStubs, UsageProgressBar: true, AccountQuotaInfo: true }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="cn-balance-cell"]')).toHaveLength(1)
+    // 火山订阅号默认隐藏余额单元格，但 probe 启用后可见 → 兜底占位符不渲染
+    expect(wrapper.find('div[title="admin.accounts.cnProviders.noBalanceEndpoint"]').exists()).toBe(false)
+  })
+
+  // ===== 派发单 BAL-GATE-D4 F03：双维 DOM 契约测试（真实证据，非 stub）=====
+
+  // Done when #1：openai apikey + balance_probe.enabled → 真实（非 stub）渲染
+  // CNProviderBalanceCell 的 cn-provider-balance-value；非 CN 平台 → 配额单元格自门控不渲染。
+  it('F03/D4 #1: openai apikey + balance_probe_capable renders REAL cn-provider-balance-value (not stubbed)', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9501,
+          platform: 'openai',
+          type: 'apikey',
+          balance_probe_capable: true,
+          credentials: {
+            base_url: 'https://openai-probe.example.com/v1/usage',
+            balance_probe: { enabled: true, url: 'https://openai-probe.example.com/v1/usage' }
+          }
+        })
+      },
+      global: {
+        // 故意不 stub CNProviderBalanceCell / CNProviderQuotaCell：断言真实 DOM
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          OpenAIQuotaResetCell: true,
+          OllamaCloudUsageCell: true,
+          CNQuotaUsageCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // 真实余额单元格渲染出余额值标记（证明单元格已"显示"而非仅"挂载"）
+    expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(true)
+    // 非 CN 平台 → 配额单元格 visible=false，真实 cn-provider-quota 根节点不渲染
+    expect(wrapper.find('[data-test="cn-provider-quota"]').exists()).toBe(false)
+  })
+
+  // Done when #1（逆向）：openai apikey 无 balance_probe → CN 余额单元格绝不渲染（父门排除路径）。
+  it('F03/D4 #1b: openai apikey without balance_probe does NOT render cn-provider-balance-value', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9502,
+          platform: 'openai',
+          type: 'apikey'
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          OpenAIQuotaResetCell: true,
+          OllamaCloudUsageCell: true,
+          CNQuotaUsageCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(false)
+    // 也无 legacy 余额探测入口（无 probe → 非 CN 平台不进入 CN 块，旧入口条件不满足）
+    expect(wrapper.text()).not.toContain('admin.accounts.cnProviders.probe')
+  })
+
+  // 方案乙核心语义（BAL-GATE-D5）：openai + balance_probe.enabled=true，但后端投影
+  // balance_probe_capable 缺省/false（配置开关打开却无能解析 URL 且非官方端点）→
+  // CN 余额单元格绝不渲染（display 条件已升级为后端投影的有效探测能力，非配置开关）。
+  it('F03/D5: openai apikey + balance_probe.enabled=true but capable=false does NOT render cn-provider-balance-value', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9502,
+          platform: 'openai',
+          type: 'apikey',
+          // 注意：故意不设置 balance_probe_capable（或设为 false）→ 开关 alone 不驱动显示
+          credentials: { balance_probe: { enabled: true } }
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          OpenAIQuotaResetCell: true,
+          OllamaCloudUsageCell: true,
+          CNQuotaUsageCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(false)
+  })
+
+  // Done when #2：zhipu coding + quota + probe 双维组合 → 真实 quota 标记与真实余额标记
+  // 同时各恰好出现一次（不 stub 叶子组件）。
+  it('F03/D4 #2: zhipu coding + balance_probe_capable → REAL cn-provider-quota & cn-provider-balance-value each exactly once', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9503,
+          platform: 'zhipu',
+          type: 'apikey',
+          balance_probe_capable: true,
+          credentials: {
+            account_mode: 'coding',
+            base_url: 'https://zhipu-probe.example.com/v1/usage',
+            balance_probe: { enabled: true, url: 'https://zhipu-probe.example.com/v1/usage' }
+          },
+          // 给近未来快照时间，避免挂载时自动探测触发真实 API
+          extra: { zhipu_usage_updated_at: '2099-01-01T00:00:00Z' }
+        })
+      },
+      global: {
+        // 不 stub CNProviderQuotaCell / CNProviderBalanceCell：断言真实渲染标记
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          OllamaCloudUsageCell: true,
+          CNQuotaUsageCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // 真实 quota 根节点（CNProviderQuotaCell visible=true）恰好一次
+    expect(wrapper.findAll('[data-test="cn-provider-quota"]')).toHaveLength(1)
+    // 真实余额值标记（CNProviderBalanceCell visible=true）恰好一次
+    expect(wrapper.findAll('[data-test="cn-provider-balance-value"]')).toHaveLength(1)
+    // 两者之一可见 → 兜底占位符不渲染
+    expect(wrapper.find('div[title="admin.accounts.cnProviders.noBalanceEndpoint"]').exists()).toBe(false)
+  })
+
+  // Done when #3：gemini + balance_probe → gemini 用量展示不变，CN 余额单元格绝不出现
+  // （gemini 被父门能力项排除，继续走专有 gemini 分支）。
+  it('F03/D4 #3: gemini + balance_probe keeps gemini display, CN balance cell absent', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9504,
+          platform: 'gemini',
+          type: 'service_account',
+          credentials: {
+            tier_id: 'vertex',
+            project_id: 'vertex-proj',
+            client_email: 'svc@vertex-proj.iam.gserviceaccount.com',
+            location: 'global',
+            balance_probe: { enabled: true }
+          },
+          extra: {}
+        }),
+        todayStats: {
+          requests: 5,
+          tokens: 100,
+          cost: 0.01,
+          standard_cost: 0.01,
+          user_cost: 0
+        }
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          OpenAIQuotaResetCell: true,
+          OllamaCloudUsageCell: true,
+          CNQuotaUsageCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    // gemini 用量窗口仍展示 today stats 徽章（原 gemini 展示路径未被 CN 分支劫持）
+    expect(wrapper.text()).toContain('5 req')
+    // CN 余额单元格绝不出现（gemini 被父门能力项排除，不进入 CN 块）
+    expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(false)
   })
 })

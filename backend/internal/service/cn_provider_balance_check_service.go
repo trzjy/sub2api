@@ -204,6 +204,10 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 	// thTargets 收集 TH（tokenharbor.ai）账号：只刷新快照（th_pass_snapshot +
 	// th_usage_snapshot），不做任何周期停调/清除（TH 停调交状态机，§4.2）。
 	var thTargets []*Account
+	// relayTargets 收集可经 RelayProbeTargetURL 选路的账号（BAL-GATE-D2 B1/B2）：
+	// 仅调 QueryBalanceForAccount 刷新快照，不调阈值停调 / payg 探测 / reconcile /
+	// Clear 类动作。与 quota/payg/probe 目标互斥（同轮每账号只进一个余额执行目标）。
+	var relayTargets []*Account
 	collect := func(platform string, accounts []Account) {
 		for i := range accounts {
 			account := &accounts[i]
@@ -255,9 +259,24 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			// 阈值停调的账号也需要新鲜快照决定是否续停）。
 			if account.IsCodingPlan() {
 				quotaTargets = append(quotaTargets, quotaTarget{id: account.ID, platform: account.Platform})
+				// R1-F03：可 relay 选路的 coding 账号双能力并存——同时进 relay 刷新
+				// 目标（快照刷新 only，与 quota 探测互不干扰）。relay 刷新要求
+				// Schedulable 门槛（与 payg/probe 目标同口径）。
+				if _, ok := RelayProbeTargetURL(account); ok && account.Schedulable {
+					relayTargets = append(relayTargets, account)
+				}
 				continue
 			}
-			// payg 余额探测：
+			// 非 coding 账号：能力驱动单目标互斥路由（BAL-GATE-D2 B1）。
+			// helper=true → 仅进 relay 刷新目标（快照刷新 only，不调阈值停调 /
+			// reconcile / Clear）；与 payg/probe 目标互斥：同轮只进一个余额执行目标。
+			if _, ok := RelayProbeTargetURL(account); ok {
+				if account.Schedulable {
+					relayTargets = append(relayTargets, account)
+				}
+				continue
+			}
+			// helper=false 的既有 payg 分域语义（原生 /user/balance 或最小完成请求探测）。
 			switch platform {
 			case PlatformZhipu, PlatformMiniMax:
 				// 智谱 / MiniMax 无公开余额端点：进最小完成请求探测队列。
@@ -343,10 +362,56 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 		}
 	}
 
+	// B2：能力驱动全量补收轮（BAL-GATE-D2）——唯一权威执行序中的新增一轮，覆盖
+	// 非 platforms() 枚举平台（如 other）的「可 relay 选路」账号：既有平台轮只遍历
+	// kimi/deepseek + 专项 openai/TH，漏过挂在 other 等非枚举平台、仅能经 relay 选路的
+	// 账号。补收轮直接走 ListActive 全量，按 BalanceProbeConfig().Enabled +
+	// RelayProbeTargetURL 选路，绝不经 collect 平台 switch——未知平台不会误归 payg
+	//（helper=false / probe disabled 直接终止，零目标零出站零快照）。
+	// 候选集合与既有平台轮等价：ListActive 与 ListByPlatform 同为 repo 层 status=active
+	// 过滤（account_repo.go:1397 / :1506）。资格谓词复用既有口径：Ollama Cloud 用量账号
+	// 排除 + Schedulable 门槛。以账号 ID seen-set 去重（本轮已收进 relay 刷新目标的
+	// 不再重复）后追加。
+	if s.accountRepo != nil {
+		allAccounts, listErr := s.accountRepo.ListActive(context.Background())
+		if listErr != nil {
+			log.Printf("[CNBalance] list all active accounts failed: %v", listErr)
+		} else {
+			seen := make(map[int64]bool, len(relayTargets))
+			for _, a := range relayTargets {
+				seen[a.ID] = true
+			}
+			for i := range allAccounts {
+				account := &allAccounts[i]
+				// Ollama Cloud 用量账号由 Ollama 窗口负责，排除。
+				if IsOllamaCloudUsageAccount(account) {
+					continue
+				}
+				// Schedulable 门槛（与 relay 目标同口径；F3 暂停账号 schedulable=false 自然排除）。
+				if !account.Schedulable {
+					continue
+				}
+				// 候选过滤：仅 Enabled 且可 relay 选路的账号进 relay 刷新目标；
+				// helper=false / probe disabled 在此终止（零目标零出站零快照）。
+				if !account.BalanceProbeConfig().Enabled {
+					continue
+				}
+				if _, ok := RelayProbeTargetURL(account); !ok {
+					continue
+				}
+				if seen[account.ID] {
+					continue
+				}
+				seen[account.ID] = true
+				relayTargets = append(relayTargets, account)
+			}
+		}
+	}
+
 	// 预算按工作量放大：4 并发 × 15s/批 + payg/probe/快照刷新每账号 5s，下限 30s 上限 300s。
 	batches := (len(quotaTargets) + cnQuotaProbeConcurrency - 1) / cnQuotaProbeConcurrency
 	timeout := 30*time.Second + time.Duration(batches)*15*time.Second +
-		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets))*5*time.Second
+		time.Duration(len(paygTargets)+len(probeTargets)+len(kiraTargets)+len(thTargets)+len(relayTargets))*5*time.Second
 	if timeout > 300*time.Second {
 		timeout = 300 * time.Second
 	}
@@ -402,6 +467,27 @@ func (s *CNProviderBalanceCheckService) runOnce() {
 			}(target)
 		}
 		wg.Wait()
+	}
+
+	// relay 刷新目标：能力驱动补收的快照刷新 only 执行器（BAL-GATE-D2 B1）。
+	// 仅调 QueryBalanceForAccount 落快照，不调阈值停调 / payg 探测 / reconcile /
+	// Clear 类动作：失败关闭（err 或 !Success 仅记日志、不动状态），成功无需任何
+	// 额外写动作（快照由 balance service 落库；relay 成功不改写 quota/rate-limit 状态）。
+	if len(relayTargets) > 0 && s.balanceService != nil {
+		for _, account := range relayTargets {
+			res, err := s.balanceService.QueryBalanceForAccount(ctx, account)
+			if err != nil {
+				log.Printf("[CNBalance] relay refresh account %d (%s) failed: %v", account.ID, account.Platform, err)
+				continue
+			}
+			if res == nil || !res.Success {
+				if res != nil {
+					log.Printf("[CNBalance] relay refresh account %d (%s) error: %s", account.ID, account.Platform, res.Error)
+				}
+				continue
+			}
+			// 快照已由 balance service 落库，无额外写动作（不动 quota/rate-limit 状态）。
+		}
 	}
 
 	// 429 误禁闭对账（自愈）：快照刷新后，若限流账号的官方窗口余量充足，

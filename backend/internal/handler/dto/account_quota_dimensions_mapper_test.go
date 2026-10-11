@@ -253,3 +253,139 @@ func TestAccountFromServiceShallow_BalanceLowMarker(t *testing.T) {
 		require.False(t, got.BalanceLow)
 	})
 }
+
+func TestAccountFromServiceShallow_BalanceProbeCapableProjection(t *testing.T) {
+	// 后端选路事实源 RelayProbeTargetURL 的布尔投影（方案乙 / BAL-GATE-D5）：
+	// 前端是否显示余额探测单元格的唯一能力源。三态：
+	//   1) probe enabled + 显式 URL → true；
+	//   2) enabled 但无 URL 且官方 base_url → false（配错账号整格不出现）；
+	//   3) 无 probe 且 kimi/deepseek 平台 → false（官方端点账号显示走前端平台规则）。
+
+	t.Run("probe enabled + explicit URL -> true", func(t *testing.T) {
+		account := dtoKimiRelayAccount()
+		account.Credentials["balance_probe"] = map[string]any{
+			"enabled": true,
+			"url":     "https://probe.example.com/api/usage",
+		}
+
+		got := AccountFromServiceShallow(account)
+		require.True(t, got.BalanceProbeCapable)
+
+		raw, err := json.Marshal(got)
+		require.NoError(t, err)
+		require.Contains(t, string(raw), `"balance_probe_capable":true`)
+	})
+
+	t.Run("enabled but no URL + official base_url -> false", func(t *testing.T) {
+		account := dtoKimiRelayAccount()
+		account.Credentials["base_url"] = "https://api.moonshot.cn/v1"
+		account.Credentials["balance_probe"] = map[string]any{
+			"enabled": true,
+			// 无显式 url：按 base_url + /v1/usage 推导，但官方域名账号不适用 → 不可探测。
+		}
+
+		got := AccountFromServiceShallow(account)
+		require.False(t, got.BalanceProbeCapable)
+
+		raw, err := json.Marshal(got)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "balance_probe_capable")
+	})
+
+	t.Run("no probe + kimi platform -> false", func(t *testing.T) {
+		account := dtoKimiRelayAccount() // 无 balance_probe 凭据
+
+		got := AccountFromServiceShallow(account)
+		require.False(t, got.BalanceProbeCapable)
+	})
+
+	t.Run("no probe + deepseek platform -> false", func(t *testing.T) {
+		account := &service.Account{
+			ID:          9301,
+			Name:       "deepseek-payg",
+			Platform:   service.PlatformDeepseek,
+			Type:       service.AccountTypeAPIKey,
+			Status:     service.StatusActive,
+			Credentials: map[string]any{"api_key": "sk-ds"},
+			Extra:       map[string]any{},
+		}
+
+		got := AccountFromServiceShallow(account)
+		require.False(t, got.BalanceProbeCapable)
+	})
+}
+
+func TestAccountListItemFromAccount_BalanceProbeCapableProjection(t *testing.T) {
+	// lite 列表 DTO 透传完整 DTO 已算出的 BalanceProbeCapable（BAL-GATE-D6）：
+	// 列表页实际走 AccountListItemFromAccount（mappers.go:543），此前未透传该字段，
+	// 导致真实列表接口永远发不出 balance_probe_capable:true，前端能力显示断链。
+	// 这里仅做值透传，禁止再次调用 RelayProbeTargetURL 或重推导。
+
+	t.Run("probe enabled + explicit URL -> lite JSON contains true", func(t *testing.T) {
+		svc := dtoKimiRelayAccount()
+		svc.Credentials["balance_probe"] = map[string]any{
+			"enabled": true,
+			"url":     "https://probe.example.com/api/usage",
+		}
+		full := AccountFromServiceShallow(svc)
+		require.True(t, full.BalanceProbeCapable)
+
+		item := AccountListItemFromAccount(full)
+		require.NotNil(t, item)
+		require.True(t, item.BalanceProbeCapable)
+
+		raw, err := json.Marshal(item)
+		require.NoError(t, err)
+		require.Contains(t, string(raw), `"balance_probe_capable":true`)
+	})
+
+	t.Run("capability false -> lite JSON omits field", func(t *testing.T) {
+		svc := dtoKimiRelayAccount() // 无 balance_probe 凭据 → false
+		full := AccountFromServiceShallow(svc)
+		require.False(t, full.BalanceProbeCapable)
+
+		item := AccountListItemFromAccount(full)
+		require.NotNil(t, item)
+		require.False(t, item.BalanceProbeCapable)
+
+		raw, err := json.Marshal(item)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), "balance_probe_capable")
+	})
+
+	t.Run("consistent with full DTO projection on same account", func(t *testing.T) {
+		// 同一账号：完整 DTO 与 lite DTO 投影结果一致（皆 true）。
+		svc := dtoKimiRelayAccount()
+		svc.Credentials["balance_probe"] = map[string]any{
+			"enabled": true,
+			"url":     "https://probe.example.com/api/usage",
+		}
+		full := AccountFromServiceShallow(svc)
+		require.True(t, full.BalanceProbeCapable)
+
+		item := AccountListItemFromAccount(full)
+		require.Equal(t, full.BalanceProbeCapable, item.BalanceProbeCapable)
+		require.True(t, item.BalanceProbeCapable)
+
+		fullRaw, err := json.Marshal(full)
+		require.NoError(t, err)
+		itemRaw, err := json.Marshal(item)
+		require.NoError(t, err)
+		require.Contains(t, string(fullRaw), `"balance_probe_capable":true`)
+		require.Contains(t, string(itemRaw), `"balance_probe_capable":true`)
+
+		// 反例：无能力账号两 mapper 皆缺省（一致）。
+		svc2 := dtoKimiRelayAccount()
+		full2 := AccountFromServiceShallow(svc2)
+		item2 := AccountListItemFromAccount(full2)
+		require.Equal(t, full2.BalanceProbeCapable, item2.BalanceProbeCapable)
+		require.False(t, item2.BalanceProbeCapable)
+
+		full2Raw, err := json.Marshal(full2)
+		require.NoError(t, err)
+		item2Raw, err := json.Marshal(item2)
+		require.NoError(t, err)
+		require.NotContains(t, string(full2Raw), "balance_probe_capable")
+		require.NotContains(t, string(item2Raw), "balance_probe_capable")
+	})
+}

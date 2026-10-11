@@ -339,6 +339,10 @@ type Account struct {
 	// BalanceLow 服务端解释的余额不足标记（方案 §3.4「balance_low 出口」，非维度模型
 	// 成员）：账号 extra 中 {platform}_balance_low 标记键为真。false/缺省 = 无标记。
 	BalanceLow bool `json:"balance_low,omitempty"`
+	// BalanceProbeCapable 后端选路事实源 RelayProbeTargetURL 的布尔投影（enabled 且
+	// URL 可解析/可推导）；false/缺省省略。本字段为前端是否显示余额探测单元格的唯一
+	// 能力源——配错账号（enabled 但无可解析 URL 且非官方端点）整格不出现。
+	BalanceProbeCapable bool `json:"balance_probe_capable,omitempty"`
 }
 
 // AccountQuotaDimension 是 service.QuotaDimension 的 DTO 投影（方案 §3.4）。枚举以小写
@@ -446,6 +450,9 @@ type AccountListItem struct {
 	QuotaDimensions []AccountQuotaDimension `json:"quota_dimensions,omitempty"`
 	// BalanceLow 服务端解释的余额不足标记（与完整 Account DTO 同字段同语义）。false/缺省省略。
 	BalanceLow                  bool   `json:"balance_low,omitempty"`
+	// BalanceProbeCapable 后端选路事实源 RelayProbeTargetURL 的布尔投影（与完整
+	// Account DTO 同字段同语义）。false/缺省省略。
+	BalanceProbeCapable         bool   `json:"balance_probe_capable,omitempty"`
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`
 	ParentPrivacyMode           string `json:"parent_privacy_mode,omitempty"`

@@ -579,11 +579,41 @@ export function cnQuotaProviderPrefix(platform: string, baseURL: string): string
   return ''
 }
 
-export function cnBalanceCellVisible(platform: string, accountMode: string, baseURL: string = ''): boolean {
+/**
+ * 余额单元格可见性（单一事实源，CNProviderBalanceCell 与 AccountUsageCell 共用）。
+ * 判定顺序（严格）：
+ *   1. capable === true → 可见（优先于火山排除，消除"后端有快照/探测、前端恒隐藏"的平行闸）
+ *   2. isVolcanoBaseURL(baseURL) → 不可见（火山订阅套餐无公开余额端点，按余额走 payg
+ *      探测会打到错误的 API Key，且订阅套餐没有可查余额，避免与火山配额单元格双重渲染）
+ *   3. accountMode === 'coding' → 不可见（coding 账号走额度探测，余额端点不适用）
+ *   4. platform 'kimi' / 'deepseek' → 可见（官方余额端点恒可达）
+ *   5. platform 'zhipu' / 'minimax' → 按 hasRelayBalanceProbe 放行
+ *   6. 其余平台 → 不可见
+ * capable 为调用方显式传入的后端投影有效探测能力（account.balance_probe_capable，即
+ * RelayProbeTargetURL 的布尔投影），非 credentials.balance_probe.enabled 配置开关——它
+ * 优先于火山排除，使已具备余额能力（enabled 且 URL 可解析/可推导）的账号不再被前端
+ * 恒隐藏；配错账号（enabled 但无可解析 URL 且非官方端点）capable 为 false，整格不出现
+ * （方案乙 / BAL-GATE-D5）。
+ * hasRelayBalanceProbe 为 credentials.balance_probe.enabled 配置开关（第 5 步放行依据）：
+ * 智谱 / MiniMax 官方无余额端点，但挂在这两个平台下的中转型账号（自建 /v1/usage 探针）
+ * 有可用余额端点，配置了探针即按配置放行，不再被平台硬白名单挡死。缺省 false 向后兼容。
+ */
+export function cnBalanceCellVisible(
+  platform: string,
+  accountMode: string,
+  baseURL: string = '',
+  capable: boolean = false,
+  hasRelayBalanceProbe: boolean = false
+): boolean {
+  if (capable === true) return true
   // 火山订阅号按余额走 payg 探测会打到错误的 API Key；订阅套餐没有可查余额，
   // 余额单元格保持隐藏，避免与火山配额单元格双重渲染。
   if (isVolcanoBaseURL(baseURL)) return false
-  return (platform === 'kimi' || platform === 'deepseek') && accountMode !== 'coding'
+  if (accountMode === 'coding') return false
+  if (platform === 'kimi' || platform === 'deepseek') return true
+  // zhipu / minimax 官方无余额端点；中转型账号（配了 balance_probe）有 /v1/usage。
+  if (platform === 'zhipu' || platform === 'minimax') return hasRelayBalanceProbe === true
+  return false
 }
 
 /**

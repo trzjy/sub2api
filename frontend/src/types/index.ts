@@ -1331,6 +1331,10 @@ export interface Account {
   quota_dimensions?: QuotaDimensionItem[]
   // 余额不足出口（与服务端 DTO 逐字锁定的顶层字段，两态兼容）。
   balance_low?: boolean
+  // 后端选路事实源 RelayProbeTargetURL 的布尔投影（enabled 且 URL 可解析/可推导）。
+  // 前端是否显示余额探测单元格的唯一能力源：配错账号（enabled 但无可解析 URL 且非
+  // 官方端点）整格不出现。false/缺省省略（与后端 DTO 字段逐字对齐，两态兼容）。
+  balance_probe_capable?: boolean
   // 影子账号回填的母账号信息（仅影子非空）
   parent_email?: string
   parent_plan_type?: string
