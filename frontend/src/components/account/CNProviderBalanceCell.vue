@@ -381,7 +381,42 @@ const balanceLabel = computed(() => {
   return currentEntries.value.map(formatEntry).join(' · ')
 })
 
+// 余额探测「配置/账号类」错误码（用户可行动）→ 本地化文案（派发单 balance-ui-errmap）。
+// 瞬时/上游类码（CN_BALANCE_REQUEST_FAILED / REQUEST_BUILD_FAILED / PROBE_RESULT_INVALID /
+// CODING_PLAN）刻意不在表内：沿用后端 message 的既有通用渲染。
+// 白名单同时充当 i18n key 注入闸：只有表内常量才能拼进 t() 的 key。
+const PROBE_ERROR_CODES = [
+  'CN_BALANCE_INVALID_CONFIG',
+  'CN_BALANCE_NOT_CONFIGURED',
+  'CN_BALANCE_TH_NOT_CONFIGURED',
+  'CN_BALANCE_NO_APIKEY',
+  'CN_BALANCE_NO_ENDPOINT',
+  'CN_BALANCE_URL_REJECTED',
+  'CN_BALANCE_INVALID_PLATFORM',
+  'CN_BALANCE_ACCOUNT_NOT_FOUND'
+] as const
+
+// 错误码取数：后端错误信封把稳定码放在 reason（response 包 Response.Reason），拦截器
+// 再平铺到错误对象上；response.data.error 为派发单指定的首位读取位（兼容位）。
+// 只认白名单内的码——非表内值一律当作无码，交回既有回退链。
+const extractProbeErrorCode = (e: unknown): string => {
+  const err = e as {
+    reason?: unknown
+    error?: unknown
+    response?: { data?: { error?: unknown; reason?: unknown } }
+  }
+  const candidates = [err?.response?.data?.error, err?.response?.data?.reason, err?.reason, err?.error]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const code = candidate.trim()
+    if ((PROBE_ERROR_CODES as readonly string[]).includes(code)) return code
+  }
+  return ''
+}
+
 const extractErrorMessage = (e: unknown): string => {
+  const code = extractProbeErrorCode(e)
+  if (code) return t(`admin.accounts.cnProviders.probeErrors.${code}`)
   const err = e as {
     message?: string
     reason?: string

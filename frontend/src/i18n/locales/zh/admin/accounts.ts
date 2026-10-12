@@ -501,6 +501,20 @@ export default {
         staleMinutes: '{minutes} 分钟',
         staleHours: '{hours} 小时',
         staleDays: '{days} 天',
+        // 余额探测错误码本地化映射（派发单 balance-ui-errmap）：仅收录「配置/账号类」
+        // 用户可行动的码；命中则替换后端英文 message，未命中/无码回退既有渲染。
+        // 瞬时/上游类（REQUEST_FAILED / REQUEST_BUILD_FAILED / PROBE_RESULT_INVALID /
+        // CODING_PLAN）刻意不进表——保持现有通用渲染不变。
+        probeErrors: {
+          CN_BALANCE_INVALID_CONFIG: '余额探测配置不完整：access_token 与 count_unit 必须同时配置',
+          CN_BALANCE_NOT_CONFIGURED: '余额探测服务未配置，请联系管理员开启',
+          CN_BALANCE_TH_NOT_CONFIGURED: 'TokenHarbor 订阅服务未配置，请联系管理员开启',
+          CN_BALANCE_NO_APIKEY: '账号 API Key 为空，请补全凭据后再查询余额',
+          CN_BALANCE_NO_ENDPOINT: '该账号所在平台没有可用的余额查询端点',
+          CN_BALANCE_URL_REJECTED: '余额探测地址不在允许范围内，请检查探测地址配置',
+          CN_BALANCE_INVALID_PLATFORM: '该账号不是国产供应商账号，不支持余额探测',
+          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除'
+        }
       },
       types: {
         oauth: 'OAuth',

@@ -35,6 +35,11 @@ vi.mock('vue-i18n', async () => {
           return `次卡 剩余 ${named.count}`
         }
         if (key === 'admin.accounts.cnProviders.countPack') return '次卡'
+        // 错误码映射（派发单 balance-ui-errmap）：命中 → 本地化文案，与裸英文 message
+        // 可区分，断言才能锁住「命中走映射、未命中回退 message」。
+        if (key.startsWith('admin.accounts.cnProviders.probeErrors.')) {
+          return `本地化:${key.slice('admin.accounts.cnProviders.probeErrors.'.length)}`
+        }
         return key
       }
     })
@@ -551,5 +556,97 @@ describe('CNProviderBalanceCell', () => {
     const wrapper = mount(CNProviderBalanceCell, { props: { account: zhipuRelayAccount } })
     expect(wrapper.find('[data-test="cn-provider-balance-value"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('次卡 705/1000')
+  })
+
+  // ===== 派发单 balance-ui-errmap：余额探测错误码本地化映射 =====
+  // 注：后端错误信封把稳定码放在 reason（response 包 Response.Reason），client 拦截器
+  // 平铺到错误对象上，故真实链路的码走 err.reason；err.response.data.error 为兼容位。
+
+  // 用户报告的裸渲染串：CN_BALANCE_INVALID_CONFIG → 本地化文案，英文 message 不再出现。
+  it('maps CN_BALANCE_INVALID_CONFIG to the localized copy instead of the raw English message', async () => {
+    queryBalance.mockRejectedValue({
+      status: 400,
+      code: 400,
+      message: 'balance probe access_token and count_unit must be configured together',
+      reason: 'CN_BALANCE_INVALID_CONFIG'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('本地化:CN_BALANCE_INVALID_CONFIG')
+    expect(wrapper.text()).not.toContain('access_token')
+    // 失败关闭：快照余额保留（既有行为不回归）
+    expect(wrapper.get('[data-test="cn-provider-balance-value"]').text()).toContain('CNY 12.50')
+  })
+
+  // 派发单指定的取数位 response.data.error 同样命中映射。
+  it('maps a probe error code carried on response.data.error', async () => {
+    queryBalance.mockRejectedValue({
+      response: { data: { error: 'CN_BALANCE_NO_APIKEY', message: 'account api_key is empty' } }
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('本地化:CN_BALANCE_NO_APIKEY')
+    expect(wrapper.text()).not.toContain('account api_key is empty')
+  })
+
+  // 表内其余配置类码同样走映射（URL 白名单拒绝）。
+  it('maps CN_BALANCE_URL_REJECTED to the localized copy', async () => {
+    queryBalance.mockRejectedValue({
+      message: 'probe url host not allowed: evil.example.com',
+      reason: 'CN_BALANCE_URL_REJECTED'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('本地化:CN_BALANCE_URL_REJECTED')
+    expect(wrapper.text()).not.toContain('evil.example.com')
+  })
+
+  // 未命中映射的瞬时/上游类码 → 既有通用渲染（回退 message 原样，逐字不回归）。
+  it('falls back to the raw message for a transient code that is NOT in the map', async () => {
+    queryBalance.mockRejectedValue({
+      message: 'upstream request failed: dial tcp: i/o timeout',
+      reason: 'CN_BALANCE_REQUEST_FAILED'
+    })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('upstream request failed')
+    expect(wrapper.text()).not.toContain('本地化:')
+  })
+
+  // 无码（纯 message 错误）→ 既有回退链不变。
+  it('keeps the existing fallback chain when no error code is present', async () => {
+    queryBalance.mockRejectedValue({ message: 'boom from server' })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('boom from server')
+    expect(wrapper.text()).not.toContain('本地化:')
+  })
+
+  // 无码且无 message → 既有兜底 t('common.error') 不变。
+  it('falls back to common.error when neither a code nor a message is present', async () => {
+    queryBalance.mockRejectedValue({ reason: 'CN_BALANCE_REQUEST_BUILD_FAILED' })
+
+    const wrapper = mount(CNProviderBalanceCell, { props: { account } })
+    await wrapper.get('[data-test="cn-provider-balance-probe"]').trigger('click')
+    await flushPromises()
+
+    // 未命中映射的码被当作无码处理，走既有链：reason 命中 err?.reason 分支。
+    expect(wrapper.text()).toContain('CN_BALANCE_REQUEST_BUILD_FAILED')
+    expect(wrapper.text()).not.toContain('本地化:')
   })
 })
