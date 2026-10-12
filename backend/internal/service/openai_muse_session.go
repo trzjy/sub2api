@@ -39,7 +39,10 @@ func applyMuseSessionHeader(c *gin.Context, account *Account, headers http.Heade
 	}
 	// 伪装账号（platform=kimi/deepseek/zhipu + opencode.ai base_url）与 muse 同口径注入，
 	// 消除 OpenCode Go 端点 chat/completions 的 400 MissingSessionID；其余账号零变化。
-	if account.Platform != PlatformMuse && !isOpenCodeHostURL(account.GetOpenAIBaseURL()) {
+	// 不能用 GetOpenAIBaseURL()：account.go:1394 对非 muse 平台早退返回 ""，
+	// 会吞掉 kimi/deepseek/zhipu 伪装账号的显式 base_url（生产实证缺陷：
+	// account 241 放量后全部 400 MissingSessionID，2026-10-12）。
+	if account.Platform != PlatformMuse && !isOpenCodeHostURL(strings.TrimSpace(account.GetCredential("base_url"))) {
 		return
 	}
 
