@@ -101,11 +101,7 @@ type OpenAIAccountScheduleRequest struct {
 	// "upstream" 仅非伪装池（星思）。空值不约束——非 kimi 平台请求零行为变化。
 	// 由 selectAccountWithSchedulerOnce 按请求 ctx 中的分档状态装门。
 	KimiTierPool string
-	// PinnedAccountID > 0 时候选池正向收窄为该单账号（掩码探针账号定向，
-	// docs-local/probe-account-routed-plan.md §3-P1）。收窄仍叠加既有兼容性过滤；
-	// 选不中即 ErrNoAvailableAccounts，绝不回退负载均衡。
-	PinnedAccountID int64
-	ExcludedIDs     map[int64]struct{}
+	ExcludedIDs  map[int64]struct{}
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -579,14 +575,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		s.metrics.recordSelect(decision)
 	}()
 
-	// 掩码探针账号定向（docs-local/probe-account-routed-plan.md §3-P1）：pinned 请求
-	// 无会话语义，previous-response / guardian / session-sticky 三层整体跳过，直落
-	// 负载均衡；候选收窄在 isAccountRequestCompatibleReason 内实施（只收窄、不豁免
-	// 任何既有过滤），收窄为空即 ErrNoAvailableAccounts——禁止任何形式的回退选号。
-	pinnedAccount := req.PinnedAccountID > 0
-
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
-	if !pinnedAccount && previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
+	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
 		(!req.StickyWeighted || !req.PreviousResponseCanMove) {
 		selection, err := s.service.selectAccountByPreviousResponseIDForCapability(
 			ctx,
@@ -627,7 +617,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !pinnedAccount && req.GuardianParentAccountID > 0 {
+	if req.GuardianParentAccountID > 0 {
 		parentReq := req
 		parentReq.StickyAccountID = req.GuardianParentAccountID
 		parentReq.PreserveStickyBinding = true
@@ -644,7 +634,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !pinnedAccount && !req.StickyWeighted {
+	if !req.StickyWeighted {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -2112,12 +2102,6 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
-	// 掩码探针账号定向正向收窄（docs-local/probe-account-routed-plan.md §3-P1）：
-	// 同 VisionRoutingTargets（§3.7）先例——非目标账号在此即被排除，目标账号继续
-	// 走下面全部既有过滤（只收窄、不豁免）。PinnedAccountID == 0（未装门）零行为变化。
-	if req.PinnedAccountID > 0 && account.ID != req.PinnedAccountID {
-		return false, "pinned_account_excluded"
-	}
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
@@ -2549,34 +2533,6 @@ func kimiTierPoolFromContext(ctx context.Context) string {
 	}
 }
 
-// MaskedIdentityProbePinnedAccountHeader 是掩码探针定向请求的账号 ID header
-// （docs-local/probe-account-routed-plan.md §3-P2）。网关 handler 与探针服务只读引用。
-const MaskedIdentityProbePinnedAccountHeader = "X-Masked-Probe-Account-ID"
-
-type maskedProbePinnedAccountContextKey struct{}
-
-// WithMaskedProbePinnedAccount 把探针定向账号 ID 装入请求 ctx；handler 在选号前、
-// 仅对探针 key 装门。accountID <= 0 不装门。
-func WithMaskedProbePinnedAccount(ctx context.Context, accountID int64) context.Context {
-	if ctx == nil || accountID <= 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, maskedProbePinnedAccountContextKey{}, accountID)
-}
-
-// maskedProbePinnedAccountFromContext 读取请求 ctx 中的探针定向账号 ID；
-// 未装门（含非法值）返回 0，即不收窄。
-func maskedProbePinnedAccountFromContext(ctx context.Context) int64 {
-	if ctx == nil {
-		return 0
-	}
-	accountID, ok := ctx.Value(maskedProbePinnedAccountContextKey{}).(int64)
-	if !ok || accountID <= 0 {
-		return 0
-	}
-	return accountID
-}
-
 func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 	ctx context.Context,
 	groupID *int64,
@@ -2792,29 +2748,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
-		// 掩码探针账号定向（probe-account-routed-plan §3-P1）：advanced scheduler 关闭时
-		// 本分支即生产活跃选号路径，pinned 必须同语义收窄。直接复用
-		// defaultOpenAIAccountScheduler.Select 的 pinned 收窄分支（单一判定正文，
-		// 不在此复制第二份收窄逻辑）；收窄失败 ErrNoAvailableAccounts 失败关闭，
-		// 绝不回落 loadAwareness。pinnedAccountID == 0（未装门）零行为变化。
-		if pinnedAccountID := maskedProbePinnedAccountFromContext(ctx); pinnedAccountID > 0 {
-			fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
-			return fallbackScheduler.Select(ctx, OpenAIAccountScheduleRequest{
-				GroupID:                 groupID,
-				Platform:                platform,
-				RequestedModel:          requestedModel,
-				RequiredTransport:       requiredTransport,
-				RequiredCapability:      requiredCapability,
-				RequiredImageCapability: requiredImageCapability,
-				RequireCompact:          requireCompact,
-				RequireVision:           requireVision,
-				VisionRoutingTargets:    visionRoutingTargets,
-				KimiTierPool:            kimiTierPool,
-				PinnedAccountID:         pinnedAccountID,
-				ExcludedIDs:             excludedIDs,
-				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
-			})
-		}
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
 		if guardianParentAccountID > 0 {
 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
@@ -2947,7 +2880,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequireVision:           requireVision,
 		VisionRoutingTargets:    visionRoutingTargets,
 		KimiTierPool:            kimiTierPool,
-		PinnedAccountID:         maskedProbePinnedAccountFromContext(ctx),
 		ExcludedIDs:             excludedIDs,
 	})
 }
