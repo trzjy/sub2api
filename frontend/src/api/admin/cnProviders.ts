@@ -115,9 +115,25 @@ export interface CNProviderBalanceResult {
   available: boolean
   /** 同程序中转订阅制不限量（remaining<0）：无数字余额，展示 plan_name。 */
   unlimited?: boolean
+  /**
+   * 计费形态三态（对齐后端 CNProviderBalanceResult.Kind，缺省按 'balance' 处理）：
+   * - 'subscription'：订阅不限量（上游 remaining<0 + mode=unrestricted），没有数字余额，
+   *   展示 plan_name；等价于既有 unlimited 布尔为真的情形。
+   * - 'count_pack'：次卡（上游 mode=quota_limited），balance 字段装的是「剩余次数」
+   *   而非金额。此时后端保证 currency 为空串、balances 为空数组——因为上游 unit
+   *   字段在次卡下也误标 "USD"（已实证 quota.used 与 usage.today.requests 逐位相等），
+   *   不可信，故前端必须走次卡专属文案、不得复用带币种前缀的金额格式化。
+   * - 'balance'：金额余额（官方 kimi/deepseek 账号）。
+   * 旧快照 / 官方原生路径未升级时该字段缺省，消费方按 'balance' 回落。
+   */
+  kind?: 'subscription' | 'count_pack' | 'balance'
+  /** 次卡总量（单位：次）。仅 'count_pack' 形态下发，非次卡缺省或为 0；缺省按 0 处理。 */
+  quota_limit?: number
+  /** 次卡已用（单位：次）。仅 'count_pack' 形态下发，非次卡缺省或为 0；缺省按 0 处理。 */
+  quota_used?: number
   /** 上游订阅分组名（如「DeepSeek 订阅」）。 */
   plan_name?: string
-  /** 上游订阅/额度到期时间（RFC3339）。 */
+  /** 上游订阅/额度到期时间（RFC3339）。次卡同样适用（卡有效期）。 */
   expires_at?: string
   /** 订阅制账号当日/当月用量（USD）；非订阅账号缺省。 */
   daily_usage?: number

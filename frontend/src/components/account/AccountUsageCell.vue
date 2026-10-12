@@ -1028,9 +1028,16 @@ const cnBalanceCellVisible = computed(() => {
   // 与 CNProviderBalanceCell 共用同一判定与取值（方案乙 / BAL-GATE-D5）：后端投影字段
   // account.balance_probe_capable（即 RelayProbeTargetURL 的有效探测能力，非配置开关）
   // 为真时优先于火山排除，使已具备余额能力的账号不再被前端恒隐藏（消除平行闸）。
-  // 火山排除只守旧规则。
+  // 火山排除只守旧规则。第五实参为 credentials.balance_probe.enabled 配置开关，
+  // 放行挂在 zhipu / minimax 下的中转型账号（有 /v1/usage 端点）。
   const capable = props.account.balance_probe_capable === true
-  return cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value, capable)
+  return cnBalanceCellVisibleFn(
+    props.account.platform,
+    cnAccountMode.value,
+    accountBaseURL.value,
+    capable,
+    props.account.balance_probe?.enabled === true
+  )
 })
 
 // TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：用量窗口列走 L5 互斥组件

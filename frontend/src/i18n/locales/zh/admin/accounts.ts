@@ -456,6 +456,11 @@ export default {
         unlimited: '订阅 · 不限量',
         unlimitedWithPlan: '{plan} · 不限量',
         remainingCount: '剩余 {count}',
+        // 次卡（上游 mode=quota_limited）：balance 字段装的是剩余「次数」而非金额，
+        // 文案不带币种前缀；有分母展示「剩余/总量」，无分母只展示剩余次数。
+        countPack: '次卡',
+        countPackRemaining: '次卡 {remaining}/{limit}',
+        countPackNoLimit: '次卡 剩余 {count}',
         expiresAt: '至 {date}',
         monthlyUsage: '月用 ${amount}',
         noBalanceEndpoint: '该平台暂无余额查询接口',

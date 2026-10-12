@@ -252,6 +252,12 @@ export default {
         unlimited: 'Subscription · Unlimited',
         unlimitedWithPlan: '{plan} · Unlimited',
         remainingCount: '{count} remaining',
+        // Count pack (upstream mode=quota_limited): the balance field carries remaining
+        // *requests*, not money — no currency prefix. With a denominator show
+        // "remaining/total", otherwise just the remaining count.
+        countPack: 'Count Pack',
+        countPackRemaining: 'Count pack {remaining}/{limit}',
+        countPackNoLimit: 'Count pack remaining {count}',
         expiresAt: 'until {date}',
         monthlyUsage: 'monthly ${amount}',
         noBalanceEndpoint: 'This platform has no balance query endpoint',
