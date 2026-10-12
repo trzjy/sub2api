@@ -2828,8 +2828,8 @@ func TestOpenAIAccountScheduler_RequireVisionFilter(t *testing.T) {
 
 	// 上游模型解析：account 无 model_mapping 时映射到请求模型本身。
 	reqBase := OpenAIAccountScheduleRequest{
-		RequestedModel:   "gpt-5.1",
-		RequiredTransport: OpenAIUpstreamTransportAny,
+		RequestedModel:     "gpt-5.1",
+		RequiredTransport:  OpenAIUpstreamTransportAny,
 		RequiredCapability: OpenAIEndpointCapabilityChatCompletions,
 	}
 
@@ -3892,4 +3892,465 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SubscriptionPriorityWai
 	require.NotNil(t, selection.WaitPlan)
 	require.Equal(t, int64(38011), selection.WaitPlan.AccountID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+}
+
+// ===========================================================================
+// 掩码探针账号定向选号（派发单 probe-routed-A0，docs-local/probe-account-routed-plan.md §3-P1/P2）
+// ===========================================================================
+
+// maskedProbePinnedOpenAIAccount 构造一个 OpenAI 平台的可调度候选账号。
+func maskedProbePinnedOpenAIAccount(id int64) Account {
+	return Account{
+		ID:          id,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+}
+
+// maskedProbePinnedKimiAccount 构造 kimi 平台账号；masked=true 挂 qwen 伪装线标记
+// （与 kimi 分层路由的池判定同源）。
+func maskedProbePinnedKimiAccount(id int64, masked bool) Account {
+	account := Account{
+		ID:          id,
+		Platform:    PlatformKimi,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+	if masked {
+		account.Extra = map[string]any{"mask_upstream_identity": true}
+	}
+	return account
+}
+
+// maskedProbePinnedTestService 构造启用高级调度器的网关服务。定向收窄只发生在
+// defaultOpenAIAccountScheduler.Select 路径，故必须把 openai_advanced_scheduler_enabled
+// 置 true。桩全部取自本文件（无 build tag），保证 `go test ./internal/service -run Pinned`
+// 不带 -tags unit 也能编译执行。
+func maskedProbePinnedTestService(t *testing.T, accounts []Account, cache *schedulerTestGatewayCache) *OpenAIGatewayService {
+	t.Helper()
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+	if cache == nil {
+		cache = &schedulerTestGatewayCache{}
+	}
+	return &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              cache,
+		cfg:                &config.Config{},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+}
+
+func releaseMaskedProbeSelection(t *testing.T, selection *AccountSelectionResult) {
+	t.Helper()
+	if selection != nil && selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+// TestMaskedProbePinnedAccountHeaderContract 锁定 A1/B 卡只读引用的 SSOT 契约：
+// header 常量值 + ctx setter/getter 往返（含 accountID <= 0 不装门、脏值按未装门）。
+func TestMaskedProbePinnedAccountHeaderContract(t *testing.T) {
+	require.Equal(t, "X-Masked-Probe-Account-ID", MaskedIdentityProbePinnedAccountHeader)
+
+	base := context.Background()
+	require.Equal(t, int64(7701), maskedProbePinnedAccountFromContext(WithMaskedProbePinnedAccount(base, 7701)))
+
+	for _, accountID := range []int64{0, -1, math.MinInt64} {
+		gated := WithMaskedProbePinnedAccount(base, accountID)
+		require.True(t, gated == base, "accountID=%d 不应装门（ctx 原样返回）", accountID)
+		require.Equal(t, int64(0), maskedProbePinnedAccountFromContext(gated))
+	}
+
+	require.Equal(t, int64(0), maskedProbePinnedAccountFromContext(base), "未装门读 0")
+	require.Equal(t, int64(0), maskedProbePinnedAccountFromContext(nil))
+	require.True(t, WithMaskedProbePinnedAccount(nil, 7701) == nil)
+
+	// 脏值（非 int64 载体 / 非正值）一律按未装门处理，绝不收窄。
+	require.Equal(t, int64(0), maskedProbePinnedAccountFromContext(context.WithValue(base, maskedProbePinnedAccountContextKey{}, "7701")))
+	require.Equal(t, int64(0), maskedProbePinnedAccountFromContext(context.WithValue(base, maskedProbePinnedAccountContextKey{}, int64(0))))
+}
+
+// TestMaskedProbePinnedAccountSelectNarrowing 覆盖定向选号主语义：
+//   - 装门必选中 pinned，候选池收窄为单账号（Done when #1）；
+//   - pinned 不在候选 / 被排除 / 不可调度 → ErrNoAvailableAccounts，绝不选中其他账号
+//     （Done when #2）；
+//   - ctx 未装门（PinnedAccountID == 0）既有选号行为零变化（Done when #3）。
+func TestMaskedProbePinnedAccountSelectNarrowing(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(104001)
+	model := "gpt-5.1"
+
+	selectAccount := func(t *testing.T, svc *OpenAIGatewayService, pinned int64, excluded map[int64]struct{}, sessionHash string) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+		t.Helper()
+		callCtx := ctx
+		if pinned > 0 {
+			callCtx = WithMaskedProbePinnedAccount(callCtx, pinned)
+		}
+		return svc.SelectAccountWithScheduler(callCtx, &groupID, "", sessionHash, model, excluded, OpenAIUpstreamTransportAny, false)
+	}
+
+	t.Run("pinned_account_selected", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedOpenAIAccount(7801), maskedProbePinnedOpenAIAccount(7802)}, nil)
+		selection, decision, err := selectAccount(t, svc, 7802, nil, "")
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7802), selection.Account.ID)
+		require.Equal(t, int64(7802), decision.SelectedAccountID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		require.Equal(t, 1, decision.CandidateCount, "候选池须正向收窄为单账号")
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("pinned_account_absent_fail_closed", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedOpenAIAccount(7801), maskedProbePinnedOpenAIAccount(7802)}, nil)
+		selection, decision, err := selectAccount(t, svc, 7899, nil, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Zero(t, decision.SelectedAccountID)
+		require.Contains(t, err.Error(), "pinned_account_excluded=2", "非定向账号全部收窄排除，留痕可诊断")
+	})
+
+	t.Run("pinned_account_excluded_fail_closed", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedOpenAIAccount(7801), maskedProbePinnedOpenAIAccount(7802)}, nil)
+		selection, _, err := selectAccount(t, svc, 7801, map[int64]struct{}{7801: {}}, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Contains(t, err.Error(), "excluded=1")
+		require.Contains(t, err.Error(), "pinned_account_excluded=1", "同池另一账号不得补位")
+	})
+
+	t.Run("pinned_account_not_schedulable_fail_closed", func(t *testing.T) {
+		disabled := maskedProbePinnedOpenAIAccount(7801)
+		disabled.Schedulable = false
+		svc := maskedProbePinnedTestService(t, []Account{disabled, maskedProbePinnedOpenAIAccount(7802)}, nil)
+		selection, _, err := selectAccount(t, svc, 7801, nil, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Contains(t, err.Error(), "not_schedulable=1")
+		require.Contains(t, err.Error(), "pinned_account_excluded=1")
+	})
+
+	t.Run("no_gate_zero_regression", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedOpenAIAccount(7801), maskedProbePinnedOpenAIAccount(7802)}, nil)
+		selection, decision, err := selectAccount(t, svc, 0, nil, "")
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Contains(t, []int64{7801, 7802}, selection.Account.ID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		require.Equal(t, 2, decision.CandidateCount, "未装门不收窄")
+		releaseMaskedProbeSelection(t, selection)
+	})
+}
+
+// TestMaskedProbePinnedAccountSkipsStickyLayers 覆盖 §3-P1.1：定向请求跳过
+// previous-response / guardian / session-sticky 三层；pinned 不可用时绝不回退粘性
+// 命中账号（Done when #2 的 sticky 场景）。
+func TestMaskedProbePinnedAccountSkipsStickyLayers(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(104101)
+	model := "gpt-5.1"
+
+	// 粘性路径会校验账号归属分组（openAIStickyAccountMatchesGroup），候选账号须带 GroupIDs。
+	inGroup := func(id int64) Account {
+		account := maskedProbePinnedOpenAIAccount(id)
+		account.GroupIDs = []int64{groupID}
+		return account
+	}
+
+	t.Run("sticky_binding_does_not_win_over_pin", func(t *testing.T) {
+		cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session_pinned": 7812}}
+		svc := maskedProbePinnedTestService(t, []Account{inGroup(7811), inGroup(7812)}, cache)
+		selection, decision, err := svc.SelectAccountWithScheduler(
+			WithMaskedProbePinnedAccount(ctx, 7811), &groupID, "", "session_pinned", model, nil, OpenAIUpstreamTransportAny, false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7811), selection.Account.ID)
+		require.Equal(t, int64(7811), decision.SelectedAccountID)
+		require.False(t, decision.StickySessionHit, "定向请求无会话语义")
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("sticky_hit_without_pin_is_baseline", func(t *testing.T) {
+		// 对照组：同绑定、未装门 → 粘性层命中 7822（证明上面的跳过确有其事）。
+		cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session_pinned": 7822}}
+		svc := maskedProbePinnedTestService(t, []Account{inGroup(7821), inGroup(7822)}, cache)
+		selection, decision, err := svc.SelectAccountWithScheduler(
+			ctx, &groupID, "", "session_pinned", model, nil, OpenAIUpstreamTransportAny, false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7822), selection.Account.ID)
+		require.True(t, decision.StickySessionHit)
+		require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("unavailable_pin_never_falls_back_to_sticky", func(t *testing.T) {
+		cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session_pinned": 7832}}
+		svc := maskedProbePinnedTestService(t, []Account{inGroup(7831), inGroup(7832)}, cache)
+		selection, _, err := svc.SelectAccountWithScheduler(
+			WithMaskedProbePinnedAccount(ctx, 7899), &groupID, "", "session_pinned", model, nil, OpenAIUpstreamTransportAny, false,
+		)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+	})
+
+	t.Run("guardian_and_sticky_ids_skipped_when_pinned", func(t *testing.T) {
+		// 直接驱动 Select()：guardian / session-sticky / previous-response 三个粘性入参
+		// 全指向另一账号，定向仍落 pinned，且三层均不得命中。
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedOpenAIAccount(7841), maskedProbePinnedOpenAIAccount(7842)}, nil)
+		scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: newOpenAIAccountRuntimeStats()}
+		selection, decision, err := scheduler.Select(WithMaskedProbePinnedAccount(ctx, 7841), OpenAIAccountScheduleRequest{
+			GroupID:                 &groupID,
+			Platform:                PlatformOpenAI,
+			SessionHash:             "session_guardian",
+			StickyAccountID:         7842,
+			GuardianParentAccountID: 7842,
+			StickyPreviousAccountID: 7842,
+			PreviousResponseID:      "resp_7842",
+			RequestedModel:          model,
+			RequiredTransport:       OpenAIUpstreamTransportAny,
+			PinnedAccountID:         7841,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7841), selection.Account.ID)
+		require.Equal(t, int64(7841), decision.SelectedAccountID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		require.False(t, decision.StickySessionHit)
+		require.False(t, decision.StickyPreviousHit)
+		releaseMaskedProbeSelection(t, selection)
+	})
+}
+
+// TestMaskedProbePinnedAccountSurvivesKimiCrossPoolRetry 覆盖 §3-P1.4：kimi 跨档重试
+// 复用同一 ctx，pinned 随 ctx 保持——重试仍收窄单账号，只可能再失败或选中同账号，
+// 不存在换账号通道。
+func TestMaskedProbePinnedAccountSurvivesKimiCrossPoolRetry(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(104201)
+	model := "kimi-k3"
+
+	selectKimi := func(t *testing.T, selCtx context.Context, svc *OpenAIGatewayService) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+		t.Helper()
+		return svc.SelectAccountWithSchedulerForCapability(
+			selCtx, &groupID, "", "", model, nil,
+			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+			false, false, false, false, PlatformKimi,
+		)
+	}
+
+	t.Run("cross_pool_retry_keeps_pin", func(t *testing.T) {
+		// 小档默认只走 qwen 伪装线；定向星思账号 → 首轮收窄为空，跨档重试仍收窄到该账号。
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedKimiAccount(7851, true), maskedProbePinnedKimiAccount(7852, false)}, nil)
+		selection, decision, err := selectKimi(t, WithMaskedProbePinnedAccount(WithKimiTierRouting(ctx, KimiTierSmall), 7852), svc)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7852), selection.Account.ID)
+		require.Equal(t, int64(7852), decision.SelectedAccountID)
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("same_pool_pin_selected", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedKimiAccount(7861, true), maskedProbePinnedKimiAccount(7862, false)}, nil)
+		selection, _, err := selectKimi(t, WithMaskedProbePinnedAccount(WithKimiTierRouting(ctx, KimiTierSmall), 7861), svc)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7861), selection.Account.ID)
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("pin_outside_both_pools_fail_closed", func(t *testing.T) {
+		svc := maskedProbePinnedTestService(t, []Account{maskedProbePinnedKimiAccount(7871, true), maskedProbePinnedKimiAccount(7872, false)}, nil)
+		selection, _, err := selectKimi(t, WithMaskedProbePinnedAccount(WithKimiTierRouting(ctx, KimiTierSmall), 7899), svc)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+	})
+}
+
+// TestMaskedProbePinnedAccountNarrowingDoesNotExemptFilters 证明收窄只收窄、不豁免
+// 任何既有过滤（§3-P1.2）：pinned 账号自身仍被既有 veto 挡下；非 pinned 账号一律
+// pinned_account_excluded；PinnedAccountID == 0 零行为变化。
+func TestMaskedProbePinnedAccountNarrowingDoesNotExemptFilters(t *testing.T) {
+	now := time.Now()
+	svc := &OpenAIGatewayService{openaiModelTransient: newOpenAIAccountModelTransientState(128)}
+	svc.openaiModelTransient.recordFailure(7881, "gpt-5.5", now)
+	svc.openaiModelTransient.recordFailure(7881, "gpt-5.5", now.Add(time.Millisecond))
+	scheduler := &defaultOpenAIAccountScheduler{service: svc}
+
+	pinned := maskedProbePinnedOpenAIAccount(7881)
+	other := maskedProbePinnedOpenAIAccount(7882)
+	req := OpenAIAccountScheduleRequest{
+		PinnedAccountID:   pinned.ID,
+		RequestedModel:    "gpt-5.5",
+		RequiredTransport: OpenAIUpstreamTransportAny,
+	}
+
+	compatible, reason := scheduler.isAccountRequestCompatibleReason(context.Background(), &pinned, req)
+	require.False(t, compatible)
+	require.Equal(t, "runtime_blocked", reason, "定向账号仍受既有 veto 约束，收窄不豁免")
+
+	compatible, reason = scheduler.isAccountRequestCompatibleReason(context.Background(), &other, req)
+	require.False(t, compatible)
+	require.Equal(t, "pinned_account_excluded", reason)
+
+	unpinnedReq := req
+	unpinnedReq.PinnedAccountID = 0
+	compatible, reason = scheduler.isAccountRequestCompatibleReason(context.Background(), &other, unpinnedReq)
+	require.True(t, compatible, "PinnedAccountID == 0 零行为变化")
+	require.Empty(t, reason)
+}
+
+// ===========================================================================
+// legacy 选号路径（advanced scheduler 关闭）的 pinned 定向收窄
+// （派发单 probe-routed-A0R2，docs-local/probe-account-routed-plan.md §3-P1）
+// ===========================================================================
+
+// maskedProbePinnedLegacyTestService 构造 openai_advanced_scheduler_enabled=false 的
+// 网关服务：getOpenAIAccountScheduler 返回 nil → selectAccountWithSchedulerOnce 落入
+// scheduler == nil 的 legacy 分支。生产该开关为 false，故此分支即生产活跃选号路径，
+// A0 只补 advanced 路径的定向收窄不足以让生产定向生效。
+func maskedProbePinnedLegacyTestService(t *testing.T, accounts []Account) *OpenAIGatewayService {
+	t.Helper()
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cache:              &schedulerTestGatewayCache{},
+		cfg:                &config.Config{},
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("false"),
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+	require.False(t, svc.isOpenAIAdvancedSchedulerEnabled(context.Background()),
+		"夹具必须落在 legacy 路径（advanced scheduler 关闭）")
+	require.Nil(t, svc.getOpenAIAccountScheduler(context.Background()))
+	return svc
+}
+
+// TestMaskedProbePinnedLegacyPath 覆盖 legacy 分支（scheduler == nil）的定向语义：
+//   - 装门必选中 pinned（Done when #1）；
+//   - pinned 不可用 → ErrNoAvailableAccounts，绝不进 selectAccountWithLoadAwareness
+//     （Done when #2，用「同夹具去掉 pinned 就会选中另一健康账号」作反证）；
+//   - 未装门既有行为零变化（Done when #3）。
+func TestMaskedProbePinnedLegacyPath(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(104201)
+	model := "gpt-5.1"
+
+	selectLegacy := func(t *testing.T, svc *OpenAIGatewayService, pinned int64, excluded map[int64]struct{}, sessionHash string) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+		t.Helper()
+		callCtx := ctx
+		if pinned > 0 {
+			callCtx = WithMaskedProbePinnedAccount(callCtx, pinned)
+		}
+		return svc.SelectAccountWithScheduler(callCtx, &groupID, "", sessionHash, model, excluded, OpenAIUpstreamTransportAny, false)
+	}
+
+	t.Run("pinned_account_selected", func(t *testing.T) {
+		svc := maskedProbePinnedLegacyTestService(t, []Account{maskedProbePinnedOpenAIAccount(7901), maskedProbePinnedOpenAIAccount(7902)})
+		selection, decision, err := selectLegacy(t, svc, 7902, nil, "")
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7902), selection.Account.ID)
+		require.Equal(t, int64(7902), decision.SelectedAccountID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		require.Equal(t, 1, decision.CandidateCount, "legacy 路径同样正向收窄为单账号")
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("pinned_absent_fail_closed", func(t *testing.T) {
+		svc := maskedProbePinnedLegacyTestService(t, []Account{maskedProbePinnedOpenAIAccount(7901), maskedProbePinnedOpenAIAccount(7902)})
+		selection, decision, err := selectLegacy(t, svc, 7999, nil, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Zero(t, decision.SelectedAccountID)
+		require.Contains(t, err.Error(), "pinned_account_excluded=2")
+	})
+
+	t.Run("pinned_excluded_fail_closed", func(t *testing.T) {
+		svc := maskedProbePinnedLegacyTestService(t, []Account{maskedProbePinnedOpenAIAccount(7901), maskedProbePinnedOpenAIAccount(7902)})
+		selection, _, err := selectLegacy(t, svc, 7901, map[int64]struct{}{7901: {}}, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Contains(t, err.Error(), "excluded=1")
+		require.Contains(t, err.Error(), "pinned_account_excluded=1", "同池另一账号不得补位")
+	})
+
+	// 反证：pinned 账号不可调度时，同池健康账号在**未装门**下必然被负载均衡选中；
+	// 装门后同一夹具必须硬失败——若 legacy 分支回落 selectAccountWithLoadAwareness，
+	// 结果会等同对照组（选中 7912），断言即失败。
+	t.Run("pinned_not_schedulable_never_falls_back_to_load_awareness", func(t *testing.T) {
+		dead := maskedProbePinnedOpenAIAccount(7911)
+		dead.Schedulable = false
+		accounts := []Account{dead, maskedProbePinnedOpenAIAccount(7912)}
+
+		control := maskedProbePinnedLegacyTestService(t, accounts)
+		controlSelection, _, controlErr := selectLegacy(t, control, 0, nil, "")
+		require.NoError(t, controlErr)
+		require.NotNil(t, controlSelection)
+		require.NotNil(t, controlSelection.Account)
+		require.Equal(t, int64(7912), controlSelection.Account.ID, "对照组：无定向时负载均衡选中健康账号")
+		releaseMaskedProbeSelection(t, controlSelection)
+
+		svc := maskedProbePinnedLegacyTestService(t, accounts)
+		selection, decision, err := selectLegacy(t, svc, 7911, nil, "")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+		require.Nil(t, selection)
+		require.Zero(t, decision.SelectedAccountID, "失败关闭不得留下任何选中账号")
+		require.Contains(t, err.Error(), "not_schedulable=1")
+		require.Contains(t, err.Error(), "pinned_account_excluded=1", "留痕来自收窄分支，非 loadAwareness 过滤器")
+	})
+
+	// 定向请求无会话语义（§3-P1.1）：legacy 分支的粘性/guardian 处理位于短路之后，
+	// 装门请求根本不会触达（结构性保证）。此处只锁定可稳定断言的一半：装门必落
+	// pinned，且决策由 Select 产出（StickySessionHit 不被置位）。
+	t.Run("pinned_decision_comes_from_select_not_legacy_layers", func(t *testing.T) {
+		svc := maskedProbePinnedLegacyTestService(t, []Account{maskedProbePinnedOpenAIAccount(7921), maskedProbePinnedOpenAIAccount(7922)})
+		selection, decision, err := selectLegacy(t, svc, 7922, nil, "session_legacy")
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Equal(t, int64(7922), selection.Account.ID)
+		require.Equal(t, int64(7922), decision.SelectedAccountID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		require.False(t, decision.StickySessionHit, "pinned 不走粘性层")
+		require.False(t, decision.StickyPreviousHit, "pinned 不走 previous-response 层")
+		releaseMaskedProbeSelection(t, selection)
+	})
+
+	t.Run("no_gate_zero_regression", func(t *testing.T) {
+		svc := maskedProbePinnedLegacyTestService(t, []Account{maskedProbePinnedOpenAIAccount(7901), maskedProbePinnedOpenAIAccount(7902)})
+		selection, decision, err := selectLegacy(t, svc, 0, nil, "")
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.NotNil(t, selection.Account)
+		require.Contains(t, []int64{7901, 7902}, selection.Account.ID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		releaseMaskedProbeSelection(t, selection)
+	})
 }

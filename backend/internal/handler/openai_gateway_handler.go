@@ -683,6 +683,17 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	c.Request = c.Request.WithContext(kimiCtx)
 
+	// 掩码探针账号定向装门（docs-local/probe-account-routed-plan.md §3-P2）：与 kimi 分档
+	// 同位、选号循环前。非探针 key 零行为变化；探针 key 的 header 缺失/非法在此 fail closed，
+	// 绝不进入下面的负载均衡选号。
+	probeCtx, err := h.applyMaskedProbePinnedAccount(c, c.Request.Context())
+	if err != nil {
+		reqLog.Warn("openai.responses.masked_probe_pin_failed", zap.Error(err))
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "invalid masked probe pinned account header")
+		return
+	}
+	c.Request = c.Request.WithContext(probeCtx)
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -1335,6 +1346,17 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	c.Request = c.Request.WithContext(kimiCtx)
+
+	// 掩码探针账号定向装门（docs-local/probe-account-routed-plan.md §3-P2）：与 kimi 分档
+	// 同位、选号循环前。非探针 key 零行为变化；探针 key 的 header 缺失/非法在此 fail closed，
+	// 绝不进入下面的负载均衡选号。
+	probeCtx, err := h.applyMaskedProbePinnedAccount(c, c.Request.Context())
+	if err != nil {
+		reqLog.Warn("openai_messages.masked_probe_pin_failed", zap.Error(err))
+		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "invalid masked probe pinned account header", streamStarted)
+		return
+	}
+	c.Request = c.Request.WithContext(probeCtx)
 
 	for {
 		if failoverClientGone(c) {
@@ -4542,4 +4564,48 @@ func applyKimiTierRouting(
 		zap.String("tier", string(class)),
 	)
 	return ctx, nil
+}
+
+// applyMaskedProbePinnedAccount 是掩码探针账号定向的网关装门
+// （docs-local/probe-account-routed-plan.md §3-P2 装门矩阵）：三入口
+// （chat/completions、responses、messages）在选号前调用，把探针 header 指定的
+// 目标账号 ID 装入请求 ctx，供 scheduler 正向收窄候选池。WS 入口不装门
+// （§9.1 已知边界：探针不使用 WS）。
+//
+// 装门矩阵（逐行对应方案 §3-P2 表）：
+//
+//  1. 探针 key 未配置（setting 读取为 0）或认证 key != 探针 key ID → 原样返回 baseCtx，
+//     header 等价不存在，既有选号行为零变化；
+//  2. 认证 key == 探针 key ID 且 header 为合法正整数 → service.WithMaskedProbePinnedAccount；
+//  3. 认证 key == 探针 key ID 但 header 缺失 / 非数字 / <= 0 → 返回 error，调用方必须在
+//     任何选号发生前 fail closed（方案审 D1：回落负载均衡 = 「断言账号与实际账号错位」
+//     的盲区换个形态复活）。
+//
+// 探针 key ID 每请求只读一次（SettingService 进程内缓存链路，与 vision routing 同模式）。
+// 装门只做装饰：返回 ctx 保留 baseCtx 的全部既有值（分档门、定价门、预算快照等）。
+func (h *OpenAIGatewayHandler) applyMaskedProbePinnedAccount(
+	c *gin.Context,
+	baseCtx context.Context,
+) (context.Context, error) {
+	probeKeyID := h.settingService.GetMaskedIdentityProbeAPIKeyID(baseCtx)
+	if probeKeyID <= 0 {
+		return baseCtx, nil
+	}
+	authKeyID := int64(0)
+	if apiKey, ok := middleware2.GetAPIKeyFromContext(c); ok && apiKey != nil {
+		authKeyID = apiKey.ID
+	}
+	if authKeyID != probeKeyID {
+		return baseCtx, nil
+	}
+	header := service.MaskedIdentityProbePinnedAccountHeader
+	raw := strings.TrimSpace(c.GetHeader(header))
+	accountID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("masked probe pinned account: header %s is not a valid integer: %w", header, err)
+	}
+	if accountID <= 0 {
+		return nil, fmt.Errorf("masked probe pinned account: header %s must be positive, got %d", header, accountID)
+	}
+	return service.WithMaskedProbePinnedAccount(baseCtx, accountID), nil
 }

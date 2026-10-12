@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3293,4 +3299,302 @@ func TestOpenAIResponsesWebSocket_MeteringUserBlockedWhenGlobalConcurrencyExhaus
 		},
 		concurrencyCloseExpected: true,
 	})
+}
+
+// ===========================================================================
+// 掩码探针账号定向装门（派发单 probe-routed-A1；docs-local/probe-account-routed-plan.md
+// §3-P2 装门矩阵）。命名统一含 MaskedProbe，便于 `go test -run 'MaskedProbe'` 过滤。
+// ===========================================================================
+
+// maskedProbeSentinelContextKey 用于断言装门只做装饰：baseCtx 的既有值必须存活到返回 ctx。
+type maskedProbeSentinelContextKey struct{}
+
+// newMaskedProbeGateFixture 构造装门 helper 所需的最小依赖面：
+//   - settingService：复用包内既有桩 contentModerationHandlerSettingRepo，写入
+//     service.SettingKeyMaskedIdentityProbeAPIKeyID（"0" = 探针未配置）；
+//   - 认证 key：经 middleware.ContextKeyAPIKey 注入，与 apiKeyAuth 中间件同键同形状；
+//   - header：直接写在 *http.Request 上（c.GetHeader 的唯一来源）。
+//
+// withHeader=false 模拟探针服务漏发 header；headerValue 原样写入（含空串/非数字/负数）。
+func newMaskedProbeGateFixture(t *testing.T, probeKeyID, authKeyID int64, headerValue string, withHeader bool) (*OpenAIGatewayHandler, *gin.Context) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	settingSvc := service.NewSettingService(&contentModerationHandlerSettingRepo{
+		values: map[string]string{
+			service.SettingKeyMaskedIdentityProbeAPIKeyID: strconv.FormatInt(probeKeyID, 10),
+		},
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if withHeader {
+		req.Header.Set(service.MaskedIdentityProbePinnedAccountHeader, headerValue)
+	}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	if authKeyID > 0 {
+		c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{ID: authKeyID})
+	}
+	return &OpenAIGatewayHandler{settingService: settingSvc}, c
+}
+
+func newMaskedProbeBaseCtx() context.Context {
+	return context.WithValue(context.Background(), maskedProbeSentinelContextKey{}, "kept")
+}
+
+// maskedProbePinnedAccountKey 从导出 setter service.WithMaskedProbePinnedAccount 构造的
+// 参照 ctx 中恢复 context key，供 ctx.Value 同值断言。
+//
+// 该 key 类型与 service 层读取函数 maskedProbePinnedAccountFromContext 同为包私有，
+// handler 测试无法直接命名；而 internal/service/** 是本卡禁区，不得为测试新增导出读取函数。
+//
+// 实现约束：只用 reflect 的公开 API 读取字段**类型**（不读私有字段值——`Interface()` 会
+// panic，故走 `Value.Elem().Type()` 拿动态类型），再对零字段结构体类型做 `reflect.New`
+// 零值化（空结构体零值即 key 本身）。每个候选都必须先在参照 ctx 上自校验取回预期值才被
+// 采用；一个都取不到即 t.Fatalf——假阴性不会静默通过。
+func maskedProbePinnedAccountKey(t *testing.T, wantAccountID int64) any {
+	t.Helper()
+	ref := service.WithMaskedProbePinnedAccount(context.Background(), wantAccountID)
+	require.NotNil(t, ref)
+	rv := reflect.ValueOf(ref)
+	if rv.Kind() == reflect.Ptr {
+		rv = rv.Elem()
+	}
+	require.Equal(t, reflect.Struct, rv.Kind(), "导出 setter 在 accountID>0 时必须返回 valueCtx")
+	for i := 0; i < rv.NumField(); i++ {
+		field := rv.Field(i)
+		if field.Kind() != reflect.Interface || field.IsNil() {
+			continue
+		}
+		fieldType := field.Elem().Type()
+		if fieldType.Kind() != reflect.Struct || fieldType.NumField() != 0 {
+			continue
+		}
+		candidate := reflect.New(fieldType).Elem().Interface()
+		if got, ok := ref.Value(candidate).(int64); ok && got == wantAccountID {
+			return candidate
+		}
+	}
+	t.Fatalf("无法从导出 setter 的参照 ctx 恢复探针定向 context key")
+	return nil
+}
+
+// TestMaskedProbeInstallGate_NonProbeKeyHeaderIgnored 覆盖矩阵第 1 行：
+// 探针 key 已配置但认证 key != 探针 key ID → 任意 header（含合法值）一律忽略，
+// 原样返回入参 ctx（header 等价不存在），零新语义。
+func TestMaskedProbeInstallGate_NonProbeKeyHeaderIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		header     string
+		withHeader bool
+	}{
+		{"合法正整数", "7701", true},
+		{"header 缺失", "", false},
+		{"空串", "", true},
+		{"非数字", "not-a-number", true},
+		{"零", "0", true},
+		{"负数", "-3", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := newMaskedProbeGateFixture(t, 9001, 4242, tc.header, tc.withHeader)
+			base := newMaskedProbeBaseCtx()
+
+			out, err := h.applyMaskedProbePinnedAccount(c, base)
+
+			require.NoError(t, err, "非探针 key 不得因 header 状态报错")
+			require.True(t, out == base, "非探针 key 必须原样返回入参 ctx（header 等价不存在）")
+		})
+	}
+}
+
+// TestMaskedProbeInstallGate_ProbeKeyUnconfiguredIgnored 覆盖矩阵第 1 行的另一半：
+// 探针 key 未配置（setting = 0）→ 即使认证 key 存在且 header 合法，也原样返回入参 ctx。
+func TestMaskedProbeInstallGate_ProbeKeyUnconfiguredIgnored(t *testing.T) {
+	h, c := newMaskedProbeGateFixture(t, 0, 4242, "7701", true)
+	base := newMaskedProbeBaseCtx()
+
+	out, err := h.applyMaskedProbePinnedAccount(c, base)
+
+	require.NoError(t, err)
+	require.True(t, out == base, "探针 key 未配置（=0）时 header 等价不存在")
+}
+
+// TestMaskedProbeInstallGate_NilSettingServiceIgnored 钉死零行为变化边界：
+// settingService 为 nil（大量既有 handler 测试的构造形态）时必须原样返回入参 ctx。
+func TestMaskedProbeInstallGate_NilSettingServiceIgnored(t *testing.T) {
+	_, c := newMaskedProbeGateFixture(t, 9001, 9001, "7701", true)
+	h := &OpenAIGatewayHandler{} // settingService == nil
+	base := newMaskedProbeBaseCtx()
+
+	out, err := h.applyMaskedProbePinnedAccount(c, base)
+
+	require.NoError(t, err)
+	require.True(t, out == base, "settingService 为 nil 时零行为变化")
+}
+
+// TestMaskedProbeInstallGate_ProbeKeyValidHeaderPinsAccount 覆盖矩阵第 2 行：
+// 探针 key + 合法正整数 header → 返回 ctx 的 pinned 值等于 header 值，
+// 且 baseCtx 既有值全部保留（装门只装饰、不替换分档门/定价门/预算快照等）。
+func TestMaskedProbeInstallGate_ProbeKeyValidHeaderPinsAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int64
+	}{
+		{"普通正整数", "7701", 7701},
+		{"前后空格容忍", "  7702  ", 7702},
+		{"最小正值 1", "1", 1},
+		{"int64 上界", "9223372036854775807", int64(9223372036854775807)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := newMaskedProbeGateFixture(t, 9001, 9001, tc.header, true)
+			base := newMaskedProbeBaseCtx()
+
+			out, err := h.applyMaskedProbePinnedAccount(c, base)
+
+			require.NoError(t, err)
+			require.NotNil(t, out)
+			require.False(t, out == base, "探针 key + 合法 header 必须返回装门后的新 ctx")
+			key := maskedProbePinnedAccountKey(t, tc.want)
+			got, ok := out.Value(key).(int64)
+			require.True(t, ok, "pinned 值必须是 int64")
+			require.Equal(t, tc.want, got, "pinned 值必须等于 header 值")
+			// 负控：恢复出的 key 必须是「定向账号」专用 key——未装门 ctx 上无值，
+			// 异值参照 ctx 上取不到本用例的期望值（防止 key 错认成恒真断言）。
+			require.Nil(t, base.Value(key), "负控：未装门 ctx 在该 key 上必须无值")
+			negID := int64(1)
+			if tc.want == 1 {
+				negID = 2
+			}
+			require.NotEqual(t, tc.want, service.WithMaskedProbePinnedAccount(context.Background(), negID).Value(key),
+				"负控：异值参照 ctx 在该 key 上不得取到期望值")
+			require.Equal(t, "kept", out.Value(maskedProbeSentinelContextKey{}),
+				"装门不得丢弃 baseCtx 的既有值")
+		})
+	}
+}
+
+// TestMaskedProbeInstallGate_ProbeKeyInvalidHeaderFailsClosed 覆盖矩阵第 3 行：
+// 探针 key + header 缺失/非数字/0/负数/溢出 → error 非空且返回 nil ctx，
+// 调用方据此在任何选号前 fail closed（方案审 D1：绝不回落负载均衡）。
+func TestMaskedProbeInstallGate_ProbeKeyInvalidHeaderFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		header     string
+		withHeader bool
+	}{
+		{"header 缺失", "", false},
+		{"空串", "", true},
+		{"纯空白", "   ", true},
+		{"非数字", "not-a-number", true},
+		{"数字带后缀", "7701abc", true},
+		{"浮点", "12.5", true},
+		{"零", "0", true},
+		{"负数", "-3", true},
+		{"超出 int64", "9223372036854775808", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, c := newMaskedProbeGateFixture(t, 9001, 9001, tc.header, tc.withHeader)
+			base := newMaskedProbeBaseCtx()
+
+			out, err := h.applyMaskedProbePinnedAccount(c, base)
+
+			require.Error(t, err, "探针 key 的非法 header 必须报错")
+			require.Nil(t, out, "fail closed 不得返回可用 ctx（否则调用方可能带着它继续选号）")
+		})
+	}
+}
+
+// maskedProbeParseHandlerFile 解析 handler 包源文件（与 openai_quota_platform_contract_test.go
+// 同模式：go test 的工作目录即包目录）。
+func maskedProbeParseHandlerFile(t *testing.T, name string) (*token.FileSet, *ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+	require.NoError(t, err)
+	return fset, parsed
+}
+
+// maskedProbeOpenAIGatewayMethodDecl 定位 `func (h *OpenAIGatewayHandler) <methodName>`
+// 的方法声明，要求唯一存在。
+func maskedProbeOpenAIGatewayMethodDecl(t *testing.T, parsed *ast.File, methodName string) *ast.FuncDecl {
+	t.Helper()
+	var found *ast.FuncDecl
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != methodName || fn.Recv == nil || len(fn.Recv.List) != 1 {
+			continue
+		}
+		star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+		if !ok {
+			continue
+		}
+		recv, ok := star.X.(*ast.Ident)
+		if !ok || recv.Name != "OpenAIGatewayHandler" {
+			continue
+		}
+		require.Nil(t, found, "存在重复的方法声明 %s", methodName)
+		found = fn
+	}
+	require.NotNil(t, found, "未找到方法 (h *OpenAIGatewayHandler) %s", methodName)
+	return found
+}
+
+// maskedProbeFirstCallOffset 返回方法体内首个「Sel 名以 prefix 开头」的方法调用的源码
+// 偏移；无匹配返回 -1。偏移用于比较调用先后顺序（同文件内单调）。
+func maskedProbeFirstCallOffset(fset *token.FileSet, fn *ast.FuncDecl, prefix string) int {
+	best := -1
+	ast.Inspect(fn, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !strings.HasPrefix(sel.Sel.Name, prefix) {
+			return true
+		}
+		offset := fset.Position(call.Pos()).Offset
+		if best == -1 || offset < best {
+			best = offset
+		}
+		return true
+	})
+	return best
+}
+
+// TestMaskedProbeInstallGate_WiredAtThreeHTTPEntriesBeforeSelection 覆盖 Done when #2/#3：
+// 三入口（chat/completions、responses、messages）都在选号前调用装门 helper，且调用点
+// 严格早于方法内首个 SelectAccountWithScheduler* 调用——探针 key 的非法 header 因此在
+// 任何选号发生前返回错误，不进入负载均衡。
+func TestMaskedProbeInstallGate_WiredAtThreeHTTPEntriesBeforeSelection(t *testing.T) {
+	entries := []struct {
+		file       string
+		methodName string
+	}{
+		{"openai_chat_completions.go", "ChatCompletions"},
+		{"openai_gateway_handler.go", "Responses"},
+		{"openai_gateway_handler.go", "Messages"},
+	}
+	for _, e := range entries {
+		t.Run(e.file+"/"+e.methodName, func(t *testing.T) {
+			fset, parsed := maskedProbeParseHandlerFile(t, e.file)
+			fn := maskedProbeOpenAIGatewayMethodDecl(t, parsed, e.methodName)
+
+			gate := maskedProbeFirstCallOffset(fset, fn, "applyMaskedProbePinnedAccount")
+			require.GreaterOrEqual(t, gate, 0, "入口必须在选号前调用 applyMaskedProbePinnedAccount")
+
+			selection := maskedProbeFirstCallOffset(fset, fn, "SelectAccountWithScheduler")
+			require.GreaterOrEqual(t, selection, 0, "前置条件：入口本身存在选号调用")
+			require.Less(t, gate, selection, "装门必须严格早于任何选号调用")
+		})
+	}
+}
+
+// TestMaskedProbeInstallGate_WSEntryNotGated 钉死方案 §9.1 已知边界：WS 入口
+// （ResponsesWebSocket）不装门——探针不使用 WS，WS 路径携带 header 时 pin 不生效。
+func TestMaskedProbeInstallGate_WSEntryNotGated(t *testing.T) {
+	fset, parsed := maskedProbeParseHandlerFile(t, "openai_gateway_handler.go")
+	fn := maskedProbeOpenAIGatewayMethodDecl(t, parsed, "ResponsesWebSocket")
+
+	require.Equal(t, -1, maskedProbeFirstCallOffset(fset, fn, "applyMaskedProbePinnedAccount"),
+		"WS 入口不得装门（方案 §9.1 登记的已知边界）")
 }

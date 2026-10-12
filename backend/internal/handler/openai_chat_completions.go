@@ -183,6 +183,17 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	c.Request = c.Request.WithContext(kimiCtx)
 
+	// 掩码探针账号定向装门（docs-local/probe-account-routed-plan.md §3-P2）：与 kimi 分档
+	// 同位、选号循环前。非探针 key 零行为变化；探针 key 的 header 缺失/非法在此 fail closed，
+	// 绝不进入下面的负载均衡选号。
+	probeCtx, err := h.applyMaskedProbePinnedAccount(c, c.Request.Context())
+	if err != nil {
+		reqLog.Warn("openai_chat_completions.masked_probe_pin_failed", zap.Error(err))
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "invalid masked probe pinned account header")
+		return
+	}
+	c.Request = c.Request.WithContext(probeCtx)
+
 	for {
 		if failoverClientGone(c) {
 			return
