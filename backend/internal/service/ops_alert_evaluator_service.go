@@ -54,6 +54,10 @@ type OpsAlertEvaluatorService struct {
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
 
+	// channelMonitorV2Stale 是 C4 聚合水位停滞检测体（懒加载；水源经 SetChannelMonitorV2StaleSource 注册）。
+	// 独立于聚合 worker / mode 门控，运行于本 ops 评估 loop 中。
+	channelMonitorV2Stale *ChannelMonitorV2StaleAlertEvaluator
+
 	warnNoRedisOnce sync.Once
 }
 
@@ -312,6 +316,9 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 
 	result := truncateString(fmt.Sprintf("rules=%d enabled=%d evaluated=%d created=%d resolved=%d emails_sent=%d", rulesTotal, rulesEnabled, rulesEvaluated, eventsCreated, eventsResolved, emailsSent), 2048)
 	s.recordHeartbeatSuccess(runAt, time.Since(startedAt), result)
+
+	// C4：渠道监控聚合水位停滞检测（独立于聚合 worker / mode 门控）。
+	s.evaluateChannelMonitorV2Stale(ctx, runtimeCfg)
 }
 
 func (s *OpsAlertEvaluatorService) pruneRuleStates(rules []*OpsAlertRule) {
