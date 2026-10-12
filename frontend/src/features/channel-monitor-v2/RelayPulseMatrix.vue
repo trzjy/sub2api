@@ -57,29 +57,35 @@
             :class="showThroughput ? 'matrix-row--with-tps' : ''"
           >
             <div class="dimension-cell flex min-w-0 items-center gap-2 bg-white dark:bg-dark-800" :title="rowLabel(entry.row)">
-              <span :class="['status-dot', cellClass(entry.row.health, entry.row.metrics.request_count)]"></span>
+              <span :class="['status-dot', statusDotClass(entry.row)]"></span>
               <strong class="truncate text-xs font-semibold text-gray-800 dark:text-gray-100">{{ rowLabel(entry.row) }}</strong>
+              <span
+                v-if="stateBadgeText(entry.row)"
+                class="state-badge shrink-0"
+                :class="stateBadgeClass(entry.row)"
+                :title="stateBadgeTitle(entry.row)"
+              >{{ stateBadgeText(entry.row) }}</span>
             </div>
             <strong class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300">
-              {{ successRate(entry.row.metrics) }}
+              {{ summarySuccessRate(entry.row) }}
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
               :title="latencyPrivacy(entry.row.metrics.ttft)"
             >
-              {{ formatMs(entry.row.metrics.ttft.p50_ms) }}
+              {{ summaryMs(entry.row) }}
             </strong>
             <strong
               v-if="showThroughput"
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
               :title="exactTps(entry.row.metrics.tpm)"
             >
-              {{ formatTps(entry.row.metrics.tpm) }}
+              {{ summaryTps(entry.row) }}
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
             >
-              {{ formatPercent(entry.row.metrics.cache_rate) }}
+              {{ summaryCache(entry.row) }}
             </strong>
             <div class="pulse-track grid items-stretch" :style="pulseStyle">
               <span
@@ -347,6 +353,79 @@ function cellClass(health: MonitorHealth, requestCount: number): string {
   return healthScoreClass(health, props.healthMode, requestCount)
 }
 
+// C3 three-state display contract. Frontend must read these fields directly and must
+// NOT infer source / has_data from percentages, error text, or time deltas.
+type RowState = 'business' | 'probe' | 'no-data'
+function rowState(row: MonitorMatrixRow): RowState {
+  // Legacy payloads without has_data fall back to business (prior behavior).
+  if (row.has_data === false) return 'no-data'
+  if (row.source === 'probe') return 'probe'
+  return 'business'
+}
+
+// Status dot color: business → health score band; probe → sampled probe result;
+// no-data → a distinct muted marker (never the all-red 0.00% interpretation).
+function statusDotClass(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  if (state === 'no-data') return 'health-no-data'
+  if (state === 'probe') {
+    switch (row.status) {
+      case 'operational': return 'health-healthy'
+      case 'degraded': return 'health-warning'
+      case 'failed':
+      case 'error': return 'health-critical'
+      default: return 'health-unknown'
+    }
+  }
+  return healthScoreClass(row.health, props.healthMode, row.metrics.request_count)
+}
+
+// Row-level badge text: only probe (抽样探测) and no-data (无数据) get a marker;
+// business rows carry no source badge.
+function stateBadgeText(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  if (state === 'probe') return t('channelMonitorV2.matrix.probeBadge')
+  if (state === 'no-data') return t('channelMonitorV2.matrix.noDataBadge')
+  return ''
+}
+
+function stateBadgeClass(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  if (state === 'probe') return 'state-badge--probe'
+  if (state === 'no-data') return 'state-badge--no-data'
+  return ''
+}
+
+function stateBadgeTitle(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  if (state === 'probe') {
+    return t('channelMonitorV2.matrix.probeSource', { status: row.status || '' })
+  }
+  if (state === 'no-data') {
+    return t('channelMonitorV2.matrix.noData')
+  }
+  return t('channelMonitorV2.matrix.stateBusiness')
+}
+
+// Metric summaries collapse to a dash for non-business rows so probe / no-data rows
+// never imply channel-wide rates (a single sampled probe does not represent the channel).
+function summarySuccessRate(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return successRate(row.metrics)
+}
+function summaryMs(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return formatMs(row.metrics.ttft.p50_ms)
+}
+function summaryTps(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return formatTps(row.metrics.tpm)
+}
+function summaryCache(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return formatPercent(row.metrics.cache_rate)
+}
+
 function rowLabel(row: MonitorMatrixRow): string {
   const parts = [row.platform]
   if (row.group_name || row.group_id) parts.push(row.group_name || `#${row.group_id}`)
@@ -524,6 +603,37 @@ function formatBucketRange(value: string) {
 .health-warning  { background: #f59e0b; }
 .health-critical { background: #ef4444; }
 .health-unknown  { background: #9ca3af; }
+/* C3 no-data marker: muted, distinct from "unknown" so absence of data is explicit. */
+.health-no-data  { background: #d1d5db; }
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.375rem;
+  height: 1.05rem;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.state-badge--probe {
+  background: rgb(250 204 21 / 0.16);
+  color: #b45309;
+  border: 1px solid rgb(250 204 21 / 0.5);
+}
+:global(.dark) .state-badge--probe {
+  background: rgb(250 204 21 / 0.14);
+  color: #fcd34d;
+}
+.state-badge--no-data {
+  background: rgb(156 163 175 / 0.16);
+  color: #6b7280;
+  border: 1px solid rgb(156 163 175 / 0.4);
+}
+:global(.dark) .state-badge--no-data {
+  color: #9ca3af;
+}
 
 .score-legend {
   background: linear-gradient(

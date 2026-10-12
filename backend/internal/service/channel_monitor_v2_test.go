@@ -82,6 +82,9 @@ func (s *channelMonitorV2RepoStub) RecomputeRange(context.Context, time.Time, ti
 func (s *channelMonitorV2RepoStub) GetAggregationWatermark(context.Context) (*ChannelMonitorV2AggregationWatermark, error) {
 	return &ChannelMonitorV2AggregationWatermark{}, nil
 }
+func (s *channelMonitorV2RepoStub) GetProbeStates(context.Context, []ChannelMonitorCatalogKey) (map[ChannelMonitorCatalogKey]*ProbeState, error) {
+	return map[ChannelMonitorCatalogKey]*ProbeState{}, nil
+}
 
 func TestChannelMonitorV2BootstrapProgress(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)

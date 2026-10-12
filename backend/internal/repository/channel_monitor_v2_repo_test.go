@@ -476,3 +476,52 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
 }
+
+func TestChannelMonitorV2GetProbeStatesReadsCatalogTriples(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	keys := []service.ChannelMonitorCatalogKey{
+		{Platform: "openai", Model: "gpt-5", GroupID: 1},
+		{Platform: "anthropic", Model: "claude", GroupID: 2},
+	}
+	mock.ExpectQuery("SELECT platform, model, group_id").
+		WithArgs("openai", "gpt-5", int64(1), "anthropic", "claude", int64(2)).
+		WillReturnRows(
+			sqlmock.NewRows([]string{
+				"platform", "model", "group_id", "last_probe_at", "last_ok", "last_detail", "last_account_id", "next_due",
+			}).
+				AddRow("openai", "gpt-5", int64(1), now, true, "ok status=200", int64(11), now.Add(30*time.Minute)).
+				AddRow("anthropic", "claude", int64(2), now, false, "upstream status=503", int64(22), now.Add(2*time.Hour)),
+		)
+
+	states, err := repo.GetProbeStates(context.Background(), keys)
+	require.NoError(t, err)
+	require.Len(t, states, 2)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	ok := states[keys[0]]
+	require.NotNil(t, ok)
+	require.True(t, ok.LastOK)
+	require.Equal(t, "ok status=200", ok.LastDetail)
+	require.Equal(t, int64(11), ok.LastAccountID)
+	fail := states[keys[1]]
+	require.NotNil(t, fail)
+	require.False(t, fail.LastOK)
+	require.Equal(t, int64(22), fail.LastAccountID)
+}
+
+func TestChannelMonitorV2GetProbeStatesEmptyKeysNoQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	states, err := repo.GetProbeStates(context.Background(), nil)
+	require.NoError(t, err)
+	require.Empty(t, states)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

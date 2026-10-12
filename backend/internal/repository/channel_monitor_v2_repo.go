@@ -1037,6 +1037,56 @@ func (r *channelMonitorV2Repository) GetAggregationWatermark(ctx context.Context
 	return out, nil
 }
 
+// GetProbeStates returns the most recent probe result keyed by (platform, model, group)
+// for each requested triple. It reads channel_monitor_probe_state directly. Missing rows
+// are omitted from the map; the returned timestamps are normalized to UTC.
+func (r *channelMonitorV2Repository) GetProbeStates(ctx context.Context, keys []service.ChannelMonitorCatalogKey) (map[service.ChannelMonitorCatalogKey]*service.ProbeState, error) {
+	out := make(map[service.ChannelMonitorCatalogKey]*service.ProbeState, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	parts := make([]string, 0, len(keys))
+	args := make([]any, 0, len(keys)*3)
+	for i := range keys {
+		args = append(args, keys[i].Platform, keys[i].Model, keys[i].GroupID)
+		parts = append(parts, fmt.Sprintf("($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3))
+	}
+	q := `SELECT platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due
+		FROM channel_monitor_probe_state WHERE (platform, model, group_id) IN (` + strings.Join(parts, ",") + `)`
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var st service.ProbeState
+		var lastProbeAt, nextDue sql.NullTime
+		var lastOK sql.NullBool
+		var lastDetail sql.NullString
+		var lastAccountID sql.NullInt64
+		if err := rows.Scan(&st.Platform, &st.Model, &st.GroupID, &lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue); err != nil {
+			return nil, err
+		}
+		if lastProbeAt.Valid {
+			st.LastProbeAt = lastProbeAt.Time.UTC()
+		}
+		if lastOK.Valid {
+			st.LastOK = lastOK.Bool
+		}
+		if lastDetail.Valid {
+			st.LastDetail = lastDetail.String
+		}
+		if lastAccountID.Valid {
+			st.LastAccountID = lastAccountID.Int64
+		}
+		if nextDue.Valid {
+			st.NextDue = nextDue.Time.UTC()
+		}
+		out[service.ChannelMonitorCatalogKey{Platform: st.Platform, Model: st.Model, GroupID: st.GroupID}] = &st
+	}
+	return out, rows.Err()
+}
+
 func (r *channelMonitorV2Repository) loadCoverage(ctx context.Context, filter service.ChannelMonitorV2Filter) (*service.ChannelMonitorV2Coverage, error) {
 	wm, err := r.GetAggregationWatermark(ctx)
 	if err != nil {
