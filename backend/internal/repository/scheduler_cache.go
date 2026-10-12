@@ -1013,6 +1013,11 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 走网关报 no available accounts"。
 		"openai_passthrough",
 		"openai_oauth_passthrough",
+		// 伪装标记必须进投影：动态门控 TierRoutingGateOpen 经同一 ListSchedulableAccounts
+		// 来源消费候选，靠 IsIdentityMaskedAccount 读 extra.mask_upstream_identity 判定
+		// 伪装线池是否可用。裁掉它，快照解码出的账号丢失伪装标记 → 门控恒判门关，
+		// 表现为"门在生产零次开启、kimi-k3 小请求全落未伪装号"（OC-T1-FIX3 根因）。
+		"mask_upstream_identity",
 		"codex_fingerprint_mode",
 		"codex_fingerprint_seed",
 		"codex_5h_used_percent",

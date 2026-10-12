@@ -445,6 +445,20 @@ func TestTierRoutingGateOpenViaSchedulerSnapshot(t *testing.T) {
 		require.True(t, open, "snapshot 注入路径应经 ListSchedulableAccounts 命中 mask+mapping 账号而开门")
 	})
 
+	t.Run("snapshot_opens_when_masked_and_unmasked_coexist", func(t *testing.T) {
+		// 复现生产事故场景：桶内同时含伪装号 241（mask_upstream_identity=true、model_mapping
+		// 含 kimi-k3）与未伪装号 235。门控经 ListSchedulableAccounts 拿到与选号器同源的同一
+		// 候选集，应识别 241 而开门——快照投影（filterSchedulerExtra）须保留 mask_upstream_identity。
+		masked := tierRoutingMaskedAccountWithModel(241, PlatformKimi, model)
+		unmasked := tierRoutingUpstreamAccount(235, PlatformKimi)
+		svc := &OpenAIGatewayService{
+			schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: []*Account{&masked, &unmasked}}},
+		}
+		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
+		require.NoError(t, err)
+		require.True(t, open, "桶内存在伪装号时门控应开（与选号同源、投影保留伪装标记）")
+	})
+
 	t.Run("snapshot_closed_without_mapping_key", func(t *testing.T) {
 		// model_mapping 仅含 glm-5.3-flash，不含目标键 kimi-k3 → 不装门。
 		acct := tierRoutingMaskedAccountWithModel(7102, PlatformKimi, "glm-5.3-flash")
