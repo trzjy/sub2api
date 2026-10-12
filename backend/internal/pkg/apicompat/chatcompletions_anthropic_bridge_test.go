@@ -143,9 +143,8 @@ func TestAnthropicToChatCompletionsRequest_ThinkingDropped(t *testing.T) {
 	out, err := AnthropicToChatCompletionsRequest(req)
 	require.NoError(t, err)
 	require.Len(t, out.Messages, 1)
-	// Only text survives. Thinking is dropped because this turn carries no tool
-	// calls — reasoning rides along with tool calls only, matching the
-	// Responses→Chat bridge (see anthropicThinkingToReasoningContent).
+	// 请求无 tools → 纯文本轮 thinking 丢弃（新作用域判据：reasoning 回传以请求带
+	// tools 为准；带 tools 时见 PlainTextTurnThinkingPassedBackWithTools 测试）。
 	require.Equal(t, `"answer"`, string(out.Messages[0].Content))
 	require.Empty(t, out.Messages[0].ReasoningContent)
 }

@@ -83,7 +83,7 @@ func TestAnthropicChatBridge_ReasoningSurvivesOutboundInboundRoundTrip(t *testin
 	require.NoError(t, err)
 
 	// 入站：Anthropic content blocks → Chat 请求
-	back, err := anthropicAssistantToChatMessages(raw)
+	back, err := anthropicAssistantToChatMessages(raw, true)
 	require.NoError(t, err)
 	require.Len(t, back, 1)
 	require.Equal(t, upstream.ReasoningContent, back[0].ReasoningContent,
@@ -127,9 +127,9 @@ func TestAnthropicChatBridge_MatchesResponsesChatBridgeReasoningPlacement(t *tes
 		"两条桥对等价历史必须产出同样的 reasoning_content 位置")
 }
 
-// 作用域守卫：不带工具调用的纯文本轮次维持现状(与兄弟桥一致 —— reasoning 只随
-// 工具调用回传)，避免把 reasoning_content 撒到不需要它的上游请求上。
-func TestAnthropicToChatCompletionsRequest_ThinkingWithoutToolCallsStaysDropped(t *testing.T) {
+// 作用域守卫：请求无 tools 时纯文本轮 thinking 维持丢弃(与兄弟桥一致 —— reasoning
+// 只随工具调用/带 tools 请求回传)，避免把 reasoning_content 撒到不需要它的上游请求上。
+func TestAnthropicToChatCompletionsRequest_ThinkingWithoutRequestToolsStaysDropped(t *testing.T) {
 	req := &AnthropicRequest{
 		Model:     "deepseek-v4-flash",
 		MaxTokens: 100,
@@ -159,71 +159,153 @@ func TestAnthropicThinkingToReasoningContent(t *testing.T) {
 	}
 
 	cases := []struct {
-		name         string
-		raw          string
-		hasToolCalls bool
-		want         string
+		name      string
+		raw       string
+		withTools bool
+		want      string
 	}{
 		{
-			name:         "single_thinking_block",
-			raw:          `[{"type":"thinking","thinking":"a"}]`,
-			hasToolCalls: true,
-			want:         "a",
+			name:      "single_thinking_block",
+			raw:       `[{"type":"thinking","thinking":"a"}]`,
+			withTools: true,
+			want:      "a",
 		},
 		{
 			// 多个 thinking 块用 "\n" 连接，与 extractResponsesReasoningText 一致。
-			name:         "multiple_blocks_join_with_newline",
-			raw:          `[{"type":"thinking","thinking":"a"},{"type":"text","text":"x"},{"type":"thinking","thinking":"b"}]`,
-			hasToolCalls: true,
-			want:         "a\nb",
+			name:      "multiple_blocks_join_with_newline",
+			raw:       `[{"type":"thinking","thinking":"a"},{"type":"text","text":"x"},{"type":"thinking","thinking":"b"}]`,
+			withTools: true,
+			want:      "a\nb",
 		},
 		{
 			// redacted_thinking 没有明文可回传。
-			name:         "redacted_thinking_has_no_plaintext",
-			raw:          `[{"type":"redacted_thinking","signature":"abc"}]`,
-			hasToolCalls: true,
-			want:         "",
+			name:      "redacted_thinking_has_no_plaintext",
+			raw:       `[{"type":"redacted_thinking","signature":"abc"}]`,
+			withTools: true,
+			want:      "",
 		},
 		{
 			// 只带 signature 的 thinking 占位块(xAI/Codex 密文回放形态)同样无明文。
-			name:         "signature_only_thinking",
-			raw:          `[{"type":"thinking","thinking":"","signature":"gAAAAxxx"}]`,
-			hasToolCalls: true,
-			want:         "",
+			name:      "signature_only_thinking",
+			raw:       `[{"type":"thinking","thinking":"","signature":"gAAAAxxx"}]`,
+			withTools: true,
+			want:      "",
 		},
 		{
-			name:         "no_tool_calls_returns_empty",
-			raw:          `[{"type":"thinking","thinking":"a"}]`,
-			hasToolCalls: false,
-			want:         "",
+			name:      "no_tools_context_returns_empty",
+			raw:       `[{"type":"thinking","thinking":"a"}]`,
+			withTools: false,
+			want:      "",
 		},
 		{
-			name:         "no_thinking_blocks",
-			raw:          `[{"type":"text","text":"x"}]`,
-			hasToolCalls: true,
-			want:         "",
+			name:      "no_thinking_blocks",
+			raw:       `[{"type":"text","text":"x"}]`,
+			withTools: true,
+			want:      "",
 		},
 		{
-			name:         "empty_blocks",
-			raw:          `[]`,
-			hasToolCalls: true,
-			want:         "",
+			name:      "empty_blocks",
+			raw:       `[]`,
+			withTools: true,
+			want:      "",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want,
-				anthropicThinkingToReasoningContent(blocksOf(t, tc.raw), tc.hasToolCalls))
+				anthropicThinkingToReasoningContent(blocksOf(t, tc.raw), tc.withTools))
 		})
 	}
 }
 
 // 纯字符串形态的 assistant content 没有 blocks 可读，走早返回分支，不得 panic。
 func TestAnthropicAssistantToChatMessages_PlainStringContentUnaffected(t *testing.T) {
-	msgs, err := anthropicAssistantToChatMessages(json.RawMessage(`"just text"`))
+	msgs, err := anthropicAssistantToChatMessages(json.RawMessage(`"just text"`), false)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	require.Empty(t, msgs[0].ReasoningContent)
 	require.Equal(t, `"just text"`, string(msgs[0].Content))
+}
+
+// anthropicToolsPlainTextTurnReq 构造一个带 tools 的多轮请求：工具轮之后跟随一个
+// 纯文本 assistant 轮（无 tool_use）。用于验证 DeepSeek thinking-mode 契约下纯文本
+// 轮次已有的 thinking 也能回传为 reasoning_content。
+func anthropicToolsPlainTextTurnReq(t *testing.T) *AnthropicRequest {
+	t.Helper()
+	return &AnthropicRequest{
+		Model:     "deepseek-v4-flash",
+		MaxTokens: 256,
+		Tools: []AnthropicTool{
+			{Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)},
+		},
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`"what's the weather?"`)},
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"thinking","thinking":"need to call the tool"},
+				{"type":"text","text":"checking"},
+				{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"SF"}}
+			]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"toolu_1","content":"sunny"}]`)},
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"thinking","thinking":"now compose the answer"},
+				{"type":"text","text":"It is sunny in SF"}
+			]`)},
+		},
+	}
+}
+
+// 带 tools 请求：工具轮的 thinking 与跟随其后的纯文本轮 thinking 都须回传。
+func TestAnthropicToChatCompletionsRequest_PlainTextTurnThinkingPassedBackWithTools(t *testing.T) {
+	out, err := AnthropicToChatCompletionsRequest(anthropicToolsPlainTextTurnReq(t))
+	require.NoError(t, err)
+	require.Len(t, out.Messages, 4)
+
+	// 工具轮：assistant 带 tool_calls，ReasoningContent 来自工具轮 thinking。
+	toolTurn := out.Messages[1]
+	require.Equal(t, "assistant", toolTurn.Role)
+	require.Len(t, toolTurn.ToolCalls, 1)
+	require.Equal(t, "need to call the tool", toolTurn.ReasoningContent)
+
+	// 纯文本轮：无 tool_calls，但 thinking 仍须回传（请求带 tools 收敛为契约）。
+	plainTurn := out.Messages[3]
+	require.Equal(t, "assistant", plainTurn.Role)
+	require.Empty(t, plainTurn.ToolCalls)
+	require.Equal(t, "now compose the answer", plainTurn.ReasoningContent)
+	require.Equal(t, `"It is sunny in SF"`, string(plainTurn.Content))
+}
+
+// 整个历史无任何工具调用、但请求声明了 tools：纯文本轮 thinking 仍须回传。
+func TestAnthropicToChatCompletionsRequest_StandalonePlainTextTurnThinkingPassedBackWithTools(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "deepseek-v4-flash",
+		MaxTokens: 256,
+		Tools: []AnthropicTool{
+			{Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)},
+		},
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: json.RawMessage(`"hi"`)},
+			{Role: "assistant", Content: json.RawMessage(`[
+				{"type":"thinking","thinking":"let me think"},
+				{"type":"text","text":"answer"}
+			]`)},
+		},
+	}
+
+	out, err := AnthropicToChatCompletionsRequest(req)
+	require.NoError(t, err)
+	require.Len(t, out.Messages, 2)
+	require.Equal(t, "let me think", out.Messages[1].ReasoningContent)
+	require.Empty(t, out.Messages[1].ToolCalls)
+}
+
+// 出站线格式：纯文本轮 reasoning_content 确实被序列化进 JSON（字段没出去等于没修）。
+func TestAnthropicToChatCompletionsRequest_PlainTextTurnReasoningSerializesOnWire(t *testing.T) {
+	out, err := AnthropicToChatCompletionsRequest(anthropicToolsPlainTextTurnReq(t))
+	require.NoError(t, err)
+
+	payload, err := json.Marshal(out)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"reasoning_content":"need to call the tool"`)
+	require.Contains(t, string(payload), `"reasoning_content":"now compose the answer"`)
 }
