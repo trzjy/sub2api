@@ -730,6 +730,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
 	applyOpenCodeSessionHeader(c, account, targetURL, req.Header)
+	// 补齐缺失调用点（OC-T1-FIX4）：与 forward.go:1655 同构，muse 平台或 base_url
+	// host=opencode.ai 的伪装账号在此注入 x-opencode-session，消除 OC-K(241) 经
+	// passthrough 路径的 400 MissingSessionID；非 OpenCode 账号由守卫兜底零变化。
+	applyMuseSessionHeader(c, account, req.Header)
 	// x-codex-beta-features：按真实 Codex 的会话级行为补注（在账号级覆写之后，
 	// 保证不被覆盖丢失）。
 	applyOpenAICodexBetaFeatures(c, account, req.Header)

@@ -132,3 +132,98 @@ func TestApplyMuseSessionHeader_PreservesClientSessionForOpenCodeHost(t *testing
 		"客户端已带 session 应原样保留，不被覆盖")
 	require.Equal(t, museRelayUserAgent, headers.Get("user-agent"))
 }
+
+// ① OC-T1-FIX4 cc_pipeline 调用点（openai_gateway_cc_pipeline.go，applyMuseSessionHeader
+// 紧跟 applyOpenCodeSessionHeader 之后）：构造 cc_pipeline 形状的 upstreamReq（Content-Type
+// / Authorization / Accept 等内置头）+ platform=kimi 且 base_url host=opencode.ai 伪装账号，
+// 调用后 header 应带 UUID 格式 x-opencode-session，并覆写 UA 为 sub2api-relay/1.0。
+func TestApplyMuseSessionHeader_CCPipelineCallSiteInjects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	upstreamReq := http.Header{}
+	upstreamReq.Set("Content-Type", "application/json")
+	upstreamReq.Set("Authorization", "Bearer token")
+	upstreamReq.Set("Accept", "text/event-stream")
+
+	account := &Account{
+		Platform: PlatformKimi,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://opencode.ai/zen/go/v1",
+		},
+	}
+	applyMuseSessionHeader(c, account, upstreamReq)
+
+	got := upstreamReq.Get("x-opencode-session")
+	require.NotEmpty(t, got, "cc_pipeline 调用点应为 opencode.ai 伪装账号注入 session")
+	_, err := uuid.Parse(got)
+	require.NoError(t, err, "注入值应为合法 UUID")
+	require.Equal(t, museRelayUserAgent, upstreamReq.Get("user-agent"))
+}
+
+// ② OC-T1-FIX4 passthrough 调用点（openai_gateway_passthrough.go，buildUpstreamRequestOpenAIPassthrough
+// 内 applyMuseSessionHeader 紧跟 applyOpenCodeSessionHeader 之后）：构造 passthrough 形状的
+// upstreamReq + platform=kimi 且 base_url host=opencode.ai 伪装账号，调用后 header 应带 UUID
+// 格式 x-opencode-session，并覆写 UA 为 sub2api-relay/1.0。
+func TestApplyMuseSessionHeader_PassthroughCallSiteInjects(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	req := http.Header{}
+	req.Set("Content-Type", "application/json")
+	req.Set("Accept", "application/json")
+
+	account := &Account{
+		Platform: PlatformKimi,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://opencode.ai/zen/go/v1",
+		},
+	}
+	applyMuseSessionHeader(c, account, req)
+
+	got := req.Get("x-opencode-session")
+	require.NotEmpty(t, got, "passthrough 调用点应为 opencode.ai 伪装账号注入 session")
+	_, err := uuid.Parse(got)
+	require.NoError(t, err, "注入值应为合法 UUID")
+	require.Equal(t, museRelayUserAgent, req.Get("user-agent"))
+}
+
+// ③ 非 OpenCode 账号经上述两个调用点（cc_pipeline 形状与 passthrough 形状）均零改动：
+// header 不得出现 x-opencode-session，UA 不得被覆写为中继身份。守卫兜底保证非 muse 且
+// base_url 非 opencode.ai 的账号不受影响。
+func TestApplyMuseSessionHeader_CallSiteNoEffectForNonOpenCodeAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	account := &Account{
+		Platform: PlatformKimi,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"base_url": "https://api.moonshot.cn/v1",
+		},
+	}
+
+	// cc_pipeline 形状
+	ccHeaders := http.Header{}
+	ccHeaders.Set("Content-Type", "application/json")
+	ccHeaders.Set("Authorization", "Bearer token")
+	applyMuseSessionHeader(c, account, ccHeaders)
+	require.Empty(t, ccHeaders.Get("x-opencode-session"),
+		"非 opencode.ai base_url 经 cc_pipeline 调用点不得注入 session")
+	require.NotEqual(t, museRelayUserAgent, ccHeaders.Get("user-agent"),
+		"非 opencode.ai base_url 经 cc_pipeline 调用点不得覆写 UA")
+
+	// passthrough 形状
+	ptHeaders := http.Header{}
+	ptHeaders.Set("Content-Type", "application/json")
+	applyMuseSessionHeader(c, account, ptHeaders)
+	require.Empty(t, ptHeaders.Get("x-opencode-session"),
+		"非 opencode.ai base_url 经 passthrough 调用点不得注入 session")
+	require.NotEqual(t, museRelayUserAgent, ptHeaders.Get("user-agent"),
+		"非 opencode.ai base_url 经 passthrough 调用点不得覆写 UA")
+}
