@@ -111,6 +111,18 @@ type Config struct {
 	Plugins                 PluginConfig                  `mapstructure:"plugins"`
 	XianyuDelivery          XianyuDeliveryConfig          `mapstructure:"xianyu_delivery"`
 	LocalCaptchaHelper      LocalCaptchaHelperConfig      `mapstructure:"local_captcha_helper"`
+
+	// Probe 是 C2 无流量渠道抽样探测调度器的配置段（派发单 C2）。
+	// 默认 Enabled=false（零探测；worker 启动但每轮空转），MaxPerTick 默认 2。
+	Probe ProbeConfig `mapstructure:"probe"`
+}
+
+// ProbeConfig 控制无流量渠道抽样直连探测调度器（派发单 C2）。
+//   - Enabled：总开关。false（默认）= 零探测，探测 worker 仍启动但每轮 RunOnce 直接返回。
+//   - MaxPerTick：每轮 tick 最多直连探测的渠道条数（默认 2）。
+type ProbeConfig struct {
+	Enabled    bool `mapstructure:"enabled"`
+	MaxPerTick int  `mapstructure:"max_per_tick"`
 }
 
 // PluginConfig 控制管理员手动上传的本地进程插件。
@@ -1207,9 +1219,9 @@ type GatewayGrokConfig struct {
 //   - th_probe_interval_minutes: TH（tokenharbor.ai）快照刷新探测间隔（分钟，默认 60）
 //   - kira_probe_interval_minutes: Kira（kiraai.vn）快照刷新探测间隔（分钟，默认 60）
 type GatewayCNProvidersConfig struct {
-	BalanceCheckEnabled         bool `mapstructure:"balance_check_enabled"`
+	BalanceCheckEnabled         bool    `mapstructure:"balance_check_enabled"`
 	BalanceThreshold            float64 `mapstructure:"balance_threshold"`
-	BalanceCheckIntervalMinutes int `mapstructure:"balance_check_interval_minutes"`
+	BalanceCheckIntervalMinutes int     `mapstructure:"balance_check_interval_minutes"`
 	// ThProbeIntervalMinutes TH 收集期年龄门间隔：th_usage_snapshot.fetched_at
 	// 距今小于该值则跳过本轮 TH 快照刷新（与 A 卡 th_probe_backoff_until 退避门
 	// 共控，默认 60 分钟）。
@@ -2846,6 +2858,11 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("local_captcha_helper.base_url", "")
 	viper.SetDefault("local_captcha_helper.api_key", "")
 	viper.SetDefault("local_captcha_helper.timeout_seconds", 0)
+
+	// C2 无流量渠道抽样直连探测调度器（派发单 C2）：默认关闭（零探测），
+	// 每轮最多探测 2 条渠道。
+	viper.SetDefault("probe.enabled", false)
+	viper.SetDefault("probe.max_per_tick", 2)
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.
