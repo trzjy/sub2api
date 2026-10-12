@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,7 +148,13 @@ func TestOpenCodeSessionForwardedByResponsesBuildersAfterAccountOverride(t *test
 	}
 }
 
-func TestOpenCodeSessionMissingCallerValueKeepsExistingOverrideBehavior(t *testing.T) {
+// T1b：opencode.ai host 账号（含非 muse 平台，如 openai）在客户端未带 session 时，
+// applyMuseSessionHeader 现按 host 注入每请求 UUID，覆盖账号静态 x-opencode-session
+// override（派发单禁止会话关联面配静态 header_override）。此用例取代原
+// "...KeepsExistingOverrideBehavior" 断言——后者编码的是注入前会触发上游
+// 400 MissingSessionID 的旧行为。applyOpenCodeSessionHeader 自身行为未变，其独立
+// 契约仍由 TestApplyOpenCodeSessionHeaderTrustBoundary 覆盖。
+func TestOpenCodeSessionMissingCallerValueInjectsSessionForOpenCodeHost(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := openCodeSessionTestAccount("https://opencode.ai/zen/v1")
@@ -158,7 +165,11 @@ func TestOpenCodeSessionMissingCallerValueKeepsExistingOverrideBehavior(t *testi
 		[]byte(`{"model":"gpt-5","input":"hello"}`), "token", false, "", false,
 	)
 	require.NoError(t, err)
-	require.Equal(t, "fixed-account-value", getHeaderRaw(req.Header, "x-opencode-session"))
+	got := getHeaderRaw(req.Header, "x-opencode-session")
+	require.NotEqual(t, "fixed-account-value", got,
+		"opencode.ai host 账号的静态会话 override 应被每请求 UUID 覆盖")
+	_, uuidErr := uuid.Parse(got)
+	require.NoError(t, uuidErr, "注入值应为合法 UUID")
 }
 
 type openCodeSessionHTTPUpstream struct {

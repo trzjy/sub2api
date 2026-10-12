@@ -2,7 +2,6 @@ package service
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -19,8 +18,8 @@ func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL stri
 		return
 	}
 
-	parsed, err := url.Parse(targetURL)
-	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || !strings.EqualFold(parsed.Hostname(), "opencode.ai") {
+	// host 判定与 applyMuseSessionHeader 共用同一来源（isOpenCodeHostURL）。
+	if !isOpenCodeHostURL(targetURL) {
 		return
 	}
 
