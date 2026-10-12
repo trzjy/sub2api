@@ -204,6 +204,9 @@ const displayPercent = computed(() => {
       ? Math.min(Math.max(props.utilization, 0), 100)
       : props.utilization
   )
+  // 取整后为 0 但真实用量 > 0（如 49/50000 = 0.098%）：显示 “<1%” 而非误导性的 “0%”。
+  // utilization 真正为 0（未使用/耗尽）时仍如实显示 “0%”。
+  if (percent === 0 && props.utilization > 0) return '<1%'
   return percent > 999 ? '>999%' : `${percent}%`
 })
 

@@ -16,9 +16,14 @@ package service
 //   - 解析器只消费既有 extra 键族（{platform}_balance + {platform}_balance_updated_at
 //     等），不新增探针、不造默认值。
 //
-// 余额年龄阈值 = 10 分钟（来源 C0 ⑤ 核证：BalanceCheckIntervalMinutes 默认 10，
-// config.go:1212 定义、config.go:2702 默认 10，消费点 wire.go:477）。本卡不为此
-// 改 config.go，在此以常量表达并引用既有默认语义（见完工报告）。
+// 余额年龄阈值 = 15 分钟。
+//
+// 2026-10-12 用户裁定（A 方案）：原阈值取 10 分钟（来源 C0 ⑤ 核证：
+// BalanceCheckIntervalMinutes 默认 10，config.go:1212 定义、config.go:2702 默认 10，
+// 消费点 wire.go:477）与自动巡检间隔（balanceProbeDefaultIntervalMinutes = 10 分钟）
+// 完全等长，卡在边界上：巡检间隙一旦越过 10 分钟，维度状态就翻 unknown，金额被
+// 单轨口径隐藏，产生「巡检间隙误报未知」。故放宽新鲜度门至 15 分钟，留出 5 分钟
+// 巡检抖动余量；巡检间隔（10 分钟）保持不动。本卡不改 config.go，在此以常量表达。
 
 import (
 	"strings"
@@ -27,9 +32,13 @@ import (
 
 // cnQuotaBalanceFreshnessThresholdMinutes 余额快照新鲜度年龄门（分钟）。
 //
-// 来源：C0 ⑤ 核证 = BalanceCheckIntervalMinutes 默认 10（config.go:1212 定义、
-// config.go:2702 默认 10）。本卡不为此改动 config.go，以常量表达既有默认语义。
-const cnQuotaBalanceFreshnessThresholdMinutes = 10
+// = 15：2026-10-12 用户裁定（A 方案）。自动巡检间隔为 10 分钟，若年龄门同样取 10
+// 分钟则两者卡边界——巡检间隙内快照年龄必然逼近/越过 10 分钟，维度状态被误判为
+// unknown，金额被单轨口径隐藏。放宽到 15 分钟以吸收巡检抖动（余量 5 分钟）。
+//
+// 参考基准（不改）：BalanceCheckIntervalMinutes 默认 10（config.go:1212 定义、
+// config.go:2702 默认 10）；自动巡检间隔 balanceProbeDefaultIntervalMinutes = 10。
+const cnQuotaBalanceFreshnessThresholdMinutes = 15
 
 // BalanceStateKind 余额三态分类。
 type BalanceStateKind int
