@@ -156,16 +156,19 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 		count    int64
 	}
 	groupCounts := map[int64]groupValue{}
-	for _, platform := range channelMonitorV2EnabledPlatforms(cfg) {
+	// C3-FIX: platform dimensions derive from the platforms actually in sale
+	// (active, non-deleted accounts) UNION the platforms that carry real traffic
+	// in the window. Config no longer gates which platforms appear (L1: platforms
+	// are not a gate), so config-only platforms with no accounts (kiro/grok/
+	// antigravity) are excluded; a platform with accounts but zero traffic (e.g.
+	// zhipu) is still seeded at count=0 and appears. Traffic rows accumulate on
+	// top of this seed in the loop below.
+	accountPlatforms, err := r.loadChannelMonitorV2AccountPlatforms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, platform := range accountPlatforms {
 		platformCounts[platform] += 0
-		for _, p := range cfg.Platforms {
-			if p.Platform != platform || len(p.Models) == 0 {
-				continue
-			}
-			for _, model := range p.Models {
-				modelCounts[platform+"\x00"+model] = modelValue{platform: platform, count: 0}
-			}
-		}
 	}
 	groupInfo, err := r.loadChannelMonitorV2GroupInfo(ctx, configuredChannelMonitorV2GroupIDs(catalogFilter, cfg))
 	if err != nil {
@@ -670,6 +673,33 @@ func (r *channelMonitorV2Repository) loadChannelMonitorV2GroupInfo(ctx context.C
 			return nil, err
 		}
 		out[id] = channelMonitorV2GroupInfo{name: name, platform: platform}
+	}
+	return out, rows.Err()
+}
+
+// loadChannelMonitorV2AccountPlatforms returns the distinct platforms that own at
+// least one active, non-deleted account — the platforms actually in sale. Used to
+// seed GetDimensions platformCounts so config-only platforms with no accounts
+// (kiro/grok/antigravity) never surface in the picker. Real-traffic platforms are
+// unioned in by the metrics scan further down.
+func (r *channelMonitorV2Repository) loadChannelMonitorV2AccountPlatforms(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT platform
+		FROM accounts
+		WHERE deleted_at IS NULL AND status = 'active'`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{}
+	for rows.Next() {
+		var platform string
+		if err := rows.Scan(&platform); err != nil {
+			return nil, err
+		}
+		if platform = strings.TrimSpace(platform); platform != "" {
+			out = append(out, platform)
+		}
 	}
 	return out, rows.Err()
 }

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -475,6 +476,63 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	// Group seeding without multi-select uses full config allow-list.
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
+}
+
+func TestChannelMonitorV2GetDimensionsDerivesPlatformsFromAccounts(t *testing.T) {
+	// C3-FIX: platform dimensions must come from platforms that actually have an
+	// active account (UNION real-traffic platforms), NOT from the config platforms
+	// list. So config-only platforms with no accounts (kiro/grok/antigravity) must
+	// be absent, while an account-bearing platform with zero traffic (zhipu) and one
+	// with real traffic (openai) must both appear.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	filter := service.ChannelMonitorV2Filter{
+		Start: time.Unix(1, 0), End: time.Unix(2, 0), Bucket: time.Minute,
+	}
+	// Config still lists the config-only noise platforms plus the real ones.
+	cfg := service.ChannelMonitorV2Config{
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "zhipu", Enabled: true},
+			{Platform: "kiro", Enabled: true},
+			{Platform: "grok", Enabled: true},
+			{Platform: "antigravity", Enabled: true},
+		},
+	}
+
+	// 1) watermark: no data → coverage empty, metrics window clamps to nothing.
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").WillReturnError(sql.ErrNoRows)
+	// 2) metrics: only openai carries real traffic in the window.
+	mock.ExpectQuery("SELECT m.platform").WillReturnRows(
+		sqlmock.NewRows([]string{"platform", "name", "group_platform", "group_id", "model", "count"}).
+			AddRow("openai", "", "unknown", int64(0), "gpt-5", int64(42)),
+	)
+	// 3) account platforms (active, non-deleted): openai + zhipu only.
+	mock.ExpectQuery("FROM accounts").WillReturnRows(
+		sqlmock.NewRows([]string{"platform"}).
+			AddRow("openai").AddRow("zhipu"),
+	)
+
+	dimensions, err := repo.GetDimensions(context.Background(), filter, cfg)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	byValue := map[string]service.ChannelMonitorV2Dimension{}
+	for _, p := range dimensions.Platforms {
+		byValue[p.Value] = p
+	}
+	// Config-only platforms with no accounts must not appear.
+	require.NotContains(t, byValue, "kiro")
+	require.NotContains(t, byValue, "grok")
+	require.NotContains(t, byValue, "antigravity")
+	// Account-bearing platforms appear: openai (traffic) and zhipu (zero traffic).
+	require.Contains(t, byValue, "openai")
+	require.Contains(t, byValue, "zhipu")
+	require.Equal(t, int64(42), byValue["openai"].RequestCount)
+	require.Equal(t, int64(0), byValue["zhipu"].RequestCount)
 }
 
 func TestChannelMonitorV2GetProbeStatesReadsCatalogTriples(t *testing.T) {
