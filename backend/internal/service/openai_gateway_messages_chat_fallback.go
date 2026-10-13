@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,14 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	chatBody, err := json.Marshal(chatReq)
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat completions request: %w", err)
+	}
+	// P1 临时取证插桩（非生产基线，定位后移除）：仅 DeepSeek 模型打印脱敏结构。
+	if strings.Contains(strings.ToLower(upstreamModel), "deepseek") {
+		probeReqID := c.GetString("request_id")
+		if probeReqID == "" {
+			probeReqID = c.GetHeader("x-request-id")
+		}
+		logMessagesReasoningProbe(probeReqID, &anthropicReq, chatReq)
 	}
 	if normalizedBody, normalized := NormalizeGLMOpenAIReasoningEffort(chatBody, upstreamModel); normalized {
 		chatBody = normalizedBody
@@ -371,4 +380,111 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		FirstTokenMs:                scan.FirstTokenMs,
 		ClientDisconnect:            clientDisconnected,
 	}, nil
+}
+
+// messagesReasoningProbeMaxMsgs 限制单侧打印的 assistant 轮次数，避免长会话打爆
+// 日志；取证只需判形状，超限时以 *_truncated 标记。
+const messagesReasoningProbeMaxMsgs = 32
+
+// logMessagesReasoningProbe 是 P1 临时取证插桩（非生产基线，定位后移除）：
+// DeepSeek thinking-mode 400 根因取证——并排打印「客户端回传的入站 assistant 块
+// 结构」与「网关转换后的出站 reasoning_content / tool_calls 结构」，据以判定丢失
+// 发生在客户端未回传 / 网关转换丢失 / 上游契约三者中哪一处。
+//
+// 只输出脱敏结构：块类型计数、长度数字、tool id 列表。严禁输出 thinking /
+// reasoning 正文、content 正文、任何密钥或完整请求体。
+func logMessagesReasoningProbe(reqID string, areq *apicompat.AnthropicRequest, creq *apicompat.ChatCompletionsRequest) {
+	if areq == nil || creq == nil {
+		return
+	}
+	fields := make([]zap.Field, 0, 16)
+	fields = append(fields,
+		zap.String("request_id", reqID),
+		zap.String("upstream_model", creq.Model),
+		zap.Bool("request_has_tools", len(areq.Tools) > 0),
+	)
+
+	// 入站：每个 assistant 轮的 content block 结构（不含任何正文）。
+	loggedIn := 0
+	for i, m := range areq.Messages {
+		if !strings.EqualFold(strings.TrimSpace(m.Role), "assistant") {
+			continue
+		}
+		if loggedIn >= messagesReasoningProbeMaxMsgs {
+			fields = append(fields, zap.Bool("inbound_truncated", true))
+			break
+		}
+		loggedIn++
+		prefix := "in." + strconv.Itoa(i) + "."
+
+		var blocks []apicompat.AnthropicContentBlock
+		if len(m.Content) == 0 || json.Unmarshal(m.Content, &blocks) != nil || len(blocks) == 0 {
+			// content 为纯字符串或空：无 thinking/tool_use 结构可统计。
+			fields = append(fields, zap.String(prefix+"content_kind", "non_block"))
+			continue
+		}
+
+		var thinking, thinkingWithText, redacted, sigOnly, toolUse int
+		var toolIDs []string
+		for _, b := range blocks {
+			switch b.Type {
+			case "thinking":
+				thinking++
+				if b.Thinking != "" {
+					thinkingWithText++
+				} else if b.Signature != "" {
+					// 只有 signature 占位、无明文：上游不会被回传明文，但客户端
+					// 回放契约要求它存在。
+					sigOnly++
+				}
+			case "redacted_thinking":
+				redacted++
+			case "tool_use":
+				toolUse++
+				if b.ID != "" {
+					toolIDs = append(toolIDs, b.ID)
+				}
+			}
+		}
+		fields = append(fields,
+			zap.String(prefix+"content_kind", "blocks"),
+			zap.Int(prefix+"blocks", len(blocks)),
+			zap.Int(prefix+"thinking", thinking),
+			zap.Int(prefix+"thinking_with_text", thinkingWithText),
+			zap.Int(prefix+"redacted_thinking", redacted),
+			zap.Int(prefix+"signature_only", sigOnly),
+			zap.Int(prefix+"tool_use", toolUse),
+			zap.Strings(prefix+"tool_use_ids", toolIDs),
+		)
+	}
+
+	// 出站：每个 assistant 轮的推理字段长度（只打长度，不打内容）。
+	loggedOut := 0
+	for i, m := range creq.Messages {
+		if !strings.EqualFold(strings.TrimSpace(m.Role), "assistant") {
+			continue
+		}
+		if loggedOut >= messagesReasoningProbeMaxMsgs {
+			fields = append(fields, zap.Bool("outbound_truncated", true))
+			break
+		}
+		loggedOut++
+		prefix := "out." + strconv.Itoa(i) + "."
+
+		toolCallIDs := make([]string, 0, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" {
+				toolCallIDs = append(toolCallIDs, tc.ID)
+			}
+		}
+		fields = append(fields,
+			zap.Int(prefix+"reasoning_content_len", len(m.ReasoningContent)),
+			zap.Int(prefix+"reasoning_len", len(m.Reasoning)),
+			zap.Int(prefix+"tool_calls", len(m.ToolCalls)),
+			zap.Strings(prefix+"tool_call_ids", toolCallIDs),
+			zap.Int(prefix+"content_len", len(m.Content)),
+		)
+	}
+
+	logger.L().Warn("MESSAGES_REASONING_PROBE", fields...)
 }
