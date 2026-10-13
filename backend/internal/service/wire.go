@@ -877,8 +877,8 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 
 // ProvideCursorAccountRetentionService 创建 Cursor 账号/流水定期清理服务并启动周期清理协程（C10）。
 // 停止逻辑挂在 cmd/server 的 provideCleanup（同 AuditLogService 装配模式）。
-func ProvideCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService) *CursorAccountRetentionService {
-	svc := NewCursorAccountRetentionService(usageCleanupRepo, db, settingService)
+func ProvideCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService, opsRepo OpsRepository) *CursorAccountRetentionService {
+	svc := NewCursorAccountRetentionService(usageCleanupRepo, db, settingService, opsRepo)
 	svc.Start()
 	return svc
 }

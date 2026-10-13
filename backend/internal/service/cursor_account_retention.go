@@ -27,6 +27,12 @@ const (
 	cursorRetentionMaxRounds     = 1000 // 单轮（runRetentionOnce）最大批次轮数，防长事务/死循环
 	cursorRetentionRunTimeout    = 30 * time.Minute
 
+	// cursorAccountRetentionJobName 是本清理任务在 ops_job_heartbeats 表中的 job 名
+	// （照 quotaKeySweepJobName = "quota_key_sweep" 同型命名，§7.9 三定时任务报活）。
+	cursorAccountRetentionJobName = "cursor_account_retention"
+	// cursorAccountRetentionHeartbeatTimeout 写心跳的超时（照 quota_key_sweep 同型）。
+	cursorAccountRetentionHeartbeatTimeout = 5 * time.Second
+
 	// cursorRetentionFarPast / cursorRetentionFarFuture 作为 DeleteUsageLogsBatch 的
 	// 时间范围边界，确保“先删某账号全部流水”时不漏删（流水产生时间可能远早于软删时间）。
 )
@@ -53,6 +59,8 @@ type CursorAccountRetentionService struct {
 	usageCleanupRepo UsageCleanupRepository
 	dbRepo           CursorRetentionAccountRepository
 	settingService   *SettingService
+	// opsRepo 用于每轮写 ops_job_heartbeats 心跳（照 QuotaKeySweeper / QuotaKeyReconciler 同型）。
+	opsRepo OpsRepository
 
 	// nowFunc 注入可控时钟，便于单测时间边界；生产默认 time.Now。
 	nowFunc func() time.Time
@@ -62,12 +70,14 @@ type CursorAccountRetentionService struct {
 	wg     sync.WaitGroup
 }
 
-// NewCursorAccountRetentionService 构造清理服务。db 用于物理删账号（私有 repo 实现）。
-func NewCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService) *CursorAccountRetentionService {
+// NewCursorAccountRetentionService 构造清理服务。db 用于物理删账号（私有 repo 实现）；
+// opsRepo 用于写 job 心跳（照 NewQuotaKeySweeper 同型）。
+func NewCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService, opsRepo OpsRepository) *CursorAccountRetentionService {
 	return &CursorAccountRetentionService{
 		usageCleanupRepo: usageCleanupRepo,
 		dbRepo:           &cursorRetentionAccountRepo{db: db},
 		settingService:   settingService,
+		opsRepo:          opsRepo,
 		nowFunc:          time.Now,
 	}
 }
@@ -122,6 +132,7 @@ func (s *CursorAccountRetentionService) runRetentionLoop() {
 }
 
 // RunOnce 执行一轮清理（可独立调用，便于测试与手动触发）。
+// 每轮结束写且仅写一次 ops_job_heartbeats 心跳（成功/失败），照 QuotaKeySweeper.runOnce 同型。
 func (s *CursorAccountRetentionService) RunOnce(ctx context.Context) {
 	if s == nil || s.usageCleanupRepo == nil || s.dbRepo == nil {
 		return
@@ -129,12 +140,24 @@ func (s *CursorAccountRetentionService) RunOnce(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runAt := time.Now().UTC()
+	deleted, err := s.runRetentionOnce(ctx)
+	if err != nil {
+		retentionWarnf("retention round failed: %v", err)
+		s.recordHeartbeat(ctx, runAt, false, err, deleted)
+		return
+	}
+	s.recordHeartbeat(ctx, runAt, true, nil, deleted)
+}
+
+// runRetentionOnce 是清理本体：返回本轮物理删除的账号总数与首个错误（清理语义不变）。
+func (s *CursorAccountRetentionService) runRetentionOnce(ctx context.Context) (int64, error) {
 	days := 0
 	if s.settingService != nil {
 		days = s.settingService.GetCursorAccountRetentionDays(ctx)
 	}
 	if days <= 0 {
-		return // 0 或负 = 永久保留，仅支持手动清空
+		return 0, nil // 0 或负 = 永久保留，仅支持手动清空
 	}
 	now := time.Now()
 	if s.nowFunc != nil {
@@ -142,33 +165,70 @@ func (s *CursorAccountRetentionService) RunOnce(ctx context.Context) {
 	}
 	cutoff := now.UTC().AddDate(0, 0, -days)
 
+	var deleted int64
 	for round := 0; round < cursorRetentionMaxRounds; round++ {
 		ids, err := s.dbRepo.ListExpiredSoftDeletedCursorAccountIDs(ctx, cutoff, cursorRetentionBatchSize)
 		if err != nil {
-			retentionWarnf("list expired cursor accounts failed: %v", err)
-			return
+			return deleted, fmt.Errorf("list expired cursor accounts: %w", err)
 		}
 		if len(ids) == 0 {
-			return
+			return deleted, nil
 		}
 
 		// 1) 先删该批账号的 usage_logs（走既有 DeleteUsageLogsBatch 原语，内含聚合失效处理）。
 		if err := s.deleteUsageLogsForAccounts(ctx, ids); err != nil {
-			retentionWarnf("delete usage logs for cursor accounts failed: %v", err)
-			return
+			return deleted, fmt.Errorf("delete usage logs for cursor accounts: %w", err)
 		}
 
 		// 2) 再物理删账号行（此时其流水已清；不依赖 accounts FK 的 CASCADE 删流水）。
-		if _, err := s.dbRepo.PhysicallyDeleteAccounts(ctx, ids); err != nil {
-			retentionWarnf("physically delete cursor accounts failed: %v", err)
-			return
+		n, err := s.dbRepo.PhysicallyDeleteAccounts(ctx, ids)
+		if err != nil {
+			return deleted, fmt.Errorf("physically delete cursor accounts: %w", err)
 		}
+		deleted += n
 
 		// 单轮批量上限生效：当批不足上限即结束；达上限则继续下一轮。
 		if len(ids) < cursorRetentionBatchSize {
-			return
+			return deleted, nil
 		}
 	}
+	return deleted, nil
+}
+
+// recordHeartbeat 写一次 job 心跳（照 quota_key_sweeper.recordHeartbeat 同型）。
+func (s *CursorAccountRetentionService) recordHeartbeat(ctx context.Context, runAt time.Time, success bool, runErr error, deleted int64) {
+	if s == nil || s.opsRepo == nil {
+		return
+	}
+	hbCtx, hbCancel := context.WithTimeout(context.Background(), cursorAccountRetentionHeartbeatTimeout)
+	defer hbCancel()
+
+	durMs := time.Since(runAt).Milliseconds()
+	input := &OpsUpsertJobHeartbeatInput{
+		JobName:        cursorAccountRetentionJobName,
+		LastRunAt:      &runAt,
+		LastDurationMs: &durMs,
+	}
+	if success {
+		now := time.Now().UTC()
+		input.LastSuccessAt = &now
+		result := truncateString(retentionResult(deleted), 2048)
+		input.LastResult = &result
+	} else if runErr != nil {
+		msg := truncateString(runErr.Error(), 2048)
+		errAt := time.Now().UTC()
+		input.LastErrorAt = &errAt
+		input.LastError = &msg
+	}
+	_ = s.opsRepo.UpsertJobHeartbeat(hbCtx, input)
+}
+
+// retentionResult 生成心跳 LastResult 的可读摘要。
+func retentionResult(deleted int64) string {
+	if deleted == 0 {
+		return "no cursor accounts deleted"
+	}
+	return fmt.Sprintf("deleted %d cursor accounts", deleted)
 }
 
 // deleteUsageLogsForAccounts 对给定账号逐个走既有原语删除其全部 usage_logs。

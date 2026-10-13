@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +37,8 @@ type fakeCursorRetentionAccountRepo struct {
 	deleted   [][]int64
 	limitSeen int
 	listCalls int
+	// listErr 非空时 ListExpiredSoftDeletedCursorAccountIDs 返回该错误，用于构造失败轮。
+	listErr error
 }
 
 type fakeRetentionAccount struct {
@@ -48,6 +52,9 @@ func (f *fakeCursorRetentionAccountRepo) ListExpiredSoftDeletedCursorAccountIDs(
 	defer f.mu.Unlock()
 	f.limitSeen = limit
 	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	var out []int64
 	for _, a := range f.accounts {
 		if a.platform == "cursor" && a.deletedAt != nil && a.deletedAt.Before(cutoff) {
@@ -159,6 +166,29 @@ func (f *fakeRetentionSettingRepo) GetAll(ctx context.Context) (map[string]strin
 	return nil, nil
 }
 func (f *fakeRetentionSettingRepo) Delete(ctx context.Context, key string) error { return nil }
+
+// retentionHeartbeatOpsRepo 在既有 opsRepoMock 之上记录心跳写入（次数 / job 名 / 完整入参），
+// 用于断言 RunOnce 每轮写且仅写一次心跳（照 heartbeatRecordingOpsRepo 同型）。
+type retentionHeartbeatOpsRepo struct {
+	*opsRepoMock
+	mu     sync.Mutex
+	inputs []*OpsUpsertJobHeartbeatInput
+}
+
+func (r *retentionHeartbeatOpsRepo) UpsertJobHeartbeat(_ context.Context, input *OpsUpsertJobHeartbeatInput) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inputs = append(r.inputs, input)
+	return nil
+}
+
+func (r *retentionHeartbeatOpsRepo) snapshots() []*OpsUpsertJobHeartbeatInput {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*OpsUpsertJobHeartbeatInput, len(r.inputs))
+	copy(out, r.inputs)
+	return out
+}
 
 func newTestCursorRetentionService(acctRepo *fakeCursorRetentionAccountRepo, usageRepo *fakeRetentionUsageCleanupRepo, now time.Time, days string) *CursorAccountRetentionService {
 	return &CursorAccountRetentionService{
@@ -327,5 +357,79 @@ func TestCursorAccountRetentionPermanentWhenZero(t *testing.T) {
 	}
 	if len(acctRepo.deleted) != 0 {
 		t.Fatalf("days<=0 时不应删除任何账号，实际 deleted=%v", acctRepo.deleted)
+	}
+}
+
+// 成功轮：写且仅写一次心跳，job 名正确 + 带成功状态（§7.9 三定时任务报活）。
+func TestCursorAccountRetentionHeartbeatOnSuccess(t *testing.T) {
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	acctRepo := &fakeCursorRetentionAccountRepo{
+		accounts: []fakeRetentionAccount{
+			{id: 1, platform: "cursor", deletedAt: retentionTimeBefore(now, 100*24*time.Hour)},
+			{id: 2, platform: "cursor", deletedAt: retentionTimeBefore(now, 100*24*time.Hour)},
+		},
+	}
+	usageRepo := &fakeRetentionUsageCleanupRepo{}
+	ops := &retentionHeartbeatOpsRepo{opsRepoMock: &opsRepoMock{}}
+	svc := newTestCursorRetentionService(acctRepo, usageRepo, now, "90")
+	svc.opsRepo = ops
+
+	svc.RunOnce(context.Background())
+
+	inputs := ops.snapshots()
+	if len(inputs) != 1 {
+		t.Fatalf("成功轮应写且仅写一次心跳，实际 %d 次", len(inputs))
+	}
+	hb := inputs[0]
+	if hb.JobName != cursorAccountRetentionJobName {
+		t.Fatalf("心跳 job 名应为 %q，实际 %q", cursorAccountRetentionJobName, hb.JobName)
+	}
+	if hb.LastRunAt == nil {
+		t.Fatal("心跳缺少 LastRunAt")
+	}
+	if hb.LastSuccessAt == nil {
+		t.Fatal("成功轮心跳应带 LastSuccessAt")
+	}
+	if hb.LastError != nil || hb.LastErrorAt != nil {
+		t.Fatalf("成功轮心跳不应带错误字段，LastError=%v LastErrorAt=%v", hb.LastError, hb.LastErrorAt)
+	}
+	if hb.LastResult == nil || *hb.LastResult == "" {
+		t.Fatal("成功轮心跳应带 LastResult 摘要")
+	}
+}
+
+// 失败轮：写且仅写一次心跳，job 名正确 + 带错误摘要（不写成功态）。
+func TestCursorAccountRetentionHeartbeatOnFailure(t *testing.T) {
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	listErr := errors.New("boom: list expired cursor accounts")
+	acctRepo := &fakeCursorRetentionAccountRepo{
+		listErr: listErr,
+		accounts: []fakeRetentionAccount{
+			{id: 1, platform: "cursor", deletedAt: retentionTimeBefore(now, 100*24*time.Hour)},
+		},
+	}
+	usageRepo := &fakeRetentionUsageCleanupRepo{}
+	ops := &retentionHeartbeatOpsRepo{opsRepoMock: &opsRepoMock{}}
+	svc := newTestCursorRetentionService(acctRepo, usageRepo, now, "90")
+	svc.opsRepo = ops
+
+	svc.RunOnce(context.Background())
+
+	inputs := ops.snapshots()
+	if len(inputs) != 1 {
+		t.Fatalf("失败轮应写且仅写一次心跳，实际 %d 次", len(inputs))
+	}
+	hb := inputs[0]
+	if hb.JobName != cursorAccountRetentionJobName {
+		t.Fatalf("心跳 job 名应为 %q，实际 %q", cursorAccountRetentionJobName, hb.JobName)
+	}
+	if hb.LastError == nil || !strings.Contains(*hb.LastError, listErr.Error()) {
+		t.Fatalf("失败轮心跳应带错误摘要（含 %q），实际 LastError=%v", listErr.Error(), hb.LastError)
+	}
+	if hb.LastErrorAt == nil {
+		t.Fatal("失败轮心跳应带 LastErrorAt")
+	}
+	if hb.LastSuccessAt != nil {
+		t.Fatal("失败轮心跳不应写 LastSuccessAt")
 	}
 }
