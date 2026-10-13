@@ -41,6 +41,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -149,6 +150,7 @@ func checkColumn(t, c string) error {
 			promointelitem.Table:                promointelitem.ValidColumn,
 			promointelsource.Table:              promointelsource.ValidColumn,
 			proxy.Table:                         proxy.ValidColumn,
+			quotakey.Table:                      quotakey.ValidColumn,
 			redeembatch.Table:                   redeembatch.ValidColumn,
 			redeemcode.Table:                    redeemcode.ValidColumn,
 			redeemcodegroup.Table:               redeemcodegroup.ValidColumn,

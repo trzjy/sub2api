@@ -93,6 +93,9 @@ type PromoIntelSource func(*sql.Selector)
 // Proxy is the predicate function for proxy builders.
 type Proxy func(*sql.Selector)
 
+// QuotaKey is the predicate function for quotakey builders.
+type QuotaKey func(*sql.Selector)
+
 // RedeemBatch is the predicate function for redeembatch builders.
 type RedeemBatch func(*sql.Selector)
 

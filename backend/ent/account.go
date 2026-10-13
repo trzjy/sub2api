@@ -89,8 +89,9 @@ type Account struct {
 	QuotaDimension account.QuotaDimension `json:"quota_dimension,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AccountQuery when eager-loading is set.
-	Edges        AccountEdges `json:"edges"`
-	selectValues sql.SelectValues
+	Edges              AccountEdges `json:"edges"`
+	quota_key_accounts *int64
+	selectValues       sql.SelectValues
 }
 
 // AccountEdges holds the relations/edges for other nodes in the graph.
@@ -187,6 +188,8 @@ func (*Account) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullString)
 		case account.FieldCreatedAt, account.FieldUpdatedAt, account.FieldDeletedAt, account.FieldLastUsedAt, account.FieldExpiresAt, account.FieldRateLimitedAt, account.FieldRateLimitResetAt, account.FieldOverloadUntil, account.FieldTempUnschedulableUntil, account.FieldSessionWindowStart, account.FieldSessionWindowEnd:
 			values[i] = new(sql.NullTime)
+		case account.ForeignKeys[0]: // quota_key_accounts
+			values[i] = new(sql.NullInt64)
 		default:
 			values[i] = new(sql.UnknownType)
 		}
@@ -432,6 +435,13 @@ func (_m *Account) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field quota_dimension", values[i])
 			} else if value.Valid {
 				_m.QuotaDimension = account.QuotaDimension(value.String)
+			}
+		case account.ForeignKeys[0]:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for edge-field quota_key_accounts", value)
+			} else if value.Valid {
+				_m.quota_key_accounts = new(int64)
+				*_m.quota_key_accounts = int64(value.Int64)
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])

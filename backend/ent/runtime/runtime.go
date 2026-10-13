@@ -34,6 +34,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -2020,6 +2021,58 @@ func init() {
 	proxyDescExpiryWarnDays := proxyFields[10].Descriptor()
 	// proxy.DefaultExpiryWarnDays holds the default value on creation for the expiry_warn_days field.
 	proxy.DefaultExpiryWarnDays = proxyDescExpiryWarnDays.Default.(int)
+	quotakeyFields := schema.QuotaKey{}.Fields()
+	_ = quotakeyFields
+	// quotakeyDescCodeEncrypted is the schema descriptor for code_encrypted field.
+	quotakeyDescCodeEncrypted := quotakeyFields[0].Descriptor()
+	// quotakey.CodeEncryptedValidator is a validator for the "code_encrypted" field. It is called by the builders before save.
+	quotakey.CodeEncryptedValidator = func() func(string) error {
+		validators := quotakeyDescCodeEncrypted.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(code_encrypted string) error {
+			for _, fn := range fns {
+				if err := fn(code_encrypted); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// quotakeyDescCodeMAC is the schema descriptor for code_mac field.
+	quotakeyDescCodeMAC := quotakeyFields[1].Descriptor()
+	// quotakey.CodeMACValidator is a validator for the "code_mac" field. It is called by the builders before save.
+	quotakey.CodeMACValidator = quotakeyDescCodeMAC.Validators[0].(func(string) error)
+	// quotakeyDescCodeLast4 is the schema descriptor for code_last4 field.
+	quotakeyDescCodeLast4 := quotakeyFields[2].Descriptor()
+	// quotakey.CodeLast4Validator is a validator for the "code_last4" field. It is called by the builders before save.
+	quotakey.CodeLast4Validator = quotakeyDescCodeLast4.Validators[0].(func(string) error)
+	// quotakeyDescStatus is the schema descriptor for status field.
+	quotakeyDescStatus := quotakeyFields[3].Descriptor()
+	// quotakey.DefaultStatus holds the default value on creation for the status field.
+	quotakey.DefaultStatus = quotakeyDescStatus.Default.(string)
+	// quotakey.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	quotakey.StatusValidator = quotakeyDescStatus.Validators[0].(func(string) error)
+	// quotakeyDescExhausted is the schema descriptor for exhausted field.
+	quotakeyDescExhausted := quotakeyFields[4].Descriptor()
+	// quotakey.DefaultExhausted holds the default value on creation for the exhausted field.
+	quotakey.DefaultExhausted = quotakeyDescExhausted.Default.(bool)
+	// quotakeyDescLastRefreshError is the schema descriptor for last_refresh_error field.
+	quotakeyDescLastRefreshError := quotakeyFields[5].Descriptor()
+	// quotakey.LastRefreshErrorValidator is a validator for the "last_refresh_error" field. It is called by the builders before save.
+	quotakey.LastRefreshErrorValidator = quotakeyDescLastRefreshError.Validators[0].(func(string) error)
+	// quotakeyDescCreatedAt is the schema descriptor for created_at field.
+	quotakeyDescCreatedAt := quotakeyFields[8].Descriptor()
+	// quotakey.DefaultCreatedAt holds the default value on creation for the created_at field.
+	quotakey.DefaultCreatedAt = quotakeyDescCreatedAt.Default.(func() time.Time)
+	// quotakeyDescUpdatedAt is the schema descriptor for updated_at field.
+	quotakeyDescUpdatedAt := quotakeyFields[9].Descriptor()
+	// quotakey.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	quotakey.DefaultUpdatedAt = quotakeyDescUpdatedAt.Default.(func() time.Time)
+	// quotakey.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	quotakey.UpdateDefaultUpdatedAt = quotakeyDescUpdatedAt.UpdateDefault.(func() time.Time)
 	redeembatchFields := schema.RedeemBatch{}.Fields()
 	_ = redeembatchFields
 	// redeembatchDescName is the schema descriptor for name field.

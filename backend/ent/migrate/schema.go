@@ -130,6 +130,7 @@ var (
 		{Name: "quota_dimension", Type: field.TypeEnum, Enums: []string{"global", "spark", "codebuddy"}, Default: "global"},
 		{Name: "proxy_id", Type: field.TypeInt64, Nullable: true},
 		{Name: "parent_account_id", Type: field.TypeInt64, Nullable: true},
+		{Name: "quota_key_accounts", Type: field.TypeInt64, Nullable: true},
 	}
 	// AccountsTable holds the schema information for the "accounts" table.
 	AccountsTable = &schema.Table{
@@ -148,6 +149,12 @@ var (
 				Columns:    []*schema.Column{AccountsColumns[34]},
 				RefColumns: []*schema.Column{AccountsColumns[0]},
 				OnDelete:   schema.Restrict,
+			},
+			{
+				Symbol:     "accounts_quota_keys_accounts",
+				Columns:    []*schema.Column{AccountsColumns[35]},
+				RefColumns: []*schema.Column{QuotaKeysColumns[0]},
+				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
@@ -1581,6 +1588,63 @@ var (
 			},
 		},
 	}
+	// QuotaKeysColumns holds the columns for the "quota_keys" table.
+	QuotaKeysColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "code_encrypted", Type: field.TypeString, Size: 2048},
+		{Name: "code_mac", Type: field.TypeString, Nullable: true, Size: 64},
+		{Name: "code_last4", Type: field.TypeString, Nullable: true, Size: 8},
+		{Name: "status", Type: field.TypeString, Size: 20, Default: "active"},
+		{Name: "exhausted", Type: field.TypeBool, Default: false},
+		{Name: "last_refresh_error", Type: field.TypeString, Nullable: true, Size: 2000},
+		{Name: "last_refresh_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "notes", Type: field.TypeString, Nullable: true, SchemaType: map[string]string{"postgres": "text"}},
+	}
+	// QuotaKeysTable holds the schema information for the "quota_keys" table.
+	QuotaKeysTable = &schema.Table{
+		Name:       "quota_keys",
+		Columns:    QuotaKeysColumns,
+		PrimaryKey: []*schema.Column{QuotaKeysColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "uq_quota_keys_code_mac",
+				Unique:  true,
+				Columns: []*schema.Column{QuotaKeysColumns[2]},
+			},
+			{
+				Name:    "idx_quota_keys_status",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaKeysColumns[4]},
+			},
+			{
+				Name:    "idx_quota_keys_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaKeysColumns[8]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "expires_at IS NOT NULL",
+				},
+			},
+			{
+				Name:    "idx_quota_keys_exhausted",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaKeysColumns[5]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "exhausted = true",
+				},
+			},
+			{
+				Name:    "idx_quota_keys_reconciler",
+				Unique:  false,
+				Columns: []*schema.Column{QuotaKeysColumns[4], QuotaKeysColumns[5], QuotaKeysColumns[8]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "status = 'active'",
+				},
+			},
+		},
+	}
 	// RedeemBatchesColumns holds the columns for the "redeem_batches" table.
 	RedeemBatchesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -2469,6 +2533,7 @@ var (
 		PromoIntelItemsTable,
 		PromoIntelSourcesTable,
 		ProxiesTable,
+		QuotaKeysTable,
 		RedeemBatchesTable,
 		RedeemCodesTable,
 		RedeemCodeGroupsTable,
@@ -2499,6 +2564,7 @@ func init() {
 	}
 	AccountsTable.ForeignKeys[0].RefTable = ProxiesTable
 	AccountsTable.ForeignKeys[1].RefTable = AccountsTable
+	AccountsTable.ForeignKeys[2].RefTable = QuotaKeysTable
 	AccountsTable.Annotation = &entsql.Annotation{
 		Table: "accounts",
 	}
@@ -2600,6 +2666,9 @@ func init() {
 	ProxiesTable.ForeignKeys[0].RefTable = ProxiesTable
 	ProxiesTable.Annotation = &entsql.Annotation{
 		Table: "proxies",
+	}
+	QuotaKeysTable.Annotation = &entsql.Annotation{
+		Table: "quota_keys",
 	}
 	RedeemBatchesTable.Annotation = &entsql.Annotation{
 		Table: "redeem_batches",

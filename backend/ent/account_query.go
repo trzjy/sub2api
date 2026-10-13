@@ -34,6 +34,7 @@ type AccountQuery struct {
 	withChildren      *AccountQuery
 	withUsageLogs     *UsageLogQuery
 	withAccountGroups *AccountGroupQuery
+	withFKs           bool
 	modifiers         []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
@@ -550,6 +551,7 @@ func (_q *AccountQuery) prepareQuery(ctx context.Context) error {
 func (_q *AccountQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Account, error) {
 	var (
 		nodes       = []*Account{}
+		withFKs     = _q.withFKs
 		_spec       = _q.querySpec()
 		loadedTypes = [6]bool{
 			_q.withGroups != nil,
@@ -560,6 +562,9 @@ func (_q *AccountQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Acco
 			_q.withAccountGroups != nil,
 		}
 	)
+	if withFKs {
+		_spec.Node.Columns = append(_spec.Node.Columns, account.ForeignKeys...)
+	}
 	_spec.ScanValues = func(columns []string) ([]any, error) {
 		return (*Account).scanValues(nil, columns)
 	}
@@ -759,6 +764,7 @@ func (_q *AccountQuery) loadChildren(ctx context.Context, query *AccountQuery, n
 			init(nodes[i])
 		}
 	}
+	query.withFKs = true
 	if len(query.ctx.Fields) > 0 {
 		query.ctx.AppendFieldOnce(account.FieldParentAccountID)
 	}

@@ -44,6 +44,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -130,6 +131,8 @@ type Client struct {
 	PromoIntelSource *PromoIntelSourceClient
 	// Proxy is the client for interacting with the Proxy builders.
 	Proxy *ProxyClient
+	// QuotaKey is the client for interacting with the QuotaKey builders.
+	QuotaKey *QuotaKeyClient
 	// RedeemBatch is the client for interacting with the RedeemBatch builders.
 	RedeemBatch *RedeemBatchClient
 	// RedeemCode is the client for interacting with the RedeemCode builders.
@@ -208,6 +211,7 @@ func (c *Client) init() {
 	c.PromoIntelItem = NewPromoIntelItemClient(c.config)
 	c.PromoIntelSource = NewPromoIntelSourceClient(c.config)
 	c.Proxy = NewProxyClient(c.config)
+	c.QuotaKey = NewQuotaKeyClient(c.config)
 	c.RedeemBatch = NewRedeemBatchClient(c.config)
 	c.RedeemCode = NewRedeemCodeClient(c.config)
 	c.RedeemCodeGroup = NewRedeemCodeGroupClient(c.config)
@@ -348,6 +352,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PromoIntelItem:                NewPromoIntelItemClient(cfg),
 		PromoIntelSource:              NewPromoIntelSourceClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
+		QuotaKey:                      NewQuotaKeyClient(cfg),
 		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
 		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
@@ -415,6 +420,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PromoIntelItem:                NewPromoIntelItemClient(cfg),
 		PromoIntelSource:              NewPromoIntelSourceClient(cfg),
 		Proxy:                         NewProxyClient(cfg),
+		QuotaKey:                      NewQuotaKeyClient(cfg),
 		RedeemBatch:                   NewRedeemBatchClient(cfg),
 		RedeemCode:                    NewRedeemCodeClient(cfg),
 		RedeemCodeGroup:               NewRedeemCodeGroupClient(cfg),
@@ -470,8 +476,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ChannelMonitorRequestTemplate, c.CompositeModelRoute, c.ErrorPassthroughRule,
 		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
-		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch,
-		c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
+		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.QuotaKey,
+		c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
 		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
 		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
 		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
@@ -492,8 +498,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ChannelMonitorRequestTemplate, c.CompositeModelRoute, c.ErrorPassthroughRule,
 		c.Group, c.IdempotencyRecord, c.IdentityAdoptionDecision, c.PaymentAuditLog,
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
-		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.RedeemBatch,
-		c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
+		c.PromoCodeUsage, c.PromoIntelItem, c.PromoIntelSource, c.Proxy, c.QuotaKey,
+		c.RedeemBatch, c.RedeemCode, c.RedeemCodeGroup, c.SecuritySecret, c.Setting,
 		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
 		c.UsageRiskReport, c.UsageRiskRollup, c.UsageRiskRun, c.User,
 		c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
@@ -564,6 +570,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.PromoIntelSource.mutate(ctx, m)
 	case *ProxyMutation:
 		return c.Proxy.mutate(ctx, m)
+	case *QuotaKeyMutation:
+		return c.QuotaKey.mutate(ctx, m)
 	case *RedeemBatchMutation:
 		return c.RedeemBatch.mutate(ctx, m)
 	case *RedeemCodeMutation:
@@ -5177,6 +5185,155 @@ func (c *ProxyClient) mutate(ctx context.Context, m *ProxyMutation) (Value, erro
 	}
 }
 
+// QuotaKeyClient is a client for the QuotaKey schema.
+type QuotaKeyClient struct {
+	config
+}
+
+// NewQuotaKeyClient returns a client for the QuotaKey from the given config.
+func NewQuotaKeyClient(c config) *QuotaKeyClient {
+	return &QuotaKeyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `quotakey.Hooks(f(g(h())))`.
+func (c *QuotaKeyClient) Use(hooks ...Hook) {
+	c.hooks.QuotaKey = append(c.hooks.QuotaKey, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `quotakey.Intercept(f(g(h())))`.
+func (c *QuotaKeyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.QuotaKey = append(c.inters.QuotaKey, interceptors...)
+}
+
+// Create returns a builder for creating a QuotaKey entity.
+func (c *QuotaKeyClient) Create() *QuotaKeyCreate {
+	mutation := newQuotaKeyMutation(c.config, OpCreate)
+	return &QuotaKeyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of QuotaKey entities.
+func (c *QuotaKeyClient) CreateBulk(builders ...*QuotaKeyCreate) *QuotaKeyCreateBulk {
+	return &QuotaKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *QuotaKeyClient) MapCreateBulk(slice any, setFunc func(*QuotaKeyCreate, int)) *QuotaKeyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &QuotaKeyCreateBulk{err: fmt.Errorf("calling to QuotaKeyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*QuotaKeyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &QuotaKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for QuotaKey.
+func (c *QuotaKeyClient) Update() *QuotaKeyUpdate {
+	mutation := newQuotaKeyMutation(c.config, OpUpdate)
+	return &QuotaKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *QuotaKeyClient) UpdateOne(_m *QuotaKey) *QuotaKeyUpdateOne {
+	mutation := newQuotaKeyMutation(c.config, OpUpdateOne, withQuotaKey(_m))
+	return &QuotaKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *QuotaKeyClient) UpdateOneID(id int64) *QuotaKeyUpdateOne {
+	mutation := newQuotaKeyMutation(c.config, OpUpdateOne, withQuotaKeyID(id))
+	return &QuotaKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for QuotaKey.
+func (c *QuotaKeyClient) Delete() *QuotaKeyDelete {
+	mutation := newQuotaKeyMutation(c.config, OpDelete)
+	return &QuotaKeyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *QuotaKeyClient) DeleteOne(_m *QuotaKey) *QuotaKeyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *QuotaKeyClient) DeleteOneID(id int64) *QuotaKeyDeleteOne {
+	builder := c.Delete().Where(quotakey.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &QuotaKeyDeleteOne{builder}
+}
+
+// Query returns a query builder for QuotaKey.
+func (c *QuotaKeyClient) Query() *QuotaKeyQuery {
+	return &QuotaKeyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeQuotaKey},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a QuotaKey entity by its id.
+func (c *QuotaKeyClient) Get(ctx context.Context, id int64) (*QuotaKey, error) {
+	return c.Query().Where(quotakey.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *QuotaKeyClient) GetX(ctx context.Context, id int64) *QuotaKey {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryAccounts queries the accounts edge of a QuotaKey.
+func (c *QuotaKeyClient) QueryAccounts(_m *QuotaKey) *AccountQuery {
+	query := (&AccountClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(quotakey.Table, quotakey.FieldID, id),
+			sqlgraph.To(account.Table, account.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, quotakey.AccountsTable, quotakey.AccountsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *QuotaKeyClient) Hooks() []Hook {
+	return c.hooks.QuotaKey
+}
+
+// Interceptors returns the client interceptors.
+func (c *QuotaKeyClient) Interceptors() []Interceptor {
+	return c.inters.QuotaKey
+}
+
+func (c *QuotaKeyClient) mutate(ctx context.Context, m *QuotaKeyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&QuotaKeyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&QuotaKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&QuotaKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&QuotaKeyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown QuotaKey mutation op: %q", m.Op())
+	}
+}
+
 // RedeemBatchClient is a client for the RedeemBatch schema.
 type RedeemBatchClient struct {
 	config
@@ -8344,7 +8501,7 @@ type (
 		ChannelMonitorHistory, ChannelMonitorRequestTemplate, CompositeModelRoute,
 		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
 		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
-		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy,
+		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, QuotaKey,
 		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
 		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
 		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
@@ -8358,7 +8515,7 @@ type (
 		ChannelMonitorHistory, ChannelMonitorRequestTemplate, CompositeModelRoute,
 		ErrorPassthroughRule, Group, IdempotencyRecord, IdentityAdoptionDecision,
 		PaymentAuditLog, PaymentOrder, PaymentProviderInstance, PendingAuthSession,
-		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy,
+		PromoCode, PromoCodeUsage, PromoIntelItem, PromoIntelSource, Proxy, QuotaKey,
 		RedeemBatch, RedeemCode, RedeemCodeGroup, SecuritySecret, Setting,
 		SubscriptionPlan, TLSFingerprintProfile, UsageCleanupTask, UsageLog,
 		UsageRiskReport, UsageRiskRollup, UsageRiskRun, User, UserAllowedGroup,
