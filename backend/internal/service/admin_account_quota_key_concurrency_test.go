@@ -24,13 +24,46 @@ type quotaCapRealInsertRepo struct {
 }
 
 func (r *quotaCapRealInsertRepo) Create(ctx context.Context, a *Account) error {
+	return r.persistAccount(ctx, nil, a)
+}
+
+// CreateWithTx 是 ≤15 集中化后 cursor 建号的事务写入口：必须落在集中入口给出的同一个
+// tx 内（判定与该插入同事务、同 advisory 互斥域），不得写到锁外或第二个事务里。
+func (r *quotaCapRealInsertRepo) CreateWithTx(ctx context.Context, tx *ent.Tx, a *Account) error {
+	return r.persistAccount(ctx, tx, a)
+}
+
+// Update 供改绑路径使用：集中入口把 tx 挂在 ctx 上（dbent.TxFromContext），
+// 这里与生产仓储同口径——沿 ctx 上的事务写，否则写入会落在判定事务之外。
+func (r *quotaCapRealInsertRepo) Update(ctx context.Context, a *Account) error {
+	r.upstreamBillingProbeAccountRepo.Update(ctx, a)
+	if a.QuotaKeyID == nil {
+		return nil
+	}
+	execClient := r.client
+	if tx := ent.TxFromContext(ctx); tx != nil {
+		execClient = tx.Client()
+	}
+	_, err := execClient.Account.UpdateOneID(a.ID).SetQuotaKeyID(*a.QuotaKeyID).Save(ctx)
+	return err
+}
+
+// persistAccount 在假 repo 的内存落库之外，同步把账号行写入真实 Postgres（tx 非 nil
+// 时写入该事务），使"计数"查询（真实 DB）能观察到本次插入。这样并发用例才能验证
+// "计数 + 插入"在同一 advisory 锁临界区内原子完成：后到的并发请求必须看到先到者的
+// 插入，而非越过上限。
+func (r *quotaCapRealInsertRepo) persistAccount(ctx context.Context, tx *ent.Tx, a *Account) error {
 	if err := r.upstreamBillingProbeAccountRepo.Create(ctx, a); err != nil {
 		return err
 	}
 	if a.QuotaKeyID == nil {
 		return nil
 	}
-	create := r.client.Account.Create().
+	execClient := r.client
+	if tx != nil {
+		execClient = tx.Client()
+	}
+	create := execClient.Account.Create().
 		SetName(a.Name).
 		SetPlatform(a.Platform).
 		SetType(a.Type).

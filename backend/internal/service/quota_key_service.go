@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 )
 
@@ -38,7 +41,8 @@ type QuotaKeyRepository interface {
 	UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// C3.2 扩展：账号软删编排与刷新扫描（均在调用方已开启的事务内执行，除 ListEligibleForRefresh）。
-	CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error)
+	// 注：working 计数（§3.2 谓词）已收敛到集中强制入口内的 countWorkingQuotaKeyAccounts
+	// （D-CURSOR-034），不再是本契约的方法——计数口径只此一处，写入路径无处可自带谓词。
 	SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) ([]int64, error)
 	EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error
 	SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error
@@ -220,23 +224,83 @@ func (s *QuotaKeyService) GetWithAccounts(ctx context.Context, id int64) (*Quota
 	return quotaKeyToStatus(qk), accounts, nil
 }
 
-// PullAccounts 按 §3.4 拉号状态机拉取账号：advisory 事务锁 → 读状态 → 计数停限 →
-// 二次读防竞态 → 发上游 → 成功插入并清 exhausted / 失败 CAS 写 exhausted。
-func (s *QuotaKeyService) PullAccounts(ctx context.Context, quotaKeyID int64) error {
-	return s.pull(ctx, quotaKeyID)
+// ErrQuotaKeyNotActive 表示激活码存在但已非 active（禁用/过期），不再承载任何账号写入。
+var ErrQuotaKeyNotActive = errors.New("quota key is not active")
+
+// ErrQuotaKeyAccountLimitReached 是"归属某激活码的 working 账号已达 ≤15 上限"的唯一
+// 容量拒绝错误（400 QUOTA_KEY_ACCOUNT_LIMIT_REACHED）。三条写路径（拉号插入 / admin
+// 建号 / admin 改绑）统一返回此错误，不再各自构造各自的计数与拒绝错误。
+var ErrQuotaKeyAccountLimitReached = infraerrors.New(http.StatusBadRequest, "QUOTA_KEY_ACCOUNT_LIMIT_REACHED",
+	"quota key already holds the maximum number of accounts")
+
+// errQuotaKeyNotFoundForWrite 构造"写路径目标激活码不存在"的拒绝错误。
+// cause 挂 ErrQuotaKeyNotFound，使既有 handler 的 404 映射（errors.Is）不受影响。
+func errQuotaKeyNotFoundForWrite(quotaKeyID int64) error {
+	return infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_NOT_FOUND",
+		"quota key %d does not exist", quotaKeyID).WithCause(ErrQuotaKeyNotFound)
 }
 
-// RefreshAccounts 手动触发拉号（§4.4），与 PullAccounts 共享同一 advisory 互斥域。
-func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
-	return s.pull(ctx, quotaKeyID)
+// countWorkingQuotaKeyAccounts 在事务内统计归属某激活码、且未软删的账号数（§3.2 working 谓词）。
+//
+// 这是 ≤15 判定唯一的计数实现：三条写路径共用，谓词（quota_key_id + deleted_at IS NULL）
+// 与原 QuotaKeyRepository.CountWorkingAccounts 完全一致，但不再有第二份副本。
+func countWorkingQuotaKeyAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
+	return tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+		).
+		Count(ctx)
 }
 
-// pull 是 PullAccounts / RefreshAccounts 共享的拉号状态机实现（同一互斥域、同一事务编排）。
-func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
+// checkQuotaKeyCapacityLocked 是 ≤15 强制的唯一判定实现，运行在"已持有该激活码 advisory
+// 事务锁"的 tx 内（软删校验随之前移进锁内，修 r4 #2），返回判定时刻的 working 计数：
+//  1. quota_key 必须存在且未软删（普通查询天然排除软删行）；
+//  2. status 必须为 active；
+//  3. working 必须 < MaxAccountsPerQuotaKey。
+//
+// 调用方必须在【同一 tx】内完成写入：判定与写入分属两个事务时，锁一释放就有并发漏网窗口。
+func checkQuotaKeyCapacityLocked(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
+	qk, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return 0, errQuotaKeyNotFoundForWrite(quotaKeyID)
+		}
+		return 0, fmt.Errorf("quota_key_service: load quota key: %w", err)
+	}
+	if qk.Status != domain.QuotaKeyStatusActive {
+		return 0, ErrQuotaKeyNotActive
+	}
+	working, err := countWorkingQuotaKeyAccounts(ctx, tx, quotaKeyID)
+	if err != nil {
+		return 0, fmt.Errorf("quota_key_service: count working accounts: %w", err)
+	}
+	if working >= MaxAccountsPerQuotaKey {
+		return working, ErrQuotaKeyAccountLimitReached.WithMetadata(map[string]string{
+			"quota_key_id": strconv.FormatInt(quotaKeyID, 10),
+			"working":      strconv.Itoa(working),
+			"limit":        strconv.Itoa(MaxAccountsPerQuotaKey),
+		})
+	}
+	return working, nil
+}
+
+// withQuotaKeyCapacity 在单激活码 advisory 互斥域内执行"容量判定 + 写入"：
+// 取锁 → working 计数（§3.2 谓词）→ 校验 quota_key 未软删且 active → 判定 < MaxAccountsPerQuotaKey
+// → 在【同一事务】内调用 fn(tx) 写入 → 提交（锁随事务释放）。
+// fn 内不得再自行取锁/计数/开事务：那样会与本入口形成嵌套 tx 或两个事务的两个临界区
+// （即 r4 #1/#3 的漏网形态）。容量不足返回 ErrQuotaKeyAccountLimitReached。
+func (s *QuotaKeyService) withQuotaKeyCapacity(ctx context.Context, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
 	}
-	tx, err := s.client.Tx(ctx)
+	return withQuotaKeyCapacityTx(ctx, s.client, quotaKeyID, fn)
+}
+
+// withQuotaKeyCapacityTx 是 withQuotaKeyCapacity 的实现本体，供不持有 QuotaKeyService
+// 的写路径（admin 建号 / admin 改绑）复用同一入口、同一互斥域，不复制一份临界区。
+func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID int64, fn func(tx *ent.Tx) error) error {
+	tx, err := client.Tx(ctx)
 	if err != nil {
 		return fmt.Errorf("quota_key_service: begin tx: %w", err)
 	}
@@ -251,98 +315,117 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 	if err := acquireAdvisoryXactLock(ctx, tx, quotaKeyAdvisoryLockID(quotaKeyID)); err != nil {
 		return err
 	}
-
-	// 读1：FOR UPDATE 锁定 quota_key 行，防止 sweep 并发改写。
-	qk, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return ErrQuotaKeyNotFound
-		}
-		return fmt.Errorf("quota_key_service: load quota key: %w", err)
+	if _, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID); err != nil {
+		return err
 	}
-	if qk.Status != domain.QuotaKeyStatusActive {
-		return nil // 已被禁用/过期，停止拉号
+	if err := fn(tx); err != nil {
+		return err
 	}
-
-	// 读2：统计 working 账号数。
-	working, err := s.repo.CountWorkingAccounts(ctx, tx, quotaKeyID)
-	if err != nil {
-		return fmt.Errorf("quota_key_service: count working accounts: %w", err)
-	}
-	if working >= MaxAccountsPerQuotaKey {
-		return nil // 达到上限，停止拉号（不改 exhausted）
-	}
-
-	// 二次读状态（防 sweep 竞态）：重新 FOR UPDATE 确认仍为 active 且未过期。
-	qk2, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
-	if err != nil {
-		return fmt.Errorf("quota_key_service: re-load quota key: %w", err)
-	}
-	if qk2.Status != domain.QuotaKeyStatusActive || isExpired(qk2) {
-		return nil
-	}
-
-	// 发上游。
-	result, pullErr := s.upstream.PullBatch(ctx, qk2)
-	if pullErr != nil {
-		// 失败：CAS 写 exhausted=true，仅当当前 status='active'（不覆盖 sweep 的禁用/过期）。
-		if cerr := s.casSetExhausted(ctx, tx, quotaKeyID, pullErr); cerr != nil {
-			return fmt.Errorf("quota_key_service: cas set exhausted: %w", cerr)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("quota_key_service: commit after exhausted: %w", err)
-		}
-		committed = true
-		return nil
-	}
-
-	// 成功：四读（再次 FOR UPDATE 确认状态）后按剩余容量截断插入，再清 exhausted。
-	qk3, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
-	if err != nil {
-		return fmt.Errorf("quota_key_service: final-load quota key: %w", err)
-	}
-	if qk3.Status != domain.QuotaKeyStatusActive {
-		return nil
-	}
-
-	// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以上游请求前读到的
-	// working 为基准，working=14 而上游返 2 时只落 1 条，总数恰好 15（不多不少）。
-	// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
-	maxInsert := MaxAccountsPerQuotaKey - working
-	for i, ua := range result.Accounts {
-		if i >= maxInsert {
-			break
-		}
-		create := tx.Account.Create().
-			SetName(ua.Name).
-			SetPlatform(ua.Platform).
-			SetType(ua.Type).
-			SetCredentials(ua.Credentials).
-			SetQuotaKeyID(quotaKeyID)
-		if ua.Extra != nil {
-			create.SetExtra(ua.Extra)
-		}
-		if _, err := create.Save(ctx); err != nil {
-			return fmt.Errorf("quota_key_service: create account: %w", err)
-		}
-	}
-
-	// 清 exhausted 与错误占位。
-	// SetNillableLastRefreshError(nil) 对 nil 指针是 no-op（仅 v != nil 时才写），
-	// 必须用 ClearLastRefreshError() 才能真正把 last_refresh_error 置空。
-	if _, err := tx.QuotaKey.UpdateOneID(quotaKeyID).
-		SetExhausted(false).
-		SetLastRefreshAt(time.Now()).
-		ClearLastRefreshError().
-		Save(ctx); err != nil {
-		return fmt.Errorf("quota_key_service: clear exhausted: %w", err)
-	}
-
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("quota_key_service: commit pull: %w", err)
+		return fmt.Errorf("quota_key_service: commit quota key capacity tx: %w", err)
 	}
 	committed = true
 	return nil
+}
+
+// PullAccounts 按 §3.4 拉号状态机拉取账号：全程在集中入口持有的同一 advisory 互斥域与
+// 同一事务内完成——容量判定（读状态 + working 计数 + ≤15）→ 二次读防竞态 → 发上游 →
+// 成功插入并清 exhausted / 失败 CAS 写 exhausted。
+func (s *QuotaKeyService) PullAccounts(ctx context.Context, quotaKeyID int64) error {
+	return s.pull(ctx, quotaKeyID)
+}
+
+// RefreshAccounts 手动触发拉号（§4.4），与 PullAccounts 共享同一 advisory 互斥域。
+func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
+	return s.pull(ctx, quotaKeyID)
+}
+
+// pull 是 PullAccounts / RefreshAccounts 共享的拉号状态机实现。
+//
+// 全链路在 ≤15 集中入口（withQuotaKeyCapacity）持有的同一 advisory 互斥域 + 同一事务内：
+// 入口先完成"未软删 + active + working < MaxAccountsPerQuotaKey"判定，fn 内不得再取锁、
+// 不再开事务，插入/状态写入与判定同事务提交（修 r4 #3 事务边界）。
+func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
+	if s.client == nil {
+		return errors.New("quota_key_service: ent client not configured")
+	}
+	err := s.withQuotaKeyCapacity(ctx, quotaKeyID, func(tx *ent.Tx) error {
+		// 二次读状态（防 sweep 竞态）：重新 FOR UPDATE 确认仍为 active 且未过期。
+		qk2, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
+		if err != nil {
+			return fmt.Errorf("quota_key_service: re-load quota key: %w", err)
+		}
+		if qk2.Status != domain.QuotaKeyStatusActive || isExpired(qk2) {
+			return nil
+		}
+
+		// 发上游。
+		result, pullErr := s.upstream.PullBatch(ctx, qk2)
+		if pullErr != nil {
+			// 失败：CAS 写 exhausted=true，仅当当前 status='active'（不覆盖 sweep 的禁用/过期）；
+			// 由集中入口在同一事务内提交（锁随事务释放）。
+			if cerr := s.casSetExhausted(ctx, tx, quotaKeyID, pullErr); cerr != nil {
+				return fmt.Errorf("quota_key_service: cas set exhausted: %w", cerr)
+			}
+			return nil
+		}
+
+		// 成功：四读（再次 FOR UPDATE 确认状态）后重取 working，按剩余容量截断插入，再清 exhausted。
+		qk3, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
+		if err != nil {
+			return fmt.Errorf("quota_key_service: final-load quota key: %w", err)
+		}
+		if qk3.Status != domain.QuotaKeyStatusActive {
+			return nil
+		}
+		// 插入前在同一事务/同一锁内重判容量：并发抢位（如上一次拉号刚提交）在此拦住。
+		working, err := checkQuotaKeyCapacityLocked(ctx, tx, quotaKeyID)
+		if err != nil {
+			if errors.Is(err, ErrQuotaKeyAccountLimitReached) || errors.Is(err, ErrQuotaKeyNotActive) {
+				return nil
+			}
+			return err
+		}
+
+		// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以插入前读到的
+		// working 为基准，working=14 而上游返 2 时只落 1 条，总数恰好 15（不多不少）。
+		// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
+		maxInsert := MaxAccountsPerQuotaKey - working
+		for i, ua := range result.Accounts {
+			if i >= maxInsert {
+				break
+			}
+			create := tx.Account.Create().
+				SetName(ua.Name).
+				SetPlatform(ua.Platform).
+				SetType(ua.Type).
+				SetCredentials(ua.Credentials).
+				SetQuotaKeyID(quotaKeyID)
+			if ua.Extra != nil {
+				create.SetExtra(ua.Extra)
+			}
+			if _, err := create.Save(ctx); err != nil {
+				return fmt.Errorf("quota_key_service: create account: %w", err)
+			}
+		}
+
+		// 清 exhausted 与错误占位。
+		// SetNillableLastRefreshError(nil) 对 nil 指针是 no-op（仅 v != nil 时才写），
+		// 必须用 ClearLastRefreshError() 才能真正把 last_refresh_error 置空。
+		if _, err := tx.QuotaKey.UpdateOneID(quotaKeyID).
+			SetExhausted(false).
+			SetLastRefreshAt(time.Now()).
+			ClearLastRefreshError().
+			Save(ctx); err != nil {
+			return fmt.Errorf("quota_key_service: clear exhausted: %w", err)
+		}
+		return nil
+	})
+	// 达到上限 / 已非 active：与既有语义一致，停止拉号且不改 exhausted，不上抛为错误。
+	if errors.Is(err, ErrQuotaKeyAccountLimitReached) || errors.Is(err, ErrQuotaKeyNotActive) {
+		return nil
+	}
+	return err
 }
 
 // DeleteWithAccounts 软删激活码及其全部账号（§3.2 删除唯一路径 = 软删口径）。

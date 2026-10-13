@@ -8,11 +8,18 @@ import (
 	"testing"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
+
+// CreateWithTx 是 ≤15 集中化后 cursor 建号的事务写入口。测试替身在此以既有 Create
+// 的语义实现（同一介质落库），供 service 在同一 advisory 事务内调用。
+func (r *upstreamBillingProbeAccountRepo) CreateWithTx(ctx context.Context, _ *dbent.Tx, a *Account) error {
+	return r.Create(ctx, a)
+}
 
 // newQuotaKeyCapAdminService 构造带真实 ent 客户端的 admin 服务（号池计数走真实 DB），
 // 账号落库走假 repo（本用例只关心建号前的上限/存在性校验）。
