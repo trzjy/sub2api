@@ -129,7 +129,7 @@ func TestAccountFromServiceShallow_QuotaDimensionsFiveFamilies(t *testing.T) {
 		require.Equal(t, "free", free.Kind)
 		require.Equal(t, "account", free.Scope)
 		require.Equal(t, "remaining", free.Status)
-		require.Equal(t, "no", free.Servable)
+		require.Equal(t, "unknown", free.Servable) // §0.2 再裁定：Kira 免费维度无 servable 生产者，恒 unknown
 		require.Equal(t, "kira_usage_snapshot", free.Source)
 		require.Equal(t, usedAt, free.ObservedAt)
 
