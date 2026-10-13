@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -26,6 +27,18 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// testEncryptor 是 QuotaKeyEncryptor 的测试替身（合同 §5，仅测试代码）：以确定性前缀
+// 变换模拟"静态加密"。在 credcrypt 退化为明文 passthrough（未配置主密钥）的环境下，
+// 仍能断言 service 层确实把明文交给了加密器、且明文不以原文落库。
+type testEncryptor struct{}
+
+func (testEncryptor) Encrypt(plain []byte) ([]byte, error) {
+	return []byte("enc:" + string(plain)), nil
+}
+func (testEncryptor) Decrypt(cipher []byte) ([]byte, error) {
+	return bytes.TrimPrefix(cipher, []byte("enc:")), nil
+}
+
 // ---------------------------------------------------------------------------
 // 既有骨架测试（C3.1）：内存 fake repo，不连数据库、不发起上游请求。
 // ---------------------------------------------------------------------------
@@ -33,8 +46,11 @@ import (
 // fakeQuotaKeyRepo 是 QuotaKeyRepository 的内存测试替身，仅存在于测试代码（合同 §5）。
 // 不连接数据库、不发起任何上游请求、不使用 mock 框架。
 type fakeQuotaKeyRepo struct {
-	byID   map[int64]*ent.QuotaKey
-	nextID int64
+	byID             map[int64]*ent.QuotaKey
+	accounts         []*ent.Account
+	nextID           int64
+	updateCredsCalls int
+	updateMetaCalls  int
 }
 
 func newFakeQuotaKeyRepo() *fakeQuotaKeyRepo {
@@ -82,6 +98,7 @@ func (f *fakeQuotaKeyRepo) HardDelete(_ context.Context, _ *ent.Tx, id int64) er
 }
 
 func (f *fakeQuotaKeyRepo) UpdateCredentials(_ context.Context, id int64, codeEncrypted, codeMAC, codeLast4 string) error {
+	f.updateCredsCalls++
 	qk, ok := f.byID[id]
 	if !ok {
 		return errQuotaKeyNotFound
@@ -127,6 +144,40 @@ func (f *fakeQuotaKeyRepo) SoftDelete(_ context.Context, _ *ent.Tx, _ int64) err
 
 func (f *fakeQuotaKeyRepo) ListEligibleForRefresh(_ context.Context) ([]*ent.QuotaKey, error) {
 	return nil, nil
+}
+
+// C5a 扩展方法（内存替身）。
+func (f *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
+	var out []*ent.QuotaKey
+	for _, qk := range f.byID {
+		out = append(out, qk)
+	}
+	return out, nil
+}
+
+func (f *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt *time.Time, notes *string) error {
+	f.updateMetaCalls++
+	qk, ok := f.byID[id]
+	if !ok {
+		return errQuotaKeyNotFound
+	}
+	if expiresAt != nil {
+		qk.ExpiresAt = expiresAt
+	}
+	if notes != nil {
+		qk.Notes = notes
+	}
+	return nil
+}
+
+func (f *fakeQuotaKeyRepo) ListAccountsByQuotaKey(_ context.Context, quotaKeyID int64) ([]*ent.Account, error) {
+	var out []*ent.Account
+	for _, a := range f.accounts {
+		if a.QuotaKeyID != nil && *a.QuotaKeyID == quotaKeyID {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 // errQuotaKeyNotFound 是测试替身的哨兵错误。
@@ -441,6 +492,27 @@ func (r *testDBRepo) ListEligibleForRefresh(ctx context.Context) ([]*ent.QuotaKe
 		).All(ctx)
 }
 
+// C5a 扩展方法（命中真实 Postgres）。
+func (r *testDBRepo) List(ctx context.Context) ([]*ent.QuotaKey, error) {
+	return r.client.QuotaKey.Query().All(ctx)
+}
+
+func (r *testDBRepo) UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error {
+	q := r.client.QuotaKey.UpdateOneID(id)
+	if expiresAt != nil {
+		q = q.SetNillableExpiresAt(expiresAt)
+	}
+	if notes != nil {
+		q = q.SetNillableNotes(notes)
+	}
+	_, err := q.Save(ctx)
+	return err
+}
+
+func (r *testDBRepo) ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error) {
+	return r.client.Account.Query().Where(account.QuotaKeyID(quotaKeyID)).All(ctx)
+}
+
 // TestQuotaKeyPull_Error_SetsExhaustedCAS：任意上游错误 → exhausted=true（CAS 写），
 // 且不得插入任何账号。
 func TestQuotaKeyPull_Error_SetsExhaustedCAS(t *testing.T) {
@@ -681,4 +753,146 @@ func TestQuotaKeyPlaceholderUpstream_ReturnsErrorNotFake(t *testing.T) {
 	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 0, n, "placeholder must NOT insert fake accounts")
+}
+
+// ---------------------------------------------------------------------------
+// C5a 扩展单测（D-CURSOR-020）：admin CRUD 的 service 层（内存 fake repo，不连库）。
+// 核心不变量：明文 code 只进不出（F1）；GetWithAccounts 不嵌套聚合（F7）。
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeyService_CreateEncryptsAndMasks：Create 后 repo 收到密文（非明文），
+// 返回的 CodeValueMasked 不含明文。
+func TestQuotaKeyService_CreateEncryptsAndMasks(t *testing.T) {
+	plain := "CURSOR-ACTIVATION-CODE-9F3A-1234"
+	repo := newFakeQuotaKeyRepo()
+	enc := testEncryptor{}
+	svc := NewQuotaKeyService(repo, enc, nil, nil)
+
+	dto, err := svc.Create(context.Background(), plain, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, dto)
+
+	stored := repo.byID[dto.ID]
+	// 明文必须经过加密器：库中所存为加密器输出（前缀 enc:），而非原文。
+	require.Equal(t, "enc:"+plain, stored.CodeEncrypted, "repo must receive the encryptor output, not raw plaintext")
+	require.NotEqual(t, plain, stored.CodeEncrypted, "repo must NOT receive raw plaintext")
+
+	require.Equal(t, "XXXX-****-****-1234", dto.CodeValueMasked)
+	require.NotContains(t, dto.CodeValueMasked, plain, "masked value must not leak plaintext")
+}
+
+// TestQuotaKeyService_ListNeverReturnsPlaintext：即便 DB 误存明文（最坏情况），
+// List 返回项的任一字段都不得出现明文。
+func TestQuotaKeyService_ListNeverReturnsPlaintext(t *testing.T) {
+	plain := "CURSOR-ACTIVATION-CODE-9F3A-1234"
+	repo := newFakeQuotaKeyRepo()
+	// 故意把密文字段直接写成明文，模拟数据库误存明文的最坏情况。
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: plain, CodeLast4: "1234", Status: "active", Notes: &plain}
+	repo.byID[2] = &ent.QuotaKey{ID: 2, CodeEncrypted: plain, CodeLast4: "9F3A", Status: "expired"}
+
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
+	dtos, err := svc.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, dtos, 2)
+
+	for _, dto := range dtos {
+		fields := map[string]string{
+			"Platform":         dto.Platform,
+			"Status":           dto.Status,
+			"LastRefreshError": dto.LastRefreshError,
+			"CodeValueMasked":  dto.CodeValueMasked,
+		}
+		for name, v := range fields {
+			require.NotContains(t, v, plain, "DTO field %s leaked plaintext", name)
+		}
+	}
+}
+
+// TestQuotaKeyService_UpdateReencryptsCode：传 code → 仅 UpdateCredentials 被调用（密文），
+// 不触碰 UpdateMeta。
+func TestQuotaKeyService_UpdateReencryptsCode(t *testing.T) {
+	oldCipher := "enc:v1:oldsomething"
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: oldCipher, CodeLast4: "oldx", Status: "active"}
+
+	enc := testEncryptor{}
+	svc := NewQuotaKeyService(repo, enc, nil, nil)
+
+	newCode := "CURSOR-ACTIVATION-CODE-NEW9-7777"
+	dto, err := svc.Update(context.Background(), 1, &newCode, nil, nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, repo.updateCredsCalls, "UpdateCredentials must be called exactly once")
+	require.Equal(t, 0, repo.updateMetaCalls, "UpdateMeta must NOT be called when code is the only change")
+
+	stored := repo.byID[1]
+	require.Equal(t, "enc:"+newCode, stored.CodeEncrypted, "code must be re-encrypted via encryptor")
+	require.NotEqual(t, oldCipher, stored.CodeEncrypted, "code must be re-encrypted")
+	require.NotEqual(t, newCode, stored.CodeEncrypted, "stored value must be ciphertext, not plaintext")
+	require.Equal(t, "7777", stored.CodeLast4)
+	require.Equal(t, "XXXX-****-****-7777", dto.CodeValueMasked)
+	require.NotContains(t, dto.CodeValueMasked, newCode)
+}
+
+// TestQuotaKeyService_UpdateMetaOnly：code=nil → 只调 UpdateMeta，不触碰 credentials/code/status。
+func TestQuotaKeyService_UpdateMetaOnly(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	expiresBefore := time.Now().Add(-time.Hour)
+	repo.byID[1] = &ent.QuotaKey{
+		ID:            1,
+		CodeEncrypted: "enc:v1:keepme",
+		CodeLast4:     "keep",
+		Status:        "active",
+		ExpiresAt:     &expiresBefore,
+	}
+
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
+
+	expiresAt := time.Now().Add(24 * time.Hour)
+	notes := "rotation note"
+	dto, err := svc.Update(context.Background(), 1, nil, &expiresAt, &notes)
+	require.NoError(t, err)
+
+	require.Equal(t, 0, repo.updateCredsCalls, "UpdateCredentials must NOT be called when code is nil")
+	require.Equal(t, 1, repo.updateMetaCalls, "UpdateMeta must be called exactly once")
+
+	stored := repo.byID[1]
+	require.Equal(t, "enc:v1:keepme", stored.CodeEncrypted, "code must remain untouched")
+	require.Equal(t, "active", stored.Status, "status must remain untouched")
+	require.Equal(t, "keep", stored.CodeLast4, "code_last4 must remain untouched")
+	require.NotNil(t, stored.ExpiresAt)
+	require.WithinDuration(t, expiresAt, *stored.ExpiresAt, time.Second)
+	require.NotNil(t, stored.Notes)
+	require.Equal(t, "rotation note", *stored.Notes)
+	require.Equal(t, "XXXX-****-****-keep", dto.CodeValueMasked)
+}
+
+// TestQuotaKeyService_GetWithAccounts_NoNesting：返回脱敏 status + 账号切片，
+// 二者为独立返回值（非聚合对象，F7）。
+func TestQuotaKeyService_GetWithAccounts_NoNesting(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.byID[1] = &ent.QuotaKey{ID: 1, CodeEncrypted: "enc:v1:x", CodeLast4: "abcd", Status: "active"}
+	qk1 := int64(1)
+	qk2 := int64(2)
+	repo.accounts = []*ent.Account{
+		{ID: 10, QuotaKeyID: &qk1, Name: "acc-1"},
+		{ID: 11, QuotaKeyID: &qk1, Name: "acc-2"},
+		{ID: 12, QuotaKeyID: &qk2, Name: "acc-other"}, // 归属其它激活码，不应出现在结果中
+	}
+
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
+	status, accounts, err := svc.GetWithAccounts(context.Background(), 1)
+	require.NoError(t, err)
+
+	require.NotNil(t, status)
+	require.Equal(t, "XXXX-****-****-abcd", status.CodeValueMasked, "status must be masked")
+	require.NotContains(t, status.CodeValueMasked, "enc:v1:x")
+
+	// 账号以独立切片返回，且只含归属本激活码的账号（非聚合对象）。
+	require.NotNil(t, accounts)
+	require.Len(t, accounts, 2)
+	for _, a := range accounts {
+		require.NotNil(t, a.QuotaKeyID)
+		require.Equal(t, int64(1), *a.QuotaKeyID, "only accounts of the requested quota key should be returned")
+	}
 }

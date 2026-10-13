@@ -11,12 +11,12 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-// QuotaKeyRepository 实现 service.QuotaKeyRepository，提供与 accounts 表无关的
-// quota_keys 基础 CRUD（C3.1 骨架范围）。
+// QuotaKeyRepository 实现 service.QuotaKeyRepository，提供 quota_keys 基础 CRUD
+// （C3.1/C3.2 骨架范围），以及 C5a 扩展的 List / UpdateMeta / 按激活码列出账号
+// （ListAccountsByQuotaKey，用于 admin GetWithAccounts 端点，软删由 SoftDeleteMixin 自动过滤）。
 //
-// 严禁声明/使用任何 account 谓词或 accounts 表查询（C2/C3.2 范围，禁区）：
-// 激活码与账号的关联（quota_key_id 外键、accounts 反向边）由后续卡片负责，
-// 本文件不得触碰。
+// 注意：C5a 之前本文件声明"严禁触碰 accounts 表"，该限制随 C5a（D-CURSOR-020）解除——
+// ListAccountsByQuotaKey 是本次显式授权的方法，仅用于读取归属账号，不写不改 accounts。
 type quotaKeyRepository struct {
 	client *ent.Client
 }
@@ -156,5 +156,32 @@ func (r *quotaKeyRepository) ListEligibleForRefresh(ctx context.Context) ([]*ent
 			),
 			quotakey.DeletedAtIsNil(),
 		).
+		All(ctx)
+}
+
+// List 全量返回激活码（SoftDeleteMixin 已自动过滤软删行）。
+func (r *quotaKeyRepository) List(ctx context.Context) ([]*ent.QuotaKey, error) {
+	return r.client.QuotaKey.Query().All(ctx)
+}
+
+// UpdateMeta 仅更新 expires_at / notes 元数据字段，不触碰 code / status。
+// expiresAt / notes 均为 nil 时为 no-op（不发起 UPDATE）。
+func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error {
+	q := r.client.QuotaKey.UpdateOneID(id)
+	if expiresAt != nil {
+		q = q.SetNillableExpiresAt(expiresAt)
+	}
+	if notes != nil {
+		q = q.SetNillableNotes(notes)
+	}
+	_, err := q.Save(ctx)
+	return err
+}
+
+// ListAccountsByQuotaKey 返回归属某激活码的账号（account.QuotaKeyIDEQ），
+// SoftDeleteMixin 已自动过滤软删账号。仅读取，不改写 accounts。
+func (r *quotaKeyRepository) ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error) {
+	return r.client.Account.Query().
+		Where(account.QuotaKeyID(quotaKeyID)).
 		All(ctx)
 }

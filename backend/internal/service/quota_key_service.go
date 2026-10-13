@@ -33,6 +33,10 @@ type QuotaKeyRepository interface {
 	UpdateCredentials(ctx context.Context, id int64, codeEncrypted, codeMAC, codeLast4 string) error
 	ListExpired(ctx context.Context, now time.Time) ([]*ent.QuotaKey, error)
 	ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error)
+	// C5a 扩展（D-CURSOR-020）：admin CRUD 读/写支撑方法。
+	List(ctx context.Context) ([]*ent.QuotaKey, error)
+	UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error
+	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// C3.2 扩展：账号软删编排与刷新扫描（均在调用方已开启的事务内执行，除 ListEligibleForRefresh）。
 	CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error)
 	SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) error
@@ -131,6 +135,81 @@ func (s *QuotaKeyService) RotateCredentials(ctx context.Context, id int64, newPl
 		return nil, err
 	}
 	return s.GetStatus(ctx, id)
+}
+
+// List 全量返回脱敏后的激活码状态列表（明文 code 绝不出现在返回 DTO 中）。
+func (s *QuotaKeyService) List(ctx context.Context) ([]*QuotaKeyStatus, error) {
+	qks, err := s.repo.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*QuotaKeyStatus, 0, len(qks))
+	for _, qk := range qks {
+		out = append(out, quotaKeyToStatus(qk))
+	}
+	return out, nil
+}
+
+// Create 接收明文激活码 → 加密（复用与 RotateCredentials 同一实现）→ 落库 → 返回脱敏状态。
+//
+// 明文 code 只进不出：加密后仅以密文/last4/MAC 形态入库，返回值一律脱敏，
+// 明文绝不进入任何返回值或日志（F1）。新激活码默认 status=active。
+func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *time.Time, notes *string) (*QuotaKeyStatus, error) {
+	enc, err := s.enc.Encrypt([]byte(code))
+	if err != nil {
+		return nil, err
+	}
+	codeEncrypted := string(enc)
+	codeMAC := quotaKeyMACOfPlaintext(code)
+	codeLast4 := last4Of(code)
+	qk, err := s.repo.Create(ctx, CreateQuotaKeyInput{
+		CodeEncrypted: codeEncrypted,
+		CodeMAC:       codeMAC,
+		CodeLast4:     codeLast4,
+		Status:        domain.QuotaKeyStatusActive,
+		ExpiresAt:     expiresAt,
+		Notes:         notes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return quotaKeyToStatus(qk), nil
+}
+
+// Update 改激活码：code 非 nil 时重加密写 credentials；expiresAt/notes 非 nil 时写元数据。
+// 返回脱敏状态。明文 code 只进不出（F1）。
+func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt *time.Time, notes *string) (*QuotaKeyStatus, error) {
+	if code != nil {
+		enc, err := s.enc.Encrypt([]byte(*code))
+		if err != nil {
+			return nil, err
+		}
+		codeEncrypted := string(enc)
+		codeMAC := quotaKeyMACOfPlaintext(*code)
+		codeLast4 := last4Of(*code)
+		if err := s.repo.UpdateCredentials(ctx, id, codeEncrypted, codeMAC, codeLast4); err != nil {
+			return nil, err
+		}
+	}
+	if expiresAt != nil || notes != nil {
+		if err := s.repo.UpdateMeta(ctx, id, expiresAt, notes); err != nil {
+			return nil, err
+		}
+	}
+	return s.GetStatus(ctx, id)
+}
+
+// GetWithAccounts 返回脱敏状态 + 该激活码下的账号切片（不嵌套聚合成单一对象，F7）。
+func (s *QuotaKeyService) GetWithAccounts(ctx context.Context, id int64) (*QuotaKeyStatus, []*ent.Account, error) {
+	qk, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	accounts, err := s.repo.ListAccountsByQuotaKey(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return quotaKeyToStatus(qk), accounts, nil
 }
 
 // PullAccounts 按 §3.4 拉号状态机拉取账号：advisory 事务锁 → 读状态 → 计数停限 →
