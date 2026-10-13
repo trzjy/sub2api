@@ -4761,6 +4761,7 @@ func accountEntityToService(m *dbent.Account) (*service.Account, error) {
 		SessionWindowStatus:     derefString(m.SessionWindowStatus),
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
+		QuotaKeyID:              m.QuotaKeyID,
 	}, nil
 }
 

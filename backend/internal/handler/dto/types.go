@@ -319,6 +319,13 @@ type Account struct {
 	ParentAccountID *int64 `json:"parent_account_id,omitempty"`
 	QuotaDimension  string `json:"quota_dimension,omitempty"`
 
+	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2，C5b 回填）。
+	// 仅 cursor 平台账号有值；非 cursor 平台省略。账号详情禁止内嵌完整 QuotaKey
+	// 聚合对象（F7），仅暴露脱敏 ID 与标签两个标量。
+	QuotaKeyID *int64 `json:"quota_key_id,omitempty"`
+	// QuotaKeyLabel 归属激活码的脱敏展示标签（值 = code_masked），不含任何原文。
+	QuotaKeyLabel *string `json:"quota_key_label,omitempty"`
+
 	// 影子账号回填的母账号信息（仅影子非空，源自母账号 Credentials/Extra）
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -137,6 +138,38 @@ func (s *QuotaKeySweeper) runOnce() {
 		log.Printf("[QuotaKeySweep] marked %d expired quota keys", n)
 	}
 	s.recordHeartbeat(ctx, runAt, true, nil, n)
+}
+
+// SweepNow 同步执行一次到期清扫，返回本轮标记为 expired 的条数（§4.4 sweep_expired
+// 的 admin 手动触发口）。
+//
+// 复用既有 sweepOnce，不重造任何清扫逻辑；与 runOnce 唯一差别是同步返回改写条数与
+// 错误，而非只写日志/心跳。事务在本方法内开启、提交/回滚，契约与 runOnce 保持一致
+// （entClient 为 nil 时直接报错，不做静默成功）。
+func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
+	if s == nil || s.entClient == nil {
+		return 0, errors.New("quota_key_sweeper: ent client not configured")
+	}
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("quota_key_sweeper: begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	n, err := s.sweepOnce(ctx, tx)
+	if err != nil {
+		return n, err
+	}
+	if err := tx.Commit(); err != nil {
+		return n, fmt.Errorf("quota_key_sweeper: commit sweep: %w", err)
+	}
+	committed = true
+	return n, nil
 }
 
 // sweepOnce 对当前过期集合逐条标 expired。
