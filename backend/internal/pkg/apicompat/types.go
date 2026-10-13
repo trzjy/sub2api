@@ -94,10 +94,16 @@ func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {
 			anthropicContentBlock
 		}{Text: b.Text, anthropicContentBlock: anthropicContentBlock(b)})
 	case "thinking":
+		// 恒输出 signature 键：DeepSeek/Gemini 等严格上游要求 thinking 块携带
+		// signature 字段（即便为空字符串），否则客户端回放时会被丢弃/降级为
+		// redacted，导致下一轮无法回传明文 reasoning_content 而 400。对齐已接受
+		// 先例 412718edf5。**不伪造**非空签名（DeepSeek 无密文签名），无值时发
+		// 空串占位。嵌入的 anthropicContentBlock 仍提供 type/cache_control 等字段。
 		return json.Marshal(struct {
-			Thinking string `json:"thinking"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
 			anthropicContentBlock
-		}{Thinking: b.Thinking, anthropicContentBlock: anthropicContentBlock(b)})
+		}{Thinking: b.Thinking, Signature: b.Signature, anthropicContentBlock: anthropicContentBlock(b)})
 	default:
 		return json.Marshal(base)
 	}
