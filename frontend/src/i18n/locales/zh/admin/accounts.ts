@@ -118,7 +118,23 @@ export default {
         lastUsed: '最近使用',
         createdAt: '创建时间',
         expiresAt: '过期时间',
+        quotaKey: '归属激活码',
         actions: '操作'
+      },
+      // Cursor 站点渠道激活码归属（C6 / 方案 §4.5）
+      quotaKey: {
+        unassigned: '未归属',
+        selectorLabel: '归属激活码',
+        selectorHint: 'Cursor 平台账号必须选择归属激活码',
+        selectorRequired: '请选择一个激活码',
+        selectorGroupAvailable: '可用激活码',
+        selectorGroupExhausted: '已耗尽激活码',
+        selectorGroupExpired: '已过期激活码',
+        selectorEmpty: '暂无可选激活码',
+        selectorLoading: '加载激活码…',
+        selectorExpand: '展开激活码列表',
+        selectorCollapse: '收起激活码列表',
+        loadError: '加载激活码列表失败'
       },
       schedulerScore: {
         baseShort: '普通',
