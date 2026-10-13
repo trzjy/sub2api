@@ -7,7 +7,6 @@ import (
 // QuotaKeyStatus 是激活码状态的脱敏视图。明文 code 绝不出现于任何字段。
 type QuotaKeyStatus struct {
 	ID               int64      `json:"id"`
-	Platform         string     `json:"platform"`
 	Status           string     `json:"status"`
 	Exhausted        bool       `json:"exhausted"`
 	LastRefreshAt    *time.Time `json:"last_refresh_at,omitempty"`

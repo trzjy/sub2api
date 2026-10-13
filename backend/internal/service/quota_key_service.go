@@ -520,7 +520,6 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 	}
 	return &QuotaKeyStatus{
 		ID:               qk.ID,
-		Platform:         "", // quota_keys 无 platform 字段（C1 schema 未含），骨架阶段留空
 		Status:           qk.Status,
 		Exhausted:        qk.Exhausted,
 		LastRefreshAt:    qk.LastRefreshAt,

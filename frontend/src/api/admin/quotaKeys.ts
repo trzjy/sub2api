@@ -22,7 +22,6 @@ import { apiClient } from '../client'
 /** 激活码脱敏视图（与后端 QuotaKeyStatus DTO 对齐）。 */
 export interface QuotaKey {
   id: number
-  platform: string
   status: string
   exhausted: boolean
   code_masked: string

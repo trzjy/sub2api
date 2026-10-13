@@ -249,7 +249,6 @@ func TestQuotaKeyGetStatus_NeverReturnsPlaintext(t *testing.T) {
 	}
 
 	fields := map[string]string{
-		"Platform":         dto.Platform,
 		"Status":           dto.Status,
 		"LastRefreshError": dto.LastRefreshError,
 		"CodeValueMasked":  dto.CodeValueMasked,
@@ -954,7 +953,6 @@ func TestQuotaKeyService_ListNeverReturnsPlaintext(t *testing.T) {
 
 	for _, dto := range dtos {
 		fields := map[string]string{
-			"Platform":         dto.Platform,
 			"Status":           dto.Status,
 			"LastRefreshError": dto.LastRefreshError,
 			"CodeValueMasked":  dto.CodeValueMasked,
