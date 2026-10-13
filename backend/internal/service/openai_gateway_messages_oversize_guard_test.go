@@ -197,14 +197,14 @@ func TestMessagesOversizeClientMessageSharedByPrecheckAndUpstreamFallback(t *tes
 	require.Equal(t, messagesOversizeClientMessage, fallbackMsg, "B must use the shared constant")
 	require.Equal(t, precheckMsg, fallbackMsg, "A and B must emit the identical message")
 
-	// 文案自检：原因 + 可执行动作
-	require.Contains(t, messagesOversizeClientMessage, "请求体过大")
-	require.Contains(t, messagesOversizeClientMessage, "125 万 token 上限")
-	require.Contains(t, messagesOversizeClientMessage, "新建一个会话")
-	require.Contains(t, messagesOversizeClientMessage, "清理/压缩较早的历史消息")
-	require.Contains(t, messagesOversizeClientMessage, "分批提交")
-	// 文案自检：不出现内部术语
-	for _, term := range []string{"账号", "分组", "中转", "节点", "ID", "account", "group"} {
+	// 文案自检：原因 + 可执行的接力步骤
+	require.Contains(t, messagesOversizeClientMessage, "会话上下文超出限制")
+	require.Contains(t, messagesOversizeClientMessage, "新开会话")
+	require.Contains(t, messagesOversizeClientMessage, "30")
+	require.Contains(t, messagesOversizeClientMessage, "300")
+	require.Contains(t, messagesOversizeClientMessage, "接力")
+	// 文案自检：不出现内部术语 / 上限数字
+	for _, term := range []string{"账号", "分组", "中转", "节点", "ID", "account", "group", "token", "上游", "125"} {
 		require.NotContains(t, messagesOversizeClientMessage, term)
 	}
 }

@@ -32,9 +32,7 @@ const messagesOversizeRequestMaxBytes = 5 * 1024 * 1024
 // messagesOversizeClientMessage 是前置预检（A）与上游无可读 message 的 4xx 兜底（B）
 // 共用的客户端文案：说清发生了什么 + 可执行动作，且不含任何内部术语
 // （不提账号/分组/中转/上游节点/账号 ID）。
-const messagesOversizeClientMessage = "请求体过大，上游无法处理（约超过 125 万 token 上限）。\n" +
-	"建议：新建一个会话继续，或清理/压缩较早的历史消息后重试。\n" +
-	"若需处理超大上下文，请分批提交。"
+const messagesOversizeClientMessage = "会话上下文超出限制，请新开会话：贴入本会话末尾 30–50 行代表性内容作为关键词，让新会话据此定位到本会话；再让其读取本会话最后 300 行以了解任务，继续接力任务。"
 
 // ForwardAsAnthropic accepts an Anthropic Messages request body, converts it
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
