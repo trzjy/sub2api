@@ -12,6 +12,8 @@ import (
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
+
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 )
 
 // QuotaKey 定义 Cursor 激活码（quota key）实体的 schema。
@@ -29,10 +31,20 @@ import (
 //     （"XXXX-****-****-1234"），不与 MAC 冲突。
 //   - C5 DTO 永不返回原文，仅返回 code_masked；日志/metrics 脱敏。
 //
-// 删除策略：硬删除（v3.3 §3.5 service 编排 `QuotaKeyService.DeleteWithAccounts`，
-// 不走 DB cascade，不引入软删除 deleted_at 列）。
+// 删除策略：软删除（D-CURSOR-014 裁定，v3.4 §3.5 删除唯一路径 = 软删口径）。
+// 账号"删除" = 号池摘除 + 前端不显示 + 停止调度；数据库账号行与全部历史记录保留，
+// 禁止物理 DELETE 账号行。quota_keys 与 accounts 均通过 SoftDeleteMixin 的
+// deleted_at 实现软删；号池/列表查询由 mixin 的拦截器自动排除 deleted_at 非 NULL 的行。
 type QuotaKey struct {
 	ent.Schema
+}
+
+// Mixin 引入软删除能力：deleted_at 时间戳 + 查询自动过滤 + 删除转换为 UPDATE。
+// 与 accounts 表使用同一 SoftDeleteMixin，保证"删除 = 软删除"口径一致。
+func (QuotaKey) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		mixins.SoftDeleteMixin{},
+	}
 }
 
 // Annotations 返回 schema 的注解配置。指定数据库表名为 "quota_keys"。

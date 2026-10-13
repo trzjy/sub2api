@@ -42700,6 +42700,7 @@ type QuotaKeyMutation struct {
 	op                 Op
 	typ                string
 	id                 *int64
+	deleted_at         *time.Time
 	code_encrypted     *string
 	code_mac           *string
 	code_last4         *string
@@ -42816,6 +42817,55 @@ func (m *QuotaKeyMutation) IDs(ctx context.Context) ([]int64, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (m *QuotaKeyMutation) SetDeletedAt(t time.Time) {
+	m.deleted_at = &t
+}
+
+// DeletedAt returns the value of the "deleted_at" field in the mutation.
+func (m *QuotaKeyMutation) DeletedAt() (r time.Time, exists bool) {
+	v := m.deleted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletedAt returns the old "deleted_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldDeletedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletedAt: %w", err)
+	}
+	return oldValue.DeletedAt, nil
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (m *QuotaKeyMutation) ClearDeletedAt() {
+	m.deleted_at = nil
+	m.clearedFields[quotakey.FieldDeletedAt] = struct{}{}
+}
+
+// DeletedAtCleared returns if the "deleted_at" field was cleared in this mutation.
+func (m *QuotaKeyMutation) DeletedAtCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldDeletedAt]
+	return ok
+}
+
+// ResetDeletedAt resets all changes to the "deleted_at" field.
+func (m *QuotaKeyMutation) ResetDeletedAt() {
+	m.deleted_at = nil
+	delete(m.clearedFields, quotakey.FieldDeletedAt)
 }
 
 // SetCodeEncrypted sets the "code_encrypted" field.
@@ -43380,7 +43430,10 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
+	if m.deleted_at != nil {
+		fields = append(fields, quotakey.FieldDeletedAt)
+	}
 	if m.code_encrypted != nil {
 		fields = append(fields, quotakey.FieldCodeEncrypted)
 	}
@@ -43422,6 +43475,8 @@ func (m *QuotaKeyMutation) Fields() []string {
 // schema.
 func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case quotakey.FieldDeletedAt:
+		return m.DeletedAt()
 	case quotakey.FieldCodeEncrypted:
 		return m.CodeEncrypted()
 	case quotakey.FieldCodeMAC:
@@ -43453,6 +43508,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case quotakey.FieldDeletedAt:
+		return m.OldDeletedAt(ctx)
 	case quotakey.FieldCodeEncrypted:
 		return m.OldCodeEncrypted(ctx)
 	case quotakey.FieldCodeMAC:
@@ -43484,6 +43541,13 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 // type.
 func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case quotakey.FieldDeletedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletedAt(v)
+		return nil
 	case quotakey.FieldCodeEncrypted:
 		v, ok := value.(string)
 		if !ok {
@@ -43591,6 +43655,9 @@ func (m *QuotaKeyMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *QuotaKeyMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(quotakey.FieldDeletedAt) {
+		fields = append(fields, quotakey.FieldDeletedAt)
+	}
 	if m.FieldCleared(quotakey.FieldCodeMAC) {
 		fields = append(fields, quotakey.FieldCodeMAC)
 	}
@@ -43623,6 +43690,9 @@ func (m *QuotaKeyMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *QuotaKeyMutation) ClearField(name string) error {
 	switch name {
+	case quotakey.FieldDeletedAt:
+		m.ClearDeletedAt()
+		return nil
 	case quotakey.FieldCodeMAC:
 		m.ClearCodeMAC()
 		return nil
@@ -43649,6 +43719,9 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *QuotaKeyMutation) ResetField(name string) error {
 	switch name {
+	case quotakey.FieldDeletedAt:
+		m.ResetDeletedAt()
+		return nil
 	case quotakey.FieldCodeEncrypted:
 		m.ResetCodeEncrypted()
 		return nil

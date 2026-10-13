@@ -17,6 +17,8 @@ type QuotaKey struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID int64 `json:"id,omitempty"`
+	// DeletedAt holds the value of the "deleted_at" field.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 	// CodeEncrypted holds the value of the "code_encrypted" field.
 	CodeEncrypted string `json:"code_encrypted,omitempty"`
 	// CodeMAC holds the value of the "code_mac" field.
@@ -74,7 +76,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldNotes:
 			values[i] = new(sql.NullString)
-		case quotakey.FieldLastRefreshAt, quotakey.FieldExpiresAt, quotakey.FieldCreatedAt, quotakey.FieldUpdatedAt:
+		case quotakey.FieldDeletedAt, quotakey.FieldLastRefreshAt, quotakey.FieldExpiresAt, quotakey.FieldCreatedAt, quotakey.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -97,6 +99,13 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", value)
 			}
 			_m.ID = int64(value.Int64)
+		case quotakey.FieldDeletedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deleted_at", values[i])
+			} else if value.Valid {
+				_m.DeletedAt = new(time.Time)
+				*_m.DeletedAt = value.Time
+			}
 		case quotakey.FieldCodeEncrypted:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field code_encrypted", values[i])
@@ -208,6 +217,11 @@ func (_m *QuotaKey) String() string {
 	var builder strings.Builder
 	builder.WriteString("QuotaKey(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	if v := _m.DeletedAt; v != nil {
+		builder.WriteString("deleted_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
 	builder.WriteString("code_encrypted=")
 	builder.WriteString(_m.CodeEncrypted)
 	builder.WriteString(", ")

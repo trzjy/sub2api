@@ -29,6 +29,26 @@ func (_u *QuotaKeyUpdate) Where(ps ...predicate.QuotaKey) *QuotaKeyUpdate {
 	return _u
 }
 
+// SetDeletedAt sets the "deleted_at" field.
+func (_u *QuotaKeyUpdate) SetDeletedAt(v time.Time) *QuotaKeyUpdate {
+	_u.mutation.SetDeletedAt(v)
+	return _u
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableDeletedAt(v *time.Time) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetDeletedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (_u *QuotaKeyUpdate) ClearDeletedAt() *QuotaKeyUpdate {
+	_u.mutation.ClearDeletedAt()
+	return _u
+}
+
 // SetCodeEncrypted sets the "code_encrypted" field.
 func (_u *QuotaKeyUpdate) SetCodeEncrypted(v string) *QuotaKeyUpdate {
 	_u.mutation.SetCodeEncrypted(v)
@@ -240,7 +260,9 @@ func (_u *QuotaKeyUpdate) RemoveAccounts(v ...*Account) *QuotaKeyUpdate {
 
 // Save executes the query and returns the number of nodes affected by the update operation.
 func (_u *QuotaKeyUpdate) Save(ctx context.Context) (int, error) {
-	_u.defaults()
+	if err := _u.defaults(); err != nil {
+		return 0, err
+	}
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
@@ -267,11 +289,15 @@ func (_u *QuotaKeyUpdate) ExecX(ctx context.Context) {
 }
 
 // defaults sets the default values of the builder before save.
-func (_u *QuotaKeyUpdate) defaults() {
+func (_u *QuotaKeyUpdate) defaults() error {
 	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		if quotakey.UpdateDefaultUpdatedAt == nil {
+			return fmt.Errorf("ent: uninitialized quotakey.UpdateDefaultUpdatedAt (forgotten import ent/runtime?)")
+		}
 		v := quotakey.UpdateDefaultUpdatedAt()
 		_u.mutation.SetUpdatedAt(v)
 	}
+	return nil
 }
 
 // check runs all checks and user-defined validators on the builder.
@@ -315,6 +341,12 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 				ps[i](selector)
 			}
 		}
+	}
+	if value, ok := _u.mutation.DeletedAt(); ok {
+		_spec.SetField(quotakey.FieldDeletedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletedAtCleared() {
+		_spec.ClearField(quotakey.FieldDeletedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.CodeEncrypted(); ok {
 		_spec.SetField(quotakey.FieldCodeEncrypted, field.TypeString, value)
@@ -427,6 +459,26 @@ type QuotaKeyUpdateOne struct {
 	fields   []string
 	hooks    []Hook
 	mutation *QuotaKeyMutation
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (_u *QuotaKeyUpdateOne) SetDeletedAt(v time.Time) *QuotaKeyUpdateOne {
+	_u.mutation.SetDeletedAt(v)
+	return _u
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableDeletedAt(v *time.Time) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetDeletedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (_u *QuotaKeyUpdateOne) ClearDeletedAt() *QuotaKeyUpdateOne {
+	_u.mutation.ClearDeletedAt()
+	return _u
 }
 
 // SetCodeEncrypted sets the "code_encrypted" field.
@@ -653,7 +705,9 @@ func (_u *QuotaKeyUpdateOne) Select(field string, fields ...string) *QuotaKeyUpd
 
 // Save executes the query and returns the updated QuotaKey entity.
 func (_u *QuotaKeyUpdateOne) Save(ctx context.Context) (*QuotaKey, error) {
-	_u.defaults()
+	if err := _u.defaults(); err != nil {
+		return nil, err
+	}
 	return withHooks(ctx, _u.sqlSave, _u.mutation, _u.hooks)
 }
 
@@ -680,11 +734,15 @@ func (_u *QuotaKeyUpdateOne) ExecX(ctx context.Context) {
 }
 
 // defaults sets the default values of the builder before save.
-func (_u *QuotaKeyUpdateOne) defaults() {
+func (_u *QuotaKeyUpdateOne) defaults() error {
 	if _, ok := _u.mutation.UpdatedAt(); !ok {
+		if quotakey.UpdateDefaultUpdatedAt == nil {
+			return fmt.Errorf("ent: uninitialized quotakey.UpdateDefaultUpdatedAt (forgotten import ent/runtime?)")
+		}
 		v := quotakey.UpdateDefaultUpdatedAt()
 		_u.mutation.SetUpdatedAt(v)
 	}
+	return nil
 }
 
 // check runs all checks and user-defined validators on the builder.
@@ -745,6 +803,12 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 				ps[i](selector)
 			}
 		}
+	}
+	if value, ok := _u.mutation.DeletedAt(); ok {
+		_spec.SetField(quotakey.FieldDeletedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletedAtCleared() {
+		_spec.ClearField(quotakey.FieldDeletedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.CodeEncrypted(); ok {
 		_spec.SetField(quotakey.FieldCodeEncrypted, field.TypeString, value)

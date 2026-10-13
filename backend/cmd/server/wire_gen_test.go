@@ -107,6 +107,8 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // promptAudit
 		nil, // pluginManager
 		nil, // quotaLifecycle
+		nil, // quotaKeySweeper (D-CURSOR-017)
+		nil, // cursorAccountRetention (D-CURSOR-017)
 	)
 
 	require.NotPanics(t, func() {

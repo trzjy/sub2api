@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -98,5 +100,61 @@ func (r *quotaKeyRepository) ListExpired(ctx context.Context, now time.Time) ([]
 func (r *quotaKeyRepository) ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().
 		Where(quotakey.Status(status)).
+		All(ctx)
+}
+
+// CountWorkingAccounts 统计归属某激活码、且未软删的账号数（号池口径）。
+// 达到上限（service.MaxAccountsPerQuotaKey）即停止拉号。
+func (r *quotaKeyRepository) CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
+	return tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+		).
+		Count(ctx)
+}
+
+// SoftDeleteAccountsByQuotaKey 在事务内逐账号置 deleted_at（软删），保留账号行与全部历史记录。
+// 严禁物理删除 accounts 表账号行（D-CURSOR-014 硬口径：删除 = 软删除）。
+func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) error {
+	_, err := tx.Account.Update().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+		).
+		SetDeletedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// SoftDelete 在事务内软删激活码（置 deleted_at），保留行与全部历史记录。
+func (r *quotaKeyRepository) SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error {
+	_, err := tx.QuotaKey.UpdateOneID(id).
+		SetDeletedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// ListEligibleForRefresh 返回可参与刷新扫描的激活码：
+// status=active AND exhausted=false AND 未过期 AND 未软删。
+// SoftDeleteMixin 的查询拦截器已自动附加 deleted_at IS NULL，这里再显式声明一次以提高可读性。
+func (r *quotaKeyRepository) ListEligibleForRefresh(ctx context.Context) ([]*ent.QuotaKey, error) {
+	now := time.Now()
+	return r.client.QuotaKey.Query().
+		Where(
+			quotakey.Status(domain.QuotaKeyStatusActive),
+			quotakey.Exhausted(false),
+			quotakey.Or(
+				quotakey.ExpiresAtIsNil(),
+				quotakey.ExpiresAtGT(now),
+			),
+			quotakey.DeletedAtIsNil(),
+		).
 		All(ctx)
 }

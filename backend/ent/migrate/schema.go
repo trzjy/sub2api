@@ -1591,6 +1591,7 @@ var (
 	// QuotaKeysColumns holds the columns for the "quota_keys" table.
 	QuotaKeysColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
 		{Name: "code_encrypted", Type: field.TypeString, Size: 2048},
 		{Name: "code_mac", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "code_last4", Type: field.TypeString, Nullable: true, Size: 8},
@@ -1612,17 +1613,17 @@ var (
 			{
 				Name:    "uq_quota_keys_code_mac",
 				Unique:  true,
-				Columns: []*schema.Column{QuotaKeysColumns[2]},
+				Columns: []*schema.Column{QuotaKeysColumns[3]},
 			},
 			{
 				Name:    "idx_quota_keys_status",
 				Unique:  false,
-				Columns: []*schema.Column{QuotaKeysColumns[4]},
+				Columns: []*schema.Column{QuotaKeysColumns[5]},
 			},
 			{
 				Name:    "idx_quota_keys_expires_at",
 				Unique:  false,
-				Columns: []*schema.Column{QuotaKeysColumns[8]},
+				Columns: []*schema.Column{QuotaKeysColumns[9]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "expires_at IS NOT NULL",
 				},
@@ -1630,7 +1631,7 @@ var (
 			{
 				Name:    "idx_quota_keys_exhausted",
 				Unique:  false,
-				Columns: []*schema.Column{QuotaKeysColumns[5]},
+				Columns: []*schema.Column{QuotaKeysColumns[6]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "exhausted = true",
 				},
@@ -1638,7 +1639,7 @@ var (
 			{
 				Name:    "idx_quota_keys_reconciler",
 				Unique:  false,
-				Columns: []*schema.Column{QuotaKeysColumns[4], QuotaKeysColumns[5], QuotaKeysColumns[8]},
+				Columns: []*schema.Column{QuotaKeysColumns[5], QuotaKeysColumns[6], QuotaKeysColumns[9]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "status = 'active'",
 				},

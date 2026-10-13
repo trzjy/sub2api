@@ -23,6 +23,20 @@ type QuotaKeyCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetDeletedAt sets the "deleted_at" field.
+func (_c *QuotaKeyCreate) SetDeletedAt(v time.Time) *QuotaKeyCreate {
+	_c.mutation.SetDeletedAt(v)
+	return _c
+}
+
+// SetNillableDeletedAt sets the "deleted_at" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableDeletedAt(v *time.Time) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetDeletedAt(*v)
+	}
+	return _c
+}
+
 // SetCodeEncrypted sets the "code_encrypted" field.
 func (_c *QuotaKeyCreate) SetCodeEncrypted(v string) *QuotaKeyCreate {
 	_c.mutation.SetCodeEncrypted(v)
@@ -191,7 +205,9 @@ func (_c *QuotaKeyCreate) Mutation() *QuotaKeyMutation {
 
 // Save creates the QuotaKey in the database.
 func (_c *QuotaKeyCreate) Save(ctx context.Context) (*QuotaKey, error) {
-	_c.defaults()
+	if err := _c.defaults(); err != nil {
+		return nil, err
+	}
 	return withHooks(ctx, _c.sqlSave, _c.mutation, _c.hooks)
 }
 
@@ -218,7 +234,7 @@ func (_c *QuotaKeyCreate) ExecX(ctx context.Context) {
 }
 
 // defaults sets the default values of the builder before save.
-func (_c *QuotaKeyCreate) defaults() {
+func (_c *QuotaKeyCreate) defaults() error {
 	if _, ok := _c.mutation.Status(); !ok {
 		v := quotakey.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -228,13 +244,20 @@ func (_c *QuotaKeyCreate) defaults() {
 		_c.mutation.SetExhausted(v)
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
+		if quotakey.DefaultCreatedAt == nil {
+			return fmt.Errorf("ent: uninitialized quotakey.DefaultCreatedAt (forgotten import ent/runtime?)")
+		}
 		v := quotakey.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
 	}
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
+		if quotakey.DefaultUpdatedAt == nil {
+			return fmt.Errorf("ent: uninitialized quotakey.DefaultUpdatedAt (forgotten import ent/runtime?)")
+		}
 		v := quotakey.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	return nil
 }
 
 // check runs all checks and user-defined validators on the builder.
@@ -306,6 +329,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 		_spec = sqlgraph.NewCreateSpec(quotakey.Table, sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64))
 	)
 	_spec.OnConflict = _c.conflict
+	if value, ok := _c.mutation.DeletedAt(); ok {
+		_spec.SetField(quotakey.FieldDeletedAt, field.TypeTime, value)
+		_node.DeletedAt = &value
+	}
 	if value, ok := _c.mutation.CodeEncrypted(); ok {
 		_spec.SetField(quotakey.FieldCodeEncrypted, field.TypeString, value)
 		_node.CodeEncrypted = value
@@ -373,7 +400,7 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 // of the `INSERT` statement. For example:
 //
 //	client.QuotaKey.Create().
-//		SetCodeEncrypted(v).
+//		SetDeletedAt(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -382,7 +409,7 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.QuotaKeyUpsert) {
-//			SetCodeEncrypted(v+v).
+//			SetDeletedAt(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *QuotaKeyCreate) OnConflict(opts ...sql.ConflictOption) *QuotaKeyUpsertOne {
@@ -417,6 +444,24 @@ type (
 		*sql.UpdateSet
 	}
 )
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *QuotaKeyUpsert) SetDeletedAt(v time.Time) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldDeletedAt, v)
+	return u
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateDeletedAt() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldDeletedAt)
+	return u
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *QuotaKeyUpsert) ClearDeletedAt() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldDeletedAt)
+	return u
+}
 
 // SetCodeEncrypted sets the "code_encrypted" field.
 func (u *QuotaKeyUpsert) SetCodeEncrypted(v string) *QuotaKeyUpsert {
@@ -617,6 +662,27 @@ func (u *QuotaKeyUpsertOne) Update(set func(*QuotaKeyUpsert)) *QuotaKeyUpsertOne
 		set(&QuotaKeyUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *QuotaKeyUpsertOne) SetDeletedAt(v time.Time) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetDeletedAt(v)
+	})
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateDeletedAt() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateDeletedAt()
+	})
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *QuotaKeyUpsertOne) ClearDeletedAt() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearDeletedAt()
+	})
 }
 
 // SetCodeEncrypted sets the "code_encrypted" field.
@@ -936,7 +1002,7 @@ func (_c *QuotaKeyCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.QuotaKeyUpsert) {
-//			SetCodeEncrypted(v+v).
+//			SetDeletedAt(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *QuotaKeyCreateBulk) OnConflict(opts ...sql.ConflictOption) *QuotaKeyUpsertBulk {
@@ -1010,6 +1076,27 @@ func (u *QuotaKeyUpsertBulk) Update(set func(*QuotaKeyUpsert)) *QuotaKeyUpsertBu
 		set(&QuotaKeyUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (u *QuotaKeyUpsertBulk) SetDeletedAt(v time.Time) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetDeletedAt(v)
+	})
+}
+
+// UpdateDeletedAt sets the "deleted_at" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateDeletedAt() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateDeletedAt()
+	})
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (u *QuotaKeyUpsertBulk) ClearDeletedAt() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearDeletedAt()
+	})
 }
 
 // SetCodeEncrypted sets the "code_encrypted" field.

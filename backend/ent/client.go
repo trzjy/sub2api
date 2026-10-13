@@ -5327,12 +5327,14 @@ func (c *QuotaKeyClient) QueryAccounts(_m *QuotaKey) *AccountQuery {
 
 // Hooks returns the client hooks.
 func (c *QuotaKeyClient) Hooks() []Hook {
-	return c.hooks.QuotaKey
+	hooks := c.hooks.QuotaKey
+	return append(hooks[:len(hooks):len(hooks)], quotakey.Hooks[:]...)
 }
 
 // Interceptors returns the client interceptors.
 func (c *QuotaKeyClient) Interceptors() []Interceptor {
-	return c.inters.QuotaKey
+	inters := c.inters.QuotaKey
+	return append(inters[:len(inters):len(inters)], quotakey.Interceptors[:]...)
 }
 
 func (c *QuotaKeyClient) mutate(ctx context.Context, m *QuotaKeyMutation) (Value, error) {

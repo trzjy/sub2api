@@ -296,6 +296,47 @@ func parseAuditLogRetentionDays(value string) int {
 	return n
 }
 
+// defaultCursorAccountRetentionDays 是 Cursor 软删账号/流水保留天数默认值（天）。
+const defaultCursorAccountRetentionDays = 90
+
+// GetCursorAccountRetentionDays 返回 Cursor 软删账号与流水保留天数（<=0 表示永久保留）。
+// 与 GetAuditLogRetentionDays 同型：走 settingRepo，读取失败或空值回退默认值 90。
+func (s *SettingService) GetCursorAccountRetentionDays(ctx context.Context) int {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyCursorAccountRetentionDays)
+	if err != nil {
+		return defaultCursorAccountRetentionDays
+	}
+	return parseCursorAccountRetentionDays(value)
+}
+
+// parseCursorAccountRetentionDays 解析保留天数配置，空/非法值回退默认值。
+func parseCursorAccountRetentionDays(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultCursorAccountRetentionDays
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultCursorAccountRetentionDays
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// SetCursorAccountRetentionDays 设置 Cursor 软删账号与流水保留天数（<=0 表示永久保留）。
+// 与 Get 同型，走 settingRepo.Set。
+func (s *SettingService) SetCursorAccountRetentionDays(ctx context.Context, days int) error {
+	if s == nil || s.settingRepo == nil {
+		return errors.New("setting service not initialized")
+	}
+	if days < 0 {
+		days = 0
+	}
+	return s.settingRepo.Set(ctx, SettingKeyCursorAccountRetentionDays, strconv.Itoa(days))
+}
+
 // GetSiteName 获取网站名称
 func (s *SettingService) GetSiteName(ctx context.Context) string {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeySiteName)

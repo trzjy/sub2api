@@ -2021,6 +2021,11 @@ func init() {
 	proxyDescExpiryWarnDays := proxyFields[10].Descriptor()
 	// proxy.DefaultExpiryWarnDays holds the default value on creation for the expiry_warn_days field.
 	proxy.DefaultExpiryWarnDays = proxyDescExpiryWarnDays.Default.(int)
+	quotakeyMixin := schema.QuotaKey{}.Mixin()
+	quotakeyMixinHooks0 := quotakeyMixin[0].Hooks()
+	quotakey.Hooks[0] = quotakeyMixinHooks0[0]
+	quotakeyMixinInters0 := quotakeyMixin[0].Interceptors()
+	quotakey.Interceptors[0] = quotakeyMixinInters0[0]
 	quotakeyFields := schema.QuotaKey{}.Fields()
 	_ = quotakeyFields
 	// quotakeyDescCodeEncrypted is the schema descriptor for code_encrypted field.

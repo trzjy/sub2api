@@ -141,6 +141,8 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 	quotaLifecycle *service.CNQuotaLifecycleService,
+	quotaKeySweeper *service.QuotaKeySweeper,
+	cursorAccountRetention *service.CursorAccountRetentionService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -452,6 +454,18 @@ func provideCleanup(
 			{"CNQuotaLifecycleService", func() error {
 				if quotaLifecycle != nil {
 					quotaLifecycle.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeySweeper", func() error {
+				if quotaKeySweeper != nil {
+					quotaKeySweeper.Stop()
+				}
+				return nil
+			}},
+			{"CursorAccountRetentionService", func() error {
+				if cursorAccountRetention != nil {
+					cursorAccountRetention.Stop()
 				}
 				return nil
 			}},

@@ -55,6 +55,11 @@ func IDLTE(id int64) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldLTE(FieldID, id))
 }
 
+// DeletedAt applies equality check predicate on the "deleted_at" field. It's identical to DeletedAtEQ.
+func DeletedAt(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldDeletedAt, v))
+}
+
 // CodeEncrypted applies equality check predicate on the "code_encrypted" field. It's identical to CodeEncryptedEQ.
 func CodeEncrypted(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldCodeEncrypted, v))
@@ -108,6 +113,56 @@ func UpdatedAt(v time.Time) predicate.QuotaKey {
 // Notes applies equality check predicate on the "notes" field. It's identical to NotesEQ.
 func Notes(v string) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldNotes, v))
+}
+
+// DeletedAtEQ applies the EQ predicate on the "deleted_at" field.
+func DeletedAtEQ(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldDeletedAt, v))
+}
+
+// DeletedAtNEQ applies the NEQ predicate on the "deleted_at" field.
+func DeletedAtNEQ(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNEQ(FieldDeletedAt, v))
+}
+
+// DeletedAtIn applies the In predicate on the "deleted_at" field.
+func DeletedAtIn(vs ...time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIn(FieldDeletedAt, vs...))
+}
+
+// DeletedAtNotIn applies the NotIn predicate on the "deleted_at" field.
+func DeletedAtNotIn(vs ...time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotIn(FieldDeletedAt, vs...))
+}
+
+// DeletedAtGT applies the GT predicate on the "deleted_at" field.
+func DeletedAtGT(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGT(FieldDeletedAt, v))
+}
+
+// DeletedAtGTE applies the GTE predicate on the "deleted_at" field.
+func DeletedAtGTE(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGTE(FieldDeletedAt, v))
+}
+
+// DeletedAtLT applies the LT predicate on the "deleted_at" field.
+func DeletedAtLT(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLT(FieldDeletedAt, v))
+}
+
+// DeletedAtLTE applies the LTE predicate on the "deleted_at" field.
+func DeletedAtLTE(v time.Time) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLTE(FieldDeletedAt, v))
+}
+
+// DeletedAtIsNil applies the IsNil predicate on the "deleted_at" field.
+func DeletedAtIsNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIsNull(FieldDeletedAt))
+}
+
+// DeletedAtNotNil applies the NotNil predicate on the "deleted_at" field.
+func DeletedAtNotNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotNull(FieldDeletedAt))
 }
 
 // CodeEncryptedEQ applies the EQ predicate on the "code_encrypted" field.

@@ -301,12 +301,12 @@ func (_q *QuotaKeyQuery) WithAccounts(opts ...func(*AccountQuery)) *QuotaKeyQuer
 // Example:
 //
 //	var v []struct {
-//		CodeEncrypted string `json:"code_encrypted,omitempty"`
+//		DeletedAt time.Time `json:"deleted_at,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.QuotaKey.Query().
-//		GroupBy(quotakey.FieldCodeEncrypted).
+//		GroupBy(quotakey.FieldDeletedAt).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *QuotaKeyQuery) GroupBy(field string, fields ...string) *QuotaKeyGroupBy {
@@ -324,11 +324,11 @@ func (_q *QuotaKeyQuery) GroupBy(field string, fields ...string) *QuotaKeyGroupB
 // Example:
 //
 //	var v []struct {
-//		CodeEncrypted string `json:"code_encrypted,omitempty"`
+//		DeletedAt time.Time `json:"deleted_at,omitempty"`
 //	}
 //
 //	client.QuotaKey.Query().
-//		Select(quotakey.FieldCodeEncrypted).
+//		Select(quotakey.FieldDeletedAt).
 //		Scan(ctx, &v)
 func (_q *QuotaKeyQuery) Select(fields ...string) *QuotaKeySelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)
