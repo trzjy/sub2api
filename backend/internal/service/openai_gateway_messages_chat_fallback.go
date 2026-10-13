@@ -77,8 +77,8 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	serviceTier := extractOpenAIServiceTierFromBody(body)
 
 	// 读侧（DeepSeek thinking 契约）：客户端未回传 thinking 的工具轮，按 tool_call
-	// id 回查网关侧缓存回注真实明文；未命中返回 nil 原样放行（失败开放，见
-	// injectCachedMessagesReasoning）。门控外路径零变化。
+	// id 回查网关侧缓存回注真实明文；未命中注入占位后照常放行（失败开放 + 占位兜底，
+	// 见 injectCachedMessagesReasoning）。门控外路径零变化。
 	if err := s.injectCachedMessagesReasoning(ctx, &anthropicReq, chatReq, account, upstreamModel); err != nil {
 		return nil, err
 	}
@@ -298,7 +298,24 @@ func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
 // 失败开放（F2 事故复盘）：缓存只能覆盖网关自身服务过的轮次，客户端重放的历史轮
 // 注定回注不到。F1 在未命中时失败关闭（400），把它放大成长会话 100% 死锁；F2 改
 // 为未命中即原样放行，由上游自行裁决。
+//
+// F3 现状（占位兜底，2026-10-14 用户裁定）：命中缓存注入真实明文（行为不变）；
+// 未命中（含缓存不可用）注入 messagesReasoningPlaceholder 并照常发往上游——不拦截、
+// 不报错、不重试，客户端零感知。缘起是 F2 把死锁降成约 95% 成功但未归零：剩余 400
+// 来自存量长会话的历史工具轮（早于 F2 上线产生，网关侧无明文可回注）叠加上游对缺失
+// 字段的偶发严格校验（account 163 实测同期 122 成功 vs 6 失败）。
 // ---------------------------------------------------------------------------
+
+// messagesReasoningPlaceholder 是「缓存未命中」时填入出站 reasoning_content 的占位文本。
+// 语义是诚实的缺失标记：该轮 reasoning 未被客户端回传、网关侧也没有缓存——**不是伪造
+// 模型的思考内容**，不含任何推断或编造的思考文本。
+//
+// 为什么允许占位（两条实测依据，证据目录见派发单背景）：
+//   - 上游只做非空校验：占位串 / 空格 / 句点全部返回 200，且原样收纳，不校验内容真伪；
+//   - 完全不带该字段时上游偶发严格（account 163 上 122 成功 vs 6 失败），正是要消除的 400。
+//
+// 客户端零感知：占位只进入网关发往上游的请求体，不写入任何返回给客户端的内容。
+const messagesReasoningPlaceholder = "(reasoning not retained)"
 
 // messagesReasoningCacheTTL 与 Responses 路径（responsesReasoningCacheTTL）同口径：
 // 会话可能跨多天恢复历史，取 7 天。
@@ -437,9 +454,12 @@ func messagesTurnThinkingShapes(req *apicompat.AnthropicRequest) map[string]mess
 // 且 ReasoningContent 为空」的历史轮，按 tool_call id 逐个回查网关缓存：命中即注入
 // 真实明文。
 //
-// 失败开放（F2）：未命中（含缓存不可用）是正常情况——缓存只能覆盖网关自身服务过的
-// 轮次，客户端重放的历史轮次注定回注不到。此时原样放行：不写错误响应、不注入占位、
-// 不给客户端任何提示，由上游自行裁决；仅打一条 debug 级脱敏日志。
+// 失败开放 + 占位兜底（F3）：未命中（含缓存不可用）是正常情况——缓存只能覆盖网关自身
+// 服务过的轮次，客户端重放的历史轮次注定回注不到。此时注入 messagesReasoningPlaceholder
+// 并照常发往上游：不写错误响应、不 return error、不重试、不给客户端任何提示（客户端
+// 零感知）；仅打一条 debug 级脱敏日志。
+//
+// 回归线（F1 事故）：任何形式的未命中拦截/报错都是 blocker，这里只返回 nil。
 func (s *OpenAIGatewayService) injectCachedMessagesReasoning(
 	ctx context.Context,
 	anthropicReq *apicompat.AnthropicRequest,
@@ -489,11 +509,13 @@ func (s *OpenAIGatewayService) injectCachedMessagesReasoning(
 				break
 			}
 		}
-		logger.L().Debug("openai messages chat fallback: cached reasoning miss, forwarding turn unchanged",
+		logger.L().Debug("openai messages chat fallback: cached reasoning miss, injecting placeholder",
 			zap.Int("tool_call_count", len(msg.ToolCalls)),
 			zap.Bool("has_thinking_text", shape.hasThinkingText),
 			zap.Bool("signature_only", shape.signatureOnly),
 		)
+		// 未命中（含缓存不可用）注入诚实的缺失标记占位，照常发往上游：不拦截、不报错。
+		msg.ReasoningContent = messagesReasoningPlaceholder
 	}
 	return nil
 }

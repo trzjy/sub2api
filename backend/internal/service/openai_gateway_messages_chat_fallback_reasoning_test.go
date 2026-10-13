@@ -29,6 +29,11 @@ import (
 // F1 在缓存未命中时失败关闭（400），而缓存只能覆盖网关自身服务过的轮次，客户端重放
 // 的历史轮次注定回注不到 ⇒ 长会话 100% 死锁（生产已回滚）。F2 改为失败开放：未命中
 // 原样放行，同时补齐 B4 写侧的 4 个漏写洞。
+//
+// F3 把「未命中原样放行」收紧为「未命中注入占位」（messagesReasoningPlaceholder）：
+// 上游只做非空校验（占位串/空格/句点实测全部 200 且原样收纳），而完全不带该字段时
+// 上游偶发严格 ⇒ 存量会话的剩余 400 由此归零。命中缓存仍注入真实明文，行为不变；
+// 占位只进上游请求体，客户端零感知。
 
 // f2ToolTurnHistory 是生产同型历史：assistant 工具轮只带 tool_use，无 thinking
 // 明文（Claude Code 回放形态）。
@@ -86,7 +91,7 @@ func f2NewContext(body string) (*gin.Context, *httptest.ResponseRecorder) {
 // ---- 读侧 ----
 
 // 命中缓存 → 最终发往 /v1/chat/completions 的 JSON 注入缓存里的真实明文
-// （不得为空/占位）。
+// （不得为空/空格/占位）。
 func TestMessagesReasoningCache_HitInjectsRealReasoningIntoUpstreamJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -105,6 +110,11 @@ func TestMessagesReasoningCache_HitInjectsRealReasoningIntoUpstreamJSON(t *testi
 	require.Equal(t, "call_1", gjson.GetBytes(upstream.lastBody, "messages.1.tool_calls.0.id").String())
 	require.Equal(t, "think hard", gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").String(),
 		"命中缓存必须注入缓存里的真实明文，而非空格/占位")
+	require.NotEqual(t, messagesReasoningPlaceholder,
+		gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").String(),
+		"命中缓存不得退化成占位")
+	require.NotEqual(t, " ", gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").String(),
+		"命中缓存不得退化成空格")
 
 	remarshaled, err := json.Marshal(json.RawMessage(upstream.lastBody))
 	require.NoError(t, err)
@@ -140,9 +150,14 @@ func TestMessagesInjectCachedReasoning_MarshaledChatRequestCarriesReasoningConte
 	require.Equal(t, "think hard", chatReq.Messages[1].ReasoningContent)
 }
 
-// F2 核心：缓存未命中 → 失败开放。请求照常发往上游、零注入（reasoning_content
-// 字段不存在）、不返回 400、不给客户端任何提示。
-func TestMessagesReasoningCache_MissForwardsUpstreamUnchanged(t *testing.T) {
+// F3 核心：缓存未命中 → 注入占位并照常发往上游。
+// 本用例锁死两条回归：
+//  1. 未命中不得失败关闭（F1 事故回归线）：不返回 400、请求照常发往上游；
+//  2. 未命中必须带占位（F3 新增）：出站 JSON 该轮 reasoning_content ==
+//     messagesReasoningPlaceholder，否则存量会话的 400 归不了零。
+//
+// 占位是诚实的缺失标记，不含任何推断/编造的思考文本；只进上游请求体，客户端零感知。
+func TestMessagesReasoningCache_MissInjectsPlaceholderAndForwardsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cache := &reasoningRecordingCache{getResp: map[string]string{}} // 全未命中
@@ -151,24 +166,28 @@ func TestMessagesReasoningCache_MissForwardsUpstreamUnchanged(t *testing.T) {
 
 	c, rec := f2NewContext(f2ToolTurnHistory)
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), []byte(f2ToolTurnHistory), "", "")
-	require.NoError(t, err, "未命中必须原样放行，不得失败关闭")
+	require.NoError(t, err, "未命中必须放行，不得失败关闭")
 	require.NotNil(t, result)
 
 	require.NotNil(t, upstream.lastReq, "失败开放：请求必须照常发往上游")
 	require.NotEmpty(t, upstream.lastBody, "失败开放：必须产生出站请求体")
 	require.Equal(t, "assistant", gjson.GetBytes(upstream.lastBody, "messages.1.role").String())
-	require.False(t, gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").Exists(),
-		"零注入：未命中不得写入任何 reasoning_content（含占位）")
-	require.NotContains(t, string(upstream.lastBody), "reasoning_content")
+	require.Equal(t, messagesReasoningPlaceholder,
+		gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").String(),
+		"未命中必须注入占位，且只注入占位（不得为空、不得是编造的思考文本）")
+	require.Contains(t, string(upstream.lastBody), `"reasoning_content":"`+messagesReasoningPlaceholder+`"`)
 
 	require.Equal(t, http.StatusOK, rec.Code, "未命中不得返回 400")
 	require.NotEqual(t, http.StatusBadRequest, rec.Code)
 	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "content.0.text").String())
 	require.Contains(t, rec.Body.String(), `"type":"text"`)
+	require.NotContains(t, rec.Body.String(), messagesReasoningPlaceholder,
+		"客户端零感知：占位不得出现在返回给客户端的内容里")
 }
 
-// 缓存不可用（s.cache == nil）同样失败开放：不得阻断转发。
-func TestMessagesReasoningCache_CacheUnavailableForwardsUpstreamUnchanged(t *testing.T) {
+// 缓存不可用（s.cache == nil）同样按未命中处理：注入占位、照常发往上游、不得阻断。
+// 与「缓存已装但全未命中」是同一条行为，不分成两条语义。
+func TestMessagesReasoningCache_CacheUnavailableInjectsPlaceholderAndForwardsUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	upstream := f2JSONUpstream()
@@ -176,10 +195,13 @@ func TestMessagesReasoningCache_CacheUnavailableForwardsUpstreamUnchanged(t *tes
 
 	c, rec := f2NewContext(f2ToolTurnHistory)
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), []byte(f2ToolTurnHistory), "", "")
-	require.NoError(t, err)
+	require.NoError(t, err, "缓存不可用必须放行，不得失败关闭")
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq, "缓存不可用也必须照常发往上游")
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, messagesReasoningPlaceholder,
+		gjson.GetBytes(upstream.lastBody, "messages.1.reasoning_content").String(),
+		"缓存不可用等同未命中：同样注入占位")
+	require.Equal(t, http.StatusOK, rec.Code, "缓存不可用不得返回 400")
 }
 
 // 门控外路径（非 deepseek 模型 + 非 deepseek 平台）→ 出站字节不变：即便缓存里有
