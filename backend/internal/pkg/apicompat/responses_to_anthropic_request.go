@@ -55,11 +55,20 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		effort := mapResponsesEffortToAnthropic(req.Reasoning.Effort)
 		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
-		// Enable thinking for non-low efforts
+		// Enable thinking for non-low efforts.
 		if effort != "low" {
-			out.Thinking = &AnthropicThinking{
-				Type:         "enabled",
-				BudgetTokens: defaultThinkingBudget(effort),
+			if modelRequiresAdaptiveThinking(req.Model) {
+				// Opus 5.5（及同族要求 adaptive 的 Claude 模型）拒绝
+				// thinking.type=enabled + budget_tokens，上游契约要求
+				// "thinking.type=adaptive and output_config.effort" 或干脆不发 thinking。
+				// 这里产出 adaptive + effort（二者满足条件其一即可），且不带
+				// budget_tokens（adaptive 模式不接受该字段）。
+				out.Thinking = &AnthropicThinking{Type: "adaptive"}
+			} else {
+				out.Thinking = &AnthropicThinking{
+					Type:         "enabled",
+					BudgetTokens: defaultThinkingBudget(effort),
+				}
 			}
 		}
 	}
@@ -81,6 +90,33 @@ func defaultThinkingBudget(effort string) int {
 	default:
 		return 10240
 	}
+}
+
+// modelRequiresAdaptiveThinking reports whether the given model rejects the
+// legacy thinking.type=enabled + budget_tokens parameters and instead requires
+// the adaptive thinking contract (thinking.type=adaptive paired with
+// output_config.effort). Anchored on the production error
+// `claude-opus-5-5 requires adaptive thinking; ...` (ops_error_logs, accounts
+// 133/229). Other Claude models keep the enabled+budget semantics, so widening
+// this set would leak Opus-5.5-only parameters onto unrelated models.
+func modelRequiresAdaptiveThinking(model string) bool {
+	const token = "claude-opus-5-5"
+	if model == token || strings.HasPrefix(model, token+"-") {
+		return true
+	}
+	// Also match upstream-qualified names that embed the model as a delimited
+	// segment, e.g. us.anthropic.claude-opus-5-5-v1 or bedrock/.../claude-opus-5-5.
+	// Segment boundaries are '.' and '/'; a bare '-' prefix is already covered
+	// above. This stays narrow enough to never catch unrelated models such as
+	// claude-opus-4-8 or claude-sonnet-5.
+	for _, sep := range []string{".", "/"} {
+		for _, seg := range strings.Split(model, sep) {
+			if seg == token || strings.HasPrefix(seg, token+"-") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mapResponsesEffortToAnthropic converts OpenAI Responses reasoning effort to
