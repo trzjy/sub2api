@@ -789,8 +789,8 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := rejectWebCredentialForNormalEntry(input.Platform, input.Type, input.Credentials, input.FromWebLogin); err != nil {
 		return nil, err
 	}
-	// C2（v3.3 §4.2）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK 兜底），
-	// 非 cursor 平台允许 NULL。
+	// C2（v3.3 §4.2 / v3.4 §2.1）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK
+	// 兜底）；非 cursor 平台必须保持 NULL——携带归属即拒绝（D-CURSOR-035，终审 r5 F1）。
 	if err := validateAccountQuotaKeyBinding(input.Platform, input.QuotaKeyID); err != nil {
 		return nil, err
 	}
@@ -923,9 +923,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
-	// C2（v3.3 §4.2）：cursor 平台账号改号也必须保持归属激活码（应用层校验，DB CHECK 兜底）。
+	// C2（v3.3 §4.2 / v3.4 §2.1）：cursor 平台账号改号也必须保持归属激活码（应用层校验，
+	// DB CHECK 兜底）；非 cursor 账号必须保持 NULL——改号时把归属绑上去同样拒绝
+	// （D-CURSOR-035，终审 r5 F1）。
 	// 校验的是"合并后的有效归属"而不是裸 input.QuotaKeyID：未提供时沿用 existing，
 	// 否则现有 cursor 账号只要编辑（不改归属）就会因为请求里没有 quota_key_id 被判非法（#3）。
+	// 反向同理：非 cursor 账号沿用 existing 时若已带归属（历史脏数据）也判非法，
+	// 需显式 QuotaKeyIDSet=true + nil 清空后才可编辑——不静默保留越平台绑定。
 	effectiveQuotaKeyID, quotaKeyProvided := resolveUpdateQuotaKeyID(account.QuotaKeyID, input)
 	if err := validateAccountQuotaKeyBinding(account.Platform, effectiveQuotaKeyID); err != nil {
 		return nil, err

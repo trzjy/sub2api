@@ -494,17 +494,28 @@ type UpdateAccountInput struct {
 	FromWebLogin bool
 }
 
-// validateAccountQuotaKeyBinding 校验账号归属激活码（v3.3 §4.2 / C2）。
+// validateAccountQuotaKeyBinding 校验账号归属激活码（v3.3 §4.2 / C2、v3.4 §2.1）。
 //
-// 规则：cursor 平台账号必须归属某个激活码（quota_key_id 必填）；其它平台允许 NULL。
+// 规则：cursor 平台账号必须归属某个激活码（quota_key_id 必填）；其它平台必须保持 NULL。
 // 这是应用层前置校验，DB CHECK 约束 accounts_cursor_quota_key_required 提供兜底。
 //
-// 用于 CreateAccount / UpdateAccount 入口：platform 为 cursor 且 quotaKeyID 为 nil 时
-// 返回 400，提示必须绑定激活码。
+// 用于 CreateAccount / UpdateAccount 入口：
+//   - platform 为 cursor 且 quotaKeyID 为 nil → 400，提示必须绑定激活码
+//   - platform 非 cursor 且 quotaKeyID 非 nil → 400，拒绝归属（D-CURSOR-035）
+//
+// 反向拒绝的理由（终审 r5 F1）：非 cursor 建号携带 quota_key_id 时不走 ≤15 集中入口
+// （createViaQuotaKeyCapacity 仅在 cursor 平台生效），而 countWorkingQuotaKeyAccounts
+// 的计数谓词不按平台过滤 —— 该组合可把一个激活码的 working 计数顶到 16 而无人判定。
+// v3.4 §2.1 规定"其他平台保持 NULL"，故非 cursor 携带归属即非法状态，应用层拒绝即可
+// （admin API 是唯一写入口；不新增 DB CHECK）。
 func validateAccountQuotaKeyBinding(platform string, quotaKeyID *int64) error {
 	if platform == domain.PlatformCursor && quotaKeyID == nil {
 		return infraerrors.New(http.StatusBadRequest, "ACCOUNT_QUOTA_KEY_REQUIRED",
 			"cursor platform accounts must be bound to a quota key (quota_key_id is required)")
+	}
+	if platform != domain.PlatformCursor && quotaKeyID != nil {
+		return infraerrors.New(http.StatusBadRequest, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM",
+			"only cursor platform accounts may be bound to a quota key (quota_key_id must be null for this platform)")
 	}
 	return nil
 }

@@ -2,19 +2,56 @@ package service
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
-// TestQuotaKeyBindingValidation 锁定 v3.3 §4.2 / C2 的应用层校验逻辑：
+// TestNonCursorAccountCreateRejectsQuotaKey 端到端锁定 CreateAccount 已接入反向拒绝：
+// 非 cursor 平台建号携带 quota_key_id 必须 400，且错误指向 quota_key_id。
+func TestNonCursorAccountCreateRejectsQuotaKey(t *testing.T) {
+	repo := &upstreamBillingProbeAccountRepo{}
+	qkID := int64(7)
+
+	_, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                 "openai-with-quota-key",
+		Platform:             PlatformOpenAI,
+		Type:                 AccountTypeAPIKey,
+		Credentials:          map[string]any{"api_key": "sk-test"},
+		SkipDefaultGroupBind: true,
+		QuotaKeyID:           &qkID,
+	})
+	require.Error(t, err, "non-cursor account creation with quota_key_id must be rejected")
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM", infraerrors.Reason(err))
+	require.Contains(t, err.Error(), "quota_key_id")
+
+	// 不携带归属 → 正常建号（NULL 保持）。
+	created, err := (&adminServiceImpl{accountRepo: repo}).CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                 "openai-null-quota-key",
+		Platform:             PlatformOpenAI,
+		Type:                 AccountTypeAPIKey,
+		Credentials:          map[string]any{"api_key": "sk-test"},
+		SkipDefaultGroupBind: true,
+	})
+	require.NoError(t, err, "non-cursor account creation with NULL quota_key_id must pass")
+	require.NotNil(t, created)
+	require.Nil(t, created.QuotaKeyID)
+}
+
+// TestQuotaKeyBindingValidation 锁定 v3.3 §4.2 / C2 与 v3.4 §2.1 的应用层校验逻辑：
 //   - cursor 平台 + quota_key_id 为 nil → 报错（必填）
-//   - 非 cursor 平台 + quota_key_id 为 nil → 通过（允许 NULL）
+//   - 非 cursor 平台 + quota_key_id 为 nil → 通过（保持 NULL）
+//   - 非 cursor 平台 + quota_key_id 非 nil → 报错（D-CURSOR-035，不得携带归属）
+//   - cursor 平台 + quota_key_id 非 nil → 通过
 func TestQuotaKeyBindingValidation(t *testing.T) {
 	// cursor 平台缺归属激活码 → 必须报错
 	err := validateAccountQuotaKeyBinding(domain.PlatformCursor, nil)
 	require.Error(t, err, "cursor platform account without quota_key_id must be rejected")
+	require.Equal(t, "ACCOUNT_QUOTA_KEY_REQUIRED", infraerrors.Reason(err))
 
 	// 非 cursor 平台缺归属激活码 → 允许（NULL）
 	err = validateAccountQuotaKeyBinding(PlatformOpenAI, nil)
@@ -24,6 +61,12 @@ func TestQuotaKeyBindingValidation(t *testing.T) {
 	qkID := int64(42)
 	err = validateAccountQuotaKeyBinding(domain.PlatformCursor, &qkID)
 	require.NoError(t, err, "cursor platform account bound to a quota key must pass")
+
+	// 非 cursor 平台携带归属激活码 → 必须报错（D-CURSOR-035 / 终审 r5 F1）
+	err = validateAccountQuotaKeyBinding(PlatformOpenAI, &qkID)
+	require.Error(t, err, "non-cursor platform account must not carry a quota_key_id")
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM", infraerrors.Reason(err))
 }
 
 // TestCursorAccountCreateRejectsMissingQuotaKey 端到端锁定 CreateAccount 入口已接入

@@ -119,9 +119,14 @@ func TestCreateAccountRejectsUnknownQuotaKey(t *testing.T) {
 	require.Equal(t, "QUOTA_KEY_NOT_FOUND", infraerrors.Reason(err))
 }
 
-// TestNonCursorCreateAccountSkipsWorkingCap 锁定：≤15 上限只约束 cursor 建号，
-// 其它平台带归属建号不受号池上限影响。
-func TestNonCursorCreateAccountSkipsWorkingCap(t *testing.T) {
+// TestNonCursorCreateAccountRejectsQuotaKeyBinding 锁定 D-CURSOR-035（终审 r5 F1）：
+// 非 cursor 平台建号携带 quota_key_id 必须 400。
+//
+// 原 `TestNonCursorCreateAccountSkipsWorkingCap`（"其它平台带归属建号不受号池上限影响"）
+// 在本单后不再成立：非 cursor 建号根本不允许携带归属。该组合此前可绕过 ≤15 集中入口
+// （createViaQuotaKeyCapacity 仅在 cursor 平台生效），而 countWorkingQuotaKeyAccounts
+// 的计数谓词不按平台过滤，可把一个激活码的 working 计数顶到 16。
+func TestNonCursorCreateAccountRejectsQuotaKeyBinding(t *testing.T) {
 	svc, _ := newQuotaKeyCapAdminService(t)
 	client := svc.entClient
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
@@ -136,5 +141,33 @@ func TestNonCursorCreateAccountSkipsWorkingCap(t *testing.T) {
 		SkipMixedChannelCheck: true,
 		QuotaKeyID:            &qk.ID,
 	})
-	require.NoError(t, err, "non-cursor accounts are not subject to the cursor quota key cap")
+	require.Error(t, err, "non-cursor accounts must not be bound to a quota key")
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM", infraerrors.Reason(err))
+
+	// 拒绝发生在写库前：该激活码下不新增非 cursor 账号。
+	n, err := client.Account.Query().Where(account.QuotaKeyIDEQ(qk.ID)).Count(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, MaxAccountsPerQuotaKey, n)
+}
+
+// TestNonCursorCreateAccountNullQuotaKeySkipsWorkingCap 保留原"≤15 上限不约束非 cursor
+// 建号"的语义：非 cursor 平台不带归属（NULL）时，即使存在已满的激活码也能正常建号。
+func TestNonCursorCreateAccountNullQuotaKeySkipsWorkingCap(t *testing.T) {
+	svc, _ := newQuotaKeyCapAdminService(t)
+	client := svc.entClient
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, MaxAccountsPerQuotaKey)
+
+	created, err := svc.CreateAccount(context.Background(), &CreateAccountInput{
+		Name:                  "openai-created-null-key",
+		Platform:              PlatformOpenAI,
+		Type:                  AccountTypeAPIKey,
+		Credentials:           map[string]any{"api_key": "sk-test"},
+		SkipDefaultGroupBind:  true,
+		SkipMixedChannelCheck: true,
+	})
+	require.NoError(t, err, "non-cursor accounts with NULL quota_key_id are not subject to the cursor quota key cap")
+	require.NotNil(t, created)
+	require.Nil(t, created.QuotaKeyID)
 }

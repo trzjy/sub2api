@@ -93,6 +93,53 @@ func TestUpdateAccountNonCursorExplicitClearAllowed(t *testing.T) {
 	require.Nil(t, updated.QuotaKeyID)
 }
 
+// TestUpdateAccountNonCursorRejectsQuotaKeyBinding 锁定 D-CURSOR-035（终审 r5 F1）更新路径：
+// 把非 cursor 账号绑到激活码必须 400，且落库归属保持原值。
+func TestUpdateAccountNonCursorRejectsQuotaKeyBinding(t *testing.T) {
+	accountID := int64(9105)
+	repo := newQuotaKeyUpdateRepo(&Account{
+		ID:       accountID,
+		Name:     "openai-acc",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Status:   StatusActive,
+	})
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	newQK := int64(99)
+	_, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		QuotaKeyIDSet: true,
+		QuotaKeyID:    &newQK,
+	})
+	require.Error(t, err, "binding a non-cursor account to a quota key must be rejected")
+	require.Equal(t, http.StatusBadRequest, infraerrors.Code(err))
+	require.Equal(t, "ACCOUNT_QUOTA_KEY_NOT_ALLOWED_FOR_PLATFORM", infraerrors.Reason(err))
+
+	// 拒绝发生在落库前：账号仍无归属。
+	stored := repo.accounts[accountID]
+	require.Nil(t, stored.QuotaKeyID)
+}
+
+// TestUpdateAccountNonCursorNullQuotaKeyAllowed 锁定：非 cursor 账号保持 NULL 时正常编辑。
+func TestUpdateAccountNonCursorNullQuotaKeyAllowed(t *testing.T) {
+	accountID := int64(9106)
+	repo := newQuotaKeyUpdateRepo(&Account{
+		ID:       accountID,
+		Name:     "openai-acc",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Status:   StatusActive,
+	})
+	svc := &adminServiceImpl{accountRepo: repo}
+
+	updated, err := svc.UpdateAccount(context.Background(), accountID, &UpdateAccountInput{
+		Name: "openai-acc-renamed",
+	})
+	require.NoError(t, err, "editing a non-cursor account with NULL quota_key_id must succeed")
+	require.Equal(t, "openai-acc-renamed", updated.Name)
+	require.Nil(t, updated.QuotaKeyID)
+}
+
 // TestUpdateAccountProvidedQuotaKeyApplied 锁定：显式提供新 key 时写入该归属。
 // （存在性校验需 ent 客户端，单测替身下跳过；此处锁定"提供值 → 落库"这一段。）
 func TestUpdateAccountProvidedQuotaKeyApplied(t *testing.T) {
