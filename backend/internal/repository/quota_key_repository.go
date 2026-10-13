@@ -6,6 +6,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
+	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -115,19 +116,74 @@ func (r *quotaKeyRepository) CountWorkingAccounts(ctx context.Context, tx *ent.T
 }
 
 // SoftDeleteAccountsByQuotaKey 在事务内逐账号置 deleted_at（软删），保留账号行与全部历史记录。
+// 返回本次实际被软删的账号 ID，供调用方在同一事务内触发调度 outbox。
 // 严禁物理删除 accounts 表账号行（D-CURSOR-014 硬口径：删除 = 软删除）。
-func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) error {
-	_, err := tx.Account.Update().
+func (r *quotaKeyRepository) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) ([]int64, error) {
+	ids, err := tx.Account.Query().
 		Where(
 			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+		).
+		IDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	_, err = tx.Account.Update().
+		Where(
+			account.IDIn(ids...),
 			account.DeletedAtIsNil(),
 		).
 		SetDeletedAt(time.Now()).
 		Save(ctx)
 	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// EnqueueAccountChangedOutbox 在事务内为每个被软删账号写一条 scheduler_outbox
+// （event_type=account_changed），复用既有唯一入口 enqueueSchedulerOutbox，
+// 不新造表/事件类型。写在本事务内 ⇒ 与软删同生共死：回滚则 outbox 一并消失。
+// 既有 outbox consumer 消费该事件时，账号已从号池不可见，于是把它从 Redis 调度快照移除。
+func (r *quotaKeyRepository) EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error {
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	groupIDsByAccount, err := loadAccountGroupIDsByAccount(ctx, tx, accountIDs)
+	if err != nil {
 		return err
 	}
+	for _, accountID := range accountIDs {
+		if accountID <= 0 {
+			continue
+		}
+		id := accountID
+		payload := buildSchedulerGroupPayload(groupIDsByAccount[id])
+		if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountChanged, &id, nil, payload); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// loadAccountGroupIDsByAccount 在给定事务内批量读取账号的分组归属，
+// 供 outbox payload 携带 group_ids（与 accountRepository.Delete 同款），
+// 使 consumer 能重建受影响分组的 bucket 快照。
+func loadAccountGroupIDsByAccount(ctx context.Context, tx *ent.Tx, accountIDs []int64) (map[int64][]int64, error) {
+	entries, err := tx.AccountGroup.Query().
+		Where(accountgroup.AccountIDIn(accountIDs...)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64][]int64, len(accountIDs))
+	for _, entry := range entries {
+		out[entry.AccountID] = append(out[entry.AccountID], entry.GroupID)
+	}
+	return out, nil
 }
 
 // SoftDelete 在事务内软删激活码（置 deleted_at），保留行与全部历史记录。

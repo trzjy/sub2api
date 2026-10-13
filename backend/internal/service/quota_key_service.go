@@ -39,7 +39,8 @@ type QuotaKeyRepository interface {
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// C3.2 扩展：账号软删编排与刷新扫描（均在调用方已开启的事务内执行，除 ListEligibleForRefresh）。
 	CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error)
-	SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) error
+	SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) ([]int64, error)
+	EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error
 	SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error
 	ListEligibleForRefresh(ctx context.Context) ([]*ent.QuotaKey, error)
 }
@@ -289,7 +290,7 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 		return nil
 	}
 
-	// 成功：四读（再次 FOR UPDATE 确认状态）后插入账号并清 exhausted。
+	// 成功：四读（再次 FOR UPDATE 确认状态）后按剩余容量截断插入，再清 exhausted。
 	qk3, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
 	if err != nil {
 		return fmt.Errorf("quota_key_service: final-load quota key: %w", err)
@@ -298,7 +299,14 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 		return nil
 	}
 
-	for _, ua := range result.Accounts {
+	// 容量判定与插入在同一事务/同一 advisory 互斥域内：maxInsert 以上游请求前读到的
+	// working 为基准，working=14 而上游返 2 时只落 1 条，总数恰好 15（不多不少）。
+	// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
+	maxInsert := MaxAccountsPerQuotaKey - working
+	for i, ua := range result.Accounts {
+		if i >= maxInsert {
+			break
+		}
 		create := tx.Account.Create().
 			SetName(ua.Name).
 			SetPlatform(ua.Platform).
@@ -314,10 +322,12 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 	}
 
 	// 清 exhausted 与错误占位。
+	// SetNillableLastRefreshError(nil) 对 nil 指针是 no-op（仅 v != nil 时才写），
+	// 必须用 ClearLastRefreshError() 才能真正把 last_refresh_error 置空。
 	if _, err := tx.QuotaKey.UpdateOneID(quotaKeyID).
 		SetExhausted(false).
 		SetLastRefreshAt(time.Now()).
-		SetNillableLastRefreshError(nil).
+		ClearLastRefreshError().
 		Save(ctx); err != nil {
 		return fmt.Errorf("quota_key_service: clear exhausted: %w", err)
 	}
@@ -329,8 +339,9 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 	return nil
 }
 
-// DeleteWithAccounts 软删激活码及其全部账号（§3.5 删除唯一路径 = 软删口径）。
-// 锁 → tx：逐账号软删 → 软删 quota_key → commit（全删或不删）。
+// DeleteWithAccounts 软删激活码及其全部账号（§3.2 删除唯一路径 = 软删口径）。
+// 锁 → tx：逐账号软删 → 写 scheduler outbox（既有入口，同事务持久）→ 软删 quota_key
+// → commit（全删或不删）。
 // 数据库账号行与全部历史记录保留，禁止物理 DELETE 账号行。
 func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int64) error {
 	if s.client == nil {
@@ -359,9 +370,16 @@ func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int
 		return fmt.Errorf("quota_key_service: load quota key for delete: %w", err)
 	}
 
-	// 逐账号软删（置 deleted_at；禁止物理删除 accounts 表账号行）。
-	if err := s.repo.SoftDeleteAccountsByQuotaKey(ctx, tx, quotaKeyID); err != nil {
+	// 逐账号软删（置 deleted_at；禁止物理删除 accounts 表账号行）。返回被软删账号 ID。
+	deletedIDs, err := s.repo.SoftDeleteAccountsByQuotaKey(ctx, tx, quotaKeyID)
+	if err != nil {
 		return fmt.Errorf("quota_key_service: soft-delete accounts: %w", err)
+	}
+	// 与被软删账号同一事务写既有 scheduler outbox 入口：outbox 是持久层（durable），
+	// 其 consumer 消费 account_changed 事件时把账号从 Redis 调度快照移除。
+	// 不写 outbox ⇒ Redis 快照继续保留已软删账号（§3.2 DB outbox → Redis snapshot 两层）。
+	if err := s.repo.EnqueueAccountChangedOutbox(ctx, tx, deletedIDs); err != nil {
+		return fmt.Errorf("quota_key_service: enqueue scheduler outbox: %w", err)
 	}
 	// 软删 quota_key。
 	if err := s.repo.SoftDelete(ctx, tx, quotaKeyID); err != nil {
@@ -382,7 +400,7 @@ func (s *QuotaKeyService) ClearExhausted(ctx context.Context, quotaKeyID int64) 
 	}
 	_, err := s.client.QuotaKey.UpdateOneID(quotaKeyID).
 		SetExhausted(false).
-		SetNillableLastRefreshError(nil).
+		ClearLastRefreshError().
 		Save(ctx)
 	if err != nil {
 		return fmt.Errorf("quota_key_service: clear exhausted: %w", err)

@@ -134,7 +134,11 @@ func (f *fakeQuotaKeyRepo) CountWorkingAccounts(_ context.Context, _ *ent.Tx, _ 
 	return 0, nil
 }
 
-func (f *fakeQuotaKeyRepo) SoftDeleteAccountsByQuotaKey(_ context.Context, _ *ent.Tx, _ int64) error {
+func (f *fakeQuotaKeyRepo) SoftDeleteAccountsByQuotaKey(_ context.Context, _ *ent.Tx, _ int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (f *fakeQuotaKeyRepo) EnqueueAccountChangedOutbox(_ context.Context, _ *ent.Tx, _ []int64) error {
 	return nil
 }
 
@@ -403,6 +407,8 @@ func qkNewTestService(t *testing.T, upstream QuotaKeyUpstreamClient) (*QuotaKeyS
 // 与 production repository 行为一致，但避免 service_test -> repository 的导入环。
 type testDBRepo struct {
 	client *ent.Client
+	// outboxCalls 记录 EnqueueAccountChangedOutbox 每次调用的账号 ID 集合。
+	outboxCalls [][]int64
 }
 
 func (r *testDBRepo) GetByID(ctx context.Context, id int64) (*ent.QuotaKey, error) {
@@ -469,11 +475,32 @@ func (r *testDBRepo) CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quota
 		Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil()).Count(ctx)
 }
 
-func (r *testDBRepo) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) error {
-	_, err := tx.Account.Update().
+func (r *testDBRepo) SoftDeleteAccountsByQuotaKey(ctx context.Context, tx *ent.Tx, quotaKeyID int64) ([]int64, error) {
+	ids, err := tx.Account.Query().
 		Where(account.QuotaKeyID(quotaKeyID), account.DeletedAtIsNil()).
-		SetDeletedAt(time.Now()).Save(ctx)
-	return err
+		IDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	_, err = tx.Account.Update().
+		Where(account.IDIn(ids...), account.DeletedAtIsNil()).
+		SetDeletedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// EnqueueAccountChangedOutbox 记录调用参数供断言使用：scheduler_outbox 表由 migrations
+// 建表、不在 ent runtime schema 中，故测试替身只断言 DeleteWithAccounts 确实命中了
+// 既有 outbox 入口，并传入了全部被软删账号 ID。
+func (r *testDBRepo) EnqueueAccountChangedOutbox(_ context.Context, _ *ent.Tx, accountIDs []int64) error {
+	r.outboxCalls = append(r.outboxCalls, accountIDs)
+	return nil
 }
 
 func (r *testDBRepo) SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error {
@@ -591,6 +618,106 @@ func TestQuotaKeyPull_StopsAtWorkingCount15(t *testing.T) {
 	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, MaxAccountsPerQuotaKey, n, "must not insert beyond the cap")
+}
+
+// TestQuotaKeyPull_TruncatesBatchToRemainingCapacity：14 + 上游返 2 ⇒ 只落 1 条，
+// 总数恰好 15（D-CURSOR-026 #2：≤15 在拉号批次溢出路径不可突破）。
+func TestQuotaKeyPull_TruncatesBatchToRemainingCapacity(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "ovf-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}},
+			{Name: "ovf-2", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}},
+		}},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, MaxAccountsPerQuotaKey-1) // 14
+
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	n, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, MaxAccountsPerQuotaKey, n, "14 working + 2 upstream must be truncated to exactly 15")
+
+	// 溢出条目不落库（UpstreamPullResult 无重放字段，溢出的号按丢弃处理）。
+	overflow, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID), account.NameEQ("ovf-2")).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, overflow, "overflowing upstream accounts must be dropped, not persisted")
+}
+
+// TestQuotaKeyPull_SuccessClearsLastRefreshError：成功拉号必须清空 last_refresh_error
+// （D-CURSOR-026 #5；SetNillableLastRefreshError(nil) 对 nil 指针是 no-op，故须 Clear）。
+func TestQuotaKeyPull_SuccessClearsLastRefreshError(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "ok-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}},
+		}},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 前置失败态：exhausted=true 且 last_refresh_error 已置位。
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).
+		SetExhausted(true).
+		SetLastRefreshError("previous upstream boom").
+		Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.False(t, got.Exhausted, "success path must clear exhausted")
+	require.Nil(t, got.LastRefreshError, "success path must null out last_refresh_error")
+	require.NotNil(t, got.LastRefreshAt, "success path must refresh last_refresh_at")
+}
+
+// TestQuotaKeyClearExhausted_ClearsLastRefreshError：ClearExhausted 必须同时清错误占位。
+func TestQuotaKeyClearExhausted_ClearsLastRefreshError(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{err: errors.New("unused")})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).
+		SetExhausted(true).
+		SetLastRefreshError("upstream boom").
+		Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.ClearExhausted(ctx, qk.ID))
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.False(t, got.Exhausted, "ClearExhausted must clear the flag")
+	require.Nil(t, got.LastRefreshError, "ClearExhausted must null out last_refresh_error")
+}
+
+// TestQuotaKeyDeleteWithAccounts_EnqueuesSchedulerOutbox：软删必须写既有 scheduler outbox，
+// 使被软删账号经既有 consumer 从 Redis 调度快照移除（D-CURSOR-026 #4）。
+func TestQuotaKeyDeleteWithAccounts_EnqueuesSchedulerOutbox(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	repo := &testDBRepo{client: client}
+	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), &fakeUpstreamClient{err: errors.New("unused")}, client)
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	mustCreateAccounts(t, client, qk.ID, 3)
+
+	require.NoError(t, svc.DeleteWithAccounts(ctx, qk.ID))
+
+	// 既有 outbox 入口被触发，且覆盖全部被软删账号（一个不多一个不少）。
+	require.Len(t, repo.outboxCalls, 1, "delete must hit the scheduler outbox entry exactly once")
+	softDeleted, err := client.Account.Query().
+		Where(account.QuotaKeyID(qk.ID), account.DeletedAtNotNil()).
+		IDs(mixins.SkipSoftDelete(ctx))
+	require.NoError(t, err)
+	require.Len(t, softDeleted, 3, "all three accounts must be soft-deleted")
+	require.ElementsMatch(t, softDeleted, repo.outboxCalls[0],
+		"outbox must cover exactly the soft-deleted accounts")
 }
 
 // TestQuotaKeyPull_ReadsStatusBeforeAfter：拉号前/中/后三读驱动状态转移。

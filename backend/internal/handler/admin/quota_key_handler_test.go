@@ -52,6 +52,7 @@ type fakeQuotaKeyRepo struct {
 	updateErr error
 	deleted   []int64
 	softKey   []int64
+	outboxed  []int64
 }
 
 func newFakeQuotaKeyRepo() *fakeQuotaKeyRepo {
@@ -202,10 +203,21 @@ func (r *fakeQuotaKeyRepo) CountWorkingAccounts(_ context.Context, _ *ent.Tx, qu
 	return len(r.accounts[quotaKeyID]), nil
 }
 
-func (r *fakeQuotaKeyRepo) SoftDeleteAccountsByQuotaKey(_ context.Context, _ *ent.Tx, quotaKeyID int64) error {
+func (r *fakeQuotaKeyRepo) SoftDeleteAccountsByQuotaKey(_ context.Context, _ *ent.Tx, quotaKeyID int64) ([]int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deleted = append(r.deleted, quotaKeyID)
+	ids := make([]int64, 0, len(r.accounts[quotaKeyID]))
+	for _, acc := range r.accounts[quotaKeyID] {
+		ids = append(ids, acc.ID)
+	}
+	return ids, nil
+}
+
+func (r *fakeQuotaKeyRepo) EnqueueAccountChangedOutbox(_ context.Context, _ *ent.Tx, accountIDs []int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outboxed = append(r.outboxed, accountIDs...)
 	return nil
 }
 
