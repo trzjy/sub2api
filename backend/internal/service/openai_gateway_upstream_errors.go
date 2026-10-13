@@ -989,10 +989,12 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	}
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
-	// 上游 4xx 且未给出任何可读 message 时，网关只能包装成无信息量的 "Upstream error: <code>"
-	// （生产实证：超大请求在流中段被裸拒 400）。客户端看不到任何可执行信息，故统一替换为
-	// 与前置预检共用的中文文案。状态码与错误类型语义保持不变，仅替换 message 文本。
-	unreadableUpstream4xx := upstreamMsg == "" && resp.StatusCode >= 400 && resp.StatusCode < 500
+	// 上游返回 400 且未给出任何可读 message 时，网关只能包装成无信息量的 "Upstream error: 400"
+	// （生产实证：超大请求在流中段被裸拒 400）。客户端看不到任何可执行信息，故替换为与前置
+	// 预检共用的中文文案。状态码与错误类型语义保持不变，仅替换 message 文本。
+	// 注意：只认 400，不认其它 4xx。429(限流)/401(鉴权)/403/404 即便空 message 也另有含义，
+	// 套用「请求体过大」会误导下游（例如把限流当超大上下文去清会话）。
+	unreadableUpstream4xx := upstreamMsg == "" && resp.StatusCode == http.StatusBadRequest
 	if upstreamMsg == "" {
 		upstreamMsg = fmt.Sprintf("Upstream error: %d", resp.StatusCode)
 	}
