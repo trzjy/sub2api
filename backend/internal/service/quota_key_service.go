@@ -448,17 +448,28 @@ func quotaKeyToStatus(qk *ent.QuotaKey) *QuotaKeyStatus {
 }
 
 // maskCodeValue 仅保留末 4 位，其余以掩码替代，绝不回显原文。
+//
+// 脱敏兜底（D-CURSOR-033 #3）：当 last4 不足 4 位（非空）时，说明可用字符数不足以
+// 遮蔽，输出固定全掩码而非回显原文任何片段；last4 为空时返回 "****"。
 func maskCodeValue(last4 string) string {
-	if last4 == "" {
+	switch {
+	case last4 == "":
 		return "****"
+	case len(last4) < 4:
+		return "XXXX-****-****-****"
+	default:
+		return "XXXX-****-****-" + last4
 	}
-	return "XXXX-****-****-" + last4
 }
 
-// last4Of 取原文末 4 位；不足 4 位时取全部。
+// last4Of 取原文末 4 位；不足 4 位（原文过短）时返回空。
+//
+// 关键不变量（D-CURSOR-033 #3）：原文长度 ≤ 4 时，其"末 4 位"即全文，若直接存为
+// CodeLast4 再交给 maskCodeValue 会回显完整短码（触 L11/L16）。故过短原文返回空，
+// 由 maskCodeValue 输出全掩码，绝不把短码原文落入任何可展示字段。
 func last4Of(plain string) string {
 	if len(plain) <= 4 {
-		return plain
+		return ""
 	}
 	return plain[len(plain)-4:]
 }

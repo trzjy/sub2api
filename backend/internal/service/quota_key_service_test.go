@@ -1070,3 +1070,60 @@ func TestQuotaKeyService_GetWithAccounts_NoNesting(t *testing.T) {
 		require.Equal(t, int64(1), *a.QuotaKeyID, "only accounts of the requested quota key should be returned")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D-CURSOR-033 #3：短激活码脱敏不泄露（终审）。
+// 不变量：原文长度 ≤ 4 的短码，code_masked / 任何 DTO 字段都不得包含原文任何字符
+// （L11/L16）；正常长度仍保持 XXXX-****-****-<last4> 既有契约。
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeyService_ShortCodeNeverLeaksPlaintext：经完整 Create 路径，短码
+// 的 code_masked 不得包含原文任何字符（不回显、不部分泄露）。
+func TestQuotaKeyService_ShortCodeNeverLeaksPlaintext(t *testing.T) {
+	shortCodes := []string{"a", "ab", "abc", "1234", "XY", "q"}
+	repo := newFakeQuotaKeyRepo()
+	enc := testEncryptor{}
+	svc := NewQuotaKeyService(repo, enc, nil, nil)
+
+	for _, code := range shortCodes {
+		dto, err := svc.Create(context.Background(), code, nil, nil)
+		require.NoError(t, err, "Create must accept short code %q without error", code)
+		require.NotNil(t, dto)
+		// 不得包含原文任何字符（逐字符校验，杜绝部分泄露）。
+		for _, r := range code {
+			require.NotContains(t, dto.CodeValueMasked, string(r),
+				"code_masked %q must not contain any char of short code %q", dto.CodeValueMasked, code)
+		}
+		// 落库的 CodeLast4 也不得是原文（短码应存为空，断绝回显源）。
+		require.NotEqual(t, code, repo.byID[dto.ID].CodeLast4,
+			"CodeLast4 must not equal the short code %q", code)
+	}
+}
+
+// TestQuotaKeyMaskCodeValue_ShortCodeFallback：直接锁定脱敏兜底。
+//   - 正常 last4（4 位）→ 既有契约 XXXX-****-****-1234
+//   - 空 → ****
+//   - 不足 4 位（非空）→ 固定全掩码，绝不回显原文片段
+func TestQuotaKeyMaskCodeValue_ShortCodeFallback(t *testing.T) {
+	require.Equal(t, "XXXX-****-****-1234", maskCodeValue("1234"), "normal last4 keeps contract")
+	require.Equal(t, "****", maskCodeValue(""), "empty last4 -> ****")
+	require.Equal(t, "XXXX-****-****-****", maskCodeValue("ab"), "short last4 -> full mask, no echo")
+	require.Equal(t, "XXXX-****-****-****", maskCodeValue("1"), "single-char last4 -> full mask")
+	require.Equal(t, "XXXX-****-****-****", maskCodeValue("XYZ"), "3-char last4 -> full mask")
+}
+
+// TestLast4Of_ShortCodeReturnsEmpty：锁定 last4Of 对 ≤4 位原文返回空，
+// 避免短码全文落入 CodeLast4 进而被掩码回显（D-CURSOR-033 #3）。
+func TestLast4Of_ShortCodeReturnsEmpty(t *testing.T) {
+	cases := map[string]string{
+		"a":                                "",
+		"ab":                               "",
+		"abc":                              "",
+		"1234":                             "",
+		"12345":                            "2345",
+		"CURSOR-ACTIVATION-CODE-9F3A-1234": "1234",
+	}
+	for in, want := range cases {
+		require.Equal(t, want, last4Of(in), "last4Of(%q) mismatch", in)
+	}
+}
