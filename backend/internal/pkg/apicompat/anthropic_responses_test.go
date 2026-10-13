@@ -849,7 +849,9 @@ func TestStreamingReasoning(t *testing.T) {
 
 	sse, err := ResponsesAnthropicEventToSSE(events[0])
 	require.NoError(t, err)
-	assert.Contains(t, sse, `"content_block":{"thinking":"","type":"thinking"}`)
+	// A1: thinking 块恒带 signature 键（值空串），对齐先例 412718edf5。
+	assert.Contains(t, sse, `"type":"thinking"`)
+	assert.Contains(t, sse, `"signature":""`)
 
 	// reasoning text delta
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{

@@ -443,6 +443,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 					Name:      name,
 					Arguments: arguments,
 				},
+				// 透传上游 functionCall 部分的 thought_signature（Kira/Gemini 契约）。
+				// 非 Kira 上游不含该字段 → 空串，下游 omitempty 不产出。
+				ThoughtSignature: rawString(item["thought_signature"]),
 			}
 			messages = appendAssistantToolCall(messages, toolCall, reasoningForAssistant())
 			pendingReasoning = ""
@@ -1369,6 +1372,8 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 				Namespace: ns.Namespace,
 				Arguments: arguments,
 				Status:    "completed",
+				// 透传 thought_signature（Kira/Gemini 契约）。
+				ThoughtSignature: toolCall.ThoughtSignature,
 			})
 			continue
 		}
@@ -1379,6 +1384,8 @@ func chatMessageToResponsesOutput(message ChatMessage, customTools, functionTool
 			Name:      toolCall.Function.Name,
 			Arguments: arguments,
 			Status:    "completed",
+			// 透传 thought_signature（Kira/Gemini 契约）。
+			ThoughtSignature: toolCall.ThoughtSignature,
 		})
 	}
 
@@ -2060,6 +2067,8 @@ func closeChatToolItems(state *ChatCompletionsToResponsesStreamState) []Response
 					Namespace: namespace,
 					Arguments: arguments,
 					Status:    "completed",
+					// 透传 thought_signature（Kira/Gemini 契约）。
+					ThoughtSignature: toolCall.ThoughtSignature,
 				},
 			}),
 		)
@@ -2133,6 +2142,8 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 			Namespace: namespace,
 			Arguments: arguments,
 			Status:    "completed",
+			// 透传 thought_signature（Kira/Gemini 契约）。
+			ThoughtSignature: toolCall.ThoughtSignature,
 		})
 	}
 	return outputs

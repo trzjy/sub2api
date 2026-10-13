@@ -94,10 +94,16 @@ func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {
 			anthropicContentBlock
 		}{Text: b.Text, anthropicContentBlock: anthropicContentBlock(b)})
 	case "thinking":
+		// 恒输出 signature 键：DeepSeek/Gemini 等严格上游要求 thinking 块携带
+		// signature 字段（即便为空字符串），否则客户端回放时会被丢弃/降级为
+		// redacted，导致下一轮无法回传明文 reasoning_content 而 400。对齐已接受
+		// 先例 412718edf5。**不伪造**非空签名（DeepSeek 无密文签名），无值时发
+		// 空串占位。嵌入的 anthropicContentBlock 仍提供 type/cache_control 等字段。
 		return json.Marshal(struct {
-			Thinking string `json:"thinking"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
 			anthropicContentBlock
-		}{Thinking: b.Thinking, anthropicContentBlock: anthropicContentBlock(b)})
+		}{Thinking: b.Thinking, Signature: b.Signature, anthropicContentBlock: anthropicContentBlock(b)})
 	default:
 		return json.Marshal(base)
 	}
@@ -278,6 +284,9 @@ type ResponsesInputItem struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 	ID        string `json:"id,omitempty"`
+	// thought_signature 透传上游（Gemini/OpenCode Zen）要求的函数调用签名（见
+	// ChatToolCall.ThoughtSignature）。
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 
 	// type=function_call_output
 	Output    string `json:"output,omitempty"`
@@ -412,6 +421,9 @@ type ResponsesOutput struct {
 	Arguments string `json:"arguments,omitempty"`
 	// 来源为 namespace 子工具时的归属命名空间（codex 按 namespace+name 路由该调用）。
 	Namespace string `json:"namespace,omitempty"`
+	// thought_signature 透传上游（Gemini/OpenCode Zen）要求的函数调用签名（见
+	// ChatToolCall.ThoughtSignature）。非 Kira/Gemini 路径为空，omitempty 不产出。
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 
 	// type=custom_tool_call（custom/freeform 工具，input 为自由文本）
 	Input string `json:"input,omitempty"`
@@ -746,6 +758,14 @@ type ChatToolCall struct {
 	ID       string           `json:"id,omitempty"`
 	Type     string           `json:"type,omitempty"` // "function"
 	Function ChatFunctionCall `json:"function"`
+	// ThoughtSignature 透传上游（Gemini/OpenCode Zen，Kira 账号）在 functionCall
+	// 部分要求的 thought_signature。原 CC 结构无此字段 → 上游响应里的签名无处存放、
+	// 必然丢失，下一轮回传时 Gemini 报 "Function call is missing a
+	// thought_signature in functionCall parts"。仅透传、不生成/不补空（禁止 dummy）。
+	// 非 Kira/Gemini 路径恒为空，omitempty 不产出该键，字节行为零变化。
+	// 字段名采用 CC/OpenAI 蛇形约定（thought_signature）；与上游实际字段一致，
+	// 真实上游响应取证前以本命名为准。
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ChatFunctionCall contains the function name and arguments.
@@ -828,6 +848,9 @@ type ChatDelta struct {
 	ReasoningContent *string        `json:"reasoning_content,omitempty"`
 	Reasoning        *string        `json:"reasoning,omitempty"`
 	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	// ThoughtSignature 是流式工具调用 delta 中透传的上游 thought_signature（见
+	// ChatToolCall.ThoughtSignature 说明）。
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 func (m ChatMessage) reasoningText() string {
