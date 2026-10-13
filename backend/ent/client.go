@@ -986,6 +986,22 @@ func (c *AccountClient) QueryUsageLogs(_m *Account) *UsageLogQuery {
 	return query
 }
 
+// QueryQuotaKey queries the quota_key edge of a Account.
+func (c *AccountClient) QueryQuotaKey(_m *Account) *QuotaKeyQuery {
+	query := (&QuotaKeyClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(account.Table, account.FieldID, id),
+			sqlgraph.To(quotakey.Table, quotakey.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, account.QuotaKeyTable, account.QuotaKeyColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // QueryAccountGroups queries the account_groups edge of a Account.
 func (c *AccountClient) QueryAccountGroups(_m *Account) *AccountGroupQuery {
 	query := (&AccountGroupClient{config: c.config}).Query()

@@ -732,6 +732,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := rejectWebCredentialForNormalEntry(input.Platform, input.Type, input.Credentials, input.FromWebLogin); err != nil {
 		return nil, err
 	}
+	// C2（v3.3 §4.2）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK 兜底），
+	// 非 cursor 平台允许 NULL。
+	if err := validateAccountQuotaKeyBinding(input.Platform, input.QuotaKeyID); err != nil {
+		return nil, err
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -839,6 +844,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	// C2（v3.3 §4.2）：cursor 平台账号改号也必须保持归属激活码（应用层校验，DB CHECK 兜底）。
+	if err := validateAccountQuotaKeyBinding(account.Platform, input.QuotaKeyID); err != nil {
 		return nil, err
 	}
 	// B3a 冻结：捕捉更新前快照用于身份字段不变性判定（方案 §3.1-2）。

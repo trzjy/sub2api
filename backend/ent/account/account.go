@@ -44,6 +44,8 @@ const (
 	FieldProxyID = "proxy_id"
 	// FieldProxyFallbackOriginID holds the string denoting the proxy_fallback_origin_id field in the database.
 	FieldProxyFallbackOriginID = "proxy_fallback_origin_id"
+	// FieldQuotaKeyID holds the string denoting the quota_key_id field in the database.
+	FieldQuotaKeyID = "quota_key_id"
 	// FieldConcurrency holds the string denoting the concurrency field in the database.
 	FieldConcurrency = "concurrency"
 	// FieldLoadFactor holds the string denoting the load_factor field in the database.
@@ -94,6 +96,8 @@ const (
 	EdgeChildren = "children"
 	// EdgeUsageLogs holds the string denoting the usage_logs edge name in mutations.
 	EdgeUsageLogs = "usage_logs"
+	// EdgeQuotaKey holds the string denoting the quota_key edge name in mutations.
+	EdgeQuotaKey = "quota_key"
 	// EdgeAccountGroups holds the string denoting the account_groups edge name in mutations.
 	EdgeAccountGroups = "account_groups"
 	// Table holds the table name of the account in the database.
@@ -125,6 +129,13 @@ const (
 	UsageLogsInverseTable = "usage_logs"
 	// UsageLogsColumn is the table column denoting the usage_logs relation/edge.
 	UsageLogsColumn = "account_id"
+	// QuotaKeyTable is the table that holds the quota_key relation/edge.
+	QuotaKeyTable = "accounts"
+	// QuotaKeyInverseTable is the table name for the QuotaKey entity.
+	// It exists in this package in order to avoid circular dependency with the "quotakey" package.
+	QuotaKeyInverseTable = "quota_keys"
+	// QuotaKeyColumn is the table column denoting the quota_key relation/edge.
+	QuotaKeyColumn = "quota_key_id"
 	// AccountGroupsTable is the table that holds the account_groups relation/edge.
 	AccountGroupsTable = "account_groups"
 	// AccountGroupsInverseTable is the table name for the AccountGroup entity.
@@ -151,6 +162,7 @@ var Columns = []string{
 	FieldExtra,
 	FieldProxyID,
 	FieldProxyFallbackOriginID,
+	FieldQuotaKeyID,
 	FieldConcurrency,
 	FieldLoadFactor,
 	FieldPriority,
@@ -173,12 +185,6 @@ var Columns = []string{
 	FieldQuotaDimension,
 }
 
-// ForeignKeys holds the SQL foreign-keys that are owned by the "accounts"
-// table and are not defined as standalone fields in the schema.
-var ForeignKeys = []string{
-	"quota_key_accounts",
-}
-
 var (
 	// GroupsPrimaryKey and GroupsColumn2 are the table columns denoting the
 	// primary key for the groups relation (M2M).
@@ -189,11 +195,6 @@ var (
 func ValidColumn(column string) bool {
 	for i := range Columns {
 		if column == Columns[i] {
-			return true
-		}
-	}
-	for i := range ForeignKeys {
-		if column == ForeignKeys[i] {
 			return true
 		}
 	}
@@ -343,6 +344,11 @@ func ByProxyID(opts ...sql.OrderTermOption) OrderOption {
 // ByProxyFallbackOriginID orders the results by the proxy_fallback_origin_id field.
 func ByProxyFallbackOriginID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldProxyFallbackOriginID, opts...).ToFunc()
+}
+
+// ByQuotaKeyID orders the results by the quota_key_id field.
+func ByQuotaKeyID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldQuotaKeyID, opts...).ToFunc()
 }
 
 // ByConcurrency orders the results by the concurrency field.
@@ -501,6 +507,13 @@ func ByUsageLogs(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	}
 }
 
+// ByQuotaKeyField orders the results by quota_key field.
+func ByQuotaKeyField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newQuotaKeyStep(), sql.OrderByField(field, opts...))
+	}
+}
+
 // ByAccountGroupsCount orders the results by account_groups count.
 func ByAccountGroupsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -547,6 +560,13 @@ func newUsageLogsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(UsageLogsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, UsageLogsTable, UsageLogsColumn),
+	)
+}
+func newQuotaKeyStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(QuotaKeyInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.M2O, true, QuotaKeyTable, QuotaKeyColumn),
 	)
 }
 func newAccountGroupsStep() *sqlgraph.Step {

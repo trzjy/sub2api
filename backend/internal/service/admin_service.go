@@ -7,6 +7,7 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
@@ -317,8 +318,8 @@ type CreateGroupInput struct {
 	ProfitControlEnabled bool
 	// AggregateCodeBuddyEnabled 聚合直绑开关（创建路径为 bool）；仅聚合族平台可置 true。
 	AggregateCodeBuddyEnabled bool
-	ProfitMinMargin      *float64
-	ProfitSafetyBuffer   *float64
+	ProfitMinMargin           *float64
+	ProfitSafetyBuffer        *float64
 	// 从指定分组复制账号（创建分组后在同一事务内绑定）
 	CopyAccountsFromGroupIDs []int64
 }
@@ -402,24 +403,27 @@ type UpdateGroupInput struct {
 	ProfitControlEnabled *bool
 	// AggregateCodeBuddyEnabled 聚合直绑开关（nil 表示不修改；仅聚合族平台可置 true）。
 	AggregateCodeBuddyEnabled *bool
-	ProfitMinMargin      *float64
-	ProfitSafetyBuffer   *float64
+	ProfitMinMargin           *float64
+	ProfitSafetyBuffer        *float64
 	// 从指定分组复制账号（同步操作：先清空当前分组的账号绑定，再绑定源分组的账号）
 	CopyAccountsFromGroupIDs []int64
 }
 
 type CreateAccountInput struct {
-	Name               string
-	Notes              *string
-	Platform           string
-	Type               string
-	Credentials        map[string]any
-	Extra              map[string]any
-	ProxyID            *int64
-	Concurrency        int
-	Priority           int
-	RateMultiplier     *float64 // 账号计费倍率（>=0，允许 0）
-	LoadFactor         *int
+	Name           string
+	Notes          *string
+	Platform       string
+	Type           string
+	Credentials    map[string]any
+	Extra          map[string]any
+	ProxyID        *int64
+	Concurrency    int
+	Priority       int
+	RateMultiplier *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor     *int
+	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
+	// cursor 平台建号必填；非 cursor 平台允许为 nil（NULL）。
+	QuotaKeyID         *int64
 	GroupIDs           []int64
 	ExpiresAt          *int64
 	AutoPauseOnExpired *bool
@@ -458,16 +462,19 @@ type AccountShadowSummary struct {
 }
 
 type UpdateAccountInput struct {
-	Name                  string
-	Notes                 *string
-	Type                  string // Account type: oauth, setup-token, apikey
-	Credentials           map[string]any
-	Extra                 map[string]any
-	ProxyID               *int64
-	Concurrency           *int     // 使用指针区分"未提供"和"设置为0"
-	Priority              *int     // 使用指针区分"未提供"和"设置为0"
-	RateMultiplier        *float64 // 账号计费倍率（>=0，允许 0）
-	LoadFactor            *int
+	Name           string
+	Notes          *string
+	Type           string // Account type: oauth, setup-token, apikey
+	Credentials    map[string]any
+	Extra          map[string]any
+	ProxyID        *int64
+	Concurrency    *int     // 使用指针区分"未提供"和"设置为0"
+	Priority       *int     // 使用指针区分"未提供"和"设置为0"
+	RateMultiplier *float64 // 账号计费倍率（>=0，允许 0）
+	LoadFactor     *int
+	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
+	// cursor 平台改号必填（归属激活码不可空缺）；非 cursor 平台允许为 nil。
+	QuotaKeyID            *int64
 	Status                string
 	GroupIDs              *[]int64
 	ExpiresAt             *int64
@@ -479,6 +486,21 @@ type UpdateAccountInput struct {
 	// API DTO 不暴露。普通 UpdateAccount 入口对 web 接入模式账号一律拒绝写入
 	// （收敛项 2，任务卡 TC-converge-b-20260921）。
 	FromWebLogin bool
+}
+
+// validateAccountQuotaKeyBinding 校验账号归属激活码（v3.3 §4.2 / C2）。
+//
+// 规则：cursor 平台账号必须归属某个激活码（quota_key_id 必填）；其它平台允许 NULL。
+// 这是应用层前置校验，DB CHECK 约束 accounts_cursor_quota_key_required 提供兜底。
+//
+// 用于 CreateAccount / UpdateAccount 入口：platform 为 cursor 且 quotaKeyID 为 nil 时
+// 返回 400，提示必须绑定激活码。
+func validateAccountQuotaKeyBinding(platform string, quotaKeyID *int64) error {
+	if platform == domain.PlatformCursor && quotaKeyID == nil {
+		return infraerrors.New(http.StatusBadRequest, "ACCOUNT_QUOTA_KEY_REQUIRED",
+			"cursor platform accounts must be bound to a quota key (quota_key_id is required)")
+	}
+	return nil
 }
 
 // BulkUpdateAccountsInput describes the payload for bulk updating accounts.

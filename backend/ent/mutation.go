@@ -2356,6 +2356,8 @@ type AccountMutation struct {
 	usage_logs                  map[int64]struct{}
 	removedusage_logs           map[int64]struct{}
 	clearedusage_logs           bool
+	quota_key                   *int64
+	clearedquota_key            bool
 	done                        bool
 	oldValue                    func(context.Context) (*Account, error)
 	predicates                  []predicate.Account
@@ -3060,6 +3062,55 @@ func (m *AccountMutation) ResetProxyFallbackOriginID() {
 	m.proxy_fallback_origin_id = nil
 	m.addproxy_fallback_origin_id = nil
 	delete(m.clearedFields, account.FieldProxyFallbackOriginID)
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (m *AccountMutation) SetQuotaKeyID(i int64) {
+	m.quota_key = &i
+}
+
+// QuotaKeyID returns the value of the "quota_key_id" field in the mutation.
+func (m *AccountMutation) QuotaKeyID() (r int64, exists bool) {
+	v := m.quota_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldQuotaKeyID returns the old "quota_key_id" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldQuotaKeyID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldQuotaKeyID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldQuotaKeyID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldQuotaKeyID: %w", err)
+	}
+	return oldValue.QuotaKeyID, nil
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (m *AccountMutation) ClearQuotaKeyID() {
+	m.quota_key = nil
+	m.clearedFields[account.FieldQuotaKeyID] = struct{}{}
+}
+
+// QuotaKeyIDCleared returns if the "quota_key_id" field was cleared in this mutation.
+func (m *AccountMutation) QuotaKeyIDCleared() bool {
+	_, ok := m.clearedFields[account.FieldQuotaKeyID]
+	return ok
+}
+
+// ResetQuotaKeyID resets all changes to the "quota_key_id" field.
+func (m *AccountMutation) ResetQuotaKeyID() {
+	m.quota_key = nil
+	delete(m.clearedFields, account.FieldQuotaKeyID)
 }
 
 // SetConcurrency sets the "concurrency" field.
@@ -4261,6 +4312,33 @@ func (m *AccountMutation) ResetUsageLogs() {
 	m.removedusage_logs = nil
 }
 
+// ClearQuotaKey clears the "quota_key" edge to the QuotaKey entity.
+func (m *AccountMutation) ClearQuotaKey() {
+	m.clearedquota_key = true
+	m.clearedFields[account.FieldQuotaKeyID] = struct{}{}
+}
+
+// QuotaKeyCleared reports if the "quota_key" edge to the QuotaKey entity was cleared.
+func (m *AccountMutation) QuotaKeyCleared() bool {
+	return m.QuotaKeyIDCleared() || m.clearedquota_key
+}
+
+// QuotaKeyIDs returns the "quota_key" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// QuotaKeyID instead. It exists only for internal usage by the builders.
+func (m *AccountMutation) QuotaKeyIDs() (ids []int64) {
+	if id := m.quota_key; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetQuotaKey resets all changes to the "quota_key" edge.
+func (m *AccountMutation) ResetQuotaKey() {
+	m.quota_key = nil
+	m.clearedquota_key = false
+}
+
 // Where appends a list predicates to the AccountMutation builder.
 func (m *AccountMutation) Where(ps ...predicate.Account) {
 	m.predicates = append(m.predicates, ps...)
@@ -4295,7 +4373,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 34)
+	fields := make([]string, 0, 35)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4337,6 +4415,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.proxy_fallback_origin_id != nil {
 		fields = append(fields, account.FieldProxyFallbackOriginID)
+	}
+	if m.quota_key != nil {
+		fields = append(fields, account.FieldQuotaKeyID)
 	}
 	if m.concurrency != nil {
 		fields = append(fields, account.FieldConcurrency)
@@ -4434,6 +4515,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.ProxyID()
 	case account.FieldProxyFallbackOriginID:
 		return m.ProxyFallbackOriginID()
+	case account.FieldQuotaKeyID:
+		return m.QuotaKeyID()
 	case account.FieldConcurrency:
 		return m.Concurrency()
 	case account.FieldLoadFactor:
@@ -4511,6 +4594,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldProxyID(ctx)
 	case account.FieldProxyFallbackOriginID:
 		return m.OldProxyFallbackOriginID(ctx)
+	case account.FieldQuotaKeyID:
+		return m.OldQuotaKeyID(ctx)
 	case account.FieldConcurrency:
 		return m.OldConcurrency(ctx)
 	case account.FieldLoadFactor:
@@ -4657,6 +4742,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProxyFallbackOriginID(v)
+		return nil
+	case account.FieldQuotaKeyID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetQuotaKeyID(v)
 		return nil
 	case account.FieldConcurrency:
 		v, ok := value.(int)
@@ -4909,6 +5001,9 @@ func (m *AccountMutation) ClearedFields() []string {
 	if m.FieldCleared(account.FieldProxyFallbackOriginID) {
 		fields = append(fields, account.FieldProxyFallbackOriginID)
 	}
+	if m.FieldCleared(account.FieldQuotaKeyID) {
+		fields = append(fields, account.FieldQuotaKeyID)
+	}
 	if m.FieldCleared(account.FieldLoadFactor) {
 		fields = append(fields, account.FieldLoadFactor)
 	}
@@ -4979,6 +5074,9 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldProxyFallbackOriginID:
 		m.ClearProxyFallbackOriginID()
+		return nil
+	case account.FieldQuotaKeyID:
+		m.ClearQuotaKeyID()
 		return nil
 	case account.FieldLoadFactor:
 		m.ClearLoadFactor()
@@ -5069,6 +5167,9 @@ func (m *AccountMutation) ResetField(name string) error {
 	case account.FieldProxyFallbackOriginID:
 		m.ResetProxyFallbackOriginID()
 		return nil
+	case account.FieldQuotaKeyID:
+		m.ResetQuotaKeyID()
+		return nil
 	case account.FieldConcurrency:
 		m.ResetConcurrency()
 		return nil
@@ -5135,7 +5236,7 @@ func (m *AccountMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *AccountMutation) AddedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.groups != nil {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5150,6 +5251,9 @@ func (m *AccountMutation) AddedEdges() []string {
 	}
 	if m.usage_logs != nil {
 		edges = append(edges, account.EdgeUsageLogs)
+	}
+	if m.quota_key != nil {
+		edges = append(edges, account.EdgeQuotaKey)
 	}
 	return edges
 }
@@ -5184,13 +5288,17 @@ func (m *AccountMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case account.EdgeQuotaKey:
+		if id := m.quota_key; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *AccountMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.removedgroups != nil {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5231,7 +5339,7 @@ func (m *AccountMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *AccountMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.clearedgroups {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5246,6 +5354,9 @@ func (m *AccountMutation) ClearedEdges() []string {
 	}
 	if m.clearedusage_logs {
 		edges = append(edges, account.EdgeUsageLogs)
+	}
+	if m.clearedquota_key {
+		edges = append(edges, account.EdgeQuotaKey)
 	}
 	return edges
 }
@@ -5264,6 +5375,8 @@ func (m *AccountMutation) EdgeCleared(name string) bool {
 		return m.clearedchildren
 	case account.EdgeUsageLogs:
 		return m.clearedusage_logs
+	case account.EdgeQuotaKey:
+		return m.clearedquota_key
 	}
 	return false
 }
@@ -5277,6 +5390,9 @@ func (m *AccountMutation) ClearEdge(name string) error {
 		return nil
 	case account.EdgeParent:
 		m.ClearParent()
+		return nil
+	case account.EdgeQuotaKey:
+		m.ClearQuotaKey()
 		return nil
 	}
 	return fmt.Errorf("unknown Account unique edge %s", name)
@@ -5300,6 +5416,9 @@ func (m *AccountMutation) ResetEdge(name string) error {
 		return nil
 	case account.EdgeUsageLogs:
 		m.ResetUsageLogs()
+		return nil
+	case account.EdgeQuotaKey:
+		m.ResetQuotaKey()
 		return nil
 	}
 	return fmt.Errorf("unknown Account edge %s", name)

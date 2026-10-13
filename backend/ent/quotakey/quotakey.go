@@ -46,7 +46,7 @@ const (
 	// It exists in this package in order to avoid circular dependency with the "account" package.
 	AccountsInverseTable = "accounts"
 	// AccountsColumn is the table column denoting the accounts relation/edge.
-	AccountsColumn = "quota_key_accounts"
+	AccountsColumn = "quota_key_id"
 )
 
 // Columns holds all SQL columns for quotakey fields.

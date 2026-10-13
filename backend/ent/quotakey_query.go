@@ -418,7 +418,9 @@ func (_q *QuotaKeyQuery) loadAccounts(ctx context.Context, query *AccountQuery, 
 			init(nodes[i])
 		}
 	}
-	query.withFKs = true
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(account.FieldQuotaKeyID)
+	}
 	query.Where(predicate.Account(func(s *sql.Selector) {
 		s.Where(sql.InValues(s.C(quotakey.AccountsColumn), fks...))
 	}))
@@ -427,13 +429,13 @@ func (_q *QuotaKeyQuery) loadAccounts(ctx context.Context, query *AccountQuery, 
 		return err
 	}
 	for _, n := range neighbors {
-		fk := n.quota_key_accounts
+		fk := n.QuotaKeyID
 		if fk == nil {
-			return fmt.Errorf(`foreign-key "quota_key_accounts" is nil for node %v`, n.ID)
+			return fmt.Errorf(`foreign-key "quota_key_id" is nil for node %v`, n.ID)
 		}
 		node, ok := nodeids[*fk]
 		if !ok {
-			return fmt.Errorf(`unexpected referenced foreign-key "quota_key_accounts" returned %v for node %v`, *fk, n.ID)
+			return fmt.Errorf(`unexpected referenced foreign-key "quota_key_id" returned %v for node %v`, *fk, n.ID)
 		}
 		assign(node, n)
 	}
