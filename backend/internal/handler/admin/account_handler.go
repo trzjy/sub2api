@@ -2,6 +2,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -212,6 +213,30 @@ type UpdateAccountRequest struct {
 	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
 	RateSyncEnabled         *bool          `json:"upstream_billing_rate_sync_enabled"`
 	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	// QuotaKeyID 归属激活码 ID（v3.4 §4.4）。用 json.RawMessage 而非 *int64 承载三态：
+	// 字段缺失 = 未提供（沿用现有归属）；显式 null = 清空（仅非 cursor 允许）；数值 = 设置。
+	// *int64 无法区分"字段缺失"与"显式 null"（两者都解成 nil）。
+	QuotaKeyID json.RawMessage `json:"quota_key_id,omitempty"`
+}
+
+// parseQuotaKeyIDUpdate 解析更新请求中的 quota_key_id 三态。
+//
+//   - 字段缺失（raw 为空）→ (nil, false)：未提供，沿用现有归属
+//   - 显式 null          → (nil, true)：清空归属
+//   - 数值               → (&id, true)：设置为该激活码
+func parseQuotaKeyIDUpdate(raw json.RawMessage) (*int64, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, false, nil
+	}
+	if string(trimmed) == "null" {
+		return nil, true, nil
+	}
+	var id int64
+	if err := json.Unmarshal(trimmed, &id); err != nil {
+		return nil, true, fmt.Errorf("quota_key_id must be an integer or null")
+	}
+	return &id, true, nil
 }
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
@@ -1346,6 +1371,13 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
+	// 归属激活码三态（#3）：非法值在进 service 前拦掉，避免 400 被泛化成 500。
+	quotaKeyID, quotaKeyIDSet, err := parseQuotaKeyIDUpdate(req.QuotaKeyID)
+	if err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
 	// 登录会话去重（排除自身）：web 平台账号更新携带 Cookie/access_token 时，
 	// 不得把它改成其他账号已持有的登录态（否则两个账号共享同一网页登录会话）。
 	// 去重门仅对"合并后目标 access_mode 仍为 web"生效：请求 credentials 中
@@ -1384,6 +1416,8 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		Priority:              req.Priority,    // 指针类型，nil 表示未提供
 		RateMultiplier:        req.RateMultiplier,
 		LoadFactor:            req.LoadFactor,
+		QuotaKeyID:            quotaKeyID,
+		QuotaKeyIDSet:         quotaKeyIDSet,
 		Status:                req.Status,
 		GroupIDs:              req.GroupIDs,
 		ExpiresAt:             req.ExpiresAt,

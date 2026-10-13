@@ -474,7 +474,13 @@ type UpdateAccountInput struct {
 	LoadFactor     *int
 	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
 	// cursor 平台改号必填（归属激活码不可空缺）；非 cursor 平台允许为 nil。
+	// 更新入口为三态语义（R-D/#3）：单个 *int64 无法区分"未提供"与"显式清空"，
+	// 故与 QuotaKeyIDSet 成对使用：
+	//   - QuotaKeyIDSet=false            → 未提供：沿用现有归属，不修改
+	//   - QuotaKeyIDSet=true  + nil      → 显式清空（仅非 cursor 允许）
+	//   - QuotaKeyIDSet=true  + 非 nil   → 设置为该激活码
 	QuotaKeyID            *int64
+	QuotaKeyIDSet         bool
 	Status                string
 	GroupIDs              *[]int64
 	ExpiresAt             *int64

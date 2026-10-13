@@ -14,7 +14,11 @@ import (
 	"strings"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/account"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -729,6 +733,107 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	return account, nil
 }
 
+// resolveUpdateQuotaKeyID 解析更新入口的归属三态（R-D/#3）。
+//
+//   - 未提供（QuotaKeyIDSet=false）→ 沿用现有归属，provided=false（不修改）
+//   - 显式清空（QuotaKeyIDSet=true 且值为 nil）→ 清空，provided=true
+//   - 提供值（QuotaKeyIDSet=true 且值非 nil）→ 设置为该激活码，provided=true
+func resolveUpdateQuotaKeyID(existing *int64, input *UpdateAccountInput) (effective *int64, provided bool) {
+	if input == nil || !input.QuotaKeyIDSet {
+		return existing, false
+	}
+	return input.QuotaKeyID, true
+}
+
+// checkQuotaKeyExists 校验"提供值"场景的激活码存在性（未软删）。
+//
+// entClient 未注入时（单测替身、窄内部调用方）跳过，交由 DB FK/CHECK 兜底。
+func (s *adminServiceImpl) checkQuotaKeyExists(ctx context.Context, quotaKeyID int64) error {
+	if s.entClient == nil {
+		return nil
+	}
+	exists, err := s.entClient.QuotaKey.Query().
+		Where(quotakey.IDEQ(quotaKeyID), quotakey.DeletedAtIsNil()).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("admin: load quota key %d: %w", quotaKeyID, err)
+	}
+	if !exists {
+		return infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_NOT_FOUND",
+			"quota key %d does not exist", quotaKeyID)
+	}
+	return nil
+}
+
+// checkQuotaKeyForCreate 建号侧归属激活码校验（#2b）：激活码必须存在且未软删，
+// cursor 平台额外复用拉号侧的 ≤15 上限——与 Pull/Refresh/Delete 共享同一 advisory
+// 互斥域，先取锁再按 §3.2 working 谓词计数，达到 MaxAccountsPerQuotaKey 即拒绝，
+// 杜绝 admin 建号绕过号池上限建出第 16 个账号。
+//
+// entClient 未注入时（单测替身、窄内部调用方）跳过，交由 DB 约束兜底。
+func (s *adminServiceImpl) checkQuotaKeyForCreate(ctx context.Context, platform string, quotaKeyID *int64) error {
+	if quotaKeyID == nil || s.entClient == nil {
+		return nil
+	}
+	if err := s.checkQuotaKeyExists(ctx, *quotaKeyID); err != nil {
+		return err
+	}
+	if platform != domain.PlatformCursor {
+		return nil
+	}
+	return s.withQuotaKeyAdvisoryTx(ctx, *quotaKeyID, func(tx *dbent.Tx) error {
+		working, err := countWorkingQuotaKeyAccounts(ctx, tx, *quotaKeyID)
+		if err != nil {
+			return fmt.Errorf("admin: count working accounts: %w", err)
+		}
+		if working >= MaxAccountsPerQuotaKey {
+			return infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_ACCOUNT_LIMIT_REACHED",
+				"quota key %d already holds %d accounts (limit %d)", *quotaKeyID, working, MaxAccountsPerQuotaKey)
+		}
+		return nil
+	})
+}
+
+// withQuotaKeyAdvisoryTx 在事务内取 quota key advisory 锁后执行 fn 并提交。
+// 锁域与 QuotaKeyService 的 Pull/Refresh/Delete 完全一致（同 key 串行、异 key 不阻塞）。
+func (s *adminServiceImpl) withQuotaKeyAdvisoryTx(ctx context.Context, quotaKeyID int64, fn func(tx *dbent.Tx) error) error {
+	tx, err := s.entClient.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("admin: begin quota key tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := acquireAdvisoryXactLock(ctx, tx, quotaKeyAdvisoryLockID(quotaKeyID)); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin: commit quota key tx: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// countWorkingQuotaKeyAccounts 在事务内统计归属某激活码、且未软删的账号数（§3.2 working 谓词）。
+//
+// 谓词与 QuotaKeyRepository.CountWorkingAccounts 完全一致（quota_key_id + deleted_at IS NULL）：
+// admin 侧无法注入 QuotaKeyRepository（service -> repository 反向依赖成环），故按同一谓词
+// 复用 ent 事务查询，不另造一套计数口径。
+func countWorkingQuotaKeyAccounts(ctx context.Context, tx *dbent.Tx, quotaKeyID int64) (int, error) {
+	return tx.Account.Query().
+		Where(
+			account.QuotaKeyID(quotaKeyID),
+			account.DeletedAtIsNil(),
+		).
+		Count(ctx)
+}
+
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
 	// web 凭据旁路关闭（收敛项 2）：普通创建入口显式 access_mode=web 一律拒绝；
 	// web 登录链（web-login-password / web-login-sms）内部建号经 FromWebLogin 豁免。
@@ -738,6 +843,11 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	// C2（v3.3 §4.2）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK 兜底），
 	// 非 cursor 平台允许 NULL。
 	if err := validateAccountQuotaKeyBinding(input.Platform, input.QuotaKeyID); err != nil {
+		return nil, err
+	}
+	// #2b：cursor 建号复用号池 ≤15 上限（advisory 互斥域 + §3.2 working 谓词计数），
+	// 并校验激活码存在（未软删），避免 FK 违规退化成 500。
+	if err := s.checkQuotaKeyForCreate(ctx, input.Platform, input.QuotaKeyID); err != nil {
 		return nil, err
 	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
@@ -850,8 +960,17 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	// C2（v3.3 §4.2）：cursor 平台账号改号也必须保持归属激活码（应用层校验，DB CHECK 兜底）。
-	if err := validateAccountQuotaKeyBinding(account.Platform, input.QuotaKeyID); err != nil {
+	// 校验的是"合并后的有效归属"而不是裸 input.QuotaKeyID：未提供时沿用 existing，
+	// 否则现有 cursor 账号只要编辑（不改归属）就会因为请求里没有 quota_key_id 被判非法（#3）。
+	effectiveQuotaKeyID, quotaKeyProvided := resolveUpdateQuotaKeyID(account.QuotaKeyID, input)
+	if err := validateAccountQuotaKeyBinding(account.Platform, effectiveQuotaKeyID); err != nil {
 		return nil, err
+	}
+	// 提供值 → 校验该激活码存在（沿用既有口径：不存在就是坏引用，不当成清空处理）。
+	if quotaKeyProvided && effectiveQuotaKeyID != nil {
+		if err := s.checkQuotaKeyExists(ctx, *effectiveQuotaKeyID); err != nil {
+			return nil, err
+		}
 	}
 	// B3a 冻结：捕捉更新前快照用于身份字段不变性判定（方案 §3.1-2）。
 	// 浅拷贝：仅读 Platform/ParentAccountID/QuotaDimension 等值，更新路径不会重赋值
@@ -1146,6 +1265,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		} else {
 			account.LoadFactor = input.LoadFactor
 		}
+	}
+	// 归属激活码三态（#3）：仅"显式提供"时写入；未提供 = 沿用现有归属，不动。
+	if quotaKeyProvided {
+		account.QuotaKeyID = effectiveQuotaKeyID
 	}
 	if input.Status != "" {
 		account.Status = input.Status

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,6 +71,93 @@ func TestAccountHandlerCreatePassesQuotaKeyIDToService(t *testing.T) {
 	require.Equal(t, domain.PlatformCursor, captured.Platform)
 	require.NotNil(t, captured.QuotaKeyID, "quota_key_id must reach the service create input")
 	require.Equal(t, int64(42), *captured.QuotaKeyID)
+}
+
+// TestUpdateAccountRequestDeserializesQuotaKeyIDTristate 锁定更新 DTO 的三态契约（#3）：
+// *int64 无法区分"字段缺失"与"显式 null"，故用 json.RawMessage 承载。
+//   - 字段缺失 → 未提供（沿用现有归属）
+//   - 显式 null → 清空归属（仅非 cursor 允许）
+//   - 数值     → 设置为该激活码
+func TestUpdateAccountRequestDeserializesQuotaKeyIDTristate(t *testing.T) {
+	var absent UpdateAccountRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"acc"}`), &absent))
+	require.Empty(t, absent.QuotaKeyID, "missing field must stay empty (not provided)")
+	id, set, err := parseQuotaKeyIDUpdate(absent.QuotaKeyID)
+	require.NoError(t, err)
+	require.False(t, set, "missing field must not be treated as an explicit update")
+	require.Nil(t, id)
+
+	var nulled UpdateAccountRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"quota_key_id":null}`), &nulled))
+	require.JSONEq(t, "null", string(nulled.QuotaKeyID), "explicit null must be preserved")
+	id, set, err = parseQuotaKeyIDUpdate(nulled.QuotaKeyID)
+	require.NoError(t, err)
+	require.True(t, set, "explicit null must be an explicit clear")
+	require.Nil(t, id)
+
+	var valued UpdateAccountRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"quota_key_id":7}`), &valued))
+	id, set, err = parseQuotaKeyIDUpdate(valued.QuotaKeyID)
+	require.NoError(t, err)
+	require.True(t, set)
+	require.NotNil(t, id)
+	require.Equal(t, int64(7), *id)
+
+	// 非法值：必须解析失败（handler 映射 400），不得静默当成清空。
+	_, _, err = parseQuotaKeyIDUpdate(json.RawMessage(`"abc"`))
+	require.Error(t, err)
+}
+
+// TestAccountHandlerUpdatePassesQuotaKeyIDTristateToService 锁定 handler Update 的三态
+// 透传：请求体的三种形态必须原样到达 service 入参，不得塌缩成单一的"未提供/清空"。
+func TestAccountHandlerUpdatePassesQuotaKeyIDTristateToService(t *testing.T) {
+	doUpdate := func(body map[string]any) *service.UpdateAccountInput {
+		adminSvc := newStubAdminService()
+		router := setupAccountMixedChannelRouter(adminSvc)
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/accounts/55", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.NotNil(t, adminSvc.lastUpdateAccountInput, "update input must reach the service")
+		return adminSvc.lastUpdateAccountInput
+	}
+
+	// 未提供 → 不修改现有归属（cursor 账号的常规编辑走这里，回归 #3）。
+	got := doUpdate(map[string]any{"name": "acc-edited"})
+	require.False(t, got.QuotaKeyIDSet, "absent quota_key_id must not be an explicit update")
+	require.Nil(t, got.QuotaKeyID)
+
+	// 显式 null → 清空归属（cursor 由 service 判 400，非 cursor 放行）。
+	got = doUpdate(map[string]any{"quota_key_id": nil})
+	require.True(t, got.QuotaKeyIDSet, "explicit null must reach the service as an explicit clear")
+	require.Nil(t, got.QuotaKeyID)
+
+	// 数值 → 设置为该激活码。
+	got = doUpdate(map[string]any{"quota_key_id": 7})
+	require.True(t, got.QuotaKeyIDSet)
+	require.NotNil(t, got.QuotaKeyID)
+	require.Equal(t, int64(7), *got.QuotaKeyID)
+}
+
+// TestAccountHandlerUpdateRejectsNonIntegerQuotaKeyID 锁定非法 quota_key_id 的响应码：
+// 解析失败必须映射为 400（含 quota_key_id 提示），不得进 service 后被泛化。
+func TestAccountHandlerUpdateRejectsNonIntegerQuotaKeyID(t *testing.T) {
+	adminSvc := newStubAdminService()
+	router := setupAccountMixedChannelRouter(adminSvc)
+
+	body, err := json.Marshal(map[string]any{"quota_key_id": "not-a-number"})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/accounts/55", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "quota_key_id")
+	require.Nil(t, adminSvc.lastUpdateAccountInput, "invalid payload must not reach the service")
 }
 
 // TestAccountHandlerCreateCursorWithoutQuotaKeyIDReturns400 锁定 cursor 建号缺
