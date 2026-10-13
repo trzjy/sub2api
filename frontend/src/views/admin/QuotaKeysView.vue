@@ -451,7 +451,8 @@ function toggleAccounts(id: number): void {
 async function load() {
   loading.value = true
   try {
-    keys.value = await adminAPI.quotaKeys.list()
+    const data = await adminAPI.quotaKeys.list()
+    keys.value = data.items
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.loadError')))
   } finally {
@@ -594,7 +595,7 @@ async function confirmSweep() {
   sweeping.value = true
   try {
     const res = await adminAPI.quotaKeys.sweepExpired()
-    appStore.showSuccess(t('admin.quotaKeys.swept', { count: res.cleared ?? 0 }))
+    appStore.showSuccess(t('admin.quotaKeys.swept', { count: res.swept ?? 0 }))
     showSweepDialog.value = false
     await load()
   } catch (err: unknown) {

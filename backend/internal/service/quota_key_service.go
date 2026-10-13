@@ -35,7 +35,7 @@ type QuotaKeyRepository interface {
 	ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error)
 	// C5a 扩展（D-CURSOR-020）：admin CRUD 读/写支撑方法。
 	List(ctx context.Context) ([]*ent.QuotaKey, error)
-	UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error
+	UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
 	// C3.2 扩展：账号软删编排与刷新扫描（均在调用方已开启的事务内执行，除 ListEligibleForRefresh）。
 	CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error)
@@ -176,9 +176,10 @@ func (s *QuotaKeyService) Create(ctx context.Context, code string, expiresAt *ti
 	return quotaKeyToStatus(qk), nil
 }
 
-// Update 改激活码：code 非 nil 时重加密写 credentials；expiresAt/notes 非 nil 时写元数据。
+// Update 改激活码：code 非 nil 时重加密写 credentials；expiresAt/notes 外层指针非 nil 时写元数据。
+// 元数据外层 nil 表示省略，内层 nil 表示显式清空，否则设置为给定值。
 // 返回脱敏状态。明文 code 只进不出（F1）。
-func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt *time.Time, notes *string) (*QuotaKeyStatus, error) {
+func (s *QuotaKeyService) Update(ctx context.Context, id int64, code *string, expiresAt **time.Time, notes **string) (*QuotaKeyStatus, error) {
 	if code != nil {
 		enc, err := s.enc.Encrypt([]byte(*code))
 		if err != nil {

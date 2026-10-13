@@ -164,15 +164,23 @@ func (r *quotaKeyRepository) List(ctx context.Context) ([]*ent.QuotaKey, error) 
 	return r.client.QuotaKey.Query().All(ctx)
 }
 
-// UpdateMeta 仅更新 expires_at / notes 元数据字段，不触碰 code / status。
-// expiresAt / notes 均为 nil 时为 no-op（不发起 UPDATE）。
-func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error {
+// UpdateMeta 仅更新请求中显式出现的 expires_at / notes 元数据字段，不触碰 code / status。
+// 外层指针 nil 表示省略，内层指针 nil 表示显式清空，否则设置为给定值。
+func (r *quotaKeyRepository) UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error {
 	q := r.client.QuotaKey.UpdateOneID(id)
 	if expiresAt != nil {
-		q = q.SetNillableExpiresAt(expiresAt)
+		if *expiresAt == nil {
+			q = q.ClearExpiresAt()
+		} else {
+			q = q.SetExpiresAt(**expiresAt)
+		}
 	}
 	if notes != nil {
-		q = q.SetNillableNotes(notes)
+		if *notes == nil {
+			q = q.ClearNotes()
+		} else {
+			q = q.SetNotes(**notes)
+		}
 	}
 	_, err := q.Save(ctx)
 	return err

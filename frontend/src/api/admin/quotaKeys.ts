@@ -65,13 +65,22 @@ export interface UpdateQuotaKeyRequest {
   notes?: string | null
 }
 
-export interface SweepExpiredResponse {
-  cleared: number
+export interface QuotaKeyListResponse {
+  items: QuotaKey[]
+  total: number
+  page: number
+  page_size: number
+  pages: number
+  quota_key_summaries?: QuotaKey[]
 }
 
-/** 列出全部激活码（后端 QuotaKeyService.List 返回切片，非分页）。 */
-export async function list(): Promise<QuotaKey[]> {
-  const { data } = await apiClient.get<QuotaKey[]>('/admin/quota_keys')
+export interface SweepExpiredResponse {
+  swept: number
+}
+
+/** 列出全部激活码（后端返回全站统一的分页信封）。 */
+export async function list(): Promise<QuotaKeyListResponse> {
+  const { data } = await apiClient.get<QuotaKeyListResponse>('/admin/quota_keys')
   return data
 }
 

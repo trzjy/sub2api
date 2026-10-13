@@ -78,7 +78,9 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 	// 执行 UpdateMeta：改 expires_at / notes，不动 code / status。
 	expiresAt := time.Now().Add(48 * time.Hour)
 	notes := "updated note " + uid
-	require.NoError(t, repo.UpdateMeta(ctx, createdID, &expiresAt, &notes))
+	expiresAtValue := &expiresAt
+	notesValue := &notes
+	require.NoError(t, repo.UpdateMeta(ctx, createdID, &expiresAtValue, &notesValue))
 
 	// 读回，验证元数据生效。
 	got, err := client.QuotaKey.Get(ctx, createdID)
@@ -95,13 +97,23 @@ func TestQuotaKeyRepository_UpdateMeta(t *testing.T) {
 
 	// expires_at / notes 仅传其一时的分支：只改 notes。
 	notes2 := "only notes " + uid
-	require.NoError(t, repo.UpdateMeta(ctx, createdID, nil, &notes2))
+	notes2Value := &notes2
+	require.NoError(t, repo.UpdateMeta(ctx, createdID, nil, &notes2Value))
 	got2, err := client.QuotaKey.Get(ctx, createdID)
 	require.NoError(t, err)
 	require.NotNil(t, got2.Notes)
 	require.Equal(t, notes2, *got2.Notes)
 	require.NotNil(t, got2.ExpiresAt, "expires_at must remain when only notes is updated")
 	require.WithinDuration(t, expiresAt, *got2.ExpiresAt, time.Second)
+
+	// 显式 null 清空两个可空字段。
+	var clearExpiresAt *time.Time
+	var clearNotes *string
+	require.NoError(t, repo.UpdateMeta(ctx, createdID, &clearExpiresAt, &clearNotes))
+	got3, err := client.QuotaKey.Get(ctx, createdID)
+	require.NoError(t, err)
+	require.Nil(t, got3.ExpiresAt)
+	require.Nil(t, got3.Notes)
 
 	// 清理（软删口径：删除由 SoftDeleteMixin 拦截为置 deleted_at，行保留）。
 	err = client.QuotaKey.DeleteOneID(createdID).Exec(ctx)

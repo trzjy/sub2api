@@ -5105,8 +5105,8 @@ function toggleQuotaKeySelector() {
 async function loadQuotaKeys() {
   quotaKeysLoading.value = true
   try {
-    const res = await adminAPI.quotaKeys.list()
-    quotaKeys.value = (res || []).map(item => ({
+    const data = await adminAPI.quotaKeys.list()
+    quotaKeys.value = data.items.map(item => ({
       id: item.id,
       label: item.code_masked || `#${item.id}`,
       status: item.status || '',

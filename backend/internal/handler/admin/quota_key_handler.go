@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
@@ -185,9 +186,9 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 type updateQuotaKeyRequest struct {
 	// 注意：status 不可编辑（§4.4）。请求体刻意不声明 status 字段，
 	// 因此该维度在服务边界之外即无法被改写。
-	Code      *string    `json:"code"`
-	ExpiresAt *time.Time `json:"expires_at"`
-	Notes     *string    `json:"notes"`
+	Code      *string         `json:"code"`
+	ExpiresAt json.RawMessage `json:"expires_at"`
+	Notes     json.RawMessage `json:"notes"`
 }
 
 // Update 编辑激活码（code / expires_at / notes；status 不允许改）。
@@ -210,7 +211,25 @@ func (h *QuotaKeyHandler) Update(c *gin.Context) {
 		}
 		req.Code = &trimmed
 	}
-	st, err := h.svc.Update(c.Request.Context(), id, req.Code, req.ExpiresAt, req.Notes)
+	var expiresAt **time.Time
+	if req.ExpiresAt != nil {
+		var value *time.Time
+		if err := json.Unmarshal(req.ExpiresAt, &value); err != nil {
+			response.BadRequest(c, "Invalid expires_at: "+err.Error())
+			return
+		}
+		expiresAt = &value
+	}
+	var notes **string
+	if req.Notes != nil {
+		var value *string
+		if err := json.Unmarshal(req.Notes, &value); err != nil {
+			response.BadRequest(c, "Invalid notes: "+err.Error())
+			return
+		}
+		notes = &value
+	}
+	st, err := h.svc.Update(c.Request.Context(), id, req.Code, expiresAt, notes)
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return

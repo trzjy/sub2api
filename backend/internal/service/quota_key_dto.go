@@ -12,7 +12,7 @@ type QuotaKeyStatus struct {
 	Exhausted        bool       `json:"exhausted"`
 	LastRefreshAt    *time.Time `json:"last_refresh_at,omitempty"`
 	LastRefreshError string     `json:"last_refresh_error,omitempty"`
-	CodeValueMasked  string     `json:"code_value_masked"` // 仅末4位掩码，禁明文
+	CodeValueMasked  string     `json:"code_masked"` // 仅末4位掩码，禁明文
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 }
 

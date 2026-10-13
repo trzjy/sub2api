@@ -155,17 +155,17 @@ func (f *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
 	return out, nil
 }
 
-func (f *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt *time.Time, notes *string) error {
+func (f *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt **time.Time, notes **string) error {
 	f.updateMetaCalls++
 	qk, ok := f.byID[id]
 	if !ok {
 		return errQuotaKeyNotFound
 	}
 	if expiresAt != nil {
-		qk.ExpiresAt = expiresAt
+		qk.ExpiresAt = *expiresAt
 	}
 	if notes != nil {
-		qk.Notes = notes
+		qk.Notes = *notes
 	}
 	return nil
 }
@@ -187,7 +187,7 @@ type quotaKeyNotFoundError struct{}
 
 func (e *quotaKeyNotFoundError) Error() string { return "quota key not found" }
 
-// TestQuotaKeyGetStatus_MasksCodeValue 验证 DTO 的 code_value_masked 为掩码、不含明文。
+// TestQuotaKeyGetStatus_MasksCodeValue 验证 DTO 的 code_masked 为掩码、不含明文。
 func TestQuotaKeyGetStatus_MasksCodeValue(t *testing.T) {
 	repo := newFakeQuotaKeyRepo()
 	repo.byID[1] = &ent.QuotaKey{
@@ -203,10 +203,10 @@ func TestQuotaKeyGetStatus_MasksCodeValue(t *testing.T) {
 		t.Fatalf("GetStatus returned error: %v", err)
 	}
 	if dto.CodeValueMasked != "XXXX-****-****-1234" {
-		t.Fatalf("unexpected code_value_masked: %q", dto.CodeValueMasked)
+		t.Fatalf("unexpected code_masked: %q", dto.CodeValueMasked)
 	}
 	if strings.Contains(dto.CodeValueMasked, "enc:v1:someciphertext") {
-		t.Fatalf("code_value_masked leaked ciphertext: %q", dto.CodeValueMasked)
+		t.Fatalf("code_masked leaked ciphertext: %q", dto.CodeValueMasked)
 	}
 }
 
@@ -276,7 +276,7 @@ func TestQuotaKeyRotateCredentials_RoundTrip(t *testing.T) {
 		t.Fatalf("dto leaked plaintext: %q", dto.CodeValueMasked)
 	}
 	if dto.CodeValueMasked != "XXXX-****-****-1234" {
-		t.Fatalf("unexpected code_value_masked: %q", dto.CodeValueMasked)
+		t.Fatalf("unexpected code_masked: %q", dto.CodeValueMasked)
 	}
 }
 
@@ -497,13 +497,21 @@ func (r *testDBRepo) List(ctx context.Context) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().All(ctx)
 }
 
-func (r *testDBRepo) UpdateMeta(ctx context.Context, id int64, expiresAt *time.Time, notes *string) error {
+func (r *testDBRepo) UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error {
 	q := r.client.QuotaKey.UpdateOneID(id)
 	if expiresAt != nil {
-		q = q.SetNillableExpiresAt(expiresAt)
+		if *expiresAt == nil {
+			q = q.ClearExpiresAt()
+		} else {
+			q = q.SetExpiresAt(**expiresAt)
+		}
 	}
 	if notes != nil {
-		q = q.SetNillableNotes(notes)
+		if *notes == nil {
+			q = q.ClearNotes()
+		} else {
+			q = q.SetNotes(**notes)
+		}
 	}
 	_, err := q.Save(ctx)
 	return err
@@ -834,36 +842,53 @@ func TestQuotaKeyService_UpdateReencryptsCode(t *testing.T) {
 	require.NotContains(t, dto.CodeValueMasked, newCode)
 }
 
-// TestQuotaKeyService_UpdateMetaOnly：code=nil → 只调 UpdateMeta，不触碰 credentials/code/status。
-func TestQuotaKeyService_UpdateMetaOnly(t *testing.T) {
+// TestQuotaKeyService_UpdateMetaTriState：省略不改、null 清空、有值设置；均不触碰 credentials/code/status。
+func TestQuotaKeyService_UpdateMetaTriState(t *testing.T) {
 	repo := newFakeQuotaKeyRepo()
-	expiresBefore := time.Now().Add(-time.Hour)
+	initialExpiresAt := time.Now().Add(-time.Hour)
+	initialNotes := "keep"
 	repo.byID[1] = &ent.QuotaKey{
 		ID:            1,
 		CodeEncrypted: "enc:v1:keepme",
 		CodeLast4:     "keep",
 		Status:        "active",
-		ExpiresAt:     &expiresBefore,
+		ExpiresAt:     &initialExpiresAt,
+		Notes:         &initialNotes,
 	}
 
 	svc := NewQuotaKeyService(repo, NewCredcryptEncryptor(), nil, nil)
 
+	_, err := svc.Update(context.Background(), 1, nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 0, repo.updateMetaCalls, "omitted metadata must not call UpdateMeta")
+	require.Equal(t, initialExpiresAt, *repo.byID[1].ExpiresAt)
+	require.Equal(t, initialNotes, *repo.byID[1].Notes)
+
+	var clearExpiresAt *time.Time
+	var clearNotes *string
+	_, err = svc.Update(context.Background(), 1, nil, &clearExpiresAt, &clearNotes)
+	require.NoError(t, err)
+	require.Equal(t, 1, repo.updateMetaCalls)
+	require.Nil(t, repo.byID[1].ExpiresAt, "explicit null must clear expires_at")
+	require.Nil(t, repo.byID[1].Notes, "explicit null must clear notes")
+
 	expiresAt := time.Now().Add(24 * time.Hour)
 	notes := "rotation note"
-	dto, err := svc.Update(context.Background(), 1, nil, &expiresAt, &notes)
+	expiresAtValue := &expiresAt
+	notesValue := &notes
+	dto, err := svc.Update(context.Background(), 1, nil, &expiresAtValue, &notesValue)
 	require.NoError(t, err)
-
-	require.Equal(t, 0, repo.updateCredsCalls, "UpdateCredentials must NOT be called when code is nil")
-	require.Equal(t, 1, repo.updateMetaCalls, "UpdateMeta must be called exactly once")
+	require.Equal(t, 2, repo.updateMetaCalls)
 
 	stored := repo.byID[1]
+	require.Equal(t, 0, repo.updateCredsCalls, "metadata updates must not call UpdateCredentials")
 	require.Equal(t, "enc:v1:keepme", stored.CodeEncrypted, "code must remain untouched")
 	require.Equal(t, "active", stored.Status, "status must remain untouched")
 	require.Equal(t, "keep", stored.CodeLast4, "code_last4 must remain untouched")
 	require.NotNil(t, stored.ExpiresAt)
 	require.WithinDuration(t, expiresAt, *stored.ExpiresAt, time.Second)
 	require.NotNil(t, stored.Notes)
-	require.Equal(t, "rotation note", *stored.Notes)
+	require.Equal(t, notes, *stored.Notes)
 	require.Equal(t, "XXXX-****-****-keep", dto.CodeValueMasked)
 }
 

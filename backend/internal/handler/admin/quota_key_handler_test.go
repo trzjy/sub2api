@@ -171,7 +171,7 @@ func (r *fakeQuotaKeyRepo) List(_ context.Context) ([]*ent.QuotaKey, error) {
 	return r.snapshot(), nil
 }
 
-func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt *time.Time, notes *string) error {
+func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt **time.Time, notes **string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.updateErr != nil {
@@ -181,8 +181,12 @@ func (r *fakeQuotaKeyRepo) UpdateMeta(_ context.Context, id int64, expiresAt *ti
 	if !ok {
 		return &ent.NotFoundError{}
 	}
-	qk.ExpiresAt = expiresAt
-	qk.Notes = notes
+	if expiresAt != nil {
+		qk.ExpiresAt = *expiresAt
+	}
+	if notes != nil {
+		qk.Notes = *notes
+	}
 	return nil
 }
 
@@ -323,6 +327,7 @@ func TestQuotaKeyHandler_List_Success_AndMasked(t *testing.T) {
 			Total             int64 `json:"total"`
 			Page              int   `json:"page"`
 			PageSize          int   `json:"page_size"`
+			Pages             int   `json:"pages"`
 			QuotaKeySummaries []struct {
 				ID         int64  `json:"id"`
 				CodeMasked string `json:"code_masked"`
@@ -333,6 +338,9 @@ func TestQuotaKeyHandler_List_Success_AndMasked(t *testing.T) {
 	require.Equal(t, 0, payload.Code)
 	require.Len(t, payload.Data.Items, 2)
 	require.Equal(t, int64(2), payload.Data.Total)
+	require.Equal(t, 1, payload.Data.Page)
+	require.Equal(t, 2, payload.Data.PageSize)
+	require.Equal(t, 1, payload.Data.Pages)
 	// 顶层汇总与列表同源，一次性给出
 	require.Len(t, payload.Data.QuotaKeySummaries, 2)
 	for _, item := range payload.Data.Items {
@@ -416,13 +424,13 @@ func TestQuotaKeyHandler_Get_Success_AccountPaging(t *testing.T) {
 
 	var payload struct {
 		Data struct {
-			ID              int64  `json:"id"`
-			CodeValueMasked string `json:"code_value_masked"`
-			Status          string `json:"status"`
-			Total           int64  `json:"total"`
-			Page            int    `json:"page"`
-			PageSize        int    `json:"page_size"`
-			Accounts        []struct {
+			ID         int64  `json:"id"`
+			CodeMasked string `json:"code_masked"`
+			Status     string `json:"status"`
+			Total      int64  `json:"total"`
+			Page       int    `json:"page"`
+			PageSize   int    `json:"page_size"`
+			Accounts   []struct {
 				ID       int64  `json:"id"`
 				Platform string `json:"platform"`
 			} `json:"accounts"`
@@ -430,7 +438,8 @@ func TestQuotaKeyHandler_Get_Success_AccountPaging(t *testing.T) {
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
-	require.Equal(t, "XXXX-****-****-1234", payload.Data.CodeValueMasked)
+	require.NotContains(t, rec.Body.String(), `"code_value_masked"`)
+	require.Equal(t, "XXXX-****-****-1234", payload.Data.CodeMasked)
 	require.Equal(t, int64(3), payload.Data.Total)
 	require.Equal(t, 1, payload.Data.Page)
 	require.Equal(t, 2, payload.Data.PageSize)
@@ -486,6 +495,52 @@ func TestQuotaKeyHandler_Update_Success_StatusImmutable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	require.Equal(t, "XXXX-****-****-1234", payload.Data.CodeMasked)
 	require.Equal(t, "active", payload.Data.Status, "status 不可通过 PUT 改写")
+}
+
+func TestQuotaKeyHandler_Update_MetaTriState(t *testing.T) {
+	initialExpiresAt := time.Date(2026, time.October, 20, 12, 0, 0, 0, time.UTC)
+	initialNotes := "keep"
+	setExpiresAt := time.Date(2026, time.November, 1, 8, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name        string
+		body        string
+		wantExpires *time.Time
+		wantNotes   *string
+	}{
+		{name: "omitted keeps values", body: `{}`, wantExpires: &initialExpiresAt, wantNotes: &initialNotes},
+		{name: "null clears values", body: `{"expires_at":null,"notes":null}`},
+		{name: "values replace values", body: `{"expires_at":"2026-11-01T08:30:00Z","notes":"updated"}`, wantExpires: &setExpiresAt, wantNotes: stringPointer("updated")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newFakeQuotaKeyRepo()
+			qk := repo.seed(9, "1234", "active", false)
+			qk.ExpiresAt = &initialExpiresAt
+			qk.Notes = &initialNotes
+			router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
+
+			rec := doQuotaKeyJSON(router, http.MethodPut, "/api/v1/admin/quota_keys/9", tt.body)
+			require.Equal(t, http.StatusOK, rec.Code)
+			if tt.wantExpires == nil {
+				require.Nil(t, qk.ExpiresAt)
+			} else {
+				require.NotNil(t, qk.ExpiresAt)
+				require.Equal(t, *tt.wantExpires, *qk.ExpiresAt)
+			}
+			if tt.wantNotes == nil {
+				require.Nil(t, qk.Notes)
+			} else {
+				require.NotNil(t, qk.Notes)
+				require.Equal(t, *tt.wantNotes, *qk.Notes)
+			}
+		})
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func TestQuotaKeyHandler_Update_InvalidID(t *testing.T) {
@@ -602,6 +657,7 @@ func TestQuotaKeyHandler_SweepExpired_Success(t *testing.T) {
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.NotContains(t, rec.Body.String(), `"cleared"`)
 	require.Equal(t, 1, payload.Data.Swept)
 
 	all, err := client.QuotaKey.Query().All(ctx)
