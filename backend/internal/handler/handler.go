@@ -53,6 +53,7 @@ type AdminHandlers struct {
 	XianguanjiaConfig      *admin.XianguanjiaConfigHandler // D3: 闲管家 admin 凭证配置入口
 	XianguanjiaPool        *admin.XianguanjiaPoolHandler   // D4d: 闲管家 admin 卡种管理 + 批量推仓入口
 	XianguanjiaSupply      *admin.XianguanjiaSupplyHandler // D6e: 闲管家 admin 货源模式凭证配置入口
+	QuotaKey               *admin.QuotaKeyHandler          // D-CURSOR-021: 激活码管理面（§4.4，8 端点）
 }
 
 // Handlers contains all HTTP handlers

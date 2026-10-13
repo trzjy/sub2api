@@ -264,6 +264,26 @@ func (r *accountRepository) Create(ctx context.Context, account *service.Account
 	return nil
 }
 
+// CreateWithTx 在调用方指定的事务内插入账号行并提交（由调用方统一 Commit）。
+//
+// 存在理由：≤15 强制集中化后，"归属某激活码的 working 计数判定"与"账号行写入"必须
+// 落在同一 advisory 互斥域 / 同一事务内（否则判定与写入分属两个事务，仍有并发漏网窗口）。
+// 本方法复用既有 createAccountRecord 与既有 scheduler outbox 入口，不新增写入语义、
+// 不开新事务、不自行提交。
+func (r *accountRepository) CreateWithTx(ctx context.Context, tx *dbent.Tx, account *service.Account) error {
+	if tx == nil {
+		return r.Create(ctx, account)
+	}
+	txClient := tx.Client()
+	if err := createAccountRecord(ctx, txClient, account); err != nil {
+		return err
+	}
+	if err := enqueueSchedulerOutbox(ctx, txClient, service.SchedulerOutboxEventAccountChanged, &account.ID, nil, buildSchedulerGroupPayload(account.GroupIDs)); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account create failed: account=%d err=%v", account.ID, err)
+	}
+	return nil
+}
+
 func createAccountRecord(ctx context.Context, client *dbent.Client, account *service.Account) error {
 	if account == nil {
 		return service.ErrAccountNilInput
@@ -329,6 +349,9 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	builder.SetQuotaDimension(dbaccount.QuotaDimension(account.QuotaDimensionOrDefault()))
 	if account.ParentAccountID != nil {
 		builder.SetParentAccountID(*account.ParentAccountID)
+	}
+	if account.QuotaKeyID != nil {
+		builder.SetQuotaKeyID(*account.QuotaKeyID)
 	}
 
 	created, err := builder.Save(ctx)
@@ -4761,6 +4784,7 @@ func accountEntityToService(m *dbent.Account) (*service.Account, error) {
 		SessionWindowStatus:     derefString(m.SessionWindowStatus),
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
+		QuotaKeyID:              m.QuotaKeyID,
 	}, nil
 }
 

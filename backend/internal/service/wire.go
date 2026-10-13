@@ -854,6 +854,35 @@ func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingServ
 	return svc
 }
 
+// ProvideQuotaKeySweeper 构造并启动过期激活码清扫器（方案 §3.1 / §4.3，C7）。
+// 周期将 expires_at < now 的激活码标 expired；只改 status 维度、不触碰 accounts、
+// 不做拉号/删除/补池。opsRepo 用于写 job 心跳（照 ops_cleanup 同型），
+// entClient 用于开启每轮事务（UpdateStatusFields 需要 *ent.Tx）。
+func ProvideQuotaKeySweeper(repo QuotaKeyRepository, opsRepo OpsRepository, entClient *dbent.Client) *QuotaKeySweeper {
+	svc := NewQuotaKeySweeper(repo, opsRepo, entClient)
+	svc.Start()
+	return svc
+}
+
+// ProvideQuotaKeyReconciler 构造并启动周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
+// 进程崩溃 / 漏触发后，重新发现 working_count < 15 的激活码并调 PullAccounts 补池；
+// 串行逐 key 拉号（每 key 独立 advisory 锁，PullAccounts 单批即返回，不占死 worker）。
+// 直接复用 QuotaKeyService.PullAccounts（不新造计数查询 / 不新造锁），扫描走
+// QuotaKeyRepository.ListEligibleForRefresh（已存在）。
+func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository) *QuotaKeyReconciler {
+	svc := NewQuotaKeyReconciler(repo, puller, opsRepo)
+	svc.Start()
+	return svc
+}
+
+// ProvideCursorAccountRetentionService 创建 Cursor 账号/流水定期清理服务并启动周期清理协程（C10）。
+// 停止逻辑挂在 cmd/server 的 provideCleanup（同 AuditLogService 装配模式）。
+func ProvideCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService, opsRepo OpsRepository) *CursorAccountRetentionService {
+	svc := NewCursorAccountRetentionService(usageCleanupRepo, db, settingService, opsRepo)
+	svc.Start()
+	return svc
+}
+
 func buildIdempotencyConfig(cfg *config.Config) IdempotencyConfig {
 	idempotencyCfg := DefaultIdempotencyConfig()
 	if cfg != nil {
@@ -1340,6 +1369,9 @@ var ProviderSet = wire.NewSet(
 	ProvideOpsService,
 	ProvideOpsIngressRejectAggregator,
 	ProvideAuditLogService,
+	ProvideQuotaKeySweeper,
+	ProvideQuotaKeyReconciler,
+	ProvideCursorAccountRetentionService,
 	ProvideOpsMetricsCollector,
 	ProvideOpsAggregationService,
 	ProvideOpsAlertEvaluatorService,

@@ -118,6 +118,14 @@ func (Account) Fields() []ent.Field {
 			Optional().Nillable().
 			Comment("Original proxy id replaced by expiry-fallback; for manual revert. NULL = not in fallback."),
 
+		// quota_key_id: 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
+		// 非 cursor 平台允许 NULL；cursor 平台必填（应用层校验 + DB CHECK 双重兜底）。
+		// 与 C1 quota_key.go 的 edge.To("accounts", Account.Type) 通过外键列配对。
+		field.Int64("quota_key_id").
+			Optional().
+			Nillable().
+			Comment("Owner activation code (NULL for non-cursor platforms; required when platform=cursor)."),
+
 		// concurrency: 账户最大并发请求数
 		// 用于限制同一时间对该账户发起的请求数量
 		field.Int("concurrency").
@@ -250,6 +258,14 @@ func (Account) Edges() []ent.Edge {
 			Unique(),
 		// usage_logs: 该账户的使用日志
 		edge.To("usage_logs", UsageLog.Type),
+		// quota_key: 归属的 Cursor 激活码（quota key），1:N 反向边（v3.3 §4.2 / C2）。
+		// 与 C1 quota_key.go 的 edge.To("accounts", Account.Type) 配对；外键列 quota_key_id。
+		// cursor 平台必填（应用层校验 + DB CHECK 兜底），非 cursor 平台允许 NULL。
+		edge.From("quota_key", QuotaKey.Type).
+			Field("quota_key_id").
+			Ref("accounts").
+			Unique().
+			Comment("Owner activation code. Required for cursor platform."),
 	}
 }
 

@@ -38,6 +38,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -898,6 +899,33 @@ func (f TraverseProxy) Traverse(ctx context.Context, q ent.Query) error {
 	return fmt.Errorf("unexpected query type %T. expect *ent.ProxyQuery", q)
 }
 
+// The QuotaKeyFunc type is an adapter to allow the use of ordinary function as a Querier.
+type QuotaKeyFunc func(context.Context, *ent.QuotaKeyQuery) (ent.Value, error)
+
+// Query calls f(ctx, q).
+func (f QuotaKeyFunc) Query(ctx context.Context, q ent.Query) (ent.Value, error) {
+	if q, ok := q.(*ent.QuotaKeyQuery); ok {
+		return f(ctx, q)
+	}
+	return nil, fmt.Errorf("unexpected query type %T. expect *ent.QuotaKeyQuery", q)
+}
+
+// The TraverseQuotaKey type is an adapter to allow the use of ordinary function as Traverser.
+type TraverseQuotaKey func(context.Context, *ent.QuotaKeyQuery) error
+
+// Intercept is a dummy implementation of Intercept that returns the next Querier in the pipeline.
+func (f TraverseQuotaKey) Intercept(next ent.Querier) ent.Querier {
+	return next
+}
+
+// Traverse calls f(ctx, q).
+func (f TraverseQuotaKey) Traverse(ctx context.Context, q ent.Query) error {
+	if q, ok := q.(*ent.QuotaKeyQuery); ok {
+		return f(ctx, q)
+	}
+	return fmt.Errorf("unexpected query type %T. expect *ent.QuotaKeyQuery", q)
+}
+
 // The RedeemBatchFunc type is an adapter to allow the use of ordinary function as a Querier.
 type RedeemBatchFunc func(context.Context, *ent.RedeemBatchQuery) (ent.Value, error)
 
@@ -1472,6 +1500,8 @@ func NewQuery(q ent.Query) (Query, error) {
 		return &query[*ent.PromoIntelSourceQuery, predicate.PromoIntelSource, promointelsource.OrderOption]{typ: ent.TypePromoIntelSource, tq: q}, nil
 	case *ent.ProxyQuery:
 		return &query[*ent.ProxyQuery, predicate.Proxy, proxy.OrderOption]{typ: ent.TypeProxy, tq: q}, nil
+	case *ent.QuotaKeyQuery:
+		return &query[*ent.QuotaKeyQuery, predicate.QuotaKey, quotakey.OrderOption]{typ: ent.TypeQuotaKey, tq: q}, nil
 	case *ent.RedeemBatchQuery:
 		return &query[*ent.RedeemBatchQuery, predicate.RedeemBatch, redeembatch.OrderOption]{typ: ent.TypeRedeemBatch, tq: q}, nil
 	case *ent.RedeemCodeQuery:

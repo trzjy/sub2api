@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 )
 
@@ -177,6 +178,20 @@ func (_c *AccountCreate) SetProxyFallbackOriginID(v int64) *AccountCreate {
 func (_c *AccountCreate) SetNillableProxyFallbackOriginID(v *int64) *AccountCreate {
 	if v != nil {
 		_c.SetProxyFallbackOriginID(*v)
+	}
+	return _c
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (_c *AccountCreate) SetQuotaKeyID(v int64) *AccountCreate {
+	_c.mutation.SetQuotaKeyID(v)
+	return _c
+}
+
+// SetNillableQuotaKeyID sets the "quota_key_id" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableQuotaKeyID(v *int64) *AccountCreate {
+	if v != nil {
+		_c.SetQuotaKeyID(*v)
 	}
 	return _c
 }
@@ -528,6 +543,11 @@ func (_c *AccountCreate) AddUsageLogs(v ...*UsageLog) *AccountCreate {
 		ids[i] = v[i].ID
 	}
 	return _c.AddUsageLogIDs(ids...)
+}
+
+// SetQuotaKey sets the "quota_key" edge to the QuotaKey entity.
+func (_c *AccountCreate) SetQuotaKey(v *QuotaKey) *AccountCreate {
+	return _c.SetQuotaKeyID(v.ID)
 }
 
 // Mutation returns the AccountMutation object of the builder.
@@ -963,6 +983,23 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 		}
 		_spec.Edges = append(_spec.Edges, edge)
 	}
+	if nodes := _c.mutation.QuotaKeyIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   account.QuotaKeyTable,
+			Columns: []string{account.QuotaKeyColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_node.QuotaKeyID = &nodes[0]
+		_spec.Edges = append(_spec.Edges, edge)
+	}
 	return _node, _spec
 }
 
@@ -1210,6 +1247,24 @@ func (u *AccountUpsert) AddProxyFallbackOriginID(v int64) *AccountUpsert {
 // ClearProxyFallbackOriginID clears the value of the "proxy_fallback_origin_id" field.
 func (u *AccountUpsert) ClearProxyFallbackOriginID() *AccountUpsert {
 	u.SetNull(account.FieldProxyFallbackOriginID)
+	return u
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (u *AccountUpsert) SetQuotaKeyID(v int64) *AccountUpsert {
+	u.Set(account.FieldQuotaKeyID, v)
+	return u
+}
+
+// UpdateQuotaKeyID sets the "quota_key_id" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateQuotaKeyID() *AccountUpsert {
+	u.SetExcluded(account.FieldQuotaKeyID)
+	return u
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (u *AccountUpsert) ClearQuotaKeyID() *AccountUpsert {
+	u.SetNull(account.FieldQuotaKeyID)
 	return u
 }
 
@@ -1828,6 +1883,27 @@ func (u *AccountUpsertOne) UpdateProxyFallbackOriginID() *AccountUpsertOne {
 func (u *AccountUpsertOne) ClearProxyFallbackOriginID() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearProxyFallbackOriginID()
+	})
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (u *AccountUpsertOne) SetQuotaKeyID(v int64) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetQuotaKeyID(v)
+	})
+}
+
+// UpdateQuotaKeyID sets the "quota_key_id" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateQuotaKeyID() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateQuotaKeyID()
+	})
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (u *AccountUpsertOne) ClearQuotaKeyID() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearQuotaKeyID()
 	})
 }
 
@@ -2669,6 +2745,27 @@ func (u *AccountUpsertBulk) UpdateProxyFallbackOriginID() *AccountUpsertBulk {
 func (u *AccountUpsertBulk) ClearProxyFallbackOriginID() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearProxyFallbackOriginID()
+	})
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (u *AccountUpsertBulk) SetQuotaKeyID(v int64) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetQuotaKeyID(v)
+	})
+}
+
+// UpdateQuotaKeyID sets the "quota_key_id" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateQuotaKeyID() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateQuotaKeyID()
+	})
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (u *AccountUpsertBulk) ClearQuotaKeyID() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearQuotaKeyID()
 	})
 }
 

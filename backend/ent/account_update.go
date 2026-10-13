@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 )
 
@@ -229,6 +230,26 @@ func (_u *AccountUpdate) AddProxyFallbackOriginID(v int64) *AccountUpdate {
 // ClearProxyFallbackOriginID clears the value of the "proxy_fallback_origin_id" field.
 func (_u *AccountUpdate) ClearProxyFallbackOriginID() *AccountUpdate {
 	_u.mutation.ClearProxyFallbackOriginID()
+	return _u
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (_u *AccountUpdate) SetQuotaKeyID(v int64) *AccountUpdate {
+	_u.mutation.SetQuotaKeyID(v)
+	return _u
+}
+
+// SetNillableQuotaKeyID sets the "quota_key_id" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableQuotaKeyID(v *int64) *AccountUpdate {
+	if v != nil {
+		_u.SetQuotaKeyID(*v)
+	}
+	return _u
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (_u *AccountUpdate) ClearQuotaKeyID() *AccountUpdate {
+	_u.mutation.ClearQuotaKeyID()
 	return _u
 }
 
@@ -687,6 +708,11 @@ func (_u *AccountUpdate) AddUsageLogs(v ...*UsageLog) *AccountUpdate {
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// SetQuotaKey sets the "quota_key" edge to the QuotaKey entity.
+func (_u *AccountUpdate) SetQuotaKey(v *QuotaKey) *AccountUpdate {
+	return _u.SetQuotaKeyID(v.ID)
+}
+
 // Mutation returns the AccountMutation object of the builder.
 func (_u *AccountUpdate) Mutation() *AccountMutation {
 	return _u.mutation
@@ -765,6 +791,12 @@ func (_u *AccountUpdate) RemoveUsageLogs(v ...*UsageLog) *AccountUpdate {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearQuotaKey clears the "quota_key" edge to the QuotaKey entity.
+func (_u *AccountUpdate) ClearQuotaKey() *AccountUpdate {
+	_u.mutation.ClearQuotaKey()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -1235,6 +1267,35 @@ func (_u *AccountUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.QuotaKeyCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   account.QuotaKeyTable,
+			Columns: []string{account.QuotaKeyColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.QuotaKeyIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   account.QuotaKeyTable,
+			Columns: []string{account.QuotaKeyColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{account.Label}
@@ -1453,6 +1514,26 @@ func (_u *AccountUpdateOne) AddProxyFallbackOriginID(v int64) *AccountUpdateOne 
 // ClearProxyFallbackOriginID clears the value of the "proxy_fallback_origin_id" field.
 func (_u *AccountUpdateOne) ClearProxyFallbackOriginID() *AccountUpdateOne {
 	_u.mutation.ClearProxyFallbackOriginID()
+	return _u
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (_u *AccountUpdateOne) SetQuotaKeyID(v int64) *AccountUpdateOne {
+	_u.mutation.SetQuotaKeyID(v)
+	return _u
+}
+
+// SetNillableQuotaKeyID sets the "quota_key_id" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableQuotaKeyID(v *int64) *AccountUpdateOne {
+	if v != nil {
+		_u.SetQuotaKeyID(*v)
+	}
+	return _u
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (_u *AccountUpdateOne) ClearQuotaKeyID() *AccountUpdateOne {
+	_u.mutation.ClearQuotaKeyID()
 	return _u
 }
 
@@ -1911,6 +1992,11 @@ func (_u *AccountUpdateOne) AddUsageLogs(v ...*UsageLog) *AccountUpdateOne {
 	return _u.AddUsageLogIDs(ids...)
 }
 
+// SetQuotaKey sets the "quota_key" edge to the QuotaKey entity.
+func (_u *AccountUpdateOne) SetQuotaKey(v *QuotaKey) *AccountUpdateOne {
+	return _u.SetQuotaKeyID(v.ID)
+}
+
 // Mutation returns the AccountMutation object of the builder.
 func (_u *AccountUpdateOne) Mutation() *AccountMutation {
 	return _u.mutation
@@ -1989,6 +2075,12 @@ func (_u *AccountUpdateOne) RemoveUsageLogs(v ...*UsageLog) *AccountUpdateOne {
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveUsageLogIDs(ids...)
+}
+
+// ClearQuotaKey clears the "quota_key" edge to the QuotaKey entity.
+func (_u *AccountUpdateOne) ClearQuotaKey() *AccountUpdateOne {
+	_u.mutation.ClearQuotaKey()
+	return _u
 }
 
 // Where appends a list predicates to the AccountUpdate builder.
@@ -2482,6 +2574,35 @@ func (_u *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err er
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(usagelog.FieldID, field.TypeInt64),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.QuotaKeyCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   account.QuotaKeyTable,
+			Columns: []string{account.QuotaKeyColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.QuotaKeyIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.M2O,
+			Inverse: true,
+			Table:   account.QuotaKeyTable,
+			Columns: []string{account.QuotaKeyColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(quotakey.FieldID, field.TypeInt64),
 			},
 		}
 		for _, k := range nodes {

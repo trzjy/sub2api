@@ -2,6 +2,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -78,6 +79,11 @@ type AccountHandler struct {
 	// freshnessAlertService 是 D4 状态新鲜度陈旧告警服务（可选注入）；管理端透传账号两维
 	// 观测/阈值/告警状态时使用。未注入时告警状态字段缺省为 false。
 	freshnessAlertService *service.FreshnessAlertService
+
+	// quotaKeyService 是 Cursor 激活码（quota key）服务（可选注入，C5b）：
+	// 账号列表/详情据此回填 quota_key_id / quota_key_label（= code_masked），
+	// 列表顶层一次性填充 quota_key_summaries（§4.4）。未注入时两个脱敏字段缺省省略。
+	quotaKeyService *service.QuotaKeyService
 }
 
 // codeBuddyAccountRefresher 是管理端账号「刷新」动作所需的 CodeBuddy 能力，
@@ -118,6 +124,12 @@ func (h *AccountHandler) SetWebLoginCaptchaHelper(helper service.LocalCaptchaHel
 // SetFreshnessAlertService 注入 D4 状态新鲜度陈旧告警服务（可选；管理端账号观测透传用）。
 func (h *AccountHandler) SetFreshnessAlertService(svc *service.FreshnessAlertService) {
 	h.freshnessAlertService = svc
+}
+
+// SetQuotaKeyService 注入 Cursor 激活码服务（可选；同 SetUpstreamBillingProbeService
+// 等 setter 模式）。未注入时列表/详情的 quota_key 脱敏字段保持缺省。
+func (h *AccountHandler) SetQuotaKeyService(svc *service.QuotaKeyService) {
+	h.quotaKeyService = svc
 }
 
 func (h *AccountHandler) SetAccountBalanceProbeService(probe *service.AccountBalanceProbeService) {
@@ -173,6 +185,7 @@ type CreateAccountRequest struct {
 	Priority                int            `json:"priority"`
 	RateMultiplier          *float64       `json:"rate_multiplier"`
 	LoadFactor              *int           `json:"load_factor"`
+	QuotaKeyID              *int64         `json:"quota_key_id,omitempty"` // 归属激活码 ID（v3.4 §4.4：cursor 建号必填，其余平台可省略）
 	GroupIDs                []int64        `json:"group_ids"`
 	ExpiresAt               *int64         `json:"expires_at"`
 	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
@@ -200,6 +213,30 @@ type UpdateAccountRequest struct {
 	ProbeEnabled            *bool          `json:"upstream_billing_probe_enabled"`
 	RateSyncEnabled         *bool          `json:"upstream_billing_rate_sync_enabled"`
 	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
+	// QuotaKeyID 归属激活码 ID（v3.4 §4.4）。用 json.RawMessage 而非 *int64 承载三态：
+	// 字段缺失 = 未提供（沿用现有归属）；显式 null = 清空（仅非 cursor 允许）；数值 = 设置。
+	// *int64 无法区分"字段缺失"与"显式 null"（两者都解成 nil）。
+	QuotaKeyID json.RawMessage `json:"quota_key_id,omitempty"`
+}
+
+// parseQuotaKeyIDUpdate 解析更新请求中的 quota_key_id 三态。
+//
+//   - 字段缺失（raw 为空）→ (nil, false)：未提供，沿用现有归属
+//   - 显式 null          → (nil, true)：清空归属
+//   - 数值               → (&id, true)：设置为该激活码
+func parseQuotaKeyIDUpdate(raw json.RawMessage) (*int64, bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, false, nil
+	}
+	if string(trimmed) == "null" {
+		return nil, true, nil
+	}
+	var id int64
+	if err := json.Unmarshal(trimmed, &id); err != nil {
+		return nil, true, fmt.Errorf("quota_key_id must be an integer or null")
+	}
+	return &id, true, nil
 }
 
 // BulkUpdateAccountsRequest represents the payload for bulk editing accounts
@@ -679,6 +716,86 @@ func (h *AccountHandler) listAccountSchedulerScoreFilterPool(
 	return accounts
 }
 
+// loadQuotaKeySummaries 一次性取出本页涉及的激活码汇总：id → 脱敏 summary。
+//
+// 只在存在任意 quota_key_id 时才查询，且无论本页多少账号都只调用一次
+// QuotaKeyService.List（常量次查询，杜绝 N+1）。查询失败按降级处理：
+// 仅缺失这两个展示字段，不影响账号列表主数据（§4.4 展示层增强，非主链路）。
+func (h *AccountHandler) loadQuotaKeySummaries(ctx context.Context, quotaKeyIDs []int64) map[int64]dto.QuotaKey {
+	if h == nil || h.quotaKeyService == nil || len(quotaKeyIDs) == 0 {
+		return nil
+	}
+	wanted := make(map[int64]struct{}, len(quotaKeyIDs))
+	for _, id := range quotaKeyIDs {
+		wanted[id] = struct{}{}
+	}
+	statuses, err := h.quotaKeyService.List(ctx)
+	if err != nil {
+		slog.Warn("admin_account_quota_key_summaries_failed", "error", err)
+		return nil
+	}
+	out := make(map[int64]dto.QuotaKey, len(statuses))
+	for _, st := range statuses {
+		if st == nil {
+			continue
+		}
+		if _, ok := wanted[st.ID]; !ok {
+			continue
+		}
+		out[st.ID] = dto.QuotaKey{
+			ID:         st.ID,
+			CodeMasked: st.CodeValueMasked,
+			Status:     st.Status,
+			Exhausted:  st.Exhausted,
+		}
+	}
+	return out
+}
+
+// applyQuotaKeyLabel 回填单个账号 DTO 的 quota_key_id / quota_key_label（F7：
+// 账号项只带两个脱敏标量，绝不内嵌 QuotaKey 聚合对象）。
+func applyQuotaKeyLabel(acc *dto.Account, quotaKeyID *int64, summaries map[int64]dto.QuotaKey) {
+	if acc == nil || quotaKeyID == nil {
+		return
+	}
+	summary, ok := summaries[*quotaKeyID]
+	if !ok {
+		return
+	}
+	acc.QuotaKeyID = quotaKeyID
+	label := summary.CodeMasked
+	acc.QuotaKeyLabel = &label
+}
+
+// quotaKeySummariesOrdered 按给定的激活码 ID 顺序输出汇总（稳定顺序：便于 ETag 与快照对比）。
+func quotaKeySummariesOrdered(quotaKeyIDs []int64, summaries map[int64]dto.QuotaKey) []dto.QuotaKey {
+	out := make([]dto.QuotaKey, 0, len(quotaKeyIDs))
+	for _, id := range quotaKeyIDs {
+		if summary, ok := summaries[id]; ok {
+			out = append(out, summary)
+		}
+	}
+	return out
+}
+
+// collectQuotaKeyIDs 汇总本页账号涉及的激活码 ID（去重）。
+func collectQuotaKeyIDs(accounts []service.Account) []int64 {
+	seen := make(map[int64]struct{})
+	ids := make([]int64, 0, len(accounts))
+	for i := range accounts {
+		id := accounts[i].QuotaKeyID
+		if id == nil {
+			continue
+		}
+		if _, dup := seen[*id]; dup {
+			continue
+		}
+		seen[*id] = struct{}{}
+		ids = append(ids, *id)
+	}
+	return ids
+}
+
 // List handles listing all accounts with pagination
 // GET /api/v1/admin/accounts
 func (h *AccountHandler) List(c *gin.Context) {
@@ -732,6 +849,12 @@ func (h *AccountHandler) List(c *gin.Context) {
 			return
 		}
 	}
+
+	// §4.4：本页涉及的激活码一次性取全（常量次查询），供账号项 label 与顶层
+	// quota_key_summaries 复用，杜绝逐账号回填导致的 N+1。
+	quotaKeyIDs := collectQuotaKeyIDs(accounts)
+	quotaKeysByID := h.loadQuotaKeySummaries(c.Request.Context(), quotaKeyIDs)
+	quotaKeySummaries := quotaKeySummariesOrdered(quotaKeyIDs, quotaKeysByID)
 
 	// Get current concurrency counts for all accounts
 	accountIDs := make([]int64, len(accounts))
@@ -841,6 +964,8 @@ func (h *AccountHandler) List(c *gin.Context) {
 				accountResponse.GroupIDs = filterSimpleModeGroupIDs(accountResponse.GroupIDs, simpleModeCompositeServiceGroupIDs(acc))
 			}
 		}
+		// 回填脱敏标量 quota_key_id / quota_key_label（F7：不内嵌 QuotaKey 聚合）。
+		applyQuotaKeyLabel(accountResponse, acc.QuotaKeyID, quotaKeysByID)
 		item := AccountWithConcurrency{
 			Account:            accountResponse,
 			simpleMode:         h.isSimpleMode(),
@@ -898,7 +1023,8 @@ func (h *AccountHandler) List(c *gin.Context) {
 				return
 			}
 		}
-		response.Paginated(c, compact, total, page, pageSize)
+		// 顶层附带 quota_key_summaries（无 cursor 账号时 omitempty，形态与既有一致）。
+		respondQuotaKeySummaries(c, compact, total, page, pageSize, quotaKeySummaries)
 		return
 	}
 
@@ -912,7 +1038,8 @@ func (h *AccountHandler) List(c *gin.Context) {
 		}
 	}
 
-	response.Paginated(c, result, total, page, pageSize)
+	// 顶层附带 quota_key_summaries（无 cursor 账号时 omitempty，形态与既有一致）。
+	respondQuotaKeySummaries(c, result, total, page, pageSize, quotaKeySummaries)
 }
 
 func buildAccountsListETag[T any](
@@ -991,7 +1118,12 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 		}
 	}
 
-	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
+	accountResponse := h.buildAccountResponseWithRuntime(c.Request.Context(), account)
+	// §4.4：详情项同样回填 quota_key_id / quota_key_label（脱敏标量，F7）。
+	if qkID := account.QuotaKeyID; qkID != nil {
+		applyQuotaKeyLabel(accountResponse.Account, qkID, h.loadQuotaKeySummaries(c.Request.Context(), []int64{*qkID}))
+	}
+	response.Success(c, accountResponse)
 }
 
 // CheckMixedChannel handles checking mixed channel risk for account-group binding.
@@ -1098,6 +1230,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Priority:              req.Priority,
 			RateMultiplier:        req.RateMultiplier,
 			LoadFactor:            req.LoadFactor,
+			QuotaKeyID:            req.QuotaKeyID,
 			GroupIDs:              req.GroupIDs,
 			ExpiresAt:             req.ExpiresAt,
 			AutoPauseOnExpired:    req.AutoPauseOnExpired,
@@ -1238,6 +1371,13 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	// 确定是否跳过混合渠道检查
 	skipCheck := req.ConfirmMixedChannelRisk != nil && *req.ConfirmMixedChannelRisk
 
+	// 归属激活码三态（#3）：非法值在进 service 前拦掉，避免 400 被泛化成 500。
+	quotaKeyID, quotaKeyIDSet, err := parseQuotaKeyIDUpdate(req.QuotaKeyID)
+	if err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
 	// 登录会话去重（排除自身）：web 平台账号更新携带 Cookie/access_token 时，
 	// 不得把它改成其他账号已持有的登录态（否则两个账号共享同一网页登录会话）。
 	// 去重门仅对"合并后目标 access_mode 仍为 web"生效：请求 credentials 中
@@ -1276,6 +1416,8 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		Priority:              req.Priority,    // 指针类型，nil 表示未提供
 		RateMultiplier:        req.RateMultiplier,
 		LoadFactor:            req.LoadFactor,
+		QuotaKeyID:            quotaKeyID,
+		QuotaKeyIDSet:         quotaKeyIDSet,
 		Status:                req.Status,
 		GroupIDs:              req.GroupIDs,
 		ExpiresAt:             req.ExpiresAt,

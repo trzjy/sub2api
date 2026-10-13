@@ -348,7 +348,17 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xgjSupplyStore := xianguanjia.NewSupplyConfigStore(db, secretEncryptor) // D6i: D6a DB 实现
 	// D4i: 闲管家 admin 卡种/推仓 handler 在 handler.ProvideAdminHandlers 内构造
 	// （接线胶水由 D4i 交付：db/settingRepository 直传，factory/marker 在 handler 内组装）。
-	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository, xgjSupplyStore)
+	// D-CURSOR-017 装配：过期激活码清扫器（方案 §3.1 / §4.3，C7）。
+	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
+	quotaKeySweeper := service.ProvideQuotaKeySweeper(quotaKeyRepository, opsRepository, client)
+	// D-CURSOR-018 装配：周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
+	// puller 复用既有 QuotaKeyService（PullAccounts 内部 advisory 锁 + 计数停限）。
+	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), nil, client)
+	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository)
+	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
+	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。
+	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper)
+	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository, xgjSupplyStore, quotaKeyHandler, quotaKeyService)
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)
 	userMessageQueueService := service.ProvideUserMessageQueueService(userMsgQueueCache, rpmCache, configConfig)
@@ -445,7 +455,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	xianyuAlertService := service.ProvideXianyuAlertService(xianyuControlService, xianyuSettingStore, notificationEmailService)
 	xianyuSyncService := service.ProvideXianyuSyncService(xianyuControlService, xianyuWorkerService, xianyuAlertService, db, settingService)
 	xianyuReconcileService := service.ProvideXianyuReconcileService(xianyuControlService, xianyuWorkerService, xianyuDeliveryStateUpdater, xianyuDeliveryRepository, xianyuWorkerDeliveryRepository, xianyuControlRepository, redeemCodeRepository, xianyuSettingStore, xianyuAlertService)
-	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, channelMonitorProbeWorker, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService)
+	// D-CURSOR-017 装配：Cursor 账号保留期清理（C10）。
+	cursorAccountRetentionService := service.ProvideCursorAccountRetentionService(usageCleanupRepository, db, settingService, opsRepository)
+	v2 := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, codeBuddyQuotaCheckService, accountBalanceProbeCheckService, accountHealthRecoveryProbeService, openAICodexVersionSyncService, proxyExpiryService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, customModelPricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, backupService, paymentOrderExpiryService, channelMonitorRunner, promoIntelService, channelMonitorV2Aggregator, channelMonitorProbeWorker, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, xianyuSyncService, xianyuReconcileService, xianyuExposureService, promptService, pluginManager, cnQuotaLifecycleService, quotaKeySweeper, cursorAccountRetentionService, quotaKeyReconciler)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
@@ -539,6 +551,9 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 	quotaLifecycle *service.CNQuotaLifecycleService,
+	quotaKeySweeper *service.QuotaKeySweeper,
+	cursorAccountRetention *service.CursorAccountRetentionService,
+	quotaKeyReconciler *service.QuotaKeyReconciler,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -845,6 +860,24 @@ func provideCleanup(
 			{"CNQuotaLifecycleService", func() error {
 				if quotaLifecycle != nil {
 					quotaLifecycle.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeySweeper", func() error {
+				if quotaKeySweeper != nil {
+					quotaKeySweeper.Stop()
+				}
+				return nil
+			}},
+			{"CursorAccountRetentionService", func() error {
+				if cursorAccountRetention != nil {
+					cursorAccountRetention.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeyReconciler", func() error {
+				if quotaKeyReconciler != nil {
+					quotaKeyReconciler.Stop()
 				}
 				return nil
 			}},

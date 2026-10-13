@@ -35,6 +35,9 @@ const (
 	PlatformMiniMax   = "minimax" // MiniMax (M 系列)
 	PlatformMuse      = "muse"     // Muse (OpenCode Go 上游 Meta Muse Spark Contributor，非国产供应商)
 	PlatformComposite = "composite"
+	// PlatformCursor 是 Cursor 站点渠道接入（v3.1/v3.3）新增的平台常量。
+	// Cursor 引入新主体 quota_key（激活码），账号强制归属激活码。
+	PlatformCursor = "cursor"
 )
 
 // IsWebLoginPlatform 报告 platform 是否为支持网页登录的官方平台（kimi/zhipu/deepseek）。
@@ -105,6 +108,23 @@ const (
 const (
 	AdjustmentTypeAdminBalance     = "admin_balance"     // 管理员调整余额
 	AdjustmentTypeAdminConcurrency = "admin_concurrency" // 管理员调整并发数
+)
+
+// QuotaKey status constants（v3.3 §4.1 / §4.3）：激活码状态枚举。
+const (
+	QuotaKeyStatusActive    = "active"    // 正常可拉号
+	QuotaKeyStatusExhausted = "exhausted" // 拉号失败占位（任意错误触发，可手动解除）
+	QuotaKeyStatusExpired   = "expired"   // expires_at < now，自动标 expired
+	QuotaKeyStatusDisabled  = "disabled"  // admin 手动禁用（v3.1 预留，暂未启用）
+)
+
+// QuotaKey 凭据加密相关字段名常量（v3.3 §4.1 / §4.3，F1 凭据安全）。
+// 与既有 Account.credentials / Account.credentials_mac 同型，复用既有加密链；
+// 不引入 §F1 驳回的 {version, key_id, nonce, ct, tag} 封装。
+const (
+	QuotaKeyCodeEncryptedField = "code_encrypted"
+	QuotaKeyCodeMacField       = "code_mac"
+	QuotaKeyCodeLast4Field     = "code_last4"
 )
 
 // Group subscription type constants

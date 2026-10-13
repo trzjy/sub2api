@@ -319,6 +319,13 @@ type Account struct {
 	ParentAccountID *int64 `json:"parent_account_id,omitempty"`
 	QuotaDimension  string `json:"quota_dimension,omitempty"`
 
+	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2，C5b 回填）。
+	// 仅 cursor 平台账号有值；非 cursor 平台省略。账号详情禁止内嵌完整 QuotaKey
+	// 聚合对象（F7），仅暴露脱敏 ID 与标签两个标量。
+	QuotaKeyID *int64 `json:"quota_key_id,omitempty"`
+	// QuotaKeyLabel 归属激活码的脱敏展示标签（值 = code_masked），不含任何原文。
+	QuotaKeyLabel *string `json:"quota_key_label,omitempty"`
+
 	// 影子账号回填的母账号信息（仅影子非空，源自母账号 Credentials/Extra）
 	ParentEmail                 string `json:"parent_email,omitempty"`
 	ParentPlanType              string `json:"parent_plan_type,omitempty"`
@@ -445,11 +452,19 @@ type AccountListItem struct {
 	ParentAccountID *int64 `json:"parent_account_id,omitempty"`
 	QuotaDimension  string `json:"quota_dimension,omitempty"`
 
+	// QuotaKeyID 是账号归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
+	// 仅 cursor 平台账号必填；非 cursor 平台为 NULL（omitempty 省略）。
+	// 注意：账号项禁止内嵌完整 QuotaKey 聚合对象（v3.3 F7），仅暴露脱敏 ID 与标签。
+	QuotaKeyID *int64 `json:"quota_key_id,omitempty"`
+	// QuotaKeyLabel 是归属激活码的脱敏展示标签（值 = code_masked，如 "XXXX-****-****-1234"），
+	// 仅展示用，不含任何激活码原文；非 cursor / 未归属时省略。
+	QuotaKeyLabel *string `json:"quota_key_label,omitempty"`
+
 	// QuotaDimensions 规范化额度维度（与完整 Account DTO 同字段同语义，方案 §3.4 / C5）。
 	// 完整 DTO 由 service 层同一 resolver 填充，lite 投影沿用该结果做形态对齐，不重新计算。
 	QuotaDimensions []AccountQuotaDimension `json:"quota_dimensions,omitempty"`
 	// BalanceLow 服务端解释的余额不足标记（与完整 Account DTO 同字段同语义）。false/缺省省略。
-	BalanceLow                  bool   `json:"balance_low,omitempty"`
+	BalanceLow bool `json:"balance_low,omitempty"`
 	// BalanceProbeCapable 后端选路事实源 RelayProbeTargetURL 的布尔投影（与完整
 	// Account DTO 同字段同语义）。false/缺省省略。
 	BalanceProbeCapable         bool   `json:"balance_probe_capable,omitempty"`
@@ -461,6 +476,39 @@ type AccountListItem struct {
 
 	Proxy    *Proxy  `json:"proxy,omitempty"`
 	GroupIDs []int64 `json:"group_ids,omitempty"`
+}
+
+// QuotaKey 是 Cursor 激活码（quota key）的展示型 DTO（v3.3 §4.5 / C2）。
+//
+// 安全约束（v3.3 F7 / C5 DTO 契约）：
+//   - 绝不返回激活码原文（code_encrypted）；仅暴露脱敏标签 code_masked。
+//   - 账号列表项（AccountListItem）禁止内嵌本聚合对象，仅暴露 QuotaKeyID /
+//     QuotaKeyLabel 两个脱敏标量（见上）。
+//   - 顶层列表响应（AccountListResponse.QuotaKeySummaries）在 cursor 平台账号
+//     存在时才填充本汇总数组，供前端下拉/校验归属关系。
+//
+// 这是 C2 的 DTO 投影骨架；完整字段由 C5 的 QuotaKey DTO 契约最终定型，本结构
+// 仅承载展示所需的最小安全子集。
+type QuotaKey struct {
+	ID         int64  `json:"id"`
+	CodeMasked string `json:"code_masked,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Exhausted  bool   `json:"exhausted,omitempty"`
+}
+
+// AccountListResponse 是管理员账号列表的顶层响应 DTO（v3.3 §4.5 / C2）。
+//
+// 在分页信封之上追加 cursor 激活码汇总（QuotaKeySummaries）：仅当本页存在
+// cursor 平台账号时填充，供前端展示归属关系；其余平台省略（omitempty）。
+// 既有的分页字段（total/page/page_size/items）与 response.PaginatedData 对齐。
+//
+// 注：C2 仅定义该 DTO 契约，实际填充由 C5 handler 完成（C2 禁区：不碰路由注册）。
+type AccountListResponse struct {
+	Items             []AccountListItem `json:"items"`
+	Total             int64             `json:"total"`
+	Page              int               `json:"page"`
+	PageSize          int               `json:"page_size"`
+	QuotaKeySummaries []QuotaKey        `json:"quota_key_summaries,omitempty"`
 }
 
 type AccountGroup struct {

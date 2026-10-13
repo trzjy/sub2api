@@ -387,7 +387,23 @@ export default {
         lastUsed: 'Last Used',
         createdAt: 'Created',
         expiresAt: 'Expires At',
+        quotaKey: 'Quota Key',
         actions: 'Actions'
+      },
+      // Cursor site-channel quota key ownership (C6 / plan §4.5)
+      quotaKey: {
+        unassigned: 'Unassigned',
+        selectorLabel: 'Quota Key',
+        selectorHint: 'Cursor accounts must be assigned to a quota key',
+        selectorRequired: 'Please select a quota key',
+        selectorGroupAvailable: 'Available',
+        selectorGroupExhausted: 'Exhausted',
+        selectorGroupExpired: 'Expired',
+        selectorEmpty: 'No quota keys available',
+        selectorLoading: 'Loading quota keys…',
+        selectorExpand: 'Expand quota key list',
+        selectorCollapse: 'Collapse quota key list',
+        loadError: 'Failed to load quota keys'
       },
       schedulerScore: {
         baseShort: 'Base',

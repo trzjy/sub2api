@@ -286,6 +286,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		GroupIDs:                a.GroupIDs,
 		ParentAccountID:         a.ParentAccountID,
 		QuotaDimension:          a.QuotaDimension,
+		QuotaKeyID:              a.QuotaKeyID,
 	}
 
 	// 规范化额度维度 + 余额不足标记（方案 §3.4 / C5）：由 service 层同一 resolver 输出，
@@ -575,8 +576,10 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		QuotaDimension: a.QuotaDimension, ParentEmail: a.ParentEmail, ParentPlanType: a.ParentPlanType,
 		ParentPrivacyMode: a.ParentPrivacyMode, ParentSubscriptionExpiresAt: a.ParentSubscriptionExpiresAt,
 		ParentChatGPTAccountID: a.ParentChatGPTAccountID, Proxy: a.Proxy, GroupIDs: a.GroupIDs,
-		QuotaDimensions: a.QuotaDimensions,
-		BalanceLow:        a.BalanceLow,
+		QuotaKeyID:          a.QuotaKeyID,
+		QuotaKeyLabel:       a.QuotaKeyLabel,
+		QuotaDimensions:     a.QuotaDimensions,
+		BalanceLow:          a.BalanceLow,
 		BalanceProbeCapable: a.BalanceProbeCapable,
 	}
 }

@@ -62,6 +62,11 @@ type Account struct {
 	ParentAccountID *int64 // non-nil → 影子账号（不持凭据，透传母账号凭据）
 	QuotaDimension  string // 用量维度："" / "global" / "spark"
 
+	// QuotaKeyID 归属的 Cursor 激活码（quota key）ID（v3.3 §4.2 / C2）。
+	// 仅用于只读展示：admin 列表/详情据此回填 quota_key_id + quota_key_label；
+	// 非 cursor 平台为 NULL。
+	QuotaKeyID *int64
+
 	Proxy         *Proxy
 	AccountGroups []AccountGroup
 	GroupIDs      []int64

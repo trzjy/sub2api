@@ -1341,6 +1341,11 @@ export interface Account {
   parent_privacy_mode?: string
   parent_subscription_expires_at?: string
   parent_chatgpt_account_id?: string
+
+  // 账号归属的 Cursor 激活码（quota key）脱敏标量（C5b / 方案 §4.5）。
+  // 仅 cursor 平台账号必填；非 cursor / 未归属时为 null/省略。
+  quota_key_id?: number | null
+  quota_key_label?: string | null
 }
 
 // The admin account list may return this compact shape when lite=1. Detail
@@ -1588,6 +1593,8 @@ export interface CreateAccountRequest {
   auto_pause_on_expired?: boolean
   upstream_billing_probe_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
+  // Cursor 站点渠道账号归属的激活码（quota key）。仅 cursor 平台必填（方案 §4.2 / §4.5）。
+  quota_key_id?: number | null
 }
 
 export interface UpdateAccountRequest {

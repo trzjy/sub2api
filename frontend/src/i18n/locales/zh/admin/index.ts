@@ -11,6 +11,7 @@ import xianyu from './xianyu'
 import pricing from './pricing'
 import promoIntel from './promoIntel'
 import usageAnalysis from './usageAnalysis'
+import quotaKeys from './quotaKeys'
 
 export default {
   ...overview,
@@ -25,5 +26,6 @@ export default {
   ...xianyu,
   ...pricing,
   ...promoIntel,
-  usageAnalysis
+  usageAnalysis,
+  ...quotaKeys
 }
