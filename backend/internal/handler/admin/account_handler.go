@@ -184,6 +184,7 @@ type CreateAccountRequest struct {
 	Priority                int            `json:"priority"`
 	RateMultiplier          *float64       `json:"rate_multiplier"`
 	LoadFactor              *int           `json:"load_factor"`
+	QuotaKeyID              *int64         `json:"quota_key_id,omitempty"` // 归属激活码 ID（v3.4 §4.4：cursor 建号必填，其余平台可省略）
 	GroupIDs                []int64        `json:"group_ids"`
 	ExpiresAt               *int64         `json:"expires_at"`
 	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
@@ -1204,6 +1205,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 			Priority:              req.Priority,
 			RateMultiplier:        req.RateMultiplier,
 			LoadFactor:            req.LoadFactor,
+			QuotaKeyID:            req.QuotaKeyID,
 			GroupIDs:              req.GroupIDs,
 			ExpiresAt:             req.ExpiresAt,
 			AutoPauseOnExpired:    req.AutoPauseOnExpired,

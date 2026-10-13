@@ -15,8 +15,6 @@
 --   - 回滚见文件末尾注释（DROP 约束/索引/列）
 --   - 与 ent generate 的 schema.go（accounts 表 QuotaKeyID 列 + 外键）保持一致
 
-BEGIN;
-
 -- 1) 外键列（默认 NULL：非 cursor 平台允许无归属）
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS quota_key_id bigint DEFAULT NULL;
 
@@ -36,8 +34,6 @@ ALTER TABLE accounts
 DROP INDEX IF EXISTS idx_accounts_quota_key_working;
 CREATE INDEX idx_accounts_quota_key_working
     ON accounts(quota_key_id, status, schedulable) WHERE deleted_at IS NULL;
-
-COMMIT;
 
 -- 回滚（仅在需要时手动执行）：
 -- BEGIN;

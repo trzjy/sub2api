@@ -684,6 +684,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Priority:    input.Priority,
 		Status:      StatusActive,
 		Schedulable: true,
+		// C2（v3.3 §4.2）：账号归属激活码落库（cursor 必填已由
+		// validateAccountQuotaKeyBinding 前置校验，DB CHECK 兜底）。
+		QuotaKeyID: input.QuotaKeyID,
 	}
 	if input.ProbeEnabled != nil && *input.ProbeEnabled {
 		if !isUpstreamBillingProbeAccount(account) {

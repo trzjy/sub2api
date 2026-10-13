@@ -330,6 +330,9 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	if account.ParentAccountID != nil {
 		builder.SetParentAccountID(*account.ParentAccountID)
 	}
+	if account.QuotaKeyID != nil {
+		builder.SetQuotaKeyID(*account.QuotaKeyID)
+	}
 
 	created, err := builder.Save(ctx)
 	if err != nil {
