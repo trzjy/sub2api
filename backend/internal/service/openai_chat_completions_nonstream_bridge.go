@@ -74,8 +74,14 @@ func (s *OpenAIGatewayService) collectCCStreamAsResponse(
 					acc.contentSeen = true
 					acc.content.WriteString(*ch.Delta.Content)
 				}
-				if ch.Delta.ReasoningContent != nil {
+				// reasoning 字段别名：上游只给其中一个（DeepSeek 官方用
+				// reasoning_content，部分中转只给 reasoning）。非空者优先，与
+				// apicompat 的 ChatDelta.reasoningText() 同口径。
+				switch {
+				case ch.Delta.ReasoningContent != nil && *ch.Delta.ReasoningContent != "":
 					acc.reasoning.WriteString(*ch.Delta.ReasoningContent)
+				case ch.Delta.Reasoning != nil && *ch.Delta.Reasoning != "":
+					acc.reasoning.WriteString(*ch.Delta.Reasoning)
 				}
 				if ch.FinishReason != nil && *ch.FinishReason != "" {
 					acc.finish = *ch.FinishReason
