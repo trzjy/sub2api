@@ -143,6 +143,7 @@ func provideCleanup(
 	quotaLifecycle *service.CNQuotaLifecycleService,
 	quotaKeySweeper *service.QuotaKeySweeper,
 	cursorAccountRetention *service.CursorAccountRetentionService,
+	quotaKeyReconciler *service.QuotaKeyReconciler,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -466,6 +467,12 @@ func provideCleanup(
 			{"CursorAccountRetentionService", func() error {
 				if cursorAccountRetention != nil {
 					cursorAccountRetention.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeyReconciler", func() error {
+				if quotaKeyReconciler != nil {
+					quotaKeyReconciler.Stop()
 				}
 				return nil
 			}},
