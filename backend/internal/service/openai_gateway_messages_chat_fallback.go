@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -76,6 +77,13 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	reasoningEffort := &convertedEffort
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, body, billingModel)
 	serviceTier := extractOpenAIServiceTierFromBody(body)
+
+	// F1 读侧（DeepSeek thinking 契约）：客户端未回传 thinking 的工具轮，按 tool_call
+	// id 回查网关侧缓存回注真实明文；全部未命中则失败关闭（不发出上游请求、不伪造、
+	// 不空格占位）。门控外路径零变化。
+	if err := s.injectCachedMessagesReasoning(ctx, c, chatReq, account, upstreamModel); err != nil {
+		return nil, err
+	}
 
 	chatBody, err := json.Marshal(chatReq)
 	if err != nil {
@@ -201,7 +209,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsAnthropic(
 	}
 	// 上游被强制流式后 Content-Type=text/event-stream，经 WriteFilteredHeaders
 	// 透传会污染非流式响应，forceJSON=true 覆盖回 application/json。
-	return s.writeChatCompletionsAsAnthropicResult(c, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
+	return s.writeChatCompletionsAsAnthropicResult(c, account, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, true)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
@@ -226,7 +234,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 		}
 		return nil, err
 	}
-	return s.writeChatCompletionsAsAnthropicResult(c, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
+	return s.writeChatCompletionsAsAnthropicResult(c, account, resp, ccResp, usage, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, false)
 }
 
 // writeChatCompletionsAsAnthropicResult 是 buffer 与 converted 两个非流式分支共用的
@@ -236,6 +244,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 // Content-Type）；buffer 分支上游为原生 JSON，置 false 保持行为零变化。
 func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
 	c *gin.Context,
+	account *Account,
 	resp *http.Response,
 	ccResp *apicompat.ChatCompletionsResponse,
 	usage OpenAIUsage,
@@ -249,6 +258,21 @@ func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, originalModel)
+
+	// F1 写侧：把本轮 reasoning 明文按 tool_call id 写入既有 GatewayCache，供后续
+	// 轮次客户端不回传 thinking 时回注。仅记日志，不影响转发。
+	if ccResp != nil && len(ccResp.Choices) > 0 {
+		msg := ccResp.Choices[0].Message
+		reasoning := msg.ReasoningContent
+		if reasoning == "" {
+			reasoning = msg.Reasoning
+		}
+		toolCallIDs := make([]string, 0, len(msg.ToolCalls))
+		for _, call := range msg.ToolCalls {
+			toolCallIDs = append(toolCallIDs, call.ID)
+		}
+		s.cacheMessagesToolCallReasoning(account, upstreamModel, reasoning, toolCallIDs)
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -273,6 +297,136 @@ func (s *OpenAIGatewayService) writeChatCompletionsAsAnthropicResult(
 	}, nil
 }
 
+// ---------------------------------------------------------------------------
+// F1：/v1/messages 路径 reasoning_content 缓存回注（DeepSeek thinking 400 根治）
+//
+// 根因（P1 插桩实证）：客户端回放历史时工具轮不带 thinking 明文，网关无明文可折叠
+// → 出站 reasoning_content 为空 → DeepSeek thinking mode 400。网关无法强迫客户端
+// 回传、亦不得伪造，故与 Responses 兄弟路径对齐：网关侧缓存 reasoning，下一轮按
+// tool_call id 回注真实明文；回注不了就失败关闭。
+// ---------------------------------------------------------------------------
+
+// messagesReasoningCacheTTL 与 Responses 路径（responsesReasoningCacheTTL）同口径：
+// 会话可能跨多天恢复历史，取 7 天。
+const messagesReasoningCacheTTL = 7 * 24 * time.Hour
+
+// messagesToolCallReasoningKey 给 Messages 路径的 reasoning 缓存键加命名空间前缀。
+// Responses 路径按 reasoning item id 索引，Messages 路径按 tool_call id 索引，两者
+// 共用既有 GatewayCache 的 reasoning_content: 键空间，加前缀避免碰撞。
+func messagesToolCallReasoningKey(toolCallID string) string {
+	return "msg_tool:" + toolCallID
+}
+
+// messagesDeepSeekThinkingGate 是 F1 的唯一门控点：仅对 DeepSeek-thinking 上游启用
+// reasoning 缓存/回注，其余路径零变化。判定 = 模型名（去 opencode 前缀后）以
+// deepseek 开头，或账号 platform 为 deepseek。
+func messagesDeepSeekThinkingGate(account *Account, upstreamModel string) bool {
+	if account != nil && account.Platform == PlatformDeepseek {
+		return true
+	}
+	model := strings.ToLower(strings.TrimSpace(upstreamModel))
+	model = strings.TrimPrefix(model, "opencode/")
+	return strings.HasPrefix(model, "deepseek")
+}
+
+// cacheMessagesToolCallReasoning 把本轮 assistant 的 reasoning 明文按 tool_call id
+// 写入既有 GatewayCache。多工具轮：为该轮每个 tool_call id 写同一条 reasoning。
+// 使用 detached ctx：客户端断连后仍在 drain 上游流，此处的 reasoning 是后续轮次
+// 回注所依赖的，不能随请求 ctx 取消。失败仅记日志，不影响转发。
+func (s *OpenAIGatewayService) cacheMessagesToolCallReasoning(account *Account, upstreamModel, reasoning string, toolCallIDs []string) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	reasoning = strings.TrimSpace(reasoning)
+	if reasoning == "" || len(toolCallIDs) == 0 {
+		return
+	}
+	if !messagesDeepSeekThinkingGate(account, upstreamModel) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, toolCallID := range toolCallIDs {
+		toolCallID = strings.TrimSpace(toolCallID)
+		if toolCallID == "" {
+			continue
+		}
+		if err := s.cache.SetReasoningContent(ctx, messagesToolCallReasoningKey(toolCallID), reasoning, messagesReasoningCacheTTL); err != nil {
+			logger.L().Warn("openai messages chat fallback: cache reasoning content failed",
+				zap.String("tool_call_id", toolCallID),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// injectCachedMessagesReasoning 在发送上游前，对「role==assistant 且 ToolCalls 非空
+// 且 ReasoningContent 为空」的历史轮，按 tool_call id 逐个回查网关缓存：命中即注入
+// 真实明文；全部未命中（或缓存不可用）则失败关闭——写出明确错误并返回 error，不发
+// 出上游请求，不伪造、不空格占位。
+func (s *OpenAIGatewayService) injectCachedMessagesReasoning(
+	ctx context.Context,
+	c *gin.Context,
+	chatReq *apicompat.ChatCompletionsRequest,
+	account *Account,
+	upstreamModel string,
+) error {
+	if chatReq == nil || !messagesDeepSeekThinkingGate(account, upstreamModel) {
+		return nil
+	}
+	for i := range chatReq.Messages {
+		msg := &chatReq.Messages[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 || msg.ReasoningContent != "" {
+			continue
+		}
+		cached := ""
+		for _, call := range msg.ToolCalls {
+			if strings.TrimSpace(call.ID) == "" {
+				continue
+			}
+			content, err := s.getMessagesToolCallReasoning(ctx, call.ID)
+			if err != nil {
+				logger.L().Warn("openai messages chat fallback: lookup cached reasoning failed",
+					zap.String("tool_call_id", call.ID),
+					zap.Error(err),
+				)
+				continue
+			}
+			if content != "" {
+				cached = content
+				break
+			}
+		}
+		if cached == "" {
+			ids := make([]string, 0, len(msg.ToolCalls))
+			for _, call := range msg.ToolCalls {
+				ids = append(ids, call.ID)
+			}
+			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error",
+				"DeepSeek thinking mode requires reasoning_content on assistant tool-call turns; "+
+					"the client replayed this turn without its thinking block and the gateway has no "+
+					"cached reasoning for tool_calls ["+strings.Join(ids, ",")+"]")
+			return fmt.Errorf("openai messages: missing reasoning_content for assistant tool-call turn (tool_calls [%s], uncached)", strings.Join(ids, ","))
+		}
+		msg.ReasoningContent = cached
+	}
+	return nil
+}
+
+// getMessagesToolCallReasoning 按 tool_call id 回查缓存的 reasoning 明文。
+func (s *OpenAIGatewayService) getMessagesToolCallReasoning(ctx context.Context, toolCallID string) (string, error) {
+	if s == nil || s.cache == nil {
+		return "", errors.New("gateway cache unavailable")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	content, err := s.cache.GetReasoningContent(lookupCtx, messagesToolCallReasoningKey(toolCallID))
+	if err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
 func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	c *gin.Context,
 	account *Account,
@@ -291,11 +445,28 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	clientDisconnected := false
 	outputStarted := false
 
+	// F1 写侧采集：本轮 reasoning 明文（thinking_delta 拼接）与本轮 tool_call id
+	// （content_block_start 的 tool_use ID，即客户端下一轮会回传的 ID）。
+	var reasoningBuf strings.Builder
+	var toolCallIDs []string
+
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
 		// CC chunk → Anthropic events (direct, single state machine)
 		anthropicEvents := apicompat.ChatCompletionsChunkToAnthropicEvents(chunk, anthropicState)
+		// 采集先于断开判定：断连后仍在 drain 上游流，此处缓存是后续轮次回注的唯一来源。
+		for _, aEvt := range anthropicEvents {
+			if aEvt.Type == "content_block_delta" && aEvt.Delta != nil &&
+				aEvt.Delta.Type == "thinking_delta" && aEvt.Delta.Thinking != "" {
+				reasoningBuf.WriteString(aEvt.Delta.Thinking)
+				continue
+			}
+			if aEvt.Type == "content_block_start" && aEvt.ContentBlock != nil &&
+				aEvt.ContentBlock.Type == "tool_use" && aEvt.ContentBlock.ID != "" {
+				toolCallIDs = append(toolCallIDs, aEvt.ContentBlock.ID)
+			}
+		}
 		if clientDisconnected {
 			return
 		}
@@ -361,6 +532,9 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}
 		c.Writer.Flush()
 	}
+	// F1 写侧：本轮结束才写缓存（reasoning 与 tool_call id 此时才完整）。
+	s.cacheMessagesToolCallReasoning(account, upstreamModel, reasoningBuf.String(), toolCallIDs)
+
 	if !scan.SawDone {
 		logCCStreamMissingDoneSentinel("openai messages chat fallback", requestID)
 	}
