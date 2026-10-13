@@ -12,7 +12,8 @@ package service
 //   - 探测调度器 ChannelMonitorProbeWorker：复用 tryAcquireSingletonLeaderLock（独立锁键
 //     channel_monitor:probe:leader）；每轮 tick：DeriveChannelMonitorCatalog 取目录 → 过滤
 //     候选 = 目录 ∩ 无新鲜业务观测（业务 15 分钟）∩ next_due 到期 → 每渠道抽样一个在售账号
-//     （候选人集按账号 ID 升序取首个）→ 直连探测 → UPSERT channel_monitor_probe_state →
+//     （候选人集按账号 ID 升序取首个可直连探测的账号；渠道无任可探测账号则跳过，不写
+//     probe_state 行 → 展示层"无数据"）→ 直连探测 → UPSERT channel_monitor_probe_state →
 //     next_due：ok → 30 分钟；!ok → 2 小时。每 tick ≤ max_per_tick。无状态机/无 CAS/无
 //     reaper/无收据表。
 //   - config probe 段：Enabled 默认 false（零探测）；MaxPerTick 默认 2。
@@ -189,35 +190,41 @@ var defaultProbeHTTPClient = &http.Client{Timeout: probeHardTimeout}
 //   - model：目录中的客户端请求模型名（已为 model_mapping 的键）。
 //   - httpClient：直连使用的 HTTP 客户端；nil 时使用默认 5 分钟超时客户端（便于单测注入假上游）。
 //
-// 返回 ok（上游 2xx 视为可达）与 detail（状态/错误摘要）。
+// 返回：
+//   - ok：上游 2xx 视为可达（权威成功）；非 2xx / 网络错误视为权威失败（last_ok=false 合法）；
+//   - detail：状态/错误摘要；
+//   - unsupported：非权威标记——账号不可直连探测（协议族不支持或凭据缺失）。调用方遇
+//     unsupported 时**绝不**写终态失败行（保持"无数据"语义），因为这是"无法探测"而非"渠道故障"。
 //
 // 协议族：OpenAI 兼容（/v1/chat/completions）、anthropic（/v1/messages）、gemini apikey
-// （generateContent）。其余（OAuth 令牌刷新依赖、agent identity、vertex、bedrock 等）返回
-// ok=false + "unsupported" detail——保守标记，不触碰令牌刷新/账号写路径。
+// （generateContent）。其余（OAuth 令牌刷新依赖、agent identity、vertex、bedrock 等）落
+// unsupported——保守标记，不触碰令牌刷新/账号写路径。
 func ProbeAccountDirect(
 	ctx context.Context,
 	accountRepo AccountRepository,
 	account *Account,
 	model string,
 	httpClient *http.Client,
-) (ok bool, detail string) {
+) (ok bool, detail string, unsupported bool) {
 	if account == nil {
-		return false, "nil account"
+		return false, "nil account", false
 	}
 	cred, err := resolveCredentialAccount(ctx, accountRepo, account)
 	if err != nil {
-		return false, "resolve credential account: " + err.Error()
+		// 解析失败为权威失败（账号实体不可达），非 unsupported。
+		return false, "resolve credential account: " + err.Error(), false
 	}
 	spec, err := buildProbeRequestSpec(cred, model)
 	if err != nil {
-		return false, err.Error()
+		// 账号不可直连探测（协议族不支持或凭据缺失）：非权威，绝不落终态 last_ok=false。
+		return false, err.Error(), true
 	}
 	if httpClient == nil {
 		httpClient = defaultProbeHTTPClient
 	}
 	req, err := http.NewRequestWithContext(ctx, spec.method, spec.url, bytes.NewReader(spec.body))
 	if err != nil {
-		return false, "build request: " + err.Error()
+		return false, "build request: " + err.Error(), false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range spec.headers {
@@ -225,19 +232,36 @@ func ProbeAccountDirect(
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return false, "upstream request failed: " + err.Error()
+		return false, "upstream request failed: " + err.Error(), false
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// 只读取少量响应体（探测无需完整响应），避免大响应体拖慢轮次。
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return true, fmt.Sprintf("ok status=%d", resp.StatusCode)
+		return true, fmt.Sprintf("ok status=%d", resp.StatusCode), false
 	}
-	return false, fmt.Sprintf("upstream status=%d", resp.StatusCode)
+	return false, fmt.Sprintf("upstream status=%d", resp.StatusCode), false
 }
 
-// buildProbeRequestSpec 按协议族构造最简直连请求。unsupported 时返回 error（由原语转 ok=false）。
+// canDirectProbe 是"账号是否可被直连探测"的单一事实源：与原语 buildProbeRequestSpec 的
+// switch 完全同条件。候选账号选取与原语构造都通过本判定把关，禁止在别处再写一份等价条件，
+// 否则两处会随协议族扩展而悄然分叉（本次生产事故的根因）。
+//
+// 可探测协议族：anthropic 原生协议、OpenAI 兼容（含 grok/CN/other/codebuddy/muse/web）、
+// gemini 且仅 apikey/upstream 型（gemini OAuth 依赖令牌刷新，不直连）。
+func canDirectProbe(acc *Account) bool {
+	return acc != nil && (acc.IsAnthropicProtocol() ||
+		acc.IsOpenAICompatible() ||
+		(acc.IsGemini() && isAPIKeyOrUpstream(acc)))
+}
+
+// buildProbeRequestSpec 按协议族构造最简直连请求。unsupported 时返回 error（由原语转
+// ok=false + unsupported=true 非权威失败）。可探测性先由 canDirectProbe 把关，switch 仅
+// 负责按协议族构造请求，二者共享同一条件。
 func buildProbeRequestSpec(acc *Account, model string) (*probeReqSpec, error) {
+	if !canDirectProbe(acc) {
+		return nil, fmt.Errorf("unsupported account platform=%q type=%q for direct probe", acc.Platform, acc.Type)
+	}
 	switch {
 	case acc.IsAnthropicProtocol():
 		return buildAnthropicMessagesSpec(acc, model)
@@ -246,6 +270,7 @@ func buildProbeRequestSpec(acc *Account, model string) (*probeReqSpec, error) {
 	case acc.IsGemini() && isAPIKeyOrUpstream(acc):
 		return buildGeminiGenerateContentSpec(acc, model)
 	default:
+		// 不可达：canDirectProbe 已确保覆盖上述三种可探测协议族。
 		return nil, fmt.Errorf("unsupported account platform=%q type=%q for direct probe", acc.Platform, acc.Type)
 	}
 }
@@ -392,7 +417,7 @@ type ChannelMonitorProbeWorker struct {
 	httpClient  *http.Client
 
 	// 以下两个字段可注入以支撑单测，生产使用默认值。
-	probeFn func(ctx context.Context, accountRepo AccountRepository, account *Account, model string, client *http.Client) (bool, string)
+	probeFn func(ctx context.Context, accountRepo AccountRepository, account *Account, model string, client *http.Client) (bool, string, bool)
 	clock   func() time.Time
 
 	ticker   *time.Ticker
@@ -485,6 +510,12 @@ func (w *ChannelMonitorProbeWorker) RunOnce(ctx context.Context) error {
 		groupsByID[groups[i].ID] = &groups[i]
 	}
 
+	// 账号查找表：供候选选取按 canDirectProbe 判定可探测性（单一事实源）。
+	accountsByID := make(map[int64]*Account, len(accounts))
+	for i := range accounts {
+		accountsByID[accounts[i].ID] = &accounts[i]
+	}
+
 	catalog := DeriveChannelMonitorCatalog(accounts, groupsByID)
 
 	fresh, err := w.store.FreshBusinessChannels(ctx, now.Add(-probeBusinessFreshnessWindow))
@@ -506,14 +537,19 @@ func (w *ChannelMonitorProbeWorker) RunOnce(ctx context.Context) error {
 		maxPerTick = 2
 	}
 
-	tasks := planProbeBatch(now, catalog, fresh, states, maxPerTick)
+	tasks := planProbeBatch(now, catalog, fresh, states, accountsByID, maxPerTick)
 
 	for _, t := range tasks {
 		account, err := w.accountRepo.GetByID(ctx, t.SampledAccountID)
 		if err != nil || account == nil {
 			continue
 		}
-		ok, detail := w.probeFn(ctx, w.accountRepo, account, t.Key.Model, w.httpClient)
+		ok, detail, unsupported := w.probeFn(ctx, w.accountRepo, account, t.Key.Model, w.httpClient)
+		if unsupported {
+			// 非权威：账号不可直连探测（竞态：选取后账号协议/凭据变化，或上游型账号被替换）。
+			// 跳过写终态失败行，保持"无数据"语义——绝不把"无法探测"误判为渠道故障。
+			continue
+		}
 		if err := w.store.UpsertProbeState(ctx, &ProbeState{
 			Platform:      t.Key.Platform,
 			Model:         t.Key.Model,
@@ -539,7 +575,8 @@ type probeTask struct {
 // planProbeBatch 是候选筛选的纯函数（派发单 C2 谓词）：
 //   - 目录 ∩ 无新鲜业务观测（fresh 中存在的三元组跳过）；
 //   - ∩ next_due 到期（states[key] 非空且 NextDue 在 now 之后跳过）；
-//   - 每渠道抽样一个在售账号（候选人集按账号 ID 升序取首个）；
+//   - 每渠道抽样一个在售账号：候选人集按账号 ID 升序取**第一个可直连探测**（canDirectProbe
+//     为真）的账号；渠道无任何可探测账号 → 返回 0，跳过该渠道（不写 probe_state 行）；
 //   - 每 tick ≤ maxPerTick 条（超出截断）。
 //
 // 返回结果按三元组字典序稳定排序，便于可重复测试。
@@ -548,6 +585,7 @@ func planProbeBatch(
 	catalog ChannelMonitorCatalog,
 	fresh map[ChannelMonitorCatalogKey]struct{},
 	states map[ChannelMonitorCatalogKey]*ProbeState,
+	accountByID map[int64]*Account,
 	maxPerTick int,
 ) []probeTask {
 	if maxPerTick < 0 {
@@ -570,13 +608,28 @@ func planProbeBatch(
 		if st := states[key]; st != nil && st.NextDue.After(now) {
 			continue
 		}
-		accID := sampleSmallestAccountID(catalog.CandidateAccountIDs[key])
+		// 候选账号选取：按账号 ID 升序取首个可直连探测的账号；无则跳过渠道（无数据态）。
+		accID := selectProbeableAccountID(catalog.CandidateAccountIDs[key], accountByID)
 		if accID == 0 {
 			continue
 		}
 		tasks = append(tasks, probeTask{Key: key, SampledAccountID: accID})
 	}
 	return tasks
+}
+
+// selectProbeableAccountID 从候选人集中按账号 ID 升序选取第一个可直连探测（canDirectProbe
+// 为真）的账号；若无任何可探测账号返回 0（调用方据此跳过该渠道）。
+func selectProbeableAccountID(ids []int64, accountByID map[int64]*Account) int64 {
+	sorted := make([]int64, len(ids))
+	copy(sorted, ids)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	for _, id := range sorted {
+		if canDirectProbe(accountByID[id]) {
+			return id
+		}
+	}
+	return 0
 }
 
 // computeNextDue 返回探测后的下次到期时间：ok → 30 分钟；!ok → 2 小时。
@@ -595,17 +648,6 @@ func catalogKeyLess(a, b ChannelMonitorCatalogKey) bool {
 		return a.Model < b.Model
 	}
 	return a.GroupID < b.GroupID
-}
-
-// sampleSmallestAccountID 返回升序排列后的首个账号 ID；空切片返回 0。
-func sampleSmallestAccountID(ids []int64) int64 {
-	if len(ids) == 0 {
-		return 0
-	}
-	sorted := make([]int64, len(ids))
-	copy(sorted, ids)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return sorted[0]
 }
 
 // ProvideChannelMonitorProbeWorker 构造并启动无流量渠道抽样探测调度器（派发单 C2）。

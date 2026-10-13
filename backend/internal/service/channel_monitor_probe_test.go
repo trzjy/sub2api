@@ -125,7 +125,10 @@ func TestChannelMonitorProbe_AccountDirect_OKAndNotOK(t *testing.T) {
 		Credentials: map[string]any{"base_url": okSrv.URL, "api_key": "k"},
 	}
 	repo := &recordingAccountRepo{}
-	ok, detail := ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", okSrv.Client())
+	ok, detail, unsupported := ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", okSrv.Client())
+	if unsupported {
+		t.Fatalf("expected supported probe for 200 upstream, got unsupported detail=%q", detail)
+	}
 	if !ok {
 		t.Fatalf("expected ok=true for 200 upstream, got ok=%v detail=%q", ok, detail)
 	}
@@ -143,7 +146,10 @@ func TestChannelMonitorProbe_AccountDirect_OKAndNotOK(t *testing.T) {
 		Status:      StatusActive,
 		Credentials: map[string]any{"base_url": failSrv.URL, "api_key": "k"},
 	}
-	ok2, detail2 := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc2, "gpt-4", failSrv.Client())
+	ok2, detail2, unsupported2 := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc2, "gpt-4", failSrv.Client())
+	if unsupported2 {
+		t.Fatalf("expected authoritative (non-unsupported) failure for 500 upstream, got unsupported detail=%q", detail2)
+	}
 	if ok2 {
 		t.Fatalf("expected ok=false for 500 upstream, got ok=true detail=%q", detail2)
 	}
@@ -169,7 +175,7 @@ func TestChannelMonitorProbe_AccountDirect_NoAccountWriteSideEffect(t *testing.T
 		Credentials: map[string]any{"base_url": srv.URL, "api_key": "k"},
 	}
 	repo := &recordingAccountRepo{}
-	if _, _ = ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", srv.Client()); len(repo.calls) != 0 {
+	if _, _, _ = ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", srv.Client()); len(repo.calls) != 0 {
 		t.Fatalf("expected zero account repo calls for non-shadow account, got %v", repo.calls)
 	}
 
@@ -191,13 +197,32 @@ func TestChannelMonitorProbe_AccountDirect_NoAccountWriteSideEffect(t *testing.T
 		Credentials: map[string]any{"base_url": srv.URL, "api_key": "k"},
 	}
 	repo2 := &recordingAccountRepo{byID: map[int64]*Account{parentID: parent}}
-	if _, _ = ProbeAccountDirect(context.Background(), repo2, shadow, "gpt-4", srv.Client()); len(repo2.calls) == 0 {
+	if _, _, _ = ProbeAccountDirect(context.Background(), repo2, shadow, "gpt-4", srv.Client()); len(repo2.calls) == 0 {
 		t.Fatalf("expected GetByID call for shadow account, got none")
 	}
 	for _, c := range repo2.calls {
 		if accountWriteMethods[c] {
 			t.Fatalf("primitive must not call account write method %q, calls=%v", c, repo2.calls)
 		}
+	}
+}
+
+// ---------- 测试 ②b：原语对不可直连探测账号返回非权威 unsupported（不落 last_ok=false） ----------
+
+func TestChannelMonitorProbe_AccountDirect_UnsupportedNonAuthoritative(t *testing.T) {
+	// gemini OAuth 账号：IsGemini 为真但非 apikey/upstream → canDirectProbe 为假 → unsupported。
+	acc := &Account{
+		ID:       1,
+		Platform: PlatformGemini,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+	}
+	ok, detail, unsupported := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "gemini-1.5-pro", nil)
+	if !unsupported {
+		t.Fatalf("expected unsupported=true for gemini oauth account, got ok=%v detail=%q", ok, detail)
+	}
+	if ok {
+		t.Fatalf("unsupported probe must not report ok=true, got detail=%q", detail)
 	}
 }
 
@@ -219,8 +244,15 @@ func TestChannelMonitorProbe_PlanBatch_CandidateFiltering(t *testing.T) {
 	states := map[ChannelMonitorCatalogKey]*ProbeState{
 		k2: {NextDue: now.Add(10 * time.Minute)}, // k2 next_due 未到 → 跳过
 	}
+	// 候选账号均可直连探测（openai apikey；anthropic 平台默认 chat_completions 协议，
+	// 不落 anthropic 分支，故此处统一用 openai apikey 表示"可探测"）。
+	accountByID := map[int64]*Account{
+		11: {ID: 11, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+		12: {ID: 12, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+		13: {ID: 13, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+	}
 
-	tasks := planProbeBatch(now, catalog, fresh, states, 100)
+	tasks := planProbeBatch(now, catalog, fresh, states, accountByID, 100)
 	if len(tasks) != 1 {
 		t.Fatalf("expected exactly 1 task, got %d: %+v", len(tasks), tasks)
 	}
@@ -268,9 +300,9 @@ func TestChannelMonitorProbe_RunOnce_RecordsCooldown(t *testing.T) {
 
 	w := NewChannelMonitorProbeWorker(store, repo, grepo, nil, cfg)
 	w.clock = func() time.Time { return now }
-	// 注入探测结果：ok=true。
-	w.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string) {
-		return true, "ok"
+	// 注入探测结果：ok=true（权威成功）。
+	w.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
+		return true, "ok", false
 	}
 
 	if err := w.RunOnce(context.Background()); err != nil {
@@ -287,12 +319,12 @@ func TestChannelMonitorProbe_RunOnce_RecordsCooldown(t *testing.T) {
 		t.Fatalf("expected NextDue +30m, got %v", st.NextDue.Sub(now))
 	}
 
-	// 第二次：注入 !ok，验证 2h 冷却。
+	// 第二次：注入 !ok（权威失败），验证 2h 冷却。
 	store2 := newFakeProbeStore()
 	w2 := NewChannelMonitorProbeWorker(store2, repo, grepo, nil, cfg)
 	w2.clock = func() time.Time { return now }
-	w2.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string) {
-		return false, "upstream status=500"
+	w2.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
+		return false, "upstream status=500", false
 	}
 	if err := w2.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce(!ok) failed: %v", err)
@@ -318,20 +350,123 @@ func TestChannelMonitorProbe_PlanBatch_MaxPerTickLimit(t *testing.T) {
 		{Platform: "openai", Model: "c", GroupID: 1},
 	}
 	catalog := ChannelMonitorCatalog{Keys: map[ChannelMonitorCatalogKey]struct{}{}, CandidateAccountIDs: map[ChannelMonitorCatalogKey][]int64{}}
+	accountByID := make(map[int64]*Account, len(keys))
 	for i, k := range keys {
 		catalog.Keys[k] = struct{}{}
-		catalog.CandidateAccountIDs[k] = []int64{int64(i + 1)}
+		id := int64(i + 1)
+		catalog.CandidateAccountIDs[k] = []int64{id}
+		accountByID[id] = &Account{ID: id, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive}
 	}
 
 	// maxPerTick=2 → 最多 2 条。
-	tasks := planProbeBatch(now, catalog, nil, nil, 2)
+	tasks := planProbeBatch(now, catalog, nil, nil, accountByID, 2)
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 tasks for maxPerTick=2, got %d", len(tasks))
 	}
 
 	// maxPerTick 充足 → 全部 3 条。
-	tasksAll := planProbeBatch(now, catalog, nil, nil, 10)
+	tasksAll := planProbeBatch(now, catalog, nil, nil, accountByID, 10)
 	if len(tasksAll) != 3 {
 		t.Fatalf("expected 3 tasks for maxPerTick=10, got %d", len(tasksAll))
+	}
+}
+
+// ---------- 测试 ⑥：候选选取——可探测账号优先（按 ID 升序取首个可探测） ----------
+
+func TestChannelMonitorProbe_PlanBatch_ProbeableAccountPriority(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	k := ChannelMonitorCatalogKey{Platform: "openai", Model: "a", GroupID: 1}
+	catalog := ChannelMonitorCatalog{
+		Keys:                map[ChannelMonitorCatalogKey]struct{}{k: {}},
+		CandidateAccountIDs: map[ChannelMonitorCatalogKey][]int64{k: {5, 6}},
+	}
+	// ID 5 不可探测（gemini OAuth），ID 6 可探测（openai apikey）。
+	accountByID := map[int64]*Account{
+		5: {ID: 5, Platform: PlatformGemini, Type: AccountTypeOAuth, Status: StatusActive},
+		6: {ID: 6, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+	}
+	tasks := planProbeBatch(now, catalog, nil, nil, accountByID, 10)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d: %+v", len(tasks), tasks)
+	}
+	if tasks[0].SampledAccountID != 6 {
+		t.Fatalf("expected probeable account 6 selected (priority over non-probeable 5), got %d", tasks[0].SampledAccountID)
+	}
+}
+
+// ---------- 测试 ⑦：候选选取——渠道无任可探测账号 → 跳过（无数据态，不写行） ----------
+
+func TestChannelMonitorProbe_PlanBatch_SkipChannelWithoutProbeableAccount(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	k := ChannelMonitorCatalogKey{Platform: "gemini", Model: "a", GroupID: 1}
+	catalog := ChannelMonitorCatalog{
+		Keys:                map[ChannelMonitorCatalogKey]struct{}{k: {}},
+		CandidateAccountIDs: map[ChannelMonitorCatalogKey][]int64{k: {7, 8}},
+	}
+	// 两个候选均为 gemini OAuth（不可直连探测）。
+	accountByID := map[int64]*Account{
+		7: {ID: 7, Platform: PlatformGemini, Type: AccountTypeOAuth, Status: StatusActive},
+		8: {ID: 8, Platform: PlatformGemini, Type: AccountTypeOAuth, Status: StatusActive},
+	}
+	tasks := planProbeBatch(now, catalog, nil, nil, accountByID, 10)
+	if len(tasks) != 0 {
+		t.Fatalf("expected 0 tasks (channel skipped, no probeable account), got %d: %+v", len(tasks), tasks)
+	}
+}
+
+// ---------- 测试 ⑧：RunOnce 对不可探测账号/unsupported 不写 probe_state 行 ----------
+
+func TestChannelMonitorProbe_RunOnce_SkipUnsupportedNoRow(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	groupID := int64(100)
+	grp := Group{ID: groupID, Status: StatusActive}
+	grepo := &fakeGroupRepo{active: []Group{grp}}
+	cfg := &config.Config{Probe: config.ProbeConfig{Enabled: true, MaxPerTick: 2}}
+
+	// 场景 A：渠道仅含不可探测账号（gemini OAuth）→ 候选选取阶段即跳过，不写行。
+	onlyNonProbeable := Account{
+		ID:          5,
+		Platform:    PlatformGemini,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gemini-1.5-pro": "gemini-1.5-pro"}},
+		GroupIDs:    []int64{groupID},
+	}
+	repoA := &fakeAccountRepo{active: []Account{onlyNonProbeable}, byID: map[int64]*Account{5: &onlyNonProbeable}}
+	storeA := newFakeProbeStore()
+	wA := NewChannelMonitorProbeWorker(storeA, repoA, grepo, nil, cfg)
+	wA.clock = func() time.Time { return now }
+	wA.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
+		return false, "should not be called", false
+	}
+	if err := wA.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(A) failed: %v", err)
+	}
+	if len(storeA.upserts) != 0 {
+		t.Fatalf("expected 0 upserts for channel with no probeable account, got %d", len(storeA.upserts))
+	}
+
+	// 场景 B：渠道含可探测账号，但探测原语竞态返回 unsupported（非权威）→ worker 跳过写行，
+	// 与"无数据"语义一致，绝不落 last_ok=false。
+	probeable := Account{
+		ID:          6,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Credentials: map[string]any{"model_mapping": map[string]any{"gpt-4": "gpt-4"}},
+		GroupIDs:    []int64{groupID},
+	}
+	repoB := &fakeAccountRepo{active: []Account{probeable}, byID: map[int64]*Account{6: &probeable}}
+	storeB := newFakeProbeStore()
+	wB := NewChannelMonitorProbeWorker(storeB, repoB, grepo, nil, cfg)
+	wB.clock = func() time.Time { return now }
+	wB.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
+		return false, "unsupported account platform=... for direct probe", true
+	}
+	if err := wB.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(B) failed: %v", err)
+	}
+	if len(storeB.upserts) != 0 {
+		t.Fatalf("expected 0 upserts when probe returns unsupported (non-authoritative), got %d", len(storeB.upserts))
 	}
 }
