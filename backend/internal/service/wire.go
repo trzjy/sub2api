@@ -1402,6 +1402,7 @@ var ProviderSet = wire.NewSet(
 	NewChannelMonitorQuotaFetcher,
 	ProvideChannelMonitorV2Service,
 	ProvideChannelMonitorV2Aggregator,
+	ProvideChannelMonitorProbeWorker,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
 	ProvidePromoIntelService,
@@ -1534,10 +1535,14 @@ func ProvideChannelMonitorRunner(
 }
 
 // ProvideChannelMonitorV2Service wires settings for user-facing privacy flags
-// (e.g. hide RPM/TPM throughput).
-func ProvideChannelMonitorV2Service(repo ChannelMonitorV2Repository, settingService *SettingService) *ChannelMonitorV2Service {
+// (e.g. hide RPM/TPM throughput) and the account/group repositories required by the
+// C3 catalog derivation (so on-sale channels with no business traffic surface in the
+// display matrix via probe / no-data states).
+func ProvideChannelMonitorV2Service(repo ChannelMonitorV2Repository, settingService *SettingService, accountRepo AccountRepository, groupRepo GroupRepository) *ChannelMonitorV2Service {
 	svc := NewChannelMonitorV2Service(repo)
 	svc.SetRuntimeReader(settingService)
+	svc.SetAccountRepository(accountRepo)
+	svc.SetGroupRepository(groupRepo)
 	return svc
 }
 

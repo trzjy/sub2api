@@ -566,23 +566,17 @@ func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filte
 	return accs
 }
 
+// C1: cfg.Platforms[].models 已停消费（迁移 271 将其清空；监控/展示模型集合改由
+// 目录（channel_monitor_catalog.go）与真实流量数据推导，见 C2/C3）。本函数不再读取
+// cfg.Platforms[].models，仅保留调用方在 filter 中显式选定的模型用于矩阵/模型视图占位。
+// 旧字段仍在 GetConfig/UpdateConfig 中解析（兼容，不报错）。
 func configuredChannelMonitorV2Models(cfg service.ChannelMonitorV2Config, platform string, filter service.ChannelMonitorV2Filter) []string {
-	models := []string{}
-	for _, p := range cfg.Platforms {
-		if p.Platform != platform {
-			continue
-		}
-		models = append(models, p.Models...)
-		break
+	_ = cfg.Platforms // 保留字段解析兼容，不再读取 .Models
+	_ = platform
+	if len(filter.Models) == 0 {
+		return []string{}
 	}
-	if len(filter.Models) > 0 {
-		if len(models) == 0 {
-			models = append(models, filter.Models...)
-		} else {
-			models = intersectStrings(models, filter.Models)
-		}
-	}
-	return models
+	return append([]string(nil), filter.Models...)
 }
 
 // channelMonitorV2CatalogFilter clears multi-select dimensions so catalog endpoints
@@ -1043,6 +1037,56 @@ func (r *channelMonitorV2Repository) GetAggregationWatermark(ctx context.Context
 	return out, nil
 }
 
+// GetProbeStates returns the most recent probe result keyed by (platform, model, group)
+// for each requested triple. It reads channel_monitor_probe_state directly. Missing rows
+// are omitted from the map; the returned timestamps are normalized to UTC.
+func (r *channelMonitorV2Repository) GetProbeStates(ctx context.Context, keys []service.ChannelMonitorCatalogKey) (map[service.ChannelMonitorCatalogKey]*service.ProbeState, error) {
+	out := make(map[service.ChannelMonitorCatalogKey]*service.ProbeState, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	parts := make([]string, 0, len(keys))
+	args := make([]any, 0, len(keys)*3)
+	for i := range keys {
+		args = append(args, keys[i].Platform, keys[i].Model, keys[i].GroupID)
+		parts = append(parts, fmt.Sprintf("($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3))
+	}
+	q := `SELECT platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due
+		FROM channel_monitor_probe_state WHERE (platform, model, group_id) IN (` + strings.Join(parts, ",") + `)`
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var st service.ProbeState
+		var lastProbeAt, nextDue sql.NullTime
+		var lastOK sql.NullBool
+		var lastDetail sql.NullString
+		var lastAccountID sql.NullInt64
+		if err := rows.Scan(&st.Platform, &st.Model, &st.GroupID, &lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue); err != nil {
+			return nil, err
+		}
+		if lastProbeAt.Valid {
+			st.LastProbeAt = lastProbeAt.Time.UTC()
+		}
+		if lastOK.Valid {
+			st.LastOK = lastOK.Bool
+		}
+		if lastDetail.Valid {
+			st.LastDetail = lastDetail.String
+		}
+		if lastAccountID.Valid {
+			st.LastAccountID = lastAccountID.Int64
+		}
+		if nextDue.Valid {
+			st.NextDue = nextDue.Time.UTC()
+		}
+		out[service.ChannelMonitorCatalogKey{Platform: st.Platform, Model: st.Model, GroupID: st.GroupID}] = &st
+	}
+	return out, rows.Err()
+}
+
 func (r *channelMonitorV2Repository) loadCoverage(ctx context.Context, filter service.ChannelMonitorV2Filter) (*service.ChannelMonitorV2Coverage, error) {
 	wm, err := r.GetAggregationWatermark(ctx)
 	if err != nil {
@@ -1182,6 +1226,9 @@ func channelMonitorV2Where(filter service.ChannelMonitorV2Filter, cfg service.Ch
 	return "WHERE " + strings.Join(conditions, " AND "), args
 }
 
+// channelMonitorV2EnabledPlatforms 返回已启用的平台集合。
+// C1 说明：本函数依据 cfg.Platforms[].Enabled（迁移 271 保留的字段）决定被监控平台，
+// 不读取 cfg.Platforms[].models（已停消费）。平台启用态仍由配置驱动，属本文件保留职责。
 func channelMonitorV2EnabledPlatforms(cfg service.ChannelMonitorV2Config) []string {
 	out := []string{}
 	for _, p := range cfg.Platforms {
@@ -1192,33 +1239,16 @@ func channelMonitorV2EnabledPlatforms(cfg service.ChannelMonitorV2Config) []stri
 	return out
 }
 
-// channelMonitorV2DisplayModel maps a raw model name for presentation.
-// Semantics (parallel to empty group_ids = all groups):
-//   - platform not in config / disabled → keep raw model (still collected)
-//   - models list empty → show the real model name (no collapsing)
-//   - models list non-empty → selected keep identity; everything else → __other__
+// channelMonitorV2DisplayModel 返回用于展示的模型名。
+// C1: cfg.Platforms[].models 已停消费（迁移 271 清空），不再据其做 named + __other__
+// 折叠——该折叠/目录推导归属 C2/C3。此处始终返回真实模型名（空模型名仍为 __other__）。
 func channelMonitorV2DisplayModel(cfg service.ChannelMonitorV2Config, platform, model string) string {
+	_ = cfg.Platforms // 保留字段解析兼容，不再读取 .Models
+	_ = platform
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return service.ChannelMonitorV2OtherModel
 	}
-	for _, p := range cfg.Platforms {
-		if p.Platform != platform {
-			continue
-		}
-		// Empty allow-list: surface every real model instead of dumping into __other__.
-		// Operators opt into the named + __other__ split only by listing models.
-		if len(p.Models) == 0 {
-			return model
-		}
-		for _, selected := range p.Models {
-			if selected == model {
-				return model
-			}
-		}
-		return service.ChannelMonitorV2OtherModel
-	}
-	// Platform not configured: still show the real model so traffic is visible.
 	return model
 }
 func channelMonitorV2ModelSelected(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, platform, model string) bool {

@@ -28,6 +28,8 @@ const i18nT = (key: string, params?: Record<string, unknown>) => {
     'channelMonitorV2.matrix.warningLegend': '警告',
     'channelMonitorV2.matrix.criticalLegend': '异常',
     'channelMonitorV2.matrix.unknownLegend': '未知',
+    'channelMonitorV2.matrix.probeBadge': '抽样探测',
+    'channelMonitorV2.matrix.noDataBadge': '无数据',
   }
   const template = map[key] || key
   return template.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ''))
@@ -139,6 +141,80 @@ describe('RelayPulseMatrix', () => {
     // No click-to-open modal
     await cells[0].trigger('click')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+})
+
+describe('RelayPulseMatrix C3 three-state', () => {
+  const coverage = {
+    requested_start: '2026-08-01T00:00:00Z',
+    requested_end: '2026-08-01T00:05:00Z',
+    coverage_start: '2026-08-01T00:00:00Z',
+    data_through: '2026-08-01T00:03:00Z',
+    computed_at: '2026-08-01T00:03:00Z',
+    aggregation_lag_seconds: 0,
+    coverage_complete: true,
+    bucket_seconds: 60,
+  }
+
+  it('renders business / probe / no-data rows with explicit source badges and no channel-wide rates', () => {
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [
+          {
+            platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-5',
+            metrics: metrics(10), health, buckets: [{ bucket_start: '2026-08-01T00:00:00Z', metrics: metrics(10), health }],
+            has_data: true, source: 'business', status: 'operational', observed_at: '2026-08-01T00:03:00Z',
+          },
+          {
+            platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-4',
+            metrics: metrics(0), health, buckets: [],
+            has_data: true, source: 'probe', status: 'operational', observed_at: '2026-08-01T00:02:00Z',
+          },
+          {
+            platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-3',
+            metrics: metrics(0), health, buckets: [],
+            has_data: false, source: null, status: null, observed_at: null,
+          },
+        ],
+        coverage,
+        healthMode: 'overall',
+      },
+    })
+
+    // Two non-business rows → exactly two source badges (probe + no-data).
+    const badges = wrapper.findAll('.state-badge')
+    expect(badges).toHaveLength(2)
+    const badgeTexts = badges.map((b) => b.text())
+    expect(badgeTexts).toContain('抽样探测')
+    expect(badgeTexts).toContain('无数据')
+
+    // Business row carries no source badge.
+    // (Each data row has a .dimension-cell; the .matrix-header is not a data row.)
+    const rows = wrapper.findAll('.dimension-cell')
+    expect(rows).toHaveLength(3)
+
+    // No-data row uses the explicit muted marker, not the all-red/unknown dot.
+    expect(wrapper.find('.health-no-data').exists()).toBe(true)
+
+    // Non-business rows collapse metrics to a dash (never imply channel-wide rates).
+    const allText = wrapper.text()
+    // business success rate is ~90.0%; probe/no-data show '—'.
+    const dashCount = (allText.match(/—/g) || []).length
+    expect(dashCount).toBeGreaterThanOrEqual(6)
+  })
+
+  it('treats legacy payloads (no has_data) as business without a badge', () => {
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [{
+          platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-5',
+          metrics: metrics(10), health, buckets: [{ bucket_start: '2026-08-01T00:00:00Z', metrics: metrics(10), health }],
+        }],
+        coverage,
+        healthMode: 'overall',
+      },
+    })
+    expect(wrapper.findAll('.state-badge')).toHaveLength(0)
   })
 })
 
