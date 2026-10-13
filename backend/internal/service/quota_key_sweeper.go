@@ -177,6 +177,12 @@ func (s *QuotaKeySweeper) SweepNow(ctx context.Context) (int, error) {
 // 幂等：已是 expired 的跳过；两个维度独立：只标 expired，保留 exhausted /
 // last_error / last_refresh_at（不重置 exhausted）。
 //
+// 关键约束（D-CURSOR-032）：状态写入按数据库当前 expires_at 条件限定。ListExpired 取回
+// 的是旧值，管理员可能在两步间用 UpdateMeta 清空 expires_at；因此写入走条件化方法
+// MarkExpiredIfStillExpired（UPDATE ... WHERE id AND status='active' AND expires_at
+// IS NOT NULL AND expires_at < now），由 DB 当前行重新判定，不受旧值影响。条件不满足时
+// 影响 0 行，count 不增，天然幂等。
+//
 // tx 由调用方提供：生产路径传真实事务，单测路径传占位事务（fake repo 忽略 tx）。
 // 返回本轮实际改写条数。
 func (s *QuotaKeySweeper) sweepOnce(ctx context.Context, tx *ent.Tx) (int, error) {
@@ -188,13 +194,14 @@ func (s *QuotaKeySweeper) sweepOnce(ctx context.Context, tx *ent.Tx) (int, error
 	count := 0
 	for _, qk := range expired {
 		if qk.Status == domain.QuotaKeyStatusExpired {
-			continue // 幂等：已是 expired 的跳过
+			continue // 幂等：已是 expired 的跳过（DB 条件也判定为假，安全冗余）
 		}
-		// 只标 expired，保留 exhausted 与其它字段（两个维度独立）。
-		if err := s.repo.UpdateStatusFields(ctx, tx, qk.ID, domain.QuotaKeyStatusExpired, qk.Exhausted, qk.LastRefreshError, qk.LastRefreshAt); err != nil {
+		// 按 DB 当前 expires_at 条件限定写入：仅当当前行仍"当前已到期"才标 expired。
+		affected, err := s.repo.MarkExpiredIfStillExpired(ctx, tx, qk.ID, now)
+		if err != nil {
 			return count, err
 		}
-		count++
+		count += affected
 	}
 	return count, nil
 }

@@ -77,6 +77,26 @@ func (r *quotaKeyRepository) HardDelete(ctx context.Context, tx *ent.Tx, id int6
 	return tx.QuotaKey.DeleteOneID(id).Exec(ctx)
 }
 
+// MarkExpiredIfStillExpired 在事务内将激活码标为 expired，但仅当数据库当前行仍满足
+// "当前已到期"条件：status='active' AND expires_at IS NOT NULL AND expires_at < now。
+//
+// 这是幂等、按当前值判定的条件化写入（D-CURSOR-032）：sweepOnce 先 ListExpired 取旧值，
+// 再凭旧值发起写入；管理员可在两步间用 UpdateMeta 清空 expires_at。若直接无条件写
+// UpdateStatusFields，会把"曾经到期"误判为"当前已到期"。本语句把判定下沉到 UPDATE 的
+// WHERE 条件，按 DB 当前行重新校验，不受旧值影响；条件不满足时影响 0 行，天然幂等。
+// 返回受影响行数（命中 1，未命中 0）。
+func (r *quotaKeyRepository) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
+	return tx.QuotaKey.Update().
+		Where(
+			quotakey.ID(id),
+			quotakey.Status(domain.QuotaKeyStatusActive),
+			quotakey.ExpiresAtNotNil(),
+			quotakey.ExpiresAtLT(now),
+		).
+		SetStatus(domain.QuotaKeyStatusExpired).
+		Save(ctx)
+}
+
 // UpdateCredentials 写入加密后的凭据形态：code_encrypted / code_mac / code_last4。
 func (r *quotaKeyRepository) UpdateCredentials(ctx context.Context, id int64, codeEncrypted, codeMAC, codeLast4 string) error {
 	_, err := r.client.QuotaKey.UpdateOneID(id).

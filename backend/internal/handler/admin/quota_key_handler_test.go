@@ -121,6 +121,25 @@ func (r *fakeQuotaKeyRepo) UpdateStatusFields(_ context.Context, _ *ent.Tx, id i
 	return nil
 }
 
+// MarkExpiredIfStillExpired 满足 service.QuotaKeyRepository 接口（D-CURSOR-032）。
+// 内存替身按"当前值"判定，仅当 status=active 且 expires_at 非空且早于 now 才标 expired。
+func (r *fakeQuotaKeyRepo) MarkExpiredIfStillExpired(_ context.Context, _ *ent.Tx, id int64, now time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		return 0, r.updateErr
+	}
+	qk, ok := r.keys[id]
+	if !ok {
+		return 0, &ent.NotFoundError{}
+	}
+	if qk.Status == "active" && qk.ExpiresAt != nil && qk.ExpiresAt.Before(now) {
+		qk.Status = "expired"
+		return 1, nil
+	}
+	return 0, nil
+}
+
 func (r *fakeQuotaKeyRepo) HardDelete(_ context.Context, _ *ent.Tx, id int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

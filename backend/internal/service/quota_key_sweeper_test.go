@@ -40,6 +40,11 @@ func (r *recordingQuotaKeyRepo) UpdateStatusFields(ctx context.Context, tx *ent.
 	return r.fakeQuotaKeyRepo.UpdateStatusFields(ctx, tx, id, status, exhausted, lastError, lastRefreshAt)
 }
 
+func (r *recordingQuotaKeyRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
+	r.record("MarkExpiredIfStillExpired")
+	return r.fakeQuotaKeyRepo.MarkExpiredIfStillExpired(ctx, tx, id, now)
+}
+
 func (r *recordingQuotaKeyRepo) calledMethods() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -148,8 +153,8 @@ func TestQuotaKeySweep_AlreadyExpiredSkipped(t *testing.T) {
 		t.Fatalf("expected status still expired, got %q", repo.byID[1].Status)
 	}
 	for _, c := range repo.calledMethods() {
-		if c == "UpdateStatusFields" {
-			t.Fatalf("already-expired key must not trigger UpdateStatusFields")
+		if c == "UpdateStatusFields" || c == "MarkExpiredIfStillExpired" {
+			t.Fatalf("already-expired key must not trigger %s", c)
 		}
 	}
 }
@@ -201,7 +206,7 @@ func TestQuotaKeySweep_NoAccountCalls(t *testing.T) {
 		if strings.Contains(c, "Account") {
 			t.Fatalf("sweep touched account-related method %q", c)
 		}
-		if c != "ListExpired" && c != "UpdateStatusFields" {
+		if c != "ListExpired" && c != "UpdateStatusFields" && c != "MarkExpiredIfStillExpired" {
 			t.Fatalf("sweep called unexpected method %q", c)
 		}
 	}
@@ -226,5 +231,39 @@ func TestQuotaKeySweep_RunOnceWritesHeartbeat(t *testing.T) {
 	}
 	if name := ops.lastJobName(); name != quotaKeySweepJobName {
 		t.Fatalf("expected heartbeat job name %q, got %q", quotaKeySweepJobName, name)
+	}
+}
+
+// staleExpiredRepo 模拟交错场景（D-CURSOR-032）：ListExpired 返回的是旧快照（仍显示到期），
+// 但当前存储中该 key 的 expires_at 已被管理员用 UpdateMeta 清空。MarkExpiredIfStillExpired
+// 按"当前值"判定，因此不应命中——避免"曾经到期"被误标 expired。
+type staleExpiredRepo struct {
+	*fakeQuotaKeyRepo
+	stale []*ent.QuotaKey
+}
+
+func (r *staleExpiredRepo) ListExpired(_ context.Context, _ time.Time) ([]*ent.QuotaKey, error) {
+	return r.stale, nil
+}
+
+// TestQuotaKeySweep_ExpiredSnapshotButExpiresCleared 验证交错：ListExpired 取到旧值
+// （仍到期）后，管理员在两步间清空 expires_at；清扫按 DB 当前条件判定，不误标 expired。
+func TestQuotaKeySweep_ExpiredSnapshotButExpiresCleared(t *testing.T) {
+	repo := &staleExpiredRepo{fakeQuotaKeyRepo: newFakeQuotaKeyRepo()}
+	// 当前存储：expires_at 已被管理员清空（模拟 ListExpired 之后、条件写入之前的 UpdateMeta 交错）。
+	repo.byID[1] = &ent.QuotaKey{ID: 1, Status: "active", ExpiresAt: nil}
+	// ListExpired 仍返回旧快照（当时 expires_at 早于 now）。
+	repo.stale = []*ent.QuotaKey{{ID: 1, Status: "active", ExpiresAt: timePtr(time.Now().Add(-time.Hour))}}
+
+	svc := newSweepTestSvc(repo)
+	n, err := svc.sweepOnce(context.Background(), &ent.Tx{})
+	if err != nil {
+		t.Fatalf("sweepOnce returned error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 marked (interleaving cleared expires_at), got %d", n)
+	}
+	if repo.byID[1].Status != "active" {
+		t.Fatalf("expected status unchanged (active), got %q", repo.byID[1].Status)
 	}
 }

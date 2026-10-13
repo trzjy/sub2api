@@ -43,6 +43,12 @@ type QuotaKeyRepository interface {
 	EnqueueAccountChangedOutbox(ctx context.Context, tx *ent.Tx, accountIDs []int64) error
 	SoftDelete(ctx context.Context, tx *ent.Tx, id int64) error
 	ListEligibleForRefresh(ctx context.Context) ([]*ent.QuotaKey, error)
+	// MarkExpiredIfStillExpired 在事务内将激活码标记为 expired，但仅当数据库当前行
+	// 仍满足"当前已到期"条件：status='active' AND expires_at IS NOT NULL AND expires_at < now。
+	// 这是幂等、按当前值判定的条件化写入：即使 ListExpired 取回的是旧值、管理员在两步间
+	// 用 UpdateMeta 清空 expires_at，本语句按 DB 当前条件重新判定，不会将"曾经到期但已
+	// 被清空"的 key 误标 expired（D-CURSOR-032）。返回受影响行数（0 或 1）。
+	MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error)
 }
 
 // QuotaKeyUpstreamClient 抽象"向上游拉取账号"的客户端。

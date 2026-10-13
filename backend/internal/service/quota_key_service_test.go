@@ -92,6 +92,20 @@ func (f *fakeQuotaKeyRepo) UpdateStatusFields(_ context.Context, _ *ent.Tx, id i
 	return nil
 }
 
+// MarkExpiredIfStillExpired 内存替身：按"当前值"判定，仅当当前行仍 status=active 且
+// expires_at 非空且早于 now 才标 expired。模拟 DB 条件化写入（D-CURSOR-032）。
+func (f *fakeQuotaKeyRepo) MarkExpiredIfStillExpired(_ context.Context, _ *ent.Tx, id int64, now time.Time) (int, error) {
+	qk, ok := f.byID[id]
+	if !ok {
+		return 0, errQuotaKeyNotFound
+	}
+	if qk.Status == domain.QuotaKeyStatusActive && qk.ExpiresAt != nil && qk.ExpiresAt.Before(now) {
+		qk.Status = domain.QuotaKeyStatusExpired
+		return 1, nil
+	}
+	return 0, nil
+}
+
 func (f *fakeQuotaKeyRepo) HardDelete(_ context.Context, _ *ent.Tx, id int64) error {
 	delete(f.byID, id)
 	return nil
@@ -464,6 +478,14 @@ func (r *testDBRepo) UpdateCredentials(ctx context.Context, id int64, codeEncryp
 func (r *testDBRepo) ListExpired(ctx context.Context, now time.Time) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().
 		Where(quotakey.ExpiresAtNotNil(), quotakey.ExpiresAtLT(now)).All(ctx)
+}
+
+// MarkExpiredIfStillExpired 真实 DB 替身：与 production repository 同语义的条件化写入。
+func (r *testDBRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
+	return tx.QuotaKey.Update().
+		Where(quotakey.ID(id), quotakey.Status(domain.QuotaKeyStatusActive), quotakey.ExpiresAtNotNil(), quotakey.ExpiresAtLT(now)).
+		SetStatus(domain.QuotaKeyStatusExpired).
+		Save(ctx)
 }
 
 func (r *testDBRepo) ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error) {
