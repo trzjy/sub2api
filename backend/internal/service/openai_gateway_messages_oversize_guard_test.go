@@ -5,6 +5,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -205,5 +206,54 @@ func TestMessagesOversizeClientMessageSharedByPrecheckAndUpstreamFallback(t *tes
 	// 文案自检：不出现内部术语
 	for _, term := range []string{"账号", "分组", "中转", "节点", "ID", "account", "group"} {
 		require.NotContains(t, messagesOversizeClientMessage, term)
+	}
+}
+
+// 回归用例（B 收窄）：直接调用 handleCompatErrorResponse，验证兜底文案只对上游裸 400 生效。
+// 其它 4xx（429 限流 / 401 鉴权 / 403 / 404）即便返回空 message，也不得套用「请求体过大」
+// 文案——否则会把限流/鉴权问题误导成上下文超限，让用户去清会话。
+// 注意：走完整 ForwardAsAnthropic 时 429/401/403 会先进入 failover 路径而非此分支，
+// 故此处直接命中 B 分支做断言，与生产非 failover 终写路径一致。
+func TestHandleCompatErrorResponse_Non400EmptyMsgKeepsUpstreamError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"400_bare", http.StatusBadRequest},
+		{"429_rate_limit", http.StatusTooManyRequests},
+		{"401_unauthorized", http.StatusUnauthorized},
+		{"404_not_found", http.StatusNotFound},
+		{"403_forbidden", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+
+			// 上游回对应 4xx 但 body 为空（无可读 message）——正是 B 收窄前会误套文案的形态。
+			resp := &http.Response{
+				StatusCode: tc.status,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+
+			_, err := svc.handleCompatErrorResponse(resp, c, rawChatCompletionsTestAccount(), writeAnthropicError)
+
+			require.Error(t, err)
+			require.Equal(t, tc.status, rec.Code, "status code semantics must stay unchanged")
+			msg := gjson.Get(rec.Body.String(), "error.message").String()
+			if tc.status == http.StatusBadRequest {
+				require.Equal(t, messagesOversizeClientMessage, msg, "bare 400 must use the oversize hint")
+			} else {
+				require.NotEqual(t, messagesOversizeClientMessage, msg,
+					"non-400 4xx must not be rewritten to the oversize hint")
+				require.Equal(t, fmt.Sprintf("Upstream error: %d", tc.status), msg,
+					"non-400 4xx with empty message keeps the generic upstream message")
+			}
+		})
 	}
 }
