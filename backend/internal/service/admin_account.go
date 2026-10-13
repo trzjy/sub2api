@@ -781,17 +781,10 @@ func (s *adminServiceImpl) checkQuotaKeyForCreate(ctx context.Context, platform 
 	if platform != domain.PlatformCursor {
 		return nil
 	}
-	return s.withQuotaKeyAdvisoryTx(ctx, *quotaKeyID, func(tx *dbent.Tx) error {
-		working, err := countWorkingQuotaKeyAccounts(ctx, tx, *quotaKeyID)
-		if err != nil {
-			return fmt.Errorf("admin: count working accounts: %w", err)
-		}
-		if working >= MaxAccountsPerQuotaKey {
-			return infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_ACCOUNT_LIMIT_REACHED",
-				"quota key %d already holds %d accounts (limit %d)", *quotaKeyID, working, MaxAccountsPerQuotaKey)
-		}
-		return nil
-	})
+	// cursor 平台的"计数 + 实际插入"临界区改由 CreateAccount 在同一 advisory 锁事务内
+	// 串行完成（持锁 → 计数 → 判定 → 插入 → 提交），避免在 checkQuotaKeyForCreate 内计数后
+	// 过早提交释放锁、再于 CreateAccount 插入的竞态窗口（两并发请求同过计数检查 → 建出第 16 个）。
+	return nil
 }
 
 // withQuotaKeyAdvisoryTx 在事务内取 quota key advisory 锁后执行 fn 并提交。
@@ -849,6 +842,38 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	// 并校验激活码存在（未软删），避免 FK 违规退化成 500。
 	if err := s.checkQuotaKeyForCreate(ctx, input.Platform, input.QuotaKeyID); err != nil {
 		return nil, err
+	}
+	// 持锁事务（cursor 平台且归属激活码、且 entClient 已注入时）：开启 advisory 事务锁并计数，
+	// 保持锁直至下方实际插入提交，使"计数 → 判定 → 插入"在同一临界区内串行完成，
+	// 杜绝两并发请求同过计数检查、各插一条、绕过号池上限建出第 16 个账号。
+	// 非 cursor 平台 / 未注入 entClient 的测试替身跳过（交由 DB 约束兜底）。
+	var quotaTx *dbent.Tx
+	quotaTxCommitted := false
+	defer func() {
+		if quotaTx != nil && !quotaTxCommitted {
+			_ = quotaTx.Rollback()
+		}
+	}()
+	if input.Platform == domain.PlatformCursor && input.QuotaKeyID != nil && s.entClient != nil {
+		tx, err := s.entClient.Tx(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("admin: begin quota key tx: %w", err)
+		}
+		if err := acquireAdvisoryXactLock(ctx, tx, quotaKeyAdvisoryLockID(*input.QuotaKeyID)); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		working, err := countWorkingQuotaKeyAccounts(ctx, tx, *input.QuotaKeyID)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("admin: count working accounts: %w", err)
+		}
+		if working >= MaxAccountsPerQuotaKey {
+			_ = tx.Rollback()
+			return nil, infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_ACCOUNT_LIMIT_REACHED",
+				"quota key %d already holds %d accounts (limit %d)", *input.QuotaKeyID, working, MaxAccountsPerQuotaKey)
+		}
+		quotaTx = tx
 	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
@@ -917,6 +942,14 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
+	}
+	// cursor 平台：实际插入完成后再提交 advisory 锁事务（锁随事务释放），
+	// "计数 → 判定 → 插入"临界区至此结束，后续并发请求方可观察到本插入后的计数。
+	if quotaTx != nil {
+		if err := quotaTx.Commit(); err != nil {
+			return nil, fmt.Errorf("admin: commit quota key tx: %w", err)
+		}
+		quotaTxCommitted = true
 	}
 
 	// 绑定分组
