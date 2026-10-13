@@ -1,13 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import AccountsView from '../../../views/admin/AccountsView.vue'
 import type { Account } from '@/types'
 
-// ④ AccountsView 批量门控：opt-in deepseek 命中、未 opt-in 不命中。
+// AccountsView 批量门控：OpenCode Go opt-in 账号命中、未 opt-in 不命中。
 // 通过挂载真实 AccountsView（AccountUsageCell 不 stub），观察批量用量抓取
 // adminAPI.accounts.getBatchUsage 收到的账号 ID，从而验证 accountSupportsBatchUsage
-// 对 deepseek opt-in 的判定（与 muse 一致纳入批量抓取）。
+// 对各平台 opt-in 的判定（与 muse 一致纳入批量抓取）。
 const {
   getBatchUsage,
   listAccounts,
@@ -142,11 +142,11 @@ function mountView() {
   })
 }
 
-function makeDeepseekAccount(id: number, usageProbe?: string): Account {
+function makeAccount(id: number, platform: Account['platform'], usageProbe?: string): Account {
   return {
     id,
-    name: `deepseek-${id}`,
-    platform: 'deepseek',
+    name: `${platform}-${id}`,
+    platform,
     type: 'apikey',
     proxy_id: null,
     concurrency: 1,
@@ -174,7 +174,7 @@ function makeDeepseekAccount(id: number, usageProbe?: string): Account {
 const OPT_IN_ID = 8101
 const NON_OPT_IN_ID = 8201
 
-describe('admin AccountsView deepseek opt-in 批量门控', () => {
+describe('admin AccountsView OpenCode Go opt-in 批量门控', () => {
   beforeEach(() => {
     localStorage.clear()
     getBatchUsage.mockReset()
@@ -184,8 +184,8 @@ describe('admin AccountsView deepseek opt-in 批量门控', () => {
 
     listAccounts.mockResolvedValue({
       items: [
-        makeDeepseekAccount(OPT_IN_ID, 'opencode_zen'),
-        makeDeepseekAccount(NON_OPT_IN_ID)
+        makeAccount(OPT_IN_ID, 'deepseek', 'opencode_zen'),
+        makeAccount(NON_OPT_IN_ID, 'deepseek')
       ],
       total: 2,
       page: 1,
@@ -212,7 +212,7 @@ describe('admin AccountsView deepseek opt-in 批量门控', () => {
   })
 
   it('opt-in deepseek 命中批量抓取、未 opt-in 不命中', async () => {
-    const wrapper = mountView()
+    mountView()
     await flushPromises()
     // 触发批量抓取 flush（queueBatchedUsage 用 setTimeout(0) 排程），用真实计时器等待排程执行
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -224,5 +224,34 @@ describe('admin AccountsView deepseek opt-in 批量门控', () => {
     )
     expect(allIds).toContain(OPT_IN_ID)
     expect(allIds).not.toContain(NON_OPT_IN_ID)
+  })
+
+  it('Go 账号 241/243 命中批量抓取，同平台未 opt-in 账号不命中', async () => {
+    listAccounts.mockResolvedValueOnce({
+      items: [
+        makeAccount(241, 'kimi', 'opencode_zen'),
+        makeAccount(243, 'zhipu', 'opencode_zen'),
+        makeAccount(244, 'kimi'),
+        makeAccount(245, 'zhipu')
+      ],
+      total: 4,
+      page: 1,
+      page_size: 20,
+      pages: 1
+    })
+
+    mountView()
+    await flushPromises()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await flushPromises()
+
+    expect(getBatchUsage).toHaveBeenCalled()
+    const allIds = (getBatchUsage as unknown as { mock: { calls: unknown[][] } }).mock.calls.flatMap(
+      (call) => call[0] as number[]
+    )
+    expect(allIds).toContain(241)
+    expect(allIds).toContain(243)
+    expect(allIds).not.toContain(244)
+    expect(allIds).not.toContain(245)
   })
 })

@@ -656,11 +656,8 @@
 
     <!-- Non-OAuth/Setup-Token accounts -->
     <div ref="rootRef" v-else>
-      <!-- Muse API Key accounts: three-window usage (OpenCode Go 上游透传) -->
-      <!-- deepseek apikey opt-in（usage_probe=opencode_zen）完全镜像 muse：进入同一
-           三窗口模板；内层 v-if="museUsage" 不动，抓取前（museUsage 为 null）显示占位符 '-'，
-           与 muse 抓取前行为一致。 -->
-      <template v-if="account.platform === 'muse' || (account.platform === 'deepseek' && account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen')">
+      <!-- Muse and OpenCode Go opt-in accounts share the upstream three-window usage. -->
+      <template v-if="account.platform === 'muse' || hasOpenCodeGoUsageProbe">
         <div v-if="museUsage" class="space-y-1">
           <UsageProgressBar
             v-if="museUsage.rolling"
@@ -933,6 +930,9 @@ const isWebAccessModeAccount = computed(() => {
   const mode = props.account.credentials?.access_mode
   return props.account.type === 'apikey' && typeof mode === 'string' && mode === 'web'
 })
+const hasOpenCodeGoUsageProbe = computed(() =>
+  props.account.type === 'apikey' && props.account.credentials?.usage_probe === 'opencode_zen'
+)
 
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
@@ -942,15 +942,8 @@ const showUsageWindows = computed(() => {
   if (isWebAccessModeAccount.value) {
     return true
   }
-  // deepseek apikey opt-in（usage_probe=opencode_zen）：完全镜像 muse apikey 通路，
-  // 路由进 v-else 根分支的三窗口模板（:664），不进入 CN 分支。未 opt-in 的 deepseek
-  // 不受影响（继续走下方 CN 分支）。判定一律用凭证 usage_probe（请求前可得），
-  // 禁止用 muse_usage 字段（请求后才存在，会循环依赖）。
-  if (
-    props.account.platform === 'deepseek' &&
-    props.account.type === 'apikey' &&
-    props.account.credentials?.usage_probe === 'opencode_zen'
-  ) {
+  // The opt-in credential is available before fetching usage and selects the Go window display.
+  if (hasOpenCodeGoUsageProbe.value) {
     return false
   }
   // CN providers: apikey 账号也有滚动用量窗口（coding plan）或余额（payg），
@@ -995,14 +988,7 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'muse') {
     return props.account.type === 'apikey'
   }
-  // deepseek apikey opt-in（usage_probe=opencode_zen）：镜像 muse，触发批量用量抓取
-  // （getBatchUsage 返回 muse_usage 后由 v-else 三窗口模板渲染）。未 opt-in 的 deepseek
-  // 保持基线行为（false，不抓取）。判定一律用凭证 usage_probe（请求前可得）。
-  if (
-    props.account.platform === 'deepseek' &&
-    props.account.type === 'apikey' &&
-    props.account.credentials?.usage_probe === 'opencode_zen'
-  ) {
+  if (hasOpenCodeGoUsageProbe.value) {
     return true
   }
   // 网页接入模式（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
