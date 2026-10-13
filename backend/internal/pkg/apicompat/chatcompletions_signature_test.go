@@ -70,3 +70,12 @@ func TestAnthropicResponse_NoThinkingBlockUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(b), "signature", "无 thinking 块时不得出现 signature 键")
 }
+
+// A1 增强（外审 #2 建议）：thinking 块带非空 signature 时必须原样保留（不覆盖、不伪造）。
+func TestAnthropicContentBlock_ThinkingPreservesNonEmptySignature(t *testing.T) {
+	withSig := AnthropicContentBlock{Type: "thinking", Thinking: "let me think", Signature: "sig_real_abc"}
+	b, err := json.Marshal(withSig)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"signature":"sig_real_abc"`, "非空 signature 必须原样保留，不得清空或替换")
+	require.Contains(t, string(b), `"thinking":"let me think"`)
+}
