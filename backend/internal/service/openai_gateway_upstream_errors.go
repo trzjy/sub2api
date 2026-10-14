@@ -989,12 +989,6 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	}
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
-	// 上游返回 400 且未给出任何可读 message 时，网关只能包装成无信息量的 "Upstream error: 400"
-	// （生产实证：超大请求在流中段被裸拒 400）。客户端看不到任何可执行信息，故替换为与前置
-	// 预检共用的中文文案。状态码与错误类型语义保持不变，仅替换 message 文本。
-	// 注意：只认 400，不认其它 4xx。429(限流)/401(鉴权)/403/404 即便空 message 也另有含义，
-	// 套用「请求体过大」会误导下游（例如把限流当超大上下文去清会话）。
-	unreadableUpstream4xx := upstreamMsg == "" && resp.StatusCode == http.StatusBadRequest
 	if upstreamMsg == "" {
 		upstreamMsg = fmt.Sprintf("Upstream error: %d", resp.StatusCode)
 	}
@@ -1003,9 +997,6 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	// masked-identity flag for the failover final-write closure (per-attempt).
 	c.Set(MaskedAccountFailoverKey, IsIdentityMaskedAccount(account))
 	clientMsg := ClientSafeUpstreamErrorMessage(account, upstreamMsg, infraerrors.UpstreamRequestFailed)
-	if unreadableUpstream4xx {
-		clientMsg = messagesOversizeClientMessage
-	}
 
 	upstreamDetail := ""
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
