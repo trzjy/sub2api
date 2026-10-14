@@ -40,7 +40,7 @@ type rawCCPurifyDecodedMessage struct {
 
 func TestPurifyRawCCMessages_BelowTriggerReturnsOriginalBody(t *testing.T) {
 	body := []byte(`{"model":"kimi-k3","messages":[{"role":"system","content":"keep this"},{"role":"user","content":"hello"}],"stream":false}`)
-	estimated, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, body)
+	estimated, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, body)
 	require.NoError(t, err)
 	require.Less(t, estimated, defaultRawCCPurifyTriggerTokens)
 
@@ -65,7 +65,7 @@ func TestRawCCPurifyThresholds_ReadsAccountExtra(t *testing.T) {
 
 func TestPurifyRawCCMessages_TruncatesToolAndAttachmentPreservingAnchors(t *testing.T) {
 	body := rawCCPurifyLargeFixture(t)
-	beforeTokens, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, body)
+	beforeTokens, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, beforeTokens, defaultRawCCPurifyTriggerTokens)
 
@@ -74,7 +74,7 @@ func TestPurifyRawCCMessages_TruncatesToolAndAttachmentPreservingAnchors(t *test
 	require.False(t, rejected)
 	require.True(t, json.Valid(purified))
 
-	afterTokens, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, purified)
+	afterTokens, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, purified)
 	require.NoError(t, err)
 	require.Less(t, afterTokens, beforeTokens)
 	require.NotContains(t, string(purified), rawCCPurifyToolSentinel)
@@ -101,7 +101,7 @@ func TestPurifyRawCCMessages_TruncatesToolAndAttachmentPreservingAnchors(t *test
 
 func TestPurifyRawCCMessages_RejectsOverRedlineWithUnifiedMessage(t *testing.T) {
 	body := rawCCPurifyUncompressibleBody(t)
-	estimated, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, body)
+	estimated, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, body)
 	require.NoError(t, err)
 	require.Greater(t, estimated, defaultRawCCPurifyRedlineTokens)
 
@@ -156,7 +156,7 @@ func TestPurifyRawCCMessages_CompletesWithinBudget(t *testing.T) {
 func TestForwardAsRawChatCompletions_PurifiesOutboundBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := rawCCPurifyLargeFixture(t)
-	beforeTokens, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, body)
+	beforeTokens, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, beforeTokens, defaultRawCCPurifyTriggerTokens)
 
@@ -184,7 +184,7 @@ func TestForwardAsRawChatCompletions_PurifiesOutboundBody(t *testing.T) {
 	require.NotContains(t, string(upstream.lastBody), rawCCPurifyAttachmentSentinel)
 	require.Contains(t, string(upstream.lastBody), "latest user question must remain byte-for-byte")
 
-	afterTokens, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, upstream.lastBody)
+	afterTokens, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, upstream.lastBody)
 	require.NoError(t, err)
 	require.Less(t, afterTokens, beforeTokens)
 }

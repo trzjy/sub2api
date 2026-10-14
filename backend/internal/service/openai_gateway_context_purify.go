@@ -38,7 +38,7 @@ func purifyRawCCMessages(body []byte, account *Account, model string) (purifiedB
 	}
 
 	triggerTokens, redlineTokens := rawCCPurifyThresholds(account)
-	estimatedTokens, err := EstimateKimiTierInputTokens(model, KimiTierProtocolChatCompletions, body)
+	estimatedTokens, err := EstimateTierRoutingInputTokens(model, TierRoutingProtocolChatCompletions, body)
 	if err != nil {
 		return nil, false, fmt.Errorf("estimate raw chat completions input tokens: %w", err)
 	}
@@ -179,7 +179,7 @@ func purifyRawCCMessages(body []byte, account *Account, model string) (purifiedB
 	}
 	purifiedTokens := estimatedTokens
 	if changed {
-		purifiedTokens, err = EstimateKimiTierInputTokens(model, KimiTierProtocolChatCompletions, result)
+		purifiedTokens, err = EstimateTierRoutingInputTokens(model, TierRoutingProtocolChatCompletions, result)
 		if err != nil {
 			return nil, false, fmt.Errorf("estimate purified raw chat completions input tokens: %w", err)
 		}
