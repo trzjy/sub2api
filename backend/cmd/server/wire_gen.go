@@ -353,7 +353,13 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	quotaKeySweeper := service.ProvideQuotaKeySweeper(quotaKeyRepository, opsRepository, client)
 	// D-CURSOR-018 装配：周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
 	// puller 复用既有 QuotaKeyService（PullAccounts 内部 advisory 锁 + 计数停限）。
-	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), nil, client)
+	// D-CURSOR-038 v3 装配：真实 shareai 拉号客户端替换占位 nil。
+	// 占位类型 NotConnectedUpstreamClient 保留作测试替身，此处不再实例化。
+	shareAIUpstream, err := service.NewShareAIUpstreamClient(service.NewCredcryptEncryptor())
+	if err != nil {
+		return nil, err
+	}
+	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), shareAIUpstream, client)
 	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository)
 	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
 	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。
