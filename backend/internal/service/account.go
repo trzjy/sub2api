@@ -1467,10 +1467,10 @@ func (a *Account) IsCodingPlan() bool {
 // GetAccessMode 返回账号的接入模式（api / web），与 GetAccountMode 同构，取值规则
 // （docs-local/platform-merge-refactor-plan.md §5.1；PR-4 已移除形状推断——PR-2 reconciler
 // 已把存量 web 账号的 access_mode 显式化，不再按凭证形状读取）：
-//  1) 显式合法值：credentials["access_mode"] 为 "api"/"web" 时直接使用；
-//  2) 显式非法值：返回空串（与非法 account_mode 一致）——但调度与转发路径必须走
+//  1. 显式合法值：credentials["access_mode"] 为 "api"/"web" 时直接使用；
+//  2. 显式非法值：返回空串（与非法 account_mode 一致）——但调度与转发路径必须走
 //     ResolveAccessMode() 失败关闭，不得按空串当 "api" 继续调度；
-//  3) 缺失 → "api"。
+//  3. 缺失 → "api"。
 //
 // 与 GetAccountMode（payg/coding）互不调用：接入模式与额度监控模式正交。
 func (a *Account) GetAccessMode() string {
@@ -1508,6 +1508,18 @@ func (a *Account) IsWebAccessMode() bool {
 	return a.GetAccessMode() == AccountAccessModeWeb
 }
 
+func accountMapsToMuseContributor(a *Account) bool {
+	if a == nil || a.Type != AccountTypeAPIKey {
+		return false
+	}
+	for _, mapped := range a.GetModelMapping() {
+		if strings.HasPrefix(strings.TrimSpace(mapped), "muse-spark-") {
+			return true
+		}
+	}
+	return false
+}
+
 // GetAPIProtocol 返回账号的上游 API 协议。存储于
 // credentials["api_protocol"]；缺失或与平台不匹配时回退 chat_completions
 // （与既有行为完全一致）。responses 协议仅 deepseek / kimi / minimax 支持（官方原生
@@ -1530,12 +1542,11 @@ func (a *Account) GetAPIProtocol() string {
 		}
 		return APIProtocolChatCompletions
 	}
-	// Muse 平台（OpenCode Go 上游 Meta Muse Spark Contributor）：上游固定
-	// Responses 协议（实测 chat/completions 400 ModelProtocolUnsupported），
-	// 非国产供应商但必须读 responses。与 PlatformOther 同属「独立分支、不读
-	// 国产供应商协议覆盖守卫」的平台——该守卫在下方，本分支必须置于其之前。
-	// 上游协议单一，固定返回 responses，不读 credentials.api_protocol。
-	if a.Platform == PlatformMuse {
+	// Muse Contributor（OpenCode Go 上游 Meta Muse Spark Contributor）：上游固定
+	// Responses 协议（实测 chat/completions 400 ModelProtocolUnsupported）。
+	// 掩码账号仍保留 kimi/deepseek/zhipu platform 以维持分组/调度归属，因此
+	// model_mapping 目标同样是协议事实源，不能只按 platform 判断。
+	if a.Platform == PlatformMuse || accountMapsToMuseContributor(a) {
 		return APIProtocolResponses
 	}
 	// 协议覆盖仅对国产 OpenAI 兼容供应商开放；openai/gemini 等平台不读该
