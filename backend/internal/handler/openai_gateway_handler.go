@@ -689,6 +689,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	c.Request = c.Request.WithContext(tierCtx)
 
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
@@ -1347,6 +1355,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 	c.Request = c.Request.WithContext(tierCtx)
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	// 估算模型用映射后的 estimateModel（与 applyTierRouting 同口径）。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		if failoverClientGone(c) {
@@ -2734,6 +2751,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	ctx = tierCtx
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -4559,6 +4584,71 @@ func isTierRoutingTargetModel(model string) bool {
 //
 // 调用方须把返回的 ctx 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover
 // 重入与跨档重试）共用同一分档门。gateOpen 由调用方注入（生产侧经调度快照查询一次）。
+// selfHostSizeExcludeThresholdTokens 是订阅组大请求动态排除自建账号的 input token 阈值
+// （派发单 D-SHS-001，input-only：仅统计请求 input，不含将要生成的 output）。
+// 估算 <= 阈值视为小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，
+// 调用 GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中的自建站点账号并入
+// failedAccountIDs。阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
+const selfHostSizeExcludeThresholdTokens = 2000
+
+// applySelfHostSizeExclusion 实现订阅组大请求动态排除自建账号（派发单 D-SHS-001）。
+//
+// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
+// 返回空集（绝不因估算失败拦请求）；估算 <= selfHostSizeExcludeThresholdTokens 视为
+// 小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，调用
+// GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中承载地址含自建站点标识
+// （selfHostBaseURLMarker）的账号 id 集合。
+//
+// 失败开放兜底：§1 列举候选或上下文异常一律按空集处理（不缩小候选），与既有选号路径
+// 零行为变化。返回集合由调用方并入各函数自持的 failedAccountIDs。
+//
+// 注：platform 为 §1 SelfHostedExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
+// protocol/body 与 applyTierRouting 同来源（body 为选号侧已持有的请求体）。
+func (h *OpenAIGatewayHandler) applySelfHostSizeExclusion(
+	ctx context.Context,
+	reqLog *zap.Logger,
+	groupID *int64,
+	platform string,
+	model string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+) map[int64]struct{} {
+	empty := make(map[int64]struct{})
+	groupIDVal := int64(0)
+	if groupID != nil {
+		groupIDVal = *groupID
+	}
+
+	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
+	if err != nil {
+		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
+		reqLog.Warn("selfhost_size_exclusion_estimate_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.String("model", model),
+			zap.Error(err))
+		return empty
+	}
+
+	if estimated <= selfHostSizeExcludeThresholdTokens {
+		// 小/中请求：参与调度，不排除自建账号。区间 ≤2000 参与。
+		return empty
+	}
+
+	// 大请求：取该分组可调度候选中的自建站点账号 id，交由调用方并入 failedAccountIDs。
+	excluded, err := h.gatewayService.SelfHostedExcludedIDs(ctx, groupID, platform)
+	if err != nil {
+		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
+		reqLog.Warn("selfhost_size_exclusion_list_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.Int("estimated_input_tokens", estimated),
+			zap.Error(err))
+		return empty
+	}
+	return excluded
+}
+
 func applyTierRouting(
 	c *gin.Context,
 	baseCtx context.Context,

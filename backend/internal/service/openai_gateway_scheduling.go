@@ -1759,6 +1759,20 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 	return accounts, nil
 }
 
+// SelfHostedExcludedIDs 列举该分组可调度候选中自建站点账号 id 集合（派发单 D-SHS-001）。
+//
+// 语义：复用 OpenAIGatewayService.listSchedulableAccounts 的候选列举，返回
+// GetOpenAIBaseURL() 含 selfHostBaseURLMarker 的账号 id。仅供 handler 侧选号前
+// 大请求动态排除使用，不改任何既有选号/调度函数签名与行为；列举候选失败返回 error，
+// 由调用方失败开放处理。
+func (s *OpenAIGatewayService) SelfHostedExcludedIDs(ctx context.Context, groupID *int64, platform string) (map[int64]struct{}, error) {
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		return nil, err
+	}
+	return selfHostedAccountIDs(accounts), nil
+}
+
 func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {
 	if s.concurrencyService == nil {
 		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil

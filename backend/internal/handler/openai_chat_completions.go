@@ -188,6 +188,14 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	c.Request = c.Request.WithContext(tierCtx)
 
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
+
 	for {
 		if failoverClientGone(c) {
 			return
