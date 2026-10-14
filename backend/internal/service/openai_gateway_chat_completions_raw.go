@@ -180,6 +180,17 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	upstreamBody = applyOllamaCloudRawChatCompletionsRequest(account, upstreamBody)
 	upstreamBody = clampOllamaCloudUpstreamMaxTokens(account, upstreamBody)
 
+	purifiedBody, contextRejected, purifyErr := purifyRawCCMessages(upstreamBody, account, upstreamModel)
+	if purifyErr != nil {
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "invalid chat completions request")
+		return nil, purifyErr
+	}
+	if contextRejected {
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", messagesOversizeClientMessage)
+		return nil, fmt.Errorf("raw chat completions context exceeds configured purification redline")
+	}
+	upstreamBody = purifiedBody
+
 	logger.L().Debug("openai chat_completions raw: forwarding without protocol conversion",
 		zap.Int64("account_id", account.ID),
 		zap.String("original_model", originalModel),
