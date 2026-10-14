@@ -741,6 +741,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 				}
 			}
+			// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段），
+			// 仅作用于真正的数据事件，避免误改 event:/:keepalive 等非数据行。
+			if maskedAccount && strings.HasPrefix(line, "data: ") {
+				jsonPart := strings.TrimPrefix(line, "data: ")
+				mb := maskVLLMFingerprints([]byte(jsonPart))
+				line = "data: " + string(mb)
+				dataBytes = mb
+				data = string(mb)
+			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
 			startsVisibleOutput := openAIStreamDataStartsVisibleOutput(data, eventType)
 			startsTTFTOutput := openAIStreamDataStartsTTFT(data, eventType, forceFlushFailedEvent, ttftMode)
@@ -1770,6 +1779,10 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
 		}
 	}
+	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
+	if IsIdentityMaskedAccount(account) {
+		body = maskVLLMFingerprints(body)
+	}
 	body, err = restoreGrokResponsesClientToolPayload(c, body)
 	if err != nil {
 		return nil, fmt.Errorf("restore Grok Responses client tool response: %w", err)
@@ -1908,6 +1921,11 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 			}
 		}
 		body = []byte(bodyText)
+	}
+
+	// 掩码账号：抹除 vLLM 指纹（system_fingerprint / reasoning 字段）。
+	if IsIdentityMaskedAccount(account) {
+		body = maskVLLMFingerprints(body)
 	}
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
