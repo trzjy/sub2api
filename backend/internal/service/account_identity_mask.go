@@ -147,3 +147,63 @@ func IdentityRewriteAliases(mappedModel string) []string {
 	}
 	return []string{mappedModel}
 }
+
+// IsReasoningStrippedAccount reports whether the account is configured to strip
+// the upstream reasoning_content (thinking / reasoning) field from the
+// client-visible response. This is a defense-in-depth measure for self-hosted
+// upstreams whose thinking text may echo competitor names or paraphrase the
+// system prompt: the gateway removes the field entirely so clients never see it.
+//
+// The flag is read from a.Extra["strip_reasoning_content"] as a boolean.
+// Missing, empty, non-bool, or false values — as well as a nil account or an
+// account with a nil Extra map — return false. This keeps the behavior a
+// zero-impact no-op for every other platform account.
+func IsReasoningStrippedAccount(a *Account) bool {
+	if a == nil || a.Extra == nil {
+		return false
+	}
+	v, ok := a.Extra["strip_reasoning_content"]
+	if !ok {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return b == "true" || b == "1"
+	default:
+		return false
+	}
+}
+
+// StripReasoningFromSSELine removes the reasoning_content field from a single
+// OpenAI Chat Completions SSE data payload line
+// (choices.0.delta.reasoning_content). Lines without a reasoning_content field
+// are returned unchanged. Parse/delete failures fall back to the original line
+// so the write path never drops a chunk on a malformed payload.
+func StripReasoningFromSSELine(line string) string {
+	if !gjson.Get(line, "choices.0.delta.reasoning_content").Exists() {
+		return line
+	}
+	out, err := sjson.Delete(line, "choices.0.delta.reasoning_content")
+	if err != nil {
+		return line
+	}
+	return out
+}
+
+// StripReasoningFromResponseBody removes the reasoning_content field from an
+// OpenAI Chat Completions JSON response body
+// (choices.0.message.reasoning_content). Bodies without a reasoning_content
+// field are returned unchanged. Parse/delete failures fall back to the original
+// body.
+func StripReasoningFromResponseBody(body []byte) []byte {
+	if !gjson.GetBytes(body, "choices.0.message.reasoning_content").Exists() {
+		return body
+	}
+	out, err := sjson.DeleteBytes(body, "choices.0.message.reasoning_content")
+	if err != nil {
+		return body
+	}
+	return out
+}

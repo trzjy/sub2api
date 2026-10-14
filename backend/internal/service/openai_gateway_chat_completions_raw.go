@@ -374,6 +374,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			line = s.replaceModelInSSELine(line, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
 		}
 
+		// 思考过程剥离：开启 strip_reasoning_content 的账号，删除客户端可见行里的
+		// reasoning_content（防御自建上游思考文本复述竞品名 / 改写系统指令）。
+		if IsReasoningStrippedAccount(account) {
+			line = StripReasoningFromSSELine(line)
+		}
+
 		writeLine(line)
 		if line == "" {
 			if !clientDisconnected && clientOutputStarted {
@@ -576,6 +582,11 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 		respBody = s.replaceModelInResponseBody(respBody, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
 	}
 
+	// 思考过程剥离：删除客户端可见响应体里的 reasoning_content。
+	if IsReasoningStrippedAccount(account) {
+		respBody = StripReasoningFromResponseBody(respBody)
+	}
+
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	}
@@ -649,6 +660,11 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 	// 此处只把客户端可见聚合体的回显模型改写回客户端请求名。
 	if rawChatCompletionsMaskGate(account, originalModel, upstreamModel) {
 		ccBytes = s.replaceModelInResponseBody(ccBytes, upstreamModel, originalModel, IdentityRewriteAliases(upstreamModel)...)
+	}
+
+	// 思考过程剥离：删除客户端可见聚合体里的 reasoning_content。
+	if IsReasoningStrippedAccount(account) {
+		ccBytes = StripReasoningFromResponseBody(ccBytes)
 	}
 
 	if s.responseHeaderFilter != nil {
