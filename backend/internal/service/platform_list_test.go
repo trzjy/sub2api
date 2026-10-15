@@ -22,9 +22,14 @@ var (
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
 		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformTypeSafe,
 		PlatformCommandCode,
-		PlatformCline,
+		PlatformCline, PlatformCodeBuddy, PlatformMuse, PlatformOther,
 	}
-	legacyCompositeMatchingPlatforms = legacySchedulerSnapshotPlatforms
+	legacyCompositeMatchingPlatforms = []string{
+		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
+		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformTypeSafe,
+		PlatformCommandCode,
+		PlatformCline, PlatformCodeBuddy, PlatformMuse,
+	}
 	legacyMultiProtocolProviders     = []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformCommandCode, PlatformCline}
 	platformProbeValues              = append(append([]string{}, legacyAllPlatforms...), PlatformComposite, "", "moonshot", "Kimi", "openai ", "glm", "bogus")
 	platformProbeAccountTypes        = []string{AccountTypeAPIKey, AccountTypeOAuth, AccountTypeSetupToken, AccountTypeUpstream, ""}
@@ -83,7 +88,14 @@ func legacyIsConcreteRequestPlatform(platform string) bool {
 }
 
 func TestPlatformListDerivedListsMatchLegacy(t *testing.T) {
-	require.Equal(t, legacyAllPlatforms, AllowedQuotaPlatforms)
+	// B2 真值表裁定（merge plan §2.5，ours 行为逐点复刻）：配额白名单不等于全量
+	// 平台清单——按 ours 现状锁定（other / codebuddy 显式放行；muse / opencode_go /
+	// typesafe / command_code / cline 不在配额白名单为已知漂移，不修复不补齐）。
+	oursQuotaPlatforms := []string{
+		PlatformAnthropic, PlatformOpenAI, PlatformGemini, PlatformAntigravity, PlatformGrok,
+		PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformOther, PlatformMiniMax, PlatformCodeBuddy,
+	}
+	require.Equal(t, oursQuotaPlatforms, AllowedQuotaPlatforms)
 	require.Equal(t, legacySchedulerSnapshotPlatforms, schedulerSnapshotPlatforms())
 	require.Equal(t, legacyCompositeMatchingPlatforms, matchingPlatforms(PlatformComposite))
 	require.Equal(t, []string{PlatformKimi}, matchingPlatforms(PlatformKimi))
