@@ -255,61 +255,6 @@
         </div>
       </div>
 
-      <!-- Cursor 站点渠道：账号必须归属一个激活码（后端 admin_service 对 cursor 平台强校验）。
-           下拉按激活码状态分组，且默认折叠（方案 §0.1 #7），展开后才允许选择。 -->
-      <div v-if="form.platform === CURSOR_PLATFORM" class="mt-4">
-        <label class="input-label">{{ t('admin.accounts.quotaKey.selectorLabel') }}</label>
-        <div class="mt-2 rounded-lg border border-gray-200 dark:border-dark-600">
-          <button
-            type="button"
-            class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
-            :aria-expanded="quotaKeySelectorExpanded"
-            @click="toggleQuotaKeySelector"
-          >
-            <span class="min-w-0 truncate text-sm text-gray-900 dark:text-white">
-              {{
-                selectedQuotaKeyLabel
-                  ? selectedQuotaKeyLabel
-                  : t('admin.accounts.quotaKey.selectorHint')
-              }}
-            </span>
-            <span class="flex shrink-0 items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
-              {{
-                quotaKeySelectorExpanded
-                  ? t('admin.accounts.quotaKey.selectorCollapse')
-                  : t('admin.accounts.quotaKey.selectorExpand')
-              }}
-              <Icon :name="quotaKeySelectorExpanded ? 'chevronDown' : 'chevronRight'" size="sm" />
-            </span>
-          </button>
-          <div v-if="quotaKeySelectorExpanded" class="border-t border-gray-200 px-3 py-2 dark:border-dark-600">
-            <p v-if="quotaKeysLoading" class="text-xs text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.quotaKey.selectorLoading') }}
-            </p>
-            <p v-else-if="quotaKeyOptions.length === 0" class="text-xs text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.quotaKey.selectorEmpty') }}
-            </p>
-            <select
-              v-else
-              v-model="form.quota_key_id"
-              class="input"
-              @change="quotaKeyError = ''"
-            >
-              <optgroup
-                v-for="group in quotaKeyGroups"
-                :key="group.label"
-                :label="group.label"
-              >
-                <option v-for="option in group.options" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </optgroup>
-            </select>
-          </div>
-        </div>
-        <p v-if="quotaKeyError" class="mt-1 text-xs text-red-600 dark:text-red-400">{{ quotaKeyError }}</p>
-      </div>
-
       <!-- Account Type Selection (Anthropic) -->
       <div v-if="form.platform === 'anthropic'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
@@ -5076,70 +5021,7 @@ const form = reactive({
   priority: 1,
   rate_multiplier: 1,
   group_ids: [] as number[],
-  expires_at: null as number | null,
-  // Cursor 站点渠道账号归属的激活码（quota key）。仅 cursor 平台必填，
-  // 其余平台保持 null 提交（方案 §4.2 / §4.5）。
-  quota_key_id: null as number | null
-})
-
-// Cursor 站点渠道平台常量（后端 domain.PlatformCursor）。尚未纳入 AccountPlatform
-// 联合类型（分组平台 GroupPlatform 等下游共用同一字面量集合，扩展会波及分组域），
-// 因此在此以同型常量声明，仅用于本表单的分支判定。
-const CURSOR_PLATFORM = 'cursor' as AccountPlatform
-
-// Cursor 激活码下拉：默认折叠（方案 §0.1 #7），展开时才拉取列表。
-const quotaKeySelectorExpanded = ref(false)
-const quotaKeysLoading = ref(false)
-const quotaKeyError = ref('')
-const quotaKeys = ref<QuotaKeyOption[]>([])
-
-type QuotaKeyOption = { id: number; label: string; status: string; exhausted: boolean }
-
-function toggleQuotaKeySelector() {
-  quotaKeySelectorExpanded.value = !quotaKeySelectorExpanded.value
-  if (quotaKeySelectorExpanded.value && quotaKeys.value.length === 0) {
-    void loadQuotaKeys()
-  }
-}
-
-async function loadQuotaKeys() {
-  quotaKeysLoading.value = true
-  try {
-    const data = await adminAPI.quotaKeys.list()
-    quotaKeys.value = data.items.map(item => ({
-      id: item.id,
-      label: item.code_masked || `#${item.id}`,
-      status: item.status || '',
-      exhausted: !!item.exhausted
-    }))
-  } catch (err: unknown) {
-    appStore.showError(extractApiErrorMessage(err, t('admin.accounts.quotaKey.loadError')))
-  } finally {
-    quotaKeysLoading.value = false
-  }
-}
-
-// 下拉按激活码状态分组：可用 / 已耗尽 / 已过期。
-const quotaKeyGroups = computed(() => {
-  const buckets: Array<{ label: string; options: Array<{ value: number; label: string }> }> = [
-    { label: t('admin.accounts.quotaKey.selectorGroupAvailable'), options: [] },
-    { label: t('admin.accounts.quotaKey.selectorGroupExhausted'), options: [] },
-    { label: t('admin.accounts.quotaKey.selectorGroupExpired'), options: [] }
-  ]
-  for (const key of quotaKeys.value) {
-    const index = key.exhausted ? 1 : key.status === 'expired' ? 2 : 0
-    buckets[index].options.push({ value: key.id, label: key.label })
-  }
-  return buckets.filter(group => group.options.length > 0)
-})
-
-const quotaKeyOptions = computed(() =>
-  quotaKeyGroups.value.flatMap(group => group.options)
-)
-
-const selectedQuotaKeyLabel = computed(() => {
-  const hit = quotaKeyOptions.value.find(option => option.value === form.quota_key_id)
-  return hit ? hit.label : ''
+  expires_at: null as number | null
 })
 
 // 网页接入平台只有一种自动登录方式（deepseek 账号密码、zhipu/kimi 手机号短信），
@@ -5736,9 +5618,6 @@ const resetForm = () => {
   form.rate_multiplier = 1
   form.group_ids = []
   form.expires_at = null
-  form.quota_key_id = null
-  quotaKeySelectorExpanded.value = false
-  quotaKeyError.value = ''
   accountCategory.value = 'oauth-based'
   addMethod.value = 'oauth'
   accountMode.value = 'payg'
@@ -6424,15 +6303,6 @@ const createAccountAndFinish = async (
   credentials: Record<string, unknown>,
   extra?: Record<string, unknown>
 ) => {
-  // Cursor 站点渠道：后端对 cursor 平台强制要求 quota_key_id（admin_service 校验），
-  // 前端在此同步拦截，避免提交后才收到 400。
-  if (platform === CURSOR_PLATFORM && form.quota_key_id == null) {
-    quotaKeyError.value = t('admin.accounts.quotaKey.selectorRequired')
-    quotaKeySelectorExpanded.value = true
-    if (quotaKeys.value.length === 0) void loadQuotaKeys()
-    appStore.showError(t('admin.accounts.quotaKey.selectorRequired'))
-    return
-  }
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
@@ -6509,8 +6379,6 @@ const createAccountAndFinish = async (
     rate_multiplier: form.rate_multiplier,
     group_ids: form.group_ids,
     expires_at: form.expires_at,
-    // Cursor 站点渠道：账号归属激活码。仅 cursor 平台下发，其余平台保持 undefined。
-    quota_key_id: platform === CURSOR_PLATFORM ? form.quota_key_id ?? undefined : undefined,
     // 探测资格按平台白名单门控（isUpstreamBillingProbeEligible，与后端
     // IsUpstreamBillingProbeIdentity 同名单）；web-*/other/codebuddy 等非资格平台
     // 及网页接入模式账号（isWebAccessModeCredentials）不传该字段，否则后端
