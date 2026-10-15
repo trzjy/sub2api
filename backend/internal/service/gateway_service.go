@@ -70,6 +70,10 @@ const (
 	claudeMimicDebugInfoKey = "claude_mimic_debug_info"
 )
 
+// codeBuddyModelsFromSnapshotLogKey 是 codebuddy 公开模型列表并入上游账号目录快照
+// 时的调试日志键（GetAvailableModels）。
+const codeBuddyModelsFromSnapshotLogKey = "gateway.models.codebuddy_snapshot_models"
+
 const (
 	cacheTTLTarget5m                   = "5m"
 	cacheTTLTarget1h                   = "1h"
@@ -1432,6 +1436,35 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 			hasAnyMapping = true
 			for model := range mapping {
 				modelSet[model] = struct{}{}
+			}
+		}
+
+		// codebuddy 的模型目录由上游账号目录（accounts.extra.upstream_model_metadata
+		// 快照）决定，不依赖手工维护的 credentials.model_mapping。缺 mapping 时
+		// 仅凭 mapping 会让公开模型列表为空、与分组白名单求交后返回 0 个模型，
+		// 故并入上游快照键，使上游新模型自动出现在列表中。
+		if platform == PlatformCodeBuddy {
+			if snapshot := acc.GetUpstreamModelMetadataSnapshot(); snapshot != nil {
+				fromSnapshot := 0
+				for model := range snapshot.Models {
+					model = strings.TrimSpace(model)
+					if model == "" {
+						continue
+					}
+					hasAnyMapping = true
+					modelSet[model] = struct{}{}
+					fromSnapshot++
+				}
+				if fromSnapshot > 0 {
+					slog.Debug(codeBuddyModelsFromSnapshotLogKey,
+						"group_id", derefGroupID(groupID),
+						"platform", platform,
+						"account_id", acc.ID,
+						"source", snapshot.Source,
+						"synced_at", snapshot.SyncedAt,
+						"models_from_snapshot", fromSnapshot,
+					)
+				}
 			}
 		}
 	}
