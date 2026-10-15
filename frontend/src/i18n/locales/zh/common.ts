@@ -228,6 +228,7 @@ export default {
     auditLogs: '操作日志',
     modelPricing: '模型价格',
     pricing: '价格管理',
+    quotaKeys: '激活码管理',
   },
 
   // Auth

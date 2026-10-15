@@ -154,9 +154,12 @@ func TestResponsesToolOutputMedia_InterleavedMessagesFollowMediaBatch(t *testing
 		{"type":"function_call_output","call_id":"call_A","output":[{"type":"input_image","image_url":"data:image/png;base64,AQID"}]}
 	]`)
 
-	require.Equal(t, []string{"assistant", "tool", "user", "user", "user"}, chatMessageRoles(messages))
-	require.Equal(t, "[Tool output media for call call_A]", chatContentParts(t, messages[2])[0].Text)
-	require.JSONEq(t, `"approval saved"`, string(messages[3].Content))
+	// The developer notice is folded into a leading system message (a system
+	// message anywhere else is rejected upstream); the media batch user message
+	// still follows the tool replies, ahead of the interleaved user turn.
+	require.Equal(t, []string{"system", "assistant", "tool", "user", "user"}, chatMessageRoles(messages))
+	require.JSONEq(t, `"approval saved"`, string(messages[0].Content))
+	require.Equal(t, "[Tool output media for call call_A]", chatContentParts(t, messages[3])[0].Text)
 	require.JSONEq(t, `"continue"`, string(messages[4].Content))
 }
 

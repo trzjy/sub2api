@@ -228,6 +228,7 @@ export default {
     auditLogs: 'Audit Logs',
     modelPricing: 'Model Pricing',
     pricing: 'Pricing Console',
+    quotaKeys: 'Quota Keys',
   },
 
   // Auth

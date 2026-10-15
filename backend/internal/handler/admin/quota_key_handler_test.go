@@ -280,7 +280,7 @@ func (r *fakeQuotaKeyRepo) listCallCount() int {
 func setupQuotaKeyRouter(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	h := NewQuotaKeyHandler(svc, sweeper)
+	h := NewQuotaKeyHandler(svc, sweeper, nil)
 	// 与 internal/server/routes/admin.go 的 registerQuotaKeyRoutes 同序注册。
 	qk := router.Group("/api/v1/admin/quota_keys")
 	qk.GET("", h.List)

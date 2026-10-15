@@ -162,9 +162,9 @@ func (s *OpenAIGatewayService) forwardWebKimi(
 	}
 
 	if reqStream {
-		return s.handleWebKimiStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, mode)
+		return s.handleWebKimiStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, prompt, mode)
 	}
-	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, webKimiExtractPrompt(body), mode)
+	return s.handleWebKimiNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel, startTime, prompt, mode)
 }
 
 // webKimiModelName 把（已映射的）模型名归一为网页端模型名。
@@ -749,8 +749,29 @@ func webKimiClientChunkEnvelope(responseID, originalModel, content, reasoningCon
 // 重包为 OpenAI chat.completion.chunk 流回写客户端；正文走 block.text.content、思考走
 // block.think.content（reasoning_content）；终止为 done 帧 + message.status=COMPLETED。
 //
-// 登录态实测（10 §4）：心跳帧跳过、done 帧终止、usage 流内无（本地估算，流式此处保持 nil
-// 不伪造）。首帧即携带 unauthenticated 错误时，按上游错误路径处理。
+// 登录态实测（10 §4）：心跳帧跳过、done 帧终止。usage 流内无（实测 0 处），
+// 与非流式路径同口径走 estimateWebUsage 本地估算兜底（流式此前恒为 nil，
+// 导致 token 计费模式下真实零计费——扣费门禁见 gateway_usage_billing.go）。
+// 首帧即携带 unauthenticated 错误时，按上游错误路径处理。
+//
+// 读侧三件套（interval 超时 / 下游 keepalive / ctx 可唤醒）由 webStreamGuard 统一承担，
+// 与 anthropic 回程 handleStreamingResponse 同构，详见 web_protocol_bridge.go。
+//
+// ── 整改2：读取可取消 / 计费不可取消的分离设计 ──
+// 出站请求 ctx 走 detachUpstreamContext（= context.WithoutCancel），见本文件
+// forwardWebKimi。它**不是**为了让计费落库在客户端断开后仍能完成——计费落库的
+// 取消独立性由三处各自的 detached 上下文保证，与上游读 ctx 无关：
+//   - gateway_usage_billing.go detachedBillingContext：WithoutCancel + 15s 超时，
+//     供 postUsageBilling / applyUsageBilling / writeUsageLogBestEffort 使用；
+//   - handler submitUsageRecordTask 的同步回退路径：context.Background()+10s。
+//
+// 因此「读取阶段可取消」不会连带取消计费落库，两阶段可以安全解耦。
+//
+// 具体做法：上游读的 ctx 仍是 WithoutCancel（保持响应提交后的排水语义），
+// 但读动作被拆进守卫 goroutine，主循环用 select 观察 ctx.Done()——客户端断开
+// 能立刻唤醒主循环、停止向下游写；同时不掐断上游读，继续把 usage 采完
+// （与 anthropic 回程 clientDisconnected 后 drain 同构）。最终释放由 interval
+// 超时兜底：上游挂死时最多 interval（默认 180s）后强制收口，goroutine 归还。
 func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	ctx context.Context,
 	resp *http.Response,
@@ -759,6 +780,7 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	originalModel string,
 	upstreamModel string,
 	startTime time.Time,
+	inputPrompt string,
 	mode webResponseMode,
 ) (*OpenAIForwardResult, error) {
 	if s.responseHeaderFilter != nil {
@@ -779,70 +801,151 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	st := newWebClientStreamState(mode, originalModel)
 
 	reader := bufio.NewReader(resp.Body)
-	for {
+	// 读侧守卫：把阻塞读搬进独立 goroutine，使主循环能 select 到
+	// 「数据 / 间隔超时 / keepalive / ctx 取消」。readFn 每次读一帧 Connect
+	// envelope 并返回其 payload；more=false（正常 EOF 或截断）按 io.EOF 上抛，
+	// 由守卫视作流结束。底层 io.ReadFull 无 deadline，超时兜底只能在此层做。
+	guardParams := s.webStreamGuardParams(func() ([]byte, error) {
 		payload, more, err := readWebKimiConnectEnvelope(reader)
 		if err != nil {
-			// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时
-			// 透明切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
-			if isOpenAICNFirstByteTimeout(err) && !written {
-				return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
-			}
-			return nil, fmt.Errorf("kimi web stream read: %w", err)
+			return nil, err
 		}
 		if !more {
-			break
+			return nil, io.EOF
 		}
-		ev := parseWebKimiEnvelopePayload(payload)
-		if ev.Heartbeat {
-			continue
-		}
-		if ev.AssistantID != "" {
-			responseID = ev.AssistantID
-		}
-		// 业务/认证错误：首帧未写任何客户端字节（written=false）走完整错误路径；流中后段已
-		// 写出正文（written=true）则记 ops 错误并向客户端写流内 error 标记后中断收口，
-		// 绝不伪造正常结束。
-		if ev.AuthFailed || ev.ErrCode != 0 || ev.ErrCodeStr != "" {
-			if !written {
-				errResp := &http.Response{
-					StatusCode: resp.StatusCode,
-					Header:     resp.Header,
-					Body:       io.NopCloser(bytes.NewReader(payload)),
+		// 零长帧（Connect keepalive）：readWebKimiConnectEnvelope 以
+		// (nil, true, nil) 表示「跳过本帧、继续读下一帧」。守卫对零长帧
+		// 统一跳过且不重置 interval 计时，故此处原样返回即可。
+		return payload, nil
+	})
+	guard := newWebStreamGuard(guardParams)
+	defer guard.stop()
+
+	lastDataAt := time.Now()
+	clientDisconnected := false
+	// ctxDoneCh 是 ctx.Done() 的一次性 latch：客户端断开触发一次后即置 nil，
+	// 该 case 在 select 中永久变为「不就绪」。直接监听 ctx.Done() 会热自旋——
+	// 取消后该 channel 永久就绪，select 立刻命中、空转、立刻再命中，最坏
+	// （客户端断开 + 上游挂死）可占满单核 CPU 直到 interval 兜底（默认 180s）。
+	// anthropic 回程回程 select 同样不监听 ctx.Done()：断开靠下游写失败
+	// （writeWebStreamChunk/writeWebStreamKeepalive 返错）感知。这里保留
+	// ctxDoneCh 而非直接删 case，是为了在「尚未写出首帧、下游一次都没写」的
+	// 窗口里也能立刻停止向下游写——那时写失败路径还不会被触发。
+	ctxDoneCh := ctx.Done()
+	// 具名循环：select 内的 break 只跳出 select，中断收口（业务错误 / done 帧）
+	// 必须跳出整个读循环，故一律用 break streamLoop。
+streamLoop:
+	for {
+		select {
+		case <-ctxDoneCh:
+			// 客户端断开：不立刻掐断上游读——响应已提交，计费需要把 usage 采完
+			// （与 anthropic 回程 clientDisconnected 后继续 drain 同构）。interval
+			// 超时是这次排水的最终上界，故此处不 return，只停止向下游写。
+			// 置 nil 是一次性 latch，绝不能 continue（continue 会让 select 立刻
+			// 再次命中同一就绪 channel，退化成满 CPU 自旋）。
+			clientDisconnected = true
+			ctxDoneCh = nil
+
+		case ev, ok := <-guard.events:
+			if !ok {
+				break streamLoop
+			}
+			if ev.err != nil {
+				if isOpenAICNFirstByteTimeout(ev.err) && !written {
+					return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
 				}
-				return s.handleWebKimiUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
+				recordWebStreamReadError(c, account, upstreamModel, ev.err)
+				return nil, fmt.Errorf("kimi web stream read: %w", ev.err)
 			}
-			// 凭证红线：与 handleWebKimiUpstreamError 同口径，先把可能被上游回显在
-			// trailer 里的 access_token / refresh_token 擦掉，再提取错误文案。本分支
-			// 不走 handleWebKimiUpstreamError，缺这一步会把凭证原文写进客户端 SSE
-			// error 帧与 ops_error_logs。
-			opsMsg := sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(redactWebKimiUpstreamErrorBody(payload, account)))
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: resp.StatusCode,
-				Kind:               "midstream_error",
-				Message:            opsMsg,
-			})
-			midstreamErr = true
-			midstreamErrMsg = opsMsg
-			break
-		}
-		if ev.Done {
-			break
-		}
-		if ev.ThinkDelta != "" {
-			written = true
-			if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", ev.ThinkDelta, "", nil)); err != nil {
-				return nil, err
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
+
+			ev2 := parseWebKimiEnvelopePayload(ev.data)
+			if ev2.Heartbeat {
+				continue
 			}
-		}
-		if ev.TextDelta != "" {
-			textAggregated.WriteString(ev.TextDelta)
-			written = true
-			if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, ev.TextDelta, "", "", nil)); err != nil {
-				return nil, err
+			if ev2.AssistantID != "" {
+				responseID = ev2.AssistantID
 			}
+			// 业务/认证错误：首帧未写任何客户端字节（written=false）走完整错误路径；
+			// 流中后段已写出正文（written=true）则记 ops 错误并向客户端写流内 error
+			// 标记后中断收口，绝不伪造正常结束。
+			if ev2.AuthFailed || ev2.ErrCode != 0 || ev2.ErrCodeStr != "" {
+				if !written {
+					errResp := &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header,
+						Body:       io.NopCloser(bytes.NewReader(ev.data)),
+					}
+					return s.handleWebKimiUpstreamError(ctx, c, account, errResp, ev.data, upstreamModel)
+				}
+				// 凭证红线：与 handleWebKimiUpstreamError 同口径，先把可能被上游回显在
+				// trailer 里的 access_token / refresh_token 擦掉，再提取错误文案。本分支
+				// 不走 handleWebKimiUpstreamError，缺这一步会把凭证原文写进客户端 SSE
+				// error 帧与 ops_error_logs。
+				opsMsg := sanitizeUpstreamErrorMessage(webKimiUpstreamErrorMessage(redactWebKimiUpstreamErrorBody(ev.data, account)))
+				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+					Platform:           account.Platform,
+					AccountID:          account.ID,
+					AccountName:        account.Name,
+					UpstreamStatusCode: resp.StatusCode,
+					Kind:               "midstream_error",
+					Message:            opsMsg,
+				})
+				midstreamErr = true
+				midstreamErrMsg = opsMsg
+				break streamLoop
+			}
+			if ev2.Done {
+				break streamLoop
+			}
+			if ev2.ThinkDelta != "" {
+				written = true
+				if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", ev2.ThinkDelta, "", nil)); err != nil {
+					clientDisconnected = true
+					continue
+				}
+			}
+			if ev2.TextDelta != "" {
+				textAggregated.WriteString(ev2.TextDelta)
+				written = true
+				if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, ev2.TextDelta, "", "", nil)); err != nil {
+					clientDisconnected = true
+					continue
+				}
+			}
+
+		case <-guard.intervalCh:
+			// 上游开了流却在 interval 内未送来任何字节：判定断流。已写出正文时
+			// 不伪造正常终止，交由下方收口；未写出时按流中断语义返回错误。
+			if !guard.streamIdle(guardParams.interval) {
+				continue
+			}
+			if clientDisconnected {
+				return nil, fmt.Errorf("kimi web stream read: %w", errWebStreamIdleTimeout)
+			}
+			slog.Warn("web kimi stream data interval timeout",
+				"account_id", account.ID,
+				"model", originalModel,
+				"upstream_model", upstreamModel,
+				"interval", guardParams.interval.String())
+			recordWebStreamReadError(c, account, upstreamModel, errWebStreamIdleTimeout)
+			return nil, fmt.Errorf("kimi web stream read: %w", errWebStreamIdleTimeout)
+
+		case <-guard.keepaliveCh:
+			// 仅在尚未写出首帧时保活：首帧前的思考/检索阶段上游可能长时间静默，
+			// 此刻保活才能防住 Cloudflare Tunnel / 反代按空闲断开连接；已出首帧
+			// 后保活帧只会污染 TTFT 观测（与 anthropic 回程 data != "" 判定同构）。
+			if clientDisconnected || !webStreamKeepalivePending(written, guardParams.keepalive, lastDataAt) {
+				guard.resetKeepalive()
+				continue
+			}
+			if err := writeWebStreamKeepalive(c); err != nil {
+				clientDisconnected = true
+				continue
+			}
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
 		}
 	}
 
@@ -866,9 +969,43 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 		}, nil
 	}
 
-	// 正常终止帧：写出终帧（finish_reason + usage 若观测到；usage 实测流内无，保持 nil 不伪造），
-	// 再按出站协议收口写 data: [DONE]。
-	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", "", finishReason, usage)); err != nil {
+	// 流式 usage 估算兜底（整改3）：Connect envelope 流内实测无 usage 字段，
+	// usage 恒为 nil。token 计费模式下这会让 InputTokens/OutputTokens 全 0，
+	// 计费金额为 0，扣费门禁（gateway_usage_billing.go）整条拦下——真实零计费。
+	// 此处与非流式路径（handleWebKimiNonStreamingResponse）同口径兜底：仅当
+	// 两个方向都为 0 且账号为 web 接入模式时，用入参 prompt 与聚合正文估算。
+	// 与非流式的差别仅在输出文本来源——流式用 textAggregated（已聚合的正文增量）。
+	finalUsage := usage
+	if finalUsage == nil {
+		finalUsage = &OpenAIUsage{}
+	}
+	if finalUsage.InputTokens == 0 && finalUsage.OutputTokens == 0 && account.IsWebAccessMode() {
+		estimated := estimateWebUsage(inputPrompt, textAggregated.String())
+		finalUsage.InputTokens = estimated.InputTokens
+		finalUsage.OutputTokens = estimated.OutputTokens
+	}
+
+	// 正常终止帧：写出终帧（finish_reason + usage），再按出站协议收口写 data: [DONE]。
+	//
+	// 客户端断开后不再向下游写，但**必须**继续走完收口并返回带 usage 的结果：
+	// 响应早已提交、上游已真实消耗额度，此时因写失败 return nil 会把 usage 整体
+	// 丢掉 → 平台漏记（与 anthropic 回程 clientDisconnected 后仍 submitUsage 同理）。
+	if clientDisconnected {
+		MarkResponseCommitted(c)
+		return &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Usage:            *finalUsage,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webKimiChatPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+			ClientDisconnect: true,
+		}, nil
+	}
+	if err := writeWebStreamChunk(c, st, webKimiClientChunkEnvelope(responseID, originalModel, "", "", finishReason, finalUsage)); err != nil {
 		return nil, err
 	}
 	if err := finalizeWebStream(c, st); err != nil {
@@ -879,15 +1016,14 @@ func (s *OpenAIGatewayService) handleWebKimiStreamingResponse(
 	result := &OpenAIForwardResult{
 		UpstreamHeaders:  resp.Header,
 		ResponseID:       responseID,
+		Usage:            *finalUsage,
 		Model:            originalModel,
 		UpstreamModel:    upstreamModel,
 		UpstreamEndpoint: webKimiChatPath,
 		Stream:           true,
 		ResponseHeaders:  resp.Header.Clone(),
 		Duration:         time.Since(startTime),
-	}
-	if usage != nil {
-		result.Usage = *usage
+		ClientDisconnect: clientDisconnected,
 	}
 	return result, nil
 }

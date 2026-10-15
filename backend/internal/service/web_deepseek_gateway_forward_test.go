@@ -699,3 +699,112 @@ func TestForwardWebDeepseek_NonStreamingFixtureAggregate(t *testing.T) {
 	require.EqualValues(t, 0, usage["input_tokens"])
 	require.EqualValues(t, 112, usage["output_tokens"])
 }
+
+// ── 整改1/4 的回归锚点 ────────────────────────────────────────────────────
+
+// TestForwardWebDeepseek_StreamingUpstreamSilentHitsIntervalTimeout 整改1：
+// 上游开流不吐数据时，deepseek 流式回程必须在 interval 内退出，不得永久阻塞。
+func TestForwardWebDeepseek_StreamingUpstreamSilentHitsIntervalTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekInboundBody("deepseek-chat")))
+	svc := newWebStreamingTestService(1, 0)
+	account := webDeepseekTestAccount(8850, map[string]any{"base_url": "https://chat.deepseek.com"})
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = svc.handleWebDeepseekStreamingResponse(
+			context.Background(), webSilentSSEResponse(), c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeChat)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("deepseek streaming must terminate on stream data interval timeout; it blocked forever")
+	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, errWebStreamIdleTimeout)
+}
+
+// TestForwardWebDeepseek_StreamingReadFailureRegistersOpsUpstreamContext 整改4：
+// deepseek 流式读失败必须登记 attempt 级 ops 遥测（此前三字段全空）。
+func TestForwardWebDeepseek_StreamingReadFailureRegistersOpsUpstreamContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webDeepseekInboundBody("deepseek-chat")))
+	svc := newWebStreamingTestService(1, 0)
+	account := webDeepseekTestAccount(8851, map[string]any{"base_url": "https://chat.deepseek.com"})
+
+	_, err := svc.handleWebDeepseekStreamingResponse(
+		context.Background(), webSilentSSEResponse(), c, account, "deepseek-chat", "deepseek-chat", time.Now(), webResponseModeChat)
+	require.Error(t, err)
+
+	raw, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "deepseek stream read failure must record an upstream attempt event")
+	events := raw.([]*OpsUpstreamErrorEvent)
+	require.Len(t, events, 1)
+	require.Equal(t, "stream_read_error", events[0].Kind)
+	require.Equal(t, account.ID, events[0].AccountID)
+	require.NotEmpty(t, events[0].Platform)
+
+	msg, ok := c.Get(OpsUpstreamErrorMessageKey)
+	require.True(t, ok, "upstream_error_message must be populated")
+	require.NotEmpty(t, msg.(string))
+}
+
+// TestForwardWebDeepseek_StreamingMultiLineEventAssemblyPreserved 整改1 反证：
+// deepseek 的 SSE 事件跨多行（data: 行累加 + 空行派发），改用守卫逐帧读后
+// 装配语义必须与原 webDeepseekNextSSEEvent 完全一致——这里直接对拍两者输出。
+func TestForwardWebDeepseek_StreamingMultiLineEventAssemblyPreserved(t *testing.T) {
+	const sse = "event: ready\n" +
+		`data: {"request_message_id":3,"response_message_id":4}` + "\n" +
+		"\n" +
+		"data: line-one\n" +
+		"data: line-two\n" +
+		"\n"
+
+	// 参考实现（Scanner 驱动，未改动）。
+	sc := bufio.NewScanner(strings.NewReader(sse))
+	var refEvents []string
+	for {
+		name, data, ok := webDeepseekNextSSEEvent(sc)
+		if !ok {
+			break
+		}
+		refEvents = append(refEvents, name+"|"+data)
+	}
+
+	// 新实现（webDeepseekSSEAccum 逐行装配）。
+	accum := &webDeepseekSSEAccum{}
+	var gotEvents []string
+	for _, line := range strings.Split(strings.TrimSuffix(sse, "\n"), "\n") {
+		if name, data, ok := accum.feed(line); ok {
+			gotEvents = append(gotEvents, name+"|"+data)
+		}
+	}
+	if name, data, ok := accum.flush(); ok {
+		gotEvents = append(gotEvents, name+"|"+data)
+	}
+
+	require.Equal(t, refEvents, gotEvents, "line-driven assembly must match the Scanner-driven reference byte for byte")
+	require.Equal(t, []string{"ready|{\"request_message_id\":3,\"response_message_id\":4}", "delta|line-one\nline-two"}, gotEvents)
+}
+
+// TestForwardWebDeepseek_SSEEventRoundTripEncoding 守卫 channel 载荷的编解码
+// 必须无损（含事件名含分隔符、空 data、多行 data 的边界）。
+func TestForwardWebDeepseek_SSEEventRoundTripEncoding(t *testing.T) {
+	for _, tc := range []struct{ name, data string }{
+		{"delta", "hello"},
+		{"ready", ""},
+		{"delta", "multi\nline\ndata"},
+		{"weird", "value:with:colons"},
+	} {
+		name, data := decodeWebDeepseekSSEEvent(encodeWebDeepseekSSEEvent(tc.name, tc.data))
+		require.Equal(t, tc.name, name)
+		require.Equal(t, tc.data, data)
+	}
+}

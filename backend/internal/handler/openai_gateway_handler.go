@@ -202,11 +202,15 @@ func resolveOpenAIMessagesDispatchMappedModel(c *gin.Context, apiKey *service.AP
 	if apiKey == nil || apiKey.Group == nil {
 		return ""
 	}
-	// composite 解析到 grok/CN/OpenCode 目标时调度级映射不适用（Group 级映射的
+	// composite 解析到 grok/CN/OpenCode/codebuddy 目标时调度级映射不适用（Group 级映射的
 	// gpt-5.x 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
+	// 并集裁定（重基消解）：我方泛化谓词 IsMultiProtocolAPIKeyProvider 覆盖国产供应商 +
+	// OpenCode/Command Code/Cline；上游显式列 CodeBuddy（生产实证 group 109 /v1/messages
+	// 403）。两侧语义都保留——显式项在谓词覆盖下等价，无行为差异。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform)) {
+			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform) ||
+				platform == service.PlatformCodeBuddy) {
 			return ""
 		}
 	}
@@ -335,17 +339,20 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// 覆盖国产供应商 + OpenCode/Command Code/Cline;与本仓库「我方平台分支 + 上游
 	// IsMultiProtocolAPIKeyProvider 分支追加」权威裁定一致,两侧 token 全保留
 	// (IsCNProvider 被上游谓词覆盖,保留为显式等价项,无行为差异)。
+	// CodeBuddy 同理显式保留:其账号是 OAuth 型,/v1/messages 经 CC 出站管线转发到
+	// copilot.tencent.com,开关对其恒 false(2026-10-15 生产实证 group 109 成功数 0)。
 	if service.IsCNProvider(apiKey.Group.Platform) || apiKey.Group.Platform == service.PlatformOther ||
-		apiKey.Group.Platform == service.PlatformMuse ||
+		apiKey.Group.Platform == service.PlatformMuse || apiKey.Group.Platform == service.PlatformCodeBuddy ||
 		service.IsMultiProtocolAPIKeyProvider(apiKey.Group.Platform) {
 		return true
 	}
-	// composite 分组解析到 grok/CN/OpenCode Go 目标时与对应独立分组同语义豁免；
+	// composite 分组解析到 grok/CN/OpenCode Go/codebuddy/muse 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
 			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
 				platform == service.PlatformOther || platform == service.PlatformMuse ||
+				platform == service.PlatformCodeBuddy ||
 				service.IsMultiProtocolAPIKeyProvider(platform)) {
 			return true
 		}

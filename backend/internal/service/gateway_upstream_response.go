@@ -1065,6 +1065,12 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					}
 				}
 				sendErrorEvent("stream_read_error", disconnectMsg)
+				// 登记 ops 上游上下文（对齐 recordOpenAIRawStreamTruncation 的双设）：
+				// 此前本分支只 sendErrorEvent + 返回错误，attempt 级遥测
+				// （platform/account/proxy/request-id）全丢，排障只能从外层文案反推。
+				// 只补登记，不改 failover 行为——上方的 UpstreamFailoverError 分支
+				// （尚未写出任何字节）与此处（已开始写流）语义保持原样。
+				recordWebStreamReadError(c, account, originalModel, ev.err)
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream read error: %w", ev.err)
 			}
 			line := ev.line

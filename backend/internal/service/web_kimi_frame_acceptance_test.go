@@ -222,7 +222,7 @@ func acceptanceWebKimiStreamRunner(t *testing.T, resp *http.Response, account *A
 			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
 		},
 	}
-	_, err := svc.handleWebKimiStreamingResponse(context.Background(), resp, c, account, model, model, time.Now(), webResponseModeChat)
+	_, err := svc.handleWebKimiStreamingResponse(context.Background(), resp, c, account, model, model, time.Now(), "hi", webResponseModeChat)
 	return recorder, err
 }
 

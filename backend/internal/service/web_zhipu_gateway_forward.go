@@ -917,23 +917,119 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
-	for scanner.Scan() {
-		payload, ok := parseWebZhipuSSEFrame(scanner.Text())
-		if !ok {
-			// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
-			// 首帧未写任何客户端字节走完整错误路径；流中段已写出正文则记 ops 错误并向
-			// 客户端写流内 error 标记后中断收口，不伪造成功。纯内容裸 JSON（无 code）
-			// 按安全策略忽略。
-			if errPayload, isErr := webZhipuBareJSONError(scanner.Text()); isErr {
+	// 读侧守卫：把阻塞读搬进独立 goroutine，使主循环能 select 到
+	// 「数据 / 间隔超时 / keepalive / ctx 取消」。readFn 每次读一行 SSE 文本；
+	// scanner 正常收流返回 false（Err()==nil）时按 io.EOF 上抛，由守卫视作
+	// 流结束。底层读无 deadline，超时兜底只能在此层做。
+	lineReader := bufio.NewReader(resp.Body)
+	guardParams := s.webStreamGuardParams(func() ([]byte, error) {
+		for {
+			line, err := lineReader.ReadBytes('\n')
+			if err != nil {
+				if len(line) > 0 && errors.Is(err, io.EOF) {
+					// 末行无换行符：视为最后一帧（scanner.Scan 同样会产出它）。
+					return line, nil
+				}
+				return nil, err
+			}
+			trimmed := bytes.TrimRight(line, "\r\n")
+			if len(trimmed) == 0 {
+				// 空行是 SSE 帧分隔符，不携带数据：交给守卫跳过且不重置
+				// interval 计时。
+				return nil, nil
+			}
+			// 沿用既有单行上限语义：超长行按读取失败处理，交由调用方收口。
+			if len(trimmed) > maxLineSize {
+				return nil, bufio.ErrTooLong
+			}
+			return trimmed, nil
+		}
+	})
+	guard := newWebStreamGuard(guardParams)
+	defer guard.stop()
+
+	lastDataAt := time.Now()
+	clientDisconnected := false
+	// ctxDoneCh 是 ctx.Done() 的一次性 latch：客户端断开触发一次后即置 nil，
+	// 该 case 在 select 中永久变为「不就绪」。直接监听 ctx.Done() 会热自旋——
+	// 取消后该 channel 永久就绪，select 立刻命中、continue、立刻再命中，最坏
+	// （客户端断开 + 上游挂死）可占满单核 CPU 直到 interval 兜底（默认 180s）。
+	// anthropic 回程的同构 select 并不监听 ctx.Done()：断开靠下游写失败感知。
+	// 这里保留 ctxDoneCh 而非直接删 case，是为了在「尚未写出首帧、下游一次都
+	// 没写」的窗口里也能立刻停止向下游写——那时写失败路径还不会被触发。
+	ctxDoneCh := ctx.Done()
+	// 具名循环：select 内的 break 只跳出 select，中断收口必须跳出整个读循环。
+streamLoop:
+	for {
+		var line string
+		select {
+		case <-ctxDoneCh:
+			// 客户端断开：不掐断上游读（响应已提交，计费需要把 usage 采完），
+			// 仅停止向下游写；interval 超时是这次排水的最终上界。置 nil 是一次性
+			// latch，绝不能 continue（continue 会退化成满 CPU 自旋）。
+			clientDisconnected = true
+			ctxDoneCh = nil
+
+		case ev, ok := <-guard.events:
+			if !ok {
+				break streamLoop
+			}
+			if ev.err != nil {
+				// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时透明
+				// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
+				if isOpenAICNFirstByteTimeout(ev.err) && !written {
+					return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+				}
+				recordWebStreamReadError(c, account, upstreamModel, ev.err)
+				return nil, fmt.Errorf("zhipu web stream read: %w", ev.err)
+			}
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
+			line = string(ev.data)
+
+			payload, ok := parseWebZhipuSSEFrame(line)
+			if !ok {
+				// #3 业务错误判定：上游 SSE 帧或裸 JSON 携带业务错误码（非 0 code）时，
+				// 首帧未写任何客户端字节走完整错误路径；流中段已写出正文则记 ops 错误并向
+				// 客户端写流内 error 标记后中断收口，不伪造成功。纯内容裸 JSON（无 code）
+				// 按安全策略忽略。
+				if errPayload, isErr := webZhipuBareJSONError(line); isErr {
+					if !written {
+						errResp := &http.Response{
+							StatusCode: resp.StatusCode,
+							Header:     resp.Header,
+							Body:       io.NopCloser(bytes.NewReader(errPayload)),
+						}
+						return s.handleWebZhipuUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
+					}
+					appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+						Platform:           account.Platform,
+						AccountID:          account.ID,
+						AccountName:        account.Name,
+						UpstreamStatusCode: resp.StatusCode,
+						Kind:               "midstream_error",
+						Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload)),
+					})
+					// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
+					// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
+					midstreamErr = true
+					midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload))
+					break streamLoop
+				}
+				continue
+			}
+			view := mapWebZhipuPayload(payload)
+			if view.ResponseID != "" && responseID == "" {
+				responseID = view.ResponseID
+			}
+			if view.ErrCode != 0 {
 				if !written {
 					errResp := &http.Response{
 						StatusCode: resp.StatusCode,
 						Header:     resp.Header,
-						Body:       io.NopCloser(bytes.NewReader(errPayload)),
+						Body:       io.NopCloser(bytes.NewReader(payload)),
 					}
-					return s.handleWebZhipuUpstreamError(ctx, c, account, errResp, errPayload, upstreamModel)
+					return s.handleWebZhipuUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
 				}
 				appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 					Platform:           account.Platform,
@@ -941,72 +1037,68 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
 					Kind:               "midstream_error",
-					Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload)),
+					Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload)),
 				})
 				// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
 				// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
 				midstreamErr = true
-				midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(errPayload))
-				break
+				midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload))
+				break streamLoop
 			}
-			continue
-		}
-		view := mapWebZhipuPayload(payload)
-		if view.ResponseID != "" && responseID == "" {
-			responseID = view.ResponseID
-		}
-		if view.ErrCode != 0 {
-			if !written {
-				errResp := &http.Response{
-					StatusCode: resp.StatusCode,
-					Header:     resp.Header,
-					Body:       io.NopCloser(bytes.NewReader(payload)),
-				}
-				return s.handleWebZhipuUpstreamError(ctx, c, account, errResp, payload, upstreamModel)
+			if view.Usage != nil {
+				usage = view.Usage
 			}
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: resp.StatusCode,
-				Kind:               "midstream_error",
-				Message:            sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload)),
-			})
-			// 流中后段已写出正文（written=true）：记 ops 错误并向客户端写流内 error
-			// 标记后中断收口，不伪造正常 finish_reason+usage 终止帧。
-			midstreamErr = true
-			midstreamErrMsg = sanitizeUpstreamErrorMessage(webZhipuUpstreamErrorMessage(payload))
-			break
+			if view.FinishReason != "" {
+				finishReason = view.FinishReason
+			}
+			if view.Content == "" {
+				continue
+			}
+			// 实测 text 元素为累积全文形态（917 → 1714 → 9171714 均为全文），出站只发增量：
+			// delta = 全文去掉已聚合前缀；前缀不匹配时（上游形态变化）回退发全文，宁重不丢。
+			delta := strings.TrimPrefix(view.Content, aggregated.String())
+			aggregated.Reset()
+			aggregated.WriteString(view.Content)
+			if delta == "" {
+				continue
+			}
+			written = true
+			if clientDisconnected {
+				continue
+			}
+			if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{"content": delta}, "", nil)); err != nil {
+				clientDisconnected = true
+				continue
+			}
+
+		case <-guard.intervalCh:
+			// 上游开了流却在 interval 内未送来任何字节：判定断流。
+			if !guard.streamIdle(guardParams.interval) {
+				continue
+			}
+			slog.Warn("web zhipu stream data interval timeout",
+				"account_id", account.ID,
+				"model", originalModel,
+				"upstream_model", upstreamModel,
+				"interval", guardParams.interval.String())
+			recordWebStreamReadError(c, account, upstreamModel, errWebStreamIdleTimeout)
+			return nil, fmt.Errorf("zhipu web stream read: %w", errWebStreamIdleTimeout)
+
+		case <-guard.keepaliveCh:
+			// 仅在尚未写出首帧时保活（与 anthropic 回程 data != "" 判定同构）：
+			// 首帧前的思考/检索阶段上游可能长时间静默，此刻保活才能防住
+			// Cloudflare Tunnel / 反代按空闲断开；已出首帧后只会污染 TTFT 观测。
+			if clientDisconnected || !webStreamKeepalivePending(written, guardParams.keepalive, lastDataAt) {
+				guard.resetKeepalive()
+				continue
+			}
+			if err := writeWebStreamKeepalive(c); err != nil {
+				clientDisconnected = true
+				continue
+			}
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
 		}
-		if view.Usage != nil {
-			usage = view.Usage
-		}
-		if view.FinishReason != "" {
-			finishReason = view.FinishReason
-		}
-		if view.Content == "" {
-			continue
-		}
-		// 实测 text 元素为累积全文形态（917 → 1714 → 9171714 均为全文），出站只发增量：
-		// delta = 全文去掉已聚合前缀；前缀不匹配时（上游形态变化）回退发全文，宁重不丢。
-		delta := strings.TrimPrefix(view.Content, aggregated.String())
-		aggregated.Reset()
-		aggregated.WriteString(view.Content)
-		if delta == "" {
-			continue
-		}
-		written = true
-		if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{"content": delta}, "", nil)); err != nil {
-			return nil, err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时透明
-		// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
-		if isOpenAICNFirstByteTimeout(err) && !written {
-			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
-		}
-		return nil, fmt.Errorf("zhipu web stream read: %w", err)
 	}
 
 	// 流中段业务错误收口：已向客户端写出过正文，上游突发业务错误。记录 ops 后向客户端
@@ -1030,6 +1122,27 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 	}
 
 	// 正常终止帧：finish_reason（若观测到）+ usage（若观测到），再按出站协议收口。
+	//
+	// 客户端断开后不再向下游写，但仍返回带 usage 的结果：响应早已提交、
+	// 上游已真实消耗额度，此时因写失败 return nil 会把 usage 整体丢掉。
+	if clientDisconnected {
+		MarkResponseCommitted(c)
+		result := &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webZhipuStreamPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+			ClientDisconnect: true,
+		}
+		if usage != nil {
+			result.Usage = *usage
+		}
+		return result, nil
+	}
 	if err := writeWebStreamChunk(c, st, webZhipuClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
@@ -1047,6 +1160,7 @@ func (s *OpenAIGatewayService) handleWebZhipuStreamingResponse(
 		Stream:           true,
 		ResponseHeaders:  resp.Header.Clone(),
 		Duration:         time.Since(startTime),
+		ClientDisconnect: clientDisconnected,
 	}
 	if usage != nil {
 		result.Usage = *usage
@@ -1106,6 +1220,9 @@ func (s *OpenAIGatewayService) handleWebZhipuNonStreamingResponse(
 	}
 	if err := scanner.Err(); err != nil {
 		// 扫描中途失败不应静默当作成功：如实返回错误而非继续解析残帧。
+		// 登记 ops 上游上下文（整改4）：与 handleWebZhipuUpstreamError 同口径，
+		// 否则 attempt 级遥测（platform/account/proxy/request-id）全丢。
+		recordWebStreamReadError(c, account, upstreamModel, err)
 		return nil, fmt.Errorf("zhipu web upstream response scan failed: %w", err)
 	}
 

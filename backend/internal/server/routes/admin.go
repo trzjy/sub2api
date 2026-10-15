@@ -232,12 +232,13 @@ func registerXianguanjiaSupplyRoutes(admin *gin.RouterGroup, h *handler.Handlers
 
 // registerUsageRiskRoutes 注册异常调用分析 admin 路由（派发单 U5）。
 // 仅新增以下端点，不增删改任何既有路由：
-//   GET  /admin/usage-risk/reports
-//   GET  /admin/usage-risk/reports/:report_id
-//   POST /admin/usage-risk/reports/:report_id/status
-//   GET  /admin/usage-risk/run-status
-//   GET  /admin/usage-risk/settings
-//   PUT  /admin/usage-risk/settings
+//
+//	GET  /admin/usage-risk/reports
+//	GET  /admin/usage-risk/reports/:report_id
+//	POST /admin/usage-risk/reports/:report_id/status
+//	GET  /admin/usage-risk/run-status
+//	GET  /admin/usage-risk/settings
+//	PUT  /admin/usage-risk/settings
 //
 // 守卫 nil：usage_risk_* 服务由 U4b 并行提供，未注入时本组不注册，避免空指针。
 func registerUsageRiskRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
@@ -374,6 +375,9 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 	}
 	qk := admin.Group("/quota_keys")
 	{
+		// 静态子路径优先于 :id 通配注册（gin 静态优先匹配），auto_entry_config 不会被 :id 吞掉。
+		qk.GET("/auto_entry_config", h.Admin.QuotaKey.GetAutoEntryConfig)
+		qk.PUT("/auto_entry_config", h.Admin.QuotaKey.UpdateAutoEntryConfig)
 		qk.GET("", h.Admin.QuotaKey.List)
 		qk.GET("/:id", h.Admin.QuotaKey.Get)
 		qk.POST("", h.Admin.QuotaKey.Create)
@@ -381,6 +385,7 @@ func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		qk.DELETE("/:id", h.Admin.QuotaKey.Delete)
 		qk.POST("/:id/refresh", h.Admin.QuotaKey.RefreshAccounts)
 		qk.POST("/:id/clear_exhausted", h.Admin.QuotaKey.ClearExhausted)
+		qk.POST("/:id/probe_quota", h.Admin.QuotaKey.ProbeQuota)
 		// 静态子路径置于 :id 通配之后注册（与既有 accounts 路由同型），由 gin
 		// 静态优先匹配，sweep_expired 不会被 :id 吞掉。
 		qk.POST("/sweep_expired", h.Admin.QuotaKey.SweepExpired)

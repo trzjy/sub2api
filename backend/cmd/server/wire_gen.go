@@ -356,6 +356,9 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	// （接线胶水由 D4i 交付：db/settingRepository 直传，factory/marker 在 handler 内组装）。
 	// D-CURSOR-017 装配：过期激活码清扫器（方案 §3.1 / §4.3，C7）。
 	quotaKeyRepository := repository.NewQuotaKeyRepository(client)
+	// D2-a 装配：入库可配置服务（settings 键值 + quota_keys 仓储 + 加密器 + 默认 lookup 客户端）。
+	// 默认 httpDoer=nil → 服务内部构建 180s 超时 + 跳过 TLS 校验的客户端（与取证一致）。
+	autoEntryService := service.NewCursorAutoEntryService(settingRepository, quotaKeyRepository, service.NewCredcryptEncryptor(), client, nil, "")
 	quotaKeySweeper := service.ProvideQuotaKeySweeper(quotaKeyRepository, opsRepository, client)
 	// D-CURSOR-018 装配：周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
 	// puller 复用既有 QuotaKeyService（PullAccounts 内部 advisory 锁 + 计数停限）。
@@ -366,10 +369,12 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		return nil, err
 	}
 	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), shareAIUpstream, client)
+	// D2-a：把入库可配置提供方注入 QuotaKeyService（D1 挂载点挂组前调用 ApplyEntryDefaults）。
+	quotaKeyService.SetAutoEntry(autoEntryService)
 	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository)
 	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
 	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。
-	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper)
+	quotaKeyHandler := admin.NewQuotaKeyHandler(quotaKeyService, quotaKeySweeper, autoEntryService)
 	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, groupHandler, accountHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, codeBuddyOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, promoIntelHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, xianyuAdminHandler, pricingHandler, upstreamBillingProbeService, ollamaCloudUsageService, accountBalanceProbeService, adminService, httpUpstream, configConfig, webPlatformAutoLoginService, usageRiskService, settingService, visionCapabilityHandler, visionRoutingService, client, xgjAdminCfgStore, secretEncryptor, db, settingRepository, xgjSupplyStore, openCodeGoUsageService, claudeResetCreditService, quotaKeyHandler, quotaKeyService)
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)

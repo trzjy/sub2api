@@ -28,14 +28,16 @@ import (
 //   - 不引入新中间件 / 新分页机制 / 新响应信封：复用 response.ParsePagination
 //     与既有分页字段（items/total/page/page_size/pages）。
 type QuotaKeyHandler struct {
-	svc     *service.QuotaKeyService
-	sweeper *service.QuotaKeySweeper
+	svc       *service.QuotaKeyService
+	sweeper   *service.QuotaKeySweeper
+	autoEntry *service.CursorAutoEntryService
 }
 
 // NewQuotaKeyHandler 构造激活码管理端点处理器。
 // sweeper 为 nil 时 sweep_expired 端点返回 503（未装配清扫器），其余端点不受影响。
-func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper) *QuotaKeyHandler {
-	return &QuotaKeyHandler{svc: svc, sweeper: sweeper}
+// autoEntry 为 nil 时 auto_entry_config / probe_quota 端点返回 503（未装配入库可配置服务）。
+func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService) *QuotaKeyHandler {
+	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry}
 }
 
 // quotaKeySummaryEnvelope 复用既有分页信封（response.PaginatedData），在顶层追加
@@ -135,10 +137,14 @@ type quotaKeyAccountItem struct {
 // 不嵌套完整 QuotaKey 聚合账号列表以外的字段，也不回放 code 原文。
 type quotaKeyDetailResponse struct {
 	*service.QuotaKeyStatus
-	Accounts []quotaKeyAccountItem `json:"accounts"`
-	Total    int64                 `json:"total"`
-	Page     int                   `json:"page"`
-	PageSize int                   `json:"page_size"`
+	// AccountCount = 未软删归属账号总数；WorkingCount = 其中可调度（schedulable+active）
+	// 数。用户验收口径（2026-10-15）：详情弹窗"账号数/可用账号数"必须真实反映，缺省 0 误导。
+	AccountCount int64                 `json:"account_count"`
+	WorkingCount int64                 `json:"working_count"`
+	Accounts     []quotaKeyAccountItem `json:"accounts"`
+	Total        int64                 `json:"total"`
+	Page         int                   `json:"page"`
+	PageSize     int                   `json:"page_size"`
 }
 
 // Get 读取单个激活码详情（脱敏 status + 账号分页）。
@@ -174,8 +180,19 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 			CreatedAt: acc.CreatedAt,
 		})
 	}
+	accountCount, workingCount := int64(0), int64(0)
+	for _, acc := range accounts {
+		if acc.DeletedAt.IsZero() {
+			accountCount++
+			if acc.Schedulable && acc.Status == "active" {
+				workingCount++
+			}
+		}
+	}
 	response.Success(c, quotaKeyDetailResponse{
 		QuotaKeyStatus: status,
+		AccountCount:   accountCount,
+		WorkingCount:   workingCount,
 		Accounts:       items,
 		Total:          total,
 		Page:           page,
@@ -312,4 +329,70 @@ func respondQuotaKeyError(c *gin.Context, err error) {
 		return
 	}
 	response.ErrorFrom(c, err)
+}
+
+// GetAutoEntryConfig 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。
+// GET /api/v1/admin/quota_keys/auto_entry_config
+func (h *QuotaKeyHandler) GetAutoEntryConfig(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	cfg, err := h.autoEntry.GetConfig(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, cfg)
+}
+
+type updateAutoEntryConfigRequest struct {
+	Vendors       map[string]bool             `json:"vendors"`
+	Models        []service.CursorModelRef    `json:"models"`
+	EntryDefaults service.CursorEntryDefaults `json:"entry_defaults"`
+}
+
+// UpdateAutoEntryConfig 校验并持久化 cursor 入库可配置。
+// PUT /api/v1/admin/quota_keys/auto_entry_config
+func (h *QuotaKeyHandler) UpdateAutoEntryConfig(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	var req updateAutoEntryConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	cfg := &service.CursorAutoEntryConfig{
+		Vendors:       req.Vendors,
+		Models:        req.Models,
+		EntryDefaults: req.EntryDefaults,
+	}
+	updated, err := h.autoEntry.UpdateConfig(c.Request.Context(), cfg)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, updated)
+}
+
+// ProbeQuota 手动触发某激活码的 key 级用量查询（lookup），并把额度快照写入其全部账号 extra。
+// 返回 key_info 摘要（状态/额度/设备/到期等）。
+// POST /api/v1/admin/quota_keys/:id/probe_quota
+func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	id, ok := parseQuotaKeyID(c)
+	if !ok {
+		return
+	}
+	info, err := h.autoEntry.ProbeKeyQuota(c.Request.Context(), id)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	response.Success(c, info)
 }

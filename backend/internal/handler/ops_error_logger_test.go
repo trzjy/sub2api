@@ -122,6 +122,7 @@ func resetOpsErrorLoggerStateForTest(t *testing.T) {
 	opsErrorLogProcessed.Store(0)
 	opsErrorLogSanitized.Store(0)
 	opsErrorLogLastDropLogAt.Store(0)
+	opsErrorLogDropWindow.Store(0)
 
 	opsErrorLogShutdownCh = make(chan struct{})
 	opsErrorLogShutdownOnce = sync.Once{}
@@ -813,7 +814,7 @@ func TestNormalizeOpsErrorType(t *testing.T) {
 	}
 }
 
-func TestClassifyOpsNoAvailableAccountsExcludedFromSLA(t *testing.T) {
+func TestClassifyOpsNoAvailableAccountsCountsForSLA(t *testing.T) {
 	const message = "No available accounts"
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
@@ -826,12 +827,15 @@ func TestClassifyOpsNoAvailableAccountsExcludedFromSLA(t *testing.T) {
 
 	require.Equal(t, "api_error", errType)
 	require.Equal(t, "routing", phase)
-	require.True(t, isBusinessLimited)
+	// 账号池耗尽是平台侧供给瓶颈，不是用户的错：不得置 business_limited，
+	// 否则该行被 ops_metrics_collector 的 NOT is_business_limited 过滤掉，
+	// 既从 SLA 分母剔除也不计入错误率（真实可用性劣化不可见）。
+	require.False(t, isBusinessLimited)
 	require.Equal(t, "platform", errorOwner)
 	require.Equal(t, "gateway", errorSource)
 }
 
-func TestClassifyOpsRoutingCapacityMarkerExcludesMaskedSelectionFailureFromSLA(t *testing.T) {
+func TestClassifyOpsRoutingCapacityMarkerCountsMaskedSelectionFailureForSLA(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -847,7 +851,7 @@ func TestClassifyOpsRoutingCapacityMarkerExcludesMaskedSelectionFailureFromSLA(t
 	)
 
 	require.Equal(t, "routing", phase)
-	require.True(t, isBusinessLimited)
+	require.False(t, isBusinessLimited)
 	require.Equal(t, "platform", errorOwner)
 	require.Equal(t, "gateway", errorSource)
 }
@@ -1428,7 +1432,7 @@ func TestClassifyOpsOtherErrorsStillCountForSLA(t *testing.T) {
 	require.Equal(t, "gateway", errorSource)
 }
 
-func TestClassifyOpsUnsupportedModelExcludedFromSLA(t *testing.T) {
+func TestClassifyOpsUnsupportedModelNoAvailableTextCountsForSLA(t *testing.T) {
 	tests := []string{
 		"No available accounts: no available accounts supporting model: made-up-model",
 		"No available accounts: no available OpenAI accounts supporting model: made-up-model",
@@ -1448,7 +1452,8 @@ func TestClassifyOpsUnsupportedModelExcludedFromSLA(t *testing.T) {
 
 			require.Equal(t, "api_error", errType)
 			require.Equal(t, "routing", phase)
-			require.True(t, isBusinessLimited)
+			// 供给侧空池（含 model 不在白名单导致的空池）计入 SLA 分母。
+			require.False(t, isBusinessLimited)
 			require.Equal(t, "platform", errorOwner)
 			require.Equal(t, "gateway", errorSource)
 		})
@@ -1498,24 +1503,6 @@ func TestClassifyOpsUpstreamAuthTextStillCountsForSLA(t *testing.T) {
 			message: "API key group platform is not gemini",
 			code:    "400",
 			status:  http.StatusBadRequest,
-		},
-		{
-			name:    "provider balance error",
-			message: "Insufficient account balance",
-			code:    "INSUFFICIENT_BALANCE",
-			status:  http.StatusForbidden,
-		},
-		{
-			name:    "provider subscription error",
-			message: "No active subscription found for this group",
-			code:    "SUBSCRIPTION_NOT_FOUND",
-			status:  http.StatusForbidden,
-		},
-		{
-			name:    "provider quota error",
-			message: "api key 额度已用完",
-			code:    "API_KEY_QUOTA_EXHAUSTED",
-			status:  http.StatusTooManyRequests,
 		},
 		{
 			name:    "provider deleted group shaped error",
@@ -2025,254 +2012,234 @@ func TestClassifyOpsLocalModelConfigurationWithoutIngressMarkStaysRouting(t *tes
 	require.Equal(t, "platform", errorOwner)
 }
 
-// 带内错误也可能出现在非流式 2xx 响应体里（如 Gemini generateContent 的 finishReason）：
-// NonStream 标记落库 stream=false，未标记的沿用流式。
-func TestLogOpsStreamError_NonStreamInBandContentPolicy(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 4)
-
+// 整改1：账号池耗尽（无可用账号）必须计入 SLA 分母，不得被标成 business_limited。
+// 该行在 ops_metrics_collector 中以 NOT is_business_limited 过滤，
+// 一旦误标即从 SLA 分母剔除且不计入错误率（zhipu grp43 曾掩盖 8.17 个百分点）。
+func TestClassifyOpsNoAvailableAccountsEntersSLADenominator(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3.7-flash:generateContent", nil)
-	setOpsRequestContext(c, "gemini-3.7-flash", false)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 
-	service.MarkOpsStreamErrorValue(c, service.OpsStreamError{
-		ErrType:        "invalid_request_error",
-		Code:           "PROHIBITED_CONTENT",
-		Message:        "Gemini content policy stop (finishReason=PROHIBITED_CONTENT): Response stopped due to prohibited content.",
-		IntendedStatus: http.StatusBadRequest,
-		RequestScoped:  true,
-		NonStream:      true,
-	})
+	// 复现生产写点：markOpsRoutingCapacityLimitedIfNoAvailable 仅在无可用账号时置位。
+	markOpsRoutingCapacityLimitedIfNoAvailable(c, service.ErrNoAvailableAccounts)
 
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	logOpsStreamError(c, ops, http.StatusOK)
+	_, isBusinessLimited, _, _ := classifyOpsErrorLog(
+		c, "api_error", infraerrors.NoAvailableAccounts, "", http.StatusServiceUnavailable,
+	)
 
-	job := <-opsErrorLogQueue
-	require.NotNil(t, job.entry)
-	require.False(t, job.entry.Stream)
-	require.Equal(t, "invalid_request_error", job.entry.ErrorType)
-	require.Equal(t, "request", job.entry.ErrorPhase)
-	require.Equal(t, "client", job.entry.ErrorOwner)
-	require.True(t, job.entry.IsBusinessLimited)
-	require.Equal(t, http.StatusBadRequest, job.entry.StatusCode, "请求级带内结果按 IntendedStatus 落库，才能进入错误列表")
-	require.Equal(t, "P3", job.entry.Severity)
-	require.Equal(t, "gemini-3.7-flash", job.entry.Model)
-	require.Contains(t, job.entry.ErrorBody, "PROHIBITED_CONTENT")
+	require.False(t, isBusinessLimited,
+		"供给瓶颈不得置 business_limited，否则该行被 NOT is_business_limited 过滤出 SLA 分母")
 }
 
-// 请求级带内结果（RequestScoped）：此前尝试残留的上游错误上下文不参与分类、不做上游归因，
-// 按业务限制计；透传规则的 skip_monitoring 残留也不影响它落库。
-func TestLogOpsStreamError_RequestScopedIgnoresResidualUpstreamContext(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 4)
-
+// 整改1 边界：用户侧不可用（Key 额度耗尽）必须仍是 business_limited，
+// 不得因移除 routingCapacityLimited 而被误并入 SLA 分母。
+func TestClassifyOpsClientQuotaStillBusinessLimited(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3.7-flash:streamGenerateContent", nil)
-	setOpsRequestContext(c, "gemini-3.7-flash", true)
-	c.Set(service.OpsUpstreamStatusCodeKey, http.StatusTooManyRequests)
-	c.Set(service.OpsUpstreamErrorMessageKey, "earlier attempt was rate limited")
-	c.Set(service.OpsUpstreamErrorsKey, []*service.OpsUpstreamErrorEvent{{
-		UpstreamStatusCode: http.StatusTooManyRequests,
-		Message:            "earlier attempt was rate limited",
-		SkipMonitoring:     true,
-	}})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonIPRestriction)
 
-	service.MarkOpsStreamErrorValue(c, service.OpsStreamError{
-		ErrType:        "invalid_request_error",
-		Code:           "PROHIBITED_CONTENT",
-		Message:        "Gemini content policy stop (finishReason=PROHIBITED_CONTENT): Response stopped due to prohibited content.",
-		IntendedStatus: http.StatusBadRequest,
-		RequestScoped:  true,
-	})
+	_, isBusinessLimited, _, _ := classifyOpsErrorLog(
+		c, "api_error", "API key 额度已用完", "API_KEY_QUOTA_EXHAUSTED", http.StatusTooManyRequests,
+	)
 
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	logOpsStreamError(c, ops, http.StatusOK)
-
-	require.Equal(t, int64(1), OpsErrorLogQueueLength())
-	job := <-opsErrorLogQueue
-	require.NotNil(t, job.entry)
-	require.Equal(t, "invalid_request_error", job.entry.ErrorType)
-	require.Equal(t, "request", job.entry.ErrorPhase)
-	require.Equal(t, "client", job.entry.ErrorOwner)
-	require.Equal(t, "client_request", job.entry.ErrorSource)
-	require.True(t, job.entry.IsBusinessLimited)
-	require.True(t, job.entry.Stream)
-	require.Equal(t, http.StatusBadRequest, job.entry.StatusCode)
-	require.Nil(t, job.entry.UpstreamStatusCode, "残留的 429 不得贴到内容策略行上")
-	require.Nil(t, job.entry.UpstreamErrorMessage)
-	require.Nil(t, job.entry.UpstreamErrorsJSON)
-	require.Contains(t, job.entry.ErrorBody, "PROHIBITED_CONTENT")
+	require.True(t, isBusinessLimited, "用户侧 Key 额度耗尽仍应从 SLA 分母剔除")
 }
 
-// 请求级带内结果与此前尝试的上游错误并存时，中间件既落带内错误行，也保留恢复行的 provider 遥测。
-func TestOpsErrorLoggerMiddleware_RequestScopedInBandErrorKeepsRecoveredTelemetry(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 4)
+// 整改1 边界：本地模型配置拒绝（local_model_configuration）仍是 business_limited。
+func TestClassifyOpsRoutingCapacityDoesNotMaskLocalModelConfiguration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+	markOpsRoutingCapacityLimited(c)
 
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(ops))
-	router.POST("/v1beta/models/gemini-3.7-flash:generateContent", func(c *gin.Context) {
-		setOpsRequestContext(c, "gemini-3.7-flash", false)
-		c.Set(service.OpsUpstreamErrorsKey, []*service.OpsUpstreamErrorEvent{{
-			UpstreamStatusCode: http.StatusTooManyRequests,
-			Message:            "earlier attempt was rate limited",
-		}})
-		service.MarkOpsStreamErrorValue(c, service.OpsStreamError{
-			ErrType:        "invalid_request_error",
-			Code:           "SAFETY",
-			Message:        "Gemini content policy stop (finishReason=SAFETY): Response stopped due to safety reasons.",
-			IntendedStatus: http.StatusBadRequest,
-			RequestScoped:  true,
-			NonStream:      true,
+	_, isBusinessLimited, _, _ := classifyOpsErrorLog(
+		c, "model_not_found", "Model \"x\" is not in whitelist", "", http.StatusNotFound,
+	)
+
+	require.True(t, isBusinessLimited, "local_model_configuration 仍属业务限制")
+}
+
+// 整改2：已知上游业务码 + 白名单状态码 → business_limited（状态码参与判定）。
+func TestClassifyOpsUpstreamBusinessCodeIsBusinessLimited(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   string
+		status int
+	}{
+		{"subscription not found 403", opsCodeSubscriptionNotFound, http.StatusForbidden},
+		{"subscription invalid 403", opsCodeSubscriptionInvalid, http.StatusForbidden},
+		{"insufficient balance 403", opsCodeInsufficientBalance, http.StatusForbidden},
+		{"usage limit exceeded 429", opsCodeUsageLimitExceeded, http.StatusTooManyRequests},
+		{"api key quota exhausted 429", opsCodeAPIKeyQuotaExhausted, http.StatusTooManyRequests},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			service.SetOpsUpstreamError(c, tt.status, "upstream rejected the request", "")
+
+			phase, isBusinessLimited, owner, source := classifyOpsErrorLog(
+				c, "api_error", "upstream rejected the request", tt.code, tt.status,
+			)
+
+			require.Equal(t, "upstream", phase)
+			require.True(t, isBusinessLimited, "已知业务码 + 白名单状态码应判为业务限制")
+			require.Equal(t, "provider", owner)
+			require.Equal(t, "upstream_http", source)
 		})
-		c.JSON(http.StatusOK, gin.H{"candidates": []any{}})
-	})
-
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3.7-flash:generateContent", nil))
-	require.Equal(t, http.StatusOK, recorder.Code)
-
-	require.Equal(t, int64(2), OpsErrorLogQueueLength())
-	inBand := <-opsErrorLogQueue
-	require.Equal(t, "invalid_request_error", inBand.entry.ErrorType)
-	require.Equal(t, "request", inBand.entry.ErrorPhase)
-	require.Equal(t, "client", inBand.entry.ErrorOwner)
-	require.True(t, inBand.entry.IsBusinessLimited)
-	require.False(t, inBand.entry.Stream)
-	require.Equal(t, http.StatusBadRequest, inBand.entry.StatusCode)
-	require.Nil(t, inBand.entry.UpstreamStatusCode)
-	require.Nil(t, inBand.entry.UpstreamErrorsJSON)
-
-	recovered := <-opsErrorLogQueue
-	require.Equal(t, "upstream", recovered.entry.ErrorPhase)
-	require.Equal(t, "provider", recovered.entry.ErrorOwner)
-	require.Equal(t, http.StatusOK, recovered.entry.StatusCode)
-	require.Equal(t, "Recovered upstream error 429: earlier attempt was rate limited", recovered.entry.ErrorMessage)
-}
-
-// 非请求级带内失败（如上游错误信封）仍与既有语义一致：上游上下文参与分类并做归因，只落一行。
-func TestOpsErrorLoggerMiddleware_UpstreamInBandFailureStillSingleRow(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 4)
-	gin.SetMode(gin.TestMode)
-
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(ops))
-	router.POST("/v1beta/models/gemini-3.7-flash:streamGenerateContent", func(c *gin.Context) {
-		setOpsRequestContext(c, "gemini-3.7-flash", true)
-		service.SetOpsUpstreamError(c, http.StatusTooManyRequests, "quota", "")
-		c.Set(service.OpsUpstreamErrorsKey, []*service.OpsUpstreamErrorEvent{{
-			UpstreamStatusCode: http.StatusTooManyRequests,
-			Message:            "quota",
-			Kind:               "stream_failed",
-		}})
-		service.MarkOpsStreamFailure(c, "rate_limit_error", "RESOURCE_EXHAUSTED", "quota", http.StatusTooManyRequests)
-		c.Data(http.StatusOK, "text/event-stream", []byte("data: {\"error\":{\"code\":429}}\n\n"))
-	})
-
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3.7-flash:streamGenerateContent", nil))
-
-	require.Equal(t, int64(1), OpsErrorLogQueueLength())
-	job := <-opsErrorLogQueue
-	require.Equal(t, "rate_limit_error", job.entry.ErrorType)
-	require.Equal(t, "upstream", job.entry.ErrorPhase)
-	require.Equal(t, "provider", job.entry.ErrorOwner)
-	require.Equal(t, http.StatusTooManyRequests, job.entry.StatusCode)
-	require.True(t, job.entry.Stream)
-	require.NotNil(t, job.entry.UpstreamStatusCode)
-	require.Equal(t, http.StatusTooManyRequests, *job.entry.UpstreamStatusCode)
-}
-
-// Gemini 带内信号登记使用的错误类型必须都在 ops 白名单里，否则会被归一化成 api_error。
-func TestNormalizeOpsErrorType_KeepsGeminiInBandSignalTypes(t *testing.T) {
-	for _, errType := range []string{
-		"invalid_request_error", "authentication_error", "permission_error",
-		"not_found_error", "rate_limit_error", "upstream_error",
-	} {
-		require.Equal(t, errType, normalizeOpsErrorType(errType, "PROHIBITED_CONTENT"), errType)
 	}
 }
 
-type opsAdvancedSettingsRepoStub struct {
-	service.SettingRepository
-	advanced string
-}
-
-func (r *opsAdvancedSettingsRepoStub) GetValue(context.Context, string) (string, error) {
-	return "", service.ErrSettingNotFound
-}
-
-func (r *opsAdvancedSettingsRepoStub) GetMultiple(context.Context, []string) (map[string]string, error) {
-	return map[string]string{service.SettingKeyOpsAdvancedSettings: r.advanced}, nil
-}
-
-func (r *opsAdvancedSettingsRepoStub) Set(context.Context, string, string) error {
-	return nil
-}
-
-// serveClientClosedRequest 以已取消的请求 context 走 failoverClientGone，复现网关标记 499 的收尾路径。
-func serveClientClosedRequest(t *testing.T, ops *service.OpsService, prepare func(c *gin.Context)) {
-	t.Helper()
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(ops))
-	router.POST("/v1/messages", func(c *gin.Context) {
-		if prepare != nil {
-			prepare(c)
-		}
-		failoverClientGone(c)
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx))
-	require.Equal(t, statusClientClosedRequest, recorder.Code)
-	require.Zero(t, recorder.Body.Len())
-}
-
-func TestOpsErrorLoggerMiddleware_SkipsPureClientClosed(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 2)
+// 整改2 关键边界：上游 403 但无已知业务码（账号被封/权限不足）不得被臆断为业务限制，
+// 必须仍按故障计入 SLA 分母——这正是「状态码参与但只覆盖白名单码」的语义。
+func TestClassifyOpsUpstreamForbiddenWithoutBusinessCodeStillCountsForSLA(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	require.True(t, ops.OpsAdvancedSettingsSnapshot().IgnoreContextCanceled)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.SetOpsUpstreamError(c, http.StatusForbidden, "account has been suspended", "")
 
-	serveClientClosedRequest(t, ops, nil)
+	phase, isBusinessLimited, owner, source := classifyOpsErrorLog(
+		c, "api_error", "account has been suspended", "ACCOUNT_SUSPENDED", http.StatusForbidden,
+	)
 
-	require.Zero(t, OpsErrorLogQueueLength(), "纯客户端取消的 499 按 IgnoreContextCanceled 跳过")
+	require.Equal(t, "upstream", phase)
+	require.False(t, isBusinessLimited, "未知码不得凭状态码被判为业务限制")
+	require.Equal(t, "provider", owner)
+	require.Equal(t, "upstream_http", source)
 }
 
-func TestOpsErrorLoggerMiddleware_RecordsClientClosedAfterUpstreamFailure(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 2)
+// 整改2 边界：已知业务码但状态码不在白名单（如订阅码配 500）仍按故障计入 SLA。
+func TestClassifyOpsUpstreamBusinessCodeWithNonWhitelistedStatusCountsForSLA(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.SetOpsUpstreamError(c, http.StatusInternalServerError, "upstream internal error", "")
 
-	serveClientClosedRequest(t, ops, func(c *gin.Context) {
-		c.Set(service.OpsUpstreamErrorsKey, []*service.OpsUpstreamErrorEvent{{
-			AccountID: 7, UpstreamStatusCode: 524, Kind: "failover", Message: "upstream timeout",
-		}})
-	})
+	_, isBusinessLimited, _, _ := classifyOpsErrorLog(
+		c, "api_error", "upstream internal error", opsCodeSubscriptionNotFound, http.StatusInternalServerError,
+	)
 
-	require.Equal(t, int64(1), OpsErrorLogQueueLength(), "上游失败后客户端离开仍按上游失败落库")
-	job := <-opsErrorLogQueue
-	require.Equal(t, statusClientClosedRequest, job.entry.StatusCode)
-	require.Equal(t, "upstream", job.entry.ErrorPhase)
-	require.NotNil(t, job.entry.UpstreamStatusCode)
-	require.Equal(t, 524, *job.entry.UpstreamStatusCode)
+	require.False(t, isBusinessLimited, "业务码配非白名单状态码不得判为业务限制")
 }
 
-func TestOpsErrorLoggerMiddleware_RecordsClientClosedWhenIgnoreContextCanceledDisabled(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 2)
+// 整改2 单元：映射表本身的边界行为。
+func TestIsOpsUpstreamBusinessLimitError(t *testing.T) {
+	require.True(t, isOpsUpstreamBusinessLimitError(opsCodeSubscriptionNotFound, http.StatusForbidden))
+	require.True(t, isOpsUpstreamBusinessLimitError(" "+opsCodeInsufficientBalance+" ", http.StatusPaymentRequired))
+	require.False(t, isOpsUpstreamBusinessLimitError(opsCodeSubscriptionNotFound, http.StatusBadGateway))
+	require.False(t, isOpsUpstreamBusinessLimitError("UNKNOWN_CODE", http.StatusForbidden))
+	require.False(t, isOpsUpstreamBusinessLimitError(opsCodeSubscriptionNotFound, 0))
+	require.False(t, isOpsUpstreamBusinessLimitError("", http.StatusForbidden))
+}
+
+// 整改4：丢弃计数必须可查询（限频只压缩日志频率，不压缩计数）。
+func TestOpsErrorLogDropWindowTotalQueryable(t *testing.T) {
+	resetOpsErrorLoggerStateForTest(t)
+	opsErrorLogOnce.Do(func() {})
+
+	require.Zero(t, OpsErrorLogDroppedTotal())
+	require.Zero(t, OpsErrorLogDropWindowTotal())
+
+	// 模拟一次丢弃后触发一次窗口记录：窗口值应等于累计丢弃数。
+	opsErrorLogDropped.Add(3)
+	opsErrorLogLastDropLogAt.Store(0)
+	maybeLogOpsErrorLogDrop()
+
+	require.Equal(t, int64(3), OpsErrorLogDropWindowTotal())
+	require.Equal(t, int64(3), OpsErrorLogDroppedTotal())
+}
+
+// 缺陷1 结论固化：「全账号限速」(AllAccountsRateLimited) 是**平台侧供给受限**，
+// 必须计入 SLA 分母——不得因为「用户侧感知是 429 稍后重试」就踢出分母。
+//
+// 该 429 由 classifySelectionFailureError 从选号失败重分类而来：调度器在
+// model_rate_limited=N / rate_limited=N 上报「全部账号都被上游限速」时，把兜底的
+// 503 api_error 改写为 429 rate_limit_error。责任方是上游供给，不是用户。
+//
+// 为什么不能置 business_limited（=移出 SLA 分母），用面板公式实算：
+//
+//	requestCountSLA = successCount + errorCountSLA
+//	errorCountSLA   = COUNT(status>=400 AND NOT is_business_limited)
+//	sla             = successCount / requestCountSLA   (ops_repo_dashboard.go:96-98)
+//
+// 取「分组 90% 请求以该 429 失败、10% 成功」（部分上游限速的典型形态）：
+//
+//	现状（is_business_limited=false）：error_sla=90 → sla = 10/100 = 10%
+//	若置 business_limited=true        ：error_sla=0  → sla = 10/10  = 100%
+//
+// 即：一次 90% 的可用性劣化会被报成 100% SLA —— 与本轮整改「真实可用性劣化必须
+// 可见」的目标正好相反，也正是 zhipu grp43 掩盖 8.17 个百分点的同一类错误。
+//
+// 与「用户自己触发的 429」的区分正交且已就位：Key 额度/余额等用户侧不可用由
+// clientBusinessLimited / localBusinessLimited 分支判为 business_limited（见
+// TestClassifyOpsClientQuotaStillBusinessLimited），那类**才**该移出分母。
+func TestClassifyOpsAllAccountsRateLimitedCountsInSLADenominator(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	settings := &opsAdvancedSettingsRepoStub{advanced: `{"ignore_context_canceled":false}`}
-	ops := service.NewOpsService(nil, settings, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	require.False(t, ops.OpsAdvancedSettingsSnapshot().IgnoreContextCanceled)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 
-	serveClientClosedRequest(t, ops, nil)
+	// 生产写点：四个调用点在 classifySelectionFailureError 改写为 429 之后，
+	// 都调用 markOpsRoutingCapacityLimitedIfNoAvailable(c, err)。
+	markOpsRoutingCapacityLimitedIfNoAvailable(c, service.ErrNoAvailableAccounts)
 
-	require.Equal(t, int64(1), OpsErrorLogQueueLength())
-	job := <-opsErrorLogQueue
-	require.Equal(t, statusClientClosedRequest, job.entry.StatusCode)
+	phase, isBusinessLimited, owner, source := classifyOpsErrorLog(
+		c, "rate_limit_error", infraerrors.AllAccountsRateLimited, "", http.StatusTooManyRequests,
+	)
+
+	require.Equal(t, "routing", phase)
+	require.False(t, isBusinessLimited,
+		"平台侧供给受限的全账号限速必须计入 SLA 分母：置 business_limited 会把一次"+
+			"90% 的可用性劣化报成 100% SLA")
+	require.Equal(t, "platform", owner, "责任方是平台侧供给，不是用户")
+	require.Equal(t, "gateway", source)
 }
+
+// 同一文案在「确有上游 429 上下文」时归因上游（failover 耗尽路径，
+// gateway_handler_responses.go:handleResponsesFailoverExhausted）：那条链路真的
+// 打到了上游并收到 429，owner 必须是 provider。两条链路同文案、不同事实，
+// 归因必须跟着事实走而不是跟着文案走。
+func TestClassifyOpsAllAccountsRateLimitedWithUpstreamContextIsProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.SetOpsUpstreamError(c, http.StatusTooManyRequests, "upstream 429", "")
+
+	phase, isBusinessLimited, owner, _ := classifyOpsErrorLog(
+		c, "rate_limit_error", infraerrors.AllAccountsRateLimited, "", http.StatusTooManyRequests,
+	)
+
+	require.Equal(t, "upstream", phase)
+	require.Equal(t, "provider", owner)
+	require.False(t, isBusinessLimited)
+}
+
+// 反向边界：用户自己触发的 429（Key 额度耗尽）仍必须移出分母——这才是
+// 「与用户自己触发的 429 区分」的另一半，缺陷1 不得把它一并改掉。
+func TestClassifyOpsAllAccountsRateLimitedDoesNotMaskUserQuota(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonIPRestriction)
+
+	_, isBusinessLimited, _, _ := classifyOpsErrorLog(
+		c, "rate_limit_error", "api key 额度已用完", opsCodeAPIKeyQuotaExhausted, http.StatusTooManyRequests,
+	)
+
+	require.True(t, isBusinessLimited, "用户侧 Key 额度耗尽仍应移出 SLA 分母")
+}
+
+// :2292 的「upstream 限速不判业务限制」早退两个分支都 return false，与其后
+// 落脚的 return false 等价——它不是承重逻辑，删除与否都不改变任何归类结果。
+// 本用例把这一事实钉住：任何依赖该早退来区分中英文案的后续改动都会立刻失败，
+// 避免有人误以为它在承重而不敢清理、或反过来以为它能挡住中文文案。
+func TestClassifyOpsIsBusinessLimitedUpstreamEnglishEarlyReturnIsInert(t *testing.T) {
+	withEnglishUpstream := classifyOpsIsBusinessLimited(
+		"rate_limit_error", "upstream", "", "Upstream rate limit exceeded", false)
+	withChineseUpstream := classifyOpsIsBusinessLimited(
+		"rate_limit_error", "upstream", "", infraerrors.AllAccountsRateLimited, false)
+
+	require.False(t, withEnglishUpstream)
+	require.Equal(t, withEnglishUpstream, withChineseUpstream,
+		"英文 upstream 早退与不触发早退的结果必须一致：该分支不是承重逻辑")
+}
+
+
+
+
+
+

@@ -1214,9 +1214,11 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
-	if platform == service.PlatformOther {
+	if platform == service.PlatformOther || platform == service.PlatformCodeBuddy {
 		// other 无平台默认模型目录：空 mapping 时公开模型列表为空，不回落到
 		// Claude 默认模型（落地外审-1），与调度层空 mapping 拒绝保持同一契约。
+		// codebuddy 同理：模型目录来自上游快照，账号无可用目录时不得对外声称
+		// 提供 Claude 默认模型。
 		writeModelsList(c, platform, nil)
 		return
 	}
@@ -1564,6 +1566,12 @@ func defaultModelIDsForPlatform(platform string) []string {
 			}
 		}
 		return ids
+	case service.PlatformCodeBuddy:
+		// codebuddy 无平台内置模型目录：公开模型列表完全来自组内账号的
+		// model_mapping 与上游模型目录快照（accounts.extra.upstream_model_metadata，
+		// 见 GatewayService.GetAvailableModels）。返回空列表，避免回落到 Claude
+		// 默认模型——白名单求交后会让 codebuddy 分组返回 0 个模型。
+		return nil
 	case service.PlatformOther:
 		// other 无平台内置模型目录：公开模型列表完全来自组内账号 model_mapping；
 		// 返回空列表，避免回落到 Claude 默认模型（外部审查外审-3）。

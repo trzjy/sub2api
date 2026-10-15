@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -333,7 +335,7 @@ func TestForwardWebKimi_TrailerOnlyErrorFailsClosed(t *testing.T) {
 			},
 		}
 		_, err := svc.handleWebKimiStreamingResponse(context.Background(), webKimiTrailerResponse(trailer),
-			c, webKimiTestAccount(8944, nil), "kimi-k3", "k3", time.Now(), webResponseModeChat)
+			c, webKimiTestAccount(8944, nil), "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
 		require.Error(t, err, "trailer-only error must not be reported as a successful stream")
 		require.NotContains(t, recorder.Body.String(), "data: [DONE]", "must not emit a normal terminal frame")
 	})
@@ -449,7 +451,7 @@ func TestForwardWebKimi_StreamingResponse(t *testing.T) {
 	}
 	account := webKimiTestAccount(8925, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), webKimiStreamResponse(), c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+		context.Background(), webKimiStreamResponse(), c, account, "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
 	require.NoError(t, err)
 	require.True(t, result.Stream)
 
@@ -483,7 +485,7 @@ func TestForwardWebKimi_StreamingUserEchoFrameWithUnauthenticatedWord(t *testing
 	}
 	account := webKimiTestAccount(111, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), webKimiEnvelopeResponse(frames), c, account, "kimi-k2d6", "k2d6", time.Now(), webResponseModeAnthropic)
+		context.Background(), webKimiEnvelopeResponse(frames), c, account, "kimi-k2d6", "k2d6", time.Now(), "hi", webResponseModeAnthropic)
 	require.NoError(t, err, "user-echo frame with 'unauthenticated' word must not fail the stream")
 	require.True(t, result.Stream)
 
@@ -513,7 +515,7 @@ func TestForwardWebKimi_StreamMidstreamBusinessError(t *testing.T) {
 	})
 	account := webKimiTestAccount(8935, nil)
 	result, err := svc.handleWebKimiStreamingResponse(
-		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), webResponseModeChat)
+		context.Background(), resp, c, account, "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
 	require.NoError(t, err, "midstream error is conveyed in-stream, not as a Go error")
 	require.True(t, result.Stream)
 
@@ -558,9 +560,9 @@ func TestForwardWebKimi_UnitClassify(t *testing.T) {
 //   - 纯内容裸 JSON（无 code）仍忽略（isError=false）；data: 前缀行不进入此判定。
 func TestWebKimiBareJSONError(t *testing.T) {
 	cases := []struct {
-		name     string
-		line     string
-		isError  bool
+		name    string
+		line    string
+		isError bool
 	}{
 		{"string_code_unauthenticated", `{"code":"unauthenticated","message":"token expired"}`, true},
 		{"string_code_empty_message", `{"code":"unauthenticated","message":""}`, true},
@@ -822,3 +824,291 @@ func (r *webKimiRateLimitRepoStub) SetError(_ context.Context, _ int64, _ string
 func newWebKimiTestRateLimitService(repo *webKimiRateLimitRepoStub) *RateLimitService {
 	return NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 }
+
+// ── 整改1/2/3/4 的回归锚点 ────────────────────────────────────────────────
+
+// webKimiSilentBody 是一个「开了 HTTP 200 流但永不吐数据」的响应体：Read
+// 永久阻塞且 Close 不解除（模拟挂死连接 / 中间设备吞流）。整改前 kimi 流式
+// 回程是裸 for + io.ReadFull，遇到这种上游会永久阻塞、goroutine 不归还；
+// 整改后由 webStreamGuard 的 interval 超时收口。
+type webKimiSilentBody struct{ closed chan struct{} }
+
+func (b *webKimiSilentBody) Read([]byte) (int, error) {
+	<-b.closed // 永不返回数据，直到测试收尾时 Close
+	return 0, io.EOF
+}
+
+func (b *webKimiSilentBody) Close() error { close(b.closed); return nil }
+
+func webKimiSilentResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/connect+json"}},
+		Body:       &webKimiSilentBody{closed: make(chan struct{})},
+	}
+}
+
+// newWebKimiStreamingTestService 构造带可配超时阈值的 service。interval/keepalive
+// 取秒为单位的配置项，测试里给极小值以在毫秒级触发，避免依赖真实 180s 默认值。
+func newWebKimiStreamingTestService(intervalSeconds, keepaliveSeconds int) *OpenAIGatewayService {
+	return &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+			Gateway: config.GatewayConfig{
+				StreamDataIntervalTimeout: intervalSeconds,
+				StreamKeepaliveInterval:   keepaliveSeconds,
+			},
+		},
+	}
+}
+
+// TestForwardWebKimi_StreamingUpstreamSilentHitsIntervalTimeout 整改1 核心用例：
+// 上游开流后不吐任何数据，流式回程必须在 interval 内退出，而不是永久阻塞。
+// 修复前此用例会挂到 go test 超时。
+func TestForwardWebKimi_StreamingUpstreamSilentHitsIntervalTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := newLockedResponseRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := webKimiInboundBody("kimi-k3")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := newWebKimiStreamingTestService(1, 0)
+	account := webKimiTestAccount(8991, nil)
+
+	done := make(chan struct{})
+	var (
+		result *OpenAIForwardResult
+		err    error
+	)
+	go func() {
+		defer close(done)
+		result, err = svc.handleWebKimiStreamingResponse(
+			context.Background(), webKimiSilentResponse(), c, account, "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("streaming response must terminate on stream data interval timeout; it blocked forever")
+	}
+
+	require.Error(t, err, "silent upstream must surface an error, not a fake success")
+	require.ErrorIs(t, err, errWebStreamIdleTimeout)
+	require.Nil(t, result)
+	// 未写出任何帧时不得伪造正常终止帧。
+	require.NotContains(t, recorder.String(), "data: [DONE]")
+}
+
+// TestForwardWebKimi_StreamingReadFailureRegistersOpsUpstreamContext 整改4：
+// 流式读失败必须登记 ops 上游上下文（此前三字段全空，attempt 级遥测丢失）。
+// 断言 platform / account / proxy 归属与 kind 均落库。
+func TestForwardWebKimi_StreamingReadFailureRegistersOpsUpstreamContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := webKimiInboundBody("kimi-k3")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := newWebKimiStreamingTestService(1, 0)
+	account := webKimiTestAccount(8992, nil)
+
+	_, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), webKimiSilentResponse(), c, account, "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
+	require.Error(t, err)
+
+	// upstream_errors：attempt 级遥测必须落库。
+	raw, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "stream read failure must record an upstream attempt event")
+	events := raw.([]*OpsUpstreamErrorEvent)
+	require.Len(t, events, 1)
+	ev := events[0]
+	require.Equal(t, "stream_read_error", ev.Kind)
+	require.Equal(t, PlatformKimi, ev.Platform)
+	require.Equal(t, account.ID, ev.AccountID)
+	require.Equal(t, account.Name, ev.AccountName)
+	require.NotEmpty(t, ev.ProxyName, "proxy attribution must be snapshotted even for direct routes")
+
+	// upstream_error_message：此前为空，排障时看不到任何线索。
+	msg, ok := c.Get(OpsUpstreamErrorMessageKey)
+	require.True(t, ok, "upstream_error_message must be populated")
+	require.NotEmpty(t, msg.(string))
+}
+
+// TestForwardWebKimi_StreamingProducesNonZeroEstimatedTokens 整改3：
+// Connect envelope 流内无 usage 字段，流式此前恒返回零 token，token 计费模式下
+// 真实零计费。断言流式与非流式同口径产出非零 usage。
+func TestForwardWebKimi_StreamingProducesNonZeroEstimatedTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := webKimiInboundBody("kimi-k3")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := newWebKimiStreamingTestService(0, 0)
+	account := webKimiTestAccount(8993, nil)
+
+	result, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), webKimiStreamResponse(), c, account, "kimi-k3", "k3", time.Now(),
+		"请用一句话解释什么是 goroutine 泄漏", webResponseModeChat)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 上游流内无 usage：两个方向都必须由 estimateWebUsage 兜底为非零，
+	// 否则单价×0 → 扣费门禁把整笔请求拦下（真实零计费）。
+	require.Greater(t, result.Usage.InputTokens, 0, "streaming input tokens must be estimated, not zero")
+	require.Greater(t, result.Usage.OutputTokens, 0, "streaming output tokens must be estimated, not zero")
+	// 输出 token 来自聚合正文 "hi there"（2 个 ASCII 词）。
+	require.Equal(t, estimateTokenCount("hi there"), result.Usage.OutputTokens)
+
+	// 终帧必须携带 usage，客户端才能观测到用量。
+	require.Contains(t, recorder.Body.String(), `"usage"`)
+}
+
+// TestForwardWebKimi_StreamingUsageMatchesNonStreamingSameCensus 整改3 口径一致性：
+// 同一份上游流，流式与非流式的估算结果必须一致（避免两条路径口径漂移导致
+// 同类请求计费不同）。
+func TestForwardWebKimi_StreamingUsageMatchesNonStreamingSameCensus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const prompt = "hello world"
+
+	streamRecorder := httptest.NewRecorder()
+	streamCtx, _ := gin.CreateTestContext(streamRecorder)
+	body := webKimiInboundBody("kimi-k3")
+	streamCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	svc := newWebKimiStreamingTestService(0, 0)
+	account := webKimiTestAccount(8994, nil)
+	streamResult, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), webKimiStreamResponse(), streamCtx, account, "kimi-k3", "k3", time.Now(), prompt, webResponseModeChat)
+	require.NoError(t, err)
+
+	nonStreamRecorder := httptest.NewRecorder()
+	nonStreamCtx, _ := gin.CreateTestContext(nonStreamRecorder)
+	nonStreamCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	nonStreamResult, err := svc.handleWebKimiNonStreamingResponse(
+		context.Background(), webKimiStreamResponse(), nonStreamCtx, account, "kimi-k3", "k3", time.Now(), prompt, webResponseModeChat)
+	require.NoError(t, err)
+
+	require.Equal(t, nonStreamResult.Usage.InputTokens, streamResult.Usage.InputTokens)
+	require.Equal(t, nonStreamResult.Usage.OutputTokens, streamResult.Usage.OutputTokens)
+}
+
+// TestForwardWebKimi_StreamingKeepaliveBeforeFirstFrame 整改1 keepalive：
+// 首帧前的静默期必须向下游发 SSE 注释保活帧，防住 Cloudflare Tunnel / 反代
+// 按空闲断开连接；且保活帧必须是 SSE 注释而非 data 帧（不污染 TTFT 与消息序列）。
+func TestForwardWebKimi_StreamingKeepaliveBeforeFirstFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	// 用带锁 recorder：保活帧由转发 goroutine 写出，本用例在测试 goroutine 里
+	// 轮询读取，httptest.ResponseRecorder 的 bytes.Buffer 非并发安全。
+	recorder := newLockedResponseRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := webKimiInboundBody("kimi-k3")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := newWebKimiStreamingTestService(5, 1)
+	account := webKimiTestAccount(8995, nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = svc.handleWebKimiStreamingResponse(
+			context.Background(), webKimiSilentResponse(), c, account, "kimi-k3", "k3", time.Now(), "hi", webResponseModeChat)
+	}()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(recorder.String(), ": \n")
+	}, 10*time.Second, 20*time.Millisecond, "a silent upstream must trigger downstream keepalive before the first frame")
+	<-done
+
+	// 保活帧不得是 data 帧——否则会被客户端解析成 assistant 内容。
+	require.NotContains(t, recorder.String(), "data: ")
+}
+
+// lockedResponseRecorder 是并发安全的 gin.ResponseWriter：转发 goroutine 写、
+// 测试 goroutine 轮询读，两者用互斥量隔开。
+type lockedResponseRecorder struct {
+	mu     sync.Mutex
+	header http.Header
+	body   bytes.Buffer
+	code   int
+}
+
+func newLockedResponseRecorder() *lockedResponseRecorder {
+	return &lockedResponseRecorder{header: http.Header{}}
+}
+
+func (r *lockedResponseRecorder) Header() http.Header { return r.header }
+
+func (r *lockedResponseRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.code = code
+}
+
+func (r *lockedResponseRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.Write(p)
+}
+
+func (r *lockedResponseRecorder) WriteString(s string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.WriteString(s)
+}
+
+func (r *lockedResponseRecorder) Flush() {}
+
+func (r *lockedResponseRecorder) String() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.String()
+}
+
+// TestForwardWebKimi_StreamingClientDisconnectStopsWritingAndDrains 整改2：
+// 客户端断开后不得继续向下游写，但仍须把已产生的 usage 带回结果并标记
+// ClientDisconnect——响应已提交、上游已真实消耗额度，此时丢弃 usage 即平台漏记。
+func TestForwardWebKimi_StreamingClientDisconnectStopsWritingAndDrains(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := &disconnectAfterFirstFrameRecorder{header: http.Header{}}
+	c, _ := gin.CreateTestContext(recorder)
+	body := webKimiInboundBody("kimi-k3")
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+
+	svc := newWebKimiStreamingTestService(0, 0)
+	account := webKimiTestAccount(8996, nil)
+
+	result, err := svc.handleWebKimiStreamingResponse(
+		context.Background(), webKimiStreamResponse(), c, account, "kimi-k3", "k3", time.Now(), "hello", webResponseModeChat)
+	require.NoError(t, err, "client disconnect must not be surfaced as a forward error")
+	require.NotNil(t, result)
+	require.True(t, recorder.disconnected, "test precondition: the client writer must have failed")
+	require.True(t, result.ClientDisconnect, "result must flag client disconnect so the handler still submits usage")
+	// 断开前已收到上游正文，估算 usage 必须非零——否则这次请求白烧上游额度。
+	require.Greater(t, result.Usage.OutputTokens, 0, "usage collected before disconnect must still be billed")
+}
+
+// disconnectAfterFirstFrameRecorder 在首帧写出后即返回写错误，模拟客户端断开。
+type disconnectAfterFirstFrameRecorder struct {
+	header       http.Header
+	writes       int
+	body         bytes.Buffer
+	disconnected bool
+}
+
+func (r *disconnectAfterFirstFrameRecorder) Header() http.Header { return r.header }
+func (r *disconnectAfterFirstFrameRecorder) WriteHeader(int)     {}
+
+func (r *disconnectAfterFirstFrameRecorder) Write(p []byte) (int, error) {
+	r.writes++
+	if r.writes > 1 {
+		r.disconnected = true
+		return 0, fmt.Errorf("client gone")
+	}
+	return r.body.Write(p)
+}
+
+func (r *disconnectAfterFirstFrameRecorder) WriteString(s string) (int, error) {
+	return r.Write([]byte(s))
+}
+
+func (r *disconnectAfterFirstFrameRecorder) Flush() {}

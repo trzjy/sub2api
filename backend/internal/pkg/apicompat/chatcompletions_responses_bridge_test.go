@@ -104,6 +104,8 @@ func TestResponsesInputToChatMessages_LeadingDeveloperRolesMergeIntoOneSystem(t 
 
 	messages, err := responsesInputToChatMessages("", input)
 	require.NoError(t, err)
+	// Both spellings map to system, and system messages are only legal at the
+	// head of the conversation, so they collapse into the leading one.
 	require.Len(t, messages, 1)
 
 	assert.Equal(t, []string{"system"}, chatMessageRoles(messages))
@@ -127,24 +129,6 @@ func TestResponsesToChatCompletionsRequest_InstructionsAndInputDeveloperRole(t *
 	assert.Equal(t, []string{"system", "user"}, chatMessageRoles(out.Messages))
 	assert.JSONEq(t, `"Use concise answers.\n\nPrefer JSON."`, string(out.Messages[0].Content))
 	assert.JSONEq(t, `"Hello"`, string(out.Messages[1].Content))
-}
-
-func TestResponsesInputToChatMessages_MidConversationDeveloperBecomesUser(t *testing.T) {
-	input := json.RawMessage(`[
-		{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
-		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},
-		{"type":"message","role":"developer","content":[{"type":"input_text","text":"<model_switch> switched model"}]},
-		{"type":"message","role":"system","content":[{"type":"input_text","text":"be terse"}]},
-		{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
-	]`)
-
-	messages, err := responsesInputToChatMessages("", input)
-	require.NoError(t, err)
-	require.Len(t, messages, 5)
-
-	assert.Equal(t, []string{"user", "assistant", "user", "user", "user"}, chatMessageRoles(messages))
-	assert.JSONEq(t, `"<model_switch> switched model"`, string(messages[2].Content))
-	assert.JSONEq(t, `"be terse"`, string(messages[3].Content))
 }
 
 func TestResponsesToChatCompletionsRequest_TextFormatJsonObject(t *testing.T) {

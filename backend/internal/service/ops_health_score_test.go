@@ -203,8 +203,8 @@ func TestComputeDashboardHealthScore_Comprehensive(t *testing.T) {
 					MemoryUsagePercent: float64Ptr(30),
 				},
 			},
-			wantMin: 84,
-			wantMax: 85,
+			wantMin: 89,
+			wantMax: 90,
 		},
 		{
 			name: "combined failures - business healthy + infra degraded",
@@ -292,6 +292,8 @@ func TestComputeBusinessHealth(t *testing.T) {
 			wantMax: 100,
 		},
 		{
+			// 5% sits in the ramp segment (good=1%, bad=10%): errorScore=68.89,
+			// so business = 68.89*0.5 + 100*0.5 = 84.44.
 			name: "error rate 5%",
 			overview: &OpsDashboardOverview{
 				SLA:               0.95,
@@ -299,10 +301,12 @@ func TestComputeBusinessHealth(t *testing.T) {
 				UpstreamErrorRate: 0,
 				Duration:          OpsPercentiles{P99: intPtr(500)},
 			},
-			wantMin: 77,
-			wantMax: 78,
+			wantMin: 84,
+			wantMax: 85,
 		},
 		{
+			// 2000ms sits in the ramp segment (good=1000ms, bad=3000ms):
+			// ttftScore=65, so business = 100*0.5 + 65*0.5 = 82.5.
 			name: "TTFT boundary 2s",
 			overview: &OpsDashboardOverview{
 				SLA:               0.99,
@@ -310,8 +314,8 @@ func TestComputeBusinessHealth(t *testing.T) {
 				UpstreamErrorRate: 0,
 				TTFT:              OpsPercentiles{P99: intPtr(2000)},
 			},
-			wantMin: 75,
-			wantMax: 75,
+			wantMin: 82,
+			wantMax: 83,
 		},
 		{
 			name: "upstream error dominates",
@@ -321,8 +325,8 @@ func TestComputeBusinessHealth(t *testing.T) {
 				UpstreamErrorRate: 0.03,
 				Duration:          OpsPercentiles{P99: intPtr(500)},
 			},
-			wantMin: 88,
-			wantMax: 90,
+			wantMin: 92,
+			wantMax: 93,
 		},
 	}
 

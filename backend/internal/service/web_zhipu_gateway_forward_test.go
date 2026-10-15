@@ -646,3 +646,116 @@ func TestForwardWebZhipu_RefreshOn401(t *testing.T) {
 		require.NotContains(t, recorder.Body.String(), "old-refresh")
 	})
 }
+
+// ── 整改1/4 的回归锚点 ────────────────────────────────────────────────────
+
+// webSilentBody 是「开了 200 流但永不吐数据」的响应体：Read 阻塞至 Close。
+// 整改前 zhipu 流式回程是裸 bufio.Scanner 循环，遇到这种上游会永久阻塞。
+type webSilentBody struct{ closed chan struct{} }
+
+func (b *webSilentBody) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *webSilentBody) Close() error { close(b.closed); return nil }
+
+func webSilentSSEResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       &webSilentBody{closed: make(chan struct{})},
+	}
+}
+
+// newWebStreamingTestService 构造带可配流超时的 service（三平台测试共用）。
+func newWebStreamingTestService(intervalSeconds, keepaliveSeconds int) *OpenAIGatewayService {
+	return &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+			Gateway: config.GatewayConfig{
+				StreamDataIntervalTimeout: intervalSeconds,
+				StreamKeepaliveInterval:   keepaliveSeconds,
+			},
+		},
+	}
+}
+
+// TestForwardWebZhipu_StreamingUpstreamSilentHitsIntervalTimeout 整改1：
+// 上游开流不吐数据时，zhipu 流式回程必须在 interval 内退出，不得永久阻塞。
+func TestForwardWebZhipu_StreamingUpstreamSilentHitsIntervalTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webZhipuInboundBody("glm-5.3-flash")))
+	svc := newWebStreamingTestService(1, 0)
+	account := webZhipuTestAccount(9030, nil)
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = svc.handleWebZhipuStreamingResponse(
+			context.Background(), webSilentSSEResponse(), c, account, "glm-5.3-flash", "glm-5.3-flash", time.Now(), webResponseModeChat)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("zhipu streaming must terminate on stream data interval timeout; it blocked forever")
+	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, errWebStreamIdleTimeout)
+	require.NotContains(t, recorder.Body.String(), "data: [DONE]", "no normal terminal frame on a silent upstream")
+}
+
+// TestForwardWebZhipu_StreamingReadFailureRegistersOpsUpstreamContext 整改4：
+// zhipu 流式读失败必须登记 attempt 级 ops 遥测（此前三字段全空）。
+func TestForwardWebZhipu_StreamingReadFailureRegistersOpsUpstreamContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webZhipuInboundBody("glm-5.3-flash")))
+	svc := newWebStreamingTestService(1, 0)
+	account := webZhipuTestAccount(9031, nil)
+
+	_, err := svc.handleWebZhipuStreamingResponse(
+		context.Background(), webSilentSSEResponse(), c, account, "glm-5.3-flash", "glm-5.3-flash", time.Now(), webResponseModeChat)
+	require.Error(t, err)
+
+	raw, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "zhipu stream read failure must record an upstream attempt event")
+	events := raw.([]*OpsUpstreamErrorEvent)
+	require.Len(t, events, 1)
+	require.Equal(t, "stream_read_error", events[0].Kind)
+	require.Equal(t, account.ID, events[0].AccountID)
+	require.NotEmpty(t, events[0].Platform)
+
+	msg, ok := c.Get(OpsUpstreamErrorMessageKey)
+	require.True(t, ok, "upstream_error_message must be populated")
+	require.NotEmpty(t, msg.(string))
+}
+
+// TestForwardWebZhipu_StreamingNormalRelayStillWorks 整改1 反证：接入守卫后
+// 正常 SSE 流必须逐帧原样转发、终帧与 [DONE] 不得丢失（防止兜底逻辑吃掉正常帧）。
+func TestForwardWebZhipu_StreamingNormalRelayStillWorks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(webZhipuInboundBody("glm-5.3-flash")))
+	svc := newWebStreamingTestService(5, 5)
+	account := webZhipuTestAccount(9032, nil)
+
+	result, err := svc.handleWebZhipuStreamingResponse(
+		context.Background(), webZhipuSSECompletionResponse(), c, account, "glm-5.3-flash", "glm-5.3-flash", time.Now(), webResponseModeChat)
+	require.NoError(t, err)
+	require.True(t, result.Stream)
+
+	out := recorder.Body.String()
+	// text 元素为累积全文形态，出站只发增量。
+	require.Contains(t, out, `"content":"hello"`)
+	require.Contains(t, out, `"content":" world"`)
+	require.Contains(t, out, "data: [DONE]")
+	// 上游真带 usage 时不得被估算覆盖。
+	require.NotContains(t, out, ": \n", "no keepalive should be emitted once frames are flowing")
+}

@@ -13,6 +13,15 @@ import (
 func assertChatInvariants(t *testing.T, messages []ChatMessage) {
 	t.Helper()
 	for i, m := range messages {
+		// A system message may only sit inside the leading run. Strict chat
+		// upstreams (the vLLM behind the kimi accounts) answer anything else
+		// with 400 "System message must be at the beginning.".
+		if m.Role == "system" {
+			for j := 0; j < i; j++ {
+				require.Equalf(t, "system", messages[j].Role,
+					"system message at %d follows a %s message at %d", i, messages[j].Role, j)
+			}
+		}
 		// Every assistant tool_calls message must be immediately followed by one
 		// tool message per tool_call_id, in order.
 		if len(m.ToolCalls) > 0 {

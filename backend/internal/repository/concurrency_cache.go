@@ -48,14 +48,23 @@ const (
 	// 账号级等待队列计数器格式: wait:account:{accountID}
 	accountWaitKeyPrefix = "wait:account:"
 
-	// 默认槽位过期时间（分钟），可通过配置覆盖
-	defaultSlotTTLMinutes = 15
+	// 并发槽位过期时间的兜底下限（分钟）。
+	//
+	// 生产路径不会走到这里：gateway.concurrency_slot_ttl_minutes 恒 > 0，
+	// 因为 config.Validate()（internal/config/config.go）在该值 <= 0 时直接返回
+	// 错误，进程启动 fail-fast，而 viper.SetDefault 已把它设为 30。
+	//
+	// 保留它只是因为 NewConcurrencyCache 是导出构造函数，可能被测试或未来的调用方
+	// 以 0 / 负数直接调用。若没有这个下限，slotTTLSeconds 会变成 0，Lua 里的
+	// expireBefore = now - 0 会立刻清空该键的全部槽位，把并发上限静默清零。
+	// 取值与 config.SetDefault 的 30 保持一致。
+	concurrencySlotTTLFallbackMinutes = 30
 
 	// 活跃索引用来替代后台任务全量 SCAN 槽位键。
 	// member 是账号/用户 ID，score 是“预计仍需关注到”的 Redis Unix 秒时间戳。
 	accountActiveIndexKey = "concurrency:account:active_index" // ZSET member=accountID, score=expireAtUnixSeconds
 	userActiveIndexKey    = "concurrency:user:active_index"    // ZSET member=userID, score=expireAtUnixSeconds
-	grpUserActiveIndexKey = "concurrency:grpuser:active_index"  // ZSET member=groupID:userID, score=expireAtUnixSeconds
+	grpUserActiveIndexKey = "concurrency:grpuser:active_index" // ZSET member=groupID:userID, score=expireAtUnixSeconds
 
 	// 后台清理只按批处理索引候选，避免单次任务占用 Redis 太久。
 	activeIndexCleanupBatchSize  = 1000
@@ -419,11 +428,11 @@ type concurrencyCache struct {
 }
 
 // NewConcurrencyCache 创建并发控制缓存
-// slotTTLMinutes: 槽位过期时间（分钟），0 或负数使用默认值 15 分钟
+// slotTTLMinutes: 槽位过期时间（分钟），0 或负数使用 concurrencySlotTTLFallbackMinutes（30）
 // waitQueueTTLSeconds: 等待队列过期时间（秒），0 或负数使用 slot TTL
 func NewConcurrencyCache(rdb *redis.Client, slotTTLMinutes int, waitQueueTTLSeconds int) service.ConcurrencyCache {
 	if slotTTLMinutes <= 0 {
-		slotTTLMinutes = defaultSlotTTLMinutes
+		slotTTLMinutes = concurrencySlotTTLFallbackMinutes
 	}
 	if waitQueueTTLSeconds <= 0 {
 		waitQueueTTLSeconds = slotTTLMinutes * 60
@@ -1119,7 +1128,6 @@ func (c *concurrencyCache) DecrementUserGroupWaitCount(ctx context.Context, grou
 	}
 	return err
 }
-
 
 func (c *concurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []service.AccountWithConcurrency) (map[int64]*service.AccountLoadInfo, error) {
 	if len(accounts) == 0 {

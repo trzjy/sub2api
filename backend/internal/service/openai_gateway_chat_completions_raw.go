@@ -635,6 +635,58 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	}, nil
 }
 
+// recordAggregatedStreamUpstreamError 登记「非流式→流式转换聚合失败」的上游错误上下文。
+//
+// 这类错误发生在请求已触达上游之后，但收口层（writeChatCompletionsError /
+// writeAnthropicError / writeOpenAIResponsesFallbackError）全程只 c.JSON，从不写
+// 上游错误记录点。结果是该错误在 ops 里 phase=internal / error_owner=platform，
+// 与「从未选中账号」的选号失败混为一谈，无法归因到 provider。
+//
+// 这里显式登记上游错误消息与 attempt 事件，使 phase 归为 upstream、owner 归为
+// provider。不改写客户端可见响应体，也不触碰 MarkResponseCommitted 语义——
+// 登记发生在写响应之前，写响应函数仍照常标记已提交。
+//
+// 状态码：上游已回 200（强制流式聚合失败发生在响应体内），502 是平台对客户端的
+// 映射值，绝不写进 OpsUpstreamStatusCodeKey / attempt 的 upstream_status_code：
+//   - setOpsUpstreamError 传 0 —— 该函数只在 >0 时写状态键，于是这里只登记消息，
+//     不覆盖任何已登记的真实上游状态码（客户端侧视角由 status_code 承载）。
+//   - attempt 事件登记 resp.StatusCode（上游真实回包状态）；resp 不可用时留 0，
+//     由 applyOpsUpstreamErrorEvents 保持 entry.UpstreamStatusCode 为空，
+//     COALESCE 回落到客户端 status_code，而不是落进 429/529 与 upstream_excl
+//     的错误归属。合成 502 曾让 queryErrorCounts 把本行误判成上游 HTTP 失败。
+func recordAggregatedStreamUpstreamError(c *gin.Context, account *Account, resp *http.Response, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	message := sanitizeUpstreamErrorMessage(err.Error())
+	// 上游已回 200（强制流式聚合失败发生在响应体内），502 是平台对客户端的映射值，
+	// 仅作 attempt 事件的 kind/reason 标记，不覆盖真实上游语义。
+	setOpsUpstreamError(c, 0, message, "")
+	upstreamStatus := 0
+	if resp != nil {
+		upstreamStatus = resp.StatusCode
+	}
+	event := OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           PlatformOpenAI,
+		UpstreamStatusCode: upstreamStatus,
+		Kind:               "request_error",
+		Stage:              string(GatewayFailureStageInference),
+		Reason:             "aggregated_stream_failed",
+		Message:            message,
+	}
+	if account != nil {
+		event.Platform = account.Platform
+		event.AccountID = account.ID
+		event.AccountName = account.Name
+	}
+	if resp != nil {
+		event.UpstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
+	}
+	appendOpsUpstreamError(c, event)
+}
+
 // convertedChatCompletionsAsRawCC 是非流式客户端经非流式→流式转换后的响应尾段
 // （方案 §D4.2）：聚合强制流式上游的 CC SSE 为完整 chat.completion 响应后，
 // marshal 并复用 bufferRawChatCompletions 的既有尾段契约（observer.ObserveOpenAI /
@@ -660,6 +712,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsRawCC(
 		if isOpenAICNFirstByteTimeout(err) {
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
 		}
+		recordAggregatedStreamUpstreamError(c, account, resp, err)
 		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", err.Error())
 		return nil, err
 	}

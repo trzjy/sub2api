@@ -38,10 +38,28 @@ func init() {
 }
 
 // shouldConvertNonstreamToStream 报告该账号的非流式上游请求是否转换流式。
-// 仅非官方上游（池类/第三方中转，生产挂死集中地）参与转换；官方直连保持原行为。
+// 两类适用对象：
+//   - CodeBuddy：上游硬性只接受流式（出站改写 §2.5 规则 1 无条件置 stream=true，
+//     codebuddy_upstream.go:73），非流式必须在本地聚合。
+//   - 非官方上游（池类/第三方中转，生产挂死集中地）：官方直连保持原行为。
 func (s *OpenAIGatewayService) shouldConvertNonstreamToStream(account *Account) bool {
 	if s.cfg == nil || s.cfg.Gateway.NonstreamToStreamDisabled {
 		return false
+	}
+	// CodeBuddy 分支（上游强制流式），必须位于下方 AccountTypeAPIKey 类型门槛之前：
+	// codebuddy 账号以 OAuth 为主（生产 group 109 的直绑账号即 OAuth），若放在门槛
+	// 之后则永远进不来——非流式请求会以非流式预期去解析上游的 SSE 流，在
+	// bufferChatCompletionsAsAnthropic/readCCUpstreamJSONResponse 里对 "data: {...}"
+	// 跑 json.Unmarshal，报 "invalid character 'd' looking for beginning of value"
+	// 并回 502（生产实证 2026-10-16，request_id d8f59d51-407e-4b74-b71b-dc173fc1b67e）。
+	//
+	// 边界说明：分支只按 platform 收敛（account.IsCodeBuddy()），不放宽类型门槛，
+	// 因此非 codebuddy 的 OAuth/upstream 类型账号仍被下方门槛原样挡住——CN/other
+	// OAuth 账号行为与本分支存在与否逐字节一致。判定不看 base_url：codebuddy 上游
+	// 由站点表决定（account.go:1430 CodeBuddySite），不存在「官方直连可放行非流式」
+	// 的概念，故不适用下游的 isOfficialCNUpstreamBaseURL 排除。
+	if account.IsCodeBuddy() {
+		return true
 	}
 	if account == nil || account.Type != AccountTypeAPIKey {
 		return false

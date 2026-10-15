@@ -1062,6 +1062,14 @@ type GatewayConfig struct {
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// TextMaxBodySize limits endpoints that cannot carry inline image/video payloads.
 	TextMaxBodySize int64 `mapstructure:"text_max_body_size"`
+	// MaxOutputTokensCeiling 是网关准入的 max_tokens 硬上限（0/负数=用内置默认
+	// service.DefaultMaxOutputTokensCeiling）。超限在出站前返回 400，不再等上游
+	// 400→502（2026-10 事故：max_tokens=999999999 哨兵值，24h 603 条 502）。
+	MaxOutputTokensCeiling int64 `mapstructure:"max_output_tokens_ceiling"`
+	// ModelContextWindow 是 context 长度预检用的模型上下文窗口（0/负数=用内置默认
+	// service.DefaultModelContextWindow）。input 估算 + max_tokens 超过该值时
+	// 出站前返回 400；估算失败放行。
+	ModelContextWindow int64 `mapstructure:"model_context_window"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
 	UpstreamResponseReadMaxBytes int64 `mapstructure:"upstream_response_read_max_bytes"`
 	// 上游模型列表响应体读取上限（字节）
@@ -2791,6 +2799,11 @@ func setDefaults() {
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
 	viper.SetDefault("gateway.text_max_body_size", int64(32*1024*1024))
+	// 输出预算准入：max_tokens 硬上限与 context 预检窗口。取值依据见
+	// service.DefaultMaxOutputTokensCeiling / DefaultModelContextWindow 的注释
+	// （Claude Code CLI 真实默认 128000；事故模型 deepseek-v4 声明的 100 万 context）。
+	viper.SetDefault("gateway.max_output_tokens_ceiling", int64(131072))
+	viper.SetDefault("gateway.model_context_window", int64(1000000))
 	viper.SetDefault("gateway.upstream_response_read_max_bytes", DefaultUpstreamResponseReadMaxBytes)
 	viper.SetDefault("gateway.models_list_read_max_bytes", DefaultModelsListReadMaxBytes)
 	viper.SetDefault("gateway.proxy_probe_response_read_max_bytes", int64(1024*1024))

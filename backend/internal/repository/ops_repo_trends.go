@@ -448,15 +448,18 @@ func (r *opsRepository) GetErrorTrend(ctx context.Context, filter *service.OpsDa
 	where, args, _ := buildErrorWhere(filter, start, end, 1)
 	bucketExpr := opsBucketExprForError(bucketSeconds)
 
+	// 上游三分子走共享谓词（service 包的 OpsUpstreamError*FilterSQLTemplate）：
+	// 必须带 `status_code >= 400` 最终状态门控，否则 recovered 行（上游失败但最终
+	// 成功）会被算成上游错误。与 raw 仪表盘 / 1min 预聚合 / hourly 表逐字同源。
 	q := `
 SELECT
   ` + bucketExpr + ` AS bucket,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400) AS error_total,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited) AS business_limited,
-  COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited) AS error_sla,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)) AS upstream_excl,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 429) AS upstream_429,
-  COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 529) AS upstream_529
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstreamErrorFilterFinalStatusGate("status_code") + `) AS error_total,
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstreamErrorFilterFinalStatusGate("status_code") + ` AND is_business_limited) AS business_limited,
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstreamErrorFilterFinalStatusGate("status_code") + ` AND NOT is_business_limited) AS error_sla,
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstreamErrorFilterSQL("status_code") + `) AS upstream_excl,
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstream429FilterFor("status_code") + `) AS upstream_429,
+  COUNT(*) FILTER (WHERE ` + service.OpsUpstream529FilterFor("status_code") + `) AS upstream_529
 FROM ops_error_logs
 ` + where + `
 GROUP BY 1
