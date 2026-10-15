@@ -8,7 +8,7 @@ import (
 )
 
 func TestOpenCodeGoPlatformMigration(t *testing.T) {
-	content, err := FS.ReadFile("272_opencode_go_platform.sql")
+	content, err := FS.ReadFile("281_opencode_go_platform.sql")
 	require.NoError(t, err)
 
 	sql := strings.Join(strings.Fields(string(content)), " ")
