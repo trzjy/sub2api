@@ -183,6 +183,15 @@ func TestDetectModelPlatform(t *testing.T) {
 		{name: "abab7 legacy", model: "abab7-chat-preview", platform: PlatformMiniMax, ok: true},
 		{name: "abab unrelated namespace", model: "abab-other", ok: false},
 		{name: "unknown k3 alias", model: "k3-preview", ok: false},
+		// space-bunny 是 CodeBuddy 平台的公开模型 ID，无平台词根前缀，只能精确识别
+		// （方案 composite-codebuddy-support-plan.md §改动清单 2，用户裁定「必须自动生效」）。
+		{name: "space-bunny", model: "space-bunny", platform: PlatformCodeBuddy, ok: true},
+		{name: "space-bunny case insensitive", model: "SPACE-BUNNY", platform: PlatformCodeBuddy, ok: true},
+		{name: "space-bunny models prefix", model: "models/space-bunny", platform: PlatformCodeBuddy, ok: true},
+		// 刻意不做前缀通配：下列近似 ID 必须仍不可检测，避免误吞未知模型。
+		{name: "space-bunner near miss", model: "space-bunner", ok: false},
+		{name: "space-bunny variant suffix", model: "space-bunny-2", ok: false},
+		{name: "space-bunny prefix only", model: "space-", ok: false},
 		{name: "unknown", model: "llama-4-maverick", ok: false},
 	}
 

@@ -347,7 +347,11 @@ func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, m
 	return compositeTargetPlatformAllowed(c, apiKey, model, gatewayCore,
 		service.PlatformOpenAI, service.PlatformGrok,
 		service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax,
-		service.PlatformMuse, service.PlatformOther)
+		service.PlatformMuse, service.PlatformOther,
+		// composite 解析到 codebuddy 目标（space-bunny 经 DetectModelPlatform 自动生效）
+		// 与独立 codebuddy 分组同语义可达：codebuddy 账号走 OpenAI 兼容出站，
+		// 且 allowOpenAICompatibleMessagesDispatch 已对其豁免（openai_gateway_handler.go:330）。
+		service.PlatformCodeBuddy)
 }
 
 // isResponsesWebSocketCompositePlatform 限定 composite 分组在 Responses WebSocket

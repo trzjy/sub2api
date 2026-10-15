@@ -156,6 +156,11 @@ func DetectModelPlatform(model string) (string, bool) {
 		strings.HasPrefix(normalized, "abab6"),
 		strings.HasPrefix(normalized, "abab7"):
 		return PlatformMiniMax, true
+	case normalized == "space-bunny":
+		// CodeBuddy 的公开模型 ID 无平台词根前缀（不同于 anthropic-/gpt-/kimi- 等），
+		// 只能精确识别。刻意不用前缀通配，避免误吞未知模型；codebuddy 自身的
+		// hy3 / claude-fable 等模型不经本检测器（走归属层或显式路由）。
+		return PlatformCodeBuddy, true
 	default:
 		return "", false
 	}

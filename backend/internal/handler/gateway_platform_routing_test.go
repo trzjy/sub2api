@@ -59,3 +59,45 @@ func TestOpenAICompatibleTextTargetAllowedAdmitsMusePlatform(t *testing.T) {
 	require.True(t, openAICompatibleTextTargetAllowed(c, apiKey, "muse-spark-1.3", nil),
 		"composite 解析到 muse 目标应放行")
 }
+
+// composite 分组解析到 codebuddy 目标（space-bunny 经 DetectModelPlatform 自动生效）时，
+// openAICompatibleTextTargetAllowed 应放行——否则 /v1/chat/completions、/v1/responses、
+// count_tokens 等 OpenAI 兼容文本入口会对 space-bunny 恒 400。
+func TestOpenAICompatibleTextTargetAllowedAdmitsCodeBuddyPlatform(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	apiKey := &service.APIKey{Group: &service.Group{
+		ID:       94,
+		Platform: service.PlatformComposite,
+	}}
+	ctx := service.WithCompositeRouteDecision(context.Background(), service.CompositeRouteDecision{
+		Matched:        true,
+		TargetPlatform: service.PlatformCodeBuddy,
+	})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil).WithContext(ctx)
+
+	require.True(t, openAICompatibleTextTargetAllowed(c, apiKey, "space-bunny", nil),
+		"composite 解析到 codebuddy 目标应放行")
+}
+
+// composite 聚合模型列表须遍历 codebuddy 平台，否则 space-bunny 不出现在 /v1/models
+// （codebuddy 账号无 model_mapping，模型来自上游目录快照，合并点在
+// GetAvailableModels 的 platform == PlatformCodeBuddy 分支）。
+func TestCompositeAvailableModelsIncludesCodeBuddySnapshotModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(96)
+	repo := &codeBuddyModelsHandlerRepoStub{gatewayModelsAccountRepoStub: gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {
+				newCodeBuddySnapshotAccount(300, map[string]service.UpstreamModelMetadata{
+					"space-bunny": {ID: "space-bunny"},
+				}),
+			},
+		},
+	}}
+	h := newGatewayModelsHandlerForTest(repo)
+
+	models := h.compositeAvailableModels(context.Background(), &groupID)
+	require.Contains(t, models, "space-bunny",
+		"composite 聚合应暴露 codebuddy 账号快照模型（切片须覆盖 codebuddy）")
+}

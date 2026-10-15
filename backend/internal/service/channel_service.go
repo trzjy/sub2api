@@ -355,9 +355,15 @@ func populateChannelCache(channels []Channel, groupPlatforms map[int64]string) *
 // isPlatformPricingMatch 判断定价条目的平台是否匹配分组平台。
 // Concrete platforms stay isolated; composite groups may carry concrete-provider
 // pricing rows that are selected by the request's resolved target platform.
+//
+// codebuddy 单列而非并入 isConcreteRequestPlatform：后者是归属层
+// isCompositeOwnableAccountPlatform 的推导基座，加入 codebuddy 会让 codebuddy 账号
+// 经显式 model_mapping 抢先 claim 别平台模型（用户裁定「codebuddy 不支持 kimi-k3」
+// 依赖该边界）。定价面无此语义，且 matchingPlatforms(composite) 早已含 codebuddy——
+// 此处不放行会造成「查得到映射、查不到定价」的不一致。
 func isPlatformPricingMatch(groupPlatform, pricingPlatform string) bool {
 	if groupPlatform == PlatformComposite {
-		return isConcreteRequestPlatform(pricingPlatform)
+		return isConcreteRequestPlatform(pricingPlatform) || pricingPlatform == PlatformCodeBuddy
 	}
 	return groupPlatform == pricingPlatform
 }
