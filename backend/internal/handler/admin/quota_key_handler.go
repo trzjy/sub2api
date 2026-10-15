@@ -137,10 +137,14 @@ type quotaKeyAccountItem struct {
 // 不嵌套完整 QuotaKey 聚合账号列表以外的字段，也不回放 code 原文。
 type quotaKeyDetailResponse struct {
 	*service.QuotaKeyStatus
-	Accounts []quotaKeyAccountItem `json:"accounts"`
-	Total    int64                 `json:"total"`
-	Page     int                   `json:"page"`
-	PageSize int                   `json:"page_size"`
+	// AccountCount = 未软删归属账号总数；WorkingCount = 其中可调度（schedulable+active）
+	// 数。用户验收口径（2026-10-15）：详情弹窗"账号数/可用账号数"必须真实反映，缺省 0 误导。
+	AccountCount int64                 `json:"account_count"`
+	WorkingCount int64                 `json:"working_count"`
+	Accounts     []quotaKeyAccountItem `json:"accounts"`
+	Total        int64                 `json:"total"`
+	Page         int                   `json:"page"`
+	PageSize     int                   `json:"page_size"`
 }
 
 // Get 读取单个激活码详情（脱敏 status + 账号分页）。
@@ -176,8 +180,19 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 			CreatedAt: acc.CreatedAt,
 		})
 	}
+	accountCount, workingCount := int64(0), int64(0)
+	for _, acc := range accounts {
+		if acc.DeletedAt.IsZero() {
+			accountCount++
+			if acc.Schedulable && acc.Status == "active" {
+				workingCount++
+			}
+		}
+	}
 	response.Success(c, quotaKeyDetailResponse{
 		QuotaKeyStatus: status,
+		AccountCount:   accountCount,
+		WorkingCount:   workingCount,
 		Accounts:       items,
 		Total:          total,
 		Page:           page,
