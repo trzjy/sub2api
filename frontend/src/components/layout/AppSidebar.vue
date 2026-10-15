@@ -780,6 +780,9 @@ const adminNavItems = computed((): NavItem[] => {
     },
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true },
     { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
+    // Cursor 站点渠道激活码管理入口（/admin/quota-keys）。
+    // 复用 KeyIcon 与管理菜单样式；激活码为高级运营功能，简单模式下隐藏。
+    { path: '/admin/quota-keys', label: '激活码', icon: KeyIcon, hideInSimpleMode: true },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/promo-intel', label: t('nav.promoIntel'), icon: GiftIcon, hideInSimpleMode: true },

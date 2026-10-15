@@ -864,13 +864,21 @@ func ProvideQuotaKeySweeper(repo QuotaKeyRepository, opsRepo OpsRepository, entC
 	return svc
 }
 
-// ProvideQuotaKeyReconciler 构造并启动周期 reconciler（C9 补池持久源，方案 §3.1 / §6 C9）。
-// 进程崩溃 / 漏触发后，重新发现 working_count < 15 的激活码并调 PullAccounts 补池；
-// 串行逐 key 拉号（每 key 独立 advisory 锁，PullAccounts 单批即返回，不占死 worker）。
-// 直接复用 QuotaKeyService.PullAccounts（不新造计数查询 / 不新造锁），扫描走
-// QuotaKeyRepository.ListEligibleForRefresh（已存在）。
+// ProvideQuotaKeyReconciler 构造并启动周期 reconciler（补池持久源，方案 §13）。
+// 每轮枚举允许模型 M → 比对水位 → 低于阈值按差额调 PullAccountsForModel 补池：
+// 复用 QuotaKeyService 的拉号状态机（advisory 互斥域 + ≤15 停限 + §13.3 分组挂载），
+// reconciler 不新造计数查询 / 不新造锁 / 不并行拉号。
 func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository) *QuotaKeyReconciler {
 	svc := NewQuotaKeyReconciler(repo, puller, opsRepo)
+	// C12-v2：在既有装配点一行注入反向引用，使软删提交后（DeleteWithAccounts）能唤醒
+	// reconciler 重判水位。不新造机制、不并行拉号。
+	puller.SetReconciler(svc)
+	// F1：注入生产用模型水位提供方（C11 接入点），使 reconciler 枚举模型→比对水位→
+	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
+	// 不新增装配入参、不新造机制（装配点保持既有 3 参签名，wire_gen 无需改动）。
+	if puller != nil && puller.client != nil {
+		svc.SetModelWaterProvider(NewQuotaKeyModelWater(puller.client))
+	}
 	svc.Start()
 	return svc
 }

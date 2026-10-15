@@ -10,10 +10,12 @@ import (
 	"hash/fnv"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
+	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -85,6 +87,29 @@ type UpstreamPullResult struct {
 // ErrUpstreamNotConnected 是生产默认占位客户端返回的"未接入上游"错误。
 var ErrUpstreamNotConnected = errors.New("quota key upstream not connected")
 
+// 注：上游冷却哨兵 ErrUpstreamCooldown 定义于 cursor_upstream_client.go（§13.2 F-b / R4 消化）：
+// 上游返回冷却时，PullAccounts 在落库事务内写 last_refresh_error + last_refresh_at（唯独豁免
+// exhausted），并以该哨兵（errors.Is 可识别）返回触发方，使其执行"冷却即停"。
+
+// ErrQuotaKeyModelNoCoverage 表示触发补拉所携带的模型 M 无任何分组白名单覆盖：
+// 失败关闭（fail-closed），不静默落成裸号（§13.3）。触发方据此记录告警。
+var ErrQuotaKeyModelNoCoverage = errors.New("quota key model M has no covering group")
+
+// ErrQuotaKeyMountFailed 表示上游成功、但本地挂载/落库失败（shareai 非幂等，上游发号
+// 不可回滚）：本地事务回滚（号不入库），触发方据此记录"上游可能已被消耗一次"告警（§13.3 F-c）。
+var ErrQuotaKeyMountFailed = errors.New("quota key account mount failed after upstream success")
+
+// errInsertFailureRollback 是 pull 内部在【多账号部分插入成功之后】遇到某账号落库失败
+// 时返回的私有哨兵：它仅用于信号化"请回滚当前容量事务、并在事后用独立事务补写标记"，
+// 不直接上抛给触发方（真正上抛的是随后由 writeInsertFailureMarker + ErrQuotaKeyMountFailed
+// 重新构造的错误）。之所以需要这一私有哨兵，是因为插入失败分支必须做到：
+//   - 当前容量事务整体回滚（已插入的账号不能提交成裸号 —— R5-1 核心）；
+//   - 但 last_refresh_error 标记仍要持久化（跨轮退出候选 —— R5-1 a）。
+//
+// 两者无法在同一事务内同时成立（回滚会连标记一起丢弃），故采用"先回滚当前事务 → 再用
+// 独立事务写标记"的两段编排（实现方向取自方案 SSOT v3.5 §13.3，零新表/字段）。
+var errInsertFailureRollback = errors.New("quota key pull: rollback partial inserts on account insert failure")
+
 // NotConnectedUpstreamClient 是生产默认的占位客户端：未接入上游时返回明确错误，
 // 由 PullAccounts 走 exhausted 分支。绝不返回假账号 / 固定成功。
 type NotConnectedUpstreamClient struct{}
@@ -103,6 +128,35 @@ type QuotaKeyService struct {
 	enc      QuotaKeyEncryptor
 	upstream QuotaKeyUpstreamClient
 	client   *ent.Client
+	// groupResolver 解析"白名单含模型 M"的全部分组 ID（§13.3 挂载事实源）。
+	// 生产默认走 findGroupsAllowingModel；测试可替换以注入挂载失败等边界。
+	groupResolver func(ctx context.Context, tx *ent.Tx, modelM string) ([]int64, error)
+
+	// insertFailureMarkerWriter 是 R5-1 插入失败后"独立事务补写 last_refresh_error 标记"
+	// 的可替换执行点（与生产默认 writeInsertFailureMarker 同签名）。测试可替换以注入
+	// 标记写失败（R5-1 b：仅本轮哨兵停轮的边界），与生产 groupResolver 同一类测试 seams。
+	insertFailureMarkerWriter func(ctx context.Context, quotaKeyID int64, cause error) error
+
+	// reconciler 是软删后水位快路径唤醒目标（C12-v2）。通过 SetReconciler 注入（wire 装配），
+	// 软删事务提交成功后调用其 NotifyAccountRemoved 触发 reconciler 重判水位；nil 时跳过
+	// （未装配则不触发快路径，退回 C10 周期补池）。
+	reconciler quotaKeyReconcilerNotifier
+}
+
+// quotaKeyReconcilerNotifier 是软删后水位快路径唤醒的窄接口（C12-v2）。
+// 仅暴露 NotifyAccountRemoved：软删事务提交成功后由删除路径调用，触发 reconciler 重判水位
+// （只置 pending，不直接拉号）。生产传 *QuotaKeyReconciler，测试可替身（合同 §5：替身仅存于测试）。
+type quotaKeyReconcilerNotifier interface {
+	NotifyAccountRemoved()
+}
+
+// SetReconciler 注入软删水位快路径唤醒目标（C12-v2）。生产由 wire 在 ProvideQuotaKeyReconciler
+// 装配点一行注入 *QuotaKeyReconciler；测试可注入替身。nil 传入时清空引用（不触发快路径）。
+func (s *QuotaKeyService) SetReconciler(r quotaKeyReconcilerNotifier) {
+	if s == nil {
+		return
+	}
+	s.reconciler = r
 }
 
 // NewQuotaKeyService 构造激活码服务。
@@ -116,7 +170,10 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	if upstream == nil {
 		upstream = NotConnectedUpstreamClient{}
 	}
-	return &QuotaKeyService{repo: repo, enc: enc, upstream: upstream, client: client}
+	s := &QuotaKeyService{repo: repo, enc: enc, upstream: upstream, client: client}
+	s.groupResolver = s.findGroupsAllowingModel
+	s.insertFailureMarkerWriter = s.writeInsertFailureMarker
+	return s
 }
 
 // GetStatus 读取激活码状态并脱敏（明文 code 绝不出现在返回 DTO 中）。
@@ -331,24 +388,54 @@ func withQuotaKeyCapacityTx(ctx context.Context, client *ent.Client, quotaKeyID 
 // PullAccounts 按 §3.4 拉号状态机拉取账号：全程在集中入口持有的同一 advisory 互斥域与
 // 同一事务内完成——容量判定（读状态 + working 计数 + ≤15）→ 二次读防竞态 → 发上游 →
 // 成功插入并清 exhausted / 失败 CAS 写 exhausted。
+//
+// 该 2 参入口不携带模型上下文（reconciler / 手动触发共用，保持与 quotaKeyPuller 窄接口
+// 兼容），故不执行 §13.3 分组挂载；挂载语义经 PullAccountsForModel 暴露。
 func (s *QuotaKeyService) PullAccounts(ctx context.Context, quotaKeyID int64) error {
-	return s.pull(ctx, quotaKeyID)
+	return s.pull(ctx, quotaKeyID, "")
+}
+
+// PullAccountsForModel 携带模型 M 上下文的拉号入口（§13.2 触发方传入 / §13.3 挂载）。
+// 成功拉号后，新号在落库事务提交前自动挂入"白名单含 M"的全部分组；M 无覆盖则失败关闭
+// （回滚、不落裸号）。其内部复用与 PullAccounts 完全相同的 pull 状态机（同一 advisory
+// 互斥域 + 同一事务 + ≤15 强制），不另造第二拉号机制。
+func (s *QuotaKeyService) PullAccountsForModel(ctx context.Context, quotaKeyID int64, modelM string) error {
+	return s.pull(ctx, quotaKeyID, modelM)
 }
 
 // RefreshAccounts 手动触发拉号（§4.4），与 PullAccounts 共享同一 advisory 互斥域。
+// 手动入口不携带模型上下文，故不执行 §13.3 分组挂载。
 func (s *QuotaKeyService) RefreshAccounts(ctx context.Context, quotaKeyID int64) error {
-	return s.pull(ctx, quotaKeyID)
+	return s.pull(ctx, quotaKeyID, "")
 }
 
-// pull 是 PullAccounts / RefreshAccounts 共享的拉号状态机实现。
+// pull 是 PullAccounts / PullAccountsForModel / RefreshAccounts 共享的拉号状态机实现。
+// modelM 非空时启用 §13.3 挂载：新号提交前挂入白名单含 M 的全部分组；为空则跳过挂载。
 //
 // 全链路在 ≤15 集中入口（withQuotaKeyCapacity）持有的同一 advisory 互斥域 + 同一事务内：
 // 入口先完成"未软删 + active + working < MaxAccountsPerQuotaKey"判定，fn 内不得再取锁、
 // 不再开事务，插入/状态写入与判定同事务提交（修 r4 #3 事务边界）。
-func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
+//
+// 结果透传约定：
+//   - 冷却（ErrUpstreamCooldown）：fn 内写标记后返回 nil 以便事务提交，再由 pull 透传哨兵；
+//   - 落库失败（create.Save）：R5-1 —— 返回 errInsertFailureRollback 哨兵使容量事务整体回滚
+//     （已部分插入的账号随之消失，号不入库）；pull 在 withQuotaKeyCapacity 返回后用【独立事务】
+//     补写 last_refresh_error 标记（豁免 exhausted）。标记写成功 ⇒ 跨轮退出候选（R5-1 a）；
+//     标记写失败 ⇒ 仅本轮哨兵停轮（R5-2 边界，不夸大保护范围为跨轮退出）。哨兵 ErrQuotaKeyMountFailed
+//     由 pull 透传给触发方（非幂等边界 = 告警 + 停轮）；
+//   - 解析失败 / 零覆盖 / 挂组失败：fn 返回错误 → 事务回滚（号不入库）→ pull 直接返回该错误；
+//     零覆盖发生在上游成功之后，同时挂 ErrQuotaKeyMountFailed + ErrQuotaKeyModelNoCoverage；
+//   - 容量上限 / 已非 active：fn 返回 nil，不改变 exhausted，不上抛。
+func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, modelM string) error {
 	if s.client == nil {
 		return errors.New("quota_key_service: ent client not configured")
 	}
+	// resultErr 捕获"需提交后再透传给触发方"的结果（冷却分支：fn 返回 nil 以提交标记，
+	// 但调用方仍需拿到可识别哨兵）。挂载失败 / 模型无覆盖则走 fn 错误返回（已回滚）。
+	var resultErr error
+	// insertFailErr 捕获插入循环中"首个落库失败"的底层原因（R5-1）：仅当该值非 nil 时，
+	// fn 才返回 errInsertFailureRollback 哨兵，事后由独立事务补写标记。
+	var insertFailErr error
 	err := s.withQuotaKeyCapacity(ctx, quotaKeyID, func(tx *ent.Tx) error {
 		// 二次读状态（防 sweep 竞态）：重新 FOR UPDATE 确认仍为 active 且未过期。
 		qk2, err := tx.QuotaKey.Query().Where(quotakey.IDEQ(quotaKeyID)).ForUpdate().Only(ctx)
@@ -362,8 +449,16 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 		// 发上游。
 		result, pullErr := s.upstream.PullBatch(ctx, qk2)
 		if pullErr != nil {
-			// 失败：CAS 写 exhausted=true，仅当当前 status='active'（不覆盖 sweep 的禁用/过期）；
-			// 由集中入口在同一事务内提交（锁随事务释放）。
+			// 冷却分支（F-b，R4 消化）：同事务写 last_refresh_error + last_refresh_at，
+			// 唯独豁免 exhausted；返回 nil 使事务提交标记，哨兵由 resultErr 透传。
+			if errors.Is(pullErr, ErrUpstreamCooldown) {
+				if werr := s.writeCooldownMarker(ctx, tx, quotaKeyID, pullErr); werr != nil {
+					return fmt.Errorf("quota_key_service: write cooldown marker: %w", werr)
+				}
+				resultErr = ErrUpstreamCooldown
+				return nil
+			}
+			// 其余上游错误：CAS 写 exhausted=true（沿用既有语义），不向上抛。
 			if cerr := s.casSetExhausted(ctx, tx, quotaKeyID, pullErr); cerr != nil {
 				return fmt.Errorf("quota_key_service: cas set exhausted: %w", cerr)
 			}
@@ -391,6 +486,10 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 		// working 为基准，working=14 而上游返 2 时只落 1 条，总数恰好 15（不多不少）。
 		// upstream 溢出的账号直接丢弃：UpstreamPullResult 不带重放字段，不做二次落库。
 		maxInsert := MaxAccountsPerQuotaKey - working
+		if maxInsert <= 0 {
+			return nil
+		}
+		insertedIDs := make([]int64, 0, len(result.Accounts))
 		for i, ua := range result.Accounts {
 			if i >= maxInsert {
 				break
@@ -404,8 +503,59 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 			if ua.Extra != nil {
 				create.SetExtra(ua.Extra)
 			}
-			if _, err := create.Save(ctx); err != nil {
-				return fmt.Errorf("quota_key_service: create account: %w", err)
+			acc, err := create.Save(ctx)
+			if err != nil {
+				// R5-1 核心（增量复审 R5 整改）：本分支位于【上游发号成功之后】——号已发出、
+				// 上游不可回滚（shareai 非幂等），但本地落库失败。此时同一批次中可能已有
+				// 前序账号被插入到【当前容量事务】内（多账号部分成功）。
+				//
+				// 关键不变量：失败时【不得提交任何已部分插入的账号】——否则会留下"裸号"
+				//（号已入库、但上游本就非幂等、且无挂载/无标记，等于悄悄消耗上游且泄漏）。
+				// 因此这里【不再】于同事务内写 last_refresh_error 后提交；改为：
+				//   1) 记录底层落库失败原因到 insertFailErr（供事后独立事务补标）；
+				//   2) 返回私有哨兵 errInsertFailureRollback，使 withQuotaKeyCapacity 整体
+				//      【回滚】当前容量事务（已插入账号随之消失，号不入库）；
+				//   3) pull 在 withQuotaKeyCapacity 返回后，用【独立事务】补写 last_refresh_error
+				//      标记（R5-1 a：标记写成功 → 跨轮退出候选）；若该独立事务也失败（R5-1 b：
+				//      标记写失败），则仅本轮哨兵停轮（R5-2 边界，不夸大保护范围）。
+				//
+				// 与解析失败 / 零覆盖 / 挂组失败同一哨兵族 ErrQuotaKeyMountFailed（非幂等边界，
+				// 触发方走"告警 + 停轮"），底层落库失败原因经 insertFailErr 重新 %w 回链。
+				insertFailErr = fmt.Errorf("create account: %w", err)
+				return fmt.Errorf("quota_key_service: %w", errInsertFailureRollback)
+			}
+			insertedIDs = append(insertedIDs, acc.ID)
+		}
+
+		// §13.3 新号挂载：M 上下文由触发方传入落库事务，提交前挂入"白名单含 M"的全部分组。
+		// modelM 为空表示触发方未携带模型上下文（既有手动/默认路径），跳过挂载。
+		if modelM != "" {
+			groupIDs, err := s.groupResolver(ctx, tx, modelM)
+			if err != nil {
+				// F4：上游已成功发号（号未入库，事务尚未提交），但本地分组解析失败
+				//（shareai 非幂等，上游发号不可回滚）→ 事务将回滚（号不入库）+ 与挂载失败
+				// 同哨兵 ErrQuotaKeyMountFailed 返回，调用方可识别"上游可能已被消耗一次"。
+				return fmt.Errorf("quota_key_service: resolve covering groups for model %q: %w: %w", modelM, ErrQuotaKeyMountFailed, err)
+			}
+			if len(groupIDs) == 0 {
+				// 失败关闭（fail-closed）：M 无分组覆盖，不得落成裸号；返回错误使事务回滚，
+				// 号不入库。触发方据此记录告警。
+				//
+				// F4'（2026-10-15 增量复审 R2）：本分支发生在【上游发号成功之后】——白名单
+				// 与上游发号不同快照，期间可变更，覆盖可能恰好此刻消失。上游号已消耗且不可
+				// 回滚（shareai 非幂等），故除 ErrQuotaKeyModelNoCoverage 外同时补挂
+				// ErrQuotaKeyMountFailed 哨兵（%w 双链，两个 errors.Is 皆为真），使触发方
+				// 走"非幂等边界 = 告警 + 停轮"，不得当作普通错误继续拉下一个候选。
+				return fmt.Errorf("quota_key_service: model %q has no covering group after upstream success: %w: %w",
+					modelM, ErrQuotaKeyMountFailed, ErrQuotaKeyModelNoCoverage)
+			}
+			// 上游成功、本地挂载失败（shareai 非幂等，上游发号不可回滚）→ 本地事务回滚
+			//（号不入库）+ 可识别错误供触发方记录"上游可能已被消耗一次"告警；不得表述为
+			//"拉号动作整体回滚"。
+			for _, accID := range insertedIDs {
+				if err := s.mountAccountToGroups(ctx, tx, accID, groupIDs); err != nil {
+					return fmt.Errorf("quota_key_service: mount account %d to groups: %w: %w", accID, ErrQuotaKeyMountFailed, err)
+				}
 			}
 		}
 
@@ -425,7 +575,35 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64) error {
 	if errors.Is(err, ErrQuotaKeyAccountLimitReached) || errors.Is(err, ErrQuotaKeyNotActive) {
 		return nil
 	}
-	return err
+	// fn 返回非 nil：
+	if err != nil {
+		// R5-1 插入失败回滚分支：fn 以 errInsertFailureRollback 哨兵信号"整体回滚当前容量
+		// 事务"（已部分插入的账号随之消失，号不入库）。此处用【独立事务】补写 last_refresh_error
+		// 标记，使"回滚全部账号"与"标记持久化"两目标同时成立（二者无法同事务共存）。
+		if errors.Is(err, errInsertFailureRollback) && insertFailErr != nil {
+			// a) 标记写成功 → 事务回滚全部已插入账号（号不入库）+ 标记持久化；
+			//    标记存在 ⇒ ListCandidateKeys 的 LastRefreshErrorIsNil() 过滤把该 key 排出
+			//    后续候选 ⇒ 跨轮退出候选（R5-2：标记写成功 = 跨轮退出候选）。
+			if werr := s.insertFailureMarkerWriter(ctx, quotaKeyID, insertFailErr); werr != nil {
+				// b) 标记写失败 → 整体回滚（现状已对）。此时 last_refresh_error 未持久，
+				//    该 key 仍可能被后续周期重新选为候选（R5-2 边界：标记写失败 = 仅本轮
+				//    哨兵停轮，不夸大保护范围为"跨轮退出"）。哨兵仍上抛，使本轮停轮。
+				return fmt.Errorf("quota_key_service: create account (marker write failed: %v): %w: %w",
+					werr, ErrQuotaKeyMountFailed, insertFailErr)
+			}
+			// a) 标记已持久：上抛 ErrQuotaKeyMountFailed 哨兵（非幂等边界，触发方停轮 +
+			//    记"上游可能已被消耗一次"告警），底层落库失败原因回链。
+			return fmt.Errorf("quota_key_service: create account: %w: %w",
+				ErrQuotaKeyMountFailed, insertFailErr)
+		}
+		// 其余 fn 错误（挂载失败 / 模型无覆盖 / 解析失败）→ 事务已回滚，错误即结果。
+		return err
+	}
+	// fn 返回 nil（含冷却分支已提交标记）→ 透传捕获的结果（冷却哨兵 / 无则 nil）。
+	if resultErr != nil {
+		return resultErr
+	}
+	return nil
 }
 
 // DeleteWithAccounts 软删激活码及其全部账号（§3.2 删除唯一路径 = 软删口径）。
@@ -479,6 +657,11 @@ func (s *QuotaKeyService) DeleteWithAccounts(ctx context.Context, quotaKeyID int
 		return fmt.Errorf("quota_key_service: commit delete: %w", err)
 	}
 	committed = true
+	// C12-v2 水位快路径：软删事务提交成功后唤醒 reconciler 重判水位（只置 pending，不直接拉号；
+	// reconciler 轮出前追加一次水位判定，有缺口才补）。reconciler 未装配（nil）时跳过。
+	if s.reconciler != nil {
+		s.reconciler.NotifyAccountRemoved()
+	}
 	return nil
 }
 
@@ -508,6 +691,101 @@ func (s *QuotaKeyService) casSetExhausted(ctx context.Context, tx *ent.Tx, quota
 		Save(ctx)
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+// writeCooldownMarker 在冷却分支（ErrUpstreamCooldown）同事务写 last_refresh_error +
+// last_refresh_at，但【不写 exhausted】（R1 F1 语义：冷却豁免 exhausted）。沿用 casSetExhausted
+// 的 CAS 约束：仅当当前 status='active' 才写入（不覆盖 sweep 已置的禁用/过期），否则 0 行。
+//
+// R4-1 起本函数复用为"落库失败（上游成功、本地失败）"标记的同一写入实现：两者同型
+// （同事务 / CAS 仅 active / 唯独豁免 exhausted），仅语义不同（冷却 vs 需人工介入）。
+// 冷却 5min 时间窗判定不在本函数内，故复用不触碰冷却语义。
+func (s *QuotaKeyService) writeCooldownMarker(ctx context.Context, tx *ent.Tx, quotaKeyID int64, pullErr error) error {
+	_, err := tx.QuotaKey.Update().
+		Where(quotakey.IDEQ(quotaKeyID), quotakey.Status(domain.QuotaKeyStatusActive)).
+		SetLastRefreshAt(time.Now()).
+		SetLastRefreshError(pullErr.Error()).
+		Save(ctx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeInsertFailureMarker 在【独立事务】内写 last_refresh_error 标记（R5-1）。
+//
+// 与"插入失败即同事务写标记后提交"的旧实现不同：多账号部分成功时，若在同一容量事务内写
+// 标记后提交，会连带把【已部分插入但本应回滚的账号】一起提交成裸号（R5-1 缺陷形态）。故
+// 改为两段编排——pull 先在容量事务内整体回滚（号不入库），再以本独立事务补写标记，使
+// "回滚全部账号"与"标记持久化"两目标同时成立。
+//
+// 语义约束（零新表/字段）：仅写 last_refresh_error + last_refresh_at，CAS 仅当 status='active'
+// （不覆盖 sweep 已置的禁用/过期），【不写 exhausted】（与 writeCooldownMarker 同豁免口径，
+// 与"上游失败"的 exhausted 占位语义区分）。标记写失败（如 CAS 0 行 / DB 错误）由调用方
+// 降格为"仅本轮哨兵停轮"（R5-2 边界）。
+func (s *QuotaKeyService) writeInsertFailureMarker(ctx context.Context, quotaKeyID int64, cause error) error {
+	if s.client == nil {
+		return errors.New("quota_key_service: ent client not configured")
+	}
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("quota_key_service: begin insert-failure marker tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	n, err := tx.QuotaKey.Update().
+		Where(quotakey.IDEQ(quotaKeyID), quotakey.Status(domain.QuotaKeyStatusActive)).
+		SetLastRefreshAt(time.Now()).
+		SetLastRefreshError(cause.Error()).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("quota_key_service: write insert-failure marker: %w", err)
+	}
+	// CAS 未命中（status 已非 active，例如 sweep 在回滚与本事务之间把 key 置 expired/disabled）
+	// ⇒ 标记实际未写入。此时降级为 R5-1(b)：仅本轮哨兵停轮，不夸大"跨轮退出"保护范围。
+	if n == 0 {
+		return fmt.Errorf("quota_key_service: insert-failure marker not written (status no longer active)")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("quota_key_service: commit insert-failure marker tx: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// findGroupsAllowingModel 是 §13.3 挂载事实源：返回"白名单含模型 M"的全部分组 ID。
+// 白名单事实源 = 既有分组模型白名单（domain.GroupModelAllowlist），不新造映射表；
+// 复用 service.GroupModelAllowlist.Allows 的既有通配/前缀匹配语义。仅取未软删分组。
+func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.Tx, modelM string) ([]int64, error) {
+	groups, err := tx.Group.Query().All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_service: query groups: %w", err)
+	}
+	out := make([]int64, 0, len(groups))
+	for _, g := range groups {
+		if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(modelM) {
+			out = append(out, g.ID)
+		}
+	}
+	return out, nil
+}
+
+// mountAccountToGroups 在落库事务内把账号挂入指定全部分组（account_groups M2M，默认
+// priority=50，不新造表）。任一分组链接写失败即返回错误，由调用方触发回滚。
+func (s *QuotaKeyService) mountAccountToGroups(ctx context.Context, tx *ent.Tx, accountID int64, groupIDs []int64) error {
+	for _, gid := range groupIDs {
+		if _, err := tx.AccountGroup.Create().
+			SetAccountID(accountID).
+			SetGroupID(gid).
+			Save(ctx); err != nil {
+			return fmt.Errorf("link account %d to group %d: %w", accountID, gid, err)
+		}
 	}
 	return nil
 }
@@ -568,6 +846,150 @@ func quotaKeyMACOfPlaintext(plain string) string {
 // isExpired 判断激活码是否已过期（expires_at 非 NULL 且早于 now）。
 func isExpired(qk *ent.QuotaKey) bool {
 	return qk.ExpiresAt != nil && qk.ExpiresAt.Before(time.Now())
+}
+
+// ---------------------------------------------------------------------------
+// F1：生产用 QuotaKeyModelWaterProvider 实现（方案 §13.1，C11 接入点）。
+// 所有 field/聚合 SQL 收敛于此，不新造表/字段；口径与调度谓词同判
+//（account.platform=cursor / schedulable / status=active / 未软删 / 非 temp 窗口 /
+// 当前允许 M 分组）。阈值恒为统一常量 quotaKeyWaterLevelThreshold（=10）。
+// ---------------------------------------------------------------------------
+
+// quotaKeyModelWater 是 QuotaKeyModelWaterProvider 的生产实现。
+// 只读聚合，命中真实 Postgres；与 C11 收口装配一致，不碰 schema/migration。
+type quotaKeyModelWater struct {
+	client *ent.Client
+}
+
+// NewQuotaKeyModelWater 构造生产用模型水位提供方（F1 装配点由 wire 注入 *ent.Client）。
+// 返回接口类型，使 reconciler 侧仅依赖窄面。
+func NewQuotaKeyModelWater(client *ent.Client) QuotaKeyModelWaterProvider {
+	return &quotaKeyModelWater{client: client}
+}
+
+// ListAllowedModels 枚举分组白名单覆盖的 cursor 服务模型：
+// 遍历 active 且未软删的【cursor 平台】分组，收集其启用白名单中的全部模型条目（去重保序）。
+// 限定 platform=cursor：补池只发 cursor 账号（§13.3 挂载与水位口径均为 cursor 账号），
+// 若把 anthropic 等其它平台分组的白名单也枚举进来，会给与 cursor 无关的型号各补一批号。
+// 返回的是白名单条目（可能含通配，如 claude-*）；WaterLevel 按同一 Allows 口径判定。
+func (w *quotaKeyModelWater) ListAllowedModels(ctx context.Context) ([]string, error) {
+	groups, err := w.client.Group.Query().
+		Where(
+			group.Platform(domain.PlatformCursor),
+			group.Status(domain.StatusActive),
+			group.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_model_water: list groups: %w", err)
+	}
+	seen := make(map[string]struct{}, 8)
+	out := make([]string, 0, 8)
+	for _, g := range groups {
+		aw := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		if !aw.Enabled {
+			continue
+		}
+		for _, m := range aw.Models {
+			k := strings.ToLower(strings.TrimSpace(m))
+			if k == "" {
+				continue
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// WaterLevel 返回模型 M 的当前水位（候选计数）与统一阈值。
+// 口径（§13.1）：account.platform=cursor + 可调度 + 正常(active) + 未软删 +
+// 当前允许 M 分组（白名单 Allows(M) 的任意未软删活跃【cursor 平台】分组）+ 非 temp 窗口
+// （temp_unschedulable_until 为空或早于 now）。阈值恒为 quotaKeyWaterLevelThreshold。
+//
+// R3-2：分组侧同样限定 platform=cursor，与 ListAllowedModels 的 cursor 范围对齐——
+// §13.1"当前允许 M 的分组"指 cursor 服务分组；跨平台（anthropic 等）的同名模型分组
+// 不计入水位，不得让与其无关的账号虚增 cursor 水位（否则水位虚高 → 该补的号不补）。
+func (w *quotaKeyModelWater) WaterLevel(ctx context.Context, modelM string) (int, int, error) {
+	now := time.Now()
+	// 当前允许 M 的 cursor 分组 ID 集合（同 Allows 判定，平台范围同 ListAllowedModels）。
+	groups, err := w.client.Group.Query().
+		Where(
+			group.Platform(domain.PlatformCursor),
+			group.Status(domain.StatusActive),
+			group.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("quota_key_model_water: list groups: %w", err)
+	}
+	gids := make([]int64, 0, len(groups))
+	for _, g := range groups {
+		if GroupModelAllowlistFromDomain(g.ModelAllowlist).Allows(modelM) {
+			gids = append(gids, g.ID)
+		}
+	}
+	current := 0
+	if len(gids) > 0 {
+		current, err = w.client.Account.Query().
+			Where(
+				account.Platform(domain.PlatformCursor),
+				account.Schedulable(true),
+				account.Status(domain.StatusActive),
+				account.DeletedAtIsNil(),
+				account.Or(
+					account.TempUnschedulableUntilIsNil(),
+					account.TempUnschedulableUntilLT(now),
+				),
+				account.HasGroupsWith(group.IDIn(gids...)),
+			).
+			Count(ctx)
+		if err != nil {
+			return 0, 0, fmt.Errorf("quota_key_model_water: count water level: %w", err)
+		}
+	}
+	return current, quotaKeyWaterLevelThreshold, nil
+}
+
+// ListCandidateKeys 返回模型 M 下需要补池的候选 quota_key ID：
+// active + 非 exhausted + 非冷却中（冷却只写 last_refresh_error、不写 exhausted，
+// 故以 last_refresh_error 为空代理"非冷却中"）+ 未过期 + 未软删 + 有剩余容量
+// （working < MaxAccountsPerQuotaKey）。limit>0 时由实现方按需截断（差额）；
+// 模型 M 不收窄候选集——挂载语义由 PullAccountsForModel 决定目标分组。
+func (w *quotaKeyModelWater) ListCandidateKeys(ctx context.Context, _ string, limit int) ([]int64, error) {
+	now := time.Now()
+	keys, err := w.client.QuotaKey.Query().
+		Where(
+			quotakey.Status(domain.QuotaKeyStatusActive),
+			quotakey.Exhausted(false),
+			quotakey.LastRefreshErrorIsNil(),
+			quotakey.Or(quotakey.ExpiresAtIsNil(), quotakey.ExpiresAtGT(now)),
+			quotakey.DeletedAtIsNil(),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quota_key_model_water: list candidate keys: %w", err)
+	}
+	out := make([]int64, 0, len(keys))
+	for _, k := range keys {
+		working, werr := w.client.Account.Query().
+			Where(account.QuotaKeyID(k.ID), account.DeletedAtIsNil()).
+			Count(ctx)
+		if werr != nil {
+			return nil, fmt.Errorf("quota_key_model_water: count working for key %d: %w", k.ID, werr)
+		}
+		if working >= MaxAccountsPerQuotaKey {
+			continue // 无剩余容量：working 已满 15，跳过
+		}
+		out = append(out, k.ID)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // quotaKeyAdvisoryLockID 计算 advisory 锁的 int64 键（与 Pull/Refresh/Delete 共享同一互斥域）。
