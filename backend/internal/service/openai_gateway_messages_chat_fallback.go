@@ -120,11 +120,15 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	)
 
 	// 3. Build and send upstream request via the shared CC pipeline.
-	//    CodeBuddy 影子：出站改走 CodeBuddy 上游（母账号凭证 + §2.5 改写 + §2.4 指纹头），
+	//    CodeBuddy（影子 ∪ 直绑 platform=codebuddy）：出站改走 CodeBuddy 上游
+	//    （母账号凭证 + §2.5 改写 + §2.4 指纹头；直绑账号凭证即自身，
+	//    sendCodeBuddyChatUpstreamAsCC 内部按 IsShadow 决定是否回查母账号），
 	//    其余账号走通用 CC 上游（账号自身 api_key/base_url）。
+	//    判定口径与 ForwardAsAnthropic 的入口分流保持一致：直绑账号缺此判定会落到
+	//    下方 resolveCCFallbackTarget，打到 ChatGPT/Codex 后端被 403 阻断页拒绝。
 	var resp *http.Response
 	var sendErr error
-	if isCodeBuddyShadowAccount(account) {
+	if isCodeBuddyPlatformAccount(account) || isCodeBuddyShadowAccount(account) {
 		resp, sendErr = s.sendCodeBuddyChatUpstreamAsCC(ctx, c, account, chatBody, upstreamModel)
 	} else {
 		apiKey, targetURL, terr := s.resolveCCFallbackTarget(account)
@@ -141,7 +145,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	// 4. Handle error responses
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
-		if isCodeBuddyShadowAccount(account) {
+		if isCodeBuddyPlatformAccount(account) || isCodeBuddyShadowAccount(account) {
 			// 与 /v1/chat/completions 路径一致的 CodeBuddy 错误副作用（余额/会话/模型冷却），
 			// 内部完成分类 + 脱敏 + 回写 resp.Body；响应本身仍以 Anthropic 格式回传。
 			s.applyCodeBuddyErrorSideEffectsFromBody(ctx, account, resp, respBody, upstreamModel)

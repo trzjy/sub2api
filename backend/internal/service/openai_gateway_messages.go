@@ -42,7 +42,15 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// /v1/messages 为 Anthropic 入站：forwardAnthropicViaRawChatCompletions 内完成
 	// Anthropic→Chat Completions 转换 + CC→Anthropic 回桥，其中出站发送对 CodeBuddy 影子
 	// 改走 CodeBuddy 上游（buildCodeBuddyChatRequest + doOpenAIUpstream + 母账号凭证）。
-	if isCodeBuddyShadowAccount(account) {
+	//
+	// 直绑 codebuddy（platform=codebuddy、非影子，ParentAccountID 为空）走同一个坑：
+	// 缺此分支时会落通用 OpenAI 路径，而 shouldForwardOpenAIResponsesViaRawChatCompletions
+	// 要求 account.Type == AccountTypeAPIKey，OAuth 账号直接返回 false，于是请求打到
+	// ChatGPT/Codex 后端并被 403 阻断页拒绝（与 chat_completions:126 / forward:196
+	// 两处已修分支同一机理，此处是 /v1/messages 唯一漏掉的一条）。
+	// 口径与那两条一致取并集：isCodeBuddyPlatformAccount 覆盖直绑，isCodeBuddyShadowAccount
+	// 保留存量影子（§3 时序红线：影子判定分支禁止摘除）。
+	if isCodeBuddyPlatformAccount(account) || isCodeBuddyShadowAccount(account) {
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 

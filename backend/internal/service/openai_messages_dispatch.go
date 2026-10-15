@@ -105,10 +105,14 @@ func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
 		return xai.ModelMappingWithOptions(opts)["claude-*"]
 	}
 
-	// 国产供应商分组与通用 other 分组:调度级模型映射不适用(其配置被 sanitize
-	// 置空,且下方的 gpt-5.x 默认值是 openai 专属,发给 CN/other 上游必错)。
+	// 国产供应商分组、通用 other 分组与 codebuddy 分组:调度级模型映射不适用
+	// (其配置被 sanitize 置空,且下方的 gpt-5.x 默认值是 openai 专属,发给
+	// CN/other/codebuddy 上游必错)。
 	// 模型改写完全交给账号级 model_mapping;anthropic 协议上游本身接受 claude-* 模型名。
-	if IsCNProvider(g.Platform) || g.Platform == PlatformOther {
+	// codebuddy 同理:其上游是 copilot.tencent.com/CodeBuddy 模型域,收到 gpt-5.x 必被拒;
+	// 分组模型白名单未开启时 claude-* 请求可达本函数(生产 group 64 即 allowlist 关闭),
+	// 若不在此拦下会把 openai 默认值改写后发给腾讯上游。
+	if IsCNProvider(g.Platform) || g.Platform == PlatformOther || g.Platform == PlatformCodeBuddy {
 		return ""
 	}
 

@@ -200,11 +200,12 @@ func resolveOpenAIMessagesDispatchMappedModel(c *gin.Context, apiKey *service.AP
 	if apiKey == nil || apiKey.Group == nil {
 		return ""
 	}
-	// composite 解析到 grok/CN 目标时调度级映射不适用（Group 级映射的 gpt-5.x
-	// 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
+	// composite 解析到 grok/CN/codebuddy 目标时调度级映射不适用（Group 级映射的
+	// gpt-5.x 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
-			(platform == service.PlatformGrok || service.IsCNProvider(platform)) {
+			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
+				platform == service.PlatformCodeBuddy) {
 			return ""
 		}
 	}
@@ -320,17 +321,22 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	// 该开关对非 openai/composite 平台恒被 sanitizeGroupMessagesDispatchFields 置 false,
 	// 若不豁免,CN 分组将永远 403。Muse 平台方案已批准下游全协议支持(/v1/messages、
 	// /v1/chat/completions、/v1/responses),与 grok/CN"messages 是主要服务形态"同语义,
-	// 同一 403 陷阱,故一并豁免。
+	// 同一 403 陷阱,故一并豁免。CodeBuddy 同理:其账号是 OAuth 型,/v1/messages
+	// 经 CC 出站管线转发到 copilot.tencent.com,是 Claude Code 接入腾讯模型的主要
+	// 服务形态;开关对其恒 false 且前端不提供(见 groupsMessagesDispatch.ts 只对
+	// openai/composite 渲染),不豁免则 codebuddy 分组永远 403(2026-10-15 生产实证:
+	// group 109 全程 /v1/messages 成功数为 0)。
 	if service.IsCNProvider(apiKey.Group.Platform) || apiKey.Group.Platform == service.PlatformOther ||
-		apiKey.Group.Platform == service.PlatformMuse {
+		apiKey.Group.Platform == service.PlatformMuse || apiKey.Group.Platform == service.PlatformCodeBuddy {
 		return true
 	}
-	// composite 分组解析到 grok/CN 目标时与对应独立分组同语义豁免；
+	// composite 分组解析到 grok/CN/codebuddy/muse 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
 			(platform == service.PlatformGrok || service.IsCNProvider(platform) ||
-				platform == service.PlatformOther || platform == service.PlatformMuse) {
+				platform == service.PlatformOther || platform == service.PlatformMuse ||
+				platform == service.PlatformCodeBuddy) {
 			return true
 		}
 	}
