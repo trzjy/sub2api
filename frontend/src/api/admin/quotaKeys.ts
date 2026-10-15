@@ -125,6 +125,58 @@ export async function sweepExpired(): Promise<SweepExpiredResponse> {
   return data
 }
 
+/** 入库可配置（D2-a）：单条模型引用。 */
+export interface AutoEntryModelRef {
+  id: string
+  vendor: string
+  probe_status?: string
+}
+
+/** 入库可配置（D2-a）：入库默认值（priority/rate_multiplier 落 account 列；concurrency 留空=沿用列默认 3）。 */
+export interface AutoEntryDefaults {
+  concurrency: number | null
+  priority: number
+  rate_multiplier: number
+}
+
+/** 入库可配置（D2-a）：完整配置（settings 表 cursor_auto_entry_config 的镜像）。 */
+export interface AutoEntryConfig {
+  vendors: Record<string, boolean>
+  models: AutoEntryModelRef[]
+  entry_defaults: AutoEntryDefaults
+}
+
+/** 用量查询（D2-a probe_quota）返回的 key_info 摘要。 */
+export interface KeyQuotaInfo {
+  group: string
+  status_code: number
+  max: number
+  used: number
+  device_count: number
+  device_max_count: number
+  mode: number
+  expired_at: string | null
+  accounts_written: number
+}
+
+/** 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。 */
+export async function getAutoEntryConfig(): Promise<AutoEntryConfig> {
+  const { data } = await apiClient.get<AutoEntryConfig>('/admin/quota_keys/auto_entry_config')
+  return data
+}
+
+/** 校验并持久化 cursor 入库可配置。 */
+export async function updateAutoEntryConfig(payload: AutoEntryConfig): Promise<AutoEntryConfig> {
+  const { data } = await apiClient.put<AutoEntryConfig>('/admin/quota_keys/auto_entry_config', payload)
+  return data
+}
+
+/** 手动触发某激活码的 key 级用量查询（lookup），写额度快照到其全部账号。 */
+export async function probeQuota(id: number): Promise<KeyQuotaInfo> {
+  const { data } = await apiClient.post<KeyQuotaInfo>(`/admin/quota_keys/${id}/probe_quota`)
+  return data
+}
+
 const quotaKeysAPI = {
   list,
   create,
@@ -133,7 +185,10 @@ const quotaKeysAPI = {
   remove,
   refresh,
   clearExhausted,
-  sweepExpired
+  sweepExpired,
+  getAutoEntryConfig,
+  updateAutoEntryConfig,
+  probeQuota
 }
 
 export default quotaKeysAPI

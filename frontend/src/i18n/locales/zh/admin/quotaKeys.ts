@@ -83,6 +83,39 @@ export default {
     refreshError: '手动拉号失败',
     clearError: '解除耗尽失败',
     sweepError: '清理过期激活码失败',
-    detailLoadError: '加载激活码详情失败'
+    detailLoadError: '加载激活码详情失败',
+    autoEntry: {
+      title: '入库配置',
+      description: '配置入库厂商勾选、模型清单与默认值（并发实测后定）。',
+      vendors: '厂商勾选',
+      vendorOpenAI: 'OpenAI',
+      vendorAnthropic: 'Anthropic',
+      vendorGoogle: 'Google',
+      vendorXAI: 'xAI',
+      vendorDeepSeek: 'DeepSeek',
+      vendorMistral: 'Mistral',
+      models: '模型清单（按厂商过滤）',
+      priority: '优先级',
+      rateMultiplier: '速率倍率',
+      concurrency: '并发',
+      concurrencyPlaceholder: '实测后定',
+      save: '保存配置',
+      saved: '入库配置已保存',
+      saveError: '保存入库配置失败'
+    },
+    probe: {
+      button: '用量查询',
+      probing: '查询中…',
+      title: '激活码用量',
+      group: '套餐',
+      status: '状态',
+      used: '已用',
+      max: '总额度',
+      deviceCount: '设备数',
+      deviceMaxCount: '最大设备数',
+      expiredAt: '到期时间',
+      accountsWritten: '已写入账号数',
+      error: '用量查询失败'
+    }
   }
 }

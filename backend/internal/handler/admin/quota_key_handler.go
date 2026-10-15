@@ -28,14 +28,16 @@ import (
 //   - 不引入新中间件 / 新分页机制 / 新响应信封：复用 response.ParsePagination
 //     与既有分页字段（items/total/page/page_size/pages）。
 type QuotaKeyHandler struct {
-	svc     *service.QuotaKeyService
-	sweeper *service.QuotaKeySweeper
+	svc       *service.QuotaKeyService
+	sweeper   *service.QuotaKeySweeper
+	autoEntry *service.CursorAutoEntryService
 }
 
 // NewQuotaKeyHandler 构造激活码管理端点处理器。
 // sweeper 为 nil 时 sweep_expired 端点返回 503（未装配清扫器），其余端点不受影响。
-func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper) *QuotaKeyHandler {
-	return &QuotaKeyHandler{svc: svc, sweeper: sweeper}
+// autoEntry 为 nil 时 auto_entry_config / probe_quota 端点返回 503（未装配入库可配置服务）。
+func NewQuotaKeyHandler(svc *service.QuotaKeyService, sweeper *service.QuotaKeySweeper, autoEntry *service.CursorAutoEntryService) *QuotaKeyHandler {
+	return &QuotaKeyHandler{svc: svc, sweeper: sweeper, autoEntry: autoEntry}
 }
 
 // quotaKeySummaryEnvelope 复用既有分页信封（response.PaginatedData），在顶层追加
@@ -312,4 +314,70 @@ func respondQuotaKeyError(c *gin.Context, err error) {
 		return
 	}
 	response.ErrorFrom(c, err)
+}
+
+// GetAutoEntryConfig 读取 cursor 入库可配置（厂商勾选 + 模型清单 + 入库参数）。
+// GET /api/v1/admin/quota_keys/auto_entry_config
+func (h *QuotaKeyHandler) GetAutoEntryConfig(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	cfg, err := h.autoEntry.GetConfig(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, cfg)
+}
+
+type updateAutoEntryConfigRequest struct {
+	Vendors       map[string]bool             `json:"vendors"`
+	Models        []service.CursorModelRef    `json:"models"`
+	EntryDefaults service.CursorEntryDefaults `json:"entry_defaults"`
+}
+
+// UpdateAutoEntryConfig 校验并持久化 cursor 入库可配置。
+// PUT /api/v1/admin/quota_keys/auto_entry_config
+func (h *QuotaKeyHandler) UpdateAutoEntryConfig(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	var req updateAutoEntryConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	cfg := &service.CursorAutoEntryConfig{
+		Vendors:       req.Vendors,
+		Models:        req.Models,
+		EntryDefaults: req.EntryDefaults,
+	}
+	updated, err := h.autoEntry.UpdateConfig(c.Request.Context(), cfg)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, updated)
+}
+
+// ProbeQuota 手动触发某激活码的 key 级用量查询（lookup），并把额度快照写入其全部账号 extra。
+// 返回 key_info 摘要（状态/额度/设备/到期等）。
+// POST /api/v1/admin/quota_keys/:id/probe_quota
+func (h *QuotaKeyHandler) ProbeQuota(c *gin.Context) {
+	if h.autoEntry == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
+		return
+	}
+	id, ok := parseQuotaKeyID(c)
+	if !ok {
+		return
+	}
+	info, err := h.autoEntry.ProbeKeyQuota(c.Request.Context(), id)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
+	response.Success(c, info)
 }
