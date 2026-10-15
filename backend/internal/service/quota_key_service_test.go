@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -1290,6 +1291,37 @@ func TestQuotaKeyService_PullForModel_CooldownReturnsSentinelAndWritesMarker(t *
 	require.Equal(t, 0, n, "cooldown must not insert accounts")
 }
 
+// TestQuotaKeyService_CooldownClearsStaleExhausted：B2 缺陷修复——存量 exhausted=true 的
+// key（v3.5 部署前旧代码在冷却响应里把 exhausted 写为 true）遇冷却响应时，冷却分支同事务
+// 顺带 SetExhausted(false)，把冷却态与耗尽态解耦（存量纠正）；同时 last_refresh_error 标记写入。
+func TestQuotaKeyService_CooldownClearsStaleExhausted(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{err: ErrUpstreamCooldown})
+
+	// 前置存量态：exhausted=true 且 last_refresh_error 已置位（旧冷却文案）。
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).
+		SetExhausted(true).
+		SetLastRefreshError("cooldown: rate limited (stale)").
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 冷却响应（不携带模型上下文亦可，冷却分支与挂载无关）。
+	err = svc.PullAccountsForModel(ctx, qk.ID, "cursor-model-x")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrUpstreamCooldown), "cooldown must be recognizable via errors.Is")
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	// B2 核心：冷却分支纠正存量 exhausted=true → false（冷却≠耗尽）。
+	require.False(t, got.Exhausted, "cooldown must clear stale exhausted=true (cooldown != exhaustion)")
+	// 标记写入。
+	require.NotNil(t, got.LastRefreshError, "cooldown must write last_refresh_error marker")
+	require.Contains(t, *got.LastRefreshError, "cooldown")
+	require.NotNil(t, got.LastRefreshAt, "cooldown must write last_refresh_at")
+}
+
 // TestQuotaKeyPullForModel_ModelNoCoverageFailClosed：M 无分组覆盖 → 失败关闭，
 // 不静默落成裸号（回滚），并以 ErrQuotaKeyModelNoCoverage 可识别（§13.3）。
 //
@@ -1427,6 +1459,58 @@ func TestQuotaKeyService_Pull_NoModelContextSkipsMount(t *testing.T) {
 		"2-arg pull without model M must NOT mount to groups")
 }
 
+// TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups：B1 缺陷修复——手动入口
+// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"active + 未软删且白名单不显式拒绝
+// cursor 的全部分组"（2026-10-15 用户裁定"放宽挂载解析"：生产无 platform=cursor 分组，
+// cursor 账号实际由 composite 聚合组调度），而非落成裸号（group_count=0）。
+func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 应被挂入的分组（生产形态复刻）：composite 聚合组，白名单未启用（Allows 恒真）。
+	grpComposite := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
+	// 应被挂入的分组：白名单启用且显式含 cursor 模型。
+	grpWhitelistCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"cursor"},
+	})
+	// 不应挂入的分组：白名单启用且明确不含 cursor（如 DeepSeek 计量组形态）。
+	grpRejectCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"deepseek-v4-1-flash"},
+	})
+
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{Name: "refresh-mount", Platform: "cursor", Type: "oauth", Credentials: map[string]any{"k": "v"}},
+		}},
+	})
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	// 手动刷新：不带模型上下文，但应挂载到全部 cursor 分组。
+	require.NoError(t, svc.RefreshAccounts(ctx, qk.ID))
+
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).WithGroups().All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1, "manual refresh must persist the pulled account")
+	accID := accs[0].ID
+
+	// group_count > 0：手动拉到的账号已挂组（修复前恒 0）。
+	require.Greater(t, len(accs[0].Edges.Groups), 0, "manual refresh must mount account to groups (group_count > 0)")
+	// 挂入 composite 聚合组（白名单未启用）与白名单显式含 cursor 的组。
+	require.True(t, accountGroupLinked(t, ctx, client, accID, grpComposite.ID),
+		"manual refresh must mount account to whitelist-disabled composite group")
+	require.True(t, accountGroupLinked(t, ctx, client, accID, grpWhitelistCursor.ID),
+		"manual refresh must mount account to whitelist-containing-cursor group")
+	// 不挂入白名单启用且显式拒绝 cursor 的组。
+	require.False(t, accountGroupLinked(t, ctx, client, accID, grpRejectCursor.ID),
+		"manual refresh must NOT mount account to whitelist-rejecting-cursor group")
+	// 手动刷新成功路径清 exhausted。
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.False(t, got.Exhausted, "manual refresh success path must clear exhausted")
+}
+
 // ---------------------------------------------------------------------------
 // FIX-1 F1/F4：生产用 QuotaKeyModelWaterProvider 口径用例 + §13.3 解析哨兵用例
 //（unit 标签，连本地 quota_test 库）。
@@ -1521,6 +1605,16 @@ func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	// 模型名全局唯一：避免持久库中上一轮遗留的同名白名单分组把遗留账号计入本轮水位。
 	modelA := fix1UniqueModel("cursor-fix1-a")
 	modelB := fix1UniqueModel("cursor-fix1-b")
+	// 持久库清理：历史轮次遗留的 c11-grp-cursor-* 组（无主、白名单各异）会把遗留账号计入
+	// 本轮水位（R3-2 后 WaterLevel 扫全 cursor 平台组）。用例级清理只删本前缀测试自建组，
+	// 不触碰生产数据（此库仅测试使用）。前置清理在建组前执行，t.Cleanup 兜底本轮产物。
+	cleanupLegacyCursorGroups := func() {
+		_, _ = client.Group.Delete().
+			Where(entgroup.NameHasPrefix("c11-grp-cursor-")).
+			Exec(context.Background())
+	}
+	cleanupLegacyCursorGroups()
+	t.Cleanup(cleanupLegacyCursorGroups)
 	grpA := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
 	grpB := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
 

@@ -26,6 +26,9 @@
             <button class="btn btn-secondary" :disabled="sweeping" @click="openSweepDialog">
               {{ t('admin.quotaKeys.sweepExpired') }}
             </button>
+            <button class="btn btn-secondary" @click="showConfigModal = true">
+              {{ t('admin.quotaKeys.autoEntry.title') }}
+            </button>
             <button class="btn btn-primary" @click="openCreateDialog">
               <Icon name="plus" size="md" class="mr-1" />
               {{ t('admin.quotaKeys.create') }}
@@ -110,6 +113,14 @@
                 @click="handleClearExhausted(row)"
               >
                 <Icon name="checkCircle" size="sm" />
+              </button>
+              <button
+                class="rounded p-1 text-gray-400 transition-colors hover:text-blue-600 disabled:opacity-40 dark:hover:text-blue-400"
+                :disabled="busyId === row.id"
+                :title="t('admin.quotaKeys.probe.button')"
+                @click="handleProbe(row)"
+              >
+                <Icon name="chart" size="sm" />
               </button>
               <button
                 class="rounded p-1 text-gray-400 transition-colors hover:text-red-600 dark:hover:text-red-400"
@@ -335,6 +346,80 @@
       @confirm="confirmSweep"
       @cancel="showSweepDialog = false"
     />
+
+    <!-- 入库可配置（D2-a） -->
+    <AutoEntryConfigModal :show="showConfigModal" @close="showConfigModal = false" />
+
+    <!-- 用量查询（D2-a probe_quota）结果 -->
+    <BaseDialog
+      :show="showProbeDialog"
+      :title="t('admin.quotaKeys.probe.title')"
+      width="normal"
+      @close="showProbeDialog = false"
+    >
+      <div v-if="probing" class="py-8 text-center text-sm text-gray-500 dark:text-gray-400">
+        {{ t('admin.quotaKeys.probe.probing') }}
+      </div>
+      <dl v-else-if="probeResult" class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.group') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.group || t('admin.quotaKeys.na') }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.status') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.status_code }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.used') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.used }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.max') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.max }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.deviceCount') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.device_count }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.deviceMaxCount') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.device_max_count }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.expiredAt') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">
+            {{ probeResult.expired_at ? formatDateTime(probeResult.expired_at) : t('admin.quotaKeys.never') }}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            {{ t('admin.quotaKeys.probe.accountsWritten') }}
+          </dt>
+          <dd class="mt-0.5 text-sm text-gray-900 dark:text-gray-100">{{ probeResult.accounts_written }}</dd>
+        </div>
+      </dl>
+      <p v-else-if="probeError" class="text-sm text-red-600 dark:text-red-400">{{ probeError }}</p>
+
+      <template #footer>
+        <div class="flex items-center justify-end">
+          <button class="btn btn-secondary" @click="showProbeDialog = false">{{ t('common.close') }}</button>
+        </div>
+      </template>
+    </BaseDialog>
   </AppLayout>
 </template>
 
@@ -349,7 +434,8 @@ import type {
   QuotaKey,
   QuotaKeyDetail,
   CreateQuotaKeyRequest,
-  UpdateQuotaKeyRequest
+  UpdateQuotaKeyRequest,
+  KeyQuotaInfo
 } from '@/api/admin/quotaKeys'
 import type { Column } from '@/components/common/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -360,6 +446,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import TextArea from '@/components/common/TextArea.vue'
 import Icon from '@/components/icons/Icon.vue'
+import AutoEntryConfigModal from '@/components/quotaKeys/AutoEntryConfigModal.vue'
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -374,6 +461,12 @@ const showFormDialog = ref(false)
 const showDetailDialog = ref(false)
 const showDeleteDialog = ref(false)
 const showSweepDialog = ref(false)
+// D2-a：入库可配置弹窗 + 用量查询弹窗。
+const showConfigModal = ref(false)
+const showProbeDialog = ref(false)
+const probing = ref(false)
+const probeResult = ref<KeyQuotaInfo | null>(null)
+const probeError = ref('')
 const editing = ref<QuotaKey | null>(null)
 const deleting = ref<QuotaKey | null>(null)
 const detail = ref<QuotaKeyDetail | null>(null)
@@ -564,6 +657,25 @@ async function handleClearExhausted(row: QuotaKey) {
   } catch (err: unknown) {
     appStore.showError(extractApiErrorMessage(err, t('admin.quotaKeys.clearError')))
   } finally {
+    busyId.value = null
+  }
+}
+
+// 用量查询（D2-a probe_quota）：调后端 lookup 并弹窗展示 key_info 摘要。
+async function handleProbe(row: QuotaKey) {
+  if (busyId.value !== null) return
+  busyId.value = row.id
+  showProbeDialog.value = true
+  probing.value = true
+  probeResult.value = null
+  probeError.value = ''
+  try {
+    const info = await adminAPI.quotaKeys.probeQuota(row.id)
+    probeResult.value = info
+  } catch (err: unknown) {
+    probeError.value = extractApiErrorMessage(err, t('admin.quotaKeys.probe.error'))
+  } finally {
+    probing.value = false
     busyId.value = null
   }
 }

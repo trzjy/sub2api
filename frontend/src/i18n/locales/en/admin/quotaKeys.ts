@@ -83,6 +83,39 @@ export default {
     refreshError: 'Manual refresh failed',
     clearError: 'Failed to clear exhausted',
     sweepError: 'Failed to sweep expired quota keys',
-    detailLoadError: 'Failed to load quota key detail'
+    detailLoadError: 'Failed to load quota key detail',
+    autoEntry: {
+      title: 'Entry Config',
+      description: 'Configure entry vendor selection, model list and defaults (concurrency TBD after measurement).',
+      vendors: 'Vendor Selection',
+      vendorOpenAI: 'OpenAI',
+      vendorAnthropic: 'Anthropic',
+      vendorGoogle: 'Google',
+      vendorXAI: 'xAI',
+      vendorDeepSeek: 'DeepSeek',
+      vendorMistral: 'Mistral',
+      models: 'Model List (filtered by vendor)',
+      priority: 'Priority',
+      rateMultiplier: 'Rate Multiplier',
+      concurrency: 'Concurrency',
+      concurrencyPlaceholder: 'TBD after measurement',
+      save: 'Save Config',
+      saved: 'Entry config saved',
+      saveError: 'Failed to save entry config'
+    },
+    probe: {
+      button: 'Probe Quota',
+      probing: 'Probing…',
+      title: 'Quota Key Usage',
+      group: 'Plan',
+      status: 'Status',
+      used: 'Used',
+      max: 'Max Quota',
+      deviceCount: 'Devices',
+      deviceMaxCount: 'Max Devices',
+      expiredAt: 'Expires At',
+      accountsWritten: 'Accounts Written',
+      error: 'Failed to probe quota'
+    }
   }
 }
