@@ -15,6 +15,7 @@ const (
 	CursorVendorGoogle    = "google"
 	CursorVendorXAI       = "xai"
 	CursorVendorDeepSeek  = "deepseek"
+	CursorVendorMuse      = "muse"
 	CursorVendorMistral   = "mistral"
 )
 
@@ -26,6 +27,7 @@ var cursorKnownVendors = map[string]struct{}{
 	CursorVendorXAI:       {},
 	CursorVendorDeepSeek:  {},
 	CursorVendorMistral:   {},
+	CursorVendorMuse:      {},
 }
 
 // CursorModelEntry 是静态清单中的一条模型记录（{id, vendor}）。
@@ -38,54 +40,22 @@ type CursorModelEntry struct {
 //
 // 仅含 {id, vendor}；不在此处保存任何额度/探活信息。新增条目不影响 schema。
 var CursorModelCatalog = []CursorModelEntry{
+	// ---- Anthropic（shareai 像素工匠渠道实供，2026-10-15 用户截图名单）----
+	{ID: "claude-opus-5.5", Vendor: CursorVendorAnthropic},
+	{ID: "claude-fable-5.1", Vendor: CursorVendorAnthropic},
+	{ID: "claude-sonnet-5.5", Vendor: CursorVendorAnthropic},
 	// ---- OpenAI ----
-	{ID: "gpt-4.1", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-4.1-mini", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-4.1-nano", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-4o", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-4o-mini", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-4.5-preview", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-5", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-5-mini", Vendor: CursorVendorOpenAI},
-	{ID: "gpt-5-nano", Vendor: CursorVendorOpenAI},
-	{ID: "o1", Vendor: CursorVendorOpenAI},
-	{ID: "o1-mini", Vendor: CursorVendorOpenAI},
-	{ID: "o3", Vendor: CursorVendorOpenAI},
-	{ID: "o3-mini", Vendor: CursorVendorOpenAI},
-	{ID: "o4-mini", Vendor: CursorVendorOpenAI},
-	{ID: "chatgpt-4o-latest", Vendor: CursorVendorOpenAI},
-
-	// ---- Anthropic ----
-	{ID: "claude-3-5-sonnet", Vendor: CursorVendorAnthropic},
-	{ID: "claude-3-5-haiku", Vendor: CursorVendorAnthropic},
-	{ID: "claude-3-7-sonnet", Vendor: CursorVendorAnthropic},
-	{ID: "claude-3-opus", Vendor: CursorVendorAnthropic},
-	{ID: "claude-3-haiku", Vendor: CursorVendorAnthropic},
-	{ID: "claude-sonnet-4", Vendor: CursorVendorAnthropic},
-	{ID: "claude-opus-4", Vendor: CursorVendorAnthropic},
-	{ID: "claude-4-sonnet", Vendor: CursorVendorAnthropic},
-	{ID: "claude-4-opus", Vendor: CursorVendorAnthropic},
-
+	{ID: "gpt-6.1-sol", Vendor: CursorVendorOpenAI},
+	{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI},
+	{ID: "gpt-5.6-sol", Vendor: CursorVendorOpenAI},
+	{ID: "gpt-6-astra", Vendor: CursorVendorOpenAI},
 	// ---- Google ----
-	{ID: "gemini-1.5-pro", Vendor: CursorVendorGoogle},
-	{ID: "gemini-1.5-flash", Vendor: CursorVendorGoogle},
-	{ID: "gemini-2.0-pro", Vendor: CursorVendorGoogle},
-	{ID: "gemini-2.0-flash", Vendor: CursorVendorGoogle},
-	{ID: "gemini-2.5-pro", Vendor: CursorVendorGoogle},
-	{ID: "gemini-2.5-flash", Vendor: CursorVendorGoogle},
-
+	{ID: "gemini-3.8-flash", Vendor: CursorVendorGoogle},
 	// ---- xAI ----
-	{ID: "grok-3", Vendor: CursorVendorXAI},
-	{ID: "grok-3-mini", Vendor: CursorVendorXAI},
-	{ID: "grok-4", Vendor: CursorVendorXAI},
-
-	// ---- DeepSeek ----
-	{ID: "deepseek-chat", Vendor: CursorVendorDeepSeek},
-	{ID: "deepseek-reasoner", Vendor: CursorVendorDeepSeek},
-
-	// ---- Mistral ----
-	{ID: "mistral-large", Vendor: CursorVendorMistral},
-	{ID: "mistral-small", Vendor: CursorVendorMistral},
+	{ID: "grok-4.7", Vendor: CursorVendorXAI},
+	{ID: "grok-4.6", Vendor: CursorVendorXAI},
+	// ---- Muse（渠道自有）----
+	{ID: "muse-spark-1.3", Vendor: "muse"},
 }
 
 // CursorModelIDSet 返回静态清单中所有模型 ID 的集合（去重），供交集运算 O(1) 命中。

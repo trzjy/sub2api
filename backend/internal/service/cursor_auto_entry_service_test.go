@@ -26,9 +26,12 @@ func TestValidateCursorModelCatalog(t *testing.T) {
 
 func TestCursorModelIDSetContainsKnown(t *testing.T) {
 	set := CursorModelIDSet()
-	require.Contains(t, set, "gpt-4.1")
-	require.Contains(t, set, "claude-3-7-sonnet")
-	require.Contains(t, set, "gemini-2.5-pro")
+	// 2026-10-15 用户裁定：清单 = shareai 像素工匠渠道实供名单（Cursor 客户端实截），
+	// 旧官方模型名（gpt-4.1 等）已不适用于该渠道。
+	require.Contains(t, set, "gpt-6.1-sol")
+	require.Contains(t, set, "claude-opus-5.5")
+	require.Contains(t, set, "grok-4.7")
+	require.Contains(t, set, "muse-spark-1.3")
 }
 
 // ---------------------------------------------------------------------------
