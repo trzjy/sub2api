@@ -490,10 +490,12 @@ type AccountListItem struct {
 // 这是 C2 的 DTO 投影骨架；完整字段由 C5 的 QuotaKey DTO 契约最终定型，本结构
 // 仅承载展示所需的最小安全子集。
 type QuotaKey struct {
-	ID         int64  `json:"id"`
-	CodeMasked string `json:"code_masked,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Exhausted  bool   `json:"exhausted,omitempty"`
+	ID           int64  `json:"id"`
+	CodeMasked   string `json:"code_masked,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Exhausted    bool   `json:"exhausted,omitempty"`
+	AccountCount int64  `json:"account_count,omitempty"`
+	WorkingCount int64  `json:"working_count,omitempty"`
 }
 
 // AccountListResponse 是管理员账号列表的顶层响应 DTO（v3.3 §4.5 / C2）。
