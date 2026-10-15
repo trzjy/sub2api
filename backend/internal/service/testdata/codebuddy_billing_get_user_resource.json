@@ -16,8 +16,8 @@
             "CapacityType": 4,
             "CapacityUnit": "credits",
             "CreateTime": 1789256769000,
-            "CycleStartTime": "2026-09-01 00:00:00",
-            "CycleEndTime": "2026-09-30 23:59:59",
+            "CycleStartTime": "2099-09-01 00:00:00",
+            "CycleEndTime": "2099-09-30 23:59:59",
             "DeductionStartTime": 1789256769000,
             "DeductionEndTime": 2049579968000,
             "FeeType": 1,
@@ -74,7 +74,7 @@
             "BindRecords": [
               {
                 "BindObjectId": "acc-test-bind-1",
-                "StartTime": "2026-09-13 07:46:09",
+                "StartTime": "2099-09-13 07:46:09",
                 "EndTime": "9999-99-99 99:99:99",
                 "Properties": []
               }
@@ -88,8 +88,8 @@
             "CapacityType": 1,
             "CapacityUnit": "credits",
             "CreateTime": 1789256770000,
-            "CycleStartTime": "2026-09-13 07:46:10",
-            "CycleEndTime": "2026-10-13 07:46:09",
+            "CycleStartTime": "2099-09-13 07:46:10",
+            "CycleEndTime": "2099-10-13 07:46:09",
             "DeductionStartTime": 1789256770000,
             "DeductionEndTime": 1791848769000,
             "FeeType": 1,
@@ -146,8 +146,8 @@
             "BindRecords": [
               {
                 "BindObjectId": "acc-test-bind-1",
-                "StartTime": "2026-09-13 07:46:10",
-                "EndTime": "2026-10-13 07:46:09",
+                "StartTime": "2099-09-13 07:46:10",
+                "EndTime": "2099-10-13 07:46:09",
                 "Properties": []
               }
             ]
