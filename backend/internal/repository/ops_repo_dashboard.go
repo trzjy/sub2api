@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -63,6 +64,17 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 	if err != nil {
 		if isQueryTimeoutErr(err) {
 			degraded = true
+			// duration/ttft are dropped below, which reads as "no slow requests".
+			// Log it: absence of latency data under load is itself a signal.
+			platform, groupID := filterLogFields(filter)
+			slog.Warn("ops dashboard latency percentiles unavailable: raw latency query timed out, duration/ttft omitted from response",
+				"timeout", opsRawLatencyQueryTimeout.String(),
+				"start", start,
+				"end", end,
+				"platform", platform,
+				"group_id", groupID,
+				"error", err.Error(),
+			)
 			duration = service.OpsPercentiles{}
 			ttft = service.OpsPercentiles{}
 		} else {
@@ -107,21 +119,10 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 		}
 	}
 
-	qpsAvg := roundTo1DP(float64(requestCountTotal) / windowSeconds)
-	tpsAvg := roundTo1DP(float64(tokenConsumed) / windowSeconds)
+	qpsAvg := roundRate(float64(requestCountTotal) / windowSeconds)
+	tpsAvg := roundRate(float64(tokenConsumed) / windowSeconds)
 	if degraded {
-		if qpsCurrent <= 0 {
-			qpsCurrent = qpsAvg
-		}
-		if tpsCurrent <= 0 {
-			tpsCurrent = tpsAvg
-		}
-		if qpsPeak <= 0 {
-			qpsPeak = roundTo1DP(math.Max(qpsCurrent, qpsAvg))
-		}
-		if tpsPeak <= 0 {
-			tpsPeak = roundTo1DP(math.Max(tpsCurrent, tpsAvg))
-		}
+		fillDegradedRates(&qpsCurrent, &tpsCurrent, &qpsPeak, &tpsPeak, qpsAvg, tpsAvg, filter, start, end)
 	}
 
 	return &service.OpsDashboardOverview{
@@ -159,6 +160,51 @@ func (r *opsRepository) getDashboardOverviewRaw(ctx context.Context, filter *ser
 		Duration: duration,
 		TTFT:     ttft,
 	}, nil
+}
+
+// filterLogFields returns nil-safe filter dimensions for log lines.
+// buildUsageWhere/buildErrorWhere both tolerate a nil filter, so the queries
+// below can run with one and the log statements must not dereference it.
+func filterLogFields(filter *service.OpsDashboardFilter) (platform string, groupID *int64) {
+	if filter == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(filter.Platform), filter.GroupID
+}
+
+// fillDegradedRates backfills current/peak rates with window averages when the
+// realtime or peak query timed out, so the panel shows a plausible number
+// instead of a misleading 0. The substituted fields are not the real
+// current/peak values, so log which ones were faked.
+func fillDegradedRates(qpsCurrent, tpsCurrent, qpsPeak, tpsPeak *float64, qpsAvg, tpsAvg float64, filter *service.OpsDashboardFilter, start, end time.Time) {
+	var filled []string
+	if *qpsCurrent <= 0 {
+		*qpsCurrent = qpsAvg
+		filled = append(filled, "qps.current")
+	}
+	if *tpsCurrent <= 0 {
+		*tpsCurrent = tpsAvg
+		filled = append(filled, "tps.current")
+	}
+	if *qpsPeak <= 0 {
+		*qpsPeak = roundRate(math.Max(*qpsCurrent, qpsAvg))
+		filled = append(filled, "qps.peak")
+	}
+	if *tpsPeak <= 0 {
+		*tpsPeak = roundRate(math.Max(*tpsCurrent, tpsAvg))
+		filled = append(filled, "tps.peak")
+	}
+	if len(filled) == 0 {
+		return
+	}
+	platform, groupID := filterLogFields(filter)
+	slog.Warn("ops dashboard rate query degraded: current/peak rates backfilled with window averages, these are not measured peaks",
+		"fields", strings.Join(filled, ","),
+		"start", start,
+		"end", end,
+		"platform", platform,
+		"group_id", groupID,
+	)
 }
 
 type opsDashboardPartial struct {
@@ -241,8 +287,13 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 	tokenConsumed := preagg.tokenConsumed + head.tokenConsumed + tail.tokenConsumed
 
 	// Approximate percentiles across segments:
-	// - p50/p90/avg: weighted average by success_count
-	// - p95/p99/max: max (conservative tail)
+	// - p50/p90/p95/p99/avg: weighted average by sample count (see below)
+	// - max: max (exact for a maximum)
+	// Merging tail quantiles from separate segments is an approximation: a true
+	// pooled p95/p99 cannot be reconstructed from per-segment quantiles without
+	// the raw distribution. We use the sample-weighted average, which tracks the
+	// pooled value far better than max-of-segments (which reports the worst
+	// single segment's tail and inflates the figure as segment count grows).
 	duration := combineApproxPercentiles([]opsPercentileSegment{
 		{weight: preagg.successCount, p: preagg.duration},
 		{weight: head.successCount, p: head.duration},
@@ -290,21 +341,10 @@ func (r *opsRepository) getDashboardOverviewPreaggregated(ctx context.Context, f
 		}
 	}
 
-	qpsAvg := roundTo1DP(float64(requestCountTotal) / windowSeconds)
-	tpsAvg := roundTo1DP(float64(tokenConsumed) / windowSeconds)
+	qpsAvg := roundRate(float64(requestCountTotal) / windowSeconds)
+	tpsAvg := roundRate(float64(tokenConsumed) / windowSeconds)
 	if degraded {
-		if qpsCurrent <= 0 {
-			qpsCurrent = qpsAvg
-		}
-		if tpsCurrent <= 0 {
-			tpsCurrent = tpsAvg
-		}
-		if qpsPeak <= 0 {
-			qpsPeak = roundTo1DP(math.Max(qpsCurrent, qpsAvg))
-		}
-		if tpsPeak <= 0 {
-			tpsPeak = roundTo1DP(math.Max(tpsCurrent, tpsAvg))
-		}
+		fillDegradedRates(&qpsCurrent, &tpsCurrent, &qpsPeak, &tpsPeak, qpsAvg, tpsAvg, filter, start, end)
 	}
 
 	return &service.OpsDashboardOverview{
@@ -493,6 +533,10 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 		p50W   int64
 		p90Sum float64
 		p90W   int64
+		p95Sum float64
+		p95W   int64
+		p99Sum float64
+		p99W   int64
 		avgSum float64
 		avgW   int64
 	)
@@ -501,17 +545,21 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 		ttftP50W   int64
 		ttftP90Sum float64
 		ttftP90W   int64
+		ttftP95Sum float64
+		ttftP95W   int64
+		ttftP99Sum float64
+		ttftP99W   int64
 		ttftAvgSum float64
 		ttftAvgW   int64
 	)
 
+	// Max is the one statistic that merges exactly with max-of-segments, so it keeps
+	// the max combiner. p95/p99 are NOT mergeable that way: taking the max over hourly
+	// buckets yields the worst single bucket's tail, not the window's tail, and the
+	// bias grows with bucket count. They merge as sample-weighted averages below.
 	var (
-		p95Max *int
-		p99Max *int
 		maxMax *int
 
-		ttftP95Max *int
-		ttftP99Max *int
 		ttftMaxMax *int
 	)
 
@@ -537,6 +585,14 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 				p90Sum += float64(row.durationP90.Int64) * float64(row.successCount)
 				p90W += row.successCount
 			}
+			if row.durationP95.Valid {
+				p95Sum += float64(row.durationP95.Int64) * float64(row.successCount)
+				p95W += row.successCount
+			}
+			if row.durationP99.Valid {
+				p99Sum += float64(row.durationP99.Int64) * float64(row.successCount)
+				p99W += row.successCount
+			}
 			if row.durationAvg.Valid {
 				avgSum += row.durationAvg.Float64 * float64(row.successCount)
 				avgW += row.successCount
@@ -555,24 +611,20 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 				ttftP90Sum += float64(row.ttftP90.Int64) * float64(row.ttftSampleCount)
 				ttftP90W += row.ttftSampleCount
 			}
+			if row.ttftP95.Valid {
+				ttftP95Sum += float64(row.ttftP95.Int64) * float64(row.ttftSampleCount)
+				ttftP95W += row.ttftSampleCount
+			}
+			if row.ttftP99.Valid {
+				ttftP99Sum += float64(row.ttftP99.Int64) * float64(row.ttftSampleCount)
+				ttftP99W += row.ttftSampleCount
+			}
 			if row.ttftAvg.Valid {
 				ttftAvgSum += row.ttftAvg.Float64 * float64(row.ttftSampleCount)
 				ttftAvgW += row.ttftSampleCount
 			}
 		}
 
-		if row.durationP95.Valid {
-			v := int(row.durationP95.Int64)
-			if p95Max == nil || v > *p95Max {
-				p95Max = &v
-			}
-		}
-		if row.durationP99.Valid {
-			v := int(row.durationP99.Int64)
-			if p99Max == nil || v > *p99Max {
-				p99Max = &v
-			}
-		}
 		if row.durationMax.Valid {
 			v := int(row.durationMax.Int64)
 			if maxMax == nil || v > *maxMax {
@@ -580,18 +632,6 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 			}
 		}
 
-		if row.ttftP95.Valid {
-			v := int(row.ttftP95.Int64)
-			if ttftP95Max == nil || v > *ttftP95Max {
-				ttftP95Max = &v
-			}
-		}
-		if row.ttftP99.Valid {
-			v := int(row.ttftP99.Int64)
-			if ttftP99Max == nil || v > *ttftP99Max {
-				ttftP99Max = &v
-			}
-		}
 		if row.ttftMax.Valid {
 			v := int(row.ttftMax.Int64)
 			if ttftMaxMax == nil || v > *ttftMaxMax {
@@ -609,8 +649,14 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 		v := int(math.Round(p90Sum / float64(p90W)))
 		out.duration.P90 = &v
 	}
-	out.duration.P95 = p95Max
-	out.duration.P99 = p99Max
+	if p95W > 0 {
+		v := int(math.Round(p95Sum / float64(p95W)))
+		out.duration.P95 = &v
+	}
+	if p99W > 0 {
+		v := int(math.Round(p99Sum / float64(p99W)))
+		out.duration.P99 = &v
+	}
 	if avgW > 0 {
 		v := int(math.Round(avgSum / float64(avgW)))
 		out.duration.Avg = &v
@@ -626,8 +672,14 @@ func aggregateHourlyRows(rows []opsHourlyMetricsRow) opsDashboardPartial {
 		v := int(math.Round(ttftP90Sum / float64(ttftP90W)))
 		out.ttft.P90 = &v
 	}
-	out.ttft.P95 = ttftP95Max
-	out.ttft.P99 = ttftP99Max
+	if ttftP95W > 0 {
+		v := int(math.Round(ttftP95Sum / float64(ttftP95W)))
+		out.ttft.P95 = &v
+	}
+	if ttftP99W > 0 {
+		v := int(math.Round(ttftP99Sum / float64(ttftP99W)))
+		out.ttft.P99 = &v
+	}
 	if ttftAvgW > 0 {
 		v := int(math.Round(ttftAvgSum / float64(ttftAvgW)))
 		out.ttft.Avg = &v
@@ -648,6 +700,17 @@ func (r *opsRepository) queryRawPartial(ctx context.Context, filter *service.Ops
 	cancelLatency()
 	if err != nil {
 		if isQueryTimeoutErr(err) {
+			// Same silent-underreport hazard as getDashboardOverviewRaw: the
+			// fragment contributes no latency percentiles and no TTFT samples.
+			platform, groupID := filterLogFields(filter)
+			slog.Warn("ops dashboard latency percentiles unavailable: raw fragment latency query timed out, fragment contributes no duration/ttft",
+				"timeout", opsRawLatencyQueryTimeout.String(),
+				"start", start,
+				"end", end,
+				"platform", platform,
+				"group_id", groupID,
+				"error", err.Error(),
+			)
 			duration = service.OpsPercentiles{}
 			ttft = service.OpsPercentiles{}
 			ttftSampleCount = 0
@@ -745,9 +808,11 @@ func combineApproxPercentiles(segments []opsPercentileSegment) service.OpsPercen
 	return service.OpsPercentiles{
 		P50: weightedInt(func(p service.OpsPercentiles) *int { return p.P50 }),
 		P90: weightedInt(func(p service.OpsPercentiles) *int { return p.P90 }),
-		P95: maxInt(func(p service.OpsPercentiles) *int { return p.P95 }),
-		P99: maxInt(func(p service.OpsPercentiles) *int { return p.P99 }),
+		P95: weightedInt(func(p service.OpsPercentiles) *int { return p.P95 }),
+		P99: weightedInt(func(p service.OpsPercentiles) *int { return p.P99 }),
 		Avg: weightedInt(func(p service.OpsPercentiles) *int { return p.Avg }),
+		// Max is exactly mergeable: max over segments IS the window max. Only Max
+		// keeps the max combiner; see the note above aggregateHourlyRows.
 		Max: maxInt(func(p service.OpsPercentiles) *int { return p.Max }),
 	}
 }
@@ -788,6 +853,15 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 
+// queryUsageCounts returns the success count and the token total backing the
+// dashboard's TPS figures.
+//
+// TPS caliber: token_consumed deliberately includes cache_creation_tokens and
+// cache_read_tokens, so TPS is NOT a pure generation rate. On workloads with a
+// high cache hit ratio TPS is systematically inflated (cache reads are billed
+// and counted but produce no new tokens). The field is consumed by the frontend
+// and by the ops_metrics_collector pre-aggregation, so the numerator is left
+// unchanged; treat the dashboard TPS as "total tokens/s", not "output tokens/s".
 func (r *opsRepository) queryUsageCounts(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (successCount int64, tokenConsumed int64, err error) {
 	join, where, args, _ := buildUsageWhere(filter, start, end, 1)
 
@@ -878,12 +952,24 @@ func (r *opsRepository) queryErrorCounts(ctx context.Context, filter *service.Op
 ) {
 	where, args, _ := buildErrorWhere(filter, start, end, 1)
 
+	// Column semantics in ops_error_logs:
+	//   - status_code           = the FINAL client-facing HTTP status of the request.
+	//   - upstream_status_code  = the status of the last upstream attempt (may be set
+	//                             even when the request as a whole succeeded).
+	//
+	// ops_error_logs also stores "recovered" rows: logOpsRecoveredUpstream records a
+	// provider-owned error for requests that hit an upstream failure but were ultimately
+	// served successfully, so those rows carry a 2xx status_code alongside a non-2xx
+	// upstream_status_code. The upstream_* numerators must therefore be gated on the
+	// FINAL status (status_code >= 400), the same gate error_total/error_sla use —
+	// otherwise requests that actually succeeded are counted as upstream errors.
+	// Rows where upstream really failed still have status_code >= 400 and are kept.
 	q := `
 SELECT
   COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400), 0) AS error_total,
   COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited), 0) AS business_limited,
   COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited), 0) AS error_sla,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)), 0) AS upstream_excl,
+  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)), 0) AS upstream_excl,
   COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 429), 0) AS upstream_429,
   COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 529), 0) AS upstream_529
 FROM ops_error_logs
@@ -914,11 +1000,14 @@ func (r *opsRepository) queryCurrentRates(ctx context.Context, filter *service.O
 		return 0, 0, err
 	}
 
-	qpsCurrent = roundTo1DP(float64(successCount1m+errorCount1m) / 60.0)
-	tpsCurrent = roundTo1DP(float64(token1m) / 60.0)
+	qpsCurrent = roundRate(float64(successCount1m+errorCount1m) / 60.0)
+	tpsCurrent = roundRate(float64(token1m) / 60.0)
 	return qpsCurrent, tpsCurrent, nil
 }
 
+// queryPeakRates returns the busiest-minute QPS/TPS inside the window.
+// Like queryUsageCounts, the token numerator includes cache tokens, so tpsPeak
+// is "total tokens/s at peak", not a pure generation rate.
 func (r *opsRepository) queryPeakRates(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (qpsPeak float64, tpsPeak float64, err error) {
 	usageJoin, usageWhere, usageArgs, next := buildUsageWhere(filter, start, end, 1)
 	errorWhere, errorArgs, _ := buildErrorWhere(filter, start, end, next)
@@ -960,10 +1049,10 @@ FROM combined`
 		return 0, 0, err
 	}
 	if maxReqPerMinute.Valid && maxReqPerMinute.Int64 > 0 {
-		qpsPeak = roundTo1DP(float64(maxReqPerMinute.Int64) / 60.0)
+		qpsPeak = roundRate(float64(maxReqPerMinute.Int64) / 60.0)
 	}
 	if maxTokensPerMinute.Valid && maxTokensPerMinute.Int64 > 0 {
-		tpsPeak = roundTo1DP(float64(maxTokensPerMinute.Int64) / 60.0)
+		tpsPeak = roundRate(float64(maxTokensPerMinute.Int64) / 60.0)
 	}
 	return qpsPeak, tpsPeak, nil
 }
@@ -1062,6 +1151,22 @@ func safeDivideFloat64(numerator float64, denominator float64) float64 {
 
 func roundTo1DP(v float64) float64 {
 	return math.Round(v*10) / 10
+}
+
+// roundRate rounds a QPS/TPS figure for display on the ops dashboard.
+//
+// Rates here are routinely far below 1 (469 requests over a 1h window is
+// 0.13 QPS), and at 1 decimal every such value collapses onto 0.0/0.1 and
+// loses all resolution. Keep 2 decimals for values >= 1, and 4 decimals below
+// 1 so low-rate windows stay distinguishable.
+//
+// Dashboard-scoped on purpose: roundTo1DP is shared with the realtime traffic
+// and trend queries, whose precision contract is unchanged.
+func roundRate(v float64) float64 {
+	if math.Abs(v) < 1 {
+		return math.Round(v*10000) / 10000
+	}
+	return math.Round(v*100) / 100
 }
 
 func roundTo4DP(v float64) float64 {

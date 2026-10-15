@@ -1386,7 +1386,11 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 }
 
 // writeAnthropicError writes an error response in Anthropic Messages API format.
+// 与 writeChatCompletionsError 一致地标记响应已提交：两者都是「错误已写客户端、
+// 不可再 failover 换号重试」的收口点，缺失该标记会让已提交响应被后续路径
+// 当作仍可重试，产生重复响应或换号后二次写入。
 func writeAnthropicError(c *gin.Context, statusCode int, errType, message string) {
+	MarkResponseCommitted(c)
 	c.JSON(statusCode, gin.H{
 		"type": "error",
 		"error": gin.H{

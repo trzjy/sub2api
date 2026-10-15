@@ -194,6 +194,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsAnthropic(
 		if isOpenAICNFirstByteTimeout(err) {
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
 		}
+		recordAggregatedStreamUpstreamError(c, account, resp, err)
 		writeAnthropicError(c, http.StatusBadGateway, "api_error", err.Error())
 		return nil, err
 	}

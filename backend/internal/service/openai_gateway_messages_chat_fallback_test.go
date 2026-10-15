@@ -879,3 +879,59 @@ func TestForwardAnthropicViaRawChatCompletions_ConvertedNonstreamHasNoHeartbeatO
 	_, upstreamCtxHB := UpstreamHeartbeatFromContext(upstream.lastReq.Context())
 	require.False(t, upstreamCtxHB, "转换路径不得在真实上游请求 ctx 上安装心跳 owner")
 }
+
+// 整改3 路径B：聚合失败收口层此前只 c.JSON、从不写上游错误记录点，
+// 导致该错误在 ops 里 phase=internal / owner=platform，与「从未选中账号」的
+// 选号失败混为一谈。本用例锁定：收口前已登记上游上下文，且不破坏已提交语义。
+func TestForwardAnthropicViaRawChatCompletions_ConvertedRecordsUpstreamErrorContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	body := []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// 上游回 200 SSE 后中途断流：聚合失败（触达过上游，非选号失败）。
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errTailReader{data: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"), err: errors.New("connection reset")}),
+	}}
+	svc := ns2sEnabledService()
+	svc.httpUpstream = upstream
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, ns2sTestAccount(), body, "", "")
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// 上游错误上下文必须已登记：ops 据此把 phase 归为 upstream。
+	// 注意：上游实际返回 200 后中途断流，因此不得伪造 502 进 OpsUpstreamStatusCodeKey
+	//（外审缺陷2：合成 502 曾污染 queryErrorCounts 的上游归属）。attempt 事件承载真实
+	// 上游码（200），phase 由事件而非伪造码判定。
+	require.Equal(t, 0, opsUpstreamStatusCodeForTest(c),
+		"上游回 200 后断流：不得伪造 502 进上游状态码键")
+	events, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "必须登记 attempt 事件")
+	list, ok := events.([]*OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.NotEmpty(t, list)
+	last := list[len(list)-1]
+	require.Equal(t, "aggregated_stream_failed", last.Reason)
+	require.NotEmpty(t, last.Message)
+	require.Equal(t, http.StatusOK, last.UpstreamStatusCode,
+		"attempt 事件须承载真实上游码（200），而非伪造 502")
+
+	// 已提交语义：writeAnthropicError 与 writeChatCompletionsError 统一标记已提交。
+	require.True(t, IsResponseCommitted(c), "错误已写客户端后必须标记响应已提交")
+}
+
+func opsUpstreamStatusCodeForTest(c *gin.Context) int {
+	v, ok := c.Get(OpsUpstreamStatusCodeKey)
+	if !ok {
+		return 0
+	}
+	code, _ := v.(int)
+	return code
+}

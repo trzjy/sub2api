@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -297,7 +298,8 @@ func HasToolSearchTool(tools []ResponsesTool) bool {
 //	parse   — instructions become a system message; input[] is split into items
 //	build   — buildChatMessagesFromItems walks items, attaching reasoning to the
 //	          assistant message that produced a tool call, merging parallel tool
-//	          calls into one assistant message, and skipping item types that have
+//	          calls into one assistant message, folding system/developer messages
+//	          into the leading system message, and skipping item types that have
 //	          no Chat equivalent
 //	normalize — normalizeChatMessages enforces the invariants DeepSeek requires
 //
@@ -359,6 +361,18 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 	// replaying the turn's reasoning on B's message satisfies the contract. Only
 	// a user-side item ends the turn and clears it.
 	var lastTurnReasoning string
+	// hoistedSystem collects the text of every system/developer message found in
+	// input[] so it can be folded into the leading system message below.
+	// Strict chat upstreams only accept system messages at the head of the
+	// conversation — the self-hosted vLLM behind the kimi accounts answers
+	// anything else with 400 "System message must be at the beginning." — and
+	// codex injects a developer notice in the middle of tool execution ("Approved
+	// command prefix saved", see the golden sample at
+	// chatcompletions_responses_request_invariants_test.go), which the in-place
+	// append would strand between an assistant tool_calls message and its tool
+	// reply. Merging mirrors what the codex path already does for system items
+	// (extractSystemMessagesFromInput promotes their text into instructions).
+	var hoistedSystem []string
 	mediaByCallID := make(toolOutputMediaByCallID)
 	invalidFunctionCallIDs := make(map[string]struct{})
 	invalidEmptyFunctionCallOutputs := 0
@@ -576,10 +590,99 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			pendingReasoning = ""
 			lastTurnReasoning = ""
 		}
+		if role == "system" {
+			// developer is mapped to system by chatCompletionsBridgeRole, so both
+			// roles land here. Keep the text, drop the position: a system message
+			// is only legal at the head of the conversation. A notice with no
+			// text carries no instruction and is dropped rather than left to
+			// strand the conversation.
+			if text := chatMessageContentText(chatContent); strings.TrimSpace(text) != "" {
+				hoistedSystem = append(hoistedSystem, text)
+			}
+			continue
+		}
 		messages = append(messages, msg)
 	}
 
-	return messages, mediaByCallID, nil
+	return mergeLeadingSystemMessages(messages, hoistedSystem), mediaByCallID, nil
+}
+
+// maxMergedSystemTextBytes 是合并后 leading system 文本的字节上限。
+//
+// 无上限时的失效形态是静默的：多个 developer 通知按项数线性膨胀，且没有任何
+// 报错——上游只拒绝位置错误的 system，不拒绝超长 system，于是请求照常成功、
+// 语义却被悄悄改变。上限取 256 KiB：远大于任何真实客户端的 instructions +
+// 通知总量（本仓内 codex 默认 instructions 为 KB 量级），又远小于任何上游的
+// system 长度限制与 1M context 窗口，足以在撞限前截断。
+const maxMergedSystemTextBytes = 256 * 1024
+
+// mergeLeadingSystemMessages folds hoisted system/developer text, in order, into
+// the leading system message — the one built from the request's instructions —
+// creating that message when the request carried none. An empty hoist list
+// returns the conversation untouched, so a request without system/developer
+// items converts exactly as before.
+//
+// Two safeguards apply to the fold, both required by production shapes:
+//
+//  1. Exact-equality dedup against the base text. Codex's
+//     extractSystemMessagesFromInput promotes role=="system" item text into
+//     instructions **and** (when omitPromoted==false, i.e.
+//     text.format.type=="json_object") keeps the same item in input with its
+//     role rewritten to developer. The promotion is a lossless copy, so the
+//     hoisted text and the base text are byte-identical and the naive
+//     concatenation yields "X\n\nX". Upstream vLLM does not reject that — it
+//     only rejects *misplaced* system messages — so the duplication silently
+//     changes semantics instead of erroring. Exact equality is the right
+//     predicate here precisely because the duplicate is a copy, not a
+//     paraphrase; genuinely distinct notices still concatenate.
+//
+//  2. A total length cap. Hoisted notices accumulate per item with no bound,
+//     so a long tool session can grow the system message without limit. The
+//     merged text is truncated to maxMergedSystemTextBytes on a rune boundary.
+func mergeLeadingSystemMessages(messages []ChatMessage, hoisted []string) []ChatMessage {
+	if len(hoisted) == 0 {
+		return messages
+	}
+
+	leading := len(messages) > 0 && messages[0].Role == "system"
+	base := ""
+	if leading {
+		base = chatMessageContentText(messages[0].Content)
+	}
+	texts := make([]string, 0, len(hoisted)+1)
+	if strings.TrimSpace(base) != "" {
+		texts = append(texts, base)
+	}
+	for _, text := range hoisted {
+		// Dedup only against the base: the codex promotion copies the base text
+		// verbatim, so equality is the signature of that copy rather than of two
+		// independent notices that happen to read the same.
+		if text == base {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	merged := truncateMergedSystemText(strings.Join(texts, "\n\n"))
+	content, _ := json.Marshal(merged)
+	if leading {
+		messages[0].Content = content
+		return messages
+	}
+	return append([]ChatMessage{{Role: "system", Content: content}}, messages...)
+}
+
+// truncateMergedSystemText clamps s to maxMergedSystemTextBytes, cutting on a
+// rune boundary so the result is always valid UTF-8 (a byte-wise cut would emit
+// a replacement char mid-instruction).
+func truncateMergedSystemText(s string) string {
+	if len(s) <= maxMergedSystemTextBytes {
+		return s
+	}
+	cut := s[:maxMergedSystemTextBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 // extractToolOutputMedia rewrites only recognized image nodes. Media-free
@@ -742,8 +845,10 @@ func appendAssistantToolCall(messages []ChatMessage, toolCall ChatToolCall, pend
 //
 // Codex histories violate this in several ways that the builder alone can't fix:
 //   - a non-tool message lands between an assistant tool_calls message and its
-//     tool replies (e.g. an "Approved command prefix saved" system notice codex
-//     injects mid tool-execution);
+//     tool replies (e.g. a user message the client interleaved mid
+//     tool-execution; the "Approved command prefix saved" system notice codex
+//     also injects there no longer reaches this stage, it is folded into the
+//     leading system message by mergeLeadingSystemMessages);
 //   - a parallel tool_call's sibling output never arrives, or a call is left
 //     dangling by a mid-execution reconnect (unanswered tool_call);
 //   - a tool reply has no announcing assistant tool_call (orphan).

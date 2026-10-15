@@ -72,6 +72,15 @@ func RegisterGatewayRoutes(
 	// 保证校验发生在合成路由改写与调度之前，且只看客户端书写的模型名。
 	groupModelAllowlist := middleware.GroupModelAllowlist()
 
+	// 输出预算准入（max_tokens 上限 + context 长度预检）：挂在 apiKeyAuth 之后、
+	// 调度与出站转发之前，在 bodyLimit 之后。事故形态是 max_tokens=999999999
+	// 哨兵值把上游顶成 400→502（24h 603 条），本护栏在出站前转成明确 400。
+	// 挂链上而非各 handler：全部生成类入口共用同一条链，挂一次即全覆盖，
+	// 避免逐入口复制而漏配。判定逻辑 SSOT 在 service.CheckRequestOutputBudget。
+	outputBudgetGuard := middleware.RequestOutputBudgetGuard(service.RequestOutputBudgetLimitsOrDefault(
+		cfg.Gateway.MaxOutputTokensCeiling, cfg.Gateway.ModelContextWindow,
+	))
+
 	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
 		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax/codebuddy）、通用 other
 		// 与 openai/grok 一样经 OpenAI 网关转发。
@@ -215,6 +224,7 @@ func RegisterGatewayRoutes(
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(compositeTarget)
+	gateway.Use(outputBudgetGuard)
 	gateway.Use(requireGroupAnthropic)
 	{
 		// /v1/messages: auto-route based on group platform
@@ -368,6 +378,7 @@ func RegisterGatewayRoutes(
 	gemini.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
 	gemini.Use(groupModelAllowlist)
 	gemini.Use(compositeGeminiTarget)
+	gemini.Use(outputBudgetGuard)
 	gemini.Use(requireGroupGoogle)
 	{
 		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
@@ -387,7 +398,7 @@ func RegisterGatewayRoutes(
 	// 根路径别名共用中间件链：白名单准入在 apiKeyAuth 之后、compositeTarget
 	// 之前，避免逐条路由手工维护链导致漏挂。
 	rootRoute := func(method, path string, limit gin.HandlerFunc, handler gin.HandlerFunc) {
-		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, handler)
+		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, outputBudgetGuard, requireGroupAnthropic, handler)
 	}
 	rootRoute(http.MethodPost, "/responses", bodyLimit, responsesHandler)
 	rootRoute(http.MethodPost, "/responses/*subpath", bodyLimit, guardResponsesSubpath(responsesHandler))
@@ -398,7 +409,7 @@ func RegisterGatewayRoutes(
 	rootRoute(http.MethodGet, "/models", bodyLimit, modelsHandler)
 	rootRoute(http.MethodPost, "/messages/count_tokens", bodyLimit, countTokensHandler)
 	codexDirect := r.Group("/backend-api/codex")
-	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic)
+	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, outputBudgetGuard, requireGroupAnthropic)
 	{
 		codexDirect.POST("/realtime/calls", h.OpenAIGateway.Live)
 		codexDirect.GET("/:call_id", h.OpenAIGateway.LiveSideband)
@@ -512,6 +523,7 @@ func RegisterGatewayRoutes(
 	antigravityV1.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1.Use(gin.HandlerFunc(apiKeyAuth))
 	antigravityV1.Use(groupModelAllowlist)
+	antigravityV1.Use(outputBudgetGuard)
 	antigravityV1.Use(requireGroupAnthropic)
 	{
 		antigravityV1.POST("/messages", h.Gateway.Messages)
@@ -528,6 +540,7 @@ func RegisterGatewayRoutes(
 	antigravityV1Beta.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1Beta.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
 	antigravityV1Beta.Use(groupModelAllowlist)
+	antigravityV1Beta.Use(outputBudgetGuard)
 	antigravityV1Beta.Use(requireGroupGoogle)
 	{
 		antigravityV1Beta.GET("/models", h.Gateway.GeminiV1BetaListModels)

@@ -161,6 +161,7 @@ func (s *OpenAIGatewayService) convertedChatCompletionsAsResponses(
 		if isOpenAICNFirstByteTimeout(err) {
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
 		}
+		recordAggregatedStreamUpstreamError(c, account, resp, err)
 		writeOpenAIResponsesFallbackError(c, http.StatusBadGateway, "api_error", err.Error())
 		return nil, err
 	}

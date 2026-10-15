@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 func (r *opsRepository) UpsertHourlyMetrics(ctx context.Context, startTime, endTime time.Time) error {
@@ -79,7 +81,11 @@ error_base AS (
     is_business_limited AS is_business_limited,
     error_owner AS error_owner,
     status_code AS client_status_code,
-    COALESCE(upstream_status_code, status_code, 0) AS effective_status_code
+    -- 投影出 upstream_status_code 原名（而非 COALESCE 后的 effective_status_code）：
+    -- 共享谓词模板 OpsUpstreamErrorFilterSQL 内部按 ops_error_logs 的原始列名写
+    -- COALESCE(upstream_status_code, <最终状态列>, 0)，两列同名才能直接套用，不必
+    -- 为 preagg 另写一份谓词副本（那正是本次要消除的口径漂移）。
+    upstream_status_code
   FROM ops_error_logs
   -- Exclude count_tokens requests from error metrics as they are informational probes
   WHERE created_at >= $1 AND created_at < $2
@@ -93,9 +99,13 @@ error_agg AS (
     COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400) AS error_count_total,
     COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400 AND is_business_limited) AS business_limited_count,
     COUNT(*) FILTER (WHERE COALESCE(client_status_code, 0) >= 400 AND NOT is_business_limited) AS error_count_sla,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) NOT IN (429, 529)) AS upstream_error_count_excl_429_529,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) = 429) AS upstream_429_count,
-    COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(effective_status_code, 0) = 529) AS upstream_529_count
+    -- 上游三分子走共享谓词（service 包的 OpsUpstreamError*Filter*）：此处最终状态列
+    -- 是 CTE 投影出的 client_status_code。门控不可省——缺它时 recovered 行（上游失败
+    -- 但最终成功，status_code=2xx）会被算成上游错误，生产实测占该分子 54%
+    -- （preagg 2252 vs raw 1036）。与 raw 仪表盘 / 1min 预聚合 / 趋势图逐字同源。
+    COUNT(*) FILTER (WHERE ` + service.OpsUpstreamErrorFilterSQL("client_status_code") + `) AS upstream_error_count_excl_429_529,
+    COUNT(*) FILTER (WHERE ` + service.OpsUpstream429FilterFor("client_status_code") + `) AS upstream_429_count,
+    COUNT(*) FILTER (WHERE ` + service.OpsUpstream529FilterFor("client_status_code") + `) AS upstream_529_count
   FROM error_base
   GROUP BY GROUPING SETS (
     (bucket_start),
@@ -282,13 +292,21 @@ SELECT
   COALESCE(SUM(upstream_529_count), 0) AS upstream_529_count,
   COALESCE(SUM(token_consumed), 0) AS token_consumed,
 
-  -- Approximation: weighted average for p50/p90, max for p95/p99 (conservative tail).
+  -- Approximation: every percentile is merged as a sample-weighted average.
+  -- A true pooled p95/p99 cannot be reconstructed from per-hour quantiles without
+  -- the raw distribution. Using max for p95/p99 reported the single worst hour's
+  -- tail and inflated the figure as the number of hours grew — a different
+  -- approximation than the Go side (ops_repo_dashboard.go combineApproxPercentiles)
+  -- uses for the same merge, so daily and dashboard windows disagreed. Keep all
+  -- four percentiles on the weighted average so both layers agree.
   ROUND(SUM(duration_p50_ms::double precision * success_count) FILTER (WHERE duration_p50_ms IS NOT NULL)
     / NULLIF(SUM(success_count) FILTER (WHERE duration_p50_ms IS NOT NULL), 0))::int AS duration_p50_ms,
   ROUND(SUM(duration_p90_ms::double precision * success_count) FILTER (WHERE duration_p90_ms IS NOT NULL)
     / NULLIF(SUM(success_count) FILTER (WHERE duration_p90_ms IS NOT NULL), 0))::int AS duration_p90_ms,
-  MAX(duration_p95_ms) AS duration_p95_ms,
-  MAX(duration_p99_ms) AS duration_p99_ms,
+  ROUND(SUM(duration_p95_ms::double precision * success_count) FILTER (WHERE duration_p95_ms IS NOT NULL)
+    / NULLIF(SUM(success_count) FILTER (WHERE duration_p95_ms IS NOT NULL), 0))::int AS duration_p95_ms,
+  ROUND(SUM(duration_p99_ms::double precision * success_count) FILTER (WHERE duration_p99_ms IS NOT NULL)
+    / NULLIF(SUM(success_count) FILTER (WHERE duration_p99_ms IS NOT NULL), 0))::int AS duration_p99_ms,
   SUM(duration_avg_ms * success_count) FILTER (WHERE duration_avg_ms IS NOT NULL)
     / NULLIF(SUM(success_count) FILTER (WHERE duration_avg_ms IS NOT NULL), 0) AS duration_avg_ms,
   MAX(duration_max_ms) AS duration_max_ms,
@@ -299,8 +317,10 @@ SELECT
     / NULLIF(SUM(ttft_sample_count) FILTER (WHERE ttft_p50_ms IS NOT NULL), 0))::int AS ttft_p50_ms,
   ROUND(SUM(ttft_p90_ms::double precision * ttft_sample_count) FILTER (WHERE ttft_p90_ms IS NOT NULL)
     / NULLIF(SUM(ttft_sample_count) FILTER (WHERE ttft_p90_ms IS NOT NULL), 0))::int AS ttft_p90_ms,
-  MAX(ttft_p95_ms) AS ttft_p95_ms,
-  MAX(ttft_p99_ms) AS ttft_p99_ms,
+  ROUND(SUM(ttft_p95_ms::double precision * ttft_sample_count) FILTER (WHERE ttft_p95_ms IS NOT NULL)
+    / NULLIF(SUM(ttft_sample_count) FILTER (WHERE ttft_p95_ms IS NOT NULL), 0))::int AS ttft_p95_ms,
+  ROUND(SUM(ttft_p99_ms::double precision * ttft_sample_count) FILTER (WHERE ttft_p99_ms IS NOT NULL)
+    / NULLIF(SUM(ttft_sample_count) FILTER (WHERE ttft_p99_ms IS NOT NULL), 0))::int AS ttft_p99_ms,
   SUM(ttft_avg_ms * ttft_sample_count) FILTER (WHERE ttft_avg_ms IS NOT NULL)
     / NULLIF(SUM(ttft_sample_count) FILTER (WHERE ttft_avg_ms IS NOT NULL), 0) AS ttft_avg_ms,
   MAX(ttft_max_ms) AS ttft_max_ms,

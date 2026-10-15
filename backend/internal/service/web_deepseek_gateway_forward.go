@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -906,6 +907,86 @@ func webDeepseekNextSSEEvent(sc *bufio.Scanner) (name, data string, ok bool) {
 	return "", "", false
 }
 
+// webDeepseekSSEAccum 逐行装配 SSE 事件，解析规则与 webDeepseekNextSSEEvent 完全一致
+// （event: 行改名、data: 行累加、":" 注释行跳过、空行派发）。
+//
+// 为什么要独立于 webDeepseekNextSSEEvent：流式回程改用 webStreamGuard 后，
+// 上游读被搬进独立 goroutine 且逐行投递，无法再交给 bufio.Scanner 驱动的
+// webDeepseekNextSSEEvent（它要求独占 Scanner）。非流式路径仍走原函数。
+type webDeepseekSSEAccum struct {
+	name    string
+	dataBuf strings.Builder
+	sawData bool
+}
+
+// feed 喂入一行，返回是否装配出一个完整事件（遇空行或显式 event 边界）。
+func (a *webDeepseekSSEAccum) feed(line string) (name, data string, ok bool) {
+	switch {
+	case line == "":
+		if a.sawData || a.name != "delta" {
+			return a.take()
+		}
+		return "", "", false
+	case strings.HasPrefix(line, ":"):
+		return "", "", false // SSE 注释行
+	case strings.HasPrefix(line, "event:"):
+		a.name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		return "", "", false
+	case strings.HasPrefix(line, "data:"):
+		d := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if a.dataBuf.Len() > 0 {
+			a.dataBuf.WriteByte('\n')
+		}
+		a.dataBuf.WriteString(d)
+		a.sawData = true
+		return "", "", false
+	}
+	return "", "", false
+}
+
+// flush 在流结束时派发挂起的事件（对应 webDeepseekNextSSEEvent 末尾的 sawData 兜底）。
+func (a *webDeepseekSSEAccum) flush() (name, data string, ok bool) {
+	if a.sawData {
+		return a.take()
+	}
+	return "", "", false
+}
+
+func (a *webDeepseekSSEAccum) take() (name, data string, ok bool) {
+	name, data = a.name, a.dataBuf.String()
+	a.name, a.sawData = "delta", false
+	a.dataBuf.Reset()
+	return name, data, true
+}
+
+// encodeWebDeepseekSSEEvent 把装配好的事件序列化为守卫 channel 的载荷。
+// 用 NUL 分隔而非 JSON：事件名恒为 ASCII 短串，NUL 不会出现在 SSE 字段里，
+// 避免为一个内部通道引入序列化开销。
+func encodeWebDeepseekSSEEvent(name, data string) []byte {
+	out := make([]byte, 0, len(name)+1+len(data))
+	out = append(out, name...)
+	out = append(out, 0)
+	out = append(out, data...)
+	return out
+}
+
+// decodeWebDeepseekSSEEvent 是 encodeWebDeepseekSSEEvent 的逆运算。
+func decodeWebDeepseekSSEEvent(raw []byte) (name, data string) {
+	if i := bytes.IndexByte(raw, 0); i >= 0 {
+		return string(raw[:i]), string(raw[i+1:])
+	}
+	return string(raw), ""
+}
+
+// webDeepseekUpstreamErrPayload 是流式事件处理中「首帧前业务错误」的延迟收口载体：
+// 读循环内的闭包无法直接 return，把构造好的错误体带出循环后统一走
+// handleWebDeepseekUpstreamError（与原同步代码路径完全同口径）。
+type webDeepseekUpstreamErrPayload struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
 // webDeepseekClientChunkEnvelope 构造 OpenAI chat.completion.chunk 包络（供 writeWebStreamChunk 回桥）。
 func webDeepseekClientChunkEnvelope(responseID, originalModel string, delta gin.H, finishReason string, usage *OpenAIUsage) gin.H {
 	choice := gin.H{"index": 0, "delta": delta, "finish_reason": finishReason}
@@ -991,27 +1072,62 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	midstreamErrMsg := ""
 	st := newWebClientStreamState(mode, originalModel)
 
+	// 事件处理中需要提前返回的错误（认证失败 / 首帧前业务错误）用这两个变量
+	// 带出读循环——闭包无法直接 return，故在循环后统一收口。
+	var authErr *webDeepseekAuthFailureError
+	var upstreamErr *webDeepseekUpstreamErrPayload
+
 	// TeeReader 留存原始响应体：流结束无内容帧时用于整包业务错误判定/失败关闭
 	// （与非流式路径同口径，HTTP 200 裸 JSON 错误不得被伪造成空成功流）。
-	var rawUpstreamBody bytes.Buffer
-	scanner := bufio.NewScanner(io.TeeReader(resp.Body, &rawUpstreamBody))
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
-	for {
-		name, data, ok := webDeepseekNextSSEEvent(scanner)
-		if !ok {
-			break
+	// 写入发生在守卫的读 goroutine 里，故用带锁的 webStreamTeeBuffer。
+	var rawUpstreamBody webStreamTeeBuffer
+	lineReader := bufio.NewReader(io.TeeReader(resp.Body, &rawUpstreamBody))
+	// 装配在 readFn 内部完成（而非主循环）：SSE 空行是事件分隔符，而 webStreamGuard
+	// 会跳过零长帧——若把逐行投递交给主循环，空行会被丢弃，事件永远装配不出来。
+	// readFn 阻塞读到一个完整事件才返回，与 kimi 的「读到一帧 envelope」同构。
+	accum := &webDeepseekSSEAccum{}
+	guardParams := s.webStreamGuardParams(func() ([]byte, error) {
+		for {
+			line, err := lineReader.ReadBytes('\n')
+			trimmed := bytes.TrimRight(line, "\r\n")
+			if len(trimmed) > maxLineSize {
+				return nil, bufio.ErrTooLong
+			}
+			if name, data, ok := accum.feed(string(trimmed)); ok {
+				return encodeWebDeepseekSSEEvent(name, data), nil
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					// 末行无换行符：先尝试派发挂起事件，没有则正常收流。
+					if name, data, ok := accum.flush(); ok {
+						return encodeWebDeepseekSSEEvent(name, data), nil
+					}
+					return nil, io.EOF
+				}
+				return nil, err
+			}
 		}
+	})
+	guard := newWebStreamGuard(guardParams)
+	defer guard.stop()
+
+	lastDataAt := time.Now()
+	clientDisconnected := false
+	// applyDeepseekStreamEvent 处理一个装配完成的 SSE 事件，返回 true 表示应
+	// 中断读循环（业务错误或流已 finished）。闭包化是为了让「逐事件派发」在
+	// select 循环与流末尾 flush 两条路径上复用同一段逻辑，避免语义漂移。
+	applyDeepseekStreamEvent := func(name, data string) bool {
 		switch name {
 		case "ready":
 			// ready 事件：提取 response_message_id 作 response ID（09 §5）。
 			if id := gjson.Get(data, "response_message_id").Int(); id != 0 {
 				responseID = strconv.FormatInt(id, 10)
 			}
-			continue
+			return false
 		case "close", "finish":
 			// 正常终止（09 §5，无 [DONE]）。
 			finishReason = "stop"
-			break
+			return false
 		}
 
 		contentDelta, isErr, _, errMsg := parser.applyDelta(data)
@@ -1020,18 +1136,15 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		}
 		if isErr {
 			if !written && webDeepseekProbeAuth(ctx) && classifyWebDeepseekUpstreamError(resp.StatusCode, []byte(data)) == webDeepseekErrKindAuthFailed {
-				return nil, &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), []byte(data)...)}
+				authErr = &webDeepseekAuthFailureError{status: resp.StatusCode, body: append([]byte(nil), []byte(data)...)}
+				return true
 			}
 			// 业务错误：首帧未写任何客户端字节（written=false）→ 走完整错误路径
 			// （可改写 4xx 状态码）；流中后段已写出正文（written=true）→ 记 ops 错误并向
 			// 客户端写流内 error 标记后中断收口，绝不伪造正常结束。
 			if !written {
-				errResp := &http.Response{
-					StatusCode: resp.StatusCode,
-					Header:     resp.Header,
-					Body:       io.NopCloser(bytes.NewReader([]byte(data))),
-				}
-				return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, []byte(data), upstreamModel)
+				upstreamErr = &webDeepseekUpstreamErrPayload{status: resp.StatusCode, header: resp.Header, body: append([]byte(nil), []byte(data)...)}
+				return true
 			}
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
@@ -1043,7 +1156,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 			})
 			midstreamErr = true
 			midstreamErrMsg = sanitizeUpstreamErrorMessage(errMsg)
-			break
+			return true
 		}
 		if parser.usage != 0 {
 			usage = &OpenAIUsage{InputTokens: 0, OutputTokens: int(parser.usage)}
@@ -1051,22 +1164,98 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		if contentDelta != "" {
 			aggregated.WriteString(contentDelta)
 			written = true
-			if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": contentDelta}, "", nil)); err != nil {
-				return nil, err
+			if !clientDisconnected {
+				if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{"content": contentDelta}, "", nil)); err != nil {
+					clientDisconnected = true
+				}
 			}
 		}
 		if parser.finished {
 			finishReason = "stop"
-			break
+			return true
+		}
+		return false
+	}
+	// ctxDoneCh 是 ctx.Done() 的一次性 latch：客户端断开触发一次后即置 nil，
+	// 该 case 在 select 中永久变为「不就绪」。直接监听 ctx.Done() 会热自旋——
+	// 取消后该 channel 永久就绪，select 立刻命中、continue、立刻再命中，最坏
+	// （客户端断开 + 上游挂死）可占满单核 CPU 直到 interval 兜底（默认 180s）。
+	// anthropic 回程的同构 select 并不监听 ctx.Done()：断开靠下游写失败感知。
+	// 这里保留 ctxDoneCh 而非直接删 case，是为了在「尚未写出首帧、下游一次都
+	// 没写」的窗口里也能立刻停止向下游写——那时写失败路径还不会被触发。
+	ctxDoneCh := ctx.Done()
+	// 具名循环：select 内的 break 只跳出 select，中断收口必须跳出整个读循环。
+streamLoop:
+	for {
+		select {
+		case <-ctxDoneCh:
+			// 客户端断开：不掐断上游读（响应已提交，计费需要把 usage 采完），
+			// 仅停止向下游写；interval 超时是这次排水的最终上界。置 nil 是一次性
+			// latch，绝不能 continue（continue 会退化成满 CPU 自旋）。
+			clientDisconnected = true
+			ctxDoneCh = nil
+
+		case ev, ok := <-guard.events:
+			if !ok {
+				break streamLoop
+			}
+			if ev.err != nil {
+				// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时透明
+				// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
+				if isOpenAICNFirstByteTimeout(ev.err) && !written {
+					return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+				}
+				recordWebStreamReadError(c, account, upstreamModel, ev.err)
+				return nil, fmt.Errorf("deepseek web stream read: %w", ev.err)
+			}
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
+
+			name, data := decodeWebDeepseekSSEEvent(ev.data)
+			if applyDeepseekStreamEvent(name, data) {
+				break streamLoop
+			}
+
+		case <-guard.intervalCh:
+			// 上游开了流却在 interval 内未送来任何字节：判定断流。
+			if !guard.streamIdle(guardParams.interval) {
+				continue
+			}
+			slog.Warn("web deepseek stream data interval timeout",
+				"account_id", account.ID,
+				"model", originalModel,
+				"upstream_model", upstreamModel,
+				"interval", guardParams.interval.String())
+			recordWebStreamReadError(c, account, upstreamModel, errWebStreamIdleTimeout)
+			return nil, fmt.Errorf("deepseek web stream read: %w", errWebStreamIdleTimeout)
+
+		case <-guard.keepaliveCh:
+			// 仅在尚未写出首帧时保活（与 anthropic 回程 data != "" 判定同构）。
+			if clientDisconnected || !webStreamKeepalivePending(written, guardParams.keepalive, lastDataAt) {
+				guard.resetKeepalive()
+				continue
+			}
+			if err := writeWebStreamKeepalive(c); err != nil {
+				clientDisconnected = true
+				continue
+			}
+			lastDataAt = time.Now()
+			guard.resetKeepalive()
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		// CN 首包超时（watchdog 转译错误）：响应头未提交（首帧写出前）时透明
-		// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
-		if isOpenAICNFirstByteTimeout(err) && !written {
-			return nil, s.failoverOpenAICNFirstByteTimeout(ctx, account, upstreamModel)
+
+	// 读循环结束后统一收口：闭包内延迟带出的两类错误优先于后续的
+	// 空内容判定（原代码在同位置 return，语义不变）。
+	if authErr != nil {
+		return nil, authErr
+	}
+	if upstreamErr != nil {
+		errResp := &http.Response{
+			StatusCode: upstreamErr.status,
+			Header:     upstreamErr.header,
+			Body:       io.NopCloser(bytes.NewReader(upstreamErr.body)),
 		}
-		return nil, fmt.Errorf("deepseek web stream read: %w", err)
+		return s.handleWebDeepseekUpstreamError(ctx, c, account, errResp, upstreamErr.body, upstreamModel)
 	}
 
 	// 无任何内容帧：可能是 HTTP 200 裸 JSON 业务错误（08 §4）或不可识别结构；
@@ -1110,6 +1299,26 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 	if parser.usage != 0 {
 		usage = &OpenAIUsage{InputTokens: 0, OutputTokens: int(parser.usage)}
 	}
+	// 客户端断开后不再向下游写，但仍返回带 usage 的结果：响应早已提交、
+	// 上游已真实消耗额度，此时因写失败 return nil 会把 usage 整体丢掉。
+	if clientDisconnected {
+		MarkResponseCommitted(c)
+		result := &OpenAIForwardResult{
+			UpstreamHeaders:  resp.Header,
+			ResponseID:       responseID,
+			Model:            originalModel,
+			UpstreamModel:    upstreamModel,
+			UpstreamEndpoint: webDeepseekChatCompletionPath,
+			Stream:           true,
+			ResponseHeaders:  resp.Header.Clone(),
+			Duration:         time.Since(startTime),
+			ClientDisconnect: true,
+		}
+		if usage != nil {
+			result.Usage = *usage
+		}
+		return result, nil
+	}
 	if err := writeWebStreamChunk(c, st, webDeepseekClientChunkEnvelope(responseID, originalModel, gin.H{}, finishReason, usage)); err != nil {
 		return nil, err
 	}
@@ -1127,6 +1336,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekStreamingResponse(
 		Stream:           true,
 		ResponseHeaders:  resp.Header.Clone(),
 		Duration:         time.Since(startTime),
+		ClientDisconnect: clientDisconnected,
 	}
 	if usage != nil {
 		result.Usage = *usage
@@ -1201,6 +1411,7 @@ func (s *OpenAIGatewayService) handleWebDeepseekNonStreamingResponse(
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		recordWebStreamReadError(c, account, upstreamModel, err)
 		return nil, fmt.Errorf("deepseek web upstream response scan failed: %w", err)
 	}
 

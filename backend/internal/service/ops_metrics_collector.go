@@ -38,6 +38,80 @@ const (
 	bytesPerMB = 1024 * 1024
 )
 
+// ── 「上游错误分子」的统一 SQL 口径（SSOT）────────────────────────────────────
+//
+// 同一指标（upstream_error_count_excl_429_529）在本仓共有 4 份 SQL 副本：
+//
+//  1. repository/ops_repo_dashboard.go  queryErrorCounts   （raw 仪表盘）
+//  2. service/ops_metrics_collector.go  queryErrorCounts   （1min 预聚合）  ← 本文件
+//  3. repository/ops_repo_preagg.go     error_agg          （hourly 表）
+//  4. repository/ops_repo_trends.go     GetErrorTrend      （趋势图）
+//
+// 历史漂移：只有 #1 带 `status_code >= 400` 门控，#2/#3/#4 没有。门控缺失时
+// ops_error_logs 里的 recovered 行会被算成上游错误——logOpsRecoveredUpstream
+// 为「上游失败但最终成功」的请求记一条 provider 归属错误，其 status_code 是
+// 2xx、upstream_status_code 非 2xx。生产实测 recovered 行占该分子 54%
+// （preagg 2252 vs raw 1036，同一屏差 2.17 倍）。
+//
+// 这几个谓词因此必须逐字一致，故集中到本文件导出，4 处引用同一来源。改动任一
+// 谓词时四处同步生效，不会再出现「只改了仪表盘、预聚合仍是旧口径」。
+//
+// 列名按各自 FROM 子句适配：#1/#2/#4 直接查 ops_error_logs，最终状态列名就是
+// `status_code`；#3 的 error_base CTE 把它投影成 `client_status_code`，故用一个
+// %[1]s 占位符渲染，其余谓词逐字相同。
+const (
+	// opsErrorFinalFailedGateTemplate 是「本次请求最终对客户端失败」的门控。
+	// status_code 是最终客户端可见状态；upstream_status_code 只是最后一次上游
+	// 尝试的状态，即使整体成功也会被写入。recovered 行正是「status_code=2xx 且
+	// upstream_status_code 非 2xx」，故必须按最终状态门控。
+	opsErrorFinalFailedGateTemplate = `COALESCE(%[1]s, 0) >= 400`
+
+	// OpsUpstreamErrorExclFilterSQLTemplate 是「上游错误（剔除 429/529）」分子的
+	// 谓词，也是本次门控整改的目标。%[1]s 处填入该处可用的「最终状态列」
+	// （status_code / client_status_code）。
+	//
+	// 只覆盖 excl、不覆盖 429/529 两个分子，是刻意与 #1（dashboard，已修且不在
+	// 本次可改范围）保持逐字一致：dashboard 的 upstream_429/upstream_529 至今
+	// 未加最终状态门控。若此处单独给 429/529 加门控，preagg 会比 raw 少算，
+	// 等于用新的漂移替换旧的漂移。429/529 的 recovered 污染是独立议题，
+	// 需连同 dashboard 一并改。
+	OpsUpstreamErrorExclFilterSQLTemplate = opsErrorFinalFailedGateTemplate +
+		` AND error_owner = 'provider' AND NOT is_business_limited` +
+		` AND COALESCE(upstream_status_code, %[1]s, 0) NOT IN (429, 529)`
+
+	// OpsUpstream429FilterSQLTemplate / OpsUpstream529FilterSQLTemplate 是限流/过载
+	// 两个分子的谓词，逐字复制 #1 的现状（无最终状态门控）。抽成常量是为了让
+	// 「这里为什么没有门控」在代码里可见，而不是靠四处心照不宣。
+	// %[1]s 处填入该处可用的「最终状态列」。
+	OpsUpstream429FilterSQLTemplate = `error_owner = 'provider' AND NOT is_business_limited` +
+		` AND COALESCE(upstream_status_code, %[1]s, 0) = 429`
+	OpsUpstream529FilterSQLTemplate = `error_owner = 'provider' AND NOT is_business_limited` +
+		` AND COALESCE(upstream_status_code, %[1]s, 0) = 529`
+)
+
+// OpsUpstreamErrorFilterSQL 按给定「最终状态列」渲染上游错误（剔除 429/529）分子谓词。
+// 4 处副本统一走这个入口，避免各处手写占位符替换时漏改或漏门控。
+func OpsUpstreamErrorFilterSQL(finalStatusCol string) string {
+	return fmt.Sprintf(OpsUpstreamErrorExclFilterSQLTemplate, finalStatusCol)
+}
+
+// OpsUpstreamErrorFilterFinalStatusGate 渲染「最终对客户端失败」门控，供本包的
+// error_total / business_limited / error_sla 三个分子，以及 repository 包的
+// ops_repo_trends.go / ops_repo_preagg.go 复用（跨包，故导出）。
+func OpsUpstreamErrorFilterFinalStatusGate(finalStatusCol string) string {
+	return fmt.Sprintf(opsErrorFinalFailedGateTemplate, finalStatusCol)
+}
+
+// OpsUpstream429FilterFor 是 429 分子的按列渲染入口。
+func OpsUpstream429FilterFor(finalStatusCol string) string {
+	return fmt.Sprintf(OpsUpstream429FilterSQLTemplate, finalStatusCol)
+}
+
+// OpsUpstream529FilterFor 是 529 分子的按列渲染入口。
+func OpsUpstream529FilterFor(finalStatusCol string) string {
+	return fmt.Sprintf(OpsUpstream529FilterSQLTemplate, finalStatusCol)
+}
+
 var opsMetricsCollectorAdvisoryLockID = hashAdvisoryLockID(opsMetricsCollectorLeaderLockKey)
 
 type opsSchedulableAccountLoadRepository interface {
@@ -542,14 +616,18 @@ func (c *OpsMetricsCollector) queryErrorCounts(ctx context.Context, start, end t
 	upstream529 int64,
 	err error,
 ) {
+	// 上游三分子走共享谓词（见文件头 OpsUpstreamError*FilterSQLTemplate）：必须带
+	// `status_code >= 400` 最终状态门控，否则 recovered 行（上游失败但最终成功）
+	// 会被算成上游错误，生产实测占该分子 54%。此处与 raw 仪表盘
+	// （repository/ops_repo_dashboard.go queryErrorCounts）逐字同源。
 	q := `
 SELECT
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400), 0) AS error_total,
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND is_business_limited), 0) AS business_limited,
-  COALESCE(COUNT(*) FILTER (WHERE COALESCE(status_code, 0) >= 400 AND NOT is_business_limited), 0) AS error_sla,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) NOT IN (429, 529)), 0) AS upstream_excl,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 429), 0) AS upstream_429,
-  COALESCE(COUNT(*) FILTER (WHERE error_owner = 'provider' AND NOT is_business_limited AND COALESCE(upstream_status_code, status_code, 0) = 529), 0) AS upstream_529
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstreamErrorFilterFinalStatusGate("status_code") + `), 0) AS error_total,
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstreamErrorFilterFinalStatusGate("status_code") + ` AND is_business_limited), 0) AS business_limited,
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstreamErrorFilterFinalStatusGate("status_code") + ` AND NOT is_business_limited), 0) AS error_sla,
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstreamErrorFilterSQL("status_code") + `), 0) AS upstream_excl,
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstream429FilterFor("status_code") + `), 0) AS upstream_429,
+  COALESCE(COUNT(*) FILTER (WHERE ` + OpsUpstream529FilterFor("status_code") + `), 0) AS upstream_529
 FROM ops_error_logs
 WHERE created_at >= $1 AND created_at < $2
   AND is_count_tokens = FALSE`

@@ -5,6 +5,69 @@ import (
 	"time"
 )
 
+// =========================
+// Background job freshness
+// =========================
+
+const (
+	// opsJobStaleCycles is how many consecutive scheduled runs a job may miss
+	// before it counts as failed. One missed run is routine (deploy, GC pause,
+	// transient DB blip); two in a row means the job is genuinely stuck.
+	opsJobStaleCycles = 2
+
+	// opsJobStaleFloor keeps the pre-existing 15-minute window for short-cycle
+	// jobs, so the per-job cadence below never *loosens* the common case.
+	opsJobStaleFloor = 15 * time.Minute
+
+	// opsJobUnknownCadence is assumed for heartbeat jobs missing from
+	// opsJobCadences: a typical ticker period. Unknown jobs therefore keep the
+	// old 15-minute behaviour rather than silently inheriting a wider window.
+	opsJobUnknownCadence = 5 * time.Minute
+)
+
+// opsJobCadences maps a heartbeat job name to its scheduled run period.
+//
+// Every caller of OpsRepository.UpsertJobHeartbeat needs an entry here. Without
+// one, a job whose real period exceeds opsJobStaleFloor is scored as failed
+// purely for being slow, which docks the infra score permanently.
+//
+// Values are the job's compiled-in default period. Jobs whose period is
+// operator-configurable (collector interval, alert evaluator interval, cleanup
+// cron) use their default, which keeps the floor at opsJobStaleFloor exactly as
+// before for those jobs; raising such a job's interval beyond its default
+// requires raising its entry here too, otherwise it reads as a false failure.
+var opsJobCadences = map[string]time.Duration{
+	// Configurable via SettingKeyOpsMetricsIntervalSeconds (default 60s).
+	opsMetricsCollectorJobName: opsMetricsCollectorMinInterval,
+	// Fixed tickers.
+	opsAggHourlyJobName: opsAggHourlyInterval,
+	opsAggDailyJobName:  opsAggDailyInterval,
+	// Cron-driven: assumes the default daily schedule (0 2 * * *). A weekly
+	// cleanup schedule would need this raised to match.
+	opsCleanupJobName:         24 * time.Hour,
+	opsScheduledReportJobName: 24 * time.Hour,
+	// Configurable via OpsAlertRuntimeSettings.EvaluationIntervalSeconds
+	// (default 60s, see defaultOpsAlertRuntimeSettings).
+	opsAlertEvaluatorJobName: 60 * time.Second,
+	// Fixed tickers.
+	quotaKeySweepJobName:          quotaKeySweepInterval,
+	quotaKeyReconcileJobName:      quotaKeyReconcileInterval,
+	cursorAccountRetentionJobName: cursorRetentionCheckInterval,
+}
+
+// opsJobStaleAfter returns how long a job may go without a successful run
+// before its heartbeat counts as failed.
+func opsJobStaleAfter(jobName string) time.Duration {
+	cadence, ok := opsJobCadences[jobName]
+	if !ok {
+		cadence = opsJobUnknownCadence
+	}
+	if stale := cadence * opsJobStaleCycles; stale > opsJobStaleFloor {
+		return stale
+	}
+	return opsJobStaleFloor
+}
+
 // computeDashboardHealthScore computes a 0-100 health score from the metrics returned by the dashboard overview.
 //
 // Design goals:
@@ -34,36 +97,55 @@ func computeDashboardHealthScore(now time.Time, overview *OpsDashboardOverview) 
 // computeBusinessHealth calculates business health score (0-100)
 // Components: Error Rate (50%) + TTFT (50%)
 func computeBusinessHealth(overview *OpsDashboardOverview) float64 {
-	// Error rate score: 1% → 100, 10% → 0 (linear)
-	// Combines request errors and upstream errors
-	errorScore := 100.0
+	// Error rate: combines request errors and upstream errors, worst case wins.
 	errorPct := clampFloat64(overview.ErrorRate*100, 0, 100)
 	upstreamPct := clampFloat64(overview.UpstreamErrorRate*100, 0, 100)
 	combinedErrorPct := math.Max(errorPct, upstreamPct) // Use worst case
-	if combinedErrorPct > 1.0 {
-		if combinedErrorPct <= 10.0 {
-			errorScore = (10.0 - combinedErrorPct) / 9.0 * 100
-		} else {
-			errorScore = 0
-		}
-	}
+	errorScore := opsBusinessSubScore(combinedErrorPct, opsErrRateCurve)
 
-	// TTFT score: 1s → 100, 3s → 0 (linear)
-	// Time to first token is critical for user experience
+	// TTFT score: Time to first token is critical for user experience.
 	ttftScore := 100.0
 	if overview.TTFT.P99 != nil {
-		p99 := float64(*overview.TTFT.P99)
-		if p99 > 1000 {
-			if p99 <= 3000 {
-				ttftScore = (3000 - p99) / 2000 * 100
-			} else {
-				ttftScore = 0
-			}
-		}
+		ttftScore = opsBusinessSubScore(float64(*overview.TTFT.P99), opsTTFTCurve)
 	}
 
 	// Weighted combination: 50% error rate + 50% TTFT
 	return errorScore*0.5 + ttftScore*0.5
+}
+
+// opsBusinessCurve describes a two-segment piecewise-linear business sub-score.
+//
+// The ramp segment (good -> bad) spans 100 -> floorScore, and the decay tail
+// (bad -> zero) spans floorScore -> 0. The tail is what makes the score
+// continuous past the threshold: without it the score hits 0 exactly at `bad`
+// and stays pinned there, so a marginally-over-threshold reading and a
+// catastrophic one scored identically and the metric lost all resolution.
+type opsBusinessCurve struct {
+	good       float64 // at or below this value the sub-score is 100
+	bad        float64 // end of the ramp / start of the decay tail
+	floorScore float64 // sub-score at `bad`, and the ceiling of the decay tail
+	zero       float64 // sub-score reaches 0 here and stays 0 beyond
+}
+
+var (
+	// Error rate in percent: 1% or less is perfect, 10% is the tail's shoulder.
+	opsErrRateCurve = opsBusinessCurve{good: 1.0, bad: 10.0, floorScore: 30.0, zero: 50.0}
+	// TTFT p99 in milliseconds: 1s or less is perfect, 3s is the tail's shoulder.
+	opsTTFTCurve = opsBusinessCurve{good: 1000.0, bad: 3000.0, floorScore: 30.0, zero: 15000.0}
+)
+
+// opsBusinessSubScore evaluates v against curve, returning a 0-100 sub-score.
+func opsBusinessSubScore(v float64, curve opsBusinessCurve) float64 {
+	if v <= curve.good {
+		return 100
+	}
+	if v <= curve.bad {
+		return 100 - (v-curve.good)/(curve.bad-curve.good)*(100-curve.floorScore)
+	}
+	if v <= curve.zero {
+		return curve.floorScore * (curve.zero - v) / (curve.zero - curve.bad)
+	}
+	return 0
 }
 
 // computeInfraHealth calculates infrastructure health score (0-100)
@@ -120,7 +202,7 @@ func computeInfraHealth(now time.Time, overview *OpsDashboardOverview) float64 {
 		totalJobs++
 		if hb.LastErrorAt != nil && (hb.LastSuccessAt == nil || hb.LastErrorAt.After(*hb.LastSuccessAt)) {
 			failedJobs++
-		} else if hb.LastSuccessAt != nil && now.Sub(*hb.LastSuccessAt) > 15*time.Minute {
+		} else if hb.LastSuccessAt != nil && now.Sub(*hb.LastSuccessAt) > opsJobStaleAfter(hb.JobName) {
 			failedJobs++
 		}
 	}

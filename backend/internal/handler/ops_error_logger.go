@@ -21,9 +21,11 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const (
@@ -61,6 +63,35 @@ const (
 	opsCodeGroupDeleted          = "GROUP_DELETED"
 	opsCodeGroupDisabled         = "GROUP_DISABLED"
 )
+
+// opsUpstreamBusinessLimitStatusByCode 建立「上游业务错误码 → 允许触发业务限制的
+// 状态码集合」映射，替代原先只按文案匹配的脆弱判定。
+//
+// 只收录有明确业务含义（订阅/额度/余额）的码，且每个码绑定状态码白名单：
+// 同一个码配不同状态码含义不同，只有落在白名单内的组合才算用户侧业务限制。
+// 这样「上游 403」不再一刀切：SUBSCRIPTION_NOT_FOUND+403 是订阅失效（业务），
+// 而 403 无已知业务码（账号被封/权限不足）仍按故障计入 SLA 分母。
+//
+// 未登记的码一律不参与状态码判定，仍走 isOpsLocalBusinessLimitError 的原判定，
+// 避免把未知码凭状态码臆断成业务限制。
+var opsUpstreamBusinessLimitStatusByCode = map[string]map[int]struct{}{
+	opsCodeSubscriptionNotFound: {http.StatusForbidden: {}, http.StatusNotFound: {}},
+	opsCodeSubscriptionInvalid:  {http.StatusForbidden: {}, http.StatusTooManyRequests: {}},
+	opsCodeInsufficientBalance:  {http.StatusForbidden: {}, http.StatusPaymentRequired: {}, http.StatusTooManyRequests: {}},
+	opsCodeUsageLimitExceeded:   {http.StatusForbidden: {}, http.StatusTooManyRequests: {}, http.StatusPaymentRequired: {}},
+	opsCodeAPIKeyQuotaExhausted: {http.StatusForbidden: {}, http.StatusTooManyRequests: {}, http.StatusPaymentRequired: {}},
+}
+
+// isOpsUpstreamBusinessLimitError 判定「已知业务码 + 状态码」是否构成用户侧业务限制。
+// 码不在映射内、或状态码不在该码白名单内时返回 false，由原判定接管。
+func isOpsUpstreamBusinessLimitError(code string, status int) bool {
+	statuses, ok := opsUpstreamBusinessLimitStatusByCode[strings.TrimSpace(code)]
+	if !ok || status <= 0 {
+		return false
+	}
+	_, ok = statuses[status]
+	return ok
+}
 
 const (
 	opsErrorLogTimeout      = 5 * time.Second
@@ -108,6 +139,7 @@ var (
 	opsErrorLogSanitized  atomic.Int64
 
 	opsErrorLogLastDropLogAt atomic.Int64
+	opsErrorLogDropWindow    atomic.Int64
 
 	opsErrorLogShutdownCh   = make(chan struct{})
 	opsErrorLogShutdownOnce sync.Once
@@ -350,6 +382,13 @@ func OpsErrorLogSanitizedTotal() int64 {
 	return opsErrorLogSanitized.Load()
 }
 
+// OpsErrorLogDropWindowTotal 返回最近一次 Warn 日志窗口内新增的丢弃数。
+// 与 OpsErrorLogDroppedTotal 的差值即为该窗口的丢弃量：让「错误队列满即丢弃」
+// 这一无声数据缺失可被读取，而不只能依赖限频后的 Warn 日志。
+func OpsErrorLogDropWindowTotal() int64 {
+	return opsErrorLogDropWindow.Load()
+}
+
 func maybeLogOpsErrorLogDrop() {
 	now := time.Now().Unix()
 
@@ -366,17 +405,21 @@ func maybeLogOpsErrorLogDrop() {
 	queued := opsErrorLogQueueLen.Load()
 	queuedBytes := opsErrorLogQueueBytes.Load()
 	queueCap := OpsErrorLogQueueCapacity()
+	dropped := opsErrorLogDropped.Load()
+	// 记录本窗口起点，使窗口内丢弃量可被查询（限频只压缩日志频率，不压缩计数）。
+	window := dropped - opsErrorLogDropWindow.Swap(dropped)
 
-	log.Printf(
-		"[OpsErrorLogger] queue is full; dropping logs (queued=%d cap=%d queued_bytes=%d bytes_cap=%d enqueued_total=%d dropped_total=%d processed_total=%d sanitized_total=%d)",
-		queued,
-		queueCap,
-		queuedBytes,
-		opsErrorLogMaxQueueBytes,
-		opsErrorLogEnqueued.Load(),
-		opsErrorLogDropped.Load(),
-		opsErrorLogProcessed.Load(),
-		opsErrorLogSanitized.Load(),
+	// 有意走 zap Warn 而非 log.Printf：丢弃是数据缺失，须进结构化日志以便检索。
+	logger.L().Warn("ops_error_logger.queue_full_dropping",
+		zap.Int("queued", int(queued)),
+		zap.Int("queue_cap", queueCap),
+		zap.Int64("queued_bytes", queuedBytes),
+		zap.Int64("bytes_cap", opsErrorLogMaxQueueBytes),
+		zap.Int64("dropped_total", dropped),
+		zap.Int64("dropped_in_window", window),
+		zap.Int64("enqueued_total", opsErrorLogEnqueued.Load()),
+		zap.Int64("processed_total", opsErrorLogProcessed.Load()),
+		zap.Int64("sanitized_total", opsErrorLogSanitized.Load()),
 	)
 }
 
@@ -2216,14 +2259,25 @@ func classifyOpsErrorLog(c *gin.Context, errType, message, code string, status i
 	msg := strings.ToLower(message)
 	effectiveUpstreamError := upstreamError && !localModelConfiguration
 	localClientAuthError := !effectiveUpstreamError && phase == "auth" && isOpsClientAuthError(code, msg)
-	localBusinessLimited := !effectiveUpstreamError && classifyOpsIsBusinessLimited(errType, phase, code, status, message, localClientAuthError)
-	isBusinessLimited = localModelConfiguration || routingCapacityLimited || (clientBusinessLimited && !effectiveUpstreamError) || localBusinessLimited
+	localBusinessLimited := !effectiveUpstreamError && classifyOpsIsBusinessLimited(errType, phase, code, message, localClientAuthError)
+	// 已知业务码 + 状态码白名单：让状态码参与判定，但只覆盖有明确业务含义的码。
+	// 仅在确有上游错误上下文时生效——这正是原先无法区分的场景：上游 403 可能是
+	// 订阅失效（用户侧业务限制），也可能是账号被封/权限不足（平台故障）。
+	// 未登记的码不参与，仍由上游归因（owner=provider）计入 SLA 分母。
+	upstreamBusinessLimited := effectiveUpstreamError && isOpsUpstreamBusinessLimitError(code, status)
+	// 账号池耗尽（routingCapacityLimited）是平台侧供给瓶颈，不是用户的错：
+	// phase 已是 routing（owner=platform），但不得置 business_limited，否则该行会
+	// 被 ops_metrics_collector 的 NOT is_business_limited 过滤掉，既从 SLA 分母剔除
+	// 也不计入错误率，使真实可用性劣化不可见（zhipu grp43「该分组暂无可用账号」
+	// 372 条/24h 即由此掩盖 8.17 个百分点）。用户侧不可用（Key 限额、余额不足）
+	// 走 clientBusinessLimited / localBusinessLimited 分支，仍然是 business_limited。
+	isBusinessLimited = localModelConfiguration || (clientBusinessLimited && !effectiveUpstreamError) || localBusinessLimited || upstreamBusinessLimited
 	errorOwner = classifyOpsErrorOwner(phase, message)
 	errorSource = classifyOpsErrorSource(phase, message)
 	return phase, isBusinessLimited, errorOwner, errorSource
 }
 
-func classifyOpsIsBusinessLimited(errType, phase, code string, status int, message string, localClientAuthError ...bool) bool {
+func classifyOpsIsBusinessLimited(errType, phase, code string, message string, localClientAuthError ...bool) bool {
 	if len(localClientAuthError) > 0 && localClientAuthError[0] {
 		return true
 	}
@@ -2238,7 +2292,6 @@ func classifyOpsIsBusinessLimited(errType, phase, code string, status int, messa
 	if errType == "rate_limit_error" && strings.Contains(strings.ToLower(message), "upstream") {
 		return false
 	}
-	_ = status
 	return false
 }
 
