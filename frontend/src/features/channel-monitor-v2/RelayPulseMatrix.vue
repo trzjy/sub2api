@@ -56,15 +56,9 @@
             class="matrix-row border-b border-gray-100/80 dark:border-dark-700/60"
             :class="showThroughput ? 'matrix-row--with-tps' : ''"
           >
-            <div class="dimension-cell flex min-w-0 items-center gap-2 bg-white dark:bg-dark-800" :title="rowLabel(entry.row)">
+            <div class="dimension-cell flex min-w-0 items-center gap-2 bg-white dark:bg-dark-800" :title="rowTitle(entry.row)">
               <span :class="['status-dot', statusDotClass(entry.row)]"></span>
               <strong class="truncate text-xs font-semibold text-gray-800 dark:text-gray-100">{{ rowLabel(entry.row) }}</strong>
-              <span
-                v-if="stateBadgeText(entry.row)"
-                class="state-badge shrink-0"
-                :class="stateBadgeClass(entry.row)"
-                :title="stateBadgeTitle(entry.row)"
-              >{{ stateBadgeText(entry.row) }}</span>
             </div>
             <strong class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300">
               {{ summarySuccessRate(entry.row) }}
@@ -380,33 +374,6 @@ function statusDotClass(row: MonitorMatrixRow): string {
   return healthScoreClass(row.health, props.healthMode, row.metrics.request_count)
 }
 
-// Row-level badge text: only probe (抽样探测) and no-data (无数据) get a marker;
-// business rows carry no source badge.
-function stateBadgeText(row: MonitorMatrixRow): string {
-  const state = rowState(row)
-  if (state === 'probe') return t('channelMonitorV2.matrix.probeBadge')
-  if (state === 'no-data') return t('channelMonitorV2.matrix.noDataBadge')
-  return ''
-}
-
-function stateBadgeClass(row: MonitorMatrixRow): string {
-  const state = rowState(row)
-  if (state === 'probe') return 'state-badge--probe'
-  if (state === 'no-data') return 'state-badge--no-data'
-  return ''
-}
-
-function stateBadgeTitle(row: MonitorMatrixRow): string {
-  const state = rowState(row)
-  if (state === 'probe') {
-    return t('channelMonitorV2.matrix.probeSource', { status: row.status || '' })
-  }
-  if (state === 'no-data') {
-    return t('channelMonitorV2.matrix.noData')
-  }
-  return t('channelMonitorV2.matrix.stateBusiness')
-}
-
 // Metric summaries collapse to a dash for non-business rows so probe / no-data rows
 // never imply channel-wide rates (a single sampled probe does not represent the channel).
 function summarySuccessRate(row: MonitorMatrixRow): string {
@@ -414,7 +381,10 @@ function summarySuccessRate(row: MonitorMatrixRow): string {
   return successRate(row.metrics)
 }
 function summaryMs(row: MonitorMatrixRow): string {
-  if (rowState(row) !== 'business') return '—'
+  const state = rowState(row)
+  // Probe rows carry a real first-token latency from the sampled probe.
+  if (state === 'probe') return row.first_token_ms == null ? '—' : formatMs(row.first_token_ms)
+  if (state !== 'business') return '—'
   return formatMs(row.metrics.ttft.p50_ms)
 }
 function summaryTps(row: MonitorMatrixRow): string {
@@ -431,6 +401,15 @@ function rowLabel(row: MonitorMatrixRow): string {
   if (row.group_name || row.group_id) parts.push(row.group_name || `#${row.group_id}`)
   if (row.model) parts.push(row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model)
   return parts.join(' / ')
+}
+
+// Row-level hover title. Probe rows explain the sampled probe source and last
+// observation time; business / no-data rows fall back to the dimension label.
+function rowTitle(row: MonitorMatrixRow): string {
+  if (rowState(row) === 'probe') {
+    return t('channelMonitorV2.matrix.probeSource', { status: row.status || '', observed_at: row.observed_at || '' })
+  }
+  return rowLabel(row)
 }
 
 function rowKey(row: MonitorMatrixRow): string {
@@ -605,35 +584,6 @@ function formatBucketRange(value: string) {
 .health-unknown  { background: #9ca3af; }
 /* C3 no-data marker: muted, distinct from "unknown" so absence of data is explicit. */
 .health-no-data  { background: #d1d5db; }
-
-.state-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 0.375rem;
-  height: 1.05rem;
-  border-radius: 9999px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-}
-.state-badge--probe {
-  background: rgb(250 204 21 / 0.16);
-  color: #b45309;
-  border: 1px solid rgb(250 204 21 / 0.5);
-}
-:global(.dark) .state-badge--probe {
-  background: rgb(250 204 21 / 0.14);
-  color: #fcd34d;
-}
-.state-badge--no-data {
-  background: rgb(156 163 175 / 0.16);
-  color: #6b7280;
-  border: 1px solid rgb(156 163 175 / 0.4);
-}
-:global(.dark) .state-badge--no-data {
-  color: #9ca3af;
-}
 
 .score-legend {
   background: linear-gradient(

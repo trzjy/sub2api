@@ -21,19 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// messagesOversizeRequestMaxBytes 是 /v1/messages 入站 body 的预检阈值（5 MiB）。
-// 依据（2026-10-14 生产实证）：同构造仅改填充熵，低熵 5.2MB（tokenizer 压到几十万 token）
-// 完整成功，高熵 base64 5.2MB（≈130 万 token）在流中段被上游裸拒 400；account 163 成功
-// 案例最大 cache_read ≈89.8 万 token（≈3.6 MiB body）。即上游上限由 token 总量而非字节数
-// 决定，5 MiB 以下放行不误杀正常大会话，5 MiB 以上按超限处理。
-// 无配置项、无环境变量、不按模型/分组细分、无放行开关。
-const messagesOversizeRequestMaxBytes = 5 * 1024 * 1024
-
-// messagesOversizeClientMessage 是前置预检（A）与上游无可读 message 的 4xx 兜底（B）
-// 共用的客户端文案：说清发生了什么 + 可执行动作，且不含任何内部术语
-// （不提账号/分组/中转/上游节点/账号 ID）。
-const messagesOversizeClientMessage = "会话上下文超出限制，请新开会话：贴入本会话末尾 30–50 行代表性内容作为关键词，让新会话据此定位到本会话；再让其读取本会话最后 300 行以了解任务，继续接力任务。"
-
 // ForwardAsAnthropic accepts an Anthropic Messages request body, converts it
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Anthropic Messages format. This enables Claude Code
@@ -46,14 +33,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	// 前置预检（A）：入站 body 超过 5 MiB 时几乎必然触发上游上下文上限，而上游只回一个
-	// 不带任何说明的裸 400，客户端既无法理解也无法操作。超限时直接以中文可读错误返回，
-	// 不消耗上游请求、不占用账号槽位。
-	if len(body) > messagesOversizeRequestMaxBytes {
-		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", messagesOversizeClientMessage)
-		return nil, fmt.Errorf("messages request body too large: %d bytes (limit %d)", len(body), messagesOversizeRequestMaxBytes)
-	}
-
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 

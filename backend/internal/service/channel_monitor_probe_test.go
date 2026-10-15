@@ -4,13 +4,18 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
 // ---------- fakes ----------
@@ -125,7 +130,7 @@ func TestChannelMonitorProbe_AccountDirect_OKAndNotOK(t *testing.T) {
 		Credentials: map[string]any{"base_url": okSrv.URL, "api_key": "k"},
 	}
 	repo := &recordingAccountRepo{}
-	ok, detail, unsupported := ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", okSrv.Client())
+	ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", okSrv.Client())
 	if unsupported {
 		t.Fatalf("expected supported probe for 200 upstream, got unsupported detail=%q", detail)
 	}
@@ -146,7 +151,7 @@ func TestChannelMonitorProbe_AccountDirect_OKAndNotOK(t *testing.T) {
 		Status:      StatusActive,
 		Credentials: map[string]any{"base_url": failSrv.URL, "api_key": "k"},
 	}
-	ok2, detail2, unsupported2 := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc2, "gpt-4", failSrv.Client())
+	ok2, detail2, unsupported2, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc2, "gpt-4", failSrv.Client())
 	if unsupported2 {
 		t.Fatalf("expected authoritative (non-unsupported) failure for 500 upstream, got unsupported detail=%q", detail2)
 	}
@@ -175,7 +180,7 @@ func TestChannelMonitorProbe_AccountDirect_NoAccountWriteSideEffect(t *testing.T
 		Credentials: map[string]any{"base_url": srv.URL, "api_key": "k"},
 	}
 	repo := &recordingAccountRepo{}
-	if _, _, _ = ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", srv.Client()); len(repo.calls) != 0 {
+	if _, _, _, _, _ = ProbeAccountDirect(context.Background(), repo, acc, "gpt-4", srv.Client()); len(repo.calls) != 0 {
 		t.Fatalf("expected zero account repo calls for non-shadow account, got %v", repo.calls)
 	}
 
@@ -197,7 +202,7 @@ func TestChannelMonitorProbe_AccountDirect_NoAccountWriteSideEffect(t *testing.T
 		Credentials: map[string]any{"base_url": srv.URL, "api_key": "k"},
 	}
 	repo2 := &recordingAccountRepo{byID: map[int64]*Account{parentID: parent}}
-	if _, _, _ = ProbeAccountDirect(context.Background(), repo2, shadow, "gpt-4", srv.Client()); len(repo2.calls) == 0 {
+	if _, _, _, _, _ = ProbeAccountDirect(context.Background(), repo2, shadow, "gpt-4", srv.Client()); len(repo2.calls) == 0 {
 		t.Fatalf("expected GetByID call for shadow account, got none")
 	}
 	for _, c := range repo2.calls {
@@ -217,7 +222,7 @@ func TestChannelMonitorProbe_AccountDirect_UnsupportedNonAuthoritative(t *testin
 		Type:     AccountTypeOAuth,
 		Status:   StatusActive,
 	}
-	ok, detail, unsupported := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "gemini-1.5-pro", nil)
+	ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "gemini-1.5-pro", nil)
 	if !unsupported {
 		t.Fatalf("expected unsupported=true for gemini oauth account, got ok=%v detail=%q", ok, detail)
 	}
@@ -301,8 +306,8 @@ func TestChannelMonitorProbe_RunOnce_RecordsCooldown(t *testing.T) {
 	w := NewChannelMonitorProbeWorker(store, repo, grepo, nil, cfg)
 	w.clock = func() time.Time { return now }
 	// 注入探测结果：ok=true（权威成功）。
-	w.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
-		return true, "ok", false
+	w.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool, *int, *int) {
+		return true, "ok", false, nil, nil
 	}
 
 	if err := w.RunOnce(context.Background()); err != nil {
@@ -323,8 +328,8 @@ func TestChannelMonitorProbe_RunOnce_RecordsCooldown(t *testing.T) {
 	store2 := newFakeProbeStore()
 	w2 := NewChannelMonitorProbeWorker(store2, repo, grepo, nil, cfg)
 	w2.clock = func() time.Time { return now }
-	w2.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
-		return false, "upstream status=500", false
+	w2.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool, *int, *int) {
+		return false, "upstream status=500", false, nil, nil
 	}
 	if err := w2.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce(!ok) failed: %v", err)
@@ -436,8 +441,8 @@ func TestChannelMonitorProbe_RunOnce_SkipUnsupportedNoRow(t *testing.T) {
 	storeA := newFakeProbeStore()
 	wA := NewChannelMonitorProbeWorker(storeA, repoA, grepo, nil, cfg)
 	wA.clock = func() time.Time { return now }
-	wA.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
-		return false, "should not be called", false
+	wA.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool, *int, *int) {
+		return false, "should not be called", false, nil, nil
 	}
 	if err := wA.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce(A) failed: %v", err)
@@ -460,13 +465,329 @@ func TestChannelMonitorProbe_RunOnce_SkipUnsupportedNoRow(t *testing.T) {
 	storeB := newFakeProbeStore()
 	wB := NewChannelMonitorProbeWorker(storeB, repoB, grepo, nil, cfg)
 	wB.clock = func() time.Time { return now }
-	wB.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool) {
-		return false, "unsupported account platform=... for direct probe", true
+	wB.probeFn = func(_ context.Context, _ AccountRepository, _ *Account, _ string, _ *http.Client) (bool, string, bool, *int, *int) {
+		return false, "unsupported account platform=... for direct probe", true, nil, nil
 	}
 	if err := wB.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce(B) failed: %v", err)
 	}
 	if len(storeB.upserts) != 0 {
 		t.Fatalf("expected 0 upserts when probe returns unsupported (non-authoritative), got %d", len(storeB.upserts))
+	}
+}
+
+// ---------- 测试 ⑨（定向 B1）：anthropic apikey 账号可直连探测 + 流式 + 200 → ok ----------
+
+func TestChannelMonitorProbe_AnthropicAPIKeyProbeable(t *testing.T) {
+	// 假上游：校验请求形状并回 SSE 文本增量。
+	got := struct {
+		method, url, apiKey, authz, body string
+	}{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got.method = r.Method
+		got.url = r.URL.String()
+		got.apiKey = r.Header.Get("x-api-key")
+		got.authz = r.Header.Get("Authorization")
+		got.body = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "data: "+`{"type":"message_start"}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: "+`{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: "+`{"type":"message_stop"}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	acc := &Account{
+		ID:          1,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Credentials: map[string]any{"base_url": srv.URL, "api_key": "secret-key"},
+	}
+
+	// B1 修复点：原生 anthropic 平台账号此前 GetAPIProtocol 回落 chat_completions，
+	// 导致 canDirectProbe 永为 false → 此处必须为 true。
+	if !canDirectProbe(acc) {
+		t.Fatalf("expected canDirectProbe=true for anthropic apikey account (B1 fix)")
+	}
+	spec, err := buildProbeRequestSpec(acc, "claude-3-5-sonnet")
+	if err != nil {
+		t.Fatalf("buildProbeRequestSpec failed: %v", err)
+	}
+	if spec.method != http.MethodPost {
+		t.Fatalf("expected POST method, got %q", spec.method)
+	}
+	if !strings.HasSuffix(spec.url, "/v1/messages?beta=true") {
+		t.Fatalf("expected url suffix /v1/messages?beta=true, got %q", spec.url)
+	}
+	// B1 修复点：anthropic 请求须携带 api_key 认证头（x-api-key 或 Authorization: Bearer）。
+	if spec.headers["X-Api-Key"] != "secret-key" && !strings.Contains(spec.headers["Authorization"], "secret-key") {
+		t.Fatalf("expected api_key auth header in probe spec, got %v", spec.headers)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(spec.body, &body); err != nil {
+		t.Fatalf("request body not json: %v", err)
+	}
+	if stream, ok := body["stream"].(bool); !ok || !stream {
+		t.Fatalf("expected body stream:true, got %v", body["stream"])
+	}
+
+	// 端到端：假上游 200 + SSE 文本增量 → ok=true，FirstTokenMs/TotalMs 非空且 total>=first。
+	ok, detail, unsupported, firstTokenMs, totalMs := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude-3-5-sonnet", srv.Client())
+	if unsupported {
+		t.Fatalf("expected supported probe, got unsupported detail=%q", detail)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for SSE upstream, got detail=%q", detail)
+	}
+	if firstTokenMs == nil {
+		t.Fatalf("expected FirstTokenMs non-nil for SSE text delta")
+	}
+	if totalMs == nil || *totalMs < *firstTokenMs {
+		t.Fatalf("expected TotalMs >= FirstTokenMs, total=%v first=%v", totalMs, firstTokenMs)
+	}
+}
+
+// ---------- 测试 ⑩（定向 B1）：cursor oauth（或任一不可探协议）仍 unsupported ----------
+
+func TestChannelMonitorProbe_CursorOAuthUnsupported(t *testing.T) {
+	// cursor oauth：非 anthropic / 非 OpenAI 兼容 / 非 gemini → 不可直连探测。
+	acc := &Account{ID: 1, Platform: domain.PlatformCursor, Type: AccountTypeOAuth, Status: StatusActive}
+	if canDirectProbe(acc) {
+		t.Fatalf("expected cursor oauth account NOT probeable")
+	}
+	if _, err := buildProbeRequestSpec(acc, "claude"); err == nil {
+		t.Fatalf("expected buildProbeRequestSpec to error for cursor oauth account")
+	}
+	// 端到端原语也须返回 unsupported（非权威，绝不落 last_ok=false）。
+	ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude", nil)
+	if !unsupported {
+		t.Fatalf("expected unsupported=true for cursor oauth, got ok=%v detail=%q", ok, detail)
+	}
+	if ok {
+		t.Fatalf("unsupported probe must not report ok=true")
+	}
+}
+
+// ---------- 测试 ⑪（定向 B3）：流式 TTFT 计时 ----------
+
+func TestChannelMonitorProbe_StreamingTTFT(t *testing.T) {
+	// 假上游：先发 message_start（起始帧），延迟 100ms 再发文本增量，再发 message_stop。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "data: "+`{"type":"message_start"}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(w, "data: "+`{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: "+`{"type":"message_stop"}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	acc := &Account{ID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Status: StatusActive, Credentials: map[string]any{"base_url": srv.URL, "api_key": "k"}}
+
+	ok, detail, unsupported, firstTokenMs, totalMs := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude", srv.Client())
+	if unsupported || !ok {
+		t.Fatalf("expected ok probe, got ok=%v unsupported=%v detail=%q", ok, unsupported, detail)
+	}
+	// 首帧计时 = 错误实现必须红：FirstTokenMs 应接近文本增量延迟（~100ms），而非 ~0。
+	if firstTokenMs == nil {
+		t.Fatalf("expected FirstTokenMs non-nil when text delta arrives")
+	}
+	if *firstTokenMs < 80 {
+		t.Fatalf("expected FirstTokenMs >= 80ms (text delta after 100ms sleep), got %d", *firstTokenMs)
+	}
+	if totalMs == nil || *totalMs < *firstTokenMs {
+		t.Fatalf("expected TotalMs >= FirstTokenMs, total=%v first=%v", totalMs, firstTokenMs)
+	}
+
+	// 全程无文本增量（仅 message_start）→ FirstTokenMs 必须为 nil。
+	noText := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "data: "+`{"type":"message_start"}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer noText.Close()
+	acc2 := &Account{ID: 2, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Status: StatusActive, Credentials: map[string]any{"base_url": noText.URL, "api_key": "k"}}
+	ok2, _, unsupported2, firstTokenMs2, totalMs2 := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc2, "claude", noText.Client())
+	if unsupported2 || !ok2 {
+		t.Fatalf("expected ok probe for no-text upstream, got ok=%v unsupported=%v", ok2, unsupported2)
+	}
+	if firstTokenMs2 != nil {
+		t.Fatalf("expected FirstTokenMs=nil when no text delta, got %v", *firstTokenMs2)
+	}
+	if totalMs2 == nil {
+		t.Fatalf("expected TotalMs non-nil for no-text upstream")
+	}
+}
+
+// ---------- 测试 ⑫（定向 B2）：候选选取优先 Schedulable ----------
+
+func TestChannelMonitorProbe_SelectProbeableAccountIDSchedulable(t *testing.T) {
+	// 候选 [10,20] 均 openai apikey 可探：10 非 schedulable，20 schedulable=true。
+	// B2：优先选 schedulable 的 20，即使 ID 更大。
+	accountByID := map[int64]*Account{
+		10: {ID: 10, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+		20: {ID: 20, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true},
+	}
+	if got := selectProbeableAccountID([]int64{10, 20}, accountByID); got != 20 {
+		t.Fatalf("expected schedulable account 20 selected, got %d", got)
+	}
+
+	// 候选均非 schedulable → 退回最低 ID（10）。
+	accountByID2 := map[int64]*Account{
+		10: {ID: 10, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+		20: {ID: 20, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive},
+	}
+	if got := selectProbeableAccountID([]int64{10, 20}, accountByID2); got != 10 {
+		t.Fatalf("expected fallback lowest-ID 10, got %d", got)
+	}
+
+	// 候选含不可探账号（gemini oauth）与 schedulable 可探账号：选 schedulable 可探的 30。
+	accountByID3 := map[int64]*Account{
+		5:  {ID: 5, Platform: PlatformGemini, Type: AccountTypeOAuth, Status: StatusActive},
+		30: {ID: 30, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true},
+	}
+	if got := selectProbeableAccountID([]int64{5, 30}, accountByID3); got != 30 {
+		t.Fatalf("expected schedulable probeable 30, got %d", got)
+	}
+}
+
+// ---------- 测试 ⑬（定向 B5）：leader 锁 TTL 推导 ----------
+
+func TestProbeLeaderLockTTLFor(t *testing.T) {
+	// maxPerTick=2 → 2×5min + 5min = 15min（恰为原常量下限）。
+	if got := probeLeaderLockTTLFor(2); got != 15*time.Minute {
+		t.Fatalf("expected 15m for maxPerTick=2, got %v", got)
+	}
+	// maxPerTick=1 → 公式 10min 低于下限 → 兜底 15min。
+	if got := probeLeaderLockTTLFor(1); got != 15*time.Minute {
+		t.Fatalf("expected 15m floor for maxPerTick=1, got %v", got)
+	}
+	// maxPerTick=3 → 3×5min + 5min = 20min（无兜底介入）。
+	if got := probeLeaderLockTTLFor(3); got != 20*time.Minute {
+		t.Fatalf("expected 20m for maxPerTick=3, got %v", got)
+	}
+	// 非正 maxPerTick 按默认 2 处理 → 15min。
+	if got := probeLeaderLockTTLFor(0); got != 15*time.Minute {
+		t.Fatalf("expected 15m default for maxPerTick=0, got %v", got)
+	}
+}
+
+// ---------- 测试 ⑭（FIX-1）：200 响应中途读取失败 → 失败关闭（ok=false, detail 含 stream read error） ----------
+
+// readErrorAfterReader 在累计读出 errAfter 字节后以非 EOF 错误结束，用于模拟 200 响应体
+// 中途断流（连接中断 / 读超时）。errAfter 之前的数据正常可读，之后返回错误而非 io.EOF。
+type readErrorAfterReader struct {
+	data     []byte
+	pos      int
+	errAfter int
+}
+
+func (r *readErrorAfterReader) Read(p []byte) (int, error) {
+	if r.pos >= r.errAfter {
+		return 0, fmt.Errorf("simulated connection reset mid-stream")
+	}
+	n := copy(p, r.data[r.pos:r.errAfter])
+	r.pos += n
+	return n, nil
+}
+
+// fixedResponseTransport 直接返回预设 *http.Response，不经真实网络，便于注入异常响应体。
+type fixedResponseTransport struct {
+	resp *http.Response
+}
+
+func (t *fixedResponseTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return t.resp, nil
+}
+
+func TestChannelMonitorProbe_StreamReadErrorMid200(t *testing.T) {
+	// 假上游：HTTP 200，但响应体在读出部分数据后发生非 EOF 读取错误（连接中断/读超时）。
+	body := &readErrorAfterReader{
+		data:     []byte("data: " + `{"type":"message_start"}`),
+		errAfter: 10,
+	}
+	resp := &http.Response{
+		StatusCode:    200,
+		Status:        "200 OK",
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(body),
+		ContentLength: -1,
+	}
+	client := &http.Client{Transport: &fixedResponseTransport{resp: resp}}
+
+	acc := &Account{
+		ID:          1,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Credentials: map[string]any{"base_url": "http://fake", "api_key": "k"},
+	}
+	ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude", client)
+	if unsupported {
+		t.Fatalf("expected supported probe, got unsupported detail=%q", detail)
+	}
+	// FIX-1：读取失败不得以 ok=true 写入。
+	if ok {
+		t.Fatalf("expected ok=false for mid-stream read error, got ok=true detail=%q", detail)
+	}
+	if !strings.Contains(detail, "stream read error") {
+		t.Fatalf("expected detail to contain 'stream read error', got %q", detail)
+	}
+}
+
+// ---------- 测试 ⑮（FIX-2）：SSE 单行超长无换行（> probeSSELineLimit）→ 失败关闭（ok=false, detail 含 sse line limit exceeded） ----------
+
+func TestChannelMonitorProbe_SSELineLimitExceeded(t *testing.T) {
+	// 假上游：HTTP 200，但单行 SSE 数据远超 probeSSELineLimit 且全程无换行 → 命中单行上限。
+	longLine := strings.Repeat("a", probeSSELineLimit*2)
+	resp := &http.Response{
+		StatusCode:    200,
+		Status:        "200 OK",
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader(longLine)),
+		ContentLength: -1,
+	}
+	client := &http.Client{Transport: &fixedResponseTransport{resp: resp}}
+
+	acc := &Account{
+		ID:          1,
+		Platform:    PlatformAnthropic,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Credentials: map[string]any{"base_url": "http://fake", "api_key": "k"},
+	}
+	ok, detail, unsupported, _, _ := ProbeAccountDirect(context.Background(), &recordingAccountRepo{}, acc, "claude", client)
+	if unsupported {
+		t.Fatalf("expected supported probe, got unsupported detail=%q", detail)
+	}
+	// FIX-2：超长无换行行不得跳行后把 2xx 记成功。
+	if ok {
+		t.Fatalf("expected ok=false for sse line limit exceeded, got ok=true detail=%q", detail)
+	}
+	if !strings.Contains(detail, "sse line limit exceeded") {
+		t.Fatalf("expected detail to contain 'sse line limit exceeded', got %q", detail)
 	}
 }

@@ -260,6 +260,9 @@ type ChannelMonitorV2MatrixRow struct {
 	Status     *string    `json:"status,omitempty"`
 	Source     *string    `json:"source,omitempty"`
 	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	// FirstTokenMs 是探测来源行的流式首 token 延迟（毫秒），紧邻 ObservedAt；
+	// 仅 probe 来源且上游返回了文本增量时非空（has_data=false 行不写）。
+	FirstTokenMs *int `json:"first_token_ms,omitempty"`
 }
 
 // C3 展示三态 DTO 枚举（行级 status / source 取值）。
@@ -272,10 +275,6 @@ const (
 	ChannelMonitorV2StatusFailed      = "failed"
 	ChannelMonitorV2StatusError       = "error"
 )
-
-// ChannelMonitorV2ProbeFreshnessWindow 是探测来源观测的有效窗口（30 分钟）。
-// 业务来源沿用手有 freshness（15 分钟），不在此处额外过期业务行。
-const ChannelMonitorV2ProbeFreshnessWindow = 30 * time.Minute
 
 // mapV2HealthOverallToStatus 将既有 V2 健康四值（healthy/warning/critical/unknown）
 // 映射到 C3 DTO 四值（operational/degraded/failed/error）。
@@ -745,9 +744,8 @@ func channelMonitorV2MergeCatalogMatrix(
 			if st == nil || st.LastProbeAt.IsZero() {
 				continue
 			}
-			if now().Sub(st.LastProbeAt) > ChannelMonitorV2ProbeFreshnessWindow {
-				continue
-			}
+			// B4：废除 30 分钟新鲜度门——最新一次探测结果无条件作为探测来源状态；
+			// 仅当该渠道从未有 probe_state 时（fresh 保持 nil）保持 has_data=false。
 			if fresh == nil || st.LastProbeAt.After(fresh.LastProbeAt) {
 				fresh = st
 			}
@@ -770,8 +768,9 @@ func channelMonitorV2MergeCatalogMatrix(
 			row.Status = &status
 			obs := fresh.LastProbeAt
 			row.ObservedAt = &obs
+			row.FirstTokenMs = fresh.FirstTokenMs
 		}
-		// ③ else: has_data=false → status/source/observed_at stay nil ("无数据").
+		// ③ else: has_data=false → status/source/observed_at/first_token_ms stay nil ("无数据").
 		result.Items = append(result.Items, row)
 	}
 
