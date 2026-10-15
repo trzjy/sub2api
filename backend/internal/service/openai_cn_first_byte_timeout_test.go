@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 )
 
 // —— mock 基础设施 ——
@@ -401,14 +403,29 @@ func (u *cnFreshConnMockUpstream) totalOutbound() int {
 	return int(atomic.LoadInt32(&u.doCalls)) + int(atomic.LoadInt32(&u.freshCalls))
 }
 
-// 验收①：无响应头时按短阈值失败（不等满整体阈值）。
+// enableOpenAICNHeaderFastFail 显式打开分段快速失败开关（默认关闭），并可选打开
+// "仅复用连接才允许快速失败"附加门禁；测试结束还原为具名常量默认值。
+func enableOpenAICNHeaderFastFail(t *testing.T, requireReusedConn bool) {
+	t.Helper()
+	openAICNHeaderFastFail.Store(true)
+	openAICNHeaderFastFailRequireReused.Store(requireReusedConn)
+	t.Cleanup(func() {
+		openAICNHeaderFastFail.Store(openAICNHeaderFastFailEnabled)
+		openAICNHeaderFastFailRequireReused.Store(openAICNHeaderFastFailRequireReusedConn)
+	})
+}
+
+// 验收①：无响应头时按短阈值失败（不等满整体阈值）。分段逻辑默认关闭，本用例显式打开。
 func TestOpenAICNFirstByteTimeout_HeaderPhaseFailsAtShortThreshold(t *testing.T) {
+	enableOpenAICNHeaderFastFail(t, false)
 	const (
 		overall     = 5 * time.Second
 		headerPhase = 40 * time.Millisecond
 	)
 	watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
 	defer watchdog.release()
+	require.NotNil(t, watchdog.headerTimer, "开关打开时必须注册 headerTimer（分段生效）")
+	require.True(t, watchdog.headerFastFailAllowed(), "开关打开且未启用 reused 门禁时快速失败应被允许")
 
 	started := time.Now()
 	// Do 尚未返回 ⇒ 响应头未到达。
@@ -427,8 +444,9 @@ func TestOpenAICNFirstByteTimeout_HeaderPhaseFailsAtShortThreshold(t *testing.T)
 }
 
 // 验收③：已收到响应头后仍按整体阈值（这里是注入的 200ms）等 body 首字节，
-// 不被新的短阈值影响。
+// 不被新的短阈值影响。分段逻辑默认关闭，本用例显式打开。
 func TestOpenAICNFirstByteTimeout_BodyPhaseKeepsOverallThreshold(t *testing.T) {
+	enableOpenAICNHeaderFastFail(t, false)
 	const (
 		overall     = 200 * time.Millisecond
 		headerPhase = 60 * time.Millisecond
@@ -455,7 +473,10 @@ func TestOpenAICNFirstByteTimeout_BodyPhaseKeepsOverallThreshold(t *testing.T) {
 }
 
 // 验收②：无响应头快失败后，对同一账号用新连接重试一次，且只一次。
+// 分段逻辑默认关闭，本用例显式打开（关闭时的对照见
+// TestOpenAICNFirstByteTimeout_HeaderFastFailDisabledKeepsSingleSegment）。
 func TestOpenAICNFirstByteTimeout_RetriesOnceOnFreshConn(t *testing.T) {
+	enableOpenAICNHeaderFastFail(t, false)
 	t.Run("重试成功：Do 一次 + DoFreshConn 一次，body 完整重放", func(t *testing.T) {
 		upstream := &cnFreshConnMockUpstream{}
 		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 60 * time.Millisecond}
@@ -566,6 +587,7 @@ func TestOpenAICNFirstByteTimeout_RetriesOnceOnFreshConn(t *testing.T) {
 // 生成慢，换新连接重发毫无意义（还会把请求重放一遍）。该场景必须保持既有语义：
 // 只向消费链上抛 errOpenAICNFirstByteTimeout，一次 DoFreshConn 都不发。
 func TestOpenAICNFirstByteTimeout_NoFreshConnRetryAfterHeadersReceived(t *testing.T) {
+	enableOpenAICNHeaderFastFail(t, false)
 	upstream := &cnFreshConnMockUpstream{doRespFn: func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -589,6 +611,120 @@ func TestOpenAICNFirstByteTimeout_NoFreshConnRetryAfterHeadersReceived(t *testin
 	require.Equal(t, 1, upstream.totalOutbound(), "响应头已到达的超时绝不得触发新连接重试（底层出站仅 1 次）")
 	require.Equal(t, int32(0), atomic.LoadInt32(&upstream.freshCalls), "响应头已到达时一次 DoFreshConn 都不许发")
 	require.Empty(t, upstream.freshBody, "未发生重试则不得有任何重放请求体")
+}
+
+// —— 止血：分段快速失败默认关闭，必须逐字回到单段语义 ——
+
+// TestOpenAICNFirstByteTimeout_HeaderFastFailDisabledKeepsSingleSegment 钉死开关
+// 关闭（当前生产默认值）时的三条契约：
+//  1. 不注册 headerTimer：出站只有 openAICNFirstByteTimeout 一个整体截止计时器，
+//     注入的短头阈值不得产生任何提前失败（不误杀大请求 prefill）；
+//  2. 不触发新连接重试：底层出站总次数 = 1（首次 Do），DoFreshConn 一次都不发；
+//  3. 观测照旧：httptrace 采集 connReused/connIdleTime，日志字段 reused/idle_time
+//     仍然输出——这是坐实"空闲连接被静默丢弃"假设的唯一数据来源。
+func TestOpenAICNFirstByteTimeout_HeaderFastFailDisabledKeepsSingleSegment(t *testing.T) {
+	t.Run("关闭时不注册 headerTimer，短头阈值不产生提前失败", func(t *testing.T) {
+		const (
+			overall     = 2 * time.Second
+			headerPhase = 40 * time.Millisecond
+		)
+		watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
+		defer watchdog.release()
+
+		require.Nil(t, watchdog.headerTimer, "开关关闭时不得注册 headerTimer（单段语义）")
+		require.False(t, watchdog.headerFastFailAllowed(), "开关关闭时快速失败一律不允许")
+
+		// 短头阈值已过（且远早于整体阈值）：不得有任何裁决发生。
+		time.Sleep(300 * time.Millisecond)
+		require.NoError(t, wctx.Err(), "关闭时短阈值不得提前取消上游尝试")
+		require.False(t, watchdog.Fired(), "关闭时不得在短阈值处触发内部超时")
+		require.False(t, watchdog.TimedOutWaitingHeaders(), "关闭时不得被识别为可重试的'无响应头'分支")
+	})
+
+	t.Run("关闭时不发生新连接重试（底层出站仅一次）", func(t *testing.T) {
+		upstream := &cnFreshConnMockUpstream{}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 60 * time.Millisecond}
+		payload := []byte(`{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}`)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://open.bigmodel.cn/api/paas/v4/chat/completions", bytes.NewReader(payload))
+		require.NoError(t, err)
+
+		_, doErr := svc.doOpenAIUpstream(context.Background(), req, "", cnKimiAccount())
+
+		require.True(t, isOpenAICNFirstByteTimeout(doErr), "关闭时超时仍按既有内部超时语义上抛")
+		require.Equal(t, int32(1), atomic.LoadInt32(&upstream.doCalls), "首次出站只能一次")
+		require.Equal(t, int32(0), atomic.LoadInt32(&upstream.freshCalls), "开关关闭时一次 DoFreshConn 都不许发")
+		require.Equal(t, 1, upstream.totalOutbound(), "底层出站总次数必须是 1（无重试、无额外延迟）")
+		require.Empty(t, upstream.freshBody, "未发生重试则不得有任何重放请求体")
+	})
+
+	t.Run("关闭时观测照旧（httptrace + reused/idle_time 字段）", func(t *testing.T) {
+		watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), 2*time.Second)
+		defer watchdog.release()
+
+		require.NotNil(t, httptrace.ContextClientTrace(wctx), "关闭时也必须挂 httptrace.ClientTrace")
+		// 模拟 GotConn 回调（真实出网由 net/http 触发）：复用了一条空闲 250ms 的连接。
+		watchdog.gotConnTrace().GotConn(httptrace.GotConnInfo{Reused: true, IdleTime: 250 * time.Millisecond})
+		require.True(t, watchdog.connReused.Load(), "httptrace 采集必须落到 watchdog 上")
+		require.Equal(t, int64(250*time.Millisecond), watchdog.connIdleTime.Load())
+
+		enc := zapcore.NewMapObjectEncoder()
+		for _, f := range watchdog.connTraceFields() {
+			f.AddTo(enc)
+		}
+		require.Equal(t, true, enc.Fields["reused"], "日志字段 reused 必须继续输出")
+		require.Equal(t, 250*time.Millisecond, enc.Fields["idle_time"], "日志字段 idle_time 必须继续输出")
+	})
+
+	// 默认值断言放在最后：先让上面三条行为契约独立跑完（变异时先看到行为失败，
+	// 而不是被默认值断言提前短路）。
+	require.False(t, openAICNHeaderFastFailEnabled, "生产默认：分段快速失败必须关闭")
+	require.False(t, openAICNHeaderFastFailRequireReusedConn, "生产默认：reused 附加门禁必须关闭")
+}
+
+// TestOpenAICNFirstByteTimeout_HeaderFastFailReusedConnGate 验证附加门禁
+// openAICNHeaderFastFailRequireReusedConn：打开后只有 httptrace 显示 reused=true
+// （复用了空闲连接）才允许无响应头快速失败与新连接重试；新建连接上的等待一律交给
+// 整体截止计时器。该门禁默认关闭，本用例显式打开。
+func TestOpenAICNFirstByteTimeout_HeaderFastFailReusedConnGate(t *testing.T) {
+	const (
+		overall     = 2 * time.Second
+		headerPhase = 40 * time.Millisecond
+	)
+
+	t.Run("门禁打开 + 新建连接（reused=false）：不得快速失败", func(t *testing.T) {
+		enableOpenAICNHeaderFastFail(t, true)
+		watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
+		defer watchdog.release()
+		require.NotNil(t, watchdog.headerTimer, "总开关打开时注册 headerTimer")
+		require.False(t, watchdog.headerFastFailAllowed(), "新建连接且门禁打开时不得允许快速失败")
+
+		// 短头阈值已过：未被裁决（否则就是误杀大请求 prefill）。
+		time.Sleep(300 * time.Millisecond)
+		require.NoError(t, wctx.Err(), "新建连接上的等待必须交给整体截止，不得被短阈值打断")
+		require.False(t, watchdog.Fired())
+		require.False(t, watchdog.TimedOutWaitingHeaders(), "门禁未通过时不得走新连接重试分支")
+	})
+
+	t.Run("门禁打开 + 复用连接（reused=true）：允许快速失败", func(t *testing.T) {
+		enableOpenAICNHeaderFastFail(t, true)
+		watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
+		defer watchdog.release()
+		watchdog.gotConnTrace().GotConn(httptrace.GotConnInfo{Reused: true, IdleTime: 195 * time.Second})
+
+		started := time.Now()
+		select {
+		case <-wctx.Done():
+		case <-time.After(overall):
+			t.Fatalf("复用连接上应在短阈值 %s 内快速失败", headerPhase)
+		}
+		elapsed := time.Since(started)
+
+		require.True(t, watchdog.Fired(), "复用连接且门禁通过时必须快速失败")
+		require.True(t, watchdog.TimedOutWaitingHeaders(), "复用连接且门禁通过时允许新连接重试")
+		require.GreaterOrEqual(t, elapsed, headerPhase)
+		require.Less(t, elapsed, overall, "必须按短阈值失败，而不是等满整体 %s", overall)
+	})
 }
 
 func TestOpenAICNFirstByteTimeout_FailoverCoolsAccountAndRequestsNextAccount(t *testing.T) {

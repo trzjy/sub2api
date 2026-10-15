@@ -25,7 +25,7 @@ import (
 // 仅收到响应头不停止计时；首包到达后流式传输不受影响（不设整体读超时）。
 const openAICNFirstByteTimeout = 60 * time.Second
 
-// openAICNHeaderTimeout 是"等待上游响应头"这一段的独立阈值（20 秒）。
+// openAICNHeaderTimeout 是"等待上游响应头"这一段的独立阈值（30 秒）。
 //
 // 事故背景：zhipu 账号（id=132）被网关内部错误 cn upstream first byte timeout
 // 反复打成临时停调。近 12h 全部 172 条该类错误的 upstream_status_code 与
@@ -36,11 +36,87 @@ const openAICNFirstByteTimeout = 60 * time.Second
 //
 // 结论方向（待坐实）：请求被写进了一条本地仍认为 ESTABLISHED、但对端已静默
 // 丢弃的半开连接，要等满 60s watchdog 才失败。因此把等待切成两段：
-//   - 未收到响应头：按本常量（20s）快速失败——该场景等满 60s 也几乎不会有
-//     响应头回来，短阈值只为尽早拿到一次"用新连接重试"的机会；
+//   - 未收到响应头：按本常量快速失败——该场景等满 60s 也几乎不会有响应头
+//     回来，短阈值只为尽早拿到一次"用新连接重试"的机会；
 //   - 已收到响应头：仍按 openAICNFirstByteTimeout（60s 整体绝对截止）等
 //     body 首字节，语义与切分前逐字一致，不缩短真实排队/生成窗口。
-const openAICNHeaderTimeout = 20 * time.Second
+//
+// 阈值 20s → 30s（2026-10-15）：20s 是按"响应头早于 body 到达"估的，将来开启
+// 分段时按 30s 留余量。本常量当前**不生效**——分段整段由
+// openAICNHeaderFastFailEnabled 关闭（见该常量注释里的实测证据）。
+const openAICNHeaderTimeout = 30 * time.Second
+
+// openAICNHeaderFastFailEnabled 是"无响应头快速失败 + 同账号新连接重试"这一分段
+// 逻辑的开关**默认值：关闭**（止血，2026-10-15）。
+//
+// 关闭时（当前生产取值，与分段改造之前逐字一致）：
+//   - 不注册 headerTimer：单次出站只有 openAICNFirstByteTimeout（60s）一个整体
+//     截止计时器；
+//   - TimedOutWaitingHeaders 恒为 false ⇒ 不发起 httpUpstreamFreshConn 新连接
+//     重试，超时直接上抛 errOpenAICNFirstByteTimeout；
+//   - 不产生任何额外延迟、额外出站与额外错误语义（无重试日志）；
+//   - httptrace 采集的 connReused / connIdleTime 与日志字段 reused / idle_time
+//     **照旧输出**——它们是坐实"空闲连接被静默丢弃"假设的唯一数据来源，与开关
+//     是否打开无关。
+//
+// 为什么默认关闭（实测证据，改动以此为准）：分段设计假设"响应头先到、body 后到"，
+// 于是"短阈值内无响应头"可区分死连接与慢请求。但绕过网关直连 open.bigmodel.cn
+// 的 anthropic 端点（stream=true）实测：
+//
+//	small:           status=200 headers=0.83s first_body=0.83s
+//	BIG(~24k token): status=200 headers=1.97s first_body=1.97s
+//
+// 即该端点 prefill/思考完成后才返回响应头，响应头与 body 首字节几乎同时到达，
+// "无响应头"无法区分「半开/死连接」与「大请求 prefill 慢」。生产近 24h
+// usage_logs 流式成功请求 TTFT：zhipu 2639 条中 233 条 >20s（8.8%，最大 388s）、
+// kimi 3124 条中 484 条（15.5%）、deepseek 3611 条中 525 条（14.5%）。这些请求在
+// 60s 阈值下是成功的，20s 分段会把已完成 prefill 的请求误杀并重放一遍。
+//
+// 打开时机：等 httptrace 的 reused / idle_time 在生产超时样本上坐实"失败集中在
+// reused=true 且空闲较久的连接"后再开，且建议同时打开
+// openAICNHeaderFastFailRequireReusedConn。
+const openAICNHeaderFastFailEnabled = false
+
+// openAICNHeaderFastFailRequireReusedConn 是快速失败的**可选附加门禁**（默认关闭，
+// 且仅在 openAICNHeaderFastFailEnabled 打开时才有意义）。
+//
+// 打开后：只有 httptrace 显示本次出站确实复用了空闲连接（reused=true）时才允许
+// "无响应头"快速失败与新连接重试；新建连接（reused=false）上的等待一律交给
+// openAICNFirstByteTimeout 整体截止。用途是把快速失败收敛到"空闲连接被上游静默
+// 丢弃"这一唯一有证据的假设上，避免误伤大请求 prefill（见
+// openAICNHeaderFastFailEnabled 注释里的实测）。
+const openAICNHeaderFastFailRequireReusedConn = false
+
+// openAICNHeaderFastFail / openAICNHeaderFastFailRequireReused 是上面两个具名常量
+// 的运行期镜像：初值即常量值（生产取值 = 常量，默认关闭）。只有测试（或将来接入
+// gateway.* 配置项）会显式置位；生产路径不写这两个变量。
+var (
+	openAICNHeaderFastFail              atomic.Bool
+	openAICNHeaderFastFailRequireReused atomic.Bool
+)
+
+func init() {
+	openAICNHeaderFastFail.Store(openAICNHeaderFastFailEnabled)
+	openAICNHeaderFastFailRequireReused.Store(openAICNHeaderFastFailRequireReusedConn)
+}
+
+// openAICNHeaderFastFailOn 报告分段快速失败总开关是否打开。
+func openAICNHeaderFastFailOn() bool {
+	return openAICNHeaderFastFail.Load()
+}
+
+// headerFastFailAllowed 报告本次"无响应头"快速失败与新连接重试是否被允许：
+// 总开关必须打开；且打开 openAICNHeaderFastFailRequireReusedConn 门禁时，还要求
+// 本次出站确实复用了空闲连接（httptrace GotConn 的 reused=true）。
+func (w *openAICNFirstByteWatchdog) headerFastFailAllowed() bool {
+	if !openAICNHeaderFastFailOn() {
+		return false
+	}
+	if openAICNHeaderFastFailRequireReused.Load() {
+		return w != nil && w.connReused.Load()
+	}
+	return true
+}
 
 // openAICNFreshConnRetryLimit 是"未收到响应头"快速失败后，对同一账号用**新建
 // TCP 连接**重试的上限（每次请求最多 1 次；不是换账号、不是换分组）。
@@ -145,6 +221,10 @@ type openAICNFirstByteWatchdog struct {
 // headerTimeout<=0 时取 min(openAICNHeaderTimeout, timeout)：注入短整体阈值的
 // 场景（测试/特殊配置）自动退化为"单段"，行为与整改前完全一致。
 //
+// 分段 headerTimer 只在 openAICNHeaderFastFailEnabled 打开时注册；关闭（当前默认）
+// 时本次出站只有整体截止一个计时器，单段语义。
+// 注意：httptrace 观测不受开关影响，任何情况下都挂。
+//
 // 返回的 context 已挂 httptrace.ClientTrace（GotConn 采集连接复用信息）。
 func newOpenAICNFirstByteWatchdog(deriveCtx, clientCtx context.Context, timeout time.Duration, headerTimeout ...time.Duration) (*openAICNFirstByteWatchdog, context.Context) {
 	if timeout <= 0 {
@@ -170,7 +250,9 @@ func newOpenAICNFirstByteWatchdog(deriveCtx, clientCtx context.Context, timeout 
 	w := &openAICNFirstByteWatchdog{parentCtx: clientCtx, cancel: cancel, done: make(chan struct{})}
 	wctx = httptrace.WithClientTrace(wctx, w.gotConnTrace())
 	w.timer = time.AfterFunc(timeout, w.expire)
-	w.headerTimer = time.AfterFunc(hp, w.expireHeader)
+	if openAICNHeaderFastFailOn() {
+		w.headerTimer = time.AfterFunc(hp, w.expireHeader)
+	}
 	go w.watchParent()
 	return w, wctx
 }
@@ -256,11 +338,16 @@ func (w *openAICNFirstByteWatchdog) expire() {
 	w.fire()
 }
 
-// expireHeader 由"等待响应头"段计时器触发。只有在响应头尚未到达时才有资格裁决：
-// 响应头已到达（headerReceived）意味着进入了排队/生成环节，必须交给整体截止
-// 计时器，不得被短阈值误杀。真正的胜负仍由 fire() 的 CAS 单一裁决决定。
+// expireHeader 由"等待响应头"段计时器触发（该计时器仅在快速失败开关打开时注册）。
+// 只有在响应头尚未到达时才有资格裁决：响应头已到达（headerReceived）意味着进入了
+// 排队/生成环节，必须交给整体截止计时器，不得被短阈值误杀。附加门禁
+// openAICNHeaderFastFailRequireReusedConn 打开时，新建连接上的等待同样不裁决。
+// 真正的胜负仍由 fire() 的 CAS 单一裁决决定。
 func (w *openAICNFirstByteWatchdog) expireHeader() {
 	if w.headerReceived.Load() {
+		return
+	}
+	if !w.headerFastFailAllowed() {
 		return
 	}
 	w.fire()
@@ -273,8 +360,11 @@ func (w *openAICNFirstByteWatchdog) HeaderReceived() bool {
 
 // TimedOutWaitingHeaders 报告本次是否属于"无响应头"分支的快速失败——
 // 只有这一类需要（且允许）走同账号新连接重试。
+//
+// 快速失败开关关闭（当前默认）时恒为 false：分段改造之前没有新连接重试路径，
+// 关闭开关必须逐字回到"Do 一次、超时直接上抛"的单段语义。
 func (w *openAICNFirstByteWatchdog) TimedOutWaitingHeaders() bool {
-	return w != nil && w.Fired() && !w.headerReceived.Load()
+	return w != nil && w.Fired() && !w.headerReceived.Load() && w.headerFastFailAllowed()
 }
 
 // markHeadersReceived 在 Do 成功返回（上游响应头已到达）时调用：标记进入
@@ -416,6 +506,8 @@ func (s *OpenAIGatewayService) openAICNFirstByteTimeoutFor() time.Duration {
 //
 // 重试前置条件（调用方保证）：上一次尝试 Fired() 且 TimedOutWaitingHeaders()。
 // 重试条件（本函数保证）：
+//  0. 分段快速失败开关已打开（openAICNHeaderFastFailEnabled）；关闭时本函数是
+//     纯粹的 no-op，出站次数与分段改造前完全一致（只有首次 Do）。
 //  1. 上游实现了 httpUpstreamFreshConn（能给出 DisableKeepAlives 的一次性 Transport）；
 //  2. 请求体可重放（Body 为 nil，或 GetBody 可用）——不可重放时绝不强发第二次；
 //  3. 每请求最多 openAICNFreshConnRetryLimit 次（当前为 1），由调用方单次调用保证。
@@ -427,6 +519,11 @@ func (s *OpenAIGatewayService) retryOpenAICNUpstreamFreshConn(
 	previous *openAICNFirstByteWatchdog,
 ) (*http.Response, *openAICNFirstByteWatchdog, bool) {
 	if s == nil || account == nil || request == nil {
+		return nil, nil, false
+	}
+	// 开关关闭（当前默认）：不发起任何新连接重试，调用方按既有超时语义上抛。
+	// 这条守卫让"关闭 = 单段语义"在重试函数内部也成立，不依赖调用方判断。
+	if !openAICNHeaderFastFailOn() {
 		return nil, nil, false
 	}
 	fields := []zap.Field{
