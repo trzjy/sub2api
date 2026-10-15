@@ -96,7 +96,7 @@ func TestFilterMuseUpstreamModels(t *testing.T) {
 		"muse-spark-1.3",                  // 缺 contributor 后缀
 		"deepseek-v4-flash",               // 非 muse 前缀
 		"glm-5.3",                         // 非 muse 前缀
-		"spark-foo-contributor",            // 非 muse 前缀
+		"spark-foo-contributor",           // 非 muse 前缀
 	}
 	accepted, discarded := filterMuseUpstreamModels(raw)
 
@@ -265,6 +265,84 @@ func TestSyncMuseModelCatalogPreservesManualAlias(t *testing.T) {
 	mapping := lastMuseMapping(t, repo)
 	require.Equal(t, "muse-spark-1.3-contributor", mapping["muse-spark-1.3"])
 	require.Equal(t, "muse-spark-1.3-contributor", mapping["my-alias"], "人工 alias 必须保留")
+}
+
+// TestSyncMuseModelCatalogRejectsMaskedAccount 验证 muse 同步守卫（派发单 OC-T1，测试 #5）：
+// 伪装账号（mask_upstream_identity=true）在同步入口、任何目录变更/持久化之前失败关闭——
+// 返回明确错误（FIX-6 后复用 UpstreamModelSyncError 契约、明确"策略拒绝"），mapping 与托管
+// 快照零写入，且不发起上游请求（零目录变更）。
+func TestSyncMuseModelCatalogRejectsMaskedAccount(t *testing.T) {
+	t.Parallel()
+
+	repo := &volcanoPlanSyncRepoStub{}
+	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
+	svc := newMuseSyncSvc(stub, repo)
+	account := museAccount(205, map[string]any{"my-alias": "muse-spark-1.3-contributor"})
+	account.Extra = map[string]any{"mask_upstream_identity": true}
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.Error(t, err)
+	require.ErrorIs(t, err, museSyncMaskedAccountRejected)
+	require.Nil(t, catalog)
+
+	// FIX-6：守卫错误应复用既有 UpstreamModelSyncError 契约，管理端据此返回明确"策略拒绝"。
+	var syncErr *UpstreamModelSyncError
+	require.ErrorAs(t, err, &syncErr)
+	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind, "守卫应返回不受支持（策略拒绝）契约")
+	require.Contains(t, syncErr.Message, "policy", "错误文案须明确表达策略拒绝而非通用内部错误")
+
+	extraCalls, credCalls := repo.counts()
+	require.Zero(t, extraCalls, "守卫拒绝不得写托管快照")
+	require.Zero(t, credCalls, "守卫拒绝不得写 model_mapping")
+	require.Empty(t, stub.urls, "守卫在任何上游请求/目录变更之前失败关闭")
+}
+
+// TestSyncMuseModelCatalogNonMaskedUnaffected 验证 muse 非伪装账号同步不受守卫影响
+// （派发单 OC-T1，测试 #5 第二项：muse 非 mask 同步正常，既有用例零回归）。
+func TestSyncMuseModelCatalogNonMaskedUnaffected(t *testing.T) {
+	t.Parallel()
+
+	repo := &volcanoPlanSyncRepoStub{}
+	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
+	svc := newMuseSyncSvc(stub, repo)
+	account := museAccount(206, nil) // 无 mask 标记
+
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, []string{"muse-spark-1.3"}, catalog.Models)
+
+	extraCalls, credCalls := repo.counts()
+	require.NotZero(t, extraCalls, "非 mask 账号仍落托管快照")
+	require.NotZero(t, credCalls, "非 mask 账号仍落 model_mapping")
+}
+
+// TestSyncUpstreamModelCatalogMuseGuardDoesNotExpandToNonMuse 验证守卫不扩大到非 muse 平台
+// （派发单 OC-T1，测试 #5 第三项）：非 muse 平台账号（此处 web 接入模式）仍走既有
+// unsupported 契约，绝不返回 muse 守卫错误。
+func TestSyncUpstreamModelCatalogMuseGuardDoesNotExpandToNonMuse(t *testing.T) {
+	t.Parallel()
+
+	repo := &volcanoPlanSyncRepoStub{}
+	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
+	svc := newMuseSyncSvc(stub, repo)
+	account := &Account{
+		ID:       207,
+		Platform: PlatformKimi,
+		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"mask_upstream_identity": true},
+		Credentials: map[string]any{
+			"access_mode": AccountAccessModeWeb,
+			"api_key":     "kimi-key",
+		},
+	}
+
+	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, museSyncMaskedAccountRejected, "守卫不得扩大到非 muse 平台")
+
+	var syncErr *UpstreamModelSyncError
+	require.ErrorAs(t, err, &syncErr)
+	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind, "非 muse 平台维持既有 unsupported 契约")
 }
 
 // lastMuseMapping 从 repo 最后一次凭据写入中取 model_mapping。

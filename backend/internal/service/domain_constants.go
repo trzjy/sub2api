@@ -129,7 +129,7 @@ const (
 )
 
 // 官方平台网页接入（zhipu / deepseek / kimi）的默认上游 base_url
-// （docs/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
+// （docs-local/web-reverse-embedded-login-plan.md §3.3 出站端点表）。可被
 // credentials.base_url 覆盖（Account.GetWebBaseURL）。
 const (
 	DefaultWebDeepseekBaseURL = "https://chat.deepseek.com"
@@ -365,6 +365,9 @@ const (
 
 	// 操作审计日志设置
 	SettingKeyAuditLogRetentionDays = "audit_log_retention_days" // 审计日志保留天数（<=0 永久保留），默认 180
+
+	// Cursor 软删账号/流水定期清理保留天数（<=0 永久保留），默认 90
+	SettingKeyCursorAccountRetentionDays = "cursor_account_retention_days"
 
 	// LinuxDo Connect OAuth 登录设置
 	SettingKeyLinuxDoConnectEnabled      = "linuxdo_connect_enabled"
@@ -816,7 +819,7 @@ const (
 	SettingKeyBackendModeEnabled = "backend_mode_enabled"
 
 	// SettingKeyVisionRoutingEnabled 全局视觉路由 kill-switch
-	// （docs/capability-routing-plan.md §3.8）：关闭后 RequireVision 恒为 false，
+	// （docs-local/capability-routing-plan.md §3.8）：关闭后 RequireVision 恒为 false，
 	// 行为回到 v1 现状（普通路由）。默认开启：未配置 = 开启（开关定位是回滚手段，
 	// 非灰度门禁）。
 	SettingKeyVisionRoutingEnabled = "vision_routing_enabled"
@@ -989,9 +992,9 @@ const (
 	SettingKeyUsageRiskMinDailyRequests = "usage_risk_min_daily_requests"
 
 	// R1 全天候活跃：活跃小时 ≥阈值 且连续活跃天数 ≥阈值。
-	SettingKeyUsageRiskR1ActiveHours    = "usage_risk_r1_active_hours"
+	SettingKeyUsageRiskR1ActiveHours     = "usage_risk_r1_active_hours"
 	SettingKeyUsageRiskR1ConsecutiveDays = "usage_risk_r1_consecutive_days"
-	SettingKeyUsageRiskR1Enabled        = "usage_risk_r1_enabled"
+	SettingKeyUsageRiskR1Enabled         = "usage_risk_r1_enabled"
 
 	// R2 用量离群：倍数 >阈值 且 peer 群计数 ≥阈值。
 	SettingKeyUsageRiskR2Multiple  = "usage_risk_r2_multiple"
@@ -1021,9 +1024,9 @@ const (
 	SettingKeyUsageRiskR6Enabled = "usage_risk_r6_enabled"
 
 	// R7 缓存失效：cache 比 ≤阈值 且当日输入 token ≥阈值。
-	SettingKeyUsageRiskR7CacheRatio      = "usage_risk_r7_cache_ratio"
+	SettingKeyUsageRiskR7CacheRatio     = "usage_risk_r7_cache_ratio"
 	SettingKeyUsageRiskR7MinInputTokens = "usage_risk_r7_min_input_tokens"
-	SettingKeyUsageRiskR7Enabled         = "usage_risk_r7_enabled"
+	SettingKeyUsageRiskR7Enabled        = "usage_risk_r7_enabled"
 
 	// R8 多 key 均摊：key 数 ≥阈值 且每 key 承载 ≥阈值。
 	SettingKeyUsageRiskR8KeyCount = "usage_risk_r8_key_count"

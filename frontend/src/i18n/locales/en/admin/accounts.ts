@@ -353,6 +353,12 @@ export default {
         unlimited: 'Subscription · Unlimited',
         unlimitedWithPlan: '{plan} · Unlimited',
         remainingCount: '{count} remaining',
+        // Count pack (upstream mode=quota_limited): the balance field carries remaining
+        // *requests*, not money — no currency prefix. With a denominator show
+        // "remaining/total", otherwise just the remaining count.
+        countPack: 'Count Pack',
+        countPackRemaining: 'Count pack {remaining}/{limit}',
+        countPackNoLimit: 'Count pack remaining {count}',
         expiresAt: 'until {date}',
         monthlyUsage: 'monthly ${amount}',
         noBalanceEndpoint: 'This platform has no balance query endpoint',
@@ -394,6 +400,21 @@ export default {
         staleMinutes: '{minutes} minutes',
         staleHours: '{hours} hours',
         staleDays: '{days} days',
+        // Localized balance-probe error map (dispatch balance-ui-errmap): only
+        // "configuration/account" codes that the user can act on live here; a hit
+        // replaces the backend English message, a miss falls back to the existing
+        // rendering. Transient/upstream codes (REQUEST_FAILED / REQUEST_BUILD_FAILED /
+        // PROBE_RESULT_INVALID / CODING_PLAN) are deliberately absent.
+        probeErrors: {
+          CN_BALANCE_INVALID_CONFIG: 'Balance probe is misconfigured: access_token and count_unit must be configured together',
+          CN_BALANCE_NOT_CONFIGURED: 'Balance probe service is not configured, please contact the administrator',
+          CN_BALANCE_TH_NOT_CONFIGURED: 'TokenHarbor pass service is not configured, please contact the administrator',
+          CN_BALANCE_NO_APIKEY: 'Account API key is empty, fill in the credentials before probing the balance',
+          CN_BALANCE_NO_ENDPOINT: 'This account platform has no balance query endpoint',
+          CN_BALANCE_URL_REJECTED: 'The balance probe URL is not allowed, please check the probe URL configuration',
+          CN_BALANCE_INVALID_PLATFORM: 'This account is not a CN provider account, balance probing is unsupported',
+          CN_BALANCE_ACCOUNT_NOT_FOUND: 'Account does not exist or has been deleted'
+        }
       },
       types: {
         oauth: 'OAuth',
@@ -467,7 +488,23 @@ export default {
         lastUsed: 'Last Used',
         createdAt: 'Created',
         expiresAt: 'Expires At',
+        quotaKey: 'Quota Key',
         actions: 'Actions'
+      },
+      // Cursor site-channel quota key ownership (C6 / plan §4.5)
+      quotaKey: {
+        unassigned: 'Unassigned',
+        selectorLabel: 'Quota Key',
+        selectorHint: 'Cursor accounts must be assigned to a quota key',
+        selectorRequired: 'Please select a quota key',
+        selectorGroupAvailable: 'Available',
+        selectorGroupExhausted: 'Exhausted',
+        selectorGroupExpired: 'Expired',
+        selectorEmpty: 'No quota keys available',
+        selectorLoading: 'Loading quota keys…',
+        selectorExpand: 'Expand quota key list',
+        selectorCollapse: 'Collapse quota key list',
+        loadError: 'Failed to load quota keys'
       },
       schedulerScore: {
         baseShort: 'Base',

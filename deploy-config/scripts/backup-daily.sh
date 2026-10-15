@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# backup-daily.sh —— sub2api 每日本地备份（方案 SSOT：docs/backup-daily-plan.md）
+# backup-daily.sh —— sub2api 每日本地备份（方案 SSOT：docs-local/backup-daily-plan.md）
 #
 # 四类备份：
 #   1. postgres  : pg_dump -Fc（自定义格式自带压缩）

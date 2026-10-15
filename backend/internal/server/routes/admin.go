@@ -155,6 +155,9 @@ func RegisterAdminRoutes(
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
 
+		// 激活码（quota key）管理面（§4.4，8 端点）
+		registerQuotaKeyRoutes(admin, h, stepUpAuth)
+
 		// 异常调用分析（防中转商薅羊毛）admin 路由
 		registerUsageRiskRoutes(admin, h)
 
@@ -350,6 +353,37 @@ func registerAuditLogRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middl
 		auditLogs.GET("/:id", h.Admin.AuditLog.Get)
 		// 清空需现场 TOTP 校验（在 handler 内强制），不复用 step-up sudo 窗口
 		auditLogs.POST("/clear", h.Admin.AuditLog.Clear)
+	}
+}
+
+// registerQuotaKeyRoutes 注册激活码（quota key）管理端点（§4.4，8 端点）：
+//
+//	GET    /admin/quota_keys                     列表（仅 code_masked，不返原文）
+//	POST   /admin/quota_keys                     创建（接原文一次 → 加密落库）
+//	GET    /admin/quota_keys/:id                 详情（脱敏 status + 账号分页）
+//	PUT    /admin/quota_keys/:id                 编辑（code/expires_at/notes，status 不可改）
+//	DELETE /admin/quota_keys/:id                 软删激活码及其账号（DeleteWithAccounts 唯一路径）
+//	POST   /admin/quota_keys/:id/refresh         手动拉号
+//	POST   /admin/quota_keys/:id/clear_exhausted 解除 exhausted
+//	POST   /admin/quota_keys/sweep_expired       手动触发一轮到期清扫
+//
+// handler 未接线（如部分部署）时整组不注册，避免空指针。
+func registerQuotaKeyRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middleware.StepUpAuthMiddleware) {
+	if h == nil || h.Admin == nil || h.Admin.QuotaKey == nil {
+		return
+	}
+	qk := admin.Group("/quota_keys")
+	{
+		qk.GET("", h.Admin.QuotaKey.List)
+		qk.GET("/:id", h.Admin.QuotaKey.Get)
+		qk.POST("", h.Admin.QuotaKey.Create)
+		qk.PUT("/:id", h.Admin.QuotaKey.Update)
+		qk.DELETE("/:id", h.Admin.QuotaKey.Delete)
+		qk.POST("/:id/refresh", h.Admin.QuotaKey.RefreshAccounts)
+		qk.POST("/:id/clear_exhausted", h.Admin.QuotaKey.ClearExhausted)
+		// 静态子路径置于 :id 通配之后注册（与既有 accounts 路由同型），由 gin
+		// 静态优先匹配，sweep_expired 不会被 :id 吞掉。
+		qk.POST("/sweep_expired", h.Admin.QuotaKey.SweepExpired)
 	}
 }
 
@@ -623,7 +657,7 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/batch-clear-error", h.Admin.Account.BatchClearError)
 		accounts.POST("/batch-refresh", h.Admin.Account.BatchRefresh)
 
-		// 视觉能力检测 / 覆盖（docs/capability-routing-plan.md §3.5/§3.8）
+		// 视觉能力检测 / 覆盖（docs-local/capability-routing-plan.md §3.5/§3.8）
 		accounts.POST("/:id/vision-capability/detect", h.Admin.VisionCapability.Detect)
 		accounts.POST("/vision-capability/detect", h.Admin.VisionCapability.DetectBatch)
 		accounts.PUT("/:id/vision-capability", h.Admin.VisionCapability.Override)

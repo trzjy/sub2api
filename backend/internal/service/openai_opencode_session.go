@@ -49,13 +49,13 @@ func openCodeInboundBodies(c *gin.Context) [][]byte {
 	return [][]byte{body}
 }
 
-// applyOpenCodeSessionHeader sets x-opencode-session on outbound inference
-// requests. OpenCode Go requires a per-conversation value from 2026-09-05
-// (MissingSessionID). Prefer caller headers, then the documented body session
-// fields (OpenAI prompt_cache_key / Anthropic metadata.user_id), then any
-// already applied account override. A generated UUID is last-resort only for
-// probes and clients that omit every stable identifier — a new UUID each turn
-// would miss upstream prompt cache.
+// applyOpenCodeSessionHeader forwards the caller-owned conversation identifier
+// only to OpenCode's official API origin (isOpenCodeHostURL). The caller applies
+// this after account header overrides so a per-conversation value cannot be
+// replaced by a fixed account-wide override. muse / opencode.ai-origin accounts
+// that lack a caller session are handled separately by applyMuseSessionHeader
+// (per-request UUID injection); this helper is the trust boundary that keeps a
+// static account override from being forwarded to non-opencode origins.
 func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL string, headers http.Header, bodies ...[]byte) {
 	if account == nil || account.Type != AccountTypeAPIKey || headers == nil {
 		return
@@ -64,8 +64,12 @@ func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL stri
 		return
 	}
 
-	payloads := append(openCodeInboundBodies(c), bodies...)
-	sessionID := resolveOpenCodeSessionID(c, headers, shouldGenerateOpenCodeSession(account, targetURL), payloads...)
+	// host 判定与 applyMuseSessionHeader 共用同一来源（isOpenCodeHostURL）。
+	if !isOpenCodeHostURL(targetURL) {
+		return
+	}
+
+	sessionID := strings.TrimSpace(c.GetHeader(openCodeSessionHeader))
 	if sessionID == "" {
 		return
 	}

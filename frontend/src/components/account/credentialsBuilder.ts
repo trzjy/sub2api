@@ -735,92 +735,88 @@ export function cnQuotaProviderPrefix(platform: string, baseURL: string): string
   return ''
 }
 
-/** 用量单元格可见性判定所需的账号字段。 */
-export interface CNUsageCellAccount {
-  platform: string
-  type: string
-  credentials?: Record<string, unknown>
-}
-
-// Command Code、Cline 的积分与用量接口只查官方主机上的 API Key 账号（与后端
-// commandCodeUsageSupported / clineAccountAPISupported 一致）：自定义中转的 Key 不发往
-// 官方接口，后端直接拒绝探测，单元格只会显示一行报错。
+// 上游新增 Command Code / Cline 的积分与用量接口判定：仅官方主机上的 apikey 账号可见
+//（与后端 commandCodeUsageSupported / clineAccountAPISupported 一致）；自定义中转的 Key
+// 不发往官方接口，后端直接拒绝探测，单元格只会显示一行报错。OFFICIAL_ACCOUNT_API_PLATFORMS
+// 为单一事实源（fork 既有的 kimi/zhipu/minimax/deepseek/火山判定顺序保持不变）。
 const OFFICIAL_ACCOUNT_API_PLATFORMS = ['command_code', 'cline']
 
-function cnUsageCellAccountMode(account: CNUsageCellAccount): string {
-  const mode = account.credentials?.account_mode
-  return typeof mode === 'string' ? mode : ''
-}
-
-/** 与后端 Account.GetAPIProtocol 一致：按模型分流的供应商未指定原生协议时为 adaptive。 */
-function accountUsesAdaptiveProtocol(platform: string, mode: string, protocol: unknown): boolean {
-  if (protocol === 'adaptive') return true
-  if (protocol === 'chat_completions' || protocol === 'anthropic') return false
-  if (protocol === 'responses' && cnSupportsNativeResponses(platform, mode)) return false
-  return providerRoutesByModel(platform)
-}
-
-/**
- * 账号实际使用的 Chat Completions 端点（与后端 Account.GetOpenAIBaseURL 一致）：adaptive
- * 账号优先分协议端点，其次 base_url，都没填时为平台清单的默认端点。
- */
-function accountChatBaseUrl(account: CNUsageCellAccount, mode: string): string {
-  const credentials = account.credentials
-  const baseUrls = credentials?.api_base_urls
-  if (baseUrls && typeof baseUrls === 'object' && accountUsesAdaptiveProtocol(account.platform, mode, credentials?.api_protocol)) {
-    const chat = (baseUrls as Record<string, unknown>).chat_completions
-    if (typeof chat === 'string' && chat.trim()) return chat.trim()
-  }
-  const baseUrl = credentials?.base_url
-  if (typeof baseUrl === 'string' && baseUrl.trim()) return baseUrl.trim()
-  return defaultCNBaseUrl(account.platform, mode)
-}
-
-/** 官方主机即平台清单默认端点的主机，且必须是 https。 */
-function officialAccountAPISupported(account: CNUsageCellAccount, mode: string): boolean {
-  if (account.type !== 'apikey') return false
+// 官方主机即平台清单默认端点的主机，且必须是 https（与后端 Account.GetOpenAIBaseURL 一致）。
+// baseURL 缺失或平台无默认端点时回退 false，向后兼容且不误放中转账号。
+function isOfficialAccountAPIHost(platform: string, accountMode: string, baseURL: string): boolean {
+  if (!baseURL) return false
   try {
-    const target = new URL(accountChatBaseUrl(account, mode))
-    const official = new URL(defaultCNBaseUrl(account.platform, mode))
+    const target = new URL(baseURL)
+    const official = new URL(defaultCNBaseUrl(platform, accountMode))
     return target.protocol === 'https:' && target.hostname === official.hostname
   } catch {
     return false
   }
 }
 
-/**
- * 账号的用量单元格判定用 base url：火山方舟订阅号优先取 credentials.base_url
- * （订阅号保存为 payg，但编辑态可能带 adaptive 的 api_base_urls 指向其它供应商），
- * 否则走 resolveAccountBaseURL 的 adaptive / 非 adaptive 统一口径。与
- * CNProviderQuotaCell.readBaseURL、后端 resolveCNQuotaProvider 的火山优先识别一致。
- */
-function cnUsageCellBaseUrl(account: CNUsageCellAccount): string {
-  const raw = account.credentials?.base_url
-  if (typeof raw === 'string' && isVolcanoBaseURL(raw)) return raw
-  return resolveAccountBaseURL(account.credentials)
-}
-
-export function cnQuotaCellVisible(account: CNUsageCellAccount): boolean {
-  const { platform } = account
-  const mode = cnUsageCellAccountMode(account)
-  if (platform === 'opencode_go') return mode !== 'zen'
-  // Command Code、Cline：订阅窗口与积分由一次探测同时刷新。
-  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) return officialAccountAPISupported(account, mode)
-  if (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') return mode === 'coding'
+export function cnQuotaCellVisible(
+  platform: string,
+  accountMode: string,
+  baseURL: string = '',
+  type: string = ''
+): boolean {
+  // Command Code / Cline：订阅窗口与积分由一次探测同时刷新；仅官方主机上的 apikey 账号可见。
+  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) {
+    return type === 'apikey' && isOfficialAccountAPIHost(platform, accountMode, baseURL)
+  }
+  if (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') {
+    return accountMode === 'coding'
+  }
   // 火山方舟订阅号：按 base_url 识别，与 platform 解耦（账号仍存为 deepseek 平台），
   // 与接入模式无关（火山订阅号保存为 payg）。仅火山放行非 coding，不改
   // Kimi / 智谱 / MiniMax / 普通 DeepSeek 的模式语义。
-  return isVolcanoBaseURL(cnUsageCellBaseUrl(account))
+  if (isVolcanoBaseURL(baseURL)) return true
+  return false
 }
 
-export function cnBalanceCellVisible(account: CNUsageCellAccount): boolean {
-  const { platform } = account
-  const mode = cnUsageCellAccountMode(account)
-  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) return officialAccountAPISupported(account, mode)
+/**
+ * 余额单元格可见性（单一事实源，CNProviderBalanceCell 与 AccountUsageCell 共用）。
+ * 判定顺序（严格）：
+ *   1. capable === true → 可见（优先于火山排除，消除"后端有快照/探测、前端恒隐藏"的平行闸）
+ *   2. isVolcanoBaseURL(baseURL) → 不可见（火山订阅套餐无公开余额端点，按余额走 payg
+ *      探测会打到错误的 API Key，且订阅套餐没有可查余额，避免与火山配额单元格双重渲染）
+ *   3. accountMode === 'coding' → 不可见（coding 账号走额度探测，余额端点不适用）
+ *   4. Command Code / Cline（官方主机上的 apikey 账号）→ 可见（上游新增，积分与用量同源）
+ *   5. platform 'kimi' / 'deepseek' → 可见（官方余额端点恒可达）
+ *   6. platform 'zhipu' / 'minimax' → 按 hasRelayBalanceProbe 放行
+ *   7. 其余平台 → 不可见
+ * capable 为调用方显式传入的后端投影有效探测能力（account.balance_probe_capable，即
+ * RelayProbeTargetURL 的布尔投影），非 credentials.balance_probe.enabled 配置开关——它
+ * 优先于火山排除，使已具备余额能力（enabled 且 URL 可解析/可推导）的账号不再被前端
+ * 恒隐藏；配错账号（enabled 但无可解析 URL 且非官方端点）capable 为 false，整格不出现
+ * （方案乙 / BAL-GATE-D5）。
+ * hasRelayBalanceProbe 为 credentials.balance_probe.enabled 配置开关（第 6 步放行依据）：
+ * 智谱 / MiniMax 官方无余额端点，但挂在这两个平台下的中转型账号（自建 /v1/usage 探针）
+ * 有可用余额端点，配置了探针即按配置放行，不再被平台硬白名单挡死。缺省 false 向后兼容。
+ * type 为上游新增的账号类型（apikey / oauth 等），仅用于 Command Code / Cline 的官方主机
+ * 可行性判定；缺省空串时该分支恒不可见（向后兼容既有调用方，不传 type 即维持旧行为）。
+ */
+export function cnBalanceCellVisible(
+  platform: string,
+  accountMode: string,
+  baseURL: string = '',
+  capable: boolean = false,
+  hasRelayBalanceProbe: boolean = false,
+  type: string = ''
+): boolean {
+  if (capable === true) return true
   // 火山订阅号按余额走 payg 探测会打到错误的 API Key；订阅套餐没有可查余额，
   // 余额单元格保持隐藏，避免与火山配额单元格双重渲染。
-  if (isVolcanoBaseURL(cnUsageCellBaseUrl(account))) return false
-  return (platform === 'kimi' || platform === 'deepseek') && mode !== 'coding'
+  if (isVolcanoBaseURL(baseURL)) return false
+  if (accountMode === 'coding') return false
+  // Command Code / Cline：仅官方主机上的 apikey 账号可见（上游新增，积分与用量同源）。
+  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) {
+    return type === 'apikey' && isOfficialAccountAPIHost(platform, accountMode, baseURL)
+  }
+  if (platform === 'kimi' || platform === 'deepseek') return true
+  // zhipu / minimax 官方无余额端点；中转型账号（配了 balance_probe）有 /v1/usage。
+  if (platform === 'zhipu' || platform === 'minimax') return hasRelayBalanceProbe === true
+  return false
 }
 
 /**

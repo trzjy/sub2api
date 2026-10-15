@@ -34,6 +34,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -250,33 +251,33 @@ func init() {
 	// account.DefaultExtra holds the default value on creation for the extra field.
 	account.DefaultExtra = accountDescExtra.Default.(func() map[string]interface{})
 	// accountDescConcurrency is the schema descriptor for concurrency field.
-	accountDescConcurrency := accountFields[11].Descriptor()
+	accountDescConcurrency := accountFields[12].Descriptor()
 	// account.DefaultConcurrency holds the default value on creation for the concurrency field.
 	account.DefaultConcurrency = accountDescConcurrency.Default.(int)
 	// accountDescPriority is the schema descriptor for priority field.
-	accountDescPriority := accountFields[13].Descriptor()
+	accountDescPriority := accountFields[14].Descriptor()
 	// account.DefaultPriority holds the default value on creation for the priority field.
 	account.DefaultPriority = accountDescPriority.Default.(int)
 	// accountDescRateMultiplier is the schema descriptor for rate_multiplier field.
-	accountDescRateMultiplier := accountFields[14].Descriptor()
+	accountDescRateMultiplier := accountFields[15].Descriptor()
 	// account.DefaultRateMultiplier holds the default value on creation for the rate_multiplier field.
 	account.DefaultRateMultiplier = accountDescRateMultiplier.Default.(float64)
 	// accountDescStatus is the schema descriptor for status field.
-	accountDescStatus := accountFields[15].Descriptor()
+	accountDescStatus := accountFields[16].Descriptor()
 	// account.DefaultStatus holds the default value on creation for the status field.
 	account.DefaultStatus = accountDescStatus.Default.(string)
 	// account.StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	account.StatusValidator = accountDescStatus.Validators[0].(func(string) error)
 	// accountDescAutoPauseOnExpired is the schema descriptor for auto_pause_on_expired field.
-	accountDescAutoPauseOnExpired := accountFields[19].Descriptor()
+	accountDescAutoPauseOnExpired := accountFields[20].Descriptor()
 	// account.DefaultAutoPauseOnExpired holds the default value on creation for the auto_pause_on_expired field.
 	account.DefaultAutoPauseOnExpired = accountDescAutoPauseOnExpired.Default.(bool)
 	// accountDescSchedulable is the schema descriptor for schedulable field.
-	accountDescSchedulable := accountFields[20].Descriptor()
+	accountDescSchedulable := accountFields[21].Descriptor()
 	// account.DefaultSchedulable holds the default value on creation for the schedulable field.
 	account.DefaultSchedulable = accountDescSchedulable.Default.(bool)
 	// accountDescSessionWindowStatus is the schema descriptor for session_window_status field.
-	accountDescSessionWindowStatus := accountFields[28].Descriptor()
+	accountDescSessionWindowStatus := accountFields[29].Descriptor()
 	// account.SessionWindowStatusValidator is a validator for the "session_window_status" field. It is called by the builders before save.
 	account.SessionWindowStatusValidator = accountDescSessionWindowStatus.Validators[0].(func(string) error)
 	accountgroupFields := schema.AccountGroup{}.Fields()
@@ -2038,6 +2039,63 @@ func init() {
 	proxyDescExpiryWarnDays := proxyFields[10].Descriptor()
 	// proxy.DefaultExpiryWarnDays holds the default value on creation for the expiry_warn_days field.
 	proxy.DefaultExpiryWarnDays = proxyDescExpiryWarnDays.Default.(int)
+	quotakeyMixin := schema.QuotaKey{}.Mixin()
+	quotakeyMixinHooks0 := quotakeyMixin[0].Hooks()
+	quotakey.Hooks[0] = quotakeyMixinHooks0[0]
+	quotakeyMixinInters0 := quotakeyMixin[0].Interceptors()
+	quotakey.Interceptors[0] = quotakeyMixinInters0[0]
+	quotakeyFields := schema.QuotaKey{}.Fields()
+	_ = quotakeyFields
+	// quotakeyDescCodeEncrypted is the schema descriptor for code_encrypted field.
+	quotakeyDescCodeEncrypted := quotakeyFields[0].Descriptor()
+	// quotakey.CodeEncryptedValidator is a validator for the "code_encrypted" field. It is called by the builders before save.
+	quotakey.CodeEncryptedValidator = func() func(string) error {
+		validators := quotakeyDescCodeEncrypted.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(code_encrypted string) error {
+			for _, fn := range fns {
+				if err := fn(code_encrypted); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// quotakeyDescCodeMAC is the schema descriptor for code_mac field.
+	quotakeyDescCodeMAC := quotakeyFields[1].Descriptor()
+	// quotakey.CodeMACValidator is a validator for the "code_mac" field. It is called by the builders before save.
+	quotakey.CodeMACValidator = quotakeyDescCodeMAC.Validators[0].(func(string) error)
+	// quotakeyDescCodeLast4 is the schema descriptor for code_last4 field.
+	quotakeyDescCodeLast4 := quotakeyFields[2].Descriptor()
+	// quotakey.CodeLast4Validator is a validator for the "code_last4" field. It is called by the builders before save.
+	quotakey.CodeLast4Validator = quotakeyDescCodeLast4.Validators[0].(func(string) error)
+	// quotakeyDescStatus is the schema descriptor for status field.
+	quotakeyDescStatus := quotakeyFields[3].Descriptor()
+	// quotakey.DefaultStatus holds the default value on creation for the status field.
+	quotakey.DefaultStatus = quotakeyDescStatus.Default.(string)
+	// quotakey.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	quotakey.StatusValidator = quotakeyDescStatus.Validators[0].(func(string) error)
+	// quotakeyDescExhausted is the schema descriptor for exhausted field.
+	quotakeyDescExhausted := quotakeyFields[4].Descriptor()
+	// quotakey.DefaultExhausted holds the default value on creation for the exhausted field.
+	quotakey.DefaultExhausted = quotakeyDescExhausted.Default.(bool)
+	// quotakeyDescLastRefreshError is the schema descriptor for last_refresh_error field.
+	quotakeyDescLastRefreshError := quotakeyFields[5].Descriptor()
+	// quotakey.LastRefreshErrorValidator is a validator for the "last_refresh_error" field. It is called by the builders before save.
+	quotakey.LastRefreshErrorValidator = quotakeyDescLastRefreshError.Validators[0].(func(string) error)
+	// quotakeyDescCreatedAt is the schema descriptor for created_at field.
+	quotakeyDescCreatedAt := quotakeyFields[8].Descriptor()
+	// quotakey.DefaultCreatedAt holds the default value on creation for the created_at field.
+	quotakey.DefaultCreatedAt = quotakeyDescCreatedAt.Default.(func() time.Time)
+	// quotakeyDescUpdatedAt is the schema descriptor for updated_at field.
+	quotakeyDescUpdatedAt := quotakeyFields[9].Descriptor()
+	// quotakey.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	quotakey.DefaultUpdatedAt = quotakeyDescUpdatedAt.Default.(func() time.Time)
+	// quotakey.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	quotakey.UpdateDefaultUpdatedAt = quotakeyDescUpdatedAt.UpdateDefault.(func() time.Time)
 	redeembatchFields := schema.RedeemBatch{}.Fields()
 	_ = redeembatchFields
 	// redeembatchDescName is the schema descriptor for name field.

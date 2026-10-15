@@ -5,7 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 平台归并重构 PR-2（docs/platform-merge-refactor-plan.md §5.8）：
+// 平台归并重构 PR-2（docs-local/platform-merge-refactor-plan.md §5.8）：
 // web-* 平台迁移 reconciler 的管理端触发入口。三字段原子性由 repository
 // 层专用事务方法保证；本 handler 只做参数解析与报告回显。
 

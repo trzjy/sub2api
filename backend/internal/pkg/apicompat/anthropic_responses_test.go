@@ -849,7 +849,11 @@ func TestStreamingReasoning(t *testing.T) {
 
 	sse, err := ResponsesAnthropicEventToSSE(events[0])
 	require.NoError(t, err)
+	// A1: thinking 块恒带 signature 键（值空串），对齐先例 412718edf5；
+	// 同时校验精确子结构（v0.2.15 引入的严格断言），两者均验证"恒带 signature"。
 	assert.Contains(t, sse, `"content_block":{"thinking":"","signature":"","type":"thinking"}`)
+	assert.Contains(t, sse, `"type":"thinking"`)
+	assert.Contains(t, sse, `"signature":""`)
 
 	// reasoning text delta
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{

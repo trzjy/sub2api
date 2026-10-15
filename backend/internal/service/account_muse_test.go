@@ -24,6 +24,14 @@ func TestMuseGetAPIProtocol(t *testing.T) {
 
 	// 无协议凭证 → 固定 responses
 	require.Equal(t, APIProtocolResponses, mk(nil).GetAPIProtocol(), "muse 缺失凭证固定 responses")
+	// 伪装账号虽保留目标平台，也因 mapping 指向 Muse Contributor 固定 Responses。
+	for _, platform := range []string{PlatformKimi, PlatformDeepseek, PlatformZhipu} {
+		mapped := &Account{Platform: platform, Type: AccountTypeAPIKey, Credentials: map[string]any{
+			"model_mapping": map[string]any{"target": "muse-spark-1.3-contributor"},
+		}}
+		require.Equal(t, APIProtocolResponses, mapped.GetAPIProtocol(), "mapped muse must use responses: %s", platform)
+	}
+
 	// 即使显式写了其他协议值，muse 仍固定 responses（上游单一协议，覆盖 cn 守卫前返回）
 	require.Equal(t, APIProtocolResponses, mk(map[string]any{"api_protocol": APIProtocolChatCompletions}).GetAPIProtocol())
 	require.Equal(t, APIProtocolResponses, mk(map[string]any{"api_protocol": APIProtocolAdaptive}).GetAPIProtocol())

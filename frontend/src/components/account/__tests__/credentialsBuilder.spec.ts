@@ -29,7 +29,8 @@ import {
   serializeHeaderOverrideRows,
   splitHeaderOverridesObject,
   validateHeaderOverrideRows,
-  isVolcanoBaseURL
+  isVolcanoBaseURL,
+  cnBalanceCellVisible
 } from '../credentialsBuilder'
 
 describe('applyInterceptWarmup', () => {
@@ -566,6 +567,111 @@ describe('plan_type helpers', () => {
       expect(out).toEqual({ email: 'a@b.c' })
       expect('plan_type' in out).toBe(false)
     })
+  })
+})
+
+describe('cnBalanceCellVisible (C1: capable 门控 / 判定顺序)', () => {
+  const VOLCANO = 'https://ark.cn-beijing.volces.com/api/plan'
+
+  // 判定顺序 1：capable（后端投影的有效探测能力，即 RelayProbeTargetURL 布尔投影）
+  // 优先于火山排除——消除"后端有快照/探测、前端恒隐藏"的平行闸。
+  it('volcano base URL + capable → 可见（capable 优先于火山排除）', () => {
+    expect(cnBalanceCellVisible('deepseek', 'payg', VOLCANO, true)).toBe(true)
+    // 即便同时是火山订阅号且 coding，probe 仍优先可见
+    expect(cnBalanceCellVisible('deepseek', 'coding', VOLCANO, true)).toBe(true)
+  })
+
+  it('zhipu + capable → 可见（zhipu 原本既不可见，capable 使其可见）', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', true)).toBe(true)
+    expect(cnBalanceCellVisible('zhipu', 'coding', '', true)).toBe(true)
+  })
+
+  // 判定顺序 2：无 probe 时火山排除仍守旧规则（订阅套餐无公开余额端点）。
+  it('volcano base URL + 无 probe → 不可见（旧规则不变）', () => {
+    expect(cnBalanceCellVisible('deepseek', 'payg', VOLCANO, false)).toBe(false)
+    expect(cnBalanceCellVisible('deepseek', 'coding', VOLCANO, false)).toBe(false)
+  })
+
+  // 判定顺序 3：kimi / deepseek payg 既可见；coding 仍隐藏（旧行为不变）。
+  it('kimi / deepseek payg 无 probe → 可见（旧行为不变）', () => {
+    expect(cnBalanceCellVisible('kimi', 'payg', '', false)).toBe(true)
+    expect(cnBalanceCellVisible('deepseek', 'payg', '', false)).toBe(true)
+  })
+
+  it('kimi / deepseek coding 无 probe → 不可见（旧行为不变）', () => {
+    expect(cnBalanceCellVisible('kimi', 'coding', '', false)).toBe(false)
+    expect(cnBalanceCellVisible('deepseek', 'coding', '', false)).toBe(false)
+  })
+
+  // 非 kimi/deepseek 平台（智谱 / minimax / openai 等）无 probe 恒不可见。
+  it('zhipu / minimax / openai 无 probe → 不可见', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', false)).toBe(false)
+    expect(cnBalanceCellVisible('minimax', 'payg', '', false)).toBe(false)
+    expect(cnBalanceCellVisible('openai', 'payg', '', false)).toBe(false)
+  })
+
+  // capable 仅严格 true 触发；'true' 字符串、'1'、undefined 等一律视为未启用（fail-closed）。
+  it('仅严格 true 启用 capable（字符串/undefined 视为未启用）', () => {
+    expect(cnBalanceCellVisible('kimi', 'coding', '', 'true' as unknown as boolean)).toBe(false)
+    expect(cnBalanceCellVisible('kimi', 'coding', '', undefined as unknown as boolean)).toBe(false)
+    expect(cnBalanceCellVisible('openai', 'payg', VOLCANO, true)).toBe(true)
+  })
+})
+
+describe('cnBalanceCellVisible（中转余额探针放行 zhipu / minimax）', () => {
+  const VOLCANO = 'https://ark.cn-beijing.volces.com/api/plan'
+
+  // zhipu / minimax 官方无余额端点，但挂在其下的中转型账号有 /v1/usage：
+  // 配了 balance_probe 即按配置放行，不再被平台硬白名单挡死。
+  it('zhipu / minimax + 中转探针 → 可见', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', false, true)).toBe(true)
+    expect(cnBalanceCellVisible('minimax', 'payg', '', false, true)).toBe(true)
+  })
+
+  // 未配探针时维持旧行为（硬白名单挡住）。
+  it('zhipu / minimax 无中转探针 → 不可见（旧行为不变）', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', false, false)).toBe(false)
+    expect(cnBalanceCellVisible('minimax', 'payg', '', false, false)).toBe(false)
+  })
+
+  // 向后兼容：第五参缺省 = false，老调用点行为逐字不变。
+  it('第五参缺省 → zhipu / minimax 仍不可见（向后兼容）', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg')).toBe(false)
+    expect(cnBalanceCellVisible('minimax', 'payg')).toBe(false)
+    expect(cnBalanceCellVisible('kimi', 'payg')).toBe(true)
+    expect(cnBalanceCellVisible('deepseek', 'payg')).toBe(true)
+  })
+
+  // coding 前置于探针放行：coding 账号走额度探测，余额端点不适用。
+  it('coding 优先于探针放行（zhipu / minimax coding + 探针 → 不可见）', () => {
+    expect(cnBalanceCellVisible('zhipu', 'coding', '', false, true)).toBe(false)
+    expect(cnBalanceCellVisible('minimax', 'coding', '', false, true)).toBe(false)
+  })
+
+  // 火山排除同样前置于探针放行：火山订阅号无余额端点，探针配置不能翻案。
+  it('火山 base_url 优先于探针放行（无 capable → 不可见）', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', VOLCANO, false, true)).toBe(false)
+    expect(cnBalanceCellVisible('deepseek', 'payg', VOLCANO, false, true)).toBe(false)
+  })
+
+  // kimi / deepseek 恒可见（payg），探针开关不改变其判定；coding 除外的排除仍生效。
+  it('kimi / deepseek 平台规则不受探针参影响', () => {
+    expect(cnBalanceCellVisible('kimi', 'payg', '', false, true)).toBe(true)
+    expect(cnBalanceCellVisible('deepseek', 'payg', '', false, true)).toBe(true)
+    expect(cnBalanceCellVisible('kimi', 'coding', '', false, true)).toBe(false)
+    expect(cnBalanceCellVisible('deepseek', 'coding', '', false, true)).toBe(false)
+  })
+
+  // 探针放行仅严格 true 生效（fail-closed，与 capable 同口径）。
+  it('探针参仅严格 true 生效', () => {
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', false, 'true' as unknown as boolean)).toBe(false)
+    expect(cnBalanceCellVisible('zhipu', 'payg', '', false, undefined as unknown as boolean)).toBe(false)
+  })
+
+  // 非 CN 平台（openai / gemini 等）不因探针参放行——它们靠 capable 能力门。
+  it('非 zhipu/minimax/kimi/deepseek 平台不因探针参放行', () => {
+    expect(cnBalanceCellVisible('openai', 'payg', '', false, true)).toBe(false)
+    expect(cnBalanceCellVisible('gemini', 'payg', '', false, true)).toBe(false)
   })
 })
 

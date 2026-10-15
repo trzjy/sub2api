@@ -48,6 +48,23 @@ func (r *fakeCNCheckRepo) ListByPlatform(ctx context.Context, platform string) (
 	return r.byPlatform[platform], nil
 }
 
+// ListActive 补齐 B2 全量补收轮调用（返回各平台账号并集；既有用例账号无
+// BalanceProbeConfig 启用，补收轮按 Enabled 谓词过滤后零追加，既有无回归）。
+func (r *fakeCNCheckRepo) ListActive(_ context.Context) ([]Account, error) {
+	var all []Account
+	seen := map[int64]bool{}
+	for _, accs := range r.byPlatform {
+		for _, a := range accs {
+			if seen[a.ID] {
+				continue
+			}
+			seen[a.ID] = true
+			all = append(all, a)
+		}
+	}
+	return all, nil
+}
+
 func TestCNProviderBalanceCheckRunOnceProbesCodingPlanQuota(t *testing.T) {
 	kimiActive := Account{ID: 1, Platform: PlatformKimi, Type: AccountTypeAPIKey, Status: StatusActive,
 		Credentials: map[string]any{"account_mode": "coding"}}
@@ -322,6 +339,15 @@ func (r *cnProbeRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 
 // ListByPlatform runOnce 收集用（本测试只断言 Kira 分支行为，返回空集即可）。
 func (r *cnProbeRepo) ListByPlatform(_ context.Context, _ string) ([]Account, error) {
+	if r.account != nil {
+		return []Account{*r.account}, nil
+	}
+	return nil, nil
+}
+
+// ListActive 补齐 B2 全量补收轮调用（返回本 repo 的单一账号；Kira 用例账号无
+// BalanceProbeConfig 启用，补收轮按 Enabled 谓词过滤后零追加，既有无回归）。
+func (r *cnProbeRepo) ListActive(_ context.Context) ([]Account, error) {
 	if r.account != nil {
 		return []Account{*r.account}, nil
 	}
@@ -823,9 +849,12 @@ func recoveredKiraQuotaResult() *CNProviderQuotaProbeResult {
 }
 
 // fakeQuotaLifecycleHandover 记录 OnUpstreamQuotaExhausted 交接的测试替身。
+// 同时记录 fresh>0 余额边沿的调用（检查单 #1 接线点）。
 type fakeQuotaLifecycleHandover struct {
-	calls         []int64
-	convergeCalls []int64
+	calls            []int64
+	convergeCalls    []int64
+	freshBalanceCall []int64
+	freshBalanceErr  error
 }
 
 func (f *fakeQuotaLifecycleHandover) OnUpstreamQuotaExhausted(_ context.Context, account *Account, _ string) error {
@@ -838,6 +867,12 @@ func (f *fakeQuotaLifecycleHandover) convergeTHStockRecovery(_ context.Context, 
 	f.convergeCalls = append(f.convergeCalls, account.ID)
 }
 
+// OnKiraFreshBalanceObserved 记录余额采集侧的 fresh>0 边沿调用（检查单 #1 接线点）。
+func (f *fakeQuotaLifecycleHandover) OnKiraFreshBalanceObserved(_ context.Context, account *Account) error {
+	f.freshBalanceCall = append(f.freshBalanceCall, account.ID)
+	return f.freshBalanceErr
+}
+
 // cnRunOnceExtraRepo 支持 ListByPlatform + GetByID + UpdateExtra 记录（TH 刷新用）。
 type cnRunOnceExtraRepo struct {
 	AccountRepository
@@ -848,6 +883,23 @@ type cnRunOnceExtraRepo struct {
 
 func (r *cnRunOnceExtraRepo) ListByPlatform(_ context.Context, platform string) ([]Account, error) {
 	return r.byPlatform[platform], nil
+}
+
+// ListActive 补齐 B2 全量补收轮调用（返回各平台账号并集；既有 TH/Kira 用例账号
+// 无 BalanceProbeConfig 启用，补收轮按 Enabled 谓词过滤后零追加，既有无回归）。
+func (r *cnRunOnceExtraRepo) ListActive(_ context.Context) ([]Account, error) {
+	var all []Account
+	seen := map[int64]bool{}
+	for _, accs := range r.byPlatform {
+		for _, a := range accs {
+			if seen[a.ID] {
+				continue
+			}
+			seen[a.ID] = true
+			all = append(all, a)
+		}
+	}
+	return all, nil
 }
 
 func (r *cnRunOnceExtraRepo) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -881,6 +933,23 @@ type cnProbeRunOnceRepo struct {
 
 func (r *cnProbeRunOnceRepo) ListByPlatform(_ context.Context, platform string) ([]Account, error) {
 	return r.byPlatform[platform], nil
+}
+
+// ListActive 补齐 B2 全量补收轮调用（返回各平台账号并集；既有用例账号无
+// BalanceProbeConfig 启用，补收轮按 Enabled 谓词过滤后零追加，既有无回归）。
+func (r *cnProbeRunOnceRepo) ListActive(_ context.Context) ([]Account, error) {
+	var all []Account
+	seen := map[int64]bool{}
+	for _, accs := range r.byPlatform {
+		for _, a := range accs {
+			if seen[a.ID] {
+				continue
+			}
+			seen[a.ID] = true
+			all = append(all, a)
+		}
+	}
+	return all, nil
 }
 
 func (r *cnProbeRunOnceRepo) GetByID(_ context.Context, id int64) (*Account, error) {

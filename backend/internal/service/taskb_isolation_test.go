@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Task B：平台归并重构隔离红线单测（docs/platform-merge-refactor-plan.md §2.4/§5.1/§6）。
+// Task B：平台归并重构隔离红线单测（docs-local/platform-merge-refactor-plan.md §2.4/§5.1/§6）。
 // 钉住：判定源为 Account.IsWebAccessMode()（PR-4 旧链归零后平台值判定已退役）；web 账号
 // 不被吸入 CN 余额/额度/403/429 冷却链；cookie 清洗豁免；凭证写入校验与模式切换重验。
 

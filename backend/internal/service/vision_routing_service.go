@@ -11,7 +11,7 @@ import (
 )
 
 // ErrVisionRoutingCrossGroup 配置写入时目标账号不属于该分组（跨组拒绝）。
-// docs/capability-routing-plan.md §3.7 / 重审 I-3。
+// docs-local/capability-routing-plan.md §3.7 / 重审 I-3。
 var ErrVisionRoutingCrossGroup = infraerrors.BadRequest(
 	"VISION_ROUTING_CROSS_GROUP",
 	"vision routing target accounts must belong to this group",
@@ -43,7 +43,7 @@ type VisionRoutingGroupAccountsReader interface {
 	GetAccountIDsByGroupIDs(ctx context.Context, groupIDs []int64) ([]int64, error)
 }
 
-// VisionRoutingService 管理分组视觉分流配置（docs/capability-routing-plan.md §3.7）。
+// VisionRoutingService 管理分组视觉分流配置（docs-local/capability-routing-plan.md §3.7）。
 //
 // 职责：
 //   - 配置写入时强制同组校验（vision_target ⊆ 该分组账号），跨组拒绝；

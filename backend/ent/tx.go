@@ -72,6 +72,8 @@ type Tx struct {
 	PromoIntelSource *PromoIntelSourceClient
 	// Proxy is the client for interacting with the Proxy builders.
 	Proxy *ProxyClient
+	// QuotaKey is the client for interacting with the QuotaKey builders.
+	QuotaKey *QuotaKeyClient
 	// RedeemBatch is the client for interacting with the RedeemBatch builders.
 	RedeemBatch *RedeemBatchClient
 	// RedeemCode is the client for interacting with the RedeemCode builders.
@@ -270,6 +272,7 @@ func (tx *Tx) init() {
 	tx.PromoIntelItem = NewPromoIntelItemClient(tx.config)
 	tx.PromoIntelSource = NewPromoIntelSourceClient(tx.config)
 	tx.Proxy = NewProxyClient(tx.config)
+	tx.QuotaKey = NewQuotaKeyClient(tx.config)
 	tx.RedeemBatch = NewRedeemBatchClient(tx.config)
 	tx.RedeemCode = NewRedeemCodeClient(tx.config)
 	tx.RedeemCodeGroup = NewRedeemCodeGroupClient(tx.config)

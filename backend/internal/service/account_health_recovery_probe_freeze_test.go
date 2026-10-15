@@ -31,6 +31,9 @@ func TestHealthRecoveryRunOnceFreezesAccountLevelFreshnessUpperBound(t *testing.
 	// nil 守卫，与冻结上界无关联）。
 	p := newProbeService(t, true, 10, nil, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, nil })
+	// 失败路径会触发短间隔补探（默认 5s×3），单测注入毫秒级节奏避免真实等待。
+	p.retryInterval = time.Millisecond
+	p.retryBurst = 1
 
 	p.RunOnce(context.Background())
 
@@ -68,10 +71,7 @@ func TestHealthRecoveryProbeRecoveryClearsFrozenFreshnessUpperBound(t *testing.T
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
-	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮仅回写连续成功计数，
-	// 冻结上界保持；次轮清除停调并 clearCandidateBound。
-	p.RunOnce(context.Background())
-	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
+	// PRC-02：首次（单轮）探测成功即清除停调并 clearCandidateBound。
 	p.RunOnce(context.Background())
 
 	require.Equal(t, 1, rlRepo.clearTempCalls, "恢复路径应清除 temp-unschedulable")

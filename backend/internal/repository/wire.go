@@ -40,7 +40,7 @@ func ProvideGitHubReleaseClient(cfg *config.Config) service.GitHubReleaseClient 
 // 直接 wire.Bind 到 *repository.groupRepository。原因有两点：
 //  1. groupRepository 是未导出类型，跨包无法引用；
 //  2. service 包若导入 repository 会与 repository→service（凭证加密链路）形成
-//      import cycle，导致 wire 类型加载器整体失效（invalid type）。
+//     import cycle，导致 wire 类型加载器整体失效（invalid type）。
 //
 // 因此这里用一层轻量适配器，从已有的 service.GroupRepository _provider 推导窄接口，
 // 既避免 cycle，也不改动 service 层语义。
@@ -92,8 +92,8 @@ var ProviderSet = wire.NewSet(
 	NewVisionRoutingRepository,
 	NewAccountModelCapabilityCache,
 	ProvideVisionRoutingGroupAccountsReader, // 适配器：service.GroupRepository → VisionRoutingGroupAccountsReader
-	NewScheduledTestPlanRepository,   // 定时测试计划仓储
-	NewScheduledTestResultRepository, // 定时测试结果仓储
+	NewScheduledTestPlanRepository,          // 定时测试计划仓储
+	NewScheduledTestResultRepository,        // 定时测试结果仓储
 	NewProxyRepository,
 	NewRedeemCodeRepository,
 	NewWelfareRepository,
@@ -118,6 +118,7 @@ var ProviderSet = wire.NewSet(
 	NewSettingRepository,
 	NewOpsRepository,
 	NewAuditLogRepository,
+	NewQuotaKeyRepository,
 	NewPasskeyRepository,
 	NewPasskeySessionStore,
 	NewUserSubscriptionRepository,

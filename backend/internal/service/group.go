@@ -87,7 +87,7 @@ type Group struct {
 	ModelRouting        map[string][]int64
 	ModelRoutingEnabled bool
 
-	// 视觉能力分流配置（同平台后台可配置，docs/capability-routing-plan.md §3.7）。
+	// 视觉能力分流配置（同平台后台可配置，docs-local/capability-routing-plan.md §3.7）。
 	// 平行于 ModelRouting：key 为模型匹配模式，value 为承接带图请求的目标账号 ID
 	// 列表（vision_target_account_ids）。与 ModelRouting 不同，该字段无独立开关：
 	// 命中即限定候选池（不豁免 3.4 能力校验），未命中回落普通路由。
@@ -281,7 +281,7 @@ func (g *Group) GetRoutingAccountIDs(requestedModel string) []int64 {
 }
 
 // GetVisionRoutingAccountIDs 返回请求模型的视觉分流目标账号 ID 列表
-//（docs/capability-routing-plan.md §3.7）。
+//（docs-local/capability-routing-plan.md §3.7）。
 //
 // 语义与 GetRoutingAccountIDs 一致：精确匹配优先，其次通配符前缀匹配；
 // 未命中返回 nil。命中结果仅收窄候选池，不豁免 3.4 的能力校验（被标为

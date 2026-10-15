@@ -67,6 +67,48 @@ func newQuotaLifecycleKiraAccount(id int64) *Account {
 	}
 }
 
+// newQuotaLifecycleKiraAccountFullFreePool 构造显式模型映射全部为 kira- 前缀的 Kira
+// 账号（免费池专号）：kiraMappingFreePoolOnly 应返回 true。
+func newQuotaLifecycleKiraAccountFullFreePool(id int64) *Account {
+	a := newQuotaLifecycleKiraAccount(id)
+	a.Credentials["model_mapping"] = map[string]any{
+		"kira-3.5-flash":     "kira-3.5-flash",
+		"kira-4-flash":       "kira-4-flash",
+		"kira-reasoner-mini": "kira-reasoner-mini",
+	}
+	return a
+}
+
+// newQuotaLifecycleKiraAccountMixedMapping 构造显式模型映射含非 kira- 前缀值的 Kira
+// 账号：kiraMappingFreePoolOnly 应返回 false。
+func newQuotaLifecycleKiraAccountMixedMapping(id int64) *Account {
+	a := newQuotaLifecycleKiraAccount(id)
+	a.Credentials["model_mapping"] = map[string]any{
+		"kira-3.5-flash": "kira-3.5-flash",
+		"qwen-3.8-flash": "qwen-3.8-flash",
+	}
+	return a
+}
+
+// newQuotaLifecycleDeepseekAccount 构造非 Kira 平台账号（deepseek）：base_url 非
+// kiraai.vn，accountIsKiraBaseURL=false，落入非 Kira 分支。
+func newQuotaLifecycleDeepseekAccount(id int64) *Account {
+	return &Account{
+		ID: id, Platform: PlatformDeepseek, Type: AccountTypeAPIKey, Status: StatusActive,
+		Credentials: map[string]any{
+			"api_key": "ds-test",
+		},
+		Extra: map[string]any{},
+	}
+}
+
+// setFreshKiraVND 写入新鲜 VND 付费余额（cnQuotaLifecycleProviderOf=Kira 时平衡键路径）。
+func setFreshKiraVND(account *Account, balance float64) {
+	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixBalance)] = balance
+	account.Extra[cnExtraKey(account.Platform, cnBalanceExtraSuffixUpdated)] =
+		quotaLifecycleBase.UTC().Format(time.RFC3339)
+}
+
 // ---------- fakes ----------
 
 type quotaParkedRecord struct {
@@ -87,6 +129,9 @@ type quotaLifecycleFakeRepo struct {
 	// 用途：边沿触发「immediate due 至多一次/冻结代际」的可观测计数证据（并发/重启
 	// 场景下断言 immediate 值只被写入一次）。
 	probeDueWrites []string
+	// updateExtraErr 注入持久化失败（检查单 #3）：非 nil 时 UpdateExtra 直接返回该
+	// 错误且不落任何键，用于断言「落库失败 ⇒ 本次推进不成立」。
+	updateExtraErr error
 	// F3 恢复链内存态（单测用，镜像生产 SQL 语义）。
 	f3Records    map[int64]*http403RecoveryRecord
 	f3GenCounter map[int64]int64
@@ -193,6 +238,9 @@ func (r *quotaLifecycleFakeRepo) ShortenTempUnschedulableIfOwned(_ context.Conte
 func (r *quotaLifecycleFakeRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.updateExtraErr != nil {
+		return r.updateExtraErr
+	}
 	a, ok := r.accounts[id]
 	if !ok {
 		return errors.New("account not found")
@@ -224,6 +272,20 @@ func (r *quotaLifecycleFakeRepo) probeDueWriteCount(want string) int {
 		}
 	}
 	return n
+}
+
+// updateExtraWrites 返回已落库的 probe_due_at 写入总次数（注入失败路径下该计数不增）。
+func (r *quotaLifecycleFakeRepo) probeDueWriteTotal() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.probeDueWrites)
+}
+
+// setUpdateExtraErr 切换 UpdateExtra 的失败注入（nil = 恢复正常写入）。
+func (r *quotaLifecycleFakeRepo) setUpdateExtraErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.updateExtraErr = err
 }
 
 func (r *quotaLifecycleFakeRepo) parkedUntil(id int64) (time.Time, bool) {
@@ -1973,6 +2035,148 @@ func TestClassifyQuotaExhaustionScopeMatrix(t *testing.T) {
 	})
 }
 
+// ---------- KA-1：mapping-aware 冻结判定（状态矩阵 + 副作用） ----------
+
+// TestKA1ClassifyQuotaExhaustionScopeMappingAwareMatrix 表驱动状态矩阵（派发单 Done
+// when #2）：逐格唯一期望值，先锁定未修改分支再验证新分支。每格独立 fresh 账号实例，
+// 避免 VND 态跨格泄漏。
+func TestKA1ClassifyQuotaExhaustionScopeMappingAwareMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		makeAcct func() *Account
+		status   int
+		vnd      string // "gt0" | "le0" | "missing"
+		want     QuotaExhaustionScope
+	}{
+		// 1-3：402 + 全 kira-* 映射 → Model（fresh 态不影响，mapping-aware 短路）。
+		{"1: 402 full-kira-* fresh>0 -> Model", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(301) }, 402, "gt0", QuotaScopeModel},
+		{"2: 402 full-kira-* fresh<=0 -> Model", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(302) }, 402, "le0", QuotaScopeModel},
+		{"3: 402 full-kira-* missing -> Model", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(303) }, 402, "missing", QuotaScopeModel},
+		// 4：402 + 混合映射（含非 kira-*）→ Account。
+		{"4: 402 mixed fresh<=0 -> Account", func() *Account { return newQuotaLifecycleKiraAccountMixedMapping(304) }, 402, "le0", QuotaScopeAccount},
+		// 5：402 + 空映射 → Account（fail-safe 维持现状）。
+		{"5: 402 empty-mapping fresh<=0 -> Account", func() *Account { return newQuotaLifecycleKiraAccount(305) }, 402, "le0", QuotaScopeAccount},
+		// 6-7：502/504 + 全 kira-* 映射 → Unknown（不整号转换）。
+		{"6: 502 full-kira-* fresh<=0 -> Unknown", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(306) }, 502, "le0", QuotaScopeUnknown},
+		{"7: 504 full-kira-* fresh<=0 -> Unknown", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(307) }, 504, "le0", QuotaScopeUnknown},
+		// 8：502 + 混合映射 + 新鲜 VND≤0 → Account（VND 三态佐证维持现状）。
+		{"8: 502 mixed fresh<=0 -> Account", func() *Account { return newQuotaLifecycleKiraAccountMixedMapping(308) }, 502, "le0", QuotaScopeAccount},
+		// 9：504 + 空映射 + 缺 VND → Unknown。
+		{"9: 504 empty-mapping missing -> Unknown", func() *Account { return newQuotaLifecycleKiraAccount(309) }, 504, "missing", QuotaScopeUnknown},
+		// 10-11：TH base_url（非 Kira）→ 402=Model / 502=Unknown。
+		{"10: 402 TH base_url -> Model", func() *Account { return newQuotaLifecycleTHAccount(310) }, 402, "", QuotaScopeModel},
+		{"11: 502 TH base_url -> Unknown", func() *Account { return newQuotaLifecycleTHAccount(311) }, 502, "", QuotaScopeUnknown},
+		// 12-13：deepseek（非 Kira 平台）→ 402=Model / 504=Unknown。
+		{"12: 402 deepseek -> Model", func() *Account { return newQuotaLifecycleDeepseekAccount(312) }, 402, "", QuotaScopeModel},
+		{"13: 504 deepseek -> Unknown", func() *Account { return newQuotaLifecycleDeepseekAccount(313) }, 504, "", QuotaScopeUnknown},
+		// 14：429 + 全 kira-* 映射 → Model（429 不触发账号级冻结）。
+		{"14: 429 full-kira-* -> Model", func() *Account { return newQuotaLifecycleKiraAccountFullFreePool(314) }, 429, "", QuotaScopeModel},
+		// 15：500 + kira base_url → Unknown（default）。
+		{"15: 500 kira base_url -> Unknown", func() *Account { return newQuotaLifecycleKiraAccount(315) }, 500, "", QuotaScopeUnknown},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			account := tc.makeAcct()
+			switch tc.vnd {
+			case "gt0":
+				setFreshKiraVND(account, 1000.0)
+			case "le0":
+				setFreshKiraVND(account, 0.0)
+			}
+			got := ClassifyQuotaExhaustionScope(account, tc.status, quotaLifecycleBase)
+			require.Equal(t, tc.want, got, "%s: 期望 %s 实得 %s", tc.name, tc.want, got)
+		})
+	}
+}
+
+// TestKA1FullFreePoolKira402ModelScopeNoAccountFreeze 副作用①：全 kira-* 映射 + 402 →
+// model 作用域。无账号级 lifecycle 状态键/temp-unsched 写入（不再整号冻结），模型级确认
+// 探针被调用。
+func TestKA1FullFreePoolKira402ModelScopeNoAccountFreeze(t *testing.T) {
+	account := newQuotaLifecycleKiraAccountFullFreePool(321)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeRecovered} // 探针成功 → 无模型级冻结
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	scope := ClassifyQuotaExhaustionScope(account, 402, quotaLifecycleBase)
+	require.Equal(t, QuotaScopeModel, scope, "全 kira-* 映射 402 应判 model")
+	signal := QuotaExhaustionSignal{Status: 402, Scope: scope, Platform: account.Platform, Msg: "402"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), account, "402", signal))
+
+	_, parked := repo.parkedUntil(321)
+	require.False(t, parked, "全 kira-* 映射 402 不得整号冻结（无 temp_unsched 写入）")
+	_, ok := cnQuotaLifecycleStateFromExtra(account.Extra)
+	require.False(t, ok, "全 kira-* 映射 402 不得写入账号级 lifecycle 状态键")
+	require.Equal(t, 1, probe.calls, "model 作用域须驱动模型级确认探针")
+}
+
+// TestKA1FullFreePoolKira502504UnknownNoFreeze 副作用②：全 kira-* 映射 + 502/504 →
+// unknown 作用域。无账号级冻结写入（即便确认探针返回耗尽也不得整号转换）。
+func TestKA1FullFreePoolKira502504UnknownNoFreeze(t *testing.T) {
+	for _, status := range []int{502, 504} {
+		account := newQuotaLifecycleKiraAccountFullFreePool(331)
+		repo := newQuotaLifecycleFakeRepo(account)
+		alerts := &fakeQuotaAlertStore{}
+		probe := &quotaProbeController{outcome: quotaProbeExhausted}
+		svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+		scope := ClassifyQuotaExhaustionScope(account, status, quotaLifecycleBase)
+		require.Equal(t, QuotaScopeUnknown, scope, "全 kira-* 映射 %d 应判 unknown", status)
+		signal := QuotaExhaustionSignal{Status: status, Scope: scope, Platform: account.Platform, Msg: "upstream"}
+		require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), account, "upstream", signal))
+
+		_, parked := repo.parkedUntil(331)
+		require.False(t, parked, "全 kira-* 映射 %d 不得整号冻结", status)
+		require.Zero(t, probe.calls, "unknown 作用域 %d 不得触发确认探针", status)
+	}
+}
+
+// TestKA1MixedMappingKira502504AccountFreeze 副作用③：混合映射 + 502/504 + 新鲜 VND≤0 →
+// 仍产生既有账号级冻结（account 作用域，维持现状语义）。
+func TestKA1MixedMappingKira502504AccountFreeze(t *testing.T) {
+	for _, status := range []int{502, 504} {
+		account := newQuotaLifecycleKiraAccountMixedMapping(341)
+		setFreshKiraVND(account, 0.0)
+		repo := newQuotaLifecycleFakeRepo(account)
+		alerts := &fakeQuotaAlertStore{}
+		probe := &quotaProbeController{outcome: quotaProbeUncertain}
+		svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+		scope := ClassifyQuotaExhaustionScope(account, status, quotaLifecycleBase)
+		require.Equal(t, QuotaScopeAccount, scope, "混合映射 %d + 新鲜 VND≤0 应判 account", status)
+		signal := QuotaExhaustionSignal{Status: status, Scope: scope, Platform: account.Platform, Msg: "upstream"}
+		require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), account, "upstream", signal))
+
+		until, parked := repo.parkedUntil(341)
+		require.True(t, parked, "混合映射 %d + VND≤0 仍须账号级冻结", status)
+		require.Contains(t, repo.parkedReason(341), cnQuotaExhaustedReason402Account,
+			"冻结须标记 402-account-authoritative", status)
+		require.True(t, until.After(quotaLifecycleBase), "冻结须落地停调到期", status)
+	}
+}
+
+// TestKA1EmptyMappingKira402AccountFreeze 副作用④：空映射 + 402 → account 作用域。仍
+// 产生既有账号级冻结（fail-safe 维持整号冻结语义）。
+func TestKA1EmptyMappingKira402AccountFreeze(t *testing.T) {
+	account := newQuotaLifecycleKiraAccount(351)
+	repo := newQuotaLifecycleFakeRepo(account)
+	alerts := &fakeQuotaAlertStore{}
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, alerts, probe)
+
+	scope := ClassifyQuotaExhaustionScope(account, 402, quotaLifecycleBase)
+	require.Equal(t, QuotaScopeAccount, scope, "空映射 402 应维持 account")
+	signal := QuotaExhaustionSignal{Status: 402, Scope: scope, Platform: account.Platform, Msg: "402"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(context.Background(), account, "402", signal))
+
+	_, parked := repo.parkedUntil(351)
+	require.True(t, parked, "空映射 402 仍须账号级冻结（维持现状语义）")
+	require.Contains(t, repo.parkedReason(351), cnQuotaExhaustedReason402Account)
+}
+
 func TestQuotaLifecycleKira402AuthoritativeFreeze(t *testing.T) {
 	// F2：Kira 账号 402 → 账号级权威冻结（三态裁决表三行全冻结），reason 标记
 	// [402-account-authoritative]，并持久化 probe_due_at（§3.3 R19-F4）。
@@ -2980,4 +3184,342 @@ func TestKira402FreezeSurvivesRestartAndIsSwept(t *testing.T) {
 	_, parked = repo.parkedUntil(208)
 	require.False(t, parked, "重启后完成级 2xx 仍能解冻（持久化资格不丢）")
 	require.Equal(t, 1, repo.clearCalls)
+}
+
+// ---------- 检查单 #1：fresh>0 边沿经真实余额写入入口推进 probe_due ----------
+//
+// 背景（终审 #1）：advance402ProbeDue 过去只在到期探针完成后被调用，充值（VND 由
+// 0/unknown 变 fresh>0）后的 402 冻结账号仍要等到每日 due 才被探测。本组测试从
+// **真实余额写入入口**（CNProviderBalanceCheckService.refreshKiraAccount →
+// CNProviderBalanceService 真实 HTTP 形状 + 真实 extra 写入）驱动验证：
+// 采集到 fresh>0 落库后，probe_due 被推进为 immediate 且消费标记落库，下一次 sweep
+// 即可探（无需等每日 due）；同一冻结代际内第二次采集不再推进；非 402 冻结账号零写入。
+
+// newFreshBalanceCollectionFixture 构造「周期余额链 → lifecycle」同实例接线夹具
+// （lifecycle 用真实时钟：余额写入的时间戳由生产代码取 time.Now，冻结 base 时钟会让
+// 新鲜度判定误判 future ⇒ stale）。kira2 为未冻结的对照组账号。
+func newFreshBalanceCollectionFixture(t *testing.T, kira, kira2 *Account) (*quotaLifecycleFakeRepo, *CNQuotaLifecycleService, *quotaProbeController, *CNProviderBalanceCheckService) {
+	t.Helper()
+	repo := newQuotaLifecycleFakeRepo(kira, kira2)
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := NewCNProviderBalanceService(repo, nil, &kiraRecordingUpstream{handler: func(r *http.Request, _ string) (int, string) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/user/usage" {
+			// 充值后形态：付费 VND > 0（同一响应顺带回免费池用量快照）。
+			return http.StatusOK, `{"summary":{"tokensUsedToday":1,"baseFreeLimit":100,"freeDailyLimit":200,"checkinBonus":0,"vndBalance":58000}}`
+		}
+		return http.StatusNotFound, `{}`
+	}}, nil)
+	lifecycle := NewCNQuotaLifecycleService(repo, &recordingHTTPUpstream{}, &config.Config{}, &fakeQuotaAlertStore{})
+	lifecycle.SetQuotaProbeOverride(probe.probe)
+	lifecycle.SetQuotaCompletionProbeOverride(probe.completionProbe)
+	check := &CNProviderBalanceCheckService{
+		accountRepo:    repo,
+		balanceService: svc,
+		cfg:            &config.Config{},
+	}
+	check.SetQuotaLifecycleHandover(lifecycle)
+	return repo, lifecycle, probe, check
+}
+
+func TestKiraFreshBalanceCollectionAdvances402ProbeDue(t *testing.T) {
+	ctx := context.Background()
+	// 平台取国产枚举（生产 Kira 账号形态）：Kira 上游本身由 base_url 识别，
+	// 而真实余额写入入口 CNProviderBalanceService 按 platform 判定 CN 供应商。
+	kira := newQuotaLifecycleKiraAccount(208)
+	kira.Platform = PlatformKimi
+	healthy := newQuotaLifecycleKiraAccount(209)
+	healthy.Platform = PlatformKimi
+	repo, lifecycle, probe, check := newFreshBalanceCollectionFixture(t, kira, healthy)
+
+	// 1) 402 权威冻结：冻结时 VND unknown ⇒ probe_due = 账号每日 reset_at（每天才探一次）。
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: kira.Platform, Msg: "402 account-level"}
+	require.NoError(t, lifecycle.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402 account-level", signal))
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.False(t, st.ImmediateDueConsumed, "冻结时 VND unknown ⇒ 不得登记已消费")
+	require.Equal(t, kiraNextDailyReset(time.Now()).UTC().Format(time.RFC3339), st.ProbeDueAt,
+		"冻结时 fresh<=0/unknown ⇒ due = 每日 reset_at（本用例的『以前要等到每天』基线）")
+
+	// 2) 真实余额写入入口：周期链采集到 fresh VND 并落库（不走 forceLifecycleProbeDue）。
+	before := time.Now().UTC().Add(-time.Second)
+	check.refreshKiraAccount(ctx, kira)
+	after := time.Now().UTC().Add(time.Second)
+
+	st, ok = cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.True(t, st.ImmediateDueConsumed, "fresh>0 边沿必须持久化登记已消费证据")
+	require.True(t, kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] != nil,
+		"VND 余额必须已由真实余额写入入口落库")
+	advancedDue, err := time.Parse(time.RFC3339, st.ProbeDueAt)
+	require.NoError(t, err)
+	require.False(t, advancedDue.Before(before) || advancedDue.After(after),
+		"fresh>0 ⇒ probe_due 必须被推进为 immediate（got %s，期望落在 [%s,%s]）", st.ProbeDueAt, before, after)
+	require.Equal(t, 1, repo.probeDueWriteCount(st.ProbeDueAt), "immediate due 恰写入一次")
+	dueFirstEdge := st.ProbeDueAt
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "边沿推进只动 probe_due，绝不解冻")
+	require.Equal(t, 0, repo.clearCalls)
+
+	// 3) 推进发生在完成级探针之前的意义 = 下一次 sweep 即可探（无需等到每日 due）。
+	require.NoError(t, lifecycle.RunRecoverySweep(ctx))
+	require.GreaterOrEqual(t, probe.completionCalls, 1,
+		"fresh>0 推进入库后，下一次 sweep 必须立即探该 402 冻结账号（不依赖测试夹具改 due）")
+	_, parked = repo.parkedUntil(208)
+	require.True(t, parked, "完成级探针仍 402（默认替身）⇒ 保持冻结")
+	st, ok = cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, kiraNextDailyReset(time.Now()).UTC().Format(time.RFC3339), st.ProbeDueAt,
+		"本代际 immediate 已消费 ⇒ 同代际内回落到每日 reset_at")
+
+	// 4) 代际内第二次余额采集到 fresh>0：不再推进（状态毫不动）。
+	writesAfterSweep := st.ProbeDueAt
+	check.refreshKiraAccount(ctx, kira)
+	st, ok = cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, writesAfterSweep, st.ProbeDueAt, "同代际第二次 fresh>0 不得再次推进")
+	require.True(t, st.ImmediateDueConsumed)
+	require.Equal(t, 1, repo.probeDueWriteCount(dueFirstEdge), "immediate due 仍恰一次（第二次零推进）")
+}
+
+// TestKiraFreshBalanceCollectionLeavesNonFrozenAccountUntouched 控制组：非 402 冻结的
+// Kira 账号经同一余额写入入口刷新，不得被写入任何 lifecycle 状态（零副作用）。
+func TestKiraFreshBalanceCollectionLeavesNonFrozenAccountUntouched(t *testing.T) {
+	ctx := context.Background()
+	kira := newQuotaLifecycleKiraAccount(208)
+	kira.Platform = PlatformKimi
+	healthy := newQuotaLifecycleKiraAccount(209)
+	healthy.Platform = PlatformKimi
+	repo, lifecycle, _, check := newFreshBalanceCollectionFixture(t, kira, healthy)
+
+	// 冻结 208，209 保持健康（无停调、无 lifecycle 状态）。
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: kira.Platform, Msg: "402"}
+	require.NoError(t, lifecycle.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", signal))
+	before := repo.probeDueWriteTotal()
+
+	check.refreshKiraAccount(ctx, healthy)
+
+	_, ok := cnQuotaLifecycleStateFromExtra(healthy.Extra)
+	require.False(t, ok, "非 402 冻结账号不得被写入 cn_quota_lifecycle 状态")
+	require.Nil(t, healthy.Extra[cnQuotaLifecycleExtraKey])
+	require.Equal(t, before, repo.probeDueWriteTotal(), "非 402 冻结账号零 probe_due 写入")
+	_, parked := repo.parkedUntil(209)
+	require.False(t, parked, "余额刷新不得冻结健康账号")
+}
+
+// ---------- 检查单 #3：消费标记持久化失败显式化（单实例收敛） ----------
+
+// TestKira402ProbeDuePersistFailureRollsBackConsumed 落库失败 ⇒ 本次推进不成立：
+// 不置 consumed（内存标记回滚）、返回错误；故障恢复后同一次 edge 可重试推进成功。
+func TestKira402ProbeDuePersistFailureRollsBackConsumed(t *testing.T) {
+	now := quotaLifecycleBase
+	immediate := now.UTC().Format(time.RFC3339)
+	daily := kiraNextDailyReset(now).UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	kira := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	// 1) 402 权威冻结（VND unknown ⇒ 每日 due），随后采集到 fresh>0。
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: kira.Platform, Msg: "402"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", signal))
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, daily, st.ProbeDueAt)
+	dueBefore := st.ProbeDueAt
+	writesBefore := repo.probeDueWriteTotal()
+
+	// 2) UpdateExtra 失败注入 ⇒ 推进必须显式失败，且不得留下 consumed=true 的假成功。
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	due, err := svc.advance402ProbeDue(ctx, kira, st, quotaProbeUncertain, now)
+	require.Error(t, err, "持久化失败必须显式上抛（不得被吞掉）")
+	require.True(t, due.IsZero(), "失败时不得返回已推进的 due")
+	require.False(t, st.ImmediateDueConsumed, "落库失败必须回滚内存消费标记（下次仍可重试）")
+	persisted, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.False(t, persisted.ImmediateDueConsumed, "落库失败时 consumed 不得落库")
+	require.Equal(t, dueBefore, persisted.ProbeDueAt, "落库失败时 probe_due 不得改变")
+	require.Equal(t, writesBefore, repo.probeDueWriteTotal())
+
+	// 3) 故障恢复后重试同一边沿 ⇒ 可正常推进一次（immediate + consumed 落库）。
+	repo.setUpdateExtraErr(nil)
+	due, err = svc.advance402ProbeDue(ctx, kira, st, quotaProbeUncertain, now)
+	require.NoError(t, err)
+	require.Equal(t, immediate, due.UTC().Format(time.RFC3339), "重试后本代际 immediate due 生效")
+	persisted, ok = cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.True(t, persisted.ImmediateDueConsumed)
+	require.Equal(t, immediate, persisted.ProbeDueAt)
+	require.Equal(t, 1, repo.probeDueWriteCount(immediate))
+}
+
+// TestKira402ProbeDuePersistFailureFailsClosedInSweep sweep 路径同一收敛：推进落库失败
+// 时 sweep 上抛错误，账号保持冻结（失败关闭），下轮重试。
+func TestKira402ProbeDuePersistFailureFailsClosedInSweep(t *testing.T) {
+	now := quotaLifecycleBase
+	ctx := context.Background()
+
+	kira := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	probe := &quotaProbeController{outcome: quotaProbeExhausted}
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, probe)
+
+	signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: kira.Platform, Msg: "402"}
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", signal))
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+	forceLifecycleProbeDue(kira, now)
+
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	require.Error(t, svc.RunRecoverySweep(ctx), "sweep 必须把推进落库失败上抛给调用方（失败关闭）")
+
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.False(t, st.ImmediateDueConsumed, "推进失败 ⇒ 本次不视为已消费（下轮可重试）")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "推进失败不得解冻、不得改变既有停调")
+	require.Equal(t, 0, repo.clearCalls)
+}
+
+// TestConcurrent402FreezeGenerationSerializesWithinInstance 检查单 #3 c：同实例内并发
+// 冻结同一账号时，generation 的 +1 计算在 dueMu 互斥域内从最新持久状态取值 ⇒
+// 各次冻结串行落实单调递增（不再各自从旧 generation 算出重复值）。
+// 多实例 CAS（跨进程丢失更新）为 Phase 2 残余，不在本卡保证范围。
+func TestConcurrent402FreezeGenerationSerializesWithinInstance(t *testing.T) {
+	ctx := context.Background()
+	kira := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			signal := QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: kira.Platform, Msg: "402"}
+			_ = svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", signal)
+		}()
+	}
+	wg.Wait()
+
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, int64(concurrency), st.FreezeGeneration,
+		"同实例并发冻结必须串行落实：每次冻结开启一个新代际（generation 单调递增）")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "并发冻结期间保持停调")
+	require.Equal(t, 0, repo.clearCalls)
+}
+
+// ---------- 终审 R2：冻结写入的持久化严格性 + 锁内最新余额（confirmExhaustedAuthoritative） ----------
+
+// kiraAccountWithFreshVND 返回「repository 内已落库 fresh>0 余额」的 Kira 账号夹具
+// （R2 两条用例的共同起点：冻结当刻 fresh>0 ⇒ immediate due + 当场消费登记）。
+func kiraAccountWithFreshVND(id int64, now time.Time) *Account {
+	a := newQuotaLifecycleKiraAccount(id)
+	a.Extra[cnExtraKey(a.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	a.Extra[cnExtraKey(a.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+	return a
+}
+
+func kira402AccountSignal(a *Account, msg string) QuotaExhaustionSignal {
+	return QuotaExhaustionSignal{Status: 402, Scope: QuotaScopeAccount, Platform: a.Platform, Msg: msg}
+}
+
+// TestKira402FreezeImmediateConsumePersistFailureFailsClosed R2-#1：冻结当刻 fresh>0
+// （含 immediate 消费登记）的冻结写入走 strict 持久化——UpdateExtra 失败 ⇒ 冻结入口
+// 返回错误、无假消费、落库态不含 consumed=true。
+func TestKira402FreezeImmediateConsumePersistFailureFailsClosed(t *testing.T) {
+	now := quotaLifecycleBase
+	ctx := context.Background()
+
+	kira := kiraAccountWithFreshVND(208, now)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	require.Error(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", kira402AccountSignal(kira, "402")),
+		"含 immediate 消费登记的冻结落库失败必须上抛（冻结入口不得假成功）")
+
+	// 无假消费：落库态不含 consumed=true（本次写入整体未落库）。
+	persisted, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	if ok {
+		require.False(t, persisted.ImmediateDueConsumed,
+			"落库失败时不得留下 consumed=true 的假成功（否则重启后同一边沿重复消费）")
+	}
+	require.Equal(t, 0, repo.probeDueWriteTotal(), "落库失败 ⇒ 零 probe_due 写入")
+	repo.setUpdateExtraErr(nil)
+}
+
+// TestKira402FreezeImmediateConsumePersistRetryConsumesOnce R2-#1 续：解除失败注入后
+// 重试同一冻结（下一轮响应式 402 重入）成功，且 immediate 消费恰一次。
+func TestKira402FreezeImmediateConsumePersistRetryConsumesOnce(t *testing.T) {
+	now := quotaLifecycleBase
+	immediate := now.UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	kira := kiraAccountWithFreshVND(208, now)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	// 1) 首次冻结：UpdateExtra 注入失败 ⇒ 失败关闭（零写入）。
+	repo.setUpdateExtraErr(errors.New("persist boom"))
+	require.Error(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402", kira402AccountSignal(kira, "402")))
+	require.Equal(t, 0, repo.probeDueWriteTotal())
+
+	// 2) 解除注入后重试：成功冻结，immediate due + consumed 落库恰一次。
+	repo.setUpdateExtraErr(nil)
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, kira, "402 again", kira402AccountSignal(kira, "402 again")))
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, immediate, st.ProbeDueAt)
+	require.True(t, st.ImmediateDueConsumed)
+	require.Equal(t, 1, repo.probeDueWriteCount(immediate), "immediate 消费恰一次（失败轮次未计数）")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "重试成功轮次账号保持冻结")
+	require.Equal(t, 0, repo.clearCalls)
+}
+
+// TestKira402FreezeImmediateDueUsesLatestPersistedBalance R2-#2：交错顺序下冻结必须
+// 基于锁内最新持久对象计算 immediate due——余额先落库 → fresh 回调因未冻结 no-op →
+// 以旧账号对象进入冻结 ⇒ 仍从 repository 最新余额得到 immediate due 且消费一次。
+func TestKira402FreezeImmediateDueUsesLatestPersistedBalance(t *testing.T) {
+	now := quotaLifecycleBase
+	immediate := now.UTC().Format(time.RFC3339)
+	daily := kiraNextDailyReset(now).UTC().Format(time.RFC3339)
+	ctx := context.Background()
+
+	kira := newQuotaLifecycleKiraAccount(208)
+	repo := newQuotaLifecycleFakeRepo(kira)
+	svc := newQuotaLifecycleTestService(repo, &fakeQuotaAlertStore{}, &quotaProbeController{outcome: quotaProbeExhausted})
+
+	// 冻结入口持有的旧账号快照（余额落库前）：独立 Extra，不含 VND 余额键。
+	stale := *kira
+	stale.Extra = map[string]any{}
+
+	// 1) 余额先落库（repository 最新对象 fresh>0）。
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixBalance)] = 1000.0
+	kira.Extra[cnExtraKey(kira.Platform, cnBalanceExtraSuffixUpdated)] = now.Add(-30 * time.Second).UTC().Format(time.RFC3339)
+
+	// 2) fresh 回调因未冻结 no-op（守门 1：非 402 冻结账号零写入）。
+	require.NoError(t, svc.OnKiraFreshBalanceObserved(ctx, kira))
+	_, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.False(t, ok, "未冻结 ⇒ fresh 回调零写入")
+	require.Equal(t, 0, repo.probeDueWriteTotal())
+
+	// 3) 以旧账号对象进入 402 权威冻结：仍须从 repository 最新余额得到 immediate due。
+	require.NoError(t, svc.OnUpstreamQuotaExhaustedScoped(ctx, &stale, "402", kira402AccountSignal(&stale, "402")))
+	st, ok := cnQuotaLifecycleStateFromExtra(kira.Extra)
+	require.True(t, ok)
+	require.Equal(t, immediate, st.ProbeDueAt,
+		"旧账号快照不得把本应 immediate 的冻结写成每日 due（got daily=%s）", daily)
+	require.True(t, st.ImmediateDueConsumed, "冻结当刻 fresh>0 ⇒ 当场登记已消费")
+	require.Equal(t, 1, repo.probeDueWriteCount(immediate), "immediate 消费恰一次")
+	_, parked := repo.parkedUntil(208)
+	require.True(t, parked, "交错顺序下账号必须被冻结")
+	require.Equal(t, 0, repo.clearCalls)
 }

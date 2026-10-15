@@ -305,7 +305,11 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	// 账号级请求头覆写：放在所有内置默认头（含 Grok CLI 身份头）之后应用，
 	// 使配置值获得除共享传输层强制头之外的最高优先级。
 	account.ApplyHeaderOverrides(upstreamReq.Header)
-	applyOpenCodeSessionHeader(c, account, targetURL, upstreamReq.Header, body)
+	applyOpenCodeSessionHeader(c, account, targetURL, upstreamReq.Header)
+	// 补齐缺失调用点（OC-T1-FIX4）：与 forward.go:1655 同构，muse 平台或 base_url
+	// host=opencode.ai 的伪装账号在此注入 x-opencode-session，消除 OC-K(241) 经
+	// cc_pipeline 路径的 400 MissingSessionID；非 OpenCode 账号由守卫兜底零变化。
+	applyMuseSessionHeader(c, account, upstreamReq.Header)
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

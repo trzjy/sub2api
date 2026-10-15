@@ -42,6 +42,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/promointelitem"
 	"github.com/Wei-Shaw/sub2api/ent/promointelsource"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/redeembatch"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcode"
 	"github.com/Wei-Shaw/sub2api/ent/redeemcodegroup"
@@ -102,6 +103,7 @@ const (
 	TypePromoIntelItem                = "PromoIntelItem"
 	TypePromoIntelSource              = "PromoIntelSource"
 	TypeProxy                         = "Proxy"
+	TypeQuotaKey                      = "QuotaKey"
 	TypeRedeemBatch                   = "RedeemBatch"
 	TypeRedeemCode                    = "RedeemCode"
 	TypeRedeemCodeGroup               = "RedeemCodeGroup"
@@ -2354,6 +2356,8 @@ type AccountMutation struct {
 	usage_logs                  map[int64]struct{}
 	removedusage_logs           map[int64]struct{}
 	clearedusage_logs           bool
+	quota_key                   *int64
+	clearedquota_key            bool
 	done                        bool
 	oldValue                    func(context.Context) (*Account, error)
 	predicates                  []predicate.Account
@@ -3058,6 +3062,55 @@ func (m *AccountMutation) ResetProxyFallbackOriginID() {
 	m.proxy_fallback_origin_id = nil
 	m.addproxy_fallback_origin_id = nil
 	delete(m.clearedFields, account.FieldProxyFallbackOriginID)
+}
+
+// SetQuotaKeyID sets the "quota_key_id" field.
+func (m *AccountMutation) SetQuotaKeyID(i int64) {
+	m.quota_key = &i
+}
+
+// QuotaKeyID returns the value of the "quota_key_id" field in the mutation.
+func (m *AccountMutation) QuotaKeyID() (r int64, exists bool) {
+	v := m.quota_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldQuotaKeyID returns the old "quota_key_id" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldQuotaKeyID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldQuotaKeyID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldQuotaKeyID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldQuotaKeyID: %w", err)
+	}
+	return oldValue.QuotaKeyID, nil
+}
+
+// ClearQuotaKeyID clears the value of the "quota_key_id" field.
+func (m *AccountMutation) ClearQuotaKeyID() {
+	m.quota_key = nil
+	m.clearedFields[account.FieldQuotaKeyID] = struct{}{}
+}
+
+// QuotaKeyIDCleared returns if the "quota_key_id" field was cleared in this mutation.
+func (m *AccountMutation) QuotaKeyIDCleared() bool {
+	_, ok := m.clearedFields[account.FieldQuotaKeyID]
+	return ok
+}
+
+// ResetQuotaKeyID resets all changes to the "quota_key_id" field.
+func (m *AccountMutation) ResetQuotaKeyID() {
+	m.quota_key = nil
+	delete(m.clearedFields, account.FieldQuotaKeyID)
 }
 
 // SetConcurrency sets the "concurrency" field.
@@ -4259,6 +4312,33 @@ func (m *AccountMutation) ResetUsageLogs() {
 	m.removedusage_logs = nil
 }
 
+// ClearQuotaKey clears the "quota_key" edge to the QuotaKey entity.
+func (m *AccountMutation) ClearQuotaKey() {
+	m.clearedquota_key = true
+	m.clearedFields[account.FieldQuotaKeyID] = struct{}{}
+}
+
+// QuotaKeyCleared reports if the "quota_key" edge to the QuotaKey entity was cleared.
+func (m *AccountMutation) QuotaKeyCleared() bool {
+	return m.QuotaKeyIDCleared() || m.clearedquota_key
+}
+
+// QuotaKeyIDs returns the "quota_key" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// QuotaKeyID instead. It exists only for internal usage by the builders.
+func (m *AccountMutation) QuotaKeyIDs() (ids []int64) {
+	if id := m.quota_key; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetQuotaKey resets all changes to the "quota_key" edge.
+func (m *AccountMutation) ResetQuotaKey() {
+	m.quota_key = nil
+	m.clearedquota_key = false
+}
+
 // Where appends a list predicates to the AccountMutation builder.
 func (m *AccountMutation) Where(ps ...predicate.Account) {
 	m.predicates = append(m.predicates, ps...)
@@ -4293,7 +4373,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 34)
+	fields := make([]string, 0, 35)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4335,6 +4415,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.proxy_fallback_origin_id != nil {
 		fields = append(fields, account.FieldProxyFallbackOriginID)
+	}
+	if m.quota_key != nil {
+		fields = append(fields, account.FieldQuotaKeyID)
 	}
 	if m.concurrency != nil {
 		fields = append(fields, account.FieldConcurrency)
@@ -4432,6 +4515,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.ProxyID()
 	case account.FieldProxyFallbackOriginID:
 		return m.ProxyFallbackOriginID()
+	case account.FieldQuotaKeyID:
+		return m.QuotaKeyID()
 	case account.FieldConcurrency:
 		return m.Concurrency()
 	case account.FieldLoadFactor:
@@ -4509,6 +4594,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldProxyID(ctx)
 	case account.FieldProxyFallbackOriginID:
 		return m.OldProxyFallbackOriginID(ctx)
+	case account.FieldQuotaKeyID:
+		return m.OldQuotaKeyID(ctx)
 	case account.FieldConcurrency:
 		return m.OldConcurrency(ctx)
 	case account.FieldLoadFactor:
@@ -4655,6 +4742,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProxyFallbackOriginID(v)
+		return nil
+	case account.FieldQuotaKeyID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetQuotaKeyID(v)
 		return nil
 	case account.FieldConcurrency:
 		v, ok := value.(int)
@@ -4907,6 +5001,9 @@ func (m *AccountMutation) ClearedFields() []string {
 	if m.FieldCleared(account.FieldProxyFallbackOriginID) {
 		fields = append(fields, account.FieldProxyFallbackOriginID)
 	}
+	if m.FieldCleared(account.FieldQuotaKeyID) {
+		fields = append(fields, account.FieldQuotaKeyID)
+	}
 	if m.FieldCleared(account.FieldLoadFactor) {
 		fields = append(fields, account.FieldLoadFactor)
 	}
@@ -4977,6 +5074,9 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldProxyFallbackOriginID:
 		m.ClearProxyFallbackOriginID()
+		return nil
+	case account.FieldQuotaKeyID:
+		m.ClearQuotaKeyID()
 		return nil
 	case account.FieldLoadFactor:
 		m.ClearLoadFactor()
@@ -5067,6 +5167,9 @@ func (m *AccountMutation) ResetField(name string) error {
 	case account.FieldProxyFallbackOriginID:
 		m.ResetProxyFallbackOriginID()
 		return nil
+	case account.FieldQuotaKeyID:
+		m.ResetQuotaKeyID()
+		return nil
 	case account.FieldConcurrency:
 		m.ResetConcurrency()
 		return nil
@@ -5133,7 +5236,7 @@ func (m *AccountMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *AccountMutation) AddedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.groups != nil {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5148,6 +5251,9 @@ func (m *AccountMutation) AddedEdges() []string {
 	}
 	if m.usage_logs != nil {
 		edges = append(edges, account.EdgeUsageLogs)
+	}
+	if m.quota_key != nil {
+		edges = append(edges, account.EdgeQuotaKey)
 	}
 	return edges
 }
@@ -5182,13 +5288,17 @@ func (m *AccountMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case account.EdgeQuotaKey:
+		if id := m.quota_key; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *AccountMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.removedgroups != nil {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5229,7 +5339,7 @@ func (m *AccountMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *AccountMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.clearedgroups {
 		edges = append(edges, account.EdgeGroups)
 	}
@@ -5244,6 +5354,9 @@ func (m *AccountMutation) ClearedEdges() []string {
 	}
 	if m.clearedusage_logs {
 		edges = append(edges, account.EdgeUsageLogs)
+	}
+	if m.clearedquota_key {
+		edges = append(edges, account.EdgeQuotaKey)
 	}
 	return edges
 }
@@ -5262,6 +5375,8 @@ func (m *AccountMutation) EdgeCleared(name string) bool {
 		return m.clearedchildren
 	case account.EdgeUsageLogs:
 		return m.clearedusage_logs
+	case account.EdgeQuotaKey:
+		return m.clearedquota_key
 	}
 	return false
 }
@@ -5275,6 +5390,9 @@ func (m *AccountMutation) ClearEdge(name string) error {
 		return nil
 	case account.EdgeParent:
 		m.ClearParent()
+		return nil
+	case account.EdgeQuotaKey:
+		m.ClearQuotaKey()
 		return nil
 	}
 	return fmt.Errorf("unknown Account unique edge %s", name)
@@ -5298,6 +5416,9 @@ func (m *AccountMutation) ResetEdge(name string) error {
 		return nil
 	case account.EdgeUsageLogs:
 		m.ResetUsageLogs()
+		return nil
+	case account.EdgeQuotaKey:
+		m.ResetQuotaKey()
 		return nil
 	}
 	return fmt.Errorf("unknown Account edge %s", name)
@@ -42658,6 +42779,1155 @@ func (m *ProxyMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown Proxy edge %s", name)
+}
+
+// QuotaKeyMutation represents an operation that mutates the QuotaKey nodes in the graph.
+type QuotaKeyMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *int64
+	deleted_at         *time.Time
+	code_encrypted     *string
+	code_mac           *string
+	code_last4         *string
+	status             *string
+	exhausted          *bool
+	last_refresh_error *string
+	last_refresh_at    *time.Time
+	expires_at         *time.Time
+	created_at         *time.Time
+	updated_at         *time.Time
+	notes              *string
+	clearedFields      map[string]struct{}
+	accounts           map[int64]struct{}
+	removedaccounts    map[int64]struct{}
+	clearedaccounts    bool
+	done               bool
+	oldValue           func(context.Context) (*QuotaKey, error)
+	predicates         []predicate.QuotaKey
+}
+
+var _ ent.Mutation = (*QuotaKeyMutation)(nil)
+
+// quotakeyOption allows management of the mutation configuration using functional options.
+type quotakeyOption func(*QuotaKeyMutation)
+
+// newQuotaKeyMutation creates new mutation for the QuotaKey entity.
+func newQuotaKeyMutation(c config, op Op, opts ...quotakeyOption) *QuotaKeyMutation {
+	m := &QuotaKeyMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeQuotaKey,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withQuotaKeyID sets the ID field of the mutation.
+func withQuotaKeyID(id int64) quotakeyOption {
+	return func(m *QuotaKeyMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *QuotaKey
+		)
+		m.oldValue = func(ctx context.Context) (*QuotaKey, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().QuotaKey.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withQuotaKey sets the old QuotaKey of the mutation.
+func withQuotaKey(node *QuotaKey) quotakeyOption {
+	return func(m *QuotaKeyMutation) {
+		m.oldValue = func(context.Context) (*QuotaKey, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m QuotaKeyMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m QuotaKeyMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *QuotaKeyMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *QuotaKeyMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().QuotaKey.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (m *QuotaKeyMutation) SetDeletedAt(t time.Time) {
+	m.deleted_at = &t
+}
+
+// DeletedAt returns the value of the "deleted_at" field in the mutation.
+func (m *QuotaKeyMutation) DeletedAt() (r time.Time, exists bool) {
+	v := m.deleted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletedAt returns the old "deleted_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldDeletedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletedAt: %w", err)
+	}
+	return oldValue.DeletedAt, nil
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (m *QuotaKeyMutation) ClearDeletedAt() {
+	m.deleted_at = nil
+	m.clearedFields[quotakey.FieldDeletedAt] = struct{}{}
+}
+
+// DeletedAtCleared returns if the "deleted_at" field was cleared in this mutation.
+func (m *QuotaKeyMutation) DeletedAtCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldDeletedAt]
+	return ok
+}
+
+// ResetDeletedAt resets all changes to the "deleted_at" field.
+func (m *QuotaKeyMutation) ResetDeletedAt() {
+	m.deleted_at = nil
+	delete(m.clearedFields, quotakey.FieldDeletedAt)
+}
+
+// SetCodeEncrypted sets the "code_encrypted" field.
+func (m *QuotaKeyMutation) SetCodeEncrypted(s string) {
+	m.code_encrypted = &s
+}
+
+// CodeEncrypted returns the value of the "code_encrypted" field in the mutation.
+func (m *QuotaKeyMutation) CodeEncrypted() (r string, exists bool) {
+	v := m.code_encrypted
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodeEncrypted returns the old "code_encrypted" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldCodeEncrypted(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeEncrypted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeEncrypted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeEncrypted: %w", err)
+	}
+	return oldValue.CodeEncrypted, nil
+}
+
+// ResetCodeEncrypted resets all changes to the "code_encrypted" field.
+func (m *QuotaKeyMutation) ResetCodeEncrypted() {
+	m.code_encrypted = nil
+}
+
+// SetCodeMAC sets the "code_mac" field.
+func (m *QuotaKeyMutation) SetCodeMAC(s string) {
+	m.code_mac = &s
+}
+
+// CodeMAC returns the value of the "code_mac" field in the mutation.
+func (m *QuotaKeyMutation) CodeMAC() (r string, exists bool) {
+	v := m.code_mac
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodeMAC returns the old "code_mac" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldCodeMAC(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeMAC is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeMAC requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeMAC: %w", err)
+	}
+	return oldValue.CodeMAC, nil
+}
+
+// ClearCodeMAC clears the value of the "code_mac" field.
+func (m *QuotaKeyMutation) ClearCodeMAC() {
+	m.code_mac = nil
+	m.clearedFields[quotakey.FieldCodeMAC] = struct{}{}
+}
+
+// CodeMACCleared returns if the "code_mac" field was cleared in this mutation.
+func (m *QuotaKeyMutation) CodeMACCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldCodeMAC]
+	return ok
+}
+
+// ResetCodeMAC resets all changes to the "code_mac" field.
+func (m *QuotaKeyMutation) ResetCodeMAC() {
+	m.code_mac = nil
+	delete(m.clearedFields, quotakey.FieldCodeMAC)
+}
+
+// SetCodeLast4 sets the "code_last4" field.
+func (m *QuotaKeyMutation) SetCodeLast4(s string) {
+	m.code_last4 = &s
+}
+
+// CodeLast4 returns the value of the "code_last4" field in the mutation.
+func (m *QuotaKeyMutation) CodeLast4() (r string, exists bool) {
+	v := m.code_last4
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCodeLast4 returns the old "code_last4" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldCodeLast4(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCodeLast4 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCodeLast4 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCodeLast4: %w", err)
+	}
+	return oldValue.CodeLast4, nil
+}
+
+// ClearCodeLast4 clears the value of the "code_last4" field.
+func (m *QuotaKeyMutation) ClearCodeLast4() {
+	m.code_last4 = nil
+	m.clearedFields[quotakey.FieldCodeLast4] = struct{}{}
+}
+
+// CodeLast4Cleared returns if the "code_last4" field was cleared in this mutation.
+func (m *QuotaKeyMutation) CodeLast4Cleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldCodeLast4]
+	return ok
+}
+
+// ResetCodeLast4 resets all changes to the "code_last4" field.
+func (m *QuotaKeyMutation) ResetCodeLast4() {
+	m.code_last4 = nil
+	delete(m.clearedFields, quotakey.FieldCodeLast4)
+}
+
+// SetStatus sets the "status" field.
+func (m *QuotaKeyMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *QuotaKeyMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *QuotaKeyMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetExhausted sets the "exhausted" field.
+func (m *QuotaKeyMutation) SetExhausted(b bool) {
+	m.exhausted = &b
+}
+
+// Exhausted returns the value of the "exhausted" field in the mutation.
+func (m *QuotaKeyMutation) Exhausted() (r bool, exists bool) {
+	v := m.exhausted
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExhausted returns the old "exhausted" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldExhausted(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExhausted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExhausted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExhausted: %w", err)
+	}
+	return oldValue.Exhausted, nil
+}
+
+// ResetExhausted resets all changes to the "exhausted" field.
+func (m *QuotaKeyMutation) ResetExhausted() {
+	m.exhausted = nil
+}
+
+// SetLastRefreshError sets the "last_refresh_error" field.
+func (m *QuotaKeyMutation) SetLastRefreshError(s string) {
+	m.last_refresh_error = &s
+}
+
+// LastRefreshError returns the value of the "last_refresh_error" field in the mutation.
+func (m *QuotaKeyMutation) LastRefreshError() (r string, exists bool) {
+	v := m.last_refresh_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastRefreshError returns the old "last_refresh_error" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldLastRefreshError(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastRefreshError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastRefreshError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastRefreshError: %w", err)
+	}
+	return oldValue.LastRefreshError, nil
+}
+
+// ClearLastRefreshError clears the value of the "last_refresh_error" field.
+func (m *QuotaKeyMutation) ClearLastRefreshError() {
+	m.last_refresh_error = nil
+	m.clearedFields[quotakey.FieldLastRefreshError] = struct{}{}
+}
+
+// LastRefreshErrorCleared returns if the "last_refresh_error" field was cleared in this mutation.
+func (m *QuotaKeyMutation) LastRefreshErrorCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldLastRefreshError]
+	return ok
+}
+
+// ResetLastRefreshError resets all changes to the "last_refresh_error" field.
+func (m *QuotaKeyMutation) ResetLastRefreshError() {
+	m.last_refresh_error = nil
+	delete(m.clearedFields, quotakey.FieldLastRefreshError)
+}
+
+// SetLastRefreshAt sets the "last_refresh_at" field.
+func (m *QuotaKeyMutation) SetLastRefreshAt(t time.Time) {
+	m.last_refresh_at = &t
+}
+
+// LastRefreshAt returns the value of the "last_refresh_at" field in the mutation.
+func (m *QuotaKeyMutation) LastRefreshAt() (r time.Time, exists bool) {
+	v := m.last_refresh_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastRefreshAt returns the old "last_refresh_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldLastRefreshAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastRefreshAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastRefreshAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastRefreshAt: %w", err)
+	}
+	return oldValue.LastRefreshAt, nil
+}
+
+// ClearLastRefreshAt clears the value of the "last_refresh_at" field.
+func (m *QuotaKeyMutation) ClearLastRefreshAt() {
+	m.last_refresh_at = nil
+	m.clearedFields[quotakey.FieldLastRefreshAt] = struct{}{}
+}
+
+// LastRefreshAtCleared returns if the "last_refresh_at" field was cleared in this mutation.
+func (m *QuotaKeyMutation) LastRefreshAtCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldLastRefreshAt]
+	return ok
+}
+
+// ResetLastRefreshAt resets all changes to the "last_refresh_at" field.
+func (m *QuotaKeyMutation) ResetLastRefreshAt() {
+	m.last_refresh_at = nil
+	delete(m.clearedFields, quotakey.FieldLastRefreshAt)
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *QuotaKeyMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *QuotaKeyMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *QuotaKeyMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[quotakey.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *QuotaKeyMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *QuotaKeyMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, quotakey.FieldExpiresAt)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *QuotaKeyMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *QuotaKeyMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *QuotaKeyMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *QuotaKeyMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *QuotaKeyMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *QuotaKeyMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetNotes sets the "notes" field.
+func (m *QuotaKeyMutation) SetNotes(s string) {
+	m.notes = &s
+}
+
+// Notes returns the value of the "notes" field in the mutation.
+func (m *QuotaKeyMutation) Notes() (r string, exists bool) {
+	v := m.notes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotes returns the old "notes" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldNotes(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotes: %w", err)
+	}
+	return oldValue.Notes, nil
+}
+
+// ClearNotes clears the value of the "notes" field.
+func (m *QuotaKeyMutation) ClearNotes() {
+	m.notes = nil
+	m.clearedFields[quotakey.FieldNotes] = struct{}{}
+}
+
+// NotesCleared returns if the "notes" field was cleared in this mutation.
+func (m *QuotaKeyMutation) NotesCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldNotes]
+	return ok
+}
+
+// ResetNotes resets all changes to the "notes" field.
+func (m *QuotaKeyMutation) ResetNotes() {
+	m.notes = nil
+	delete(m.clearedFields, quotakey.FieldNotes)
+}
+
+// AddAccountIDs adds the "accounts" edge to the Account entity by ids.
+func (m *QuotaKeyMutation) AddAccountIDs(ids ...int64) {
+	if m.accounts == nil {
+		m.accounts = make(map[int64]struct{})
+	}
+	for i := range ids {
+		m.accounts[ids[i]] = struct{}{}
+	}
+}
+
+// ClearAccounts clears the "accounts" edge to the Account entity.
+func (m *QuotaKeyMutation) ClearAccounts() {
+	m.clearedaccounts = true
+}
+
+// AccountsCleared reports if the "accounts" edge to the Account entity was cleared.
+func (m *QuotaKeyMutation) AccountsCleared() bool {
+	return m.clearedaccounts
+}
+
+// RemoveAccountIDs removes the "accounts" edge to the Account entity by IDs.
+func (m *QuotaKeyMutation) RemoveAccountIDs(ids ...int64) {
+	if m.removedaccounts == nil {
+		m.removedaccounts = make(map[int64]struct{})
+	}
+	for i := range ids {
+		delete(m.accounts, ids[i])
+		m.removedaccounts[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedAccounts returns the removed IDs of the "accounts" edge to the Account entity.
+func (m *QuotaKeyMutation) RemovedAccountsIDs() (ids []int64) {
+	for id := range m.removedaccounts {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// AccountsIDs returns the "accounts" edge IDs in the mutation.
+func (m *QuotaKeyMutation) AccountsIDs() (ids []int64) {
+	for id := range m.accounts {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetAccounts resets all changes to the "accounts" edge.
+func (m *QuotaKeyMutation) ResetAccounts() {
+	m.accounts = nil
+	m.clearedaccounts = false
+	m.removedaccounts = nil
+}
+
+// Where appends a list predicates to the QuotaKeyMutation builder.
+func (m *QuotaKeyMutation) Where(ps ...predicate.QuotaKey) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the QuotaKeyMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *QuotaKeyMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.QuotaKey, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *QuotaKeyMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *QuotaKeyMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (QuotaKey).
+func (m *QuotaKeyMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *QuotaKeyMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.deleted_at != nil {
+		fields = append(fields, quotakey.FieldDeletedAt)
+	}
+	if m.code_encrypted != nil {
+		fields = append(fields, quotakey.FieldCodeEncrypted)
+	}
+	if m.code_mac != nil {
+		fields = append(fields, quotakey.FieldCodeMAC)
+	}
+	if m.code_last4 != nil {
+		fields = append(fields, quotakey.FieldCodeLast4)
+	}
+	if m.status != nil {
+		fields = append(fields, quotakey.FieldStatus)
+	}
+	if m.exhausted != nil {
+		fields = append(fields, quotakey.FieldExhausted)
+	}
+	if m.last_refresh_error != nil {
+		fields = append(fields, quotakey.FieldLastRefreshError)
+	}
+	if m.last_refresh_at != nil {
+		fields = append(fields, quotakey.FieldLastRefreshAt)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, quotakey.FieldExpiresAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, quotakey.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, quotakey.FieldUpdatedAt)
+	}
+	if m.notes != nil {
+		fields = append(fields, quotakey.FieldNotes)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case quotakey.FieldDeletedAt:
+		return m.DeletedAt()
+	case quotakey.FieldCodeEncrypted:
+		return m.CodeEncrypted()
+	case quotakey.FieldCodeMAC:
+		return m.CodeMAC()
+	case quotakey.FieldCodeLast4:
+		return m.CodeLast4()
+	case quotakey.FieldStatus:
+		return m.Status()
+	case quotakey.FieldExhausted:
+		return m.Exhausted()
+	case quotakey.FieldLastRefreshError:
+		return m.LastRefreshError()
+	case quotakey.FieldLastRefreshAt:
+		return m.LastRefreshAt()
+	case quotakey.FieldExpiresAt:
+		return m.ExpiresAt()
+	case quotakey.FieldCreatedAt:
+		return m.CreatedAt()
+	case quotakey.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case quotakey.FieldNotes:
+		return m.Notes()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case quotakey.FieldDeletedAt:
+		return m.OldDeletedAt(ctx)
+	case quotakey.FieldCodeEncrypted:
+		return m.OldCodeEncrypted(ctx)
+	case quotakey.FieldCodeMAC:
+		return m.OldCodeMAC(ctx)
+	case quotakey.FieldCodeLast4:
+		return m.OldCodeLast4(ctx)
+	case quotakey.FieldStatus:
+		return m.OldStatus(ctx)
+	case quotakey.FieldExhausted:
+		return m.OldExhausted(ctx)
+	case quotakey.FieldLastRefreshError:
+		return m.OldLastRefreshError(ctx)
+	case quotakey.FieldLastRefreshAt:
+		return m.OldLastRefreshAt(ctx)
+	case quotakey.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case quotakey.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case quotakey.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case quotakey.FieldNotes:
+		return m.OldNotes(ctx)
+	}
+	return nil, fmt.Errorf("unknown QuotaKey field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case quotakey.FieldDeletedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletedAt(v)
+		return nil
+	case quotakey.FieldCodeEncrypted:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodeEncrypted(v)
+		return nil
+	case quotakey.FieldCodeMAC:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodeMAC(v)
+		return nil
+	case quotakey.FieldCodeLast4:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCodeLast4(v)
+		return nil
+	case quotakey.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case quotakey.FieldExhausted:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExhausted(v)
+		return nil
+	case quotakey.FieldLastRefreshError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastRefreshError(v)
+		return nil
+	case quotakey.FieldLastRefreshAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastRefreshAt(v)
+		return nil
+	case quotakey.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case quotakey.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case quotakey.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case quotakey.FieldNotes:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotes(v)
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaKey field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *QuotaKeyMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *QuotaKeyMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *QuotaKeyMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown QuotaKey numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *QuotaKeyMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(quotakey.FieldDeletedAt) {
+		fields = append(fields, quotakey.FieldDeletedAt)
+	}
+	if m.FieldCleared(quotakey.FieldCodeMAC) {
+		fields = append(fields, quotakey.FieldCodeMAC)
+	}
+	if m.FieldCleared(quotakey.FieldCodeLast4) {
+		fields = append(fields, quotakey.FieldCodeLast4)
+	}
+	if m.FieldCleared(quotakey.FieldLastRefreshError) {
+		fields = append(fields, quotakey.FieldLastRefreshError)
+	}
+	if m.FieldCleared(quotakey.FieldLastRefreshAt) {
+		fields = append(fields, quotakey.FieldLastRefreshAt)
+	}
+	if m.FieldCleared(quotakey.FieldExpiresAt) {
+		fields = append(fields, quotakey.FieldExpiresAt)
+	}
+	if m.FieldCleared(quotakey.FieldNotes) {
+		fields = append(fields, quotakey.FieldNotes)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *QuotaKeyMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *QuotaKeyMutation) ClearField(name string) error {
+	switch name {
+	case quotakey.FieldDeletedAt:
+		m.ClearDeletedAt()
+		return nil
+	case quotakey.FieldCodeMAC:
+		m.ClearCodeMAC()
+		return nil
+	case quotakey.FieldCodeLast4:
+		m.ClearCodeLast4()
+		return nil
+	case quotakey.FieldLastRefreshError:
+		m.ClearLastRefreshError()
+		return nil
+	case quotakey.FieldLastRefreshAt:
+		m.ClearLastRefreshAt()
+		return nil
+	case quotakey.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	case quotakey.FieldNotes:
+		m.ClearNotes()
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaKey nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *QuotaKeyMutation) ResetField(name string) error {
+	switch name {
+	case quotakey.FieldDeletedAt:
+		m.ResetDeletedAt()
+		return nil
+	case quotakey.FieldCodeEncrypted:
+		m.ResetCodeEncrypted()
+		return nil
+	case quotakey.FieldCodeMAC:
+		m.ResetCodeMAC()
+		return nil
+	case quotakey.FieldCodeLast4:
+		m.ResetCodeLast4()
+		return nil
+	case quotakey.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case quotakey.FieldExhausted:
+		m.ResetExhausted()
+		return nil
+	case quotakey.FieldLastRefreshError:
+		m.ResetLastRefreshError()
+		return nil
+	case quotakey.FieldLastRefreshAt:
+		m.ResetLastRefreshAt()
+		return nil
+	case quotakey.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case quotakey.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case quotakey.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case quotakey.FieldNotes:
+		m.ResetNotes()
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaKey field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *QuotaKeyMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.accounts != nil {
+		edges = append(edges, quotakey.EdgeAccounts)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *QuotaKeyMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case quotakey.EdgeAccounts:
+		ids := make([]ent.Value, 0, len(m.accounts))
+		for id := range m.accounts {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *QuotaKeyMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.removedaccounts != nil {
+		edges = append(edges, quotakey.EdgeAccounts)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *QuotaKeyMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case quotakey.EdgeAccounts:
+		ids := make([]ent.Value, 0, len(m.removedaccounts))
+		for id := range m.removedaccounts {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *QuotaKeyMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedaccounts {
+		edges = append(edges, quotakey.EdgeAccounts)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *QuotaKeyMutation) EdgeCleared(name string) bool {
+	switch name {
+	case quotakey.EdgeAccounts:
+		return m.clearedaccounts
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *QuotaKeyMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown QuotaKey unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *QuotaKeyMutation) ResetEdge(name string) error {
+	switch name {
+	case quotakey.EdgeAccounts:
+		m.ResetAccounts()
+		return nil
+	}
+	return fmt.Errorf("unknown QuotaKey edge %s", name)
 }
 
 // RedeemBatchMutation represents an operation that mutates the RedeemBatch nodes in the graph.

@@ -494,7 +494,18 @@
     </template>
 
     <!-- CN providers (Kimi / Zhipu / DeepSeek / MiniMax / 火山方舟订阅号 base_url 命中 volces): coding-plan quota or payg balance -->
-    <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek' || account.platform === 'minimax' || isVolcanoAccount">
+    <!--
+      F01（BAL-GATE-D4）：父门（showUsageWindows）已按能力放行 probe 账号，此处
+      v-else-if 同步追加能力项，使"叶子组件可显示、列表入口不可达"的平行闸贯通：
+      ① 能力账号（balance_probe enabled）从父门贯通到 CN 子单元格；
+      ② 排除 gemini——其专有分支（:531）在 CN 分支之后，若被 CN 分支捕获会失去
+         gemini 用量展示；
+      ③ openai-oauth 等专有分支在 CN 分支之前，v-else-if 优先级天然不受影响；
+         openai apikey 等无专有分支的账号原先落兜底占位，进入 CN 块后 quota 单元格
+         自门控（CNProviderQuotaCell 的 cnQuotaCellVisible 对非 CN 平台为 false，
+         不渲染），余额单元格按能力显示——无既有展示损失。
+    -->
+    <template v-else-if="account.platform === 'kimi' || account.platform === 'zhipu' || account.platform === 'deepseek' || account.platform === 'minimax' || isVolcanoAccount || (cnBalanceCellVisible && account.platform !== 'gemini')">
       <!-- 挂在 CN 平台下的 Ollama Cloud 账号（资格由后端下发 eligible）：用量由
            Ollama 用量窗口负责。这类账号不是国产厂商订阅，CN 的额度/余额探测端点由
            base_url 衍生，对 ollama.com 会被后端出站 URL 白名单拒绝，渲染出来只会
@@ -645,11 +656,8 @@
 
     <!-- Non-OAuth/Setup-Token accounts -->
     <div ref="rootRef" v-else>
-      <!-- Muse API Key accounts: three-window usage (OpenCode Go 上游透传) -->
-      <!-- deepseek apikey opt-in（usage_probe=opencode_zen）完全镜像 muse：进入同一
-           三窗口模板；内层 v-if="museUsage" 不动，抓取前（museUsage 为 null）显示占位符 '-'，
-           与 muse 抓取前行为一致。 -->
-      <template v-if="account.platform === 'muse' || (account.platform === 'deepseek' && account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen')">
+      <!-- Muse and OpenCode Go opt-in accounts share the upstream three-window usage. -->
+      <template v-if="account.platform === 'muse' || hasOpenCodeGoUsageProbe">
         <div v-if="museUsage" class="space-y-1">
           <UsageProgressBar
             v-if="museUsage.rolling"
@@ -1026,6 +1034,9 @@ const isWebAccessModeAccount = computed(() => {
   const mode = props.account.credentials?.access_mode
   return props.account.type === 'apikey' && typeof mode === 'string' && mode === 'web'
 })
+const hasOpenCodeGoUsageProbe = computed(() =>
+  props.account.type === 'apikey' && props.account.credentials?.usage_probe === 'opencode_zen'
+)
 
 const showUsageWindows = computed(() => {
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
@@ -1035,15 +1046,8 @@ const showUsageWindows = computed(() => {
   if (isWebAccessModeAccount.value) {
     return true
   }
-  // deepseek apikey opt-in（usage_probe=opencode_zen）：完全镜像 muse apikey 通路，
-  // 路由进 v-else 根分支的三窗口模板（:664），不进入 CN 分支。未 opt-in 的 deepseek
-  // 不受影响（继续走下方 CN 分支）。判定一律用凭证 usage_probe（请求前可得），
-  // 禁止用 muse_usage 字段（请求后才存在，会循环依赖）。
-  if (
-    props.account.platform === 'deepseek' &&
-    props.account.type === 'apikey' &&
-    props.account.credentials?.usage_probe === 'opencode_zen'
-  ) {
+  // The opt-in credential is available before fetching usage and selects the Go window display.
+  if (hasOpenCodeGoUsageProbe.value) {
     return false
   }
   // CN providers: apikey 账号也有滚动用量窗口（coding plan）或余额（payg），
@@ -1058,6 +1062,11 @@ const showUsageWindows = computed(() => {
   ) {
     return true
   }
+  // F01（BAL-GATE-D4）：父级平台门能力贯通。能力账号（balance_probe enabled）从
+  // 此处父门放行到 CN 块分支（:508 同步追加同款能力项），消除"叶子组件可显示、
+  // 列表入口不可达"的平行闸。gemini 已在最上方（:939）return true 先行放行，
+  // 故此处无需再排除——其专有分支在 CN 分支之后，不被本能力项捕获。
+  if (cnBalanceCellVisible.value) return true
   return props.account.type === 'oauth' || props.account.type === 'setup-token'
 })
 
@@ -1083,14 +1092,7 @@ const shouldFetchUsage = computed(() => {
   if (props.account.platform === 'muse') {
     return props.account.type === 'apikey'
   }
-  // deepseek apikey opt-in（usage_probe=opencode_zen）：镜像 muse，触发批量用量抓取
-  // （getBatchUsage 返回 muse_usage 后由 v-else 三窗口模板渲染）。未 opt-in 的 deepseek
-  // 保持基线行为（false，不抓取）。判定一律用凭证 usage_probe（请求前可得）。
-  if (
-    props.account.platform === 'deepseek' &&
-    props.account.type === 'apikey' &&
-    props.account.credentials?.usage_probe === 'opencode_zen'
-  ) {
+  if (hasOpenCodeGoUsageProbe.value) {
     return true
   }
   // 网页接入模式（W6）：不做额度探测（免费额度无标准查询接口），仅本地今日统计，
@@ -1112,9 +1114,21 @@ const isVolcanoAccount = computed(() => isVolcanoBaseURL(accountBaseURL.value))
 const cnQuotaCellVisible = computed(() =>
   cnQuotaCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
 )
-const cnBalanceCellVisible = computed(() =>
-  cnBalanceCellVisibleFn(props.account.platform, cnAccountMode.value, accountBaseURL.value)
-)
+const cnBalanceCellVisible = computed(() => {
+  // 与 CNProviderBalanceCell 共用同一判定与取值（方案乙 / BAL-GATE-D5）：后端投影字段
+  // account.balance_probe_capable（即 RelayProbeTargetURL 的有效探测能力，非配置开关）
+  // 为真时优先于火山排除，使已具备余额能力的账号不再被前端恒隐藏（消除平行闸）。
+  // 火山排除只守旧规则。第五实参为 credentials.balance_probe.enabled 配置开关，
+  // 放行挂在 zhipu / minimax 下的中转型账号（有 /v1/usage 端点）。
+  const capable = props.account.balance_probe_capable === true
+  return cnBalanceCellVisibleFn(
+    props.account.platform,
+    cnAccountMode.value,
+    accountBaseURL.value,
+    capable,
+    props.account.balance_probe?.enabled === true
+  )
+})
 
 // TokenHarbor 免费档账号（base_url 含 tokenharbor.ai）：用量窗口列走 L5 互斥组件
 // CNQuotaUsageCell（有 Pass→订阅窗口；无 Pass→7 天滚动已用）。

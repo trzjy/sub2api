@@ -103,7 +103,6 @@ func provideCleanup(
 	codeBuddyQuotaCheck *service.CodeBuddyQuotaCheckService,
 	apiKeyBalanceProbeCheck *service.AccountBalanceProbeCheckService,
 	accountHealthRecoveryProbe *service.AccountHealthRecoveryProbeService,
-	maskedIdentityProbe *service.MaskedIdentityProbeService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
 	claudeCodeVersionSync *service.ClaudeCodeVersionSyncService,
 	proxyExpiry *service.ProxyExpiryService,
@@ -142,6 +141,9 @@ func provideCleanup(
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
 	quotaLifecycle *service.CNQuotaLifecycleService,
+	quotaKeySweeper *service.QuotaKeySweeper,
+	cursorAccountRetention *service.CursorAccountRetentionService,
+	quotaKeyReconciler *service.QuotaKeyReconciler,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -324,12 +326,6 @@ func provideCleanup(
 				}
 				return nil
 			}},
-			{"MaskedIdentityProbe", func() error {
-				if maskedIdentityProbe != nil {
-					maskedIdentityProbe.Stop()
-				}
-				return nil
-			}},
 			{"OpenAICodexVersionSyncService", func() error {
 				codexVersionSync.Stop()
 				return nil
@@ -459,6 +455,24 @@ func provideCleanup(
 			{"CNQuotaLifecycleService", func() error {
 				if quotaLifecycle != nil {
 					quotaLifecycle.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeySweeper", func() error {
+				if quotaKeySweeper != nil {
+					quotaKeySweeper.Stop()
+				}
+				return nil
+			}},
+			{"CursorAccountRetentionService", func() error {
+				if cursorAccountRetention != nil {
+					cursorAccountRetention.Stop()
+				}
+				return nil
+			}},
+			{"QuotaKeyReconciler", func() error {
+				if quotaKeyReconciler != nil {
+					quotaKeyReconciler.Stop()
 				}
 				return nil
 			}},

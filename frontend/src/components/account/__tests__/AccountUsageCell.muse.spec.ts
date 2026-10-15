@@ -366,3 +366,43 @@ describe('AccountUsageCell deepseek opt-in 镜像 muse', () => {
     expect(bars).toContain('R|7||indigo')
   })
 })
+
+describe.each([
+  ['kimi', 241],
+  ['zhipu', 243]
+] as const)('AccountUsageCell OpenCode Go %s 用量', (platform, id) => {
+  it('opt-in 账号从批量响应显示真实三窗口', async () => {
+    const requestBatchedUsage = vi.fn()
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id,
+          platform,
+          type: 'apikey',
+          credentials: { usage_probe: 'opencode_zen' }
+        }),
+        requestBatchedUsage,
+        batchedUsage: {
+          muse_usage: {
+            rolling: { status: 'ok', percent: 7, resets_at: null },
+            weekly: { status: 'ok', percent: 11, resets_at: null },
+            monthly: { status: 'ok', percent: 51, resets_at: null },
+            paused: false,
+            unschedulable_until: null
+          }
+        }
+      },
+      global: { stubs: deepseekStubs }
+    })
+
+    await flushPromises()
+
+    expect(requestBatchedUsage).toHaveBeenCalled()
+    expect(wrapper.find('[data-test="cn-quota"]').exists()).toBe(false)
+    expect(wrapper.findAll('.usage-bar').map((bar) => bar.text())).toEqual([
+      'R|7||indigo',
+      '7d|11||emerald',
+      '30d|51||purple'
+    ])
+  })
+})

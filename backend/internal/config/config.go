@@ -116,6 +116,17 @@ type Config struct {
 
 	// Enforce only API-key spending windows in simple mode.
 	SimpleModeKeyRateLimitEnabled bool `mapstructure:"simple_mode_key_rate_limit_enabled" yaml:"simple_mode_key_rate_limit_enabled"`
+	// Probe 是 C2 无流量渠道抽样探测调度器的配置段（派发单 C2）。
+	// 默认 Enabled=false（零探测；worker 启动但每轮空转），MaxPerTick 默认 2。
+	Probe ProbeConfig `mapstructure:"probe"`
+}
+
+// ProbeConfig 控制无流量渠道抽样直连探测调度器（派发单 C2）。
+//   - Enabled：总开关。false（默认）= 零探测，探测 worker 仍启动但每轮 RunOnce 直接返回。
+//   - MaxPerTick：每轮 tick 最多直连探测的渠道条数（默认 2）。
+type ProbeConfig struct {
+	Enabled    bool `mapstructure:"enabled"`
+	MaxPerTick int  `mapstructure:"max_per_tick"`
 }
 
 // SimpleModeConfig controls startup behavior in simple mode.
@@ -1301,7 +1312,7 @@ type GatewayCodeBuddyConfig struct {
 	// 仅在 Enabled=true 时生效：将该站点所有 CodeBuddy 出站（chat/auth/refresh/
 	// billing/models）的 TCP 连接重定向到指定源站 IP，绕开被 Cloudflare 隧道改写
 	// 的 DNS。默认全关；启用需 IP+Host 齐全，否则启动失败（fail-fast）。
-	// 详见 docs/codebuddy-direct-origin-plan.md。
+	// 详见 docs-local/codebuddy-direct-origin-plan.md。
 	DirectOrigin map[string]CodeBuddyDirectOriginConfig `mapstructure:"direct_origin"`
 }
 
@@ -2786,10 +2797,13 @@ func setDefaults() {
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
 	// HTTP 上游连接池配置（针对 5000+ 并发用户优化）
-	viper.SetDefault("gateway.max_idle_conns", 2560)          // 最大空闲连接总数（高并发场景可调大）
-	viper.SetDefault("gateway.max_idle_conns_per_host", 120)  // 每主机最大空闲连接（HTTP/2 场景默认）
-	viper.SetDefault("gateway.max_conns_per_host", 1024)      // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
-	viper.SetDefault("gateway.idle_conn_timeout_seconds", 90) // 空闲连接超时（秒）
+	viper.SetDefault("gateway.max_idle_conns", 2560)         // 最大空闲连接总数（高并发场景可调大）
+	viper.SetDefault("gateway.max_idle_conns_per_host", 120) // 每主机最大空闲连接（HTTP/2 场景默认）
+	viper.SetDefault("gateway.max_conns_per_host", 1024)     // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
+	// 空闲连接超时（秒）。45s：半开连接（对端静默丢弃、本地仍 ESTABLISHED）的存活
+	// 窗口越小，"账号空闲一段时间后第一个请求"撞上去的概率越低（详见 zhipu id=132
+	// 首包超时事故整改）。显式配置优先，此处只给默认。
+	viper.SetDefault("gateway.idle_conn_timeout_seconds", 45)
 	viper.SetDefault("gateway.max_upstream_clients", 5000)
 	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
@@ -2903,6 +2917,11 @@ func setEnvReachableDefaults() {
 	viper.SetDefault("local_captcha_helper.base_url", "")
 	viper.SetDefault("local_captcha_helper.api_key", "")
 	viper.SetDefault("local_captcha_helper.timeout_seconds", 0)
+
+	// C2 无流量渠道抽样直连探测调度器（派发单 C2）：默认关闭（零探测），
+	// 每轮最多探测 2 条渠道。
+	viper.SetDefault("probe.enabled", false)
+	viper.SetDefault("probe.max_per_tick", 2)
 
 	// sticky_escape_enabled is the one exception to the zero-value rule: its
 	// effective default is true, applied post-unmarshal via a viper.IsSet guard.

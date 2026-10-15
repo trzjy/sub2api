@@ -709,14 +709,28 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer stopCF524Guard()
 
-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolResponses, body)
+	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
+	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
+	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名，无映射时等于
+	// 请求侧名；token 估算用映射后模型，二者一致）。
+	gateOpen := func(m string) (bool, error) {
+		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
+	}
+	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolResponses, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
 		return
 	}
-	c.Request = c.Request.WithContext(kimiCtx)
+	c.Request = c.Request.WithContext(tierCtx)
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolResponses, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
@@ -1355,7 +1369,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	effectiveMappedModel := preferredMappedModel
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
-	// B2 /v1/messages 标记（docs/platform-merge-refactor-plan.md §5.2）：本入口装上
+	// B2 /v1/messages 标记（docs-local/platform-merge-refactor-plan.md §5.2）：本入口装上
 	// messages dispatch flag，调度候选过滤据此对 Web 接入模式账号永不入选；
 	// chat/completions 与 responses 入口不装此 flag，Web 账号在两级池语义下保持可选。
 	// 带图请求沿用生图惯例跳过利润门（方案 §3.6）：先打 suppressed 标记再装门。
@@ -1370,18 +1384,33 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer stopCF524Guard()
 
-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
-	kimiModel := routingModel
+	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
+	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
+	// 门控/目标判定用请求侧模型（routingModel）；token 估算用映射后模型（preferredMappedModel，
+	// 无映射时等于请求侧模型）。禁止用映射后模型做目标集合判定（FIX-2）。
+	estimateModel := routingModel
 	if preferredMappedModel != "" {
-		kimiModel = preferredMappedModel
+		estimateModel = preferredMappedModel
 	}
-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, kimiModel, service.KimiTierProtocolMessages, body)
+	gateOpen := func(m string) (bool, error) {
+		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
+	}
+	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, service.TierRoutingProtocolMessages, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
-		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed", streamStarted)
+		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed", streamStarted)
 		return
 	}
-	c.Request = c.Request.WithContext(kimiCtx)
+	c.Request = c.Request.WithContext(tierCtx)
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	// 估算模型用映射后的 estimateModel（与 applyTierRouting 同口径）。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, estimateModel, service.TierRoutingProtocolMessages, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		if failoverClientGone(c) {
@@ -2919,14 +2948,27 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
 	ctx = wsPricingCtx
 
-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
-	kimiCtx, err := applyKimiTierRouting(c, ctx, reqLog, requestPlatform, wsForwardModel, service.KimiTierProtocolResponses, firstMessage)
+	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
+	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
+	// 门控/目标判定与 token 估算共用请求侧模型（wsForwardModel 即请求侧名）。
+	gateOpen := func(m string) (bool, error) {
+		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
+	}
+	tierCtx, err := applyTierRouting(c, ctx, reqLog, wsForwardModel, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "kimi tier estimate failed")
+		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "tier routing estimate failed")
 		return
 	}
-	ctx = kimiCtx
+	ctx = tierCtx
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(ctx, reqLog, apiKey.GroupID, requestPlatform, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -4755,35 +4797,137 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
 	return closeStatus, closeReason
 }
 
-// applyKimiTierRouting 是派发单 B2 的 kimi 分层路由接入点：在选号前对 kimi 平台请求用
-// 既有本地估算链（service.EstimateKimiTierInputTokens，复用 estimateOpenAIInputTokens
-// 同一 SSOT——纯本地、不发上游请求）估算 input token，按
-// docs-local/model-source-tier-routing-plan.md §2 分档装门（small → qwen 伪装线池 /
-// big → 星思池，=阈值判小），并输出一行结构化日志（request_id + 估算 input + 分档
-// small/big）作为验证窗载体。
+// tierRoutingTargetModels 是分层路由泛化（派发单 OC-T1）的精确目标模型集合：
+// 仅当请求侧模型名精确匹配其中一项（判定 SSOT）才进入分层路由评估。
+// 这些模型各自存在「伪装线池（mask_upstream_identity）」候选，门控语义见下。
+var tierRoutingTargetModels = map[string]struct{}{
+	"kimi-k3":             {},
+	"deepseek-v4.1-flash": {},
+	"glm-5.3-flash":       {},
+}
+
+// isTierRoutingTargetModel 判定请求模型是否属于分层路由目标集合（请求侧模型名精确匹配）。
+func isTierRoutingTargetModel(model string) bool {
+	_, ok := tierRoutingTargetModels[model]
+	return ok
+}
+
+// applyTierRouting 是派发单 OC-T1 泛化后的分层路由接入点：对「请求侧模型 ∈ 目标集合
+// 且动态门控开启」的请求，在选号前用既有本地估算链
+// （service.EstimateTierRoutingInputTokens，复用 estimateOpenAIInputTokens 同一 SSOT——
+// 纯本地、不发上游请求）估算 input token，按 docs-local/model-source-tier-routing-plan.md
+// §2 分档装门（small → 伪装线池 / big → 星思池，=阈值判小），并输出一行结构化日志
+// （request_id + 估算 input + 分档 small/big）作为验证窗载体。
 //
-// 非 kimi 平台请求直接返回原 baseCtx，零行为变化；估算失败（解析/转换/非标）返回错误，
-// 由调用方 fail-closed（禁止默认大档、禁止隐式转 infer-kimi）。调用方须把返回的 ctx
-// 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover 重入与跨档重试）共用
-// 同一分档门。
-func applyKimiTierRouting(
+// 模型语义拆分（FIX-2）：
+//   - routingModel：门控判定 / 目标集合判定 / model_mapping 键查询，一律用请求侧模型名；
+//   - estimateModel：token 估算用映射后模型名（无映射时等于请求侧模型名）。
+//     二者由调用方分别传入，禁止用映射后模型做目标集合判定。
+//
+// 动态门控（派发单 OC-T1）：对目标模型 M，门开启当且仅当 gateOpen(M)==true，即存在账号
+// A 满足管理态 schedulable=true（以调度快照管理态为准）且 extra.mask_upstream_identity=true
+// 且 A.model_mapping 含键 M。未开启（gateOpen 返回 false，或模型不在目标集合）→ 直接返回
+// 原 baseCtx，原路径零行为变化；估算失败（解析/转换/非标）返回错误，由调用方 fail-closed
+// （禁止默认大档、禁止隐式转其他档）。运行态不可用（熔断/配额暂停/临时停调）不改管理态
+// schedulable，故不关门。
+//
+// 调用方须把返回的 ctx 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover
+// 重入与跨档重试）共用同一分档门。gateOpen 由调用方注入（生产侧经调度快照查询一次）。
+// selfHostSizeExcludeThresholdTokens 是订阅组大请求动态排除自建账号的 input token 阈值
+// （派发单 D-SHS-001，input-only：仅统计请求 input，不含将要生成的 output）。
+// 估算 <= 阈值视为小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，
+// 调用 GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中的自建站点账号并入
+// failedAccountIDs。阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
+const selfHostSizeExcludeThresholdTokens = 2000
+
+// applySelfHostSizeExclusion 实现订阅组大请求动态排除自建账号（派发单 D-SHS-001）。
+//
+// 在选号循环之前调用：先估算本次请求的 input token（input-only），估算失败 → 失败开放
+// 返回空集（绝不因估算失败拦请求）；估算 <= selfHostSizeExcludeThresholdTokens 视为
+// 小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，调用
+// GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中承载地址含自建站点标识
+// （selfHostBaseURLMarker）的账号 id 集合。
+//
+// 失败开放兜底：§1 列举候选或上下文异常一律按空集处理（不缩小候选），与既有选号路径
+// 零行为变化。返回集合由调用方并入各函数自持的 failedAccountIDs。
+//
+// 注：platform 为 §1 SelfHostedExcludedIDs 列举候选所需的平台维度；ctx/groupID/model/
+// protocol/body 与 applyTierRouting 同来源（body 为选号侧已持有的请求体）。
+func (h *OpenAIGatewayHandler) applySelfHostSizeExclusion(
+	ctx context.Context,
+	reqLog *zap.Logger,
+	groupID *int64,
+	platform string,
+	model string,
+	protocol service.TierRoutingRequestProtocol,
+	body []byte,
+) map[int64]struct{} {
+	empty := make(map[int64]struct{})
+	groupIDVal := int64(0)
+	if groupID != nil {
+		groupIDVal = *groupID
+	}
+
+	estimated, err := service.EstimateTierRoutingInputTokens(model, protocol, body)
+	if err != nil {
+		// 估算失败 → 失败开放：不排除任何账号，仅告警，绝不因估算失败拦请求。
+		reqLog.Warn("selfhost_size_exclusion_estimate_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.String("model", model),
+			zap.Error(err))
+		return empty
+	}
+
+	if estimated <= selfHostSizeExcludeThresholdTokens {
+		// 小/中请求：参与调度，不排除自建账号。区间 ≤2000 参与。
+		return empty
+	}
+
+	// 大请求：取该分组可调度候选中的自建站点账号 id，交由调用方并入 failedAccountIDs。
+	excluded, err := h.gatewayService.SelfHostedExcludedIDs(ctx, groupID, platform)
+	if err != nil {
+		// 列举候选失败 → 失败开放：不缩小候选，仅告警。
+		reqLog.Warn("selfhost_size_exclusion_list_failed",
+			zap.Int64("group_id", groupIDVal),
+			zap.String("platform", platform),
+			zap.Int("estimated_input_tokens", estimated),
+			zap.Error(err))
+		return empty
+	}
+	return excluded
+}
+
+func applyTierRouting(
 	c *gin.Context,
 	baseCtx context.Context,
 	reqLog *zap.Logger,
-	requestPlatform string,
-	model string,
-	protocol service.KimiTierRequestProtocol,
+	routingModel string,
+	estimateModel string,
+	protocol service.TierRoutingRequestProtocol,
 	body []byte,
+	gateOpen func(model string) (bool, error),
 ) (context.Context, error) {
-	if service.NormalizeOpenAICompatiblePlatform(requestPlatform) != service.PlatformKimi {
+	if !isTierRoutingTargetModel(routingModel) {
 		return baseCtx, nil
 	}
-	estimated, err := service.EstimateKimiTierInputTokens(model, protocol, body)
+	open, err := gateOpen(routingModel)
 	if err != nil {
-		return nil, fmt.Errorf("kimi tier input estimate failed: %w", err)
+		// 门控查询自身失败（基础设施）不装门，回落原路径零行为变化（运行态不可用不关门，
+		// 但此处是查询链路异常，保守按关门处理，避免把请求卡在分层路由上）。沿用既有
+		// reqLog 体系，从 Debug 提到 Warn 提升可观测（FIX-5）。
+		reqLog.Warn("tier_routing_gate_query_failed", zap.String("model", routingModel), zap.Error(err))
+		return baseCtx, nil
 	}
-	class := service.KimiTierClassForEstimate(estimated)
-	ctx := service.WithKimiTierRouting(baseCtx, class)
+	if !open {
+		return baseCtx, nil
+	}
+	estimated, err := service.EstimateTierRoutingInputTokens(estimateModel, protocol, body)
+	if err != nil {
+		return nil, fmt.Errorf("tier routing input estimate failed: %w", err)
+	}
+	class := service.TierRoutingClassForEstimate(estimated)
+	ctx := service.WithTierRouting(baseCtx, class)
 	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
 	reqLog.Info("kimi_tier_routing_decision",
 		zap.String("request_id", requestID),

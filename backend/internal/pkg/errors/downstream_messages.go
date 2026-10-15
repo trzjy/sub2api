@@ -2,7 +2,7 @@ package errors
 
 // 下游可见错误文案常量（中文）。
 //
-// SSOT：docs/downstream-error-zh-localization-plan.md §3 文案对照表。
+// SSOT：docs-local/downstream-error-zh-localization-plan.md §3 文案对照表。
 // 规则：所有写回下游的错误 message 一律引用本文件常量，禁止在业务代码里
 // 写裸文案字符串；六处上游状态映射、计费哨兵、并发文案、ops 分类 Contains
 // 均引用此处。文案原则：写明责任归属（上游渠道 / 账号池 / 用户自身）+ 状态 + 动作。

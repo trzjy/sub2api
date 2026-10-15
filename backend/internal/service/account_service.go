@@ -146,7 +146,7 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
-// WebPlatformMigrationRepository 平台归并重构 PR-2（docs/platform-merge-refactor-plan.md
+// WebPlatformMigrationRepository 平台归并重构 PR-2（docs-local/platform-merge-refactor-plan.md
 // §5.8）迁移 reconciler 的 repository 层专用事务方法。三字段（platform /
 // credentials["access_mode"] / extra["migrated_from_platform"]）与 MAC、
 // scheduler outbox 必须由本接口的原子事务方法更新，禁止 service 层拼接多个

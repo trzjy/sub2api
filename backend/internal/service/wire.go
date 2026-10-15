@@ -778,23 +778,6 @@ func ProvideAccountHealthRecoveryProbeService(
 	return svc
 }
 
-// ProvideMaskedIdentityProbeService 构造并启动「掩码身份泄漏持续探针 job」（方案 §7.5 #1）：
-// 定时经本站网关 loopback 发三入口真实请求，断言响应不含上游身份痕迹，阳性走既有
-// ops_alert 闭环（严重级事件 + 邮件 + 恢复关闭）。开关默认关闭，循环每轮重读开关，
-// 故管理端开关变更在一个间隔内生效，无需重启。
-func ProvideMaskedIdentityProbeService(
-	cfg *config.Config,
-	settingService *SettingService,
-	apiKeyRepo APIKeyRepository,
-	accountRepo AccountRepository,
-	opsService *OpsService,
-	emailService *EmailService,
-) *MaskedIdentityProbeService {
-	svc := NewMaskedIdentityProbeService(cfg, settingService, apiKeyRepo, accountRepo, opsService, emailService)
-	svc.Start(context.Background())
-	return svc
-}
-
 // ProvideFreshnessAlertService 构造状态新鲜度陈旧告警服务（D4 工作项 3）。
 // 复用既有 OpsAlertEvent 载体（不新增通知链路）；账号侧读面与冻结上界经 RateLimitService
 // 取得（后者由探测调度器注入），渠道档位经 ChannelMonitorService.DeriveChannelStatus 推导。
@@ -894,6 +877,43 @@ func ProvideOpsSystemLogSink(opsRepo OpsRepository) *OpsSystemLogSink {
 // 停止逻辑挂在 cmd/server 的 provideCleanup。
 func ProvideAuditLogService(repo AuditLogRepository, settingService *SettingService) *AuditLogService {
 	svc := NewAuditLogService(repo, settingService)
+	svc.Start()
+	return svc
+}
+
+// ProvideQuotaKeySweeper 构造并启动过期激活码清扫器（方案 §3.1 / §4.3，C7）。
+// 周期将 expires_at < now 的激活码标 expired；只改 status 维度、不触碰 accounts、
+// 不做拉号/删除/补池。opsRepo 用于写 job 心跳（照 ops_cleanup 同型），
+// entClient 用于开启每轮事务（UpdateStatusFields 需要 *ent.Tx）。
+func ProvideQuotaKeySweeper(repo QuotaKeyRepository, opsRepo OpsRepository, entClient *dbent.Client) *QuotaKeySweeper {
+	svc := NewQuotaKeySweeper(repo, opsRepo, entClient)
+	svc.Start()
+	return svc
+}
+
+// ProvideQuotaKeyReconciler 构造并启动周期 reconciler（补池持久源，方案 §13）。
+// 每轮枚举允许模型 M → 比对水位 → 低于阈值按差额调 PullAccountsForModel 补池：
+// 复用 QuotaKeyService 的拉号状态机（advisory 互斥域 + ≤15 停限 + §13.3 分组挂载），
+// reconciler 不新造计数查询 / 不新造锁 / 不并行拉号。
+func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService, opsRepo OpsRepository) *QuotaKeyReconciler {
+	svc := NewQuotaKeyReconciler(repo, puller, opsRepo)
+	// C12-v2：在既有装配点一行注入反向引用，使软删提交后（DeleteWithAccounts）能唤醒
+	// reconciler 重判水位。不新造机制、不并行拉号。
+	puller.SetReconciler(svc)
+	// F1：注入生产用模型水位提供方（C11 接入点），使 reconciler 枚举模型→比对水位→
+	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
+	// 不新增装配入参、不新造机制（装配点保持既有 3 参签名，wire_gen 无需改动）。
+	if puller != nil && puller.client != nil {
+		svc.SetModelWaterProvider(NewQuotaKeyModelWater(puller.client))
+	}
+	svc.Start()
+	return svc
+}
+
+// ProvideCursorAccountRetentionService 创建 Cursor 账号/流水定期清理服务并启动周期清理协程（C10）。
+// 停止逻辑挂在 cmd/server 的 provideCleanup（同 AuditLogService 装配模式）。
+func ProvideCursorAccountRetentionService(usageCleanupRepo UsageCleanupRepository, db *sql.DB, settingService *SettingService, opsRepo OpsRepository) *CursorAccountRetentionService {
+	svc := NewCursorAccountRetentionService(usageCleanupRepo, db, settingService, opsRepo)
 	svc.Start()
 	return svc
 }
@@ -1326,7 +1346,6 @@ var ProviderSet = wire.NewSet(
 	ProvideXianyuExposureService,
 	ProvideServerBaseURL,
 	ProvideAccountHealthRecoveryProbeService,
-	ProvideMaskedIdentityProbeService,
 	ProvideXianyuSettingStore,
 	ProvideSystemUserReader,
 	wire.Bind(new(XianyuDeliverySettingReader), new(*SettingService)),
@@ -1392,6 +1411,9 @@ var ProviderSet = wire.NewSet(
 	ProvideOpsService,
 	ProvideOpsIngressRejectAggregator,
 	ProvideAuditLogService,
+	ProvideQuotaKeySweeper,
+	ProvideQuotaKeyReconciler,
+	ProvideCursorAccountRetentionService,
 	ProvideOpsMetricsCollector,
 	ProvideOpsAggregationService,
 	ProvideOpsAlertEvaluatorService,
@@ -1455,11 +1477,12 @@ var ProviderSet = wire.NewSet(
 	NewChannelMonitorQuotaFetcher,
 	ProvideChannelMonitorV2Service,
 	ProvideChannelMonitorV2Aggregator,
+	ProvideChannelMonitorProbeWorker,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
 	ProvidePromoIntelService,
 
-	// 视觉能力检测 / 分流配置（docs/capability-routing-plan.md §3.5/§3.7；派发单 F3 接线）
+	// 视觉能力检测 / 分流配置（docs-local/capability-routing-plan.md §3.5/§3.7；派发单 F3 接线）
 	NewAccountModelCapabilityService,
 	ProvideVisionDetectService,
 	NewVisionRoutingService,
@@ -1587,10 +1610,14 @@ func ProvideChannelMonitorRunner(
 }
 
 // ProvideChannelMonitorV2Service wires settings for user-facing privacy flags
-// (e.g. hide RPM/TPM throughput).
-func ProvideChannelMonitorV2Service(repo ChannelMonitorV2Repository, settingService *SettingService) *ChannelMonitorV2Service {
+// (e.g. hide RPM/TPM throughput) and the account/group repositories required by the
+// C3 catalog derivation (so on-sale channels with no business traffic surface in the
+// display matrix via probe / no-data states).
+func ProvideChannelMonitorV2Service(repo ChannelMonitorV2Repository, settingService *SettingService, accountRepo AccountRepository, groupRepo GroupRepository) *ChannelMonitorV2Service {
 	svc := NewChannelMonitorV2Service(repo)
 	svc.SetRuntimeReader(settingService)
+	svc.SetAccountRepository(accountRepo)
+	svc.SetGroupRepository(groupRepo)
 	return svc
 }
 

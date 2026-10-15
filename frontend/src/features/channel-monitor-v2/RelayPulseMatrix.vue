@@ -56,30 +56,30 @@
             class="matrix-row border-b border-gray-100/80 dark:border-dark-700/60"
             :class="showThroughput ? 'matrix-row--with-tps' : ''"
           >
-            <div class="dimension-cell flex min-w-0 items-center gap-2 bg-white dark:bg-dark-800" :title="rowLabel(entry.row)">
-              <span :class="['status-dot', cellClass(entry.row.health, entry.row.metrics.request_count)]"></span>
+            <div class="dimension-cell flex min-w-0 items-center gap-2 bg-white dark:bg-dark-800" :title="rowTitle(entry.row)">
+              <span :class="['status-dot', statusDotClass(entry.row)]"></span>
               <strong class="truncate text-xs font-semibold text-gray-800 dark:text-gray-100">{{ rowLabel(entry.row) }}</strong>
             </div>
             <strong class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300">
-              {{ successRate(entry.row.metrics) }}
+              {{ summarySuccessRate(entry.row) }}
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
               :title="latencyPrivacy(entry.row.metrics.ttft)"
             >
-              {{ formatMs(entry.row.metrics.ttft.p50_ms) }}
+              {{ summaryMs(entry.row) }}
             </strong>
             <strong
               v-if="showThroughput"
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
               :title="exactTps(entry.row.metrics.tpm)"
             >
-              {{ formatTps(entry.row.metrics.tpm) }}
+              {{ summaryTps(entry.row) }}
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
             >
-              {{ formatPercent(entry.row.metrics.cache_rate) }}
+              {{ summaryCache(entry.row) }}
             </strong>
             <div class="pulse-track grid items-stretch" :style="pulseStyle">
               <span
@@ -347,11 +347,69 @@ function cellClass(health: MonitorHealth, requestCount: number): string {
   return healthScoreClass(health, props.healthMode, requestCount)
 }
 
+// C3 three-state display contract. Frontend must read these fields directly and must
+// NOT infer source / has_data from percentages, error text, or time deltas.
+type RowState = 'business' | 'probe' | 'no-data'
+function rowState(row: MonitorMatrixRow): RowState {
+  // Legacy payloads without has_data fall back to business (prior behavior).
+  if (row.has_data === false) return 'no-data'
+  if (row.source === 'probe') return 'probe'
+  return 'business'
+}
+
+// Status dot color: business → health score band; probe → sampled probe result;
+// no-data → a distinct muted marker (never the all-red 0.00% interpretation).
+function statusDotClass(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  if (state === 'no-data') return 'health-no-data'
+  if (state === 'probe') {
+    switch (row.status) {
+      case 'operational': return 'health-healthy'
+      case 'degraded': return 'health-warning'
+      case 'failed':
+      case 'error': return 'health-critical'
+      default: return 'health-unknown'
+    }
+  }
+  return healthScoreClass(row.health, props.healthMode, row.metrics.request_count)
+}
+
+// Metric summaries collapse to a dash for non-business rows so probe / no-data rows
+// never imply channel-wide rates (a single sampled probe does not represent the channel).
+function summarySuccessRate(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return successRate(row.metrics)
+}
+function summaryMs(row: MonitorMatrixRow): string {
+  const state = rowState(row)
+  // Probe rows carry a real first-token latency from the sampled probe.
+  if (state === 'probe') return row.first_token_ms == null ? '—' : formatMs(row.first_token_ms)
+  if (state !== 'business') return '—'
+  return formatMs(row.metrics.ttft.p50_ms)
+}
+function summaryTps(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return formatTps(row.metrics.tpm)
+}
+function summaryCache(row: MonitorMatrixRow): string {
+  if (rowState(row) !== 'business') return '—'
+  return formatPercent(row.metrics.cache_rate)
+}
+
 function rowLabel(row: MonitorMatrixRow): string {
   const parts = [row.platform]
   if (row.group_name || row.group_id) parts.push(row.group_name || `#${row.group_id}`)
   if (row.model) parts.push(row.model === '__other__' ? t('channelMonitorV2.otherModels') : row.model)
   return parts.join(' / ')
+}
+
+// Row-level hover title. Probe rows explain the sampled probe source and last
+// observation time; business / no-data rows fall back to the dimension label.
+function rowTitle(row: MonitorMatrixRow): string {
+  if (rowState(row) === 'probe') {
+    return t('channelMonitorV2.matrix.probeSource', { status: row.status || '', observed_at: row.observed_at || '' })
+  }
+  return rowLabel(row)
 }
 
 function rowKey(row: MonitorMatrixRow): string {
@@ -524,6 +582,8 @@ function formatBucketRange(value: string) {
 .health-warning  { background: #f59e0b; }
 .health-critical { background: #ef4444; }
 .health-unknown  { background: #9ca3af; }
+/* C3 no-data marker: muted, distinct from "unknown" so absence of data is explicit. */
+.health-no-data  { background: #d1d5db; }
 
 .score-legend {
   background: linear-gradient(

@@ -1,6 +1,6 @@
 # credmigrate — 凭证存量迁移命令
 
-执行凭证静态加密的第三阶段（A3-E3，见 `docs/security-ban-prevention-plan.md`）：
+执行凭证静态加密的第三阶段（A3-E3，见 `docs-local/security-ban-prevention-plan.md`）：
 把 `accounts.credentials` 中明文形态的敏感子键批量加密为 `enc:v1:` 密文
 （AES-256-GCM），并为全部账号回填 `credentials_mac` / `credentials_api_key_mac`
 指纹列（迁移 246 增加，供 SQL 级 CAS 守卫与 Ollama 用量分组使用）。

@@ -37,7 +37,7 @@ func (f *fakeCapabilityRepo) DeleteByAccount(ctx context.Context, accountID int6
 
 // TestOpenAIGatewayService_VisionCapabilityWiring 是派发单 Vision-S1 的接线测试：
 // 经 ProvideOpenAIGatewayService 构造服务时，必须把账号级视觉能力查询绑定到
-// AccountModelCapabilityService.ModelSupportsVisionInput，使 docs/capability-routing-plan.md
+// AccountModelCapabilityService.ModelSupportsVisionInput，使 docs-local/capability-routing-plan.md
 // §3.4 的 vision_not_supported 排除与读错失败关闭在生产生效（之前恒为 unknown 放行的假实现）。
 func TestOpenAIGatewayService_VisionCapabilityWiring(t *testing.T) {
 	const accountID int64 = 77001

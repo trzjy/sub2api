@@ -2,7 +2,7 @@ package service
 
 // 上游重复 token 循环熔断（repetition-loop breaker）。
 //
-// 方案：docs/repetition-loop-breaker-plan.md。智谱官方 glm 账号对长上下文
+// 方案：docs-local/repetition-loop-breaker-plan.md。智谱官方 glm 账号对长上下文
 // 请求偶发退化输出：从本轮第一个 delta 起无限流同一 token（如 `!`），单笔
 // 3.2万~4.8万 token、流 7~27 分钟才被 max_tokens 掐断。本组件在流式转发层
 // 逐 delta 比较，同一 delta 连续重复 ≥ N 次（N 默认 768，env

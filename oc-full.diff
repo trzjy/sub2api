@@ -1,0 +1,1913 @@
+diff --git a/backend/internal/handler/admin/account_handler_muse_sync_test.go b/backend/internal/handler/admin/account_handler_muse_sync_test.go
+new file mode 100644
+index 0000000..b91bc61
+--- /dev/null
++++ b/backend/internal/handler/admin/account_handler_muse_sync_test.go
+@@ -0,0 +1,97 @@
++//go:build unit
++
++package admin
++
++// masked muse 账号上游模型目录同步入口（POST /api/v1/admin/accounts/:id/models/sync-upstream）
++// 策略拒绝回归（派发单 OC-T1 FIX-D）：对 mask_upstream_identity=true 的 muse 账号触发同步，
++// 管理端应返回 HTTP 400（策略拒绝），且全程零上游 HTTP 调用、零 repository 写入——同步守卫
++// 在入口、任何目录变更/持久化之前即失败关闭（muse_models.go syncMuseModelCatalog 守卫）。
++
++import (
++	"bytes"
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"sync"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/config"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++// recordingHTTPStub 记录上游 HTTP 调用次数（FIX-D：零上游调用）。
++type recordingHTTPStub struct {
++	mu    sync.Mutex
++	calls int
++}
++
++func (s *recordingHTTPStub) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
++	s.mu.Lock()
++	s.calls++
++	s.mu.Unlock()
++	return nil, nil
++}
++
++func (s *recordingHTTPStub) DoWithTLS(_ *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
++	s.mu.Lock()
++	s.calls++
++	s.mu.Unlock()
++	return nil, nil
++}
++
++// recordingMuseRepo 记录 repository 写入次数（FIX-D：零写入）。仅覆盖同步路径会触达的
++// UpdateExtra；其余方法经嵌入的 AccountRepository 提升（守卫返回后不会触达，绝不 panic）。
++type recordingMuseRepo struct {
++	service.AccountRepository
++	mu      sync.Mutex
++	updates int
++}
++
++func (r *recordingMuseRepo) UpdateExtra(_ context.Context, _ int64, _ map[string]any) error {
++	r.mu.Lock()
++	r.updates++
++	r.mu.Unlock()
++	return nil
++}
++
++func maskedMuseAccount() service.Account {
++	return service.Account{
++		ID:       777,
++		Platform: service.PlatformMuse,
++		Type:     service.AccountTypeAPIKey,
++		Extra:    map[string]any{"mask_upstream_identity": true},
++		Credentials: map[string]any{
++			"api_key":  "muse-go-key",
++			"base_url": "https://opencode.ai/zen/go/v1",
++		},
++	}
++}
++
++func TestSyncUpstreamModels_MaskedMuseAccountRejected(t *testing.T) {
++	httpStub := &recordingHTTPStub{}
++	repo := &recordingMuseRepo{}
++
++	adminSvc := newStubAdminService()
++	acct := maskedMuseAccount()
++	adminSvc.getAccountResult = &acct
++
++	testSvc := service.NewAccountTestService(repo, nil, nil, nil, nil, httpStub, &config.Config{}, nil)
++
++	gin.SetMode(gin.TestMode)
++	router := gin.New()
++	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, testSvc, nil, nil, nil, nil, nil)
++	router.POST("/api/v1/admin/accounts/:id/models/sync-upstream", handler.SyncUpstreamModels)
++
++	rec := httptest.NewRecorder()
++	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/777/models/sync-upstream", bytes.NewReader(nil))
++	router.ServeHTTP(rec, req)
++
++	require.Equal(t, http.StatusBadRequest, rec.Code, "masked muse 账号同步应被策略拒绝返回 400")
++	require.Contains(t, rec.Body.String(), "muse catalog sync rejected by policy", "应回传策略拒绝原因")
++
++	require.Equal(t, 0, httpStub.calls, "零上游 HTTP 调用")
++	require.Equal(t, 0, repo.updates, "零 repository 写入")
++}
+diff --git a/backend/internal/handler/openai_chat_completions.go b/backend/internal/handler/openai_chat_completions.go
+index 97802fa..bcdc7be 100644
+--- a/backend/internal/handler/openai_chat_completions.go
++++ b/backend/internal/handler/openai_chat_completions.go
+@@ -174,14 +174,19 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
+ 	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+ 	defer cf524StopHeartbeat()
+ 
+-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolChatCompletions, body)
++	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
++	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
++	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名）。
++	gateOpen := func(m string) (bool, error) {
++		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
++	}
++	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
+ 	if err != nil {
+ 		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
+-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
++		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
+ 		return
+ 	}
+-	c.Request = c.Request.WithContext(kimiCtx)
++	c.Request = c.Request.WithContext(tierCtx)
+ 
+ 	for {
+ 		if failoverClientGone(c) {
+diff --git a/backend/internal/handler/openai_gateway_handler.go b/backend/internal/handler/openai_gateway_handler.go
+index cf44157..b3cd678 100644
+--- a/backend/internal/handler/openai_gateway_handler.go
++++ b/backend/internal/handler/openai_gateway_handler.go
+@@ -674,14 +674,20 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
+ 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+ 	defer stopCF524Guard()
+ 
+-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolResponses, body)
++	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
++	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
++	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名，无映射时等于
++	// 请求侧名；token 估算用映射后模型，二者一致）。
++	gateOpen := func(m string) (bool, error) {
++		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
++	}
++	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolResponses, body, gateOpen)
+ 	if err != nil {
+ 		reqLog.Warn("openai.responses.kimi_tier_estimate_failed", zap.Error(err))
+-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
++		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
+ 		return
+ 	}
+-	c.Request = c.Request.WithContext(kimiCtx)
++	c.Request = c.Request.WithContext(tierCtx)
+ 
+ 	for {
+ 		// Streaming Forward intentionally detaches the upstream request so usage can
+@@ -1323,18 +1329,24 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
+ 	stopCF524Guard := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
+ 	defer stopCF524Guard()
+ 
+-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+-	kimiModel := routingModel
++	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
++	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
++	// 门控/目标判定用请求侧模型（routingModel）；token 估算用映射后模型（preferredMappedModel，
++	// 无映射时等于请求侧模型）。禁止用映射后模型做目标集合判定（FIX-2）。
++	estimateModel := routingModel
+ 	if preferredMappedModel != "" {
+-		kimiModel = preferredMappedModel
++		estimateModel = preferredMappedModel
+ 	}
+-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, kimiModel, service.KimiTierProtocolMessages, body)
++	gateOpen := func(m string) (bool, error) {
++		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
++	}
++	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel, service.TierRoutingProtocolMessages, body, gateOpen)
+ 	if err != nil {
+ 		reqLog.Warn("openai_messages.kimi_tier_estimate_failed", zap.Error(err))
+-		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed", streamStarted)
++		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed", streamStarted)
+ 		return
+ 	}
+-	c.Request = c.Request.WithContext(kimiCtx)
++	c.Request = c.Request.WithContext(tierCtx)
+ 
+ 	for {
+ 		if failoverClientGone(c) {
+@@ -2709,14 +2721,19 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
+ 		h.withOpenAIProfitSuppressedForImage(ctx, firstMessage), apiKey.GroupID)
+ 	ctx = wsPricingCtx
+ 
+-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
+-	kimiCtx, err := applyKimiTierRouting(c, ctx, reqLog, requestPlatform, wsForwardModel, service.KimiTierProtocolResponses, firstMessage)
++	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
++	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
++	// 门控/目标判定与 token 估算共用请求侧模型（wsForwardModel 即请求侧名）。
++	gateOpen := func(m string) (bool, error) {
++		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
++	}
++	tierCtx, err := applyTierRouting(c, ctx, reqLog, wsForwardModel, wsForwardModel, service.TierRoutingProtocolResponses, firstMessage, gateOpen)
+ 	if err != nil {
+ 		reqLog.Warn("openai.websocket.kimi_tier_estimate_failed", zap.Error(err))
+-		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "kimi tier estimate failed")
++		closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "tier routing estimate failed")
+ 		return
+ 	}
+-	ctx = kimiCtx
++	ctx = tierCtx
+ 
+ 	for {
+ 		if ctx.Err() != nil {
+@@ -4506,35 +4523,72 @@ func summarizeWSCloseErrorForLog(err error) (string, string) {
+ 	return closeStatus, closeReason
+ }
+ 
+-// applyKimiTierRouting 是派发单 B2 的 kimi 分层路由接入点：在选号前对 kimi 平台请求用
+-// 既有本地估算链（service.EstimateKimiTierInputTokens，复用 estimateOpenAIInputTokens
+-// 同一 SSOT——纯本地、不发上游请求）估算 input token，按
+-// docs-local/model-source-tier-routing-plan.md §2 分档装门（small → qwen 伪装线池 /
+-// big → 星思池，=阈值判小），并输出一行结构化日志（request_id + 估算 input + 分档
+-// small/big）作为验证窗载体。
++// tierRoutingTargetModels 是分层路由泛化（派发单 OC-T1）的精确目标模型集合：
++// 仅当请求侧模型名精确匹配其中一项（判定 SSOT）才进入分层路由评估。
++// 这些模型各自存在「伪装线池（mask_upstream_identity）」候选，门控语义见下。
++var tierRoutingTargetModels = map[string]struct{}{
++	"kimi-k3":             {},
++	"deepseek-v4.1-flash": {},
++	"glm-5.3-flash":       {},
++}
++
++// isTierRoutingTargetModel 判定请求模型是否属于分层路由目标集合（请求侧模型名精确匹配）。
++func isTierRoutingTargetModel(model string) bool {
++	_, ok := tierRoutingTargetModels[model]
++	return ok
++}
++
++// applyTierRouting 是派发单 OC-T1 泛化后的分层路由接入点：对「请求侧模型 ∈ 目标集合
++// 且动态门控开启」的请求，在选号前用既有本地估算链
++// （service.EstimateTierRoutingInputTokens，复用 estimateOpenAIInputTokens 同一 SSOT——
++// 纯本地、不发上游请求）估算 input token，按 docs-local/model-source-tier-routing-plan.md
++// §2 分档装门（small → 伪装线池 / big → 星思池，=阈值判小），并输出一行结构化日志
++// （request_id + 估算 input + 分档 small/big）作为验证窗载体。
++//
++// 模型语义拆分（FIX-2）：
++//   - routingModel：门控判定 / 目标集合判定 / model_mapping 键查询，一律用请求侧模型名；
++//   - estimateModel：token 估算用映射后模型名（无映射时等于请求侧模型名）。
++//     二者由调用方分别传入，禁止用映射后模型做目标集合判定。
+ //
+-// 非 kimi 平台请求直接返回原 baseCtx，零行为变化；估算失败（解析/转换/非标）返回错误，
+-// 由调用方 fail-closed（禁止默认大档、禁止隐式转 infer-kimi）。调用方须把返回的 ctx
+-// 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover 重入与跨档重试）共用
+-// 同一分档门。
+-func applyKimiTierRouting(
++// 动态门控（派发单 OC-T1）：对目标模型 M，门开启当且仅当 gateOpen(M)==true，即存在账号
++// A 满足管理态 schedulable=true（以调度快照管理态为准）且 extra.mask_upstream_identity=true
++// 且 A.model_mapping 含键 M。未开启（gateOpen 返回 false，或模型不在目标集合）→ 直接返回
++// 原 baseCtx，原路径零行为变化；估算失败（解析/转换/非标）返回错误，由调用方 fail-closed
++// （禁止默认大档、禁止隐式转其他档）。运行态不可用（熔断/配额暂停/临时停调）不改管理态
++// schedulable，故不关门。
++//
++// 调用方须把返回的 ctx 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover
++// 重入与跨档重试）共用同一分档门。gateOpen 由调用方注入（生产侧经调度快照查询一次）。
++func applyTierRouting(
+ 	c *gin.Context,
+ 	baseCtx context.Context,
+ 	reqLog *zap.Logger,
+-	requestPlatform string,
+-	model string,
+-	protocol service.KimiTierRequestProtocol,
++	routingModel string,
++	estimateModel string,
++	protocol service.TierRoutingRequestProtocol,
+ 	body []byte,
++	gateOpen func(model string) (bool, error),
+ ) (context.Context, error) {
+-	if service.NormalizeOpenAICompatiblePlatform(requestPlatform) != service.PlatformKimi {
++	if !isTierRoutingTargetModel(routingModel) {
++		return baseCtx, nil
++	}
++	open, err := gateOpen(routingModel)
++	if err != nil {
++		// 门控查询自身失败（基础设施）不装门，回落原路径零行为变化（运行态不可用不关门，
++		// 但此处是查询链路异常，保守按关门处理，避免把请求卡在分层路由上）。沿用既有
++		// reqLog 体系，从 Debug 提到 Warn 提升可观测（FIX-5）。
++		reqLog.Warn("tier_routing_gate_query_failed", zap.String("model", routingModel), zap.Error(err))
++		return baseCtx, nil
++	}
++	if !open {
+ 		return baseCtx, nil
+ 	}
+-	estimated, err := service.EstimateKimiTierInputTokens(model, protocol, body)
++	estimated, err := service.EstimateTierRoutingInputTokens(estimateModel, protocol, body)
+ 	if err != nil {
+-		return nil, fmt.Errorf("kimi tier input estimate failed: %w", err)
++		return nil, fmt.Errorf("tier routing input estimate failed: %w", err)
+ 	}
+-	class := service.KimiTierClassForEstimate(estimated)
+-	ctx := service.WithKimiTierRouting(baseCtx, class)
++	class := service.TierRoutingClassForEstimate(estimated)
++	ctx := service.WithTierRouting(baseCtx, class)
+ 	requestID, _ := c.Request.Context().Value(ctxkey.RequestID).(string)
+ 	reqLog.Info("kimi_tier_routing_decision",
+ 		zap.String("request_id", requestID),
+diff --git a/backend/internal/handler/openai_kimi_tier_test.go b/backend/internal/handler/openai_kimi_tier_test.go
+deleted file mode 100644
+index 5f3cdaa..0000000
+--- a/backend/internal/handler/openai_kimi_tier_test.go
++++ /dev/null
+@@ -1,82 +0,0 @@
+-//go:build unit
+-
+-package handler
+-
+-import (
+-	"context"
+-	"net/http"
+-	"net/http/httptest"
+-	"testing"
+-
+-	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+-	"github.com/Wei-Shaw/sub2api/internal/service"
+-	"github.com/gin-gonic/gin"
+-	"github.com/stretchr/testify/require"
+-	"go.uber.org/zap"
+-	"go.uber.org/zap/zapcore"
+-	"go.uber.org/zap/zaptest/observer"
+-)
+-
+-// newKimiTierTestCtx 构造一个带 request_id 的 gin 测试上下文与可观测日志 core。
+-func newKimiTierTestCtx(t *testing.T, requestID string) (*gin.Context, *zap.Logger, *observer.ObservedLogs) {
+-	t.Helper()
+-	gin.SetMode(gin.TestMode)
+-	w := httptest.NewRecorder()
+-	c, _ := gin.CreateTestContext(w)
+-	base := context.WithValue(context.Background(), ctxkey.RequestID, requestID)
+-	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(base)
+-	c.Request = req
+-	core, logs := observer.New(zapcore.InfoLevel)
+-	return c, zap.New(core), logs
+-}
+-
+-// TestKimiTierApplyRoutingNonKimiPassthrough 验证非 kimi 平台请求零行为变化：
+-// 直接返回原 baseCtx，且不输出分层路由日志。
+-func TestKimiTierApplyRoutingNonKimiPassthrough(t *testing.T) {
+-	c, reqLog, logs := newKimiTierTestCtx(t, "req-nonkimi")
+-	baseCtx := context.Background()
+-	out, err := applyKimiTierRouting(c, baseCtx, reqLog, service.PlatformOpenAI, "gpt-5.1", service.KimiTierProtocolChatCompletions, []byte(`{"model":"gpt-5.1"}`))
+-	require.NoError(t, err)
+-	require.True(t, out == baseCtx, "non-kimi platform must pass through base ctx unchanged")
+-	require.Equal(t, 0, logs.Len(), "no kimi tier log for non-kimi platform")
+-}
+-
+-// TestKimiTierApplyRoutingValidEmitsLog 验证 kimi 平台请求估算成功：装门返回新 ctx，
+-// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。
+-func TestKimiTierApplyRoutingValidEmitsLog(t *testing.T) {
+-	c, reqLog, logs := newKimiTierTestCtx(t, "req-valid")
+-	body := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello world"}]}`)
+-	out, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, service.PlatformKimi, "kimi-k3", service.KimiTierProtocolChatCompletions, body)
+-	require.NoError(t, err)
+-	require.NotNil(t, out)
+-	require.NotSame(t, c.Request.Context(), out, "kimi platform must return a tier-decorated ctx")
+-
+-	entries := logs.FilterMessage("kimi_tier_routing_decision").All()
+-	require.Len(t, entries, 1, "exactly one structured kimi tier log line expected")
+-	// 按字段名断言结构化日志的 request_id + 估算 input + 分档。
+-	var gotRequestID, gotTier string
+-	var gotEstimated int
+-	for _, f := range entries[0].Context {
+-		switch f.Key {
+-		case "request_id":
+-			gotRequestID = f.String
+-		case "tier":
+-			gotTier = f.String
+-		case "estimated_input_tokens":
+-			gotEstimated = int(f.Integer)
+-		}
+-	}
+-	require.Equal(t, "req-valid", gotRequestID)
+-	require.Equal(t, "small", gotTier, "short prompt must classify as small")
+-	require.GreaterOrEqual(t, gotEstimated, 0)
+-}
+-
+-// TestKimiTierApplyRoutingEstimateFailClosed 验证估算失败（非法请求体）返回错误，
+-// 不默认大档、不静默放行（派发单 B2，Done when #2 fail-closed）。
+-func TestKimiTierApplyRoutingEstimateFailClosed(t *testing.T) {
+-	c, reqLog, logs := newKimiTierTestCtx(t, "req-fail")
+-	out, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, service.PlatformKimi, "kimi-k3", service.KimiTierProtocolChatCompletions, []byte("not-json"))
+-	require.Error(t, err)
+-	require.Nil(t, out, "estimate failure must not yield a tier ctx (no default-to-big)")
+-	require.Equal(t, 0, logs.Len(), "no tier log on estimate failure")
+-}
+diff --git a/backend/internal/handler/openai_tier_routing_test.go b/backend/internal/handler/openai_tier_routing_test.go
+new file mode 100644
+index 0000000..1292a7d
+--- /dev/null
++++ b/backend/internal/handler/openai_tier_routing_test.go
+@@ -0,0 +1,202 @@
++//go:build unit
++
++package handler
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/zap"
++	"go.uber.org/zap/zapcore"
++	"go.uber.org/zap/zaptest/observer"
++)
++
++// newTierRoutingTestCtx 构造一个带 request_id 的 gin 测试上下文与可观测日志 core。
++func newTierRoutingTestCtx(t *testing.T, requestID string) (*gin.Context, *zap.Logger, *observer.ObservedLogs) {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	w := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(w)
++	base := context.WithValue(context.Background(), ctxkey.RequestID, requestID)
++	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(base)
++	c.Request = req
++	core, logs := observer.New(zapcore.InfoLevel)
++	return c, zap.New(core), logs
++}
++
++// gateFunc 是 applyTierRouting 注入的动态门控闭包（测试可编排开门/关门）。
++type gateFunc func(model string) (bool, error)
++
++func openGate(model string) (bool, error)   { return true, nil }
++func closedGate(model string) (bool, error) { return false, nil }
++
++// TestTierRoutingApplyRoutingNonTargetModelPassthrough 验证「同平台非目标模型」零装门零行为
++// 变化（派发单 OC-T1，测试 #2）：即使平台命中（kimi），只要请求模型不在目标集合，直接返回
++// 原 baseCtx，不输出分层路由日志，亦不依赖门控结果。
++func TestTierRoutingApplyRoutingNonTargetModelPassthrough(t *testing.T) {
++	for _, model := range []string{"kimi-k2", "glm-5.3", "deepseek-v4-pro", "gpt-5.1"} {
++		c, reqLog, logs := newTierRoutingTestCtx(t, "req-nontarget-"+model)
++		baseCtx := context.Background()
++		out, err := applyTierRouting(c, baseCtx, reqLog, model, model,
++			service.TierRoutingProtocolChatCompletions, []byte(`{"model":"`+model+`"}`), openGate)
++		require.NoError(t, err)
++		require.True(t, out == baseCtx, "non-target model must pass through base ctx unchanged: %s", model)
++		require.Equal(t, 0, logs.Len(), "no tier log for non-target model: %s", model)
++	}
++}
++
++// TestTierRoutingApplyRoutingGateClosedPassthrough 验证目标模型但动态门控关闭时零装门
++// （派发单 OC-T1，动态门三态 ①②）：返回原 baseCtx，不输出分层路由日志。
++func TestTierRoutingApplyRoutingGateClosedPassthrough(t *testing.T) {
++	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
++		c, reqLog, logs := newTierRoutingTestCtx(t, "req-closed-"+model)
++		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello world"}]}`)
++		out, err := applyTierRouting(c, c.Request.Context(), reqLog, model, model,
++			service.TierRoutingProtocolChatCompletions, body, closedGate)
++		require.NoError(t, err)
++		require.True(t, baseCtxUnchanged(c, out), "gate closed must pass through ctx unchanged: %s", model)
++		require.Equal(t, 0, logs.Len(), "no tier log when gate closed: %s", model)
++	}
++}
++
++func baseCtxUnchanged(c *gin.Context, out context.Context) bool {
++	return out == c.Request.Context()
++}
++
++// TestTierRoutingApplyRoutingGateErrorPassthrough 验证门控查询返回 error（基础设施异常）时
++// 不装分档门、回落原路径（ctx 不变、无分层路由日志）；并按 FIX-5 要求以 Warn 级别（非 Debug）
++// 记录（沿用既有 reqLog 体系，不新增机制）。
++func TestTierRoutingApplyRoutingGateErrorPassthrough(t *testing.T) {
++	errGate := func(string) (bool, error) { return false, errors.New("gate query boom") }
++	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
++		c, reqLog, logs := newTierRoutingTestCtx(t, "req-gateerr-"+model)
++		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello world"}]}`)
++		out, err := applyTierRouting(c, c.Request.Context(), reqLog, model, model,
++			service.TierRoutingProtocolChatCompletions, body, errGate)
++		require.NoError(t, err, "gate error must fall back to passthrough, not surface as failure: %s", model)
++		require.True(t, baseCtxUnchanged(c, out), "gate error must pass through ctx unchanged: %s", model)
++		require.Equal(t, 1, logs.Len(), "gate error must emit exactly one log line at Warn: %s", model)
++		require.Equal(t, zapcore.WarnLevel, logs.All()[0].Level, "gate error log must be Warn level (FIX-5): %s", model)
++	}
++}
++
++// TestTierRoutingApplyRoutingTargetModelGateOpen 验证目标模型且门开启时装门返回新 ctx，
++// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=1000 判小的精确边界
++// 由 TestTierRoutingClassForEstimate 在纯分档函数层确定性覆盖（派发单 OC-T1，测试 #2 + #1）。
++func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
++	cases := []struct {
++		name     string
++		content  string
++		wantTier string
++	}{
++		{"small_below", "hello world", "small"},
++		{"big_above", repeatWords(1500), "big"},
++	}
++	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
++		for _, tc := range cases {
++			c, reqLog, logs := newTierRoutingTestCtx(t, "req-valid-"+model+"-"+tc.name)
++			body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"` + tc.content + `"}]}`)
++			out, err := applyTierRouting(c, c.Request.Context(), reqLog, model, model,
++				service.TierRoutingProtocolChatCompletions, body, openGate)
++			require.NoError(t, err, "%s/%s", model, tc.name)
++			require.NotNil(t, out)
++			require.NotSame(t, c.Request.Context(), out, "target model must return a tier-decorated ctx: %s/%s", model, tc.name)
++
++			entries := logs.FilterMessage("kimi_tier_routing_decision").All()
++			require.Len(t, entries, 1, "exactly one structured tier log line expected: %s/%s", model, tc.name)
++			var gotRequestID, gotTier string
++			var gotEstimated int
++			for _, f := range entries[0].Context {
++				switch f.Key {
++				case "request_id":
++					gotRequestID = f.String
++				case "tier":
++					gotTier = f.String
++				case "estimated_input_tokens":
++					gotEstimated = int(f.Integer)
++				}
++			}
++			require.Equal(t, "req-valid-"+model+"-"+tc.name, gotRequestID)
++			require.Equal(t, tc.wantTier, gotTier, "tier misclassify: %s/%s", model, tc.name)
++			require.GreaterOrEqual(t, gotEstimated, 0)
++		}
++	}
++}
++
++// TestTierRoutingApplyRoutingEstimateFailClosed 验证估算失败（非法请求体）返回错误，
++// 不默认大档、不静默放行（派发单 OC-T1，测试 #3 fail-closed）。
++func TestTierRoutingApplyRoutingEstimateFailClosed(t *testing.T) {
++	c, reqLog, logs := newTierRoutingTestCtx(t, "req-fail")
++	out, err := applyTierRouting(c, c.Request.Context(), reqLog, "kimi-k3", "kimi-k3",
++		service.TierRoutingProtocolChatCompletions, []byte("not-json"), openGate)
++	require.Error(t, err)
++	require.Nil(t, out, "estimate failure must not yield a tier ctx (no default-to-big)")
++	require.Equal(t, 0, logs.Len(), "no tier log on estimate failure")
++}
++
++// repeatWords 生成约 n 个词的文本（每个词约占 1 token），用于构造 >1000 / =1000 边界。
++func repeatWords(n int) string {
++	const word = " word"
++	if n <= 0 {
++		return ""
++	}
++	b := make([]byte, 0, n*len(word))
++	for i := 0; i < n; i++ {
++		b = append(b, word...)
++	}
++	return string(b)
++}
++
++// TestTierRoutingApplyRoutingRoutingVsEstimateModelSplit 覆盖 FIX-C（routingModel≠estimateModel
++// 回归，派发单 OC-T1 泛化 FIX-2）：当请求侧模型存在映射（映射名与请求侧名不同）时，动态门控
++// 必须以请求侧模型（routingModel）做目标集合判定与 model_mapping 键查询，而 token 估算必须以
++// 映射后模型（estimateModel）进行。用映射 {"glm-5.3-flash":"gpt-4"} 场景断言：
++//   - ① gateOpen 收到的键 = 请求侧 glm-5.3-flash（而非映射名 gpt-4）；
++//   - ② token 估算使用映射名 gpt-4（与请求侧 glm-5.3-flash 走不同 tokenizer，估算值可确定区分）；
++//   - ③ 映射名 gpt-4 不在目标集合，但门仍开启（证明门用请求侧名而非映射名做目标判定，不误关门）。
++func TestTierRoutingApplyRoutingRoutingVsEstimateModelSplit(t *testing.T) {
++	const routingModel = "glm-5.3-flash"
++	const estimateModel = "gpt-4" // 映射后上游名：Cl100k tokenizer，与 glm 的 O200k 不同；且不在目标集合
++	c, reqLog, logs := newTierRoutingTestCtx(t, "req-split")
++	// CJK 内容使 Cl100k 与 O200k 分词结果可确定区分（同英文文本两 codec 计数常相同）。
++	body := []byte(`{"model":"` + routingModel + `","messages":[{"role":"user","content":"你好世界这是一段中文测试文本用于分词差异验证"}]}`)
++
++	var gotGateModel string
++	gate := func(m string) (bool, error) {
++		gotGateModel = m
++		return true, nil
++	}
++
++	out, err := applyTierRouting(c, c.Request.Context(), reqLog, routingModel, estimateModel,
++		service.TierRoutingProtocolChatCompletions, body, gate)
++	require.NoError(t, err)
++
++	// ① 门控必须以请求侧名判定，不得误用映射名。
++	require.Equal(t, routingModel, gotGateModel, "gateOpen 必须收到请求侧模型 glm-5.3-flash，而非映射名 gpt-4")
++
++	// ③ 映射名不在目标集合，但门仍开启：证明门按请求侧名做目标判定（不误关门）。
++	require.NotSame(t, c.Request.Context(), out, "门应开启（映射名不在目标集合也不误关门）")
++	entries := logs.FilterMessage("kimi_tier_routing_decision").All()
++	require.Len(t, entries, 1)
++	var gotEstimated int
++	for _, f := range entries[0].Context {
++		if f.Key == "estimated_input_tokens" {
++			gotEstimated = int(f.Integer)
++		}
++	}
++
++	// ② token 估算必须使用映射名 estimateModel：两模型走不同 tokenizer，估算值可确定区分。
++	expEstimate, errE := service.EstimateTierRoutingInputTokens(estimateModel, service.TierRoutingProtocolChatCompletions, body)
++	require.NoError(t, errE)
++	expRouting, errR := service.EstimateTierRoutingInputTokens(routingModel, service.TierRoutingProtocolChatCompletions, body)
++	require.NoError(t, errR)
++	require.NotEqual(t, expEstimate, expRouting, "映射名与请求侧名走不同 tokenizer，估算值应可确定区分")
++	require.Equal(t, expEstimate, gotEstimated, "token 估算必须使用映射名 gpt-4（而非请求侧 glm-5.3-flash）")
++}
+diff --git a/backend/internal/service/muse_models.go b/backend/internal/service/muse_models.go
+index 74c272c..1c9f2ad 100644
+--- a/backend/internal/service/muse_models.go
++++ b/backend/internal/service/muse_models.go
+@@ -161,13 +161,33 @@ func (s *AccountTestService) fetchMuseUpstreamCatalog(ctx context.Context, accou
+ 	return models, resp.StatusCode, nil
+ }
+ 
++// museSyncMaskedAccountRejected 是 muse 同步守卫（派发单 OC-T1）的拒绝错误：伪装账号
++// （mask_upstream_identity=true）禁止参与 muse 托管目录同步，避免伪装线 model_mapping
++// 被目录同步污染。守卫在同步入口、任何目录变更/持久化之前即失败关闭。
++// FIX-6：复用既有 UpstreamModelSyncError 类型契约（失败关闭语义不变，不另造错误体系），
++// 管理端公开同步入口据此返回明确"策略拒绝"而非通用内部错误。
++var museSyncMaskedAccountRejected = &UpstreamModelSyncError{
++	Kind:    UpstreamModelSyncErrorUnsupported,
++	Message: "muse catalog sync rejected by policy: account masks upstream identity",
++}
++
+ // syncMuseModelCatalog 是 muse 平台上游模型目录同步的实现入口（照 SyncVolcanoPlanModels
+ // 模式）：拉取 → 过滤 → 派生干净名 → 落库系统托管快照 + 自动建立 clean→contributor 的
+ // model_mapping。返回下游契约（干净名）组成的 UpstreamModelCatalog。
+ //
+ // 落库仅当账号已落库（account.ID>0 且 repo 可用）时发生；预览（无 ID）只返回分类结果，
+ // 不动库（与火山 preview 一致）。
++//
++// 同步守卫（派发单 OC-T1）：在同步入口、任何目录变更/持久化之前，若账号
++// mask_upstream_identity=true（伪装账号）立即返回 museSyncMaskedAccountRejected（复用
++// UpstreamModelSyncError 契约，策略拒绝）失败关闭，mapping 与托管快照零写入。守卫仅作用于
++// muse 同步入口（非 muse 平台账号走既有
++// unsupported/no-op 契约，绝不扩大）。
+ func (s *AccountTestService) syncMuseModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
++	// 同步守卫：伪装账号禁止 muse 目录同步，防止伪装线 model_mapping 被污染。
++	if IsIdentityMaskedAccount(account) {
++		return nil, museSyncMaskedAccountRejected
++	}
+ 	rawModels, status, fetchErr := s.fetchMuseUpstreamCatalog(ctx, account)
+ 
+ 	prevFailures := 0
+diff --git a/backend/internal/service/muse_models_test.go b/backend/internal/service/muse_models_test.go
+index 61ade3a..2300890 100644
+--- a/backend/internal/service/muse_models_test.go
++++ b/backend/internal/service/muse_models_test.go
+@@ -96,7 +96,7 @@ func TestFilterMuseUpstreamModels(t *testing.T) {
+ 		"muse-spark-1.3",                  // 缺 contributor 后缀
+ 		"deepseek-v4-flash",               // 非 muse 前缀
+ 		"glm-5.3",                         // 非 muse 前缀
+-		"spark-foo-contributor",            // 非 muse 前缀
++		"spark-foo-contributor",           // 非 muse 前缀
+ 	}
+ 	accepted, discarded := filterMuseUpstreamModels(raw)
+ 
+@@ -267,6 +267,84 @@ func TestSyncMuseModelCatalogPreservesManualAlias(t *testing.T) {
+ 	require.Equal(t, "muse-spark-1.3-contributor", mapping["my-alias"], "人工 alias 必须保留")
+ }
+ 
++// TestSyncMuseModelCatalogRejectsMaskedAccount 验证 muse 同步守卫（派发单 OC-T1，测试 #5）：
++// 伪装账号（mask_upstream_identity=true）在同步入口、任何目录变更/持久化之前失败关闭——
++// 返回明确错误（FIX-6 后复用 UpstreamModelSyncError 契约、明确"策略拒绝"），mapping 与托管
++// 快照零写入，且不发起上游请求（零目录变更）。
++func TestSyncMuseModelCatalogRejectsMaskedAccount(t *testing.T) {
++	t.Parallel()
++
++	repo := &volcanoPlanSyncRepoStub{}
++	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
++	svc := newMuseSyncSvc(stub, repo)
++	account := museAccount(205, map[string]any{"my-alias": "muse-spark-1.3-contributor"})
++	account.Extra = map[string]any{"mask_upstream_identity": true}
++
++	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
++	require.Error(t, err)
++	require.ErrorIs(t, err, museSyncMaskedAccountRejected)
++	require.Nil(t, catalog)
++
++	// FIX-6：守卫错误应复用既有 UpstreamModelSyncError 契约，管理端据此返回明确"策略拒绝"。
++	var syncErr *UpstreamModelSyncError
++	require.ErrorAs(t, err, &syncErr)
++	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind, "守卫应返回不受支持（策略拒绝）契约")
++	require.Contains(t, syncErr.Message, "policy", "错误文案须明确表达策略拒绝而非通用内部错误")
++
++	extraCalls, credCalls := repo.counts()
++	require.Zero(t, extraCalls, "守卫拒绝不得写托管快照")
++	require.Zero(t, credCalls, "守卫拒绝不得写 model_mapping")
++	require.Empty(t, stub.urls, "守卫在任何上游请求/目录变更之前失败关闭")
++}
++
++// TestSyncMuseModelCatalogNonMaskedUnaffected 验证 muse 非伪装账号同步不受守卫影响
++// （派发单 OC-T1，测试 #5 第二项：muse 非 mask 同步正常，既有用例零回归）。
++func TestSyncMuseModelCatalogNonMaskedUnaffected(t *testing.T) {
++	t.Parallel()
++
++	repo := &volcanoPlanSyncRepoStub{}
++	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
++	svc := newMuseSyncSvc(stub, repo)
++	account := museAccount(206, nil) // 无 mask 标记
++
++	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
++	require.NoError(t, err)
++	require.Equal(t, []string{"muse-spark-1.3"}, catalog.Models)
++
++	extraCalls, credCalls := repo.counts()
++	require.NotZero(t, extraCalls, "非 mask 账号仍落托管快照")
++	require.NotZero(t, credCalls, "非 mask 账号仍落 model_mapping")
++}
++
++// TestSyncUpstreamModelCatalogMuseGuardDoesNotExpandToNonMuse 验证守卫不扩大到非 muse 平台
++// （派发单 OC-T1，测试 #5 第三项）：非 muse 平台账号（此处 web 接入模式）仍走既有
++// unsupported 契约，绝不返回 muse 守卫错误。
++func TestSyncUpstreamModelCatalogMuseGuardDoesNotExpandToNonMuse(t *testing.T) {
++	t.Parallel()
++
++	repo := &volcanoPlanSyncRepoStub{}
++	stub := &museSyncHTTPStub{status: 200, body: museModelsBody("muse-spark-1.3-contributor")}
++	svc := newMuseSyncSvc(stub, repo)
++	account := &Account{
++		ID:       207,
++		Platform: PlatformKimi,
++		Type:     AccountTypeAPIKey,
++		Extra:    map[string]any{"mask_upstream_identity": true},
++		Credentials: map[string]any{
++			"access_mode": AccountAccessModeWeb,
++			"api_key":     "kimi-key",
++		},
++	}
++
++	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
++	require.Error(t, err)
++	require.NotErrorIs(t, err, museSyncMaskedAccountRejected, "守卫不得扩大到非 muse 平台")
++
++	var syncErr *UpstreamModelSyncError
++	require.ErrorAs(t, err, &syncErr)
++	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind, "非 muse 平台维持既有 unsupported 契约")
++}
++
+ // lastMuseMapping 从 repo 最后一次凭据写入中取 model_mapping。
+ func lastMuseMapping(t *testing.T, repo *volcanoPlanSyncRepoStub) map[string]string {
+ 	t.Helper()
+diff --git a/backend/internal/service/openai_account_scheduler.go b/backend/internal/service/openai_account_scheduler.go
+index ecfe425..a747559 100644
+--- a/backend/internal/service/openai_account_scheduler.go
++++ b/backend/internal/service/openai_account_scheduler.go
+@@ -96,12 +96,12 @@ type OpenAIAccountScheduleRequest struct {
+ 	// 集合，且仍叠加 §3.4 的 vision_not_supported 能力过滤（只收窄、不豁免）。
+ 	// 由选号入口每次请求最多读取一次后透传，避免候选循环内重复查库。
+ 	VisionRoutingTargets []int64
+-	// KimiTierPool 是 kimi 分层路由（派发单 B2，docs-local/model-source-tier-routing-plan.md
+-	// §2）的分档候选约束："masked" 仅 qwen 伪装线池（extra.mask_upstream_identity=true），
+-	// "upstream" 仅非伪装池（星思）。空值不约束——非 kimi 平台请求零行为变化。
+-	// 由 selectAccountWithSchedulerOnce 按请求 ctx 中的分档状态装门。
+-	KimiTierPool string
+-	ExcludedIDs  map[int64]struct{}
++	// TierRoutingPool 是分层路由（派发单 OC-T1 泛化，docs-local/model-source-tier-routing-plan.md
++	// §2）的分档候选约束："masked" 仅伪装线池（qwen 伪装线，extra.mask_upstream_identity=true），
++	// "upstream" 仅非伪装池（星思）。空值不约束——handler 未对请求装分档门时零行为变化，
++	// 装门后平台无关（不限于 kimi）。由 selectAccountWithSchedulerOnce 按请求 ctx 中的分档状态装门。
++	TierRoutingPool string
++	ExcludedIDs     map[int64]struct{}
+ }
+ 
+ type OpenAIAccountScheduleDecision struct {
+@@ -2179,14 +2179,14 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
+ 	// 大档仅非伪装池（星思）；空值不约束（非 kimi 请求零行为变化）。换号不出档——
+ 	// 同档内换号走既有熔断/重试，跨档只发生在 selectAccountWithScheduler 的
+ 	// qwen 整池无可用重试（仅小档、告警）。
+-	if req.KimiTierPool != "" {
++	if req.TierRoutingPool != "" {
+ 		masked := IsIdentityMaskedAccount(account)
+-		switch req.KimiTierPool {
+-		case kimiTierPoolMasked:
++		switch req.TierRoutingPool {
++		case tierRoutingPoolMasked:
+ 			if !masked {
+ 				return false, "kimi_tier_pool_excluded"
+ 			}
+-		case kimiTierPoolUpstream:
++		case tierRoutingPoolUpstream:
+ 			if masked {
+ 				return false, "kimi_tier_pool_excluded"
+ 			}
+@@ -2465,74 +2465,128 @@ func resetOpenAIAdvancedSchedulerSettingCacheForTest() {
+ 	openAIAdvancedSchedulerSettingSF = singleflight.Group{}
+ }
+ 
+-// KimiTierClass 是 kimi 分层路由（派发单 B2）的分档结果：估算 input ≤ 阈值判小
++// TierRoutingClass 是 kimi 分层路由（派发单 B2）的分档结果：估算 input ≤ 阈值判小
+ // （small → qwen 伪装线池），> 阈值判大（big → 星思池）。
+-type KimiTierClass string
++type TierRoutingClass string
+ 
+ const (
+-	KimiTierSmall KimiTierClass = "small"
+-	KimiTierBig   KimiTierClass = "big"
++	TierRoutingSmall TierRoutingClass = "small"
++	TierRoutingBig   TierRoutingClass = "big"
+ )
+ 
+-// KimiTierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
++// TierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
+ // 恰好等于阈值判小）。input-only 口径与阈值均为 2026-10-07 用户裁定
+ // （docs-local/model-source-tier-routing-plan.md §2）。
+-const KimiTierRoutingInputThreshold = 1000
++const TierRoutingInputThreshold = 1000
+ 
+-// KimiTierClassForEstimate 按估算 input 值分档；=阈值判小。
+-func KimiTierClassForEstimate(estimatedInputTokens int) KimiTierClass {
+-	if estimatedInputTokens <= KimiTierRoutingInputThreshold {
+-		return KimiTierSmall
++// TierRoutingClassForEstimate 按估算 input 值分档；=阈值判小。
++func TierRoutingClassForEstimate(estimatedInputTokens int) TierRoutingClass {
++	if estimatedInputTokens <= TierRoutingInputThreshold {
++		return TierRoutingSmall
+ 	}
+-	return KimiTierBig
++	return TierRoutingBig
+ }
+ 
+-// kimi 分档候选池取值（OpenAIAccountScheduleRequest.KimiTierPool）。
++// kimi 分档候选池取值（OpenAIAccountScheduleRequest.TierRoutingPool）。
+ const (
+-	kimiTierPoolMasked   = "masked"   // qwen 伪装线池（extra.mask_upstream_identity=true）
+-	kimiTierPoolUpstream = "upstream" // 非伪装池（星思）
++	tierRoutingPoolMasked   = "masked"   // qwen 伪装线池（extra.mask_upstream_identity=true）
++	tierRoutingPoolUpstream = "upstream" // 非伪装池（星思）
+ )
+ 
+-type kimiTierRoutingContextKey struct{}
++type tierRoutingContextKey struct{}
+ 
+-// kimiTierRoutingState 是请求级分档状态。crossPool 仅在 qwen 伪装线整池无可用后
++// tierRoutingState 是请求级分档状态。crossPool 仅在 qwen 伪装线整池无可用后
+ // 由跨档重试置位（仅 small 允许跨档；big 永不进伪装线）。
+-type kimiTierRoutingState struct {
+-	class     KimiTierClass
++type tierRoutingState struct {
++	class     TierRoutingClass
+ 	crossPool bool
+ }
+ 
+-// WithKimiTierRouting 把 kimi 分层路由的分档结果装入请求 ctx；handler 在选号前、
++// WithTierRouting 把 kimi 分层路由的分档结果装入请求 ctx；handler 在选号前、
+ // 估算判定后调用。空 class 不装门。
+-func WithKimiTierRouting(ctx context.Context, class KimiTierClass) context.Context {
++func WithTierRouting(ctx context.Context, class TierRoutingClass) context.Context {
+ 	if ctx == nil || class == "" {
+ 		return ctx
+ 	}
+-	return context.WithValue(ctx, kimiTierRoutingContextKey{}, kimiTierRoutingState{class: class})
++	return context.WithValue(ctx, tierRoutingContextKey{}, tierRoutingState{class: class})
+ }
+ 
+-// kimiTierPoolFromContext 解析请求 ctx 中的分档状态为候选池约束；未装门返回 ""。
+-func kimiTierPoolFromContext(ctx context.Context) string {
++// tierRoutingPoolFromContext 解析请求 ctx 中的分档状态为候选池约束；未装门返回 ""。
++func tierRoutingPoolFromContext(ctx context.Context) string {
+ 	if ctx == nil {
+ 		return ""
+ 	}
+-	st, ok := ctx.Value(kimiTierRoutingContextKey{}).(kimiTierRoutingState)
++	st, ok := ctx.Value(tierRoutingContextKey{}).(tierRoutingState)
+ 	if !ok {
+ 		return ""
+ 	}
+ 	switch st.class {
+-	case KimiTierSmall:
++	case TierRoutingSmall:
+ 		if st.crossPool {
+-			return kimiTierPoolUpstream
++			return tierRoutingPoolUpstream
+ 		}
+-		return kimiTierPoolMasked
+-	case KimiTierBig:
+-		return kimiTierPoolUpstream
++		return tierRoutingPoolMasked
++	case TierRoutingBig:
++		return tierRoutingPoolUpstream
+ 	default:
+ 		return ""
+ 	}
+ }
+ 
++// TierRoutingGateOpen 是派发单 OC-T1 的动态门控判定：对目标模型 model，门开启当且仅当
++// 存在账号 A 满足「管理态 schedulable=true（以调度快照的管理态为准，忽略运行态熔断/
++// 配额暂停/临时停调——它们不改管理态 schedulable）且 extra.mask_upstream_identity=true
++// 且 A.model_mapping 含键 model」。未开启（无满足条件的账号）→ 返回 false，调用方不装
++// 分档门（原路径零行为变化）；运行态不可用不关门。
++//
++// 账号候选经调度快照（含 DB fallback）取出：schedulerSnapshot 非空时走与选号路径同源的
++// ListSchedulableAccounts（snapshot 已带 mask/mapping，选号器的 IsIdentityMaskedAccount /
++// IsModelSupported 过滤同源消费，生产已证；hasForcePlatform 取选号同款 false）；snapshot
++// 为 nil 时回退既有 repo 查询 ListModelAvailabilityCandidates（与选号器 nil-snapshot 回退
++// 同构）。两类候选最终都由纯函数 tierRoutingGateOpenForAccounts 按上述条件判定，便于单测。
++func (s *OpenAIGatewayService) TierRoutingGateOpen(ctx context.Context, groupID *int64, platform, model string) (bool, error) {
++	if s == nil {
++		return false, nil
++	}
++	if s.schedulerSnapshot != nil {
++		// 与选号路径同源：listSchedulableAccounts 对 OpenAI 兼容入口固定 hasForcePlatform=false。
++		accounts, _, err := s.schedulerSnapshot.ListSchedulableAccounts(ctx, groupID, platform, false)
++		if err != nil {
++			return false, err
++		}
++		return tierRoutingGateOpenForAccounts(accounts, model), nil
++	}
++	if s.accountRepo == nil {
++		return false, nil
++	}
++	// nil-snapshot 回退：与选号器 nil-snapshot 回退同构（仅管理态候选，忽略运行态瞬态）。
++	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(ctx, groupID, []string{platform}, true)
++	if err != nil {
++		return false, err
++	}
++	return tierRoutingGateOpenForAccounts(accounts, model), nil
++}
++
++// tierRoutingGateOpenForAccounts 是动态门控的判定纯函数（派发单 OC-T1）：任一账号满足
++// 「管理态 schedulable=true 且掩码（mask_upstream_identity=true）且 model_mapping 含键
++// model」即开门。运行态不可用（熔断/配额暂停/临时停调）一律不关门——这里只看管理态
++// Schedulable 字段，绝不调用运行态 IsSchedulable()。
++func tierRoutingGateOpenForAccounts(accounts []Account, model string) bool {
++	for i := range accounts {
++		a := &accounts[i]
++		if !a.IsActive() || !a.Schedulable {
++			continue
++		}
++		if !IsIdentityMaskedAccount(a) {
++			continue
++		}
++		if _, ok := a.GetModelMapping()[model]; ok {
++			return true
++		}
++	}
++	return false
++}
++
+ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
+ 	ctx context.Context,
+ 	groupID *int64,
+@@ -2616,21 +2670,22 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
+ 	requireVision bool,
+ ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+ 	selection, decision, err := s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
+-	// B2 kimi 分层路由跨档：小档请求在 qwen 伪装线整池无可用时，按既有熔断语义跨档
+-	// 走星思池一次并告警；反向（大档落伪装线）不允许。双侧均无可用时 err 原样返回，
+-	// 沿 noAvailableOpenAISelectionError 路径 fail-closed——不隐式转 infer-kimi，
+-	// 无第三回退源。跨档故障态优先于 session 粘性（方案 §2 职责隔离）。
+-	if err != nil && NormalizeOpenAICompatiblePlatform(platform) == PlatformKimi &&
++	// 分层路由跨档（派发单 OC-T1 泛化）：小档请求在伪装线整池无可用时，按既有熔断语义跨档
++	// 走星思池一次并告警；反向（大档落伪装线）不允许。跨档依据 ctx 中的分档状态
++	// （small + 未 crossPool）判定，不再以平台为门。双侧均无可用时 err 原样返回，
++	// 沿 noAvailableOpenAISelectionError 路径 fail-closed——不隐式转其他档，无第三回退源。
++	// 跨档故障态优先于 session 粘性（方案 §2 职责隔离）。
++	if err != nil &&
+ 		(errors.Is(err, ErrNoAvailableAccounts) || errors.Is(err, ErrNoAvailableCompactAccounts)) {
+-		if st, ok := ctx.Value(kimiTierRoutingContextKey{}).(kimiTierRoutingState); ok && st.class == KimiTierSmall && !st.crossPool {
++		if st, ok := ctx.Value(tierRoutingContextKey{}).(tierRoutingState); ok && st.class == TierRoutingSmall && !st.crossPool {
+ 			slog.Warn("kimi_tier_cross_pool_failover",
+ 				"model", requestedModel,
+-				"from_pool", kimiTierPoolMasked,
+-				"to_pool", kimiTierPoolUpstream,
+-				"reason", "qwen_pool_exhausted",
++				"from_pool", tierRoutingPoolMasked,
++				"to_pool", tierRoutingPoolUpstream,
++				"reason", "masked_pool_exhausted",
+ 			)
+ 			st.crossPool = true
+-			ctx = context.WithValue(ctx, kimiTierRoutingContextKey{}, st)
++			ctx = context.WithValue(ctx, tierRoutingContextKey{}, st)
+ 			selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost, requireVision)
+ 		}
+ 	}
+@@ -2712,13 +2767,10 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
+ 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
+ 	}
+ 	platform = NormalizeOpenAICompatiblePlatform(platform)
+-	// B2 kimi 分层路由：仅 kimi 平台请求消费请求 ctx 中的分档状态（其他平台零读取、
+-	// 零行为变化）；装门后的候选池约束透传进本请求全部选号路径（粘性/负载均衡/failover
+-	// 重入共用同一 req）。
+-	kimiTierPool := ""
+-	if platform == PlatformKimi {
+-		kimiTierPool = kimiTierPoolFromContext(ctx)
+-	}
++	// 分层路由泛化（派发单 OC-T1）：消费请求 ctx 中由 handler 按目标模型 + 动态门装好的
++	// 分档状态（平台无关）；只要 ctx 中分档状态非空即透传候选池约束进本请求全部选号路径
++	// （粘性/负载均衡/failover 重入共用同一 req），调度器侧不再以平台为门。
++	tierRoutingPool := tierRoutingPoolFromContext(ctx)
+ 	// §3.8 全局视觉路由 kill-switch（vision_routing_enabled，默认开启）：关闭后
+ 	// RequireVision 恒为 false，行为回到 v1 现状（普通路由）。单点收口于此，
+ 	// 同时覆盖 §3.4 能力过滤与 §3.7 候选池收窄：置 false 后
+@@ -2748,6 +2800,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
+ 	}
+ 	scheduler := s.getOpenAIAccountScheduler(ctx)
+ 	if scheduler == nil {
++
+ 		decision.Layer = openAIAccountScheduleLayerLoadBalance
+ 		if guardianParentAccountID > 0 {
+ 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+@@ -2767,7 +2820,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
+ 				RequireCompact:          requireCompact,
+ 				RequireVision:           requireVision,
+ 				VisionRoutingTargets:    visionRoutingTargets,
+-				KimiTierPool:            kimiTierPool,
++				TierRoutingPool:         tierRoutingPool,
+ 				ExcludedIDs:             excludedIDs,
+ 				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
+ 			})
+@@ -2879,8 +2932,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
+ 		RequireCompact:          requireCompact,
+ 		RequireVision:           requireVision,
+ 		VisionRoutingTargets:    visionRoutingTargets,
+-		KimiTierPool:            kimiTierPool,
+-		ExcludedIDs:             excludedIDs,
++		TierRoutingPool:         tierRoutingPool,
++
++		ExcludedIDs: excludedIDs,
+ 	})
+ }
+ 
+diff --git a/backend/internal/service/openai_gateway_count_tokens.go b/backend/internal/service/openai_gateway_count_tokens.go
+index 773e9e3..f0fd065 100644
+--- a/backend/internal/service/openai_gateway_count_tokens.go
++++ b/backend/internal/service/openai_gateway_count_tokens.go
+@@ -622,31 +622,31 @@ func estimateOpenAIInputTokens(req openAIInputTokensCountRequest) (int, error) {
+ 	return total, nil
+ }
+ 
+-// KimiTierRequestProtocol 标识待估算请求体的入口协议形态（B2 kimi 分层路由）。
+-type KimiTierRequestProtocol string
++// TierRoutingRequestProtocol 标识待估算请求体的入口协议形态（B2 kimi 分层路由）。
++type TierRoutingRequestProtocol string
+ 
+ const (
+-	KimiTierProtocolResponses       KimiTierRequestProtocol = "responses"
+-	KimiTierProtocolChatCompletions KimiTierRequestProtocol = "chat_completions"
+-	KimiTierProtocolMessages        KimiTierRequestProtocol = "messages"
++	TierRoutingProtocolResponses       TierRoutingRequestProtocol = "responses"
++	TierRoutingProtocolChatCompletions TierRoutingRequestProtocol = "chat_completions"
++	TierRoutingProtocolMessages        TierRoutingRequestProtocol = "messages"
+ )
+ 
+-// EstimateKimiTierInputTokens 是 kimi 分层路由（docs-local/model-source-tier-routing-plan.md
++// EstimateTierRoutingInputTokens 是 kimi 分层路由（docs-local/model-source-tier-routing-plan.md
+ // §2，派发单 B2）在选号前估算 input token 的最小导出入口。三种入口协议形态先收敛为
+ // Responses 形状，再统一走既有本地估算链 estimateOpenAIInputTokens（apicompat 转换 +
+ // tiktoken，纯本地、不发上游请求，与 count_tokens 端点同一 SSOT）。本函数只做协议
+ // 收敛与导出包装，不改变既有估算函数的行为。任何解析/转换/估算失败都返回错误，
+ // 由调用方 fail-closed（禁止默认当大请求）。
+-func EstimateKimiTierInputTokens(model string, protocol KimiTierRequestProtocol, body []byte) (int, error) {
++func EstimateTierRoutingInputTokens(model string, protocol TierRoutingRequestProtocol, body []byte) (int, error) {
+ 	switch protocol {
+-	case KimiTierProtocolResponses:
++	case TierRoutingProtocolResponses:
+ 		var req openAIInputTokensCountRequest
+ 		if err := json.Unmarshal(body, &req); err != nil {
+ 			return 0, fmt.Errorf("parse responses request for tier estimate: %w", err)
+ 		}
+ 		req.Model = model
+ 		return estimateOpenAIInputTokens(req)
+-	case KimiTierProtocolChatCompletions:
++	case TierRoutingProtocolChatCompletions:
+ 		var ccReq apicompat.ChatCompletionsRequest
+ 		if err := json.Unmarshal(body, &ccReq); err != nil {
+ 			return 0, fmt.Errorf("parse chat completions request for tier estimate: %w", err)
+@@ -662,7 +662,7 @@ func EstimateKimiTierInputTokens(model string, protocol KimiTierRequestProtocol,
+ 			Tools:        responsesReq.Tools,
+ 			ToolChoice:   responsesReq.ToolChoice,
+ 		})
+-	case KimiTierProtocolMessages:
++	case TierRoutingProtocolMessages:
+ 		var anthropicReq apicompat.AnthropicRequest
+ 		if err := json.Unmarshal(body, &anthropicReq); err != nil {
+ 			return 0, fmt.Errorf("parse messages request for tier estimate: %w", err)
+diff --git a/backend/internal/service/openai_kimi_tier_test.go b/backend/internal/service/openai_kimi_tier_test.go
+deleted file mode 100644
+index 7361e6f..0000000
+--- a/backend/internal/service/openai_kimi_tier_test.go
++++ /dev/null
+@@ -1,156 +0,0 @@
+-//go:build unit
+-
+-package service
+-
+-import (
+-	"context"
+-	"testing"
+-
+-	"github.com/Wei-Shaw/sub2api/internal/config"
+-	"github.com/stretchr/testify/require"
+-)
+-
+-// TestKimiTierClassForEstimate 覆盖分层路由边界语义：估算 input ≤1000 判小
+-// （含 =1000 边界），>1000 判大（派发单 B2，Done when #1 / #5）。
+-func TestKimiTierClassForEstimate(t *testing.T) {
+-	require.Equal(t, KimiTierSmall, KimiTierClassForEstimate(0))
+-	require.Equal(t, KimiTierSmall, KimiTierClassForEstimate(999))
+-	require.Equal(t, KimiTierSmall, KimiTierClassForEstimate(1000))
+-	require.Equal(t, KimiTierBig, KimiTierClassForEstimate(1001))
+-	require.Equal(t, KimiTierBig, KimiTierClassForEstimate(5000))
+-}
+-
+-// TestKimiTierEstimateInputTokens 覆盖既有估算链导出入口：合法 chat completions
+-// 请求体估算成功返回非负值；非法请求体（无法解析/非标）返回错误——这是 fail-closed
+-// 的前置：估算失败禁止默认大档（派发单 B2，Done when #2）。
+-func TestKimiTierEstimateInputTokens(t *testing.T) {
+-	valid := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello world"}]}`)
+-	est, err := EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, valid)
+-	require.NoError(t, err)
+-	require.GreaterOrEqual(t, est, 0)
+-
+-	// 非法 JSON：解析失败必须返回错误（调用方 fail-closed）。
+-	_, err = EstimateKimiTierInputTokens("kimi-k3", KimiTierProtocolChatCompletions, []byte("not-json"))
+-	require.Error(t, err)
+-
+-	// 不支持的协议：必须返回错误而非默认大档。
+-	_, err = EstimateKimiTierInputTokens("kimi-k3", KimiTierRequestProtocol("bogus"), valid)
+-	require.Error(t, err)
+-}
+-
+-// kimiTierTestService 构造一个启用高级调度器的 OpenAIGatewayService，复用既有
+-// 测试桩（schedulerTestOpenAIAccountRepo / schedulerTestGatewayCache /
+-// newOpenAIAdvancedSchedulerRateLimitService），使 selectAccountWithSchedulerOnce
+-// 真正走候选过滤（含 KimiTierPool 约束）与跨档重试路径。
+-func kimiTierTestService(t *testing.T, accounts []Account) *OpenAIGatewayService {
+-	t.Helper()
+-	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+-	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+-	return &OpenAIGatewayService{
+-		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+-		cache:              &schedulerTestGatewayCache{},
+-		cfg:                &config.Config{},
+-		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+-		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+-	}
+-}
+-
+-func kimiTierMaskedAccount(id int64) Account {
+-	return Account{
+-		ID:          id,
+-		Platform:    PlatformKimi,
+-		Type:        AccountTypeAPIKey,
+-		Status:      StatusActive,
+-		Schedulable: true,
+-		Concurrency: 1,
+-		Extra:       map[string]any{"mask_upstream_identity": true},
+-	}
+-}
+-
+-func kimiTierUpstreamAccount(id int64) Account {
+-	return Account{
+-		ID:          id,
+-		Platform:    PlatformKimi,
+-		Type:        AccountTypeAPIKey,
+-		Status:      StatusActive,
+-		Schedulable: true,
+-		Concurrency: 1,
+-	}
+-}
+-
+-// TestKimiTierSelectAccountRouting 覆盖分层路由选号主语义与职责隔离（派发单 B2，
+-// Done when #1 / #3）：
+-//   - ≤1000（small）→ 仅落 qwen 伪装线池（masked 账号）；
+-//   - >1000（big）→ 仅落星思池（非 masked 账号）；
+-//   - qwen 池整体无可用 → 小请求跨档走星思池（告警日志路径在 selectAccountWithScheduler 内）；
+-//   - 双侧均无可用 → fail-closed 返回 ErrNoAvailableAccounts，无 infer-kimi 隐式落侧。
+-func TestKimiTierSelectAccountRouting(t *testing.T) {
+-	groupID := int64(102001)
+-	model := "kimi-k3"
+-	ctx := context.Background()
+-
+-	t.Run("small_only_masked_pool", func(t *testing.T) {
+-		svc := kimiTierTestService(t, []Account{
+-			kimiTierMaskedAccount(4001),
+-			kimiTierUpstreamAccount(4002),
+-		})
+-		selCtx := WithKimiTierRouting(ctx, KimiTierSmall)
+-		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+-			selCtx, &groupID, "", "", model, nil,
+-			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+-			false, false, false, false, PlatformKimi,
+-		)
+-		require.NoError(t, err)
+-		require.NotNil(t, selection)
+-		require.NotNil(t, selection.Account)
+-		require.Equal(t, int64(4001), selection.Account.ID, "small request must land on masked (qwen) pool only")
+-	})
+-
+-	t.Run("big_only_upstream_pool", func(t *testing.T) {
+-		svc := kimiTierTestService(t, []Account{
+-			kimiTierMaskedAccount(4011),
+-			kimiTierUpstreamAccount(4012),
+-		})
+-		selCtx := WithKimiTierRouting(ctx, KimiTierBig)
+-		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+-			selCtx, &groupID, "", "", model, nil,
+-			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+-			false, false, false, false, PlatformKimi,
+-		)
+-		require.NoError(t, err)
+-		require.NotNil(t, selection)
+-		require.NotNil(t, selection.Account)
+-		require.Equal(t, int64(4012), selection.Account.ID, "big request must land on upstream (xingsi) pool only")
+-	})
+-
+-	t.Run("qwen_pool_empty_cross_to_upstream", func(t *testing.T) {
+-		// 仅星思池有账号；小请求在 qwen 整池无可用后跨档落星思（职责隔离：换号不出档失败才跨档）。
+-		svc := kimiTierTestService(t, []Account{
+-			kimiTierUpstreamAccount(4022),
+-		})
+-		selCtx := WithKimiTierRouting(ctx, KimiTierSmall)
+-		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+-			selCtx, &groupID, "", "", model, nil,
+-			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+-			false, false, false, false, PlatformKimi,
+-		)
+-		require.NoError(t, err)
+-		require.NotNil(t, selection)
+-		require.NotNil(t, selection.Account)
+-		require.Equal(t, int64(4022), selection.Account.ID, "small request must cross-pool to upstream when qwen pool exhausted")
+-	})
+-
+-	t.Run("both_pools_empty_fail_closed", func(t *testing.T) {
+-		// 双侧整池无可用 → fail-closed 返回可见错误，禁止隐式转 infer-kimi / 第三回退源。
+-		svc := kimiTierTestService(t, nil)
+-		selCtx := WithKimiTierRouting(ctx, KimiTierSmall)
+-		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+-			selCtx, &groupID, "", "", model, nil,
+-			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+-			false, false, false, false, PlatformKimi,
+-		)
+-		require.Error(t, err)
+-		require.ErrorIs(t, err, ErrNoAvailableAccounts)
+-		require.Nil(t, selection)
+-	})
+-}
+diff --git a/backend/internal/service/openai_muse_session.go b/backend/internal/service/openai_muse_session.go
+index 0c55695..f722259 100644
+--- a/backend/internal/service/openai_muse_session.go
++++ b/backend/internal/service/openai_muse_session.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"net/http"
++	"net/url"
+ 	"strings"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -10,11 +11,25 @@ import (
+ 
+ const museRelayUserAgent = "sub2api-relay/1.0"
+ 
+-// applyMuseSessionHeader 为 muse 平台的上游请求注入 OpenCode Go 端点必需的
+-// x-opencode-session 头与网关中继身份 User-Agent。仅对 muse 平台生效，其他平台
+-// 零改动。
++// isOpenCodeHostURL 报告 rawURL 是否指向 OpenCode 官方 API origin
++// （https scheme + hostname opencode.ai，任意路径）。作为 applyOpenCodeSessionHeader
++// 与 applyMuseSessionHeader 共用的 host 判定单一来源，避免第二份拷贝。
++func isOpenCodeHostURL(rawURL string) bool {
++	parsed, err := url.Parse(rawURL)
++	if err != nil {
++		return false
++	}
++	return strings.EqualFold(parsed.Scheme, "https") && strings.EqualFold(parsed.Hostname(), "opencode.ai")
++}
++
++// applyMuseSessionHeader 为 muse 平台账号（或 base_url 指向 OpenCode 官方 origin 的
++// 伪装账号）的上游请求注入 OpenCode Go 端点必需的 x-opencode-session 头与网关中继
++// 身份 User-Agent。其余账号零改动。
++//
++// 门控（OC-T1b 扩展）：platform == muse，或账号 base_url host 为 opencode.ai（任一路径）
++// 时注入；两者皆不满足则直接返回。
+ //
+-// 语义（muse-3 派发单）：
++// 语义（muse-3 派发单，原样保留）：
+ //   - 客户端已带 x-opencode-session 则原样保留，作为每会话稳定 ID；
+ //   - 客户端未带则每请求生成 UUID 塞入，满足上游 MissingSessionID 校验；
+ //   - User-Agent 覆写为 sub2api-relay/1.0，确保上游识别为合法中继调用方。
+@@ -22,7 +37,9 @@ func applyMuseSessionHeader(c *gin.Context, account *Account, headers http.Heade
+ 	if c == nil || c.Request == nil || account == nil || headers == nil {
+ 		return
+ 	}
+-	if account.Platform != PlatformMuse {
++	// 伪装账号（platform=kimi/deepseek/zhipu + opencode.ai base_url）与 muse 同口径注入，
++	// 消除 OpenCode Go 端点 chat/completions 的 400 MissingSessionID；其余账号零变化。
++	if account.Platform != PlatformMuse && !isOpenCodeHostURL(account.GetOpenAIBaseURL()) {
+ 		return
+ 	}
+ 
+diff --git a/backend/internal/service/openai_muse_session_test.go b/backend/internal/service/openai_muse_session_test.go
+index 5b3edca..3f97584 100644
+--- a/backend/internal/service/openai_muse_session_test.go
++++ b/backend/internal/service/openai_muse_session_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"testing"
+ 
+ 	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -59,3 +60,75 @@ func TestApplyMuseSessionHeader_NoEffectForOtherPlatform(t *testing.T) {
+ 	require.NotEqual(t, museRelayUserAgent, headers.Get("user-agent"),
+ 		"非 muse 平台不得覆写 UA")
+ }
++
++// ② 非 muse 平台但 base_url host 为 opencode.ai（伪装账号，如 platform=kimi）：
++// 与 muse 同口径注入每请求 UUID session，并覆写 UA。
++func TestApplyMuseSessionHeader_InjectsForOpenCodeHostDisguise(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++
++	account := &Account{
++		Platform: PlatformKimi,
++		Type:     AccountTypeAPIKey,
++		Credentials: map[string]any{
++			"base_url": "https://opencode.ai/zen/go/v1",
++		},
++	}
++	headers := http.Header{}
++	applyMuseSessionHeader(c, account, headers)
++
++	got := headers.Get("x-opencode-session")
++	require.NotEmpty(t, got, "opencode.ai base_url 的非 muse 账号应注入 session")
++	_, err := uuid.Parse(got)
++	require.NoError(t, err, "注入值应为合法 UUID")
++	require.Equal(t, museRelayUserAgent, headers.Get("user-agent"))
++}
++
++// ③ 非 muse 平台且 base_url host 非 opencode.ai：零改动——不得注入 session，不得覆写 UA。
++func TestApplyMuseSessionHeader_NoEffectForNonOpenCodeHost(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	req.Header.Set("x-opencode-session", "should-not-leak")
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = req
++
++	account := &Account{
++		Platform: PlatformKimi,
++		Type:     AccountTypeAPIKey,
++		Credentials: map[string]any{
++			"base_url": "https://api.moonshot.cn/v1",
++		},
++	}
++	headers := http.Header{}
++	applyMuseSessionHeader(c, account, headers)
++
++	require.Empty(t, headers.Get("x-opencode-session"),
++		"非 opencode.ai base_url 不得注入 session")
++	require.NotEqual(t, museRelayUserAgent, headers.Get("user-agent"),
++		"非 opencode.ai base_url 不得覆写 UA")
++}
++
++// ④ 非 muse 平台、base_url host 为 opencode.ai、客户端已带 x-opencode-session：
++// 原样保留客户端值不覆盖，并仍覆写 UA。
++func TestApplyMuseSessionHeader_PreservesClientSessionForOpenCodeHost(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	req.Header.Set("x-opencode-session", "client-stable-id")
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = req
++
++	account := &Account{
++		Platform: PlatformKimi,
++		Type:     AccountTypeAPIKey,
++		Credentials: map[string]any{
++			"base_url": "https://opencode.ai/zen/go/v1",
++		},
++	}
++	headers := http.Header{}
++	applyMuseSessionHeader(c, account, headers)
++
++	require.Equal(t, "client-stable-id", headers.Get("x-opencode-session"),
++		"客户端已带 session 应原样保留，不被覆盖")
++	require.Equal(t, museRelayUserAgent, headers.Get("user-agent"))
++}
+diff --git a/backend/internal/service/openai_opencode_session.go b/backend/internal/service/openai_opencode_session.go
+index fbb0b97..baa2f02 100644
+--- a/backend/internal/service/openai_opencode_session.go
++++ b/backend/internal/service/openai_opencode_session.go
+@@ -2,7 +2,6 @@ package service
+ 
+ import (
+ 	"net/http"
+-	"net/url"
+ 	"strings"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -19,8 +18,8 @@ func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL stri
+ 		return
+ 	}
+ 
+-	parsed, err := url.Parse(targetURL)
+-	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || !strings.EqualFold(parsed.Hostname(), "opencode.ai") {
++	// host 判定与 applyMuseSessionHeader 共用同一来源（isOpenCodeHostURL）。
++	if !isOpenCodeHostURL(targetURL) {
+ 		return
+ 	}
+ 
+diff --git a/backend/internal/service/openai_opencode_session_test.go b/backend/internal/service/openai_opencode_session_test.go
+index 18ed39b..b765048 100644
+--- a/backend/internal/service/openai_opencode_session_test.go
++++ b/backend/internal/service/openai_opencode_session_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"github.com/Wei-Shaw/sub2api/internal/config"
+ 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+ 	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+@@ -147,7 +148,13 @@ func TestOpenCodeSessionForwardedByResponsesBuildersAfterAccountOverride(t *test
+ 	}
+ }
+ 
+-func TestOpenCodeSessionMissingCallerValueKeepsExistingOverrideBehavior(t *testing.T) {
++// T1b：opencode.ai host 账号（含非 muse 平台，如 openai）在客户端未带 session 时，
++// applyMuseSessionHeader 现按 host 注入每请求 UUID，覆盖账号静态 x-opencode-session
++// override（派发单禁止会话关联面配静态 header_override）。此用例取代原
++// "...KeepsExistingOverrideBehavior" 断言——后者编码的是注入前会触发上游
++// 400 MissingSessionID 的旧行为。applyOpenCodeSessionHeader 自身行为未变，其独立
++// 契约仍由 TestApplyOpenCodeSessionHeaderTrustBoundary 覆盖。
++func TestOpenCodeSessionMissingCallerValueInjectsSessionForOpenCodeHost(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 	svc := openCodeSessionTestService()
+ 	account := openCodeSessionTestAccount("https://opencode.ai/zen/v1")
+@@ -158,7 +165,11 @@ func TestOpenCodeSessionMissingCallerValueKeepsExistingOverrideBehavior(t *testi
+ 		[]byte(`{"model":"gpt-5","input":"hello"}`), "token", false, "", false,
+ 	)
+ 	require.NoError(t, err)
+-	require.Equal(t, "fixed-account-value", getHeaderRaw(req.Header, "x-opencode-session"))
++	got := getHeaderRaw(req.Header, "x-opencode-session")
++	require.NotEqual(t, "fixed-account-value", got,
++		"opencode.ai host 账号的静态会话 override 应被每请求 UUID 覆盖")
++	_, uuidErr := uuid.Parse(got)
++	require.NoError(t, uuidErr, "注入值应为合法 UUID")
+ }
+ 
+ type openCodeSessionHTTPUpstream struct {
+diff --git a/backend/internal/service/openai_tier_routing_test.go b/backend/internal/service/openai_tier_routing_test.go
+new file mode 100644
+index 0000000..cc44658
+--- /dev/null
++++ b/backend/internal/service/openai_tier_routing_test.go
+@@ -0,0 +1,468 @@
++//go:build unit
++
++package service
++
++import (
++	"context"
++	"errors"
++	"log/slog"
++	"testing"
++	"time"
++
++	"github.com/Wei-Shaw/sub2api/internal/config"
++	"github.com/stretchr/testify/require"
++)
++
++// TestTierRoutingClassForEstimate 覆盖分层路由边界语义：估算 input ≤1000 判小
++// （含 =1000 边界），>1000 判大（派发单 OC-T1，测试 #2 三档中的 =1000 判小）。
++func TestTierRoutingClassForEstimate(t *testing.T) {
++	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(0))
++	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(999))
++	require.Equal(t, TierRoutingSmall, TierRoutingClassForEstimate(1000))
++	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(1001))
++	require.Equal(t, TierRoutingBig, TierRoutingClassForEstimate(5000))
++}
++
++// TestTierRoutingEstimateInputTokens 覆盖既有估算链导出入口：合法 chat completions
++// 请求体估算成功返回非负值；非法请求体（无法解析/非标）返回错误——这是 fail-closed
++// 的前置：估算失败禁止默认大档（派发单 OC-T1，测试 #3）。
++func TestTierRoutingEstimateInputTokens(t *testing.T) {
++	valid := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello world"}]}`)
++	est, err := EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, valid)
++	require.NoError(t, err)
++	require.GreaterOrEqual(t, est, 0)
++
++	// 非法 JSON：解析失败必须返回错误（调用方 fail-closed）。
++	_, err = EstimateTierRoutingInputTokens("kimi-k3", TierRoutingProtocolChatCompletions, []byte("not-json"))
++	require.Error(t, err)
++
++	// 不支持的协议：必须返回错误而非默认大档。
++	_, err = EstimateTierRoutingInputTokens("kimi-k3", TierRoutingRequestProtocol("bogus"), valid)
++	require.Error(t, err)
++}
++
++// tierRoutingTestService 构造一个启用高级调度器的 OpenAIGatewayService，复用既有
++// 测试桩（schedulerTestOpenAIAccountRepo / schedulerTestGatewayCache /
++// newOpenAIAdvancedSchedulerRateLimitService），使 selectAccountWithSchedulerOnce
++// 真正走候选过滤（含 TierRoutingPool 约束）与跨档重试路径。
++func tierRoutingTestService(t *testing.T, accounts []Account) *OpenAIGatewayService {
++	t.Helper()
++	resetOpenAIAdvancedSchedulerSettingCacheForTest()
++	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
++	return &OpenAIGatewayService{
++		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
++		cache:              &schedulerTestGatewayCache{},
++		cfg:                &config.Config{},
++		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
++		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
++	}
++}
++
++func tierRoutingMaskedAccount(id int64, platform string) Account {
++	return Account{
++		ID:          id,
++		Platform:    platform,
++		Type:        AccountTypeAPIKey,
++		Status:      StatusActive,
++		Schedulable: true,
++		Concurrency: 1,
++		Extra:       map[string]any{"mask_upstream_identity": true},
++	}
++}
++
++func tierRoutingUpstreamAccount(id int64, platform string) Account {
++	return Account{
++		ID:          id,
++		Platform:    platform,
++		Type:        AccountTypeAPIKey,
++		Status:      StatusActive,
++		Schedulable: true,
++		Concurrency: 1,
++	}
++}
++
++// tierRoutingMaskedAccountWithModel 构造伪装（mask_upstream_identity=true）账号，其
++// model_mapping 含指定目标模型键（动态门控要求「掩码 且 model_mapping 含目标模型」）。
++func tierRoutingMaskedAccountWithModel(id int64, platform string, models ...string) Account {
++	mapping := make(map[string]any, len(models))
++	for _, m := range models {
++		mapping[m] = m + "-upstream"
++	}
++	return Account{
++		ID:          id,
++		Platform:    platform,
++		Type:        AccountTypeAPIKey,
++		Status:      StatusActive,
++		Schedulable: true,
++		Concurrency: 1,
++		Extra:       map[string]any{"mask_upstream_identity": true},
++		Credentials: map[string]any{"model_mapping": mapping},
++	}
++}
++
++// TestTierRoutingGateOpenForAccounts 覆盖动态门控判定纯函数（派发单 OC-T1，测试 #1 动态门
++// 三态 + 运行态不关门）：
++//   - ① 无 mask 账号 → 门关；
++//   - ② mask 账号管理态 schedulable=false → 门关；
++//   - ③ mask 账号管理态 schedulable=true 且 model_mapping 含目标模型 → 门开；
++//   - ④ mask 账号 schedulable=true 但运行态不可用（熔断/配额暂停/临时停调）→ 门仍开；
++//   - ⑤ mask 账号 model_mapping 不含目标模型键 → 门关；
++//   - ⑥ 账号非 active → 门关。
++func TestTierRoutingGateOpenForAccounts(t *testing.T) {
++	const model = "deepseek-v4.1-flash"
++	future := time.Now().Add(time.Hour)
++
++	t.Run("no_mask_account_gate_closed", func(t *testing.T) {
++		require.False(t, tierRoutingGateOpenForAccounts([]Account{tierRoutingUpstreamAccount(5001, PlatformKimi)}, model))
++		require.False(t, tierRoutingGateOpenForAccounts(nil, model))
++	})
++
++	t.Run("mask_schedulable_false_gate_closed", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5002, PlatformKimi, model)
++		acct.Schedulable = false
++		require.False(t, tierRoutingGateOpenForAccounts([]Account{acct}, model))
++	})
++
++	t.Run("mask_schedulable_true_gate_open", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5003, PlatformKimi, model)
++		require.True(t, tierRoutingGateOpenForAccounts([]Account{acct}, model))
++	})
++
++	t.Run("mask_runtime_unavailable_gate_still_open", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5004, PlatformKimi, model)
++		// 运行态不可用标记：熔断（OverloadUntil）、配额暂停（RateLimitResetAt）、临时停调
++		// （TempUnschedulableUntil）——均不改管理态 Schedulable，故门仍开。
++		acct.OverloadUntil = &future
++		acct.RateLimitResetAt = &future
++		acct.TempUnschedulableUntil = &future
++		acct.TempUnschedulableReason = "circuit_breaker"
++		require.True(t, tierRoutingGateOpenForAccounts([]Account{acct}, model),
++			"运行态不可用不关门（只看管理态 Schedulable）")
++	})
++
++	t.Run("mask_without_model_key_gate_closed", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5005, PlatformKimi, "glm-5.3-flash")
++		require.False(t, tierRoutingGateOpenForAccounts([]Account{acct}, model),
++			"model_mapping 不含目标模型键不装门")
++	})
++
++	t.Run("inactive_account_gate_closed", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5006, PlatformKimi, model)
++		acct.Status = StatusDisabled
++		require.False(t, tierRoutingGateOpenForAccounts([]Account{acct}, model))
++	})
++}
++
++// tierRoutingGateRepoStub 是动态门控查询的仓库桩：仅实现 ListModelAvailabilityCandidates，
++// 返回预置账号（模拟管理态查询，忽略运行态瞬态）。
++type tierRoutingGateRepoStub struct {
++	AccountRepository
++	accounts []Account
++	err      error
++}
++
++func (r *tierRoutingGateRepoStub) ListModelAvailabilityCandidates(_ context.Context, _ *int64, _ []string, _ bool) ([]Account, error) {
++	if r.err != nil {
++		return nil, r.err
++	}
++	return r.accounts, nil
++}
++
++// TestTierRoutingGateOpenQuery 覆盖动态门控的查询入口（派发单 OC-T1，测试 #1）：
++// 经既有管理态候选查询取账号后判定；查询自身失败原样上抛（由调用方按关门保守处理）。
++func TestTierRoutingGateOpenQuery(t *testing.T) {
++	const model = "kimi-k3"
++	groupID := int64(7001)
++	future := time.Now().Add(time.Hour)
++
++	t.Run("query_opens_on_management_masked_account", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(5101, PlatformKimi, model)
++		acct.RateLimitResetAt = &future // 运行态不可用不影响开门
++		svc := &OpenAIGatewayService{accountRepo: &tierRoutingGateRepoStub{accounts: []Account{acct}}}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.True(t, open)
++	})
++
++	t.Run("query_no_mask_account_gate_closed", func(t *testing.T) {
++		// 仅非伪装账号（无 mask 标记）→ 门关（原路径）。
++		svc := &OpenAIGatewayService{accountRepo: &tierRoutingGateRepoStub{accounts: []Account{tierRoutingUpstreamAccount(5102, PlatformKimi)}}}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.False(t, open)
++	})
++
++	t.Run("query_error_propagates", func(t *testing.T) {
++		svc := &OpenAIGatewayService{accountRepo: &tierRoutingGateRepoStub{err: errors.New("boom")}}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.Error(t, err)
++		require.False(t, open)
++	})
++
++	t.Run("nil_repo_gate_closed", func(t *testing.T) {
++		svc := &OpenAIGatewayService{}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.False(t, open)
++	})
++}
++
++// TestTierRoutingSelectAccountFaultPaths 覆盖分层路由故障路径（派发单 OC-T1，测试 #4）：
++//   - 单 mask 账号运行态不可用 → 先耗尽同档候选（仍选同档可用 mask 账号），不跨档；
++//   - mask 整池运行态不可用 → 仅 small 跨档到上游池且产生跨档告警事件；
++//   - mask 整池运行态不可用 → big 任何重试不进 mask 池（只落上游池、无跨档告警）。
++func TestTierRoutingSelectAccountFaultPaths(t *testing.T) {
++	groupID := int64(103001)
++	model := "kimi-k3"
++	ctx := context.Background()
++	future := time.Now().Add(time.Hour)
++
++	selectFor := func(t *testing.T, svc *OpenAIGatewayService, class TierRoutingClass) (*AccountSelectionResult, error) {
++		t.Helper()
++		sel, _, err := svc.SelectAccountWithSchedulerForCapability(
++			WithTierRouting(ctx, class), &groupID, "", "", model, nil,
++			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++			false, false, false, false, PlatformKimi,
++		)
++		return sel, err
++	}
++
++	t.Run("single_masked_unavailable_exhausts_same_tier_first", func(t *testing.T) {
++		unavailable := tierRoutingMaskedAccount(5201, PlatformKimi)
++		unavailable.RateLimitResetAt = &future // 运行态不可用（同档候选之一）
++		svc := tierRoutingTestService(t, []Account{
++			unavailable,
++			tierRoutingMaskedAccount(5202, PlatformKimi), // 同档可用
++			tierRoutingUpstreamAccount(5203, PlatformKimi),
++		})
++		sel, err := selectFor(t, svc, TierRoutingSmall)
++		require.NoError(t, err)
++		require.NotNil(t, sel)
++		require.NotNil(t, sel.Account)
++		require.Equal(t, int64(5202), sel.Account.ID, "同档候选耗尽前不得跨档")
++	})
++
++	t.Run("masked_pool_exhausted_small_crosses_with_alert", func(t *testing.T) {
++		unavailable1 := tierRoutingMaskedAccount(5211, PlatformKimi)
++		unavailable1.RateLimitResetAt = &future
++		unavailable2 := tierRoutingMaskedAccount(5212, PlatformKimi)
++		unavailable2.OverloadUntil = &future
++		svc := tierRoutingTestService(t, []Account{
++			unavailable1, unavailable2, tierRoutingUpstreamAccount(5213, PlatformKimi),
++		})
++
++		var buf syncBuffer
++		prev := slog.Default()
++		slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
++		t.Cleanup(func() { slog.SetDefault(prev) })
++
++		sel, err := selectFor(t, svc, TierRoutingSmall)
++		require.NoError(t, err)
++		require.NotNil(t, sel)
++		require.NotNil(t, sel.Account)
++		require.Equal(t, int64(5213), sel.Account.ID, "伪装整池无可用时小档跨档到上游池")
++		require.Contains(t, buf.String(), "kimi_tier_cross_pool_failover", "小档跨档必须产生告警事件")
++	})
++
++	t.Run("masked_pool_exhausted_big_never_enters_masked", func(t *testing.T) {
++		unavailable := tierRoutingMaskedAccount(5221, PlatformKimi)
++		unavailable.RateLimitResetAt = &future
++		svc := tierRoutingTestService(t, []Account{unavailable, tierRoutingUpstreamAccount(5222, PlatformKimi)})
++
++		var buf syncBuffer
++		prev := slog.Default()
++		slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
++		t.Cleanup(func() { slog.SetDefault(prev) })
++
++		sel, err := selectFor(t, svc, TierRoutingBig)
++		require.NoError(t, err)
++		require.NotNil(t, sel)
++		require.NotNil(t, sel.Account)
++		require.Equal(t, int64(5222), sel.Account.ID, "大档只落上游池，任何重试不进伪装池")
++		require.NotContains(t, buf.String(), "kimi_tier_cross_pool_failover", "大档不跨档（无跨档告警）")
++	})
++}
++
++// TestTierRoutingSelectAccountRouting 覆盖分层路由选号主语义与职责隔离（派发单 OC-T1，
++// 测试 #2 分档落池 + 测试 #4 故障路径）：
++//   - ≤1000（small）→ 仅落 qwen 伪装线池（masked 账号）；
++//   - >1000（big）→ 仅落星思池（非 masked 账号）；
++//   - qwen 池整体无可用 → 小请求跨档走星思池（告警日志路径在 selectAccountWithScheduler 内）；
++//   - 双侧均无可用 → fail-closed 返回 ErrNoAvailableAccounts，无 infer-kimi 隐式落侧。
++func TestTierRoutingSelectAccountRouting(t *testing.T) {
++	groupID := int64(102001)
++	model := "kimi-k3"
++	ctx := context.Background()
++
++	t.Run("small_only_masked_pool", func(t *testing.T) {
++		svc := tierRoutingTestService(t, []Account{
++			tierRoutingMaskedAccount(4001, PlatformKimi),
++			tierRoutingUpstreamAccount(4002, PlatformKimi),
++		})
++		selCtx := WithTierRouting(ctx, TierRoutingSmall)
++		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
++			selCtx, &groupID, "", "", model, nil,
++			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++			false, false, false, false, PlatformKimi,
++		)
++		require.NoError(t, err)
++		require.NotNil(t, selection)
++		require.NotNil(t, selection.Account)
++		require.Equal(t, int64(4001), selection.Account.ID, "small request must land on masked (qwen) pool only")
++	})
++
++	t.Run("big_only_upstream_pool", func(t *testing.T) {
++		svc := tierRoutingTestService(t, []Account{
++			tierRoutingMaskedAccount(4011, PlatformKimi),
++			tierRoutingUpstreamAccount(4012, PlatformKimi),
++		})
++		selCtx := WithTierRouting(ctx, TierRoutingBig)
++		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
++			selCtx, &groupID, "", "", model, nil,
++			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++			false, false, false, false, PlatformKimi,
++		)
++		require.NoError(t, err)
++		require.NotNil(t, selection)
++		require.NotNil(t, selection.Account)
++		require.Equal(t, int64(4012), selection.Account.ID, "big request must land on upstream (xingsi) pool only")
++	})
++
++	t.Run("qwen_pool_empty_cross_to_upstream", func(t *testing.T) {
++		// 仅星思池有账号；小请求在 qwen 整池无可用后跨档落星思（职责隔离：换号不出档失败才跨档）。
++		svc := tierRoutingTestService(t, []Account{
++			tierRoutingUpstreamAccount(4022, PlatformKimi),
++		})
++		selCtx := WithTierRouting(ctx, TierRoutingSmall)
++		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
++			selCtx, &groupID, "", "", model, nil,
++			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++			false, false, false, false, PlatformKimi,
++		)
++		require.NoError(t, err)
++		require.NotNil(t, selection)
++		require.NotNil(t, selection.Account)
++		require.Equal(t, int64(4022), selection.Account.ID, "small request must cross-pool to upstream when qwen pool exhausted")
++	})
++
++	t.Run("both_pools_empty_fail_closed", func(t *testing.T) {
++		// 双侧整池无可用 → fail-closed 返回可见错误，禁止隐式转 infer-kimi / 第三回退源。
++		svc := tierRoutingTestService(t, nil)
++		selCtx := WithTierRouting(ctx, TierRoutingSmall)
++		selection, _, err := svc.SelectAccountWithSchedulerForCapability(
++			selCtx, &groupID, "", "", model, nil,
++			OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++			false, false, false, false, PlatformKimi,
++		)
++		require.Error(t, err)
++		require.ErrorIs(t, err, ErrNoAvailableAccounts)
++		require.Nil(t, selection)
++	})
++}
++
++// TestTierRoutingSelectAccountPlatformCombinations 验证分层路由（派发单 OC-T1 泛化）在真实多平台
++// 组合下的一致性（FIX-3）：kimi-k3+PlatformKimi / deepseek-v4.1-flash+PlatformDeepseek /
++// glm-5.3-flash+PlatformZhipu，各验：
++//   - ≤1000（small）→ 仅落伪装线池（masked 账号）；
++//   - >1000（big）→ 仅落非伪装池（upstream 账号）；
++//   - 伪装线整池无可用 → 小请求跨档落星思池。
++func TestTierRoutingSelectAccountPlatformCombinations(t *testing.T) {
++	groupID := int64(104001)
++	combos := []struct {
++		model    string
++		platform string
++	}{
++		{"kimi-k3", PlatformKimi},
++		{"deepseek-v4.1-flash", PlatformDeepseek},
++		{"glm-5.3-flash", PlatformZhipu},
++	}
++	for _, combo := range combos {
++		combo := combo
++		t.Run(combo.model+"_small_only_masked_pool", func(t *testing.T) {
++			svc := tierRoutingTestService(t, []Account{
++				tierRoutingMaskedAccount(7001, combo.platform),
++				tierRoutingUpstreamAccount(7002, combo.platform),
++			})
++			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
++				WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", combo.model, nil,
++				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++				false, false, false, false, combo.platform,
++			)
++			require.NoError(t, err)
++			require.NotNil(t, sel)
++			require.NotNil(t, sel.Account)
++			require.Equal(t, int64(7001), sel.Account.ID, "small request must land on masked pool only")
++		})
++		t.Run(combo.model+"_big_only_upstream_pool", func(t *testing.T) {
++			svc := tierRoutingTestService(t, []Account{
++				tierRoutingMaskedAccount(7011, combo.platform),
++				tierRoutingUpstreamAccount(7012, combo.platform),
++			})
++			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
++				WithTierRouting(context.Background(), TierRoutingBig), &groupID, "", "", combo.model, nil,
++				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++				false, false, false, false, combo.platform,
++			)
++			require.NoError(t, err)
++			require.NotNil(t, sel)
++			require.NotNil(t, sel.Account)
++			require.Equal(t, int64(7012), sel.Account.ID, "big request must land on upstream pool only")
++		})
++		t.Run(combo.model+"_small_masked_pool_exhausted_cross_to_upstream", func(t *testing.T) {
++			svc := tierRoutingTestService(t, []Account{
++				tierRoutingUpstreamAccount(7022, combo.platform),
++			})
++			sel, _, err := svc.SelectAccountWithSchedulerForCapability(
++				WithTierRouting(context.Background(), TierRoutingSmall), &groupID, "", "", combo.model, nil,
++				OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
++				false, false, false, false, combo.platform,
++			)
++			require.NoError(t, err)
++			require.NotNil(t, sel)
++			require.NotNil(t, sel.Account)
++			require.Equal(t, int64(7022), sel.Account.ID, "small request must cross-pool to upstream when masked pool exhausted")
++		})
++	}
++}
++
++// TestTierRoutingGateOpenViaSchedulerSnapshot 覆盖 FIX-A：门控查询优先走调度快照的
++// ListSchedulableAccounts（与选号路径同源，snapshot 已带 mask/mapping，hasForcePlatform
++// 取选号同款 false）；snapshot 为 nil 时回退到 repo 查询 ListModelAvailabilityCandidates
++// （与选号器 nil-snapshot 回退同构）。纯函数判定语义在两路径下保持一致、不回归。
++func TestTierRoutingGateOpenViaSchedulerSnapshot(t *testing.T) {
++	const model = "kimi-k3"
++	groupID := int64(7101)
++
++	t.Run("snapshot_open_on_management_masked_account", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(7101, PlatformKimi, model)
++		future := time.Now().Add(time.Hour)
++		acct.RateLimitResetAt = &future // 运行态不可用不影响开门
++		svc := &OpenAIGatewayService{
++			schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: []*Account{&acct}}},
++		}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.True(t, open, "snapshot 注入路径应经 ListSchedulableAccounts 命中 mask+mapping 账号而开门")
++	})
++
++	t.Run("snapshot_closed_without_mapping_key", func(t *testing.T) {
++		// model_mapping 仅含 glm-5.3-flash，不含目标键 kimi-k3 → 不装门。
++		acct := tierRoutingMaskedAccountWithModel(7102, PlatformKimi, "glm-5.3-flash")
++		svc := &OpenAIGatewayService{
++			schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{snapshotAccounts: []*Account{&acct}}},
++		}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.False(t, open, "snapshot 账号 model_mapping 不含目标键不装门")
++	})
++
++	t.Run("snapshot_nil_falls_back_to_repo", func(t *testing.T) {
++		acct := tierRoutingMaskedAccountWithModel(7103, PlatformKimi, model)
++		svc := &OpenAIGatewayService{
++			accountRepo: &tierRoutingGateRepoStub{accounts: []Account{acct}},
++		}
++		open, err := svc.TierRoutingGateOpen(context.Background(), &groupID, PlatformKimi, model)
++		require.NoError(t, err)
++		require.True(t, open, "nil-snapshot 回退 repo 路径不回归（与选号器同构）")
++	})
++}

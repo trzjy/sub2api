@@ -203,4 +203,52 @@ describe('UsageProgressBar', () => {
     expect(percent.classes()).toContain('w-[32px]')
     expect(percent.classes()).toContain('text-right')
   })
+
+  // 次卡进度条：49/50000 = 0.098% 取整为 0，此前显示 “0%” 造成误导（2026-10-12 用户裁定）
+  describe('displayPercent 次卡 <1% 显示', () => {
+    const percentText = (utilization: number, extra: Record<string, unknown> = {}) =>
+      mount(UsageProgressBar, {
+        props: { label: '次卡', utilization, color: 'indigo', ...extra }
+      })
+        .get('.h-1\\.5 + span')
+        .text()
+
+    it('真实用量 > 0 但取整为 0 时显示 “<1%”', () => {
+      expect(percentText(0.098)).toBe('<1%')
+      expect(percentText(0.4)).toBe('<1%')
+      expect(percentText(0.01)).toBe('<1%')
+    })
+
+    it('取整后达到 1% 时不再显示 “<1%”', () => {
+      // Math.round(0.5) = 1：边界之上走常规百分比渲染
+      expect(percentText(0.5)).toBe('1%')
+      expect(percentText(1)).toBe('1%')
+    })
+
+    it('利用率真正为 0 时仍如实显示 “0%”', () => {
+      expect(percentText(0)).toBe('0%')
+
+      // 剩余容量模式：耗尽（0）保持 “0%”，不被 <1% 分支吞掉
+      expect(percentText(0, { remainingCapacity: true })).toBe('0%')
+    })
+
+    it('剩余容量模式下极低残余也显示 “<1%”', () => {
+      expect(percentText(0.3, { remainingCapacity: true })).toBe('<1%')
+    })
+
+    it('unknownUsage 的 “—” 路径不受 <1% 分支影响', () => {
+      const wrapper = mount(UsageProgressBar, {
+        props: { label: '次卡', utilization: 0.098, unknownUsage: true, color: 'indigo' }
+      })
+
+      expect(wrapper.get('.h-1\\.5 + span').text()).toBe('—')
+      expect(wrapper.text()).not.toContain('<1%')
+    })
+
+    it('负利用率（脏数据）不误判为 <1%', () => {
+      // 负值不属于「不足 1%」语义：<1% 分支只在 utilization > 0 时生效，
+      // 负值的渲染保持本卡改动前的既有行为（不在本卡改动范围内）。
+      expect(percentText(-5)).not.toBe('<1%')
+    })
+  })
 })

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -251,6 +252,44 @@ type ChannelMonitorV2MatrixRow struct {
 	Metrics   ChannelMonitorV2Metric       `json:"metrics"`
 	Health    ChannelMonitorV2Health       `json:"health"`
 	Buckets   []ChannelMonitorV2TrendPoint `json:"buckets"`
+	// C3 展示三态 + DTO 最小契约（行级字段）。
+	//   has_data=false → status / source / observed_at 必须为 null（不变量）；
+	//   has_data=true  → 三者非空。
+	// 前端不得从百分比 / 错误文本 / 时间差反推 source 或有无数据。
+	HasData    bool       `json:"has_data"`
+	Status     *string    `json:"status,omitempty"`
+	Source     *string    `json:"source,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	// FirstTokenMs 是探测来源行的流式首 token 延迟（毫秒），紧邻 ObservedAt；
+	// 仅 probe 来源且上游返回了文本增量时非空（has_data=false 行不写）。
+	FirstTokenMs *int `json:"first_token_ms,omitempty"`
+}
+
+// C3 展示三态 DTO 枚举（行级 status / source 取值）。
+const (
+	ChannelMonitorV2SourceBusiness = "business"
+	ChannelMonitorV2SourceProbe    = "probe"
+
+	ChannelMonitorV2StatusOperational = "operational"
+	ChannelMonitorV2StatusDegraded    = "degraded"
+	ChannelMonitorV2StatusFailed      = "failed"
+	ChannelMonitorV2StatusError       = "error"
+)
+
+// mapV2HealthOverallToStatus 将既有 V2 健康四值（healthy/warning/critical/unknown）
+// 映射到 C3 DTO 四值（operational/degraded/failed/error）。
+// 不改既有四值枚举语义，仅做展示层映射。
+func mapV2HealthOverallToStatus(overall string) string {
+	switch overall {
+	case "healthy":
+		return ChannelMonitorV2StatusOperational
+	case "warning":
+		return ChannelMonitorV2StatusDegraded
+	case "critical":
+		return ChannelMonitorV2StatusFailed
+	default: // unknown（样本不足）当作观测到但未判故障，归 operational。
+		return ChannelMonitorV2StatusOperational
+	}
 }
 
 type ChannelMonitorV2Matrix struct {
@@ -310,6 +349,12 @@ type ChannelMonitorV2Repository interface {
 	// passive aggregator (and bootstrap progress). Missing row → zero value, nil error.
 	GetAggregationWatermark(ctx context.Context) (*ChannelMonitorV2AggregationWatermark, error)
 	RecomputeRange(ctx context.Context, start, end time.Time) error
+	// GetProbeStates returns the most recent probe result for each requested
+	// (platform, model, group) triple, read from channel_monitor_probe_state.
+	// Triples with no row are simply absent from the returned map (never an error).
+	// Used by the C3 display layer to render the "抽样探测" state for on-sale channels
+	// that have no business traffic.
+	GetProbeStates(ctx context.Context, keys []ChannelMonitorCatalogKey) (map[ChannelMonitorCatalogKey]*ProbeState, error)
 }
 
 // ChannelMonitorV2BootstrapProductWindow is the longest UI range that must be
@@ -379,10 +424,31 @@ type ChannelMonitorV2Service struct {
 	repo     ChannelMonitorV2Repository
 	settings channelMonitorRuntimeReader
 	now      func() time.Time
+	// accountRepo / groupRepo feed the C3 catalog derivation (DeriveChannelMonitorCatalog)
+	// so the display matrix can surface on-sale channels that have no business traffic.
+	// Injected via setters to keep the constructor signature stable for existing tests.
+	accountRepo AccountRepository
+	groupRepo   GroupRepository
 }
 
 func NewChannelMonitorV2Service(repo ChannelMonitorV2Repository) *ChannelMonitorV2Service {
 	return &ChannelMonitorV2Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// SetAccountRepository wires the account repository used by C3 catalog derivation.
+func (s *ChannelMonitorV2Service) SetAccountRepository(r AccountRepository) {
+	if s == nil {
+		return
+	}
+	s.accountRepo = r
+}
+
+// SetGroupRepository wires the group repository used by C3 catalog derivation.
+func (s *ChannelMonitorV2Service) SetGroupRepository(r GroupRepository) {
+	if s == nil {
+		return
+	}
+	s.groupRepo = r
 }
 
 // SetRuntimeReader wires optional settings for privacy flags (hide throughput).
@@ -529,6 +595,7 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
+	matrix = s.enrichMatrixWithCatalog(ctx, *cfg, groupBy, matrix)
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
 		for i := range matrix.Items {
@@ -539,6 +606,270 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 		}
 	}
 	return matrix, nil
+}
+
+// enrichMatrixWithCatalog applies the C3 three-state display contract to matrix rows:
+//
+//   - ① business: row has business traffic in the window (RequestCount > 0) → keep the
+//     existing V2 row, source=business, status from health.Overall.
+//   - ② no business traffic but a fresh probe_state row (≤30m) → source=probe with the
+//     "抽样探测" semantics; status reflects the sampled probe result (NOT channel-wide).
+//   - ③ neither → has_data=false with status/source/observed_at all null ("无数据").
+//
+// On-sale channels without business traffic must still appear (user requirement #5);
+// the catalog (platform, model, group) triples are projected to the requested groupBy
+// grain so coarser views still surface them. When the catalog cannot be derived (account
+// or group repository not injected), every traffic row is enriched as business and no
+// catalog-derived rows are added (degraded, test-friendly path).
+func (s *ChannelMonitorV2Service) enrichMatrixWithCatalog(ctx context.Context, cfg ChannelMonitorV2Config, groupBy ChannelMonitorV2GroupBy, base *ChannelMonitorV2Matrix) *ChannelMonitorV2Matrix {
+	if base == nil {
+		return nil
+	}
+	if s.accountRepo == nil || s.groupRepo == nil {
+		// Degraded path: no catalog available. Enrich existing traffic rows as business.
+		for i := range base.Items {
+			row := &base.Items[i]
+			if row.Metrics.RequestCount > 0 {
+				enrichBusinessMatrixRow(row, base.Coverage, s.now)
+			}
+		}
+		return base
+	}
+
+	accounts, err := s.accountRepo.ListActive(ctx)
+	if err != nil {
+		return base
+	}
+	groups, err := s.groupRepo.ListActive(ctx)
+	if err != nil {
+		return base
+	}
+	groupsByID := make(map[int64]*Group, len(groups))
+	for i := range groups {
+		groupsByID[groups[i].ID] = &groups[i]
+	}
+	catalog := DeriveChannelMonitorCatalog(accounts, groupsByID)
+	probeStates, perr := s.repo.GetProbeStates(ctx, catalogTriples(catalog))
+	if perr != nil {
+		probeStates = map[ChannelMonitorCatalogKey]*ProbeState{}
+	}
+	return channelMonitorV2MergeCatalogMatrix(cfg, groupBy, catalog, groupsByID, base, probeStates, s.now)
+}
+
+// catalogTriples returns the distinct (platform, model, group) keys of a catalog.
+func catalogTriples(catalog ChannelMonitorCatalog) []ChannelMonitorCatalogKey {
+	keys := make([]ChannelMonitorCatalogKey, 0, len(catalog.Keys))
+	for key := range catalog.Keys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// channelMonitorV2MergeCatalogMatrix is the pure C3 three-state merge: it combines the
+// catalog-derived on-sale set with the traffic matrix and probe states (already fetched)
+// into a single display matrix. It is deterministic and independent of any repository,
+// which keeps the three-state contract unit-testable without DB or repo fakes.
+//
+//   - ① business: a grain key has traffic (RequestCount > 0) → keep that V2 row, source=business.
+//   - ② no business traffic but a fresh probe (≤30m) exists for the grain's triples → source=probe.
+//   - ③ otherwise → has_data=false with status/source/observed_at all null ("无数据").
+//
+// Zero-traffic seeded matrix rows are dropped; the catalog drives probe/no-data for them.
+func channelMonitorV2MergeCatalogMatrix(
+	cfg ChannelMonitorV2Config,
+	groupBy ChannelMonitorV2GroupBy,
+	catalog ChannelMonitorCatalog,
+	groupsByID map[int64]*Group,
+	base *ChannelMonitorV2Matrix,
+	probeStates map[ChannelMonitorCatalogKey]*ProbeState,
+	now func() time.Time,
+) *ChannelMonitorV2Matrix {
+	if base == nil {
+		return nil
+	}
+
+	// Grain buckets: each on-sale catalog triple projected to the groupBy grain.
+	type grainBucket struct {
+		platform  string
+		groupID   int64
+		groupName string
+		model     string
+		triples   []ChannelMonitorCatalogKey
+	}
+	grainByKey := make(map[string]*grainBucket, len(catalog.Keys))
+	var grainOrder []string
+	for key := range catalog.Keys {
+		gk := channelMonitorV2RowGrainKey(groupBy, cfg, key.Platform, key.GroupID, key.Model)
+		bucket := grainByKey[gk]
+		if bucket == nil {
+			bucket = &grainBucket{
+				platform: key.Platform,
+				groupID:  channelMonitorV2RowGroupID(groupBy, key.GroupID),
+				model:    channelMonitorV2RowModel(groupBy, cfg, key.Model),
+			}
+			if bucket.groupID > 0 {
+				if g, ok := groupsByID[bucket.groupID]; ok {
+					bucket.groupName = g.Name
+				}
+			}
+			grainByKey[gk] = bucket
+			grainOrder = append(grainOrder, gk)
+		}
+		bucket.triples = append(bucket.triples, key)
+	}
+
+	// Business rows from real traffic (RequestCount > 0). Zero-traffic seeded rows are
+	// dropped here; catalog drives probe/no-data for them below.
+	businessKeys := make(map[string]bool, len(base.Items))
+	result := &ChannelMonitorV2Matrix{GroupBy: groupBy, Coverage: base.Coverage, Items: make([]ChannelMonitorV2MatrixRow, 0, len(base.Items)+len(grainByKey))}
+	for i := range base.Items {
+		row := base.Items[i]
+		if row.Metrics.RequestCount <= 0 {
+			continue
+		}
+		gk := channelMonitorV2RowGrainKey(groupBy, cfg, row.Platform, derefInt64(row.GroupID), row.Model)
+		enrichBusinessMatrixRow(&row, base.Coverage, now)
+		businessKeys[gk] = true
+		result.Items = append(result.Items, row)
+	}
+
+	for _, gk := range grainOrder {
+		bucket := grainByKey[gk]
+		if businessKeys[gk] {
+			continue
+		}
+		var fresh *ProbeState
+		for _, t := range bucket.triples {
+			st := probeStates[t]
+			if st == nil || st.LastProbeAt.IsZero() {
+				continue
+			}
+			// B4：废除 30 分钟新鲜度门——最新一次探测结果无条件作为探测来源状态；
+			// 仅当该渠道从未有 probe_state 时（fresh 保持 nil）保持 has_data=false。
+			if fresh == nil || st.LastProbeAt.After(fresh.LastProbeAt) {
+				fresh = st
+			}
+		}
+		row := ChannelMonitorV2MatrixRow{Platform: bucket.platform, Model: bucket.model, HasData: false}
+		if bucket.groupID > 0 {
+			id := bucket.groupID
+			row.GroupID = &id
+			row.GroupName = bucket.groupName
+		}
+		if fresh != nil {
+			// ② probe source: a sampled single-account probe, not channel-wide availability.
+			row.HasData = true
+			src := ChannelMonitorV2SourceProbe
+			row.Source = &src
+			status := ChannelMonitorV2StatusFailed
+			if fresh.LastOK {
+				status = ChannelMonitorV2StatusOperational
+			}
+			row.Status = &status
+			obs := fresh.LastProbeAt
+			row.ObservedAt = &obs
+			row.FirstTokenMs = fresh.FirstTokenMs
+		}
+		// ③ else: has_data=false → status/source/observed_at/first_token_ms stay nil ("无数据").
+		result.Items = append(result.Items, row)
+	}
+
+	sortChannelMonitorV2MatrixRows(result.Items)
+	return result
+}
+
+// enrichBusinessMatrixRow stamps the business-state DTO fields on a traffic row.
+func enrichBusinessMatrixRow(row *ChannelMonitorV2MatrixRow, coverage ChannelMonitorV2Coverage, now func() time.Time) {
+	row.HasData = true
+	src := ChannelMonitorV2SourceBusiness
+	row.Source = &src
+	status := mapV2HealthOverallToStatus(row.Health.Overall)
+	row.Status = &status
+	row.ObservedAt = businessObservedAt(row, coverage, now)
+}
+
+// businessObservedAt returns the latest timestamp the business row was actually observed,
+// preferring the newest bucket carrying traffic, then the aggregate data_through.
+func businessObservedAt(row *ChannelMonitorV2MatrixRow, coverage ChannelMonitorV2Coverage, now func() time.Time) *time.Time {
+	var latest *time.Time
+	for i := range row.Buckets {
+		if row.Buckets[i].Metrics.RequestCount > 0 {
+			b := row.Buckets[i].BucketStart
+			if latest == nil || b.After(*latest) {
+				cp := b
+				latest = &cp
+			}
+		}
+	}
+	if latest != nil {
+		return latest
+	}
+	if !coverage.DataThrough.IsZero() {
+		t := coverage.DataThrough
+		return &t
+	}
+	n := now().UTC()
+	return &n
+}
+
+// channelMonitorV2RowGrainKey projects a (platform, model, group) triple to the
+// groupBy display grain, mirroring repository.channelMonitorV2MatrixDimensionKey.
+func channelMonitorV2RowGrainKey(groupBy ChannelMonitorV2GroupBy, cfg ChannelMonitorV2Config, platform string, groupID int64, model string) string {
+	key := platform
+	if groupBy == ChannelMonitorV2GroupByPlatformGroup || groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
+		key += "\x00" + strconv.FormatInt(channelMonitorV2RowGroupID(groupBy, groupID), 10)
+	}
+	if groupBy == ChannelMonitorV2GroupByPlatformModel || groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
+		key += "\x00" + channelMonitorV2RowModel(groupBy, cfg, model)
+	}
+	return key
+}
+
+// channelMonitorV2RowGroupID returns the groupID for the grain, or 0 when the grain
+// does not include the group dimension.
+func channelMonitorV2RowGroupID(groupBy ChannelMonitorV2GroupBy, groupID int64) int64 {
+	if groupBy == ChannelMonitorV2GroupByPlatformGroup || groupBy == ChannelMonitorV2GroupByPlatformGroupModel {
+		return groupID
+	}
+	return 0
+}
+
+// channelMonitorV2RowModel returns the display model for the grain, or "" when the
+// grain does not include the model dimension. Mirrors repository display-model rules.
+func channelMonitorV2RowModel(groupBy ChannelMonitorV2GroupBy, cfg ChannelMonitorV2Config, model string) string {
+	if groupBy != ChannelMonitorV2GroupByPlatformModel && groupBy != ChannelMonitorV2GroupByPlatformGroupModel {
+		return ""
+	}
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ChannelMonitorV2OtherModel
+	}
+	return m
+}
+
+// sortChannelMonitorV2MatrixRows orders rows by platform, group name, group id, model —
+// same comparator the repository uses for stable display.
+func sortChannelMonitorV2MatrixRows(items []ChannelMonitorV2MatrixRow) {
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.Platform != b.Platform {
+			return a.Platform < b.Platform
+		}
+		if a.GroupName != b.GroupName {
+			return a.GroupName < b.GroupName
+		}
+		if a.GroupID != nil && b.GroupID != nil && *a.GroupID != *b.GroupID {
+			return *a.GroupID < *b.GroupID
+		}
+		return a.Model < b.Model
+	})
+}
+
+func derefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 func ParseChannelMonitorV2GroupBy(value string) (ChannelMonitorV2GroupBy, error) {

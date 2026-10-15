@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -29,26 +30,35 @@ func TestChannelMonitorV2DateBinOriginIsUTC(t *testing.T) {
 }
 
 func TestChannelMonitorV2DisplayModelIsPlatformScoped(t *testing.T) {
+	// C1: channelMonitorV2DisplayModel 已停消费 cfg.Platforms[].models（见 channel_monitor_v2_repo.go）。
+	// named + __other__ 折叠随模型清单归零而退役；此处始终返回真实模型名，仅空模型名回落 __other__。
+	// 展示折叠/目录推导归属 C2/C3。
 	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{
 		{Platform: "openai", Enabled: true, Models: []string{"shared", "gpt-5"}},
 		{Platform: "grok", Enabled: true, Models: []string{"grok-4"}},
-		// Empty models list must NOT collapse everything into __other__.
 		{Platform: "anthropic", Enabled: true, Models: []string{}},
 	}}
 	require.Equal(t, "shared", channelMonitorV2DisplayModel(cfg, "openai", "shared"))
-	require.Equal(t, service.ChannelMonitorV2OtherModel, channelMonitorV2DisplayModel(cfg, "grok", "shared"))
+	// 未列入模型清单的模型仍返回真实名（不再折叠为 __other__）。
+	require.Equal(t, "shared", channelMonitorV2DisplayModel(cfg, "grok", "shared"))
 	require.Equal(t, "claude-sonnet-4", channelMonitorV2DisplayModel(cfg, "anthropic", "claude-sonnet-4"))
-	// Unconfigured platform still surfaces the real model name.
+	// 未配置平台仍返回真实模型名。
 	require.Equal(t, "gemini-2.5-pro", channelMonitorV2DisplayModel(cfg, "gemini", "gemini-2.5-pro"))
-	require.True(t, channelMonitorV2ModelSelected(service.ChannelMonitorV2Filter{Models: []string{service.ChannelMonitorV2OtherModel}}, cfg, "grok", "shared"))
+	// 空模型名回落 __other__。
+	require.Equal(t, service.ChannelMonitorV2OtherModel, channelMonitorV2DisplayModel(cfg, "openai", ""))
+	// 模型选择不再匹配 __other__：展示模型为真实名，与 filter.Models=[__other__] 不符。
+	require.False(t, channelMonitorV2ModelSelected(service.ChannelMonitorV2Filter{Models: []string{service.ChannelMonitorV2OtherModel}}, cfg, "grok", "shared"))
+	// 选择真实模型名可命中。
+	require.True(t, channelMonitorV2ModelSelected(service.ChannelMonitorV2Filter{Models: []string{"shared"}}, cfg, "grok", "shared"))
 }
 
 func TestChannelMonitorV2MatrixDimensionKey(t *testing.T) {
 	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{"gpt-5"}}}}
 	key := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByPlatformGroupModel, cfg, "openai", 7, "gpt-5")
 	require.Equal(t, channelMonitorV2MatrixKey{platform: "openai", groupID: 7, model: "gpt-5"}, key)
+	// C1: 未列入模型清单的模型不再折叠为 __other__，保留真实模型名。
 	key = channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByPlatformModel, cfg, "openai", 7, "unlisted")
-	require.Equal(t, channelMonitorV2MatrixKey{platform: "openai", model: service.ChannelMonitorV2OtherModel}, key)
+	require.Equal(t, channelMonitorV2MatrixKey{platform: "openai", model: "unlisted"}, key)
 	key = channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByPlatform, cfg, "openai", 7, "gpt-5")
 	require.Equal(t, channelMonitorV2MatrixKey{platform: "openai"}, key)
 }
@@ -482,4 +492,110 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	// Group seeding without multi-select uses full config allow-list.
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
+}
+
+func TestChannelMonitorV2GetDimensionsDerivesPlatformsFromAccounts(t *testing.T) {
+	// C3-FIX: platform dimensions must come from platforms that actually have an
+	// active account (UNION real-traffic platforms), NOT from the config platforms
+	// list. So config-only platforms with no accounts (kiro/grok/antigravity) must
+	// be absent, while an account-bearing platform with zero traffic (zhipu) and one
+	// with real traffic (openai) must both appear.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	filter := service.ChannelMonitorV2Filter{
+		Start: time.Unix(1, 0), End: time.Unix(2, 0), Bucket: time.Minute,
+	}
+	// Config still lists the config-only noise platforms plus the real ones.
+	cfg := service.ChannelMonitorV2Config{
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "zhipu", Enabled: true},
+			{Platform: "kiro", Enabled: true},
+			{Platform: "grok", Enabled: true},
+			{Platform: "antigravity", Enabled: true},
+		},
+	}
+
+	// 1) watermark: no data → coverage empty, metrics window clamps to nothing.
+	mock.ExpectQuery("FROM channel_monitor_v2_watermarks").WillReturnError(sql.ErrNoRows)
+	// 2) metrics: only openai carries real traffic in the window.
+	mock.ExpectQuery("SELECT m.platform").WillReturnRows(
+		sqlmock.NewRows([]string{"platform", "name", "group_platform", "group_id", "model", "count"}).
+			AddRow("openai", "", "unknown", int64(0), "gpt-5", int64(42)),
+	)
+	// 3) account platforms (active, non-deleted): openai + zhipu only.
+	mock.ExpectQuery("FROM accounts").WillReturnRows(
+		sqlmock.NewRows([]string{"platform"}).
+			AddRow("openai").AddRow("zhipu"),
+	)
+
+	dimensions, err := repo.GetDimensions(context.Background(), filter, cfg)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	byValue := map[string]service.ChannelMonitorV2Dimension{}
+	for _, p := range dimensions.Platforms {
+		byValue[p.Value] = p
+	}
+	// Config-only platforms with no accounts must not appear.
+	require.NotContains(t, byValue, "kiro")
+	require.NotContains(t, byValue, "grok")
+	require.NotContains(t, byValue, "antigravity")
+	// Account-bearing platforms appear: openai (traffic) and zhipu (zero traffic).
+	require.Contains(t, byValue, "openai")
+	require.Contains(t, byValue, "zhipu")
+	require.Equal(t, int64(42), byValue["openai"].RequestCount)
+	require.Equal(t, int64(0), byValue["zhipu"].RequestCount)
+}
+
+func TestChannelMonitorV2GetProbeStatesReadsCatalogTriples(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	keys := []service.ChannelMonitorCatalogKey{
+		{Platform: "openai", Model: "gpt-5", GroupID: 1},
+		{Platform: "anthropic", Model: "claude", GroupID: 2},
+	}
+	mock.ExpectQuery("SELECT platform, model, group_id").
+		WithArgs("openai", "gpt-5", int64(1), "anthropic", "claude", int64(2)).
+		WillReturnRows(
+			sqlmock.NewRows([]string{
+				"platform", "model", "group_id", "last_probe_at", "last_ok", "last_detail", "last_account_id", "next_due",
+			}).
+				AddRow("openai", "gpt-5", int64(1), now, true, "ok status=200", int64(11), now.Add(30*time.Minute)).
+				AddRow("anthropic", "claude", int64(2), now, false, "upstream status=503", int64(22), now.Add(2*time.Hour)),
+		)
+
+	states, err := repo.GetProbeStates(context.Background(), keys)
+	require.NoError(t, err)
+	require.Len(t, states, 2)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	ok := states[keys[0]]
+	require.NotNil(t, ok)
+	require.True(t, ok.LastOK)
+	require.Equal(t, "ok status=200", ok.LastDetail)
+	require.Equal(t, int64(11), ok.LastAccountID)
+	fail := states[keys[1]]
+	require.NotNil(t, fail)
+	require.False(t, fail.LastOK)
+	require.Equal(t, int64(22), fail.LastAccountID)
+}
+
+func TestChannelMonitorV2GetProbeStatesEmptyKeysNoQuery(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+
+	states, err := repo.GetProbeStates(context.Background(), nil)
+	require.NoError(t, err)
+	require.Empty(t, states)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

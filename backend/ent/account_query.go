@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 )
 
@@ -33,6 +34,7 @@ type AccountQuery struct {
 	withParent        *AccountQuery
 	withChildren      *AccountQuery
 	withUsageLogs     *UsageLogQuery
+	withQuotaKey      *QuotaKeyQuery
 	withAccountGroups *AccountGroupQuery
 	modifiers         []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
@@ -174,6 +176,28 @@ func (_q *AccountQuery) QueryUsageLogs() *UsageLogQuery {
 			sqlgraph.From(account.Table, account.FieldID, selector),
 			sqlgraph.To(usagelog.Table, usagelog.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, false, account.UsageLogsTable, account.UsageLogsColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryQuotaKey chains the current query on the "quota_key" edge.
+func (_q *AccountQuery) QueryQuotaKey() *QuotaKeyQuery {
+	query := (&QuotaKeyClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(account.Table, account.FieldID, selector),
+			sqlgraph.To(quotakey.Table, quotakey.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, account.QuotaKeyTable, account.QuotaKeyColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -400,6 +424,7 @@ func (_q *AccountQuery) Clone() *AccountQuery {
 		withParent:        _q.withParent.Clone(),
 		withChildren:      _q.withChildren.Clone(),
 		withUsageLogs:     _q.withUsageLogs.Clone(),
+		withQuotaKey:      _q.withQuotaKey.Clone(),
 		withAccountGroups: _q.withAccountGroups.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
@@ -459,6 +484,17 @@ func (_q *AccountQuery) WithUsageLogs(opts ...func(*UsageLogQuery)) *AccountQuer
 		opt(query)
 	}
 	_q.withUsageLogs = query
+	return _q
+}
+
+// WithQuotaKey tells the query-builder to eager-load the nodes that are connected to
+// the "quota_key" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AccountQuery) WithQuotaKey(opts ...func(*QuotaKeyQuery)) *AccountQuery {
+	query := (&QuotaKeyClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withQuotaKey = query
 	return _q
 }
 
@@ -551,12 +587,13 @@ func (_q *AccountQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Acco
 	var (
 		nodes       = []*Account{}
 		_spec       = _q.querySpec()
-		loadedTypes = [6]bool{
+		loadedTypes = [7]bool{
 			_q.withGroups != nil,
 			_q.withProxy != nil,
 			_q.withParent != nil,
 			_q.withChildren != nil,
 			_q.withUsageLogs != nil,
+			_q.withQuotaKey != nil,
 			_q.withAccountGroups != nil,
 		}
 	)
@@ -611,6 +648,12 @@ func (_q *AccountQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*Acco
 		if err := _q.loadUsageLogs(ctx, query, nodes,
 			func(n *Account) { n.Edges.UsageLogs = []*UsageLog{} },
 			func(n *Account, e *UsageLog) { n.Edges.UsageLogs = append(n.Edges.UsageLogs, e) }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withQuotaKey; query != nil {
+		if err := _q.loadQuotaKey(ctx, query, nodes, nil,
+			func(n *Account, e *QuotaKey) { n.Edges.QuotaKey = e }); err != nil {
 			return nil, err
 		}
 	}
@@ -812,6 +855,38 @@ func (_q *AccountQuery) loadUsageLogs(ctx context.Context, query *UsageLogQuery,
 	}
 	return nil
 }
+func (_q *AccountQuery) loadQuotaKey(ctx context.Context, query *QuotaKeyQuery, nodes []*Account, init func(*Account), assign func(*Account, *QuotaKey)) error {
+	ids := make([]int64, 0, len(nodes))
+	nodeids := make(map[int64][]*Account)
+	for i := range nodes {
+		if nodes[i].QuotaKeyID == nil {
+			continue
+		}
+		fk := *nodes[i].QuotaKeyID
+		if _, ok := nodeids[fk]; !ok {
+			ids = append(ids, fk)
+		}
+		nodeids[fk] = append(nodeids[fk], nodes[i])
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	query.Where(quotakey.IDIn(ids...))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		nodes, ok := nodeids[n.ID]
+		if !ok {
+			return fmt.Errorf(`unexpected foreign-key "quota_key_id" returned %v`, n.ID)
+		}
+		for i := range nodes {
+			assign(nodes[i], n)
+		}
+	}
+	return nil
+}
 func (_q *AccountQuery) loadAccountGroups(ctx context.Context, query *AccountGroupQuery, nodes []*Account, init func(*Account), assign func(*Account, *AccountGroup)) error {
 	fks := make([]driver.Value, 0, len(nodes))
 	nodeids := make(map[int64]*Account)
@@ -876,6 +951,9 @@ func (_q *AccountQuery) querySpec() *sqlgraph.QuerySpec {
 		}
 		if _q.withParent != nil {
 			_spec.Node.AddColumnOnce(account.FieldParentAccountID)
+		}
+		if _q.withQuotaKey != nil {
+			_spec.Node.AddColumnOnce(account.FieldQuotaKeyID)
 		}
 	}
 	if ps := _q.predicates; len(ps) > 0 {

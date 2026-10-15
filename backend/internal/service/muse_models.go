@@ -161,13 +161,33 @@ func (s *AccountTestService) fetchMuseUpstreamCatalog(ctx context.Context, accou
 	return models, resp.StatusCode, nil
 }
 
+// museSyncMaskedAccountRejected 是 muse 同步守卫（派发单 OC-T1）的拒绝错误：伪装账号
+// （mask_upstream_identity=true）禁止参与 muse 托管目录同步，避免伪装线 model_mapping
+// 被目录同步污染。守卫在同步入口、任何目录变更/持久化之前即失败关闭。
+// FIX-6：复用既有 UpstreamModelSyncError 类型契约（失败关闭语义不变，不另造错误体系），
+// 管理端公开同步入口据此返回明确"策略拒绝"而非通用内部错误。
+var museSyncMaskedAccountRejected = &UpstreamModelSyncError{
+	Kind:    UpstreamModelSyncErrorUnsupported,
+	Message: "muse catalog sync rejected by policy: account masks upstream identity",
+}
+
 // syncMuseModelCatalog 是 muse 平台上游模型目录同步的实现入口（照 SyncVolcanoPlanModels
 // 模式）：拉取 → 过滤 → 派生干净名 → 落库系统托管快照 + 自动建立 clean→contributor 的
 // model_mapping。返回下游契约（干净名）组成的 UpstreamModelCatalog。
 //
 // 落库仅当账号已落库（account.ID>0 且 repo 可用）时发生；预览（无 ID）只返回分类结果，
 // 不动库（与火山 preview 一致）。
+//
+// 同步守卫（派发单 OC-T1）：在同步入口、任何目录变更/持久化之前，若账号
+// mask_upstream_identity=true（伪装账号）立即返回 museSyncMaskedAccountRejected（复用
+// UpstreamModelSyncError 契约，策略拒绝）失败关闭，mapping 与托管快照零写入。守卫仅作用于
+// muse 同步入口（非 muse 平台账号走既有
+// unsupported/no-op 契约，绝不扩大）。
 func (s *AccountTestService) syncMuseModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	// 同步守卫：伪装账号禁止 muse 目录同步，防止伪装线 model_mapping 被污染。
+	if IsIdentityMaskedAccount(account) {
+		return nil, museSyncMaskedAccountRejected
+	}
 	rawModels, status, fetchErr := s.fetchMuseUpstreamCatalog(ctx, account)
 
 	prevFailures := 0

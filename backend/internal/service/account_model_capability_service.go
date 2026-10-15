@@ -16,7 +16,7 @@ var ErrAccountModelCapabilityInvalid = errors.New("invalid account model capabil
 
 // AccountModelCapabilityRepository 定义能力标记的数据访问接口。
 //
-// 能力是 (账号, 上游模型, 协议) 三元组属性（docs/capability-routing-plan.md §3.3）。
+// 能力是 (账号, 上游模型, 协议) 三元组属性（docs-local/capability-routing-plan.md §3.3）。
 type AccountModelCapabilityRepository interface {
 	// Get 按 (accountID, upstreamModel, protocol) 三元组读取一条标记；
 	// 未命中返回 (nil, nil)。

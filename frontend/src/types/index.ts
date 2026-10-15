@@ -1392,12 +1392,21 @@ export interface Account {
   quota_dimensions?: QuotaDimensionItem[]
   // 余额不足出口（与服务端 DTO 逐字锁定的顶层字段，两态兼容）。
   balance_low?: boolean
+  // 后端选路事实源 RelayProbeTargetURL 的布尔投影（enabled 且 URL 可解析/可推导）。
+  // 前端是否显示余额探测单元格的唯一能力源：配错账号（enabled 但无可解析 URL 且非
+  // 官方端点）整格不出现。false/缺省省略（与后端 DTO 字段逐字对齐，两态兼容）。
+  balance_probe_capable?: boolean
   // 影子账号回填的母账号信息（仅影子非空）
   parent_email?: string
   parent_plan_type?: string
   parent_privacy_mode?: string
   parent_subscription_expires_at?: string
   parent_chatgpt_account_id?: string
+
+  // 账号归属的 Cursor 激活码（quota key）脱敏标量（C5b / 方案 §4.5）。
+  // 仅 cursor 平台账号必填；非 cursor / 未归属时为 null/省略。
+  quota_key_id?: number | null
+  quota_key_label?: string | null
 }
 
 // The admin account list may return this compact shape when lite=1. Detail
@@ -1645,6 +1654,8 @@ export interface CreateAccountRequest {
   auto_pause_on_expired?: boolean
   upstream_billing_probe_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
+  // Cursor 站点渠道账号归属的激活码（quota key）。仅 cursor 平台必填（方案 §4.2 / §4.5）。
+  quota_key_id?: number | null
 }
 
 export interface UpdateAccountRequest {

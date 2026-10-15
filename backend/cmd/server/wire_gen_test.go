@@ -72,7 +72,6 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // codeBuddyQuotaCheck
 		nil, // apiKeyBalanceProbeCheck
 		nil, // accountHealthRecoveryProbe
-		nil, // maskedIdentityProbe
 		codexVersionSyncSvc,
 		claudeCodeVersionSyncSvc,
 		proxyExpirySvc,
@@ -99,6 +98,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // channelMonitorRunner
 		nil, // promoIntelService
 		nil, // channelMonitorV2Aggregator
+		nil, // channelMonitorProbeWorker
 		nil, // quotaFlusher
 		nil, // upstreamBillingProbe
 		nil, // ollamaCloudUsage
@@ -111,6 +111,9 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // promptAudit
 		nil, // pluginManager
 		nil, // quotaLifecycle
+		nil, // quotaKeySweeper (D-CURSOR-017)
+		nil, // cursorAccountRetention (D-CURSOR-017)
+		nil, // quotaKeyReconciler (D-CURSOR-018)
 	)
 
 	require.NotPanics(t, func() {

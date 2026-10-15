@@ -562,6 +562,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/quota-keys',
+    name: 'AdminQuotaKeys',
+    component: () => import('@/views/admin/QuotaKeysView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Quota Key Management',
+      titleKey: 'admin.quotaKeys.title',
+      descriptionKey: 'admin.quotaKeys.description'
+    }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),

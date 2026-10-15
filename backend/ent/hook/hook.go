@@ -357,6 +357,18 @@ func (f ProxyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProxyMutation", m)
 }
 
+// The QuotaKeyFunc type is an adapter to allow the use of ordinary
+// function as QuotaKey mutator.
+type QuotaKeyFunc func(context.Context, *ent.QuotaKeyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f QuotaKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.QuotaKeyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.QuotaKeyMutation", m)
+}
+
 // The RedeemBatchFunc type is an adapter to allow the use of ordinary
 // function as RedeemBatch mutator.
 type RedeemBatchFunc func(context.Context, *ent.RedeemBatchMutation) (ent.Value, error)

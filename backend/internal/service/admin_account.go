@@ -14,7 +14,10 @@ import (
 	"strings"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -600,7 +603,7 @@ func hasWebLoginShapeCredential(platform string, credentials map[string]any) boo
 // credentials["access_mode"]="web"，平台归并后唯一形态）：
 // 仅接受 apikey 类型（静态登录态凭证）；DeepSeek/Zhipu 须提供非空整串 Cookie，
 // Kimi 须提供非空 access_token（refresh_token/user_id 可选）；base_url 为可选的
-// 官方域名覆盖。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
+// 官方域名覆盖。字段口径见 docs-local/web-reverse-embedded-login-plan.md §3.2。
 // 仅做准入校验，不含任何上游请求逻辑（适配器见 W2-W4）。
 // access_mode 非法显式值（非 api/web/空）在此拒绝持久化。
 func validateWebAccountCredential(platform, accountType string, credentials map[string]any) error {
@@ -692,6 +695,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Priority:    input.Priority,
 		Status:      StatusActive,
 		Schedulable: true,
+		// C2（v3.3 §4.2）：账号归属激活码落库（cursor 必填已由
+		// validateAccountQuotaKeyBinding 前置校验，DB CHECK 兜底）。
+		QuotaKeyID: input.QuotaKeyID,
 	}
 	if input.ProbeEnabled != nil && *input.ProbeEnabled {
 		if !isUpstreamBillingProbeAccount(account) {
@@ -734,11 +740,74 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	return account, nil
 }
 
+// resolveUpdateQuotaKeyID 解析更新入口的归属三态（R-D/#3）。
+//
+//   - 未提供（QuotaKeyIDSet=false）→ 沿用现有归属，provided=false（不修改）
+//   - 显式清空（QuotaKeyIDSet=true 且值为 nil）→ 清空，provided=true
+//   - 提供值（QuotaKeyIDSet=true 且值非 nil）→ 设置为该激活码，provided=true
+func resolveUpdateQuotaKeyID(existing *int64, input *UpdateAccountInput) (effective *int64, provided bool) {
+	if input == nil || !input.QuotaKeyIDSet {
+		return existing, false
+	}
+	return input.QuotaKeyID, true
+}
+
+// checkQuotaKeyExists 校验"提供值"场景的激活码存在性（未软删）。
+//
+// entClient 未注入时（单测替身、窄内部调用方）跳过，交由 DB FK/CHECK 兜底。
+func (s *adminServiceImpl) checkQuotaKeyExists(ctx context.Context, quotaKeyID int64) error {
+	if s.entClient == nil {
+		return nil
+	}
+	exists, err := s.entClient.QuotaKey.Query().
+		Where(quotakey.IDEQ(quotaKeyID), quotakey.DeletedAtIsNil()).
+		Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("admin: load quota key %d: %w", quotaKeyID, err)
+	}
+	if !exists {
+		return infraerrors.Newf(http.StatusBadRequest, "QUOTA_KEY_NOT_FOUND",
+			"quota key %d does not exist", quotaKeyID)
+	}
+	return nil
+}
+
+// createViaQuotaKeyCapacity 报告本次建号是否必须经 ≤15 集中入口写入（D-CURSOR-034）：
+// cursor 平台 + 提供归属激活码 + ent 客户端可用。
+//
+// 命中时"存在性 + active + working < MaxAccountsPerQuotaKey"三判定与账号写入在集中入口
+// 的同一 advisory 互斥域 / 同一事务内完成（计数、判定、写入不再分散到本文件）；
+// 不命中时（非 cursor 平台、未归属、无 ent 客户端的窄内部调用方）沿用 DB 约束兜底的
+// 既有行为，存在性校验仍在本文件完成。
+func (s *adminServiceImpl) createViaQuotaKeyCapacity(input *CreateAccountInput) bool {
+	return input.Platform == domain.PlatformCursor && input.QuotaKeyID != nil && s.entClient != nil
+}
+
+// AccountTxCreator 是账号仓储"在调用方指定的 ent 事务内插入账号行"的窄能力。
+// ≤15 集中强制要求"计数判定"与"账号写入"落在同一事务 / 同一 advisory 互斥域内，
+// 故 cursor 建号必须经此事务版写入口；未实现该窄接口的仓储（窄测试替身）fail-closed 拒绝，
+// 不静默回落到"锁外写入"（那样等于重新打开 r4 #1 的绕过窗口）。
+type AccountTxCreator interface {
+	CreateWithTx(ctx context.Context, tx *dbent.Tx, account *Account) error
+}
+
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
 	// web 凭据旁路关闭（收敛项 2）：普通创建入口显式 access_mode=web 一律拒绝；
 	// web 登录链（web-login-password / web-login-sms）内部建号经 FromWebLogin 豁免。
 	if err := rejectWebCredentialForNormalEntry(input.Platform, input.Type, input.Credentials, input.FromWebLogin); err != nil {
 		return nil, err
+	}
+	// C2（v3.3 §4.2 / v3.4 §2.1）：cursor 平台账号必须归属激活码（应用层校验，DB CHECK
+	// 兜底）；非 cursor 平台必须保持 NULL——携带归属即拒绝（D-CURSOR-035，终审 r5 F1）。
+	if err := validateAccountQuotaKeyBinding(input.Platform, input.QuotaKeyID); err != nil {
+		return nil, err
+	}
+	// #2b / D-CURSOR-034：走集中入口的建号由入口在持锁事务内完成存在性判定，
+	// 此处不重复查一次；其余场景沿用既有存在性校验，避免 FK 违规退化成 500。
+	if input.QuotaKeyID != nil && !s.createViaQuotaKeyCapacity(input) {
+		if err := s.checkQuotaKeyExists(ctx, *input.QuotaKeyID); err != nil {
+			return nil, err
+		}
 	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
@@ -808,7 +877,20 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
 	}
-	if err := s.accountRepo.Create(ctx, account); err != nil {
+	// ≤15 集中强制（D-CURSOR-034）：命中集中入口时，"持锁 → 未软删/active/working 计数
+	// → 判定 → 建号 → 提交"全部由 withQuotaKeyCapacityTx 在同一互斥域同一事务内完成；
+	// 其余场景沿用既有非事务写入（非 cursor / 未归属 / 无 ent 客户端的窄内部调用方）。
+	if s.createViaQuotaKeyCapacity(input) {
+		creator, ok := s.accountRepo.(AccountTxCreator)
+		if !ok {
+			return nil, errors.New("admin: account repository does not support in-transaction create")
+		}
+		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *input.QuotaKeyID, func(tx *dbent.Tx) error {
+			return creator.CreateWithTx(ctx, tx, account)
+		}); err != nil {
+			return nil, err
+		}
+	} else if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
 	}
 
@@ -851,6 +933,31 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	// C2（v3.3 §4.2 / v3.4 §2.1）：cursor 平台账号改号也必须保持归属激活码（应用层校验，
+	// DB CHECK 兜底）；非 cursor 账号必须保持 NULL——改号时把归属绑上去同样拒绝
+	// （D-CURSOR-035，终审 r5 F1）。
+	// 校验的是"合并后的有效归属"而不是裸 input.QuotaKeyID：未提供时沿用 existing，
+	// 否则现有 cursor 账号只要编辑（不改归属）就会因为请求里没有 quota_key_id 被判非法（#3）。
+	// 反向同理：非 cursor 账号沿用 existing 时若已带归属（历史脏数据）也判非法，
+	// 需显式 QuotaKeyIDSet=true + nil 清空后才可编辑——不静默保留越平台绑定。
+	effectiveQuotaKeyID, quotaKeyProvided := resolveUpdateQuotaKeyID(account.QuotaKeyID, input)
+	if err := validateAccountQuotaKeyBinding(account.Platform, effectiveQuotaKeyID); err != nil {
+		return nil, err
+	}
+	// 提供值 → 校验该激活码存在（沿用既有口径：不存在就是坏引用，不当成清空处理）。
+	//
+	// 归属改到【不同】的 key 会净增目标 key 的 working 计数，必须经 ≤15 集中入口判定；
+	// 入口在持锁事务内一并完成存在性判定，故此处不重复查一次。
+	// rebindViaQuotaKeyCapacity = true 时这场写入连同判定在同一事务提交（修 r4 #1 改绑绕过）。
+	rebindViaQuotaKeyCapacity := false
+	if quotaKeyProvided && effectiveQuotaKeyID != nil {
+		rebindViaQuotaKeyCapacity = account.QuotaKeyID == nil || *account.QuotaKeyID != *effectiveQuotaKeyID
+	}
+	if quotaKeyProvided && effectiveQuotaKeyID != nil && !(rebindViaQuotaKeyCapacity && s.entClient != nil) {
+		if err := s.checkQuotaKeyExists(ctx, *effectiveQuotaKeyID); err != nil {
+			return nil, err
+		}
 	}
 	// B3a 冻结：捕捉更新前快照用于身份字段不变性判定（方案 §3.1-2）。
 	// 浅拷贝：仅读 Platform/ParentAccountID/QuotaDimension 等值，更新路径不会重赋值
@@ -1169,6 +1276,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			account.LoadFactor = input.LoadFactor
 		}
 	}
+	// 归属激活码三态（#3）：仅"显式提供"时写入；未提供 = 沿用现有归属，不动。
+	if quotaKeyProvided {
+		account.QuotaKeyID = effectiveQuotaKeyID
+	}
 	if input.Status != "" {
 		account.Status = input.Status
 	}
@@ -1215,35 +1326,54 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		// AdminAccountRepository.
 		updater, _ = s.accountRepo.(AccountBillingSettingsRepository)
 	}
-	if updater != nil {
-		if err := updater.UpdateWithAccountBillingSettings(
-			ctx,
-			account,
-			requestedProbeEnabledUpdate,
-			requestedRateSyncEnabledUpdate,
-			input.RateMultiplier,
-		); err != nil {
-			return nil, err
+	// persistAccountWrite 是本次账号写入的唯一实现，供"集中入口内同事务写入"与
+	// "常规写入"两种包裹复用：仓储的 Update/UpdateWithAccountBillingSettings 均认
+	// 得 ctx 上的既有事务（dbent.TxFromContext），故把入口的 tx 挂进 ctx 即可让写入
+	// 与 ≤15 判定共处同一事务，不必再复制一份写入分支。
+	persistAccountWrite := func(writeCtx context.Context) error {
+		if updater != nil {
+			if err := updater.UpdateWithAccountBillingSettings(
+				writeCtx,
+				account,
+				requestedProbeEnabledUpdate,
+				requestedRateSyncEnabledUpdate,
+				input.RateMultiplier,
+			); err != nil {
+				return err
+			}
+			billingSettingsAppliedAtomically = true
 		}
-		billingSettingsAppliedAtomically = true
+		if !billingSettingsAppliedAtomically {
+			if err := s.accountRepo.Update(writeCtx, account); err != nil {
+				return err
+			}
+			if (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) &&
+				isUpstreamBillingProbeAccount(account) {
+				settings := make(map[string]any, 2)
+				if requestedProbeEnabledUpdate != nil {
+					settings[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
+				}
+				if requestedRateSyncEnabledUpdate != nil {
+					settings[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
+				}
+				if err := s.accountRepo.UpdateExtra(writeCtx, account.ID, settings); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
-	if !billingSettingsAppliedAtomically {
-		if err := s.accountRepo.Update(ctx, account); err != nil {
+	// ≤15 集中强制（D-CURSOR-034）：改绑到不同 key 时净增目标 key 的 working 计数，
+	// 判定（存在/active/容量）与本次写入必须在同一 advisory 互斥域同一事务内完成，
+	// 不再各自取锁计数（修 r4 #1：改绑可绕过上限）。
+	if rebindViaQuotaKeyCapacity && s.entClient != nil {
+		if err := withQuotaKeyCapacityTx(ctx, s.entClient, *effectiveQuotaKeyID, func(tx *dbent.Tx) error {
+			return persistAccountWrite(dbent.NewTxContext(ctx, tx))
+		}); err != nil {
 			return nil, err
 		}
-		if (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) &&
-			isUpstreamBillingProbeAccount(account) {
-			settings := make(map[string]any, 2)
-			if requestedProbeEnabledUpdate != nil {
-				settings[UpstreamBillingProbeEnabledExtraKey] = *requestedProbeEnabledUpdate
-			}
-			if requestedRateSyncEnabledUpdate != nil {
-				settings[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
-			}
-			if err := s.accountRepo.UpdateExtra(ctx, account.ID, settings); err != nil {
-				return nil, err
-			}
-		}
+	} else if err := persistAccountWrite(ctx); err != nil {
+		return nil, err
 	}
 
 	// 将 proxy 变更传播到 spark 影子账号（同步；Update 内部已触发调度快照）。

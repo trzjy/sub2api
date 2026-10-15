@@ -236,7 +236,23 @@ export default {
         lastUsed: '最近使用',
         createdAt: '创建时间',
         expiresAt: '过期时间',
+        quotaKey: '归属激活码',
         actions: '操作'
+      },
+      // Cursor 站点渠道激活码归属（C6 / 方案 §4.5）
+      quotaKey: {
+        unassigned: '未归属',
+        selectorLabel: '归属激活码',
+        selectorHint: 'Cursor 平台账号必须选择归属激活码',
+        selectorRequired: '请选择一个激活码',
+        selectorGroupAvailable: '可用激活码',
+        selectorGroupExhausted: '已耗尽激活码',
+        selectorGroupExpired: '已过期激活码',
+        selectorEmpty: '暂无可选激活码',
+        selectorLoading: '加载激活码…',
+        selectorExpand: '展开激活码列表',
+        selectorCollapse: '收起激活码列表',
+        loadError: '加载激活码列表失败'
       },
       schedulerScore: {
         baseShort: '普通',
@@ -574,6 +590,11 @@ export default {
         unlimited: '订阅 · 不限量',
         unlimitedWithPlan: '{plan} · 不限量',
         remainingCount: '剩余 {count}',
+        // 次卡（上游 mode=quota_limited）：balance 字段装的是剩余「次数」而非金额，
+        // 文案不带币种前缀；有分母展示「剩余/总量」，无分母只展示剩余次数。
+        countPack: '次卡',
+        countPackRemaining: '次卡 {remaining}/{limit}',
+        countPackNoLimit: '次卡 剩余 {count}',
         expiresAt: '至 {date}',
         monthlyUsage: '月用 ${amount}',
         noBalanceEndpoint: '该平台暂无余额查询接口',
@@ -614,6 +635,20 @@ export default {
         staleMinutes: '{minutes} 分钟',
         staleHours: '{hours} 小时',
         staleDays: '{days} 天',
+        // 余额探测错误码本地化映射（派发单 balance-ui-errmap）：仅收录「配置/账号类」
+        // 用户可行动的码；命中则替换后端英文 message，未命中/无码回退既有渲染。
+        // 瞬时/上游类（REQUEST_FAILED / REQUEST_BUILD_FAILED / PROBE_RESULT_INVALID /
+        // CODING_PLAN）刻意不进表——保持现有通用渲染不变。
+        probeErrors: {
+          CN_BALANCE_INVALID_CONFIG: '余额探测配置不完整：access_token 与 count_unit 必须同时配置',
+          CN_BALANCE_NOT_CONFIGURED: '余额探测服务未配置，请联系管理员开启',
+          CN_BALANCE_TH_NOT_CONFIGURED: 'TokenHarbor 订阅服务未配置，请联系管理员开启',
+          CN_BALANCE_NO_APIKEY: '账号 API Key 为空，请补全凭据后再查询余额',
+          CN_BALANCE_NO_ENDPOINT: '该账号所在平台没有可用的余额查询端点',
+          CN_BALANCE_URL_REJECTED: '余额探测地址不在允许范围内，请检查探测地址配置',
+          CN_BALANCE_INVALID_PLATFORM: '该账号不是国产供应商账号，不支持余额探测',
+          CN_BALANCE_ACCOUNT_NOT_FOUND: '账号不存在或已被删除'
+        }
       },
       types: {
         oauth: 'OAuth',

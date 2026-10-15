@@ -237,7 +237,7 @@ func isCompositeOwnableAccountPlatform(platform string) bool {
 // Claude 默认模型。集中定义于此，供 gateway_handler 与 admin account_handler 共用，
 // 避免两处各写一份导致漂移。
 //
-// 归并后签名（docs/platform-merge-refactor-plan.md §5.6，PR-4 旧链归零）：键为官方
+// 归并后签名（docs-local/platform-merge-refactor-plan.md §5.6，PR-4 旧链归零）：键为官方
 // 平台值（zhipu/deepseek/kimi）+ 显式 access_mode="web" 双键；失败关闭——缺省 mode
 // 或 mode 非 "web" 一律返回 nil，调用方必须显式声明 web 语境，杜绝「只按平台、
 // 不按接入模式」的模糊判定（本轮重构红线）。
@@ -262,7 +262,7 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 		// 请求会被上游以 invalid_argument 拒绝的付费模型；免费档实测可用的 k2d6 /
 		// k2d6-chat 从未出现在下拉里，管理员配的账号级 model_mapping 又被 web 分支
 		// 忽略，形成死循环。
-		// 依据 docs/web-reverse-analysis-plan.md §60（免费档实测仅 k2d6 / k2d6-chat 可用）
+		// 依据 docs-local/web-reverse-analysis-plan.md §60（免费档实测仅 k2d6 / k2d6-chat 可用）
 		// 与 §167（kimi-k3 → k3 需付费订阅，生产建议映射 kimi-k3 → k2d6-chat）补全。
 		// 免费档可用项置前，便于用户选到能用的；付费档 k3 / k3-agent-ultra 保留。
 		//
@@ -280,7 +280,7 @@ func DefaultWebModelIDs(platform string, mode ...string) []string {
 
 // ValidateWebModel 校验指定官方平台的 web 接入模式账号入站模型是否在默认目录内；
 // model 为空或不在允许集合内时返回非 nil error，使未知模型失败关闭
-// （docs/platform-merge-refactor-plan.md §5.6：Web 账号不得回落 API 模型目录、不猜测）。
+// （docs-local/platform-merge-refactor-plan.md §5.6：Web 账号不得回落 API 模型目录、不猜测）。
 // 错误信息仅含模型名与平台，不泄露任何凭证。
 //
 // 各 web 适配器接受的公开 ID 一律取自 DefaultWebModelIDs（唯一 SSOT），避免两份名单
@@ -315,7 +315,7 @@ func ValidateWebModel(provider, model string) error {
 
 // MergeAndDedupModelIDs 合并多个模型目录源并对同名 ID 去重，保留首次出现顺序。用于
 // /models 聚合输出：web 账号与 API 账号同组时，deepseek-chat / deepseek-reasoner 等同名
-// 单条目只出现一次（docs/platform-merge-refactor-plan.md §5.6 B4 同名模型去重）。
+// 单条目只出现一次（docs-local/platform-merge-refactor-plan.md §5.6 B4 同名模型去重）。
 func MergeAndDedupModelIDs(sources ...[]string) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)

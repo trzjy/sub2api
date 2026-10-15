@@ -291,6 +291,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		GroupIDs:                a.GroupIDs,
 		ParentAccountID:         a.ParentAccountID,
 		QuotaDimension:          a.QuotaDimension,
+		QuotaKeyID:              a.QuotaKeyID,
 	}
 
 	// 规范化额度维度 + 余额不足标记（方案 §3.4 / C5）：由 service 层同一 resolver 输出，
@@ -298,6 +299,10 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	now := time.Now()
 	out.QuotaDimensions = accountQuotaDimensionsFromService(a, now)
 	out.BalanceLow = accountBalanceLowFromExtra(a)
+	// 后端选路事实源 RelayProbeTargetURL 的布尔投影（enabled 且 URL 可解析/可推导）。
+	// 本层只投影，不重新推导 URL 规则——单一事实源在 service（禁区本体不动）。
+	// RelayProbeTargetURL 返回 (string, bool)，bool 即"已选中 relay 目标"的有效探测能力。
+	_, out.BalanceProbeCapable = service.RelayProbeTargetURL(a)
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
 	if a.IsAnthropicOAuthOrSetupToken() {
@@ -623,8 +628,11 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		QuotaDimension: a.QuotaDimension, ParentEmail: a.ParentEmail, ParentPlanType: a.ParentPlanType,
 		ParentPrivacyMode: a.ParentPrivacyMode, ParentSubscriptionExpiresAt: a.ParentSubscriptionExpiresAt,
 		ParentChatGPTAccountID: a.ParentChatGPTAccountID, Proxy: a.Proxy, GroupIDs: a.GroupIDs,
-		QuotaDimensions: a.QuotaDimensions,
-		BalanceLow:      a.BalanceLow,
+		QuotaKeyID:          a.QuotaKeyID,
+		QuotaKeyLabel:       a.QuotaKeyLabel,
+		QuotaDimensions:     a.QuotaDimensions,
+		BalanceLow:          a.BalanceLow,
+		BalanceProbeCapable: a.BalanceProbeCapable,
 	}
 }
 

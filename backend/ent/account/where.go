@@ -115,6 +115,11 @@ func ProxyFallbackOriginID(v int64) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldProxyFallbackOriginID, v))
 }
 
+// QuotaKeyID applies equality check predicate on the "quota_key_id" field. It's identical to QuotaKeyIDEQ.
+func QuotaKeyID(v int64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldQuotaKeyID, v))
+}
+
 // Concurrency applies equality check predicate on the "concurrency" field. It's identical to ConcurrencyEQ.
 func Concurrency(v int) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldConcurrency, v))
@@ -903,6 +908,36 @@ func ProxyFallbackOriginIDIsNil() predicate.Account {
 // ProxyFallbackOriginIDNotNil applies the NotNil predicate on the "proxy_fallback_origin_id" field.
 func ProxyFallbackOriginIDNotNil() predicate.Account {
 	return predicate.Account(sql.FieldNotNull(FieldProxyFallbackOriginID))
+}
+
+// QuotaKeyIDEQ applies the EQ predicate on the "quota_key_id" field.
+func QuotaKeyIDEQ(v int64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldQuotaKeyID, v))
+}
+
+// QuotaKeyIDNEQ applies the NEQ predicate on the "quota_key_id" field.
+func QuotaKeyIDNEQ(v int64) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldQuotaKeyID, v))
+}
+
+// QuotaKeyIDIn applies the In predicate on the "quota_key_id" field.
+func QuotaKeyIDIn(vs ...int64) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldQuotaKeyID, vs...))
+}
+
+// QuotaKeyIDNotIn applies the NotIn predicate on the "quota_key_id" field.
+func QuotaKeyIDNotIn(vs ...int64) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldQuotaKeyID, vs...))
+}
+
+// QuotaKeyIDIsNil applies the IsNil predicate on the "quota_key_id" field.
+func QuotaKeyIDIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldQuotaKeyID))
+}
+
+// QuotaKeyIDNotNil applies the NotNil predicate on the "quota_key_id" field.
+func QuotaKeyIDNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldQuotaKeyID))
 }
 
 // ConcurrencyEQ applies the EQ predicate on the "concurrency" field.
@@ -1942,6 +1977,29 @@ func HasUsageLogs() predicate.Account {
 func HasUsageLogsWith(preds ...predicate.UsageLog) predicate.Account {
 	return predicate.Account(func(s *sql.Selector) {
 		step := newUsageLogsStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasQuotaKey applies the HasEdge predicate on the "quota_key" edge.
+func HasQuotaKey() predicate.Account {
+	return predicate.Account(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, QuotaKeyTable, QuotaKeyColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasQuotaKeyWith applies the HasEdge predicate on the "quota_key" edge with a given conditions (other predicates).
+func HasQuotaKeyWith(preds ...predicate.QuotaKey) predicate.Account {
+	return predicate.Account(func(s *sql.Selector) {
+		step := newQuotaKeyStep()
 		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
 			for _, p := range preds {
 				p(s)

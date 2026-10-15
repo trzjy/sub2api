@@ -341,12 +341,15 @@ func TestCommandCodeWindowsIgnoredWithPurchasedCredits(t *testing.T) {
 	require.Nil(t, cnProviderQuotaSnapshotReset(account, time.Now()))
 }
 
-// commandCodeCheckRepo 按平台列出账号，并记录周期检测对账号的停调。
+// commandCodeCheckRepo 按平台列出账号，并记录周期检测对账号的停调。嵌入共享基类
+// cnTestActiveAccountRepo（见 cline_test.go），由基类具体提供 ListActive，消除"嵌入空
+// AccountRepository 接口 + 方法提升 → nil 解引用"（runOnce 第 379 行 B2 全量补收轮经
+// ListActive 触发）。这是 644 / ProbesCommandCode 两个夹具共用同一 runOnce 路径却各自撞
+// 同一空点的根因；根因修复收敛为共享基类，而非逐夹具打补丁。
 type commandCodeCheckRepo struct {
-	AccountRepository
-	accounts []Account
-	mu       sync.Mutex
-	paused   []int64
+	cnTestActiveAccountRepo
+	mu     sync.Mutex
+	paused []int64
 }
 
 func (r *commandCodeCheckRepo) ListByPlatform(_ context.Context, platform string) ([]Account, error) {
@@ -393,7 +396,7 @@ func TestCNProviderBalanceCheckRunOnceProbesCommandCode(t *testing.T) {
 	inactive := *commandCodeUsageAccount()
 	inactive.ID, inactive.Status = 4, StatusDisabled
 
-	repo := &commandCodeCheckRepo{accounts: []Account{official, manualOff, relay, inactive}}
+	repo := &commandCodeCheckRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{official, manualOff, relay, inactive}}}
 	prober := &commandCodeBalanceProber{balance: 0.2}
 	cfg := &config.Config{}
 	cfg.Gateway.CNProviders.BalanceThreshold = 0.5
@@ -590,8 +593,11 @@ func TestCommandCodeSpendLimitScope(t *testing.T) {
 }
 
 // commandCodeStatefulRepo 把停调写回同一个账号对象，用于验证完整的状态转换。
+// 嵌入共享基类 cnTestActiveAccountRepo（见 cline_test.go）由其具体提供 ListActive，
+// 消除"嵌入空 AccountRepository 接口 + 方法提升 → nil 解引用"的脆弱性（与 clineAccountRepo
+// / commandCodeCheckRepo 同源根因，统一收敛为共享基类，避免同类夹具各自撞空点）。
 type commandCodeStatefulRepo struct {
-	AccountRepository
+	cnTestActiveAccountRepo
 	account    *Account
 	clearCalls int
 }
@@ -627,7 +633,7 @@ func commandCodeCreditsBody(purchased float64) string {
 func TestCommandCodeWindowCooldownClearedAfterTopUp(t *testing.T) {
 	account := commandCodeUsageAccount()
 	account.Schedulable = true
-	repo := &commandCodeStatefulRepo{account: account}
+	repo := &commandCodeStatefulRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}, account: account}
 	rateLimit := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 
 	rateLimit.HandleUpstreamError(context.Background(), account, http.StatusTooManyRequests, http.Header{},
@@ -666,7 +672,7 @@ func TestCommandCodeTopUpKeepsOtherCooldowns(t *testing.T) {
 		account.Schedulable = true
 		account.TempUnschedulableUntil = &until
 		account.TempUnschedulableReason = reason
-		repo := &commandCodeStatefulRepo{account: account}
+		repo := &commandCodeStatefulRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}, account: account}
 		upstream := newCommandCodeAlphaUpstream(`{"org": null}`)
 		upstream.responses["/alpha/billing/credits"] = commandCodeAlphaResponse{status: http.StatusOK, body: commandCodeCreditsBody(20)}
 

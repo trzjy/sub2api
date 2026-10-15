@@ -9,7 +9,7 @@ import (
 )
 
 // Task A (PR-1 平台归并重构)：B3 两级池 + B2 /v1/messages 过滤 + 显式非法 access_mode
-// fail-closed。以下测试钉死 docs/platform-merge-refactor-plan.md §5.1/§5.2 的核心行为。
+// fail-closed。以下测试钉死 docs-local/platform-merge-refactor-plan.md §5.1/§5.2 的核心行为。
 
 // --- 纯函数层（候选序单测，PR-1 必需） ---
 

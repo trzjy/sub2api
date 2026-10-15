@@ -6,11 +6,16 @@
   >
     <!-- ============ L5 显示互斥 ============
          TH 有 Pass（th_pass_snapshot.has_pass=true）→ 只渲染订阅用量窗口；
-         TH 无 Pass → 只渲染免费用量窗口（7 天滚动，仅官方已用计数）；
-         Kira → 只渲染免费用量窗口（当日已用/上限 + reset_at 倒计时 + VND 余额）。
-         三条路径 v-if/v-else 互斥，不混算（L1）。不做 $ 换算/剩余估算/重置卡（L6）。 -->
+         TH 无 Pass → 只渲染免费用量窗口（7 天滚动计数 + th free-tier 状态）；
+         Kira → 只渲染用量窗口（当日已用/上限 + reset_at 倒计时 + VND 余额）。
+         三条路径 v-if/v-else 互斥，不混算（L1）。不做 $ 换算/剩余估算/重置卡（L6）。
 
-    <!-- TH 订阅链：Pass 档位 + 周期重置倒计时 + 本期已用（today/7d/renew 切换）+ 状态 -->
+         派发单 F4 口径：类别文案（免费/付费/订阅）是多余设计，已整体删除（含底部
+         维度面板与其 kind 标签）。数据展示（进度条/金额/状态徽标）自己说明自己；
+         quota_dimensions 仍作为状态判定的唯一事实源（三分支可见性继续消费维度
+         status 与 observed_at），只是不再渲染类别标签行。 -->
+
+    <!-- TH 订阅链：Pass 档位 + 周期重置倒计时 + 本期已用（today/7d/renew 切换）+ 津贴进度 -->
     <div v-if="showPassWindow" data-test="cn-quota-pass-window" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1.5">
         <span
@@ -27,10 +32,8 @@
         >
           {{ resetAtLabel }}
         </span>
-        <!-- 单轨收敛（方案 §3.4 / 派发单 UNIFY-QUOTA-UI-20261010）：删除 Pass 窗口头部
-             的重复状态徽标（旧 lifecycle/plan_exhausted 派生）；订阅/免费状态的唯一出口 =
-             下方规范化维度面板（cn-quota-dimensions）的对应维度行。恢复倒计时改由订阅维度
-             status==='exhausted' 驱动（recovery_at 取值路径不变，仍读 cn_quota_lifecycle）。 -->
+        <!-- 恢复倒计时：订阅维度 status==='exhausted' 驱动（recovery_at 取值路径不变，
+             仍读 cn_quota_lifecycle）。 -->
         <span
           v-if="exhausted && recoveryAt"
           data-test="cn-quota-recovery"
@@ -80,9 +83,21 @@
         :stale-note="thStaleNote"
         color="indigo"
       />
+      <!-- 同一 invariant 的第二分支：从未探测（订阅维度 status=unknown 且 observed_at
+           缺失 且 无 plan_used_pct）→「未知」徽标，不假显 0%；维度缺失（旧 DTO）→
+           既不渲染进度条也不渲染徽标（不造状态）。 -->
+      <div
+        v-else-if="passPlanUnknownVisible"
+        data-test="cn-quota-pass-plan-unknown"
+        class="flex flex-wrap items-center gap-1"
+      >
+        <span :class="unknownBadgeClass">
+          {{ t('admin.accounts.cnProviders.dimensionStatusUnknown') }}
+        </span>
+      </div>
     </div>
 
-    <!-- TH 免费链：7 天滚动计数，只显示已用（无官方分母，L6/L7） -->
+    <!-- TH 免费链：7 天滚动计数 + th free-tier 状态（有值→进度条，无值→「未知」徽标） -->
     <div v-else-if="isTokenHarbor" data-test="cn-quota-free-window" class="space-y-1">
       <div
         data-test="cn-quota-free-7d"
@@ -90,14 +105,34 @@
       >
         {{ free7dLabel }}
       </div>
+      <!-- th free-tier（th_pass_snapshot.used_pct，官方免费津贴已用百分比）：
+           三分支判定源 = free 维度（source=th_pass_snapshot, kind=free）status/observed_at。 -->
+      <UsageProgressBar
+        v-if="thFreeBarVisible"
+        data-test="cn-quota-th-free-bar"
+        :label="t('admin.accounts.cnProviders.planLabel')"
+        :utilization="thFreePct ?? 0"
+        :unknown-usage="thFreePct == null"
+        :stale="thFreeStale"
+        :stale-note="thFreeStaleNote"
+        color="indigo"
+      />
+      <div
+        v-else-if="thFreeUnknownVisible"
+        data-test="cn-quota-th-free-unknown"
+        class="flex flex-wrap items-center gap-1"
+      >
+        <span :class="unknownBadgeClass">
+          {{ t('admin.accounts.cnProviders.dimensionStatusUnknown') }}
+        </span>
+      </div>
     </div>
 
-    <!-- Kira 免费链：当日已用/上限进度条 + reset_at 倒计时 + VND 余额 -->
+    <!-- Kira 用量链：当日已用/上限进度条 + reset_at 倒计时 + VND 余额 -->
     <div v-else data-test="cn-quota-kira-window" class="space-y-1">
-      <!-- 单轨口径（方案 §3.4）：免费进度条 + 已用/上限数值的可见性 = 免费维度
-           （quota_dimensions source=kira_usage_snapshot）status !== 'unknown'。
-           status=unknown → 不渲染旧快照百分比/金额（防同屏旧数值）；维度缺失（旧 DTO）→
-           降级按既有快照渲染。planUsedPct 等数值来源不变，仅加维度状态门。 -->
+      <!-- 当日进度条（used_percent）：数值存在即渲染；free 维度 status=unknown 且数值存在
+           → 灰度条 + observed_at 陈旧标注；从未探测（status=unknown 且无 observed_at 且
+           无数值）→「未知」徽标，不渲染旧快照百分比。 -->
       <UsageProgressBar
         v-if="kiraFreeVisible"
         data-test="cn-quota-kira-bar"
@@ -110,6 +145,15 @@
         color="emerald"
       />
       <div
+        v-else-if="kiraFreeUnknownVisible"
+        data-test="cn-quota-kira-free-unknown"
+        class="flex flex-wrap items-center gap-1"
+      >
+        <span :class="unknownBadgeClass">
+          {{ t('admin.accounts.cnProviders.dimensionStatusUnknown') }}
+        </span>
+      </div>
+      <div
         v-if="kiraFreeVisible && kiraUsedTokens != null && kiraLimitTokens != null"
         data-test="cn-quota-kira-used-limit"
         class="text-[10px] leading-4 text-gray-500 dark:text-gray-400"
@@ -121,9 +165,8 @@
         data-test="cn-quota-kira-vnd"
         class="flex flex-wrap items-center gap-1 text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
       >
-        <!-- 单轨口径（方案 §3.4 v24）：付费行是状态唯一出口，删除窗口内孤立 VND 状态徽标
-             （旧 cn-quota-kira-vnd-status）。vndBalance != null 即显示金额；paid 维度
-             status=unknown 且金额存在 → 金额旁附陈旧标注（不再渲染状态徽标）。 -->
+        <!-- vndBalance != null 即显示金额；paid 维度 status=unknown 且金额存在 →
+             金额旁附陈旧标注（staleNote），不再渲染孤立状态徽标。 -->
         <span>{{ t('admin.accounts.cnProviders.kiraVndBalance', { balance: formatVnd(vndBalance) }) }}</span>
         <span
           v-if="kiraVndStaleNote"
@@ -133,36 +176,36 @@
           {{ kiraVndStaleNote }}
         </span>
       </div>
-    </div>
-
-    <!-- 规范化维度面板（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源 =
-         quota_dimensions。前端不再用 extra 键自行判定维度存在/状态；渲染账号实际
-         拥有的全部 account 级维度（含 coding plan monthly 窗口、TH 钱包 paid、
-         Kira paid 等既有窗口分支未覆盖者）。 -->
-    <div v-if="accountDimensions.length" data-test="cn-quota-dimensions" class="space-y-1">
       <div
-        v-for="(dim, i) in accountDimensions"
-        :key="`${dim.source}:${dim.target}:${i}`"
-        data-test="cn-quota-dimension"
+        v-else-if="kiraVndUnknownVisible"
+        data-test="cn-quota-kira-vnd-unknown"
         class="flex flex-wrap items-center gap-1"
       >
-        <span
-          data-test="cn-quota-dimension-kind"
-          class="rounded bg-gray-100 px-1 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-800 dark:text-gray-300"
-        >
-          {{ dimensionKindLabel(dim) }}
-        </span>
-        <span
-          v-if="dimensionStatusVisible(dim)"
-          data-test="cn-quota-dimension-status"
-          :class="dimensionStatusClass(dim.status)"
-        >
-          {{ dimensionStatusLabel(dim.status) }}
+        <span :class="unknownBadgeClass">
+          {{ t('admin.accounts.cnProviders.dimensionStatusUnknown') }}
         </span>
       </div>
     </div>
 
-    <!-- TH 模型级 free-tier 耗尽逐模型展示：scope=model 且 status=exhausted。 -->
+    <!-- TH 钱包 paid 维度（spend_after_allowance=true 且 th_balance 有值）：钱包余额行。
+         无值不渲染（不是状态出口，不造「未知」）。 -->
+    <div
+      v-if="thWalletVisible"
+      data-test="cn-quota-th-wallet"
+      class="flex flex-wrap items-center gap-1 text-[10px] font-medium leading-4 text-emerald-600 dark:text-emerald-300"
+    >
+      <span>{{ thWalletLabel }}</span>
+      <span
+        v-if="thWalletStaleNote"
+        data-test="cn-quota-th-wallet-stale"
+        class="font-normal text-gray-400 dark:text-gray-500"
+      >
+        {{ thWalletStaleNote }}
+      </span>
+    </div>
+
+    <!-- TH 模型级 free-tier 耗尽逐模型展示：scope=model 且 status=exhausted。
+         模型 ID 有信息量，故整块保留（派发单 F4 唯一保留的维度行渲染）。 -->
     <div v-if="exhaustedModelDimensions.length" data-test="cn-quota-model-exhausted" class="space-y-1">
       <div
         v-for="(dim, i) in exhaustedModelDimensions"
@@ -259,111 +302,89 @@ const isTokenHarbor = computed(() => baseHasTokenHarbor(props.account))
 const isKira = computed(() => baseHasKira(props.account))
 const visible = computed(() => isTokenHarbor.value || isKira.value)
 
-// ===== 规范化维度（方案 §3.4 / R5-F3）：维度存在性与状态的唯一事实源 = quota_dimensions =====
-// 不再用 extra 原始键自行判定维度存在/状态；渲染账号实际拥有的全部 account 级维度，
-// 以及 TH 模型级 free-tier 耗尽（scope=model, status=exhausted）逐模型展示。
+// ===== 规范化维度（quota_dimensions）：三分支可见性判定的唯一事实源 =====
+// 派发单 F4：维度不再渲染为类别标签行，但 status / observed_at 仍是展示不变式的唯一
+// 判定源；判定的 DOM 出口改为窗口内的数据展示（进度条 / 金额 /「未知」徽标）。
 const quotaDimensions = computed<QuotaDimensionItem[]>(() => props.account.quota_dimensions ?? [])
-
-// 全部 account 级维度：含 coding plan monthly 窗口、TH 钱包 paid、Kira paid 等
-// 既有窗口分支未覆盖者，统一由本列表驱动渲染。
-const accountDimensions = computed(() => quotaDimensions.value.filter((d) => d.scope === 'account'))
 
 // TH 模型级 free-tier 耗尽：逐模型展示（模型 ID + 耗尽徽标）。
 const exhaustedModelDimensions = computed(() =>
   quotaDimensions.value.filter((d) => d.scope === 'model' && d.status === 'exhausted')
 )
 
-// Kira 付费余额结构化行：source=kira_vnd_balance 维度（paid）驱动，既有 VND 金额取数路径不变。
-const kiraPaidDimension = computed(() =>
-  quotaDimensions.value.find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
-)
-
-// TH 订阅维度（source=th_pass_snapshot, kind=subscription, scope=account）：本组件订阅链
-// 唯一定义的状态出口事实源（方案 §3.4 单轨不变式）。其 status 驱动订阅进度条可见性与
-// 恢复倒计时；旧的 lifecycle/plan_exhausted 派生状态已删除，改由本维度统一出口。
+// TH 订阅维度（source=th_pass_snapshot, kind=subscription, scope=account）：驱动订阅
+// 津贴进度条可见性（三分支）与恢复倒计时（exhausted）。
 const thSubscriptionDimension = computed<QuotaDimensionItem | undefined>(() =>
   quotaDimensions.value.find(
     (d) => d.source === 'th_pass_snapshot' && d.kind === 'subscription' && d.scope === 'account'
   )
 )
 
+// TH free-tier 维度（source=th_pass_snapshot, kind=free, scope=account）：驱动 th
+// 免费津贴进度条可见性（三分支）。
+const thFreeDimension = computed<QuotaDimensionItem | undefined>(() =>
+  quotaDimensions.value.find(
+    (d) => d.source === 'th_pass_snapshot' && d.kind === 'free' && d.scope === 'account'
+  )
+)
+
+// TH 钱包维度（source=th_balance, kind=paid, scope=account）：钱包余额行陈旧标注的判定源
+// （存在性/数值来自 spend_after_allowance 能力字段与 th_balance 键）。
+const thPaidDimension = computed<QuotaDimensionItem | undefined>(() =>
+  quotaDimensions.value.find(
+    (d) => d.source === 'th_balance' && d.kind === 'paid' && d.scope === 'account'
+  )
+)
+
+// Kira 付费余额维度：source=kira_vnd_balance 维度（paid），既有 VND 金额取数路径不变。
+const kiraPaidDimension = computed(() =>
+  quotaDimensions.value.find((d) => d.source === 'kira_vnd_balance' && d.kind === 'paid')
+)
+
 // Kira 免费维度（source=kira_usage_snapshot, kind=free）：驱动当日进度条 + 已用/上限数值
-// 的可见性。status=unknown → 不渲染旧快照百分比/金额（防同屏旧数值）。
+// 的可见性（三分支）。
 const kiraFreeDimension = computed<QuotaDimensionItem | undefined>(() =>
   quotaDimensions.value.find((d) => d.source === 'kira_usage_snapshot' && d.kind === 'free')
 )
 
-// 单轨可见性门（方案 §3.4 v24）：数值存在（kiraUsedPercent != null）即渲染，不再受
-// status==='unknown' 阻断；维度缺失（旧 DTO）→ 降级按既有快照渲染（不造状态）。
-// status=unknown 且数值存在 → 灰度 + 陈旧标注（见 kiraStale / kiraStaleNote）；
-// status=unknown 且无数值 → 保持隐藏。
-const kiraFreeVisible = computed(() => {
-  const dim = kiraFreeDimension.value
-  if (!dim) return true
-  return kiraUsedPercent.value != null
-})
-
-// Kira 免费维度 status=unknown 且数值存在 → 灰度进度条 + 陈旧标注。
-const kiraStale = computed(() => {
-  const dim = kiraFreeDimension.value
-  return !!dim && dim.status === 'unknown' && kiraUsedPercent.value != null
-})
-const kiraStaleNote = computed(() =>
-  kiraStale.value ? staleNoteFor(kiraFreeDimension.value?.observed_at) : null
-)
-
-// Kira VND 金额可见性（方案 §3.4 v24）：vndBalance != null 即显示金额（模板直接用
-// v-if="vndBalance != null" 渲染，取数路径不变）；paid 维度 status=unknown 且金额存在 →
-// 金额旁附陈旧标注、不渲染状态徽标。
-
-// Kira paid 维度 status=unknown 且金额存在 → 金额旁附陈旧标注。
-const kiraVndStale = computed(() => {
-  const dim = kiraPaidDimension.value
-  return !!dim && dim.status === 'unknown' && vndBalance.value != null
-})
-const kiraVndStaleNote = computed(() =>
-  kiraVndStale.value ? staleNoteFor(kiraPaidDimension.value?.observed_at) : null
-)
-
-const dimensionKindLabel = (dim: QuotaDimensionItem): string => {
-  if (dim.kind === 'free') return t('admin.accounts.cnProviders.dimensionKindFree')
-  if (dim.kind === 'subscription') return t('admin.accounts.cnProviders.dimensionKindSubscription')
-  return t('admin.accounts.cnProviders.dimensionKindPaid')
-}
-
-const dimensionStatusLabel = (status: QuotaDimensionItem['status']): string => {
-  if (status === 'exhausted') return t('admin.accounts.cnProviders.statusExhausted')
-  if (status === 'remaining') return t('admin.accounts.cnProviders.dimensionStatusRemaining')
-  return t('admin.accounts.cnProviders.dimensionStatusUnknown')
-}
-
-const dimensionStatusClass = (status: QuotaDimensionItem['status']): string[] => {
-  if (status === 'exhausted') {
-    return ['inline-flex', 'items-center', 'rounded', 'bg-red-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-red-700', 'dark:bg-red-900/30', 'dark:text-red-300']
-  }
-  if (status === 'remaining') {
-    return ['inline-flex', 'items-center', 'rounded', 'bg-emerald-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-emerald-700', 'dark:bg-emerald-900/30', 'dark:text-emerald-300']
-  }
-  return ['inline-flex', 'items-center', 'rounded', 'bg-gray-100', 'px-1', 'py-0.5', 'text-[10px]', 'font-medium', 'text-gray-500', 'dark:bg-dark-800', 'dark:text-gray-400']
-}
+// 「未知」徽标样式：单一出口，替代被删除的类别/kind 标签样式。
+const unknownBadgeClass = [
+  'inline-flex',
+  'items-center',
+  'rounded',
+  'bg-gray-100',
+  'px-1',
+  'py-0.5',
+  'text-[10px]',
+  'font-medium',
+  'text-gray-500',
+  'dark:bg-dark-800',
+  'dark:text-gray-400'
+]
 
 // 维度是否已探测到可展示数值（决定「未知」徽标 vs 灰度陈旧条）：
-// 订阅维度→plan_used_pct；Kira 免费→used_percent；Kira paid→vndBalance。
-// 其它维度无独立数值概念，默认视为无值（其「未知」徽标仍按 observed_at 兜底）。
+// 订阅维度→plan_used_pct；TH free-tier→used_pct；TH wallet→th_balance；
+// Kira 免费→used_percent；Kira paid→vndBalance。
 const dimensionHasValue = (dim: QuotaDimensionItem): boolean => {
   if (dim.source === 'th_pass_snapshot' && dim.kind === 'subscription') return planUsedPct.value != null
+  if (dim.source === 'th_pass_snapshot' && dim.kind === 'free') return thFreePct.value != null
+  if (dim.source === 'th_balance' && dim.kind === 'paid') return thWalletBalance.value != null
   if (dim.source === 'kira_usage_snapshot' && dim.kind === 'free') return kiraUsedPercent.value != null
   if (dim.source === 'kira_vnd_balance' && dim.kind === 'paid') return vndBalance.value != null
   return false
 }
 
-// 单轨展示不变式（方案 §3.4 三分支最终口径 / 派发单 F1-R2）：
+// 单轨展示不变式（方案 §3.4 三分支最终口径 / 派发单 F1-R2 / F4）：
 // 「未知」徽标仅当维度从未探测（observed_at 缺失/空 且 对应数值也不存在）才渲染；
 // 已探测且数值存在但 observed_at 缺失/零值/无效（status=unknown）→ 不渲染「未知」，
-// 改由灰度进度条 + 固定「采集时间未知」陈旧标注表达（第三分支）；
-// remaining/exhausted 始终渲染状态徽标。
+// 改由灰度进度条 + 固定「采集时间未知」陈旧标注表达（第三分支）。
 const dimensionStatusVisible = (dim: QuotaDimensionItem): boolean =>
   dim.status !== 'unknown' || (!dim.observed_at && !dimensionHasValue(dim))
+
+// 从未探测（→ 渲染「未知」徽标）：维度存在、status=unknown、无 observed_at、无数值。
+// 维度缺失（旧 DTO）→ false（降级渲染，不造状态）。
+const neverProbed = (dim: QuotaDimensionItem | undefined): boolean =>
+  !!dim && dim.status === 'unknown' && dimensionStatusVisible(dim)
 
 // 陈旧标注：相对时间格式「约 N 分钟前 / 约 N 小时前 / 约 N 天前」（>24h 显示天）。
 // observed_at 缺失/零值/无效 → parseTime 返回 null，formatStaleRelative 返回空串，
@@ -384,7 +405,7 @@ const formatStaleRelative = (observedAt: string | undefined): string => {
 // 封装（方案 §3.4 三分支最终口径 / 派发单 F1-R2）：
 // 数值存在 + observed_at 有效 → 灰度 + 「约 {time}前」；
 // 数值存在 + observed_at 缺失/零值/无效 → 灰度 + 固定「采集时间未知」；
-// 数值不存在分支不调用本函数（由 unknown 徽标路径表达）。
+// 数值不存在分支不调用本函数（由「未知」徽标路径表达）。
 const staleNoteFor = (observedAt: string | undefined): string => {
   const rel = formatStaleRelative(observedAt)
   return rel
@@ -399,6 +420,8 @@ const readExtraObject = (key: string): Record<string, unknown> | null => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   return raw as Record<string, unknown>
 }
+
+const extraNumber = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
 const passSnapshot = computed<THPassSnapshot | null>(() => {
   const raw = readExtraObject('th_pass_snapshot')
@@ -460,8 +483,7 @@ const resetAtFull = computed(() => resetAt.value?.toLocaleString() ?? '')
 // 官方 Pass 津贴进度条：plan_used_pct 仍作为 bar 数值来源（注释标注维度 source）。
 // 单轨展示不变式（方案 §3.4 v24）：可见性 = 数值存在（plan_used_pct != null）即渲染，
 // 不再受 status==='unknown' 阻断（探针间隔内不得隐藏进度条）；维度缺失（旧 DTO）→
-// 降级按既有 plan_used_pct / plan_exhausted 渲染。status=unknown 且数值存在 → 灰度 +
-// 陈旧标注（见 thStale / thStaleNote）；status=unknown 且无数值 → 保持隐藏。
+// 降级按既有 plan_used_pct / plan_exhausted 渲染。status=unknown 且无数值 →「未知」徽标。
 const planUsedPct = computed<number | null>(() => {
   const v = passSnapshot.value?.plan_used_pct
   return typeof v === 'number' ? v : null
@@ -472,8 +494,11 @@ const passPlanBarVisible = computed(() => {
   if (!dim) return planUsedPct.value != null || passSnapshot.value?.plan_exhausted === true
   return planUsedPct.value != null
 })
+const passPlanUnknownVisible = computed(
+  () => showPassWindow.value && neverProbed(thSubscriptionDimension.value)
+)
 
-// 订阅维度 status=unknown 且数值存在 → 灰度进度条 + 陈旧标注（不渲染 unknown 徽标）。
+// 订阅维度 status=unknown 且数值存在 → 灰度进度条 + 陈旧标注（不渲染「未知」徽标）。
 const thStale = computed(() => {
   const dim = thSubscriptionDimension.value
   return !!dim && dim.status === 'unknown' && planUsedPct.value != null
@@ -538,7 +563,7 @@ const activeWindowStatsLabel = computed(() => {
   return base
 })
 
-// ===== TH 免费链（无 Pass）：7 天滚动计数，只显示已用 =====
+// ===== TH 免费链（无 Pass）：7 天滚动计数 + th free-tier 状态 =====
 
 const free7dLabel = computed(() => {
   const windows = usageSnapshot.value?.windows as Record<string, THUsageWindowStats> | undefined
@@ -552,7 +577,44 @@ const free7dLabel = computed(() => {
   })
 })
 
-// ===== Kira 免费链 =====
+// th free-tier 官方免费津贴已用百分比（th_pass_snapshot.used_pct，D-QLM-006 官方口径键）。
+const thFreePct = computed<number | null>(() =>
+  extraNumber(readExtraObject('th_pass_snapshot')?.['used_pct'])
+)
+const thFreeBarVisible = computed(() => thFreePct.value != null)
+const thFreeUnknownVisible = computed(() => neverProbed(thFreeDimension.value))
+const thFreeStale = computed(() => {
+  const dim = thFreeDimension.value
+  return !!dim && dim.status === 'unknown' && thFreePct.value != null
+})
+const thFreeStaleNote = computed(() =>
+  thFreeStale.value ? staleNoteFor(thFreeDimension.value?.observed_at) : null
+)
+
+// ===== TH 钱包 paid 维度：spend_after_allowance=true 且 th_balance 有值 → 钱包余额行 =====
+
+const spendAfterAllowance = computed(() => passSnapshot.value?.spend_after_allowance === true)
+const thWalletBalance = computed<number | null>(() =>
+  extraNumber((props.account.extra as Record<string, unknown> | undefined)?.['th_balance'])
+)
+const thWalletVisible = computed(
+  () => isTokenHarbor.value && spendAfterAllowance.value && thWalletBalance.value != null
+)
+const thWalletLabel = computed(() =>
+  thWalletBalance.value == null
+    ? ''
+    : `${t('admin.usage.billingTypeBalance')} ${formatVnd(thWalletBalance.value)}`
+)
+// wallet 维度 status=unknown 且金额存在 → 金额旁附陈旧标注（与 Kira VND 行同口径）。
+const thWalletStale = computed(() => {
+  const dim = thPaidDimension.value
+  return !!dim && dim.status === 'unknown' && thWalletBalance.value != null
+})
+const thWalletStaleNote = computed(() =>
+  thWalletStale.value ? staleNoteFor(thPaidDimension.value?.observed_at) : null
+)
+
+// ===== Kira 用量链 =====
 
 // 手动探测成功后优先用探测返回的 daily 档（后端探测会同时刷新快照，父级账号
 // 列表刷新前也能立即反映最新值）；否则用落库快照。
@@ -568,7 +630,10 @@ const kiraUsedPercent = computed<number | null>(() => {
 
 const kiraUtilization = computed(() => kiraUsedPercent.value ?? 0)
 
-const extraNumber = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+// 单轨可见性门：数值存在（kiraUsedPercent != null）即渲染；从未探测（free 维度
+// status=unknown 且无 observed_at 且无数值）→ 不渲染旧快照百分比，改由「未知」徽标表达。
+const kiraFreeVisible = computed(() => kiraUsedPercent.value != null)
+const kiraFreeUnknownVisible = computed(() => neverProbed(kiraFreeDimension.value))
 
 const kiraUsedTokens = computed(() => {
   if (probedDailyTier.value) return null
@@ -584,6 +649,15 @@ const kiraResetAt = computed(() => {
   return typeof raw === 'string' ? raw.trim() : ''
 })
 
+// Kira 免费维度 status=unknown 且数值存在 → 灰度进度条 + 陈旧标注。
+const kiraStale = computed(() => {
+  const dim = kiraFreeDimension.value
+  return !!dim && dim.status === 'unknown' && kiraUsedPercent.value != null
+})
+const kiraStaleNote = computed(() =>
+  kiraStale.value ? staleNoteFor(kiraFreeDimension.value?.observed_at) : null
+)
+
 // VND 余额：Kira 余额探测写 <platform>_balance（cn_provider_kira.go cnExtraKey）。
 const vndBalance = computed<number | null>(() => {
   const v = (props.account.extra as Record<string, unknown> | undefined)?.[
@@ -591,6 +665,17 @@ const vndBalance = computed<number | null>(() => {
   ]
   return extraNumber(v)
 })
+
+// paid 维度 status=unknown 且金额存在 → 金额旁附陈旧标注；从未探测（status=unknown
+// 且无 observed_at 且无金额）→「未知」徽标。
+const kiraVndStale = computed(() => {
+  const dim = kiraPaidDimension.value
+  return !!dim && dim.status === 'unknown' && vndBalance.value != null
+})
+const kiraVndStaleNote = computed(() =>
+  kiraVndStale.value ? staleNoteFor(kiraPaidDimension.value?.observed_at) : null
+)
+const kiraVndUnknownVisible = computed(() => neverProbed(kiraPaidDimension.value))
 
 const formatVnd = (value: number): string => (value >= 100 ? value.toFixed(0) : value.toFixed(2))
 

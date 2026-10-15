@@ -491,6 +491,25 @@
               </div>
             </div>
           </template>
+          <!-- 归属激活码（Cursor 站点渠道）：仅展示后端下发的脱敏标签，不含激活码原文 -->
+          <template #cell-quota_key="{ row }">
+            <span
+              v-if="row.quota_key_label"
+              class="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 font-mono text-xs text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+              :title="row.quota_key_id != null ? `#${row.quota_key_id}` : undefined"
+            >
+              {{ row.quota_key_label }}
+            </span>
+            <span
+              v-else-if="row.quota_key_id != null"
+              class="font-mono text-xs text-gray-600 dark:text-gray-300"
+            >
+              #{{ row.quota_key_id }}
+            </span>
+            <span v-else class="text-sm text-gray-400 dark:text-gray-500">
+              {{ t('admin.accounts.quotaKey.unassigned') }}
+            </span>
+          </template>
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
               <button @click="handleEdit(row)" class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400">
@@ -817,9 +836,7 @@ const accountSupportsBatchUsage = (account: Account) => {
   if (account.platform === 'openai') return account.type === 'oauth'
   if (account.platform === 'grok') return account.type === 'oauth'
   if (account.platform === 'muse') return account.type === 'apikey'
-  // deepseek apikey opt-in（usage_probe=opencode_zen）：纳入批量用量抓取，镜像 muse。
-  // 未 opt-in 的 deepseek 不命中（保持基线行为）。判定一律用凭证 usage_probe（请求前可得）。
-  if (account.platform === 'deepseek' && account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen') return true
+  if (account.type === 'apikey' && account.credentials?.usage_probe === 'opencode_zen') return true
   return false
 }
 
@@ -1882,6 +1899,12 @@ function getAntigravityTierClass(row: any): string {
   }
 }
 
+// Cursor 站点渠道：仅当本页存在已归属激活码的账号时才暴露「归属激活码」列，
+// 避免给非 cursor 站点凭空增加一列空数据（方案 §4.5：非 cursor 平台为 NULL）。
+const hasQuotaKeyAccounts = computed(() =>
+  accounts.value.some(account => account.quota_key_id != null || !!account.quota_key_label)
+)
+
 // All available columns
 const allColumns = computed(() => {
   const c = [
@@ -1908,6 +1931,9 @@ const allColumns = computed(() => {
     { key: 'last_used_at', label: t('admin.accounts.columns.lastUsed'), sortable: true },
     { key: 'created_at', label: t('admin.accounts.columns.createdAt'), sortable: true },
     { key: 'expires_at', label: t('admin.accounts.columns.expiresAt'), sortable: true },
+    ...(hasQuotaKeyAccounts.value
+      ? [{ key: 'quota_key', label: t('admin.accounts.columns.quotaKey'), sortable: false }]
+      : []),
     { key: 'notes', label: t('admin.accounts.columns.notes'), sortable: false },
     { key: 'actions', label: t('admin.accounts.columns.actions'), sortable: false }
   )

@@ -35,9 +35,10 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(clientCtx context.Context, reque
 			return response, err
 		}
 	}
-	// CN 清单平台（派发单 1 同一谓词）：出站加 60s 首包超时。独立 context 层
-	// （WithCancel + 定时器），到期取消当前上游尝试；body 首字节到达后流式
-	// 传输不受影响。非 CN 路径（OpenAI/anthropic/gemini/codebuddy/other）不加。
+	// CN 清单平台（派发单 1 同一谓词）：出站加分段首包超时（响应头 20s / body
+	// 首字节 60s 整体截止）。独立 context 层（WithCancel + 定时器），到期取消当前
+	// 上游尝试；body 首字节到达后流式传输不受影响。非 CN 路径（OpenAI/anthropic/
+	// gemini/codebuddy/other）不加——阈值变更只作用于 CN 清单平台。
 	if !isCNFamilyFastpathAccount(account) {
 		return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
 	}
@@ -57,6 +58,27 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(clientCtx context.Context, reque
 		// 超时覆盖为底层取消错误，504 冷却与换号随之丢失。已胜出的超时先行
 		// 处理，客户端后到不覆盖。
 		if watchdog.Fired() {
+			// 只在"未收到响应头"分支尝试同账号新连接重试：请求可能落在了一条本地
+			// 仍认为存活、但对端已静默丢弃的半开连接上，换条新连接才有救（仍同账号、
+			// 同请求，最多一次）。响应头已到达的超时属于上游排队/生成慢，重试无意义，
+			// 按既有内部超时语义上抛。
+			if watchdog.TimedOutWaitingHeaders() {
+				if retriedResp, retriedWatchdog, retried := s.retryOpenAICNUpstreamFreshConn(
+					clientCtx, request, proxyURL, account, watchdog,
+				); retried {
+					if retriedResp != nil && retriedWatchdog != nil {
+						retriedResp.Body = &openAICNFirstByteTimeoutBody{
+							ReadCloser: retriedResp.Body, w: retriedWatchdog,
+						}
+						return retriedResp, nil
+					}
+					// 重试未成功：客户端在重试期间断开时保持取消语义（不冷却不换号）；
+					// 其余情况（重试再次超时 / 传输错误）沿用既有内部超时失败语义。
+					if retriedWatchdog != nil && retriedWatchdog.parentDone() && !retriedWatchdog.Fired() {
+						return nil, context.Canceled
+					}
+				}
+			}
 			// 内部首包超时先于 Do 完成（上游连响应头都没给）：返回网关内部
 			// 超时错误，与客户端取消（context.Canceled）严格区分。
 			return nil, errOpenAICNFirstByteTimeout
@@ -70,6 +92,8 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(clientCtx context.Context, reque
 		watchdog.release()
 		return resp, err
 	}
+	// 响应头已到达：短阈值计时器退场，之后只剩 60s 整体截止等 body 首字节。
+	watchdog.markHeadersReceived()
 	resp.Body = &openAICNFirstByteTimeoutBody{ReadCloser: resp.Body, w: watchdog}
 	return resp, nil
 }

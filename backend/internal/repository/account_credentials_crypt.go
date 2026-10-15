@@ -11,7 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 )
 
-// 本文件是凭证静态加密（docs/security-ban-prevention-plan.md A3-E2）在
+// 本文件是凭证静态加密（docs-local/security-ban-prevention-plan.md A3-E2）在
 // accountRepository 边界上的实现：
 //
 //   - 写路径：prepareCredentialsForStorage 对 SensitiveCredentialKeys 命中的

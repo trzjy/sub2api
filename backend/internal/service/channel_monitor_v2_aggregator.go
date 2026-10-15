@@ -69,6 +69,11 @@ type ChannelMonitorV2Aggregator struct {
 }
 
 func NewChannelMonitorV2Aggregator(repo ChannelMonitorV2Repository, db *sql.DB, settings channelMonitorRuntimeReader) *ChannelMonitorV2Aggregator {
+	// C4：注册共享水位源供聚合水位停滞检测体读取。即使本聚合 worker 完全未装配
+	// （Start 未调用），只要 ChannelMonitorV2Repository 存在，检测体仍能读到共享持久水位并告警。
+	if repo != nil {
+		SetChannelMonitorV2StaleSource(repo)
+	}
 	return &ChannelMonitorV2Aggregator{
 		repo:          repo,
 		db:            db,

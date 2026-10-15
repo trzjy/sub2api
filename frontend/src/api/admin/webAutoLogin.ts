@@ -129,7 +129,7 @@ export async function webLoginSms(payload: WebLoginSmsRequest): Promise<WebLogin
 }
 
 /**
- * DeepSeek 邮箱注册接口（契约：docs/deepseek-email-register-plan.md §1.2）。
+ * DeepSeek 邮箱注册接口（契约：docs-local/deepseek-email-register-plan.md §1.2）。
  * 成功响应为原始 JSON（不包裹 code/message/data）；失败关闭（HTTP 4xx）由拦截器
  * 以平面错误 reject：{ message, metadata:{ detail, ... } }。
  */

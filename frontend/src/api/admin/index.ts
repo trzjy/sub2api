@@ -42,6 +42,7 @@ import xianguanjiaAPI from './xianguanjia'
 import pricingAPI from './pricing'
 import promoIntelAPI from './promoIntel'
 import usageRiskAPI from './usageRisk'
+import quotaKeysAPI from './quotaKeys'
 
 /**
  * Unified admin API object for convenient access
@@ -85,7 +86,8 @@ export const adminAPI = {
   xianguanjia: xianguanjiaAPI,
   pricing: pricingAPI,
   promoIntel: promoIntelAPI,
-  usageRisk: usageRiskAPI
+  usageRisk: usageRiskAPI,
+  quotaKeys: quotaKeysAPI
 }
 
 export {
@@ -127,7 +129,8 @@ export {
   xianguanjiaAPI,
   pricingAPI,
   promoIntelAPI,
-  usageRiskAPI
+  usageRiskAPI,
+  quotaKeysAPI
 }
 export default adminAPI
 

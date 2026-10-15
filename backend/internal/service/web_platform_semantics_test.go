@@ -140,7 +140,7 @@ func TestWebLoginPlatformInCNProviderFamily(t *testing.T) {
 
 // TestValidateWebAccountCredential 锁定网页平台建号不变量：仅 apikey 类型；
 // deepseek / zhipu 须有非空整串 cookie；kimi 须有非空 access_token；
-// base_url 可选。字段口径见 docs/web-reverse-embedded-login-plan.md §3.2。
+// base_url 可选。字段口径见 docs-local/web-reverse-embedded-login-plan.md §3.2。
 func TestValidateWebAccountCredential(t *testing.T) {
 	// 非网页平台不受影响。
 	require.NoError(t, validateWebAccountCredential(PlatformOpenAI, AccountTypeOAuth, nil))

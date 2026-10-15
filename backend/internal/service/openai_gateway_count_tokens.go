@@ -622,31 +622,31 @@ func estimateOpenAIInputTokens(req openAIInputTokensCountRequest) (int, error) {
 	return total, nil
 }
 
-// KimiTierRequestProtocol 标识待估算请求体的入口协议形态（B2 kimi 分层路由）。
-type KimiTierRequestProtocol string
+// TierRoutingRequestProtocol 标识待估算请求体的入口协议形态（B2 kimi 分层路由）。
+type TierRoutingRequestProtocol string
 
 const (
-	KimiTierProtocolResponses       KimiTierRequestProtocol = "responses"
-	KimiTierProtocolChatCompletions KimiTierRequestProtocol = "chat_completions"
-	KimiTierProtocolMessages        KimiTierRequestProtocol = "messages"
+	TierRoutingProtocolResponses       TierRoutingRequestProtocol = "responses"
+	TierRoutingProtocolChatCompletions TierRoutingRequestProtocol = "chat_completions"
+	TierRoutingProtocolMessages        TierRoutingRequestProtocol = "messages"
 )
 
-// EstimateKimiTierInputTokens 是 kimi 分层路由（docs-local/model-source-tier-routing-plan.md
+// EstimateTierRoutingInputTokens 是 kimi 分层路由（docs-local/model-source-tier-routing-plan.md
 // §2，派发单 B2）在选号前估算 input token 的最小导出入口。三种入口协议形态先收敛为
 // Responses 形状，再统一走既有本地估算链 estimateOpenAIInputTokens（apicompat 转换 +
 // tiktoken，纯本地、不发上游请求，与 count_tokens 端点同一 SSOT）。本函数只做协议
 // 收敛与导出包装，不改变既有估算函数的行为。任何解析/转换/估算失败都返回错误，
 // 由调用方 fail-closed（禁止默认当大请求）。
-func EstimateKimiTierInputTokens(model string, protocol KimiTierRequestProtocol, body []byte) (int, error) {
+func EstimateTierRoutingInputTokens(model string, protocol TierRoutingRequestProtocol, body []byte) (int, error) {
 	switch protocol {
-	case KimiTierProtocolResponses:
+	case TierRoutingProtocolResponses:
 		var req openAIInputTokensCountRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			return 0, fmt.Errorf("parse responses request for tier estimate: %w", err)
 		}
 		req.Model = model
 		return estimateOpenAIInputTokens(req)
-	case KimiTierProtocolChatCompletions:
+	case TierRoutingProtocolChatCompletions:
 		var ccReq apicompat.ChatCompletionsRequest
 		if err := json.Unmarshal(body, &ccReq); err != nil {
 			return 0, fmt.Errorf("parse chat completions request for tier estimate: %w", err)
@@ -662,7 +662,7 @@ func EstimateKimiTierInputTokens(model string, protocol KimiTierRequestProtocol,
 			Tools:        responsesReq.Tools,
 			ToolChoice:   responsesReq.ToolChoice,
 		})
-	case KimiTierProtocolMessages:
+	case TierRoutingProtocolMessages:
 		var anthropicReq apicompat.AnthropicRequest
 		if err := json.Unmarshal(body, &anthropicReq); err != nil {
 			return 0, fmt.Errorf("parse messages request for tier estimate: %w", err)

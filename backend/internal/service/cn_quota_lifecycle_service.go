@@ -162,23 +162,39 @@ type QuotaExhaustionSignal struct {
 }
 
 // ClassifyQuotaExhaustionScope 结构化作用域判定矩阵（方案 §4 F2）：
-//   - kira + 402 = account（到达证据；Kira 实测 VND=0 时含免费池请求在内全拒）。
+//   - kira + 402 + 全 kira- 映射 = model（免费池专号：落模型级探针确认停调，不再整号冻结）。
+//   - kira + 402 + 非全 kira- 映射/空映射 = account（到达证据，维持整号冻结语义）。
 //   - 非 Kira 平台 402 = model/path（按已确认维度上下文，不得泛化账号冻结）。
-//   - kira + 502/504 = 仅当新鲜 VND≤0 三态佐证成立（ResolveKiraVNDBalanceState）
-//     才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
+//   - kira + 502/504 + 全 kira- 映射 = unknown（不整号转换）。
+//   - kira + 502/504 + 其他映射 = 仅当新鲜 VND≤0 三态佐证成立
+//     （ResolveKiraVNDBalanceState）才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
 //   - 429 / 其他 = model/path（429 不触发账号级权威冻结）；判不清 = unknown。
+//
+// 2026-10-11 双向实测：付费模型 VND=0 全拒（qwen3.8-flash 402）；免费池模型 VND=0
+// 正常服务（kira-3.5-flash 2xx；官方条款免费额度限 kira- 前缀）。全 kira-* 映射账号的
+// 402/502/504 不再整号冻结：402 落模型级探针确认停调，502/504 落 unknown（不整号转换）。
 //
 // 禁止从自由报文文本猜测作用域。
 func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) QuotaExhaustionScope {
 	switch status {
 	case 402:
 		if accountIsKiraBaseURL(account) {
+			// kira+402：仅当显式模型映射全部为 kira- 前缀（免费池专号）时落模型级
+			// 探针确认停调，不再整号冻结；否则维持整号冻结语义（到达证据）。
+			if kiraMappingFreePoolOnly(account) {
+				return QuotaScopeModel
+			}
 			return QuotaScopeAccount // kira+402=account（到达证据）
 		}
 		return QuotaScopeModel // 非 Kira 平台 402 = model/path
 	case 502, 504:
 		if accountIsKiraBaseURL(account) {
-			// kira+502/504：仅当新鲜 VND≤0 三态佐证成立才 account，否则 unknown。
+			// kira+502/504：仅当显式模型映射全部为 kira- 前缀（免费池专号）时落
+			// unknown（不整号转换）；否则维持现状——仅当新鲜 VND≤0 三态佐证成立
+			// 才 account，否则 unknown（禁止把通用 5xx 泛化为账号冻结）。
+			if kiraMappingFreePoolOnly(account) {
+				return QuotaScopeUnknown
+			}
 			if ResolveKiraVNDBalanceState(account, now).IsExhausted() {
 				return QuotaScopeAccount
 			}
@@ -190,6 +206,25 @@ func ClassifyQuotaExhaustionScope(account *Account, status int, now time.Time) Q
 	default:
 		return QuotaScopeUnknown
 	}
+}
+
+// kiraMappingFreePoolOnly 判定 Kira 账号的显式模型映射非空且全部 value 均为
+// kira- 前缀（仅描述显式 mapping 集合，不推断账号全部有效可达模型）。
+// 空映射 = false（fail-safe，维持现状整号冻结语义）。
+func kiraMappingFreePoolOnly(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	mapping := account.GetModelMapping()
+	if len(mapping) == 0 {
+		return false
+	}
+	for _, v := range mapping {
+		if !strings.HasPrefix(v, "kira-") {
+			return false
+		}
+	}
+	return true
 }
 
 // cnQuotaLifecycleState extra 持久化的状态机状态记录。
@@ -529,14 +564,27 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 	// 本次 402 权威冻结写入开启新冻结代际（freeze_generation），代际内 fresh>0 的
 	// immediate due 至多消费一次——冻结即 fresh>0 时当场登记已消费（due=now），
 	// 后续同值重观察不再提前；fresh≤0 → due = 账号每日 reset_at。
-	probeDueAt, immediateConsumed := s.resolveFreezeTimeProbeDue(account, now)
-	// 新冻结代际：在既有代际序号上 +1（存量无序号 → 1）。同一次冻结内的重复写入
-	// （如并发双入口）各自开启新代际，代际语义即「一次 402 权威冻结事件」。
+	//
+	// probe_due / consumed / generation 三者的读-改-写统一在 dueMu 互斥域内完成，
+	// 且全部基于锁内 GetByID 的最新持久账号对象（检查单 #3 c + R2-#2）：
+	//   - generation 不再各自从旧 generation 算出重复值（单实例内单调递增，多实例
+	//     CAS 仍是 Phase 2 残余，本卡不建存储层 CAS）；
+	//   - 余额解析不再用锁外传入的旧账号快照：杜绝「余额先落库 → fresh 回调因未
+	//     冻结 no-op → 冻结入口持旧余额」的交错把本应 immediate 的冻结写成每日 due。
+	s.dueMu.Lock()
+	defer s.dueMu.Unlock()
+	latest := account
+	if s.accountRepo != nil {
+		if fresh, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && fresh != nil {
+			latest = fresh
+		}
+	}
 	generation := int64(1)
-	if prev, ok := cnQuotaLifecycleStateFromExtra(account.Extra); ok && prev != nil && prev.FreezeGeneration > 0 {
+	if prev, ok := cnQuotaLifecycleStateFromExtra(latest.Extra); ok && prev != nil && prev.FreezeGeneration > 0 {
 		generation = prev.FreezeGeneration + 1
 	}
-	s.persistLifecycleState(ctx, account.ID, &cnQuotaLifecycleState{
+	probeDueAt, immediateConsumed := s.resolveFreezeTimeProbeDue(latest, now)
+	freezeState := &cnQuotaLifecycleState{
 		State:                cnQuotaLifecycleStateExhausted,
 		RecoveryAt:           cnQuotaRFC3339OrEmpty(recoveryAt, known),
 		RecoverySource:       source,
@@ -547,7 +595,18 @@ func (s *CNQuotaLifecycleService) confirmExhaustedAuthoritative(ctx context.Cont
 		FreezeSource:         cnQuotaFreezeSource402Account,
 		FreezeGeneration:     generation,
 		ImmediateDueConsumed: immediateConsumed,
-	})
+	}
+	if immediateConsumed {
+		// 含 immediate 消费登记的冻结写入走 strict 持久化并上抛失败（R2-#1）：
+		// UpdateExtra 失败 ⇒ 本次冻结迁移不成立（失败关闭，下轮 sweep/响应式
+		// 重试），不得出现「内存 consumed=true 但落库失败」的假成功——否则重启后
+		// 同一边沿可重复消费。不含消费登记的普通冻结写入保持既有吞错路径。
+		if err := s.persistLifecycleStateStrict(ctx, account.ID, freezeState); err != nil {
+			return fmt.Errorf("cn quota lifecycle persist 402 authoritative freeze for account %d: %w", account.ID, err)
+		}
+	} else {
+		s.persistLifecycleState(ctx, account.ID, freezeState)
+	}
 	s.convergeTHStockRecovery(ctx, account)
 	s.untrack(account.ID)
 	s.ensureQuotaAlertFiring(ctx, account, upstreamMsg, reason)
@@ -624,10 +683,16 @@ func is402AuthoritativeFrozen(account *Account, st *cnQuotaLifecycleState) bool 
 //     标记）方可再提前一次。
 //
 // 本方法只推进 probe_due，**永不解冻**（解冻唯一事件 = 完成级 2xx，见
-// sweepProbeAccount）。返回推进后的 due。
-func (s *CNQuotaLifecycleService) advance402ProbeDue(ctx context.Context, account *Account, st *cnQuotaLifecycleState, outcome quotaProbeOutcome, now time.Time) time.Time {
+// sweepProbeAccount）。返回推进后的 due；持久化失败返回错误（见下方 invariant）。
+//
+// 检查单 #3 invariant：持久化失败必须显式上抛，且失败时回滚本次内存置位的消费标记
+// ——不得出现「内存 consumed=true 但落库失败」的假成功（否则重启后重复 immediate，
+// 违反边沿至多一次）。调用方按失败关闭处理：本次不视为已消费，下轮重试推进。
+// 保证级别收窄为**单实例**（dueMu 内互斥 + 写入失败不假成功）；多实例 CAS
+// （generation 并发递增丢失更新）登记为 Phase 2 残余。
+func (s *CNQuotaLifecycleService) advance402ProbeDue(ctx context.Context, account *Account, st *cnQuotaLifecycleState, outcome quotaProbeOutcome, now time.Time) (time.Time, error) {
 	if s == nil || account == nil {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	s.dueMu.Lock()
 	defer s.dueMu.Unlock()
@@ -649,6 +714,7 @@ func (s *CNQuotaLifecycleService) advance402ProbeDue(ctx context.Context, accoun
 	}
 	vnd := ResolveKiraVNDBalanceState(account, now)
 	due := s.resolveDailyResetDue(account, now)
+	consumedBefore := st.ImmediateDueConsumed
 	if vnd.IsFresh() && vnd.Value > 0 && !st.ImmediateDueConsumed {
 		due = now // 边沿：本代际唯一一次 immediate due
 		st.ImmediateDueConsumed = true
@@ -663,10 +729,60 @@ func (s *CNQuotaLifecycleService) advance402ProbeDue(ctx context.Context, accoun
 	st.LastProbeAt = now.UTC().Format(time.RFC3339)
 	st.LastProbeOutcome = probeOutcomeName(outcome)
 	st.UpdatedAt = now.UTC().Format(time.RFC3339)
-	s.persistLifecycleState(ctx, account.ID, st)
+	if err := s.persistLifecycleStateStrict(ctx, account.ID, st); err != nil {
+		// 落库失败 ⇒ 本次推进不成立：回滚内存消费标记并上抛（调用方失败关闭）。
+		st.ImmediateDueConsumed = consumedBefore
+		return time.Time{}, fmt.Errorf("cn quota lifecycle persist 402 probe due for account %d: %w", account.ID, err)
+	}
 	fmt.Printf("[CNQuotaLifecycle] account=%d 402-source freeze held (no unfreeze); probe_due=%s consumed=%v\n",
 		account.ID, cnQuotaRFC3339OrEmpty(due, true), st.ImmediateDueConsumed)
-	return due
+	return due, nil
+}
+
+// OnKiraFreshBalanceObserved Kira 付费 VND 余额采集侧的 immediate due 边沿
+// （检查单 #1 / §0.2(1) 单一状态迁移表）。周期余额链（CNProviderBalanceCheckService.
+// refreshKiraAccount）把新鲜 VND 快照成功落库后调用本方法，使「充值后不必再等每日
+// due」的锁定语义真正接通——推进走现有 lifecycle 权威路径 advance402ProbeDue
+// （复用其代际消费判据），不新增 ticker/状态机。
+//
+// 条件推进的守门（不满足即零写入返回，绝不扩大影响面）：
+//  1. 账号当前必须处于 402 权威冻结（is402AuthoritativeFrozen 来源交叉判定）；
+//  2. 采到的 VND 必须 fresh>0（其余余额态不推进）；
+//  3. 本冻结代际尚未消费过 immediate due（已消费则本代际不再提前）。
+//
+// 推进的意义：probe_due 被落到「下一次 sweep 即可探」（due=now），且发生在完成级
+// 到期探针之前——下一次 sweep 立即把该账号纳入探测候选。返回值：推进持久化失败时
+// 上抛（调用方按失败关闭记录，下轮周期链重试推进；检查单 #3）。
+func (s *CNQuotaLifecycleService) OnKiraFreshBalanceObserved(ctx context.Context, account *Account) error {
+	if s == nil || account == nil {
+		return nil
+	}
+	// 用最新持久状态判定（周期链采集到的新余额只在库里，内存账号可能是旧快照）。
+	latest := account
+	if s.accountRepo != nil {
+		if fresh, err := s.accountRepo.GetByID(ctx, account.ID); err == nil && fresh != nil {
+			latest = fresh
+		}
+	}
+	st, _ := cnQuotaLifecycleStateFromExtra(latest.Extra)
+	if !is402AuthoritativeFrozen(latest, st) {
+		return nil // 非 402 冻结账号：不进入 402 状态机，零写入。
+	}
+	now := s.now()
+	vnd := ResolveKiraVNDBalanceState(latest, now)
+	if !vnd.IsFresh() || vnd.Value <= 0 {
+		return nil // 只有 fresh>0 才构成 immediate due 边沿。
+	}
+	if st != nil && st.ImmediateDueConsumed {
+		return nil // 本冻结代际的 immediate 额度已消费：不再提前。
+	}
+	due, err := s.advance402ProbeDue(ctx, latest, st, quotaProbeUncertain, now)
+	if err != nil {
+		return fmt.Errorf("cn quota lifecycle advance probe due on fresh balance for account %d: %w", account.ID, err)
+	}
+	fmt.Printf("[CNQuotaLifecycle] account=%d fresh VND observed on balance collection; probe_due advanced to=%s\n",
+		account.ID, cnQuotaRFC3339OrEmpty(due, true))
+	return nil
 }
 
 // probeOutcomeName 把 quotaProbeOutcome 映射为可持久化文本。
@@ -829,7 +945,10 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 		if frozen402 && !completed2xx {
 			// 来源交叉（§0.2(1)）：402 权威冻结账号的事实层 Recovered（含 9 格表
 			// Recovered）不得解冻，只按迁移表推进 probe_due；完成级 2xx 是唯一解冻事件。
-			s.advance402ProbeDue(ctx, account, state, outcome, now)
+			// 推进落库失败 ⇒ 失败关闭：本次不视为已消费，下轮重试（检查单 #3）。
+			if _, err := s.advance402ProbeDue(ctx, account, state, outcome, now); err != nil {
+				return err
+			}
 			return nil
 		}
 		// 恢复闭环：清停调 + resolve 告警 + 刷新快照（可选）+ 状态落墓碑。
@@ -849,7 +968,9 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 		if frozen402 {
 			// 402 来源：保持停调（上方续停/re-park 已落地），probe_due 按迁移表推进
 			// （仍 402 → 每日 reset_at；本代际首次 fresh>0 → immediate 一次）。
-			s.advance402ProbeDue(ctx, account, state, outcome, now)
+			if _, err := s.advance402ProbeDue(ctx, account, state, outcome, now); err != nil {
+				return err
+			}
 		} else {
 			s.persistLifecycleState(ctx, account.ID, &cnQuotaLifecycleState{
 				State:            cnQuotaLifecycleStateExhausted,
@@ -867,7 +988,9 @@ func (s *CNQuotaLifecycleService) sweepProbeAccount(ctx context.Context, account
 	default:
 		if frozen402 {
 			// 402 来源：不确定同样只推进 probe_due（失败关闭，绝不恢复）。
-			s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now)
+			if _, err := s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now); err != nil {
+				return err
+			}
 			s.ensureQuotaAlertFiring(ctx, account, "", cnQuotaUncertainReason("", perr))
 			fmt.Printf("[CNQuotaLifecycle] account=%d 402-source freeze: probe uncertain (fail-closed, keep parked), err=%v\n", account.ID, perr)
 			return nil
@@ -921,7 +1044,9 @@ func (s *CNQuotaLifecycleService) sweepProbe402FrozenAccount(ctx context.Context
 		if transient {
 			// 达上限：失败关闭——保持冻结（不清停调），按迁移表重排每日 due，告警
 			// 保持 firing；不终止自动恢复，下轮 sweep 继续到期探测。
-			s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now)
+			if _, err := s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now); err != nil {
+				return err
+			}
 			s.ensureQuotaAlertFiring(ctx, account, "", cnQuotaUncertainReason("", res.Err))
 			fmt.Printf("[CNQuotaLifecycle] account=%d 402 freeze completion probe transient (fail-closed, keep frozen), err=%v\n",
 				account.ID, res.Err)
@@ -948,7 +1073,9 @@ func (s *CNQuotaLifecycleService) sweepProbe402FrozenAccount(ctx context.Context
 		if err := s.reParkUntilRecovery(ctx, account, state, recoveryAt, known, source, now); err != nil {
 			return err
 		}
-		s.advance402ProbeDue(ctx, account, state, quotaProbeExhausted, now)
+		if _, err := s.advance402ProbeDue(ctx, account, state, quotaProbeExhausted, now); err != nil {
+			return err
+		}
 		s.ensureQuotaAlertFiring(ctx, account, "", cnQuotaExhaustedReason("", known, recoveryAt, source))
 		fmt.Printf("[CNQuotaLifecycle] account=%d 402 freeze completion probe still 402, frozen; probe_due re-scheduled\n", account.ID)
 		return nil
@@ -957,7 +1084,9 @@ func (s *CNQuotaLifecycleService) sweepProbe402FrozenAccount(ctx context.Context
 		return s.handoff402FreezeToAuthFailure(ctx, account)
 	default:
 		// 其他未列举响应（R18-F3 同构）：失败关闭——保持冻结 + 每日重排 + 告警。
-		s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now)
+		if _, err := s.advance402ProbeDue(ctx, account, state, quotaProbeUncertain, now); err != nil {
+			return err
+		}
 		s.ensureQuotaAlertFiring(ctx, account, "", cnQuotaUncertainReason("", res.Err))
 		fmt.Printf("[CNQuotaLifecycle] account=%d 402 freeze completion probe unclassified (fail-closed, keep frozen), status=%d\n",
 			account.ID, res.Status)
@@ -1900,8 +2029,21 @@ func (s *CNQuotaLifecycleService) resolveQuotaAlert(ctx context.Context, account
 // --- 状态持久化（extra cn_quota_lifecycle） ---
 
 func (s *CNQuotaLifecycleService) persistLifecycleState(ctx context.Context, accountID int64, st *cnQuotaLifecycleState) {
+	if err := s.persistLifecycleStateStrict(ctx, accountID, st); err != nil {
+		// 状态记录失败不阻断状态迁移主路径（停调/清除已落库）；持久候选发现对
+		// 已停调账号会因缺状态键跳过，下一轮 402 重进状态机自愈。
+		fmt.Printf("[CNQuotaLifecycle] account=%d persist lifecycle state failed: %v\n", accountID, err)
+	}
+}
+
+// persistLifecycleStateStrict 写 lifecycle 状态到 extra，并**显式上抛持久化失败**
+// （检查单 #3）。仅用于「写入成功与否决定本次迁移是否成立」的路径
+// （advance402ProbeDue 的代际消费登记）：内存置位 + 落库失败的组合必须被看见，
+// 否则会出现「假成功」（重启后重复 immediate）。其余路径继续用吞错版
+// persistLifecycleState（状态记录失败可由下一轮自愈）。
+func (s *CNQuotaLifecycleService) persistLifecycleStateStrict(ctx context.Context, accountID int64, st *cnQuotaLifecycleState) error {
 	if s == nil || s.accountRepo == nil || st == nil {
-		return
+		return nil
 	}
 	if st.UpdatedAt == "" {
 		st.UpdatedAt = s.now().UTC().Format(time.RFC3339)
@@ -1919,10 +2061,9 @@ func (s *CNQuotaLifecycleService) persistLifecycleState(ctx context.Context, acc
 		"immediate_due_consumed": st.ImmediateDueConsumed,
 	}}
 	if err := s.accountRepo.UpdateExtra(ctx, accountID, updates); err != nil {
-		// 状态记录失败不阻断状态迁移主路径（停调/清除已落库）；持久候选发现对
-		// 已停调账号会因缺状态键跳过，下一轮 402 重进状态机自愈。
-		fmt.Printf("[CNQuotaLifecycle] account=%d persist lifecycle state failed: %v\n", accountID, err)
+		return fmt.Errorf("cn quota lifecycle persist state for account %d: %w", accountID, err)
 	}
+	return nil
 }
 
 // cnQuotaLifecycleStateFromExtra 解析 extra 状态记录（兼容 JSON 反序列化后的

@@ -187,14 +187,27 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	cf524StopHeartbeat := h.cf524InstallUpstreamBudgetAndHeartbeatOpenAI(c, requestStart, reqStream)
 	defer cf524StopHeartbeat()
 
-	// B2 kimi 分层路由：选号前估算 input 分档并装门（仅 kimi 平台；非 kimi 零行为变化）。
-	kimiCtx, err := applyKimiTierRouting(c, c.Request.Context(), reqLog, requestPlatform, forwardModel, service.KimiTierProtocolChatCompletions, body)
+	// 分层路由泛化（派发单 OC-T1）：选号前估算 input 分档并装门——仅当请求模型
+	// 属于目标集合且动态门控开启；其余（非目标模型 / 门未开）零行为变化。
+	// 门控/目标判定与 token 估算共用请求侧模型（forwardModel 即请求侧名）。
+	gateOpen := func(m string) (bool, error) {
+		return h.gatewayService.TierRoutingGateOpen(c.Request.Context(), apiKey.GroupID, requestPlatform, m)
+	}
+	tierCtx, err := applyTierRouting(c, c.Request.Context(), reqLog, forwardModel, forwardModel, service.TierRoutingProtocolChatCompletions, body, gateOpen)
 	if err != nil {
 		reqLog.Warn("openai_chat_completions.kimi_tier_estimate_failed", zap.Error(err))
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "kimi tier estimate failed")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "tier routing estimate failed")
 		return
 	}
-	c.Request = c.Request.WithContext(kimiCtx)
+	c.Request = c.Request.WithContext(tierCtx)
+
+	// 订阅组大请求动态排除自建账号（派发单 D-SHS-001）：选号循环前将自建站点账号
+	// 并入 failedAccountIDs；估算 <= 阈值或估算失败（失败开放）时不排除任何账号。
+	if adds := h.applySelfHostSizeExclusion(c.Request.Context(), reqLog, apiKey.GroupID, requestPlatform, forwardModel, service.TierRoutingProtocolChatCompletions, body); len(adds) > 0 {
+		for id := range adds {
+			failedAccountIDs[id] = struct{}{}
+		}
+	}
 
 	for {
 		if failoverClientGone(c) {

@@ -815,7 +815,7 @@ func partitionOpenAIAccessModePools(accounts []*Account) (apiPool []*Account, we
 
 // openAIAccessModeExcludeReason returns a non-empty filter reason when the account must be
 // judged unschedulable because its access_mode is explicitly invalid. Per
-// docs/platform-merge-refactor-plan.md §5.1 rule 2, an explicit illegal access_mode value
+// docs-local/platform-merge-refactor-plan.md §5.1 rule 2, an explicit illegal access_mode value
 // is fail-closed: ResolveAccessMode returns an error and the account is excluded from all
 // scheduling pools (neither API nor Web).
 func openAIAccessModeExcludeReason(account *Account) string {
@@ -1616,8 +1616,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(available[i].account, available[j].account) < 0
 			})
 		}
-		// 免费优先分区（方案 §3.5）：在所有既有排序之后消费分区原语。
-		partitionFreeRemainingFirstWithLoad(available)
 
 		selectionOrder := make([]accountWithLoad, 0, len(available))
 		if requireCompact {
@@ -1637,6 +1635,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else {
 			selectionOrder = append(selectionOrder, available...)
 		}
+		// 免费优先分区是**最终**排序步骤（检查单 #2 / 方案 §3.5）：先走完既有排序
+		//（含 requireCompact 的 tier 重排），再消费同一分区原语——compact 重排不得
+		// 推翻免费优先（compact 账号集中时 free 账号仍整体在前）。
+		partitionFreeRemainingFirstWithLoad(selectionOrder)
 
 		for _, item := range selectionOrder {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
@@ -1674,11 +1676,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				return rateOrder.compare(ordered[i], ordered[j]) < 0
 			})
 		}
-		// 免费优先分区（方案 §3.5）：负载批量失败回退序列消费同一分区原语。
-		partitionFreeRemainingFirst(ordered)
+		// 免费优先分区（方案 §3.5）：负载批量失败回退序列消费同一分区原语，且分区是
+		// 最终排序步骤（检查单 #2）——先排完 compact tier，后分区，compact 不得推翻
+		// 免费优先。
 		if requireCompact {
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
+		partitionFreeRemainingFirst(ordered)
 		for _, acc := range ordered {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
@@ -1726,11 +1730,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return rateOrder.compare(candidates[i], candidates[j]) < 0
 		})
 	}
-	// 免费优先分区（方案 §3.5）：兜底排队序列消费同一分区原语。
-	partitionFreeRemainingFirst(candidates)
+	// 免费优先分区（方案 §3.5）：兜底排队序列消费同一分区原语，且分区是最终排序步骤
+	//（检查单 #2）——先排完 compact tier，后分区，compact 不得推翻免费优先。
 	if requireCompact {
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
+	partitionFreeRemainingFirst(candidates)
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
@@ -1787,6 +1792,20 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 		accounts = s.filterGrokFreeQuotaAccountsForOpenAI(ctx, accounts)
 	}
 	return accounts, nil
+}
+
+// SelfHostedExcludedIDs 列举该分组可调度候选中自建站点账号 id 集合（派发单 D-SHS-001）。
+//
+// 语义：复用 OpenAIGatewayService.listSchedulableAccounts 的候选列举，返回
+// GetOpenAIBaseURL() 含 selfHostBaseURLMarker 的账号 id。仅供 handler 侧选号前
+// 大请求动态排除使用，不改任何既有选号/调度函数签名与行为；列举候选失败返回 error，
+// 由调用方失败开放处理。
+func (s *OpenAIGatewayService) SelfHostedExcludedIDs(ctx context.Context, groupID *int64, platform string) (map[int64]struct{}, error) {
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		return nil, err
+	}
+	return selfHostedAccountIDs(accounts), nil
 }
 
 func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {

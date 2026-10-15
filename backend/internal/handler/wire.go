@@ -75,6 +75,8 @@ func ProvideAdminHandlers(
 	xgjSupplyStore *xianguanjia.SupplyConfigStore, // D6i: 货源模式凭证存储（D6a DB 实现，Save/Get）
 	opencodeGoUsage *service.OpenCodeGoUsageService, // 上游 v0.2.15 新增（正交吸收）
 	claudeResetCredits *service.ClaudeResetCreditService, // 上游 v0.2.15 新增（正交吸收）
+	quotaKeyHandler *admin.QuotaKeyHandler, // D-CURSOR-021: 激活码管理面（§4.4，8 端点）
+	quotaKeyService *service.QuotaKeyService, // D-CURSOR-021: accounts 列表/详情脱敏回填数据源
 ) *AdminHandlers {
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
 	accountHandler.SetOllamaCloudUsageService(ollamaCloudUsage)
@@ -89,6 +91,9 @@ func ProvideAdminHandlers(
 	accountHandler.SetWebPlatformAutoLoginService(webPlatformAutoLogin)
 	// 注入分组视觉分流配置服务，供 group create/update 链路做同组校验。
 	groupHandler.SetVisionRoutingService(visionRoutingService)
+	// D-CURSOR-021: 账号列表/详情回填 quota_key_id + quota_key_label（= code_masked），
+	// 列表顶层一次性填充 quota_key_summaries（§4.4）。未装配时两个脱敏字段保持缺省。
+	accountHandler.SetQuotaKeyService(quotaKeyService)
 	accountHandler.SetWebLoginCaptchaHelper(service.NewLocalCaptchaHelperHTTPClient(service.LocalCaptchaHelperConfig{
 		BaseURL: cfg.LocalCaptchaHelper.BaseURL,
 		APIKey:  cfg.LocalCaptchaHelper.APIKey,
@@ -137,6 +142,7 @@ func ProvideAdminHandlers(
 		Pricing:                pricingHandler,
 		UsageRisk:              admin.NewUsageRiskHandler(usageRiskService, settingService),
 		VisionCapability:       visionCapabilityHandler,
+		QuotaKey:               quotaKeyHandler,
 	}
 	// D3: 闲管家 admin 凭证配置入口——与 D1 的推送验签共享同一份 ConfigStore（252 表）
 	// 与 secretEncryptor；探活客户端为 nil 时 handler 内部用默认 http.Client。
@@ -397,6 +403,7 @@ var ProviderSet = wire.NewSet(
 	admin.NewAuditLogHandler,
 	admin.NewPricingHandler,
 	admin.NewUsageRiskHandler,
+	admin.NewQuotaKeyHandler,
 
 	// AdminHandlers and Handlers constructors
 	ProvideAdminHandlers,

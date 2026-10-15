@@ -51,6 +51,90 @@ func TestHTTPUpstreamDoCanDisableRedirectsPerRequest(t *testing.T) {
 	require.Zero(t, redirectedCalls.Load())
 }
 
+// TestHTTPUpstreamDoFreshConnNeverReusesIdleConn 用真实 TCP 连接计数坐实
+// DoFreshConn 的语义：常规 Do 第二次会复用池中空闲连接（基线），DoFreshConn
+// 每次都新建连接。这是 CN 首包超时后同账号重试能绕开半开连接的唯一依据——
+// 请求头上的 Connection: close 做不到这一点（Transport 取连接时不看它）。
+func TestHTTPUpstreamDoFreshConnNeverReusesIdleConn(t *testing.T) {
+	var newConns, served atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		served.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	rawUpstream := NewHTTPUpstream(nil)
+	upstream, ok := rawUpstream.(*httpUpstreamService)
+	require.True(t, ok, "生产注入的 HTTPUpstream 必须实现 DoFreshConn")
+	newReq := func() *http.Request {
+		req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader([]byte(`{"probe":1}`)))
+		require.NoError(t, err)
+		return req
+	}
+	drain := func(resp *http.Response, err error) {
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		require.NoError(t, resp.Body.Close())
+	}
+
+	// 基线：常规 Do 连续两次请求同一主机必须复用同一条连接（1 次 TCP 握手）。
+	drain(upstream.Do(newReq(), "", 1, 1))
+	drain(upstream.Do(newReq(), "", 1, 1))
+	require.Equal(t, int64(1), newConns.Load(), "常规 Do 必须复用连接池中的空闲连接（否则本用例失去对照）")
+	require.Equal(t, int64(2), served.Load())
+
+	// DoFreshConn：两次请求各新建一条连接，既不能复用生产主池的空闲连接，
+	// 也不能在一次性 Transport 里留活的下一次复用。
+	newConns.Store(0)
+	served.Store(0)
+	drain(upstream.DoFreshConn(newReq(), "", 1, 1))
+	drain(upstream.DoFreshConn(newReq(), "", 1, 1))
+	require.Equal(t, int64(2), newConns.Load(), "DoFreshConn 每次都必须新建 TCP 连接")
+	require.Equal(t, int64(2), served.Load())
+}
+
+// TestFreshConnClientDisablesKeepAlivesOnClone 单独钉住 DisableKeepAlives 这一层：
+// 上面的端到端用例里 "每次都新建连接" 由 Transport.Clone 的空连接池 + 单次使用共同保证，
+// 即使去掉 DisableKeepAlives 也会通过（实测反证），因此这里用**同一个一次性 client**
+// 连发两次请求单独验证：克隆体不得把连接放回池里给下一次用。
+func TestFreshConnClientDisablesKeepAlivesOnClone(t *testing.T) {
+	var newConns atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	base := &http.Client{Transport: &http.Transport{}}
+	oneShot := freshConnClient(base)
+	newReq := func() *http.Request {
+		req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewReader([]byte(`{"probe":1}`)))
+		require.NoError(t, err)
+		return req
+	}
+	for range 2 {
+		resp, err := oneShot.Do(newReq())
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		require.NoError(t, resp.Body.Close())
+	}
+	require.Equal(t, int64(2), newConns.Load(), "克隆体必须禁用 keep-alive，同 client 的第二次请求也要新建连接")
+	require.NotSame(t, base.Transport, oneShot.Transport, "必须克隆 Transport，不得污染原连接池")
+}
+
 func TestHTTPUpstreamDoWithTLSPlainHTTPUsesConfiguredHTTPProxy(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -44,7 +44,12 @@ func AnthropicToChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsR
 		return nil, fmt.Errorf("anthropic request is nil")
 	}
 
-	messages, err := anthropicToChatMessages(req.System, req.Messages)
+	// DeepSeek thinking-mode 契约：请求带 tools 时，各 assistant 轮次（含纯文本
+	// 轮，即无 tool_use 的轮次）已存在的 thinking 明文都必须折叠为 reasoning_content
+	// 回传；否则后续请求漏传即 400。无 tools 请求行为不变（见
+	// anthropicThinkingToReasoningContent 的 withTools 判据）。
+	requestHasTools := len(req.Tools) > 0
+	messages, err := anthropicToChatMessages(req.System, req.Messages, requestHasTools)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +116,7 @@ func AnthropicToChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsR
 // anthropicToChatMessages converts the Anthropic system field + message list
 // into Chat Completions messages. It mirrors convertAnthropicToResponsesInput +
 // responsesInputToChatMessages but produces ChatMessage directly.
-func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([]ChatMessage, error) {
+func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, requestHasTools bool) ([]ChatMessage, error) {
 	var messages []ChatMessage
 
 	// System prompt → system message. parseAnthropicSystemContentParts handles
@@ -131,7 +136,7 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([
 	}
 
 	for _, m := range msgs {
-		converted, err := anthropicMsgToChatMessages(m)
+		converted, err := anthropicMsgToChatMessages(m, requestHasTools)
 		if err != nil {
 			return nil, err
 		}
@@ -145,10 +150,10 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([
 // Chat messages. tool_result blocks become standalone "tool" role messages
 // (the Chat Completions convention); text/image blocks stay in a user message;
 // assistant tool_use blocks become tool_calls on the assistant message.
-func anthropicMsgToChatMessages(m AnthropicMessage) ([]ChatMessage, error) {
+func anthropicMsgToChatMessages(m AnthropicMessage, requestHasTools bool) ([]ChatMessage, error) {
 	switch m.Role {
 	case "assistant":
-		return anthropicAssistantToChatMessages(m.Content)
+		return anthropicAssistantToChatMessages(m.Content, requestHasTools)
 	default: // "user" and any unknown role
 		return anthropicUserToChatMessages(m.Content)
 	}
@@ -244,9 +249,12 @@ func anthropicUserToChatMessages(raw json.RawMessage) ([]ChatMessage, error) {
 
 // anthropicAssistantToChatMessages handles an Anthropic assistant message.
 // Text content → assistant message content; tool_use blocks → tool_calls on the
-// same assistant message; thinking blocks → reasoning_content, but only on a
-// message that carries tool calls (see anthropicThinkingToReasoningContent).
-func anthropicAssistantToChatMessages(raw json.RawMessage) ([]ChatMessage, error) {
+// same assistant message; thinking blocks → reasoning_content (see
+// anthropicThinkingToReasoningContent). The requestHasTools flag widens the
+// reasoning passback scope: when the request declared tools (DeepSeek
+// thinking-mode contract), thinking on plain-text assistant turns that follow a
+// tool call is also folded back, not only turns that carry tool_calls themselves.
+func anthropicAssistantToChatMessages(raw json.RawMessage, requestHasTools bool) ([]ChatMessage, error) {
 	// Plain string → single assistant message.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -284,7 +292,7 @@ func anthropicAssistantToChatMessages(raw json.RawMessage) ([]ChatMessage, error
 		})
 	}
 
-	msg.ReasoningContent = anthropicThinkingToReasoningContent(blocks, len(msg.ToolCalls) > 0)
+	msg.ReasoningContent = anthropicThinkingToReasoningContent(blocks, requestHasTools || len(msg.ToolCalls) > 0)
 
 	return []ChatMessage{msg}, nil
 }
@@ -299,14 +307,22 @@ func anthropicAssistantToChatMessages(raw json.RawMessage) ([]ChatMessage, error
 // produced a tool call to be replayed on that assistant message and answers
 // 400 otherwise, which is why buildChatMessagesFromItems already carries
 // pendingReasoning onto assistant tool-call messages in the Responses→Chat
-// bridge. hasToolCalls keeps the scope identical to that sibling: reasoning
-// rides along with tool calls only, never on a plain assistant text turn.
+// bridge.
+//
+// withTools keeps the scope aligned with that sibling: when the request
+// declared tools (DeepSeek thinking-mode contract) every assistant turn's
+// thinking — including plain-text turns that follow a tool call — is folded
+// back; this is safe because DeepSeek ignores reasoning_content on
+// non-tool turns. When withTools is false (no tools in the request AND the
+// message carries no tool_calls) the thinking is still dropped, which is also
+// safe: non-tool-turn reasoning_content is ignored by the upstream, and
+// callers that don't speak DeepSeek thinking mode must not be sent it.
 //
 // redacted_thinking blocks and signature-only placeholders carry no plaintext
 // and contribute nothing. Multiple blocks join with "\n", matching
 // extractResponsesReasoningText.
-func anthropicThinkingToReasoningContent(blocks []AnthropicContentBlock, hasToolCalls bool) string {
-	if !hasToolCalls {
+func anthropicThinkingToReasoningContent(blocks []AnthropicContentBlock, withTools bool) string {
+	if !withTools {
 		return ""
 	}
 	var parts []string

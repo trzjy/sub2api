@@ -1124,6 +1124,23 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 	return accounts, useMixed, nil
 }
 
+// selfHostBaseURLMarker 是自建站点承载地址的统一标识子串（派发单 D-SHS-001）。
+// 订阅组大请求动态排除自建账号：候选账号 GetOpenAIBaseURL() 含该子串即视为自建站点账号。
+// 标识与阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
+const selfHostBaseURLMarker = "jq1.9gpu"
+
+// selfHostedAccountIDs 从候选账号集合中挑出承载地址含自建站点标识的账号 id。
+// 纯函数：用构造 Account 即可单测，不连 DB；不改变任何既有选号/调度行为。
+func selfHostedAccountIDs(accounts []Account) map[int64]struct{} {
+	excluded := make(map[int64]struct{})
+	for i := range accounts {
+		if strings.Contains(accounts[i].GetOpenAIBaseURL(), selfHostBaseURLMarker) {
+			excluded[accounts[i].ID] = struct{}{}
+		}
+	}
+	return excluded
+}
+
 // IsSingleAntigravityAccountGroup 检查指定分组是否只有一个 antigravity 平台的可调度账号。
 // 用于 Handler 层在首次请求时提前设置 SingleAccountRetry context，
 // 避免单账号分组收到 503 时错误地设置模型限流标记导致后续请求连续快速失败。

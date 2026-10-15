@@ -95,9 +95,11 @@ func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {
 			anthropicContentBlock
 		}{Text: b.Text, anthropicContentBlock: anthropicContentBlock(b)})
 	case "thinking":
-		// Anthropic always sends `signature` on thinking blocks (empty on
-		// content_block_start); strict clients such as Grok Build reject the
-		// block with "missing field `signature`" when the key is absent.
+		// 恒输出 signature 键：DeepSeek/Gemini 等严格上游、以及 Grok Build 等
+		// 严格客户端均要求 thinking 块携带 signature 字段（即便为空字符串），
+		// 否则会被丢弃/降级为 redacted，或报 "missing field `signature`"。
+		// 对齐已接受先例 412718edf5。**不伪造**非空签名（DeepSeek 无密文签名），
+		// 无值时发空串占位。嵌入的 anthropicContentBlock 仍提供 type/cache_control 等字段。
 		return json.Marshal(struct {
 			Thinking  string `json:"thinking"`
 			Signature string `json:"signature"`

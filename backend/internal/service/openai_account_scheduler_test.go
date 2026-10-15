@@ -2932,7 +2932,7 @@ func setTestVisionCapabilityLookup(t *testing.T, lookup func(ctx context.Context
 	})
 }
 
-// TestOpenAIAccountScheduler_RequireVisionFilter 覆盖 docs/capability-routing-plan.md §3.4：
+// TestOpenAIAccountScheduler_RequireVisionFilter 覆盖 docs-local/capability-routing-plan.md §3.4：
 // RequireVision=true 排除已知不支持的账号，unknown 放行；RequireVision=false 零回归。
 func TestOpenAIAccountScheduler_RequireVisionFilter(t *testing.T) {
 	ctx := context.Background()
@@ -2941,8 +2941,8 @@ func TestOpenAIAccountScheduler_RequireVisionFilter(t *testing.T) {
 
 	// 上游模型解析：account 无 model_mapping 时映射到请求模型本身。
 	reqBase := OpenAIAccountScheduleRequest{
-		RequestedModel:   "gpt-5.1",
-		RequiredTransport: OpenAIUpstreamTransportAny,
+		RequestedModel:     "gpt-5.1",
+		RequiredTransport:  OpenAIUpstreamTransportAny,
 		RequiredCapability: OpenAIEndpointCapabilityChatCompletions,
 	}
 

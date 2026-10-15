@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # deploy-to-server.sh —— GitHub 中心化部署唯一入口（服务器端执行）
-# 语义见 docs/deploy-github-flow-migration-plan.md §2.1。
+# 语义见 docs-local/deploy-github-flow-migration-plan.md §2.1。
 # 禁区：脚本内不得出现删除类命令或同步删除工具，亦不得含任何删除逻辑。
 
 # 1. 用法：deploy-to-server.sh [ref]，REF 取 $1，缺省 origin/main

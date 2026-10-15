@@ -286,10 +286,27 @@ func TestHandleUpstreamError_Cline402KeepsAccountWhenCooldownWriteFails(t *testi
 	}
 }
 
+// cnTestActiveAccountRepo 是被余额 / 用量 / 周期检测假 repo 复用的共享基类：嵌入
+// AccountRepository（满足接口）并持有 accounts 切片、提供具体 ListActive。各夹具嵌入本
+// 基类而非仅嵌入空的 AccountRepository 接口后，ListActive 由本基类具体提供，从根本上
+// 消除"嵌入空接口 + 方法提升 → nil 解引用"的脆弱性（cn_provider_balance_check_service.go:379
+// B2 全量补收轮经 ListActive 触发）。intfix 轮对 clineAccountRepo / commandCodeCheckRepo
+// 逐夹具补 ListActive 属症状打补丁；本次收敛为共享基类，新增同类夹具直接嵌入即可，无需
+// 再各自补一遍。
+type cnTestActiveAccountRepo struct {
+	AccountRepository
+	accounts []Account
+}
+
+// ListActive 假实现：repo 仅含显式构造的激活账号，直接返回全量即可（与 ListByPlatform
+// 同口径，均为 repo 层 status=active 过滤的测试等价）。
+func (r *cnTestActiveAccountRepo) ListActive(_ context.Context) ([]Account, error) {
+	return r.accounts, nil
+}
+
 // clineAccountRepo 为余额 / 用量探测与周期检测提供 Cline 账号，并记录写入。
 type clineAccountRepo struct {
-	AccountRepository
-	accounts    []Account
+	cnTestActiveAccountRepo
 	mu          sync.Mutex
 	extraWrites map[int64][]map[string]any
 	modelLimits map[int64]map[string]time.Time
@@ -434,7 +451,7 @@ func clineUsageTestConfig() *config.Config {
 // 一次探测刷新三档窗口与积分余额；两个钱包都可用时不写冷却。
 func TestClineUsageProbeWritesWindowsAndBalance(t *testing.T) {
 	account := clineTestAccount(60)
-	repo := &clineAccountRepo{accounts: []Account{*account}}
+	repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 	upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusOK, body: clineUsageLimitsBody}, `{"success":true,"data":{"balance":12340000}}`)
 
 	result, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -469,7 +486,7 @@ func TestClineUsageProbeCoolsDownExhaustedWallets(t *testing.T) {
 	body := `{"data":{"limits":[{"type":"five_hour","percentUsed":30},{"type":"weekly","percentUsed":100,"resetsAt":"` +
 		resetAt.Format(time.RFC3339) + `"}]},"success":true}`
 	account := clineTestAccount(61)
-	repo := &clineAccountRepo{accounts: []Account{*account}}
+	repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 	upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusOK, body: body}, `{"success":true,"data":{"balance":200000}}`)
 
 	_, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -489,7 +506,7 @@ func TestClineUsageProbeWithoutSubscription(t *testing.T) {
 		{status: http.StatusOK, body: `{"success":true,"data":{"limits":[]}}`},
 	} {
 		account := withClinePassSnapshot(clineTestAccount(62), nil)
-		repo := &clineAccountRepo{accounts: []Account{*account}}
+		repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 		upstream := newClineAccountUpstream(usage, `{"success":true,"data":{"balance":5000000}}`)
 
 		result, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -522,7 +539,7 @@ func TestClineUsageProbeClearsRecoveredWallets(t *testing.T) {
 		now := time.Now()
 		setAccountModelRateLimitSnapshot(account, clinePassRateLimitKey, now.Add(6*time.Hour), clinePassLimitReason, now)
 		setAccountModelRateLimitSnapshot(account, clineCreditsRateLimitKey, now.Add(time.Hour), tc.creditsReason, now)
-		repo := &clineAccountRepo{accounts: []Account{*account}}
+		repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 		upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusOK, body: clineUsageLimitsBody}, `{"success":true,"data":{"balance":5000000}}`)
 
 		_, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -556,7 +573,7 @@ func TestClineUsageProbeClearsOnlyProvablePassCooldowns(t *testing.T) {
 		NewRateLimitService(&commandCodeRateLimitRepo{}, nil, &config.Config{}, nil, nil).HandleUpstreamError(ctx, account,
 			tc.status, http.Header{}, []byte(tc.body))
 		require.True(t, account.isRateLimitActiveForKey(clinePassRateLimitKey), tc.body)
-		repo := &clineAccountRepo{accounts: []Account{*account}}
+		repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 		upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusOK, body: clineUsageLimitsBody}, balance)
 
 		_, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -567,7 +584,7 @@ func TestClineUsageProbeClearsOnlyProvablePassCooldowns(t *testing.T) {
 	}
 
 	// 探测发现未订阅设的冷却，订阅后的下一次探测解除。
-	repo := &clineAccountRepo{accounts: []Account{*clineTestAccount(66)}}
+	repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*clineTestAccount(66)}}}
 	unsubscribed := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusNotFound,
 		body: `{"success":false,"error":"no plan history found for user"}`}, balance)
 	_, err := NewCNProviderQuotaService(repo, nil, unsubscribed, clineUsageTestConfig()).QueryUsage(context.Background(), 66)
@@ -583,7 +600,7 @@ func TestClineUsageProbeClearsOnlyProvablePassCooldowns(t *testing.T) {
 // 用量接口鉴权失败：探测失败但不写快照、不动冷却。
 func TestClineUsageProbeAuthFailure(t *testing.T) {
 	account := clineTestAccount(64)
-	repo := &clineAccountRepo{accounts: []Account{*account}}
+	repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{*account}}}
 	upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusUnauthorized, body: `{"error":"Unauthorized"}`}, `{}`)
 
 	result, err := NewCNProviderQuotaService(repo, nil, upstream, clineUsageTestConfig()).QueryUsage(context.Background(), account.ID)
@@ -606,7 +623,7 @@ func TestCNProviderBalanceCheckRunOnceProbesClineUsage(t *testing.T) {
 	relay.Credentials["base_url"] = "https://relay.example.com/v1"
 	relay.Credentials["api_protocol"] = APIProtocolChatCompletions
 
-	repo := &clineAccountRepo{accounts: []Account{official, manualOff, relay}}
+	repo := &clineAccountRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{official, manualOff, relay}}}
 	upstream := newClineAccountUpstream(commandCodeAlphaResponse{status: http.StatusOK, body: clineUsageLimitsBody}, `{"success":true,"data":{"balance":200000}}`)
 	cfg := clineUsageTestConfig()
 	svc := &CNProviderBalanceCheckService{
@@ -631,7 +648,7 @@ func TestCNProviderBalanceCheckRunOnceDispatchesAccountProbesByPlatform(t *testi
 	commandCode := *commandCodeUsageAccount()
 	commandCode.ID, commandCode.Schedulable = 1, true
 	cline := *clineTestAccount(2)
-	repo := &commandCodeCheckRepo{accounts: []Account{commandCode, cline}}
+	repo := &commandCodeCheckRepo{cnTestActiveAccountRepo: cnTestActiveAccountRepo{accounts: []Account{commandCode, cline}}}
 	prober := &commandCodeBalanceProber{balance: 0.2}
 	svc := &CNProviderBalanceCheckService{accountRepo: repo, quotaService: prober, cfg: clineUsageTestConfig()}
 
