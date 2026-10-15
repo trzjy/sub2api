@@ -123,14 +123,21 @@ func TestForwardAsAnthropic_DirectCodeBuddyRoutesToCodeBuddyUpstream(t *testing.
 	gin.SetMode(gin.TestMode)
 	const body = `{"model":"space-bunny","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 
+	// codebuddy 出站改写无条件置 stream=true，上游恒回 SSE（见 codebuddy_upstream.go:73）；
+	// 非流式客户端请求由 convertedChatCompletionsAsAnthropic 本地聚合成 Anthropic JSON。
 	ccOK := &http.Response{
 		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body: io.NopCloser(strings.NewReader(`{
-			"id":"c1","object":"chat.completion","model":"space-bunny",
-			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
-			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
-		}`)),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"id":"c1","object":"chat.completion.chunk","model":"space-bunny","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+			"",
+			`data: {"id":"c1","object":"chat.completion.chunk","model":"space-bunny","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			"",
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n"))),
 	}
 	upstream := &httpUpstreamRecorder{resp: ccOK}
 	cfg := &config.Config{

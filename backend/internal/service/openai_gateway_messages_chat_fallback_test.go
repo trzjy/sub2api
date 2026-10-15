@@ -559,6 +559,133 @@ func TestForwardAnthropicViaRawChatCompletions_NonstreamConvertedToStream(t *tes
 	require.Equal(t, 2, result.Usage.OutputTokens)
 }
 
+// TestForwardAnthropicViaRawChatCompletions_CodeBuddyNonstreamConvertedToStream 是
+// TestForwardAnthropicViaRawChatCompletions_NonstreamConvertedToStream 的 codebuddy 版本，
+// 覆盖 2026-10-16 生产缺陷（group 109 /v1/messages stream:false 恒 502
+// "parse chat completions response: invalid character 'd' looking for beginning of value"）：
+// codebuddy 出站改写无条件置 stream=true（codebuddy_upstream.go:73），非流式请求若不走
+// 「非流式→流式转换」通道，就会以非流式预期 json.Unmarshal 上游的 "data: {...}"。
+// 直绑 codebuddy OAuth 账号（生产 group 109 形态）必须复用该通道。
+func TestForwardAnthropicViaRawChatCompletions_CodeBuddyNonstreamConvertedToStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"space-bunny","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	// codebuddy 上游是 CC 变体且强制流式：响应恒为 SSE（与 codebuddy 出站改写同源）。
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_cb","object":"chat.completion.chunk","created":1700000000,"model":"space-bunny","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_cb","object":"chat.completion.chunk","created":1700000000,"model":"space-bunny","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_cb_ns2s"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{
+				URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
+			},
+			Gateway: config.GatewayConfig{
+				// NonstreamToStreamDisabled 零值 false = 转换通道启用。
+				CodeBuddy: config.GatewayCodeBuddyConfig{SanitizeEnabled: true},
+			},
+		},
+		httpUpstream: upstream,
+		accountRepo:  &codeBuddyShadowRepoStub{},
+	}
+
+	// 直绑 codebuddy OAuth 账号（生产 group 109 形态：无 ParentAccountID，凭证即自身）。
+	account := healthyCodeBuddyGatewayTestAccount(9003, "direct-access-token")
+	require.Equal(t, AccountTypeOAuth, account.Type)
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// 上游请求：走 codebuddy 上游 + stream=true + include_usage。
+	require.NotNil(t, upstream.lastReq, "must have sent an upstream request")
+	require.Equal(t, "copilot.tencent.com", upstream.lastReq.URL.Host, "必须走 codebuddy 上游")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(),
+		"非流式客户端请求必须向上游发 stream=true（上游硬性拒绝非流式）")
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Bool(), "必须携带 include_usage")
+	require.Equal(t, "space-bunny", gjson.GetBytes(upstream.lastBody, "model").String(),
+		"出站模型名不得被改写成 gpt-5.x")
+
+	// 客户端：200 anthropic 非流式 JSON（本地聚合 SSE 后的完整消息，非 SSE 帧）。
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	out := rec.Body.String()
+	require.NotContains(t, out, "data:", "响应不得是 SSE 帧")
+	require.Equal(t, "message", gjson.Get(out, "type").String())
+	require.Equal(t, "assistant", gjson.Get(out, "role").String())
+	require.Equal(t, "ok", gjson.Get(out, "content.0.text").String(), "客户端内容=聚合后的完整内容")
+
+	require.False(t, result.Stream, "非流式客户端 ForwardResult.Stream 必须为 false")
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+}
+
+// TestForwardAnthropicViaRawChatCompletions_CodeBuddyClientStreamUnchanged 非回归：
+// codebuddy 客户端流式请求行为不变（上游 stream=true，客户端收到 SSE）。
+func TestForwardAnthropicViaRawChatCompletions_CodeBuddyClientStreamUnchanged(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"space-bunny","max_tokens":16,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chatcmpl_cbs","object":"chat.completion.chunk","created":1700000000,"model":"space-bunny","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_cbs","object":"chat.completion.chunk","created":1700000000,"model":"space-bunny","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_cb_stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{
+				URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true},
+			},
+			Gateway: config.GatewayConfig{CodeBuddy: config.GatewayCodeBuddyConfig{SanitizeEnabled: true}},
+		},
+		httpUpstream: upstream,
+		accountRepo:  &codeBuddyShadowRepoStub{},
+	}
+	account := healthyCodeBuddyGatewayTestAccount(9004, "direct-access-token")
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool(), "客户端流式请求上游恒 stream=true")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, result.Stream, "客户端流式 ForwardResult.Stream 必须为 true")
+	require.Contains(t, rec.Body.String(), "event: message_start", "客户端流式应收到 Anthropic SSE 事件")
+}
+
 // Done when #2a：非资格账号（openai apikey / grok apikey / CN 官方直连 apikey）+
 // stream:false → 走既有缓冲分支（上游请求体 stream 缺省/false，无 include_usage，
 // 客户端 200 JSON 不变）。

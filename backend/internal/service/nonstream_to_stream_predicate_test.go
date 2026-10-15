@@ -70,11 +70,14 @@ func TestShouldConvertNonstreamToStream(t *testing.T) {
 		{"deepseek web 接入", newNS2SAccount(PlatformDeepseek, AccountTypeAPIKey, proxyBaseURL, AccountAccessModeWeb), false},
 		{"other web 接入", newNS2SAccount(PlatformOther, AccountTypeAPIKey, proxyBaseURL, AccountAccessModeWeb), false},
 
-		// openai OAuth / grok / codebuddy = 不转换
+		// openai OAuth / grok = 不转换
 		{"openai OAuth", newNS2SAccount(PlatformOpenAI, AccountTypeOAuth, "", ""), false},
 		{"openai apikey", newNS2SAccount(PlatformOpenAI, AccountTypeAPIKey, "", ""), false},
 		{"grok apikey", newNS2SAccount(PlatformGrok, AccountTypeAPIKey, "", ""), false},
-		{"codebuddy apikey", newNS2SAccount(PlatformCodeBuddy, AccountTypeAPIKey, "", ""), false},
+
+		// codebuddy（上游强制流式）= 一律转换，与账号类型无关（2026-10-16 修复）
+		{"codebuddy apikey", newNS2SAccount(PlatformCodeBuddy, AccountTypeAPIKey, "", ""), true},
+		{"codebuddy oauth", newNS2SAccount(PlatformCodeBuddy, AccountTypeOAuth, "", ""), true},
 
 		// 非 apikey 类型（upstream / oauth）一律不转换
 		{"deepseek upstream", newNS2SAccount(PlatformDeepseek, AccountTypeUpstream, proxyBaseURL, ""), false},
@@ -103,6 +106,46 @@ func TestShouldConvertNonstreamToStream_Disabled(t *testing.T) {
 	}
 	for _, acc := range candidates {
 		require.False(t, svc.shouldConvertNonstreamToStream(acc), "开关关闭时任何账号都不应转换")
+	}
+}
+
+// TestShouldConvertNonstreamToStream_CodeBuddyUpstreamForcesStream 钉住 2026-10-16
+// 生产缺陷修复：codebuddy 上游出站改写无条件置 stream=true（codebuddy_upstream.go:73），
+// 故非流式请求必须经「非流式→流式转换」通道走本地聚合，否则读上游 SSE 时报
+// "invalid character 'd' looking for beginning of value" 并回 502。
+// 断言 codebuddy OAuth 是本次修复的核心（生产 group 109 账号即 OAuth）。
+func TestShouldConvertNonstreamToStream_CodeBuddyUpstreamForcesStream(t *testing.T) {
+	svc := enabledService()
+
+	oauth := newNS2SAccount(PlatformCodeBuddy, AccountTypeOAuth, "", "")
+	require.True(t, svc.shouldConvertNonstreamToStream(oauth),
+		"codebuddy OAuth 账号必须转换（上游硬性拒绝非流式）")
+
+	apikey := newNS2SAccount(PlatformCodeBuddy, AccountTypeAPIKey, "", "")
+	require.True(t, svc.shouldConvertNonstreamToStream(apikey),
+		"codebuddy apikey 账号同样转换，不得因账号类型产生行为分叉")
+}
+
+// TestShouldConvertNonstreamToStream_CodeBuddyDisabledSwitch 总开关优先于 codebuddy 分支：
+// 配置关闭时任何账号（含 codebuddy）都不转换。
+func TestShouldConvertNonstreamToStream_CodeBuddyDisabledSwitch(t *testing.T) {
+	svc := disabledService()
+	require.False(t, svc.shouldConvertNonstreamToStream(newNS2SAccount(PlatformCodeBuddy, AccountTypeOAuth, "", "")),
+		"开关关闭时 codebuddy 也不得转换")
+	require.False(t, svc.shouldConvertNonstreamToStream(newNS2SAccount(PlatformCodeBuddy, AccountTypeAPIKey, "", "")),
+		"开关关闭时 codebuddy 也不得转换")
+}
+
+// TestShouldConvertNonstreamToStream_NonCodeBuddyOAuthStillBlocked 非回归：codebuddy 分支
+// 只按 platform 收敛，不得把非 codebuddy 的 OAuth/upstream 类型账号一并放进转换通道
+// （那会连带改变 CN/other OAuth 账号的既有行为）。
+func TestShouldConvertNonstreamToStream_NonCodeBuddyOAuthStillBlocked(t *testing.T) {
+	svc := enabledService()
+
+	for _, platform := range []string{PlatformDeepseek, PlatformKimi, PlatformZhipu, PlatformMiniMax, PlatformOther, PlatformOpenAI, PlatformGrok} {
+		acc := newNS2SAccount(platform, AccountTypeOAuth, "https://tokenharbor.ai/v1", "")
+		require.False(t, svc.shouldConvertNonstreamToStream(acc),
+			"%s OAuth 账号必须仍被 AccountTypeAPIKey 门槛挡住", platform)
 	}
 }
 
