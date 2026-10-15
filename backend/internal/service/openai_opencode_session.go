@@ -69,7 +69,13 @@ func applyOpenCodeSessionHeader(c *gin.Context, account *Account, targetURL stri
 		return
 	}
 
-	sessionID := strings.TrimSpace(c.GetHeader(openCodeSessionHeader))
+	// 复用既有会话 ID 解析/生成函数：客户端已带 X-OpenCode-Session 则原样保留
+	// （每会话稳定 ID）；否则对 OpenCode Go / opencode.ai-origin 账号按生产语义
+	// 生成 UUID 注入，满足上游 MissingSessionID 校验。生成分支与网关
+	// applyMuseSessionHeader 同源（resolveOpenCodeSessionID(generate=true)），
+	// 不另造机制。此分支使本不携带入站会话的账号测试器（TestAccountConnection）
+	// 对 OpenCode Go 上游出站请求自然带上必需会话头，与正式转发链语义一致。
+	sessionID := resolveOpenCodeSessionID(c, headers, shouldGenerateOpenCodeSession(account, targetURL), bodies...)
 	if sessionID == "" {
 		return
 	}
