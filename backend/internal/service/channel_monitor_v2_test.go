@@ -510,3 +510,71 @@ func TestChannelMonitorV2HealthTTFTAtTargetIsHealthy(t *testing.T) {
 	require.NotNil(t, h.TTFTScore)
 	require.InDelta(t, 100.0, *h.TTFTScore, 0.01)
 }
+
+// ---------- 测试（定向 B4）：merge 的探测来源语义 ----------
+
+func TestChannelMonitorV2MergeCatalogMatrix_ProbeSource(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	key := ChannelMonitorCatalogKey{Platform: "anthropic", Model: "claude", GroupID: 0}
+	catalog := ChannelMonitorCatalog{
+		Keys:                map[ChannelMonitorCatalogKey]struct{}{key: {}},
+		CandidateAccountIDs: map[ChannelMonitorCatalogKey][]int64{key: {1}},
+	}
+	// 空 base：无业务流量行，全部由 catalog 驱动（探测 / 无数据）。
+	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByPlatform}
+
+	ft := 123
+	probeStale := &ProbeState{
+		Platform: "anthropic", Model: "claude", GroupID: 0,
+		LastProbeAt: now.Add(-time.Hour), LastOK: true, FirstTokenMs: &ft,
+	}
+
+	// ① 探测状态早于 30 分钟（新鲜度门已废除的回归）→ 仍展示为 probe 来源，FirstTokenMs 透传。
+	merged := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
+		map[ChannelMonitorCatalogKey]*ProbeState{key: probeStale},
+		func() time.Time { return now },
+	)
+	require.Len(t, merged.Items, 1)
+	row := merged.Items[0]
+	require.True(t, row.HasData)
+	require.NotNil(t, row.Source)
+	require.Equal(t, ChannelMonitorV2SourceProbe, *row.Source)
+	require.NotNil(t, row.Status)
+	require.Equal(t, ChannelMonitorV2StatusOperational, *row.Status)
+	require.NotNil(t, row.ObservedAt)
+	require.NotNil(t, row.FirstTokenMs, "probe row must carry first_token_ms")
+	require.Equal(t, ft, *row.FirstTokenMs)
+
+	// ② 从未探测（无 probe_state）→ has_data=false，status/source/observed_at/first_token_ms 全 null。
+	mergedNone := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
+		map[ChannelMonitorCatalogKey]*ProbeState{},
+		func() time.Time { return now },
+	)
+	require.Len(t, mergedNone.Items, 1)
+	rowNone := mergedNone.Items[0]
+	require.False(t, rowNone.HasData)
+	require.Nil(t, rowNone.Source)
+	require.Nil(t, rowNone.Status)
+	require.Nil(t, rowNone.ObservedAt)
+	require.Nil(t, rowNone.FirstTokenMs)
+
+	// ③ probe 行带 first_token_ms：!ok 探测仍透传 FirstTokenMs 字段（仅 status 变 failed）。
+	ft2 := 7
+	probeFail := &ProbeState{
+		Platform: "anthropic", Model: "claude", GroupID: 0,
+		LastProbeAt: now.Add(-time.Hour), LastOK: false, FirstTokenMs: &ft2,
+	}
+	mergedFail := channelMonitorV2MergeCatalogMatrix(
+		ChannelMonitorV2Config{}, ChannelMonitorV2GroupByPlatform, catalog, nil, base,
+		map[ChannelMonitorCatalogKey]*ProbeState{key: probeFail},
+		func() time.Time { return now },
+	)
+	require.Len(t, mergedFail.Items, 1)
+	require.True(t, mergedFail.Items[0].HasData)
+	require.NotNil(t, mergedFail.Items[0].Status)
+	require.Equal(t, ChannelMonitorV2StatusFailed, *mergedFail.Items[0].Status)
+	require.NotNil(t, mergedFail.Items[0].FirstTokenMs)
+	require.Equal(t, ft2, *mergedFail.Items[0].FirstTokenMs)
+}

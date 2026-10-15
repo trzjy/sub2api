@@ -139,7 +139,8 @@ func TestChannelMonitorV2MergeCatalogProbeFailedStatus(t *testing.T) {
 func TestChannelMonitorV2MergeCatalogProbeFreshnessExpiry(t *testing.T) {
 	catalog, groupsByID := buildC3Catalog()
 	base := &ChannelMonitorV2Matrix{GroupBy: ChannelMonitorV2GroupByPlatformGroupModel, Coverage: c3Coverage(), Items: nil}
-	// Probe older than the 30m freshness window → must collapse to no-data.
+	// B4：新鲜度门已废除——即使探测早于 30 分钟，最新一次探测结果仍无条件作为
+	// 探测来源状态展示（不再折叠为 no-data）。仅该渠道从未有 probe_state 才 has_data=false。
 	probeStates := map[ChannelMonitorCatalogKey]*ProbeState{
 		{Platform: "openai", Model: "gpt-4", GroupID: 1}: {
 			Platform: "openai", Model: "gpt-4", GroupID: 1,
@@ -152,10 +153,12 @@ func TestChannelMonitorV2MergeCatalogProbeFreshnessExpiry(t *testing.T) {
 	)
 	probe := findRow(result.Items, "gpt-4")
 	require.NotNil(t, probe)
-	require.False(t, probe.HasData) // expired probe → no-data, not probe
-	require.Nil(t, probe.Source)
-	require.Nil(t, probe.Status)
-	require.Nil(t, probe.ObservedAt)
+	require.True(t, probe.HasData) // 废除新鲜度门后，陈旧探测仍展示为 probe 来源
+	require.NotNil(t, probe.Source)
+	require.Equal(t, ChannelMonitorV2SourceProbe, *probe.Source)
+	require.NotNil(t, probe.Status)
+	require.Equal(t, ChannelMonitorV2StatusOperational, *probe.Status)
+	require.NotNil(t, probe.ObservedAt)
 }
 
 func TestChannelMonitorV2MergeCatalogDTOMinimalContract(t *testing.T) {

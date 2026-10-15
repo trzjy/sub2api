@@ -28,8 +28,7 @@ const i18nT = (key: string, params?: Record<string, unknown>) => {
     'channelMonitorV2.matrix.warningLegend': '警告',
     'channelMonitorV2.matrix.criticalLegend': '异常',
     'channelMonitorV2.matrix.unknownLegend': '未知',
-    'channelMonitorV2.matrix.probeBadge': '抽样探测',
-    'channelMonitorV2.matrix.noDataBadge': '无数据',
+    'channelMonitorV2.matrix.probeSource': '来自探测（单账号，非渠道整体）：{status} · 最近探测 {observed_at}',
   }
   const template = map[key] || key
   return template.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? ''))
@@ -156,7 +155,7 @@ describe('RelayPulseMatrix C3 three-state', () => {
     bucket_seconds: 60,
   }
 
-  it('renders business / probe / no-data rows with explicit source badges and no channel-wide rates', () => {
+  it('renders business / probe / no-data rows without source badges and shows real probe TTFT', () => {
     const wrapper = mount(RelayPulseMatrix, {
       props: {
         rows: [
@@ -169,9 +168,16 @@ describe('RelayPulseMatrix C3 three-state', () => {
             platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-4',
             metrics: metrics(0), health, buckets: [],
             has_data: true, source: 'probe', status: 'operational', observed_at: '2026-08-01T00:02:00Z',
+            first_token_ms: 250,
           },
           {
             platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-3',
+            metrics: metrics(0), health, buckets: [],
+            has_data: true, source: 'probe', status: 'failed', observed_at: '2026-08-01T00:01:00Z',
+            first_token_ms: null,
+          },
+          {
+            platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-2',
             metrics: metrics(0), health, buckets: [],
             has_data: false, source: null, status: null, observed_at: null,
           },
@@ -181,26 +187,36 @@ describe('RelayPulseMatrix C3 three-state', () => {
       },
     })
 
-    // Two non-business rows → exactly two source badges (probe + no-data).
-    const badges = wrapper.findAll('.state-badge')
-    expect(badges).toHaveLength(2)
-    const badgeTexts = badges.map((b) => b.text())
-    expect(badgeTexts).toContain('抽样探测')
-    expect(badgeTexts).toContain('无数据')
+    // No source badges anywhere (badge system abolished).
+    expect(wrapper.findAll('.state-badge')).toHaveLength(0)
 
-    // Business row carries no source badge.
-    // (Each data row has a .dimension-cell; the .matrix-header is not a data row.)
-    const rows = wrapper.findAll('.dimension-cell')
-    expect(rows).toHaveLength(3)
+    // Four data rows (header excluded).
+    const dataRows = wrapper.findAll('.matrix-row:not(.matrix-header)')
+    expect(dataRows).toHaveLength(4)
 
-    // No-data row uses the explicit muted marker, not the all-red/unknown dot.
-    expect(wrapper.find('.health-no-data').exists()).toBe(true)
+    // Probe row (gpt-4) renders first_token_ms in the TTFT column (index 1).
+    const probeRow = dataRows[1]
+    const probeTtft = probeRow.findAll('.summary-value')[1].text()
+    expect(probeTtft).toBe('250ms')
+    // Probe row carries no badge.
+    expect(probeRow.find('.state-badge').exists()).toBe(false)
 
-    // Non-business rows collapse metrics to a dash (never imply channel-wide rates).
-    const allText = wrapper.text()
-    // business success rate is ~90.0%; probe/no-data show '—'.
-    const dashCount = (allText.match(/—/g) || []).length
-    expect(dashCount).toBeGreaterThanOrEqual(6)
+    // Probe row with null first_token_ms shows a dash, no badge.
+    const probeNullRow = dataRows[2]
+    expect(probeNullRow.findAll('.summary-value')[1].text()).toBe('—')
+    expect(probeNullRow.find('.state-badge').exists()).toBe(false)
+
+    // No-data row uses the explicit muted marker, not a badge; TTFT collapses to dash.
+    const noDataRow = dataRows[3]
+    expect(noDataRow.find('.health-no-data').exists()).toBe(true)
+    expect(noDataRow.find('.state-badge').exists()).toBe(false)
+    expect(noDataRow.find('.dimension-cell').text()).toBe('openai / 默认组 / gpt-2')
+    expect(noDataRow.findAll('.summary-value')[1].text()).toBe('—')
+
+    // Probe row hover explains the sampled source + last observation time.
+    const probeTitle = probeRow.find('.dimension-cell').attributes('title') || ''
+    expect(probeTitle).toContain('来自探测')
+    expect(probeTitle).toContain('2026-08-01T00:02:00Z')
   })
 
   it('treats legacy payloads (no has_data) as business without a badge', () => {

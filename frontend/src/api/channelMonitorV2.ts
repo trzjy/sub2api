@@ -174,6 +174,8 @@ export interface MonitorMatrixRow {
   status?: 'operational' | 'degraded' | 'failed' | 'error' | null
   /** ISO timestamp of the most recent observation (business or probe), null when has_data=false. */
   observed_at?: string | null
+  /** First-token latency in milliseconds; present only on probe rows, null/omitted = none. */
+  first_token_ms?: number | null
 }
 
 export interface MonitorMatrixResponse {

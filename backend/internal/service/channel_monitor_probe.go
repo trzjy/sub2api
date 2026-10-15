@@ -19,6 +19,7 @@ package service
 //   - config probe 段：Enabled 默认 false（零探测）；MaxPerTick 默认 2。
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -42,8 +43,9 @@ import (
 const (
 	// channelMonitorProbeLeaderKey 是探测 worker 的独立 leader 锁键（与聚合器锁键不同）。
 	channelMonitorProbeLeaderKey = "channel_monitor:probe:leader"
-	// probeLeaderLockTTL 必须大于最坏轮次运行时长：max_per_tick 条 × 5 分钟硬超时（串行）。
-	probeLeaderLockTTL = 15 * time.Minute
+	// probeLeaderLockMinTTL 是 leader 锁 TTL 的下限（min 兜底原 15 分钟常量语义）。
+	// 真实 TTL 由 probeLeaderLockTTLFor 按 cfg.Probe.MaxPerTick 推导（见 B5）。
+	probeLeaderLockMinTTL = 15 * time.Minute
 	// probeTickInterval 探测 worker 的轮询间隔（与冷却窗口相比足够稀疏）。
 	probeTickInterval = time.Minute
 	// probeHardTimeout 单条直连探测的硬超时（派发单 C2 规定 5 分钟）。
@@ -57,6 +59,11 @@ const (
 
 	// defaultGeminiBaseURL 是 gemini apikey 账号无自定义 base_url 时的默认端点。
 	defaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
+
+	// probeSSELineLimit 是探测流式读取单行 SSE 的上限（1 MiB），与仓库既有响应读取上限
+	// 量级一致（FIX-2）；上游持续发送无换行数据会被该上限截断，避免无界内存占用。超限
+	// 视为探测失败（ok=false，detail 记 sse line limit exceeded），绝不跳行后把 2xx 记成功。
+	probeSSELineLimit = 1 << 20
 )
 
 // ---------- ProbeState ----------
@@ -71,6 +78,12 @@ type ProbeState struct {
 	LastDetail    string
 	LastAccountID int64
 	NextDue       time.Time
+	// FirstTokenMs / TotalMs 是流式探测计时（B3，方案审锁定定义）：
+	//   FirstTokenMs：请求发出到首个非空文本内容增量的毫秒数；仅有起始事件无文本 → nil。
+	//   TotalMs：请求发出到流结束/连接关闭的毫秒数。
+	// 二者均可空（历史行或!ok 行可能为 nil）。
+	FirstTokenMs *int
+	TotalMs      *int
 }
 
 // ---------- probeStore ----------
@@ -98,7 +111,7 @@ func NewChannelMonitorProbeStore(db *sql.DB) probeStore {
 }
 
 func (s *postgresProbeStore) GetProbeState(ctx context.Context, platform, model string, groupID int64) (*ProbeState, error) {
-	const q = `SELECT last_probe_at, last_ok, last_detail, last_account_id, next_due
+	const q = `SELECT last_probe_at, last_ok, last_detail, last_account_id, next_due, first_token_ms, total_ms
 		FROM channel_monitor_probe_state WHERE platform = $1 AND model = $2 AND group_id = $3`
 	row := s.db.QueryRowContext(ctx, q, platform, model, groupID)
 	st := &ProbeState{Platform: platform, Model: model, GroupID: groupID}
@@ -106,7 +119,8 @@ func (s *postgresProbeStore) GetProbeState(ctx context.Context, platform, model 
 	var lastOK sql.NullBool
 	var lastDetail sql.NullString
 	var lastAccountID sql.NullInt64
-	if err := row.Scan(&lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue); err != nil {
+	var firstTokenMs, totalMs sql.NullInt64
+	if err := row.Scan(&lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue, &firstTokenMs, &totalMs); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -127,21 +141,39 @@ func (s *postgresProbeStore) GetProbeState(ctx context.Context, platform, model 
 	if nextDue.Valid {
 		st.NextDue = nextDue.Time
 	}
+	if firstTokenMs.Valid {
+		v := int(firstTokenMs.Int64)
+		st.FirstTokenMs = &v
+	}
+	if totalMs.Valid {
+		v := int(totalMs.Int64)
+		st.TotalMs = &v
+	}
 	return st, nil
 }
 
 func (s *postgresProbeStore) UpsertProbeState(ctx context.Context, st *ProbeState) error {
 	const q = `INSERT INTO channel_monitor_probe_state
-		(platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		(platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due, first_token_ms, total_ms)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (platform, model, group_id) DO UPDATE SET
 			last_probe_at = EXCLUDED.last_probe_at,
 			last_ok = EXCLUDED.last_ok,
 			last_detail = EXCLUDED.last_detail,
 			last_account_id = EXCLUDED.last_account_id,
-			next_due = EXCLUDED.next_due`
+			next_due = EXCLUDED.next_due,
+			first_token_ms = EXCLUDED.first_token_ms,
+			total_ms = EXCLUDED.total_ms`
+	var firstTokenMs, totalMs sql.NullInt64
+	if st.FirstTokenMs != nil {
+		firstTokenMs = sql.NullInt64{Int64: int64(*st.FirstTokenMs), Valid: true}
+	}
+	if st.TotalMs != nil {
+		totalMs = sql.NullInt64{Int64: int64(*st.TotalMs), Valid: true}
+	}
 	_, err := s.db.ExecContext(ctx, q,
-		st.Platform, st.Model, st.GroupID, st.LastProbeAt, st.LastOK, st.LastDetail, st.LastAccountID, st.NextDue)
+		st.Platform, st.Model, st.GroupID, st.LastProbeAt, st.LastOK, st.LastDetail, st.LastAccountID, st.NextDue,
+		firstTokenMs, totalMs)
 	return err
 }
 
@@ -205,42 +237,63 @@ func ProbeAccountDirect(
 	account *Account,
 	model string,
 	httpClient *http.Client,
-) (ok bool, detail string, unsupported bool) {
+) (ok bool, detail string, unsupported bool, firstTokenMs *int, totalMs *int) {
 	if account == nil {
-		return false, "nil account", false
+		return false, "nil account", false, nil, nil
 	}
 	cred, err := resolveCredentialAccount(ctx, accountRepo, account)
 	if err != nil {
 		// 解析失败为权威失败（账号实体不可达），非 unsupported。
-		return false, "resolve credential account: " + err.Error(), false
+		return false, "resolve credential account: " + err.Error(), false, nil, nil
 	}
 	spec, err := buildProbeRequestSpec(cred, model)
 	if err != nil {
 		// 账号不可直连探测（协议族不支持或凭据缺失）：非权威，绝不落终态 last_ok=false。
-		return false, err.Error(), true
+		return false, err.Error(), true, nil, nil
 	}
 	if httpClient == nil {
 		httpClient = defaultProbeHTTPClient
 	}
 	req, err := http.NewRequestWithContext(ctx, spec.method, spec.url, bytes.NewReader(spec.body))
 	if err != nil {
-		return false, "build request: " + err.Error(), false
+		return false, "build request: " + err.Error(), false, nil, nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range spec.headers {
 		req.Header.Set(k, v)
 	}
+	// 计时基准：请求发出（Do 发送前）。TTFT 终点 = 首个非空文本增量；total 终点 = 流结束。
+	start := time.Now()
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return false, "upstream request failed: " + err.Error(), false
+		return false, "upstream request failed: " + err.Error(), false, nil, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// 只读取少量响应体（探测无需完整响应），避免大响应体拖慢轮次。
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return true, fmt.Sprintf("ok status=%d", resp.StatusCode), false
+
+	// 流式读取响应并测量 TTFT / total（见 B3 方案审锁定定义）。
+	family := probeFamilyOf(cred)
+	fTok, tot, readErr := probeStreamRead(resp.Body, family, start)
+	if readErr != nil {
+		// 读取失败（连接中断 / 读超时 / SSE 单行超限）：失败关闭（FIX-1/FIX-2），
+		// 绝不以 ok=true 写入。detail 标识 stream read error（含 sse line limit exceeded）。
+		return false, "stream read error: " + readErr.Error(), false, fTok, tot
 	}
-	return false, fmt.Sprintf("upstream status=%d", resp.StatusCode), false
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, fmt.Sprintf("ok status=%d", resp.StatusCode), false, fTok, tot
+	}
+	return false, fmt.Sprintf("upstream status=%d", resp.StatusCode), false, fTok, tot
+}
+
+// isAnthropicProbeTarget 是"账号是否走 anthropic 直连探测（/v1/messages）"的单一事实源，
+// 供 canDirectProbe 与 buildProbeRequestSpec 的 switch 共用，禁止在别处再写一份等价判定
+// （否则两处会随协议族扩展而悄然分叉，本次 anthropic 永不被探测事故的根因）。
+//
+// 含 Platform == PlatformAnthropic：原生 anthropic 平台账号 GetAPIProtocol 默认回落
+// chat_completions（见 account.go GetAPIProtocol），导致 IsAnthropicProtocol 为假、长期
+// 无法被直连探测——这是本次生产事故的直接根因。
+func isAnthropicProbeTarget(acc *Account) bool {
+	return acc != nil && (acc.IsAnthropicProtocol() || acc.Platform == PlatformAnthropic)
 }
 
 // canDirectProbe 是"账号是否可被直连探测"的单一事实源：与原语 buildProbeRequestSpec 的
@@ -250,7 +303,7 @@ func ProbeAccountDirect(
 // 可探测协议族：anthropic 原生协议、OpenAI 兼容（含 grok/CN/other/codebuddy/muse/web）、
 // gemini 且仅 apikey/upstream 型（gemini OAuth 依赖令牌刷新，不直连）。
 func canDirectProbe(acc *Account) bool {
-	return acc != nil && (acc.IsAnthropicProtocol() ||
+	return acc != nil && (isAnthropicProbeTarget(acc) ||
 		acc.IsOpenAICompatible() ||
 		(acc.IsGemini() && isAPIKeyOrUpstream(acc)))
 }
@@ -263,7 +316,7 @@ func buildProbeRequestSpec(acc *Account, model string) (*probeReqSpec, error) {
 		return nil, fmt.Errorf("unsupported account platform=%q type=%q for direct probe", acc.Platform, acc.Type)
 	}
 	switch {
-	case acc.IsAnthropicProtocol():
+	case isAnthropicProbeTarget(acc):
 		return buildAnthropicMessagesSpec(acc, model)
 	case acc.IsOpenAICompatible():
 		return buildOpenAIChatCompletionsSpec(acc, model)
@@ -311,7 +364,7 @@ func buildOpenAIChatCompletionsSpec(acc *Account, model string) (*probeReqSpec, 
 			"model":      m,
 			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
 			"max_tokens": 5,
-			"stream":     false,
+			"stream":     true,
 		}),
 	}, nil
 }
@@ -322,6 +375,11 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 	var base, key string
 	if isAPIKeyOrUpstream(acc) {
 		base = strings.TrimSpace(acc.GetAnthropicProtocolBaseURL())
+		if base == "" {
+			// 与业务转发同源（gateway_anthropic_passthrough.go:349 用 GetBaseURL）：
+			// anthropic 协议账号缺 base_url 时回退到通用 base，避免漏探。
+			base = strings.TrimSpace(acc.GetBaseURL())
+		}
 		key = strings.TrimSpace(acc.GetCredential("api_key"))
 		if base == "" {
 			return nil, fmt.Errorf("unsupported: no upstream base url for anthropic account")
@@ -355,6 +413,7 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 		body: probeMustJSON(map[string]any{
 			"model":      m,
 			"max_tokens": 16,
+			"stream":     true,
 			"messages":   []map[string]any{{"role": "user", "content": "hi"}},
 		}),
 	}, nil
@@ -398,6 +457,146 @@ func probeMustJSON(v any) []byte {
 	return b
 }
 
+// probeFamilyOf 将账号归一到流式解析族（"openai" | "anthropic" | "gemini"），
+// 与 buildProbeRequestSpec 的可探测协议族一致，驱动首个文本增量的判定规则。
+func probeFamilyOf(acc *Account) string {
+	switch {
+	case isAnthropicProbeTarget(acc):
+		return "anthropic"
+	case acc.IsOpenAICompatible():
+		return "openai"
+	case acc.IsGemini() && isAPIKeyOrUpstream(acc):
+		return "gemini"
+	}
+	return ""
+}
+
+// probeStreamRead 读取上游流式响应并测量 TTFT / total 计时（B3，方案审锁定定义）。
+//
+//   - firstTokenMs：从 start（请求发出）到首个非空文本内容增量的毫秒数；
+//     仅有起始事件而无文本增量 → nil。
+//   - totalMs：从 start 到流结束/连接关闭的毫秒数（读尽整条流以取 total，简单正确）。
+//   - err：读取错误（连接中断 / 读超时 / SSE 单行超限）。EOF 不算错误（正常流结束）。
+//
+// 逐行读 SSE `data:` 帧；非 SSE（纯 JSON 错误体）无 `data:` 前缀 → 不产生文本判定。
+// 单行长度以 probeSSELineLimit 为上限（FIX-2）：上游持续发送无换行数据触及上限即停止读取
+// 并返回错误，避免无界内存占用；返回的错误交由调用方判 ok=false（detail 记 sse line limit
+// exceeded），绝不跳行后把 2xx 记成功。读取失败（非 EOF）同样返回错误，调用方必须失败关闭
+// （FIX-1），不得以 ok=true 写入。禁止引入新依赖。
+func probeStreamRead(r io.Reader, family string, start time.Time) (firstTokenMs *int, totalMs *int, err error) {
+	// NewReaderSize 把内部缓冲设为上限之上，使 ReadSlice 能在单行触及 probeSSELineLimit
+	// 字节仍无换行时返回 bufio.ErrBufferFull（即"单行超限"信号），从而有界地检测并失败。
+	br := bufio.NewReaderSize(r, probeSSELineLimit+1)
+	foundFirst := false
+	for {
+		line, rerr := br.ReadSlice('\n')
+		if len(line) > 0 {
+			if probeSSEDataHasText(family, string(line)) && !foundFirst {
+				t := int(time.Since(start) / time.Millisecond)
+				firstTokenMs = &t
+				foundFirst = true
+			}
+		}
+		if rerr != nil {
+			if rerr == bufio.ErrBufferFull {
+				// 单行超过 probeSSELineLimit 仍无换行：停止读取，按探测失败处理（FIX-2）。
+				return firstTokenMs, nil, fmt.Errorf("sse line limit exceeded (limit=%d bytes)", probeSSELineLimit)
+			}
+			if rerr == io.EOF {
+				// 正常流结束：维持现有 ok 语义（EOF 不算错误）。
+				break
+			}
+			// 真实读取错误（连接中断 / 读超时等）：停止读取，按探测失败处理（FIX-1）。
+			return firstTokenMs, nil, rerr
+		}
+	}
+	// foundFirst 为假时 firstTokenMs 保持 nil（仅有起始事件无文本增量）。
+	t := int(time.Since(start) / time.Millisecond)
+	totalMs = &t
+	return firstTokenMs, totalMs, nil
+}
+
+// probeSSEDataHasText 解析单行 SSE，返回该行是否携带首个非空文本内容增量。
+func probeSSEDataHasText(family, line string) bool {
+	line = strings.TrimRight(line, "\r\n")
+	if !strings.HasPrefix(line, "data:") {
+		return false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return false
+	}
+	switch family {
+	case "openai":
+		return probeOpenAIDataHasText(payload)
+	case "anthropic":
+		return probeAnthropicDataHasText(payload)
+	case "gemini":
+		return probeGeminiDataHasText(payload)
+	}
+	return false
+}
+
+func probeOpenAIDataHasText(payload string) bool {
+	var m struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return false
+	}
+	for _, c := range m.Choices {
+		if strings.TrimSpace(c.Delta.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func probeAnthropicDataHasText(payload string) bool {
+	var m struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Text string `json:"text"`
+		} `json:"delta"`
+	}
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return false
+	}
+	// 仅 content_block_delta 且 text 非空计数；忽略 message_start / ping /
+	// content_block_start / content_block_stop 等无文本帧。
+	if m.Type == "content_block_delta" && strings.TrimSpace(m.Delta.Text) != "" {
+		return true
+	}
+	return false
+}
+
+func probeGeminiDataHasText(payload string) bool {
+	var m struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return false
+	}
+	for _, c := range m.Candidates {
+		for _, p := range c.Content.Parts {
+			if strings.TrimSpace(p.Text) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ---------- 探测调度器 worker ----------
 
 // ChannelMonitorProbeWorker 是无流量渠道抽样直连探测调度器（派发单 C2）。
@@ -417,7 +616,7 @@ type ChannelMonitorProbeWorker struct {
 	httpClient  *http.Client
 
 	// 以下两个字段可注入以支撑单测，生产使用默认值。
-	probeFn func(ctx context.Context, accountRepo AccountRepository, account *Account, model string, client *http.Client) (bool, string, bool)
+	probeFn func(ctx context.Context, accountRepo AccountRepository, account *Account, model string, client *http.Client) (bool, string, bool, *int, *int)
 	clock   func() time.Time
 
 	ticker   *time.Ticker
@@ -491,7 +690,8 @@ func (w *ChannelMonitorProbeWorker) RunOnce(ctx context.Context) error {
 	}
 	now := w.clock()
 
-	release, acquired := tryAcquireSingletonLeaderLock(ctx, w.leaderLock, nil, channelMonitorProbeLeaderKey, "channel-monitor-probe", probeLeaderLockTTL)
+	// B5：leader 锁 TTL 由 maxPerTick 推导（最坏轮次运行时长 + 缓冲），min 兜底 15 分钟。
+	release, acquired := tryAcquireSingletonLeaderLock(ctx, w.leaderLock, nil, channelMonitorProbeLeaderKey, "channel-monitor-probe", probeLeaderLockTTLFor(w.cfg.Probe.MaxPerTick))
 	if !acquired {
 		return nil
 	}
@@ -544,7 +744,7 @@ func (w *ChannelMonitorProbeWorker) RunOnce(ctx context.Context) error {
 		if err != nil || account == nil {
 			continue
 		}
-		ok, detail, unsupported := w.probeFn(ctx, w.accountRepo, account, t.Key.Model, w.httpClient)
+		ok, detail, unsupported, firstTokenMs, totalMs := w.probeFn(ctx, w.accountRepo, account, t.Key.Model, w.httpClient)
 		if unsupported {
 			// 非权威：账号不可直连探测（竞态：选取后账号协议/凭据变化，或上游型账号被替换）。
 			// 跳过写终态失败行，保持"无数据"语义——绝不把"无法探测"误判为渠道故障。
@@ -559,6 +759,8 @@ func (w *ChannelMonitorProbeWorker) RunOnce(ctx context.Context) error {
 			LastDetail:    detail,
 			LastAccountID: t.SampledAccountID,
 			NextDue:       computeNextDue(now, ok),
+			FirstTokenMs:  firstTokenMs,
+			TotalMs:       totalMs,
 		}); err != nil {
 			return fmt.Errorf("upsert probe state: %w", err)
 		}
@@ -618,18 +820,28 @@ func planProbeBatch(
 	return tasks
 }
 
-// selectProbeableAccountID 从候选人集中按账号 ID 升序选取第一个可直连探测（canDirectProbe
-// 为真）的账号；若无任何可探测账号返回 0（调用方据此跳过该渠道）。
+// selectProbeableAccountID 从候选人集中选取一个可直连探测（canDirectProbe 为真）的账号：
+//   - 优先选 Schedulable 为真的可探账号（按 ID 升序）；
+//   - 无 schedulable 可探账号时退回任意 active 可探账号（按 ID 升序）。
+//
+// 返回 0 表示无任何可探测账号（调用方据此跳过该渠道，保持"无数据"语义）。
 func selectProbeableAccountID(ids []int64, accountByID map[int64]*Account) int64 {
 	sorted := make([]int64, len(ids))
 	copy(sorted, ids)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	var fallback int64
 	for _, id := range sorted {
-		if canDirectProbe(accountByID[id]) {
+		if !canDirectProbe(accountByID[id]) {
+			continue
+		}
+		if accountByID[id] != nil && accountByID[id].IsSchedulable() {
 			return id
 		}
+		if fallback == 0 {
+			fallback = id
+		}
 	}
-	return 0
+	return fallback
 }
 
 // computeNextDue 返回探测后的下次到期时间：ok → 30 分钟；!ok → 2 小时。
@@ -648,6 +860,21 @@ func catalogKeyLess(a, b ChannelMonitorCatalogKey) bool {
 		return a.Model < b.Model
 	}
 	return a.GroupID < b.GroupID
+}
+
+// probeLeaderLockTTLFor 推导探测 worker 的 leader 锁 TTL（B5）：
+// 必须大于最坏轮次运行时长（每 tick 最多 maxPerTick 条，串行，单条硬超时 probeHardTimeout）
+// 再叠加 5 分钟缓冲。当 maxPerTick 偏小（≤2）导致公式结果低于原 15 分钟常量时，用
+// probeLeaderLockMinTTL 兜住原下限语义（maxPerTick=2 时公式恰为 15 分钟）。
+func probeLeaderLockTTLFor(maxPerTick int) time.Duration {
+	if maxPerTick <= 0 {
+		maxPerTick = 2
+	}
+	ttl := time.Duration(maxPerTick)*probeHardTimeout + 5*time.Minute
+	if ttl < probeLeaderLockMinTTL {
+		ttl = probeLeaderLockMinTTL
+	}
+	return ttl
 }
 
 // ProvideChannelMonitorProbeWorker 构造并启动无流量渠道抽样探测调度器（派发单 C2）。
