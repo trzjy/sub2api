@@ -472,6 +472,8 @@ func TestRunOnce_EmptyPhaseExplicitHandling(t *testing.T) {
 }
 
 // settings 正常且双开关开启：仅熔断相位执行（D2 相位已退役，不再有第二相）。
+// 注意断言口径：唯一相位约束的是「相位数量」，账号级相位内部仍允许首探 + 短间隔
+// 补探多次（见 4e4b27d57），两者不可混为一谈。
 func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 	// RunOnce 内部使用真实时钟（nowFunc 注入面已随 D2 相位退役删除），候选的
 	// temp-unschedulable 窗口必须以真实时钟构造未来时刻，否则候选被
@@ -504,18 +506,42 @@ func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 	rl := &RateLimitService{accountRepo: repo}
 
 	var breakerProbes int64
+	var probedMu sync.Mutex
+	var probedAccountIDs []int64
 	svc := &AccountHealthRecoveryProbeService{
 		frozenBounds:   make(map[string]int),
 		rateLimit:      rl,
 		accountRepo:    repo,
 		settingService: ss,
-		probeOverride: func(_ context.Context, _ *Account) (bool, error) {
+		probeOverride: func(_ context.Context, acc *Account) (bool, error) {
 			atomic.AddInt64(&breakerProbes, 1)
+			probedMu.Lock()
+			probedAccountIDs = append(probedAccountIDs, acc.ID)
+			probedMu.Unlock()
 			return false, nil
 		},
 	}
+	// 补探节奏注入：默认常量为 5s/3 次，单测改为毫秒级（与
+	// newProbeRetryHarness 同款）。不注入则本用例真实等待 3×5s=15s。
+	svc.retryInterval = time.Millisecond
+	const retryBurst = 3
+	svc.retryBurst = retryBurst
 
 	svc.RunOnce(context.Background())
 
-	require.Equal(t, int64(1), atomic.LoadInt64(&breakerProbes), "熔断相位应执行 1 次探测（唯一相位）")
+	// 断言分两个维度，「相位数量」与「每相位探测次数」不可混为一谈：
+	//  - 相位数量：D2 TokenHarbor 模型级相位已退役，熔断（账号级）是唯一相位。
+	//    判据是探测作用域——每次探测的入参账号都必须是熔断候选账号 1，
+	//    不得出现任何模型级候选账号的探测。
+	//  - 每相位探测次数：账号级相位对每个候选先首探 1 次，首探失败再于同一轮
+	//    内按短间隔补探，单轮补探上限 retryBurst 次（4e4b27d57 起的设计意图：
+	//    「首探失败后不再空等一个完整轮次」）。故总探测数 = 1 + retryBurst，
+	//    而非旧断言的 1——后者是把「唯一相位」误当成「每相位仅探测一次」。
+	require.Equal(t, int64(1+retryBurst), atomic.LoadInt64(&breakerProbes),
+		"熔断相位探测次数应为 1 次首探 + retryBurst 次补探（唯一相位 ≠ 每相位只探一次）")
+	probedMu.Lock()
+	defer probedMu.Unlock()
+	for _, id := range probedAccountIDs {
+		require.Equal(t, int64(1), id, "探测作用域只应是熔断候选账号，不得出现模型级候选账号的探测")
+	}
 }
