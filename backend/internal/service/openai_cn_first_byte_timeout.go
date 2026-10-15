@@ -6,27 +6,65 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // openAICNFirstByteTimeout 是显式 CN 清单平台（kimi/deepseek/zhipu/minimax，
-// 与派发单 1 的 isCNFamilyFastpathAccount 同一清单）出站请求的首包超时阈值。
+// 与派发单 1 的 isCNFamilyFastpathAccount 同一清单）出站请求的整体首包超时阈值。
 // 用户裁定 1：60 秒（数据调研：60s 误杀 4%，30s 误杀 27%）。
 //
 // 计时边界（方案文档 P2）：起点 = 出站请求发出；终点 = 上游响应 body 首字节。
 // 仅收到响应头不停止计时；首包到达后流式传输不受影响（不设整体读超时）。
 const openAICNFirstByteTimeout = 60 * time.Second
 
+// openAICNHeaderTimeout 是"等待上游响应头"这一段的独立阈值（20 秒）。
+//
+// 事故背景：zhipu 账号（id=132）被网关内部错误 cn upstream first byte timeout
+// 反复打成临时停调。近 12h 全部 172 条该类错误的 upstream_status_code 与
+// network_error_type 皆为空——上游连响应头都没有回来，请求石沉大海，而不是
+// "上游在慢慢算"（同期成功请求 TTFT p50 2.84s / p95 8.4s；在途请求中位 0、
+// 最大 3，远未到 concurrency=20；超时请求体仅 8~24KB）。强指纹是"账号空闲约
+// 195s 后的第一个请求"（对照组请求间隔中位 14s，5 个账号一致）。
+//
+// 结论方向（待坐实）：请求被写进了一条本地仍认为 ESTABLISHED、但对端已静默
+// 丢弃的半开连接，要等满 60s watchdog 才失败。因此把等待切成两段：
+//   - 未收到响应头：按本常量（20s）快速失败——该场景等满 60s 也几乎不会有
+//     响应头回来，短阈值只为尽早拿到一次"用新连接重试"的机会；
+//   - 已收到响应头：仍按 openAICNFirstByteTimeout（60s 整体绝对截止）等
+//     body 首字节，语义与切分前逐字一致，不缩短真实排队/生成窗口。
+const openAICNHeaderTimeout = 20 * time.Second
+
+// openAICNFreshConnRetryLimit 是"未收到响应头"快速失败后，对同一账号用**新建
+// TCP 连接**重试的上限（每次请求最多 1 次；不是换账号、不是换分组）。
+// 超过此次数即按既有超时语义上抛，杜绝无限重试与探测风暴。
+const openAICNFreshConnRetryLimit = 1
+
 // errOpenAICNFirstByteTimeout 标识网关内部的 CN 首包超时。它刻意与
 // context.Canceled / context.DeadlineExceeded 区分：内部超时不得表现为
 // 客户端取消语义（派发单 4 禁区：客户端取消不得触发冷却/换号，内部超时
 // 必须触发冷却+换号）。消费链通过 isOpenAICNFirstByteTimeout 识别。
 var errOpenAICNFirstByteTimeout = errors.New("cn upstream first byte timeout")
+
+// httpUpstreamFreshConn 是 HTTPUpstream 的**可选**能力：强制本次出站使用新建的
+// TCP 连接，不复用连接池中的空闲连接。
+//
+// 为何不能只发 Connection: close：Go 的 http.Transport 在取连接时（queueForIdleConn）
+// 只看 DisableKeepAlives / IdleConnTimeout / isBroken，请求头上的 Connection: close
+// 只决定"响应读完之后是否关闭"，并不阻止本次复用池里已有的空闲连接。要让重试真正
+// 落在一条新连接上，只能用一个 DisableKeepAlives 的一次性 Transport。
+//
+// 未实现本接口的 HTTPUpstream（含测试桩）不参与同账号新连接重试，走既有超时语义。
+type httpUpstreamFreshConn interface {
+	DoFreshConn(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error)
+}
 
 // openAICNFirstByteTimeoutFailoverBody 是超时触发 failover 后的客户端可见错误体。
 var openAICNFirstByteTimeoutFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"upstream first byte timeout"}}`)
@@ -60,19 +98,35 @@ const (
 //   - firstByte/release 以 CAS(0→settled) 赢；赢家 disarm 定时器；
 //   - watchParent（父 context 取消）以 CAS(0→settled) 赢，并取消当前上游尝试；
 //   - expire（定时器到期）以 CAS(0→timedOut) 赢，并取消当前上游尝试。
+//
 // 三条路径都是纯 CAS，无任何"先检查再 CAS"的窗口（闸②终审整改项 3：旧实现
 // 的 parentDone() 检查与 CAS(0,2) 之间存在窗口，父取消会被误判为内部超时）。
 //   - 判定内部超时 = decided==timedOut（Fired）；其余终态均非超时。
+//
+// 两段计时（本次整改）：headerTimer 管"等待响应头"段（openAICNHeaderTimeout），
+// timer 管整体绝对截止（openAICNFirstByteTimeout）。响应头到达即 stop headerTimer，
+// 之后只剩整体截止——与整改前单一 60s 计时器的 body 阶段语义完全一致。两个计时器
+// 共用同一 defeat fire()/settle() 的唯一胜者裁决，且不可 Reset（避免重挂竞态）。
 type openAICNFirstByteWatchdog struct {
 	parentCtx context.Context
-	timer     *time.Timer
-	cancel    context.CancelFunc
+	// timer 是整体首包超时绝对截止计时器（起点 = 出站请求发出）。
+	timer *time.Timer
+	// headerTimer 是"等待响应头"段计时器；响应头到达后即停，不再裁决。
+	headerTimer *time.Timer
+	cancel      context.CancelFunc
 	// decided 是唯一胜者裁决状态（watchdogState* 常量）。
 	decided atomic.Int32
+	// headerReceived 记录当前尝试是否已收到上游响应头。true 表示已进入
+	// "等待 body 首字节"段，此后再触发的超时属首包超时而非无头超时。
+	headerReceived atomic.Bool
 	// firstByteSeen 独立记录"上游响应 body 首个字节已到达"，供流式消费者在
 	// 首字节前抑制 keepalive 心跳（闸②终审整改项 1）。与 decided 正交：
 	// release 也会置 settled，但不代表首字节已到达。
 	firstByteSeen atomic.Bool
+	// connReused / connIdleTime 由 httptrace.GotConn 采集本次尝试实际用到的
+	// 连接：是否复用、复用前空闲多久。用于坐实"空闲连接被上游静默丢弃"假设。
+	connReused   atomic.Bool
+	connIdleTime atomic.Int64
 	// done 在裁决产生唯一胜者后关闭，释放 watchParent goroutine。
 	done     chan struct{}
 	doneOnce sync.Once
@@ -88,8 +142,11 @@ type openAICNFirstByteWatchdog struct {
 // （闸②终审整改项 2：旧实现从 clientCtx 派生 wctx，装到 request 上会覆盖并
 // 丢弃 request.Context() 里的 transport profile）。
 //
-// timeout<=0 时使用 openAICNFirstByteTimeout。
-func newOpenAICNFirstByteWatchdog(deriveCtx, clientCtx context.Context, timeout time.Duration) (*openAICNFirstByteWatchdog, context.Context) {
+// headerTimeout<=0 时取 min(openAICNHeaderTimeout, timeout)：注入短整体阈值的
+// 场景（测试/特殊配置）自动退化为"单段"，行为与整改前完全一致。
+//
+// 返回的 context 已挂 httptrace.ClientTrace（GotConn 采集连接复用信息）。
+func newOpenAICNFirstByteWatchdog(deriveCtx, clientCtx context.Context, timeout time.Duration, headerTimeout ...time.Duration) (*openAICNFirstByteWatchdog, context.Context) {
 	if timeout <= 0 {
 		timeout = openAICNFirstByteTimeout
 	}
@@ -100,13 +157,33 @@ func newOpenAICNFirstByteWatchdog(deriveCtx, clientCtx context.Context, timeout 
 	if clientCtx == nil {
 		clientCtx = base
 	}
+	hp := openAICNHeaderTimeout
+	if len(headerTimeout) > 0 && headerTimeout[0] > 0 {
+		hp = headerTimeout[0]
+	}
+	if timeout < hp {
+		hp = timeout
+	}
 	// request.WithContext 会覆盖整个 ctx：从 request 自身 context 派生即可保留
 	// 构建器写入的 HTTPUpstreamProfile。
 	wctx, cancel := context.WithCancel(base)
 	w := &openAICNFirstByteWatchdog{parentCtx: clientCtx, cancel: cancel, done: make(chan struct{})}
+	wctx = httptrace.WithClientTrace(wctx, w.gotConnTrace())
 	w.timer = time.AfterFunc(timeout, w.expire)
+	w.headerTimer = time.AfterFunc(hp, w.expireHeader)
 	go w.watchParent()
 	return w, wctx
+}
+
+// gotConnTrace 返回采集连接复用状态的 ClientTrace。只有 GotConn 被设置，
+// 其余钩子保持 nil，net/http 不会产生额外系统调用。
+func (w *openAICNFirstByteWatchdog) gotConnTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			w.connReused.Store(info.Reused)
+			w.connIdleTime.Store(int64(info.IdleTime))
+		},
+	}
 }
 
 // settle 在裁决为非超时终态时收尾：停定时器、释放 watchParent、首次调用时
@@ -132,10 +209,13 @@ func (w *openAICNFirstByteWatchdog) fire() bool {
 	return true
 }
 
-// stop 停定时器并关闭 done（只关一次），解除 watchParent 的挂起。
+// stop 停两个计时器并关闭 done（只关一次），解除 watchParent 的挂起。
 func (w *openAICNFirstByteWatchdog) stop() {
 	if w.timer != nil {
 		w.timer.Stop()
+	}
+	if w.headerTimer != nil {
+		w.headerTimer.Stop()
 	}
 	w.doneOnce.Do(func() {
 		if w.done != nil {
@@ -170,10 +250,52 @@ func (w *openAICNFirstByteWatchdog) watchParent() {
 	}
 }
 
-// expire 由定时器触发：以纯 CAS 竞争超时终态，唯一胜者才取消当前上游尝试。
+// expire 由整体截止计时器触发：以纯 CAS 竞争超时终态，唯一胜者才取消当前上游尝试。
 // 客户端取消若先（或同时）经 watchParent 裁决，本 CAS 失败，误判窗口消失。
 func (w *openAICNFirstByteWatchdog) expire() {
 	w.fire()
+}
+
+// expireHeader 由"等待响应头"段计时器触发。只有在响应头尚未到达时才有资格裁决：
+// 响应头已到达（headerReceived）意味着进入了排队/生成环节，必须交给整体截止
+// 计时器，不得被短阈值误杀。真正的胜负仍由 fire() 的 CAS 单一裁决决定。
+func (w *openAICNFirstByteWatchdog) expireHeader() {
+	if w.headerReceived.Load() {
+		return
+	}
+	w.fire()
+}
+
+// HeaderReceived 报告当前尝试是否已收到上游响应头。
+func (w *openAICNFirstByteWatchdog) HeaderReceived() bool {
+	return w != nil && w.headerReceived.Load()
+}
+
+// TimedOutWaitingHeaders 报告本次是否属于"无响应头"分支的快速失败——
+// 只有这一类需要（且允许）走同账号新连接重试。
+func (w *openAICNFirstByteWatchdog) TimedOutWaitingHeaders() bool {
+	return w != nil && w.Fired() && !w.headerReceived.Load()
+}
+
+// markHeadersReceived 在 Do 成功返回（上游响应头已到达）时调用：标记进入
+// 首字节等待段并停掉短阈值计时器，之后只剩整体 60s 绝对截止。
+func (w *openAICNFirstByteWatchdog) markHeadersReceived() {
+	w.headerReceived.Store(true)
+	if w.headerTimer != nil {
+		w.headerTimer.Stop()
+	}
+}
+
+// connTraceFields 返回 httptrace.GotConn 采集到的连接观测字段，用于超时日志定位
+// "空闲连接被上游静默丢弃"（reused=true 且 idle_time 较大即为嫌疑连接）。
+func (w *openAICNFirstByteWatchdog) connTraceFields() []zap.Field {
+	if w == nil {
+		return nil
+	}
+	return []zap.Field{
+		zap.Bool("reused", w.connReused.Load()),
+		zap.Duration("idle_time", time.Duration(w.connIdleTime.Load())),
+	}
 }
 
 // Fired 报告内部超时是否已触发（唯一胜者裁决：decided==timedOut）。
@@ -284,6 +406,102 @@ func (s *OpenAIGatewayService) openAICNFirstByteTimeoutFor() time.Duration {
 	return s.cnFirstByteTimeout
 }
 
+// retryOpenAICNUpstreamFreshConn 在"未收到响应头"的快速失败之后，对**同一账号**
+// 用**新建立的 TCP 连接**重试一次（不是换账号、不是换分组）。
+//
+// 返回 (resp, watchdog, retried)。retried=true 表示本次确实发起了重试（无论成败）；
+// resp 非 nil 表示重试拿到了响应头，调用方须用返回的 watchdog 继续包 body 以继承
+// 首字节阶段的 60s 阈值。retried=false 表示不具备重试条件，调用方按既有超时语义
+// 返回 errOpenAICNFirstByteTimeout。
+//
+// 重试前置条件（调用方保证）：上一次尝试 Fired() 且 TimedOutWaitingHeaders()。
+// 重试条件（本函数保证）：
+//  1. 上游实现了 httpUpstreamFreshConn（能给出 DisableKeepAlives 的一次性 Transport）；
+//  2. 请求体可重放（Body 为 nil，或 GetBody 可用）——不可重放时绝不强发第二次；
+//  3. 每请求最多 openAICNFreshConnRetryLimit 次（当前为 1），由调用方单次调用保证。
+func (s *OpenAIGatewayService) retryOpenAICNUpstreamFreshConn(
+	clientCtx context.Context,
+	request *http.Request,
+	proxyURL string,
+	account *Account,
+	previous *openAICNFirstByteWatchdog,
+) (*http.Response, *openAICNFirstByteWatchdog, bool) {
+	if s == nil || account == nil || request == nil {
+		return nil, nil, false
+	}
+	fields := []zap.Field{
+		zap.Int64("account_id", account.ID),
+		zap.String("platform", account.Platform),
+	}
+	if previous != nil {
+		fields = append(fields, previous.connTraceFields()...)
+	}
+
+	upstream, ok := s.httpUpstream.(httpUpstreamFreshConn)
+	if !ok {
+		logOpenAICNFreshConnRetry(fields, false, "upstream_unsupported", nil)
+		return nil, nil, false
+	}
+	// 请求体已被上一次尝试消费；没有 GetBody 就无法还原，只能放弃重试。
+	if request.Body != nil && request.GetBody == nil {
+		logOpenAICNFreshConnRetry(fields, false, "body_not_replayable", nil)
+		return nil, nil, false
+	}
+	var replay io.ReadCloser
+	if request.Body != nil {
+		var err error
+		if replay, err = request.GetBody(); err != nil {
+			logOpenAICNFreshConnRetry(fields, false, "body_rewind_failed", err)
+			return nil, nil, false
+		}
+	}
+
+	// wctx 同样从 request.Context() 派生以继承 HTTPUpstreamProfile；clientCtx 只作
+	// 取消裁决信号。重试用全新的 watchdog（阈值同原始值），与上一次完全隔离。
+	watchdog, wctx := newOpenAICNFirstByteWatchdog(request.Context(), clientCtx, s.openAICNFirstByteTimeoutFor())
+	retryReq := request.Clone(request.Context())
+	retryReq.Body = replay
+	retryReq = retryReq.WithContext(wctx)
+
+	resp, err := upstream.DoFreshConn(retryReq, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		watchdog.release()
+		switch {
+		case watchdog.Fired() && !watchdog.HeaderReceived():
+			logOpenAICNFreshConnRetry(fields, true, "retry_timeout_no_headers", err)
+		case watchdog.Fired():
+			logOpenAICNFreshConnRetry(fields, true, "retry_first_byte_timeout", err)
+		case watchdog.parentDone():
+			logOpenAICNFreshConnRetry(fields, true, "retry_client_gone", err)
+		default:
+			logOpenAICNFreshConnRetry(fields, true, "retry_transport_error", err)
+		}
+		return nil, watchdog, true
+	}
+	watchdog.markHeadersReceived()
+	logOpenAICNFreshConnRetry(fields, true, "retry_ok", nil)
+	return resp, watchdog, true
+}
+
+// logOpenAICNFreshConnRetry 输出同账号新连接重试的可观测事件。
+// outcome 取值：upstream_unsupported / body_not_replayable / body_rewind_failed /
+// retry_ok / retry_timeout_no_headers / retry_first_byte_timeout / retry_client_gone /
+// retry_transport_error。
+func logOpenAICNFreshConnRetry(fields []zap.Field, retried bool, outcome string, err error) {
+	all := make([]zap.Field, 0, len(fields)+3)
+	all = append(all, fields...)
+	all = append(all,
+		zap.Bool("retried", retried),
+		zap.String("outcome", outcome),
+		zap.Int("limit", openAICNFreshConnRetryLimit),
+	)
+	if err != nil {
+		all = append(all, zap.Error(err))
+	}
+	logger.L().With(zap.String("component", "service.openai_gateway")).Warn(
+		"openai.cn_upstream_fresh_conn_retry", all...)
+}
+
 // failoverOpenAICNFirstByteTimeout 把一次网关内部 CN 首包超时映射为既有 failover
 // 循环可消费的错误，并调用派发单 1 已开放的冷却入口（handleOpenAIAccountUpstreamError
 // 链）。返回的 UpstreamFailoverError.NextAccountAction = NextAccountRetry。
@@ -303,9 +521,9 @@ func (s *OpenAIGatewayService) failoverOpenAICNFirstByteTimeout(ctx context.Cont
 		s.handleOpenAIAccountUpstreamError(ctx, account, http.StatusGatewayTimeout, http.Header{}, openAICNFirstByteTimeoutFailoverBody, model)
 	}
 	return &UpstreamFailoverError{
-		StatusCode:       http.StatusGatewayTimeout,
-		ResponseBody:     openAICNFirstByteTimeoutFailoverBody,
-		ResponseHeaders:  http.Header{},
+		StatusCode:        http.StatusGatewayTimeout,
+		ResponseBody:      openAICNFirstByteTimeoutFailoverBody,
+		ResponseHeaders:   http.Header{},
 		NextAccountAction: NextAccountRetry,
 	}
 }

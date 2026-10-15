@@ -31,12 +31,19 @@ import (
 
 // Transport 连接池默认配置
 const (
-	defaultMaxIdleConns        = 100              // 最大空闲连接数
-	defaultMaxIdleConnsPerHost = 10               // 每个主机最大空闲连接数
-	defaultIdleConnTimeout     = 90 * time.Second // 空闲连接超时时间（建议小于上游 LB 超时）
-	defaultDialTimeout         = 5 * time.Second  // TCP 连接超时（含代理握手），代理不通时快速失败
-	defaultTLSHandshakeTimeout = 5 * time.Second  // TLS 握手超时
-	validatedHostTTL           = 30 * time.Second // DNS Rebinding 校验缓存 TTL
+	defaultMaxIdleConns        = 100 // 最大空闲连接数
+	defaultMaxIdleConnsPerHost = 10  // 每个主机最大空闲连接数
+	// defaultIdleConnTimeout 空闲连接超时时间（建议小于上游 LB 超时）。
+	// 45s：idle 窗口越长，连接被上游/LB 静默丢弃后本地仍认为 ESTABLISHED 的时间越久，
+	// "闲置一段时间后第一个请求"撞上半开连接的概率越高（zhipu 首包超时事故整改，
+	// 与 internal/repository/http_upstream.go 的 defaultIdleConnTimeout 同值）。
+	defaultIdleConnTimeout     = 45 * time.Second
+	defaultDialTimeout         = 5 * time.Second // TCP 连接超时（含代理握手），代理不通时快速失败
+	defaultTLSHandshakeTimeout = 5 * time.Second // TLS 握手超时
+	// defaultKeepAlive TCP keepalive 探测间隔：必须显式设置。零值 net.Dialer 不发
+	// 探测包，对端静默丢弃的半开连接本地无法察觉，请求会一直挂到 TCP 重传超时。
+	defaultKeepAlive = 15 * time.Second
+	validatedHostTTL = 30 * time.Second // DNS Rebinding 校验缓存 TTL
 )
 
 // Options 定义共享 HTTP 客户端的构建参数
@@ -113,7 +120,8 @@ func buildTransport(opts Options) (*http.Transport, error) {
 
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout: defaultDialTimeout,
+			Timeout:   defaultDialTimeout,
+			KeepAlive: defaultKeepAlive,
 		}).DialContext,
 		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
 		MaxIdleConns:          maxIdleConns,

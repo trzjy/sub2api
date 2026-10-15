@@ -2741,10 +2741,13 @@ func setDefaults() {
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
 	// HTTP 上游连接池配置（针对 5000+ 并发用户优化）
-	viper.SetDefault("gateway.max_idle_conns", 2560)          // 最大空闲连接总数（高并发场景可调大）
-	viper.SetDefault("gateway.max_idle_conns_per_host", 120)  // 每主机最大空闲连接（HTTP/2 场景默认）
-	viper.SetDefault("gateway.max_conns_per_host", 1024)      // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
-	viper.SetDefault("gateway.idle_conn_timeout_seconds", 90) // 空闲连接超时（秒）
+	viper.SetDefault("gateway.max_idle_conns", 2560)         // 最大空闲连接总数（高并发场景可调大）
+	viper.SetDefault("gateway.max_idle_conns_per_host", 120) // 每主机最大空闲连接（HTTP/2 场景默认）
+	viper.SetDefault("gateway.max_conns_per_host", 1024)     // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
+	// 空闲连接超时（秒）。45s：半开连接（对端静默丢弃、本地仍 ESTABLISHED）的存活
+	// 窗口越小，"账号空闲一段时间后第一个请求"撞上去的概率越低（详见 zhipu id=132
+	// 首包超时事故整改）。显式配置优先，此处只给默认。
+	viper.SetDefault("gateway.idle_conn_timeout_seconds", 45)
 	viper.SetDefault("gateway.max_upstream_clients", 5000)
 	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）

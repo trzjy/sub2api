@@ -3,6 +3,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -314,6 +316,280 @@ func TestOpenAICNFirstByteTimeout_NonCNAccountUnaffected(t *testing.T) {
 }
 
 // —— failover 映射：冷却入口 + NextAccountRetry ——
+
+// —— 任务卡 #2：分段阈值 + 同账号新连接重试 ——
+
+// cnFreshConnMockUpstream 同时实现 Do / DoWithTLS / DoFreshConn，用于验证
+// "未收到响应头"分支只会发出一次新连接重试（既不重试两次，也不换接口）。
+type cnFreshConnMockUpstream struct {
+	doCalls    int32
+	freshCalls int32
+	// freshHang=true 时 DoFreshConn 也阻塞到 ctx 取消（模拟重试同样石沉大海）。
+	freshHang bool
+	// doResp 非 nil 时 Do 立即返回该响应（用于非 CN 对照场景：那里没有 watchdog
+	// 兜底，若 Do 阻塞在永不取消的 context 上整个测试会挂死）。
+	doResp *http.Response
+	// doRespFn 优先于 doResp：需要按请求 context 构造响应体时用（例如
+	// "响应头已到达但 body 停滞"场景，停滞必须挂在该次尝试的 wctx 上）。
+	doRespFn func(req *http.Request) (*http.Response, error)
+	// doCtxs / freshCtxs 按发生顺序记录每次出站进入时使用的 context，以及进入
+	// 时刻该 context 是否已取消。用于判定重试确实建立在一条全新的计时链路上
+	// （而不是复用首次尝试那条已被超时取消的 context）。
+	doCtxs    []cnFreshConnCallCtx
+	freshCtxs []cnFreshConnCallCtx
+	mu        sync.Mutex
+	// freshBody 记录重试用到的请求体内容（用于验证 body 可重放且未被污染）。
+	freshBody string
+}
+
+// cnFreshConnCallCtx 是一次出站进入时快照的 context 状态。
+type cnFreshConnCallCtx struct {
+	ctx             context.Context
+	canceledOnEntry bool
+}
+
+func (u *cnFreshConnMockUpstream) recordDo(req *http.Request) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.doCtxs = append(u.doCtxs, cnFreshConnCallCtx{ctx: req.Context(), canceledOnEntry: req.Context().Err() != nil})
+}
+
+func (u *cnFreshConnMockUpstream) recordFresh(req *http.Request) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.freshCtxs = append(u.freshCtxs, cnFreshConnCallCtx{ctx: req.Context(), canceledOnEntry: req.Context().Err() != nil})
+}
+
+func (u *cnFreshConnMockUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	atomic.AddInt32(&u.doCalls, 1)
+	u.recordDo(req)
+	if u.doRespFn != nil {
+		return u.doRespFn(req)
+	}
+	if u.doResp != nil {
+		return u.doResp, nil
+	}
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+func (u *cnFreshConnMockUpstream) DoFreshConn(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	atomic.AddInt32(&u.freshCalls, 1)
+	u.recordFresh(req)
+	if req != nil && req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		u.freshBody = string(raw)
+	}
+	if u.freshHang {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("data: {\"ok\":true}\n\n")),
+	}, nil
+}
+
+func (u *cnFreshConnMockUpstream) DoWithTLS(req *http.Request, p string, a int64, c int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, p, a, c)
+}
+
+// totalOutbound 返回底层出站调用总次数（Do + DoFreshConn），用于钉死"最多再发
+// 一次"的上限：任何第三次出站都会让该总数超过 2。
+func (u *cnFreshConnMockUpstream) totalOutbound() int {
+	return int(atomic.LoadInt32(&u.doCalls)) + int(atomic.LoadInt32(&u.freshCalls))
+}
+
+// 验收①：无响应头时按短阈值失败（不等满整体阈值）。
+func TestOpenAICNFirstByteTimeout_HeaderPhaseFailsAtShortThreshold(t *testing.T) {
+	const (
+		overall     = 5 * time.Second
+		headerPhase = 40 * time.Millisecond
+	)
+	watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
+	defer watchdog.release()
+
+	started := time.Now()
+	// Do 尚未返回 ⇒ 响应头未到达。
+	select {
+	case <-wctx.Done():
+	case <-time.After(overall):
+		t.Fatalf("短阈值应在 %s 内触发", headerPhase)
+	}
+	elapsed := time.Since(started)
+
+	require.True(t, watchdog.Fired(), "无响应头必须触发内部超时")
+	require.False(t, watchdog.HeaderReceived(), "前提：响应头未到达")
+	require.True(t, watchdog.TimedOutWaitingHeaders(), "必须被识别为'未收到响应头'分支（可走新连接重试）")
+	require.GreaterOrEqual(t, elapsed, headerPhase, "不得早于短阈值触发")
+	require.Less(t, elapsed, overall, "必须按短阈值失败，而不是等满整体 %s", overall)
+}
+
+// 验收③：已收到响应头后仍按整体阈值（这里是注入的 200ms）等 body 首字节，
+// 不被新的短阈值影响。
+func TestOpenAICNFirstByteTimeout_BodyPhaseKeepsOverallThreshold(t *testing.T) {
+	const (
+		overall     = 200 * time.Millisecond
+		headerPhase = 60 * time.Millisecond
+	)
+	watchdog, wctx := newOpenAICNFirstByteWatchdog(context.Background(), context.Background(), overall, headerPhase)
+
+	started := time.Now()
+	// 模拟 Do 在短阈值之前返回（响应头已到达），随后进入 body 首字节等待段。
+	time.Sleep(20 * time.Millisecond)
+	watchdog.markHeadersReceived()
+
+	select {
+	case <-wctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("整体阈值应在 2s 内触发")
+	}
+	elapsed := time.Since(started)
+
+	require.True(t, watchdog.Fired(), "整体阈值到期必须触发超时")
+	require.True(t, watchdog.HeaderReceived(), "已进入首字节等待段")
+	require.False(t, watchdog.TimedOutWaitingHeaders(), "已收到响应头不得走新连接重试分支")
+	require.GreaterOrEqual(t, elapsed, overall, "必须等到整体阈值，短阈值 %s 不得提前误杀", headerPhase)
+	require.Less(t, elapsed, overall+500*time.Millisecond)
+}
+
+// 验收②：无响应头快失败后，对同一账号用新连接重试一次，且只一次。
+func TestOpenAICNFirstByteTimeout_RetriesOnceOnFreshConn(t *testing.T) {
+	t.Run("重试成功：Do 一次 + DoFreshConn 一次，body 完整重放", func(t *testing.T) {
+		upstream := &cnFreshConnMockUpstream{}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 60 * time.Millisecond}
+		account := &Account{ID: 132, Name: "官方+19808568277", Platform: PlatformZhipu, Type: AccountTypeAPIKey, Concurrency: 20}
+		payload := []byte(`{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}`)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://open.bigmodel.cn/api/paas/v4/chat/completions", bytes.NewReader(payload))
+		require.NoError(t, err)
+
+		resp, doErr := svc.doOpenAIUpstream(context.Background(), req, "", account)
+
+		require.NoError(t, doErr, "新连接重试成功后不应返回错误")
+		require.NotNil(t, resp)
+		defer resp.Body.Close()
+		require.Equal(t, int32(1), atomic.LoadInt32(&upstream.doCalls), "首次出站只能一次")
+		// 契约①（上限）：实际发起的新连接重试次数必须**恰好**等于
+		// openAICNFreshConnRetryLimit。该常量被改成 0（等于禁用重试）时，实现
+		// 仍会发一次重试 → 本断言必然失败；反之若实现真的不重试，上方
+		// require.NoError 也会失败。即：上限常量必须是真正生效的开关。
+		require.Equal(t, openAICNFreshConnRetryLimit, int(atomic.LoadInt32(&upstream.freshCalls)),
+			"实际新连接重试次数必须等于上限 openAICNFreshConnRetryLimit（上限为 0 时一次都不该重试）")
+		require.Equal(t, 2, upstream.totalOutbound(),
+			"底层出站总次数必须是 2（首次 1 次 + 新连接重试 1 次），不得有第三次")
+		require.Equal(t, string(payload), upstream.freshBody, "重试用必须是完整还原的请求体")
+
+		// 契约②（新链路）：首次尝试的 context 必须已被超时取消；重试必须建立在
+		// 一条进入时尚未取消的全新计时链路上——否则"换条新连接重试"无从谈起。
+		require.Len(t, upstream.doCtxs, 1)
+		require.Len(t, upstream.freshCtxs, 1)
+		require.Error(t, upstream.doCtxs[0].ctx.Err(), "首次尝试必须因无响应头超时而被取消")
+		require.False(t, upstream.freshCtxs[0].canceledOnEntry,
+			"重试必须用全新计时链路（进入 DoFreshConn 时尚未取消），不得复用已超时的首次链路")
+
+		// 契约③（响应归属）：交给调用方的必须是重试拿到的响应体本身。
+		_, wrapped := resp.Body.(*openAICNFirstByteTimeoutBody)
+		require.True(t, wrapped, "重试的响应 body 必须继承首字节阈值包装")
+		raw, readErr := io.ReadAll(resp.Body)
+		require.NoError(t, readErr)
+		require.Equal(t, "data: {\"ok\":true}\n\n", string(raw),
+			"返回给调用方的必须是新连接重试拿到的响应内容（而非首次尝试的残留）")
+	})
+
+	t.Run("重试也超时：不再重试第三次，按既有内部超时上抛", func(t *testing.T) {
+		upstream := &cnFreshConnMockUpstream{freshHang: true}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 50 * time.Millisecond}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://open.bigmodel.cn/api/paas/v4/chat/completions", bytes.NewReader([]byte(`{"m":1}`)))
+
+		_, doErr := svc.doOpenAIUpstream(context.Background(), req, "", cnKimiAccount())
+
+		require.True(t, isOpenAICNFirstByteTimeout(doErr), "重试失败仍必须表现为网关内部超时")
+		require.Equal(t, int32(1), atomic.LoadInt32(&upstream.doCalls))
+		// 达到上限后第二次仍失败 → 不再有第三次（Do 不重发、DoFreshConn 不重发）。
+		require.Equal(t, openAICNFreshConnRetryLimit, int(atomic.LoadInt32(&upstream.freshCalls)),
+			"实际新连接重试次数必须等于上限 openAICNFreshConnRetryLimit，不得有第三次")
+		require.Equal(t, 2, upstream.totalOutbound(), "重试也超时时底层出站总次数仍是 2，杜绝探测风暴")
+	})
+
+	t.Run("上游不支持新连接能力：不重试，行为与整改前一致", func(t *testing.T) {
+		upstream := &cnFirstByteMockUpstream{fn: func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 50 * time.Millisecond}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://open.bigmodel.cn/api/paas/v4/chat/completions", nil)
+
+		_, doErr := svc.doOpenAIUpstream(context.Background(), req, "", cnKimiAccount())
+
+		require.True(t, isOpenAICNFirstByteTimeout(doErr), "无新连接能力时必须退回既有超时语义")
+	})
+
+	t.Run("请求体不可重放（无 GetBody）：不重试", func(t *testing.T) {
+		upstream := &cnFreshConnMockUpstream{}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 50 * time.Millisecond}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://open.bigmodel.cn/api/paas/v4/chat/completions", io.NopCloser(strings.NewReader(`{"m":1}`)))
+		require.Nil(t, req.GetBody, "前提：该 body 无 GetBody，无法安全重放")
+
+		_, doErr := svc.doOpenAIUpstream(context.Background(), req, "", cnKimiAccount())
+
+		require.True(t, isOpenAICNFirstByteTimeout(doErr))
+		require.Equal(t, int32(0), atomic.LoadInt32(&upstream.freshCalls), "body 不可重放时绝不发第二次出站")
+	})
+
+	t.Run("非 CN 平台不受新逻辑影响", func(t *testing.T) {
+		upstream := &cnFreshConnMockUpstream{doResp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: ok\n\n")),
+		}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 50 * time.Millisecond}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"https://api.openai.com/v1/chat/completions", bytes.NewReader([]byte(`{"m":1}`)))
+		openAIAccount := &Account{ID: 2, Name: "openai", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1}
+
+		resp, doErr := svc.doOpenAIUpstream(context.Background(), req, "", openAIAccount)
+
+		require.NoError(t, doErr, "非 CN 平台不得挂新连接重试/分段阈值")
+		require.NotNil(t, resp)
+		defer resp.Body.Close()
+		require.Equal(t, int32(0), atomic.LoadInt32(&upstream.freshCalls))
+	})
+}
+
+// TestOpenAICNFirstByteTimeout_NoFreshConnRetryAfterHeadersReceived 钉死"已收到
+// 响应头"这一侧不触发新连接重试：响应头已到达后卡在 body 首字节上属于上游排队/
+// 生成慢，换新连接重发毫无意义（还会把请求重放一遍）。该场景必须保持既有语义：
+// 只向消费链上抛 errOpenAICNFirstByteTimeout，一次 DoFreshConn 都不发。
+func TestOpenAICNFirstByteTimeout_NoFreshConnRetryAfterHeadersReceived(t *testing.T) {
+	upstream := &cnFreshConnMockUpstream{doRespFn: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			// 响应头已到达，body 首字节始终不来。
+			Body: newCNFirstByteBlockingBody(nil, req.Context()),
+		}, nil
+	}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream, cnFirstByteTimeout: 60 * time.Millisecond}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://open.bigmodel.cn/api/paas/v4/chat/completions", bytes.NewReader([]byte(`{"m":1}`)))
+
+	resp, doErr := svc.doOpenAIUpstream(context.Background(), req, "", cnKimiAccount())
+	require.NoError(t, doErr, "响应头已到达时 Do 本身不算失败（超时发生在 body 阶段）")
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+
+	_, readErr := resp.Body.Read(make([]byte, 64))
+	require.True(t, isOpenAICNFirstByteTimeout(readErr), "body 首字节超时必须映射为网关内部超时")
+
+	require.Equal(t, 1, upstream.totalOutbound(), "响应头已到达的超时绝不得触发新连接重试（底层出站仅 1 次）")
+	require.Equal(t, int32(0), atomic.LoadInt32(&upstream.freshCalls), "响应头已到达时一次 DoFreshConn 都不许发")
+	require.Empty(t, upstream.freshBody, "未发生重试则不得有任何重放请求体")
+}
 
 func TestOpenAICNFirstByteTimeout_FailoverCoolsAccountAndRequestsNextAccount(t *testing.T) {
 	// fastpath 冷却记录依赖 rateLimitService（handleOpenAIAccountUpstreamError 在
@@ -700,6 +976,7 @@ func TestOpenAICNFirstByteTimeout_AnthropicChatFallbackBufferedConsumesFailover(
 	require.False(t, c.Writer.Written(), "助手不得先写 502（否则 failover 无法重放）")
 	require.Empty(t, rec.Body.String(), "首包超时时不得下发任何响应体")
 }
+
 // —— native anthropic 两流式消费者：头前/头后两阶段（闸②整改项 1） ——
 
 // TestOpenAICNFirstByteTimeout_CCNativeStreamingHeadlessConsumesFailover 钉死

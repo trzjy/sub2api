@@ -24,6 +24,16 @@ import (
 // is small; the cap protects against pathological backlog after a long outage.
 const accountHealthProbeCandidateLimit = 200
 
+// 补探（retry burst）默认节奏：首探失败后不再空等一个完整轮次（默认 60s）才再试，
+// 而是在同一轮 sweep 内按短间隔连补若干次，把恢复时长从「冷却到期」（cooldown 分钟级）
+// 拉回秒级；双重上限（本轮补探次数 + settings.probe.max_attempts）避免探测风暴。
+const (
+	// accountHealthProbeRetryInterval 首探失败后的补探间隔（秒级）。
+	accountHealthProbeRetryInterval = 5 * time.Second
+	// accountHealthProbeRetryBurst 单轮 sweep 内每个失败账号的最大补探次数。
+	accountHealthProbeRetryBurst = 3
+)
+
 // probeRecoverableMarkers 列出可被探测恢复的停调标记词（TempUnschedState.MatchedKeyword）：
 //   - openai_apikey_health_breaker：APIKey 健康熔断 L3 停调（CodeBuddy 影子准入后
 //     同样携带该标记，方案 T1）；
@@ -74,6 +84,12 @@ type AccountHealthRecoveryProbeService struct {
 
 	// probeOverride, when set, replaces the real upstream probe (used by tests).
 	probeOverride func(ctx context.Context, account *Account) (ok bool, err error)
+
+	// retryInterval / retryBurst 覆盖补探节奏（仅测试注入，避免单测真实等待
+	// accountHealthProbeRetryInterval）；零值经 probeRetryInterval/probeRetryBurst
+	// 回落到默认常量。
+	retryInterval time.Duration
+	retryBurst    int
 
 	// frozenMu / frozenBounds 保存每个 (account,scope) 进入调度时冻结的候选总数
 	//（C，上限公式）。冻结值经 RateLimitService.freshnessBoundsProvider 供三维新鲜度
@@ -225,6 +241,10 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			logger.L().Warn("openai.apikey_health_probe_list_failed", zap.Error(lerr))
 			return
 		}
+		// 首探失败的账号：主循环结束后按短间隔补探（不再空等一个完整轮次）。
+		pendingRetry := make([]*Account, 0, len(candidates))
+		retryInterval := p.probeRetryInterval()
+		retryBurst := p.probeRetryBurst()
 		for _, acc := range candidates {
 			if !p.isHealthBreakerTrip(acc, now) {
 				continue
@@ -238,8 +258,17 @@ func (p *AccountHealthRecoveryProbeService) RunOnce(ctx context.Context) {
 			// clearCandidateBound（probeAccount 恢复路径 :365）负责清除，"首冻结
 			// 不覆盖"语义保持。
 			p.freezeCandidateBound(acc.ID, "", 1)
-			p.probeAccount(ctx, acc, maxAttempts)
+			if stillParked := p.probeAccount(ctx, acc, maxAttempts); stillParked {
+				pendingRetry = append(pendingRetry, acc)
+				logger.L().Info("openai.apikey_health_probe_retry_scheduled",
+					zap.Int64("account_id", acc.ID),
+					zap.Duration("retry_interval", retryInterval),
+					zap.Int("retry_burst", retryBurst),
+				)
+			}
 		}
+		// 补探相位：先让所有候选都拿到一次首探（公平），再对失败者按短间隔连补。
+		p.runProbeRetryBurst(ctx, pendingRetry, maxAttempts)
 	}
 
 	// E45：孤儿告警清扫（候选过期转非活动的账号+模型维）。以 firing 新鲜度告警为界反向核对
@@ -287,19 +316,25 @@ func parseHealthBreakerState(reason string) (*TempUnschedState, bool) {
 }
 
 // probeAccount performs one probe attempt for a cooldowned account.
-func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, acc *Account, maxAttempts int) {
+//
+// 返回值 stillParked 报告本次尝试后账号是否仍处于停调且未达 max_attempts 上限
+//（即是否值得短间隔补探）：真实探测成功并完成恢复提交、或已到达尝试上限时返回 false。
+// 「首次真实探测成功即解除停调」——不再要求连续两轮成功（旧 consecutive_successes
+// 二次确认已移除）：恢复判据回到「一次真实探测成功」，把恢复时长从冷却到期拉回秒级。
+func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, acc *Account, maxAttempts int) (stillParked bool) {
 	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
 	if !ok || state == nil {
-		return
+		return false
 	}
 	attempts := state.ProbeAttempts + 1
 	if attempts > maxAttempts {
 		// Reached the attempt ceiling: give up probing and let the cooldown expire.
 		logger.L().Info("openai.apikey_health_probe_gave_up",
 			zap.Int64("account_id", acc.ID),
+			zap.Int("attempt", attempts),
 			zap.Int("max_attempts", maxAttempts),
 		)
-		return
+		return false
 	}
 
 	ok, err := p.runProbe(ctx, acc)
@@ -324,7 +359,7 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 			)
 		}
 		p.bumpProbeAttempts(ctx, acc.ID, maxAttempts)
-		return
+		return true
 	}
 
 	// #2：非 success outcome（探测失败/降级）且观测写错误 → Warn 后继续既有失败簿记
@@ -343,24 +378,7 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 			logger.L().Warn("openai.apikey_health_probe_commit_failed",
 				zap.Int64("account_id", acc.ID),
 				zap.Error(obsErr))
-			return
-		}
-		// 连续两轮成功才清除（方案 §2.2）：恢复判据与判停判据等价化，消除单发
-		// 轻请求秒撤的假阳性。首轮 success 仅将连续成功计数置 1 并 best-effort
-		// 回写 reason（不触发清除/池401重置/渠道收敛），次轮（>=1）才走既有清除路径。
-		// 计数已在入口处由 parseHealthBreakerState 解析于 state。
-		if state.ConsecutiveSuccesses < 1 {
-			updated, wErr := p.writeProbeConsecutiveSuccesses(ctx, acc.ID, 1)
-			if wErr == nil && updated != "" {
-				// 同步回当前进程内的账号对象，使后续同进程重放（测试/单实例下一轮
-				// 重读）能读到最新计数；生产路径下轮由 DB 回读，此处写回为无害冗余。
-				acc.TempUnschedulableReason = updated
-			}
-			logger.L().Info("openai.apikey_health_probe_first_success",
-				zap.Int64("account_id", acc.ID),
-				zap.Int("attempt", attempts),
-			)
-			return
+			return true
 		}
 		if p.rateLimit != nil {
 			if clearErr := p.rateLimit.ClearTempUnschedulable(ctx, acc.ID); clearErr != nil {
@@ -393,7 +411,7 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 			zap.Int64("account_id", acc.ID),
 			zap.Int("attempt", attempts),
 		)
-		return
+		return false
 	}
 
 	// Probe failed: bump the attempt counter; keep the account parked.
@@ -403,6 +421,7 @@ func (p *AccountHealthRecoveryProbeService) probeAccount(ctx context.Context, ac
 		zap.Int("attempt", attempts),
 		zap.Int("max_attempts", maxAttempts),
 	)
+	return true
 }
 
 // bumpProbeAttempts rewrites the temp-unschedulable reason to record the new attempt
@@ -420,9 +439,6 @@ func (p *AccountHealthRecoveryProbeService) bumpProbeAttempts(ctx context.Contex
 		return
 	}
 	state.ProbeAttempts = attempts
-	// 失败/降级回写 reason 时一并重置连续成功计数（方案 §2.2：任一失败 outcome
-	// 将计数归零，保持 parked，后续需再连续两轮 success 才清除）。
-	state.ConsecutiveSuccesses = 0
 	updated, mErr := json.Marshal(state)
 	if mErr != nil {
 		return
@@ -433,35 +449,95 @@ func (p *AccountHealthRecoveryProbeService) bumpProbeAttempts(ctx context.Contex
 	}
 }
 
-// writeProbeConsecutiveSuccesses 将连续成功计数 best-effort 写回 reason JSON
-//（方案 §2.2 首轮 success 路径）。复用既有 SetTempUnschedulableReason 写入口与
-// parseHealthBreakerState 解析，不引入新存储机制；写失败仅 Debug 日志不阻断
-//（与 bumpProbeAttempts 同口径）。成功时返回更新后的 reason 字符串，调用方可据此
-// 同步进程内账号对象。
-func (p *AccountHealthRecoveryProbeService) writeProbeConsecutiveSuccesses(ctx context.Context, accountID int64, count int) (string, error) {
-	if p.accountRepo == nil {
-		return "", errors.New("probe account repo not configured")
+// probeRetryInterval 返回补探间隔：未显式注入（零值）时回落到默认常量。
+func (p *AccountHealthRecoveryProbeService) probeRetryInterval() time.Duration {
+	if p != nil && p.retryInterval > 0 {
+		return p.retryInterval
 	}
-	acc, err := p.accountRepo.GetByID(ctx, accountID)
-	if err != nil || acc == nil {
-		return "", err
+	return accountHealthProbeRetryInterval
+}
+
+// probeRetryBurst 返回单轮 sweep 内每个失败账号的最大补探次数：零值回落到默认常量。
+func (p *AccountHealthRecoveryProbeService) probeRetryBurst() int {
+	if p != nil && p.retryBurst > 0 {
+		return p.retryBurst
 	}
-	state, ok := parseHealthBreakerState(acc.TempUnschedulableReason)
-	if !ok || state == nil {
-		return "", errors.New("invalid health breaker state")
+	return accountHealthProbeRetryBurst
+}
+
+// runProbeRetryBurst 对本轮首探失败的账号按短间隔补探，直到某个账号探测成功
+//（由 probeAccount 内部完成解除停调）、账号不再处于停调（已被他实例恢复或冷却到期）、
+// 达到本轮补探次数上限，或触及 settings.probe.max_attempts（由 probeAccount 判定
+// gave_up）。补探与主循环共用同一 probeAccount 路径与 max_attempts 簿记，故补探不会
+// 绕过真实探测成功这一恢复前提，也不会无限重试。
+func (p *AccountHealthRecoveryProbeService) runProbeRetryBurst(ctx context.Context, pending []*Account, maxAttempts int) {
+	if p == nil || p.accountRepo == nil || len(pending) == 0 {
+		return
 	}
-	state.ConsecutiveSuccesses = count
-	updated, mErr := json.Marshal(state)
-	if mErr != nil {
-		return "", mErr
+	interval := p.probeRetryInterval()
+	burst := p.probeRetryBurst()
+	for round := 1; round <= burst && len(pending) > 0; round++ {
+		if !p.sleepBeforeProbeRetry(ctx, interval) {
+			return
+		}
+		next := make([]*Account, 0, len(pending))
+		for _, acc := range pending {
+			if ctx.Err() != nil {
+				return
+			}
+			// 回读最新账号：补探前必须确认账号仍处于可探测停调态（他实例可能已恢复，
+			// 冷却也可能已到期），且要拿到最新的 ProbeAttempts 计数（max_attempts 判据）。
+			fresh, err := p.accountRepo.GetByID(ctx, acc.ID)
+			if err != nil || fresh == nil {
+				continue
+			}
+			if !p.isHealthBreakerTrip(fresh, time.Now()) {
+				continue
+			}
+			// 补探序号与 probeAccount 内的 attempts 同口径（本次尝试后的累计次数），
+			// 便于按 account_id+attempt 串联「首探→补探→恢复」日志链（事故复盘时
+			// 恢复时长抖动需逐次定位）；解析失败退回 round+1，仅影响日志不阻塞补探。
+			attempt := round + 1
+			if st, ok := parseHealthBreakerState(fresh.TempUnschedulableReason); ok && st != nil {
+				attempt = st.ProbeAttempts + 1
+			}
+			logger.L().Info("openai.apikey_health_probe_retry",
+				zap.Int64("account_id", acc.ID),
+				zap.Int("round", round),
+				zap.Int("attempt", attempt),
+				zap.Duration("interval", interval),
+			)
+			if p.probeAccount(ctx, fresh, maxAttempts) {
+				next = append(next, fresh)
+			}
+		}
+		pending = next
 	}
-	reason := string(updated)
-	if err := p.accountRepo.SetTempUnschedulableReason(ctx, accountID, reason); err != nil {
-		logger.L().Debug("openai.apikey_health_probe_consecutive_write_failed",
-			zap.Int64("account_id", accountID), zap.Error(err))
-		return "", err
+	if len(pending) > 0 {
+		logger.L().Info("openai.apikey_health_probe_retry_burst_exhausted",
+			zap.Int("accounts", len(pending)),
+			zap.Int("rounds", burst),
+			zap.Duration("interval", interval),
+		)
 	}
-	return reason, nil
+}
+
+// sleepBeforeProbeRetry 等一个补探间隔；ctx 取消或 Stop() 触发时立即返回 false
+//（不把补探等待拖进优雅关闭路径）。
+func (p *AccountHealthRecoveryProbeService) sleepBeforeProbeRetry(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	p.startMu.Lock()
+	stopCh := p.stopCh
+	p.startMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-stopCh:
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // runProbe executes the upstream probe, preferring a real request but allowing an

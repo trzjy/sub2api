@@ -605,6 +605,14 @@ func parkedBreakerAccount(id int64, probeAttempts int) *Account {
 	}
 }
 
+// setFastProbeRetry 注入毫秒级补探节奏（PRC-02）。默认补探间隔
+// accountHealthProbeRetryInterval=5s、本轮上限 accountHealthProbeRetryBurst=3，
+// 单测不得真实等待；burst=1 使「首探 + 1 次补探」的 attempt 计数可确定断言。
+func setFastProbeRetry(p *AccountHealthRecoveryProbeService) {
+	p.retryInterval = time.Millisecond
+	p.retryBurst = 1
+}
+
 func newProbeService(t *testing.T, probeEnabled bool, maxAttempts int, rl *RateLimitService, repo *probeRepoMock) *AccountHealthRecoveryProbeService {
 	t.Helper()
 	settings := &OpenAIAPIKeyHealthBreakerSettings{
@@ -616,9 +624,9 @@ func newProbeService(t *testing.T, probeEnabled bool, maxAttempts int, rl *RateL
 	return p
 }
 
-// 恢复判定新语义（探针恢复判定修复 §2.2）：单次（首轮）成功只把 consecutive_successes
-// 置 1 并保持 parked，连续第二轮成功才清除停调。故「成功清除」场景须连跑两轮 RunOnce。
-func TestProbeRecoverySuccessClearsAfterTwoConsecutiveRounds(t *testing.T) {
+// 恢复判定语义（PRC-02）：一次真实探测成功即清除停调（旧「连续两轮成功」二次确认
+// 已移除），故单轮 RunOnce 即完成提前恢复，不必等到停调到期。
+func TestProbeRecoverySuccessClearsOnFirstRound(t *testing.T) {
 	rlRepo := &probeRateLimitRepo{}
 	rl := NewRateLimitService(rlRepo, nil, &config.Config{}, nil, nil)
 	repo := &probeRepoMock{
@@ -628,15 +636,11 @@ func TestProbeRecoverySuccessClearsAfterTwoConsecutiveRounds(t *testing.T) {
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return true, nil })
 
-	// 首轮 success：仅回写连续成功计数，不清除。
-	p.RunOnce(context.Background())
-	require.Zero(t, rlRepo.clearTempCalls, "首轮 success 不得清除停调")
-
-	// 次轮 success：达成连续两轮，清除停调（仍早于停调到期）。
 	p.RunOnce(context.Background())
 
-	require.Equal(t, 1, rlRepo.clearTempCalls) // recovered early
-	require.Equal(t, 1, repo.setReasonCall)    // 首轮回写 consecutive_successes=1；清除轮不再写
+	// 单轮 success 即清除停调（recovered early），且不再回写 consecutive_successes。
+	require.Equal(t, 1, rlRepo.clearTempCalls)
+	require.Equal(t, 0, repo.setReasonCall)
 }
 
 func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
@@ -649,15 +653,17 @@ func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
 	}
 	p := newProbeService(t, true, 10, rl, repo)
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, nil })
+	// PRC-02：首探失败后本轮补探 1 次（毫秒级节奏），共 2 次 attempt 记账。
+	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
 
 	require.Zero(t, rlRepo.clearTempCalls) // not recovered
-	require.Equal(t, 1, repo.setReasonCall) // attempt counter bumped
+	require.Equal(t, 2, repo.setReasonCall) // attempt counter bumped（首探 + 1 次补探）
 
 	var state TempUnschedState
 	require.NoError(t, json.Unmarshal([]byte(cand.TempUnschedulableReason), &state))
-	require.Equal(t, 1, state.ProbeAttempts)
+	require.Equal(t, 2, state.ProbeAttempts)
 }
 
 func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
@@ -672,6 +678,7 @@ func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
 	// A degraded platform returns an error: the probe must not spam, it bumps the
 	// attempt counter and lets the cooldown expire.
 	p.SetProbeOverride(func(_ context.Context, _ *Account) (bool, error) { return false, errors.New("no safe endpoint") })
+	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
 
@@ -711,9 +718,7 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 	}))
 
 	// Same service instance, no restart: the next tick now performs the sweep.
-	// 恢复需连续两轮 success（探针恢复判定修复 §2.2）：首轮只回写连续成功计数，
-	// 故开关生效后需再跑一轮才到达清除。
-	p.RunOnce(context.Background())
+	// PRC-02：一次真实探测成功即清除，故开关生效后的第一个 tick 即完成恢复。
 	p.RunOnce(context.Background())
 	require.Equal(t, 1, rlRepo.clearTempCalls, "enabling the probe must take effect on the running loop")
 }

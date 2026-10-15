@@ -49,9 +49,15 @@ const (
 	// defaultMaxConnsPerHost: 默认每主机最大连接数（含活跃连接）
 	// 达到上限后新请求会等待，而非无限创建连接
 	defaultMaxConnsPerHost = 240
-	// defaultIdleConnTimeout: 默认空闲连接超时时间（90秒）
-	// 超时后连接会被关闭，释放系统资源（建议小于上游 LB 超时）
-	defaultIdleConnTimeout = 90 * time.Second
+	// defaultIdleConnTimeout: 默认空闲连接超时时间（45秒）
+	// 超时后连接会被关闭，释放系统资源（建议小于上游 LB 超时）。
+	//
+	// 事故整改（zhipu id=132 被 cn upstream first byte timeout 反复停调）：原 90s
+	// 的空闲窗口里，连接可能已被上游/LB 或 NAT 静默丢弃而本地仍认为 ESTABLISHED，
+	// "账号空闲一段时间后的第一个请求"正好把所有权重压在这条最旧的连接上（超时前
+	// 空闲时长中位 195s vs 对照组 14s，5 个账号一致）。下调到 45s 把这一窗口减半，
+	// 让空闲连接更早被主动回收，配合 defaultUpstreamDialKeepAlive 一起降噪。
+	defaultIdleConnTimeout = 45 * time.Second
 	// defaultResponseHeaderTimeout: 默认等待响应头超时时间（5分钟）
 	// LLM 请求可能排队较久，需要较长超时
 	defaultResponseHeaderTimeout = 300 * time.Second
@@ -62,8 +68,11 @@ const (
 	// 上游域名被解析到 443 不可达的 IP 时（DNS 污染/路由异常），单个账号就要卡满
 	// 内核超时；而多账号故障转移是串行的，一次请求会阻塞数分钟且不写中间错误。
 	defaultUpstreamDialTimeout = 10 * time.Second
-	// defaultUpstreamDialKeepAlive: TCP keepalive 探测间隔，与 Go 默认值保持一致
-	defaultUpstreamDialKeepAlive = 30 * time.Second
+	// defaultUpstreamDialKeepAlive: TCP keepalive 探测间隔（15秒）
+	//  必须显式设置：TCP keepalive 是唯一无需发新请求就能发现半开连接（对端已静默
+	//  丢弃、本地仍 ESTABLISHED）的手段，被内核判定失活的连接会复位，请求不会石沉大海。
+	//  30s → 15s：与 defaultIdleConnTimeout 同步下调，压缩半开连接的存活时间。
+	defaultUpstreamDialKeepAlive = 15 * time.Second
 	// defaultUpstreamTLSHandshakeTimeout: TLS 握手超时（10秒）
 	// 与建连超时同量级，避免 TCP 已连通但对端不推进握手时无限等待
 	defaultUpstreamTLSHandshakeTimeout = 10 * time.Second
@@ -215,13 +224,79 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
+	resp, err := s.doWithClient(client, req, profile, entry)
+	if err != nil {
+		// 请求失败，立即减少计数
+		atomic.AddInt64(&entry.inFlight, -1)
+		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+// DoFreshConn 与 Do 走完全相同的入参、校验、隔离策略与协议模式，唯一差别是本次
+// 出站强制新建 TCP 连接，不会复用连接池里的任何空闲连接。
+//
+// 用途：CN 清单平台（kimi/deepseek/zhipu/minimax）首包超时中"连响应头都没回来"
+// 那一分支的同账号一次性重试。该分支怀疑是请求被写进了一条本地仍认为 ESTABLISHED、
+// 但对端已静默丢弃的半开连接：只有换新连接才可能把请求重新送出去。
+// 它不是换账号、也不是换分组，次数上限由调用方控制在每请求 1 次。
+//
+// 注意：请求头上的 Connection: close 无法达到同样效果——Go 的 http.Transport 在
+// 取连接时（queueForIdleConn）只在 DisableKeepAlives 为真时跳过空闲连接队列，
+// Connection: close 只决定响应读完之后是否关闭连接。
+func (s *httpUpstreamService) DoFreshConn(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	applyGrokCLIProxyHeaders(req)
+	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	profile := service.HTTPUpstreamProfileDefault
+	if req != nil {
+		profile = service.HTTPUpstreamProfileFromContext(req.Context())
+	}
+
+	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
+	if err != nil {
+		return nil, err
+	}
+
+	client := freshConnClient(s.httpClientForUpstreamRequest(entry.client, req))
+	resp, err := s.doWithClient(client, req, profile, entry)
+	if err != nil {
+		atomic.AddInt64(&entry.inFlight, -1)
+		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		return nil, err
+	}
+	return resp, nil
+}
+
+// freshConnClient 克隆 client 底层 Transport 并禁用 keep-alive，使本次请求必然走一条
+// 新建连接：Clone 出来的是全新连接池实例，不含任何既有空闲连接，且 DisableKeepAlives
+// 会让 Transport 在响应读完后直接关闭该连接（无残留空闲连接）。
+// 底层 RoundTripper 不是 *http.Transport 时原样返回（保持与 Do 一致的语义，不猜测）。
+func freshConnClient(client *http.Client) *http.Client {
+	if client == nil || client.Transport == nil {
+		return client
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	fresh := transport.Clone()
+	fresh.DisableKeepAlives = true
+	cloned := *client
+	cloned.Transport = fresh
+	return &cloned
+}
+
+// doWithClient 用指定 client 执行单次出站。成功时 body 被包一层计数归还闭包（流式
+// 响应读取中保持占用）；错误路径的计数归还由调用方负责。
+func (s *httpUpstreamService) doWithClient(client *http.Client, req *http.Request, profile service.HTTPUpstreamProfile, entry *upstreamClientEntry) (*http.Response, error) {
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := servertiming.Do(client, req)
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
-		// 请求失败，立即减少计数
-		atomic.AddInt64(&entry.inFlight, -1)
-		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 		return nil, err
 	}
 	s.recordOpenAIHTTP2Success(profile, entry.protocolMode, entry.proxyKey)
