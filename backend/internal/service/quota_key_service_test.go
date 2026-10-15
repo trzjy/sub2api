@@ -18,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/accountgroup"
+	entgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -1459,21 +1460,24 @@ func TestQuotaKeyService_Pull_NoModelContextSkipsMount(t *testing.T) {
 }
 
 // TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups：B1 缺陷修复——手动入口
-// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"当前白名单允许平台 cursor 的全部分组"
-// （cursor + active + 未软删），而非落成裸号（group_count=0）。
+// RefreshAccounts 改走挂载语义，拉到的 cursor 账号挂入"active + 未软删且白名单不显式拒绝
+// cursor 的全部分组"（2026-10-15 用户裁定"放宽挂载解析"：生产无 platform=cursor 分组，
+// cursor 账号实际由 composite 聚合组调度），而非落成裸号（group_count=0）。
 func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 
-	// 应被挂入的 cursor 平台分组（active + 启用白名单）。
-	grpCursor := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{
+	// 应被挂入的分组（生产形态复刻）：composite 聚合组，白名单未启用（Allows 恒真）。
+	grpComposite := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
+	// 应被挂入的分组：白名单启用且显式含 cursor 模型。
+	grpWhitelistCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
-		Models:  []string{"cursor-claude-opus-4"},
+		Models:  []string{"cursor"},
 	})
-	// 白名单外分组：非 cursor 平台分组，不应被挂入（验证"挂载目标仅限 cursor 分组"）。
-	grpOther := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	// 不应挂入的分组：白名单启用且明确不含 cursor（如 DeepSeek 计量组形态）。
+	grpRejectCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
-		Models:  []string{"cursor-claude-opus-4"},
+		Models:  []string{"deepseek-v4-1-flash"},
 	})
 
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
@@ -1493,12 +1497,14 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 
 	// group_count > 0：手动拉到的账号已挂组（修复前恒 0）。
 	require.Greater(t, len(accs[0].Edges.Groups), 0, "manual refresh must mount account to groups (group_count > 0)")
-	// 挂入 cursor 分组。
-	require.True(t, accountGroupLinked(t, ctx, client, accID, grpCursor.ID),
-		"manual refresh must mount account to cursor whitelist group")
-	// 不挂入白名单外（非 cursor 平台）分组。
-	require.False(t, accountGroupLinked(t, ctx, client, accID, grpOther.ID),
-		"manual refresh must NOT mount account to non-cursor group")
+	// 挂入 composite 聚合组（白名单未启用）与白名单显式含 cursor 的组。
+	require.True(t, accountGroupLinked(t, ctx, client, accID, grpComposite.ID),
+		"manual refresh must mount account to whitelist-disabled composite group")
+	require.True(t, accountGroupLinked(t, ctx, client, accID, grpWhitelistCursor.ID),
+		"manual refresh must mount account to whitelist-containing-cursor group")
+	// 不挂入白名单启用且显式拒绝 cursor 的组。
+	require.False(t, accountGroupLinked(t, ctx, client, accID, grpRejectCursor.ID),
+		"manual refresh must NOT mount account to whitelist-rejecting-cursor group")
 	// 手动刷新成功路径清 exhausted。
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
@@ -1599,6 +1605,16 @@ func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	// 模型名全局唯一：避免持久库中上一轮遗留的同名白名单分组把遗留账号计入本轮水位。
 	modelA := fix1UniqueModel("cursor-fix1-a")
 	modelB := fix1UniqueModel("cursor-fix1-b")
+	// 持久库清理：历史轮次遗留的 c11-grp-cursor-* 组（无主、白名单各异）会把遗留账号计入
+	// 本轮水位（R3-2 后 WaterLevel 扫全 cursor 平台组）。用例级清理只删本前缀测试自建组，
+	// 不触碰生产数据（此库仅测试使用）。前置清理在建组前执行，t.Cleanup 兜底本轮产物。
+	cleanupLegacyCursorGroups := func() {
+		_, _ = client.Group.Delete().
+			Where(entgroup.NameHasPrefix("c11-grp-cursor-")).
+			Exec(context.Background())
+	}
+	cleanupLegacyCursorGroups()
+	t.Cleanup(cleanupLegacyCursorGroups)
 	grpA := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelA}})
 	grpB := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelB}})
 

@@ -852,25 +852,31 @@ func (s *QuotaKeyService) findGroupsAllowingModel(ctx context.Context, tx *ent.T
 	return out, nil
 }
 
-// findCursorPlatformGroups 是 B1 手动挂载事实源：返回"当前白名单允许平台 cursor 的全部分组"ID。
-// 与 findGroupsAllowingModel 同判——后者对传入的 M 取 Allows(M) 决定覆盖组；手动刷新不携带
-// 模型上下文（M 为空），而 Allows("") 恒为 true 会把【所有】分组（含非 cursor 平台、白名单关闭的）
-// 都当覆盖组，故此处改为显式枚举"cursor 平台 + active + 未软删"的分组（与 §13.1 WaterLevel /
-// ListAllowedModels 的 cursor 范围对齐），不新造映射表。手动拉到的 cursor 账号据此挂入这些分组，
-// 使 group_count>0、可用；零分组时走 pull 的 fail-closed（不落裸号）。
+// findCursorPlatformGroups 是 B1 手动挂载事实源（2026-10-15 用户裁定"放宽挂载解析"后改版）：
+// 生产库不存在 platform=cursor 的分组（cursor 账号实际由 composite 聚合组调度，线八拓扑），
+// 原按 cursor 平台过滤的枚举恒为空 → 每次手动拉号都在挂载段失败关闭、号被丢弃。
+// 新口径：枚举"active + 未软删"的全部分组，剔除白名单【显式拒绝】cursor 的组——
+// 判定规则：enabled=false（未启用白名单，Allows 恒真）或 enabled=true 且 Allows("cursor")
+// 的分组入选；白名单启用且明确不含 cursor 的（如 DeepSeek 计量）不入选。零入选仍走
+// fail-closed（不落裸号）。不新造映射表，白名单事实源不变。
 func (s *QuotaKeyService) findCursorPlatformGroups(ctx context.Context, tx *ent.Tx) ([]int64, error) {
 	groups, err := tx.Group.Query().
 		Where(
-			group.Platform(domain.PlatformCursor),
 			group.Status(domain.StatusActive),
 			group.DeletedAtIsNil(),
 		).
 		All(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("quota_key_service: query cursor groups: %w", err)
+		return nil, fmt.Errorf("quota_key_service: query candidate groups: %w", err)
 	}
 	out := make([]int64, 0, len(groups))
 	for _, g := range groups {
+		al := GroupModelAllowlistFromDomain(g.ModelAllowlist)
+		// enabled=false：白名单未启用，Allows 恒真 → 该组接受任意模型，cursor 可挂。
+		// enabled=true：仅当白名单显式允许 "cursor" 模型才挂（如聚合组勾了 cursor）。
+		if al.Enabled && !al.Allows("cursor") {
+			continue
+		}
 		out = append(out, g.ID)
 	}
 	return out, nil
