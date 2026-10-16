@@ -1,10 +1,64 @@
--- user_platform_quotas 仅保存至少配置了一档限额的记录；不存在的行等价于不限额。
--- 三档限额全为 NULL 的行不携带任何可执行的限额，也不参与任何读取，直接删除。
--- 幂等：重复执行影响 0 行。
--- 行数约为历史用户数 × 平台数，整条语句在一个事务内执行；超大表需按
--- SETUP_MIGRATION_TIMEOUT_SECONDS 调高迁移超时，或在升级前预先分批清理。
+-- ============================ 本文件已改为「不删活跃数据」（2026-10-16） ============================
+--
+-- 原实现（照搬上游）：
+--
+--   DELETE FROM user_platform_quotas
+--    WHERE daily_limit_usd IS NULL AND weekly_limit_usd IS NULL AND monthly_limit_usd IS NULL;
+--
+-- 上游的注释断言「三档全空的行不携带任何可执行的限额，也不参与任何读取，不存在的行等价于
+-- 不限额」。前半句在本仓库**不成立**，照搬会抹掉生产 100% 的配额表数据，故改为只清理
+-- 软删行。
+--
+-- ------------------------- 为什么原 DELETE 在本仓库是数据破坏 -------------------------
+--
+-- 【实测】2026-10-16 只读查询生产库（未做任何写操作）：
+--   总行数 2578；daily/weekly/monthly 三限全为 NULL 的行 2578（100%）；
+--   软删行（deleted_at IS NOT NULL）0；三限至少有一档非 NULL 的行 0。
+--   → 原 DELETE 会删掉全部 2578 行，即整张 user_platform_quotas 表。
+--
+-- 【语义不等价 1：这张表同时承载「已累计用量」，不只承载限额】
+--   表结构除三档 limit 外还有 daily_usage_usd / weekly_usage_usd / monthly_usage_usd 与
+--   三个 *_window_start（ent/schema/user_platform_quota.go:59-80）。三限全空 ≠ 该行无信息：
+--   实测有 16 行在三限全空的同时带着非零累计用量（如 user_id=138 anthropic 月累计
+--   0.0064550750、user_id=138 openai 日/周/月 0.0000209254/0.0000492419/0.0000775584），
+--   最近写入时间 2026-10-16 16:23，即这些行正在被活跃写入路径持续更新。
+--   原 DELETE 的 WHERE 只看三档 limit、不看 usage 列，会把这 16 行的累计用量一并销毁。
+--
+-- 【语义不等价 2：「缺行 = 不限额」只对 enforcement 成立，对「用量累计」不成立】
+--   · enforcement 侧确实等价：billing_cache_service.go 的 checkUserPlatformQuotaEligibility
+--     在 GetByUserPlatform 返回 (nil, nil) 时回填 sentinel 并 return nil（放行）；
+--     三档 limit 皆 nil 时三次 `limit != nil && usage >= limit` 比较也全部跳过 → 放行。
+--     单看限流结果，删与不删一致。
+--   · 但「缺行」不等于「不需要累计」：repository 层对缺行的处理是**不建行、丢弃本次累加**
+--     ——IncrementUsageWithReset 命中 IsNotFound 直接 return nil（user_platform_quota_repo.go:
+--     191-193，注释明写「记录不存在时不建行」）；BatchSnapshotUsage 是 UPDATE ... FROM (VALUES)，
+--     只覆盖既有活跃行，行不存在即整条快照被跳过（:482-485）。
+--     也就是说删行之后，这些 user×platform 的用量累计会**静默停止**并在下次配置限额时从 0 起算，
+--     而保留行则能按真实窗口继续累计。这不是等价变换。
+--
+-- 【为什么这些行会存在】三限全空的活跃行并非本仓库写路径产生的：
+--   BulkInsertInitial / UpsertForUser 都先过 configuredRecords()，HasAnyLimit() 为 false 的
+--   记录被过滤掉、不写库（user_platform_quota_repo.go:34-36, 95, 324, 506-514）。
+--   即当前代码路径不会新建三限全空行 —— 生产这 2578 行是历史存量（上游播种或旧版本写入），
+--   它们的用途已不可从代码推断，而「不可推断」本身就是不能删的理由。
+--
+-- ------------------------------ 现在的行为 ------------------------------
+--
+-- 只删除**软删**行（deleted_at IS NOT NULL）且三限全空的记录。软删行对本仓库所有读路径
+-- 均不可见，是唯一可证明无副作用的清理对象：
+--   · GetByUserPlatform / ListByUser / IncrementUsageWithReset 均带 DeletedAtIsNil()；
+--   · BatchSnapshotUsage 的 WHERE 带 q.deleted_at IS NULL；
+--   · userplatformquota_user_id_platform_uq 是 partial unique index（WHERE deleted_at IS NULL），
+--     软删行不参与唯一性冲突，软删行被物理删除不影响后续 insert/upsert 重建。
+-- 生产实测软删行 0 条 → 本迁移在生产是 no-op（影响 0 行），不会造成任何数据变动。
+-- 有配置限额的行、以及任何软删但带限额的行，一律保留。
+--
+-- 幂等：重复执行影响 0 行（生产当前软删全空行为 0）。
+-- 若将来确需清理三限全空的活跃存量行，应先确认这些行的累计用量无保留价值，
+-- 并按 usage 列非零 / 窗口未过期分批处理，不要用一条无条件 DELETE 覆盖全表。
 
 DELETE FROM user_platform_quotas
- WHERE daily_limit_usd IS NULL
+ WHERE deleted_at IS NOT NULL
+   AND daily_limit_usd IS NULL
    AND weekly_limit_usd IS NULL
    AND monthly_limit_usd IS NULL;
