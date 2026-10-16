@@ -2616,9 +2616,12 @@ const handleDuplicateAccount = async (a: Account) => {
 const handleRefresh = async (a: Account) => {
   try {
     const result = await adminAPI.accounts.refreshCredentials(a.id)
-    patchAccountInList(result.account)
+    const refreshed = 'account' in result ? result.account : result
+    patchAccountInList(refreshed)
     enterAutoRefreshSilentWindow()
-    if (result.warning) appStore.showWarning(result.message)
+    if ('warning' in result && result.warning) {
+      appStore.showWarning(result.message ?? '')
+    }
   } catch (error) {
     console.error('Failed to refresh credentials:', error)
   }

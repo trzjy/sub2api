@@ -1258,12 +1258,11 @@ function generateRoutedCodexFiles(
   }
   const preferredModel = preferredModels[platform] || ''
   const model = selectCodexCatalogModel(preferredModel)
-  // keep OURS (权威表第 4 条): codebuddy/muse/other are our platform set and the
-  // signature authority table pins the account-platform value set to ours.
-  // take UPSTREAM: nothing here — upstream adds opencode_go/typesafe/command_code/cline,
-  // but none of those exist in our GroupPlatform (types/index.ts is w62's file and the
-  // [COMPILE]-flagged mutual-exclusion conflict is still open). Adding them would break
-  // `Record<GroupPlatform, string>`. Registered as a w48 cross-card dependency instead.
+  // provenance (权威表第 4 条): codebuddy/muse/other 是我们的平台集，签名权威表
+  // 将 account-platform 取值钉死为我们的集合。这段注释源自 w48 跨卡依赖。
+  // 现状: opencode_go/typesafe/command_code/cline 现已进入 KnownAccountPlatform
+  // (types/index.ts:943) 并登记于后端 platformList (platforms.go:52-55)，
+  // 故本表补齐对应标签，不再缺失。
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -1277,7 +1276,12 @@ function generateRoutedCodexFiles(
     codebuddy: 'CodeBuddy',
     muse: 'Muse',
     other: 'Other',
-    composite: 'Composite'
+    composite: 'Composite',
+    opencode_go: 'OpenCode',
+    typesafe: 'TypeSafe',
+    command_code: 'Command Code',
+    cline: 'Cline',
+    cursor: 'Cursor'
   }
   const label = labels[platform]
   const envContent = isWindows

@@ -14,17 +14,18 @@
 //   另两处各是单方改动，落在非冲突区，当前未进工作树，故同样按预防锁登记。
 //   对应测试：__tests__/channelMonitor.fusion.spec.ts（15 条，逐条映射下面编号）。
 //
-// 融合点 1 — Provider 联合类型：keep OURS 'muse'；take UPSTREAM（暂缓，跨卡依赖）
+// 融合点 1 — Provider 联合类型：'opencode_go' 已于 2026-10-16 落地（后端 binding 已含、platforms.go:52
+//   已有 PlatformOpenCodeGo）。理由 (1b) 已失效（见下方）。(1a) 穷尽性约束仍成立：下方 ProviderIcon.vue
+//   的 Record<Provider, IconData> 必须同步补 'opencode_go' 键，否则 vue-tsc 立即报缺键。
 //   双方都在 base 尾部（'minimax' 之后、同一插入位置）各加 1 项：ours 加 muse、上游加 opencode_go。
 //   两个加项互不重叠、且都不在 base 里 → 语义上是"同一供应商的两种命名"，不是可并集的 orthogonal 增量。
 //   keep OURS 的理由（不止"默认我方"，有三条硬证据）：
 //     (1a) 穷尽性会破：ProviderIcon.vue:46 是 Record<Provider, IconData>（映射类型要求全覆盖），
 //          该文件由 w53 已交付并明确"不将 opencode_go 写入 Record"。单方给本 union 加 opencode_go
 //          → vue-tsc 立即报缺键（spec 第 4 条用纯函数实算该后果，不靠声称）。
-//     (1b) 上游符号缺席：backend/internal/domain/platforms.go 不存在、service 包剥注释后零命中
-//          PlatformOpenCodeGo / IsMultiProtocolAPIKeyProvider ⇒ 派发单权威表第 5 条"定义随自动合并已入树"
-//          在本机整体不成立（复证 w14/w27 取证）。此时给前端 union 加一个后端无枚举值的成员，
-//          只会把"编译错"降级成"运行期 provider 校验失败"，半个契约不该由本卡单方面落地。
+//     (1b) [已失效 2026-10-16] 上游符号已就位：backend/internal/domain/platforms.go:52 已有
+//          PlatformOpenCodeGo，channel_monitor_handler.go:43 的 binding 已含 opencode_go。原"后端无枚举值"
+//          前提不再成立，故本 union 现已补 'opencode_go'（见下方现状说明）。
 //     (1c) 品牌终裁未决：w63 (d) 已把"muse 与 opencode_go 是 alias 还是并存"作为 BLOCKED 交主会话，
 //          本卡取"无 alias"以与在树 w53/w63 一致；若终裁改判需同时回改三张卡（见收敛单元 (d)）。
 //   报警锚点：spec 第 3 条（剥注释后本文件不得含 opencode_go）、第 4 条（穷尽性实算）。
@@ -73,7 +74,9 @@
 //   本卡在当前 (a)-(d) 未收敛前的终态 = 工作树现状（keep OURS 全部三处），无任何代码层改动。
 import { apiClient } from '../client'
 
-// w34 融合点 1：keep OURS 'muse'；上游 'opencode_go' 暂缓（跨卡依赖，见文件头 notes 与 fusion spec 第 1-4 条）
+// w34 融合点 1：本 union 现已含 'opencode_go'（后端 binding 已含，见 channel_monitor_handler.go:43；
+// domain/platforms.go:52 已有 PlatformOpenCodeGo）。下游 ProviderIcon.vue 的 Record<Provider, IconData>
+// 必须同步补 'opencode_go' 键，否则 vue-tsc 立即报缺键（穷尽性约束，融合点 1a 仍成立）。
 export type Provider =
   | 'openai'
   | 'anthropic'
@@ -85,6 +88,7 @@ export type Provider =
   | 'deepseek'
   | 'minimax'
   | 'muse'
+  | 'opencode_go'
 export type MonitorStatus = 'operational' | 'degraded' | 'failed' | 'error'
 export type BodyOverrideMode = 'off' | 'merge' | 'replace'
 export type APIMode = 'chat_completions' | 'responses'

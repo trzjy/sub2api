@@ -63,6 +63,24 @@ export const resolveOpenAIWSModeHintKey = (
   }
 }
 
+/**
+ * Resolve the i18n hint key for the concurrency-mode explainer.
+ *
+ * `ctx_pool` gets its own dedicated key (`admin.accounts.openai.wsModeConcurrencyHint`);
+ * all other modes fall back to the existing `resolveOpenAIWSModeHintKey` result. The
+ * result is always a string so it can be passed straight to `t()` without a null guard
+ * (cf. `EditAccountModal`, which guards with `v-if`); the no-hint case (`off`) yields
+ * an empty string.
+ */
+export const resolveOpenAIWSModeConcurrencyHintKey = (
+  mode: OpenAIWSMode
+): string => {
+  if (mode === OPENAI_WS_MODE_CTX_POOL) {
+    return 'admin.accounts.openai.wsModeConcurrencyHint'
+  }
+  return resolveOpenAIWSModeHintKey(mode) ?? ''
+}
+
 export const resolveOpenAIWSModeFromExtra = (
   extra: Record<string, unknown> | null | undefined,
   options: ResolveOpenAIWSModeOptions

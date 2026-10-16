@@ -28,8 +28,14 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  OpenCodeGoUsageState,
+  OpenCodeGoUsageSettings
 } from '@/types'
+import type {
+  OpenAIReferralRefreshResult,
+  OpenAIReferralSendResult
+} from '@/types/openaiReferrals'
 
 /**
  * List all accounts with pagination
@@ -334,11 +340,11 @@ export async function validateWebCredentials(
  *     `Promise<RefreshCredentialsResult>` (account NESTED under `.account`).
  *
  * Fusion (field-level, same_contract) — KEEP OURS wire shape, surface UPSTREAM metadata:
- *   - Shape: DO NOT take upstream's nested `.account` union. Our backend
- *     `account_handler.go:Refresh` (POST /admin/accounts/:id/refresh) returns the full
- *     Account directly on success and `{ message, warning }` (no nested `.account`) on
- *     partial `missing_project_id_temporary`. Adopting upstream's nested shape would
- *     break our call sites and mismatch the wire.
+ *   - Shape (CORRECTED 2026-10-16, verified `account_handler.go:1961-1989`): the backend
+ *     emits TWO wire shapes from POST /admin/accounts/:id/refresh: the full Account FLAT on
+ *     success, and a NESTED `{ account, message, warning }` on the
+ *     `missing_project_id_temporary` branch. The type is therefore a union
+ *     `Account | RefreshCredentialsPartial` (see below), NOT a flat-only Account.
  *   - `warning?: string` — TAKE UPSTREAM metadata field (emitted by our backend on
  *     partial refresh).
  *   - `message?: string` — TAKE UPSTREAM metadata field (emitted by our backend on
@@ -357,22 +363,22 @@ export async function validateWebCredentials(
  *   to change (AccountsView.vue is another card), and our backend never emits `.account`,
  *   so the nested accessor would yield undefined here. Flat shape is the only wire-correct call.
  *
- * Non-conflicting upstream deltas on this file — ALL kept OUT (measured 2026-10-11, zero
- * pre-injection in the work tree; upstream's dependency symbols do not exist in this tree,
- * so absorbing any of them would make the file fail to compile):
- *   - `import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'`
- *     -> `src/types/openaiReferrals.ts` absent (upstream-only file).
- *   - `OpenCodeGoUsageSettings` / `OpenCodeGoUsageState` imports from `@/types` -> zero hits in `src/types/`.
- *   - `refreshOpenAIReferrals`, `sendOpenAIReferralInvite` -> no producer, no consumer.
- *   - `getOpenCodeGoUsageSettings` / `updateOpenCodeGoUsageSettings` / `getOpenCodeGoUsage`
- *     / `setOpenCodeGoUsageAutoRefresh` / `refreshOpenCodeGoUsage` + their 5 `accountsAPI`
- *     entries -> same (upstream-only backend routes).
+ * Non-conflicting upstream deltas — kept OUT (still absent in tree, not part of this card):
  *   - `max_context_window?: number` (syncUpstreamModels model info) -> absent in tree.
- *   - `credits?: OpenAICredits | null` + `export interface OpenAICredits` -> absent in tree.
- *   - `credits_cache_persisted?: boolean` on `OpenAIQuotaRefreshResult` -> absent in tree.
- *   Verdict for every item above: keep OURS, deferred to the wave that lands the upstream
- *   producer files (B11 git merge). Nothing in this list is a funds/numeric value, so the
- *   "retain our numbers" rule is not exercised here.
+ *
+ * The following were previously logged here as "upstream-only, kept OUT" but have since
+ * landed in this tree (backend producer + frontend consumer both present) and are NOW
+ * implemented in this file — removed from the "kept OUT" list so a future reader does not
+ * re-flag them as missing:
+ *   - `OpenAIReferralRefreshResult` / `OpenAIReferralSendResult` imported from
+ *     `@/types/openaiReferrals` (file present) — backend `routes/admin.go:723-724`.
+ *   - `OpenCodeGoUsageSettings` / `OpenCodeGoUsageState` + the 5 OpenCode Go usage wrappers
+ *     (`getOpenCodeGoUsage`, `setOpenCodeGoUsageAutoRefresh`, `refreshOpenCodeGoUsage`,
+ *     `getOpenCodeGoUsageSettings`, `updateOpenCodeGoUsageSettings`) — backend
+ *     `routes/admin.go:600-602,621-623`.
+ *   - `credits?: OpenAICredits | null` on `OpenAIQuotaUsage` + `export interface OpenAICredits`
+ *     and `credits_cache_persisted?: boolean` on `OpenAIQuotaRefreshResult` — backend
+ *     `service/openai_quota_service.go` / `handler/admin/openai_oauth_handler.go`.
  *
  * Guard placement: the flat-vs-nested contract CANNOT be asserted by a type-level sentinel
  * in the co-located spec — tsconfig.json excludes the __tests__ dirs and *.spec.ts files
@@ -385,22 +391,27 @@ export async function validateWebCredentials(
 /**
  * Result of refreshing account credentials.
  *
- * Backend contract (POST /admin/accounts/:id/refresh):
- * - success: a full Account object
- * - partial refresh (e.g. `missing_project_id_temporary`): `{ message, warning }`
- *   without the account payload
+ * Backend contract (POST /admin/accounts/:id/refresh) emits TWO shapes
+ * (verified `account_handler.go:1961-1989`):
+ * - success: a full Account object (flat)
+ * - partial refresh (`missing_project_id_temporary`): a nested object
+ *   `{ account, message?, warning? }`
  *
- * Extending `Account` keeps existing call sites that consume an
- * `Account` (e.g. `patchAccountInList`) type-compatible, while the optional
- * fields surface the upstream warning/message metadata. Values are returned
- * verbatim — no re-wrapping.
+ * The union keeps both wire shapes type-correct. `RefreshCredentialsPartial`
+ * carries the wrapped `account` plus the optional warning/message metadata;
+ * callers narrow on `'account' in result` to pick the branch. Values are
+ * returned verbatim — no re-wrapping.
  */
-export interface RefreshCredentialsResult extends Account {
+export interface RefreshCredentialsPartial {
+  /** Wrapped account returned by the partial-refresh (missing_project_id_temporary) branch */
+  account: Account
   /** Present when the refresh partially succeeded (e.g. `missing_project_id_temporary`) */
   warning?: string
   /** Human-readable detail accompanying `warning` */
   message?: string
 }
+
+export type RefreshCredentialsResult = Account | RefreshCredentialsPartial
 
 /**
  * Refresh account credentials
@@ -1085,6 +1096,19 @@ export interface OpenAIRateLimitResetCredits {
   credits?: OpenAIRateLimitResetCreditDetail[]
 }
 
+/**
+ * OpenAI credits snapshot.
+ *
+ * Backend contract: `backend/internal/service/openai_quota_service.go:85-89`.
+ * `Balance` is a nullable decimal string serialized by the upstream to preserve
+ * precision — it MUST stay `string | null` and never be coerced to `number`.
+ */
+export interface OpenAICredits {
+  has_credits: boolean
+  unlimited: boolean
+  balance: string | null
+}
+
 export interface OpenAIQuotaUsage {
   user_id?: string
   account_id?: string
@@ -1093,6 +1117,8 @@ export interface OpenAIQuotaUsage {
   rate_limit?: OpenAIRateLimit | null
   additional_rate_limits?: OpenAIAdditionalRateLimit[]
   rate_limit_reset_credits?: OpenAIRateLimitResetCredits | null
+  /** Backend `openai_quota_service.go:104`: `Credits *OpenAICredits` (omitempty). */
+  credits?: OpenAICredits | null
   fetched_at: number
 }
 
@@ -1123,6 +1149,9 @@ export interface OpenAIQuotaResetResult {
 /** Usage payload plus whether the reset-credit snapshot was persisted. */
 export interface OpenAIQuotaRefreshResult extends OpenAIQuotaUsage {
   cache_persisted: boolean
+  /** Backend `handler/admin/openai_oauth_handler.go:63`: `CreditsCachePersisted bool`
+   * (no omitempty, always returned; optional on the TS side to tolerate legacy snapshots). */
+  credits_cache_persisted?: boolean
 }
 
 /**
@@ -1364,6 +1393,116 @@ export async function setVisionCapabilityOverride(
   return data
 }
 
+// ==================== OpenCode Go usage ====================
+// Backend contract: `backend/internal/service/opencode_go_usage.go`.
+// RFC3339 timestamps (Go `time.Time`) are serialized as strings — they MUST be
+// typed `string`, never `number`. `omitempty` fields are mapped to optional props.
+
+/**
+ * OpenCode Go usage types (`OpenCodeGoUsageState` / `OpenCodeGoUsageSettings`) are
+ * imported from `@/types` (that module holds the field-level contract and is the type
+ * consumers expect). Backend source: `backend/internal/service/opencode_go_usage.go`.
+ * RFC3339 timestamps (`resets_at` / `fetched_at` / `last_attempt_at` / `next_refresh_at`)
+ * serialize as strings, never numbers.
+ */
+
+/**
+ * Get the OpenCode Go usage snapshot + auto-refresh state for an account.
+ * Backend: GET /admin/accounts/:id/opencode-go-usage
+ */
+export async function getOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsageState> {
+  const { data } = await apiClient.get<OpenCodeGoUsageState>(`/admin/accounts/${id}/opencode-go-usage`)
+  return data
+}
+
+/**
+ * Toggle OpenCode Go usage auto-refresh for an account.
+ * Backend: PUT /admin/accounts/:id/opencode-go-usage/auto-refresh
+ */
+export async function setOpenCodeGoUsageAutoRefresh(
+  id: number,
+  enabled: boolean,
+): Promise<OpenCodeGoUsageState> {
+  const { data } = await apiClient.put<OpenCodeGoUsageState>(
+    `/admin/accounts/${id}/opencode-go-usage/auto-refresh`,
+    { enabled },
+  )
+  return data
+}
+
+/**
+ * Trigger a one-off OpenCode Go usage refresh for an account.
+ * Backend: POST /admin/accounts/:id/opencode-go-usage/refresh
+ */
+export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsageState> {
+  const { data } = await apiClient.post<OpenCodeGoUsageState>(
+    `/admin/accounts/${id}/opencode-go-usage/refresh`,
+  )
+  return data
+}
+
+/**
+ * Get the global OpenCode Go usage settings.
+ * Backend: GET /admin/accounts/opencode-go-usage/settings
+ */
+export async function getOpenCodeGoUsageSettings(): Promise<OpenCodeGoUsageSettings> {
+  const { data } = await apiClient.get<OpenCodeGoUsageSettings>(
+    '/admin/accounts/opencode-go-usage/settings',
+  )
+  return data
+}
+
+/**
+ * Update the global OpenCode Go usage settings (write-then-read-back).
+ * Backend: PUT /admin/accounts/opencode-go-usage/settings
+ */
+export async function updateOpenCodeGoUsageSettings(
+  payload: OpenCodeGoUsageSettings,
+): Promise<OpenCodeGoUsageSettings> {
+  const { data } = await apiClient.put<OpenCodeGoUsageSettings>(
+    '/admin/accounts/opencode-go-usage/settings',
+    payload,
+  )
+  return data
+}
+
+// ==================== OpenAI referral (invite / refresh) ====================
+// Types `OpenAIReferralRefreshResult` / `OpenAIReferralSendResult` are imported from
+// `@/types/openaiReferrals`. Backend contract: `routes/admin.go:723-724`.
+
+/** Request body for `sendOpenAIReferralInvite` (backend `OpenAIReferralSendRequest`). */
+export interface OpenAIReferralSendRequest {
+  email: string
+  program_id: string
+  confirmed: boolean
+}
+
+/**
+ * Refresh the OpenAI referral eligibility snapshot for an account.
+ * Backend: POST /admin/openai/accounts/:id/referrals/refresh
+ */
+export async function refreshOpenAIReferrals(id: number): Promise<OpenAIReferralRefreshResult> {
+  const { data } = await apiClient.post<OpenAIReferralRefreshResult>(
+    `/admin/openai/accounts/${id}/referrals/refresh`,
+  )
+  return data
+}
+
+/**
+ * Send an OpenAI referral invite for an account.
+ * Backend: POST /admin/openai/accounts/:id/referrals/invite
+ */
+export async function sendOpenAIReferralInvite(
+  id: number,
+  req: OpenAIReferralSendRequest,
+): Promise<OpenAIReferralSendResult> {
+  const { data } = await apiClient.post<OpenAIReferralSendResult>(
+    `/admin/openai/accounts/${id}/referrals/invite`,
+    req,
+  )
+  return data
+}
+
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -1417,6 +1556,13 @@ export const accountsAPI = {
   revertProxyFallback,
   refreshOpenAIQuota,
   resetOpenAIQuota,
+  refreshOpenAIReferrals,
+  sendOpenAIReferralInvite,
+  getOpenCodeGoUsage,
+  setOpenCodeGoUsageAutoRefresh,
+  refreshOpenCodeGoUsage,
+  getOpenCodeGoUsageSettings,
+  updateOpenCodeGoUsageSettings,
   createSparkShadow,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,

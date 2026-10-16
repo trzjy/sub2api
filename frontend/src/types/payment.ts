@@ -77,6 +77,12 @@ export interface CheckoutInfoResponse {
   alipay_mobile_precreate_deep_link?: boolean
 }
 
+/** 充值优惠档位。后端档位 JSON 键：min_amount / bonus_percent */
+export interface RechargeBonusTier {
+  min_amount: number
+  bonus_percent: number
+}
+
 // ==================== Orders ====================
 
 export interface PaymentOrder {
