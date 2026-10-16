@@ -222,10 +222,12 @@ func TestProbeKeyQuotaHeadersAndSnapshot(t *testing.T) {
 
 	// 加密器替身：明文 passthrough。
 	enc := testEncryptor{}
-	// quota_keys 仓储替身：返回带加密 code 的 key + 两个账号。
+	// quota_keys 仓储替身：返回带加密 code 的 key + 归属该 key 的两个账号。
+	// 注意：fake 的 ListAccountsByQuotaKey 按 account.QuotaKeyID 过滤，
+	// 账号必须挂上 QuotaKeyID=42 才会被返回（QuotaKeyID 为 nil 一律过滤掉）。
 	repo := newFakeQuotaKeyRepo()
 	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST"}
-	// 夹具账号必须挂 QuotaKeyID=42：fakeQuotaKeyRepo.ListAccountsByQuotaKey 按
+// 夹具账号必须挂 QuotaKeyID=42：fakeQuotaKeyRepo.ListAccountsByQuotaKey 按
 	// QuotaKeyID 过滤（quota_key_service_test.go），不设置则写入数为 0。
 	qkID := int64(42)
 	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}, {ID: 101, QuotaKeyID: &qkID}}

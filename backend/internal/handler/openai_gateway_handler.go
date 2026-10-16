@@ -366,6 +366,11 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 // 平台(覆盖 OpenCode/Command Code/Cline),我方新增的 muse/other 未登记于该表,
 // 显式追加以保留我方语义。
 func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) bool {
+// 允许集取我方 domain 派生式（门一裁定：平台清单单一来源 internal/domain），
+	// 覆盖 domain.PlatformGatewayOpenAI 登记的全部平台——含上游硬编码枚举中的
+	// codebuddy（其账号走 OpenAI 兼容出站，且 allowOpenAICompatibleMessagesDispatch
+	// 已对其豁免）、opencode_go/command_code/cline 等；muse/other 未登记于该表，
+	// 按我方语义显式追加。
 	allowed := domain.PlatformIDsWhere(func(spec domain.PlatformSpec) bool {
 		return spec.Gateway == domain.PlatformGatewayOpenAI
 	})

@@ -159,8 +159,13 @@ func DetectModelPlatform(model string) (string, bool) {
 		strings.HasPrefix(normalized, "abab6"),
 		strings.HasPrefix(normalized, "abab7"):
 		return PlatformMiniMax, true
-	case normalized == "jev-latest" || strings.HasPrefix(normalized, "jev-"):
+case normalized == "jev-latest" || strings.HasPrefix(normalized, "jev-"):
 		return PlatformTypeSafe, true
+	case normalized == "space-bunny":
+		// CodeBuddy 的公开模型 ID 无平台词根前缀（不同于 anthropic-/gpt-/kimi- 等），
+		// 只能精确识别。刻意不用前缀通配，避免误吞未知模型；codebuddy 自身的
+		// hy3 / claude-fable 等模型不经本检测器（走归属层或显式路由）。
+		return PlatformCodeBuddy, true
 	default:
 		return "", false
 	}
@@ -214,7 +219,18 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 
 // isConcreteRequestPlatform：composite 目标平台白名单。平台归并后（PR-4）网页接入
 // 挂在官方平台 zhipu/deepseek/kimi 账号级 access_mode 上，web-* 不再是目标平台。
+//
+// 并集消解（合并上游 platformList 单一来源后）：门一裁定要求平台清单走
+// domain.IsConcretePlatform；但我方方案 composite-codebuddy-support-plan.md 已锁定
+// codebuddy 不得进入本白名单——它是归属层 isCompositeOwnableAccountPlatform 的推导
+// 基座，一旦纳入，codebuddy 账号配了 model_mapping 就会抢先 claim kimi-k3 等模型
+// （用户明确要求「codebuddy 账号不支持 kimi-k3」，kimi-k3 必须恒归 kimi 平台账号）。
+// 故在 domain 判定之上显式排除 codebuddy；codebuddy 仍走 DetectModelPlatform
+//（space-bunny 自动生效），只不经归属层。锁见 composite_other_ownership_test.go。
 func isConcreteRequestPlatform(platform string) bool {
+	if platform == PlatformCodeBuddy {
+		return false
+	}
 	return domain.IsConcretePlatform(platform)
 }
 

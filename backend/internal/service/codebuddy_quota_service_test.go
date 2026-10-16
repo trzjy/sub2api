@@ -119,8 +119,10 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	require.Equal(t, 0.0, result.UsedPercent, "抓包中两个资源包 CapacityUsed 均为 0")
 	require.Equal(t, 2000.0, result.TotalCredit, "500 + 1500")
 	require.Equal(t, 0.0, result.UsedCredit)
-	// 最晚 CycleEndTime = 2026-10-13 07:46:09 (UTC+8) → 2026-10-12T23:46:09Z
-	require.Equal(t, "2026-10-12T23:46:09Z", result.ResetAt)
+	// 最晚 CycleEndTime = 2099-10-13 07:46:09 (UTC+8) → 2099-10-12T23:46:09Z。
+	// fixture 时间取遥远未来：deriveResetAtFromPackages 只认"未来的最晚值"，
+	// 写死2026 年近端值会随日历推移变成过期值并静默回退默认窗口（曾发生）。
+	require.Equal(t, "2099-10-12T23:46:09Z", result.ResetAt)
 
 	// Card B 唯一条件更新写口：成功快照通过 WriteCodeBuddyCreditSnapshot 落库。
 	require.Equal(t, 1, repo.nextVerCalls, "抓取开始必须取一次 attempt_version")
@@ -130,7 +132,7 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 	require.Len(t, write.Packages, 2, "两个分包都应进入快照")
 	require.Equal(t, 0.0, write.UsedPercent)
 	require.False(t, write.SuccessTime.IsZero(), "成功时刻必须采样")
-	require.Equal(t, "2026-10-12T23:46:09Z", write.ResetAt.UTC().Format(time.RFC3339))
+	require.Equal(t, "2099-10-12T23:46:09Z", write.ResetAt.UTC().Format(time.RFC3339))
 	require.Empty(t, write.ErrorMsg, "无解析错误时应清旧错误")
 	// 旧 UpdateExtra 写口零调用（写路径全量切换，禁双写口）。
 	require.Equal(t, 0, repo.updateExtra, "快照不得再走旧 UpdateExtra 写口")
@@ -140,8 +142,8 @@ func TestCodeBuddyQuotaService_QueryUsageParsesRealBillingSchema(t *testing.T) {
 // 的聚合口径（sum(used)/sum(size)）与最晚 CycleEndTime 取值为重置时间。
 func TestParseCodeBuddyCreditUsage_ComputesPercentFromCapacityCounters(t *testing.T) {
 	body := []byte(`{"code":0,"data":{"Response":{"Data":{"TotalCount":2,"TotalDosage":2000,"Accounts":[
-		{"AccountId":1,"CapacitySize":500,"CapacityUsed":100,"CapacityRemain":400,"CycleEndTime":"2026-09-30 23:59:59","Status":0},
-		{"AccountId":2,"CapacitySize":1500,"CapacityUsed":300,"CapacityRemain":1200,"CycleEndTime":"2026-10-13 07:46:09","Status":0}
+		{"AccountId":1,"CapacitySize":500,"CapacityUsed":100,"CapacityRemain":400,"CycleEndTime":"2099-09-30 23:59:59","Status":0},
+		{"AccountId":2,"CapacitySize":1500,"CapacityUsed":300,"CapacityRemain":1200,"CycleEndTime":"2099-10-13 07:46:09","Status":0}
 	]}}}}`)
 
 	usage, ok := parseCodeBuddyCreditUsage(body, "unmatched-uid")
@@ -151,7 +153,7 @@ func TestParseCodeBuddyCreditUsage_ComputesPercentFromCapacityCounters(t *testin
 	require.InDelta(t, 20.0, usage.UsedPercent, 1e-9)
 	require.True(t, usage.HasResetAt)
 	// 取最晚的未来周期结束时间（聚合用量需全部资源包滚动后才归零）。
-	require.Equal(t, "2026-10-12T23:46:09Z", usage.ResetAt.UTC().Format(time.RFC3339))
+	require.Equal(t, "2099-10-12T23:46:09Z", usage.ResetAt.UTC().Format(time.RFC3339))
 }
 
 // TestParseCodeBuddyCreditUsage_PreciseStringFallback 验证整型计数器缺失时回退到

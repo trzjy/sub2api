@@ -2102,6 +2102,11 @@ func TestIsPlatformPricingMatch(t *testing.T) {
 		{"composite matches kimi pricing", PlatformComposite, PlatformKimi, true},
 		{"composite matches zhipu pricing", PlatformComposite, PlatformZhipu, true},
 		{"composite matches deepseek pricing", PlatformComposite, PlatformDeepseek, true},
+		// composite 必须匹配 codebuddy 定价：space-bunny 经检测器解析到 codebuddy 后
+		// 在 composite 分组计费，而 matchingPlatforms(composite) 早已含 codebuddy。
+		// 若此处不放行，会出现「查得到映射、查不到定价」的不一致（定价静默落空）。
+		{"composite matches codebuddy pricing", PlatformComposite, PlatformCodeBuddy, true},
+		{"codebuddy group does NOT match composite pricing", PlatformCodeBuddy, PlatformComposite, false},
 		{"empty string matches nothing", "", PlatformAnthropic, false},
 		{"empty string matches empty", "", "", true},
 	}

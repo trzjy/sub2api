@@ -1340,8 +1340,12 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	// 平台清单以 domain SSOT 派生（含上游新增平台与 B2 登记的我方 codebuddy/muse，
 	// 权威表第 5 条）；网页接入账号无静态模型目录：模型列表来自账号 model_mapping
 	//（defaultModelIDsForPlatform 对官方平台返回 nil/CN 分支），与 other 同语义。
-	// other 刻意不在 domain 清单内，按我方语义显式追加：composite 聚合须暴露 other
-	// 账号 model_mapping 键（随卡测试 TestCompositeAvailableModelsIncludesOtherMappingExcludesUnknown）。
+// 平台枚举并集（重基消解）：我方 domain.CompositePrecedencePlatformIDs()（门一裁定=
+	// 平台清单单一来源 internal/domain）+ 显式追加 other（other 刻意不在 domain 清单内，
+	// 按我方语义 composite 聚合须暴露 other 账号 model_mapping 键，随卡测试
+	// TestCompositeAvailableModelsIncludesOtherMappingExcludesUnknown）；typesafe 按
+	// includeSystemOne 开关过滤。上游硬编码枚举并入的后果是 codebuddy/muse 被漏，
+	// 故取我方派生式为准（并集语义在 domain 清单内已覆盖上游全部平台）。
 	platforms := domain.CompositePrecedencePlatformIDs()
 	platforms = append(platforms, service.PlatformOther)
 	for _, platform := range platforms {

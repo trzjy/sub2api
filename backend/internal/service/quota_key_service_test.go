@@ -200,6 +200,24 @@ func (f *fakeQuotaKeyRepo) ListAccountsByQuotaKey(_ context.Context, quotaKeyID 
 	return out, nil
 }
 
+// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次遍历 → 内存按 key 过滤），
+// 与真实仓储的 QuotaKeyIDIn 单查询语义对齐，杜绝逐激活码查询的 N+1。
+func (f *fakeQuotaKeyRepo) ListAccountsByQuotaKeys(_ context.Context, ids []int64) ([]*ent.Account, error) {
+	var out []*ent.Account
+	for _, a := range f.accounts {
+		if a.QuotaKeyID == nil {
+			continue
+		}
+		for _, id := range ids {
+			if *a.QuotaKeyID == id {
+				out = append(out, a)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // errQuotaKeyNotFound 是测试替身的哨兵错误。
 var errQuotaKeyNotFound = &quotaKeyNotFoundError{}
 
@@ -575,6 +593,16 @@ func (r *testDBRepo) UpdateMeta(ctx context.Context, id int64, expiresAt **time.
 
 func (r *testDBRepo) ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error) {
 	return r.client.Account.Query().Where(account.QuotaKeyID(quotaKeyID)).All(ctx)
+}
+
+// ListAccountsByQuotaKeys 是 QuotaKeyRepository 新增方法的真实 DB 替身：一次
+// QuotaKeyIDIn 查询返回归属给定激活码的账号（软删由 SoftDeleteMixin 过滤），
+// 与 production repository 同语义，供 List 端点批量聚合计数。
+func (r *testDBRepo) ListAccountsByQuotaKeys(ctx context.Context, ids []int64) ([]*ent.Account, error) {
+	if len(ids) == 0 {
+		return []*ent.Account{}, nil
+	}
+	return r.client.Account.Query().Where(account.QuotaKeyIDIn(ids...)).All(ctx)
 }
 
 // TestQuotaKeyPull_Error_SetsExhaustedCAS：任意上游错误 → exhausted=true（CAS 写），

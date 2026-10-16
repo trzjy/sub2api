@@ -42,6 +42,10 @@ type QuotaKeyRepository interface {
 	List(ctx context.Context) ([]*ent.QuotaKey, error)
 	UpdateMeta(ctx context.Context, id int64, expiresAt **time.Time, notes **string) error
 	ListAccountsByQuotaKey(ctx context.Context, quotaKeyID int64) ([]*ent.Account, error)
+	// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次 QuotaKeyIDIn 查询），
+	// 供 List 端点按 quota_key_id 分组聚合计数，避免逐激活码查询退化为 N+1。
+	// SoftDeleteMixin 已自动过滤软删账号；仅读取，不改写 accounts。
+	ListAccountsByQuotaKeys(ctx context.Context, ids []int64) ([]*ent.Account, error)
 	// C3.2 扩展：账号软删编排与刷新扫描（均在调用方已开启的事务内执行，除 ListEligibleForRefresh）。
 	// 注：working 计数（§3.2 谓词）已收敛到集中强制入口内的 countWorkingQuotaKeyAccounts
 	// （D-CURSOR-034），不再是本契约的方法——计数口径只此一处，写入路径无处可自带谓词。
@@ -312,6 +316,65 @@ func (s *QuotaKeyService) GetWithAccounts(ctx context.Context, id int64) (*Quota
 		return nil, nil, err
 	}
 	return quotaKeyToStatus(qk), accounts, nil
+}
+
+// QuotaKeyAccountCounts 是某激活码下的账号计数（与详情端点 Get 的计数口径一致）。
+type QuotaKeyAccountCounts struct {
+	AccountCount int64
+	WorkingCount int64
+}
+
+// countQuotaKeyAccountStats 对一批账号按"详情端点 Get 的计数口径"聚合：
+// 未软删（DeletedAt == nil）计入 AccountCount；其中 Schedulable==true 且 Status=="active"
+// 计入 WorkingCount。这是全仓唯一的账户计数口径实现：详情端点 Get（经导出封装
+// CountQuotaKeyAccountStats）与 List 批量计数（经 CountAccountsByQuotaKeys）都收敛于此，
+// 不得出现第二种口径。
+func countQuotaKeyAccountStats(accounts []*ent.Account) (accountCount, workingCount int64) {
+	for _, acc := range accounts {
+		if acc.DeletedAt == nil {
+			accountCount++
+			if acc.Schedulable && acc.Status == "active" {
+				workingCount++
+			}
+		}
+	}
+	return accountCount, workingCount
+}
+
+// CountQuotaKeyAccountStats 是 countQuotaKeyAccountStats 的导出薄封装，供 handler 详情
+// 端点 Get 复用同一处计数口径（与 List 的批量计数同源）。纯内存计算，无副作用：
+// 仅做"未软删 + working 谓词"投影，使该谓词在生产代码中只有一份实现。
+func CountQuotaKeyAccountStats(accounts []*ent.Account) (accountCount, workingCount int64) {
+	return countQuotaKeyAccountStats(accounts)
+}
+
+// CountAccountsByQuotaKeys 批量统计各激活码下的账号数（一次查询，按 quota_key_id 分组）。
+//
+// 计数口径见 countQuotaKeyAccountStats，与详情端点 Get 逐字一致。查询次数与激活码数量
+// 无关（常数次：一次 repo 批量查询 + 内存分组），严守 List 既有的"杜绝 N+1"承诺
+// （respondQuotaKeySummaries 注释：与页数、条目数无关的常数次查询）。
+func (s *QuotaKeyService) CountAccountsByQuotaKeys(ctx context.Context, ids []int64) (map[int64]QuotaKeyAccountCounts, error) {
+	if len(ids) == 0 {
+		return map[int64]QuotaKeyAccountCounts{}, nil
+	}
+	// 一次查询取全部归属账号，再按 quota_key_id 分组聚合：避免按激活码逐个查询的 N+1。
+	accounts, err := s.repo.ListAccountsByQuotaKeys(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	grouped := make(map[int64][]*ent.Account, len(ids))
+	for _, acc := range accounts {
+		if acc.QuotaKeyID == nil {
+			continue
+		}
+		grouped[*acc.QuotaKeyID] = append(grouped[*acc.QuotaKeyID], acc)
+	}
+	out := make(map[int64]QuotaKeyAccountCounts, len(ids))
+	for _, id := range ids {
+		ac, wc := countQuotaKeyAccountStats(grouped[id])
+		out[id] = QuotaKeyAccountCounts{AccountCount: ac, WorkingCount: wc}
+	}
+	return out, nil
 }
 
 // ErrQuotaKeyNotActive 表示激活码存在但已非 active（禁用/过期），不再承载任何账号写入。

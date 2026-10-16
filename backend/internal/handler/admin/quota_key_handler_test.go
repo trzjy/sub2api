@@ -41,18 +41,19 @@ const testQuotaKeyPlain = "sk-antigravity-secret-1234"
 // ---------------------------------------------------------------------------
 
 type fakeQuotaKeyRepo struct {
-	mu        sync.Mutex
-	keys      map[int64]*ent.QuotaKey
-	nextID    int64
-	accounts  map[int64][]*ent.Account
-	listCalls int
-	listErr   error
-	getErr    error
-	createErr error
-	updateErr error
-	deleted   []int64
-	softKey   []int64
-	outboxed  []int64
+	mu                         sync.Mutex
+	keys                       map[int64]*ent.QuotaKey
+	nextID                     int64
+	accounts                   map[int64][]*ent.Account
+	listCalls                  int
+	listErr                    error
+	listAccountsByQuotaKeysErr error
+	getErr                     error
+	createErr                  error
+	updateErr                  error
+	deleted                    []int64
+	softKey                    []int64
+	outboxed                   []int64
 }
 
 func newFakeQuotaKeyRepo() *fakeQuotaKeyRepo {
@@ -214,6 +215,21 @@ func (r *fakeQuotaKeyRepo) ListAccountsByQuotaKey(_ context.Context, quotaKeyID 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]*ent.Account{}, r.accounts[quotaKeyID]...), nil
+}
+
+// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次查询 → 内存按 key 收集），
+// 与真实仓储的 QuotaKeyIDIn 单查询语义对齐，供 List 端点聚合计数、杜绝 N+1。
+func (r *fakeQuotaKeyRepo) ListAccountsByQuotaKeys(_ context.Context, ids []int64) ([]*ent.Account, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.listAccountsByQuotaKeysErr != nil {
+		return nil, r.listAccountsByQuotaKeysErr
+	}
+	out := make([]*ent.Account, 0)
+	for _, id := range ids {
+		out = append(out, r.accounts[id]...)
+	}
+	return out, nil
 }
 
 func (r *fakeQuotaKeyRepo) CountWorkingAccounts(_ context.Context, _ *ent.Tx, quotaKeyID int64) (int, error) {
@@ -389,6 +405,94 @@ func TestQuotaKeyHandler_List_ServiceError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// TestQuotaKeyHandler_List_AccountCounts 覆盖列表端点的计数回填（QKD-03 a/b/c）：
+//
+//	a) items[].account_count / working_count 值正确（夹具：3 条未软删，其中 1 条
+//	   Schedulable=true+active → 3 / 1）；
+//	b) 软删账号（DeletedAt != nil）不计入两个计数（夹具含 1 条软删，仍为 3 / 1）；
+//	c) 顶层 quota_key_summaries 中同一激活码的计数与 items 中一致。
+func TestQuotaKeyHandler_List_AccountCounts(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.seed(21, "1111", "active", false)
+	repo.seed(22, "2222", "expired", true)
+	deletedAt := time.Now().UTC()
+	keyID := int64(21)
+	repo.accounts[21] = []*ent.Account{
+		// 未软删 + 可调度 + active → 计入 account_count 与 working_count。
+		{ID: 1, QuotaKeyID: &keyID, Status: service.StatusActive, Schedulable: true, DeletedAt: nil},
+		// 未软删 + 不可调度 → 仅计入 account_count。
+		{ID: 2, QuotaKeyID: &keyID, Status: service.StatusActive, Schedulable: false, DeletedAt: nil},
+		// 未软删 + 可调度但 status != active → 仅计入 account_count。
+		{ID: 3, QuotaKeyID: &keyID, Status: "disabled", Schedulable: true, DeletedAt: nil},
+		// 已软删 + 可调度 + active → 两个计数均不计入。
+		{ID: 4, QuotaKeyID: &keyID, Status: service.StatusActive, Schedulable: true, DeletedAt: &deletedAt},
+	}
+	// key 22 无归属账号 → 计数为 0（omitempty，JSON 中省略）。
+	router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/quota_keys", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	requireNoPlaintext(t, rec.Body.String())
+
+	type quotaKeyCounts struct {
+		ID           int64  `json:"id"`
+		CodeMasked   string `json:"code_masked"`
+		AccountCount int64  `json:"account_count"`
+		WorkingCount int64  `json:"working_count"`
+	}
+	var payload struct {
+		Data struct {
+			Items             []quotaKeyCounts `json:"items"`
+			QuotaKeySummaries []quotaKeyCounts `json:"quota_key_summaries"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+
+	countsByID := make(map[int64]quotaKeyCounts, len(payload.Data.Items))
+	for _, item := range payload.Data.Items {
+		countsByID[item.ID] = item
+	}
+	require.Len(t, payload.Data.Items, 2)
+
+	// a) + b)：3 条未软删（1 条 working），软删那条不计入。
+	item21, ok := countsByID[21]
+	require.True(t, ok, "列表 items 必须包含激活码 21")
+	require.Equal(t, int64(3), item21.AccountCount, "3 条未软删账号，软删那条不计入")
+	require.Equal(t, int64(1), item21.WorkingCount, "仅 1 条 Schedulable=true+active")
+	item22, ok := countsByID[22]
+	require.True(t, ok, "列表 items 必须包含激活码 22")
+	require.Equal(t, int64(0), item22.AccountCount)
+	require.Equal(t, int64(0), item22.WorkingCount)
+
+	// 列表响应体里必须出现非零计数（证明不再恒 0）。
+	require.Contains(t, rec.Body.String(), `"account_count":3`)
+	require.Contains(t, rec.Body.String(), `"working_count":1`)
+
+	// c)：顶层汇总与 items 同源，同一激活码计数一致。
+	require.Len(t, payload.Data.QuotaKeySummaries, 2)
+	summariesByID := make(map[int64]quotaKeyCounts, len(payload.Data.QuotaKeySummaries))
+	for _, s := range payload.Data.QuotaKeySummaries {
+		summariesByID[s.ID] = s
+	}
+	require.Equal(t, item21.AccountCount, summariesByID[21].AccountCount, "汇总与 items 的 account_count 必须一致")
+	require.Equal(t, item21.WorkingCount, summariesByID[21].WorkingCount, "汇总与 items 的 working_count 必须一致")
+	require.Equal(t, item22.AccountCount, summariesByID[22].AccountCount)
+	require.Equal(t, item22.WorkingCount, summariesByID[22].WorkingCount)
+}
+
+// TestQuotaKeyHandler_List_CountsError 计数查询失败必须按既有错误路径返回，
+// 不得吞错填 0（禁兜底条款）：repo.List 成功但批量计数查询报错 → 500。
+func TestQuotaKeyHandler_List_CountsError(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.seed(31, "3333", "active", false)
+	repo.listAccountsByQuotaKeysErr = errors.New("counts boom")
+	router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/quota_keys", "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotContains(t, rec.Body.String(), `"account_count"`, "计数失败不得输出 0 蒙混")
+}
+
 // ---------------------------------------------------------------------------
 // 端点 2：POST /quota_keys
 // ---------------------------------------------------------------------------
@@ -442,10 +546,18 @@ func TestQuotaKeyHandler_Get_Success_AccountPaging(t *testing.T) {
 	repo := newFakeQuotaKeyRepo()
 	repo.seed(7, "1234", "active", false)
 	for i := 1; i <= 3; i++ {
-		repo.accounts[7] = append(repo.accounts[7], &ent.Account{
+		// DeletedAt: nil 显式声明——未软删，应计入 account_count。
+		// Schedulable 交错分布：i=1 可调度、i=2/i=3 不可调度，
+		// 使 working_count 期望值可断言且可区分（预期 = 1）。
+		acc := &ent.Account{
 			ID: int64(100 + i), Name: "cursor-acc", Platform: "cursor", Type: "apikey",
 			Status: service.StatusActive, CreatedAt: time.Now().UTC(),
-		})
+			DeletedAt: nil,
+		}
+		if i == 1 {
+			acc.Schedulable = true
+		}
+		repo.accounts[7] = append(repo.accounts[7], acc)
 	}
 	router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
 
@@ -455,13 +567,15 @@ func TestQuotaKeyHandler_Get_Success_AccountPaging(t *testing.T) {
 
 	var payload struct {
 		Data struct {
-			ID         int64  `json:"id"`
-			CodeMasked string `json:"code_masked"`
-			Status     string `json:"status"`
-			Total      int64  `json:"total"`
-			Page       int    `json:"page"`
-			PageSize   int    `json:"page_size"`
-			Accounts   []struct {
+			ID           int64  `json:"id"`
+			CodeMasked   string `json:"code_masked"`
+			Status       string `json:"status"`
+			Total        int64  `json:"total"`
+			Page         int    `json:"page"`
+			PageSize     int    `json:"page_size"`
+			AccountCount int64  `json:"account_count"`
+			WorkingCount int64  `json:"working_count"`
+			Accounts     []struct {
 				ID       int64  `json:"id"`
 				Platform string `json:"platform"`
 			} `json:"accounts"`
@@ -475,12 +589,56 @@ func TestQuotaKeyHandler_Get_Success_AccountPaging(t *testing.T) {
 	require.Equal(t, 1, payload.Data.Page)
 	require.Equal(t, 2, payload.Data.PageSize)
 	require.Len(t, payload.Data.Accounts, 2, "第一页按 page_size 截断")
+	require.Equal(t, int64(3), payload.Data.AccountCount, "3 条夹具账号均未软删，account_count=3")
+	require.Equal(t, int64(1), payload.Data.WorkingCount, "仅 1 条 Schedulable=true+active，working_count=1")
 	require.Nil(t, payload.Data.Credentials, "详情不应回放账号凭据")
 
 	// 第二页取剩余 1 条
 	rec2 := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/quota_keys/7?page=2&page_size=2", "")
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &payload))
 	require.Len(t, payload.Data.Accounts, 1)
+}
+
+// TestQuotaKeyHandler_Get_SkipsSoftDeletedAccounts 是 QKD-01 的回归护栏：
+// 详情计数循环必须跳过 DeletedAt != nil 的软删账号，且对 DeletedAt 的任何
+// 取值（含 nil）都不能 panic。夹具含 1 条未软删 + 1 条已软删，
+// 断言 account_count 只计未软删那条、且响应 200。
+func TestQuotaKeyHandler_Get_SkipsSoftDeletedAccounts(t *testing.T) {
+	repo := newFakeQuotaKeyRepo()
+	repo.seed(8, "1234", "active", false)
+	deletedAt := time.Now().UTC()
+	repo.accounts[8] = []*ent.Account{
+		{
+			ID: int64(200), Name: "alive", Platform: "cursor", Type: "apikey",
+			Status: service.StatusActive, Schedulable: true,
+			CreatedAt: time.Now().UTC(), DeletedAt: nil,
+		},
+		{
+			ID: int64(201), Name: "ghost", Platform: "cursor", Type: "apikey",
+			Status: service.StatusActive, Schedulable: true,
+			CreatedAt: time.Now().UTC(), DeletedAt: &deletedAt,
+		},
+	}
+	router := setupQuotaKeyRouter(newQuotaKeyService(repo, nil), nil)
+
+	rec := doQuotaKeyJSON(router, http.MethodGet, "/api/v1/admin/quota_keys/8?page=1&page_size=10", "")
+	require.Equal(t, http.StatusOK, rec.Code, "软删账号不得触发 panic / 500")
+
+	var payload struct {
+		Data struct {
+			Total        int64 `json:"total"`
+			AccountCount int64 `json:"account_count"`
+			WorkingCount int64 `json:"working_count"`
+			Accounts     []struct {
+				ID int64 `json:"id"`
+			} `json:"accounts"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, int64(2), payload.Data.Total, "分页基于全部账号（含软删）")
+	require.Equal(t, int64(1), payload.Data.AccountCount, "account_count 只计未软删那条")
+	require.Equal(t, int64(1), payload.Data.WorkingCount, "working_count 同理排除软删账号")
+	require.Len(t, payload.Data.Accounts, 2)
 }
 
 func TestQuotaKeyHandler_Get_InvalidID(t *testing.T) {

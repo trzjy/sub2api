@@ -28,6 +28,68 @@ func TestIsCompositeOwnableAccountPlatformEqualsConcreteUnionOther(t *testing.T)
 	}
 }
 
+// TestCodeBuddyStaysOutOfCompositeOwnership 锁定方案
+// composite-codebuddy-support-plan.md 的核心安全边界：codebuddy 走 DetectModelPlatform
+// （space-bunny 自动生效），但绝不能进入归属层。
+//
+// 为什么必须钉死：归属层只认显式 model_mapping，且先于检测器执行
+// （composite_route_resolver.go 归属层早于检测器）。若 codebuddy 变为 ownable，
+// 配了 model_mapping 的 codebuddy 账号会抢先 claim 模型——用户明确要求
+// 「codebuddy 账号不支持 kimi-k3」，kimi-k3 必须恒归 kimi 平台账号。
+// 本用例同时锁 isConcreteRequestPlatform 不含 codebuddy（它是 ownable 的推导基座）。
+func TestCodeBuddyStaysOutOfCompositeOwnership(t *testing.T) {
+	require.False(t, isConcreteRequestPlatform(PlatformCodeBuddy),
+		"codebuddy 不得进入具体平台白名单：它是归属层 isCompositeOwnableAccountPlatform 的推导基座")
+	require.False(t, isCompositeOwnableAccountPlatform(PlatformCodeBuddy),
+		"归属层必须不含 codebuddy，否则 codebuddy 账号可抢先 claim kimi-k3 等模型")
+
+	// 端到端反证：codebuddy 账号即使显式映射 kimi-k3，也不得产生归属，
+	// kimi-k3 必须由检测器判给 kimi 平台（结构上 Ambiguous 不可达）。
+	groupID := int64(94)
+	repo := &compositeOwnershipAccountRepo{
+		accounts: []Account{
+			{
+				ID:       1,
+				Platform: PlatformCodeBuddy,
+				Credentials: map[string]any{
+					"model_mapping": map[string]any{"kimi-k3": "kimi-k3"},
+				},
+			},
+		},
+	}
+	svc := &GatewayService{accountRepo: repo}
+
+	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "kimi-k3")
+	require.NoError(t, err)
+	require.Equal(t, CompositeModelOwnership{}, ownership, "codebuddy 账号不得 claim kimi-k3")
+
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(svc.resolveCompositeModelOwnership)
+	decision, err := resolver.Resolve(context.Background(), groupID, "kimi-k3", CompositeRouteEndpointResponses)
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, CompositeRouteSourceDetector, decision.Source, "kimi-k3 必须由检测器判定")
+	require.Equal(t, PlatformKimi, decision.TargetPlatform, "kimi-k3 恒归 kimi，不得被 codebuddy 抢走")
+}
+
+// TestDetectModelPlatformSpaceBunnyResolvesCodeBuddyTarget 覆盖 space-bunny 的端到端
+// 解析：composite 分组经三级解析（显式路由 → 归属 → 检测器）落到 codebuddy 目标，
+// 无需手工建显式路由（用户裁定 1）。
+func TestDetectModelPlatformSpaceBunnyResolvesCodeBuddyTarget(t *testing.T) {
+	groupID := int64(94)
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), groupID, "space-bunny", CompositeRouteEndpointResponses)
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, CompositeRouteSourceDetector, decision.Source)
+	require.Equal(t, PlatformCodeBuddy, decision.TargetPlatform)
+	require.Equal(t, "space-bunny", decision.UpstreamModel)
+}
+
 // --- 验收口径①：other + 显式映射账号经归属层放行、盖章平台=other、UpstreamModel 传播正确 ---
 
 func TestCompositeOwnershipAdmitsOtherPlatformExplicitMapping(t *testing.T) {

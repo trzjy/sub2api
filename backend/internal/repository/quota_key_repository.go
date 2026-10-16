@@ -269,3 +269,15 @@ func (r *quotaKeyRepository) ListAccountsByQuotaKey(ctx context.Context, quotaKe
 		Where(account.QuotaKeyID(quotaKeyID)).
 		All(ctx)
 }
+
+// ListAccountsByQuotaKeys 批量返回归属给定激活码的账号（一次 QuotaKeyIDIn 查询），
+// SoftDeleteMixin 已自动过滤软删账号。供 List 端点按 quota_key_id 分组聚合计数，
+// 避免逐激活码查询退化为 N+1。仅读取，不改写 accounts。
+func (r *quotaKeyRepository) ListAccountsByQuotaKeys(ctx context.Context, ids []int64) ([]*ent.Account, error) {
+	if len(ids) == 0 {
+		return []*ent.Account{}, nil
+	}
+	return r.client.Account.Query().
+		Where(account.QuotaKeyIDIn(ids...)).
+		All(ctx)
+}

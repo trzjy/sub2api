@@ -70,6 +70,10 @@ func respondQuotaKeySummaries(c *gin.Context, items any, total int64, page, page
 }
 
 // maskedQuotaKey 把 service 层脱敏状态投影成只含安全子集的展示对象（绝不含原文）。
+//
+// 纯投影：不接收计数、也不查询数据。计数由调用方（List）在拿到服务层口径的聚合结果后
+// 覆盖到返回对象上，故 Create / Update 等复用点行为不变（其计数保持零值，omitempty 下
+// JSON 形态与接入计数前完全一致）。
 func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 	return dto.QuotaKey{
 		ID:         st.ID,
@@ -79,18 +83,39 @@ func maskedQuotaKey(st *service.QuotaKeyStatus) dto.QuotaKey {
 	}
 }
 
-// List 列出全部激活码（仅 code_masked，绝不返原文）。
+// List 列出全部激活码（仅 code_masked，绝不返原文），并回填每个激活码的账号计数
+// （account_count / working_count）。
 // GET /api/v1/admin/quota_keys
+//
+// 计数走 service.CountAccountsByQuotaKeys（一次批量查询 + 内存分组），与详情端点 Get
+// 同源同谓词（未软删 DeletedAt==nil；working = Schedulable && Status=="active"），
+// 不在此处另写一份计数循环，也杜绝逐激活码查询的 N+1。
 func (h *QuotaKeyHandler) List(c *gin.Context) {
 	statuses, err := h.svc.List(c.Request.Context())
 	if err != nil {
 		respondQuotaKeyError(c, err)
 		return
 	}
+	ids := make([]int64, 0, len(statuses))
+	for _, st := range statuses {
+		ids = append(ids, st.ID)
+	}
+	// 计数查询失败按既有错误路径返回，绝不吞错填 0（禁兜底条款）。
+	counts, err := h.svc.CountAccountsByQuotaKeys(c.Request.Context(), ids)
+	if err != nil {
+		respondQuotaKeyError(c, err)
+		return
+	}
 	items := make([]dto.QuotaKey, 0, len(statuses))
 	for _, st := range statuses {
-		items = append(items, maskedQuotaKey(st))
+		item := maskedQuotaKey(st)
+		// service 保证对每个入参 id 都给出一个条目；直接取用即 service 口径，不设零值兜底分支。
+		cnt := counts[st.ID]
+		item.AccountCount = cnt.AccountCount
+		item.WorkingCount = cnt.WorkingCount
+		items = append(items, item)
 	}
+	// items 与 quota_key_summaries 传的是同一切片，天然同批对象、计数一致。
 	respondQuotaKeySummaries(c, items, int64(len(items)), 1, len(items), items)
 }
 
@@ -180,15 +205,8 @@ func (h *QuotaKeyHandler) Get(c *gin.Context) {
 			CreatedAt: acc.CreatedAt,
 		})
 	}
-	accountCount, workingCount := int64(0), int64(0)
-	for _, acc := range accounts {
-		if acc.DeletedAt.IsZero() {
-			accountCount++
-			if acc.Schedulable && acc.Status == "active" {
-				workingCount++
-			}
-		}
-	}
+	// 计数口径收敛到 service helper（未软删 + working 谓词），此处不再自持第二份循环。
+	accountCount, workingCount := service.CountQuotaKeyAccountStats(accounts)
 	response.Success(c, quotaKeyDetailResponse{
 		QuotaKeyStatus: status,
 		AccountCount:   accountCount,
