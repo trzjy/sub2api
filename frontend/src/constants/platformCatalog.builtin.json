@@ -290,6 +290,12 @@
       "display_name": "Muse",
       "gateway": "openai",
       "cn_provider": false
+    },
+    {
+      "id": "cursor",
+      "display_name": "Cursor",
+      "gateway": "openai",
+      "cn_provider": false
     }
   ],
   "composite_precedence": [
@@ -307,6 +313,7 @@
     "command_code",
     "cline",
     "codebuddy",
-    "muse"
+    "muse",
+    "cursor"
   ]
 }

@@ -2205,7 +2205,7 @@ func TestForwardAsAnthropic_MissingTerminalAfterOutputRecordsOpsWithoutFailover(
 
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.1")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "missing terminal event")
+	require.ErrorIs(t, err, ErrOpenAIUpstreamStreamTruncated)
 	var failoverErr *UpstreamFailoverError
 	require.False(t, errors.As(err, &failoverErr), "partial output must not be replayed through failover")
 	require.NotNil(t, result)
@@ -2217,7 +2217,7 @@ func TestForwardAsAnthropic_MissingTerminalAfterOutputRecordsOpsWithoutFailover(
 	events := openAICompatOpsEvents(t, c)
 	require.Len(t, events, 1)
 	require.Equal(t, "stream_missing_terminal", events[0].Kind)
-	require.Equal(t, http.StatusBadGateway, events[0].UpstreamStatusCode)
+	require.Equal(t, http.StatusOK, events[0].UpstreamStatusCode)
 	require.Equal(t, int64(1), events[0].AccountID)
 	require.Equal(t, "rid_partial_missing_terminal", events[0].UpstreamRequestID)
 	require.Contains(t, events[0].Message, "terminal event")
