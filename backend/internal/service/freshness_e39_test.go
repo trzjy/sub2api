@@ -112,7 +112,7 @@ func TestRecoveryProbe_ChannelFreshnessOnRecover(t *testing.T) {
 	// PRC-02：首次探测成功即走清除路径；渠道收敛挂在清除轮，故整段恰触发 1 次。
 	p.probeAccount(context.Background(), shadow, 10)
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "E39：探测恢复必须清停调")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "E39：探测恢复必须清停调")
 	require.Equal(t, []int64{130}, refresher.calls, "E39：恢复成功后触发渠道收敛")
 }
 
@@ -134,7 +134,7 @@ func TestRecoveryProbe_ChannelFreshnessFailureKeepsRecovery(t *testing.T) {
 	// PRC-02：首次探测成功即达清除，清除轮的渠道收敛返回错误不得回滚恢复结论。
 	p.probeAccount(context.Background(), shadow, 10)
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "E39：收敛失败不得改写恢复成功结论")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "E39：收敛失败不得改写恢复成功结论")
 	require.Equal(t, []int64{130}, refresher.calls)
 }
 
@@ -213,9 +213,9 @@ func TestBalanceCheck_CheckOne_BalanceRecoveredTriggersChannelFreshness(t *testi
 	}, nil)
 	refresher := &e39ChannelFreshnessRefresher{}
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:    repo,
-		balanceService: balanceSvc,
-		cfg:            &config.Config{},
+		accountRepo:      repo,
+		balanceService:   balanceSvc,
+		cfg:              &config.Config{},
 		channelFreshness: refresher,
 	}
 
@@ -253,9 +253,9 @@ func TestBalanceCheck_CheckOne_FreshnessFailureKeepsRecovery(t *testing.T) {
 	}, nil)
 	refresher := &e39ChannelFreshnessRefresher{err: errors.New("freshness boom")}
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:    repo,
-		balanceService: balanceSvc,
-		cfg:            &config.Config{},
+		accountRepo:      repo,
+		balanceService:   balanceSvc,
+		cfg:              &config.Config{},
 		channelFreshness: refresher,
 	}
 
@@ -270,12 +270,12 @@ func TestBalanceCheck_CheckOne_FreshnessFailureKeepsRecovery(t *testing.T) {
 func TestBalanceCheck_ProbeOne_RecoversTriggersChannelFreshness(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	account := &Account{
-		ID:          73,
-		Platform:    PlatformZhipu,
-		Type:        AccountTypeAPIKey,
-		Status:      StatusActive,
-		Schedulable: true,
-		Credentials: map[string]any{"api_key": "sk-zhipu"},
+		ID:                      73,
+		Platform:                PlatformZhipu,
+		Type:                    AccountTypeAPIKey,
+		Status:                  StatusActive,
+		Schedulable:             true,
+		Credentials:             map[string]any{"api_key": "sk-zhipu"},
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: cnBalanceLowReasonPrefix + "余额不足",
 	}
@@ -283,10 +283,10 @@ func TestBalanceCheck_ProbeOne_RecoversTriggersChannelFreshness(t *testing.T) {
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	refresher := &e39ChannelFreshnessRefresher{}
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:  repo,
-		rateLimitSvc: rl,
-		httpUpstream: &cnProbeCaptureUpstream{statusCode: 200, body: `{"choices":[{"message":{"content":"hi"}}]}`},
-		cfg:          &config.Config{},
+		accountRepo:      repo,
+		rateLimitSvc:     rl,
+		httpUpstream:     &cnProbeCaptureUpstream{statusCode: 200, body: `{"choices":[{"message":{"content":"hi"}}]}`},
+		cfg:              &config.Config{},
 		channelFreshness: refresher,
 	}
 
@@ -300,12 +300,12 @@ func TestBalanceCheck_ProbeOne_RecoversTriggersChannelFreshness(t *testing.T) {
 func TestBalanceCheck_ProbeOne_FreshnessFailureKeepsRecovery(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	account := &Account{
-		ID:          73,
-		Platform:    PlatformZhipu,
-		Type:        AccountTypeAPIKey,
-		Status:      StatusActive,
-		Schedulable: true,
-		Credentials: map[string]any{"api_key": "sk-zhipu"},
+		ID:                      73,
+		Platform:                PlatformZhipu,
+		Type:                    AccountTypeAPIKey,
+		Status:                  StatusActive,
+		Schedulable:             true,
+		Credentials:             map[string]any{"api_key": "sk-zhipu"},
 		TempUnschedulableUntil:  &until,
 		TempUnschedulableReason: cnBalanceLowReasonPrefix + "余额不足",
 	}
@@ -313,10 +313,10 @@ func TestBalanceCheck_ProbeOne_FreshnessFailureKeepsRecovery(t *testing.T) {
 	rl := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	refresher := &e39ChannelFreshnessRefresher{err: errors.New("freshness boom")}
 	svc := &CNProviderBalanceCheckService{
-		accountRepo:  repo,
-		rateLimitSvc: rl,
-		httpUpstream: &cnProbeCaptureUpstream{statusCode: 200, body: `{"choices":[{"message":{"content":"hi"}}]}`},
-		cfg:          &config.Config{},
+		accountRepo:      repo,
+		rateLimitSvc:     rl,
+		httpUpstream:     &cnProbeCaptureUpstream{statusCode: 200, body: `{"choices":[{"message":{"content":"hi"}}]}`},
+		cfg:              &config.Config{},
 		channelFreshness: refresher,
 	}
 

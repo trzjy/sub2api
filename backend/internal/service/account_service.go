@@ -105,14 +105,22 @@ type AccountRepository interface {
 	SetOverloaded(ctx context.Context, id int64, until time.Time) error
 	SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error
 	ClearTempUnschedulable(ctx context.Context, id int64) error
+	// ClearTempUnschedulableIfGeneration 是条件清除原语（AC-G2R5 must_fix / AC-G2R6 子秒精度）：
+	// 用「截止时间」做不可变代际令牌。仅当该账号当前 temp_unschedulable_until 仍等于 expectedUntil
+	// （探测开始/入队时读到的代际令牌，timestamptz 全精度等值）时才清除停调，返回 true；若 until
+	// 已被他人改写（新停调接管，必写更晚 until）则零写入、返回 false，调用方据此保留新停调、不清除。
+	// 原子单语句，杜绝读-改-写两步的并发覆盖。
+	ClearTempUnschedulableIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time) (bool, error)
+	// BumpTempUnschedulableReasonIfGeneration 是 attempt 回写的代际守卫原语（AC-G2R6 must_fix）：
+	// 仅当当前 temp_unschedulable_until 仍等于 expectedUntil（探测入队时读到的代际令牌，timestamptz
+	// 全精度等值）且停调窗口仍有效（> NOW()）时才改写 reason 返回 true；否则返回 false（已被接管），
+	// 调用方据此终止本轮补探、保留接管者 reason。与 ClearTempUnschedulableIfGeneration 同源，供
+	// accountHealthProbeRepository 窄接口与 AccountRepository 全接口共用。
+	BumpTempUnschedulableReasonIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time, newReason string) (bool, error)
 	// ListTempUnschedulableAccounts returns accounts currently parked by a
 	// temp-unschedulable block whose expiry is still in the future, ordered by
 	// soonest expiry first. Used by the health-breaker recovery probe sweep.
 	ListTempUnschedulableAccounts(ctx context.Context, now time.Time, limit int) ([]*Account, error)
-	// SetTempUnschedulableReason rewrites the block reason for an account that is
-	// still within its temp-unschedulable window (no-op if the block expired or
-	// was cleared). Used to record probe-attempt bookkeeping without re-parking.
-	SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error
 	ClearRateLimit(ctx context.Context, id int64) error
 	ClearAntigravityQuotaScopes(ctx context.Context, id int64) error
 	ClearModelRateLimits(ctx context.Context, id int64) error

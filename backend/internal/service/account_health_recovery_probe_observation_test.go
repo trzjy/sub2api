@@ -194,6 +194,17 @@ func (r *d2ProbeObsRepo) ClearTempUnschedulable(_ context.Context, _ int64) erro
 	return nil
 }
 
+// ClearTempUnschedulableIfGeneration 覆盖嵌入实现（AC-G2R5）：本桩不消费代际令牌，
+// 直接返回 true（视为清除成功）。E27/E24 定向测试均在观测提交失败分支提前 return，
+// 不会触达本方法；提供实现仅为满足 accountHealthProbeRepository / AccountRepository 接口。
+func (r *d2ProbeObsRepo) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (r *d2ProbeObsRepo) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}
+
 func (r *d2ProbeObsRepo) metaFor(id int64, scope string) (d2ObsMeta, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -521,13 +532,14 @@ func TestRunOnce_BreakerPhaseOnly(t *testing.T) {
 			return false, nil
 		},
 	}
-	// 补探节奏注入：默认常量为 5s/3 次，单测改为毫秒级（与
-	// newProbeRetryHarness 同款）。不注入则本用例真实等待 3×5s=15s。
+	// 补探节奏注入：默认常量为 5s/50 次（AC-C1：旧 3），单测改为毫秒级（与
+	// newProbeRetryHarness 同款）。不注入则本用例真实等待 50×5s。
 	svc.retryInterval = time.Millisecond
 	const retryBurst = 3
 	svc.retryBurst = retryBurst
 
 	svc.RunOnce(context.Background())
+	svc.wg.Wait() // 等待异步补探完成（AC-C1），使探测次数断言确定
 
 	// 断言分两个维度，「相位数量」与「每相位探测次数」不可混为一谈：
 	//  - 相位数量：D2 TokenHarbor 模型级相位已退役，熔断（账号级）是唯一相位。

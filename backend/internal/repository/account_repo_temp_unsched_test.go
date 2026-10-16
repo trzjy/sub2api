@@ -461,3 +461,136 @@ func (e *recordingSQLExecutor) ExecContext(ctx context.Context, query string, ar
 func (e *recordingSQLExecutor) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	return nil, sql.ErrNoRows
 }
+
+// TestClearTempUnschedulableIfGeneration_RowsAffectedWritesOutbox 锁定仓储层条件清除原语
+// （AC-G2R5 must_fix / AC-G2R6 子秒精度）：代际令牌命中（rows>0）时清除停调（until/reason 置
+// NULL、自增 sched_state_revision），并如 ClearTempUnschedulable 同款写 scheduler_outbox 快照
+// 事件，返回 true。SQL 形态必须含 `temp_unschedulable_until = $2` 条件守卫（timestamptz 全精度
+// 等值，微秒级，不再 EXTRACT(EPOCH)::bigint 截断）——用截止时间做不可变代际令牌，单语句原子，
+// 杜绝读-改-写两步的并发覆盖（见 account_repo.go ClearTempUnschedulableIfGeneration）。
+func TestClearTempUnschedulableIfGeneration_RowsAffectedWritesOutbox(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	until := time.Date(2024, 5, 29, 12, 0, 0, 123456000, time.UTC)
+	cleared, err := repo.ClearTempUnschedulableIfGeneration(context.Background(), 42, until)
+	require.NoError(t, err)
+	require.True(t, cleared, "命中条件时必须返回 true")
+
+	require.Len(t, exec.execQueries, 2, "命中后应发 UPDATE + scheduler_outbox（与 ClearTempUnschedulable 同款）")
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "UPDATE accounts")
+	require.Contains(t, normalized, "temp_unschedulable_until = NULL")
+	require.Contains(t, normalized, "temp_unschedulable_reason = NULL")
+	require.Contains(t, normalized, "WHERE id = $1 AND deleted_at IS NULL AND temp_unschedulable_until IS NOT NULL AND temp_unschedulable_until = $2",
+		"必须用 until 截止时间做代际令牌条件守卫（timestamptz 全精度等值），避免读-改-写两步的并发覆盖")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：禁止 EXTRACT(EPOCH) 截断，必须全精度等值")
+	require.Equal(t, int64(42), exec.execArgs[0][0])
+	require.Equal(t, until, exec.execArgs[0][1])
+	require.Contains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+}
+
+// TestClearTempUnschedulableIfGeneration_NoRowsAffectedDoesNotClearOrWriteOutbox 锁定代际失配
+// （until 已被他人改写为更晚值，rows==0）时零写入、不写 outbox、返回 false——探测方据此保留新
+// 停调、不清除他链刚写入的状态（见 account_health_recovery_probe_service.go 恢复分支）。
+func TestClearTempUnschedulableIfGeneration_NoRowsAffectedDoesNotClearOrWriteOutbox(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	until := time.Date(2024, 5, 29, 12, 0, 0, 0, time.UTC)
+	cleared, err := repo.ClearTempUnschedulableIfGeneration(context.Background(), 42, until)
+	require.NoError(t, err)
+	require.False(t, cleared, "代际失配（rows==0）时必须返回 false（no-op，保留新停调）")
+	require.Len(t, exec.execQueries, 1, "未命中不得触发 outbox")
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "UPDATE accounts")
+	require.Contains(t, normalized, "temp_unschedulable_until = $2")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：禁止 EXTRACT(EPOCH) 截断，必须全精度等值")
+	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+}
+
+// TestClearTempUnschedulableIfGeneration_SubSecondPrecision 锁定 AC-G2R6 子秒精度修复：
+// 代际令牌 until 携带微秒时，必须原样（timestamptz 全精度，微秒级）传入 SQL 的 $2，禁止
+// EXTRACT(EPOCH)::bigint 截断到秒——否则「同一秒内的两个不同 until」会被误判为命中（同秒错清）。
+func TestClearTempUnschedulableIfGeneration_SubSecondPrecision(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	// 带微秒的 until：123456000ns = 123.456ms。
+	until := time.Date(2024, 5, 29, 12, 0, 0, 123456000, time.UTC)
+	cleared, err := repo.ClearTempUnschedulableIfGeneration(context.Background(), 42, until)
+	require.NoError(t, err)
+	require.True(t, cleared, "命中条件时必须返回 true")
+
+	require.Len(t, exec.execQueries, 2, "命中后应发 UPDATE + scheduler_outbox")
+	// 全精度 time.Time 必须原样传入（微秒不得截断）：若被截断到秒，此处 time.Time 等值会失败。
+	require.Equal(t, until, exec.execArgs[0][1], "全精度 time.Time 必须原样传入（微秒不得截断）")
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "temp_unschedulable_until = $2", "必须用全精度等值比较")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：禁止 EXTRACT(EPOCH) 截断")
+}
+
+// TestClearTempUnschedulableIfGeneration_GenerationMismatchSameSecondRetainsNewBlock 锁定
+// AC-G2R6 子秒精度修复的「同秒不同 until 必失配」语义：本代令牌 until=12:00:00.123456；他因
+// 同窗口写入了不同 until（12:00:00.654321）。仓储层以全精度 `= $2` 等值比较，必失配、rows==0、
+// 返回 false，账号保持新停调（不清）。若仍用 EXTRACT(EPOCH)::bigint 截断到秒，二者会被误判为
+// 命中（同秒错清），正是本修复要消除的漏洞。
+func TestClearTempUnschedulableIfGeneration_GenerationMismatchSameSecondRetainsNewBlock(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	// 本代令牌（微秒级）；他因同窗口写入的不同 until 由 SQL 的 `= $2` 全精度比较判失配。
+	until := time.Date(2024, 5, 29, 12, 0, 0, 123456000, time.UTC)
+	cleared, err := repo.ClearTempUnschedulableIfGeneration(context.Background(), 42, until)
+	require.NoError(t, err)
+	require.False(t, cleared, "同秒不同微秒的 until 代际失配必须返回 false，保留新停调")
+	require.Len(t, exec.execQueries, 1, "未命中不得触发 outbox")
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "temp_unschedulable_until = $2",
+		"必须用全精度等值比较，使同秒不同微秒的 until 失配")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：禁止 EXTRACT(EPOCH) 截断，必须全精度等值")
+	require.NotContains(t, strings.Join(exec.execQueries, "\n"), "scheduler_outbox")
+}
+
+// TestBumpTempUnschedulableReasonIfGeneration_Success 锁定 attempt 回写代际守卫原语
+// （AC-G2R6 must_fix）：代际命中（until 仍等于令牌且停调窗口仍有效）时改写 reason 返回 true；
+// SQL 形态须含 `temp_unschedulable_until = $2`、`temp_unschedulable_until > NOW()`、
+// `deleted_at IS NULL`、`temp_unschedulable_reason = $3`，且全精度等值（无 EXTRACT(EPOCH)）。
+func TestBumpTempUnschedulableReasonIfGeneration_Success(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	until := time.Date(2024, 5, 29, 12, 0, 0, 123456000, time.UTC)
+	const newReason = `{"probe_attempts":2}`
+	bumped, err := repo.BumpTempUnschedulableReasonIfGeneration(context.Background(), 42, until, newReason)
+	require.NoError(t, err)
+	require.True(t, bumped, "代际命中且停调窗口有效时必须返回 true")
+
+	require.Len(t, exec.execQueries, 1, "reason 改写不改调度状态，不写 scheduler_outbox")
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "UPDATE accounts")
+	require.Contains(t, normalized, "temp_unschedulable_reason = $3")
+	require.Contains(t, normalized, "temp_unschedulable_until = $2")
+	require.Contains(t, normalized, "temp_unschedulable_until > NOW()")
+	require.Contains(t, normalized, "deleted_at IS NULL")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：全精度等值，禁止截断")
+	require.Equal(t, until, exec.execArgs[0][1], "全精度 time.Time 必须原样传入（微秒不得截断）")
+	require.Equal(t, newReason, exec.execArgs[0][2])
+}
+
+// TestBumpTempUnschedulableReasonIfGeneration_TakenOver 锁定代际失配（已被接管，必写更晚
+// until）→ rows==0、返回 false，调用方据此终止本轮补探、保留接管者 reason。
+func TestBumpTempUnschedulableReasonIfGeneration_TakenOver(t *testing.T) {
+	exec := &recordingSQLExecutor{result: rowsAffectedResult(0)}
+	repo := newAccountRepositoryWithSQL(nil, exec, nil)
+
+	until := time.Date(2024, 5, 29, 12, 0, 0, 0, time.UTC)
+	bumped, err := repo.BumpTempUnschedulableReasonIfGeneration(context.Background(), 42, until, `{"probe_attempts":2}`)
+	require.NoError(t, err)
+	require.False(t, bumped, "代际失配（已被接管）必须返回 false，调用方据此终止本轮补探")
+	require.Len(t, exec.execQueries, 1)
+	normalized := normalizeSQLWhitespace(exec.execQueries[0])
+	require.Contains(t, normalized, "temp_unschedulable_until = $2")
+	require.Contains(t, normalized, "temp_unschedulable_until > NOW()")
+	require.NotContains(t, normalized, "EXTRACT(EPOCH", "AC-G2R6：全精度等值，禁止截断")
+}

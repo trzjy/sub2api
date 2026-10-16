@@ -21,7 +21,7 @@ const (
 	// should do.
 	openAIModelTransientStreakTTL     = 30 * time.Minute
 	openAIModelTransientShortCooldown = 10 * time.Second
-	openAIModelTransientLongCooldown  = 45 * time.Second
+	openAIModelTransientLongCooldown  = 30 * time.Second // AC-A1 用户裁定：原 45s → 30s（5xx 阶梯第 3 次共用，残余风险已登记）
 	openAIModelTransientDefaultMax    = 4096
 	openAIModelTransientMaxModelBytes = 512
 )

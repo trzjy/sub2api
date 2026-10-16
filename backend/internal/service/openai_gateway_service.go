@@ -509,7 +509,7 @@ type OpenAIGatewayService struct {
 	codexSnapshotThrottle               *accountWriteThrottle
 	// cnFirstByteTimeout 是 CN 清单平台出站首包超时阈值；<=0 时用默认 60s。
 	// 仅用于测试注入短值，生产统一走 openAICNFirstByteTimeout。
-	cnFirstByteTimeout time.Duration
+	cnFirstByteTimeout                  time.Duration
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
@@ -592,6 +592,9 @@ func NewOpenAIGatewayService(
 	}
 	if rateLimitService != nil {
 		rateLimitService.SetAccountRuntimeBlocker(svc)
+		// AC-A1：将 gateway 持有的同一 openaiModelTransient 实例注入 RateLimitService，
+		// 作为 OAuth 401 失败连击阶梯与 5xx 阶梯的共享单一事实源。
+		rateLimitService.SetModelTransientState(svc.openaiModelTransient)
 	}
 	if openAITokenProvider != nil {
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)
