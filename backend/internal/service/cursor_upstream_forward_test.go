@@ -422,13 +422,14 @@ func TestCursorWasmAuthProvider_ConcurrentSafe(t *testing.T) {
 	}
 }
 
-// 14) 路径白名单：已取证端点放行，未取证端点拒绝。
+// 14) 路径白名单：已取证端点放行，未取证端点拒绝（含 B-1 纠错后已删除的三条）。
 func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 	allowed := []string{
-		cursorPathStreamUnifiedChatWithToolsSSE,
-		cursorPathStreamUnifiedChatWithToolsSSEWithMcp,
-		cursorPathGenerateUnifiedCompletionWithToolsSSE,
 		cursorPathAvailableModels,
+		cursorPathStreamUnifiedChatWithTools,
+		cursorPathStreamUnifiedChatWithToolsSSE,
+		cursorPathGetSessionToken,
+		cursorPathCheckSessionToken,
 	}
 	for _, p := range allowed {
 		if !IsCursorAllowedUpstreamPath(p) {
@@ -441,6 +442,14 @@ func TestIsCursorAllowedUpstreamPath(t *testing.T) {
 		"/",
 		"",
 		"/aiserver.v1.AIServiceService/Unknown",
+		// B-1 纠错：以下三条在 Cursor 3.24.12 全量资产中不存在（静态 0 命中），
+		// 放行它们等于把任意路径打到中转节点，必须保持拒绝。
+		"/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSE",
+		"/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSEWithMcp",
+		"/aiserver.v1.AIServiceService/GenerateUnifiedCompletionWithToolsSSE",
+		"/aiserver.v1.AIServiceService/GetAvailableModels",
+		// 服务名对但方法不存在（B-1 静态裁定）。
+		"/aiserver.v1.ChatService/AvailableModels",
 	}
 	for _, p := range denied {
 		if IsCursorAllowedUpstreamPath(p) {

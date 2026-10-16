@@ -131,13 +131,10 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 
 	// Cursor（shareai 号池中转）：必须在通用 OpenAI 路径之前分流，理由同
 	// OpenAIGatewayService.Forward 的 cursor 分支（出站为 Cursor 原生协议端点）。
-	// 分发口径与 Forward 保持一致的单一列表。当前转换层未实现，分支失败关闭。
+	// 分发口径与 Forward 保持一致的单一列表。E6 起执行真实转发。
 	if isCursorAccount(account) {
 		view := newOpenAIRequestView(body)
-		if err := s.forwardCursor(ctx, account, view.Model); err != nil {
-			return nil, err
-		}
-		return nil, ErrCursorProtocolBridgeUnavailable
+		return s.forwardCursor(ctx, c, account, body, view.Model, view.Stream, time.Now())
 	}
 
 	// 网页逆向平台（W3 方案任务 1）：归并后由账号级接入模式（access_mode=web）决定

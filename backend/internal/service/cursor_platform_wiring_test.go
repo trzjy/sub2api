@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -205,7 +206,7 @@ func (r *identityCursorQuotaKeys) MarkExpiredIfStillExpired(context.Context, *en
 	return 0, nil
 }
 
-// SetDeviceIDIfAbsent 模拟 DB 的条件化写入（WHERE device_id IS NULL OR =''），
+// SetDeviceIDIfAbsent 模拟 DB 的条件化写入（WHERE device_id IS NULL OR =”），
 // 语义与 production repository / service 读判定三者一致：NULL 或空串才写入并返回
 // 受影响行数 1；已有非空值则不覆盖、返回 0（由 DeviceIDFor 重读赢家值）。
 func (r *identityCursorQuotaKeys) SetDeviceIDIfAbsent(_ context.Context, id int64, deviceID string) (int, error) {
@@ -369,10 +370,13 @@ func TestCursorAuthProviderFailsClosedOnUnresolvableKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. 失败关闭（协议桥未实现）
+// 4. 失败关闭
 // ---------------------------------------------------------------------------
 
-// TestForwardCursorFailsClosed 钉死协议桥未实现时绝不发出请求。
+// TestForwardCursorFailsClosed 钉死各前置条件缺失时绝不发出请求。
+//
+// E6 起协议桥已实现，故本用例的失败关闭点前移到**依赖装配**层：
+// 未注入转发器/鉴权依赖时必须在发出任何请求前失败。
 func TestForwardCursorFailsClosed(t *testing.T) {
 	svc := NewOpenAIGatewayService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -380,21 +384,39 @@ func TestForwardCursorFailsClosed(t *testing.T) {
 		1: {ID: 1, CodeEncrypted: "ACTIVATION-CODE-ONE"},
 	}}
 	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
+	// 注入一个"任何出站都拒绝"的转发器：若 forwardCursor 真发出请求，用例即失败。
+	svc.SetCursorForwarder(NewCursorUpstreamForwarder(
+		WithCursorUpstreamHTTPClient(&http.Client{Transport: &cursorRejectAllTransport{t}})))
 
-	// 账号有 model_mapping 时走到协议桥边界并失败关闭。
+	body := []byte(`{"model":"cursor-sonnet","messages":[{"role":"user","content":"hi"}]}`)
+
+	// 账号有 model_mapping 但 deviceId 解析器缺失 → 失败关闭（绝不发出无鉴权请求）。
 	acc := &Account{
 		ID: 1, Platform: PlatformCursor, QuotaKeyID: qkID(1),
 		Credentials: map[string]any{"model_mapping": map[string]any{"cursor-sonnet": "upstream-sonnet"}},
 	}
-	err := svc.forwardCursor(context.Background(), acc, "cursor-sonnet")
-	require.ErrorIs(t, err, ErrCursorProtocolBridgeUnavailable)
+	svc.cursorDeviceIDs = nil
+	_, err := svc.forwardCursor(context.Background(), nil, acc, body, "cursor-sonnet", false, time.Now())
+	require.Error(t, err)
 
 	// 无 model_mapping → 模型闸门先失败关闭（不得把任意模型名发往 Cursor 端点）。
-	err = svc.forwardCursor(context.Background(), &Account{ID: 2, Platform: PlatformCursor, QuotaKeyID: qkID(1)}, "whatever")
+	svc.cursorDeviceIDs = cursorTestDeviceIDs(repo)
+	_, err = svc.forwardCursor(context.Background(), nil,
+		&Account{ID: 2, Platform: PlatformCursor, QuotaKeyID: qkID(1)}, body, "whatever", false, time.Now())
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrCursorProtocolBridgeUnavailable)
 
 	// 非 cursor 账号 → 拒绝。
-	err = svc.forwardCursor(context.Background(), &Account{ID: 3, Platform: PlatformOpenAI}, "m")
+	_, err = svc.forwardCursor(context.Background(), nil,
+		&Account{ID: 3, Platform: PlatformOpenAI}, body, "m", false, time.Now())
 	require.Error(t, err)
+}
+
+// cursorRejectAllTransport 让任何出站请求立刻失败并标记 t，
+// 用于坐实"失败关闭发生在发出请求之前"。
+type cursorRejectAllTransport struct{ t *testing.T }
+
+func (rt *cursorRejectAllTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	rt.t.Error("cursor forwarder must not issue an upstream request on the fail-closed paths")
+	return nil, errors.New("blocked by cursorRejectAllTransport")
 }

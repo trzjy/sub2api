@@ -62,22 +62,47 @@ var (
 
 // 已取证的 Cursor 原生端点路径。
 //
-// 依据：插件只替换 authority / connect 目标与请求头，请求 path 原样保留
-// （zk17 / zk27 实测产物均不改 path）。故此处仅放行 Cursor 原生对话相关路径；
-// 未列举的一律失败关闭，避免把任意路径打到中转节点。
+// **依据（2026-10-16 活体 + 静态双重实证，见证据目录
+// ~/.sub2api-acceptance/cursor-20261016-protocol/07-live-b1-closed.md §4）**：
+//
+//	B-1 纠错前的 4 条常量里，第 1 条服务名错、另 2 条方法全盘不存在（静态 0 命中），
+//	第 4 条服务名与方法名均错。此处已整体替换为下面这组。
+//
+//	⚠️ 各条的证据强度不同，**不得**整体宣称"全部活体验证过"：
+//	  - 已活体 200：AvailableModels、StreamUnifiedChatWithTools（B-1 关闭项）
+//	  - 静态确认存在、未活体探测：StreamUnifiedChatWithToolsSSE、GetSessionToken、
+//	    CheckSessionToken
+//	  - 不存在（已删除）：…SSEWithMcp、GenerateUnifiedCompletionWithToolsSSE、
+//	    AIServiceService/* 全部
 const (
-	cursorPathStreamUnifiedChatWithToolsSSE         = "/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSE"
-	cursorPathStreamUnifiedChatWithToolsSSEWithMcp  = "/aiserver.v1.AIServiceService/StreamUnifiedChatWithToolsSSEWithMcp"
-	cursorPathGenerateUnifiedCompletionWithToolsSSE = "/aiserver.v1.AIServiceService/GenerateUnifiedCompletionWithToolsSSE"
-	cursorPathAvailableModels                       = "/aiserver.v1.AIServiceService/GetAvailableModels"
+	// cursorPathAvailableModels —— 模型列表。**活体 200**（135,922 字节 / 12 个模型）。
+	// 服务名是 AiService（不是 AIServiceService），方法名是 AvailableModels
+	// （不是 GetAvailableModels）。
+	cursorPathAvailableModels = "/aiserver.v1.AiService/AvailableModels"
+
+	// cursorPathStreamUnifiedChatWithTools —— 对话主路径（BiDiStreaming）。
+	// **活体 200 + 业务错误**（非 404 ⇒ 路径存在，且中转不改写 path）。
+	cursorPathStreamUnifiedChatWithTools = "/aiserver.v1.ChatService/StreamUnifiedChatWithTools"
+
+	// cursorPathStreamUnifiedChatWithToolsSSE —— 对话的 ServerStreaming 变体，
+	// 首字段是 BidiRequestId{1 request_id}（**不是**聊天请求体）。静态确认存在。
+	cursorPathStreamUnifiedChatWithToolsSSE = "/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE"
+
+	// cursorPathGetSessionToken —— B-13 用户级 token 换取（Unary）。
+	// 静态确认存在 + **活体已抵达其业务逻辑**（见 cursor_auth_token.go）。
+	cursorPathGetSessionToken = "/aiserver.v1.AuthService/GetSessionToken"
+
+	// cursorPathCheckSessionToken —— 缓存有效性校验（Unary）。静态确认存在。
+	cursorPathCheckSessionToken = "/aiserver.v1.AuthService/CheckSessionToken"
 )
 
 // cursorAllowedUpstreamPaths 是已取证的出站路径白名单（失败关闭用）。
 var cursorAllowedUpstreamPaths = map[string]struct{}{
-	cursorPathStreamUnifiedChatWithToolsSSE:         {},
-	cursorPathStreamUnifiedChatWithToolsSSEWithMcp:  {},
-	cursorPathGenerateUnifiedCompletionWithToolsSSE: {},
-	cursorPathAvailableModels:                       {},
+	cursorPathAvailableModels:               {},
+	cursorPathStreamUnifiedChatWithTools:    {},
+	cursorPathStreamUnifiedChatWithToolsSSE: {},
+	cursorPathGetSessionToken:               {},
+	cursorPathCheckSessionToken:             {},
 }
 
 // IsCursorAllowedUpstreamPath 报告给定路径是否在已取证白名单内（E2 卡可用）。
@@ -96,6 +121,16 @@ type CursorUpstreamRequest struct {
 	Headers map[string]string
 	// UseHTTP2 为 true 时走 HTTP2Base，否则走 HTTP1Base。
 	UseHTTP2 bool
+
+	// AuthProvider 是**本次请求**的鉴权材料提供者，覆盖转发器上配置的默认 provider。
+	//
+	// 为什么需要覆盖：x-jg-auth 是**账号级**材料（zk03({d: deviceId, a: 激活码}），
+	// 不同账号的 deviceId 与激活码都不同）。转发器是进程级共享的（节点缓存需要），
+	// 把单一材料挂在转发器上等于把 A 号的凭证发给 B 号——这正是方案
+	// §2 E1「遗留风险登记」要求用本字段解决的情形。
+	//
+	// 为 nil 时回落到转发器上配置的 provider（仅供单账号场景与测试使用）。
+	AuthProvider CursorUpstreamAuthProvider
 }
 
 // CursorUpstreamResponse 是 cursor 上游的原始响应（流式帧原样透传）。
@@ -193,7 +228,12 @@ func (f *CursorUpstreamForwarder) Do(
 	}
 
 	// 鉴权材料先取：不可得则失败关闭，绝不发出无鉴权请求去白耗中转额度。
-	auth, err := f.cursorAuth(ctx)
+	// 优先用请求自带的 provider（账号级材料），回落转发器上配置的默认 provider。
+	authProvider := req.AuthProvider
+	if authProvider == nil {
+		authProvider = f.authProvider
+	}
+	auth, err := cursorUpstreamAuthFrom(ctx, authProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -231,12 +271,14 @@ func (f *CursorUpstreamForwarder) Do(
 	}, nil
 }
 
-// cursorAuth 取鉴权材料：provider 缺失或返回错误都视为不可得（失败关闭）。
-func (f *CursorUpstreamForwarder) cursorAuth(ctx context.Context) (string, error) {
-	if f.authProvider == nil {
+// cursorUpstreamAuthFrom 取鉴权材料：provider 缺失或返回错误都视为不可得（失败关闭）。
+//
+// 独立成函数（而非方法）是为了让转发器与 token 层共用同一份失败关闭口径。
+func cursorUpstreamAuthFrom(ctx context.Context, p CursorUpstreamAuthProvider) (string, error) {
+	if p == nil {
 		return "", fmt.Errorf("%w: no auth provider configured", ErrCursorAuthMaterialUnavailable)
 	}
-	auth, err := f.authProvider.CursorUpstreamAuth(ctx)
+	auth, err := p.CursorUpstreamAuth(ctx)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrCursorAuthMaterialUnavailable, err)
 	}
@@ -244,6 +286,11 @@ func (f *CursorUpstreamForwarder) cursorAuth(ctx context.Context) (string, error
 		return "", fmt.Errorf("%w: empty auth material", ErrCursorAuthMaterialUnavailable)
 	}
 	return auth, nil
+}
+
+// cursorAuth 取鉴权材料：provider 缺失或返回错误都视为不可得（失败关闭）。
+func (f *CursorUpstreamForwarder) cursorAuth(ctx context.Context) (string, error) {
+	return cursorUpstreamAuthFrom(ctx, f.authProvider)
 }
 
 // ---------------------------------------------------------------------------

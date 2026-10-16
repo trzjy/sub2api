@@ -478,9 +478,17 @@ type OpenAIGatewayService struct {
 	liveAttestationCipher SecretEncryptor
 	// cursor 出站鉴权依赖（quota_keys 仓储 + 激活码解密器 + deviceId 解析器），
 	// 仅 forwardCursor 消费。经 SetCursorAuthDeps 注入而非改构造签名——理由见该方法注释。
-	cursorQuotaKeys QuotaKeyRepository
+	cursorQuotaKeys   QuotaKeyRepository
 	cursorQuotaKeyEnc QuotaKeyEncryptor
 	cursorDeviceIDs   CursorDeviceIDResolver
+	// cursor 出站转发器（E6）。经 SetCursorForwarder 注入；为 nil 时 forwardCursor
+	// 用节点单例兜底构造（只含站点级节点信息，不含任何凭证）。
+	cursorForwarder *CursorUpstreamForwarder
+	// cursorTokenSources 按 quota_key_id 缓存 AuthService token 来源，
+	// 使 session_token 的 TTL 缓存真正生效（否则每请求换一次 token）。
+	// 键是 quota_key_id，与凭证维度一致，不会跨账号串号。
+	cursorTokenMu      sync.Mutex
+	cursorTokenSources map[int64]*cursorSessionTokenSource
 
 	openaiWSPoolOnce               sync.Once
 	openaiWSStateStoreOnce         sync.Once
@@ -514,7 +522,7 @@ type OpenAIGatewayService struct {
 	codexSnapshotThrottle               *accountWriteThrottle
 	// cnFirstByteTimeout 是 CN 清单平台出站首包超时阈值；<=0 时用默认 60s。
 	// 仅用于测试注入短值，生产统一走 openAICNFirstByteTimeout。
-	cnFirstByteTimeout time.Duration
+	cnFirstByteTimeout                  time.Duration
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map

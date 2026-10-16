@@ -56,13 +56,15 @@ var _ CursorDeviceIDResolver = (*QuotaKeyService)(nil)
 //  1. 迭代单位：插件 s.charCodeAt(i) 遍历 **UTF-16 码元**；既有实现 `for _, c := range`
 //     遍历 **Unicode 码点**。ASCII 下两者一致，但 BMP 外字符（如 emoji，UTF-16 为代理对
 //     2 个码元）会分叉：😀 插件得 001B0D63，既有实现得 0001F600。
+//
 //  2. 乘法形式：插件 `(a<<5) - a + c`；既有实现 `h*31 + c`。二者对 int32 环绕数学等价
 //     （(x<<5)-x == 31x，且两侧都在 int32 内环绕），非差异来源，但按插件字面照抄以免歧义。
+//
 //  3. 收尾取绝对值：插件 Math.abs 作用在**双精度**上，int32 最小值 -2147483648 取绝对值
 //     得 2147483648（不溢出）；Go 若用 int32 取绝对值会溢出为自身，故此处显式转 int64。
 //     这是唯一的语义性溢出陷阱。
 //
-// 4. 格式化：插件 toString(16).padStart(8,"0").substring(0,8).toUpperCase()。对 int32
+//  4. 格式化：插件 toString(16).padStart(8,"0").substring(0,8).toUpperCase()。对 int32
 //     量级的绝对值（≤ 0x80000000）十六进制最多 8 位，substring 不会截断；%08X 同时
 //     保证至少 8 位并大写，与 padStart+substring+toUpperCase 等价。
 func hashDeviceIDFromUUID(uuid string) string {
@@ -108,7 +110,7 @@ func GenerateCursorDeviceID() (string, error) {
 
 // DeviceIDFor 返回指定激活码的出站 deviceId；库内尚无则生成一份并落库。
 //
-// 首次并发防重靠 **DB 层条件更新**（SetDeviceIDIfAbsent：WHERE device_id IS NULL OR =''）：
+// 首次并发防重靠 **DB 层条件更新**（SetDeviceIDIfAbsent：WHERE device_id IS NULL OR 空串）：
 // 并发首次请求中只有把"未生成"改成非空的那一个事务会命中（受影响行数=1），其余
 // 拿到 0 行后重读，取到赢家写入的值。因此同一激活码恒定只有一份 deviceId，
 // 不会出现"两个请求各生成一个不同值、后写覆盖先写"的分裂。

@@ -204,12 +204,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	// Cursor（shareai 号池中转）：入站是 OpenAI 形状，出站是 Cursor 原生协议端点，
 	// 二者不兼容，必须在通用 OpenAI 路径之前分流——落到通用路径会把 OpenAI 形状的
-	// body 发到 Cursor 原生端点并白耗 shareai 额度。当前转换层未实现，分支失败关闭。
+	// body 发到 Cursor 原生端点并白耗 shareai 额度。E6 起 forwardCursor 执行真实
+	// 转发（请求/响应双向转换 + AuthService 换 token）。
 	if isCursorAccount(account) {
-		if err := s.forwardCursor(ctx, account, originalModel); err != nil {
-			return nil, err
-		}
-		return nil, ErrCursorProtocolBridgeUnavailable
+		return s.forwardCursor(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
 	// 网页逆向平台（W3 方案任务 1）：入站 OpenAI 协议经各自适配器转换为官方网页端
