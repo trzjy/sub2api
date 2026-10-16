@@ -17,6 +17,7 @@ var (
 		PlatformCline,
 		PlatformCodeBuddy,
 		PlatformMuse,
+		PlatformCursor,
 	}
 	legacyCompositePrecedence = []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
@@ -25,6 +26,7 @@ var (
 		PlatformCline,
 		PlatformCodeBuddy,
 		PlatformMuse,
+		PlatformCursor,
 	}
 	legacyOpenAIGateway = []string{
 		PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo,
@@ -32,6 +34,7 @@ var (
 		PlatformCline,
 		PlatformCodeBuddy,
 		PlatformMuse,
+		PlatformCursor,
 	}
 	legacyCNProviders    = []string{PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax}
 	legacyLiteLLMByPlatf = map[string]string{
@@ -39,7 +42,7 @@ var (
 		PlatformAntigravity: "anthropic", PlatformGrok: "xai", PlatformKimi: "moonshot",
 		PlatformZhipu: "zhipu", PlatformDeepseek: "deepseek", PlatformMiniMax: "minimax",
 		PlatformOpenCodeGo: "opencode-go", PlatformTypeSafe: "typesafe", PlatformCommandCode: "", PlatformCline: "",
-		PlatformCodeBuddy: "", PlatformMuse: "",
+		PlatformCodeBuddy: "", PlatformMuse: "", PlatformCursor: "",
 	}
 )
 
@@ -95,9 +98,9 @@ func TestPlatformListExcludesOther(t *testing.T) {
 	require.NotContains(t, CompositePrecedencePlatformIDs(), PlatformOther)
 }
 
-// 我方自研平台（CodeBuddy / Muse）已在清单内：经 OpenAI 网关转发、非国产单一厂商。
+// 我方自研平台（CodeBuddy / Muse / Cursor）已在清单内：经 OpenAI 网关转发、非国产单一厂商。
 func TestPlatformListIncludesForkPlatforms(t *testing.T) {
-	for _, platform := range []string{PlatformCodeBuddy, PlatformMuse} {
+	for _, platform := range []string{PlatformCodeBuddy, PlatformMuse, PlatformCursor} {
 		spec, ok := LookupPlatform(platform)
 		require.True(t, ok, platform)
 		require.Equal(t, PlatformGatewayOpenAI, spec.Gateway, platform)

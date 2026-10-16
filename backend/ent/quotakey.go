@@ -35,6 +35,8 @@ type QuotaKey struct {
 	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`
 	// ExpiresAt holds the value of the "expires_at" field.
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// DeviceID holds the value of the "device_id" field.
+	DeviceID *string `json:"device_id,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
@@ -74,7 +76,7 @@ func (*QuotaKey) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case quotakey.FieldID:
 			values[i] = new(sql.NullInt64)
-		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldNotes:
+		case quotakey.FieldCodeEncrypted, quotakey.FieldCodeMAC, quotakey.FieldCodeLast4, quotakey.FieldStatus, quotakey.FieldLastRefreshError, quotakey.FieldDeviceID, quotakey.FieldNotes:
 			values[i] = new(sql.NullString)
 		case quotakey.FieldDeletedAt, quotakey.FieldLastRefreshAt, quotakey.FieldExpiresAt, quotakey.FieldCreatedAt, quotakey.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -156,6 +158,13 @@ func (_m *QuotaKey) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ExpiresAt = new(time.Time)
 				*_m.ExpiresAt = value.Time
+			}
+		case quotakey.FieldDeviceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field device_id", values[i])
+			} else if value.Valid {
+				_m.DeviceID = new(string)
+				*_m.DeviceID = value.String
 			}
 		case quotakey.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -250,6 +259,11 @@ func (_m *QuotaKey) String() string {
 	if v := _m.ExpiresAt; v != nil {
 		builder.WriteString("expires_at=")
 		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeviceID; v != nil {
+		builder.WriteString("device_id=")
+		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")

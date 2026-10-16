@@ -371,6 +371,10 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	quotaKeyService := service.NewQuotaKeyService(quotaKeyRepository, service.NewCredcryptEncryptor(), shareAIUpstream, client)
 	// D2-a：把入库可配置提供方注入 QuotaKeyService（D1 挂载点挂组前调用 ApplyEntryDefaults）。
 	quotaKeyService.SetAutoEntry(autoEntryService)
+	// E2 卡装配：cursor 出站鉴权依赖注入 OpenAIGatewayService（quota_key_id → 解密激活码
+	// → x-jg-auth）。经 setter 注入而非改构造签名，故排在 openAIGatewayService 构造之后。
+	// 未注入时 forwardCursor 因依赖缺失失败关闭，绝不回落明文。
+	openAIGatewayService.SetCursorAuthDeps(quotaKeyRepository, service.NewCredcryptEncryptor())
 	quotaKeyReconciler := service.ProvideQuotaKeyReconciler(quotaKeyRepository, quotaKeyService, opsRepository)
 	// D-CURSOR-021 装配：admin 激活码端点（方案 §4.4，8 端点）。
 	// 直接复用 C7 / C9 已构造的 quotaKeySweeper 与 quotaKeyService，不再新建实例。

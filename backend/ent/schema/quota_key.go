@@ -94,6 +94,20 @@ func (QuotaKey) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
+		// device_id：cursor 出站鉴权头 x-jg-auth 中 `d` 字段的值（B-10）。
+		//
+		// 与 expires_at 上方的 deviceID(code) 派生**不是同一个东西**，两者用途不可混用：
+		//   - deviceID(code)：取号链 POST /api/refresh 的 `device-id` 请求头，按激活码派生；
+		//   - device_id：本列，出站 x-jg-auth 的 `d`。插件是 uuidv4() 随机生成后固化到
+		//     ~/.cursor_free_data（deobfuscated.js:8131-8150 getDeviceId），与激活码无关。
+		//
+		// 用户裁定（2026-10-16）：站点随机生成并落库，每个激活码一份，首次需要时生成、
+		// 之后永久复用——对齐插件语义，不依赖本机插件产物。故绝不可由激活码派生。
+		// NULL = 尚未生成（首次使用时生成并回写）。
+		field.String("device_id").
+			Optional().
+			Nillable().
+			MaxLen(8),
 		// created_at：创建时间（immutable）。
 		field.Time("created_at").
 			Default(time.Now).

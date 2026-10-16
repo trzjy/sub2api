@@ -36,6 +36,7 @@ var openAICompatibleGatewayPlatforms = map[string]struct{}{
 	service.PlatformMuse:      {},
 	service.PlatformCodeBuddy: {},
 	service.PlatformOther:     {},
+	service.PlatformCursor:    {},
 }
 
 // isOpenAICompatibleGatewayPlatform 报告该分组平台是否应经 OpenAI 网关转发。

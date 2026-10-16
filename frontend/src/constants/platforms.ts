@@ -37,7 +37,8 @@ export const CONCRETE_PLATFORM_OPTIONS = [
   { value: 'other', label: 'Other' },
   { value: 'minimax', label: 'MiniMax' },
   { value: 'codebuddy', label: 'CodeBuddy' },
-  { value: 'muse', label: 'Muse' }
+  { value: 'muse', label: 'Muse' },
+  { value: 'cursor', label: 'Cursor' }
 ] as const satisfies readonly PlatformOption<AccountPlatform>[]
 
 /** Platforms that can own a group. */

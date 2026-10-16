@@ -24,7 +24,11 @@ import (
 //   - code==0 且含 metadata → zk01 解密 → UpstreamAccount；
 //     code==1（含"每5分钟内仅可刷新1次"）→ 冷却（可识别错误，不标 exhausted）；
 //     其它 code / HTTP 错误 → 失败关闭。
-//   - 仅改派发单列出的文件；不触状态机/契约/软删；无兜底降级。
+//   - 解析 key_info.expired_at（【激活码】到期时间）并随 UpstreamPullResult.KeyExpiresAt
+//     上抛，供落库写 quota_keys.expires_at（B-11）。注意与号池账号的 account_expire_in
+//     区分：后者在 metadata 内、描述的是账号，不是激活码。
+//   - 取号链路本身（device-id 派生 / 主备端点顺序 / activate→refresh 时序 / 业务码分类）
+//     一律未改；无兜底降级。
 
 const (
 	defaultPrimaryBase  = "https://cur-api.shareai.pro/quota"
@@ -98,8 +102,36 @@ type shareAIResponse struct {
 		Mail      string          `json:"mail"`
 		Timestamp json.RawMessage `json:"timestamp"` // 数字或字符串，统一规整为字符串
 		OemInfo   json.RawMessage `json:"oem_info"`
-		KeyInfo   json.RawMessage `json:"key_info"`
+		KeyInfo   shareAIKeyInfo  `json:"key_info"`
 	} `json:"data"`
+}
+
+// shareAIKeyInfo 是 data.key_info（激活码自身的额度/到期信息）。
+//
+// 关键区分：key_info.expired_at 是【激活码】的到期时间（quota_keys.expires_at 的事实源）；
+// 而 buildAccount 解出的 account_expire_in 是【号池账号】的有效期，两者不可混用。
+// 整段其余字段（group / quota / device_count …）当前无消费方，保持已声明但不读取。
+type shareAIKeyInfo struct {
+	ExpiredAt *string `json:"expired_at"`
+}
+
+// parseKeyExpiresAt 解析 key_info.expired_at 为 quota_keys.expires_at 的写入值。
+//
+// 返回 nil 表示"上游未给出可用到期时间"，调用方据此保持 expires_at 原值不动
+// （绝不据未知推算补一个假日期）。解析失败同样按未知处理，不让格式异常阻断拉号主流程。
+func parseKeyExpiresAt(raw *string) *time.Time {
+	if raw == nil {
+		return nil
+	}
+	s := strings.TrimSpace(*raw)
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 // PullBatch 实现 QuotaKeyUpstreamClient：解密激活码 → refresh（必要时 activate）→ 解密 metadata。
@@ -116,13 +148,13 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 	code := string(plain)
 	did := deviceID(code)
 
-	acct, err := c.refresh(ctx, code, did)
+	acct, expiresAt, err := c.refresh(ctx, code, did)
 	if errors.Is(err, errNoMetadata) {
 		// 首次激活：先 activate 再 refresh。
 		if actErr := c.activate(ctx, code, did); actErr != nil {
 			return nil, actErr
 		}
-		acct, err = c.refresh(ctx, code, did)
+		acct, expiresAt, err = c.refresh(ctx, code, did)
 		if err != nil {
 			return nil, err
 		}
@@ -130,16 +162,21 @@ func (c *shareAIUpstreamClient) PullBatch(ctx context.Context, qk *ent.QuotaKey)
 		return nil, err
 	}
 
-	return &UpstreamPullResult{Accounts: []*UpstreamAccount{acct}}, nil
+	return &UpstreamPullResult{Accounts: []*UpstreamAccount{acct}, ExpiresAt: expiresAt}, nil
 }
 
 // refresh 调用 /api/refresh 并解析响应。
-func (c *shareAIUpstreamClient) refresh(ctx context.Context, code, did string) (*UpstreamAccount, error) {
+// 第二个返回值是 key_info.expired_at 解析出的激活码到期时间（nil = 上游未给出）。
+func (c *shareAIUpstreamClient) refresh(ctx context.Context, code, did string) (*UpstreamAccount, *time.Time, error) {
 	resp, err := c.fetch(ctx, "/api/refresh", code, did)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return c.handleResponse(resp)
+	acct, err := c.handleResponse(resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return acct, parseKeyExpiresAt(resp.Data.KeyInfo.ExpiredAt), nil
 }
 
 // activate 调用 /api/activate（首次激活，无 metadata 时补一次）。

@@ -141,6 +141,25 @@ func (r *fakeQuotaKeyRepo) MarkExpiredIfStillExpired(_ context.Context, _ *ent.T
 	return 0, nil
 }
 
+// SetDeviceIDIfAbsent 满足 service.QuotaKeyRepository 接口（B-10）。
+// 内存替身模拟 DB 条件化写入：仅当 device_id 为 NULL 或空串时写入并返回 1。
+func (r *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, deviceID string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		return 0, r.updateErr
+	}
+	qk, ok := r.keys[id]
+	if !ok {
+		return 0, &ent.NotFoundError{}
+	}
+	if qk.DeviceID != nil && *qk.DeviceID != "" {
+		return 0, nil
+	}
+	qk.DeviceID = &deviceID
+	return 1, nil
+}
+
 func (r *fakeQuotaKeyRepo) HardDelete(_ context.Context, _ *ent.Tx, id int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

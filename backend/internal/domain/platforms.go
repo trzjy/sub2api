@@ -61,6 +61,16 @@ var platformList = []PlatformSpec{
 	// 网关转发；fork 侧现状是 muse 只在此类「所有平台」清单里出现，documented
 	// drift 见 docs-local/upstream-v0.2.15-merge-plan.md（B2 批次 notes）。
 	{ID: PlatformMuse, DisplayName: "Muse", Gateway: PlatformGatewayOpenAI},
+	// PlatformCursor 是 Cursor 站点渠道接入（shareai 号池中转），经 OpenAI 网关
+	// 转发。登记后即可被「所有平台」类列表派生——这是 cursor 账号能被调度快照
+	// 建桶（schedulerSnapshotPlatforms → CompositePrecedencePlatformIDs）的**必要
+	// 前提**：未登记时 cursor 不进 platformList，IsGroupPlatform/IsConcretePlatform
+	// 均为 false，既建不出 cursor 分组、也开不出 target_platform=cursor 的
+	// composite 路由，账号永远无桶可入。
+	// CNProvider 与 LiteLLMProvider 留空：cursor 不是国产单一厂商余额 / Coding Plan
+	// 能力体系；其模型无内置目录（模型完全来自账号 model_mapping），故不参与
+	// 定价目录模型同步——defaultModelsListCandidateIDs 对它显式返回 nil。
+	{ID: PlatformCursor, DisplayName: "Cursor", Gateway: PlatformGatewayOpenAI},
 }
 
 var platformIndex = func() map[string]int {

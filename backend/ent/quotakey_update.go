@@ -191,6 +191,26 @@ func (_u *QuotaKeyUpdate) ClearExpiresAt() *QuotaKeyUpdate {
 	return _u
 }
 
+// SetDeviceID sets the "device_id" field.
+func (_u *QuotaKeyUpdate) SetDeviceID(v string) *QuotaKeyUpdate {
+	_u.mutation.SetDeviceID(v)
+	return _u
+}
+
+// SetNillableDeviceID sets the "device_id" field if the given value is not nil.
+func (_u *QuotaKeyUpdate) SetNillableDeviceID(v *string) *QuotaKeyUpdate {
+	if v != nil {
+		_u.SetDeviceID(*v)
+	}
+	return _u
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (_u *QuotaKeyUpdate) ClearDeviceID() *QuotaKeyUpdate {
+	_u.mutation.ClearDeviceID()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *QuotaKeyUpdate) SetUpdatedAt(v time.Time) *QuotaKeyUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -327,6 +347,11 @@ func (_u *QuotaKeyUpdate) check() error {
 			return &ValidationError{Name: "last_refresh_error", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.last_refresh_error": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DeviceID(); ok {
+		if err := quotakey.DeviceIDValidator(v); err != nil {
+			return &ValidationError{Name: "device_id", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.device_id": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -386,6 +411,12 @@ func (_u *QuotaKeyUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ExpiresAtCleared() {
 		_spec.ClearField(quotakey.FieldExpiresAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeviceID(); ok {
+		_spec.SetField(quotakey.FieldDeviceID, field.TypeString, value)
+	}
+	if _u.mutation.DeviceIDCleared() {
+		_spec.ClearField(quotakey.FieldDeviceID, field.TypeString)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)
@@ -623,6 +654,26 @@ func (_u *QuotaKeyUpdateOne) ClearExpiresAt() *QuotaKeyUpdateOne {
 	return _u
 }
 
+// SetDeviceID sets the "device_id" field.
+func (_u *QuotaKeyUpdateOne) SetDeviceID(v string) *QuotaKeyUpdateOne {
+	_u.mutation.SetDeviceID(v)
+	return _u
+}
+
+// SetNillableDeviceID sets the "device_id" field if the given value is not nil.
+func (_u *QuotaKeyUpdateOne) SetNillableDeviceID(v *string) *QuotaKeyUpdateOne {
+	if v != nil {
+		_u.SetDeviceID(*v)
+	}
+	return _u
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (_u *QuotaKeyUpdateOne) ClearDeviceID() *QuotaKeyUpdateOne {
+	_u.mutation.ClearDeviceID()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *QuotaKeyUpdateOne) SetUpdatedAt(v time.Time) *QuotaKeyUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -772,6 +823,11 @@ func (_u *QuotaKeyUpdateOne) check() error {
 			return &ValidationError{Name: "last_refresh_error", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.last_refresh_error": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DeviceID(); ok {
+		if err := quotakey.DeviceIDValidator(v); err != nil {
+			return &ValidationError{Name: "device_id", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.device_id": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -848,6 +904,12 @@ func (_u *QuotaKeyUpdateOne) sqlSave(ctx context.Context) (_node *QuotaKey, err 
 	}
 	if _u.mutation.ExpiresAtCleared() {
 		_spec.ClearField(quotakey.FieldExpiresAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeviceID(); ok {
+		_spec.SetField(quotakey.FieldDeviceID, field.TypeString, value)
+	}
+	if _u.mutation.DeviceIDCleared() {
+		_spec.ClearField(quotakey.FieldDeviceID, field.TypeString)
 	}
 	if value, ok := _u.mutation.UpdatedAt(); ok {
 		_spec.SetField(quotakey.FieldUpdatedAt, field.TypeTime, value)

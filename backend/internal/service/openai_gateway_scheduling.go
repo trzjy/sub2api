@@ -297,7 +297,7 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 // handler 调度入口仍需导出，保持导出名。）
 func NormalizeOpenAICompatiblePlatform(platform string) string {
 	switch platform {
-	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformCodeBuddy, PlatformOther, PlatformMuse:
+	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformCodeBuddy, PlatformOther, PlatformMuse, PlatformCursor:
 		return platform
 	}
 	// 上游多协议 API Key 供应商分支追加（权威表第 4 条）：kimi/zhipu/deepseek/minimax/

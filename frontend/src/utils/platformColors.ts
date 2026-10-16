@@ -28,6 +28,7 @@ export type Platform =
   | 'composite'
   | 'codebuddy'
   | 'muse'
+  | 'cursor'
 
 // ── Badge (bg + text + border, for inline badges with border) ───────
 const BADGE: Record<Platform, string> = {
@@ -48,6 +49,7 @@ const BADGE: Record<Platform, string> = {
   other: 'bg-slate-500/10 text-slate-600 border-slate-500/30 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 border-sky-500/30 dark:text-sky-400',
   muse: 'bg-fuchsia-500/10 text-fuchsia-600 border-fuchsia-500/30 dark:text-fuchsia-400',
+  cursor: 'bg-lime-500/10 text-lime-600 border-lime-500/30 dark:text-lime-400',
 }
 const BADGE_DEFAULT = 'bg-slate-500/10 text-slate-600 border-slate-500/30 dark:text-slate-400'
 
@@ -70,6 +72,7 @@ const BADGE_LIGHT: Record<Platform, string> = {
   other: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/10 dark:text-slate-300',
   codebuddy: 'bg-sky-500/10 text-sky-600 dark:bg-sky-500/10 dark:text-sky-300',
   muse: 'bg-fuchsia-500/10 text-fuchsia-600 dark:bg-fuchsia-500/10 dark:text-fuchsia-300',
+  cursor: 'bg-lime-500/10 text-lime-600 dark:bg-lime-500/10 dark:text-lime-300',
 }
 
 // ── Border ──────────────────────────────────────────────────────────
@@ -91,6 +94,7 @@ const BORDER: Record<Platform, string> = {
   other: 'border-slate-500/20 dark:border-slate-500/20',
   codebuddy: 'border-sky-500/20 dark:border-sky-500/20',
   muse: 'border-fuchsia-500/20 dark:border-fuchsia-500/20',
+  cursor: 'border-lime-500/20 dark:border-lime-500/20',
 }
 const BORDER_DEFAULT = 'border-gray-200 dark:border-dark-700'
 
@@ -113,6 +117,7 @@ const BORDER_STRONG: Record<Platform, string> = {
   other: 'border-slate-500/35 dark:border-slate-500/30',
   codebuddy: 'border-sky-500/35 dark:border-sky-500/30',
   muse: 'border-fuchsia-500/35 dark:border-fuchsia-500/30',
+  cursor: 'border-lime-500/35 dark:border-lime-500/30',
 }
 const BORDER_STRONG_DEFAULT = 'border-gray-300 dark:border-dark-600'
 
@@ -136,6 +141,7 @@ const ACCENT: Record<Platform, string> = {
   other: '#64748b', // slate-500
   codebuddy: '#0ea5e9', // sky-500
   muse: '#d946ef', // fuchsia-500
+  cursor: '#84cc16', // lime-500
 }
 const ACCENT_DEFAULT = '#14b8a6' // primary-500 (teal)
 
@@ -158,6 +164,7 @@ const ACCENT_BAR: Record<Platform, string> = {
   other: 'bg-gradient-to-r from-slate-500 to-slate-600',
   codebuddy: 'bg-gradient-to-r from-sky-400 to-sky-500',
   muse: 'bg-gradient-to-r from-fuchsia-400 to-fuchsia-500',
+  cursor: 'bg-gradient-to-r from-lime-400 to-lime-500',
 }
 const ACCENT_BAR_DEFAULT = 'bg-gradient-to-r from-primary-400 to-primary-500'
 
@@ -180,6 +187,7 @@ const TEXT: Record<Platform, string> = {
   other: 'text-slate-600 dark:text-slate-300',
   codebuddy: 'text-sky-600 dark:text-sky-400',
   muse: 'text-fuchsia-600 dark:text-fuchsia-400',
+  cursor: 'text-lime-600 dark:text-lime-400',
 }
 const TEXT_DEFAULT = 'text-primary-600 dark:text-primary-400'
 
@@ -202,6 +210,7 @@ const ICON: Record<Platform, string> = {
   other: 'text-slate-500 dark:text-slate-300',
   codebuddy: 'text-sky-500 dark:text-sky-400',
   muse: 'text-fuchsia-500 dark:text-fuchsia-400',
+  cursor: 'text-lime-500 dark:text-lime-400',
 }
 const ICON_DEFAULT = 'text-primary-500 dark:text-primary-400'
 
@@ -224,6 +233,7 @@ const BUTTON: Record<Platform, string> = {
   other: 'bg-slate-600 text-white hover:bg-slate-700 active:bg-slate-800 dark:bg-slate-600/80 dark:hover:bg-slate-600',
   codebuddy: 'bg-sky-500 text-white hover:bg-sky-600 active:bg-sky-700 dark:bg-sky-500/80 dark:hover:bg-sky-500',
   muse: 'bg-fuchsia-500 text-white hover:bg-fuchsia-600 active:bg-fuchsia-700 dark:bg-fuchsia-500/80 dark:hover:bg-fuchsia-500',
+  cursor: 'bg-lime-500 text-white hover:bg-lime-600 active:bg-lime-700 dark:bg-lime-500/80 dark:hover:bg-lime-500',
 }
 const BUTTON_DEFAULT = 'bg-primary-500 text-white hover:bg-primary-600 dark:bg-primary-600 dark:hover:bg-primary-500'
 
@@ -246,6 +256,7 @@ const DISCOUNT: Record<Platform, string> = {
   other: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
   codebuddy: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
   muse: 'bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/40 dark:text-fuchsia-300',
+  cursor: 'bg-lime-100 text-lime-700 dark:bg-lime-900/40 dark:text-lime-300',
 }
 const DISCOUNT_DEFAULT = 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
 
@@ -268,6 +279,7 @@ const GRADIENT: Record<Platform, string> = {
   other: 'from-slate-600 to-slate-700',
   codebuddy: 'from-sky-500 to-sky-600',
   muse: 'from-fuchsia-500 to-fuchsia-600',
+  cursor: 'from-lime-500 to-lime-600',
 }
 const GRADIENT_DEFAULT = 'from-primary-500 to-primary-600'
 
@@ -290,6 +302,7 @@ const GRADIENT_TEXT: Record<Platform, string> = {
   other: 'text-slate-100',
   codebuddy: 'text-sky-100',
   muse: 'text-fuchsia-100',
+  cursor: 'text-lime-100',
 }
 const GRADIENT_TEXT_DEFAULT = 'text-primary-100'
 
@@ -311,6 +324,7 @@ const GRADIENT_SUBTEXT: Record<Platform, string> = {
   other: 'text-slate-200',
   codebuddy: 'text-sky-200',
   muse: 'text-fuchsia-200',
+  cursor: 'text-lime-200',
 }
 const GRADIENT_SUBTEXT_DEFAULT = 'text-primary-200'
 
@@ -334,7 +348,8 @@ function isPlatform(p: string): p is Platform {
     p === 'composite' ||
     p === 'other' ||
     p === 'codebuddy' ||
-    p === 'muse'
+    p === 'muse' ||
+    p === 'cursor'
   )
 }
 
@@ -427,6 +442,7 @@ export function platformLabel(p: string): string {
     case 'composite': return 'Composite'
     case 'codebuddy': return 'CodeBuddy'
     case 'muse': return 'Muse'
+    case 'cursor': return 'Cursor'
     default: return p || 'API'
   }
 }

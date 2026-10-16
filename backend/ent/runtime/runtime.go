@@ -2086,12 +2086,16 @@ func init() {
 	quotakeyDescLastRefreshError := quotakeyFields[5].Descriptor()
 	// quotakey.LastRefreshErrorValidator is a validator for the "last_refresh_error" field. It is called by the builders before save.
 	quotakey.LastRefreshErrorValidator = quotakeyDescLastRefreshError.Validators[0].(func(string) error)
+	// quotakeyDescDeviceID is the schema descriptor for device_id field.
+	quotakeyDescDeviceID := quotakeyFields[8].Descriptor()
+	// quotakey.DeviceIDValidator is a validator for the "device_id" field. It is called by the builders before save.
+	quotakey.DeviceIDValidator = quotakeyDescDeviceID.Validators[0].(func(string) error)
 	// quotakeyDescCreatedAt is the schema descriptor for created_at field.
-	quotakeyDescCreatedAt := quotakeyFields[8].Descriptor()
+	quotakeyDescCreatedAt := quotakeyFields[9].Descriptor()
 	// quotakey.DefaultCreatedAt holds the default value on creation for the created_at field.
 	quotakey.DefaultCreatedAt = quotakeyDescCreatedAt.Default.(func() time.Time)
 	// quotakeyDescUpdatedAt is the schema descriptor for updated_at field.
-	quotakeyDescUpdatedAt := quotakeyFields[9].Descriptor()
+	quotakeyDescUpdatedAt := quotakeyFields[10].Descriptor()
 	// quotakey.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	quotakey.DefaultUpdatedAt = quotakeyDescUpdatedAt.Default.(func() time.Time)
 	// quotakey.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

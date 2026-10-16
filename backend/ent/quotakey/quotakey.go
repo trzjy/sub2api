@@ -33,6 +33,8 @@ const (
 	FieldLastRefreshAt = "last_refresh_at"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
 	FieldExpiresAt = "expires_at"
+	// FieldDeviceID holds the string denoting the device_id field in the database.
+	FieldDeviceID = "device_id"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
@@ -64,6 +66,7 @@ var Columns = []string{
 	FieldLastRefreshError,
 	FieldLastRefreshAt,
 	FieldExpiresAt,
+	FieldDeviceID,
 	FieldCreatedAt,
 	FieldUpdatedAt,
 	FieldNotes,
@@ -101,6 +104,8 @@ var (
 	DefaultExhausted bool
 	// LastRefreshErrorValidator is a validator for the "last_refresh_error" field. It is called by the builders before save.
 	LastRefreshErrorValidator func(string) error
+	// DeviceIDValidator is a validator for the "device_id" field. It is called by the builders before save.
+	DeviceIDValidator func(string) error
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultUpdatedAt holds the default value on creation for the "updated_at" field.
@@ -160,6 +165,11 @@ func ByLastRefreshAt(opts ...sql.OrderTermOption) OrderOption {
 // ByExpiresAt orders the results by the expires_at field.
 func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
+}
+
+// ByDeviceID orders the results by the device_id field.
+func ByDeviceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeviceID, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

@@ -30,11 +30,26 @@ func (errEncryptor) Encrypt(b []byte) ([]byte, error) { return b, nil }
 func (errEncryptor) Decrypt(b []byte) ([]byte, error) { return nil, errors.New("boom decrypt") }
 
 // loadUpstreamVector 读取权威向量（与 wasm 测试同源）。
+//
+// 依次尝试取证目录的多个落点：生产取证机用 /root/cursor-evidence/，开发机用
+// ~/.sub2api-acceptance/ 下的同名副本；都找不到才 Skip（绝不用桩数据伪造向量）。
 func loadUpstreamVector(t *testing.T) (metadata, mail, timestamp, expMail, expAT, expRT string, expRole int, expMode int) {
 	t.Helper()
-	raw, err := os.ReadFile("/root/cursor-evidence/06-zk01-vector.json")
-	if err != nil {
-		t.Skipf("vector file unavailable: %v", err)
+	candidates := []string{"/root/cursor-evidence/06-zk01-vector.json"}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			home+"/.sub2api-acceptance/sub2api-cursor-20261013/10-t3-shareai-contract/06-zk01-vector.json")
+	}
+	var raw []byte
+	var readErr error
+	for _, p := range candidates {
+		raw, readErr = os.ReadFile(p)
+		if readErr == nil {
+			break
+		}
+	}
+	if readErr != nil {
+		t.Skipf("vector file unavailable: %v", readErr)
 	}
 	var v struct {
 		Input struct {
@@ -316,5 +331,102 @@ func TestPullBatch_EncryptorError_NoLeak(t *testing.T) {
 func TestNewShareAIUpstreamClient_NilEncryptor(t *testing.T) {
 	if _, err := NewShareAIUpstreamClient(nil); err == nil {
 		t.Fatal("want error for nil encryptor, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B-11：key_info.expired_at（【激活码】到期时间）解析。
+// 取证事实见 10-t3-shareai-contract/03-refresh-1.json：refresh 响应的
+// data.key_info.expired_at = "2026-10-14T07:53:25.000Z"，是 quota_keys.expires_at
+// 的唯一事实源（区别于 metadata 内 account_expire_in —— 那是号池账号的有效期）。
+// ---------------------------------------------------------------------------
+
+// pullBatchWithKeyInfo 起一个替身上游，按 keyInfo 覆盖字段返回 refresh 响应。
+func pullBatchWithKeyInfo(t *testing.T, keyInfo map[string]interface{}) (*UpstreamPullResult, error) {
+	t.Helper()
+	md, mail, ts, _, _, _, _, _ := loadUpstreamVector(t)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 0, "msg": "ok",
+			"data": map[string]interface{}{
+				"metadata":  md,
+				"mail":      mail,
+				"timestamp": ts,
+				"key_info":  keyInfo,
+			},
+		})
+	})
+	return newTestClient(t, handler).PullBatch(context.Background(), &ent.QuotaKey{CodeEncrypted: "TESTCODE"})
+}
+
+// 11) key_info.expired_at 正常解析 → 上抛为 UpstreamPullResult.ExpiresAt。
+func TestPullBatch_ParsesKeyInfoExpiredAt(t *testing.T) {
+	res, err := pullBatchWithKeyInfo(t, map[string]interface{}{
+		"expired_at": "2026-10-14T07:53:25.000Z",
+	})
+	if err != nil {
+		t.Fatalf("PullBatch: %v", err)
+	}
+	if res.ExpiresAt == nil {
+		t.Fatal("ExpiresAt must be parsed from key_info.expired_at")
+	}
+	if got := res.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"); got != "2026-10-14T07:53:25Z" {
+		t.Errorf("ExpiresAt = %s, want 2026-10-14T07:53:25Z", got)
+	}
+}
+
+// 12) 上游未给 key_info → ExpiresAt 为 nil（绝不含激推算出的假日期）。
+func TestPullBatch_NoKeyInfo_ExpiresAtNil(t *testing.T) {
+	res, err := pullBatchWithKeyInfo(t, map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("PullBatch: %v", err)
+	}
+	if res.ExpiresAt != nil {
+		t.Errorf("ExpiresAt = %v, want nil when key_info absent", res.ExpiresAt)
+	}
+}
+
+// 13) expired_at 为 null / 空串 / 非法格式 → 一律 nil，且不阻断拉号主流程。
+func TestPullBatch_ExpiredAtUnusable_ExpiresAtNil(t *testing.T) {
+	cases := map[string]interface{}{
+		"null":       nil,
+		"empty":      "",
+		"bad_format": "not-a-timestamp",
+	}
+	for name, v := range cases {
+		t.Run(name, func(t *testing.T) {
+			res, err := pullBatchWithKeyInfo(t, map[string]interface{}{"expired_at": v})
+			if err != nil {
+				t.Fatalf("unusable expired_at must not fail the pull: %v", err)
+			}
+			if len(res.Accounts) != 1 {
+				t.Fatalf("want 1 account, got %d", len(res.Accounts))
+			}
+			if res.ExpiresAt != nil {
+				t.Errorf("ExpiresAt = %v, want nil", res.ExpiresAt)
+			}
+		})
+	}
+}
+
+// 14) parseKeyExpiresAt 直接单测：只接受 RFC3339，其余一律 nil。
+func TestParseKeyExpiresAt(t *testing.T) {
+	s := func(v string) *string { return &v }
+	if got := parseKeyExpiresAt(nil); got != nil {
+		t.Errorf("nil input => %v, want nil", got)
+	}
+	if got := parseKeyExpiresAt(s("  ")); got != nil {
+		t.Errorf("blank input => %v, want nil", got)
+	}
+	if got := parseKeyExpiresAt(s("2026-10-14 07:53:25")); got != nil {
+		t.Errorf("non-RFC3339 => %v, want nil", got)
+	}
+	got := parseKeyExpiresAt(s("2026-10-14T07:53:25.000Z"))
+	if got == nil {
+		t.Fatal("valid RFC3339 => nil, want parsed time")
+	}
+	if y, m, d := got.UTC().Date(); y != 2026 || m != 10 || d != 14 {
+		t.Errorf("parsed date = %d-%d-%d, want 2026-10-14", y, m, d)
 	}
 }

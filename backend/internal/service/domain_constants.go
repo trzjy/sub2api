@@ -63,6 +63,10 @@ const (
 	PlatformOther = domain.PlatformOther
 	// PlatformMuse 是 OpenCode Go 上游 Meta Muse Spark Contributor 平台（muse-1 新增）。
 	PlatformMuse = domain.PlatformMuse
+	// PlatformCursor 是 Cursor 站点渠道接入平台（shareai 号池中转，E2 卡接线）。
+	// 已登记进 domain 平台清单，故 IsGroupPlatform / IsConcretePlatform 对其为真，
+	// 可建 cursor 分组、可开 target_platform=cursor 的 composite 路由。
+	PlatformCursor = domain.PlatformCursor
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"

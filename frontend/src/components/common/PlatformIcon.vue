@@ -82,6 +82,10 @@
   <svg v-else-if="platform === 'codebuddy'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 3C7.03 3 3 6.36 3 10.5c0 2.36 1.31 4.46 3.34 5.83-.14.78-.58 1.86-1.34 2.83 1.86-.2 3.36-.86 4.31-1.53.73.18 1.5.28 2.69.28 4.97 0 9-3.36 9-7.5S16.97 3 12 3z" />
   </svg>
+  <!-- Cursor (generic pointer glyph; not a verbatim brand asset) -->
+  <svg v-else-if="platform === 'cursor'" :class="sizeClass" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M5.3 3.2a1 1 0 0 1 1.5-.86l11.1 6.4a1 1 0 0 1-.08 1.82l-4.53 2.3a1 1 0 0 0-.53.55l-2.1 4.9a1 1 0 0 1-1.9-.14L5.24 4.4a1 1 0 0 1 .06-1.2z" />
+  </svg>
   <!-- Fallback: generic platform icon -->
   <svg v-else :class="sizeClass" fill="currentColor" viewBox="0 0 24 24">
     <path

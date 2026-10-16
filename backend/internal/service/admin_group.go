@@ -396,6 +396,11 @@ func defaultModelsListCandidateIDs(platform string) []string {
 	case PlatformOther:
 		// other 无平台默认模型候选：候选完全来自账号 model_mapping / 自定义模型清单。
 		return nil
+	case PlatformCursor:
+		// cursor 同 other / muse 契约：无内置模型目录，模型完全来自账号 model_mapping。
+		// 必须显式返回 nil——否则会落进 default 分支把 Claude 列表当成 cursor 的候选
+		// 模型，污染 composite 分组的可选模型清单。
+		return nil
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {

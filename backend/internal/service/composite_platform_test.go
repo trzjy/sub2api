@@ -235,12 +235,12 @@ func TestCompositeGroupSchedulerHasAllCanonicalPlatformBuckets(t *testing.T) {
 	//
 	// 合并上游 v0.2.15 后候选调度平台经 domain SSOT（domain.CompositePrecedencePlatformIDs）
 	// 派生并追加我方 other（见 scheduler_snapshot_service.go）：上游新增
-	// opencode_go/typesafe/command_code/cline 与我方自研 codebuddy/muse 均为裸名桶键，
+	// opencode_go/typesafe/command_code/cline 与我方自研 codebuddy/muse/cursor 均为裸名桶键，
 	// 须一并纳入期望集合（消费者核对见本卡 notes「跨批依赖」）。
 	nonAggPlatforms := []string{
 		PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok,
 		PlatformOpenCodeGo, PlatformTypeSafe, PlatformCommandCode, PlatformCline,
-		PlatformCodeBuddy, PlatformMuse,
+		PlatformCodeBuddy, PlatformMuse, PlatformCursor,
 	}
 	// 聚合族五平台：裸名 + "@agg" + schedulerSnapshotAggregationVersion（用常量拼，不硬编码版本号）。
 	aggPlatforms := []string{

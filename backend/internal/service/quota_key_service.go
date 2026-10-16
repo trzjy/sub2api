@@ -59,6 +59,12 @@ type QuotaKeyRepository interface {
 	// 用 UpdateMeta 清空 expires_at，本语句按 DB 当前条件重新判定，不会将"曾经到期但已
 	// 被清空"的 key 误标 expired（D-CURSOR-032）。返回受影响行数（0 或 1）。
 	MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error)
+	// SetDeviceIDIfAbsent 在 device_id 当前为 NULL 或空串时写入给定值，返回受影响行数
+	// （命中 1，已被并发写入则 0）。这是 B-10 首次并发的防重闸门：把"是否已有值"的
+	// 判定下沉到 UPDATE 的 WHERE 条件，由 DB 原子裁决，多个并发首次请求中只有一个
+	// 能写入，其余拿到 0 行后重读赢家值，避免同一激活码分裂出两份 deviceId。
+	// 判定口径（NULL 或空串）须与 service 侧 DeviceIDFor 的读判定逐字一致。
+	SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error)
 }
 
 // QuotaKeyUpstreamClient 抽象"向上游拉取账号"的客户端。
@@ -86,6 +92,11 @@ type UpstreamAccount struct {
 // UpstreamPullResult 是上游一次拉号返回的批量结果。
 type UpstreamPullResult struct {
 	Accounts []*UpstreamAccount
+	// ExpiresAt 是本次响应 key_info.expired_at 解析出的【激活码】到期时间，
+	// 由拉号成功路径写入 quota_keys.expires_at（sweeper 的判定依据）。
+	// nil = 上游本次未给出可用到期时间；调用方必须保持 expires_at 原值不动，
+	// 不得据未知推算补日期（见 B-11）。
+	ExpiresAt *time.Time
 }
 
 // ErrUpstreamNotConnected 是生产默认占位客户端返回的"未接入上游"错误。
@@ -690,10 +701,16 @@ func (s *QuotaKeyService) pull(ctx context.Context, quotaKeyID int64, mountResol
 		// 清 exhausted 与错误占位。
 		// SetNillableLastRefreshError(nil) 对 nil 指针是 no-op（仅 v != nil 时才写），
 		// 必须用 ClearLastRefreshError() 才能真正把 last_refresh_error 置空。
+		//
+		// B-11：同一次写入顺带落 expires_at（上游 key_info.expired_at 的事实源）。
+		// SetNillableExpiresAt 对 nil 是 no-op —— 上游未给出到期时间时保持原值不动，
+		// 既不写假日期、也不清空管理员手工设置的值。上游给出的值始终覆盖本地值：
+		// 上游是激活码有效期的唯一权威，本地任何旧值都可能是陈旧的。
 		if _, err := tx.QuotaKey.UpdateOneID(quotaKeyID).
 			SetExhausted(false).
 			SetLastRefreshAt(time.Now()).
 			ClearLastRefreshError().
+			SetNillableExpiresAt(result.ExpiresAt).
 			Save(ctx); err != nil {
 			return fmt.Errorf("quota_key_service: clear exhausted: %w", err)
 		}

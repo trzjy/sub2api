@@ -2,6 +2,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -320,6 +321,7 @@ func (a *Account) IsCNProvider() bool {
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsMultiProtocolAPIKey() ||
 		a.Platform == PlatformOther || a.Platform == PlatformCodeBuddy || a.Platform == PlatformMuse ||
+		a.Platform == PlatformCursor ||
 		a.IsWebAccessMode())
 }
 
@@ -909,6 +911,14 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 			// 因此 whitelist 语义严格生效。
 			return false
 		}
+		if a.Platform == PlatformCursor {
+			// cursor 无内置模型目录：模型完全来自账号 model_mapping。空映射 = 无可服务
+			// 模型（与 other / muse 同契约）。此处失败关闭是**必需**的而非保守：
+			// cursor 出站是 Cursor 原生端点（/aiserver.v1.AIServiceService/*），把任意
+			// OpenAI 模型名原样发过去必然被上游拒绝；空映射放行等于让 cursor 号在任何
+			// 模型请求下都被选中，白耗 shareai 额度并回吐上游错误。
+			return false
+		}
 		return true // 无映射 = 允许所有
 	}
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
@@ -1447,7 +1457,7 @@ func (a *Account) IsOpenAIApiKey() bool {
 // （opencode_go / command_code / cline）同样经本函数取 base，故并入
 // IsMultiProtocolAPIKey 放行。
 func (a *Account) GetOpenAIBaseURL() string {
-	if !a.UsesOpenAIProtocolSharedBaseURL() && a.Platform != PlatformMuse && !a.IsMultiProtocolAPIKey() {
+	if !a.UsesOpenAIProtocolSharedBaseURL() && a.Platform != PlatformMuse && a.Platform != PlatformCursor && !a.IsMultiProtocolAPIKey() {
 		return ""
 	}
 	if a.IsMultiProtocolAPIKey() && a.IsAdaptiveAPIProtocol() {
@@ -1485,6 +1495,14 @@ func (a *Account) GetOpenAIBaseURL() string {
 		// 实际路由由 forwardCodeBuddy 直接按站点表打到上游。此处返回站点表 base 供
 		// 凭证探活等按账号站点取上游，禁止回落写死的 CN 域名。
 		return codeBuddyEndpointsFor(a.CodeBuddySite()).UpstreamBase
+	case PlatformCursor:
+		// cursor 同 codebuddy 口径：不走共享 base_url，实际路由由 forwardCursor
+		// 经 E1 转发器按节点发现打出。此处返回节点 base 供凭证探活等按账号取上游，
+		// 禁止写死域名——节点可由上游动态下发（add.csv），写死会在换线后失效。
+		//
+		// 用包级单例 resolver：节点发现自带 10 分钟缓存 + 失败降级到静态兜底节点，
+		// 故此处取到的 base 始终是当前可用节点，无需每次调用都探网络。
+		return cursorUpstreamNodesSingleton().Resolve(context.Background()).HTTP1Base
 	case PlatformOther:
 		// other 无内置默认上游：仅返回账号自定义 base_url；为空返回空，由上层
 		// 失败关闭，绝不回落官方 OpenAI 端点。

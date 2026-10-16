@@ -141,6 +141,20 @@ func (_c *QuotaKeyCreate) SetNillableExpiresAt(v *time.Time) *QuotaKeyCreate {
 	return _c
 }
 
+// SetDeviceID sets the "device_id" field.
+func (_c *QuotaKeyCreate) SetDeviceID(v string) *QuotaKeyCreate {
+	_c.mutation.SetDeviceID(v)
+	return _c
+}
+
+// SetNillableDeviceID sets the "device_id" field if the given value is not nil.
+func (_c *QuotaKeyCreate) SetNillableDeviceID(v *string) *QuotaKeyCreate {
+	if v != nil {
+		_c.SetDeviceID(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *QuotaKeyCreate) SetCreatedAt(v time.Time) *QuotaKeyCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -296,6 +310,11 @@ func (_c *QuotaKeyCreate) check() error {
 			return &ValidationError{Name: "last_refresh_error", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.last_refresh_error": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.DeviceID(); ok {
+		if err := quotakey.DeviceIDValidator(v); err != nil {
+			return &ValidationError{Name: "device_id", err: fmt.Errorf(`ent: validator failed for field "QuotaKey.device_id": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "QuotaKey.created_at"`)}
 	}
@@ -364,6 +383,10 @@ func (_c *QuotaKeyCreate) createSpec() (*QuotaKey, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ExpiresAt(); ok {
 		_spec.SetField(quotakey.FieldExpiresAt, field.TypeTime, value)
 		_node.ExpiresAt = &value
+	}
+	if value, ok := _c.mutation.DeviceID(); ok {
+		_spec.SetField(quotakey.FieldDeviceID, field.TypeString, value)
+		_node.DeviceID = &value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(quotakey.FieldCreatedAt, field.TypeTime, value)
@@ -586,6 +609,24 @@ func (u *QuotaKeyUpsert) UpdateExpiresAt() *QuotaKeyUpsert {
 // ClearExpiresAt clears the value of the "expires_at" field.
 func (u *QuotaKeyUpsert) ClearExpiresAt() *QuotaKeyUpsert {
 	u.SetNull(quotakey.FieldExpiresAt)
+	return u
+}
+
+// SetDeviceID sets the "device_id" field.
+func (u *QuotaKeyUpsert) SetDeviceID(v string) *QuotaKeyUpsert {
+	u.Set(quotakey.FieldDeviceID, v)
+	return u
+}
+
+// UpdateDeviceID sets the "device_id" field to the value that was provided on create.
+func (u *QuotaKeyUpsert) UpdateDeviceID() *QuotaKeyUpsert {
+	u.SetExcluded(quotakey.FieldDeviceID)
+	return u
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (u *QuotaKeyUpsert) ClearDeviceID() *QuotaKeyUpsert {
+	u.SetNull(quotakey.FieldDeviceID)
 	return u
 }
 
@@ -829,6 +870,27 @@ func (u *QuotaKeyUpsertOne) UpdateExpiresAt() *QuotaKeyUpsertOne {
 func (u *QuotaKeyUpsertOne) ClearExpiresAt() *QuotaKeyUpsertOne {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearExpiresAt()
+	})
+}
+
+// SetDeviceID sets the "device_id" field.
+func (u *QuotaKeyUpsertOne) SetDeviceID(v string) *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetDeviceID(v)
+	})
+}
+
+// UpdateDeviceID sets the "device_id" field to the value that was provided on create.
+func (u *QuotaKeyUpsertOne) UpdateDeviceID() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateDeviceID()
+	})
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (u *QuotaKeyUpsertOne) ClearDeviceID() *QuotaKeyUpsertOne {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearDeviceID()
 	})
 }
 
@@ -1243,6 +1305,27 @@ func (u *QuotaKeyUpsertBulk) UpdateExpiresAt() *QuotaKeyUpsertBulk {
 func (u *QuotaKeyUpsertBulk) ClearExpiresAt() *QuotaKeyUpsertBulk {
 	return u.Update(func(s *QuotaKeyUpsert) {
 		s.ClearExpiresAt()
+	})
+}
+
+// SetDeviceID sets the "device_id" field.
+func (u *QuotaKeyUpsertBulk) SetDeviceID(v string) *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.SetDeviceID(v)
+	})
+}
+
+// UpdateDeviceID sets the "device_id" field to the value that was provided on create.
+func (u *QuotaKeyUpsertBulk) UpdateDeviceID() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.UpdateDeviceID()
+	})
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (u *QuotaKeyUpsertBulk) ClearDeviceID() *QuotaKeyUpsertBulk {
+	return u.Update(func(s *QuotaKeyUpsert) {
+		s.ClearDeviceID()
 	})
 }
 

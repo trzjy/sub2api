@@ -505,6 +505,20 @@ func (r *testDBRepo) ListExpired(ctx context.Context, now time.Time) ([]*ent.Quo
 		Where(quotakey.ExpiresAtNotNil(), quotakey.ExpiresAtLT(now)).All(ctx)
 }
 
+// SetDeviceIDIfAbsent 内存替身：模拟 DB 条件化写入（WHERE device_id IS NULL OR =''），
+// 与 production repository / service 读判定三者语义一致。
+func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, deviceID string) (int, error) {
+	qk, ok := f.byID[id]
+	if !ok {
+		return 0, errQuotaKeyNotFound
+	}
+	if qk.DeviceID != nil && *qk.DeviceID != "" {
+		return 0, nil
+	}
+	qk.DeviceID = &deviceID
+	return 1, nil
+}
+
 // MarkExpiredIfStillExpired 真实 DB 替身：与 production repository 同语义的条件化写入。
 func (r *testDBRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, id int64, now time.Time) (int, error) {
 	return tx.QuotaKey.Update().
@@ -515,6 +529,14 @@ func (r *testDBRepo) MarkExpiredIfStillExpired(ctx context.Context, tx *ent.Tx, 
 
 func (r *testDBRepo) ListByStatus(ctx context.Context, status string) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().Where(quotakey.Status(status)).All(ctx)
+}
+
+// SetDeviceIDIfAbsent 真实 DB 替身：与 production repository 同语义的条件化写入。
+func (r *testDBRepo) SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error) {
+	return r.client.QuotaKey.Update().
+		Where(quotakey.ID(id), quotakey.Or(quotakey.DeviceIDIsNil(), quotakey.DeviceIDEQ(""))).
+		SetDeviceID(deviceID).
+		Save(ctx)
 }
 
 func (r *testDBRepo) CountWorkingAccounts(ctx context.Context, tx *ent.Tx, quotaKeyID int64) (int, error) {
@@ -2012,4 +2034,126 @@ func TestQuotaKeyService_Pull_InsertFailureMarkerWriteFailsRollsBackOnlyThisRoun
 	post, err := w.ListCandidateKeys(ctx, "cursor-r5-markerfail", 0)
 	require.NoError(t, err)
 	require.Contains(t, post, qk.ID, "R5-2 boundary: marker-write failure must NOT exit candidate set (only this-round stop)")
+}
+
+// ---------------------------------------------------------------------------
+// B-11：拉号成功路径写入 expires_at（上游 key_info.expired_at 的事实源）。
+// 修复前 expires_at 永远为 NULL → sweeper/reconciler 的"未过期"判定形同虚设。
+// ---------------------------------------------------------------------------
+
+// TestQuotaKeyPull_WritesExpiresAtFromUpstream：上游给出到期时间 → 成功落库写入 expires_at。
+func TestQuotaKeyPull_WritesExpiresAtFromUpstream(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	upstreamExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{
+			Accounts:  []*UpstreamAccount{{Name: "ok-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}}},
+			ExpiresAt: &upstreamExpiry,
+		},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt, "pull success must persist expires_at from upstream")
+	require.WithinDuration(t, upstreamExpiry, *got.ExpiresAt, time.Second,
+		"persisted expires_at must equal upstream key_info.expired_at")
+}
+
+// TestQuotaKeyPull_UpstreamWithoutExpiry_KeepsExistingExpiresAt：
+// 上游未给出到期时间（nil）→ expires_at 原值不动。
+// 既不能被清空（管理员手工设置会丢），也不能被填一个推算出的假日期。
+func TestQuotaKeyPull_UpstreamWithoutExpiry_KeepsExistingExpiresAt(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{
+			Accounts: []*UpstreamAccount{{Name: "ok-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}}},
+		},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	manual := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).SetExpiresAt(manual).Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt, "upstream without expiry must not clear existing expires_at")
+	require.WithinDuration(t, manual, *got.ExpiresAt, time.Second,
+		"existing expires_at must be preserved when upstream gives no expiry")
+}
+
+// TestQuotaKeyPull_UpstreamExpiryOverwritesStaleValue：
+// 本地存的是陈旧到期时间 → 上游值必须覆盖（上游是唯一权威）。
+func TestQuotaKeyPull_UpstreamExpiryOverwritesStaleValue(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	upstreamExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{
+			Accounts:  []*UpstreamAccount{{Name: "ok-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}}},
+			ExpiresAt: &upstreamExpiry,
+		},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	stale := time.Now().UTC().Add(365 * 24 * time.Hour).Truncate(time.Second)
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).SetExpiresAt(stale).Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt)
+	require.WithinDuration(t, upstreamExpiry, *got.ExpiresAt, time.Second,
+		"stale local expires_at must be overwritten by upstream value")
+}
+
+// TestQuotaKeyPull_WrittenExpiryDrivesSweeper_EndToEnd：
+// 端到端证明修复目的——写入 expires_at 后，sweeper 能把到期码标为 expired，
+// 从此不再进入 reconciler 候选（修复前 expires_at 恒 NULL，该链路不可能发生）。
+func TestQuotaKeyPull_WrittenExpiryDrivesSweeper_EndToEnd(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	// 上游告知的到期时间已过（仍在成功响应里返回，模拟"到期时间刚过但拉号未报错"）。
+	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{
+			Accounts:  []*UpstreamAccount{{Name: "ok-1", Platform: "cursor", Type: "oauth", Credentials: map[string]any{}}},
+			ExpiresAt: &past,
+		},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+
+	stored, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.ExpiresAt)
+	require.True(t, stored.ExpiresAt.Before(time.Now()), "test precondition: stored expiry is in the past")
+
+	// sweeper 标 expired（复用既有 sweepOnce，不新造机制）。
+	// 计数只作"本轮确有改写"的下限断言：测试库与其它 QuotaKey 用例共用且不清库，
+	// 其它用例遗留的到期码会一并被扫，故不断言精确条数（本 key 的状态才是判据）。
+	sweeper := NewQuotaKeySweeper(&testDBRepo{client: client}, nil, client)
+	n, err := sweeper.SweepNow(ctx)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, n, 1, "sweeper must mark at least the expired key")
+
+	after, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusExpired, after.Status)
+
+	// 已 expired 的码不再是候选 —— 这正是 B-11 修复要恢复的语义。
+	water := &quotaKeyModelWater{client: client}
+	candidates, err := water.ListCandidateKeys(ctx, "cursor-any", 0)
+	require.NoError(t, err)
+	require.NotContains(t, candidates, qk.ID, "expired key must not remain a rotation candidate")
 }

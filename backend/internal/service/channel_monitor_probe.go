@@ -303,6 +303,14 @@ func isAnthropicProbeTarget(acc *Account) bool {
 // 可探测协议族：anthropic 原生协议、OpenAI 兼容（含 grok/CN/other/codebuddy/muse/web）、
 // gemini 且仅 apikey/upstream 型（gemini OAuth 依赖令牌刷新，不直连）。
 func canDirectProbe(acc *Account) bool {
+	// cursor 必须显式排除，尽管它 IsOpenAICompatible()==true：本探针按协议族构造请求，
+	// cursor 命中的是 OpenAI Chat Completions 形状，而 cursor 上游是 Cursor **原生**端点
+	//（/aiserver.v1.AIServiceService/*，protobuf-JSON + 私有 SSE 帧）。把 OpenAI 形状的
+	// 探针打到 cursor 端点必然被拒，会把健康账号误标 last_ok=false。cursor 的可用性
+	// 由 cursor 自身的探针口径负责（不在本探针范围）。
+	if acc != nil && acc.Platform == PlatformCursor {
+		return false
+	}
 	return acc != nil && (isAnthropicProbeTarget(acc) ||
 		acc.IsOpenAICompatible() ||
 		(acc.IsGemini() && isAPIKeyOrUpstream(acc)))

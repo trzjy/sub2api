@@ -107,6 +107,31 @@ func (r *quotaKeyRepository) UpdateCredentials(ctx context.Context, id int64, co
 	return err
 }
 
+// SetDeviceIDIfAbsent 在 device_id 当前为 NULL 或空串时写入给定值，返回受影响行数（1 / 0）。
+//
+// 并发防重（B-10）：条件判定放在 UPDATE 的 WHERE 里由 DB 原子裁决，而不是"先查后写"。
+// 后者在两个请求同时首次进入时会双双读到 NULL、各自生成一个不同的 deviceId，
+// 后写者覆盖先写者，同一激活码出现两份设备标识（上游会视为两个不同客户端）。
+// 这里只有把 NULL/空串改成非空的那一个事务命中，其余受影响 0 行，由调用方重读赢家值。
+//
+// WHERE 覆盖"NULL 或空串"两种未生成形态，与 service 侧 DeviceIDFor 的读判定
+// （DeviceID == nil || *DeviceID == ""）逐字一致——两侧判定若不一致，会出现
+// "读侧认为已有、写侧仍可写"的错配，进而在竞态分支读到本请求自己刚写的值。
+//
+// 与 MarkExpiredIfStillExpired 同款写法：条件化写入天然幂等，重复调用第二次即 0 行。
+func (r *quotaKeyRepository) SetDeviceIDIfAbsent(ctx context.Context, id int64, deviceID string) (int, error) {
+	return r.client.QuotaKey.Update().
+		Where(
+			quotakey.ID(id),
+			quotakey.Or(
+				quotakey.DeviceIDIsNil(),
+				quotakey.DeviceIDEQ(""),
+			),
+		).
+		SetDeviceID(deviceID).
+		Save(ctx)
+}
+
 // ListExpired 返回 expires_at 非空且早于 now 的激活码（sweep_expired 用）。
 func (r *quotaKeyRepository) ListExpired(ctx context.Context, now time.Time) ([]*ent.QuotaKey, error) {
 	return r.client.QuotaKey.Query().

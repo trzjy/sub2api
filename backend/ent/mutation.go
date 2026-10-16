@@ -42796,6 +42796,7 @@ type QuotaKeyMutation struct {
 	last_refresh_error *string
 	last_refresh_at    *time.Time
 	expires_at         *time.Time
+	device_id          *string
 	created_at         *time.Time
 	updated_at         *time.Time
 	notes              *string
@@ -43308,6 +43309,55 @@ func (m *QuotaKeyMutation) ResetExpiresAt() {
 	delete(m.clearedFields, quotakey.FieldExpiresAt)
 }
 
+// SetDeviceID sets the "device_id" field.
+func (m *QuotaKeyMutation) SetDeviceID(s string) {
+	m.device_id = &s
+}
+
+// DeviceID returns the value of the "device_id" field in the mutation.
+func (m *QuotaKeyMutation) DeviceID() (r string, exists bool) {
+	v := m.device_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeviceID returns the old "device_id" field's value of the QuotaKey entity.
+// If the QuotaKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *QuotaKeyMutation) OldDeviceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeviceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeviceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeviceID: %w", err)
+	}
+	return oldValue.DeviceID, nil
+}
+
+// ClearDeviceID clears the value of the "device_id" field.
+func (m *QuotaKeyMutation) ClearDeviceID() {
+	m.device_id = nil
+	m.clearedFields[quotakey.FieldDeviceID] = struct{}{}
+}
+
+// DeviceIDCleared returns if the "device_id" field was cleared in this mutation.
+func (m *QuotaKeyMutation) DeviceIDCleared() bool {
+	_, ok := m.clearedFields[quotakey.FieldDeviceID]
+	return ok
+}
+
+// ResetDeviceID resets all changes to the "device_id" field.
+func (m *QuotaKeyMutation) ResetDeviceID() {
+	m.device_id = nil
+	delete(m.clearedFields, quotakey.FieldDeviceID)
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *QuotaKeyMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -43517,7 +43567,7 @@ func (m *QuotaKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *QuotaKeyMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 13)
 	if m.deleted_at != nil {
 		fields = append(fields, quotakey.FieldDeletedAt)
 	}
@@ -43544,6 +43594,9 @@ func (m *QuotaKeyMutation) Fields() []string {
 	}
 	if m.expires_at != nil {
 		fields = append(fields, quotakey.FieldExpiresAt)
+	}
+	if m.device_id != nil {
+		fields = append(fields, quotakey.FieldDeviceID)
 	}
 	if m.created_at != nil {
 		fields = append(fields, quotakey.FieldCreatedAt)
@@ -43580,6 +43633,8 @@ func (m *QuotaKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.LastRefreshAt()
 	case quotakey.FieldExpiresAt:
 		return m.ExpiresAt()
+	case quotakey.FieldDeviceID:
+		return m.DeviceID()
 	case quotakey.FieldCreatedAt:
 		return m.CreatedAt()
 	case quotakey.FieldUpdatedAt:
@@ -43613,6 +43668,8 @@ func (m *QuotaKeyMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldLastRefreshAt(ctx)
 	case quotakey.FieldExpiresAt:
 		return m.OldExpiresAt(ctx)
+	case quotakey.FieldDeviceID:
+		return m.OldDeviceID(ctx)
 	case quotakey.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case quotakey.FieldUpdatedAt:
@@ -43691,6 +43748,13 @@ func (m *QuotaKeyMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetExpiresAt(v)
 		return nil
+	case quotakey.FieldDeviceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeviceID(v)
+		return nil
 	case quotakey.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -43760,6 +43824,9 @@ func (m *QuotaKeyMutation) ClearedFields() []string {
 	if m.FieldCleared(quotakey.FieldExpiresAt) {
 		fields = append(fields, quotakey.FieldExpiresAt)
 	}
+	if m.FieldCleared(quotakey.FieldDeviceID) {
+		fields = append(fields, quotakey.FieldDeviceID)
+	}
 	if m.FieldCleared(quotakey.FieldNotes) {
 		fields = append(fields, quotakey.FieldNotes)
 	}
@@ -43794,6 +43861,9 @@ func (m *QuotaKeyMutation) ClearField(name string) error {
 		return nil
 	case quotakey.FieldExpiresAt:
 		m.ClearExpiresAt()
+		return nil
+	case quotakey.FieldDeviceID:
+		m.ClearDeviceID()
 		return nil
 	case quotakey.FieldNotes:
 		m.ClearNotes()
@@ -43832,6 +43902,9 @@ func (m *QuotaKeyMutation) ResetField(name string) error {
 		return nil
 	case quotakey.FieldExpiresAt:
 		m.ResetExpiresAt()
+		return nil
+	case quotakey.FieldDeviceID:
+		m.ResetDeviceID()
 		return nil
 	case quotakey.FieldCreatedAt:
 		m.ResetCreatedAt()

@@ -100,6 +100,11 @@ func ExpiresAt(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldExpiresAt, v))
 }
 
+// DeviceID applies equality check predicate on the "device_id" field. It's identical to DeviceIDEQ.
+func DeviceID(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldDeviceID, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldEQ(FieldCreatedAt, v))
@@ -628,6 +633,81 @@ func ExpiresAtIsNil() predicate.QuotaKey {
 // ExpiresAtNotNil applies the NotNil predicate on the "expires_at" field.
 func ExpiresAtNotNil() predicate.QuotaKey {
 	return predicate.QuotaKey(sql.FieldNotNull(FieldExpiresAt))
+}
+
+// DeviceIDEQ applies the EQ predicate on the "device_id" field.
+func DeviceIDEQ(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEQ(FieldDeviceID, v))
+}
+
+// DeviceIDNEQ applies the NEQ predicate on the "device_id" field.
+func DeviceIDNEQ(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNEQ(FieldDeviceID, v))
+}
+
+// DeviceIDIn applies the In predicate on the "device_id" field.
+func DeviceIDIn(vs ...string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIn(FieldDeviceID, vs...))
+}
+
+// DeviceIDNotIn applies the NotIn predicate on the "device_id" field.
+func DeviceIDNotIn(vs ...string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotIn(FieldDeviceID, vs...))
+}
+
+// DeviceIDGT applies the GT predicate on the "device_id" field.
+func DeviceIDGT(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGT(FieldDeviceID, v))
+}
+
+// DeviceIDGTE applies the GTE predicate on the "device_id" field.
+func DeviceIDGTE(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldGTE(FieldDeviceID, v))
+}
+
+// DeviceIDLT applies the LT predicate on the "device_id" field.
+func DeviceIDLT(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLT(FieldDeviceID, v))
+}
+
+// DeviceIDLTE applies the LTE predicate on the "device_id" field.
+func DeviceIDLTE(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldLTE(FieldDeviceID, v))
+}
+
+// DeviceIDContains applies the Contains predicate on the "device_id" field.
+func DeviceIDContains(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldContains(FieldDeviceID, v))
+}
+
+// DeviceIDHasPrefix applies the HasPrefix predicate on the "device_id" field.
+func DeviceIDHasPrefix(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldHasPrefix(FieldDeviceID, v))
+}
+
+// DeviceIDHasSuffix applies the HasSuffix predicate on the "device_id" field.
+func DeviceIDHasSuffix(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldHasSuffix(FieldDeviceID, v))
+}
+
+// DeviceIDIsNil applies the IsNil predicate on the "device_id" field.
+func DeviceIDIsNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldIsNull(FieldDeviceID))
+}
+
+// DeviceIDNotNil applies the NotNil predicate on the "device_id" field.
+func DeviceIDNotNil() predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldNotNull(FieldDeviceID))
+}
+
+// DeviceIDEqualFold applies the EqualFold predicate on the "device_id" field.
+func DeviceIDEqualFold(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldEqualFold(FieldDeviceID, v))
+}
+
+// DeviceIDContainsFold applies the ContainsFold predicate on the "device_id" field.
+func DeviceIDContainsFold(v string) predicate.QuotaKey {
+	return predicate.QuotaKey(sql.FieldContainsFold(FieldDeviceID, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

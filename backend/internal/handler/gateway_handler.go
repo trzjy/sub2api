@@ -1584,6 +1584,10 @@ func defaultModelIDsForPlatform(platform string) []string {
 		// muse 有系统托管模型目录（上游 /zen/go/v1/models 动态拉取），公开模型列表
 		// 完全来自组内账号 model_mapping；返回空列表，避免回落到 Claude 默认模型。
 		return nil
+	case service.PlatformCursor:
+		// cursor 无平台内置模型目录：公开模型列表完全来自组内账号 model_mapping；
+		// 返回空列表，避免回落到 Claude 默认模型（与 other / muse 同契约）。
+		return nil
 	default:
 		ids := make([]string, 0, len(claude.DefaultModels))
 		for _, model := range claude.DefaultModels {
