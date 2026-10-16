@@ -3136,7 +3136,16 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	}
 	if success {
 		s.openaiOAuth429RetryStartedAt.Delete(accountID)
-		s.clearOpenAIAccountModelTransientState(accountID, normalizeOpenAIAccountModelTransientModel(model))
+		// r6 阻塞2（AC-A1）：401 记账在 resolveCredentialAccount 解析后的母账号 ID 上，
+		// 而此处原本只清被调度账号 ID，导致影子场景母子键错位、连击永不清零。
+		// 对称清键：原账号 ID 与解析后的母账号 ID 两键都清（幂等，非影子场景两键相同）。
+		clearModel := normalizeOpenAIAccountModelTransientModel(model)
+		s.clearOpenAIAccountModelTransientState(accountID, clearModel)
+		if s.accountRepo != nil {
+			if resolved, rerr := resolveCredentialAccount(context.Background(), s.accountRepo, account); rerr == nil && resolved != nil && resolved.ID != accountID {
+				s.clearOpenAIAccountModelTransientState(resolved.ID, clearModel)
+			}
+		}
 	}
 	scheduler := s.getOpenAIAccountScheduler(context.Background())
 	if scheduler == nil {

@@ -183,6 +183,14 @@ func (s *accountRepoStub) ClearTempUnschedulable(ctx context.Context, id int64) 
 	panic("unexpected ClearTempUnschedulable call")
 }
 
+func (s *accountRepoStub) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *accountRepoStub) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}
+
 func (s *accountRepoStub) ClearRateLimit(ctx context.Context, id int64) error {
 	panic("unexpected ClearRateLimit call")
 }
@@ -311,7 +319,7 @@ func (r *accountRepoStub) SetTempUnschedulableReason(_ context.Context, _ int64,
 }
 
 // DeleteModelRateLimitsMetaKeys 是 D-QL-007 F2 新增仓库方法的 no-op 桩
-//（AccountRepository 近期新增方法，本测试桩无需行为）。
+// （AccountRepository 近期新增方法，本测试桩无需行为）。
 func (r *accountRepoStub) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
 	return 0, nil
 }

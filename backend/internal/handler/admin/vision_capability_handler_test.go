@@ -80,7 +80,7 @@ func (r *fakeAccountRepo) BatchUpdateLastUsed(ctx context.Context, updates map[i
 	return nil
 }
 func (r *fakeAccountRepo) SetError(ctx context.Context, id int64, errorMsg string) error { return nil }
-func (r *fakeAccountRepo) ClearError(ctx context.Context, id int64) error                 { return nil }
+func (r *fakeAccountRepo) ClearError(ctx context.Context, id int64) error                { return nil }
 func (r *fakeAccountRepo) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
 	return nil
 }
@@ -90,7 +90,9 @@ func (r *fakeAccountRepo) AutoPauseExpiredAccounts(ctx context.Context, now time
 func (r *fakeAccountRepo) BindGroups(ctx context.Context, accountID int64, groupIDs []int64) error {
 	return nil
 }
-func (r *fakeAccountRepo) ListSchedulable(ctx context.Context) ([]service.Account, error) { return nil, nil }
+func (r *fakeAccountRepo) ListSchedulable(ctx context.Context) ([]service.Account, error) {
+	return nil, nil
+}
 func (r *fakeAccountRepo) ListSchedulableByGroupID(ctx context.Context, groupID int64) ([]service.Account, error) {
 	return nil, nil
 }
@@ -121,7 +123,9 @@ func (r *fakeAccountRepo) SetRateLimited(ctx context.Context, id int64, resetAt 
 func (r *fakeAccountRepo) SetModelRateLimit(ctx context.Context, id int64, scope string, resetAt time.Time, reason ...string) error {
 	return nil
 }
-func (r *fakeAccountRepo) SetOverloaded(ctx context.Context, id int64, until time.Time) error { return nil }
+func (r *fakeAccountRepo) SetOverloaded(ctx context.Context, id int64, until time.Time) error {
+	return nil
+}
 func (r *fakeAccountRepo) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
 	return nil
 }
@@ -131,6 +135,12 @@ func (r *fakeAccountRepo) ListTempUnschedulableAccounts(ctx context.Context, now
 }
 func (r *fakeAccountRepo) SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error {
 	return nil
+}
+func (r *fakeAccountRepo) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+func (r *fakeAccountRepo) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
 }
 func (r *fakeAccountRepo) ClearRateLimit(ctx context.Context, id int64) error { return nil }
 func (r *fakeAccountRepo) ClearAntigravityQuotaScopes(ctx context.Context, id int64) error {
@@ -146,6 +156,7 @@ func (r *fakeAccountRepo) UpdateSessionWindowEnd(ctx context.Context, id int64, 
 func (r *fakeAccountRepo) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
 	return nil
 }
+
 // TH 会话持久化三方法（D-TH-05A 在 AccountRepository 接口新增）的 no-op 桩，
 // 补齐接口，本测试不涉该路径。
 func (r *fakeAccountRepo) StoreTokenHarborSession(context.Context, int64, string, time.Time) error {

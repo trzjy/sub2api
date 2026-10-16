@@ -3,12 +3,12 @@
 package service
 
 import (
-	"time"
 	"context"
 	"errors"
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -607,3 +607,10 @@ func (r *accountRepoStubForBulkUpdate) SetTempUnschedulableReason(_ context.Cont
 	return nil
 }
 
+func (r *accountRepoStubForBulkUpdate) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (r *accountRepoStubForBulkUpdate) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}

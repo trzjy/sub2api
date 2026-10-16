@@ -91,6 +91,15 @@ func (s *longContextBillingRepoStub) SetTempUnschedulableReason(_ context.Contex
 	return nil
 }
 
+// ClearTempUnschedulableIfGeneration 是健康探测接口的条件清除 no-op 桩（AC-G2R5）。
+func (s *longContextBillingRepoStub) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *longContextBillingRepoStub) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}
+
 func (r *longContextBillingRepoStub) Create(_ context.Context, account *Account) error {
 	account.ID = 1
 	r.account = account

@@ -605,6 +605,9 @@ func NewOpenAIGatewayService(
 	}
 	if rateLimitService != nil {
 		rateLimitService.SetAccountRuntimeBlocker(svc)
+		// AC-A1：将 gateway 持有的同一 openaiModelTransient 实例注入 RateLimitService，
+		// 作为 OAuth 401 失败连击阶梯与 5xx 阶梯的共享单一事实源。
+		rateLimitService.SetModelTransientState(svc.openaiModelTransient)
 	}
 	if openAITokenProvider != nil {
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)

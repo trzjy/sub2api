@@ -35,6 +35,11 @@ type RateLimitService struct {
 	// cnQuotaLifecycle 额度耗尽状态机响应式入口（D-QL-002，可选依赖；
 	// CN 402/429 响应式信号经此移交停调语义，见 ratelimit_cn_providers.go）。
 	cnQuotaLifecycle CNQuotaLifecycleEntry
+	// modelTransient 是 OAuth 401 失败连击阶梯（AC-A1）的共享状态机引用。
+	// 由 gateway 构造期注入同一实例（与 5xx 阶梯共用，单一事实源）；
+	// 只存引用、不 new。为 nil 时 401 阶梯不生效，保持旧行为的 10 分钟失败
+	// 关闭语义（wiring 回退）。
+	modelTransient *openAIAccountModelTransientState
 	// ollamaCloudUsageProbe is the optional Ollama Cloud usage probe scheduler
 	// injected via SetOllamaCloudUsageProbeScheduler. See
 	// ratelimit_service_ollama_429.go for how real-Ollama 429s schedule an async
@@ -113,6 +118,29 @@ const (
 	openAI403CounterWindowMinutes   = 180
 )
 
+// oauth401RecoverableMarker 是 OAuth 401 连击阶梯写入 TempUnschedState 的固定类别标记
+// （AC-A1）。值等匹配用，不得填上游错误全文。
+const oauth401RecoverableMarker = "oauth_401_recoverable"
+
+// buildOAuth401RecoverableReason 生成 OAuth 401 连击阶梯可解析的 TempUnschedState JSON
+// reason（AC-A1）：MatchedKeyword 固定为 oauth401RecoverableMarker，ErrorMessage 保留原 msg 文案
+// （供排障），UntilUnix/TriggeredAtUnix 记录冷却窗口。
+func buildOAuth401RecoverableReason(errorMsg string, until, now time.Time, streak int) string {
+	state := TempUnschedState{
+		UntilUnix:       until.Unix(),
+		TriggeredAtUnix: now.Unix(),
+		StatusCode:      401,
+		MatchedKeyword:  oauth401RecoverableMarker,
+		ErrorMessage:    errorMsg,
+		TriggerCount:    int64(streak),
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return errorMsg
+	}
+	return string(raw)
+}
+
 // NewRateLimitService 创建RateLimitService实例
 func NewRateLimitService(accountRepo AccountRepository, usageRepo UsageLogRepository, cfg *config.Config, geminiQuotaService *GeminiQuotaService, tempUnschedCache TempUnschedCache) *RateLimitService {
 	return &RateLimitService{
@@ -158,6 +186,13 @@ func (s *RateLimitService) SetSettingService(settingService *SettingService) {
 // SetTokenCacheInvalidator 设置 token 缓存清理器（可选依赖）
 func (s *RateLimitService) SetTokenCacheInvalidator(invalidator TokenCacheInvalidator) {
 	s.tokenCacheInvalidator = invalidator
+}
+
+// SetModelTransientState 注入 OAuth 401 失败连击阶梯（AC-A1）共享状态机。
+// 与 OpenAIGatewayService 持有的同一实例（单一事实源）；只存引用、不 new。
+// 装配未注入（nil）时 401 阶梯不生效，走旧 10 分钟冷却回退语义。
+func (s *RateLimitService) SetModelTransientState(state *openAIAccountModelTransientState) {
+	s.modelTransient = state
 }
 
 func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocker) {
@@ -606,13 +641,49 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 					slog.Info("antigravity_401_force_refresh_marked", "account_id", authAccount.ID)
 				}
 			}
-			cooldownMinutes := s.cfg.RateLimit.OAuth401CooldownMinutes
-			if cooldownMinutes <= 0 {
-				cooldownMinutes = 10
+			// 失败连击阶梯（AC-A1）之前的模型键守门（AC-G2R6 must_fix 第3条主功能漏洞）：
+			// 进入阶梯前检查模型键，空键（无 requestedModel，如定时刷新/保活触发或上游在非请求
+			// 上下文返回 401）无法定位模型维度，阶梯失去意义且会对整账号无差别连击误伤；此时
+			// 不进阶梯，直接走既有 OAuth401CooldownMinutes 冷却（失败关闭，同 modelTransient==nil
+			// 的回退分支）。
+			model := tempUnschedulableModel(ctx, requestedModel)
+			// modelTransient 未注入（wiring 缺失）或模型键为空时回退旧行为：一次即 10 分钟冷却 + shouldDisable。
+			if s.modelTransient == nil || strings.TrimSpace(model) == "" {
+				if strings.TrimSpace(model) == "" {
+					slog.Warn("oauth_401_empty_model_key_fallback_cooldown",
+						"account_id", authAccount.ID, "platform", authAccount.Platform)
+				}
+				cooldownMinutes := s.cfg.RateLimit.OAuth401CooldownMinutes
+				if cooldownMinutes <= 0 {
+					cooldownMinutes = 10
+				}
+				until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+				s.notifyAccountSchedulingBlocked(authAccount, until, "oauth_401")
+				if err := s.accountRepo.SetTempUnschedulable(ctx, authAccount.ID, until, msg); err != nil {
+					slog.Warn("oauth_401_set_temp_unschedulable_failed", "account_id", authAccount.ID, "error", err)
+				}
+				shouldDisable = true
+				break
 			}
-			until := time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+			// 失败连击阶梯（AC-A1）：共享状态机记录失败，按连击次数决定冷却。
+			// streak==1：不置任何冷却，仅本次请求失败，账号继续可调度；
+			// streak==2：冷却 openAIModelTransientShortCooldown（10s）；
+			// streak>=3：冷却 openAIModelTransientLongCooldown（30s，用户裁定）。
+			// 401 记账在 resolveCredentialAccount 解析后的母账号 ID 上（与下方 SetTempUnschedulable
+			// 的 authAccount.ID 一致），成功出口对称清键（见 openai_account_scheduler.go）。
+			decision := s.modelTransient.recordFailure(authAccount.ID, model, time.Now())
+			if decision.Cooldown <= 0 {
+				// streak==1：不置冷却、账号继续可调度（仅本次请求失败）。
+				shouldDisable = false
+				break
+			}
+			now := time.Now()
+			until := now.Add(decision.Cooldown)
 			s.notifyAccountSchedulingBlocked(authAccount, until, "oauth_401")
-			if err := s.accountRepo.SetTempUnschedulable(ctx, authAccount.ID, until, msg); err != nil {
+			// 写入可解析的 TempUnschedState JSON reason（MatchedKeyword 固定类别标记，
+			// ErrorMessage 保留原 msg 排障文案）。
+			reason := buildOAuth401RecoverableReason(msg, until, now, decision.FailureStreak)
+			if err := s.accountRepo.SetTempUnschedulable(ctx, authAccount.ID, until, reason); err != nil {
 				slog.Warn("oauth_401_set_temp_unschedulable_failed", "account_id", authAccount.ID, "error", err)
 			}
 			shouldDisable = true

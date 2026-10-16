@@ -24,6 +24,7 @@ type rateLimitAccountRepoStub struct {
 	lastExtraUpdates       map[string]any
 	lastErrorMsg           string
 	lastTempReason         string
+	lastTempUntil          time.Time
 	lastErrorID            int64
 	lastTempID             int64
 	lastRateLimitedID      int64
@@ -42,6 +43,7 @@ func (r *rateLimitAccountRepoStub) SetTempUnschedulable(ctx context.Context, id 
 	r.tempCalls++
 	r.lastTempID = id
 	r.lastTempReason = reason
+	r.lastTempUntil = until
 	return r.tempErr
 }
 
@@ -368,4 +370,49 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
 		require.Len(t, invalidator.accounts, 1)
 	})
+}
+
+// TestRateLimitService_HandleUpstreamError_OAuth401EmptyModelKeyFallsBackToCooldown
+// AC-G2R6 must_fix 第3条（主功能漏洞）：无 requestedModel 的 OAuth 401 不得进入失败连击阶梯
+// （阶梯无法定位模型维度、且会对整账号无差别连击误伤），必须直接走既有 OAuth401CooldownMinutes
+// 冷却（失败关闭，同 modelTransient==nil 的回退分支），并记 warn 日志一行。本测试断言该空键路径：
+// 不进阶梯、一次即 10 分钟冷却 + shouldDisable，reason 为明文（绝不含连击阶梯的
+// oauth_401_recoverable 标记）。
+func TestRateLimitService_HandleUpstreamError_OAuth401EmptyModelKeyFallsBackToCooldown(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	invalidator := &tokenCacheInvalidatorRecorder{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	service.SetTokenCacheInvalidator(invalidator)
+	account := &Account{
+		ID:       2001,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"refresh_token": "rt-2001",
+		},
+	}
+
+	// 关键：不传入 requestedModel（模拟定时刷新/保活触发或上游在非请求上下文返回 401）。
+	shouldDisable := service.HandleUpstreamError(
+		context.Background(),
+		account,
+		401,
+		http.Header{},
+		[]byte(`{"error":{"message":"Invalid token"}}`),
+	)
+
+	require.True(t, shouldDisable, "空键 401 必须失败关闭（shouldDisable）")
+	require.Equal(t, 1, repo.tempCalls, "空模型键必须走冷却分支并置 temp-unschedulable")
+	require.Equal(t, int64(2001), repo.lastTempID)
+	// 连击阶梯未注入（modelTransient==nil）→ 与空键分支同款回退：OAuth401CooldownMinutes
+	// 未配置 → 默认 10 分钟冷却。
+	require.False(t, repo.lastTempUntil.IsZero(), "必须写入 temp-unschedulable 截止时间")
+	elapsed := repo.lastTempUntil.Sub(time.Now())
+	require.GreaterOrEqual(t, elapsed, 9*time.Minute, "空键冷却不得低于 9 分钟（默认 10 分钟）")
+	require.LessOrEqual(t, elapsed, 11*time.Minute, "空键冷却不得高于 11 分钟（默认 10 分钟）")
+	// 冷却分支 reason 为明文 msg，绝不应是连击阶梯写入的 TempUnschedState JSON
+	//（含 oauth_401_recoverable 标记），据此确认未进入阶梯。
+	require.NotContains(t, repo.lastTempReason, oauth401RecoverableMarker,
+		"空模型键不得进入失败连击阶梯（不得写入 oauth_401_recoverable 标记）")
+	require.Len(t, invalidator.accounts, 1, "token 缓存仍需失效以便后续刷新")
 }
