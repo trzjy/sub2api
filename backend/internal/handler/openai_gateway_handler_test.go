@@ -302,6 +302,33 @@ func TestOpenAIEnsureForwardErrorResponse_WritesFallbackWhenNotWritten(t *testin
 	assert.Equal(t, infraerrors.UpstreamRequestFailed, errorObj["message"])
 }
 
+func TestOpenAIAnthropicStreamReadError_AppendsEventAndMarksOpsFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, EndpointMessages, nil)
+	c.Header("Content-Type", "text/event-stream")
+	_, err := c.Writer.WriteString("event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n")
+	require.NoError(t, err)
+	c.Writer.Flush()
+
+	h := &OpenAIGatewayHandler{}
+	require.True(t, h.ensureAnthropicStreamReadErrorResponse(c, service.OpenAIUpstreamStreamTruncatedCode, "Upstream response stream ended before completion", false))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "event: error\n")
+	require.Contains(t, w.Body.String(), `"type":"upstream_error"`)
+	require.NotContains(t, w.Body.String(), "event: message_stop")
+	marked, ok := c.Get(service.OpsStreamErrorKey)
+	require.True(t, ok)
+	streamErr := marked.(service.OpsStreamError)
+	require.True(t, streamErr.CountTowardsSLA)
+	require.Equal(t, service.OpenAIUpstreamStreamTruncatedCode, streamErr.Code)
+
+	service.MarkResponseCommitted(c)
+	require.False(t, h.ensureAnthropicStreamReadErrorResponse(c, service.OpenAIUpstreamStreamTruncatedCode, "duplicate", true))
+	require.Equal(t, 1, strings.Count(w.Body.String(), "event: error\n"))
+}
+
 // Writer 已写后 ensureForwardErrorResponse 必须仍然把错误信息以 SSE
 // 形式追加给客户端（streamStarted 强制 true）。
 // 这是 case B 修复：旧实现遇到 Writer.Written 直接 return false，

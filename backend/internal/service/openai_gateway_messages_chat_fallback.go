@@ -599,15 +599,20 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// 本轮已采集到的 reasoning 与 tool_call id 不能在早退时整轮丢弃。
 	turnCollector.flush(s, account, upstreamModel)
 
-	if scan.Err != nil {
+	streamErr := scan.Err
+	if streamErr == nil && !clientDisconnected && c.Request.Context().Err() == nil && scan.Terminal.IsTruncated(outputStarted) {
+		streamErr = ErrOpenAIUpstreamStreamTruncated
+	}
+	if streamErr != nil {
 		// CN 首包超时（watchdog 转译错误）：响应头未提交（首事件写出前）时透明
 		// 切换（冷却+换号，带模型）；已写出则按既有流中断语义处理。
-		if isOpenAICNFirstByteTimeout(scan.Err) && !outputStarted {
+		if isOpenAICNFirstByteTimeout(streamErr) && !outputStarted {
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
 		}
-		// Broken upstream read: skip finalization so no synthetic message_stop
-		// masks the truncation, and surface the error to flag usage incomplete
-		// (mirrors forwardResponsesViaRawChatCompletions).
+		if !clientDisconnected && c.Request.Context().Err() == nil {
+			recordAggregatedStreamUpstreamError(c, account, resp, streamErr)
+		}
+		// Incomplete upstream streams must not gain a synthetic message_stop.
 		return &OpenAIForwardResult{
 			RequestID:                   requestID,
 			UpstreamHeaders:             resp.Header,
@@ -622,7 +627,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			Duration:                    time.Since(startTime),
 			FirstTokenMs:                scan.FirstTokenMs,
 			ClientDisconnect:            clientDisconnected,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}, newOpenAIUpstreamStreamReadError(streamErr)
 	}
 
 	// Finalize: close open blocks + emit message_delta/message_stop.

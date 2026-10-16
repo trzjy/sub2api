@@ -437,6 +437,64 @@ func TestForwardAsAnthropic_ForceChatCompletionsStreamReadErrorSkipsFinalize(t *
 	out := rec.Body.String()
 	require.Contains(t, out, `"text":"he"`, "delta emitted before the failure must reach the client")
 	require.NotContains(t, out, "event: message_stop", "no synthetic completion after a broken read")
+	code, _, ok := OpenAIUpstreamStreamReadErrorDetails(err)
+	require.True(t, ok)
+	require.Equal(t, OpenAIUpstreamStreamReadErrorCode, code)
+	_, ok = c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok, "read failure must reach ops")
+}
+
+func TestForwardAsAnthropic_ForceChatCompletionsCleanEOFRequiresTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.4","max_tokens":8,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	partial := `data: {"id":"chatcmpl_cut","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"half"},"finish_reason":null}]}` + "\n\n"
+	finish := `data: {"id":"chatcmpl_cut","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+
+	for _, tc := range []struct {
+		name        string
+		upstream    string
+		wantFailure bool
+	}{
+		{name: "partial clean EOF", upstream: partial, wantFailure: true},
+		{name: "empty clean EOF", upstream: "", wantFailure: true},
+		{name: "finish reason before clean EOF", upstream: partial + finish},
+		{name: "usage before clean EOF", upstream: partial + `data: {"id":"chatcmpl_cut","object":"chat.completion.chunk","model":"gpt-5.4","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_msg_cut"}},
+				Body:       io.NopCloser(strings.NewReader(tc.upstream)),
+			}}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+			result, err := svc.ForwardAsAnthropic(context.Background(), c, forceChatMessagesFallbackAccount(), body, "", "")
+			if !tc.wantFailure {
+				require.NotNil(t, result)
+				require.NoError(t, err)
+				require.Contains(t, rec.Body.String(), "event: message_stop")
+				return
+			}
+			require.ErrorIs(t, err, ErrOpenAIUpstreamStreamTruncated)
+			code, _, ok := OpenAIUpstreamStreamReadErrorDetails(err)
+			require.True(t, ok)
+			require.Equal(t, OpenAIUpstreamStreamTruncatedCode, code)
+			if tc.upstream == "" {
+				require.NotContains(t, rec.Body.String(), "event: message_start")
+			} else {
+				require.NotNil(t, result)
+				require.Contains(t, rec.Body.String(), `"text":"half"`)
+			}
+			require.NotContains(t, rec.Body.String(), "event: message_stop")
+			events, ok := c.Get(OpsUpstreamErrorsKey)
+			require.True(t, ok)
+			list := events.([]*OpsUpstreamErrorEvent)
+			require.Len(t, list, 1)
+			require.Equal(t, http.StatusOK, list[0].UpstreamStatusCode)
+		})
+	}
 }
 
 // Gate regression: an API-key account whose upstream is confirmed to support

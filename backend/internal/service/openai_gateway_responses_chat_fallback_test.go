@@ -185,6 +185,36 @@ func TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions(t
 	require.NotNil(t, result.FirstTokenMs)
 }
 
+func TestForwardResponses_ChatFallbackCleanEOFRequiresTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.4","input":"hello","stream":true}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	upstreamBody := `data: {"id":"chatcmpl_cut","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"half"},"finish_reason":null}]}` + "\n\n"
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "x-request-id": []string{"rid_resp_cut"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
+	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+
+	result, err := svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
+	require.NotNil(t, result)
+	require.ErrorIs(t, err, ErrOpenAIUpstreamStreamTruncated)
+	code, _, ok := OpenAIUpstreamStreamReadErrorDetails(err)
+	require.True(t, ok)
+	require.Equal(t, OpenAIUpstreamStreamTruncatedCode, code)
+	require.Contains(t, rec.Body.String(), "event: response.output_text.delta")
+	require.NotContains(t, rec.Body.String(), "event: response.completed")
+	require.NotContains(t, rec.Body.String(), "data: [DONE]")
+	events, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	list := events.([]*OpsUpstreamErrorEvent)
+	require.Len(t, list, 1)
+	require.Equal(t, http.StatusOK, list[0].UpstreamStatusCode)
+}
+
 func TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

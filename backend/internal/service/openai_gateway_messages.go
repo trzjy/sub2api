@@ -762,20 +762,22 @@ func isOpenAICompatResponsesTerminalEvent(eventType string) bool {
 	}
 }
 
-func (s *OpenAIGatewayService) recordOpenAIMessagesStreamUpstreamError(c *gin.Context, account *Account, upstreamRequestID, kind, message string) {
+func (s *OpenAIGatewayService) recordOpenAIMessagesStreamUpstreamError(c *gin.Context, account *Account, resp *http.Response, kind, message string) {
 	if c == nil {
 		return
 	}
 	message = sanitizeUpstreamErrorMessage(message)
-	setOpsUpstreamError(c, http.StatusBadGateway, message, "")
+	setOpsUpstreamError(c, 0, message, "")
 	event := OpsUpstreamErrorEvent{
-		ProxyID:            opsUpstreamProxyID(account),
-		ProxyName:          opsUpstreamProxyName(account),
-		Platform:           PlatformOpenAI,
-		UpstreamStatusCode: http.StatusBadGateway,
-		UpstreamRequestID:  strings.TrimSpace(upstreamRequestID),
-		Kind:               kind,
-		Message:            message,
+		ProxyID:   opsUpstreamProxyID(account),
+		ProxyName: opsUpstreamProxyName(account),
+		Platform:  PlatformOpenAI,
+		Kind:      kind,
+		Message:   message,
+	}
+	if resp != nil {
+		event.UpstreamStatusCode = resp.StatusCode
+		event.UpstreamRequestID = strings.TrimSpace(resp.Header.Get("x-request-id"))
 	}
 	if account != nil {
 		event.Platform = account.Platform
@@ -1242,8 +1244,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		if !clientOutputStarted {
 			return result, s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, message)
 		}
-		s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, "stream_missing_terminal", message)
-		return result, fmt.Errorf("stream usage incomplete: missing terminal event")
+		s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, "stream_missing_terminal", message)
+		return result, newOpenAIUpstreamStreamReadError(ErrOpenAIUpstreamStreamTruncated)
 	}
 	processFrame := func(frame openAICompatSSEFrame) bool {
 		payload := openAICompatPayloadWithEventType(frame.Data, frame.EventType)
@@ -1277,7 +1279,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, err, upstreamModel); foErr != nil {
 				return nil, foErr
 			}
-			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
+			if !clientDisconnected && c.Request.Context().Err() == nil {
+				s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, "stream_read_error", "OpenAI messages stream read failed")
+			}
+			return resultWithUsage(), newOpenAIUpstreamStreamReadError(err)
 		}
 		if frame, ok := parser.Finish(); ok {
 			if strings.TrimSpace(frame.Data) == "[DONE]" {
@@ -1353,7 +1358,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				if foErr := s.openAICNFirstByteTimeoutStreamFailover(c, account, clientOutputStarted, ev.err, upstreamModel); foErr != nil {
 					return nil, foErr
 				}
-				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
+				if !clientDisconnected && c.Request.Context().Err() == nil {
+					s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, "stream_read_error", "OpenAI messages stream read failed")
+				}
+				return resultWithUsage(), newOpenAIUpstreamStreamReadError(ev.err)
 			}
 			lastDataAt = time.Now()
 			line := ev.line

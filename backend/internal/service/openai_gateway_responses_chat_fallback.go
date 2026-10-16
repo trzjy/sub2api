@@ -286,6 +286,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	state.ToolSearchDeclared = toolSearch
 	state.NamespaceTools = namespaceTools
 	clientDisconnected := false
+	clientOutputStarted := false
 
 	writeEvents := func(events []apicompat.ResponsesStreamEvent) {
 		if clientDisconnected || len(events) == 0 {
@@ -309,6 +310,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 				)
 				return
 			}
+			clientOutputStarted = true
 		}
 		c.Writer.Flush()
 	}
@@ -319,10 +321,17 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 		writeEvents(events)
 	})
 
-	if scan.Err != nil {
+	streamErr := scan.Err
+	if streamErr == nil && !clientDisconnected && c.Request.Context().Err() == nil && scan.Terminal.IsTruncated(clientOutputStarted) {
+		streamErr = ErrOpenAIUpstreamStreamTruncated
+	}
+	if streamErr != nil {
 		// CN 首包超时：响应头未提交（首事件写出前）时透明切换（冷却+换号）。
-		if isOpenAICNFirstByteTimeout(scan.Err) {
+		if isOpenAICNFirstByteTimeout(streamErr) {
 			return nil, s.failoverOpenAICNFirstByteTimeout(context.Background(), account, upstreamModel)
+		}
+		if !clientDisconnected && c.Request.Context().Err() == nil {
+			recordAggregatedStreamUpstreamError(c, account, resp, streamErr)
 		}
 		return &OpenAIForwardResult{
 			RequestID:                   requestID,
@@ -337,7 +346,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 			Stream:                      true,
 			Duration:                    time.Since(startTime),
 			FirstTokenMs:                scan.FirstTokenMs,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}, newOpenAIUpstreamStreamReadError(streamErr)
 	}
 	if err := state.ValidateToolCallArguments(); err != nil {
 		return &OpenAIForwardResult{

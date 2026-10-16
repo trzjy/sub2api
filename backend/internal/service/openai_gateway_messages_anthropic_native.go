@@ -545,7 +545,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				case repGuardFailover:
 					message := "upstream repetition loop detected before stream passthrough"
 					logger.LegacyPrintf("service.gateway", "[CN Anthropic 直通] Repetition loop detected (buffering, failover): account=%d model=%s request_id=%s", account.ID, upstreamModel, requestID)
-					s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, repetitionLoopErrorCode, message)
+					s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
 					return s.nativeAnthropicStreamResult(c, resp, usage, firstTokenMs, clientDisconnected, originalModel, billingModel, upstreamModel, reasoningEffort, startTime),
 						newRepetitionLoopFailoverError()
 				case repGuardAbort:
@@ -558,7 +558,7 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 							flusher.Flush()
 						}
 					}
-					s.recordOpenAIMessagesStreamUpstreamError(c, account, requestID, repetitionLoopErrorCode, message)
+					s.recordOpenAIMessagesStreamUpstreamError(c, account, resp, repetitionLoopErrorCode, message)
 					s.ObserveOpenAIAccountHealthFailure(ctx, account, guardErr)
 					if resp.Body != nil {
 						_ = resp.Body.Close()

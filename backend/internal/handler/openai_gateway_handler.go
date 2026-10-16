@@ -366,7 +366,7 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 // 平台(覆盖 OpenCode/Command Code/Cline),我方新增的 muse/other 未登记于该表,
 // 显式追加以保留我方语义。
 func openAICompatibleTextTargetAllowed(c *gin.Context, apiKey *service.APIKey, model string, gatewayCore *service.GatewayService) bool {
-// 允许集取我方 domain 派生式（门一裁定：平台清单单一来源 internal/domain），
+	// 允许集取我方 domain 派生式（门一裁定：平台清单单一来源 internal/domain），
 	// 覆盖 domain.PlatformGatewayOpenAI 登记的全部平台——含上游硬编码枚举中的
 	// codebuddy（其账号走 OpenAI 兼容出站，且 allowOpenAICompatibleMessagesDispatch
 	// 已对其豁免）、opencode_go/command_code/cline 等；muse/other 未登记于该表，
@@ -1052,7 +1052,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
-					wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
+					wroteFallback = h.ensureOpenAIStreamReadErrorResponse(c, err, streamStarted)
+					if !wroteFallback {
+						wroteFallback = h.ensureForwardErrorResponse(c, streamStarted)
+					}
 				}
 				fields := []zap.Field{
 					zap.Int64("account_id", account.ID),
@@ -1666,7 +1669,13 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), false, nil, err)
-				wroteFallback := h.ensureAnthropicErrorResponse(c, streamStarted)
+				wroteFallback := false
+				if code, message, ok := service.OpenAIUpstreamStreamReadErrorDetails(err); ok {
+					wroteFallback = h.ensureAnthropicStreamReadErrorResponse(c, code, message, streamStarted)
+				}
+				if !wroteFallback {
+					wroteFallback = h.ensureAnthropicErrorResponse(c, streamStarted)
+				}
 				reqLog.Warn("openai_messages.forward_failed",
 					zap.Int64("account_id", account.ID),
 					zap.Bool("fallback_error_response_written", wroteFallback),
@@ -1774,6 +1783,23 @@ func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, stre
 		return false
 	}
 	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamRequestFailed, streamStarted)
+	return true
+}
+
+func (h *OpenAIGatewayHandler) ensureAnthropicStreamReadErrorResponse(c *gin.Context, code, message string, streamStarted bool) bool {
+	if c == nil || c.Writer == nil || service.IsResponseCommitted(c) {
+		return false
+	}
+	if c.Request != nil && errors.Is(c.Request.Context().Err(), context.Canceled) {
+		return false
+	}
+	if c.Writer.Written() {
+		streamStarted = true
+	}
+	if streamStarted {
+		service.MarkOpsStreamFailure(c, "upstream_error", code, message, http.StatusBadGateway)
+	}
+	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "upstream_error", message, streamStarted)
 	return true
 }
 
