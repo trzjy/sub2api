@@ -252,13 +252,17 @@ func (s *cursorSessionTokenSource) cursorBuildGetSessionTokenRequest() []byte {
 }
 
 // doGetSessionToken 发出一次 Unary 调用并返回原始响应体。
+//
+// GetSessionToken 是 Unary 端点，请求体走**裸 protobuf**，Content-Type 用
+// `cursorUnaryContentType`（`application/proto`）；若误用 streaming 的
+// `application/connect+proto`，上游会直接 415（活体实证）。
 func (s *cursorSessionTokenSource) doGetSessionToken(ctx context.Context, authProvider CursorUpstreamAuthProvider) ([]byte, error) {
 	resp, err := s.forwarder.Do(ctx, &CursorUpstreamRequest{
 		Path:         cursorPathGetSessionToken,
 		Body:         s.cursorBuildGetSessionTokenRequest(),
 		AuthProvider: authProvider,
 		Headers: map[string]string{
-			"Content-Type":             cursorConnectContentType,
+			"Content-Type":             cursorUnaryContentType,
 			"Connect-Protocol-Version": "1",
 		},
 	})

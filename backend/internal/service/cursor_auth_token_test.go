@@ -288,6 +288,25 @@ func TestCursorSessionTokenRedirectURIOverride(t *testing.T) {
 	require.Contains(t, string(srv2.lastBody), cursorDefaultAuthRedirectURI)
 }
 
+// TestCursorGetSessionTokenContentType 钉死 Unary 端点（GetSessionToken）的
+// Content-Type 用 `application/proto`（裸 protobuf），而非 streaming 的
+// `application/connect+proto`。
+//
+// 生产实证：Unary 端点收到 `application/connect+proto` 的裸 protobuf 体直接 415；
+// 改用 `application/proto` 后请求穿透到鉴权层（后续 401 是号池账号过期，与内容类型无关）。
+func TestCursorGetSessionTokenContentType(t *testing.T) {
+	srv := &cursorTokenTestServer{respBody: func(int64) []byte { return cursorTokenOKBody("TOK") }}
+	src, _ := newTestTokenSource(t, srv)
+
+	_, err := src.CursorSessionToken(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, cursorUnaryContentType, srv.lastHeader.Get("Content-Type"),
+		"GetSessionToken 是 Unary 端点，必须用裸 protobuf 内容类型")
+	require.NotEqual(t, cursorConnectContentType, srv.lastHeader.Get("Content-Type"),
+		"GetSessionToken 不得用 streaming 内容类型（会 415）")
+}
+
 // cursorStaticAuthProvider 是固定值的鉴权材料替身。
 type cursorStaticAuthProvider struct{ value string }
 

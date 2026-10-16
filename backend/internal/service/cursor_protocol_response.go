@@ -64,9 +64,18 @@ var (
 
 // cursorConnectContentType 是 Connect RPC 二进制 protobuf 的请求内容类型。
 //
-// ⚠️ 与模型列表端点的 `application/proto`（**裸 protobuf、无 envelope**）不同——
+// ⚠️ 与 Unary 端点的 `application/proto`（**裸 protobuf、无 envelope**）不同——
 // 两者不可混用（09-live-models.md §1 活体证伪）。
 const cursorConnectContentType = "application/connect+proto"
+
+// cursorUnaryContentType 是 Cursor **Unary** 端点的请求内容类型。
+//
+// Unary 端点（如 AuthService.GetSessionToken、模型列表）请求体走**裸 protobuf**，
+// 无 5 字节 envelope，须用 `application/proto`；streaming 端点（如
+// StreamUnifiedChatWithTools）才有 Connect envelope，须用
+// `cursorConnectContentType`。两者不可混用——生产实测 Unary 端点收到
+// `application/connect+proto` 的裸 protobuf 体直接 415。
+const cursorUnaryContentType = "application/proto"
 
 // cursorAuthResponseMaxBytes 是换 token 响应的读取上限（防无界读）。
 //
