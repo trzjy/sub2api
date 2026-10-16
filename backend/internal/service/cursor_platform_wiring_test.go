@@ -8,12 +8,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	wasmcrypto "github.com/Wei-Shaw/sub2api/internal/service/wasm"
 	"github.com/stretchr/testify/require"
 )
 
@@ -220,10 +222,16 @@ func (r *identityCursorQuotaKeys) SetDeviceIDIfAbsent(_ context.Context, id int6
 
 func qkID(v int64) *int64 { return &v }
 
+// cursorTestDeviceIDs 用真实的 *QuotaKeyService 作 deviceId 解析器（B-10 生产同款路径），
+// 底层挂内存替身仓储。不用桩：解析器正是本次修的接线点，桩会把它绕过去。
+func cursorTestDeviceIDs(repo QuotaKeyRepository) CursorDeviceIDResolver {
+	return NewQuotaKeyService(repo, NewCursorTestEncryptor(), nil, nil)
+}
+
 // TestCursorAuthProviderResolvesPerAccount 钉死鉴权材料按账号解析。
 //
-// 关键性质：两个不同 quota_key 的账号必须解析出**不同**材料（材料由各自的激活码
-// 确定性派生）。若实现退化为全局单例共享，两账号会拿到同一份材料 —— 即把 A 号的
+// 关键性质：两个不同 quota_key 的账号必须解析出**不同**材料（各自的激活码 + 各自的
+// deviceId）。若实现退化为全局单例共享，两账号会拿到同一份材料 —— 即把 A 号的
 // 凭证发给 B 号，这是本卡最严重的潜在缺陷，故显式反证。
 func TestCursorAuthProviderResolvesPerAccount(t *testing.T) {
 	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
@@ -231,20 +239,80 @@ func TestCursorAuthProviderResolvesPerAccount(t *testing.T) {
 		2: {ID: 2, CodeEncrypted: "ACTIVATION-CODE-TWO"},
 	}}
 
-	p1, err := newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor())
+	p1, err := newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.NoError(t, err)
-	p2, err := newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(2)}, repo, NewCursorTestEncryptor())
+	p2, err := newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(2)}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.NoError(t, err)
 	require.NotNil(t, p1)
 	require.NotNil(t, p2)
 
-	// 依赖缺失（enc=nil）必须构造失败，绝不静默回落。
-	_, err = newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, nil)
+	// 依赖缺失（enc=nil / deviceIDs=nil）必须构造失败，绝不静默回落。
+	_, err = newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, nil, cursorTestDeviceIDs(repo))
 	require.Error(t, err, "nil encryptor must fail construction (never fall back to plaintext)")
+	_, err = newCursorAccountAuthProvider(&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor(), nil)
+	require.Error(t, err, "nil device id resolver must fail construction (deviceId 绝不兜底派生)")
 
 	// 无 quota_key_id 的账号必须失败关闭。
-	_, err = newCursorAccountAuthProvider(&Account{Platform: PlatformCursor}, repo, NewCursorTestEncryptor())
+	_, err = newCursorAccountAuthProvider(&Account{Platform: PlatformCursor}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.ErrorIs(t, err, ErrCursorQuotaKeyUnresolved)
+}
+
+// TestCursorAuthProviderUsesResolvedDeviceIDNotCodeDerived 是本次接线的**核心反证**。
+//
+// 背景：E1 曾把 x-jg-auth 的 `d` 写成 deviceID(code)（按激活码派生），B-10 已推翻该做法。
+// 本用例从**出站材料明文**这一层断言：解密 zk03 产物后，d 必须等于 deviceIDFor 解析出的
+// 落库值，且**必须不等于** deviceID(激活码)。
+//
+// 这条断言是刻意选的：只断言"材料随账号不同"或"调用了 resolver"都抓不住回落派生
+// （按码派生同样随账号不同），只有比对明文里的 d 才能钉死。已用变异测试坐实：
+// 把实现改回 deviceID(code) 后本用例失败。
+func TestCursorAuthProviderUsesResolvedDeviceIDNotCodeDerived(t *testing.T) {
+	const activation = "ACTIVATION-CODE-FOR-DEVICEID-PROOF"
+	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
+		1: {ID: 1, CodeEncrypted: activation},
+	}}
+
+	p, err := newCursorAccountAuthProvider(
+		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)},
+		repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
+	require.NoError(t, err)
+
+	material, err := p.CursorUpstreamAuth(context.Background())
+	require.NoError(t, err)
+
+	// 解开出站材料读出 d（明文是 JSON{d,a}，激活码非敏感、deviceId 亦非凭据）。
+	plain, err := wasmcrypto.DecryptLocalData(material)
+	require.NoError(t, err)
+	var decoded cursorEncryptedCredentialsInput
+	require.NoError(t, json.Unmarshal([]byte(plain), &decoded))
+
+	// 期望值 = resolver 解析出且已落库的那一份（DeviceIDFor 生成后写回行内）。
+	require.Equal(t, *repo.byID[1].DeviceID, decoded.D,
+		"出站 d 必须是 DeviceIDFor 解析/落库的 deviceId")
+	require.Equal(t, activation, decoded.A)
+
+	// 反证：按激活码派生的值绝不能出现在出站材料里。
+	require.NotEqual(t, deviceID(activation), decoded.D,
+		"出站 d 绝不能是 deviceID(激活码)：B-10 已推翻按码派生（插件语义=uuidv4 随机固化）")
+}
+
+// TestCursorAuthProviderPersistsAndReusesDeviceID 钉死 deviceId 落库后**永久复用**：
+// 第二次取材料必须拿到同一份 d（不得重新生成），且行内 device_id 已被写回。
+func TestCursorAuthProviderPersistsAndReusesDeviceID(t *testing.T) {
+	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
+		1: {ID: 1, CodeEncrypted: "ACTIVATION-CODE-REUSE"},
+	}}
+	resolver := cursorTestDeviceIDs(repo)
+
+	first, err := resolver.DeviceIDFor(context.Background(), 1)
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+	require.Equal(t, first, *repo.byID[1].DeviceID, "首次解析必须把 deviceId 落库")
+
+	// 新 provider 实例（模拟后续请求）必须复用库里那份，而不是再随机一个。
+	second, err := resolver.DeviceIDFor(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, first, second, "deviceId 落库后必须永久复用")
 }
 
 // TestCursorAuthProviderDistinctPerQuotaKey 证明材料按账号隔离。
@@ -257,7 +325,7 @@ func TestCursorAuthProviderDistinctPerQuotaKey(t *testing.T) {
 	materialOf := func(quotaKeyID int64) string {
 		p, err := newCursorAccountAuthProvider(
 			&Account{Platform: PlatformCursor, QuotaKeyID: qkID(quotaKeyID)},
-			repo, NewCursorTestEncryptor())
+			repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 		require.NoError(t, err)
 		got, aerr := p.CursorUpstreamAuth(context.Background())
 		require.NoError(t, aerr)
@@ -272,7 +340,7 @@ func TestCursorAuthProviderDistinctPerQuotaKey(t *testing.T) {
 
 	// 同一 provider 实例重复取必须稳定（E1 provider 内部缓存生效，避免每次对话跑 wasm）。
 	p, err := newCursorAccountAuthProvider(
-		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor())
+		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.NoError(t, err)
 	first, err := p.CursorUpstreamAuth(context.Background())
 	require.NoError(t, err)
@@ -287,14 +355,14 @@ func TestCursorAuthProviderFailsClosedOnUnresolvableKey(t *testing.T) {
 		1: {ID: 1, CodeEncrypted: ""}, // 无激活码
 	}}
 	p, err := newCursorAccountAuthProvider(
-		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor())
+		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(1)}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.NoError(t, err)
 	_, aerr := p.CursorUpstreamAuth(context.Background())
 	require.ErrorIs(t, aerr, ErrCursorQuotaKeyUnresolved)
 
 	// 取不存在的 key 同样失败关闭。
 	p2, err := newCursorAccountAuthProvider(
-		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(99)}, repo, NewCursorTestEncryptor())
+		&Account{Platform: PlatformCursor, QuotaKeyID: qkID(99)}, repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 	require.NoError(t, err)
 	_, aerr = p2.CursorUpstreamAuth(context.Background())
 	require.Error(t, aerr)
@@ -311,7 +379,7 @@ func TestForwardCursorFailsClosed(t *testing.T) {
 	repo := &identityCursorQuotaKeys{byID: map[int64]*ent.QuotaKey{
 		1: {ID: 1, CodeEncrypted: "ACTIVATION-CODE-ONE"},
 	}}
-	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor())
+	svc.SetCursorAuthDeps(repo, NewCursorTestEncryptor(), cursorTestDeviceIDs(repo))
 
 	// 账号有 model_mapping 时走到协议桥边界并失败关闭。
 	acc := &Account{

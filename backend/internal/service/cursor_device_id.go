@@ -36,6 +36,18 @@ import (
 // 且会白耗 shareai 额度。故本卡不提供任何兜底默认值。
 var ErrCursorDeviceIDUnavailable = errors.New("cursor: device id unavailable (fail closed)")
 
+// CursorDeviceIDResolver 为出站鉴权解析指定激活码的 deviceId。
+//
+// 只抽这一个方法（而非让调用方依赖整个 *QuotaKeyService）：E2 接线侧只消费本方法，
+// 测试替身也无须构造整个 QuotaKeyService。*QuotaKeyService 天然满足本接口，
+// 故生产装配可直接注入它。
+type CursorDeviceIDResolver interface {
+	DeviceIDFor(ctx context.Context, quotaKeyID int64) (string, error)
+}
+
+// 编译期断言：生产实现满足上述窄接口。
+var _ CursorDeviceIDResolver = (*QuotaKeyService)(nil)
+
 // hashDeviceIDFromUUID 逐字复刻插件 hashDeviceId（deobfuscated.js:8070-8077）。
 //
 // 与仓库既有 hashDeviceID（cursor_auto_entry_service.go:452）的差异**不止一处**，

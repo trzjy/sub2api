@@ -109,8 +109,9 @@ type CursorUpstreamResponse struct {
 
 // CursorUpstreamAuthProvider 提供 x-jg-auth 鉴权材料。
 //
-// 实现方须基于**确定性推导**（device-id 由激活码派生）产出材料；材料不可得时返回错误，
-// 绝不返回空串（空串会得到语义不明的 401）。
+// 材料由**调用方给定的两个输入**合成：`deviceId`（站点侧随机生成并落库固化，见
+// cursor_device_id.go / B-10，**不是**激活码的函数）+ `activationCode`（解密后明文）。
+// 材料不可得时返回错误，绝不返回空串（空串会得到语义不明的 401）。
 type CursorUpstreamAuthProvider interface {
 	CursorUpstreamAuth(ctx context.Context) (string, error)
 }
@@ -259,9 +260,12 @@ type cursorEncryptedCredentialsInput struct {
 
 // cursorWasmAuthProvider 基于内嵌 wasm 生成 x-jg-auth 材料。
 //
-// device-id 由激活码确定性派生（复用 cursor_upstream_client.go 的 deviceID(code)），
-// 因此鉴权材料可在站点侧独立生成，不依赖任何本机客户端状态（方案 §1.3 裁定）。
+// 两个输入都由调用方给定：deviceID 是**站点侧随机生成并落库固化**的设备标识
+// （B-10，见 cursor_device_id.go），activationCode 是解密后的激活码。
+// 二者都不是本 provider 能推导出来的——尤其 deviceID **绝不**由激活码派生
+// （该方向已被 B-10 推翻：插件语义是 uuidv4() 随机生成后固化，与激活码无关）。
 type cursorWasmAuthProvider struct {
+	deviceID       string
 	activationCode string
 
 	mu sync.Mutex
@@ -273,13 +277,19 @@ type cursorWasmAuthProvider struct {
 
 // NewCursorWasmAuthProvider 构造基于内嵌 wasm 的鉴权材料提供者。
 //
-// activationCode 由调用方经 QuotaKeyEncryptor 解密后传入；明文绝不落日志。
-func NewCursorWasmAuthProvider(activationCode string) CursorUpstreamAuthProvider {
-	return &cursorWasmAuthProvider{activationCode: activationCode}
+// deviceID 由调用方经 CursorDeviceIDResolver 解析（无则生成落库），activationCode
+// 由调用方经 QuotaKeyEncryptor 解密后传入；两者明文都绝不落日志。
+func NewCursorWasmAuthProvider(deviceID, activationCode string) CursorUpstreamAuthProvider {
+	return &cursorWasmAuthProvider{deviceID: deviceID, activationCode: activationCode}
 }
 
 // CursorUpstreamAuth 实现 CursorUpstreamAuthProvider：返回 x-jg-auth 头值。
 func (p *cursorWasmAuthProvider) CursorUpstreamAuth(_ context.Context) (string, error) {
+	// 两个输入都失败关闭：任一为空都会让上游拿到的凭据与设备绑定关系不匹配，
+	// 必然被拒且白耗 shareai 额度。绝不兜底派生 deviceID（那正是 B-10 的错法）。
+	if strings.TrimSpace(p.deviceID) == "" {
+		return "", errors.New("empty device id")
+	}
 	if strings.TrimSpace(p.activationCode) == "" {
 		return "", errors.New("empty activation code")
 	}
@@ -291,7 +301,7 @@ func (p *cursorWasmAuthProvider) CursorUpstreamAuth(_ context.Context) (string, 
 	}
 
 	payload, err := json.Marshal(cursorEncryptedCredentialsInput{
-		D: deviceID(p.activationCode),
+		D: p.deviceID,
 		A: p.activationCode,
 	})
 	if err != nil {

@@ -270,11 +270,15 @@ func TestCursorForward_AuthFailureFailsClosed(t *testing.T) {
 	}
 }
 
-// 8) 失败关闭：空激活码 → 不生成材料，且错误不含明文。
+// 8) 失败关闭：空激活码 / 空 deviceId → 不生成材料，且错误不含明文。
+//
+// deviceId 为空同样必须失败关闭：它绝不允许被兜底成按激活码派生的值（B-10 的错法）。
 func TestCursorWasmAuthProvider_EmptyActivationFailsClosed(t *testing.T) {
-	p := NewCursorWasmAuthProvider("   ")
-	if _, err := p.CursorUpstreamAuth(context.Background()); err == nil {
+	if _, err := NewCursorWasmAuthProvider("DEVICE-ID-OK", "   ").CursorUpstreamAuth(context.Background()); err == nil {
 		t.Fatal("want error for empty activation code")
+	}
+	if _, err := NewCursorWasmAuthProvider("  ", "ACTIVATION-CODE-OK").CursorUpstreamAuth(context.Background()); err == nil {
+		t.Fatal("want error for empty device id (never fall back to code-derived)")
 	}
 }
 
@@ -300,10 +304,18 @@ func TestCursorForward_NeverFallsBackToCursorOfficial(t *testing.T) {
 }
 
 // 10) 鉴权材料真值：cursorWasmAuthProvider 产出的密文可被 zk04 解回
-// {"d":deviceID(code),"a":code}，证明键序与 device-id 派生均正确。
+// {"d":deviceID,"a":code}，证明两个输入都原样进入明文、键序未错位。
+//
+// 注意 d 取的是**调用方给定的 deviceId**，与激活码无关（B-10）。此处显式传入一个
+// 不等于 deviceID(code) 的值，确保实现没有偷偷回落到按码派生。
 func TestCursorWasmAuthProvider_RoundTripDecryptsToDeviceAndActivation(t *testing.T) {
 	const activation = "ROUNDTRIP-ACTIVATION-CODE"
-	p := NewCursorWasmAuthProvider(activation)
+	const device = "A1B2C3D4"
+	// 测试前提：本例 deviceId 必须不等于按码派生值，否则证明不了没有回落派生。
+	if deviceID(activation) == device {
+		t.Fatal("测试前提失效：deviceId 恰好等于 deviceID(code)，本用例无法证伪回落派生")
+	}
+	p := NewCursorWasmAuthProvider(device, activation)
 
 	cipher, err := p.CursorUpstreamAuth(context.Background())
 	if err != nil {
@@ -329,7 +341,7 @@ func TestCursorWasmAuthProvider_RoundTripDecryptsToDeviceAndActivation(t *testin
 		t.Errorf("incomplete ciphertext envelope: %+v", envelope)
 	}
 
-	// 交叉验证：解密回明文，核对 d=deviceID(activation)、a=activation。
+	// 交叉验证：解密回明文，核对 d=给定 deviceId、a=给定激活码。
 	plain, err := decryptCursorAuthMaterial(t, cipher)
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
@@ -338,8 +350,8 @@ func TestCursorWasmAuthProvider_RoundTripDecryptsToDeviceAndActivation(t *testin
 	if err := json.Unmarshal([]byte(plain), &got); err != nil {
 		t.Fatalf("plaintext must be JSON: %v", err)
 	}
-	if got.D != deviceID(activation) {
-		t.Errorf("device id = %q, want %q (deviceID(code))", got.D, deviceID(activation))
+	if got.D != device {
+		t.Errorf("device id = %q, want %q (caller-supplied, never code-derived)", got.D, device)
 	}
 	if got.A != activation {
 		t.Errorf("activation = %q, want %q", got.A, activation)
@@ -348,7 +360,7 @@ func TestCursorWasmAuthProvider_RoundTripDecryptsToDeviceAndActivation(t *testin
 
 // 11) 鉴权材料缓存：同一 provider 重复取返回同一密文（不重复跑 wasm）。
 func TestCursorWasmAuthProvider_CachesMaterial(t *testing.T) {
-	p := NewCursorWasmAuthProvider("CACHE-ME")
+	p := NewCursorWasmAuthProvider("CACHED-DEVICE", "CACHE-ME")
 	first, err := p.CursorUpstreamAuth(context.Background())
 	if err != nil {
 		t.Fatalf("first: %v", err)
@@ -362,24 +374,33 @@ func TestCursorWasmAuthProvider_CachesMaterial(t *testing.T) {
 	}
 }
 
-// 12) 不同激活码 → 不同材料（材料确实绑定激活码与 device-id）。
+// 12) 不同激活码 / 不同 deviceId → 不同材料（材料确实绑定这两个输入）。
 func TestCursorWasmAuthProvider_DiffersPerActivation(t *testing.T) {
-	a, err := NewCursorWasmAuthProvider("CODE-A").CursorUpstreamAuth(context.Background())
+	a, err := NewCursorWasmAuthProvider("DEVICE-A", "CODE-A").CursorUpstreamAuth(context.Background())
 	if err != nil {
 		t.Fatalf("code A: %v", err)
 	}
-	b, err := NewCursorWasmAuthProvider("CODE-B").CursorUpstreamAuth(context.Background())
+	b, err := NewCursorWasmAuthProvider("DEVICE-A", "CODE-B").CursorUpstreamAuth(context.Background())
 	if err != nil {
 		t.Fatalf("code B: %v", err)
 	}
 	if a == b {
 		t.Error("different activation codes must not yield identical material")
 	}
+
+	// 仅 deviceId 不同也必须产出不同材料（deviceId 是独立输入，不是激活码的函数）。
+	c, err := NewCursorWasmAuthProvider("DEVICE-B", "CODE-A").CursorUpstreamAuth(context.Background())
+	if err != nil {
+		t.Fatalf("device B: %v", err)
+	}
+	if a == c {
+		t.Error("different device ids must not yield identical material")
+	}
 }
 
 // 13) 并发取材料安全（wasm 调用被串行化）。
 func TestCursorWasmAuthProvider_ConcurrentSafe(t *testing.T) {
-	p := NewCursorWasmAuthProvider("CONCURRENT-CODE")
+	p := NewCursorWasmAuthProvider("CONCURRENT-DEVICE", "CONCURRENT-CODE")
 	var wg sync.WaitGroup
 	results := make([]string, 8)
 	errs := make([]error, 8)

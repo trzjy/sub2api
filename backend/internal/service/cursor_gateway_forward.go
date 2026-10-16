@@ -55,12 +55,14 @@ var ErrCursorQuotaKeyUnresolved = errors.New("cursor: account has no resolvable 
 // cursorAccountAuthProvider 为**单个账号**提供 x-jg-auth 鉴权材料。
 //
 // 绑定该账号的 quota key ID：每次取材料时按 ID 取回 quota_keys 行、解密激活码，
-// 再交 E1 的 wasm provider 生成材料。材料在 provider 内部缓存（E1 已实现），
-// 故稳态下每账号每次对话只跑一次 wasm。
+// 并按同一 ID 解析出站 deviceId（无则生成落库、之后永久复用），再交 E1 的 wasm
+// provider 合成材料。材料在 provider 内部缓存（E1 已实现），故稳态下每账号每次
+// 对话只跑一次 wasm。
 type cursorAccountAuthProvider struct {
 	quotaKeyID int64
 	quotaKeys  QuotaKeyRepository
 	enc        QuotaKeyEncryptor
+	deviceIDs  CursorDeviceIDResolver
 
 	// mu 保护 cached 的读写。缓存键即本 provider 绑定的**单一账号**，故不存在
 	// 跨账号串号风险；激活码轮换会换新的 quota key 行，由账号实例自然隔离。
@@ -70,19 +72,25 @@ type cursorAccountAuthProvider struct {
 
 // newCursorAccountAuthProvider 为指定账号构造鉴权材料提供者。
 //
-// quotaKeyID 取自账号自身的 QuotaKeyID；quotaKeys / enc 为 nil 时构造失败，
-// 禁止静默回落明文（与 cursor_upstream_client.go 同口径）。
-func newCursorAccountAuthProvider(account *Account, quotaKeys QuotaKeyRepository, enc QuotaKeyEncryptor) (CursorUpstreamAuthProvider, error) {
+// quotaKeyID 取自账号自身的 QuotaKeyID；quotaKeys / enc / deviceIDs 为 nil 时
+// 构造失败，禁止静默回落明文（与 cursor_upstream_client.go 同口径）。
+func newCursorAccountAuthProvider(
+	account *Account,
+	quotaKeys QuotaKeyRepository,
+	enc QuotaKeyEncryptor,
+	deviceIDs CursorDeviceIDResolver,
+) (CursorUpstreamAuthProvider, error) {
 	if account == nil || account.QuotaKeyID == nil || *account.QuotaKeyID <= 0 {
 		return nil, ErrCursorQuotaKeyUnresolved
 	}
-	if quotaKeys == nil || enc == nil {
-		return nil, errors.New("cursor: quota key repository and encryptor are required")
+	if quotaKeys == nil || enc == nil || deviceIDs == nil {
+		return nil, errors.New("cursor: quota key repository, encryptor and device id resolver are required")
 	}
 	return &cursorAccountAuthProvider{
 		quotaKeyID: *account.QuotaKeyID,
 		quotaKeys:  quotaKeys,
 		enc:        enc,
+		deviceIDs:  deviceIDs,
 	}, nil
 }
 
@@ -112,8 +120,19 @@ func (p *cursorAccountAuthProvider) CursorUpstreamAuth(ctx context.Context) (str
 		return "", fmt.Errorf("%w: quota key %d decrypted to empty activation code", ErrCursorQuotaKeyUnresolved, p.quotaKeyID)
 	}
 
-	// 复用 E1 的 wasm provider 生成 x-jg-auth（device-id 由激活码确定性派生）。
-	material, err := NewCursorWasmAuthProvider(code).CursorUpstreamAuth(ctx)
+	// 出站 deviceId：按 quota key ID 从站点侧解析（库内没有则随机生成一份并落库，
+	// 之后永久复用）。**绝不**由激活码派生（B-10 已推翻该做法：插件语义是
+	// uuidv4() 随机生成后固化，与激活码无关；按码派生会得到与设备绑定不匹配的值）。
+	resolvedDeviceID, err := p.deviceIDs.DeviceIDFor(ctx, p.quotaKeyID)
+	if err != nil {
+		return "", fmt.Errorf("cursor: resolve device id for quota key %d: %w", p.quotaKeyID, err)
+	}
+	if strings.TrimSpace(resolvedDeviceID) == "" {
+		return "", fmt.Errorf("%w: quota key %d resolved to empty device id", ErrCursorQuotaKeyUnresolved, p.quotaKeyID)
+	}
+
+	// 复用 E1 的 wasm provider 生成 x-jg-auth：材料 = zk03({d: deviceId, a: code})。
+	material, err := NewCursorWasmAuthProvider(resolvedDeviceID, code).CursorUpstreamAuth(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -146,12 +165,15 @@ func isCursorAccount(account *Account) bool {
 // QuotaKeyService.SetAutoEntry / ChannelMonitorV2Service.SetAccountRepository 同构。
 //
 // enc 为 nil 时保持未注入态：forwardCursor 会因依赖缺失而失败关闭，绝不回落明文。
-func (s *OpenAIGatewayService) SetCursorAuthDeps(quotaKeys QuotaKeyRepository, enc QuotaKeyEncryptor) {
+//
+// deviceIDs 用于解析出站 deviceId（B-10）；生产装配注入 *QuotaKeyService 即可。
+func (s *OpenAIGatewayService) SetCursorAuthDeps(quotaKeys QuotaKeyRepository, enc QuotaKeyEncryptor, deviceIDs CursorDeviceIDResolver) {
 	if s == nil {
 		return
 	}
 	s.cursorQuotaKeys = quotaKeys
 	s.cursorQuotaKeyEnc = enc
+	s.cursorDeviceIDs = deviceIDs
 }
 
 // forwardCursor 是 cursor 平台的转发入口，挂在 OpenAIGatewayService 的 platform 分支上
@@ -187,7 +209,7 @@ func (s *OpenAIGatewayService) forwardCursor(
 
 	// 鉴权材料按账号解析（quota_key_id → 解密激活码 → wasm），此处预热：
 	// 材料不可得即失败关闭，绝不发出无鉴权请求去白耗 shareai 额度。
-	provider, err := newCursorAccountAuthProvider(account, s.cursorQuotaKeys, s.cursorQuotaKeyEnc)
+	provider, err := newCursorAccountAuthProvider(account, s.cursorQuotaKeys, s.cursorQuotaKeyEnc, s.cursorDeviceIDs)
 	if err != nil {
 		return err
 	}

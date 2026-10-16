@@ -476,10 +476,11 @@ type OpenAIGatewayService struct {
 	rpmCache              RPMCache // 账号级 RPM 计数（当前用于 CodeBuddy 平台默认 RPM 限流）
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
-	// cursor 出站鉴权依赖（quota_keys 仓储 + 激活码解密器），仅 forwardCursor 消费。
-	// 经 SetCursorAuthDeps 注入而非改构造签名——理由见该方法注释。
+	// cursor 出站鉴权依赖（quota_keys 仓储 + 激活码解密器 + deviceId 解析器），
+	// 仅 forwardCursor 消费。经 SetCursorAuthDeps 注入而非改构造签名——理由见该方法注释。
 	cursorQuotaKeys QuotaKeyRepository
 	cursorQuotaKeyEnc QuotaKeyEncryptor
+	cursorDeviceIDs   CursorDeviceIDResolver
 
 	openaiWSPoolOnce               sync.Once
 	openaiWSStateStoreOnce         sync.Once
