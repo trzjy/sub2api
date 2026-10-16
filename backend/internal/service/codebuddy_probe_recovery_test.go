@@ -152,8 +152,8 @@ func TestCodeBuddyShadowProbeDispatchesMinimalStreamChat(t *testing.T) {
 	// PRC-02：一次真实探测成功即走既有 ClearTempUnschedulable 恢复路径，无 attempt 记账。
 	p.RunOnce(context.Background())
 
-	require.Equal(t, 1, rlRepo.clearTempCalls)
-	require.Equal(t, 0, repo.setReasonCall, "成功恢复路径不再回写 consecutive_successes")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls)
+	require.Equal(t, 0, repo.bumpTempIfReasonCalls, "成功恢复路径不再回写 consecutive_successes")
 
 	// httptest 上游校验请求形状。
 	rec := upstream.lastRecord(t)
@@ -200,9 +200,10 @@ func TestCodeBuddyShadowProbeSSEErrorFrameKeepsParked(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成（AC-C1）
 
-	require.Zero(t, rlRepo.clearTempCalls, "错误帧必须判探测失败，不得恢复停调")
-	require.Equal(t, 2, repo.setReasonCall, "失败后 attempt 计数 +1（首探 + 1 次补探）")
+	require.Zero(t, repo.clearTempIfReasonCalls, "错误帧必须判探测失败，不得恢复停调")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "失败后 attempt 计数 +1（首探 + 1 次补探）")
 	var state TempUnschedState
 	require.NoError(t, json.Unmarshal([]byte(shadow.TempUnschedulableReason), &state))
 	require.Equal(t, 2, state.ProbeAttempts)
@@ -224,9 +225,10 @@ func TestCodeBuddyShadowProbeTruncatedStreamKeepsParked(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成（AC-C1）
 
-	require.Zero(t, rlRepo.clearTempCalls, "缺 [DONE] 终止帧必须判探测失败")
-	require.Equal(t, 2, repo.setReasonCall, "首探 + 1 次补探（PRC-02）")
+	require.Zero(t, repo.clearTempIfReasonCalls, "缺 [DONE] 终止帧必须判探测失败")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探（PRC-02）")
 }
 
 func TestCodeBuddyShadowProbeNon2xxKeepsParked(t *testing.T) {
@@ -243,9 +245,10 @@ func TestCodeBuddyShadowProbeNon2xxKeepsParked(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成（AC-C1）
 
-	require.Zero(t, rlRepo.clearTempCalls, "非 2xx 不得恢复停调")
-	require.Equal(t, 2, repo.setReasonCall, "首探 + 1 次补探（PRC-02）")
+	require.Zero(t, repo.clearTempIfReasonCalls, "非 2xx 不得恢复停调")
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls, "首探 + 1 次补探（PRC-02）")
 }
 
 // --- T4：四条件成功判定的纯函数表驱动钉（含业务错误信封形态） ---
@@ -294,7 +297,7 @@ func TestProbeAPIKeyAccountKeepsModelsProbePath(t *testing.T) {
 	// PRC-02：语义不变指「成功仍会恢复、且仍走 /models 探测」，只是不再需要第二轮确认。
 	p.RunOnce(context.Background())
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "apikey 账号 2xx /models 探测成功语义不变")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "apikey 账号 2xx /models 探测成功语义不变")
 	rec := upstream.lastRecord(t)
 	require.Equal(t, http.MethodGet, rec.Method)
 	require.Equal(t, "/v1/models", rec.Path, "非 CodeBuddy 账号仍走既有 /models 探测")
@@ -339,7 +342,7 @@ func TestProbePool401MarkerRecoveryResetsPoolWindowState(t *testing.T) {
 	p.RunOnce(context.Background())
 
 	// marker 放行：探测成功 → ClearTempUnschedulable 生效。
-	require.Equal(t, 1, rlRepo.clearTempCalls)
+	require.Equal(t, 1, repo.clearTempIfReasonCalls)
 
 	// resetPool401State 已被调用：窗口条目清空。
 	pool401Windows.mu.Lock()
@@ -384,9 +387,10 @@ func TestProbePool401MarkerAccountIsSelected(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成（AC-C1）
 
 	require.Equal(t, 2, overrideCalls, "池 401 升级停调必须被探测选号认领（首探 + 1 次补探）")
-	require.Zero(t, rlRepo.clearTempCalls)
+	require.Zero(t, repo.clearTempIfReasonCalls)
 }
 
 // --- T5 回归：健康熔断 marker 的恢复不触碰池 401 窗口 ---
@@ -410,7 +414,7 @@ func TestProbeHealthBreakerMarkerKeepsPoolWindowStateUntouched(t *testing.T) {
 	// PRC-02：首次探测成功即恢复，marker 分派语义不变。
 	p.RunOnce(context.Background())
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "健康熔断 marker 恢复行为不变")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "健康熔断 marker 恢复行为不变")
 	pool401Windows.mu.Lock()
 	_, entryExists := pool401Windows.entries[accID]
 	pool401Windows.mu.Unlock()

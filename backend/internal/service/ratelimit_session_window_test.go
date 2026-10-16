@@ -66,6 +66,13 @@ func (m *sessionWindowMockRepo) ClearModelRateLimits(_ context.Context, _ int64)
 func (m *sessionWindowMockRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
 	return nil
 }
+func (m *sessionWindowMockRepo) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (m *sessionWindowMockRepo) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
+}
 func (m *sessionWindowMockRepo) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
 	return nil, nil
 }

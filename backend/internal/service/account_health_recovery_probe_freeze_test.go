@@ -74,7 +74,7 @@ func TestHealthRecoveryProbeRecoveryClearsFrozenFreshnessUpperBound(t *testing.T
 	// PRC-02：首次（单轮）探测成功即清除停调并 clearCandidateBound。
 	p.RunOnce(context.Background())
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "恢复路径应清除 temp-unschedulable")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "恢复路径应清除 temp-unschedulable")
 	_, frozen := p.frozenCandidateBoundOK(7, "")
 	require.False(t, frozen, "恢复成功后账号级冻结上界必须被清除（回到未冻结态）")
 	require.Equal(t, time.Duration(0), p.AccountFreshnessUpperBound(7, ""),

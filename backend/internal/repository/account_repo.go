@@ -2946,24 +2946,77 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 	return nil
 }
 
-// SetTempUnschedulableReason updates only the temp-unschedulable reason string for
-// an account that is still inside its cooldown window (e.g. to bump probe attempt
-// counters). It does not extend the cooldown; the scheduling state is unchanged so
-// no scheduler outbox event is emitted.
-func (r *accountRepository) SetTempUnschedulableReason(ctx context.Context, id int64, reason string) error {
-	_, err := r.sql.ExecContext(ctx, `
+// ClearTempUnschedulableIfGeneration 是仓储层条件清除原语（AC-G2R5 must_fix / AC-G2R6 子秒
+// 精度修复）：用「截止时间」做不可变代际令牌——同一次停调内 bumpProbeAttempts 只改 reason
+// 不改 until；他因接管必写更晚 until → 必失配保留。仅当该账号当前 temp_unschedulable_until 仍
+// 等于 expectedUntil（探测开始/入队时读到的代际令牌，timestamptz 全精度等值，微秒级）时才清除
+// 停调，并如 ClearTempUnschedulable 同款自增 sched_state_revision、写调度快照；若 until 已被
+// 他人改写（新停调接管）则 WHERE 失配、零写入、返回 false——探测方据此保留新停调、不清除。单语句
+// 原子，禁止读-改-写两步（否则代际判断与清除之间可被并发覆盖，错清他链刚写入的状态）。沿用本文件
+// 既有 SQL 风格与错误包装（与 ClearTempUnschedulable 同源）。
+//
+// 代际口径选择（AC-G2R5 相对 G2R4 的修复根因）：G2R4 用 reason 字符串作代际令牌，但
+// bumpProbeAttempts 在每次失败探测后持续改写 reason（写入新 attempt 计数），导致「首探失败→
+// reason 被改写→补探成功时令牌失配、rows==0、清不掉」。改以 until（停调截止时间）作令牌后，
+// 同一次停调内 bumpProbeAttempts 不触碰 until，补探成功的令牌始终命中；而他因接管（写更晚
+// until）必然令 until 失配、保留新停调——代际语义完全正确。
+//
+// 全精度等值（AC-G2R6）：temp_unschedulable_until 在 PG 以微秒级 timestamptz 落地，故比较两侧
+// 直接用 `temp_unschedulable_until = $2`（time.Time 全精度），不再 EXTRACT(EPOCH)::bigint 截断
+// 到秒——截断会导致「同一秒内的两个不同 until」被误判为命中（同秒错清），以及更隐蔽的漏清。
+func (r *accountRepository) ClearTempUnschedulableIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time) (bool, error) {
+	result, err := r.sql.ExecContext(ctx, `
 		UPDATE accounts
-		SET temp_unschedulable_reason = $2,
+		SET temp_unschedulable_until = NULL,
+			temp_unschedulable_reason = NULL,
+			extra = `+schedStateRevisionIncrementExpr()+`,
 			updated_at = NOW()
 		WHERE id = $1
 			AND deleted_at IS NULL
 			AND temp_unschedulable_until IS NOT NULL
-			AND temp_unschedulable_until > NOW()
-	`, id, reason)
+			AND temp_unschedulable_until = $2
+	`, accountID, expectedUntil)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear temp unschedulable if reason failed: account=%d err=%v", accountID, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, accountID)
+	return true, nil
+}
+
+// BumpTempUnschedulableReasonIfGeneration 是 attempt 回写的代际守卫原语（AC-G2R6 must_fix）：
+// 仅当该账号当前 temp_unschedulable_until 仍等于 expectedUntil（探测入队时读到的代际令牌，
+// timestamptz 全精度等值）且停调窗口仍有效（> NOW()）时，才把 reason 改写为 newReason（递增
+// probe_attempts 计数）；否则 WHERE 失配、零写入、返回 false —— 表示停调已被他因接管（必写更晚
+// until），本次回写属于「已不属于本代的旧停调」，调用方据此终止该账号本轮补探、保留接管者写入的
+// reason。单语句原子，杜绝读-改-写两步的并发覆盖。reason 改写不改调度状态，不写 scheduler_outbox。
+func (r *accountRepository) BumpTempUnschedulableReasonIfGeneration(ctx context.Context, accountID int64, expectedUntil time.Time, newReason string) (bool, error) {
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET temp_unschedulable_reason = $3,
+			updated_at = NOW()
+		WHERE id = $1
+			AND deleted_at IS NULL
+			AND temp_unschedulable_until = $2
+			AND temp_unschedulable_until > NOW()
+	`, accountID, expectedUntil, newReason)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // ListTempUnschedulableAccounts returns accounts currently inside a temp-unschedulable

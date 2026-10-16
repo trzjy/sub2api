@@ -48,12 +48,12 @@ type cachedOpenAIAPIKeyHealthBreakerSettings struct {
 const (
 	openAIAPIKeyHealthWatchRatioMin    = 0.01
 	openAIAPIKeyHealthWatchRatioMax    = 0.99
-	openAIAPIKeyHealthWarningRatioMin   = 0.01
-	openAIAPIKeyHealthWarningRatioMax   = 0.99
-	openAIAPIKeyHealthProbeIntervalMin  = 30
-	openAIAPIKeyHealthProbeIntervalMax  = 600
-	openAIAPIKeyHealthProbeAttemptsMin  = 1
-	openAIAPIKeyHealthProbeAttemptsMax  = 100
+	openAIAPIKeyHealthWarningRatioMin  = 0.01
+	openAIAPIKeyHealthWarningRatioMax  = 0.99
+	openAIAPIKeyHealthProbeIntervalMin = 15
+	openAIAPIKeyHealthProbeIntervalMax = 600
+	openAIAPIKeyHealthProbeAttemptsMin = 1
+	openAIAPIKeyHealthProbeAttemptsMax = 100
 )
 
 // normalizeOpenAIAPIKeyHealthBreakerSettings fills in missing fields with defaults

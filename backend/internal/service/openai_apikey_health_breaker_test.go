@@ -249,7 +249,7 @@ func TestNormalizeOpenAIAPIKeyHealthBreakerSettings(t *testing.T) {
 		require.Equal(t, 1, got.FailureThreshold)
 		require.Equal(t, 60, got.CooldownMinutes)
 		require.Equal(t, []string{domain.PlatformOpenAI, domain.PlatformDeepseek}, got.ScopePlatforms)
-		require.InDelta(t, 0.01, got.WatchRatio, 1e-9)  // clamped up to min
+		require.InDelta(t, 0.01, got.WatchRatio, 1e-9) // clamped up to min
 		require.InDelta(t, 0.95, got.WarningRatio, 1e-9)
 		require.Equal(t, 600, got.Probe.IntervalSeconds) // clamped to max
 		require.Equal(t, 100, got.Probe.MaxAttempts)     // clamped to max
@@ -268,7 +268,7 @@ func TestNormalizeOpenAIAPIKeyHealthBreakerSettings(t *testing.T) {
 		got := normalizeOpenAIAPIKeyHealthBreakerSettings(&OpenAIAPIKeyHealthBreakerSettings{})
 		require.NotNil(t, got.Probe)
 		require.False(t, got.Probe.Enabled)
-		require.Equal(t, 30, got.Probe.IntervalSeconds)
+		require.Equal(t, 15, got.Probe.IntervalSeconds)
 		require.Equal(t, 1, got.Probe.MaxAttempts)
 	})
 }
@@ -528,6 +528,16 @@ type probeRepoMock struct {
 	candidates    []*Account
 	setReasonCall int
 	listCalls     int
+	// clearTempIfReasonCalls 记录条件清除 ClearTempUnschedulableIfGeneration 的调用次数
+	//（替代旧 ClearTempUnschedulable 的调用计数；AC-G2R5 恢复路径改走仓储层条件清除）。
+	clearTempIfReasonCalls int
+	// bumpTempIfReasonCalls 记录 attempt 回写 BumpTempUnschedulableReasonIfGeneration
+	// 的调用次数（AC-G2R6 代际守卫）。
+	bumpTempIfReasonCalls int
+	// storedUntils 模拟 DB 当前存储的 temp_unschedulable_until（UNIX 秒，默认取 accounts
+	// 中账号的当前 until）。测试写入不同于账号对象的更晚 until 可模拟「他因新停调接管」：
+	// 条件清除命中失配、rows==0、返回 false，账号保持新停调。
+	storedUntils map[int64]int64
 }
 
 func (m *probeRepoMock) ListTempUnschedulableAccounts(_ context.Context, _ time.Time, _ int) ([]*Account, error) {
@@ -546,6 +556,54 @@ func (m *probeRepoMock) SetTempUnschedulableReason(_ context.Context, id int64, 
 		a.TempUnschedulableReason = reason
 	}
 	return nil
+}
+
+// ClearTempUnschedulableIfGeneration 是仓储层条件清除的内存实现（AC-G2R5 must_fix / AC-G2R6
+// 子秒精度）：仅当 DB 当前 until（storedUntils，缺省取账号对象当前 until 的 UNIX 秒）等于
+// expectedUntil 的 UNIX 秒时才记一次调用、返回 true；否则命中失配、零写入、返回 false（模拟他因
+// 新停调接管，必写更晚 until）。注意：与生产实现一致，本桩不修改入参 acc 的内存副本（清除
+// 只落 DB），故恢复后账号对象的 TempUnschedulableUntil 仍保留原值——调用方应通过
+// clearTempIfReasonCalls 与返回值判定清除是否发生，而非读取内存对象的字段。
+func (m *probeRepoMock) ClearTempUnschedulableIfGeneration(_ context.Context, id int64, expectedUntil time.Time) (bool, error) {
+	m.clearTempIfReasonCalls++
+	var stored int64
+	if a, ok := m.accounts[id]; ok && a.TempUnschedulableUntil != nil {
+		stored = a.TempUnschedulableUntil.Unix()
+	}
+	if v, ok := m.storedUntils[id]; ok {
+		stored = v
+	}
+	if stored != expectedUntil.Unix() {
+		// 代际失配：模拟 until 已被他人改写（更晚新停调接管），条件清除零写入，账号保持新停调。
+		return false, nil
+	}
+	// 命中：模拟 DB 行被清除（生产只落 DB，不改内存 acc 副本；此处不改动 accounts[id]）。
+	return true, nil
+}
+
+// BumpTempUnschedulableReasonIfGeneration 是 attempt 回写代际守卫的内存实现（AC-G2R6 must_fix）：
+// 与 ClearTempUnschedulableIfGeneration 同款代际判定——仅当 DB 当前 until 仍等于 expectedUntil
+// 的 UNIX 秒且停调仍有效时才记一次调用、返回 true；否则（已被接管，必写更晚 until）返回 false，
+// 调用方据此终止本轮补探。bumpTempIfReasonCalls 供测试断言回写是否发生。
+func (m *probeRepoMock) BumpTempUnschedulableReasonIfGeneration(_ context.Context, id int64, expectedUntil time.Time, newReason string) (bool, error) {
+	m.bumpTempIfReasonCalls++
+	var stored int64
+	if a, ok := m.accounts[id]; ok && a.TempUnschedulableUntil != nil {
+		stored = a.TempUnschedulableUntil.Unix()
+	}
+	if v, ok := m.storedUntils[id]; ok {
+		stored = v
+	}
+	if stored != expectedUntil.Unix() {
+		// 代际失配：模拟 until 已被他人改写（更晚新停调接管），回写零写入。
+		return false, nil
+	}
+	// 命中：代际守卫通过，回写新 reason（与生产 BumpTempUnschedulableReasonIfGeneration
+	// 一致，attempt 计数落库），供测试断言 ProbeAttempts 已被更新。
+	if a, ok := m.accounts[id]; ok {
+		a.TempUnschedulableReason = newReason
+	}
+	return true, nil
 }
 
 // probeRateLimitRepo records ClearTempUnschedulable calls from the probe recovery.
@@ -597,17 +655,17 @@ func parkedBreakerAccount(id int64, probeAttempts int) *Account {
 	}
 	reason, _ := json.Marshal(state)
 	return &Account{
-		ID:                        id,
-		Platform:                  domain.PlatformOpenAI,
-		Type:                      AccountTypeAPIKey,
-		TempUnschedulableUntil:    &until,
-		TempUnschedulableReason:   string(reason),
+		ID:                      id,
+		Platform:                domain.PlatformOpenAI,
+		Type:                    AccountTypeAPIKey,
+		TempUnschedulableUntil:  &until,
+		TempUnschedulableReason: string(reason),
 	}
 }
 
 // setFastProbeRetry 注入毫秒级补探节奏（PRC-02）。默认补探间隔
-// accountHealthProbeRetryInterval=5s、本轮上限 accountHealthProbeRetryBurst=3，
-// 单测不得真实等待；burst=1 使「首探 + 1 次补探」的 attempt 计数可确定断言。
+// accountHealthProbeRetryInterval=5s、本轮上限 accountHealthProbeRetryBurst=50
+// （AC-C1：旧 3），单测不得真实等待；burst=1 使「首探 + 1 次补探」的 attempt 计数可确定断言。
 func setFastProbeRetry(p *AccountHealthRecoveryProbeService) {
 	p.retryInterval = time.Millisecond
 	p.retryBurst = 1
@@ -639,8 +697,8 @@ func TestProbeRecoverySuccessClearsOnFirstRound(t *testing.T) {
 	p.RunOnce(context.Background())
 
 	// 单轮 success 即清除停调（recovered early），且不再回写 consecutive_successes。
-	require.Equal(t, 1, rlRepo.clearTempCalls)
-	require.Equal(t, 0, repo.setReasonCall)
+	require.Equal(t, 1, repo.clearTempIfReasonCalls)
+	require.Equal(t, 0, repo.bumpTempIfReasonCalls)
 }
 
 func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
@@ -657,9 +715,10 @@ func TestProbeFailureStaysParkedAndBumpsAttempts(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成，使 attempt 记账断言确定（AC-C1 异步化）
 
-	require.Zero(t, rlRepo.clearTempCalls) // not recovered
-	require.Equal(t, 2, repo.setReasonCall) // attempt counter bumped（首探 + 1 次补探）
+	require.Zero(t, repo.clearTempIfReasonCalls)    // not recovered
+	require.Equal(t, 2, repo.bumpTempIfReasonCalls) // attempt counter bumped（首探 + 1 次补探）
 
 	var state TempUnschedState
 	require.NoError(t, json.Unmarshal([]byte(cand.TempUnschedulableReason), &state))
@@ -681,9 +740,10 @@ func TestProbeDegradedPlatformFallsBackToExpiry(t *testing.T) {
 	setFastProbeRetry(p)
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探（降级路径首探后 gave_up，无二次 bump）完成，避免 goroutine 泄漏
 
-	require.Zero(t, rlRepo.clearTempCalls)
-	require.Equal(t, 1, repo.setReasonCall)
+	require.Zero(t, repo.clearTempIfReasonCalls)
+	require.Equal(t, 1, repo.bumpTempIfReasonCalls)
 }
 
 func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
@@ -709,7 +769,7 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 
 	// Disabled at start: the running loop never touches the candidate.
 	p.RunOnce(context.Background())
-	require.Zero(t, rlRepo.clearTempCalls)
+	require.Zero(t, repo.clearTempIfReasonCalls)
 
 	// Flip the switch ON through the setting service (simulates an admin toggle).
 	require.NoError(t, ss.SetOpenAIAPIKeyHealthBreakerSettings(context.Background(), &OpenAIAPIKeyHealthBreakerSettings{
@@ -720,7 +780,7 @@ func TestProbeSwitchTogglesAtRuntimeWithoutRestart(t *testing.T) {
 	// Same service instance, no restart: the next tick now performs the sweep.
 	// PRC-02：一次真实探测成功即清除，故开关生效后的第一个 tick 即完成恢复。
 	p.RunOnce(context.Background())
-	require.Equal(t, 1, rlRepo.clearTempCalls, "enabling the probe must take effect on the running loop")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "enabling the probe must take effect on the running loop")
 }
 
 func TestProbeGivesUpAfterMaxAttempts(t *testing.T) {
@@ -741,9 +801,9 @@ func TestProbeGivesUpAfterMaxAttempts(t *testing.T) {
 
 	p.RunOnce(context.Background())
 
-	require.Zero(t, overrideCalls)           // never probed
-	require.Zero(t, rlRepo.clearTempCalls)   // not recovered
-	require.Zero(t, repo.setReasonCall)      // no further bookkeeping
+	require.Zero(t, overrideCalls)               // never probed
+	require.Zero(t, repo.clearTempIfReasonCalls) // not recovered
+	require.Zero(t, repo.bumpTempIfReasonCalls)  // no further bookkeeping
 }
 
 func TestProbeSkipsNonBreakerBlocks(t *testing.T) {
@@ -768,7 +828,7 @@ func TestProbeSkipsNonBreakerBlocks(t *testing.T) {
 	p.RunOnce(context.Background())
 
 	require.Zero(t, overrideCalls)
-	require.Zero(t, rlRepo.clearTempCalls)
+	require.Zero(t, repo.clearTempIfReasonCalls)
 }
 
 func TestProbeDisabledIsNoOp(t *testing.T) {
@@ -787,7 +847,7 @@ func TestProbeDisabledIsNoOp(t *testing.T) {
 
 	p.RunOnce(context.Background())
 
-	require.Zero(t, repo.listCalls)    // never listed candidates
-	require.Zero(t, overrideCalls)     // never probed
-	require.Zero(t, rlRepo.clearTempCalls)
+	require.Zero(t, repo.listCalls) // never listed candidates
+	require.Zero(t, overrideCalls)  // never probed
+	require.Zero(t, repo.clearTempIfReasonCalls)
 }

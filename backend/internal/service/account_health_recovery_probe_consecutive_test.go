@@ -25,7 +25,7 @@ import (
 )
 
 // newProbeRetryHarness 构造一个探针 service + 内存 repo，并注入毫秒级补探节奏
-//（生产默认 accountHealthProbeRetryInterval=5s，单测不能真等）。probe 序列由
+// （生产默认 accountHealthProbeRetryInterval=5s，单测不能真等）。probe 序列由
 // 调用方注入；repo.accounts 与 repo.candidates 指向同一个 *Account 对象，
 // 使 bumpProbeAttempts 的回写对补探可见（与真实 DB 回读同语义）。
 func newProbeRetryHarness(
@@ -72,52 +72,58 @@ func TestProbeRecoveryFirstSuccessClearsImmediately(t *testing.T) {
 	stillParked := p.probeAccount(context.Background(), acc, 10)
 
 	require.False(t, stillParked, "首探成功即恢复，不应仍标记为待补探")
-	require.Equal(t, 1, rlRepo.clearTempCalls, "首次探测成功必须立即解除停调（不再要求连续两轮成功）")
-	require.Equal(t, 0, repo.setReasonCall, "不再回写 consecutive_successes 计数")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "首次探测成功必须立即解除停调（不再要求连续两轮成功）")
+	require.Equal(t, 0, repo.bumpTempIfReasonCalls, "不再回写 consecutive_successes 计数")
 	require.Equal(t, originalReason, acc.TempUnschedulableReason, "成功恢复路径不得改写 reason")
 	require.True(t, sink.ContainsMessageAtLevel("openai.apikey_health_probe_recovered", "info"),
 		"首探成功必须产出 apikey_health_probe_recovered 事件")
 }
 
-// 用例 2：首探失败后按短间隔补探——同一轮 RunOnce 内即补探成功并解除停调，
-// 不再空等一个完整轮次（默认 60s）或冷却到期。
+// 用例 2：首探失败后按短间隔补探——sweep 异步发起补探（AC-C1），补探成功并解除停调，
+// 不再空等一个完整轮次（默认 15s）或冷却到期；sweep 自身不被补探阻塞。
 func TestProbeRecoveryRetryBurstAfterFirstProbeFailure(t *testing.T) {
 	var calls int32
-	p, repo, rlRepo := newProbeRetryHarness(t, 10, func(_ context.Context, _ *Account) (bool, error) {
+	p, repo, _ := newProbeRetryHarness(t, 10, func(_ context.Context, _ *Account) (bool, error) {
 		// 首探失败，补探成功。
 		return atomic.AddInt32(&calls, 1) >= 2, nil
 	})
 
+	// sweep 必须立即返回（补探在独立 goroutine 异步执行，不阻塞本 sweep）。
 	start := time.Now()
 	p.RunOnce(context.Background())
+	require.Less(t, time.Since(start), 50*time.Millisecond, "sweep 不得被异步补探阻塞")
+
+	// 等待异步补探完成并完成恢复。
+	p.wg.Wait()
 	elapsed := time.Since(start)
 
-	require.Equal(t, 1, rlRepo.clearTempCalls, "首探失败后应在同一轮内补探成功并解除停调")
+	require.Equal(t, 1, repo.clearTempIfReasonCalls, "首探失败后应异步补探成功并解除停调")
 	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "探测次数应为 1 次首探 + 1 次补探")
 	require.GreaterOrEqual(t, elapsed, 10*time.Millisecond, "补探必须按注入间隔等待，不得零间隔空转")
 	require.Less(t, elapsed, 30*time.Second, "补探须在秒级完成，不得等完整轮次或冷却到期")
-	require.Equal(t, 1, repo.setReasonCall, "首探失败应簿记一次 ProbeAttempts")
+	require.Equal(t, 1, repo.bumpTempIfReasonCalls, "首探失败应簿记一次 ProbeAttempts")
 }
 
 // 用例 3：补探全部失败时不得解除停调，且补探次数受本轮上限（retryBurst）约束。
 func TestProbeRecoveryRetryBurstRespectsBurstLimit(t *testing.T) {
 	var calls int32
-	p, _, rlRepo := newProbeRetryHarness(t, 100, func(_ context.Context, _ *Account) (bool, error) {
+	p, repo, _ := newProbeRetryHarness(t, 100, func(_ context.Context, _ *Account) (bool, error) {
 		atomic.AddInt32(&calls, 1)
 		return false, nil // 始终失败
 	})
 	p.retryBurst = 2
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探完成（AC-C1）
 
 	require.Equal(t, int32(3), atomic.LoadInt32(&calls), "探测次数应为 1 次首探 + 2 次补探（本轮补探上限）")
-	require.Zero(t, rlRepo.clearTempCalls, "补探全部失败不得解除停调（恢复仍须基于真实探测成功）")
+	require.Zero(t, repo.clearTempIfReasonCalls, "补探全部失败不得解除停调（恢复仍须基于真实探测成功）")
 }
 
 // 用例 4：补探同样受 settings.probe.max_attempts 约束——达上限后 gave_up，不再补探。
 func TestProbeRecoveryRetryBurstStopsAtMaxAttempts(t *testing.T) {
 	var calls int32
-	p, _, rlRepo := newProbeRetryHarness(t, 1, func(_ context.Context, _ *Account) (bool, error) {
+	p, repo, _ := newProbeRetryHarness(t, 1, func(_ context.Context, _ *Account) (bool, error) {
 		atomic.AddInt32(&calls, 1)
 		return false, nil
 	})
@@ -127,9 +133,10 @@ func TestProbeRecoveryRetryBurstStopsAtMaxAttempts(t *testing.T) {
 	defer stop()
 
 	p.RunOnce(context.Background())
+	p.wg.Wait() // 等待异步补探（gave_up 在补探 goroutine 内产出，AC-C1）
 
 	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "max_attempts=1 时首探即达上限，不得再补探")
-	require.Zero(t, rlRepo.clearTempCalls, "达尝试上限不得解除停调")
+	require.Zero(t, repo.clearTempIfReasonCalls, "达尝试上限不得解除停调")
 	require.True(t, sink.ContainsMessageAtLevel("openai.apikey_health_probe_gave_up", "info"),
 		"达到 max_attempts 应产出 apikey_health_probe_gave_up 事件")
 }

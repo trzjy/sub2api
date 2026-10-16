@@ -32,7 +32,7 @@ func (m *mockAccountRepoForGemini) SetTempUnschedulableReason(_ context.Context,
 }
 
 // DeleteModelRateLimitsMetaKeys 是 D-QL-007 F2 新增仓库方法的 no-op 桩
-//（补齐 AccountRepository 接口编译断言所需，本 mock 不触达清理路径）。
+// （补齐 AccountRepository 接口编译断言所需，本 mock 不触达清理路径）。
 func (m *mockAccountRepoForGemini) DeleteModelRateLimitsMetaKeys(context.Context, int64, []string) (int64, error) {
 	return 0, nil
 }
@@ -180,6 +180,13 @@ func (m *mockAccountRepoForGemini) SetTempUnschedulable(ctx context.Context, id 
 }
 func (m *mockAccountRepoForGemini) ClearTempUnschedulable(ctx context.Context, id int64) error {
 	return nil
+}
+func (m *mockAccountRepoForGemini) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (m *mockAccountRepoForGemini) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return true, nil
 }
 func (m *mockAccountRepoForGemini) ClearRateLimit(ctx context.Context, id int64) error { return nil }
 func (m *mockAccountRepoForGemini) ClearAntigravityQuotaScopes(ctx context.Context, id int64) error {
