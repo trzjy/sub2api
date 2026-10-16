@@ -312,6 +312,21 @@ export default {
       inactive: '已停用',
       quota_exhausted: '额度耗尽',
       expired: '已过期'
+    },
+    // 上游 v0.2.15 合并：API Key 批量编辑弹窗随组件入树，文案未带入。
+    // 插值名与 BulkEditKeysModal.vue 调用处一致。
+    bulkEdit: {
+      title: '批量编辑 API Key',
+      selectedCount: '已选择 {count} 个 Key',
+      hint: '仅勾选的字段会被更新，其余字段保持原值。',
+      apply: '应用到 {count} 个 Key',
+      limitHint: '请填写不小于 0 的数值，额度可含小数。',
+      ipHint: '每行一个 IP 或 CIDR，留空表示清空该列表。',
+      invalidLimit: '请填写不小于 0 的额度或限速值。',
+      invalidExpiration: '请选择有效的到期时间。',
+      success: '已更新 {count} 个 Key',
+      partialFailure: '部分更新：成功 {success} 个，失败 {failed} 个',
+      failureHint: '以下 Key 更新失败：'
     }
   },
 
@@ -381,6 +396,8 @@ export default {
     latency: '延迟',
     latencyFirstToken: '首字',
     latencyDuration: '总耗时',
+    outputTps: '输出 TPS',
+    outputTpsHint: '本次请求的每秒输出 Token 数：输出 Token ÷ 总耗时（含首字等待）。数值越高越快。',
     time: '时间',
     ws: 'WS',
     stream: '流式',
@@ -496,7 +513,8 @@ export default {
       kimi: 'Kimi',
       zhipu: '智谱 GLM',
       deepseek: 'DeepSeek',
-      minimax: 'MiniMax'
+      minimax: 'MiniMax',
+      opencode_go: 'OpenCode'
     },
     // 检查模式（监控条目的工作方式）
     checkMode: {
@@ -669,6 +687,10 @@ export default {
       tierHintMarginal: '仅超过阈值的部分按该档计价，输出不加价',
       maxReasoningMultiplierBadge: 'Max ×{multiplier}',
       maxReasoningMultiplierHint: '最终转发的推理强度为 max 时，整次请求的计费与额度消耗乘以 {multiplier}',
+      // 上游 v0.2.15 合并：按档位渲染的倍率徽标会遍历每个已配置档位，
+      // 同时传入 {effort} 与 {multiplier}（PlazaModelPricingTable.vue:99-102）。
+      reasoningMultiplierBadge: '{effort} ×{multiplier}',
+      reasoningMultiplierHint: '最终转发的推理强度为 {effort} 时，整次请求的计费与额度消耗乘以 {multiplier}',
       marginalBadge: '超出部分计价',
       timePricingRowHint: '按 {timezone} 时间，在该时段内发起的请求按本行价格计费',
       timePricingRowHintWeekdays:

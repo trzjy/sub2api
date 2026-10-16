@@ -397,6 +397,21 @@ export default {
       quota_exhausted: 'Quota Exhausted',
       expired: 'Expired',
     },
+    // Upstream v0.2.15 merge: the bulk key editor landed with its component but
+    // not its copy. Interpolation names match BulkEditKeysModal.vue call sites.
+    bulkEdit: {
+      title: 'Bulk Edit API Keys',
+      selectedCount: '{count} key(s) selected',
+      hint: 'Only checked fields are applied; every other field keeps its current value.',
+      apply: 'Apply to {count} key(s)',
+      limitHint: 'Enter 0 or more. Fractional quotas are allowed.',
+      ipHint: 'One IP address or CIDR per line. Leave empty to clear the list.',
+      invalidLimit: 'Enter a quota or rate limit of 0 or more.',
+      invalidExpiration: 'Select a valid expiration date.',
+      success: 'Updated {count} key(s)',
+      partialFailure: 'Partially updated: {success} succeeded, {failed} failed',
+      failureHint: 'These keys could not be updated:'
+    }
   },
 
   // Usage
@@ -465,6 +480,8 @@ export default {
     latency: 'Latency',
     latencyFirstToken: 'First',
     latencyDuration: 'Total',
+    outputTps: 'Output TPS',
+    outputTpsHint: 'Output tokens per second for this request: output tokens ÷ total duration, including the first-token wait. Higher is faster.',
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',
@@ -580,7 +597,8 @@ export default {
       kimi: 'Kimi',
       zhipu: 'Zhipu GLM',
       deepseek: 'DeepSeek',
-      minimax: 'MiniMax'
+      minimax: 'MiniMax',
+      opencode_go: 'OpenCode'
     },
     // Check modes (how a monitor performs its checks)
     checkMode: {
@@ -753,6 +771,11 @@ export default {
       tierHintMarginal: 'Only the portion above the threshold is billed at this tier; output is unaffected',
       maxReasoningMultiplierBadge: 'Max ×{multiplier}',
       maxReasoningMultiplierHint: 'When the forwarded reasoning effort is max, billing and quota usage for the request are multiplied by {multiplier}',
+      // Upstream v0.2.15 merge: per-effort badges iterate every configured level and
+      // pass both {effort} and {multiplier} (PlazaModelPricingTable.vue:99-102).
+      reasoningMultiplierBadge: '{effort} ×{multiplier}',
+      reasoningMultiplierHint:
+        'When the forwarded reasoning effort is {effort}, billing and quota usage for the request are multiplied by {multiplier}',
       marginalBadge: 'excess-only tiers',
       timePricingRowHint: 'Requests made within this period ({timezone} time) are billed at the prices in this row',
       timePricingRowHintWeekdays:

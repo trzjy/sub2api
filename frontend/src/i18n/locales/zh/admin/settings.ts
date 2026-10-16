@@ -144,6 +144,25 @@ export default {
           cyberSessionBlock: 'cyber 会话自动屏蔽',
           cyberSessionBlockHint: '开启后,被上游网络安全策略(cyber_policy)拦截的会话将在 TTL 内被本地屏蔽,不再发往上游。仅屏蔽该会话,不影响同 Key 其他会话。',
           cyberSessionBlockTTL: '屏蔽时长(秒)',
+          riskControlUserAllowlist: '风控用户白名单',
+          riskControlUserAllowlistHint: '仅名单内用户可见风控入口并接受网关审核；留空表示对全部 Sub2API 用户生效。',
+        },
+        // 上游 v0.2.15 合并：站点类型选择器随组件入树，文案未带入。
+        // 取值与 utils/siteBillingMode.ts 一致。
+        siteBillingMode: {
+          title: '站点类型',
+          description: '选择面向用户的站点形态。该项由订阅与余额支付两个开关派生；保存时若需要会自动重新开启余额充值。',
+          label: '站点类型',
+          options: {
+            rechargeAndSubscription: '充值 + 订阅',
+            rechargeOnly: '仅充值',
+            subscriptionOnly: '仅订阅'
+          },
+          hints: {
+            rechargeAndSubscription: '用户可充值余额，也可管理订阅。',
+            rechargeOnly: '隐藏订阅入口，用户仅可充值余额。',
+            subscriptionOnly: '关闭余额充值，用户仅可管理订阅。'
+          }
         },
         affiliate: {
           title: '邀请返利',
@@ -596,6 +615,11 @@ export default {
         openaiCodexVersionAutoSync: '自动同步 Codex 版本号',
         openaiCodexVersionAutoSyncHint: '每 6 小时从官方仓库获取最新稳定版客户端版本号，无需为了跟版本而升级本服务。关闭后仅使用上方手填版本或内置版本。',
         openaiCodexVersionSyncedValue: '当前同步到：{version}',
+        claudeCodeClientVersion: 'Claude Code 客户端版本号',
+        claudeCodeClientVersionHint: '网关对上游声明的 Claude Code 客户端版本号，User-Agent 与 version 头同源使用。留空表示使用自动同步到的官方最新稳定版；填写后固定为该版本，不再跟随同步。',
+        claudeCodeVersionAutoSync: '自动同步 Claude Code 版本号',
+        claudeCodeVersionAutoSyncHint: '每 6 小时从官方仓库获取最新稳定版客户端版本号，无需为了跟版本而升级本服务。关闭后仅使用上方手填版本或内置版本。',
+        claudeCodeVersionSyncedValue: '当前同步到：{version}',
         codexHardeningTitle: 'Codex 设置',
         codexClientRestrictionTitle: 'Codex 客户端限制',
         codexHardeningDesc:
@@ -780,6 +804,7 @@ export default {
         remove: '删除',
         moveUp: '上移',
         moveDown: '下移',
+        hideOpenButton: '隐藏「新标签页打开」按钮',
       },
       payment: {
         title: '支付设置',
@@ -959,6 +984,38 @@ export default {
         refundEnabled: '允许退款',
         allowUserRefund: '允许用户退款',
         enableConflict: '{method} 已有启用中的服务商实例：{provider}。请先停用现有实例后再启用或切换。',
+        // 上游 v0.2.15 合并：充值优惠阶梯编辑器随组件入树，文案未带入。
+        // 插值名与 RechargeBonusTierEditor.vue 调用处一致。
+        rechargeBonus: {
+          label: '充值优惠阶梯',
+          hint: '按充值金额分档，每档赠送额度或折扣。',
+          modeLabel: '模式',
+          modeBonus: '赠送',
+          modeBonusHint: '按百分比额外增加入账额度。',
+          modeDiscount: '折扣',
+          modeDiscountHint: '按百分比从入账额度中扣减。',
+          minAmountLabel: '充值金额起点',
+          percentLabel: '赠送比例',
+          percentLabelDiscount: '折扣比例',
+          addTier: '添加档位',
+          removeTier: '删除档位',
+          empty: '尚未配置档位，添加一档即可生效。',
+          incompleteRow: '请同时填写金额起点和比例。',
+          invalidMinAmount: '金额起点需不小于 0。',
+          invalidPercent: '比例需不小于 0。',
+          invalidDiscountPercent: '折扣比例需小于 100%。',
+          duplicateMinAmount: '已有档位使用了相同的金额起点。',
+          previewTitle: '生效区间',
+          previewOpen: '{from} 及以上：+{percent}%',
+          previewOpenDiscount: '{from} 及以上：-{percent}%',
+          previewOpenNone: '{from} 及以上：无优惠',
+          previewRange: '{from} 至 {to}：+{percent}%',
+          previewRangeDiscount: '{from} 至 {to}：-{percent}%',
+          previewRangeNone: '{from} 至 {to}：无优惠',
+          noticeLabel: '活动文案',
+          noticePlaceholder: '展示在充值页，如「充值 100 赠送 20」。',
+          noticeHint: '留空则不展示活动文案。'
+        }
       },
       balanceNotify: {
         title: '余额不足提醒',
@@ -1214,6 +1271,7 @@ export default {
         tierAll: '全部 tier 值',
         tierPriority: 'priority（fast）',
         tierUltrafast: 'ultrafast',
+        tierMissing: '省略 tier',
         tierFlex: 'flex',
         action: '处理方式',
         actionPass: '透传（保留 service_tier）',
@@ -1324,6 +1382,7 @@ export default {
         oauthRateTitle: 'OAuth 调度参考倍率',
         oauthRatePriorityDescription: '同一分组同时包含 API Key 和 OAuth 账号时，OAuth 账号按此倍率与已探测的 API Key 计费倍率一起排序。',
         oauthRateWeightedDescription: '同一分组同时包含 API Key 和 OAuth 账号时，计算“计费倍率”得分时，OAuth 账号按此倍率参与计算。',
+        oauthRateInvalid: '请填写非负的 OAuth 调度参考倍率，或留空以使用各账号自身倍率。',
         stickyWeightedTitle: '粘性加权',
         stickyWeightedDescription: '开启后 previous_response_id 和 session_hash 粘性进入高级调度打分；关闭时仍按旧逻辑硬命中粘性账号。',
         subscriptionPriorityTitle: '订阅优先',
@@ -1346,6 +1405,20 @@ export default {
       usageRecords: {
         title: '使用记录',
         description: '与终端用户可见的用量及失败请求记录相关的设置。',
+      },
+      // 上游 v0.2.15 合并：OpenCode Go 用量自动刷新面板随组件入树，文案未带入。
+      // 取值范围与 SettingsView.vue 中的输入框一致。
+      opencodeGoUsage: {
+        title: 'OpenCode Go 用量刷新',
+        description: '控制后台刷新 OpenCode Go 账号配额窗口的频率。',
+        enabled: '开启自动刷新',
+        enabledHint: '关闭后，只有在账号上点击「立即刷新」才会查询配额窗口。',
+        debounceMinutes: '防抖间隔（分钟）',
+        debounceHint: '距上一次请求后等待多久再查询上游，最小 1、最大 60。',
+        intervalMinutes: '刷新间隔（分钟）',
+        intervalHint: '后台刷新频率，最小 5、最大 1440。',
+        saved: 'OpenCode Go 用量设置已保存',
+        saveFailed: '保存 OpenCode Go 用量设置失败'
       },
       user_error_view: {
         label: '允许用户查看自己的错误请求',

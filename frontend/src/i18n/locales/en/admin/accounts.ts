@@ -1997,8 +1997,136 @@ export default {
           failed: 'Auto-reset failed'
         },
         confirmTitle: 'Confirm Weekly Limit Reset',
-        confirmMessage: 'This will consume 1 reset credit to immediately restore the current window ({count} remaining). This action cannot be undone. Continue?'
+        confirmMessage: 'This will consume 1 reset credit to immediately restore the current window ({count} remaining). This action cannot be undone. Continue?',
+        points: 'Points',
+        pointsAvailable: 'Available',
+        pointsUnlimited: 'Unlimited',
+        pointsTooltip: 'Click to load the balance of redeemable points',
+        pointsUpdatedAt: 'Points queried at {time}',
+        pointsCachePersistFailed:
+          'Showing the live points balance, but it could not be written to the cache. Query it again later.'
       },
+      // Upstream v0.2.15 merge: the Claude (Anthropic OAuth) reset-credit cell and its
+      // OpenAI referral / OpenCode Go panels landed with the components but not the copy.
+      // Values follow the sibling openaiQuotaReset wording above.
+      claudeResetCredits: {
+        count: 'Credits',
+        reset: 'Reset',
+        countTooltipLoad: 'Click to load the available reset-credit count',
+        countTooltipRefresh: 'Click to refresh the available reset-credit count',
+        resetTooltipReady: 'Consume 1 reset credit to immediately restore the window',
+        resetTooltipNeedQuery: 'Click Credits first to load the available count',
+        resetTooltipNone: 'No reset credits available to redeem',
+        fetched: 'Queried at {time}',
+        expiresAt: 'Expires {time}',
+        expiresAtFull: 'Reset credit expires at {time}',
+        clears: 'Clears: {windows}',
+        requiresLimit: 'Requires an active usage limit to take effect',
+        notUsableNow: 'Credits are held, but none can be redeemed right now',
+        ineligible: 'This account is not eligible for Claude reset credits',
+        cooldown: 'Cooldown until {time}',
+        confirmTitle: 'Confirm Claude Limit Reset',
+        confirmMessage:
+          'This will consume 1 reset credit to immediately restore the current window ({windows}), leaving {count} remaining. This action cannot be undone. Continue?',
+        error: 'Failed to query Claude reset credits',
+        windows: {
+          fiveHour: '5-hour window',
+          sevenDay: '7-day window',
+          sevenDayOverage: '7-day overage'
+        },
+        outcome: {
+          reset: 'Reset the {windows} window; credits and account state updated',
+          alreadyUsed: 'This window was already reset; the credit was not consumed',
+          cooldown: 'Still in cooldown; the credit was not consumed',
+          cooldownUntil: 'Still in cooldown until {time}; the credit was not consumed',
+          notLimited: 'This account has no active usage limit, so there is nothing to reset',
+          ineligible: 'This account is not eligible for Claude reset credits',
+          busy: 'Another reset is in progress; try again shortly',
+          notAvailable: 'No reset credit is available to redeem right now',
+          inProgress: 'The previous request is still being processed; wait a moment and retry',
+          retryBackoff: 'Too many attempts; wait before retrying',
+          unavailable: 'Upstream is unavailable, so the window could not be reset',
+          failed: 'Failed to reset the window',
+          unknown: 'The reset result is unknown; query the credit count again'
+        }
+      },
+      openaiReferral: {
+        available: 'Invites',
+        invite: 'Invite',
+        fromAccount: 'Inviting from account',
+        email: 'Invitee email',
+        consent: 'I confirm this invitation is authorized by the account owner.',
+        sending: 'Sending...',
+        send: 'Send invite',
+        sent: 'Invitation sent to {email}',
+        queryHint: 'Click Invites to query the available count',
+        checkedAt: 'Queried at {time}',
+        unavailable: 'This account cannot send invitations',
+        shadowHint: 'Shadow accounts cannot send invitations; invite from the parent account',
+        cacheFailed: 'The query succeeded, but the result could not be cached. Refresh to retry.',
+        refreshFailed: 'The invitation was sent, but the remaining count could not be refreshed.',
+        sendUnknown:
+          'The network failed while sending, so the outcome is unknown. Check the recipient inbox before retrying.',
+        invalidEmail: 'Enter a valid email address',
+        rejected: 'Upstream rejected this address',
+        alreadyInvited: 'This address has already been invited',
+        rateLimited: 'Too many invitations in a short period; try again later',
+        programChanged: 'The referral program changed; reopen the dialog and try again',
+        consentRequired: 'Confirm the authorization statement before sending',
+        workspace: 'Workspace referral program',
+        personal: 'Personal referral program'
+      },
+      opencodeGo: {
+        title: 'OpenCode Go Usage',
+        panelHint: 'Quota windows reported by the upstream OpenCode Go account.',
+        status: 'Status',
+        updatedAt: 'Updated',
+        rolling: 'Rolling window',
+        weekly: 'Weekly window',
+        monthly: 'Monthly window',
+        rollingShort: 'Rolling',
+        weeklyShort: 'Weekly',
+        monthlyShort: 'Monthly',
+        ok: 'Normal',
+        unauthorized: 'Unauthorized',
+        failed: 'Query failed',
+        notRefreshed: 'Not queried yet',
+        windowWithReset: '{percent} used, resets {reset}',
+        refreshNow: 'Refresh now',
+        refreshSuccess: 'OpenCode Go usage refreshed',
+        refreshFailed: 'Failed to refresh OpenCode Go usage',
+        loadFailed: 'Failed to load OpenCode Go usage',
+        autoRefresh: 'Auto refresh',
+        autoRefreshHint: 'Refresh usage in the background so the list always shows the latest quota.',
+        autoRefreshFailed: 'Failed to update the auto-refresh setting',
+        accountMode: {
+          zen: 'Subscription',
+          zenDesc: 'Billed by subscription; quota windows come from the plan.',
+          go: 'Pay as you go',
+          goDesc: 'Billed per token against a prepaid balance.'
+        },
+        protocolRules: {
+          title: 'Protocol routing rules',
+          hint: 'Route each model pattern to a protocol. The first matching rule wins.',
+          patternPlaceholder: 'Model pattern, e.g. gpt-5*',
+          add: 'Add rule',
+          remove: 'Remove rule',
+          restoreDefaults: 'Restore defaults',
+          alsoSupports: 'Also accepts',
+          alsoSupportsHint: 'Extra protocols this rule accepts in addition to the preferred one.',
+          fallback: 'Anything not matched above uses this protocol.',
+          catalogFallback: 'Anything not matched above uses the model catalog protocol.'
+        }
+      },
+      priorityQuick: {
+        raise: 'Raise priority',
+        lower: 'Lower priority',
+        editHint: 'Click to enter a priority value directly',
+        failed: 'Failed to update priority'
+      },
+      moreFilters: 'More filters',
+      moreFiltersActive: 'More filters ({count} active)',
+      modelMappingConflict: '{from} is already mapped to {to} in Model Mapping; remove that mapping first.',
       tier: {
         free: 'Free',
         pro: 'Pro',

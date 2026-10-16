@@ -157,6 +157,25 @@ export default {
           cyberSessionBlock: 'Cyber session auto-block',
           cyberSessionBlockHint: 'When enabled, sessions hit by upstream cyber_policy are blocked locally for the TTL and no longer forwarded. Only the offending session is blocked; other sessions on the same key are unaffected.',
           cyberSessionBlockTTL: 'Block TTL (seconds)',
+          riskControlUserAllowlist: 'Risk Control user allowlist',
+          riskControlUserAllowlistHint: 'Only these users see the Risk Control entry and get gateway moderation. Leave empty to apply to all Sub2API users.',
+        },
+        // Upstream v0.2.15 merge: the site billing-mode selector landed with its
+        // components but not its copy. Values mirror utils/siteBillingMode.ts.
+        siteBillingMode: {
+          title: 'Site Type',
+          description: 'Choose which user-facing surfaces are available. Derived from the subscription and balance-payment switches; saving re-enables balance recharge when needed.',
+          label: 'Site type',
+          options: {
+            rechargeAndSubscription: 'Recharge + Subscription',
+            rechargeOnly: 'Recharge only',
+            subscriptionOnly: 'Subscription only'
+          },
+          hints: {
+            rechargeAndSubscription: 'Users can recharge their balance and manage subscriptions.',
+            rechargeOnly: 'Subscriptions are hidden; users recharge their balance only.',
+            subscriptionOnly: 'Balance recharge is disabled; users manage subscriptions only.'
+          }
         },
         affiliate: {
           title: 'Affiliate (Invite Rebate)',
@@ -616,6 +635,13 @@ export default {
         openaiCodexVersionAutoSync: 'Auto-sync Codex version',
         openaiCodexVersionAutoSyncHint: 'Fetches the latest stable client version from the official repository every 6 hours, so you never need to upgrade this service just to keep the version current. When disabled, only the version above or the built-in default is used.',
         openaiCodexVersionSyncedValue: 'Currently synced: {version}',
+        claudeCodeClientVersion: 'Claude Code client version',
+        claudeCodeClientVersionHint:
+          'The Claude Code client version this gateway declares upstream, shared by the User-Agent and the version header. Leave empty to use the auto-synced latest stable release; setting a value pins it and stops following auto-sync.',
+        claudeCodeVersionAutoSync: 'Auto-sync Claude Code version',
+        claudeCodeVersionAutoSyncHint:
+          'Fetches the latest stable client version from the official repository every 6 hours, so you never need to upgrade this service just to keep the version current. When disabled, only the version above or the built-in default is used.',
+        claudeCodeVersionSyncedValue: 'Currently synced: {version}',
         codexHardeningTitle: "Codex Settings",
         codexClientRestrictionTitle: "Codex client restriction",
         codexHardeningDesc:
@@ -798,6 +824,7 @@ export default {
         remove: 'Remove',
         moveUp: 'Move Up',
         moveDown: 'Move Down',
+        hideOpenButton: 'Hide the "Open in new tab" button',
       },
       payment: {
         title: 'Payment Settings',
@@ -977,6 +1004,38 @@ export default {
         refundEnabled: 'Allow Refund',
         allowUserRefund: 'Allow User Refund',
         enableConflict: '{method} already has an enabled provider instance: {provider}. Disable the existing instance before switching.',
+        // Upstream v0.2.15 merge: the recharge bonus tier editor landed with its
+        // component but not its copy. Interpolation names match RechargeBonusTierEditor.vue.
+        rechargeBonus: {
+          label: 'Recharge Bonus Tiers',
+          hint: 'Give a bonus, or a discount, on top of each recharge amount within a tier range.',
+          modeLabel: 'Mode',
+          modeBonus: 'Bonus',
+          modeBonusHint: 'Adds the percentage to the credited balance.',
+          modeDiscount: 'Discount',
+          modeDiscountHint: 'Subtracts the percentage from the credited balance.',
+          minAmountLabel: 'Recharge from',
+          percentLabel: 'Bonus %',
+          percentLabelDiscount: 'Discount %',
+          addTier: 'Add tier',
+          removeTier: 'Remove tier',
+          empty: 'No tiers yet. Add one to start giving bonuses or discounts.',
+          incompleteRow: 'Enter both the minimum amount and the percentage.',
+          invalidMinAmount: 'Enter a minimum amount of 0 or more.',
+          invalidPercent: 'Enter a percentage of 0 or more.',
+          invalidDiscountPercent: 'A discount must be below 100%.',
+          duplicateMinAmount: 'Another tier already starts at this amount.',
+          previewTitle: 'Applies to',
+          previewOpen: '{from} and above: +{percent}%',
+          previewOpenDiscount: '{from} and above: -{percent}%',
+          previewOpenNone: '{from} and above: no bonus',
+          previewRange: '{from} to {to}: +{percent}%',
+          previewRangeDiscount: '{from} to {to}: -{percent}%',
+          previewRangeNone: '{from} to {to}: no bonus',
+          noticeLabel: 'Campaign notice',
+          noticePlaceholder: 'Shown on the recharge page, e.g. "Recharge 100 and get 20 bonus".',
+          noticeHint: 'Leave empty to show no campaign notice.'
+        }
       },
       balanceNotify: {
         title: 'Balance Low Notification',
@@ -1233,6 +1292,7 @@ export default {
         tierAll: 'All tier values',
         tierPriority: 'priority (fast)',
         tierUltrafast: 'ultrafast',
+        tierMissing: 'Omitted tier',
         tierFlex: 'flex',
         action: 'Action',
         actionPass: 'Pass (keep service_tier)',
@@ -1343,6 +1403,7 @@ export default {
         oauthRateTitle: 'OAuth scheduling reference rate',
         oauthRatePriorityDescription: 'When a group contains both API Key and OAuth accounts, this rate is used to order OAuth accounts alongside probed API Key billing rates.',
         oauthRateWeightedDescription: 'When a group contains both API Key and OAuth accounts, this rate is used for OAuth accounts when calculating the billing-rate score.',
+        oauthRateInvalid: 'Enter a non-negative OAuth scheduling rate, or leave it empty to use each account\'s own rate.',
         stickyWeightedTitle: 'Sticky weighting',
         stickyWeightedDescription: 'When enabled, previous_response_id and session_hash affinity are scored by the advanced scheduler. When disabled, sticky accounts keep the legacy hard-hit behavior.',
         subscriptionPriorityTitle: 'Subscription priority',
@@ -1365,6 +1426,20 @@ export default {
       usageRecords: {
         title: 'Usage Records',
         description: 'Settings for usage and failed-request records visible to end users.',
+      },
+      // Upstream v0.2.15 merge: the global OpenCode Go usage refresh panel landed
+      // with its component but not its copy. Ranges mirror the inputs in SettingsView.vue.
+      opencodeGoUsage: {
+        title: 'OpenCode Go Usage Refresh',
+        description: 'Control how often OpenCode Go account quota windows are refreshed in the background.',
+        enabled: 'Enable auto refresh',
+        enabledHint: 'When off, quota windows are only queried when you click Refresh on an account.',
+        debounceMinutes: 'Debounce (minutes)',
+        debounceHint: 'Wait this long after the last request before querying upstream again. Minimum 1, maximum 60.',
+        intervalMinutes: 'Refresh interval (minutes)',
+        intervalHint: 'How often to refresh in the background. Minimum 5, maximum 1440.',
+        saved: 'OpenCode Go usage settings saved',
+        saveFailed: 'Failed to save OpenCode Go usage settings'
       },
       user_error_view: {
         label: 'Allow users to view their own error requests',
