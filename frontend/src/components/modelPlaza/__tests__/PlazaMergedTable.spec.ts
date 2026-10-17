@@ -115,3 +115,41 @@ describe('PlazaMergedTable 折扣徽章', () => {
     expect(wrapper.text()).not.toContain('折')
   })
 })
+
+describe('PlazaMergedTable 平台徽章由 platform 字段驱动 (D5 回归)', () => {
+  it("platform='composite' 渲染 Composite 徽章,platform='codebuddy' 渲染 CodeBuddy 原徽章", () => {
+    function mk(name: string, platform: string): PlazaModel {
+      return model({ name, platform })
+    }
+    const wrapper = mount(PlazaMergedTable, {
+      props: {
+        rows: [
+          {
+            key: 'omni',
+            model: mk('omni-merged-1', 'composite'),
+            entries: [
+              { groupId: 1, groupName: 'omni 组', rate: 1, model: mk('omni-merged-1', 'composite') }
+            ]
+          },
+          {
+            key: 'cb',
+            model: mk('cb-agent-1', 'codebuddy'),
+            entries: [
+              { groupId: 2, groupName: 'cb 组', rate: 1, model: mk('cb-agent-1', 'codebuddy') }
+            ]
+          }
+        ],
+        platform: 'anthropic'
+      },
+      global: {
+        stubs: {
+          GroupBadge: { props: ['name'], template: '<span class="group-badge">{{ name }}</span>' },
+          PlatformIcon: true
+        }
+      }
+    })
+    const text = wrapper.text()
+    expect(text).toContain('Composite')
+    expect(text).toContain('CodeBuddy')
+  })
+})
