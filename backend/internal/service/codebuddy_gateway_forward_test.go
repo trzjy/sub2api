@@ -93,9 +93,19 @@ func TestForwardCodeBuddy_ContentAuditRetryReplacesSystemThenSucceeds(t *testing
 		},
 	}
 
-	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
-
-	account := healthyCodeBuddyGatewayTestAccount(7701, "access-token")
+	parent := healthyCodeBuddyGatewayTestAccount(7701, "parent-access-token")
+	parent.Extra = map[string]any{"identity_prompt": "You are the credential parent."}
+	svc := &OpenAIGatewayService{
+		cfg:          cfg,
+		httpUpstream: upstream,
+		accountRepo:  &codeBuddyShadowRepoStub{parent: parent},
+	}
+	account := &Account{
+		ID: 7712, Name: "hy3-kimi-persona", Platform: PlatformKimi, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, Concurrency: 1,
+		ParentAccountID: ptrI64(parent.ID), QuotaDimension: QuotaDimensionCodeBuddy,
+		Extra: map[string]any{"identity_prompt": "You are the HY3 Kimi persona."},
+	}
 
 	result, err := svc.forwardCodeBuddy(
 		context.Background(), c, account, body, "codebuddy-model", false, time.Now(),
@@ -116,6 +126,10 @@ func TestForwardCodeBuddy_ContentAuditRetryReplacesSystemThenSucceeds(t *testing
 	// 重试轮作为最后手段替换/去除了 system 消息，指纹不再出现，且请求体随之改变。
 	require.NotEqual(t, first, second, "retry body must differ from first attempt (system replacement is the last-resort fix)")
 	require.NotContains(t, second, fingerprint, "retry must have replaced/removed the system message so the fingerprint is gone")
+	require.Contains(t, first, "You are the HY3 Kimi persona.", "identity prompt must be included in the first outbound body")
+	require.Contains(t, second, "You are the HY3 Kimi persona.", "identity prompt must be re-applied after the audit retry rewrites the body")
+	require.NotContains(t, first, "You are the credential parent.", "first attempt must use the scheduled persona prompt")
+	require.NotContains(t, second, "You are the credential parent.", "retry must use the scheduled persona prompt")
 
 	// 最终响应成功聚合（模型名回填为原始请求模型）。
 	require.Equal(t, "codebuddy-model", result.Model)
@@ -173,6 +187,54 @@ func TestForwardCodeBuddy_NoRetryWhenFirstSucceeds(t *testing.T) {
 	// §2.4 指纹头对齐：Authorization Bearer 与 User-Agent。
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, CodeBuddyClientUA, upstream.lastReq.Header.Get("User-Agent"))
+	expectedBody, err := PrepareCodeBuddyBody(body, CodeBuddyRewriteOptions{Model: "codebuddy-model"})
+	require.NoError(t, err)
+	require.Equal(t, expectedBody, upstream.bodies[0], "without identity_prompt, CodeBuddy outbound body must remain the existing rewritten body")
+}
+
+func TestSendCodeBuddyChatUpstreamAsCC_IdentityUsesPersonaAfterAuditRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"hy3","stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+
+	audit400 := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"code":400,"msg":"blocked by security policy"}`)),
+	}
+	ok200 := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[]}`)),
+	}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{audit400, ok200}}
+	parent := healthyCodeBuddyGatewayTestAccount(7704, "parent-access-token")
+	parent.Extra = map[string]any{"identity_prompt": "You are the credential parent."}
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{
+			Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false, AllowInsecureHTTP: true}},
+			Gateway:  config.GatewayConfig{CodeBuddy: config.GatewayCodeBuddyConfig{SanitizeEnabled: true}},
+		},
+		httpUpstream: upstream,
+		accountRepo:  &codeBuddyShadowRepoStub{parent: parent},
+	}
+	persona := &Account{
+		ID: 7705, Name: "hy3-kimi-persona", Platform: PlatformKimi, Type: AccountTypeOAuth,
+		ParentAccountID: ptrI64(parent.ID), QuotaDimension: QuotaDimensionCodeBuddy,
+		Extra: map[string]any{"identity_prompt": "You are the scheduled Kimi persona."},
+	}
+
+	resp, err := svc.sendCodeBuddyChatUpstreamAsCC(context.Background(), c, persona, body, "hy3")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	require.Len(t, upstream.bodies, 2, "content audit must make one retry")
+	for i, outbound := range upstream.bodies {
+		require.Contains(t, string(outbound), "You are the scheduled Kimi persona.", "attempt %d must use the scheduled persona prompt", i+1)
+		require.NotContains(t, string(outbound), "You are the credential parent.", "attempt %d must not use the credential parent's prompt", i+1)
+	}
 }
 
 // TestRedactCodeBuddyUpstreamErrorBody 钉住 A2 脱敏规则：已知 uid/nickname/enterprise_id

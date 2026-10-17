@@ -458,7 +458,7 @@ func (s *defaultOpenAIAccountScheduler) evaluateCodeBuddyCatalogGate(
 		go func(acc *Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			v := s.probeCodeBuddyCatalog(probeCtx, provider, acc, req.RequestedModel)
+			v := probeCodeBuddyCatalog(probeCtx, provider, acc, req.RequestedModel)
 			mu.Lock()
 			verdicts[acc.ID] = v
 			mu.Unlock()
@@ -471,7 +471,7 @@ func (s *defaultOpenAIAccountScheduler) evaluateCodeBuddyCatalogGate(
 // probeCodeBuddyCatalog 探测单个 codebuddy 账号的目录闸门：
 // 先按账号级 GetMappedModel 把客户端请求模型映射为上游名，再以
 // 上游名与账号目录精确比较（§2.1-1 判定顺序：禁止客户端名直比、禁止映射后跳过比较）。
-func (s *defaultOpenAIAccountScheduler) probeCodeBuddyCatalog(
+func probeCodeBuddyCatalog(
 	ctx context.Context,
 	provider codeBuddyCatalogProvider,
 	account *Account,
@@ -2491,9 +2491,10 @@ const (
 )
 
 // TierRoutingInputThreshold 是分层路由的 input-only 估算阈值（含边界：估算值
-// 恰好等于阈值判小）。input-only 口径与阈值均为 2026-10-07 用户裁定
-// （docs-local/model-source-tier-routing-plan.md §2）。
-const TierRoutingInputThreshold = 1000
+// 恰好等于阈值判小），统一采用 2000 input tokens。input-only 口径沿用
+// 2026-10-07 用户裁定（docs-local/model-source-tier-routing-plan.md §2）；阈值按
+// 2026-10-17 用户裁定统一为 2000。
+const TierRoutingInputThreshold = 2000
 
 // TierRoutingClassForEstimate 按估算 input 值分档；=阈值判小。
 func TierRoutingClassForEstimate(estimatedInputTokens int) TierRoutingClass {
@@ -2728,32 +2729,34 @@ type openAIGroupPrivacyRequirementContextKey struct{}
 type openAIGroupPrivacyRequirement struct {
 	groupID  int64
 	required bool
+	group    *Group
 }
 
 func (s *OpenAIGatewayService) withOpenAIGroupPrivacyRequirement(ctx context.Context, groupID *int64) context.Context {
-	return context.WithValue(ctx, openAIGroupPrivacyRequirementContextKey{}, openAIGroupPrivacyRequirement{
-		groupID:  derefGroupID(groupID),
-		required: s.loadOpenAIGroupRequiresPrivacySet(ctx, groupID),
-	})
+	return context.WithValue(ctx, openAIGroupPrivacyRequirementContextKey{}, s.loadOpenAIGroupPrivacyRequirement(ctx, groupID))
 }
 
 func (s *OpenAIGatewayService) openAIGroupRequiresPrivacySet(ctx context.Context, groupID *int64) bool {
 	if cached, ok := ctx.Value(openAIGroupPrivacyRequirementContextKey{}).(openAIGroupPrivacyRequirement); ok && cached.groupID == derefGroupID(groupID) {
 		return cached.required
 	}
-	return s.loadOpenAIGroupRequiresPrivacySet(ctx, groupID)
+	return s.loadOpenAIGroupPrivacyRequirement(ctx, groupID).required
 }
 
-func (s *OpenAIGatewayService) loadOpenAIGroupRequiresPrivacySet(ctx context.Context, groupID *int64) bool {
+func (s *OpenAIGatewayService) loadOpenAIGroupPrivacyRequirement(ctx context.Context, groupID *int64) openAIGroupPrivacyRequirement {
+	requirement := openAIGroupPrivacyRequirement{groupID: derefGroupID(groupID)}
 	if s == nil || groupID == nil || s.schedulerSnapshot == nil {
-		return false
+		return requirement
 	}
 	// GetByID 会聚合账号计数；隐私开关只在分组行上。
 	group, err := s.schedulerSnapshot.GetGroupByIDLite(ctx, *groupID)
 	if err != nil {
-		return true
+		requirement.required = true
+		return requirement
 	}
-	return group != nil && group.RequirePrivacySet
+	requirement.group = group
+	requirement.required = group != nil && group.RequirePrivacySet
+	return requirement
 }
 
 // applyLegacySelectionDecision 把非高级调度路径的选号结果回填到决策：记录选中账号，

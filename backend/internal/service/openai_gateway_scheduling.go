@@ -412,7 +412,19 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			return "account_model_not_owned"
 		}
 	}
-	if account.Platform != platform || !account.IsOpenAICompatible() {
+	if !openAIAccountEligibleForTierPool(ctx, account) {
+		return "tier_pool_mismatch"
+	}
+	if account.Platform != platform {
+		requirement, ok := ctx.Value(openAIGroupPrivacyRequirementContextKey{}).(openAIGroupPrivacyRequirement)
+		if !ok || !codeBuddyTierPlatformMismatchAllowed(account, platform, requestedModel, requirement.groupID, requirement.group, tierRoutingPoolFromContext(ctx)) {
+			return "platform_mismatch"
+		}
+		if probeCodeBuddyCatalog(ctx, codeBuddySnapshotCatalogProvider{}, account, requestedModel) != codeBuddyCatalogAllowed {
+			return "upstream_catalog_unavailable_or_missing"
+		}
+	}
+	if !account.IsOpenAICompatible() {
 		return "platform_mismatch"
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
@@ -465,6 +477,36 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 		return "compact_unsupported"
 	}
 	return ""
+}
+
+func openAIAccountEligibleForTierPool(ctx context.Context, account *Account) bool {
+	pool := tierRoutingPoolFromContext(ctx)
+	if pool == "" {
+		return true
+	}
+	masked := IsIdentityMaskedAccount(account)
+	switch pool {
+	case tierRoutingPoolMasked:
+		return masked
+	case tierRoutingPoolUpstream:
+		return !masked
+	default:
+		return true
+	}
+}
+
+func codeBuddyTierPlatformMismatchAllowed(account *Account, platform string, requestedModel string, groupID int64, group *Group, tierPool string) bool {
+	if account == nil || group == nil || groupID <= 0 || account.Platform != PlatformCodeBuddy || !account.IsOpenAICompatible() {
+		return false
+	}
+	platform = NormalizeOpenAICompatiblePlatform(platform)
+	if !isCodeBuddyAggregatedPlatform(platform) || group.ID != groupID || NormalizeOpenAICompatiblePlatform(group.Platform) != platform || !group.AggregateCodeBuddyEnabled {
+		return false
+	}
+	if tierPool != tierRoutingPoolMasked || !IsIdentityMaskedAccount(account) || !openAIStickyAccountMatchesGroup(account, &groupID) {
+		return false
+	}
+	return requestedModel != "" && account.IsModelSupported(requestedModel)
 }
 
 type openAIQuotaAutoPauseDecision struct {

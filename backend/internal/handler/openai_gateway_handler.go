@@ -4871,12 +4871,12 @@ func isTierRoutingTargetModel(model string) bool {
 //
 // 调用方须把返回的 ctx 装回 c.Request（或等价 ctx 变量），供后续选号循环（含 failover
 // 重入与跨档重试）共用同一分档门。gateOpen 由调用方注入（生产侧经调度快照查询一次）。
-// selfHostSizeExcludeThresholdTokens 是订阅组大请求动态排除自建账号的 input token 阈值
-// （派发单 D-SHS-001，input-only：仅统计请求 input，不含将要生成的 output）。
+// selfHostSizeExcludeThresholdTokens 与分层路由共用 2000 input token 阈值
+// （input-only：仅统计请求 input，不含将要生成的 output）。
 // 估算 <= 阈值视为小/中请求，参与调度、不排除任何自建账号；估算 > 阈值视为大请求，
 // 调用 GatewayService.SelfHostedExcludedIDs 取该分组可调度候选中的自建站点账号并入
 // failedAccountIDs。阈值只允许集中常量（禁区：不新增字段/配置项/环境变量）。
-const selfHostSizeExcludeThresholdTokens = 2000
+const selfHostSizeExcludeThresholdTokens = service.TierRoutingInputThreshold
 
 // applySelfHostSizeExclusion 实现订阅组大请求动态排除自建账号（派发单 D-SHS-001）。
 //

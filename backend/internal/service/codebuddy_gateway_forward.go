@@ -119,6 +119,7 @@ func (s *OpenAIGatewayService) forwardCodeBuddy(
 				sendBody = sb
 			}
 		}
+		sendBody = s.injectAccountIdentitySystemMessage(account, sendBody)
 		upstreamReq, buildErr := s.buildCodeBuddyChatRequest(upstreamCtx, c, credAccount, sendBody, token, upstreamModel)
 		if buildErr != nil {
 			return nil, buildErr
@@ -600,6 +601,7 @@ func (s *OpenAIGatewayService) sendCodeBuddyChatUpstreamAsCC(
 				sendBody = sb
 			}
 		}
+		sendBody = s.injectAccountIdentitySystemMessage(account, sendBody)
 		upstreamReq, buildErr := s.buildCodeBuddyChatRequest(upstreamCtx, c, credAccount, sendBody, token, upstreamModel)
 		if buildErr != nil {
 			return nil, buildErr

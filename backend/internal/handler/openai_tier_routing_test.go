@@ -88,7 +88,7 @@ func TestTierRoutingApplyRoutingGateErrorPassthrough(t *testing.T) {
 }
 
 // TestTierRoutingApplyRoutingTargetModelGateOpen 验证目标模型且门开启时装门返回新 ctx，
-// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=1000 判小的精确边界
+// 并输出一行结构化日志（request_id + 估算 input + 分档 small/big）。=2000 判小的精确边界
 // 由 TestTierRoutingClassForEstimate 在纯分档函数层确定性覆盖（派发单 OC-T1，测试 #2 + #1）。
 func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 	cases := []struct {
@@ -97,7 +97,8 @@ func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 		wantTier string
 	}{
 		{"small_below", "hello world", "small"},
-		{"big_above", repeatWords(1500), "big"},
+		{"small_above_old_threshold", repeatWords(1500), "small"},
+		{"big_above", repeatWords(2500), "big"},
 	}
 	for _, model := range []string{"kimi-k3", "deepseek-v4.1-flash", "glm-5.3-flash"} {
 		for _, tc := range cases {
@@ -126,6 +127,10 @@ func TestTierRoutingApplyRoutingTargetModelGateOpen(t *testing.T) {
 			require.Equal(t, "req-valid-"+model+"-"+tc.name, gotRequestID)
 			require.Equal(t, tc.wantTier, gotTier, "tier misclassify: %s/%s", model, tc.name)
 			require.GreaterOrEqual(t, gotEstimated, 0)
+			if tc.name == "small_above_old_threshold" {
+				require.Greater(t, gotEstimated, 1000)
+				require.LessOrEqual(t, gotEstimated, service.TierRoutingInputThreshold)
+			}
 		}
 	}
 }
@@ -141,7 +146,7 @@ func TestTierRoutingApplyRoutingEstimateFailClosed(t *testing.T) {
 	require.Equal(t, 0, logs.Len(), "no tier log on estimate failure")
 }
 
-// repeatWords 生成约 n 个词的文本（每个词约占 1 token），用于构造 >1000 / =1000 边界。
+// repeatWords 生成约 n 个词的文本（每个词约占 1 token），用于构造 2000 附近的边界。
 func repeatWords(n int) string {
 	const word = " word"
 	if n <= 0 {
