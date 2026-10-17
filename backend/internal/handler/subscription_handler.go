@@ -198,7 +198,7 @@ func (h *SubscriptionHandler) GetSummary(c *gin.Context) {
 		TotalUsedUSD  float64                   `json:"total_used_usd"`
 		Subscriptions []SubscriptionSummaryItem `json:"subscriptions"`
 	}{
-		ActiveCount:   len(subscriptions),
+		ActiveCount:   len(items),
 		TotalUsedUSD:  totalUsed,
 		Subscriptions: items,
 	}
