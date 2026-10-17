@@ -62,16 +62,18 @@ func runSubContext() (*httptest.ResponseRecorder, *gin.Context) {
 // 构造两条订阅：一条嵌套 codebuddy（内部供给平台）分组，一条 composite 分组。
 func subFixtures() (byUser, byUserActive []service.UserSubscription, byID map[int64]service.UserSubscription) {
 	codebuddySub := service.UserSubscription{
-		ID:      11,
-		UserID:  1,
-		GroupID: 10,
-		Group:   &service.Group{ID: 10, Name: "codebuddy-g", Platform: "codebuddy"},
+		ID:             11,
+		UserID:         1,
+		GroupID:        10,
+		Group:          &service.Group{ID: 10, Name: "codebuddy-g", Platform: "codebuddy"},
+		MonthlyUsageUSD: 99.0, // 内部供给平台订阅：不可见，不应计入统计口径。
 	}
 	compositeSub := service.UserSubscription{
-		ID:      12,
-		UserID:  1,
-		GroupID: 20,
-		Group:   &service.Group{ID: 20, Name: "composite-g", Platform: "composite"},
+		ID:             12,
+		UserID:         1,
+		GroupID:        20,
+		Group:          &service.Group{ID: 20, Name: "composite-g", Platform: "composite"},
+		MonthlyUsageUSD: 42.0, // 可见订阅：统计口径应只累加此值。
 	}
 	byUser = []service.UserSubscription{codebuddySub, compositeSub}
 	byUserActive = []service.UserSubscription{codebuddySub, compositeSub}
@@ -166,6 +168,8 @@ func TestSubscriptionGetSummaryFiltersInternalSupplyPlatform(t *testing.T) {
 	require.NotContains(t, groupIDs, int64(10), "codebuddy subscription (group 10) must be hidden")
 	require.Contains(t, groupIDs, int64(20), "composite subscription (group 20) must be visible")
 	require.Len(t, summary.Subscriptions, 1, "only the non-internal subscription should remain")
-	// ActiveCount 沿用 ListActiveUserSubscriptions 的全量计数（本轮未进入 items 过滤点）。
-	require.Equal(t, 2, summary.ActiveCount)
+	// ActiveCount 应为过滤后可见条目数（len(items)），而非全量订阅数。
+	require.Equal(t, 1, summary.ActiveCount)
+	// TotalUsedUSD 只累加可见订阅的用量（composite=42.0），不含被过滤的 codebuddy=99.0。
+	require.Equal(t, 42.0, summary.TotalUsedUSD)
 }
