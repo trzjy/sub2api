@@ -48,6 +48,22 @@ func TestValidateURLFormat(t *testing.T) {
 	if normalized != "https://example.com/api/v1" {
 		t.Fatalf("expected trailing slash to be removed from path, got %s", normalized)
 	}
+
+	// base url 不得带 query / fragment（调用方会在其后拼接 "?" 参数，否则产出双 ? 畸形 URL）
+	for _, raw := range []string{
+		"https://host/v1?token=abc",
+		"https://host/v1#frag",
+		"https://host/v1?token=abc#frag",
+		// 空 query / 空 fragment：出现分隔符即拒绝（url.Parse 下 RawQuery/Fragment 均为空，需靠 ForceQuery 与原始串兜底）
+		"https://host/v1?",
+		"https://host/v1#",
+		// fragment 后接伪 query：由 '#' 判定拒绝，'?' 判定不得误伤 fragment 内的 '?'
+		"https://host/path#frag?x=1",
+	} {
+		if _, err := ValidateURLFormat(raw, false); err == nil {
+			t.Fatalf("expected %q to be rejected", raw)
+		}
+	}
 }
 
 func TestValidateHTTPURL(t *testing.T) {
@@ -85,6 +101,22 @@ func TestValidateHTTPURL(t *testing.T) {
 			AllowedHosts: []string{"api.kimi.com", "chat.deepseek.com", "chatglm.cn", "auth.kimi.com", "www.kimi.com"},
 		}); err != nil {
 			t.Fatalf("expected web login host %s to pass allowlist, got %v", raw, err)
+		}
+	}
+
+	// base url 不得带 query / fragment（调用方会在其后拼接 "?" 参数，否则产出双 ? 畸形 URL）
+	for _, raw := range []string{
+		"https://host/v1?token=abc",
+		"https://host/v1#frag",
+		"https://host/v1?token=abc#frag",
+		// 空 query / 空 fragment：出现分隔符即拒绝（url.Parse 下 RawQuery/Fragment 均为空，需靠 ForceQuery 与原始串兜底）
+		"https://host/v1?",
+		"https://host/v1#",
+		// fragment 后接伪 query：由 '#' 判定拒绝，'?' 判定不得误伤 fragment 内的 '?'
+		"https://host/path#frag?x=1",
+	} {
+		if _, err := ValidateHTTPURL(raw, false, ValidationOptions{}); err == nil {
+			t.Fatalf("expected %q to be rejected", raw)
 		}
 	}
 }

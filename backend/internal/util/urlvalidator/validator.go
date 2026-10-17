@@ -24,6 +24,10 @@ type ValidationOptions struct {
 // - 可选 allowlist（支持 *.example.com 通配）
 // - allow_private_hosts 策略（阻断 localhost/私网字面量 IP）
 //
+// 另外，base_url 是拼接端点的基址，调用方会在其后用 "?" 追加参数；query 与
+// fragment 都不适合作为端点拼接的基址——query 会与调用方参数拼成畸形 URL，
+// fragment 则会让追加的参数落到 fragment 里，均在校验边界直接拒绝。
+//
 // 注意：DNS Rebinding 防护（解析后 IP 校验）应在实际发起请求时执行，避免 TOCTOU。
 func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions) (string, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -56,6 +60,15 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 		}
 	}
 
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("base url must not contain query string: %s", trimmed)
+	}
+	// 未转义的 '#' 恒为 fragment 分隔符；url.Parse 对 "https://host/v1#" 会丢弃
+	// 分隔符并给出空 Fragment，故直接对原始串判定，出现分隔符即拒绝。
+	if strings.Contains(trimmed, "#") {
+		return "", fmt.Errorf("base url must not contain fragment: %s", trimmed)
+	}
+
 	allowlist := normalizeAllowlist(opts.AllowedHosts)
 	if opts.RequireAllowlist && len(allowlist) == 0 {
 		return "", errors.New("allowlist is not configured")
@@ -69,8 +82,11 @@ func ValidateHTTPURL(raw string, allowInsecureHTTP bool, opts ValidationOptions)
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
+// ValidateURLFormat 做最小格式校验：仅保证 URL 可解析且 scheme 合规，不做白名单/私网/SSRF 校验。
+//
+// 同 ValidateHTTPURL，base_url 是拼接端点的基址，不适合自带 query 或 fragment：
+// 前者会与调用方参数拼成畸形 URL，后者会让追加的参数落到 fragment 里，故在校验边界拒绝。
 func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
-	// 最小格式校验：仅保证 URL 可解析且 scheme 合规，不做白名单/私网/SSRF 校验
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", errors.New("url is required")
@@ -96,6 +112,14 @@ func ValidateURLFormat(raw string, allowInsecureHTTP bool) (string, error) {
 		if err != nil || num <= 0 || num > 65535 {
 			return "", fmt.Errorf("invalid port: %s", port)
 		}
+	}
+
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("base url must not contain query string: %s", trimmed)
+	}
+	// 与 ValidateHTTPURL 同口径：未转义的 '#' 恒为 fragment 分隔符，出现即拒绝。
+	if strings.Contains(trimmed, "#") {
+		return "", fmt.Errorf("base url must not contain fragment: %s", trimmed)
 	}
 
 	return strings.TrimRight(trimmed, "/"), nil
