@@ -555,6 +555,60 @@ func TestChannelMonitorProbe_AnthropicAPIKeyProbeable(t *testing.T) {
 	}
 }
 
+// ---------- 测试 ⑨b（PROBE-URL-1）：openai 探针复用业务同源版本感知 helper，消除 /v1/v1 双段 404 ----------
+
+func TestChannelMonitorProbe_OpenAIChatCompletionsSpecURL(t *testing.T) {
+	model := "gpt-4"
+
+	cases := []struct {
+		name string
+		base string
+		want string
+	}{
+		{
+			// a) base 无版本段：追加完整 endpoint。
+			name: "no version suffix",
+			base: "https://upstream.example",
+			want: "https://upstream.example/v1/chat/completions",
+		},
+		{
+			// b) 核心回归：base 已带 /v1，不得出现 /v1/v1 双段。
+			name: "base has /v1",
+			base: "https://upstream.example/v1",
+			want: "https://upstream.example/v1/chat/completions",
+		},
+		{
+			// c) base 带非 v1 版本段（如 /openai/v2）：对齐 openai_endpoint_url 既有 "version" 用例语义。
+			name: "base has other version suffix",
+			base: "https://upstream.example/openai/v2",
+			want: "https://upstream.example/openai/v2/chat/completions",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &Account{
+				ID:          1,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Credentials: map[string]any{"base_url": c.base, "api_key": "k"},
+			}
+			spec, err := buildOpenAIChatCompletionsSpec(acc, model)
+			if err != nil {
+				t.Fatalf("buildOpenAIChatCompletionsSpec failed: %v", err)
+			}
+			if spec.url != c.want {
+				t.Fatalf("base=%q: expected url %q, got %q", c.base, c.want, spec.url)
+			}
+			// 核心回归断言：带 /v1 的 base 不得产生 /v1/v1 双段。
+			if strings.Contains(spec.url, "/v1/v1") {
+				t.Fatalf("base=%q: url must not contain /v1/v1, got %q", c.base, spec.url)
+			}
+		})
+	}
+}
+
 // ---------- 测试 ⑩（定向 B1）：cursor oauth（或任一不可探协议）仍 unsupported ----------
 
 func TestChannelMonitorProbe_CursorOAuthUnsupported(t *testing.T) {

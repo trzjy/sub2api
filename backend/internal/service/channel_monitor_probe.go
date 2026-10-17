@@ -359,7 +359,9 @@ func buildOpenAIChatCompletionsSpec(acc *Account, model string) (*probeReqSpec, 
 	if key == "" {
 		return nil, fmt.Errorf("unsupported: no api key (platform=%s)", acc.Platform)
 	}
-	u := strings.TrimRight(base, "/") + "/v1/chat/completions"
+	// 复用业务同源版本感知 helper：base 已含版本段（如 /v1、/v4）时只追加相对路径，
+	// 避免裸拼 "/v1/chat/completions" 造成 /v1/v1 双段 404（对齐 openai_endpoint_url.go）。
+	u := buildOpenAIEndpointURL(base, "/v1/chat/completions")
 	m := acc.GetMappedModel(model)
 	if strings.TrimSpace(m) == "" {
 		m = model
