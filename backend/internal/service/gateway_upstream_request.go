@@ -34,7 +34,9 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 			if err != nil {
 				return nil, nil, err
 			}
-			targetURL = validatedURL + "/v1/messages?beta=true"
+			// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含版本段时只追加相对路径，
+			// 避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404。
+			targetURL = buildVersionedEndpointURL(endpointFamilyAnthropic, validatedURL, "/v1/messages") + "?beta=true"
 		}
 	} else if account.IsCustomBaseURLEnabled() {
 		customURL := account.GetCustomBaseURL()
@@ -954,9 +956,11 @@ func truncateForLog(b []byte, maxBytes int) string {
 }
 
 // buildCustomRelayURL 构建自定义中继转发 URL
-// 在 path 后附加 beta=true 和可选的 proxy 查询参数
+// path 由版本感知原语（buildVersionedEndpointURL）拼接：base 自带版本段时不再双拼
+// （如 base=/v1 时产出 /v1/messages 而非 /v1/v1/messages）。在此之后追加 beta=true
+// 和可选的 proxy 查询参数。
 func (s *GatewayService) buildCustomRelayURL(baseURL, path string, account *Account) string {
-	u := strings.TrimRight(baseURL, "/") + path + "?beta=true"
+	u := buildVersionedEndpointURL(endpointFamilyAnthropic, baseURL, path) + "?beta=true"
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL := account.Proxy.URL()
 		if proxyURL != "" {

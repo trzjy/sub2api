@@ -352,7 +352,9 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 		if err != nil {
 			return nil, nil, err
 		}
-		targetURL = validatedURL + "/v1/messages?beta=true"
+		// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含版本段（如 /v1、/v4）时只追加
+		// 相对路径，避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404。
+		targetURL = buildVersionedEndpointURL(endpointFamilyAnthropic, validatedURL, "/v1/messages") + "?beta=true"
 	}
 
 	// 能力维度 body sanitize：透传路径上 anthropic-beta header 原样透传客户端值，

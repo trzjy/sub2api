@@ -1273,7 +1273,9 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
-		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages?beta=true"
+		// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含版本段时只追加相对路径，
+		// 避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404。
+		apiURL = buildVersionedEndpointURL(endpointFamilyAnthropic, normalizedBaseURL, "/v1/messages") + "?beta=true"
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}

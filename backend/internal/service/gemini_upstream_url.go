@@ -37,7 +37,10 @@ func buildGeminiAIStudioModelActionURL(baseURL, model, action string, stream boo
 		return "", fmt.Errorf("unsupported gemini action: %s", trimmedAction)
 	}
 
-	fullURL := fmt.Sprintf("%s/v1beta/models/%s:%s", trimmedBase, trimmedModel, trimmedAction)
+	// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含 /v1beta 时只追加相对路径，
+	// 避免裸拼 "/v1beta/models" 造成 /v1beta/v1beta 双段 404。model 已过上方片段护栏、
+	// action 已过白名单，二者均为合法路径片段。
+	fullURL := buildVersionedEndpointURL(endpointFamilyGemini, trimmedBase, "/v1beta/models/"+trimmedModel+":"+trimmedAction)
 	if stream {
 		fullURL += "?alt=sse"
 	}

@@ -42,8 +42,9 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	}
 	originalModel := claudeReq.Model
 
-	// 构建上游请求 URL
-	upstreamURL := baseURL + "/v1/messages"
+	// 构建上游请求 URL（版本感知拼接，同源 upstream_endpoint_url.go）：base 已含版本段时
+	// 只追加相对路径，避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404。
+	upstreamURL := buildVersionedEndpointURL(endpointFamilyAnthropic, baseURL, "/v1/messages")
 
 	// 能力维度 sanitize：Anthropic-compatible 上游透传路径也需要保证 body↔beta header
 	// 对称。客户端 anthropic-beta header 不含 context-management-2025-06-27 但 body 带

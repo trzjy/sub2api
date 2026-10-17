@@ -402,7 +402,9 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 		if err != nil {
 			return nil, err
 		}
-		targetURL = validatedURL + "/v1/messages/count_tokens?beta=true"
+		// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含版本段时只追加相对路径，
+		// 避免裸拼 "/v1/messages/count_tokens" 造成 /v1/v1 双段 404。
+		targetURL = buildVersionedEndpointURL(endpointFamilyAnthropic, validatedURL, "/v1/messages/count_tokens") + "?beta=true"
 	}
 	body = sanitizeCountTokensRequestBody(body)
 
@@ -471,7 +473,9 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 			if err != nil {
 				return nil, nil, err
 			}
-			targetURL = validatedURL + "/v1/messages/count_tokens?beta=true"
+			// 版本感知拼接（同源 upstream_endpoint_url.go）：base 已含版本段时只追加相对路径，
+			// 避免裸拼 "/v1/messages/count_tokens" 造成 /v1/v1 双段 404。
+			targetURL = buildVersionedEndpointURL(endpointFamilyAnthropic, validatedURL, "/v1/messages/count_tokens") + "?beta=true"
 		}
 	} else if account.IsCustomBaseURLEnabled() {
 		customURL := account.GetCustomBaseURL()

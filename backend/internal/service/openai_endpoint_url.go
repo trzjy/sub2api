@@ -5,26 +5,10 @@ import (
 	"strings"
 )
 
+// buildOpenAIEndpointURL 是通用原语 buildVersionedEndpointURL 在 openai 族上的薄包装，
+// 行为与原实现逐字节一致（语义零变化）。
 func buildOpenAIEndpointURL(base string, endpoint string) string {
-	normalized := strings.TrimSpace(base)
-	endpoint = "/" + strings.TrimLeft(strings.TrimSpace(endpoint), "/")
-	relative := strings.TrimPrefix(endpoint, "/v1")
-	parsed, err := url.Parse(normalized)
-	if err != nil {
-		return strings.TrimRight(normalized, "/") + endpoint
-	}
-	path := strings.TrimRight(parsed.Path, "/")
-	if !strings.HasSuffix(path, endpoint) && !strings.HasSuffix(path, relative) {
-		if openAIBaseURLHasVersionSuffix(path) {
-			path += relative
-		} else {
-			path += endpoint
-		}
-	}
-	parsed.Path = path
-	parsed.RawPath = ""
-	parsed.Fragment = ""
-	return parsed.String()
+	return buildVersionedEndpointURL(endpointFamilyOpenAI, base, endpoint)
 }
 
 func buildOpenAIResponsesInputTokensURL(base string) string {

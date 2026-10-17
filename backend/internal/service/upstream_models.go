@@ -1275,14 +1275,7 @@ func upstreamModelsProxyURL(account *Account) string {
 }
 
 func buildV1ModelsURL(base string) string {
-	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
-	if strings.HasSuffix(normalized, "/v1/models") {
-		return normalized
-	}
-	if strings.HasSuffix(normalized, "/v1") {
-		return normalized + "/models"
-	}
-	return normalized + "/v1/models"
+	return buildVersionedEndpointURL(endpointFamilyAnthropic, base, "/v1/models")
 }
 
 func buildOpenAIModelsURL(base string) string {
@@ -1290,14 +1283,7 @@ func buildOpenAIModelsURL(base string) string {
 }
 
 func buildGeminiModelsURL(base string) string {
-	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
-	if strings.HasSuffix(normalized, "/v1beta/models") {
-		return normalized
-	}
-	if strings.HasSuffix(normalized, "/v1beta") {
-		return normalized + "/models"
-	}
-	return normalized + "/v1beta/models"
+	return buildVersionedEndpointURL(endpointFamilyGemini, base, "/v1beta/models")
 }
 
 type upstreamModelEntry struct {

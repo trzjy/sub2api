@@ -407,7 +407,9 @@ func buildAnthropicMessagesSpec(acc *Account, model string) (*probeReqSpec, erro
 		}
 		h.Set("Authorization", "Bearer "+key)
 	}
-	u := strings.TrimRight(base, "/") + "/v1/messages?beta=true"
+	// 复用业务同源版本感知 helper（对齐上方 openai 分支）：base 已含版本段（如 /v1、/v4）时
+	// 只追加相对路径，避免裸拼 "/v1/messages" 造成 /v1/v1 双段 404（对齐 openai_endpoint_url.go）。
+	u := buildVersionedEndpointURL(endpointFamilyAnthropic, base, "/v1/messages") + "?beta=true"
 	m := acc.GetMappedModel(model)
 	if strings.TrimSpace(m) == "" {
 		m = model
@@ -443,8 +445,12 @@ func buildGeminiGenerateContentSpec(acc *Account, model string) (*probeReqSpec, 
 	if strings.TrimSpace(m) == "" {
 		m = model
 	}
-	u := strings.TrimRight(base, "/") + "/v1beta/models/" + url.PathEscape(m) +
-		":streamGenerateContent?alt=sse&key=" + url.QueryEscape(key)
+	// 复用业务同源版本感知 helper（对齐上方 openai 分支）：base 已含 /v1beta 时
+	// 只追加相对路径，避免裸拼 "/v1beta/models" 造成 /v1beta/v1beta 双段 404。
+	// 版本段只拼到 /v1beta/models 为止：model 段由调用方 PathEscape 后裸拼，若把已转义的
+	// model 交给原语，其内部 url.Parse→String() 会对已转义段二次转义（%2F→%252F）导致 404。
+	u := buildVersionedEndpointURL(endpointFamilyGemini, base, "/v1beta/models") +
+		"/" + url.PathEscape(m) + ":streamGenerateContent?alt=sse&key=" + url.QueryEscape(key)
 	return &probeReqSpec{
 		method:  http.MethodPost,
 		url:     u,

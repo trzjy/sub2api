@@ -133,17 +133,16 @@ func (s *OpenAIGatewayService) nativeAnthropicTargetURL(account *Account) (strin
 	if err != nil {
 		return "", fmt.Errorf("invalid base_url: %w", err)
 	}
-	return nativeAnthropicMessagesURL(account, validatedURL), nil
+	return nativeAnthropicMessagesURL(validatedURL), nil
 }
 
 // nativeAnthropicMessagesURL 由已校验的 Anthropic 协议基址拼出 messages 端点，转发与
-// 连接测试共用。按模型分流的聚合平台（OpenCode、Command Code 等）的基址可能沿用带 /v1
-// 的 Chat Completions 基址，用版本感知拼接避免 /v1/v1/messages；其余供应商朴素拼接。
-func nativeAnthropicMessagesURL(account *Account, validatedBaseURL string) string {
-	if account.routesByModel() {
-		return buildOpenAIEndpointURL(validatedBaseURL, "/v1/messages")
-	}
-	return strings.TrimRight(validatedBaseURL, "/") + "/v1/messages"
+// 连接测试共用。一律走版本感知原语（同源 openai/openai 族，见 upstream_endpoint_url.go）：
+// 聚合平台（OpenCode、Command Code 等）的基址可能沿用带 /v1 的 Chat Completions 基址，
+// 非 /v1 版本段（如 /v4）同样只追加相对路径，避免 /v1/v1/messages 双段 404。
+// 原 routesByModel 特判已消失：该分支语义与原语一致，全账号统一由原语判定。
+func nativeAnthropicMessagesURL(validatedBaseURL string) string {
+	return buildVersionedEndpointURL(endpointFamilyAnthropic, validatedBaseURL, "/v1/messages")
 }
 
 func resolveMappedUpstreamModel(account *Account, body []byte, defaultMappedModel string) string {

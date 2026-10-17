@@ -22,6 +22,27 @@ func TestBuildGeminiAIStudioModelActionURL(t *testing.T) {
 	require.Equal(t, base+"/v1beta/models/gemini-2.5-pro:countTokens", got)
 }
 
+// TestBuildGeminiAIStudioModelActionURLVersionSegment 锁定 G1 收敛：base 自带 /v1beta
+// 版本段时只追加相对路径，不得出现 /v1beta/v1beta 双段。
+func TestBuildGeminiAIStudioModelActionURLVersionSegment(t *testing.T) {
+	const host = "https://generativelanguage.googleapis.com"
+
+	got, err := buildGeminiAIStudioModelActionURL(host+"/v1beta", "gemini-2.5-pro", "generateContent", false)
+	require.NoError(t, err)
+	require.Equal(t, host+"/v1beta/models/gemini-2.5-pro:generateContent", got)
+	require.NotContains(t, got, "/v1beta/v1beta")
+
+	got, err = buildGeminiAIStudioModelActionURL(host+"/v1beta/", "gemini-2.5-flash", "streamGenerateContent", true)
+	require.NoError(t, err)
+	require.Equal(t, host+"/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", got)
+	require.NotContains(t, got, "/v1beta/v1beta")
+
+	// 反向用例：非 /v1beta 版本段（误配 /v1）按 Gemini 固定判定不做剥离，形态暴露错配。
+	got, err = buildGeminiAIStudioModelActionURL(host+"/v1", "gemini-2.5-pro", "countTokens", false)
+	require.NoError(t, err)
+	require.Equal(t, host+"/v1/v1beta/models/gemini-2.5-pro:countTokens", got)
+}
+
 // TestBuildGeminiAIStudioModelActionURLRejectsNonConformingModel 锁定不变式：
 // 模型名来自客户端（native 路由的 URL 片段 / compat 路由的请求体），
 // 只有合规的路径片段才允许拼进上游 URL。

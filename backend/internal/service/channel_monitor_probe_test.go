@@ -609,6 +609,180 @@ func TestChannelMonitorProbe_OpenAIChatCompletionsSpecURL(t *testing.T) {
 	}
 }
 
+// ---------- 测试 ⑨c（URL-PRIM-2）：anthropic 探针 spec 走业务同源版本感知原语，消除 /v1/v1 双段 ----------
+
+func TestChannelMonitorProbe_AnthropicMessagesSpecURL(t *testing.T) {
+	model := "claude-3-5-sonnet"
+
+	cases := []struct {
+		name string
+		base string
+		want string
+	}{
+		{
+			// a) base 无版本段：追加完整 endpoint。
+			name: "no version suffix",
+			base: "https://upstream.example",
+			want: "https://upstream.example/v1/messages?beta=true",
+		},
+		{
+			// b) 核心回归：base 已带 /v1，不得出现 /v1/v1 双段。
+			name: "base has /v1",
+			base: "https://upstream.example/v1",
+			want: "https://upstream.example/v1/messages?beta=true",
+		},
+		{
+			// c) base 带非 /v1 版本段（中转 /openai/v4 形态）：只追加相对路径。
+			name: "base has other version suffix",
+			base: "https://upstream.example/openai/v4",
+			want: "https://upstream.example/openai/v4/messages?beta=true",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &Account{
+				ID:          1,
+				Platform:    PlatformAnthropic,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Credentials: map[string]any{"base_url": c.base, "api_key": "k"},
+			}
+			spec, err := buildAnthropicMessagesSpec(acc, model)
+			if err != nil {
+				t.Fatalf("buildAnthropicMessagesSpec failed: %v", err)
+			}
+			if spec.url != c.want {
+				t.Fatalf("base=%q: expected url %q, got %q", c.base, c.want, spec.url)
+			}
+			// 核心回归断言：带版本段的 base 不得产生 /v1/v1 双段。
+			if strings.Contains(spec.url, "/v1/v1") {
+				t.Fatalf("base=%q: url must not contain /v1/v1, got %q", c.base, spec.url)
+			}
+		})
+	}
+}
+
+// ---------- 测试 ⑨d（URL-PRIM-2）：gemini 探针 spec 走业务同源版本感知原语，消除 /v1beta/v1beta 双段 ----------
+
+func TestChannelMonitorProbe_GeminiGenerateContentSpecURL(t *testing.T) {
+	model := "gemini-2.5-flash"
+
+	cases := []struct {
+		name string
+		base string
+		want string
+	}{
+		{
+			// a) base 无版本段：追加完整 endpoint。
+			name: "no version suffix",
+			base: "https://upstream.example",
+			want: "https://upstream.example/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=k",
+		},
+		{
+			// b) 核心回归：base 已带 /v1beta，不得出现 /v1beta/v1beta 双段。
+			name: "base has /v1beta",
+			base: "https://upstream.example/v1beta",
+			want: "https://upstream.example/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=k",
+		},
+		{
+			// c) base 带尾斜杠：与 b 同产出。
+			name: "base has /v1beta with trailing slash",
+			base: "https://upstream.example/v1beta/",
+			want: "https://upstream.example/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=k",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &Account{
+				ID:          1,
+				Platform:    PlatformGemini,
+				Type:        AccountTypeAPIKey,
+				Status:      StatusActive,
+				Credentials: map[string]any{"base_url": c.base, "api_key": "k"},
+			}
+			spec, err := buildGeminiGenerateContentSpec(acc, model)
+			if err != nil {
+				t.Fatalf("buildGeminiGenerateContentSpec failed: %v", err)
+			}
+			if spec.url != c.want {
+				t.Fatalf("base=%q: expected url %q, got %q", c.base, c.want, spec.url)
+			}
+			// 核心回归断言：带 /v1beta 的 base 不得产生 /v1beta/v1beta 双段。
+			if strings.Contains(spec.url, "/v1beta/v1beta") {
+				t.Fatalf("base=%q: url must not contain /v1beta/v1beta, got %q", c.base, spec.url)
+			}
+		})
+	}
+
+	// 追加子用例（URL-PRIM-2b G2）：映射模型含 / 与空格时，model 段必须单次转义
+	// （%2F / %20），且不得出现 %25——原语内部 url.Parse→String() 会对已转义段
+	// 二次转义（%2F→%252F），故版本段只拼到 /v1beta/models 为止，model 段裸拼。
+	escapedCases := []struct {
+		name     string
+		base     string
+		model    string
+		mapping  map[string]any
+		wantSubs []string
+	}{
+		{
+			// d) 映射模型含 /：PathEscape 输出 %2F，且不得被原语二次转义成 %252F。
+			name:     "mapped model has slash",
+			base:     "https://upstream.example/v1beta",
+			model:    "gemini-2.5-flash",
+			mapping:  map[string]any{"gemini-2.5-flash": "models/gemini-2.5-flash"},
+			wantSubs: []string{"%2F"},
+		},
+		{
+			// e) 映射模型含空格：PathEscape 输出 %20，同样不得二次转义。
+			name:     "mapped model has space",
+			base:     "https://upstream.example",
+			model:    "gemini-2.5-flash",
+			mapping:  map[string]any{"gemini-2.5-flash": "gemini 2.5 flash"},
+			wantSubs: []string{"%20"},
+		},
+	}
+
+	for _, c := range escapedCases {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &Account{
+				ID:       1,
+				Platform: PlatformGemini,
+				Type:     AccountTypeAPIKey,
+				Status:   StatusActive,
+				Credentials: map[string]any{
+					"base_url":      c.base,
+					"api_key":       "k",
+					"model_mapping": c.mapping,
+				},
+			}
+			spec, err := buildGeminiGenerateContentSpec(acc, c.model)
+			if err != nil {
+				t.Fatalf("buildGeminiGenerateContentSpec failed: %v", err)
+			}
+			for _, sub := range c.wantSubs {
+				if !strings.Contains(spec.url, sub) {
+					t.Fatalf("model=%q: expected url to contain %q, got %q", c.model, sub, spec.url)
+				}
+			}
+			// 二次转义禁现：断言收窄为 %252F/%2520（已转义段被再转义一次的产物），
+			// 不泛断 %25——model 原始值本身含 % 时 PathEscape 产出 %25 属单次合法编码。
+			for _, banned := range []string{"%252F", "%2520"} {
+				if strings.Contains(spec.url, banned) {
+					t.Fatalf("model=%q: url must not contain %s (double escaping), got %q", c.model, banned, spec.url)
+				}
+			}
+			// 裸 model 段不得泄漏未转义的 / 与空格。
+			for _, raw := range []string{"/gemini-2.5-flash:", " 2.5 "} {
+				if strings.Contains(spec.url, raw) {
+					t.Fatalf("model=%q: url must not contain unescaped %q, got %q", c.model, raw, spec.url)
+				}
+			}
+		})
+	}
+}
+
 // ---------- 测试 ⑩（定向 B1）：cursor oauth（或任一不可探协议）仍 unsupported ----------
 
 func TestChannelMonitorProbe_CursorOAuthUnsupported(t *testing.T) {
