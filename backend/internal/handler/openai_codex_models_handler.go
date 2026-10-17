@@ -30,7 +30,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 		return
 	}
 	if apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex models manifest is only available for OpenAI and Composite groups")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.CodexManifestGroupRestricted)
 		return
 	}
 
@@ -61,7 +61,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			// 让 ops 错误日志携带实际拉取成功的首个固定账号。
 			setOpsSelectedAccount(c, pinnedAccount.ID, pinnedAccount.Platform)
 			if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, pinnedManifest, ifNoneMatch); err != nil {
-				h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+				h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.CodexManifestBuildFailed)
 				return
 			}
 			if c.Request.Context().Err() != nil {
@@ -82,7 +82,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			if c.Request.Context().Err() != nil {
 				return
 			}
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.CodexManifestBuildFailed)
 			return
 		}
 		if configured {
@@ -128,15 +128,15 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			return
 		}
 		if err := h.gatewayService.CompleteAPIKeyCodexModelsManifestForClient(manifest, account); err != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to complete Codex models manifest")
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.CodexManifestBuildFailed)
 			return
 		}
 		if err := service.ApplyPinnedCodexModelsMapping(manifest, account, apiKey.Group); err != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to apply model mappings")
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.ModelMappingApplyFailed)
 			return
 		}
 		if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, manifest, ifNoneMatch); err != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.CodexManifestBuildFailed)
 			return
 		}
 		if c.Request.Context().Err() != nil {

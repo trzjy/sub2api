@@ -16,7 +16,7 @@ func (h *GatewayHandler) pinnedOpenAIModels(c *gin.Context, group *service.Group
 		return
 	}
 	if h.openAIGatewayService == nil {
-		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", "OpenAI model discovery is not configured")
+		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", infraerrors.ModelDiscoveryUnavailable)
 		return
 	}
 	etag := c.GetHeader("If-None-Match")
@@ -71,7 +71,7 @@ func writeModelsListResponse(c *gin.Context, models any) {
 	}
 	body, err := json.Marshal(response)
 	if err != nil {
-		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", "Failed to encode model catalogue")
+		writeOpenAIModelsError(c, http.StatusInternalServerError, "api_error", infraerrors.ModelCatalogueEncodeFailed)
 		return
 	}
 	writeRetrievedModel(c, body)
@@ -82,19 +82,19 @@ func writeRetrievedModel(c *gin.Context, body []byte) {
 		Data []json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &catalog); err != nil {
-		writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", "Invalid model catalogue")
+		writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", infraerrors.ModelCatalogueInvalid)
 		return
 	}
 	modelID := c.Param("model")
 	for _, raw := range catalog.Data {
 		var model map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &model); err != nil {
-			writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", "Invalid model catalogue entry")
+			writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", infraerrors.ModelCatalogueInvalid)
 			return
 		}
 		var id string
 		if err := json.Unmarshal(model["id"], &id); err != nil {
-			writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", "Invalid model catalogue ID")
+			writeOpenAIModelsError(c, http.StatusBadGateway, "upstream_error", infraerrors.ModelCatalogueInvalid)
 			return
 		}
 		if id == modelID {

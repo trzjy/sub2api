@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -40,12 +41,12 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	// 1. Parse Anthropic request
 	var anthropicReq apicompat.AnthropicRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
-		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
 	}
 	originalModel := anthropicReq.Model
 	if strings.TrimSpace(originalModel) == "" {
-		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 	applyOpenAICompatModelNormalization(&anthropicReq)

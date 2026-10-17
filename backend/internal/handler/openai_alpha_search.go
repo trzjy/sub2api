@@ -28,16 +28,16 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	if apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex alpha search is only available for OpenAI and Composite groups")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.CodexAlphaGroupRestricted)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -57,27 +57,27 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 	if len(body) == 0 {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	requestedModel := strings.TrimSpace(modelResult.String())
 	if !compositeTargetPlatformAllowed(c, apiKey, requestedModel, h.coreGatewayService, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex alpha search only supports OpenAI models for Composite groups")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.CodexAlphaModelRestricted)
 		return
 	}
 	reqLog = reqLog.With(zap.String("model", requestedModel))

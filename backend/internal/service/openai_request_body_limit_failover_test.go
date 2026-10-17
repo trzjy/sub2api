@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -76,7 +77,7 @@ func TestOpenAIRequestBodyLimitFailover_HTTP413SwitchesAccountsBeforeWrite(t *te
 			require.Equal(t, GatewayFailureReason("openai_request_body_too_large"), failoverErr.Reason)
 			require.Equal(t, NextAccountRetry, failoverErr.NextAccountAction)
 			require.Equal(t, http.StatusRequestEntityTooLarge, failoverErr.ClientStatusCode)
-			require.Equal(t, "Request payload is too large", failoverErr.ClientMessage)
+			require.Equal(t, infraerrors.UpstreamPayloadTooLarge, failoverErr.ClientMessage)
 			require.False(t, failoverErr.RetryableOnSameAccount, "a body limit requires another account, not another attempt on the same account")
 			require.False(t, c.Writer.Written(), "account failover must happen before downstream output is committed")
 			require.Empty(t, rec.Body.String())

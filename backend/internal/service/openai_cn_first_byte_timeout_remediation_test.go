@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -455,7 +456,7 @@ func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *te
 				require.Contains(t, rec.Body.String(), "Upstream response too large",
 					"超限必须走 TooLarge 契约，不得归并到 read/parse")
 				require.NotContains(t, rec.Body.String(), "Failed to read upstream response")
-				require.NotContains(t, rec.Body.String(), "Failed to parse upstream response")
+				require.NotContains(t, rec.Body.String(), infraerrors.UpstreamResponseParseFailed)
 			})
 		}
 	})
@@ -473,7 +474,7 @@ func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *te
 				require.Error(t, err)
 				require.Nil(t, result)
 				require.Equal(t, http.StatusBadGateway, rec.Code)
-				require.Contains(t, rec.Body.String(), "Failed to parse upstream response",
+				require.Contains(t, rec.Body.String(), infraerrors.UpstreamResponseParseFailed,
 					"解析失败必须走 parse 契约，不得归并到 read")
 				require.NotContains(t, rec.Body.String(), "Failed to read upstream response")
 				consumer.wantTypeAt(t, rec)
@@ -496,7 +497,7 @@ func TestOpenAICNFirstByteTimeout_NonTimeoutReadErrorsKeepEndpointContract(t *te
 				require.Equal(t, http.StatusBadGateway, rec.Code)
 				require.Contains(t, rec.Body.String(), "Failed to read upstream response",
 					"读取错误必须走 read 契约，不得归并到 parse/TooLarge")
-				require.NotContains(t, rec.Body.String(), "Failed to parse upstream response")
+				require.NotContains(t, rec.Body.String(), infraerrors.UpstreamResponseParseFailed)
 				require.NotContains(t, rec.Body.String(), "Upstream response too large")
 				consumer.wantTypeAt(t, rec)
 			})

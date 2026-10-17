@@ -64,7 +64,7 @@ func (h *BatchImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, req *
 	}
 	subject, ok := middleware.GetAuthSubjectFromContext(c)
 	if !ok {
-		batchImageError(c, infraerrors.New(http.StatusInternalServerError, "USER_CONTEXT_REQUIRED", "User context not found"))
+		batchImageError(c, infraerrors.New(http.StatusInternalServerError, "USER_CONTEXT_REQUIRED", infraerrors.UserContextNotFound))
 		return false
 	}
 	items := make([]map[string]string, 0, len(req.Items))

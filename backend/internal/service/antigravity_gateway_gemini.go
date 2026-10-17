@@ -62,7 +62,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing action in URL")
 	}
 	if len(body) == 0 {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Request body is empty")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
 	}
 
 	// 解析请求以获取 image_size（用于图片计费）
@@ -126,7 +126,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	// Antigravity 上游要求必须包含身份提示词，注入到请求中
 	injectedBody, err := injectIdentityPatchToGeminiRequest(body)
 	if err != nil {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Invalid request body")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.InvalidRequestBody)
 	}
 
 	// 清理 Schema
@@ -181,7 +181,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		}
 		// 区分客户端取消和真正的上游失败，返回更准确的错误消息
 		if c.Request.Context().Err() != nil {
-			return nil, s.writeGoogleError(c, antigravityStatusClientClosed, "Client disconnected before upstream response")
+			return nil, s.writeGoogleError(c, antigravityStatusClientClosed, infraerrors.ClientDisconnectedBeforeResponse)
 		}
 		return nil, s.writeGoogleError(c, http.StatusBadGateway, infraerrors.UpstreamRequestFailed)
 	}

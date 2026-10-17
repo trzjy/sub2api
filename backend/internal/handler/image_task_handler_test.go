@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -133,7 +134,7 @@ func TestAsyncImageHandlerDisabledReturns404(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
-	require.Contains(t, w.Body.String(), "not enabled")
+	require.Contains(t, w.Body.String(), infraerrors.AsyncImageTasksDisabled)
 
 	pollReq := httptest.NewRequest(http.MethodGet, "/v1/images/tasks/imgtask_missing", nil)
 	pollWriter := httptest.NewRecorder()

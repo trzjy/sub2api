@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -34,7 +35,7 @@ func ParseSeedanceRequest(body []byte) (GrokMediaRequestInfo, error) {
 	}
 	model := gjson.GetBytes(body, "model")
 	if model.Type != gjson.String || strings.TrimSpace(model.String()) == "" {
-		return info, fmt.Errorf("model is required")
+		return info, fmt.Errorf("%s", infraerrors.ModelRequired)
 	}
 	content := gjson.GetBytes(body, "content")
 	if !content.IsArray() || len(content.Array()) == 0 {

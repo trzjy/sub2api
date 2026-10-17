@@ -17,6 +17,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -177,7 +178,7 @@ func TestCCBufferedFromNativeAnthropic_HangTimesOut(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("handler did not respect interval bound: %v", elapsed)
 	}
-	if !strings.Contains(rec.Body.String(), "Upstream stream data interval timeout") {
+	if !strings.Contains(rec.Body.String(), infraerrors.UpstreamStreamIntervalTimeout) {
 		t.Fatalf("expected 502 error body, got %q", rec.Body.String())
 	}
 }

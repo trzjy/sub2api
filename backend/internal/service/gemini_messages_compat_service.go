@@ -1171,7 +1171,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Missing action in URL")
 	}
 	if len(body) == 0 {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Request body is empty")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
 	}
 
 	// 过滤掉 parts 为空的消息（Gemini API 不接受空 parts）
@@ -1920,7 +1920,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errMsg = upstreamMsg
 		}
 		if errMsg == "" {
-			errMsg = "Invalid request"
+			errMsg = infraerrors.InvalidRequest
 		}
 	case 401:
 		if statusCode == 0 {
@@ -1950,7 +1950,7 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 			errType = "not_found_error"
 		}
 		if errMsg == "" {
-			errMsg = "Resource not found"
+			errMsg = infraerrors.ResourceNotFound
 		}
 	case 429:
 		if statusCode == 0 {
@@ -2095,7 +2095,7 @@ func (s *GeminiMessagesCompatService) handleNonStreamingResponse(c *gin.Context,
 
 	unwrappedBody, err := unwrapGeminiResponse(body)
 	if err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -2106,7 +2106,7 @@ func (s *GeminiMessagesCompatService) handleNonStreamingResponse(c *gin.Context,
 
 	var geminiResp map[string]any
 	if err := json.Unmarshal(unwrappedBody, &geminiResp); err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 
 	claudeResp, usage := convertGeminiToClaudeMessage(geminiResp, originalModel, unwrappedBody, false)

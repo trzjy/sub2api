@@ -20,7 +20,7 @@ import (
 // 特点：不记录使用量、仅支持非流式响应
 func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context, account *Account, parsed *ParsedRequest) error {
 	if parsed == nil {
-		s.countTokensError(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		s.countTokensError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return fmt.Errorf("parse request: empty request")
 	}
 

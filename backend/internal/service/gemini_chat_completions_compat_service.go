@@ -33,10 +33,10 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 
 	var ccReq apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &ccReq); err != nil {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 	}
 	if strings.TrimSpace(ccReq.Model) == "" {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 	}
 
 	originalModel := ccReq.Model
@@ -77,10 +77,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		Stream bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(claudeBody, &req); err != nil {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 	}
 
 	mappedModel := req.Model
@@ -251,7 +251,7 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		collectedBytes, _ := json.Marshal(collected)
 		chatResp, usageObj2, err := geminiResponseToChatCompletions(collected, originalModel, collectedBytes, usageObj)
 		if err != nil {
-			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+			return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 		}
 		c.JSON(http.StatusOK, chatResp)
 		usage = usageObj2
@@ -452,12 +452,12 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsNonStreamingResponseF
 
 	var geminiResp map[string]any
 	if err := json.Unmarshal(respBody, &geminiResp); err != nil {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 
 	chatResp, usage, err := geminiResponseToChatCompletions(geminiResp, originalModel, respBody, nil)
 	if err != nil {
-		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -855,7 +855,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			if upstreamMsg != "" {
 				errMsg = upstreamMsg
 			} else {
-				errMsg = "Invalid request"
+				errMsg = infraerrors.InvalidRequest
 			}
 		}
 	case http.StatusNotFound:
@@ -864,7 +864,7 @@ func (s *GeminiMessagesCompatService) writeGeminiChatCompletionsMappedError(
 			errType = "not_found_error"
 		}
 		if errMsg == infraerrors.UpstreamRequestFailed {
-			errMsg = "Resource not found"
+			errMsg = infraerrors.ResourceNotFound
 		}
 	case http.StatusTooManyRequests:
 		statusCode = http.StatusTooManyRequests

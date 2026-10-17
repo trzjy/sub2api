@@ -28,13 +28,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.chatCompletionsErrorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.chatCompletionsErrorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.chatCompletionsErrorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.chatCompletionsErrorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -52,12 +52,12 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			h.chatCompletionsErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 
 	if len(body) == 0 {
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 
@@ -66,14 +66,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	// Validate JSON
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	// Extract model and stream
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	reqModel := modelResult.String()
@@ -303,7 +303,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		setActualUpstreamEndpoint(c, "")
 		if account.Platform == service.PlatformGemini {
 			if h.geminiCompatService == nil {
-				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Gemini compatibility service is not configured")
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
 				}
@@ -312,7 +312,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			result, err = h.geminiCompatService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
 		} else if shouldUseAntigravityCompat(account) {
 			if h.antigravityGatewayService == nil {
-				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Antigravity compatibility service is not configured")
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
 				}

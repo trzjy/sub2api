@@ -28,13 +28,13 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.responsesErrorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.responsesErrorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.responsesErrorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.responsesErrorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -52,12 +52,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			h.responsesErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 
 	if len(body) == 0 {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 
@@ -66,14 +66,14 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	// Validate JSON
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	// Extract model and stream using gjson (like OpenAI handler)
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	reqModel := modelResult.String()
@@ -298,7 +298,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		setActualUpstreamEndpoint(c, "")
 		if shouldUseAntigravityCompat(account) {
 			if h.antigravityGatewayService == nil {
-				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", "Antigravity compatibility service is not configured")
+				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatServiceNotConfigured)
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
 				}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -582,7 +583,7 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 			})
 			clientMsg := msg
 			if clientMsg == "" {
-				clientMsg = "Request blocked by upstream cyber-security policy"
+				clientMsg = infraerrors.UpstreamCyberPolicyBlocked
 			}
 			writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", clientMsg)
 			return nil, fmt.Errorf("openai cyber_policy: %s", msg)
@@ -833,7 +834,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					writeStreamHeaders()
 					clientMsg := msg
 					if clientMsg == "" {
-						clientMsg = "Request blocked by upstream cyber-security policy"
+						clientMsg = infraerrors.UpstreamCyberPolicyBlocked
 					}
 					if _, err := fmt.Fprint(c.Writer, buildChatStreamErrorSSE(code, clientMsg)); err == nil {
 						_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +44,7 @@ func TestReadOpenAIWSClientMessage_ControlCloseFrames(t *testing.T) {
 			name:        "lease loss sends retry close",
 			cancelCause: ErrOpenAIWSIngressLeaseLost,
 			wantStatus:  coderws.StatusTryAgainLater,
-			wantReason:  "websocket ingress capacity lease lost; please reconnect",
+			wantReason:  infraerrors.WSIngressCapacityLost,
 		},
 	}
 

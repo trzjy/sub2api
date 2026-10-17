@@ -39,7 +39,7 @@ func TestSystemOneRejectsNonTypeSafeGroupBeforeScheduling(t *testing.T) {
 
 	(&GatewayHandler{cfg: &config.Config{Gateway: config.GatewayConfig{MaxBodySize: 1 << 20}}}).SystemOne(c)
 	require.Equal(t, http.StatusNotFound, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "only available for TypeSafe")
+	require.Contains(t, recorder.Body.String(), "仅支持特定分组配置")
 }
 
 func newTypeSafeGroupContext(t *testing.T, path, body, groupPlatform string) (*gin.Context, *httptest.ResponseRecorder) {

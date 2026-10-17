@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -35,7 +36,7 @@ type keyBillingInfoResponse struct {
 func (h *GatewayHandler) KeyBillingInfo(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", pkgerrors.InvalidAPIKey)
 		return
 	}
 	if h.cfg != nil && h.cfg.RunMode == config.RunModeSimple {
@@ -47,13 +48,13 @@ func (h *GatewayHandler) KeyBillingInfo(c *gin.Context) {
 		return
 	}
 	if apiKey.Group == nil {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Billing information is unavailable")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", pkgerrors.BillingInfoUnavailable)
 		return
 	}
 
 	resolvedRate, ok := h.resolveKeyBillingRate(c, apiKey)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Billing information is unavailable")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", pkgerrors.BillingInfoUnavailable)
 		return
 	}
 

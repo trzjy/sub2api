@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -34,12 +35,12 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &responsesReq); err != nil {
-		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
 	originalModel := strings.TrimSpace(responsesReq.Model)
 	if originalModel == "" {
-		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeOpenAIResponsesFallbackError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -138,7 +139,7 @@ func TestOpenAIGatewayHandlerAcquireImageGenerationSlot_Returns429WhenFull(t *te
 	require.Nil(t, blockedRelease)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.Equal(t, "rate_limit_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
-	require.Contains(t, rec.Body.String(), "Image generation concurrency limit exceeded")
+	require.Contains(t, rec.Body.String(), infraerrors.ImageConcurrencyLimitReached)
 }
 
 func TestOpenAIGatewayHandlerResponses_ImageIntentRejectedByImageConcurrency(t *testing.T) {
@@ -183,7 +184,7 @@ func TestOpenAIGatewayHandlerResponses_ImageIntentRejectedByImageConcurrency(t *
 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.Equal(t, "rate_limit_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
-	require.Contains(t, rec.Body.String(), "Image generation concurrency limit exceeded")
+	require.Contains(t, rec.Body.String(), infraerrors.ImageConcurrencyLimitReached)
 }
 
 func TestOpenAIGatewayHandlerResponses_TextOnlyNotRejectedByImageConcurrency(t *testing.T) {
@@ -226,5 +227,5 @@ func TestOpenAIGatewayHandlerResponses_TextOnlyNotRejectedByImageConcurrency(t *
 	h.Responses(c)
 
 	require.NotEqual(t, http.StatusTooManyRequests, rec.Code)
-	require.NotContains(t, rec.Body.String(), "Image generation concurrency limit exceeded")
+	require.NotContains(t, rec.Body.String(), infraerrors.ImageConcurrencyLimitReached)
 }

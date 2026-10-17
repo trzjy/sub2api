@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -22,20 +23,20 @@ import (
 func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	if apiKey.Group == nil || (apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite) {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Live is not supported for this platform")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.LiveNotSupportedForPlatform)
 		return
 	}
 	if !liveEnabledForAPIKey(apiKey) {
-		h.errorResponse(c, http.StatusForbidden, "permission_error", "Live is not enabled for this group")
+		h.errorResponse(c, http.StatusForbidden, "permission_error", infraerrors.LiveNotEnabledForGroup)
 		return
 	}
 	request, err := parseLiveCallRequest(c)
@@ -45,13 +46,13 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 	}
 	model := strings.TrimSpace(gjson.GetBytes(request.Session, "model").String())
 	if !compositeTargetPlatformAllowed(c, apiKey, model, h.coreGatewayService, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Live only supports OpenAI models for Composite groups")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.LiveOnlyOpenAIModels)
 		return
 	}
 	if upstreamModel, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context()); ok && upstreamModel != model {
 		rewrittenSession, rewriteErr := sjson.SetBytes(request.Session, "model", upstreamModel)
 		if rewriteErr != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to apply Composite model route")
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.CompositeModelRouteFailed)
 			return
 		}
 		request.Session = rewrittenSession
@@ -78,7 +79,7 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	if h.billingCacheService == nil {
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Billing service unavailable")
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.BillingServiceUnavailable)
 		return
 	}
 	if err := h.billingCacheService.CheckBillingEligibility(
@@ -103,11 +104,11 @@ func (h *OpenAIGatewayHandler) Live(c *gin.Context) {
 		subject.Concurrency,
 	)
 	if err != nil {
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Live concurrency unavailable")
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.LiveConcurrencyUnavailable)
 		return
 	}
 	if !acquired {
-		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Live concurrency limit reached")
+		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", infraerrors.LiveConcurrencyLimitReached)
 		return
 	}
 	defer userRelease()
@@ -180,9 +181,9 @@ func liveCallIdentity(
 func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrLiveConcurrencyFull):
-		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Live concurrency limit reached")
+		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", infraerrors.LiveConcurrencyLimitReached)
 	case errors.Is(err, service.ErrLiveUnavailable):
-		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Live is unavailable")
+		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.LiveUnavailable)
 	default:
 		var attestationErr *service.LiveAttestationUnavailableError
 		if errors.As(err, &attestationErr) {
@@ -191,26 +192,26 @@ func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 		}
 		var upstreamErr *service.UpstreamFailoverError
 		if errors.As(err, &upstreamErr) && upstreamErr.StatusCode >= 400 && upstreamErr.StatusCode < 500 {
-			h.errorResponse(c, upstreamErr.StatusCode, "invalid_request_error", "Live upstream rejected the request")
+			h.errorResponse(c, upstreamErr.StatusCode, "invalid_request_error", infraerrors.LiveUpstreamRejected)
 			return
 		}
-		h.errorResponse(c, http.StatusBadGateway, "api_error", "Live upstream request failed")
+		h.errorResponse(c, http.StatusBadGateway, "api_error", infraerrors.LiveUpstreamRequestFailed)
 	}
 }
 
 func (h *OpenAIGatewayHandler) LiveSideband(c *gin.Context) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	if !liveEnabledForAPIKey(apiKey) {
-		h.errorResponse(c, http.StatusForbidden, "permission_error", "Live is not enabled for this group")
+		h.errorResponse(c, http.StatusForbidden, "permission_error", infraerrors.LiveNotEnabledForGroup)
 		return
 	}
 	identity := service.LiveCallIdentity{
@@ -221,10 +222,10 @@ func (h *OpenAIGatewayHandler) LiveSideband(c *gin.Context) {
 	record, err := h.gatewayService.GetLiveCallForIdentity(c.Request.Context(), c.Param("call_id"), identity)
 	if err != nil {
 		if errors.Is(err, service.ErrLiveIdentityMismatch) {
-			h.errorResponse(c, http.StatusForbidden, "permission_error", "Live call belongs to another identity")
+			h.errorResponse(c, http.StatusForbidden, "permission_error", infraerrors.LiveCallOwnershipDenied)
 			return
 		}
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Live call not found")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.LiveCallNotFound)
 		return
 	}
 	downstream, err := coderws.Accept(c.Writer, c.Request, &coderws.AcceptOptions{

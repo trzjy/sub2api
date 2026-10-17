@@ -21,7 +21,7 @@ const (
 	grokCredentialMutationConfirmWait = 250 * time.Millisecond
 	grokCredentialCacheCleanupTimeout = 500 * time.Millisecond
 
-	GrokCredentialUnavailableClientMessage = "No healthy Grok OAuth account is currently available"
+	GrokCredentialUnavailableClientMessage = infraerrors.NoAvailableAccounts
 
 	GrokCredentialReasonRevoked          GatewayFailureReason = "grok_oauth_credential_revoked"
 	GrokCredentialReasonMissing          GatewayFailureReason = "grok_oauth_credentials_missing"

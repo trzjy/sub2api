@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	coderws "github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
@@ -139,7 +140,7 @@ func TestOpenAIResponsesWebSocket_GroupRateChangeReachesProfitGateOnNextTurn(t *
 		},
 		secondTurnCloseExpected: true,
 		closeStatus:             coderws.StatusTryAgainLater,
-		closeReason:             "no longer eligible for this connection",
+		closeReason:             infraerrors.WSAccountNotEligible,
 	})
 }
 

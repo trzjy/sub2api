@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	errors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 const (
 	OpenAIImagesInsufficientBalanceReason  GatewayFailureReason = "openai_images_insufficient_balance"
 	OpenAIImagesInsufficientBalanceCode                         = "insufficient_balance"
-	OpenAIImagesInsufficientBalanceMessage                      = "Upstream image account has insufficient balance"
+	OpenAIImagesInsufficientBalanceMessage                      = errors.UpstreamPaymentRequired
 	openAIImagesBalanceCooldown                                 = 5 * time.Minute
 	openAIImagesBalanceRateLimitReason                          = "openai_images_insufficient_balance"
 )

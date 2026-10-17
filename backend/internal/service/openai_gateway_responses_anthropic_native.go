@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -53,12 +54,12 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 	// 2. Parse Responses request
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(adaptedBody, &responsesReq); err != nil {
-		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
 	originalModel := responsesReq.Model
 	if strings.TrimSpace(originalModel) == "" {
-		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 	clientStream := responsesReq.Stream
@@ -190,7 +191,7 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 			zap.String("request_id", requestID),
 			zap.Duration("interval", streamInterval),
 		)
-		writeResponsesError(c, http.StatusBadGateway, "server_error", "Upstream stream data interval timeout")
+		writeResponsesError(c, http.StatusBadGateway, "server_error", infraerrors.UpstreamStreamIntervalTimeout)
 		return nil, fmt.Errorf("stream data interval timeout")
 	}
 

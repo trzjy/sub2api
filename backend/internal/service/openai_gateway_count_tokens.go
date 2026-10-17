@@ -58,7 +58,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 
 	prepared, err := prepareNativeOpenAIInputTokensCountRequest(body, account)
 	if err != nil {
-		writeOpenAIResponsesInputTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeOpenAIResponsesInputTokensError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return err
 	}
 
@@ -279,7 +279,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 	if account.Platform == PlatformCodeBuddy || account.IsMultiProtocolAPIKey() || account.Platform == PlatformOther {
 		estimated, err := estimateAnthropicCountTokensLocally(body)
 		if err != nil {
-			writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+			writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 			return fmt.Errorf("count_tokens: estimate cn provider input tokens: %w", err)
 		}
 		logger.L().Debug("openai count_tokens: cn provider local estimate",
@@ -294,7 +294,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 
 	prepared, err := prepareOpenAIInputTokensCountRequest(body, account, defaultMappedModel)
 	if err != nil {
-		writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return err
 	}
 

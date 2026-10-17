@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
@@ -16,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const systemOneOnlyPlatformMessage = "TypeSafe models are only available through POST /v1/systemone"
+const systemOneOnlyPlatformMessage = "该模型仅支持通过 POST /v1/systemone 访问"
 
 // rejectSystemOneOnlyPlatform stops TypeSafe traffic from entering a non System
 // One protocol chain. TypeSafe accounts only speak the native System One
@@ -40,12 +41,12 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 	requestStart := time.Now()
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil || apiKey.Group == nil {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(c, "handler.gateway.systemone",
@@ -60,7 +61,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 	model, err := typesafe.ValidateSystemOneRequest(body)
@@ -71,7 +72,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 	ensureCompositeTargetPlatform(c, apiKey, model, h.gatewayService)
 	if apiKey.Group.Platform != service.PlatformTypeSafe &&
 		(apiKey.Group.Platform != service.PlatformComposite || !compositeTargetPlatformAllowed(c, apiKey, model, h.gatewayService, service.PlatformTypeSafe)) {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "System One is only available for TypeSafe and compatible Composite groups")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.SystemOneGroupRestricted)
 		return
 	}
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolTypeSafeSystemOne, model, body); decision != nil && !decision.AllowNextStage {
@@ -166,7 +167,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 		if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
-				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
+				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 				return
 			}
 			accountRelease, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, selection.WaitPlan.Timeout, false, &streamStarted)
@@ -231,15 +232,15 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				if !service.IsSystemOneRequestErrorStatus(status) {
 					status = http.StatusBadGateway
 				}
-				h.errorResponse(c, status, "upstream_error", "TypeSafe rejected the request")
+				h.errorResponse(c, status, "upstream_error", infraerrors.CompatUpstreamRequestFailed)
 				return
 			}
 			reqLog.Warn("systemone.forward_failed", zap.Int64("account_id", account.ID), zap.Error(forwardErr))
 			if errors.Is(forwardErr, typesafe.ErrSystemOneResponseTooLarge) {
-				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "TypeSafe response exceeds the gateway size limit")
+				h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseTooLarge)
 				return
 			}
-			h.errorResponse(c, http.StatusBadGateway, "upstream_error", "TypeSafe upstream request failed")
+			h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.CompatUpstreamRequestFailed)
 			return
 		}
 

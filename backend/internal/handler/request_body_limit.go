@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 )
 
@@ -26,7 +27,7 @@ func formatBodyLimit(limit int64) string {
 }
 
 func buildBodyTooLargeMessage(limit int64) string {
-	return fmt.Sprintf("Request body too large, limit is %s", formatBodyLimit(limit))
+	return fmt.Sprintf(pkgerrors.RequestBodyTooLargeFormat, formatBodyLimit(limit))
 }
 
 func readLenientJSONRequestBodyWithPrealloc(req *http.Request, cfg *config.Config) ([]byte, error) {

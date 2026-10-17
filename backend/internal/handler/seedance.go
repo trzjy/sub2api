@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -16,13 +17,13 @@ func (h *OpenAIGatewayHandler) SeedanceTasks(c *gin.Context) {
 	if c.Request.Method == http.MethodPost && c.GetHeader("Content-Type") != "" {
 		mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
 		if err != nil || mediaType != "application/json" {
-			h.errorResponse(c, http.StatusUnsupportedMediaType, "invalid_request_error", "Seedance requires application/json")
+			h.errorResponse(c, http.StatusUnsupportedMediaType, "invalid_request_error", infraerrors.SeedanceRequiresJSON)
 			return
 		}
 	}
 	key, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || key.Group == nil || (key.Group.Platform != service.PlatformOpenAI && key.Group.Platform != service.PlatformComposite) {
-		h.errorResponse(c, http.StatusForbidden, "permission_error", "Seedance requires an OpenAI or composite group")
+		h.errorResponse(c, http.StatusForbidden, "permission_error", infraerrors.SeedanceRequiresGroup)
 		return
 	}
 	endpoint := service.SeedanceEndpointCreate

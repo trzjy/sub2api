@@ -440,13 +440,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// Get apiKey and user from context (set by ApiKeyAuth middleware)
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -468,12 +468,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		logRequestBodyReadFailure(reqLog, c.Request, err)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 
 	if len(body) == 0 {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 
@@ -499,20 +499,20 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 校验请求体 JSON 合法性
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	// 使用 gjson 只读提取字段做校验，避免完整 Unmarshal
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
 		return
 	}
 	if cappedBody, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
@@ -556,7 +556,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			reqLog.Warn("openai.request_validation_failed",
 				zap.String("reason", "previous_response_id_looks_like_message_id"),
 			)
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id must be a response.id (resp_*), not a message id")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.PreviousResponseIDBadFormat)
 			return
 		}
 		groupID := int64(0)
@@ -575,7 +575,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if !owned {
 			reqLog.Warn("openai.request_validation_failed", zap.String("reason", "previous_response_owner_mismatch"))
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id is not available for this user")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.PreviousResponseIDUnavailable)
 			return
 		}
 	}
@@ -836,7 +836,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				Scope:            service.GatewayFailureScopeRequest,
 				Reason:           service.OpenAIHTTPContinuationUnsupportedReason,
 				ClientStatusCode: http.StatusBadRequest,
-				ClientMessage:    "previous_response_id requires an OpenAI API-key account for HTTP requests",
+				ClientMessage:    infraerrors.PreviousResponseIDUnsupported,
 			}
 			reqLog.Debug("openai.account_skipped_http_continuation_unsupported",
 				zap.Int64("account_id", account.ID),
@@ -1254,13 +1254,13 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.anthropicErrorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.anthropicErrorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.anthropicErrorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -1288,29 +1288,29 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			h.anthropicErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 	if len(body) == 0 {
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel, h.coreGatewayService) {
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
 		return
 	}
 	bindOpenAIReasoningEffortPolicyForMessagesRequest(c, apiKey, body)
@@ -1831,7 +1831,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 		reqLog.Warn("openai.request_validation_failed",
 			zap.String("reason", "function_call_output_missing_call_id"),
 		)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires call_id on HTTP requests; continuation via previous_response_id is only supported on Responses WebSocket v2")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.FunctionCallOutputNeedsCallID)
 		return false
 	}
 	if validation.HasItemReferenceForAllCallIDs {
@@ -1841,7 +1841,7 @@ func (h *OpenAIGatewayHandler) validateFunctionCallOutputRequest(c *gin.Context,
 	reqLog.Warn("openai.request_validation_failed",
 		zap.String("reason", "function_call_output_missing_item_reference"),
 	)
-	h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "function_call_output requires item_reference ids matching each call_id on HTTP requests; continuation via previous_response_id is only supported on Responses WebSocket v2")
+	h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.FunctionCallOutputItemRefMismatch)
 	return false
 }
 
@@ -2586,19 +2586,19 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 // GET /openai/v1/responses (Upgrade: websocket)
 func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if !isOpenAIWSUpgradeRequest(c.Request) {
-		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
+		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", infraerrors.WebSocketUpgradeRequired)
 		return
 	}
 	setOpenAIClientTransportWS(c)
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 
@@ -2631,7 +2631,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if !ingressLeaseAcquired {
 		reqLog.Info("openai.websocket_ingress_capacity_rejected", zap.Int("max_ingress_connections_per_api_key", maxIngressConnections))
 		c.Header("Retry-After", "5")
-		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Too many open WebSocket connections, please retry later")
+		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", infraerrors.WSConnectionsTooMany)
 		return
 	}
 	if ingressLease != nil {
@@ -2671,7 +2671,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if err != nil {
 		if errors.Is(context.Cause(ctx), service.ErrOpenAIWSIngressLeaseLost) {
 			reqLog.Warn("openai.websocket_ingress_lease_lost_before_first_message", zap.Error(err))
-			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "websocket ingress capacity lease lost; please reconnect")
+			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSIngressCapacityLost)
 			return
 		}
 		closeStatus, closeReason := summarizeWSCloseErrorForLog(err)
@@ -3282,7 +3282,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 						zap.Int("turn", turn),
 						zap.Int64("account_id", account.ID),
 						zap.String("reason", reason))
-					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account is no longer eligible for this connection, please reconnect", nil)
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, infraerrors.WSAccountNotEligible, nil)
 				}
 				turnPricing.freeze(turnAt)
 				if turn == 1 {
@@ -3511,7 +3511,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					zap.Int64("account_id", account.ID),
 					zap.Error(err),
 				)
-				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "websocket ingress capacity lease lost; please reconnect")
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, infraerrors.WSIngressCapacityLost)
 				return
 			}
 
@@ -3756,7 +3756,7 @@ func (h *OpenAIGatewayHandler) acquireImageGenerationSlot(c *gin.Context, stream
 	if acquired {
 		return release, true
 	}
-	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode, "Image generation concurrency limit exceeded, please retry later", streamStarted, false)
+	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayConcurrencyLimitCode, infraerrors.ImageConcurrencyLimitReached, streamStarted, false)
 	return nil, false
 }
 
@@ -3796,7 +3796,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
-			message = "previous_response_id requires an OpenAI API-key account for HTTP requests"
+			message = infraerrors.PreviousResponseIDUnsupported
 		}
 		h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", message, streamStarted)
 		return

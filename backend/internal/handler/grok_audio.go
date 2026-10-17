@@ -24,12 +24,12 @@ import (
 // Only Grok-platform API keys may use this endpoint.
 func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	if c == nil || c.Request == nil || !isOpenAIWSUpgradeRequest(c.Request) {
-		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
+		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", infraerrors.WebSocketUpgradeRequired)
 		return
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformGrok {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Realtime API is not supported for this platform")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.RealtimeAPINotSupported)
 		return
 	}
 	if !h.ensureResponsesDependencies(c, nil) {
@@ -129,7 +129,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if !candidateSeen {
 			h.errorResponse(c, http.StatusServiceUnavailable, "api_error", infraerrors.NoAvailableAccounts)
 		} else {
-			h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Grok realtime upstream unavailable")
+			h.errorResponse(c, http.StatusBadGateway, "upstream_error", infraerrors.RealtimeUpstreamUnavailable)
 		}
 		return
 	}
@@ -186,7 +186,7 @@ func isExpectedGrokRealtimeClose(err error) bool {
 func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformGrok {
-		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Voice API is not supported for this platform")
+		h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.VoiceAPINotSupported)
 		return
 	}
 	if !h.ensureResponsesDependencies(c, nil) {

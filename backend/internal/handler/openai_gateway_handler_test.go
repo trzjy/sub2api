@@ -941,7 +941,7 @@ func TestOpenAIResponses_RejectsMessageIDAsPreviousResponseID(t *testing.T) {
 	h.Responses(c)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "previous_response_id must be a response.id")
+	require.Contains(t, w.Body.String(), "previous_response_id 必须是 response.id")
 }
 
 func TestOpenAIResponses_AcceptsHTTPContinuationPreviousResponseIDBeforeRouting(t *testing.T) {
@@ -997,7 +997,7 @@ func TestOpenAIResponses_RejectsHTTPContinuationOwnedByAnotherUser(t *testing.T)
 	h.Responses(c)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "previous_response_id is not available for this user")
+	require.Contains(t, w.Body.String(), "该用户不可使用 previous_response_id")
 }
 
 func TestOpenAIResponses_RejectsUnownedHTTPContinuation(t *testing.T) {
@@ -1018,7 +1018,7 @@ func TestOpenAIResponses_RejectsUnownedHTTPContinuation(t *testing.T) {
 	h.Responses(c)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "previous_response_id is not available for this user")
+	require.Contains(t, w.Body.String(), "该用户不可使用 previous_response_id")
 }
 
 func TestOpenAIResponses_FunctionCallOutputHTTPGuidanceDoesNotSuggestPreviousResponseReuse(t *testing.T) {

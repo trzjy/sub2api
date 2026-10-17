@@ -45,7 +45,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	if query == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
-			"message": "query is required",
+			"message": infraerrors.QueryRequired,
 		}})
 		return
 	}
@@ -65,7 +65,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	if !ok || apiKey == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"type": "error", "error": gin.H{
 			"type":    "authentication_error",
-			"message": "API key required",
+			"message": infraerrors.APIKeyMissing,
 		}})
 		return
 	}
@@ -73,7 +73,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	if apiKey.Group == nil || apiKey.Group.Platform != "grok" {
 		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": gin.H{
 			"type":    "invalid_request_error",
-			"message": searchLabel + " is only supported for grok groups",
+			"message": infraerrors.SearchGrokGroupOnly,
 		}})
 		return
 	}
@@ -120,7 +120,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 		msg := decision.ClientMessage
 		if msg == "" {
-			msg = "Request blocked by content policy"
+			msg = infraerrors.SecurityAuditBlockedFallback
 		}
 		c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": code, "message": msg}})
 		return

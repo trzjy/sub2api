@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	coderws "github.com/coder/websocket"
 )
 
@@ -107,7 +108,7 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 			if errors.Is(cause, ErrOpenAIWSIngressLeaseLost) {
 				return closeAndJoin(
 					coderws.StatusTryAgainLater,
-					"websocket ingress capacity lease lost; please reconnect",
+					infraerrors.WSIngressCapacityLost,
 					cause,
 				)
 			}

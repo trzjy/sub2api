@@ -362,7 +362,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_LeaseLossSendsRe
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusTryAgainLater, closeErr.Code)
-	require.Equal(t, "websocket ingress capacity lease lost; please reconnect", closeErr.Reason)
+	require.Equal(t, infraerrors.WSIngressCapacityLost, closeErr.Reason)
 
 	select {
 	case serverErr := <-serverErrCh:

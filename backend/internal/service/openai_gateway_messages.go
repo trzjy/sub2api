@@ -14,6 +14,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -687,7 +688,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 			})
 			clientMsg := msg
 			if clientMsg == "" {
-				clientMsg = "Request blocked by upstream cyber-security policy"
+				clientMsg = infraerrors.UpstreamCyberPolicyBlocked
 			}
 			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", clientMsg)
 			return nil, fmt.Errorf("openai cyber_policy: %s", msg)
@@ -1115,7 +1116,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 						writeStreamHeaders()
 						clientMsg := msg
 						if clientMsg == "" {
-							clientMsg = "Request blocked by upstream cyber-security policy"
+							clientMsg = infraerrors.UpstreamCyberPolicyBlocked
 						}
 						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("invalid_request_error", clientMsg)); err == nil {
 							c.Writer.Flush()

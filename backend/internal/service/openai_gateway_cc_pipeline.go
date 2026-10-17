@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -454,7 +455,7 @@ func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
 	var ccResp apicompat.ChatCompletionsResponse
 	if err := json.Unmarshal(respBody, &ccResp); err != nil {
 		if writeError != nil {
-			writeError(c, http.StatusBadGateway, "api_error", "Failed to parse upstream response")
+			writeError(c, http.StatusBadGateway, "api_error", infraerrors.UpstreamResponseParseFailed)
 		}
 		return nil, OpenAIUsage{}, fmt.Errorf("parse chat completions response: %w", err)
 	}

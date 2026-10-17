@@ -50,7 +50,7 @@ func (h *AsyncImageHandler) pollable() bool {
 // returns before the upstream image generation begins.
 func (h *AsyncImageHandler) Submit(c *gin.Context) {
 	if !h.enabled() {
-		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", "async image tasks are not enabled")
+		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", infraerrors.AsyncImageTasksDisabled)
 		return
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
@@ -63,7 +63,7 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 		platform = apiKey.Group.Platform
 	}
 	if platform != service.PlatformOpenAI && platform != service.PlatformGrok {
-		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", "Images API is not supported for this platform")
+		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", infraerrors.ImagesAPINotSupported)
 		return
 	}
 	if !service.GroupAllowsImageGeneration(apiKey.Group) {
@@ -81,15 +81,15 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 			imageTaskJSONError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 	if len(body) == 0 {
-		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 	if asyncImageRequestStreams(c.GetHeader("Content-Type"), body) {
-		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", "streaming image requests cannot be submitted as asynchronous tasks")
+		imageTaskJSONError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.StreamingImageAsyncUnsupported)
 		return
 	}
 	if err := h.validateRequest(c, platform, body); err != nil {
@@ -131,7 +131,7 @@ func (h *AsyncImageHandler) checkSecurityAuditBeforeSubmit(c *gin.Context, apiKe
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		imageTaskJSONError(c, http.StatusInternalServerError, "api_error", "User context not found")
+		imageTaskJSONError(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return false
 	}
 	model := ""
@@ -167,7 +167,7 @@ func (h *AsyncImageHandler) Get(c *gin.Context) {
 	// strand tasks that were already accepted — their results are still in Redis
 	// and their submitters are still polling.
 	if !h.pollable() {
-		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", "async image tasks are not enabled")
+		imageTaskJSONError(c, http.StatusNotFound, "not_found_error", infraerrors.AsyncImageTasksDisabled)
 		return
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
@@ -194,7 +194,7 @@ func (h *AsyncImageHandler) validateRequest(c *gin.Context, platform string, bod
 	if platform == service.PlatformGrok {
 		parsed := service.ParseGrokMediaRequest(c.GetHeader("Content-Type"), body)
 		if strings.TrimSpace(parsed.Model) == "" {
-			return errors.New("model is required")
+			return errors.New(infraerrors.ModelRequired)
 		}
 		return nil
 	}
@@ -203,14 +203,14 @@ func (h *AsyncImageHandler) validateRequest(c *gin.Context, platform string, bod
 		return err
 	}
 	if parsed.Stream {
-		return errors.New("streaming image requests cannot be submitted as asynchronous tasks")
+		return errors.New(infraerrors.StreamingImageAsyncUnsupported)
 	}
 	return nil
 }
 
 func (h *AsyncImageHandler) executeWithGateway(platform string, c *gin.Context) {
 	if h.openAI == nil {
-		imageTaskJSONError(c, http.StatusServiceUnavailable, "api_error", "image gateway is unavailable")
+		imageTaskJSONError(c, http.StatusServiceUnavailable, "api_error", infraerrors.ImageGatewayUnavailable)
 		return
 	}
 	if platform == service.PlatformGrok {

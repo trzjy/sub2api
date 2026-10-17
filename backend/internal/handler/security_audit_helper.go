@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -193,7 +194,7 @@ func securityAuditErrorCode(decision *securityaudit.Decision) string {
 
 func securityAuditMessage(decision *securityaudit.Decision) string {
 	if decision == nil {
-		return "Request blocked by content policy"
+		return errors.SecurityAuditBlockedFallback
 	}
 	if decision.Legacy != nil && decision.Legacy.Blocked && strings.TrimSpace(decision.Legacy.Message) != "" {
 		return decision.Legacy.Message
@@ -201,7 +202,7 @@ func securityAuditMessage(decision *securityaudit.Decision) string {
 	if strings.TrimSpace(decision.ClientMessage) != "" {
 		return decision.ClientMessage
 	}
-	return "Request blocked by content policy"
+	return errors.SecurityAuditBlockedFallback
 }
 
 func cloneSecurityAuditGroupID(value *int64) *int64 {

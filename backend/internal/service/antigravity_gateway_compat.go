@@ -25,7 +25,7 @@ const (
 
 const (
 	// AntigravityCredentialRejectedClientMessage 是可安全返回给客户端的认证修复提示。
-	AntigravityCredentialRejectedClientMessage = "Antigravity rejected the OAuth credential after refresh; reauthorize the account and verify project_id"
+	AntigravityCredentialRejectedClientMessage = infraerrors.UpstreamAuthFailed
 	// AntigravityCredentialRejectedReason 标识上游拒绝已刷新 OAuth 凭据。
 	AntigravityCredentialRejectedReason GatewayFailureReason = "antigravity_oauth_credential_rejected"
 )
@@ -66,10 +66,10 @@ func (s *AntigravityGatewayService) ForwardAsChatCompletions(
 
 	var request apicompat.ChatCompletionsRequest
 	if json.Unmarshal(body, &request) != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 	}
 	if strings.TrimSpace(request.Model) == "" {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 	}
 
 	responsesRequest, err := apicompat.ChatCompletionsToResponses(&request)
@@ -113,10 +113,10 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 
 	var request apicompat.ResponsesRequest
 	if json.Unmarshal(body, &request) != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 	}
 	if strings.TrimSpace(request.Model) == "" {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 	}
 
 	claudeRequest, err := apicompat.ResponsesToAnthropicRequest(&request)
@@ -210,7 +210,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 ) (*antigravityCompatUpstreamCall, error) {
 	var claudeRequest antigravity.ClaudeRequest
 	if json.Unmarshal(request.claudeBody, &claudeRequest) != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request body")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.InvalidRequestBody)
 	}
 
 	mappedModel := s.getMappedModelForThinkingLevel(
@@ -228,7 +228,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
 
 	if s.tokenProvider == nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "api_error", "Antigravity token provider not configured")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "api_error", infraerrors.CompatTokenProviderNotConfigured)
 	}
 	accessToken, err := s.tokenProvider.GetAccessToken(ctx, account)
 	if err != nil {
@@ -245,7 +245,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 	}
 	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel)
 	if err != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.InvalidRequest)
 	}
 
 	request.reasoningEffort = ApplyThinkingEnabledFallback(request.reasoningEffort, request.originalBody, mappedModel)
@@ -375,7 +375,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatTransportError(c *gin
 		}
 	}
 	if c.Request.Context().Err() != nil {
-		return s.writeAntigravityCompatError(c, antigravityStatusClientClosed, "client_disconnected", "Client disconnected before upstream response")
+		return s.writeAntigravityCompatError(c, antigravityStatusClientClosed, "client_disconnected", infraerrors.ClientDisconnectedBeforeResponse)
 	}
 	return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 }
@@ -571,7 +571,7 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	}
 	var anthropicResponse apicompat.AnthropicResponse
 	if json.Unmarshal(claudeResponse, &anthropicResponse) != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 	responsesResponse := apicompat.AnthropicToResponsesResponse(&anthropicResponse)
 	c.JSON(http.StatusOK, apicompat.ResponsesToChatCompletions(responsesResponse, originalModel))
@@ -590,7 +590,7 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	}
 	var anthropicResponse apicompat.AnthropicResponse
 	if json.Unmarshal(claudeResponse, &anthropicResponse) != nil {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 	}
 	c.JSON(http.StatusOK, apicompat.AnthropicToResponsesResponse(&anthropicResponse))
 	return result, nil
@@ -605,10 +605,10 @@ func (s *AntigravityGatewayService) mapAntigravityCompatCollectionError(c *gin.C
 		return err
 	}
 	if strings.Contains(err.Error(), "stream data interval timeout") {
-		return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_timeout", "Upstream stream data interval timeout")
+		return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_timeout", infraerrors.UpstreamStreamIntervalTimeout)
 	}
 	if errors.Is(err, bufio.ErrTooLong) {
-		return s.writeAntigravityCompatError(c, http.StatusBadGateway, "response_too_large", "Upstream response line too long")
+		return s.writeAntigravityCompatError(c, http.StatusBadGateway, "response_too_large", infraerrors.UpstreamResponseLineTooLong)
 	}
-	return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", "Failed to parse upstream response")
+	return s.writeAntigravityCompatError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamResponseParseFailed)
 }

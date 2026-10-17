@@ -65,12 +65,12 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	requestStart := time.Now()
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 
@@ -95,11 +95,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 				return
 			}
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 			return
 		}
 		if len(body) == 0 {
-			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 			return
 		}
 	}
@@ -116,11 +116,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	requestModel := requestInfo.Model
 	routingModel := service.NormalizeGrokMediaModelForEndpoint(endpoint, requestModel, requestInfo.HasInputImage())
 	if endpoint.IsGenerationRequest() && strings.TrimSpace(requestModel) == "" {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	if endpoint.IsVideoLookupRequest() && strings.TrimSpace(requestID) == "" {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "request_id is required")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestIDRequired)
 		return
 	}
 
@@ -199,7 +199,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		)
 		if err != nil || boundLookupAccountID <= 0 {
 			reqLog.Info("grok_media.video_lookup_owner_binding_missing", zap.Error(err))
-			h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
+			h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.VideoRequestNotFound)
 			return
 		}
 	}
@@ -269,7 +269,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				return
 			}
 			if boundLookupAccountID > 0 && errors.Is(err, service.ErrNoAvailableAccounts) {
-				h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
+				h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.VideoRequestNotFound)
 				return
 			}
 			reqLog.Warn("grok_media.account_select_failed",
@@ -318,7 +318,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				zap.Int64("bound_account_id", boundLookupAccountID),
 				zap.Int64("selected_account_id", selection.Account.ID),
 			)
-			h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
+			h.errorResponse(c, http.StatusNotFound, "not_found_error", infraerrors.VideoRequestNotFound)
 			return
 		}
 
@@ -437,19 +437,19 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 						continue
 					}
 				}
-			h.gatewayService.RecordOpenAIAccountSwitch()
-			failedAccountIDs[account.ID] = struct{}{}
-			lastFailoverErr = failoverErr
-			switchCount++
-			if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
-				h.handleFailoverExhausted(c, failoverErr, false)
-				return
-			}
-			reqLog.Warn("grok_media.upstream_failover_switching",
-				zap.Int64("account_id", account.ID),
-				zap.Int("upstream_status", failoverErr.StatusCode),
-				zap.Int("switch_count", switchCount),
-			)
+				h.gatewayService.RecordOpenAIAccountSwitch()
+				failedAccountIDs[account.ID] = struct{}{}
+				lastFailoverErr = failoverErr
+				switchCount++
+				if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+					h.handleFailoverExhausted(c, failoverErr, false)
+					return
+				}
+				reqLog.Warn("grok_media.upstream_failover_switching",
+					zap.Int64("account_id", account.ID),
+					zap.Int("upstream_status", failoverErr.StatusCode),
+					zap.Int("switch_count", switchCount),
+				)
 				continue
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, grokMediaScheduleModel(account, routingModel, nil), false, nil)

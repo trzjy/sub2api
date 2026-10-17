@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -43,7 +44,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 
 	originalModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	if originalModel == "" {
-		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 	clientStream := gjson.GetBytes(body, "stream").Bool()

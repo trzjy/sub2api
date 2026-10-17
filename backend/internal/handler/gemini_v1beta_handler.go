@@ -37,7 +37,7 @@ var geminiCLITmpDirRegex = regexp.MustCompile(`/\.gemini/tmp/([A-Fa-f0-9]{64})`)
 func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
-		googleError(c, http.StatusUnauthorized, "Invalid API key")
+		googleError(c, http.StatusUnauthorized, infraerrors.InvalidAPIKey)
 		return
 	}
 	// 检查平台：优先使用强制平台（/antigravity 路由），否则要求 gemini 分组
@@ -221,7 +221,7 @@ func filterUpstreamGeminiModelsBody(body []byte, allowlist service.GroupModelAll
 func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
-		googleError(c, http.StatusUnauthorized, "Invalid API key")
+		googleError(c, http.StatusUnauthorized, infraerrors.InvalidAPIKey)
 		return
 	}
 	// 检查平台：优先使用强制平台（/antigravity 路由），否则要求 gemini 分组
@@ -284,12 +284,12 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	apiKey, ok := middleware.GetAPIKeyFromContext(c)
 	if !ok || apiKey == nil {
-		googleError(c, http.StatusUnauthorized, "Invalid API key")
+		googleError(c, http.StatusUnauthorized, infraerrors.InvalidAPIKey)
 		return
 	}
 	authSubject, ok := middleware.GetAuthSubjectFromContext(c)
 	if !ok {
-		googleError(c, http.StatusInternalServerError, "User context not found")
+		googleError(c, http.StatusInternalServerError, infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -332,11 +332,11 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			googleError(c, http.StatusRequestEntityTooLarge, buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		googleError(c, http.StatusBadRequest, "Failed to read request body")
+		googleError(c, http.StatusBadRequest, infraerrors.RequestBodyReadFailed)
 		return
 	}
 	if len(body) == 0 {
-		googleError(c, http.StatusBadRequest, "Request body is empty")
+		googleError(c, http.StatusBadRequest, infraerrors.RequestBodyEmpty)
 		return
 	}
 

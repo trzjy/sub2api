@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
@@ -67,7 +68,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	// 1. Parse minimal fields needed for routing/billing
 	originalModel := gjson.GetBytes(body, "model").String()
 	if originalModel == "" {
-		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 	clientStream := gjson.GetBytes(body, "stream").Bool()

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 type CompositeRouteResolver struct {
@@ -77,7 +79,7 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 		Endpoint:    endpoint,
 	}
 	if model == "" {
-		decision.Reason = "model is required"
+		decision.Reason = infraerrors.ModelRequired
 		return decision, nil
 	}
 

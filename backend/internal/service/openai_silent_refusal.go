@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -15,7 +16,7 @@ const (
 	openAISilentRefusalMinRequestBodyBytes = 64 * 1024
 	openAISilentRefusalErrorCode           = "openai_silent_refusal"
 	openAISilentRefusalUpstreamMessage     = "OpenAI upstream returned an empty completion stream with finish_reason=stop and no usage"
-	openAISilentRefusalClientMessage       = "Upstream returned an empty completion without usage; no fallback account was available"
+	openAISilentRefusalClientMessage       = infraerrors.UpstreamEmptyCompletion
 	openAIResponsesEmptyCompletedMessage   = "OpenAI upstream returned an empty response.completed stream with no output and no usage"
 )
 

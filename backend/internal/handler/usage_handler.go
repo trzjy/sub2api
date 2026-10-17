@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
@@ -688,7 +689,7 @@ func (h *UsageHandler) GetMyAPIKeyDailyUsage(c *gin.Context) {
 
 	days, ok := parseAPIKeyDailyUsageDays(c.DefaultQuery("days", ""))
 	if !ok {
-		response.BadRequest(c, "Invalid days, allowed range is 1-90")
+		response.BadRequest(c, infraerrors.InvalidDaysRange)
 		return
 	}
 

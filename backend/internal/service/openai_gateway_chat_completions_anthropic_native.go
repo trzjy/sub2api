@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
@@ -46,12 +47,12 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 	// 1. Parse Chat Completions request
 	var ccReq apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &ccReq); err != nil {
-		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return nil, fmt.Errorf("parse chat completions request: %w", err)
 	}
 	originalModel := ccReq.Model
 	if strings.TrimSpace(originalModel) == "" {
-		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return nil, fmt.Errorf("missing model in request")
 	}
 	clientStream := ccReq.Stream
@@ -189,7 +190,7 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 			zap.String("request_id", requestID),
 			zap.Duration("interval", streamInterval),
 		)
-		writeChatCompletionsError(c, http.StatusBadGateway, "server_error", "Upstream stream data interval timeout")
+		writeChatCompletionsError(c, http.StatusBadGateway, "server_error", infraerrors.UpstreamStreamIntervalTimeout)
 		return nil, fmt.Errorf("stream data interval timeout")
 	}
 

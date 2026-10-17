@@ -43,7 +43,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// 解析 Claude 请求
 	var claudeReq antigravity.ClaudeRequest
 	if err := json.Unmarshal(body, &claudeReq); err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request body")
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.InvalidRequestBody)
 	}
 	if strings.TrimSpace(claudeReq.Model) == "" {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Missing model")
@@ -96,7 +96,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	// 转换 Claude 请求为 Gemini 格式
 	geminiBody, err := antigravity.TransformClaudeToGeminiWithOptions(&claudeReq, projectID, mappedModel, transformOpts)
 	if err != nil {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
+		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", infraerrors.InvalidRequest)
 	}
 
 	// Antigravity 上游只支持流式请求，统一使用 streamGenerateContent
@@ -132,7 +132,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		}
 		// 区分客户端取消和真正的上游失败，返回更准确的错误消息
 		if c.Request.Context().Err() != nil {
-			return nil, s.writeClaudeError(c, antigravityStatusClientClosed, "client_disconnected", "Client disconnected before upstream response")
+			return nil, s.writeClaudeError(c, antigravityStatusClientClosed, "client_disconnected", infraerrors.ClientDisconnectedBeforeResponse)
 		}
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", infraerrors.UpstreamRequestFailed)
 	}

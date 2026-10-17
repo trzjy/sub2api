@@ -27,13 +27,13 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", infraerrors.InvalidAPIKey)
 		return
 	}
 
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "User context not found")
+		h.errorResponse(c, http.StatusInternalServerError, "api_error", infraerrors.UserContextNotFound)
 		return
 	}
 	reqLog := requestLogger(
@@ -53,28 +53,28 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyReadFailed)
 		return
 	}
 	if len(body) == 0 {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyEmpty)
 		return
 	}
 	if !gjson.ValidBytes(body) {
 		logRequestBodyParseFailure(reqLog, body, nil)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.RequestBodyParseFailed)
 		return
 	}
 
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || strings.TrimSpace(modelResult.String()) == "" {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelRequired)
 		return
 	}
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel, h.coreGatewayService)
 	if !compositeTargetPlatformAllowed(c, apiKey, reqModel, h.coreGatewayService, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", infraerrors.ModelNotSupportedByComposite)
 		return
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel))
@@ -234,15 +234,15 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 					)
 					return
 				}
-			h.gatewayService.RecordOpenAIAccountSwitch()
-			failedAccountIDs[account.ID] = struct{}{}
-			lastFailoverErr = failoverErr
-			switchCount++
-			reqLog.Warn("openai_embeddings.upstream_failover_switching",
-				zap.Int64("account_id", account.ID),
-				zap.Int("upstream_status", failoverErr.StatusCode),
-				zap.Int("switch_count", switchCount),
-			)
+				h.gatewayService.RecordOpenAIAccountSwitch()
+				failedAccountIDs[account.ID] = struct{}{}
+				lastFailoverErr = failoverErr
+				switchCount++
+				reqLog.Warn("openai_embeddings.upstream_failover_switching",
+					zap.Int64("account_id", account.ID),
+					zap.Int("upstream_status", failoverErr.StatusCode),
+					zap.Int("switch_count", switchCount),
+				)
 				continue
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, result), false, nil, err)

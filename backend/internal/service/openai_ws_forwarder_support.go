@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -135,7 +136,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw, prewarmModel)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
-				errMsg = "OpenAI websocket prewarm error"
+				errMsg = infraerrors.UpstreamWebSocketPrewarmFailed
 			}
 			fallbackReason, canFallback := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
 			errCode, errType, errMessage := summarizeOpenAIWSErrorEventFieldsFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)

@@ -751,7 +751,7 @@ func (s *AntigravityGatewayService) writeMappedClaudeError(c *gin.Context, accou
 	case 400:
 		statusCode = http.StatusBadRequest
 		errType = "invalid_request_error"
-		errMsg = getPassthroughOrDefault(upstreamMsg, "Invalid request")
+		errMsg = getPassthroughOrDefault(upstreamMsg, infraerrors.InvalidRequest)
 	case 401:
 		statusCode = http.StatusBadGateway
 		errType = "authentication_error"
@@ -1005,13 +1005,13 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 			return nil, err
 		}
 
-		errMsg := "Failed to parse upstream response"
+		errMsg := infraerrors.UpstreamResponseParseFailed
 		errType := "upstream_error"
 		if strings.Contains(err.Error(), "stream data interval timeout") {
-			errMsg = "Upstream stream data interval timeout"
+			errMsg = infraerrors.UpstreamStreamIntervalTimeout
 			errType = "upstream_timeout"
 		} else if errors.Is(err, bufio.ErrTooLong) {
-			errMsg = "Upstream response line too long"
+			errMsg = infraerrors.UpstreamResponseLineTooLong
 			errType = "response_too_large"
 		}
 

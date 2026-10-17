@@ -2342,7 +2342,8 @@ func isOpsClientAuthError(code string, msg string) bool {
 		strings.Contains(msg, "user account is not active") ||
 		strings.Contains(msg, "api key 所属分组已删除") ||
 		strings.Contains(msg, "api key 所属分组已停用") ||
-		strings.Contains(msg, "api key is not assigned to any group")
+		strings.Contains(msg, "api key is not assigned to any group") ||
+		strings.Contains(msg, infraerrors.InvalidAPIKey)
 }
 
 func isOpsLocalBusinessLimitError(code string, msg string) bool {
@@ -2383,9 +2384,11 @@ func isOpsLocalBusinessLimitError(code string, msg string) bool {
 		strings.Contains(msg, "this group is restricted to claude code clients") ||
 		strings.Contains(msg, "this group does not allow /v1/messages dispatch") ||
 		strings.Contains(msg, "image generation is not enabled for this group") ||
+		strings.Contains(msg, infraerrors.ImageGenerationNotEnabled) ||
 		(strings.Contains(msg, "reasoning effort") && strings.Contains(msg, "exceeds this group's limit")) ||
 		strings.Contains(msg, "token counting is not supported for this platform") ||
 		strings.Contains(msg, "images api is not supported for this platform") ||
+		strings.Contains(msg, infraerrors.ImagesAPINotSupported) ||
 		(strings.Contains(msg, "model ") && strings.Contains(msg, " not in whitelist")) ||
 		(strings.Contains(msg, "beta feature ") && strings.Contains(msg, " is not allowed")) ||
 		(strings.Contains(msg, "openai service_tier=") && strings.Contains(msg, " is not allowed for model")) ||
@@ -2440,7 +2443,9 @@ func isOpsNoAvailableAccountMessage(message string) bool {
 		strings.Contains(msg, "no available account") ||
 		strings.Contains(msg, "no available gemini accounts") ||
 		strings.Contains(msg, "no available openai accounts") ||
-		strings.Contains(msg, "no available compatible accounts")
+		strings.Contains(msg, "no available compatible accounts") ||
+		// 上游 body 中文化后，账号池耗尽文案走中文常量匹配（对原始 message，避免 ToLower 干扰）。
+		strings.Contains(message, infraerrors.NoAvailableAccounts)
 }
 
 func classifyOpsErrorOwner(phase string, message string) string {

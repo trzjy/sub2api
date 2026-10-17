@@ -1338,7 +1338,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		reason := "websocket request canceled"
 		if errors.Is(cause, ErrOpenAIWSIngressLeaseLost) {
 			status = coderws.StatusTryAgainLater
-			reason = "websocket ingress capacity lease lost; please reconnect"
+			reason = infraerrors.WSIngressCapacityLost
 		}
 		_ = clientConn.Close(status, reason)
 		_ = clientConn.CloseNow()

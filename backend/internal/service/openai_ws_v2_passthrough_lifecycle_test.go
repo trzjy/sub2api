@@ -590,7 +590,7 @@ func TestPassthroughLifecycle_LeaseLossSendsRetryClose(t *testing.T) {
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusTryAgainLater, closeErr.Code)
-	require.Equal(t, "websocket ingress capacity lease lost; please reconnect", closeErr.Reason)
+	require.Equal(t, "网关接入容量租约已失效，请重新连接", closeErr.Reason)
 	select {
 	case <-serverErr:
 	case <-time.After(3 * time.Second):

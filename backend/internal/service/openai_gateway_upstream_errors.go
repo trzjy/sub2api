@@ -315,7 +315,7 @@ func IsOpenAICompatibleModelNotFound400(respBody []byte) bool {
 
 // OpenAIRequestBodyTooLargeClientMessage is the fixed downstream message used
 // after all account-specific request body limit failovers are exhausted.
-const OpenAIRequestBodyTooLargeClientMessage = "Request payload is too large"
+const OpenAIRequestBodyTooLargeClientMessage = infraerrors.UpstreamPayloadTooLarge
 
 const openAIRequestBodyTooLargeReason = GatewayFailureReason("openai_request_body_too_large")
 
@@ -403,7 +403,7 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 }
 
 const (
-	openAIUpstreamAccessUnavailableClientMessage = "Upstream access is temporarily unavailable, please retry later"
+	openAIUpstreamAccessUnavailableClientMessage = infraerrors.UpstreamAccessUnavailable
 	// OpenAIUpstreamAccessStateReason marks a provider credential whose
 	// account, workspace, or organization is unavailable.
 	OpenAIUpstreamAccessStateReason = GatewayFailureReason("openai_upstream_access_state")
@@ -977,7 +977,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		setOpsUpstreamError(c, resp.StatusCode, cyberMsg, truncateString(string(body), 2048))
 		clientMsg := cyberMsg
 		if clientMsg == "" {
-			clientMsg = "Request blocked by upstream cyber-security policy"
+			clientMsg = infraerrors.UpstreamCyberPolicyBlocked
 		}
 		writeError(c, resp.StatusCode, "invalid_request_error", clientMsg)
 		if cyberMsg == "" {

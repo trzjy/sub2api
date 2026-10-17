@@ -153,7 +153,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(reqModel, body); rejectReason != "" {
-			rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
+			rejectMsg := infraerrors.CodexInstructionsRequired
 			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
 			logOpenAIPassthroughInstructionsRejected(ctx, c, account, reqModel, rejectReason, body)
 			c.JSON(http.StatusForbidden, gin.H{
@@ -2402,7 +2402,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
 		msg := extractOpenAISSEErrorMessage(terminalPayload)
 		if msg == "" {
-			msg = "Upstream compact response failed"
+			msg = infraerrors.UpstreamCompactResponseFailed
 		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr

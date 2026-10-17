@@ -1893,7 +1893,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
 		msg := extractOpenAISSEErrorMessage(terminalPayload)
 		if msg == "" {
-			msg = "Upstream compact response failed"
+			msg = infraerrors.UpstreamCompactResponseFailed
 		}
 		// QK-S2: scrub the client-visible terminal failure message for masked
 		// accounts so no upstream model identity or tokenharbor trace leaks.

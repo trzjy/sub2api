@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -453,16 +454,16 @@ func (s *OpenAIGatewayService) forwardResponsesViaCodeBuddy(
 ) (*OpenAIForwardResult, error) {
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &responsesReq); err != nil {
-		setOpsUpstreamError(c, http.StatusBadRequest, "Failed to parse request body", "")
+		setOpsUpstreamError(c, http.StatusBadRequest, infraerrors.RequestBodyParseFailed, "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"type": "invalid_request_error", "message": "Failed to parse request body",
+			"type": "invalid_request_error", "message": infraerrors.RequestBodyParseFailed,
 		}})
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
 	if strings.TrimSpace(responsesReq.Model) == "" {
-		setOpsUpstreamError(c, http.StatusBadRequest, "model is required", "")
+		setOpsUpstreamError(c, http.StatusBadRequest, infraerrors.ModelRequired, "")
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"type": "invalid_request_error", "message": "model is required",
+			"type": "invalid_request_error", "message": infraerrors.ModelRequired,
 		}})
 		return nil, fmt.Errorf("missing model in request")
 	}

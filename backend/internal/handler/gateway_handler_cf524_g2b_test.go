@@ -132,7 +132,7 @@ func TestCF524G2b_InstallPoint_AuthFailure_NoInstallNoSideEffects(t *testing.T) 
 	h.Messages(c)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	require.JSONEq(t, `{"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}`, rec.Body.String())
+	require.JSONEq(t, `{"type":"error","error":{"type":"authentication_error","message":"无效的 API 密钥"}}`, rec.Body.String())
 	require.NotContains(t, rec.Body.String(), "keep-alive", "认证失败不得因安装点产生任何 SSE/心跳写出")
 
 	_, hasSnapshot := service.RequestBudgetSnapshotFromContext(c.Request.Context())

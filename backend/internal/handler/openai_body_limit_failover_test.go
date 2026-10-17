@@ -3,11 +3,13 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -27,7 +29,7 @@ func TestOpenAIBodyLimitFailoverExhausted_ReturnsRedactedJSON413(t *testing.T) {
 	errBody, ok := envelope["error"].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "invalid_request_error", errBody["type"])
-	require.Equal(t, "Request payload is too large", errBody["message"])
+	require.Equal(t, infraerrors.UpstreamPayloadTooLarge, errBody["message"])
 	require.NotContains(t, rec.Body.String(), "must-not-leak")
 }
 
@@ -42,7 +44,7 @@ func TestOpenAIBodyLimitFailoverExhausted_ReturnsRedactedResponsesSSE(t *testing
 	body := rec.Body.String()
 	require.True(t, strings.HasPrefix(body, "event: response.failed\n"))
 	require.Contains(t, body, `"code":"invalid_request"`)
-	require.Contains(t, body, `"message":"Request payload is too large"`)
+	require.Contains(t, body, fmt.Sprintf(`"message":"%s"`, infraerrors.UpstreamPayloadTooLarge))
 	require.NotContains(t, body, "must-not-leak")
 }
 
