@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
 // PlazaOfficialPricing 模型广场展示用的官方参考价（USD per token），与计费同源：
@@ -132,6 +134,10 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 	order := make([]int64, 0, len(groups))
 	for i := range groups {
 		g := &groups[i]
+		// F2：内部供给平台分组整组不出现在广场（谓词为唯一判定来源）。
+		if domain.IsInternalSupplyPlatform(g.Platform) {
+			continue
+		}
 		byGroup[g.ID] = &PlazaGroup{
 			ID:                        g.ID,
 			Name:                      g.Name,
@@ -182,13 +188,21 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			for j := range supported {
 				m := supported[j]
 				if pg.Platform == PlatformComposite {
-					if !isConcreteRequestPlatform(m.Platform) {
+					// F3：内部供给平台模型保留（其供给方归一为 composite），
+					// 其余非具体请求平台模型按既有逻辑跳过。
+					if !domain.IsInternalSupplyPlatform(m.Platform) && !isConcreteRequestPlatform(m.Platform) {
 						continue
 					}
 				} else if m.Platform != pg.Platform {
 					continue
 				}
-				key := modelKey{platform: m.Platform, name: m.Name}
+				// composite 内命内部供给谓词的模型，供给方归一为 composite 常量，
+				// 避免向用户暴露真实上游平台（用户侧徽章显示 Composite）。
+				displayPlatform := m.Platform
+				if pg.Platform == PlatformComposite && domain.IsInternalSupplyPlatform(m.Platform) {
+					displayPlatform = PlatformComposite
+				}
+				key := modelKey{platform: displayPlatform, name: m.Name}
 				if at, seen := idx[key]; seen {
 					// 先见者胜；仅当已存条目无定价而新条目有定价时升级。
 					if pg.Models[at].Pricing == nil && m.Pricing != nil {
@@ -199,7 +213,7 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 				idx[key] = len(pg.Models)
 				pg.Models = append(pg.Models, PlazaModel{
 					Name:     m.Name,
-					Platform: m.Platform,
+					Platform: displayPlatform,
 					Pricing:  m.Pricing,
 				})
 			}

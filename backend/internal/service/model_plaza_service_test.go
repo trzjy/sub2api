@@ -509,3 +509,89 @@ func TestListGroups_TimePricingPassthrough(t *testing.T) {
 	// 展示单价为标准时段价
 	require.InDelta(t, 0.28e-6, *m.Pricing.InputPrice, 1e-15)
 }
+
+func TestListPlazaGroups_InternalSupplyGroupsSkipped(t *testing.T) {
+	// 负向：platform=codebuddy/muse/cursor 的分组（带模型）整组不出现在广场；
+	// 普通分组（anthropic）不受影响。
+	channels := []Channel{
+		plazaPricedChannel(1, "cb", []int64{10}, PlatformCodeBuddy, "cb-model"),
+		plazaPricedChannel(2, "muse", []int64{20}, PlatformMuse, "muse-model"),
+		plazaPricedChannel(3, "cursor", []int64{30}, PlatformCursor, "cursor-model"),
+		plazaPricedChannel(4, "anthropic", []int64{40}, PlatformAnthropic, "claude-sonnet"),
+	}
+	groups := []Group{
+		{ID: 10, Name: "g-codebuddy", Platform: PlatformCodeBuddy, RateMultiplier: 1},
+		{ID: 20, Name: "g-muse", Platform: PlatformMuse, RateMultiplier: 1},
+		{ID: 30, Name: "g-cursor", Platform: PlatformCursor, RateMultiplier: 1},
+		{ID: 40, Name: "g-anthropic", Platform: PlatformAnthropic, RateMultiplier: 1},
+	}
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1, "仅 anthropic 分组应出现，三个内部供给分组整组被过滤")
+	require.Equal(t, "g-anthropic", out[0].Name)
+	require.Len(t, out[0].Models, 1)
+}
+
+func TestListPlazaGroups_CompositeKeepsInternalSupplyModelsNormalized(t *testing.T) {
+	// F3 正向：composite 分组内 platform=codebuddy/muse/cursor 的模型仍出现，
+	// 且输出 PlazaModel.Platform 归一为 composite。
+	channels := []Channel{
+		plazaPricedChannel(1, "cb", []int64{10}, PlatformCodeBuddy, "cb-model"),
+		plazaPricedChannel(2, "muse", []int64{10}, PlatformMuse, "muse-model"),
+		plazaPricedChannel(3, "cursor", []int64{10}, PlatformCursor, "cursor-model"),
+	}
+	groups := []Group{{ID: 10, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 3, "三个内部供给平台模型都应保留（原 codebuddy 走 isConcreteRequestPlatform 被过滤，F3 后保留）")
+	byName := map[string]PlazaModel{}
+	for _, m := range out[0].Models {
+		byName[m.Name] = m
+	}
+	for _, name := range []string{"cb-model", "muse-model", "cursor-model"} {
+		require.Equal(t, PlatformComposite, byName[name].Platform, "内部供给模型 Platform 应归一为 composite: "+name)
+	}
+}
+
+func TestListPlazaGroups_CompositeOrdinaryPlatformModelsUnchanged(t *testing.T) {
+	// F3 正向：composite 分组内普通平台（deepseek/openai）模型 Platform 不变。
+	ch := Channel{
+		ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{10},
+		ModelPricing: []ChannelModelPricing{
+			{Platform: PlatformDeepseek, Models: []string{"deepseek-chat"}, InputPrice: testPtrFloat64(0.28e-6)},
+			{Platform: PlatformOpenAI, Models: []string{"gpt-5"}, InputPrice: testPtrFloat64(2e-6)},
+		},
+	}
+	groups := []Group{{ID: 10, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1}}
+
+	out, err := newPlazaService([]Channel{ch}, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 2)
+	byName := map[string]PlazaModel{}
+	for _, m := range out[0].Models {
+		byName[m.Name] = m
+	}
+	require.Equal(t, PlatformDeepseek, byName["deepseek-chat"].Platform, "普通平台 Platform 不变")
+	require.Equal(t, PlatformOpenAI, byName["gpt-5"].Platform, "普通平台 Platform 不变")
+}
+
+func TestListPlazaGroups_OrdinaryGroupUnaffected(t *testing.T) {
+	// F3 正向：非 composite 的普通平台分组（anthropic）行为不变（F2 不误伤）。
+	ch := plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "claude-sonnet", "claude-opus")
+	groups := []Group{{ID: 10, Name: "g-anthropic", Platform: PlatformAnthropic, RateMultiplier: 1}}
+
+	out, err := newPlazaService([]Channel{ch}, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, "g-anthropic", out[0].Name)
+	require.Len(t, out[0].Models, 2)
+	for _, m := range out[0].Models {
+		require.Equal(t, PlatformAnthropic, m.Platform)
+	}
+}
