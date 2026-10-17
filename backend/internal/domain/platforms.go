@@ -158,3 +158,14 @@ func IsCNProviderPlatform(id string) bool {
 	spec, ok := LookupPlatform(id)
 	return ok && spec.CNProvider
 }
+
+// IsInternalSupplyPlatform 报告平台是否为内部上游供给平台。内部供给平台不出现在
+// 用户可见分组、模型广场、可用渠道、订阅购买和订阅展示（2026-10-18 用户裁定），
+// 但管理端账号管理继续识别和管理它们；调度、快照与出站能力不受影响。
+func IsInternalSupplyPlatform(id string) bool {
+	switch id {
+	case PlatformCodeBuddy, PlatformMuse, PlatformCursor:
+		return true
+	}
+	return false
+}
