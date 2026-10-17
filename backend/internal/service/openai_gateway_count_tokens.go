@@ -265,7 +265,10 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 		return fmt.Errorf("count_tokens: missing account")
 	}
 
-	// 多协议 API Key 供应商（国产厂商与聚合平台，全部协议，含 anthropic）：一律本地估算，不发上游请求。
+	// CodeBuddy 账号与多协议 API Key 供应商（国产厂商与聚合平台，全部协议，含
+	// anthropic）：一律本地估算，不发上游请求。CodeBuddy OAuth 的 token issuer
+	// 不匹配 OpenAI /v1/responses/input_tokens；把该请求送到 OpenAI 端点会稳定返回
+	// 401，并将 count_tokens 的探测错误带入账号健康处置。
 	// 依据（2026-08 核实）：三家的 Anthropic 兼容层均未提供
 	// /v1/messages/count_tokens——DeepSeek 官方 anthropic_api 文档无此端点
 	// （且注明 anthropic-version 头被忽略），聚合网关 OpenModel 明确标注
@@ -273,7 +276,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 	// 只会常态 404，且错误还会流入账号处置逻辑误伤整账号调度；Claude Code
 	// 高频调用此端点，本地 tiktoken 估算是与 Grok 一致的既有方案。
 	// other 同为无原生 anthropic count_tokens 端点的自定义上游，一并本地估算。
-	if account.IsMultiProtocolAPIKey() || account.Platform == PlatformOther {
+	if account.Platform == PlatformCodeBuddy || account.IsMultiProtocolAPIKey() || account.Platform == PlatformOther {
 		estimated, err := estimateAnthropicCountTokensLocally(body)
 		if err != nil {
 			writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")

@@ -87,6 +87,49 @@ func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_APIKeyUsesResponsesI
 	require.False(t, gjson.GetBytes(upstream.lastBody, "messages").Exists())
 }
 
+func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_CodeBuddyOAuthUsesLocalEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := []byte(`{"model":"space-bunny","messages":[{"role":"user","content":"hello"}]}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"issuer mismatch"}}`)),
+	}}
+	repo := &countTokensRuntimeStateRepo{}
+	svc := &OpenAIGatewayService{
+		cfg:              &config.Config{},
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{accountRepo: repo, cfg: &config.Config{}},
+	}
+	account := &Account{
+		ID:          258,
+		Name:        "space-bunny-codebuddy",
+		Platform:    PlatformCodeBuddy,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{"access_token": "codebuddy-token"},
+		Status:      StatusActive,
+		Schedulable: true,
+	}
+
+	expectedEstimate, err := estimateAnthropicCountTokensLocally(body)
+	require.NoError(t, err)
+
+	err = svc.ForwardCountTokensAsAnthropic(context.Background(), c, account, body, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"input_tokens":`+strconv.Itoa(expectedEstimate)+`}`, rec.Body.String())
+	require.Empty(t, upstream.requests, "CodeBuddy count_tokens must not call the OpenAI upstream")
+	require.Zero(t, repo.tempUnschedCalls, "local count_tokens must not temp-unschedule CodeBuddy accounts")
+	require.Zero(t, repo.setErrorCalls, "local count_tokens must not mark CodeBuddy accounts in error")
+}
+
 func TestOpenAIGatewayService_ForwardCountTokensAsAnthropic_OAuthFallsBackWhenPlatformEndpointUnsupported(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
