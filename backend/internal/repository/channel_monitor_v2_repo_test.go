@@ -566,10 +566,10 @@ func TestChannelMonitorV2GetProbeStatesReadsCatalogTriples(t *testing.T) {
 		WithArgs("openai", "gpt-5", int64(1), "anthropic", "claude", int64(2)).
 		WillReturnRows(
 			sqlmock.NewRows([]string{
-				"platform", "model", "group_id", "last_probe_at", "last_ok", "last_detail", "last_account_id", "next_due",
+				"platform", "model", "group_id", "last_probe_at", "last_ok", "last_detail", "last_account_id", "next_due", "first_token_ms", "total_ms",
 			}).
-				AddRow("openai", "gpt-5", int64(1), now, true, "ok status=200", int64(11), now.Add(30*time.Minute)).
-				AddRow("anthropic", "claude", int64(2), now, false, "upstream status=503", int64(22), now.Add(2*time.Hour)),
+				AddRow("openai", "gpt-5", int64(1), now, true, "ok status=200", int64(11), now.Add(30*time.Minute), int64(2745), int64(5800)).
+				AddRow("anthropic", "claude", int64(2), now, false, "upstream status=503", int64(22), now.Add(2*time.Hour), nil, nil),
 		)
 
 	states, err := repo.GetProbeStates(context.Background(), keys)
@@ -582,10 +582,16 @@ func TestChannelMonitorV2GetProbeStatesReadsCatalogTriples(t *testing.T) {
 	require.True(t, ok.LastOK)
 	require.Equal(t, "ok status=200", ok.LastDetail)
 	require.Equal(t, int64(11), ok.LastAccountID)
+	require.NotNil(t, ok.FirstTokenMs)
+	require.Equal(t, 2745, *ok.FirstTokenMs)
+	require.NotNil(t, ok.TotalMs)
+	require.Equal(t, 5800, *ok.TotalMs)
 	fail := states[keys[1]]
 	require.NotNil(t, fail)
 	require.False(t, fail.LastOK)
 	require.Equal(t, int64(22), fail.LastAccountID)
+	require.Nil(t, fail.FirstTokenMs)
+	require.Nil(t, fail.TotalMs)
 }
 
 func TestChannelMonitorV2GetProbeStatesEmptyKeysNoQuery(t *testing.T) {

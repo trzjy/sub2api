@@ -1081,7 +1081,7 @@ func (r *channelMonitorV2Repository) GetProbeStates(ctx context.Context, keys []
 		args = append(args, keys[i].Platform, keys[i].Model, keys[i].GroupID)
 		parts = append(parts, fmt.Sprintf("($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3))
 	}
-	q := `SELECT platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due
+	q := `SELECT platform, model, group_id, last_probe_at, last_ok, last_detail, last_account_id, next_due, first_token_ms, total_ms
 		FROM channel_monitor_probe_state WHERE (platform, model, group_id) IN (` + strings.Join(parts, ",") + `)`
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -1093,8 +1093,8 @@ func (r *channelMonitorV2Repository) GetProbeStates(ctx context.Context, keys []
 		var lastProbeAt, nextDue sql.NullTime
 		var lastOK sql.NullBool
 		var lastDetail sql.NullString
-		var lastAccountID sql.NullInt64
-		if err := rows.Scan(&st.Platform, &st.Model, &st.GroupID, &lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue); err != nil {
+		var lastAccountID, firstTokenMs, totalMs sql.NullInt64
+		if err := rows.Scan(&st.Platform, &st.Model, &st.GroupID, &lastProbeAt, &lastOK, &lastDetail, &lastAccountID, &nextDue, &firstTokenMs, &totalMs); err != nil {
 			return nil, err
 		}
 		if lastProbeAt.Valid {
@@ -1111,6 +1111,14 @@ func (r *channelMonitorV2Repository) GetProbeStates(ctx context.Context, keys []
 		}
 		if nextDue.Valid {
 			st.NextDue = nextDue.Time.UTC()
+		}
+		if firstTokenMs.Valid {
+			v := int(firstTokenMs.Int64)
+			st.FirstTokenMs = &v
+		}
+		if totalMs.Valid {
+			v := int(totalMs.Int64)
+			st.TotalMs = &v
 		}
 		out[service.ChannelMonitorCatalogKey{Platform: st.Platform, Model: st.Model, GroupID: st.GroupID}] = &st
 	}
