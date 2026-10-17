@@ -64,3 +64,100 @@ func TestSchedulerCacheSnapshotPreservesMaskUpstreamIdentity(t *testing.T) {
 	require.Equal(t, map[string]string{"kimi-k3": "kimi-k3-upstream"}, got[0].GetModelMapping(),
 		"快照投影必须保留 model_mapping（选号/门控均依赖）")
 }
+
+func TestSchedulerCacheSnapshotPreservesUpstreamModelMetadata(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newSchedulerCacheUnitWithRedis(t)
+	bucket := service.SchedulerBucket{
+		GroupID:  53,
+		Platform: "kimi@agg1",
+		Mode:     service.SchedulerModeSingle,
+	}
+
+	account := service.Account{
+		ID:          242,
+		Platform:    service.PlatformCodeBuddy,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Credentials: map[string]any{"model_mapping": map[string]any{"kimi-k3": "hy3"}},
+	}
+	account.SetUpstreamModelMetadataSnapshot(service.UpstreamModelMetadataSnapshot{
+		Source: "account",
+		Models: map[string]service.UpstreamModelMetadata{"hy3": {ID: "hy3"}},
+	})
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{account}))
+
+	got, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, got, 1)
+	snapshot := got[0].GetUpstreamModelMetadataSnapshot()
+	require.NotNil(t, snapshot, "scheduler metadata projection must retain the upstream catalog used by HY3 eligibility")
+	require.Equal(t, map[string]service.UpstreamModelMetadata{"hy3": {ID: "hy3"}}, snapshot.Models)
+}
+
+func TestSchedulerCacheSetAccountRefreshesUpstreamModelMetadataProjection(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newSchedulerCacheUnitWithRedis(t)
+	bucket := service.SchedulerBucket{
+		GroupID:  54,
+		Platform: "kimi@agg1",
+		Mode:     service.SchedulerModeSingle,
+	}
+
+	account := service.Account{
+		ID:          243,
+		Platform:    service.PlatformCodeBuddy,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+	}
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{account}))
+
+	account.SetUpstreamModelMetadataSnapshot(service.UpstreamModelMetadataSnapshot{
+		Source: "account",
+		Models: map[string]service.UpstreamModelMetadata{"hy3": {ID: "hy3"}},
+	})
+	require.NoError(t, cache.SetAccount(ctx, &account))
+
+	got, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, got, 1)
+	snapshot := got[0].GetUpstreamModelMetadataSnapshot()
+	require.NotNil(t, snapshot, "SetAccount refresh must update the same metadata projection consumed by directory eligibility")
+	require.Contains(t, snapshot.Models, "hy3")
+}
+
+func TestSchedulerCacheSnapshotDoesNotInventUpstreamModelMetadata(t *testing.T) {
+	ctx := context.Background()
+	cache, _ := newSchedulerCacheUnitWithRedis(t)
+	bucket := service.SchedulerBucket{
+		GroupID:  55,
+		Platform: "kimi@agg1",
+		Mode:     service.SchedulerModeSingle,
+	}
+
+	accounts := []service.Account{
+		{ID: 244, Platform: service.PlatformCodeBuddy, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1},
+		{ID: 245, Platform: service.PlatformCodeBuddy, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1,
+			Extra: map[string]any{service.UpstreamModelMetadataExtraKey: map[string]any{"source": "account", "models": map[string]any{}}}},
+	}
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, accounts))
+
+	got, hit, err := cache.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Len(t, got, 2)
+	require.Nil(t, got[0].GetUpstreamModelMetadataSnapshot(), "missing catalog remains missing")
+	require.Nil(t, got[1].GetUpstreamModelMetadataSnapshot(), "empty catalog remains unusable")
+}

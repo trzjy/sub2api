@@ -1035,6 +1035,10 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 伪装线池是否可用。裁掉它，快照解码出的账号丢失伪装标记 → 门控恒判门关，
 		// 表现为"门在生产零次开启、kimi-k3 小请求全落未伪装号"（OC-T1-FIX3 根因）。
 		"mask_upstream_identity",
+		// HY3 legacy eligibility rechecks the mapped model against this existing
+		// account catalog snapshot. Dropping it makes a valid masked account fail
+		// closed after scheduler snapshot projection.
+		service.UpstreamModelMetadataExtraKey,
 		"codex_fingerprint_mode",
 		"codex_fingerprint_seed",
 		"codex_5h_used_percent",
