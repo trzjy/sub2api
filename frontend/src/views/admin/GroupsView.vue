@@ -518,7 +518,7 @@
           }}</label>
           <Select
             v-model="createForm.platform"
-            :options="platformOptions"
+            :options="creatablePlatformOptions"
             data-tour="group-form-platform"
             @change="createForm.copy_accounts_from_group_ids = []"
           />
@@ -4593,6 +4593,7 @@ import type {
 } from "@/types";
 import {
   COMPOSITE_TARGET_PLATFORM_OPTIONS,
+  GROUP_PLATFORM_CREATABLE_OPTIONS,
   GROUP_PLATFORM_OPTIONS,
 } from "@/constants/platforms";
 import type { Column } from "@/components/common/types";
@@ -4923,6 +4924,14 @@ const exclusiveOptions = computed(() => [
 
 const platformOptions = computed(() =>
   GROUP_PLATFORM_OPTIONS.filter(
+    (option) => !authStore.isSimpleMode || option.value !== "composite",
+  ),
+);
+
+// 创建分组选择器：剔除内部供给平台（codebuddy/muse/cursor），不得新增内部供给分组入口。
+// 编辑弹窗的 platformOptions 保持全量（禁用态需渲染既有值），此处单列供创建弹窗使用。
+const creatablePlatformOptions = computed(() =>
+  GROUP_PLATFORM_CREATABLE_OPTIONS.filter(
     (option) => !authStore.isSimpleMode || option.value !== "composite",
   ),
 );

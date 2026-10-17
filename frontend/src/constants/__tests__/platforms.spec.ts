@@ -2,14 +2,17 @@ import { describe, expect, it } from 'vitest'
 import {
   COMPOSITE_TARGET_PLATFORM_OPTIONS,
   CONCRETE_PLATFORM_OPTIONS,
+  GROUP_PLATFORM_CREATABLE_OPTIONS,
   GROUP_PLATFORM_OPTIONS,
+  INTERNAL_SUPPLY_PLATFORMS,
+  PLAZA_PLATFORM_ORDER,
   filterUpstreamModelsByPlatform,
   modelMatchesPlatform,
 } from '@/constants/platforms'
 import { platformLabel } from '@/utils/platformColors'
 
-// ours 现状：含 other / codebuddy / muse（muse 是自研平台，虽然不在
-// service.AllowedQuotaPlatforms 里，但在选择器清单中，属已知漂移，此处锁定现状）。
+// ours 现状：含 other / codebuddy / muse / cursor（cursor 为内部供给平台，
+// 由上游 D 卡并入 CONCRETE_PLATFORM_OPTIONS；此处补齐锁定现状）。
 const concretePlatforms = [
   'anthropic',
   'openai',
@@ -22,7 +25,8 @@ const concretePlatforms = [
   'other',
   'minimax',
   'codebuddy',
-  'muse'
+  'muse',
+  'cursor'
 ]
 
 describe('platform option catalogs', () => {
@@ -145,5 +149,35 @@ describe('filterUpstreamModelsByPlatform', () => {
     const result = filterUpstreamModelsByPlatform(upstream, [])
     expect(result.filterApplied).toBe(false)
     expect(result.kept).toEqual(upstream)
+  })
+})
+
+describe('D5 内部供给平台收敛', () => {
+  it('INTERNAL_SUPPLY_PLATFORMS 恰为 codebuddy / muse / cursor 三平台', () => {
+    expect(INTERNAL_SUPPLY_PLATFORMS).toEqual(['codebuddy', 'muse', 'cursor'])
+  })
+
+  it('GROUP_PLATFORM_CREATABLE_OPTIONS 剔除内部供给平台,保留 composite 与其余平台', () => {
+    const values = GROUP_PLATFORM_CREATABLE_OPTIONS.map((o) => o.value)
+    expect(values).not.toContain('codebuddy')
+    expect(values).not.toContain('muse')
+    expect(values).not.toContain('cursor')
+    expect(values).toContain('composite')
+    for (const p of concretePlatforms) {
+      if (!['codebuddy', 'muse', 'cursor'].includes(p)) {
+        expect(values).toContain(p)
+      }
+    }
+  })
+
+  it('GROUP_PLATFORM_OPTIONS 仍含三内部平台(管理端筛选器数据源不变)', () => {
+    const values = GROUP_PLATFORM_OPTIONS.map((o) => o.value)
+    expect(values).toContain('codebuddy')
+    expect(values).toContain('muse')
+    expect(values).toContain('cursor')
+  })
+
+  it('PLAZA_PLATFORM_ORDER 不含 muse(后端归一后 composite 分组内模型不再出现 muse)', () => {
+    expect((PLAZA_PLATFORM_ORDER as readonly string[])).not.toContain('muse')
   })
 })
