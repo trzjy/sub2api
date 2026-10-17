@@ -40,22 +40,23 @@ const cf524OpenAICompactKeepaliveKey = "openai_compact_sse_keepalive"
 // 逐字同型）：心跳注释帧非语义写出，不得把心跳已提交字节误判为"流已写出"。
 //
 // 判定采用基线增量**严格相等**：调用方在捕获 writerSizeBeforeForward 的**同时点**捕获
-// 心跳已提交字节基线 hbCommittedBaseline（owner 存在时 CommittedBytes()，否则 0），
-// 本函数只做 `(归一后 size - 归一后 before) == (committed - hbCommittedBaseline)` 比较。
-// owner 不存在 / 自基线零心跳提交时 delta=0，退化与现状判定 `Size()==before` 完全一致
+// 心跳已提交字节基线 hbCommittedBaseline（owner 存在时 CommittedBytes()，否则 0），并在
+// 判定时点捕获当前写出尺寸 currentWrittenSize（口径必须与基线一致：Responses 传
+// compact-adjusted 值，Messages/CC 传原始 writer 尺寸），本函数只做
+// `(归一后 current - 归一后 before) == (committed - hbCommittedBaseline)` 比较。
+// owner 不存在 / 自基线零心跳提交时 delta=0，退化与现状判定 `size==before` 完全一致
 // （同一路径，无第二分支）。
 //
 // G5d 哨兵归一：gin.Size() 的 noWritten 哨兵为 -1，首次 Write/Flush 经 WriteHeaderNow()
 // 把 size 从 -1 翻转为 0 再累加。该翻转发生在捕获点之后、组件快照之外，不对称来源会令
 // 纯心跳在零写出捕获场景被误判为语义写出、错误禁止 failover（第二轮外审 P1 回归）。
-// 故进入判定先把 writerSizeBeforeForward 与实测 size 归一为逻辑尺寸（<0→0），所有比较
-// 用归一值。无心跳分支 `size==before` 结果与现状逐一等价（-1==-1 ⟺ 0==0；-1+S==-1 恒假
-// ⟺ S+0==0 恒假）。
+// 故进入判定先把 before 与 current 归一为逻辑尺寸（<0→0），所有比较用归一值。无心跳
+// 分支 `size==before` 结果与现状逐一等价（-1==-1 ⟺ 0==0；-1+S==-1 恒假 ⟺ S+0==0 恒假）。
 //
 // Responses 路径口径：调用方须先把 OpenAICompactKeepaliveAdjustedWrittenSize(c) 返回值
-// 过同一 normalizeSize(<0→0) 再作为 writerSizeBeforeForward 传入（compact keepalive 字节
-// 与心跳字节两个扣除来源独立、不得合并计数）。本函数自身不感知 compact 标记。
-func cf524OpenAIHeartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward, hbCommittedBaseline int) bool {
+// 过同一 normalizeSize(<0→0) 再作为 before/current 传入（compact keepalive 字节与心跳
+// 字节两个扣除来源独立、不得合并计数）。本函数自身不感知 compact 标记。
+func cf524OpenAIHeartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBeforeForward, currentWrittenSize, hbCommittedBaseline int) bool {
 	if c == nil || c.Writer == nil {
 		return true
 	}
@@ -66,7 +67,7 @@ func cf524OpenAIHeartbeatFailoverGuardStillClean(c *gin.Context, writerSizeBefor
 		}
 		return v
 	}
-	size := normalizeSize(c.Writer.Size())
+	size := normalizeSize(currentWrittenSize)
 	before := normalizeSize(writerSizeBeforeForward)
 	hb, _ := service.UpstreamHeartbeatFromContext(c.Request.Context())
 	if hb == nil {

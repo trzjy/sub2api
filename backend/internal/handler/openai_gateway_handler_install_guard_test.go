@@ -116,7 +116,8 @@ func TestCF524P2C_SnapshotClosureBeforeAccountLoop(t *testing.T) {
 // 与 G5d 归一 0 约定不同源。调用方（Responses :780）先过 cf524NormalizeWrittenSize(<0→0) 再
 // 进入防线比较，使 -1 与 0 在"无语义字节"语义上等价、比较结果不变。compact 字节由
 // OpenAICompactKeepaliveAdjustedWrittenSize 扣除、心跳字节由 CommittedBytes 基线增量扣除，
-// 两个扣除来源各自独立、不得合并计数（Responses 链 compact 与心跳互斥，心跳 owner 不安装）。
+// 两个扣除来源各自独立、不得合并计数（compact 与心跳的互斥只对 compact 请求成立；
+// 普通 Responses 请求由安装 helper 起搏 UpstreamHeartbeat，本次修复已补齐心跳扣除）。
 func TestCF524P2C_CompactAdjustedSentinelNormalization(t *testing.T) {
 	c, _ := newCF524TestContext(t, "/v1/responses")
 
@@ -128,10 +129,10 @@ func TestCF524P2C_CompactAdjustedSentinelNormalization(t *testing.T) {
 	require.Equal(t, 0, cf524NormalizeWrittenSize(0))
 
 	// 基线过归一后进入 cf524OpenAIHeartbeatFailoverGuardStillClean，比较结果不变：
-	// 无心跳 owner（Responses 互斥 → 无 owner）时 -1 与 0 基线判定同为 clean。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, 0),
+	// 无心跳 owner（本用例 context 未安装）时 -1 与 0 基线判定同为 clean。
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, c.Writer.Size(), 0),
 		"-1 基线须判定 clean（与 0 等价）")
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, 0),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), 0),
 		"0 基线须判定 clean（与 -1 等价）")
 }
 
@@ -143,8 +144,8 @@ func TestCF524P2C_ForwardMayFailover_SentinelEquivalence(t *testing.T) {
 
 	// 当前口径 OpenAICompactKeepaliveAdjustedWrittenSize(c) 亦为 -1；双侧归一后 0==0 → 可 failover。
 	// -1 基线与 0 基线结果一致，证明归一不改变判定。
-	require.True(t, openAIForwardMayFailover(c, -1, failoverErr), "-1 基线应与 0 等价 → 可 failover")
-	require.True(t, openAIForwardMayFailover(c, 0, failoverErr), "0 基线应与 -1 等价 → 可 failover")
+	require.True(t, openAIForwardMayFailover(c, -1, 0, failoverErr), "-1 基线应与 0 等价 → 可 failover")
+	require.True(t, openAIForwardMayFailover(c, 0, 0, failoverErr), "0 基线应与 -1 等价 → 可 failover")
 }
 
 // 两扣除来源独立不合并：心跳判定只消费 CommittedBytes 基线增量，不并入任何 compact 扣除
@@ -162,19 +163,19 @@ func TestCF524P2C_GuardHeartbeatDeductionIndependent(t *testing.T) {
 	baseline := int(hb.CommittedBytes())
 	// 仅心跳字节（无语义写出）：writtenDelta == heartbeatDelta → clean。
 	// 该判定只消费心跳 CommittedBytes 增量，不并入 compact 扣除（本链无 compact）。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, baseline),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), baseline),
 		"仅心跳字节：心跳增量独立判定为 clean（不并入 compact 扣除）")
 
 	// 追加语义写出：writtenDelta > heartbeatDelta → 不 clean。
 	_, err := c.Writer.Write([]byte("semantic"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, baseline),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), baseline),
 		"语义写出破坏心跳增量相等 → 不 clean")
 }
 
 // ───────── ⑤ 防线等价回归：非流式/无心跳请求判定与改造前逐一等价 ─────────
 // Messages :1455 改造前为裸 `c.Writer.Size() != writerSizeBeforeForward`；改造后为
-// cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline)
+// cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline)
 // （:1368 同时点捕获 hbCommittedBaseline）。无心跳 owner 时退化 size==before，经 G5d 双侧
 // 归一后与改造前裸判定逐一等价。
 func TestCF524P2C_MessagesGuardEquivalenceNoHeartbeat(t *testing.T) {
@@ -185,7 +186,7 @@ func TestCF524P2C_MessagesGuardEquivalenceNoHeartbeat(t *testing.T) {
 	// 改造后（cf524OpenAIHeartbeatFailoverGuardStillClean，G5d 归一）：0 == 0 → true（clean）
 	// 逐一等价。
 	require.False(t, c.Writer.Size() != -1, "改造前裸判定：无写出应不放弃")
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, 0),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, c.Writer.Size(), 0),
 		"改造后归一判定：无写出应 clean")
 
 	// 写出语义字节后：
@@ -194,6 +195,6 @@ func TestCF524P2C_MessagesGuardEquivalenceNoHeartbeat(t *testing.T) {
 	require.NoError(t, err)
 	written := c.Writer.Size()
 	require.True(t, written != -1, "改造前：有语义写出应放弃")
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, 0),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, -1, c.Writer.Size(), 0),
 		"改造后：有语义写出应不 clean")
 }

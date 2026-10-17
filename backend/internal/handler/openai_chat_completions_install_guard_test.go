@@ -63,14 +63,14 @@ func TestCF524P2B_GuardEquivalence_NoHeartbeat(t *testing.T) {
 	// 未写：clean（true）⟺ 旧判定 Size()==before（不禁止 failover 的反面）。
 	cClean, _ := newCF524TestContext(t, "/v1/chat/completions")
 	require.Equal(t, -1, cClean.Writer.Size(), "前置：零写出须为 gin noWritten 哨兵态")
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cClean, -1, 0),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cClean, -1, cClean.Writer.Size(), 0),
 		"无心跳未写场景须判定 clean（与改造前 Size()==before 等价）")
 
 	// 已写：不 clean（false）⟺ 旧判定 Size()!=before（允许 failover）。
 	cDirty, _ := newCF524TestContext(t, "/v1/chat/completions")
 	_, err := cDirty.Writer.Write([]byte("semantic"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cDirty, -1, 0),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cDirty, -1, cDirty.Writer.Size(), 0),
 		"无心跳已写场景须判定不 clean（与改造前 Size()!=before 等价，允许 failover）")
 }
 
@@ -93,12 +93,12 @@ func TestCF524P2B_GuardBaselineSamePoint(t *testing.T) {
 	require.Greater(t, c.Writer.Size(), writerSizeBeforeForward, "前置心跳帧须落到 writer body")
 
 	// 踩坑 #1：前置心跳字节由 heartbeatDelta 扣除，不得误判为语义写出→clean（允许换号）。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline),
 		"前置心跳字节须由 heartbeatDelta 扣除，不得误判为语义写出（基线同时点捕获）")
 
 	// 基线之后写语义字节：writtenDelta != heartbeatDelta → 不 clean（禁止换号不回退）。
 	_, err := c.Writer.Write([]byte("x"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline),
 		"基线之后语义写出必须破坏增量相等 → 不 clean")
 }

@@ -384,7 +384,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						)
 						return
 					}
-					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
+					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return

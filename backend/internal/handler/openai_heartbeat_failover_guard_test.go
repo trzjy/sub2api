@@ -53,12 +53,12 @@ func TestCF524P2A_GuardStillClean_NoHeartbeatBranch(t *testing.T) {
 	c, _ := newCF524TestContext(t, "/v1/messages")
 
 	// 无 hb：size==before → true（退化与现状等价）。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, 0), "零写出应判定 clean")
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), 0), "零写出应判定 clean")
 
 	// 无 hb：写入差 → false。
 	_, err := c.Writer.Write([]byte("semantic"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, 0), "有语义写出应判定不 clean")
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), 0), "有语义写出应判定不 clean")
 }
 
 func TestCF524P2A_GuardStillClean_HeartbeatDeltaEqualsWritten(t *testing.T) {
@@ -66,13 +66,13 @@ func TestCF524P2A_GuardStillClean_HeartbeatDeltaEqualsWritten(t *testing.T) {
 	installOpenAIHeartbeatForTest(t, c) // 仅心跳字节，committed=N、baseline=0
 
 	// 仅心跳字节（无语义写出）：writtenDelta == heartbeatDelta → true。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, 0),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), 0),
 		"仅心跳字节不得误判为语义写出（增量严格相等）")
 
 	// 追加语义写出：writtenDelta > heartbeatDelta → false。
 	_, err := c.Writer.Write([]byte("semantic"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, 0),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), 0),
 		"语义写出必须破坏增量相等 → 不 clean")
 }
 
@@ -80,14 +80,14 @@ func TestCF524P2A_GuardStillClean_SentinelNormalization(t *testing.T) {
 	// 双侧 -1 哨兵：gin noWritten 归一为 0，0==0 → true。
 	cClean, _ := newCF524TestContext(t, "/v1/messages")
 	require.Equal(t, -1, cClean.Writer.Size(), "未写出时 gin Size 应为 -1 哨兵")
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cClean, -1, 0),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cClean, -1, cClean.Writer.Size(), 0),
 		"双侧 -1 哨兵归一后应判定 clean")
 
 	// 实测有写出、before 捕获为 -1：归一后 before=0，size>0 → false。
 	cDirty, _ := newCF524TestContext(t, "/v1/messages")
 	_, err := cDirty.Writer.Write([]byte("abc"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cDirty, -1, 0),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(cDirty, -1, cDirty.Writer.Size(), 0),
 		"-1 哨兵基线不得掩盖真实语义写出")
 }
 
@@ -97,13 +97,13 @@ func TestCF524P2A_GuardStillClean_BaselineDeltaStrict(t *testing.T) {
 	baseline := int(hb.CommittedBytes()) // 捕获同时点基线（已含首拍字节 N）
 
 	// 自基线零新增心跳 + 无语义写出：退化 size==before → true。
-	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, baseline),
+	require.True(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), baseline),
 		"自基线零新增应退化等价判定为 clean")
 
 	// 基线之后新写一帧语义字节：writtenDelta(=S) != heartbeatDelta(=0) → false。
 	_, err := c.Writer.Write([]byte("x"))
 	require.NoError(t, err)
-	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, baseline),
+	require.False(t, cf524OpenAIHeartbeatFailoverGuardStillClean(c, 0, c.Writer.Size(), baseline),
 		"基线之后语义写出必须破坏退化等价 → 不 clean")
 }
 

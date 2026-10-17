@@ -871,9 +871,18 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// -1（gin noWritten 哨兵同源），与 G5d 归一 0 约定不同源——基线先过
 		// cf524NormalizeWrittenSize(<0→0) 再进入防线比较，使 -1 与 0 在"无语义字节"
 		// 语义上等价、比较结果不变；compact keepalive 字节由该函数扣除、心跳字节由
-		// CommittedBytes 基线增量扣除，两个扣除来源各自独立、不得合并计数（本入口
-		// compact 与心跳互斥，心跳 owner 不会安装，故语义上无需 hbCommittedBaseline）。
+		// CommittedBytes 基线增量扣除，两个扣除来源各自独立、不得合并计数。
+		// compact 与心跳的互斥只对 compact 请求成立；普通 Responses 请求（CN 首字节
+		// 等待、CN watchdog 场景）由安装 helper 起搏 UpstreamHeartbeat，故每次
+		// Forward 同时点捕获 hbCommittedBaseline（owner 不存在时为 0），与 Messages
+		// （踩坑 #1）同型；heartbeat 增量由共享防线判定扣除（cf524 P2 防线统一）。
 		writerSizeBeforeForward := cf524NormalizeWrittenSize(service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
+		hbCommittedBaseline := func() int {
+			if hb, ok := service.UpstreamHeartbeatFromContext(c.Request.Context()); ok && hb != nil {
+				return int(hb.CommittedBytes())
+			}
+			return 0
+		}()
 		// 跨 passthrough 边界的 failover：从 Kiro 等透传账号切到 Bedrock 等非透传账号前，
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
@@ -980,7 +989,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						)
 						return
 					}
-					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, hbCommittedBaseline, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
@@ -1610,7 +1619,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						)
 						return
 					}
-					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, hbCommittedBaseline) {
+					if !cf524OpenAIHeartbeatFailoverGuardStillClean(c, writerSizeBeforeForward, c.Writer.Size(), hbCommittedBaseline) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
@@ -4180,17 +4189,19 @@ func cf524NormalizeWrittenSize(v int) int {
 	return v
 }
 
-func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failoverErr *service.UpstreamFailoverError) bool {
+func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward, hbCommittedBaseline int, failoverErr *service.UpstreamFailoverError) bool {
 	if c == nil || c.Writer == nil {
 		return false
 	}
-	// 踩坑 #12 / G5d：基线（调用方已可能归一）与当前口径均过 cf524NormalizeWrittenSize(<0→0)，
+	// 踩坑 #12 / G5d：基线（调用方已可能归一）、当前口径均过 cf524NormalizeWrittenSize(<0→0)，
 	// 使 -1 与 0 在"无语义字节"语义上等价、比较结果不变。compact keepalive 字节由
-	// OpenAICompactKeepaliveAdjustedWrittenSize 扣除（Responses 口径），与心跳字节
-	// （CommittedBytes 基线增量）各自独立、不得合并计数。
+	// OpenAICompactKeepaliveAdjustedWrittenSize 扣除（Responses 口径，与基线同口径），
+	// 心跳字节由 CommittedBytes 基线增量扣除（共享防线判定），两者各自独立、不得合并计数。
 	before := cf524NormalizeWrittenSize(writerSizeBeforeForward)
 	current := cf524NormalizeWrittenSize(service.OpenAICompactKeepaliveAdjustedWrittenSize(c))
-	if current == before {
+	// 共享防线判定（增量严格相等）：仅心跳/保活注释时不误拦既有换号；真实语义输出后
+	// 不 clean，继续走既有 SafeToFailoverAfterWrite 特许判断。
+	if cf524OpenAIHeartbeatFailoverGuardStillClean(c, before, current, hbCommittedBaseline) {
 		return true
 	}
 	return failoverErr != nil && failoverErr.SafeToFailoverAfterWrite
