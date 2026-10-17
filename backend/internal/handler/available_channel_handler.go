@@ -3,6 +3,7 @@ package handler
 import (
 	"sort"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -188,6 +189,12 @@ func buildPlatformSections(
 	ch service.AvailableChannel,
 	visibleGroups []userAvailableGroup,
 ) []userChannelPlatformSection {
+	// F4（D3）：内部供给平台的模型 platform 归一为 composite。这样 modelPlatforms
+	// 不再含内部平台名（不生成内部平台 section），模型随 composite 分组落入 composite
+	// section 继续可见（L2：composite 模型仍须显示）。归一发生在计算 modelPlatforms
+	// 前、toUserSupportedModels 过滤前，且只作用于拷贝，service 层原值不变（管理端共用）。
+	models := normalizeSupportedModelsPlatform(ch.SupportedModels)
+
 	groupsByPlatform := make(map[string][]userAvailableGroup, 4)
 	compositeGroups := make([]userAvailableGroup, 0, 1)
 	for _, g := range visibleGroups {
@@ -202,9 +209,9 @@ func buildPlatformSections(
 	}
 
 	if len(compositeGroups) > 0 {
-		modelPlatforms := make(map[string]struct{}, len(ch.SupportedModels))
-		for i := range ch.SupportedModels {
-			if platform := ch.SupportedModels[i].Platform; platform != "" {
+		modelPlatforms := make(map[string]struct{}, len(models))
+		for i := range models {
+			if platform := models[i].Platform; platform != "" {
 				modelPlatforms[platform] = struct{}{}
 			}
 		}
@@ -235,10 +242,28 @@ func buildPlatformSections(
 		sections = append(sections, userChannelPlatformSection{
 			Platform:        platform,
 			Groups:          groupsByPlatform[platform],
-			SupportedModels: toUserSupportedModels(ch.SupportedModels, platformSet),
+			SupportedModels: toUserSupportedModels(models, platformSet),
 		})
 	}
 	return sections
+}
+
+// normalizeSupportedModelsPlatform 将内部供给平台的模型 platform 收敛为 composite。
+// 返回新的切片，不改动入参（service 层 SupportedModels 被渠道监控 V2 管理端共用，
+// 其原值必须保持原样）。谓词 domain.IsInternalSupplyPlatform 为唯一判定来源。
+func normalizeSupportedModelsPlatform(src []service.SupportedModel) []service.SupportedModel {
+	if len(src) == 0 {
+		return src
+	}
+	out := make([]service.SupportedModel, len(src))
+	for i := range src {
+		m := src[i]
+		if domain.IsInternalSupplyPlatform(m.Platform) {
+			m.Platform = service.PlatformComposite
+		}
+		out[i] = m
+	}
+	return out
 }
 
 // filterUserVisibleGroups 仅保留用户可访问的分组。

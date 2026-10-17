@@ -271,3 +271,116 @@ func TestBuildPlatformSections_CompositeWithoutModelsKeepsEmptyCompositeSection(
 	require.Len(t, sections[0].Groups, 1)
 	require.Empty(t, sections[0].SupportedModels)
 }
+
+// TestBuildPlatformSections_InternalSupplyModelsNormalizedToComposite 验证 F4 负向归一到 composite：
+// 内部供给平台（codebuddy/muse/cursor）的模型不再生成同名平台 section。
+func TestBuildPlatformSections_InternalSupplyModelsNormalizedToComposite(t *testing.T) {
+	ch := service.AvailableChannel{
+		Name: "internal-supply-channel",
+		SupportedModels: []service.SupportedModel{
+			{Name: "cb-model", Platform: "codebuddy"},
+			{Name: "muse-model", Platform: "muse"},
+			{Name: "cursor-model", Platform: "cursor"},
+		},
+	}
+	visible := []userAvailableGroup{
+		{ID: 9, Name: "composite", Platform: service.PlatformComposite},
+	}
+
+	sections := buildPlatformSections(ch, visible)
+
+	require.Len(t, sections, 1)
+	require.Equal(t, service.PlatformComposite, sections[0].Platform)
+	// 响应中不得出现任何内部供给平台名作为 section platform 键。
+	platforms := make([]string, 0, len(sections))
+	modelPlatforms := make([]string, 0)
+	for _, s := range sections {
+		platforms = append(platforms, s.Platform)
+		for _, m := range s.SupportedModels {
+			modelPlatforms = append(modelPlatforms, m.Platform)
+		}
+	}
+	for _, forbidden := range []string{"codebuddy", "muse", "cursor"} {
+		require.NotContainsf(t, platforms, forbidden, "section must not expose internal supply platform %q", forbidden)
+		require.NotContainsf(t, modelPlatforms, forbidden, "supported model must not expose internal supply platform %q", forbidden)
+	}
+}
+
+// TestBuildPlatformSections_InternalSupplyModelVisibleInCompositeSection 验证正向：
+// composite 分组可见时，内部供给模型出现在 composite section 的 supported_models。
+func TestBuildPlatformSections_InternalSupplyModelVisibleInCompositeSection(t *testing.T) {
+	ch := service.AvailableChannel{
+		Name: "mixed-channel",
+		SupportedModels: []service.SupportedModel{
+			{Name: "cb-model", Platform: "codebuddy"},
+			{Name: "gpt-5", Platform: service.PlatformOpenAI},
+		},
+	}
+	visible := []userAvailableGroup{
+		{ID: 9, Name: "composite", Platform: service.PlatformComposite},
+	}
+
+	sections := buildPlatformSections(ch, visible)
+
+	// composite（内部供给的 cb-model 归一后）+ openai 两个 section。
+	require.Len(t, sections, 2)
+
+	var compositeSection *userChannelPlatformSection
+	for i := range sections {
+		if sections[i].Platform == service.PlatformComposite {
+			compositeSection = &sections[i]
+		}
+	}
+	require.NotNil(t, compositeSection, "must have a composite section")
+	require.Len(t, compositeSection.SupportedModels, 1)
+	require.Equal(t, "cb-model", compositeSection.SupportedModels[0].Name)
+	require.Equal(t, service.PlatformComposite, compositeSection.SupportedModels[0].Platform)
+}
+
+// TestBuildPlatformSections_OrdinaryPlatformUnchanged 验证正向：普通平台（deepseek 等）
+// section 与模型行为不变，归一不污染普通平台。
+func TestBuildPlatformSections_OrdinaryPlatformUnchanged(t *testing.T) {
+	ch := service.AvailableChannel{
+		Name: "ordinary-channel",
+		SupportedModels: []service.SupportedModel{
+			{Name: "deepseek-v3", Platform: "deepseek"},
+			{Name: "claude-sonnet-4-6", Platform: service.PlatformAnthropic},
+		},
+	}
+	visible := []userAvailableGroup{
+		{ID: 1, Name: "anthropic-only", Platform: service.PlatformAnthropic},
+		{ID: 2, Name: "deepseek-only", Platform: "deepseek"},
+	}
+
+	sections := buildPlatformSections(ch, visible)
+
+	require.Len(t, sections, 2)
+	require.Equal(t, "anthropic", sections[0].Platform)
+	require.Equal(t, "deepseek", sections[1].Platform)
+	require.Len(t, sections[1].SupportedModels, 1)
+	require.Equal(t, "deepseek-v3", sections[1].SupportedModels[0].Name)
+	require.Equal(t, "deepseek", sections[1].SupportedModels[0].Platform)
+}
+
+// TestBuildPlatformSections_NonCompositeOrdinaryGroupNotNormalized 验证正向：
+// 非 composite 普通分组（platform=anthropic 等）不经归一，platform 保持原样。
+func TestBuildPlatformSections_NonCompositeOrdinaryGroupNotNormalized(t *testing.T) {
+	ch := service.AvailableChannel{
+		Name: "ordinary-group-channel",
+		SupportedModels: []service.SupportedModel{
+			{Name: "claude-sonnet-4-6", Platform: service.PlatformAnthropic},
+		},
+	}
+	visible := []userAvailableGroup{
+		{ID: 1, Name: "anthropic-only", Platform: service.PlatformAnthropic},
+	}
+
+	sections := buildPlatformSections(ch, visible)
+
+	require.Len(t, sections, 1)
+	require.Equal(t, service.PlatformAnthropic, sections[0].Platform)
+	require.Len(t, sections[0].Groups, 1)
+	require.Equal(t, service.PlatformAnthropic, sections[0].Groups[0].Platform)
+	require.Len(t, sections[0].SupportedModels, 1)
+	require.Equal(t, service.PlatformAnthropic, sections[0].SupportedModels[0].Platform)
+}
