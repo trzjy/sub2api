@@ -31,6 +31,7 @@ export default {
     notes: '备注',
     notesPlaceholder: '可选备注',
     never: '永不过期',
+    expiryUnknown: '到期时间未知',
     na: '—',
     yes: '是',
     no: '否',
@@ -94,6 +95,8 @@ export default {
       vendorXAI: 'xAI',
       vendorDeepSeek: 'DeepSeek',
       vendorMistral: 'Mistral',
+      vendorMuse: 'Muse',
+      vendorComposer: 'Composer',
       models: '模型清单（按厂商过滤）',
       priority: '优先级',
       rateMultiplier: '速率倍率',
@@ -101,7 +104,10 @@ export default {
       concurrencyPlaceholder: '实测后定',
       save: '保存配置',
       saved: '入库配置已保存',
-      saveError: '保存入库配置失败'
+      saveError: '保存入库配置失败',
+      staleModelsCleaned: '已清理 {count} 个不在实供清单内的失效模型勾选',
+      vendorAttributionFixed: '修正 {count} 个厂商归属（配置中的厂商与实供清单不符，已自动对齐）',
+      staleCleanedAndVendorsFixed: '已清理 {ghost} 个不在实供清单内的失效模型勾选，并修正 {vendor} 个厂商归属'
     },
     probe: {
       button: '用量查询',

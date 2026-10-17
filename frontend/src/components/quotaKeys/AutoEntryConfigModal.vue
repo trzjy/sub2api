@@ -100,6 +100,7 @@
       </div>
 
       <p v-if="error" class="text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+      <p v-if="successMsg" class="text-sm text-amber-600 dark:text-amber-400">{{ successMsg }}</p>
     </div>
 
     <template #footer>
@@ -132,22 +133,38 @@ const vendorList = [
   { key: 'google', labelKey: 'admin.quotaKeys.autoEntry.vendorGoogle' },
   { key: 'xai', labelKey: 'admin.quotaKeys.autoEntry.vendorXAI' },
   { key: 'deepseek', labelKey: 'admin.quotaKeys.autoEntry.vendorDeepSeek' },
-  { key: 'mistral', labelKey: 'admin.quotaKeys.autoEntry.vendorMistral' }
+  { key: 'mistral', labelKey: 'admin.quotaKeys.autoEntry.vendorMistral' },
+  { key: 'muse', labelKey: 'admin.quotaKeys.autoEntry.vendorMuse' },
+  { key: 'composer', labelKey: 'admin.quotaKeys.autoEntry.vendorComposer' }
 ] as const
 
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
+// successMsg 仅在"保存时静默清理了清单外失效勾选"时出现（R12-2）：提示本次丢弃了 N 个失效模型，
+// 不阻断保存。其余正常保存流程不显示它。
+const successMsg = ref('')
+// staleCleanedCount 记录 loadConfig 时清理项总数（R13-1 扩展前仅含 R12-2 幽灵项剔除；
+// 扩展后 = 幽灵项剔除数 + 厂商归属修正数）。loadConfig 只清 UI 态、不自动保存；该计数在管理员
+// 点保存时通过 successMsg 提示，并清零。
+const staleCleanedCount = ref(0)
+// staleVendorFixedCount 仅记录 loadConfig 时就地修正的"自报 vendor ≠ 真实 vendor"归属项数
+// （R13-1），用于保存提示条区分幽灵剔除与归属修正两类计数。
+const staleVendorFixedCount = ref(0)
 const localVendors = ref<Record<string, boolean>>({})
-// localModels 是 GET config 返回的模型全集（默认含全部静态清单），按勾选厂商过滤展示；
-// 每模型的勾选态即其在 localModels 中的存在性（取消勾选即从 localModels 移除）。
+// localModels 是"已勾选"模型集合（保存契约的提交源）：勾选即入列、取消即从 localModels 移除。
+// 渲染源不依赖它——模型多选区以 availableModels（可选全集）渲染，勾选态由 isModelSelected 判定，
+// 因此取消勾选后该项仍渲染、复选框未选中，可再勾回（CUR-F2 裁定 1）。
 const localModels = ref<AutoEntryModelRef[]>([])
+// availableModels 是后端实供清单投影的"可选模型全集"（按厂商过滤展示的渲染源），只读。
+const availableModels = ref<AutoEntryModelRef[]>([])
 const localDefaults = ref({ priority: 1, rateMultiplier: 1.0 })
 
 const enabledVendors = computed(() => vendorList.filter((v) => localVendors.value[v.key]))
 
+// 渲染源 = 该厂商下的可选全集（来自 availableModels）；不再用 localModels 既当渲染源又当勾选态。
 function modelsForVendor(vendor: string): AutoEntryModelRef[] {
-  return localModels.value.filter((m) => m.vendor === vendor)
+  return availableModels.value.filter((m) => m.vendor === vendor)
 }
 
 function isModelSelected(id: string): boolean {
@@ -176,10 +193,38 @@ watch(
 async function loadConfig(): Promise<void> {
   loading.value = true
   error.value = ''
+  successMsg.value = ''
   try {
     const cfg: AutoEntryConfig = await adminAPI.quotaKeys.getAutoEntryConfig()
     localVendors.value = { ...cfg.vendors }
-    localModels.value = cfg.models.map((m) => ({
+    // R12-2：加载时把配置里"不在后端实供清单（available_models）内"的项从 localModels 剔除，
+    // 使 UI 态即不含幽灵项（管理员无法取消的失效勾选）。注意：仅清 UI 态、不自动保存——只有管理员
+    // 点保存，清理结果才落库（save() 也会再做一次同样过滤作兜底）。
+    const availList = cfg.available_models ?? []
+    // R13-1：实供清单的 id→vendor 映射，作为"真实归属"口径（与后端 CursorRealSupplyVendorByID
+    // 同源）。自报 vendor 与真实 vendor 不符的已勾选项就地修正，避免 F8 校验把错误归属当
+    // 配置错误拒绝、卡死无法自愈。
+    const availVendorById = new Map(availList.map((m) => [m.id, m.vendor]))
+    const availIds = new Set(availVendorById.keys())
+    // R12-2 幽灵项剔除数：配置里不在实供清单内的项。
+    const ghostCount = cfg.models.filter((m) => !availIds.has(m.id)).length
+    // R13-1 归属修正数：在实供清单内、但自报 vendor 与真实 vendor 不符的项。
+    let vendorFixedCount = 0
+    localModels.value = cfg.models
+      .filter((m) => availIds.has(m.id))
+      .map((m) => {
+        const realVendor = availVendorById.get(m.id)
+        if (realVendor && m.vendor !== realVendor) {
+          vendorFixedCount++
+          // 就地修正为真实 vendor（数据源 = 后端 available_models 的 id→vendor 映射）。
+          return { id: m.id, vendor: realVendor, probe_status: m.probe_status ?? '' }
+        }
+        return { id: m.id, vendor: m.vendor, probe_status: m.probe_status ?? '' }
+      })
+    // staleCleanedCount 语义扩展：幽灵项剔除数 + 归属修正数（R13-1）。
+    staleCleanedCount.value = ghostCount + vendorFixedCount
+    staleVendorFixedCount.value = vendorFixedCount
+    availableModels.value = (cfg.available_models ?? []).map((m) => ({
       id: m.id,
       vendor: m.vendor,
       probe_status: m.probe_status ?? ''
@@ -198,9 +243,26 @@ async function loadConfig(): Promise<void> {
 async function save(): Promise<void> {
   saving.value = true
   error.value = ''
+  successMsg.value = ''
   try {
-    // 保存时仅保留"已勾选厂商"下的模型（后端校验：禁用厂商的模型不允许落库）。
-    const models = localModels.value.filter((m) => localVendors.value[m.vendor])
+    // R12-2：保存时仅保留"已勾选厂商"下、且属于后端实供清单（available_models）的模型。
+    // 不在实供清单内的失效勾选（如旧配置残留的官方模型名 gpt-4.1）静默丢弃（loadConfig 已将其从
+    // UI 态剔除，此处过滤作兜底）——原样提交会让补池持续报配置错误；本轮清理数 > 0 时弹出提示条
+    // （不阻断保存）。
+    // R13-1：提交前再按实供清单 id→vendor 修正归属（兜底）：即便管理员在 loadConfig 后又手动
+    // 勾选/改动过项，提交 payload 也带"真实 vendor"，避免后端 R8 归属校验拒绝（卡死自愈）。
+    const availList = availableModels.value
+    const availIds = new Set(availList.map((m) => m.id))
+    const availVendorById = new Map(availList.map((m) => [m.id, m.vendor]))
+    const models = localModels.value
+      .map((m) => ({
+        id: m.id,
+        vendor: availVendorById.get(m.id) ?? m.vendor,
+        probe_status: m.probe_status ?? ''
+      }))
+      .filter((m) => localVendors.value[m.vendor] && availIds.has(m.id))
+    const ghost = staleCleanedCount.value - staleVendorFixedCount.value
+    const vendor = staleVendorFixedCount.value
     const payload: AutoEntryConfig = {
       vendors: { ...localVendors.value },
       models,
@@ -211,6 +273,22 @@ async function save(): Promise<void> {
       }
     }
     await adminAPI.quotaKeys.updateAutoEntryConfig(payload)
+    // R15-2：仅在保存请求成功后显示清理/修正提示并清零计数——失败时保留计数，
+    // 错误与"已清理"成功提示不同时出现。
+    if (staleCleanedCount.value > 0) {
+      if (ghost > 0 && vendor > 0) {
+        successMsg.value = t('admin.quotaKeys.autoEntry.staleCleanedAndVendorsFixed', {
+          ghost,
+          vendor
+        })
+      } else if (vendor > 0) {
+        successMsg.value = t('admin.quotaKeys.autoEntry.vendorAttributionFixed', { count: vendor })
+      } else {
+        successMsg.value = t('admin.quotaKeys.autoEntry.staleModelsCleaned', { count: ghost })
+      }
+      staleCleanedCount.value = 0
+      staleVendorFixedCount.value = 0
+    }
     emit('saved')
     emit('close')
   } catch (err: unknown) {

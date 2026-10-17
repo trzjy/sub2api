@@ -73,18 +73,23 @@ func (w *fakeAccountWriter) UpdateExtraKey(_ context.Context, id int64, key stri
 func autoEntryPtrInt(v int) *int { return &v }
 
 func TestComputeEntryModelsIntersection(t *testing.T) {
-	// 厂商勾选：openai 启用、anthropic 禁用；清单含一个不在静态目录的失效 ID。
+	// 裁定 1 / cursor-model-catalog-fact.md：门控清单是【实供】清单（CursorRealSupplyModels），
+	// 不再是官方模型名快照 CursorModelCatalog。故 fixture 改用实供模型，覆盖三分支：
+	//   - 实供 + 厂商启用 → 保留；
+	//   - 厂商禁用 → 剔除；
+	//   - 不在实供清单的失效/笔误 ID → 剔除。
+	// （旧用例以 gpt-4.1 / gpt-4o 等官方名编码了"官方清单门控"缺陷态，现已随实现修正而作废。）
 	cfg := &CursorAutoEntryConfig{
-		Vendors: map[string]bool{CursorVendorOpenAI: true, CursorVendorAnthropic: false},
+		Vendors: map[string]bool{CursorVendorOpenAI: true, CursorVendorAnthropic: false, CursorVendorXAI: false},
 		Models: []CursorModelRef{
-			{ID: "gpt-4.1", Vendor: CursorVendorOpenAI},
-			{ID: "claude-3-7-sonnet", Vendor: CursorVendorAnthropic}, // 厂商禁用 → 剔除
-			{ID: "not-a-real-model", Vendor: CursorVendorOpenAI},     // 不在静态清单 → 剔除
-			{ID: "gpt-4o", Vendor: CursorVendorOpenAI},
+			{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI},          // 实供 + 厂商启用 → 保留
+			{ID: "claude-opus-5-5", Vendor: CursorVendorAnthropic}, // 厂商禁用 → 剔除
+			{ID: "not-a-real-model", Vendor: CursorVendorOpenAI},   // 不在实供清单 → 剔除
+			{ID: "grok-4.7", Vendor: CursorVendorXAI},              // 厂商(xai)禁用 → 剔除
 		},
 	}
 	got := ComputeEntryModels(cfg)
-	require.Equal(t, []string{"gpt-4.1", "gpt-4o"}, got)
+	require.Equal(t, []string{"gpt-6-sol"}, got)
 }
 
 func TestApplyEntryDefaultsWritesColumnsAndExtra(t *testing.T) {
@@ -93,7 +98,7 @@ func TestApplyEntryDefaultsWritesColumnsAndExtra(t *testing.T) {
 
 	cfg := &CursorAutoEntryConfig{
 		Vendors: map[string]bool{CursorVendorOpenAI: true},
-		Models:  []CursorModelRef{{ID: "gpt-4.1", Vendor: CursorVendorOpenAI}},
+		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
 		EntryDefaults: CursorEntryDefaults{
 			Concurrency:    nil, // 沿用列默认 3
 			Priority:       1,
@@ -109,9 +114,9 @@ func TestApplyEntryDefaultsWritesColumnsAndExtra(t *testing.T) {
 	require.Equal(t, 1, call.priority)
 	require.Equal(t, 1.0, call.rateMultiplier)
 	require.Nil(t, call.concurrency, "concurrency=nil 时不应写该列")
-	require.Equal(t, []string{"gpt-4.1"}, call.entryModels)
+	require.Equal(t, []string{"gpt-6-sol"}, call.entryModels)
 	// 内存实体回填：extra.entry_models
-	require.Equal(t, []string{"gpt-4.1"}, updated.Extra[CursorEntryModelsExtraKey])
+	require.Equal(t, []string{"gpt-6-sol"}, updated.Extra[CursorEntryModelsExtraKey])
 }
 
 func TestApplyEntryDefaultsExplicitConcurrency(t *testing.T) {
@@ -125,6 +130,40 @@ func TestApplyEntryDefaultsExplicitConcurrency(t *testing.T) {
 	require.Len(t, w.apply, 1)
 	require.NotNil(t, w.apply[0].concurrency)
 	require.Equal(t, 9, *w.apply[0].concurrency)
+}
+
+// ---------------------------------------------------------------------------
+// 6. GetConfigResponse：可选模型全集 = 实供清单（CUR-F2 裁定）
+// ---------------------------------------------------------------------------
+
+func TestGetConfigResponse_AvailableModelsMatchesRealSupply(t *testing.T) {
+	// settings 为 nil 时 GetConfig 返回缺省配置；可用全集来自 CursorRealSupplyModels。
+	s := NewCursorAutoEntryService(nil, nil, nil, nil, nil, "")
+	resp, err := s.GetConfigResponse(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.AvailableModels, "响应必须含可选模型全集 available_models")
+
+	// 逐项断言（id→vendor）与实供清单完全一致，不只断言长度。
+	real := map[string]string{}
+	for _, m := range CursorRealSupplyModels {
+		real[m.ID] = m.Vendor
+	}
+	got := map[string]string{}
+	for _, m := range resp.AvailableModels {
+		got[m.ID] = m.Vendor
+	}
+	require.Equal(t, real, got, "可选模型全集必须与 CursorRealSupplyModels 逐项一致（id→vendor）")
+	require.Len(t, resp.AvailableModels, len(CursorRealSupplyModels))
+
+	// muse-spark-1.3（vendor=muse）必须在全集内——它属实供、按 muse 归类入库。
+	require.Equal(t, CursorVendorMuse, got["muse-spark-1.3"], "muse-spark-1.3 必须在可选全集中且 vendor=muse")
+
+	// 反向校验：不得混入官方 catalog 独有的模型（误用 CursorModelCatalog 会把实供判非法）。
+	for id := range got {
+		_, inReal := real[id]
+		require.True(t, inReal, "可选全集含非实供模型 %s（误用官方 catalog？）", id)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +266,7 @@ func TestProbeKeyQuotaHeadersAndSnapshot(t *testing.T) {
 	// 账号必须挂上 QuotaKeyID=42 才会被返回（QuotaKeyID 为 nil 一律过滤掉）。
 	repo := newFakeQuotaKeyRepo()
 	repo.byID[42] = &ent.QuotaKey{ID: 42, CodeEncrypted: "enc:JG-CF-TEST"}
-// 夹具账号必须挂 QuotaKeyID=42：fakeQuotaKeyRepo.ListAccountsByQuotaKey 按
+	// 夹具账号必须挂 QuotaKeyID=42：fakeQuotaKeyRepo.ListAccountsByQuotaKey 按
 	// QuotaKeyID 过滤（quota_key_service_test.go），不设置则写入数为 0。
 	qkID := int64(42)
 	repo.accounts = []*ent.Account{{ID: 100, QuotaKeyID: &qkID}, {ID: 101, QuotaKeyID: &qkID}}
@@ -333,4 +372,62 @@ func TestDeviceIDFormat(t *testing.T) {
 // randomHexUUIDForTest 生成一个伪 UUID 串（仅用于 device-id 格式断言，不依赖 crypto/rand）。
 func randomHexUUIDForTest() string {
 	return "abc12345-6789-0abc-def1-23456789abcd"
+}
+
+// ---------------------------------------------------------------------------
+// CUR-F8（外审 R5 must_fix）：模型-vendor 归属校验，以实供清单真实归属为准，不信自报
+// ---------------------------------------------------------------------------
+
+// TestCURF8_ValidateRejectsVendorSpoofing：冒用反例。
+// 提交 gpt-6-sol（真实归属 openai）+ vendor=xai，并开 xai / 关 openai。
+// 旧实现只查 vendor 已知+启用，会被骗过；CUR-F8 应以真实归属拦截 UpdateConfig。
+func TestCURF8_ValidateRejectsVendorSpoofing(t *testing.T) {
+	svc := NewCursorAutoEntryService(newFakeSettingRepo(), newFakeQuotaKeyRepo(), testEncryptor{}, nil, nil, "")
+	cfg := &CursorAutoEntryConfig{
+		Vendors:       map[string]bool{CursorVendorOpenAI: false, CursorVendorXAI: true}, // 关 openai / 开 xai
+		Models:        []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorXAI}},      // 冒用：真实归属是 openai
+		EntryDefaults: CursorEntryDefaults{Priority: 1, RateMultiplier: 1.0},
+	}
+	_, err := svc.UpdateConfig(context.Background(), cfg)
+	require.Error(t, err, "gpt-6-sol 自报 xai 以绕过 openai 开关时必须被 Validate 拦截")
+	require.Contains(t, err.Error(), "belongs to vendor openai, not xai")
+}
+
+// TestCURF8_ComputeEntryModelsIgnoresSpoofedVendor：绕过 Validate 直接调 ComputeEntryModels
+// （同冒用配置）→ 该模型不得产出（门控改用清单真实归属，不信自报 vendor）。
+func TestCURF8_ComputeEntryModelsIgnoresSpoofedVendor(t *testing.T) {
+	cfg := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorOpenAI: false, CursorVendorXAI: true},
+		Models:  []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorXAI}},
+	}
+	got := ComputeEntryModels(cfg)
+	require.NotContains(t, got, "gpt-6-sol", "绕过 Validate 时，冒用配置仍不得把 gpt-6-sol 纳入补池")
+	require.Empty(t, got)
+}
+
+// TestCURF8_PositiveVendorMatch：正例。gpt-6-sol + vendor=openai + openai 开 → 保留。
+func TestCURF8_PositiveVendorMatch(t *testing.T) {
+	svc := NewCursorAutoEntryService(newFakeSettingRepo(), newFakeQuotaKeyRepo(), testEncryptor{}, nil, nil, "")
+	cfg := &CursorAutoEntryConfig{
+		Vendors:       map[string]bool{CursorVendorOpenAI: true},
+		Models:        []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
+		EntryDefaults: CursorEntryDefaults{Priority: 1, RateMultiplier: 1.0},
+	}
+	_, err := svc.UpdateConfig(context.Background(), cfg)
+	require.NoError(t, err, "真实归属匹配且厂商启用时应保留")
+	require.Equal(t, []string{"gpt-6-sol"}, ComputeEntryModels(cfg))
+}
+
+// TestCURF8_DisabledRealVendorExcluded：清单内模型配对正确但真实归属厂商关 → 剔除（既有语义回归）。
+func TestCURF8_DisabledRealVendorExcluded(t *testing.T) {
+	cfg := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorOpenAI: false}, // openai 关
+		// 自报与真实一致（openai），但厂商已关 → 仍应剔除。
+		Models: []CursorModelRef{{ID: "gpt-6-sol", Vendor: CursorVendorOpenAI}},
+	}
+	got := ComputeEntryModels(cfg)
+	require.NotContains(t, got, "gpt-6-sol", "真实归属厂商关闭时该模型应被剔除")
+
+	// Validate 层面同样拒绝（自报厂商未勾选）。
+	require.NotEmpty(t, cfg.Validate(), "自报厂商未勾选时 Validate 必须拒绝")
 }

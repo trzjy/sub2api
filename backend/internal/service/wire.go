@@ -904,7 +904,9 @@ func ProvideQuotaKeyReconciler(repo QuotaKeyRepository, puller *QuotaKeyService,
 	// 按差额触发 PullAccountsForModel 补池。ent client 直接取拉号服务已装配的实例，
 	// 不新增装配入参、不新造机制（装配点保持既有 3 参签名，wire_gen 无需改动）。
 	if puller != nil && puller.client != nil {
-		svc.SetModelWaterProvider(NewQuotaKeyModelWater(puller.client))
+		// F1（裁定 1）：注入配置源，使 ListAllowedModels 的交集左操作数取"配置勾选模型"。
+		w := NewQuotaKeyModelWater(puller.client, puller.autoEntry)
+		svc.SetModelWaterProvider(w)
 	}
 	svc.Start()
 	return svc

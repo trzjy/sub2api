@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/quotakey"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
@@ -435,9 +437,21 @@ func mustCreateAccounts(t *testing.T, client *ent.Client, quotaKeyID int64, n in
 	}
 }
 
+// quotaKeyTestCredcryptKeyB64 是 qkNewTestService 公共 setup 一次性安装的固定测试主密钥
+// （R6-2）。凭据加密写路径（credcryptEncryptor）在未配置主密钥时退化为明文 passthrough，
+// 导致既有拉号成功用例因 "credential encryption not enabled" 失败。此处统一启用加密链，
+// 由 t.Cleanup 在测试结束后复原为未配置态（passthrough），与既有
+// TestCURF1_CredentialEncryptionOnPull 的复位约定一致。生产门槛（config.Totp.EncryptionKeyConfigured）
+// 不在本处放宽。
+const quotaKeyTestCredcryptKeyB64 = "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlI=" // 32×0x5a
+
 func qkNewTestService(t *testing.T, upstream QuotaKeyUpstreamClient) (*QuotaKeyService, *ent.Client) {
 	t.Helper()
 	client := quotaKeyTestEntClient(t)
+	// R6-2：公共 setup 安装固定测试主密钥，激活加密写路径；测试结束复原未配置态。
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
 	repo := &testDBRepo{client: client}
 	return NewQuotaKeyService(repo, NewCredcryptEncryptor(), upstream, client), client
 }
@@ -505,7 +519,7 @@ func (r *testDBRepo) ListExpired(ctx context.Context, now time.Time) ([]*ent.Quo
 		Where(quotakey.ExpiresAtNotNil(), quotakey.ExpiresAtLT(now)).All(ctx)
 }
 
-// SetDeviceIDIfAbsent 内存替身：模拟 DB 条件化写入（WHERE device_id IS NULL OR =''），
+// SetDeviceIDIfAbsent 内存替身：模拟 DB 条件化写入（WHERE device_id IS NULL OR =""），
 // 与 production repository / service 读判定三者语义一致。
 func (f *fakeQuotaKeyRepo) SetDeviceIDIfAbsent(_ context.Context, id int64, deviceID string) (int, error) {
 	qk, ok := f.byID[id]
@@ -635,7 +649,12 @@ func TestQuotaKeyPull_Error_SetsExhaustedCAS(t *testing.T) {
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{err: errors.New("upstream boom")})
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+	// 自动链路（manual=false）遇未知上游错误：落库 exhausted=true 不变，但 R13-2 后不再裸
+	// return nil，而是透传含 ErrUpstreamKeyBlocked 哨兵的包裹错误（使 reconciler 如实计入失败）。
+	err := svc.PullAccounts(ctx, qk.ID)
+	require.Error(t, err, "automatic chain must surface the blocked sentinel (R13-2)")
+	require.True(t, errors.Is(err, ErrUpstreamKeyBlocked),
+		"automatic unknown upstream error must wrap ErrUpstreamKeyBlocked; got=%v", err)
 
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
@@ -1010,7 +1029,12 @@ func TestQuotaKeyPlaceholderUpstream_ReturnsErrorNotFake(t *testing.T) {
 	svc, _ := qkNewTestService(t, nil)
 
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	require.NoError(t, svc.PullAccounts(ctx, qk.ID))
+	// 自动链路（manual=false）遇占位客户端错误：落库 exhausted=true 不变，但 R13-2 后透传
+	// 含 ErrUpstreamKeyBlocked 哨兵的包裹错误（不再裸 return nil）。
+	err := svc.PullAccounts(ctx, qk.ID)
+	require.Error(t, err, "automatic chain must surface the blocked sentinel (R13-2)")
+	require.True(t, errors.Is(err, ErrUpstreamKeyBlocked),
+		"placeholder upstream error must wrap ErrUpstreamKeyBlocked; got=%v", err)
 
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
@@ -1294,6 +1318,14 @@ func TestQuotaKeyService_PullForModel_MountsToCoveringGroups(t *testing.T) {
 		Enabled: true,
 		Models:  []string{"some-other-model"},
 	})
+	// R10-1（CUR-F13）：复原本用例自建分组，避免残留共享库污染他用例。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range []int64{grp.ID, other.ID} {
+			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
+	})
 
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
 		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
@@ -1382,9 +1414,15 @@ func TestQuotaKeyService_PullForModel_ModelNoCoverageFailClosed(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
 	// 存在覆盖其它模型的分组，但 M 无覆盖。
-	_ = mustCreateGroup(t, client, domain.GroupModelAllowlist{
+	grpOtherModel := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"other-model"},
+	})
+	// R10-1（CUR-F13）：复原本用例自建分组，避免残留共享库污染他用例。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grpOtherModel.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grpOtherModel.ID)).Exec(cctx)
 	})
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
 		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
@@ -1492,6 +1530,12 @@ func TestQuotaKeyService_Pull_NoModelContextSkipsMount(t *testing.T) {
 		Enabled: true,
 		Models:  []string{"some-model"},
 	})
+	// R10-1（CUR-F13）：复原本用例自建分组，避免残留共享库污染他用例。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grp.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(cctx)
+	})
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
 		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
 			{Name: "m4", Platform: "cursor", Type: "oauth", Credentials: map[string]any{"k": "v"}},
@@ -1519,15 +1563,28 @@ func TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups(t *testing.T) {
 
 	// 应被挂入的分组（生产形态复刻）：composite 聚合组，白名单未启用（Allows 恒真）。
 	grpComposite := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: false})
-	// 应被挂入的分组：白名单启用且显式含 cursor 模型。
+	// 应被挂入的分组：白名单启用且覆盖某一实供模型（R4-1 口径：enabled=true 仅当覆盖
+	// 实供模型才挂入；仅含 "cursor" 字样、不含实供模型的分组依 R4-1 不挂）。
 	grpWhitelistCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
-		Models:  []string{"cursor"},
+		Models:  []string{"claude-sonnet-5-5"},
 	})
 	// 不应挂入的分组：白名单启用且明确不含 cursor（如 DeepSeek 计量组形态）。
 	grpRejectCursor := mustCreateGroup(t, client, domain.GroupModelAllowlist{
 		Enabled: true,
 		Models:  []string{"deepseek-v4-1-flash"},
+	})
+
+	// 本用例自建的分组（含 allow-all 的 composite 聚合组）必须自行清理，不得遗留为共享库
+	// 污染：allow-all 组（grpComposite）若被他用例（如 TestCURF1_AllowedModels_... 的全等
+	// 断言）读到，会使其允许集合混入非预期模型而断言失败。R9-1 已删除"遍历删全库 allow-all"
+	// 的隔离段，故此处显式复原本用例数据。
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, gid := range []int64{grpComposite.ID, grpWhitelistCursor.ID, grpRejectCursor.ID} {
+			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(ctx)
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(ctx)
+		}
 	})
 
 	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
@@ -1609,37 +1666,48 @@ func mustLinkAccountToGroup(t *testing.T, client *ent.Client, accountID, groupID
 	require.NoError(t, err)
 }
 
-// TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly 验证 ListAllowedModels 只枚举
-// cursor 服务模型：仅 cursor 平台分组的启用白名单条目入选；非 cursor 平台分组、以及
-// 白名单被禁用的 cursor 分组均不入选（§13.1：补池只发 cursor 账号）。
+// TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly 验证裁定 1：ListAllowedModels
+// 不再限定 group.Platform(cursor)。配置勾选实供模型 grok-4.7 / gpt-6-sol，分别由 cursor 平台
+// 分组与非 cursor 平台分组的白名单覆盖 → 两者都应入选（补池按白名单覆盖，不按平台收窄）。
 func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client)
+	// 配置勾选两个实供模型（vendor 随实供清单），交集左操作数取自该配置。
+	w := NewQuotaKeyModelWater(client, curF1ConfigSelecting("grok-4.7", "gpt-6-sol"))
 
-	modelCursor := fix1UniqueModel("cursor-fix1-lam-c")
-	modelOther := fix1UniqueModel("cursor-fix1-lam-o")
-
-	// cursor 平台分组 + 启用白名单 → 入选。
-	_, err := client.Group.Create().
+	// cursor 平台分组允许 grok-4.7。
+	cursorGrp, err := client.Group.Create().
 		SetName(fmt.Sprintf("c11-grp-cursor-%d", time.Now().UnixNano())).
 		SetPlatform(domain.PlatformCursor).
-		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelCursor}}).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}}).
 		Save(ctx)
 	require.NoError(t, err)
-	// 非 cursor 平台分组（默认 anthropic）→ 不入选。
+	// 非 cursor 平台分组（默认 anthropic）允许 gpt-6-sol。
 	// 注意：本用例只创建"白名单启用"的分组——白名单未启用（enabled=false）的分组按既有
 	// Allows 语义是"放行一切"，会污染 quota_test 持久库里其它用例的挂载/水位断言。
-	_, err = client.Group.Create().
+	anthropicGrp, err := client.Group.Create().
 		SetName(fmt.Sprintf("c11-grp-anthropic-%d", time.Now().UnixNano())).
-		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelOther}}).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6-sol"}}).
 		Save(ctx)
 	require.NoError(t, err)
+
+	// R10-1（CUR-F13）：显式复原本用例自建分组，避免其（覆盖 grok-4.7 / gpt-6-sol 的启用组）
+	// 残留共享库、污染他用例（如 F10 的全等挂载断言、F1 的交集断言）。先清挂载链接再删分组。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range []int64{cursorGrp.ID, anthropicGrp.ID} {
+			_, _ = client.AccountGroup.Delete().
+				Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
+			_, _ = client.Group.Delete().
+				Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
+	})
 
 	models, err := w.ListAllowedModels(ctx)
 	require.NoError(t, err)
-	require.Contains(t, models, modelCursor, "model covered by cursor group allowlist must be enumerated")
-	require.NotContains(t, models, modelOther, "model covered only by non-cursor group must NOT be enumerated")
+	require.Contains(t, models, "grok-4.7", "model covered by a cursor group allowlist must be enumerated")
+	require.Contains(t, models, "gpt-6-sol",
+		"model covered ONLY by a NON-cursor group allowlist must ALSO be enumerated (裁定 1 removed platform=cursor scoping)")
 }
 
 // TestQuotaKeyModelWater_WaterLevelFiltersByModel 验证水位按模型 M 过滤：仅"白名单含 M"
@@ -1650,7 +1718,7 @@ func TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly(t *testing.T) {
 func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	// 模型名全局唯一：避免持久库中上一轮遗留的同名白名单分组把遗留账号计入本轮水位。
 	modelA := fix1UniqueModel("cursor-fix1-a")
@@ -1690,17 +1758,17 @@ func TestQuotaKeyModelWater_WaterLevelFiltersByModel(t *testing.T) {
 	require.Equal(t, 0, curUnknown, "model with no covering group has water level 0")
 }
 
-// TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly 是 R3-2 的跨平台同名模型对照用例：
-// 同一模型名 M 同时被【cursor 平台】分组与【非 cursor 平台】分组的白名单覆盖时，
-// 水位只计入 cursor 服务分组内的候选账号 —— 跨平台同名模型不得虚增 cursor 水位
-// （§13.1"当前允许 M 的分组"= cursor 服务分组；水位虚高会导致缺口该补的号不补）。
+// TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly 验证裁定 1：水位不再限定 platform=cursor。
+// 同一实供模型被 cursor 平台分组与非 cursor 平台分组的白名单同时覆盖时，两个分组的候选账号
+// 都计入水位（§13.1"当前允许 M 的分组"不再限定 cursor 平台）。
 func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client)
+	// 配置勾选 grok-4.7 与 gpt-6-sol（实供模型，vendor 随清单）。
+	w := NewQuotaKeyModelWater(client, curF1ConfigSelecting("grok-4.7", "gpt-6-sol"))
 
-	// 同名模型：cursor 分组与非 cursor 分组白名单各覆盖一次。
-	modelM := fix1UniqueModel("cursor-fix1-cross")
+	// 同名实供模型：cursor 分组与非 cursor 分组白名单各覆盖一次。
+	modelM := "grok-4.7"
 	grpCursor := mustCreateCursorGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
 	// mustCreateGroup 不设平台 → 默认 anthropic（非 cursor 服务分组）。
 	grpOther := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}})
@@ -1715,18 +1783,30 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 	cur, thr, err := w.WaterLevel(ctx, modelM)
 	require.NoError(t, err)
 	require.Equal(t, quotaKeyWaterLevelThreshold, thr, "threshold must be constant 10")
-	require.Equal(t, 1, cur,
-		"only the account in the cursor-platform group counts; same-named model on a non-cursor platform must not inflate water level")
+	// 持久库可能已有其它覆盖 grok-4.7 的分组/账号，故用 >= 容错；本用例自有 2 条必计入。
+	require.GreaterOrEqual(t, cur, 2,
+		"accounts in BOTH cursor and non-cursor covering groups count; non-cursor platform no longer excluded (裁定 1)")
 
-	// 反向对照：仅非 cursor 平台分组覆盖同名模型时，水位为 0（不虚增）。
-	modelOtherOnly := fix1UniqueModel("cursor-fix1-cross-other")
+	// 反向对照：仅非 cursor 平台分组覆盖的实供模型，水位仍 >0（不再虚高为 0）。
+	modelOtherOnly := "gpt-6-sol"
 	grpOtherOnly := mustCreateGroup(t, client, domain.GroupModelAllowlist{Enabled: true, Models: []string{modelOtherOnly}})
 	accOtherOnly := mustCreateCursorAccount(t, client, holder.ID)
 	mustLinkAccountToGroup(t, client, accOtherOnly.ID, grpOtherOnly.ID)
 
+	// R10-1（CUR-F13）：复原本用例自建分组（覆盖 grok-4.7 / gpt-6-sol 的启用组），避免其残留
+	// 共享库污染他用例（如 F10 全等挂载断言、F7 零覆盖判定）。先清挂载链接再删分组。
+	leakedGroupIDs := []int64{grpCursor.ID, grpOther.ID, grpOtherOnly.ID}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		for _, gid := range leakedGroupIDs {
+			_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(gid)).Exec(cctx)
+			_, _ = client.Group.Delete().Where(entgroup.IDEQ(gid)).Exec(cctx)
+		}
+	})
+
 	cur, _, err = w.WaterLevel(ctx, modelOtherOnly)
 	require.NoError(t, err)
-	require.Equal(t, 0, cur, "model covered only by a non-cursor group must have water level 0")
+	require.GreaterOrEqual(t, cur, 1, "model covered only by a non-cursor group must have water level > 0 (裁定 1)")
 }
 
 // TestQuotaKeyModelWater_WaterLevelExcludesTempWindow 验证 temp 窗口排除：
@@ -1734,7 +1814,7 @@ func TestQuotaKeyModelWater_WaterLevelCursorPlatformOnly(t *testing.T) {
 func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	modelM := fix1UniqueModel("cursor-fix1-temp")
 	// R3-2：水位口径的覆盖分组须为 cursor 平台分组。
@@ -1766,7 +1846,7 @@ func TestQuotaKeyModelWater_WaterLevelExcludesTempWindow(t *testing.T) {
 func TestQuotaKeyModelWater_ListCandidateKeysFiltersByKeyState(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	keyOK := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 	keyExhausted := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
@@ -1776,7 +1856,13 @@ func TestQuotaKeyModelWater_ListCandidateKeysFiltersByKeyState(t *testing.T) {
 	_, err = client.QuotaKey.UpdateOneID(keyExpired.ID).SetExpiresAt(time.Now().Add(-time.Hour)).Save(ctx)
 	require.NoError(t, err)
 	keyCooldown := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	_, err = client.QuotaKey.UpdateOneID(keyCooldown.ID).SetLastRefreshError("cooldown").Save(ctx)
+	// 裁定 3：冷却判定基于错误【分类】（前缀 ErrUpstreamCooldown）+ 5 分钟窗口，而非
+	// last_refresh_error 是否非空。故此处用冷却分类前缀错误 + 近期 last_refresh_at，
+	// 使该 key 落入冷却窗口内、被排除。
+	_, err = client.QuotaKey.UpdateOneID(keyCooldown.ID).
+		SetLastRefreshError(ErrUpstreamCooldown.Error() + ": 每5分钟内仅可刷新1次").
+		SetLastRefreshAt(time.Now()).
+		Save(ctx)
 	require.NoError(t, err)
 	keyFull := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
 	mustCreateAccounts(t, client, keyFull.ID, MaxAccountsPerQuotaKey) // working=15 → 无剩余容量
@@ -1868,14 +1954,14 @@ func TestQuotaKeyService_Pull_InsertFailureCarriesMountFailedSentinel(t *testing
 
 // TestQuotaKeyService_Pull_InsertFailureMarksKeyExitsCandidatesAndRecoverable 验证 R4-1：
 // pull 内 create.Save 失败（上游发号成功、本地落库失败）在返回 ErrQuotaKeyMountFailed
-// 哨兵的同时，同事务写 last_refresh_error —— 语义是"上游已消耗一次、本地待人工介入"，
-// 故：
-//  1. last_refresh_error 非空，但 exhausted 仍为 false（本分支是"上游成功本地失败"，
-//     与"上游失败"的 exhausted 占位语义不同，不得混写）；
-//  2. 该 key 被 ListCandidateKeys 既有的 LastRefreshErrorIsNil() 过滤自然排出候选集
-//     ——后续周期不再自动消耗上游（零新字段、零新状态）；
-//  3. 人工 ClearExhausted（既有的清除路径）后 key 回到候选集 —— 证明"退出"是标记驱动、
-//     可人工恢复，而非永久封禁。
+// 哨兵的同时，独立事务补写 last_refresh_error + exhausted=true —— 该分支属"非限频错误"
+// （上游已成功发号、仅本地落库失败），故按裁定 3 一律以 exhausted=true 占位排除，与
+// "上游失败"的 casSetExhausted=true 同口径：
+//  1. last_refresh_error 非空且 exhausted=true（非限频错误占位排除，与上游失败同口径）；
+//  2. 该 key 被 ListCandidateKeys 的 Exhausted(false) 查询自然排出候选集 —— 后续周期
+//     不再自动消耗上游（零新字段、零新状态；替代原 last_refresh_error IS NULL 过滤）；
+//  3. 人工 ClearExhausted（既有的清除路径，清 exhausted + last_refresh_error）后 key 回到
+//     候选集 —— 证明"退出"是标记驱动、可人工恢复，而非永久封禁。
 func TestQuotaKeyService_Pull_InsertFailureMarksKeyExitsCandidatesAndRecoverable(t *testing.T) {
 	client := quotaKeyTestEntClient(t)
 	ctx := context.Background()
@@ -1887,7 +1973,7 @@ func TestQuotaKeyService_Pull_InsertFailureMarksKeyExitsCandidatesAndRecoverable
 	}
 	svc, _ := qkNewTestService(t, up)
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	// 前置：失败前该 key 在候选集内（active / 非 exhausted / 无错误标记 / 有剩余容量）。
 	cands, err := w.ListCandidateKeys(ctx, "cursor-fix5-r4-cand", 0)
@@ -1900,16 +1986,17 @@ func TestQuotaKeyService_Pull_InsertFailureMarksKeyExitsCandidatesAndRecoverable
 		"insert failure must still surface the non-idempotent sentinel")
 	require.Equal(t, int64(1), up.calls.Load(), "upstream must have issued the account before the local insert failed")
 
-	// ① 标记写入：last_refresh_error 非空，exhausted 仍 false（不混写"上游失败"占位）。
+	// ① 标记写入：last_refresh_error 非空且 exhausted=true（非限频错误占位排除，裁定 3 同口径）。
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.LastRefreshError, "insert failure must record last_refresh_error (key needs human attention)")
 	require.Contains(t, *got.LastRefreshError, "create account",
 		"marker must keep the underlying insert failure reason")
-	require.False(t, got.Exhausted,
-		"insert failure is 'upstream succeeded, local failed': exhausted (upstream-failure placeholder) must stay false")
+	require.True(t, got.Exhausted,
+		"insert failure is a non-cooldown error: per 裁定 3 it must be excluded via exhausted=true placeholder")
 
-	// ② 脱离候选：既有的 LastRefreshErrorIsNil() 过滤把该 key 排出后续周期候选。
+	// ② 脱离候选：ListCandidateKeys 的 Exhausted(false) 查询（替代原 last_refresh_error IS NULL
+	// 过滤）把该 key 排出后续周期候选。
 	cands, err = w.ListCandidateKeys(ctx, "cursor-fix5-r4-cand", 0)
 	require.NoError(t, err)
 	require.NotContains(t, cands, qk.ID, "key with a pending insert failure must exit the candidate set")
@@ -1945,7 +2032,7 @@ func TestQuotaKeyService_Pull_InsertFailureMultiAccountRollsBackPartial(t *testi
 	}
 	svc, _ := qkNewTestService(t, up)
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	// 前置：失败前该 key 在候选集内（active / 非 exhausted / 无错误标记 / 有剩余容量）。
 	pre, err := w.ListCandidateKeys(ctx, "cursor-r5-multi", 0)
@@ -1970,16 +2057,18 @@ func TestQuotaKeyService_Pull_InsertFailureMultiAccountRollsBackPartial(t *testi
 	require.NoError(t, err)
 	require.Equal(t, 0, n, "partial insert before failure must be rolled back (no naked account persisted)")
 
-	// ③ 标记持久：last_refresh_error 非空、exhausted 仍 false ⇒ 跨轮退出候选（R5-1 a）。
+	// ③ 标记持久：last_refresh_error 非空且 exhausted=true（非限频错误占位排除，裁定 3 同口径）
+	// ⇒ 被 ListCandidateKeys 的 Exhausted(false) 查询排出，跨轮退出候选（R5-1 a）。
 	got, err := client.QuotaKey.Get(ctx, qk.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.LastRefreshError, "insert failure must record last_refresh_error (cross-round exit)")
 	require.Contains(t, *got.LastRefreshError, "create account",
 		"marker must keep the underlying insert failure reason")
-	require.False(t, got.Exhausted,
-		"insert failure is 'upstream succeeded, local failed': exhausted (upstream-failure placeholder) must stay false")
+	require.True(t, got.Exhausted,
+		"insert failure is a non-cooldown error: per 裁定 3 it must be excluded via exhausted=true placeholder")
 
-	// ④ 脱离候选：既有的 LastRefreshErrorIsNil() 过滤把该 key 排出后续周期候选。
+	// ④ 脱离候选：ListCandidateKeys 的 Exhausted(false) 查询（替代原 last_refresh_error IS NULL
+	// 过滤）把该 key 排出后续周期候选。
 	post, err := w.ListCandidateKeys(ctx, "cursor-r5-multi", 0)
 	require.NoError(t, err)
 	require.NotContains(t, post, qk.ID, "key with a pending insert failure must exit the candidate set")
@@ -2006,7 +2095,7 @@ func TestQuotaKeyService_Pull_InsertFailureMarkerWriteFailsRollsBackOnlyThisRoun
 		return fmt.Errorf("injected marker write failure")
 	}
 	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
-	w := NewQuotaKeyModelWater(client)
+	w := NewQuotaKeyModelWater(client, nil)
 
 	pre, err := w.ListCandidateKeys(ctx, "cursor-r5-markerfail", 0)
 	require.NoError(t, err)
@@ -2156,4 +2245,386 @@ func TestQuotaKeyPull_WrittenExpiryDrivesSweeper_EndToEnd(t *testing.T) {
 	candidates, err := water.ListCandidateKeys(ctx, "cursor-any", 0)
 	require.NoError(t, err)
 	require.NotContains(t, candidates, qk.ID, "expired key must not remain a rotation candidate")
+}
+
+// ---------------------------------------------------------------------------
+// CUR-F1（续作卡）：8 条定向测试，逐条对应 /root/CUR-F1.md 裁定点。
+// 仅改本测试文件；不动工作树其它文件。需本地 quota_test 库（unit 标签）。
+// ---------------------------------------------------------------------------
+
+// curF1ConfigSource 是 AutoEntryConfigProvider 的最小测试替身：仅 GetConfig 返回预设配置，
+// ApplyEntryDefaults 原样放行（本卡测试不依赖挂组属性写入）。
+type curF1ConfigSource struct {
+	cfg *CursorAutoEntryConfig
+}
+
+func (c *curF1ConfigSource) GetConfig(_ context.Context) (*CursorAutoEntryConfig, error) {
+	return c.cfg, nil
+}
+func (c *curF1ConfigSource) ApplyEntryDefaults(_ context.Context, _ *ent.Tx, acc *ent.Account, _ *CursorAutoEntryConfig) (*ent.Account, error) {
+	return acc, nil
+}
+
+// curF1ConfigSelecting 构造一个 AutoEntryConfigProvider 测试替身：启用全部已知厂商，
+// 并勾选给定的【实供】模型（vendor 取自 CursorRealSupplyModels，与 ComputeEntryModels 门控一致）。
+// 仅用于把"配置勾选集合"注入 quotaKeyModelWater 以验证裁定 1 的交集语义。
+func curF1ConfigSelecting(models ...string) *curF1ConfigSource {
+	vendors := make(map[string]bool, len(cursorKnownVendors))
+	for v := range cursorKnownVendors {
+		vendors[v] = true
+	}
+	refs := make([]CursorModelRef, 0, len(models))
+	for _, m := range models {
+		var v string
+		for _, sm := range CursorRealSupplyModels {
+			if sm.ID == m {
+				v = sm.Vendor
+				break
+			}
+		}
+		refs = append(refs, CursorModelRef{ID: m, Vendor: v})
+	}
+	return &curF1ConfigSource{cfg: &CursorAutoEntryConfig{
+		Vendors:       vendors,
+		Models:        refs,
+		EntryDefaults: CursorEntryDefaults{RateMultiplier: 1.0, Priority: 1},
+	}}
+}
+
+// TestCURF1_AllowedModels_NoCursorGroup_RealSupplyModel（裁定 1，最关键的一条）：
+// 库里零 cursor 平台分组、存在若干 active 未软删分组且其白名单允许实供模型 X，
+// 配置勾选 X → ListAllowedModels 必含 X、WaterLevel(X) 正常返回、ListCandidateKeys(X) 非空。
+// X 必须取实供模型名（grok-4.7），不能用官方模型名——否则会掩盖勾选侧门控清单错。
+func TestCURF1_AllowedModels_NoCursorGroup_RealSupplyModel(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 配置勾选实供模型 grok-4.7（vendor xai）。
+	cfg := &CursorAutoEntryConfig{
+		Vendors:       map[string]bool{CursorVendorXAI: true},
+		Models:        []CursorModelRef{{ID: "grok-4.7", Vendor: CursorVendorXAI}},
+		EntryDefaults: CursorEntryDefaults{RateMultiplier: 1.0, Priority: 1},
+	}
+	w := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cfg})
+
+	// 非 cursor 平台的活跃分组，白名单允许 grok-4.7（生产无 cursor 平台分组，聚合组按白名单覆盖）。
+	grp := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"grok-4.7"},
+	})
+	// R10-1（CUR-F13）：复原本用例自建分组，避免其（覆盖 grok-4.7 的启用组）残留共享库、
+	// 污染他用例（如 F10 的全等挂载断言、F7 的零覆盖判定）。先清挂载链接再删分组。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(grp.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(grp.ID)).Exec(cctx)
+	})
+
+	// ListAllowedModels 必含实供模型 grok-4.7（交集：勾选集合 ∩ 分组白名单命中）。
+	allowed, err := w.ListAllowedModels(ctx)
+	require.NoError(t, err)
+	require.Contains(t, allowed, "grok-4.7",
+		"real-supply model selected in config AND allowed by an active group must be in ListAllowedModels")
+
+	// WaterLevel(grok-4.7) 正常返回（阈值恒为 quotaKeyWaterLevelThreshold）。
+	cur, thr, err := w.WaterLevel(ctx, "grok-4.7")
+	require.NoError(t, err)
+	require.Equal(t, quotaKeyWaterLevelThreshold, thr, "water level threshold must be the unified constant")
+
+	// 挂一条账号进覆盖组，令水位可数（证明 WaterLevel 真的按白名单统计，而非空跑）。
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	acc := mustCreateCursorAccount(t, client, qk.ID)
+	mustLinkAccountToGroup(t, client, acc.ID, grp.ID)
+	cur, _, err = w.WaterLevel(ctx, "grok-4.7")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, cur, 1, "water level must count the account linked into the covering group")
+
+	// ListCandidateKeys(grok-4.7) 非空：qk 为 active / 非 exhausted / 未过期 / 有剩余容量。
+	cands, err := w.ListCandidateKeys(ctx, "grok-4.7", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk.ID, "active key with capacity must be a candidate for the real-supply model")
+}
+
+// TestCURF1_ComputeEntryModels_GatingFixedForRealSupplyModels（1b，勾选侧门控已修）：
+// ComputeEntryModels 对实供清单 11 项 + §2 保留项全部不剔除；Validate 对 muse/composer
+// 厂商不报 unknown vendor。
+func TestCURF1_ComputeEntryModels_GatingFixedForRealSupplyModels(t *testing.T) {
+	// 用实供清单全集构造配置（所有厂商启用）。
+	vendors := make(map[string]bool, len(cursorKnownVendors))
+	for v := range cursorKnownVendors {
+		vendors[v] = true
+	}
+	models := make([]CursorModelRef, 0, len(CursorRealSupplyModels))
+	for _, m := range CursorRealSupplyModels {
+		models = append(models, CursorModelRef{ID: m.ID, Vendor: m.Vendor})
+	}
+	cfg := &CursorAutoEntryConfig{
+		Vendors:       vendors,
+		Models:        models,
+		EntryDefaults: CursorEntryDefaults{RateMultiplier: 1.0, Priority: 1},
+	}
+
+	// 实供清单每一项都必须被保留（不得因官方模型名快照门控而剔除）。
+	got := ComputeEntryModels(cfg)
+	require.Len(t, got, len(CursorRealSupplyModels),
+		"all real-supply models must survive ComputeEntryModels gating")
+	for _, m := range CursorRealSupplyModels {
+		require.Contains(t, got, m.ID, "real-supply model %q must NOT be filtered out by gating", m.ID)
+	}
+
+	// Validate 不得报 unknown vendor（muse-spark-1.3 / composer-2.5 已纳入 cursorKnownVendors）。
+	require.Equal(t, "", cfg.Validate(),
+		"config with muse/composer real-supply models must pass Validate (no unknown vendor)")
+}
+
+// TestCURF1_AllowedModels_IntersectionExcludesOutside（2，交集之外不纳入）：
+// 配置勾选 [grok-4.7, gpt-6.1-sol]，但仅 grok-4.7 被本用例创建的 active 分组白名单允许；
+// gpt-6.1-sol（同为实供模型，vendor openai）无任何分组白名单 Allows → 不得出现在
+// ListAllowedModels（禁止把"勾选了但无分组覆盖"的模型盲目纳入补池）。
+//
+// 注意：本用例的"应排除"模型刻意取 gpt-6.1-sol 而非 gpt-6-sol——quota_test 是跨测试共享的
+// 持久库，既有用例 TestQuotaKeyModelWater_ListAllowedModelsCursorPlatformOnly 会遗留一个允许
+// gpt-6-sol 的 active 分组，使 gpt-6-sol 在共享库里恒被覆盖、断言 NotContains 永远失败。
+// gpt-6.1-sol 未被任何其它用例的 allowlist 引用，故在共享库下该断言确定成立。
+func TestCURF1_AllowedModels_IntersectionExcludesOutside(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// R9-1（CUR-F12，2026-10-17）：删除"遍历删全库 allow-all 组"的隔离段——该段会误删
+	// 其他用例（如 TestQuotaKeyService_RefreshAccounts_MountsToCursorGroups 的 grpComposite）
+	// 的 allow-all 数据。改为"确定性构造 + 全等断言"：本用例只自建一个精确覆盖组（见下），
+	// 断言 ListAllowedModels == 勾选∩有覆盖；若共享库被他用例遗留 allow-all 组（Allows 恒真），
+	// 会使 gpt-6.1-sol 混入结果使全等断言失败并暴露污染（而非旧版 NotContains 的静默假绿）。
+
+	cfg := &CursorAutoEntryConfig{
+		Vendors: map[string]bool{CursorVendorXAI: true, CursorVendorOpenAI: true},
+		Models: []CursorModelRef{
+			{ID: "grok-4.7", Vendor: CursorVendorXAI},
+			{ID: "gpt-6.1-sol", Vendor: CursorVendorOpenAI},
+		},
+		EntryDefaults: CursorEntryDefaults{RateMultiplier: 1.0, Priority: 1},
+	}
+	w := NewQuotaKeyModelWater(client, &curF1ConfigSource{cfg: cfg})
+
+	// 仅允许 grok-4.7 的分组（无分组允许 gpt-6.1-sol）。
+	grp, err := client.Group.Create().
+		SetName(fmt.Sprintf("c11-f1-out-%d", time.Now().UnixNano())).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{"grok-4.7"}}).
+		Save(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = client.AccountGroup.Delete().
+			Where(accountgroup.GroupIDEQ(grp.ID)).Exec(context.Background())
+		_, _ = client.Group.Delete().
+			Where(entgroup.IDEQ(grp.ID)).Exec(context.Background())
+	})
+
+	allowed, err := w.ListAllowedModels(ctx)
+	require.NoError(t, err)
+	// R9-1 全等断言：本用例仅自建一个只许 grok-4.7 的精确覆盖组，故允许集合应确定等于
+	// 勾选∩有覆盖 = {grok-4.7}。若共享库被他用例遗留 allow-all 组（Enabled=false，Allows 恒真），
+	// gpt-6.1-sol 会被它覆盖而混入结果，使本全等断言失败（暴露污染），而不是旧版 NotContains
+	// 那种"因误删他用例数据才侥幸通过"的静默假绿。
+	require.ElementsMatch(t, []string{"grok-4.7"}, allowed,
+		"ListAllowedModels must equal exactly selected∩covered = {grok-4.7}")
+}
+
+// TestCURF1_UpstreamClassify_ChineseMsgPreserved（3，上游中文 msg 原样）：
+// "每5分钟内仅可刷新1次，请3分钟后再试" → errors.Is(err, ErrUpstreamCooldown) 为真且文本含原文；
+// "密钥额度耗尽或已过期" → 不判冷却，落到过期哨兵。
+// 直接驱动上游客户端的 handleResponse（code=1 分类入口），不发起真实 HTTP。
+func TestCURF1_UpstreamClassify_ChineseMsgPreserved(t *testing.T) {
+	c := &shareAIUpstreamClient{}
+
+	// 限频语义。
+	cooldownMsg := "每5分钟内仅可刷新1次，请3分钟后再试"
+	_, err := c.handleResponse(&shareAIResponse{Code: 1, Msg: cooldownMsg})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrUpstreamCooldown),
+		"rate-limit msg must be classified as ErrUpstreamCooldown")
+	require.Contains(t, err.Error(), cooldownMsg,
+		"cooldown error text must embed the original Chinese msg verbatim")
+
+	// 过期/耗尽终态语义。
+	expiredMsg := "密钥额度耗尽或已过期"
+	_, err = c.handleResponse(&shareAIResponse{Code: 1, Msg: expiredMsg})
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrUpstreamCooldown),
+		"expired/quota-exhausted msg must NOT be classified as cooldown")
+	require.True(t, errors.Is(err, ErrUpstreamKeyExpired),
+		"expired/quota-exhausted msg must hit ErrUpstreamKeyExpired sentinel")
+}
+
+// TestCURF1_UpstreamClassify_UnknownCode1FailsClosed（4，未知 code=1 msg 失败关闭）：
+// 既非限频也非过期耗尽 → 失败关闭，错误文本保留 msg 原文。
+func TestCURF1_UpstreamClassify_UnknownCode1FailsClosed(t *testing.T) {
+	c := &shareAIUpstreamClient{}
+
+	msg := "系统当前繁忙，请稍后再试"
+	_, err := c.handleResponse(&shareAIResponse{Code: 1, Msg: msg})
+	require.Error(t, err)
+	require.False(t, errors.Is(err, ErrUpstreamCooldown),
+		"unknown code=1 msg must NOT be classified as cooldown")
+	require.False(t, errors.Is(err, ErrUpstreamKeyExpired),
+		"unknown code=1 msg must NOT be classified as expired")
+	require.Contains(t, err.Error(), msg,
+		"unknown code=1 error text must preserve the original msg verbatim (fail-closed)")
+}
+
+// TestCURF1_CandidateKeys_CooldownWindow（5，冷却 5 分钟窗口内外）：
+// 带冷却标记且 last_refresh_at=now-1min → 候选排除；=now-6min → 自动重新入选（不等人工 clear）。
+func TestCURF1_CandidateKeys_CooldownWindow(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil)
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 冷却错误标记：前缀须为 ErrUpstreamCooldown.Error()（与 writeCooldownMarker 写入形态一致）。
+	cooldownErr := ErrUpstreamCooldown.Error() + ": 每5分钟内仅可刷新1次"
+
+	// 窗口内（now-1min）：排除。
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).
+		SetLastRefreshError(cooldownErr).
+		SetLastRefreshAt(time.Now().Add(-1 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+	cands, err := w.ListCandidateKeys(ctx, "cursor-f1-cool", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, qk.ID, "cooldown within 5min window must exclude the key")
+
+	// 窗口外（now-6min）：自动重新入选（不必人工 clear）。
+	_, err = client.QuotaKey.UpdateOneID(qk.ID).
+		SetLastRefreshAt(time.Now().Add(-6 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+	cands, err = w.ListCandidateKeys(ctx, "cursor-f1-cool", 0)
+	require.NoError(t, err)
+	require.Contains(t, cands, qk.ID,
+		"cooldown past 5min window must auto re-include the key (no manual clear)")
+}
+
+// TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime（6，非冷却错误不得因时间被当冷却）：
+// 带非冷却 last_refresh_error 的 key，即便 last_refresh_at 很旧，也不产生限频豁免
+// （仍按 exhausted 占位排除）。判据是错误分类而非时间。
+func TestCURF1_CandidateKeys_NonCooldownNotReinstatedByTime(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	w := NewQuotaKeyModelWater(client, nil)
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	// 非冷却错误（未知结果），且 exhausted=true（casSetExhausted 既有语义），时间很旧。
+	nonCooldownErr := "shareai: upstream code=1 unknown result: boom"
+	_, err := client.QuotaKey.UpdateOneID(qk.ID).
+		SetExhausted(true).
+		SetLastRefreshError(nonCooldownErr).
+		SetLastRefreshAt(time.Now().Add(-1 * time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 单元断言：非冷却错误字符串绝不被识别为冷却（判据是分类，不是时间）。
+	require.False(t, isCooldownRefreshError(&nonCooldownErr),
+		"non-cooldown error must not be classified as cooldown")
+
+	// 集成断言：即便时间久远，也不得因"冷却窗口"重新入选（仍按 exhausted 占位排除）。
+	cands, err := w.ListCandidateKeys(ctx, "cursor-f1-noncool", 0)
+	require.NoError(t, err)
+	require.NotContains(t, cands, qk.ID,
+		"non-cooldown error must NOT be reinstated by elapsed time (stays excluded via exhausted)")
+}
+
+// TestCURF1_UpstreamExpired_MarksExpiredNoDateForged（7，上游确认过期 → 状态与日期）：
+// 过期分支后 key status='expired'；且断言没有从 msg 推算或伪造任何日期
+// （expires_at 保持原值，本测试初始为 nil）。
+func TestCURF1_UpstreamExpired_MarksExpiredNoDateForged(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 上游确认过期：哨兵包中文 msg 原文（与 classifyUpstreamError 产出形态一致）。
+	upErr := fmt.Errorf("%w: 密钥额度耗尽或已过期", ErrUpstreamKeyExpired)
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{err: upErr})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	require.Nil(t, qk.ExpiresAt, "test precondition: expires_at starts nil")
+
+	err := svc.PullAccountsForModel(ctx, qk.ID, "cursor-f1-exp")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrUpstreamKeyExpired),
+		"expired upstream must surface ErrUpstreamKeyExpired sentinel")
+
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.Equal(t, domain.QuotaKeyStatusExpired, got.Status,
+		"key must be marked expired after upstream confirms expiry")
+	// 关键约束：绝不得据 msg 反推或伪造任何日期。
+	require.Nil(t, got.ExpiresAt,
+		"expires_at must NOT be written from/derived off the upstream msg (no forged date)")
+	require.NotNil(t, got.LastRefreshError)
+	require.Contains(t, *got.LastRefreshError, "密钥额度耗尽或已过期",
+		"last_refresh_error must preserve the original msg text")
+}
+
+// TestCURF1_CredentialEncryptionOnPull（8，凭证加密）：
+// 拉号落库后 accounts.credentials 中的 access_token/refresh_token 带 enc:v1: 前缀且不等于明文，
+// 且 credentials_mac 非空。需在测试内启用 credcrypt 主密钥以激活加密写路径，结束后复原 passthrough。
+func TestCURF1_CredentialEncryptionOnPull(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+
+	// 启用 credcrypt 主密钥（测试专属），激活加密写路径；defer 复原未配置态（passthrough）。
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = 0x5a
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(raw)
+	_, err := credcrypt.Configure(keyB64, "")
+	require.NoError(t, err)
+	defer credcrypt.Configure("", "")
+
+	modelM := fix1UniqueModel("cursor-f1-enc")
+	// active 分组允许该模型，使挂载成功、账号落库（否则零覆盖回滚、号不入库）。
+	encGrp, err := client.Group.Create().
+		SetName(fmt.Sprintf("c11-f1-enc-%d", time.Now().UnixNano())).
+		SetModelAllowlist(domain.GroupModelAllowlist{Enabled: true, Models: []string{modelM}}).
+		Save(ctx)
+	require.NoError(t, err)
+	// R10-1（CUR-F13）：复原本用例自建分组，避免其残留共享库污染他用例。
+	t.Cleanup(func() {
+		cctx := context.Background()
+		_, _ = client.AccountGroup.Delete().Where(accountgroup.GroupIDEQ(encGrp.ID)).Exec(cctx)
+		_, _ = client.Group.Delete().Where(entgroup.IDEQ(encGrp.ID)).Exec(cctx)
+	})
+
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		batch: &UpstreamPullResult{Accounts: []*UpstreamAccount{
+			{
+				Name:     "f1-enc@x.com",
+				Platform: "cursor",
+				Type:     "oauth",
+				Credentials: map[string]any{
+					"mail":          "f1-enc@x.com",
+					"access_token":  "PLAIN_ACCESS_TOKEN",
+					"refresh_token": "PLAIN_REFRESH_TOKEN",
+				},
+			},
+		}},
+	})
+
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+	err = svc.PullAccountsForModel(ctx, qk.ID, modelM)
+	require.NoError(t, err, "pull must succeed and persist the account")
+
+	accs, err := client.Account.Query().Where(account.QuotaKeyID(qk.ID)).All(ctx)
+	require.NoError(t, err)
+	require.Len(t, accs, 1, "exactly one account must be persisted")
+
+	creds := accs[0].Credentials
+	at, _ := creds["access_token"].(string)
+	rt, _ := creds["refresh_token"].(string)
+	require.True(t, strings.HasPrefix(at, credcrypt.Prefix),
+		"access_token must be encrypted with enc:v1: prefix, got %q", at)
+	require.NotEqual(t, "PLAIN_ACCESS_TOKEN", at, "access_token must not be stored as plaintext")
+	require.True(t, strings.HasPrefix(rt, credcrypt.Prefix),
+		"refresh_token must be encrypted with enc:v1: prefix, got %q", rt)
+	require.NotEqual(t, "PLAIN_REFRESH_TOKEN", rt, "refresh_token must not be stored as plaintext")
+	require.NotEmpty(t, accs[0].CredentialsMAC, "credentials_mac must be non-empty")
 }

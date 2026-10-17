@@ -144,6 +144,9 @@ export interface AutoEntryConfig {
   vendors: Record<string, boolean>
   models: AutoEntryModelRef[]
   entry_defaults: AutoEntryDefaults
+  // 可选模型全集（CUR-F2）：后端实供清单 CursorRealSupplyModels 投影，前端"厂商 → 模型多选"
+  // 的渲染源。只读派生，不回写。取消勾选的模型仍从中渲染，可重新勾回。
+  available_models?: AutoEntryModelRef[]
 }
 
 /** 用量查询（D2-a probe_quota）返回的 key_info 摘要。 */

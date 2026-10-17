@@ -168,8 +168,8 @@ func DefaultAutoEntryConfig() *CursorAutoEntryConfig {
 	for v := range cursorKnownVendors {
 		vendors[v] = true
 	}
-	models := make([]CursorModelRef, 0, len(CursorModelCatalog))
-	for _, m := range CursorModelCatalog {
+	models := make([]CursorModelRef, 0, len(CursorRealSupplyModels))
+	for _, m := range CursorRealSupplyModels {
 		models = append(models, CursorModelRef{ID: m.ID, Vendor: m.Vendor, ProbeStatus: ""})
 	}
 	return &CursorAutoEntryConfig{
@@ -198,6 +198,14 @@ func (s *CursorAutoEntryService) GetConfig(ctx context.Context) (*CursorAutoEntr
 	}
 	if strings.TrimSpace(raw) == "" {
 		return DefaultAutoEntryConfig(), nil
+	}
+	// R4-2：顶层字面 null 必须显式报错，不得静默成零值空模型集
+	// （否则 ComputeEntryModels 返回空 → reconciler 报 "no allowed models" 当成功停轮，
+	// 把配置损坏伪装成用户清空）。(nil / "null") 两种形态都拦截，与现有
+	// INVALID 错误同型。
+	if strings.TrimSpace(raw) == "null" {
+		return nil, infraerrors.New(http.StatusBadRequest, "CURSOR_AUTO_ENTRY_CONFIG_INVALID",
+			"cursor_auto_entry_config must not be null")
 	}
 	var cfg CursorAutoEntryConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
@@ -229,6 +237,38 @@ func (s *CursorAutoEntryService) UpdateConfig(ctx context.Context, cfg *CursorAu
 	return cfg, nil
 }
 
+// AutoEntryConfigResponse 是 GET auto_entry_config 端点的响应体：在既有配置字段
+// （vendors/models/entry_defaults）之外附带"可选模型全集" available_models——前端
+// "厂商勾选 → 模型多选"的渲染源。available_models 来自 F1 落地的实供清单
+// CursorRealSupplyModels（绝非官方 catalog：后者会把实供模型全部判为非法），为只读派生
+// 数据，不写入 settings，不新增任何 DB 字段/表。
+type AutoEntryConfigResponse struct {
+	Vendors         map[string]bool     `json:"vendors"`
+	Models          []CursorModelRef    `json:"models"`
+	EntryDefaults   CursorEntryDefaults `json:"entry_defaults"`
+	AvailableModels []CursorModelRef    `json:"available_models"`
+}
+
+// GetConfigResponse 读取配置并返回含"可选模型全集"的 API 响应（供 GetAutoEntryConfig 端点）。
+// available_models 以实供清单 CursorRealSupplyModels 为准（含 muse-spark-1.3 等），与
+// DefaultAutoEntryConfig / ComputeEntryModels 的口径一致，避免前端硬编码一份可能漂移的全集。
+func (s *CursorAutoEntryService) GetConfigResponse(ctx context.Context) (*AutoEntryConfigResponse, error) {
+	cfg, err := s.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	available := make([]CursorModelRef, 0, len(CursorRealSupplyModels))
+	for _, m := range CursorRealSupplyModels {
+		available = append(available, CursorModelRef{ID: m.ID, Vendor: m.Vendor, ProbeStatus: ""})
+	}
+	return &AutoEntryConfigResponse{
+		Vendors:         cfg.Vendors,
+		Models:          cfg.Models,
+		EntryDefaults:   cfg.EntryDefaults,
+		AvailableModels: available,
+	}, nil
+}
+
 // Normalize 保证 vendors/models 非 nil（缺省时填零值结构，避免前端 null 崩溃）。
 func (c *CursorAutoEntryConfig) Normalize() {
 	if c.Vendors == nil {
@@ -242,12 +282,21 @@ func (c *CursorAutoEntryConfig) Normalize() {
 // Validate 校验配置自洽：models 中每条必须有非空 ID 与已知 vendor，且 vendor 在 vendors 中启用
 // （勾选模型必须对应已勾选厂商）；entry_defaults 的 rate_multiplier 必须为正。返回首个违规描述。
 func (c *CursorAutoEntryConfig) Validate() string {
+	// CUR-F8：实供清单的"ID → 真实归属厂商"映射。ID 落在实供清单内时，
+	// 自报 vendor 必须等于真实归属，否则视为厂商开关被冒用绕过。
+	realVendor := CursorRealSupplyVendorByID()
 	for _, m := range c.Models {
 		if m.ID == "" {
 			return "model entry with empty id"
 		}
 		if _, ok := cursorKnownVendors[m.Vendor]; !ok {
 			return "unknown vendor: " + m.Vendor
+		}
+		// 落入实供清单：自报 vendor 必须等同清单真实归属（CUR-F8 冒用校验）。
+		// 例：gpt-6-sol 自报 vendor=xai 并关 openai / 开 xai，意在把 OpenAI 模型
+		// 经 xai 开关纳入补池——真实归属为 openai，必须拦截。
+		if real, ok := realVendor[m.ID]; ok && real != m.Vendor {
+			return "model " + m.ID + " belongs to vendor " + real + ", not " + m.Vendor
 		}
 		if !c.Vendors[m.Vendor] {
 			return "model " + m.ID + " belongs to disabled vendor " + m.Vendor
@@ -259,27 +308,36 @@ func (c *CursorAutoEntryConfig) Validate() string {
 	return ""
 }
 
-// ComputeEntryModels 计算"勾选模型 ∩ 静态清单"的有效模型 ID 列表（并受厂商勾选门控）。
+// ComputeEntryModels 计算"勾选模型 ∩ 实供清单"的有效模型 ID 列表（并受厂商勾选门控）。
 //
-// 规则（D2-a 数据结构）：以配置 Models 为用户勾选集合，与 CursorModelCatalog 静态清单取交集
-// （剔除任何不在静态清单中的失效/笔误 ID），同时要求该模型所属厂商在 Vendors 中启用。
-// 返回保序、去重的模型 ID。空结果（厂商全关 / 模型清空）是合法态——账号仍入库、挂组不受影响。
+// 规则（裁定 1 / docs-local/cursor-model-catalog-fact.md）：以配置 Models 为用户勾选集合，
+// 与 CursorRealSupplyModels【实供】清单取交集（剔除任何不在实供清单中的失效/笔误/官方口径 ID），
+// 同时要求该模型所属厂商在 Vendors 中启用。返回保序、去重的模型 ID。空结果（厂商全关 /
+// 模型清空 / 勾选了上游不供的官方模型名）是合法态——账号仍入库、挂组不受影响。
+//
+// 注意：门控清单是【实供】清单（CursorRealSupplyModelIDSet），不是官方模型名快照
+// CursorModelCatalog——后者 §1 的 11 个实供模型全部不在其内（11/11 MISSING），继续用它会
+// 把本渠道所有实供模型判为非法，导致补池交集恒空、reconciler 每轮空跑。
 func ComputeEntryModels(cfg *CursorAutoEntryConfig) []string {
 	if cfg == nil {
 		return []string{}
 	}
-	catalog := CursorModelIDSet()
+	// CUR-F8：以实供清单"ID → 真实归属厂商"为权威门控依据，不信配置自报 vendor。
+	// 即便配置把 gpt-6-sol 的 vendor 自报为 xai，此处仍按真实归属 openai 判开关，
+	// 自报 vendor 被冒用时无法再绕过厂商门控。ID 不在实供清单内 → 剔除（既有语义）。
+	realVendor := CursorRealSupplyVendorByID()
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(cfg.Models))
 	for _, m := range cfg.Models {
 		if m.ID == "" {
 			continue
 		}
-		if _, ok := catalog[m.ID]; !ok {
-			continue // 不在静态清单：剔除
+		real, ok := realVendor[m.ID]
+		if !ok {
+			continue // 不在实供清单：剔除
 		}
-		if !cfg.Vendors[m.Vendor] {
-			continue // 厂商未勾选：门控剔除
+		if !cfg.Vendors[real] {
+			continue // 真实归属厂商未勾选：门控剔除
 		}
 		if _, dup := seen[m.ID]; dup {
 			continue

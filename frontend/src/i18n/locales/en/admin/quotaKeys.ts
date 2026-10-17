@@ -31,6 +31,7 @@ export default {
     notes: 'Notes',
     notesPlaceholder: 'Optional notes',
     never: 'Never',
+    expiryUnknown: 'Expiry time unknown',
     na: '—',
     yes: 'Yes',
     no: 'No',
@@ -94,6 +95,8 @@ export default {
       vendorXAI: 'xAI',
       vendorDeepSeek: 'DeepSeek',
       vendorMistral: 'Mistral',
+      vendorMuse: 'Muse',
+      vendorComposer: 'Composer',
       models: 'Model List (filtered by vendor)',
       priority: 'Priority',
       rateMultiplier: 'Rate Multiplier',
@@ -101,7 +104,10 @@ export default {
       concurrencyPlaceholder: 'TBD after measurement',
       save: 'Save Config',
       saved: 'Entry config saved',
-      saveError: 'Failed to save entry config'
+      saveError: 'Failed to save entry config',
+      staleModelsCleaned: 'Cleaned {count} stale model selection(s) not in the real-supply list',
+      vendorAttributionFixed: 'Fixed {count} vendor attribution(s) (config vendor mismatched real-supply list, auto-aligned)',
+      staleCleanedAndVendorsFixed: 'Cleaned {ghost} stale model selection(s) not in the real-supply list and fixed {vendor} vendor attribution(s)'
     },
     probe: {
       button: 'Probe Quota',

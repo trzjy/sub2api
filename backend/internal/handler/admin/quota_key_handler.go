@@ -341,9 +341,20 @@ func parseQuotaKeyID(c *gin.Context) (int64, bool) {
 
 // respondQuotaKeyError 统一映射激活码领域的错误到 HTTP。
 // 不存在（软删行不可见）规范映射到 404，其余沿用既有 response.ErrorFrom。
+//
+// R1-1：手动刷新上游失败/终态结果（*service.UpstreamPullError）须把上游中文 msg 原文
+// 逐字回显到响应 message（HTTP 502，无英文前缀/映射；原文仍是错误信息、非 success）。
+// 不得改 response 包 / 不得改 FromError 全局行为——仅在此 handler 层做一次性翻译。
+// 其他错误走默认映射（FromError 对非 ApplicationError 替换 message 为 "internal error" 的
+// 既有行为不受影响）。
 func respondQuotaKeyError(c *gin.Context, err error) {
 	if errors.Is(err, service.ErrQuotaKeyNotFound) || ent.IsNotFound(err) {
 		response.ErrorFrom(c, infraerrors.NotFound("QUOTA_KEY_NOT_FOUND", "quota key not found"))
+		return
+	}
+	var upe *service.UpstreamPullError
+	if errors.As(err, &upe) {
+		response.ErrorFrom(c, infraerrors.New(http.StatusBadGateway, "QUOTA_KEY_UPSTREAM", upe.Message()))
 		return
 	}
 	response.ErrorFrom(c, err)
@@ -356,12 +367,12 @@ func (h *QuotaKeyHandler) GetAutoEntryConfig(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "Cursor auto-entry service unavailable")
 		return
 	}
-	cfg, err := h.autoEntry.GetConfig(c.Request.Context())
+	resp, err := h.autoEntry.GetConfigResponse(c.Request.Context())
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, cfg)
+	response.Success(c, resp)
 }
 
 type updateAutoEntryConfigRequest struct {

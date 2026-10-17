@@ -146,6 +146,32 @@ export function formatDateTime(
 }
 
 /**
+ * 激活码到期时间的展示解析（纯函数，便于单测，不持有 i18n）。
+ *
+ * 语义（CUR-F2 裁定 4）：
+ * - null/undefined：上游未给出到期时间（该码尚未成功拉号 / key_info.expired_at 为空）
+ *   ⇒ 视为"到期时间未知"，**不等于**"永不过期"。由调用方映射为 i18n 文案。
+ * - 空串：管理员创建表单显式留空 ⇒ "永不过期"语义（创建表单约定，路径不同，不改）。
+ * - 其它：返回格式化的日期串。
+ */
+export type ExpiryDisplay =
+  | { status: 'unknown' }
+  | { status: 'never' }
+  | { status: 'date'; text: string }
+
+export function resolveExpiryDisplay(
+  value: string | null | undefined
+): ExpiryDisplay {
+  if (value === null || value === undefined) {
+    return { status: 'unknown' }
+  }
+  if (value.trim() === '') {
+    return { status: 'never' }
+  }
+  return { status: 'date', text: formatDateTime(value) }
+}
+
+/**
  * 格式化日期时间（精确到分钟）
  */
 export function formatDateTimeToMinute(

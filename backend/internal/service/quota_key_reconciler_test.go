@@ -29,6 +29,7 @@ type reconOpsRepo struct {
 	jobName    string
 	lastResult string
 	lastError  string
+	lastSucc   bool
 }
 
 // captureLog 把标准日志输出重定向到缓冲区并返回读取函数（F4：断言告警级日志内容）。
@@ -48,6 +49,11 @@ func (o *reconOpsRepo) UpsertJobHeartbeat(_ context.Context, input *OpsUpsertJob
 	o.mu.Lock()
 	o.calls++
 	o.jobName = input.JobName
+	if input.LastSuccessAt != nil {
+		o.lastSucc = true
+	} else {
+		o.lastSucc = false
+	}
 	if input.LastResult != nil {
 		o.lastResult = *input.LastResult
 	}
@@ -80,6 +86,13 @@ func (o *reconOpsRepo) lastErrorVal() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.lastError
+}
+
+// lastSuccessCalled 报告最近一次心跳是否带 LastSuccessAt（R15-1 断言用）。
+func (o *reconOpsRepo) lastSuccessCalled() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lastSucc
 }
 
 // fakeModelWater 是 QuotaKeyModelWaterProvider 的测试替身，控制枚举的模型、

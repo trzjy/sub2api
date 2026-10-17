@@ -1,0 +1,190 @@
+//go:build unit
+
+package service
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/domain"
+	"github.com/stretchr/testify/require"
+)
+
+// ---------------------------------------------------------------------------
+// R1-1：手动刷新错误原文必须到达页面 + 未知结果不得显示成功。
+// 验证：手动链路（RefreshAccounts）返回的错误携带上游中文 msg 原文（Cooldown/Expired/Unknown）；
+// 自动链路（PullAccountsForModel）对未知结果仍走 casSetExhausted 且静默停（落库行为不变）。
+// ---------------------------------------------------------------------------
+
+func TestCURF4_RefreshAccounts_CooldownCarriesOriginalMessage(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		err: NewUpstreamCooldownError("每5分钟内仅可刷新1次，请3分钟后再试"),
+	})
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	err := svc.RefreshAccounts(ctx, qk.ID)
+	require.Error(t, err, "manual refresh must surface the upstream error (not success)")
+	var upe *UpstreamPullError
+	require.True(t, errors.As(err, &upe), "manual refresh must return *UpstreamPullError")
+	require.Equal(t, UpstreamCooldown, upe.Kind)
+	require.Contains(t, upe.Message(), "每5分钟内仅可刷新1次，请3分钟后再试",
+		"cooldown response message must carry the original Chinese msg verbatim")
+
+	// 落库：冷却豁免 exhausted（B2），但标记已写入。
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.False(t, got.Exhausted, "cooldown must NOT set exhausted")
+	require.NotNil(t, got.LastRefreshError)
+}
+
+func TestCURF4_RefreshAccounts_ExpiredCarriesOriginalMessage(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		err: NewUpstreamExpiredError("密钥额度耗尽或已过期"),
+	})
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	err := svc.RefreshAccounts(ctx, qk.ID)
+	require.Error(t, err, "manual refresh must surface the upstream error (not success)")
+	var upe *UpstreamPullError
+	require.True(t, errors.As(err, &upe), "manual refresh must return *UpstreamPullError")
+	require.Equal(t, UpstreamExpired, upe.Kind)
+	require.Contains(t, upe.Message(), "密钥额度耗尽或已过期",
+		"expired response message must carry the original Chinese msg verbatim")
+}
+
+func TestCURF4_RefreshAccounts_UnknownCarriesOriginalMessage(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		err: NewUpstreamUnknownError("some unknown text"),
+	})
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	err := svc.RefreshAccounts(ctx, qk.ID)
+	require.Error(t, err, "manual refresh must NOT report success on unknown upstream result")
+	var upe *UpstreamPullError
+	require.True(t, errors.As(err, &upe), "manual refresh must return *UpstreamPullError")
+	require.Equal(t, UpstreamUnknown, upe.Kind)
+	require.Contains(t, upe.Message(), "some unknown text",
+		"unknown response message must carry the original msg verbatim")
+}
+
+// TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel：自动链路对未知上游结果
+// 走 casSetExhausted（落库 exhausted=true 不变），但不再裸 return nil（R13-2）——改为透传
+// 含 ErrUpstreamKeyBlocked 哨兵的包裹错误，使 reconciler 如实计入失败（不再被记成成功）。
+// 手动链路仍返回 *UpstreamPullError（F4 语义不变，见 TestCURF4_RefreshAccounts_UnknownCarriesOriginalMessage）。
+func TestCURF4_PullAccountsForModel_UnknownSurfacesBlockedSentinel(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{
+		err: NewUpstreamUnknownError("boom unknown"),
+	})
+	qk := mustCreateQuotaKey(t, client, domain.QuotaKeyStatusActive)
+
+	// 自动链路（manual=false）：返回含 ErrUpstreamKeyBlocked 哨兵的包裹错误（不再静默 nil）。
+	err := svc.PullAccountsForModel(ctx, qk.ID, "cursor-f4-unknown")
+	require.Error(t, err, "automatic chain must surface the blocked sentinel (not silent success)")
+	require.True(t, errors.Is(err, ErrUpstreamKeyBlocked),
+		"automatic unknown path must wrap ErrUpstreamKeyBlocked, got=%v", err)
+	require.Contains(t, err.Error(), "boom unknown",
+		"underlying reason summary must be carried in the wrapped error")
+
+	// 落库行为零变化：exhausted=true（casSetExhausted 既有语义）且保留原文。
+	got, err := client.QuotaKey.Get(ctx, qk.ID)
+	require.NoError(t, err)
+	require.True(t, got.Exhausted, "automatic unknown path still drives exhausted=true (casSetExhausted)")
+	require.NotNil(t, got.LastRefreshError)
+	require.Contains(t, *got.LastRefreshError, "boom unknown",
+		"last_refresh_error must preserve the original msg text")
+}
+
+// ---------------------------------------------------------------------------
+// R1-2：挂组门槛与枚举/水位对齐（active + 未软删）。
+// ---------------------------------------------------------------------------
+
+func TestCURF4_FindGroupsAllowingModel_ExcludesNonActiveOrSoftDeleted(t *testing.T) {
+	client := quotaKeyTestEntClient(t)
+	ctx := context.Background()
+	modelM := "cursor-claude-opus-4"
+
+	// 分组 A：active + 白名单含 M（应入选）。
+	grpA := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{modelM},
+	})
+	// 分组 B：disabled + 白名单含 M（不应入选）。
+	grpB := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{modelM},
+	})
+	require.NoError(t, client.Group.UpdateOneID(grpB.ID).SetStatus(domain.StatusDisabled).Exec(ctx))
+	// 分组 C：软删 + 白名单含 M（不应入选）。
+	grpC := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{modelM},
+	})
+	require.NoError(t, client.Group.UpdateOneID(grpC.ID).SetDeletedAt(time.Now()).Exec(ctx))
+
+	// 分组 D：active 但白名单不含 M（不应入选，白名单判定不变）。
+	grpD := mustCreateGroup(t, client, domain.GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"other-model"},
+	})
+
+	tx, err := client.Tx(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	svc, _ := qkNewTestService(t, &fakeUpstreamClient{})
+	ids, err := svc.findGroupsAllowingModel(ctx, tx, modelM)
+	require.NoError(t, err)
+
+	require.Contains(t, ids, grpA.ID, "active+allowlist group must be in the mount set")
+	require.NotContains(t, ids, grpB.ID, "disabled group must NOT be in the mount set")
+	require.NotContains(t, ids, grpC.ID, "soft-deleted group must NOT be in the mount set")
+	require.NotContains(t, ids, grpD.ID, "allowlist-mismatched group must NOT be in the mount set")
+}
+
+// ---------------------------------------------------------------------------
+// R1-3：关键词分类消灭否定句误判。
+// ---------------------------------------------------------------------------
+
+func TestCURF4_ClassifyUpstreamError_NoFalsePositiveOnNegatives(t *testing.T) {
+	// 反例（必须覆盖——否定句/普通文案不得误判）。
+	negExpired := classifyUpstreamError("密钥未过期")
+	require.False(t, errors.Is(negExpired, ErrUpstreamKeyExpired), "否定句'未过期' 不得判过期")
+	require.False(t, errors.Is(negExpired, ErrUpstreamCooldown), "否定句'未过期' 不得判冷却")
+
+	negRefresh := classifyUpstreamError("刷新失败")
+	require.False(t, errors.Is(negRefresh, ErrUpstreamCooldown), "普通'刷新失败' 不含'仅可刷新'，不得判冷却")
+	require.False(t, errors.Is(negRefresh, ErrUpstreamKeyExpired), "普通'刷新失败' 不得判过期")
+
+	// 正例（生产真实文案）。
+	cooldown := classifyUpstreamError("每5分钟内仅可刷新1次，请3分钟后再试")
+	require.True(t, errors.Is(cooldown, ErrUpstreamCooldown), "生产冷却样本必须判冷却（仅可刷新）")
+	require.False(t, errors.Is(cooldown, ErrUpstreamKeyExpired), "冷却样本不得判过期")
+
+	expired1 := classifyUpstreamError("密钥额度耗尽或已过期")
+	require.True(t, errors.Is(expired1, ErrUpstreamKeyExpired), "生产过期样本必须判 expired")
+
+	expired2 := classifyUpstreamError("密钥已过期")
+	require.True(t, errors.Is(expired2, ErrUpstreamKeyExpired), "'密钥已过期' 必须判 expired")
+
+	// 过期/耗尽优先于限频：含"仅可刷新"且含"已过期"的 msg 应归过期。
+	both := classifyUpstreamError("密钥已过期，每5分钟内仅可刷新1次")
+	require.True(t, errors.Is(both, ErrUpstreamKeyExpired), "同时命中的 msg 应优先归过期")
+
+	// 未知结果 failure-closed：原文保留。
+	unknown := classifyUpstreamError("系统当前繁忙，请稍后再试")
+	require.False(t, errors.Is(unknown, ErrUpstreamCooldown))
+	require.False(t, errors.Is(unknown, ErrUpstreamKeyExpired))
+	var upe *UpstreamPullError
+	require.True(t, errors.As(unknown, &upe))
+	require.Contains(t, upe.Message(), "系统当前繁忙，请稍后再试")
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/pkg/credcrypt"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,6 +28,10 @@ import (
 func newQuotaKeyCentralizedService(t *testing.T, upstream QuotaKeyUpstreamClient) (*adminServiceImpl, *QuotaKeyService, *ent.Client, *quotaCapRealInsertRepo) {
 	t.Helper()
 	client := quotaKeyTestEntClient(t)
+	// R6-2：公共 setup 安装固定测试主密钥，激活加密写路径；测试结束复原未配置态。
+	_, err := credcrypt.Configure(quotaKeyTestCredcryptKeyB64, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = credcrypt.Configure("", "") })
 	repo := &quotaCapRealInsertRepo{client: client}
 	repo.accounts = map[int64]*Account{}
 	adminSvc := &adminServiceImpl{accountRepo: repo, entClient: client}

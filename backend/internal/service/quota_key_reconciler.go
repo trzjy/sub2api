@@ -271,6 +271,9 @@ func (r *QuotaKeyReconciler) runOnce() {
 	// mountStopReason 非空表示本轮命中 F4 哨兵（ErrQuotaKeyMountFailed）：立即停止本轮
 	// 后续候选拉号，并改写失败心跳（不再走成功摘要）。
 	mountStopReason := ""
+	// R15-1：本轮 ErrUpstreamKeyBlocked（上游失败、key 已 exhausted 占位）计数。
+	// 单 key 失败不停轮（既有语义），但收尾心跳必须如实记失败，不得记成功。
+	blockedCount := 0
 models:
 	for _, m := range models {
 		// double-checked exit：每处理一组前确认未停止。
@@ -305,9 +308,12 @@ models:
 			// F2：持有模型 m 传入 pullKey，使补池拉号携带 M 上下文
 			//（触发 §13.3 分组挂载，而非落成裸号）。
 			// F4：命中 MountFailed 哨兵 → 停本轮后续候选拉号（含其余模型）。
-			if r.pullKey(ctx, keyID, m) {
+			if mf, blk := r.pullKey(ctx, keyID, m); mf {
 				mountStopReason = fmt.Sprintf("stopped: upstream may have been consumed (mount failed) for quota key %d", keyID)
+				_ = blk
 				break models
+			} else if blk {
+				blockedCount++
 			}
 		}
 	}
@@ -319,6 +325,14 @@ models:
 		return
 	}
 
+	if blockedCount > 0 {
+		// R15-1：本轮发生过上游拉号失败（key 已 exhausted 占位）——心跳如实记失败，
+		// 不得记成功。不停轮语义保持：仅反映结果，不改变下一轮行为。
+		r.recordHeartbeat(ctx, runAt, false,
+			fmt.Errorf("quota_key_reconcile: %d upstream pull(s) blocked (keys moved to exhausted placeholder)", blockedCount),
+			"")
+		return
+	}
 	if candidateCount == 0 {
 		// 无候选 key：停止补池并记录原因（可能是所有模型均达水位，或候选 key 不可补）。
 		r.recordHeartbeat(ctx, runAt, true, nil, "no candidate keys for any allowed model")
@@ -338,22 +352,24 @@ models:
 // ErrQuotaKeyMountFailed（上游已发号成功、本地挂载/落库失败 —— shareai 拉号非幂等，
 // 上游该次配额可能已被消耗），调用方（runOnce）据此停止本轮后续候选拉号并写失败心跳。
 // 其余错误返回 false，由调用方按既有语义（记日志、继续下一个候选）处理。
-func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM string) (mountFailed bool) {
+func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM string) (mountFailed bool, blocked bool) {
 	// 单 flight：若同 key 已在拉号，合并为 pending wakeup 后直接返回。
 	if !r.coalescer.tryBegin(keyID) {
-		return false
+		return false, false
 	}
 	// double-checked exit / F3：发起真实拉号前在 coalescer 同一 c.mu 临界区内做最终确认，
 	// 与 Stop() 的停机置位可线性化——Stop 置位后绝不新发起（已发起的在途者等待其结束）。
 	if !r.coalescer.confirmBegin(keyID) {
 		r.coalescer.end(keyID)
-		return false
+		return false, false
 	}
 	defer func() {
 		// pending wakeup：若拉号期间又有同 key 请求，结束后补拉一次（补拉本身同样受门禁）。
 		if r.coalescer.end(keyID) {
-			if r.pullKey(ctx, keyID, modelM) {
+			if mf, blk := r.pullKey(ctx, keyID, modelM); mf {
 				mountFailed = true
+			} else if blk {
+				blocked = true
 			}
 		}
 	}()
@@ -370,13 +386,21 @@ func (r *QuotaKeyReconciler) pullKey(ctx context.Context, keyID int64, modelM st
 		// 只带 quota_key_id 与语义原因，不落任何凭据/账号内容。
 		if errors.Is(err, ErrQuotaKeyMountFailed) {
 			log.Printf("[QuotaKeyReconcile] WARN: quota key %d mount failed after upstream success; upstream may have been consumed once (non-idempotent, no retry this round): %v", keyID, err)
-			return true
+			return true, false
+		}
+		// R13-2：自动链路未知上游失败（ErrUpstreamKeyBlocked）——记失败级日志（含 key id 与
+		// 原因摘要，不落凭据）、不加 pulled 计数、返回 false（不停轮，下一候选继续；单 key 失败
+		// 不中断既有语义保持不变）。落库（casSetExhausted 已置 exhausted=true）行为零变化，心跳
+		// 摘要 reconcileResult(pulled) 只反映真实成功数，ops 侧据失败日志 + 低计数可辨。
+		if errors.Is(err, ErrUpstreamKeyBlocked) {
+			log.Printf("[QuotaKeyReconcile] WARN: quota key %d upstream pull blocked (failure counted, not success): %v", keyID, err)
+			return false, true
 		}
 		log.Printf("[QuotaKeyReconcile] pull accounts for quota key %d failed: %v", keyID, err)
-		return false
+		return false, false
 	}
 	r.pulled.Add(1)
-	return false
+	return false, false
 }
 
 // recordHeartbeat 写一次 job 心跳（照 quota_key_sweeper.recordHeartbeat 同型）。

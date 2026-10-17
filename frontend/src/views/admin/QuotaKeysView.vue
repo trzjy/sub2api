@@ -428,7 +428,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, resolveExpiryDisplay } from '@/utils/format'
 import { adminAPI } from '@/api/admin'
 import type {
   QuotaKey,
@@ -525,8 +525,10 @@ function statusBadgeClass(row: QuotaKey | QuotaKeyDetail): string {
 }
 
 function formatExpiresAt(value: string | null | undefined): string {
-  if (!value) return t('admin.quotaKeys.never')
-  return formatDateTime(value)
+  const r = resolveExpiryDisplay(value)
+  if (r.status === 'unknown') return t('admin.quotaKeys.expiryUnknown')
+  if (r.status === 'never') return t('admin.quotaKeys.never')
+  return r.text
 }
 
 function isAccountsExpanded(id: number): boolean {
