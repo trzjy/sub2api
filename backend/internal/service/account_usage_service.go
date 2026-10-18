@@ -874,6 +874,17 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	if account == nil || !account.IsOAuth() {
 		return nil, nil
 	}
+	// 探测开始前快照账号级限流代际：清除 CAS 绑定该代际，防止旧探测结果
+	// 清除探测期间由新 429 写入的更新一代限流。
+	var observedLimitedAt, observedResetAt *time.Time
+	if account.RateLimitedAt != nil {
+		limitedAt := *account.RateLimitedAt
+		observedLimitedAt = &limitedAt
+	}
+	if account.RateLimitResetAt != nil {
+		resetAt := *account.RateLimitResetAt
+		observedResetAt = &resetAt
+	}
 	accessToken := ""
 	if !account.IsOpenAIAgentIdentity() {
 		accessToken = account.GetOpenAIAccessToken()
@@ -950,6 +961,11 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	}
 	if len(updates) > 0 {
 		s.persistOpenAICodexProbeSnapshot(account.ID, updates)
+		// 成功(2xx)且明确确认 5h/7d 均未耗尽时才收敛账号级限流；429-with-headers
+		// 或其它非 2xx 响应不得触发清理。observed 代际在探测前快照，见 helper。
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			s.clearOpenAIRateLimitAfterQuotaRecovery(account.ID, observedLimitedAt, observedResetAt, updates)
+		}
 		return updates, nil
 	}
 	return nil, nil
@@ -969,6 +985,76 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 		if err := s.accountRepo.UpdateExtra(updateCtx, accountID, updates); err == nil {
 			notifyOpenAIAutoReset(accountID)
 		}
+	}()
+}
+
+// openAIRateLimitRecoveryRepository 是账号级限流 CAS 清除的窄接口（镜像 grok 先例），
+// 不扩展 AccountRepository 大接口，避免测试桩连锁破坏。
+type openAIRateLimitRecoveryRepository interface {
+	ClearOpenAIRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error)
+}
+
+// openAICodexProbeConfirmsQuotaAvailable 报告新鲜成功的 quota probe 是否明确确认 5h 与 7d 均未耗尽。
+// 两个窗口的 used_percent 都必须显式出现且 < 100：任一窗口缺失（无明确使用率）或已耗尽都不得清除。
+func openAICodexProbeConfirmsQuotaAvailable(updates map[string]any) bool {
+	used5h, ok5h := resolveAccountExtraNumber(updates, "codex_5h_used_percent")
+	used7d, ok7d := resolveAccountExtraNumber(updates, "codex_7d_used_percent")
+	return ok5h && ok7d && used5h < 100 && used7d < 100
+}
+
+// clearOpenAIRateLimitAfterQuotaRecovery 在 quota probe 成功路径上，把探测前读到的账号级限流代际
+// 与"5h/7d 均未耗尽"的最新确认一起交给 CAS 清除。observed 代际在探测前快照，更新的是探测定序：
+// 探测开始后新写入的 429（新 RateLimitedAt）会使 CAS 失配，本次清除零写入、保留新限流。
+// 该函数本身异步执行（镜像 persistOpenAICodexProbeSnapshot 姿态），不阻塞探测调用方。
+func (s *AccountUsageService) clearOpenAIRateLimitAfterQuotaRecovery(
+	accountID int64,
+	observedLimitedAt, observedResetAt *time.Time,
+	updates map[string]any,
+) {
+	if s == nil || s.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	if observedLimitedAt == nil || observedResetAt == nil {
+		// 探测前无账号级限流（已清除或从未设置）——无需收敛，也不得制造清除。
+		return
+	}
+	if !openAICodexProbeConfirmsQuotaAvailable(updates) {
+		return
+	}
+	limitedAt := *observedLimitedAt
+	resetAt := *observedResetAt
+	recoveryRepo, ok := s.accountRepo.(openAIRateLimitRecoveryRepository)
+	if !ok {
+		return
+	}
+
+	go func() {
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer updateCancel()
+		if err := updateCtx.Err(); err != nil {
+			return
+		}
+		cleared, err := recoveryRepo.ClearOpenAIRateLimitIfObserved(updateCtx, accountID, limitedAt, resetAt)
+		if err != nil {
+			slog.Warn("openai_quota_probe_rate_limit_recovery_clear_failed",
+				"account_id", accountID, "error", err)
+			return
+		}
+		if !cleared {
+			// CAS 失配：探测期间新 429 已写入更一代限流（或代际已变更）。零写入，
+			// 保留新限流，不把它当作已清除记录。
+			slog.Debug("openai_quota_probe_rate_limit_clear_missed",
+				"account_id", accountID,
+				"observed_limited_at", limitedAt.UTC(),
+				"observed_reset_at", resetAt.UTC(),
+			)
+			return
+		}
+		slog.Info("openai_quota_probe_rate_limit_cleared",
+			"account_id", accountID,
+			"observed_limited_at", limitedAt.UTC(),
+			"observed_reset_at", resetAt.UTC(),
+		)
 	}()
 }
 

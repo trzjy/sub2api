@@ -9,8 +9,15 @@ import (
 
 type accountUsageCodexProbeRepo struct {
 	stubOpenAIAccountRepo
-	updateExtraCh chan map[string]any
-	rateLimitCh   chan time.Time
+	updateExtraCh    chan map[string]any
+	rateLimitCh      chan time.Time
+	clearRateLimitCh chan clearRateLimitCall
+}
+
+type clearRateLimitCall struct {
+	id                int64
+	observedLimitedAt time.Time
+	observedResetAt   time.Time
 }
 
 func (r *accountUsageCodexProbeRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
@@ -29,6 +36,13 @@ func (r *accountUsageCodexProbeRepo) SetRateLimited(_ context.Context, _ int64, 
 		r.rateLimitCh <- resetAt
 	}
 	return nil
+}
+
+func (r *accountUsageCodexProbeRepo) ClearOpenAIRateLimitIfObserved(_ context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error) {
+	if r.clearRateLimitCh != nil {
+		r.clearRateLimitCh <- clearRateLimitCall{id: id, observedLimitedAt: observedLimitedAt, observedResetAt: observedResetAt}
+	}
+	return true, nil
 }
 
 func TestShouldRefreshOpenAICodexSnapshot(t *testing.T) {
@@ -255,4 +269,151 @@ func TestBuildCodexUsageProgressFromExtra_ZerosExpiredWindow(t *testing.T) {
 			t.Fatalf("expected Utilization=0 for expired 7d window, got %v", progress.Utilization)
 		}
 	})
+}
+
+func TestOpenAICodexProbeConfirmsQuotaAvailable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both windows explicit and below 100 confirms", func(t *testing.T) {
+		updates := map[string]any{
+			"codex_5h_used_percent": 0.0,
+			"codex_7d_used_percent": 0.0,
+		}
+		if !openAICodexProbeConfirmsQuotaAvailable(updates) {
+			t.Fatal("expected 5h=0%,7d=0% to confirm quota available")
+		}
+	})
+
+	t.Run("one window missing does not confirm", func(t *testing.T) {
+		updates := map[string]any{"codex_5h_used_percent": 0.0}
+		if openAICodexProbeConfirmsQuotaAvailable(updates) {
+			t.Fatal("missing 7d used_percent must not confirm")
+		}
+	})
+
+	t.Run("one window exhausted does not confirm", func(t *testing.T) {
+		updates := map[string]any{
+			"codex_5h_used_percent": 100.0,
+			"codex_7d_used_percent": 0.0,
+		}
+		if openAICodexProbeConfirmsQuotaAvailable(updates) {
+			t.Fatal("5h=100% must not confirm")
+		}
+	})
+
+	t.Run("one window at or above 100 does not confirm", func(t *testing.T) {
+		updates := map[string]any{
+			"codex_5h_used_percent": 0.0,
+			"codex_7d_used_percent": 100.0,
+		}
+		if openAICodexProbeConfirmsQuotaAvailable(updates) {
+			t.Fatal("7d=100% must not confirm")
+		}
+	})
+
+	t.Run("empty updates does not confirm", func(t *testing.T) {
+		if openAICodexProbeConfirmsQuotaAvailable(nil) {
+			t.Fatal("empty updates must not confirm")
+		}
+	})
+}
+
+func TestClearOpenAIRateLimitAfterQuotaRecovery(t *testing.T) {
+	t.Parallel()
+
+	limitedAt := time.Now().Add(-30 * time.Minute).UTC().Truncate(time.Second)
+	resetAt := time.Now().Add(3 * 24 * time.Hour).UTC().Truncate(time.Second)
+	available := map[string]any{
+		"codex_5h_used_percent": 0.0,
+		"codex_7d_used_percent": 0.0,
+	}
+
+	t.Run("fresh 0%/0% success clears the observed generation", func(t *testing.T) {
+		repo := &accountUsageCodexProbeRepo{clearRateLimitCh: make(chan clearRateLimitCall, 1)}
+		svc := &AccountUsageService{accountRepo: repo}
+		svc.clearOpenAIRateLimitAfterQuotaRecovery(244, &limitedAt, &resetAt, available)
+
+		select {
+		case call := <-repo.clearRateLimitCh:
+			if call.id != 244 {
+				t.Fatalf("cleared wrong account id: %d", call.id)
+			}
+			if !call.observedLimitedAt.Equal(limitedAt) {
+				t.Fatalf("observed limitedAt mismatch: %v != %v", call.observedLimitedAt, limitedAt)
+			}
+			if !call.observedResetAt.Equal(resetAt) {
+				t.Fatalf("observed resetAt mismatch: %v != %v", call.observedResetAt, resetAt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected CAS clear to be issued")
+		}
+	})
+
+	t.Run("one window exhausted does not clear", func(t *testing.T) {
+		repo := &accountUsageCodexProbeRepo{clearRateLimitCh: make(chan clearRateLimitCall, 1)}
+		svc := &AccountUsageService{accountRepo: repo}
+		svc.clearOpenAIRateLimitAfterQuotaRecovery(244, &limitedAt, &resetAt, map[string]any{
+			"codex_5h_used_percent": 0.0,
+			"codex_7d_used_percent": 100.0,
+		})
+
+		select {
+		case call := <-repo.clearRateLimitCh:
+			t.Fatalf("7d=100%% must not issue a clear: %+v", call)
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+
+	t.Run("missing window signal does not clear", func(t *testing.T) {
+		repo := &accountUsageCodexProbeRepo{clearRateLimitCh: make(chan clearRateLimitCall, 1)}
+		svc := &AccountUsageService{accountRepo: repo}
+		svc.clearOpenAIRateLimitAfterQuotaRecovery(244, &limitedAt, &resetAt, map[string]any{
+			"codex_5h_used_percent": 0.0,
+		})
+
+		select {
+		case call := <-repo.clearRateLimitCh:
+			t.Fatalf("missing 7d signal must not issue a clear: %+v", call)
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+
+	t.Run("no observed rate-limit generation does not clear", func(t *testing.T) {
+		repo := &accountUsageCodexProbeRepo{clearRateLimitCh: make(chan clearRateLimitCall, 1)}
+		svc := &AccountUsageService{accountRepo: repo}
+		svc.clearOpenAIRateLimitAfterQuotaRecovery(244, nil, nil, available)
+
+		select {
+		case call := <-repo.clearRateLimitCh:
+			t.Fatalf("no observed generation must not issue a clear: %+v", call)
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+}
+
+func TestClearOpenAIRateLimitAfterQuotaRecovery_StaleProbeBindsPreProbeGeneration(t *testing.T) {
+	t.Parallel()
+
+	// 探测开始前读到代际 A；探测期间新 429 写入代际 B（RateLimitedAt=now 更新）。
+	// helper 绑定代际 A 的 observed 值提交 CAS，仓库层对 B 失配 → 零写入、保留新限流。
+	limitedA := time.Now().Add(-40 * time.Minute).UTC().Truncate(time.Second)
+	resetA := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+
+	repo := &accountUsageCodexProbeRepo{clearRateLimitCh: make(chan clearRateLimitCall, 1)}
+	svc := &AccountUsageService{accountRepo: repo}
+	svc.clearOpenAIRateLimitAfterQuotaRecovery(244, &limitedA, &resetA, map[string]any{
+		"codex_5h_used_percent": 0.0,
+		"codex_7d_used_percent": 0.0,
+	})
+
+	select {
+	case call := <-repo.clearRateLimitCh:
+		// 桩仓库恒返回 true；真实仓库会因代际失配返回 false 且不落盘。这里断言
+		// 提交的正是代际 A 的 observed 值，说明 CAS 绑定正确。
+		if !call.observedLimitedAt.Equal(limitedA) || !call.observedResetAt.Equal(resetA) {
+			t.Fatalf("CAS must bind the pre-probe generation A: %+v", call)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected CAS clear to be issued with generation A")
+	}
 }
