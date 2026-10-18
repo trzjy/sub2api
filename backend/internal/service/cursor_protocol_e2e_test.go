@@ -207,10 +207,7 @@ func TestCursorProtocolStreamUsageReachesBilling(t *testing.T) {
 // TestForwardCursorReusesAccountBearerAcrossCalls 覆盖多次对话复用同一账号 Bearer，
 // 且全程不产生任何换 token 调用（旧链已删，不存在"缓存到期再换一次"的行为）。
 func TestForwardCursorReusesAccountBearerAcrossCalls(t *testing.T) {
-	var chat []byte
-	chat = append(chat, cursorTextDeltaFrame(t, "ok")...)
-	chat = append(chat, cursorTestEndStream(t, `{}`)...)
-	upstream := &cursorE2EUpstream{chatBody: chat}
+	upstream := &cursorE2EUpstream{chatBody: cursorE2ESuccessStream(t, "ok")}
 	svc, c, _ := newCursorE2EService(t, upstream)
 
 	body := []byte(`{"model":"cursor-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
