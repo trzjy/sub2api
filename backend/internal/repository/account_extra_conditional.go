@@ -106,10 +106,14 @@ func (r *accountRepository) NextCodeBuddyCreditAttemptVersion(ctx context.Contex
 
 // WriteCodeBuddyCreditSnapshot 提交成功事务的条件更新（单一原子 UPDATE）。
 //
-// 字段矩阵（R2 #3 逐项钉死）——成功事务写：分包快照 +
+// 字段矩阵（R2 #3 逐项钉死 + 整改③聚合契约）——成功事务写：紧迫度分包数组
+// （codebuddy_urgency_packages，五字段）+ 聚合总量键（total_remaining/total_total，
+// 十进制字符串）+ 可比性标注（has_excluded）+
 // codebuddy_credit_packages_updated_at(=SuccessTime) + reset_at + used_percent
 // + codebuddy_credit_last_attempt_at(=SuccessTime) + version(=attempt_version，
 // 禁提交期自增) + 本次解析错误结果（ErrorMsg 为空则清除旧错误）。
+//
+// 整改③：逐包明细键 codebuddy_credit_packages 已删除，本写口不写、不读该键。
 //
 // 无错误时**删除**旧错误键（`- 'codebuddy_credit_error'`）；有错误时按原值写入。
 // 两分支的接受条件由同一 tuple 谓词统一保护，且都在同一条 UPDATE 内原子完成。
@@ -123,32 +127,33 @@ func (r *accountRepository) WriteCodeBuddyCreditSnapshot(ctx context.Context, ac
 	}
 
 	// 成功事务写入的 B4 键集合（仅这些键；其余 extra 键原样保留）。
-	// 整改③：逐包明细持久化收缩为聚合键 + urgency 专用分包键；旧
-	// 逐包明细分包数组（键名已随本单归零停用）不再写入。写入侧十进制字符串量化由
-	// service 层保证（deriveTotalsFromPackages 已返回 NUMERIC(20,8) 量化字符串）。
+	// 参数：$1=SuccessTime, $2=Version, $3=urgency packages JSON,
+	// $4=TotalRemaining, $5=TotalTotal, $6=HasExcluded, $7=ResetAt,
+	// $8=UsedPercent, $9=ErrorMsg, $10=accountID。
 	successKeys := "jsonb_build_object(" +
 		"'" + service.CodeBuddyUrgencyPackagesKey + "', $3::jsonb, " +
-		"'" + service.CodeBuddyCreditTotalRemainingKey + "', to_jsonb($8::text), " +
-		"'" + service.CodeBuddyCreditTotalTotalKey + "', to_jsonb($9::text), " +
-		"'" + service.CodeBuddyCreditHasExcludedKey + "', to_jsonb($10::bool), " +
+		"'" + service.CodeBuddyCreditTotalRemainingKey + "', to_jsonb($4::text), " +
+		"'" + service.CodeBuddyCreditTotalTotalKey + "', to_jsonb($5::text), " +
+		"'" + service.CodeBuddyCreditHasExcludedKey + "', to_jsonb($6::boolean), " +
 		"'" + service.CodeBuddyCreditPackagesUpdatedAtKey + "', to_jsonb($1::timestamptz), " +
-		"'" + service.CodeBuddyCreditResetAtKey + "', to_jsonb($4::timestamptz), " +
-		"'" + service.CodeBuddyCreditUsedPercentKey + "', to_jsonb($5::float8), " +
+		"'" + service.CodeBuddyCreditResetAtKey + "', to_jsonb($7::timestamptz), " +
+		"'" + service.CodeBuddyCreditUsedPercentKey + "', to_jsonb($8::float8), " +
 		"'" + service.CodeBuddyCreditLastAttemptAtKey + "', to_jsonb($1::timestamptz), " +
 		"'" + service.CodeBuddyCreditVersionKey + "', to_jsonb($2::bigint)" +
 		")"
 
 	// 错误键处理：无错误 → 删除旧键；有错误 → 写入错误值。
 	// 两分支均只合并 B4 键。
-	extraExpr := "CASE WHEN $6::text = '' THEN (COALESCE(extra, '{}'::jsonb) - '" + service.CodeBuddyCreditErrorKey + "') || " + successKeys +
+	extraExpr := "CASE WHEN $9::text = '' THEN (COALESCE(extra, '{}'::jsonb) - '" + service.CodeBuddyCreditErrorKey + "') || " + successKeys +
 		" ELSE COALESCE(extra, '{}'::jsonb) || (" + successKeys +
-		" || jsonb_build_object('" + service.CodeBuddyCreditErrorKey + "', to_jsonb($6::text))) END"
+		" || jsonb_build_object('" + service.CodeBuddyCreditErrorKey + "', to_jsonb($9::text))) END"
 
-	query := "UPDATE accounts SET extra = " + extraExpr + ", updated_at = NOW() WHERE id = $7 AND deleted_at IS NULL AND " +
+	query := "UPDATE accounts SET extra = " + extraExpr + ", updated_at = NOW() WHERE id = $10 AND deleted_at IS NULL AND " +
 		codebuddyTupleAcceptConditionSQL()
 
 	result, err := r.sql.ExecContext(ctx, query,
-		write.SuccessTime, write.Version, string(urgencyJSON), write.ResetAt, write.UsedPercent, write.ErrorMsg, accountID, write.TotalRemaining, write.TotalTotal, write.HasExcluded,
+		write.SuccessTime, write.Version, string(urgencyJSON), write.TotalRemaining, write.TotalTotal,
+		write.HasExcluded, write.ResetAt, write.UsedPercent, write.ErrorMsg, accountID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("codebuddy credit snapshot: conditional update: %w", err)
@@ -165,7 +170,7 @@ func (r *accountRepository) WriteCodeBuddyCreditSnapshot(ctx context.Context, ac
 //
 // 字段矩阵（R2 #3）——失败事务**仅**更新 codebuddy_credit_last_attempt_at
 // (=AttemptTime) + 错误标记 + version 持久化；**不得**修改 freshness/reset_at/
-// 成功快照（不触碰 packages/packages_updated_at/used_percent/reset_at）。
+// 成功快照（不触碰 urgency_packages/聚合总量键/packages_updated_at/used_percent/reset_at）。
 func (r *accountRepository) WriteCodeBuddyCreditAttemptError(ctx context.Context, accountID int64, write service.CodeBuddyCreditAttemptErrorWrite) (bool, error) {
 	if r == nil || r.sql == nil {
 		return false, errors.New("codebuddy credit attempt error: sql executor not configured")

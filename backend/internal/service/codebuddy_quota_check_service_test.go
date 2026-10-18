@@ -90,10 +90,12 @@ func TestCodeBuddyQuotaCheckService_RunOnceProbesAndAppliesThreshold(t *testing.
 	}}}
 
 	// 真实计费 schema（data.Response.Data.Accounts[]，PascalCase 容量计数器，
-	// *Precise 定点字段，§4.1 分包解析用例）。
+	// 周期 *Precise 定点字段为 remaining/total 唯一解析源（CYCLE-20261019-R3）；
+	// 共存的 Capacity*Precise 为已停用的累计字段，取值不同以验证不回退。
 	meterBody := `{"code":0,"data":{"Response":{"Data":{"TotalCount":1,"TotalDosage":100,"Accounts":[
 		{"AccountId":1,"PackageName":"p","CapacityUnit":"credits","CapacitySize":100,"CapacityUsed":99,"CapacityRemain":1,
-		 "CapacitySizePrecise":"100","CapacityRemainPrecise":"1","CycleEndTime":"2026-10-13 07:46:09"}
+		 "CapacitySizePrecise":"100","CapacityRemainPrecise":"50",
+		 "CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"1","CycleEndTime":"2026-10-13 07:46:09"}
 	]}}}}`
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
@@ -111,5 +113,6 @@ func TestCodeBuddyQuotaCheckService_RunOnceProbesAndAppliesThreshold(t *testing.
 	require.GreaterOrEqual(t, repo.getCalls, 2, "QueryUsage 与 reload 各调一次 GetByID")
 	require.GreaterOrEqual(t, len(repo.snapshotWrites), 1, "QueryUsage 必须经条件更新写口落额度快照")
 	require.Equal(t, 0, repo.updateExtra, "额度快照不得再走旧 UpdateExtra 写口")
+	// 周期口径 (100−1)/100×100 = 99（回退 CapacityRemainPrecise=50 会得 50）。
 	require.Equal(t, 99.0, repo.snapshotWrites[0].UsedPercent)
 }

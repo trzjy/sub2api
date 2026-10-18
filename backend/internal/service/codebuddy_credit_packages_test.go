@@ -107,7 +107,7 @@ func TestParseCodeBuddyCreditPackages_ContractAndDerivation(t *testing.T) {
 // TestParseCodeBuddyCreditPackages_DropsUnknownStatus 未知 Status（合法仅 0/3）整包剔除。
 func TestParseCodeBuddyCreditPackages_DropsUnknownStatus(t *testing.T) {
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":7,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":7,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, errEntries, envelopeErr := parseCodeBuddyCreditPackages(body, "")
 	require.False(t, envelopeErr)
 	require.Empty(t, packages)
@@ -119,7 +119,7 @@ func TestParseCodeBuddyCreditPackages_DropsUnknownStatus(t *testing.T) {
 // TestParseCodeBuddyCreditPackages_DropsRemainingGreaterThanTotal remaining>total 整包剔除。
 func TestParseCodeBuddyCreditPackages_DropsRemainingGreaterThanTotal(t *testing.T) {
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"150","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"150","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
 	require.Empty(t, packages)
 	require.Len(t, errEntries, 1)
@@ -129,7 +129,7 @@ func TestParseCodeBuddyCreditPackages_DropsRemainingGreaterThanTotal(t *testing.
 // TestParseCodeBuddyCreditPackages_DropsNonCanonicalUnit 异单位分包整包剔除（禁止跨单位相加）。
 func TestParseCodeBuddyCreditPackages_DropsNonCanonicalUnit(t *testing.T) {
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"tokens","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"tokens","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
 	require.Empty(t, packages)
 	require.Len(t, errEntries, 1)
@@ -140,7 +140,7 @@ func TestParseCodeBuddyCreditPackages_DropsNonCanonicalUnit(t *testing.T) {
 // TestParseCodeBuddyCreditPackages_DropsNegativeValue 负值整包剔除（不钳位）。
 func TestParseCodeBuddyCreditPackages_DropsNegativeValue(t *testing.T) {
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"-100","CapacityRemainPrecise":"0","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CycleCapacitySizePrecise":"-100","CycleCapacityRemainPrecise":"0","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
 	require.Empty(t, packages)
 	require.Len(t, errEntries, 1)
@@ -152,7 +152,7 @@ func TestParseCodeBuddyCreditPackages_DropsNegativeValue(t *testing.T) {
 func TestParseCodeBuddyCreditPackages_ZeroTotalSignal(t *testing.T) {
 	// 全部分包被剔除 → 无有效分包。
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"tokens","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"tokens","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, _, _ := parseCodeBuddyCreditPackages(body, "")
 	_, ok := DeriveCodeBuddyCreditUsedPercent(packages)
 	require.False(t, ok)
@@ -182,7 +182,7 @@ func TestParseCodeBuddyCreditPackages_AsiaShanghaiToUTCBoundary(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			body := codeBuddyCreditPackagesBody(
-				`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"` + tc.cycleEnd + `"}`)
+				`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"` + tc.cycleEnd + `"}`)
 			packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
 			require.Empty(t, errEntries)
 			require.Len(t, packages, 1)
@@ -196,7 +196,7 @@ func TestParseCodeBuddyCreditPackages_AsiaShanghaiToUTCBoundary(t *testing.T) {
 func TestParseCodeBuddyCreditPackages_MissingOrInvalidExpiryKept(t *testing.T) {
 	for _, cycleEnd := range []string{"", "not-a-timestamp"} {
 		body := codeBuddyCreditPackagesBody(
-			`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"40","CycleEndTime":"` + cycleEnd + `"}`)
+			`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"40","CycleEndTime":"` + cycleEnd + `"}`)
 		packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
 		require.Empty(t, errEntries)
 		require.Len(t, packages, 1)
@@ -212,7 +212,7 @@ func TestParseCodeBuddyCreditPackages_MissingOrInvalidExpiryKept(t *testing.T) {
 // 异单位（unit_mismatch）条目同样使 has_excluded=true。
 func TestParseCodeBuddyCreditPackages_UnknownStatusSetsHasExcluded(t *testing.T) {
 	body := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":7,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":7,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
 	packages, errEntries, envelopeErr := parseCodeBuddyCreditPackages(body, "")
 	require.False(t, envelopeErr)
 	require.Empty(t, packages, "未知 status 分包不计入参与集合（不计入 used_percent/totals）")
@@ -223,12 +223,80 @@ func TestParseCodeBuddyCreditPackages_UnknownStatusSetsHasExcluded(t *testing.T)
 
 	// 合法包 + 异单位包混合：仅合法包进集合，异单位条目 → has_excluded=true。
 	mixed := codeBuddyCreditPackagesBody(
-		`{"AccountId":"a-2","PackageName":"ok","CapacityUnit":"credits","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"},` +
-			`{"AccountId":"a-3","PackageName":"bad","CapacityUnit":"tokens","Status":0,"CapacitySizePrecise":"100","CapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
+		`{"AccountId":"a-2","PackageName":"ok","CapacityUnit":"credits","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"},` +
+			`{"AccountId":"a-3","PackageName":"bad","CapacityUnit":"tokens","Status":0,"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"50","CycleEndTime":"2026-10-16 05:26:43"}`)
 	pkgs2, errs2, _ := parseCodeBuddyCreditPackages(mixed, "")
 	require.Len(t, pkgs2, 1, "仅合法分包进集合，异单位被剔除")
 	require.True(t, codeBuddyCreditHasExcludedFromErrors(errs2),
 		"异单位条目 → has_excluded=true（可比性标注）")
+}
+
+// TestParseCodeBuddyCreditPackages_CycleFieldsPreferredOverCapacity 周期字段切换
+// （CYCLE-20261019-R3）：remaining/total 只取 CycleCapacity*Precise；共存的累计容量
+// 字段 Capacity*Precise 一律不采用。
+func TestParseCodeBuddyCreditPackages_CycleFieldsPreferredOverCapacity(t *testing.T) {
+	body := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,` +
+			`"CapacitySizePrecise":"999","CapacityRemainPrecise":"888",` +
+			`"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"40","CycleEndTime":"2026-10-16 05:26:43"}`)
+	packages, errEntries, envelopeErr := parseCodeBuddyCreditPackages(body, "")
+	require.False(t, envelopeErr)
+	require.Empty(t, errEntries)
+	require.Len(t, packages, 1)
+	require.Equal(t, "100", packages[0].Total.String(), "total 必须取周期字段，不得回退 Capacity*")
+	require.Equal(t, "40", packages[0].Remaining.String(), "remaining 必须取周期字段，不得回退 Capacity*")
+	// 周期口径 (100−40)/100×100 = 60（Capacity 口径 888/999 会给出 ≈11.11）。
+	usedPercent, ok := DeriveCodeBuddyCreditUsedPercent(packages)
+	require.True(t, ok)
+	require.InDelta(t, 60.0, usedPercent, 1e-9, "used_percent 必须按周期值推导")
+}
+
+// TestParseCodeBuddyCreditPackages_MissingOrInvalidCycleFieldsFailClosed 周期字段缺失或
+// 非法时失败关闭（整包剔除），即便 Capacity*Precise 存在且合法也不得回退。
+func TestParseCodeBuddyCreditPackages_MissingOrInvalidCycleFieldsFailClosed(t *testing.T) {
+	// 周期字段完全缺失（仅 Capacity*Precise）→ 整包剔除。
+	missing := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":0,` +
+			`"CapacitySizePrecise":"100","CapacityRemainPrecise":"40","CycleEndTime":"2026-10-16 05:26:43"}`)
+	packages, errEntries, envelopeErr := parseCodeBuddyCreditPackages(missing, "")
+	require.False(t, envelopeErr)
+	require.Empty(t, packages, "周期字段缺失必须整包剔除，不得回退 Capacity*")
+	require.Len(t, errEntries, 1)
+	require.Equal(t, "invalid_remaining", errEntries[0].Reason)
+	require.Equal(t, "", errEntries[0].RawValues["remaining"], "rawValues 反映周期字段（缺失为空）")
+
+	// 周期字段非法（非定点字符串）+ Capacity*Precise 合法 → 同样失败关闭。
+	invalid := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-2","PackageName":"p","CapacityUnit":"credits","Status":0,` +
+			`"CapacitySizePrecise":"100","CapacityRemainPrecise":"40",` +
+			`"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"not-a-number","CycleEndTime":"2026-10-16 05:26:43"}`)
+	packages2, errEntries2, _ := parseCodeBuddyCreditPackages(invalid, "")
+	require.Empty(t, packages2)
+	require.Len(t, errEntries2, 1)
+	require.Equal(t, "invalid_remaining", errEntries2[0].Reason)
+	require.Equal(t, "not-a-number", errEntries2[0].RawValues["remaining"])
+}
+
+// TestParseCodeBuddyCreditPackages_ExhaustedParticipatesInPercentButNotUrgency 基线语义
+// 保持：Status=3 参与 used_percent/totals（codeBuddyCreditParticipatesInPercent），
+// 但基础谓词与 urgency 过滤仍排除它。
+func TestParseCodeBuddyCreditPackages_ExhaustedParticipatesInPercentButNotUrgency(t *testing.T) {
+	body := codeBuddyCreditPackagesBody(
+		`{"AccountId":"a-1","PackageName":"p","CapacityUnit":"credits","Status":3,` +
+			`"CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"0","CycleEndTime":"2026-10-16 05:26:43"}`)
+	packages, errEntries, _ := parseCodeBuddyCreditPackages(body, "")
+	require.Empty(t, errEntries)
+	require.Len(t, packages, 1)
+	require.True(t, codeBuddyCreditParticipatesInPercent(packages[0]), "status=3 参与 used_percent/totals")
+	require.False(t, IsValidCodeBuddyCreditPackage(packages[0]), "基础谓词仍排除 status=3")
+	require.Empty(t, codeBuddyFilterUrgencyPackages(packages), "urgency 仍排除 status=3")
+
+	usedPercent, ok := DeriveCodeBuddyCreditUsedPercent(packages)
+	require.True(t, ok)
+	require.InDelta(t, 100.0, usedPercent, 1e-9, "耗尽包全额计入已用")
+	totalRemaining, totalTotal := deriveTotalsFromPackages(packages)
+	require.Equal(t, "0", totalRemaining)
+	require.Equal(t, "100", totalTotal)
 }
 
 // TestIsValidCodeBuddyCreditPackage_ExcludesExhausted 基础谓词：字段有效 + 非 Status=3。
