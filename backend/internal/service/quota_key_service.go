@@ -308,6 +308,14 @@ func NewQuotaKeyService(repo QuotaKeyRepository, enc QuotaKeyEncryptor, upstream
 	s.groupResolver = s.findGroupsAllowingModel
 	s.cursorGroupResolver = s.findCursorPlatformGroups
 	s.insertFailureMarkerWriter = s.writeInsertFailureMarker
+	// P1-B4 设备同源闭环：真实拉号客户端需要反查本服务才能分流"存量派生值 / DeviceIDFor"，
+	// 构造顺序天然成环（客户端先建 → 服务后建），故在此回填本服务自身作为设备解析器
+	// （*QuotaKeyService 同时提供 DeviceIDFor 与 HasAccount）。
+	// 这样 wire / 测试无须新增装配语句，也不必改动构造函数签名；
+	// 传入的是占位或替身上游（不满足类型断言）时整段跳过，行为不变。
+	if sac, ok := upstream.(*shareAIUpstreamClient); ok {
+		sac.SetDeviceResolver(s)
+	}
 	return s
 }
 
@@ -1292,6 +1300,22 @@ func (s *QuotaKeyService) mountAccountToGroups(ctx context.Context, tx *ent.Tx, 
 		}
 	}
 	return nil
+}
+
+// HasAccount 判定指定激活码是否已持有（未软删）账号。
+//
+// P1-B4 设备同源统一用其识别"存量 key"：已持久化 device_id 的码直接走同源链路，
+// 未持久化但 HasAccount==true 的码按 §16 红线保持既有派生值 deviceID(code)，不写库、不迁移；
+// 仅 HasAccount==false（新码）才经 DeviceIDFor 生成并落库 device_id。查询只读 accounts，不改写。
+func (s *QuotaKeyService) HasAccount(ctx context.Context, quotaKeyID int64) (bool, error) {
+	if s == nil || s.repo == nil {
+		return false, errors.New("quota_key_service: repo not configured")
+	}
+	accs, err := s.repo.ListAccountsByQuotaKey(ctx, quotaKeyID)
+	if err != nil {
+		return false, fmt.Errorf("quota_key_service: list accounts by quota key: %w", err)
+	}
+	return len(accs) > 0, nil
 }
 
 // quotaKeyToStatus 将 ent 实体映射为脱敏 DTO。
