@@ -12,9 +12,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
@@ -365,6 +367,89 @@ func openAICompactSupportTier(account *Account) int {
 	return 0
 }
 
+// ---------------------------------------------------------------------------
+// P1-S：cursor 供给的调度资格门（quota_key 终态约束，方案 §15.4-I2 / §16.1）
+//
+// 语义：激活码（quota_key）已确认过期，只约束其关联 cursor 账号的**调度资格**——
+// 账号本体一律不动（不改 status 为耗尽、不软删、不清凭据）。亏损运算符因此不会把
+// 一个"只是归属码过期"的账号标成永久不可用：码一旦被续期/换绑，账号立即恢复可调度。
+// ---------------------------------------------------------------------------
+
+// CursorQuotaKeyStateProvider 是调度资格门读取激活码状态所需的窄依赖。
+//
+// 为什么不走任意 *Service 具体类型：资格谓词是包级纯函数（被 legacy/ad-
+// vanced/DB recheck 三条链共用），拿不到 service 句柄；因此沿用
+// codeBuddyQuotaInstance 的包级安装模式，由 QuotaKeyService 在构造时安装。
+type CursorQuotaKeyStateProvider interface {
+	// CursorQuotaKeyStatus 返回激活码的当前调度口径状态（domain.QuotaKey* 常量）。
+	// 无法读取时返回 error——资格门据此失败关闭。
+	CursorQuotaKeyStatus(ctx context.Context, quotaKeyID int64) (string, error)
+}
+
+var (
+	cursorQuotaKeyStateMu       sync.RWMutex
+	cursorQuotaKeyStateInstance CursorQuotaKeyStateProvider
+)
+
+// InstallCursorQuotaKeyStateProvider 安装 cursor 调度资格门的激活码状态读取器
+// （装配入口：QuotaKeyService 构造函数；单测直接安装替身）。
+func InstallCursorQuotaKeyStateProvider(provider CursorQuotaKeyStateProvider) {
+	cursorQuotaKeyStateMu.Lock()
+	defer cursorQuotaKeyStateMu.Unlock()
+	cursorQuotaKeyStateInstance = provider
+}
+
+func currentCursorQuotaKeyStateProvider() CursorQuotaKeyStateProvider {
+	cursorQuotaKeyStateMu.RLock()
+	defer cursorQuotaKeyStateMu.RUnlock()
+	return cursorQuotaKeyStateInstance
+}
+
+// quotaKeyStatusBlocksCursorScheduling 判定激活码状态是否构成"停供"。
+//
+// 只有 expired（含其等价语义：expires_at 已到期但 sweeper 尚未落盘）停供。
+// exhausted 不是供给终态：它是**拉号失败占位**（任意上游错误即置，可 ClearExhausted
+// 手动解除），代表"这个码没能再拉出新号"，不代表已有账号不能继续服务；把它当停供
+// 等于用拉号侧的瞬时故障反向剥夺账号（且与 I2「不把账号伪标耗尽」反向对称）。
+// disabled 是 admin 手动停用的激活码，语义由 admin 侧写路径承担，不在本门判定。
+func quotaKeyStatusBlocksCursorScheduling(status string) bool {
+	return status == domain.QuotaKeyStatusExpired
+}
+
+// cursorAccountQuotaKeyVetoReason 返回 cursor 账号因归属激活码终态而被剥夺调度资格
+// 的原因串（"" 表示无否决）。非 cursor 平台、或未绑定激活码的账号恒不受影响。
+//
+// 失败关闭：已安装 provider 但读取出错时同样否决——拿不到"码是否过期"的判定结论时，
+// 宁可本次不选，也不把可能已停供的 cursor 号放进候选。provider 未安装（进程未装配
+// QuotaKeyService，如缩编排布的单元/集成场景）不构成"已知停供"，此时不额外收紧，
+// 与 codeBuddyQuotaInstance 为 nil 时的降级口径一致。
+func cursorAccountQuotaKeyVetoReason(ctx context.Context, account *Account) string {
+	if account == nil || account.Platform != PlatformCursor || account.QuotaKeyID == nil {
+		return ""
+	}
+	provider := currentCursorQuotaKeyStateProvider()
+	if provider == nil {
+		return ""
+	}
+	status, err := provider.CursorQuotaKeyStatus(ctx, *account.QuotaKeyID)
+	if err != nil {
+		slog.Debug("cursor_account_quota_key_state_unavailable",
+			"account_id", account.ID,
+			"quota_key_id", *account.QuotaKeyID,
+			"error", err,
+		)
+		return "quota_key_state_unavailable"
+	}
+	if quotaKeyStatusBlocksCursorScheduling(status) {
+		slog.Debug("cursor_account_quota_key_expired",
+			"account_id", account.ID,
+			"quota_key_id", *account.QuotaKeyID,
+		)
+		return "quota_key_expired"
+	}
+	return ""
+}
+
 // isOpenAICompatibleAccountEligibleForRequest 判断 OpenAI 兼容账号是否满足本次请求的调度条件。
 // 检查内容包括：平台匹配、账号可用性、quota 自动暂停、spark 路由限制、模型支持及端点能力。
 //
@@ -426,6 +511,12 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	}
 	if !account.IsOpenAICompatible() {
 		return "platform_mismatch"
+	}
+	// P1-S §16.1：cursor 供给的 key 终态门。放平台判定之后、可调度性之前——
+	// 账号本体不动，只是本次不予入选。普通链（本函数）、粘性链（复check 亦走本函数）
+	// 与 DB 复核链共享同一口径；高级候选链在 selectByLoadBalance 里另行分流。
+	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+		return reason
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
 		if account.IsSchedulable() {

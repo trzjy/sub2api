@@ -296,7 +296,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			if !s.isGatewayAccountProfitEligible(ctx, account) {
 				continue
 			}
-			if !s.isAccountAllowedForPlatform(account, platform, useMixed) {
+			if !s.isAccountAdmittedForPlatform(ctx, account, platform, useMixed, requestedModel, groupID) {
 				filteredPlatform++
 				continue
 			}
@@ -356,7 +356,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 						gatePass := s.isAccountSchedulableForSelection(stickyAccount) &&
 							s.isGatewayAccountProfitEligible(ctx, stickyAccount) &&
-							s.isAccountAllowedForPlatform(stickyAccount, platform, useMixed) &&
+							s.isAccountAdmittedForPlatform(ctx, stickyAccount, platform, useMixed, requestedModel, groupID) &&
 							(requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, stickyAccount, requestedModel)) &&
 							!isChannelRestricted(stickyAccount) &&
 							s.isAccountSchedulableForModelSelection(ctx, stickyAccount, requestedModel) &&
@@ -542,7 +542,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// 注意：不再检查 isAccountInGroup，因为 accountByID 已经从按分组过滤的
 				// accounts 列表构建，账号一定在分组内。而 scheduler snapshot 缓存
 				// 反序列化后 AccountGroups 字段为空，导致 isAccountInGroup 永远返回 false。
-				platformOK := s.isAccountAllowedForPlatform(account, platform, useMixed)
+				platformOK := s.isAccountAdmittedForPlatform(ctx, account, platform, useMixed, requestedModel, groupID)
 				profitOK := s.isGatewayAccountProfitEligible(ctx, account)
 				modelSupported := requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)
 				channelOK := !isChannelRestricted(account)
@@ -667,7 +667,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		if !s.isGatewayAccountProfitEligible(ctx, acc) {
 			continue
 		}
-		if !s.isAccountAllowedForPlatform(acc, platform, useMixed) {
+		if !s.isAccountAdmittedForPlatform(ctx, acc, platform, useMixed, requestedModel, groupID) {
 			continue
 		}
 		if requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, acc, requestedModel) {
@@ -1042,7 +1042,7 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 	}
 	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
 	if useMixed {
-		platforms := []string{platform, PlatformAntigravity}
+		platforms := cursorSupplyPlatformsFor(groupID, []string{platform, PlatformAntigravity})
 		var accounts []Account
 		var err error
 		if groupID != nil {
@@ -1087,7 +1087,17 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 
 	var accounts []Account
 	var err error
-	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+	if platforms := cursorSupplyPlatformsFor(groupID, []string{platform}); len(platforms) > 1 {
+		// 「原生平台 + 显式挂组的 cursor 供给」：走多平台查询把两者一并取回
+		// （入选与否仍由 isAccountAdmittedForPlatform 逐条裁决）。
+		if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
+			accounts, err = s.accountRepo.ListSchedulableByPlatforms(ctx, platforms)
+		} else if groupID != nil {
+			accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatforms(ctx, *groupID, platforms)
+		} else {
+			accounts, err = s.accountRepo.ListSchedulableUngroupedByPlatforms(ctx, platforms)
+		}
+	} else if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
 		accounts, err = s.accountRepo.ListSchedulableByPlatform(ctx, platform)
 	} else if groupID != nil {
 		accounts, err = s.accountRepo.ListSchedulableByGroupIDAndPlatform(ctx, *groupID, platform)
@@ -1163,6 +1173,118 @@ func (s *GatewayService) isAccountAllowedForPlatform(account *Account, platform 
 		return account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()
 	}
 	return account.Platform == platform
+}
+
+// isAccountAdmittedForPlatform 在既有平台精确匹配之外追加 cursor 供给的跨平台准入，
+// 是原生（Claude/Gemini）链唯一的准入判定出口，取代原先散落的
+// isAccountAllowedForPlatform 直接调用。
+//
+// cursor 跨平台准入是**显式挂组**语义（P1-S §15.4-I4 / §16.1）：只有被明确挂进
+// 当前分组的 cursor 账号才可能被选中；未挂组（groupID 为 nil）的 cursor 账号一律
+// 不外溢到其他平台候选池——不做全站跨平台放开。准入同时要求三重"能力匹配"：
+//  1. 分组模型白名单允许本次请求模型（既有 GroupModelAllowlist.Allows 口径）；
+//  2. 账号 model_mapping 显式声明该模型（模型映射唯一出口，空映射恒 false）；
+//  3. 归属激活码未处于终态（同 OpenAI 链的 key 门）。
+func (s *GatewayService) isAccountAdmittedForPlatform(ctx context.Context, account *Account, platform string, useMixed bool, requestedModel string, groupID *int64) bool {
+	if s.isAccountAllowedForPlatform(account, platform, useMixed) {
+		if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+			return false
+		}
+		return true
+	}
+	return s.cursorSupplyAdmittedForNativePlatform(ctx, account, platform, requestedModel, groupID)
+}
+
+// cursorNativeBridgePlatforms 是允许接纳 cursor 供给的原生目标平台集合（M 个，唯一定义处）。
+//
+// 为什么不含 OpenAI 系：OpenAI 侧资格链按 NormalizeOpenAICompatiblePlatform 精确匹配
+// 淘汰/放行（cursor 已在该归并表内保留原值），跨平台准入倘再放开会破坏"分组平台=
+// 账号平台"的既有契约。只有 native（Claude/Gemini）系本就没有 cursor 原生同平台供给，
+// 必须由分支 Serde 桥接，才有接纳的必要。
+func cursorNativeBridgePlatforms(platform string) bool {
+	switch platform {
+	case PlatformAnthropic, PlatformGemini:
+		return true
+	default:
+		return false
+	}
+}
+
+// cursorSupplyPlatformsFor 在原生平台查询集合上追加 cursor 供给，返回交给 repo 的
+// 多平台查询入参（顺序稳定：先 base，后 cursor）。
+//
+// 追加的两个前提条件（P1-S §15.4-I4「显式挂组」）：
+//  1. base 中存在允许桥接的原生平台（见 cursorNativeBridgePlatforms）；
+//  2. 有分组上下文（groupID 非 nil 且 > 0）——未挂组（含 undefined 分组 API Key）
+//     的 cursor 账号不得进入任何非 cursor 平台候选池，故此时不做跨平台查询。
+//
+// 这是"取回"，不是"准入"：真正入选仍由 isAccountAdmittedForPlatform 逐条裁决
+// （显式挂组 + 分组模型白名单 + 账号 model_mapping + key 终态门）。
+func cursorSupplyPlatformsFor(groupID *int64, base []string) []string {
+	if groupID == nil || *groupID <= 0 {
+		return base
+	}
+	bridgeable := false
+	for _, p := range base {
+		if cursorNativeBridgePlatforms(p) {
+			bridgeable = true
+			break
+		}
+	}
+	if !bridgeable {
+		return base
+	}
+	out := make([]string, 0, len(base)+1)
+	out = append(out, base...)
+	return append(out, PlatformCursor)
+}
+
+// cursorSupplyAdmittedForNativePlatform 判定 cursor 账号能否承接本次原生平台请求。
+func (s *GatewayService) cursorSupplyAdmittedForNativePlatform(ctx context.Context, account *Account, platform string, requestedModel string, groupID *int64) bool {
+	if account == nil || account.Platform != PlatformCursor {
+		return false
+	}
+	if !cursorNativeBridgePlatforms(platform) {
+		return false
+	}
+	// 显式挂组：无分组上下文（未挂组/undefined 分组 API Key）一律不外溢。
+	if groupID == nil || *groupID <= 0 {
+		return false
+	}
+	if requestedModel == "" {
+		return false
+	}
+	// key 终态门（I2）：过期的码约束的是账号的调度资格，账号本体不动。
+	if reason := cursorAccountQuotaKeyVetoReason(ctx, account); reason != "" {
+		return false
+	}
+	// 能力匹配②：模型映射是唯一出口，空映射（cursor 无内置目录）恒不可选。
+	if !account.IsModelSupported(requestedModel) {
+		return false
+	}
+	// 能力匹配①：分组模型白名单。enabled=false 为未启用白名单（Allows 恒真），
+	// 此时显式挂组本身即运营意图。
+	return s.cursorGroupModelAllowed(ctx, *groupID, requestedModel)
+}
+
+// cursorGroupModelAllowed 读分组模型白名单判定是否允许该模型（Allows 的既有通配语义
+// 不做任何改写）。取分组优先走 ctx（Resolver 已装载），没有 groupRepo 时失败关闭。
+func (s *GatewayService) cursorGroupModelAllowed(ctx context.Context, groupID int64, requestedModel string) bool {
+	if groupID <= 0 || requestedModel == "" {
+		return false
+	}
+	group := s.groupFromContext(ctx, groupID)
+	if group == nil {
+		if s.groupRepo == nil {
+			return false
+		}
+		resolved, err := s.resolveGroupByID(ctx, groupID)
+		if err != nil || resolved == nil {
+			return false
+		}
+		group = resolved
+	}
+	return group.ModelAllowlist.Allows(requestedModel)
 }
 
 func (s *GatewayService) isAccountSchedulableForSelection(account *Account) bool {
