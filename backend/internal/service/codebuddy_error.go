@@ -147,7 +147,8 @@ const codeBuddyCodeAccountRestricted = 11140
 
 // isCodeBuddyContentSafetyError 检测上游响应体是否为 CodeBuddy 内容安全审核拒绝
 // （生产实测形态：HTTP 403 + {"code":11140,"msg":"request illegal","requestId":"...",
-//   "displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}）。
+//
+//	"displayMsg":{"en":"The content did not pass the safety review...","zh":"内容未通过安全审核，请调整后重试。"}}）。
 //
 // 这是**请求级内容拒绝**：同一账号换一个合规内容即可成功，不构成账号凭据或权限
 // 失效的证据——不得据此把账号置 error / temp-unschedulable（与 HTML 403 #5334
@@ -187,9 +188,13 @@ func isCodeBuddyAccountRestrictedError(statusCode int, responseBody []byte) bool
 }
 
 // codeBuddyBodyIndicatesInsufficientBalance 通过响应体文案识别余额/积分不足。
+// 「额度已用尽」为 2026-10-18 生产实测（429 + error.data.code=14018「额度已用尽…
+// 购买加量包」）补充的上游额度耗尽文案；不补则该形态落行 4 裸 429 被判账号级软限流，
+// 按 1 分钟滚动冷却永动重试，而非进入余额耗尽停调链。
 func codeBuddyBodyIndicatesInsufficientBalance(bodyLower string) bool {
 	return strings.Contains(bodyLower, "积分不足") ||
 		strings.Contains(bodyLower, "余额不足") ||
+		strings.Contains(bodyLower, "额度已用尽") ||
 		strings.Contains(bodyLower, "insufficient credit") ||
 		strings.Contains(bodyLower, "insufficient balance") ||
 		strings.Contains(bodyLower, "balance is not enough") ||

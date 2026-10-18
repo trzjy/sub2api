@@ -14,6 +14,10 @@ func TestClassifyCodeBuddyError_BalanceExhausted(t *testing.T) {
 		{http.StatusPaymentRequired, `{"code":0}`},
 		{http.StatusOK, `{"msg":"余额不足"}`},
 		{http.StatusBadRequest, `{"msg":"insufficient credit"}`},
+		// 2026-10-18 生产实测形态：429 + error.data.code=14018「额度已用尽…购买加量包」。
+		// 修复前该 body 落行 4 裸 429 被判 AccountSoftLimit（1 分钟滚动冷却），
+		// 修复后必须命中行 1 余额耗尽（进入 handleCodeBuddyInsufficientBalance 停调链）。
+		{http.StatusTooManyRequests, `{"error":{"data":{"code":14018,"msg":"额度已用尽，请访问以下链接，购买加量包以获取更多额度：https://www.codebuddy.cn/profile/usage ","requestId":"13e52710-070a-4c4a-92f4-773419dbcba7"}}}`},
 	}
 	for _, c := range cases {
 		if got := ClassifyCodeBuddyError(c.status, []byte(c.body)); got != CodeBuddyErrKindBalanceExhausted {
