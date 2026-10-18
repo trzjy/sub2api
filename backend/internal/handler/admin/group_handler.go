@@ -276,14 +276,14 @@ type CreateGroupRequest struct {
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes []string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch       bool                                      `json:"allow_messages_dispatch"`
-	AllowLive                   bool                                      `json:"allow_live"`
-	ForceOpenAIFast             bool                                      `json:"force_openai_fast"`
-	FreeOpenAIFast              bool                                      `json:"free_openai_fast"`
-	RequireOAuthOnly            bool                                      `json:"require_oauth_only"`
-	RequirePrivacySet           bool                                      `json:"require_privacy_set"`
+	AllowMessagesDispatch bool `json:"allow_messages_dispatch"`
+	AllowLive             bool `json:"allow_live"`
+	ForceOpenAIFast       bool `json:"force_openai_fast"`
+	FreeOpenAIFast        bool `json:"free_openai_fast"`
+	RequireOAuthOnly      bool `json:"require_oauth_only"`
+	RequirePrivacySet     bool `json:"require_privacy_set"`
 	// 聚合直绑开关（仅聚合族平台可置 true；非聚合族置 true 创建将被拒 400）。
-	AggregateCodeBuddyEnabled   bool                                      `json:"aggregate_codebuddy_enabled"`
+	AggregateDirectEnabled      bool                                      `json:"aggregate_direct_enabled"`
 	DefaultMappedModel          string                                    `json:"default_mapped_model"`
 	MessagesDispatchModelConfig service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
 	ModelAllowlist              service.GroupModelAllowlist               `json:"model_allowlist"`
@@ -358,14 +358,14 @@ type UpdateGroupRequest struct {
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes *[]string `json:"supported_model_scopes"`
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
-	AllowMessagesDispatch       *bool                                      `json:"allow_messages_dispatch"`
-	AllowLive                   *bool                                      `json:"allow_live"`
-	ForceOpenAIFast             *bool                                      `json:"force_openai_fast"`
-	FreeOpenAIFast              *bool                                      `json:"free_openai_fast"`
-	RequireOAuthOnly            *bool                                      `json:"require_oauth_only"`
-	RequirePrivacySet           *bool                                      `json:"require_privacy_set"`
+	AllowMessagesDispatch *bool `json:"allow_messages_dispatch"`
+	AllowLive             *bool `json:"allow_live"`
+	ForceOpenAIFast       *bool `json:"force_openai_fast"`
+	FreeOpenAIFast        *bool `json:"free_openai_fast"`
+	RequireOAuthOnly      *bool `json:"require_oauth_only"`
+	RequirePrivacySet     *bool `json:"require_privacy_set"`
 	// 聚合直绑开关（nil 不修改；仅聚合族平台可置 true；非聚合族置 true 更新将被拒 400）。
-	AggregateCodeBuddyEnabled *bool `json:"aggregate_codebuddy_enabled"`
+	AggregateDirectEnabled      *bool                                      `json:"aggregate_direct_enabled"`
 	DefaultMappedModel          *string                                    `json:"default_mapped_model"`
 	MessagesDispatchModelConfig *service.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
 	ModelAllowlist              *service.GroupModelAllowlist               `json:"model_allowlist"`
@@ -815,7 +815,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		FreeOpenAIFast:                  req.FreeOpenAIFast,
 		RequireOAuthOnly:                req.RequireOAuthOnly,
 		RequirePrivacySet:               req.RequirePrivacySet,
-		AggregateCodeBuddyEnabled:       req.AggregateCodeBuddyEnabled,
+		AggregateCodeBuddyEnabled:       req.AggregateDirectEnabled,
 		DefaultMappedModel:              req.DefaultMappedModel,
 		MessagesDispatchModelConfig:     req.MessagesDispatchModelConfig,
 		ModelAllowlist:                  req.ModelAllowlist,
@@ -977,7 +977,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		FreeOpenAIFast:                  req.FreeOpenAIFast,
 		RequireOAuthOnly:                req.RequireOAuthOnly,
 		RequirePrivacySet:               req.RequirePrivacySet,
-		AggregateCodeBuddyEnabled:       req.AggregateCodeBuddyEnabled,
+		AggregateCodeBuddyEnabled:       req.AggregateDirectEnabled,
 		DefaultMappedModel:              req.DefaultMappedModel,
 		MessagesDispatchModelConfig:     req.MessagesDispatchModelConfig,
 		ModelAllowlist:                  req.ModelAllowlist,

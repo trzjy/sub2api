@@ -387,7 +387,6 @@ func TestAPIContracts(t *testing.T) {
 						"claude_code_only": false,
 					"concurrency": 0,
 						"allow_messages_dispatch": false,
-						"aggregate_codebuddy_enabled": false,
 						"allow_live": false,
 						"fallback_group_id": null,
 						"fallback_group_id_on_invalid_request": null,
@@ -3101,4 +3100,15 @@ func (r *stubAccountRepo) ListTempUnschedulableAccounts(_ context.Context, _ tim
 
 func (r *stubAccountRepo) SetTempUnschedulableReason(_ context.Context, _ int64, _ string) error {
 	return nil
+}
+
+// BumpTempUnschedulableReasonIfGeneration 是健康探测恢复接口后续新增方法的 no-op 桩
+// （本契约测试无需行为，仅为满足 AdminAccountRepository 接口完整性）。
+func (r *stubAccountRepo) BumpTempUnschedulableReasonIfGeneration(_ context.Context, _ int64, _ time.Time, _ string) (bool, error) {
+	return false, nil
+}
+
+// ClearTempUnschedulableIfGeneration 同上：代际守卫条件清除原语的 no-op 桩。
+func (r *stubAccountRepo) ClearTempUnschedulableIfGeneration(_ context.Context, _ int64, _ time.Time) (bool, error) {
+	return false, nil
 }

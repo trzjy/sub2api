@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -125,6 +126,27 @@ func APIKeyFromService(k *service.APIKey) *APIKey {
 	return out
 }
 
+// APIKeyFromServiceForUser 构造用户侧 API Key 响应 DTO（List/GetByID/Create/Update）。
+// 与管理端共用的 APIKeyFromService 唯一差异：当 Key 绑定的分组属于内部供给平台
+// （domain.IsInternalSupplyPlatform，唯一判定源）时，在用户响应边界剥离供给方身份
+// （platform 置空串）。platform 不置 "composite"：内部供给组不得伪装为 composite
+// （用户裁定）；空串在前端走既有"未知平台"渲染路径（图标不渲染、默认配色）。
+// 聚合直绑开关（原 aggregate_codebuddy_enabled，2026-10-18 用户裁定）已整体迁出
+// 用户侧 Group DTO（现仅存于 AdminGroup，tag 改中性名 aggregate_direct_enabled），
+// 用户响应不再含该字段——内部供给组与 composite 组均无此暴露面。
+// Group 对象本身保留：分组 ID/名称、group_id 绑定状态与计费/能力字段原样，
+// 使用说明、协议能力判断与分组切换语义不受影响。
+func APIKeyFromServiceForUser(k *service.APIKey) *APIKey {
+	out := APIKeyFromService(k)
+	if out == nil || out.Group == nil {
+		return out
+	}
+	if domain.IsInternalSupplyPlatform(out.Group.Platform) {
+		out.Group.Platform = ""
+	}
+	return out
+}
+
 func GroupFromServiceShallow(g *service.Group) *Group {
 	if g == nil {
 		return nil
@@ -150,6 +172,7 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 		Group:                       groupFromServiceBase(g),
 		ForceOpenAIFast:             g.ForceOpenAIFast,
 		FreeOpenAIFast:              g.FreeOpenAIFast,
+		AggregateDirectEnabled:      g.AggregateCodeBuddyEnabled,
 		ProfitControlEnabled:        g.ProfitControlEnabled,
 		ProfitMinMargin:             g.ProfitMinMargin,
 		ProfitSafetyBuffer:          g.ProfitSafetyBuffer,
@@ -223,7 +246,6 @@ func groupFromServiceBase(g *service.Group) Group {
 		AllowLive:                       g.AllowLive,
 		RequireOAuthOnly:                g.RequireOAuthOnly,
 		RequirePrivacySet:               g.RequirePrivacySet,
-		AggregateCodeBuddyEnabled:       g.AggregateCodeBuddyEnabled,
 		RPMLimit:                        g.RPMLimit,
 		Concurrency:                     g.Concurrency,
 		MaxReasoningEffort:              g.MaxReasoningEffort,
