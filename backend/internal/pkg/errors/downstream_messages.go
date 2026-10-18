@@ -293,6 +293,12 @@ const (
 	WSUnsupportedClientMessageTypeFormat = "不支持的 WebSocket 客户端消息类型：%s"
 	WSIngressCapacityUnavailable         = "WebSocket 接入容量暂时不可用，请稍后重试"
 	WSIdleTimeout                        = "WebSocket 连接空闲超时"
+	// WSRequestCanceled: 请求 context 取消的客户端关闭 reason（closeAndJoin / adapter close 路径）。
+	WSRequestCanceled = "WebSocket 请求已取消"
+	// UpstreamRealtimeConnFailed: 上游 realtime 连接失败的客户端关闭 reason（泛化不提厂商）。
+	UpstreamRealtimeConnFailed = "上游实时连接失败，请稍后重试"
+	// LiveSidebandFailed: Live 副带代理失败的客户端关闭 reason。
+	LiveSidebandFailed = "Live 通话连接已中断，请稍后重试"
 
 	// 流式错误（共享读错分类 + SSE 错误帧 + 图片流；帧结构/code 不变）。
 	UpstreamStreamEndedEarly           = "上游响应流提前结束，内容可能不完整，请稍后重试"
